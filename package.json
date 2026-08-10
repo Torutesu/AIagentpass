@@ -1,0 +1,18 @@
+{
+  "name": "agentpass",
+  "version": "0.1.0",
+  "description": "Policy-controlled signing broker for coding agents",
+  "type": "module",
+  "bin": {
+    "agentpass": "./bin/agentpass.mjs",
+    "agentpass-git-sign": "./bin/agentpass-git-sign.mjs"
+  },
+  "scripts": {
+    "test": "node --test",
+    "lint": "node --check bin/agentpass.mjs && node --check lib/*.mjs"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "license": "MIT"
+}
