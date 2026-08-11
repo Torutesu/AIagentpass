@@ -1,12 +1,13 @@
 # Native macOS broker
 
-AgentPass 0.13 implements the source-level native security boundary described by ADR-001. It is a Swift 6 package with three components:
+AgentPass 0.14 implements the native security boundary described by ADR-001. It is a Swift 6 package with four components:
 
 - `AgentPassNativeCore`: Secure Enclave P-256 key management, OpenSSH SSHSIG encoding, signed Agent request verification, protected sessions and remote control, replay prevention, policy/Git validation, and protected audit primitives;
 - `agentpass-native-service`: a privileged Mach XPC service that owns the signing key, session hashes, audit key, root-owned policy and control state, audit chain, and checkpoint chain;
 - `agentpass-native-client`: a bounded bridge used by the Node signing wrapper and native management commands.
+- `agentpass-native-manager`: the app host and `SMAppService` register/status/unregister entry point.
 
-This is not a pre-signed binary distribution. Production installation still requires an Apple Developer Team ID, app bundle, matching entitlements/provisioning, hardened-runtime signing, notarization, and registration through `SMAppService.daemon(plistName:)`. An ad-hoc build is suitable for tests, but does not activate the claimed client-identity and keychain-access-group boundary.
+The repository now assembles the required app layout, signs its nested executables, supports universal binaries and notarization, and verifies identifiers and keychain access groups. It is not a pre-signed binary distribution. Production installation still requires an Apple Developer Team ID, matching provisioning, signing credentials, notarization credentials, and hardware validation. An ad-hoc build is suitable only for structure tests and does not activate the claimed client-identity and keychain-access-group boundary.
 
 ## Security boundary
 
@@ -60,16 +61,32 @@ The existing remote anchor protocol accepts the local broker's Ed25519 checkpoin
 ```sh
 swift test --package-path native/macos
 swift build -c release --package-path native/macos
+npm run test:native-app
+native/macos/scripts/build-app.sh --adhoc --force
 ```
 
-Tests verify SSHSIG output with `/usr/bin/ssh-keygen -Y verify` and cover forged requests, session/key/Agent binding, challenge mutation and replay, expiration and revocation, scope bypass, malformed signatures, audit mutation, truncation, checkpoint mutation, audit-key substitution, symlinks, and permissive files. Secure Enclave prompts and signed-XPC behavior require a provisioned macOS integration environment and are not exercised by the software-key unit tests.
+The ad-hoc app test verifies the app layout, signing identifiers, embedded keychain access groups, daemon label/program/Mach service, manager diagnostics, strict code-signature validity, and fail-closed build options. It does not prove Apple Developer identity, Service Management registration, notarization, or Secure Enclave access.
+
+For a production build, provide the final provisioning profile and signing identity. Add `--universal` to build arm64 and x86_64 slices and `--notary-profile` to submit and staple the result:
+
+```sh
+AGENTPASS_SIGNING_IDENTITY="Developer ID Application: Example Corp (TEAMID1234)" \
+AGENTPASS_TEAM_ID="TEAMID1234" \
+native/macos/scripts/build-app.sh \
+  --universal \
+  --profile ./AgentPass.provisionprofile \
+  --notary-profile agentpass-notary \
+  --force
+```
+
+The build refuses a production build without an identity, Team ID, and provisioning profile. It decodes the profile, verifies its Team ID, derives the App Identifier Prefix, and requires the exact AgentPass keychain access group before signing. It also refuses symlinked profiles, refuses ad-hoc notarization, and does not overwrite an existing app unless `--force` is explicit. Set `AGENTPASS_APP_IDENTIFIER_PREFIX` or `--app-identifier-prefix` only when an explicit cross-check against the profile is desired. Tests also verify SSHSIG output with `/usr/bin/ssh-keygen -Y verify` and cover forged requests, session/key/Agent binding, challenge mutation and replay, expiration and revocation, scope bypass, malformed signatures, audit mutation, truncation, checkpoint mutation, audit-key substitution, symlinks, and permissive files. Secure Enclave prompts and signed-XPC behavior require a provisioned macOS integration environment and are not exercised by software-key tests.
 
 ## Bundle resources and installation inputs
 
 Templates are under `native/macos/Resources/`:
 
 - `dev.agentpass.native-service.plist` belongs in the signed app's `Contents/Library/LaunchDaemons` directory;
-- `AgentPassNativeService.entitlements` must use the actual App Identifier Prefix;
+- the client and service entitlements must use the actual App Identifier Prefix;
 - `native-service.example.json` must replace `TEAMID`, use the interactive user's UID, and be installed root-owned with mode `0600`.
 
 Create `/Library/Application Support/AgentPass` as root with no group/world write permission. Install the approved version 4 policy there as `policy.json`, owned by root and not group/world writable. This copy—not `~/.agentpass/config.json`—is authoritative inside the service. If it contains `control.required=true`, install an initial signed bundle as `control.bundle.json`, root-owned with mode `0600`, and configure that absolute `control_state_path`. Add `control_url` and `control_refresh_seconds` to enable service-owned refresh. The configured state and audit paths must remain under protected root-owned ancestry.
@@ -81,7 +98,8 @@ After the signed app and daemon are registered, select the bridge in the user-si
   "native_broker": {
     "enabled": true,
     "mach_service": "dev.agentpass.native-service",
-    "client": "/Applications/AgentPass.app/Contents/MacOS/agentpass-native-client"
+    "client": "/Applications/AgentPass.app/Contents/MacOS/agentpass-native-client",
+    "manager": "/Applications/AgentPass.app/Contents/MacOS/agentpass-native-manager"
   }
 }
 ```
@@ -99,6 +117,10 @@ Verify the client signature as part of provisioning, then copy the exact public-
 ## Operations
 
 ```sh
+agentpass native daemon-status
+agentpass native daemon-register
+agentpass native daemon-open-settings
+agentpass native daemon-unregister
 agentpass native status
 agentpass native public-key
 agentpass native audit-key
@@ -111,11 +133,13 @@ agentpass control fetch
 agentpass control status
 ```
 
+Copy the final signed app to a stable location before registration. `daemon-register` asks Service Management to register the plist embedded at `Contents/Library/LaunchDaemons/dev.agentpass.native-service.plist`. If macOS reports that administrator approval is required, the manager opens Login Items settings and returns `requires_approval: true`; registration is not operational until the user approves it. `daemon-status` returns the bundle and plist paths as diagnostics. A `not_found` status means Service Management did not find this service and must not be treated as successful registration.
+
 `native status` verifies both chains and reports the audit head, latest checkpoint, session state, control sequence/expiry/operational state, and automatic-refresh status. `native public-key` emits the Git signing public key. `native audit-key` emits the distinct checkpoint verification key. `native checkpoint` first adds an audit event, then signs the resulting exact audit head. `session start` prompts once and caps the requested TTL at the root policy value. The pre-push hook asks the service to validate both the session and control state instead of consulting user-writable files. `native revoke-sessions` does not require human approval because it can only remove authority. `control source` stores an optional untrusted manual-fetch URL in user configuration; `control apply` and manual `fetch` cross XPC and are independently verified against the root policy before persistence. Native `control trust` is refused because user configuration cannot rotate the service trust root. Automatic refresh uses only the root-owned service URL.
 
 ## Remaining production work
 
-- Build the signed `.app` host/registrar and automate `SMAppService` register/status/unregister.
+- Publish a Developer ID-signed, provisioned, notarized universal artifact and installer.
 - Add fleet jitter and exponential retry backoff while preserving refresh-before-expiry guarantees.
 - Add a remote anchor protocol and verifier for native P-256 checkpoints.
 - Add signed audit-log archival/rotation without losing checkpoint continuity.

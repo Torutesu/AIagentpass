@@ -7,7 +7,8 @@ let package = Package(
     products: [
         .library(name: "AgentPassNativeCore", targets: ["AgentPassNativeCore"]),
         .executable(name: "agentpass-native-service", targets: ["AgentPassNativeService"]),
-        .executable(name: "agentpass-native-client", targets: ["AgentPassNativeClient"])
+        .executable(name: "agentpass-native-client", targets: ["AgentPassNativeClient"]),
+        .executable(name: "agentpass-native-manager", targets: ["AgentPassNativeManager"])
     ],
     targets: [
         .target(
@@ -21,6 +22,10 @@ let package = Package(
         .executableTarget(
             name: "AgentPassNativeClient",
             dependencies: ["AgentPassNativeCore"]
+        ),
+        .executableTarget(
+            name: "AgentPassNativeManager",
+            linkerSettings: [.linkedFramework("ServiceManagement")]
         ),
         .testTarget(
             name: "AgentPassNativeCoreTests",

@@ -158,14 +158,15 @@ AgentPass protects against copying the private key out of the device and limits 
 
 ## Native macOS boundary
 
-Version 0.13 includes a Swift/XPC native broker foundation. It creates separate non-exportable P-256 signing, audit-checkpoint, and human-presence approval keys in Secure Enclave, emits OpenSSH-compatible SSHSIG signatures internally, authenticates the signed XPC client, and repeats Agent identity, session, remote-control, replay, scope, Git context, tree, and parent validation against root-owned policy and state inside the service. The service automatically refreshes signed control bundles from a root-configured HTTPS source with redirects disabled and a 256 KiB response ceiling. Every native signing outcome is appended to a root-owned, durable SHA-256 chain; signed checkpoints make later truncation or rewriting detectable once retained outside the host.
+Version 0.14 includes a Swift/XPC native broker and a buildable macOS app host. It creates separate non-exportable P-256 signing, audit-checkpoint, and human-presence approval keys in Secure Enclave, emits OpenSSH-compatible SSHSIG signatures internally, authenticates the signed XPC client, and repeats Agent identity, session, remote-control, replay, scope, Git context, tree, and parent validation against root-owned policy and state inside the service. The service automatically refreshes signed control bundles from a root-configured HTTPS source with redirects disabled and a 256 KiB response ceiling. Every native signing outcome is appended to a root-owned, durable SHA-256 chain; signed checkpoints make later truncation or rewriting detectable once retained outside the host.
 
 ```sh
 npm run test:native
-swift build -c release --package-path native/macos
+npm run test:native-app
+native/macos/scripts/build-app.sh --adhoc --force
 ```
 
-Protected native sessions require human presence only when `agentpass session start` is called; policy-compliant commits remain unattended until the Agent-bound TTL expires. The service retains token hashes only in memory, so restart and `agentpass native revoke-sessions` invalidate them. Native mode verifies, atomically persists, and periodically refreshes signed control bundles under root-owned configuration and ancestry; `agentpass control apply`, `fetch`, and `status` are also routed through XPC. The repository does not yet ship a Developer ID-signed/notarized app bundle, and native P-256 checkpoints are not accepted by the Ed25519 remote anchor. See [docs/NATIVE_BROKER.md](docs/NATIVE_BROKER.md) for setup and remaining gaps.
+Protected native sessions require human presence only when `agentpass session start` is called; policy-compliant commits remain unattended until the Agent-bound TTL expires. The service retains token hashes only in memory, so restart and `agentpass native revoke-sessions` invalidate them. Native mode verifies, atomically persists, and periodically refreshes signed control bundles under root-owned configuration and ancestry; `agentpass control apply`, `fetch`, and `status` are also routed through XPC. The build pipeline assembles the required `Contents/Library/LaunchDaemons` layout, signs every nested executable, supports universal builds and optional notarization, and exposes `SMAppService` register/status/unregister commands. No Developer ID-signed release artifact is published yet, and ad-hoc builds do not activate the production identity boundary. See [docs/NATIVE_BROKER.md](docs/NATIVE_BROKER.md) for setup and remaining gaps.
 
 ## Current scope and roadmap
 
@@ -188,7 +189,8 @@ Protected native sessions require human presence only when `agentpass session st
 - [x] Swift/XPC broker core with Secure Enclave SSHSIG and service-side policy validation
 - [x] root-owned native hash-chain audit with separate Secure Enclave checkpoint key
 - [x] human-approved protected native sessions with Agent binding and immediate revocation
-- [ ] signed/notarized native app bundle
+- [x] signed/notarizable native app build and Service Management registrar
+- [ ] published notarized universal native release artifact
 - [x] protected native remote-control state and monotonic sequence enforcement
 - [x] service-owned bounded native HTTPS control refresh
 - [x] per-agent Ed25519 request identity with replay protection

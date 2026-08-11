@@ -18,7 +18,7 @@ import { applyControlBundle, controlKeyFingerprint, fetchControlBundle, generate
 const [, , command, ...args] = process.argv;
 
 function usage() {
-  console.log(`AgentPass 0.13.0
+  console.log(`AgentPass 0.14.0
 
 Commands:
   init              create a secure local policy
@@ -35,6 +35,10 @@ Commands:
   native checkpoint create a protected native audit checkpoint
   native session-approval-key  create/print the human-presence approval key
   native revoke-sessions       immediately invalidate protected native sessions
+  native daemon-register       register the bundled privileged service
+  native daemon-unregister     unregister the bundled privileged service
+  native daemon-status         inspect Service Management registration
+  native daemon-open-settings  open macOS Login Items settings
   agent list        list enrolled agent identities
   agent add NAME    enroll a new agent identity
   agent set-default ID
@@ -359,7 +363,16 @@ async function nativeManage() {
   const config = loadConfig();
   if (!config.native_broker?.enabled) throw new Error("Native broker is not configured");
   const action = args[0];
-  if (action === "status") {
+  if (["daemon-register", "daemon-unregister", "daemon-status", "daemon-open-settings"].includes(action)) {
+    const manager = config.native_broker.manager ?? path.join(path.dirname(config.native_broker.client), "agentpass-native-manager");
+    const stat = fs.lstatSync(manager);
+    const currentUid = process.getuid?.();
+    if (!stat.isFile() || stat.isSymbolicLink() || (stat.mode & 0o022) !== 0 || (currentUid !== undefined && stat.uid !== currentUid && stat.uid !== 0)) throw new Error("Native manager executable permissions are unsafe");
+    const managerAction = { "daemon-register": "register", "daemon-unregister": "unregister", "daemon-status": "status", "daemon-open-settings": "open-settings" }[action];
+    const result = spawnSync(manager, [managerAction], { encoding: "utf8", env: { PATH: "/usr/bin:/bin:/usr/sbin:/sbin" } });
+    if (result.status !== 0) throw new Error(result.stderr.trim() || result.stdout.trim() || "Native service management failed");
+    console.log(JSON.stringify(JSON.parse(result.stdout.trim()), null, 2));
+  } else if (action === "status") {
     const health = await brokerRequest({ operation: "ping" }, { native: config.native_broker });
     const auditResult = await brokerRequest({ operation: "native.audit.status" }, { native: config.native_broker });
     console.log(JSON.stringify({ health, audit: JSON.parse(Buffer.from(auditResult.stdout_base64, "base64").toString("utf8")) }, null, 2));
