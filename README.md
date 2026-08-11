@@ -102,6 +102,34 @@ agentpass restore --confirm RESTORE
 
 Copy `checkpoint.json` to an append-only or remote system. The public key verifies who signed a checkpoint; retaining a checkpoint record or its `checkpoint_hash` outside the host is what detects later local history replacement.
 
+## Offline-signed remote revocation
+
+Generate the control key on an offline administration host and retain `control-private.pem` there:
+
+```sh
+agentpass control keygen ./agentpass-control-key
+agentpass control sign \
+  --key ./agentpass-control-key/control-private.pem \
+  --sequence 1 \
+  --expires 2026-08-12T00:00:00Z \
+  --revoke-agent AGENT_ID > control.bundle.json
+```
+
+Use `--global-revoke` instead of `--revoke-agent` for an emergency stop. Bundles have a maximum seven-day lifetime and sequence numbers must increase whenever content changes.
+
+On each AgentPass host, pin only the public key and install the initial bundle:
+
+```sh
+agentpass control trust ./control-public.pem \
+  --url https://control.example.com/agentpass/control.bundle.json \
+  --refresh 60
+agentpass control apply ./control.bundle.json
+agentpass broker install --force
+agentpass control status
+```
+
+The broker periodically fetches the static JSON bundle over HTTPS. Missing, expired, malformed, incorrectly signed, rolled-back, or same-sequence conflicting bundles fail closed. See [docs/REMOTE_CONTROL.md](docs/REMOTE_CONTROL.md) for the protocol and operational model.
+
 ## Security model
 
 AgentPass protects against copying the private key out of the device and limits the allowed signing context. It does not protect against a fully compromised host process that is able to invoke an allowed signing operation. The policy boundary is therefore an authorization and audit layer, not a replacement for macOS sandboxing or endpoint security.
@@ -133,7 +161,9 @@ AgentPass protects against copying the private key out of the device and limits 
 - [x] merge commit parent validation against `HEAD` and `MERGE_HEAD`
 - [ ] FIDO2/YubiKey and TPM backends
 - [ ] 1Password, Vault, and Infisical broker adapters
-- [ ] remote checkpoint anchoring and remote revocation
+- [x] offline-signed remote Agent and global revocation
+- [x] bounded HTTPS control refresh with sequence rollback detection
+- [ ] remote checkpoint anchoring
 
 See [THREAT_MODEL.md](THREAT_MODEL.md) for the exact security boundary and remaining same-user limitations.
 

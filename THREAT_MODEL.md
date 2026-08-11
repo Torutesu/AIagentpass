@@ -7,6 +7,7 @@
 - The integrity and attribution of signing requests.
 - Audit evidence describing policy decisions and signer outcomes for authenticated signing requests.
 - Signed audit checkpoints that can be pinned outside the host.
+- An optional offline control trust root for remote emergency revocation.
 
 ## Broker security boundary
 
@@ -27,6 +28,8 @@ The Unix socket is mode `0600`, the configuration directory is mode `0700`, and 
 
 An authenticated Agent ID is also an authorization principal. Its explicit operation, repository, branch, and remote scope is evaluated after the global policy, so an Agent scope cannot widen global access. Session records are keyed by token hash and bound to one Agent ID; issuing a session for one enrolled agent does not authorize another.
 
+When remote control is configured, the broker pins an Ed25519 administration public key and refuses to start or sign without a valid, unexpired bundle. Bundles can revoke all signing or selected Agent IDs. They are limited to seven days, fetched only through HTTPS without redirects, size-bounded, and ordered by a monotonically increasing sequence. Runtime rollback and same-sequence equivocation are rejected.
+
 Normal commits must have `HEAD` as their sole parent. Merge commits are accepted only while `MERGE_HEAD` exists and every payload parent exactly matches `HEAD` followed by the repository's merge heads. Initial commits must have no parent.
 
 Audit records form a SHA-256 chain. A separate Ed25519 key signs explicit checkpoints containing the entry count and exact audit head. Exporting the checkpoint record or its hash to an append-only remote system makes later truncation or rewriting detectable against that external copy. The public-key fingerprint identifies the checkpoint signer but, by itself, cannot preserve history after private-key compromise.
@@ -38,6 +41,8 @@ Audit records form a SHA-256 chain. A separate Ed25519 key signs explicit checkp
 The included macOS LaunchAgent runs as the logged-in user. It protects against accidental misuse, argument injection, an untrusted Git wrapper, policy drift while the broker is running, and copying the non-exportable key material.
 
 It does not provide a complete boundary against malware or an agent with arbitrary code execution as the same macOS user. Such a process can attempt to terminate the broker, modify user-owned files, bypass Git hooks, or invoke platform signing facilities directly if it can access the key reference.
+
+The offline control key prevents that process from authoring a new valid control decision. In local mode, however, a same-user attacker can replace the cached bundle and restart the broker, losing the in-memory highest sequence. Short bundle lifetimes and an online HTTPS source bound the rollback window; the native system service must persist the sequence outside the agent user's writable state.
 
 ### Hardened system broker mode
 

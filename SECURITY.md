@@ -6,4 +6,6 @@ AgentPass keeps the signing key in platform-backed storage and applies policy in
 
 The included broker is a per-user macOS LaunchAgent. It does not isolate its files or key reference from malware with arbitrary code execution as that same user. Git pre-push hooks are also bypassable. Use least-privilege repository access and server-side branch protection, and read [THREAT_MODEL.md](THREAT_MODEL.md) before deploying. The signed native XPC boundary required for hostile same-user isolation is specified in [docs/ADR-001-native-security-boundary.md](docs/ADR-001-native-security-boundary.md).
 
+Optional remote control uses an offline Ed25519 administration key. Once its public key is pinned, the broker requires a currently valid signed bundle and enforces global and per-Agent revocation before local policy. Keep the administration private key off AgentPass hosts and publish bundles through authenticated HTTPS infrastructure.
+
 Report vulnerabilities through a private GitHub security advisory. Do not include private keys, credentials, or sensitive repository data in public issues.

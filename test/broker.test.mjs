@@ -9,6 +9,7 @@ import { brokerRequest } from "../lib/broker-client.mjs";
 import { createBroker, processRequest, sanitizeSignArgs } from "../lib/broker.mjs";
 import { loadConfig, saveConfig, saveSession, saveState } from "../lib/config.mjs";
 import { createAgentIdentity, createAuditIdentity, signRequest } from "../lib/identity.mjs";
+import { applyControlBundle, generateControlKeyPair, signControlBundle } from "../lib/remote-control.mjs";
 
 function fixture() {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "agentpass-broker-"));
@@ -200,4 +201,24 @@ test("broker refuses pre-v4 configuration instead of bypassing agent scopes", as
   delete config.audit_signing;
   saveConfig(config, data.configDir);
   await assert.rejects(processRequest(signedRequest(data), async () => ({ status: 0, stdout: Buffer.from("bad"), stderr: "" }), data.configDir), /version 4 is required/);
+});
+
+test("broker enforces an offline-signed remote agent revocation", async () => {
+  const data = fixture();
+  const keys = generateControlKeyPair(path.join(data.root, "control-keys"));
+  const config = loadConfig(data.configDir);
+  config.control = { required: true, public_key: fs.readFileSync(keys.public_file, "utf8") };
+  saveConfig(config, data.configDir);
+  const bundle = signControlBundle({ sequence: 1, expiresAt: Date.now() + 60_000, revokedAgents: [data.identity.id] }, keys.private_file);
+  applyControlBundle(bundle, config, data.configDir);
+  await assert.rejects(processRequest(signedRequest(data), async () => ({ status: 0, stdout: Buffer.from("bad"), stderr: "" }), data.configDir), /remote_agent_revoked/);
+});
+
+test("broker refuses to start when required remote control state is missing", () => {
+  const data = fixture();
+  const keys = generateControlKeyPair(path.join(data.root, "missing-control-keys"));
+  const config = loadConfig(data.configDir);
+  config.control = { required: true, public_key: fs.readFileSync(keys.public_file, "utf8") };
+  saveConfig(config, data.configDir);
+  assert.throws(() => createBroker({ socket: path.join(data.root, "missing-control.sock"), configDir: data.configDir }), /bundle is missing/);
 });

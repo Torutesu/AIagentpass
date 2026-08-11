@@ -45,6 +45,14 @@ test("Git creates a signed commit through the AgentPass broker", { timeout: 15_0
   run(process.execPath, [cli, "agent", "set-default", addedAgent.id], { cwd: repo, env });
   assert.match(run(process.execPath, [cli, "agent", "list"], { cwd: repo, env }), /e2e-agent/);
 
+  const controlKeys = JSON.parse(run(process.execPath, [cli, "control", "keygen", path.join(root, "offline-control")], { cwd: repo, env }));
+  run(process.execPath, [cli, "control", "trust", controlKeys.public_file], { cwd: repo, env });
+  const controlBundle = run(process.execPath, [cli, "control", "sign", "--key", controlKeys.private_file, "--sequence", "1", "--expires", new Date(Date.now() + 60 * 60 * 1000).toISOString()], { cwd: repo, env });
+  const controlBundleFile = path.join(root, "control.bundle.json");
+  fs.writeFileSync(controlBundleFile, `${controlBundle}\n`, { mode: 0o600 });
+  run(process.execPath, [cli, "control", "apply", controlBundleFile], { cwd: repo, env });
+  assert.match(run(process.execPath, [cli, "control", "status"], { cwd: repo, env }), /"sequence": 1/);
+
   const session = run(process.execPath, [cli, "session", "start", "300"], { cwd: repo, env });
   const broker = spawn(process.execPath, [daemon], { cwd: repo, env, stdio: ["ignore", "pipe", "pipe"] });
   const socket = path.join(testHome, ".agentpass", "agentpass.sock");

@@ -8,15 +8,16 @@ import { spawnSync } from "node:child_process";
 import { addAgent, revokeAgent, rotateAgent, setAgentScope, setDefaultAgent } from "../lib/agent-admin.mjs";
 import { audit, createAuditCheckpoint, publicKeyFingerprint, verifyAudit, verifyAuditCheckpoints } from "../lib/audit.mjs";
 import { brokerRequest } from "../lib/broker-client.mjs";
-import { auditPath, defaultConfigDir, loadConfig, loadSession, loadState, saveConfig, saveSession, saveState, socketPath } from "../lib/config.mjs";
+import { auditPath, controlBundlePath, defaultConfigDir, loadConfig, loadSession, loadState, saveConfig, saveSession, saveState, socketPath } from "../lib/config.mjs";
 import { createAgentIdentity, createAuditIdentity, signRequest } from "../lib/identity.mjs";
 import { readGitSigningInvocation, writeGitSignature } from "../lib/git-signing.mjs";
 import { evaluateAgentRequest } from "../lib/policy.mjs";
+import { applyControlBundle, controlKeyFingerprint, fetchControlBundle, generateControlKeyPair, loadControlBundle, signControlBundle } from "../lib/remote-control.mjs";
 
 const [, , command, ...args] = process.argv;
 
 function usage() {
-  console.log(`AgentPass 0.6.0
+  console.log(`AgentPass 0.7.0
 
 Commands:
   init              create a secure local policy
@@ -43,6 +44,12 @@ Commands:
   audit [--verify]  print or verify audit logs and checkpoints
   audit checkpoint  sign the current audit head
   audit public-key  print the checkpoint verification key
+  control keygen DIR
+  control trust PUBLIC_KEY [--url HTTPS_URL]
+  control sign       create an offline-signed control bundle
+  control apply FILE verify and install a control bundle
+  control fetch      fetch and install the configured HTTPS bundle
+  control status     inspect active remote revocation state
 `);
 }
 
@@ -196,6 +203,17 @@ function doctor() {
     { name: "config", ok: fs.existsSync(path.join(defaultConfigDir, "config.json")), detail: defaultConfigDir },
     { name: "broker-socket", ok: fs.existsSync(socketPath()), detail: socketPath() }
   ];
+  if (fs.existsSync(path.join(defaultConfigDir, "config.json"))) {
+    try {
+      const config = loadConfig();
+      if (config.control) {
+        const bundle = loadControlBundle(config, defaultConfigDir);
+        checks.push({ name: "remote-control", ok: true, detail: `sequence=${bundle.sequence} expires=${bundle.expires_at}` });
+      }
+    } catch (error) {
+      checks.push({ name: "remote-control", ok: false, detail: error.message });
+    }
+  }
   console.log(JSON.stringify({ ok: checks.every((check) => check.ok), checks }, null, 2));
   if (!checks.every((check) => check.ok)) process.exitCode = 1;
 }
@@ -299,6 +317,85 @@ function selectedAgent(config) {
 async function brokerPing() {
   const response = await brokerRequest({ operation: "ping" });
   console.log(JSON.stringify(response, null, 2));
+}
+
+async function controlManage() {
+  const action = args[0];
+  if (action === "keygen") {
+    if (!args[1]) throw new Error("Control key generation requires an output directory");
+    console.log(JSON.stringify(generateControlKeyPair(path.resolve(args[1])), null, 2));
+    return;
+  }
+  if (action === "sign") {
+    const privateFile = requiredFlag("--key");
+    const sequence = Number(requiredFlag("--sequence"));
+    const expiresAt = requiredFlag("--expires");
+    const revokedAgents = repeatedFlag("--revoke-agent");
+    const bundle = signControlBundle({ sequence, expiresAt, globalRevoked: args.includes("--global-revoke"), revokedAgents }, path.resolve(privateFile));
+    console.log(JSON.stringify(bundle, null, 2));
+    return;
+  }
+
+  const config = loadConfig();
+  if (action === "trust") {
+    if (!args[1]) throw new Error("Control trust requires a public key file");
+    const publicKey = fs.readFileSync(path.resolve(args[1]), "utf8");
+    const urlIndex = args.indexOf("--url");
+    const refreshIndex = args.indexOf("--refresh");
+    const url = urlIndex >= 0 ? args[urlIndex + 1] : undefined;
+    const refreshSeconds = refreshIndex >= 0 ? Number(args[refreshIndex + 1]) : 60;
+    const control = { required: true, public_key: publicKey };
+    if (url) Object.assign(control, { url, refresh_seconds: refreshSeconds });
+    const newFingerprint = controlKeyFingerprint(publicKey);
+    const currentFingerprint = config.control?.public_key ? controlKeyFingerprint(config.control.public_key) : null;
+    if (currentFingerprint && currentFingerprint !== newFingerprint && !(args.includes("--confirm") && args.includes("ROTATE_TRUST"))) throw new Error("Replacing the control trust root requires --confirm ROTATE_TRUST");
+    saveConfig({ ...config, control });
+    const existingBundle = controlBundlePath();
+    if (currentFingerprint !== newFingerprint && fs.existsSync(existingBundle)) fs.renameSync(existingBundle, `${existingBundle}.${Date.now()}.untrusted.bak`);
+    audit({ operation: "control.trust", decision: "allow", key_fingerprint: newFingerprint, previous_key_fingerprint: currentFingerprint, url: url ?? null }, defaultConfigDir);
+    console.log(JSON.stringify({ fingerprint: newFingerprint, url: url ?? null }, null, 2));
+    console.error("Install a signed control bundle, then restart the broker.");
+  } else if (action === "apply") {
+    if (!args[1]) throw new Error("Control apply requires a bundle file");
+    const bundle = readJsonFile(path.resolve(args[1]), 256 * 1024);
+    const verified = applyControlBundle(bundle, config, defaultConfigDir);
+    audit({ operation: "control.apply", decision: "allow", sequence: verified.sequence, expires_at: verified.expires_at, global_revoked: verified.global_revoked, revoked_agents: verified.revoked_agents }, defaultConfigDir);
+    console.log(JSON.stringify(verified, null, 2));
+  } else if (action === "fetch") {
+    if (!config.control?.url) throw new Error("No remote control HTTPS URL is configured");
+    const bundle = await fetchControlBundle(config.control.url);
+    const verified = applyControlBundle(bundle, config, defaultConfigDir);
+    audit({ operation: "control.fetch", decision: "allow", sequence: verified.sequence, expires_at: verified.expires_at }, defaultConfigDir);
+    console.log(JSON.stringify(verified, null, 2));
+  } else if (action === "status") {
+    if (!config.control) {
+      console.log(JSON.stringify({ configured: false }, null, 2));
+      return;
+    }
+    const bundle = loadControlBundle(config, defaultConfigDir);
+    console.log(JSON.stringify({ configured: true, fingerprint: controlKeyFingerprint(config.control.public_key), url: config.control.url ?? null, bundle }, null, 2));
+  } else {
+    throw new Error("Unknown control command");
+  }
+}
+
+function requiredFlag(flag) {
+  const index = args.indexOf(flag);
+  if (index < 0 || !args[index + 1]) throw new Error(`Missing required ${flag} value`);
+  return args[index + 1];
+}
+
+function repeatedFlag(flag) {
+  const values = [];
+  for (let index = 0; index < args.length; index += 1) if (args[index] === flag && args[index + 1]) values.push(args[index + 1]);
+  return values;
+}
+
+function readJsonFile(file, maxBytes) {
+  const stat = fs.lstatSync(file);
+  if (!stat.isFile() || stat.isSymbolicLink() || stat.size <= 0 || stat.size > maxBytes) throw new Error("JSON input must be a bounded regular file");
+  try { return JSON.parse(fs.readFileSync(file, "utf8")); }
+  catch { throw new Error(`Invalid JSON file: ${file}`); }
 }
 
 function agentManage() {
@@ -420,6 +517,7 @@ try {
   else if (command === "broker" && args[0] === "install") brokerInstall();
   else if (command === "broker" && args[0] === "stop") brokerStop();
   else if (command === "agent") agentManage();
+  else if (command === "control") await controlManage();
   else if (command === "setup-macos") setupMacos();
   else if (command === "install-hook") installHook();
   else if (command === "push-check") pushCheck();
