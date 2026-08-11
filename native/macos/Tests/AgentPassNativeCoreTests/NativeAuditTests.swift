@@ -9,6 +9,22 @@ private struct AuditSoftwareSigner: P256MessageSigner {
     func sign(message: Data) throws -> Data { try privateKey.signature(for: message).rawRepresentation }
 }
 
+private func anchorPublicKeyPEM(_ key: Curve25519.Signing.PublicKey) -> String {
+    let der = Data([0x30, 0x2a, 0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x70, 0x03, 0x21, 0x00]) + key.rawRepresentation
+    return "-----BEGIN PUBLIC KEY-----\n\(der.base64EncodedString())\n-----END PUBLIC KEY-----\n"
+}
+
+private func anchorReceiptData(checkpoint: NativeAuditCheckpoint, index: Int, previous: String, tenant: String, key: Curve25519.Signing.PrivateKey, receivedAt: String = "2027-01-15T08:00:00.000Z") throws -> Data {
+    let statement: [String: Any] = ["version": 1, "tenant": tenant, "index": index, "checkpoint_hash": checkpoint.checkpointHash, "received_at": receivedAt, "previous_receipt_hash": previous]
+    let signature = try key.signature(for: NativeAuditLog.canonical(statement)).base64EncodedString()
+    let der = Data([0x30, 0x2a, 0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x70, 0x03, 0x21, 0x00]) + key.publicKey.rawRepresentation
+    let fingerprint = "SHA256:" + Data(SHA256.hash(data: der)).base64EncodedString().replacingOccurrences(of: "+", with: "-").replacingOccurrences(of: "/", with: "_").replacingOccurrences(of: "=", with: "")
+    let ordered = "{\"version\":1,\"tenant\":\"\(tenant)\",\"index\":\(index),\"checkpoint_hash\":\"\(checkpoint.checkpointHash)\",\"received_at\":\"\(receivedAt)\",\"previous_receipt_hash\":\"\(previous)\",\"anchor_key_fingerprint\":\"\(fingerprint)\",\"signature\":\"\(signature)\"}"
+    let receiptHash = NativeAuditLog.hash(Data(ordered.utf8))
+    let receipt: [String: Any] = statement.merging(["anchor_key_fingerprint": fingerprint, "signature": signature, "receipt_hash": receiptHash]) { current, _ in current }
+    return try NativeAuditLog.canonical(receipt)
+}
+
 @Test func nativeAuditChainsRecordsAndFailsClosedAfterTampering() throws {
     let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
     try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
@@ -50,6 +66,40 @@ private struct AuditSoftwareSigner: P256MessageSigner {
     try Data((records.joined(separator: "\n") + "\n").utf8).write(to: checkpointFile)
     #expect(throws: (any Error).self) { try checkpoints.verify() }
     #expect(throws: (any Error).self) { try checkpoints.create() }
+}
+
+@Test func nativeAuditAnchorReceiptsAreVerifiedChainedAndPersisted() throws {
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+    try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: root) }
+    let log = try NativeAuditLog(path: root.appendingPathComponent("audit.jsonl").path)
+    let checkpoints = try NativeAuditCheckpoints(path: root.appendingPathComponent("checkpoints.jsonl").path, auditLog: log, signer: AuditSoftwareSigner())
+    try log.append(NativeAuditEvent(operation: "one", decision: "allow"))
+    let first = try checkpoints.create()
+    try log.append(NativeAuditEvent(operation: "two", decision: "allow"))
+    let second = try checkpoints.create()
+    let records = try checkpoints.verify()
+    let anchorKey = Curve25519.Signing.PrivateKey()
+    let receiptFile = root.appendingPathComponent("anchor.receipts.jsonl")
+    let manager = try NativeAuditAnchorReceipts(path: receiptFile.path, tenant: "native-host", anchorPublicKeyPEM: anchorPublicKeyPEM(anchorKey.publicKey))
+    #expect(try manager.status(checkpoints: records).pending == 2)
+    #expect(try manager.pendingCheckpoint(checkpoints: records) == first)
+    let firstData = try anchorReceiptData(checkpoint: first, index: 1, previous: NativeAuditLog.zeroHash, tenant: "native-host", key: anchorKey)
+    let firstStatus = try manager.accept(receiptData: firstData, checkpoint: first, checkpoints: records)
+    #expect(firstStatus.receipts == 1)
+    #expect(firstStatus.pending == 1)
+    let firstReceipt = try JSONDecoder().decode(NativeAuditAnchorReceipt.self, from: firstData)
+    let rolledBack = try anchorReceiptData(checkpoint: second, index: 2, previous: firstReceipt.receiptHash, tenant: "native-host", key: anchorKey, receivedAt: "2027-01-15T07:59:59.000Z")
+    #expect(throws: AgentPassNativeError.self) { try manager.accept(receiptData: rolledBack, checkpoint: second, checkpoints: records) }
+    let secondData = try anchorReceiptData(checkpoint: second, index: 2, previous: firstReceipt.receiptHash, tenant: "native-host", key: anchorKey)
+    #expect(try manager.accept(receiptData: secondData, checkpoint: second, checkpoints: records).pending == 0)
+    #expect((try FileManager.default.attributesOfItem(atPath: receiptFile.path)[.posixPermissions] as? NSNumber)?.intValue == 0o600)
+    let restarted = try NativeAuditAnchorReceipts(path: receiptFile.path, tenant: "native-host", anchorPublicKeyPEM: anchorPublicKeyPEM(anchorKey.publicKey))
+    #expect(try restarted.status(checkpoints: records).receipts == 2)
+
+    var forged = try JSONSerialization.jsonObject(with: secondData) as! [String: Any]
+    forged["checkpoint_hash"] = String(repeating: "f", count: 64)
+    #expect(throws: AgentPassNativeError.self) { try manager.accept(receiptData: NativeAuditLog.canonical(forged), checkpoint: second, checkpoints: records) }
 }
 
 @Test func nativeAuditRejectsSymlinkedAndPermissiveFiles() throws {

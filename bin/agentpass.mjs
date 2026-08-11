@@ -18,7 +18,7 @@ import { applyControlBundle, controlKeyFingerprint, fetchControlBundle, generate
 const [, , command, ...args] = process.argv;
 
 function usage() {
-  console.log(`AgentPass 0.15.0
+  console.log(`AgentPass 0.16.0
 
 Commands:
   init              create a secure local policy
@@ -33,6 +33,8 @@ Commands:
   native public-key print the native Git signing public key
   native audit-key  print the native audit checkpoint public key
   native checkpoint create a protected native audit checkpoint
+  native anchor-push push the next protected checkpoint to the native anchor
+  native anchor-status verify protected native anchor receipts
   native session-approval-key  create/print the human-presence approval key
   native revoke-sessions       immediately invalidate protected native sessions
   native daemon-register       register the bundled privileged service
@@ -384,6 +386,12 @@ async function nativeManage() {
     console.log(result.public_key);
   } else if (action === "checkpoint") {
     const result = await brokerRequest({ operation: "native.audit.checkpoint" }, { native: config.native_broker, timeoutMs: 30_000 });
+    console.log(JSON.stringify(JSON.parse(Buffer.from(result.stdout_base64, "base64").toString("utf8")), null, 2));
+  } else if (action === "anchor-push") {
+    const result = await brokerRequest({ operation: "native.audit.anchor.push" }, { native: config.native_broker, timeoutMs: 30_000 });
+    console.log(JSON.stringify(JSON.parse(Buffer.from(result.stdout_base64, "base64").toString("utf8")), null, 2));
+  } else if (action === "anchor-status") {
+    const result = await brokerRequest({ operation: "native.audit.anchor.status" }, { native: config.native_broker, timeoutMs: 30_000 });
     console.log(JSON.stringify(JSON.parse(Buffer.from(result.stdout_base64, "base64").toString("utf8")), null, 2));
   } else if (action === "session-approval-key") {
     const result = await brokerRequest({ operation: "native.session.approval-public-key" }, { native: config.native_broker, timeoutMs: 30_000 });

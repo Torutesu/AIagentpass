@@ -69,6 +69,10 @@ private struct ServiceConfiguration: Decodable {
     let auditLogPath: String
     let auditCheckpointPath: String
     let auditKeyTag: String
+    let auditAnchorURL: String?
+    let auditAnchorTenant: String?
+    let auditAnchorPublicKey: String?
+    let auditAnchorReceiptPath: String?
     let controlStatePath: String?
     let controlURL: String?
     let controlRefreshSeconds: Int?
@@ -84,6 +88,10 @@ private struct ServiceConfiguration: Decodable {
         case auditLogPath = "audit_log_path"
         case auditCheckpointPath = "audit_checkpoint_path"
         case auditKeyTag = "audit_key_tag"
+        case auditAnchorURL = "audit_anchor_url"
+        case auditAnchorTenant = "audit_anchor_tenant"
+        case auditAnchorPublicKey = "audit_anchor_public_key"
+        case auditAnchorReceiptPath = "audit_anchor_receipt_path"
         case controlStatePath = "control_state_path"
         case controlURL = "control_url"
         case controlRefreshSeconds = "control_refresh_seconds"
@@ -104,6 +112,19 @@ private struct ServiceConfiguration: Decodable {
             }
             _ = try NativeControlRefreshConfiguration(urlString: rawURL, refreshSeconds: interval)
         }
+        let anchorValues: [Any?] = [value.auditAnchorURL, value.auditAnchorTenant, value.auditAnchorPublicKey, value.auditAnchorReceiptPath]
+        if anchorValues.contains(where: { $0 != nil }) {
+            guard let rawURL = value.auditAnchorURL, let url = URL(string: rawURL), let components = URLComponents(url: url, resolvingAgainstBaseURL: false),
+                  let tenant = value.auditAnchorTenant, let publicKey = value.auditAnchorPublicKey,
+                  let receiptPath = value.auditAnchorReceiptPath else {
+                throw AgentPassNativeError.invalidConfiguration("Native audit anchor requires URL, tenant, public key, and receipt path")
+            }
+            guard components.scheme?.lowercased() == "https", components.host?.isEmpty == false,
+                  components.user == nil, components.password == nil, components.query == nil, components.fragment == nil else {
+                throw AgentPassNativeError.invalidConfiguration("Native audit anchor requires a credential-free HTTPS URL")
+            }
+            _ = try NativeAuditAnchorReceipts(path: receiptPath, tenant: tenant, anchorPublicKeyPEM: publicKey)
+        }
         return value
     }
 }
@@ -114,6 +135,8 @@ private final class ServiceEndpoint: NSObject, AgentPassNativeServiceProtocol, @
     private let auditLog: NativeAuditLog
     private let auditCheckpoints: NativeAuditCheckpoints
     private let auditSigner: SecureEnclaveKeyStore
+    private let auditAnchorReceipts: NativeAuditAnchorReceipts?
+    private let auditAnchorClient: NativeAuditAnchorClient?
     private let sessionManager: NativeSessionManager?
     private let controlManager: NativeControlManager?
     private let authorizationLock = NSLock()
@@ -121,12 +144,14 @@ private final class ServiceEndpoint: NSObject, AgentPassNativeServiceProtocol, @
     private var lastControlFetchAuditReason: String?
     private var lastControlFetchAuditAt: Date?
 
-    init(keyStore: SecureEnclaveKeyStore, authorizer: NativeRequestAuthorizer, auditLog: NativeAuditLog, auditCheckpoints: NativeAuditCheckpoints, auditSigner: SecureEnclaveKeyStore, sessionManager: NativeSessionManager?, controlManager: NativeControlManager?) {
+    init(keyStore: SecureEnclaveKeyStore, authorizer: NativeRequestAuthorizer, auditLog: NativeAuditLog, auditCheckpoints: NativeAuditCheckpoints, auditSigner: SecureEnclaveKeyStore, auditAnchorReceipts: NativeAuditAnchorReceipts?, auditAnchorClient: NativeAuditAnchorClient?, sessionManager: NativeSessionManager?, controlManager: NativeControlManager?) {
         self.keyStore = keyStore
         self.authorizer = authorizer
         self.auditLog = auditLog
         self.auditCheckpoints = auditCheckpoints
         self.auditSigner = auditSigner
+        self.auditAnchorReceipts = auditAnchorReceipts
+        self.auditAnchorClient = auditAnchorClient
         self.sessionManager = sessionManager
         self.controlManager = controlManager
     }
@@ -148,9 +173,10 @@ private final class ServiceEndpoint: NSObject, AgentPassNativeServiceProtocol, @
             let approvalFingerprint: Any = sessionManager?.approvalKeyFingerprint ?? NSNull()
             let control = controlManager?.status()
             let fetch = controlFetcher?.status()
-            reply(["ok": true, "protocol_version": 6, "key_backend": "secure-enclave", "audit_entries": audit.entries, "audit_checkpoints": checkpoints.count, "session_required": session?.required ?? false, "active_sessions": session?.active ?? 0, "session_generation": session?.generation ?? 0, "session_approval_key_fingerprint": approvalFingerprint, "control_configured": control != nil, "control_sequence": control?.sequence ?? 0, "control_operational": control?.operational ?? true, "control_expired": control?.expired ?? false, "control_expires_at": control?.expiresAt ?? NSNull(), "control_refresh_configured": fetch != nil, "control_refresh_in_flight": fetch?.inFlight ?? false, "control_refresh_last_attempt_at": fetch?.lastAttemptAt ?? NSNull(), "control_refresh_last_success_at": fetch?.lastSuccessAt ?? NSNull(), "control_refresh_last_error": fetch?.lastError ?? NSNull(), "control_refresh_next_attempt_at": fetch?.nextAttemptAt ?? NSNull(), "control_refresh_consecutive_failures": fetch?.consecutiveFailures ?? 0])
+            let anchor = try auditAnchorReceipts?.status(checkpoints: checkpoints)
+            reply(["ok": true, "protocol_version": 7, "key_backend": "secure-enclave", "audit_entries": audit.entries, "audit_checkpoints": checkpoints.count, "audit_anchor_configured": anchor != nil, "audit_anchor_receipts": anchor?.receipts ?? 0, "audit_anchor_pending": anchor?.pending ?? 0, "audit_anchor_latest_receipt": anchor?.latestReceiptHash ?? NSNull(), "session_required": session?.required ?? false, "active_sessions": session?.active ?? 0, "session_generation": session?.generation ?? 0, "session_approval_key_fingerprint": approvalFingerprint, "control_configured": control != nil, "control_sequence": control?.sequence ?? 0, "control_operational": control?.operational ?? true, "control_expired": control?.expired ?? false, "control_expires_at": control?.expiresAt ?? NSNull(), "control_refresh_configured": fetch != nil, "control_refresh_in_flight": fetch?.inFlight ?? false, "control_refresh_last_attempt_at": fetch?.lastAttemptAt ?? NSNull(), "control_refresh_last_success_at": fetch?.lastSuccessAt ?? NSNull(), "control_refresh_last_error": fetch?.lastError ?? NSNull(), "control_refresh_next_attempt_at": fetch?.nextAttemptAt ?? NSNull(), "control_refresh_consecutive_failures": fetch?.consecutiveFailures ?? 0])
         } catch {
-            reply(["ok": false, "protocol_version": 6, "error": error.localizedDescription])
+            reply(["ok": false, "protocol_version": 7, "error": error.localizedDescription])
         }
     }
 
@@ -225,6 +251,76 @@ private final class ServiceEndpoint: NSObject, AgentPassNativeServiceProtocol, @
             do { try auditLog.append(NativeAuditEvent(operation: "audit.checkpoint", decision: "error", reason: checkpointError.localizedDescription)) }
             catch let auditError { reply(nil, auditError as NSError); return }
             reply(nil, checkpointError as NSError)
+        }
+    }
+
+    func auditAnchorStatus(withReply reply: @escaping (NSData?, NSError?) -> Void) {
+        guard let auditAnchorReceipts else {
+            do { reply(try JSONSerialization.data(withJSONObject: ["configured": false], options: [.sortedKeys]) as NSData, nil) }
+            catch { reply(nil, error as NSError) }
+            return
+        }
+        do {
+            let encoder = JSONEncoder()
+            encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
+            reply(try encoder.encode(auditAnchorReceipts.status(checkpoints: auditCheckpoints.verify())) as NSData, nil)
+        } catch { reply(nil, error as NSError) }
+    }
+
+    func pushAuditAnchor(withReply reply: @escaping (NSData?, NSError?) -> Void) {
+        guard let auditAnchorReceipts, let auditAnchorClient else {
+            reply(nil, AgentPassNativeError.invalidConfiguration("Native audit anchor is not configured") as NSError)
+            return
+        }
+        let checkpoint: NativeAuditCheckpoint
+        authorizationLock.lock()
+        do {
+            var checkpoints = try auditCheckpoints.verify()
+            if try auditAnchorReceipts.pendingCheckpoint(checkpoints: checkpoints) == nil {
+                try auditLog.append(NativeAuditEvent(operation: "audit.anchor.push", decision: "allow", reason: "queued"))
+                _ = try auditCheckpoints.create()
+                checkpoints = try auditCheckpoints.verify()
+            }
+            guard let pending = try auditAnchorReceipts.pendingCheckpoint(checkpoints: checkpoints) else {
+                throw AgentPassNativeError.invalidConfiguration("Native audit anchor has no pending checkpoint")
+            }
+            checkpoint = pending
+            authorizationLock.unlock()
+        } catch {
+            authorizationLock.unlock()
+            reply(nil, error as NSError)
+            return
+        }
+        do {
+            try auditAnchorClient.post(checkpoint: checkpoint) { [weak self] result in
+                guard let self else {
+                    reply(nil, AgentPassNativeError.invalidConfiguration("Native audit anchor service is unavailable") as NSError)
+                    return
+                }
+                self.authorizationLock.lock()
+                defer { self.authorizationLock.unlock() }
+                do {
+                    switch result {
+                    case .success(let receiptData):
+                        let checkpoints = try self.auditCheckpoints.verify()
+                        let status = try auditAnchorReceipts.accept(receiptData: receiptData, checkpoint: checkpoint, checkpoints: checkpoints)
+                        try self.auditLog.append(NativeAuditEvent(operation: "audit.anchor.push", decision: "allow", reason: "checkpoint=\(checkpoint.checkpointHash);receipt=\(status.latestReceiptHash ?? "")"))
+                        let encoder = JSONEncoder()
+                        encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
+                        reply(try encoder.encode(status) as NSData, nil)
+                    case .failure(let pushError):
+                        do { try self.auditLog.append(NativeAuditEvent(operation: "audit.anchor.push", decision: "error", reason: pushError.localizedDescription)) }
+                        catch { reply(nil, error as NSError); return }
+                        reply(nil, pushError as NSError)
+                    }
+                } catch { reply(nil, error as NSError) }
+            }
+        } catch {
+            authorizationLock.lock()
+            defer { authorizationLock.unlock() }
+            do { try auditLog.append(NativeAuditEvent(operation: "audit.anchor.push", decision: "error", reason: error.localizedDescription)) }
+            catch { reply(nil, error as NSError); return }
+            reply(nil, error as NSError)
         }
     }
 
@@ -453,6 +549,9 @@ do {
     if let controlStatePath = configuration.controlStatePath {
         try validateProtectedOutputPath(path: controlStatePath, label: "Native control state")
     }
+    if let receiptPath = configuration.auditAnchorReceiptPath {
+        try validateProtectedOutputPath(path: receiptPath, label: "Native audit anchor receipt log")
+    }
     let policyData = try loadProtectedFile(path: configuration.policyPath, label: "Native policy")
     let sessionManager = try configuration.sessionApprovalPublicKey.map { try NativeSessionManager(policyData: policyData, approvalPublicKey: $0) }
     let controlManager = try configuration.controlStatePath.map { try NativeControlManager(policyData: policyData, statePath: $0) }
@@ -463,11 +562,22 @@ do {
     let auditSigner = try SecureEnclaveKeyStore(applicationTag: configuration.auditKeyTag, accessGroup: configuration.keychainAccessGroup)
     let auditLog = try NativeAuditLog(path: configuration.auditLogPath)
     let auditCheckpoints = try NativeAuditCheckpoints(path: configuration.auditCheckpointPath, auditLog: auditLog, signer: auditSigner)
+    let auditAnchorReceipts: NativeAuditAnchorReceipts?
+    let auditAnchorClient: NativeAuditAnchorClient?
+    if let rawURL = configuration.auditAnchorURL, let url = URL(string: rawURL),
+       let tenant = configuration.auditAnchorTenant, let publicKey = configuration.auditAnchorPublicKey,
+       let receiptPath = configuration.auditAnchorReceiptPath {
+        auditAnchorReceipts = try NativeAuditAnchorReceipts(path: receiptPath, tenant: tenant, anchorPublicKeyPEM: publicKey)
+        auditAnchorClient = try NativeAuditAnchorClient(url: url, tenant: tenant)
+    } else {
+        auditAnchorReceipts = nil
+        auditAnchorClient = nil
+    }
     _ = try auditLog.verify()
     _ = try auditCheckpoints.verify()
     let authorizer = try NativeRequestAuthorizer(policyData: policyData, sessionValidator: sessionManager, controlValidator: controlManager)
     let listener = NSXPCListener(machServiceName: configuration.machServiceName)
-    let endpoint = ServiceEndpoint(keyStore: keyStore, authorizer: authorizer, auditLog: auditLog, auditCheckpoints: auditCheckpoints, auditSigner: auditSigner, sessionManager: sessionManager, controlManager: controlManager)
+    let endpoint = ServiceEndpoint(keyStore: keyStore, authorizer: authorizer, auditLog: auditLog, auditCheckpoints: auditCheckpoints, auditSigner: auditSigner, auditAnchorReceipts: auditAnchorReceipts, auditAnchorClient: auditAnchorClient, sessionManager: sessionManager, controlManager: controlManager)
     if let rawURL = configuration.controlURL, let interval = configuration.controlRefreshSeconds {
         let refresh = try NativeControlRefreshConfiguration(urlString: rawURL, refreshSeconds: interval)
         try endpoint.startControlRefresh(url: refresh.url, refreshSeconds: refresh.refreshSeconds)

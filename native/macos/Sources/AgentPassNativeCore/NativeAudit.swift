@@ -267,6 +267,173 @@ public final class NativeAuditCheckpoints: @unchecked Sendable {
     }
 }
 
+public struct NativeAuditAnchorReceipt: Codable, Equatable, Sendable {
+    public let version: Int
+    public let tenant: String
+    public let index: Int
+    public let checkpointHash: String
+    public let receivedAt: String
+    public let previousReceiptHash: String
+    public let anchorKeyFingerprint: String
+    public let signature: String
+    public let receiptHash: String
+    enum CodingKeys: String, CodingKey {
+        case version, tenant, index, signature
+        case checkpointHash = "checkpoint_hash"
+        case receivedAt = "received_at"
+        case previousReceiptHash = "previous_receipt_hash"
+        case anchorKeyFingerprint = "anchor_key_fingerprint"
+        case receiptHash = "receipt_hash"
+    }
+}
+
+public struct NativeAuditAnchorStatus: Codable, Equatable, Sendable {
+    public let configured: Bool
+    public let checkpoints: Int
+    public let receipts: Int
+    public let pending: Int
+    public let latestReceiptHash: String?
+    enum CodingKeys: String, CodingKey {
+        case configured, checkpoints, receipts, pending
+        case latestReceiptHash = "latest_receipt_hash"
+    }
+}
+
+public final class NativeAuditAnchorReceipts: @unchecked Sendable {
+    private static let receiptKeys: Set<String> = ["version", "tenant", "index", "checkpoint_hash", "received_at", "previous_receipt_hash", "anchor_key_fingerprint", "signature", "receipt_hash"]
+    private let file: String
+    private let tenant: String
+    private let anchorKey: Curve25519.Signing.PublicKey
+    private let anchorKeyFingerprint: String
+    private let lock = NSLock()
+
+    public init(path: String, tenant: String, anchorPublicKeyPEM: String) throws {
+        guard path.hasPrefix("/"), tenant.range(of: "^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$", options: .regularExpression) != nil else {
+            throw AgentPassNativeError.invalidConfiguration("Native audit anchor receipt path or tenant is invalid")
+        }
+        let parsed = try Self.ed25519PublicKey(anchorPublicKeyPEM)
+        file = URL(fileURLWithPath: path).standardizedFileURL.path
+        self.tenant = tenant
+        anchorKey = parsed.key
+        anchorKeyFingerprint = "SHA256:" + Data(SHA256.hash(data: parsed.der)).base64EncodedString().replacingOccurrences(of: "+", with: "-").replacingOccurrences(of: "/", with: "_").replacingOccurrences(of: "=", with: "")
+        if try pathEntryExists(file) { try validatePrivateRegularFile(file, label: "Native audit anchor receipt log") }
+    }
+
+    public func status(checkpoints: [NativeAuditCheckpoint]) throws -> NativeAuditAnchorStatus {
+        lock.lock()
+        defer { lock.unlock() }
+        let receipts = try readAndVerifyUnlocked(checkpoints: checkpoints)
+        return Self.status(checkpoints: checkpoints, receipts: receipts)
+    }
+
+    public func pendingCheckpoint(checkpoints: [NativeAuditCheckpoint]) throws -> NativeAuditCheckpoint? {
+        lock.lock()
+        defer { lock.unlock() }
+        let receipts = try readAndVerifyUnlocked(checkpoints: checkpoints)
+        return receipts.count < checkpoints.count ? checkpoints[receipts.count] : nil
+    }
+
+    @discardableResult
+    public func accept(receiptData: Data, checkpoint: NativeAuditCheckpoint, checkpoints: [NativeAuditCheckpoint]) throws -> NativeAuditAnchorStatus {
+        lock.lock()
+        defer { lock.unlock() }
+        let receipts = try readAndVerifyUnlocked(checkpoints: checkpoints)
+        guard receipts.count < checkpoints.count, checkpoints[receipts.count] == checkpoint else {
+            throw AgentPassNativeError.invalidSignature("Native audit anchor receipt does not match the next local checkpoint")
+        }
+        let receipt = try Self.decodeReceipt(receiptData)
+        try verify(receipt, checkpoint: checkpoint, previousReceiptHash: receipts.last?.receiptHash ?? NativeAuditLog.zeroHash, expectedIndex: receipts.count + 1, minimumReceivedAt: receipts.last.flatMap { Self.receiptDate($0.receivedAt) })
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
+        try durableAppend(path: file, data: try encoder.encode(receipt) + Data("\n".utf8))
+        return Self.status(checkpoints: checkpoints, receipts: receipts + [receipt])
+    }
+
+    private func readAndVerifyUnlocked(checkpoints: [NativeAuditCheckpoint]) throws -> [NativeAuditAnchorReceipt] {
+        guard try pathEntryExists(file) else { return [] }
+        try validatePrivateRegularFile(file, label: "Native audit anchor receipt log")
+        let data = try Data(contentsOf: URL(fileURLWithPath: file), options: .mappedIfSafe)
+        guard data.count <= 128 * 1024 * 1024 else { throw AgentPassNativeError.invalidSignature("Native audit anchor receipt log exceeds the verification limit") }
+        try validateJSONLinesFraming(data, label: "Native audit anchor receipt log")
+        let lines = data.split(separator: 0x0a, omittingEmptySubsequences: true)
+        guard lines.count <= checkpoints.count else { throw AgentPassNativeError.invalidSignature("Native audit anchor receipt log is ahead of local checkpoints") }
+        var previous = NativeAuditLog.zeroHash
+        var previousReceivedAt: Date?
+        var receipts: [NativeAuditAnchorReceipt] = []
+        for (index, line) in lines.enumerated() {
+            let receipt = try Self.decodeReceipt(Data(line))
+            try verify(receipt, checkpoint: checkpoints[index], previousReceiptHash: previous, expectedIndex: index + 1, minimumReceivedAt: previousReceivedAt)
+            previous = receipt.receiptHash
+            previousReceivedAt = Self.receiptDate(receipt.receivedAt)
+            receipts.append(receipt)
+        }
+        return receipts
+    }
+
+    private func verify(_ receipt: NativeAuditAnchorReceipt, checkpoint: NativeAuditCheckpoint, previousReceiptHash: String, expectedIndex: Int, minimumReceivedAt: Date?) throws {
+        let receivedAt = Self.receiptDate(receipt.receivedAt)
+        guard let receivedAt else { throw AgentPassNativeError.invalidSignature("Native audit anchor receipt timestamp is invalid") }
+        guard receipt.version == 1, receipt.tenant == tenant, receipt.index == expectedIndex,
+              receipt.checkpointHash == checkpoint.checkpointHash, receipt.previousReceiptHash == previousReceiptHash,
+              receipt.anchorKeyFingerprint == anchorKeyFingerprint,
+              minimumReceivedAt.map({ receivedAt >= $0 }) ?? true,
+              receipt.receiptHash.range(of: "^[0-9a-f]{64}$", options: .regularExpression) != nil,
+              let signature = Data(base64Encoded: receipt.signature), signature.count == 64 else {
+            throw AgentPassNativeError.invalidSignature("Native audit anchor receipt statement is invalid")
+        }
+        let statement: [String: Any] = ["version": receipt.version, "tenant": receipt.tenant, "index": receipt.index, "checkpoint_hash": receipt.checkpointHash, "received_at": receipt.receivedAt, "previous_receipt_hash": receipt.previousReceiptHash]
+        guard anchorKey.isValidSignature(signature, for: try NativeAuditLog.canonical(statement)) else {
+            throw AgentPassNativeError.invalidSignature("Native audit anchor receipt signature is invalid")
+        }
+        guard receipt.receiptHash == NativeAuditLog.hash(try Self.nodeReceiptHashData(receipt)) else {
+            throw AgentPassNativeError.invalidSignature("Native audit anchor receipt hash is invalid")
+        }
+    }
+
+    private static func decodeReceipt(_ data: Data) throws -> NativeAuditAnchorReceipt {
+        guard data.count > 0, data.count <= 64 * 1024,
+              let object = try JSONSerialization.jsonObject(with: data) as? [String: Any], Set(object.keys) == receiptKeys else {
+            throw AgentPassNativeError.invalidSignature("Native audit anchor receipt encoding is invalid")
+        }
+        return try JSONDecoder().decode(NativeAuditAnchorReceipt.self, from: data)
+    }
+
+    private static func status(checkpoints: [NativeAuditCheckpoint], receipts: [NativeAuditAnchorReceipt]) -> NativeAuditAnchorStatus {
+        NativeAuditAnchorStatus(configured: true, checkpoints: checkpoints.count, receipts: receipts.count, pending: checkpoints.count - receipts.count, latestReceiptHash: receipts.last?.receiptHash)
+    }
+
+    private static func receiptDate(_ value: String) -> Date? {
+        guard value.utf8.count <= 64 else { return nil }
+        let fractional = ISO8601DateFormatter()
+        fractional.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        if let date = fractional.date(from: value) { return date }
+        let basic = ISO8601DateFormatter()
+        basic.formatOptions = [.withInternetDateTime]
+        return basic.date(from: value)
+    }
+
+    private static func nodeReceiptHashData(_ receipt: NativeAuditAnchorReceipt) throws -> Data {
+        let values: [Any] = [receipt.version, receipt.tenant, receipt.index, receipt.checkpointHash, receipt.receivedAt, receipt.previousReceiptHash, receipt.anchorKeyFingerprint, receipt.signature]
+        let encoded = try values.map { value -> String in
+            let data = try JSONSerialization.data(withJSONObject: [value], options: [.withoutEscapingSlashes])
+            let array = String(decoding: data, as: UTF8.self)
+            return String(array.dropFirst().dropLast())
+        }
+        let keys = ["version", "tenant", "index", "checkpoint_hash", "received_at", "previous_receipt_hash", "anchor_key_fingerprint", "signature"]
+        return Data(("{" + zip(keys, encoded).map { pair in "\"\(pair.0)\":\(pair.1)" }.joined(separator: ",") + "}").utf8)
+    }
+
+    private static func ed25519PublicKey(_ pem: String) throws -> (key: Curve25519.Signing.PublicKey, der: Data) {
+        let lines = pem.split(whereSeparator: \.isNewline).map(String.init)
+        guard lines.first == "-----BEGIN PUBLIC KEY-----", lines.last == "-----END PUBLIC KEY-----", lines.count >= 3,
+              let der = Data(base64Encoded: lines.dropFirst().dropLast().joined()), der.count == 44,
+              der.prefix(12) == Data([0x30, 0x2a, 0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x70, 0x03, 0x21, 0x00]) else {
+            throw AgentPassNativeError.invalidKey("Native audit anchor receipt key must be Ed25519 SPKI PEM")
+        }
+        return (try Curve25519.Signing.PublicKey(rawRepresentation: der.suffix(32)), der)
+    }
+}
+
 private func durableAppend(path: String, data: Data) throws {
     guard !data.isEmpty else { throw AgentPassNativeError.invalidConfiguration("Native audit append must not be empty") }
     let existed = try pathEntryExists(path)

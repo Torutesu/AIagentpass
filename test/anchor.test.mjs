@@ -7,7 +7,8 @@ import assert from "node:assert/strict";
 import { anchorPendingCheckpoints, readAnchorReceipts, verifyStoredAnchorReceipts } from "../lib/anchor-client.mjs";
 import { createAnchorServer, enrollAnchorTenant, initializeAnchor, submitAnchorCheckpoint, verifyAnchorReceipt, verifyAnchorTenant } from "../lib/anchor.mjs";
 import { audit, createAuditCheckpoint, publicKeyFingerprint, readAuditCheckpoints } from "../lib/audit.mjs";
-import { createAuditIdentity } from "../lib/identity.mjs";
+import { canonicalJson, createAuditIdentity } from "../lib/identity.mjs";
+import { nativeAuditPublicKeyFingerprint, verifyNativeCheckpointRecord } from "../lib/native-audit.mjs";
 
 function fixture() {
   const host = fs.mkdtempSync(path.join(os.tmpdir(), "agentpass-anchor-host-"));
@@ -20,6 +21,40 @@ function fixture() {
   audit({ operation: "test.two", decision: "allow" }, host);
   const second = createAuditCheckpoint(identity.public_key, host);
   return { host, anchor, identity, initialized, first, second };
+}
+
+function nativeFixture() {
+  const anchor = fs.mkdtempSync(path.join(os.tmpdir(), "agentpass-native-anchor-server-"));
+  const initialized = initializeAnchor(anchor);
+  const { privateKey, publicKey } = crypto.generateKeyPairSync("ec", { namedCurve: "prime256v1" });
+  const jwk = publicKey.export({ format: "jwk" });
+  const point = Buffer.concat([Buffer.from([4]), Buffer.from(jwk.x, "base64url"), Buffer.from(jwk.y, "base64url")]);
+  const publicBlob = Buffer.concat([sshString("ecdsa-sha2-nistp256"), sshString("nistp256"), sshString(point)]);
+  const auditPublicKey = `ecdsa-sha2-nistp256 ${publicBlob.toString("base64")}`;
+  const enrolled = enrollAnchorTenant(anchor, "native-host", auditPublicKey);
+  const checkpoint = (entries, previous, headByte) => {
+    const statement = {
+      version: 1,
+      created_at: new Date(1_800_000_000_000 + entries * 1000).toISOString(),
+      entries,
+      head_hash: headByte.repeat(64),
+      previous_checkpoint_hash: previous
+    };
+    const signature = crypto.sign("sha256", Buffer.from(canonicalJson(statement)), { key: privateKey, dsaEncoding: "ieee-p1363" }).toString("base64");
+    const record = { ...statement, public_key_fingerprint: nativeAuditPublicKeyFingerprint(auditPublicKey), signature };
+    record.checkpoint_hash = crypto.createHash("sha256").update(canonicalJson(record)).digest("hex");
+    return record;
+  };
+  const first = checkpoint(1, "0".repeat(64), "a");
+  const second = checkpoint(2, first.checkpoint_hash, "b");
+  return { anchor, initialized, enrolled, auditPublicKey, first, second };
+}
+
+function sshString(value) {
+  const bytes = Buffer.isBuffer(value) ? value : Buffer.from(value);
+  const length = Buffer.alloc(4);
+  length.writeUInt32BE(bytes.length);
+  return Buffer.concat([length, bytes]);
 }
 
 test("anchor signs an append-only checkpoint and receipt chain", () => {
@@ -40,6 +75,44 @@ test("anchor signs an append-only checkpoint and receipt chain", () => {
     latest_checkpoint: value.second.checkpoint_hash,
     latest_receipt: secondReceipt.receipt_hash
   });
+});
+
+test("anchor enrolls and verifies native P-256 checkpoint chains", () => {
+  const value = nativeFixture();
+  assert.equal(value.enrolled.version, 2);
+  assert.equal(value.enrolled.checkpoint_algorithm, "p256-sha256");
+  assert.equal(verifyNativeCheckpointRecord(value.first, value.auditPublicKey).checkpoint_hash, value.first.checkpoint_hash);
+  const firstReceipt = submitAnchorCheckpoint(value.anchor, "native-host", value.first);
+  assert.deepEqual(submitAnchorCheckpoint(value.anchor, "native-host", value.first), firstReceipt);
+  const secondReceipt = submitAnchorCheckpoint(value.anchor, "native-host", value.second);
+  assert.equal(secondReceipt.index, 2);
+  assert.deepEqual(verifyAnchorTenant(value.anchor, "native-host"), {
+    valid: true,
+    records: 2,
+    latest_checkpoint: value.second.checkpoint_hash,
+    latest_receipt: secondReceipt.receipt_hash
+  });
+  assert.throws(() => submitAnchorCheckpoint(value.anchor, "native-host", { ...value.second, entries: 3 }), /signature|hash/i);
+  const configFile = path.join(value.anchor, "tenants", "native-host", "config.json");
+  const config = JSON.parse(fs.readFileSync(configFile, "utf8"));
+  config.checkpoint_algorithm = "ed25519";
+  fs.writeFileSync(configFile, `${JSON.stringify(config)}\n`, { mode: 0o600 });
+  assert.throws(() => verifyAnchorTenant(value.anchor, "native-host"), /algorithm|identity/i);
+});
+
+test("HTTP anchor accepts native checkpoints and rejects algorithm confusion", async (t) => {
+  const value = nativeFixture();
+  const server = createAnchorServer(value.anchor);
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  t.after(() => new Promise((resolve) => server.close(resolve)));
+  const endpoint = `http://127.0.0.1:${server.address().port}/v1/checkpoints/native-host`;
+  const accepted = await fetch(endpoint, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ checkpoint: value.first }) });
+  assert.equal(accepted.status, 200);
+
+  const ed25519 = fixture();
+  const confused = await fetch(endpoint, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ checkpoint: ed25519.first }) });
+  assert.equal(confused.status, 400);
+  assert.match((await confused.json()).error, /Native audit checkpoint|public.key/i);
 });
 
 test("anchor rejects forged, rolled-back, and locally corrupted records", () => {

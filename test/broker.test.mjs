@@ -116,6 +116,10 @@ process.stdin.on("end", () => {
   assert.equal(result.command, "sign");
   const auditStatus = await brokerRequest({ operation: "native.audit.status" }, { native: { enabled: true, client, mach_service: "dev.agentpass.native" } });
   assert.equal(auditStatus.command, "audit-status");
+  const anchorPush = await brokerRequest({ operation: "native.audit.anchor.push" }, { native: { enabled: true, client, mach_service: "dev.agentpass.native" } });
+  assert.equal(anchorPush.command, "audit-anchor-push");
+  const anchorStatus = await brokerRequest({ operation: "native.audit.anchor.status" }, { native: { enabled: true, client, mach_service: "dev.agentpass.native" } });
+  assert.equal(anchorStatus.command, "audit-anchor-status");
   const nativeSession = await brokerRequest({ operation: "native.session.start", agent_id: "agent", ttl_seconds: 300 }, { native: { enabled: true, client, mach_service: "dev.agentpass.native" } });
   assert.equal(nativeSession.command, "session-start");
   const revokeSessions = await brokerRequest({ operation: "native.session.revoke" }, { native: { enabled: true, client, mach_service: "dev.agentpass.native" } });

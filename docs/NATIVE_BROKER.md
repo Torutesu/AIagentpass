@@ -1,6 +1,6 @@
 # Native macOS broker
 
-AgentPass 0.15 implements the native security boundary described by ADR-001. It is a Swift 6 package with four components:
+AgentPass 0.16 implements the native security boundary described by ADR-001. It is a Swift 6 package with four components:
 
 - `AgentPassNativeCore`: Secure Enclave P-256 key management, OpenSSH SSHSIG encoding, signed Agent request verification, protected sessions and remote control, replay prevention, policy/Git validation, and protected audit primitives;
 - `agentpass-native-service`: a privileged Mach XPC service that owns the signing key, session hashes, audit key, root-owned policy and control state, audit chain, and checkpoint chain;
@@ -54,7 +54,7 @@ Before accepting XPC traffic, and again on health, signing, and checkpoint opera
 
 Checkpoints use a second, non-exportable Secure Enclave P-256 key. Each checkpoint binds the audit entry count and head, the previous checkpoint hash, timestamp, and key fingerprint. Copy checkpoint records and the audit public key to an independently protected system to make later local truncation detectable. Merely retaining the fingerprint on the same host does not preserve evidence after full host compromise.
 
-The existing remote anchor protocol accepts the local broker's Ed25519 checkpoints, not these native P-256 checkpoints. Native remote anchoring is still pending; do not send native checkpoint JSON to the current anchor endpoint.
+The remote anchor accepts both local Ed25519 and native P-256 checkpoint tenants while pinning one algorithm and key per tenant. Native anchor configuration is root-owned; the service itself performs HTTPS submission, rejects redirects and responses over 512 KiB, verifies the returned Ed25519 receipt and both chains, and durably appends the receipt under protected ancestry. A lost response leaves the checkpoint pending, and retrying it returns the anchor's original receipt.
 
 ## Build and test
 
@@ -91,6 +91,8 @@ Templates are under `native/macos/Resources/`:
 
 Create `/Library/Application Support/AgentPass` as root with no group/world write permission. Install the approved version 4 policy there as `policy.json`, owned by root and not group/world writable. This copy—not `~/.agentpass/config.json`—is authoritative inside the service. If it contains `control.required=true`, install an initial signed bundle as `control.bundle.json`, root-owned with mode `0600`, and configure that absolute `control_state_path`. Add `control_url` and `control_refresh_seconds` to enable service-owned refresh. The configured state and audit paths must remain under protected root-owned ancestry.
 
+To anchor native checkpoints, first export `agentpass native audit-key` from the final signed client and enroll it as a unique tenant on the separately administered anchor. Then add `audit_anchor_url`, `audit_anchor_tenant`, `audit_anchor_public_key`, and `audit_anchor_receipt_path` to the root-owned native service configuration. The public key is the anchor's Ed25519 SPKI PEM, not the host P-256 key. All four fields are required together; partial configuration prevents service startup.
+
 After the signed app and daemon are registered, select the bridge in the user-side configuration:
 
 ```json
@@ -125,6 +127,8 @@ agentpass native status
 agentpass native public-key
 agentpass native audit-key
 agentpass native checkpoint > checkpoint.json
+agentpass native anchor-push
+agentpass native anchor-status
 export AGENTPASS_SESSION="$(agentpass session start 900)"
 agentpass native revoke-sessions
 agentpass control apply ./control.bundle.json
@@ -137,10 +141,11 @@ Copy the final signed app to a stable location before registration. `daemon-regi
 
 `native status` verifies both chains and reports the audit head, latest checkpoint, session state, control sequence/expiry/operational state, and automatic-refresh status. `native public-key` emits the Git signing public key. `native audit-key` emits the distinct checkpoint verification key. `native checkpoint` first adds an audit event, then signs the resulting exact audit head. `session start` prompts once and caps the requested TTL at the root policy value. The pre-push hook asks the service to validate both the session and control state instead of consulting user-writable files. `native revoke-sessions` does not require human approval because it can only remove authority. `control source` stores an optional untrusted manual-fetch URL in user configuration; `control apply` and manual `fetch` cross XPC and are independently verified against the root policy before persistence. Native `control trust` is refused because user configuration cannot rotate the service trust root. Automatic refresh uses only the root-owned service URL.
 
+`native anchor-push` creates a fresh checkpoint only when no older checkpoint is pending, then submits exactly the next pending checkpoint. Re-run it until `native anchor-status` reports `pending: 0`; limiting each call to one checkpoint bounds XPC and network work. Receipt verification and persistence occur inside the privileged service. User-side `audit anchor trust` does not configure or rotate native anchor trust.
+
 ## Remaining production work
 
 - Publish a Developer ID-signed, provisioned, notarized universal artifact and installer.
-- Add a remote anchor protocol and verifier for native P-256 checkpoints.
 - Add signed audit-log archival/rotation without losing checkpoint continuity.
 - Add signing, audit, and session-approval key deletion/rotation with interactive authorization and recovery UX.
 - Test notarized universal binaries on Intel and Apple silicon hardware with Secure Enclave.
