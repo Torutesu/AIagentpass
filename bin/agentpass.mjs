@@ -18,7 +18,7 @@ import { applyControlBundle, controlKeyFingerprint, fetchControlBundle, generate
 const [, , command, ...args] = process.argv;
 
 function usage() {
-  console.log(`AgentPass 0.9.0
+  console.log(`AgentPass 0.10.0
 
 Commands:
   init              create a secure local policy
@@ -29,6 +29,10 @@ Commands:
   broker ping       verify that the signing broker is running
   broker install    install and start the macOS LaunchAgent
   broker stop       stop the macOS LaunchAgent
+  native status     verify protected native audit and broker health
+  native public-key print the native Git signing public key
+  native audit-key  print the native audit checkpoint public key
+  native checkpoint create a protected native audit checkpoint
   agent list        list enrolled agent identities
   agent add NAME    enroll a new agent identity
   agent set-default ID
@@ -324,6 +328,28 @@ async function brokerPing() {
   console.log(JSON.stringify(response, null, 2));
 }
 
+async function nativeManage() {
+  const config = loadConfig();
+  if (!config.native_broker?.enabled) throw new Error("Native broker is not configured");
+  const action = args[0];
+  if (action === "status") {
+    const health = await brokerRequest({ operation: "ping" }, { native: config.native_broker });
+    const auditResult = await brokerRequest({ operation: "native.audit.status" }, { native: config.native_broker });
+    console.log(JSON.stringify({ health, audit: JSON.parse(Buffer.from(auditResult.stdout_base64, "base64").toString("utf8")) }, null, 2));
+  } else if (action === "public-key") {
+    const result = await brokerRequest({ operation: "native.public-key" }, { native: config.native_broker });
+    console.log(result.public_key);
+  } else if (action === "audit-key") {
+    const result = await brokerRequest({ operation: "native.audit.public-key" }, { native: config.native_broker });
+    console.log(result.public_key);
+  } else if (action === "checkpoint") {
+    const result = await brokerRequest({ operation: "native.audit.checkpoint" }, { native: config.native_broker, timeoutMs: 30_000 });
+    console.log(JSON.stringify(JSON.parse(Buffer.from(result.stdout_base64, "base64").toString("utf8")), null, 2));
+  } else {
+    throw new Error("Unknown native command");
+  }
+}
+
 async function controlManage() {
   const action = args[0];
   if (action === "keygen") {
@@ -560,6 +586,7 @@ try {
   else if (command === "broker" && args[0] === "ping") await brokerPing();
   else if (command === "broker" && args[0] === "install") brokerInstall();
   else if (command === "broker" && args[0] === "stop") brokerStop();
+  else if (command === "native") await nativeManage();
   else if (command === "agent") agentManage();
   else if (command === "control") await controlManage();
   else if (command === "setup-macos") setupMacos();

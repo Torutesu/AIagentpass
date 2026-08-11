@@ -108,11 +108,14 @@ process.stdin.setEncoding("utf8");
 process.stdin.on("data", (chunk) => input += chunk);
 process.stdin.on("end", () => {
   const request = JSON.parse(input);
-  process.stdout.write(JSON.stringify({ ok: true, stdout_base64: Buffer.from(request.operation).toString("base64") }) + "\\n");
+  process.stdout.write(JSON.stringify({ ok: true, stdout_base64: Buffer.from(request.operation).toString("base64"), command: process.argv.at(-1) }) + "\\n");
 });
 `, { mode: 0o755 });
   const result = await brokerRequest({ operation: "git.commit.sign" }, { native: { enabled: true, client, mach_service: "dev.agentpass.native" } });
   assert.equal(Buffer.from(result.stdout_base64, "base64").toString(), "git.commit.sign");
+  assert.equal(result.command, "sign");
+  const auditStatus = await brokerRequest({ operation: "native.audit.status" }, { native: { enabled: true, client, mach_service: "dev.agentpass.native" } });
+  assert.equal(auditStatus.command, "audit-status");
   fs.chmodSync(client, 0o777);
   assert.throws(() => brokerRequest({ operation: "ping" }, { native: { enabled: true, client, mach_service: "dev.agentpass.native" } }), /permissions are unsafe/);
 });

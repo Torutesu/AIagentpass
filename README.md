@@ -155,14 +155,14 @@ AgentPass protects against copying the private key out of the device and limits 
 
 ## Native macOS boundary
 
-Version 0.9 includes a Swift/XPC native broker foundation. It creates a non-exportable P-256 key in Secure Enclave, emits OpenSSH-compatible SSHSIG signatures internally, authenticates the signed XPC client, and repeats Agent identity, replay, scope, Git context, tree, and parent validation against a root-owned policy inside the service.
+Version 0.10 includes a Swift/XPC native broker foundation. It creates separate non-exportable P-256 signing and audit-checkpoint keys in Secure Enclave, emits OpenSSH-compatible SSHSIG signatures internally, authenticates the signed XPC client, and repeats Agent identity, replay, scope, Git context, tree, and parent validation against a root-owned policy inside the service. Every native signing outcome is appended to a root-owned, durable SHA-256 chain; signed checkpoints make later truncation or rewriting detectable once retained outside the host.
 
 ```sh
 npm run test:native
 swift build -c release --package-path native/macos
 ```
 
-The repository does not ship a Developer ID-signed or notarized app bundle: those artifacts require an Apple Team ID, provisioning, entitlements, and `SMAppService` registration. Native mode also currently refuses session-required and remote-control policies until those states move behind the native boundary. See [docs/NATIVE_BROKER.md](docs/NATIVE_BROKER.md) for the exact implementation and deployment gap.
+Once a signed service is installed, `agentpass native status`, `native public-key`, `native audit-key`, and `native checkpoint` expose the narrow operational interface. The repository does not ship a Developer ID-signed or notarized app bundle: those artifacts require an Apple Team ID, provisioning, entitlements, and `SMAppService` registration. Native mode also refuses session-required and remote-control policies until those state machines move behind the native boundary. Native P-256 checkpoints are not yet accepted by the existing Ed25519 remote anchor. See [docs/NATIVE_BROKER.md](docs/NATIVE_BROKER.md) for the exact implementation and deployment gap.
 
 ## Current scope and roadmap
 
@@ -183,7 +183,8 @@ The repository does not ship a Developer ID-signed or notarized app bundle: thos
 - [x] separate branch and tag push rules
 - [x] GitHub Actions CI test workflow
 - [x] Swift/XPC broker core with Secure Enclave SSHSIG and service-side policy validation
-- [ ] signed/notarized native app bundle and protected session/control/audit state
+- [x] root-owned native hash-chain audit with separate Secure Enclave checkpoint key
+- [ ] signed/notarized native app bundle and protected session/control state
 - [x] per-agent Ed25519 request identity with replay protection
 - [x] agent enrollment, selection, revocation, and key rotation
 - [x] per-agent operation/repository/branch/remote scopes
@@ -195,6 +196,7 @@ The repository does not ship a Developer ID-signed or notarized app bundle: thos
 - [x] offline-signed remote Agent and global revocation
 - [x] bounded HTTPS control refresh with sequence rollback detection
 - [x] remote checkpoint anchoring with signed, chained receipts
+- [ ] remote anchoring protocol for native P-256 checkpoints
 
 See [THREAT_MODEL.md](THREAT_MODEL.md) for the exact security boundary and remaining same-user limitations.
 

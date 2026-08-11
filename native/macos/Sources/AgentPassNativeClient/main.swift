@@ -18,7 +18,7 @@ private func emit(_ output: Output, status: Int32 = 0) -> Never {
 }
 
 guard CommandLine.arguments.count >= 3, CommandLine.arguments[1] == "--service" else {
-    emit(Output(ok: false, version: nil, stdout_base64: nil, public_key: nil, error: "Usage: agentpass-native-client --service MACH_SERVICE sign|ping|public-key"), status: 2)
+    emit(Output(ok: false, version: nil, stdout_base64: nil, public_key: nil, error: "Usage: agentpass-native-client --service MACH_SERVICE sign|ping|public-key|audit-status|audit-public-key|audit-checkpoint"), status: 2)
 }
 let serviceName = CommandLine.arguments[2]
 let command = CommandLine.arguments.count > 3 ? CommandLine.arguments[3] : ""
@@ -33,6 +33,18 @@ let proxy = connection.remoteObjectProxyWithErrorHandler { error in
     semaphore.signal()
 } as! AgentPassNativeServiceProtocol
 
+private func dataOutput(_ data: NSData?, error: NSError?) -> Output {
+    if let error { return Output(ok: false, version: nil, stdout_base64: nil, public_key: nil, error: error.localizedDescription) }
+    guard let data else { return Output(ok: false, version: nil, stdout_base64: nil, public_key: nil, error: "Native service returned an empty response") }
+    return Output(ok: true, version: nil, stdout_base64: (data as Data).base64EncodedString(), public_key: nil, error: nil)
+}
+
+private func keyOutput(_ key: NSString?, error: NSError?) -> Output {
+    if let error { return Output(ok: false, version: nil, stdout_base64: nil, public_key: nil, error: error.localizedDescription) }
+    guard let key else { return Output(ok: false, version: nil, stdout_base64: nil, public_key: nil, error: "Native service returned an empty public key") }
+    return Output(ok: true, version: nil, stdout_base64: nil, public_key: key as String, error: nil)
+}
+
 switch command {
 case "sign":
     let request = FileHandle.standardInput.readDataToEndOfFile()
@@ -40,19 +52,35 @@ case "sign":
         emit(Output(ok: false, version: nil, stdout_base64: nil, public_key: nil, error: "Native request size is invalid"), status: 1)
     }
     proxy.sign(request: request as NSData) { signature, error in
-        result = error.map { Output(ok: false, version: nil, stdout_base64: nil, public_key: nil, error: $0.localizedDescription) }
-            ?? Output(ok: true, version: nil, stdout_base64: Data((signature! as String).utf8).base64EncodedString(), public_key: nil, error: nil)
+        if let error { result = Output(ok: false, version: nil, stdout_base64: nil, public_key: nil, error: error.localizedDescription) }
+        else if let signature { result = Output(ok: true, version: nil, stdout_base64: Data((signature as String).utf8).base64EncodedString(), public_key: nil, error: nil) }
+        else { result = Output(ok: false, version: nil, stdout_base64: nil, public_key: nil, error: "Native service returned an empty signature") }
         semaphore.signal()
     }
 case "ping":
     proxy.health { health in
-        result = Output(ok: health["ok"] as? Bool == true, version: health["protocol_version"] as? Int, stdout_base64: nil, public_key: nil, error: nil)
+        let ok = health["ok"] as? Bool == true
+        result = Output(ok: ok, version: health["protocol_version"] as? Int, stdout_base64: nil, public_key: nil, error: ok ? nil : (health["error"] as? String ?? "Native service health check failed"))
         semaphore.signal()
     }
 case "public-key":
     proxy.publicKey { key, error in
-        result = error.map { Output(ok: false, version: nil, stdout_base64: nil, public_key: nil, error: $0.localizedDescription) }
-            ?? Output(ok: true, version: nil, stdout_base64: nil, public_key: key as String?, error: nil)
+        result = keyOutput(key, error: error)
+        semaphore.signal()
+    }
+case "audit-status":
+    proxy.auditStatus { data, error in
+        result = dataOutput(data, error: error)
+        semaphore.signal()
+    }
+case "audit-public-key":
+    proxy.auditPublicKey { key, error in
+        result = keyOutput(key, error: error)
+        semaphore.signal()
+    }
+case "audit-checkpoint":
+    proxy.createAuditCheckpoint { data, error in
+        result = dataOutput(data, error: error)
         semaphore.signal()
     }
 default:
