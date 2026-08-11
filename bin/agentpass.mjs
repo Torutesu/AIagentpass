@@ -18,7 +18,7 @@ import { applyControlBundle, controlKeyFingerprint, fetchControlBundle, generate
 const [, , command, ...args] = process.argv;
 
 function usage() {
-  console.log(`AgentPass 0.10.0
+  console.log(`AgentPass 0.11.0
 
 Commands:
   init              create a secure local policy
@@ -33,6 +33,8 @@ Commands:
   native public-key print the native Git signing public key
   native audit-key  print the native audit checkpoint public key
   native checkpoint create a protected native audit checkpoint
+  native session-approval-key  create/print the human-presence approval key
+  native revoke-sessions       immediately invalidate protected native sessions
   agent list        list enrolled agent identities
   agent add NAME    enroll a new agent identity
   agent set-default ID
@@ -143,7 +145,7 @@ function isSessionValid(session, supplied, agentId) {
   return Boolean(session && supplied && session.agent_id === agentId && crypto.createHash("sha256").update(supplied).digest("hex") === session.token_hash && Date.now() < Date.parse(session.expires_at) && session.generation === loadState().generation);
 }
 
-function sessionStart() {
+async function sessionStart() {
   const config = loadConfig();
   const agentFlag = args.indexOf("--agent");
   const agentId = agentFlag >= 0 ? args[agentFlag + 1] : (process.env.AGENTPASS_AGENT_ID ?? config.default_agent_id);
@@ -151,6 +153,14 @@ function sessionStart() {
   const ttlArgument = args.slice(1).find((value, index, values) => value !== "--agent" && values[index - 1] !== "--agent");
   const ttl = Math.max(60, Math.min(Number(ttlArgument ?? config.session?.ttl_seconds ?? 3600), 86400));
   if (!Number.isFinite(ttl)) throw new Error("Session TTL must be a number of seconds");
+  if (config.native_broker?.enabled) {
+    const result = await brokerRequest({ operation: "native.session.start", agent_id: agentId, ttl_seconds: ttl }, { native: config.native_broker, timeoutMs: 120_000 });
+    const issued = JSON.parse(Buffer.from(result.stdout_base64, "base64").toString("utf8"));
+    if (typeof issued.token !== "string" || typeof issued.expires_at !== "string" || issued.agent_id !== agentId) throw new Error("Native service returned an invalid session");
+    console.log(issued.token);
+    console.error(`Session expires at ${issued.expires_at}`);
+    return;
+  }
   const token = crypto.randomBytes(32).toString("base64url");
   const state = loadState();
   const expiresAt = new Date(Date.now() + ttl * 1000).toISOString();
@@ -186,7 +196,8 @@ function status() {
 }
 
 function revoke() {
-  loadConfig();
+  const config = loadConfig();
+  if (config.native_broker?.enabled) throw new Error("User-state revoke does not control the native service; use `agentpass native revoke-sessions`");
   const state = loadState();
   saveState({ ...state, revoked: true, generation: (state.generation ?? 0) + 1, revoked_at: new Date().toISOString() });
   audit({ operation: "control.revoke", decision: "allow", generation: state.generation + 1 }, defaultConfigDir);
@@ -194,7 +205,8 @@ function revoke() {
 }
 
 function restore() {
-  loadConfig();
+  const config = loadConfig();
+  if (config.native_broker?.enabled) throw new Error("User-state restore does not control the native service; start a new protected native session instead");
   if (args[0] !== "--confirm" || args[1] !== "RESTORE") throw new Error("Restoring requires: agentpass restore --confirm RESTORE");
   const state = loadState();
   saveState({ ...state, revoked: false, generation: (state.generation ?? 0) + 1, restored_at: new Date().toISOString() });
@@ -273,21 +285,29 @@ function installHook() {
   console.log(`Installed ${hook}`);
 }
 
-function pushCheck() {
+async function pushCheck() {
   const config = loadConfig();
   const state = loadState();
   const remote = args[0] ?? "origin";
   const remoteUrl = args[1] ?? git(["remote", "get-url", remote], true);
   const lines = fs.readFileSync(0, "utf8").trim().split("\n").filter(Boolean);
   const refs = lines.length ? lines : [`local 0000000 refs/heads/${git(["branch", "--show-current"], true)} 0000000`];
+  const identity = selectedAgent(config);
+  let sessionValid;
+  if (config.native_broker?.enabled) {
+    const response = await brokerRequest({ operation: "native.session.validate", agent_id: identity.id, session: process.env.AGENTPASS_SESSION ?? null }, { native: config.native_broker });
+    const status = JSON.parse(Buffer.from(response.stdout_base64, "base64").toString("utf8"));
+    sessionValid = status.valid === true;
+  } else {
+    sessionValid = isSessionValid(loadSession(process.env.AGENTPASS_SESSION), process.env.AGENTPASS_SESSION, identity.id);
+  }
   const results = refs.map((line) => {
     const [, , remoteRef] = line.split(/\s+/);
     const isTag = remoteRef?.startsWith("refs/tags/");
     const operation = isTag ? "git.tag.push" : "git.push";
     const branch = (remoteRef ?? `refs/heads/${git(["branch", "--show-current"], true)}`).replace(/^refs\/(heads|tags)\//, "");
-    const identity = selectedAgent(config);
     const agentId = identity.id;
-    const requestContext = { policy: { ...config, session: { ...config.session, valid: isSessionValid(loadSession(process.env.AGENTPASS_SESSION), process.env.AGENTPASS_SESSION, agentId) } }, cwd: git(["rev-parse", "--show-toplevel"]), branch, remote: remoteUrl, operation, revoked: state.revoked };
+    const requestContext = { policy: { ...config, session: { ...config.session, valid: sessionValid } }, cwd: git(["rev-parse", "--show-toplevel"]), branch, remote: remoteUrl, operation, revoked: state.revoked };
     const result = evaluateAgentRequest(requestContext, identity);
     audit({ operation, decision: result.allowed ? "allow" : "deny", reason: result.reason, branch, remote: remoteUrl }, defaultConfigDir);
     return { operation, branch, ...result };
@@ -344,6 +364,12 @@ async function nativeManage() {
     console.log(result.public_key);
   } else if (action === "checkpoint") {
     const result = await brokerRequest({ operation: "native.audit.checkpoint" }, { native: config.native_broker, timeoutMs: 30_000 });
+    console.log(JSON.stringify(JSON.parse(Buffer.from(result.stdout_base64, "base64").toString("utf8")), null, 2));
+  } else if (action === "session-approval-key") {
+    const result = await brokerRequest({ operation: "native.session.approval-public-key" }, { native: config.native_broker, timeoutMs: 30_000 });
+    console.log(result.public_key);
+  } else if (action === "revoke-sessions") {
+    const result = await brokerRequest({ operation: "native.session.revoke" }, { native: config.native_broker });
     console.log(JSON.stringify(JSON.parse(Buffer.from(result.stdout_base64, "base64").toString("utf8")), null, 2));
   } else {
     throw new Error("Unknown native command");
@@ -591,8 +617,8 @@ try {
   else if (command === "control") await controlManage();
   else if (command === "setup-macos") setupMacos();
   else if (command === "install-hook") installHook();
-  else if (command === "push-check") pushCheck();
-  else if (command === "session" && args[0] === "start") sessionStart();
+  else if (command === "push-check") await pushCheck();
+  else if (command === "session" && args[0] === "start") await sessionStart();
   else if (command === "revoke") revoke();
   else if (command === "restore") restore();
   else if (command === "git-sign") await gitSign();

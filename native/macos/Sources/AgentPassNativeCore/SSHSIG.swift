@@ -65,6 +65,23 @@ public enum SSHSIG {
         return "\(algorithm) \(blob.base64EncodedString())"
     }
 
+    public static func p256PublicKey(fromAuthorizedKey value: String) throws -> Data {
+        let fields = value.split(whereSeparator: \.isWhitespace)
+        guard fields.count >= 2, fields[0] == Substring(algorithm), let blob = Data(base64Encoded: String(fields[1])) else {
+            throw AgentPassNativeError.invalidKey("P-256 authorized key is invalid")
+        }
+        var cursor = SSHWireCursor(data: blob)
+        guard try cursor.readString() == Data(algorithm.utf8),
+              try cursor.readString() == Data(curve.utf8) else {
+            throw AgentPassNativeError.invalidKey("P-256 authorized key algorithm is invalid")
+        }
+        let publicKey = try cursor.readString()
+        guard cursor.isAtEnd, publicKey.count == 65, publicKey.first == 0x04 else {
+            throw AgentPassNativeError.invalidKey("P-256 authorized key encoding is invalid")
+        }
+        return publicKey
+    }
+
     private static func mpint<T: DataProtocol>(_ input: T) -> Data {
         var bytes = Array(input)
         while bytes.first == 0 && bytes.count > 1 { bytes.removeFirst() }
@@ -81,6 +98,21 @@ public enum SSHSIG {
             return String(encoded[start..<end])
         }
         return (["-----BEGIN SSH SIGNATURE-----"] + lines + ["-----END SSH SIGNATURE-----", ""]).joined(separator: "\n")
+    }
+}
+
+private struct SSHWireCursor {
+    let data: Data
+    var offset = 0
+    var isAtEnd: Bool { offset == data.count }
+
+    mutating func readString() throws -> Data {
+        guard offset + 4 <= data.count else { throw AgentPassNativeError.invalidKey("SSH key field is truncated") }
+        let length = data[offset..<(offset + 4)].reduce(0) { ($0 << 8) | Int($1) }
+        offset += 4
+        guard length >= 0, offset + length <= data.count else { throw AgentPassNativeError.invalidKey("SSH key field length is invalid") }
+        defer { offset += length }
+        return data.subdata(in: offset..<(offset + length))
     }
 }
 

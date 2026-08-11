@@ -12,7 +12,7 @@ let package = Package(
     targets: [
         .target(
             name: "AgentPassNativeCore",
-            linkerSettings: [.linkedFramework("Security")]
+            linkerSettings: [.linkedFramework("Security"), .linkedFramework("LocalAuthentication")]
         ),
         .executableTarget(
             name: "AgentPassNativeService",

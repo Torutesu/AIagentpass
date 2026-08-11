@@ -69,6 +69,7 @@ private struct ServiceConfiguration: Decodable {
     let auditLogPath: String
     let auditCheckpointPath: String
     let auditKeyTag: String
+    let sessionApprovalPublicKey: String?
     let clientCodeSigningRequirement: String
     let allowedClientUID: UInt32
 
@@ -80,6 +81,7 @@ private struct ServiceConfiguration: Decodable {
         case auditLogPath = "audit_log_path"
         case auditCheckpointPath = "audit_checkpoint_path"
         case auditKeyTag = "audit_key_tag"
+        case sessionApprovalPublicKey = "session_approval_public_key"
         case clientCodeSigningRequirement = "client_code_signing_requirement"
         case allowedClientUID = "allowed_client_uid"
     }
@@ -100,22 +102,27 @@ private final class ServiceEndpoint: NSObject, AgentPassNativeServiceProtocol {
     private let auditLog: NativeAuditLog
     private let auditCheckpoints: NativeAuditCheckpoints
     private let auditSigner: SecureEnclaveKeyStore
+    private let sessionManager: NativeSessionManager?
+    private let authorizationLock = NSLock()
 
-    init(keyStore: SecureEnclaveKeyStore, authorizer: NativeRequestAuthorizer, auditLog: NativeAuditLog, auditCheckpoints: NativeAuditCheckpoints, auditSigner: SecureEnclaveKeyStore) {
+    init(keyStore: SecureEnclaveKeyStore, authorizer: NativeRequestAuthorizer, auditLog: NativeAuditLog, auditCheckpoints: NativeAuditCheckpoints, auditSigner: SecureEnclaveKeyStore, sessionManager: NativeSessionManager?) {
         self.keyStore = keyStore
         self.authorizer = authorizer
         self.auditLog = auditLog
         self.auditCheckpoints = auditCheckpoints
         self.auditSigner = auditSigner
+        self.sessionManager = sessionManager
     }
 
     func health(withReply reply: @escaping (NSDictionary) -> Void) {
         do {
             let audit = try auditLog.verify()
             let checkpoints = try auditCheckpoints.verify()
-            reply(["ok": true, "protocol_version": 2, "key_backend": "secure-enclave", "audit_entries": audit.entries, "audit_checkpoints": checkpoints.count])
+            let session = sessionManager?.status()
+            let approvalFingerprint: Any = sessionManager?.approvalKeyFingerprint ?? NSNull()
+            reply(["ok": true, "protocol_version": 3, "key_backend": "secure-enclave", "audit_entries": audit.entries, "audit_checkpoints": checkpoints.count, "session_required": session?.required ?? false, "active_sessions": session?.active ?? 0, "session_generation": session?.generation ?? 0, "session_approval_key_fingerprint": approvalFingerprint])
         } catch {
-            reply(["ok": false, "protocol_version": 2, "error": error.localizedDescription])
+            reply(["ok": false, "protocol_version": 3, "error": error.localizedDescription])
         }
     }
 
@@ -125,6 +132,8 @@ private final class ServiceEndpoint: NSObject, AgentPassNativeServiceProtocol {
     }
 
     func sign(request: NSData, withReply reply: @escaping (NSString?, NSError?) -> Void) {
+        authorizationLock.lock()
+        defer { authorizationLock.unlock() }
         do { _ = try auditCheckpoints.verify() }
         catch { reply(nil, error as NSError); return }
         let authorized: AuthorizedSignRequest
@@ -154,7 +163,9 @@ private final class ServiceEndpoint: NSObject, AgentPassNativeServiceProtocol {
             let checkpoints = try auditCheckpoints.verify()
             let latest: Any = checkpoints.last?.checkpointHash ?? NSNull()
             let fingerprint = NativeAuditCheckpoints.fingerprint(auditSigner.publicKeyX963)
-            let data = try JSONSerialization.data(withJSONObject: ["valid": true, "entries": audit.entries, "head_hash": audit.headHash, "checkpoints": checkpoints.count, "latest_checkpoint": latest, "audit_key_fingerprint": fingerprint], options: [.sortedKeys])
+            let session = sessionManager?.status()
+            let approvalFingerprint: Any = sessionManager?.approvalKeyFingerprint ?? NSNull()
+            let data = try JSONSerialization.data(withJSONObject: ["valid": true, "entries": audit.entries, "head_hash": audit.headHash, "checkpoints": checkpoints.count, "latest_checkpoint": latest, "audit_key_fingerprint": fingerprint, "session_required": session?.required ?? false, "active_sessions": session?.active ?? 0, "session_generation": session?.generation ?? 0, "session_approval_key_fingerprint": approvalFingerprint], options: [.sortedKeys])
             reply(data as NSData, nil)
         } catch { reply(nil, error as NSError) }
     }
@@ -177,6 +188,76 @@ private final class ServiceEndpoint: NSObject, AgentPassNativeServiceProtocol {
             catch let auditError { reply(nil, auditError as NSError); return }
             reply(nil, checkpointError as NSError)
         }
+    }
+
+    func beginSession(agentID: NSString, ttlSeconds: Int, withReply reply: @escaping (NSData?, NSError?) -> Void) {
+        guard let sessionManager else {
+            reply(nil, AgentPassNativeError.invalidConfiguration("Protected native sessions are not configured") as NSError)
+            return
+        }
+        do { _ = try auditCheckpoints.verify() }
+        catch { reply(nil, error as NSError); return }
+        do { reply(try sessionManager.beginSession(agentID: agentID as String, requestedTTLSeconds: ttlSeconds) as NSData, nil) }
+        catch let sessionError {
+            do { try auditLog.append(NativeAuditEvent(operation: "session.start", decision: "deny", reason: sessionError.localizedDescription, agentID: agentID as String)) }
+            catch let auditError { reply(nil, auditError as NSError); return }
+            reply(nil, sessionError as NSError)
+        }
+    }
+
+    func completeSession(challenge: NSData, signature: NSData, withReply reply: @escaping (NSData?, NSError?) -> Void) {
+        authorizationLock.lock()
+        defer { authorizationLock.unlock() }
+        guard let sessionManager else {
+            reply(nil, AgentPassNativeError.invalidConfiguration("Protected native sessions are not configured") as NSError)
+            return
+        }
+        do { _ = try auditCheckpoints.verify() }
+        catch { reply(nil, error as NSError); return }
+        do {
+            let issued = try sessionManager.completeSession(challengeData: challenge as Data, signature: signature as Data)
+            do { try auditLog.append(NativeAuditEvent(operation: "session.start", decision: "allow", agentID: issued.agentID, expiresAt: issued.expiresAt)) }
+            catch let auditError {
+                sessionManager.discardSession(token: issued.token)
+                reply(nil, auditError as NSError)
+                return
+            }
+            let encoder = JSONEncoder()
+            encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
+            reply(try encoder.encode(issued) as NSData, nil)
+        } catch let sessionError {
+            do { try auditLog.append(NativeAuditEvent(operation: "session.start", decision: "deny", reason: sessionError.localizedDescription)) }
+            catch let auditError { reply(nil, auditError as NSError); return }
+            reply(nil, sessionError as NSError)
+        }
+    }
+
+    func revokeSessions(withReply reply: @escaping (NSData?, NSError?) -> Void) {
+        authorizationLock.lock()
+        defer { authorizationLock.unlock() }
+        guard let sessionManager else {
+            reply(nil, AgentPassNativeError.invalidConfiguration("Protected native sessions are not configured") as NSError)
+            return
+        }
+        do { _ = try auditCheckpoints.verify() }
+        catch { reply(nil, error as NSError); return }
+        let revoked = sessionManager.revokeAll()
+        do {
+            try auditLog.append(NativeAuditEvent(operation: "session.revoke-all", decision: "allow", reason: "generation=\(revoked.generation);revoked=\(revoked.revokedSessions)"))
+            let encoder = JSONEncoder()
+            encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
+            reply(try encoder.encode(revoked) as NSData, nil)
+        } catch { reply(nil, error as NSError) }
+    }
+
+    func validateSession(token: NSString?, agentID: NSString, withReply reply: @escaping (Bool, NSError?) -> Void) {
+        do { _ = try auditCheckpoints.verify() }
+        catch { reply(false, error as NSError); return }
+        guard let sessionManager else { reply(true, nil); return }
+        do {
+            try sessionManager.validateSession(token: token as String?, agentID: agentID as String, nowMilliseconds: Int64(Date().timeIntervalSince1970 * 1000))
+            reply(true, nil)
+        } catch { reply(false, nil) }
     }
 }
 
@@ -206,6 +287,8 @@ do {
     let configuration = try ServiceConfiguration.load(path: CommandLine.arguments[2])
     try validateProtectedOutputPath(path: configuration.auditLogPath, label: "Native audit log")
     try validateProtectedOutputPath(path: configuration.auditCheckpointPath, label: "Native audit checkpoint log")
+    let policyData = try loadProtectedFile(path: configuration.policyPath, label: "Native policy")
+    let sessionManager = try configuration.sessionApprovalPublicKey.map { try NativeSessionManager(policyData: policyData, approvalPublicKey: $0) }
     let keyStore = try SecureEnclaveKeyStore(
         applicationTag: configuration.keyTag,
         accessGroup: configuration.keychainAccessGroup
@@ -215,9 +298,9 @@ do {
     let auditCheckpoints = try NativeAuditCheckpoints(path: configuration.auditCheckpointPath, auditLog: auditLog, signer: auditSigner)
     _ = try auditLog.verify()
     _ = try auditCheckpoints.verify()
-    let authorizer = try NativeRequestAuthorizer(policyData: loadProtectedFile(path: configuration.policyPath, label: "Native policy"))
+    let authorizer = try NativeRequestAuthorizer(policyData: policyData, sessionValidator: sessionManager)
     let listener = NSXPCListener(machServiceName: configuration.machServiceName)
-    let delegate = ListenerDelegate(configuration: configuration, endpoint: ServiceEndpoint(keyStore: keyStore, authorizer: authorizer, auditLog: auditLog, auditCheckpoints: auditCheckpoints, auditSigner: auditSigner))
+    let delegate = ListenerDelegate(configuration: configuration, endpoint: ServiceEndpoint(keyStore: keyStore, authorizer: authorizer, auditLog: auditLog, auditCheckpoints: auditCheckpoints, auditSigner: auditSigner, sessionManager: sessionManager))
     listener.delegate = delegate
     listener.resume()
     RunLoop.current.run()

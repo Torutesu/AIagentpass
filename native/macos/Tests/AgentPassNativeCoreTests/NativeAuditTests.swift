@@ -104,3 +104,13 @@ private struct AuditSoftwareSigner: P256MessageSigner {
     #expect(throws: AgentPassNativeError.self) { try log.verify() }
     #expect(throws: AgentPassNativeError.self) { try log.append(NativeAuditEvent(operation: "two", decision: "allow")) }
 }
+
+@Test func nativeAuditValidatesSessionExpiryMetadata() throws {
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+    try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: root) }
+    let log = try NativeAuditLog(path: root.appendingPathComponent("audit.jsonl").path)
+    try log.append(NativeAuditEvent(operation: "session.start", decision: "allow", expiresAt: "2027-01-15T08:00:00.000Z"))
+    #expect(try log.verify().entries == 1)
+    #expect(throws: AgentPassNativeError.self) { try log.append(NativeAuditEvent(operation: "session.start", decision: "allow", expiresAt: "not-a-date")) }
+}

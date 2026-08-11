@@ -1,6 +1,6 @@
 # ADR-001: Native macOS security boundary
 
-Status: accepted; native core and protected audit implemented in 0.10, signed distribution pending
+Status: accepted; native core, protected audit, and protected sessions implemented in 0.11; signed distribution pending
 
 ## Decision
 
@@ -32,7 +32,7 @@ Apple's documentation also recommends a factored privileged service with a narro
 
 Without these values, the repository can implement and test the portable broker, protocol, policy engine, and SSHSIG fixtures, but cannot produce the final code-signed keychain isolation boundary.
 
-AgentPass 0.10 implements that testable source layer under `native/macos`: Secure Enclave signing and audit keys, SSHSIG generation, XPC client gating, service-side Agent/policy/Git validation, durable protected audit, and signed audit checkpoints. See [NATIVE_BROKER.md](NATIVE_BROKER.md) for the remaining packaging, session, control, and remote-retention work.
+AgentPass 0.11 implements that testable source layer under `native/macos`: Secure Enclave signing, audit, and human-presence approval keys; SSHSIG generation; XPC client gating; service-side Agent/session/policy/Git validation; durable protected audit; and signed audit checkpoints. See [NATIVE_BROKER.md](NATIVE_BROKER.md) for the remaining packaging, control, and remote-retention work.
 
 ## Primary references
 

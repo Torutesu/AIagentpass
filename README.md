@@ -96,8 +96,9 @@ agentpass status
 agentpass audit --verify
 agentpass audit checkpoint > checkpoint.json
 agentpass audit public-key > agentpass-audit.pub
-agentpass revoke    # immediately deny signing
+agentpass revoke    # local broker mode
 agentpass restore --confirm RESTORE
+agentpass native revoke-sessions  # native mode: invalidate active authority
 ```
 
 Copy `checkpoint.json` to an append-only or remote system. The public key verifies who signed a checkpoint; retaining a checkpoint record or its `checkpoint_hash` outside the host is what detects later local history replacement.
@@ -155,14 +156,14 @@ AgentPass protects against copying the private key out of the device and limits 
 
 ## Native macOS boundary
 
-Version 0.10 includes a Swift/XPC native broker foundation. It creates separate non-exportable P-256 signing and audit-checkpoint keys in Secure Enclave, emits OpenSSH-compatible SSHSIG signatures internally, authenticates the signed XPC client, and repeats Agent identity, replay, scope, Git context, tree, and parent validation against a root-owned policy inside the service. Every native signing outcome is appended to a root-owned, durable SHA-256 chain; signed checkpoints make later truncation or rewriting detectable once retained outside the host.
+Version 0.11 includes a Swift/XPC native broker foundation. It creates separate non-exportable P-256 signing, audit-checkpoint, and human-presence approval keys in Secure Enclave, emits OpenSSH-compatible SSHSIG signatures internally, authenticates the signed XPC client, and repeats Agent identity, session, replay, scope, Git context, tree, and parent validation against a root-owned policy inside the service. Every native signing outcome is appended to a root-owned, durable SHA-256 chain; signed checkpoints make later truncation or rewriting detectable once retained outside the host.
 
 ```sh
 npm run test:native
 swift build -c release --package-path native/macos
 ```
 
-Once a signed service is installed, `agentpass native status`, `native public-key`, `native audit-key`, and `native checkpoint` expose the narrow operational interface. The repository does not ship a Developer ID-signed or notarized app bundle: those artifacts require an Apple Team ID, provisioning, entitlements, and `SMAppService` registration. Native mode also refuses session-required and remote-control policies until those state machines move behind the native boundary. Native P-256 checkpoints are not yet accepted by the existing Ed25519 remote anchor. See [docs/NATIVE_BROKER.md](docs/NATIVE_BROKER.md) for the exact implementation and deployment gap.
+Protected native sessions require human presence only when `agentpass session start` is called; policy-compliant commits remain unattended until the Agent-bound TTL expires. The service retains token hashes only in memory, so restart and `agentpass native revoke-sessions` invalidate them. The repository does not ship a Developer ID-signed or notarized app bundle, native remote control remains fail-closed, and native P-256 checkpoints are not yet accepted by the Ed25519 remote anchor. See [docs/NATIVE_BROKER.md](docs/NATIVE_BROKER.md) for setup and remaining gaps.
 
 ## Current scope and roadmap
 
@@ -184,7 +185,8 @@ Once a signed service is installed, `agentpass native status`, `native public-ke
 - [x] GitHub Actions CI test workflow
 - [x] Swift/XPC broker core with Secure Enclave SSHSIG and service-side policy validation
 - [x] root-owned native hash-chain audit with separate Secure Enclave checkpoint key
-- [ ] signed/notarized native app bundle and protected session/control state
+- [x] human-approved protected native sessions with Agent binding and immediate revocation
+- [ ] signed/notarized native app bundle and protected remote-control state
 - [x] per-agent Ed25519 request identity with replay protection
 - [x] agent enrollment, selection, revocation, and key rotation
 - [x] per-agent operation/repository/branch/remote scopes

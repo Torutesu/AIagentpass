@@ -11,16 +11,18 @@ public struct AuthorizedSignRequest: Sendable {
 
 public final class NativeRequestAuthorizer: @unchecked Sendable {
     private let policy: Policy
+    private let sessionValidator: (any NativeSessionValidating)?
     private var replayCache: [String: Int64] = [:]
     private let lock = NSLock()
 
-    public init(policyData: Data) throws {
+    public init(policyData: Data, sessionValidator: (any NativeSessionValidating)? = nil) throws {
         policy = try JSONDecoder().decode(Policy.self, from: policyData)
+        self.sessionValidator = sessionValidator
         guard policy.version == 4, !policy.agents.isEmpty else {
             throw AgentPassNativeError.invalidConfiguration("Native broker requires a version 4 policy with enrolled agents")
         }
-        guard policy.session.required == false else {
-            throw AgentPassNativeError.invalidConfiguration("Native broker currently requires session.required=false; use a root-owned scoped policy")
+        guard !policy.session.required || sessionValidator != nil else {
+            throw AgentPassNativeError.invalidConfiguration("Native broker requires a protected session validator when session.required=true")
         }
         guard policy.control == nil else {
             throw AgentPassNativeError.invalidConfiguration("Native broker remote-control enforcement is not implemented yet")
@@ -58,6 +60,7 @@ public final class NativeRequestAuthorizer: @unchecked Sendable {
             throw AgentPassNativeError.unauthorizedClient("Agent request signature is invalid")
         }
         try consumeNonce(request.nonce, nowMilliseconds: nowMilliseconds)
+        try sessionValidator?.validateSession(token: request.session, agentID: agent.id, nowMilliseconds: nowMilliseconds)
 
         let payload = try strictBase64(request.payloadBase64, label: "Signing payload")
         guard !payload.isEmpty, payload.count <= 8 * 1024 * 1024 else {
@@ -229,9 +232,10 @@ private struct SignRequest: Decodable {
     let agentID: String
     let timestampMilliseconds: Int64
     let nonce: String
+    let session: String?
     let signature: String
     enum CodingKeys: String, CodingKey {
-        case operation, cwd, nonce, signature
+        case operation, cwd, nonce, session, signature
         case payloadBase64 = "payload_base64"
         case agentID = "agent_id"
         case timestampMilliseconds = "timestamp_ms"

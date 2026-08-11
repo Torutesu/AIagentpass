@@ -41,13 +41,13 @@ private struct AuthorizerFixture {
         ], options: [.sortedKeys, .withoutEscapingSlashes])
     }
 
-    func signedRequest(nonce: String = String(repeating: "n", count: 32), payloadOverride: Data? = nil, timestamp: Int64 = 1_800_000_000_000) throws -> Data {
+    func signedRequest(nonce: String = String(repeating: "n", count: 32), payloadOverride: Data? = nil, timestamp: Int64 = 1_800_000_000_000, session: String? = nil) throws -> Data {
         var request: [String: Any] = [
             "operation": "git.commit.sign",
             "cwd": repository.path,
             "sign_args": ["-Y", "sign", "-n", "git", "-f", "/tmp/untrusted"],
             "payload_base64": (payloadOverride ?? payload).base64EncodedString(),
-            "session": NSNull(),
+            "session": session ?? NSNull(),
             "agent_id": "11111111-1111-4111-8111-111111111111",
             "timestamp_ms": timestamp,
             "nonce": nonce
@@ -117,5 +117,25 @@ private struct AuthorizerFixture {
     object["control"] = ["required": true]
     #expect(throws: AgentPassNativeError.self) {
         try NativeRequestAuthorizer(policyData: JSONSerialization.data(withJSONObject: object))
+    }
+}
+
+@Test func nativeAuthorizerEnforcesProtectedAgentBoundSession() throws {
+    let fixture = try AuthorizerFixture()
+    defer { try? FileManager.default.removeItem(at: fixture.root) }
+    var object = try #require(JSONSerialization.jsonObject(with: fixture.policy) as? [String: Any])
+    object["session"] = ["required": true, "ttl_seconds": 300]
+    let policy = try JSONSerialization.data(withJSONObject: object, options: [.sortedKeys])
+    let approvalKey = P256.Signing.PrivateKey()
+    let approvalPublicKey = try SSHSIG.authorizedKey(publicKeyX963: approvalKey.publicKey.x963Representation)
+    let sessions = try NativeSessionManager(policyData: policy, approvalPublicKey: approvalPublicKey)
+    let now: Int64 = 1_800_000_000_000
+    let challenge = try sessions.beginSession(agentID: "11111111-1111-4111-8111-111111111111", requestedTTLSeconds: 300, nowMilliseconds: now)
+    let approval = try approvalKey.signature(for: challenge).rawRepresentation
+    let issued = try sessions.completeSession(challengeData: challenge, signature: approval, nowMilliseconds: now)
+    let authorizer = try NativeRequestAuthorizer(policyData: policy, sessionValidator: sessions)
+    _ = try authorizer.authorize(requestData: fixture.signedRequest(session: issued.token), nowMilliseconds: now)
+    #expect(throws: AgentPassNativeError.self) {
+        try authorizer.authorize(requestData: fixture.signedRequest(nonce: String(repeating: "x", count: 32), session: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"), nowMilliseconds: now)
     }
 }

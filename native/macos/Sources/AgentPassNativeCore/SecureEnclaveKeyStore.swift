@@ -1,20 +1,21 @@
 import Foundation
+import LocalAuthentication
 import Security
 
 public final class SecureEnclaveKeyStore: P256MessageSigner, @unchecked Sendable {
     private let privateKey: SecKey
     public let publicKeyX963: Data
 
-    public init(applicationTag: String, accessGroup: String? = nil, createIfMissing: Bool = true) throws {
+    public init(applicationTag: String, accessGroup: String? = nil, createIfMissing: Bool = true, requiresUserPresence: Bool = false, operationPrompt: String? = nil) throws {
         guard !applicationTag.isEmpty else {
             throw AgentPassNativeError.invalidConfiguration("Secure Enclave key tag must not be empty")
         }
         let tag = Data(applicationTag.utf8)
-        if let existing = try Self.load(tag: tag, accessGroup: accessGroup) {
+        if let existing = try Self.load(tag: tag, accessGroup: accessGroup, operationPrompt: operationPrompt) {
             privateKey = existing
         } else {
             guard createIfMissing else { throw AgentPassNativeError.invalidKey("Secure Enclave key does not exist") }
-            privateKey = try Self.create(tag: tag, accessGroup: accessGroup)
+            privateKey = try Self.create(tag: tag, accessGroup: accessGroup, requiresUserPresence: requiresUserPresence)
         }
         guard let publicKey = SecKeyCopyPublicKey(privateKey),
               let representation = SecKeyCopyExternalRepresentation(publicKey, nil) as Data? else {
@@ -34,7 +35,7 @@ public final class SecureEnclaveKeyStore: P256MessageSigner, @unchecked Sendable
         return try Self.rawSignature(fromDER: der)
     }
 
-    private static func load(tag: Data, accessGroup: String?) throws -> SecKey? {
+    private static func load(tag: Data, accessGroup: String?, operationPrompt: String?) throws -> SecKey? {
         var query: [CFString: Any] = [
             kSecClass: kSecClassKey,
             kSecAttrApplicationTag: tag,
@@ -43,6 +44,11 @@ public final class SecureEnclaveKeyStore: P256MessageSigner, @unchecked Sendable
             kSecMatchLimit: kSecMatchLimitOne
         ]
         if let accessGroup { query[kSecAttrAccessGroup] = accessGroup }
+        if let operationPrompt {
+            let context = LAContext()
+            context.localizedReason = operationPrompt
+            query[kSecUseAuthenticationContext] = context
+        }
         var item: CFTypeRef?
         let status = SecItemCopyMatching(query as CFDictionary, &item)
         if status == errSecItemNotFound { return nil }
@@ -52,12 +58,12 @@ public final class SecureEnclaveKeyStore: P256MessageSigner, @unchecked Sendable
         return key
     }
 
-    private static func create(tag: Data, accessGroup: String?) throws -> SecKey {
+    private static func create(tag: Data, accessGroup: String?, requiresUserPresence: Bool) throws -> SecKey {
         var accessError: Unmanaged<CFError>?
         guard let access = SecAccessControlCreateWithFlags(
             nil,
-            kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly,
-            .privateKeyUsage,
+            requiresUserPresence ? kSecAttrAccessibleWhenUnlockedThisDeviceOnly : kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly,
+            requiresUserPresence ? [.privateKeyUsage, .userPresence] : .privateKeyUsage,
             &accessError
         ) else {
             throw accessError?.takeRetainedValue() as Error? ?? AgentPassNativeError.invalidKey("Unable to create key access control")

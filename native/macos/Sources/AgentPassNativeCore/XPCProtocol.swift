@@ -7,4 +7,8 @@ import Foundation
     func auditStatus(withReply reply: @escaping (NSData?, NSError?) -> Void)
     func auditPublicKey(withReply reply: @escaping (NSString?, NSError?) -> Void)
     func createAuditCheckpoint(withReply reply: @escaping (NSData?, NSError?) -> Void)
+    func beginSession(agentID: NSString, ttlSeconds: Int, withReply reply: @escaping (NSData?, NSError?) -> Void)
+    func completeSession(challenge: NSData, signature: NSData, withReply reply: @escaping (NSData?, NSError?) -> Void)
+    func revokeSessions(withReply reply: @escaping (NSData?, NSError?) -> Void)
+    func validateSession(token: NSString?, agentID: NSString, withReply reply: @escaping (Bool, NSError?) -> Void)
 }

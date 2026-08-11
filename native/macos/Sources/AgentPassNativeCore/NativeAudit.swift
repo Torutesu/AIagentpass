@@ -11,8 +11,9 @@ public struct NativeAuditEvent: Sendable {
     public let branch: String?
     public let remote: String?
     public let payloadSHA256: String?
+    public let expiresAt: String?
 
-    public init(operation: String, decision: String, reason: String? = nil, agentID: String? = nil, repository: String? = nil, branch: String? = nil, remote: String? = nil, payloadSHA256: String? = nil) {
+    public init(operation: String, decision: String, reason: String? = nil, agentID: String? = nil, repository: String? = nil, branch: String? = nil, remote: String? = nil, payloadSHA256: String? = nil, expiresAt: String? = nil) {
         self.operation = operation
         self.decision = decision
         self.reason = reason
@@ -21,6 +22,7 @@ public struct NativeAuditEvent: Sendable {
         self.branch = branch
         self.remote = remote
         self.payloadSHA256 = payloadSHA256
+        self.expiresAt = expiresAt
     }
 }
 
@@ -71,6 +73,10 @@ public final class NativeAuditLog: @unchecked Sendable {
             guard value.range(of: "^[0-9a-f]{64}$", options: .regularExpression) != nil else { throw AgentPassNativeError.invalidConfiguration("Native audit payload hash is invalid") }
             record["payload_sha256"] = value
         }
+        if let value = event.expiresAt {
+            guard value.utf8.count <= 64, isAuditTimestamp(value) else { throw AgentPassNativeError.invalidConfiguration("Native audit expiry timestamp is invalid") }
+            record["expires_at"] = value
+        }
         record["hash"] = Self.hash(try Self.canonical(record))
         try durableAppend(path: file, data: try Self.canonical(record) + Data("\n".utf8))
         return NativeAuditStatus(valid: true, entries: status.entries + 1, headHash: record["hash"] as! String)
@@ -100,6 +106,7 @@ public final class NativeAuditLog: @unchecked Sendable {
                   Self.validOptionalString(record, key: "branch", bytes: 512),
                   Self.validOptionalString(record, key: "remote", bytes: 4096),
                   Self.validOptionalHash(record, key: "payload_sha256"),
+                  Self.validOptionalTimestamp(record, key: "expires_at"),
                   expected == Self.hash(try Self.canonical(record)) else {
                 throw AgentPassNativeError.invalidSignature("Native audit chain is invalid at entry \(entries + 1)")
             }
@@ -139,6 +146,12 @@ public final class NativeAuditLog: @unchecked Sendable {
         guard let value = record[key] else { return true }
         guard let string = value as? String else { return false }
         return string.range(of: "^[0-9a-f]{64}$", options: .regularExpression) != nil
+    }
+
+    private static func validOptionalTimestamp(_ record: [String: Any], key: String) -> Bool {
+        guard let value = record[key] else { return true }
+        guard let string = value as? String, string.utf8.count <= 64 else { return false }
+        return isAuditTimestamp(string)
     }
 
 }
