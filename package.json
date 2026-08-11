@@ -1,19 +1,38 @@
 {
   "name": "agentpass",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "description": "Policy-controlled signing broker for coding agents",
   "type": "module",
+  "files": [
+    "bin",
+    "lib",
+    "docs",
+    "README.md",
+    "SECURITY.md",
+    "THREAT_MODEL.md",
+    "LICENSE"
+  ],
   "bin": {
     "agentpass": "./bin/agentpass.mjs",
+    "agentpassd": "./bin/agentpassd.mjs",
     "agentpass-git-sign": "./bin/agentpass-git-sign.mjs",
     "agentpass-pre-push": "./bin/agentpass-pre-push.mjs"
   },
   "scripts": {
     "test": "node --test",
-    "lint": "node --check bin/*.mjs && node --check lib/*.mjs"
+    "lint": "node --check bin/*.mjs && node --check lib/*.mjs",
+    "prepack": "npm test && npm run lint"
   },
   "engines": {
     "node": ">=20"
   },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Torutesu/Agentpass.git"
+  },
+  "bugs": {
+    "url": "https://github.com/Torutesu/Agentpass/issues"
+  },
+  "homepage": "https://github.com/Torutesu/Agentpass#readme",
   "license": "MIT"
 }

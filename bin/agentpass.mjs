@@ -3,28 +3,36 @@ import fs from "node:fs";
 import crypto from "node:crypto";
 import os from "node:os";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
 import { audit, verifyAudit } from "../lib/audit.mjs";
-import { auditPath, defaultConfigDir, loadConfig, loadSession, loadState, saveConfig, saveSession, saveState } from "../lib/config.mjs";
+import { brokerRequest } from "../lib/broker-client.mjs";
+import { auditPath, defaultConfigDir, loadConfig, loadSession, loadState, saveConfig, saveSession, saveState, socketPath } from "../lib/config.mjs";
+import { createAgentIdentity, signRequest } from "../lib/identity.mjs";
+import { readGitSigningInvocation, writeGitSignature } from "../lib/git-signing.mjs";
 import { evaluateRequest, evaluateSignRequest } from "../lib/policy.mjs";
 
 const [, , command, ...args] = process.argv;
 
 function usage() {
-  console.log(`AgentPass 0.4.0
+  console.log(`AgentPass 0.5.0
 
 Commands:
   init              create a secure local policy
+  migrate           upgrade an older policy to signed-agent format
   status            show policy and revocation status
   check             evaluate the current repository
   doctor            check local prerequisites
+  broker ping       verify that the signing broker is running
+  broker install    install and start the macOS LaunchAgent
+  broker stop       stop the macOS LaunchAgent
   setup-macos       show Secure Enclave setup (use --execute to run)
   install-hook      install a policy-enforcing pre-push hook
   push-check        evaluate a pre-push request
   session start     issue a short-lived agent session token
   revoke            immediately deny all operations
   restore           re-enable operations after revocation
-  git-sign [args]   policy-check then delegate to ssh-keygen
+  git-sign [args]   send a signing request to the broker
   audit [--verify]  print or verify the tamper-evident audit log
 `);
 }
@@ -43,19 +51,38 @@ function init() {
   if (fs.existsSync(path.join(dir, "config.json"))) throw new Error(`Already initialized: ${dir}`);
   const repository = git(["rev-parse", "--show-toplevel"], true) || process.cwd();
   const origin = git(["remote", "get-url", "origin"], true);
+  const identity = createAgentIdentity(dir, process.env.AGENTPASS_AGENT ?? "coding-agent");
   saveConfig({
-    version: 2,
+    version: 3,
     agent: { name: process.env.AGENTPASS_AGENT ?? "coding-agent" },
+    agents: [{ id: identity.id, name: identity.name, public_key: identity.public_key }],
+    default_agent_id: identity.id,
     operations: ["git.commit.sign"],
     repositories: [path.resolve(repository)],
     branches: { allow: ["feature/*", "fix/*", "chore/*"], deny: ["main", "master", "production"] },
     remotes: { allow: origin ? [origin] : [] },
-    signing: { key: "~/.ssh/id_git_sign", provider: "/usr/lib/ssh-keychain.dylib" },
-    session: { required: false, ttl_seconds: 3600 }
+    signing: { key: path.join(defaultConfigDir, "keys", "id_git_sign"), provider: "/usr/lib/ssh-keychain.dylib" },
+    session: { required: true, ttl_seconds: 3600 }
   }, dir);
   saveState({ revoked: false, generation: 0 }, dir);
   audit({ operation: "config.init", decision: "allow", agent: process.env.AGENTPASS_AGENT ?? "coding-agent" }, dir);
   console.log(`Initialized ${dir}`);
+}
+
+function migrate() {
+  const config = loadConfig();
+  if (config.version >= 3) throw new Error("Configuration is already at version 3");
+  const identity = createAgentIdentity(defaultConfigDir, config.agent?.name ?? "coding-agent");
+  const migrated = {
+    ...config,
+    version: 3,
+    agents: [{ id: identity.id, name: identity.name, public_key: identity.public_key }],
+    default_agent_id: identity.id,
+    session: { ...config.session, required: true }
+  };
+  saveConfig(migrated);
+  audit({ operation: "config.migrate", decision: "allow", from_version: config.version, to_version: 3, agent_id: identity.id }, defaultConfigDir);
+  console.log("Migrated to configuration version 3. Restart the AgentPass broker.");
 }
 
 function context(config) {
@@ -133,7 +160,8 @@ function doctor() {
     { name: "platform", ok: process.platform === "darwin", detail: `${process.platform}/${process.arch}` },
     { name: "git", ok: Boolean(spawnSync("git", ["--version"], { encoding: "utf8" }).stdout), detail: git(["--version"], true) },
     { name: "ssh-keygen", ok: fs.existsSync("/usr/bin/ssh-keygen"), detail: "/usr/bin/ssh-keygen" },
-    { name: "config", ok: fs.existsSync(path.join(defaultConfigDir, "config.json")), detail: defaultConfigDir }
+    { name: "config", ok: fs.existsSync(path.join(defaultConfigDir, "config.json")), detail: defaultConfigDir },
+    { name: "broker-socket", ok: fs.existsSync(socketPath()), detail: socketPath() }
   ];
   console.log(JSON.stringify({ ok: checks.every((check) => check.ok), checks }, null, 2));
   if (!checks.every((check) => check.ok)) process.exitCode = 1;
@@ -143,34 +171,36 @@ function setupMacos() {
   if (process.platform !== "darwin") throw new Error("Secure Enclave setup is currently supported only on macOS");
   const commands = [
     "sc_auth create-ctk-identity -l agentpass-git-sign -k p-256-ne -t none",
-    "mkdir -p ~/.ssh",
-    "cd ~/.ssh && ssh-keygen -w /usr/lib/ssh-keychain.dylib -K -N \"\"",
-    "mv ~/.ssh/id_ecdsa_sk_rk ~/.ssh/id_git_sign",
-    "mv ~/.ssh/id_ecdsa_sk_rk.pub ~/.ssh/id_git_sign.pub"
+    "mkdir -p ~/.agentpass/keys",
+    "cd ~/.agentpass/keys && ssh-keygen -w /usr/lib/ssh-keychain.dylib -K -N \"\"",
+    "mv ~/.agentpass/keys/id_ecdsa_sk_rk ~/.agentpass/keys/id_git_sign",
+    "mv ~/.agentpass/keys/id_ecdsa_sk_rk.pub ~/.agentpass/keys/id_git_sign.pub"
   ];
   if (!args.includes("--execute")) {
     console.log(commands.join("\n"));
     console.log("\nDry run only. Re-run with --execute after reviewing the commands.");
     return;
   }
-  if (!args.includes("--force") && (fs.existsSync(path.join(os.homedir(), ".ssh", "id_git_sign")) || fs.existsSync(path.join(os.homedir(), ".ssh", "id_git_sign.pub")))) {
-    throw new Error("~/.ssh/id_git_sign already exists; use --force only if you intend to replace it");
+  const keyDir = path.join(defaultConfigDir, "keys");
+  if (!args.includes("--force") && (fs.existsSync(path.join(keyDir, "id_git_sign")) || fs.existsSync(path.join(keyDir, "id_git_sign.pub")))) {
+    throw new Error("AgentPass signing key already exists; use --force only if you intend to replace it");
   }
   if (args.includes("--force")) {
     const backup = `${Date.now()}.bak`;
     for (const file of ["id_git_sign", "id_git_sign.pub"]) {
-      const target = path.join(os.homedir(), ".ssh", file);
+      const target = path.join(keyDir, file);
       if (fs.existsSync(target)) fs.renameSync(target, `${target}.${backup}`);
     }
   }
   let result = spawnSync("sc_auth", ["create-ctk-identity", "-l", "agentpass-git-sign", "-k", "p-256-ne", "-t", "none"], { stdio: "inherit" });
   if (result.status !== 0) throw new Error("Setup command failed: sc_auth");
-  const sshDir = path.join(os.homedir(), ".ssh");
-  fs.mkdirSync(sshDir, { recursive: true, mode: 0o700 });
-  result = spawnSync("/usr/bin/ssh-keygen", ["-w", "/usr/lib/ssh-keychain.dylib", "-K", "-N", ""], { stdio: "inherit", cwd: sshDir });
+  fs.mkdirSync(keyDir, { recursive: true, mode: 0o700 });
+  result = spawnSync("/usr/bin/ssh-keygen", ["-w", "/usr/lib/ssh-keychain.dylib", "-K", "-N", ""], { stdio: "inherit", cwd: keyDir });
   if (result.status !== 0) throw new Error("Setup command failed: ssh-keygen");
-  fs.renameSync(path.join(sshDir, "id_ecdsa_sk_rk"), path.join(sshDir, "id_git_sign"));
-  fs.renameSync(path.join(sshDir, "id_ecdsa_sk_rk.pub"), path.join(sshDir, "id_git_sign.pub"));
+  fs.renameSync(path.join(keyDir, "id_ecdsa_sk_rk"), path.join(keyDir, "id_git_sign"));
+  fs.renameSync(path.join(keyDir, "id_ecdsa_sk_rk.pub"), path.join(keyDir, "id_git_sign.pub"));
+  fs.chmodSync(path.join(keyDir, "id_git_sign"), 0o600);
+  fs.chmodSync(path.join(keyDir, "id_git_sign.pub"), 0o644);
   console.log("Secure Enclave-backed SSH signing key created.");
 }
 
@@ -178,7 +208,7 @@ function installHook() {
   const root = git(["rev-parse", "--show-toplevel"]);
   const hook = path.join(root, ".git", "hooks", "pre-push");
   if (fs.existsSync(hook) && !args.includes("--force")) throw new Error(`${hook} exists; use --force to replace it`);
-  const wrapper = path.resolve(new URL("./agentpass-pre-push.mjs", import.meta.url).pathname);
+  const wrapper = fileURLToPath(new URL("./agentpass-pre-push.mjs", import.meta.url));
   fs.writeFileSync(hook, `#!/bin/sh\nexec /usr/bin/env node ${JSON.stringify(wrapper)} "$@"\n`, { mode: 0o755 });
   fs.chmodSync(hook, 0o755);
   console.log(`Installed ${hook}`);
@@ -204,58 +234,87 @@ function pushCheck() {
   if (results.some((result) => !result.allowed)) process.exitCode = 1;
 }
 
-function gitSign(signArgs = args) {
+async function gitSign(signArgs = args) {
   const config = loadConfig();
-  const ctx = context(config);
-  const configuredKey = expandHome(config.signing?.key);
-  const requestedKey = extractKeyArgument(signArgs);
-  if (!requestedKey || !samePath(requestedKey, configuredKey)) {
-    audit({ operation: "git.commit.sign", decision: "deny", reason: "signing_key_mismatch", cwd: ctx.cwd, requested_key: requestedKey ?? null }, defaultConfigDir);
-    throw new Error("Signing key is not the configured AgentPass key");
-  }
-  const result = evaluateSignRequest(ctx);
-  const payload = fs.readFileSync(0);
-  const payloadSha256 = crypto.createHash("sha256").update(payload).digest("hex");
-  audit({ operation: "git.commit.sign", decision: result.allowed ? "allow" : "deny", reason: result.reason, cwd: ctx.cwd, branch: ctx.branch, remote: ctx.remote, payload_sha256: payloadSha256, signing_key: configuredKey }, defaultConfigDir);
-  if (!result.allowed) throw new Error(`Denied by policy: ${result.reason}`);
-
-  const provider = config.signing?.provider || "/usr/lib/ssh-keychain.dylib";
-  const child = spawnSync("/usr/bin/ssh-keygen", signArgs, {
-    input: payload,
-    stdio: ["pipe", "inherit", "inherit"],
-    env: { ...process.env, SSH_SK_PROVIDER: provider, AGENTPASS_POLICY_DECISION: "allow" }
-  });
-  process.exitCode = child.status ?? 1;
+  const { payloadPath, payload, brokerArgs } = readGitSigningInvocation(signArgs);
+  const agentId = process.env.AGENTPASS_AGENT_ID ?? config.default_agent_id;
+  if (!config.agents?.some((agent) => agent.id === agentId)) throw new Error("Selected agent identity is not enrolled");
+  const privatePath = path.join(defaultConfigDir, "agents", `${agentId}.pem`);
+  const request = signRequest({
+    operation: "git.commit.sign",
+    cwd: process.cwd(),
+    sign_args: brokerArgs,
+    payload_base64: payload.toString("base64"),
+    session: process.env.AGENTPASS_SESSION ?? null,
+    agent_id: agentId,
+    timestamp_ms: Date.now(),
+    nonce: crypto.randomBytes(24).toString("base64url")
+  }, privatePath);
+  const response = await brokerRequest(request, { timeoutMs: 30000 });
+  writeGitSignature(payloadPath, Buffer.from(response.stdout_base64, "base64"));
 }
 
-function expandHome(value) {
-  if (!value) return "";
-  return value.startsWith("~/") ? path.join(os.homedir(), value.slice(2)) : path.resolve(value);
+async function brokerPing() {
+  const response = await brokerRequest({ operation: "ping" });
+  console.log(JSON.stringify(response, null, 2));
 }
 
-function extractKeyArgument(signArgs) {
-  const index = signArgs.indexOf("-f");
-  return index >= 0 && signArgs[index + 1] ? expandHome(signArgs[index + 1]) : null;
+function brokerInstall() {
+  if (process.platform !== "darwin") throw new Error("LaunchAgent installation is supported only on macOS");
+  const launchAgents = path.join(os.homedir(), "Library", "LaunchAgents");
+  const plist = path.join(launchAgents, "dev.agentpass.broker.plist");
+  if (fs.existsSync(plist) && !args.includes("--force")) throw new Error(`${plist} exists; use --force to replace it`);
+  fs.mkdirSync(launchAgents, { recursive: true, mode: 0o700 });
+  const daemon = fileURLToPath(new URL("./agentpassd.mjs", import.meta.url));
+  const xml = `<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>Label</key><string>dev.agentpass.broker</string>
+  <key>ProgramArguments</key><array><string>${xmlEscape(process.execPath)}</string><string>${xmlEscape(daemon)}</string></array>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+  <key>ProcessType</key><string>Background</string>
+  <key>Umask</key><integer>63</integer>
+  <key>StandardOutPath</key><string>${xmlEscape(path.join(defaultConfigDir, "broker.out.log"))}</string>
+  <key>StandardErrorPath</key><string>${xmlEscape(path.join(defaultConfigDir, "broker.err.log"))}</string>
+</dict></plist>
+`;
+  const domain = `gui/${process.getuid()}`;
+  if (args.includes("--force")) spawnSync("/bin/launchctl", ["bootout", `${domain}/dev.agentpass.broker`], { encoding: "utf8" });
+  fs.writeFileSync(plist, xml, { mode: 0o600 });
+  const result = spawnSync("/bin/launchctl", ["bootstrap", domain, plist], { encoding: "utf8" });
+  if (result.status !== 0) throw new Error(result.stderr.trim() || "launchctl bootstrap failed");
+  console.log(`Installed ${plist}`);
 }
 
-function samePath(left, right) {
-  try { return fs.realpathSync(left) === fs.realpathSync(right); }
-  catch { return path.resolve(left) === path.resolve(right); }
+function brokerStop() {
+  if (process.platform !== "darwin") throw new Error("LaunchAgent control is supported only on macOS");
+  const result = spawnSync("/bin/launchctl", ["bootout", `gui/${process.getuid()}/dev.agentpass.broker`], { encoding: "utf8" });
+  if (result.status !== 0) throw new Error(result.stderr.trim() || "launchctl bootout failed");
+  console.log("AgentPass broker stopped.");
+}
+
+function xmlEscape(value) {
+  return String(value).replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;").replaceAll('"', "&quot;").replaceAll("'", "&apos;");
 }
 
 try {
   if (command === "init") init();
+  else if (command === "migrate") migrate();
   else if (command === "check") check();
   else if (command === "status") status();
   else if (command === "doctor") doctor();
+  else if (command === "broker" && args[0] === "ping") await brokerPing();
+  else if (command === "broker" && args[0] === "install") brokerInstall();
+  else if (command === "broker" && args[0] === "stop") brokerStop();
   else if (command === "setup-macos") setupMacos();
   else if (command === "install-hook") installHook();
   else if (command === "push-check") pushCheck();
   else if (command === "session" && args[0] === "start") sessionStart();
   else if (command === "revoke") revoke();
   else if (command === "restore") restore();
-  else if (command === "git-sign") gitSign();
-  else if (command === "-Y") gitSign([command, ...args]);
+  else if (command === "git-sign") await gitSign();
+  else if (command === "-Y") await gitSign([command, ...args]);
   else if (command === "audit") {
     if (args.includes("--verify")) console.log(JSON.stringify(verifyAudit(defaultConfigDir), null, 2));
     else console.log(fs.existsSync(auditPath()) ? fs.readFileSync(auditPath(), "utf8") : "");

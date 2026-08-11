@@ -20,8 +20,8 @@ test("denies repositories outside the policy", () => {
   assert.equal(evaluateSignRequest({ policy, cwd: "/tmp/other", branch: "feature/auth", remote: "git@github.com:example/project.git" }).reason, "repository_not_allowed");
 });
 
-test("allows a subdirectory of a configured repository", () => {
-  assert.equal(evaluateSignRequest({ policy, cwd: "/tmp/project/packages/app", branch: "feature/auth", remote: "git@github.com:example/project.git" }).allowed, true);
+test("denies a nested repository beneath an allowed repository", () => {
+  assert.equal(evaluateSignRequest({ policy, cwd: "/tmp/project/packages/app", branch: "feature/auth", remote: "git@github.com:example/project.git" }).reason, "repository_not_allowed");
 });
 
 test("denies revoked requests and unapproved operations", () => {
