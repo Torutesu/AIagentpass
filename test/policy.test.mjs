@@ -28,3 +28,9 @@ test("denies revoked requests and unapproved operations", () => {
   assert.equal(evaluateRequest({ policy, cwd: "/tmp/project", branch: "feature/auth", remote: "git@github.com:example/project.git", revoked: true }).reason, "revoked");
   assert.equal(evaluateRequest({ policy, cwd: "/tmp/project", branch: "feature/auth", remote: "git@github.com:example/project.git", operation: "git.push" }).reason, "operation_not_allowed");
 });
+
+test("applies separate tag policy", () => {
+  const tagPolicy = { ...policy, operations: ["git.tag.push"], tags: { allow: ["v1.*"], deny: ["v1.0.0"] } };
+  assert.equal(evaluateRequest({ policy: tagPolicy, cwd: "/tmp/project", branch: "v1.2.0", remote: "git@github.com:example/project.git", operation: "git.tag.push" }).allowed, true);
+  assert.equal(evaluateRequest({ policy: tagPolicy, cwd: "/tmp/project", branch: "v1.0.0", remote: "git@github.com:example/project.git", operation: "git.tag.push" }).reason, "tag_denied");
+});

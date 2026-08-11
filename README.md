@@ -18,6 +18,25 @@ agentpass check
 agentpass doctor
 ```
 
+Create the non-exportable Secure Enclave-backed signing key on macOS:
+
+```sh
+agentpass setup-macos              # review commands
+agentpass setup-macos --execute    # run them
+```
+
+Install a pre-push hook after explicitly allowing push operations in `config.json`. The default policy intentionally does not allow push:
+
+```json
+{ "operations": ["git.commit.sign", "git.push", "git.tag.push"] }
+```
+
+```sh
+agentpass install-hook
+```
+
+The hook evaluates every ref received from Git. Branches use `branches.allow`/`branches.deny`; tags use `tags.allow`/`tags.deny`. A revoked AgentPass state or a required expired session blocks the push.
+
 For unattended runs, issue a short-lived session token and enable session enforcement in `config.json`:
 
 ```sh
@@ -56,6 +75,10 @@ AgentPass protects against copying the private key out of the device and limits 
 - [x] emergency local revocation switch
 - [x] prerequisite diagnostics
 - [x] short-lived session token with generation-based revocation
+- [x] Secure Enclave setup command with dry-run default
+- [x] optional pre-push policy hook
+- [x] separate branch and tag push rules
+- [x] GitHub Actions CI test workflow
 - [ ] per-agent identity and session TTL
 - [ ] push and tag policy enforcement
 - [ ] FIDO2/YubiKey and TPM backends

@@ -18,6 +18,9 @@ Commands:
   status            show policy and revocation status
   check             evaluate the current repository
   doctor            check local prerequisites
+  setup-macos       show Secure Enclave setup (use --execute to run)
+  install-hook      install a policy-enforcing pre-push hook
+  push-check        evaluate a pre-push request
   session start     issue a short-lived agent session token
   revoke            immediately deny all operations
   restore           re-enable operations after revocation
@@ -57,7 +60,7 @@ function context(config) {
   const root = git(["rev-parse", "--show-toplevel"]);
   const session = loadSession();
   const supplied = process.env.AGENTPASS_SESSION;
-  const sessionValid = Boolean(session && supplied && crypto.createHash("sha256").update(supplied).digest("hex") === session.token_hash && Date.now() < Date.parse(session.expires_at) && session.generation === loadState().generation);
+  const sessionValid = isSessionValid(session, supplied);
   return {
     cwd: root,
     branch: git(["branch", "--show-current"], true) || "HEAD",
@@ -65,6 +68,10 @@ function context(config) {
     revoked: loadState().revoked,
     policy: { ...config, session: { ...config.session, valid: sessionValid } }
   };
+}
+
+function isSessionValid(session, supplied) {
+  return Boolean(session && supplied && crypto.createHash("sha256").update(supplied).digest("hex") === session.token_hash && Date.now() < Date.parse(session.expires_at) && session.generation === loadState().generation);
 }
 
 function sessionStart() {
@@ -129,6 +136,71 @@ function doctor() {
   if (!checks.every((check) => check.ok)) process.exitCode = 1;
 }
 
+function setupMacos() {
+  if (process.platform !== "darwin") throw new Error("Secure Enclave setup is currently supported only on macOS");
+  const commands = [
+    "sc_auth create-ctk-identity -l agentpass-git-sign -k p-256-ne -t none",
+    "mkdir -p ~/.ssh",
+    "cd ~/.ssh && ssh-keygen -w /usr/lib/ssh-keychain.dylib -K -N \"\"",
+    "mv ~/.ssh/id_ecdsa_sk_rk ~/.ssh/id_git_sign",
+    "mv ~/.ssh/id_ecdsa_sk_rk.pub ~/.ssh/id_git_sign.pub"
+  ];
+  if (!args.includes("--execute")) {
+    console.log(commands.join("\n"));
+    console.log("\nDry run only. Re-run with --execute after reviewing the commands.");
+    return;
+  }
+  if (!args.includes("--force") && (fs.existsSync(path.join(os.homedir(), ".ssh", "id_git_sign")) || fs.existsSync(path.join(os.homedir(), ".ssh", "id_git_sign.pub")))) {
+    throw new Error("~/.ssh/id_git_sign already exists; use --force only if you intend to replace it");
+  }
+  if (args.includes("--force")) {
+    const backup = `${Date.now()}.bak`;
+    for (const file of ["id_git_sign", "id_git_sign.pub"]) {
+      const target = path.join(os.homedir(), ".ssh", file);
+      if (fs.existsSync(target)) fs.renameSync(target, `${target}.${backup}`);
+    }
+  }
+  let result = spawnSync("sc_auth", ["create-ctk-identity", "-l", "agentpass-git-sign", "-k", "p-256-ne", "-t", "none"], { stdio: "inherit" });
+  if (result.status !== 0) throw new Error("Setup command failed: sc_auth");
+  const sshDir = path.join(os.homedir(), ".ssh");
+  fs.mkdirSync(sshDir, { recursive: true, mode: 0o700 });
+  result = spawnSync("/usr/bin/ssh-keygen", ["-w", "/usr/lib/ssh-keychain.dylib", "-K", "-N", ""], { stdio: "inherit", cwd: sshDir });
+  if (result.status !== 0) throw new Error("Setup command failed: ssh-keygen");
+  fs.renameSync(path.join(sshDir, "id_ecdsa_sk_rk"), path.join(sshDir, "id_git_sign"));
+  fs.renameSync(path.join(sshDir, "id_ecdsa_sk_rk.pub"), path.join(sshDir, "id_git_sign.pub"));
+  console.log("Secure Enclave-backed SSH signing key created.");
+}
+
+function installHook() {
+  const root = git(["rev-parse", "--show-toplevel"]);
+  const hook = path.join(root, ".git", "hooks", "pre-push");
+  if (fs.existsSync(hook) && !args.includes("--force")) throw new Error(`${hook} exists; use --force to replace it`);
+  const wrapper = path.resolve(new URL("./agentpass-pre-push.mjs", import.meta.url).pathname);
+  fs.writeFileSync(hook, `#!/bin/sh\nexec /usr/bin/env node ${JSON.stringify(wrapper)} "$@"\n`, { mode: 0o755 });
+  fs.chmodSync(hook, 0o755);
+  console.log(`Installed ${hook}`);
+}
+
+function pushCheck() {
+  const config = loadConfig();
+  const state = loadState();
+  const remote = args[0] ?? "origin";
+  const remoteUrl = args[1] ?? git(["remote", "get-url", remote], true);
+  const lines = fs.readFileSync(0, "utf8").trim().split("\n").filter(Boolean);
+  const refs = lines.length ? lines : [`local 0000000 refs/heads/${git(["branch", "--show-current"], true)} 0000000`];
+  const results = refs.map((line) => {
+    const [, , remoteRef] = line.split(/\s+/);
+    const isTag = remoteRef?.startsWith("refs/tags/");
+    const operation = isTag ? "git.tag.push" : "git.push";
+    const branch = (remoteRef ?? `refs/heads/${git(["branch", "--show-current"], true)}`).replace(/^refs\/(heads|tags)\//, "");
+    const result = evaluateRequest({ policy: { ...config, session: { ...config.session, valid: isSessionValid(loadSession(), process.env.AGENTPASS_SESSION) } }, cwd: git(["rev-parse", "--show-toplevel"]), branch, remote: remoteUrl, operation, revoked: state.revoked });
+    audit({ operation, decision: result.allowed ? "allow" : "deny", reason: result.reason, branch, remote: remoteUrl }, defaultConfigDir);
+    return { operation, branch, ...result };
+  });
+  console.log(JSON.stringify(results, null, 2));
+  if (results.some((result) => !result.allowed)) process.exitCode = 1;
+}
+
 function gitSign(signArgs = args) {
   const config = loadConfig();
   const ctx = context(config);
@@ -149,6 +221,9 @@ try {
   else if (command === "check") check();
   else if (command === "status") status();
   else if (command === "doctor") doctor();
+  else if (command === "setup-macos") setupMacos();
+  else if (command === "install-hook") installHook();
+  else if (command === "push-check") pushCheck();
   else if (command === "session" && args[0] === "start") sessionStart();
   else if (command === "revoke") revoke();
   else if (command === "restore") restore();
