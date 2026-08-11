@@ -6,9 +6,10 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
 import { addAgent, revokeAgent, rotateAgent, setAgentScope, setDefaultAgent } from "../lib/agent-admin.mjs";
+import { anchorPendingCheckpoints, verifyStoredAnchorReceipts } from "../lib/anchor-client.mjs";
 import { audit, createAuditCheckpoint, publicKeyFingerprint, verifyAudit, verifyAuditCheckpoints } from "../lib/audit.mjs";
 import { brokerRequest } from "../lib/broker-client.mjs";
-import { auditPath, controlBundlePath, defaultConfigDir, loadConfig, loadSession, loadState, saveConfig, saveSession, saveState, socketPath } from "../lib/config.mjs";
+import { anchorReceiptPath, auditPath, controlBundlePath, defaultConfigDir, loadConfig, loadSession, loadState, saveConfig, saveSession, saveState, socketPath } from "../lib/config.mjs";
 import { createAgentIdentity, createAuditIdentity, signRequest } from "../lib/identity.mjs";
 import { readGitSigningInvocation, writeGitSignature } from "../lib/git-signing.mjs";
 import { evaluateAgentRequest } from "../lib/policy.mjs";
@@ -17,7 +18,7 @@ import { applyControlBundle, controlKeyFingerprint, fetchControlBundle, generate
 const [, , command, ...args] = process.argv;
 
 function usage() {
-  console.log(`AgentPass 0.7.0
+  console.log(`AgentPass 0.8.0
 
 Commands:
   init              create a secure local policy
@@ -44,6 +45,9 @@ Commands:
   audit [--verify]  print or verify audit logs and checkpoints
   audit checkpoint  sign the current audit head
   audit public-key  print the checkpoint verification key
+  audit anchor trust --url HTTPS_URL --tenant TENANT --key PUBLIC_KEY
+  audit anchor push
+  audit anchor status
   control keygen DIR
   control trust PUBLIC_KEY [--url HTTPS_URL]
   control sign       create an offline-signed control bundle
@@ -450,7 +454,7 @@ function scopeFromPolicy(config) {
   };
 }
 
-function auditCommand() {
+async function auditCommand() {
   const config = loadConfig();
   if (args[0] === "checkpoint") {
     const checkpoint = createAuditCheckpoint(config.audit_signing.public_key, defaultConfigDir);
@@ -458,13 +462,52 @@ function auditCommand() {
   } else if (args[0] === "public-key") {
     console.error(publicKeyFingerprint(config.audit_signing.public_key));
     console.log(config.audit_signing.public_key.trim());
+  } else if (args[0] === "anchor") {
+    await auditAnchorCommand(config);
   } else if (args.includes("--verify")) {
     const chain = verifyAudit(defaultConfigDir);
     const checkpoints = verifyAuditCheckpoints(config.audit_signing.public_key, defaultConfigDir);
-    console.log(JSON.stringify({ valid: chain.valid && checkpoints.valid, audit: chain, checkpoints }, null, 2));
-    if (!chain.valid || !checkpoints.valid) process.exitCode = 1;
+    let anchor;
+    try { anchor = verifyStoredAnchorReceipts(config, defaultConfigDir); }
+    catch (error) { anchor = { valid: false, error: error.message }; }
+    console.log(JSON.stringify({ valid: chain.valid && checkpoints.valid && anchor.valid, audit: chain, checkpoints, anchor }, null, 2));
+    if (!chain.valid || !checkpoints.valid || !anchor.valid) process.exitCode = 1;
   } else {
     console.log(fs.existsSync(auditPath()) ? fs.readFileSync(auditPath(), "utf8") : "");
+  }
+}
+
+async function auditAnchorCommand(config) {
+  const action = args[1];
+  if (action === "trust") {
+    const url = requiredFlag("--url");
+    const tenant = requiredFlag("--tenant");
+    const publicKey = fs.readFileSync(path.resolve(requiredFlag("--key")), "utf8");
+    const fingerprint = publicKeyFingerprint(publicKey);
+    const previousFingerprint = config.audit_anchor?.public_key ? publicKeyFingerprint(config.audit_anchor.public_key) : null;
+    const identityChanged = config.audit_anchor && (previousFingerprint !== fingerprint || config.audit_anchor.tenant !== tenant);
+    if (identityChanged && !(args.includes("--confirm") && args.includes("ROTATE_ANCHOR_TRUST"))) {
+      throw new Error("Replacing the audit anchor trust root requires --confirm ROTATE_ANCHOR_TRUST");
+    }
+    saveConfig({ ...config, audit_anchor: { url, tenant, public_key: publicKey } });
+    const receiptFile = anchorReceiptPath();
+    if (identityChanged && fs.existsSync(receiptFile)) fs.renameSync(receiptFile, `${receiptFile}.${Date.now()}.untrusted.bak`);
+    audit({ operation: "audit.anchor.trust", decision: "allow", tenant, url, key_fingerprint: fingerprint, previous_key_fingerprint: previousFingerprint }, defaultConfigDir);
+    console.log(JSON.stringify({ configured: true, tenant, url, fingerprint }, null, 2));
+  } else if (action === "push") {
+    if (!config.audit_anchor) throw new Error("No audit anchor is configured");
+    audit({ operation: "audit.anchor.push", decision: "allow", tenant: config.audit_anchor.tenant, url: config.audit_anchor.url }, defaultConfigDir);
+    createAuditCheckpoint(config.audit_signing.public_key, defaultConfigDir);
+    console.log(JSON.stringify(await anchorPendingCheckpoints(config, defaultConfigDir), null, 2));
+  } else if (action === "status") {
+    if (!config.audit_anchor) {
+      console.log(JSON.stringify({ configured: false }, null, 2));
+      return;
+    }
+    const receipts = verifyStoredAnchorReceipts(config, defaultConfigDir);
+    console.log(JSON.stringify({ configured: true, tenant: config.audit_anchor.tenant, url: config.audit_anchor.url, fingerprint: publicKeyFingerprint(config.audit_anchor.public_key), ...receipts }, null, 2));
+  } else {
+    throw new Error("Unknown audit anchor command");
   }
 }
 
@@ -526,7 +569,7 @@ try {
   else if (command === "restore") restore();
   else if (command === "git-sign") await gitSign();
   else if (command === "-Y") await gitSign([command, ...args]);
-  else if (command === "audit") auditCommand();
+  else if (command === "audit") await auditCommand();
   else usage();
 } catch (error) {
   console.error(`agentpass: ${error.message}`);

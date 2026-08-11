@@ -8,4 +8,6 @@ The included broker is a per-user macOS LaunchAgent. It does not isolate its fil
 
 Optional remote control uses an offline Ed25519 administration key. Once its public key is pinned, the broker requires a currently valid signed bundle and enforces global and per-Agent revocation before local policy. Keep the administration private key off AgentPass hosts and publish bundles through authenticated HTTPS infrastructure.
 
+Optional remote audit anchoring sends signed checkpoint metadata to a separately administered append-only service and verifies its signed receipts. The reference anchor must be exposed through a hardened HTTPS reverse proxy; it does not include TLS termination, rate limiting, replication, or an HSM-backed receipt key. See [docs/AUDIT_ANCHOR.md](docs/AUDIT_ANCHOR.md).
+
 Report vulnerabilities through a private GitHub security advisory. Do not include private keys, credentials, or sensitive repository data in public issues.

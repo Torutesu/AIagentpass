@@ -7,6 +7,7 @@
 - The integrity and attribution of signing requests.
 - Audit evidence describing policy decisions and signer outcomes for authenticated signing requests.
 - Signed audit checkpoints that can be pinned outside the host.
+- Signed remote-anchor receipts that preserve checkpoint ordering outside the host.
 - An optional offline control trust root for remote emergency revocation.
 
 ## Broker security boundary
@@ -32,7 +33,9 @@ When remote control is configured, the broker pins an Ed25519 administration pub
 
 Normal commits must have `HEAD` as their sole parent. Merge commits are accepted only while `MERGE_HEAD` exists and every payload parent exactly matches `HEAD` followed by the repository's merge heads. Initial commits must have no parent.
 
-Audit records form a SHA-256 chain. A separate Ed25519 key signs explicit checkpoints containing the entry count and exact audit head. Exporting the checkpoint record or its hash to an append-only remote system makes later truncation or rewriting detectable against that external copy. The public-key fingerprint identifies the checkpoint signer but, by itself, cannot preserve history after private-key compromise.
+Audit records form a SHA-256 chain. A separate Ed25519 key signs explicit checkpoints containing the entry count and exact audit head. The optional remote anchor pins that audit public key per tenant, requires each checkpoint to extend the accepted chain without reducing its entry count, and returns an Ed25519-signed, hash-chained receipt. This makes later local truncation or rewriting detectable after the first accepted checkpoint. The first checkpoint is the enrollment baseline; the public-key fingerprint alone cannot preserve history after private-key compromise.
+
+The reference anchor is a separate trust domain, not part of the signing authorization path. Its server binds to loopback HTTP by default and must be placed behind operator-managed TLS, network access control, rate limiting, monitoring, and durable backup. Its software receipt key does not resist compromise of the anchor host; an HSM/KMS-backed signer and independently retained receipts are required where that threat is in scope.
 
 ## Security levels
 
@@ -57,4 +60,5 @@ The implementation decision and Apple signing prerequisites are recorded in [doc
 - Preventing `git push --no-verify`; server-side branch protection is required.
 - Protecting against root or kernel compromise.
 - Proving audit integrity after an attacker rewrites the entire local log and uses the locally readable checkpoint key; pin checkpoint records or checkpoint hashes outside the host.
+- Proving events before anchor enrollment or before the first accepted checkpoint.
 - Treating an environment-variable session token as a non-transferable agent identity.

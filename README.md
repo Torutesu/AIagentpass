@@ -102,6 +102,25 @@ agentpass restore --confirm RESTORE
 
 Copy `checkpoint.json` to an append-only or remote system. The public key verifies who signed a checkpoint; retaining a checkpoint record or its `checkpoint_hash` outside the host is what detects later local history replacement.
 
+AgentPass also includes a remote anchor that verifies checkpoint signatures and returns append-only, signed receipts:
+
+```sh
+# Separately administered anchor host; publish it through an HTTPS reverse proxy.
+agentpass-anchor init /var/lib/agentpass-anchor
+agentpass-anchor enroll /var/lib/agentpass-anchor build-mac-01 ./agentpass-audit.pub
+agentpass-anchor serve /var/lib/agentpass-anchor
+
+# AgentPass host; pin the anchor key through an authenticated channel.
+agentpass audit anchor trust \
+  --url https://audit-anchor.example.com/ \
+  --tenant build-mac-01 \
+  --key ./anchor-public.pem
+agentpass audit anchor push
+agentpass audit anchor status
+```
+
+Only signed checkpoint metadata leaves the host; audit events and repository data remain local. Failed pushes are retained and safely retried. See [docs/AUDIT_ANCHOR.md](docs/AUDIT_ANCHOR.md) for deployment, protocol, and residual risks.
+
 ## Offline-signed remote revocation
 
 Generate the control key on an offline administration host and retain `control-private.pem` there:
@@ -163,7 +182,7 @@ AgentPass protects against copying the private key out of the device and limits 
 - [ ] 1Password, Vault, and Infisical broker adapters
 - [x] offline-signed remote Agent and global revocation
 - [x] bounded HTTPS control refresh with sequence rollback detection
-- [ ] remote checkpoint anchoring
+- [x] remote checkpoint anchoring with signed, chained receipts
 
 See [THREAT_MODEL.md](THREAT_MODEL.md) for the exact security boundary and remaining same-user limitations.
 
