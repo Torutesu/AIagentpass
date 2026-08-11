@@ -61,7 +61,7 @@ Inspect and control the local policy:
 agentpass status
 agentpass audit --verify
 agentpass revoke    # immediately deny signing
-agentpass restore
+agentpass restore --confirm RESTORE
 ```
 
 ## Security model
@@ -75,6 +75,9 @@ AgentPass protects against copying the private key out of the device and limits 
 - [x] emergency local revocation switch
 - [x] prerequisite diagnostics
 - [x] short-lived session token with generation-based revocation
+- [x] fixed production config location (no environment override)
+- [x] configured signing-key enforcement
+- [x] signed-payload hash in audit events
 - [x] Secure Enclave setup command with dry-run default
 - [x] optional pre-push policy hook
 - [x] separate branch and tag push rules

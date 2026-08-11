@@ -11,10 +11,10 @@ import { evaluateRequest, evaluateSignRequest } from "../lib/policy.mjs";
 const [, , command, ...args] = process.argv;
 
 function usage() {
-  console.log(`AgentPass 0.2.0
+  console.log(`AgentPass 0.4.0
 
 Commands:
-  init [dir]        create a secure local policy
+  init              create a secure local policy
   status            show policy and revocation status
   check             evaluate the current repository
   doctor            check local prerequisites
@@ -39,15 +39,17 @@ function git(gitArgs, optional = false) {
 }
 
 function init() {
-  const dir = path.resolve(args[0] ?? defaultConfigDir);
+  const dir = defaultConfigDir;
   if (fs.existsSync(path.join(dir, "config.json"))) throw new Error(`Already initialized: ${dir}`);
+  const repository = git(["rev-parse", "--show-toplevel"], true) || process.cwd();
+  const origin = git(["remote", "get-url", "origin"], true);
   saveConfig({
     version: 2,
     agent: { name: process.env.AGENTPASS_AGENT ?? "coding-agent" },
     operations: ["git.commit.sign"],
-    repositories: [git(["rev-parse", "--show-toplevel"], true) || process.cwd()],
+    repositories: [path.resolve(repository)],
     branches: { allow: ["feature/*", "fix/*", "chore/*"], deny: ["main", "master", "production"] },
-    remotes: { allow: ["git@github.com:*", "https://github.com/*", "ssh://git@github.com/*"] },
+    remotes: { allow: origin ? [origin] : [] },
     signing: { key: "~/.ssh/id_git_sign", provider: "/usr/lib/ssh-keychain.dylib" },
     session: { required: false, ttl_seconds: 3600 }
   }, dir);
@@ -118,6 +120,7 @@ function revoke() {
 
 function restore() {
   loadConfig();
+  if (args[0] !== "--confirm" || args[1] !== "RESTORE") throw new Error("Restoring requires: agentpass restore --confirm RESTORE");
   const state = loadState();
   saveState({ ...state, revoked: false, generation: (state.generation ?? 0) + 1, restored_at: new Date().toISOString() });
   audit({ operation: "control.restore", decision: "allow", generation: state.generation + 1 }, defaultConfigDir);
@@ -204,16 +207,40 @@ function pushCheck() {
 function gitSign(signArgs = args) {
   const config = loadConfig();
   const ctx = context(config);
+  const configuredKey = expandHome(config.signing?.key);
+  const requestedKey = extractKeyArgument(signArgs);
+  if (!requestedKey || !samePath(requestedKey, configuredKey)) {
+    audit({ operation: "git.commit.sign", decision: "deny", reason: "signing_key_mismatch", cwd: ctx.cwd, requested_key: requestedKey ?? null }, defaultConfigDir);
+    throw new Error("Signing key is not the configured AgentPass key");
+  }
   const result = evaluateSignRequest(ctx);
-  audit({ operation: "git.commit.sign", decision: result.allowed ? "allow" : "deny", reason: result.reason, cwd: ctx.cwd, branch: ctx.branch, remote: ctx.remote }, defaultConfigDir);
+  const payload = fs.readFileSync(0);
+  const payloadSha256 = crypto.createHash("sha256").update(payload).digest("hex");
+  audit({ operation: "git.commit.sign", decision: result.allowed ? "allow" : "deny", reason: result.reason, cwd: ctx.cwd, branch: ctx.branch, remote: ctx.remote, payload_sha256: payloadSha256, signing_key: configuredKey }, defaultConfigDir);
   if (!result.allowed) throw new Error(`Denied by policy: ${result.reason}`);
 
   const provider = config.signing?.provider || "/usr/lib/ssh-keychain.dylib";
   const child = spawnSync("/usr/bin/ssh-keygen", signArgs, {
-    stdio: "inherit",
+    input: payload,
+    stdio: ["pipe", "inherit", "inherit"],
     env: { ...process.env, SSH_SK_PROVIDER: provider, AGENTPASS_POLICY_DECISION: "allow" }
   });
   process.exitCode = child.status ?? 1;
+}
+
+function expandHome(value) {
+  if (!value) return "";
+  return value.startsWith("~/") ? path.join(os.homedir(), value.slice(2)) : path.resolve(value);
+}
+
+function extractKeyArgument(signArgs) {
+  const index = signArgs.indexOf("-f");
+  return index >= 0 && signArgs[index + 1] ? expandHome(signArgs[index + 1]) : null;
+}
+
+function samePath(left, right) {
+  try { return fs.realpathSync(left) === fs.realpathSync(right); }
+  catch { return path.resolve(left) === path.resolve(right); }
 }
 
 try {
