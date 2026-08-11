@@ -1,6 +1,6 @@
 # ADR-001: Native macOS security boundary
 
-Status: accepted for the high-assurance roadmap
+Status: accepted; native core implemented in 0.9, signed distribution pending
 
 ## Decision
 
@@ -31,6 +31,8 @@ Apple's documentation also recommends a factored privileged service with a narro
 - Stable bundle identifiers for the host app and XPC service.
 
 Without these values, the repository can implement and test the portable broker, protocol, policy engine, and SSHSIG fixtures, but cannot produce the final code-signed keychain isolation boundary.
+
+AgentPass 0.9 implements that testable source layer under `native/macos`: Secure Enclave key management, SSHSIG generation, XPC client gating, and service-side Agent/policy/Git validation. See [NATIVE_BROKER.md](NATIVE_BROKER.md) for the remaining packaging and protected-state work.
 
 ## Primary references
 

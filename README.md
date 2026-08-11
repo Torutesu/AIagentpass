@@ -153,6 +153,17 @@ The broker periodically fetches the static JSON bundle over HTTPS. Missing, expi
 
 AgentPass protects against copying the private key out of the device and limits the allowed signing context. It does not protect against a fully compromised host process that is able to invoke an allowed signing operation. The policy boundary is therefore an authorization and audit layer, not a replacement for macOS sandboxing or endpoint security.
 
+## Native macOS boundary
+
+Version 0.9 includes a Swift/XPC native broker foundation. It creates a non-exportable P-256 key in Secure Enclave, emits OpenSSH-compatible SSHSIG signatures internally, authenticates the signed XPC client, and repeats Agent identity, replay, scope, Git context, tree, and parent validation against a root-owned policy inside the service.
+
+```sh
+npm run test:native
+swift build -c release --package-path native/macos
+```
+
+The repository does not ship a Developer ID-signed or notarized app bundle: those artifacts require an Apple Team ID, provisioning, entitlements, and `SMAppService` registration. Native mode also currently refuses session-required and remote-control policies until those states move behind the native boundary. See [docs/NATIVE_BROKER.md](docs/NATIVE_BROKER.md) for the exact implementation and deployment gap.
+
 ## Current scope and roadmap
 
 - [x] repository, branch, remote, and operation policy
@@ -171,7 +182,8 @@ AgentPass protects against copying the private key out of the device and limits 
 - [x] optional pre-push policy hook
 - [x] separate branch and tag push rules
 - [x] GitHub Actions CI test workflow
-- [ ] separate-user system broker for hostile same-user agents
+- [x] Swift/XPC broker core with Secure Enclave SSHSIG and service-side policy validation
+- [ ] signed/notarized native app bundle and protected session/control/audit state
 - [x] per-agent Ed25519 request identity with replay protection
 - [x] agent enrollment, selection, revocation, and key rotation
 - [x] per-agent operation/repository/branch/remote scopes

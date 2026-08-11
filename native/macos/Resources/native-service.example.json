@@ -1,0 +1,8 @@
+{
+  "mach_service_name": "dev.agentpass.native-service",
+  "key_tag": "dev.agentpass.git-signing",
+  "keychain_access_group": "TEAMID.dev.agentpass.keys",
+  "policy_path": "/Library/Application Support/AgentPass/policy.json",
+  "client_code_signing_requirement": "anchor apple generic and identifier \"dev.agentpass.native-client\" and certificate leaf[subject.OU] = \"TEAMID\"",
+  "allowed_client_uid": 501
+}

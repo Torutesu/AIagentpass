@@ -18,7 +18,7 @@ import { applyControlBundle, controlKeyFingerprint, fetchControlBundle, generate
 const [, , command, ...args] = process.argv;
 
 function usage() {
-  console.log(`AgentPass 0.8.0
+  console.log(`AgentPass 0.9.0
 
 Commands:
   init              create a secure local policy
@@ -307,7 +307,7 @@ async function gitSign(signArgs = args) {
     timestamp_ms: Date.now(),
     nonce: crypto.randomBytes(24).toString("base64url")
   }, privatePath);
-  const response = await brokerRequest(request, { timeoutMs: 30000 });
+  const response = await brokerRequest(request, { timeoutMs: 30000, native: config.native_broker });
   writeGitSignature(payloadPath, Buffer.from(response.stdout_base64, "base64"));
 }
 
@@ -319,7 +319,8 @@ function selectedAgent(config) {
 }
 
 async function brokerPing() {
-  const response = await brokerRequest({ operation: "ping" });
+  const config = loadConfig();
+  const response = await brokerRequest({ operation: "ping" }, { native: config.native_broker });
   console.log(JSON.stringify(response, null, 2));
 }
 

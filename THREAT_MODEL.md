@@ -51,7 +51,9 @@ The offline control key prevents that process from authoring a new valid control
 
 The target high-assurance deployment is a separately installed and signed system service under a dedicated OS identity. That service must own the key reference, policy, state, and audit signing key; expose only a narrow socket protocol; authenticate approved agent identities; and require human authentication for restore or policy changes.
 
-This mode is not yet shipped. Until it is, AgentPass must not claim protection against a fully compromised same-user host.
+Version 0.9 ships the source-level Swift/XPC core for this mode. The service holds a non-exportable Secure Enclave P-256 key, gates clients by UID and code-signing requirement, and independently verifies Agent signatures, replay state, root-owned policy, Git context, commit tree, and parents. It fails closed for session-required and remote-control policies because those protected native state machines are not implemented yet.
+
+The repository does not yet ship the Developer ID-signed, provisioned, notarized app bundle required to activate the code-signing and keychain-access-group boundary. Until that bundle and native audit/control/session state are complete, AgentPass must not claim full protection against a compromised same-user host.
 
 The implementation decision and Apple signing prerequisites are recorded in [docs/ADR-001-native-security-boundary.md](docs/ADR-001-native-security-boundary.md).
 

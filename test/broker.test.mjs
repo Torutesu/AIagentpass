@@ -99,6 +99,24 @@ test("Unix socket client and broker exchange one bounded request", async () => {
   }
 });
 
+test("broker client routes signed requests through the native bridge", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "agentpass-native-bridge-"));
+  const client = path.join(root, "native-client.mjs");
+  fs.writeFileSync(client, `#!${process.execPath}
+let input = "";
+process.stdin.setEncoding("utf8");
+process.stdin.on("data", (chunk) => input += chunk);
+process.stdin.on("end", () => {
+  const request = JSON.parse(input);
+  process.stdout.write(JSON.stringify({ ok: true, stdout_base64: Buffer.from(request.operation).toString("base64") }) + "\\n");
+});
+`, { mode: 0o755 });
+  const result = await brokerRequest({ operation: "git.commit.sign" }, { native: { enabled: true, client, mach_service: "dev.agentpass.native" } });
+  assert.equal(Buffer.from(result.stdout_base64, "base64").toString(), "git.commit.sign");
+  fs.chmodSync(client, 0o777);
+  assert.throws(() => brokerRequest({ operation: "ping" }, { native: { enabled: true, client, mach_service: "dev.agentpass.native" } }), /permissions are unsafe/);
+});
+
 test("running broker fails closed after configuration mutation", async () => {
   const data = fixture();
   const { root, configDir } = data;

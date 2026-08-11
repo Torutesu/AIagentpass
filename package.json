@@ -1,12 +1,16 @@
 {
   "name": "agentpass",
-  "version": "0.8.0",
+  "version": "0.9.0",
   "description": "Policy-controlled signing broker for coding agents",
   "type": "module",
   "files": [
     "bin",
     "lib",
     "docs",
+    "native/macos/Package.swift",
+    "native/macos/Resources",
+    "native/macos/Sources",
+    "native/macos/Tests",
     "README.md",
     "SECURITY.md",
     "THREAT_MODEL.md",
@@ -21,8 +25,9 @@
   },
   "scripts": {
     "test": "node --test",
+    "test:native": "swift test --package-path native/macos",
     "lint": "node --check bin/*.mjs && node --check lib/*.mjs",
-    "prepack": "npm test && npm run lint"
+    "prepack": "npm test && npm run test:native && npm run lint"
   },
   "engines": {
     "node": ">=20"
