@@ -18,7 +18,7 @@ import { applyControlBundle, controlKeyFingerprint, fetchControlBundle, generate
 const [, , command, ...args] = process.argv;
 
 function usage() {
-  console.log(`AgentPass 0.14.0
+  console.log(`AgentPass 0.15.0
 
 Commands:
   init              create a secure local policy

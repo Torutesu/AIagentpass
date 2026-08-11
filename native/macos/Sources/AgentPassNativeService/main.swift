@@ -131,8 +131,8 @@ private final class ServiceEndpoint: NSObject, AgentPassNativeServiceProtocol, @
         self.controlManager = controlManager
     }
 
-    func startControlRefresh(url: URL, refreshSeconds: Int) {
-        let fetcher = NativeControlFetcher(sourceURL: url, refreshSeconds: refreshSeconds) { [weak self] outcome in
+    func startControlRefresh(url: URL, refreshSeconds: Int) throws {
+        let fetcher = try NativeControlFetcher(sourceURL: url, refreshSeconds: refreshSeconds) { [weak self] outcome in
             guard let self else { throw AgentPassNativeError.invalidConfiguration("Native control service is unavailable") }
             try self.handleControlFetch(outcome)
         }
@@ -148,9 +148,9 @@ private final class ServiceEndpoint: NSObject, AgentPassNativeServiceProtocol, @
             let approvalFingerprint: Any = sessionManager?.approvalKeyFingerprint ?? NSNull()
             let control = controlManager?.status()
             let fetch = controlFetcher?.status()
-            reply(["ok": true, "protocol_version": 5, "key_backend": "secure-enclave", "audit_entries": audit.entries, "audit_checkpoints": checkpoints.count, "session_required": session?.required ?? false, "active_sessions": session?.active ?? 0, "session_generation": session?.generation ?? 0, "session_approval_key_fingerprint": approvalFingerprint, "control_configured": control != nil, "control_sequence": control?.sequence ?? 0, "control_operational": control?.operational ?? true, "control_expired": control?.expired ?? false, "control_expires_at": control?.expiresAt ?? NSNull(), "control_refresh_configured": fetch != nil, "control_refresh_in_flight": fetch?.inFlight ?? false, "control_refresh_last_success_at": fetch?.lastSuccessAt ?? NSNull(), "control_refresh_last_error": fetch?.lastError ?? NSNull()])
+            reply(["ok": true, "protocol_version": 6, "key_backend": "secure-enclave", "audit_entries": audit.entries, "audit_checkpoints": checkpoints.count, "session_required": session?.required ?? false, "active_sessions": session?.active ?? 0, "session_generation": session?.generation ?? 0, "session_approval_key_fingerprint": approvalFingerprint, "control_configured": control != nil, "control_sequence": control?.sequence ?? 0, "control_operational": control?.operational ?? true, "control_expired": control?.expired ?? false, "control_expires_at": control?.expiresAt ?? NSNull(), "control_refresh_configured": fetch != nil, "control_refresh_in_flight": fetch?.inFlight ?? false, "control_refresh_last_attempt_at": fetch?.lastAttemptAt ?? NSNull(), "control_refresh_last_success_at": fetch?.lastSuccessAt ?? NSNull(), "control_refresh_last_error": fetch?.lastError ?? NSNull(), "control_refresh_next_attempt_at": fetch?.nextAttemptAt ?? NSNull(), "control_refresh_consecutive_failures": fetch?.consecutiveFailures ?? 0])
         } catch {
-            reply(["ok": false, "protocol_version": 5, "error": error.localizedDescription])
+            reply(["ok": false, "protocol_version": 6, "error": error.localizedDescription])
         }
     }
 
@@ -203,7 +203,7 @@ private final class ServiceEndpoint: NSObject, AgentPassNativeServiceProtocol, @
             let approvalFingerprint: Any = sessionManager?.approvalKeyFingerprint ?? NSNull()
             let control = controlManager?.status()
             let fetch = controlFetcher?.status()
-            let data = try JSONSerialization.data(withJSONObject: ["valid": true, "entries": audit.entries, "head_hash": audit.headHash, "checkpoints": checkpoints.count, "latest_checkpoint": latest, "audit_key_fingerprint": fingerprint, "session_required": session?.required ?? false, "active_sessions": session?.active ?? 0, "session_generation": session?.generation ?? 0, "session_approval_key_fingerprint": approvalFingerprint, "control_configured": control != nil, "control_sequence": control?.sequence ?? 0, "control_operational": control?.operational ?? true, "control_expired": control?.expired ?? false, "control_expires_at": control?.expiresAt ?? NSNull(), "control_refresh_configured": fetch != nil, "control_refresh_last_success_at": fetch?.lastSuccessAt ?? NSNull(), "control_refresh_last_error": fetch?.lastError ?? NSNull()], options: [.sortedKeys])
+            let data = try JSONSerialization.data(withJSONObject: ["valid": true, "entries": audit.entries, "head_hash": audit.headHash, "checkpoints": checkpoints.count, "latest_checkpoint": latest, "audit_key_fingerprint": fingerprint, "session_required": session?.required ?? false, "active_sessions": session?.active ?? 0, "session_generation": session?.generation ?? 0, "session_approval_key_fingerprint": approvalFingerprint, "control_configured": control != nil, "control_sequence": control?.sequence ?? 0, "control_operational": control?.operational ?? true, "control_expired": control?.expired ?? false, "control_expires_at": control?.expiresAt ?? NSNull(), "control_refresh_configured": fetch != nil, "control_refresh_last_attempt_at": fetch?.lastAttemptAt ?? NSNull(), "control_refresh_last_success_at": fetch?.lastSuccessAt ?? NSNull(), "control_refresh_last_error": fetch?.lastError ?? NSNull(), "control_refresh_next_attempt_at": fetch?.nextAttemptAt ?? NSNull(), "control_refresh_consecutive_failures": fetch?.consecutiveFailures ?? 0], options: [.sortedKeys])
             reply(data as NSData, nil)
         } catch { reply(nil, error as NSError) }
     }
@@ -336,6 +336,8 @@ private final class ServiceEndpoint: NSObject, AgentPassNativeServiceProtocol, @
             object["refresh_last_attempt_at"] = fetch?.lastAttemptAt ?? NSNull()
             object["refresh_last_success_at"] = fetch?.lastSuccessAt ?? NSNull()
             object["refresh_last_error"] = fetch?.lastError ?? NSNull()
+            object["refresh_next_attempt_at"] = fetch?.nextAttemptAt ?? NSNull()
+            object["refresh_consecutive_failures"] = fetch?.consecutiveFailures ?? 0
             reply(try JSONSerialization.data(withJSONObject: object, options: [.sortedKeys]) as NSData, nil)
         } catch { reply(nil, error as NSError) }
     }
@@ -468,7 +470,7 @@ do {
     let endpoint = ServiceEndpoint(keyStore: keyStore, authorizer: authorizer, auditLog: auditLog, auditCheckpoints: auditCheckpoints, auditSigner: auditSigner, sessionManager: sessionManager, controlManager: controlManager)
     if let rawURL = configuration.controlURL, let interval = configuration.controlRefreshSeconds {
         let refresh = try NativeControlRefreshConfiguration(urlString: rawURL, refreshSeconds: interval)
-        endpoint.startControlRefresh(url: refresh.url, refreshSeconds: refresh.refreshSeconds)
+        try endpoint.startControlRefresh(url: refresh.url, refreshSeconds: refresh.refreshSeconds)
     }
     let delegate = ListenerDelegate(configuration: configuration, endpoint: endpoint)
     listener.delegate = delegate

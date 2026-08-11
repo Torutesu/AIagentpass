@@ -1,3 +1,4 @@
+import AgentPassNativeCore
 import Foundation
 
 enum NativeControlFetchOutcome: Sendable {
@@ -12,14 +13,16 @@ struct NativeControlFetchStatus: Sendable {
     let lastAttemptAt: String?
     let lastSuccessAt: String?
     let lastError: String?
+    let nextAttemptAt: String?
+    let consecutiveFailures: Int
 }
 
 final class NativeControlFetcher: NSObject, URLSessionDataDelegate, URLSessionTaskDelegate, @unchecked Sendable {
     private static let maximumBytes = 256 * 1024
     private let sourceURL: URL
-    private let refreshSeconds: Int
     private let handler: @Sendable (NativeControlFetchOutcome) throws -> Void
     private let stateLock = NSLock()
+    private let timerQueue = DispatchQueue(label: "dev.agentpass.native-control-timer")
     private var session: URLSession!
     private var timer: DispatchSourceTimer?
     private var task: URLSessionDataTask?
@@ -30,11 +33,12 @@ final class NativeControlFetcher: NSObject, URLSessionDataDelegate, URLSessionTa
     private var lastError: String?
     private var lastTransportFailure: String?
     private var lastFailureReportAt: Date?
+    private var retrySchedule: NativeControlRetrySchedule
 
-    init(sourceURL: URL, refreshSeconds: Int, handler: @escaping @Sendable (NativeControlFetchOutcome) throws -> Void) {
+    init(sourceURL: URL, refreshSeconds: Int, handler: @escaping @Sendable (NativeControlFetchOutcome) throws -> Void) throws {
         self.sourceURL = sourceURL
-        self.refreshSeconds = refreshSeconds
         self.handler = handler
+        retrySchedule = try NativeControlRetrySchedule(refreshSeconds: refreshSeconds)
         super.init()
         let configuration = URLSessionConfiguration.ephemeral
         configuration.timeoutIntervalForRequest = 15
@@ -51,17 +55,17 @@ final class NativeControlFetcher: NSObject, URLSessionDataDelegate, URLSessionTa
     }
 
     func start() {
-        let timer = DispatchSource.makeTimerSource(queue: DispatchQueue(label: "dev.agentpass.native-control-timer"))
-        timer.schedule(deadline: .now(), repeating: .seconds(refreshSeconds), leeway: .seconds(min(5, refreshSeconds / 4)))
+        let timer = DispatchSource.makeTimerSource(queue: timerQueue)
         timer.setEventHandler { [weak self] in self?.fetch() }
         self.timer = timer
         timer.resume()
+        scheduleNext(after: 0)
     }
 
     func status() -> NativeControlFetchStatus {
         stateLock.lock()
         defer { stateLock.unlock() }
-        return NativeControlFetchStatus(configured: true, sourceURL: sourceURL.absoluteString, inFlight: task != nil, lastAttemptAt: lastAttemptAt, lastSuccessAt: lastSuccessAt, lastError: lastError)
+        return NativeControlFetchStatus(configured: true, sourceURL: sourceURL.absoluteString, inFlight: task != nil, lastAttemptAt: lastAttemptAt, lastSuccessAt: lastSuccessAt, lastError: lastError, nextAttemptAt: nextAttemptAt, consecutiveFailures: retrySchedule.consecutiveFailures)
     }
 
     private func fetch() {
@@ -70,6 +74,7 @@ final class NativeControlFetcher: NSObject, URLSessionDataDelegate, URLSessionTa
         responseData = Data()
         responseFailure = nil
         lastAttemptAt = timestamp()
+        nextAttemptAt = nil
         var request = URLRequest(url: sourceURL, cachePolicy: .reloadIgnoringLocalAndRemoteCacheData, timeoutInterval: 15)
         request.httpMethod = "GET"
         request.setValue("application/json", forHTTPHeaderField: "Accept")
@@ -77,6 +82,31 @@ final class NativeControlFetcher: NSObject, URLSessionDataDelegate, URLSessionTa
         task = newTask
         stateLock.unlock()
         newTask.resume()
+    }
+
+    private var nextAttemptAt: String?
+
+    private func scheduleNext(after delay: TimeInterval) {
+        let boundedDelay = max(0, delay)
+        stateLock.lock()
+        nextAttemptAt = timestamp(Date().addingTimeInterval(boundedDelay))
+        let timer = self.timer
+        stateLock.unlock()
+        timer?.schedule(deadline: .now() + boundedDelay, leeway: .milliseconds(min(5_000, max(250, Int(boundedDelay * 100)))))
+    }
+
+    private func scheduleAfterSuccess() {
+        stateLock.lock()
+        let delay = retrySchedule.successDelay(randomUnit: Double.random(in: 0...1))
+        stateLock.unlock()
+        scheduleNext(after: delay)
+    }
+
+    private func scheduleAfterFailure() {
+        stateLock.lock()
+        let delay = retrySchedule.failureDelay(randomUnit: Double.random(in: 0...1))
+        stateLock.unlock()
+        scheduleNext(after: delay)
     }
 
     func urlSession(_ session: URLSession, task: URLSessionTask, willPerformHTTPRedirection response: HTTPURLResponse, newRequest request: URLRequest, completionHandler: @escaping (URLRequest?) -> Void) {
@@ -133,13 +163,14 @@ final class NativeControlFetcher: NSObject, URLSessionDataDelegate, URLSessionTa
                 lastFailureReportAt = Date()
             }
             stateLock.unlock()
-            guard shouldReport else { return }
+            guard shouldReport else { scheduleAfterFailure(); return }
             var recordedFailure = failure
             do { try handler(.failure(failure)) }
             catch { recordedFailure += "; audit failure: \(error.localizedDescription)" }
             stateLock.lock()
             lastError = recordedFailure
             stateLock.unlock()
+            scheduleAfterFailure()
             return
         }
         do {
@@ -150,16 +181,18 @@ final class NativeControlFetcher: NSObject, URLSessionDataDelegate, URLSessionTa
             lastTransportFailure = nil
             lastFailureReportAt = nil
             stateLock.unlock()
+            scheduleAfterSuccess()
         } catch {
             stateLock.lock()
             lastError = error.localizedDescription
             stateLock.unlock()
+            scheduleAfterFailure()
         }
     }
 }
 
-private func timestamp() -> String {
+private func timestamp(_ date: Date = Date()) -> String {
     let formatter = ISO8601DateFormatter()
     formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-    return formatter.string(from: Date())
+    return formatter.string(from: date)
 }

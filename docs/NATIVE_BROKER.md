@@ -1,6 +1,6 @@
 # Native macOS broker
 
-AgentPass 0.14 implements the native security boundary described by ADR-001. It is a Swift 6 package with four components:
+AgentPass 0.15 implements the native security boundary described by ADR-001. It is a Swift 6 package with four components:
 
 - `AgentPassNativeCore`: Secure Enclave P-256 key management, OpenSSH SSHSIG encoding, signed Agent request verification, protected sessions and remote control, replay prevention, policy/Git validation, and protected audit primitives;
 - `agentpass-native-service`: a privileged Mach XPC service that owns the signing key, session hashes, audit key, root-owned policy and control state, audit chain, and checkpoint chain;
@@ -32,7 +32,7 @@ The administration Ed25519 public key is pinned in the root-owned version 4 poli
 
 Every accepted higher control sequence also advances the native session generation, discarding active sessions and pending approvals. A session issued under an older control decision therefore cannot become usable again after a later unrevocation; the next operation requires a newly human-approved session. Re-fetching the exact active sequence does not revoke sessions.
 
-Optional `control_url` and `control_refresh_seconds` fields in the root-owned service configuration enable immediate startup fetch followed by periodic refresh every 15-3600 seconds. The URL must be credential-free HTTPS without a query or fragment. Redirects, non-200 responses, responses over 256 KiB, and request/resource timeouts are rejected without changing active state. Cookies and caches are disabled. Fetch status is exposed through native health and `control status`; unchanged valid bundles do not create state writes or repeated allow events. Fetch failures are audited immediately, no more than once per five minutes when the failure changes, and hourly while unchanged.
+Optional `control_url` and `control_refresh_seconds` fields in the root-owned service configuration enable an immediate startup fetch followed by dynamically scheduled refresh. Successful fetches use one-sided 90-100% jitter, so they never occur later than the configured 15-3600 second interval. Failures retry with 5-second exponential backoff and 75-100% jitter, capped at that same configured interval. A successful validated fetch resets the failure count. The URL must be credential-free HTTPS without a query or fragment. Redirects, non-200 responses, responses over 256 KiB, and request/resource timeouts are rejected without changing active state. Cookies and caches are disabled. Native health and `control status` expose the next attempt and consecutive failure count in addition to the last attempt, success, and error. Unchanged valid bundles do not create state writes or repeated allow events. Fetch failures are audited immediately, no more than once per five minutes when the failure changes, and hourly while unchanged.
 
 Accepted state is atomically replaced with mode `0600` and synchronized to disk and its parent directory. The file and existing ancestry are checked for ownership, permissions, regular-file type, and symlinks. Control application is serialized with signing and session changes. If the state changes but its allow audit event cannot be appended, the manager poisons itself and denies further use until the service is repaired and restarted.
 
@@ -140,7 +140,6 @@ Copy the final signed app to a stable location before registration. `daemon-regi
 ## Remaining production work
 
 - Publish a Developer ID-signed, provisioned, notarized universal artifact and installer.
-- Add fleet jitter and exponential retry backoff while preserving refresh-before-expiry guarantees.
 - Add a remote anchor protocol and verifier for native P-256 checkpoints.
 - Add signed audit-log archival/rotation without losing checkpoint continuity.
 - Add signing, audit, and session-approval key deletion/rotation with interactive authorization and recovery UX.

@@ -158,7 +158,7 @@ AgentPass protects against copying the private key out of the device and limits 
 
 ## Native macOS boundary
 
-Version 0.14 includes a Swift/XPC native broker and a buildable macOS app host. It creates separate non-exportable P-256 signing, audit-checkpoint, and human-presence approval keys in Secure Enclave, emits OpenSSH-compatible SSHSIG signatures internally, authenticates the signed XPC client, and repeats Agent identity, session, remote-control, replay, scope, Git context, tree, and parent validation against root-owned policy and state inside the service. The service automatically refreshes signed control bundles from a root-configured HTTPS source with redirects disabled and a 256 KiB response ceiling. Every native signing outcome is appended to a root-owned, durable SHA-256 chain; signed checkpoints make later truncation or rewriting detectable once retained outside the host.
+Version 0.15 includes a Swift/XPC native broker and a buildable macOS app host. It creates separate non-exportable P-256 signing, audit-checkpoint, and human-presence approval keys in Secure Enclave, emits OpenSSH-compatible SSHSIG signatures internally, authenticates the signed XPC client, and repeats Agent identity, session, remote-control, replay, scope, Git context, tree, and parent validation against root-owned policy and state inside the service. The service automatically refreshes signed control bundles from a root-configured HTTPS source with bounded one-sided jitter and exponential failure backoff, while retaining the configured maximum refresh interval. Every native signing outcome is appended to a root-owned, durable SHA-256 chain; signed checkpoints make later truncation or rewriting detectable once retained outside the host.
 
 ```sh
 npm run test:native
@@ -193,6 +193,7 @@ Protected native sessions require human presence only when `agentpass session st
 - [ ] published notarized universal native release artifact
 - [x] protected native remote-control state and monotonic sequence enforcement
 - [x] service-owned bounded native HTTPS control refresh
+- [x] bounded native refresh jitter, exponential retry, and retry telemetry
 - [x] per-agent Ed25519 request identity with replay protection
 - [x] agent enrollment, selection, revocation, and key rotation
 - [x] per-agent operation/repository/branch/remote scopes

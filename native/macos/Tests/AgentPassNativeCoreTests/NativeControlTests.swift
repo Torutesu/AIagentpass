@@ -81,6 +81,22 @@ private struct ControlFixture {
     #expect(throws: AgentPassNativeError.self) { try NativeControlRefreshConfiguration(urlString: "https://control.example.com/bundle.json", refreshSeconds: 14) }
 }
 
+@Test func nativeControlRetryScheduleUsesBoundedOneSidedJitterAndBackoff() throws {
+    var schedule = try NativeControlRetrySchedule(refreshSeconds: 60)
+    #expect(schedule.successDelay(randomUnit: 0) == 54)
+    #expect(schedule.successDelay(randomUnit: 1) == 60)
+    #expect(schedule.failureDelay(randomUnit: 1) == 5)
+    #expect(schedule.failureDelay(randomUnit: 1) == 10)
+    #expect(schedule.failureDelay(randomUnit: 1) == 20)
+    #expect(schedule.failureDelay(randomUnit: 1) == 40)
+    #expect(schedule.failureDelay(randomUnit: 1) == 60)
+    #expect(schedule.failureDelay(randomUnit: 0) == 45)
+    #expect(schedule.consecutiveFailures == 6)
+    #expect(schedule.successDelay(randomUnit: .nan) == 54)
+    #expect(schedule.consecutiveFailures == 0)
+    #expect(throws: AgentPassNativeError.self) { try NativeControlRetrySchedule(refreshSeconds: 14) }
+}
+
 @Test func nativeControlRejectsExpiredForgedAndUnsafeState() throws {
     let fixture = ControlFixture()
     let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
