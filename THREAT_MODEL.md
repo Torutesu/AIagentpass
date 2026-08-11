@@ -6,6 +6,7 @@
 - The authorization policy and revocation state.
 - The integrity and attribution of signing requests.
 - Audit evidence describing policy decisions and signer outcomes for authenticated signing requests.
+- Signed audit checkpoints that can be pinned outside the host.
 
 ## Broker security boundary
 
@@ -23,6 +24,12 @@ For every request, the broker:
 8. has no local-signing fallback.
 
 The Unix socket is mode `0600`, the configuration directory is mode `0700`, and a PID lease prevents a second broker from silently replacing the live socket. Connections and message sizes are bounded.
+
+An authenticated Agent ID is also an authorization principal. Its explicit operation, repository, branch, and remote scope is evaluated after the global policy, so an Agent scope cannot widen global access. Session records are keyed by token hash and bound to one Agent ID; issuing a session for one enrolled agent does not authorize another.
+
+Normal commits must have `HEAD` as their sole parent. Merge commits are accepted only while `MERGE_HEAD` exists and every payload parent exactly matches `HEAD` followed by the repository's merge heads. Initial commits must have no parent.
+
+Audit records form a SHA-256 chain. A separate Ed25519 key signs explicit checkpoints containing the entry count and exact audit head. Exporting the checkpoint record or its hash to an append-only remote system makes later truncation or rewriting detectable against that external copy. The public-key fingerprint identifies the checkpoint signer but, by itself, cannot preserve history after private-key compromise.
 
 ## Security levels
 
@@ -44,5 +51,5 @@ The implementation decision and Apple signing prerequisites are recorded in [doc
 
 - Preventing `git push --no-verify`; server-side branch protection is required.
 - Protecting against root or kernel compromise.
-- Proving audit integrity after an attacker rewrites the entire local log; remote anchoring or signed audit checkpoints are required.
+- Proving audit integrity after an attacker rewrites the entire local log and uses the locally readable checkpoint key; pin checkpoint records or checkpoint hashes outside the host.
 - Treating an environment-variable session token as a non-transferable agent identity.

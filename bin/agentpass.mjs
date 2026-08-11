@@ -5,17 +5,18 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
-import { audit, verifyAudit } from "../lib/audit.mjs";
+import { addAgent, revokeAgent, rotateAgent, setAgentScope, setDefaultAgent } from "../lib/agent-admin.mjs";
+import { audit, createAuditCheckpoint, publicKeyFingerprint, verifyAudit, verifyAuditCheckpoints } from "../lib/audit.mjs";
 import { brokerRequest } from "../lib/broker-client.mjs";
 import { auditPath, defaultConfigDir, loadConfig, loadSession, loadState, saveConfig, saveSession, saveState, socketPath } from "../lib/config.mjs";
-import { createAgentIdentity, signRequest } from "../lib/identity.mjs";
+import { createAgentIdentity, createAuditIdentity, signRequest } from "../lib/identity.mjs";
 import { readGitSigningInvocation, writeGitSignature } from "../lib/git-signing.mjs";
-import { evaluateRequest, evaluateSignRequest } from "../lib/policy.mjs";
+import { evaluateAgentRequest } from "../lib/policy.mjs";
 
 const [, , command, ...args] = process.argv;
 
 function usage() {
-  console.log(`AgentPass 0.5.0
+  console.log(`AgentPass 0.6.0
 
 Commands:
   init              create a secure local policy
@@ -26,6 +27,12 @@ Commands:
   broker ping       verify that the signing broker is running
   broker install    install and start the macOS LaunchAgent
   broker stop       stop the macOS LaunchAgent
+  agent list        list enrolled agent identities
+  agent add NAME    enroll a new agent identity
+  agent set-default ID
+  agent scope ID    replace per-agent authorization scope
+  agent rotate ID   replace an agent identity key
+  agent revoke ID   revoke an identity (--confirm REVOKE)
   setup-macos       show Secure Enclave setup (use --execute to run)
   install-hook      install a policy-enforcing pre-push hook
   push-check        evaluate a pre-push request
@@ -33,7 +40,9 @@ Commands:
   revoke            immediately deny all operations
   restore           re-enable operations after revocation
   git-sign [args]   send a signing request to the broker
-  audit [--verify]  print or verify the tamper-evident audit log
+  audit [--verify]  print or verify audit logs and checkpoints
+  audit checkpoint  sign the current audit head
+  audit public-key  print the checkpoint verification key
 `);
 }
 
@@ -52,16 +61,22 @@ function init() {
   const repository = git(["rev-parse", "--show-toplevel"], true) || process.cwd();
   const origin = git(["remote", "get-url", "origin"], true);
   const identity = createAgentIdentity(dir, process.env.AGENTPASS_AGENT ?? "coding-agent");
+  const auditIdentity = createAuditIdentity(dir);
+  const operations = ["git.commit.sign"];
+  const repositories = [path.resolve(repository)];
+  const branches = { allow: ["feature/*", "fix/*", "chore/*"], deny: ["main", "master", "production"] };
+  const remotes = { allow: origin ? [origin] : [] };
   saveConfig({
-    version: 3,
+    version: 4,
     agent: { name: process.env.AGENTPASS_AGENT ?? "coding-agent" },
-    agents: [{ id: identity.id, name: identity.name, public_key: identity.public_key }],
+    agents: [{ id: identity.id, name: identity.name, public_key: identity.public_key, scope: { operations, repositories, branches, remotes } }],
     default_agent_id: identity.id,
-    operations: ["git.commit.sign"],
-    repositories: [path.resolve(repository)],
-    branches: { allow: ["feature/*", "fix/*", "chore/*"], deny: ["main", "master", "production"] },
-    remotes: { allow: origin ? [origin] : [] },
+    operations,
+    repositories,
+    branches,
+    remotes,
     signing: { key: path.join(defaultConfigDir, "keys", "id_git_sign"), provider: "/usr/lib/ssh-keychain.dylib" },
+    audit_signing: { public_key: auditIdentity.public_key },
     session: { required: true, ttl_seconds: 3600 }
   }, dir);
   saveState({ revoked: false, generation: 0 }, dir);
@@ -71,25 +86,35 @@ function init() {
 
 function migrate() {
   const config = loadConfig();
-  if (config.version >= 3) throw new Error("Configuration is already at version 3");
-  const identity = createAgentIdentity(defaultConfigDir, config.agent?.name ?? "coding-agent");
+  if (config.version >= 4) throw new Error("Configuration is already at version 4");
+  const identity = config.version >= 3 ? null : createAgentIdentity(defaultConfigDir, config.agent?.name ?? "coding-agent");
+  const auditIdentity = createAuditIdentity(defaultConfigDir);
+  const policy = scopeFromPolicy(config);
+  const previousTtl = Number(config.session?.ttl_seconds);
+  const ttlSeconds = Number.isFinite(previousTtl) ? Math.max(60, Math.min(previousTtl, 86400)) : 3600;
   const migrated = {
     ...config,
-    version: 3,
-    agents: [{ id: identity.id, name: identity.name, public_key: identity.public_key }],
-    default_agent_id: identity.id,
-    session: { ...config.session, required: true }
+    version: 4,
+    agents: (identity ? [{ id: identity.id, name: identity.name, public_key: identity.public_key }] : config.agents).map((agent) => ({ ...agent, scope: agent.scope ?? policy })),
+    default_agent_id: identity ? identity.id : config.default_agent_id,
+    operations: policy.operations,
+    repositories: policy.repositories,
+    branches: policy.branches,
+    remotes: policy.remotes,
+    audit_signing: { public_key: auditIdentity.public_key },
+    session: { ...config.session, ttl_seconds: ttlSeconds, required: true }
   };
   saveConfig(migrated);
-  audit({ operation: "config.migrate", decision: "allow", from_version: config.version, to_version: 3, agent_id: identity.id }, defaultConfigDir);
-  console.log("Migrated to configuration version 3. Restart the AgentPass broker.");
+  audit({ operation: "config.migrate", decision: "allow", from_version: config.version, to_version: 4, agent_id: identity?.id ?? config.default_agent_id }, defaultConfigDir);
+  console.log("Migrated to configuration version 4. Restart the AgentPass broker.");
 }
 
 function context(config) {
   const root = git(["rev-parse", "--show-toplevel"]);
-  const session = loadSession();
   const supplied = process.env.AGENTPASS_SESSION;
-  const sessionValid = isSessionValid(session, supplied);
+  const session = loadSession(supplied);
+  const agentId = process.env.AGENTPASS_AGENT_ID ?? config.default_agent_id;
+  const sessionValid = isSessionValid(session, supplied, agentId);
   return {
     cwd: root,
     branch: git(["branch", "--show-current"], true) || "HEAD",
@@ -99,25 +124,31 @@ function context(config) {
   };
 }
 
-function isSessionValid(session, supplied) {
-  return Boolean(session && supplied && crypto.createHash("sha256").update(supplied).digest("hex") === session.token_hash && Date.now() < Date.parse(session.expires_at) && session.generation === loadState().generation);
+function isSessionValid(session, supplied, agentId) {
+  return Boolean(session && supplied && session.agent_id === agentId && crypto.createHash("sha256").update(supplied).digest("hex") === session.token_hash && Date.now() < Date.parse(session.expires_at) && session.generation === loadState().generation);
 }
 
 function sessionStart() {
   const config = loadConfig();
-  const ttl = Math.max(60, Math.min(Number(args[1] ?? config.session?.ttl_seconds ?? 3600), 86400));
+  const agentFlag = args.indexOf("--agent");
+  const agentId = agentFlag >= 0 ? args[agentFlag + 1] : (process.env.AGENTPASS_AGENT_ID ?? config.default_agent_id);
+  if (!config.agents?.some((agent) => agent.id === agentId)) throw new Error("Cannot create a session for an unknown agent identity");
+  const ttlArgument = args.slice(1).find((value, index, values) => value !== "--agent" && values[index - 1] !== "--agent");
+  const ttl = Math.max(60, Math.min(Number(ttlArgument ?? config.session?.ttl_seconds ?? 3600), 86400));
+  if (!Number.isFinite(ttl)) throw new Error("Session TTL must be a number of seconds");
   const token = crypto.randomBytes(32).toString("base64url");
   const state = loadState();
   const expiresAt = new Date(Date.now() + ttl * 1000).toISOString();
-  saveSession({ token_hash: crypto.createHash("sha256").update(token).digest("hex"), expires_at: expiresAt, generation: state.generation });
-  audit({ operation: "session.start", decision: "allow", expires_at: expiresAt, generation: state.generation }, defaultConfigDir);
+  saveSession({ token_hash: crypto.createHash("sha256").update(token).digest("hex"), expires_at: expiresAt, generation: state.generation, agent_id: agentId });
+  audit({ operation: "session.start", decision: "allow", expires_at: expiresAt, generation: state.generation, agent_id: agentId }, defaultConfigDir);
   console.log(token);
   console.error(`Session expires at ${expiresAt}`);
 }
 
 function check() {
   const config = loadConfig();
-  const result = evaluateSignRequest(context(config));
+  const identity = selectedAgent(config);
+  const result = evaluateAgentRequest({ ...context(config), operation: "git.commit.sign" }, identity);
   audit({ operation: "git.commit.sign", decision: result.allowed ? "allow" : "deny", reason: result.reason, cwd: process.cwd() }, defaultConfigDir);
   console.log(JSON.stringify(result, null, 2));
   if (!result.allowed) process.exitCode = 1;
@@ -129,11 +160,13 @@ function status() {
   console.log(JSON.stringify({
     version: config.version,
     agent: config.agent,
+    agents: config.agents?.map((agent) => ({ id: agent.id, name: agent.name, default: agent.id === config.default_agent_id })),
     operations: config.operations,
     repositories: config.repositories,
     revoked: state.revoked,
     generation: state.generation,
-    audit: auditPath()
+    audit: auditPath(),
+    audit_key_fingerprint: config.audit_signing?.public_key ? publicKeyFingerprint(config.audit_signing.public_key) : null
   }, null, 2));
 }
 
@@ -226,7 +259,10 @@ function pushCheck() {
     const isTag = remoteRef?.startsWith("refs/tags/");
     const operation = isTag ? "git.tag.push" : "git.push";
     const branch = (remoteRef ?? `refs/heads/${git(["branch", "--show-current"], true)}`).replace(/^refs\/(heads|tags)\//, "");
-    const result = evaluateRequest({ policy: { ...config, session: { ...config.session, valid: isSessionValid(loadSession(), process.env.AGENTPASS_SESSION) } }, cwd: git(["rev-parse", "--show-toplevel"]), branch, remote: remoteUrl, operation, revoked: state.revoked });
+    const identity = selectedAgent(config);
+    const agentId = identity.id;
+    const requestContext = { policy: { ...config, session: { ...config.session, valid: isSessionValid(loadSession(process.env.AGENTPASS_SESSION), process.env.AGENTPASS_SESSION, agentId) } }, cwd: git(["rev-parse", "--show-toplevel"]), branch, remote: remoteUrl, operation, revoked: state.revoked };
+    const result = evaluateAgentRequest(requestContext, identity);
     audit({ operation, decision: result.allowed ? "allow" : "deny", reason: result.reason, branch, remote: remoteUrl }, defaultConfigDir);
     return { operation, branch, ...result };
   });
@@ -237,8 +273,7 @@ function pushCheck() {
 async function gitSign(signArgs = args) {
   const config = loadConfig();
   const { payloadPath, payload, brokerArgs } = readGitSigningInvocation(signArgs);
-  const agentId = process.env.AGENTPASS_AGENT_ID ?? config.default_agent_id;
-  if (!config.agents?.some((agent) => agent.id === agentId)) throw new Error("Selected agent identity is not enrolled");
+  const agentId = selectedAgent(config).id;
   const privatePath = path.join(defaultConfigDir, "agents", `${agentId}.pem`);
   const request = signRequest({
     operation: "git.commit.sign",
@@ -254,9 +289,86 @@ async function gitSign(signArgs = args) {
   writeGitSignature(payloadPath, Buffer.from(response.stdout_base64, "base64"));
 }
 
+function selectedAgent(config) {
+  const agentId = process.env.AGENTPASS_AGENT_ID ?? config.default_agent_id;
+  const identity = config.agents?.find((agent) => agent.id === agentId);
+  if (!identity) throw new Error("Selected agent identity is not enrolled");
+  return identity;
+}
+
 async function brokerPing() {
   const response = await brokerRequest({ operation: "ping" });
   console.log(JSON.stringify(response, null, 2));
+}
+
+function agentManage() {
+  const action = args[0];
+  if (action === "list") {
+    const config = loadConfig();
+    console.log(JSON.stringify(config.agents.map((agent) => ({ id: agent.id, name: agent.name, default: agent.id === config.default_agent_id, fingerprint: publicKeyFingerprint(agent.public_key), scope: agent.scope ?? null })), null, 2));
+    return;
+  }
+  if (action === "add") {
+    const identity = addAgent(args[1], defaultConfigDir);
+    console.log(JSON.stringify({ id: identity.id, name: identity.name }, null, 2));
+  } else if (action === "set-default") {
+    setDefaultAgent(args[1], defaultConfigDir);
+    console.log(`Default agent set to ${args[1]}.`);
+  } else if (action === "scope") {
+    const scope = parseAgentScope(args.slice(2));
+    setAgentScope(args[1], scope, defaultConfigDir);
+    console.log(JSON.stringify(scope, null, 2));
+  } else if (action === "rotate") {
+    const identity = rotateAgent(args[1], defaultConfigDir);
+    console.log(JSON.stringify({ previous_id: args[1], id: identity.id, name: identity.name }, null, 2));
+  } else if (action === "revoke") {
+    if (args[2] !== "--confirm" || args[3] !== "REVOKE") throw new Error("Agent revocation requires: agentpass agent revoke ID --confirm REVOKE");
+    revokeAgent(args[1], defaultConfigDir);
+    console.log(`Agent ${args[1]} revoked.`);
+  } else {
+    throw new Error("Unknown agent command");
+  }
+  console.error("Broker configuration changed. Restart it before the next signing request.");
+}
+
+function parseAgentScope(values) {
+  const flags = { "--operation": [], "--repository": [], "--branch": [], "--remote": [] };
+  for (let index = 0; index < values.length; index += 2) {
+    const flag = values[index];
+    const value = values[index + 1];
+    if (!Object.hasOwn(flags, flag) || !value) throw new Error("Scope requires repeated --operation, --repository, --branch, and --remote pairs");
+    flags[flag].push(value);
+  }
+  if (Object.values(flags).some((items) => items.length === 0)) throw new Error("Scope requires at least one operation, repository, branch, and remote");
+  if (flags["--repository"].some((repository) => !path.isAbsolute(repository))) throw new Error("Scoped repositories must be absolute paths");
+  return { operations: flags["--operation"], repositories: flags["--repository"], branches: { allow: flags["--branch"] }, remotes: { allow: flags["--remote"] } };
+}
+
+function scopeFromPolicy(config) {
+  return {
+    operations: [...(config.operations ?? ["git.commit.sign"])],
+    repositories: [...config.repositories],
+    branches: structuredClone(Array.isArray(config.branches?.allow) ? config.branches : { allow: ["*"] }),
+    remotes: structuredClone(Array.isArray(config.remotes?.allow) ? config.remotes : { allow: ["*"] })
+  };
+}
+
+function auditCommand() {
+  const config = loadConfig();
+  if (args[0] === "checkpoint") {
+    const checkpoint = createAuditCheckpoint(config.audit_signing.public_key, defaultConfigDir);
+    console.log(JSON.stringify(checkpoint, null, 2));
+  } else if (args[0] === "public-key") {
+    console.error(publicKeyFingerprint(config.audit_signing.public_key));
+    console.log(config.audit_signing.public_key.trim());
+  } else if (args.includes("--verify")) {
+    const chain = verifyAudit(defaultConfigDir);
+    const checkpoints = verifyAuditCheckpoints(config.audit_signing.public_key, defaultConfigDir);
+    console.log(JSON.stringify({ valid: chain.valid && checkpoints.valid, audit: chain, checkpoints }, null, 2));
+    if (!chain.valid || !checkpoints.valid) process.exitCode = 1;
+  } else {
+    console.log(fs.existsSync(auditPath()) ? fs.readFileSync(auditPath(), "utf8") : "");
+  }
 }
 
 function brokerInstall() {
@@ -307,6 +419,7 @@ try {
   else if (command === "broker" && args[0] === "ping") await brokerPing();
   else if (command === "broker" && args[0] === "install") brokerInstall();
   else if (command === "broker" && args[0] === "stop") brokerStop();
+  else if (command === "agent") agentManage();
   else if (command === "setup-macos") setupMacos();
   else if (command === "install-hook") installHook();
   else if (command === "push-check") pushCheck();
@@ -315,10 +428,8 @@ try {
   else if (command === "restore") restore();
   else if (command === "git-sign") await gitSign();
   else if (command === "-Y") await gitSign([command, ...args]);
-  else if (command === "audit") {
-    if (args.includes("--verify")) console.log(JSON.stringify(verifyAudit(defaultConfigDir), null, 2));
-    else console.log(fs.existsSync(auditPath()) ? fs.readFileSync(auditPath(), "utf8") : "");
-  } else usage();
+  else if (command === "audit") auditCommand();
+  else usage();
 } catch (error) {
   console.error(`agentpass: ${error.message}`);
   process.exitCode = 1;

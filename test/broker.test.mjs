@@ -7,8 +7,8 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { brokerRequest } from "../lib/broker-client.mjs";
 import { createBroker, processRequest, sanitizeSignArgs } from "../lib/broker.mjs";
-import { loadConfig, saveConfig, saveState } from "../lib/config.mjs";
-import { createAgentIdentity, signRequest } from "../lib/identity.mjs";
+import { loadConfig, saveConfig, saveSession, saveState } from "../lib/config.mjs";
+import { createAgentIdentity, createAuditIdentity, signRequest } from "../lib/identity.mjs";
 
 function fixture() {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "agentpass-broker-"));
@@ -24,16 +24,18 @@ function fixture() {
   const payload = Buffer.from(`tree ${tree}\nauthor Test <test@example.com> 0 +0000\ncommitter Test <test@example.com> 0 +0000\n\nTest commit\n`);
   const key = path.join(root, "id_git_sign");
   const identity = createAgentIdentity(configDir, "test-agent");
+  const auditIdentity = createAuditIdentity(configDir);
   saveConfig({
-    version: 3,
+    version: 4,
     agent: { name: "test-agent" },
-    agents: [{ id: identity.id, name: identity.name, public_key: identity.public_key }],
+    agents: [{ id: identity.id, name: identity.name, public_key: identity.public_key, scope: { operations: ["git.commit.sign"], repositories: [repo], branches: { allow: ["feature/*"], deny: ["main"] }, remotes: { allow: ["git@github.com:example/project.git"] } } }],
     default_agent_id: identity.id,
     operations: ["git.commit.sign"],
     repositories: [repo],
     branches: { allow: ["feature/*"], deny: ["main"] },
     remotes: { allow: ["git@github.com:example/project.git"] },
     signing: { key, provider: "/test/provider" },
+    audit_signing: { public_key: auditIdentity.public_key },
     session: { required: false, ttl_seconds: 300 }
   }, configDir);
   saveState({ revoked: false, generation: 0 }, configDir);
@@ -143,4 +145,59 @@ test("a second broker cannot replace a live broker socket", async () => {
   } finally {
     await new Promise((resolve) => server.close(resolve));
   }
+});
+
+test("broker allows merge parents only when they exactly match HEAD and MERGE_HEAD", async () => {
+  const data = fixture();
+  const env = { ...process.env, GIT_AUTHOR_NAME: "Test", GIT_AUTHOR_EMAIL: "test@example.com", GIT_COMMITTER_NAME: "Test", GIT_COMMITTER_EMAIL: "test@example.com" };
+  execFileSync("git", ["-C", data.repo, "commit", "-m", "base"], { env });
+  const head = execFileSync("git", ["-C", data.repo, "rev-parse", "HEAD"], { encoding: "utf8" }).trim();
+  const tree = execFileSync("git", ["-C", data.repo, "write-tree"], { encoding: "utf8" }).trim();
+  const mergeHead = execFileSync("git", ["-C", data.repo, "commit-tree", tree, "-m", "side"], { encoding: "utf8", env }).trim();
+  const mergeHeadPath = execFileSync("git", ["-C", data.repo, "rev-parse", "--git-path", "MERGE_HEAD"], { encoding: "utf8" }).trim();
+  fs.writeFileSync(path.isAbsolute(mergeHeadPath) ? mergeHeadPath : path.resolve(data.repo, mergeHeadPath), `${mergeHead}\n`);
+  data.payload = Buffer.from(`tree ${tree}\nparent ${head}\nparent ${mergeHead}\nauthor Test <test@example.com> 0 +0000\ncommitter Test <test@example.com> 0 +0000\n\nMerge\n`);
+  const signer = async () => ({ status: 0, stdout: Buffer.from("signature"), stderr: "" });
+  await processRequest(signedRequest(data), signer, data.configDir);
+
+  data.payload = Buffer.from(`tree ${tree}\nparent ${head}\nparent ${"0".repeat(40)}\nauthor Test <test@example.com> 0 +0000\ncommitter Test <test@example.com> 0 +0000\n\nForged merge\n`);
+  await assert.rejects(processRequest(signedRequest(data), signer, data.configDir), /parents do not match/);
+});
+
+test("broker enforces an agent scope in addition to global policy", async () => {
+  const data = fixture();
+  const config = loadConfig(data.configDir);
+  config.agents[0].scope = {
+    operations: ["git.commit.sign"],
+    repositories: [data.repo],
+    branches: { allow: ["fix/*"] },
+    remotes: { allow: ["git@github.com:example/project.git"] }
+  };
+  saveConfig(config, data.configDir);
+  await assert.rejects(processRequest(signedRequest(data), async () => ({ status: 0, stdout: Buffer.from("bad"), stderr: "" }), data.configDir), /agent_scope_branch_not_allowed/);
+});
+
+test("short-lived sessions are bound to one agent identity", async () => {
+  const data = fixture();
+  const config = loadConfig(data.configDir);
+  config.session.required = true;
+  saveConfig(config, data.configDir);
+  const wrongToken = crypto.randomBytes(32).toString("base64url");
+  saveSession({ token_hash: crypto.createHash("sha256").update(wrongToken).digest("hex"), expires_at: new Date(Date.now() + 60_000).toISOString(), generation: 0, agent_id: crypto.randomUUID() }, data.configDir);
+  const signer = async () => ({ status: 0, stdout: Buffer.from("signature"), stderr: "" });
+  await assert.rejects(processRequest(signedRequest(data, { session: wrongToken }), signer, data.configDir), /session_required/);
+
+  const matchingToken = crypto.randomBytes(32).toString("base64url");
+  saveSession({ token_hash: crypto.createHash("sha256").update(matchingToken).digest("hex"), expires_at: new Date(Date.now() + 60_000).toISOString(), generation: 0, agent_id: data.identity.id }, data.configDir);
+  const result = await processRequest(signedRequest(data, { session: matchingToken }), signer, data.configDir);
+  assert.equal(result.ok, true);
+});
+
+test("broker refuses pre-v4 configuration instead of bypassing agent scopes", async () => {
+  const data = fixture();
+  const config = loadConfig(data.configDir);
+  config.version = 3;
+  delete config.audit_signing;
+  saveConfig(config, data.configDir);
+  await assert.rejects(processRequest(signedRequest(data), async () => ({ status: 0, stdout: Buffer.from("bad"), stderr: "" }), data.configDir), /version 4 is required/);
 });

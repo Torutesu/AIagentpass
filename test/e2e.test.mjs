@@ -40,6 +40,11 @@ test("Git creates a signed commit through the AgentPass broker", { timeout: 15_0
   config.signing.provider = "/usr/lib/ssh-keychain.dylib";
   fs.writeFileSync(configPath, `${JSON.stringify(config, null, 2)}\n`, { mode: 0o600 });
 
+  const addedAgent = JSON.parse(run(process.execPath, [cli, "agent", "add", "e2e-agent"], { cwd: repo, env }));
+  run(process.execPath, [cli, "agent", "scope", addedAgent.id, "--operation", "git.commit.sign", "--repository", repo, "--branch", "feature/*", "--remote", "git@github.com:example/e2e.git"], { cwd: repo, env });
+  run(process.execPath, [cli, "agent", "set-default", addedAgent.id], { cwd: repo, env });
+  assert.match(run(process.execPath, [cli, "agent", "list"], { cwd: repo, env }), /e2e-agent/);
+
   const session = run(process.execPath, [cli, "session", "start", "300"], { cwd: repo, env });
   const broker = spawn(process.execPath, [daemon], { cwd: repo, env, stdio: ["ignore", "pipe", "pipe"] });
   const socket = path.join(testHome, ".agentpass", "agentpass.sock");
@@ -54,6 +59,10 @@ test("Git creates a signed commit through the AgentPass broker", { timeout: 15_0
     run("git", ["-C", repo, "commit", "-m", "Signed commit"], { env: { ...env, AGENTPASS_SESSION: session } });
     const commit = run("git", ["-C", repo, "cat-file", "-p", "HEAD"]);
     assert.match(commit, /BEGIN SSH SIGNATURE/);
+    const checkpoint = JSON.parse(run(process.execPath, [cli, "audit", "checkpoint"], { cwd: repo, env }));
+    assert.equal(checkpoint.entries > 0, true);
+    const verification = JSON.parse(run(process.execPath, [cli, "audit", "--verify"], { cwd: repo, env }));
+    assert.equal(verification.valid, true);
   } finally {
     broker.kill("SIGTERM");
     await new Promise((resolve) => broker.once("exit", resolve));

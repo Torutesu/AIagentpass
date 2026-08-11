@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { evaluateRequest, evaluateSignRequest } from "../lib/policy.mjs";
+import { evaluateAgentRequest, evaluateRequest, evaluateSignRequest } from "../lib/policy.mjs";
 
 const policy = {
   repositories: ["/tmp/project"],
@@ -33,4 +33,11 @@ test("applies separate tag policy", () => {
   const tagPolicy = { ...policy, operations: ["git.tag.push"], tags: { allow: ["v1.*"], deny: ["v1.0.0"] } };
   assert.equal(evaluateRequest({ policy: tagPolicy, cwd: "/tmp/project", branch: "v1.2.0", remote: "git@github.com:example/project.git", operation: "git.tag.push" }).allowed, true);
   assert.equal(evaluateRequest({ policy: tagPolicy, cwd: "/tmp/project", branch: "v1.0.0", remote: "git@github.com:example/project.git", operation: "git.tag.push" }).reason, "tag_denied");
+});
+
+test("agent scope can narrow but cannot widen global policy", () => {
+  const agent = { scope: { ...policy, branches: { allow: ["feature/agent-*"], deny: [] }, operations: ["git.commit.sign"] } };
+  assert.equal(evaluateAgentRequest({ policy, cwd: "/tmp/project", branch: "feature/other", remote: "git@github.com:example/project.git" }, agent).reason, "agent_scope_branch_not_allowed");
+  const widened = { scope: { ...policy, branches: { allow: ["main"] }, operations: ["git.commit.sign"] } };
+  assert.equal(evaluateAgentRequest({ policy, cwd: "/tmp/project", branch: "main", remote: "git@github.com:example/project.git" }, widened).reason, "branch_denied");
 });

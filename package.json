@@ -1,6 +1,6 @@
 {
   "name": "agentpass",
-  "version": "0.5.0",
+  "version": "0.6.0",
   "description": "Policy-controlled signing broker for coding agents",
   "type": "module",
   "files": [
