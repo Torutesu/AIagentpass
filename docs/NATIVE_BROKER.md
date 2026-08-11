@@ -1,6 +1,6 @@
 # Native macOS broker
 
-AgentPass 0.12 implements the source-level native security boundary described by ADR-001. It is a Swift 6 package with three components:
+AgentPass 0.13 implements the source-level native security boundary described by ADR-001. It is a Swift 6 package with three components:
 
 - `AgentPassNativeCore`: Secure Enclave P-256 key management, OpenSSH SSHSIG encoding, signed Agent request verification, protected sessions and remote control, replay prevention, policy/Git validation, and protected audit primitives;
 - `agentpass-native-service`: a privileged Mach XPC service that owns the signing key, session hashes, audit key, root-owned policy and control state, audit chain, and checkpoint chain;
@@ -28,6 +28,10 @@ When `control.required=true`, service startup requires both `control_state_path`
 ## Protected native remote control
 
 The administration Ed25519 public key is pinned in the root-owned version 4 policy. The service accepts only bounded canonical version 1 bundles with a matching key fingerprint, a valid signature, UUIDv4 Agent IDs, at most seven days of validity, and a monotonically increasing JavaScript-safe sequence. Exact same-sequence reapplication is idempotent; rollback and same-sequence equivocation fail closed.
+
+Every accepted higher control sequence also advances the native session generation, discarding active sessions and pending approvals. A session issued under an older control decision therefore cannot become usable again after a later unrevocation; the next operation requires a newly human-approved session. Re-fetching the exact active sequence does not revoke sessions.
+
+Optional `control_url` and `control_refresh_seconds` fields in the root-owned service configuration enable immediate startup fetch followed by periodic refresh every 15-3600 seconds. The URL must be credential-free HTTPS without a query or fragment. Redirects, non-200 responses, responses over 256 KiB, and request/resource timeouts are rejected without changing active state. Cookies and caches are disabled. Fetch status is exposed through native health and `control status`; unchanged valid bundles do not create state writes or repeated allow events. Fetch failures are audited immediately, no more than once per five minutes when the failure changes, and hourly while unchanged.
 
 Accepted state is atomically replaced with mode `0600` and synchronized to disk and its parent directory. The file and existing ancestry are checked for ownership, permissions, regular-file type, and symlinks. Control application is serialized with signing and session changes. If the state changes but its allow audit event cannot be appended, the manager poisons itself and denies further use until the service is repaired and restarted.
 
@@ -68,7 +72,7 @@ Templates are under `native/macos/Resources/`:
 - `AgentPassNativeService.entitlements` must use the actual App Identifier Prefix;
 - `native-service.example.json` must replace `TEAMID`, use the interactive user's UID, and be installed root-owned with mode `0600`.
 
-Create `/Library/Application Support/AgentPass` as root with no group/world write permission. Install the approved version 4 policy there as `policy.json`, owned by root and not group/world writable. This copy—not `~/.agentpass/config.json`—is authoritative inside the service. If it contains `control.required=true`, install an initial signed bundle as `control.bundle.json`, root-owned with mode `0600`, and configure that absolute `control_state_path`. The configured state and audit paths must remain under protected root-owned ancestry.
+Create `/Library/Application Support/AgentPass` as root with no group/world write permission. Install the approved version 4 policy there as `policy.json`, owned by root and not group/world writable. This copy—not `~/.agentpass/config.json`—is authoritative inside the service. If it contains `control.required=true`, install an initial signed bundle as `control.bundle.json`, root-owned with mode `0600`, and configure that absolute `control_state_path`. Add `control_url` and `control_refresh_seconds` to enable service-owned refresh. The configured state and audit paths must remain under protected root-owned ancestry.
 
 After the signed app and daemon are registered, select the bridge in the user-side configuration:
 
@@ -107,12 +111,12 @@ agentpass control fetch
 agentpass control status
 ```
 
-`native status` verifies both chains and reports the audit head, latest checkpoint, session state, and control sequence/expiry/operational state. `native public-key` emits the Git signing public key. `native audit-key` emits the distinct checkpoint verification key. `native checkpoint` first adds an audit event, then signs the resulting exact audit head. `session start` prompts once and caps the requested TTL at the root policy value. The pre-push hook asks the service to validate both the session and control state instead of consulting user-writable files. `native revoke-sessions` does not require human approval because it can only remove authority. `control source` stores only an untrusted HTTPS distribution URL in user configuration; `control apply` and `fetch` cross XPC and are independently verified against the root policy before persistence. Native `control trust` is refused because user configuration cannot rotate the service trust root. Native HTTPS refresh is not automatic yet; run `control fetch` from an operator-managed scheduler before expiry.
+`native status` verifies both chains and reports the audit head, latest checkpoint, session state, control sequence/expiry/operational state, and automatic-refresh status. `native public-key` emits the Git signing public key. `native audit-key` emits the distinct checkpoint verification key. `native checkpoint` first adds an audit event, then signs the resulting exact audit head. `session start` prompts once and caps the requested TTL at the root policy value. The pre-push hook asks the service to validate both the session and control state instead of consulting user-writable files. `native revoke-sessions` does not require human approval because it can only remove authority. `control source` stores an optional untrusted manual-fetch URL in user configuration; `control apply` and manual `fetch` cross XPC and are independently verified against the root policy before persistence. Native `control trust` is refused because user configuration cannot rotate the service trust root. Automatic refresh uses only the root-owned service URL.
 
 ## Remaining production work
 
 - Build the signed `.app` host/registrar and automate `SMAppService` register/status/unregister.
-- Add service-owned bounded HTTPS control refresh with monitored retry/backoff.
+- Add fleet jitter and exponential retry backoff while preserving refresh-before-expiry guarantees.
 - Add a remote anchor protocol and verifier for native P-256 checkpoints.
 - Add signed audit-log archival/rotation without losing checkpoint continuity.
 - Add signing, audit, and session-approval key deletion/rotation with interactive authorization and recovery UX.

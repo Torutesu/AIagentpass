@@ -55,7 +55,7 @@ private struct ControlFixture {
     #expect(manager.status().sequence == 1)
 
     let revokedBundle = try fixture.bundle(sequence: 2, revokedAgents: [fixture.agentID])
-    try manager.validateBundle(bundleData: revokedBundle, nowMilliseconds: fixture.now)
+    #expect(try manager.validateBundle(bundleData: revokedBundle, nowMilliseconds: fixture.now))
     try manager.beginAuditedUpdate()
     let revoked = try manager.apply(bundleData: revokedBundle, nowMilliseconds: fixture.now)
     try manager.completeAuditedUpdate()
@@ -63,11 +63,22 @@ private struct ControlFixture {
     #expect(throws: AgentPassNativeError.self) { try manager.validateControl(agentID: fixture.agentID, nowMilliseconds: fixture.now) }
     #expect(throws: AgentPassNativeError.self) { try manager.apply(bundleData: fixture.bundle(sequence: 1), nowMilliseconds: fixture.now) }
     #expect(throws: AgentPassNativeError.self) { try manager.apply(bundleData: fixture.bundle(sequence: 2, globalRevoked: true), nowMilliseconds: fixture.now) }
+    #expect(try manager.validateBundle(bundleData: revokedBundle, nowMilliseconds: fixture.now) == false)
 
     let restarted = try NativeControlManager(policyData: fixture.policy(), statePath: state.path, nowMilliseconds: fixture.now)
     #expect(restarted.status().sequence == 2)
     #expect(restarted.status().operational)
     #expect(throws: AgentPassNativeError.self) { try restarted.validateControl(agentID: fixture.agentID, nowMilliseconds: fixture.now) }
+}
+
+@Test func nativeControlRefreshConfigurationRejectsUnsafeSources() throws {
+    let valid = try NativeControlRefreshConfiguration(urlString: "https://control.example.com/agentpass/bundle.json", refreshSeconds: 60)
+    #expect(valid.url.host == "control.example.com")
+    #expect(throws: AgentPassNativeError.self) { try NativeControlRefreshConfiguration(urlString: "http://control.example.com/bundle.json", refreshSeconds: 60) }
+    #expect(throws: AgentPassNativeError.self) { try NativeControlRefreshConfiguration(urlString: "https://user:secret@control.example.com/bundle.json", refreshSeconds: 60) }
+    #expect(throws: AgentPassNativeError.self) { try NativeControlRefreshConfiguration(urlString: "https://control.example.com/bundle.json?token=secret", refreshSeconds: 60) }
+    #expect(throws: AgentPassNativeError.self) { try NativeControlRefreshConfiguration(urlString: "https://control.example.com/bundle.json#fragment", refreshSeconds: 60) }
+    #expect(throws: AgentPassNativeError.self) { try NativeControlRefreshConfiguration(urlString: "https://control.example.com/bundle.json", refreshSeconds: 14) }
 }
 
 @Test func nativeControlRejectsExpiredForgedAndUnsafeState() throws {

@@ -4,7 +4,7 @@
 
 The administration key is Ed25519 and should be generated and retained on an offline or separately administered host. AgentPass signing hosts receive only its public key. A control bundle is public data and may be distributed as a static JSON file through a CDN, object store, or repository endpoint that provides HTTPS.
 
-Configuring a trust root is a fail-closed transition. The broker will not start without a locally installed, cryptographically valid bundle and will not sign once it expires. In local mode, an HTTPS URL enables background refresh. In native mode, the root-owned policy and control-state path are authoritative; `agentpass control fetch` verifies transport in the CLI and sends the signed bundle to the service, but scheduling that command is currently an operator responsibility.
+Configuring a trust root is a fail-closed transition. The broker will not start without a locally installed, cryptographically valid bundle and will not sign once it expires. In local mode, an HTTPS URL enables background refresh. In native mode, the root-owned policy, state path, HTTPS URL, and refresh interval are authoritative. The service performs bounded periodic refresh itself; manual `agentpass control fetch` remains available for recovery but cannot bypass service-side signature and sequence checks.
 
 Replacing an existing administration public key requires the explicit `--confirm ROTATE_TRUST` acknowledgement. The previous cached bundle is archived because signatures from the old root must not be accepted under the new configuration.
 
@@ -31,6 +31,8 @@ The transport object also contains the administration-key fingerprint and a Base
 - Once the last valid bundle expires, signing stops until a new valid bundle is installed.
 
 Automatic fetch outcomes and sequence changes are written to the AgentPass audit chain. `agentpass broker ping` exposes the active sequence, last successful fetch time, and latest fetch error.
+
+Native fetch uses an ephemeral URL session, accepts only a direct HTTP 200 response from the configured credential-free HTTPS URL without query or fragment, disables cookies and caches, enforces 15/20-second request/resource timeouts, and cancels once decoded response data exceeds 256 KiB. Repeated identical valid bundles are no-ops. Fetch failures update status on every attempt but are audited immediately, at most every five minutes when the failure changes, and hourly while unchanged. This bounds audit growth during an outage or hostile distribution response.
 
 ## Recovery
 

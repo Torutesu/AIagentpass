@@ -70,6 +70,8 @@ private struct ServiceConfiguration: Decodable {
     let auditCheckpointPath: String
     let auditKeyTag: String
     let controlStatePath: String?
+    let controlURL: String?
+    let controlRefreshSeconds: Int?
     let sessionApprovalPublicKey: String?
     let clientCodeSigningRequirement: String
     let allowedClientUID: UInt32
@@ -83,6 +85,8 @@ private struct ServiceConfiguration: Decodable {
         case auditCheckpointPath = "audit_checkpoint_path"
         case auditKeyTag = "audit_key_tag"
         case controlStatePath = "control_state_path"
+        case controlURL = "control_url"
+        case controlRefreshSeconds = "control_refresh_seconds"
         case sessionApprovalPublicKey = "session_approval_public_key"
         case clientCodeSigningRequirement = "client_code_signing_requirement"
         case allowedClientUID = "allowed_client_uid"
@@ -94,11 +98,17 @@ private struct ServiceConfiguration: Decodable {
               !value.clientCodeSigningRequirement.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             throw AgentPassNativeError.invalidConfiguration("Native service configuration contains empty trust parameters")
         }
+        if value.controlURL != nil || value.controlRefreshSeconds != nil {
+            guard value.controlStatePath != nil, let rawURL = value.controlURL, let interval = value.controlRefreshSeconds else {
+                throw AgentPassNativeError.invalidConfiguration("Native control refresh requires protected state, URL, and interval")
+            }
+            _ = try NativeControlRefreshConfiguration(urlString: rawURL, refreshSeconds: interval)
+        }
         return value
     }
 }
 
-private final class ServiceEndpoint: NSObject, AgentPassNativeServiceProtocol {
+private final class ServiceEndpoint: NSObject, AgentPassNativeServiceProtocol, @unchecked Sendable {
     private let keyStore: SecureEnclaveKeyStore
     private let authorizer: NativeRequestAuthorizer
     private let auditLog: NativeAuditLog
@@ -107,6 +117,9 @@ private final class ServiceEndpoint: NSObject, AgentPassNativeServiceProtocol {
     private let sessionManager: NativeSessionManager?
     private let controlManager: NativeControlManager?
     private let authorizationLock = NSLock()
+    private var controlFetcher: NativeControlFetcher?
+    private var lastControlFetchAuditReason: String?
+    private var lastControlFetchAuditAt: Date?
 
     init(keyStore: SecureEnclaveKeyStore, authorizer: NativeRequestAuthorizer, auditLog: NativeAuditLog, auditCheckpoints: NativeAuditCheckpoints, auditSigner: SecureEnclaveKeyStore, sessionManager: NativeSessionManager?, controlManager: NativeControlManager?) {
         self.keyStore = keyStore
@@ -118,6 +131,15 @@ private final class ServiceEndpoint: NSObject, AgentPassNativeServiceProtocol {
         self.controlManager = controlManager
     }
 
+    func startControlRefresh(url: URL, refreshSeconds: Int) {
+        let fetcher = NativeControlFetcher(sourceURL: url, refreshSeconds: refreshSeconds) { [weak self] outcome in
+            guard let self else { throw AgentPassNativeError.invalidConfiguration("Native control service is unavailable") }
+            try self.handleControlFetch(outcome)
+        }
+        controlFetcher = fetcher
+        fetcher.start()
+    }
+
     func health(withReply reply: @escaping (NSDictionary) -> Void) {
         do {
             let audit = try auditLog.verify()
@@ -125,9 +147,10 @@ private final class ServiceEndpoint: NSObject, AgentPassNativeServiceProtocol {
             let session = sessionManager?.status()
             let approvalFingerprint: Any = sessionManager?.approvalKeyFingerprint ?? NSNull()
             let control = controlManager?.status()
-            reply(["ok": true, "protocol_version": 4, "key_backend": "secure-enclave", "audit_entries": audit.entries, "audit_checkpoints": checkpoints.count, "session_required": session?.required ?? false, "active_sessions": session?.active ?? 0, "session_generation": session?.generation ?? 0, "session_approval_key_fingerprint": approvalFingerprint, "control_configured": control != nil, "control_sequence": control?.sequence ?? 0, "control_operational": control?.operational ?? true, "control_expired": control?.expired ?? false, "control_expires_at": control?.expiresAt ?? NSNull()])
+            let fetch = controlFetcher?.status()
+            reply(["ok": true, "protocol_version": 5, "key_backend": "secure-enclave", "audit_entries": audit.entries, "audit_checkpoints": checkpoints.count, "session_required": session?.required ?? false, "active_sessions": session?.active ?? 0, "session_generation": session?.generation ?? 0, "session_approval_key_fingerprint": approvalFingerprint, "control_configured": control != nil, "control_sequence": control?.sequence ?? 0, "control_operational": control?.operational ?? true, "control_expired": control?.expired ?? false, "control_expires_at": control?.expiresAt ?? NSNull(), "control_refresh_configured": fetch != nil, "control_refresh_in_flight": fetch?.inFlight ?? false, "control_refresh_last_success_at": fetch?.lastSuccessAt ?? NSNull(), "control_refresh_last_error": fetch?.lastError ?? NSNull()])
         } catch {
-            reply(["ok": false, "protocol_version": 4, "error": error.localizedDescription])
+            reply(["ok": false, "protocol_version": 5, "error": error.localizedDescription])
         }
     }
 
@@ -179,7 +202,8 @@ private final class ServiceEndpoint: NSObject, AgentPassNativeServiceProtocol {
             let session = sessionManager?.status()
             let approvalFingerprint: Any = sessionManager?.approvalKeyFingerprint ?? NSNull()
             let control = controlManager?.status()
-            let data = try JSONSerialization.data(withJSONObject: ["valid": true, "entries": audit.entries, "head_hash": audit.headHash, "checkpoints": checkpoints.count, "latest_checkpoint": latest, "audit_key_fingerprint": fingerprint, "session_required": session?.required ?? false, "active_sessions": session?.active ?? 0, "session_generation": session?.generation ?? 0, "session_approval_key_fingerprint": approvalFingerprint, "control_configured": control != nil, "control_sequence": control?.sequence ?? 0, "control_operational": control?.operational ?? true, "control_expired": control?.expired ?? false, "control_expires_at": control?.expiresAt ?? NSNull()], options: [.sortedKeys])
+            let fetch = controlFetcher?.status()
+            let data = try JSONSerialization.data(withJSONObject: ["valid": true, "entries": audit.entries, "head_hash": audit.headHash, "checkpoints": checkpoints.count, "latest_checkpoint": latest, "audit_key_fingerprint": fingerprint, "session_required": session?.required ?? false, "active_sessions": session?.active ?? 0, "session_generation": session?.generation ?? 0, "session_approval_key_fingerprint": approvalFingerprint, "control_configured": control != nil, "control_sequence": control?.sequence ?? 0, "control_operational": control?.operational ?? true, "control_expired": control?.expired ?? false, "control_expires_at": control?.expiresAt ?? NSNull(), "control_refresh_configured": fetch != nil, "control_refresh_last_success_at": fetch?.lastSuccessAt ?? NSNull(), "control_refresh_last_error": fetch?.lastError ?? NSNull()], options: [.sortedKeys])
             reply(data as NSData, nil)
         } catch { reply(nil, error as NSError) }
     }
@@ -285,41 +309,8 @@ private final class ServiceEndpoint: NSObject, AgentPassNativeServiceProtocol {
     }
 
     func applyControlBundle(bundle: NSData, withReply reply: @escaping (NSData?, NSError?) -> Void) {
-        authorizationLock.lock()
-        defer { authorizationLock.unlock() }
-        guard let controlManager else {
-            reply(nil, AgentPassNativeError.invalidConfiguration("Native remote control is not configured") as NSError)
-            return
-        }
-        do { _ = try auditCheckpoints.verify() }
-        catch { reply(nil, error as NSError); return }
-        do { try controlManager.validateBundle(bundleData: bundle as Data) }
-        catch let controlError {
-            do { try auditLog.append(NativeAuditEvent(operation: "control.apply", decision: "deny", reason: controlError.localizedDescription)) }
-            catch let auditError { reply(nil, auditError as NSError); return }
-            reply(nil, controlError as NSError)
-            return
-        }
-        do { try controlManager.beginAuditedUpdate() }
-        catch { reply(nil, error as NSError); return }
-        let status: NativeControlStatus
-        do { status = try controlManager.apply(bundleData: bundle as Data) }
-        catch {
-            controlManager.invalidate()
-            _ = try? auditLog.append(NativeAuditEvent(operation: "control.apply", decision: "error", reason: error.localizedDescription))
-            reply(nil, error as NSError)
-            return
-        }
         do {
-            try auditLog.append(NativeAuditEvent(operation: "control.apply", decision: "allow", reason: "sequence=\(status.sequence);expires_at=\(status.expiresAt)"))
-            try controlManager.completeAuditedUpdate()
-        }
-        catch {
-            controlManager.invalidate()
-            reply(nil, error as NSError)
-            return
-        }
-        do {
+            let status = try applyControlUpdate(bundleData: bundle as Data, operation: "control.apply")
             let encoder = JSONEncoder()
             encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
             reply(try encoder.encode(status) as NSData, nil)
@@ -335,9 +326,17 @@ private final class ServiceEndpoint: NSObject, AgentPassNativeServiceProtocol {
             return
         }
         do {
-            let encoder = JSONEncoder()
+            let encoder = JSONEncoder(), status = controlManager.status()
             encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
-            reply(try encoder.encode(controlManager.status()) as NSData, nil)
+            var object = try JSONSerialization.jsonObject(with: encoder.encode(status)) as! [String: Any]
+            let fetch = controlFetcher?.status()
+            object["refresh_configured"] = fetch != nil
+            object["refresh_source_url"] = fetch?.sourceURL ?? NSNull()
+            object["refresh_in_flight"] = fetch?.inFlight ?? false
+            object["refresh_last_attempt_at"] = fetch?.lastAttemptAt ?? NSNull()
+            object["refresh_last_success_at"] = fetch?.lastSuccessAt ?? NSNull()
+            object["refresh_last_error"] = fetch?.lastError ?? NSNull()
+            reply(try JSONSerialization.data(withJSONObject: object, options: [.sortedKeys]) as NSData, nil)
         } catch { reply(nil, error as NSError) }
     }
 
@@ -349,6 +348,77 @@ private final class ServiceEndpoint: NSObject, AgentPassNativeServiceProtocol {
             try controlManager.validateControl(agentID: agentID as String, nowMilliseconds: Int64(Date().timeIntervalSince1970 * 1000))
             reply(true, nil)
         } catch { reply(false, nil) }
+    }
+
+    private func handleControlFetch(_ outcome: NativeControlFetchOutcome) throws {
+        switch outcome {
+        case .success(let data):
+            _ = try applyControlUpdate(bundleData: data, operation: "control.fetch")
+        case .failure(let reason):
+            authorizationLock.lock()
+            defer { authorizationLock.unlock() }
+            guard let controlManager else { throw AgentPassNativeError.invalidConfiguration("Native remote control is not configured") }
+            _ = try auditCheckpoints.verify()
+            do { try appendControlFetchFailureIfNeeded(decision: "error", reason: reason) }
+            catch {
+                controlManager.invalidate()
+                throw error
+            }
+        }
+    }
+
+    private func applyControlUpdate(bundleData: Data, operation: String) throws -> NativeControlStatus {
+        authorizationLock.lock()
+        defer { authorizationLock.unlock() }
+        guard let controlManager else { throw AgentPassNativeError.invalidConfiguration("Native remote control is not configured") }
+        _ = try auditCheckpoints.verify()
+        let requiresUpdate: Bool
+        do { requiresUpdate = try controlManager.validateBundle(bundleData: bundleData) }
+        catch let controlError {
+            do {
+                if operation == "control.fetch" { try appendControlFetchFailureIfNeeded(decision: "deny", reason: controlError.localizedDescription) }
+                else { try auditLog.append(NativeAuditEvent(operation: operation, decision: "deny", reason: controlError.localizedDescription)) }
+            }
+            catch {
+                controlManager.invalidate()
+                throw error
+            }
+            throw controlError
+        }
+        if operation == "control.fetch" {
+            lastControlFetchAuditReason = nil
+            lastControlFetchAuditAt = nil
+        }
+        if !requiresUpdate { return controlManager.status() }
+        try controlManager.beginAuditedUpdate()
+        let status: NativeControlStatus
+        do { status = try controlManager.apply(bundleData: bundleData) }
+        catch {
+            controlManager.invalidate()
+            _ = try? auditLog.append(NativeAuditEvent(operation: operation, decision: "error", reason: error.localizedDescription))
+            throw error
+        }
+        let revokedSessions = sessionManager?.revokeAll()
+        do {
+            let sessionReason = revokedSessions.map { ";session_generation=\($0.generation);sessions_revoked=\($0.revokedSessions)" } ?? ""
+            try auditLog.append(NativeAuditEvent(operation: operation, decision: "allow", reason: "sequence=\(status.sequence);expires_at=\(status.expiresAt)\(sessionReason)"))
+            try controlManager.completeAuditedUpdate()
+        } catch {
+            controlManager.invalidate()
+            throw error
+        }
+        return status
+    }
+
+    private func appendControlFetchFailureIfNeeded(decision: String, reason: String) throws {
+        let now = Date()
+        let elapsed = lastControlFetchAuditAt.map { now.timeIntervalSince($0) }
+        let key = "\(decision):\(reason)"
+        let shouldAppend = elapsed.map { $0 >= 3600 || (lastControlFetchAuditReason != key && $0 >= 300) } ?? true
+        guard shouldAppend else { return }
+        try auditLog.append(NativeAuditEvent(operation: "control.fetch", decision: decision, reason: reason))
+        lastControlFetchAuditReason = key
+        lastControlFetchAuditAt = now
     }
 }
 
@@ -395,7 +465,12 @@ do {
     _ = try auditCheckpoints.verify()
     let authorizer = try NativeRequestAuthorizer(policyData: policyData, sessionValidator: sessionManager, controlValidator: controlManager)
     let listener = NSXPCListener(machServiceName: configuration.machServiceName)
-    let delegate = ListenerDelegate(configuration: configuration, endpoint: ServiceEndpoint(keyStore: keyStore, authorizer: authorizer, auditLog: auditLog, auditCheckpoints: auditCheckpoints, auditSigner: auditSigner, sessionManager: sessionManager, controlManager: controlManager))
+    let endpoint = ServiceEndpoint(keyStore: keyStore, authorizer: authorizer, auditLog: auditLog, auditCheckpoints: auditCheckpoints, auditSigner: auditSigner, sessionManager: sessionManager, controlManager: controlManager)
+    if let rawURL = configuration.controlURL, let interval = configuration.controlRefreshSeconds {
+        let refresh = try NativeControlRefreshConfiguration(urlString: rawURL, refreshSeconds: interval)
+        endpoint.startControlRefresh(url: refresh.url, refreshSeconds: refresh.refreshSeconds)
+    }
+    let delegate = ListenerDelegate(configuration: configuration, endpoint: endpoint)
     listener.delegate = delegate
     listener.resume()
     RunLoop.current.run()

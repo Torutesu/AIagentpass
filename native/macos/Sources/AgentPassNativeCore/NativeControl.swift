@@ -7,6 +7,22 @@ public protocol NativeControlValidating: Sendable {
     func validateControl(agentID: String, nowMilliseconds: Int64) throws
 }
 
+public struct NativeControlRefreshConfiguration: Equatable, Sendable {
+    public let url: URL
+    public let refreshSeconds: Int
+
+    public init(urlString: String, refreshSeconds: Int) throws {
+        guard let components = URLComponents(string: urlString), components.scheme?.lowercased() == "https",
+              components.host?.isEmpty == false, components.user == nil, components.password == nil,
+              components.query == nil, components.fragment == nil, let url = components.url,
+              (15...3600).contains(refreshSeconds) else {
+            throw AgentPassNativeError.invalidConfiguration("Native control refresh requires a credential-free HTTPS URL without query or fragment and a 15-3600 second interval")
+        }
+        self.url = url
+        self.refreshSeconds = refreshSeconds
+    }
+}
+
 public struct NativeControlStatus: Codable, Equatable, Sendable {
     public let configured: Bool
     public let sequence: Int64
@@ -89,13 +105,15 @@ public final class NativeControlManager: NativeControlValidating, @unchecked Sen
         return Self.status(candidate, nowMilliseconds: nowMilliseconds)
     }
 
-    public func validateBundle(bundleData: Data, nowMilliseconds: Int64 = Int64(Date().timeIntervalSince1970 * 1000)) throws {
+    @discardableResult
+    public func validateBundle(bundleData: Data, nowMilliseconds: Int64 = Int64(Date().timeIntervalSince1970 * 1000)) throws -> Bool {
         guard bundleData.count > 0, bundleData.count <= 256 * 1024 else { throw AgentPassNativeError.unauthorizedClient("Native control bundle size is invalid") }
         let candidate = try Self.verify(data: bundleData, publicKey: publicKey, publicKeyDER: publicKeyDER, nowMilliseconds: nowMilliseconds, allowExpired: false)
         lock.lock()
         defer { lock.unlock() }
         guard operational else { throw AgentPassNativeError.unauthorizedClient("Native remote control integrity failure") }
         try validateSequence(candidate)
+        return candidate.sequence > active.sequence
     }
 
     public func validateControl(agentID: String, nowMilliseconds: Int64 = Int64(Date().timeIntervalSince1970 * 1000)) throws {
