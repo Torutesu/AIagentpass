@@ -44,6 +44,73 @@ private func anchorReceiptData(checkpoint: NativeAuditCheckpoint, index: Int, pr
     #expect(throws: AgentPassNativeError.self) { try log.append(NativeAuditEvent(operation: "test", decision: "allow")) }
 }
 
+@Test func nativeAuditRotationPreservesChainAndCheckpointContinuity() throws {
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+    let archive = root.appendingPathComponent("archive")
+    try FileManager.default.createDirectory(at: archive, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+    defer { try? FileManager.default.removeItem(at: root) }
+    let auditFile = root.appendingPathComponent("audit.jsonl")
+    let checkpointFile = root.appendingPathComponent("checkpoints.jsonl")
+    let signer = AuditSoftwareSigner()
+    let log = try NativeAuditLog(path: auditFile.path, archiveDirectory: archive.path)
+    let checkpoints = try NativeAuditCheckpoints(path: checkpointFile.path, auditLog: log, signer: signer)
+    try log.append(NativeAuditEvent(operation: "one", decision: "allow"), timestamp: Date(timeIntervalSince1970: 1))
+    try log.append(NativeAuditEvent(operation: "two", decision: "deny"), timestamp: Date(timeIntervalSince1970: 2))
+    let checkpoint = try checkpoints.create(timestamp: Date(timeIntervalSince1970: 3))
+    let rotation = try log.rotate(minimumBytes: 1)
+    #expect(rotation.entries == 2)
+    #expect(rotation.headHash == checkpoint.headHash)
+    #expect(rotation.archiveFile.contains("00000000000000000002"))
+    #expect(!FileManager.default.fileExists(atPath: auditFile.path))
+    #expect((try FileManager.default.attributesOfItem(atPath: archive.appendingPathComponent(rotation.archiveFile).path)[.posixPermissions] as? NSNumber)?.intValue == 0o400)
+    let rotatedStorage = try log.storageStatus()
+    #expect(rotatedStorage.configured)
+    #expect(rotatedStorage.segments == 1)
+    #expect(rotatedStorage.activeBytes == 0)
+    #expect(!rotatedStorage.rotationReady)
+
+    let after = try log.append(NativeAuditEvent(operation: "three", decision: "allow"), timestamp: Date(timeIntervalSince1970: 4))
+    #expect(after.entries == 3)
+    #expect(after.headHash != rotation.headHash)
+    #expect(try checkpoints.verify() == [checkpoint])
+    let restarted = try NativeAuditLog(path: auditFile.path, archiveDirectory: archive.path)
+    #expect(try restarted.verify() == after)
+}
+
+@Test func nativeAuditRotationRejectsSmallLogsAndArchiveTampering() throws {
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+    let archive = root.appendingPathComponent("archive")
+    try FileManager.default.createDirectory(at: archive, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+    defer { try? FileManager.default.removeItem(at: root) }
+    let log = try NativeAuditLog(path: root.appendingPathComponent("audit.jsonl").path, archiveDirectory: archive.path)
+    try log.append(NativeAuditEvent(operation: "one", decision: "allow"))
+    #expect(throws: AgentPassNativeError.self) { try log.rotate() }
+    let rotation = try log.rotate(minimumBytes: 1)
+    let segment = archive.appendingPathComponent(rotation.archiveFile)
+    try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: segment.path)
+    var data = try Data(contentsOf: segment)
+    data[data.startIndex] ^= 1
+    try data.write(to: segment)
+    try FileManager.default.setAttributes([.posixPermissions: 0o400], ofItemAtPath: segment.path)
+    #expect(throws: (any Error).self) { try log.verify() }
+    #expect(throws: (any Error).self) { try log.append(NativeAuditEvent(operation: "two", decision: "allow")) }
+}
+
+@Test func nativeAuditArchiveRejectsUnknownEntriesAndUnsafeDirectories() throws {
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+    let archive = root.appendingPathComponent("archive")
+    try FileManager.default.createDirectory(at: archive, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+    defer { try? FileManager.default.removeItem(at: root) }
+    let auditFile = root.appendingPathComponent("audit.jsonl")
+    #expect(throws: AgentPassNativeError.self) { try NativeAuditLog(path: auditFile.path, archiveDirectory: root.path) }
+    let log = try NativeAuditLog(path: auditFile.path, archiveDirectory: archive.path)
+    try Data("unexpected\n".utf8).write(to: archive.appendingPathComponent("README"))
+    #expect(throws: AgentPassNativeError.self) { try log.verify() }
+    try FileManager.default.removeItem(at: archive.appendingPathComponent("README"))
+    try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: archive.path)
+    #expect(throws: AgentPassNativeError.self) { try NativeAuditLog(path: auditFile.path, archiveDirectory: archive.path) }
+}
+
 @Test func nativeAuditCheckpointsUseASeparateSignedChain() throws {
     let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
     try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)

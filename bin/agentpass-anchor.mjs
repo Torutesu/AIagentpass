@@ -6,7 +6,7 @@ import { createAnchorServer, enrollAnchorTenant, initializeAnchor, verifyAnchorT
 const [, , command, ...args] = process.argv;
 
 function usage() {
-  console.log(`AgentPass Anchor 0.16.0
+  console.log(`AgentPass Anchor 0.17.0
 
 Commands:
   init DIR                         initialize anchor storage and receipt key

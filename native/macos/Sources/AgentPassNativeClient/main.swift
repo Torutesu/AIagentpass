@@ -18,7 +18,7 @@ private func emit(_ output: Output, status: Int32 = 0) -> Never {
 }
 
 guard CommandLine.arguments.count >= 3, CommandLine.arguments[1] == "--service" else {
-    emit(Output(ok: false, version: nil, stdout_base64: nil, public_key: nil, error: "Usage: agentpass-native-client --service MACH_SERVICE sign|ping|public-key|audit-status|audit-public-key|audit-checkpoint|audit-anchor-status|audit-anchor-push|approval-public-key|session-start|session-revoke|session-validate|control-apply|control-status|control-validate"), status: 2)
+    emit(Output(ok: false, version: nil, stdout_base64: nil, public_key: nil, error: "Usage: agentpass-native-client --service MACH_SERVICE sign|ping|public-key|audit-status|audit-public-key|audit-checkpoint|audit-rotate|audit-anchor-status|audit-anchor-push|approval-public-key|session-start|session-revoke|session-validate|control-apply|control-status|control-validate"), status: 2)
 }
 let serviceName = CommandLine.arguments[2]
 let command = CommandLine.arguments.count > 3 ? CommandLine.arguments[3] : ""
@@ -87,6 +87,11 @@ case "audit-public-key":
     }
 case "audit-checkpoint":
     proxy.createAuditCheckpoint { data, error in
+        result = dataOutput(data, error: error)
+        semaphore.signal()
+    }
+case "audit-rotate":
+    proxy.rotateAudit { data, error in
         result = dataOutput(data, error: error)
         semaphore.signal()
     }

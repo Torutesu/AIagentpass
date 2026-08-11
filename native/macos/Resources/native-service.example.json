@@ -4,6 +4,7 @@
   "keychain_access_group": "TEAMID.dev.agentpass.keys",
   "policy_path": "/Library/Application Support/AgentPass/policy.json",
   "audit_log_path": "/Library/Application Support/AgentPass/audit.jsonl",
+  "audit_archive_directory": "/Library/Application Support/AgentPass/audit-archive",
   "audit_checkpoint_path": "/Library/Application Support/AgentPass/audit.checkpoints.jsonl",
   "audit_key_tag": "dev.agentpass.audit-checkpoint",
   "audit_anchor_url": "https://audit-anchor.example.com/",

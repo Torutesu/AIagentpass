@@ -57,6 +57,27 @@ private func validateProtectedOutputPath(path: String, label: String) throws {
     }
 }
 
+private func validateProtectedDirectoryPath(path: String, label: String) throws {
+    let original = URL(fileURLWithPath: path).standardizedFileURL
+    guard original.path.hasPrefix("/"), original.resolvingSymlinksInPath().path == original.path else {
+        throw AgentPassNativeError.invalidConfiguration("\(label) path must be absolute and contain no symbolic links")
+    }
+    var current = original
+    while true {
+        let attributes = try FileManager.default.attributesOfItem(atPath: current.path)
+        let owner = (attributes[.ownerAccountID] as? NSNumber)?.uint32Value
+        guard owner == 0, permissions(attributes) & 0o022 == 0 else {
+            throw AgentPassNativeError.invalidConfiguration("\(label) and every parent must be root-owned and not group/world writable")
+        }
+        if current.path == "/" { break }
+        current.deleteLastPathComponent()
+    }
+    let attributes = try FileManager.default.attributesOfItem(atPath: original.path)
+    guard (attributes[.type] as? FileAttributeType) == .typeDirectory, permissions(attributes) & 0o077 == 0 else {
+        throw AgentPassNativeError.invalidConfiguration("\(label) must be a private directory")
+    }
+}
+
 private func permissions(_ attributes: [FileAttributeKey: Any]) -> UInt16 {
     (attributes[.posixPermissions] as? NSNumber)?.uint16Value ?? 0xffff
 }
@@ -67,6 +88,7 @@ private struct ServiceConfiguration: Decodable {
     let keychainAccessGroup: String?
     let policyPath: String
     let auditLogPath: String
+    let auditArchiveDirectory: String?
     let auditCheckpointPath: String
     let auditKeyTag: String
     let auditAnchorURL: String?
@@ -86,6 +108,7 @@ private struct ServiceConfiguration: Decodable {
         case keychainAccessGroup = "keychain_access_group"
         case policyPath = "policy_path"
         case auditLogPath = "audit_log_path"
+        case auditArchiveDirectory = "audit_archive_directory"
         case auditCheckpointPath = "audit_checkpoint_path"
         case auditKeyTag = "audit_key_tag"
         case auditAnchorURL = "audit_anchor_url"
@@ -168,15 +191,16 @@ private final class ServiceEndpoint: NSObject, AgentPassNativeServiceProtocol, @
     func health(withReply reply: @escaping (NSDictionary) -> Void) {
         do {
             let audit = try auditLog.verify()
+            let storage = try auditLog.storageStatus()
             let checkpoints = try auditCheckpoints.verify()
             let session = sessionManager?.status()
             let approvalFingerprint: Any = sessionManager?.approvalKeyFingerprint ?? NSNull()
             let control = controlManager?.status()
             let fetch = controlFetcher?.status()
             let anchor = try auditAnchorReceipts?.status(checkpoints: checkpoints)
-            reply(["ok": true, "protocol_version": 7, "key_backend": "secure-enclave", "audit_entries": audit.entries, "audit_checkpoints": checkpoints.count, "audit_anchor_configured": anchor != nil, "audit_anchor_receipts": anchor?.receipts ?? 0, "audit_anchor_pending": anchor?.pending ?? 0, "audit_anchor_latest_receipt": anchor?.latestReceiptHash ?? NSNull(), "session_required": session?.required ?? false, "active_sessions": session?.active ?? 0, "session_generation": session?.generation ?? 0, "session_approval_key_fingerprint": approvalFingerprint, "control_configured": control != nil, "control_sequence": control?.sequence ?? 0, "control_operational": control?.operational ?? true, "control_expired": control?.expired ?? false, "control_expires_at": control?.expiresAt ?? NSNull(), "control_refresh_configured": fetch != nil, "control_refresh_in_flight": fetch?.inFlight ?? false, "control_refresh_last_attempt_at": fetch?.lastAttemptAt ?? NSNull(), "control_refresh_last_success_at": fetch?.lastSuccessAt ?? NSNull(), "control_refresh_last_error": fetch?.lastError ?? NSNull(), "control_refresh_next_attempt_at": fetch?.nextAttemptAt ?? NSNull(), "control_refresh_consecutive_failures": fetch?.consecutiveFailures ?? 0])
+            reply(["ok": true, "protocol_version": 8, "key_backend": "secure-enclave", "audit_entries": audit.entries, "audit_archive_configured": storage.configured, "audit_archive_segments": storage.segments, "audit_active_bytes": storage.activeBytes, "audit_rotation_ready": storage.rotationReady, "audit_checkpoints": checkpoints.count, "audit_anchor_configured": anchor != nil, "audit_anchor_receipts": anchor?.receipts ?? 0, "audit_anchor_pending": anchor?.pending ?? 0, "audit_anchor_latest_receipt": anchor?.latestReceiptHash ?? NSNull(), "session_required": session?.required ?? false, "active_sessions": session?.active ?? 0, "session_generation": session?.generation ?? 0, "session_approval_key_fingerprint": approvalFingerprint, "control_configured": control != nil, "control_sequence": control?.sequence ?? 0, "control_operational": control?.operational ?? true, "control_expired": control?.expired ?? false, "control_expires_at": control?.expiresAt ?? NSNull(), "control_refresh_configured": fetch != nil, "control_refresh_in_flight": fetch?.inFlight ?? false, "control_refresh_last_attempt_at": fetch?.lastAttemptAt ?? NSNull(), "control_refresh_last_success_at": fetch?.lastSuccessAt ?? NSNull(), "control_refresh_last_error": fetch?.lastError ?? NSNull(), "control_refresh_next_attempt_at": fetch?.nextAttemptAt ?? NSNull(), "control_refresh_consecutive_failures": fetch?.consecutiveFailures ?? 0])
         } catch {
-            reply(["ok": false, "protocol_version": 7, "error": error.localizedDescription])
+            reply(["ok": false, "protocol_version": 8, "error": error.localizedDescription])
         }
     }
 
@@ -222,6 +246,7 @@ private final class ServiceEndpoint: NSObject, AgentPassNativeServiceProtocol, @
     func auditStatus(withReply reply: @escaping (NSData?, NSError?) -> Void) {
         do {
             let audit = try auditLog.verify()
+            let storage = try auditLog.storageStatus()
             let checkpoints = try auditCheckpoints.verify()
             let latest: Any = checkpoints.last?.checkpointHash ?? NSNull()
             let fingerprint = NativeAuditCheckpoints.fingerprint(auditSigner.publicKeyX963)
@@ -229,7 +254,7 @@ private final class ServiceEndpoint: NSObject, AgentPassNativeServiceProtocol, @
             let approvalFingerprint: Any = sessionManager?.approvalKeyFingerprint ?? NSNull()
             let control = controlManager?.status()
             let fetch = controlFetcher?.status()
-            let data = try JSONSerialization.data(withJSONObject: ["valid": true, "entries": audit.entries, "head_hash": audit.headHash, "checkpoints": checkpoints.count, "latest_checkpoint": latest, "audit_key_fingerprint": fingerprint, "session_required": session?.required ?? false, "active_sessions": session?.active ?? 0, "session_generation": session?.generation ?? 0, "session_approval_key_fingerprint": approvalFingerprint, "control_configured": control != nil, "control_sequence": control?.sequence ?? 0, "control_operational": control?.operational ?? true, "control_expired": control?.expired ?? false, "control_expires_at": control?.expiresAt ?? NSNull(), "control_refresh_configured": fetch != nil, "control_refresh_last_attempt_at": fetch?.lastAttemptAt ?? NSNull(), "control_refresh_last_success_at": fetch?.lastSuccessAt ?? NSNull(), "control_refresh_last_error": fetch?.lastError ?? NSNull(), "control_refresh_next_attempt_at": fetch?.nextAttemptAt ?? NSNull(), "control_refresh_consecutive_failures": fetch?.consecutiveFailures ?? 0], options: [.sortedKeys])
+            let data = try JSONSerialization.data(withJSONObject: ["valid": true, "entries": audit.entries, "archive_configured": storage.configured, "archive_segments": storage.segments, "active_bytes": storage.activeBytes, "rotation_ready": storage.rotationReady, "head_hash": audit.headHash, "checkpoints": checkpoints.count, "latest_checkpoint": latest, "audit_key_fingerprint": fingerprint, "session_required": session?.required ?? false, "active_sessions": session?.active ?? 0, "session_generation": session?.generation ?? 0, "session_approval_key_fingerprint": approvalFingerprint, "control_configured": control != nil, "control_sequence": control?.sequence ?? 0, "control_operational": control?.operational ?? true, "control_expired": control?.expired ?? false, "control_expires_at": control?.expiresAt ?? NSNull(), "control_refresh_configured": fetch != nil, "control_refresh_last_attempt_at": fetch?.lastAttemptAt ?? NSNull(), "control_refresh_last_success_at": fetch?.lastSuccessAt ?? NSNull(), "control_refresh_last_error": fetch?.lastError ?? NSNull(), "control_refresh_next_attempt_at": fetch?.nextAttemptAt ?? NSNull(), "control_refresh_consecutive_failures": fetch?.consecutiveFailures ?? 0], options: [.sortedKeys])
             reply(data as NSData, nil)
         } catch { reply(nil, error as NSError) }
     }
@@ -252,6 +277,21 @@ private final class ServiceEndpoint: NSObject, AgentPassNativeServiceProtocol, @
             catch let auditError { reply(nil, auditError as NSError); return }
             reply(nil, checkpointError as NSError)
         }
+    }
+
+    func rotateAudit(withReply reply: @escaping (NSData?, NSError?) -> Void) {
+        authorizationLock.lock()
+        defer { authorizationLock.unlock() }
+        do {
+            guard try auditLog.canRotate() else {
+                throw AgentPassNativeError.invalidConfiguration("Native audit log has not reached the 64 MiB rotation threshold")
+            }
+            _ = try auditCheckpoints.create()
+            let rotation = try auditLog.rotate()
+            let encoder = JSONEncoder()
+            encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
+            reply(try encoder.encode(rotation) as NSData, nil)
+        } catch { reply(nil, error as NSError) }
     }
 
     func auditAnchorStatus(withReply reply: @escaping (NSData?, NSError?) -> Void) {
@@ -545,6 +585,9 @@ do {
     }
     let configuration = try ServiceConfiguration.load(path: CommandLine.arguments[2])
     try validateProtectedOutputPath(path: configuration.auditLogPath, label: "Native audit log")
+    if let archiveDirectory = configuration.auditArchiveDirectory {
+        try validateProtectedDirectoryPath(path: archiveDirectory, label: "Native audit archive directory")
+    }
     try validateProtectedOutputPath(path: configuration.auditCheckpointPath, label: "Native audit checkpoint log")
     if let controlStatePath = configuration.controlStatePath {
         try validateProtectedOutputPath(path: controlStatePath, label: "Native control state")
@@ -560,7 +603,7 @@ do {
         accessGroup: configuration.keychainAccessGroup
     )
     let auditSigner = try SecureEnclaveKeyStore(applicationTag: configuration.auditKeyTag, accessGroup: configuration.keychainAccessGroup)
-    let auditLog = try NativeAuditLog(path: configuration.auditLogPath)
+    let auditLog = try NativeAuditLog(path: configuration.auditLogPath, archiveDirectory: configuration.auditArchiveDirectory)
     let auditCheckpoints = try NativeAuditCheckpoints(path: configuration.auditCheckpointPath, auditLog: auditLog, signer: auditSigner)
     let auditAnchorReceipts: NativeAuditAnchorReceipts?
     let auditAnchorClient: NativeAuditAnchorClient?

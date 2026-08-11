@@ -158,7 +158,7 @@ AgentPass protects against copying the private key out of the device and limits 
 
 ## Native macOS boundary
 
-Version 0.16 includes a Swift/XPC native broker and a buildable macOS app host. It creates separate non-exportable P-256 signing, audit-checkpoint, and human-presence approval keys in Secure Enclave, emits OpenSSH-compatible SSHSIG signatures internally, authenticates the signed XPC client, and repeats Agent identity, session, remote-control, replay, scope, Git context, tree, and parent validation against root-owned policy and state inside the service. The service automatically refreshes signed control bundles with bounded jitter/backoff and can submit P-256 audit checkpoints to a root-configured HTTPS anchor. It verifies Ed25519 receipts and persists their chain under protected ancestry before acknowledging success.
+Version 0.17 includes a Swift/XPC native broker and a buildable macOS app host. It creates separate non-exportable P-256 signing, audit-checkpoint, and human-presence approval keys in Secure Enclave, emits OpenSSH-compatible SSHSIG signatures internally, authenticates the signed XPC client, and repeats Agent identity, session, remote-control, replay, scope, Git context, tree, and parent validation against root-owned policy and state inside the service. The service automatically refreshes signed control bundles with bounded jitter/backoff, can submit P-256 audit checkpoints to a root-configured HTTPS anchor, and rotates full audit logs into protected hash-linked segments without resetting their global chain. It verifies Ed25519 receipts and persists their chain under protected ancestry before acknowledging success.
 
 ```sh
 npm run test:native
@@ -206,6 +206,7 @@ Protected native sessions require human presence only when `agentpass session st
 - [x] bounded HTTPS control refresh with sequence rollback detection
 - [x] remote checkpoint anchoring with signed, chained receipts
 - [x] service-owned remote anchoring for native P-256 checkpoints
+- [x] protected native audit rotation with checkpoint and hash-chain continuity
 
 See [THREAT_MODEL.md](THREAT_MODEL.md) for the exact security boundary and remaining same-user limitations.
 

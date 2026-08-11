@@ -33,14 +33,54 @@ public struct NativeAuditStatus: Codable, Equatable, Sendable {
     enum CodingKeys: String, CodingKey { case valid, entries; case headHash = "head_hash" }
 }
 
+public struct NativeAuditRotation: Codable, Equatable, Sendable {
+    public let entries: Int
+    public let headHash: String
+    public let archiveFile: String
+    enum CodingKeys: String, CodingKey {
+        case entries
+        case headHash = "head_hash"
+        case archiveFile = "archive_file"
+    }
+}
+
+public struct NativeAuditStorageStatus: Codable, Equatable, Sendable {
+    public let configured: Bool
+    public let segments: Int
+    public let activeBytes: Int
+    public let rotationReady: Bool
+    enum CodingKeys: String, CodingKey {
+        case configured, segments
+        case activeBytes = "active_bytes"
+        case rotationReady = "rotation_ready"
+    }
+}
+
 public final class NativeAuditLog: @unchecked Sendable {
     public static let zeroHash = String(repeating: "0", count: 64)
+    public static let defaultRotationMinimumBytes = 64 * 1024 * 1024
     private let file: String
+    private let archiveDirectory: String?
     private let lock = NSLock()
 
-    public init(path: String) throws {
+    public init(path: String, archiveDirectory: String? = nil) throws {
         guard path.hasPrefix("/") else { throw AgentPassNativeError.invalidConfiguration("Native audit path must be absolute") }
         file = URL(fileURLWithPath: path).standardizedFileURL.path
+        if let archiveDirectory {
+            guard archiveDirectory.hasPrefix("/") else { throw AgentPassNativeError.invalidConfiguration("Native audit archive directory must be absolute") }
+            let directory = URL(fileURLWithPath: archiveDirectory).standardizedFileURL.path
+            try validatePrivateDirectory(directory, label: "Native audit archive directory")
+            let activeParent = URL(fileURLWithPath: file).deletingLastPathComponent().path
+            guard directory != activeParent else { throw AgentPassNativeError.invalidConfiguration("Native audit archive directory must be separate from the active log directory") }
+            var archiveInfo = stat()
+            var parentInfo = stat()
+            guard stat(directory, &archiveInfo) == 0, stat(activeParent, &parentInfo) == 0, archiveInfo.st_dev == parentInfo.st_dev else {
+                throw AgentPassNativeError.invalidConfiguration("Native audit archive and active log must be on the same filesystem")
+            }
+            self.archiveDirectory = directory
+        } else {
+            self.archiveDirectory = nil
+        }
         if try pathEntryExists(file) { try validatePrivateRegularFile(file, label: "Native audit log") }
     }
 
@@ -48,6 +88,24 @@ public final class NativeAuditLog: @unchecked Sendable {
         lock.lock()
         defer { lock.unlock() }
         return try verifyUnlocked()
+    }
+
+    public func canRotate(minimumBytes: Int = NativeAuditLog.defaultRotationMinimumBytes) throws -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        guard minimumBytes > 0 else { throw AgentPassNativeError.invalidConfiguration("Native audit rotation threshold must be positive") }
+        guard archiveDirectory != nil else { throw AgentPassNativeError.invalidConfiguration("Native audit archive directory is not configured") }
+        _ = try verifyUnlocked()
+        return try activeBytesUnlocked() >= minimumBytes
+    }
+
+    public func storageStatus() throws -> NativeAuditStorageStatus {
+        lock.lock()
+        defer { lock.unlock() }
+        _ = try verifyUnlocked()
+        let bytes = try activeBytesUnlocked()
+        let segments = try archiveDirectory.map { try archiveSegments(directory: $0).count } ?? 0
+        return NativeAuditStorageStatus(configured: archiveDirectory != nil, segments: segments, activeBytes: bytes, rotationReady: archiveDirectory != nil && bytes >= Self.defaultRotationMinimumBytes)
     }
 
     @discardableResult
@@ -82,14 +140,69 @@ public final class NativeAuditLog: @unchecked Sendable {
         return NativeAuditStatus(valid: true, entries: status.entries + 1, headHash: record["hash"] as! String)
     }
 
-    private func verifyUnlocked() throws -> NativeAuditStatus {
-        guard try pathEntryExists(file) else { return NativeAuditStatus(valid: true, entries: 0, headHash: Self.zeroHash) }
+    public func rotate(minimumBytes: Int = NativeAuditLog.defaultRotationMinimumBytes) throws -> NativeAuditRotation {
+        lock.lock()
+        defer { lock.unlock() }
+        guard minimumBytes > 0 else { throw AgentPassNativeError.invalidConfiguration("Native audit rotation threshold must be positive") }
+        guard let archiveDirectory else { throw AgentPassNativeError.invalidConfiguration("Native audit archive directory is not configured") }
+        try validatePrivateDirectory(archiveDirectory, label: "Native audit archive directory")
+        let status = try verifyUnlocked()
+        guard try pathEntryExists(file) else { throw AgentPassNativeError.invalidConfiguration("Native audit log does not exist") }
         try validatePrivateRegularFile(file, label: "Native audit log")
-        let data = try Data(contentsOf: URL(fileURLWithPath: file), options: .mappedIfSafe)
-        guard data.count <= 128 * 1024 * 1024 else { throw AgentPassNativeError.invalidSignature("Native audit log exceeds the verification limit") }
-        try validateJSONLinesFraming(data, label: "Native audit log")
+        var info = stat()
+        guard lstat(file, &info) == 0, info.st_size >= minimumBytes, info.st_size > 0 else {
+            throw AgentPassNativeError.invalidConfiguration("Native audit log has not reached the rotation threshold")
+        }
+        let name = Self.archiveName(entries: status.entries, headHash: status.headHash)
+        let destination = URL(fileURLWithPath: archiveDirectory).appendingPathComponent(name).path
+        guard !(try pathEntryExists(destination)) else { throw AgentPassNativeError.invalidSignature("Native audit archive segment already exists") }
+        guard Darwin.rename(file, destination) == 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
+        let descriptor = open(destination, O_RDONLY | O_NOFOLLOW | O_CLOEXEC)
+        guard descriptor >= 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
+        defer { close(descriptor) }
+        guard fchmod(descriptor, 0o400) == 0, fsync(descriptor) == 0 else {
+            throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+        }
+        try fsyncDirectory(archiveDirectory)
+        let activeParent = URL(fileURLWithPath: file).deletingLastPathComponent().path
+        if activeParent != archiveDirectory { try fsyncDirectory(activeParent) }
+        return NativeAuditRotation(entries: status.entries, headHash: status.headHash, archiveFile: name)
+    }
+
+    private func verifyUnlocked() throws -> NativeAuditStatus {
         var previous = Self.zeroHash
         var entries = 0
+        if let archiveDirectory {
+            try validatePrivateDirectory(archiveDirectory, label: "Native audit archive directory")
+            for segment in try archiveSegments(directory: archiveDirectory) {
+                let before = entries
+                try verifySegment(path: segment.path, label: "Native audit archive segment", previous: &previous, entries: &entries)
+                guard entries > before, entries == segment.entries, previous == segment.headHash else {
+                    throw AgentPassNativeError.invalidSignature("Native audit archive filename does not match its terminal state")
+                }
+            }
+        }
+        if try pathEntryExists(file) {
+            try verifySegment(path: file, label: "Native audit log", previous: &previous, entries: &entries)
+        }
+        return NativeAuditStatus(valid: true, entries: entries, headHash: previous)
+    }
+
+    private func activeBytesUnlocked() throws -> Int {
+        guard try pathEntryExists(file) else { return 0 }
+        try validatePrivateRegularFile(file, label: "Native audit log")
+        var info = stat()
+        guard lstat(file, &info) == 0, info.st_size >= 0, info.st_size <= Int.max else {
+            throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+        }
+        return Int(info.st_size)
+    }
+
+    private func verifySegment(path: String, label: String, previous: inout String, entries: inout Int) throws {
+        try validatePrivateRegularFile(path, label: label)
+        let data = try Data(contentsOf: URL(fileURLWithPath: path), options: .mappedIfSafe)
+        guard data.count <= 128 * 1024 * 1024 else { throw AgentPassNativeError.invalidSignature("\(label) exceeds the verification limit") }
+        try validateJSONLinesFraming(data, label: label)
         for line in data.split(separator: 0x0a, omittingEmptySubsequences: true) {
             guard var record = try JSONSerialization.jsonObject(with: Data(line)) as? [String: Any],
                   let expected = record.removeValue(forKey: "hash") as? String,
@@ -111,9 +224,41 @@ public final class NativeAuditLog: @unchecked Sendable {
                 throw AgentPassNativeError.invalidSignature("Native audit chain is invalid at entry \(entries + 1)")
             }
             previous = expected
+            guard entries < Int.max else { throw AgentPassNativeError.invalidSignature("Native audit entry count exceeds the supported range") }
             entries += 1
         }
-        return NativeAuditStatus(valid: true, entries: entries, headHash: previous)
+    }
+
+    private func archiveSegments(directory: String) throws -> [(path: String, entries: Int, headHash: String)] {
+        let names = try FileManager.default.contentsOfDirectory(atPath: directory)
+        var result: [(path: String, entries: Int, headHash: String)] = []
+        for name in names {
+            guard let parsed = Self.parseArchiveName(name) else {
+                throw AgentPassNativeError.invalidConfiguration("Native audit archive directory contains an unknown entry")
+            }
+            result.append((URL(fileURLWithPath: directory).appendingPathComponent(name).path, parsed.entries, parsed.headHash))
+        }
+        result.sort { $0.entries < $1.entries }
+        if result.count > 1 {
+            for index in 1..<result.count where result[index - 1].entries >= result[index].entries {
+                throw AgentPassNativeError.invalidSignature("Native audit archive segment order is invalid")
+            }
+        }
+        return result
+    }
+
+    private static func archiveName(entries: Int, headHash: String) -> String {
+        "audit-\(String(format: "%020d", entries))-\(headHash).jsonl"
+    }
+
+    private static func parseArchiveName(_ name: String) -> (entries: Int, headHash: String)? {
+        guard name.range(of: "^audit-[0-9]{20}-[0-9a-f]{64}\\.jsonl$", options: .regularExpression) != nil else { return nil }
+        let start = name.index(name.startIndex, offsetBy: 6)
+        let countEnd = name.index(start, offsetBy: 20)
+        let hashStart = name.index(countEnd, offsetBy: 1)
+        let hashEnd = name.index(hashStart, offsetBy: 64)
+        guard let entries = Int(name[start..<countEnd]), entries > 0 else { return nil }
+        return (entries, String(name[hashStart..<hashEnd]))
     }
 
     static func canonical(_ object: [String: Any]) throws -> Data {
@@ -481,6 +626,21 @@ private func validatePrivateRegularFile(_ path: String, label: String) throws {
           info.st_uid == geteuid(), info.st_mode & 0o077 == 0 else {
         throw AgentPassNativeError.invalidConfiguration("\(label) must be owned by the service account and be a private regular file")
     }
+}
+
+private func validatePrivateDirectory(_ path: String, label: String) throws {
+    var info = stat()
+    guard lstat(path, &info) == 0, (info.st_mode & S_IFMT) == S_IFDIR,
+          info.st_uid == geteuid(), info.st_mode & 0o077 == 0 else {
+        throw AgentPassNativeError.invalidConfiguration("\(label) must be owned by the service account and be a private directory")
+    }
+}
+
+private func fsyncDirectory(_ path: String) throws {
+    let descriptor = open(path, O_RDONLY | O_DIRECTORY | O_CLOEXEC)
+    guard descriptor >= 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
+    defer { close(descriptor) }
+    guard fsync(descriptor) == 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
 }
 
 private func auditTimestamp(_ date: Date) -> String {

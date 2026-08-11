@@ -7,6 +7,7 @@ import Foundation
     func auditStatus(withReply reply: @escaping (NSData?, NSError?) -> Void)
     func auditPublicKey(withReply reply: @escaping (NSString?, NSError?) -> Void)
     func createAuditCheckpoint(withReply reply: @escaping (NSData?, NSError?) -> Void)
+    func rotateAudit(withReply reply: @escaping (NSData?, NSError?) -> Void)
     func auditAnchorStatus(withReply reply: @escaping (NSData?, NSError?) -> Void)
     func pushAuditAnchor(withReply reply: @escaping (NSData?, NSError?) -> Void)
     func beginSession(agentID: NSString, ttlSeconds: Int, withReply reply: @escaping (NSData?, NSError?) -> Void)
