@@ -18,7 +18,7 @@ import { applyControlBundle, controlKeyFingerprint, fetchControlBundle, generate
 const [, , command, ...args] = process.argv;
 
 function usage() {
-  console.log(`AgentPass 0.11.0
+  console.log(`AgentPass 0.12.0
 
 Commands:
   init              create a secure local policy
@@ -57,6 +57,7 @@ Commands:
   control keygen DIR
   control trust PUBLIC_KEY [--url HTTPS_URL]
   control sign       create an offline-signed control bundle
+  control source URL configure the native HTTPS distribution URL
   control apply FILE verify and install a control bundle
   control fetch      fetch and install the configured HTTPS bundle
   control status     inspect active remote revocation state
@@ -294,10 +295,16 @@ async function pushCheck() {
   const refs = lines.length ? lines : [`local 0000000 refs/heads/${git(["branch", "--show-current"], true)} 0000000`];
   const identity = selectedAgent(config);
   let sessionValid;
+  let controlValid = true;
   if (config.native_broker?.enabled) {
-    const response = await brokerRequest({ operation: "native.session.validate", agent_id: identity.id, session: process.env.AGENTPASS_SESSION ?? null }, { native: config.native_broker });
-    const status = JSON.parse(Buffer.from(response.stdout_base64, "base64").toString("utf8"));
-    sessionValid = status.valid === true;
+    const [sessionResponse, controlResponse] = await Promise.all([
+      brokerRequest({ operation: "native.session.validate", agent_id: identity.id, session: process.env.AGENTPASS_SESSION ?? null }, { native: config.native_broker }),
+      brokerRequest({ operation: "native.control.validate", agent_id: identity.id }, { native: config.native_broker })
+    ]);
+    const sessionStatus = JSON.parse(Buffer.from(sessionResponse.stdout_base64, "base64").toString("utf8"));
+    const controlStatus = JSON.parse(Buffer.from(controlResponse.stdout_base64, "base64").toString("utf8"));
+    sessionValid = sessionStatus.valid === true;
+    controlValid = controlStatus.valid === true;
   } else {
     sessionValid = isSessionValid(loadSession(process.env.AGENTPASS_SESSION), process.env.AGENTPASS_SESSION, identity.id);
   }
@@ -307,7 +314,7 @@ async function pushCheck() {
     const operation = isTag ? "git.tag.push" : "git.push";
     const branch = (remoteRef ?? `refs/heads/${git(["branch", "--show-current"], true)}`).replace(/^refs\/(heads|tags)\//, "");
     const agentId = identity.id;
-    const requestContext = { policy: { ...config, session: { ...config.session, valid: sessionValid } }, cwd: git(["rev-parse", "--show-toplevel"]), branch, remote: remoteUrl, operation, revoked: state.revoked };
+    const requestContext = { policy: { ...config, session: { ...config.session, valid: sessionValid } }, cwd: git(["rev-parse", "--show-toplevel"]), branch, remote: remoteUrl, operation, revoked: config.native_broker?.enabled ? !controlValid : state.revoked };
     const result = evaluateAgentRequest(requestContext, identity);
     audit({ operation, decision: result.allowed ? "allow" : "deny", reason: result.reason, branch, remote: remoteUrl }, defaultConfigDir);
     return { operation, branch, ...result };
@@ -394,7 +401,16 @@ async function controlManage() {
   }
 
   const config = loadConfig();
-  if (action === "trust") {
+  const native = config.native_broker?.enabled === true;
+  if (action === "source") {
+    if (!native) throw new Error("Control source is only used by the native broker; local mode configures it with control trust --url");
+    if (!args[1]) throw new Error("Control source requires an HTTPS URL");
+    const url = new URL(args[1]);
+    if (url.protocol !== "https:") throw new Error("Native control source must use HTTPS");
+    saveConfig({ ...config, native_broker: { ...config.native_broker, control_url: url.toString() } });
+    console.log(JSON.stringify({ url: url.toString(), trust: "root-owned native policy" }, null, 2));
+  } else if (action === "trust") {
+    if (native) throw new Error("Native control trust is defined only by the root-owned service policy; update it through the operator provisioning flow");
     if (!args[1]) throw new Error("Control trust requires a public key file");
     const publicKey = fs.readFileSync(path.resolve(args[1]), "utf8");
     const urlIndex = args.indexOf("--url");
@@ -415,16 +431,33 @@ async function controlManage() {
   } else if (action === "apply") {
     if (!args[1]) throw new Error("Control apply requires a bundle file");
     const bundle = readJsonFile(path.resolve(args[1]), 256 * 1024);
+    if (native) {
+      const result = await brokerRequest({ operation: "native.control.apply", bundle }, { native: config.native_broker, timeoutMs: 30_000 });
+      console.log(JSON.stringify(JSON.parse(Buffer.from(result.stdout_base64, "base64").toString("utf8")), null, 2));
+      return;
+    }
     const verified = applyControlBundle(bundle, config, defaultConfigDir);
     audit({ operation: "control.apply", decision: "allow", sequence: verified.sequence, expires_at: verified.expires_at, global_revoked: verified.global_revoked, revoked_agents: verified.revoked_agents }, defaultConfigDir);
     console.log(JSON.stringify(verified, null, 2));
   } else if (action === "fetch") {
-    if (!config.control?.url) throw new Error("No remote control HTTPS URL is configured");
-    const bundle = await fetchControlBundle(config.control.url);
+    const sourceURL = native ? config.native_broker.control_url : config.control?.url;
+    if (!sourceURL) throw new Error("No remote control HTTPS URL is configured");
+    const bundle = await fetchControlBundle(sourceURL);
+    if (native) {
+      const result = await brokerRequest({ operation: "native.control.apply", bundle }, { native: config.native_broker, timeoutMs: 30_000 });
+      console.log(JSON.stringify(JSON.parse(Buffer.from(result.stdout_base64, "base64").toString("utf8")), null, 2));
+      return;
+    }
     const verified = applyControlBundle(bundle, config, defaultConfigDir);
     audit({ operation: "control.fetch", decision: "allow", sequence: verified.sequence, expires_at: verified.expires_at }, defaultConfigDir);
     console.log(JSON.stringify(verified, null, 2));
   } else if (action === "status") {
+    if (native) {
+      const result = await brokerRequest({ operation: "native.control.status" }, { native: config.native_broker });
+      const status = JSON.parse(Buffer.from(result.stdout_base64, "base64").toString("utf8"));
+      console.log(JSON.stringify({ ...status, source_url: config.native_broker.control_url ?? null }, null, 2));
+      return;
+    }
     if (!config.control) {
       console.log(JSON.stringify({ configured: false }, null, 2));
       return;

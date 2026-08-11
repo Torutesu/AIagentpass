@@ -12,20 +12,22 @@ public struct AuthorizedSignRequest: Sendable {
 public final class NativeRequestAuthorizer: @unchecked Sendable {
     private let policy: Policy
     private let sessionValidator: (any NativeSessionValidating)?
+    private let controlValidator: (any NativeControlValidating)?
     private var replayCache: [String: Int64] = [:]
     private let lock = NSLock()
 
-    public init(policyData: Data, sessionValidator: (any NativeSessionValidating)? = nil) throws {
+    public init(policyData: Data, sessionValidator: (any NativeSessionValidating)? = nil, controlValidator: (any NativeControlValidating)? = nil) throws {
         policy = try JSONDecoder().decode(Policy.self, from: policyData)
         self.sessionValidator = sessionValidator
+        self.controlValidator = controlValidator
         guard policy.version == 4, !policy.agents.isEmpty else {
             throw AgentPassNativeError.invalidConfiguration("Native broker requires a version 4 policy with enrolled agents")
         }
         guard !policy.session.required || sessionValidator != nil else {
             throw AgentPassNativeError.invalidConfiguration("Native broker requires a protected session validator when session.required=true")
         }
-        guard policy.control == nil else {
-            throw AgentPassNativeError.invalidConfiguration("Native broker remote-control enforcement is not implemented yet")
+        guard policy.control == nil || controlValidator != nil else {
+            throw AgentPassNativeError.invalidConfiguration("Native broker requires protected remote-control state when control is configured")
         }
         for agent in policy.agents {
             _ = try Self.ed25519Key(fromPEM: agent.publicKey)
@@ -60,6 +62,7 @@ public final class NativeRequestAuthorizer: @unchecked Sendable {
             throw AgentPassNativeError.unauthorizedClient("Agent request signature is invalid")
         }
         try consumeNonce(request.nonce, nowMilliseconds: nowMilliseconds)
+        try controlValidator?.validateControl(agentID: agent.id, nowMilliseconds: nowMilliseconds)
         try sessionValidator?.validateSession(token: request.session, agentID: agent.id, nowMilliseconds: nowMilliseconds)
 
         let payload = try strictBase64(request.payloadBase64, label: "Signing payload")

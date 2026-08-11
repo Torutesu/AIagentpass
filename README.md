@@ -150,20 +150,22 @@ agentpass control status
 
 The broker periodically fetches the static JSON bundle over HTTPS. Missing, expired, malformed, incorrectly signed, rolled-back, or same-sequence conflicting bundles fail closed. See [docs/REMOTE_CONTROL.md](docs/REMOTE_CONTROL.md) for the protocol and operational model.
 
+In native mode, install the public key in the root-owned service policy and the initial bundle at `control_state_path`; user-side `control trust` is intentionally refused. Use `agentpass control source HTTPS_URL` followed by `control fetch`, or apply a local bundle directly. The native service—not the user configuration—verifies trust and persists the sequence.
+
 ## Security model
 
 AgentPass protects against copying the private key out of the device and limits the allowed signing context. It does not protect against a fully compromised host process that is able to invoke an allowed signing operation. The policy boundary is therefore an authorization and audit layer, not a replacement for macOS sandboxing or endpoint security.
 
 ## Native macOS boundary
 
-Version 0.11 includes a Swift/XPC native broker foundation. It creates separate non-exportable P-256 signing, audit-checkpoint, and human-presence approval keys in Secure Enclave, emits OpenSSH-compatible SSHSIG signatures internally, authenticates the signed XPC client, and repeats Agent identity, session, replay, scope, Git context, tree, and parent validation against a root-owned policy inside the service. Every native signing outcome is appended to a root-owned, durable SHA-256 chain; signed checkpoints make later truncation or rewriting detectable once retained outside the host.
+Version 0.12 includes a Swift/XPC native broker foundation. It creates separate non-exportable P-256 signing, audit-checkpoint, and human-presence approval keys in Secure Enclave, emits OpenSSH-compatible SSHSIG signatures internally, authenticates the signed XPC client, and repeats Agent identity, session, remote-control, replay, scope, Git context, tree, and parent validation against root-owned policy and state inside the service. Every native signing outcome is appended to a root-owned, durable SHA-256 chain; signed checkpoints make later truncation or rewriting detectable once retained outside the host.
 
 ```sh
 npm run test:native
 swift build -c release --package-path native/macos
 ```
 
-Protected native sessions require human presence only when `agentpass session start` is called; policy-compliant commits remain unattended until the Agent-bound TTL expires. The service retains token hashes only in memory, so restart and `agentpass native revoke-sessions` invalidate them. The repository does not ship a Developer ID-signed or notarized app bundle, native remote control remains fail-closed, and native P-256 checkpoints are not yet accepted by the Ed25519 remote anchor. See [docs/NATIVE_BROKER.md](docs/NATIVE_BROKER.md) for setup and remaining gaps.
+Protected native sessions require human presence only when `agentpass session start` is called; policy-compliant commits remain unattended until the Agent-bound TTL expires. The service retains token hashes only in memory, so restart and `agentpass native revoke-sessions` invalidate them. Native mode verifies and atomically persists signed control bundles under root-owned ancestry; `agentpass control apply`, `fetch`, and `status` are routed through XPC. The repository does not yet ship a Developer ID-signed/notarized app bundle or a native background fetch scheduler, and native P-256 checkpoints are not accepted by the Ed25519 remote anchor. See [docs/NATIVE_BROKER.md](docs/NATIVE_BROKER.md) for setup and remaining gaps.
 
 ## Current scope and roadmap
 
@@ -186,7 +188,8 @@ Protected native sessions require human presence only when `agentpass session st
 - [x] Swift/XPC broker core with Secure Enclave SSHSIG and service-side policy validation
 - [x] root-owned native hash-chain audit with separate Secure Enclave checkpoint key
 - [x] human-approved protected native sessions with Agent binding and immediate revocation
-- [ ] signed/notarized native app bundle and protected remote-control state
+- [ ] signed/notarized native app bundle
+- [x] protected native remote-control state and monotonic sequence enforcement
 - [x] per-agent Ed25519 request identity with replay protection
 - [x] agent enrollment, selection, revocation, and key rotation
 - [x] per-agent operation/repository/branch/remote scopes

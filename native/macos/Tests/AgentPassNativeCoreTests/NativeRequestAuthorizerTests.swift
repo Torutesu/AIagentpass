@@ -3,6 +3,13 @@ import Foundation
 import Testing
 @testable import AgentPassNativeCore
 
+private final class TestControlValidator: NativeControlValidating, @unchecked Sendable {
+    var blocked = false
+    func validateControl(agentID: String, nowMilliseconds: Int64) throws {
+        if blocked { throw AgentPassNativeError.unauthorizedClient("remote_agent_revoked") }
+    }
+}
+
 private struct AuthorizerFixture {
     let root: URL
     let repository: URL
@@ -137,5 +144,20 @@ private struct AuthorizerFixture {
     _ = try authorizer.authorize(requestData: fixture.signedRequest(session: issued.token), nowMilliseconds: now)
     #expect(throws: AgentPassNativeError.self) {
         try authorizer.authorize(requestData: fixture.signedRequest(nonce: String(repeating: "x", count: 32), session: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"), nowMilliseconds: now)
+    }
+}
+
+@Test func nativeAuthorizerEnforcesInjectedRemoteControl() throws {
+    let fixture = try AuthorizerFixture()
+    defer { try? FileManager.default.removeItem(at: fixture.root) }
+    var object = try #require(JSONSerialization.jsonObject(with: fixture.policy) as? [String: Any])
+    object["control"] = ["required": true]
+    let policy = try JSONSerialization.data(withJSONObject: object, options: [.sortedKeys])
+    let control = TestControlValidator()
+    let authorizer = try NativeRequestAuthorizer(policyData: policy, controlValidator: control)
+    _ = try authorizer.authorize(requestData: fixture.signedRequest(), nowMilliseconds: 1_800_000_000_000)
+    control.blocked = true
+    #expect(throws: AgentPassNativeError.self) {
+        try authorizer.authorize(requestData: fixture.signedRequest(nonce: String(repeating: "c", count: 32)), nowMilliseconds: 1_800_000_000_000)
     }
 }

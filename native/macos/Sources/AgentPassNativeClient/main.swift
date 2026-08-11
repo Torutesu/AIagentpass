@@ -18,7 +18,7 @@ private func emit(_ output: Output, status: Int32 = 0) -> Never {
 }
 
 guard CommandLine.arguments.count >= 3, CommandLine.arguments[1] == "--service" else {
-    emit(Output(ok: false, version: nil, stdout_base64: nil, public_key: nil, error: "Usage: agentpass-native-client --service MACH_SERVICE sign|ping|public-key|audit-status|audit-public-key|audit-checkpoint|approval-public-key|session-start|session-revoke|session-validate"), status: 2)
+    emit(Output(ok: false, version: nil, stdout_base64: nil, public_key: nil, error: "Usage: agentpass-native-client --service MACH_SERVICE sign|ping|public-key|audit-status|audit-public-key|audit-checkpoint|approval-public-key|session-start|session-revoke|session-validate|control-apply|control-status|control-validate"), status: 2)
 }
 let serviceName = CommandLine.arguments[2]
 let command = CommandLine.arguments.count > 3 ? CommandLine.arguments[3] : ""
@@ -136,6 +136,38 @@ case "session-validate":
     }
     let token = object["session"] as? String
     proxy.validateSession(token: token as NSString?, agentID: agentID as NSString) { valid, error in
+        if let error { result = Output(ok: false, version: nil, stdout_base64: nil, public_key: nil, error: error.localizedDescription) }
+        else {
+            let data = try? JSONSerialization.data(withJSONObject: ["valid": valid], options: [.sortedKeys])
+            result = dataOutput(data as NSData?, error: nil)
+        }
+        semaphore.signal()
+    }
+case "control-apply":
+    let request = FileHandle.standardInput.readDataToEndOfFile()
+    guard request.count > 0, request.count <= 300 * 1024,
+          let object = try? JSONSerialization.jsonObject(with: request) as? [String: Any],
+          let bundle = object["bundle"], JSONSerialization.isValidJSONObject(bundle),
+          let bundleData = try? JSONSerialization.data(withJSONObject: bundle, options: [.sortedKeys, .withoutEscapingSlashes]) else {
+        emit(Output(ok: false, version: nil, stdout_base64: nil, public_key: nil, error: "Native control apply request is invalid"), status: 1)
+    }
+    proxy.applyControlBundle(bundle: bundleData as NSData) { data, error in
+        result = dataOutput(data, error: error)
+        semaphore.signal()
+    }
+case "control-status":
+    proxy.controlStatus { data, error in
+        result = dataOutput(data, error: error)
+        semaphore.signal()
+    }
+case "control-validate":
+    let request = FileHandle.standardInput.readDataToEndOfFile()
+    guard request.count > 0, request.count <= 16 * 1024,
+          let object = try? JSONSerialization.jsonObject(with: request) as? [String: Any],
+          let agentID = object["agent_id"] as? String else {
+        emit(Output(ok: false, version: nil, stdout_base64: nil, public_key: nil, error: "Native control validation request is invalid"), status: 1)
+    }
+    proxy.validateControl(agentID: agentID as NSString) { valid, error in
         if let error { result = Output(ok: false, version: nil, stdout_base64: nil, public_key: nil, error: error.localizedDescription) }
         else {
             let data = try? JSONSerialization.data(withJSONObject: ["valid": valid], options: [.sortedKeys])

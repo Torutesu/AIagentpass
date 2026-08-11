@@ -6,6 +6,7 @@
   "audit_log_path": "/Library/Application Support/AgentPass/audit.jsonl",
   "audit_checkpoint_path": "/Library/Application Support/AgentPass/audit.checkpoints.jsonl",
   "audit_key_tag": "dev.agentpass.audit-checkpoint",
+  "control_state_path": "/Library/Application Support/AgentPass/control.bundle.json",
   "session_approval_public_key": "ecdsa-sha2-nistp256 REPLACE_WITH_AGENTPASS_NATIVE_SESSION_APPROVAL_KEY",
   "client_code_signing_requirement": "anchor apple generic and identifier \"dev.agentpass.native-client\" and certificate leaf[subject.OU] = \"TEAMID\"",
   "allowed_client_uid": 501

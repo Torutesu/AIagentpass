@@ -122,6 +122,12 @@ process.stdin.on("end", () => {
   assert.equal(revokeSessions.command, "session-revoke");
   const validateSession = await brokerRequest({ operation: "native.session.validate", agent_id: "agent", session: "token" }, { native: { enabled: true, client, mach_service: "dev.agentpass.native" } });
   assert.equal(validateSession.command, "session-validate");
+  const applyControl = await brokerRequest({ operation: "native.control.apply", bundle: { version: 1 } }, { native: { enabled: true, client, mach_service: "dev.agentpass.native" } });
+  assert.equal(applyControl.command, "control-apply");
+  const controlStatus = await brokerRequest({ operation: "native.control.status" }, { native: { enabled: true, client, mach_service: "dev.agentpass.native" } });
+  assert.equal(controlStatus.command, "control-status");
+  const validateControl = await brokerRequest({ operation: "native.control.validate", agent_id: "agent" }, { native: { enabled: true, client, mach_service: "dev.agentpass.native" } });
+  assert.equal(validateControl.command, "control-validate");
   fs.chmodSync(client, 0o777);
   assert.throws(() => brokerRequest({ operation: "ping" }, { native: { enabled: true, client, mach_service: "dev.agentpass.native" } }), /permissions are unsafe/);
 });
