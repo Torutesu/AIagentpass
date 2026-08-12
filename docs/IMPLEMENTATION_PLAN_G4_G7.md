@@ -406,6 +406,96 @@ Run browser E2E first, then bind it to the native path on supported physical Mac
 
 Merge gate: the report names the exact source commit, PKG SHA-256, nested code identities, notarization ticket, Cloud image digest, migration set, browser versions, macOS versions, hardware, and test evidence hashes.
 
+## 9. Execution backlog after G4.3 Console read model
+
+Baseline commit: `cbd3c49`. The Cloud PostgreSQL device read model, minimal BFF DTO, Console state presentation, device revoke recent-auth flow, and emergency-stop recent-auth flow are implemented. This baseline is not a production-ready claim: manual wake, browser E2E, trusted-HTTPS integration, physical Secure Enclave qualification, managed signing, and production deployment remain open.
+
+### P0-A — freeze and implement authority-neutral manual wake
+
+The manual action is a delivery hint, not a new policy generation and not a new authority grant.
+
+1. Freeze `POST /organizations/{organization_id}/devices/{device_id}/refresh-requests` in Human OpenAPI.
+2. Require owner/admin role, CSRF, idempotency, and operation-bound recent WebAuthn operation `device.refresh.request`.
+3. Add a PostgreSQL wake-request/outbox record keyed by organization, device, current desired generation, and idempotency key. It must reference the current bundle head but must not increment `desired_generation`, create a new bundle statement, reopen a consumed ACK nonce, or alter `observed_generation`.
+4. Coalesce concurrent pending wakes for the same device/generation. Exact replay returns the original result; body substitution conflicts; revoked devices and organizations fail closed.
+5. Publish only a non-authoritative wake hint. Polling remains the correctness fallback and bundle fetch remains the authority source.
+6. Add BFF normalization and a Console action only after the Cloud contract and tests exist. Show accepted/coalesced/offline outcomes without claiming that the device applied the bundle.
+
+Exit gate: concurrent/replayed requests cannot create authority, regenerate ACK evidence, or bypass revocation; a dropped notification still converges through polling; Console never equates `202 accepted` with `applied`.
+
+### P0-B — complete G4.3 browser and PostgreSQL E2E
+
+1. Add Playwright fixtures for owner, admin, auditor, and viewer sessions with a deterministic WebAuthn virtual authenticator.
+2. Cover device state rendering for synced, pending, blocked, stale, offline, and revoked states, including keyboard navigation and screen-reader text.
+3. Prove owner/admin can request wake and revoke, auditor/viewer are read-only, and all high-risk actions reject missing, stale, replayed, cross-operation, and cross-tenant recent-auth authorization.
+4. Run Console BFF and Cloud API against disposable PostgreSQL over trusted local TLS; do not use the file store or loopback-HTTP test exception in this lane.
+5. Drive an exact signed ACK through Device API into PostgreSQL and assert the Console transition from desired > observed to synchronized. Test duplicate success, conflicting ACK, substituted device/path/body, key-epoch mismatch, expiry, and rollback.
+6. Scan browser storage, network captures, screenshots, traces, logs, and failure artifacts for policy bodies, nonce, signature, private/enrollment keys, capabilities, cookies, CSRF, and recent-auth material.
+
+Exit gate: the role/recent-auth matrix and signed-ACK state transition pass against PostgreSQL and trusted HTTPS with zero secret-bearing artifacts.
+
+### P0-C — qualify the native boundary on physical Macs
+
+1. Produce a Developer ID-signed and notarized PKG containing the app, XPC client, privileged service, launchd configuration, and exact entitlements.
+2. Install and upgrade through the real root installer path; verify ownership, modes, designated requirements, Team ID, nested signatures, launchd registration, and preservation of protected state.
+3. Enroll a dedicated non-exportable Secure Enclave P-256 device key and prove Cloud possession verification. Record only public identity evidence and key attributes.
+4. Run unattended Claude Code and Cursor commit signing while the user is logged in but absent. Confirm no recurring biometric prompt is needed for policy-authorized agent use and that unrelated processes cannot invoke the signer.
+5. Kill the app/service at every durable refresh, bundle-install, ACK, audit, and setup boundary; repeat after OS restart, network loss, sleep/wake, clock adjustment, and an upgrade from the previous signed build.
+6. Verify revoke, emergency stop, offline expiry, rollback/equivocation rejection, uninstall behavior, and retained-state recovery against the exact release artifact.
+
+Exit gate: a signed qualification report binds hardware model, macOS version, source commit, PKG digest, code identities, notarization ticket, Cloud image digest, and evidence hashes. Simulator, ad-hoc signing, and the POSIX durability model remain supporting evidence only.
+
+### P1-A — shared abuse controls and immediate session invalidation
+
+1. Add PostgreSQL-backed token buckets for bootstrap, WebAuthn options/verify, invitation acceptance, enrollment, wake, revoke, emergency stop, and recovery.
+2. Separate unauthenticated transport admission limits from organization/member/device limits; never derive a durable bucket key from unverified caller input alone.
+3. Add organization and member session epochs. Emergency stop and membership authority reduction increment the relevant epoch in the same transaction as audit/outbox writes; stale sessions fail on their next request on every Cloud instance.
+4. Enforce bounded active sessions, pending WebAuthn ceremonies, enrollment attempts, and wake requests. Return stable non-enumerating errors and bounded `Retry-After`.
+5. Add two-instance race, restart, clock, hot-key, tenant-isolation, and database-outage tests.
+
+Exit gate: aggregate limits cannot be exceeded across instances and emergency invalidation cannot be bypassed with a session issued before the reduction.
+
+### P1-B — provider-neutral hosted signer and managed-key adapter
+
+1. Freeze a purpose-separated signer interface for ControlBundle, Capability, refresh hint, Console identity assertion, and release/qualification evidence. Each call binds purpose, key ID/version, algorithm, canonical digest, deadline, and request ID.
+2. Implement a deterministic fake provider for conformance and fault injection, then one production managed KMS/HSM adapter. Private export and local-file fallback are forbidden in hosted mode.
+3. Store only public key metadata and provider references. Enforce IAM per purpose/key and validate provider signatures locally before publishing results.
+4. Implement overlap rotation: old verification remains available while new signing activates atomically; ambiguous timeout, throttling, malformed DER/P1363, wrong key version, and active-version races fail closed.
+5. Add signer latency/error metrics with non-secret labels and a break-glass procedure that cannot mint signatures outside the normal audit trail.
+
+Exit gate: provider IAM, rotation, timeout/retry behavior, public verification, and no-export/no-fallback properties have automated and operator-reviewed evidence.
+
+### P2 — threshold recovery and secret-free notifications
+
+1. Version the recovery policy and generate independent offline owner shares. Store only salted commitments/digests and never upload raw shares.
+2. Consume threshold authorization transactionally, rotate used material, issue a restricted recovery session, and require passkey re-enrollment plus normal recent WebAuthn before high-risk operations.
+3. Add an allow-listed transactional notification outbox for login, credential changes, recovery, role reduction, device revoke, emergency stop, signer rotation, and export.
+4. Make delivery idempotent and keep destination/provider failures out of authority transactions. Notification payloads must not include secrets, policy bodies, repository paths, or signing material.
+
+Exit gate: threshold bypass, concurrent consumption, replay, stale-policy use, tenant substitution, support-only takeover, duplicate delivery, and artifact leakage all fail closed.
+
+### P3 — production deployment and release acceptance
+
+1. Build immutable Cloud and Console images from a signed source commit; apply forward-only migrations through a separately authorized job and record migration/image digests.
+2. Configure trusted TLS, managed PostgreSQL backups/PITR, KMS/HSM keys, least-privilege service identities, secret injection, log retention, audit export, and regional failure behavior.
+3. Define SLOs for refresh convergence, ACK freshness, signer latency, authentication success, audit continuity, and emergency-stop propagation. Alerts must use stable non-secret dimensions.
+4. Run migration rehearsal, backup restore, canary, rollback-without-schema-reversal, key rotation, dependency outage, and capacity tests.
+5. Publish the notarized PKG, signed manifest, checksums, SBOM, verification instructions, compatibility matrix, and known limitations. The release workflow must verify signed source before entering any secret-bearing job.
+
+Exit gate: browser E2E, trusted-HTTPS/PostgreSQL integration, physical-Mac qualification, security review, restore drill, observability review, and release verification all bind the same source and artifact identities.
+
+### Required merge order
+
+1. P0-A Cloud contract/repository/runtime tests.
+2. P0-A BFF and Console action.
+3. P0-B browser/PostgreSQL/trusted-TLS E2E.
+4. P0-C signed physical-Mac qualification.
+5. P1-A and P1-B in parallel with serialized migrations and contract review.
+6. P2 recovery/notifications after session epochs and signer interface stabilize.
+7. P3 deployment and release acceptance.
+
+Every merge keeps the repository releasable: contract validation, full Node and Swift suites, Console build/lint/tests, PostgreSQL integration tests, secret scans, and the applicable signed-artifact checks must pass. External credentials or hardware may block a qualification lane, but they do not justify weakening the gate or labeling modeled evidence as production evidence.
+
 ### Wave 6 — production deployment and release
 
 Provision private PostgreSQL, backups/PITR, managed signer identities, metrics/alerts, canary deployment, forward-only migration procedure, restore drills, incident runbooks, and release evidence. Complete independent security review and resolve every critical/high finding before production claims.
