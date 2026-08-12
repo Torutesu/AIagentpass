@@ -68,7 +68,7 @@ test("fails closed on an unknown or out-of-order applied version", async () => {
 
 test("loads the reviewed contract migrations in contiguous order without rewriting their SQL", async () => {
   const loaded = await loadSqlMigrations(defaultContractDirectory());
-  assert.deepEqual(loaded.map((migration) => migration.name), ["0001_control_plane.sql", "0002_webauthn_challenges.sql", "0003_webauthn_challenge_bindings.sql", "0004_human_identity_and_webauthn_registration.sql", "0005_human_credential_session_management.sql", "0006_organization_membership_invitations.sql", "0007_capability_membership_authority.sql", "0008_capability_revocation_bundle_lookup.sql", "0009_human_identity_assertion_replays.sql", "0010_device_audit_activity_keyset.sql"]);
+  assert.deepEqual(loaded.map((migration) => migration.name), ["0001_control_plane.sql", "0002_webauthn_challenges.sql", "0003_webauthn_challenge_bindings.sql", "0004_human_identity_and_webauthn_registration.sql", "0005_human_credential_session_management.sql", "0006_organization_membership_invitations.sql", "0007_capability_membership_authority.sql", "0008_capability_revocation_bundle_lookup.sql", "0009_human_identity_assertion_replays.sql", "0010_device_audit_activity_keyset.sql", "0011_control_plane_hosted_cutover.sql"]);
   assert.match(loaded[0].sql, /^BEGIN;/);
   assert.match(loaded[0].sql, /CREATE TABLE schema_migrations/);
   assert.match(loaded[0].sql.trim(), /COMMIT;$/);
@@ -161,6 +161,38 @@ test("migration 0009 stores only namespaced jti replay state and provides atomic
   assert.match(sql, /ON CONFLICT \(jti_digest\) DO NOTHING/);
   assert.match(sql, /RETURN FOUND/);
   assert.match(sql, /assertion_expires_at <= clock_timestamp\(\)/);
+  assert.doesNotMatch(sql, /DROP\s+(?:TABLE|COLUMN)|TRUNCATE/iu);
+});
+
+test("migration 0011 closes the hosted control-plane schema gaps transactionally", async () => {
+  const sql = await readFile(new URL("../../../../contracts/postgres/0011_control_plane_hosted_cutover.sql", import.meta.url), "utf8");
+  assert.match(sql.trim(), /^BEGIN;[\s\S]*COMMIT;$/);
+  assert.match(sql, /devices[\s\S]*ADD COLUMN metadata jsonb NOT NULL/);
+  assert.match(sql, /devices_pending_key_state/);
+  assert.match(sql, /devices[\s\S]*ALTER COLUMN key_algorithm DROP NOT NULL/);
+  assert.match(sql, /device_enrollments[\s\S]*ADD COLUMN label text[\s\S]*ADD COLUMN platform text[\s\S]*ADD COLUMN completion_hash text/);
+  assert.doesNotMatch(sql, /completed_by/);
+  assert.match(sql, /device_enrollments_completion_evidence_complete/);
+  assert.match(sql, /policies[\s\S]*ADD COLUMN version bigint NOT NULL DEFAULT 1[\s\S]*ADD COLUMN updated_at timestamptz/);
+  assert.match(sql, /revocations[\s\S]*ADD COLUMN revoked_by uuid[\s\S]*ADD COLUMN revoked_at timestamptz[\s\S]*ADD COLUMN version bigint/);
+  assert.match(sql, /issued_by_member_id/);
+  assert.match(sql, /issued_membership_version/);
+  assert.match(sql, /capabilities[\s\S]*ADD COLUMN issuer text[\s\S]*ADD COLUMN key_id text[\s\S]*ADD COLUMN scope_json jsonb[\s\S]*ADD COLUMN nonce_digest bytea/);
+  assert.match(sql, /bundle_heads[\s\S]*ADD COLUMN expires_at timestamptz[\s\S]*ALTER COLUMN expires_at SET NOT NULL/);
+  assert.match(sql, /bundle_acknowledgements_head_fk[\s\S]*FOREIGN KEY \(organization_id, device_id, format_epoch, sequence, statement_hash\)[\s\S]*REFERENCES bundle_heads\(organization_id, device_id, format_epoch, sequence, statement_hash\)/);
+  assert.match(sql, /CREATE TABLE device_audit_heads \(/);
+  assert.match(sql, /CREATE TABLE device_audit_gaps \(/);
+  assert.match(sql, /CREATE TRIGGER device_audit_events_record_head/);
+  assert.match(sql, /CREATE TABLE device_request_nonces \([\s\S]*nonce_digest bytea NOT NULL CHECK \(octet_length\(nonce_digest\) = 32\)/);
+  assert.match(sql, /CREATE TABLE rate_limit_buckets \(/);
+  assert.match(sql, /CREATE INDEX (?:idempotency_records_expiry|device_request_nonces_expiry|rate_limit_buckets_expiry)/);
+  assert.match(sql, /CREATE FUNCTION agentpass_consume_device_request_nonce\(/);
+  assert.match(sql, /CREATE FUNCTION agentpass_acquire_rate_limit\(/);
+  assert.match(sql, /CREATE FUNCTION agentpass_prune_shared_control_expired\(/);
+  assert.match(sql, /ON CONFLICT \(organization_id, device_id, nonce_digest\) DO NOTHING/);
+  assert.match(sql, /FOR UPDATE/);
+  assert.match(sql, /LIMIT remaining/);
+  assert.doesNotMatch(sql, /raw_nonce|raw credential|private key|bearer token|session secret/i);
   assert.doesNotMatch(sql, /DROP\s+(?:TABLE|COLUMN)|TRUNCATE/iu);
 });
 

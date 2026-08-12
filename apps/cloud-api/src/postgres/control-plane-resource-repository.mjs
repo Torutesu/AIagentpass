@@ -64,25 +64,25 @@ export function createPostgresControlPlaneResourceRepository({ client, now = () 
 
   async function createDevice(input) {
     const organizationId = tenant(input);
-    const deviceId = optionalUuid(input.deviceId ?? input.device_id ?? input.id, "device_id") ?? crypto.randomUUID();
+    const principalId = requiredPrincipalId(input);
+    const idempotencyKey = requireIdempotencyKey(input.idempotencyKey ?? input.idempotency_key);
+    const deviceId = optionalUuid(input.deviceId ?? input.device_id ?? input.id, "device_id") ?? deterministicUuid("device", organizationId, principalId, idempotencyKey);
     const name = text(input.name, "name", 128, true);
     const publicKey = publicKeyText(input.publicKey ?? input.public_key ?? input.devicePublicKey ?? input.device_public_key, "device_public_key");
     const metadata = metadataValue(input.metadata);
-    if (!isEmptyObject(metadata)) throw schemaGap("devices.metadata", "devices has no metadata column");
     const algorithm = requiredDeviceAlgorithm(input.keyAlgorithm ?? input.key_algorithm);
-    const idempotencyKey = requireIdempotencyKey(input.idempotencyKey ?? input.idempotency_key);
     const request = { organization_id: organizationId, device_id: deviceId, name, public_key: publicKey, metadata, key_algorithm: algorithm };
     return runDatabase(async () => inTransaction(async (tx) => {
       await lockOrganization(tx, organizationId);
-      const replay = await acquireIdempotency(tx, organizationId, "create_device", idempotencyKey, request);
+      const replay = await acquireIdempotency(tx, organizationId, principalId, idempotencyKey, request);
       if (replay !== undefined) return replay;
-      const result = await tx.query(`INSERT INTO devices (organization_id,id,label,key_algorithm,public_key_pem,status)
-        VALUES ($1,$2,$3,$4,$5,'active')
-        RETURNING organization_id,id,label,key_algorithm,public_key_pem,status,version,created_at,last_seen_at`,
-      [organizationId, deviceId, name, algorithm, publicKey]);
+      const result = await tx.query(`INSERT INTO devices (organization_id,id,label,key_algorithm,public_key_pem,status,metadata)
+        VALUES ($1,$2,$3,$4,$5,'active',$6::jsonb)
+        RETURNING organization_id,id,label,key_algorithm,public_key_pem,status,metadata,version,created_at,last_seen_at`,
+      [organizationId, deviceId, name, algorithm, publicKey, JSON.stringify(metadata)]);
       if (rowCount(result) !== 1) throw new ControlPlaneResourceRepositoryError("ERR_DATABASE", "device creation did not return a row");
-      const device = mapDevice(result.rows[0], metadata);
-      await finishIdempotency(tx, organizationId, "create_device", idempotencyKey, 201, device);
+      const device = mapDevice(result.rows[0]);
+      await finishIdempotency(tx, organizationId, principalId, idempotencyKey, 201, device);
       return device;
     }));
   }
@@ -92,7 +92,7 @@ export function createPostgresControlPlaneResourceRepository({ client, now = () 
     const deviceId = requiredUuid(input.deviceId ?? input.device_id ?? input.id, "device_id");
     return runDatabase(async () => {
       await assertOrganization(client, organizationId);
-      const result = await client.query(`SELECT organization_id,id,label,key_algorithm,public_key_pem,status,version,created_at,last_seen_at
+      const result = await client.query(`SELECT organization_id,id,label,key_algorithm,public_key_pem,status,metadata,version,created_at,last_seen_at
         FROM devices WHERE organization_id=$1 AND id=$2`, [organizationId, deviceId]);
       if (rowCount(result) !== 1) throw notFound("device", deviceId);
       return mapDevice(result.rows[0]);
@@ -103,7 +103,7 @@ export function createPostgresControlPlaneResourceRepository({ client, now = () 
     const organizationId = tenant(input);
     return runDatabase(async () => {
       await assertOrganization(client, organizationId);
-      const result = await client.query(`SELECT organization_id,id,label,key_algorithm,public_key_pem,status,version,created_at,last_seen_at
+      const result = await client.query(`SELECT organization_id,id,label,key_algorithm,public_key_pem,status,metadata,version,created_at,last_seen_at
         FROM devices WHERE organization_id=$1 ORDER BY created_at ASC,id ASC`, [organizationId]);
       return (result.rows ?? []).map((row) => mapDevice(row));
     });
@@ -119,12 +119,12 @@ export function createPostgresControlPlaneResourceRepository({ client, now = () 
     const publicKey = patch.device_public_key === undefined ? undefined : publicKeyText(patch.device_public_key, "device_public_key");
     const metadata = patch.metadata === undefined ? undefined : metadataValue(patch.metadata);
     const status = patch.status === undefined ? undefined : enumValue(patch.status, "status", DEVICE_STATUSES);
-    if (metadata !== undefined && !isEmptyObject(metadata)) throw schemaGap("devices.metadata", "devices has no metadata column");
+    const principalId = requiredPrincipalId(input);
     const idempotencyKey = requireIdempotencyKey(input.idempotencyKey ?? input.idempotency_key);
     const request = { organization_id: organizationId, resource_id: deviceId, expected_version: expectedVersion, patch };
     return runDatabase(async () => inTransaction(async (tx) => {
       await lockOrganization(tx, organizationId);
-      const replay = await acquireIdempotency(tx, organizationId, "update_device", idempotencyKey, request);
+      const replay = await acquireIdempotency(tx, organizationId, principalId, idempotencyKey, request);
       if (replay !== undefined) return replay;
       const current = await selectDevice(tx, organizationId, deviceId, true);
       const values = [];
@@ -132,22 +132,26 @@ export function createPostgresControlPlaneResourceRepository({ client, now = () 
       if (name !== undefined) { values.push(name); assignments.push(`label=$${values.length + 3}`); }
       if (publicKey !== undefined) { values.push(publicKey); assignments.push(`public_key_pem=$${values.length + 3}`); }
       if (status !== undefined) { values.push(status); assignments.push(`status=$${values.length + 3}`); }
+      if (metadata !== undefined) { values.push(JSON.stringify(metadata)); assignments.push(`metadata=$${values.length + 3}::jsonb`); }
       if (assignments.length === 0) throw new ControlPlaneResourceRepositoryError("ERR_INVALID_INPUT", "device patch must contain a mutable field");
       values.unshift(organizationId, deviceId, expectedVersion);
       const result = await tx.query(`UPDATE devices SET ${assignments.join(", ")},version=version+1
         WHERE organization_id=$1 AND id=$2 AND version=$3
-        RETURNING organization_id,id,label,key_algorithm,public_key_pem,status,version,created_at,last_seen_at`, values);
+        RETURNING organization_id,id,label,key_algorithm,public_key_pem,status,metadata,version,created_at,last_seen_at`, values);
       if (rowCount(result) === 0) throw new ControlPlaneResourceRepositoryError("ERR_VERSION_CONFLICT", "optimistic version check failed", { expected: expectedVersion, actual: current.version });
-      const device = mapDevice(result.rows[0], metadata === undefined ? undefined : metadata);
-      await finishIdempotency(tx, organizationId, "update_device", idempotencyKey, 200, device);
+      const device = mapDevice(result.rows[0]);
+      await finishIdempotency(tx, organizationId, principalId, idempotencyKey, 200, device);
       return device;
     }));
   }
 
   async function createDeviceEnrollment(input) {
     const organizationId = tenant(input);
-    const enrollmentId = optionalUuid(input.enrollmentId ?? input.enrollment_id, "enrollment_id") ?? crypto.randomUUID();
-    const deviceId = optionalUuid(input.deviceId ?? input.device_id, "device_id") ?? crypto.randomUUID();
+    const createdBy = requiredCreatedBy(input);
+    const principalId = requiredPrincipalId(input);
+    const idempotencyKey = requireIdempotencyKey(input.idempotencyKey ?? input.idempotency_key);
+    const enrollmentId = optionalUuid(input.enrollmentId ?? input.enrollment_id, "enrollment_id") ?? deterministicUuid("enrollment", organizationId, principalId, idempotencyKey);
+    const deviceId = optionalUuid(input.deviceId ?? input.device_id, "device_id") ?? deterministicUuid("enrollment-device", organizationId, principalId, idempotencyKey);
     const label = text(input.label ?? input.name, "label", 128, true);
     const platform = enumValue(input.platform ?? "macos", "platform", new Set(["macos"]));
     const credentialDigest = sha256(input.credentialDigest ?? input.credential_digest, "credential_digest");
@@ -156,28 +160,23 @@ export function createPostgresControlPlaneResourceRepository({ client, now = () 
     if (Date.parse(expiresAt) <= Date.parse(createdAt) || Date.parse(expiresAt) - Date.parse(createdAt) > 24 * 60 * 60 * 1000) {
       throw new ControlPlaneResourceRepositoryError("ERR_INVALID_INPUT", "enrollment expiry must be within 24 hours after creation");
     }
-    const createdBy = requiredCreatedBy(input);
-    const pendingAlgorithm = input.keyAlgorithm ?? input.key_algorithm ?? input.algorithm;
-    if (pendingAlgorithm === undefined) throw schemaGap("devices.key_algorithm", "device enrollment does not provide an algorithm for the NOT NULL pending-device column");
-    const algorithm = enumValue(pendingAlgorithm, "key_algorithm", new Set(["p256-sha256", "ed25519"]));
-    const idempotencyKey = requireIdempotencyKey(input.idempotencyKey ?? input.idempotency_key);
-    const request = { organization_id: organizationId, enrollment_id: enrollmentId, device_id: deviceId, label, platform, credential_digest: credentialDigest, created_at: createdAt, expires_at: expiresAt, created_by: createdBy, key_algorithm: algorithm };
+    const request = { organization_id: organizationId, enrollment_id: enrollmentId, device_id: deviceId, label, platform, credential_digest: credentialDigest, ttl_ms: Date.parse(expiresAt) - Date.parse(createdAt), created_by: createdBy };
     return runDatabase(async () => inTransaction(async (tx) => {
       await lockOrganization(tx, organizationId);
-      const replay = await acquireIdempotency(tx, organizationId, "create_device_enrollment", idempotencyKey, request);
+      const replay = await acquireIdempotency(tx, organizationId, principalId, idempotencyKey, request);
       if (replay !== undefined) return replay;
       const deviceResult = await tx.query(`INSERT INTO devices (organization_id,id,label,key_algorithm,public_key_pem,status)
-        VALUES ($1,$2,$3,$4,NULL,'pending')
-        RETURNING organization_id,id,label,key_algorithm,public_key_pem,status,version,created_at,last_seen_at`,
-      [organizationId, deviceId, label, algorithm]);
+        VALUES ($1,$2,$3,NULL,NULL,'pending')
+        RETURNING organization_id,id,label,key_algorithm,public_key_pem,status,metadata,version,created_at,last_seen_at`,
+      [organizationId, deviceId, label]);
       if (rowCount(deviceResult) !== 1) throw new ControlPlaneResourceRepositoryError("ERR_DATABASE", "pending device creation did not return a row");
-      const enrollmentResult = await tx.query(`INSERT INTO device_enrollments (id,organization_id,device_id,secret_hash,created_by,created_at,expires_at)
-        VALUES ($1,$2,$3,decode($4,'hex'),$5,$6,$7)
-        RETURNING id,organization_id,device_id,created_at,expires_at,consumed_at`,
-      [enrollmentId, organizationId, deviceId, credentialDigest, createdBy, createdAt, expiresAt]);
+      const enrollmentResult = await tx.query(`INSERT INTO device_enrollments (id,organization_id,device_id,secret_hash,created_by,created_at,expires_at,label,platform)
+        VALUES ($1,$2,$3,decode($4,'hex'),$5,$6,$7,$8,$9)
+        RETURNING id,organization_id,device_id,label,platform,created_at,expires_at,consumed_at,completion_hash`,
+      [enrollmentId, organizationId, deviceId, credentialDigest, createdBy, createdAt, expiresAt, label, platform]);
       if (rowCount(enrollmentResult) !== 1) throw new ControlPlaneResourceRepositoryError("ERR_DATABASE", "device enrollment creation did not return a row");
-      const enrollment = mapEnrollment(enrollmentResult.rows[0], label, platform);
-      await finishIdempotency(tx, organizationId, "create_device_enrollment", idempotencyKey, 201, enrollment);
+      const enrollment = mapEnrollment(enrollmentResult.rows[0]);
+      await finishIdempotency(tx, organizationId, principalId, idempotencyKey, 201, enrollment);
       return enrollment;
     }));
   }
@@ -194,18 +193,17 @@ export function createPostgresControlPlaneResourceRepository({ client, now = () 
     const completedAt = timestamp(input.completedAt ?? input.completed_at ?? now(), "completed_at");
     const completionHash = sha256Hex({ version: 1, enrollment_id: enrollmentId, organization_id: organizationId, device_id: deviceId, label, platform, algorithm, public_key: publicKey });
     return runDatabase(async () => inTransaction(async (tx) => {
-      const enrollmentResult = await tx.query(`SELECT id,organization_id,device_id,created_at,expires_at,consumed_at
+      const enrollmentResult = await tx.query(`SELECT id,organization_id,device_id,label,platform,created_at,expires_at,consumed_at,completion_hash
         FROM device_enrollments
         WHERE organization_id=$1 AND id=$2 AND encode(secret_hash,'hex')=$3
         FOR UPDATE`, [organizationId, enrollmentId, credentialDigest]);
       if (rowCount(enrollmentResult) !== 1) throw new ControlPlaneResourceRepositoryError("ERR_ENROLLMENT_AUTH", "device enrollment authentication failed");
       const enrollment = enrollmentResult.rows[0];
       if (enrollment.device_id !== deviceId) throw new ControlPlaneResourceRepositoryError("ERR_ENROLLMENT_BINDING", "device enrollment request does not match its reservation");
+      if (enrollment.label !== label || enrollment.platform !== platform) throw new ControlPlaneResourceRepositoryError("ERR_ENROLLMENT_BINDING", "device enrollment request does not match its reservation");
       const device = await selectDevice(tx, organizationId, deviceId, true);
       if (enrollment.consumed_at !== null) {
-        // The schema has no completion_hash. Replaying the exact persisted
-        // device binding is safe; a different completion is rejected.
-        if (device.label !== label || device.key_algorithm !== algorithm || device.public_key_pem !== publicKey || device.status !== "active") {
+        if (enrollment.completion_hash !== completionHash || device.label !== label || device.key_algorithm !== algorithm || device.public_key_pem !== publicKey || device.status !== "active") {
           throw new ControlPlaneResourceRepositoryError("ERR_ENROLLMENT_CONSUMED", "device enrollment was already consumed");
         }
         return mapDevice(device);
@@ -214,23 +212,22 @@ export function createPostgresControlPlaneResourceRepository({ client, now = () 
       if (device.status !== "pending" || device.public_key_pem !== null || device.label !== label) throw new ControlPlaneResourceRepositoryError("ERR_ENROLLMENT_STATE", "pending device state is invalid");
       const update = await tx.query(`UPDATE devices SET key_algorithm=$3,public_key_pem=$4,status='active',version=version+1
         WHERE organization_id=$1 AND id=$2 AND status='pending' AND public_key_pem IS NULL
-        RETURNING organization_id,id,label,key_algorithm,public_key_pem,status,version,created_at,last_seen_at`, [organizationId, deviceId, algorithm, publicKey]);
+        RETURNING organization_id,id,label,key_algorithm,public_key_pem,status,metadata,version,created_at,last_seen_at`, [organizationId, deviceId, algorithm, publicKey]);
       if (rowCount(update) !== 1) throw new ControlPlaneResourceRepositoryError("ERR_ENROLLMENT_STATE", "pending device state is invalid");
-      const consumed = await tx.query(`UPDATE device_enrollments SET consumed_at=$3
+      const consumed = await tx.query(`UPDATE device_enrollments SET consumed_at=$3,completion_hash=$4
         WHERE organization_id=$1 AND id=$2 AND consumed_at IS NULL
-        RETURNING id,organization_id,device_id,created_at,expires_at,consumed_at`, [organizationId, enrollmentId, completedAt]);
+        RETURNING id,organization_id,device_id,label,platform,created_at,expires_at,consumed_at,completion_hash`, [organizationId, enrollmentId, completedAt, completionHash]);
       if (rowCount(consumed) !== 1) throw new ControlPlaneResourceRepositoryError("ERR_ENROLLMENT_CONSUMED", "device enrollment was already consumed");
-      // Keep the computed hash in the local execution path so the exact
-      // replay contract remains explicit even though 0001 lacks a column.
-      void completionHash;
       return mapDevice(update.rows[0]);
     }));
   }
 
   async function createAgent(input) {
     const organizationId = tenant(input);
+    const principalId = requiredPrincipalId(input);
+    const idempotencyKey = requireIdempotencyKey(input.idempotencyKey ?? input.idempotency_key);
     const source = object(input.descriptor ?? input, "agent");
-    const agentId = optionalUuid(source.agent_id ?? source.agentId ?? source.id, "agent_id") ?? crypto.randomUUID();
+    const agentId = optionalUuid(source.agent_id ?? source.agentId ?? source.id, "agent_id") ?? deterministicUuid("agent", organizationId, principalId, idempotencyKey);
     const descriptor = normalizeAgent({
       version: source.version,
       agent_id: agentId,
@@ -240,11 +237,10 @@ export function createPostgresControlPlaneResourceRepository({ client, now = () 
       created_at: source.created_at ?? source.createdAt ?? now()
     });
     const deviceId = requiredUuid(input.deviceId ?? input.device_id ?? source.device_id ?? source.deviceId, "device_id");
-    const idempotencyKey = requireIdempotencyKey(input.idempotencyKey ?? input.idempotency_key);
     const request = { organization_id: organizationId, agent_id: descriptor.agent_id, device_id: deviceId, descriptor };
     return runDatabase(async () => inTransaction(async (tx) => {
       await lockOrganization(tx, organizationId);
-      const replay = await acquireIdempotency(tx, organizationId, "create_agent", idempotencyKey, request);
+      const replay = await acquireIdempotency(tx, organizationId, principalId, idempotencyKey, request);
       if (replay !== undefined) return replay;
       await requireDevice(tx, organizationId, deviceId);
       const result = await tx.query(`INSERT INTO agents (organization_id,id,device_id,kind,name,public_key_pem,status)
@@ -253,7 +249,7 @@ export function createPostgresControlPlaneResourceRepository({ client, now = () 
       [organizationId, descriptor.agent_id, deviceId, descriptor.kind, descriptor.name, descriptor.public_key]);
       if (rowCount(result) !== 1) throw new ControlPlaneResourceRepositoryError("ERR_DATABASE", "agent creation did not return a row");
       const agent = mapAgent(result.rows[0]);
-      await finishIdempotency(tx, organizationId, "create_agent", idempotencyKey, 201, agent);
+      await finishIdempotency(tx, organizationId, principalId, idempotencyKey, 201, agent);
       return agent;
     }));
   }
@@ -287,6 +283,7 @@ export function createPostgresControlPlaneResourceRepository({ client, now = () 
     const patch = object(input.patch, "patch");
     assertAllowedPatch(patch, new Set(["name", "kind", "public_key", "device_id", "status"]), "agent");
     const idempotencyKey = requireIdempotencyKey(input.idempotencyKey ?? input.idempotency_key);
+    const principalId = requiredPrincipalId(input);
     const normalizedPatch = {};
     if (patch.name !== undefined) normalizedPatch.name = text(patch.name, "name", 128, true);
     if (patch.kind !== undefined) normalizedPatch.kind = enumValue(patch.kind, "kind", new Set(["claude-code", "cursor", "mcp", "cli", "custom"]));
@@ -296,7 +293,7 @@ export function createPostgresControlPlaneResourceRepository({ client, now = () 
     const request = { organization_id: organizationId, resource_id: agentId, expected_version: expectedVersion, patch };
     return runDatabase(async () => inTransaction(async (tx) => {
       await lockOrganization(tx, organizationId);
-      const replay = await acquireIdempotency(tx, organizationId, "update_agent", idempotencyKey, request);
+      const replay = await acquireIdempotency(tx, organizationId, principalId, idempotencyKey, request);
       if (replay !== undefined) return replay;
       const current = await selectAgent(tx, organizationId, agentId, true);
       if (normalizedPatch.device_id !== undefined) await requireDevice(tx, organizationId, normalizedPatch.device_id);
@@ -309,30 +306,31 @@ export function createPostgresControlPlaneResourceRepository({ client, now = () 
         RETURNING organization_id,id,device_id,kind,name,public_key_pem,status,version,created_at,last_seen_at`, values);
       if (rowCount(result) === 0) throw new ControlPlaneResourceRepositoryError("ERR_VERSION_CONFLICT", "optimistic version check failed", { expected: expectedVersion, actual: current.version });
       const agent = mapAgent(result.rows[0]);
-      await finishIdempotency(tx, organizationId, "update_agent", idempotencyKey, 200, agent);
+      await finishIdempotency(tx, organizationId, principalId, idempotencyKey, 200, agent);
       return agent;
     }));
   }
 
   async function createPolicy(input) {
     const organizationId = tenant(input);
-    const policyId = optionalUuid(input.policyId ?? input.policy_id ?? input.id, "policy_id") ?? crypto.randomUUID();
+    const createdBy = requiredCreatedBy(input);
+    const principalId = requiredPrincipalId(input);
+    const idempotencyKey = requireIdempotencyKey(input.idempotencyKey ?? input.idempotency_key);
+    const policyId = optionalUuid(input.policyId ?? input.policy_id ?? input.id, "policy_id") ?? deterministicUuid("policy", organizationId, principalId, idempotencyKey);
     const name = text(input.name, "name", 128, true);
     const scope = normalizePolicyScope(input.scope);
     const sequence = sequenceValue(input.sequence ?? 1, "sequence");
-    const createdBy = requiredCreatedBy(input);
-    const idempotencyKey = requireIdempotencyKey(input.idempotencyKey ?? input.idempotency_key);
     const request = { organization_id: organizationId, policy_id: policyId, name, scope, sequence, created_by: createdBy };
     return runDatabase(async () => inTransaction(async (tx) => {
       await lockOrganization(tx, organizationId);
-      const replay = await acquireIdempotency(tx, organizationId, "create_policy", idempotencyKey, request);
+      const replay = await acquireIdempotency(tx, organizationId, principalId, idempotencyKey, request);
       if (replay !== undefined) return replay;
       const result = await tx.query(`INSERT INTO policies (organization_id,id,sequence,name,scope_json,status,created_by)
         VALUES ($1,$2,$3,$4,$5::jsonb,'active',$6)
-        RETURNING organization_id,id,sequence,name,scope_json,status,created_by,created_at`, [organizationId, policyId, sequence, name, JSON.stringify(scope), createdBy]);
+        RETURNING organization_id,id,sequence,name,scope_json,status,created_by,created_at,updated_at,version`, [organizationId, policyId, sequence, name, JSON.stringify(scope), createdBy]);
       if (rowCount(result) !== 1) throw new ControlPlaneResourceRepositoryError("ERR_DATABASE", "policy creation did not return a row");
       const policy = mapPolicy(result.rows[0]);
-      await finishIdempotency(tx, organizationId, "create_policy", idempotencyKey, 201, policy);
+      await finishIdempotency(tx, organizationId, principalId, idempotencyKey, 201, policy);
       return policy;
     }));
   }
@@ -342,7 +340,7 @@ export function createPostgresControlPlaneResourceRepository({ client, now = () 
     const policyId = requiredUuid(input.policyId ?? input.policy_id ?? input.id, "policy_id");
     return runDatabase(async () => {
       await assertOrganization(client, organizationId);
-      const result = await client.query(`SELECT organization_id,id,sequence,name,scope_json,status,created_by,created_at
+      const result = await client.query(`SELECT organization_id,id,sequence,name,scope_json,status,created_by,created_at,updated_at,version
         FROM policies WHERE organization_id=$1 AND id=$2`, [organizationId, policyId]);
       if (rowCount(result) !== 1) throw notFound("policy", policyId);
       return mapPolicy(result.rows[0]);
@@ -353,7 +351,7 @@ export function createPostgresControlPlaneResourceRepository({ client, now = () 
     const organizationId = tenant(input);
     return runDatabase(async () => {
       await assertOrganization(client, organizationId);
-      const result = await client.query(`SELECT organization_id,id,sequence,name,scope_json,status,created_by,created_at
+      const result = await client.query(`SELECT organization_id,id,sequence,name,scope_json,status,created_by,created_at,updated_at,version
         FROM policies WHERE organization_id=$1 ORDER BY created_at ASC,id ASC`, [organizationId]);
       return (result.rows ?? []).map(mapPolicy);
     });
@@ -371,12 +369,27 @@ export function createPostgresControlPlaneResourceRepository({ client, now = () 
     if (patch.sequence !== undefined) normalizedPatch.sequence = sequenceValue(patch.sequence, "sequence");
     if (patch.status !== undefined) normalizedPatch.status = enumValue(patch.status, "status", POLICY_STATUSES);
     const idempotencyKey = requireIdempotencyKey(input.idempotencyKey ?? input.idempotency_key);
+    const principalId = requiredPrincipalId(input);
     const request = { organization_id: organizationId, resource_id: policyId, expected_version: expectedVersion, patch };
     return runDatabase(async () => withTransaction(client, async (tx) => {
       await lockOrganization(tx, organizationId);
-      const replay = await acquireIdempotency(tx, organizationId, "update_policy", idempotencyKey, request);
+      const replay = await acquireIdempotency(tx, organizationId, principalId, idempotencyKey, request);
       if (replay !== undefined) return replay;
-      throw schemaGap("policies.version", "policies has no version column for optimistic updates");
+      const current = await selectPolicy(tx, organizationId, policyId, true);
+      const values = [organizationId, policyId, expectedVersion];
+      const assignments = [];
+      for (const [key, value] of Object.entries(normalizedPatch)) {
+        values.push(key === "scope_json" ? JSON.stringify(value) : value);
+        assignments.push(`${key}=$${values.length}${key === "scope_json" ? "::jsonb" : ""}`);
+      }
+      if (assignments.length === 0) throw new ControlPlaneResourceRepositoryError("ERR_INVALID_INPUT", "policy patch must contain a mutable field");
+      const result = await tx.query(`UPDATE policies SET ${assignments.join(", ")},version=version+1,updated_at=clock_timestamp()
+        WHERE organization_id=$1 AND id=$2 AND version=$3
+        RETURNING organization_id,id,sequence,name,scope_json,status,created_by,created_at,updated_at,version`, values);
+      if (rowCount(result) === 0) throw new ControlPlaneResourceRepositoryError("ERR_VERSION_CONFLICT", "optimistic version check failed", { expected: expectedVersion, actual: safeInteger(current.version, "version") });
+      const policy = mapPolicy(result.rows[0]);
+      await finishIdempotency(tx, organizationId, principalId, idempotencyKey, 200, policy);
+      return policy;
     }));
   }
 
@@ -396,25 +409,25 @@ export function createPostgresControlPlaneResourceRepository({ client, now = () 
     finally { if (transactionClient !== client) transactionClient.release?.(); }
   }
 
-  async function acquireIdempotency(tx, organizationId, operation, key, request) {
+  async function acquireIdempotency(tx, organizationId, principalId, key, request) {
     const requestHash = sha256Hex(request);
     await tx.query(`DELETE FROM idempotency_records
-      WHERE organization_id=$1 AND principal_id=$2 AND idempotency_key=$3 AND expires_at<=clock_timestamp()`, [organizationId, operation, key]);
+      WHERE organization_id=$1 AND principal_id=$2 AND idempotency_key=$3 AND expires_at<=clock_timestamp()`, [organizationId, principalId, key]);
     const inserted = await tx.query(`INSERT INTO idempotency_records (organization_id,principal_id,idempotency_key,request_hash,response_status,response_json,expires_at)
       VALUES ($1,$2,$3,$4,202,'{}'::jsonb,clock_timestamp()+$5::interval)
-      ON CONFLICT (organization_id,principal_id,idempotency_key) DO NOTHING`, [organizationId, operation, key, requestHash, `${idempotencyTtlMs} milliseconds`]);
+      ON CONFLICT (organization_id,principal_id,idempotency_key) DO NOTHING`, [organizationId, principalId, key, requestHash, `${idempotencyTtlMs} milliseconds`]);
     if (rowCount(inserted) === 1) return undefined;
     const existing = await tx.query(`SELECT request_hash,response_status,response_json
-      FROM idempotency_records WHERE organization_id=$1 AND principal_id=$2 AND idempotency_key=$3 FOR UPDATE`, [organizationId, operation, key]);
+      FROM idempotency_records WHERE organization_id=$1 AND principal_id=$2 AND idempotency_key=$3 FOR UPDATE`, [organizationId, principalId, key]);
     if (rowCount(existing) !== 1) throw new ControlPlaneResourceRepositoryError("ERR_DATABASE", "idempotency record disappeared during a transaction");
     if (existing.rows[0].request_hash !== requestHash) throw new ControlPlaneResourceRepositoryError("ERR_IDEMPOTENCY_CONFLICT", "idempotency key was already used for a different mutation");
     if (existing.rows[0].response_status === 202) throw new ControlPlaneResourceRepositoryError("ERR_IDEMPOTENCY_IN_PROGRESS", "idempotency mutation is still in progress");
     return cloneJson(existing.rows[0].response_json);
   }
 
-  async function finishIdempotency(tx, organizationId, operation, key, status, response) {
+  async function finishIdempotency(tx, organizationId, principalId, key, status, response) {
     const result = await tx.query(`UPDATE idempotency_records SET response_status=$4,response_json=$5::jsonb,expires_at=clock_timestamp()+$6::interval
-      WHERE organization_id=$1 AND principal_id=$2 AND idempotency_key=$3`, [organizationId, operation, key, status, JSON.stringify(response), `${idempotencyTtlMs} milliseconds`]);
+      WHERE organization_id=$1 AND principal_id=$2 AND idempotency_key=$3`, [organizationId, principalId, key, status, JSON.stringify(response), `${idempotencyTtlMs} milliseconds`]);
     if (rowCount(result) !== 1) throw new ControlPlaneResourceRepositoryError("ERR_DATABASE", "idempotency record could not be finalized");
   }
 }
@@ -435,7 +448,7 @@ async function requireDevice(client, organizationId, deviceId) {
 }
 
 async function selectDevice(client, organizationId, deviceId, forUpdate = false) {
-  const result = await client.query(`SELECT organization_id,id,label,key_algorithm,public_key_pem,status,version,created_at,last_seen_at
+  const result = await client.query(`SELECT organization_id,id,label,key_algorithm,public_key_pem,status,metadata,version,created_at,last_seen_at
     FROM devices WHERE organization_id=$1 AND id=$2${forUpdate ? " FOR UPDATE" : ""}`, [organizationId, deviceId]);
   if (rowCount(result) !== 1) throw notFound("device", deviceId);
   return result.rows[0];
@@ -449,13 +462,13 @@ async function selectAgent(client, organizationId, agentId, forUpdate = false) {
 }
 
 async function selectPolicy(client, organizationId, policyId, forUpdate = false) {
-  const result = await client.query(`SELECT organization_id,id,sequence,name,scope_json,status,created_by,created_at
+  const result = await client.query(`SELECT organization_id,id,sequence,name,scope_json,status,created_by,created_at,updated_at,version
     FROM policies WHERE organization_id=$1 AND id=$2${forUpdate ? " FOR UPDATE" : ""}`, [organizationId, policyId]);
   if (rowCount(result) !== 1) throw notFound("policy", policyId);
   return result.rows[0];
 }
 
-function mapDevice(row, metadata = undefined) {
+function mapDevice(row) {
   return {
     device_id: requiredUuid(row.id ?? row.device_id, "device_id"),
     organization_id: requiredUuid(row.organization_id, "organization_id"),
@@ -463,20 +476,20 @@ function mapDevice(row, metadata = undefined) {
     device_public_key: row.public_key_pem ?? row.device_public_key,
     ...(row.key_algorithm === undefined ? {} : { key_algorithm: row.key_algorithm }),
     status: row.status,
-    metadata: metadata ?? {},
+    metadata: metadataValue(row.metadata ?? {}),
     created_at: timestamp(row.created_at, "created_at"),
     ...(row.last_seen_at === null || row.last_seen_at === undefined ? {} : { last_seen_at: timestamp(row.last_seen_at, "last_seen_at") }),
     version: safeInteger(row.version, "version")
   };
 }
 
-function mapEnrollment(row, label, platform) {
+function mapEnrollment(row) {
   return {
     enrollment_id: requiredUuid(row.id ?? row.enrollment_id, "enrollment_id"),
     organization_id: requiredUuid(row.organization_id, "organization_id"),
     device_id: requiredUuid(row.device_id, "device_id"),
-    label,
-    platform,
+    label: text(row.label, "label", 128, true),
+    platform: enumValue(row.platform, "platform", new Set(["macos"])),
     created_at: timestamp(row.created_at, "created_at"),
     expires_at: timestamp(row.expires_at, "expires_at"),
     consumed_at: row.consumed_at === null || row.consumed_at === undefined ? null : timestamp(row.consumed_at, "consumed_at")
@@ -507,7 +520,8 @@ function mapPolicy(row) {
     sequence: sequenceValue(row.sequence, "sequence"),
     status: enumValue(row.status, "status", POLICY_STATUSES),
     created_at: timestamp(row.created_at, "created_at"),
-    version: row.version === undefined ? 1 : safeInteger(row.version, "version")
+    updated_at: timestamp(row.updated_at, "updated_at"),
+    version: safeInteger(row.version, "version")
   };
 }
 
@@ -523,8 +537,14 @@ function normalizePolicyScope(value) {
 
 function requiredCreatedBy(input) {
   const value = input.createdBy ?? input.created_by ?? input.memberId ?? input.member_id;
-  if (value === undefined || value === null) throw schemaGap("created_by", "the current createCloudStore/server call does not supply the NOT NULL actor column");
+  if (value === undefined || value === null) throw new ControlPlaneResourceRepositoryError("ERR_ACTOR_REQUIRED", "mutation requires an authenticated member actor");
   return requiredUuid(value, "created_by");
+}
+
+function requiredPrincipalId(input) {
+  const value = input.principalId ?? input.principal_id ?? input.createdBy ?? input.created_by ?? input.memberId ?? input.member_id;
+  if (typeof value !== "string" || value.length < 1 || value.length > 255 || CONTROL.test(value)) throw new ControlPlaneResourceRepositoryError("ERR_PRINCIPAL_REQUIRED", "mutation requires an authenticated principal identifier");
+  return value;
 }
 
 function tenant(input) { return requiredUuid(input?.organizationId ?? input?.organization_id, "organization_id"); }
@@ -541,17 +561,17 @@ function publicKeyText(value, label) {
 function metadataValue(value) { if (value === undefined) return {}; if (!value || typeof value !== "object" || Array.isArray(value)) throw new ControlPlaneResourceRepositoryError("ERR_INVALID_INPUT", "metadata must be an object"); if (Buffer.byteLength(JSON.stringify(value), "utf8") > MAX_METADATA_BYTES) throw new ControlPlaneResourceRepositoryError("ERR_LIMIT_EXCEEDED", "metadata exceeds 16384 bytes"); return cloneJson(value); }
 function object(value, label) { if (!value || typeof value !== "object" || Array.isArray(value)) throw new ControlPlaneResourceRepositoryError("ERR_INVALID_INPUT", `${label} must be an object`); return value; }
 function enumValue(value, label, allowed) { const result = text(value, label, 128, true); if (!allowed.has(result)) throw new ControlPlaneResourceRepositoryError("ERR_INVALID_INPUT", `${label} is invalid`); return result; }
-function sequenceValue(value, label) { if (!Number.isSafeInteger(value) || value < 0) throw new ControlPlaneResourceRepositoryError("ERR_INVALID_INPUT", `${label} must be a non-negative safe integer`); return value; }
+function sequenceValue(value, label) { const result = typeof value === "string" && /^\d+$/u.test(value) ? Number(value) : value; if (!Number.isSafeInteger(result) || result < 0) throw new ControlPlaneResourceRepositoryError("ERR_INVALID_INPUT", `${label} must be a non-negative safe integer`); return result; }
 function requiredVersion(value) { if (!Number.isSafeInteger(value) || value < 1) throw new ControlPlaneResourceRepositoryError("ERR_VERSION_REQUIRED", "expectedVersion must be a positive safe integer"); return value; }
 function safeInteger(value, label) { const number = typeof value === "string" ? Number(value) : value; if (!Number.isSafeInteger(number) || number < 1) throw new ControlPlaneResourceRepositoryError("ERR_DATABASE", `stored ${label} is invalid`); return number; }
 function timestamp(value, label) { if (value instanceof Date) value = value.toISOString(); if (typeof value !== "string" || !RFC3339_UTC.test(value) || !Number.isFinite(Date.parse(value))) throw new ControlPlaneResourceRepositoryError("ERR_INVALID_INPUT", `${label} must be a valid RFC 3339 UTC value`); return new Date(value).toISOString(); }
 function dateValue(value) { return Date.parse(value instanceof Date ? value.toISOString() : value); }
 function sha256(value, label) { const result = text(value, label, 64, true); if (!SHA256.test(result)) throw new ControlPlaneResourceRepositoryError("ERR_INVALID_INPUT", `${label} must be SHA-256 hex`); return result.toLowerCase(); }
 function sha256Hex(value) { return crypto.createHash("sha256").update(canonicalJson(value), "utf8").digest("hex"); }
-function requiredDeviceAlgorithm(value) { if (value === undefined) throw schemaGap("devices.key_algorithm", "createDevice does not receive the NOT NULL key_algorithm column from the current server call"); return enumValue(value, "key_algorithm", new Set(["p256-sha256", "ed25519"])); }
+function deterministicUuid(kind, organizationId, principalId, idempotencyKey) { const bytes=crypto.createHash("sha256").update("AgentPass-Control-Resource-Id-v1\0").update(canonicalJson({kind,organization_id:organizationId,principal_id:principalId,idempotency_key:idempotencyKey})).digest().subarray(0,16); bytes[6]=(bytes[6]&0x0f)|0x50; bytes[8]=(bytes[8]&0x3f)|0x80; const hex=bytes.toString("hex"); return `${hex.slice(0,8)}-${hex.slice(8,12)}-${hex.slice(12,16)}-${hex.slice(16,20)}-${hex.slice(20)}`; }
+function requiredDeviceAlgorithm(value) { return enumValue(value, "key_algorithm", new Set(["p256-sha256", "ed25519"])); }
 function assertAllowedPatch(patch, allowed, label) { for (const key of Object.keys(patch)) if (!allowed.has(key)) throw new ControlPlaneResourceRepositoryError("ERR_IMMUTABLE_FIELD", `${label}.${key} is not mutable`); }
 function requireIdempotencyKey(value) { if (typeof value !== "string" || !IDEMPOTENCY_KEY.test(value)) throw new ControlPlaneResourceRepositoryError("ERR_IDEMPOTENCY_KEY_REQUIRED", "mutation requires an idempotency key of 8-255 safe characters"); return value; }
-function schemaGap(field, message) { return new ControlPlaneResourceRepositoryError("ERR_SCHEMA_GAP", `${field}: ${message}`); }
 function notFound(label, id) { return new ControlPlaneResourceRepositoryError("ERR_NOT_FOUND", `${label} not found: ${id}`); }
 function rowCount(result) { return result?.rowCount ?? result?.rows?.length ?? 0; }
 function cloneJson(value) { return value === undefined ? undefined : structuredClone(value); }

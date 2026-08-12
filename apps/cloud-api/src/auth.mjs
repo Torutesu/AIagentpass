@@ -196,14 +196,16 @@ export function verifyDeviceRequest(request, enrolled, options = {}) {
   }
   if (!valid) fail(AUTH_ERROR_CODES.DEVICE_AUTH_FAILED);
 
-  const replayCache = options.replayCache ?? options.replay ?? createReplayCache();
-  purgeReplayCache(replayCache, now);
-  const replayKey = `${headers["AgentPass-Device"]}:${nonce}`;
-  if (replayCache.has(replayKey)) fail(AUTH_ERROR_CODES.REPLAY_DETECTED);
-  const limit = replayCache.maxEntries ?? options.maxReplayEntries ?? DEFAULT_REPLAY_LIMIT;
-  if (!Number.isSafeInteger(limit) || limit < 1) fail(AUTH_ERROR_CODES.INVALID_REQUEST);
-  if (replayCache.size >= limit) fail(AUTH_ERROR_CODES.REPLAY_CACHE_FULL);
-  replayCache.set(replayKey, now + REPLAY_RETENTION_MS);
+  if (options.deferReplayConsumption !== true) {
+    const replayCache = options.replayCache ?? options.replay ?? createReplayCache();
+    purgeReplayCache(replayCache, now);
+    const replayKey = `${headers["AgentPass-Device"]}:${nonce}`;
+    if (replayCache.has(replayKey)) fail(AUTH_ERROR_CODES.REPLAY_DETECTED);
+    const limit = replayCache.maxEntries ?? options.maxReplayEntries ?? DEFAULT_REPLAY_LIMIT;
+    if (!Number.isSafeInteger(limit) || limit < 1) fail(AUTH_ERROR_CODES.INVALID_REQUEST);
+    if (replayCache.size >= limit) fail(AUTH_ERROR_CODES.REPLAY_CACHE_FULL);
+    replayCache.set(replayKey, now + REPLAY_RETENTION_MS);
+  }
 
   return publicDevice(device, headers["AgentPass-Device"]);
 }

@@ -244,7 +244,7 @@ export async function createCloudStore(options = {}) {
       organizationId,
       operation: "create_device_enrollment",
       idempotencyKey: input.idempotencyKey ?? input.idempotency_key,
-      input: { organization_id: organizationId, enrollment_id: enrollmentId, device_id: deviceId, label, platform, credential_digest: credentialDigest, created_at: createdAt, expires_at: expiresAt },
+      input: { organization_id: organizationId, enrollment_id: enrollmentId, device_id: deviceId, label, platform, credential_digest: credentialDigest, ttl_ms: Date.parse(expiresAt) - Date.parse(createdAt) },
       action: () => {
         if (state.device_enrollments[enrollmentId] || state.devices[deviceId] || hasAnyResourceId(state, enrollmentId) || hasAnyResourceId(state, deviceId)) throw unique("enrollment_or_device_id", enrollmentId);
         if (Object.values(state.device_enrollments).some((item) => item.credential_digest === credentialDigest)) throw unique("credential_digest", credentialDigest);

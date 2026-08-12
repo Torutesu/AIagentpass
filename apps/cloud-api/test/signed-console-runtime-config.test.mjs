@@ -43,14 +43,14 @@ function createFixture({ identityPublicKey, bundlePrivateKey } = {}) {
     bundlePEM: String(bundlePEM),
     identityPEM: String(identityPEM),
     env: {
-      AGENTPASS_CLOUD_DATA_DIR: dataDir,
-      AGENTPASS_CLOUD_TOKEN_RECORDS_PATH: tokenRecordsPath,
+      AGENTPASS_CLOUD_PROFILE: "hosted",
       AGENTPASS_CLOUD_BUNDLE_PRIVATE_KEY_PATH: bundlePrivateKeyPath,
       AGENTPASS_CLOUD_PORT: "0",
       AGENTPASS_DATABASE_URL: DATABASE_URL,
       AGENTPASS_CONSOLE_ORIGIN: "https://console.example.test",
       AGENTPASS_WEBAUTHN_RP_ID: "example.test",
       AGENTPASS_HUMAN_CURSOR_SECRET: CURSOR_SECRET,
+      AGENTPASS_CAPABILITY_NONCE_SECRET: Buffer.alloc(32, 0x33).toString("base64url"),
       AGENTPASS_IDENTITY_PROVIDER: "chatgpt",
       AGENTPASS_IDENTITY_ASSERTION_ISSUER: IDENTIFIER_ISSUER,
       AGENTPASS_IDENTITY_ASSERTION_AUDIENCE: IDENTIFIER_AUDIENCE,
@@ -107,6 +107,11 @@ function fakePostgresRuntime() {
       async issueCapabilityMetadata() { return null; },
       async listRevokedCapabilityIds() { return []; }
     },
+    controlPlaneStore: {},
+    sharedControlRepository: {
+      async consumeDeviceRequestNonce() { return { accepted: true }; },
+      async acquireRateLimit() { return { allowed: true, limit: 120, remaining: 119, retryAfterMs: 0, retryAfterSeconds: 0, resetAt: Date.now() }; }
+    },
     async close() { closed = true; },
     wasClosed() { return closed; }
   };
@@ -116,10 +121,10 @@ test("loadRuntimeConfig fails closed when a production identity assertion settin
   const fixture = createFixture();
   try {
     const expectedErrors = new Map([
-      ["AGENTPASS_IDENTITY_ASSERTION_ISSUER", /Human identity assertion configuration is incomplete/],
-      ["AGENTPASS_IDENTITY_ASSERTION_AUDIENCE", /Human identity assertion configuration is incomplete/],
-      ["AGENTPASS_IDENTITY_ASSERTION_KID", /Human identity assertion configuration is incomplete/],
-      ["AGENTPASS_IDENTITY_ASSERTION_PUBLIC_KEY_PATH", /AGENTPASS_IDENTITY_ASSERTION_PUBLIC_KEY_PATH must be an absolute path/]
+      ["AGENTPASS_IDENTITY_ASSERTION_ISSUER", /requires complete PostgreSQL/],
+      ["AGENTPASS_IDENTITY_ASSERTION_AUDIENCE", /requires complete PostgreSQL/],
+      ["AGENTPASS_IDENTITY_ASSERTION_KID", /requires complete PostgreSQL/],
+      ["AGENTPASS_IDENTITY_ASSERTION_PUBLIC_KEY_PATH", /requires complete PostgreSQL/]
     ]);
     for (const [name, expected] of expectedErrors) {
       const env = { ...fixture.env };
@@ -278,8 +283,8 @@ test("complete production configuration wires only the pinned signedConsoleIdent
     error(...args) { logs.push(args); }
   };
   try {
-    // Hosted Human Auth must not retain a runtime dependency on the legacy
-    // operator bearer database, even when a stale path remains in the env.
+    // Hosted Human Auth has no runtime dependency on the legacy operator
+    // bearer database. The profile rejects such a path before composition.
     fs.unlinkSync(fixture.tokenRecordsPath);
     const runtime = await createCloudRuntime({
       env: fixture.env,

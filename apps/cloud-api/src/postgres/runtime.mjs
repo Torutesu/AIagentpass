@@ -1,9 +1,11 @@
 import { Pool } from "pg";
 import { createMigrationRunner } from "./migration-runner.mjs";
 import { createCapabilityAuthorityRepository } from "./capability-authority-repository.mjs";
+import { createPostgresControlPlaneStore } from "./control-plane-store.mjs";
 import { createPostgresHumanRepository } from "./human-repository.mjs";
 import { createPostgresOrganizationRepository } from "./organization-repository.mjs";
 import { createTenantRepositoryFactory } from "./repository.mjs";
+import { createSharedControlRepository } from "./shared-control-repository.mjs";
 
 export async function createPostgresRuntime({ env = process.env, PoolClass = Pool, applicationVersion = "unknown" } = {}) {
   const config = loadPostgresConfig(env);
@@ -22,11 +24,25 @@ export async function createPostgresRuntime({ env = process.env, PoolClass = Poo
   client.release();
   let closed = false;
   const organizationRepository = createPostgresOrganizationRepository({ client: pool });
+  const capabilityAuthorityRepository = createCapabilityAuthorityRepository({ client: pool });
+  const sharedControlRepository = createSharedControlRepository({ client: pool });
+  const auditCursorSecret = exactSecret(env.AGENTPASS_HUMAN_CURSOR_SECRET, "AGENTPASS_HUMAN_CURSOR_SECRET");
+  const capabilityNonceSecret = exactSecret(env.AGENTPASS_CAPABILITY_NONCE_SECRET, "AGENTPASS_CAPABILITY_NONCE_SECRET");
+  const controlPlaneStore = createPostgresControlPlaneStore({
+    client: pool,
+    organizationRepository,
+    capabilityAuthorityRepository,
+    sharedControlRepository,
+    auditCursorSecret,
+    capabilityNonceSecret
+  });
   return Object.freeze({
     pool,
     humanRepository: createPostgresHumanRepository({ client: pool }),
     organizationRepository,
-    capabilityAuthorityRepository: createCapabilityAuthorityRepository({ client: pool }),
+    capabilityAuthorityRepository,
+    sharedControlRepository,
+    controlPlaneStore,
     tenants: createTenantRepositoryFactory({ client: pool }),
     async health() {
       if (closed) return { ready: false, code: "postgres_closed" };
@@ -56,3 +72,5 @@ export function loadPostgresConfig(env = {}) {
 }
 
 function integer(value, min, max) { if (typeof value !== "string" || !/^\d+$/.test(value)) throw new TypeError("PostgreSQL timeout/limit is invalid"); const result=Number(value); if(!Number.isSafeInteger(result)||result<min||result>max) throw new TypeError("PostgreSQL timeout/limit is invalid"); return result; }
+
+function exactSecret(value, name) { if (typeof value !== "string" || !/^[A-Za-z0-9_-]{43}$/u.test(value)) throw new TypeError(`${name} must be an exact 32-byte base64url secret`); const bytes=Buffer.from(value,"base64url"); if(bytes.length!==32||bytes.toString("base64url")!==value) throw new TypeError(`${name} must be an exact 32-byte base64url secret`); return bytes; }

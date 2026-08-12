@@ -36,6 +36,19 @@ export function createPostgresOrganizationRepository({ client, now = () => new D
   assertClient(client);
   if (typeof now !== "function") throw new TypeError("now must be a function");
 
+  async function getOrganization(input = {}) {
+    const organizationId = uuid(input.organization_id ?? input.organizationId ?? input.actor?.organization_id);
+    try {
+      const result = await client.query(`SELECT id AS organization_id,name,version,created_at,updated_at
+        FROM organizations WHERE id=$1 LIMIT 1`, [organizationId]);
+      if ((result.rowCount ?? result.rows?.length ?? 0) !== 1) return null;
+      return safeOrganizationRow(result.rows[0]);
+    } catch (error) {
+      if (error instanceof OrganizationRepositoryError) throw error;
+      throw new OrganizationRepositoryError("ERR_DATABASE", "organization storage is unavailable");
+    }
+  }
+
   async function listOrganizationsForMember(input = {}) {
     const memberId = uuid(input.member_id ?? input.memberId);
     const hasPaging = input.limit !== undefined || input.after_created_at !== undefined || input.after_id !== undefined;
@@ -470,6 +483,7 @@ export function createPostgresOrganizationRepository({ client, now = () => new D
   }
 
   return Object.freeze({
+    getOrganization,
     listOrganizationsForMember,
     listMembers,
     createOrganizationWithOwner,

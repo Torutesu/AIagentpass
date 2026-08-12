@@ -74,6 +74,6 @@ for (const table of ["organizations", "memberships", "human_sessions", "webauthn
 }
 if (!/FOREIGN KEY \(organization_id, device_id\)/.test(sql)) fail("PostgreSQL migration must enforce tenant-qualified device references");
 if (!/CREATE TABLE webauthn_challenges \(/.test(migrations.map((item) => item.sql).join("\n"))) fail("PostgreSQL migrations must persist one-time WebAuthn challenges");
-if (!/CREATE INDEX device_audit_events_activity_keyset[\s\S]*redacted_json\s*->>\s*'device_timestamp'[\s\S]*event_id DESC/i.test(migrations.at(-1).sql)) fail("PostgreSQL migrations must index the device audit activity keyset");
+if (!migrations.some((migration) => /CREATE INDEX device_audit_events_activity_keyset[\s\S]*redacted_json\s*->>\s*'device_timestamp'[\s\S]*event_id DESC/i.test(migration.sql))) fail("PostgreSQL migrations must index the device audit activity keyset");
 
 if (!process.exitCode) process.stdout.write(`validated ${schemaFiles.length} schemas, 2 OpenAPI documents, 4 fixtures, and ${migrations.length} PostgreSQL migrations\n`);

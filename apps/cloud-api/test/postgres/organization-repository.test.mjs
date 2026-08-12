@@ -73,11 +73,19 @@ test("exposes exactly the frozen organization API", () => {
   assert.equal(Object.isFrozen(repository), true);
   assert.deepEqual(Object.keys(repository).sort(), [
     "acceptInvitation", "createInvitation", "createOrganizationWithOwner", "listInvitations",
-    "listMembers", "listOrganizationsForMember", "removeMember", "renameOrganization",
+    "getOrganization", "listMembers", "listOrganizationsForMember", "removeMember", "renameOrganization",
     "revokeInvitation", "updateMemberRole"
   ].sort());
   assert.throws(() => createPostgresOrganizationRepository({ client: {} }), /database client/);
   assert.throws(() => createPostgresOrganizationRepository({ client: new QueueClient(), now: "not-a-function" }), /now must be a function/);
+});
+
+test("gets one tenant organization without exposing database failures", async () => {
+  const client = new QueueClient([response([orgRow()])]);
+  assert.deepEqual(await repo(client).getOrganization({ organizationId: ids.organization }), orgRow());
+  assert.deepEqual(client.calls[0].params, [ids.organization]);
+  const failing = repo(new QueueClient([], { failOn: () => new Error("password=internal") }));
+  await assert.rejects(failing.getOrganization({ organizationId: ids.organization }), (error) => error.code === "ERR_DATABASE" && !error.message.includes("internal"));
 });
 
 test("validates UUIDs, bounded text, roles, versions, times, and digests before querying", async () => {

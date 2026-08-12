@@ -7,6 +7,7 @@ import test from "node:test";
 
 import { createApiTokenRecord, generateApiToken } from "../src/auth.mjs";
 import { createCloudRuntime, loadRuntimeConfig } from "../src/runtime.mjs";
+import { createCloudStore } from "../src/store.mjs";
 
 const CURSOR_SECRET = Buffer.alloc(32, 0x42).toString("base64url");
 
@@ -23,7 +24,7 @@ function files() {
   fs.writeFileSync(tokenRecordsPath, JSON.stringify(records), { mode: 0o600 });
   fs.writeFileSync(bundlePrivateKeyPath, keys.privateKey.export({ type: "pkcs8", format: "pem" }), { mode: 0o600 });
   fs.writeFileSync(identityPublicKeyPath, keys.publicKey.export({ type: "spki", format: "pem" }), { mode: 0o600 });
-  return { root, env: { AGENTPASS_CLOUD_DATA_DIR: dataDir, AGENTPASS_CLOUD_TOKEN_RECORDS_PATH: tokenRecordsPath, AGENTPASS_CLOUD_BUNDLE_PRIVATE_KEY_PATH: bundlePrivateKeyPath, AGENTPASS_CLOUD_PORT: "0", AGENTPASS_IDENTITY_ASSERTION_ISSUER: "agentpass-console", AGENTPASS_IDENTITY_ASSERTION_AUDIENCE: "agentpass-cloud-session", AGENTPASS_IDENTITY_ASSERTION_KID: "console-2026-08", AGENTPASS_IDENTITY_ASSERTION_PUBLIC_KEY_PATH: identityPublicKeyPath } };
+  return { root, identityPublicKeyPath, env: { AGENTPASS_CLOUD_PROFILE: "evaluation", AGENTPASS_CLOUD_DATA_DIR: dataDir, AGENTPASS_CLOUD_TOKEN_RECORDS_PATH: tokenRecordsPath, AGENTPASS_CLOUD_BUNDLE_PRIVATE_KEY_PATH: bundlePrivateKeyPath, AGENTPASS_CLOUD_PORT: "0" } };
 }
 
 test("production runtime starts from protected files and closes idempotently", async (t) => {
@@ -41,21 +42,22 @@ test("runtime rejects unsafe secrets, key algorithms, and configuration", async 
   t.after(() => fs.rmSync(value.root, { recursive: true, force: true }));
   fs.chmodSync(value.env.AGENTPASS_CLOUD_TOKEN_RECORDS_PATH, 0o644);
   await assert.rejects(createCloudRuntime({ env: value.env }), /permissions are unsafe/);
-  assert.throws(() => loadRuntimeConfig({}), /absolute path/);
+  assert.throws(() => loadRuntimeConfig({}), /profile is required/);
   assert.throws(() => loadRuntimeConfig({ ...value.env, AGENTPASS_CLOUD_HOST: "example.com" }), /listen host/);
-  assert.throws(() => loadRuntimeConfig({ ...value.env, AGENTPASS_DATABASE_URL: "postgresql://db" }), /Human auth configuration is incomplete/);
-  assert.throws(() => loadRuntimeConfig({ ...value.env, AGENTPASS_DATABASE_URL: "postgresql://db", AGENTPASS_CONSOLE_ORIGIN: "https://console.example.test", AGENTPASS_WEBAUTHN_RP_ID: "other.test" }), /RP_ID/);
-  const humanEnv = { ...value.env, AGENTPASS_DATABASE_URL: "postgresql://agent:secret@db.example.test/agentpass?sslmode=verify-full", AGENTPASS_CONSOLE_ORIGIN: "https://console.example.test", AGENTPASS_WEBAUTHN_RP_ID: "example.test" };
-  assert.throws(() => loadRuntimeConfig(humanEnv), /HUMAN_CURSOR_SECRET/);
-  assert.throws(() => loadRuntimeConfig({ ...humanEnv, AGENTPASS_HUMAN_CURSOR_SECRET: "A".repeat(42) }), /HUMAN_CURSOR_SECRET/);
+  assert.throws(() => loadRuntimeConfig({ ...value.env, AGENTPASS_DATABASE_URL: "postgresql://db" }), /forbids PostgreSQL/);
+  const humanEnv = hostedEnv(value);
+  assert.throws(() => loadRuntimeConfig({ ...humanEnv, AGENTPASS_WEBAUTHN_RP_ID: "other.test" }), /Human Auth configuration is invalid/);
+  assert.throws(() => loadRuntimeConfig({ ...humanEnv, AGENTPASS_HUMAN_CURSOR_SECRET: undefined }), /requires complete PostgreSQL/);
+  assert.throws(() => loadRuntimeConfig({ ...humanEnv, AGENTPASS_HUMAN_CURSOR_SECRET: "A".repeat(42) }), /Human Auth configuration is invalid/);
 });
 
 test("production human auth is composed from PostgreSQL and closed with the runtime", async (t) => {
   const value = files();
   t.after(() => fs.rmSync(value.root, { recursive: true, force: true }));
-  const env = { ...value.env, AGENTPASS_CLOUD_TOKEN_RECORDS_PATH: undefined, AGENTPASS_DATABASE_URL: "postgresql://agent:secret@db.example.test/agentpass?sslmode=verify-full", AGENTPASS_CONSOLE_ORIGIN: "https://console.example.test", AGENTPASS_WEBAUTHN_RP_ID: "example.test", AGENTPASS_HUMAN_CURSOR_SECRET: CURSOR_SECRET };
+  const env = hostedEnv(value);
   const calls = [];
-  const postgresRuntime = { pool: {}, humanRepository: {}, capabilityAuthorityRepository: { async issueCapabilityMetadata() {}, async listRevokedCapabilityIds() { return []; } }, async close() { calls.push("postgres-close"); } };
+  const controlPlaneStore = await createCloudStore({ dataDir: path.join(value.root, "hosted-test-store"), auditCursorSecret: Buffer.from(CURSOR_SECRET, "base64url") });
+  const postgresRuntime = { pool: {}, humanRepository: {}, controlPlaneStore, sharedControlRepository: { async consumeDeviceRequestNonce() { return { accepted: true }; }, async acquireRateLimit() { return { allowed: true, limit: 120, remaining: 119, retryAfterMs: 0, retryAfterSeconds: 0, resetAt: Date.now() }; } }, capabilityAuthorityRepository: { async issueCapabilityMetadata() {}, async listRevokedCapabilityIds() { return []; } }, async close() { calls.push("postgres-close"); await controlPlaneStore.close(); } };
   const recentAuthService = { async authorize() { return { verified: false }; } };
   const humanSession = { async authenticateRequest() { return { session: {} }; } };
   const runtime = await createCloudRuntime({ env, logger: { info() {} }, postgresFactory: async (input) => { calls.push(["postgres", input.applicationVersion]); return postgresRuntime; }, humanAuthFactory: (input) => { calls.push(["human", input.origin, input.rpId, input.cursorSecret, input.signedConsoleIdentity]); return { api: { async handle() { return { status: 404, body: { error: { code: "not_found", message: "Resource not found" } }, headers: {} }; } }, humanSession, recentAuthService }; } });
@@ -77,7 +79,7 @@ test("production human auth is composed from PostgreSQL and closed with the runt
 test("production human auth fails closed without PostgreSQL capability authority", async (t) => {
   const value = files();
   t.after(() => fs.rmSync(value.root, { recursive: true, force: true }));
-  const env = { ...value.env, AGENTPASS_DATABASE_URL: "postgresql://agent:secret@db.example.test/agentpass?sslmode=verify-full", AGENTPASS_CONSOLE_ORIGIN: "https://console.example.test", AGENTPASS_WEBAUTHN_RP_ID: "example.test", AGENTPASS_HUMAN_CURSOR_SECRET: CURSOR_SECRET };
+  const env = hostedEnv(value);
   let closed = false;
   await assert.rejects(createCloudRuntime({
     env,
@@ -86,3 +88,7 @@ test("production human auth fails closed without PostgreSQL capability authority
   }), /capability authority is unavailable/);
   assert.equal(closed, true);
 });
+
+function hostedEnv(value) {
+  return { ...value.env, AGENTPASS_CLOUD_PROFILE: "hosted", AGENTPASS_CLOUD_DATA_DIR: undefined, AGENTPASS_CLOUD_TOKEN_RECORDS_PATH: undefined, AGENTPASS_DATABASE_URL: "postgresql://agent:secret@db.example.test/agentpass?sslmode=verify-full", AGENTPASS_CONSOLE_ORIGIN: "https://console.example.test", AGENTPASS_WEBAUTHN_RP_ID: "example.test", AGENTPASS_HUMAN_CURSOR_SECRET: CURSOR_SECRET, AGENTPASS_CAPABILITY_NONCE_SECRET: Buffer.alloc(32, 0x33).toString("base64url"), AGENTPASS_IDENTITY_ASSERTION_ISSUER: "agentpass-console", AGENTPASS_IDENTITY_ASSERTION_AUDIENCE: "agentpass-cloud-session", AGENTPASS_IDENTITY_ASSERTION_KID: "console-2026-08", AGENTPASS_IDENTITY_ASSERTION_PUBLIC_KEY_PATH: value.identityPublicKeyPath };
+}

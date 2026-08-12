@@ -31,7 +31,9 @@ async function fixture(t, apiOptions = {}) {
   const token = "ap_owner_token_abcdefghijklmnopqrstuvwxyz";
   const records = [createApiTokenRecord({ token, tokenId: "owner-token", organizationId: org, memberId: "owner-1", role: "owner" })];
   const bundleKeys = crypto.generateKeyPairSync("ed25519");
-  const server = createCloudApi({ store, tokenRecords: records, bundleSigner: { privateKey: bundleKeys.privateKey, issuer: "agentpass-cloud", keyId: "control-v1", ttlMs: 60_000, offlineTtlMs: 120_000 }, now: () => now, verifyRecentWebAuthn: async ({ proof, principal, organization_id, operation }) => ({ verified: proof === "webauthn-proof-abcdefghijklmnopqrstuvwxyz", consumed: true, challenge_id: "99999999-9999-4999-8999-999999999999", member_id: principal.member_id, organization_id, operation, authenticated_at: now }), ...apiOptions });
+  const { storeDecorator, ...cloudApiOptions } = apiOptions;
+  const apiStore = typeof storeDecorator === "function" ? storeDecorator(store) : store;
+  const server = createCloudApi({ store: apiStore, tokenRecords: records, bundleSigner: { privateKey: bundleKeys.privateKey, issuer: "agentpass-cloud", keyId: "control-v1", ttlMs: 60_000, offlineTtlMs: 120_000 }, now: () => now, verifyRecentWebAuthn: async ({ proof, principal, organization_id, operation }) => ({ verified: proof === "webauthn-proof-abcdefghijklmnopqrstuvwxyz", consumed: true, challenge_id: "99999999-9999-4999-8999-999999999999", member_id: principal.member_id, organization_id, operation, authenticated_at: now }), ...cloudApiOptions });
   await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
   const base = `http://127.0.0.1:${server.address().port}`;
   t.after(async () => { await new Promise((resolve) => server.close(resolve)); await store.close(); await fs.rm(directory, { recursive: true, force: true }); });
@@ -60,6 +62,7 @@ test("human routes enforce bearer role, tenant, and idempotency", async (t) => {
 
 test("Human Auth mode uses the hash-only session as control-plane authority and never falls back to bearer", async (t) => {
   const calls = [];
+  const policyInputs = [];
   const humanSession = {
     async authenticateRequest(input) {
       calls.push(input);
@@ -81,7 +84,13 @@ test("Human Auth mode uses the hash-only session as control-plane authority and 
       return { session: { member_id: "owner-1", organization_id: org, role: "owner" } };
     }
   };
-  const f = await fixture(t, { humanSession });
+  const f = await fixture(t, {
+    humanSession,
+    storeDecorator: (store) => Object.freeze({
+      ...store,
+      async createPolicy(input) { policyInputs.push(structuredClone(input)); return store.createPolicy(input); }
+    })
+  });
   const pathName = `/v1/organizations/${org}/devices`;
   const deniedBearer = await fetch(`${f.base}${pathName}`, { headers: { authorization: `Bearer ${f.token}` } });
   assert.equal(deniedBearer.status, 401);
@@ -102,10 +111,13 @@ test("Human Auth mode uses the hash-only session as control-plane authority and 
   assert.equal(missingCsrf.status, 403);
   const acceptedMutation = await fetch(`${f.base}${mutationPath}`, { method: "POST", headers: { ...mutationHeaders, "agentpass-csrf": "c".repeat(43), "idempotency-key": "human-auth-policy-0002" }, body: JSON.stringify({ name: "session-policy", scope: f.scope, sequence: 2 }) });
   assert.equal(acceptedMutation.status, 201, JSON.stringify(await acceptedMutation.clone().json()));
+  assert.equal(policyInputs.length, 1);
+  assert.equal(policyInputs[0].createdBy, "owner-1");
+  assert.equal(policyInputs[0].principalId, "owner-1");
 });
 
 test("admin issues a one-time enrollment and a macOS P-256 device completes it", async (t) => {
-  const f = await fixture(t);
+  const f = await fixture(t, { enrollmentCredentialSecret: Buffer.alloc(32, 0x5e) });
   const enrollmentId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
   const pendingDevice = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
   const enrollmentBody = JSON.stringify({ enrollment_id: enrollmentId, device_id: pendingDevice, label: "Build Mac 02", platform: "macos", ttl_ms: 600_000 });
@@ -124,6 +136,13 @@ test("admin issues a one-time enrollment and a macOS P-256 device completes it",
   assert.equal(issued.status, 201, JSON.stringify(await issued.clone().json()));
   const invitation = (await issued.json()).enrollment;
   assert.match(invitation.credential, /^[A-Za-z0-9_-]{43}$/);
+  const retried = await fetch(`${f.base}/v1/organizations/${org}/device-enrollments`, {
+    method: "POST",
+    headers: { authorization: `Bearer ${f.token}`, "content-type": "application/json", "idempotency-key": "issue-device-enrollment-0001", "AgentPass-Recent-Auth": "webauthn-proof-abcdefghijklmnopqrstuvwxyz" },
+    body: enrollmentBody
+  });
+  assert.equal(retried.status, 201, JSON.stringify(await retried.clone().json()));
+  assert.deepEqual((await retried.json()).enrollment, invitation);
   const keys = crypto.generateKeyPairSync("ec", { namedCurve: "prime256v1" });
   const request = { version: 1, enrollment_id: enrollmentId, organization_id: org, device_id: pendingDevice, label: "Build Mac 02", platform: "macos", device_key: { algorithm: "p256-sha256", spki_pem: keys.publicKey.export({ type: "spki", format: "pem" }).toString() } };
   const requestBody = JSON.stringify(request);

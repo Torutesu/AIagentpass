@@ -32,6 +32,19 @@ export {
   createCapabilityAuthorityRepository
 } from "./capability-authority-repository.mjs";
 export {
+  CapabilityReservationRepositoryError,
+  createPostgresCapabilityReservationRepository
+} from "./capability-reservation-repository.mjs";
+export {
+  AdminAuditRepositoryError,
+  createPostgresAdminAuditRepository
+} from "./admin-audit-repository.mjs";
+export {
+  CONTROL_PLANE_STORE_METHODS,
+  ControlPlaneStoreError,
+  createPostgresControlPlaneStore
+} from "./control-plane-store.mjs";
+export {
   OrganizationRepositoryError,
   canonicalAuditEvent,
   createOrganizationRepository,

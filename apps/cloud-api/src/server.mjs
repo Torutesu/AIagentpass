@@ -18,7 +18,7 @@ const HUMAN_AUTH_UUID = "[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89a-
 const UUID = "([0-9a-fA-F-]{36})";
 const UUID_VALUE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu;
 
-export function createCloudApi({ store, tokenRecords = [], bundleSigner, now = () => Date.now(), monotonicNow, replayCache = createReplayCache(), rateLimiter, admissionRateLimiter, verifyRecentWebAuthn, recentAuthService, humanAuthApi, humanSession, capabilityAuthorityRepository, capabilityRevocationSource, auditRepository } = {}) {
+export function createCloudApi({ store, tokenRecords = [], bundleSigner, now = () => Date.now(), monotonicNow, replayCache = createReplayCache(), deviceReplayConsumer, rateLimiter, admissionRateLimiter, verifyRecentWebAuthn, recentAuthService, humanAuthApi, humanSession, capabilityAuthorityRepository, capabilityRevocationSource, auditRepository, enrollmentCredentialSecret } = {}) {
   if (!store) throw new TypeError("store is required");
   if (verifyRecentWebAuthn !== undefined && recentAuthService !== undefined) throw new TypeError("configure verifyRecentWebAuthn or recentAuthService, not both");
   if (humanAuthApi !== undefined && (!humanAuthApi || typeof humanAuthApi.handle !== "function")) throw new TypeError("humanAuthApi must expose handle()");
@@ -26,6 +26,11 @@ export function createCloudApi({ store, tokenRecords = [], bundleSigner, now = (
   if (capabilityRevocationSource !== undefined && (!capabilityRevocationSource || typeof capabilityRevocationSource.listRevokedCapabilityIds !== "function")) throw new TypeError("capabilityRevocationSource must expose listRevokedCapabilityIds()");
   if (capabilityAuthorityRepository !== undefined && (!capabilityAuthorityRepository || typeof capabilityAuthorityRepository.issueCapabilityMetadata !== "function")) throw new TypeError("capabilityAuthorityRepository must expose issueCapabilityMetadata()");
   if (auditRepository !== undefined && (!auditRepository || typeof auditRepository.listDeviceAuditEvents !== "function")) throw new TypeError("auditRepository must expose listDeviceAuditEvents()");
+  if (deviceReplayConsumer !== undefined && typeof deviceReplayConsumer !== "function") throw new TypeError("deviceReplayConsumer must be a function");
+  if (enrollmentCredentialSecret !== undefined && (!Buffer.isBuffer(enrollmentCredentialSecret) || enrollmentCredentialSecret.length !== 32)) throw new TypeError("enrollmentCredentialSecret must be an exact 32-byte Buffer");
+  const effectiveEnrollmentCredentialSecret = enrollmentCredentialSecret ?? (bundleSigner?.privateKey
+    ? crypto.createHash("sha256").update("AgentPass-Evaluation-Enrollment-Root-v1\0").update(bundleSigner.privateKey.export({ type: "pkcs8", format: "der" })).digest()
+    : crypto.randomBytes(32));
   const recentAuthVerifier = recentAuthService === undefined ? verifyRecentWebAuthn : recentAuthService?.authorize?.bind(recentAuthService);
   if (recentAuthService !== undefined && typeof recentAuthVerifier !== "function") throw new TypeError("recentAuthService must expose authorize()");
   const limiter = rateLimiter ?? createRateLimiter({ now, ...(monotonicNow ? { monotonicNow } : {}) });
@@ -33,6 +38,16 @@ export function createCloudApi({ store, tokenRecords = [], bundleSigner, now = (
   const activitySource = auditRepository ?? store;
   if (!limiter || typeof limiter.acquire !== "function") throw new TypeError("rateLimiter must expose acquire()");
   const routes = buildRoutes();
+
+  async function mutateAndAudit(organizationId, mutation, audit) {
+    if (typeof store.runAtomicMutation === "function") {
+      const result = await store.runAtomicMutation({ organizationId, mutation: ({ store: transactionStore }) => mutation(transactionStore), audit });
+      return result.mutation;
+    }
+    const result = await mutation(store);
+    await store.appendAdminAuditEvent(typeof audit === "function" ? await audit({ mutation: result }) : audit);
+    return result;
+  }
 
   const server = http.createServer(async (request, response) => {
     const requestId = crypto.randomUUID();
@@ -50,14 +65,20 @@ export function createCloudApi({ store, tokenRecords = [], bundleSigner, now = (
       // Admission is keyed only by the transport peer. Untrusted auth headers
       // must not let an attacker mint fresh pre-authentication buckets.
       const admissionId = crypto.createHash("sha256").update(String(request.socket.remoteAddress ?? "unknown")).digest("hex");
-      const admitted = admission.acquire({ tenantId: rateLimitTenant, principalType: route.device ? "device" : "human", principalId: admissionId });
+      const admitted = await acquireRateLimit(admission, { tenantId: rateLimitTenant, principalType: route.device ? "device" : "human", principalId: admissionId });
       if (!admitted.allowed) throw apiError("rate_limited", 429, "Pre-authentication rate limit exceeded", rateLimitHeaders(admitted, true));
       const bodyBytes = await readBody(request);
       const body = parseBody(bodyBytes);
       let principal;
       if (route.device) {
         const devices = await store.listDevices({ organizationId });
-        principal = verifyDeviceRequest({ method: request.method, path: request.url, body: bodyBytes, headers: request.headers }, devices, { organizationId, now: now(), replayCache });
+        principal = verifyDeviceRequest({ method: request.method, path: request.url, body: bodyBytes, headers: request.headers }, devices, { organizationId, now: now(), replayCache, deferReplayConsumption: deviceReplayConsumer !== undefined });
+        if (deviceReplayConsumer !== undefined) {
+          let accepted = false;
+          try { accepted = await deviceReplayConsumer({ organizationId, deviceId: principal.device_id, nonce: request.headers["agentpass-nonce"] }); }
+          catch { throw apiError("auth_replay_unavailable", 503, "Authentication replay protection is unavailable"); }
+          if (accepted !== true) throw apiError("auth_replay_detected", 401, "Authentication failed");
+        }
       } else if (route.enrollment) {
         principal = { enrollment_id: match?.groups?.enrollmentId, member_id: admissionId };
       } else if (humanSession !== undefined) {
@@ -73,7 +94,7 @@ export function createCloudApi({ store, tokenRecords = [], bundleSigner, now = (
       }
       let rateLimit;
       try {
-        rateLimit = limiter.acquire({ tenantId: rateLimitTenant, principalType: route.device ? "device" : "human", principalId: route.device ? principal.device_id : principal.member_id });
+        rateLimit = await limiter.acquire({ tenantId: rateLimitTenant, principalType: route.device ? "device" : "human", principalId: route.device ? principal.device_id : principal.member_id });
         if (!rateLimit || typeof rateLimit !== "object" || typeof rateLimit.allowed !== "boolean" || !Number.isSafeInteger(rateLimit.limit) || rateLimit.limit < 1 || !Number.isSafeInteger(rateLimit.remaining) || rateLimit.remaining < 0 || rateLimit.remaining > rateLimit.limit || !Number.isSafeInteger(rateLimit.retryAfterSeconds) || rateLimit.retryAfterSeconds < 0 || !Number.isSafeInteger(rateLimit.resetAt) || rateLimit.resetAt < 0) throw new Error("invalid rate limiter decision");
       } catch (error) {
         if (error?.code === "RATE_LIMITER_CAPACITY_EXHAUSTED") throw error;
@@ -98,9 +119,9 @@ export function createCloudApi({ store, tokenRecords = [], bundleSigner, now = (
   async function handleHumanAuth(request, response, url, requestId) {
     const principalId = transportPrincipalId(request);
     const tenantId = "human-auth";
-    const admitted = acquireRateLimit(admission, { tenantId, principalType: "human", principalId });
+    const admitted = await acquireRateLimit(admission, { tenantId, principalType: "human", principalId });
     if (!admitted.allowed) throw apiError("rate_limited", 429, "Pre-authentication rate limit exceeded", rateLimitHeaders(admitted, true));
-    const rateLimit = acquireRateLimit(limiter, { tenantId, principalType: "human", principalId });
+    const rateLimit = await acquireRateLimit(limiter, { tenantId, principalType: "human", principalId });
     if (!rateLimit.allowed) throw apiError("rate_limited", 429, "Rate limit exceeded", rateLimitHeaders(rateLimit, true));
 
     const bodyBytes = await readBody(request, HUMAN_AUTH_MAX_BODY_BYTES);
@@ -122,15 +143,16 @@ export function createCloudApi({ store, tokenRecords = [], bundleSigner, now = (
     return [
       route("GET", new RegExp(`^/v1/organizations/(?<organizationId>${UUID})$`), "viewer", async ({ organizationId }) => ({ body: { organization: await store.getOrganization({ organizationId }) } })),
       route("GET", new RegExp(`^/v1/organizations/(?<organizationId>${UUID})/devices$`), "viewer", async ({ organizationId }) => ({ body: { devices: await store.listDevices({ organizationId }) } })),
-      route("POST", new RegExp(`^/v1/organizations/(?<organizationId>${UUID})/devices$`), "admin", async ({ organizationId, body, idempotencyKey }) => ({ status: 201, body: { device: await store.createDevice({ ...body, organizationId, idempotencyKey }) } })),
+      route("POST", new RegExp(`^/v1/organizations/(?<organizationId>${UUID})/devices$`), "admin", async ({ organizationId, body, idempotencyKey, principal }) => ({ status: 201, body: { device: await mutateAndAudit(organizationId, (target) => target.createDevice({ ...body, organizationId, createdBy: principal.member_id, principalId: principal.member_id, idempotencyKey }), ({ mutation }) => ({ organizationId, eventType: "device.created", actorId: principal.member_id, targetType: "device", targetId: mutation.device_id, idempotencyKey: `${idempotencyKey}:audit` })) } })),
       route("POST", new RegExp(`^/v1/organizations/(?<organizationId>${UUID})/device-enrollments$`), "admin", async ({ organizationId, body, idempotencyKey, principal }) => {
         rejectUnknown(body, new Set(["enrollment_id", "device_id", "label", "platform", "ttl_ms"]), "device_enrollment_issue");
         const ttl = body.ttl_ms ?? 15 * 60 * 1000;
         if (!Number.isSafeInteger(ttl) || ttl < 60_000 || ttl > 24 * 60 * 60 * 1000) throw apiError("invalid_enrollment_ttl", 400, "Enrollment TTL must be between 1 minute and 24 hours");
-        const credential = crypto.randomBytes(32).toString("base64url");
+        const credential = deriveEnrollmentCredential(effectiveEnrollmentCredentialSecret, { organization_id: organizationId, principal_id: principal.member_id, idempotency_key: idempotencyKey, enrollment_id: body.enrollment_id ?? null, device_id: body.device_id ?? null, label: body.label, platform: body.platform ?? "macos", ttl_ms: ttl });
         const createdAt = new Date(now()).toISOString();
-        const enrollment = await store.createDeviceEnrollment({ organizationId, enrollmentId: body.enrollment_id, deviceId: body.device_id, label: body.label, platform: body.platform ?? "macos", credentialDigest: crypto.createHash("sha256").update(credential).digest("hex"), createdAt, expiresAt: new Date(now() + ttl).toISOString(), idempotencyKey });
-        await store.appendAdminAuditEvent({ organizationId, eventType: "device.enrollment_issued", actorId: principal.member_id, targetType: "device", targetId: enrollment.device_id, details: { enrollment_id: enrollment.enrollment_id, expires_at: enrollment.expires_at }, idempotencyKey: `${idempotencyKey}:audit` });
+        const enrollment = await mutateAndAudit(organizationId,
+          (target) => target.createDeviceEnrollment({ organizationId, enrollmentId: body.enrollment_id, deviceId: body.device_id, label: body.label, platform: body.platform ?? "macos", credentialDigest: crypto.createHash("sha256").update(credential).digest("hex"), createdAt, expiresAt: new Date(now() + ttl).toISOString(), createdBy: principal.member_id, principalId: principal.member_id, idempotencyKey }),
+          ({ mutation }) => ({ organizationId, eventType: "device.enrollment_issued", actorId: principal.member_id, targetType: "device", targetId: mutation.device_id, details: { enrollment_id: mutation.enrollment_id, expires_at: mutation.expires_at }, idempotencyKey: `${idempotencyKey}:audit` }));
         return { status: 201, body: { enrollment: { ...enrollment, credential, endpoint: `/v1/enrollments/${enrollment.enrollment_id}` } } };
       }, false, false, "device.enrollment.issue"),
       route("POST", new RegExp(`^/v1/enrollments/(?<enrollmentId>${UUID})$`), null, async ({ match, body, bodyBytes, request }) => {
@@ -147,25 +169,28 @@ export function createCloudApi({ store, tokenRecords = [], bundleSigner, now = (
         return { status: 201, body: { enrollment: { version: 1, enrollment_id: match.enrollmentId, organization_id: device.organization_id, device_id: device.device_id, status: device.status, key_algorithm: device.key_algorithm, control: { format_epoch: 2, issuer: bundleSigner.issuer, key_id: bundleSigner.keyId, public_key: controlPublicKey, bundle_path: `/v1/organizations/${device.organization_id}/bundles/${device.device_id}` } } } };
       }, false, true),
       route("GET", new RegExp(`^/v1/organizations/(?<organizationId>${UUID})/agents$`), "viewer", async ({ organizationId }) => ({ body: { agents: await store.listAgents({ organizationId }) } })),
-      route("POST", new RegExp(`^/v1/organizations/(?<organizationId>${UUID})/agents$`), "admin", async ({ organizationId, body, idempotencyKey }) => ({ status: 201, body: { agent: await store.createAgent({ ...body, organizationId, idempotencyKey }) } })),
+      route("POST", new RegExp(`^/v1/organizations/(?<organizationId>${UUID})/agents$`), "admin", async ({ organizationId, body, idempotencyKey, principal }) => ({ status: 201, body: { agent: await mutateAndAudit(organizationId, (target) => target.createAgent({ ...body, organizationId, createdBy: principal.member_id, principalId: principal.member_id, idempotencyKey }), ({ mutation }) => ({ organizationId, eventType: "agent.created", actorId: principal.member_id, targetType: "agent", targetId: mutation.agent_id, idempotencyKey: `${idempotencyKey}:audit` })) } })),
       route("POST", new RegExp(`^/v1/organizations/(?<organizationId>${UUID})/agents/(?<agentId>${UUID})/revoke$`), "admin", async ({ organizationId, match, body, idempotencyKey, principal }) => {
         rejectUnknown(body, new Set(["reason"]), "agent_revocation");
-        const revocation = await store.createRevocation({ organizationId, targetType: "agent", targetId: match.agentId, reason: body.reason, idempotencyKey });
-        await store.appendAdminAuditEvent({ organizationId, eventType: "agent.revoked", actorId: principal.member_id, targetType: "agent", targetId: match.agentId, idempotencyKey: `${idempotencyKey}:audit` });
+        const revocation = await mutateAndAudit(organizationId,
+          (target) => target.createRevocation({ organizationId, targetType: "agent", targetId: match.agentId, reason: body.reason, createdBy: principal.member_id, principalId: principal.member_id, idempotencyKey }),
+          { organizationId, eventType: "agent.revoked", actorId: principal.member_id, targetType: "agent", targetId: match.agentId, idempotencyKey: `${idempotencyKey}:audit` });
         return { status: 201, body: { revocation } };
       }),
       route("POST", new RegExp(`^/v1/organizations/(?<organizationId>${UUID})/devices/(?<deviceId>${UUID})/revoke$`), "admin", async ({ organizationId, match, body, idempotencyKey, principal }) => {
         rejectUnknown(body, new Set(["reason"]), "device_revocation");
-        const revocation = await store.createRevocation({ organizationId, targetType: "device", targetId: match.deviceId, reason: body.reason, idempotencyKey });
-        await store.appendAdminAuditEvent({ organizationId, eventType: "device.revoked", actorId: principal.member_id, targetType: "device", targetId: match.deviceId, idempotencyKey: `${idempotencyKey}:audit` });
+        const revocation = await mutateAndAudit(organizationId,
+          (target) => target.createRevocation({ organizationId, targetType: "device", targetId: match.deviceId, reason: body.reason, createdBy: principal.member_id, principalId: principal.member_id, idempotencyKey }),
+          { organizationId, eventType: "device.revoked", actorId: principal.member_id, targetType: "device", targetId: match.deviceId, idempotencyKey: `${idempotencyKey}:audit` });
         return { status: 201, body: { revocation } };
       }),
       route("GET", new RegExp(`^/v1/organizations/(?<organizationId>${UUID})/policies$`), "viewer", async ({ organizationId }) => ({ body: { policies: await store.listPolicies({ organizationId }) } })),
-      route("POST", new RegExp(`^/v1/organizations/(?<organizationId>${UUID})/policies$`), "admin", async ({ organizationId, body, idempotencyKey }) => ({ status: 201, body: { policy: await store.createPolicy({ ...body, organizationId, idempotencyKey }) } })),
+      route("POST", new RegExp(`^/v1/organizations/(?<organizationId>${UUID})/policies$`), "admin", async ({ organizationId, body, idempotencyKey, principal }) => ({ status: 201, body: { policy: await mutateAndAudit(organizationId, (target) => target.createPolicy({ ...body, organizationId, createdBy: principal.member_id, principalId: principal.member_id, idempotencyKey }), ({ mutation }) => ({ organizationId, eventType: "policy.created", actorId: principal.member_id, targetType: "policy", targetId: mutation.policy_id, idempotencyKey: `${idempotencyKey}:audit` })) } })),
       route("POST", new RegExp(`^/v1/organizations/(?<organizationId>${UUID})/policies/(?<policyId>${UUID})/disable$`), "admin", async ({ organizationId, match, body, idempotencyKey, principal }) => {
         rejectUnknown(body, new Set(["expected_version", "reason"]), "policy_disable");
-        const policy = await store.updatePolicy({ organizationId, policyId: match.policyId, expectedVersion: body.expected_version, patch: { status: "disabled" }, idempotencyKey });
-        await store.appendAdminAuditEvent({ organizationId, eventType: "policy.disabled", actorId: principal.member_id, targetType: "policy", targetId: match.policyId, details: { reason: body.reason ?? "disabled_by_operator" }, idempotencyKey: `${idempotencyKey}:audit` });
+        const policy = await mutateAndAudit(organizationId,
+          (target) => target.updatePolicy({ organizationId, policyId: match.policyId, expectedVersion: body.expected_version, patch: { status: "disabled" }, createdBy: principal.member_id, principalId: principal.member_id, idempotencyKey }),
+          { organizationId, eventType: "policy.disabled", actorId: principal.member_id, targetType: "policy", targetId: match.policyId, details: { reason: body.reason ?? "disabled_by_operator" }, idempotencyKey: `${idempotencyKey}:audit` });
         return { body: { policy } };
       }),
       route("GET", new RegExp(`^/v1/organizations/(?<organizationId>${UUID})/capabilities$`), "viewer", async ({ organizationId, url }) => ({ body: { capabilities: (await store.listCapabilities({ organizationId })).slice(-optionalLimit(url)).map(publicCapability) } })),
@@ -185,58 +210,27 @@ export function createCloudApi({ store, tokenRecords = [], bundleSigner, now = (
         let effectiveScope;
         try { effectiveScope = intersectScopes(activePolicy.scope, body.scope); }
         catch { throw apiError("invalid_capability_scope", 400, "Capability scope is invalid"); }
-        const reserved = await store.reserveCapability({
-          organizationId,
-          ...(body.capability_id ? { capabilityId: body.capability_id } : {}),
-          issuer: bundleSigner.issuer,
-          keyId: bundleSigner.keyId,
-          agentId: agent.agent_id,
-          deviceId: device.device_id,
-          scope: effectiveScope,
-          sequence: body.sequence,
-          ttlMs,
-          issuedAt: new Date(now()).toISOString(),
-          idempotencyKey
-        });
-        const statement = {
-          version: 1,
-          capability_id: reserved.capability_id,
-          nonce: reserved.nonce,
-          issuer: reserved.issuer,
-          key_id: reserved.key_id,
-          audience: { agent_id: reserved.agent_id, device_id: reserved.device_id },
-          scope: reserved.scope,
-          not_before: reserved.not_before,
-          expires_at: reserved.expires_at,
-          sequence: reserved.sequence
-        };
-        if (capabilityAuthorityRepository !== undefined) {
-          try {
-            await capabilityAuthorityRepository.issueCapabilityMetadata({
-              organization_id: organizationId,
-              capability_id: statement.capability_id,
-              agent_id: statement.audience.agent_id,
-              device_id: statement.audience.device_id,
-              sequence: statement.sequence,
-              statement_hash: crypto.createHash("sha256").update(canonicalJson(statement)).digest("hex"),
-              expires_at: statement.expires_at,
-              issued_by_member_id: principal.member_id
-            });
-          } catch (error) {
-            if (error?.code === "ERR_MEMBER_NOT_ACTIVE" || error?.code === "ERR_MEMBERSHIP_VERSION") {
-              throw apiError("capability_issuer_not_active", 403, "Capability issuer membership is not active");
-            }
-            throw apiError("capability_authority_unavailable", 503, "Capability authority state is unavailable");
-          }
+        const issuedAt = new Date(now()).toISOString();
+        let signed;
+        try { signed = await mutateAndAudit(organizationId, async (target) => {
+          const reserved = await target.reserveCapability({ organizationId, ...(body.capability_id ? { capabilityId: body.capability_id } : {}), issuer: bundleSigner.issuer, keyId: bundleSigner.keyId, agentId: agent.agent_id, deviceId: device.device_id, scope: effectiveScope, sequence: body.sequence, ttlMs, issuedAt, createdBy: principal.member_id, principalId: principal.member_id, idempotencyKey });
+          const statement = { version: 1, capability_id: reserved.capability_id, nonce: reserved.nonce, issuer: reserved.issuer, key_id: reserved.key_id, audience: { agent_id: reserved.agent_id, device_id: reserved.device_id }, scope: reserved.scope, not_before: reserved.not_before, expires_at: reserved.expires_at, sequence: reserved.sequence };
+          const metadataTarget = typeof target.issueCapabilityMetadata === "function" ? target : capabilityAuthorityRepository;
+          if (metadataTarget !== undefined) await metadataTarget.issueCapabilityMetadata({ organization_id: organizationId, capability_id: statement.capability_id, agent_id: statement.audience.agent_id, device_id: statement.audience.device_id, sequence: statement.sequence, statement_hash: crypto.createHash("sha256").update(canonicalJson(statement)).digest("hex"), expires_at: statement.expires_at, issued_by_member_id: principal.member_id });
+          return { ...statement, signature: crypto.sign(null, Buffer.from(canonicalJson(statement)), bundleSigner.privateKey).toString("base64") };
+        }, ({ mutation }) => ({ organizationId, eventType: "capability.issued", actorId: principal.member_id, targetType: "capability", targetId: mutation.capability_id, details: { agent_id: agent.agent_id, device_id: device.device_id, expires_at: mutation.expires_at, sequence: mutation.sequence }, idempotencyKey: `${idempotencyKey}:audit` })); }
+        catch (error) {
+          if (error?.code === "ERR_MEMBER_NOT_ACTIVE" || error?.code === "ERR_MEMBERSHIP_VERSION") throw apiError("capability_issuer_not_active", 403, "Capability issuer membership is not active");
+          if (error?.code === "ERR_DATABASE") throw apiError("capability_authority_unavailable", 503, "Capability authority state is unavailable");
+          throw error;
         }
-        const signed = { ...statement, signature: crypto.sign(null, Buffer.from(canonicalJson(statement)), bundleSigner.privateKey).toString("base64") };
-        await store.appendAdminAuditEvent({ organizationId, eventType: "capability.issued", actorId: principal.member_id, targetType: "capability", targetId: signed.capability_id, details: { agent_id: agent.agent_id, device_id: device.device_id, expires_at: signed.expires_at, sequence: signed.sequence }, idempotencyKey: `${idempotencyKey}:audit` });
         return { status: 201, body: { capability: signed } };
       }),
       route("POST", new RegExp(`^/v1/organizations/(?<organizationId>${UUID})/capabilities/(?<capabilityId>${UUID})/revoke$`), "admin", async ({ organizationId, match, body, idempotencyKey, principal }) => {
         rejectUnknown(body, new Set(["reason"]), "capability_revocation");
-        const revocation = await store.createRevocation({ organizationId, targetType: "capability", targetId: match.capabilityId, reason: body.reason, idempotencyKey });
-        await store.appendAdminAuditEvent({ organizationId, eventType: "capability.revoked", actorId: principal.member_id, targetType: "capability", targetId: match.capabilityId, idempotencyKey: `${idempotencyKey}:audit` });
+        const revocation = await mutateAndAudit(organizationId,
+          (target) => target.createRevocation({ organizationId, targetType: "capability", targetId: match.capabilityId, reason: body.reason, createdBy: principal.member_id, principalId: principal.member_id, idempotencyKey }),
+          { organizationId, eventType: "capability.revoked", actorId: principal.member_id, targetType: "capability", targetId: match.capabilityId, idempotencyKey: `${idempotencyKey}:audit` });
         return { status: 201, body: { revocation } };
       }),
       route("GET", new RegExp(`^/v1/organizations/(?<organizationId>${UUID})/revocations$`), "viewer", async ({ organizationId, url }) => ({ body: { revocations: (await store.listRevocations({ organizationId })).slice(-optionalLimit(url)) } })),
@@ -255,10 +249,24 @@ export function createCloudApi({ store, tokenRecords = [], bundleSigner, now = (
       route("GET", new RegExp(`^/v1/organizations/(?<organizationId>${UUID})/bundles/(?<deviceId>${UUID})$`), null, async ({ organizationId, principal, match }) => {
         if (principal.device_id !== match.deviceId) throw apiError("audience_mismatch", 403, "Device cannot fetch another device's bundle");
         if (!bundleSigner?.privateKey || !bundleSigner?.issuer || !bundleSigner?.keyId) throw apiError("bundle_signer_unavailable", 503, "Bundle signer is unavailable");
+        const issuedMs = now();
+        const ttlMs = bundleSigner.ttlMs ?? 3_600_000;
+        if (typeof store.snapshotAndAssignBundleHead === "function") {
+          const authority = await store.snapshotAndAssignBundleHead({ organizationId, deviceId: match.deviceId, minimumSequence: 1, issuedAt: new Date(issuedMs).toISOString(), expiresAt: new Date(issuedMs + ttlMs).toISOString() });
+          const { snapshot, head } = authority;
+          const bundle = issueControlBundle({
+            format_epoch: 2, issuer: bundleSigner.issuer, organization_id: organizationId, device_id: match.deviceId,
+            audience: { organization_id: organizationId, device_id: match.deviceId }, issued_at: head.issued_at,
+            expires_at: head.expires_at, sequence: head.sequence, policy_scope: snapshot.policy_scope,
+            global_revoked: snapshot.global_revoked, revoked_devices: snapshot.revoked_devices,
+            revoked_agents: snapshot.revoked_agents, revoked_capabilities: snapshot.revoked_capabilities,
+            offline_ttl_ms: bundleSigner.offlineTtlMs ?? 3_600_000, key_id: bundleSigner.keyId
+          }, bundleSigner.privateKey, { now: issuedMs, maxTtlMs: ttlMs, maxOfflineTtlMs: bundleSigner.offlineTtlMs ?? 3_600_000 });
+          return { body: { bundle } };
+        }
         const policies = await store.listPolicies({ organizationId });
         const active = policies.filter((policy) => policy.status === "active").sort((a, b) => b.sequence - a.sequence)[0];
         if (!active) throw apiError("policy_missing", 409, "No active policy exists");
-        const issuedMs = now();
         const revocations = await store.listRevocations({ organizationId });
         const storedCapabilityRevocations = revocations.filter((item) => item.target_type === "capability" && item.status === "active").map((item) => item.target_id);
         let durableCapabilityRevocations = [];
@@ -275,7 +283,6 @@ export function createCloudApi({ store, tokenRecords = [], bundleSigner, now = (
         const revokedCapabilities = [...new Set([...storedCapabilityRevocations, ...durableCapabilityRevocations])].sort();
         if (revokedCapabilities.length > MAX_REVOCATIONS) throw apiError("capability_revocations_overflow", 503, "Capability revocation state exceeds the ControlBundle limit");
         const stateFingerprint = crypto.createHash("sha256").update(JSON.stringify({ device_id: match.deviceId, policy_id: active.policy_id, policy_sequence: active.sequence, policy_scope: active.scope, revocations: revocations.filter((item) => item.target_type !== "capability").map((item) => [item.revocation_id, item.target_type, item.target_id, item.status]).sort(), revoked_capabilities: revokedCapabilities })).digest("hex");
-        const ttlMs = bundleSigner.ttlMs ?? 3_600_000;
         const head = await store.assignBundleHead({ organizationId, deviceId: match.deviceId, stateFingerprint, minimumSequence: active.sequence, issuedAt: new Date(issuedMs).toISOString(), expiresAt: new Date(issuedMs + ttlMs).toISOString() });
         const bundle = issueControlBundle({
             format_epoch: 2,
@@ -298,8 +305,9 @@ export function createCloudApi({ store, tokenRecords = [], bundleSigner, now = (
       }, true),
       route("POST", new RegExp(`^/v1/organizations/(?<organizationId>${UUID})/emergency-stop$`), "owner", async ({ organizationId, body, idempotencyKey, principal }) => {
         rejectUnknown(body, new Set(["reason"]), "emergency_stop");
-        const revocation = await store.createRevocation({ organizationId, targetType: "organization", targetId: organizationId, reason: body.reason, idempotencyKey });
-        await store.appendAdminAuditEvent({ organizationId, eventType: "organization.emergency_stop", actorId: principal.member_id, targetType: "organization", targetId: organizationId, idempotencyKey: `${idempotencyKey}:audit` });
+        const revocation = await mutateAndAudit(organizationId,
+          (target) => target.createRevocation({ organizationId, targetType: "organization", targetId: organizationId, reason: body.reason, createdBy: principal.member_id, principalId: principal.member_id, idempotencyKey }),
+          { organizationId, eventType: "organization.emergency_stop", actorId: principal.member_id, targetType: "organization", targetId: organizationId, idempotencyKey: `${idempotencyKey}:audit` });
         return { status: 201, body: { revocation } };
       }, false, false, "organization.emergency_stop")
     ];
@@ -327,9 +335,9 @@ function transportPrincipalId(request) {
   return crypto.createHash("sha256").update(String(request.socket?.remoteAddress ?? "unknown")).digest("hex");
 }
 
-function acquireRateLimit(limiter, input) {
+async function acquireRateLimit(limiter, input) {
   try {
-    const decision = limiter.acquire(input);
+    const decision = await limiter.acquire(input);
     if (!decision || typeof decision !== "object" || typeof decision.allowed !== "boolean" || !Number.isSafeInteger(decision.limit) || decision.limit < 1 || !Number.isSafeInteger(decision.remaining) || decision.remaining < 0 || decision.remaining > decision.limit || !Number.isSafeInteger(decision.retryAfterSeconds) || decision.retryAfterSeconds < 0 || !Number.isSafeInteger(decision.resetAt) || decision.resetAt < 0) throw new Error("invalid rate limiter decision");
     return decision;
   } catch (error) {
@@ -411,6 +419,13 @@ function validateEnrollmentPublicKey(algorithm, pem) {
   if (!valid) throw apiError("invalid_device_key", 400, "Device key algorithm does not match the public key");
   const canonical = key.export({ type: "spki", format: "pem" }).toString();
   if (canonical !== pem) throw apiError("invalid_device_key", 400, "Device public key must use canonical SPKI PEM encoding");
+}
+
+function deriveEnrollmentCredential(secret, identity) {
+  return crypto.createHmac("sha256", secret)
+    .update("AgentPass-Enrollment-Credential-v1\0", "utf8")
+    .update(canonicalJson(identity), "utf8")
+    .digest("base64url");
 }
 
 function validateEnrollmentProof(requestPath, body, algorithm, pem, credential, encodedSignature) {

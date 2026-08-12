@@ -1,6 +1,6 @@
 import crypto from "node:crypto";
 
-import { canonicalJson, normalizeAuditEvent } from "../../../../packages/protocol/src/index.mjs";
+import { canonicalJson, normalizeAuditEvent, normalizeScope } from "../../../../packages/protocol/src/index.mjs";
 import { auditCursorBinding, createAuditCursorCodec, normalizeAuditPageInput } from "../audit-pagination.mjs";
 import { createCapabilityAuthorityRepository } from "./capability-authority-repository.mjs";
 import { assertTenantId, PostgresRepositoryError, withTransaction } from "./repository.mjs";
@@ -14,19 +14,14 @@ const LOCK_PREFIX = "agentpass:control-plane-authority:";
 const TARGET_TABLES = Object.freeze({ device: "devices", agent: "agents", capability: "capabilities" });
 const REVOCATION_TARGETS = new Set(["organization", "device", "agent", "capability"]);
 const ACK_STATUSES = new Set(["applied", "blocked"]);
+const IDEMPOTENCY_KEY = /^[A-Za-z0-9._~-]{8,255}$/u;
 
 /**
  * These are intentionally public metadata, not a migration shim.  They make
  * the deployment contract explicit when the repository is used with the
  * current contract migrations.
  */
-export const CONTROL_PLANE_SCHEMA_GAPS = Object.freeze([
-  "revocations.created_by is NOT NULL but createCloudStore/server currently do not pass an actor member id",
-  "revocations has no revoked_at or version column; the adapter maps created_at to the legacy revoked_at shape and cannot persist optimistic versions",
-  "bundle_heads has no expires_at column; head reuse is disabled so expiry is never guessed or reconstructed",
-  "device_audit_events has no durable device_audit_heads or device_audit_gaps table; health derives a best-effort chain from received_at and does not persist gap records",
-  "bundle_acknowledgements has no foreign key to the accepted bundle head; the repository verifies the current head while acknowledging"
-]);
+export const CONTROL_PLANE_SCHEMA_GAPS = Object.freeze([]);
 
 export class ControlPlaneAuthorityRepositoryError extends PostgresRepositoryError {
   constructor(code, message, details = undefined, cause = undefined) {
@@ -59,7 +54,7 @@ export function createControlPlaneAuthorityRepository({ client, cursorCodec, cur
       await assertActiveMember(tx, values.organizationId, values.createdBy);
       await assertRevocationTarget(tx, values);
 
-      const active = await tx.query(`SELECT organization_id,id AS revocation_id,target_type,target_id,sequence,reason,status,created_by,created_at
+      const active = await tx.query(`SELECT organization_id,id AS revocation_id,target_type,target_id,sequence,reason,status,created_by,revoked_by,created_at,revoked_at,version
         FROM revocations
         WHERE organization_id=$1 AND target_type=$2 AND target_id IS NOT DISTINCT FROM $3 AND status='active'
         FOR UPDATE`, [values.organizationId, values.targetType, values.databaseTargetId]);
@@ -71,17 +66,17 @@ export function createControlPlaneAuthorityRepository({ client, cursorCodec, cur
         FROM revocations WHERE organization_id=$1`, [values.organizationId]);
       const sequence = positiveInteger(sequenceResult.rows?.[0]?.sequence, "sequence");
       let result = await tx.query(`INSERT INTO revocations
-        (organization_id,id,target_type,target_id,sequence,reason,status,created_by,created_at)
-        VALUES ($1,$2,$3,$4,$5,$6,'active',$7,$8::timestamptz)
+        (organization_id,id,target_type,target_id,sequence,reason,status,created_by,revoked_by,created_at,revoked_at)
+        VALUES ($1,$2,$3,$4,$5,$6,'active',$7,$7,$8::timestamptz,$8::timestamptz)
         ON CONFLICT (organization_id,id) DO NOTHING
-        RETURNING organization_id,id AS revocation_id,target_type,target_id,sequence,reason,status,created_by,created_at`, [
+        RETURNING organization_id,id AS revocation_id,target_type,target_id,sequence,reason,status,created_by,revoked_by,created_at,revoked_at,version`, [
         values.organizationId, values.revocationId, values.targetType, values.databaseTargetId,
         sequence, values.reason, values.createdBy, values.createdAt
       ]);
 
       let replayed = false;
       if (rowCount(result) !== 1) {
-        result = await tx.query(`SELECT organization_id,id AS revocation_id,target_type,target_id,sequence,reason,status,created_by,created_at
+        result = await tx.query(`SELECT organization_id,id AS revocation_id,target_type,target_id,sequence,reason,status,created_by,revoked_by,created_at,revoked_at,version
           FROM revocations WHERE organization_id=$1 AND id=$2 FOR UPDATE`, [values.organizationId, values.revocationId]);
         if (rowCount(result) !== 1 || !sameRevocation(result.rows[0], values)) {
           throw new ControlPlaneAuthorityRepositoryError("ERR_REVOCATION_CONFLICT", "revocation identity conflicts with another request");
@@ -96,7 +91,7 @@ export function createControlPlaneAuthorityRepository({ client, cursorCodec, cur
     const organizationId = tenant(input.organization_id ?? input.organizationId);
     const revocationId = uuid(input.revocation_id ?? input.revocationId ?? input.id, "revocation_id");
     return databaseOperation(async () => {
-      const result = await client.query(`SELECT organization_id,id AS revocation_id,target_type,target_id,sequence,reason,status,created_by,created_at
+      const result = await client.query(`SELECT organization_id,id AS revocation_id,target_type,target_id,sequence,reason,status,created_by,revoked_by,created_at,revoked_at,version
         FROM revocations WHERE organization_id=$1 AND id=$2 LIMIT 1`, [organizationId, revocationId]);
       if (rowCount(result) !== 1) throw new ControlPlaneAuthorityRepositoryError("ERR_NOT_FOUND", "revocation was not found");
       return publicRevocation(result.rows[0]);
@@ -107,7 +102,7 @@ export function createControlPlaneAuthorityRepository({ client, cursorCodec, cur
     const organizationId = tenant(input.organization_id ?? input.organizationId);
     const limit = boundedLimit(input.limit);
     return databaseOperation(async () => {
-      const result = await client.query(`SELECT organization_id,id AS revocation_id,target_type,target_id,sequence,reason,status,created_by,created_at
+      const result = await client.query(`SELECT organization_id,id AS revocation_id,target_type,target_id,sequence,reason,status,created_by,revoked_by,created_at,revoked_at,version
         FROM revocations WHERE organization_id=$1 ORDER BY sequence ASC,id ASC LIMIT $2`, [organizationId, limit]);
       return Object.freeze((result.rows ?? []).map((row) => publicRevocation(row)));
     });
@@ -118,28 +113,95 @@ export function createControlPlaneAuthorityRepository({ client, cursorCodec, cur
     return databaseOperation(() => transaction(client, async (tx) => {
       await lockDevice(tx, values.organizationId, values.deviceId);
       await assertDevice(tx, values.organizationId, values.deviceId);
-      const currentResult = await tx.query(`SELECT organization_id,device_id,format_epoch,sequence,statement_hash,issued_at
-        FROM bundle_heads WHERE organization_id=$1 AND device_id=$2 FOR UPDATE`, [values.organizationId, values.deviceId]);
-      const current = currentResult.rows?.[0];
+      return assignBundleHeadInTransaction(tx, values);
+    }));
+  }
 
-      // The current schema cannot durably record expires_at.  Reusing a head
-      // would therefore risk accepting an expired cached bundle after a
-      // restart.  Issuing a new sequence is conservative and preserves the
-      // monotonic authority invariant until the migration adds that column.
-      const sequence = Math.max(values.minimumSequence, current ? positiveInteger(current.sequence, "sequence") + 1 : 1);
-      const result = await tx.query(`INSERT INTO bundle_heads
-        (organization_id,device_id,format_epoch,sequence,statement_hash,issued_at)
-        VALUES ($1,$2,2,$3,$4,$5::timestamptz)
-        ON CONFLICT (organization_id,device_id) DO UPDATE SET
-          format_epoch=EXCLUDED.format_epoch,
-          sequence=EXCLUDED.sequence,
-          statement_hash=EXCLUDED.statement_hash,
-          issued_at=EXCLUDED.issued_at
-        RETURNING organization_id,device_id,format_epoch,sequence,statement_hash,issued_at`, [
-        values.organizationId, values.deviceId, sequence, values.stateFingerprint, values.issuedAt
-      ]);
-      if (rowCount(result) !== 1) throw new ControlPlaneAuthorityRepositoryError("ERR_DB_RESULT", "bundle head was not created");
-      return publicBundleHead(result.rows[0], values.expiresAt);
+  async function assignBundleHeadInTransaction(tx, values) {
+    const currentResult = await tx.query(`SELECT organization_id,device_id,format_epoch,sequence,statement_hash,issued_at,expires_at
+      FROM bundle_heads WHERE organization_id=$1 AND device_id=$2 FOR UPDATE`, [values.organizationId, values.deviceId]);
+    const current = currentResult.rows?.[0];
+    const sequence = Math.max(values.minimumSequence, current ? positiveInteger(current.sequence, "sequence") + 1 : 1);
+    const result = await tx.query(`INSERT INTO bundle_heads
+      (organization_id,device_id,format_epoch,sequence,statement_hash,issued_at,expires_at)
+      VALUES ($1,$2,2,$3,$4,$5::timestamptz,$6::timestamptz)
+      ON CONFLICT (organization_id,device_id) DO UPDATE SET
+        format_epoch=EXCLUDED.format_epoch,
+        sequence=EXCLUDED.sequence,
+        statement_hash=EXCLUDED.statement_hash,
+        issued_at=EXCLUDED.issued_at,
+        expires_at=EXCLUDED.expires_at
+      RETURNING organization_id,device_id,format_epoch,sequence,statement_hash,issued_at,expires_at`, [
+      values.organizationId, values.deviceId, sequence, values.stateFingerprint, values.issuedAt, values.expiresAt
+    ]);
+    if (rowCount(result) !== 1) throw new ControlPlaneAuthorityRepositoryError("ERR_DB_RESULT", "bundle head was not created");
+    return publicBundleHead(result.rows[0]);
+  }
+
+  /**
+   * Atomically capture the authority state that a control bundle will sign and
+   * assign its monotonic device head.  The organization lock is deliberately
+   * the first authority operation, matching createRevocation(), so a bundle
+   * can only be signed from a state that is ordered before or after a
+   * concurrent revocation; it cannot straddle one.
+   *
+   * The returned snapshot contains the exact derived fields consumed by
+   * ControlBundle signing.  Callers must sign using snapshot.state_fingerprint
+   * and head.sequence/issued_at/expires_at from this same result.
+   */
+  async function snapshotAndAssignBundleHead(input = {}) {
+    const values = normalizeBundleAuthoritySnapshotInput(input);
+    return databaseOperation(() => transaction(client, async (tx) => {
+      await lockOrganization(tx, values.organizationId);
+      await lockOrganizationRow(tx, values.organizationId);
+      await assertDevice(tx, values.organizationId, values.deviceId);
+
+      const policyResult = await tx.query(`SELECT organization_id,id,sequence,name,scope_json,status,created_at,updated_at,version
+        FROM policies
+        WHERE organization_id=$1
+        ORDER BY created_at ASC,id ASC`, [values.organizationId]);
+      const policies = Object.freeze((policyResult.rows ?? []).map(publicPolicy));
+      const activePolicy = policies
+        .filter((policy) => policy.status === "active")
+        .sort((left, right) => right.sequence - left.sequence || left.policy_id.localeCompare(right.policy_id))[0];
+      if (!activePolicy) throw new ControlPlaneAuthorityRepositoryError("ERR_POLICY_MISSING", "no active policy exists for the organization");
+
+      const revocationResult = await tx.query(`SELECT organization_id,id AS revocation_id,target_type,target_id,sequence,reason,status,created_by,revoked_by,created_at,revoked_at,version
+        FROM revocations
+        WHERE organization_id=$1
+        ORDER BY sequence ASC,id ASC`, [values.organizationId]);
+      const revocations = Object.freeze((revocationResult.rows ?? []).map((row) => publicRevocation(row)));
+
+      // Capability revocations are durable authority state too.  Read them
+      // inside this transaction so the returned snapshot never omits a
+      // capability that was already revoked at the snapshot boundary.
+      const capabilityResult = await tx.query(`SELECT id AS capability_id
+        FROM capabilities
+        WHERE organization_id=$1 AND revoked_at IS NOT NULL AND expires_at>$2::timestamptz
+        ORDER BY id ASC
+        LIMIT $3`, [values.organizationId, values.issuedAt, MAX_CONTROL_BUNDLE_REVOCATIONS + 1]);
+      const durableCapabilityRevocations = (capabilityResult.rows ?? []).map((row) => uuid(row.capability_id ?? row.id, "capability_id"));
+      if (durableCapabilityRevocations.length > MAX_CONTROL_BUNDLE_REVOCATIONS) {
+        throw new ControlPlaneAuthorityRepositoryError("ERR_REVOCATION_CAPACITY", "active capability revocations exceed the ControlBundle limit");
+      }
+
+      const snapshot = createBundleAuthoritySnapshot({
+        organizationId: values.organizationId,
+        deviceId: values.deviceId,
+        activePolicy,
+        policies,
+        revocations,
+        durableCapabilityRevocations
+      });
+      if (values.expectedStateFingerprint !== undefined && values.expectedStateFingerprint !== snapshot.state_fingerprint) {
+        throw new ControlPlaneAuthorityRepositoryError("ERR_STATE_FINGERPRINT_MISMATCH", "bundle authority state changed or fingerprint is invalid");
+      }
+
+      const head = await assignBundleHeadInTransaction(tx, {
+        ...values,
+        stateFingerprint: snapshot.state_fingerprint
+      });
+      return Object.freeze({ snapshot, head });
     }));
   }
 
@@ -196,10 +258,9 @@ export function createControlPlaneAuthorityRepository({ client, cursorCodec, cur
       await lockDevice(tx, values.organizationId, values.deviceId);
       await assertDevice(tx, values.organizationId, values.deviceId);
       await assertAuditAgents(tx, values.organizationId, values.deviceId, values.events);
-      const headResult = await tx.query(`SELECT event_id,event_hash,previous_hash,redacted_json,received_at
-        FROM device_audit_events WHERE organization_id=$1 AND device_id=$2
-        ORDER BY received_at DESC,event_id DESC LIMIT 1 FOR UPDATE`, [values.organizationId, values.deviceId]);
-      let head = headFromRow(headResult.rows?.[0]);
+      const headResult = await tx.query(`SELECT last_event_id,last_event_hash,chain_status,gap_count
+        FROM device_audit_heads WHERE organization_id=$1 AND device_id=$2 FOR UPDATE`, [values.organizationId, values.deviceId]);
+      let head = durableHead(headResult.rows?.[0]);
       const accepted = [];
       const duplicates = [];
       const gaps = [];
@@ -219,7 +280,7 @@ export function createControlPlaneAuthorityRepository({ client, cursorCodec, cur
         const gap = event.previous_hash !== head.last_hash;
         if (gap) {
           gaps.push(Object.freeze({
-            gap_id: crypto.randomUUID(),
+            gap_id: event.event_id,
             organization_id: values.organizationId,
             device_id: values.deviceId,
             event_id: event.event_id,
@@ -287,23 +348,11 @@ export function createControlPlaneAuthorityRepository({ client, cursorCodec, cur
   async function getAuditHealth(input = {}) {
     const organizationId = tenant(input.organization_id ?? input.organizationId);
     return databaseOperation(async () => {
-      const devices = await client.query(`SELECT id AS device_id FROM devices WHERE organization_id=$1 ORDER BY id ASC`, [organizationId]);
-      const events = await client.query(`SELECT organization_id,device_id,event_id,previous_hash,event_hash,redacted_json,received_at
-        FROM device_audit_events WHERE organization_id=$1 ORDER BY device_id ASC,received_at ASC,event_id ASC`, [organizationId]);
-      const health = new Map((devices.rows ?? []).map((row) => [uuid(row.device_id, "device_id"), { device_id: row.device_id, last_hash: ZERO_HASH, last_event_id: null, chain_status: "continuous", gap_count: 0 }]));
-      for (const row of events.rows ?? []) {
-        const deviceId = uuid(row.device_id, "device_id");
-        if (!health.has(deviceId)) continue;
-        const stored = publicStoredAuditRow(row);
-        const current = health.get(deviceId);
-        if (stored.previous_hash !== current.last_hash) {
-          current.chain_status = "gap";
-          current.gap_count += 1;
-        }
-        current.last_hash = stored.event_hash;
-        current.last_event_id = stored.event_id;
-      }
-      return Object.freeze([...health.values()].map((item) => Object.freeze(item)));
+      const result = await client.query(`SELECT d.id AS device_id,h.last_event_id,h.last_event_hash,h.chain_status,h.gap_count
+        FROM devices d LEFT JOIN device_audit_heads h
+          ON h.organization_id=d.organization_id AND h.device_id=d.id
+        WHERE d.organization_id=$1 ORDER BY d.id ASC`, [organizationId]);
+      return Object.freeze((result.rows ?? []).map((row) => Object.freeze({ device_id: uuid(row.device_id, "device_id"), ...durableHead(row) })));
     });
   }
 
@@ -317,6 +366,7 @@ export function createControlPlaneAuthorityRepository({ client, cursorCodec, cur
     getBundleAcknowledgement,
     getRevocation,
     ingestDeviceAuditEvents,
+    snapshotAndAssignBundleHead,
     issueCapabilityMetadata: capabilityAuthority.issueCapabilityMetadata,
     listDeviceAuditEvents,
     listRevocations,
@@ -337,7 +387,10 @@ function normalizeRevocationInput(input, now) {
   const targetId = uuid(suppliedTarget, "target_id");
   if (targetType === "organization" && targetId !== organizationId) throw new ControlPlaneAuthorityRepositoryError("ERR_NOT_FOUND", "revocation target was not found");
   const createdBy = uuid(input.created_by ?? input.createdBy ?? input.actor_id ?? input.actorId, "created_by");
-  const revocationId = uuid(input.revocation_id ?? input.revocationId ?? input.id ?? crypto.randomUUID(), "revocation_id");
+  const suppliedRevocationId = input.revocation_id ?? input.revocationId ?? input.id;
+  const idempotencyKey = input.idempotency_key ?? input.idempotencyKey;
+  if (suppliedRevocationId === undefined && (typeof idempotencyKey !== "string" || !IDEMPOTENCY_KEY.test(idempotencyKey))) throw new ControlPlaneAuthorityRepositoryError("ERR_IDEMPOTENCY", "revocation requires a valid idempotency key");
+  const revocationId = uuid(suppliedRevocationId ?? deterministicUuid(canonicalJson({ version: 1, organization_id: organizationId, principal_id: input.principal_id ?? input.principalId ?? createdBy, idempotency_key: idempotencyKey })), "revocation_id");
   const reason = boundedText(input.reason, "reason", 256);
   const createdAt = timestamp(input.created_at ?? input.createdAt ?? input.revoked_at ?? input.revokedAt ?? now(), "created_at");
   return { organizationId, targetType, targetId, databaseTargetId: targetType === "organization" ? null : targetId, createdBy, revocationId, reason, createdAt };
@@ -353,6 +406,19 @@ function normalizeBundleHeadInput(input) {
   const expiresAt = timestamp(input.expires_at ?? input.expiresAt, "expires_at");
   if (Date.parse(expiresAt) <= Date.parse(issuedAt)) throw new ControlPlaneAuthorityRepositoryError("ERR_TIMESTAMP", "bundle head expiry must be after issuance");
   return { organizationId, deviceId, stateFingerprint, minimumSequence, issuedAt, expiresAt };
+}
+
+function normalizeBundleAuthoritySnapshotInput(input) {
+  if (!isObject(input)) throw new ControlPlaneAuthorityRepositoryError("ERR_INPUT", "bundle authority snapshot input must be an object");
+  const organizationId = tenant(input.organization_id ?? input.organizationId);
+  const deviceId = uuid(input.device_id ?? input.deviceId, "device_id");
+  const minimumSequence = positiveInteger(input.minimum_sequence ?? input.minimumSequence ?? 1, "minimum_sequence");
+  const issuedAt = timestamp(input.issued_at ?? input.issuedAt, "issued_at");
+  const expiresAt = timestamp(input.expires_at ?? input.expiresAt, "expires_at");
+  if (Date.parse(expiresAt) <= Date.parse(issuedAt)) throw new ControlPlaneAuthorityRepositoryError("ERR_TIMESTAMP", "bundle head expiry must be after issuance");
+  const expectedValue = input.state_fingerprint ?? input.stateFingerprint;
+  const expectedStateFingerprint = expectedValue === undefined ? undefined : hash(expectedValue, "state_fingerprint");
+  return { organizationId, deviceId, minimumSequence, issuedAt, expiresAt, expectedStateFingerprint };
 }
 
 function normalizeAcknowledgementInput(input, now) {
@@ -432,7 +498,12 @@ async function assertAuditAgents(tx, organizationId, deviceId, events) {
 }
 
 async function lockOrganization(tx, organizationId) {
-  await tx.query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", [`${LOCK_PREFIX}organization:${organizationId}`]);
+  await tx.query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", [`agentpass:organization:${organizationId}`]);
+}
+
+async function lockOrganizationRow(tx, organizationId) {
+  const result = await tx.query("SELECT id FROM organizations WHERE id=$1 FOR UPDATE", [organizationId]);
+  if (rowCount(result) !== 1) throw new ControlPlaneAuthorityRepositoryError("ERR_NOT_FOUND", "organization was not found");
 }
 
 async function lockDevice(tx, organizationId, deviceId) {
@@ -454,18 +525,80 @@ async function databaseOperation(operation) {
   }
 }
 
+function publicPolicy(row) {
+  if (!row || typeof row !== "object") throw new ControlPlaneAuthorityRepositoryError("ERR_DB_RESULT", "policy query returned an invalid row");
+  let scope;
+  try { scope = normalizeScope(row.scope_json ?? row.scope); }
+  catch (error) { throw new ControlPlaneAuthorityRepositoryError("ERR_DB_RESULT", "stored policy scope is invalid", undefined, error); }
+  return Object.freeze({
+    policy_id: uuid(row.policy_id ?? row.id, "policy_id"),
+    organization_id: uuid(row.organization_id, "organization_id"),
+    name: boundedText(row.name, "name", 128),
+    scope,
+    sequence: positiveInteger(row.sequence, "sequence"),
+    status: textEnum(row.status, new Set(["active", "disabled"]), "status"),
+    created_at: timestamp(row.created_at, "created_at"),
+    updated_at: timestamp(row.updated_at, "updated_at"),
+    version: positiveInteger(row.version, "version")
+  });
+}
+
+function createBundleAuthoritySnapshot({ organizationId, deviceId, activePolicy, policies, revocations, durableCapabilityRevocations }) {
+  const activeRevocations = revocations.filter((item) => item.status === "active");
+  const revokedDevices = activeRevocations.filter((item) => item.target_type === "device").map((item) => item.target_id).sort();
+  const revokedAgents = activeRevocations.filter((item) => item.target_type === "agent").map((item) => item.target_id).sort();
+  const revokedCapabilities = [...new Set([
+    ...activeRevocations.filter((item) => item.target_type === "capability").map((item) => item.target_id),
+    ...durableCapabilityRevocations
+  ])].sort();
+  for (const [label, values] of [["device", revokedDevices], ["agent", revokedAgents], ["capability", revokedCapabilities]]) {
+    if (values.length > MAX_CONTROL_BUNDLE_REVOCATIONS) {
+      throw new ControlPlaneAuthorityRepositoryError("ERR_REVOCATION_CAPACITY", `active ${label} revocations exceed the ControlBundle limit`);
+    }
+  }
+
+  // Keep this preimage byte-for-byte compatible with the current HTTP bundle
+  // signer. The new primitive owns the read boundary; the signer owns only
+  // the private-key operation after this result is returned.
+  const state = {
+    device_id: deviceId,
+    policy_id: activePolicy.policy_id,
+    policy_sequence: activePolicy.sequence,
+    policy_scope: activePolicy.scope,
+    revocations: revocations
+      .filter((item) => item.target_type !== "capability")
+      .map((item) => [item.revocation_id, item.target_type, item.target_id, item.status])
+      .sort((left, right) => JSON.stringify(left).localeCompare(JSON.stringify(right))),
+    revoked_capabilities: revokedCapabilities
+  };
+  const stateFingerprint = crypto.createHash("sha256").update(JSON.stringify(state), "utf8").digest("hex");
+  return Object.freeze({
+    organization_id: organizationId,
+    device_id: deviceId,
+    active_policy: activePolicy,
+    policies: Object.freeze([...policies]),
+    revocations: Object.freeze([...revocations]),
+    policy_scope: activePolicy.scope,
+    global_revoked: activeRevocations.some((item) => item.target_type === "organization"),
+    revoked_devices: Object.freeze(revokedDevices),
+    revoked_agents: Object.freeze(revokedAgents),
+    revoked_capabilities: Object.freeze(revokedCapabilities),
+    state_fingerprint: stateFingerprint
+  });
+}
+
 function publicRevocation(row, replayed = false) {
   if (!row || typeof row !== "object") throw new ControlPlaneAuthorityRepositoryError("ERR_DB_RESULT", "revocation query returned an invalid row");
   const organizationId = uuid(row.organization_id, "organization_id");
   const targetType = textEnum(row.target_type, REVOCATION_TARGETS, "target_type");
   const targetId = targetType === "organization" ? organizationId : uuid(row.target_id, "target_id");
-  const value = { revocation_id: uuid(row.revocation_id ?? row.id, "revocation_id"), organization_id: organizationId, target_type: targetType, target_id: targetId, reason: boundedText(row.reason, "reason", 256), status: textEnum(row.status, new Set(["active", "superseded"]), "status"), revoked_at: timestamp(row.created_at, "revoked_at"), version: 1 };
+  const value = { revocation_id: uuid(row.revocation_id ?? row.id, "revocation_id"), organization_id: organizationId, target_type: targetType, target_id: targetId, reason: boundedText(row.reason, "reason", 256), status: textEnum(row.status, new Set(["active", "superseded"]), "status"), revoked_at: timestamp(row.revoked_at, "revoked_at"), version: positiveInteger(row.version, "version") };
   return Object.freeze(replayed ? { ...value, replayed: true } : value);
 }
 
-function publicBundleHead(row, expiresAt) {
+function publicBundleHead(row) {
   if (!row || typeof row !== "object") throw new ControlPlaneAuthorityRepositoryError("ERR_DB_RESULT", "bundle head query returned an invalid row");
-  return Object.freeze({ organization_id: uuid(row.organization_id, "organization_id"), device_id: uuid(row.device_id, "device_id"), sequence: positiveInteger(row.sequence, "sequence"), state_fingerprint: hash(row.statement_hash, "state_fingerprint"), issued_at: timestamp(row.issued_at, "issued_at"), expires_at: timestamp(expiresAt, "expires_at") });
+  return Object.freeze({ organization_id: uuid(row.organization_id, "organization_id"), device_id: uuid(row.device_id, "device_id"), sequence: positiveInteger(row.sequence, "sequence"), state_fingerprint: hash(row.statement_hash, "state_fingerprint"), issued_at: timestamp(row.issued_at, "issued_at"), expires_at: timestamp(row.expires_at, "expires_at") });
 }
 
 function publicAcknowledgement(row) {
@@ -505,10 +638,12 @@ function publicStoredAuditRow(row) {
   return { organization_id: organizationId, device_id: deviceId, event_id: eventId, previous_hash: row.previous_hash, event_hash: row.event_hash, event, received_at: timestamp(row.received_at, "received_at") };
 }
 
-function headFromRow(row) {
-  if (!row) return { last_hash: ZERO_HASH, last_event_id: null, chain_status: "continuous", gap_count: 0 };
-  const stored = publicStoredAuditRow(row);
-  return { last_hash: stored.event_hash, last_event_id: stored.event_id, chain_status: "continuous", gap_count: 0 };
+function durableHead(row) {
+  if (!row || row.last_event_id === null || row.last_event_id === undefined) return { last_hash: ZERO_HASH, last_event_id: null, chain_status: "continuous", gap_count: 0 };
+  const gapCount = typeof row.gap_count === "string" ? Number(row.gap_count) : row.gap_count;
+  if (!Number.isSafeInteger(gapCount) || gapCount < 0) throw new ControlPlaneAuthorityRepositoryError("ERR_AUDIT_ROW", "stored audit head is invalid");
+  const chainStatus = textEnum(row.chain_status, new Set(["continuous", "gap"]), "chain_status");
+  return { last_hash: hash(row.last_event_hash, "last_event_hash"), last_event_id: uuid(row.last_event_id, "last_event_id"), chain_status: chainStatus, gap_count: gapCount };
 }
 
 function tenant(value) {
@@ -555,5 +690,6 @@ function timestamp(value, field) {
 }
 
 function isObject(value) { return value !== null && typeof value === "object" && !Array.isArray(value); }
+function deterministicUuid(identity) { const bytes=crypto.createHash("sha256").update("AgentPass-Revocation-Id-v1\0").update(identity).digest().subarray(0,16); bytes[6]=(bytes[6]&0x0f)|0x50; bytes[8]=(bytes[8]&0x3f)|0x80; const hex=bytes.toString("hex"); return `${hex.slice(0,8)}-${hex.slice(8,12)}-${hex.slice(12,16)}-${hex.slice(16,20)}-${hex.slice(20)}`; }
 function rowCount(result) { return Number(result?.rowCount ?? result?.rows?.length ?? 0); }
 function assertClient(client) { if (!client || typeof client.query !== "function") throw new ControlPlaneAuthorityRepositoryError("ERR_DB_CLIENT", "database client must provide query(text, params)"); }

@@ -1,0 +1,169 @@
+import assert from "node:assert/strict";
+import test from "node:test";
+
+import {
+  CLOUD_RUNTIME_PROFILES,
+  CLOUD_RUNTIME_PROFILE_ERROR_CODES,
+  CloudRuntimeProfileError,
+  parseCloudRuntimeProfile
+} from "../src/runtime-profile.mjs";
+
+const SECRET = Buffer.alloc(32, 0x5a).toString("base64url");
+const DATABASE_URL = "postgresql://agent:database-password@db.example.test/agentpass?sslmode=verify-full";
+
+function evaluationEnv(overrides = {}) {
+  return {
+    AGENTPASS_CLOUD_PROFILE: "evaluation",
+    AGENTPASS_CLOUD_DATA_DIR: "/srv/agentpass/evaluation/data",
+    AGENTPASS_CLOUD_TOKEN_RECORDS_PATH: "/srv/agentpass/evaluation/token-records.json",
+    ...overrides
+  };
+}
+
+function hostedEnv(overrides = {}) {
+  return {
+    AGENTPASS_CLOUD_PROFILE: "hosted",
+    AGENTPASS_DATABASE_URL: DATABASE_URL,
+    AGENTPASS_CONSOLE_ORIGIN: "https://console.example.test",
+    AGENTPASS_WEBAUTHN_RP_ID: "example.test",
+    AGENTPASS_IDENTITY_ASSERTION_ISSUER: "agentpass-console",
+    AGENTPASS_IDENTITY_ASSERTION_AUDIENCE: "agentpass-cloud-session",
+    AGENTPASS_IDENTITY_ASSERTION_KID: "console-2026-08",
+    AGENTPASS_IDENTITY_ASSERTION_PUBLIC_KEY_PATH: "/srv/agentpass/hosted/console-public.pem",
+    AGENTPASS_HUMAN_CURSOR_SECRET: SECRET,
+    AGENTPASS_CAPABILITY_NONCE_SECRET: Buffer.alloc(32, 0x33).toString("base64url"),
+    ...overrides
+  };
+}
+
+function assertProfileError(action, code) {
+  assert.throws(action, (error) => {
+    assert.ok(error instanceof CloudRuntimeProfileError);
+    assert.equal(error.code, code);
+    assert.doesNotMatch(error.message, /database-password|5[a-zA-Z0-9_-]{42}/u);
+    return true;
+  });
+}
+
+test("requires an explicit hosted or evaluation selector", () => {
+  assertProfileError(() => parseCloudRuntimeProfile({}), CLOUD_RUNTIME_PROFILE_ERROR_CODES.PROFILE_REQUIRED);
+  assertProfileError(() => parseCloudRuntimeProfile({ AGENTPASS_CLOUD_PROFILE: "production" }), CLOUD_RUNTIME_PROFILE_ERROR_CODES.PROFILE_UNKNOWN);
+  assertProfileError(() => parseCloudRuntimeProfile({ AGENTPASS_CLOUD_PROFILE: "" }), CLOUD_RUNTIME_PROFILE_ERROR_CODES.PROFILE_REQUIRED);
+});
+
+test("accepts evaluation only with the complete reference file-store boundary", () => {
+  const profile = parseCloudRuntimeProfile(evaluationEnv());
+  assert.deepEqual(profile, {
+    profile: CLOUD_RUNTIME_PROFILES.EVALUATION,
+    production: false,
+    isHosted: false,
+    isEvaluation: true,
+    usesPostgres: false,
+    usesHumanAuth: false,
+    usesReferenceFileStore: true,
+    postgres: null,
+    humanAuth: null,
+    fileStore: {
+      dataDir: "/srv/agentpass/evaluation/data",
+      tokenRecordsPath: "/srv/agentpass/evaluation/token-records.json"
+    }
+  });
+  assertProfileError(() => parseCloudRuntimeProfile({ AGENTPASS_CLOUD_PROFILE: "evaluation" }), CLOUD_RUNTIME_PROFILE_ERROR_CODES.EVALUATION_FILE_STORE_INCOMPLETE);
+  assertProfileError(() => parseCloudRuntimeProfile(evaluationEnv({ AGENTPASS_CLOUD_TOKEN_RECORDS_PATH: undefined })), CLOUD_RUNTIME_PROFILE_ERROR_CODES.EVALUATION_FILE_STORE_INCOMPLETE);
+  assertProfileError(() => parseCloudRuntimeProfile(evaluationEnv({ AGENTPASS_CLOUD_DATA_DIR: "relative/data" })), CLOUD_RUNTIME_PROFILE_ERROR_CODES.EVALUATION_FILE_STORE_INCOMPLETE);
+});
+
+test("accepts hosted only with complete PostgreSQL and Human Auth prerequisites", () => {
+  const profile = parseCloudRuntimeProfile(hostedEnv());
+  assert.equal(profile.profile, CLOUD_RUNTIME_PROFILES.HOSTED);
+  assert.equal(profile.production, true);
+  assert.equal(profile.isHosted, true);
+  assert.equal(profile.isEvaluation, false);
+  assert.equal(profile.usesPostgres, true);
+  assert.equal(profile.usesHumanAuth, true);
+  assert.equal(profile.usesReferenceFileStore, false);
+  assert.equal(profile.fileStore, null);
+  assert.equal(profile.humanAuth.origin, "https://console.example.test");
+  assert.equal(Object.hasOwn(profile.humanAuth, "cursorSecret"), false);
+  assert.equal(JSON.stringify(profile).includes(SECRET), false);
+  assert.equal(JSON.stringify(profile).includes("database-password"), false);
+
+  for (const name of [
+    "AGENTPASS_DATABASE_URL",
+    "AGENTPASS_CONSOLE_ORIGIN",
+    "AGENTPASS_WEBAUTHN_RP_ID",
+    "AGENTPASS_IDENTITY_ASSERTION_ISSUER",
+    "AGENTPASS_IDENTITY_ASSERTION_AUDIENCE",
+    "AGENTPASS_IDENTITY_ASSERTION_KID",
+    "AGENTPASS_IDENTITY_ASSERTION_PUBLIC_KEY_PATH",
+    "AGENTPASS_HUMAN_CURSOR_SECRET",
+    "AGENTPASS_CAPABILITY_NONCE_SECRET"
+  ]) {
+    const env = hostedEnv();
+    delete env[name];
+    assertProfileError(() => parseCloudRuntimeProfile(env), CLOUD_RUNTIME_PROFILE_ERROR_CODES.HOSTED_AUTH_INCOMPLETE);
+  }
+});
+
+test("rejects hosted file-store compatibility inputs and evaluation auth inputs", () => {
+  assertProfileError(
+    () => parseCloudRuntimeProfile(hostedEnv({ AGENTPASS_CLOUD_DATA_DIR: "/srv/agentpass/data" })),
+    CLOUD_RUNTIME_PROFILE_ERROR_CODES.HOSTED_FILE_STORE_FORBIDDEN
+  );
+  assertProfileError(
+    () => parseCloudRuntimeProfile(hostedEnv({ AGENTPASS_CLOUD_TOKEN_RECORDS_PATH: "/srv/agentpass/tokens.json" })),
+    CLOUD_RUNTIME_PROFILE_ERROR_CODES.HOSTED_FILE_STORE_FORBIDDEN
+  );
+  assertProfileError(
+    () => parseCloudRuntimeProfile(evaluationEnv({ AGENTPASS_DATABASE_URL: DATABASE_URL })),
+    CLOUD_RUNTIME_PROFILE_ERROR_CODES.EVALUATION_AUTH_FORBIDDEN
+  );
+  assertProfileError(
+    () => parseCloudRuntimeProfile(evaluationEnv({ AGENTPASS_CONSOLE_ORIGIN: "https://console.example.test" })),
+    CLOUD_RUNTIME_PROFILE_ERROR_CODES.EVALUATION_AUTH_FORBIDDEN
+  );
+});
+
+test("fails closed for partial, malformed, stale, unsafe, and unknown configuration", () => {
+  assertProfileError(
+    () => parseCloudRuntimeProfile(hostedEnv({ AGENTPASS_DATABASE_URL: undefined })),
+    CLOUD_RUNTIME_PROFILE_ERROR_CODES.HOSTED_AUTH_INCOMPLETE
+  );
+  assertProfileError(
+    () => parseCloudRuntimeProfile(hostedEnv({ AGENTPASS_DATABASE_URL: "postgresql://agent:pw@db.example.test/agentpass?sslmode=require" })),
+    CLOUD_RUNTIME_PROFILE_ERROR_CODES.DATABASE_INVALID
+  );
+  assertProfileError(
+    () => parseCloudRuntimeProfile(hostedEnv({ AGENTPASS_DATABASE_URL: "postgresql://agent:pw@db.example.test/agentpass?sslmode=verify-full&connect_timeout=1" })),
+    CLOUD_RUNTIME_PROFILE_ERROR_CODES.DATABASE_INVALID
+  );
+  assertProfileError(
+    () => parseCloudRuntimeProfile(hostedEnv({ AGENTPASS_DATABASE_MAX_CONNECTIONS: "0" })),
+    CLOUD_RUNTIME_PROFILE_ERROR_CODES.DATABASE_INVALID
+  );
+  assertProfileError(
+    () => parseCloudRuntimeProfile(hostedEnv({ AGENTPASS_CONSOLE_ORIGIN: "http://console.example.test" })),
+    CLOUD_RUNTIME_PROFILE_ERROR_CODES.HUMAN_AUTH_INVALID
+  );
+  assertProfileError(
+    () => parseCloudRuntimeProfile(hostedEnv({ AGENTPASS_HUMAN_CURSOR_SECRET: "cursor-secret-that-must-not-appear-in-errors" })),
+    CLOUD_RUNTIME_PROFILE_ERROR_CODES.HUMAN_AUTH_INVALID
+  );
+  assertProfileError(
+    () => parseCloudRuntimeProfile({ ...evaluationEnv(), AGENTPASS_CLOUD_UNSUPPORTED_SETTING: "unknown-value" }),
+    CLOUD_RUNTIME_PROFILE_ERROR_CODES.UNKNOWN_CONFIGURATION
+  );
+  assertProfileError(
+    () => parseCloudRuntimeProfile({ ...evaluationEnv(), AGENTPASS_DATABASE_UNSUPPORTED_SETTING: "unknown-value" }),
+    CLOUD_RUNTIME_PROFILE_ERROR_CODES.UNKNOWN_CONFIGURATION
+  );
+  assertProfileError(
+    () => parseCloudRuntimeProfile({ ...evaluationEnv(), AGENTPASS_CAPABILITY_UNSUPPORTED_SETTING: "unknown-value" }),
+    CLOUD_RUNTIME_PROFILE_ERROR_CODES.UNKNOWN_CONFIGURATION
+  );
+});
+
+test("does not treat unrelated process environment variables as profile configuration", () => {
+  const profile = parseCloudRuntimeProfile({ ...evaluationEnv(), PATH: "/usr/bin", NODE_ENV: "test", AGENTPASS_OTHER_APP_FLAG: "1" });
+  assert.equal(profile.isEvaluation, true);
+});
