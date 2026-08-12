@@ -18,7 +18,10 @@ import { executeProductionInstall, prepareProductionInstall, removeStagedProduct
 import { runProductionDoctor } from "../lib/platform-doctor.mjs";
 import { inspectNativeApplication } from "../lib/platform-setup.mjs";
 import { createNativeBootstrapRunner } from "../lib/native-bootstrap-runner.mjs";
+import { createNativeDeviceEnrollmentRunner } from "../lib/native-device-enrollment-runner.mjs";
 import { createNativeSetupHandlers } from "../lib/native-setup-handlers.mjs";
+import { createDeviceEnrollmentSetupHandler } from "../lib/device-enrollment-setup-handler.mjs";
+import { parseControlBundleJson } from "../lib/control-bundle-v2.mjs";
 import { executeProductionUninstall, planProductionUninstall } from "../lib/platform-uninstall.mjs";
 import { createSetupOrchestrator } from "../lib/setup-orchestrator.mjs";
 import { SETUP_STATES, SetupJournalError, createSetupJournal, loadSetupJournal } from "../lib/setup-journal.mjs";
@@ -40,7 +43,7 @@ Commands:
           --fingerprint SHA256:PIN --team-id TEAMID [--execute]
                     verify and optionally install the production macOS package
   setup status
-  setup continue [--execute]
+  setup continue [--execute] [--enrollment-url HTTPS_URL --enrollment-stdin]
                     advance exactly one verified, crash-resumable setup state
   setup --client claude-code|cursor --team-id TEAMID [--project DIR] [--execute]
                     configure the native bridge and project MCP integration
@@ -50,7 +53,7 @@ Commands:
   check             evaluate the current repository
   doctor [--client claude-code|cursor] [--project DIR] [--team-id TEAMID] [--verbose]
                     diagnose production installation without changing state
-  uninstall [--project DIR] [--execute] [--system]
+  uninstall [--project DIR] [--team-id TEAMID] [--execute] [--system]
                     remove integrations/app registration while preserving all protected state
   broker ping       verify that the signing broker is running
   broker install    install and start the macOS LaunchAgent
@@ -184,12 +187,35 @@ function installProduction() {
 
 function setupContinueFlags() {
   let execute = false;
+  let enrollmentStdin = false;
+  let enrollmentUrl;
   for (let index = 1; index < args.length; index += 1) {
     const argument = args[index];
-    if (argument !== "--execute" || execute) throw new Error("Usage: agentpass setup continue [--execute]");
-    execute = true;
+    if (argument === "--execute" && !execute) { execute = true; continue; }
+    if (argument === "--enrollment-stdin" && !enrollmentStdin) { enrollmentStdin = true; continue; }
+    if (argument === "--enrollment-url" && enrollmentUrl === undefined && index + 1 < args.length && !args[index + 1].startsWith("--")) { enrollmentUrl = args[++index]; continue; }
+    throw new Error("Usage: agentpass setup continue [--execute] [--enrollment-url HTTPS_URL --enrollment-stdin]");
   }
-  return { execute };
+  if ((enrollmentStdin || enrollmentUrl !== undefined) && (!execute || !enrollmentStdin || enrollmentUrl === undefined)) throw new Error("Enrollment requires --execute, --enrollment-url, and --enrollment-stdin together");
+  return { execute, enrollmentStdin, enrollmentUrl };
+}
+
+function readEnrollmentInvitationStdin() {
+  const chunks = []; let total = 0;
+  while (true) {
+    const chunk = Buffer.alloc(4096);
+    const count = fs.readSync(0, chunk, 0, chunk.length, null);
+    if (count === 0) break;
+    total += count;
+    if (total > 16 * 1024) throw new Error("Enrollment invitation exceeds 16 KiB");
+    chunks.push(chunk.subarray(0, count));
+  }
+  const parsed = parseControlBundleJson(Buffer.concat(chunks), { maxBytes: 16 * 1024, maxDepth: 8 });
+  const value = parsed?.enrollment ?? parsed;
+  if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("Enrollment invitation is invalid");
+  const invitation = { enrollment_id: value.enrollment_id, organization_id: value.organization_id, device_id: value.device_id, label: value.label, credential: value.credential };
+  if (Object.values(invitation).some((item) => typeof item !== "string" || item.length === 0)) throw new Error("Enrollment invitation is missing a required field");
+  return invitation;
 }
 
 async function continueNativeSetup() {
@@ -202,6 +228,8 @@ async function continueNativeSetup() {
   if (process.platform !== "darwin") throw new Error("Native AgentPass setup is supported only on macOS");
   if (process.getuid?.() === 0) throw new Error("Run setup as the interactive user, not root");
   const config = loadConfig();
+  const enrollmentInvitation = flags.enrollmentStdin ? readEnrollmentInvitationStdin() : undefined;
+  if ((journal.status().state === "service_keys_activated") !== Boolean(enrollmentInvitation)) throw new Error("At service_keys_activated, pipe the canonical enrollment invitation with --enrollment-url URL --enrollment-stdin");
   const teamId = config.native_broker?.team_id;
   if (typeof teamId !== "string") throw new Error("Native bridge configuration has no pinned Apple Team ID; rerun agentpass setup --team-id TEAMID");
   const application = inspectNativeApplication(undefined, { expectedTeamId: teamId });
@@ -236,6 +264,16 @@ async function continueNativeSetup() {
     enroll_approval_key: (context) => nativeHandlers().enroll_approval_key(context),
     activate_service_keys: (context) => nativeHandlers().activate_service_keys(context)
   };
+  if (enrollmentInvitation) {
+    const enrollmentRunner = createNativeDeviceEnrollmentRunner({ clientPath: application.client });
+    handlers.enroll_device = createDeviceEnrollmentSetupHandler({
+      runner: enrollmentRunner,
+      invitation: enrollmentInvitation,
+      baseUrl: flags.enrollmentUrl,
+      loadConfig,
+      saveConfig
+    });
+  }
   const result = await createSetupOrchestrator({ journal, handlers }).execute();
   console.log(JSON.stringify(result, null, 2));
 }
@@ -300,27 +338,30 @@ async function setupNativeBridge() {
 }
 
 function uninstallProduction() {
-  const allowed = new Set(["--project"]); const flags = new Map(); const switches = new Set();
+  const allowed = new Set(["--project", "--team-id"]); const flags = new Map(); const switches = new Set();
   for (let index = 0; index < args.length; index += 1) {
     const argument = args[index];
     if (["--execute", "--system"].includes(argument)) {
-      if (switches.has(argument)) throw new Error("Usage: agentpass uninstall [--project DIR] [--execute] [--system]");
+      if (switches.has(argument)) throw new Error("Usage: agentpass uninstall [--project DIR] [--team-id TEAMID] [--execute] [--system]");
       switches.add(argument); continue;
     }
-    if (!allowed.has(argument) || flags.has(argument) || index + 1 >= args.length || args[index + 1].startsWith("--")) throw new Error("Usage: agentpass uninstall [--project DIR] [--execute] [--system]");
+    if (!allowed.has(argument) || flags.has(argument) || index + 1 >= args.length || args[index + 1].startsWith("--")) throw new Error("Usage: agentpass uninstall [--project DIR] [--team-id TEAMID] [--execute] [--system]");
     flags.set(argument, args[++index]);
   }
   const system = switches.has("--system");
+  const configuredTeamId = system ? undefined : loadConfig().native_broker?.team_id;
+  const teamId = flags.get("--team-id") ?? configuredTeamId;
+  if (typeof teamId !== "string" || !/^[A-Z0-9]{10}$/.test(teamId)) throw new Error("uninstall requires the pinned 10-character Apple Team ID");
   const project = path.resolve(flags.get("--project") ?? process.cwd());
   const mcpServer = fileURLToPath(new URL("../adapters/mcp-server/bin/agentpass-mcp.mjs", import.meta.url));
   const integrations = system ? [] : ["claude-code", "cursor"].map((client) => ({ client, projectDir: project, nodePath: process.execPath, mcpServerPath: mcpServer }));
-  const plan = planProductionUninstall({ integrations, includeUser: !system });
+  const plan = planProductionUninstall({ integrations, includeUser: !system, expectedTeamId: teamId });
   if (!switches.has("--execute")) {
     console.log(JSON.stringify({ ...plan, next: system ? "rerun as root with --system --execute" : "rerun with --execute; then run the reported system command" }, null, 2));
     return;
   }
-  const result = executeProductionUninstall(plan, { execute: true, scope: system ? "system" : "user", includeUser: !system });
-  console.log(JSON.stringify({ ...result, system_removal_required: !system && plan.requiresRoot, system_command: !system && plan.requiresRoot ? "sudo agentpass uninstall --system --execute" : null }, null, 2));
+  const result = executeProductionUninstall(plan, { execute: true, scope: system ? "system" : "user", includeUser: !system, expectedTeamId: teamId });
+  console.log(JSON.stringify({ ...result, system_removal_required: !system && plan.requiresRoot, system_command: !system && plan.requiresRoot ? `sudo agentpass uninstall --system --team-id ${teamId} --execute` : null }, null, 2));
 }
 
 function init() {

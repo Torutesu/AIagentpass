@@ -60,12 +60,13 @@ CREATE TABLE devices (
   id uuid NOT NULL,
   label text NOT NULL CHECK (char_length(label) BETWEEN 1 AND 128),
   key_algorithm text NOT NULL CHECK (key_algorithm IN ('p256-sha256', 'ed25519')),
-  public_key_pem text NOT NULL CHECK (public_key_pem LIKE '-----BEGIN PUBLIC KEY-----%'),
+  public_key_pem text,
   status text NOT NULL CHECK (status IN ('pending', 'active', 'disabled', 'revoked')),
   version bigint NOT NULL DEFAULT 1 CHECK (version > 0),
   created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
   last_seen_at timestamptz,
   PRIMARY KEY (organization_id, id),
+  CHECK ((status = 'pending' AND public_key_pem IS NULL) OR (status <> 'pending' AND public_key_pem LIKE '-----BEGIN PUBLIC KEY-----%')),
   UNIQUE (organization_id, public_key_pem)
 );
 

@@ -280,6 +280,29 @@ test("rejects secret material, unsafe storage, and unbounded audit input", async
   await assert.rejects(() => createCloudStore({ dataDir: symlinkDirectory }), { code: "ERR_UNSAFE_PATH" });
 });
 
+test("device enrollment stores only a digest and consumes an exact bound request idempotently", async (t) => {
+  const { directory, store } = await fixture();
+  t.after(async () => { await store.close(); await fs.rm(directory, { recursive: true, force: true }); });
+  const enrollmentId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+  const pendingDevice = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+  const credential = "enrollment-credential-never-persisted";
+  const credentialDigest = crypto.createHash("sha256").update(credential).digest("hex");
+  const enrollment = await store.createDeviceEnrollment({ organizationId: ids.org, enrollmentId, deviceId: pendingDevice, label: "Build Mac 02", platform: "macos", credentialDigest, createdAt: "2026-08-12T00:00:00.000Z", expiresAt: "2026-08-12T00:15:00.000Z", idempotencyKey: "issue-device-enrollment" });
+  assert.equal(enrollment.device_id, pendingDevice);
+  assert.equal(Object.hasOwn(enrollment, "credential_digest"), false);
+  const keys = crypto.generateKeyPairSync("ec", { namedCurve: "prime256v1" });
+  const publicKey = keys.publicKey.export({ type: "spki", format: "pem" }).toString();
+  const request = { enrollmentId, organizationId: ids.org, deviceId: pendingDevice, label: "Build Mac 02", platform: "macos", algorithm: "p256-sha256", publicKey, credentialDigest, completedAt: "2026-08-12T00:01:00.000Z" };
+  const completed = await store.completeDeviceEnrollment(request);
+  assert.equal(completed.status, "active");
+  assert.equal(completed.device_public_key, publicKey);
+  assert.deepEqual(await store.completeDeviceEnrollment(request), completed);
+  await assert.rejects(() => store.completeDeviceEnrollment({ ...request, label: "substituted" }), { code: "ERR_ENROLLMENT_BINDING" });
+  const disk = await fs.readFile(path.join(directory, "cloud-store.json"), "utf8");
+  assert.equal(disk.includes(credential), false);
+  assert.equal(disk.includes(credentialDigest), true);
+});
+
 test("exports a clean, frozen API", async (t) => {
   const { directory, store } = await fixture();
   t.after(async () => { await store.close(); await fs.rm(directory, { recursive: true, force: true }); });

@@ -40,11 +40,11 @@ Implemented and tested:
 
 Not yet production-complete:
 
-- setup does not yet provision the root service configuration, enroll the cloud device, or verify the final test commit;
+- setup can enroll the cloud device with a fixed Secure Enclave key and persist user-side pinned trust, but does not yet provision that trust into the root service configuration or verify the final test commit;
 - uninstall does not yet offer the separately confirmed current-user-state purge flow;
 - the Cloud API still uses a single-writer file store in its reference runtime;
-- Human API sessions, organization membership management, and WebAuthn are not connected to durable storage;
-- Device API is not connected end to end to the macOS service;
+- Human API sessions, organization membership management, and WebAuthn ceremonies are not connected to durable storage; high-risk enrollment issuance already fails closed behind a recent-WebAuthn verifier seam;
+- Device enrollment is connected through the macOS signed client, but root service trust provisioning, authenticated bundle refresh/ACK, and the final physical-Mac E2E remain open;
 - Console screens still contain sample presentation state;
 - cloud signing keys are file-backed rather than KMS/HSM-backed;
 - no published Developer ID/notarized release has passed physical-hardware qualification;

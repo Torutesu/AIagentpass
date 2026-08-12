@@ -94,6 +94,7 @@ install_product() {
 install_product agentpass-native-manager "$MACOS_DIR/agentpass-native-manager"
 install_product agentpass-native-service "$SERVICE_APP/Contents/MacOS/agentpass-native-service"
 install_product agentpass-native-client "$CLIENT_APP/Contents/MacOS/agentpass-native-client"
+install_product agentpass-atomic-rename "$HELPER_DIR/agentpass-atomic-rename"
 install -m 0644 "$RESOURCE_DIR/AgentPass-Info.plist" "$APP/Contents/Info.plist"
 install -m 0644 "$RESOURCE_DIR/AgentPassNativeService-Info.plist" "$SERVICE_APP/Contents/Info.plist"
 install -m 0644 "$RESOURCE_DIR/AgentPassNativeClient-Info.plist" "$CLIENT_APP/Contents/Info.plist"
@@ -123,6 +124,11 @@ sign_item() {
 # Sign app-like helpers before their containing application. Never use --deep for signing.
 sign_item "$SERVICE_APP" "dev.agentpass.native-service" "$ENTITLEMENT_DIR/service.plist"
 sign_item "$CLIENT_APP" "dev.agentpass.native-client" "$ENTITLEMENT_DIR/client.plist"
+if [[ "$ADHOC" -eq 1 ]]; then
+  /usr/bin/codesign --force --sign - --identifier "dev.agentpass.atomic-rename" "$HELPER_DIR/agentpass-atomic-rename"
+else
+  /usr/bin/codesign --force --sign "$SIGNING_IDENTITY" --identifier "dev.agentpass.atomic-rename" --options runtime --timestamp "$HELPER_DIR/agentpass-atomic-rename"
+fi
 sign_item "$MACOS_DIR/agentpass-native-manager" "dev.agentpass" "$ENTITLEMENT_DIR/manager.plist"
 sign_item "$APP" "dev.agentpass" "$ENTITLEMENT_DIR/manager.plist"
 
@@ -145,9 +151,11 @@ verify_group() {
 
 /usr/bin/codesign --verify --strict --verbose=2 "$SERVICE_APP"
 /usr/bin/codesign --verify --strict --verbose=2 "$CLIENT_APP"
+/usr/bin/codesign --verify --strict --verbose=2 "$HELPER_DIR/agentpass-atomic-rename"
 /usr/bin/codesign --verify --strict --verbose=2 "$APP"
 verify_identifier "$SERVICE_APP" "dev.agentpass.native-service"
 verify_identifier "$CLIENT_APP" "dev.agentpass.native-client"
+verify_identifier "$HELPER_DIR/agentpass-atomic-rename" "dev.agentpass.atomic-rename"
 verify_identifier "$MACOS_DIR/agentpass-native-manager" "dev.agentpass"
 verify_identifier "$APP" "dev.agentpass"
 verify_group "$SERVICE_APP" "${APP_IDENTIFIER_PREFIX}.dev.agentpass.service-keys"
@@ -158,7 +166,7 @@ verify_group "$CLIENT_APP" "${APP_IDENTIFIER_PREFIX}.dev.agentpass.approval-keys
 [[ "$(/usr/libexec/PlistBuddy -c 'Print :MachServices:dev.agentpass.native-service' "$DAEMON_DIR/dev.agentpass.native-service.plist")" == "true" ]] || { echo "Missing daemon Mach service" >&2; exit 1; }
 
 if [[ "$ADHOC" -eq 0 ]]; then
-  for item in "$SERVICE_APP" "$CLIENT_APP" "$MACOS_DIR/agentpass-native-manager" "$APP"; do
+  for item in "$SERVICE_APP" "$CLIENT_APP" "$HELPER_DIR/agentpass-atomic-rename" "$MACOS_DIR/agentpass-native-manager" "$APP"; do
     actual_team="$(/usr/bin/codesign -dv --verbose=4 "$item" 2>&1 | /usr/bin/awk -F= '/^TeamIdentifier=/{print $2; exit}')"
     [[ "$actual_team" == "$TEAM_ID" ]] || { echo "Unexpected TeamIdentifier on $item" >&2; exit 1; }
   done

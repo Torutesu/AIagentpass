@@ -9,6 +9,7 @@ import {
   planProductionUninstall
 } from "../lib/platform-uninstall.mjs";
 import { renderRemoval } from "../lib/integrations.mjs";
+import { canonicalJson } from "../lib/identity.mjs";
 
 function fixture({ app = true, broker = true, receipt = true, integration = true } = {}) {
   const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "agentpass-uninstall-")));
@@ -58,6 +59,7 @@ function options(value) {
     uid: 0,
     expectedUserOwner: process.getuid(),
     expectedSystemOwner: process.getuid(),
+    expectedTeamId: null,
     run: value.run,
     integrations: [{ client: "claude-code", projectDir: value.project, expectedServer: value.expectedServer }]
   };
@@ -117,6 +119,26 @@ test("user phase preserves unrelated integration bytes and defers privileged tar
     assert.equal(JSON.parse(after).keep, true);
     assert.equal(JSON.parse(after).mcpServers.other.command, "other");
     assert.equal(after, expected);
+  } finally { fs.rmSync(value.root, { recursive: true, force: true }); }
+});
+
+test("production user-file removal uses the atomic no-replace helper boundary", () => {
+  const value = fixture();
+  const calls = [];
+  const atomicRename = (request) => {
+    calls.push(request);
+    assert.equal(request.platform, "darwin");
+    assert.equal(request.owner, process.getuid());
+    assert.equal(fs.existsSync(request.destination), false);
+    fs.renameSync(request.source, request.destination);
+  };
+  const dependencies = { ...options(value), uid: process.getuid(), requireAtomicRename: true, atomicRename };
+  try {
+    const result = executeProductionUninstall(planProductionUninstall(dependencies), { ...dependencies, scope: "user" });
+    assert.equal(result.code, UNINSTALL_CODES.COMPLETE);
+    assert.ok(calls.some((call) => call.source === path.join(value.project, ".mcp.json")));
+    assert.ok(calls.some((call) => call.source === value.brokerPath));
+    assert.ok(calls.every((call) => call.destination.endsWith(".agentpass-remove.quarantine")));
   } finally { fs.rmSync(value.root, { recursive: true, force: true }); }
 });
 
@@ -235,20 +257,120 @@ test("journal recovery never overwrites a concurrent integration writer", () => 
   } finally { fs.rmSync(value.root, { recursive: true, force: true }); }
 });
 
-test("a partially removed application quarantine resumes without requiring app executables", () => {
+test("application removal writes a canonical root-owned identity manifest and resumes partial deletion", () => {
   const value = fixture({ broker: false, receipt: false, integration: false });
   try {
     const application = path.join(value.applications, "AgentPass.app");
-    const quarantine = `${application}.agentpass-remove.${"a".repeat(32)}`;
-    fs.renameSync(application, quarantine);
-    fs.unlinkSync(path.join(quarantine, "Contents", "MacOS", "agentpass-native-manager"));
-    const dependencies = options(value);
+    const manifestPath = `${application}.agentpass-remove.manifest`;
+    let crashed = false;
+    let fsyncCount = 0;
+    const realUnlink = fs.unlinkSync;
+    const realFsync = fs.fsyncSync;
+    const filesystem = Object.create(fs);
+    filesystem.fsyncSync = (descriptor) => { fsyncCount += 1; return realFsync(descriptor); };
+    filesystem.unlinkSync = (target) => {
+      if (!crashed && typeof target === "string" && target.includes(".agentpass-remove.") && !target.endsWith(".manifest")) {
+        crashed = true;
+        const error = new Error("simulated process crash during recursive deletion");
+        error.code = "SIMULATED_CRASH";
+        throw error;
+      }
+      return realUnlink(target);
+    };
+    const dependencies = { ...options(value), fs: filesystem };
     const plan = planProductionUninstall(dependencies);
-    const app = plan.targets.find((item) => item.id === "application");
-    assert.equal(app.state, "present");
-    assert.equal(app.removalJournal, quarantine);
-    const result = executeProductionUninstall(plan, { ...dependencies, scope: "system" });
+    assert.throws(() => executeProductionUninstall(plan, { ...dependencies, scope: "system" }), { code: "SIMULATED_CRASH" });
+    assert.equal(crashed, true);
+    assert.ok(fsyncCount > 0);
+    assert.equal(fs.existsSync(application), false);
+    const manifestStat = fs.lstatSync(manifestPath);
+    const manifestText = fs.readFileSync(manifestPath, "utf8");
+    const manifest = JSON.parse(manifestText);
+    assert.equal(manifestText, `${canonicalJson(manifest)}\n`);
+    assert.equal(manifestStat.uid, process.getuid());
+    assert.equal(manifestStat.mode & 0o777, 0o600);
+    assert.equal(manifest.phase, "deleting");
+    assert.equal(manifest.application_identity.bundle_id, "dev.agentpass");
+    assert.equal(manifest.application_identity.manager_identifier, "dev.agentpass");
+    assert.equal(manifest.application_identity.client_identifier, "dev.agentpass.native-client");
+    assert.equal(manifest.application_identity.service_identifier, "dev.agentpass.native-service");
+    assert.equal(manifest.root_identity.dev, fs.lstatSync(manifest.quarantine).dev);
+    assert.equal(manifest.root_identity.ino, fs.lstatSync(manifest.quarantine).ino);
+
+    const resumePlan = planProductionUninstall(options(value));
+    assert.equal(resumePlan.targets.find((item) => item.id === "application").removalJournal, manifest.quarantine);
+    const result = executeProductionUninstall(resumePlan, { ...options(value), scope: "system" });
     assert.equal(result.results.find((item) => item.id === "application").removed, true);
-    assert.equal(fs.existsSync(quarantine), false);
+    assert.equal(fs.existsSync(manifestPath), false);
+    assert.equal(fs.existsSync(manifest.quarantine), false);
+    assert.equal(fs.existsSync(path.join(value.home, ".agentpass", "keys", "id_git_sign")), true);
+  } finally { fs.rmSync(value.root, { recursive: true, force: true }); }
+});
+
+test("a crash before the app rename resumes from the prepared manifest", () => {
+  const value = fixture({ broker: false, receipt: false, integration: false });
+  try {
+    const application = path.join(value.applications, "AgentPass.app");
+    const manifestPath = `${application}.agentpass-remove.manifest`;
+    let crashed = false;
+    const realRename = fs.renameSync;
+    const filesystem = Object.create(fs);
+    filesystem.renameSync = (source, destination) => {
+      if (!crashed && source === application && destination.includes(".agentpass-remove.")) {
+        crashed = true;
+        const error = new Error("simulated crash after manifest commit");
+        error.code = "SIMULATED_CRASH";
+        throw error;
+      }
+      return realRename(source, destination);
+    };
+    const dependencies = { ...options(value), fs: filesystem };
+    assert.throws(() => executeProductionUninstall(planProductionUninstall(dependencies), { ...dependencies, scope: "system" }), { code: "SIMULATED_CRASH" });
+    assert.equal(crashed, true);
+    assert.equal(fs.existsSync(application), true);
+    assert.equal(JSON.parse(fs.readFileSync(manifestPath, "utf8")).phase, "prepared");
+
+    const resumed = executeProductionUninstall(planProductionUninstall(options(value)), { ...options(value), scope: "system" });
+    assert.equal(resumed.results.find((item) => item.id === "application").removed, true);
+    assert.equal(fs.existsSync(application), false);
+    assert.equal(fs.existsSync(manifestPath), false);
+    assert.equal(fs.existsSync(path.join(value.home, ".agentpass", "keys", "id_git_sign")), true);
+  } finally { fs.rmSync(value.root, { recursive: true, force: true }); }
+});
+
+test("resume rejects a substituted app quarantine root and preserves protected state", () => {
+  const value = fixture({ broker: false, receipt: false, integration: false });
+  try {
+    const application = path.join(value.applications, "AgentPass.app");
+    let crashed = false;
+    const filesystem = Object.create(fs);
+    const realUnlink = fs.unlinkSync;
+    filesystem.unlinkSync = (target) => {
+      if (!crashed && typeof target === "string" && target.includes(".agentpass-remove.") && !target.endsWith(".manifest")) {
+        crashed = true;
+        const error = new Error("simulated process crash before app deletion completed");
+        error.code = "SIMULATED_CRASH";
+        throw error;
+      }
+      return realUnlink(target);
+    };
+    const dependencies = { ...options(value), fs: filesystem };
+    assert.throws(() => executeProductionUninstall(planProductionUninstall(dependencies), { ...dependencies, scope: "system" }), { code: "SIMULATED_CRASH" });
+    const manifestPath = `${application}.agentpass-remove.manifest`;
+    const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
+    const originalQuarantine = manifest.quarantine;
+    const originalManifest = fs.readFileSync(manifestPath, "utf8");
+    const substitutedIdentity = { ...manifest, application_identity: { ...manifest.application_identity, bundle_id: "dev.substituted" } };
+    fs.writeFileSync(manifestPath, `${canonicalJson(substitutedIdentity)}\n`, { mode: 0o600 });
+    assert.throws(() => planProductionUninstall(options(value)), { code: UNINSTALL_CODES.UNSAFE_TARGET });
+    fs.writeFileSync(manifestPath, originalManifest, { mode: 0o600 });
+    const backup = `${originalQuarantine}.backup`;
+    fs.renameSync(originalQuarantine, backup);
+    fs.mkdirSync(originalQuarantine, { mode: 0o700 });
+    assert.throws(() => planProductionUninstall(options(value)), { code: UNINSTALL_CODES.UNSAFE_TARGET });
+    assert.equal(fs.existsSync(manifestPath), true);
+    assert.equal(fs.existsSync(path.join(value.home, ".agentpass", "keys", "id_git_sign")), true);
+    fs.rmSync(backup, { recursive: true, force: true });
+    fs.rmSync(originalQuarantine, { recursive: true, force: true });
   } finally { fs.rmSync(value.root, { recursive: true, force: true }); }
 });

@@ -8,7 +8,7 @@ import { RateLimiterCapacityError, createRateLimiter } from "./rate-limit.mjs";
 const MAX_BODY_BYTES = 1024 * 1024;
 const UUID = "([0-9a-fA-F-]{36})";
 
-export function createCloudApi({ store, tokenRecords = [], bundleSigner, now = () => Date.now(), monotonicNow, replayCache = createReplayCache(), rateLimiter, admissionRateLimiter } = {}) {
+export function createCloudApi({ store, tokenRecords = [], bundleSigner, now = () => Date.now(), monotonicNow, replayCache = createReplayCache(), rateLimiter, admissionRateLimiter, verifyRecentWebAuthn } = {}) {
   if (!store) throw new TypeError("store is required");
   const limiter = rateLimiter ?? createRateLimiter({ now, ...(monotonicNow ? { monotonicNow } : {}) });
   const admission = admissionRateLimiter ?? createRateLimiter({ now, ...(monotonicNow ? { monotonicNow } : {}), human: { capacity: 30, refillPerSecond: 1 }, device: { capacity: 60, refillPerSecond: 2 } });
@@ -23,10 +23,14 @@ export function createCloudApi({ store, tokenRecords = [], bundleSigner, now = (
       if (!route) return send(response, 404, { error: { code: "not_found", message: "Resource not found" }, request_id: requestId });
       const match = route.pattern.exec(url.pathname);
       const organizationId = match?.groups?.organizationId;
+      // Public enrollment IDs are attacker-controlled path input. Keep every
+      // pre-auth enrollment attempt in one IP-scoped tenant bucket so random
+      // UUIDs cannot manufacture fresh admission capacity.
+      const rateLimitTenant = organizationId ?? "public-device-enrollment";
       // Admission is keyed only by the transport peer. Untrusted auth headers
       // must not let an attacker mint fresh pre-authentication buckets.
       const admissionId = crypto.createHash("sha256").update(String(request.socket.remoteAddress ?? "unknown")).digest("hex");
-      const admitted = admission.acquire({ tenantId: organizationId, principalType: route.device ? "device" : "human", principalId: admissionId });
+      const admitted = admission.acquire({ tenantId: rateLimitTenant, principalType: route.device ? "device" : "human", principalId: admissionId });
       if (!admitted.allowed) throw apiError("rate_limited", 429, "Pre-authentication rate limit exceeded", rateLimitHeaders(admitted, true));
       const bodyBytes = await readBody(request);
       const body = parseBody(bodyBytes);
@@ -34,13 +38,16 @@ export function createCloudApi({ store, tokenRecords = [], bundleSigner, now = (
       if (route.device) {
         const devices = await store.listDevices({ organizationId });
         principal = verifyDeviceRequest({ method: request.method, path: request.url, body: bodyBytes, headers: request.headers }, devices, { organizationId, now: now(), replayCache });
+      } else if (route.enrollment) {
+        principal = { enrollment_id: match?.groups?.enrollmentId, member_id: admissionId };
       } else {
         principal = authenticateApiToken(bearerToken(request.headers.authorization), tokenRecords);
         requireOrganizationRole(principal, organizationId, route.role);
+        if (route.recentAuth) await requireRecentWebAuthn({ verifier: verifyRecentWebAuthn, principal, proof: request.headers["agentpass-recent-auth"], organizationId, now: now() });
       }
       let rateLimit;
       try {
-        rateLimit = limiter.acquire({ tenantId: organizationId, principalType: route.device ? "device" : "human", principalId: route.device ? principal.device_id : principal.member_id });
+        rateLimit = limiter.acquire({ tenantId: rateLimitTenant, principalType: route.device ? "device" : "human", principalId: route.device ? principal.device_id : principal.member_id });
         if (!rateLimit || typeof rateLimit !== "object" || typeof rateLimit.allowed !== "boolean" || !Number.isSafeInteger(rateLimit.limit) || rateLimit.limit < 1 || !Number.isSafeInteger(rateLimit.remaining) || rateLimit.remaining < 0 || rateLimit.remaining > rateLimit.limit || !Number.isSafeInteger(rateLimit.retryAfterSeconds) || rateLimit.retryAfterSeconds < 0 || !Number.isSafeInteger(rateLimit.resetAt) || rateLimit.resetAt < 0) throw new Error("invalid rate limiter decision");
       } catch (error) {
         if (error?.code === "RATE_LIMITER_CAPACITY_EXHAUSTED") throw error;
@@ -63,11 +70,34 @@ export function createCloudApi({ store, tokenRecords = [], bundleSigner, now = (
   return server;
 
   function buildRoutes() {
-    const route = (method, pattern, role, handle, device = false) => ({ method, pattern, role, handle, device });
+    const route = (method, pattern, role, handle, device = false, enrollment = false, recentAuth = false) => ({ method, pattern, role, handle, device, enrollment, recentAuth });
     return [
       route("GET", new RegExp(`^/v1/organizations/(?<organizationId>${UUID})$`), "viewer", async ({ organizationId }) => ({ body: { organization: await store.getOrganization({ organizationId }) } })),
       route("GET", new RegExp(`^/v1/organizations/(?<organizationId>${UUID})/devices$`), "viewer", async ({ organizationId }) => ({ body: { devices: await store.listDevices({ organizationId }) } })),
       route("POST", new RegExp(`^/v1/organizations/(?<organizationId>${UUID})/devices$`), "admin", async ({ organizationId, body, idempotencyKey }) => ({ status: 201, body: { device: await store.createDevice({ ...body, organizationId, idempotencyKey }) } })),
+      route("POST", new RegExp(`^/v1/organizations/(?<organizationId>${UUID})/device-enrollments$`), "admin", async ({ organizationId, body, idempotencyKey, principal }) => {
+        rejectUnknown(body, new Set(["enrollment_id", "device_id", "label", "platform", "ttl_ms"]), "device_enrollment_issue");
+        const ttl = body.ttl_ms ?? 15 * 60 * 1000;
+        if (!Number.isSafeInteger(ttl) || ttl < 60_000 || ttl > 24 * 60 * 60 * 1000) throw apiError("invalid_enrollment_ttl", 400, "Enrollment TTL must be between 1 minute and 24 hours");
+        const credential = crypto.randomBytes(32).toString("base64url");
+        const createdAt = new Date(now()).toISOString();
+        const enrollment = await store.createDeviceEnrollment({ organizationId, enrollmentId: body.enrollment_id, deviceId: body.device_id, label: body.label, platform: body.platform ?? "macos", credentialDigest: crypto.createHash("sha256").update(credential).digest("hex"), createdAt, expiresAt: new Date(now() + ttl).toISOString(), idempotencyKey });
+        await store.appendAdminAuditEvent({ organizationId, eventType: "device.enrollment_issued", actorId: principal.member_id, targetType: "device", targetId: enrollment.device_id, details: { enrollment_id: enrollment.enrollment_id, expires_at: enrollment.expires_at }, idempotencyKey: `${idempotencyKey}:audit` });
+        return { status: 201, body: { enrollment: { ...enrollment, credential, endpoint: `/v1/enrollments/${enrollment.enrollment_id}` } } };
+      }, false, false, true),
+      route("POST", new RegExp(`^/v1/enrollments/(?<enrollmentId>${UUID})$`), null, async ({ match, body, bodyBytes, request }) => {
+        rejectUnknown(body, new Set(["version", "enrollment_id", "organization_id", "device_id", "label", "platform", "device_key"]), "device_enrollment");
+        if (body.version !== 1 || body.enrollment_id !== match.enrollmentId || !body.device_key || typeof body.device_key !== "object" || Array.isArray(body.device_key)) throw apiError("invalid_enrollment", 400, "Device enrollment request is invalid");
+        rejectUnknown(body.device_key, new Set(["algorithm", "spki_pem"]), "device_key");
+        const credential = request.headers["agentpass-enrollment-credential"];
+        if (typeof credential !== "string" || !/^[A-Za-z0-9_-]{43}$/.test(credential)) throw apiError("invalid_enrollment_credential", 401, "Device enrollment credential is invalid");
+        validateEnrollmentPublicKey(body.device_key.algorithm, body.device_key.spki_pem);
+        validateEnrollmentProof(request.url, bodyBytes, body.device_key.algorithm, body.device_key.spki_pem, credential, request.headers["agentpass-enrollment-signature"]);
+        if (!bundleSigner?.privateKey || !bundleSigner?.issuer || !bundleSigner?.keyId) throw apiError("bundle_signer_unavailable", 503, "Control bundle signer is unavailable");
+        const controlPublicKey = crypto.createPublicKey(bundleSigner.privateKey).export({ type: "spki", format: "pem" }).toString();
+        const device = await store.completeDeviceEnrollment({ enrollmentId: match.enrollmentId, organizationId: body.organization_id, deviceId: body.device_id, label: body.label, platform: body.platform, algorithm: body.device_key.algorithm, publicKey: body.device_key.spki_pem, credentialDigest: crypto.createHash("sha256").update(credential).digest("hex"), completedAt: new Date(now()).toISOString() });
+        return { status: 201, body: { enrollment: { version: 1, enrollment_id: match.enrollmentId, organization_id: device.organization_id, device_id: device.device_id, status: device.status, key_algorithm: device.key_algorithm, control: { format_epoch: 2, issuer: bundleSigner.issuer, key_id: bundleSigner.keyId, public_key: controlPublicKey, bundle_path: `/v1/organizations/${device.organization_id}/bundles/${device.device_id}` } } } };
+      }, false, true),
       route("GET", new RegExp(`^/v1/organizations/(?<organizationId>${UUID})/agents$`), "viewer", async ({ organizationId }) => ({ body: { agents: await store.listAgents({ organizationId }) } })),
       route("POST", new RegExp(`^/v1/organizations/(?<organizationId>${UUID})/agents$`), "admin", async ({ organizationId, body, idempotencyKey }) => ({ status: 201, body: { agent: await store.createAgent({ ...body, organizationId, idempotencyKey }) } })),
       route("POST", new RegExp(`^/v1/organizations/(?<organizationId>${UUID})/agents/(?<agentId>${UUID})/revoke$`), "admin", async ({ organizationId, match, body, idempotencyKey, principal }) => {
@@ -196,10 +226,52 @@ function bearerToken(value) {
 }
 
 function idempotencyKey(request, route) {
-  if (!["POST", "PUT", "PATCH", "DELETE"].includes(request.method) || route.device) return undefined;
+  if (!["POST", "PUT", "PATCH", "DELETE"].includes(request.method) || route.device || route.enrollment) return undefined;
   const value = request.headers["idempotency-key"];
   if (typeof value !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._:-]{7,127}$/.test(value)) throw apiError("idempotency_key_required", 400, "A valid Idempotency-Key is required");
   return value;
+}
+
+async function requireRecentWebAuthn({ verifier, principal, proof, organizationId, now }) {
+  if (typeof verifier !== "function") throw apiError("recent_auth_unavailable", 503, "Recent WebAuthn verification is unavailable");
+  if (typeof proof !== "string" || proof.length < 32 || proof.length > 4096 || /[\u0000-\u001f\u007f]/.test(proof)) throw apiError("recent_auth_required", 401, "Recent WebAuthn authentication is required");
+  let result;
+  try { result = await verifier({ proof, principal: { ...principal }, organization_id: organizationId, now }); }
+  catch { throw apiError("recent_auth_failed", 401, "Recent WebAuthn authentication failed"); }
+  if (!result || typeof result !== "object" || Array.isArray(result) || Object.keys(result).sort().join(",") !== ["authenticated_at", "member_id", "organization_id", "verified"].sort().join(",") || result.verified !== true || result.member_id !== principal.member_id || result.organization_id !== organizationId) {
+    throw apiError("recent_auth_failed", 401, "Recent WebAuthn authentication failed");
+  }
+  const authenticatedAt = typeof result.authenticated_at === "string" ? Date.parse(result.authenticated_at) : result.authenticated_at;
+  if (!Number.isSafeInteger(authenticatedAt) || authenticatedAt > now + 30_000 || now - authenticatedAt > 5 * 60_000) throw apiError("recent_auth_stale", 401, "Recent WebAuthn authentication is stale");
+}
+
+function validateEnrollmentPublicKey(algorithm, pem) {
+  if (typeof pem !== "string" || Buffer.byteLength(pem) > 8192 || /PRIVATE\s+KEY/i.test(pem)) throw apiError("invalid_device_key", 400, "Device public key is invalid");
+  let key;
+  try { key = crypto.createPublicKey(pem); } catch { throw apiError("invalid_device_key", 400, "Device public key is invalid"); }
+  const valid = algorithm === "ed25519"
+    ? key.asymmetricKeyType === "ed25519"
+    : algorithm === "p256-sha256" && key.asymmetricKeyType === "ec" && key.asymmetricKeyDetails?.namedCurve === "prime256v1";
+  if (!valid) throw apiError("invalid_device_key", 400, "Device key algorithm does not match the public key");
+  const canonical = key.export({ type: "spki", format: "pem" }).toString();
+  if (canonical !== pem) throw apiError("invalid_device_key", 400, "Device public key must use canonical SPKI PEM encoding");
+}
+
+function validateEnrollmentProof(requestPath, body, algorithm, pem, credential, encodedSignature) {
+  if (typeof encodedSignature !== "string" || !/^(?:[A-Za-z0-9+/]{4}){21}(?:[A-Za-z0-9+/]{2}==)$/.test(encodedSignature)) throw apiError("invalid_enrollment_proof", 401, "Device enrollment proof is invalid");
+  const signature = Buffer.from(encodedSignature, "base64");
+  if (signature.length !== 64 || signature.toString("base64") !== encodedSignature) throw apiError("invalid_enrollment_proof", 401, "Device enrollment proof is invalid");
+  const digest = crypto.createHash("sha256").update(body).digest("hex");
+  const credentialDigest = crypto.createHash("sha256").update(credential).digest("hex");
+  const proof = Buffer.from(["AgentPass-Enrollment-Proof-v1", "POST", requestPath, digest, credentialDigest].join("\n"), "utf8");
+  const key = crypto.createPublicKey(pem);
+  let valid = false;
+  try {
+    valid = algorithm === "ed25519"
+      ? crypto.verify(null, proof, key, signature)
+      : crypto.verify("sha256", proof, { key, dsaEncoding: "ieee-p1363" }, signature);
+  } catch { valid = false; }
+  if (!valid) throw apiError("invalid_enrollment_proof", 401, "Device enrollment proof is invalid");
 }
 
 async function readBody(request) {
@@ -244,7 +316,7 @@ function rateLimitHeaders(decision, retry = false) {
 }
 
 function send(response, status, value, headers = {}) {
-  const encoded = Buffer.from(JSON.stringify(value));
+  const encoded = Buffer.from(canonicalJson(value));
   response.writeHead(status, { "content-type": "application/json; charset=utf-8", "content-length": encoded.length, "cache-control": "no-store", ...headers });
   response.end(encoded);
 }
@@ -256,6 +328,8 @@ function mapError(error) {
   if (String(error.code).startsWith("auth_") || ["invalid_api_token", "device_auth_failed", "invalid_auth_headers"].includes(error.code)) return { status: 401, code: error.code, message: "Authentication failed" };
   if (["role_denied", "organization_mismatch"].includes(error.code)) return { status: 403, code: error.code, message: "Authorization denied" };
   if (error.code === "ERR_NOT_FOUND") return { status: 404, code: "not_found", message: "Resource not found" };
+  if (error.code === "ERR_ENROLLMENT_AUTH") return { status: 401, code: "invalid_enrollment_credential", message: "Device enrollment authentication failed" };
+  if (["ERR_ENROLLMENT_EXPIRED", "ERR_ENROLLMENT_CONSUMED", "ERR_ENROLLMENT_STATE", "ERR_ENROLLMENT_BINDING"].includes(error.code)) return { status: 409, code: error.code.toLowerCase(), message: "Device enrollment conflict" };
   if (error.code === "ERR_VERSION_CONFLICT") return { status: 409, code: "version_conflict", message: "Resource version conflict" };
   if (error.code === "ERR_IDEMPOTENCY_CONFLICT" || error.code === "ERR_UNIQUE_CONSTRAINT") return { status: 409, code: error.code.toLowerCase(), message: "Mutation conflict" };
   if (String(error.code).startsWith("ERR_")) return { status: 400, code: error.code.toLowerCase(), message: "Request was rejected" };

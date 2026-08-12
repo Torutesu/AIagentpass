@@ -31,7 +31,7 @@ async function fixture(t, apiOptions = {}) {
   const token = "ap_owner_token_abcdefghijklmnopqrstuvwxyz";
   const records = [createApiTokenRecord({ token, tokenId: "owner-token", organizationId: org, memberId: "owner-1", role: "owner" })];
   const bundleKeys = crypto.generateKeyPairSync("ed25519");
-  const server = createCloudApi({ store, tokenRecords: records, bundleSigner: { privateKey: bundleKeys.privateKey, issuer: "agentpass-cloud", keyId: "control-v1", ttlMs: 60_000, offlineTtlMs: 120_000 }, now: () => now, ...apiOptions });
+  const server = createCloudApi({ store, tokenRecords: records, bundleSigner: { privateKey: bundleKeys.privateKey, issuer: "agentpass-cloud", keyId: "control-v1", ttlMs: 60_000, offlineTtlMs: 120_000 }, now: () => now, verifyRecentWebAuthn: async ({ proof, principal, organization_id }) => ({ verified: proof === "webauthn-proof-abcdefghijklmnopqrstuvwxyz", member_id: principal.member_id, organization_id, authenticated_at: now }), ...apiOptions });
   await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
   const base = `http://127.0.0.1:${server.address().port}`;
   t.after(async () => { await new Promise((resolve) => server.close(resolve)); await store.close(); await fs.rm(directory, { recursive: true, force: true }); });
@@ -51,6 +51,53 @@ test("human routes enforce bearer role, tenant, and idempotency", async (t) => {
   const duplicate = await fetch(`${f.base}/v1/organizations/${org}/policies`, { method: "POST", headers: { authorization: `Bearer ${f.token}`, "content-type": "application/json", "idempotency-key": "duplicate-json-0001" }, body: '{"name":"first","name":"second"}' });
   assert.equal(duplicate.status, 400);
   assert.equal((await duplicate.json()).error.code, "invalid_json");
+});
+
+test("admin issues a one-time enrollment and a macOS P-256 device completes it", async (t) => {
+  const f = await fixture(t);
+  const enrollmentId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+  const pendingDevice = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+  const enrollmentBody = JSON.stringify({ enrollment_id: enrollmentId, device_id: pendingDevice, label: "Build Mac 02", platform: "macos", ttl_ms: 600_000 });
+  const withoutRecentAuth = await fetch(`${f.base}/v1/organizations/${org}/device-enrollments`, {
+    method: "POST",
+    headers: { authorization: `Bearer ${f.token}`, "content-type": "application/json", "idempotency-key": "issue-device-enrollment-denied" },
+    body: enrollmentBody
+  });
+  assert.equal(withoutRecentAuth.status, 401);
+  assert.equal((await withoutRecentAuth.json()).error.code, "recent_auth_required");
+  const issued = await fetch(`${f.base}/v1/organizations/${org}/device-enrollments`, {
+    method: "POST",
+    headers: { authorization: `Bearer ${f.token}`, "content-type": "application/json", "idempotency-key": "issue-device-enrollment-0001", "AgentPass-Recent-Auth": "webauthn-proof-abcdefghijklmnopqrstuvwxyz" },
+    body: enrollmentBody
+  });
+  assert.equal(issued.status, 201, JSON.stringify(await issued.clone().json()));
+  const invitation = (await issued.json()).enrollment;
+  assert.match(invitation.credential, /^[A-Za-z0-9_-]{43}$/);
+  const keys = crypto.generateKeyPairSync("ec", { namedCurve: "prime256v1" });
+  const request = { version: 1, enrollment_id: enrollmentId, organization_id: org, device_id: pendingDevice, label: "Build Mac 02", platform: "macos", device_key: { algorithm: "p256-sha256", spki_pem: keys.publicKey.export({ type: "spki", format: "pem" }).toString() } };
+  const requestBody = JSON.stringify(request);
+  const proof = Buffer.from(["AgentPass-Enrollment-Proof-v1", "POST", invitation.endpoint, crypto.createHash("sha256").update(requestBody).digest("hex"), crypto.createHash("sha256").update(invitation.credential).digest("hex")].join("\n"));
+  const signature = crypto.sign("sha256", proof, { key: keys.privateKey, dsaEncoding: "ieee-p1363" }).toString("base64");
+  const enrollmentHeaders = { "content-type": "application/json", "AgentPass-Enrollment-Credential": invitation.credential, "AgentPass-Enrollment-Signature": signature };
+  const badCredential = crypto.randomBytes(32).toString("base64url");
+  const badProof = Buffer.from(["AgentPass-Enrollment-Proof-v1", "POST", invitation.endpoint, crypto.createHash("sha256").update(requestBody).digest("hex"), crypto.createHash("sha256").update(badCredential).digest("hex")].join("\n"));
+  const badHeaders = { "content-type": "application/json", "AgentPass-Enrollment-Credential": badCredential, "AgentPass-Enrollment-Signature": crypto.sign("sha256", badProof, { key: keys.privateKey, dsaEncoding: "ieee-p1363" }).toString("base64") };
+  const wrongCredential = await fetch(`${f.base}${invitation.endpoint}`, { method: "POST", headers: badHeaders, body: requestBody });
+  assert.equal(wrongCredential.status, 401);
+  assert.equal((await wrongCredential.json()).error.code, "invalid_enrollment_credential");
+  const completed = await fetch(`${f.base}${invitation.endpoint}`, { method: "POST", headers: enrollmentHeaders, body: requestBody });
+  assert.equal(completed.status, 201, JSON.stringify(await completed.clone().json()));
+  const result = (await completed.json()).enrollment;
+  assert.equal(result.status, "active");
+  assert.equal(result.control.format_epoch, 2);
+  assert.equal(result.control.issuer, "agentpass-cloud");
+  assert.equal(result.control.bundle_path, `/v1/organizations/${org}/bundles/${pendingDevice}`);
+  assert.equal(crypto.createPublicKey(result.control.public_key).asymmetricKeyType, "ed25519");
+  const replay = await fetch(`${f.base}${invitation.endpoint}`, { method: "POST", headers: enrollmentHeaders, body: requestBody });
+  assert.equal(replay.status, 201);
+  const substituted = await fetch(`${f.base}${invitation.endpoint}`, { method: "POST", headers: enrollmentHeaders, body: JSON.stringify({ ...request, label: "Other Mac" }) });
+  assert.equal(substituted.status, 401);
+  assert.equal((await f.store.getDevice({ organizationId: org, deviceId: pendingDevice })).status, "active");
 });
 
 test("device routes verify the exact signed request and issue an audience-bound bundle", async (t) => {

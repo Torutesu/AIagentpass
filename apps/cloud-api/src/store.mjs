@@ -225,6 +225,75 @@ export async function createCloudStore(options = {}) {
     });
   };
 
+  const createDeviceEnrollment = async (input = {}) => {
+    const organizationId = requireTenant(input);
+    const enrollmentId = input.enrollmentId ?? input.enrollment_id ?? crypto.randomUUID();
+    const deviceId = input.deviceId ?? input.device_id ?? crypto.randomUUID();
+    assertUuid(enrollmentId, "enrollment_id");
+    assertUuid(deviceId, "device_id");
+    const label = boundedText(input.label ?? input.name, "label", 128, true);
+    const platform = enumText(input.platform ?? "macos", "platform", ["macos"]);
+    const credentialDigest = boundedText(input.credentialDigest ?? input.credential_digest, "credential_digest", 64, true);
+    if (!SHA256.test(credentialDigest)) throw new CloudStoreError("ERR_INVALID_INPUT", "credential_digest must be SHA-256");
+    const createdAt = timestamp(input.createdAt ?? input.created_at ?? now());
+    const expiresAt = timestamp(input.expiresAt ?? input.expires_at);
+    if (Date.parse(expiresAt) <= Date.parse(createdAt) || Date.parse(expiresAt) - Date.parse(createdAt) > 24 * 60 * 60 * 1000) throw new CloudStoreError("ERR_INVALID_INPUT", "enrollment expiry must be within 24 hours after creation");
+    return mutate({
+      organizationId,
+      operation: "create_device_enrollment",
+      idempotencyKey: input.idempotencyKey ?? input.idempotency_key,
+      input: { organization_id: organizationId, enrollment_id: enrollmentId, device_id: deviceId, label, platform, credential_digest: credentialDigest, created_at: createdAt, expires_at: expiresAt },
+      action: () => {
+        if (state.device_enrollments[enrollmentId] || state.devices[deviceId] || hasAnyResourceId(state, enrollmentId) || hasAnyResourceId(state, deviceId)) throw unique("enrollment_or_device_id", enrollmentId);
+        if (Object.values(state.device_enrollments).some((item) => item.credential_digest === credentialDigest)) throw unique("credential_digest", credentialDigest);
+        state.devices[deviceId] = { device_id: deviceId, organization_id: organizationId, name: label, device_public_key: null, status: "pending", metadata: { platform }, created_at: createdAt, version: 1 };
+        const record = { enrollment_id: enrollmentId, organization_id: organizationId, device_id: deviceId, label, platform, credential_digest: credentialDigest, created_at: createdAt, expires_at: expiresAt, consumed_at: null, completion_hash: null };
+        state.device_enrollments[enrollmentId] = record;
+        return publicEnrollment(record);
+      }
+    });
+  };
+
+  const completeDeviceEnrollment = async (input = {}) => enqueue(async () => {
+    const enrollmentId = input.enrollmentId ?? input.enrollment_id;
+    assertUuid(enrollmentId, "enrollment_id");
+    const record = state.device_enrollments[enrollmentId];
+    const credentialDigest = boundedText(input.credentialDigest ?? input.credential_digest, "credential_digest", 64, true);
+    const credentialMatches = SHA256.test(credentialDigest) && timingSafeHex(record?.credential_digest ?? "0".repeat(64), credentialDigest);
+    if (!record || !credentialMatches) throw new CloudStoreError("ERR_ENROLLMENT_AUTH", "device enrollment authentication failed");
+    const organizationId = input.organizationId ?? input.organization_id;
+    const deviceId = input.deviceId ?? input.device_id;
+    assertUuid(organizationId, "organization_id");
+    assertUuid(deviceId, "device_id");
+    const label = boundedText(input.label, "label", 128, true);
+    const platform = enumText(input.platform, "platform", ["macos"]);
+    const algorithm = enumText(input.algorithm, "algorithm", ["p256-sha256", "ed25519"]);
+    const publicKey = boundedText(input.publicKey ?? input.public_key, "device_public_key", 8192, true, true);
+    rejectPrivateKey(publicKey, "device_public_key");
+    if (organizationId !== record.organization_id || deviceId !== record.device_id || label !== record.label || platform !== record.platform) throw new CloudStoreError("ERR_ENROLLMENT_BINDING", "device enrollment request does not match its reservation");
+    const completionHash = digest({ version: 1, enrollment_id: enrollmentId, organization_id: organizationId, device_id: deviceId, label, platform, algorithm, public_key: publicKey });
+    if (record.consumed_at !== null) {
+      if (record.completion_hash !== completionHash) throw new CloudStoreError("ERR_ENROLLMENT_CONSUMED", "device enrollment was already consumed");
+      return clone(state.devices[deviceId]);
+    }
+    const completedAt = timestamp(input.completedAt ?? input.completed_at ?? now());
+    if (Date.parse(completedAt) > Date.parse(record.expires_at)) throw new CloudStoreError("ERR_ENROLLMENT_EXPIRED", "device enrollment has expired");
+    const device = state.devices[deviceId];
+    if (!device || device.organization_id !== organizationId || device.status !== "pending" || device.device_public_key !== null) throw new CloudStoreError("ERR_ENROLLMENT_STATE", "pending device state is invalid");
+    if (Object.values(state.devices).some((item) => item.device_id !== deviceId && item.device_public_key === publicKey)) throw unique("device_public_key", publicKey);
+    const before = clone(state);
+    try {
+      device.device_public_key = publicKey;
+      device.key_algorithm = algorithm;
+      device.status = "active";
+      device.version += 1;
+      record.consumed_at = completedAt;
+      record.completion_hash = completionHash;
+      await persistState(storage, state);
+      return clone(device);
+    } catch (error) { state = before; throw error; }
+  });
+
   const createAgent = async (input = {}) => {
     assertSafeValue(input, "agent");
     const organizationId = requireTenant(input);
@@ -567,7 +636,7 @@ export async function createCloudStore(options = {}) {
     const organizationId = requireTenant(input);
     const scoped = (collection) => list(collection, organizationId);
     return {
-      organizations: [clone(state.organizations[organizationId])], memberships: scoped("memberships"), devices: scoped("devices"), agents: scoped("agents"), policies: scoped("policies"), capabilities: scoped("capabilities"), revocations: scoped("revocations"), admin_audit_events: state.admin_audit_events.filter((item) => item.organization_id === organizationId).map(clone), device_audit_events: state.device_audit_events.filter((item) => item.organization_id === organizationId).map(clone), device_audit_gaps: state.device_audit_gaps.filter((item) => item.organization_id === organizationId).map(clone), audit_health: devicesHealth(state, organizationId)
+      organizations: [clone(state.organizations[organizationId])], memberships: scoped("memberships"), devices: scoped("devices"), device_enrollments: scoped("device_enrollments").map(publicEnrollment), agents: scoped("agents"), policies: scoped("policies"), capabilities: scoped("capabilities"), revocations: scoped("revocations"), admin_audit_events: state.admin_audit_events.filter((item) => item.organization_id === organizationId).map(clone), device_audit_events: state.device_audit_events.filter((item) => item.organization_id === organizationId).map(clone), device_audit_gaps: state.device_audit_gaps.filter((item) => item.organization_id === organizationId).map(clone), audit_health: devicesHealth(state, organizationId)
     };
   });
 
@@ -575,6 +644,7 @@ export async function createCloudStore(options = {}) {
     createOrganization, getOrganization, listOrganizations,
     createMembership, getMembership, listMemberships: listTenant("memberships"), updateMembership: (input) => updateResource(input, "memberships", "membership", ["membershipId", "membership_id", "id"], ["role", "status"], (value) => ({ ...value, role: enumText(value.role, "role", ["owner", "admin", "auditor", "viewer"]), status: enumText(value.status, "status", ["active", "revoked"]) })),
     createDevice, getDevice, listDevices: listTenant("devices"), updateDevice: (input) => updateResource(input, "devices", "device", ["deviceId", "device_id", "id"], ["name", "device_public_key", "metadata", "status"], (value) => { const publicKey = boundedText(value.device_public_key, "device_public_key", 8192, true, true); rejectPrivateKey(publicKey, "device_public_key"); return { ...value, name: boundedText(value.name, "name", 128, true), device_public_key: publicKey, metadata: safeMetadata(value.metadata, "metadata"), status: enumText(value.status, "status", ["active", "revoked"]) }; }),
+    createDeviceEnrollment, completeDeviceEnrollment,
     createAgent, getAgent, listAgents: listTenant("agents"), updateAgent: (input) => updateResource(input, "agents", "agent", ["agentId", "agent_id", "id"], ["name", "kind", "public_key", "device_id", "status"], (value) => { const descriptor = normalizeAgentDescriptor({ version: value.version, agent_id: value.agent_id, name: value.name, kind: value.kind, public_key: value.public_key, created_at: value.created_at }); return { ...value, ...descriptor, status: enumText(value.status, "status", ["active", "revoked"]) }; }),
     createPolicy, getPolicy, listPolicies: listTenant("policies"), updatePolicy: (input) => updateResource(input, "policies", "policy", ["policyId", "policy_id", "id"], ["name", "scope", "sequence", "status"], (value) => ({ ...value, name: boundedText(value.name, "name", 128, true), scope: normalizeScope(value.scope), sequence: sequenceValue(value.sequence, "sequence"), status: enumText(value.status, "status", ["active", "disabled"]) })),
     createCapability, reserveCapability, getCapability, listCapabilities: listTenant("capabilities"),
@@ -591,7 +661,7 @@ export async function createCloudStore(options = {}) {
 function emptyState() {
   return {
     schema_version: SCHEMA_VERSION,
-    organizations: {}, memberships: {}, devices: {}, agents: {}, policies: {}, capabilities: {}, revocations: {},
+    organizations: {}, memberships: {}, devices: {}, device_enrollments: {}, agents: {}, policies: {}, capabilities: {}, revocations: {},
     admin_audit_events: [], device_audit_events: [], device_audit_gaps: [], device_audit_heads: {}, bundle_heads: {}, idempotency: {}
   };
 }
@@ -710,6 +780,7 @@ async function loadState(storage) {
   // memory and persisted on the next mutation. No authorization data is
   // inferred; the first subsequent bundle receives a fresh head.
   if (parsed?.schema_version === SCHEMA_VERSION && parsed.bundle_heads === undefined) parsed.bundle_heads = {};
+  if (parsed?.schema_version === SCHEMA_VERSION && parsed.device_enrollments === undefined) parsed.device_enrollments = {};
   validateState(parsed);
   return parsed;
 }
@@ -734,7 +805,7 @@ async function persistState(storage, state) {
 
 function validateState(value) {
   if (!value || typeof value !== "object" || Array.isArray(value) || value.schema_version !== SCHEMA_VERSION) throw new CloudStoreError("ERR_STORE_CORRUPT", "store schema is invalid");
-  for (const collection of ["organizations", "memberships", "devices", "agents", "policies", "capabilities", "revocations", "device_audit_heads", "bundle_heads", "idempotency"]) {
+  for (const collection of ["organizations", "memberships", "devices", "device_enrollments", "agents", "policies", "capabilities", "revocations", "device_audit_heads", "bundle_heads", "idempotency"]) {
     if (!value[collection] || typeof value[collection] !== "object" || Array.isArray(value[collection])) throw new CloudStoreError("ERR_STORE_CORRUPT", `store collection ${collection} is invalid`);
   }
   for (const collection of ["admin_audit_events", "device_audit_events", "device_audit_gaps"]) {
@@ -802,13 +873,21 @@ function requireIdempotencyKey(value) {
 function rejectPrivateKey(value, label) { if (/PRIVATE\s+KEY|BEGIN\s+RSA|BEGIN\s+EC/i.test(value)) throw new CloudStoreError("ERR_SECRET_MATERIAL", `${label} contains private key material`); }
 function clone(value) { return structuredClone(value); }
 function digest(value) { return crypto.createHash("sha256").update(canonicalJson(value)).digest("hex"); }
-function idOf(record) { return record.organization_id ?? record.membership_id ?? record.device_id ?? record.agent_id ?? record.policy_id ?? record.capability_id ?? record.revocation_id ?? record.audit_event_id ?? ""; }
+function idOf(record) { return record.enrollment_id ?? record.organization_id ?? record.membership_id ?? record.device_id ?? record.agent_id ?? record.policy_id ?? record.capability_id ?? record.revocation_id ?? record.audit_event_id ?? ""; }
 function unique(field, value) { return new CloudStoreError("ERR_UNIQUE_CONSTRAINT", `${field} must be unique: ${value}`); }
 function notFound(label, id) { return new CloudStoreError("ERR_NOT_FOUND", `${label} not found: ${id}`); }
 function slugify(value) { return value.toLowerCase().trim().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") || "organization"; }
 function hasAnyResourceId(state, id) {
-  return ["organizations", "memberships", "devices", "agents", "policies", "capabilities", "revocations"]
+  return ["organizations", "memberships", "devices", "device_enrollments", "agents", "policies", "capabilities", "revocations"]
     .some((collection) => Object.hasOwn(state[collection], id));
+}
+function publicEnrollment(record) {
+  const { credential_digest: _credential, completion_hash: _completion, ...value } = record;
+  return clone(value);
+}
+function timingSafeHex(left, right) {
+  const a = Buffer.from(left, "ascii"), b = Buffer.from(right, "ascii");
+  return a.length === b.length && crypto.timingSafeEqual(a, b);
 }
 function boundedLimit(value) { if (value === undefined) return 100; if (!Number.isSafeInteger(value) || value < 1 || value > MAX_BATCH * 16) throw new CloudStoreError("ERR_LIMIT_EXCEEDED", "limit is out of bounds"); return value; }
 function listAudit(values, organizationId, limit) { return values.filter((item) => item.organization_id === organizationId).slice(-boundedLimit(limit)).map(clone); }
