@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { createPostgresHumanManagementRepository } from "../src/human-auth/management/postgres-adapter.mjs";
+import { createHumanCursorCodec } from "../src/human-auth/pagination/cursor-codec.mjs";
 
 const ids = {
   session: "11111111-1111-4111-8111-111111111111",
@@ -100,13 +101,15 @@ test("requires the complete PostgreSQL management repository and a clock functio
   assert.throws(() => createPostgresHumanManagementRepository({ repository, now: "not-a-function" }), /now must be a function/);
 });
 
-test("paginates credentials and sessions with a bounded, null cursor", async () => {
+test("paginates credentials and sessions with authenticated resource-bound cursors", async () => {
   const records = [credential({ id: "AQEBAQEBAQEBAQEBAQEBAQ" }), credential({ id: "AgICAgICAgICAgICAgICAg" }), credential({ id: "AwMDAwMDAwMDAwMDAwMDAw" })];
   const { repository, calls } = makeRepository({ listCredentialMetadataForSession: records, listSafeSessions: [session(), session({ session_id: ids.targetSession })] });
-  const management = createPostgresHumanManagementRepository({ repository, now: () => NOW });
+  const cursorCodec = createHumanCursorCodec({ secret: Buffer.alloc(32, 0x44) });
+  const management = createPostgresHumanManagementRepository({ repository, cursorCodec, now: () => NOW });
 
-  const credentials = await management.listCredentials({ session_id: ids.session, member_id: ids.member, organization_id: ids.organization, limit: 2, cursor: "ignored-by-adapter" });
-  assert.deepEqual(credentials, { items: records.slice(0, 2), next_cursor: null });
+  const credentials = await management.listCredentials({ session_id: ids.session, member_id: ids.member, organization_id: ids.organization, limit: 2 });
+  assert.deepEqual(credentials.items, records.slice(0, 2));
+  assert.match(credentials.next_cursor, /^[A-Za-z0-9_-]+$/u);
   assert.equal(Object.isFrozen(credentials), true);
   assert.equal(Object.isFrozen(credentials.items), true);
   assert.deepEqual(calls.listCredentialMetadataForSession[0], {
@@ -114,18 +117,32 @@ test("paginates credentials and sessions with a bounded, null cursor", async () 
     member_id: ids.member,
     organization_id: ids.organization,
     limit: 2,
-    cursor: "ignored-by-adapter",
+  });
+  const credentialPosition = cursorCodec.decode(credentials.next_cursor, { resource: "credentials", tenant_id: ids.organization, member_id: ids.member, direction: "asc" });
+  await management.listCredentials({ session_id: ids.session, member_id: ids.member, organization_id: ids.organization, limit: 2, cursor: credentials.next_cursor });
+  assert.deepEqual(calls.listCredentialMetadataForSession[1], {
+    session_id: ids.session, member_id: ids.member, organization_id: ids.organization, limit: 2,
+    after_created_at: credentialPosition.created_at, after_id: credentialPosition.id
   });
 
   const sessions = await management.listSessions({ session_id: ids.session, member_id: ids.member, organization_id: ids.organization, limit: 1 });
   assert.equal(sessions.items.length, 1);
-  assert.equal(sessions.next_cursor, null);
+  assert.match(sessions.next_cursor, /^[A-Za-z0-9_-]+$/u);
   assert.deepEqual(calls.listSafeSessions[0], {
     session_id: ids.session,
     member_id: ids.member,
     organization_id: ids.organization,
     limit: 1,
   });
+  await assert.rejects(
+    management.listCredentials({ session_id: ids.session, member_id: ids.member, organization_id: ids.organization, limit: 2, cursor: sessions.next_cursor }),
+    { code: "human_cursor_invalid" }
+  );
+  const otherTenant = createPostgresHumanManagementRepository({ repository, cursorCodec, now: () => NOW });
+  await assert.rejects(
+    otherTenant.listSessions({ session_id: ids.session, member_id: ids.member, organization_id: "55555555-5555-4555-8555-555555555555", limit: 1, cursor: sessions.next_cursor }),
+    { code: "human_cursor_invalid" }
+  );
 
   for (const limit of [0, 101, 1.5, NaN, Infinity]) {
     await assert.rejects(() => management.listCredentials({ limit }), /management page limit is invalid/);

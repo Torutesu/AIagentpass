@@ -8,7 +8,7 @@ import { createApiTokenRecord, signDeviceRequest } from "../src/auth.mjs";
 import { createCloudApi } from "../src/server.mjs";
 import { computeAuditEventHash, createCloudStore } from "../src/store.mjs";
 import { verifyControlBundle } from "../../../lib/control-bundle-v2.mjs";
-import { verifyCapability } from "../../../packages/capability/src/index.mjs";
+import { canonicalJson, verifyCapability } from "../../../packages/capability/src/index.mjs";
 import { createRateLimiter } from "../src/rate-limit.mjs";
 
 const org = "11111111-1111-4111-8111-111111111111";
@@ -145,6 +145,44 @@ test("device routes verify the exact signed request and issue an audience-bound 
   assert.equal(substitution.status, 401);
 });
 
+test("ControlBundle merges durable PostgreSQL capability revocations and fails closed when authority is unavailable", async (t) => {
+  const durableRevocation = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+  const nextRevocation = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+  let durable = [durableRevocation];
+  const calls = [];
+  const source = {
+    async listRevokedCapabilityIds(input) {
+      calls.push(input);
+      if (durable instanceof Error) throw durable;
+      return durable;
+    }
+  };
+  const f = await fixture(t, { capabilityRevocationSource: source });
+  const pathName = `/v1/organizations/${org}/bundles/${deviceId}`;
+  const firstHeaders = signDeviceRequest({ method: "GET", path: pathName, body: Buffer.alloc(0), device_id: deviceId, timestamp: now, nonce: "nonce-durable-revocation-abcdefghijklmnopqrstuvwxyz" }, f.deviceKeys.privateKey);
+  const first = await fetch(`${f.base}${pathName}`, { headers: firstHeaders });
+  assert.equal(first.status, 200, JSON.stringify(await first.clone().json()));
+  const firstBundle = (await first.json()).bundle;
+  assert.deepEqual(firstBundle.revoked_capabilities, [durableRevocation]);
+  assert.deepEqual(calls[0], { organization_id: org, evaluated_at: new Date(now).toISOString() });
+
+  durable = [nextRevocation, durableRevocation];
+  const secondHeaders = signDeviceRequest({ method: "GET", path: pathName, body: Buffer.alloc(0), device_id: deviceId, timestamp: now, nonce: "nonce-durable-revocation-second-abcdefghijklmnop" }, f.deviceKeys.privateKey);
+  const second = await fetch(`${f.base}${pathName}`, { headers: secondHeaders });
+  assert.equal(second.status, 200);
+  const secondBundle = (await second.json()).bundle;
+  assert.deepEqual(secondBundle.revoked_capabilities, [durableRevocation, nextRevocation]);
+  assert.ok(secondBundle.sequence > firstBundle.sequence);
+
+  durable = new Error("database details must not escape");
+  const unavailableHeaders = signDeviceRequest({ method: "GET", path: pathName, body: Buffer.alloc(0), device_id: deviceId, timestamp: now, nonce: "nonce-durable-revocation-failure-abcdefghijkl" }, f.deviceKeys.privateKey);
+  const unavailable = await fetch(`${f.base}${pathName}`, { headers: unavailableHeaders });
+  assert.equal(unavailable.status, 503);
+  const failure = await unavailable.json();
+  assert.equal(failure.error.code, "capability_revocations_unavailable");
+  assert.doesNotMatch(JSON.stringify(failure), /database details/u);
+});
+
 test("device audit ingestion is authenticated and rejects body substitution", async (t) => {
   const f = await fixture(t);
   const endpoint = `/v1/organizations/${org}/audit/events`;
@@ -159,7 +197,9 @@ test("device audit ingestion is authenticated and rejects body substitution", as
 });
 
 test("admin issues a signed short-lived capability bound to an active agent and device", async (t) => {
-  const f = await fixture(t);
+  const authorityCalls = [];
+  let authorityError;
+  const f = await fixture(t, { capabilityAuthorityRepository: { async issueCapabilityMetadata(input) { authorityCalls.push(input); if (authorityError) throw authorityError; return input; } } });
   const endpoint = `${f.base}/v1/organizations/${org}/capabilities`;
   const headers = { authorization: `Bearer ${f.token}`, "content-type": "application/json", "idempotency-key": "capability-request-0001" };
   const body = JSON.stringify({ agent_id: agentId, device_id: deviceId, scope: f.scope, ttl_ms: 60_000, sequence: 1 });
@@ -173,11 +213,36 @@ test("admin issues a signed short-lived capability bound to an active agent and 
   const verified = verifyCapability(capability, { public_key: f.bundleKeys.publicKey, issuer: "agentpass-cloud", key_id: "control-v1" }, { now, audience: { agent_id: agentId, device_id: deviceId } });
   assert.equal(verified.scope.operations[0], "git.commit.sign");
   assert.equal((await f.store.getCapability({ organizationId: org, capabilityId: capability.capability_id })).signature, undefined);
+  assert.equal(authorityCalls.length, 1);
+  const capabilityStatement = { ...capability };
+  delete capabilityStatement.signature;
+  assert.deepEqual(authorityCalls[0], {
+    organization_id: org,
+    capability_id: capability.capability_id,
+    agent_id: agentId,
+    device_id: deviceId,
+    sequence: 1,
+    statement_hash: crypto.createHash("sha256").update(canonicalJson(capabilityStatement)).digest("hex"),
+    expires_at: capability.expires_at,
+    issued_by_member_id: "owner-1"
+  });
 
   const retry = await fetch(endpoint, { method: "POST", headers, body });
   assert.equal(retry.status, 201);
   assert.deepEqual((await retry.json()).capability, capability, "an exact retry must return the same bearer envelope without issuing again");
+  assert.equal(authorityCalls.length, 2, "the PostgreSQL authority boundary must verify an exact replay too");
   assert.equal((await f.store.listCapabilities({ organizationId: org })).length, 1);
+
+  authorityError = Object.assign(new Error("database detail must not escape"), { code: "ERR_DATABASE" });
+  const unavailable = await fetch(endpoint, {
+    method: "POST",
+    headers: { ...headers, "idempotency-key": "capability-request-authority-failure" },
+    body: JSON.stringify({ agent_id: agentId, device_id: deviceId, scope: f.scope, ttl_ms: 60_000, sequence: 2 })
+  });
+  assert.equal(unavailable.status, 503);
+  const unavailableBody = await unavailable.json();
+  assert.equal(unavailableBody.error.code, "capability_authority_unavailable");
+  assert.doesNotMatch(JSON.stringify(unavailableBody), /database detail/u);
 
   const unknown = await fetch(`${f.base}/v1/organizations/${org}/capabilities`, {
     method: "POST",

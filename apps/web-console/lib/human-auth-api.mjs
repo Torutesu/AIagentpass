@@ -2,14 +2,16 @@ const MAX_BODY_BYTES = 128 * 1024;
 const MAX_RESPONSE_BYTES = 256 * 1024;
 const DEFAULT_TIMEOUT_MS = 8_000;
 const ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
+const OPAQUE_TOKEN = /^[A-Za-z0-9_-]{43}$/;
+const SESSION_COOKIE_NAME = "__Host-agentpass_session";
 const ROUTES = new Map([
-  ["/api/auth/session", Object.freeze({ cloudPath: "/api/auth/session", session: true })],
-  ["/api/auth/webauthn/options", Object.freeze({ cloudPath: "/api/auth/webauthn/options", session: false })],
-  ["/api/auth/webauthn/verify", Object.freeze({ cloudPath: "/api/auth/webauthn/verify", session: false })],
-  ["/api/auth/webauthn/registration/options", Object.freeze({ cloudPath: "/api/auth/webauthn/registration/options", session: false })],
-  ["/api/auth/webauthn/registration/verify", Object.freeze({ cloudPath: "/api/auth/webauthn/registration/verify", session: false })],
-  ["/api/auth/security/passkeys", Object.freeze({ cloudPath: "/api/auth/management/credentials", methods: ["GET"], requireCookie: true, requireCsrf: true, body: "none" })],
-  ["/api/auth/security/sessions", Object.freeze({ cloudPath: "/api/auth/management/sessions", methods: ["GET"], requireCookie: true, requireCsrf: true, body: "none" })],
+  ["/api/auth/session", Object.freeze({ cloudPath: "/api/auth/session", session: "bootstrap" })],
+  ["/api/auth/webauthn/options", Object.freeze({ cloudPath: "/api/auth/webauthn/options", session: "human", requireCookie: true, requireCsrf: true })],
+  ["/api/auth/webauthn/verify", Object.freeze({ cloudPath: "/api/auth/webauthn/verify", session: "human", requireCookie: true, requireCsrf: true })],
+  ["/api/auth/webauthn/registration/options", Object.freeze({ cloudPath: "/api/auth/webauthn/registration/options", session: "human", requireCookie: true, requireCsrf: true })],
+  ["/api/auth/webauthn/registration/verify", Object.freeze({ cloudPath: "/api/auth/webauthn/registration/verify", session: "human", requireCookie: true, requireCsrf: true })],
+  ["/api/auth/security/passkeys", Object.freeze({ cloudPath: "/api/auth/management/credentials", session: "human", methods: ["GET"], requireCookie: true, requireCsrf: true, body: "none" })],
+  ["/api/auth/security/sessions", Object.freeze({ cloudPath: "/api/auth/management/sessions", session: "human", methods: ["GET"], requireCookie: true, requireCsrf: true, body: "none" })],
 ]);
 
 export class HumanAuthBridgeError extends Error {
@@ -33,35 +35,32 @@ export async function handleHumanAuthRequest(request, options = {}) {
     if (!(route.methods ?? ["POST"]).includes(request.method)) fail(405, "method_not_allowed", "Method not allowed");
     if (url.search && !(route.queryMethods ?? []).includes(request.method)) fail(400, "invalid_request", "The request query is invalid");
     const query = (route.queryMethods ?? []).includes(request.method) ? normalizeListQuery(url.searchParams) : "";
-    route = { ...route, cloudPath: `${route.cloudPath}${query}`, body: route.bodies?.[request.method] ?? route.body, requireIdempotency: route.requireIdempotency === true || (route.idempotencyMethods ?? []).includes(request.method) };
+    route = { ...route, session: route.session ?? "human", cloudPath: `${route.cloudPath}${query}`, body: route.bodies?.[request.method] ?? route.body, requireIdempotency: route.requireIdempotency === true || (route.idempotencyMethods ?? []).includes(request.method) };
     const origin = request.headers.get("origin");
     if (origin !== url.origin || origin === "null") fail(403, "origin_not_allowed", "The request origin is not allowed");
 
-    const user = await requireUser(request, options);
-    const config = readConfig(options.env);
-    if (!config.operatorUserIds.has(user.userId)) fail(403, "operator_access_denied", "Operator access is denied");
+    const config = readConfig(options.env, { legacyBootstrap: route.session === "bootstrap" });
+    const user = route.session === "bootstrap" ? await requireLegacyBootstrapUser(request, options, config) : undefined;
     const body = route.body === "none" ? await readNoBody(request) : await readBody(request, route);
     const fetchImpl = options.fetchImpl ?? options.fetch ?? globalThis.fetch;
     if (typeof fetchImpl !== "function") fail(503, "cloud_api_unavailable", "Cloud API is unavailable");
 
     const headers = new Headers({
       accept: "application/json",
-      authorization: `Bearer ${config.token}`,
       "cache-control": "no-store",
       "content-type": "application/json",
       origin,
       pragma: "no-cache",
-      "agentpass-console-user-id": user.userId,
     });
-    const cookie = request.headers.get("cookie");
-    const csrf = request.headers.get("agentpass-csrf");
-    if (cookie !== null) {
-      if (cookie.length < 1 || cookie.length > 8192 || hasControl(cookie)) fail(400, "invalid_cookie", "The session cookie is invalid");
-      headers.set("cookie", cookie);
+    const cookie = normalizeSessionCookie(request.headers.get("cookie"), { required: route.requireCookie === true });
+    if (route.session === "human" && cookie !== null) headers.set("cookie", cookie);
+    if (route.session === "bootstrap" && user !== undefined) {
+      headers.set("authorization", `Bearer ${config.token}`);
+      headers.set("agentpass-console-user-id", user.userId);
     }
-    if (route.requireCookie && cookie === null) fail(401, "session_required", "An active session is required");
-    if (route.requireCsrf || !route.session) {
-      if (csrf === null || csrf.length < 1 || csrf.length > 512 || hasControl(csrf)) fail(403, "csrf_required", "CSRF authentication is required");
+    const csrf = request.headers.get("agentpass-csrf");
+    if (route.requireCsrf) {
+      if (!isOpaqueToken(csrf)) fail(403, "csrf_required", "CSRF authentication is required");
       headers.set("agentpass-csrf", csrf);
     }
     const recentAuth = request.headers.get("agentpass-recent-auth");
@@ -100,7 +99,7 @@ export async function handleHumanAuthRequest(request, options = {}) {
     } finally {
       clearTimeout(timeout);
     }
-    return await relayResponse(upstream, route.session === true || route.allowSetCookie === true);
+    return await relayResponse(upstream, { allowSetCookie: route.session === "bootstrap" || route.allowSetCookie === true, clearCookieOnly: route.clearCookieOnly === true });
   } catch (error) {
     const mapped = error instanceof HumanAuthBridgeError
       ? error
@@ -109,12 +108,13 @@ export async function handleHumanAuthRequest(request, options = {}) {
   }
 }
 
-async function requireUser(request, options) {
+async function requireLegacyBootstrapUser(request, options, config) {
   const getUser = options.getSiwcUser ?? options.getUser;
   if (typeof getUser !== "function") fail(503, "identity_unavailable", "Identity verification is unavailable");
   let user;
   try { user = await getUser(request); } catch { fail(401, "authentication_required", "Authentication is required"); }
   if (!user || typeof user.userId !== "string" || !ID.test(user.userId)) fail(401, "authentication_required", "Authentication is required");
+  if (!config.operatorUserIds.has(user.userId)) fail(403, "operator_access_denied", "Operator access is denied");
   return user;
 }
 
@@ -181,8 +181,8 @@ function validateBody(value, shape) {
   fail(500, "human_auth_bridge_failed", "Authentication is unavailable");
 }
 
-async function relayResponse(response, allowSetCookie) {
-  if (!response || typeof response.status !== "number" || response.status < 200 || response.status > 599) fail(502, "cloud_api_invalid_response", "Cloud API response was invalid");
+async function relayResponse(response, { allowSetCookie = false, clearCookieOnly = false } = {}) {
+  if (!response || typeof response.status !== "number" || response.status < 200 || response.status > 599 || (response.status >= 300 && response.status < 400)) fail(502, "cloud_api_invalid_response", "Cloud API response was invalid");
   const type = response.headers?.get("content-type") ?? "";
   if (!/^application\/json(?:\s*;|\s*$)/i.test(type)) fail(502, "cloud_api_invalid_response", "Cloud API response was invalid");
   const declared = response.headers.get("content-length");
@@ -195,24 +195,31 @@ async function relayResponse(response, allowSetCookie) {
   const setCookie = response.headers.get("set-cookie");
   if (setCookie !== null && !allowSetCookie) fail(502, "cloud_api_invalid_response", "Cloud API response was invalid");
   if (allowSetCookie && setCookie !== null) {
-    if (!/^__Host-agentpass_session=(?:[A-Za-z0-9_-]{43}|); Path=\/; HttpOnly; Secure; SameSite=Strict(?:; Max-Age=(?:0|[1-9]\d*))?$/.test(setCookie)) fail(502, "cloud_api_invalid_response", "Cloud API response was invalid");
+    const cookiePattern = clearCookieOnly
+      ? /^__Host-agentpass_session=; Path=\/; HttpOnly; Secure; SameSite=Strict; Max-Age=0$/
+      : /^__Host-agentpass_session=(?:[A-Za-z0-9_-]{43}|); Path=\/; HttpOnly; Secure; SameSite=Strict(?:; Max-Age=(?:0|[1-9]\d*))?$/;
+    if (!cookiePattern.test(setCookie)) fail(502, "cloud_api_invalid_response", "Cloud API response was invalid");
     headers.set("set-cookie", setCookie);
   }
   return new Response(JSON.stringify(value), { status: response.status, headers });
 }
 
-function readConfig(injected) {
+function readConfig(injected, { legacyBootstrap = false } = {}) {
   const source = injected ?? (typeof process === "undefined" ? undefined : process.env);
   const urlValue = source?.AGENTPASS_CLOUD_API_URL;
-  const token = source?.AGENTPASS_CLOUD_TOKEN;
-  const operators = typeof source?.AGENTPASS_OPERATOR_USER_IDS === "string" ? source.AGENTPASS_OPERATOR_USER_IDS.split(",").map((item) => item.trim()).filter(Boolean) : [];
+  const token = legacyBootstrap ? source?.AGENTPASS_CLOUD_TOKEN : undefined;
+  const operators = legacyBootstrap && typeof source?.AGENTPASS_OPERATOR_USER_IDS === "string" ? source.AGENTPASS_OPERATOR_USER_IDS.split(",").map((item) => item.trim()).filter(Boolean) : [];
   let url;
   try { url = new URL(urlValue); } catch { fail(503, "cloud_api_unavailable", "Cloud API is unavailable"); }
   const insecureLoopback = source?.AGENTPASS_ALLOW_INSECURE_LOOPBACK_CLOUD_API === "true" && url.protocol === "http:" && ["127.0.0.1", "::1", "localhost"].includes(url.hostname);
-  if ((url.protocol !== "https:" && !insecureLoopback) || url.username || url.password || url.search || url.hash || url.pathname !== "/" || typeof token !== "string" || token.length < 1 || token.length > 8192 || hasControl(token) || operators.length < 1 || operators.length > 100 || new Set(operators).size !== operators.length || operators.some((item) => !ID.test(item))) fail(503, "cloud_api_unavailable", "Cloud API is unavailable");
+  if ((url.protocol !== "https:" && !insecureLoopback) || url.username || url.password || url.search || url.hash || url.pathname !== "/") fail(503, "cloud_api_unavailable", "Cloud API is unavailable");
+  if (legacyBootstrap) {
+    if (source?.AGENTPASS_ALLOW_LEGACY_SESSION_BOOTSTRAP !== "true" || !["development", "test"].includes(source?.NODE_ENV)) fail(503, "legacy_session_bootstrap_disabled", "Legacy session bootstrap is disabled");
+    if (typeof token !== "string" || token.length < 1 || token.length > 8192 || hasControl(token) || operators.length < 1 || operators.length > 100 || new Set(operators).size !== operators.length || operators.some((item) => !ID.test(item))) fail(503, "cloud_api_unavailable", "Cloud API is unavailable");
+  }
   const rawTimeout = source?.AGENTPASS_CLOUD_TIMEOUT_MS;
   const timeoutMs = typeof rawTimeout === "string" && /^\d+$/.test(rawTimeout) ? Math.max(1000, Math.min(30_000, Number(rawTimeout))) : DEFAULT_TIMEOUT_MS;
-  return { url, token, timeoutMs, operatorUserIds: new Set(operators) };
+  return { url, ...(legacyBootstrap ? { token, operatorUserIds: new Set(operators) } : {}), timeoutMs };
 }
 
 function json(status, body, extra) {
@@ -227,6 +234,32 @@ function hasControl(value) {
   }
   return false;
 }
+function normalizeSessionCookie(cookie, { required = false } = {}) {
+  if (cookie === null) {
+    if (required) fail(401, "session_required", "An active session is required");
+    return null;
+  }
+  if (typeof cookie !== "string" || cookie.length < 1 || cookie.length > 8192 || hasControl(cookie)) fail(400, "invalid_cookie", "The session cookie is invalid");
+  let token;
+  for (const part of cookie.split(";")) {
+    const separator = part.indexOf("=");
+    if (separator < 1) {
+      if (part.trim() !== "") fail(400, "invalid_cookie", "The session cookie is invalid");
+      continue;
+    }
+    const name = part.slice(0, separator).trim();
+    const value = part.slice(separator + 1).trim();
+    if (name !== SESSION_COOKIE_NAME) continue;
+    if (token !== undefined || !isOpaqueToken(value)) fail(400, "invalid_cookie", "The session cookie is invalid");
+    token = value;
+  }
+  if (token === undefined) {
+    if (required) fail(401, "session_required", "An active session is required");
+    return null;
+  }
+  return `${SESSION_COOKIE_NAME}=${token}`;
+}
+function isOpaqueToken(value) { return typeof value === "string" && OPAQUE_TOKEN.test(value); }
 function resolveRoute(pathname) {
   const exact = ROUTES.get(pathname);
   if (exact) return exact;
@@ -239,7 +272,7 @@ function resolveRoute(pathname) {
   if (id !== match[2]) return undefined;
   if (match[1] === "passkeys" && isCredentialId(id) && !match[3]) return { cloudPath: `/api/auth/management/credentials/${id}`, methods: ["PATCH"], requireCookie: true, requireCsrf: true, body: "rename", allowIfMatch: true };
   if (match[1] === "passkeys" && isCredentialId(id) && match[3]) return { cloudPath: `/api/auth/management/credentials/${id}/revoke`, methods: ["POST"], requireCookie: true, requireCsrf: true, requireRecentAuth: true, body: "version", allowIfMatch: true };
-  if (match[1] === "sessions" && isUuid(id) && match[3]) return { cloudPath: `/api/auth/management/sessions/${id.toLowerCase()}/revoke`, methods: ["POST"], requireCookie: true, requireCsrf: true, allowRecentAuth: true, body: "version", allowIfMatch: true, allowSetCookie: true };
+  if (match[1] === "sessions" && isUuid(id) && match[3]) return { cloudPath: `/api/auth/management/sessions/${id.toLowerCase()}/revoke`, methods: ["POST"], requireCookie: true, requireCsrf: true, allowRecentAuth: true, body: "version", allowIfMatch: true, allowSetCookie: true, clearCookieOnly: true };
   return undefined;
 }
 function resolveOrganizationRoute(pathname) {

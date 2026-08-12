@@ -3,7 +3,7 @@ import test from "node:test";
 
 import { createHumanAuthBridge } from "../lib/human-auth-api.mjs";
 
-const env = Object.freeze({ AGENTPASS_CLOUD_API_URL: "https://cloud.example.test", AGENTPASS_CLOUD_TOKEN: "server-only-token", AGENTPASS_OPERATOR_USER_IDS: "operator-1" });
+const env = Object.freeze({ AGENTPASS_CLOUD_API_URL: "https://cloud.example.test" });
 const organizationId = "11111111-1111-4111-8111-111111111111";
 const memberId = "22222222-2222-4222-8222-222222222222";
 const invitationId = "33333333-3333-4333-8333-333333333333";
@@ -51,7 +51,8 @@ test("forwards only the exact Organization API allow-list with bounded query and
     const call = calls.at(-1);
     assert.equal(call.url, cloudUrl);
     assert.equal(call.init.method, method);
-    assert.equal(call.init.headers.get("authorization"), "Bearer server-only-token");
+    assert.equal(call.init.headers.has("authorization"), false);
+    assert.equal(call.init.headers.has("agentpass-console-user-id"), false);
     assert.equal(call.init.headers.get("cookie"), cookie);
     assert.equal(call.init.headers.get("agentpass-csrf"), csrf);
     assert.equal(call.init.headers.get("idempotency-key"), headers["idempotency-key"] ?? null);

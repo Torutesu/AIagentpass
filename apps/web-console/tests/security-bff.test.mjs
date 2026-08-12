@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { createHumanAuthBridge } from "../lib/human-auth-api.mjs";
 
-const env = Object.freeze({ AGENTPASS_CLOUD_API_URL: "https://cloud.example.test", AGENTPASS_CLOUD_TOKEN: "server-only-token", AGENTPASS_OPERATOR_USER_IDS: "operator-1" });
+const env = Object.freeze({ AGENTPASS_CLOUD_API_URL: "https://cloud.example.test" });
 const cookie = "__Host-agentpass_session=" + "A".repeat(43);
 const csrf = "B".repeat(43);
 const credentialId = "A".repeat(22);
@@ -25,7 +25,8 @@ test("maps Security BFF paths to Cloud management paths and forwards session con
   assert.equal(response.status, 200);
   assert.equal(calls[0].url, "https://cloud.example.test/api/auth/management/credentials");
   assert.equal(calls[0].init.method, "GET");
-  assert.equal(calls[0].init.headers.get("authorization"), "Bearer server-only-token");
+  assert.equal(calls[0].init.headers.has("authorization"), false);
+  assert.equal(calls[0].init.headers.has("agentpass-console-user-id"), false);
   assert.equal(calls[0].init.headers.get("cookie"), cookie);
   assert.equal(calls[0].init.headers.get("agentpass-csrf"), csrf);
 
@@ -54,6 +55,13 @@ test("forwards only an allow-listed session clear cookie", async () => {
   const response = await api.handle(request(`/api/auth/security/sessions/${sessionId}/revoke`, { method: "POST", body: { expected_version: 1 }, headers: { cookie, "agentpass-csrf": csrf } }));
   assert.equal(response.status, 200);
   assert.equal(response.headers.get("set-cookie"), "__Host-agentpass_session=; Path=/; HttpOnly; Secure; SameSite=Strict; Max-Age=0");
+});
+
+test("rejects session replacement cookies from a revoke response", async () => {
+  const api = bridge(async () => new Response(JSON.stringify({ session: {} }), { headers: { "content-type": "application/json", "set-cookie": `__Host-agentpass_session=${"C".repeat(43)}; Path=/; HttpOnly; Secure; SameSite=Strict; Max-Age=3600` } }));
+  const response = await api.handle(request(`/api/auth/security/sessions/${sessionId}/revoke`, { method: "POST", body: { expected_version: 1 }, headers: { cookie, "agentpass-csrf": csrf } }));
+  assert.equal(response.status, 502);
+  assert.equal(response.headers.get("set-cookie"), null);
 });
 
 test("forwards recent auth only to protected Security mutations", async () => {

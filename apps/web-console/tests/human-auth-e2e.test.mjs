@@ -31,7 +31,7 @@ test("browser-shaped requests cross Console BFF and Cloud Human Auth without exp
   const address = cloud.address();
   const serviceToken = "server-only-cloud-token";
   const bridge = createHumanAuthBridge({
-    env: { AGENTPASS_CLOUD_API_URL: `http://127.0.0.1:${address.port}`, AGENTPASS_CLOUD_TOKEN: serviceToken, AGENTPASS_OPERATOR_USER_IDS: "operator-1", AGENTPASS_ALLOW_INSECURE_LOOPBACK_CLOUD_API: "true" },
+    env: { NODE_ENV: "test", AGENTPASS_ALLOW_LEGACY_SESSION_BOOTSTRAP: "true", AGENTPASS_CLOUD_API_URL: `http://127.0.0.1:${address.port}`, AGENTPASS_CLOUD_TOKEN: serviceToken, AGENTPASS_OPERATOR_USER_IDS: "operator-1", AGENTPASS_ALLOW_INSECURE_LOOPBACK_CLOUD_API: "true" },
     getSiwcUser: async () => ({ userId: "operator-1" }),
   });
   const browser = (path, body, headers = {}) => new Request(`https://console.example.test${path}`, { method: "POST", headers: { origin: "https://console.example.test", "content-type": "application/json", ...headers }, body: JSON.stringify(body) });

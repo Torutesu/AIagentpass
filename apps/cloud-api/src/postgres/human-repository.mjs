@@ -5,6 +5,8 @@ const HEX_32 = /^[0-9a-f]{64}$/;
 const PROVIDER = /^[a-z][a-z0-9._-]{0,63}$/;
 const SUBJECT = /^[^\u0000-\u001f\u007f]{1,512}$/u;
 const CREDENTIAL_TRANSPORTS = new Set(["ble", "cable", "hybrid", "internal", "nfc", "smart-card", "usb"]);
+const DEFAULT_MANAGEMENT_PAGE_SIZE = 25;
+const MAX_MANAGEMENT_PAGE_SIZE = 100;
 
 export function createPostgresHumanRepository({ client } = {}) {
   if (!client || typeof client.query !== "function") throw new TypeError("database client is invalid");
@@ -66,11 +68,13 @@ export function createPostgresHumanRepository({ client } = {}) {
     const memberId = uuid(input?.member_id ?? input?.memberId);
     const organizationValue = input?.organization_id ?? input?.organizationId;
     const organizationId = organizationValue === undefined ? undefined : uuid(organizationValue);
+    const paging = keysetPagination(input, DEFAULT_MANAGEMENT_PAGE_SIZE, "session");
     const params = [memberId];
     const predicates = [
       "s.member_id=$1",
       "m.organization_id=s.organization_id",
       "m.member_id=s.member_id",
+      "m.id=s.membership_id",
       "m.status='active'",
       "m.role=s.role"
     ];
@@ -78,7 +82,12 @@ export function createPostgresHumanRepository({ client } = {}) {
       params.push(organizationId);
       predicates.push(`s.organization_id=$${params.length}`);
     }
-    const result = await client.query(`SELECT s.id AS session_id,s.member_id,s.organization_id,s.role,s.version,s.created_at,s.expires_at,s.last_seen_at,s.idle_expires_at,s.recent_auth_at,s.revoked_at,s.revoke_reason FROM human_sessions s JOIN memberships m ON ${predicates.slice(1).join(" AND ")} WHERE ${predicates[0]} ORDER BY s.created_at ASC,s.id ASC LIMIT 100`, params);
+    const after = paging.after
+      ? ` AND (date_trunc('milliseconds',s.created_at),s.id) > ($${params.length + 1},$${params.length + 2})`
+      : "";
+    if (paging.after) params.push(paging.after.createdAt, paging.after.id);
+    params.push(paging.limit + 1);
+    const result = await client.query(`SELECT s.id AS session_id,s.member_id,s.organization_id,s.role,s.version,s.created_at,s.expires_at,s.last_seen_at,s.idle_expires_at,s.recent_auth_at,s.revoked_at,s.revoke_reason FROM human_sessions s JOIN memberships m ON ${predicates.slice(1).join(" AND ")} WHERE ${predicates[0]}${after} ORDER BY date_trunc('milliseconds',s.created_at) ASC,s.id ASC LIMIT $${params.length}`, params);
     return (result.rows ?? []).map(safeSessionRow);
   }
 
@@ -160,7 +169,15 @@ export function createPostgresHumanRepository({ client } = {}) {
 
   async function listCredentialMetadataForSession(input) {
     const scope = credentialScope(input);
-    const result = await client.query(`SELECT c.id,c.member_id,c.label,c.transports,c.backup_eligible,c.backup_state,c.created_at,c.last_used_at,c.revoked_at,c.version FROM webauthn_credentials c JOIN human_sessions s ON s.member_id=c.member_id JOIN memberships m ON m.organization_id=s.organization_id AND m.member_id=s.member_id AND m.id=s.membership_id WHERE s.id=$1 AND s.member_id=$2 AND s.organization_id=$3 AND s.revoked_at IS NULL AND s.expires_at>clock_timestamp() AND (s.idle_expires_at IS NULL OR s.idle_expires_at>clock_timestamp()) AND m.status='active' AND m.role=s.role ORDER BY c.created_at ASC,c.id ASC LIMIT 64`, [scope.sessionId, scope.memberId, scope.organizationId]);
+    const paging = keysetPagination(input, DEFAULT_MANAGEMENT_PAGE_SIZE, "credential");
+    const params = [scope.sessionId, scope.memberId, scope.organizationId];
+    const after = paging.after
+      ? ` AND EXISTS (SELECT 1 FROM webauthn_credentials anchor WHERE anchor.member_id=$2 AND ${credentialCursorIdSql("anchor")}=$5)
+        AND (date_trunc('milliseconds',c.created_at),c.id) > (SELECT date_trunc('milliseconds',anchor.created_at),anchor.id FROM webauthn_credentials anchor WHERE anchor.member_id=$2 AND date_trunc('milliseconds',anchor.created_at)=$4 AND ${credentialCursorIdSql("anchor")}=$5 LIMIT 1)`
+      : "";
+    if (paging.after) params.push(paging.after.createdAt, paging.after.id);
+    params.push(paging.limit + 1);
+    const result = await client.query(`SELECT c.id,c.member_id,c.label,c.transports,c.backup_eligible,c.backup_state,c.created_at,c.last_used_at,c.revoked_at,c.version FROM webauthn_credentials c JOIN human_sessions s ON s.member_id=c.member_id JOIN memberships m ON m.organization_id=s.organization_id AND m.member_id=s.member_id AND m.id=s.membership_id WHERE s.id=$1 AND s.member_id=$2 AND s.organization_id=$3 AND s.revoked_at IS NULL AND s.expires_at>clock_timestamp() AND (s.idle_expires_at IS NULL OR s.idle_expires_at>clock_timestamp()) AND m.status='active' AND m.role=s.role${after} ORDER BY date_trunc('milliseconds',c.created_at) ASC,c.id ASC LIMIT $${params.length}`, params);
     return (result.rows ?? []).map(safeCredentialRow);
   }
 
@@ -337,6 +354,31 @@ function credentialRow(row) { return { id: credentialId(row.id), member_id: uuid
 function safeCredentialRow(row) { return { id: credentialId(row.id), member_id: uuid(String(row.member_id)), label: credentialLabel(row.label), transports: credentialTransports(row.transports), backup_eligible: strictBoolean(row.backup_eligible, "backup_eligible"), backup_state: strictBoolean(row.backup_state, "backup_state"), created_at: row.created_at, last_used_at: row.last_used_at ?? null, revoked_at: row.revoked_at ?? null, version: positiveInteger(row.version) }; }
 function safeSessionRow(row) { const sessionId = uuid(String(row.session_id ?? row.id)); const memberId = uuid(String(row.member_id)); const organizationId = uuid(String(row.organization_id)); return { session_id: sessionId, member_id: memberId, organization_id: organizationId, role: membershipRole(row.role), version: positiveInteger(row.version ?? 1), created_at: row.created_at, expires_at: row.expires_at, last_seen_at: row.last_seen_at ?? null, idle_expires_at: row.idle_expires_at ?? null, recent_auth_at: row.recent_auth_at ?? null, revoked_at: row.revoked_at ?? null, revoke_reason: row.revoke_reason ?? null, status: row.revoked_at ? "revoked" : "active" }; }
 function credentialScope(input) { return { sessionId: uuid(input?.session_id ?? input?.sessionId), memberId: uuid(input?.member_id ?? input?.memberId), organizationId: uuid(input?.organization_id ?? input?.organizationId) }; }
+function keysetPagination(input, defaultLimit, resource) {
+  const rawLimit = input?.limit;
+  const limit = rawLimit === undefined ? defaultLimit : pageLimit(rawLimit);
+  const hasCreatedAt = input?.after_created_at !== undefined;
+  const hasId = input?.after_id !== undefined;
+  if (hasCreatedAt !== hasId) throw new TypeError(`${resource} cursor position is incomplete`);
+  if (!hasCreatedAt) return { limit, after: undefined };
+  return {
+    limit,
+    after: {
+      createdAt: cursorTimestamp(input.after_created_at),
+      id: uuid(input.after_id)
+    }
+  };
+}
+function pageLimit(value) { if (!Number.isSafeInteger(value) || value < 1 || value > MAX_MANAGEMENT_PAGE_SIZE) throw new TypeError("management page limit is invalid"); return value; }
+function cursorTimestamp(value) {
+  const date = value instanceof Date ? new Date(value.getTime()) : new Date(value);
+  if (!Number.isFinite(date.getTime())) throw new TypeError("cursor timestamp is invalid");
+  return date.toISOString();
+}
+function credentialCursorIdSql(alias) {
+  const digest = `encode(sha256(${alias}.id),'hex')`;
+  return `(substr(${digest},1,8)||'-'||substr(${digest},9,4)||'-4'||substr(${digest},14,3)||'-8'||substr(${digest},18,3)||'-'||substr(${digest},21,12))::uuid`;
+}
 function lastCredentialError() { const error = new Error("cannot revoke the last active WebAuthn credential"); error.code = "ERR_LAST_ACTIVE_CREDENTIAL"; return error; }
 function versionConflict() { const error = new Error("resource version conflict"); error.code = "ERR_VERSION_CONFLICT"; return error; }
 function normalizeLastCredentialError(error) { return error?.code === "23514" && (error.constraint === "webauthn_credentials_last_active" || /last active WebAuthn credential/i.test(error.message ?? "")) ? lastCredentialError() : error; }

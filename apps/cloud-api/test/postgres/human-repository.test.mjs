@@ -172,7 +172,8 @@ test("safe session listings never select or return bearer digests", async () => 
   }]);
   assert.doesNotMatch(calls[0].text, /token_hash|csrf_token_hash/);
   assert.match(calls[0].text, /m\.status='active'/);
-  assert.match(calls[0].text, /LIMIT 100/);
+  assert.match(calls[0].text, /ORDER BY date_trunc\('milliseconds',s\.created_at\) ASC,s\.id ASC LIMIT \$3/);
+  assert.deepEqual(calls[0].params, [ids.member, ids.org, 26]);
 });
 
 test("credential management metadata is active-session/member/org scoped and omits key material", async () => {
@@ -188,6 +189,23 @@ test("credential management metadata is active-session/member/org scoped and omi
   assert.match(calls[0].text, /s\.member_id=\$2/);
   assert.match(calls[0].text, /s\.organization_id=\$3/);
   assert.match(calls[0].text, /m\.id=s\.membership_id/);
+});
+
+test("management lists use limit+1 millisecond keysets and a SHA-256 credential anchor", async () => {
+  const calls = [];
+  const repo = createPostgresHumanRepository({ client: { async query(text, params) { calls.push({ text, params }); return { rows: [], rowCount: 0 }; } } });
+  const after = "2026-08-12T00:00:00.000Z";
+  const anchor = "66666666-6666-4666-8666-666666666666";
+  await repo.listSafeSessions({ member_id: ids.member, organization_id: ids.org, limit: 7, after_created_at: after, after_id: ids.session });
+  assert.match(calls[0].text, /\(date_trunc\('milliseconds',s\.created_at\),s\.id\) > \(\$3,\$4\)/);
+  assert.match(calls[0].text, /LIMIT \$5/);
+  assert.deepEqual(calls[0].params, [ids.member, ids.org, after, ids.session, 8]);
+
+  await repo.listCredentialMetadataForSession({ session_id: ids.session, member_id: ids.member, organization_id: ids.org, limit: 9, after_created_at: after, after_id: anchor });
+  assert.match(calls[1].text, /encode\(sha256\(anchor\.id\),'hex'\)/);
+  assert.match(calls[1].text, /date_trunc\('milliseconds',c\.created_at\),c\.id/);
+  assert.match(calls[1].text, /LIMIT \$6/);
+  assert.deepEqual(calls[1].params, [ids.session, ids.member, ids.org, after, anchor, 10]);
 });
 
 test("credential label update uses an advisory lock and expected version", async () => {

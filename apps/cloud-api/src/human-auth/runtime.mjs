@@ -54,7 +54,7 @@ export function createHumanAuthRuntime({ postgresRuntime, tokenRecords, origin, 
     now
   });
   const registrationApi = createWebAuthnRegistrationHttpApi({ humanSession, registrationService, origin, basePath: "/api/auth" });
-  const managementRepository = createPostgresHumanManagementRepository({ repository, now });
+  const managementRepository = createPostgresHumanManagementRepository({ repository, cursorCodec, now });
   const managementApi = createHumanManagementHttpApi({ humanSession, recentAuthService, repository: managementRepository, origin, now });
   const organizationService = createPostgresOrganizationService({ repository: organizationRepository, cursorCodec, now });
   const organizationApi = createHumanOrganizationsHttpApi({ humanSession, recentAuthService, organizationService, origin, now });

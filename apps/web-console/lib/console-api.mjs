@@ -1,6 +1,10 @@
 const MAX_BYTES = 256 * 1024;
 const DEFAULT_TIMEOUT_MS = 8_000;
 const MAX_TIMEOUT_MS = 30_000;
+const MAX_CURSOR_LENGTH = 512;
+const ACTIVITY_WINDOW_LIMIT = 500;
+const ACTIVITY_CURSOR_VERSION = 1;
+const ACTIVITY_CURSOR_PATTERN = /^[A-Za-z0-9_-]{1,512}\.[A-Za-z0-9_-]{1,512}\.[A-Za-z0-9_-]{1,512}$/;
 const UUID_OR_OPAQUE_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 const IDEMPOTENCY_KEY = /^[A-Za-z0-9][A-Za-z0-9._:-]{7,127}$/;
 const SAFE_ERROR_CODE = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$/;
@@ -132,7 +136,7 @@ function ensureSameOrigin(request) {
 }
 
 function parseQuery(params, method) {
-  const allowed = new Set(["resource", "operation", "device_id", "limit"]);
+  const allowed = new Set(["resource", "operation", "device_id", "limit", "cursor"]);
   const seen = new Set();
   for (const [key] of params) {
     if (!allowed.has(key) || seen.has(key)) {
@@ -164,11 +168,19 @@ function parseQuery(params, method) {
     throw new ConsoleApiError(400, "invalid_query", "Query parameters are invalid");
   }
 
-  return { resource, operation, deviceId, limit };
+  const cursor = params.get("cursor");
+  if (cursor !== null && (!ACTIVITY_CURSOR_PATTERN.test(cursor) || cursor.length > MAX_CURSOR_LENGTH)) {
+    throw new ConsoleApiError(400, "invalid_query", "Query parameters are invalid");
+  }
+
+  return { resource, operation, deviceId, limit, cursor };
 }
 
 async function getResource(query, config, fetchImpl, options) {
   const resource = normalizeResource(query.resource);
+  if (query.cursor !== null && !["summary", "audit", "activity"].includes(resource)) {
+    throw new ConsoleApiError(400, "invalid_query", "Query parameters are invalid");
+  }
   if (resource === "summary") return getSummary(query, config, fetchImpl, options);
   if (resource === "organization") return getSimple(query, "organization", config, fetchImpl, options);
   if (resource === "devices") return getSimple(query, "devices", config, fetchImpl, options);
@@ -180,8 +192,11 @@ async function getResource(query, config, fetchImpl, options) {
   if (resource === "audit-health") return getSimple(query, "audit-health", config, fetchImpl, options);
 
   if (resource === "audit" || resource === "activity" || resource === "health") {
-    const audit = await getAudit(query, config, fetchImpl, options);
-    if (resource === "activity") return { activity: audit.activity };
+    if (resource === "health" && query.cursor !== null) {
+      throw new ConsoleApiError(400, "invalid_query", "Query parameters are invalid");
+    }
+    const audit = await getAudit(query, config, fetchImpl, options, undefined, resource);
+    if (resource === "activity") return { activity: audit.activity, next_cursor: audit.next_cursor };
     if (resource === "health") return { health: audit.health };
     return audit;
   }
@@ -196,7 +211,7 @@ async function getSummary(query, config, fetchImpl, options) {
     cloudRequest("GET", "/agents", undefined, config, fetchImpl, options),
     cloudRequest("GET", "/policies", undefined, config, fetchImpl, options),
   ]);
-  const audit = await getAudit({ ...query, deviceId: query.deviceId }, config, fetchImpl, options, devices);
+  const audit = await getAudit({ ...query, deviceId: query.deviceId }, config, fetchImpl, options, devices, "summary");
 
   return {
     organization: organization.organization,
@@ -206,6 +221,7 @@ async function getSummary(query, config, fetchImpl, options) {
     audit: {
       health: audit.health,
       activity: audit.activity,
+      next_cursor: audit.next_cursor,
     },
   };
 }
@@ -232,7 +248,8 @@ function queryLimit(query) {
   return Number.isSafeInteger(query?.limit) && query.limit >= 1 && query.limit <= 500 ? query.limit : 100;
 }
 
-async function getAudit(query, config, fetchImpl, options, devicesPayload = undefined) {
+async function getAudit(query, config, fetchImpl, options, devicesPayload = undefined, cursorResource = "audit") {
+  const cursor = query.cursor === null ? null : await decodeActivityCursor(query.cursor, config, cursorResource, query.deviceId);
   let devices = devicesPayload;
   if (!devices) {
     devices = await cloudRequest("GET", "/devices", undefined, config, fetchImpl, options);
@@ -241,14 +258,25 @@ async function getAudit(query, config, fetchImpl, options, devicesPayload = unde
   const deviceIds = query.deviceId
     ? [query.deviceId]
     : Array.isArray(devices.devices)
-      ? devices.devices.map((device) => device?.device_id).filter((id) => typeof id === "string")
+      ? devices.devices.map((device) => device?.device_id).filter((id) => typeof id === "string").sort()
       : [];
+
+  const requestedScope = query.deviceId ?? "all";
+  if (cursor && cursor.scope !== requestedScope) {
+    throw new ConsoleApiError(400, "invalid_cursor", "Cursor is invalid");
+  }
+  if (cursor) {
+    const scopeDigest = await digestText(JSON.stringify({ scope: requestedScope, device_ids: [...deviceIds].sort() }));
+    if (scopeDigest !== cursor.scope_digest) {
+      throw new ConsoleApiError(409, "activity_cursor_stale", "Activity cursor is no longer valid");
+    }
+  }
 
   const [responses, healthPayload] = await Promise.all([
     Promise.all(deviceIds.map((deviceId) =>
       cloudRequest(
         "GET",
-        `/audit/events?device_id=${encodeURIComponent(deviceId)}&limit=${query.limit}`,
+        `/audit/events?device_id=${encodeURIComponent(deviceId)}&limit=${ACTIVITY_WINDOW_LIMIT}`,
         undefined,
         config,
         fetchImpl,
@@ -257,28 +285,183 @@ async function getAudit(query, config, fetchImpl, options, devicesPayload = unde
     )),
     cloudRequest("GET", "/audit/health", undefined, config, fetchImpl, options),
   ]);
-  const activity = responses.flatMap((payload, index) =>
-    (Array.isArray(payload.events) ? payload.events : []).map((event) => ({
-      ...event,
-      device_id: event.device_id ?? deviceIds[index],
-    })),
-  );
-  activity.sort((left, right) => String(left.device_timestamp ?? "").localeCompare(String(right.device_timestamp ?? "")));
+  const streams = responses.map((payload, index) => normalizeActivityStream(payload, deviceIds[index]));
+  const hasSaturatedStream = streams.some((stream) => stream.saturated);
+  // Blocker: GET /v1/organizations/{organization_id}/audit/events currently
+  // accepts only device_id and limit; it has no cursor/before/after parameter
+  // and its response ordering is not a public pagination contract. A saturated
+  // stream can hide older events, so do not emit any page or cursor that would
+  // imply that traversal is complete.
+  if (hasSaturatedStream) {
+    throw new ConsoleApiError(409, "activity_cursor_requires_upstream_cursor", "Activity pagination requires upstream cursor support");
+  }
+  const records = streams.flatMap((stream) => stream.records);
+  records.sort((left, right) => compareActivityTuple(left.tuple, right.tuple));
+  const visibleRecords = cursor
+    ? records.filter((record) => compareActivityTuple(record.tuple, cursor.position) < 0)
+    : records;
+  visibleRecords.sort((left, right) => compareActivityTuple(right.tuple, left.tuple));
+  const pageRecords = visibleRecords.slice(0, query.limit + 1);
+  const hasMore = pageRecords.length > query.limit;
+  const activity = pageRecords.slice(0, query.limit).map((record) => record.value);
+  const nextCursor = hasMore
+    ? await encodeActivityCursor({
+      config,
+      resource: cursorResource,
+      scope: requestedScope,
+      scopeDigest: await digestText(JSON.stringify({ scope: requestedScope, device_ids: [...deviceIds].sort() })),
+      position: pageRecords[query.limit - 1].tuple,
+    })
+    : null;
 
   const authoritativeHealth = new Map((Array.isArray(healthPayload.health) ? healthPayload.health : []).map((item) => [item.device_id, item]));
   const health = deviceIds.map((deviceId, index) => {
-    const events = Array.isArray(responses[index]?.events) ? responses[index].events : [];
-    const last = events[events.length - 1] ?? null;
+    const events = streams[index].records;
+    const last = events.at(-1)?.value ?? null;
     return {
       device_id: deviceId,
       ...(authoritativeHealth.get(deviceId) ?? { chain_status: "unknown", gap_count: 0, last_event_id: null, last_hash: null }),
       event_count: events.length,
-      last_event_id: authoritativeHealth.get(deviceId)?.last_event_id ?? last?.event_id ?? null,
-      last_hash: authoritativeHealth.get(deviceId)?.last_hash ?? last?.event_hash ?? null,
+      last_event_id: authoritativeHealth.get(deviceId)?.last_event_id ?? last?.event_id ?? last?.event?.event_id ?? null,
+      last_hash: authoritativeHealth.get(deviceId)?.last_hash ?? last?.event_hash ?? last?.event?.event_hash ?? null,
     };
   });
 
-  return { health, activity };
+  return { health, activity, next_cursor: nextCursor };
+}
+
+function normalizeActivityStream(payload, deviceId) {
+  if (!payload || typeof payload !== "object" || Array.isArray(payload) || !Array.isArray(payload.events)) {
+    throw new ConsoleApiError(502, "cloud_api_invalid_response", "Cloud API response was invalid");
+  }
+  const events = payload.events;
+  if (events.length > ACTIVITY_WINDOW_LIMIT) {
+    throw new ConsoleApiError(502, "cloud_api_invalid_response", "Cloud API response was invalid");
+  }
+  const seen = new Set();
+  const records = events.map((event) => {
+    if (!event || typeof event !== "object" || Array.isArray(event)) {
+      throw new ConsoleApiError(502, "cloud_api_invalid_response", "Cloud API response was invalid");
+    }
+    const source = event.event && typeof event.event === "object" && !Array.isArray(event.event) ? event.event : event;
+    const eventDeviceId = event.device_id ?? source.device_id ?? deviceId;
+    const eventId = event.event_id ?? source.event_id;
+    const timestamp = normalizeActivityTimestamp(source.device_timestamp ?? event.device_timestamp);
+    if (eventDeviceId !== deviceId || typeof eventDeviceId !== "string" || !UUID_OR_OPAQUE_ID.test(eventDeviceId)
+      || typeof eventId !== "string" || !UUID_OR_OPAQUE_ID.test(eventId)) {
+      throw new ConsoleApiError(502, "cloud_api_invalid_response", "Cloud API response was invalid");
+    }
+    const tuple = { t: timestamp, d: eventDeviceId, e: eventId };
+    const key = JSON.stringify(tuple);
+    if (seen.has(key)) throw new ConsoleApiError(502, "cloud_api_invalid_response", "Cloud API response was invalid");
+    seen.add(key);
+    return { value: { ...event, device_id: eventDeviceId }, tuple };
+  });
+  records.sort((left, right) => compareActivityTuple(left.tuple, right.tuple));
+  return Object.freeze({ deviceId, records, saturated: events.length === ACTIVITY_WINDOW_LIMIT });
+}
+
+function normalizeActivityTimestamp(value) {
+  if (typeof value !== "string" || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?Z$/.test(value)) {
+    throw new ConsoleApiError(502, "cloud_api_invalid_response", "Cloud API response was invalid");
+  }
+  const timestamp = Date.parse(value);
+  if (!Number.isFinite(timestamp)) throw new ConsoleApiError(502, "cloud_api_invalid_response", "Cloud API response was invalid");
+  return new Date(timestamp).toISOString();
+}
+
+function compareActivityTuple(left, right) {
+  const timestamp = left.t.localeCompare(right.t);
+  if (timestamp !== 0) return timestamp;
+  const device = left.d.localeCompare(right.d);
+  if (device !== 0) return device;
+  return left.e.localeCompare(right.e);
+}
+
+async function encodeActivityCursor({ config, resource, scope, scopeDigest, position }) {
+  const payload = JSON.stringify({ v: ACTIVITY_CURSOR_VERSION, r: resource, o: config.organizationId, s: scope, d: scopeDigest, p: position });
+  const encodedPayload = base64UrlEncode(new TextEncoder().encode(payload));
+  const signature = await signActivityCursor(encodedPayload, config);
+  const cursor = `v1.${encodedPayload}.${signature}`;
+  if (cursor.length > MAX_CURSOR_LENGTH) throw new ConsoleApiError(502, "activity_cursor_unavailable", "Activity cursor is unavailable");
+  return cursor;
+}
+
+async function decodeActivityCursor(cursor, config, resource, deviceId) {
+  if (cursor === null) return null;
+  if (typeof cursor !== "string" || !ACTIVITY_CURSOR_PATTERN.test(cursor) || cursor.length > MAX_CURSOR_LENGTH) {
+    throw new ConsoleApiError(400, "invalid_cursor", "Cursor is invalid");
+  }
+  const [version, encodedPayload, signature] = cursor.split(".");
+  if (version !== "v1" || !(await verifyActivityCursor(encodedPayload, signature, config))) {
+    throw new ConsoleApiError(400, "invalid_cursor", "Cursor is invalid");
+  }
+  let payload;
+  try {
+    const bytes = base64UrlDecode(encodedPayload);
+    if (bytes.byteLength > 2048) throw new Error("cursor payload too large");
+    payload = JSON.parse(new TextDecoder().decode(bytes));
+  } catch {
+    throw new ConsoleApiError(400, "invalid_cursor", "Cursor is invalid");
+  }
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)
+    || Object.keys(payload).sort().join(",") !== "d,o,p,r,s,v"
+    || Object.keys(payload.p ?? {}).sort().join(",") !== "d,e,t"
+    || !Number.isInteger(payload.v) || payload.v !== ACTIVITY_CURSOR_VERSION
+    || typeof payload.r !== "string" || typeof payload.o !== "string" || typeof payload.s !== "string"
+    || typeof payload.d !== "string" || !payload.p || typeof payload.p !== "object" || Array.isArray(payload.p)
+    || typeof payload.p.t !== "string" || typeof payload.p.d !== "string" || typeof payload.p.e !== "string"
+    || !UUID_OR_OPAQUE_ID.test(payload.o) || !UUID_OR_OPAQUE_ID.test(payload.p.d) || !UUID_OR_OPAQUE_ID.test(payload.p.e)
+    || (payload.s !== "all" && !UUID_OR_OPAQUE_ID.test(payload.s))
+    || !/^[A-Za-z0-9_-]{43}$/.test(payload.d)
+    || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/.test(payload.p.t)) {
+    throw new ConsoleApiError(400, "invalid_cursor", "Cursor is invalid");
+  }
+  if (payload.r !== resource || payload.o !== config.organizationId || (deviceId !== null && payload.s !== deviceId)) {
+    throw new ConsoleApiError(400, "invalid_cursor", "Cursor is invalid");
+  }
+  return { resource: payload.r, scope: payload.s, scope_digest: payload.d, position: payload.p };
+}
+
+async function signActivityCursor(encodedPayload, config) {
+  const key = await importActivityCursorKey(config);
+  const signature = await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(encodedPayload));
+  return base64UrlEncode(new Uint8Array(signature));
+}
+
+async function verifyActivityCursor(encodedPayload, encodedSignature, config) {
+  try {
+    const key = await importActivityCursorKey(config);
+    return await crypto.subtle.verify("HMAC", key, base64UrlDecode(encodedSignature), new TextEncoder().encode(encodedPayload));
+  } catch {
+    return false;
+  }
+}
+
+async function importActivityCursorKey(config) {
+  if (!globalThis.crypto?.subtle) throw new ConsoleApiError(503, "activity_cursor_unavailable", "Activity cursor is unavailable");
+  const material = base64UrlDecode(config.cursorSecret);
+  return crypto.subtle.importKey("raw", material, { name: "HMAC", hash: "SHA-256" }, false, ["sign", "verify"]);
+}
+
+async function digestText(value) {
+  if (!globalThis.crypto?.subtle) throw new ConsoleApiError(503, "activity_cursor_unavailable", "Activity cursor is unavailable");
+  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(value));
+  return base64UrlEncode(new Uint8Array(digest));
+}
+
+function base64UrlEncode(bytes) {
+  let binary = "";
+  for (const byte of bytes) binary += String.fromCharCode(byte);
+  return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/g, "");
+}
+
+function base64UrlDecode(value) {
+  if (typeof value !== "string" || !/^[A-Za-z0-9_-]+$/.test(value)) throw new Error("invalid base64url");
+  if (value.length % 4 === 1) throw new Error("invalid base64url length");
+  const padded = value.replace(/-/g, "+").replace(/_/g, "/") + "=".repeat((4 - (value.length % 4)) % 4);
+  const binary = atob(padded);
+  return Uint8Array.from(binary, (character) => character.charCodeAt(0));
 }
 
 async function postOperation(query, body, idempotencyKey, config, fetchImpl, options, recentAuth) {
@@ -644,9 +827,10 @@ async function readConfig(injected) {
   const url = source?.AGENTPASS_CLOUD_API_URL;
   const organizationId = source?.AGENTPASS_ORGANIZATION_ID;
   const token = source?.AGENTPASS_CLOUD_TOKEN;
+  const cursorSecret = source?.AGENTPASS_CONSOLE_CURSOR_SECRET;
   const rawOperatorUserIds = source?.AGENTPASS_OPERATOR_USER_IDS;
   const operatorUserIds = typeof rawOperatorUserIds === "string" ? rawOperatorUserIds.split(",").map((value) => value.trim()).filter(Boolean) : [];
-  if (typeof url !== "string" || typeof organizationId !== "string" || typeof token !== "string" || !url || !UUID_OR_OPAQUE_ID.test(organizationId) || !token || token.length > 8192 || hasControlCharacters(token) || operatorUserIds.length < 1 || operatorUserIds.length > 100 || new Set(operatorUserIds).size !== operatorUserIds.length || operatorUserIds.some((value) => !UUID_OR_OPAQUE_ID.test(value))) {
+  if (typeof url !== "string" || typeof organizationId !== "string" || typeof token !== "string" || typeof cursorSecret !== "string" || !url || !UUID_OR_OPAQUE_ID.test(organizationId) || !token || token.length > 8192 || hasControlCharacters(token) || !/^[A-Za-z0-9_-]{43}$/.test(cursorSecret) || base64UrlDecode(cursorSecret).byteLength !== 32 || operatorUserIds.length < 1 || operatorUserIds.length > 100 || new Set(operatorUserIds).size !== operatorUserIds.length || operatorUserIds.some((value) => !UUID_OR_OPAQUE_ID.test(value))) {
     throw new ConsoleApiError(503, "cloud_api_unavailable", "Cloud API is unavailable");
   }
   const timeoutValue = source?.AGENTPASS_CLOUD_TIMEOUT_MS;
@@ -658,10 +842,11 @@ async function readConfig(injected) {
     url,
     organizationId,
     token,
+    cursorSecret,
     timeoutMs,
     allowInsecureLoopback,
     operatorUserIds: new Set(operatorUserIds),
-    secrets: [url, organizationId, token],
+    secrets: [url, organizationId, token, cursorSecret],
   };
 }
 

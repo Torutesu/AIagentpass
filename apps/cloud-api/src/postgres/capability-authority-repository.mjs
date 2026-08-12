@@ -3,6 +3,7 @@ import { assertTenantId, PostgresRepositoryError, withTransaction } from "./repo
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const SHA256 = /^[0-9a-f]{64}$/;
 const LOCK_PREFIX = "agentpass:capability-authority:";
+const MAX_CONTROL_BUNDLE_REVOCATIONS = 256;
 
 export class CapabilityAuthorityRepositoryError extends PostgresRepositoryError {
   constructor(code, message, details = undefined, cause = undefined) {
@@ -99,6 +100,23 @@ export function createCapabilityAuthorityRepository({ client, now = () => new Da
     }));
   }
 
+  async function listRevokedCapabilityIds(input = {}) {
+    const organizationId = tenant(input.organization_id ?? input.organizationId);
+    const evaluatedAt = timestamp(input.evaluated_at ?? input.evaluatedAt ?? now(), "evaluated_at");
+    return operation(async () => {
+      const result = await client.query(`SELECT id AS capability_id
+        FROM capabilities
+        WHERE organization_id=$1 AND revoked_at IS NOT NULL AND expires_at>$2::timestamptz
+        ORDER BY id ASC
+        LIMIT $3`, [organizationId, evaluatedAt, MAX_CONTROL_BUNDLE_REVOCATIONS + 1]);
+      const rows = result.rows ?? [];
+      if (rows.length > MAX_CONTROL_BUNDLE_REVOCATIONS) {
+        throw new CapabilityAuthorityRepositoryError("ERR_REVOCATION_CAPACITY", "active capability revocations exceed the ControlBundle limit");
+      }
+      return Object.freeze(rows.map((row) => uuid(row.capability_id ?? row.id, "capability_id")));
+    });
+  }
+
   async function operation(callback) {
     try { return await callback(); }
     catch (error) {
@@ -119,7 +137,7 @@ export function createCapabilityAuthorityRepository({ client, now = () => new Da
     }
   }
 
-  return Object.freeze({ issueCapabilityMetadata, revokeActiveCapabilitiesForMember });
+  return Object.freeze({ issueCapabilityMetadata, revokeActiveCapabilitiesForMember, listRevokedCapabilityIds });
 }
 
 function normalizeIssueInput(input, now) {

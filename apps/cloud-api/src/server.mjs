@@ -1,7 +1,7 @@
 import crypto from "node:crypto";
 import http from "node:http";
 import { authenticateApiToken, createReplayCache, requireOrganizationRole, verifyDeviceRequest } from "./auth.mjs";
-import { issueControlBundle, parseControlBundleJson } from "../../../lib/control-bundle-v2.mjs";
+import { MAX_REVOCATIONS, issueControlBundle, parseControlBundleJson } from "../../../lib/control-bundle-v2.mjs";
 import { canonicalJson, intersectScopes } from "../../../packages/capability/src/index.mjs";
 import { RateLimiterCapacityError, createRateLimiter } from "./rate-limit.mjs";
 
@@ -16,11 +16,14 @@ const HUMAN_AUTH_ORGANIZATIONS_PATH = "/api/auth/organizations";
 const HUMAN_AUTH_ACCEPT_INVITATION_PATH = "/api/auth/invitations/accept";
 const HUMAN_AUTH_UUID = "[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89a-fA-F][0-9a-fA-F]{3}-[0-9a-fA-F]{12}";
 const UUID = "([0-9a-fA-F-]{36})";
+const UUID_VALUE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu;
 
-export function createCloudApi({ store, tokenRecords = [], bundleSigner, now = () => Date.now(), monotonicNow, replayCache = createReplayCache(), rateLimiter, admissionRateLimiter, verifyRecentWebAuthn, recentAuthService, humanAuthApi } = {}) {
+export function createCloudApi({ store, tokenRecords = [], bundleSigner, now = () => Date.now(), monotonicNow, replayCache = createReplayCache(), rateLimiter, admissionRateLimiter, verifyRecentWebAuthn, recentAuthService, humanAuthApi, capabilityAuthorityRepository, capabilityRevocationSource } = {}) {
   if (!store) throw new TypeError("store is required");
   if (verifyRecentWebAuthn !== undefined && recentAuthService !== undefined) throw new TypeError("configure verifyRecentWebAuthn or recentAuthService, not both");
   if (humanAuthApi !== undefined && (!humanAuthApi || typeof humanAuthApi.handle !== "function")) throw new TypeError("humanAuthApi must expose handle()");
+  if (capabilityRevocationSource !== undefined && (!capabilityRevocationSource || typeof capabilityRevocationSource.listRevokedCapabilityIds !== "function")) throw new TypeError("capabilityRevocationSource must expose listRevokedCapabilityIds()");
+  if (capabilityAuthorityRepository !== undefined && (!capabilityAuthorityRepository || typeof capabilityAuthorityRepository.issueCapabilityMetadata !== "function")) throw new TypeError("capabilityAuthorityRepository must expose issueCapabilityMetadata()");
   const recentAuthVerifier = recentAuthService === undefined ? verifyRecentWebAuthn : recentAuthService?.authorize?.bind(recentAuthService);
   if (recentAuthService !== undefined && typeof recentAuthVerifier !== "function") throw new TypeError("recentAuthService must expose authorize()");
   const limiter = rateLimiter ?? createRateLimiter({ now, ...(monotonicNow ? { monotonicNow } : {}) });
@@ -198,6 +201,25 @@ export function createCloudApi({ store, tokenRecords = [], bundleSigner, now = (
           expires_at: reserved.expires_at,
           sequence: reserved.sequence
         };
+        if (capabilityAuthorityRepository !== undefined) {
+          try {
+            await capabilityAuthorityRepository.issueCapabilityMetadata({
+              organization_id: organizationId,
+              capability_id: statement.capability_id,
+              agent_id: statement.audience.agent_id,
+              device_id: statement.audience.device_id,
+              sequence: statement.sequence,
+              statement_hash: crypto.createHash("sha256").update(canonicalJson(statement)).digest("hex"),
+              expires_at: statement.expires_at,
+              issued_by_member_id: principal.member_id
+            });
+          } catch (error) {
+            if (error?.code === "ERR_MEMBER_NOT_ACTIVE" || error?.code === "ERR_MEMBERSHIP_VERSION") {
+              throw apiError("capability_issuer_not_active", 403, "Capability issuer membership is not active");
+            }
+            throw apiError("capability_authority_unavailable", 503, "Capability authority state is unavailable");
+          }
+        }
         const signed = { ...statement, signature: crypto.sign(null, Buffer.from(canonicalJson(statement)), bundleSigner.privateKey).toString("base64") };
         await store.appendAdminAuditEvent({ organizationId, eventType: "capability.issued", actorId: principal.member_id, targetType: "capability", targetId: signed.capability_id, details: { agent_id: agent.agent_id, device_id: device.device_id, expires_at: signed.expires_at, sequence: signed.sequence }, idempotencyKey: `${idempotencyKey}:audit` });
         return { status: 201, body: { capability: signed } };
@@ -222,9 +244,23 @@ export function createCloudApi({ store, tokenRecords = [], bundleSigner, now = (
         const policies = await store.listPolicies({ organizationId });
         const active = policies.filter((policy) => policy.status === "active").sort((a, b) => b.sequence - a.sequence)[0];
         if (!active) throw apiError("policy_missing", 409, "No active policy exists");
-        const revocations = await store.listRevocations({ organizationId });
-        const stateFingerprint = crypto.createHash("sha256").update(JSON.stringify({ device_id: match.deviceId, policy_id: active.policy_id, policy_sequence: active.sequence, policy_scope: active.scope, revocations: revocations.map((item) => [item.revocation_id, item.target_type, item.target_id, item.status]).sort() })).digest("hex");
         const issuedMs = now();
+        const revocations = await store.listRevocations({ organizationId });
+        const storedCapabilityRevocations = revocations.filter((item) => item.target_type === "capability" && item.status === "active").map((item) => item.target_id);
+        let durableCapabilityRevocations = [];
+        if (capabilityRevocationSource !== undefined) {
+          try {
+            durableCapabilityRevocations = await capabilityRevocationSource.listRevokedCapabilityIds({ organization_id: organizationId, evaluated_at: new Date(issuedMs).toISOString() });
+          } catch {
+            throw apiError("capability_revocations_unavailable", 503, "Capability revocation state is unavailable");
+          }
+          if (!Array.isArray(durableCapabilityRevocations) || durableCapabilityRevocations.some((id) => typeof id !== "string" || !UUID_VALUE.test(id))) {
+            throw apiError("capability_revocations_unavailable", 503, "Capability revocation state is unavailable");
+          }
+        }
+        const revokedCapabilities = [...new Set([...storedCapabilityRevocations, ...durableCapabilityRevocations])].sort();
+        if (revokedCapabilities.length > MAX_REVOCATIONS) throw apiError("capability_revocations_overflow", 503, "Capability revocation state exceeds the ControlBundle limit");
+        const stateFingerprint = crypto.createHash("sha256").update(JSON.stringify({ device_id: match.deviceId, policy_id: active.policy_id, policy_sequence: active.sequence, policy_scope: active.scope, revocations: revocations.filter((item) => item.target_type !== "capability").map((item) => [item.revocation_id, item.target_type, item.target_id, item.status]).sort(), revoked_capabilities: revokedCapabilities })).digest("hex");
         const ttlMs = bundleSigner.ttlMs ?? 3_600_000;
         const head = await store.assignBundleHead({ organizationId, deviceId: match.deviceId, stateFingerprint, minimumSequence: active.sequence, issuedAt: new Date(issuedMs).toISOString(), expiresAt: new Date(issuedMs + ttlMs).toISOString() });
         const bundle = issueControlBundle({
@@ -240,7 +276,7 @@ export function createCloudApi({ store, tokenRecords = [], bundleSigner, now = (
             global_revoked: revocations.some((item) => item.target_type === "organization" && item.status === "active"),
             revoked_devices: revocations.filter((item) => item.target_type === "device" && item.status === "active").map((item) => item.target_id).sort(),
             revoked_agents: revocations.filter((item) => item.target_type === "agent" && item.status === "active").map((item) => item.target_id).sort(),
-            revoked_capabilities: revocations.filter((item) => item.target_type === "capability" && item.status === "active").map((item) => item.target_id).sort(),
+            revoked_capabilities: revokedCapabilities,
             offline_ttl_ms: bundleSigner.offlineTtlMs ?? 3_600_000,
             key_id: bundleSigner.keyId
           }, bundleSigner.privateKey, { now: issuedMs, maxTtlMs: ttlMs, maxOfflineTtlMs: bundleSigner.offlineTtlMs ?? 3_600_000 });

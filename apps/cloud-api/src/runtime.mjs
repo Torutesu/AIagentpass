@@ -27,6 +27,11 @@ export async function createCloudRuntime({ env = process.env, logger = console, 
   try {
     if (config.humanAuth) {
       postgresRuntime = await postgresFactory({ env, applicationVersion: "0.18.0" });
+      if (!postgresRuntime?.capabilityAuthorityRepository
+        || typeof postgresRuntime.capabilityAuthorityRepository.issueCapabilityMetadata !== "function"
+        || typeof postgresRuntime.capabilityAuthorityRepository.listRevokedCapabilityIds !== "function") {
+        throw new Error("PostgreSQL capability authority is unavailable");
+      }
       humanAuthRuntime = humanAuthFactory({ postgresRuntime, tokenRecords, origin: config.humanAuth.origin, rpId: config.humanAuth.rpId, cursorSecret, identityProvider: config.humanAuth.identityProvider });
     }
     server = createCloudApi({
@@ -36,7 +41,9 @@ export async function createCloudRuntime({ env = process.env, logger = console, 
       rateLimiter: createRateLimiter({ persistencePath: path.join(config.dataDir, "principal-rate-limits.json") }),
       admissionRateLimiter: createRateLimiter({ persistencePath: path.join(config.dataDir, "admission-rate-limits.json"), human: { capacity: 30, refillPerSecond: 1 }, device: { capacity: 60, refillPerSecond: 2 } }),
       bundleSigner: { privateKey, issuer: config.issuer, keyId: config.keyId, ttlMs: config.ttlMs, offlineTtlMs: config.offlineTtlMs },
-      ...(humanAuthRuntime ? { humanAuthApi: humanAuthRuntime.api, recentAuthService: humanAuthRuntime.recentAuthService } : {})
+      ...(humanAuthRuntime ? { humanAuthApi: humanAuthRuntime.api, recentAuthService: humanAuthRuntime.recentAuthService } : {}),
+      ...(postgresRuntime?.capabilityAuthorityRepository ? { capabilityAuthorityRepository: postgresRuntime.capabilityAuthorityRepository } : {}),
+      ...(postgresRuntime?.capabilityAuthorityRepository ? { capabilityRevocationSource: postgresRuntime.capabilityAuthorityRepository } : {})
     });
   } catch (error) { await postgresRuntime?.close?.().catch(() => {}); await store.close(); throw error; }
   let closed = false;

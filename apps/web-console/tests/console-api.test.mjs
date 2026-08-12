@@ -6,10 +6,17 @@ const env = Object.freeze({
   AGENTPASS_CLOUD_API_URL: "https://cloud.example.test",
   AGENTPASS_ORGANIZATION_ID: "11111111-1111-4111-8111-111111111111",
   AGENTPASS_CLOUD_TOKEN: "test-server-token-abcdefghijklmnopqrstuvwxyz",
+  AGENTPASS_CONSOLE_CURSOR_SECRET: "YWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWE",
   AGENTPASS_OPERATOR_USER_IDS: "user-1",
 });
 const deviceId = "22222222-2222-4222-8222-222222222222";
 const authenticatedUser = Object.freeze({ userId: "user-1", email: "user@example.test" });
+const auditTimestamps = [
+  "2026-08-12T00:00:00.000Z",
+  "2026-08-12T00:00:01.000Z",
+  "2026-08-12T00:00:02.000Z",
+  "2026-08-12T00:00:03.000Z",
+];
 
 function authenticatedApi(options = {}) {
   return createConsoleApi({
@@ -28,6 +35,40 @@ function response(body, status = 200) {
     status,
     headers: { "content-type": "application/json" },
   });
+}
+
+function auditEvent(eventId, timestamp, extra = {}) {
+  return {
+    version: 1,
+    event_id: eventId,
+    request_id: `request-${eventId}`,
+    agent_id: "33333333-3333-4333-8333-333333333333",
+    operation: "git.commit.sign",
+    decision: "allow",
+    reason: "allowed-audit-detail",
+    repository: "/work/private-repository",
+    branch: "feature/activity",
+    payload_digest: "b".repeat(64),
+    device_timestamp: timestamp,
+    previous_hash: "0".repeat(64),
+    ...extra,
+  };
+}
+
+function activityFixture({ events = [], onEventRequest = () => events, apiEnv = env } = {}) {
+  const calls = [];
+  const api = authenticatedApi({
+    env: apiEnv,
+    fetchImpl: async (url, init) => {
+      calls.push({ url: String(url), init });
+      const parsed = new URL(url);
+      if (parsed.pathname.endsWith("/devices")) return response({ devices: [{ device_id: deviceId, name: "Build Mac" }] });
+      if (parsed.pathname.endsWith("/audit/events")) return response({ events: onEventRequest(parsed) });
+      if (parsed.pathname.endsWith("/audit/health")) return response({ health: [{ device_id: deviceId, chain_status: "continuous", gap_count: 0, last_event_id: "event-3", last_hash: "a".repeat(64) }] });
+      return response({});
+    },
+  });
+  return { api, calls };
 }
 
 test("GET summary aggregates tenant resources and bounded audit activity", async () => {
@@ -67,6 +108,156 @@ test("GET summary aggregates tenant resources and bounded audit activity", async
     assert.equal(call.init.headers.get("authorization"), `Bearer ${env.AGENTPASS_CLOUD_TOKEN}`);
   }
   assert.doesNotMatch(JSON.stringify(body), new RegExp(env.AGENTPASS_CLOUD_TOKEN));
+});
+
+test("activity uses a bounded window, returns limit+1 evidence, and resumes with an opaque cursor", async () => {
+  const { api, calls } = activityFixture({
+    events: [
+      auditEvent("event-1", auditTimestamps[0]),
+      auditEvent("event-2", auditTimestamps[1]),
+      auditEvent("event-3", auditTimestamps[2]),
+    ],
+  });
+
+  const first = await api.handle(request("/api/console?resource=activity&limit=2"));
+  assert.equal(first.status, 200);
+  const firstBody = await first.json();
+  assert.deepEqual(firstBody.activity.map((event) => event.event_id), ["event-3", "event-2"]);
+  assert.equal(typeof firstBody.next_cursor, "string");
+  assert.match(firstBody.next_cursor, /^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/);
+  const firstEventRequest = calls.find((call) => new URL(call.url).pathname.endsWith("/audit/events"));
+  assert.equal(new URL(firstEventRequest.url).searchParams.get("limit"), "500");
+
+  const second = await api.handle(request(`/api/console?resource=activity&limit=2&cursor=${encodeURIComponent(firstBody.next_cursor)}`));
+  assert.equal(second.status, 200);
+  const secondBody = await second.json();
+  assert.deepEqual(secondBody.activity.map((event) => event.event_id), ["event-1"]);
+  assert.equal(secondBody.next_cursor, null);
+  for (const call of calls.filter((item) => new URL(item.url).pathname.endsWith("/audit/events"))) {
+    const upstreamQuery = new URL(call.url).searchParams;
+    assert.equal(upstreamQuery.has("cursor"), false);
+    assert.equal(upstreamQuery.get("limit"), "500");
+  }
+});
+
+test("activity cursors reject tampering and resource or device-scope substitution", async () => {
+  const { api } = activityFixture({
+    events: [auditEvent("event-1", auditTimestamps[0]), auditEvent("event-2", auditTimestamps[1]), auditEvent("event-3", auditTimestamps[2])],
+  });
+  const first = await api.handle(request("/api/console?resource=activity&limit=2"));
+  const cursor = (await first.json()).next_cursor;
+  const parts = cursor.split(".");
+  const last = parts[2][0] === "A" ? "B" : "A";
+  const tampered = [parts[0], parts[1], `${last}${parts[2].slice(1)}`].join(".");
+
+  const tamperedResponse = await api.handle(request(`/api/console?resource=activity&cursor=${encodeURIComponent(tampered)}`));
+  assert.equal(tamperedResponse.status, 400);
+  assert.deepEqual(await tamperedResponse.json(), { error: { code: "invalid_cursor", message: "Cursor is invalid" } });
+
+  const resourceSubstitution = await api.handle(request(`/api/console?resource=audit&cursor=${encodeURIComponent(cursor)}`));
+  assert.equal(resourceSubstitution.status, 400);
+  assert.deepEqual(await resourceSubstitution.json(), { error: { code: "invalid_cursor", message: "Cursor is invalid" } });
+
+  const scopeSubstitution = await api.handle(request(`/api/console?resource=activity&device_id=${deviceId}&cursor=${encodeURIComponent(cursor)}`));
+  assert.equal(scopeSubstitution.status, 400);
+  assert.deepEqual(await scopeSubstitution.json(), { error: { code: "invalid_cursor", message: "Cursor is invalid" } });
+});
+
+test("activity cursor authority is independent from the legacy Cloud bearer", async () => {
+  const events = [auditEvent("event-1", auditTimestamps[0]), auditEvent("event-2", auditTimestamps[1]), auditEvent("event-3", auditTimestamps[2])];
+  const first = activityFixture({ events }).api;
+  const issued = await first.handle(request("/api/console?resource=activity&limit=2"));
+  const cursor = (await issued.json()).next_cursor;
+
+  const rotated = activityFixture({ events, apiEnv: { ...env, AGENTPASS_CLOUD_TOKEN: "rotated-server-token-abcdefghijklmnopqrstuvwxyz" } }).api;
+  const accepted = await rotated.handle(request(`/api/console?resource=activity&limit=2&cursor=${encodeURIComponent(cursor)}`));
+  assert.equal(accepted.status, 200);
+
+  const otherSecretApi = authenticatedApi({
+    env: { ...env, AGENTPASS_CONSOLE_CURSOR_SECRET: "YmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmI" },
+    fetchImpl: async (url) => {
+      const parsed = new URL(url);
+      if (parsed.pathname.endsWith("/devices")) return response({ devices: [{ device_id: deviceId }] });
+      if (parsed.pathname.endsWith("/audit/events")) return response({ events });
+      return response({ health: [] });
+    },
+  });
+  const rejected = await otherSecretApi.handle(request(`/api/console?resource=activity&limit=2&cursor=${encodeURIComponent(cursor)}`));
+  assert.equal(rejected.status, 400);
+  assert.deepEqual(await rejected.json(), { error: { code: "invalid_cursor", message: "Cursor is invalid" } });
+
+  const unavailable = authenticatedApi({ env: { ...env, AGENTPASS_CONSOLE_CURSOR_SECRET: undefined }, fetchImpl: async () => response({}) });
+  const missing = await unavailable.handle(request("/api/console?resource=activity&limit=2"));
+  assert.equal(missing.status, 503);
+});
+
+test("activity cursors remain traversable when a newer concurrent insert sorts before the position", async () => {
+  let currentEvents = [
+    auditEvent("event-1", auditTimestamps[0]),
+    auditEvent("event-2", auditTimestamps[1]),
+    auditEvent("event-3", auditTimestamps[2]),
+  ];
+  const { api } = activityFixture({ onEventRequest: () => currentEvents });
+  const first = await api.handle(request("/api/console?resource=activity&limit=2"));
+  const cursor = (await first.json()).next_cursor;
+  currentEvents = [...currentEvents, auditEvent("event-4", auditTimestamps[3])];
+
+  const second = await api.handle(request(`/api/console?resource=activity&limit=2&cursor=${encodeURIComponent(cursor)}`));
+  assert.equal(second.status, 200);
+  const secondBody = await second.json();
+  assert.deepEqual(secondBody.activity.map((event) => event.event_id), ["event-1"]);
+  assert.equal(secondBody.next_cursor, null);
+});
+
+test("activity cursors contain no audit content or secrets and never touch browser storage or logging", async () => {
+  const { api } = activityFixture({
+    events: [auditEvent("event-1", auditTimestamps[0]), auditEvent("event-2", auditTimestamps[1]), auditEvent("event-3", auditTimestamps[2])],
+  });
+  const originalLog = console.log;
+  const storageDescriptor = Object.getOwnPropertyDescriptor(globalThis, "localStorage");
+  let logCalls = 0;
+  console.log = () => { logCalls += 1; };
+  Object.defineProperty(globalThis, "localStorage", {
+    configurable: true,
+    get() {
+      throw new Error("browser storage must not be accessed");
+    },
+  });
+  try {
+    const result = await api.handle(request("/api/console?resource=activity&limit=2"));
+    assert.equal(result.status, 200);
+    const body = await result.json();
+    const cursor = body.next_cursor;
+    const payload = JSON.parse(new TextDecoder().decode(Uint8Array.from(atob(cursor.split(".")[1].replace(/-/g, "+").replace(/_/g, "/") + "=".repeat((4 - cursor.split(".")[1].length % 4) % 4)), (character) => character.charCodeAt(0))));
+    assert.deepEqual(Object.keys(payload).sort(), ["d", "o", "p", "r", "s", "v"]);
+    assert.doesNotMatch(JSON.stringify(payload), /allowed-audit-detail|private-repository|payload_digest|secret|token/i);
+    assert.doesNotMatch(JSON.stringify(body), new RegExp(env.AGENTPASS_CLOUD_TOKEN));
+  } finally {
+    console.log = originalLog;
+    if (storageDescriptor) Object.defineProperty(globalThis, "localStorage", storageDescriptor);
+    else delete globalThis.localStorage;
+  }
+  assert.equal(logCalls, 0);
+});
+
+test("activity rejects an upstream window that cannot prove a terminal page", async () => {
+  const saturated = Array.from({ length: 500 }, (_, index) => auditEvent(`event-${index + 1}`, `2026-08-12T00:${String(Math.floor(index / 60)).padStart(2, "0")}:${String(index % 60).padStart(2, "0")}.000Z`));
+  const { api } = activityFixture({ events: saturated });
+  const result = await api.handle(request("/api/console?resource=activity&limit=2"));
+  assert.equal(result.status, 409);
+  assert.deepEqual(await result.json(), { error: { code: "activity_cursor_requires_upstream_cursor", message: "Activity pagination requires upstream cursor support" } });
+});
+
+test("activity derives the immutable position from the Cloud audit record envelope", async () => {
+  const wrappedEvent = auditEvent("event-wrapped", auditTimestamps[0]);
+  const { api } = activityFixture({
+    events: [{ organization_id: env.AGENTPASS_ORGANIZATION_ID, device_id: deviceId, event_id: wrappedEvent.event_id, event: wrappedEvent }],
+  });
+  const result = await api.handle(request("/api/console?resource=activity&limit=1"));
+  assert.equal(result.status, 200);
+  const body = await result.json();
+  assert.equal(body.activity[0].event.event_id, "event-wrapped");
+  assert.equal(body.next_cursor, null);
 });
 
 test("bounded list limits are forwarded to Cloud API resources", async () => {

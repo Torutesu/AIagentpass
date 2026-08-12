@@ -48,6 +48,14 @@ class FakeClient {
       const rows = this.capabilities.filter((row) => row.organization_id === params[0] && row.issued_by_member_id === params[1] && row.revoked_at === null).map((row) => ({ ...row, revoked_at: params[2] }));
       return { rows, rowCount: rows.length };
     }
+    if (text.startsWith("SELECT id AS capability_id")) {
+      const rows = this.capabilities
+        .filter((row) => row.organization_id === params[0] && row.revoked_at !== null && Date.parse(row.expires_at) > Date.parse(params[1]))
+        .sort((left, right) => left.capability_id.localeCompare(right.capability_id))
+        .slice(0, params[2])
+        .map((row) => ({ capability_id: row.capability_id }));
+      return { rows, rowCount: rows.length };
+    }
     throw new Error(`unexpected query: ${text}`);
   }
 }
@@ -85,10 +93,33 @@ test("exposes a frozen authority API and validates input before opening a transa
   const client = new FakeClient();
   const repository = createCapabilityAuthorityRepository({ client, now: () => NOW });
   assert.equal(Object.isFrozen(repository), true);
-  assert.deepEqual(Object.keys(repository).sort(), ["issueCapabilityMetadata", "revokeActiveCapabilitiesForMember"].sort());
+  assert.deepEqual(Object.keys(repository).sort(), ["issueCapabilityMetadata", "listRevokedCapabilityIds", "revokeActiveCapabilitiesForMember"].sort());
   await assert.rejects(repository.issueCapabilityMetadata(issueInput({ statement_hash: "not-a-hash" })), { code: "ERR_STATEMENT_HASH" });
   await assert.rejects(repository.revokeActiveCapabilitiesForMember({ organization_id: "not-a-uuid", member_id: ids.member }), { code: "ERR_TENANT_SCOPE" });
   assert.equal(client.calls.length, 0);
+});
+
+test("lists only unexpired durable revocations for ControlBundle generation and fails closed at capacity", async () => {
+  const expired = "77777777-7777-4777-8777-777777777777";
+  const client = new FakeClient({ capabilities: [
+    { organization_id: ids.organization, capability_id: ids.capability2, expires_at: EXPIRES, revoked_at: NOW },
+    { organization_id: ids.organization, capability_id: ids.capability, expires_at: EXPIRES, revoked_at: NOW },
+    { organization_id: ids.organization, capability_id: expired, expires_at: NOW, revoked_at: NOW }
+  ] });
+  const repository = createCapabilityAuthorityRepository({ client, now: () => NOW });
+  assert.deepEqual(await repository.listRevokedCapabilityIds({ organization_id: ids.organization }), [ids.capability, ids.capability2]);
+  const query = client.calls.at(-1);
+  assert.match(query.text, /revoked_at IS NOT NULL AND expires_at>\$2::timestamptz/);
+  assert.match(query.text, /ORDER BY id ASC\s+LIMIT \$3/);
+  assert.deepEqual(query.params, [ids.organization, NOW, 257]);
+
+  const overflow = new FakeClient({ capabilities: Array.from({ length: 257 }, (_, index) => ({
+    organization_id: ids.organization,
+    capability_id: `00000000-0000-4000-8000-${String(index).padStart(12, "0")}`,
+    expires_at: EXPIRES,
+    revoked_at: NOW
+  })) });
+  await assert.rejects(createCapabilityAuthorityRepository({ client: overflow, now: () => NOW }).listRevokedCapabilityIds({ organization_id: ids.organization }), { code: "ERR_REVOCATION_CAPACITY" });
 });
 
 test("issues metadata from the locked active membership version and never trusts a stale caller version", async () => {
@@ -222,6 +253,8 @@ test("real PostgreSQL capability authority behavior is exercised when AGENTPASS_
     });
     assert.equal(issued.issued_by_member_id, real.member);
     assert.equal(issued.issued_membership_version, 1);
+    await repository.revokeActiveCapabilitiesForMember({ organization_id: real.organization, member_id: real.member, revoked_at: NOW });
+    assert.deepEqual(await repository.listRevokedCapabilityIds({ organization_id: real.organization, evaluated_at: NOW }), [real.capability]);
   } finally {
     await pool.end();
   }

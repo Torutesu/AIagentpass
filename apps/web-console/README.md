@@ -14,7 +14,7 @@ npm run dev
 npm run build
 ```
 
-The server-side console bridge requires `AGENTPASS_CLOUD_API_URL`, `AGENTPASS_ORGANIZATION_ID`, `AGENTPASS_CLOUD_TOKEN`, and `AGENTPASS_OPERATOR_USER_IDS`. The last value is a comma-separated allowlist of stable SIWC user IDs. Authentication alone never grants use of the privileged Cloud token; a signed-in user must also be in this explicit operator allowlist. Keep the Site private and store the Cloud token only as a server secret.
+The legacy server-side operator bridge requires `AGENTPASS_CLOUD_API_URL`, `AGENTPASS_ORGANIZATION_ID`, `AGENTPASS_CLOUD_TOKEN`, `AGENTPASS_CONSOLE_CURSOR_SECRET`, and `AGENTPASS_OPERATOR_USER_IDS`. Generate the cursor secret as 32 random bytes encoded with unpadded base64url (for example, `openssl rand -base64 32 | tr '+/' '-_' | tr -d '='`). The operator IDs form a comma-separated allowlist of stable SIWC user IDs. Authentication alone never grants use of the privileged Cloud token; a signed-in user must also be in this explicit operator allowlist. Keep the Site private and store both secrets only as server secrets. Human-session organization and security routes do not forward this Cloud token.
 
 Deploy this console only on a hosting path that injects SIWC identity headers after authentication and strips client-supplied copies. Do not expose the application server directly behind a generic proxy that forwards `oai-authenticated-user-*` headers. The explicit operator allowlist is mandatory, but it does not make forgeable upstream identity headers trustworthy.
 

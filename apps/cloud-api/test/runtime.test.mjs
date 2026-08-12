@@ -53,7 +53,7 @@ test("production human auth is composed from PostgreSQL and closed with the runt
   t.after(() => fs.rmSync(value.root, { recursive: true, force: true }));
   const env = { ...value.env, AGENTPASS_DATABASE_URL: "postgresql://agent:secret@db.example.test/agentpass?sslmode=verify-full", AGENTPASS_CONSOLE_ORIGIN: "https://console.example.test", AGENTPASS_WEBAUTHN_RP_ID: "example.test", AGENTPASS_HUMAN_CURSOR_SECRET: CURSOR_SECRET };
   const calls = [];
-  const postgresRuntime = { pool: {}, humanRepository: {}, async close() { calls.push("postgres-close"); } };
+  const postgresRuntime = { pool: {}, humanRepository: {}, capabilityAuthorityRepository: { async issueCapabilityMetadata() {}, async listRevokedCapabilityIds() { return []; } }, async close() { calls.push("postgres-close"); } };
   const recentAuthService = { async authorize() { return { verified: false }; } };
   const runtime = await createCloudRuntime({ env, logger: { info() {} }, postgresFactory: async (input) => { calls.push(["postgres", input.applicationVersion]); return postgresRuntime; }, humanAuthFactory: (input) => { calls.push(["human", input.origin, input.rpId, input.cursorSecret]); return { api: { async handle() { return { status: 404, body: { error: { code: "not_found", message: "Resource not found" } }, headers: {} }; } }, recentAuthService }; } });
   assert.equal(runtime.postgresRuntime, postgresRuntime);
@@ -63,4 +63,17 @@ test("production human auth is composed from PostgreSQL and closed with the runt
   assert.equal(JSON.stringify(runtime.config).includes(CURSOR_SECRET), false);
   await runtime.close();
   assert.equal(calls.at(-1), "postgres-close");
+});
+
+test("production human auth fails closed without PostgreSQL capability authority", async (t) => {
+  const value = files();
+  t.after(() => fs.rmSync(value.root, { recursive: true, force: true }));
+  const env = { ...value.env, AGENTPASS_DATABASE_URL: "postgresql://agent:secret@db.example.test/agentpass?sslmode=verify-full", AGENTPASS_CONSOLE_ORIGIN: "https://console.example.test", AGENTPASS_WEBAUTHN_RP_ID: "example.test", AGENTPASS_HUMAN_CURSOR_SECRET: CURSOR_SECRET };
+  let closed = false;
+  await assert.rejects(createCloudRuntime({
+    env,
+    postgresFactory: async () => ({ pool: {}, humanRepository: {}, async close() { closed = true; } }),
+    humanAuthFactory: () => { throw new Error("human auth must not be constructed"); }
+  }), /capability authority is unavailable/);
+  assert.equal(closed, true);
 });

@@ -640,6 +640,9 @@ function isOpaqueToken(value) {
 function mapRepositoryError(error, resource) {
   if (error instanceof HumanManagementHttpError) return error;
   const code = String(error?.code ?? error?.name ?? "").toLowerCase();
+  if (["human_cursor_invalid", "invalid_cursor", "cursor_invalid"].includes(code)) {
+    return new HumanManagementHttpError(HUMAN_MANAGEMENT_HTTP_ERROR_CODES.INVALID_PAGINATION, { status: 400, cause: error });
+  }
   if (["not_found", "credential_not_found", "session_not_found", "resource_not_found"].includes(code)) {
     return new HumanManagementHttpError(resource === "credential" ? HUMAN_MANAGEMENT_HTTP_ERROR_CODES.CREDENTIAL_NOT_FOUND : HUMAN_MANAGEMENT_HTTP_ERROR_CODES.SESSION_NOT_FOUND, { status: 404, cause: error });
   }
