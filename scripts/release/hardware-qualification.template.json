@@ -1,0 +1,17 @@
+{
+  "schema_version": 1,
+  "artifact_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+  "architecture": "arm64",
+  "hardware_class": "apple_silicon",
+  "model_identifier": "REPLACE_WITH_MODEL_IDENTIFIER",
+  "macos_version": "14.0",
+  "macos_build": "REPLACEWITHMACOSBUILD",
+  "secure_enclave": true,
+  "started_at": "2026-01-01T00:00:00Z",
+  "completed_at": "2026-01-01T00:00:01Z",
+  "operator": "REPLACE_WITH_OPERATOR_ID",
+  "qualified": false,
+  "tests": [
+    { "name": "install-and-register", "status": "skipped", "reason": "template only" }
+  ]
+}

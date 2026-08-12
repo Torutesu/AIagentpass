@@ -118,6 +118,24 @@ process.stdin.on("end", () => {
   assert.equal(auditStatus.command, "audit-status");
   const auditRotate = await brokerRequest({ operation: "native.audit.rotate" }, { native: { enabled: true, client, mach_service: "dev.agentpass.native" } });
   assert.equal(auditRotate.command, "audit-rotate");
+  const evidenceRotate = await brokerRequest({ operation: "native.audit.evidence.rotate" }, { native: { enabled: true, client, mach_service: "dev.agentpass.native" } });
+  assert.equal(evidenceRotate.command, "audit-evidence-rotate");
+  const lifecycleStatus = await brokerRequest({ operation: "native.key-lifecycle.status" }, { native: { enabled: true, client, mach_service: "dev.agentpass.native" } });
+  assert.equal(lifecycleStatus.command, "key-lifecycle-status");
+  const keyStage = await brokerRequest({ operation: "native.key.stage", role: "git_signing" }, { native: { enabled: true, client, mach_service: "dev.agentpass.native" } });
+  assert.equal(keyStage.command, "key-stage");
+  const keyActivate = await brokerRequest({ operation: "native.key.activate", role: "git_signing", generation: 2, reason: "test" }, { native: { enabled: true, client, mach_service: "dev.agentpass.native" } });
+  assert.equal(keyActivate.command, "key-activate");
+  const keyDelete = await brokerRequest({ operation: "native.key.delete", role: "git_signing", generation: 1, reason: "retained", minimum_retention_seconds: 2592000, proof: { version: 1 } }, { native: { enabled: true, client, mach_service: "dev.agentpass.native" } });
+  assert.equal(keyDelete.command, "key-delete");
+  const recoveryRequest = await brokerRequest({ operation: "native.recovery.request", role: "git_signing" }, { native: { enabled: true, client, mach_service: "dev.agentpass.native" } });
+  assert.equal(recoveryRequest.command, "recovery-request");
+  const recoveryPrepare = await brokerRequest({ operation: "native.recovery.prepare", evidence_base64: "e30=" }, { native: { enabled: true, client, mach_service: "dev.agentpass.native" } });
+  assert.equal(recoveryPrepare.command, "recovery-prepare");
+  const recoveryInstall = await brokerRequest({ operation: "native.recovery.install", evidence_base64: "e30=" }, { native: { enabled: true, client, mach_service: "dev.agentpass.native" } });
+  assert.equal(recoveryInstall.command, "recovery-install");
+  const anchorRecoveryInstall = await brokerRequest({ operation: "native.recovery.anchor.install", evidence_base64: "e30=" }, { native: { enabled: true, client, mach_service: "dev.agentpass.native" } });
+  assert.equal(anchorRecoveryInstall.command, "recovery-anchor-install");
   const anchorPush = await brokerRequest({ operation: "native.audit.anchor.push" }, { native: { enabled: true, client, mach_service: "dev.agentpass.native" } });
   assert.equal(anchorPush.command, "audit-anchor-push");
   const anchorStatus = await brokerRequest({ operation: "native.audit.anchor.status" }, { native: { enabled: true, client, mach_service: "dev.agentpass.native" } });
@@ -136,6 +154,23 @@ process.stdin.on("end", () => {
   assert.equal(validateControl.command, "control-validate");
   fs.chmodSync(client, 0o777);
   assert.throws(() => brokerRequest({ operation: "ping" }, { native: { enabled: true, client, mach_service: "dev.agentpass.native" } }), /permissions are unsafe/);
+});
+
+test("native recovery and prune bridge pins protocol 13 and dedicated management routes", () => {
+  const clientSource = fs.readFileSync(path.resolve(import.meta.dirname, "../native/macos/Sources/AgentPassNativeClient/main.swift"), "utf8");
+  const serviceSource = fs.readFileSync(path.resolve(import.meta.dirname, "../native/macos/Sources/AgentPassNativeService/main.swift"), "utf8");
+  const protocolSource = fs.readFileSync(path.resolve(import.meta.dirname, "../native/macos/Sources/AgentPassNativeCore/XPCProtocol.swift"), "utf8");
+  assert.match(clientSource, /command == "audit-prune-submit"/);
+  assert.match(clientSource, /command == "audit-prune-execute"/);
+  assert.match(clientSource, /case "audit-recovery-abort-expired":/);
+  assert.match(clientSource, /case "audit-recovery-status":/);
+  assert.match(clientSource, /Native service protocol 13 is required/);
+  assert.match(serviceSource, /"protocol_version": 13, "key_backend": "secure-enclave"/);
+  assert.match(protocolSource, /func abortExpiredAuditRecovery\(withReply/);
+  assert.match(protocolSource, /func auditRecoveryStatus\(withReply/);
+  assert.match(serviceSource, /abortExpiredUnsubmittedPending\(nowMilliseconds: nowMilliseconds\)/);
+  assert.match(serviceSource, /preparedRecordVerifier: keyLifecycle/);
+  assert.match(serviceSource, /lifecycleAncestryVerifier: keyLifecycle/);
 });
 
 test("running broker fails closed after configuration mutation", async () => {
