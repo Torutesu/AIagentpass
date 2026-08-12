@@ -48,13 +48,20 @@ const AUTHORITY_TABLES = Object.freeze([
   ["device_request_nonces", "t.organization_id = ANY($1::uuid[])", "security"],
   ["rate_limit_buckets", "t.organization_id = ANY($1::uuid[])", "security"],
   ["human_identity_assertion_replays", "$1::uuid[] IS NOT NULL", "replay"],
+  ["control_plane_authority_generations", "t.organization_id = ANY($1::uuid[])", "tenant"],
+  ["device_key_epochs", "t.organization_id = ANY($1::uuid[])", "security"],
+  ["device_control_plane_state", "t.organization_id = ANY($1::uuid[])", "tenant"],
+  ["control_bundle_statements", "t.organization_id = ANY($1::uuid[])", "security"],
+  ["device_refresh_outbox", "t.organization_id = ANY($1::uuid[])", "outbox"],
+  ["device_refresh_delivery_attempts", "t.organization_id = ANY($1::uuid[])", "outbox"],
+  ["device_bundle_acknowledgements", "t.organization_id = ANY($1::uuid[])", "security"],
   ["schema_migration_attempts", "$1::uuid[] IS NOT NULL", "migration"]
 ]);
 const AUTHORITY_TABLE_NAMES = Object.freeze(AUTHORITY_TABLES.map(([name]) => name));
 const TENANT_TABLE_NAMES = new Set(AUTHORITY_TABLES.filter(([, , kind]) => ["tenant", "audit", "outbox", "security"].includes(kind)).map(([name]) => name));
 
 export const AUTHORITY_MANIFEST_SCHEMA_VERSION = 2;
-export const REQUIRED_MIGRATION_VERSION = "11";
+export const REQUIRED_MIGRATION_VERSION = "12";
 export const MANIFEST_KIND = "agentpass.authority-manifest";
 
 export const DIAGNOSTICS = Object.freeze({
@@ -433,7 +440,7 @@ function normalizeTables(values, rowCounts) {
 }
 
 function normalizeMigrations(rows, expected, databaseRows = false) {
-  if (!Array.isArray(rows) || rows.length !== 11) throw new AuthorityManifestError(DIAGNOSTICS.INVALID_FILE);
+  if (!Array.isArray(rows) || rows.length !== 12) throw new AuthorityManifestError(DIAGNOSTICS.INVALID_FILE);
   const result = rows.map((row) => {
     const expectedMigration = expected?.find((migration) => String(migration.version) === String(row.version));
     if (!isPlainObject(row) || (databaseRows ? Object.keys(row).sort().join(",") !== "checksum,version" : Object.keys(row).sort().join(",") !== "checksum,name,version")) throw new AuthorityManifestError(databaseRows ? DIAGNOSTICS.SCHEMA : DIAGNOSTICS.INVALID_FILE);

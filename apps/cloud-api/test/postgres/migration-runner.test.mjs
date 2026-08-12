@@ -68,7 +68,7 @@ test("fails closed on an unknown or out-of-order applied version", async () => {
 
 test("loads the reviewed contract migrations in contiguous order without rewriting their SQL", async () => {
   const loaded = await loadSqlMigrations(defaultContractDirectory());
-  assert.deepEqual(loaded.map((migration) => migration.name), ["0001_control_plane.sql", "0002_webauthn_challenges.sql", "0003_webauthn_challenge_bindings.sql", "0004_human_identity_and_webauthn_registration.sql", "0005_human_credential_session_management.sql", "0006_organization_membership_invitations.sql", "0007_capability_membership_authority.sql", "0008_capability_revocation_bundle_lookup.sql", "0009_human_identity_assertion_replays.sql", "0010_device_audit_activity_keyset.sql", "0011_control_plane_hosted_cutover.sql"]);
+  assert.deepEqual(loaded.map((migration) => migration.name), ["0001_control_plane.sql", "0002_webauthn_challenges.sql", "0003_webauthn_challenge_bindings.sql", "0004_human_identity_and_webauthn_registration.sql", "0005_human_credential_session_management.sql", "0006_organization_membership_invitations.sql", "0007_capability_membership_authority.sql", "0008_capability_revocation_bundle_lookup.sql", "0009_human_identity_assertion_replays.sql", "0010_device_audit_activity_keyset.sql", "0011_control_plane_hosted_cutover.sql", "0012_device_refresh_authority.sql"]);
   assert.match(loaded[0].sql, /^BEGIN;/);
   assert.match(loaded[0].sql, /CREATE TABLE schema_migrations/);
   assert.match(loaded[0].sql.trim(), /COMMIT;$/);

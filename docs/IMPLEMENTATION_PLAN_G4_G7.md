@@ -1,6 +1,6 @@
 # AgentPass G4–G7 implementation plan
 
-Status: active execution baseline; G4.0 implemented and locally qualified
+Status: active execution baseline; G4.0 qualified, G4.1 authority foundation implemented but not yet qualified
 
 Updated: 2026-08-13
 
@@ -70,6 +70,8 @@ Exit gate: Node and Swift decode the same fixtures and produce byte-identical si
 
 ### G4.1 Cloud publication and polling
 
+Current implementation checkpoint (2026-08-13): migration `0012` now defines monotonic authority generations, immutable device key epochs, per-device desired/observed state, append-only bundle statement history, refresh outbox/delivery attempts, and signed ACK evidence. The authority repository and Device API boundaries implement snapshot binding, bounded polling, strict ACK validation, duplicate/conflict handling, and exact-schema readiness at version 12. This checkpoint is deliberately **not** the G4.1 exit gate: hosted-store wiring, restart-safe nonce reconstruction, transactional integration with every reducing mutation, two-instance concurrency evidence, and production long-poll delivery remain open.
+
 Database work:
 
 - add monotonic organization authority generation;
@@ -87,6 +89,39 @@ Cloud work:
 - make duplicate publication and delivery idempotent.
 
 Exit gate: two Cloud instances and PostgreSQL prove no pre-commit hint, no lost committed generation, no widening from duplicate/reordered delivery, bounded polling resources, and measurable propagation latency.
+
+#### G4.1 remaining implementation sequence
+
+1. **Restart-safe refresh nonce ownership**
+   - derive each 16-byte nonce with a dedicated secret-manager HMAC key from the immutable tuple `organization_id/device_id/generation/outbox_id`;
+   - persist only the nonce digest and a non-secret nonce-key version, never the raw nonce;
+   - make every Cloud instance able to reconstruct the same nonce after restart or failover;
+   - rotate by dual-read/single-write key version and retain old versions only through ACK/outbox retention;
+   - add known-answer, rotation, restart, cross-tenant substitution, and log-redaction tests.
+2. **Hosted runtime wiring**
+   - expose `pollDeviceRefresh`, `snapshotAndAssignBundleHead`, `acknowledgeBundle`, and refresh-state reads through the PostgreSQL store facade without widening its public admin API;
+   - return the active immutable `device_key_epoch` and its exact public key from the device-auth lookup path;
+   - introduce a purpose-separated `refresh-hint` signer instead of treating the bundle-signing key as an implicit general signer;
+   - have the Cloud layer construct and sign the hint from authoritative state; repository rows must never masquerade as signed hints;
+   - fail closed when nonce key, signer, active key epoch, or authority state is unavailable.
+3. **Commit-coupled authority reductions**
+   - route emergency stop, device revoke, member removal/role reduction, policy narrowing, credential/session epoch invalidation, and capability revocation through one transaction helper;
+   - acquire the organization authority lock in one documented order, mutate authority, increment generation, enqueue every affected device, and append admin audit before commit;
+   - prove rollback leaves no mutation, generation, outbox row, audit row, or observable notification;
+   - make exact idempotent replay return the committed generation without incrementing it again.
+4. **Bounded publication and long-poll**
+   - add one dedicated PostgreSQL notification listener per Cloud process, with an initial query and final query as correctness fallbacks;
+   - use notifications only as wake-up hints; correctness always comes from the committed generation query;
+   - cap waits at 30 seconds, listeners and waiter count per process, response size, delivery retries, and retry age;
+   - record only fixed-label metrics for propagation latency, active waiters, delivery failures, stale ACKs, and queue age;
+   - return `204` for no change and never return policy, capability, or authority bodies from the refresh route.
+5. **Real-boundary qualification**
+   - run migrations and repository operations against PostgreSQL 17, including two connections racing reduction, bundle assignment, polling, and ACK;
+   - kill one Cloud process after commit and before publish, then prove another process serves the same generation and nonce;
+   - reorder and duplicate notifications and ACKs, rotate the nonce/signing key, and inject database/signer timeouts;
+   - publish a G4.1 evidence report with p50/p95/p99 propagation latency and bounded resource counts.
+
+G4.1 is complete only when all five steps pass. HTTP contract tests or migration tests alone do not satisfy this gate.
 
 ### G4.2 Native fetch and atomic install
 
@@ -255,3 +290,22 @@ Every merged slice must include:
 - a changelog entry and traceability from requirement to test.
 
 “Implemented” means code and local tests exist. “Qualified” means the real boundary and exit scenario pass. “Production-ready” is reserved for the final G7.2 evidence index.
+
+## 11. Immediate delivery backlog
+
+| Priority | Deliverable | Depends on | Completion evidence |
+| --- | --- | --- | --- |
+| P0 | G4.1 nonce-key contract and migration follow-up | current `0012` checkpoint | cross-process known-answer and rotation tests; raw nonce absent from SQL/logs |
+| P0 | PostgreSQL store/device-auth wiring | nonce contract | hosted API integration test proves poll, fetch, and signed ACK use the active key epoch |
+| P0 | atomic reduction integration | store wiring | rollback/idempotency/race matrix on PostgreSQL 17 |
+| P0 | notification listener and bounded long-poll | atomic reduction | two-instance failover and resource-bound tests |
+| P1 | G4.2 Swift refresh state machine and atomic install | qualified G4.1 | crash-at-every-write-boundary suite plus offline-expiry denial |
+| P1 | G4.3 Console device state/actions | native ACK path | Playwright role/recent-auth tests and physical-Mac ACK observation |
+| P1 | G5.1 shared abuse controls | stable G4 identifiers | two-instance token-bucket and session-epoch races |
+| P1 | G7.1 signer interface and managed adapter | signer purpose contract | conformance, outage, IAM, and rotation evidence |
+| P2 | G5.2 threshold recovery and notifications | abuse controls | threshold/replay/concurrency/secret-scan suite |
+| P2 | G6.1 browser qualification | G4.3 and G5.2 | full Playwright report and artifact secret scan |
+| P2 | G6.2 physical Mac qualification | G6.1 and managed signer | notarized PKG report bound to source and artifact digest |
+| P2 | G7.2 production deployment/release gate | all prior gates | restore/canary/rollback drills, independent review, zero unresolved high findings |
+
+Recommended execution order is the table order. G5.1 and the provider-neutral portion of G7.1 may run in parallel with G4.2 after the G4.1 identifiers and signer-purpose contract are frozen; production qualification remains serialized at G6/G7.2.

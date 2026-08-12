@@ -1,6 +1,15 @@
 import crypto from "node:crypto";
 
-import { canonicalJson, normalizeAuditEvent, normalizeScope } from "../../../../packages/protocol/src/index.mjs";
+import {
+  BUNDLE_ACK_REASON_CODES,
+  BUNDLE_ACK_RESULTS,
+  BUNDLE_ACK_TYPE,
+  DEVICE_REFRESH_STATES,
+  canonicalJson,
+  normalizeAuditEvent,
+  normalizeBundleAcknowledgement,
+  normalizeScope
+} from "../../../../packages/protocol/src/index.mjs";
 import { auditCursorBinding, createAuditCursorCodec, normalizeAuditPageInput } from "../audit-pagination.mjs";
 import { createCapabilityAuthorityRepository } from "./capability-authority-repository.mjs";
 import { assertTenantId, PostgresRepositoryError, withTransaction } from "./repository.mjs";
@@ -15,6 +24,12 @@ const TARGET_TABLES = Object.freeze({ device: "devices", agent: "agents", capabi
 const REVOCATION_TARGETS = new Set(["organization", "device", "agent", "capability"]);
 const ACK_STATUSES = new Set(["applied", "blocked"]);
 const IDEMPOTENCY_KEY = /^[A-Za-z0-9._~-]{8,255}$/u;
+const REFRESH_NONCE_BYTES = 16;
+const MAX_REFRESH_WAIT_MS = 30_000;
+const MAX_REFRESH_TTL_MS = 5 * 60 * 1000;
+const REFRESH_STATE_SET = new Set(DEVICE_REFRESH_STATES);
+const ACK_RESULT_SET = new Set(BUNDLE_ACK_RESULTS);
+const ACK_REASON_SET = new Set(BUNDLE_ACK_REASON_CODES);
 
 /**
  * These are intentionally public metadata, not a migration shim.  They make
@@ -201,11 +216,19 @@ export function createControlPlaneAuthorityRepository({ client, cursorCodec, cur
         ...values,
         stateFingerprint: snapshot.state_fingerprint
       });
-      return Object.freeze({ snapshot, head });
+      const stateResult = await tx.query(`SELECT desired_generation,observed_generation,refresh_state
+        FROM device_control_plane_state
+        WHERE organization_id=$1 AND device_id=$2
+        FOR UPDATE`, [values.organizationId, values.deviceId]);
+      if (rowCount(stateResult) !== 1) throw new ControlPlaneAuthorityRepositoryError("ERR_REFRESH_STATE_MISSING", "device refresh state was not found");
+      const desiredGeneration = positiveInteger(stateResult.rows[0].desired_generation, "desired_generation");
+      await bindOutboxToBundleStatement(tx, values.organizationId, values.deviceId, desiredGeneration, head);
+      return Object.freeze({ snapshot, head, desired_generation: desiredGeneration });
     }));
   }
 
   async function acknowledgeBundle(input = {}) {
+    if (isG4AcknowledgementInput(input)) return acknowledgeG4Bundle(input);
     const values = normalizeAcknowledgementInput(input, now);
     return databaseOperation(() => transaction(client, async (tx) => {
       await lockDevice(tx, values.organizationId, values.deviceId);
@@ -237,6 +260,142 @@ export function createControlPlaneAuthorityRepository({ client, cursorCodec, cur
       }
       return publicAcknowledgement(result.rows[0]);
     }));
+  }
+
+  async function acknowledgeG4Bundle(input) {
+    const values = normalizeG4AcknowledgementInput(input);
+    return databaseOperation(() => transaction(client, async (tx) => {
+      await lockDevice(tx, values.organizationId, values.deviceId);
+      await assertDevice(tx, values.organizationId, values.deviceId);
+      await assertActiveDeviceKeyEpoch(tx, values);
+
+      const existing = await tx.query(`SELECT organization_id,device_id,device_key_epoch,format_epoch,sequence,statement_hash,result,reason_code,observed_at,ack_nonce_digest
+        FROM device_bundle_acknowledgements
+        WHERE organization_id=$1 AND device_id=$2 AND device_key_epoch=$3 AND sequence=$4
+        FOR SHARE`, [values.organizationId, values.deviceId, values.deviceKeyEpoch, values.sequence]);
+      if (rowCount(existing) === 1) {
+        if (!sameG4Acknowledgement(existing.rows[0], values)) {
+          throw new ControlPlaneAuthorityRepositoryError("ERR_ACK_CONFLICT", "bundle acknowledgement conflicts with previous evidence");
+        }
+        return refreshAcknowledgementResponse(tx, values.organizationId, values.deviceId, true);
+      }
+
+      const currentHead = await tx.query(`SELECT format_epoch,sequence,statement_hash
+        FROM bundle_heads
+        WHERE organization_id=$1 AND device_id=$2
+        FOR SHARE`, [values.organizationId, values.deviceId]);
+      if (rowCount(currentHead) === 1 && Number(currentHead.rows[0].sequence) > values.sequence) {
+        throw new ControlPlaneAuthorityRepositoryError("ERR_ACK_SEQUENCE_ROLLBACK", "bundle acknowledgement sequence is older than the current bundle head");
+      }
+      if (rowCount(currentHead) !== 1 || Number(currentHead.rows[0].format_epoch) !== values.formatEpoch
+        || Number(currentHead.rows[0].sequence) !== values.sequence || currentHead.rows[0].statement_hash !== values.statementHash) {
+        throw new ControlPlaneAuthorityRepositoryError("ERR_BUNDLE_HEAD_MISMATCH", "bundle acknowledgement does not match the current bundle head");
+      }
+
+      const history = await tx.query(`SELECT organization_id,device_id,format_epoch,sequence,statement_hash,authority_generation,issued_at,expires_at
+        FROM control_bundle_statements
+        WHERE organization_id=$1 AND device_id=$2 AND format_epoch=$3 AND sequence=$4 AND statement_hash=$5
+        FOR SHARE`, [values.organizationId, values.deviceId, values.formatEpoch, values.sequence, values.statementHash]);
+      if (rowCount(history) !== 1) throw new ControlPlaneAuthorityRepositoryError("ERR_BUNDLE_STATEMENT_NOT_FOUND", "bundle statement history was not found");
+
+      const outbox = await tx.query(`SELECT organization_id,device_id,desired_generation,format_epoch,sequence,statement_hash,status
+        FROM device_refresh_outbox
+        WHERE organization_id=$1 AND device_id=$2 AND format_epoch=$3 AND sequence=$4 AND statement_hash=$5
+        LIMIT 1 FOR SHARE`, [values.organizationId, values.deviceId, values.formatEpoch, values.sequence, values.statementHash]);
+      if (rowCount(outbox) !== 1) throw new ControlPlaneAuthorityRepositoryError("ERR_BUNDLE_OUTBOX_NOT_FOUND", "bundle refresh outbox binding was not found");
+
+      let persisted;
+      try {
+        persisted = await tx.query(`SELECT accepted,duplicate
+          FROM agentpass_record_device_bundle_ack($1::uuid,$2::uuid,$3::bigint,$4::integer,$5::bigint,$6::text,$7::text,$8::text,$9::timestamptz,$10::bytea)`, [
+          values.organizationId, values.deviceId, values.deviceKeyEpoch, values.formatEpoch, values.sequence,
+          values.statementHash, values.result, values.reasonCode, values.observedAt, values.ackNonceDigest
+        ]);
+      } catch (error) {
+        if (error?.code === "23505" || error?.code === "23514") {
+          throw new ControlPlaneAuthorityRepositoryError("ERR_ACK_CONFLICT", "bundle acknowledgement conflicts with previous evidence", undefined, error);
+        }
+        throw error;
+      }
+      if (rowCount(persisted) !== 1 || persisted.rows[0].accepted !== true) {
+        throw new ControlPlaneAuthorityRepositoryError("ERR_ACK_NOT_ACCEPTED", "bundle acknowledgement was not accepted");
+      }
+      return refreshAcknowledgementResponse(tx, values.organizationId, values.deviceId, persisted.rows[0].duplicate === true);
+    }));
+  }
+
+  async function advanceAuthorityGenerationAndEnqueueRefresh(input = {}) {
+    const values = normalizeAuthorityAdvanceInput(input, now);
+    return databaseOperation(() => transaction(client, async (tx) => {
+      // This is the repository-wide organization lock. The migration helper
+      // takes its own compatible generation lock as well; keeping this lock
+      // first makes reductions and bundle snapshots share one ordering point.
+      await lockOrganization(tx, values.organizationId);
+      await lockOrganizationRow(tx, values.organizationId);
+      let revocation;
+      if (values.reduction !== undefined) {
+        await assertActiveMember(tx, values.organizationId, values.reduction.createdBy);
+        await assertRevocationTarget(tx, values.reduction);
+        revocation = await insertRevocationInTransaction(tx, values.reduction);
+      }
+      const generationResult = await tx.query(`SELECT organization_id,generation
+        FROM agentpass_advance_authority_generation($1::uuid,$2::timestamptz)`, [values.organizationId, values.issuedAt]);
+      if (rowCount(generationResult) !== 1) throw new ControlPlaneAuthorityRepositoryError("ERR_DB_RESULT", "authority generation advance did not return a row");
+      const generation = positiveInteger(generationResult.rows[0].generation, "generation");
+      const devices = await tx.query(`SELECT id
+        FROM devices
+        WHERE organization_id=$1
+        ORDER BY id ASC
+        FOR UPDATE`, [values.organizationId]);
+      const enqueued = [];
+      for (const row of devices.rows ?? []) {
+        const deviceId = uuid(row.id, "device_id");
+        const nonce = refreshNonceForDevice(values, deviceId);
+        const outboxId = refreshOutboxIdForDevice(values, deviceId);
+        const result = await tx.query(`SELECT outbox_id,desired_generation,replayed
+          FROM agentpass_request_device_refresh($1::uuid,$2::uuid,$3::uuid,$4::bigint,$5::bytea,$6::timestamptz)`, [
+          outboxId, values.organizationId, deviceId, generation, nonce.digest, values.expiresAt
+        ]);
+        if (rowCount(result) !== 1) throw new ControlPlaneAuthorityRepositoryError("ERR_DB_RESULT", "device refresh enqueue did not return a row");
+        enqueued.push(Object.freeze({
+          device_id: deviceId,
+          outbox_id: uuid(result.rows[0].outbox_id, "outbox_id"),
+          desired_generation: positiveInteger(result.rows[0].desired_generation, "desired_generation"),
+          replayed: result.rows[0].replayed === true,
+          refresh_nonce: nonce.value
+        }));
+      }
+      return Object.freeze({ organization_id: values.organizationId, generation, devices: Object.freeze(enqueued), ...(revocation === undefined ? {} : { revocation }) });
+    }));
+  }
+
+  async function getDeviceRefreshState(input = {}) {
+    const values = normalizeRefreshStateKey(input);
+    return databaseOperation(async () => {
+      const result = await client.query(`SELECT organization_id,device_id,desired_generation,observed_generation,refresh_state,
+          refresh_requested_at,last_delivered_at,last_observed_at,last_error_code,updated_at
+        FROM device_control_plane_state
+        WHERE organization_id=$1 AND device_id=$2
+        LIMIT 1`, [values.organizationId, values.deviceId]);
+      if (rowCount(result) !== 1) throw new ControlPlaneAuthorityRepositoryError("ERR_NOT_FOUND", "device refresh state was not found");
+      return publicRefreshState(result.rows[0]);
+    });
+  }
+
+  async function pollDeviceRefresh(input = {}) {
+    const values = normalizeRefreshPollInput(input);
+    return databaseOperation(async () => {
+      // Deliberately one bounded query. Long-poll orchestration belongs to the
+      // Cloud layer and must not create a database busy-wait loop here.
+      const result = await client.query(`SELECT organization_id,device_id,desired_generation,observed_generation,refresh_state,
+          refresh_requested_at,last_delivered_at,last_observed_at,last_error_code,updated_at
+        FROM device_control_plane_state
+        WHERE organization_id=$1 AND device_id=$2 AND desired_generation>$3
+        ORDER BY desired_generation ASC
+        LIMIT 1`, [values.organizationId, values.deviceId, values.afterGeneration]);
+      if (rowCount(result) !== 1) return null;
+      return publicRefreshState(result.rows[0]);
+    });
   }
 
   async function getBundleAcknowledgement(input = {}) {
@@ -359,11 +518,14 @@ export function createControlPlaneAuthorityRepository({ client, cursorCodec, cur
   return Object.freeze({
     acknowledgeBundle,
     acknowledgeControlBundle: acknowledgeBundle,
+    advanceAuthorityGeneration: advanceAuthorityGenerationAndEnqueueRefresh,
+    advanceAuthorityGenerationAndEnqueueRefresh,
     appendDeviceAuditEvent,
     assignBundleHead,
     createRevocation,
     getAuditHealth,
     getBundleAcknowledgement,
+    getDeviceRefreshState,
     getRevocation,
     ingestDeviceAuditEvents,
     snapshotAndAssignBundleHead,
@@ -371,6 +533,9 @@ export function createControlPlaneAuthorityRepository({ client, cursorCodec, cur
     listDeviceAuditEvents,
     listRevocations,
     listRevokedCapabilityIds: capabilityAuthority.listRevokedCapabilityIds,
+    pollDeviceRefresh,
+    reduceAuthority: advanceAuthorityGenerationAndEnqueueRefresh,
+    reduceAuthorityAndEnqueueRefresh: advanceAuthorityGenerationAndEnqueueRefresh,
     revoke: createRevocation,
     revokeActiveCapabilitiesForMember: capabilityAuthority.revokeActiveCapabilitiesForMember
   });
@@ -442,6 +607,136 @@ function normalizeAcknowledgementKey(input) {
   return { organizationId, deviceId, formatEpoch, sequence, statementHash };
 }
 
+function isG4AcknowledgementInput(input) {
+  return isObject(input) && (input.type === BUNDLE_ACK_TYPE || input.result !== undefined || input.nonce !== undefined || input.signature !== undefined);
+}
+
+function normalizeG4AcknowledgementInput(input) {
+  let normalized;
+  try {
+    normalized = normalizeBundleAcknowledgement(input);
+  } catch (error) {
+    throw new ControlPlaneAuthorityRepositoryError("ERR_ACK_INVALID", "bundle acknowledgement input is invalid", undefined, error);
+  }
+  const organizationId = tenant(normalized.organization_id);
+  const deviceId = uuid(normalized.device_id, "device_id");
+  const nonceBytes = decodeBase64Url(normalized.nonce, "nonce", REFRESH_NONCE_BYTES);
+  return Object.freeze({
+    ...normalized,
+    organizationId,
+    deviceId,
+    deviceKeyEpoch: positiveInteger(normalized.device_key_epoch, "device_key_epoch"),
+    formatEpoch: positiveInteger(normalized.format_epoch, "format_epoch"),
+    sequence: positiveInteger(normalized.sequence, "sequence"),
+    statementHash: hash(normalized.statement_hash, "statement_hash"),
+    result: textEnum(normalized.result, ACK_RESULT_SET, "result"),
+    reasonCode: normalized.reason_code === undefined ? null : textEnum(normalized.reason_code, ACK_REASON_SET, "reason_code"),
+    observedAt: timestamp(normalized.observed_at, "observed_at"),
+    ackNonceDigest: crypto.createHash("sha256").update(nonceBytes).digest()
+  });
+}
+
+function sameG4Acknowledgement(row, values) {
+  return row.organization_id === values.organizationId
+    && row.device_id === values.deviceId
+    && Number(row.device_key_epoch) === values.deviceKeyEpoch
+    && Number(row.format_epoch) === values.formatEpoch
+    && Number(row.sequence) === values.sequence
+    && row.statement_hash === values.statementHash
+    && row.result === values.result
+    && (row.reason_code ?? null) === values.reasonCode
+    && timestamp(row.observed_at, "observed_at") === values.observedAt
+    && Buffer.isBuffer(row.ack_nonce_digest)
+    && row.ack_nonce_digest.length === values.ackNonceDigest.length
+    && crypto.timingSafeEqual(row.ack_nonce_digest, values.ackNonceDigest);
+}
+
+function normalizeAuthorityAdvanceInput(input, now) {
+  if (!isObject(input)) throw new ControlPlaneAuthorityRepositoryError("ERR_INPUT", "authority advance input must be an object");
+  const organizationId = tenant(input.organization_id ?? input.organizationId);
+  const issuedAt = timestamp(input.issued_at ?? input.issuedAt ?? now(), "issued_at");
+  const expiresAt = timestamp(input.expires_at ?? input.expiresAt ?? new Date(Date.parse(issuedAt) + MAX_REFRESH_TTL_MS).toISOString(), "expires_at");
+  const ttl = Date.parse(expiresAt) - Date.parse(issuedAt);
+  if (ttl < 1 || ttl > MAX_REFRESH_TTL_MS) throw new ControlPlaneAuthorityRepositoryError("ERR_TIMESTAMP", "refresh expiry must be within five minutes after issuance");
+  const nonces = input.refresh_nonces ?? input.refreshNonces ?? input.device_nonces ?? input.deviceNonces;
+  const nonceDigests = input.refresh_nonce_digests ?? input.refreshNonceDigests ?? input.device_nonce_digests ?? input.deviceNonceDigests;
+  const outboxIds = input.outbox_ids ?? input.outboxIds;
+  const reductionInput = input.reduction ?? input.revocation ?? (input.target_type !== undefined ? input : undefined);
+  const reduction = reductionInput === undefined ? undefined : normalizeRevocationInput({ ...input, ...reductionInput, organization_id: organizationId }, now);
+  if (nonces !== undefined && !isObject(nonces)) throw new ControlPlaneAuthorityRepositoryError("ERR_INPUT", "refresh_nonces must be an object");
+  if (nonceDigests !== undefined && !isObject(nonceDigests)) throw new ControlPlaneAuthorityRepositoryError("ERR_INPUT", "refresh_nonce_digests must be an object");
+  if (outboxIds !== undefined && !isObject(outboxIds)) throw new ControlPlaneAuthorityRepositoryError("ERR_INPUT", "outbox_ids must be an object");
+  return Object.freeze({ organizationId, issuedAt, expiresAt, nonces, nonceDigests, outboxIds, reduction });
+}
+
+function refreshNonceForDevice(values, deviceId) {
+  const raw = values.nonces?.[deviceId];
+  if (raw !== undefined) {
+    const bytes = decodeBase64Url(raw, "refresh_nonce", REFRESH_NONCE_BYTES);
+    return { value: bytes.toString("base64url"), digest: crypto.createHash("sha256").update(bytes).digest() };
+  }
+  const digestInput = values.nonceDigests?.[deviceId];
+  if (digestInput !== undefined) return { value: null, digest: decodeDigest(digestInput, "refresh_nonce_digest") };
+  const bytes = crypto.randomBytes(REFRESH_NONCE_BYTES);
+  return { value: bytes.toString("base64url"), digest: crypto.createHash("sha256").update(bytes).digest() };
+}
+
+function refreshOutboxIdForDevice(values, deviceId) {
+  const supplied = values.outboxIds?.[deviceId];
+  return supplied === undefined ? crypto.randomUUID() : uuid(supplied, "outbox_id");
+}
+
+function normalizeRefreshStateKey(input) {
+  if (!isObject(input)) throw new ControlPlaneAuthorityRepositoryError("ERR_INPUT", "refresh state input must be an object");
+  return { organizationId: tenant(input.organization_id ?? input.organizationId), deviceId: uuid(input.device_id ?? input.deviceId, "device_id") };
+}
+
+function normalizeRefreshPollInput(input) {
+  const key = normalizeRefreshStateKey(input);
+  const afterGeneration = nonNegativeInteger(input.after_generation ?? input.afterGeneration ?? 0, "after_generation");
+  const waitMs = input.wait_ms ?? input.waitMs ?? 0;
+  if (!Number.isSafeInteger(waitMs) || waitMs < 0 || waitMs > MAX_REFRESH_WAIT_MS) throw new ControlPlaneAuthorityRepositoryError("ERR_LIMIT", "wait_ms must be between 0 and 30000");
+  return { ...key, afterGeneration, waitMs };
+}
+
+function publicRefreshState(row) {
+  if (!row || typeof row !== "object") throw new ControlPlaneAuthorityRepositoryError("ERR_DB_RESULT", "device refresh state query returned an invalid row");
+  return Object.freeze({
+    organization_id: uuid(row.organization_id, "organization_id"),
+    device_id: uuid(row.device_id, "device_id"),
+    desired_generation: positiveInteger(row.desired_generation, "desired_generation"),
+    observed_generation: nullablePositiveInteger(row.observed_generation, "observed_generation"),
+    refresh_state: refreshState(row.refresh_state),
+    refresh_requested_at: timestamp(row.refresh_requested_at, "refresh_requested_at"),
+    last_delivered_at: nullableTimestamp(row.last_delivered_at, "last_delivered_at"),
+    last_observed_at: nullableTimestamp(row.last_observed_at, "last_observed_at"),
+    last_error_code: row.last_error_code === null || row.last_error_code === undefined ? null : boundedText(row.last_error_code, "last_error_code", 128),
+    updated_at: timestamp(row.updated_at, "updated_at")
+  });
+}
+
+function refreshState(value) { return textEnum(value, REFRESH_STATE_SET, "refresh_state"); }
+function nullableTimestamp(value, field) { return value === null || value === undefined ? null : timestamp(value, field); }
+function nullablePositiveInteger(value, field) { return value === null || value === undefined ? null : positiveInteger(value, field); }
+function nonNegativeInteger(value, field) {
+  const number = typeof value === "string" && /^[0-9]+$/u.test(value) ? Number(value) : value;
+  if (!Number.isSafeInteger(number) || number < 0) throw new ControlPlaneAuthorityRepositoryError("ERR_INTEGER", `${field} must be a non-negative safe integer`);
+  return number;
+}
+function decodeBase64Url(value, field, expectedBytes) {
+  const expectedLength = Math.ceil(expectedBytes * 8 / 6);
+  if (typeof value !== "string" || !new RegExp(`^[A-Za-z0-9_-]{${expectedLength}}$`, "u").test(value)) throw new ControlPlaneAuthorityRepositoryError("ERR_INPUT", `${field} must be canonical base64url`);
+  const bytes = Buffer.from(value, "base64url");
+  if (bytes.length !== expectedBytes || bytes.toString("base64url") !== value) throw new ControlPlaneAuthorityRepositoryError("ERR_INPUT", `${field} must be canonical base64url`);
+  return bytes;
+}
+function decodeDigest(value, field) {
+  if (Buffer.isBuffer(value) && value.length === 32) return Buffer.from(value);
+  if (value instanceof Uint8Array && value.length === 32) return Buffer.from(value);
+  if (typeof value === "string" && SHA256.test(value)) return Buffer.from(value, "hex");
+  throw new ControlPlaneAuthorityRepositoryError("ERR_INPUT", `${field} must be a 32-byte digest`);
+}
+
 function normalizeAuditInput(input) {
   if (!isObject(input)) throw new ControlPlaneAuthorityRepositoryError("ERR_INPUT", "audit ingestion input must be an object");
   const organizationId = tenant(input.organization_id ?? input.organizationId);
@@ -477,6 +772,37 @@ async function assertRevocationTarget(tx, values) {
   if (rowCount(result) !== 1) throw new ControlPlaneAuthorityRepositoryError("ERR_NOT_FOUND", "revocation target was not found");
 }
 
+async function insertRevocationInTransaction(tx, values) {
+  const active = await tx.query(`SELECT organization_id,id AS revocation_id,target_type,target_id,sequence,reason,status,created_by,revoked_by,created_at,revoked_at,version
+    FROM revocations
+    WHERE organization_id=$1 AND target_type=$2 AND target_id IS NOT DISTINCT FROM $3 AND status='active'
+    FOR UPDATE`, [values.organizationId, values.targetType, values.databaseTargetId]);
+  if (rowCount(active) > 0 && active.rows[0].revocation_id !== values.revocationId) {
+    throw new ControlPlaneAuthorityRepositoryError("ERR_ALREADY_REVOKED", "the target is already revoked");
+  }
+  const sequenceResult = await tx.query(`SELECT COALESCE(MAX(sequence),0)+1 AS sequence
+    FROM revocations WHERE organization_id=$1`, [values.organizationId]);
+  const sequence = positiveInteger(sequenceResult.rows?.[0]?.sequence, "sequence");
+  let result = await tx.query(`INSERT INTO revocations
+    (organization_id,id,target_type,target_id,sequence,reason,status,created_by,revoked_by,created_at,revoked_at)
+    VALUES ($1,$2,$3,$4,$5,$6,'active',$7,$7,$8::timestamptz,$8::timestamptz)
+    ON CONFLICT (organization_id,id) DO NOTHING
+    RETURNING organization_id,id AS revocation_id,target_type,target_id,sequence,reason,status,created_by,revoked_by,created_at,revoked_at,version`, [
+    values.organizationId, values.revocationId, values.targetType, values.databaseTargetId,
+    sequence, values.reason, values.createdBy, values.createdAt
+  ]);
+  let replayed = false;
+  if (rowCount(result) !== 1) {
+    result = await tx.query(`SELECT organization_id,id AS revocation_id,target_type,target_id,sequence,reason,status,created_by,revoked_by,created_at,revoked_at,version
+      FROM revocations WHERE organization_id=$1 AND id=$2 FOR UPDATE`, [values.organizationId, values.revocationId]);
+    if (rowCount(result) !== 1 || !sameRevocation(result.rows[0], values)) {
+      throw new ControlPlaneAuthorityRepositoryError("ERR_REVOCATION_CONFLICT", "revocation identity conflicts with another request");
+    }
+    replayed = true;
+  }
+  return publicRevocation(result.rows[0], replayed);
+}
+
 async function assertActiveMember(tx, organizationId, memberId) {
   const result = await tx.query(`SELECT member_id FROM memberships WHERE organization_id=$1 AND member_id=$2 AND status='active' FOR SHARE`, [organizationId, memberId]);
   if (rowCount(result) !== 1) throw new ControlPlaneAuthorityRepositoryError("ERR_MEMBER_NOT_ACTIVE", "revocation actor is not an active organization member");
@@ -495,6 +821,42 @@ async function assertAuditAgents(tx, organizationId, deviceId, events) {
   if (found.size !== agentIds.length || agentIds.some((id) => !found.has(id.toLowerCase()))) {
     throw new ControlPlaneAuthorityRepositoryError("ERR_AUDIT_DEVICE_MISMATCH", "audit agent is not bound to the authenticated device");
   }
+}
+
+async function bindOutboxToBundleStatement(tx, organizationId, deviceId, desiredGeneration, head) {
+  const result = await tx.query(`UPDATE device_refresh_outbox
+    SET format_epoch=$3,sequence=$4,statement_hash=$5
+    WHERE organization_id=$1 AND device_id=$2 AND desired_generation=$6
+      AND status IN ('pending','delivered')
+      AND format_epoch IS NULL AND sequence IS NULL AND statement_hash IS NULL
+    RETURNING outbox_id,desired_generation,format_epoch,sequence,statement_hash`, [
+    organizationId, deviceId, head.format_epoch ?? 2, head.sequence, head.statement_hash, desiredGeneration
+  ]);
+  for (const row of result.rows ?? []) uuid(row.outbox_id, "outbox_id");
+}
+
+async function assertActiveDeviceKeyEpoch(tx, values) {
+  const result = await tx.query(`SELECT epochs.organization_id,epochs.device_id,epochs.key_epoch,epochs.status
+    FROM device_key_epochs epochs
+    JOIN devices devices
+      ON devices.organization_id=epochs.organization_id AND devices.id=epochs.device_id
+    WHERE epochs.organization_id=$1 AND epochs.device_id=$2 AND epochs.key_epoch=$3
+      AND epochs.status='active' AND devices.status='active'
+    FOR SHARE`, [values.organizationId, values.deviceId, values.deviceKeyEpoch]);
+  if (rowCount(result) !== 1) throw new ControlPlaneAuthorityRepositoryError("ERR_ACK_KEY_EPOCH_STALE", "device acknowledgement key epoch is not active");
+}
+
+async function refreshAcknowledgementResponse(tx, organizationId, deviceId, duplicate) {
+  const state = await tx.query(`SELECT desired_generation,observed_generation,refresh_state
+    FROM device_control_plane_state
+    WHERE organization_id=$1 AND device_id=$2
+    FOR SHARE`, [organizationId, deviceId]);
+  if (rowCount(state) !== 1) throw new ControlPlaneAuthorityRepositoryError("ERR_REFRESH_STATE_MISSING", "device refresh state was not found");
+  return Object.freeze({
+    duplicate: duplicate === true,
+    observed_generation: nullablePositiveInteger(state.rows[0].observed_generation, "observed_generation"),
+    refresh_state: refreshState(state.rows[0].refresh_state)
+  });
 }
 
 async function lockOrganization(tx, organizationId) {

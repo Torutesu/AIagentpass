@@ -3,6 +3,12 @@ import http from "node:http";
 import { authenticateApiToken, createReplayCache, requireOrganizationRole, verifyDeviceRequest } from "./auth.mjs";
 import { MAX_REVOCATIONS, issueControlBundle, parseControlBundleJson } from "../../../lib/control-bundle-v2.mjs";
 import { canonicalJson, intersectScopes } from "../../../packages/capability/src/index.mjs";
+import {
+  bundleAcknowledgementSigningData,
+  normalizeRefreshHint,
+  parseBundleAcknowledgementJson,
+  refreshHintSigningData
+} from "../../../packages/protocol/src/index.mjs";
 import { RateLimiterCapacityError, createRateLimiter } from "./rate-limit.mjs";
 
 const MAX_BODY_BYTES = 1024 * 1024;
@@ -101,7 +107,7 @@ export function createCloudApi({ store, tokenRecords = [], bundleSigner, now = (
       let principal;
       if (route.device) {
         const devices = await store.listDevices({ organizationId });
-        principal = verifyDeviceRequest({ method: request.method, path: request.url, body: bodyBytes, headers: request.headers }, devices, { organizationId, now: now(), replayCache, deferReplayConsumption: deviceReplayConsumer !== undefined });
+        principal = verifyDeviceRequest({ method: request.method, path: request.url, body: bodyBytes, headers: request.headers }, devices, { organizationId, now: now(), replayCache, deferReplayConsumption: deviceReplayConsumer !== undefined, includeAuthenticationMetadata: true });
         if (deviceReplayConsumer !== undefined) {
           let accepted = false;
           try { accepted = await deviceReplayConsumer({ organizationId, deviceId: principal.device_id, nonce: request.headers["agentpass-nonce"] }); }
@@ -134,7 +140,8 @@ export function createCloudApi({ store, tokenRecords = [], bundleSigner, now = (
       const result = await route.handle(context);
       const gapCount = result?.body?.ingestion?.gaps?.length;
       if (Number.isSafeInteger(gapCount) && gapCount > 0) recordOperationalMetric(operationalMetrics, "recordAuditGap", gapCount);
-      send(response, result.status ?? 200, { ...result.body, request_id: requestId }, { ...rateLimitHeaders(rateLimit), ...result.headers });
+      if (result.status === 204) sendNoContent(response, { ...rateLimitHeaders(rateLimit), ...result.headers });
+      else send(response, result.status ?? 200, { ...result.body, request_id: requestId }, { ...rateLimitHeaders(rateLimit), ...result.headers });
     } catch (error) {
       if (error?.code === "ERR_BUNDLE_HEAD_MISMATCH") recordOperationalMetric(operationalMetrics, "recordStaleAck");
       if (hasErrorCode(error, "55P03")) recordOperationalMetric(operationalMetrics, "recordLockTimeout");
@@ -279,6 +286,31 @@ export function createCloudApi({ store, tokenRecords = [], bundleSigner, now = (
         rejectUnknown(body, new Set(["batch_id", "events"]), "audit_ingestion");
         return { status: 202, body: { ingestion: await store.ingestDeviceAuditEvents({ organizationId, deviceId: principal.device_id, events: body.events, idempotencyKey: body.batch_id ?? crypto.randomUUID() }) } };
       }, true),
+      route("GET", new RegExp(`^/v1/organizations/(?<organizationId>${UUID})/devices/(?<deviceId>${UUID})/refresh$`), null, async ({ organizationId, principal, match, url, request }) => {
+        if (principal.device_id !== match.deviceId) throw apiError("audience_mismatch", 403, "Device cannot poll another device's refresh state");
+        if (typeof store.pollDeviceRefresh !== "function") throw apiError("refresh_unavailable", 503, "Refresh polling is unavailable");
+        requireExactQueryKeys(url, new Set(["after_generation", "wait_ms"]));
+        const afterGeneration = optionalBoundedIntegerQuery(url, "after_generation", 0, Number.MAX_SAFE_INTEGER, 0);
+        const waitMs = optionalBoundedIntegerQuery(url, "wait_ms", 0, 30_000, 0);
+        const abort = new AbortController();
+        const previousSocketTimeout = request.socket?.timeout;
+        if (request.socket && waitMs > 10_000) request.socket.setTimeout(waitMs + 5_000);
+        const disconnected = () => abort.abort();
+        request.once("aborted", disconnected);
+        request.once("close", disconnected);
+        let result;
+        try {
+          result = await store.pollDeviceRefresh({ organization_id: organizationId, device_id: match.deviceId, after_generation: afterGeneration, wait_ms: waitMs, signal: abort.signal });
+        } finally {
+          request.off("aborted", disconnected);
+          request.off("close", disconnected);
+          if (request.socket && Number.isFinite(previousSocketTimeout)) request.socket.setTimeout(previousSocketTimeout);
+        }
+        if (result === null || result === undefined) return { status: 204, body: undefined };
+        if (!result || typeof result !== "object" || Array.isArray(result) || Object.keys(result).sort().join(",") !== "hint") throw apiError("refresh_unavailable", 503, "Refresh polling is unavailable");
+        const hint = verifyRefreshHint(result.hint, bundleSigner, { organizationId, deviceId: match.deviceId, afterGeneration, now: now() });
+        return { body: { hint } };
+      }, true),
       route("GET", new RegExp(`^/v1/organizations/(?<organizationId>${UUID})/bundles/(?<deviceId>${UUID})$`), null, async ({ organizationId, principal, match }) => {
         if (principal.device_id !== match.deviceId) throw apiError("audience_mismatch", 403, "Device cannot fetch another device's bundle");
         if (!bundleSigner?.privateKey || !bundleSigner?.issuer || !bundleSigner?.keyId) throw apiError("bundle_signer_unavailable", 503, "Bundle signer is unavailable");
@@ -295,7 +327,7 @@ export function createCloudApi({ store, tokenRecords = [], bundleSigner, now = (
             revoked_agents: snapshot.revoked_agents, revoked_capabilities: snapshot.revoked_capabilities,
             offline_ttl_ms: bundleSigner.offlineTtlMs ?? 3_600_000, key_id: bundleSigner.keyId
           }, bundleSigner.privateKey, { now: issuedMs, maxTtlMs: ttlMs, maxOfflineTtlMs: bundleSigner.offlineTtlMs ?? 3_600_000 });
-          return { body: { bundle } };
+          return { body: { bundle, desired_generation: positiveGeneration(authority.desired_generation ?? head.sequence) } };
         }
         const policies = await store.listPolicies({ organizationId });
         const active = policies.filter((policy) => policy.status === "active").sort((a, b) => b.sequence - a.sequence)[0];
@@ -334,7 +366,28 @@ export function createCloudApi({ store, tokenRecords = [], bundleSigner, now = (
             offline_ttl_ms: bundleSigner.offlineTtlMs ?? 3_600_000,
             key_id: bundleSigner.keyId
           }, bundleSigner.privateKey, { now: issuedMs, maxTtlMs: ttlMs, maxOfflineTtlMs: bundleSigner.offlineTtlMs ?? 3_600_000 });
-        return { body: { bundle } };
+        return { body: { bundle, desired_generation: positiveGeneration(head.desired_generation ?? head.sequence) } };
+      }, true),
+      route("POST", new RegExp(`^/v1/organizations/(?<organizationId>${UUID})/bundles/(?<deviceId>${UUID})/acknowledgements$`), null, async ({ organizationId, principal, match, bodyBytes }) => {
+        if (principal.device_id !== match.deviceId) throw apiError("audience_mismatch", 403, "Device cannot acknowledge another device's bundle");
+        if (typeof store.acknowledgeBundle !== "function") throw apiError("acknowledgement_unavailable", 503, "Bundle acknowledgement is unavailable");
+        let acknowledgement;
+        try { acknowledgement = parseBundleAcknowledgementJson(bodyBytes); }
+        catch { throw apiError("invalid_acknowledgement", 400, "Bundle acknowledgement is invalid"); }
+        if (acknowledgement.organization_id !== organizationId || acknowledgement.device_id !== match.deviceId) {
+          throw apiError("acknowledgement_binding_mismatch", 400, "Bundle acknowledgement binding is invalid");
+        }
+        if (!Number.isSafeInteger(principal.key_epoch) || principal.key_epoch < 1 || acknowledgement.device_key_epoch !== principal.key_epoch) {
+          throw apiError("acknowledgement_key_epoch_mismatch", 409, "Bundle acknowledgement key epoch is stale");
+        }
+        verifyBundleAcknowledgementSignature(acknowledgement, principal.authentication_public_key);
+        const accepted = await store.acknowledgeBundle(acknowledgement);
+        if (!accepted || typeof accepted !== "object" || Array.isArray(accepted)
+          || typeof accepted.duplicate !== "boolean" || !Number.isSafeInteger(accepted.observed_generation) || accepted.observed_generation < 1
+          || !new Set(["pending", "fetching", "applied", "blocked", "stale", "offline", "revoked"]).has(accepted.refresh_state)) {
+          throw apiError("acknowledgement_unavailable", 503, "Bundle acknowledgement is unavailable");
+        }
+        return { status: 202, body: { accepted: true, duplicate: accepted.duplicate, observed_generation: accepted.observed_generation, refresh_state: accepted.refresh_state } };
       }, true),
       route("POST", new RegExp(`^/v1/organizations/(?<organizationId>${UUID})/emergency-stop$`), "owner", async ({ organizationId, body, idempotencyKey, principal }) => {
         rejectUnknown(body, new Set(["reason"]), "emergency_stop");
@@ -524,6 +577,54 @@ function optionalLimit(url) {
   if (!/^[1-9]\d{0,2}$/.test(value) || Number(value) > 500) throw apiError("invalid_query", 400, "limit is invalid");
   return Number(value);
 }
+
+function optionalBoundedIntegerQuery(url, name, minimum, maximum, fallback) {
+  const values = url.searchParams.getAll(name);
+  if (values.length > 1) throw apiError("invalid_query", 400, "query is invalid");
+  if (values.length === 0) return fallback;
+  if (!/^(?:0|[1-9]\d*)$/u.test(values[0])) throw apiError("invalid_query", 400, "query is invalid");
+  const value = Number(values[0]);
+  if (!Number.isSafeInteger(value) || value < minimum || value > maximum) throw apiError("invalid_query", 400, "query is invalid");
+  return value;
+}
+
+function positiveGeneration(value) {
+  const generation = Number(value);
+  if (!Number.isSafeInteger(generation) || generation < 1) throw apiError("bundle_generation_unavailable", 503, "Bundle generation is unavailable");
+  return generation;
+}
+
+function verifyRefreshHint(input, signer, { organizationId, deviceId, afterGeneration, now }) {
+  let hint;
+  try { hint = normalizeRefreshHint(input); }
+  catch { throw apiError("refresh_unavailable", 503, "Refresh polling is unavailable"); }
+  if (hint.organization_id !== organizationId || hint.device_id !== deviceId || hint.authority_generation <= afterGeneration) {
+    throw apiError("refresh_unavailable", 503, "Refresh polling is unavailable");
+  }
+  const publishedAt = Date.parse(hint.published_at);
+  const expiresAt = Date.parse(hint.expires_at);
+  if (publishedAt > now + 60_000 || expiresAt <= now) throw apiError("refresh_unavailable", 503, "Refresh polling is unavailable");
+  let publicKey;
+  try {
+    const source = signer?.publicKey ?? signer?.public_key ?? signer?.privateKey ?? signer?.private_key;
+    publicKey = source?.type === "public" ? source : crypto.createPublicKey(source);
+  } catch { throw apiError("refresh_unavailable", 503, "Refresh polling is unavailable"); }
+  if (publicKey.asymmetricKeyType !== "ed25519" || signer?.keyId !== hint.key_id) throw apiError("refresh_unavailable", 503, "Refresh polling is unavailable");
+  const signature = Buffer.from(hint.signature, "base64url");
+  if (!crypto.verify(null, refreshHintSigningData(hint), publicKey, signature)) throw apiError("refresh_unavailable", 503, "Refresh polling is unavailable");
+  return hint;
+}
+
+function verifyBundleAcknowledgementSignature(acknowledgement, publicKey) {
+  if (!publicKey || publicKey.asymmetricKeyType !== "ec" || publicKey.asymmetricKeyDetails?.namedCurve !== "prime256v1") {
+    throw apiError("invalid_acknowledgement_signature", 401, "Bundle acknowledgement signature is invalid");
+  }
+  const signature = Buffer.from(acknowledgement.signature, "base64url");
+  let valid = false;
+  try { valid = crypto.verify("sha256", bundleAcknowledgementSigningData(acknowledgement), { key: publicKey, dsaEncoding: "ieee-p1363" }, signature); }
+  catch { valid = false; }
+  if (!valid) throw apiError("invalid_acknowledgement_signature", 401, "Bundle acknowledgement signature is invalid");
+}
 function publicCapability(capability) {
   const { nonce, ...metadata } = capability;
   return metadata;
@@ -597,6 +698,11 @@ function send(response, status, value, headers = {}) {
   response.end(encoded);
 }
 
+function sendNoContent(response, headers = {}) {
+  response.writeHead(204, { "cache-control": "no-store", ...headers });
+  response.end();
+}
+
 function apiError(code, status, message, headers) { const error = new Error(message); error.code = code; error.status = status; if (headers) error.headers = headers; return error; }
 function mapError(error) {
   if (error.status) return error;
@@ -610,6 +716,7 @@ function mapError(error) {
   if (error.code === "ERR_ENROLLMENT_AUTH") return { status: 401, code: "invalid_enrollment_credential", message: "Device enrollment authentication failed" };
   if (["ERR_ENROLLMENT_EXPIRED", "ERR_ENROLLMENT_CONSUMED", "ERR_ENROLLMENT_STATE", "ERR_ENROLLMENT_BINDING"].includes(error.code)) return { status: 409, code: error.code.toLowerCase(), message: "Device enrollment conflict" };
   if (error.code === "ERR_VERSION_CONFLICT") return { status: 409, code: "version_conflict", message: "Resource version conflict" };
+  if (error.code === "ERR_ACK_CONFLICT") return { status: 409, code: "ack_conflict", message: "Bundle acknowledgement conflicts with prior evidence" };
   if (error.code === "ERR_IDEMPOTENCY_CONFLICT" || error.code === "ERR_UNIQUE_CONSTRAINT") return { status: 409, code: error.code.toLowerCase(), message: "Mutation conflict" };
   if (String(error.code).startsWith("ERR_")) return { status: 400, code: error.code.toLowerCase(), message: "Request was rejected" };
   return { status: 500, code: "internal_error", message: "Internal error" };

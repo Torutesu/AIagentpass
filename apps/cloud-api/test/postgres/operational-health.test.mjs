@@ -44,7 +44,7 @@ test("metrics are fixed-key, monotonic, and free of caller labels", () => {
   assert.throws(() => metrics.recordAuditGap(-1), { code: "invalid_input" });
 });
 
-test("readiness requires exact schema 11, verified checksums, a DB probe, and a non-waiting pool", async () => {
+test("readiness requires exact schema 12, verified checksums, a DB probe, and a non-waiting pool", async () => {
   const metrics = createOperationalMetrics();
   const drain = createDrainController();
   let probeCalls = 0;
@@ -60,7 +60,7 @@ test("readiness requires exact schema 11, verified checksums, a DB probe, and a 
   assert.equal(result.ready, true);
   assert.equal(result.status, "ready");
   assert.equal(result.code, "ready");
-  assert.equal(result.checks.schema.applied_version, 11);
+  assert.equal(result.checks.schema.applied_version, 12);
   assert.equal(result.checks.schema.schema_version_status, "exact");
   assert.equal(result.checks.schema.checksum_status, "verified");
   assert.equal(result.checks.schema.drift, false);
@@ -106,14 +106,14 @@ test("schema drift, DB failure, and malformed pool state fail closed without err
   const malformedSchema = createOperationalHealth({
     pool: pool(),
     drainController: createDrainController(),
-    migrationStatus: async () => ({ ...APPLIED, applied: APPLIED.applied.slice(0, 10), pending: [11] }),
+    migrationStatus: async () => ({ ...APPLIED, applied: APPLIED.applied.slice(0, 11), pending: [12] }),
     probe: async () => true
   });
   const schemaResult = await malformedSchema.readiness();
   assert.equal(schemaResult.ready, false);
   assert.equal(schemaResult.code, "schema_version_mismatch");
   assert.equal(schemaResult.checks.schema.schema_version_status, "mismatch");
-  assert.equal(schemaResult.checks.schema.applied_version, 10);
+  assert.equal(schemaResult.checks.schema.applied_version, 11);
 
   const invalidPool = createOperationalHealth({
     pool: pool({ idleCount: 9 }),

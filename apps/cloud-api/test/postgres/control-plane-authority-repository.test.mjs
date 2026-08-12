@@ -25,6 +25,7 @@ class FakeClient {
     this.calls = [];
     this.bundleSequence = 0;
     this.bundleHead = null;
+    this.refreshState = { organization_id: ids.organization, device_id: ids.device, desired_generation: 3, observed_generation: 2, refresh_state: "pending", refresh_requested_at: NOW, last_delivered_at: null, last_observed_at: NOW, last_error_code: null, updated_at: NOW };
   }
 
   async query(text, params = []) {
@@ -34,6 +35,17 @@ class FakeClient {
     if (text.startsWith("SELECT id FROM organizations")) return result([{ id: ids.organization }]);
     if (text.startsWith("SELECT member_id FROM memberships")) return result([{ member_id: ids.member }]);
     if (text.startsWith("SELECT id FROM devices")) return result([{ id: ids.device }]);
+    if (text.startsWith("SELECT id\n        FROM devices")) return result([{ id: ids.device }]);
+    if (text.startsWith("SELECT organization_id,generation")) return result([{ organization_id: ids.organization, generation: 3 }]);
+    if (text.startsWith("SELECT outbox_id,desired_generation,replayed")) return result([{ outbox_id: params[0], desired_generation: params[3], replayed: false }]);
+    if (text.startsWith("SELECT organization_id,device_id,desired_generation,observed_generation,refresh_state")) return result([this.refreshState]);
+    if (text.startsWith("SELECT desired_generation,observed_generation,refresh_state")) return result([this.refreshState]);
+    if (text.startsWith("UPDATE device_refresh_outbox")) return result([]);
+    if (text.startsWith("SELECT epochs.organization_id,epochs.device_id,epochs.key_epoch,epochs.status")) return result([{ organization_id: ids.organization, device_id: ids.device, key_epoch: 1, status: "active" }]);
+    if (text.startsWith("SELECT organization_id,device_id,device_key_epoch,format_epoch,sequence,statement_hash,result")) return result();
+    if (text.startsWith("SELECT organization_id,device_id,format_epoch,sequence,statement_hash,authority_generation")) return result([{ organization_id: ids.organization, device_id: ids.device, format_epoch: 2, sequence: 1, statement_hash: HASH, authority_generation: 3, issued_at: NOW, expires_at: LATER }]);
+    if (text.startsWith("SELECT organization_id,device_id,desired_generation,format_epoch,sequence,statement_hash,status")) return result([{ organization_id: ids.organization, device_id: ids.device, desired_generation: 3, format_epoch: 2, sequence: 1, statement_hash: HASH, status: "delivered" }]);
+    if (text.startsWith("SELECT accepted,duplicate")) return result([{ accepted: true, duplicate: false }]);
     if (text.startsWith("SELECT id FROM agents")) return result([{ id: ids.agent }]);
     if (text.startsWith("SELECT organization_id,id,sequence,name,scope_json,status,created_at,updated_at,version")) return result([policyRow()]);
     if (text.startsWith("SELECT organization_id,id AS revocation_id,target_type,target_id,sequence,reason,status,created_by")) {
@@ -166,6 +178,7 @@ test("bundle authority snapshot and head assignment share the revocation organiz
   assert.match(first.snapshot.state_fingerprint, /^[0-9a-f]{64}$/u);
   assert.equal(first.head.sequence, 1);
   assert.equal(first.head.state_fingerprint, first.snapshot.state_fingerprint);
+  assert.equal(first.desired_generation, 3);
 
   const lockCall = client.calls.find(({ text }) => text.includes("pg_advisory_xact_lock"));
   assert.deepEqual(lockCall.params, [`agentpass:organization:${ids.organization}`]);
@@ -183,6 +196,61 @@ test("bundle authority snapshot and head assignment share the revocation organiz
     organization_id: ids.organization, device_id: ids.device, minimum_sequence: 1, issued_at: NOW, expires_at: LATER,
     state_fingerprint: HASH
   }), { code: "ERR_STATE_FINGERPRINT_MISMATCH" });
+});
+
+test("authority reduction advances generation and enqueues every device without sending a raw nonce to SQL", async () => {
+  const client = new FakeClient();
+  const api = repository(client);
+  const rawNonce = Buffer.alloc(16, 0x41).toString("base64url");
+  const resultValue = await api.advanceAuthorityGenerationAndEnqueueRefresh({
+    organization_id: ids.organization,
+    issued_at: NOW,
+    expires_at: "2026-08-13T00:04:00.000Z",
+    refresh_nonces: { [ids.device]: rawNonce },
+    outbox_ids: { [ids.device]: "88888888-8888-4888-8888-888888888888" }
+  });
+  assert.equal(resultValue.generation, 3);
+  assert.equal(resultValue.devices.length, 1);
+  assert.equal(resultValue.devices[0].refresh_nonce, rawNonce);
+  const enqueue = client.calls.find(({ text }) => text.startsWith("SELECT outbox_id,desired_generation,replayed"));
+  assert.ok(enqueue);
+  assert.equal(enqueue.params.includes(rawNonce), false);
+  assert.ok(Buffer.isBuffer(enqueue.params.at(-2)));
+  assert.equal(enqueue.params.at(-2).length, 32);
+  assert.ok(client.calls.some(({ text }) => text.includes("pg_advisory_xact_lock")));
+  assert.equal(client.calls.at(-1).text, "COMMIT");
+});
+
+test("refresh state polling is one bounded tenant-qualified query and never busy-waits", async () => {
+  const client = new FakeClient();
+  const api = repository(client);
+  const state = await api.pollDeviceRefresh({ organization_id: ids.organization, device_id: ids.device, after_generation: 1, wait_ms: 30_000 });
+  assert.equal(state.desired_generation, 3);
+  assert.equal(client.calls.length, 1);
+  assert.match(client.calls[0].text, /organization_id=\$1 AND device_id=\$2 AND desired_generation>\$3/);
+  await assert.rejects(() => api.pollDeviceRefresh({ organization_id: ids.organization, device_id: ids.device, wait_ms: 30_001 }), { code: "ERR_LIMIT" });
+});
+
+test("G4 ACK uses the SQL function with only a nonce digest and returns duplicate-safe refresh state", async () => {
+  const client = new FakeClient();
+  const api = repository(client);
+  const nonce = Buffer.alloc(16, 0x42).toString("base64url");
+  const acknowledgement = await api.acknowledgeBundle({
+    version: 1, type: "agentpass.bundle-ack", organization_id: ids.organization, device_id: ids.device,
+    device_key_epoch: 1, format_epoch: 2, sequence: 1, statement_hash: HASH, result: "applied",
+    observed_at: NOW, nonce, signature_algorithm: "p256-sha256", signature: Buffer.alloc(64, 0x22).toString("base64url")
+  });
+  assert.deepEqual(acknowledgement, { duplicate: false, observed_generation: 2, refresh_state: "pending" });
+  const ackCall = client.calls.find(({ text }) => text.startsWith("SELECT accepted,duplicate"));
+  assert.ok(ackCall);
+  assert.equal(ackCall.params.includes(nonce), false);
+  assert.ok(Buffer.isBuffer(ackCall.params.at(-1)));
+  assert.equal(ackCall.params.at(-1).length, 32);
+  await assert.rejects(() => api.acknowledgeBundle({
+    version: 1, type: "agentpass.bundle-ack", organization_id: ids.organization, device_id: ids.device,
+    device_key_epoch: 1, format_epoch: 2, sequence: 1, statement_hash: HASH, result: "applied",
+    observed_at: NOW, nonce, signature_algorithm: "p256-sha256", signature: Buffer.alloc(64, 0x22).toString("base64url"), extra: true
+  }), { code: "ERR_ACK_INVALID" });
 });
 
 test("audit ingestion verifies the protocol hash, tenant/device agent binding, duplicate evidence, and head shape", async () => {
