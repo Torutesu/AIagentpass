@@ -26,6 +26,20 @@ private final class ProvisioningMemoryFileSystem: NativeControlProvisioningFileS
         return data
     }
 
+    func createDirectory(at path: String, mode: UInt16) throws {
+        try maybeFail("mkdir")
+        guard entries[path] == nil else { throw POSIXError(.EEXIST) }
+        entries[path] = NativeControlProvisioningMetadata(kind: .directory, ownerUID: 0, mode: mode)
+        events.append("mkdir")
+    }
+
+    func setMode(_ mode: UInt16, forPath path: String) throws {
+        try maybeFail("chmod-directory")
+        guard let entry = entries[path] else { throw POSIXError(.ENOENT) }
+        entries[path] = NativeControlProvisioningMetadata(kind: entry.kind, ownerUID: entry.ownerUID, mode: mode)
+        events.append("chmod-directory")
+    }
+
     func createExclusive(at path: String, mode: UInt16) throws -> Int32 {
         try maybeFail("create")
         guard files[path] == nil else { throw POSIXError(.EEXIST) }
@@ -113,6 +127,7 @@ private struct ProvisioningFixture {
             "device_id": "22222222-2222-4222-8222-222222222222",
             "device_key_epoch": 4,
             "control_url": "https://api.example.test/v1/organizations/11111111-1111-4111-8111-111111111111/bundles/22222222-2222-4222-8222-222222222222",
+            "control_v2_api_base_url": "https://api.example.test/v1",
             "public_key_pem": pem,
             "refresh_hint": ["key_id": "refresh-hint-v1", "algorithm": "ed25519", "public_key": refreshPEM]
         ]
@@ -148,11 +163,17 @@ private func jsonObject(_ data: Data) throws -> [String: Any] {
     #expect(object["control_v2_public_key"] as? String == fixture.pem)
     #expect(object["control_v2_issuer"] as? String == "agentpass-cloud")
     #expect(object["control_v2_device_key_epoch"] as? Int == 4)
+    #expect(object["control_v2_api_base_url"] as? String == "https://api.example.test/v1")
+    #expect(object["control_v2_refresh_state_path"] as? String == "\(fixture.root)/control-v2-refresh.state.json")
+    #expect(object["control_v2_bundle_store_path"] as? String == "\(fixture.root)/control-v2-bundles")
     #expect((object["control_v2_refresh_hint_keyring"] as? [[String: Any]])?.first?["key_id"] as? String == "refresh-hint-v1")
     #expect((object["control_v2_refresh_hint_keyring"] as? [[String: Any]])?.first?["algorithm"] as? String == "ed25519")
     #expect(object["control_v2_device_key_tag"] as? String == NativeEnrollmentKeyMaterial.fixedApplicationTag)
     #expect(object["control_v2_state_path"] as? String == "\(fixture.root)/control-v2.state.json")
     #expect(fs.events.suffix(7).elementsEqual(["create", "write", "chmod", "fsync-file", "close", "rename", "fsync-directory"]))
+    #expect(fs.entries["\(fixture.root)/control-v2-bundles"]?.kind == .directory)
+    #expect(fs.entries["\(fixture.root)/control-v2-bundles"]?.ownerUID == 0)
+    #expect(fs.entries["\(fixture.root)/control-v2-bundles"]?.mode == 0o700)
     #expect(fs.files.keys.allSatisfy { !$0.hasSuffix(".tmp") })
 }
 
@@ -168,6 +189,16 @@ private func jsonObject(_ data: Data) throws -> [String: Any] {
     substitutedEpoch["device_key_epoch"] = 0
     #expect(throws: NativeControlProvisioningError.self) {
         try provisioning.provision(canonicalInput: try NativeStrictJSON.data(substitutedEpoch), at: fixture.config)
+    }
+    var missingAPIBase = try jsonObject(try fixture.input())
+    missingAPIBase.removeValue(forKey: "control_v2_api_base_url")
+    #expect(throws: NativeControlProvisioningError.self) {
+        try provisioning.provision(canonicalInput: try NativeStrictJSON.data(missingAPIBase), at: fixture.config)
+    }
+    var credentialedAPIBase = try jsonObject(try fixture.input())
+    credentialedAPIBase["control_v2_api_base_url"] = "https://user:pass@api.example.test/v1"
+    #expect(throws: NativeControlProvisioningError.self) {
+        try provisioning.provision(canonicalInput: try NativeStrictJSON.data(credentialedAPIBase), at: fixture.config)
     }
     var sameKey = try jsonObject(try fixture.input())
     sameKey["refresh_hint"] = ["key_id": "refresh-hint-v1", "algorithm": "ed25519", "public_key": fixture.pem]
@@ -227,4 +258,17 @@ private func jsonObject(_ data: Data) throws -> [String: Any] {
     #expect(throws: NativeControlProvisioningError.self) { try NativeControlProvisioning(fileSystem: fs).provision(canonicalInput: try fixture.input(), at: fixture.config) }
     fs.entries[fixture.config] = .init(kind: .symlink, ownerUID: 0, mode: 0o777)
     #expect(throws: NativeControlProvisioningError.self) { try NativeControlProvisioning(fileSystem: fs).provision(canonicalInput: try fixture.input(), at: fixture.config) }
+}
+
+@Test func nativeControlProvisioningRejectsSubstitutedServiceOwnedStorePath() throws {
+    let fixture = ProvisioningFixture()
+    let existing = try NativeStrictJSON.data([
+        "version": 4,
+        "control_v2_refresh_state_path": "/tmp/agentpass-refresh.state.json",
+        "control_v2_bundle_store_path": "\(fixture.root)/control-v2-bundles"
+    ])
+    let fs = fixture.fileSystem(configData: existing)
+    #expect(throws: NativeControlProvisioningError.self) {
+        try NativeControlProvisioning(fileSystem: fs).provision(canonicalInput: try fixture.input(), at: fixture.config)
+    }
 }

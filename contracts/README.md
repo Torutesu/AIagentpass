@@ -14,7 +14,7 @@ The G4 refresh lane has two exact, signed envelopes:
 
 Both envelopes reject unknown fields, use canonical UTC millisecond timestamps, and use unpadded base64url for their fixed-size nonce and signature values. The refresh hint validator also enforces `expires_at > published_at` and a maximum five-minute hint lifetime.
 
-Implementation status (2026-08-13): the Cloud runtime implements the target bundle-fetch envelope, refresh long-poll, and ACK ingestion with PostgreSQL qualification. The Swift native endpoint implements strict hint verification and ACK construction; its durable background synchronization state machine and atomic bundle activation are G4.2 work in progress. This distinction is also machine-readable in `openapi/device-v1.json`.
+Implementation status (2026-08-13): the Cloud runtime implements the target bundle-fetch envelope, refresh long-poll, and ACK ingestion with local PostgreSQL qualification. The Swift native endpoint implements the durable refresh machine, authenticated poll/fetch/ACK transport, atomic bundle activation, and the single live ControlBundle v2 daemon runner with redacted status and manual-refresh joining. G4.2 remains in progress until real XPC, subprocess kill/restart, installed launchd, unified-log redaction, and physical Secure Enclave qualification pass. This distinction is also machine-readable in `openapi/device-v1.json`.
 
 Contract changes are additive within v1 unless a new path or format epoch is introduced. A change is incomplete until OpenAPI, JSON Schema, PostgreSQL constraints, Node validation, Swift fixtures, and negative tests agree.
 

@@ -46,6 +46,8 @@ public struct NativeControlProvisioningMetadata: Sendable, Equatable {
 public protocol NativeControlProvisioningFileSystem: Sendable {
     func metadata(at path: String) throws -> NativeControlProvisioningMetadata
     func read(at path: String) throws -> Data
+    func createDirectory(at path: String, mode: UInt16) throws
+    func setMode(_ mode: UInt16, forPath path: String) throws
     func createExclusive(at path: String, mode: UInt16) throws -> Int32
     func write(_ data: Data, to descriptor: Int32) throws
     func setMode(_ mode: UInt16, for descriptor: Int32) throws
@@ -65,6 +67,7 @@ public struct NativeControlProvisioningInput: Equatable, Sendable {
     public let deviceID: String
     public let deviceKeyEpoch: Int64
     public let controlURL: String
+    public let controlV2APIBaseURL: String
     public let publicKeyPEM: String
     public let refreshHintKeyID: String
     public let refreshHintAlgorithm: String
@@ -87,8 +90,8 @@ public struct NativeControlProvisioningInput: Equatable, Sendable {
         guard canonical == data else {
             throw NativeControlProvisioningError.invalidInput("Control provisioning input must be canonical JSON")
         }
-        let allowed = Set(["version", "issuer", "key_id", "organization_id", "device_id", "device_key_epoch", "control_url", "public_key_pem", "refresh_hint", "expected_old_fingerprint"])
-        guard object.keys.allSatisfy({ allowed.contains($0) }), (object.count == 9 || object.count == 10) else {
+        let allowed = Set(["version", "issuer", "key_id", "organization_id", "device_id", "device_key_epoch", "control_url", "control_v2_api_base_url", "public_key_pem", "refresh_hint", "expected_old_fingerprint"])
+        guard object.keys.allSatisfy({ allowed.contains($0) }), (object.count == 10 || object.count == 11) else {
             throw NativeControlProvisioningError.invalidInput("Control provisioning input contains an unknown or missing field")
         }
         guard nativeProvisioningInt(object["version"]) == Self.version else {
@@ -104,8 +107,13 @@ public struct NativeControlProvisioningInput: Equatable, Sendable {
               let deviceID = object["device_id"] as? String, Self.validUUIDv4(deviceID) else {
             throw NativeControlProvisioningError.invalidInput("organization_id and device_id must be canonical UUIDv4 values")
         }
-        guard let controlURL = object["control_url"] as? String, Self.validControlURL(controlURL) else {
+        guard let controlURL = object["control_url"] as? String, Self.validControlURL(controlURL, organizationID: organizationID, deviceID: deviceID) else {
             throw NativeControlProvisioningError.invalidInput("control_url must be a credential-free HTTPS URL without query or fragment")
+        }
+        guard let controlV2APIBaseURL = object["control_v2_api_base_url"] as? String,
+              Self.validAPIBaseURL(controlV2APIBaseURL),
+              Self.sameOriginAndAPIPath(controlURL: controlURL, apiBaseURL: controlV2APIBaseURL) else {
+            throw NativeControlProvisioningError.invalidInput("control_v2_api_base_url must be the credential-free HTTPS /v1 API base for control_url")
         }
         guard let publicKeyPEM = object["public_key_pem"] as? String else {
             throw NativeControlProvisioningError.invalidInput("public_key_pem is required")
@@ -138,6 +146,7 @@ public struct NativeControlProvisioningInput: Equatable, Sendable {
         self.deviceID = deviceID
         self.deviceKeyEpoch = Int64(rawEpoch)
         self.controlURL = controlURL
+        self.controlV2APIBaseURL = controlV2APIBaseURL
         self.publicKeyPEM = publicKeyPEM
         self.refreshHintKeyID = refreshHintKeyID
         self.refreshHintAlgorithm = refreshHintAlgorithm
@@ -154,6 +163,7 @@ public struct NativeControlProvisioningInput: Equatable, Sendable {
             "device_id": deviceID,
             "device_key_epoch": deviceKeyEpoch,
             "control_url": controlURL,
+            "control_v2_api_base_url": controlV2APIBaseURL,
             "public_key_pem": publicKeyPEM,
             "refresh_hint": [
                 "key_id": refreshHintKeyID,
@@ -184,6 +194,13 @@ public struct NativeControlProvisioningInput: Equatable, Sendable {
     }
 
     fileprivate static func validControlURL(_ value: String) -> Bool {
+        guard let components = URLComponents(string: value), components.scheme == "https", components.host != nil,
+              components.user == nil, components.password == nil, components.query == nil, components.fragment == nil,
+              components.url?.absoluteString == value else { return false }
+        return true
+    }
+
+    fileprivate static func validControlURL(_ value: String, organizationID: String, deviceID: String) -> Bool {
         guard let components = URLComponents(string: value),
               components.scheme == "https",
               let host = components.host, !host.isEmpty,
@@ -191,8 +208,27 @@ public struct NativeControlProvisioningInput: Equatable, Sendable {
               components.user == nil, components.password == nil,
               components.query == nil, components.fragment == nil,
               let url = components.url,
-              url.absoluteString == value else { return false }
+              url.absoluteString == value,
+              components.path == "/v1/organizations/\(organizationID)/bundles/\(deviceID)" else { return false }
         return true
+    }
+
+    fileprivate static func validAPIBaseURL(_ value: String) -> Bool {
+        guard let components = URLComponents(string: value),
+              components.scheme == "https",
+              let host = components.host, !host.isEmpty,
+              host == host.lowercased(),
+              components.user == nil, components.password == nil,
+              components.query == nil, components.fragment == nil,
+              components.path == "/v1",
+              components.url?.absoluteString == value else { return false }
+        return true
+    }
+
+    fileprivate static func sameOriginAndAPIPath(controlURL: String, apiBaseURL: String) -> Bool {
+        guard let control = URLComponents(string: controlURL), let api = URLComponents(string: apiBaseURL) else { return false }
+        return control.scheme == api.scheme && control.host == api.host && control.port == api.port &&
+            control.path.hasPrefix(api.path + "/")
     }
 
     fileprivate static func ed25519KeyAndDER(from pem: String) throws -> (key: Curve25519.Signing.PublicKey, der: Data) {
@@ -281,6 +317,20 @@ public final class NativeControlProvisioning: @unchecked Sendable {
         updated["control_v2_organization_id"] = input.organizationID
         updated["control_v2_device_id"] = input.deviceID
         updated["control_v2_device_key_epoch"] = input.deviceKeyEpoch
+        updated["control_v2_api_base_url"] = input.controlV2APIBaseURL
+        let refreshStatePath = "\(parent)/control-v2-refresh.state.json"
+        let bundleStorePath = "\(parent)/control-v2-bundles"
+        if let existingRefreshStatePath = existing["control_v2_refresh_state_path"] as? String,
+           existingRefreshStatePath != refreshStatePath {
+            throw NativeControlProvisioningError.invalidExistingConfiguration("Existing control_v2_refresh_state_path is not the service-owned default")
+        }
+        if let existingBundleStorePath = existing["control_v2_bundle_store_path"] as? String,
+           existingBundleStorePath != bundleStorePath {
+            throw NativeControlProvisioningError.invalidExistingConfiguration("Existing control_v2_bundle_store_path is not the service-owned default")
+        }
+        try Self.ensureBundleStoreDirectory(at: bundleStorePath, parent: parent, fileSystem: fileSystem)
+        updated["control_v2_refresh_state_path"] = refreshStatePath
+        updated["control_v2_bundle_store_path"] = bundleStorePath
         updated["control_v2_refresh_hint_keyring"] = refreshHintKeyring
         updated["control_v2_device_key_tag"] = NativeEnrollmentKeyMaterial.fixedApplicationTag
         let encoded: Data
@@ -373,6 +423,37 @@ public final class NativeControlProvisioning: @unchecked Sendable {
         return path
     }
 
+    private static func ensureBundleStoreDirectory(at path: String, parent: String, fileSystem: any NativeControlProvisioningFileSystem) throws {
+        let canonical = URL(fileURLWithPath: path).standardizedFileURL.path
+        guard canonical == path, URL(fileURLWithPath: path).deletingLastPathComponent().path == parent else {
+            throw NativeControlProvisioningError.unsafeConfigPath("ControlBundle store path must be the service-owned child directory")
+        }
+        do {
+            let metadata = try fileSystem.metadata(at: path)
+            guard metadata.kind == .directory, metadata.ownerUID == 0, metadata.mode == 0o700 else {
+                throw NativeControlProvisioningError.unsafeConfigPath("ControlBundle store must be a root-owned 0700 directory")
+            }
+            return
+        } catch let error as POSIXError where error.code == .ENOENT {
+            // The installer normally creates this directory. A first enrollment
+            // may create it here as the root-owned setup boundary.
+        } catch let error as NativeControlProvisioningError {
+            throw error
+        } catch {
+            throw NativeControlProvisioningError.filesystem("Unable to inspect protected ControlBundle store")
+        }
+        do {
+            try fileSystem.createDirectory(at: path, mode: 0o700)
+            try fileSystem.setMode(0o700, forPath: path)
+            try fileSystem.synchronizeDirectory(at: parent)
+        } catch {
+            throw NativeControlProvisioningError.filesystem("Unable to create protected ControlBundle store")
+        }
+        guard let metadata = try? fileSystem.metadata(at: path), metadata.kind == .directory, metadata.ownerUID == 0, metadata.mode == 0o700 else {
+            throw NativeControlProvisioningError.unsafeConfigPath("ControlBundle store could not be verified as a root-owned 0700 directory")
+        }
+    }
+
     private static func atomicReplace(_ data: Data, at path: String, fileSystem: any NativeControlProvisioningFileSystem) throws {
         let temporary = "\(path).agentpass-control-v2.\(UUID().uuidString).tmp"
         var descriptor: Int32?
@@ -417,6 +498,17 @@ public struct NativeControlProvisioningPOSIXFileSystem: NativeControlProvisionin
             guard count > 0, data.count + count <= 512 * 1024 else { throw NativeControlProvisioningError.filesystem("Configuration file is too large") }
             data.append(contentsOf: buffer[0..<count])
         }
+    }
+
+    public func createDirectory(at path: String, mode: UInt16) throws {
+        guard mkdir(path, mode_t(mode)) == 0 else { throw posixError() }
+    }
+
+    public func setMode(_ mode: UInt16, forPath path: String) throws {
+        let fd = open(path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
+        guard fd >= 0 else { throw posixError() }
+        defer { Darwin.close(fd) }
+        guard fchmod(fd, mode_t(mode)) == 0 else { throw posixError() }
     }
 
     public func createExclusive(at path: String, mode: UInt16) throws -> Int32 {

@@ -1,6 +1,6 @@
 # AgentPass G4–G7 implementation plan
 
-Status: active execution baseline; G4.0 qualified, G4.1 locally qualified, G4.2 durable core implemented but daemon integration remains open
+Status: active execution baseline; G4.0 qualified, G4.1 locally qualified, G4.2 live daemon path implemented with real-boundary qualification remaining
 
 Updated: 2026-08-13
 
@@ -145,13 +145,14 @@ Implementation requirements:
 - immediately deny signing after emergency-stop/revoke application, and always deny after installed-bundle expiry;
 - emit no policy body, repository data, capability, token, or signature material to logs.
 
-Current implementation checkpoint (2026-08-13, commit `1d2589b`): the native durable core is implemented. It includes the closed nine-state refresh machine, canonical crash-safe snapshot persistence, strict authenticated HTTPS poll/fetch/ACK transport, full hint and ControlBundle verification, monotonic generation/sequence/hash/nonce binding, immutable bundle publication with an atomic active pointer, exact signed ACK construction, and a serial coordinator that resumes after crashes and retries a remotely accepted ACK idempotently. ControlBundle authorization now denies at the exact bundle expiry boundary. Enrollment propagates the authoritative device-key epoch and a purpose-separated rotating refresh-hint trust set into root configuration. Unit and adversarial tests cover all state transitions, every injected durable-write boundary, hard-link publication recovery, rollback/equivocation, malformed transport responses, redirects/origin substitution, superseded generations, forged bundles, and ACK retry after a simulated local crash. The complete Swift suite passes 350 tests, and the complete Node suite passes 744 tests with 13 intentional skips.
+Current implementation checkpoint (2026-08-13): the native durable core and live daemon path are implemented. The closed refresh machine, crash-safe snapshot, authenticated HTTPS poll/fetch/ACK transport, strict hint and ControlBundle verification, monotonic generation/sequence/hash/nonce binding, immutable atomic bundle publication, exact signed ACK, and whole-cycle coordinator all run through the ControlBundle v2 service path. Startup now constructs one bounded background runner, resumes non-idle durable state immediately, exposes redacted health/status, coalesces manual XPC refreshes, and routes activation through the existing lifecycle, audit, session-revocation, and authorization transaction. V2 cannot start the legacy `NativeControlFetcher`. Enrollment atomically provisions an exact HTTPS `/v1` API base plus service-owned refresh and bundle-store paths; the installer rejects substituted or permissive bundle-store roots. Activation is reverified at its exact timestamp and again before ACK, so an expiry crossing becomes a durable blocked result while authorization remains fail-closed. Unit and adversarial tests cover restart from every durable state, concurrent synchronization, activation replay, expiry before ACK, redaction, scheduling, cancellation, jitter/backoff, manual-refresh joining, and terminal runner lifecycle. Current local evidence is 363 Swift tests passing and 745 Node tests passing with 13 intentional skips.
 
-G4.2 is not yet qualified because the coordinator is not the live daemon refresh path. The existing v2 service still starts the legacy `NativeControlFetcher`; launchd scheduling, XPC status/manual refresh integration, installer-owned state directories, and a real subprocess kill/restart matrix remain.
+G4.2 is not yet qualified at the real service boundary. Remaining work is a real XPC client matrix, subprocess `SIGKILL`/restart injection over POSIX storage and deterministic local TLS, unified-log/crash-artifact secret scanning, launchd installation/upgrade qualification, and a provenance-bound physical Apple-silicon/Secure Enclave report.
 
 #### G4.2 completion sequence
 
 1. **Freeze runtime configuration and protected storage layout**
+   - Status: implemented and locally tested; installed upgrade/reprovision qualification remains.
    - add explicit `control_v2_api_base_url`, `control_v2_refresh_state_path`, and `control_v2_bundle_store_path` fields;
    - derive no security-sensitive endpoint by string slicing the legacy bundle URL;
    - provision the fields atomically from enrollment and reject partial or legacy-v2 mixtures;
@@ -159,12 +160,14 @@ G4.2 is not yet qualified because the coordinator is not the live daemon refresh
    - add migration behavior for already-enrolled installations: preserve the active bundle, require exact organization/device/key-epoch continuity, and fail closed with a reprovision action when continuity cannot be proven.
 
 2. **Make the coordinator the only ControlBundle v2 network path**
+   - Status: implemented and locally tested; subprocess and XPC boundary evidence remains.
    - construct `NativeDeviceSyncHTTPTransport`, refresh-hint trust, snapshot store, atomic bundle store, and coordinator during service startup;
    - route verified activation through the existing authorization lock, lifecycle verification, audit checkpoint verification, session revocation, control audit, and audited-update completion transaction;
    - remove `NativeControlFetcher` from the v2 branch while retaining it only for explicitly supported legacy mode;
    - prove no second fetcher, timer, or manual XPC request can race an in-flight coordinator cycle.
 
 3. **Add a bounded background runner and signing gate**
+   - Status: implemented and locally tested; launchd timing and real XPC concurrency qualification remains.
    - run one cancellable task owned by the service with 15–3600 second base interval, bounded exponential backoff, one-sided jitter, and at most one 30-second long poll;
    - resume `fetching`, `verifying`, `staging`, `applied`, `blocked`, or `acknowledged` from the durable snapshot before scheduling a new poll;
    - expose a thread-safe summary for health and status: state, desired/observed generation, sequence, last attempt/success, next attempt, bounded failure count, and stable redacted reason;
@@ -172,12 +175,14 @@ G4.2 is not yet qualified because the coordinator is not the live daemon refresh
    - gate signing on operational ControlBundle state and exact expiry. Transport freshness must not extend authority or invalidate a still-valid installed bundle unless policy explicitly requires an online-only mode.
 
 4. **Close activation and ACK crash gaps**
+   - Status: adversarial in-process coverage is implemented; real process-kill injection at each durable boundary remains.
    - inject crashes before and after bundle-file fsync, hard-link publication, directory fsync, pointer rename, manager state persistence, audit append, session revocation, remote ACK acceptance, and local ACK persistence;
    - on restart, converge to the old valid bundle or the fully verified new bundle and replay the same logical ACK binding;
    - preserve generation and sequence high-water marks after ACK/reset, and reject nonce, key epoch, statement hash, or audience substitution;
    - specify and test behavior when a fetched bundle expires during staging or before ACK: deny authority, persist a stable blocked reason, and ACK only the exact fetched statement.
 
 5. **Qualify the real service boundary**
+   - Status: pending. This is the remaining G4.2 exit gate.
    - add service-support unit tests for scheduling, cancellation, backoff, and manual-refresh joining;
    - add XPC integration tests for health/status and signing during refresh, expiry, blocked state, and restart;
    - run a subprocess kill/restart harness against real POSIX storage and a deterministic local TLS Device API fixture;
@@ -339,7 +344,7 @@ Every merged slice must include:
 
 | Priority | Deliverable | Depends on | Completion evidence |
 | --- | --- | --- | --- |
-| P0 | G4.2 daemon integration and real-boundary qualification | durable coordinator, transport, state machine, and atomic store at `1d2589b` | single live v2 path, launchd/XPC recovery, subprocess crash matrix, expiry denial, and signed physical-Mac report |
+| P0 | G4.2 real-boundary qualification | implemented single live v2 daemon path | launchd/XPC recovery, subprocess crash matrix, unified-log secret scan, upgrade evidence, and signed physical-Mac report |
 | P0 | G4.1 hosted qualification artifact | deployed staging topology and selected secret manager | repeat hard-kill, reconnect, latency, rotation, and sustained-load runs; bind report to source/artifact/environment digests and sign it |
 | P1 | G4.3 ACK transport and Console device state/actions | native state machine and ACK signer | Playwright role/recent-auth tests and physical-Mac ACK observation |
 | P1 | G5.1 shared abuse controls | stable G4 identifiers | two-instance token-bucket and session-epoch races |
@@ -355,7 +360,7 @@ Recommended execution order is the table order. G5.1 and the provider-neutral po
 
 ### Wave 1 — finish G4.2 locally
 
-Critical path: configuration/storage migration → live service wiring → runner/status/XPC → crash and expiry qualification. These changes share the native service startup and must merge serially. In parallel, an independent test lane can build the TLS fixture and subprocess crash harness, while a documentation lane updates the operator runbook and migration remediation.
+Implemented path: configuration/storage provisioning → live service wiring → runner/status/manual-XPC joining → in-process crash and expiry tests. Remaining critical path: real XPC harness → deterministic local TLS fixture → subprocess kill/restart matrix → installer upgrade and unified-log qualification → physical-Mac evidence. The harness and operator migration/runbook updates can proceed in parallel until the physical qualification gate.
 
 Merge gate:
 

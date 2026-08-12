@@ -52,6 +52,21 @@ private final class CoordinatorActivator: NativeDeviceSyncBundleActivating, @unc
     }
 }
 
+private final class CoordinatorClock: @unchecked Sendable {
+    private let lock = NSLock()
+    private var values: [Int64]
+    private let fallback: Int64
+
+    init(_ values: [Int64], fallback: Int64) {
+        self.values = values
+        self.fallback = fallback
+    }
+
+    func now() -> Int64 {
+        lock.withLock { values.isEmpty ? fallback : values.removeFirst() }
+    }
+}
+
 private struct CoordinatorSigner: P256MessageSigner {
     let key: P256.Signing.PrivateKey
     var publicKeyX963: Data { key.publicKey.x963Representation }
@@ -176,7 +191,13 @@ private struct CoordinatorFixture {
         )
     }
 
-    func coordinator(transport: CoordinatorTransport, snapshot: CoordinatorSnapshotStore, bundles: CoordinatorBundleStore, activator: CoordinatorActivator) throws -> NativeDeviceSyncCoordinator {
+    func coordinator(
+        transport: CoordinatorTransport,
+        snapshot: CoordinatorSnapshotStore,
+        bundles: CoordinatorBundleStore,
+        activator: CoordinatorActivator,
+        nowMilliseconds: @escaping @Sendable () -> Int64 = { coordinatorNow }
+    ) throws -> NativeDeviceSyncCoordinator {
         try NativeDeviceSyncCoordinator(
             organizationID: coordinatorOrganization,
             deviceID: coordinatorDevice,
@@ -188,7 +209,7 @@ private struct CoordinatorFixture {
             bundleStore: bundles,
             activator: activator,
             acknowledgementSigner: deviceSigner,
-            nowMilliseconds: { coordinatorNow }
+            nowMilliseconds: nowMilliseconds
         )
     }
 }
@@ -253,6 +274,38 @@ private struct CoordinatorFixture {
     #expect(transport.afterGenerations == [0, 1])
     #expect(activator.calls == 0)
     #expect(transport.acknowledgements.first?.reasonCode == .bundleSignatureInvalid)
+}
+
+@Test func coordinatorBlocksBundleThatExpiresBetweenVerificationAndActivation() async throws {
+    let fixture = CoordinatorFixture()
+    let transport = CoordinatorTransport(
+        polls: [.init(hint: try fixture.hint(generation: 1))],
+        fetches: [try fixture.bundle(generation: 1, sequence: 1)],
+        acknowledgementState: .blocked
+    )
+    let snapshot = CoordinatorSnapshotStore(), bundles = CoordinatorBundleStore(), activator = CoordinatorActivator()
+    let expiry = coordinatorNow + 5 * 60 * 1_000
+    let clock = CoordinatorClock(
+        [coordinatorNow, coordinatorNow, expiry, expiry],
+        fallback: expiry
+    )
+    let coordinator = try fixture.coordinator(
+        transport: transport,
+        snapshot: snapshot,
+        bundles: bundles,
+        activator: activator,
+        nowMilliseconds: { clock.now() }
+    )
+
+    #expect(try await coordinator.synchronize() == .blocked(
+        generation: 1,
+        sequence: 1,
+        reason: .bundleExpired
+    ))
+    #expect(try bundles.active() == nil)
+    #expect(activator.calls == 0)
+    #expect(transport.acknowledgements.first?.result == .blocked)
+    #expect(transport.acknowledgements.first?.reasonCode == .bundleExpired)
 }
 
 private func ed25519PEM(_ key: Curve25519.Signing.PublicKey) -> String {

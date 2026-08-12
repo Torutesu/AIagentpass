@@ -76,6 +76,7 @@ public actor NativeDeviceSyncCoordinator {
     private let acknowledgementSigner: any P256MessageSigner
     private let nowMilliseconds: @Sendable () -> Int64
     private var machine: NativeDeviceRefreshStateMachine
+    private var inFlightSynchronization: Task<NativeDeviceSyncRunResult, Error>?
 
     public init(
         organizationID: String,
@@ -139,6 +140,34 @@ public actor NativeDeviceSyncCoordinator {
         guard (0...NativeDeviceSyncHTTPTransport.maximumPollWaitMilliseconds).contains(waitMilliseconds) else {
             throw NativeDeviceSyncCoordinatorError.invalidConfiguration
         }
+
+        // Actor isolation alone does not serialize across an `await`: another
+        // caller can re-enter while a long poll or fetch is suspended. Share
+        // one task for the complete cycle so manual, scheduled, and startup
+        // callers cannot issue competing polls or mutate the durable machine
+        // from interleaved responses.
+        if let existing = inFlightSynchronization {
+            return try await existing.value
+        }
+        let task = Task { [weak self] () throws -> NativeDeviceSyncRunResult in
+            guard let self else { throw NativeDeviceSyncCoordinatorError.unrecoverableState }
+            return try await self.performSynchronization(waitMilliseconds: waitMilliseconds)
+        }
+        inFlightSynchronization = task
+        do {
+            let result = try await withTaskCancellationHandler(
+                operation: { try await task.value },
+                onCancel: { task.cancel() }
+            )
+            inFlightSynchronization = nil
+            return result
+        } catch {
+            inFlightSynchronization = nil
+            throw error
+        }
+    }
+
+    private func performSynchronization(waitMilliseconds: Int) async throws -> NativeDeviceSyncRunResult {
 
         for _ in 0..<Self.maximumConvergenceAttempts {
             if machine.state == .acknowledged {
@@ -251,24 +280,61 @@ public actor NativeDeviceSyncCoordinator {
                       let statementHash = machine.binding.statementHash else {
                     throw NativeDeviceSyncCoordinatorError.unrecoverableState
                 }
-                let contentHash = Data(SHA256.hash(data: bytes)).map { String(format: "%02x", $0) }.joined()
-                let descriptor = try NativeAtomicControlBundleDescriptor(
-                    generation: machine.binding.generation,
-                    sequence: bundle.sequence,
-                    statementHash: statementHash,
-                    contentHash: contentHash
-                )
                 do {
-                    _ = try bundleStore.install(descriptor: descriptor, canonicalBytes: bytes)
-                } catch {
-                    throw NativeDeviceSyncCoordinatorError.storageUnavailable
+                    // Time can advance while the bundle is fetched, verified,
+                    // and durably staged. Revalidate at the exact activation
+                    // instant so a bundle that expires in that window is
+                    // never published as active. The same timestamp is passed
+                    // through to the manager activation transaction.
+                    let activationNow = nowMilliseconds()
+                    let activationState = NativeControlBundleV2SequenceState(
+                        highestSequence: machine.sequenceWatermark,
+                        statementHash: statementHash
+                    )
+                    _ = try NativeControlBundleV2Codec.verify(
+                        bytes,
+                        trust: bundleTrust,
+                        options: .init(
+                            nowMilliseconds: activationNow,
+                            audience: bundleTrust.audience,
+                            sequenceState: activationState
+                        )
+                    )
+                    let contentHash = Data(SHA256.hash(data: bytes)).map { String(format: "%02x", $0) }.joined()
+                    let descriptor = try NativeAtomicControlBundleDescriptor(
+                        generation: machine.binding.generation,
+                        sequence: bundle.sequence,
+                        statementHash: statementHash,
+                        contentHash: contentHash
+                    )
+                    do {
+                        _ = try bundleStore.install(descriptor: descriptor, canonicalBytes: bytes)
+                    } catch {
+                        throw NativeDeviceSyncCoordinatorError.storageUnavailable
+                    }
+                    do {
+                        try activator.activateVerifiedBundle(bytes, nowMilliseconds: activationNow)
+                    } catch {
+                        throw NativeDeviceSyncCoordinatorError.activationUnavailable
+                    }
+                    // Activation may include durable manager state, audit, and
+                    // session revocation. If time crosses the expiry boundary
+                    // before that transaction returns, authorization is
+                    // already fail-closed in the manager and the Cloud must
+                    // observe a blocked—not applied—result.
+                    _ = try NativeControlBundleV2Codec.verify(
+                        bytes,
+                        trust: bundleTrust,
+                        options: .init(
+                            nowMilliseconds: nowMilliseconds(),
+                            audience: bundleTrust.audience,
+                            sequenceState: activationState
+                        )
+                    )
+                    _ = try machine.apply(.stagingSucceeded, persistingTo: snapshotStore)
+                } catch let error as NativeControlBundleV2Error {
+                    _ = try machine.apply(.stagingBlocked(Self.stateReason(error.reason)), persistingTo: snapshotStore)
                 }
-                do {
-                    try activator.activateVerifiedBundle(bytes, nowMilliseconds: nowMilliseconds())
-                } catch {
-                    throw NativeDeviceSyncCoordinatorError.activationUnavailable
-                }
-                _ = try machine.apply(.stagingSucceeded, persistingTo: snapshotStore)
             }
 
             if machine.state == .applied || machine.state == .blocked {
