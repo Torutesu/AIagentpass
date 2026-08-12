@@ -48,8 +48,9 @@ private struct AuthorizerFixture {
         ], options: [.sortedKeys, .withoutEscapingSlashes])
     }
 
-    func signedRequest(nonce: String = String(repeating: "n", count: 32), payloadOverride: Data? = nil, timestamp: Int64 = 1_800_000_000_000, session: String? = nil) throws -> Data {
+    func signedRequest(nonce: String = String(repeating: "n", count: 32), payloadOverride: Data? = nil, timestamp: Int64 = 1_800_000_000_000, session: String? = nil, capability: [String: Any]? = nil) throws -> Data {
         var request: [String: Any] = [
+            "request_id": UUID().uuidString.lowercased(),
             "operation": "git.commit.sign",
             "cwd": repository.path,
             "sign_args": ["-Y", "sign", "-n", "git", "-f", "/tmp/untrusted"],
@@ -59,6 +60,7 @@ private struct AuthorizerFixture {
             "timestamp_ms": timestamp,
             "nonce": nonce
         ]
+        if let capability { request["capability"] = capability }
         let canonical = try JSONSerialization.data(withJSONObject: request, options: [.sortedKeys, .withoutEscapingSlashes])
         request["signature"] = try privateKey.signature(for: canonical).base64EncodedString()
         return try JSONSerialization.data(withJSONObject: request, options: [.sortedKeys, .withoutEscapingSlashes])
@@ -78,6 +80,45 @@ private struct AuthorizerFixture {
         }
         return (String(data: output.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
     }
+}
+
+@Test func nativeAuthorizerEnforcesV2BundleAndCapabilityOnTheActualRequestPath() throws {
+    let fixture = try AuthorizerFixture()
+    defer { try? FileManager.default.removeItem(at: fixture.root) }
+    let now: Int64 = 1_800_000_000_000
+    let organizationID = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+    let deviceID = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
+    let cloudKey = Curve25519.Signing.PrivateKey()
+    let prefix = Data([0x30, 0x2a, 0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x70, 0x03, 0x21, 0x00])
+    let pem = "-----BEGIN PUBLIC KEY-----\n\((prefix + cloudKey.publicKey.rawRepresentation).base64EncodedString())\n-----END PUBLIC KEY-----\n"
+    let scope: [String: Any] = ["operations": ["git.commit.sign"], "repositories": [fixture.repository.path], "branches": ["allow": ["feature/*"], "deny": ["main"]], "remotes": ["allow": ["git@github.com:example/native.git"], "deny": []]]
+    let unsignedBundle: [String: Any] = ["format_epoch": 2, "issuer": "agentpass-cloud", "organization_id": organizationID, "device_id": deviceID, "audience": ["organization_id": organizationID, "device_id": deviceID], "issued_at": "2027-01-15T07:59:59.000Z", "expires_at": "2027-01-15T08:01:00.000Z", "sequence": 1, "policy_scope": scope, "global_revoked": false, "revoked_devices": [], "revoked_agents": [], "revoked_capabilities": [], "offline_ttl_ms": 60_000, "key_id": "control-v2"]
+    let bundle = try NativeControlBundleV2Codec.issue(unsignedJSON: JSONSerialization.data(withJSONObject: unsignedBundle, options: [.sortedKeys, .withoutEscapingSlashes]), signingKey: cloudKey, nowMilliseconds: now)
+    let trust = try NativeControlBundleV2Trust(publicKeyPEM: pem, issuer: "agentpass-cloud", keyID: "control-v2", audience: .init(organizationID: organizationID, deviceID: deviceID))
+    let manager = try NativeControlBundleV2Manager(trust: trust, statePath: fixture.root.appendingPathComponent("control-v2.json").path, nowMilliseconds: now)
+    _ = try manager.apply(bundleData: bundle, nowMilliseconds: now)
+    var capability: [String: Any] = ["version": 1, "capability_id": "cccccccc-cccc-4ccc-8ccc-cccccccccccc", "nonce": String(repeating: "C", count: 32), "issuer": "agentpass-cloud", "key_id": "control-v2", "audience": ["agent_id": "11111111-1111-4111-8111-111111111111", "device_id": deviceID], "scope": scope, "not_before": "2027-01-15T07:59:59.000Z", "expires_at": "2027-01-15T08:00:30.000Z", "sequence": 1]
+    let capabilityStatement = try JSONSerialization.data(withJSONObject: capability, options: [.sortedKeys, .withoutEscapingSlashes])
+    capability["signature"] = try cloudKey.signature(for: capabilityStatement).base64EncodedString()
+    let verifier = try NativeCapabilityVerifier(trust: NativeCapabilityTrust(publicKey: cloudKey.publicKey, issuer: "agentpass-cloud", keyID: "control-v2"), statePath: fixture.root.appendingPathComponent("capabilities.json").path)
+    let evidence = try NativeRequestEvidenceStore(path: fixture.root.appendingPathComponent("requests.json").path)
+    let authorizer = try NativeRequestAuthorizer(policyData: fixture.policy, capabilityValidator: verifier, v2ControlManager: manager, requestEvidenceStore: evidence, controlV2Configured: true, v2DeviceID: deviceID)
+    let request = try fixture.signedRequest(capability: capability)
+    let authorized = try authorizer.authorize(requestData: request, nowMilliseconds: now)
+    #expect(authorized.agentID == "11111111-1111-4111-8111-111111111111")
+    #expect(throws: AgentPassNativeError.self) { _ = try authorizer.authorize(requestData: request, nowMilliseconds: now + 1) }
+
+    let revokedCapabilityID = "dddddddd-dddd-4ddd-8ddd-dddddddddddd"
+    var revokedBundleStatement = unsignedBundle
+    revokedBundleStatement["sequence"] = 2
+    revokedBundleStatement["revoked_capabilities"] = [revokedCapabilityID]
+    let revokedBundle = try NativeControlBundleV2Codec.issue(unsignedJSON: JSONSerialization.data(withJSONObject: revokedBundleStatement, options: [.sortedKeys, .withoutEscapingSlashes]), signingKey: cloudKey, nowMilliseconds: now)
+    _ = try manager.apply(bundleData: revokedBundle, nowMilliseconds: now)
+    #expect(throws: AgentPassNativeError.self) { try manager.validateCapability(capabilityID: revokedCapabilityID) }
+    var revokedCapability: [String: Any] = ["version": 1, "capability_id": revokedCapabilityID, "nonce": String(repeating: "D", count: 32), "issuer": "agentpass-cloud", "key_id": "control-v2", "audience": ["agent_id": "11111111-1111-4111-8111-111111111111", "device_id": deviceID], "scope": scope, "not_before": "2027-01-15T07:59:59.000Z", "expires_at": "2027-01-15T08:00:30.000Z", "sequence": 2]
+    revokedCapability["signature"] = try cloudKey.signature(for: JSONSerialization.data(withJSONObject: revokedCapability, options: [.sortedKeys, .withoutEscapingSlashes])).base64EncodedString()
+    let revokedRequest = try fixture.signedRequest(nonce: String(repeating: "d", count: 32), capability: revokedCapability)
+    #expect(throws: AgentPassNativeError.self) { _ = try authorizer.authorize(requestData: revokedRequest, nowMilliseconds: now) }
 }
 
 @Test func nativeAuthorizerAcceptsAnExactSignedGitRequestAndRejectsReplay() throws {
@@ -112,6 +153,34 @@ private struct AuthorizerFixture {
     }
 }
 
+@Test func nativeAuthorizerRejectsUnknownFieldsAndAmbiguousCommitHeaders() throws {
+    let fixture = try AuthorizerFixture()
+    defer { try? FileManager.default.removeItem(at: fixture.root) }
+    let authorizer = try NativeRequestAuthorizer(policyData: fixture.policy)
+
+    var unknown = try #require(JSONSerialization.jsonObject(with: fixture.signedRequest()) as? [String: Any])
+    unknown["unexpected"] = true
+    let unknownData = try JSONSerialization.data(withJSONObject: unknown, options: [.sortedKeys, .withoutEscapingSlashes])
+    #expect(throws: AgentPassNativeError.self) {
+        try authorizer.authorize(requestData: unknownData, nowMilliseconds: 1_800_000_000_000)
+    }
+
+    let tree = try AuthorizerFixture.gitOutput(fixture.repository, ["write-tree"])
+    let malformedPayloads = [
+        "tree \(tree)\ntree \(tree)\nauthor Native <native@example.com> 0 +0000\ncommitter Native <native@example.com> 0 +0000\n\nDuplicate\n",
+        "tree \(tree)\nauthor Native <native@example.com> 0 +0000\ncommitter Native <native@example.com> 0 +0000\ngpgsig forged\n\nSigned\n",
+        "tree \(tree)\nauthor Native <native@example.com> 0 +0000\ncommitter Native <native@example.com> 0 +0000\n continued\n\nContinued\n"
+    ]
+    for (index, payload) in malformedPayloads.enumerated() {
+        #expect(throws: AgentPassNativeError.self) {
+            try authorizer.authorize(
+                requestData: fixture.signedRequest(nonce: String(repeating: String(index), count: 32), payloadOverride: Data(payload.utf8)),
+                nowMilliseconds: 1_800_000_000_000
+            )
+        }
+    }
+}
+
 @Test func nativeAuthorizerRejectsSessionAndRemoteControlBypass() throws {
     let fixture = try AuthorizerFixture()
     defer { try? FileManager.default.removeItem(at: fixture.root) }
@@ -124,6 +193,9 @@ private struct AuthorizerFixture {
     object["control"] = ["required": true]
     #expect(throws: AgentPassNativeError.self) {
         try NativeRequestAuthorizer(policyData: JSONSerialization.data(withJSONObject: object))
+    }
+    #expect(throws: AgentPassNativeError.self) {
+        try NativeRequestAuthorizer(policyData: fixture.policy, controlV2Configured: true)
     }
 }
 
@@ -160,4 +232,28 @@ private struct AuthorizerFixture {
     #expect(throws: AgentPassNativeError.self) {
         try authorizer.authorize(requestData: fixture.signedRequest(nonce: String(repeating: "c", count: 32)), nowMilliseconds: 1_800_000_000_000)
     }
+}
+
+@Test func nativeAuthorizerFailsClosedWhenControlBundleV2IsConfiguredWithoutV2Wiring() throws {
+    let fixture = try AuthorizerFixture()
+    defer { try? FileManager.default.removeItem(at: fixture.root) }
+    var object = try #require(JSONSerialization.jsonObject(with: fixture.policy) as? [String: Any])
+    object["control_v2"] = ["required": true, "capability_required": true, "public_key": "pinned", "issuer": "agentpass-cloud", "key_id": "control-v2", "organization_id": "11111111-1111-4111-8111-111111111111", "device_id": "22222222-2222-4222-8222-222222222222"]
+    #expect(throws: AgentPassNativeError.self) {
+        try NativeRequestAuthorizer(policyData: JSONSerialization.data(withJSONObject: object))
+    }
+}
+
+@Test func nativeRequestEvidencePersistsRequestCapabilityBindingAcrossRestart() throws {
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+    try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: root) }
+    let path = root.appendingPathComponent("request-evidence.json").path
+    let requestID = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+    let capabilityID = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
+    let store = try NativeRequestEvidenceStore(path: path)
+    try store.record(requestID: requestID, capabilityID: capabilityID, capabilitySequence: 9)
+    let restarted = try NativeRequestEvidenceStore(path: path)
+    #expect(restarted.evidence(for: requestID)?.capabilityID == capabilityID)
+    #expect(throws: AgentPassNativeError.self) { try restarted.record(requestID: requestID, capabilityID: "cccccccc-cccc-4ccc-8ccc-cccccccccccc", capabilitySequence: 10) }
 }

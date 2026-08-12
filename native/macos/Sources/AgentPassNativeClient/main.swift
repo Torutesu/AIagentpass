@@ -726,6 +726,11 @@ case "control-status":
         result = dataOutput(data, error: error)
         semaphore.signal()
     }
+case "control-refresh":
+    proxy.refreshControl { data, error in
+        result = dataOutput(data, error: error)
+        semaphore.signal()
+    }
 case "control-validate":
     let request = FileHandle.standardInput.readDataToEndOfFile()
     guard request.count > 0, request.count <= 16 * 1024,

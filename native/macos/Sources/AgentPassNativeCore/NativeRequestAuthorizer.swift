@@ -2,6 +2,7 @@ import CryptoKit
 import Foundation
 
 public struct AuthorizedSignRequest: Sendable {
+    public let requestID: String
     public let payload: Data
     public let agentID: String
     public let repository: String
@@ -9,17 +10,84 @@ public struct AuthorizedSignRequest: Sendable {
     public let remote: String
 }
 
+/// Optional v2 boundary.  The existing NativeRequestAuthorizer initializer and
+/// authorize(requestData:) remain the v1-compatible service surface.
+public protocol NativeCapabilityAuthorizing: Sendable {
+    func verify(_ data: Data, audience: NativeCapabilityAudience, nowMilliseconds: Int64) throws -> NativeCapability
+    func consume(_ capabilityID: String) throws
+    func verifyAndConsume(_ data: Data, audience: NativeCapabilityAudience, operation: String, repository: String, branch: String, remote: String, nowMilliseconds: Int64) throws -> NativeCapability
+}
+
+public final class NativeRequestEvidenceStore: @unchecked Sendable {
+    public struct Evidence: Equatable, Sendable { public let requestID: String; public let capabilityID: String; public let capabilitySequence: Int64 }
+    private let path: String
+    private var values: [String: Evidence] = [:]
+    private let lock = NSLock()
+
+    public init(path: String) throws {
+        guard path.hasPrefix("/") else { throw AgentPassNativeError.invalidConfiguration("Request evidence path must be absolute") }
+        self.path = URL(fileURLWithPath: path).standardizedFileURL.path
+        if FileManager.default.fileExists(atPath: self.path) { try load() }
+    }
+
+    public func record(requestID: String, capabilityID: String, capabilitySequence: Int64) throws {
+        guard UUID(uuidString: requestID) != nil, UUID(uuidString: capabilityID) != nil, capabilitySequence >= 1 else { throw AgentPassNativeError.invalidConfiguration("Request evidence identity is invalid") }
+        lock.lock(); defer { lock.unlock() }
+        if let old = values[requestID] { guard old.capabilityID == capabilityID, old.capabilitySequence == capabilitySequence else { throw AgentPassNativeError.unauthorizedClient("request_evidence_conflict") }; return }
+        guard values.count < 10_000 else { throw AgentPassNativeError.unauthorizedClient("request_evidence_capacity_exceeded") }
+        values[requestID] = Evidence(requestID: requestID, capabilityID: capabilityID, capabilitySequence: capabilitySequence)
+        try persistLocked()
+    }
+
+    public func evidence(for requestID: String) -> Evidence? { lock.lock(); defer { lock.unlock() }; return values[requestID] }
+
+    private func load() throws {
+        let object = try NativeStrictJSON.object(from: nativeV2ReadFile(path, maxBytes: 256 * 1024), maxBytes: 256 * 1024, maxDepth: 8)
+        try nativeScopeUnknown(object, ["request_evidence"])
+        guard let records = object["request_evidence"] as? [[String: Any]], records.count <= 10_000 else { throw AgentPassNativeError.invalidConfiguration("Request evidence state is invalid") }
+        for record in records {
+            try nativeScopeUnknown(record, ["request_id", "capability_id", "capability_sequence"])
+            guard let requestID = record["request_id"] as? String, let capabilityID = record["capability_id"] as? String, let sequence = nativeInt(record["capability_sequence"]), UUID(uuidString: requestID) != nil, UUID(uuidString: capabilityID) != nil, sequence >= 1 else { throw AgentPassNativeError.invalidConfiguration("Request evidence record is invalid") }
+            guard values[requestID] == nil else { throw AgentPassNativeError.invalidConfiguration("Request evidence contains duplicate request IDs") }
+            values[requestID] = Evidence(requestID: requestID, capabilityID: capabilityID, capabilitySequence: sequence)
+        }
+    }
+
+    private func persistLocked() throws {
+        let records = values.values.sorted { $0.requestID < $1.requestID }.map { ["request_id": $0.requestID, "capability_id": $0.capabilityID, "capability_sequence": $0.capabilitySequence] as [String: Any] }
+        do { try nativeV2AtomicWrite(path, data: try NativeStrictJSON.data(["request_evidence": records]) + Data("\n".utf8)) }
+        catch { throw AgentPassNativeError.invalidConfiguration("Request evidence could not be persisted") }
+    }
+}
+
+extension NativeCapabilityVerifier: NativeCapabilityAuthorizing {
+    public func verify(_ data: Data, audience: NativeCapabilityAudience, nowMilliseconds: Int64) throws -> NativeCapability {
+        try verify(data, options: .init(nowMilliseconds: nowMilliseconds, audience: audience))
+    }
+    public func verifyAndConsume(_ data: Data, audience: NativeCapabilityAudience, operation: String, repository: String, branch: String, remote: String, nowMilliseconds: Int64) throws -> NativeCapability {
+        try verifyAndConsume(data, options: .init(nowMilliseconds: nowMilliseconds, audience: audience), operation: operation, repository: repository, branch: branch, remote: remote)
+    }
+}
+
 public final class NativeRequestAuthorizer: @unchecked Sendable {
     private let policy: Policy
     private let sessionValidator: (any NativeSessionValidating)?
     private let controlValidator: (any NativeControlValidating)?
+    private let capabilityValidator: (any NativeCapabilityAuthorizing)?
+    private let v2ControlManager: NativeControlBundleV2Manager?
+    private let requestEvidenceStore: NativeRequestEvidenceStore?
+    private let v2DeviceID: String?
     private var replayCache: [String: Int64] = [:]
     private let lock = NSLock()
 
-    public init(policyData: Data, sessionValidator: (any NativeSessionValidating)? = nil, controlValidator: (any NativeControlValidating)? = nil) throws {
+    public init(policyData: Data, sessionValidator: (any NativeSessionValidating)? = nil, controlValidator: (any NativeControlValidating)? = nil, capabilityValidator: (any NativeCapabilityAuthorizing)? = nil, v2ControlManager: NativeControlBundleV2Manager? = nil, requestEvidenceStore: NativeRequestEvidenceStore? = nil, controlV2Configured: Bool = false, v2DeviceID: String? = nil) throws {
         policy = try JSONDecoder().decode(Policy.self, from: policyData)
         self.sessionValidator = sessionValidator
         self.controlValidator = controlValidator
+        self.capabilityValidator = capabilityValidator
+        self.v2ControlManager = v2ControlManager
+        self.requestEvidenceStore = requestEvidenceStore
+        self.v2DeviceID = v2DeviceID
         guard policy.version == 4, !policy.agents.isEmpty else {
             throw AgentPassNativeError.invalidConfiguration("Native broker requires a version 4 policy with enrolled agents")
         }
@@ -29,6 +97,9 @@ public final class NativeRequestAuthorizer: @unchecked Sendable {
         guard policy.control == nil || controlValidator != nil else {
             throw AgentPassNativeError.invalidConfiguration("Native broker requires protected remote-control state when control is configured")
         }
+        guard (!controlV2Configured && policy.controlV2 == nil) || (v2ControlManager != nil && capabilityValidator != nil && requestEvidenceStore != nil && v2DeviceID.flatMap { UUID(uuidString: $0) } != nil) else {
+            throw AgentPassNativeError.invalidConfiguration("control_v2 is configured but the native signing path is not v2-wired")
+        }
         for agent in policy.agents {
             _ = try Self.ed25519Key(fromPEM: agent.publicKey)
             try Self.validate(scope: agent.scope)
@@ -36,13 +107,53 @@ public final class NativeRequestAuthorizer: @unchecked Sendable {
         try Self.validate(scope: policy.globalScope)
     }
 
+    /// v2 service hook: first authorize the signed native request using all
+    /// existing local protections, then require a verified, audience-bound,
+    /// one-shot cloud capability and the active ControlBundle v2 scope.
+    public func authorizeV2(requestData: Data, capabilityData: Data, deviceID: String, nowMilliseconds: Int64 = Int64(Date().timeIntervalSince1970 * 1000)) throws -> AuthorizedSignRequest {
+        guard let capabilityValidator else { throw AgentPassNativeError.invalidConfiguration("Native broker requires a v2 capability verifier") }
+        let authorized = try authorizeLocal(requestData: requestData, nowMilliseconds: nowMilliseconds, permitsCapability: true)
+        if let v2ControlManager {
+            try v2ControlManager.validateControl(agentID: authorized.agentID, nowMilliseconds: nowMilliseconds)
+            let scope = try v2ControlManager.currentPolicyScope()
+            guard NativeControlBundleV2Codec.policyScopeAllows(scope, operation: "git.commit.sign", repository: authorized.repository, branch: authorized.branch, remote: authorized.remote) else { throw AgentPassNativeError.unauthorizedClient("control_policy_scope_denied") }
+        }
+        let parsedCapability = try NativeCapabilityCodec.parse(capabilityData, nowMilliseconds: nowMilliseconds)
+        if let evidence = requestEvidenceStore?.evidence(for: authorized.requestID) {
+            guard evidence.capabilityID == parsedCapability.capabilityID, evidence.capabilitySequence == parsedCapability.sequence else { throw AgentPassNativeError.unauthorizedClient("request_evidence_conflict") }
+            throw AgentPassNativeError.unauthorizedClient("request_replay")
+        }
+        let capability = try capabilityValidator.verify(capabilityData, audience: NativeCapabilityAudience(agentID: authorized.agentID, deviceID: deviceID), nowMilliseconds: nowMilliseconds)
+        try v2ControlManager?.validateCapability(capabilityID: capability.capabilityID)
+        guard NativeControlBundleV2Codec.policyScopeAllows(capability.scope, operation: "git.commit.sign", repository: authorized.repository, branch: authorized.branch, remote: authorized.remote) else { throw AgentPassNativeError.unauthorizedClient("capability_scope_denied") }
+        try capabilityValidator.consume(capability.capabilityID)
+        try requestEvidenceStore?.record(requestID: authorized.requestID, capabilityID: capability.capabilityID, capabilitySequence: capability.sequence)
+        return authorized
+    }
+
     public func authorize(requestData: Data, nowMilliseconds: Int64 = Int64(Date().timeIntervalSince1970 * 1000)) throws -> AuthorizedSignRequest {
+        if let v2DeviceID {
+            guard let object = try JSONSerialization.jsonObject(with: requestData) as? [String: Any], let capability = object["capability"], capability is [String: Any] else { throw AgentPassNativeError.unauthorizedClient("A short-lived cloud capability is required") }
+            let capabilityData = try JSONSerialization.data(withJSONObject: capability, options: [.sortedKeys, .withoutEscapingSlashes])
+            return try authorizeV2(requestData: requestData, capabilityData: capabilityData, deviceID: v2DeviceID, nowMilliseconds: nowMilliseconds)
+        }
+        return try authorizeLocal(requestData: requestData, nowMilliseconds: nowMilliseconds, permitsCapability: false)
+    }
+
+    private func authorizeLocal(requestData: Data, nowMilliseconds: Int64, permitsCapability: Bool) throws -> AuthorizedSignRequest {
         guard requestData.count > 0, requestData.count <= 12 * 1024 * 1024 else {
             throw AgentPassNativeError.unauthorizedClient("Native broker request size is invalid")
+        }
+        let required = Set(["request_id", "operation", "cwd", "sign_args", "payload_base64", "session", "agent_id", "timestamp_ms", "nonce", "signature"] + (permitsCapability ? ["capability"] : []))
+        guard let requestObject = try JSONSerialization.jsonObject(with: requestData) as? [String: Any], Set(requestObject.keys) == required else {
+            throw AgentPassNativeError.unauthorizedClient("Native broker request contains unknown or missing fields")
         }
         let request = try JSONDecoder().decode(SignRequest.self, from: requestData)
         guard request.operation == "git.commit.sign" else {
             throw AgentPassNativeError.unauthorizedClient("Unsupported native broker operation")
+        }
+        guard UUID(uuidString: request.requestID)?.uuidString.lowercased() == request.requestID.lowercased() else {
+            throw AgentPassNativeError.unauthorizedClient("Native broker request_id is invalid")
         }
         guard request.timestampMilliseconds >= nowMilliseconds - 60_000,
               request.timestampMilliseconds <= nowMilliseconds + 60_000 else {
@@ -74,7 +185,20 @@ public final class NativeRequestAuthorizer: @unchecked Sendable {
         do { try validate(scope: agent.scope, context: context) }
         catch { throw AgentPassNativeError.unauthorizedClient("Agent scope denied the request: \(error.localizedDescription)") }
         try validateCommit(payload: payload, repository: context.repository)
-        return AuthorizedSignRequest(payload: payload, agentID: agent.id, repository: context.repository, branch: context.branch, remote: context.remote)
+        return AuthorizedSignRequest(requestID: request.requestID, payload: payload, agentID: agent.id, repository: context.repository, branch: context.branch, remote: context.remote)
+    }
+
+    /// Rechecks mutable repository facts at the last possible point before key
+    /// use. Authorization is not transferable to a tree, branch, or remote that
+    /// changed after the original decision.
+    public func revalidate(_ request: AuthorizedSignRequest) throws {
+        let context = try trustedGitContext(request.repository)
+        guard context.repository == request.repository,
+              context.branch == request.branch,
+              context.remote == request.remote else {
+            throw AgentPassNativeError.unauthorizedClient("Trusted Git context changed before signing")
+        }
+        try validateCommit(payload: request.payload, repository: context.repository)
     }
 
     private func consumeNonce(_ nonce: String, nowMilliseconds: Int64) throws {
@@ -108,13 +232,22 @@ public final class NativeRequestAuthorizer: @unchecked Sendable {
     }
 
     private func validateCommit(payload: Data, repository: String) throws {
+        guard !payload.contains(0), !payload.contains(13) else {
+            throw AgentPassNativeError.unauthorizedClient("Signing payload contains a forbidden control byte")
+        }
         guard let text = String(data: payload, encoding: .utf8), let separator = text.range(of: "\n\n") else {
             throw AgentPassNativeError.unauthorizedClient("Signing payload is not a Git commit object")
         }
         let headers = text[..<separator.lowerBound].split(separator: "\n").map(String.init)
-        guard let tree = headers.first(where: { $0.hasPrefix("tree ") })?.dropFirst(5),
-              headers.contains(where: { $0.hasPrefix("author ") }),
-              headers.contains(where: { $0.hasPrefix("committer ") }),
+        guard !headers.contains(where: { $0.hasPrefix(" ") }),
+              !headers.contains(where: { $0.hasPrefix("gpgsig ") || $0.hasPrefix("gpgsig-sha256 ") }) else {
+            throw AgentPassNativeError.unauthorizedClient("Signing payload contains a forbidden signature or continued header")
+        }
+        let trees = headers.filter { $0.hasPrefix("tree ") }
+        let authors = headers.filter { $0.hasPrefix("author ") }
+        let committers = headers.filter { $0.hasPrefix("committer ") }
+        guard trees.count == 1, authors.count == 1, committers.count == 1,
+              let tree = trees.first?.dropFirst(5),
               Self.isObjectID(String(tree)) else {
             throw AgentPassNativeError.unauthorizedClient("Signing payload contains invalid commit headers")
         }
@@ -223,12 +356,18 @@ private struct Policy: Decodable {
     let remotes: Rules
     let session: SessionPolicy
     let control: JSONValue?
+    let controlV2: JSONValue?
+    enum CodingKeys: String, CodingKey {
+        case version, agents, operations, repositories, branches, remotes, session, control
+        case controlV2 = "control_v2"
+    }
     var globalScope: Scope { Scope(operations: operations, repositories: repositories, branches: branches, remotes: remotes) }
 }
 private enum JSONValue: Decodable { case value
     init(from decoder: Decoder) throws { self = .value }
 }
 private struct SignRequest: Decodable {
+    let requestID: String
     let operation: String
     let cwd: String
     let payloadBase64: String
@@ -242,5 +381,6 @@ private struct SignRequest: Decodable {
         case payloadBase64 = "payload_base64"
         case agentID = "agent_id"
         case timestampMilliseconds = "timestamp_ms"
+        case requestID = "request_id"
     }
 }

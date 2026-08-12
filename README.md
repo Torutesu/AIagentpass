@@ -1,5 +1,7 @@
 # AgentPass
 
+The agent platform's implementation-level security and product design is documented in [docs/DETAILED_DESIGN.md](docs/DETAILED_DESIGN.md); the concise component contract is in [docs/AGENT_PLATFORM_ARCHITECTURE.md](docs/AGENT_PLATFORM_ARCHITECTURE.md).
+
 AgentPass is an OSS policy broker for coding-agent operations. It keeps signing keys in the platform security boundary and gives an agent permission to perform a narrowly scoped operation, rather than handing the agent a secret.
 
 > Early alpha: macOS + Git SSH signing. Review the threat model before using production keys.
@@ -66,6 +68,22 @@ git config --local commit.gpgsign true
 ```
 
 `agentpass-git-sign` never invokes `ssh-keygen` directly. It sends the payload to the Unix socket broker. The broker independently resolves the repository root, branch, and origin; replaces the caller-provided key with the configured key; filters SSH signing arguments; evaluates policy and session state; records the payload hash; and only then signs. If the broker is unavailable, signing fails closed.
+
+## Claude Code and Cursor
+
+AgentPass includes a local MCP server for status, policy checks, setup guidance, and a bounded redacted audit tail. It deliberately does not expose a general-purpose signing tool: commits continue through Git and `agentpass-git-sign`.
+
+Preview a project-scoped integration, then install it explicitly:
+
+```sh
+agentpass integrate claude-code
+agentpass integrate claude-code --install
+
+agentpass integrate cursor
+agentpass integrate cursor --install
+```
+
+Claude Code uses `.mcp.json`; Cursor uses `.cursor/mcp.json`. AgentPass preserves unrelated MCP servers in either file and refuses invalid or unsafe existing configuration. Once connected, the available MCP tools are `agentpass_status`, `agentpass_check`, `agentpass_setup`, and `agentpass_audit_tail`.
 
 Each request is signed by an enrolled Ed25519 agent identity, timestamped, and assigned a random nonce. The broker verifies the signature and rejects unknown, expired, or replayed requests before policy evaluation.
 
@@ -158,7 +176,7 @@ AgentPass protects against copying the private key out of the device and limits 
 
 ## Native macOS boundary
 
-Version 0.17 includes a Swift/XPC native broker and a buildable macOS app host. It creates separate non-exportable P-256 signing, audit-checkpoint, and human-presence approval keys in Secure Enclave, emits OpenSSH-compatible SSHSIG signatures internally, authenticates the signed XPC client, and repeats Agent identity, session, remote-control, replay, scope, Git context, tree, and parent validation against root-owned policy and state inside the service. The service automatically refreshes signed control bundles with bounded jitter/backoff, can submit P-256 audit checkpoints to a root-configured HTTPS anchor, and rotates full audit logs into protected hash-linked segments without resetting their global chain. It verifies Ed25519 receipts and persists their chain under protected ancestry before acknowledging success.
+Version 0.18 includes a Swift/XPC native broker and a buildable macOS app host. It creates separate non-exportable P-256 signing, audit-checkpoint, human-presence approval, and Cloud device-authentication keys in Secure Enclave, emits OpenSSH-compatible SSHSIG signatures internally, authenticates the signed XPC client, and repeats Agent identity, capability, session, ControlBundle v2, replay, scope, Git context, tree, and parent validation against root-owned policy and state inside the service. The service automatically refreshes device-authenticated signed bundles with bounded jitter/backoff, can submit P-256 audit checkpoints to a root-configured HTTPS anchor, and rotates full audit logs into protected hash-linked segments without resetting their global chain. It verifies Ed25519 bundles/receipts and persists their chains under protected ancestry before acknowledging success.
 
 ```sh
 npm run test:native

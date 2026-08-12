@@ -6,10 +6,12 @@ import { execFileSync } from "node:child_process";
 import test from "node:test";
 import assert from "node:assert/strict";
 import { brokerRequest } from "../lib/broker-client.mjs";
-import { createBroker, processRequest, sanitizeSignArgs } from "../lib/broker.mjs";
+import { createBroker, processRequest, sanitizeSignArgs, validateCommitPayload } from "../lib/broker.mjs";
 import { loadConfig, saveConfig, saveSession, saveState } from "../lib/config.mjs";
 import { createAgentIdentity, createAuditIdentity, signRequest } from "../lib/identity.mjs";
 import { applyControlBundle, generateControlKeyPair, signControlBundle } from "../lib/remote-control.mjs";
+import { applyControlBundle as applyControlBundleV2, issueControlBundle } from "../lib/control-bundle-v2.mjs";
+import { issueCapability } from "../packages/capability/src/index.mjs";
 
 function fixture() {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "agentpass-broker-"));
@@ -45,6 +47,7 @@ function fixture() {
 
 function signedRequest(fixtureData, overrides = {}) {
   return signRequest({
+    request_id: crypto.randomUUID(),
     operation: "git.commit.sign",
     cwd: fixtureData.repo,
     sign_args: ["-Y", "sign", "-n", "git", "-f", "/tmp/attacker-key"],
@@ -189,13 +192,17 @@ test("running broker fails closed after configuration mutation", async () => {
   }
 });
 
-test("broker rejects replayed signed agent requests", async () => {
+test("broker returns an idempotent completed request but rejects nonce reuse under another request ID", async () => {
   const data = fixture();
   const replayCache = new Map();
   const request = signedRequest(data);
   const signer = async () => ({ status: 0, stdout: Buffer.from("signature"), stderr: "" });
-  await processRequest(request, signer, data.configDir, null, replayCache);
-  await assert.rejects(processRequest(request, signer, data.configDir, null, replayCache), /replay/);
+  const first = await processRequest(request, signer, data.configDir, null, replayCache);
+  const retry = await processRequest(request, signer, data.configDir, null, replayCache);
+  assert.equal(retry.replayed, true);
+  assert.equal(retry.stdout_base64, first.stdout_base64);
+  const nonceReuse = signedRequest(data, { request_id: crypto.randomUUID(), nonce: request.nonce });
+  await assert.rejects(processRequest(nonceReuse, signer, data.configDir, null, replayCache), /replay/);
 });
 
 test("broker rejects a commit payload whose tree is not the current index", async () => {
@@ -207,6 +214,17 @@ test("broker rejects a commit payload whose tree is not the current index", asyn
 test("broker rejects malformed base64 payloads", async () => {
   const data = fixture();
   await assert.rejects(processRequest(signedRequest(data, { payload_base64: "not base64!!!" }), async () => ({ status: 0, stdout: Buffer.from("bad"), stderr: "" }), data.configDir), /valid base64/);
+});
+
+test("commit parser rejects duplicate required headers, existing signatures, continuations, NUL, and CRLF", () => {
+  const data = fixture();
+  const tree = execFileSync("git", ["-C", data.repo, "write-tree"], { encoding: "utf8" }).trim();
+  const base = `tree ${tree}\nauthor Test <test@example.com> 0 +0000\ncommitter Test <test@example.com> 0 +0000`;
+  assert.throws(() => validateCommitPayload(Buffer.from(`tree ${tree}\n${base}\n\nmessage\n`), data.repo), /exactly one tree/);
+  assert.throws(() => validateCommitPayload(Buffer.from(`${base}\ngpgsig forged\n\nmessage\n`), data.repo), /already contains a signature/);
+  assert.throws(() => validateCommitPayload(Buffer.from(`${base}\n continued\n\nmessage\n`), data.repo), /continued header/);
+  assert.throws(() => validateCommitPayload(Buffer.from(`${base}\n\nmessage\0hidden\n`), data.repo), /NUL/);
+  assert.throws(() => validateCommitPayload(Buffer.from(`${base}\r\n\r\nmessage\r\n`), data.repo), /carriage return/);
 });
 
 test("a second broker cannot replace a live broker socket", async () => {
@@ -295,4 +313,90 @@ test("broker refuses to start when required remote control state is missing", ()
   config.control = { required: true, public_key: fs.readFileSync(keys.public_file, "utf8") };
   saveConfig(config, data.configDir);
   assert.throws(() => createBroker({ socket: path.join(data.root, "missing-control.sock"), configDir: data.configDir }), /bundle is missing/);
+});
+
+test("broker intersects ControlBundle v2 and a one-shot short-lived capability", async () => {
+  const data = fixture();
+  const keys = crypto.generateKeyPairSync("ed25519");
+  const organizationId = crypto.randomUUID();
+  const deviceId = crypto.randomUUID();
+  const statePath = path.join(data.configDir, "control-v2.state.json");
+  const now = Date.now();
+  const scope = {
+    operations: ["git.commit.sign"], repositories: [fs.realpathSync(data.repo)],
+    branches: { allow: ["feature/*"], deny: ["main"] },
+    remotes: { allow: ["git@github.com:example/project.git"], deny: [] }
+  };
+  const bundle = issueControlBundle({
+    format_epoch: 2, issuer: "agentpass-cloud", organization_id: organizationId, device_id: deviceId,
+    audience: { organization_id: organizationId, device_id: deviceId }, issued_at: new Date(now).toISOString(),
+    expires_at: new Date(now + 60_000).toISOString(), sequence: 1, policy_scope: scope, global_revoked: false,
+    revoked_devices: [], revoked_agents: [], revoked_capabilities: [], offline_ttl_ms: 60_000, key_id: "control-v2"
+  }, keys.privateKey, { now, maxTtlMs: 60_000, maxOfflineTtlMs: 60_000 });
+  const trust = { public_key: keys.publicKey, issuer: "agentpass-cloud", key_id: "control-v2", audience: { organization_id: organizationId, device_id: deviceId } };
+  applyControlBundleV2(bundle, trust, statePath, { now, audience: trust.audience });
+  const config = loadConfig(data.configDir);
+  config.control_v2 = { required: true, capability_required: true, public_key: keys.publicKey.export({ type: "spki", format: "pem" }).toString(), issuer: "agentpass-cloud", key_id: "control-v2", organization_id: organizationId, device_id: deviceId, state_path: statePath };
+  saveConfig(config, data.configDir);
+  const capability = issueCapability({ issuer: "agentpass-cloud", key_id: "control-v2", audience: { agent_id: data.identity.id, device_id: deviceId }, scope, sequence: 1, ttl_ms: 60_000 }, keys.privateKey, { now, ttlMs: 60_000 });
+  const cache = { highestSequence: 0, bundle: null, capabilitySequence: {}, consumedCapabilities: new Set() };
+  const signer = async () => ({ status: 0, stdout: Buffer.from("signature"), stderr: "" });
+  const result = await processRequest(signedRequest(data, { capability }), signer, data.configDir, null, new Map(), cache);
+  assert.equal(result.ok, true);
+  assert.equal(fs.statSync(path.join(data.configDir, "capability.state.json")).mode & 0o777, 0o600);
+  const revokedCapabilityId = crypto.randomUUID();
+  const revokedBundle = issueControlBundle({
+    ...Object.fromEntries(Object.entries(bundle).filter(([key]) => key !== "signature")), sequence: 2,
+    revoked_capabilities: [revokedCapabilityId]
+  }, keys.privateKey, { now, maxTtlMs: 60_000, maxOfflineTtlMs: 60_000 });
+  applyControlBundleV2(revokedBundle, trust, statePath, { now, audience: trust.audience });
+  const revokedCapability = issueCapability({ capability_id: revokedCapabilityId, issuer: "agentpass-cloud", key_id: "control-v2", audience: { agent_id: data.identity.id, device_id: deviceId }, scope, sequence: 2, ttl_ms: 60_000 }, keys.privateKey, { now, ttlMs: 60_000 });
+  await assert.rejects(processRequest(signedRequest(data, { capability: revokedCapability }), signer, data.configDir, null, new Map(), cache), /capability_revoked/);
+  const restartedCache = { highestSequence: 0, bundle: null, capabilitySequence: {}, consumedCapabilities: new Set() };
+  await assert.rejects(processRequest(signedRequest(data, { capability }), signer, data.configDir, null, new Map(), restartedCache), /already been consumed/);
+});
+
+test("non-native broker synchronizes authenticated ControlBundle v2 before every signature", async () => {
+  const data = fixture();
+  const controlKeys = crypto.generateKeyPairSync("ed25519");
+  const deviceKeys = crypto.generateKeyPairSync("ed25519");
+  const organizationId = crypto.randomUUID();
+  const deviceId = crypto.randomUUID();
+  const now = Date.now();
+  const statePath = path.join(data.configDir, "online-control-v2.state.json");
+  const deviceKeyPath = path.join(data.configDir, "device-auth.pem");
+  fs.writeFileSync(deviceKeyPath, deviceKeys.privateKey.export({ type: "pkcs8", format: "pem" }), { mode: 0o600 });
+  const scope = { operations: ["git.commit.sign"], repositories: [fs.realpathSync(data.repo)], branches: { allow: ["feature/*"], deny: ["main"] }, remotes: { allow: ["git@github.com:example/project.git"], deny: [] } };
+  const bundle = issueControlBundle({ format_epoch: 2, issuer: "agentpass-cloud", organization_id: organizationId, device_id: deviceId, audience: { organization_id: organizationId, device_id: deviceId }, issued_at: new Date(now).toISOString(), expires_at: new Date(now + 60_000).toISOString(), sequence: 1, policy_scope: scope, global_revoked: false, revoked_devices: [], revoked_agents: [], revoked_capabilities: [], offline_ttl_ms: 60_000, key_id: "control-v2" }, controlKeys.privateKey, { now, maxTtlMs: 60_000, maxOfflineTtlMs: 60_000 });
+  const config = loadConfig(data.configDir);
+  config.control_v2 = { required: true, capability_required: true, public_key: controlKeys.publicKey.export({ type: "spki", format: "pem" }).toString(), issuer: "agentpass-cloud", key_id: "control-v2", organization_id: organizationId, device_id: deviceId, state_path: statePath, url: `https://cloud.example.test/v1/organizations/${organizationId}/bundles/${deviceId}`, refresh_seconds: 15, device_private_key_path: deviceKeyPath };
+  saveConfig(config, data.configDir);
+  const capability = issueCapability({ issuer: "agentpass-cloud", key_id: "control-v2", audience: { agent_id: data.identity.id, device_id: deviceId }, scope, sequence: 1, ttl_ms: 60_000 }, controlKeys.privateKey, { now, ttlMs: 60_000 });
+  const originalFetch = globalThis.fetch;
+  let fetches = 0;
+  globalThis.fetch = async (_url, options) => {
+    fetches += 1;
+    assert.match(options.headers["AgentPass-Signature"], /^[A-Za-z0-9+/]+=*$/);
+    assert.equal(options.headers["AgentPass-Device"], deviceId);
+    return new Response(JSON.stringify({ bundle, request_id: crypto.randomUUID() }), { status: 200, headers: { "content-type": "application/json" } });
+  };
+  try {
+    const result = await processRequest(signedRequest(data, { capability }), async () => ({ status: 0, stdout: Buffer.from("signature"), stderr: "" }), data.configDir);
+    assert.equal(result.ok, true);
+    assert.equal(fetches, 1);
+    assert.equal(fs.existsSync(statePath), true);
+  } finally { globalThis.fetch = originalFetch; }
+});
+
+test("completed request_id replay is bound to the exact signed envelope", async () => {
+  const data = fixture();
+  const request = signedRequest(data);
+  let calls = 0;
+  const signer = async () => { calls += 1; return { status: 0, stdout: Buffer.from("signature"), stderr: "" }; };
+  await processRequest(request, signer, data.configDir);
+  const exactRetry = await processRequest(request, signer, data.configDir);
+  assert.equal(exactRetry.replayed, true);
+  const substituted = signedRequest(data, { request_id: request.request_id });
+  await assert.rejects(processRequest(substituted, signer, data.configDir), /request_id_reuse/);
+  assert.equal(calls, 1);
 });

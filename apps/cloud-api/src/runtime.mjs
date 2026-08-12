@@ -1,0 +1,92 @@
+import crypto from "node:crypto";
+import fs from "node:fs";
+import path from "node:path";
+
+import { createCloudApi } from "./server.mjs";
+import { createCloudStore } from "./store.mjs";
+import { createPersistentReplayCache } from "./auth.mjs";
+import { createRateLimiter } from "./rate-limit.mjs";
+
+const IDENTIFIER = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
+
+export async function createCloudRuntime({ env = process.env, logger = console } = {}) {
+  const config = loadRuntimeConfig(env);
+  const tokenRecords = readProtectedJson(config.tokenRecordsPath, "token records", 1024 * 1024);
+  if (!Array.isArray(tokenRecords) || tokenRecords.length < 1 || tokenRecords.length > 256) throw new Error("Cloud token records are invalid");
+  const privateKeyPEM = readProtectedFile(config.bundlePrivateKeyPath, "bundle private key", 16 * 1024).toString("utf8");
+  let privateKey;
+  try { privateKey = crypto.createPrivateKey(privateKeyPEM); } catch { throw new Error("Cloud bundle private key is invalid"); }
+  if (privateKey.asymmetricKeyType !== "ed25519") throw new Error("Cloud bundle private key must be Ed25519");
+  const store = await createCloudStore({ dataDir: config.dataDir });
+  let server;
+  try {
+    server = createCloudApi({
+      store,
+      tokenRecords,
+      replayCache: createPersistentReplayCache(path.join(config.dataDir, "device-replay-cache.json")),
+      rateLimiter: createRateLimiter({ persistencePath: path.join(config.dataDir, "principal-rate-limits.json") }),
+      admissionRateLimiter: createRateLimiter({ persistencePath: path.join(config.dataDir, "admission-rate-limits.json"), human: { capacity: 30, refillPerSecond: 1 }, device: { capacity: 60, refillPerSecond: 2 } }),
+      bundleSigner: { privateKey, issuer: config.issuer, keyId: config.keyId, ttlMs: config.ttlMs, offlineTtlMs: config.offlineTtlMs }
+    });
+  } catch (error) { await store.close(); throw error; }
+  let closed = false;
+  return Object.freeze({
+    config,
+    server,
+    store,
+    async listen() {
+      if (server.listening) return server.address();
+      await new Promise((resolve, reject) => { server.once("error", reject); server.listen(config.port, config.host, () => { server.off("error", reject); resolve(); }); });
+      logger.info?.(`AgentPass Cloud API listening on ${config.host}:${server.address().port}`);
+      return server.address();
+    },
+    async close() {
+      if (closed) return;
+      closed = true;
+      if (server.listening) await new Promise((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+      await store.close();
+    }
+  });
+}
+
+export function loadRuntimeConfig(env = {}) {
+  const dataDir = absolute(env.AGENTPASS_CLOUD_DATA_DIR, "AGENTPASS_CLOUD_DATA_DIR");
+  const tokenRecordsPath = absolute(env.AGENTPASS_CLOUD_TOKEN_RECORDS_PATH, "AGENTPASS_CLOUD_TOKEN_RECORDS_PATH");
+  const bundlePrivateKeyPath = absolute(env.AGENTPASS_CLOUD_BUNDLE_PRIVATE_KEY_PATH, "AGENTPASS_CLOUD_BUNDLE_PRIVATE_KEY_PATH");
+  const issuer = env.AGENTPASS_CLOUD_ISSUER ?? "agentpass-cloud";
+  const keyId = env.AGENTPASS_CLOUD_KEY_ID ?? "control-v2";
+  if (!IDENTIFIER.test(issuer) || !IDENTIFIER.test(keyId)) throw new Error("Cloud signer identifiers are invalid");
+  const host = env.AGENTPASS_CLOUD_HOST ?? "127.0.0.1";
+  if (!new Set(["127.0.0.1", "::1", "localhost", "0.0.0.0", "::"]).has(host)) throw new Error("Cloud listen host is invalid");
+  const port = integer(env.AGENTPASS_CLOUD_PORT ?? "8080", 0, 65_535, "Cloud port");
+  const ttlMs = integer(env.AGENTPASS_CLOUD_BUNDLE_TTL_MS ?? "3600000", 1_000, 7 * 24 * 60 * 60 * 1000, "Bundle TTL");
+  const offlineTtlMs = integer(env.AGENTPASS_CLOUD_OFFLINE_TTL_MS ?? "3600000", 0, 7 * 24 * 60 * 60 * 1000, "Offline TTL");
+  return Object.freeze({ dataDir, tokenRecordsPath, bundlePrivateKeyPath, issuer, keyId, host, port, ttlMs, offlineTtlMs });
+}
+
+function readProtectedJson(file, label, maxBytes) {
+  const bytes = readProtectedFile(file, label, maxBytes);
+  try { return JSON.parse(bytes); } catch { throw new Error(`Cloud ${label} JSON is invalid`); }
+}
+
+function readProtectedFile(file, label, maxBytes) {
+  const descriptor = fs.openSync(file, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
+  try {
+    const stat = fs.fstatSync(descriptor);
+    const uid = typeof process.getuid === "function" ? process.getuid() : undefined;
+    if (!stat.isFile() || stat.nlink !== 1 || stat.size < 1 || stat.size > maxBytes || (stat.mode & 0o077) !== 0 || (uid !== undefined && stat.uid !== uid)) throw new Error(`Cloud ${label} permissions are unsafe`);
+    return fs.readFileSync(descriptor);
+  } finally { fs.closeSync(descriptor); }
+}
+
+function absolute(value, label) {
+  if (typeof value !== "string" || !path.isAbsolute(value) || path.basename(value) === "." || path.basename(value) === "..") throw new Error(`${label} must be an absolute path`);
+  return path.resolve(value);
+}
+
+function integer(value, min, max, label) {
+  if (typeof value !== "string" || !/^\d+$/.test(value)) throw new Error(`${label} is invalid`);
+  const result = Number(value);
+  if (!Number.isSafeInteger(result) || result < min || result > max) throw new Error(`${label} is invalid`);
+  return result;
+}

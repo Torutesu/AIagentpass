@@ -228,6 +228,15 @@ private struct ServiceConfiguration: Decodable {
     let controlStatePath: String?
     let controlURL: String?
     let controlRefreshSeconds: Int?
+    let controlV2StatePath: String?
+    let controlV2CapabilityStatePath: String?
+    let controlV2RequestEvidencePath: String?
+    let controlV2PublicKey: String?
+    let controlV2Issuer: String?
+    let controlV2KeyID: String?
+    let controlV2OrganizationID: String?
+    let controlV2DeviceID: String?
+    let controlV2DeviceKeyTag: String?
     let sessionApprovalPublicKey: String?
     let sessionApprovalKeyTag: String?
     let clientCodeSigningRequirement: String
@@ -270,6 +279,15 @@ private struct ServiceConfiguration: Decodable {
         case controlStatePath = "control_state_path"
         case controlURL = "control_url"
         case controlRefreshSeconds = "control_refresh_seconds"
+        case controlV2StatePath = "control_v2_state_path"
+        case controlV2CapabilityStatePath = "control_v2_capability_state_path"
+        case controlV2RequestEvidencePath = "control_v2_request_evidence_path"
+        case controlV2PublicKey = "control_v2_public_key"
+        case controlV2Issuer = "control_v2_issuer"
+        case controlV2KeyID = "control_v2_key_id"
+        case controlV2OrganizationID = "control_v2_organization_id"
+        case controlV2DeviceID = "control_v2_device_id"
+        case controlV2DeviceKeyTag = "control_v2_device_key_tag"
         case sessionApprovalPublicKey = "session_approval_public_key"
         case sessionApprovalKeyTag = "session_approval_key_tag"
         case clientCodeSigningRequirement = "client_code_signing_requirement"
@@ -283,10 +301,33 @@ private struct ServiceConfiguration: Decodable {
             throw AgentPassNativeError.invalidConfiguration("Native service configuration contains empty trust parameters")
         }
         if value.controlURL != nil || value.controlRefreshSeconds != nil {
-            guard value.controlStatePath != nil, let rawURL = value.controlURL, let interval = value.controlRefreshSeconds else {
+            guard let rawURL = value.controlURL, let interval = value.controlRefreshSeconds,
+                  value.controlV2StatePath != nil ? value.controlV2DeviceKeyTag?.isEmpty == false : value.controlStatePath != nil else {
                 throw AgentPassNativeError.invalidConfiguration("Native control refresh requires protected state, URL, and interval")
             }
             _ = try NativeControlRefreshConfiguration(urlString: rawURL, refreshSeconds: interval)
+        }
+        let v2Values: [Any?] = [value.controlV2StatePath, value.controlV2CapabilityStatePath, value.controlV2RequestEvidencePath, value.controlV2PublicKey, value.controlV2Issuer, value.controlV2KeyID, value.controlV2OrganizationID, value.controlV2DeviceID]
+        let v2Count = v2Values.compactMap { $0 }.count
+        if value.controlV2DeviceKeyTag != nil, v2Count == 0 { throw AgentPassNativeError.invalidConfiguration("ControlBundle v2 device key tag requires ControlBundle v2") }
+        if v2Count != 0 {
+            guard v2Count == v2Values.count,
+                  value.controlV2StatePath?.hasPrefix("/") == true,
+                  value.controlV2CapabilityStatePath?.hasPrefix("/") == true,
+                  value.controlV2RequestEvidencePath?.hasPrefix("/") == true,
+                  let publicKey = value.controlV2PublicKey,
+                  let issuer = value.controlV2Issuer, !issuer.isEmpty,
+                  let keyID = value.controlV2KeyID, !keyID.isEmpty,
+                  let organizationID = value.controlV2OrganizationID, UUID(uuidString: organizationID) != nil,
+                  let deviceID = value.controlV2DeviceID, UUID(uuidString: deviceID) != nil,
+                  value.controlURL != nil, value.controlRefreshSeconds != nil,
+                  value.controlV2DeviceKeyTag?.isEmpty == false else {
+                throw AgentPassNativeError.invalidConfiguration("ControlBundle v2 requires complete pinned trust, audience, and protected state paths")
+            }
+            _ = try NativeControlBundleV2Trust(publicKeyPEM: publicKey, issuer: issuer, keyID: keyID, audience: NativeControlBundleV2Audience(organizationID: organizationID, deviceID: deviceID))
+            if let tag = value.controlV2DeviceKeyTag {
+                guard !tag.isEmpty, tag != value.keyTag, tag != value.auditKeyTag, tag != value.sessionApprovalKeyTag else { throw AgentPassNativeError.invalidConfiguration("ControlBundle v2 device authentication requires a dedicated Secure Enclave key tag") }
+            }
         }
         let deletionConfigurationCount: Int = [
             value.auditKeyDeletionEvidenceBundlePath != nil,
@@ -484,6 +525,8 @@ private final class ServiceEndpoint: NSObject, AgentPassNativeServiceProtocol, @
     private let installationID: String?
     private let sessionManager: NativeSessionManager?
     private let controlManager: NativeControlManager?
+    private let controlV2Manager: NativeControlBundleV2Manager?
+    private let signingTransactions: NativeSigningTransactionStore
     private let keyLifecycle: NativeKeyLifecycleStore?
     private let keyCoordinator: NativeKeyLifecycleCoordinator?
     private let loadedLifecycleHeadHash: String?
@@ -504,7 +547,7 @@ private final class ServiceEndpoint: NSObject, AgentPassNativeServiceProtocol, @
     private var auditPruneLastError: String?
     private var auditPruneLastUpdatedAt: String?
 
-    init(keyStore: SecureEnclaveKeyStore, authorizer: NativeRequestAuthorizer, auditLog: NativeAuditLog, auditCheckpoints: NativeAuditCheckpoints, auditSigner: SecureEnclaveKeyStore, auditAnchorReceipts: NativeAuditAnchorReceipts?, auditAnchorClient: NativeAuditAnchorClient?, auditKeyRotationCoordinator: NativeAuditKeyRotationCoordinator?, auditKeyRecoveryCoordinator: NativeAuditKeyRecoveryCoordinator?, auditKeyRecoveryPlanJournal: NativeAuditKeyRecoveryPlanJournal?, auditKeyTransitionStore: NativeAuditKeyTransitionStore?, auditKeyRecoveryPolicy: NativeAuditKeyRecoveryPolicy?, auditKeyRecoveryApprovalJournal: NativeAuditRecoveryApprovalJournal?, auditPruneCoordinator: NativeAuditPruneCoordinator?, auditPruneTrustSource: NativeAuditPruneServiceTrustSource?, auditPruneEvidenceBundlePath: String?, auditAnchorTenant: String?, keychainAccessGroup: String?, recoveryPolicyData: Data?, installationID: String?, sessionManager: NativeSessionManager?, controlManager: NativeControlManager?, keyLifecycle: NativeKeyLifecycleStore?, keyCoordinator: NativeKeyLifecycleCoordinator?, loadedLifecycleHeadHash: String?) {
+    init(keyStore: SecureEnclaveKeyStore, authorizer: NativeRequestAuthorizer, auditLog: NativeAuditLog, auditCheckpoints: NativeAuditCheckpoints, auditSigner: SecureEnclaveKeyStore, auditAnchorReceipts: NativeAuditAnchorReceipts?, auditAnchorClient: NativeAuditAnchorClient?, auditKeyRotationCoordinator: NativeAuditKeyRotationCoordinator?, auditKeyRecoveryCoordinator: NativeAuditKeyRecoveryCoordinator?, auditKeyRecoveryPlanJournal: NativeAuditKeyRecoveryPlanJournal?, auditKeyTransitionStore: NativeAuditKeyTransitionStore?, auditKeyRecoveryPolicy: NativeAuditKeyRecoveryPolicy?, auditKeyRecoveryApprovalJournal: NativeAuditRecoveryApprovalJournal?, auditPruneCoordinator: NativeAuditPruneCoordinator?, auditPruneTrustSource: NativeAuditPruneServiceTrustSource?, auditPruneEvidenceBundlePath: String?, auditAnchorTenant: String?, keychainAccessGroup: String?, recoveryPolicyData: Data?, installationID: String?, sessionManager: NativeSessionManager?, controlManager: NativeControlManager?, controlV2Manager: NativeControlBundleV2Manager? = nil, signingTransactions: NativeSigningTransactionStore, keyLifecycle: NativeKeyLifecycleStore?, keyCoordinator: NativeKeyLifecycleCoordinator?, loadedLifecycleHeadHash: String?) {
         self.keyStore = keyStore
         self.authorizer = authorizer
         self.auditLog = auditLog
@@ -527,13 +570,15 @@ private final class ServiceEndpoint: NSObject, AgentPassNativeServiceProtocol, @
         self.installationID = installationID
         self.sessionManager = sessionManager
         self.controlManager = controlManager
+        self.controlV2Manager = controlV2Manager
+        self.signingTransactions = signingTransactions
         self.keyLifecycle = keyLifecycle
         self.keyCoordinator = keyCoordinator
         self.loadedLifecycleHeadHash = loadedLifecycleHeadHash
     }
 
-    func startControlRefresh(url: URL, refreshSeconds: Int) throws {
-        let fetcher = try NativeControlFetcher(sourceURL: url, refreshSeconds: refreshSeconds) { [weak self] outcome in
+    func startControlRefresh(url: URL, refreshSeconds: Int, deviceID: String? = nil, signer: (any P256MessageSigner)? = nil) throws {
+        let fetcher = try NativeControlFetcher(sourceURL: url, refreshSeconds: refreshSeconds, deviceID: deviceID, signer: signer) { [weak self] outcome in
             guard let self else { throw AgentPassNativeError.invalidConfiguration("Native control service is unavailable") }
             try self.handleControlFetch(outcome)
         }
@@ -551,11 +596,15 @@ private final class ServiceEndpoint: NSObject, AgentPassNativeServiceProtocol, @
             let session = sessionManager?.status()
             let approvalFingerprint: Any = sessionManager?.approvalKeyFingerprint ?? NSNull()
             let control = controlManager?.status()
+            let controlV2 = controlV2Manager?.status()
+            let controlSequence = controlV2?.sequence ?? control?.sequence ?? 0
+            let controlOperational = controlV2?.operational ?? control?.operational ?? true
+            let controlExpired = controlV2?.expired ?? control?.expired ?? false
             let fetch = controlFetcher?.status()
             let anchor = try auditAnchorReceipts?.status(checkpoints: checkpoints)
             let lifecycle = try keyLifecycle?.verify()
             let receiptStorage = try auditAnchorReceipts?.storageStatus(checkpoints: checkpoints)
-            reply(["ok": true, "protocol_version": 13, "key_backend": "secure-enclave", "key_lifecycle_configured": lifecycle != nil, "key_lifecycle_sequence": lifecycle?.sequence ?? 0, "key_lifecycle_head_hash": lifecycle?.headHash ?? NSNull(), "audit_entries": audit.entries, "audit_archive_configured": storage.configured, "audit_archive_segments": storage.segments, "audit_active_bytes": storage.activeBytes, "audit_rotation_ready": storage.rotationReady, "audit_checkpoints": checkpoints.count, "audit_checkpoint_archive_configured": checkpointStorage.configured, "audit_checkpoint_archive_segments": checkpointStorage.segments, "audit_checkpoint_active_bytes": checkpointStorage.activeBytes, "audit_checkpoint_rotation_ready": checkpointStorage.rotationReady, "audit_anchor_configured": anchor != nil, "audit_anchor_receipts": anchor?.receipts ?? 0, "audit_anchor_pending": anchor?.pending ?? 0, "audit_anchor_latest_receipt": anchor?.latestReceiptHash ?? NSNull(), "audit_receipt_archive_configured": receiptStorage?.configured ?? false, "audit_receipt_archive_segments": receiptStorage?.segments ?? 0, "audit_receipt_active_bytes": receiptStorage?.activeBytes ?? 0, "audit_receipt_rotation_ready": receiptStorage?.rotationReady ?? false, "session_required": session?.required ?? false, "active_sessions": session?.active ?? 0, "session_generation": session?.generation ?? 0, "session_approval_key_fingerprint": approvalFingerprint, "control_configured": control != nil, "control_sequence": control?.sequence ?? 0, "control_operational": control?.operational ?? true, "control_expired": control?.expired ?? false, "control_expires_at": control?.expiresAt ?? NSNull(), "control_refresh_configured": fetch != nil, "control_refresh_in_flight": fetch?.inFlight ?? false, "control_refresh_last_attempt_at": fetch?.lastAttemptAt ?? NSNull(), "control_refresh_last_success_at": fetch?.lastSuccessAt ?? NSNull(), "control_refresh_last_error": fetch?.lastError ?? NSNull(), "control_refresh_next_attempt_at": fetch?.nextAttemptAt ?? NSNull(), "control_refresh_consecutive_failures": fetch?.consecutiveFailures ?? 0])
+            reply(["ok": true, "protocol_version": 13, "key_backend": "secure-enclave", "key_lifecycle_configured": lifecycle != nil, "key_lifecycle_sequence": lifecycle?.sequence ?? 0, "key_lifecycle_head_hash": lifecycle?.headHash ?? NSNull(), "audit_entries": audit.entries, "audit_archive_configured": storage.configured, "audit_archive_segments": storage.segments, "audit_active_bytes": storage.activeBytes, "audit_rotation_ready": storage.rotationReady, "audit_checkpoints": checkpoints.count, "audit_checkpoint_archive_configured": checkpointStorage.configured, "audit_checkpoint_archive_segments": checkpointStorage.segments, "audit_checkpoint_active_bytes": checkpointStorage.activeBytes, "audit_checkpoint_rotation_ready": checkpointStorage.rotationReady, "audit_anchor_configured": anchor != nil, "audit_anchor_receipts": anchor?.receipts ?? 0, "audit_anchor_pending": anchor?.pending ?? 0, "audit_anchor_latest_receipt": anchor?.latestReceiptHash ?? NSNull(), "audit_receipt_archive_configured": receiptStorage?.configured ?? false, "audit_receipt_archive_segments": receiptStorage?.segments ?? 0, "audit_receipt_active_bytes": receiptStorage?.activeBytes ?? 0, "audit_receipt_rotation_ready": receiptStorage?.rotationReady ?? false, "session_required": session?.required ?? false, "active_sessions": session?.active ?? 0, "session_generation": session?.generation ?? 0, "session_approval_key_fingerprint": approvalFingerprint, "control_configured": control != nil || controlV2 != nil, "control_format_epoch": controlV2?.minimumFormatEpoch ?? (control == nil ? 0 : 1), "control_sequence": controlSequence, "control_operational": controlOperational, "control_expired": controlExpired, "control_expires_at": control?.expiresAt ?? NSNull(), "control_refresh_configured": fetch != nil, "control_device_auth_public_key": fetch?.devicePublicKeyPEM ?? NSNull(), "control_refresh_in_flight": fetch?.inFlight ?? false, "control_refresh_last_attempt_at": fetch?.lastAttemptAt ?? NSNull(), "control_refresh_last_success_at": fetch?.lastSuccessAt ?? NSNull(), "control_refresh_last_error": fetch?.lastError ?? NSNull(), "control_refresh_next_attempt_at": fetch?.nextAttemptAt ?? NSNull(), "control_refresh_consecutive_failures": fetch?.consecutiveFailures ?? 0])
         } catch {
             reply(["ok": false, "protocol_version": 13, "error": error.localizedDescription])
         }
@@ -567,12 +616,36 @@ private final class ServiceEndpoint: NSObject, AgentPassNativeServiceProtocol, @
     }
 
     func sign(request: NSData, withReply reply: @escaping (NSString?, NSError?) -> Void) {
+        if controlV2Manager != nil {
+            do {
+                guard let controlFetcher else { throw AgentPassNativeError.invalidConfiguration("ControlBundle v2 online refresh is unavailable") }
+                try controlFetcher.requireFreshForSigning()
+            } catch { reply(nil, error as NSError); return }
+        }
         authorizationLock.lock()
         defer { authorizationLock.unlock() }
         do { try verifyLifecycleTrustLocked() }
         catch { reply(nil, error as NSError); return }
         do { try rotateAuditIfReady(); _ = try auditCheckpoints.verify() }
         catch { reply(nil, error as NSError); return }
+        do {
+            if let prior = try signingTransactions.lookup(requestData: request as Data) {
+                switch prior.phase {
+                case .complete:
+                    reply(prior.signature! as NSString, nil)
+                case .signed:
+                    try appendAudit(NativeAuditEvent(operation: "git.commit.sign", decision: "allow", requestID: prior.requestID, reason: "allowed_recovered", agentID: prior.agentID, repository: prior.repository, branch: prior.branch, remote: prior.remote, payloadSHA256: prior.payloadHash))
+                    let completed = try signingTransactions.complete(requestID: prior.requestID)
+                    reply(completed.signature! as NSString, nil)
+                case .intent:
+                    _ = try signingTransactions.markOutcomeUnknown(requestID: prior.requestID)
+                    throw AgentPassNativeError.unauthorizedClient("signing_outcome_unknown")
+                case .outcomeUnknown:
+                    throw AgentPassNativeError.unauthorizedClient("signing_outcome_unknown")
+                }
+                return
+            }
+        } catch { reply(nil, error as NSError); return }
         let authorized: AuthorizedSignRequest
         do {
             authorized = try authorizer.authorize(requestData: request as Data)
@@ -580,6 +653,7 @@ private final class ServiceEndpoint: NSObject, AgentPassNativeServiceProtocol, @
             do { try appendAudit(NativeAuditEvent(operation: "git.commit.sign", decision: "deny", reason: authorizationError.localizedDescription)) }
             catch let auditError {
                 controlManager?.invalidate()
+                controlV2Manager?.invalidate()
                 reply(nil, auditError as NSError)
                 return
             }
@@ -587,14 +661,38 @@ private final class ServiceEndpoint: NSObject, AgentPassNativeServiceProtocol, @
             return
         }
         do {
-            let signature = try SSHSIG.sign(payload: authorized.payload, signer: keyStore)
             let payloadHash = SHA256.hash(data: authorized.payload).map { String(format: "%02x", $0) }.joined()
-            try appendAudit(NativeAuditEvent(operation: "git.commit.sign", decision: "allow", reason: "allowed", agentID: authorized.agentID, repository: authorized.repository, branch: authorized.branch, remote: authorized.remote, payloadSHA256: payloadHash))
-            reply(signature as NSString, nil)
+            _ = try signingTransactions.begin(requestData: request as Data, authorized: authorized, payloadHash: payloadHash)
+            // Durable authorization intent is appended before the hardware key
+            // is touched. A missing terminal result is therefore observable as
+            // an unresolved outcome rather than silent key use.
+            try appendAudit(NativeAuditEvent(operation: "git.commit.sign", decision: "allow", requestID: authorized.requestID, reason: "authorized_intent", agentID: authorized.agentID, repository: authorized.repository, branch: authorized.branch, remote: authorized.remote, payloadSHA256: payloadHash))
+            try authorizer.revalidate(authorized)
+            let signature = try SSHSIG.sign(payload: authorized.payload, signer: keyStore)
+            _ = try signingTransactions.recordSigned(requestID: authorized.requestID, signature: signature)
+            try appendAudit(NativeAuditEvent(operation: "git.commit.sign", decision: "allow", requestID: authorized.requestID, reason: "allowed", agentID: authorized.agentID, repository: authorized.repository, branch: authorized.branch, remote: authorized.remote, payloadSHA256: payloadHash))
+            let completed = try signingTransactions.complete(requestID: authorized.requestID)
+            reply(completed.signature! as NSString, nil)
         } catch let signingError {
-            do { try appendAudit(NativeAuditEvent(operation: "git.commit.sign", decision: "error", reason: signingError.localizedDescription, agentID: authorized.agentID, repository: authorized.repository, branch: authorized.branch, remote: authorized.remote)) }
+            // Once a signature is durably recorded, never append a contradictory
+            // terminal error and never touch the key again. The exact retry path
+            // above only repairs the missing final audit record.
+            if let transaction = try? signingTransactions.lookup(requestData: request as Data), transaction.phase == .signed {
+                controlManager?.invalidate()
+                controlV2Manager?.invalidate()
+                reply(nil, signingError as NSError)
+                return
+            }
+            // An intent without a durably recorded signature is deliberately
+            // treated as ambiguous. This sacrifices availability after a crash
+            // boundary rather than risking duplicate hardware-key use.
+            if let transaction = try? signingTransactions.lookup(requestData: request as Data), transaction.phase == .intent {
+                _ = try? signingTransactions.markOutcomeUnknown(requestID: authorized.requestID)
+            }
+            do { try appendAudit(NativeAuditEvent(operation: "git.commit.sign", decision: "error", requestID: authorized.requestID, reason: signingError.localizedDescription, agentID: authorized.agentID, repository: authorized.repository, branch: authorized.branch, remote: authorized.remote)) }
             catch let auditError {
                 controlManager?.invalidate()
+                controlV2Manager?.invalidate()
                 reply(nil, auditError as NSError)
                 return
             }
@@ -614,8 +712,12 @@ private final class ServiceEndpoint: NSObject, AgentPassNativeServiceProtocol, @
             let session = sessionManager?.status()
             let approvalFingerprint: Any = sessionManager?.approvalKeyFingerprint ?? NSNull()
             let control = controlManager?.status()
+            let controlV2 = controlV2Manager?.status()
+            let controlSequence = controlV2?.sequence ?? control?.sequence ?? 0
+            let controlOperational = controlV2?.operational ?? control?.operational ?? true
+            let controlExpired = controlV2?.expired ?? control?.expired ?? false
             let fetch = controlFetcher?.status()
-            let data = try JSONSerialization.data(withJSONObject: ["valid": true, "entries": audit.entries, "archive_configured": storage.configured, "archive_segments": storage.segments, "active_bytes": storage.activeBytes, "rotation_ready": storage.rotationReady, "head_hash": audit.headHash, "checkpoints": checkpoints.count, "latest_checkpoint": latest, "audit_key_fingerprint": fingerprint, "checkpoint_archive_configured": checkpointStorage.configured, "checkpoint_archive_segments": checkpointStorage.segments, "checkpoint_active_records": checkpointStorage.activeRecords, "checkpoint_active_bytes": checkpointStorage.activeBytes, "checkpoint_rotation_ready": checkpointStorage.rotationReady, "receipt_archive_configured": receiptStorage?.configured ?? false, "receipt_archive_segments": receiptStorage?.segments ?? 0, "receipt_active_records": receiptStorage?.activeRecords ?? 0, "receipt_active_bytes": receiptStorage?.activeBytes ?? 0, "receipt_rotation_ready": receiptStorage?.rotationReady ?? false, "session_required": session?.required ?? false, "active_sessions": session?.active ?? 0, "session_generation": session?.generation ?? 0, "session_approval_key_fingerprint": approvalFingerprint, "control_configured": control != nil, "control_sequence": control?.sequence ?? 0, "control_operational": control?.operational ?? true, "control_expired": control?.expired ?? false, "control_expires_at": control?.expiresAt ?? NSNull(), "control_refresh_configured": fetch != nil, "control_refresh_last_attempt_at": fetch?.lastAttemptAt ?? NSNull(), "control_refresh_last_success_at": fetch?.lastSuccessAt ?? NSNull(), "control_refresh_last_error": fetch?.lastError ?? NSNull(), "control_refresh_next_attempt_at": fetch?.nextAttemptAt ?? NSNull(), "control_refresh_consecutive_failures": fetch?.consecutiveFailures ?? 0], options: [.sortedKeys])
+            let data = try JSONSerialization.data(withJSONObject: ["valid": true, "entries": audit.entries, "archive_configured": storage.configured, "archive_segments": storage.segments, "active_bytes": storage.activeBytes, "rotation_ready": storage.rotationReady, "head_hash": audit.headHash, "checkpoints": checkpoints.count, "latest_checkpoint": latest, "audit_key_fingerprint": fingerprint, "checkpoint_archive_configured": checkpointStorage.configured, "checkpoint_archive_segments": checkpointStorage.segments, "checkpoint_active_records": checkpointStorage.activeRecords, "checkpoint_active_bytes": checkpointStorage.activeBytes, "checkpoint_rotation_ready": checkpointStorage.rotationReady, "receipt_archive_configured": receiptStorage?.configured ?? false, "receipt_archive_segments": receiptStorage?.segments ?? 0, "receipt_active_records": receiptStorage?.activeRecords ?? 0, "receipt_active_bytes": receiptStorage?.activeBytes ?? 0, "receipt_rotation_ready": receiptStorage?.rotationReady ?? false, "session_required": session?.required ?? false, "active_sessions": session?.active ?? 0, "session_generation": session?.generation ?? 0, "session_approval_key_fingerprint": approvalFingerprint, "control_configured": control != nil || controlV2 != nil, "control_format_epoch": controlV2?.minimumFormatEpoch ?? (control == nil ? 0 : 1), "control_sequence": controlSequence, "control_operational": controlOperational, "control_expired": controlExpired, "control_expires_at": control?.expiresAt ?? NSNull(), "control_refresh_configured": fetch != nil, "control_device_auth_public_key": fetch?.devicePublicKeyPEM ?? NSNull(), "control_refresh_last_attempt_at": fetch?.lastAttemptAt ?? NSNull(), "control_refresh_last_success_at": fetch?.lastSuccessAt ?? NSNull(), "control_refresh_last_error": fetch?.lastError ?? NSNull(), "control_refresh_next_attempt_at": fetch?.nextAttemptAt ?? NSNull(), "control_refresh_consecutive_failures": fetch?.consecutiveFailures ?? 0], options: [.sortedKeys])
             reply(data as NSData, nil)
         } catch { reply(nil, error as NSError) }
     }
@@ -1871,6 +1973,7 @@ private final class ServiceEndpoint: NSObject, AgentPassNativeServiceProtocol, @
         catch { reply(nil, error as NSError); return }
         do {
             try controlManager?.validateControl(agentID: agentID as String, nowMilliseconds: Int64(Date().timeIntervalSince1970 * 1000))
+            try controlV2Manager?.validateControl(agentID: agentID as String, nowMilliseconds: Int64(Date().timeIntervalSince1970 * 1000))
             reply(try sessionManager.beginSession(agentID: agentID as String, requestedTTLSeconds: ttlSeconds) as NSData, nil)
         }
         catch let sessionError {
@@ -1894,6 +1997,11 @@ private final class ServiceEndpoint: NSObject, AgentPassNativeServiceProtocol, @
         do {
             let issued = try sessionManager.completeSession(challengeData: challenge as Data, signature: signature as Data)
             do { try controlManager?.validateControl(agentID: issued.agentID, nowMilliseconds: Int64(Date().timeIntervalSince1970 * 1000)) }
+            catch {
+                sessionManager.discardSession(token: issued.token)
+                throw error
+            }
+            do { try controlV2Manager?.validateControl(agentID: issued.agentID, nowMilliseconds: Int64(Date().timeIntervalSince1970 * 1000)) }
             catch {
                 sessionManager.discardSession(token: issued.token)
                 throw error
@@ -1947,30 +2055,22 @@ private final class ServiceEndpoint: NSObject, AgentPassNativeServiceProtocol, @
     }
 
     func applyControlBundle(bundle: NSData, withReply reply: @escaping (NSData?, NSError?) -> Void) {
-        authorizationLock.lock()
-        defer { authorizationLock.unlock() }
         do {
-            try verifyLifecycleTrustLocked()
-            _ = try auditCheckpoints.verify()
             let status = try applyControlUpdate(bundleData: bundle as Data, operation: "control.apply")
-            let encoder = JSONEncoder()
-            encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
-            reply(try encoder.encode(status) as NSData, nil)
+            reply(try JSONSerialization.data(withJSONObject: status, options: [.sortedKeys, .withoutEscapingSlashes]) as NSData, nil)
         } catch { reply(nil, error as NSError) }
     }
 
     func controlStatus(withReply reply: @escaping (NSData?, NSError?) -> Void) {
         do { _ = try auditCheckpoints.verify() }
         catch { reply(nil, error as NSError); return }
-        guard let controlManager else {
+        guard controlManager != nil || controlV2Manager != nil else {
             do { reply(try JSONSerialization.data(withJSONObject: ["configured": false], options: [.sortedKeys]) as NSData, nil) }
             catch { reply(nil, error as NSError) }
             return
         }
         do {
-            let encoder = JSONEncoder(), status = controlManager.status()
-            encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
-            var object = try JSONSerialization.jsonObject(with: encoder.encode(status)) as! [String: Any]
+            var object = try currentControlStatusObject()
             let fetch = controlFetcher?.status()
             object["refresh_configured"] = fetch != nil
             object["refresh_source_url"] = fetch?.sourceURL ?? NSNull()
@@ -1980,16 +2080,31 @@ private final class ServiceEndpoint: NSObject, AgentPassNativeServiceProtocol, @
             object["refresh_last_error"] = fetch?.lastError ?? NSNull()
             object["refresh_next_attempt_at"] = fetch?.nextAttemptAt ?? NSNull()
             object["refresh_consecutive_failures"] = fetch?.consecutiveFailures ?? 0
+            object["device_auth_public_key"] = fetch?.devicePublicKeyPEM ?? NSNull()
             reply(try JSONSerialization.data(withJSONObject: object, options: [.sortedKeys]) as NSData, nil)
         } catch { reply(nil, error as NSError) }
+    }
+
+    func refreshControl(withReply reply: @escaping (NSData?, NSError?) -> Void) {
+        guard let controlFetcher else { reply(nil, AgentPassNativeError.invalidConfiguration("Native control refresh is not configured") as NSError); return }
+        controlFetcher.fetchNow { [weak self] failure in
+            guard let self else { reply(nil, AgentPassNativeError.invalidConfiguration("Native control service is unavailable") as NSError); return }
+            if let failure { reply(nil, AgentPassNativeError.invalidConfiguration(failure) as NSError); return }
+            do {
+                var object = try self.currentControlStatusObject()
+                object["refreshed"] = true
+                reply(try JSONSerialization.data(withJSONObject: object, options: [.sortedKeys, .withoutEscapingSlashes]) as NSData, nil)
+            } catch { reply(nil, error as NSError) }
+        }
     }
 
     func validateControl(agentID: NSString, withReply reply: @escaping (Bool, NSError?) -> Void) {
         do { _ = try auditCheckpoints.verify() }
         catch { reply(false, error as NSError); return }
-        guard let controlManager else { reply(true, nil); return }
+        guard controlManager != nil || controlV2Manager != nil else { reply(true, nil); return }
         do {
-            try controlManager.validateControl(agentID: agentID as String, nowMilliseconds: Int64(Date().timeIntervalSince1970 * 1000))
+            try controlManager?.validateControl(agentID: agentID as String, nowMilliseconds: Int64(Date().timeIntervalSince1970 * 1000))
+            try controlV2Manager?.validateControl(agentID: agentID as String, nowMilliseconds: Int64(Date().timeIntervalSince1970 * 1000))
             reply(true, nil)
         } catch { reply(false, nil) }
     }
@@ -1997,24 +2112,49 @@ private final class ServiceEndpoint: NSObject, AgentPassNativeServiceProtocol, @
     private func handleControlFetch(_ outcome: NativeControlFetchOutcome) throws {
         switch outcome {
         case .success(let data):
-            _ = try applyControlUpdate(bundleData: data, operation: "control.fetch")
+            let bundle = controlV2Manager == nil ? data : try NativeControlBundleV2Codec.extractCloudResponse(data)
+            _ = try applyControlUpdate(bundleData: bundle, operation: "control.fetch")
         case .failure(let reason):
             authorizationLock.lock()
             defer { authorizationLock.unlock() }
-            guard let controlManager else { throw AgentPassNativeError.invalidConfiguration("Native remote control is not configured") }
+            guard controlManager != nil || controlV2Manager != nil else { throw AgentPassNativeError.invalidConfiguration("Native remote control is not configured") }
             try verifyLifecycleTrustLocked()
             _ = try auditCheckpoints.verify()
             do { try appendControlFetchFailureIfNeeded(decision: "error", reason: reason) }
             catch {
-                controlManager.invalidate()
+                controlManager?.invalidate()
+                controlV2Manager?.invalidate()
                 throw error
             }
         }
     }
 
-    private func applyControlUpdate(bundleData: Data, operation: String) throws -> NativeControlStatus {
+    private func applyControlUpdate(bundleData: Data, operation: String) throws -> [String: Any] {
         authorizationLock.lock()
         defer { authorizationLock.unlock() }
+        if let controlV2Manager {
+            try verifyLifecycleTrustLocked()
+            _ = try auditCheckpoints.verify()
+            let requiresUpdate: Bool
+            do { requiresUpdate = try controlV2Manager.validateBundle(bundleData: bundleData) }
+            catch let controlError {
+                do { try appendAudit(NativeAuditEvent(operation: operation, decision: "deny", reason: controlError.localizedDescription)) }
+                catch { controlV2Manager.invalidate(); throw error }
+                throw controlError
+            }
+            if !requiresUpdate { return try currentControlStatusObject() }
+            try controlV2Manager.beginAuditedUpdate()
+            let status: NativeControlBundleV2Status
+            do { status = try controlV2Manager.apply(bundleData: bundleData) }
+            catch { controlV2Manager.invalidate(); _ = try? appendAudit(NativeAuditEvent(operation: operation, decision: "error", reason: error.localizedDescription)); throw error }
+            let revokedSessions = sessionManager?.revokeAll()
+            do {
+                let sessionReason = revokedSessions.map { ";session_generation=\($0.generation);sessions_revoked=\($0.revokedSessions)" } ?? ""
+                try appendAudit(NativeAuditEvent(operation: operation, decision: "allow", reason: "format_epoch=\(status.minimumFormatEpoch);sequence=\(status.sequence)\(sessionReason)"))
+                try controlV2Manager.completeAuditedUpdate()
+            } catch { controlV2Manager.invalidate(); throw error }
+            return try currentControlStatusObject()
+        }
         guard let controlManager else { throw AgentPassNativeError.invalidConfiguration("Native remote control is not configured") }
         try verifyLifecycleTrustLocked()
         _ = try auditCheckpoints.verify()
@@ -2035,7 +2175,7 @@ private final class ServiceEndpoint: NSObject, AgentPassNativeServiceProtocol, @
             lastControlFetchAuditReason = nil
             lastControlFetchAuditAt = nil
         }
-        if !requiresUpdate { return controlManager.status() }
+        if !requiresUpdate { return try currentControlStatusObject() }
         try controlManager.beginAuditedUpdate()
         let status: NativeControlStatus
         do { status = try controlManager.apply(bundleData: bundleData) }
@@ -2053,7 +2193,21 @@ private final class ServiceEndpoint: NSObject, AgentPassNativeServiceProtocol, @
             controlManager.invalidate()
             throw error
         }
-        return status
+        return try currentControlStatusObject()
+    }
+
+    private func currentControlStatusObject() throws -> [String: Any] {
+        if let controlV2Manager {
+            let status = controlV2Manager.status()
+            return ["configured": true, "format_epoch": status.minimumFormatEpoch, "sequence": status.sequence, "operational": status.operational, "global_revoked": status.globalRevoked, "expired": status.expired, "device_revoked": status.deviceRevoked, "revoked_agents": status.revokedAgents, "revoked_capabilities": status.revokedCapabilities]
+        }
+        guard let controlManager else { return ["configured": false] }
+        let encoder = JSONEncoder(), status = controlManager.status()
+        encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
+        var object = try JSONSerialization.jsonObject(with: encoder.encode(status)) as! [String: Any]
+        object["format_epoch"] = 1
+        object["configured"] = true
+        return object
     }
 
     private func appendControlFetchFailureIfNeeded(decision: String, reason: String) throws {
@@ -2122,7 +2276,7 @@ private final class ServiceEndpoint: NSObject, AgentPassNativeServiceProtocol, @
               anchorStatus.pending == 0 else {
             throw AgentPassNativeError.invalidSignature("Recovery requires an exact fully anchored current audit boundary")
         }
-        let rawControlSequence = controlManager?.status().sequence ?? 0
+        let rawControlSequence = controlV2Manager?.status().sequence ?? controlManager?.status().sequence ?? 0
         guard let controlSequence = Int(exactly: rawControlSequence) else {
             throw AgentPassNativeError.invalidConfiguration("Recovery control sequence exceeds the supported range")
         }
@@ -2487,6 +2641,8 @@ do {
     }
     let configuration = try ServiceConfiguration.load(path: CommandLine.arguments[2])
     try validateProtectedOutputPath(path: configuration.auditLogPath, label: "Native audit log")
+    let signingTransactionPath = configuration.auditLogPath + ".signing-transactions.json"
+    try validateProtectedOutputPath(path: signingTransactionPath, label: "Native signing transaction state")
     if let archiveDirectory = configuration.auditArchiveDirectory {
         try validateProtectedDirectoryPath(path: archiveDirectory, label: "Native audit archive directory")
     }
@@ -2505,6 +2661,13 @@ do {
     }
     if let controlStatePath = configuration.controlStatePath {
         try validateProtectedOutputPath(path: controlStatePath, label: "Native control state")
+    }
+    for (path, label) in [
+        (configuration.controlV2StatePath, "Native ControlBundle v2 state"),
+        (configuration.controlV2CapabilityStatePath, "Native capability replay state"),
+        (configuration.controlV2RequestEvidencePath, "Native request evidence state")
+    ] {
+        if let path { try validateProtectedOutputPath(path: path, label: label) }
     }
     if let receiptPath = configuration.auditAnchorReceiptPath {
         try validateProtectedOutputPath(path: receiptPath, label: "Native audit anchor receipt log")
@@ -2575,6 +2738,27 @@ do {
     let approvalPublicKey = try activeApproval.map { try SSHSIG.authorizedKey(publicKeyX963: $0.publicKeyX963) } ?? configuration.sessionApprovalPublicKey
     let sessionManager = try approvalPublicKey.map { try NativeSessionManager(policyData: policyData, approvalPublicKey: $0) }
     let controlManager = try configuration.controlStatePath.map { try NativeControlManager(policyData: policyData, statePath: $0) }
+    let controlV2Manager: NativeControlBundleV2Manager?
+    let capabilityVerifier: NativeCapabilityVerifier?
+    let requestEvidenceStore: NativeRequestEvidenceStore?
+    if let statePath = configuration.controlV2StatePath,
+       let capabilityStatePath = configuration.controlV2CapabilityStatePath,
+       let requestEvidencePath = configuration.controlV2RequestEvidencePath,
+       let publicKey = configuration.controlV2PublicKey,
+       let issuer = configuration.controlV2Issuer,
+       let keyID = configuration.controlV2KeyID,
+       let organizationID = configuration.controlV2OrganizationID,
+       let deviceID = configuration.controlV2DeviceID {
+        let audience = NativeControlBundleV2Audience(organizationID: organizationID, deviceID: deviceID)
+        let trust = try NativeControlBundleV2Trust(publicKeyPEM: publicKey, issuer: issuer, keyID: keyID, audience: audience)
+        controlV2Manager = try NativeControlBundleV2Manager(trust: trust, statePath: statePath)
+        capabilityVerifier = try NativeCapabilityVerifier(trust: NativeCapabilityTrust(publicKeyPEM: publicKey, issuer: issuer, keyID: keyID), statePath: capabilityStatePath)
+        requestEvidenceStore = try NativeRequestEvidenceStore(path: requestEvidencePath)
+    } else {
+        controlV2Manager = nil
+        capabilityVerifier = nil
+        requestEvidenceStore = nil
+    }
     let keyStore = try activeSigning.map { try SecureEnclaveKeyStore.loadExisting(applicationTag: $0.applicationTag, accessGroup: configuration.keychainAccessGroup) }
         ?? SecureEnclaveKeyStore(applicationTag: configuration.keyTag, accessGroup: configuration.keychainAccessGroup)
     if let activeSigning, keyStore.publicKeyX963 != activeSigning.publicKeyX963 { throw AgentPassNativeError.invalidKey("Active signing key does not match the lifecycle ledger") }
@@ -2582,6 +2766,10 @@ do {
         ?? SecureEnclaveKeyStore(applicationTag: configuration.auditKeyTag, accessGroup: configuration.keychainAccessGroup)
     if let activeAudit, auditSigner.publicKeyX963 != activeAudit.publicKeyX963 { throw AgentPassNativeError.invalidKey("Active audit key does not match the lifecycle ledger") }
     let auditLog = try NativeAuditLog(path: configuration.auditLogPath, archiveDirectory: configuration.auditArchiveDirectory)
+    let signingTransactions = try NativeSigningTransactionStore(path: signingTransactionPath)
+    let controlV2DeviceSigner = try configuration.controlV2DeviceKeyTag.map {
+        try SecureEnclaveKeyStore(applicationTag: $0, accessGroup: configuration.keychainAccessGroup)
+    }
     let auditGenerations = lifecycleSnapshot?.generations.filter { $0.role == .auditCheckpoint && $0.status != .staged } ?? []
     let auditVerificationKeys = auditGenerations.map(\.publicKeyX963)
     let auditVerificationGenerations = Dictionary(uniqueKeysWithValues: auditGenerations.map { ($0.fingerprint, $0.generation) })
@@ -2858,12 +3046,12 @@ do {
     }
     _ = try auditLog.verify()
     _ = try auditCheckpoints.verify()
-    let authorizer = try NativeRequestAuthorizer(policyData: policyData, sessionValidator: sessionManager, controlValidator: controlManager)
+    let authorizer = try NativeRequestAuthorizer(policyData: policyData, sessionValidator: sessionManager, controlValidator: controlManager, capabilityValidator: capabilityVerifier, v2ControlManager: controlV2Manager, requestEvidenceStore: requestEvidenceStore, controlV2Configured: configuration.controlV2StatePath != nil, v2DeviceID: configuration.controlV2DeviceID)
     let listener = NSXPCListener(machServiceName: configuration.machServiceName)
-    let endpoint = ServiceEndpoint(keyStore: keyStore, authorizer: authorizer, auditLog: auditLog, auditCheckpoints: auditCheckpoints, auditSigner: auditSigner, auditAnchorReceipts: auditAnchorReceipts, auditAnchorClient: auditAnchorClient, auditKeyRotationCoordinator: auditKeyRotationCoordinator, auditKeyRecoveryCoordinator: auditKeyRecoveryCoordinator, auditKeyRecoveryPlanJournal: auditKeyRecoveryPlanJournal, auditKeyTransitionStore: auditKeyTransitionStore, auditKeyRecoveryPolicy: auditKeyRecoveryPolicy, auditKeyRecoveryApprovalJournal: auditKeyRecoveryApprovalJournal, auditPruneCoordinator: auditPruneCoordinator, auditPruneTrustSource: auditPruneTrustSource, auditPruneEvidenceBundlePath: configuration.auditPruneEvidenceBundlePath, auditAnchorTenant: configuration.auditAnchorTenant, keychainAccessGroup: configuration.keychainAccessGroup, recoveryPolicyData: recoveryPolicyData, installationID: configuration.installationID, sessionManager: sessionManager, controlManager: controlManager, keyLifecycle: keyLifecycle, keyCoordinator: keyCoordinator, loadedLifecycleHeadHash: lifecycleSnapshot?.headHash)
+    let endpoint = ServiceEndpoint(keyStore: keyStore, authorizer: authorizer, auditLog: auditLog, auditCheckpoints: auditCheckpoints, auditSigner: auditSigner, auditAnchorReceipts: auditAnchorReceipts, auditAnchorClient: auditAnchorClient, auditKeyRotationCoordinator: auditKeyRotationCoordinator, auditKeyRecoveryCoordinator: auditKeyRecoveryCoordinator, auditKeyRecoveryPlanJournal: auditKeyRecoveryPlanJournal, auditKeyTransitionStore: auditKeyTransitionStore, auditKeyRecoveryPolicy: auditKeyRecoveryPolicy, auditKeyRecoveryApprovalJournal: auditKeyRecoveryApprovalJournal, auditPruneCoordinator: auditPruneCoordinator, auditPruneTrustSource: auditPruneTrustSource, auditPruneEvidenceBundlePath: configuration.auditPruneEvidenceBundlePath, auditAnchorTenant: configuration.auditAnchorTenant, keychainAccessGroup: configuration.keychainAccessGroup, recoveryPolicyData: recoveryPolicyData, installationID: configuration.installationID, sessionManager: sessionManager, controlManager: controlManager, controlV2Manager: controlV2Manager, signingTransactions: signingTransactions, keyLifecycle: keyLifecycle, keyCoordinator: keyCoordinator, loadedLifecycleHeadHash: lifecycleSnapshot?.headHash)
     if let rawURL = configuration.controlURL, let interval = configuration.controlRefreshSeconds {
         let refresh = try NativeControlRefreshConfiguration(urlString: rawURL, refreshSeconds: interval)
-        try endpoint.startControlRefresh(url: refresh.url, refreshSeconds: refresh.refreshSeconds)
+        try endpoint.startControlRefresh(url: refresh.url, refreshSeconds: refresh.refreshSeconds, deviceID: controlV2Manager == nil ? nil : configuration.controlV2DeviceID, signer: controlV2Manager == nil ? nil : controlV2DeviceSigner)
     }
     let delegate = ListenerDelegate(configuration: configuration, endpoint: endpoint)
     listener.delegate = delegate

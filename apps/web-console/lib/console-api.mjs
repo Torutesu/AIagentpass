@@ -1,0 +1,679 @@
+const MAX_BYTES = 256 * 1024;
+const DEFAULT_TIMEOUT_MS = 8_000;
+const MAX_TIMEOUT_MS = 30_000;
+const UUID_OR_OPAQUE_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
+const IDEMPOTENCY_KEY = /^[A-Za-z0-9][A-Za-z0-9._:-]{7,127}$/;
+const SAFE_ERROR_CODE = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$/;
+const SENSITIVE_KEY = /(?:authorization|bearer|cookie|credential|password|private[_-]?key|refresh[_-]?token|secret|session[_-]?token|access[_-]?token|api[_-]?token)/i;
+const SIWC_HEADERS = [
+  "oai-authenticated-user-id",
+  "oai-authenticated-user-email",
+  "oai-authenticated-user-full-name",
+  "oai-authenticated-user-full-name-encoding",
+];
+
+export class ConsoleApiError extends Error {
+  constructor(status, code, message) {
+    super(message);
+    this.name = "ConsoleApiError";
+    this.status = status;
+    this.code = code;
+  }
+}
+
+class CloudResponseError extends Error {
+  constructor(status, body, secrets) {
+    super("Cloud API request failed");
+    this.name = "CloudResponseError";
+    this.status = status;
+    this.body = body;
+    this.secrets = secrets;
+  }
+}
+
+/**
+ * The route uses this factory in production and tests use the same entry point
+ * with a fake fetch and an explicit server environment.
+ */
+export function createConsoleApi(options = {}) {
+  return Object.freeze({
+    handle(request) {
+      return handleConsoleRequest(request, options);
+    },
+  });
+}
+
+export async function handleConsoleRequest(request, options = {}) {
+  try {
+    ensureSameOrigin(request);
+    const user = await requireAuthenticatedUser(request, options);
+    const config = await readConfig(options.env);
+    if (!config.operatorUserIds.has(user.userId)) {
+      throw new ConsoleApiError(403, "operator_access_denied", "Operator access is denied");
+    }
+    const fetchImpl = options.fetchImpl ?? options.fetch ?? globalThis.fetch;
+    if (typeof fetchImpl !== "function") {
+      throw new ConsoleApiError(503, "cloud_api_unavailable", "Cloud API is unavailable");
+    }
+
+    if (request.method === "GET") {
+      const query = parseQuery(new URL(request.url).searchParams, "GET");
+      const result = await getResource(query, config, fetchImpl, options);
+      const status = result?.__consoleStatus ?? 200;
+      const payload = result?.__consoleBody ?? result;
+      return makeJsonResponse(status, payload, config);
+    }
+
+    if (request.method === "POST") {
+      const query = parseQuery(new URL(request.url).searchParams, "POST");
+      const idempotencyKey = request.headers.get("idempotency-key");
+      if (!idempotencyKey || !IDEMPOTENCY_KEY.test(idempotencyKey)) {
+        throw new ConsoleApiError(400, "idempotency_key_required", "A valid Idempotency-Key is required");
+      }
+      const body = await readJsonBody(request);
+      const payload = await postOperation(query, body, idempotencyKey, config, fetchImpl, options);
+      return makeJsonResponse(payload.status, payload.body, config);
+    }
+
+    throw new ConsoleApiError(405, "method_not_allowed", "Method not allowed");
+  } catch (error) {
+    return errorResponse(error);
+  }
+}
+
+async function requireAuthenticatedUser(request, options) {
+  if (typeof options.getSiwcUser !== "function") {
+    throw new ConsoleApiError(401, "authentication_required", "Authentication is required");
+  }
+
+  let user;
+  try {
+    user = await options.getSiwcUser(request);
+  } catch {
+    user = null;
+  }
+  if (!user || typeof user !== "object" || typeof user.userId !== "string" || !user.userId || typeof user.email !== "string" || !user.email) {
+    throw new ConsoleApiError(401, "authentication_required", "Authentication is required");
+  }
+  return user;
+}
+
+export function hasForwardedSiwcHeaders(request) {
+  return SIWC_HEADERS.some((name) => request.headers.has(name));
+}
+
+function ensureSameOrigin(request) {
+  const requestOrigin = new URL(request.url).origin;
+  const origin = request.headers.get("origin");
+  if (origin !== null && origin !== requestOrigin) {
+    throw new ConsoleApiError(403, "same_origin_required", "Same-origin request required");
+  }
+
+  const referer = request.headers.get("referer");
+  if (referer !== null) {
+    let refererOrigin;
+    try {
+      refererOrigin = new URL(referer).origin;
+    } catch {
+      refererOrigin = null;
+    }
+    if (refererOrigin !== requestOrigin) {
+      throw new ConsoleApiError(403, "same_origin_required", "Same-origin request required");
+    }
+  }
+
+  const fetchSite = request.headers.get("sec-fetch-site");
+  if (fetchSite !== null && fetchSite !== "same-origin") {
+    throw new ConsoleApiError(403, "same_origin_required", "Same-origin request required");
+  }
+}
+
+function parseQuery(params, method) {
+  const allowed = new Set(["resource", "operation", "device_id", "limit"]);
+  const seen = new Set();
+  for (const [key] of params) {
+    if (!allowed.has(key) || seen.has(key)) {
+      throw new ConsoleApiError(400, "invalid_query", "Query parameters are invalid");
+    }
+    seen.add(key);
+  }
+
+  const resource = params.get("resource");
+  const operation = params.get("operation");
+  if (method === "GET" && operation !== null) {
+    throw new ConsoleApiError(400, "invalid_query", "Query parameters are invalid");
+  }
+  if (method === "POST" && resource !== null && operation !== null) {
+    throw new ConsoleApiError(400, "invalid_query", "Query parameters are invalid");
+  }
+
+  const limitValue = params.get("limit");
+  let limit = 100;
+  if (limitValue !== null) {
+    if (!/^[1-9]\d{0,2}$/.test(limitValue) || Number(limitValue) > 500) {
+      throw new ConsoleApiError(400, "invalid_query", "Query parameters are invalid");
+    }
+    limit = Number(limitValue);
+  }
+
+  const deviceId = params.get("device_id");
+  if (deviceId !== null && !UUID_OR_OPAQUE_ID.test(deviceId)) {
+    throw new ConsoleApiError(400, "invalid_query", "Query parameters are invalid");
+  }
+
+  return { resource, operation, deviceId, limit };
+}
+
+async function getResource(query, config, fetchImpl, options) {
+  const resource = normalizeResource(query.resource);
+  if (resource === "summary") return getSummary(query, config, fetchImpl, options);
+  if (resource === "organization") return getSimple("organization", config, fetchImpl, options);
+  if (resource === "devices") return getSimple("devices", config, fetchImpl, options);
+  if (resource === "agents") return getSimple("agents", config, fetchImpl, options);
+  if (resource === "policies") return getSimple("policies", config, fetchImpl, options);
+  if (resource === "capabilities") return getSimple("capabilities", config, fetchImpl, options);
+  if (resource === "revocations") return getSimple("revocations", config, fetchImpl, options);
+  if (resource === "admin-audit") return getSimple("admin-audit", config, fetchImpl, options);
+  if (resource === "audit-health") return getSimple("audit-health", config, fetchImpl, options);
+
+  if (resource === "audit" || resource === "activity" || resource === "health") {
+    const audit = await getAudit(query, config, fetchImpl, options);
+    if (resource === "activity") return { activity: audit.activity };
+    if (resource === "health") return { health: audit.health };
+    return audit;
+  }
+
+  throw new ConsoleApiError(400, "invalid_resource", "Resource is invalid");
+}
+
+async function getSummary(query, config, fetchImpl, options) {
+  const [organization, devices, agents, policies] = await Promise.all([
+    cloudRequest("GET", "", undefined, config, fetchImpl, options),
+    cloudRequest("GET", "/devices", undefined, config, fetchImpl, options),
+    cloudRequest("GET", "/agents", undefined, config, fetchImpl, options),
+    cloudRequest("GET", "/policies", undefined, config, fetchImpl, options),
+  ]);
+  const audit = await getAudit({ ...query, deviceId: query.deviceId }, config, fetchImpl, options, devices);
+
+  return {
+    organization: organization.organization,
+    devices: devices.devices,
+    agents: agents.agents,
+    policies: policies.policies,
+    audit: {
+      health: audit.health,
+      activity: audit.activity,
+    },
+  };
+}
+
+async function getSimple(resource, config, fetchImpl, options) {
+  const paths = {
+    organization: "",
+    devices: "/devices",
+    agents: "/agents",
+    policies: "/policies",
+    capabilities: "/capabilities",
+    revocations: "/revocations",
+    "admin-audit": "/audit/admin-events",
+    "audit-health": "/audit/health",
+  };
+  const result = await cloudRequest("GET", paths[resource], undefined, config, fetchImpl, options, undefined, true);
+  return { __consoleStatus: result.status, __consoleBody: result.body };
+}
+
+async function getAudit(query, config, fetchImpl, options, devicesPayload = undefined) {
+  let devices = devicesPayload;
+  if (!devices) {
+    devices = await cloudRequest("GET", "/devices", undefined, config, fetchImpl, options);
+  }
+
+  const deviceIds = query.deviceId
+    ? [query.deviceId]
+    : Array.isArray(devices.devices)
+      ? devices.devices.map((device) => device?.device_id).filter((id) => typeof id === "string")
+      : [];
+
+  const [responses, healthPayload] = await Promise.all([
+    Promise.all(deviceIds.map((deviceId) =>
+      cloudRequest(
+        "GET",
+        `/audit/events?device_id=${encodeURIComponent(deviceId)}&limit=${query.limit}`,
+        undefined,
+        config,
+        fetchImpl,
+        options,
+      ),
+    )),
+    cloudRequest("GET", "/audit/health", undefined, config, fetchImpl, options),
+  ]);
+  const activity = responses.flatMap((payload, index) =>
+    (Array.isArray(payload.events) ? payload.events : []).map((event) => ({
+      ...event,
+      device_id: event.device_id ?? deviceIds[index],
+    })),
+  );
+  activity.sort((left, right) => String(left.device_timestamp ?? "").localeCompare(String(right.device_timestamp ?? "")));
+
+  const authoritativeHealth = new Map((Array.isArray(healthPayload.health) ? healthPayload.health : []).map((item) => [item.device_id, item]));
+  const health = deviceIds.map((deviceId, index) => {
+    const events = Array.isArray(responses[index]?.events) ? responses[index].events : [];
+    const last = events[events.length - 1] ?? null;
+    return {
+      device_id: deviceId,
+      ...(authoritativeHealth.get(deviceId) ?? { chain_status: "unknown", gap_count: 0, last_event_id: null, last_hash: null }),
+      event_count: events.length,
+      last_event_id: authoritativeHealth.get(deviceId)?.last_event_id ?? last?.event_id ?? null,
+      last_hash: authoritativeHealth.get(deviceId)?.last_hash ?? last?.event_hash ?? null,
+    };
+  });
+
+  return { health, activity };
+}
+
+async function postOperation(query, body, idempotencyKey, config, fetchImpl, options) {
+  const operation = normalizeOperation(query.operation ?? query.resource);
+  if (operation === "create-policy") {
+    const policy = validatePolicyBody(body);
+    const result = await cloudRequest("POST", "/policies", policy, config, fetchImpl, options, idempotencyKey, true);
+    return {
+      status: result.status,
+      body: result.body,
+    };
+  }
+  if (operation === "emergency-stop") {
+    const stop = validateEmergencyStopBody(body);
+    const result = await cloudRequest("POST", "/emergency-stop", stop, config, fetchImpl, options, idempotencyKey, true);
+    return {
+      status: result.status,
+      body: result.body,
+    };
+  }
+  if (operation === "create-device") {
+    const device = validateDeviceBody(body);
+    const result = await cloudRequest("POST", "/devices", device, config, fetchImpl, options, idempotencyKey, true);
+    return { status: result.status, body: result.body };
+  }
+  if (operation === "create-agent") {
+    const agent = validateAgentBody(body);
+    const result = await cloudRequest("POST", "/agents", agent, config, fetchImpl, options, idempotencyKey, true);
+    return { status: result.status, body: result.body };
+  }
+  if (operation === "disable-policy") {
+    const input = validatePolicyDisableBody(body);
+    const result = await cloudRequest("POST", `/policies/${encodeURIComponent(input.policy_id)}/disable`, { expected_version: input.expected_version, ...(input.reason ? { reason: input.reason } : {}) }, config, fetchImpl, options, idempotencyKey, true);
+    return { status: result.status, body: result.body };
+  }
+  if (operation === "revoke-agent" || operation === "revoke-device" || operation === "revoke-capability") {
+    const input = validateRevocationBody(body, operation);
+    const path = operation === "revoke-agent" ? `/agents/${input.target_id}/revoke` : operation === "revoke-device" ? `/devices/${input.target_id}/revoke` : `/capabilities/${input.target_id}/revoke`;
+    const result = await cloudRequest("POST", path, { reason: input.reason }, config, fetchImpl, options, idempotencyKey, true);
+    return { status: result.status, body: result.body };
+  }
+  if (operation === "issue-capability") {
+    const capability = validateCapabilityBody(body);
+    const result = await cloudRequest("POST", "/capabilities", capability, config, fetchImpl, options, idempotencyKey, true);
+    return { status: result.status, body: result.body };
+  }
+  throw new ConsoleApiError(400, "invalid_operation", "Operation is invalid");
+}
+
+function normalizeResource(value) {
+  if (value === null || value === "" || value === "summary") return "summary";
+  const aliases = { org: "organization", organization: "organization", devices: "devices", agents: "agents", policies: "policies", capabilities: "capabilities", revocations: "revocations", "admin-audit": "admin-audit", "audit-health": "audit-health", audit: "audit", activity: "activity", health: "health" };
+  if (aliases[value]) return aliases[value];
+  throw new ConsoleApiError(400, "invalid_resource", "Resource is invalid");
+}
+
+function normalizeOperation(value) {
+  const aliases = {
+    policy: "create-policy",
+    policies: "create-policy",
+    create_policy: "create-policy",
+    "create-policy": "create-policy",
+    "policy.create": "create-policy",
+    "create-device": "create-device",
+    device: "create-device",
+    "device.create": "create-device",
+    "create-agent": "create-agent",
+    agent: "create-agent",
+    "agent.create": "create-agent",
+    "disable-policy": "disable-policy",
+    "policy.disable": "disable-policy",
+    "revoke-agent": "revoke-agent",
+    "agent.revoke": "revoke-agent",
+    "revoke-device": "revoke-device",
+    "device.revoke": "revoke-device",
+    "issue-capability": "issue-capability",
+    capability: "issue-capability",
+    "capability.issue": "issue-capability",
+    "revoke-capability": "revoke-capability",
+    "capability.revoke": "revoke-capability",
+    "emergency-stop": "emergency-stop",
+    emergency_stop: "emergency-stop",
+    "emergency.stop": "emergency-stop",
+  };
+  if (typeof value === "string" && aliases[value]) return aliases[value];
+  throw new ConsoleApiError(400, "invalid_operation", "Operation is invalid");
+}
+
+function validatePolicyBody(value) {
+  const body = plainObject(value);
+  exactKeys(body, ["name", "scope", "sequence"], "policy");
+  const name = boundedString(body.name, "policy.name", 128, true);
+  const scope = validateScope(body.scope);
+  const policy = { name, scope };
+  if (body.sequence !== undefined) {
+    if (!Number.isSafeInteger(body.sequence) || body.sequence < 1) {
+      throw new ConsoleApiError(400, "invalid_json_schema", "Request JSON does not match the schema");
+    }
+    policy.sequence = body.sequence;
+  }
+  return policy;
+}
+
+function validateScope(value) {
+  const scope = plainObject(value);
+  exactKeys(scope, ["operations", "repositories", "branches", "remotes", "tags"], "policy.scope");
+  const result = {
+    operations: stringArray(scope.operations, "policy.scope.operations", 64, true, (item) => item === "git.commit.sign"),
+    repositories: stringArray(scope.repositories, "policy.scope.repositories", 64, true, (item) => item.startsWith("/") && !item.startsWith("//")),
+    branches: validatePatternSet(scope.branches, "policy.scope.branches", true),
+    remotes: validatePatternSet(scope.remotes, "policy.scope.remotes", true),
+  };
+  if (scope.tags !== undefined) result.tags = validatePatternSet(scope.tags, "policy.scope.tags", false);
+  return result;
+}
+
+function validatePatternSet(value, path, required) {
+  const patternSet = plainObject(value);
+  exactKeys(patternSet, ["allow", "deny"], path);
+  return {
+    allow: stringArray(patternSet.allow, `${path}.allow`, 64, required),
+    deny: stringArray(patternSet.deny, `${path}.deny`, 64, false),
+  };
+}
+
+function validateEmergencyStopBody(value) {
+  const body = plainObject(value);
+  exactKeys(body, ["reason"], "emergency_stop");
+  return { reason: boundedString(body.reason, "emergency_stop.reason", 128, true) };
+}
+
+function validateDeviceBody(value) {
+  const body = plainObject(value);
+  exactKeys(body, ["device_id", "name", "public_key", "metadata"], "device");
+  const result = { name: boundedString(body.name, "device.name", 128, true), public_key: validatePublicKey(body.public_key, "device.public_key") };
+  if (body.device_id !== undefined) result.device_id = validateIdentifier(body.device_id, "device.device_id");
+  if (body.metadata !== undefined) result.metadata = plainObject(body.metadata);
+  return result;
+}
+
+function validateAgentBody(value) {
+  const body = plainObject(value);
+  exactKeys(body, ["agent_id", "name", "kind", "public_key", "device_id"], "agent");
+  const result = { name: boundedString(body.name, "agent.name", 128, true), kind: boundedString(body.kind, "agent.kind", 64, true), public_key: validatePublicKey(body.public_key, "agent.public_key") };
+  for (const key of ["agent_id", "device_id"]) if (body[key] !== undefined) result[key] = validateIdentifier(body[key], `agent.${key}`);
+  return result;
+}
+
+function validatePolicyDisableBody(value) {
+  const body = plainObject(value);
+  exactKeys(body, ["policy_id", "expected_version", "reason"], "policy_disable");
+  const policyId = validateIdentifier(body.policy_id, "policy_disable.policy_id");
+  if (!Number.isSafeInteger(body.expected_version) || body.expected_version < 1) throw new ConsoleApiError(400, "invalid_json_schema", "Request JSON does not match the schema");
+  return { policy_id: policyId, expected_version: body.expected_version, ...(body.reason === undefined ? {} : { reason: boundedString(body.reason, "policy_disable.reason", 128, true) }) };
+}
+
+function validateRevocationBody(value, operation) {
+  const body = plainObject(value);
+  exactKeys(body, ["target_id", "reason"], operation);
+  return { target_id: validateIdentifier(body.target_id, `${operation}.target_id`), reason: boundedString(body.reason, `${operation}.reason`, 128, true) };
+}
+
+function validateCapabilityBody(value) {
+  const body = plainObject(value);
+  exactKeys(body, ["capability_id", "agent_id", "device_id", "scope", "ttl_ms", "sequence"], "capability");
+  const result = { agent_id: validateIdentifier(body.agent_id, "capability.agent_id"), device_id: validateIdentifier(body.device_id, "capability.device_id"), scope: validateScope(body.scope) };
+  if (body.capability_id !== undefined) result.capability_id = validateIdentifier(body.capability_id, "capability.capability_id");
+  if (body.ttl_ms !== undefined && (!Number.isSafeInteger(body.ttl_ms) || body.ttl_ms < 1_000 || body.ttl_ms > 15 * 60 * 1000)) throw new ConsoleApiError(400, "invalid_json_schema", "Request JSON does not match the schema");
+  if (body.sequence !== undefined && (!Number.isSafeInteger(body.sequence) || body.sequence < 0)) throw new ConsoleApiError(400, "invalid_json_schema", "Request JSON does not match the schema");
+  if (body.ttl_ms !== undefined) result.ttl_ms = body.ttl_ms;
+  if (body.sequence !== undefined) result.sequence = body.sequence;
+  return result;
+}
+
+function validateIdentifier(value, path) {
+  return boundedString(value, path, 128, true).match(UUID_OR_OPAQUE_ID)?.[0] === value ? value : (() => { throw new ConsoleApiError(400, "invalid_json_schema", "Request JSON does not match the schema"); })();
+}
+
+function validatePublicKey(value, path) {
+  const key = boundedString(value, path, 8192, true, true);
+  if (/PRIVATE\s+KEY|BEGIN\s+RSA|BEGIN\s+EC/i.test(key)) throw new ConsoleApiError(400, "invalid_json_schema", "Request JSON does not match the schema");
+  return key;
+}
+
+function stringArray(value, path, maxItems, required, predicate = () => true) {
+  if (!Array.isArray(value) || value.length > maxItems || (required && value.length === 0)) {
+    throw new ConsoleApiError(400, "invalid_json_schema", "Request JSON does not match the schema");
+  }
+  return value.map((item) => {
+    const text = boundedString(item, path, 4096, true);
+    if (!predicate(text)) throw new ConsoleApiError(400, "invalid_json_schema", "Request JSON does not match the schema");
+    return text;
+  });
+}
+
+function boundedString(value, path, maxBytes, nonEmpty, allowNewlines = false) {
+  if (typeof value !== "string" || (nonEmpty && value.length === 0) || hasControlCharacters(value, allowNewlines) || new TextEncoder().encode(value).byteLength > maxBytes) {
+    throw new ConsoleApiError(400, "invalid_json_schema", "Request JSON does not match the schema");
+  }
+  return value;
+}
+
+function hasControlCharacters(value, allowNewlines = false) {
+  for (const character of value) {
+    const code = character.codePointAt(0);
+    if (code !== undefined && ((code <= 0x1f && !(allowNewlines && (code === 0x0a || code === 0x0d))) || code === 0x7f)) return true;
+  }
+  return false;
+}
+
+function plainObject(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new ConsoleApiError(400, "invalid_json_schema", "Request JSON does not match the schema");
+  }
+  return value;
+}
+
+function exactKeys(value, allowed, path) {
+  const allowedSet = new Set(allowed);
+  if (Object.keys(value).some((key) => !allowedSet.has(key))) {
+    throw new ConsoleApiError(400, "invalid_json_schema", `Invalid fields in ${path}`);
+  }
+}
+
+async function readJsonBody(request) {
+  const contentType = request.headers.get("content-type") ?? "";
+  if (!/^application\/json(?:\s*;|$)/i.test(contentType)) {
+    throw new ConsoleApiError(415, "json_required", "JSON request body required");
+  }
+  const contentLength = request.headers.get("content-length");
+  if (contentLength !== null && (!/^\d+$/.test(contentLength) || Number(contentLength) > MAX_BYTES)) {
+    throw new ConsoleApiError(413, "request_too_large", "Request body is too large");
+  }
+  const bytes = new Uint8Array(await request.arrayBuffer());
+  if (bytes.byteLength > MAX_BYTES) {
+    throw new ConsoleApiError(413, "request_too_large", "Request body is too large");
+  }
+  try {
+    return plainObject(JSON.parse(new TextDecoder().decode(bytes)));
+  } catch (error) {
+    if (error instanceof ConsoleApiError) throw error;
+    throw new ConsoleApiError(400, "invalid_json", "Request body must be a JSON object");
+  }
+}
+
+async function cloudRequest(method, suffix, body, config, fetchImpl, options, idempotencyKey = undefined, includeStatus = false) {
+  const url = buildCloudUrl(config.url, config.organizationId, suffix, config.allowInsecureLoopback);
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), config.timeoutMs);
+  const headers = new Headers({ accept: "application/json" });
+  headers.set("authorization", `Bearer ${config.token}`);
+  const init = {
+    method,
+    headers,
+    redirect: "error",
+    cache: "no-store",
+    signal: controller.signal,
+  };
+  if (body !== undefined) {
+    const encoded = JSON.stringify(body);
+    if (new TextEncoder().encode(encoded).byteLength > MAX_BYTES) {
+      clearTimeout(timeoutId);
+      throw new ConsoleApiError(413, "request_too_large", "Request body is too large");
+    }
+    headers.set("content-type", "application/json");
+    init.body = encoded;
+  }
+  if (idempotencyKey !== undefined) headers.set("idempotency-key", idempotencyKey);
+
+  let response;
+  try {
+    response = await fetchImpl(url, init);
+  } catch {
+    clearTimeout(timeoutId);
+    if (controller.signal.aborted) {
+      throw new ConsoleApiError(504, "cloud_api_timeout", "Cloud API request timed out");
+    }
+    throw new ConsoleApiError(502, "cloud_api_unavailable", "Cloud API is unavailable");
+  }
+  clearTimeout(timeoutId);
+
+  const raw = await readCloudResponse(response);
+  let parsed;
+  try {
+    parsed = raw.length === 0 ? {} : JSON.parse(raw);
+  } catch {
+    throw new ConsoleApiError(502, "cloud_api_invalid_response", "Cloud API response was invalid");
+  }
+  const safe = sanitizeValue(parsed, config.secrets);
+  if (!response.ok) throw new CloudResponseError(response.status, safe, config.secrets);
+  return includeStatus ? { status: response.status, body: safe } : safe;
+}
+
+function buildCloudUrl(baseValue, organizationId, suffix, allowInsecureLoopback = false) {
+  let base;
+  try {
+    base = new URL(baseValue);
+  } catch {
+    throw new ConsoleApiError(503, "cloud_api_unavailable", "Cloud API is unavailable");
+  }
+  const isLoopback = base.hostname === "localhost" || base.hostname === "127.0.0.1" || base.hostname === "::1";
+  if ((base.protocol !== "https:" && !(base.protocol === "http:" && allowInsecureLoopback && isLoopback)) || base.username || base.password || base.search || base.hash) {
+    throw new ConsoleApiError(503, "cloud_api_unavailable", "Cloud API is unavailable");
+  }
+  const root = `${base.origin}${base.pathname.replace(/\/$/, "")}`;
+  return `${root}/v1/organizations/${encodeURIComponent(organizationId)}${suffix}`;
+}
+
+async function readCloudResponse(response) {
+  const contentLength = response.headers?.get("content-length");
+  if (contentLength !== null && contentLength !== undefined && /^\d+$/.test(contentLength) && Number(contentLength) > MAX_BYTES) {
+    throw new ConsoleApiError(502, "cloud_api_response_too_large", "Cloud API response is too large");
+  }
+  const bytes = new Uint8Array(await response.arrayBuffer());
+  if (bytes.byteLength > MAX_BYTES) {
+    throw new ConsoleApiError(502, "cloud_api_response_too_large", "Cloud API response is too large");
+  }
+  return new TextDecoder().decode(bytes);
+}
+
+async function readConfig(injected) {
+  let source = injected;
+  if (source === undefined) {
+    try {
+      const workers = await import("cloudflare:workers");
+      source = workers.env;
+    } catch {
+      source = undefined;
+    }
+    if (typeof process !== "undefined") source = { ...process.env, ...(source ?? {}) };
+  }
+  if (source === undefined && typeof process !== "undefined") source = process.env;
+  const url = source?.AGENTPASS_CLOUD_API_URL;
+  const organizationId = source?.AGENTPASS_ORGANIZATION_ID;
+  const token = source?.AGENTPASS_CLOUD_TOKEN;
+  const rawOperatorUserIds = source?.AGENTPASS_OPERATOR_USER_IDS;
+  const operatorUserIds = typeof rawOperatorUserIds === "string" ? rawOperatorUserIds.split(",").map((value) => value.trim()).filter(Boolean) : [];
+  if (typeof url !== "string" || typeof organizationId !== "string" || typeof token !== "string" || !url || !UUID_OR_OPAQUE_ID.test(organizationId) || !token || token.length > 8192 || hasControlCharacters(token) || operatorUserIds.length < 1 || operatorUserIds.length > 100 || new Set(operatorUserIds).size !== operatorUserIds.length || operatorUserIds.some((value) => !UUID_OR_OPAQUE_ID.test(value))) {
+    throw new ConsoleApiError(503, "cloud_api_unavailable", "Cloud API is unavailable");
+  }
+  const timeoutValue = source?.AGENTPASS_CLOUD_TIMEOUT_MS;
+  const timeoutMs = typeof timeoutValue === "string" && /^\d+$/.test(timeoutValue)
+    ? Math.min(MAX_TIMEOUT_MS, Math.max(1_000, Number(timeoutValue)))
+    : DEFAULT_TIMEOUT_MS;
+  const allowInsecureLoopback = source?.AGENTPASS_ALLOW_INSECURE_LOOPBACK_CLOUD_API === "true";
+  return {
+    url,
+    organizationId,
+    token,
+    timeoutMs,
+    allowInsecureLoopback,
+    operatorUserIds: new Set(operatorUserIds),
+    secrets: [url, organizationId, token],
+  };
+}
+
+function sanitizeValue(value, secrets, key = "", seen = new WeakSet()) {
+  if (SENSITIVE_KEY.test(key)) return "[redacted]";
+  if (typeof value === "string") {
+    return secrets.reduce((result, secret) => secret ? result.split(secret).join("[redacted]") : result, value);
+  }
+  if (Array.isArray(value)) return value.map((item) => sanitizeValue(item, secrets, "", seen));
+  if (!value || typeof value !== "object") return value;
+  if (seen.has(value)) return "[redacted]";
+  seen.add(value);
+  const result = {};
+  for (const [childKey, childValue] of Object.entries(value)) {
+    result[childKey] = sanitizeValue(childValue, secrets, childKey, seen);
+  }
+  return result;
+}
+
+function makeJsonResponse(status, body, config) {
+  const safeBody = sanitizeValue(body, config.secrets);
+  const encoded = JSON.stringify(safeBody);
+  if (new TextEncoder().encode(encoded).byteLength > MAX_BYTES) {
+    return jsonResponse(502, { error: { code: "response_too_large", message: "Response is too large" } });
+  }
+  return jsonResponse(status, safeBody);
+}
+
+function errorResponse(error) {
+  if (error instanceof CloudResponseError) {
+    const source = error.body && typeof error.body === "object" ? error.body : {};
+    const sourceError = source.error && typeof source.error === "object" ? source.error : {};
+    const code = typeof sourceError.code === "string" && SAFE_ERROR_CODE.test(sourceError.code)
+      ? sourceError.code
+      : "cloud_api_error";
+    const responseBody = { error: { code, message: "Cloud API request failed" } };
+    if (typeof source.request_id === "string" && /^[A-Za-z0-9._:-]{1,128}$/.test(source.request_id)) responseBody.request_id = source.request_id;
+    return jsonResponse(error.status, responseBody);
+  }
+  if (error instanceof ConsoleApiError) {
+    return jsonResponse(error.status, { error: { code: error.code, message: error.message } });
+  }
+  return jsonResponse(500, { error: { code: "internal_error", message: "Internal error" } });
+}
+
+function jsonResponse(status, body) {
+  return new Response(JSON.stringify(body), {
+    status,
+    headers: {
+      "cache-control": "no-store",
+      "content-type": "application/json; charset=utf-8",
+      pragma: "no-cache",
+    },
+  });
+}
