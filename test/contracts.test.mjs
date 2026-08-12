@@ -162,14 +162,15 @@ test("device operations use device signatures and tenant-qualified paths", () =>
   }
 });
 
-test("G4.0 freezes refresh, signed ACK, device state, and canonical request contracts", () => {
+test("G4.2 device sync contract matches the implemented Cloud refresh lane", () => {
   const openapi = JSON.parse(fs.readFileSync(path.join(root, "contracts", "openapi", "device-v1.json"), "utf8"));
   assert.deepEqual(openapi["x-agentpass-implementation-status"], {
     contract: "frozen-g4.0",
-    "bundle-fetch-route": "implemented-legacy-response",
-    "bundle-fetch-target-envelope": "planned-g4.1",
-    "refresh-poll": "planned-g4.1",
-    "signed-ack": "planned-g4.3"
+    "bundle-fetch-target-envelope": "implemented-g4.1",
+    "refresh-poll": "implemented-g4.1",
+    "signed-ack-ingestion": "implemented-g4.1",
+    "native-sync": "in-progress-g4.2",
+    "console-device-state": "planned-g4.3"
   });
   assert.match(openapi.components.securitySchemes.deviceSignature.description, /six newline-delimited fields/i);
   assert.match(openapi.components.securitySchemes.deviceSignature.description, /WHATWG_URL_PATHNAME/);
@@ -180,6 +181,12 @@ test("G4.0 freezes refresh, signed ACK, device state, and canonical request cont
   assert.deepEqual(openapi.components.schemas.DeviceRefreshState.enum, ["pending", "fetching", "applied", "blocked", "stale", "offline", "revoked"]);
   assert.equal(openapi.components.schemas.ControlBundleV2.properties.signature.pattern, "^[A-Za-z0-9+/]{86}==$" );
   assert.equal(openapi.components.schemas.ControlBundleV2.properties.issued_at.maxLength, 24);
+  assert.equal(openapi.paths["/enrollments/{enrollment_id}"].post.requestBody.content["application/json"].schema.$ref, "../schemas/device-enrollment-v1.schema.json");
+  assert.equal(openapi.paths["/enrollments/{enrollment_id}"].post.responses["201"].$ref, "#/components/responses/DeviceEnrollmentCompleted");
+  assert.deepEqual(openapi.components.schemas.ControlRefreshPollResponse.required, ["hint", "request_id"]);
+  assert.deepEqual(openapi.components.schemas.ControlBundleFetchResponse.required, ["bundle", "desired_generation", "request_id"]);
+  assert.deepEqual(openapi.components.schemas.ControlBundleAcknowledgementResponse.required, ["accepted", "duplicate", "observed_generation", "refresh_state", "request_id"]);
+  assert.deepEqual(openapi.components.schemas.DeviceEnrollmentCompletedResponse.required, ["enrollment", "request_id"]);
 });
 
 test("G2 device audit listing freezes tenant/device keyset pagination", () => {

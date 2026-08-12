@@ -296,11 +296,14 @@ test("device enrollment stores only a digest and consumes an exact bound request
   const completed = await store.completeDeviceEnrollment(request);
   assert.equal(completed.status, "active");
   assert.equal(completed.device_public_key, publicKey);
+  assert.equal(completed.key_epoch, 1);
   assert.deepEqual(await store.completeDeviceEnrollment(request), completed);
   await assert.rejects(() => store.completeDeviceEnrollment({ ...request, label: "substituted" }), { code: "ERR_ENROLLMENT_BINDING" });
   const disk = await fs.readFile(path.join(directory, "cloud-store.json"), "utf8");
   assert.equal(disk.includes(credential), false);
   assert.equal(disk.includes(credentialDigest), true);
+  const rotated = await store.updateDevice({ organizationId: ids.org, deviceId: pendingDevice, expectedVersion: completed.version, patch: { device_public_key: crypto.generateKeyPairSync("ed25519").publicKey.export({ type: "spki", format: "pem" }).toString() }, idempotencyKey: "rotate-device-key" });
+  assert.equal(rotated.key_epoch, 2);
 });
 
 test("exports a clean, frozen API", async (t) => {

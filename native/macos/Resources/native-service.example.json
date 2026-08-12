@@ -41,6 +41,14 @@
   "control_v2_key_id": "control-v2",
   "control_v2_organization_id": "REPLACE_WITH_ORGANIZATION_UUID",
   "control_v2_device_id": "REPLACE_WITH_DEVICE_UUID",
+  "control_v2_device_key_epoch": 1,
+  "control_v2_refresh_hint_keyring": [
+    {
+      "key_id": "refresh-hint-v1",
+      "algorithm": "ed25519",
+      "public_key": "-----BEGIN PUBLIC KEY-----\nREPLACE_WITH_REFRESH_HINT_ED25519_PUBLIC_KEY\n-----END PUBLIC KEY-----\n"
+    }
+  ],
   "control_v2_device_key_tag": "dev.agentpass.device-auth",
   "session_approval_public_key": "ecdsa-sha2-nistp256 REPLACE_WITH_AGENTPASS_NATIVE_SESSION_APPROVAL_KEY",
   "session_approval_key_tag": "dev.agentpass.session-approval",

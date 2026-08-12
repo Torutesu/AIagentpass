@@ -604,9 +604,11 @@ public final class NativeControlBundleV2Manager: NativeControlValidating, @unche
             let state = NativeControlBundleV2SequenceState(highestSequence: highestSequence, statementHash: statementHash)
             let verified = try NativeControlBundleV2Codec.verify(bundleData, trust: trust, options: .init(nowMilliseconds: nowMilliseconds, audience: trust.audience, sequenceState: state))
             let hash = try NativeControlBundleV2Codec.statementHash(verified)
-            try nativeV2PersistMinimumEpoch(markerPath, epoch: 2)
+            do { try nativeV2PersistMinimumEpoch(markerPath, epoch: 2) }
+            catch { operational = false; throw error }
             minimumEpoch = 2; highestSequence = verified.sequence; statementHash = hash; activeV2 = verified; activeLegacy = nil
-            try persistState()
+            do { try persistState() }
+            catch { operational = false; throw error }
         } else {
             guard legacyMode else { throw NativeControlBundleV2Error(.legacyModeRequired, "Legacy control bundles require explicit legacy mode") }
             guard minimumEpoch < 2 else { throw NativeControlBundleV2Error(.legacyPermanentlyRejected, "Legacy control bundles are permanently disabled") }
@@ -614,7 +616,8 @@ public final class NativeControlBundleV2Manager: NativeControlValidating, @unche
             guard legacy.sequence >= highestSequence else { throw NativeControlBundleV2Error(.sequenceRollback, "Legacy control bundle sequence rolled back") }
             if legacy.sequence == highestSequence, let statementHash, statementHash != legacy.statementHash { throw NativeControlBundleV2Error(.sequenceConflict, "Legacy control bundle sequence conflicts with durable evidence") }
             highestSequence = legacy.sequence; statementHash = legacy.statementHash; activeLegacy = legacy; activeV2 = nil
-            try persistState()
+            do { try persistState() }
+            catch { operational = false; throw error }
         }
         return currentStatus(nowMilliseconds: nowMilliseconds)
     }
@@ -631,7 +634,7 @@ public final class NativeControlBundleV2Manager: NativeControlValidating, @unche
     public func validateControl(agentID: String, nowMilliseconds: Int64 = Int64(Date().timeIntervalSince1970 * 1000)) throws {
         lock.lock(); defer { lock.unlock() }; guard operational else { throw AgentPassNativeError.unauthorizedClient("Native remote control integrity failure") }
         if let bundle = activeV2 {
-            let expiry = try milliseconds(bundle.expiresAt); guard nowMilliseconds < expiry || nowMilliseconds < expiry + bundle.offlineTTLMilliseconds else { throw AgentPassNativeError.unauthorizedClient("offline_ttl_expired") }; guard !bundle.globalRevoked else { throw AgentPassNativeError.unauthorizedClient("global_revoked") }; guard !bundle.revokedDevices.contains(bundle.deviceID) else { throw AgentPassNativeError.unauthorizedClient("device_revoked") }; guard !bundle.revokedAgents.contains(agentID) else { throw AgentPassNativeError.unauthorizedClient("agent_revoked") }
+            let expiry = try milliseconds(bundle.expiresAt); guard nowMilliseconds < expiry else { throw AgentPassNativeError.unauthorizedClient("bundle_expired") }; guard !bundle.globalRevoked else { throw AgentPassNativeError.unauthorizedClient("global_revoked") }; guard !bundle.revokedDevices.contains(bundle.deviceID) else { throw AgentPassNativeError.unauthorizedClient("device_revoked") }; guard !bundle.revokedAgents.contains(agentID) else { throw AgentPassNativeError.unauthorizedClient("agent_revoked") }
         } else if let legacy = activeLegacy { guard nowMilliseconds < legacy.expiresAtMilliseconds else { throw AgentPassNativeError.unauthorizedClient("expired") }; guard !legacy.globalRevoked else { throw AgentPassNativeError.unauthorizedClient("global_revoked") }; guard !legacy.revokedAgents.contains(agentID) else { throw AgentPassNativeError.unauthorizedClient("agent_revoked") }
         } else { throw AgentPassNativeError.unauthorizedClient("Control bundle state is missing") }
     }
@@ -651,14 +654,15 @@ public final class NativeControlBundleV2Manager: NativeControlValidating, @unche
         guard operational, !auditedUpdatePending else { throw NativeControlBundleV2Error(.invalidBundle, "A control update is already pending audit") }
         auditedUpdatePending = true
         do { try persistState() }
-        catch { auditedUpdatePending = false; throw error }
+        catch { auditedUpdatePending = false; operational = false; throw error }
     }
 
     public func completeAuditedUpdate() throws {
         lock.lock(); defer { lock.unlock() }
         guard operational, auditedUpdatePending else { throw NativeControlBundleV2Error(.invalidBundle, "No control update is pending audit") }
         auditedUpdatePending = false
-        try persistState()
+        do { try persistState() }
+        catch { operational = false; throw error }
     }
 
     public func status(nowMilliseconds: Int64 = Int64(Date().timeIntervalSince1970 * 1000)) -> NativeControlBundleV2Status { lock.lock(); defer { lock.unlock() }; return currentStatus(nowMilliseconds: nowMilliseconds) }

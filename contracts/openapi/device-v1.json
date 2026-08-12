@@ -1,15 +1,28 @@
 {
   "openapi": "3.1.0",
-  "info": { "title": "AgentPass Device API", "version": "1.0.0", "description": "G4.0 freezes this target contract. A legacy bundle-fetch route exists in the current Cloud runtime, but its target response envelope, refresh polling, and signed ACK ingestion are implemented in G4.1/G4.3 and must not be advertised as deployed until runtime conformance tests pass." },
-  "x-agentpass-implementation-status": { "contract": "frozen-g4.0", "bundle-fetch-route": "implemented-legacy-response", "bundle-fetch-target-envelope": "planned-g4.1", "refresh-poll": "planned-g4.1", "signed-ack": "planned-g4.3" },
+  "info": { "title": "AgentPass Device API", "version": "1.0.0", "description": "G4.0 freezes this contract. G4.1 implements the device-bound bundle response, correctness-fallback refresh polling, and signed ACK ingestion in the Cloud runtime with runtime and PostgreSQL conformance evidence. Native background synchronization and Console presentation remain G4.2/G4.3 work." },
+  "x-agentpass-implementation-status": { "contract": "frozen-g4.0", "bundle-fetch-target-envelope": "implemented-g4.1", "refresh-poll": "implemented-g4.1", "signed-ack-ingestion": "implemented-g4.1", "native-sync": "in-progress-g4.2", "console-device-state": "planned-g4.3" },
   "servers": [{ "url": "https://api.ai-agentpass.com/v1" }],
   "paths": {
     "/enrollments/{enrollment_id}": {
       "post": {
         "operationId": "completeDeviceEnrollment",
+        "summary": "Complete a one-time device enrollment",
+        "description": "Consumes the one-time enrollment credential and proof-of-possession, then returns the active device identity epoch and the two purpose-separated public trust roots required by the native client. The enrollment response never contains private key material or an enrollment credential. The response is no-store and includes a request_id envelope field.",
         "security": [{ "enrollmentCredential": [], "enrollmentProof": [] }],
         "parameters": [{ "$ref": "#/components/parameters/EnrollmentId" }],
-        "responses": { "201": { "$ref": "#/components/responses/Json" } }
+        "requestBody": {
+          "required": true,
+          "content": { "application/json": { "schema": { "$ref": "../schemas/device-enrollment-v1.schema.json" } } }
+        },
+        "responses": {
+          "201": { "$ref": "#/components/responses/DeviceEnrollmentCompleted" },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "409": { "$ref": "#/components/responses/Conflict" },
+          "429": { "$ref": "#/components/responses/RateLimited" },
+          "503": { "$ref": "#/components/responses/ServiceUnavailable" }
+        }
       }
     },
     "/organizations/{organization_id}/bundles/{device_id}": {
@@ -72,7 +85,7 @@
         "x-agentpass-hint-semantics": { "authority": "none", "can-authorize": false, "can-extend-expiry": false, "additionalProperties": false },
         "responses": {
           "200": { "$ref": "#/components/responses/ControlRefreshPoll" },
-          "204": { "description": "No newer control refresh generation is available." },
+          "204": { "description": "No newer control refresh generation is available.", "headers": { "Cache-Control": { "$ref": "#/components/headers/CacheControl" }, "X-RateLimit-Limit": { "$ref": "#/components/headers/RateLimitLimit" }, "X-RateLimit-Remaining": { "$ref": "#/components/headers/RateLimitRemaining" }, "X-RateLimit-Reset": { "$ref": "#/components/headers/RateLimitReset" } } },
           "400": { "$ref": "#/components/responses/BadRequest" },
           "401": { "$ref": "#/components/responses/Unauthorized" },
           "404": { "$ref": "#/components/responses/NotFound" },
@@ -135,9 +148,10 @@
     },
     "responses": {
       "Json": { "description": "JSON response", "content": { "application/json": { "schema": { "type": "object" } } } },
-      "ControlRefreshPoll": { "description": "A newer device-bound refresh hint. The hint accelerates a bundle fetch but cannot authorize or extend expiry.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ControlRefreshPollResponse" } } } },
-      "ControlBundleFetch": { "description": "The exact signed ControlBundle v2 for the path organization and device. The response is no-store and must not be obtained through a redirect.", "headers": { "Cache-Control": { "description": "Responses must not be cached.", "required": true, "schema": { "type": "string", "const": "no-store" } }, "ETag": { "description": "Optional transport validator only; never authority, generation, freshness, or expiry evidence.", "required": false, "schema": { "type": "string", "minLength": 1, "maxLength": 1024 } } }, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ControlBundleFetchResponse" } } } },
-      "ControlBundleAcknowledgementAccepted": { "description": "The exact acknowledgement was accepted or recognized as an idempotent duplicate.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ControlBundleAcknowledgementResponse" } } } },
+      "DeviceEnrollmentCompleted": { "description": "The one-time enrollment was consumed and the device is active. The response is no-store and contains no private key or enrollment credential.", "headers": { "Cache-Control": { "$ref": "#/components/headers/CacheControl" }, "X-RateLimit-Limit": { "$ref": "#/components/headers/RateLimitLimit" }, "X-RateLimit-Remaining": { "$ref": "#/components/headers/RateLimitRemaining" }, "X-RateLimit-Reset": { "$ref": "#/components/headers/RateLimitReset" } }, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/DeviceEnrollmentCompletedResponse" } } } },
+      "ControlRefreshPoll": { "description": "A newer device-bound refresh hint. The hint accelerates a bundle fetch but cannot authorize or extend expiry. The response is no-store and includes a request_id envelope field.", "headers": { "Cache-Control": { "$ref": "#/components/headers/CacheControl" }, "X-RateLimit-Limit": { "$ref": "#/components/headers/RateLimitLimit" }, "X-RateLimit-Remaining": { "$ref": "#/components/headers/RateLimitRemaining" }, "X-RateLimit-Reset": { "$ref": "#/components/headers/RateLimitReset" } }, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ControlRefreshPollResponse" } } } },
+      "ControlBundleFetch": { "description": "The exact signed ControlBundle v2 for the path organization and device. The response is no-store and must not be obtained through a redirect. It includes a request_id envelope field.", "headers": { "Cache-Control": { "$ref": "#/components/headers/CacheControl" }, "X-RateLimit-Limit": { "$ref": "#/components/headers/RateLimitLimit" }, "X-RateLimit-Remaining": { "$ref": "#/components/headers/RateLimitRemaining" }, "X-RateLimit-Reset": { "$ref": "#/components/headers/RateLimitReset" } }, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ControlBundleFetchResponse" } } } },
+      "ControlBundleAcknowledgementAccepted": { "description": "The exact acknowledgement was accepted or recognized as an idempotent duplicate. The response is no-store and includes a request_id envelope field.", "headers": { "Cache-Control": { "$ref": "#/components/headers/CacheControl" }, "X-RateLimit-Limit": { "$ref": "#/components/headers/RateLimitLimit" }, "X-RateLimit-Remaining": { "$ref": "#/components/headers/RateLimitRemaining" }, "X-RateLimit-Reset": { "$ref": "#/components/headers/RateLimitReset" } }, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ControlBundleAcknowledgementResponse" } } } },
       "DeviceAuditList": { "description": "A bounded, tenant/device-scoped audit page.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/DeviceAuditListResponse" } } } },
       "InvalidCursor": { "description": "The cursor is malformed, tampered, expired, or bound to another tenant/device/resource.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/InvalidCursorEnvelope" } } } },
       "BadRequest": { "description": "Stable 400 error for malformed, out-of-range, or body/path-inconsistent input.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorEnvelope" } } } },
@@ -185,36 +199,91 @@
           "signature": { "type": "string", "minLength": 88, "maxLength": 88, "pattern": "^[A-Za-z0-9+/]{86}==$" }
         }
       },
+      "RequestId": { "type": "string", "format": "uuid", "description": "Server-generated correlation identifier added to every non-204 response." },
+      "DeviceEnrollmentControlTrust": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["format_epoch", "issuer", "key_id", "public_key", "bundle_path", "refresh_hint"],
+        "properties": {
+          "format_epoch": { "const": 2 },
+          "issuer": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$" },
+          "key_id": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$" },
+          "public_key": { "type": "string", "minLength": 80, "maxLength": 8192, "pattern": "^-----BEGIN PUBLIC KEY-----" },
+          "bundle_path": { "type": "string", "minLength": 1, "maxLength": 256, "pattern": "^/v1/organizations/[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}/bundles/[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$" },
+          "refresh_hint": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["key_id", "algorithm", "public_key"],
+            "properties": {
+              "key_id": { "type": "string", "minLength": 1, "maxLength": 64, "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$" },
+              "algorithm": { "const": "ed25519" },
+              "public_key": { "type": "string", "minLength": 80, "maxLength": 8192, "pattern": "^-----BEGIN PUBLIC KEY-----" }
+            }
+          }
+        }
+      },
+      "DeviceEnrollmentCompleted": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["version", "enrollment_id", "organization_id", "device_id", "status", "key_algorithm", "device_key_epoch", "control"],
+        "properties": {
+          "version": { "const": 1 },
+          "enrollment_id": { "type": "string", "format": "uuid" },
+          "organization_id": { "type": "string", "format": "uuid" },
+          "device_id": { "type": "string", "format": "uuid" },
+          "status": { "const": "active" },
+          "key_algorithm": { "enum": ["p256-sha256", "ed25519"] },
+          "device_key_epoch": { "type": "integer", "minimum": 1, "maximum": 9007199254740991 },
+          "control": { "$ref": "#/components/schemas/DeviceEnrollmentControlTrust" }
+        }
+      },
+      "DeviceEnrollmentCompletedResponse": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["enrollment", "request_id"],
+        "properties": {
+          "enrollment": { "$ref": "#/components/schemas/DeviceEnrollmentCompleted" },
+          "request_id": { "$ref": "#/components/schemas/RequestId" }
+        }
+      },
       "ControlRefreshPollResponse": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["hint"],
-        "properties": { "hint": { "$ref": "#/components/schemas/RefreshHintV1" } }
+        "required": ["hint", "request_id"],
+        "properties": { "hint": { "$ref": "#/components/schemas/RefreshHintV1" }, "request_id": { "$ref": "#/components/schemas/RequestId" } }
       },
       "ControlBundleFetchResponse": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["bundle", "desired_generation"],
+        "required": ["bundle", "desired_generation", "request_id"],
         "properties": {
           "bundle": { "$ref": "#/components/schemas/ControlBundleV2" },
-          "desired_generation": { "type": "integer", "minimum": 1, "maximum": 9007199254740991 }
+          "desired_generation": { "type": "integer", "minimum": 1, "maximum": 9007199254740991 },
+          "request_id": { "$ref": "#/components/schemas/RequestId" }
         }
       },
       "ControlBundleAcknowledgementResponse": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["accepted", "duplicate", "observed_generation", "refresh_state"],
+        "required": ["accepted", "duplicate", "observed_generation", "refresh_state", "request_id"],
         "properties": {
           "accepted": { "const": true },
           "duplicate": { "type": "boolean" },
           "observed_generation": { "type": "integer", "minimum": 1, "maximum": 9007199254740991 },
-          "refresh_state": { "$ref": "#/components/schemas/DeviceRefreshState" }
+          "refresh_state": { "$ref": "#/components/schemas/DeviceRefreshState" },
+          "request_id": { "$ref": "#/components/schemas/RequestId" }
         }
       },
       "AuditCursor": { "$ref": "../schemas/device-audit-list-v1.schema.json#/$defs/cursor" },
       "DeviceAuditListResponse": { "$ref": "../schemas/device-audit-list-v1.schema.json" },
       "ErrorEnvelope": { "type": "object", "additionalProperties": false, "required": ["error", "request_id"], "properties": { "error": { "type": "object", "additionalProperties": false, "required": ["code", "message"], "properties": { "code": { "type": "string", "minLength": 1, "maxLength": 64 }, "message": { "type": "string", "minLength": 1, "maxLength": 512 } } }, "request_id": { "type": "string", "format": "uuid" } } },
-      "InvalidCursorEnvelope": { "type": "object", "additionalProperties": false, "required": ["error", "request_id"], "properties": { "error": { "type": "object", "additionalProperties": false, "required": ["code", "message"], "properties": { "code": { "type": "string", "const": "invalid_cursor" }, "message": { "type": "string", "const": "Cursor is invalid" } } }, "request_id": { "type": "string", "format": "uuid" } } }
+      "InvalidCursorEnvelope": { "type": "object", "additionalProperties": false, "required": ["error", "request_id"], "properties": { "error": { "type": "object", "additionalProperties": false, "required": ["code", "message"], "properties": { "code": { "type": "string", "const": "invalid_cursor" }, "message": { "type": "string", "const": "Cursor is invalid" } } }, "request_id": { "$ref": "#/components/schemas/RequestId" } } }
+    },
+    "headers": {
+      "CacheControl": { "description": "Responses must not be cached.", "required": true, "schema": { "type": "string", "const": "no-store" } },
+      "RateLimitLimit": { "description": "Configured rate-limit capacity.", "required": true, "schema": { "type": "string", "pattern": "^[1-9][0-9]*$" } },
+      "RateLimitRemaining": { "description": "Remaining requests in the current rate-limit window.", "required": true, "schema": { "type": "string", "pattern": "^[0-9]+$" } },
+      "RateLimitReset": { "description": "Unix epoch seconds at which the rate-limit window resets.", "required": true, "schema": { "type": "string", "pattern": "^[0-9]+$" } }
     }
   }
 }

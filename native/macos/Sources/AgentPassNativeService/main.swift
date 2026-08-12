@@ -191,6 +191,28 @@ private func ed25519RecoveryPublicKey(_ pem: String) throws -> Data {
     return raw
 }
 
+private struct ServiceRefreshHintKey: Decodable {
+    let keyID: String
+    let algorithm: String
+    let publicKey: String
+
+    enum CodingKeys: String, CodingKey, CaseIterable {
+        case keyID = "key_id"
+        case algorithm
+        case publicKey = "public_key"
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        guard Set(container.allKeys) == Set(CodingKeys.allCases) else {
+            throw DecodingError.dataCorruptedError(forKey: .keyID, in: container, debugDescription: "refresh hint keyring entry contains unknown fields")
+        }
+        keyID = try container.decode(String.self, forKey: .keyID)
+        algorithm = try container.decode(String.self, forKey: .algorithm)
+        publicKey = try container.decode(String.self, forKey: .publicKey)
+    }
+}
+
 private struct ServiceConfiguration: Decodable {
     let machServiceName: String
     let keyTag: String
@@ -236,6 +258,8 @@ private struct ServiceConfiguration: Decodable {
     let controlV2KeyID: String?
     let controlV2OrganizationID: String?
     let controlV2DeviceID: String?
+    let controlV2DeviceKeyEpoch: Int64?
+    let controlV2RefreshHintKeyring: [ServiceRefreshHintKey]?
     let controlV2DeviceKeyTag: String?
     let sessionApprovalPublicKey: String?
     let sessionApprovalKeyTag: String?
@@ -287,6 +311,8 @@ private struct ServiceConfiguration: Decodable {
         case controlV2KeyID = "control_v2_key_id"
         case controlV2OrganizationID = "control_v2_organization_id"
         case controlV2DeviceID = "control_v2_device_id"
+        case controlV2DeviceKeyEpoch = "control_v2_device_key_epoch"
+        case controlV2RefreshHintKeyring = "control_v2_refresh_hint_keyring"
         case controlV2DeviceKeyTag = "control_v2_device_key_tag"
         case sessionApprovalPublicKey = "session_approval_public_key"
         case sessionApprovalKeyTag = "session_approval_key_tag"
@@ -307,7 +333,7 @@ private struct ServiceConfiguration: Decodable {
             }
             _ = try NativeControlRefreshConfiguration(urlString: rawURL, refreshSeconds: interval)
         }
-        let v2Values: [Any?] = [value.controlV2StatePath, value.controlV2CapabilityStatePath, value.controlV2RequestEvidencePath, value.controlV2PublicKey, value.controlV2Issuer, value.controlV2KeyID, value.controlV2OrganizationID, value.controlV2DeviceID]
+        let v2Values: [Any?] = [value.controlV2StatePath, value.controlV2CapabilityStatePath, value.controlV2RequestEvidencePath, value.controlV2PublicKey, value.controlV2Issuer, value.controlV2KeyID, value.controlV2OrganizationID, value.controlV2DeviceID, value.controlV2DeviceKeyEpoch, value.controlV2RefreshHintKeyring]
         let v2Count = v2Values.compactMap { $0 }.count
         if value.controlV2DeviceKeyTag != nil, v2Count == 0 { throw AgentPassNativeError.invalidConfiguration("ControlBundle v2 device key tag requires ControlBundle v2") }
         if v2Count != 0 {
@@ -320,11 +346,29 @@ private struct ServiceConfiguration: Decodable {
                   let keyID = value.controlV2KeyID, !keyID.isEmpty,
                   let organizationID = value.controlV2OrganizationID, UUID(uuidString: organizationID) != nil,
                   let deviceID = value.controlV2DeviceID, UUID(uuidString: deviceID) != nil,
+                  let deviceKeyEpoch = value.controlV2DeviceKeyEpoch,
+                  deviceKeyEpoch > 0, deviceKeyEpoch <= 9_007_199_254_740_991,
+                  let refreshHintKeyring = value.controlV2RefreshHintKeyring,
+                  !refreshHintKeyring.isEmpty, refreshHintKeyring.count <= NativeRefreshHintTrust.maximumKeys,
                   value.controlURL != nil, value.controlRefreshSeconds != nil,
                   value.controlV2DeviceKeyTag?.isEmpty == false else {
-                throw AgentPassNativeError.invalidConfiguration("ControlBundle v2 requires complete pinned trust, audience, and protected state paths")
+                throw AgentPassNativeError.invalidConfiguration("ControlBundle v2 requires complete pinned trust, audience, device_key_epoch, refresh hint keyring, and protected state paths; reprovision the native service")
             }
             _ = try NativeControlBundleV2Trust(publicKeyPEM: publicKey, issuer: issuer, keyID: keyID, audience: NativeControlBundleV2Audience(organizationID: organizationID, deviceID: deviceID))
+            var refreshKeys: [String: String] = [:]
+            let controlDER = canonicalEd25519DER(publicKey)
+            guard controlDER != nil else { throw AgentPassNativeError.invalidConfiguration("ControlBundle v2 public key is invalid") }
+            for entry in refreshHintKeyring {
+                guard entry.algorithm == "ed25519",
+                      entry.keyID.range(of: "^[A-Za-z0-9][A-Za-z0-9._:~-]{0,63}$", options: .regularExpression) != nil,
+                      refreshKeys[entry.keyID] == nil,
+                      let refreshDER = canonicalEd25519DER(entry.publicKey),
+                      refreshDER != controlDER else {
+                    throw AgentPassNativeError.invalidConfiguration("ControlBundle v2 refresh hint keyring is invalid or reuses the bundle key")
+                }
+                refreshKeys[entry.keyID] = entry.publicKey
+            }
+            _ = try NativeRefreshHintTrust(organizationID: organizationID, deviceID: deviceID, publicKeysPEM: refreshKeys)
             if let tag = value.controlV2DeviceKeyTag {
                 guard !tag.isEmpty, tag != value.keyTag, tag != value.auditKeyTag, tag != value.sessionApprovalKeyTag else { throw AgentPassNativeError.invalidConfiguration("ControlBundle v2 device authentication requires a dedicated Secure Enclave key tag") }
             }
@@ -453,6 +497,18 @@ private struct ServiceConfiguration: Decodable {
         }
         return value
     }
+}
+
+private func canonicalEd25519DER(_ pem: String) -> Data? {
+    let prefix = "-----BEGIN PUBLIC KEY-----\n"
+    let suffix = "\n-----END PUBLIC KEY-----\n"
+    guard pem.hasPrefix(prefix), pem.hasSuffix(suffix) else { return nil }
+    let body = String(pem.dropFirst(prefix.count).dropLast(suffix.count))
+    guard !body.isEmpty, !body.contains("\n"), let der = Data(base64Encoded: body), der.count == 44,
+          der.prefix(12) == Data([0x30, 0x2a, 0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x70, 0x03, 0x21, 0x00]),
+          body == der.base64EncodedString(),
+          (try? Curve25519.Signing.PublicKey(rawRepresentation: der.suffix(32))) != nil else { return nil }
+    return der
 }
 
 private final class ServiceEndpoint: NSObject, AgentPassNativeServiceProtocol, @unchecked Sendable {

@@ -92,9 +92,15 @@ private struct ProvisioningFixture {
     let root = "/private/var/agentpass-test-root"
     let config = "/private/var/agentpass-test-root/service.json"
     let signer = Curve25519.Signing.PrivateKey()
+    let refreshSigner = Curve25519.Signing.PrivateKey()
 
     var pem: String {
         let der = Data([0x30, 0x2a, 0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x70, 0x03, 0x21, 0x00]) + signer.publicKey.rawRepresentation
+        return "-----BEGIN PUBLIC KEY-----\n\(der.base64EncodedString())\n-----END PUBLIC KEY-----\n"
+    }
+
+    var refreshPEM: String {
+        let der = Data([0x30, 0x2a, 0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x70, 0x03, 0x21, 0x00]) + refreshSigner.publicKey.rawRepresentation
         return "-----BEGIN PUBLIC KEY-----\n\(der.base64EncodedString())\n-----END PUBLIC KEY-----\n"
     }
 
@@ -105,8 +111,10 @@ private struct ProvisioningFixture {
             "key_id": "control-v2",
             "organization_id": "11111111-1111-4111-8111-111111111111",
             "device_id": "22222222-2222-4222-8222-222222222222",
+            "device_key_epoch": 4,
             "control_url": "https://api.example.test/v1/organizations/11111111-1111-4111-8111-111111111111/bundles/22222222-2222-4222-8222-222222222222",
-            "public_key_pem": pem
+            "public_key_pem": pem,
+            "refresh_hint": ["key_id": "refresh-hint-v1", "algorithm": "ed25519", "public_key": refreshPEM]
         ]
         if let expectedOldFingerprint { object["expected_old_fingerprint"] = expectedOldFingerprint }
         return try NativeStrictJSON.data(object)
@@ -139,10 +147,33 @@ private func jsonObject(_ data: Data) throws -> [String: Any] {
     #expect(object["control_url"] as? String == "https://api.example.test/v1/organizations/11111111-1111-4111-8111-111111111111/bundles/22222222-2222-4222-8222-222222222222")
     #expect(object["control_v2_public_key"] as? String == fixture.pem)
     #expect(object["control_v2_issuer"] as? String == "agentpass-cloud")
+    #expect(object["control_v2_device_key_epoch"] as? Int == 4)
+    #expect((object["control_v2_refresh_hint_keyring"] as? [[String: Any]])?.first?["key_id"] as? String == "refresh-hint-v1")
+    #expect((object["control_v2_refresh_hint_keyring"] as? [[String: Any]])?.first?["algorithm"] as? String == "ed25519")
     #expect(object["control_v2_device_key_tag"] as? String == NativeEnrollmentKeyMaterial.fixedApplicationTag)
     #expect(object["control_v2_state_path"] as? String == "\(fixture.root)/control-v2.state.json")
     #expect(fs.events.suffix(7).elementsEqual(["create", "write", "chmod", "fsync-file", "close", "rename", "fsync-directory"]))
     #expect(fs.files.keys.allSatisfy { !$0.hasSuffix(".tmp") })
+}
+
+@Test func nativeControlProvisioningRejectsMissingOrSubstitutedEpochAndRefreshTrust() throws {
+    let fixture = ProvisioningFixture()
+    let provisioning = NativeControlProvisioning(fileSystem: fixture.fileSystem())
+    var missingEpoch = try jsonObject(try fixture.input())
+    missingEpoch.removeValue(forKey: "device_key_epoch")
+    #expect(throws: NativeControlProvisioningError.self) {
+        try provisioning.provision(canonicalInput: try NativeStrictJSON.data(missingEpoch), at: fixture.config)
+    }
+    var substitutedEpoch = try jsonObject(try fixture.input())
+    substitutedEpoch["device_key_epoch"] = 0
+    #expect(throws: NativeControlProvisioningError.self) {
+        try provisioning.provision(canonicalInput: try NativeStrictJSON.data(substitutedEpoch), at: fixture.config)
+    }
+    var sameKey = try jsonObject(try fixture.input())
+    sameKey["refresh_hint"] = ["key_id": "refresh-hint-v1", "algorithm": "ed25519", "public_key": fixture.pem]
+    #expect(throws: NativeControlProvisioningError.self) {
+        try provisioning.provision(canonicalInput: try NativeStrictJSON.data(sameKey), at: fixture.config)
+    }
 }
 
 @Test func nativeControlProvisioningRejectsNonCanonicalUnknownDuplicateAndSecretInput() throws {

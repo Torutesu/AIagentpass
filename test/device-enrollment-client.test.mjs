@@ -59,6 +59,7 @@ function jsonResponse(value, status = 201, headers = {}) {
 function enrolledResponse(pair, extra = {}) {
   const algorithm = pair.publicKey.asymmetricKeyType === "ed25519" ? "ed25519" : "p256-sha256";
   const control = keys("ed25519");
+  const refreshHint = keys("ed25519");
   return {
     request_id: "request-123",
     enrollment: {
@@ -68,12 +69,14 @@ function enrolledResponse(pair, extra = {}) {
       device_id: DEVICE,
       status: "active",
       key_algorithm: algorithm,
+      device_key_epoch: 3,
       control: {
         format_epoch: 2,
         issuer: "cloud-control",
         key_id: "control-v2",
         public_key: control.publicPem,
-        bundle_path: `/v1/organizations/${ORGANIZATION}/bundles/${DEVICE}`
+        bundle_path: `/v1/organizations/${ORGANIZATION}/bundles/${DEVICE}`,
+        refresh_hint: { key_id: "refresh-hint-v1", algorithm: "ed25519", public_key: refreshHint.publicPem }
       }
     },
     ...extra
@@ -141,10 +144,12 @@ test("signs proof-of-possession over the exact endpoint and body without a beare
   });
   const result = await client.enroll();
   assert.equal(result.status, "enrolled");
-  assert.deepEqual(result.evidence, { organization_id: ORGANIZATION, device_id: DEVICE, enrollment_id: ENROLLMENT, key_fingerprint: fingerprint(pair) });
+  assert.deepEqual(result.evidence, { organization_id: ORGANIZATION, device_id: DEVICE, enrollment_id: ENROLLMENT, device_key_epoch: 3, key_fingerprint: fingerprint(pair) });
   assert.equal(result.organization_id, ORGANIZATION);
   assert.equal(result.control.issuer, "cloud-control");
   assert.equal(result.control.format_epoch, 2);
+  assert.equal(result.device_key_epoch, 3);
+  assert.equal(result.control.refresh_hint.algorithm, "ed25519");
   assert.equal(JSON.stringify(client.config).includes(CREDENTIAL), false);
   assert.equal(JSON.stringify(result).includes(CREDENTIAL), false);
   assert.equal(captured.url, `${BASE_URL}/enrollments/${ENROLLMENT}`);
@@ -252,7 +257,11 @@ test("rejects mismatched signer, response identities, key substitution, secrets,
   const wrongAlgorithm = valid(); wrongAlgorithm.enrollment.key_algorithm = "ed25519";
   const secretField = valid(); secretField.enrollment.control.credential = "should-not-cross-boundary";
   const unknownField = valid(); unknownField.enrollment.unknown = true;
-  for (const responseBody of [wrongDevice, wrongOrganization, pending, wrongAlgorithm, secretField, unknownField]) {
+  const missingEpoch = valid(); delete missingEpoch.enrollment.device_key_epoch;
+  const substitutedEpoch = valid(); substitutedEpoch.enrollment.device_key_epoch = 0;
+  const missingRefreshHint = valid(); delete missingRefreshHint.enrollment.control.refresh_hint;
+  const substitutedRefreshHint = valid(); substitutedRefreshHint.enrollment.control.refresh_hint.public_key = substitutedRefreshHint.enrollment.control.public_key;
+  for (const responseBody of [wrongDevice, wrongOrganization, pending, wrongAlgorithm, secretField, unknownField, missingEpoch, substitutedEpoch, missingRefreshHint, substitutedRefreshHint]) {
     const client = createDeviceEnrollmentClient({ ...input(pair), signer: signWith(pair), fetchImpl: async () => jsonResponse(responseBody) });
     await assert.rejects(() => client.enroll(), (error) => [DEVICE_ENROLLMENT_ERRORS.BINDING, DEVICE_ENROLLMENT_ERRORS.RESPONSE].includes(error.code));
   }
@@ -291,6 +300,6 @@ test("requires a pinned HTTPS /v1 endpoint and bounded timeout", async () => {
 test("exposes only the exact non-secret setup evidence", () => {
   const pair = keys();
   const keyFingerprint = fingerprint(pair);
-  assert.deepEqual(deviceEnrollmentEvidence({ enrollment_id: ENROLLMENT, organization_id: ORGANIZATION, device_id: DEVICE, key_fingerprint: keyFingerprint, private_key: "ignored" }), { organization_id: ORGANIZATION, device_id: DEVICE, enrollment_id: ENROLLMENT, key_fingerprint: keyFingerprint });
+  assert.deepEqual(deviceEnrollmentEvidence({ enrollment_id: ENROLLMENT, organization_id: ORGANIZATION, device_id: DEVICE, device_key_epoch: 2, key_fingerprint: keyFingerprint, private_key: "ignored" }), { organization_id: ORGANIZATION, device_id: DEVICE, enrollment_id: ENROLLMENT, device_key_epoch: 2, key_fingerprint: keyFingerprint });
   assert.throws(() => deviceEnrollmentEvidence({ enrollment_id: ENROLLMENT, organization_id: ORGANIZATION, device_id: DEVICE }), (error) => error.code === DEVICE_ENROLLMENT_ERRORS.BINDING);
 });

@@ -215,7 +215,7 @@ export function createPostgresControlPlaneResourceRepository({ client, now = () 
         if (enrollment.completion_hash !== completionHash || device.label !== label || device.key_algorithm !== algorithm || device.public_key_pem !== publicKey || device.status !== "active") {
           throw new ControlPlaneResourceRepositoryError("ERR_ENROLLMENT_CONSUMED", "device enrollment was already consumed");
         }
-        return mapDevice(device);
+        return await mapCompletedDevice(tx, organizationId, deviceId, device);
       }
       if (Date.parse(completedAt) > dateValue(enrollment.expires_at)) throw new ControlPlaneResourceRepositoryError("ERR_ENROLLMENT_EXPIRED", "device enrollment has expired");
       if (device.status !== "pending" || device.public_key_pem !== null || device.label !== label) throw new ControlPlaneResourceRepositoryError("ERR_ENROLLMENT_STATE", "pending device state is invalid");
@@ -227,7 +227,7 @@ export function createPostgresControlPlaneResourceRepository({ client, now = () 
         WHERE organization_id=$1 AND id=$2 AND consumed_at IS NULL
         RETURNING id,organization_id,device_id,label,platform,created_at,expires_at,consumed_at,completion_hash`, [organizationId, enrollmentId, completedAt, completionHash]);
       if (rowCount(consumed) !== 1) throw new ControlPlaneResourceRepositoryError("ERR_ENROLLMENT_CONSUMED", "device enrollment was already consumed");
-      return mapDevice(update.rows[0]);
+      return await mapCompletedDevice(tx, organizationId, deviceId, update.rows[0]);
     }));
   }
 
@@ -473,6 +473,20 @@ async function selectDevice(client, organizationId, deviceId, forUpdate = false)
     FROM devices WHERE organization_id=$1 AND id=$2${forUpdate ? " FOR UPDATE" : ""}`, [organizationId, deviceId]);
   if (rowCount(result) !== 1) throw notFound("device", deviceId);
   return result.rows[0];
+}
+
+async function mapCompletedDevice(client, organizationId, deviceId, row) {
+  // The devices UPDATE trigger creates the active epoch in this same
+  // transaction. Read it back from the authoritative epoch table before the
+  // transaction commits; never infer epoch 1 from enrollment state.
+  const result = await client.query(`SELECT key_epoch,public_key_pem,status
+    FROM device_key_epochs
+    WHERE organization_id=$1 AND device_id=$2 AND status='active'
+    ORDER BY key_epoch ASC
+    FOR SHARE`, [organizationId, deviceId]);
+  if (rowCount(result) !== 1) throw new ControlPlaneResourceRepositoryError("ERR_DEVICE_AUTH_UNAVAILABLE", "active device authentication key epoch is unavailable");
+  const epoch = result.rows[0];
+  return mapDevice({ ...row, active_key_epoch: epoch.key_epoch, active_public_key_pem: epoch.public_key_pem, active_key_epoch_status: epoch.status, active_key_epoch_count: 1 }, { requireActiveEpoch: true });
 }
 
 async function selectAgent(client, organizationId, agentId, forUpdate = false) {

@@ -31,13 +31,14 @@ async function fixture(t, apiOptions = {}) {
   const token = "ap_owner_token_abcdefghijklmnopqrstuvwxyz";
   const records = [createApiTokenRecord({ token, tokenId: "owner-token", organizationId: org, memberId: "owner-1", role: "owner" })];
   const bundleKeys = crypto.generateKeyPairSync("ed25519");
+  const refreshHintKeys = crypto.generateKeyPairSync("ed25519");
   const { storeDecorator, ...cloudApiOptions } = apiOptions;
   const apiStore = typeof storeDecorator === "function" ? storeDecorator(store) : store;
-  const server = createCloudApi({ store: apiStore, tokenRecords: records, bundleSigner: { privateKey: bundleKeys.privateKey, issuer: "agentpass-cloud", keyId: "control-v1", ttlMs: 60_000, offlineTtlMs: 120_000 }, now: () => now, verifyRecentWebAuthn: async ({ proof, principal, organization_id, operation }) => ({ verified: proof === "webauthn-proof-abcdefghijklmnopqrstuvwxyz", consumed: true, challenge_id: "99999999-9999-4999-8999-999999999999", member_id: principal.member_id, organization_id, operation, authenticated_at: now }), ...cloudApiOptions });
+  const server = createCloudApi({ store: apiStore, tokenRecords: records, bundleSigner: { privateKey: bundleKeys.privateKey, issuer: "agentpass-cloud", keyId: "control-v1", ttlMs: 60_000, offlineTtlMs: 120_000 }, refreshHintService: { publicKeyMetadata: async () => ({ key_id: "refresh-hint-v1", algorithm: "ed25519", public_key: refreshHintKeys.publicKey.export({ type: "spki", format: "pem" }).toString() }), poll: async () => null }, now: () => now, verifyRecentWebAuthn: async ({ proof, principal, organization_id, operation }) => ({ verified: proof === "webauthn-proof-abcdefghijklmnopqrstuvwxyz", consumed: true, challenge_id: "99999999-9999-4999-8999-999999999999", member_id: principal.member_id, organization_id, operation, authenticated_at: now }), ...cloudApiOptions });
   await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
   const base = `http://127.0.0.1:${server.address().port}`;
   t.after(async () => { await new Promise((resolve) => server.close(resolve)); await store.close(); await fs.rm(directory, { recursive: true, force: true }); });
-  return { store, token, deviceKeys, bundleKeys, base, scope };
+  return { store, token, deviceKeys, bundleKeys, refreshHintKeys, base, scope };
 }
 
 function auditListEvent(eventId, requestId, previousHash, deviceTimestamp) {
@@ -159,9 +160,13 @@ test("admin issues a one-time enrollment and a macOS P-256 device completes it",
   assert.equal(completed.status, 201, JSON.stringify(await completed.clone().json()));
   const result = (await completed.json()).enrollment;
   assert.equal(result.status, "active");
+  assert.equal(result.device_key_epoch, 1);
   assert.equal(result.control.format_epoch, 2);
   assert.equal(result.control.issuer, "agentpass-cloud");
   assert.equal(result.control.bundle_path, `/v1/organizations/${org}/bundles/${pendingDevice}`);
+  assert.equal(result.control.refresh_hint.key_id, "refresh-hint-v1");
+  assert.equal(result.control.refresh_hint.algorithm, "ed25519");
+  assert.notEqual(result.control.refresh_hint.public_key, result.control.public_key);
   assert.equal(crypto.createPublicKey(result.control.public_key).asymmetricKeyType, "ed25519");
   const replay = await fetch(`${f.base}${invitation.endpoint}`, { method: "POST", headers: enrollmentHeaders, body: requestBody });
   assert.equal(replay.status, 201);

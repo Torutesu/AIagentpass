@@ -66,6 +66,12 @@ test("issues a purpose-signed hint from committed metadata without copying autho
   assert.equal(f.calls.polls[0].wait_ms, 0);
   assert.deepEqual(f.calls.deliveries[0], { organization_id: ORGANIZATION_ID, device_id: DEVICE_ID, outbox_id: OUTBOX_ID, desired_generation: 7, delivered_at: "2026-08-13T00:00:00.000Z" });
   assert.equal(JSON.stringify(hint).includes("policy"), false);
+  const metadata = await f.service.publicKeyMetadata();
+  assert.deepEqual(Object.keys(metadata).sort(), ["algorithm", "key_id", "public_key"]);
+  assert.equal(metadata.algorithm, "ed25519");
+  assert.equal(typeof metadata.public_key, "string");
+  assert.equal(metadata.public_key.includes("PRIVATE KEY"), false);
+  assert.equal(crypto.createPublicKey(metadata.public_key).export({ type: "spki", format: "pem" }).toString(), metadata.public_key);
 });
 
 test("records bounded refresh pipeline outcomes without labels", async () => {

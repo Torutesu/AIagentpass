@@ -63,8 +63,12 @@ public struct NativeControlProvisioningInput: Equatable, Sendable {
     public let keyID: String
     public let organizationID: String
     public let deviceID: String
+    public let deviceKeyEpoch: Int64
     public let controlURL: String
     public let publicKeyPEM: String
+    public let refreshHintKeyID: String
+    public let refreshHintAlgorithm: String
+    public let refreshHintPublicKeyPEM: String
     public let expectedOldFingerprint: String?
 
     public init(canonicalJSON data: Data) throws {
@@ -83,8 +87,8 @@ public struct NativeControlProvisioningInput: Equatable, Sendable {
         guard canonical == data else {
             throw NativeControlProvisioningError.invalidInput("Control provisioning input must be canonical JSON")
         }
-        let allowed = Set(["version", "issuer", "key_id", "organization_id", "device_id", "control_url", "public_key_pem", "expected_old_fingerprint"])
-        guard object.keys.allSatisfy({ allowed.contains($0) }), object.count == 7 || object.count == 8 else {
+        let allowed = Set(["version", "issuer", "key_id", "organization_id", "device_id", "device_key_epoch", "control_url", "public_key_pem", "refresh_hint", "expected_old_fingerprint"])
+        guard object.keys.allSatisfy({ allowed.contains($0) }), (object.count == 9 || object.count == 10) else {
             throw NativeControlProvisioningError.invalidInput("Control provisioning input contains an unknown or missing field")
         }
         guard nativeProvisioningInt(object["version"]) == Self.version else {
@@ -106,7 +110,24 @@ public struct NativeControlProvisioningInput: Equatable, Sendable {
         guard let publicKeyPEM = object["public_key_pem"] as? String else {
             throw NativeControlProvisioningError.invalidInput("public_key_pem is required")
         }
-        _ = try Self.ed25519KeyAndDER(from: publicKeyPEM)
+        let (_, controlDER) = try Self.ed25519KeyAndDER(from: publicKeyPEM)
+        guard let rawEpoch = nativeProvisioningInt(object["device_key_epoch"]),
+              rawEpoch > 0, Int64(rawEpoch) <= Self.maximumSafeInteger else {
+            throw NativeControlProvisioningError.invalidInput("device_key_epoch must be a positive safe integer")
+        }
+        guard let refreshHint = object["refresh_hint"] as? [String: Any],
+              Set(refreshHint.keys) == Set(["key_id", "algorithm", "public_key"]),
+              let refreshHintKeyID = refreshHint["key_id"] as? String,
+              Self.validIdentifier(refreshHintKeyID),
+              let refreshHintAlgorithm = refreshHint["algorithm"] as? String,
+              refreshHintAlgorithm == "ed25519",
+              let refreshHintPublicKeyPEM = refreshHint["public_key"] as? String else {
+            throw NativeControlProvisioningError.invalidInput("refresh_hint trust metadata is invalid")
+        }
+        let (_, refreshDER) = try Self.ed25519KeyAndDER(from: refreshHintPublicKeyPEM)
+        guard controlDER != refreshDER else {
+            throw NativeControlProvisioningError.invalidInput("refresh_hint trust key must be purpose-separated from the control key")
+        }
         let expected = object["expected_old_fingerprint"] as? String
         guard object["expected_old_fingerprint"] == nil || (expected != nil && Self.validFingerprint(expected!)) else {
             throw NativeControlProvisioningError.invalidInput("expected_old_fingerprint is invalid")
@@ -115,8 +136,12 @@ public struct NativeControlProvisioningInput: Equatable, Sendable {
         self.keyID = keyID
         self.organizationID = organizationID
         self.deviceID = deviceID
+        self.deviceKeyEpoch = Int64(rawEpoch)
         self.controlURL = controlURL
         self.publicKeyPEM = publicKeyPEM
+        self.refreshHintKeyID = refreshHintKeyID
+        self.refreshHintAlgorithm = refreshHintAlgorithm
+        self.refreshHintPublicKeyPEM = refreshHintPublicKeyPEM
         self.expectedOldFingerprint = expected
     }
 
@@ -127,8 +152,14 @@ public struct NativeControlProvisioningInput: Equatable, Sendable {
             "key_id": keyID,
             "organization_id": organizationID,
             "device_id": deviceID,
+            "device_key_epoch": deviceKeyEpoch,
             "control_url": controlURL,
-            "public_key_pem": publicKeyPEM
+            "public_key_pem": publicKeyPEM,
+            "refresh_hint": [
+                "key_id": refreshHintKeyID,
+                "algorithm": refreshHintAlgorithm,
+                "public_key": refreshHintPublicKeyPEM
+            ]
         ]
         if let expectedOldFingerprint { object["expected_old_fingerprint"] = expectedOldFingerprint }
         return try NativeStrictJSON.data(object)
@@ -141,6 +172,8 @@ public struct NativeControlProvisioningInput: Equatable, Sendable {
     fileprivate static func validIdentifier(_ value: String) -> Bool {
         value.utf8.count <= 128 && value.range(of: "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$", options: .regularExpression) != nil
     }
+
+    fileprivate static let maximumSafeInteger: Int64 = 9_007_199_254_740_991
 
     fileprivate static func validUUIDv4(_ value: String) -> Bool {
         value == value.lowercased() && value.range(of: "^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$", options: .regularExpression) != nil
@@ -217,6 +250,14 @@ public final class NativeControlProvisioning: @unchecked Sendable {
         catch { throw NativeControlProvisioningError.invalidExistingConfiguration("Root service configuration is not strict JSON") }
         var updated = existing
         let oldTrust = try Self.existingTrust(from: existing)
+        if let rawEpoch = existing["control_v2_device_key_epoch"] {
+            guard let existingEpoch = nativeProvisioningInt(rawEpoch),
+                  existingEpoch > 0, Int64(existingEpoch) <= NativeControlProvisioningInput.maximumSafeInteger,
+                  Int64(existingEpoch) == input.deviceKeyEpoch else {
+                throw NativeControlProvisioningError.invalidExistingConfiguration("Existing device_key_epoch does not match authoritative enrollment; reprovisioning is required")
+            }
+        }
+        let refreshHintKeyring = try Self.refreshHintKeyring(existing: existing, input: input, controlPublicKeyPEM: input.publicKeyPEM)
         if let expected = input.expectedOldFingerprint {
             guard let oldTrust, expected == oldTrust.fingerprint else { throw NativeControlProvisioningError.trustFingerprintMismatch }
         }
@@ -239,6 +280,8 @@ public final class NativeControlProvisioning: @unchecked Sendable {
         updated["control_v2_key_id"] = input.keyID
         updated["control_v2_organization_id"] = input.organizationID
         updated["control_v2_device_id"] = input.deviceID
+        updated["control_v2_device_key_epoch"] = input.deviceKeyEpoch
+        updated["control_v2_refresh_hint_keyring"] = refreshHintKeyring
         updated["control_v2_device_key_tag"] = NativeEnrollmentKeyMaterial.fixedApplicationTag
         let encoded: Data
         do { encoded = try NativeStrictJSON.data(updated) }
@@ -272,6 +315,45 @@ public final class NativeControlProvisioning: @unchecked Sendable {
         }
         let (_, der) = try NativeControlProvisioningInput.ed25519KeyAndDER(from: publicKey)
         return ExistingTrust(issuer: issuer, keyID: keyID, organizationID: organizationID, deviceID: deviceID, url: url, fingerprint: NativeControlProvisioningInput.fingerprint(forDER: der))
+    }
+
+    private static func refreshHintKeyring(existing: [String: Any], input: NativeControlProvisioningInput, controlPublicKeyPEM: String) throws -> [[String: Any]] {
+        let (_, controlDER) = try NativeControlProvisioningInput.ed25519KeyAndDER(from: controlPublicKeyPEM)
+        var entries: [[String: Any]] = []
+        if let raw = existing["control_v2_refresh_hint_keyring"] {
+            guard let array = raw as? [[String: Any]], !array.isEmpty, array.count <= NativeRefreshHintTrust.maximumKeys else {
+                throw NativeControlProvisioningError.invalidExistingConfiguration("Existing refresh hint keyring is invalid; reprovisioning is required")
+            }
+            for item in array {
+                guard Set(item.keys) == Set(["key_id", "algorithm", "public_key"]),
+                      let keyID = item["key_id"] as? String, NativeControlProvisioningInput.validIdentifier(keyID),
+                      let algorithm = item["algorithm"] as? String, algorithm == "ed25519",
+                      let publicKey = item["public_key"] as? String else {
+                    throw NativeControlProvisioningError.invalidExistingConfiguration("Existing refresh hint keyring is invalid; reprovisioning is required")
+                }
+                let (_, der) = try NativeControlProvisioningInput.ed25519KeyAndDER(from: publicKey)
+                guard der != controlDER else {
+                    throw NativeControlProvisioningError.invalidExistingConfiguration("Existing refresh hint keyring reuses the ControlBundle key")
+                }
+                entries.append(["key_id": keyID, "algorithm": algorithm, "public_key": publicKey])
+            }
+        }
+        if let index = entries.firstIndex(where: { ($0["key_id"] as? String) == input.refreshHintKeyID }) {
+            guard entries[index]["algorithm"] as? String == input.refreshHintAlgorithm,
+                  entries[index]["public_key"] as? String == input.refreshHintPublicKeyPEM else {
+                throw NativeControlProvisioningError.invalidExistingConfiguration("Refresh hint key id is already pinned to a different key")
+            }
+        } else {
+            guard entries.count < NativeRefreshHintTrust.maximumKeys else {
+                throw NativeControlProvisioningError.invalidInput("refresh_hint trust keyring exceeds the bounded key limit")
+            }
+            entries.append(["key_id": input.refreshHintKeyID, "algorithm": input.refreshHintAlgorithm, "public_key": input.refreshHintPublicKeyPEM])
+        }
+        let ids = entries.compactMap { $0["key_id"] as? String }
+        guard Set(ids).count == entries.count else {
+            throw NativeControlProvisioningError.invalidExistingConfiguration("Refresh hint keyring contains duplicate key ids")
+        }
+        return entries
     }
 
     private static func validateConfigPath(_ rawPath: String, fileSystem: any NativeControlProvisioningFileSystem) throws -> String {

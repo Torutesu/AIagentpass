@@ -140,7 +140,7 @@ export function createRefreshHintService({
         outbox_id: state.outboxId,
         key_id: state.nonceKeyId
       });
-      metadata = await signer.publicKeyMetadata();
+      metadata = await loadSignerMetadata();
     } catch {
       recordMetric(metrics, "recordRefreshDeliveryFailure");
       throw new RefreshHintServiceError(REFRESH_HINT_SERVICE_ERROR_CODES.UNAVAILABLE);
@@ -148,7 +148,7 @@ export function createRefreshHintService({
     const nonceValue = nonce?.nonce_base64url ?? (Buffer.isBuffer(nonce?.nonce) ? nonce.nonce.toString("base64url") : undefined);
     if (typeof nonceValue !== "string" || !NONCE.test(nonceValue) || nonceDeriver.matchesDigest(nonce, state.nonceDigest) !== true
       || !metadata || typeof metadata !== "object" || Array.isArray(metadata)
-      || !KEY_ID.test(metadata.key_id ?? "") || metadata.algorithm !== REFRESH_HINT_SIGNATURE_ALGORITHM) {
+      || !KEY_ID.test(metadata.keyId ?? "") || !metadata.publicKey || typeof metadata.publicKeyPEM !== "string") {
       throw new RefreshHintServiceError(REFRESH_HINT_SERVICE_ERROR_CODES.UNAVAILABLE);
     }
     const unsigned = {
@@ -160,7 +160,7 @@ export function createRefreshHintService({
       published_at: new Date(publishedMs).toISOString(),
       expires_at: new Date(expiresMs).toISOString(),
       nonce: nonceValue,
-      key_id: metadata.key_id,
+      key_id: metadata.keyId,
       signature_algorithm: REFRESH_HINT_SIGNATURE_ALGORITHM
     };
     let signature;
@@ -169,9 +169,7 @@ export function createRefreshHintService({
       signature = await signer.signRefreshHint(refreshHintSigningData(placeholder));
       if (Buffer.isBuffer(signature) || signature instanceof Uint8Array) signature = Buffer.from(signature).toString("base64url");
       const hint = normalizeRefreshHint({ ...unsigned, signature });
-      const publicKey = metadata.public_key?.type === "public" ? metadata.public_key : crypto.createPublicKey(metadata.public_key);
-      if (publicKey.asymmetricKeyType !== "ed25519"
-        || !crypto.verify(null, refreshHintSigningData(hint), publicKey, Buffer.from(hint.signature, "base64url"))) {
+      if (!crypto.verify(null, refreshHintSigningData(hint), metadata.publicKey, Buffer.from(hint.signature, "base64url"))) {
         throw new Error("invalid signature");
       }
       await source.markDeviceRefreshDelivered({
@@ -189,8 +187,33 @@ export function createRefreshHintService({
 
   return Object.freeze({
     poll,
+    // Expose only the canonical public trust metadata required by native
+    // provisioning. The signer-owned KeyObject never crosses this boundary.
+    publicKeyMetadata: async () => {
+      const metadata = await loadSignerMetadata();
+      return Object.freeze({ key_id: metadata.keyId, algorithm: REFRESH_HINT_SIGNATURE_ALGORITHM, public_key: metadata.publicKeyPEM });
+    },
     snapshot: () => Object.freeze({ active_waiters: activeWaiters, max_waiters: maxWaiters })
   });
+
+  async function loadSignerMetadata() {
+    let metadata;
+    try { metadata = await signer.publicKeyMetadata(); } catch { throw new Error("refresh signer metadata unavailable"); }
+    if (!metadata || typeof metadata !== "object" || Array.isArray(metadata)
+      || Object.keys(metadata).some((key) => !["key_id", "algorithm", "public_key"].includes(key))
+      || Object.keys(metadata).length !== 3
+      || !KEY_ID.test(metadata.key_id ?? "")
+      || metadata.algorithm !== REFRESH_HINT_SIGNATURE_ALGORITHM) {
+      throw new Error("refresh signer metadata is invalid");
+    }
+    let publicKey;
+    try { publicKey = metadata.public_key?.type === "public" ? metadata.public_key : crypto.createPublicKey(metadata.public_key); }
+    catch { throw new Error("refresh signer public key is invalid"); }
+    if (publicKey.type !== "public" || publicKey.asymmetricKeyType !== "ed25519") throw new Error("refresh signer public key is invalid");
+    const publicKeyPEM = publicKey.export({ type: "spki", format: "pem" }).toString();
+    if (typeof metadata.public_key === "string" && metadata.public_key !== publicKeyPEM) throw new Error("refresh signer public key is not canonical");
+    return { keyId: metadata.key_id, publicKey, publicKeyPEM };
+  }
 }
 
 function recordMetric(metrics, method, amount = 1) {

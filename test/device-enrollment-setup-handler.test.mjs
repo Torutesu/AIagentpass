@@ -12,6 +12,7 @@ const deviceId = "33333333-3333-4333-8333-333333333333";
 test("enrolls with native proof and persists only non-secret pinned control trust", async () => {
   const device = crypto.generateKeyPairSync("ec", { namedCurve: "prime256v1" });
   const control = crypto.generateKeyPairSync("ed25519");
+  const refreshHint = crypto.generateKeyPairSync("ed25519");
   const publicPem = device.publicKey.export({ type: "spki", format: "pem" }).toString();
   const fingerprint = `SHA256:${crypto.createHash("sha256").update(device.publicKey.export({ type: "spki", format: "der" })).digest("base64url")}`;
   const credential = crypto.randomBytes(32).toString("base64url");
@@ -31,17 +32,19 @@ test("enrolls with native proof and persists only non-secret pinned control trus
     saveConfig: (value) => { saved = value; },
     fetchImpl: async (_url, init) => {
       assert.equal(init.headers["AgentPass-Enrollment-Credential"], credential);
-      return new Response(canonicalJson({ request_id: "request-1", enrollment: { version: 1, enrollment_id: enrollmentId, organization_id: organizationId, device_id: deviceId, status: "active", key_algorithm: "p256-sha256", control: { format_epoch: 2, issuer: "agentpass-cloud", key_id: "control-v1", public_key: control.publicKey.export({ type: "spki", format: "pem" }).toString(), bundle_path: `/v1/organizations/${organizationId}/bundles/${deviceId}` } } }), { status: 201, headers: { "content-type": "application/json" } });
+      return new Response(canonicalJson({ request_id: "request-1", enrollment: { version: 1, enrollment_id: enrollmentId, organization_id: organizationId, device_id: deviceId, status: "active", key_algorithm: "p256-sha256", device_key_epoch: 4, control: { format_epoch: 2, issuer: "agentpass-cloud", key_id: "control-v1", public_key: control.publicKey.export({ type: "spki", format: "pem" }).toString(), bundle_path: `/v1/organizations/${organizationId}/bundles/${deviceId}`, refresh_hint: { key_id: "refresh-hint-v1", algorithm: "ed25519", public_key: refreshHint.publicKey.export({ type: "spki", format: "pem" }).toString() } } } }), { status: 201, headers: { "content-type": "application/json" } });
     }
   });
   const context = { current_state: "service_keys_activated", target_state: "device_enrolled", operation_id: "setup:test:8:enroll_device", action: { id: "enroll_device" } };
   const result = await handler(context);
-  assert.deepEqual(result.evidence.proof, { organization_id: organizationId, device_id: deviceId, enrollment_id: enrollmentId, key_fingerprint: fingerprint });
+  assert.deepEqual(result.evidence.proof, { organization_id: organizationId, device_id: deviceId, enrollment_id: enrollmentId, device_key_epoch: 4, key_fingerprint: fingerprint });
   assert.equal(saved.control_v2.required, true);
   assert.equal(saved.control_v2.capability_required, true);
   assert.equal(saved.control_v2.url, `https://api.example.test/v1/organizations/${organizationId}/bundles/${deviceId}`);
   assert.equal(saved.native_broker.control_url, saved.control_v2.url);
   assert.equal(provisioned.control_url, saved.control_v2.url);
+  assert.equal(provisioned.device_key_epoch, 4);
+  assert.equal(provisioned.refresh_hint.key_id, "refresh-hint-v1");
   assert.equal(provisioned.public_key_pem, saved.control_v2.public_key);
   assert.equal(JSON.stringify(saved).includes(credential), false);
   assert.equal(JSON.stringify(result).includes(credential), false);

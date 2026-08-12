@@ -220,7 +220,7 @@ export async function createCloudStore(options = {}) {
       action: () => {
         if (state.devices[deviceId] || hasAnyResourceId(state, deviceId)) throw unique("device_id", deviceId);
         if (Object.values(state.devices).some((item) => item.device_public_key === publicKey)) throw unique("device_public_key", publicKey);
-        const record = { device_id: deviceId, organization_id: organizationId, name, device_public_key: publicKey, status: "active", metadata, created_at: now(), version: 1 };
+        const record = { device_id: deviceId, organization_id: organizationId, name, device_public_key: publicKey, key_epoch: 1, status: "active", metadata, created_at: now(), version: 1 };
         state.devices[deviceId] = record;
         return record;
       }
@@ -287,6 +287,7 @@ export async function createCloudStore(options = {}) {
     try {
       device.device_public_key = publicKey;
       device.key_algorithm = algorithm;
+      device.key_epoch = nextDeviceKeyEpoch(device.key_epoch);
       device.status = "active";
       device.version += 1;
       record.consumed_at = completedAt;
@@ -563,7 +564,10 @@ export async function createCloudStore(options = {}) {
       if (!allowed.includes(key)) throw new CloudStoreError("ERR_IMMUTABLE_FIELD", `${label}.${key} is not mutable`);
     }
     const record = tenantRecord(collection, organizationId, resourceId, label);
-    const candidate = normalize({ ...record, ...patch });
+    let candidate = normalize({ ...record, ...patch });
+    if (collection === "devices" && candidate.device_public_key !== record.device_public_key) {
+      candidate = { ...candidate, key_epoch: nextDeviceKeyEpoch(record.key_epoch) };
+    }
     assertSafeValue(candidate, label);
     return mutate({
       organizationId,
@@ -832,6 +836,18 @@ function validateState(value) {
     if (!Array.isArray(value[collection])) throw new CloudStoreError("ERR_STORE_CORRUPT", `store collection ${collection} is invalid`);
   }
   assertSafeValue(value, "store");
+  for (const device of Object.values(value.devices)) validateDeviceEpoch(device);
+}
+
+function validateDeviceEpoch(device) {
+  if (!device || typeof device !== "object") throw new CloudStoreError("ERR_STORE_CORRUPT", "device record is invalid");
+  if (device.status === "pending") {
+    if (device.device_public_key !== null || device.key_epoch !== undefined) throw new CloudStoreError("ERR_STORE_CORRUPT", "pending device contains authentication epoch material");
+    return;
+  }
+  if (device.device_public_key !== null && device.device_public_key !== undefined) {
+    if (!Number.isSafeInteger(device.key_epoch) || device.key_epoch < 1) throw new CloudStoreError("ERR_STORE_CORRUPT", "active device authentication key epoch is unavailable");
+  }
 }
 
 function assertSafeValue(value, label, seen = new Set(), depth = 0) {
@@ -884,6 +900,11 @@ function boundedArray(value, label, maxItems, maxBytes, required = false) {
 
 function enumText(value, label, allowed) { const text = boundedText(value, label, 128, true); if (!allowed.includes(text)) throw new CloudStoreError("ERR_INVALID_INPUT", `${label} must be one of ${allowed.join(", ")}`); return text; }
 function sequenceValue(value, label) { if (!Number.isSafeInteger(value) || value < 0) throw new CloudStoreError("ERR_INVALID_INPUT", `${label} must be a non-negative safe integer`); return value; }
+function nextDeviceKeyEpoch(value) {
+  if (value === undefined) return 1;
+  if (!Number.isSafeInteger(value) || value < 1 || value >= Number.MAX_SAFE_INTEGER) throw new CloudStoreError("ERR_DEVICE_AUTH_UNAVAILABLE", "device authentication key epoch cannot advance safely");
+  return value + 1;
+}
 function timestamp(value) { if (typeof value !== "string" || !RFC3339_UTC.test(value) || !Number.isFinite(new Date(value).getTime())) throw new CloudStoreError("ERR_INVALID_INPUT", "timestamp must be a valid RFC 3339 UTC value"); return new Date(value).toISOString(); }
 function now() { return new Date().toISOString(); }
 function requireIdempotencyKey(value) {

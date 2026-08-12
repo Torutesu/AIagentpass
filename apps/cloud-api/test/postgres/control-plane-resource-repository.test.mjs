@@ -70,6 +70,7 @@ class FakeClient {
     if (text.startsWith("UPDATE policies")) return result([this.policyUpdateRow ?? policyRow({ version: 2 })], 1);
     if (text.startsWith("SELECT id FROM devices")) return result([{ id: ids.device }]);
     if (text.startsWith("SELECT id,organization_id,device_id,label,platform,created_at,expires_at,consumed_at,completion_hash")) return result([enrollmentRow()]);
+    if (text.startsWith("SELECT key_epoch,public_key_pem,status")) return result([{ key_epoch: 1, public_key_pem: PUBLIC_KEY, status: "active" }]);
     if (text.startsWith("SELECT organization_id,id,label,key_algorithm,public_key_pem,status,metadata,version,created_at,last_seen_at\n    FROM devices") && params[1] === ids.device2) return result([deviceRow({ id: ids.device2, label: "New Mac", key_algorithm: null, status: "pending", public_key_pem: null })]);
     if (text.startsWith("SELECT organization_id,id,label,key_algorithm,public_key_pem,status,metadata,version,created_at,last_seen_at\n    FROM devices")) return result([deviceRow()]);
     if (text.startsWith("UPDATE device_enrollments")) return result([enrollmentRow({ consumed_at: NOW, completion_hash: params[3] })], 1);
@@ -284,6 +285,10 @@ test("uses row locks and one-time credential matching for completion", async () 
   const { repository, client } = repo();
   const completed = await repository.completeDeviceEnrollment({ organization_id: ids.organization, enrollment_id: ids.enrollment, device_id: ids.device2, label: "New Mac", platform: "macos", algorithm: "ed25519", public_key: PUBLIC_KEY, credential_digest: DIGEST, completed_at: NOW });
   assert.equal(completed.status, "active");
+  assert.equal(completed.key_epoch, 1);
+  const epochLookup = client.calls.find((call) => call.text.startsWith("SELECT key_epoch,public_key_pem,status"));
+  assert.match(epochLookup.text, /device_key_epochs/);
+  assert.match(epochLookup.text, /FOR SHARE/);
   const lookup = client.calls.find((call) => call.text.startsWith("SELECT id,organization_id,device_id,label,platform,created_at,expires_at,consumed_at,completion_hash"));
   assert.match(lookup.text, /organization_id=\$1 AND id=\$2 AND encode\(secret_hash,'hex'\)=\$3/);
   assert.match(lookup.text, /FOR UPDATE/);

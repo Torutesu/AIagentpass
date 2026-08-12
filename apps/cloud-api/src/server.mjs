@@ -204,8 +204,10 @@ export function createCloudApi({ store, tokenRecords = [], bundleSigner, refresh
         validateEnrollmentProof(request.url, bodyBytes, body.device_key.algorithm, body.device_key.spki_pem, credential, request.headers["agentpass-enrollment-signature"]);
         if (!bundleSigner?.privateKey || !bundleSigner?.issuer || !bundleSigner?.keyId) throw apiError("bundle_signer_unavailable", 503, "Control bundle signer is unavailable");
         const controlPublicKey = crypto.createPublicKey(bundleSigner.privateKey).export({ type: "spki", format: "pem" }).toString();
+        const refreshHintTrust = await enrollmentRefreshHintTrustMetadata(refreshHintService, controlPublicKey);
         const device = await store.completeDeviceEnrollment({ enrollmentId: match.enrollmentId, organizationId: body.organization_id, deviceId: body.device_id, label: body.label, platform: body.platform, algorithm: body.device_key.algorithm, publicKey: body.device_key.spki_pem, credentialDigest: crypto.createHash("sha256").update(credential).digest("hex"), completedAt: new Date(now()).toISOString() });
-        return { status: 201, body: { enrollment: { version: 1, enrollment_id: match.enrollmentId, organization_id: device.organization_id, device_id: device.device_id, status: device.status, key_algorithm: device.key_algorithm, control: { format_epoch: 2, issuer: bundleSigner.issuer, key_id: bundleSigner.keyId, public_key: controlPublicKey, bundle_path: `/v1/organizations/${device.organization_id}/bundles/${device.device_id}` } } } };
+        const deviceKeyEpoch = positiveDeviceKeyEpoch(device);
+        return { status: 201, body: { enrollment: { version: 1, enrollment_id: match.enrollmentId, organization_id: device.organization_id, device_id: device.device_id, status: device.status, key_algorithm: device.key_algorithm, device_key_epoch: deviceKeyEpoch, control: { format_epoch: 2, issuer: bundleSigner.issuer, key_id: bundleSigner.keyId, public_key: controlPublicKey, bundle_path: `/v1/organizations/${device.organization_id}/bundles/${device.device_id}`, refresh_hint: refreshHintTrust } } } };
       }, false, true),
       route("GET", new RegExp(`^/v1/organizations/(?<organizationId>${UUID})/agents$`), "viewer", async ({ organizationId }) => ({ body: { agents: await store.listAgents({ organizationId }) } })),
       route("POST", new RegExp(`^/v1/organizations/(?<organizationId>${UUID})/agents$`), "admin", async ({ organizationId, body, idempotencyKey, principal }) => ({ status: 201, body: { agent: await mutateAndAudit(organizationId, (target) => target.createAgent({ ...body, organizationId, createdBy: principal.member_id, principalId: principal.member_id, idempotencyKey }), ({ mutation }) => ({ organizationId, eventType: "agent.created", actorId: principal.member_id, targetType: "agent", targetId: mutation.agent_id, idempotencyKey: `${idempotencyKey}:audit` })) } })),
@@ -592,17 +594,44 @@ function positiveGeneration(value) {
   return generation;
 }
 
-function validateRefreshHintResponse(input, { organizationId, deviceId, afterGeneration, now }) {
+  function validateRefreshHintResponse(input, { organizationId, deviceId, afterGeneration, now }) {
   let hint;
   try { hint = normalizeRefreshHint(input); }
   catch { throw apiError("refresh_unavailable", 503, "Refresh polling is unavailable"); }
   if (hint.organization_id !== organizationId || hint.device_id !== deviceId || hint.authority_generation <= afterGeneration) {
     throw apiError("refresh_unavailable", 503, "Refresh polling is unavailable");
   }
+
   const publishedAt = Date.parse(hint.published_at);
   const expiresAt = Date.parse(hint.expires_at);
   if (publishedAt > now + 60_000 || expiresAt <= now) throw apiError("refresh_unavailable", 503, "Refresh polling is unavailable");
   return hint;
+}
+
+async function enrollmentRefreshHintTrustMetadata(refreshHintService, bundlePublicKeyPEM) {
+  if (!refreshHintService || typeof refreshHintService.publicKeyMetadata !== "function") {
+    throw apiError("refresh_hint_signer_unavailable", 503, "Refresh hint signer is unavailable");
+  }
+  let metadata;
+  try { metadata = await refreshHintService.publicKeyMetadata(); } catch { throw apiError("refresh_hint_signer_unavailable", 503, "Refresh hint signer is unavailable"); }
+  if (!metadata || typeof metadata !== "object" || Array.isArray(metadata)
+    || Object.keys(metadata).length !== 3 || Object.keys(metadata).some((key) => !["key_id", "algorithm", "public_key"].includes(key))
+    || !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$/u.test(metadata.key_id ?? "")
+    || metadata.algorithm !== "ed25519" || typeof metadata.public_key !== "string") {
+    throw apiError("refresh_hint_signer_unavailable", 503, "Refresh hint signer is unavailable");
+  }
+  let publicKey;
+  try { publicKey = crypto.createPublicKey(metadata.public_key); } catch { throw apiError("refresh_hint_signer_unavailable", 503, "Refresh hint signer is unavailable"); }
+  if (publicKey.type !== "public" || publicKey.asymmetricKeyType !== "ed25519") throw apiError("refresh_hint_signer_unavailable", 503, "Refresh hint signer is unavailable");
+  const publicKeyPEM = publicKey.export({ type: "spki", format: "pem" }).toString();
+  if (publicKeyPEM !== metadata.public_key || publicKeyPEM === bundlePublicKeyPEM) throw apiError("refresh_hint_signer_unavailable", 503, "Refresh hint signer is unavailable");
+  return Object.freeze({ key_id: metadata.key_id, algorithm: "ed25519", public_key: publicKeyPEM });
+}
+
+function positiveDeviceKeyEpoch(device) {
+  const epoch = Number(device?.key_epoch);
+  if (!Number.isSafeInteger(epoch) || epoch < 1) throw apiError("device_key_epoch_unavailable", 503, "Device authentication key epoch is unavailable");
+  return epoch;
 }
 
 function verifyBundleAcknowledgementSignature(acknowledgement, publicKey) {
