@@ -1,0 +1,16 @@
+{
+  "name": "@agentpass/mcp-server",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Stdio MCP adapter for AgentPass",
+  "type": "module",
+  "bin": {
+    "agentpass-mcp": "./bin/agentpass-mcp.mjs"
+  },
+  "scripts": {
+    "test": "node --test"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

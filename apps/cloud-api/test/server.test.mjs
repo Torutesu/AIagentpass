@@ -1,0 +1,236 @@
+import assert from "node:assert/strict";
+import crypto from "node:crypto";
+import fs from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
+import test from "node:test";
+import { createApiTokenRecord, signDeviceRequest } from "../src/auth.mjs";
+import { createCloudApi } from "../src/server.mjs";
+import { computeAuditEventHash, createCloudStore } from "../src/store.mjs";
+import { verifyControlBundle } from "../../../lib/control-bundle-v2.mjs";
+import { verifyCapability } from "../../../packages/capability/src/index.mjs";
+import { createRateLimiter } from "../src/rate-limit.mjs";
+
+const org = "11111111-1111-4111-8111-111111111111";
+const deviceId = "22222222-2222-4222-8222-222222222222";
+const agentId = "33333333-3333-4333-8333-333333333333";
+const policyId = "44444444-4444-4444-8444-444444444444";
+const now = Date.parse("2026-08-12T00:00:00.000Z");
+
+async function fixture(t, apiOptions = {}) {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), "agentpass-api-"));
+  const store = await createCloudStore({ dataDir: directory });
+  await store.createOrganization({ organizationId: org, name: "Acme", idempotencyKey: "create-org" });
+  const deviceKeys = crypto.generateKeyPairSync("ed25519");
+  const devicePublic = deviceKeys.publicKey.export({ type: "spki", format: "pem" }).toString();
+  await store.createDevice({ organizationId: org, deviceId, name: "Build Mac", publicKey: devicePublic, idempotencyKey: "create-device" });
+  const agentKeys = crypto.generateKeyPairSync("ed25519");
+  await store.createAgent({ organizationId: org, deviceId, version: 1, agentId, name: "Claude", kind: "claude-code", publicKey: agentKeys.publicKey.export({ type: "spki", format: "pem" }).toString(), createdAt: new Date(now).toISOString(), idempotencyKey: "create-agent" });
+  const scope = { operations: ["git.commit.sign"], repositories: ["/work/repo"], branches: { allow: ["feature/*"], deny: ["main"] }, remotes: { allow: ["git@example.test:repo.git"] } };
+  await store.createPolicy({ organizationId: org, policyId, name: "default", scope, sequence: 1, idempotencyKey: "create-policy" });
+  const token = "ap_owner_token_abcdefghijklmnopqrstuvwxyz";
+  const records = [createApiTokenRecord({ token, tokenId: "owner-token", organizationId: org, memberId: "owner-1", role: "owner" })];
+  const bundleKeys = crypto.generateKeyPairSync("ed25519");
+  const server = createCloudApi({ store, tokenRecords: records, bundleSigner: { privateKey: bundleKeys.privateKey, issuer: "agentpass-cloud", keyId: "control-v1", ttlMs: 60_000, offlineTtlMs: 120_000 }, now: () => now, ...apiOptions });
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const base = `http://127.0.0.1:${server.address().port}`;
+  t.after(async () => { await new Promise((resolve) => server.close(resolve)); await store.close(); await fs.rm(directory, { recursive: true, force: true }); });
+  return { store, token, deviceKeys, bundleKeys, base, scope };
+}
+
+test("human routes enforce bearer role, tenant, and idempotency", async (t) => {
+  const f = await fixture(t);
+  const ok = await fetch(`${f.base}/v1/organizations/${org}/devices`, { headers: { authorization: `Bearer ${f.token}` } });
+  assert.equal(ok.status, 200);
+  assert.equal((await ok.json()).devices.length, 1);
+  const noAuth = await fetch(`${f.base}/v1/organizations/${org}/devices`);
+  assert.equal(noAuth.status, 401);
+  const mutation = await fetch(`${f.base}/v1/organizations/${org}/policies`, { method: "POST", headers: { authorization: `Bearer ${f.token}`, "content-type": "application/json" }, body: JSON.stringify({ name: "missing-key", scope: f.scope }) });
+  assert.equal(mutation.status, 400);
+  assert.equal((await mutation.json()).error.code, "idempotency_key_required");
+  const duplicate = await fetch(`${f.base}/v1/organizations/${org}/policies`, { method: "POST", headers: { authorization: `Bearer ${f.token}`, "content-type": "application/json", "idempotency-key": "duplicate-json-0001" }, body: '{"name":"first","name":"second"}' });
+  assert.equal(duplicate.status, 400);
+  assert.equal((await duplicate.json()).error.code, "invalid_json");
+});
+
+test("device routes verify the exact signed request and issue an audience-bound bundle", async (t) => {
+  const f = await fixture(t);
+  const pathName = `/v1/organizations/${org}/bundles/${deviceId}`;
+  const signed = signDeviceRequest({ method: "GET", path: pathName, body: Buffer.alloc(0), device_id: deviceId, timestamp: now, nonce: "nonce-abcdefghijklmnopqrstuvwxyz-1234567890" }, f.deviceKeys.privateKey);
+  const response = await fetch(`${f.base}${pathName}`, { headers: signed });
+  assert.equal(response.status, 200, JSON.stringify(await response.clone().json()));
+  const bundle = (await response.json()).bundle;
+  const verifiedBundle = verifyControlBundle(bundle, { public_key: f.bundleKeys.publicKey, issuer: "agentpass-cloud", key_id: "control-v1" }, { now, audience: { organization_id: org, device_id: deviceId } });
+  assert.equal(verifiedBundle.format_epoch, 2);
+  assert.ok(verifiedBundle.sequence >= 1);
+
+  const secondHeaders = signDeviceRequest({ method: "GET", path: pathName, body: Buffer.alloc(0), device_id: deviceId, timestamp: now, nonce: "nonce-second-abcdefghijklmnopqrstuvwxyz-123456" }, f.deviceKeys.privateKey);
+  const second = await fetch(`${f.base}${pathName}`, { headers: secondHeaders });
+  assert.equal(second.status, 200);
+  assert.deepEqual((await second.json()).bundle, bundle, "unchanged effective state must return byte-equivalent signed bundle data");
+
+  const revokedCapabilityId = "88888888-8888-4888-8888-888888888888";
+  await f.store.createCapability({ organizationId: org, capabilityId: revokedCapabilityId, agentId, deviceId, issuer: "agentpass-cloud", keyId: "control-v1", scope: f.scope, operations: ["git.commit.sign"], notBefore: new Date(now).toISOString(), expiresAt: new Date(now + 60_000).toISOString(), sequence: 1, nonce: "capability-nonce-abcdefghijklmnopqrstuvwxyz", idempotencyKey: "bundle-capability" });
+  await f.store.createRevocation({ organizationId: org, targetType: "capability", targetId: revokedCapabilityId, reason: "operator-revoked", idempotencyKey: "bundle-capability-revoke" });
+  const revokedHeaders = signDeviceRequest({ method: "GET", path: pathName, body: Buffer.alloc(0), device_id: deviceId, timestamp: now, nonce: "nonce-revoked-capability-abcdefghijklmnopqrstuvwxyz" }, f.deviceKeys.privateKey);
+  const revokedResponse = await fetch(`${f.base}${pathName}`, { headers: revokedHeaders });
+  assert.equal(revokedResponse.status, 200);
+  const revokedBundle = (await revokedResponse.json()).bundle;
+  assert.deepEqual(revokedBundle.revoked_capabilities, [revokedCapabilityId]);
+  assert.ok(revokedBundle.sequence > bundle.sequence);
+
+  const replay = await fetch(`${f.base}${pathName}`, { headers: signed });
+  assert.equal(replay.status, 401);
+  const otherPath = `/v1/organizations/${org}/bundles/55555555-5555-4555-8555-555555555555`;
+  const substitution = await fetch(`${f.base}${otherPath}`, { headers: { ...signed, "AgentPass-Nonce": "nonce-zyxwvutsrqponmlkjihgfedcba-0987654321" } });
+  assert.equal(substitution.status, 401);
+});
+
+test("device audit ingestion is authenticated and rejects body substitution", async (t) => {
+  const f = await fixture(t);
+  const endpoint = `/v1/organizations/${org}/audit/events`;
+  const event = { version: 1, event_id: "66666666-6666-4666-8666-666666666666", request_id: "77777777-7777-4777-8777-777777777777", agent_id: agentId, operation: "git.commit.sign", decision: "allow", reason: "allowed", policy_sequence: 1, capability_sequence: 1, repository: "/work/repo", branch: "feature/api", remote: "git@example.test:repo.git", payload_digest: "a".repeat(64), device_timestamp: new Date(now).toISOString(), previous_hash: "0".repeat(64) };
+  event.event_hash = computeAuditEventHash(event);
+  const body = JSON.stringify({ batch_id: "audit-batch-1", events: [event] });
+  const headers = signDeviceRequest({ method: "POST", path: endpoint, body, device_id: deviceId, timestamp: now, nonce: "nonce-audit-abcdefghijklmnopqrstuvwxyz-12345" }, f.deviceKeys.privateKey);
+  const accepted = await fetch(`${f.base}${endpoint}`, { method: "POST", headers: { ...headers, "content-type": "application/json" }, body });
+  assert.equal(accepted.status, 202, JSON.stringify(await accepted.clone().json()));
+  const tampered = await fetch(`${f.base}${endpoint}`, { method: "POST", headers: { ...headers, "AgentPass-Nonce": "nonce-audit-zyxwvutsrqponmlkjihgfedcba-54321", "content-type": "application/json" }, body: JSON.stringify({ batch_id: "other", events: [event] }) });
+  assert.equal(tampered.status, 401);
+});
+
+test("admin issues a signed short-lived capability bound to an active agent and device", async (t) => {
+  const f = await fixture(t);
+  const endpoint = `${f.base}/v1/organizations/${org}/capabilities`;
+  const headers = { authorization: `Bearer ${f.token}`, "content-type": "application/json", "idempotency-key": "capability-request-0001" };
+  const body = JSON.stringify({ agent_id: agentId, device_id: deviceId, scope: f.scope, ttl_ms: 60_000, sequence: 1 });
+  const response = await fetch(endpoint, {
+    method: "POST",
+    headers,
+    body
+  });
+  assert.equal(response.status, 201, JSON.stringify(await response.clone().json()));
+  const capability = (await response.json()).capability;
+  const verified = verifyCapability(capability, { public_key: f.bundleKeys.publicKey, issuer: "agentpass-cloud", key_id: "control-v1" }, { now, audience: { agent_id: agentId, device_id: deviceId } });
+  assert.equal(verified.scope.operations[0], "git.commit.sign");
+  assert.equal((await f.store.getCapability({ organizationId: org, capabilityId: capability.capability_id })).signature, undefined);
+
+  const retry = await fetch(endpoint, { method: "POST", headers, body });
+  assert.equal(retry.status, 201);
+  assert.deepEqual((await retry.json()).capability, capability, "an exact retry must return the same bearer envelope without issuing again");
+  assert.equal((await f.store.listCapabilities({ organizationId: org })).length, 1);
+
+  const unknown = await fetch(`${f.base}/v1/organizations/${org}/capabilities`, {
+    method: "POST",
+    headers: { authorization: `Bearer ${f.token}`, "content-type": "application/json", "idempotency-key": "capability-request-0002" },
+    body: JSON.stringify({ agent_id: agentId, device_id: deviceId, scope: f.scope, sequence: 2, unexpected: true })
+  });
+  assert.equal(unknown.status, 400);
+});
+
+test("operator routes expose metadata and persist device, policy, and capability controls", async (t) => {
+  const f = await fixture(t);
+  const auth = { authorization: `Bearer ${f.token}` };
+  const capabilities = await fetch(`${f.base}/v1/organizations/${org}/capabilities`, { headers: auth });
+  assert.equal(capabilities.status, 200);
+  assert.deepEqual((await capabilities.json()).capabilities, []);
+
+  const disabled = await fetch(`${f.base}/v1/organizations/${org}/policies/${policyId}/disable`, {
+    method: "POST",
+    headers: { ...auth, "content-type": "application/json", "idempotency-key": "disable-policy-0001" },
+    body: JSON.stringify({ expected_version: 1, reason: "maintenance" })
+  });
+  assert.equal(disabled.status, 200, JSON.stringify(await disabled.clone().json()));
+  assert.equal((await disabled.json()).policy.status, "disabled");
+
+  const deviceRevocation = await fetch(`${f.base}/v1/organizations/${org}/devices/${deviceId}/revoke`, {
+    method: "POST",
+    headers: { ...auth, "content-type": "application/json", "idempotency-key": "revoke-device-0001" },
+    body: JSON.stringify({ reason: "lost-device" })
+  });
+  assert.equal(deviceRevocation.status, 201, JSON.stringify(await deviceRevocation.clone().json()));
+  const revocations = await fetch(`${f.base}/v1/organizations/${org}/revocations`, { headers: auth });
+  assert.equal((await revocations.json()).revocations[0].target_type, "device");
+
+  const adminAudit = await fetch(`${f.base}/v1/organizations/${org}/audit/admin-events`, { headers: auth });
+  assert.equal(adminAudit.status, 200);
+  assert.ok((await adminAudit.json()).events.some((event) => event.event_type === "policy.disabled"));
+  const health = await fetch(`${f.base}/v1/organizations/${org}/audit/health`, { headers: auth });
+  assert.equal(health.status, 200);
+  assert.equal((await health.json()).health[0].chain_status, "continuous");
+});
+
+test("rate limits human and device principals independently and returns retry metadata", async (t) => {
+  let monotonic = 10_000;
+  const limiter = createRateLimiter({
+    now: () => now,
+    monotonicNow: () => monotonic,
+    maxEntries: 8,
+    human: { capacity: 1, refillPerSecond: 1 },
+    device: { capacity: 1, refillPerSecond: 1 }
+  });
+  const f = await fixture(t, { rateLimiter: limiter });
+  const humanPath = `/v1/organizations/${org}/devices`;
+  const firstHuman = await fetch(`${f.base}${humanPath}`, { headers: { authorization: `Bearer ${f.token}` } });
+  assert.equal(firstHuman.status, 200);
+  assert.equal(firstHuman.headers.get("x-ratelimit-limit"), "1");
+  assert.equal(firstHuman.headers.get("x-ratelimit-remaining"), "0");
+  const blockedHuman = await fetch(`${f.base}${humanPath}`, { headers: { authorization: `Bearer ${f.token}` } });
+  assert.equal(blockedHuman.status, 429);
+  assert.equal(blockedHuman.headers.get("retry-after"), "1");
+  assert.equal(blockedHuman.headers.get("x-ratelimit-reset"), String(Math.ceil(now / 1000) + 1));
+
+  const devicePath = `/v1/organizations/${org}/bundles/${deviceId}`;
+  const deviceHeaders = signDeviceRequest({ method: "GET", path: devicePath, body: Buffer.alloc(0), device_id: deviceId, timestamp: now, nonce: "nonce-rate-device-abcdefghijklmnopqrstuvwxyz-123" }, f.deviceKeys.privateKey);
+  const firstDevice = await fetch(`${f.base}${devicePath}`, { headers: deviceHeaders });
+  assert.equal(firstDevice.status, 200);
+  assert.equal(firstDevice.headers.get("x-ratelimit-limit"), "1");
+  assert.equal(firstDevice.headers.get("x-ratelimit-remaining"), "0");
+
+  monotonic += 1_000;
+  const recoveredHuman = await fetch(`${f.base}${humanPath}`, { headers: { authorization: `Bearer ${f.token}` } });
+  assert.equal(recoveredHuman.status, 200);
+});
+
+test("rate limiter isolates principals, resets buckets, and fails closed at capacity", () => {
+  let monotonic = 0;
+  const limiter = createRateLimiter({
+    now: () => 1_000,
+    monotonicNow: () => monotonic,
+    maxEntries: 2,
+    idleTtlMs: 100,
+    human: { capacity: 1, refillPerSecond: 1 },
+    device: { capacity: 1, refillPerSecond: 1 }
+  });
+  assert.equal(limiter.acquire({ tenantId: org, principalType: "human", principalId: "member-a" }).allowed, true);
+  assert.equal(limiter.acquire({ tenantId: org, principalType: "human", principalId: "member-b" }).allowed, true);
+  assert.throws(() => limiter.acquire({ tenantId: org, principalType: "human", principalId: "member-c" }), { code: "RATE_LIMITER_CAPACITY_EXHAUSTED" });
+  assert.equal(limiter.size, 2);
+  assert.throws(() => limiter.acquire({ tenantId: org, principalType: "device", principalId: "device-a" }), { code: "RATE_LIMITER_CAPACITY_EXHAUSTED" });
+  limiter.reset({ tenantId: org, principalType: "human", principalId: "member-a" });
+  assert.equal(limiter.acquire({ tenantId: org, principalType: "human", principalId: "member-a" }).allowed, true);
+  monotonic = 100;
+  assert.equal(limiter.acquire({ tenantId: org, principalType: "human", principalId: "member-c" }).allowed, true, "idle entries are purged before allocating a new bucket");
+});
+
+test("rate limiter rejects unsafe configuration and a backwards monotonic clock", () => {
+  assert.throws(() => createRateLimiter({ maxEntries: 0 }), { code: "RATE_LIMITER_CONFIGURATION_INVALID" });
+  assert.throws(() => createRateLimiter({ human: { capacity: 1, refillPerSecond: Number.NaN } }), { code: "RATE_LIMITER_CONFIGURATION_INVALID" });
+  let monotonic = 10;
+  const limiter = createRateLimiter({ now: () => now, monotonicNow: () => monotonic });
+  limiter.acquire({ tenantId: org, principalType: "human", principalId: "member-a" });
+  monotonic = 9;
+  assert.throws(() => limiter.acquire({ tenantId: org, principalType: "human", principalId: "member-a" }), { code: "RATE_LIMITER_CONFIGURATION_INVALID" });
+  assert.throws(() => limiter.acquire({ tenantId: org, principalType: "human", principalId: "\u0000" }), { code: "RATE_LIMITER_CONFIGURATION_INVALID" });
+});
+
+test("rate limiter preserves exhausted buckets across restart", async () => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), "agentpass-rate-state-"));
+  const statePath = path.join(directory, "rate.json");
+  const options = { now: () => now, monotonicNow: () => 1_000, persistencePath: statePath, human: { capacity: 1, refillPerSecond: 1 }, device: { capacity: 1, refillPerSecond: 1 } };
+  const first = createRateLimiter(options);
+  assert.equal(first.acquire({ tenantId: org, principalType: "human", principalId: "member-a" }).allowed, true);
+  const restarted = createRateLimiter(options);
+  assert.equal(restarted.acquire({ tenantId: org, principalType: "human", principalId: "member-a" }).allowed, false);
+  await fs.rm(directory, { recursive: true, force: true });
+});

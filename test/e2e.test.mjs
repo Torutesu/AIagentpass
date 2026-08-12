@@ -17,7 +17,9 @@ function run(program, args, options = {}) {
   return result.stdout.trim();
 }
 
-test("Git creates a signed commit through the AgentPass broker", { timeout: 15_000 }, async () => {
+// This launches several Node, Git, and ssh-keygen processes. Keep enough headroom
+// for the full parallel suite on slower CI runners while retaining a hard bound.
+test("Git creates a signed commit through the AgentPass broker", { timeout: 30_000 }, async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "agentpass-e2e-"));
   const testHome = path.join(root, "home");
   const repo = path.join(root, "repo");

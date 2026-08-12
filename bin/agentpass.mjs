@@ -11,6 +11,7 @@ import { audit, createAuditCheckpoint, publicKeyFingerprint, verifyAudit, verify
 import { brokerRequest } from "../lib/broker-client.mjs";
 import { anchorReceiptPath, auditPath, controlBundlePath, defaultConfigDir, loadConfig, loadSession, loadState, saveConfig, saveSession, saveState, socketPath } from "../lib/config.mjs";
 import { canonicalJson, createAgentIdentity, createAuditIdentity, signRequest } from "../lib/identity.mjs";
+import { installIntegration, integrationPlan } from "../lib/integrations.mjs";
 import { readGitSigningInvocation, writeGitSignature } from "../lib/git-signing.mjs";
 import { evaluateAgentRequest } from "../lib/policy.mjs";
 import { generateRecoveryIdentity, recoveryPolicyToAnchorPolicy, signAnchorRecoveryAuthorization, signRecoveryRequest, verifyAnchorRecoveryApprovals, verifyRecoveryThreshold } from "../lib/recovery.mjs";
@@ -19,7 +20,7 @@ import { applyControlBundle, controlKeyFingerprint, fetchControlBundle, generate
 const [, , command, ...args] = process.argv;
 
 function usage() {
-  console.log(`AgentPass 0.17.0
+  console.log(`AgentPass 0.18.0
 
 Commands:
   init              create a secure local policy
@@ -66,6 +67,9 @@ Commands:
   agent scope ID    replace per-agent authorization scope
   agent rotate ID   replace an agent identity key
   agent revoke ID   revoke an identity (--confirm REVOKE)
+  integrate CLIENT  preview Claude Code or Cursor MCP setup
+  integrate CLIENT --install [--project DIR]
+                    install project-scoped MCP setup without replacing other servers
   setup-macos       show Secure Enclave setup (use --execute to run)
   install-hook      install a policy-enforcing pre-push hook
   push-check        evaluate a pre-push request
@@ -365,7 +369,9 @@ async function gitSign(signArgs = args) {
   const { payloadPath, payload, brokerArgs } = readGitSigningInvocation(signArgs);
   const agentId = selectedAgent(config).id;
   const privatePath = path.join(defaultConfigDir, "agents", `${agentId}.pem`);
+  const capability = config.control_v2 ? readCapabilityInput() : undefined;
   const request = signRequest({
+    request_id: crypto.randomUUID(),
     operation: "git.commit.sign",
     cwd: process.cwd(),
     sign_args: brokerArgs,
@@ -373,10 +379,23 @@ async function gitSign(signArgs = args) {
     session: process.env.AGENTPASS_SESSION ?? null,
     agent_id: agentId,
     timestamp_ms: Date.now(),
-    nonce: crypto.randomBytes(24).toString("base64url")
+    nonce: crypto.randomBytes(24).toString("base64url"),
+    ...(capability ? { capability } : {})
   }, privatePath);
   const response = await brokerRequest(request, { timeoutMs: 30000, native: config.native_broker });
   writeGitSignature(payloadPath, Buffer.from(response.stdout_base64, "base64"));
+}
+
+function readCapabilityInput() {
+  const file = process.env.AGENTPASS_CAPABILITY_PATH;
+  if (typeof file !== "string" || !path.isAbsolute(file)) throw new Error("ControlBundle v2 requires AGENTPASS_CAPABILITY_PATH to name an absolute capability file");
+  const stat = fs.lstatSync(file);
+  const uid = process.getuid?.();
+  if (!stat.isFile() || stat.isSymbolicLink() || stat.size < 2 || stat.size > 256 * 1024 || (stat.mode & 0o077) !== 0 || (uid !== undefined && stat.uid !== uid)) throw new Error("Capability file permissions are unsafe");
+  let capability;
+  try { capability = JSON.parse(fs.readFileSync(file, "utf8")); } catch { throw new Error("Capability file is not valid JSON"); }
+  if (!capability || typeof capability !== "object" || Array.isArray(capability)) throw new Error("Capability file must contain an object");
+  return capability;
 }
 
 function selectedAgent(config) {
@@ -573,12 +592,12 @@ async function controlManage() {
   } else if (action === "fetch") {
     const sourceURL = native ? config.native_broker.control_url : config.control?.url;
     if (!sourceURL) throw new Error("No remote control HTTPS URL is configured");
-    const bundle = await fetchControlBundle(sourceURL);
     if (native) {
-      const result = await brokerRequest({ operation: "native.control.apply", bundle }, { native: config.native_broker, timeoutMs: 30_000 });
+      const result = await brokerRequest({ operation: "native.control.refresh" }, { native: config.native_broker, timeoutMs: 30_000 });
       console.log(JSON.stringify(JSON.parse(Buffer.from(result.stdout_base64, "base64").toString("utf8")), null, 2));
       return;
     }
+    const bundle = await fetchControlBundle(sourceURL);
     const verified = applyControlBundle(bundle, config, defaultConfigDir);
     audit({ operation: "control.fetch", decision: "allow", sequence: verified.sequence, expires_at: verified.expires_at }, defaultConfigDir);
     console.log(JSON.stringify(verified, null, 2));
@@ -764,6 +783,36 @@ function agentManage() {
   console.error("Broker configuration changed. Restart it before the next signing request.");
 }
 
+function integrateAgent() {
+  const client = args[0];
+  let projectValue = process.cwd();
+  let projectSet = false;
+  let install = false;
+  for (let index = 1; index < args.length; index += 1) {
+    if (args[index] === "--install" && !install) install = true;
+    else if (args[index] === "--project" && !projectSet && args[index + 1] && !args[index + 1].startsWith("--")) { projectValue = args[++index]; projectSet = true; }
+    else throw new Error("Usage: agentpass integrate claude-code|cursor [--install] [--project DIR]");
+  }
+  const projectDir = path.resolve(projectValue);
+  if (!fs.statSync(projectDir).isDirectory()) throw new Error("Integration project must be a directory");
+  const mcpServerPath = fileURLToPath(new URL("../adapters/mcp-server/bin/agentpass-mcp.mjs", import.meta.url));
+  const plan = integrationPlan({ client, projectDir, nodePath: process.execPath, mcpServerPath });
+  const result = installIntegration(plan, { dryRun: !install });
+  console.log(JSON.stringify({
+    version: result.version,
+    client: result.client,
+    target: result.target,
+    changed: result.changed,
+    installed: result.installed,
+    configuration: { mcpServers: { [result.server_name]: result.server } },
+    next_steps: [
+      "Start an AgentPass session and export AGENTPASS_SESSION for the agent process.",
+      "Configure this repository to use agentpass-git-sign as Git's SSH signing program.",
+      "Ask the agent to run agentpass_check before committing."
+    ]
+  }, null, 2));
+}
+
 function parseAgentScope(values) {
   const flags = { "--operation": [], "--repository": [], "--branch": [], "--remote": [] };
   for (let index = 0; index < values.length; index += 2) {
@@ -804,9 +853,32 @@ async function auditCommand() {
     catch (error) { anchor = { valid: false, error: error.message }; }
     console.log(JSON.stringify({ valid: chain.valid && checkpoints.valid && anchor.valid, audit: chain, checkpoints, anchor }, null, 2));
     if (!chain.valid || !checkpoints.valid || !anchor.valid) process.exitCode = 1;
+  } else if (args[0] === "--tail") {
+    if (args.length !== 2 || !/^[1-9]\d*$/.test(args[1]) || Number(args[1]) > 50) throw new Error("audit --tail requires a count from 1 to 50");
+    console.log(readAuditTail(auditPath(), Number(args[1])));
   } else {
     console.log(fs.existsSync(auditPath()) ? fs.readFileSync(auditPath(), "utf8") : "");
   }
+}
+
+function readAuditTail(file, count, maxBytes = 512 * 1024) {
+  if (!fs.existsSync(file)) return "";
+  const flags = fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW ?? 0);
+  const descriptor = fs.openSync(file, flags);
+  try {
+    const stat = fs.fstatSync(descriptor);
+    if (!stat.isFile() || stat.isSymbolicLink?.()) throw new Error("Audit log must be a regular file");
+    const length = Math.min(stat.size, maxBytes);
+    const buffer = Buffer.alloc(length);
+    fs.readSync(descriptor, buffer, 0, length, stat.size - length);
+    let text = buffer.toString("utf8");
+    if (stat.size > length) {
+      const newline = text.indexOf("\n");
+      if (newline < 0) throw new Error("Recent audit event exceeds the tail limit");
+      text = text.slice(newline + 1);
+    }
+    return text.split(/\r?\n/).filter(Boolean).slice(-count).join("\n");
+  } finally { fs.closeSync(descriptor); }
 }
 
 async function auditAnchorCommand(config) {
@@ -893,6 +965,7 @@ try {
   else if (command === "broker" && args[0] === "stop") brokerStop();
   else if (command === "native") await nativeManage();
   else if (command === "agent") agentManage();
+  else if (command === "integrate") integrateAgent();
   else if (command === "control") await controlManage();
   else if (command === "recovery") recoveryManage();
   else if (command === "setup-macos") setupMacos();

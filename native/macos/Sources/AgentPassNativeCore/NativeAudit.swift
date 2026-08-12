@@ -5,6 +5,7 @@ import Foundation
 public struct NativeAuditEvent: Sendable {
     public let operation: String
     public let decision: String
+    public let requestID: String?
     public let reason: String?
     public let agentID: String?
     public let repository: String?
@@ -13,9 +14,10 @@ public struct NativeAuditEvent: Sendable {
     public let payloadSHA256: String?
     public let expiresAt: String?
 
-    public init(operation: String, decision: String, reason: String? = nil, agentID: String? = nil, repository: String? = nil, branch: String? = nil, remote: String? = nil, payloadSHA256: String? = nil, expiresAt: String? = nil) {
+    public init(operation: String, decision: String, requestID: String? = nil, reason: String? = nil, agentID: String? = nil, repository: String? = nil, branch: String? = nil, remote: String? = nil, payloadSHA256: String? = nil, expiresAt: String? = nil) {
         self.operation = operation
         self.decision = decision
+        self.requestID = requestID
         self.reason = reason
         self.agentID = agentID
         self.repository = repository
@@ -288,6 +290,10 @@ public final class NativeAuditLog: @unchecked Sendable {
             "decision": event.decision
         ]
         if let value = event.reason { record["reason"] = Self.bounded(value, bytes: 1024) }
+        if let value = event.requestID {
+            guard UUID(uuidString: value) != nil else { throw AgentPassNativeError.invalidConfiguration("Native audit request ID is invalid") }
+            record["request_id"] = value.lowercased()
+        }
         if let value = event.agentID { record["agent_id"] = Self.bounded(value, bytes: 128) }
         if let value = event.repository { record["repository"] = Self.bounded(value, bytes: 4096) }
         if let value = event.branch { record["branch"] = Self.bounded(value, bytes: 512) }

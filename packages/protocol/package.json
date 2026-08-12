@@ -1,0 +1,17 @@
+{
+  "name": "@agentpass/protocol",
+  "version": "1.0.0",
+  "description": "AgentPass v1 protocol validators and canonical JSON helpers",
+  "type": "module",
+  "exports": "./src/index.mjs",
+  "files": [
+    "src"
+  ],
+  "scripts": {
+    "test": "node --test"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "license": "MIT"
+}
