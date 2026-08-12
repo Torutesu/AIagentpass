@@ -6,6 +6,8 @@ import { createCloudApi } from "../src/server.mjs";
 const OPTIONS_PATH = "/api/auth/webauthn/options";
 const VERIFY_PATH = "/api/auth/webauthn/verify";
 const SESSION_PATH = "/api/auth/session";
+const REGISTRATION_OPTIONS_PATH = "/api/auth/webauthn/registration/options";
+const REGISTRATION_VERIFY_PATH = "/api/auth/webauthn/registration/verify";
 const decision = { allowed: true, limit: 20, remaining: 19, retryAfterSeconds: 0, resetAt: 1_800_000_000_000 };
 
 async function startServer(t, options = {}) {
@@ -60,13 +62,17 @@ test("delegates only exact WebAuthn paths and preserves the adapter response con
 
   const verifyResponse = await fetch(`${base}${VERIFY_PATH}`, { method: "POST", headers, body: requestBody });
   assert.equal(verifyResponse.status, 201);
-  assert.equal(calls.length, 2);
+  for (const path of [REGISTRATION_OPTIONS_PATH, REGISTRATION_VERIFY_PATH]) {
+    const registrationResponse = await fetch(`${base}${path}`, { method: "POST", headers, body: requestBody });
+    assert.equal(registrationResponse.status, 201);
+  }
+  assert.deepEqual(calls.map((call) => call.url), [OPTIONS_PATH, VERIFY_PATH, REGISTRATION_OPTIONS_PATH, REGISTRATION_VERIFY_PATH]);
 
   for (const suffix of ["/", "?ignored=1"]) {
     const rejected = await fetch(`${base}${OPTIONS_PATH}${suffix}`, { method: "POST", headers, body: requestBody });
     assert.equal(rejected.status, 404);
   }
-  assert.equal(calls.length, 2);
+  assert.equal(calls.length, 4);
 });
 
 test("routes the exact paths without a bearer token and retains human-auth rate limiting", async (t) => {

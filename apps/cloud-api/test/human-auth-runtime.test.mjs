@@ -17,10 +17,12 @@ function postgres() {
     async bindRecentAuth() { return true; },
     async consumeRecentAuth() { return null; },
     async listCredentialsForSession() { return []; },
+    async getRegistrationUser() { return { id: "EREREREREREREREREREREQ", name: "agentpass:test", display_name: "Test user" }; },
+    async createCredential() { return { created: true, credential_id: "Q".repeat(22) }; },
     async findCredentialForSession() { return null; },
     async updateCredentialCounter() { return false; },
   };
-  return { pool: { async query() { return { rows: [], rowCount: 0 }; }, async connect() { throw new Error("not used by session bootstrap"); } }, humanRepository };
+  return { pool: { async query(sql) { if (String(sql).includes("FROM upstream_identities")) return { rows: [{ provider: "chatgpt", subject: "siwc-user-1", member_id: ids.member, membership_id: "33333333-3333-4333-8333-333333333333", organization_id: ids.org, role: "owner" }], rowCount: 1 }; return { rows: [], rowCount: 0 }; }, async connect() { throw new Error("not used by session bootstrap"); } }, humanRepository };
 }
 
 test("composes the production human-auth boundary and bootstraps a hash-only session", async () => {

@@ -3,9 +3,11 @@ const MAX_RESPONSE_BYTES = 256 * 1024;
 const DEFAULT_TIMEOUT_MS = 8_000;
 const ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 const ROUTES = new Map([
-  ["/api/auth/session", "/api/auth/session"],
-  ["/api/auth/webauthn/options", "/api/auth/webauthn/options"],
-  ["/api/auth/webauthn/verify", "/api/auth/webauthn/verify"],
+  ["/api/auth/session", Object.freeze({ cloudPath: "/api/auth/session", session: true })],
+  ["/api/auth/webauthn/options", Object.freeze({ cloudPath: "/api/auth/webauthn/options", session: false })],
+  ["/api/auth/webauthn/verify", Object.freeze({ cloudPath: "/api/auth/webauthn/verify", session: false })],
+  ["/api/auth/webauthn/registration/options", Object.freeze({ cloudPath: "/api/auth/webauthn/registration/options", session: false })],
+  ["/api/auth/webauthn/registration/verify", Object.freeze({ cloudPath: "/api/auth/webauthn/registration/verify", session: false })],
 ]);
 
 export class HumanAuthBridgeError extends Error {
@@ -24,8 +26,8 @@ export function createHumanAuthBridge(options = {}) {
 export async function handleHumanAuthRequest(request, options = {}) {
   try {
     const url = new URL(request.url);
-    const cloudPath = ROUTES.get(url.pathname);
-    if (!cloudPath || url.search || url.hash) fail(404, "not_found", "Resource not found");
+    const route = ROUTES.get(url.pathname);
+    if (!route || url.search || url.hash) fail(404, "not_found", "Resource not found");
     if (request.method !== "POST") fail(405, "method_not_allowed", "Only POST is allowed");
     const origin = request.headers.get("origin");
     if (origin !== url.origin || origin === "null") fail(403, "origin_not_allowed", "The request origin is not allowed");
@@ -52,7 +54,7 @@ export async function handleHumanAuthRequest(request, options = {}) {
       if (cookie.length < 1 || cookie.length > 8192 || hasControl(cookie)) fail(400, "invalid_cookie", "The session cookie is invalid");
       headers.set("cookie", cookie);
     }
-    if (cloudPath !== "/api/auth/session") {
+    if (!route.session) {
       if (csrf === null || csrf.length < 1 || csrf.length > 512 || hasControl(csrf)) fail(403, "csrf_required", "CSRF authentication is required");
       headers.set("agentpass-csrf", csrf);
     }
@@ -61,7 +63,7 @@ export async function handleHumanAuthRequest(request, options = {}) {
     const timeout = setTimeout(() => controller.abort(), config.timeoutMs);
     let upstream;
     try {
-      upstream = await fetchImpl(new URL(cloudPath, config.url), {
+      upstream = await fetchImpl(new URL(route.cloudPath, config.url), {
         method: "POST",
         headers,
         body,
@@ -74,7 +76,7 @@ export async function handleHumanAuthRequest(request, options = {}) {
     } finally {
       clearTimeout(timeout);
     }
-    return await relayResponse(upstream, cloudPath === "/api/auth/session");
+    return await relayResponse(upstream, route.session);
   } catch (error) {
     const mapped = error instanceof HumanAuthBridgeError
       ? error
@@ -118,6 +120,7 @@ async function relayResponse(response, allowSetCookie) {
   try { value = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes)); } catch { fail(502, "cloud_api_invalid_response", "Cloud API response was invalid"); }
   const headers = new Headers({ "content-type": "application/json; charset=utf-8", "cache-control": "no-store, max-age=0", pragma: "no-cache", "x-content-type-options": "nosniff" });
   const setCookie = response.headers.get("set-cookie");
+  if (setCookie !== null && !allowSetCookie) fail(502, "cloud_api_invalid_response", "Cloud API response was invalid");
   if (allowSetCookie && setCookie !== null) {
     if (!/^__Host-agentpass_session=[A-Za-z0-9_-]{43}; Path=\/; HttpOnly; Secure; SameSite=Strict(?:; Max-Age=\d+)?$/.test(setCookie)) fail(502, "cloud_api_invalid_response", "Cloud API response was invalid");
     headers.set("set-cookie", setCookie);

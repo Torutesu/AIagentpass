@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import { authenticateRecentAuth, WebAuthnClientError } from "../webauthn-client";
+import { authenticateRecentAuth, registerPasskey, WebAuthnClientError } from "../webauthn-client";
 
 export type ConsoleView =
   | "overview"
@@ -218,6 +218,10 @@ function supportsWebAuthn(): boolean {
   return typeof window !== "undefined" && typeof window.PublicKeyCredential !== "undefined" && typeof navigator.credentials?.get === "function";
 }
 
+function supportsWebAuthnRegistration(): boolean {
+  return typeof window !== "undefined" && typeof window.PublicKeyCredential !== "undefined" && typeof navigator.credentials?.create === "function";
+}
+
 function enrollmentErrorMessage(error: unknown): string {
   if (error instanceof EnrollmentFlowError) return error.message;
   if (error instanceof WebAuthnClientError) {
@@ -228,6 +232,19 @@ function enrollmentErrorMessage(error: unknown): string {
   }
   if (error instanceof DOMException && (error.name === "NotAllowedError" || error.name === "AbortError")) return "Touch ID/パスキー確認を完了できませんでした。キャンセルした場合は、もう一度お試しください。";
   return "登録情報を発行できませんでした。接続と権限を確認して、もう一度お試しください。";
+}
+
+function passkeyErrorMessage(error: unknown): string {
+  if (error instanceof EnrollmentFlowError) return error.message;
+  if (error instanceof WebAuthnClientError) {
+    if (error.code === "webauthn_unavailable" || error.code === "fetch_unavailable") return "このブラウザはパスキー登録に対応していません。対応ブラウザでお試しください。";
+    if (error.code === "http_failed" && (error.status === 401 || error.status === 403)) return "セッションの有効期限が切れました。ページを再読み込みして、もう一度お試しください。";
+    if (error.code === "http_failed" && error.status === 409) return "このパスキーはすでに登録されているか、登録状態が更新されています。登録済みのパスキーを確認してください。";
+    if (error.code === "aborted" || error.code === "webauthn_failed") return "パスキー登録を完了できませんでした。キャンセルした場合は、もう一度お試しください。";
+    return "パスキーを登録できませんでした。ページを再読み込みして、もう一度お試しください。";
+  }
+  if (error instanceof DOMException && (error.name === "NotAllowedError" || error.name === "AbortError")) return "パスキー登録を完了できませんでした。キャンセルした場合は、もう一度お試しください。";
+  return "パスキーを登録できませんでした。接続と権限を確認して、もう一度お試しください。";
 }
 
 const navItems: Array<{ id: ConsoleView; label: string; icon: string; badge?: string }> = [
@@ -360,6 +377,10 @@ function SetupSurface({ data, goTo, operate, online }: { data: AgentPassInitialD
   const [enrollmentPending, setEnrollmentPending] = useState(false);
   const [enrollmentError, setEnrollmentError] = useState("");
   const enrollmentInFlight = useRef(false);
+  const [passkeyPending, setPasskeyPending] = useState(false);
+  const [passkeyRegistered, setPasskeyRegistered] = useState(false);
+  const [passkeyError, setPasskeyError] = useState("");
+  const passkeyInFlight = useRef(false);
   const [agent, setAgent] = useState({ name: "", kind: "claude-code", public_key: "", device_id: data.devices[0]?.deviceId ?? "" });
   const [capabilityPending, setCapabilityPending] = useState(false);
   const defaultScope = data.policies.find((policy) => policy.scope)?.scope ?? { operations: ["git.commit.sign"], repositories: ["/"], branches: { allow: ["*"], deny: [] }, remotes: { allow: ["*"], deny: [] } };
@@ -402,6 +423,24 @@ function SetupSurface({ data, goTo, operate, online }: { data: AgentPassInitialD
       setEnrollmentPending(false);
     }
   };
+  const registerPasskeyOnDevice = async () => {
+    if (passkeyInFlight.current) return;
+    passkeyInFlight.current = true;
+    setPasskeyPending(true);
+    setPasskeyRegistered(false);
+    setPasskeyError("");
+    try {
+      const { organizationId, csrfToken } = await startEnrollmentSession();
+      if (!supportsWebAuthnRegistration()) throw new EnrollmentFlowError("unsupported", "このブラウザはパスキー登録に対応していません。対応ブラウザでお試しください。");
+      await registerPasskey({ organizationId, csrfToken });
+      setPasskeyRegistered(true);
+    } catch (error) {
+      setPasskeyError(passkeyErrorMessage(error));
+    } finally {
+      passkeyInFlight.current = false;
+      setPasskeyPending(false);
+    }
+  };
   const enrollmentJson = enrollment ? JSON.stringify({ enrollment }, null, 2) : "";
   useEffect(() => {
     if (!enrollment) return;
@@ -432,6 +471,14 @@ function SetupSurface({ data, goTo, operate, online }: { data: AgentPassInitialD
           {data.capabilityRecords?.length ? <ul className="row-list">{data.capabilityRecords.map((capability) => <li className="row-list-item" key={capability.capabilityId}><div><p className="row-title">{capability.capabilityId}</p><p className="row-description">Agent {capability.agentId} · 端末 {capability.deviceId} · sequence {capability.sequence}</p></div><StatusTag tone="green">{capability.expiresAt.slice(0, 16).replace("T", " ")}まで</StatusTag></li>)}</ul> : <p className="row-description">発行済みの短期Capabilityはありません。</p>}
         </article>
         <article className="surface-card"><span className="section-kicker">DEVICES</span><h2 className="surface-card-title">登録済み端末</h2><ul className="row-list">{data.devices.map((device) => <li className="row-list-item" key={device.deviceId ?? device.name}><div><p className="row-title">{device.name}</p><p className="row-description">{device.deviceId ?? "ID未同期"} · {device.location}</p></div><span><StatusTag tone={device.status === "停止" ? "red" : "green"}>{device.status}</StatusTag>{device.deviceId && device.status !== "停止" ? <button className="text-button" type="button" onClick={() => operate("revoke-device", { target_id: device.deviceId, reason: "web-console-operator" }, `${device.name}を停止しました`)}>停止</button> : null}</span></li>)}</ul></article>
+        <article className="surface-card">
+          <span className="section-kicker">ACCOUNT SECURITY</span>
+          <h2 className="surface-card-title">パスキーを登録</h2>
+          <p className="surface-card-copy">このブラウザのTouch IDやパスキーを、AgentPassへのログインと重要操作の確認に使います。秘密鍵は端末の認証器から取り出されません。パスキーの名前は端末の認証器が管理します。</p>
+          <button className="secondary-button" type="button" disabled={!online || passkeyPending} onClick={() => void registerPasskeyOnDevice()}>{passkeyPending ? "パスキーを登録中…" : "Touch ID / パスキーを登録"}</button>
+          {passkeyRegistered ? <p className="section-note" role="status">パスキーを登録しました。この端末から重要操作を確認できます。</p> : null}
+          {passkeyError ? <p className="form-error" role="alert">{passkeyError}</p> : null}
+        </article>
         <article className="surface-card">
           <span className="section-kicker">ENROLL A MAC</span><h2 className="surface-card-title">Macを安全に追加</h2>
           <p className="surface-card-copy">10分だけ有効なワンタイム登録情報を発行します。秘密鍵はMacのSecure Enclave内で生成され、外へ出ません。</p>

@@ -1,9 +1,31 @@
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const HEX_32 = /^[0-9a-f]{64}$/;
+const PROVIDER = /^[a-z][a-z0-9._-]{0,63}$/;
+const SUBJECT = /^[^\u0000-\u001f\u007f]{1,512}$/u;
+const CREDENTIAL_TRANSPORTS = new Set(["ble", "cable", "hybrid", "internal", "nfc", "smart-card", "usb"]);
 
 export function createPostgresHumanRepository({ client } = {}) {
   if (!client || typeof client.query !== "function") throw new TypeError("database client is invalid");
-  return Object.freeze({ createSession, findSessionByTokenHash, updateSessionActivity, revokeSession, listSessions, bindRecentAuth, consumeRecentAuth, listCredentialsForSession, findCredentialForSession, updateCredentialCounter });
+  return Object.freeze({
+    createSession,
+    findSessionByTokenHash,
+    updateSessionActivity,
+    revokeSession,
+    listSessions,
+    bindRecentAuth,
+    consumeRecentAuth,
+    createUpstreamIdentity,
+    findUpstreamIdentity,
+    listMembershipsForUpstreamIdentity,
+    resolveUpstreamIdentity,
+    getRegistrationUser,
+    listCredentialsForSession,
+    findCredentialForSession,
+    insertCredential,
+    createCredential,
+    insertCredentialForSession: insertCredential,
+    updateCredentialCounter
+  });
 
   async function createSession(record) {
     validateSession(record);
@@ -41,6 +63,61 @@ export function createPostgresHumanRepository({ client } = {}) {
     return result.rowCount === 1 ? result.rows[0] : null;
   }
 
+  async function createUpstreamIdentity(input) {
+    const provider = identityProvider(input?.provider);
+    const subject = identitySubject(input?.subject);
+    const memberId = uuid(input?.member_id ?? input?.memberId);
+    const inserted = await client.query(`INSERT INTO upstream_identities (provider,subject,member_id) VALUES ($1,$2,$3) ON CONFLICT (provider,subject) DO NOTHING RETURNING provider,subject,member_id,created_at`, [provider, subject, memberId]);
+    if (inserted.rowCount === 1) return upstreamIdentityRow(inserted.rows[0]);
+
+    // A conflict is idempotent only when it points at the same member. Never
+    // silently rebind an identity, even if the caller presents a valid session.
+    const existing = await client.query(`SELECT provider,subject,member_id,created_at FROM upstream_identities WHERE provider=$1 AND subject=$2`, [provider, subject]);
+    const row = existing.rows?.[0];
+    if (!row) throw upstreamIdentityConflict();
+    if (String(row.member_id).toLowerCase() !== memberId) throw upstreamIdentityConflict();
+    return upstreamIdentityRow(row);
+  }
+
+  async function findUpstreamIdentity(input) {
+    const result = await client.query(`SELECT provider,subject,member_id,created_at FROM upstream_identities WHERE provider=$1 AND subject=$2`, [identityProvider(input?.provider), identitySubject(input?.subject)]);
+    return result.rows?.[0] ? upstreamIdentityRow(result.rows[0]) : null;
+  }
+
+  async function listMembershipsForUpstreamIdentity(input) {
+    const provider = identityProvider(input?.provider);
+    const subject = identitySubject(input?.subject);
+    const organizationId = input?.organization_id ?? input?.organizationId;
+    const params = [provider, subject];
+    let organizationClause = "";
+    if (organizationId !== undefined) {
+      organizationClause = " AND m.organization_id=$3";
+      params.push(uuid(organizationId));
+    }
+    const result = await client.query(`SELECT ui.provider,ui.subject,ui.member_id,ui.created_at AS identity_created_at,m.organization_id,m.id AS membership_id,m.role,m.status,m.version,m.created_at,m.updated_at,o.name AS organization_name FROM upstream_identities ui JOIN memberships m ON m.member_id=ui.member_id JOIN organizations o ON o.id=m.organization_id WHERE ui.provider=$1 AND ui.subject=$2 AND m.status='active'${organizationClause} ORDER BY m.organization_id ASC,m.id ASC LIMIT 128`, params);
+    return (result.rows ?? []).map(upstreamMembershipRow);
+  }
+
+  async function resolveUpstreamIdentity(input) {
+    const memberships = await listMembershipsForUpstreamIdentity(input);
+    const first = memberships[0];
+    if (!first) return null;
+    return Object.freeze({
+      provider: first.provider,
+      subject: first.subject,
+      member_id: first.member_id,
+      memberships
+    });
+  }
+
+  async function getRegistrationUser(input) {
+    const result = await client.query(`SELECT s.member_id,m.display_name FROM human_sessions s JOIN members m ON m.id=s.member_id JOIN memberships ms ON ms.organization_id=s.organization_id AND ms.member_id=s.member_id WHERE s.id=$1 AND s.member_id=$2 AND s.organization_id=$3 AND s.revoked_at IS NULL AND s.expires_at>clock_timestamp() AND ms.status='active' AND ms.role=s.role LIMIT 1`, [uuid(input?.session_id ?? input?.sessionId), uuid(input?.member_id ?? input?.memberId), uuid(input?.organization_id ?? input?.organizationId)]);
+    const row = result.rows?.[0];
+    if (!row) return null;
+    const memberId = uuid(String(row.member_id));
+    return { id: uuidUserHandle(memberId), name: `agentpass:${memberId}`, display_name: bounded(row.display_name ?? "AgentPass user", 128) };
+  }
+
   async function listCredentialsForSession(input) {
     const result = await client.query(`SELECT c.id,c.transports FROM webauthn_credentials c JOIN human_sessions s ON s.member_id=c.member_id JOIN memberships m ON m.organization_id=s.organization_id AND m.member_id=s.member_id WHERE s.id=$1 AND s.organization_id=$2 AND s.revoked_at IS NULL AND s.expires_at>clock_timestamp() AND c.revoked_at IS NULL AND m.status='active' ORDER BY c.created_at ASC,c.id ASC LIMIT 64`, [uuid(input.session_id), uuid(input.organization_id)]);
     return (result.rows ?? []).map((row) => ({ id: credentialId(row.id), type: "public-key", transports: credentialTransports(row.transports) }));
@@ -50,6 +127,49 @@ export function createPostgresHumanRepository({ client } = {}) {
     const result = await client.query(`SELECT c.id,c.public_key,c.sign_count,c.transports,c.revoked_at FROM webauthn_credentials c JOIN human_sessions s ON s.member_id=c.member_id JOIN memberships m ON m.organization_id=s.organization_id AND m.member_id=s.member_id WHERE s.id=$1 AND s.organization_id=$2 AND c.id=$3 AND s.revoked_at IS NULL AND c.revoked_at IS NULL AND m.status='active' LIMIT 1`, [uuid(input.session_id), uuid(input.organization_id), base64Bytes(input.credential_id, 16, 1024)]);
     const row = result.rows?.[0];
     return row ? { ...row, id: Buffer.from(row.id).toString("base64url") } : null;
+  }
+
+  async function insertCredential(input) {
+    const sessionId = uuid(input?.session_id ?? input?.sessionId);
+    const memberId = uuid(input?.member_id ?? input?.memberId);
+    const organizationId = uuid(input?.organization_id ?? input?.organizationId);
+    const credentialId = base64Bytes(input?.credential_id ?? input?.credentialId, 16, 1024);
+    const publicKey = publicKeyBytes(input?.public_key ?? input?.publicKey);
+    const signCount = counter(input?.sign_count ?? input?.signCount);
+    const transports = credentialTransports(input?.transports);
+    const label = credentialLabel(input?.label);
+    const backupEligible = strictBoolean(input?.backup_eligible ?? input?.backupEligible, "backup_eligible");
+    const backupState = strictBoolean(input?.backup_state ?? input?.backupState, "backup_state");
+    if (backupState && !backupEligible) throw new TypeError("backup_state requires backup_eligible");
+    const result = await client.query(`INSERT INTO webauthn_credentials (id,member_id,public_key,sign_count,transports,label,backup_eligible,backup_state) SELECT $3,$2,$4,$5,$6,$7,$8,$9 FROM human_sessions s JOIN memberships m ON m.organization_id=s.organization_id AND m.member_id=s.member_id WHERE s.id=$1 AND s.member_id=$2 AND s.organization_id=$10 AND s.revoked_at IS NULL AND s.expires_at>clock_timestamp() AND m.status='active' AND m.role=s.role ON CONFLICT (id) DO NOTHING RETURNING id,member_id,public_key,sign_count,transports,label,backup_eligible,backup_state,created_at,last_used_at,revoked_at`, [sessionId, memberId, credentialId, publicKey, signCount, transports, label, backupEligible, backupState, organizationId]);
+    return result.rows?.[0] ? credentialRow(result.rows[0]) : null;
+  }
+
+  async function createCredential(input) {
+    const sessionId = uuid(input?.session_id ?? input?.sessionId);
+    const memberId = uuid(input?.member_id ?? input?.memberId);
+    const organizationId = uuid(input?.organization_id ?? input?.organizationId);
+    const credentialId = input?.credential_id ?? input?.credentialId;
+    const backupState = input?.backup_state ?? input?.backupState ?? input?.credential_backed_up ?? false;
+    const deviceType = input?.credential_device_type;
+    if (deviceType !== undefined && deviceType !== "singleDevice" && deviceType !== "multiDevice") throw new TypeError("credential device type is invalid");
+    if (deviceType === "singleDevice" && backupState === true) throw new TypeError("single-device credential cannot be backed up");
+    const backupEligible = input?.backup_eligible ?? input?.backupEligible ?? (backupState === true || deviceType === "multiDevice");
+    const created = await insertCredential({
+      ...input,
+      credential_id: credentialId,
+      label: input?.label ?? "Unnamed credential",
+      backup_eligible: backupEligible,
+      backup_state: backupState
+    });
+    if (created) return Object.freeze({ created: true, credential_id: created.id });
+
+    // `INSERT ... ON CONFLICT DO NOTHING` keeps duplicate registration
+    // harmless. Distinguish that case for the registration service without
+    // exposing the existing credential record or public key.
+    const duplicate = await client.query(`SELECT 1 FROM webauthn_credentials c WHERE c.id=$1 AND EXISTS (SELECT 1 FROM human_sessions s JOIN memberships m ON m.organization_id=s.organization_id AND m.member_id=s.member_id WHERE s.id=$2 AND s.member_id=$3 AND s.organization_id=$4 AND s.revoked_at IS NULL AND s.expires_at>clock_timestamp() AND m.status='active' AND m.role=s.role) LIMIT 1`, [base64Bytes(credentialId, 16, 1024), sessionId, memberId, organizationId]);
+    if (duplicate.rows?.length === 1) throw credentialExists();
+    throw new Error("credential registration could not be stored");
   }
 
   async function updateCredentialCounter(input) {
@@ -62,8 +182,21 @@ function validateSession(record) { uuid(record?.session_id); uuid(record?.member
 function sessionRow(row) { return row ? { ...row, session_id: row.session_id ?? row.id, token_hash: row.token_hash_hex ?? row.token_hash, csrf_token_hash: row.csrf_token_hash_hex ?? row.csrf_token_hash } : null; }
 function uuid(value) { if (typeof value !== "string" || !UUID.test(value)) throw new TypeError("UUID is invalid"); return value.toLowerCase(); }
 function bounded(value, max) { if (typeof value !== "string" || value.length < 1 || value.length > max || /[\u0000-\u001f\u007f]/.test(value)) throw new TypeError("bounded text is invalid"); return value; }
+function identityProvider(value) { if (typeof value !== "string" || !PROVIDER.test(value)) throw new TypeError("identity provider is invalid"); return value; }
+function identitySubject(value) { if (typeof value !== "string" || !SUBJECT.test(value) || value.trim() !== value) throw new TypeError("identity subject is invalid"); return value; }
+function uuidUserHandle(value) { return Buffer.from(value.replaceAll("-", ""), "hex").toString("base64url"); }
 function bytes32(value) { if (typeof value !== "string" || !HEX_32.test(value)) throw new TypeError("digest is invalid"); return Buffer.from(value, "hex"); }
 function base64Bytes(value, min, max) { if (typeof value !== "string" || !/^[A-Za-z0-9_-]+$/.test(value)) throw new TypeError("credential id is invalid"); const bytes=Buffer.from(value,"base64url"); if(bytes.length<min||bytes.length>max||bytes.toString("base64url")!==value) throw new TypeError("credential id is invalid"); return bytes; }
 function credentialId(value) { if (!Buffer.isBuffer(value) || value.length < 16 || value.length > 1024) throw new TypeError("stored credential id is invalid"); return value.toString("base64url"); }
-function credentialTransports(value) { const allowed=new Set(["ble","cable","hybrid","internal","nfc","smart-card","usb"]); if(!Array.isArray(value)||value.length>7||value.some((item)=>typeof item!=="string"||!allowed.has(item))||new Set(value).size!==value.length) throw new TypeError("stored credential transports are invalid"); return [...value]; }
+function credentialTransports(value) { if(!Array.isArray(value)||value.length>7||value.some((item)=>typeof item!=="string"||!CREDENTIAL_TRANSPORTS.has(item))||new Set(value).size!==value.length) throw new TypeError("stored credential transports are invalid"); return [...value]; }
+function publicKeyBytes(value) { if (!(Buffer.isBuffer(value) || value instanceof Uint8Array) || value.length < 32 || value.length > 4096) throw new TypeError("public key is invalid"); return Buffer.from(value); }
+function credentialLabel(value) { return bounded(value, 128); }
+function strictBoolean(value, name) { if (typeof value !== "boolean") throw new TypeError(`${name} is invalid`); return value; }
 function counter(value) { if (!Number.isSafeInteger(value)||value<0) throw new TypeError("counter is invalid"); return value; }
+function upstreamIdentityRow(row) { return { provider: identityProvider(row.provider), subject: identitySubject(row.subject), member_id: uuid(String(row.member_id)), created_at: row.created_at }; }
+function upstreamMembershipRow(row) { return { provider: identityProvider(row.provider), subject: identitySubject(row.subject), member_id: uuid(String(row.member_id)), identity_created_at: row.identity_created_at, organization_id: uuid(String(row.organization_id)), membership_id: uuid(String(row.membership_id)), role: membershipRole(row.role), status: "active", version: positiveInteger(row.version), created_at: row.created_at, updated_at: row.updated_at, organization_name: bounded(row.organization_name, 128) }; }
+function membershipRole(value) { if (!["owner", "admin", "auditor", "viewer"].includes(value)) throw new TypeError("membership role is invalid"); return value; }
+function positiveInteger(value) { if (typeof value === "string" && /^\d+$/.test(value)) value=Number(value); if (!Number.isSafeInteger(value)||value<1) throw new TypeError("membership version is invalid"); return value; }
+function credentialRow(row) { return { id: credentialId(row.id), member_id: uuid(String(row.member_id)), public_key: publicKeyBytes(row.public_key), sign_count: counter(row.sign_count), transports: credentialTransports(row.transports), label: credentialLabel(row.label), backup_eligible: strictBoolean(row.backup_eligible, "backup_eligible"), backup_state: strictBoolean(row.backup_state, "backup_state"), created_at: row.created_at, last_used_at: row.last_used_at ?? null, revoked_at: row.revoked_at ?? null }; }
+function upstreamIdentityConflict() { const error = new Error("upstream identity mapping conflict"); error.code = "ERR_UPSTREAM_IDENTITY_CONFLICT"; return error; }
+function credentialExists() { const error = new Error("credential already exists"); error.code = "credential_exists"; return error; }

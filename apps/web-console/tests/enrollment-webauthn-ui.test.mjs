@@ -7,7 +7,7 @@ const componentPath = new URL("../app/components/AgentPassConsole.tsx", import.m
 test("enrollment UI uses a session-bound WebAuthn ceremony instead of manual proof", async () => {
   const source = await readFile(componentPath, "utf8");
 
-  assert.match(source, /import \{ authenticateRecentAuth, WebAuthnClientError \} from "\.\.\/webauthn-client"/);
+  assert.match(source, /import \{ authenticateRecentAuth, registerPasskey, WebAuthnClientError \} from "\.\.\/webauthn-client"/);
   assert.match(source, /fetch\("\/api\/auth\/session", \{[\s\S]*?method: "POST"[\s\S]*?body: "\{\}"[\s\S]*?cache: "no-store"[\s\S]*?credentials: "same-origin"/);
   assert.match(source, /hasExactKeys\(value, \["session", "csrf_token"\]\)/);
   assert.match(source, /UUID\.test\(session\.organization_id\)/);
@@ -16,6 +16,8 @@ test("enrollment UI uses a session-bound WebAuthn ceremony instead of manual pro
   assert.match(source, /"agentpass-recent-auth": authorization_id/);
   assert.match(source, /enrollmentInFlight\.current/);
   assert.match(source, /Touch ID\/パスキー確認/);
+  assert.match(source, /registerPasskey\(\{ organizationId, csrfToken \}\)/);
+  assert.match(source, /Touch ID \/ パスキーを登録/);
 
   assert.doesNotMatch(source, /\[recentAuth,\s*setRecentAuth\]/);
   assert.doesNotMatch(source, /setRecentAuth/);
@@ -32,4 +34,6 @@ test("enrollment ceremony material is not placed in React state or browser stora
   assert.doesNotMatch(setupBody, /localStorage|sessionStorage|console\.(?:log|info|warn|error)/);
   assert.match(setupBody, /const \{ organizationId, csrfToken \} = await startEnrollmentSession\(\)/);
   assert.match(setupBody, /const \{ authorization_id \} = await authenticateRecentAuth/);
+  assert.match(setupBody, /await registerPasskey\(\{ organizationId, csrfToken \}\)/);
+  assert.doesNotMatch(setupBody, /useState\([^\n]*(?:credential|attestation|assertion|challenge|label)/i);
 });

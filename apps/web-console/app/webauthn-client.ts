@@ -1,17 +1,24 @@
 import {
   startAuthentication,
+  startRegistration,
   WebAuthnAbortService,
   type AuthenticationResponseJSON,
+  type PublicKeyCredentialCreationOptionsJSON,
   type PublicKeyCredentialRequestOptionsJSON,
+  type RegistrationResponseJSON,
 } from "@simplewebauthn/browser";
 
 const DEFAULT_OPTIONS_PATH = "/api/auth/webauthn/options";
 const DEFAULT_VERIFY_PATH = "/api/auth/webauthn/verify";
+const DEFAULT_REGISTRATION_OPTIONS_PATH = "/api/auth/webauthn/registration/options";
+const DEFAULT_REGISTRATION_VERIFY_PATH = "/api/auth/webauthn/registration/verify";
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const BASE64URL = /^[A-Za-z0-9_-]+$/;
 const MAX_JSON_BYTES = 128 * 1024;
 const MAX_OPTIONS_TIMEOUT_MS = 120_000;
 const MAX_ALLOW_CREDENTIALS = 100;
+const MAX_PUB_KEY_CRED_PARAMS = 32;
+const MAX_ATTESTATION_FORMATS = 16;
 const MAX_OPERATION_LENGTH = 128;
 const MAX_ORGANIZATION_ID_LENGTH = 64;
 
@@ -39,6 +46,25 @@ const ASSERTION_RESPONSE_KEYS = new Set([
   "signature",
   "userHandle",
 ]);
+const CREATION_OPTION_KEYS = new Set([
+  "rp",
+  "user",
+  "challenge",
+  "pubKeyCredParams",
+  "timeout",
+  "excludeCredentials",
+  "authenticatorSelection",
+  "hints",
+  "attestation",
+  "attestationFormats",
+  "extensions",
+]);
+const RP_KEYS = new Set(["id", "name"]);
+const USER_KEYS = new Set(["id", "name", "displayName"]);
+const PUB_KEY_CRED_PARAM_KEYS = new Set(["type", "alg"]);
+const AUTHENTICATOR_SELECTION_KEYS = new Set(["authenticatorAttachment", "residentKey", "requireResidentKey", "userVerification"]);
+const REGISTRATION_CREDENTIAL_KEYS = new Set(["id", "rawId", "response", "type", "clientExtensionResults", "authenticatorAttachment"]);
+const REGISTRATION_RESPONSE_KEYS = new Set(["clientDataJSON", "attestationObject", "transports", "publicKeyAlgorithm", "publicKey", "authenticatorData"]);
 
 export type WebAuthnClientInput = Readonly<{
   operation: string;
@@ -52,6 +78,17 @@ export type WebAuthnClientInput = Readonly<{
 }>;
 
 export type AuthorizationResult = Readonly<{ authorization_id: string }>;
+export type RegistrationResult = Readonly<{ registered: true }>;
+
+export type WebAuthnRegistrationInput = Readonly<{
+  organizationId: string;
+  csrfToken: string;
+  signal?: AbortSignal;
+  optionsPath?: string;
+  verifyPath?: string;
+  fetchImpl?: typeof fetch;
+  startRegistrationImpl?: typeof startRegistration;
+}>;
 
 export class WebAuthnClientError extends Error {
   readonly code: string;
@@ -105,6 +142,44 @@ export async function authenticateRecentAuth(input: WebAuthnClientInput): Promis
   }, csrfToken, signal);
 
   return Object.freeze({ authorization_id: validateAuthorizationResponse(verified).authorization_id });
+}
+
+/**
+ * Register one passkey for the current human session.
+ *
+ * Registration options and the browser credential stay in local call frames.
+ * Only the server's boolean completion result leaves this function, so React
+ * state and browser-readable storage never receive ceremony material.
+ */
+export async function registerPasskey(input: WebAuthnRegistrationInput): Promise<RegistrationResult> {
+  const organizationId = requiredBoundedString(input?.organizationId, MAX_ORGANIZATION_ID_LENGTH, "organizationId");
+  const csrfToken = requiredBoundedString(input?.csrfToken, 512, "csrfToken");
+  const signal = input?.signal;
+  assertAbortSignal(signal);
+  throwIfAborted(signal);
+
+  const fetchImpl = input?.fetchImpl ?? globalThis.fetch;
+  if (typeof fetchImpl !== "function") throw new WebAuthnClientError("fetch_unavailable", "Registration transport is unavailable");
+  const startRegistrationImpl = input?.startRegistrationImpl ?? startRegistration;
+  if (typeof startRegistrationImpl !== "function") throw new WebAuthnClientError("webauthn_unavailable", "WebAuthn registration is unavailable");
+
+  const optionsPath = validateRelativePath(input?.optionsPath ?? DEFAULT_REGISTRATION_OPTIONS_PATH, "registrationOptionsPath");
+  const verifyPath = validateRelativePath(input?.verifyPath ?? DEFAULT_REGISTRATION_VERIFY_PATH, "registrationVerifyPath");
+  const optionsResponse = await postJson(fetchImpl, optionsPath, {
+    organization_id: organizationId,
+  }, csrfToken, signal);
+  const challenge = validateRegistrationOptionsResponse(optionsResponse);
+  throwIfAborted(signal);
+
+  const credential = await runRegistration(startRegistrationImpl, challenge.options, signal);
+  throwIfAborted(signal);
+  const verified = await postJson(fetchImpl, verifyPath, {
+    organization_id: organizationId,
+    challenge_id: challenge.challenge_id,
+    credential: validateRegistrationCredential(credential),
+  }, csrfToken, signal);
+
+  return Object.freeze({ registered: validateRegistrationResponse(verified).registered });
 }
 
 export const createWebAuthnClient = (defaults: Omit<Partial<WebAuthnClientInput>, "operation" | "organizationId" | "csrfToken"> = {}) =>
@@ -195,9 +270,9 @@ function validateRequestOptions(value: Record<string, unknown>): void {
   if (value.extensions !== undefined && !jsonObject(value.extensions, 16_384)) throw new WebAuthnClientError("invalid_options", "WebAuthn options are invalid");
 }
 
-function validateAllowCredential(value: unknown): void {
-  if (!plainObject(value) || Object.keys(value).some((key) => !ALLOW_CREDENTIAL_KEYS.has(key)) || value.type !== "public-key" || !base64url(value.id, 1, 1024)) throw new WebAuthnClientError("invalid_options", "WebAuthn options are invalid");
-  if (value.transports !== undefined && (!Array.isArray(value.transports) || value.transports.length > 7 || value.transports.some((transport) => !["ble", "cable", "hybrid", "internal", "nfc", "smart-card", "usb"].includes(transport as string)))) throw new WebAuthnClientError("invalid_options", "WebAuthn options are invalid");
+function validateAllowCredential(value: unknown, errorCode = "invalid_options"): void {
+  if (!plainObject(value) || Object.keys(value).some((key) => !ALLOW_CREDENTIAL_KEYS.has(key)) || value.type !== "public-key" || !base64url(value.id, 1, 1024)) throw new WebAuthnClientError(errorCode, "WebAuthn options are invalid");
+  if (value.transports !== undefined && (!Array.isArray(value.transports) || value.transports.length > 7 || value.transports.some((transport) => !["ble", "cable", "hybrid", "internal", "nfc", "smart-card", "usb"].includes(transport as string)))) throw new WebAuthnClientError(errorCode, "WebAuthn options are invalid");
 }
 
 async function runAuthentication(startAuthenticationImpl: typeof startAuthentication, options: PublicKeyCredentialRequestOptionsJSON, signal: AbortSignal | undefined): Promise<AuthenticationResponseJSON> {
@@ -226,12 +301,120 @@ async function runAuthentication(startAuthenticationImpl: typeof startAuthentica
   }
 }
 
+async function runRegistration(startRegistrationImpl: typeof startRegistration, options: PublicKeyCredentialCreationOptionsJSON, signal: AbortSignal | undefined): Promise<RegistrationResponseJSON> {
+  throwIfAborted(signal);
+  let abortListener: (() => void) | undefined;
+  let abortPromise: Promise<never> | undefined;
+  if (signal) {
+    abortPromise = new Promise((_, reject) => {
+      abortListener = () => {
+        WebAuthnAbortService.cancelCeremony();
+        reject(abortError());
+      };
+      signal.addEventListener("abort", abortListener, { once: true });
+    });
+  }
+  try {
+    const registrationPromise = Promise.resolve().then(() => startRegistrationImpl({ optionsJSON: options }));
+    const result = abortPromise ? await Promise.race([registrationPromise, abortPromise]) : await registrationPromise;
+    return validateRegistrationCredential(result);
+  } catch (error) {
+    if (signal?.aborted || error instanceof WebAuthnClientError && error.code === "aborted") throw abortError();
+    if (error instanceof WebAuthnClientError) throw error;
+    throw new WebAuthnClientError("webauthn_failed", "WebAuthn registration failed");
+  } finally {
+    if (signal && abortListener) signal.removeEventListener("abort", abortListener);
+  }
+}
+
 function validateAssertion(value: unknown): AuthenticationResponseJSON {
   if (!plainObject(value) || Object.keys(value).some((key) => !ASSERTION_KEYS.has(key)) || !string(value.id) || hasControlCharacters(value.id) || !base64url(value.rawId, 1, 4096) || value.type !== "public-key" || !plainObject(value.response) || !plainObject(value.clientExtensionResults)) throw new WebAuthnClientError("invalid_assertion", "WebAuthn assertion is invalid");
   if (value.authenticatorAttachment !== undefined && !["platform", "cross-platform"].includes(value.authenticatorAttachment as string)) throw new WebAuthnClientError("invalid_assertion", "WebAuthn assertion is invalid");
   if (Object.keys(value.response).some((key) => !ASSERTION_RESPONSE_KEYS.has(key)) || !base64url(value.response.authenticatorData, 1, 16_384) || !base64url(value.response.clientDataJSON, 1, 16_384) || !base64url(value.response.signature, 1, 16_384)) throw new WebAuthnClientError("invalid_assertion", "WebAuthn assertion is invalid");
   if (value.response.userHandle !== undefined && value.response.userHandle !== null && !base64url(value.response.userHandle, 1, 1024)) throw new WebAuthnClientError("invalid_assertion", "WebAuthn assertion is invalid");
   return value as unknown as AuthenticationResponseJSON;
+}
+
+function validateRegistrationOptionsResponse(value: unknown): Readonly<{ challenge_id: string; options: PublicKeyCredentialCreationOptionsJSON }> {
+  if (!plainObject(value) || !exactKeys(value, ["challenge_id", "options"]) || typeof value.challenge_id !== "string" || !UUID.test(value.challenge_id) || !plainObject(value.options)) {
+    throw new WebAuthnClientError("invalid_registration_options", "WebAuthn registration options are invalid");
+  }
+  validateCreationOptions(value.options);
+  return Object.freeze({ challenge_id: value.challenge_id, options: value.options as unknown as PublicKeyCredentialCreationOptionsJSON });
+}
+
+function validateCreationOptions(value: Record<string, unknown>): void {
+  if (Object.keys(value).some((key) => !CREATION_OPTION_KEYS.has(key)) || !plainObject(value.rp) || !plainObject(value.user) || !base64url(value.challenge, 16, 128) || !Array.isArray(value.pubKeyCredParams) || value.pubKeyCredParams.length < 1 || value.pubKeyCredParams.length > MAX_PUB_KEY_CRED_PARAMS) {
+    throw new WebAuthnClientError("invalid_registration_options", "WebAuthn registration options are invalid");
+  }
+  validateRp(value.rp);
+  validateUser(value.user);
+  for (const parameter of value.pubKeyCredParams) validatePubKeyCredentialParameter(parameter);
+  if (value.timeout !== undefined && (typeof value.timeout !== "number" || !Number.isSafeInteger(value.timeout) || value.timeout < 1 || value.timeout > MAX_OPTIONS_TIMEOUT_MS)) throw new WebAuthnClientError("invalid_registration_options", "WebAuthn registration options are invalid");
+  if (value.excludeCredentials !== undefined) {
+    if (!Array.isArray(value.excludeCredentials) || value.excludeCredentials.length > MAX_ALLOW_CREDENTIALS) throw new WebAuthnClientError("invalid_registration_options", "WebAuthn registration options are invalid");
+    for (const credential of value.excludeCredentials) validateAllowCredential(credential, "invalid_registration_options");
+  }
+  if (value.authenticatorSelection !== undefined) validateAuthenticatorSelection(value.authenticatorSelection);
+  if (value.hints !== undefined) validateHints(value.hints);
+  if (value.attestation !== undefined && !["none", "indirect", "direct", "enterprise"].includes(value.attestation as string)) throw new WebAuthnClientError("invalid_registration_options", "WebAuthn registration options are invalid");
+  if (value.attestationFormats !== undefined && (!Array.isArray(value.attestationFormats) || value.attestationFormats.length > MAX_ATTESTATION_FORMATS || value.attestationFormats.some((format) => typeof format !== "string" || !["packed", "tpm", "android-key", "android-safetynet", "fido-u2f", "none", "apple"].includes(format)))) throw new WebAuthnClientError("invalid_registration_options", "WebAuthn registration options are invalid");
+  if (value.extensions !== undefined && !jsonObject(value.extensions, 16_384)) throw new WebAuthnClientError("invalid_registration_options", "WebAuthn registration options are invalid");
+}
+
+function validateRp(value: Record<string, unknown>): void {
+  if (Object.keys(value).some((key) => !RP_KEYS.has(key)) || !string(value.id) || !string(value.name) || value.id.length > 253 || value.name.length > 128 || hasControlCharacters(value.id) || hasControlCharacters(value.name) || /[ /\\?#]/.test(value.id)) throw new WebAuthnClientError("invalid_registration_options", "WebAuthn registration options are invalid");
+}
+
+function validateUser(value: Record<string, unknown>): void {
+  if (Object.keys(value).some((key) => !USER_KEYS.has(key)) || !base64url(value.id, 1, 64) || !string(value.name) || !string(value.displayName) || value.name.length > 128 || value.displayName.length > 128 || hasControlCharacters(value.name) || hasControlCharacters(value.displayName)) throw new WebAuthnClientError("invalid_registration_options", "WebAuthn registration options are invalid");
+}
+
+function validatePubKeyCredentialParameter(value: unknown): void {
+  if (!plainObject(value) || Object.keys(value).some((key) => !PUB_KEY_CRED_PARAM_KEYS.has(key)) || value.type !== "public-key" || typeof value.alg !== "number" || !Number.isSafeInteger(value.alg) || value.alg < -65_535 || value.alg > 65_535) throw new WebAuthnClientError("invalid_registration_options", "WebAuthn registration options are invalid");
+}
+
+function validateAuthenticatorSelection(value: unknown): void {
+  if (!plainObject(value) || Object.keys(value).some((key) => !AUTHENTICATOR_SELECTION_KEYS.has(key))) throw new WebAuthnClientError("invalid_registration_options", "WebAuthn registration options are invalid");
+  if (value.authenticatorAttachment !== undefined && !["platform", "cross-platform"].includes(value.authenticatorAttachment as string)) throw new WebAuthnClientError("invalid_registration_options", "WebAuthn registration options are invalid");
+  if (value.residentKey !== undefined && !["discouraged", "preferred", "required"].includes(value.residentKey as string)) throw new WebAuthnClientError("invalid_registration_options", "WebAuthn registration options are invalid");
+  if (value.requireResidentKey !== undefined && typeof value.requireResidentKey !== "boolean") throw new WebAuthnClientError("invalid_registration_options", "WebAuthn registration options are invalid");
+  if (value.userVerification !== undefined && !["required", "preferred", "discouraged"].includes(value.userVerification as string)) throw new WebAuthnClientError("invalid_registration_options", "WebAuthn registration options are invalid");
+}
+
+function validateHints(value: unknown): void {
+  if (!Array.isArray(value) || value.length > 3 || value.some((hint) => !["security-key", "client-device", "hybrid"].includes(hint as string))) throw new WebAuthnClientError("invalid_registration_options", "WebAuthn registration options are invalid");
+}
+
+function validateRegistrationCredential(value: unknown): RegistrationResponseJSON {
+  if (!plainObject(value) || Object.keys(value).some((key) => !REGISTRATION_CREDENTIAL_KEYS.has(key)) || !string(value.id) || hasControlCharacters(value.id) || !base64url(value.rawId, 16, 1024) || value.id !== value.rawId || value.type !== "public-key" || !plainObject(value.response) || !plainObject(value.clientExtensionResults)) throw new WebAuthnClientError("invalid_registration_credential", "WebAuthn registration credential is invalid");
+  if (value.authenticatorAttachment !== undefined && !["platform", "cross-platform"].includes(value.authenticatorAttachment as string)) throw new WebAuthnClientError("invalid_registration_credential", "WebAuthn registration credential is invalid");
+  if (Object.keys(value.response).some((key) => !REGISTRATION_RESPONSE_KEYS.has(key)) || !base64url(value.response.attestationObject, 1, 65_536) || !base64url(value.response.clientDataJSON, 1, 16_384)) throw new WebAuthnClientError("invalid_registration_credential", "WebAuthn registration credential is invalid");
+  if (value.response.authenticatorData !== undefined && !base64url(value.response.authenticatorData, 37, 16_384)) throw new WebAuthnClientError("invalid_registration_credential", "WebAuthn registration credential is invalid");
+  if (value.response.publicKey !== undefined && !base64url(value.response.publicKey, 1, 16_384)) throw new WebAuthnClientError("invalid_registration_credential", "WebAuthn registration credential is invalid");
+  if (value.response.publicKeyAlgorithm !== undefined && (typeof value.response.publicKeyAlgorithm !== "number" || !Number.isSafeInteger(value.response.publicKeyAlgorithm) || value.response.publicKeyAlgorithm < -65_535 || value.response.publicKeyAlgorithm > 65_535)) throw new WebAuthnClientError("invalid_registration_credential", "WebAuthn registration credential is invalid");
+  if (value.response.transports !== undefined && (!Array.isArray(value.response.transports) || value.response.transports.length > 7 || value.response.transports.some((transport) => !["ble", "cable", "hybrid", "internal", "nfc", "smart-card", "usb"].includes(transport as string)))) throw new WebAuthnClientError("invalid_registration_credential", "WebAuthn registration credential is invalid");
+  return {
+    id: value.id,
+    rawId: value.rawId,
+    response: {
+      clientDataJSON: value.response.clientDataJSON,
+      attestationObject: value.response.attestationObject,
+      ...(value.response.transports === undefined ? {} : { transports: value.response.transports }),
+    },
+    type: "public-key",
+    clientExtensionResults: value.clientExtensionResults,
+    ...(value.authenticatorAttachment === undefined ? {} : { authenticatorAttachment: value.authenticatorAttachment }),
+  } as unknown as RegistrationResponseJSON;
+}
+
+function validateRegistrationResponse(value: unknown): RegistrationResult {
+  if (!plainObject(value) || !exactKeys(value, ["credential_id", "registered_at"]) || !base64url(value.credential_id, 16, 1024) || typeof value.registered_at !== "string" || !isCanonicalIsoDate(value.registered_at)) throw new WebAuthnClientError("invalid_registration_result", "WebAuthn registration response is invalid");
+  return Object.freeze({ registered: true });
+}
+
+function isCanonicalIsoDate(value: string): boolean {
+  try { return new Date(value).toISOString() === value; } catch { return false; }
 }
 
 function validateAuthorizationResponse(value: unknown): AuthorizationResult {

@@ -47,6 +47,27 @@ test("forwards only the session cookie and CSRF token to WebAuthn", async () => 
   assert.equal(response.headers.get("cache-control"), "no-store, max-age=0");
 });
 
+test("forwards passkey registration through the same-origin BFF without exposing the Cloud token", async () => {
+  const calls = [];
+  const api = bridge(async (url, init) => {
+    calls.push({ url: String(url), init });
+    return new Response(JSON.stringify({ credential_id: "A".repeat(22), registered_at: "2026-08-12T10:00:00.000Z" }), { status: 201, headers: { "content-type": "application/json" } });
+  });
+  const response = await api.handle(request("/api/auth/webauthn/registration/verify", {
+    body: { organization_id: "org", challenge_id: "challenge-id", credential: { id: "opaque-to-bff" } },
+    headers: { cookie: sessionCookie, "agentpass-csrf": csrf },
+  }));
+  assert.equal(response.status, 201);
+  const responseText = await response.text();
+  assert.deepEqual(JSON.parse(responseText), { credential_id: "A".repeat(22), registered_at: "2026-08-12T10:00:00.000Z" });
+  assert.equal(calls[0].url, "https://cloud.example.test/api/auth/webauthn/registration/verify");
+  assert.equal(calls[0].init.headers.get("authorization"), "Bearer server-only-token");
+  assert.equal(calls[0].init.headers.get("cookie"), sessionCookie);
+  assert.equal(calls[0].init.headers.get("agentpass-csrf"), csrf);
+  assert.equal(calls[0].init.headers.get("agentpass-console-user-id"), "operator-1");
+  assert.doesNotMatch(responseText, /server-only-token|opaque-to-bff/);
+});
+
 test("rejects cross-origin, missing SIWC, non-operators, and missing CSRF before Cloud", async () => {
   let calls = 0;
   const fetchImpl = async () => { calls += 1; return new Response("{}"); };

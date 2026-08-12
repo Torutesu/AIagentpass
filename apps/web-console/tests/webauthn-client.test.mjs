@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { authenticateRecentAuth, WebAuthnClientError } from "../app/webauthn-client.ts";
+import { authenticateRecentAuth, registerPasskey, WebAuthnClientError } from "../app/webauthn-client.ts";
 
 const organizationId = "11111111-1111-4111-8111-111111111111";
 const challengeId = "22222222-2222-4222-8222-222222222222";
@@ -16,12 +16,36 @@ const options = Object.freeze({
 });
 
 const assertion = Object.freeze({
-  id: "Y3JlZGVudGlhbC0x",
-  rawId: "Y3JlZGVudGlhbC0x",
+  id: "A".repeat(22),
+  rawId: "A".repeat(22),
   response: {
     authenticatorData: "YXV0aGVudGljYXRvci1kYXRh",
     clientDataJSON: "Y2xpZW50LWRhdGE",
     signature: "c2lnbmF0dXJl",
+  },
+  type: "public-key",
+  clientExtensionResults: {},
+});
+
+const registrationOptions = Object.freeze({
+  rp: { id: "console.example.test", name: "AgentPass Console" },
+  user: { id: "dXNlci0x", name: "operator@example.test", displayName: "Operator" },
+  challenge,
+  pubKeyCredParams: [{ type: "public-key", alg: -7 }, { type: "public-key", alg: -257 }],
+  authenticatorSelection: { residentKey: "preferred", userVerification: "required" },
+  attestation: "none",
+  excludeCredentials: [],
+});
+
+const registrationCredential = Object.freeze({
+  id: "A".repeat(22),
+  rawId: "A".repeat(22),
+  response: {
+    clientDataJSON: "Y2xpZW50LWRhdGE",
+    attestationObject: "YXR0ZXN0YXRpb24tb2JqZWN0",
+    authenticatorData: "A".repeat(50),
+    transports: ["internal"],
+    publicKeyAlgorithm: -7,
   },
   type: "public-key",
   clientExtensionResults: {},
@@ -81,6 +105,108 @@ test("posts options, runs startAuthentication, verifies, and returns only author
   const verifyBody = JSON.parse(calls[1].init.body);
   assert.deepEqual(verifyBody, { organization_id: organizationId, operation: "device.enrollment.issue", challenge_id: challengeId, credential: assertion });
   assert.equal(calls[1].url.includes(challenge), false);
+});
+
+test("posts strict registration options, runs startRegistration, and returns only completion state", async () => {
+  const calls = [];
+  const registrationCalls = [];
+  const result = await registerPasskey({
+    organizationId,
+    csrfToken,
+    fetchImpl: async (url, init) => {
+      calls.push({ url: String(url), init });
+      const parsed = new URL(url, "https://console.example.test");
+      if (parsed.pathname === "/api/auth/webauthn/registration/options") return jsonResponse({ challenge_id: challengeId, options: registrationOptions });
+      if (parsed.pathname === "/api/auth/webauthn/registration/verify") return jsonResponse({ credential_id: registrationCredential.id, registered_at: "2026-08-12T10:00:00.000Z" }, 201);
+      throw new Error(`unexpected path: ${parsed.pathname}`);
+    },
+    startRegistrationImpl: async (input) => {
+      registrationCalls.push(input);
+      return registrationCredential;
+    },
+  });
+
+  assert.deepEqual(result, { registered: true });
+  assert.deepEqual(Object.keys(result), ["registered"]);
+  assert.deepEqual(calls.map((call) => call.url), [
+    "/api/auth/webauthn/registration/options",
+    "/api/auth/webauthn/registration/verify",
+  ]);
+  assert.deepEqual(registrationCalls, [{ optionsJSON: registrationOptions }]);
+  assert.deepEqual(JSON.parse(calls[0].init.body), { organization_id: organizationId });
+  assert.deepEqual(JSON.parse(calls[1].init.body), {
+    organization_id: organizationId,
+    challenge_id: challengeId,
+    credential: {
+      id: registrationCredential.id,
+      rawId: registrationCredential.rawId,
+      response: {
+        clientDataJSON: registrationCredential.response.clientDataJSON,
+        attestationObject: registrationCredential.response.attestationObject,
+        transports: registrationCredential.response.transports,
+      },
+      type: registrationCredential.type,
+      clientExtensionResults: registrationCredential.clientExtensionResults,
+    },
+  });
+  for (const call of calls) {
+    assert.equal(call.init.method, "POST");
+    assert.equal(call.init.credentials, "same-origin");
+    assert.equal(call.init.cache, "no-store");
+    assert.equal(call.init.redirect, "error");
+    assert.equal(call.init.headers.get("agentpass-csrf"), csrfToken);
+    assert.equal(call.init.headers.get("cache-control"), "no-store");
+  }
+  assert.equal(calls[1].url.includes(challenge), false);
+});
+
+test("rejects malformed registration options without invoking the authenticator", async () => {
+  let registrationCalls = 0;
+  await assert.rejects(
+    () => registerPasskey({
+      organizationId,
+      csrfToken,
+      fetchImpl: async () => jsonResponse({ challenge_id: challengeId, options: { ...registrationOptions, unexpected: true } }),
+      startRegistrationImpl: async () => {
+        registrationCalls += 1;
+        return registrationCredential;
+      },
+    }),
+    (error) => error instanceof WebAuthnClientError && error.code === "invalid_registration_options",
+  );
+  assert.equal(registrationCalls, 0);
+});
+
+test("rejects malformed registration credential and never posts it", async () => {
+  const calls = [];
+  await assert.rejects(
+    () => registerPasskey({
+      organizationId,
+      csrfToken,
+      fetchImpl: async (url, init) => {
+        calls.push({ url: String(url), init });
+        return jsonResponse({ challenge_id: challengeId, options: registrationOptions });
+      },
+      startRegistrationImpl: async () => ({ ...registrationCredential, rawId: "different" }),
+    }),
+    (error) => error instanceof WebAuthnClientError && error.code === "invalid_registration_credential",
+  );
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].url, "/api/auth/webauthn/registration/options");
+});
+
+test("rejects a non-exact registration completion response", async () => {
+  await assert.rejects(
+    () => registerPasskey({
+      organizationId,
+      csrfToken,
+      fetchImpl: async (url) => String(url).includes("/options")
+        ? jsonResponse({ challenge_id: challengeId, options: registrationOptions })
+        : jsonResponse({ credential_id: registrationCredential.id, registered_at: "2026-08-12T10:00:00.000Z", extra: "must reject" }, 201),
+      startRegistrationImpl: async () => registrationCredential,
+    }),
+    (error) => error instanceof WebAuthnClientError && error.code === "invalid_registration_result",
+  );
 });
 
 test("rejects malformed options without invoking WebAuthn or verification", async () => {

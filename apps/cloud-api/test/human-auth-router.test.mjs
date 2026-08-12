@@ -8,6 +8,7 @@ function fixture() {
   const router = createHumanAuthRouter({
     sessionApi: { async handle(input) { calls.push(["session", input]); return result; } },
     webauthnApi: { async handle(input) { calls.push(["webauthn", input]); return result; } },
+    registrationApi: { async handle(input) { calls.push(["registration", input]); return result; } },
   });
   return { router, calls };
 }
@@ -18,7 +19,9 @@ test("routes exact public auth paths and translates only the session path", asyn
   await router.handle({ ...base, url: "/api/auth/session" });
   await router.handle({ ...base, url: "/api/auth/webauthn/options" });
   await router.handle({ ...base, url: "/api/auth/webauthn/verify" });
-  assert.deepEqual(calls.map(([kind, input]) => [kind, input.url]), [["session", "/session"], ["webauthn", "/api/auth/webauthn/options"], ["webauthn", "/api/auth/webauthn/verify"]]);
+  await router.handle({ ...base, url: "/api/auth/webauthn/registration/options" });
+  await router.handle({ ...base, url: "/api/auth/webauthn/registration/verify" });
+  assert.deepEqual(calls.map(([kind, input]) => [kind, input.url]), [["session", "/session"], ["webauthn", "/api/auth/webauthn/options"], ["webauthn", "/api/auth/webauthn/verify"], ["registration", "/api/auth/webauthn/registration/options"], ["registration", "/api/auth/webauthn/registration/verify"]]);
   assert.equal(calls.every(([, input]) => input.headers === base.headers && input.body === base.body), true);
 });
 

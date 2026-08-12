@@ -10,6 +10,8 @@ const HUMAN_AUTH_MAX_BODY_BYTES = 64 * 1024;
 const HUMAN_AUTH_SESSION_PATH = "/api/auth/session";
 const HUMAN_AUTH_OPTIONS_PATH = "/api/auth/webauthn/options";
 const HUMAN_AUTH_VERIFY_PATH = "/api/auth/webauthn/verify";
+const HUMAN_AUTH_REGISTRATION_OPTIONS_PATH = "/api/auth/webauthn/registration/options";
+const HUMAN_AUTH_REGISTRATION_VERIFY_PATH = "/api/auth/webauthn/registration/verify";
 const UUID = "([0-9a-fA-F-]{36})";
 
 export function createCloudApi({ store, tokenRecords = [], bundleSigner, now = () => Date.now(), monotonicNow, replayCache = createReplayCache(), rateLimiter, admissionRateLimiter, verifyRecentWebAuthn, recentAuthService, humanAuthApi } = {}) {
@@ -252,7 +254,7 @@ export function createCloudApi({ store, tokenRecords = [], bundleSigner, now = (
 }
 
 function isExactHumanAuthPath(url) {
-  return !url.search && !url.hash && (url.pathname === HUMAN_AUTH_SESSION_PATH || url.pathname === HUMAN_AUTH_OPTIONS_PATH || url.pathname === HUMAN_AUTH_VERIFY_PATH);
+  return !url.search && !url.hash && (url.pathname === HUMAN_AUTH_SESSION_PATH || url.pathname === HUMAN_AUTH_OPTIONS_PATH || url.pathname === HUMAN_AUTH_VERIFY_PATH || url.pathname === HUMAN_AUTH_REGISTRATION_OPTIONS_PATH || url.pathname === HUMAN_AUTH_REGISTRATION_VERIFY_PATH);
 }
 
 function transportPrincipalId(request) {

@@ -26,7 +26,7 @@ export async function createCloudRuntime({ env = process.env, logger = console, 
   try {
     if (config.humanAuth) {
       postgresRuntime = await postgresFactory({ env, applicationVersion: "0.18.0" });
-      humanAuthRuntime = humanAuthFactory({ postgresRuntime, tokenRecords, origin: config.humanAuth.origin, rpId: config.humanAuth.rpId });
+      humanAuthRuntime = humanAuthFactory({ postgresRuntime, tokenRecords, origin: config.humanAuth.origin, rpId: config.humanAuth.rpId, identityProvider: config.humanAuth.identityProvider });
     }
     server = createCloudApi({
       store,
@@ -81,13 +81,15 @@ function humanAuthConfig(env) {
   const database = env.AGENTPASS_DATABASE_URL;
   const origin = env.AGENTPASS_CONSOLE_ORIGIN;
   const rpId = env.AGENTPASS_WEBAUTHN_RP_ID;
+  const identityProvider = env.AGENTPASS_IDENTITY_PROVIDER ?? "chatgpt";
   if (database === undefined && origin === undefined && rpId === undefined) return null;
   if (typeof database !== "string" || database.length < 1 || typeof origin !== "string" || typeof rpId !== "string") throw new Error("Human auth configuration is incomplete");
   let parsed;
   try { parsed = new URL(origin); } catch { throw new Error("AGENTPASS_CONSOLE_ORIGIN is invalid"); }
   if (parsed.protocol !== "https:" || parsed.origin !== origin || parsed.pathname !== "/" || parsed.username || parsed.password || parsed.search || parsed.hash) throw new Error("AGENTPASS_CONSOLE_ORIGIN is invalid");
   if (!/^[A-Za-z0-9](?:[A-Za-z0-9.-]*[A-Za-z0-9])?$/.test(rpId) || (parsed.hostname !== rpId && !parsed.hostname.endsWith(`.${rpId}`))) throw new Error("AGENTPASS_WEBAUTHN_RP_ID is invalid");
-  return Object.freeze({ origin, rpId });
+  if (!/^[a-z][a-z0-9._-]{0,63}$/.test(identityProvider)) throw new Error("AGENTPASS_IDENTITY_PROVIDER is invalid");
+  return Object.freeze({ origin, rpId, identityProvider });
 }
 
 function readProtectedJson(file, label, maxBytes) {
