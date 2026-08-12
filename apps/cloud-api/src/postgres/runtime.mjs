@@ -6,13 +6,14 @@ import { createPostgresHumanRepository } from "./human-repository.mjs";
 import { createPostgresOrganizationRepository } from "./organization-repository.mjs";
 import { createTenantRepositoryFactory } from "./repository.mjs";
 import { createSharedControlRepository } from "./shared-control-repository.mjs";
+import { createPostgresRefreshHintNotifier } from "./refresh-hint-notifier.mjs";
 import {
   createDrainController,
   createOperationalHealth,
   createOperationalMetrics
 } from "./operational-health.mjs";
 
-export async function createPostgresRuntime({ env = process.env, PoolClass = Pool, applicationVersion = "unknown" } = {}) {
+export async function createPostgresRuntime({ env = process.env, PoolClass = Pool, applicationVersion = "unknown", refreshNonceCodec } = {}) {
   const config = loadPostgresConfig(env);
   const pool = new PoolClass({ connectionString: config.connectionString, ssl: { rejectUnauthorized: true }, max: config.maxConnections, connectionTimeoutMillis: config.connectionTimeoutMs, idleTimeoutMillis: config.idleTimeoutMs, statement_timeout: config.statementTimeoutMs, lock_timeout: config.lockTimeoutMs, query_timeout: config.statementTimeoutMs + 1_000, allowExitOnIdle: false });
   const migrationRunner = createMigrationRunner({ client: pool, applicationVersion });
@@ -30,6 +31,7 @@ export async function createPostgresRuntime({ env = process.env, PoolClass = Poo
   client.release();
   let closed = false;
   const drainController = createDrainController();
+  const refreshHintNotifier = createPostgresRefreshHintNotifier({ pool });
   const operationalMetrics = createOperationalMetrics();
   const operationalHealth = createOperationalHealth({
     pool,
@@ -41,6 +43,7 @@ export async function createPostgresRuntime({ env = process.env, PoolClass = Poo
   async function closePool() {
     if (closed) return;
     closed = true;
+    await refreshHintNotifier.close();
     await pool.end();
   }
   async function close() {
@@ -60,7 +63,8 @@ export async function createPostgresRuntime({ env = process.env, PoolClass = Poo
     capabilityAuthorityRepository,
     sharedControlRepository,
     auditCursorSecret,
-    capabilityNonceSecret
+    capabilityNonceSecret,
+    refreshNonceCodec
   });
   return Object.freeze({
     pool,
@@ -69,6 +73,7 @@ export async function createPostgresRuntime({ env = process.env, PoolClass = Poo
     capabilityAuthorityRepository,
     sharedControlRepository,
     controlPlaneStore,
+    refreshHintNotifier,
     tenants: createTenantRepositoryFactory({ client: pool }),
     operationalHealth,
     operationalMetrics,
@@ -93,7 +98,7 @@ export function loadPostgresConfig(env = {}) {
   }
   return Object.freeze({
     connectionString: url.toString(),
-    maxConnections: integer(env.AGENTPASS_DATABASE_MAX_CONNECTIONS ?? "10", 1, 100),
+    maxConnections: integer(env.AGENTPASS_DATABASE_MAX_CONNECTIONS ?? "10", 2, 100),
     connectionTimeoutMs: integer(env.AGENTPASS_DATABASE_CONNECT_TIMEOUT_MS ?? "5000", 250, 30_000),
     idleTimeoutMs: integer(env.AGENTPASS_DATABASE_IDLE_TIMEOUT_MS ?? "30000", 1_000, 300_000),
     statementTimeoutMs: integer(env.AGENTPASS_DATABASE_STATEMENT_TIMEOUT_MS ?? "8000", 250, 60_000),

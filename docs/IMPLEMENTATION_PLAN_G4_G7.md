@@ -70,7 +70,7 @@ Exit gate: Node and Swift decode the same fixtures and produce byte-identical si
 
 ### G4.1 Cloud publication and polling
 
-Current implementation checkpoint (2026-08-13): migration `0012` now defines monotonic authority generations, immutable device key epochs, per-device desired/observed state, append-only bundle statement history, refresh outbox/delivery attempts, and signed ACK evidence. The authority repository and Device API boundaries implement snapshot binding, bounded polling, strict ACK validation, duplicate/conflict handling, and exact-schema readiness at version 12. This checkpoint is deliberately **not** the G4.1 exit gate: hosted-store wiring, restart-safe nonce reconstruction, transactional integration with every reducing mutation, two-instance concurrency evidence, and production long-poll delivery remain open.
+Current implementation checkpoint (2026-08-13): schema version `14` adds restart-safe nonce key identity and commit-only refresh notifications to the generation/key-epoch/outbox/ACK foundation. Hosted runtime uses a purpose-separated refresh signer, reconstructs the same 16-byte nonce across restart or instance failover, records delivery evidence before returning a hint, and holds one bounded PostgreSQL listener with initial/final authoritative queries. PostgreSQL 17 evidence covers two pools racing exact reduction and ACK, rollback, notification wakeup, nonce mismatch rejection, blocked ACK observation, and restart reconstruction. Device lookup pins the active immutable key epoch. Revocation and emergency-stop reductions are commit-coupled. The G4.1 exit gate remains open for policy narrowing, member removal/role reduction, session/credential epoch invalidation, capability revocation propagation, production latency evidence, and process-kill fault injection.
 
 Database work:
 
@@ -93,29 +93,34 @@ Exit gate: two Cloud instances and PostgreSQL prove no pre-commit hint, no lost 
 #### G4.1 remaining implementation sequence
 
 1. **Restart-safe refresh nonce ownership**
+   - Status: implemented and locally qualified, including key rotation/restart/cross-binding/redaction tests; production secret-manager rotation evidence remains.
    - derive each 16-byte nonce with a dedicated secret-manager HMAC key from the immutable tuple `organization_id/device_id/generation/outbox_id`;
    - persist only the nonce digest and a non-secret nonce-key version, never the raw nonce;
    - make every Cloud instance able to reconstruct the same nonce after restart or failover;
    - rotate by dual-read/single-write key version and retain old versions only through ACK/outbox retention;
    - add known-answer, rotation, restart, cross-tenant substitution, and log-redaction tests.
 2. **Hosted runtime wiring**
+   - Status: implemented and locally qualified against PostgreSQL 17; managed signer work remains G7.1.
    - expose `pollDeviceRefresh`, `snapshotAndAssignBundleHead`, `acknowledgeBundle`, and refresh-state reads through the PostgreSQL store facade without widening its public admin API;
    - return the active immutable `device_key_epoch` and its exact public key from the device-auth lookup path;
    - introduce a purpose-separated `refresh-hint` signer instead of treating the bundle-signing key as an implicit general signer;
    - have the Cloud layer construct and sign the hint from authoritative state; repository rows must never masquerade as signed hints;
    - fail closed when nonce key, signer, active key epoch, or authority state is unavailable.
 3. **Commit-coupled authority reductions**
+   - Status: partial. Revocation/device/emergency-stop paths are coupled; policy, membership, session/credential, and capability paths remain P0.
    - route emergency stop, device revoke, member removal/role reduction, policy narrowing, credential/session epoch invalidation, and capability revocation through one transaction helper;
    - acquire the organization authority lock in one documented order, mutate authority, increment generation, enqueue every affected device, and append admin audit before commit;
    - prove rollback leaves no mutation, generation, outbox row, audit row, or observable notification;
    - make exact idempotent replay return the committed generation without incrementing it again.
 4. **Bounded publication and long-poll**
+   - Status: implemented with schema `0014`, one dedicated listener, 30-second waits, bounded waiters, delivery attempts, and final-query fallback; fixed-label propagation metrics remain.
    - add one dedicated PostgreSQL notification listener per Cloud process, with an initial query and final query as correctness fallbacks;
    - use notifications only as wake-up hints; correctness always comes from the committed generation query;
    - cap waits at 30 seconds, listeners and waiter count per process, response size, delivery retries, and retry age;
    - record only fixed-label metrics for propagation latency, active waiters, delivery failures, stale ACKs, and queue age;
    - return `204` for no change and never return policy, capability, or authority bodies from the refresh route.
 5. **Real-boundary qualification**
+   - Status: partial. PostgreSQL 17 two-pool races, duplicate/reordered behavior, rollback, listener wakeup, restart nonce reconstruction, nonce mismatch, and blocked ACK pass. Process-kill timing and p50/p95/p99 evidence remain.
    - run migrations and repository operations against PostgreSQL 17, including two connections racing reduction, bundle assignment, polling, and ACK;
    - kill one Cloud process after commit and before publish, then prove another process serves the same generation and nonce;
    - reorder and duplicate notifications and ACKs, rotate the nonce/signing key, and inject database/signer timeouts;

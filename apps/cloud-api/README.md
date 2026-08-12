@@ -45,7 +45,7 @@ Hosted additionally requires `AGENTPASS_CAPABILITY_NONCE_SECRET` and `AGENTPASS_
 
 Human authentication modules provide opaque hash-only sessions, exact-origin and session-bound CSRF enforcement, PostgreSQL-backed one-time WebAuthn registration/authentication challenges, a maintained `@simplewebauthn/server` verifier adapter, and operation-bound recent authorization. A recent authorization is consumed atomically for one member, organization, and operation; it is not a reusable bearer token. Migration `0004_human_identity_and_webauthn_registration.sql` adds immutable provider/subject mappings and passkey metadata while challenges retain the exact RP/origin/UV/session/member/organization binding.
 
-When Human Auth is enabled, capability issuance also requires the PostgreSQL organization, member, device, and agent projection to exist. The exact canonical signed-statement hash and issuing membership version are recorded before a bearer envelope is returned. Membership reduction revokes those rows transactionally; every subsequent device bundle fetch merges the bounded, unexpired PostgreSQL revocation set into `revoked_capabilities`. If the authority projection is missing, unavailable, malformed, or exceeds the ControlBundle protocol bound, issuance/bundle generation fails closed. Existing installed bundles learn the change on their next authenticated native refresh; push-triggered refresh is still a production hardening item.
+When Human Auth is enabled, capability issuance also requires the PostgreSQL organization, member, device, and agent projection to exist. The exact canonical signed-statement hash and issuing membership version are recorded before a bearer envelope is returned. Membership reduction revokes those rows transactionally; every subsequent device bundle fetch merges the bounded, unexpired PostgreSQL revocation set into `revoked_capabilities`. If the authority projection is missing, unavailable, malformed, or exceeds the ControlBundle protocol bound, issuance/bundle generation fails closed. Existing installed bundles learn the change through the authenticated Device API refresh route. Hosted Cloud uses a commit-only PostgreSQL notification as a wake-up hint and always performs a final authoritative query, so lost or duplicated notifications do not change correctness.
 
 Device Activity listing is cursor-based. `GET /v1/organizations/{organization_id}/audit/events` requires one `device_id`, accepts `limit` from 1 through 500 and an optional opaque `cursor`, and returns `{events,next_cursor}` in descending `(device_timestamp,device_id,event_id)` order. Cursors are HMAC-authenticated, expire after 24 hours, and are bound to the exact organization and device. Hosted instances derive this purpose-separated cursor authority from the shared Human cursor root so cursors survive restart and instance switching. Hosted now uses PostgreSQL for the complete control plane; the file store is evaluation-only.
 
@@ -56,10 +56,14 @@ Start the API behind a TLS reverse proxy:
 ```bash
 export AGENTPASS_CLOUD_PROFILE=hosted
 export AGENTPASS_CLOUD_BUNDLE_PRIVATE_KEY_PATH=/absolute/protected/agentpass-cloud/bundle-private.pem
+export AGENTPASS_CLOUD_REFRESH_PRIVATE_KEY_PATH=/absolute/protected/agentpass-cloud/refresh-private.pem
+export AGENTPASS_CLOUD_REFRESH_KEY_ID=refresh-2026-08
+export AGENTPASS_CLOUD_REFRESH_NONCE_KEYRING_PATH=/absolute/protected/agentpass-cloud/refresh-nonce-keyring.json
 export AGENTPASS_CLOUD_HOST=127.0.0.1
 export AGENTPASS_CLOUD_PORT=8080
 # Enable the production Human Auth path as one all-or-nothing group:
 export AGENTPASS_DATABASE_URL='postgresql://agentpass:...@db.example/agentpass?sslmode=verify-full'
+export AGENTPASS_DATABASE_MAX_CONNECTIONS=10 # minimum 2; one is reserved while LISTEN is active
 export AGENTPASS_CONSOLE_ORIGIN='https://console.example.com'
 export AGENTPASS_WEBAUTHN_RP_ID='example.com'
 export AGENTPASS_IDENTITY_PROVIDER='chatgpt'
@@ -73,6 +77,8 @@ export AGENTPASS_CAPABILITY_NONCE_SECRET="$(openssl rand -base64 32 | tr '+/' '-
 export AGENTPASS_OPERATIONAL_PROBE_SECRET="$(openssl rand -base64 32 | tr '+/' '-_' | tr -d '=\n')"
 npm start
 ```
+
+The refresh signing key must be a separate Ed25519 key from the ControlBundle key. The nonce keyring file is owner-only JSON in this exact form: `{"version":1,"active_key_id":"refresh-nonce-v1","keys":{"refresh-nonce-v1":"<canonical 32-byte base64url secret>"}}`. Every Cloud instance must receive the same active and retained nonce keys. Rotation is dual-read/single-write: add the new key, switch `active_key_id`, retain old keys until every matching outbox/ACK has expired, then remove them. PostgreSQL stores only the key ID and SHA-256 digest, never the raw derived nonce.
 
 Hosted exposes secret-free response contracts at `GET /health/ready` and `GET /health/metrics`, but both endpoints require the `AgentPass-Operational-Token` header. Readiness verifies database access, exact migration version/checksums, pool saturation, and drain state. Shutdown marks readiness false before waiting for tracked requests and closing PostgreSQL. Use [the cutover runbook](../../docs/POSTGRES_CUTOVER_RUNBOOK.md) and [backup/restore manifest procedure](../../docs/POSTGRES_BACKUP_RESTORE.md); committed migrations are forward-only and rollback changes application traffic, never authority history.
 

@@ -6,8 +6,7 @@ import { canonicalJson, intersectScopes } from "../../../packages/capability/src
 import {
   bundleAcknowledgementSigningData,
   normalizeRefreshHint,
-  parseBundleAcknowledgementJson,
-  refreshHintSigningData
+  parseBundleAcknowledgementJson
 } from "../../../packages/protocol/src/index.mjs";
 import { RateLimiterCapacityError, createRateLimiter } from "./rate-limit.mjs";
 
@@ -25,7 +24,7 @@ const UUID = "([0-9a-fA-F-]{36})";
 const UUID_VALUE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu;
 const OPERATIONAL_METRIC_KEYS = Object.freeze(["lock_timeout_total", "lock_wait_total", "replay_denial_total", "rate_limit_denial_total", "stale_ack_total", "audit_gap_total"]);
 
-export function createCloudApi({ store, tokenRecords = [], bundleSigner, now = () => Date.now(), monotonicNow, replayCache = createReplayCache(), deviceReplayConsumer, rateLimiter, admissionRateLimiter, verifyRecentWebAuthn, recentAuthService, humanAuthApi, humanSession, capabilityAuthorityRepository, capabilityRevocationSource, auditRepository, enrollmentCredentialSecret, trackInFlight, readiness, operationalMetrics, operationalProbeSecret } = {}) {
+export function createCloudApi({ store, tokenRecords = [], bundleSigner, refreshHintService, now = () => Date.now(), monotonicNow, replayCache = createReplayCache(), deviceReplayConsumer, rateLimiter, admissionRateLimiter, verifyRecentWebAuthn, recentAuthService, humanAuthApi, humanSession, capabilityAuthorityRepository, capabilityRevocationSource, auditRepository, enrollmentCredentialSecret, trackInFlight, readiness, operationalMetrics, operationalProbeSecret } = {}) {
   if (!store) throw new TypeError("store is required");
   if (verifyRecentWebAuthn !== undefined && recentAuthService !== undefined) throw new TypeError("configure verifyRecentWebAuthn or recentAuthService, not both");
   if (humanAuthApi !== undefined && (!humanAuthApi || typeof humanAuthApi.handle !== "function")) throw new TypeError("humanAuthApi must expose handle()");
@@ -33,6 +32,7 @@ export function createCloudApi({ store, tokenRecords = [], bundleSigner, now = (
   if (capabilityRevocationSource !== undefined && (!capabilityRevocationSource || typeof capabilityRevocationSource.listRevokedCapabilityIds !== "function")) throw new TypeError("capabilityRevocationSource must expose listRevokedCapabilityIds()");
   if (capabilityAuthorityRepository !== undefined && (!capabilityAuthorityRepository || typeof capabilityAuthorityRepository.issueCapabilityMetadata !== "function")) throw new TypeError("capabilityAuthorityRepository must expose issueCapabilityMetadata()");
   if (auditRepository !== undefined && (!auditRepository || typeof auditRepository.listDeviceAuditEvents !== "function")) throw new TypeError("auditRepository must expose listDeviceAuditEvents()");
+  if (refreshHintService !== undefined && (!refreshHintService || typeof refreshHintService.poll !== "function")) throw new TypeError("refreshHintService must expose poll()");
   if (deviceReplayConsumer !== undefined && typeof deviceReplayConsumer !== "function") throw new TypeError("deviceReplayConsumer must be a function");
   if (enrollmentCredentialSecret !== undefined && (!Buffer.isBuffer(enrollmentCredentialSecret) || enrollmentCredentialSecret.length !== 32)) throw new TypeError("enrollmentCredentialSecret must be an exact 32-byte Buffer");
   if (trackInFlight !== undefined && typeof trackInFlight !== "function") throw new TypeError("trackInFlight must be a function");
@@ -288,7 +288,7 @@ export function createCloudApi({ store, tokenRecords = [], bundleSigner, now = (
       }, true),
       route("GET", new RegExp(`^/v1/organizations/(?<organizationId>${UUID})/devices/(?<deviceId>${UUID})/refresh$`), null, async ({ organizationId, principal, match, url, request }) => {
         if (principal.device_id !== match.deviceId) throw apiError("audience_mismatch", 403, "Device cannot poll another device's refresh state");
-        if (typeof store.pollDeviceRefresh !== "function") throw apiError("refresh_unavailable", 503, "Refresh polling is unavailable");
+        if (!refreshHintService) throw apiError("refresh_unavailable", 503, "Refresh polling is unavailable");
         requireExactQueryKeys(url, new Set(["after_generation", "wait_ms"]));
         const afterGeneration = optionalBoundedIntegerQuery(url, "after_generation", 0, Number.MAX_SAFE_INTEGER, 0);
         const waitMs = optionalBoundedIntegerQuery(url, "wait_ms", 0, 30_000, 0);
@@ -300,15 +300,14 @@ export function createCloudApi({ store, tokenRecords = [], bundleSigner, now = (
         request.once("close", disconnected);
         let result;
         try {
-          result = await store.pollDeviceRefresh({ organization_id: organizationId, device_id: match.deviceId, after_generation: afterGeneration, wait_ms: waitMs, signal: abort.signal });
+          result = await refreshHintService.poll({ organization_id: organizationId, device_id: match.deviceId, after_generation: afterGeneration, wait_ms: waitMs, signal: abort.signal });
         } finally {
           request.off("aborted", disconnected);
           request.off("close", disconnected);
           if (request.socket && Number.isFinite(previousSocketTimeout)) request.socket.setTimeout(previousSocketTimeout);
         }
         if (result === null || result === undefined) return { status: 204, body: undefined };
-        if (!result || typeof result !== "object" || Array.isArray(result) || Object.keys(result).sort().join(",") !== "hint") throw apiError("refresh_unavailable", 503, "Refresh polling is unavailable");
-        const hint = verifyRefreshHint(result.hint, bundleSigner, { organizationId, deviceId: match.deviceId, afterGeneration, now: now() });
+        const hint = validateRefreshHintResponse(result, { organizationId, deviceId: match.deviceId, afterGeneration, now: now() });
         return { body: { hint } };
       }, true),
       route("GET", new RegExp(`^/v1/organizations/(?<organizationId>${UUID})/bundles/(?<deviceId>${UUID})$`), null, async ({ organizationId, principal, match }) => {
@@ -594,7 +593,7 @@ function positiveGeneration(value) {
   return generation;
 }
 
-function verifyRefreshHint(input, signer, { organizationId, deviceId, afterGeneration, now }) {
+function validateRefreshHintResponse(input, { organizationId, deviceId, afterGeneration, now }) {
   let hint;
   try { hint = normalizeRefreshHint(input); }
   catch { throw apiError("refresh_unavailable", 503, "Refresh polling is unavailable"); }
@@ -604,14 +603,6 @@ function verifyRefreshHint(input, signer, { organizationId, deviceId, afterGener
   const publishedAt = Date.parse(hint.published_at);
   const expiresAt = Date.parse(hint.expires_at);
   if (publishedAt > now + 60_000 || expiresAt <= now) throw apiError("refresh_unavailable", 503, "Refresh polling is unavailable");
-  let publicKey;
-  try {
-    const source = signer?.publicKey ?? signer?.public_key ?? signer?.privateKey ?? signer?.private_key;
-    publicKey = source?.type === "public" ? source : crypto.createPublicKey(source);
-  } catch { throw apiError("refresh_unavailable", 503, "Refresh polling is unavailable"); }
-  if (publicKey.asymmetricKeyType !== "ed25519" || signer?.keyId !== hint.key_id) throw apiError("refresh_unavailable", 503, "Refresh polling is unavailable");
-  const signature = Buffer.from(hint.signature, "base64url");
-  if (!crypto.verify(null, refreshHintSigningData(hint), publicKey, signature)) throw apiError("refresh_unavailable", 503, "Refresh polling is unavailable");
   return hint;
 }
 
@@ -717,6 +708,8 @@ function mapError(error) {
   if (["ERR_ENROLLMENT_EXPIRED", "ERR_ENROLLMENT_CONSUMED", "ERR_ENROLLMENT_STATE", "ERR_ENROLLMENT_BINDING"].includes(error.code)) return { status: 409, code: error.code.toLowerCase(), message: "Device enrollment conflict" };
   if (error.code === "ERR_VERSION_CONFLICT") return { status: 409, code: "version_conflict", message: "Resource version conflict" };
   if (error.code === "ERR_ACK_CONFLICT") return { status: 409, code: "ack_conflict", message: "Bundle acknowledgement conflicts with prior evidence" };
+  if (error.code === "ERR_REFRESH_BUSY") return { status: 503, code: "refresh_busy", message: "Refresh polling capacity is exhausted", headers: { "retry-after": "1" } };
+  if (["ERR_REFRESH_ABORTED", "ERR_REFRESH_INPUT", "ERR_REFRESH_UNAVAILABLE"].includes(error.code)) return { status: 503, code: "refresh_unavailable", message: "Refresh polling is unavailable" };
   if (error.code === "ERR_IDEMPOTENCY_CONFLICT" || error.code === "ERR_UNIQUE_CONSTRAINT") return { status: 409, code: error.code.toLowerCase(), message: "Mutation conflict" };
   if (String(error.code).startsWith("ERR_")) return { status: 400, code: error.code.toLowerCase(), message: "Request was rejected" };
   return { status: 500, code: "internal_error", message: "Internal error" };

@@ -57,3 +57,21 @@ test("transaction commits on success and rolls back on failure", async () => {
   await assert.rejects(withTransaction(failing, async () => { throw new Error("boom"); }), /boom/);
   assert.equal(failing.calls.at(-1).text, "ROLLBACK");
 });
+
+test("transaction checks out exactly one pool client and releases it", async () => {
+  const checkedOut = new FakePgClient();
+  let connects = 0;
+  let releases = 0;
+  checkedOut.release = () => { releases += 1; };
+  const pool = {
+    query() { throw new Error("pool.query must not execute transaction statements"); },
+    async connect() { connects += 1; return checkedOut; }
+  };
+  await withTransaction(pool, async (transactionClient) => {
+    assert.equal(transactionClient, checkedOut);
+    await transactionClient.query("SELECT 1", []);
+  });
+  assert.equal(connects, 1);
+  assert.equal(releases, 1);
+  assert.deepEqual(checkedOut.calls.map(({ text }) => text), ["BEGIN", "SELECT 1", "COMMIT"]);
+});

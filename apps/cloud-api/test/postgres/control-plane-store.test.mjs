@@ -19,7 +19,8 @@ function repositories(overrides = {}) {
     "createDeviceEnrollment", "createPolicy", "createRevocation", "getAuditHealth", "getOrganization",
     "ingestDeviceAuditEvents", "issueCapabilityMetadata", "listAdminAuditEvents", "listAgents", "listCapabilities",
     "listDeviceAuditEvents", "listDevices", "listPolicies", "listRevocations", "listRevokedCapabilityIds",
-    "reserveCapability", "updatePolicy"
+    "reserveCapability", "updatePolicy", "snapshotAndAssignBundleHead", "pollDeviceRefresh",
+    "getDeviceRefreshState", "acknowledgeBundle"
   ];
   const repository = Object.fromEntries(methods.map((method) => [method, async (input) => {
     calls.push({ method, input });
@@ -40,6 +41,35 @@ test("exposes exactly the Cloud server contract and freezes the facade", () => {
     sharedControlRepository: { withTransaction() {} }
   });
   assert.equal(Object.isFrozen(store), true);
+  assert.deepEqual(Object.keys(store).sort(), [...CONTROL_PLANE_STORE_METHODS].sort());
+});
+
+test("exposes hosted device-plane methods without widening the enumerable admin contract", async () => {
+  const { repository, calls } = repositories();
+  const store = createPostgresControlPlaneStore({ authorityRepository: repository });
+  for (const method of ["snapshotAndAssignBundleHead", "pollDeviceRefresh", "getDeviceRefreshState", "acknowledgeBundle"]) {
+    const descriptor = Object.getOwnPropertyDescriptor(store, method);
+    assert.equal(typeof store[method], "function");
+    assert.equal(descriptor.enumerable, false);
+  }
+
+  await store.snapshotAndAssignBundleHead({ organizationId, deviceId, private_key: "-----BEGIN PRIVATE KEY-----secret" });
+  await store.pollDeviceRefresh({ organizationId, deviceId, after_generation: 4, privateKey: "private-secret" });
+  await store.getDeviceRefreshState({ organizationId, deviceId, secret_key: "secret", principal: { private_key: "nested-private" } });
+  await store.acknowledgeBundle({ organizationId, deviceId, type: "bundle-ack.v1", signature: "public-signature", private_key_pem: "private-secret" });
+
+  assert.deepEqual(calls.map(({ method }) => method), [
+    "snapshotAndAssignBundleHead", "pollDeviceRefresh", "getDeviceRefreshState", "acknowledgeBundle"
+  ]);
+  for (const { input } of calls) {
+    assert.equal(input.organization_id, organizationId);
+    assert.equal(Object.hasOwn(input, "private_key"), false);
+    assert.equal(Object.hasOwn(input, "privateKey"), false);
+    assert.equal(Object.hasOwn(input, "private_key_pem"), false);
+    assert.equal(Object.hasOwn(input, "secret_key"), false);
+    assert.doesNotMatch(JSON.stringify(input), /private-secret|nested-private|BEGIN PRIVATE KEY/u);
+    assert.equal(input.principal?.private_key, undefined);
+  }
   assert.deepEqual(Object.keys(store).sort(), [...CONTROL_PLANE_STORE_METHODS].sort());
 });
 
@@ -76,6 +106,25 @@ test("propagates safe actor/principal identity while dropping session and bearer
   assert.equal(Object.hasOwn(input, "private_key"), false);
 });
 
+test("routes hosted revocations through the commit-coupled generation and outbox reduction", async () => {
+  const calls = [];
+  const revocation = { revocation_id: "44444444-4444-4444-8444-444444444444", organization_id: organizationId };
+  const store = createPostgresControlPlaneStore({
+    authorityRepository: {
+      async reduceAuthorityAndEnqueueRefresh(input) {
+        calls.push(input);
+        return { organization_id: organizationId, generation: 3, devices: [], revocation };
+      }
+    }
+  });
+  const result = await store.createRevocation({ organizationId, targetType: "device", targetId: deviceId, reason: "operator", createdBy: memberId, idempotencyKey: "revoke-device-3" });
+  assert.equal(result, revocation);
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].organization_id, organizationId);
+  assert.equal(calls[0].reduction.organization_id, organizationId);
+  assert.equal(calls[0].reduction.targetId, deviceId);
+});
+
 test("maps database failures to one constant public error without a cause", async () => {
   const { repository } = repositories({ listDevices: async () => { throw new Error("password=secret relation=private"); } });
   const store = createPostgresControlPlaneStore({ resourceRepository: repository });
@@ -98,7 +147,7 @@ test("maps database failures to one constant public error without a cause", asyn
 
 test("fails closed for server methods with no safe PostgreSQL mapping", async () => {
   const store = createPostgresControlPlaneStore({});
-  for (const method of ["getOrganization", "reserveCapability", "listCapabilities", "appendAdminAuditEvent", "listAdminAuditEvents"]) {
+  for (const method of ["getOrganization", "reserveCapability", "listCapabilities", "appendAdminAuditEvent", "listAdminAuditEvents", "snapshotAndAssignBundleHead", "pollDeviceRefresh", "getDeviceRefreshState", "acknowledgeBundle"]) {
     await assert.rejects(store[method]({ organizationId }), (error) => {
       assert.equal(error.code, CONTROL_PLANE_STORE_ERROR_CODES.METHOD_UNAVAILABLE);
       assert.equal(error.status, 503);

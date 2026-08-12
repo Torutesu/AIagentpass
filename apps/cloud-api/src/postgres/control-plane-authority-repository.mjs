@@ -12,6 +12,7 @@ import {
 } from "../../../../packages/protocol/src/index.mjs";
 import { auditCursorBinding, createAuditCursorCodec, normalizeAuditPageInput } from "../audit-pagination.mjs";
 import { createCapabilityAuthorityRepository } from "./capability-authority-repository.mjs";
+import { REFRESH_NONCE_KEY_ID_PATTERN } from "./refresh-nonce-codec.mjs";
 import { assertTenantId, PostgresRepositoryError, withTransaction } from "./repository.mjs";
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu;
@@ -30,6 +31,23 @@ const MAX_REFRESH_TTL_MS = 5 * 60 * 1000;
 const REFRESH_STATE_SET = new Set(DEVICE_REFRESH_STATES);
 const ACK_RESULT_SET = new Set(BUNDLE_ACK_RESULTS);
 const ACK_REASON_SET = new Set(BUNDLE_ACK_REASON_CODES);
+
+/**
+ * Exact unsigned metadata returned by pollDeviceRefresh.  The values are
+ * deliberately descriptive rather than a second runtime schema; the actual
+ * row is normalized and frozen by publicRefreshPollMetadata().
+ */
+export const DEVICE_REFRESH_POLL_RETURN_SHAPE = Object.freeze({
+  organization_id: "uuid",
+  device_id: "uuid",
+  desired_generation: "positive integer",
+  refresh_state: "frozen device refresh state",
+  outbox_id: "uuid",
+  refresh_nonce_key_id: "refresh-nonce-v[1-9][0-9]{0,8}",
+  refresh_nonce_digest: "lower-case SHA-256 hex",
+  published_at: "immutable outbox created_at ISO timestamp",
+  expires_at: "ISO timestamp after published_at"
+});
 
 /**
  * These are intentionally public metadata, not a migration shim.  They make
@@ -52,11 +70,14 @@ export class ControlPlaneAuthorityRepositoryError extends PostgresRepositoryErro
  * lock.  The method names intentionally mirror the file CloudStore and the
  * capability/audit interfaces consumed by server.mjs.
  */
-export function createControlPlaneAuthorityRepository({ client, cursorCodec, cursorSecret, now = () => new Date().toISOString() } = {}) {
+export function createControlPlaneAuthorityRepository({ client, cursorCodec, cursorSecret, refreshNonceCodec, now = () => new Date().toISOString() } = {}) {
   assertClient(client);
   if (typeof now !== "function") throw new ControlPlaneAuthorityRepositoryError("ERR_CLOCK", "now must be a function");
 
   const capabilityAuthority = createCapabilityAuthorityRepository({ client, now });
+  if (refreshNonceCodec !== undefined && (!refreshNonceCodec || typeof refreshNonceCodec.derive !== "function" || typeof refreshNonceCodec.activeKeyId !== "string")) {
+    throw new ControlPlaneAuthorityRepositoryError("ERR_REFRESH_NONCE_CODEC", "refreshNonceCodec must expose derive() and activeKeyId");
+  }
   const auditCursor = cursorCodec ?? createAuditCursorCodec({ secret: cursorSecret, now });
   if (!auditCursor || typeof auditCursor.encode !== "function" || typeof auditCursor.decode !== "function") {
     throw new ControlPlaneAuthorityRepositoryError("ERR_CURSOR", "cursorCodec must expose encode() and decode()");
@@ -326,6 +347,7 @@ export function createControlPlaneAuthorityRepository({ client, cursorCodec, cur
 
   async function advanceAuthorityGenerationAndEnqueueRefresh(input = {}) {
     const values = normalizeAuthorityAdvanceInput(input, now);
+    const nonceCodec = requireRefreshNonceCodec(refreshNonceCodec);
     return databaseOperation(() => transaction(client, async (tx) => {
       // This is the repository-wide organization lock. The migration helper
       // takes its own compatible generation lock as well; keeping this lock
@@ -337,6 +359,20 @@ export function createControlPlaneAuthorityRepository({ client, cursorCodec, cur
         await assertActiveMember(tx, values.organizationId, values.reduction.createdBy);
         await assertRevocationTarget(tx, values.reduction);
         revocation = await insertRevocationInTransaction(tx, values.reduction);
+        if (revocation.replayed === true) {
+          const current = await tx.query(`SELECT generation
+            FROM control_plane_authority_generations
+            WHERE organization_id=$1
+              AND superseded_at IS NULL
+            FOR SHARE`, [values.organizationId]);
+          if (rowCount(current) !== 1) throw new ControlPlaneAuthorityRepositoryError("ERR_DB_RESULT", "authority generation was not found");
+          return Object.freeze({
+            organization_id: values.organizationId,
+            generation: positiveInteger(current.rows[0].generation, "generation"),
+            devices: Object.freeze([]),
+            revocation
+          });
+        }
       }
       const generationResult = await tx.query(`SELECT organization_id,generation
         FROM agentpass_advance_authority_generation($1::uuid,$2::timestamptz)`, [values.organizationId, values.issuedAt]);
@@ -350,19 +386,27 @@ export function createControlPlaneAuthorityRepository({ client, cursorCodec, cur
       const enqueued = [];
       for (const row of devices.rows ?? []) {
         const deviceId = uuid(row.id, "device_id");
-        const nonce = refreshNonceForDevice(values, deviceId);
         const outboxId = refreshOutboxIdForDevice(values, deviceId);
-        const result = await tx.query(`SELECT outbox_id,desired_generation,replayed
-          FROM agentpass_request_device_refresh($1::uuid,$2::uuid,$3::uuid,$4::bigint,$5::bytea,$6::timestamptz)`, [
-          outboxId, values.organizationId, deviceId, generation, nonce.digest, values.expiresAt
+        const derived = nonceCodec.derive({
+          organization_id: values.organizationId,
+          device_id: deviceId,
+          authority_generation: generation,
+          outbox_id: outboxId,
+          key_id: nonceCodec.activeKeyId
+        });
+        const result = await tx.query(`SELECT outbox_id,desired_generation,refresh_nonce_key_id,refresh_nonce_digest,replayed
+          FROM agentpass_request_device_refresh($1::uuid,$2::uuid,$3::uuid,$4::bigint,$5::text,$6::bytea,$7::timestamptz)`, [
+          outboxId, values.organizationId, deviceId, generation, derived.key_id, derived.nonce_digest_bytes, values.expiresAt
         ]);
         if (rowCount(result) !== 1) throw new ControlPlaneAuthorityRepositoryError("ERR_DB_RESULT", "device refresh enqueue did not return a row");
+        const storedDigest = decodeDigest(result.rows[0].refresh_nonce_digest, "refresh_nonce_digest");
         enqueued.push(Object.freeze({
           device_id: deviceId,
           outbox_id: uuid(result.rows[0].outbox_id, "outbox_id"),
           desired_generation: positiveInteger(result.rows[0].desired_generation, "desired_generation"),
           replayed: result.rows[0].replayed === true,
-          refresh_nonce: nonce.value
+          refresh_nonce_key_id: normalizeRefreshNonceKeyId(result.rows[0].refresh_nonce_key_id),
+          refresh_nonce_digest: storedDigest.toString("hex")
         }));
       }
       return Object.freeze({ organization_id: values.organizationId, generation, devices: Object.freeze(enqueued), ...(revocation === undefined ? {} : { revocation }) });
@@ -387,15 +431,63 @@ export function createControlPlaneAuthorityRepository({ client, cursorCodec, cur
     return databaseOperation(async () => {
       // Deliberately one bounded query. Long-poll orchestration belongs to the
       // Cloud layer and must not create a database busy-wait loop here.
-      const result = await client.query(`SELECT organization_id,device_id,desired_generation,observed_generation,refresh_state,
-          refresh_requested_at,last_delivered_at,last_observed_at,last_error_code,updated_at
-        FROM device_control_plane_state
-        WHERE organization_id=$1 AND device_id=$2 AND desired_generation>$3
-        ORDER BY desired_generation ASC
+      const result = await client.query(`SELECT state.organization_id,state.device_id,state.desired_generation,state.refresh_state,
+          outbox.outbox_id,outbox.refresh_nonce_key_id,outbox.refresh_nonce_digest,
+          outbox.created_at AS published_at,outbox.expires_at
+        FROM device_control_plane_state state
+        JOIN LATERAL (
+          SELECT refresh_outbox.outbox_id,refresh_outbox.refresh_nonce_key_id,refresh_outbox.refresh_nonce_digest,
+              refresh_outbox.created_at,refresh_outbox.expires_at
+          FROM device_refresh_outbox refresh_outbox
+          WHERE refresh_outbox.organization_id=$1
+            AND refresh_outbox.device_id=$2
+            AND refresh_outbox.desired_generation>$3
+            AND refresh_outbox.status IN ('pending','delivered')
+          ORDER BY refresh_outbox.desired_generation ASC,refresh_outbox.created_at ASC,refresh_outbox.outbox_id ASC
+          LIMIT 1
+        ) outbox ON true
+        WHERE state.organization_id=$1 AND state.device_id=$2
         LIMIT 1`, [values.organizationId, values.deviceId, values.afterGeneration]);
       if (rowCount(result) !== 1) return null;
-      return publicRefreshState(result.rows[0]);
+      return publicRefreshPollMetadata(result.rows[0]);
     });
+  }
+
+  async function markDeviceRefreshDelivered(input = {}) {
+    const values = normalizeRefreshDeliveryInput(input, now);
+    return databaseOperation(() => transaction(client, async (tx) => {
+      const selected = await tx.query(`SELECT attempt_count,status,expires_at
+        FROM device_refresh_outbox
+        WHERE organization_id=$1 AND device_id=$2 AND outbox_id=$3 AND desired_generation=$4
+        FOR UPDATE`, [values.organizationId, values.deviceId, values.outboxId, values.desiredGeneration]);
+      if (rowCount(selected) !== 1) throw new ControlPlaneAuthorityRepositoryError("ERR_NOT_FOUND", "device refresh delivery was not found");
+      const row = selected.rows[0];
+      if (!new Set(["pending", "delivered"]).has(row.status) || Date.parse(row.expires_at) <= Date.parse(values.deliveredAt)) {
+        throw new ControlPlaneAuthorityRepositoryError("ERR_REFRESH_EXPIRED", "device refresh delivery is no longer deliverable");
+      }
+      const attemptNo = nonNegativeInteger(row.attempt_count, "attempt_count") + 1;
+      if (attemptNo > 100) throw new ControlPlaneAuthorityRepositoryError("ERR_REFRESH_DELIVERY_LIMIT", "device refresh delivery attempt limit was reached");
+      const updated = await tx.query(`UPDATE device_refresh_outbox
+        SET status='delivered',attempt_count=$5,
+            first_delivered_at=COALESCE(first_delivered_at,$6::timestamptz),
+            last_delivered_at=$6::timestamptz
+        WHERE organization_id=$1 AND device_id=$2 AND outbox_id=$3 AND desired_generation=$4
+        RETURNING outbox_id,desired_generation,status,attempt_count`, [
+        values.organizationId, values.deviceId, values.outboxId, values.desiredGeneration, attemptNo, values.deliveredAt
+      ]);
+      await tx.query(`INSERT INTO device_refresh_delivery_attempts
+        (attempt_id,organization_id,outbox_id,attempt_no,status,started_at,completed_at,response_status)
+        VALUES ($1,$2,$3,$4,'delivered',$5::timestamptz,$5::timestamptz,200)`, [
+        crypto.randomUUID(), values.organizationId, values.outboxId, attemptNo, values.deliveredAt
+      ]);
+      await tx.query(`UPDATE device_control_plane_state
+        SET refresh_state=CASE WHEN refresh_state='revoked' THEN 'revoked' ELSE 'fetching' END,
+            last_delivered_at=$4::timestamptz,updated_at=$4::timestamptz
+        WHERE organization_id=$1 AND device_id=$2 AND desired_generation=$3`, [
+        values.organizationId, values.deviceId, values.desiredGeneration, values.deliveredAt
+      ]);
+      return Object.freeze({ outbox_id: uuid(updated.rows[0].outbox_id, "outbox_id"), desired_generation: positiveInteger(updated.rows[0].desired_generation, "desired_generation"), status: "delivered", attempt_count: attemptNo });
+    }));
   }
 
   async function getBundleAcknowledgement(input = {}) {
@@ -534,6 +626,7 @@ export function createControlPlaneAuthorityRepository({ client, cursorCodec, cur
     listRevocations,
     listRevokedCapabilityIds: capabilityAuthority.listRevokedCapabilityIds,
     pollDeviceRefresh,
+    markDeviceRefreshDelivered,
     reduceAuthority: advanceAuthorityGenerationAndEnqueueRefresh,
     reduceAuthorityAndEnqueueRefresh: advanceAuthorityGenerationAndEnqueueRefresh,
     revoke: createRevocation,
@@ -658,27 +751,14 @@ function normalizeAuthorityAdvanceInput(input, now) {
   const expiresAt = timestamp(input.expires_at ?? input.expiresAt ?? new Date(Date.parse(issuedAt) + MAX_REFRESH_TTL_MS).toISOString(), "expires_at");
   const ttl = Date.parse(expiresAt) - Date.parse(issuedAt);
   if (ttl < 1 || ttl > MAX_REFRESH_TTL_MS) throw new ControlPlaneAuthorityRepositoryError("ERR_TIMESTAMP", "refresh expiry must be within five minutes after issuance");
-  const nonces = input.refresh_nonces ?? input.refreshNonces ?? input.device_nonces ?? input.deviceNonces;
-  const nonceDigests = input.refresh_nonce_digests ?? input.refreshNonceDigests ?? input.device_nonce_digests ?? input.deviceNonceDigests;
   const outboxIds = input.outbox_ids ?? input.outboxIds;
   const reductionInput = input.reduction ?? input.revocation ?? (input.target_type !== undefined ? input : undefined);
   const reduction = reductionInput === undefined ? undefined : normalizeRevocationInput({ ...input, ...reductionInput, organization_id: organizationId }, now);
-  if (nonces !== undefined && !isObject(nonces)) throw new ControlPlaneAuthorityRepositoryError("ERR_INPUT", "refresh_nonces must be an object");
-  if (nonceDigests !== undefined && !isObject(nonceDigests)) throw new ControlPlaneAuthorityRepositoryError("ERR_INPUT", "refresh_nonce_digests must be an object");
-  if (outboxIds !== undefined && !isObject(outboxIds)) throw new ControlPlaneAuthorityRepositoryError("ERR_INPUT", "outbox_ids must be an object");
-  return Object.freeze({ organizationId, issuedAt, expiresAt, nonces, nonceDigests, outboxIds, reduction });
-}
-
-function refreshNonceForDevice(values, deviceId) {
-  const raw = values.nonces?.[deviceId];
-  if (raw !== undefined) {
-    const bytes = decodeBase64Url(raw, "refresh_nonce", REFRESH_NONCE_BYTES);
-    return { value: bytes.toString("base64url"), digest: crypto.createHash("sha256").update(bytes).digest() };
+  if (input.refresh_nonces !== undefined || input.refreshNonces !== undefined || input.refresh_nonce_digests !== undefined || input.refreshNonceDigests !== undefined) {
+    throw new ControlPlaneAuthorityRepositoryError("ERR_INPUT", "raw or caller-supplied refresh nonce material is not accepted; the repository derives it from the immutable outbox identity");
   }
-  const digestInput = values.nonceDigests?.[deviceId];
-  if (digestInput !== undefined) return { value: null, digest: decodeDigest(digestInput, "refresh_nonce_digest") };
-  const bytes = crypto.randomBytes(REFRESH_NONCE_BYTES);
-  return { value: bytes.toString("base64url"), digest: crypto.createHash("sha256").update(bytes).digest() };
+  if (outboxIds !== undefined && !isObject(outboxIds)) throw new ControlPlaneAuthorityRepositoryError("ERR_INPUT", "outbox_ids must be an object");
+  return Object.freeze({ organizationId, issuedAt, expiresAt, outboxIds, reduction });
 }
 
 function refreshOutboxIdForDevice(values, deviceId) {
@@ -699,6 +779,16 @@ function normalizeRefreshPollInput(input) {
   return { ...key, afterGeneration, waitMs };
 }
 
+function normalizeRefreshDeliveryInput(input, clock) {
+  const key = normalizeRefreshStateKey(input);
+  return {
+    ...key,
+    outboxId: uuid(input.outbox_id ?? input.outboxId, "outbox_id"),
+    desiredGeneration: positiveInteger(input.desired_generation ?? input.desiredGeneration, "desired_generation"),
+    deliveredAt: timestamp(input.delivered_at ?? input.deliveredAt ?? clock(), "delivered_at")
+  };
+}
+
 function publicRefreshState(row) {
   if (!row || typeof row !== "object") throw new ControlPlaneAuthorityRepositoryError("ERR_DB_RESULT", "device refresh state query returned an invalid row");
   return Object.freeze({
@@ -715,7 +805,29 @@ function publicRefreshState(row) {
   });
 }
 
+function publicRefreshPollMetadata(row) {
+  if (!row || typeof row !== "object") throw new ControlPlaneAuthorityRepositoryError("ERR_DB_RESULT", "device refresh poll query returned an invalid row");
+  const publishedAt = timestamp(row.published_at, "published_at");
+  const expiresAt = timestamp(row.expires_at, "expires_at");
+  if (Date.parse(expiresAt) <= Date.parse(publishedAt)) throw new ControlPlaneAuthorityRepositoryError("ERR_DB_RESULT", "device refresh poll expiry is invalid");
+  return Object.freeze({
+    organization_id: uuid(row.organization_id, "organization_id"),
+    device_id: uuid(row.device_id, "device_id"),
+    desired_generation: positiveInteger(row.desired_generation, "desired_generation"),
+    refresh_state: refreshState(row.refresh_state),
+    outbox_id: uuid(row.outbox_id, "outbox_id"),
+    refresh_nonce_key_id: normalizeRefreshNonceKeyId(row.refresh_nonce_key_id),
+    refresh_nonce_digest: decodeDigest(row.refresh_nonce_digest, "refresh_nonce_digest").toString("hex"),
+    published_at: publishedAt,
+    expires_at: expiresAt
+  });
+}
+
 function refreshState(value) { return textEnum(value, REFRESH_STATE_SET, "refresh_state"); }
+function normalizeRefreshNonceKeyId(value) {
+  if (typeof value !== "string" || !REFRESH_NONCE_KEY_ID_PATTERN.test(value)) throw new ControlPlaneAuthorityRepositoryError("ERR_DB_RESULT", "refresh nonce key id is invalid");
+  return value;
+}
 function nullableTimestamp(value, field) { return value === null || value === undefined ? null : timestamp(value, field); }
 function nullablePositiveInteger(value, field) { return value === null || value === undefined ? null : positiveInteger(value, field); }
 function nonNegativeInteger(value, field) {
@@ -735,6 +847,13 @@ function decodeDigest(value, field) {
   if (value instanceof Uint8Array && value.length === 32) return Buffer.from(value);
   if (typeof value === "string" && SHA256.test(value)) return Buffer.from(value, "hex");
   throw new ControlPlaneAuthorityRepositoryError("ERR_INPUT", `${field} must be a 32-byte digest`);
+}
+
+function requireRefreshNonceCodec(codec) {
+  if (!codec || typeof codec.derive !== "function" || typeof codec.activeKeyId !== "string") {
+    throw new ControlPlaneAuthorityRepositoryError("ERR_REFRESH_NONCE_KEY_UNAVAILABLE", "restart-safe refresh nonce codec is unavailable");
+  }
+  return codec;
 }
 
 function normalizeAuditInput(input) {
@@ -830,7 +949,7 @@ async function bindOutboxToBundleStatement(tx, organizationId, deviceId, desired
       AND status IN ('pending','delivered')
       AND format_epoch IS NULL AND sequence IS NULL AND statement_hash IS NULL
     RETURNING outbox_id,desired_generation,format_epoch,sequence,statement_hash`, [
-    organizationId, deviceId, head.format_epoch ?? 2, head.sequence, head.statement_hash, desiredGeneration
+    organizationId, deviceId, head.format_epoch ?? 2, head.sequence, head.state_fingerprint, desiredGeneration
   ]);
   for (const row of result.rows ?? []) uuid(row.outbox_id, "outbox_id");
 }

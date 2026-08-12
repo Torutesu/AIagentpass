@@ -56,6 +56,10 @@ const DATABASE_MESSAGE = "control-plane database operation failed";
 const UNAVAILABLE_MESSAGE = "control-plane operation is unavailable";
 const DATABASE_ERROR_CODES = new Set(["ERR_DATABASE", "ERR_DB_CLIENT", "ERR_DB_RESULT", "XX000", "08000", "08003", "08006"]);
 const SAFE_IDENTITY_KEYS = new Set(["member_id", "organization_id", "role", "device_id", "enrollment_id"]);
+const DEVICE_PLANE_SENSITIVE_KEYS = new Set([
+  "accesstoken", "authorization", "bearertoken", "password", "privatekey", "privatekeypem",
+  "secret", "secretkey", "sessionsecret"
+]);
 
 export class ControlPlaneStoreError extends Error {
   constructor(code, message, status = undefined) {
@@ -83,7 +87,7 @@ export function createPostgresControlPlaneStore(options = {}) {
 
   const organizationRepository = options.organizationRepository ?? options.organization ?? (client ? createPostgresOrganizationRepository({ client, now }) : undefined);
   const resourceRepository = options.resourceRepository ?? options.resource ?? (client ? createPostgresControlPlaneResourceRepository({ client, now }) : undefined);
-  const authorityRepository = options.authorityRepository ?? options.authority ?? (client && (cursorCodec || cursorSecret) ? createControlPlaneAuthorityRepository({ client, cursorCodec, cursorSecret, now }) : undefined);
+  const authorityRepository = options.authorityRepository ?? options.authority ?? (client && (cursorCodec || cursorSecret) ? createControlPlaneAuthorityRepository({ client, cursorCodec, cursorSecret, refreshNonceCodec: options.refreshNonceCodec, now }) : undefined);
   const auditRepository = options.auditRepository ?? options.audit ?? (client && (cursorCodec || cursorSecret) ? createPostgresAuditRepository({ client, cursorCodec, cursorSecret, now: () => clockMillis(now) }) : undefined);
   const adminAuditRepository = options.adminAuditRepository ?? options.adminAudit ?? (client ? createPostgresAdminAuditRepository({ client, now }) : undefined);
   const sharedControlRepository = options.sharedControlRepository ?? options.sharedControl ?? (client ? createSharedControlRepository({ client }) : undefined);
@@ -98,6 +102,17 @@ export function createPostgresControlPlaneStore(options = {}) {
     return callRepository(fn, repository, operation, context ? addAuthorityContext(qualified) : qualified);
   };
 
+  const createRevocation = async (input = {}) => {
+    const qualified = addAuthorityContext(qualifyTenant(input, "createRevocation"));
+    const reduction = authorityRepository?.reduceAuthorityAndEnqueueRefresh;
+    if (typeof reduction === "function") {
+      const result = await callRepository(reduction, authorityRepository, "createRevocation", { ...qualified, reduction: qualified });
+      if (!result || typeof result !== "object" || Array.isArray(result) || !result.revocation) throw unavailable("createRevocation");
+      return result.revocation;
+    }
+    return delegate(authorityRepository, "createRevocation", "createRevocation", { context: true })(input);
+  };
+
   const api = {
     appendAdminAuditEvent: delegate(adminAuditRepository, "appendAdminAuditEvent", "appendAdminAuditEvent", { context: true }),
     assignBundleHead: delegate(authorityRepository, "assignBundleHead", "assignBundleHead", { context: true }),
@@ -106,7 +121,7 @@ export function createPostgresControlPlaneStore(options = {}) {
     createDevice: delegate(resourceRepository, "createDevice", "createDevice", { context: true }),
     createDeviceEnrollment: delegate(resourceRepository, "createDeviceEnrollment", "createDeviceEnrollment", { context: true }),
     createPolicy: delegate(resourceRepository, "createPolicy", "createPolicy", { context: true }),
-    createRevocation: delegate(authorityRepository, "createRevocation", "createRevocation", { context: true }),
+    createRevocation,
     getAuditHealth: delegate(authorityRepository, "getAuditHealth", "getAuditHealth"),
     getOrganization: delegate(organizationRepository, "getOrganization", "getOrganization"),
     ingestDeviceAuditEvents: delegate(authorityRepository, "ingestDeviceAuditEvents", "ingestDeviceAuditEvents", { context: true }),
@@ -126,7 +141,23 @@ export function createPostgresControlPlaneStore(options = {}) {
   Object.defineProperties(api, {
     snapshotAndAssignBundleHead: {
       enumerable: false,
-      value: delegate(authorityRepository, "snapshotAndAssignBundleHead", "snapshotAndAssignBundleHead", { context: true })
+      value: devicePlaneDelegate(authorityRepository, "snapshotAndAssignBundleHead", "snapshotAndAssignBundleHead", { context: true })
+    },
+    pollDeviceRefresh: {
+      enumerable: false,
+      value: devicePlaneDelegate(authorityRepository, "pollDeviceRefresh", "pollDeviceRefresh")
+    },
+    markDeviceRefreshDelivered: {
+      enumerable: false,
+      value: devicePlaneDelegate(authorityRepository, "markDeviceRefreshDelivered", "markDeviceRefreshDelivered")
+    },
+    getDeviceRefreshState: {
+      enumerable: false,
+      value: devicePlaneDelegate(authorityRepository, "getDeviceRefreshState", "getDeviceRefreshState")
+    },
+    acknowledgeBundle: {
+      enumerable: false,
+      value: devicePlaneDelegate(authorityRepository, "acknowledgeBundle", "acknowledgeBundle")
     },
     withTransaction: {
       enumerable: false,
@@ -192,6 +223,16 @@ export function createPostgresControlPlaneStore(options = {}) {
 
 }
 
+function devicePlaneDelegate(repository, method, operation, { context = false } = {}) {
+  return async (input = {}) => {
+    const fn = repository?.[method];
+    if (typeof fn !== "function") throw unavailable(operation);
+    const qualified = qualifyTenant(input, operation);
+    const safe = stripDevicePlaneSensitiveInput(qualified);
+    return callRepository(fn, repository, operation, context ? addAuthorityContext(safe) : safe);
+  };
+}
+
 export const createControlPlaneStore = createPostgresControlPlaneStore;
 export default createPostgresControlPlaneStore;
 
@@ -230,6 +271,26 @@ function cloneInput(input) {
   if (input === undefined) return {};
   if (!input || typeof input !== "object" || Array.isArray(input)) return input;
   return { ...input };
+}
+
+function stripDevicePlaneSensitiveInput(input) {
+  if (!input || typeof input !== "object" || Array.isArray(input)) return input;
+  const result = {};
+  for (const [key, value] of Object.entries(input)) {
+    if (DEVICE_PLANE_SENSITIVE_KEYS.has(normalizeInputKey(key))) continue;
+    result[key] = stripNestedDevicePlaneSensitiveInput(value);
+  }
+  return result;
+}
+
+function stripNestedDevicePlaneSensitiveInput(value) {
+  if (Array.isArray(value)) return value.map((item) => stripNestedDevicePlaneSensitiveInput(item));
+  if (!value || typeof value !== "object" || Object.getPrototypeOf(value) !== Object.prototype) return value;
+  return stripDevicePlaneSensitiveInput(value);
+}
+
+function normalizeInputKey(key) {
+  return String(key).replace(/[-_]/gu, "").toLowerCase();
 }
 
 async function callRepository(fn, repository, operation, input) {

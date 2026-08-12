@@ -21,7 +21,10 @@ function createFixture({ identityPublicKey, bundlePrivateKey } = {}) {
   const tokenRecordsPath = path.join(root, "tokens.json");
   const bundlePrivateKeyPath = path.join(root, "bundle-private.pem");
   const identityPublicKeyPath = path.join(root, "console-identity-public.pem");
+  const refreshPrivateKeyPath = path.join(root, "refresh-private.pem");
+  const refreshNonceKeyringPath = path.join(root, "refresh-nonce-keyring.json");
   const bundlePair = crypto.generateKeyPairSync("ed25519");
+  const refreshPair = crypto.generateKeyPairSync("ed25519");
   const identityPair = crypto.generateKeyPairSync("ed25519");
   const token = generateApiToken();
   const records = [createApiTokenRecord({
@@ -35,6 +38,8 @@ function createFixture({ identityPublicKey, bundlePrivateKey } = {}) {
   fs.writeFileSync(tokenRecordsPath, JSON.stringify(records), { mode: 0o600 });
   fs.writeFileSync(bundlePrivateKeyPath, bundlePEM, { mode: 0o600 });
   fs.writeFileSync(identityPublicKeyPath, identityPEM, { mode: 0o600 });
+  fs.writeFileSync(refreshPrivateKeyPath, refreshPair.privateKey.export({ type: "pkcs8", format: "pem" }), { mode: 0o600 });
+  fs.writeFileSync(refreshNonceKeyringPath, JSON.stringify({ version: 1, active_key_id: "refresh-nonce-v1", keys: { "refresh-nonce-v1": Buffer.alloc(32, 0x71).toString("base64url") } }), { mode: 0o600 });
   return {
     root,
     tokenRecordsPath,
@@ -45,6 +50,9 @@ function createFixture({ identityPublicKey, bundlePrivateKey } = {}) {
     env: {
       AGENTPASS_CLOUD_PROFILE: "hosted",
       AGENTPASS_CLOUD_BUNDLE_PRIVATE_KEY_PATH: bundlePrivateKeyPath,
+      AGENTPASS_CLOUD_REFRESH_PRIVATE_KEY_PATH: refreshPrivateKeyPath,
+      AGENTPASS_CLOUD_REFRESH_KEY_ID: "refresh-2026-08",
+      AGENTPASS_CLOUD_REFRESH_NONCE_KEYRING_PATH: refreshNonceKeyringPath,
       AGENTPASS_CLOUD_PORT: "0",
       AGENTPASS_DATABASE_URL: DATABASE_URL,
       AGENTPASS_CONSOLE_ORIGIN: "https://console.example.test",
@@ -108,7 +116,8 @@ function fakePostgresRuntime() {
       async issueCapabilityMetadata() { return null; },
       async listRevokedCapabilityIds() { return []; }
     },
-    controlPlaneStore: {},
+    controlPlaneStore: { async pollDeviceRefresh() { return null; }, async markDeviceRefreshDelivered() {} },
+    refreshHintNotifier: { async waitForRefresh() { return false; } },
     sharedControlRepository: {
       async consumeDeviceRequestNonce() { return { accepted: true }; },
       async acquireRateLimit() { return { allowed: true, limit: 120, remaining: 119, retryAfterMs: 0, retryAfterSeconds: 0, resetAt: Date.now() }; }

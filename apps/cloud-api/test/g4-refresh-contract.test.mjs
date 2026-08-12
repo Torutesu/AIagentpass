@@ -16,9 +16,10 @@ import { controlBundleStatementHash, issueControlBundle } from "../../../lib/con
 // so the server implementation cannot hide persistence, ordering, or replay
 // semantics behind an untestable route-local map.
 //
-// pollDeviceRefresh(input) -> { hint } | null
+// refreshHintService.poll(input) -> RefreshHintV1 | null
 //   input: { organization_id, device_id, after_generation, wait_ms, signal }
-//   result.hint is a signed RefreshHintV1 and contains no authority.
+//   result is a purpose-signed RefreshHintV1 and contains no authority. The
+//   PostgreSQL repository behind the service returns only unsigned metadata.
 //
 // snapshotAndAssignBundleHead(input) -> { snapshot, head, desired_generation }
 //   snapshot/head are the same transaction boundary used for ControlBundle v2
@@ -180,6 +181,7 @@ async function startServer(t, options = {}) {
   const dependencies = createDependencies(options);
   const server = createCloudApi({
     store: dependencies.store,
+    refreshHintService: { poll: dependencies.store.pollDeviceRefresh },
     bundleSigner: { privateKey: dependencies.bundleSigner.privateKey, issuer: "agentpass-cloud", keyId: "control-v1", ttlMs: 60_000, offlineTtlMs: 120_000 },
     now: () => NOW,
     ...options.cloudApi
@@ -201,7 +203,7 @@ test("G4.1 refresh poll returns a signed device-bound hint when generation is ne
   const f = await startServer(t, { refreshResult: ({ after_generation, wait_ms }) => {
     assert.equal(after_generation, 4);
     assert.equal(wait_ms, WAIT_MS);
-    return { hint: createRefreshHint(f.bundleSigner) };
+    return createRefreshHint(f.bundleSigner);
   } });
   const path = `/v1/organizations/${ORGANIZATION_ID}/devices/${DEVICE_ID}/refresh?after_generation=4&wait_ms=${WAIT_MS}`;
   const response = await fetch(`${f.base}${path}`, {
@@ -224,6 +226,21 @@ test("G4.1 refresh poll returns an empty 204 without a stale or authority-bearin
   });
   assert.equal(response.status, 204);
   assert.equal(await response.text(), "");
+});
+
+test("G4.1 refresh polling capacity failure is stable, retryable, and redacted", async (t) => {
+  const error = new Error("tenant SQL and signing input must not escape");
+  error.code = "ERR_REFRESH_BUSY";
+  const f = await startServer(t, { cloudApi: { refreshHintService: { async poll() { throw error; } } } });
+  const path = `/v1/organizations/${ORGANIZATION_ID}/devices/${DEVICE_ID}/refresh?after_generation=1&wait_ms=30000`;
+  const response = await fetch(`${f.base}${path}`, {
+    headers: signRequest({ method: "GET", path, devicePrivateKey: f.deviceKeys.privateKey, nonce: "refresh-contract-nonce-0000000000000003" })
+  });
+  assert.equal(response.status, 503);
+  assert.equal(response.headers.get("retry-after"), "1");
+  const body = await response.json();
+  assert.equal(body.error.code, "refresh_busy");
+  assert.equal(JSON.stringify(body).includes("tenant SQL"), false);
 });
 
 test("G4.1 bundle fetch returns the target envelope with desired_generation", async (t) => {

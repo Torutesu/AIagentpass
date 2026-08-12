@@ -5,8 +5,10 @@ import test from "node:test";
 import { canonicalJson } from "../../../../packages/protocol/src/index.mjs";
 import {
   CONTROL_PLANE_SCHEMA_GAPS,
+  DEVICE_REFRESH_POLL_RETURN_SHAPE,
   createControlPlaneAuthorityRepository
 } from "../../src/postgres/control-plane-authority-repository.mjs";
+import { createRefreshNonceCodec } from "../../src/postgres/refresh-nonce-codec.mjs";
 
 const ids = {
   organization: "11111111-1111-4111-8111-111111111111",
@@ -37,9 +39,15 @@ class FakeClient {
     if (text.startsWith("SELECT id FROM devices")) return result([{ id: ids.device }]);
     if (text.startsWith("SELECT id\n        FROM devices")) return result([{ id: ids.device }]);
     if (text.startsWith("SELECT organization_id,generation")) return result([{ organization_id: ids.organization, generation: 3 }]);
-    if (text.startsWith("SELECT outbox_id,desired_generation,replayed")) return result([{ outbox_id: params[0], desired_generation: params[3], replayed: false }]);
+    if (text.startsWith("SELECT generation\n")) return result([{ generation: 3 }]);
+    if (text.startsWith("SELECT outbox_id,desired_generation,refresh_nonce_key_id,refresh_nonce_digest,replayed")) return result([{ outbox_id: params[0], desired_generation: params[3], refresh_nonce_key_id: params[4], refresh_nonce_digest: params[5], replayed: false }]);
+    if (text.startsWith("SELECT state.organization_id")) return result([{ organization_id: ids.organization, device_id: ids.device, desired_generation: 3, refresh_state: "pending", outbox_id: "88888888-8888-4888-8888-888888888888", refresh_nonce_key_id: "refresh-nonce-v3", refresh_nonce_digest: crypto.createHash("sha256").update(Buffer.alloc(16, 0x42)).digest(), published_at: NOW, expires_at: LATER }]);
+    if (text.startsWith("SELECT attempt_count,status,expires_at")) return result([{ attempt_count: 0, status: "pending", expires_at: LATER }]);
     if (text.startsWith("SELECT organization_id,device_id,desired_generation,observed_generation,refresh_state")) return result([this.refreshState]);
     if (text.startsWith("SELECT desired_generation,observed_generation,refresh_state")) return result([this.refreshState]);
+    if (text.startsWith("UPDATE device_refresh_outbox") && text.includes("attempt_count=$5")) return result([{ outbox_id: params[2], desired_generation: params[3], status: "delivered", attempt_count: params[4] }]);
+    if (text.startsWith("INSERT INTO device_refresh_delivery_attempts")) return result([]);
+    if (text.startsWith("UPDATE device_control_plane_state") && text.includes("last_delivered_at")) return result([]);
     if (text.startsWith("UPDATE device_refresh_outbox")) return result([]);
     if (text.startsWith("SELECT epochs.organization_id,epochs.device_id,epochs.key_epoch,epochs.status")) return result([{ organization_id: ids.organization, device_id: ids.device, key_epoch: 1, status: "active" }]);
     if (text.startsWith("SELECT organization_id,device_id,device_key_epoch,format_epoch,sequence,statement_hash,result")) return result();
@@ -94,7 +102,12 @@ function ackRow(params) {
   return { organization_id: params[0], device_id: params[1], format_epoch: params[2], sequence: params[3], statement_hash: params[4], status: params[5], reason: params[6], applied_at: params[7], received_at: NOW };
 }
 function repository(client) {
-  return createControlPlaneAuthorityRepository({ client, cursorSecret: Buffer.alloc(32, 0x31), now: () => NOW });
+  return createControlPlaneAuthorityRepository({
+    client,
+    cursorSecret: Buffer.alloc(32, 0x31),
+    refreshNonceCodec: createRefreshNonceCodec({ keys: { "refresh-nonce-v3": Buffer.alloc(32, 0x33) }, activeKeyId: "refresh-nonce-v3" }),
+    now: () => NOW
+  });
 }
 function auditEvent(previousHash = "0".repeat(64)) {
   const preimage = {
@@ -123,9 +136,10 @@ test("exposes a frozen control-plane authority API with migration 0011 gaps clos
   for (const method of [
     "createRevocation", "getRevocation", "listRevocations", "issueCapabilityMetadata", "listRevokedCapabilityIds",
     "assignBundleHead", "acknowledgeBundle", "getBundleAcknowledgement", "ingestDeviceAuditEvents",
-    "appendDeviceAuditEvent", "listDeviceAuditEvents", "getAuditHealth", "snapshotAndAssignBundleHead"
+    "appendDeviceAuditEvent", "listDeviceAuditEvents", "getAuditHealth", "snapshotAndAssignBundleHead", "pollDeviceRefresh", "getDeviceRefreshState"
   ]) assert.equal(typeof api[method], "function", method);
   assert.deepEqual(CONTROL_PLANE_SCHEMA_GAPS, []);
+  assert.deepEqual(Object.keys(DEVICE_REFRESH_POLL_RETURN_SHAPE), ["organization_id", "device_id", "desired_generation", "refresh_state", "outbox_id", "refresh_nonce_key_id", "refresh_nonce_digest", "published_at", "expires_at"]);
 });
 
 test("revocation mutation is tenant-qualified, locked, transactional, and idempotent by identity", async () => {
@@ -198,37 +212,97 @@ test("bundle authority snapshot and head assignment share the revocation organiz
   }), { code: "ERR_STATE_FINGERPRINT_MISMATCH" });
 });
 
-test("authority reduction advances generation and enqueues every device without sending a raw nonce to SQL", async () => {
+test("authority reduction derives a restart-safe nonce and sends only key id plus digest to SQL", async () => {
   const client = new FakeClient();
   const api = repository(client);
-  const rawNonce = Buffer.alloc(16, 0x41).toString("base64url");
   const resultValue = await api.advanceAuthorityGenerationAndEnqueueRefresh({
     organization_id: ids.organization,
     issued_at: NOW,
     expires_at: "2026-08-13T00:04:00.000Z",
-    refresh_nonces: { [ids.device]: rawNonce },
     outbox_ids: { [ids.device]: "88888888-8888-4888-8888-888888888888" }
   });
   assert.equal(resultValue.generation, 3);
   assert.equal(resultValue.devices.length, 1);
-  assert.equal(resultValue.devices[0].refresh_nonce, rawNonce);
-  const enqueue = client.calls.find(({ text }) => text.startsWith("SELECT outbox_id,desired_generation,replayed"));
+  assert.equal("refresh_nonce" in resultValue.devices[0], false);
+  assert.equal(resultValue.devices[0].refresh_nonce_key_id, "refresh-nonce-v3");
+  assert.match(resultValue.devices[0].refresh_nonce_digest, /^[0-9a-f]{64}$/u);
+  const enqueue = client.calls.find(({ text }) => text.startsWith("SELECT outbox_id,desired_generation,refresh_nonce_key_id,refresh_nonce_digest,replayed"));
   assert.ok(enqueue);
-  assert.equal(enqueue.params.includes(rawNonce), false);
-  assert.ok(Buffer.isBuffer(enqueue.params.at(-2)));
-  assert.equal(enqueue.params.at(-2).length, 32);
+  assert.equal(enqueue.params.some((value) => typeof value === "string" && value.includes("refresh_nonce")), false);
+  assert.equal(enqueue.params.some((value) => typeof value === "string" && value.length === 22), false);
+  assert.ok(Buffer.isBuffer(enqueue.params[5]));
+  assert.equal(enqueue.params[5].length, 32);
+  assert.equal(enqueue.params[4], "refresh-nonce-v3");
   assert.ok(client.calls.some(({ text }) => text.includes("pg_advisory_xact_lock")));
   assert.equal(client.calls.at(-1).text, "COMMIT");
 });
 
-test("refresh state polling is one bounded tenant-qualified query and never busy-waits", async () => {
+test("exact revocation replay returns the committed generation without advancing or enqueueing again", async () => {
+  class ReplayClient extends FakeClient {
+    async query(text, params = []) {
+      if (text.startsWith("INSERT INTO revocations")) {
+        this.calls.push({ text, params });
+        return result();
+      }
+      return super.query(text, params);
+    }
+  }
+  const client = new ReplayClient();
+  const api = repository(client);
+  const replay = await api.reduceAuthorityAndEnqueueRefresh({
+    organization_id: ids.organization,
+    target_type: "device",
+    target_id: ids.device,
+    reason: "operator-request",
+    created_by: ids.member,
+    revocation_id: ids.revocation,
+    created_at: NOW,
+    issued_at: NOW,
+    expires_at: "2026-08-13T00:04:00.000Z"
+  });
+  assert.equal(replay.generation, 3);
+  assert.equal(replay.revocation.replayed, true);
+  assert.deepEqual(replay.devices, []);
+  assert.equal(client.calls.some(({ text }) => text.startsWith("SELECT organization_id,generation")), false);
+  assert.equal(client.calls.some(({ text }) => text.startsWith("SELECT outbox_id,desired_generation")), false);
+  assert.equal(client.calls.at(-1).text, "COMMIT");
+});
+
+test("refresh polling returns exact unsigned reconstruction metadata in one bounded tenant-qualified query", async () => {
   const client = new FakeClient();
   const api = repository(client);
   const state = await api.pollDeviceRefresh({ organization_id: ids.organization, device_id: ids.device, after_generation: 1, wait_ms: 30_000 });
-  assert.equal(state.desired_generation, 3);
+  assert.deepEqual(state, {
+    organization_id: ids.organization,
+    device_id: ids.device,
+    desired_generation: 3,
+    refresh_state: "pending",
+    outbox_id: "88888888-8888-4888-8888-888888888888",
+    refresh_nonce_key_id: "refresh-nonce-v3",
+    refresh_nonce_digest: crypto.createHash("sha256").update(Buffer.alloc(16, 0x42)).digest("hex"),
+    published_at: NOW,
+    expires_at: LATER
+  });
+  assert.equal(Object.isFrozen(state), true);
   assert.equal(client.calls.length, 1);
-  assert.match(client.calls[0].text, /organization_id=\$1 AND device_id=\$2 AND desired_generation>\$3/);
+  assert.match(client.calls[0].text, /refresh_outbox\.organization_id=\$1/);
+  assert.match(client.calls[0].text, /refresh_outbox\.device_id=\$2/);
+  assert.match(client.calls[0].text, /refresh_outbox\.desired_generation>\$3/);
+  assert.match(client.calls[0].text, /refresh_nonce_key_id/);
+  assert.match(client.calls[0].text, /created_at AS published_at/);
   await assert.rejects(() => api.pollDeviceRefresh({ organization_id: ids.organization, device_id: ids.device, wait_ms: 30_001 }), { code: "ERR_LIMIT" });
+});
+
+test("refresh delivery evidence and device fetching state commit atomically without nonce material", async () => {
+  const client = new FakeClient();
+  const api = repository(client);
+  const delivered = await api.markDeviceRefreshDelivered({ organization_id: ids.organization, device_id: ids.device, outbox_id: "88888888-8888-4888-8888-888888888888", desired_generation: 3, delivered_at: NOW });
+  assert.deepEqual(delivered, { outbox_id: "88888888-8888-4888-8888-888888888888", desired_generation: 3, status: "delivered", attempt_count: 1 });
+  assert.equal(client.calls[0].text, "BEGIN");
+  assert.ok(client.calls.some(({ text }) => text.startsWith("INSERT INTO device_refresh_delivery_attempts")));
+  assert.ok(client.calls.some(({ text }) => text.includes("refresh_state=CASE") && text.includes("'fetching'")));
+  assert.equal(client.calls.flatMap(({ params }) => params).some((value) => typeof value === "string" && /^[A-Za-z0-9_-]{22}$/u.test(value)), false);
+  assert.equal(client.calls.at(-1).text, "COMMIT");
 });
 
 test("G4 ACK uses the SQL function with only a nonce digest and returns duplicate-safe refresh state", async () => {

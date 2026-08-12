@@ -24,9 +24,10 @@ const SCOPE = { operations: ["git.commit.sign"], repositories: ["/repo"], branch
 const PUBLIC_KEY = "-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==\n-----END PUBLIC KEY-----";
 
 class FakeClient {
-  constructor() {
+  constructor({ deviceAuthRow = undefined } = {}) {
     this.calls = [];
     this.idempotency = new Map();
+    this.deviceAuthRow = deviceAuthRow;
   }
 
   async query(text, params = []) {
@@ -53,7 +54,7 @@ class FakeClient {
       row.response_json = JSON.parse(params[4]);
       return result([], 1);
     }
-    if (text.startsWith("SELECT organization_id,id,label,key_algorithm,public_key_pem,status,metadata,version,created_at,last_seen_at\n        FROM devices")) return result([deviceRow()]);
+    if (text.startsWith("SELECT devices.organization_id,devices.id,devices.label,devices.key_algorithm")) return result([this.deviceAuthRow ?? deviceRow()]);
     if (text.startsWith("SELECT organization_id,id,device_id,kind,name,public_key_pem,status,version,created_at,last_seen_at\n    FROM agents")) return result([agentRow()]);
     if (text.startsWith("SELECT organization_id,id,sequence,name,scope_json,status,created_by,created_at,updated_at,version\n    FROM policies")) return result([policyRow()]);
     if (text.startsWith("SELECT organization_id,id,device_id,kind,name,public_key_pem,status,version,created_at,last_seen_at\n        FROM agents")) return result([agentRow()]);
@@ -76,7 +77,16 @@ class FakeClient {
 }
 
 function result(rows = [], rowCount = rows.length) { return { rows, rowCount }; }
-function deviceRow(overrides = {}) { return { organization_id: ids.organization, id: ids.device, label: "Build Mac", key_algorithm: "ed25519", public_key_pem: PUBLIC_KEY, status: "active", metadata: {}, version: 1, created_at: NOW, last_seen_at: null, ...overrides }; }
+function deviceRow(overrides = {}) {
+  const row = { organization_id: ids.organization, id: ids.device, label: "Build Mac", key_algorithm: "ed25519", public_key_pem: PUBLIC_KEY, status: "active", metadata: {}, version: 1, created_at: NOW, last_seen_at: null, active_key_epoch: 1, active_public_key_pem: PUBLIC_KEY, active_key_epoch_status: "active", active_key_epoch_count: "1", ...overrides };
+  if (row.status !== "active" || row.public_key_pem === null) {
+    if (!Object.hasOwn(overrides, "active_key_epoch")) row.active_key_epoch = null;
+    if (!Object.hasOwn(overrides, "active_public_key_pem")) row.active_public_key_pem = null;
+    if (!Object.hasOwn(overrides, "active_key_epoch_status")) row.active_key_epoch_status = null;
+    if (!Object.hasOwn(overrides, "active_key_epoch_count")) row.active_key_epoch_count = "0";
+  }
+  return row;
+}
 function agentRow(overrides = {}) { return { organization_id: ids.organization, id: ids.agent, device_id: ids.device, kind: "claude-code", name: "Claude", public_key_pem: PUBLIC_KEY, status: "active", version: 1, created_at: NOW, last_seen_at: null, ...overrides }; }
 function policyRow(overrides = {}) { return { organization_id: ids.organization, id: ids.policy, sequence: 1, name: "default", scope_json: SCOPE, status: "active", created_by: ids.member, created_at: NOW, updated_at: NOW, version: 1, ...overrides }; }
 function enrollmentRow(overrides = {}) { return { id: ids.enrollment, organization_id: ids.organization, device_id: ids.device2, label: "New Mac", platform: "macos", created_at: NOW, expires_at: EXPIRES, consumed_at: null, completion_hash: null, ...overrides }; }
@@ -113,6 +123,50 @@ test("lists and updates resources with tenant scope and optimistic versions", as
   const update = client.calls.find((call) => call.text.startsWith("UPDATE devices"));
   assert.match(update.text, /WHERE organization_id=\$1 AND id=\$2 AND version=\$3/);
   assert.equal((await repository.listAgents({ organization_id: ids.organization }))[0].agent_id, ids.agent);
+});
+
+test("returns active immutable key metadata without changing the public device shape", async () => {
+  const { repository, client } = repo();
+  const device = await repository.getDevice({ organization_id: ids.organization, device_id: ids.device });
+  assert.equal(device.key_epoch, 1);
+  assert.equal(device.authentication_public_key, PUBLIC_KEY);
+  assert.equal(Object.prototype.propertyIsEnumerable.call(device, "key_epoch"), false);
+  assert.equal(Object.prototype.propertyIsEnumerable.call(device, "authentication_public_key"), false);
+  assert.equal(Object.hasOwn(device, "private_key"), false);
+  assert.doesNotMatch(JSON.stringify(device), /key_epoch|PRIVATE KEY/u);
+  const listed = (await repository.listDevices({ organization_id: ids.organization }))[0];
+  assert.equal(listed.key_epoch, 1);
+  assert.equal(listed.authentication_public_key, PUBLIC_KEY);
+  assert.equal(Object.prototype.propertyIsEnumerable.call(listed, "key_epoch"), false);
+  assert.doesNotMatch(JSON.stringify(listed), /key_epoch|PRIVATE KEY/u);
+  const lookup = client.calls.find(({ text }) => text.startsWith("SELECT devices.organization_id"));
+  assert.match(lookup.text, /device_key_epochs/u);
+  assert.doesNotMatch(lookup.text, /private[_ ]key/iu);
+});
+
+test("fails closed when an active device has no unique current epoch or exact public key", async () => {
+  const invalidRows = [
+    { active_key_epoch_count: "0", active_key_epoch: null, active_public_key_pem: null, active_key_epoch_status: null },
+    { active_key_epoch_count: "2" },
+    { active_key_epoch_status: "retired" },
+    { active_public_key_pem: "-----BEGIN PRIVATE KEY-----\nsecret\n-----END PRIVATE KEY-----" },
+    { active_public_key_pem: PUBLIC_KEY.replace("MCow", "MCox") }
+  ];
+  for (const overrides of invalidRows) {
+    const client = new FakeClient({ deviceAuthRow: deviceRow(overrides) });
+    const { repository } = repo(client);
+    for (const lookup of [
+      () => repository.listDevices({ organization_id: ids.organization }),
+      () => repository.getDevice({ organization_id: ids.organization, device_id: ids.device })
+    ]) {
+      await assert.rejects(lookup, (error) => {
+        assert.ok(error instanceof ControlPlaneResourceRepositoryError);
+        assert.equal(error.code, "ERR_DEVICE_AUTH_UNAVAILABLE");
+        assert.doesNotMatch(error.message, /PRIVATE KEY|secret/u);
+        return true;
+      });
+    }
+  }
 });
 
 test("persists device metadata and updates policies with optimistic versions", async () => {

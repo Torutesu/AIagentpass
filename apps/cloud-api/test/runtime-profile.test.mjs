@@ -32,6 +32,9 @@ function hostedEnv(overrides = {}) {
     AGENTPASS_IDENTITY_ASSERTION_PUBLIC_KEY_PATH: "/srv/agentpass/hosted/console-public.pem",
     AGENTPASS_HUMAN_CURSOR_SECRET: SECRET,
     AGENTPASS_CAPABILITY_NONCE_SECRET: Buffer.alloc(32, 0x33).toString("base64url"),
+    AGENTPASS_CLOUD_REFRESH_PRIVATE_KEY_PATH: "/srv/agentpass/hosted/refresh-private.pem",
+    AGENTPASS_CLOUD_REFRESH_KEY_ID: "refresh-2026-08",
+    AGENTPASS_CLOUD_REFRESH_NONCE_KEYRING_PATH: "/srv/agentpass/hosted/refresh-nonce-keyring.json",
     ...overrides
   };
 }
@@ -97,7 +100,10 @@ test("accepts hosted only with complete PostgreSQL and Human Auth prerequisites"
     "AGENTPASS_IDENTITY_ASSERTION_KID",
     "AGENTPASS_IDENTITY_ASSERTION_PUBLIC_KEY_PATH",
     "AGENTPASS_HUMAN_CURSOR_SECRET",
-    "AGENTPASS_CAPABILITY_NONCE_SECRET"
+    "AGENTPASS_CAPABILITY_NONCE_SECRET",
+    "AGENTPASS_CLOUD_REFRESH_PRIVATE_KEY_PATH",
+    "AGENTPASS_CLOUD_REFRESH_KEY_ID",
+    "AGENTPASS_CLOUD_REFRESH_NONCE_KEYRING_PATH"
   ]) {
     const env = hostedEnv();
     delete env[name];
@@ -139,6 +145,10 @@ test("fails closed for partial, malformed, stale, unsafe, and unknown configurat
   );
   assertProfileError(
     () => parseCloudRuntimeProfile(hostedEnv({ AGENTPASS_DATABASE_MAX_CONNECTIONS: "0" })),
+    CLOUD_RUNTIME_PROFILE_ERROR_CODES.DATABASE_INVALID
+  );
+  assertProfileError(
+    () => parseCloudRuntimeProfile(hostedEnv({ AGENTPASS_DATABASE_MAX_CONNECTIONS: "1" })),
     CLOUD_RUNTIME_PROFILE_ERROR_CODES.DATABASE_INVALID
   );
   assertProfileError(

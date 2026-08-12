@@ -9,6 +9,9 @@ import { createRateLimiter } from "./rate-limit.mjs";
 import { createPostgresRuntime } from "./postgres/runtime.mjs";
 import { createHumanAuthRuntime } from "./human-auth/runtime.mjs";
 import { parseCloudRuntimeProfile } from "./runtime-profile.mjs";
+import { createRefreshHintService } from "./refresh-hint-service.mjs";
+import { createEd25519RefreshHintSigner } from "./refresh-hint-signer.mjs";
+import { createRefreshNonceCodec } from "./postgres/refresh-nonce-codec.mjs";
 
 const IDENTIFIER = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 
@@ -21,6 +24,19 @@ export async function createCloudRuntime({ env = process.env, logger = console, 
   let privateKey;
   try { privateKey = crypto.createPrivateKey(privateKeyPEM); } catch { throw new Error("Cloud bundle private key is invalid"); }
   if (privateKey.asymmetricKeyType !== "ed25519") throw new Error("Cloud bundle private key must be Ed25519");
+  let refreshHintSigner;
+  let refreshNonceCodec;
+  if (profile.isHosted) {
+    const refreshPrivateKeyPEM = readProtectedFile(config.refreshPrivateKeyPath, "refresh private key", 16 * 1024).toString("utf8");
+    let refreshPrivateKey;
+    try { refreshPrivateKey = crypto.createPrivateKey(refreshPrivateKeyPEM); } catch { throw new Error("Cloud refresh private key is invalid"); }
+    if (refreshPrivateKey.asymmetricKeyType !== "ed25519") throw new Error("Cloud refresh private key must be Ed25519");
+    const bundlePublic = crypto.createPublicKey(privateKey).export({ type: "spki", format: "der" });
+    const refreshPublic = crypto.createPublicKey(refreshPrivateKey).export({ type: "spki", format: "der" });
+    if (bundlePublic.equals(refreshPublic)) throw new Error("Cloud refresh key must be purpose-separated from the bundle key");
+    refreshHintSigner = createEd25519RefreshHintSigner({ privateKey: refreshPrivateKey, keyId: config.refreshKeyId });
+    refreshNonceCodec = loadRefreshNonceCodec(config.refreshNonceKeyringPath);
+  }
   const cursorSecret = config.humanAuth ? requireHumanCursorSecret(env.AGENTPASS_HUMAN_CURSOR_SECRET) : undefined;
   const consoleIdentityPublicKey = config.humanAuth
     ? readProtectedFile(config.humanAuth.identityAssertionPublicKeyPath, "console identity public key", 16 * 1024).toString("utf8")
@@ -34,7 +50,7 @@ export async function createCloudRuntime({ env = process.env, logger = console, 
   let server;
   try {
     if (profile.isHosted) {
-      postgresRuntime = await postgresFactory({ env, applicationVersion: "0.18.0" });
+      postgresRuntime = await postgresFactory({ env, applicationVersion: "0.18.0", refreshNonceCodec });
       if (!postgresRuntime?.capabilityAuthorityRepository
         || typeof postgresRuntime.capabilityAuthorityRepository.issueCapabilityMetadata !== "function"
         || typeof postgresRuntime.capabilityAuthorityRepository.listRevokedCapabilityIds !== "function") {
@@ -43,6 +59,8 @@ export async function createCloudRuntime({ env = process.env, logger = console, 
       if (!postgresRuntime?.controlPlaneStore) throw new Error("PostgreSQL control-plane store is unavailable");
       if (!postgresRuntime?.sharedControlRepository || typeof postgresRuntime.sharedControlRepository.consumeDeviceRequestNonce !== "function" || typeof postgresRuntime.sharedControlRepository.acquireRateLimit !== "function") throw new Error("PostgreSQL shared controls are unavailable");
       store = postgresRuntime.controlPlaneStore;
+      if (typeof store.pollDeviceRefresh !== "function" || typeof store.markDeviceRefreshDelivered !== "function") throw new Error("PostgreSQL refresh polling is unavailable");
+      if (!postgresRuntime.refreshHintNotifier || typeof postgresRuntime.refreshHintNotifier.waitForRefresh !== "function") throw new Error("PostgreSQL refresh notification is unavailable");
       humanAuthRuntime = humanAuthFactory({
         postgresRuntime,
         tokenRecords,
@@ -73,6 +91,7 @@ export async function createCloudRuntime({ env = process.env, logger = console, 
       } : { rateLimiter: createRateLimiter({ persistencePath: path.join(config.dataDir, "principal-rate-limits.json") }) }),
       admissionRateLimiter: profile.isHosted ? undefined : createRateLimiter({ persistencePath: path.join(config.dataDir, "admission-rate-limits.json"), human: { capacity: 30, refillPerSecond: 1 }, device: { capacity: 60, refillPerSecond: 2 } }),
       bundleSigner: { privateKey, issuer: config.issuer, keyId: config.keyId, ttlMs: config.ttlMs, offlineTtlMs: config.offlineTtlMs },
+      ...(profile.isHosted ? { refreshHintService: createRefreshHintService({ source: store, nonceDeriver: refreshNonceCodec, signer: refreshHintSigner, notifier: postgresRuntime.refreshHintNotifier }) } : {}),
       ...(humanAuthRuntime ? { humanAuthApi: humanAuthRuntime.api, humanSession: humanAuthRuntime.humanSession, recentAuthService: humanAuthRuntime.recentAuthService } : {}),
       ...(postgresRuntime?.capabilityAuthorityRepository ? { capabilityAuthorityRepository: postgresRuntime.capabilityAuthorityRepository } : {}),
       ...(postgresRuntime?.capabilityAuthorityRepository ? { capabilityRevocationSource: postgresRuntime.capabilityAuthorityRepository } : {})
@@ -129,10 +148,33 @@ export function loadRuntimeConfig(env = {}) {
   const ttlMs = integer(env.AGENTPASS_CLOUD_BUNDLE_TTL_MS ?? "3600000", 1_000, 7 * 24 * 60 * 60 * 1000, "Bundle TTL");
   const offlineTtlMs = integer(env.AGENTPASS_CLOUD_OFFLINE_TTL_MS ?? "3600000", 0, 7 * 24 * 60 * 60 * 1000, "Offline TTL");
   const humanAuth = profile.isHosted ? humanAuthConfig(env) : null;
+  const refreshPrivateKeyPath = profile.isHosted ? absolute(env.AGENTPASS_CLOUD_REFRESH_PRIVATE_KEY_PATH, "AGENTPASS_CLOUD_REFRESH_PRIVATE_KEY_PATH") : null;
+  const refreshNonceKeyringPath = profile.isHosted ? absolute(env.AGENTPASS_CLOUD_REFRESH_NONCE_KEYRING_PATH, "AGENTPASS_CLOUD_REFRESH_NONCE_KEYRING_PATH") : null;
+  const refreshKeyId = profile.isHosted ? env.AGENTPASS_CLOUD_REFRESH_KEY_ID : null;
+  if (profile.isHosted && !IDENTIFIER.test(refreshKeyId ?? "")) throw new Error("Cloud refresh signer identifier is invalid");
   // Hosted Human Auth never loads the legacy operator bearer database. The
   // token-record file exists only for the explicit evaluation profile.
   const tokenRecordsPath = profile.isHosted ? null : absolute(env.AGENTPASS_CLOUD_TOKEN_RECORDS_PATH, "AGENTPASS_CLOUD_TOKEN_RECORDS_PATH");
-  return Object.freeze({ dataDir, tokenRecordsPath, bundlePrivateKeyPath, issuer, keyId, host, port, ttlMs, offlineTtlMs, humanAuth });
+  return Object.freeze({ dataDir, tokenRecordsPath, bundlePrivateKeyPath, issuer, keyId, host, port, ttlMs, offlineTtlMs, humanAuth, refreshPrivateKeyPath, refreshNonceKeyringPath, refreshKeyId });
+}
+
+function loadRefreshNonceCodec(file) {
+  const document = readProtectedJson(file, "refresh nonce keyring", 64 * 1024);
+  if (!document || typeof document !== "object" || Array.isArray(document)
+    || Object.keys(document).sort().join(",") !== "active_key_id,keys,version"
+    || document.version !== 1 || !document.keys || typeof document.keys !== "object" || Array.isArray(document.keys)
+    || Object.keys(document.keys).length < 1 || Object.keys(document.keys).length > 8) {
+    throw new Error("Cloud refresh nonce keyring is invalid");
+  }
+  const keys = {};
+  for (const [keyId, encoded] of Object.entries(document.keys)) {
+    if (typeof encoded !== "string" || !/^[A-Za-z0-9_-]{43}$/u.test(encoded)) throw new Error("Cloud refresh nonce keyring is invalid");
+    const bytes = Buffer.from(encoded, "base64url");
+    if (bytes.length !== 32 || bytes.toString("base64url") !== encoded) throw new Error("Cloud refresh nonce keyring is invalid");
+    keys[keyId] = bytes;
+  }
+  try { return createRefreshNonceCodec({ keys, activeKeyId: document.active_key_id }); }
+  catch { throw new Error("Cloud refresh nonce keyring is invalid"); }
 }
 
 function humanAuthConfig(env) {

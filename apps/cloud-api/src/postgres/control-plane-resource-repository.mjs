@@ -17,6 +17,14 @@ const DEVICE_STATUSES = new Set(["active", "revoked"]);
 const AGENT_STATUSES = new Set(["active", "revoked"]);
 const POLICY_STATUSES = new Set(["active", "disabled"]);
 
+const DEVICE_AUTH_SELECT = `SELECT devices.organization_id,devices.id,devices.label,devices.key_algorithm,devices.public_key_pem,devices.status,devices.metadata,devices.version,devices.created_at,devices.last_seen_at,
+        active_epoch.key_epoch AS active_key_epoch,active_epoch.public_key_pem AS active_public_key_pem,active_epoch.status AS active_key_epoch_status,
+        (SELECT count(*) FROM device_key_epochs epoch_count
+          WHERE epoch_count.organization_id=devices.organization_id AND epoch_count.device_id=devices.id AND epoch_count.status='active') AS active_key_epoch_count
+      FROM devices
+      LEFT JOIN device_key_epochs active_epoch
+        ON active_epoch.organization_id=devices.organization_id AND active_epoch.device_id=devices.id AND active_epoch.status='active'`;
+
 /**
  * A CloudStore-compatible PostgreSQL adapter for the control-plane resources
  * that are currently read and mutated by server.mjs.
@@ -92,10 +100,10 @@ export function createPostgresControlPlaneResourceRepository({ client, now = () 
     const deviceId = requiredUuid(input.deviceId ?? input.device_id ?? input.id, "device_id");
     return runDatabase(async () => {
       await assertOrganization(client, organizationId);
-      const result = await client.query(`SELECT organization_id,id,label,key_algorithm,public_key_pem,status,metadata,version,created_at,last_seen_at
-        FROM devices WHERE organization_id=$1 AND id=$2`, [organizationId, deviceId]);
+      const result = await client.query(`${DEVICE_AUTH_SELECT}
+        WHERE devices.organization_id=$1 AND devices.id=$2`, [organizationId, deviceId]);
       if (rowCount(result) !== 1) throw notFound("device", deviceId);
-      return mapDevice(result.rows[0]);
+      return mapDevice(result.rows[0], { requireActiveEpoch: true });
     });
   }
 
@@ -103,9 +111,9 @@ export function createPostgresControlPlaneResourceRepository({ client, now = () 
     const organizationId = tenant(input);
     return runDatabase(async () => {
       await assertOrganization(client, organizationId);
-      const result = await client.query(`SELECT organization_id,id,label,key_algorithm,public_key_pem,status,metadata,version,created_at,last_seen_at
-        FROM devices WHERE organization_id=$1 ORDER BY created_at ASC,id ASC`, [organizationId]);
-      return (result.rows ?? []).map((row) => mapDevice(row));
+      const result = await client.query(`${DEVICE_AUTH_SELECT}
+        WHERE devices.organization_id=$1 ORDER BY devices.created_at ASC,devices.id ASC`, [organizationId]);
+      return (result.rows ?? []).map((row) => mapDevice(row, { requireActiveEpoch: true }));
     });
   }
 
@@ -468,19 +476,53 @@ async function selectPolicy(client, organizationId, policyId, forUpdate = false)
   return result.rows[0];
 }
 
-function mapDevice(row) {
-  return {
+function mapDevice(row, { requireActiveEpoch = false } = {}) {
+  const deviceStatus = row.status;
+  const devicePublicKey = row.public_key_pem ?? row.device_public_key;
+  const activeEpoch = requireActiveEpoch ? activeDeviceKeyEpoch(row, deviceStatus, devicePublicKey) : undefined;
+  const device = {
     device_id: requiredUuid(row.id ?? row.device_id, "device_id"),
     organization_id: requiredUuid(row.organization_id, "organization_id"),
     name: text(row.label ?? row.name, "name", 128, true),
-    device_public_key: row.public_key_pem ?? row.device_public_key,
+    device_public_key: devicePublicKey,
     ...(row.key_algorithm === undefined ? {} : { key_algorithm: row.key_algorithm }),
-    status: row.status,
+    status: deviceStatus,
     metadata: metadataValue(row.metadata ?? {}),
     created_at: timestamp(row.created_at, "created_at"),
     ...(row.last_seen_at === null || row.last_seen_at === undefined ? {} : { last_seen_at: timestamp(row.last_seen_at, "last_seen_at") }),
     version: safeInteger(row.version, "version")
   };
+  if (activeEpoch !== undefined) {
+    Object.defineProperties(device, {
+      key_epoch: { value: activeEpoch.keyEpoch, enumerable: false },
+      authentication_public_key: { value: activeEpoch.publicKey, enumerable: false }
+    });
+  }
+  return device;
+}
+
+function activeDeviceKeyEpoch(row, deviceStatus, devicePublicKey) {
+  // Pending and revoked records remain visible to the administrative resource
+  // API, but they are never eligible for device authentication. An active
+  // device must have exactly one current immutable epoch; ambiguity or any
+  // missing/stale/mismatched material is an authentication outage, not a
+  // reason to guess which key should be trusted.
+  if (deviceStatus !== "active") return undefined;
+  const count = typeof row.active_key_epoch_count === "string" ? Number(row.active_key_epoch_count) : row.active_key_epoch_count;
+  const keyEpoch = typeof row.active_key_epoch === "string" ? Number(row.active_key_epoch) : row.active_key_epoch;
+  if (count !== 1 || !Number.isSafeInteger(keyEpoch) || keyEpoch < 1 || row.active_key_epoch_status !== "active") {
+    throw new ControlPlaneResourceRepositoryError("ERR_DEVICE_AUTH_UNAVAILABLE", "active device authentication key epoch is unavailable");
+  }
+  let publicKey;
+  try {
+    publicKey = publicKeyText(row.active_public_key_pem, "active_device_public_key");
+  } catch {
+    throw new ControlPlaneResourceRepositoryError("ERR_DEVICE_AUTH_UNAVAILABLE", "active device authentication key is unavailable");
+  }
+  if (publicKey !== devicePublicKey) {
+    throw new ControlPlaneResourceRepositoryError("ERR_DEVICE_AUTH_UNAVAILABLE", "active device authentication key does not match the enrolled public key");
+  }
+  return { keyEpoch, publicKey };
 }
 
 function mapEnrollment(row) {

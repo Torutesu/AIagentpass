@@ -121,6 +121,18 @@ export function createTenantRepositoryFactory({ client } = {}) {
 export async function withTransaction(client, operation) {
   assertClient(client);
   if (typeof operation !== "function") throw new PostgresRepositoryError("ERR_TRANSACTION", "transaction operation must be a function");
+  // pg.Pool#query does not reserve a connection between BEGIN and COMMIT.
+  // Acquire one checked-out client for the complete transaction whenever the
+  // supplied database handle is a pool; already-checked-out clients and test
+  // doubles continue through the same path without an extra acquisition.
+  if (typeof client.connect === "function" && typeof client.release !== "function") {
+    const transactionClient = await client.connect();
+    try {
+      return await withTransaction(transactionClient, operation);
+    } finally {
+      transactionClient.release();
+    }
+  }
   let began = false;
   try {
     await client.query("BEGIN", []);

@@ -24,6 +24,11 @@ const FILE_STORE_ENV = Object.freeze([
   "AGENTPASS_CLOUD_DATA_DIR",
   "AGENTPASS_CLOUD_TOKEN_RECORDS_PATH"
 ]);
+const HOSTED_REFRESH_ENV = Object.freeze([
+  "AGENTPASS_CLOUD_REFRESH_PRIVATE_KEY_PATH",
+  "AGENTPASS_CLOUD_REFRESH_KEY_ID",
+  "AGENTPASS_CLOUD_REFRESH_NONCE_KEYRING_PATH"
+]);
 const DATABASE_ENV = Object.freeze([
   "AGENTPASS_DATABASE_URL",
   "AGENTPASS_DATABASE_MAX_CONNECTIONS",
@@ -52,6 +57,7 @@ const PROFILE_RELATED_ENV = new Set([
   "AGENTPASS_CLOUD_PORT",
   "AGENTPASS_CLOUD_BUNDLE_TTL_MS",
   "AGENTPASS_CLOUD_OFFLINE_TTL_MS",
+  ...HOSTED_REFRESH_ENV,
   ...FILE_STORE_ENV,
   ...DATABASE_ENV,
   "AGENTPASS_CONSOLE_ORIGIN",
@@ -117,10 +123,11 @@ export function parseCloudRuntimeProfile(env = process.env) {
   }
 
   const fileStore = parseFileStore(env);
+  const hostedRefresh = parseHostedRefresh(env);
   if (profile === CLOUD_RUNTIME_PROFILES.HOSTED) {
     if (fileStore.present) fail(CLOUD_RUNTIME_PROFILE_ERROR_CODES.HOSTED_FILE_STORE_FORBIDDEN);
     const humanAuth = parseHumanAuth(env);
-    if (!humanAuth.complete || !configured(env, CAPABILITY_NONCE_SECRET_ENV)) fail(CLOUD_RUNTIME_PROFILE_ERROR_CODES.HOSTED_AUTH_INCOMPLETE);
+    if (!humanAuth.complete || !hostedRefresh.complete || !configured(env, CAPABILITY_NONCE_SECRET_ENV)) fail(CLOUD_RUNTIME_PROFILE_ERROR_CODES.HOSTED_AUTH_INCOMPLETE);
     if (!validCursorSecret(env[CAPABILITY_NONCE_SECRET_ENV])) fail(CLOUD_RUNTIME_PROFILE_ERROR_CODES.HUMAN_AUTH_INVALID);
     return Object.freeze({
       profile,
@@ -136,7 +143,8 @@ export function parseCloudRuntimeProfile(env = process.env) {
     });
   }
 
-  if (HUMAN_AUTH_ENV.some((name) => configured(env, name)) || DATABASE_ENV.some((name) => configured(env, name)) || configured(env, CAPABILITY_NONCE_SECRET_ENV)) {
+  if (HUMAN_AUTH_ENV.some((name) => configured(env, name)) || DATABASE_ENV.some((name) => configured(env, name))
+    || hostedRefresh.present || configured(env, CAPABILITY_NONCE_SECRET_ENV)) {
     fail(CLOUD_RUNTIME_PROFILE_ERROR_CODES.EVALUATION_AUTH_FORBIDDEN);
   }
   if (!fileStore.complete) fail(CLOUD_RUNTIME_PROFILE_ERROR_CODES.EVALUATION_FILE_STORE_INCOMPLETE);
@@ -152,6 +160,16 @@ export function parseCloudRuntimeProfile(env = process.env) {
     humanAuth: null,
     fileStore: Object.freeze({ dataDir: fileStore.dataDir, tokenRecordsPath: fileStore.tokenRecordsPath })
   });
+}
+
+function parseHostedRefresh(env) {
+  const present = HOSTED_REFRESH_ENV.some((name) => configured(env, name));
+  if (!present) return { present: false, complete: false };
+  const complete = HOSTED_REFRESH_ENV.every((name) => configured(env, name))
+    && absolutePath(env.AGENTPASS_CLOUD_REFRESH_PRIVATE_KEY_PATH)
+    && absolutePath(env.AGENTPASS_CLOUD_REFRESH_NONCE_KEYRING_PATH)
+    && IDENTIFIER.test(env.AGENTPASS_CLOUD_REFRESH_KEY_ID);
+  return { present: true, complete };
 }
 
 export const validateCloudRuntimeProfile = parseCloudRuntimeProfile;
@@ -184,7 +202,7 @@ function parseDatabase(env) {
   const sslModes = url.searchParams.getAll("sslmode");
   if (sslModes.length !== 1 || sslModes[0] !== "verify-full") fail(CLOUD_RUNTIME_PROFILE_ERROR_CODES.DATABASE_INVALID);
   for (const key of url.searchParams.keys()) if (key !== "sslmode") fail(CLOUD_RUNTIME_PROFILE_ERROR_CODES.DATABASE_INVALID);
-  if (!boundedInteger(env.AGENTPASS_DATABASE_MAX_CONNECTIONS, 1, 100)
+  if (!boundedInteger(env.AGENTPASS_DATABASE_MAX_CONNECTIONS, 2, 100)
     || !boundedInteger(env.AGENTPASS_DATABASE_CONNECT_TIMEOUT_MS, 250, 30_000)
     || !boundedInteger(env.AGENTPASS_DATABASE_IDLE_TIMEOUT_MS, 1_000, 300_000)
     || !boundedInteger(env.AGENTPASS_DATABASE_STATEMENT_TIMEOUT_MS, 250, 60_000)
