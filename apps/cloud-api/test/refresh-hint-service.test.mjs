@@ -6,6 +6,7 @@ import {
   REFRESH_HINT_SERVICE_ERROR_CODES,
   createRefreshHintService
 } from "../src/refresh-hint-service.mjs";
+import { createOperationalMetrics } from "../src/postgres/operational-health.mjs";
 import { refreshHintSigningData } from "../../../packages/protocol/src/index.mjs";
 
 const ORGANIZATION_ID = "11111111-1111-4111-8111-111111111111";
@@ -47,6 +48,7 @@ function fixture(overrides = {}) {
       async signRefreshHint(bytes) { calls.signs.push(Buffer.from(bytes)); return crypto.sign(null, bytes, keys.privateKey); }
     },
     notifier: overrides.notifier ?? { async waitForRefresh(input) { calls.waits.push(input); } },
+    metrics: overrides.metrics,
     now: () => NOW,
     maxWaiters: overrides.maxWaiters ?? 2
   });
@@ -64,6 +66,52 @@ test("issues a purpose-signed hint from committed metadata without copying autho
   assert.equal(f.calls.polls[0].wait_ms, 0);
   assert.deepEqual(f.calls.deliveries[0], { organization_id: ORGANIZATION_ID, device_id: DEVICE_ID, outbox_id: OUTBOX_ID, desired_generation: 7, delivered_at: "2026-08-13T00:00:00.000Z" });
   assert.equal(JSON.stringify(hint).includes("policy"), false);
+});
+
+test("records bounded refresh pipeline outcomes without labels", async () => {
+  const metrics = createOperationalMetrics();
+  const observed = fixture({ metrics });
+  await observed.service.poll({ organization_id: ORGANIZATION_ID, device_id: DEVICE_ID, after_generation: 6, wait_ms: 0 });
+
+  const timedOut = fixture({ metrics, rows: [null, null] });
+  assert.equal(await timedOut.service.poll({ organization_id: ORGANIZATION_ID, device_id: DEVICE_ID, after_generation: 7, wait_ms: 1 }), null);
+
+  const failed = fixture({ metrics, signer: {
+    async publicKeyMetadata() { throw new Error("signer unavailable"); },
+    async signRefreshHint() { throw new Error("signer unavailable"); }
+  } });
+  await assert.rejects(failed.service.poll({ organization_id: ORGANIZATION_ID, device_id: DEVICE_ID, after_generation: 6 }), { code: REFRESH_HINT_SERVICE_ERROR_CODES.UNAVAILABLE });
+
+  const counters = metrics.snapshot().counters;
+  assert.equal(counters.refresh_propagation_observation_total, 2);
+  assert.equal(counters.refresh_propagation_timeout_total, 1);
+  assert.equal(counters.refresh_delivery_failure_total, 1);
+});
+
+test("records waiter rejection and notifier failure while preserving fallback correctness", async () => {
+  const metrics = createOperationalMetrics();
+  let release;
+  const waiting = fixture({
+    metrics,
+    rows: [null, null, null],
+    notifier: { waitForRefresh: () => new Promise((resolve) => { release = resolve; }) },
+    maxWaiters: 1
+  });
+  const first = waiting.service.poll({ organization_id: ORGANIZATION_ID, device_id: DEVICE_ID, after_generation: 7, wait_ms: 1_000 });
+  await new Promise((resolve) => setImmediate(resolve));
+  await assert.rejects(waiting.service.poll({ organization_id: ORGANIZATION_ID, device_id: DEVICE_ID, after_generation: 7, wait_ms: 1_000 }), { code: REFRESH_HINT_SERVICE_ERROR_CODES.BUSY });
+  release();
+  assert.equal(await first, null);
+
+  const fallback = fixture({
+    metrics,
+    rows: [null, refreshRow(9)],
+    notifier: { async waitForRefresh() { throw new Error("listener disconnected"); } }
+  });
+  assert.equal((await fallback.service.poll({ organization_id: ORGANIZATION_ID, device_id: DEVICE_ID, after_generation: 8, wait_ms: 10 })).authority_generation, 9);
+  const counters = metrics.snapshot().counters;
+  assert.equal(counters.refresh_waiter_rejection_total, 1);
+  assert.equal(counters.refresh_notification_wake_failure_total, 1);
 });
 
 test("queries before and after one notification wait so notification loss is harmless", async () => {

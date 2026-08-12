@@ -9,6 +9,7 @@ import {
   parseBundleAcknowledgementJson
 } from "../../../packages/protocol/src/index.mjs";
 import { RateLimiterCapacityError, createRateLimiter } from "./rate-limit.mjs";
+import { OPERATIONAL_METRIC_KEYS } from "./postgres/operational-health.mjs";
 
 const MAX_BODY_BYTES = 1024 * 1024;
 const HUMAN_AUTH_MAX_BODY_BYTES = 64 * 1024;
@@ -22,8 +23,6 @@ const HUMAN_AUTH_ACCEPT_INVITATION_PATH = "/api/auth/invitations/accept";
 const HUMAN_AUTH_UUID = "[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89a-fA-F][0-9a-fA-F]{3}-[0-9a-fA-F]{12}";
 const UUID = "([0-9a-fA-F-]{36})";
 const UUID_VALUE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu;
-const OPERATIONAL_METRIC_KEYS = Object.freeze(["lock_timeout_total", "lock_wait_total", "replay_denial_total", "rate_limit_denial_total", "stale_ack_total", "audit_gap_total"]);
-
 export function createCloudApi({ store, tokenRecords = [], bundleSigner, refreshHintService, now = () => Date.now(), monotonicNow, replayCache = createReplayCache(), deviceReplayConsumer, rateLimiter, admissionRateLimiter, verifyRecentWebAuthn, recentAuthService, humanAuthApi, humanSession, capabilityAuthorityRepository, capabilityRevocationSource, auditRepository, enrollmentCredentialSecret, trackInFlight, readiness, operationalMetrics, operationalProbeSecret } = {}) {
   if (!store) throw new TypeError("store is required");
   if (verifyRecentWebAuthn !== undefined && recentAuthService !== undefined) throw new TypeError("configure verifyRecentWebAuthn or recentAuthService, not both");

@@ -28,6 +28,13 @@ test("metrics are fixed-key, monotonic, and free of caller labels", () => {
   metrics.recordRateLimitDenial();
   metrics.recordStaleAck(3);
   metrics.recordAuditGap();
+  metrics.recordRefreshWaiterRejection(2);
+  metrics.recordRefreshWaiterCapacity();
+  metrics.recordRefreshDeliveryFailure(3);
+  metrics.recordRefreshNotificationReconnect();
+  metrics.recordRefreshNotificationWakeFailure(2);
+  metrics.recordRefreshPropagationObservation(4);
+  metrics.recordRefreshPropagationTimeout();
   const snapshot = metrics.snapshot();
   assert.deepEqual(Object.keys(snapshot), ["version", "counters", "valid"]);
   assert.deepEqual(Object.keys(snapshot.counters), OPERATIONAL_METRIC_KEYS);
@@ -37,11 +44,34 @@ test("metrics are fixed-key, monotonic, and free of caller labels", () => {
     replay_denial_total: 1,
     rate_limit_denial_total: 1,
     stale_ack_total: 3,
-    audit_gap_total: 1
+    audit_gap_total: 1,
+    refresh_waiter_rejection_total: 2,
+    refresh_waiter_capacity_total: 1,
+    refresh_delivery_failure_total: 3,
+    refresh_notification_reconnect_total: 1,
+    refresh_notification_wake_failure_total: 2,
+    refresh_propagation_observation_total: 4,
+    refresh_propagation_timeout_total: 1
   });
   assert.equal(JSON.stringify(snapshot).includes("tenant"), false);
   assert.throws(() => metrics.increment("tenant_id", 1), { code: "invalid_input" });
   assert.throws(() => metrics.recordAuditGap(-1), { code: "invalid_input" });
+});
+
+test("refresh metrics are bounded fixed-key counters and never retain labels", () => {
+  const metrics = createOperationalMetrics({
+    initial: {
+      refresh_delivery_failure_total: Number.MAX_SAFE_INTEGER - 1
+    }
+  });
+  assert.equal(metrics.recordRefreshDeliveryFailure(10), Number.MAX_SAFE_INTEGER);
+  assert.equal(metrics.recordRefreshDeliveryFailure(), Number.MAX_SAFE_INTEGER);
+  assert.throws(() => metrics.recordRefreshWaiterRejection("tenant-a"), { code: "invalid_input" });
+  assert.throws(() => createOperationalMetrics({ initial: { refresh_waiter_capacity_total: -1 } }), { code: "invalid_input" });
+  const serialized = JSON.stringify(metrics.snapshot());
+  assert.equal(serialized.includes("tenant-a"), false);
+  assert.equal(serialized.includes("label"), false);
+  assert.deepEqual(Object.keys(metrics.snapshot().counters), OPERATIONAL_METRIC_KEYS);
 });
 
 test("readiness requires exact schema 15, verified checksums, a DB probe, and a non-waiting pool", async () => {

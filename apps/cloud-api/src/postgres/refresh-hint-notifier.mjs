@@ -38,11 +38,13 @@ export function createPostgresRefreshHintNotifier({
   now = () => Date.now(),
   maxWaiters = DEFAULT_MAX_WAITERS,
   maxWaitMs = MAX_WAIT_MS,
-  reconnectCooldownMs = DEFAULT_RECONNECT_COOLDOWN_MS
+  reconnectCooldownMs = DEFAULT_RECONNECT_COOLDOWN_MS,
+  metrics
 } = {}) {
   const connect = clientFactory ?? (pool && typeof pool.connect === "function" ? () => pool.connect() : undefined);
   if (typeof connect !== "function"
     || typeof now !== "function"
+    || (metrics !== undefined && (!metrics || typeof metrics.snapshot !== "function"))
     || !Number.isSafeInteger(maxWaiters) || maxWaiters < 1 || maxWaiters > 100_000
     || !Number.isSafeInteger(maxWaitMs) || maxWaitMs < 1 || maxWaitMs > MAX_WAIT_MS
     || !Number.isSafeInteger(reconnectCooldownMs) || reconnectCooldownMs < 0 || reconnectCooldownMs > MAX_WAIT_MS) {
@@ -63,7 +65,10 @@ export function createPostgresRefreshHintNotifier({
     if (request.signal?.aborted) throw abortedError();
     if (closePromise || draining) throw new RefreshHintNotifierError(REFRESH_HINT_NOTIFIER_ERROR_CODES.CLOSED, "refresh notifier is closed");
     if (request.timeoutMs === 0) return false;
-    if (waiters.size >= maxWaiters) throw new RefreshHintNotifierError(REFRESH_HINT_NOTIFIER_ERROR_CODES.BUSY, "refresh notifier waiter capacity is exhausted");
+    if (waiters.size >= maxWaiters) {
+      recordMetric(metrics, "recordRefreshWaiterCapacity");
+      throw new RefreshHintNotifierError(REFRESH_HINT_NOTIFIER_ERROR_CODES.BUSY, "refresh notifier waiter capacity is exhausted");
+    }
 
     const waiter = createWaiter(request);
     waiters.add(waiter);
@@ -112,6 +117,8 @@ export function createPostgresRefreshHintNotifier({
       }
       return candidate;
     } catch {
+      recordMetric(metrics, "recordRefreshNotificationReconnect");
+      if (waiters.size > 0) recordMetric(metrics, "recordRefreshNotificationWakeFailure");
       if (candidateConnection) {
         if (connection === candidateConnection) connection = null;
         await dispose(candidateConnection, true);
@@ -156,6 +163,8 @@ export function createPostgresRefreshHintNotifier({
     if (wasCurrent) {
       connection = null;
       lastFailureAt = clock(now);
+      recordMetric(metrics, "recordRefreshNotificationReconnect");
+      if (waiters.size > 0) recordMetric(metrics, "recordRefreshNotificationWakeFailure");
     }
     const disposal = dispose(failedConnection, true);
     disposalPromises.add(disposal);
@@ -284,6 +293,10 @@ export function createPostgresRefreshHintNotifier({
       }
     });
   }
+}
+
+function recordMetric(metrics, method, amount = 1) {
+  try { metrics?.[method]?.(amount); } catch { /* Metrics never alter notifier behavior. */ }
 }
 
 function normalizeRequest(input, maxWaitMs) {

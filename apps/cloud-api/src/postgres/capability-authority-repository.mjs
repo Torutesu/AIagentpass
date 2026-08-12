@@ -102,6 +102,7 @@ export function createCapabilityAuthorityRepository({ client, now = () => new Da
             tx,
             organization_id: values.organizationId,
             member_id: values.memberId,
+            actor_member_id: values.actorMemberId,
             occurred_at: values.revokedAt,
             capabilities: Object.freeze(capabilities)
           }));
@@ -185,8 +186,9 @@ function normalizeRevokeInput(input, now) {
   if (!input || typeof input !== "object" || Array.isArray(input)) throw new CapabilityAuthorityRepositoryError("ERR_INPUT", "capability revocation input must be an object");
   const organizationId = tenant(input.organization_id ?? input.organizationId);
   const memberId = uuid(input.member_id ?? input.memberId ?? input.issued_by_member_id ?? input.issuedByMemberId, "member_id");
+  const actorMemberId = uuid(input.actor_member_id ?? input.actorMemberId ?? memberId, "actor_member_id");
   const revokedAt = timestamp(input.revoked_at ?? input.revokedAt ?? now(), "revoked_at");
-  return { organizationId, memberId, revokedAt };
+  return { organizationId, memberId, actorMemberId, revokedAt };
 }
 
 async function lockAuthority(tx, organizationId, memberId) {

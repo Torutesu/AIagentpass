@@ -1,6 +1,6 @@
 # AgentPass G4–G7 implementation plan
 
-Status: active execution baseline; G4.0 qualified, G4.1 authority foundation implemented but not yet qualified
+Status: active execution baseline; G4.0 qualified, G4.1 correctness path implemented but production qualification remains open
 
 Updated: 2026-08-13
 
@@ -70,7 +70,7 @@ Exit gate: Node and Swift decode the same fixtures and produce byte-identical si
 
 ### G4.1 Cloud publication and polling
 
-Current implementation checkpoint (2026-08-13): schema version `15` adds restart-safe nonce key identity, commit-only refresh notifications, and safe delivery-state rollover between generations to the generation/key-epoch/outbox/ACK foundation. Hosted runtime uses a purpose-separated refresh signer, reconstructs the same 16-byte nonce across restart or instance failover, records delivery evidence before returning a hint, and holds one bounded PostgreSQL listener with initial/final authoritative queries. PostgreSQL 17 evidence covers two pools racing exact reduction and ACK, rollback, notification wakeup, nonce mismatch rejection, blocked ACK observation, restart reconstruction, member removal, policy disable, standalone capability revoke, managed credential/session revoke, and post-commit publisher-process loss. Device lookup pins the active immutable key epoch. Every implemented authority-reducing path now advances generation and enqueues every active device inside its mutation transaction; ordinary self logout deliberately does not trigger a device refresh. The G4.1 exit gate remains open for unified admin-audit coupling, production latency evidence, fixed-label refresh metrics, and hard process-kill timing injection.
+Current implementation checkpoint (2026-08-13): schema version `15` adds restart-safe nonce key identity, commit-only refresh notifications, and safe delivery-state rollover between generations to the generation/key-epoch/outbox/ACK foundation. Hosted runtime uses a purpose-separated refresh signer, reconstructs the same 16-byte nonce across restart or instance failover, records delivery evidence before returning a hint, and holds one bounded PostgreSQL listener with initial/final authoritative queries. PostgreSQL 17 evidence covers two pools racing exact reduction and ACK, rollback, notification wakeup, nonce mismatch rejection, blocked ACK observation, restart reconstruction, member removal, policy disable, standalone capability revoke, managed credential/session revoke, post-commit publisher-process loss, and injected audit failure. Device lookup pins the active immutable key epoch. Every implemented authority-reducing path now advances generation, enqueues every active device, and appends the appropriate admin audit in the owning transaction; an audit failure rolls back the authority mutation, generation, outbox, and audit together. Ordinary self logout deliberately does not trigger a device refresh. Fixed-key, label-free counters now cover waiter rejection/capacity, delivery failure, notification reconnect/wake failure, propagation observation, and timeout. The G4.1 production exit gate remains open only for hard process-kill timing injection, measured p50/p95/p99 propagation latency, production secret-manager rotation evidence, and sustained resource/lock stress.
 
 Database work:
 
@@ -107,13 +107,13 @@ Exit gate: two Cloud instances and PostgreSQL prove no pre-commit hint, no lost 
    - have the Cloud layer construct and sign the hint from authoritative state; repository rows must never masquerade as signed hints;
    - fail closed when nonce key, signer, active key epoch, or authority state is unavailable.
 3. **Commit-coupled authority reductions**
-   - Status: partial. Revocation/device/emergency-stop, policy reduction, member removal/role reduction, managed credential/session revoke, and standalone capability revoke are coupled and fail closed. Organization-first lock ordering is enforced and the capability-issue/member-removal race passes on PostgreSQL 17; unified admin-audit coupling and broader stress remain P0.
+   - Status: implemented and locally qualified. Revocation/device/emergency-stop, policy reduction, member removal/role reduction, managed credential/session revoke, and standalone capability revoke are coupled and fail closed. Organization-first lock ordering is enforced; admin audit uses the same caller-owned transaction; an injected audit failure proves rollback of mutation, generation, refresh outbox, and audit; the capability-issue/member-removal race passes on PostgreSQL 17. Broader stress remains part of production qualification.
    - route emergency stop, device revoke, member removal/role reduction, policy narrowing, credential/session epoch invalidation, and capability revocation through one transaction helper;
    - acquire the organization authority lock in one documented order, mutate authority, increment generation, enqueue every affected device, and append admin audit before commit;
    - prove rollback leaves no mutation, generation, outbox row, audit row, or observable notification;
    - make exact idempotent replay return the committed generation without incrementing it again.
 4. **Bounded publication and long-poll**
-   - Status: implemented with schema `0014`, one dedicated listener, 30-second waits, bounded waiters, delivery attempts, and final-query fallback; fixed-label propagation metrics remain.
+   - Status: implemented with schema `0014`, one dedicated listener, 30-second waits, bounded waiters, delivery attempts, final-query fallback, and fixed-key label-free refresh metrics. Latency histograms and production alert/SLO wiring remain qualification work.
    - add one dedicated PostgreSQL notification listener per Cloud process, with an initial query and final query as correctness fallbacks;
    - use notifications only as wake-up hints; correctness always comes from the committed generation query;
    - cap waits at 30 seconds, listeners and waiter count per process, response size, delivery retries, and retry age;
@@ -300,10 +300,10 @@ Every merged slice must include:
 
 | Priority | Deliverable | Depends on | Completion evidence |
 | --- | --- | --- | --- |
-| P0 | G4.1 nonce-key contract and migration follow-up | current `0012` checkpoint | cross-process known-answer and rotation tests; raw nonce absent from SQL/logs |
-| P0 | PostgreSQL store/device-auth wiring | nonce contract | hosted API integration test proves poll, fetch, and signed ACK use the active key epoch |
-| P0 | atomic reduction integration | store wiring | rollback/idempotency/race matrix on PostgreSQL 17 |
-| P0 | notification listener and bounded long-poll | atomic reduction | two-instance failover and resource-bound tests |
+| P0 | G4.1 production qualification harness | implemented G4.1 path | independently kill publisher after transaction commit and at listener reconnect boundaries; prove recovery from another process |
+| P0 | G4.1 latency/SLO evidence | qualification harness | emit p50/p95/p99 commit-to-observation and commit-to-applied-ACK latency, queue age, waiter/connection bounds, and alert thresholds |
+| P0 | production nonce-key rotation evidence | selected secret manager | dual-read/single-write rotation across two Cloud instances; old retained rows remain reconstructable and raw nonce stays absent |
+| P0 | G4.1 sustained contention test | qualification harness | multi-tenant reduction/poll/ACK load keeps organization locks bounded and preserves monotonic generations without pool starvation |
 | P1 | G4.2 Swift refresh state machine and atomic install | qualified G4.1 | crash-at-every-write-boundary suite plus offline-expiry denial |
 | P1 | G4.3 Console device state/actions | native ACK path | Playwright role/recent-auth tests and physical-Mac ACK observation |
 | P1 | G5.1 shared abuse controls | stable G4 identifiers | two-instance token-bucket and session-epoch races |

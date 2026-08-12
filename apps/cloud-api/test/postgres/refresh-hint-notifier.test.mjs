@@ -8,6 +8,7 @@ import {
   REFRESH_HINT_NOTIFIER_ERROR_CODES,
   RefreshHintNotifierError
 } from "../../src/postgres/refresh-hint-notifier.mjs";
+import { createOperationalMetrics } from "../../src/postgres/operational-health.mjs";
 
 const ORG_A = "11111111-1111-4111-8111-111111111111";
 const ORG_B = "22222222-2222-4222-8222-222222222222";
@@ -69,12 +70,14 @@ test("rejects malformed or secret-bearing payloads without waking a waiter", asy
 
 test("bounds waiters and resolves a timed-out waiter for the authoritative fallback query", async () => {
   const client = new FakeClient();
-  const notifier = createPostgresRefreshHintNotifier({ pool: new FakePool([client]), maxWaiters: 1, reconnectCooldownMs: 0 });
+  const metrics = createOperationalMetrics();
+  const notifier = createPostgresRefreshHintNotifier({ pool: new FakePool([client]), maxWaiters: 1, reconnectCooldownMs: 0, metrics });
   const pending = notifier.waitForRefresh({ organization_id: ORG_A, device_id: DEVICE_A, after_generation: 1, timeout_ms: 15 });
   await assert.rejects(
     () => notifier.waitForRefresh({ organization_id: ORG_A, device_id: DEVICE_A, after_generation: 1, timeout_ms: 15 }),
     (error) => error instanceof RefreshHintNotifierError && error.code === REFRESH_HINT_NOTIFIER_ERROR_CODES.BUSY
   );
+  assert.equal(metrics.snapshot().counters.refresh_waiter_capacity_total, 1);
   assert.equal(await pending, false);
   await notifier.close();
 });
@@ -110,12 +113,15 @@ test("resolves pending waits safely on client failure and reconnects for a later
   const first = new FakeClient();
   const second = new FakeClient();
   const pool = new FakePool([first, second]);
-  const notifier = createPostgresRefreshHintNotifier({ pool, reconnectCooldownMs: 0 });
+  const metrics = createOperationalMetrics();
+  const notifier = createPostgresRefreshHintNotifier({ pool, reconnectCooldownMs: 0, metrics });
   const failed = notifier.waitForRefresh({ organization_id: ORG_A, device_id: DEVICE_A, after_generation: 1, timeout_ms: 500 });
   await tick();
   first.emit("error", new Error("connection reset"));
   assert.equal(await failed, false);
   assert.deepEqual(first.releaseCalls, [true]);
+  assert.equal(metrics.snapshot().counters.refresh_notification_reconnect_total, 1);
+  assert.equal(metrics.snapshot().counters.refresh_notification_wake_failure_total, 1);
 
   const recovered = notifier.waitForRefresh({ organization_id: ORG_A, device_id: DEVICE_A, after_generation: 1, timeout_ms: 500 });
   await tick();

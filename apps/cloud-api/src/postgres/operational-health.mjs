@@ -7,7 +7,14 @@ export const OPERATIONAL_METRIC_KEYS = Object.freeze([
   "replay_denial_total",
   "rate_limit_denial_total",
   "stale_ack_total",
-  "audit_gap_total"
+  "audit_gap_total",
+  "refresh_waiter_rejection_total",
+  "refresh_waiter_capacity_total",
+  "refresh_delivery_failure_total",
+  "refresh_notification_reconnect_total",
+  "refresh_notification_wake_failure_total",
+  "refresh_propagation_observation_total",
+  "refresh_propagation_timeout_total"
 ]);
 
 const METRIC_KEY_SET = new Set(OPERATIONAL_METRIC_KEYS);
@@ -70,6 +77,13 @@ export function createOperationalMetrics({ initial = {} } = {}) {
     recordRateLimitDenial: (amount = 1) => increment("rate_limit_denial_total", amount),
     recordStaleAck: (amount = 1) => increment("stale_ack_total", amount),
     recordAuditGap: (amount = 1) => increment("audit_gap_total", amount),
+    recordRefreshWaiterRejection: (amount = 1) => increment("refresh_waiter_rejection_total", amount),
+    recordRefreshWaiterCapacity: (amount = 1) => increment("refresh_waiter_capacity_total", amount),
+    recordRefreshDeliveryFailure: (amount = 1) => increment("refresh_delivery_failure_total", amount),
+    recordRefreshNotificationReconnect: (amount = 1) => increment("refresh_notification_reconnect_total", amount),
+    recordRefreshNotificationWakeFailure: (amount = 1) => increment("refresh_notification_wake_failure_total", amount),
+    recordRefreshPropagationObservation: (amount = 1) => increment("refresh_propagation_observation_total", amount),
+    recordRefreshPropagationTimeout: (amount = 1) => increment("refresh_propagation_timeout_total", amount),
     snapshot
   });
 }

@@ -8,6 +8,8 @@ import { createPostgresOrganizationRepository } from "./organization-repository.
 import { createTenantRepositoryFactory } from "./repository.mjs";
 import { createSharedControlRepository } from "./shared-control-repository.mjs";
 import { createPostgresRefreshHintNotifier } from "./refresh-hint-notifier.mjs";
+import { createPostgresAdminAuditRepository } from "./admin-audit-repository.mjs";
+import { createAuthorityReductionAuditAppender } from "./authority-reduction-audit.mjs";
 import {
   createDrainController,
   createOperationalHealth,
@@ -32,8 +34,8 @@ export async function createPostgresRuntime({ env = process.env, PoolClass = Poo
   client.release();
   let closed = false;
   const drainController = createDrainController();
-  const refreshHintNotifier = createPostgresRefreshHintNotifier({ pool });
   const operationalMetrics = createOperationalMetrics();
+  const refreshHintNotifier = createPostgresRefreshHintNotifier({ pool, metrics: operationalMetrics });
   const operationalHealth = createOperationalHealth({
     pool,
     maxConnections: config.maxConnections,
@@ -55,7 +57,9 @@ export async function createPostgresRuntime({ env = process.env, PoolClass = Poo
   }
   const auditCursorSecret = exactSecret(env.AGENTPASS_HUMAN_CURSOR_SECRET, "AGENTPASS_HUMAN_CURSOR_SECRET");
   const capabilityNonceSecret = exactSecret(env.AGENTPASS_CAPABILITY_NONCE_SECRET, "AGENTPASS_CAPABILITY_NONCE_SECRET");
-  const onAuthorityReduction = async ({ tx, organization_id, occurred_at, policy }) => {
+  const adminAuditRepository = createPostgresAdminAuditRepository({ client: pool });
+  const authorityReductionAuditAppender = createAuthorityReductionAuditAppender({ adminAuditRepository });
+  const onAuthorityReduction = async ({ tx, organization_id, occurred_at, policy, resource, member_id, actor_member_id, capabilities }) => {
     const issuedAt = occurred_at ?? policy?.updated_at;
     if (typeof issuedAt !== "string" || !Number.isFinite(Date.parse(issuedAt))) throw new TypeError("authority reduction timestamp is invalid");
     const authority = createControlPlaneAuthorityRepository({
@@ -63,11 +67,14 @@ export async function createPostgresRuntime({ env = process.env, PoolClass = Poo
       cursorSecret: auditCursorSecret,
       refreshNonceCodec
     });
-    return authority.advanceAuthorityGenerationAndEnqueueRefresh({
+    const reduction = await authority.advanceAuthorityGenerationAndEnqueueRefresh({
       organization_id,
       issued_at: issuedAt,
       expires_at: new Date(Date.parse(issuedAt) + 5 * 60_000).toISOString()
     });
+    const audit = authorityReductionAudit({ organization_id, resource, member_id, actor_member_id, capabilities, reduction, occurred_at: issuedAt });
+    if (audit) await authorityReductionAuditAppender.appendAuthorityReductionAudit({ ...audit, tx });
+    return reduction;
   };
   const organizationRepository = createPostgresOrganizationRepository({ client: pool, onAuthorityReduction });
   const capabilityAuthorityRepository = createCapabilityAuthorityRepository({ client: pool, onAuthorityReduction });
@@ -101,6 +108,36 @@ export async function createPostgresRuntime({ env = process.env, PoolClass = Poo
     drain,
     close
   });
+}
+
+function authorityReductionAudit({ organization_id, resource, member_id, actor_member_id, capabilities, reduction, occurred_at }) {
+  if (resource === "credential" || resource === "session") {
+    return Object.freeze({
+      organization_id,
+      actor: Object.freeze({ member_id }),
+      event_type: `${resource}.revoked`,
+      resource: Object.freeze({ type: "member", id: member_id }),
+      metadata: Object.freeze({ generation: reduction.generation }),
+      reason: "human_management",
+      source: "management_api",
+      mutation_key: `authority-reduction-${reduction.generation}`,
+      occurred_at
+    });
+  }
+  if (Array.isArray(capabilities) && capabilities.length > 0) {
+    return Object.freeze({
+      organization_id,
+      actor: Object.freeze({ member_id: actor_member_id }),
+      event_type: "capability.revoked",
+      resource: Object.freeze({ type: "member", id: member_id }),
+      metadata: Object.freeze({ revoked_count: capabilities.length, generation: reduction.generation }),
+      reason: "authority_revoked",
+      source: "system",
+      mutation_key: `authority-reduction-${reduction.generation}`,
+      occurred_at
+    });
+  }
+  return null;
 }
 
 function transactionBoundClient(tx) {

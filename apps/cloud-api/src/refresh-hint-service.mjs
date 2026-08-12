@@ -44,6 +44,7 @@ export function createRefreshHintService({
   nonceDeriver,
   signer,
   notifier,
+  metrics,
   now = () => Date.now(),
   hintTtlMs = DEFAULT_HINT_TTL_MS,
   maxWaiters = DEFAULT_MAX_WAITERS
@@ -52,6 +53,7 @@ export function createRefreshHintService({
     || !nonceDeriver || typeof nonceDeriver.derive !== "function" || typeof nonceDeriver.matchesDigest !== "function"
     || !signer || typeof signer.signRefreshHint !== "function" || typeof signer.publicKeyMetadata !== "function"
     || (notifier !== undefined && (!notifier || typeof notifier.waitForRefresh !== "function"))
+    || (metrics !== undefined && (!metrics || typeof metrics.snapshot !== "function"))
     || typeof now !== "function" || !Number.isSafeInteger(hintTtlMs) || hintTtlMs < 1 || hintTtlMs > MAX_HINT_TTL_MS
     || !Number.isSafeInteger(maxWaiters) || maxWaiters < 1 || maxWaiters > 100_000) {
     throw new RefreshHintServiceError(REFRESH_HINT_SERVICE_ERROR_CODES.INPUT);
@@ -62,9 +64,15 @@ export function createRefreshHintService({
   async function poll(input = {}) {
     const request = normalizePollInput(input);
     let state = await query(request);
-    if (state) return issueHint(state, request);
+    if (state) {
+      recordMetric(metrics, "recordRefreshPropagationObservation");
+      return issueHint(state, request);
+    }
     if (request.waitMs === 0) return null;
-    if (activeWaiters >= maxWaiters) throw new RefreshHintServiceError(REFRESH_HINT_SERVICE_ERROR_CODES.BUSY);
+    if (activeWaiters >= maxWaiters) {
+      recordMetric(metrics, "recordRefreshWaiterRejection");
+      throw new RefreshHintServiceError(REFRESH_HINT_SERVICE_ERROR_CODES.BUSY);
+    }
     activeWaiters += 1;
     try {
       await wait(request);
@@ -72,6 +80,7 @@ export function createRefreshHintService({
       activeWaiters -= 1;
     }
     state = await query(request);
+    recordMetric(metrics, state ? "recordRefreshPropagationObservation" : "recordRefreshPropagationTimeout");
     return state ? issueHint(state, request) : null;
   }
 
@@ -111,6 +120,7 @@ export function createRefreshHintService({
       }
       // A notifier is an optimization only. Its failure still reaches the
       // authoritative final query instead of converting into lost refresh.
+      recordMetric(metrics, "recordRefreshNotificationWakeFailure");
     }
   }
 
@@ -132,6 +142,7 @@ export function createRefreshHintService({
       });
       metadata = await signer.publicKeyMetadata();
     } catch {
+      recordMetric(metrics, "recordRefreshDeliveryFailure");
       throw new RefreshHintServiceError(REFRESH_HINT_SERVICE_ERROR_CODES.UNAVAILABLE);
     }
     const nonceValue = nonce?.nonce_base64url ?? (Buffer.isBuffer(nonce?.nonce) ? nonce.nonce.toString("base64url") : undefined);
@@ -180,6 +191,10 @@ export function createRefreshHintService({
     poll,
     snapshot: () => Object.freeze({ active_waiters: activeWaiters, max_waiters: maxWaiters })
   });
+}
+
+function recordMetric(metrics, method, amount = 1) {
+  try { metrics?.[method]?.(amount); } catch { /* Metrics never alter refresh correctness. */ }
 }
 
 function normalizePollInput(input) {

@@ -18,6 +18,8 @@ import { createPostgresOrganizationRepository } from "../../src/postgres/organiz
 import { createPostgresControlPlaneResourceRepository } from "../../src/postgres/control-plane-resource-repository.mjs";
 import { createCapabilityAuthorityRepository } from "../../src/postgres/capability-authority-repository.mjs";
 import { createPostgresHumanRepository } from "../../src/postgres/human-repository.mjs";
+import { createPostgresAdminAuditRepository } from "../../src/postgres/admin-audit-repository.mjs";
+import { createAuthorityReductionAuditAppender } from "../../src/postgres/authority-reduction-audit.mjs";
 
 const { Pool } = pg;
 const databaseUrl = process.env.AGENTPASS_TEST_POSTGRES_URL;
@@ -70,22 +72,30 @@ test("G4 refresh generation, failover reconstruction, and signed ACK are race-sa
     VALUES ($1,$2,$3,$4,$5,$6,$7,'owner'),($8,$2,$9,$4,$5,$6,$7,'owner')`, [ids.sessionA, ids.member, crypto.randomBytes(32), sessionCreatedAt, sessionExpiresAt, ids.organization, ids.membership, ids.sessionB, crypto.randomBytes(32)]);
   const credentialA = crypto.randomBytes(16);
   const credentialB = crypto.randomBytes(16);
+  const credentialC = crypto.randomBytes(16);
   await poolA.query(`INSERT INTO webauthn_credentials (id,member_id,public_key,transports,label,backup_eligible,backup_state)
-    VALUES ($1,$2,$3,'{}','Primary',false,false),($4,$2,$5,'{}','Backup',false,false)`, [credentialA, ids.member, Buffer.alloc(32, 0x51), credentialB, Buffer.alloc(32, 0x52)]);
+    VALUES ($1,$2,$3,'{}','Primary',false,false),($4,$2,$5,'{}','Backup',false,false),($6,$2,$7,'{}','Recovery',false,false)`, [credentialA, ids.member, Buffer.alloc(32, 0x51), credentialB, Buffer.alloc(32, 0x52), credentialC, Buffer.alloc(32, 0x53)]);
   await poolA.query(`INSERT INTO policies (organization_id,id,sequence,name,scope_json,status,created_by)
     VALUES ($1,$2,1,'default',$3::jsonb,'active',$4)`, [ids.organization, ids.policy, JSON.stringify({ operations: ["git.commit.sign"], repositories: ["/work/repo"], branches: { allow: ["main"], deny: [] }, remotes: { allow: ["origin"], deny: [] } }), ids.member]);
 
   const codec = createRefreshNonceCodec({ keys: { "refresh-nonce-v3": Buffer.alloc(32, 0x73) }, activeKeyId: "refresh-nonce-v3" });
   const repositoryA = createControlPlaneAuthorityRepository({ client: poolA, cursorSecret: Buffer.alloc(32, 0x41), refreshNonceCodec: codec });
   const repositoryB = createControlPlaneAuthorityRepository({ client: poolB, cursorSecret: Buffer.alloc(32, 0x42), refreshNonceCodec: codec });
-  const onAuthorityReduction = async ({ tx, organization_id, occurred_at, policy }) => {
+  const auditAppender = createAuthorityReductionAuditAppender({ adminAuditRepository: createPostgresAdminAuditRepository({ client: poolA }) });
+  const onAuthorityReduction = async ({ tx, organization_id, occurred_at, policy, resource, member_id, actor_member_id, capabilities }) => {
     const issuedAt = occurred_at ?? policy?.updated_at;
     const transactionAuthority = createControlPlaneAuthorityRepository({
       client: transactionBoundClient(tx),
       cursorSecret: Buffer.alloc(32, 0x43),
       refreshNonceCodec: codec
     });
-    return transactionAuthority.advanceAuthorityGenerationAndEnqueueRefresh({ organization_id, issued_at: issuedAt, expires_at: new Date(Date.parse(issuedAt) + 5 * 60_000).toISOString() });
+    const reduction = await transactionAuthority.advanceAuthorityGenerationAndEnqueueRefresh({ organization_id, issued_at: issuedAt, expires_at: new Date(Date.parse(issuedAt) + 5 * 60_000).toISOString() });
+    if (resource === "credential" || resource === "session") {
+      await auditAppender.appendAuthorityReductionAudit({ tx, organization_id, actor: { member_id }, resource: { type: "member", id: member_id }, event_type: `${resource}.revoked`, mutation_key: `authority-reduction-${reduction.generation}`, occurred_at: issuedAt, reason: "human_management", source: "management_api", metadata: { generation: reduction.generation } });
+    } else if (Array.isArray(capabilities) && capabilities.length > 0) {
+      await auditAppender.appendAuthorityReductionAudit({ tx, organization_id, actor: { member_id: actor_member_id }, resource: { type: "member", id: member_id }, event_type: "capability.revoked", mutation_key: `authority-reduction-${reduction.generation}`, occurred_at: issuedAt, reason: "authority_revoked", source: "system", metadata: { revoked_count: capabilities.length, generation: reduction.generation } });
+    }
+    return reduction;
   };
   const notifier = createPostgresRefreshHintNotifier({ pool: poolB });
   t.after(async () => { await notifier.close(); await Promise.all([poolA.end(), poolB.end()]); });
@@ -253,14 +263,16 @@ test("G4 refresh generation, failover reconstruction, and signed ACK are race-sa
   assert.equal(failoverOutbox.rows[0].count, 2);
 
   const capabilityRepository = createCapabilityAuthorityRepository({ client: poolB, onAuthorityReduction });
-  const revokedCapabilities = await capabilityRepository.revokeActiveCapabilitiesForMember({ organization_id: ids.organization, member_id: ids.member });
+  const revokedCapabilities = await capabilityRepository.revokeActiveCapabilitiesForMember({ organization_id: ids.organization, member_id: ids.member, actor_member_id: ids.member });
   assert.equal(revokedCapabilities.revoked_count, 1);
   const capabilityGeneration = await poolB.query("SELECT generation FROM control_plane_authority_generations WHERE organization_id=$1 AND superseded_at IS NULL", [ids.organization]);
   assert.equal(Number(capabilityGeneration.rows[0].generation), 6);
-  const replayedCapabilityRevocation = await capabilityRepository.revokeActiveCapabilitiesForMember({ organization_id: ids.organization, member_id: ids.member });
+  const replayedCapabilityRevocation = await capabilityRepository.revokeActiveCapabilitiesForMember({ organization_id: ids.organization, member_id: ids.member, actor_member_id: ids.member });
   assert.equal(replayedCapabilityRevocation.revoked_count, 0);
   const capabilityGenerationAfterReplay = await poolB.query("SELECT generation FROM control_plane_authority_generations WHERE organization_id=$1 AND superseded_at IS NULL", [ids.organization]);
   assert.equal(Number(capabilityGenerationAfterReplay.rows[0].generation), 6);
+  const capabilityAudit = await poolB.query("SELECT count(*)::int AS count FROM admin_audit_events WHERE organization_id=$1 AND action='capability.revoked'", [ids.organization]);
+  assert.equal(capabilityAudit.rows[0].count, 1);
 
   const humanRepository = createPostgresHumanRepository({ client: poolA, onAuthorityReduction });
   const credentialRevokedAt = new Date().toISOString();
@@ -273,6 +285,29 @@ test("G4 refresh generation, failover reconstruction, and signed ACK are race-sa
   assert.equal(revokedSession.version, 2);
   const sessionGeneration = await poolA.query("SELECT generation FROM control_plane_authority_generations WHERE organization_id=$1 AND superseded_at IS NULL", [ids.organization]);
   assert.equal(Number(sessionGeneration.rows[0].generation), 8);
+  const humanAudits = await poolA.query("SELECT action,count(*)::int AS count FROM admin_audit_events WHERE organization_id=$1 AND action IN ('credential.revoked','session.revoked') GROUP BY action ORDER BY action", [ids.organization]);
+  assert.deepEqual(humanAudits.rows, [{ action: "credential.revoked", count: 1 }, { action: "session.revoked", count: 1 }]);
+
+  const failingHumanRepository = createPostgresHumanRepository({
+    client: poolA,
+    onAuthorityReduction: async (input) => {
+      await onAuthorityReduction(input);
+      throw new Error("injected audit transaction failure");
+    }
+  });
+  await assert.rejects(
+    failingHumanRepository.revokeCredential({ session_id: ids.sessionA, actor_session_id: ids.sessionA, member_id: ids.member, organization_id: ids.organization, credential_id: credentialB.toString("base64url"), expected_version: 1, revoked_at: new Date().toISOString(), reason: "rollback_probe", authority_reduction: true }),
+    /injected audit transaction failure/u
+  );
+  const rolledBackCredential = await poolA.query("SELECT revoked_at,version FROM webauthn_credentials WHERE id=$1", [credentialB]);
+  assert.equal(rolledBackCredential.rows[0].revoked_at, null);
+  assert.equal(Number(rolledBackCredential.rows[0].version), 1);
+  const generationAfterAuditFailure = await poolA.query("SELECT generation FROM control_plane_authority_generations WHERE organization_id=$1 AND superseded_at IS NULL", [ids.organization]);
+  assert.equal(Number(generationAfterAuditFailure.rows[0].generation), 8);
+  const outboxAfterAuditFailure = await poolA.query("SELECT count(*)::int AS count FROM device_refresh_outbox WHERE organization_id=$1 AND desired_generation=9", [ids.organization]);
+  assert.equal(outboxAfterAuditFailure.rows[0].count, 0);
+  const auditsAfterFailure = await poolA.query("SELECT count(*)::int AS count FROM admin_audit_events WHERE organization_id=$1 AND action='credential.revoked'", [ids.organization]);
+  assert.equal(auditsAfterFailure.rows[0].count, 1);
   await humanRepository.revokeSession({ session_id: ids.sessionA, revoked_at: new Date().toISOString(), reason: "logout" });
   const generationAfterLogout = await poolA.query("SELECT generation FROM control_plane_authority_generations WHERE organization_id=$1 AND superseded_at IS NULL", [ids.organization]);
   assert.equal(Number(generationAfterLogout.rows[0].generation), 8);
