@@ -5,7 +5,7 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 
-import { CloudStoreError, VersionConflictError, auditEventHashPreimage, computeAuditEventHash, createCloudStore } from "../src/store.mjs";
+import { CloudStoreError, VersionConflictError, auditEventHashPreimage, computeAuditEventHash, createCapabilityNonce, createCloudStore } from "../src/store.mjs";
 import { canonicalJson } from "../../../packages/protocol/src/index.mjs";
 
 const ids = {
@@ -33,6 +33,13 @@ test("store process lock rejects concurrent writers and releases on close", asyn
 
 const timestamp = "2026-08-11T01:00:00.000Z";
 const digest = "a".repeat(64);
+
+test("capability nonce generation normalizes every base64url prefix into the protocol alphabet", () => {
+  const nonce = createCapabilityNonce(() => Buffer.alloc(32, 0xff));
+  assert.match(nonce, /^[A-Za-z0-9][A-Za-z0-9._:-]{31,127}$/);
+  assert.equal(nonce.startsWith("A"), true);
+  assert.throws(() => createCapabilityNonce(() => Buffer.alloc(31)), { code: "ERR_INVALID_INPUT" });
+});
 
 async function fixture() {
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), "agentpass-cloud-"));

@@ -44,6 +44,13 @@ export class VersionConflictError extends CloudStoreError {
   }
 }
 
+export function createCapabilityNonce(randomBytes = crypto.randomBytes) {
+  const bytes = randomBytes(32);
+  if (!Buffer.isBuffer(bytes) || bytes.length !== 32) throw new CloudStoreError("ERR_INVALID_INPUT", "capability nonce source must return 32 bytes");
+  const encoded = bytes.toString("base64url");
+  return /^[A-Za-z0-9]/.test(encoded) ? encoded : `A${encoded.slice(1)}`;
+}
+
 /**
  * Return the SHA-256 hash used by the device audit chain.
  *
@@ -349,7 +356,7 @@ export async function createCloudStore(options = {}) {
         if (state.capabilities[capabilityId] || hasAnyResourceId(state, capabilityId)) throw unique("capability_id", capabilityId);
         const notBefore = requestedAt;
         const expiresAt = new Date(Date.parse(notBefore) + ttlMs).toISOString();
-        const nonce = crypto.randomBytes(32).toString("base64url");
+        const nonce = createCapabilityNonce();
         const operations = scope.operations;
         const capabilityHash = crypto.createHash("sha256").update(canonicalJson({ capability_id: capabilityId, issuer, key_id: keyId, agent_id: agentId, device_id: deviceId, operations, scope, not_before: notBefore, expires_at: expiresAt, sequence, nonce })).digest("hex");
         const record = { capability_id: capabilityId, organization_id: organizationId, issuer, key_id: keyId, agent_id: agentId, device_id: deviceId, operations, scope, not_before: notBefore, expires_at: expiresAt, sequence, nonce, capability_hash: capabilityHash, issued_at: notBefore, status: "active", version: 1 };
