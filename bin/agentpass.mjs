@@ -15,6 +15,7 @@ import { installIntegration, integrationPlan } from "../lib/integrations.mjs";
 import { readGitSigningInvocation, writeGitSignature } from "../lib/git-signing.mjs";
 import { evaluateAgentRequest } from "../lib/policy.mjs";
 import { executeProductionInstall, prepareProductionInstall, removeStagedProductionInstall, stageProductionInstall, verifyProductionInstall } from "../lib/platform-install.mjs";
+import { runProductionDoctor } from "../lib/platform-doctor.mjs";
 import { inspectNativeApplication } from "../lib/platform-setup.mjs";
 import { generateRecoveryIdentity, recoveryPolicyToAnchorPolicy, signAnchorRecoveryAuthorization, signRecoveryRequest, verifyAnchorRecoveryApprovals, verifyRecoveryThreshold } from "../lib/recovery.mjs";
 import { applyControlBundle, controlKeyFingerprint, fetchControlBundle, generateControlKeyPair, loadControlBundle, signControlBundle } from "../lib/remote-control.mjs";
@@ -34,7 +35,8 @@ Commands:
   migrate           upgrade an older policy to signed-agent format
   status            show policy and revocation status
   check             evaluate the current repository
-  doctor            check local prerequisites
+  doctor [--client claude-code|cursor] [--project DIR] [--team-id TEAMID] [--verbose]
+                    diagnose production installation without changing state
   broker ping       verify that the signing broker is running
   broker install    install and start the macOS LaunchAgent
   broker stop       stop the macOS LaunchAgent
@@ -344,28 +346,34 @@ function restore() {
   console.log("AgentPass operations restored.");
 }
 
-function doctor() {
-  const checks = [
-    { name: "node", ok: Number(process.versions.node.split(".")[0]) >= 20, detail: process.versions.node },
-    { name: "platform", ok: process.platform === "darwin", detail: `${process.platform}/${process.arch}` },
-    { name: "git", ok: Boolean(spawnSync("git", ["--version"], { encoding: "utf8" }).stdout), detail: git(["--version"], true) },
-    { name: "ssh-keygen", ok: fs.existsSync("/usr/bin/ssh-keygen"), detail: "/usr/bin/ssh-keygen" },
-    { name: "config", ok: fs.existsSync(path.join(defaultConfigDir, "config.json")), detail: defaultConfigDir },
-    { name: "broker-socket", ok: fs.existsSync(socketPath()), detail: socketPath() }
-  ];
-  if (fs.existsSync(path.join(defaultConfigDir, "config.json"))) {
-    try {
-      const config = loadConfig();
-      if (config.control) {
-        const bundle = loadControlBundle(config, defaultConfigDir);
-        checks.push({ name: "remote-control", ok: true, detail: `sequence=${bundle.sequence} expires=${bundle.expires_at}` });
-      }
-    } catch (error) {
-      checks.push({ name: "remote-control", ok: false, detail: error.message });
+async function doctor() {
+  const allowed = new Set(["--client", "--project", "--team-id"]);
+  const flags = new Map();
+  for (let index = 0; index < args.length; index += 1) {
+    const argument = args[index];
+    if (argument === "--verbose") continue;
+    if (!allowed.has(argument) || flags.has(argument) || index + 1 >= args.length || args[index + 1].startsWith("--")) {
+      throw new Error("Usage: agentpass doctor [--client claude-code|cursor] [--project DIR] [--team-id TEAMID] [--verbose]");
     }
+    flags.set(argument, args[index + 1]);
+    index += 1;
   }
-  console.log(JSON.stringify({ ok: checks.every((check) => check.ok), checks }, null, 2));
-  if (!checks.every((check) => check.ok)) process.exitCode = 1;
+  const expectedTeamId = flags.get("--team-id") ?? process.env.AGENTPASS_RELEASE_TEAM_ID;
+  if (expectedTeamId !== undefined && !/^[A-Z0-9]{10}$/.test(expectedTeamId)) throw new Error("Doctor Team ID must contain 10 uppercase letters or digits");
+  const report = await runProductionDoctor({
+    client: flags.get("--client"),
+    projectDir: flags.has("--project") ? path.resolve(flags.get("--project")) : undefined,
+    expectedTeamId,
+    verbose: args.includes("--verbose")
+  }, {
+    nativeStatus: async (native) => {
+      const health = await brokerRequest({ operation: "ping" }, { native, timeoutMs: 10_000 });
+      const auditResult = await brokerRequest({ operation: "native.audit.status" }, { native, timeoutMs: 30_000 });
+      return { health, audit: JSON.parse(Buffer.from(auditResult.stdout_base64, "base64").toString("utf8")) };
+    }
+  });
+  console.log(JSON.stringify(report, null, 2));
+  if (!report.ok) process.exitCode = 1;
 }
 
 function setupMacos() {
@@ -1049,7 +1057,7 @@ try {
   else if (command === "migrate") migrate();
   else if (command === "check") check();
   else if (command === "status") status();
-  else if (command === "doctor") doctor();
+  else if (command === "doctor") await doctor();
   else if (command === "broker" && args[0] === "ping") await brokerPing();
   else if (command === "broker" && args[0] === "install") brokerInstall();
   else if (command === "broker" && args[0] === "stop") brokerStop();
