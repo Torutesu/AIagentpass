@@ -1,5 +1,5 @@
 export const OPERATIONAL_HEALTH_VERSION = 1;
-export const EXPECTED_POSTGRES_SCHEMA_VERSION = 14;
+export const EXPECTED_POSTGRES_SCHEMA_VERSION = 15;
 
 export const OPERATIONAL_METRIC_KEYS = Object.freeze([
   "lock_timeout_total",

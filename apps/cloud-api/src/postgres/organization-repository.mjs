@@ -3,6 +3,7 @@ import { createHash, randomUUID } from "node:crypto";
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const DIGEST = /^[0-9a-f]{64}$/i;
 const ROLES = new Set(["owner", "admin", "auditor", "viewer"]);
+const ROLE_AUTHORITY = Object.freeze({ owner: 4, admin: 3, auditor: 2, viewer: 1 });
 const INVITABLE_ROLES = new Set(["admin", "auditor", "viewer"]);
 const CONTROL_CHARACTERS = /[\u0000-\u001f\u007f]/u;
 const RFC3339 = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?(?:Z|[+-]\d{2}:\d{2})$/;
@@ -32,9 +33,10 @@ export class OrganizationRepositoryError extends Error {
  * This prevents a repository instance from accidentally becoming a tenant
  * boundary that outlives a request.
  */
-export function createPostgresOrganizationRepository({ client, now = () => new Date().toISOString() } = {}) {
+export function createPostgresOrganizationRepository({ client, now = () => new Date().toISOString(), onAuthorityReduction } = {}) {
   assertClient(client);
   if (typeof now !== "function") throw new TypeError("now must be a function");
+  if (onAuthorityReduction !== undefined && typeof onAuthorityReduction !== "function") throw new TypeError("onAuthorityReduction must be a function");
 
   async function getOrganization(input = {}) {
     const organizationId = uuid(input.organization_id ?? input.organizationId ?? input.actor?.organization_id);
@@ -204,6 +206,9 @@ export function createPostgresOrganizationRepository({ client, now = () => new D
       if ((result.rowCount ?? result.rows?.length ?? 0) !== 1) return null;
       const row = safeMembershipRow(result.rows[0]);
       await revokeMemberSessions(tx, { organizationId, memberId, revokedAt: sessionsRevokedAt, reason: "membership_role_changed" });
+      if (ROLE_AUTHORITY[role] < ROLE_AUTHORITY[target.role]) {
+        await notifyAuthorityReduction(tx, { organizationId, actorId, memberId, eventType: "membership.role_reduced", occurredAt: sessionsRevokedAt });
+      }
       await appendMutationEvents(tx, { organizationId, actorId, action: "membership.role_updated", targetType: "membership", targetId: row.membership_id, details: { member_id: row.member_id, role, version: row.version } });
       return row;
     }, 200);
@@ -231,6 +236,7 @@ export function createPostgresOrganizationRepository({ client, now = () => new D
       if ((result.rowCount ?? result.rows?.length ?? 0) !== 1) return null;
       const row = safeMembershipRow(result.rows[0]);
       await revokeMemberSessions(tx, { organizationId, memberId, revokedAt: removedAt, reason: "membership_removed" });
+      await notifyAuthorityReduction(tx, { organizationId, actorId, memberId, eventType: "membership.removed", occurredAt: removedAt });
       await appendMutationEvents(tx, { organizationId, actorId, action: "membership.removed", targetType: "membership", targetId: row.membership_id, details: { member_id: row.member_id, version: row.version, removed_at: removedAt } });
       return row;
     }, 200);
@@ -421,6 +427,21 @@ export function createPostgresOrganizationRepository({ client, now = () => new D
     await tx.query(`UPDATE capabilities
       SET revoked_at=$3
       WHERE organization_id=$1 AND issued_by_member_id=$2 AND revoked_at IS NULL`, [organizationId, memberId, revokedAt]);
+  }
+
+  async function notifyAuthorityReduction(tx, { organizationId, actorId, memberId, eventType, occurredAt }) {
+    if (!onAuthorityReduction) throw new OrganizationRepositoryError("ERR_AUTHORITY_REDUCTION_UNAVAILABLE", "authority reduction propagation is unavailable");
+    const result = await onAuthorityReduction(Object.freeze({
+      tx,
+      organization_id: organizationId,
+      actor_member_id: actorId,
+      member_id: memberId,
+      event_type: eventType,
+      occurred_at: occurredAt
+    }));
+    if (!result || typeof result !== "object" || !Number.isSafeInteger(result.generation) || result.generation < 1) {
+      throw new OrganizationRepositoryError("ERR_AUTHORITY_REDUCTION_UNAVAILABLE", "authority reduction propagation is unavailable");
+    }
   }
 
   async function acquireIdempotency(tx, { organizationId, actorPrincipal, idempotencyKey, requestHash }) {

@@ -2,6 +2,7 @@ import { Pool } from "pg";
 import { createMigrationRunner } from "./migration-runner.mjs";
 import { createCapabilityAuthorityRepository } from "./capability-authority-repository.mjs";
 import { createPostgresControlPlaneStore } from "./control-plane-store.mjs";
+import { createControlPlaneAuthorityRepository } from "./control-plane-authority-repository.mjs";
 import { createPostgresHumanRepository } from "./human-repository.mjs";
 import { createPostgresOrganizationRepository } from "./organization-repository.mjs";
 import { createTenantRepositoryFactory } from "./repository.mjs";
@@ -52,11 +53,25 @@ export async function createPostgresRuntime({ env = process.env, PoolClass = Poo
   async function drain(options = {}) {
     return drainController.drain({ ...options, close: closePool });
   }
-  const organizationRepository = createPostgresOrganizationRepository({ client: pool });
-  const capabilityAuthorityRepository = createCapabilityAuthorityRepository({ client: pool });
-  const sharedControlRepository = createSharedControlRepository({ client: pool });
   const auditCursorSecret = exactSecret(env.AGENTPASS_HUMAN_CURSOR_SECRET, "AGENTPASS_HUMAN_CURSOR_SECRET");
   const capabilityNonceSecret = exactSecret(env.AGENTPASS_CAPABILITY_NONCE_SECRET, "AGENTPASS_CAPABILITY_NONCE_SECRET");
+  const onAuthorityReduction = async ({ tx, organization_id, occurred_at, policy }) => {
+    const issuedAt = occurred_at ?? policy?.updated_at;
+    if (typeof issuedAt !== "string" || !Number.isFinite(Date.parse(issuedAt))) throw new TypeError("authority reduction timestamp is invalid");
+    const authority = createControlPlaneAuthorityRepository({
+      client: transactionBoundClient(tx),
+      cursorSecret: auditCursorSecret,
+      refreshNonceCodec
+    });
+    return authority.advanceAuthorityGenerationAndEnqueueRefresh({
+      organization_id,
+      issued_at: issuedAt,
+      expires_at: new Date(Date.parse(issuedAt) + 5 * 60_000).toISOString()
+    });
+  };
+  const organizationRepository = createPostgresOrganizationRepository({ client: pool, onAuthorityReduction });
+  const capabilityAuthorityRepository = createCapabilityAuthorityRepository({ client: pool });
+  const sharedControlRepository = createSharedControlRepository({ client: pool });
   const controlPlaneStore = createPostgresControlPlaneStore({
     client: pool,
     organizationRepository,
@@ -64,7 +79,8 @@ export async function createPostgresRuntime({ env = process.env, PoolClass = Poo
     sharedControlRepository,
     auditCursorSecret,
     capabilityNonceSecret,
-    refreshNonceCodec
+    refreshNonceCodec,
+    onAuthorityReduction
   });
   return Object.freeze({
     pool,
@@ -84,6 +100,15 @@ export async function createPostgresRuntime({ env = process.env, PoolClass = Poo
     beginDrain: drainController.beginDrain,
     drain,
     close
+  });
+}
+
+function transactionBoundClient(tx) {
+  return Object.freeze({
+    async query(text, params) {
+      if (text === "BEGIN" || text === "COMMIT" || text === "ROLLBACK") return { rows: [], rowCount: 0 };
+      return tx.query(text, params);
+    }
   });
 }
 

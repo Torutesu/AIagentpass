@@ -66,7 +66,7 @@ function membershipRow(overrides = {}) { return { organization_id: ids.organizat
 function invitationRow(overrides = {}) { return { organization_id: ids.organization, invitation_id: ids.invitation, role: "viewer", created_by: ids.admin, created_at: NOW, expires_at: LATER, consumed_at: null, revoked_at: null, version: 1, ...overrides }; }
 function txResponses(...responses) { return [response(), response(), ...responses, response(), response(), response(), response(), response(), response()]; }
 
-function repo(client, options = {}) { return createPostgresOrganizationRepository({ client, now: () => NOW, ...options }); }
+function repo(client, options = {}) { return createPostgresOrganizationRepository({ client, now: () => NOW, onAuthorityReduction: async () => ({ generation: 2 }), ...options }); }
 
 test("exposes exactly the frozen organization API", () => {
   const repository = repo(new QueueClient());
@@ -78,6 +78,7 @@ test("exposes exactly the frozen organization API", () => {
   ].sort());
   assert.throws(() => createPostgresOrganizationRepository({ client: {} }), /database client/);
   assert.throws(() => createPostgresOrganizationRepository({ client: new QueueClient(), now: "not-a-function" }), /now must be a function/);
+  assert.throws(() => createPostgresOrganizationRepository({ client: new QueueClient(), onAuthorityReduction: "not-a-function" }), /onAuthorityReduction/);
 });
 
 test("gets one tenant organization without exposing database failures", async () => {
@@ -312,7 +313,8 @@ test("same canonical request replays without running the mutation, while a diffe
 
 test("removeMember is role-gated, versioned, tenant-scoped, session-revoking, and audit-bound", async () => {
   const client = new QueueClient([response(), response(), response([{ role: "owner", status: "active" }]), response([membershipRow({ member_id: ids.viewer, role: "viewer" })]), response([membershipRow({ member_id: ids.viewer, role: "viewer", status: "revoked", version: 2 })]), response(), response(), response([{ sequence: 0, event_hash: ZERO_HASH }]), response(), response(), response(), response()]);
-  const result = await repo(client).removeMember({ organization_id: ids.organization, actor_member_id: ids.owner, member_id: ids.viewer, expected_version: 1, removed_at: NOW, idempotency_key: "remove-member-1" });
+  const reductions = [];
+  const result = await repo(client, { onAuthorityReduction: async (input) => { reductions.push(input); return { generation: 2 }; } }).removeMember({ organization_id: ids.organization, actor_member_id: ids.owner, member_id: ids.viewer, expected_version: 1, removed_at: NOW, idempotency_key: "remove-member-1" });
   assert.equal(result.status, "revoked");
   const update = client.calls.find((call) => call.text.startsWith("UPDATE memberships"));
   assert.match(update.text, /status='revoked'/);
@@ -324,6 +326,32 @@ test("removeMember is role-gated, versioned, tenant-scoped, session-revoking, an
   assert.equal(client.calls.some((call) => call.text.startsWith("UPDATE webauthn_challenges") && call.text.includes("status='consumed'")), true);
   assert.equal(client.calls.some((call) => call.text.startsWith("UPDATE capabilities") && call.text.includes("issued_by_member_id=$2")), true);
   assert.equal(client.calls.filter((call) => call.text.startsWith("INSERT INTO admin_audit_events")).length, 1);
+  assert.equal(reductions.length, 1);
+  assert.equal(reductions[0].tx, client);
+  assert.deepEqual(Object.fromEntries(Object.entries(reductions[0]).filter(([key]) => key !== "tx")), { organization_id: ids.organization, actor_member_id: ids.owner, member_id: ids.viewer, event_type: "membership.removed", occurred_at: NOW });
+});
+
+test("role reduction propagates authority once while widening and idempotent replay do not", async () => {
+  const reductions = [];
+  const reductionClient = new QueueClient([response(), response(), response([{ role: "owner", status: "active" }]), response([membershipRow({ member_id: ids.admin, role: "admin" })]), response([membershipRow({ member_id: ids.admin, role: "viewer", version: 2 })]), response(), response(), response([{ sequence: 0, event_hash: ZERO_HASH }]), response(), response(), response(), response()]);
+  await repo(reductionClient, { onAuthorityReduction: async (input) => { reductions.push(input); return { generation: 3 }; } }).updateMemberRole({ organization_id: ids.organization, actor_member_id: ids.owner, member_id: ids.admin, role: "viewer", expected_version: 1, revoked_at: NOW, idempotency_key: "role-reduce-1" });
+  assert.equal(reductions.length, 1);
+  assert.equal(reductions[0].event_type, "membership.role_reduced");
+
+  const widening = [];
+  const wideningClient = new QueueClient([response(), response(), response([{ role: "owner", status: "active" }]), response([membershipRow({ member_id: ids.viewer, role: "viewer" })]), response([membershipRow({ member_id: ids.viewer, role: "admin", version: 2 })]), response(), response(), response([{ sequence: 0, event_hash: ZERO_HASH }]), response(), response(), response(), response()]);
+  await repo(wideningClient, { onAuthorityReduction: async (input) => { widening.push(input); return { generation: 3 }; } }).updateMemberRole({ organization_id: ids.organization, actor_member_id: ids.owner, member_id: ids.viewer, role: "admin", expected_version: 1, revoked_at: NOW, idempotency_key: "role-widen-1" });
+  assert.equal(widening.length, 0);
+});
+
+test("rolls back a membership reduction when generation propagation is unavailable", async () => {
+  const client = new QueueClient([response(), response(), response([{ role: "owner", status: "active" }]), response([membershipRow({ member_id: ids.viewer, role: "viewer" })]), response([membershipRow({ member_id: ids.viewer, role: "viewer", status: "revoked", version: 2 })]), response(), response()]);
+  await assert.rejects(
+    repo(client, { onAuthorityReduction: async () => undefined }).removeMember({ organization_id: ids.organization, actor_member_id: ids.owner, member_id: ids.viewer, expected_version: 1, removed_at: NOW, idempotency_key: "remove-member-fail-closed" }),
+    { code: "ERR_AUTHORITY_REDUCTION_UNAVAILABLE" }
+  );
+  assert.equal(client.calls.at(-1).text, "ROLLBACK");
+  assert.equal(client.calls.some(({ text }) => text.startsWith("UPDATE idempotency_records")), false);
 });
 
 test("maps the PostgreSQL final-owner constraint to a stable repository error", async () => {

@@ -35,7 +35,7 @@ test("Organization P1 is atomic and replay-safe across real PostgreSQL connectio
     ($1,'integration-owner','Owner'),($2,'integration-invited','Invited'),($3,'integration-removed','Removed')`, [ownerId, invitedId, removedId]);
 
   let randomCounter = 0;
-  const repository = createPostgresOrganizationRepository({ client: pool, now: () => NOW });
+  const repository = createPostgresOrganizationRepository({ client: pool, now: () => NOW, onAuthorityReduction: async () => ({ generation: 2 }) });
   const cursorCodec = createHumanCursorCodec({ secret: Buffer.alloc(32, 0x42) });
   const service = createPostgresOrganizationService({
     repository,

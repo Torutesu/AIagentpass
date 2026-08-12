@@ -14,6 +14,8 @@ import { createControlPlaneAuthorityRepository } from "../../src/postgres/contro
 import { createMigrationRunner } from "../../src/postgres/migration-runner.mjs";
 import { createRefreshNonceCodec } from "../../src/postgres/refresh-nonce-codec.mjs";
 import { createPostgresRefreshHintNotifier } from "../../src/postgres/refresh-hint-notifier.mjs";
+import { createPostgresOrganizationRepository } from "../../src/postgres/organization-repository.mjs";
+import { createPostgresControlPlaneResourceRepository } from "../../src/postgres/control-plane-resource-repository.mjs";
 
 const { Pool } = pg;
 const databaseUrl = process.env.AGENTPASS_TEST_POSTGRES_URL;
@@ -30,7 +32,9 @@ test("G4 refresh generation, failover reconstruction, and signed ACK are race-sa
   const ids = {
     organization: crypto.randomUUID(),
     member: crypto.randomUUID(),
+    removedMember: crypto.randomUUID(),
     membership: crypto.randomUUID(),
+    removedMembership: crypto.randomUUID(),
     policy: crypto.randomUUID(),
     deviceA: crypto.randomUUID(),
     deviceB: crypto.randomUUID(),
@@ -41,8 +45,9 @@ test("G4 refresh generation, failover reconstruction, and signed ACK are race-sa
   const deviceAPublic = deviceAKeys.publicKey.export({ type: "spki", format: "pem" }).toString().trimEnd();
   const deviceBPublic = deviceBKeys.publicKey.export({ type: "spki", format: "pem" }).toString().trimEnd();
   await poolA.query("INSERT INTO organizations (id,name) VALUES ($1,'G4 integration')", [ids.organization]);
-  await poolA.query("INSERT INTO members (id,github_subject,display_name) VALUES ($1,$2,'G4 owner')", [ids.member, `g4-${ids.member}`]);
+  await poolA.query("INSERT INTO members (id,github_subject,display_name) VALUES ($1,$2,'G4 owner'),($3,$4,'G4 removed')", [ids.member, `g4-${ids.member}`, ids.removedMember, `g4-${ids.removedMember}`]);
   await poolA.query("INSERT INTO memberships (organization_id,id,member_id,role,status) VALUES ($1,$2,$3,'owner','active')", [ids.organization, ids.membership, ids.member]);
+  await poolA.query("INSERT INTO memberships (organization_id,id,member_id,role,status) VALUES ($1,$2,$3,'viewer','active')", [ids.organization, ids.removedMembership, ids.removedMember]);
   await poolA.query(`INSERT INTO devices (organization_id,id,label,key_algorithm,public_key_pem,status,metadata)
     VALUES ($1,$2,'Mac A','p256-sha256',$3,'active','{}'::jsonb),($1,$4,'Mac B','p256-sha256',$5,'active','{}'::jsonb)`, [ids.organization, ids.deviceA, deviceAPublic, ids.deviceB, deviceBPublic]);
   await poolA.query(`INSERT INTO policies (organization_id,id,sequence,name,scope_json,status,created_by)
@@ -51,6 +56,15 @@ test("G4 refresh generation, failover reconstruction, and signed ACK are race-sa
   const codec = createRefreshNonceCodec({ keys: { "refresh-nonce-v3": Buffer.alloc(32, 0x73) }, activeKeyId: "refresh-nonce-v3" });
   const repositoryA = createControlPlaneAuthorityRepository({ client: poolA, cursorSecret: Buffer.alloc(32, 0x41), refreshNonceCodec: codec });
   const repositoryB = createControlPlaneAuthorityRepository({ client: poolB, cursorSecret: Buffer.alloc(32, 0x42), refreshNonceCodec: codec });
+  const onAuthorityReduction = async ({ tx, organization_id, occurred_at, policy }) => {
+    const issuedAt = occurred_at ?? policy?.updated_at;
+    const transactionAuthority = createControlPlaneAuthorityRepository({
+      client: transactionBoundClient(tx),
+      cursorSecret: Buffer.alloc(32, 0x43),
+      refreshNonceCodec: codec
+    });
+    return transactionAuthority.advanceAuthorityGenerationAndEnqueueRefresh({ organization_id, issued_at: issuedAt, expires_at: new Date(Date.parse(issuedAt) + 5 * 60_000).toISOString() });
+  };
   const notifier = createPostgresRefreshHintNotifier({ pool: poolB });
   t.after(async () => { await notifier.close(); await Promise.all([poolA.end(), poolB.end()]); });
   const issuedAt = new Date().toISOString();
@@ -164,7 +178,49 @@ test("G4 refresh generation, failover reconstruction, and signed ACK are race-sa
   await assert.rejects(repositoryA.reduceAuthorityAndEnqueueRefresh({ ...reduction, revocation_id: crypto.randomUUID(), target_id: crypto.randomUUID() }), { code: "ERR_NOT_FOUND" });
   const afterRollback = await poolA.query("SELECT generation FROM control_plane_authority_generations WHERE organization_id=$1 AND superseded_at IS NULL", [ids.organization]);
   assert.equal(Number(afterRollback.rows[0].generation), 2);
+
+  const organizationRepository = createPostgresOrganizationRepository({
+    client: poolA,
+    onAuthorityReduction
+  });
+  const removedAt = new Date().toISOString();
+  let removed;
+  try {
+    removed = await organizationRepository.removeMember({ organization_id: ids.organization, actor_member_id: ids.member, member_id: ids.removedMember, expected_version: 1, removed_at: removedAt, idempotency_key: "g4-member-remove" });
+  } catch (error) {
+    assert.fail(`membership authority propagation failed: ${error.cause?.message ?? error.message}`);
+  }
+  assert.equal(removed.status, "revoked");
+  const memberGeneration = await poolA.query("SELECT generation FROM control_plane_authority_generations WHERE organization_id=$1 AND superseded_at IS NULL", [ids.organization]);
+  assert.equal(Number(memberGeneration.rows[0].generation), 3);
+  const memberOutbox = await poolA.query("SELECT count(*)::int AS count FROM device_refresh_outbox WHERE organization_id=$1 AND desired_generation=3", [ids.organization]);
+  assert.equal(memberOutbox.rows[0].count, 2);
+  const replayedRemoval = await organizationRepository.removeMember({ organization_id: ids.organization, actor_member_id: ids.member, member_id: ids.removedMember, expected_version: 1, removed_at: new Date().toISOString(), idempotency_key: "g4-member-remove" });
+  assert.equal(replayedRemoval.replayed, true);
+  const generationAfterReplay = await poolA.query("SELECT generation FROM control_plane_authority_generations WHERE organization_id=$1 AND superseded_at IS NULL", [ids.organization]);
+  assert.equal(Number(generationAfterReplay.rows[0].generation), 3);
+
+  const resourceRepository = createPostgresControlPlaneResourceRepository({ client: poolA, onAuthorityReduction });
+  const disabledPolicy = await resourceRepository.updatePolicy({ organization_id: ids.organization, policy_id: ids.policy, expected_version: 1, patch: { status: "disabled" }, principal_id: ids.member, idempotency_key: "g4-policy-disable" });
+  assert.equal(disabledPolicy.status, "disabled");
+  const policyGeneration = await poolA.query("SELECT generation FROM control_plane_authority_generations WHERE organization_id=$1 AND superseded_at IS NULL", [ids.organization]);
+  assert.equal(Number(policyGeneration.rows[0].generation), 4);
+  const policyOutbox = await poolA.query("SELECT count(*)::int AS count FROM device_refresh_outbox WHERE organization_id=$1 AND desired_generation=4", [ids.organization]);
+  assert.equal(policyOutbox.rows[0].count, 2);
+  const replayedPolicy = await resourceRepository.updatePolicy({ organization_id: ids.organization, policy_id: ids.policy, expected_version: 1, patch: { status: "disabled" }, principal_id: ids.member, idempotency_key: "g4-policy-disable" });
+  assert.equal(replayedPolicy.status, "disabled");
+  const policyGenerationAfterReplay = await poolA.query("SELECT generation FROM control_plane_authority_generations WHERE organization_id=$1 AND superseded_at IS NULL", [ids.organization]);
+  assert.equal(Number(policyGenerationAfterReplay.rows[0].generation), 4);
 });
+
+function transactionBoundClient(tx) {
+  return Object.freeze({
+    async query(text, params) {
+      if (["BEGIN", "COMMIT", "ROLLBACK"].includes(text)) return { rows: [], rowCount: 0 };
+      return tx.query(text, params);
+    }
+  });
+}
 
 function signAcknowledgement({ privateKey, organizationId, deviceId, generation, sequence, statementHash, nonce, result = "applied", reasonCode }) {
   const unsigned = {

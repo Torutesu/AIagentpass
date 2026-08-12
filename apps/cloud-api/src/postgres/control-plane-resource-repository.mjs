@@ -44,12 +44,13 @@ export class ControlPlaneResourceRepositoryError extends Error {
   }
 }
 
-export function createPostgresControlPlaneResourceRepository({ client, now = () => new Date().toISOString(), idempotencyTtlMs = MAX_IDEMPOTENCY_TTL_MS } = {}) {
+export function createPostgresControlPlaneResourceRepository({ client, now = () => new Date().toISOString(), idempotencyTtlMs = MAX_IDEMPOTENCY_TTL_MS, onAuthorityReduction } = {}) {
   assertClient(client);
   if (typeof now !== "function") throw new TypeError("now must be a function");
   if (!Number.isSafeInteger(idempotencyTtlMs) || idempotencyTtlMs < 1_000 || idempotencyTtlMs > MAX_IDEMPOTENCY_TTL_MS) {
     throw new TypeError("idempotencyTtlMs must be between 1000 and 86400000");
   }
+  if (onAuthorityReduction !== undefined && typeof onAuthorityReduction !== "function") throw new TypeError("onAuthorityReduction must be a function");
 
   const api = {
     createDevice: (input = {}) => createDevice(input),
@@ -396,6 +397,18 @@ export function createPostgresControlPlaneResourceRepository({ client, now = () 
         RETURNING organization_id,id,sequence,name,scope_json,status,created_by,created_at,updated_at,version`, values);
       if (rowCount(result) === 0) throw new ControlPlaneResourceRepositoryError("ERR_VERSION_CONFLICT", "optimistic version check failed", { expected: expectedVersion, actual: safeInteger(current.version, "version") });
       const policy = mapPolicy(result.rows[0]);
+      if (onAuthorityReduction && requiresPolicyAuthorityReduction(current, policy, normalizedPatch)) {
+        const authority = await onAuthorityReduction(Object.freeze({
+          tx,
+          organization_id: organizationId,
+          policy: freezePolicyForAuthorityHook(policy),
+          actor_member_id: principalId,
+          idempotency_key: idempotencyKey
+        }));
+        if (!authority || typeof authority !== "object" || !Number.isSafeInteger(authority.generation) || authority.generation < 1) {
+          throw new ControlPlaneResourceRepositoryError("ERR_AUTHORITY_REDUCTION_UNAVAILABLE", "authority reduction propagation is unavailable");
+        }
+      }
       await finishIdempotency(tx, organizationId, principalId, idempotencyKey, 200, policy);
       return policy;
     }));
@@ -575,6 +588,67 @@ function normalizeAgent(input) {
 function normalizePolicyScope(value) {
   try { return normalizeScope(value); }
   catch (error) { throw new ControlPlaneResourceRepositoryError("ERR_INVALID_INPUT", "policy scope is invalid", undefined, error); }
+}
+
+function requiresPolicyAuthorityReduction(currentRow, nextPolicy, normalizedPatch) {
+  if (currentRow.status !== "active") return false;
+  if (nextPolicy.status === "disabled") return true;
+  // A policy update can affect which authority is effective even when its
+  // scope is not touched (for example, a sequence change). Treat every such
+  // active update as reducing unless the whole mutation is a proven widening.
+  if (normalizedPatch.scope_json === undefined) return true;
+  if (Object.keys(normalizedPatch).some((key) => key !== "scope_json" && key !== "status")) return true;
+  return !isProvablyStrictScopeWidening(normalizePolicyScope(currentRow.scope_json), nextPolicy.scope);
+}
+
+function isProvablyStrictScopeWidening(previous, next) {
+  if (!isSubset(previous.operations, next.operations) || !isSubset(previous.repositories, next.repositories)) return false;
+  for (const key of ["branches", "remotes"]) {
+    if (!isPatternSetWidening(previous[key], next[key])) return false;
+  }
+  // An omitted optional tag filter has semantics that are enforced elsewhere;
+  // do not infer whether adding/removing it widens access.
+  if (Object.hasOwn(previous, "tags") || Object.hasOwn(next, "tags")) {
+    if (!Object.hasOwn(previous, "tags") || !Object.hasOwn(next, "tags") || !isPatternSetWidening(previous.tags, next.tags)) return false;
+  }
+  return isStrictSuperset(previous.operations, next.operations)
+    || isStrictSuperset(previous.repositories, next.repositories)
+    || ["branches", "remotes", "tags"].some((key) => Object.hasOwn(previous, key) && Object.hasOwn(next, key) && isPatternSetStrictlyWider(previous[key], next[key]));
+}
+
+function isPatternSetWidening(previous, next) {
+  return isSubset(previous.allow, next.allow) && sameSet(previous.deny, next.deny);
+}
+
+function isPatternSetStrictlyWider(previous, next) {
+  return isPatternSetWidening(previous, next) && isStrictSuperset(previous.allow, next.allow);
+}
+
+function isSubset(previous, next) {
+  const nextSet = new Set(next);
+  return previous.every((value) => nextSet.has(value));
+}
+
+function isStrictSuperset(previous, next) {
+  return isSubset(previous, next) && new Set(next).size > new Set(previous).size;
+}
+
+function sameSet(left, right) {
+  return left.length === right.length && isSubset(left, right);
+}
+
+function freezePolicyForAuthorityHook(policy) {
+  return Object.freeze({
+    policy_id: policy.policy_id,
+    organization_id: policy.organization_id,
+    name: policy.name,
+    scope: policy.scope,
+    sequence: policy.sequence,
+    status: policy.status,
+    created_at: policy.created_at,
+    updated_at: policy.updated_at,
+    version: policy.version
+  });
 }
 
 function requiredCreatedBy(input) {

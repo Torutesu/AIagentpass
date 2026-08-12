@@ -44,7 +44,7 @@ test("metrics are fixed-key, monotonic, and free of caller labels", () => {
   assert.throws(() => metrics.recordAuditGap(-1), { code: "invalid_input" });
 });
 
-test("readiness requires exact schema 14, verified checksums, a DB probe, and a non-waiting pool", async () => {
+test("readiness requires exact schema 15, verified checksums, a DB probe, and a non-waiting pool", async () => {
   const metrics = createOperationalMetrics();
   const drain = createDrainController();
   let probeCalls = 0;
@@ -60,7 +60,7 @@ test("readiness requires exact schema 14, verified checksums, a DB probe, and a 
   assert.equal(result.ready, true);
   assert.equal(result.status, "ready");
   assert.equal(result.code, "ready");
-  assert.equal(result.checks.schema.applied_version, 14);
+  assert.equal(result.checks.schema.applied_version, 15);
   assert.equal(result.checks.schema.schema_version_status, "exact");
   assert.equal(result.checks.schema.checksum_status, "verified");
   assert.equal(result.checks.schema.drift, false);

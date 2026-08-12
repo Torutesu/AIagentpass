@@ -24,10 +24,12 @@ const SCOPE = { operations: ["git.commit.sign"], repositories: ["/repo"], branch
 const PUBLIC_KEY = "-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==\n-----END PUBLIC KEY-----";
 
 class FakeClient {
-  constructor({ deviceAuthRow = undefined } = {}) {
+  constructor({ deviceAuthRow = undefined, policySelectRow = undefined, policyUpdateRow = undefined } = {}) {
     this.calls = [];
     this.idempotency = new Map();
     this.deviceAuthRow = deviceAuthRow;
+    this.policySelectRow = policySelectRow;
+    this.policyUpdateRow = policyUpdateRow;
   }
 
   async query(text, params = []) {
@@ -56,16 +58,16 @@ class FakeClient {
     }
     if (text.startsWith("SELECT devices.organization_id,devices.id,devices.label,devices.key_algorithm")) return result([this.deviceAuthRow ?? deviceRow()]);
     if (text.startsWith("SELECT organization_id,id,device_id,kind,name,public_key_pem,status,version,created_at,last_seen_at\n    FROM agents")) return result([agentRow()]);
-    if (text.startsWith("SELECT organization_id,id,sequence,name,scope_json,status,created_by,created_at,updated_at,version\n    FROM policies")) return result([policyRow()]);
+    if (text.startsWith("SELECT organization_id,id,sequence,name,scope_json,status,created_by,created_at,updated_at,version\n    FROM policies")) return result([this.policySelectRow ?? policyRow()]);
     if (text.startsWith("SELECT organization_id,id,device_id,kind,name,public_key_pem,status,version,created_at,last_seen_at\n        FROM agents")) return result([agentRow()]);
-    if (text.startsWith("SELECT organization_id,id,sequence,name,scope_json,status,created_by,created_at,updated_at,version\n        FROM policies")) return result([policyRow()]);
+    if (text.startsWith("SELECT organization_id,id,sequence,name,scope_json,status,created_by,created_at,updated_at,version\n        FROM policies")) return result([this.policySelectRow ?? policyRow()]);
     if (text.startsWith("INSERT INTO devices")) return result([deviceRow()], 1);
     if (text.startsWith("INSERT INTO device_enrollments")) return result([enrollmentRow()], 1);
     if (text.startsWith("INSERT INTO agents")) return result([agentRow()], 1);
     if (text.startsWith("INSERT INTO policies")) return result([policyRow()], 1);
     if (text.startsWith("UPDATE devices")) return result([deviceRow({ version: 2 })], 1);
     if (text.startsWith("UPDATE agents")) return result([agentRow({ version: 2 })], 1);
-    if (text.startsWith("UPDATE policies")) return result([policyRow({ version: 2 })], 1);
+    if (text.startsWith("UPDATE policies")) return result([this.policyUpdateRow ?? policyRow({ version: 2 })], 1);
     if (text.startsWith("SELECT id FROM devices")) return result([{ id: ids.device }]);
     if (text.startsWith("SELECT id,organization_id,device_id,label,platform,created_at,expires_at,consumed_at,completion_hash")) return result([enrollmentRow()]);
     if (text.startsWith("SELECT organization_id,id,label,key_algorithm,public_key_pem,status,metadata,version,created_at,last_seen_at\n    FROM devices") && params[1] === ids.device2) return result([deviceRow({ id: ids.device2, label: "New Mac", key_algorithm: null, status: "pending", public_key_pem: null })]);
@@ -173,6 +175,84 @@ test("persists device metadata and updates policies with optimistic versions", a
   const { repository } = repo();
   assert.equal((await repository.updateDevice({ organization_id: ids.organization, device_id: ids.device, expected_version: 1, patch: { metadata: { environment: "prod" } }, principal_id: ids.member, idempotency_key: "device-metadata-1" })).version, 2);
   assert.equal((await repository.updatePolicy({ organization_id: ids.organization, policy_id: ids.policy, expected_version: 1, patch: { status: "disabled" }, principal_id: ids.member, idempotency_key: "policy-update-1" })).version, 2);
+});
+
+test("invokes the frozen authority hook inside the transaction for active policy reductions", async () => {
+  const reductions = [];
+  const client = new FakeClient({ policyUpdateRow: policyRow({ status: "disabled", version: 2 }) });
+  const updated = await createPostgresControlPlaneResourceRepository({
+    client,
+    now: () => NOW,
+    onAuthorityReduction: async (input) => {
+      reductions.push(input);
+      assert.equal(input.tx, client);
+      assert.equal(Object.isFrozen(input), true);
+      assert.equal(Object.isFrozen(input.policy), true);
+      assert.equal(Object.isFrozen(input.policy.scope), true);
+      assert.equal(input.organization_id, ids.organization);
+      assert.equal(input.policy.policy_id, ids.policy);
+      assert.equal(input.actor_member_id, ids.member);
+      assert.equal(input.idempotency_key, "policy-reduce-1");
+      assert.throws(() => { input.policy.status = "active"; }, TypeError);
+      return { generation: 2 };
+    }
+  }).updatePolicy({ organization_id: ids.organization, policy_id: ids.policy, expected_version: 1, patch: { status: "disabled" }, principal_id: ids.member, idempotency_key: "policy-reduce-1" });
+  assert.equal(updated.status, "disabled");
+  assert.equal(reductions.length, 1);
+  assert.ok(client.calls.findIndex(({ text }) => text.startsWith("UPDATE policies")) < client.calls.findIndex(({ text }) => text.startsWith("UPDATE idempotency_records")));
+});
+
+test("rolls back a policy reduction when generation propagation is unavailable", async () => {
+  for (const onAuthorityReduction of [async () => undefined, async () => { throw new Error("authority backend unavailable"); }]) {
+    const client = new FakeClient({ policyUpdateRow: policyRow({ status: "disabled", version: 2 }) });
+    const repository = createPostgresControlPlaneResourceRepository({ client, now: () => NOW, onAuthorityReduction });
+    await assert.rejects(
+      repository.updatePolicy({ organization_id: ids.organization, policy_id: ids.policy, expected_version: 1, patch: { status: "disabled" }, principal_id: ids.member, idempotency_key: "policy-fail-closed-1" }),
+      (error) => ["ERR_AUTHORITY_REDUCTION_UNAVAILABLE", "ERR_DATABASE"].includes(error.code)
+    );
+    assert.equal(client.calls.at(-1).text, "ROLLBACK");
+    assert.equal(client.calls.some(({ text }) => text.startsWith("UPDATE idempotency_records")), false);
+  }
+});
+
+test("does not invoke the policy authority hook for a proven widening, but does so conservatively for ambiguous active changes", async () => {
+  const wideningScope = { ...SCOPE, operations: ["git.commit.sign"], repositories: ["/repo", "/other"] };
+  const wideningCalls = [];
+  const wideningClient = new FakeClient({
+    policySelectRow: policyRow(),
+    policyUpdateRow: policyRow({ scope_json: wideningScope, version: 2 })
+  });
+  await createPostgresControlPlaneResourceRepository({ client: wideningClient, now: () => NOW, onAuthorityReduction: async (input) => { wideningCalls.push(input); return { generation: 2 }; } }).updatePolicy({
+    organization_id: ids.organization, policy_id: ids.policy, expected_version: 1,
+    patch: { scope: wideningScope }, principal_id: ids.member, idempotency_key: "policy-widen-1"
+  });
+  assert.equal(wideningCalls.length, 0);
+
+  const ambiguousCalls = [];
+  const ambiguousClient = new FakeClient({ policyUpdateRow: policyRow({ version: 2, name: "renamed" }) });
+  await createPostgresControlPlaneResourceRepository({ client: ambiguousClient, now: () => NOW, onAuthorityReduction: async (input) => { ambiguousCalls.push(input); return { generation: 2 }; } }).updatePolicy({
+    organization_id: ids.organization, policy_id: ids.policy, expected_version: 1,
+    patch: { name: "renamed" }, principal_id: ids.member, idempotency_key: "policy-ambiguous-1"
+  });
+  assert.equal(ambiguousCalls.length, 1);
+});
+
+test("treats scope narrowing, deny changes, tag ambiguity, and active-to-disabled as reductions, while exact replay stays silent", async () => {
+  const cases = [
+    { name: "narrow repository", patch: { scope: { ...SCOPE, repositories: ["/repo/sub"] } }, update: { scope_json: { ...SCOPE, repositories: ["/repo/sub"] } } },
+    { name: "add deny", patch: { scope: { ...SCOPE, branches: { allow: ["main"], deny: ["release/*"] } } }, update: { scope_json: { ...SCOPE, branches: { allow: ["main"], deny: ["release/*"] } } } },
+    { name: "ambiguous optional tags", patch: { scope: { ...SCOPE, tags: { allow: ["v1"], deny: [] } } }, update: { scope_json: { ...SCOPE, tags: { allow: ["v1"], deny: [] } } } },
+    { name: "disable", patch: { status: "disabled" }, update: { status: "disabled" } }
+  ];
+  for (const [index, item] of cases.entries()) {
+    const calls = [];
+    const key = `policy-reduce-${index + 2}`;
+    const client = new FakeClient({ policyUpdateRow: policyRow({ ...item.update, version: 2 }) });
+    const repository = createPostgresControlPlaneResourceRepository({ client, now: () => NOW, onAuthorityReduction: async (input) => { calls.push(input); return { generation: 2 }; } });
+    await repository.updatePolicy({ organization_id: ids.organization, policy_id: ids.policy, expected_version: 1, patch: item.patch, principal_id: ids.member, idempotency_key: key });
+    await repository.updatePolicy({ organization_id: ids.organization, policy_id: ids.policy, expected_version: 1, patch: item.patch, principal_id: ids.member, idempotency_key: key });
+    assert.equal(calls.length, 1, item.name);
+  }
 });
 
 test("fails closed for schema-required actor attribution instead of inventing it", async () => {

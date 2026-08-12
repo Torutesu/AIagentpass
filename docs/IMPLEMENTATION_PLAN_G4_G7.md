@@ -70,7 +70,7 @@ Exit gate: Node and Swift decode the same fixtures and produce byte-identical si
 
 ### G4.1 Cloud publication and polling
 
-Current implementation checkpoint (2026-08-13): schema version `14` adds restart-safe nonce key identity and commit-only refresh notifications to the generation/key-epoch/outbox/ACK foundation. Hosted runtime uses a purpose-separated refresh signer, reconstructs the same 16-byte nonce across restart or instance failover, records delivery evidence before returning a hint, and holds one bounded PostgreSQL listener with initial/final authoritative queries. PostgreSQL 17 evidence covers two pools racing exact reduction and ACK, rollback, notification wakeup, nonce mismatch rejection, blocked ACK observation, and restart reconstruction. Device lookup pins the active immutable key epoch. Revocation and emergency-stop reductions are commit-coupled. The G4.1 exit gate remains open for policy narrowing, member removal/role reduction, session/credential epoch invalidation, capability revocation propagation, production latency evidence, and process-kill fault injection.
+Current implementation checkpoint (2026-08-13): schema version `15` adds restart-safe nonce key identity, commit-only refresh notifications, and safe delivery-state rollover between generations to the generation/key-epoch/outbox/ACK foundation. Hosted runtime uses a purpose-separated refresh signer, reconstructs the same 16-byte nonce across restart or instance failover, records delivery evidence before returning a hint, and holds one bounded PostgreSQL listener with initial/final authoritative queries. PostgreSQL 17 evidence covers two pools racing exact reduction and ACK, rollback, notification wakeup, nonce mismatch rejection, blocked ACK observation, restart reconstruction, member removal, and policy disable. Device lookup pins the active immutable key epoch. Revocation, emergency stop, policy reduction, member removal, and role reduction now advance generation and enqueue every active device in their mutation transaction. The G4.1 exit gate remains open for direct session/credential authority invalidation, standalone capability-revocation propagation, production latency evidence, and process-kill fault injection.
 
 Database work:
 
@@ -107,7 +107,7 @@ Exit gate: two Cloud instances and PostgreSQL prove no pre-commit hint, no lost 
    - have the Cloud layer construct and sign the hint from authoritative state; repository rows must never masquerade as signed hints;
    - fail closed when nonce key, signer, active key epoch, or authority state is unavailable.
 3. **Commit-coupled authority reductions**
-   - Status: partial. Revocation/device/emergency-stop paths are coupled; policy, membership, session/credential, and capability paths remain P0.
+   - Status: partial. Revocation/device/emergency-stop, policy reduction, member removal, and role reduction paths are coupled and fail closed; direct session/credential and standalone capability-revocation paths remain P0.
    - route emergency stop, device revoke, member removal/role reduction, policy narrowing, credential/session epoch invalidation, and capability revocation through one transaction helper;
    - acquire the organization authority lock in one documented order, mutate authority, increment generation, enqueue every affected device, and append admin audit before commit;
    - prove rollback leaves no mutation, generation, outbox row, audit row, or observable notification;
@@ -120,7 +120,7 @@ Exit gate: two Cloud instances and PostgreSQL prove no pre-commit hint, no lost 
    - record only fixed-label metrics for propagation latency, active waiters, delivery failures, stale ACKs, and queue age;
    - return `204` for no change and never return policy, capability, or authority bodies from the refresh route.
 5. **Real-boundary qualification**
-   - Status: partial. PostgreSQL 17 two-pool races, duplicate/reordered behavior, rollback, listener wakeup, restart nonce reconstruction, nonce mismatch, and blocked ACK pass. Process-kill timing and p50/p95/p99 evidence remain.
+   - Status: partial. PostgreSQL 17 two-pool races, duplicate/reordered behavior, rollback, listener wakeup, restart nonce reconstruction, nonce mismatch, blocked ACK, member removal, policy disable, and generation rollover pass. Process-kill timing and p50/p95/p99 evidence remain.
    - run migrations and repository operations against PostgreSQL 17, including two connections racing reduction, bundle assignment, polling, and ACK;
    - kill one Cloud process after commit and before publish, then prove another process serves the same generation and nonce;
    - reorder and duplicate notifications and ACKs, rotate the nonce/signing key, and inject database/signer timeouts;
