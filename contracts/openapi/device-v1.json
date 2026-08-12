@@ -1,12 +1,94 @@
 {
   "openapi": "3.1.0",
-  "info": { "title": "AgentPass Device API", "version": "1.0.0" },
+  "info": { "title": "AgentPass Device API", "version": "1.0.0", "description": "G4.0 freezes this target contract. A legacy bundle-fetch route exists in the current Cloud runtime, but its target response envelope, refresh polling, and signed ACK ingestion are implemented in G4.1/G4.3 and must not be advertised as deployed until runtime conformance tests pass." },
+  "x-agentpass-implementation-status": { "contract": "frozen-g4.0", "bundle-fetch-route": "implemented-legacy-response", "bundle-fetch-target-envelope": "planned-g4.1", "refresh-poll": "planned-g4.1", "signed-ack": "planned-g4.3" },
   "servers": [{ "url": "https://api.ai-agentpass.com/v1" }],
   "paths": {
-    "/enrollments/{enrollment_id}": { "post": { "operationId": "completeDeviceEnrollment", "security": [{ "enrollmentCredential": [], "enrollmentProof": [] }], "parameters": [{ "$ref": "#/components/parameters/EnrollmentId" }], "responses": { "201": { "$ref": "#/components/responses/Json" } } } },
-    "/organizations/{organization_id}/bundles/{device_id}": { "get": { "operationId": "fetchControlBundle", "security": [{ "deviceSignature": [] }], "parameters": [{ "$ref": "#/components/parameters/OrganizationId" }, { "$ref": "#/components/parameters/DeviceId" }], "responses": { "200": { "$ref": "#/components/responses/Json" } } } },
-    "/organizations/{organization_id}/bundles/{device_id}/acknowledgements": { "post": { "operationId": "acknowledgeControlBundle", "security": [{ "deviceSignature": [] }], "parameters": [{ "$ref": "#/components/parameters/OrganizationId" }, { "$ref": "#/components/parameters/DeviceId" }], "responses": { "202": { "$ref": "#/components/responses/Json" } } } },
-    "/organizations/{organization_id}/devices/{device_id}/check-ins": { "post": { "operationId": "checkInDevice", "security": [{ "deviceSignature": [] }], "parameters": [{ "$ref": "#/components/parameters/OrganizationId" }, { "$ref": "#/components/parameters/DeviceId" }], "responses": { "202": { "$ref": "#/components/responses/Json" } } } },
+    "/enrollments/{enrollment_id}": {
+      "post": {
+        "operationId": "completeDeviceEnrollment",
+        "security": [{ "enrollmentCredential": [], "enrollmentProof": [] }],
+        "parameters": [{ "$ref": "#/components/parameters/EnrollmentId" }],
+        "responses": { "201": { "$ref": "#/components/responses/Json" } }
+      }
+    },
+    "/organizations/{organization_id}/bundles/{device_id}": {
+      "get": {
+        "operationId": "fetchControlBundle",
+        "summary": "Fetch the current signed control bundle for exactly one device",
+        "description": "Returns the signed ControlBundle v2 for exactly the device identified by both path parameters. The organization_id and device_id path pair is authoritative and must match the bundle audience; cross-tenant and cross-device disclosure is forbidden. This endpoint must not redirect, and clients must not follow redirects. Responses are not cacheable. An ETag may be returned as an optimization, but it is only a transport validator and never authority, freshness, generation, or expiry evidence.",
+        "security": [{ "deviceSignature": [] }],
+        "parameters": [{ "$ref": "#/components/parameters/OrganizationId" }, { "$ref": "#/components/parameters/DeviceId" }],
+        "x-agentpass-tenant-scope": { "kind": "organization", "source": "path.organization_id", "cross-tenant-disclosure": false, "additionalProperties": false },
+        "x-agentpass-device-scope": { "kind": "device", "source": "path.device_id", "cross-device-disclosure": false, "additionalProperties": false },
+        "x-agentpass-transport": { "redirects": "forbidden", "cache-control": "no-store", "etag": "optional-transport-validator-only", "additionalProperties": false },
+        "responses": {
+          "200": { "$ref": "#/components/responses/ControlBundleFetch" },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "429": { "$ref": "#/components/responses/RateLimited" },
+          "503": { "$ref": "#/components/responses/ServiceUnavailable" }
+        }
+      }
+    },
+    "/organizations/{organization_id}/bundles/{device_id}/acknowledgements": {
+      "post": {
+        "operationId": "acknowledgeControlBundle",
+        "summary": "Submit an exact device-bound control bundle acknowledgement",
+        "description": "The acknowledgement organization_id and device_id in the request body must exactly equal the organization_id and device_id in the path. The server rejects cross-tenant and cross-device body/path substitution before applying or deduplicating the acknowledgement. A duplicate exact acknowledgement is accepted idempotently; a conflicting acknowledgement for the same device, epoch, sequence, or statement hash is a stable conflict.",
+        "security": [{ "deviceSignature": [] }],
+        "parameters": [{ "$ref": "#/components/parameters/OrganizationId" }, { "$ref": "#/components/parameters/DeviceId" }],
+        "requestBody": {
+          "required": true,
+          "content": { "application/json": { "schema": { "$ref": "#/components/schemas/BundleAckV1" } } }
+        },
+        "x-agentpass-tenant-scope": { "kind": "organization", "source": "path.organization_id + body.organization_id", "binding": "body.organization_id == path.organization_id", "cross-tenant-disclosure": false, "additionalProperties": false },
+        "x-agentpass-device-scope": { "kind": "device", "source": "path.device_id + body.device_id", "binding": "body.device_id == path.device_id", "cross-device-disclosure": false, "additionalProperties": false },
+        "responses": {
+          "202": { "$ref": "#/components/responses/ControlBundleAcknowledgementAccepted" },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "409": { "$ref": "#/components/responses/Conflict" },
+          "429": { "$ref": "#/components/responses/RateLimited" },
+          "503": { "$ref": "#/components/responses/ServiceUnavailable" }
+        }
+      }
+    },
+    "/organizations/{organization_id}/devices/{device_id}/refresh": {
+      "get": {
+        "operationId": "pollControlRefresh",
+        "summary": "Poll for a committed control refresh generation",
+        "description": "Authenticated long-polling is a correctness fallback and may accelerate fetching a newer signed ControlBundle. The hint contains no authority and cannot authorize an operation, widen scope, or authorize or extend bundle expiry. The path organization_id/device_id pair is the exact tenant and device scope; the server must not disclose another organization or device. A 204 response means no generation newer than after_generation was available when the bounded wait completed.",
+        "security": [{ "deviceSignature": [] }],
+        "parameters": [
+          { "$ref": "#/components/parameters/OrganizationId" },
+          { "$ref": "#/components/parameters/DeviceId" },
+          { "$ref": "#/components/parameters/AfterGeneration" },
+          { "$ref": "#/components/parameters/WaitMs" }
+        ],
+        "x-agentpass-tenant-scope": { "kind": "organization", "source": "path.organization_id", "cross-tenant-disclosure": false, "additionalProperties": false },
+        "x-agentpass-device-scope": { "kind": "device", "source": "path.device_id", "cross-device-disclosure": false, "additionalProperties": false },
+        "x-agentpass-hint-semantics": { "authority": "none", "can-authorize": false, "can-extend-expiry": false, "additionalProperties": false },
+        "responses": {
+          "200": { "$ref": "#/components/responses/ControlRefreshPoll" },
+          "204": { "description": "No newer control refresh generation is available." },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "429": { "$ref": "#/components/responses/RateLimited" },
+          "503": { "$ref": "#/components/responses/ServiceUnavailable" }
+        }
+      }
+    },
+    "/organizations/{organization_id}/devices/{device_id}/check-ins": {
+      "post": {
+        "operationId": "checkInDevice",
+        "security": [{ "deviceSignature": [] }],
+        "parameters": [{ "$ref": "#/components/parameters/OrganizationId" }, { "$ref": "#/components/parameters/DeviceId" }],
+        "responses": { "202": { "$ref": "#/components/responses/Json" } }
+      }
+    },
     "/organizations/{organization_id}/audit/events": {
       "get": {
         "operationId": "listDeviceAuditEvents",
@@ -34,23 +116,101 @@
     }
   },
   "components": {
-    "securitySchemes": { "deviceSignature": { "type": "apiKey", "in": "header", "name": "AgentPass-Signature", "description": "Requires Device, Timestamp, Nonce, Content-SHA256, and Signature headers." }, "humanSession": { "type": "apiKey", "in": "cookie", "name": "__Host-agentpass_session", "description": "Hosted Human session forwarded only by the same-origin Console BFF. The session must carry at least the auditor role for the path organization." }, "auditReader": { "type": "http", "scheme": "bearer", "bearerFormat": "opaque", "description": "Evaluation-profile auditor credential. Hosted production uses humanSession instead. The organization and device path/query scope remains authoritative; a credential never widens either scope." }, "enrollmentCredential": { "type": "apiKey", "in": "header", "name": "AgentPass-Enrollment-Credential", "description": "One-time 256-bit credential; only its SHA-256 digest is retained by the Control Plane." }, "enrollmentProof": { "type": "apiKey", "in": "header", "name": "AgentPass-Enrollment-Signature", "description": "Raw 64-byte signature over the method, exact path, canonical request-body SHA-256, and enrollment-credential SHA-256." } },
+    "securitySchemes": {
+      "deviceSignature": { "type": "apiKey", "in": "header", "name": "AgentPass-Signature", "description": "Authenticates the device request. The canonical signed request input is exactly six newline-delimited fields: UPPERCASE_METHOD\\nWHATWG_URL_PATHNAME\\nCANONICAL_RFC3986_QUERY\\nLOWERCASE_BODY_SHA256\\nUNIX_TIMESTAMP_MILLISECONDS\\nNONCE. The pathname is exactly the result of resolving the supplied absolute-path reference against a fixed HTTPS base and reading URL.pathname. Query parameters are decoded, RFC3986-encoded, and sorted by encoded key then value. The signature covers this exact UTF-8 input; redirects are never followed and signatures are never forwarded to another origin." },
+      "humanSession": { "type": "apiKey", "in": "cookie", "name": "__Host-agentpass_session", "description": "Hosted Human session forwarded only by the same-origin Console BFF. The session must carry at least the auditor role for the path organization." },
+      "auditReader": { "type": "http", "scheme": "bearer", "bearerFormat": "opaque", "description": "Evaluation-profile auditor credential. Hosted production uses humanSession instead. The organization and device path/query scope remains authoritative; a credential never widens either scope." },
+      "enrollmentCredential": { "type": "apiKey", "in": "header", "name": "AgentPass-Enrollment-Credential", "description": "One-time 256-bit credential; only its SHA-256 digest is retained by the Control Plane." },
+      "enrollmentProof": { "type": "apiKey", "in": "header", "name": "AgentPass-Enrollment-Signature", "description": "Raw 64-byte signature over the method, exact path, canonical request-body SHA-256, and enrollment-credential SHA-256." }
+    },
     "parameters": {
       "EnrollmentId": { "name": "enrollment_id", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } },
       "OrganizationId": { "name": "organization_id", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } },
       "DeviceId": { "name": "device_id", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } },
+      "AfterGeneration": { "name": "after_generation", "in": "query", "required": false, "description": "Return a hint only when a strictly newer committed authority generation exists. This is a cursor, not authority.", "schema": { "type": "integer", "minimum": 0, "maximum": 9007199254740991, "default": 0 } },
+      "WaitMs": { "name": "wait_ms", "in": "query", "required": false, "description": "Bounded long-poll wait duration in milliseconds.", "schema": { "type": "integer", "minimum": 0, "maximum": 30000, "default": 0 } },
       "AuditDeviceId": { "name": "device_id", "in": "query", "required": true, "description": "The single device stream to read. This scope is part of cursor authentication and cannot be changed while traversing a stream.", "schema": { "type": "string", "format": "uuid" } },
       "AuditCursor": { "name": "cursor", "in": "query", "required": false, "description": "Opaque, versioned, authenticated keyset cursor. It is bound to resource device-audit, organization_id, and device_id and contains the exclusive last-seen (device_timestamp, device_id, event_id) tuple plus an expiry. Clients must not inspect or modify it. Invalid, tampered, expired, cross-tenant, cross-device, or otherwise mismatched values return invalid_cursor.", "schema": { "$ref": "#/components/schemas/AuditCursor" } },
       "AuditLimit": { "name": "limit", "in": "query", "required": false, "description": "Maximum records returned. The server probes limit + 1 records to determine whether next_cursor is present.", "schema": { "type": "integer", "minimum": 1, "maximum": 500, "default": 100 } }
     },
     "responses": {
       "Json": { "description": "JSON response", "content": { "application/json": { "schema": { "type": "object" } } } },
+      "ControlRefreshPoll": { "description": "A newer device-bound refresh hint. The hint accelerates a bundle fetch but cannot authorize or extend expiry.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ControlRefreshPollResponse" } } } },
+      "ControlBundleFetch": { "description": "The exact signed ControlBundle v2 for the path organization and device. The response is no-store and must not be obtained through a redirect.", "headers": { "Cache-Control": { "description": "Responses must not be cached.", "required": true, "schema": { "type": "string", "const": "no-store" } }, "ETag": { "description": "Optional transport validator only; never authority, generation, freshness, or expiry evidence.", "required": false, "schema": { "type": "string", "minLength": 1, "maxLength": 1024 } } }, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ControlBundleFetchResponse" } } } },
+      "ControlBundleAcknowledgementAccepted": { "description": "The exact acknowledgement was accepted or recognized as an idempotent duplicate.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ControlBundleAcknowledgementResponse" } } } },
       "DeviceAuditList": { "description": "A bounded, tenant/device-scoped audit page.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/DeviceAuditListResponse" } } } },
       "InvalidCursor": { "description": "The cursor is malformed, tampered, expired, or bound to another tenant/device/resource.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/InvalidCursorEnvelope" } } } },
+      "BadRequest": { "description": "Stable 400 error for malformed, out-of-range, or body/path-inconsistent input.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorEnvelope" } } } },
       "Unauthorized": { "description": "Authentication is required or invalid.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorEnvelope" } } } },
+      "NotFound": { "description": "Stable 404 error for an absent or unavailable organization/device resource without cross-tenant disclosure.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorEnvelope" } } } },
+      "Conflict": { "description": "Stable 409 error for an acknowledgement that conflicts with already observed device evidence.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorEnvelope" } } } },
+      "RateLimited": { "description": "Stable 429 error when the device polling or acknowledgement rate limit is exceeded.", "headers": { "Retry-After": { "description": "Seconds before retrying.", "required": false, "schema": { "type": "integer", "minimum": 0 } } }, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorEnvelope" } } } },
+      "ServiceUnavailable": { "description": "Stable 503 error when the control-plane dependency is unavailable; no authority is widened by retry behavior.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorEnvelope" } } } },
       "Forbidden": { "description": "The authenticated auditor cannot read this organization/device scope.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorEnvelope" } } } }
     },
     "schemas": {
+      "ScopeV1": { "$ref": "../schemas/scope-v1.schema.json" },
+      "BundleAckV1": { "$ref": "../schemas/bundle-ack-v1.schema.json" },
+      "RefreshHintV1": { "$ref": "../schemas/refresh-hint-v1.schema.json" },
+      "DeviceRefreshState": { "type": "string", "enum": ["pending", "fetching", "applied", "blocked", "stale", "offline", "revoked"] },
+      "ControlBundleAudience": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["organization_id", "device_id"],
+        "properties": {
+          "organization_id": { "type": "string", "format": "uuid" },
+          "device_id": { "type": "string", "format": "uuid" }
+        }
+      },
+      "ControlBundleV2": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["format_epoch", "issuer", "organization_id", "device_id", "audience", "issued_at", "expires_at", "sequence", "policy_scope", "global_revoked", "revoked_devices", "revoked_agents", "revoked_capabilities", "offline_ttl_ms", "key_id", "signature"],
+        "properties": {
+          "format_epoch": { "const": 2 },
+          "issuer": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$" },
+          "organization_id": { "type": "string", "format": "uuid" },
+          "device_id": { "type": "string", "format": "uuid" },
+          "audience": { "$ref": "#/components/schemas/ControlBundleAudience" },
+          "issued_at": { "type": "string", "format": "date-time", "minLength": 24, "maxLength": 24, "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$" },
+          "expires_at": { "type": "string", "format": "date-time", "minLength": 24, "maxLength": 24, "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$" },
+          "sequence": { "type": "integer", "minimum": 1, "maximum": 9007199254740991 },
+          "policy_scope": { "$ref": "#/components/schemas/ScopeV1" },
+          "global_revoked": { "type": "boolean" },
+          "revoked_devices": { "type": "array", "description": "Canonical ascending lexical order is required by the runtime validator.", "maxItems": 256, "uniqueItems": true, "items": { "type": "string", "format": "uuid", "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$" } },
+          "revoked_agents": { "type": "array", "description": "Canonical ascending lexical order is required by the runtime validator.", "maxItems": 256, "uniqueItems": true, "items": { "type": "string", "format": "uuid", "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$" } },
+          "revoked_capabilities": { "type": "array", "description": "Canonical ascending lexical order is required by the runtime validator.", "maxItems": 256, "uniqueItems": true, "items": { "type": "string", "format": "uuid", "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$" } },
+          "offline_ttl_ms": { "type": "integer", "minimum": 1, "maximum": 604800000 },
+          "key_id": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$" },
+          "signature": { "type": "string", "minLength": 88, "maxLength": 88, "pattern": "^[A-Za-z0-9+/]{86}==$" }
+        }
+      },
+      "ControlRefreshPollResponse": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["hint"],
+        "properties": { "hint": { "$ref": "#/components/schemas/RefreshHintV1" } }
+      },
+      "ControlBundleFetchResponse": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["bundle", "desired_generation"],
+        "properties": {
+          "bundle": { "$ref": "#/components/schemas/ControlBundleV2" },
+          "desired_generation": { "type": "integer", "minimum": 1, "maximum": 9007199254740991 }
+        }
+      },
+      "ControlBundleAcknowledgementResponse": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["accepted", "duplicate", "observed_generation", "refresh_state"],
+        "properties": {
+          "accepted": { "const": true },
+          "duplicate": { "type": "boolean" },
+          "observed_generation": { "type": "integer", "minimum": 1, "maximum": 9007199254740991 },
+          "refresh_state": { "$ref": "#/components/schemas/DeviceRefreshState" }
+        }
+      },
       "AuditCursor": { "$ref": "../schemas/device-audit-list-v1.schema.json#/$defs/cursor" },
       "DeviceAuditListResponse": { "$ref": "../schemas/device-audit-list-v1.schema.json" },
       "ErrorEnvelope": { "type": "object", "additionalProperties": false, "required": ["error", "request_id"], "properties": { "error": { "type": "object", "additionalProperties": false, "required": ["code", "message"], "properties": { "code": { "type": "string", "minLength": 1, "maxLength": 64 }, "message": { "type": "string", "minLength": 1, "maxLength": 512 } } }, "request_id": { "type": "string", "format": "uuid" } } },

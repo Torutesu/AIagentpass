@@ -1,10 +1,15 @@
 {
   "version": 1,
+  "type": "agentpass.bundle-ack",
   "organization_id": "22222222-2222-4222-8222-222222222222",
   "device_id": "33333333-3333-4333-8333-333333333333",
+  "device_key_epoch": 3,
   "format_epoch": 2,
   "sequence": 7,
   "statement_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-  "applied_at": "2026-08-12T00:00:00.000Z",
-  "status": "applied"
+  "result": "applied",
+  "observed_at": "2026-08-12T00:00:05.000Z",
+  "nonce": "EREREREREREREREREREREQ",
+  "signature_algorithm": "p256-sha256",
+  "signature": "IiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIg"
 }

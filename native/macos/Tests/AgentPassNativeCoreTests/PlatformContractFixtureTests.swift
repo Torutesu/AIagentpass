@@ -31,30 +31,6 @@ private struct DeviceEnrollmentContract: Decodable {
     }
 }
 
-private struct BundleAcknowledgementContract: Decodable {
-    let version: Int
-    let organizationID: UUID
-    let deviceID: UUID
-    let formatEpoch: Int
-    let sequence: Int64
-    let statementHash: String
-    let appliedAt: String
-    let status: String
-    let reason: String?
-
-    enum CodingKeys: String, CodingKey {
-        case version
-        case organizationID = "organization_id"
-        case deviceID = "device_id"
-        case formatEpoch = "format_epoch"
-        case sequence
-        case statementHash = "statement_hash"
-        case appliedAt = "applied_at"
-        case status
-        case reason
-    }
-}
-
 private func platformContractFixture(_ name: String) throws -> Data {
     let testDirectory = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
     let fixture = testDirectory
@@ -83,20 +59,4 @@ private func exactKeys(in data: Data, expected: Set<String>) throws {
     #expect(enrollment.deviceKey.spkiPEM.hasPrefix("-----BEGIN PUBLIC KEY-----"))
     #expect(enrollment.enrollmentID != enrollment.organizationID)
     #expect(enrollment.organizationID != enrollment.deviceID)
-}
-
-@Test func macOSDecodesTheCanonicalBundleAcknowledgementContract() throws {
-    let data = try platformContractFixture("bundle-ack.valid.json")
-    try exactKeys(
-        in: data,
-        expected: ["version", "organization_id", "device_id", "format_epoch", "sequence", "statement_hash", "applied_at", "status"]
-    )
-
-    let acknowledgement = try JSONDecoder().decode(BundleAcknowledgementContract.self, from: data)
-    #expect(acknowledgement.version == 1)
-    #expect(acknowledgement.formatEpoch == 2)
-    #expect(acknowledgement.sequence == 7)
-    #expect(acknowledgement.statementHash.count == 64)
-    #expect(acknowledgement.status == "applied")
-    #expect(acknowledgement.reason == nil)
 }

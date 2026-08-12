@@ -9,7 +9,7 @@ const root = path.resolve(import.meta.dirname, "..");
 test("machine-readable platform contracts pass the offline validator", () => {
   const result = spawnSync(process.execPath, [path.join(root, "scripts", "validate-contracts.mjs")], { cwd: root, encoding: "utf8" });
   assert.equal(result.status, 0, result.stderr);
-  assert.match(result.stdout, /validated 6 schemas, 2 OpenAPI documents, 4 fixtures, and 11 PostgreSQL migrations/);
+  assert.match(result.stdout, /validated 7 schemas, 2 OpenAPI documents, 5 fixtures, and 11 PostgreSQL migrations/);
 });
 
 const humanOpenapi = () => JSON.parse(fs.readFileSync(path.join(root, "contracts", "openapi", "human-v1.json"), "utf8"));
@@ -160,6 +160,26 @@ test("device operations use device signatures and tenant-qualified paths", () =>
       else assert.deepEqual(operation.security, [{ deviceSignature: [] }]);
     }
   }
+});
+
+test("G4.0 freezes refresh, signed ACK, device state, and canonical request contracts", () => {
+  const openapi = JSON.parse(fs.readFileSync(path.join(root, "contracts", "openapi", "device-v1.json"), "utf8"));
+  assert.deepEqual(openapi["x-agentpass-implementation-status"], {
+    contract: "frozen-g4.0",
+    "bundle-fetch-route": "implemented-legacy-response",
+    "bundle-fetch-target-envelope": "planned-g4.1",
+    "refresh-poll": "planned-g4.1",
+    "signed-ack": "planned-g4.3"
+  });
+  assert.match(openapi.components.securitySchemes.deviceSignature.description, /six newline-delimited fields/i);
+  assert.match(openapi.components.securitySchemes.deviceSignature.description, /WHATWG_URL_PATHNAME/);
+  assert.ok(openapi.paths["/organizations/{organization_id}/devices/{device_id}/refresh"].get.responses["204"]);
+  assert.equal(openapi.paths["/organizations/{organization_id}/bundles/{device_id}/acknowledgements"].post.requestBody.content["application/json"].schema.$ref, "#/components/schemas/BundleAckV1");
+  assert.equal(openapi.components.schemas.RefreshHintV1.$ref, "../schemas/refresh-hint-v1.schema.json");
+  assert.equal(openapi.components.schemas.BundleAckV1.$ref, "../schemas/bundle-ack-v1.schema.json");
+  assert.deepEqual(openapi.components.schemas.DeviceRefreshState.enum, ["pending", "fetching", "applied", "blocked", "stale", "offline", "revoked"]);
+  assert.equal(openapi.components.schemas.ControlBundleV2.properties.signature.pattern, "^[A-Za-z0-9+/]{86}==$" );
+  assert.equal(openapi.components.schemas.ControlBundleV2.properties.issued_at.maxLength, 24);
 });
 
 test("G2 device audit listing freezes tenant/device keyset pagination", () => {

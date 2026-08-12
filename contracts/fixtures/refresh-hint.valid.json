@@ -1,0 +1,13 @@
+{
+  "version": 1,
+  "type": "agentpass.refresh-hint",
+  "organization_id": "22222222-2222-4222-8222-222222222222",
+  "device_id": "33333333-3333-4333-8333-333333333333",
+  "authority_generation": 42,
+  "published_at": "2026-08-12T00:00:00.000Z",
+  "expires_at": "2026-08-12T00:04:00.000Z",
+  "nonce": "EREREREREREREREREREREQ",
+  "key_id": "authority-v1",
+  "signature_algorithm": "ed25519",
+  "signature": "IiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIg"
+}

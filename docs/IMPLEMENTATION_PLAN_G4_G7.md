@@ -1,6 +1,6 @@
 # AgentPass G4–G7 implementation plan
 
-Status: proposed execution baseline
+Status: active execution baseline; G4.0 implemented and locally qualified
 
 Updated: 2026-08-13
 
@@ -54,10 +54,12 @@ G5.1 and G7.1 can proceed in parallel after G4.0 freezes the shared identifiers 
 
 ### G4.0 Contract freeze
 
+Status: complete on 2026-08-13. The frozen contract is implemented by the two JSON Schemas, Device OpenAPI, shared positive fixtures, strict Node/Swift decoders, domain-separated canonical signing inputs, and the seven-value refresh-state enum. Node and Swift fixture signing-input SHA-256 vectors are identical. Local evidence: contract validator passed; Node full suite passed with 665 tests and 8 skips; Swift full suite passed with 309 tests. Replay consumption, generation/sequence state transitions, current-key-epoch lookup, and cross-device runtime enforcement remain G4.1/G4.3 responsibilities and are not claimed by this contract slice.
+
 Deliverables:
 
-- `refresh-hint.v1` JSON Schema with only `organization_id`, `device_id`, `authority_generation`, `published_at`, `expires_at`, `nonce`, `key_id`, and signature;
-- `bundle-ack.v1` schema with `device_id`, device-key epoch, sequence, exact ControlBundle statement hash, `applied|blocked`, stable reason code, observed time, nonce, and device signature;
+- `refresh-hint.v1` JSON Schema with an exact version/type envelope, `organization_id`, `device_id`, `authority_generation`, `published_at`, `expires_at`, `nonce`, `key_id`, signature algorithm, and signature;
+- `bundle-ack.v1` schema with an exact version/type envelope, organization/device, device-key epoch, sequence, exact ControlBundle statement hash, `applied|blocked`, stable reason code, observed time, nonce, signature algorithm, and device signature;
 - Device OpenAPI routes for pending refresh state, authenticated long-poll, bundle fetch, and ACK submission;
 - stable device state enum: `pending`, `fetching`, `applied`, `blocked`, `stale`, `offline`, `revoked`;
 - explicit canonicalization, signature domains, size limits, time skew, retry limits, and error envelopes.

@@ -59,6 +59,14 @@ The native service requires a signed initial bundle when remote control is confi
 
 The implementation decision and Apple signing prerequisites are recorded in [docs/ADR-001-native-security-boundary.md](docs/ADR-001-native-security-boundary.md).
 
+## Cloud synchronization contract boundary
+
+A refresh hint is untrusted delivery input even when its Cloud signature is valid. It carries no policy, capability, revocation list, signing permission, or expiry extension. Its only permitted effect is to ask the enrolled device to fetch the current ControlBundle through the independently authenticated Device API. Substitution, replay, reordering, duplicate delivery, expiry, or total notification outage therefore cannot widen authority; the installed signed ControlBundle and its expiry remain canonical.
+
+Refresh-hint signatures are Ed25519 over a versioned, domain-separated canonical statement bound to one organization, device, authority generation, short validity window, nonce, algorithm, and key ID. The device rejects unknown fields, invalid encodings, cross-device audience, generation rollback, expired/future-invalid windows, untrusted keys, and signatures over any other byte sequence.
+
+A bundle acknowledgement is evidence, not authorization. The native device signs a versioned, domain-separated canonical ACK with its non-exportable enrolled P-256 device key. The statement binds the organization, device, device-key epoch, ControlBundle format epoch, sequence, exact statement hash, applied/blocked result, stable non-secret reason code, observation time, and nonce. Cloud must verify both body/path scope and the active key epoch, consume the nonce once, and accept an exact duplicate idempotently while rejecting a conflicting result. ACK failure never makes an unverified bundle active, and ACK success never grants signing authority.
+
 ## Explicit non-goals of local mode
 
 - Preventing `git push --no-verify`; server-side branch protection is required.

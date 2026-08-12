@@ -36,6 +36,7 @@ const AUDIT_DECISIONS = Object.freeze(["allow", "deny", "error"]);
 
 const LIMITS = Object.freeze({
   maxDocumentBytes: 16 * 1024,
+  maxJsonDepth: 32,
   maxStringBytes: 4096,
   maxNameBytes: 128,
   maxPublicKeyBytes: 8192,
@@ -52,6 +53,41 @@ const NONCE_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{7,127}$/;
 const RFC3339_UTC_PATTERN =
   /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?Z$/;
 const CONTROL_CHARACTER_PATTERN = /[\u0000-\u001f\u007f]/;
+const CANONICAL_MILLISECOND_TIMESTAMP = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
+const BASE64URL_16_BYTES = /^[A-Za-z0-9_-]{22}$/;
+const BASE64URL_64_BYTES = /^[A-Za-z0-9_-]{86}$/;
+const SAFE_KEY_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$/;
+const P256_HALF_ORDER = Buffer.from("7fffffff800000007fffffffffffffffde737d56d38bcf4279dce5617e3192a8", "hex");
+
+export const REFRESH_HINT_TYPE = "agentpass.refresh-hint";
+export const BUNDLE_ACK_TYPE = "agentpass.bundle-ack";
+export const REFRESH_HINT_SIGNATURE_ALGORITHM = "ed25519";
+export const BUNDLE_ACK_SIGNATURE_ALGORITHM = "p256-sha256";
+export const REFRESH_HINT_SIGNATURE_DOMAIN = "AgentPass-Refresh-Hint-v1\0";
+export const BUNDLE_ACK_SIGNATURE_DOMAIN = "AgentPass-Bundle-Ack-v1\0";
+export const BUNDLE_ACK_RESULTS = Object.freeze(["applied", "blocked"]);
+export const DEVICE_REFRESH_STATES = Object.freeze([
+  "pending",
+  "fetching",
+  "applied",
+  "blocked",
+  "stale",
+  "offline",
+  "revoked"
+]);
+export const BUNDLE_ACK_REASON_CODES = Object.freeze([
+  "bundle_expired",
+  "bundle_not_yet_valid",
+  "bundle_signature_invalid",
+  "bundle_signer_untrusted",
+  "bundle_audience_mismatch",
+  "bundle_sequence_rollback",
+  "bundle_sequence_conflict",
+  "bundle_storage_failed",
+  "device_revoked",
+  "emergency_stop",
+  "internal_error"
+]);
 
 export { ALLOWED_AGENT_KINDS, ALLOWED_OPERATIONS, AUDIT_DECISIONS, DECISION_REASONS, LIMITS, PROTOCOL_VERSION };
 
@@ -231,17 +267,99 @@ export function normalizeAuditEvent(input) {
   return finish(value, issues, "audit");
 }
 
+export function normalizeRefreshHint(input) {
+  const object = asObject(input, "refresh_hint");
+  const issues = [];
+  exactKeys(object, ["version", "type", "organization_id", "device_id", "authority_generation", "published_at", "expires_at", "nonce", "key_id", "signature_algorithm", "signature"], "refresh_hint", issues);
+  const publishedAt = canonicalMillisecondTimestamp(object.published_at, "refresh_hint.published_at", issues);
+  const expiresAt = canonicalMillisecondTimestamp(object.expires_at, "refresh_hint.expires_at", issues);
+  if (publishedAt !== undefined && expiresAt !== undefined) {
+    const duration = Date.parse(expiresAt) - Date.parse(publishedAt);
+    if (duration <= 0 || duration > 5 * 60_000) issues.push(issue("refresh_hint.expires_at", "invalid_window", "refresh hint lifetime must be greater than zero and at most five minutes"));
+  }
+  return finish({
+    version: protocolVersion(object.version, "refresh_hint.version", issues),
+    type: constantString(object.type, REFRESH_HINT_TYPE, "refresh_hint.type", issues),
+    organization_id: uuid(object.organization_id, "refresh_hint.organization_id", issues),
+    device_id: uuid(object.device_id, "refresh_hint.device_id", issues),
+    authority_generation: positiveSequence(object.authority_generation, "refresh_hint.authority_generation", issues),
+    published_at: publishedAt,
+    expires_at: expiresAt,
+    nonce: exactBase64Url(object.nonce, 16, BASE64URL_16_BYTES, "refresh_hint.nonce", issues),
+    key_id: safeKeyId(object.key_id, "refresh_hint.key_id", issues),
+    signature_algorithm: constantString(object.signature_algorithm, REFRESH_HINT_SIGNATURE_ALGORITHM, "refresh_hint.signature_algorithm", issues),
+    signature: exactBase64Url(object.signature, 64, BASE64URL_64_BYTES, "refresh_hint.signature", issues)
+  }, issues, "refresh_hint");
+}
+
+export function normalizeBundleAcknowledgement(input) {
+  const object = asObject(input, "bundle_ack");
+  const issues = [];
+  exactKeys(object, ["version", "type", "organization_id", "device_id", "device_key_epoch", "format_epoch", "sequence", "statement_hash", "result", "reason_code", "observed_at", "nonce", "signature_algorithm", "signature"], "bundle_ack", issues);
+  const result = enumValue(object.result, "bundle_ack.result", BUNDLE_ACK_RESULTS, issues);
+  const reasonCode = object.reason_code === undefined ? undefined : enumValue(object.reason_code, "bundle_ack.reason_code", BUNDLE_ACK_REASON_CODES, issues);
+  if (result === "blocked" && reasonCode === undefined) issues.push(issue("bundle_ack.reason_code", "missing_field", "blocked acknowledgements require a stable reason code"));
+  if (result === "applied" && object.reason_code !== undefined) issues.push(issue("bundle_ack.reason_code", "inconsistent_value", "applied acknowledgements cannot include a reason code"));
+  return finish({
+    version: protocolVersion(object.version, "bundle_ack.version", issues),
+    type: constantString(object.type, BUNDLE_ACK_TYPE, "bundle_ack.type", issues),
+    organization_id: uuid(object.organization_id, "bundle_ack.organization_id", issues),
+    device_id: uuid(object.device_id, "bundle_ack.device_id", issues),
+    device_key_epoch: positiveSequence(object.device_key_epoch, "bundle_ack.device_key_epoch", issues),
+    format_epoch: exactInteger(object.format_epoch, 2, "bundle_ack.format_epoch", issues),
+    sequence: positiveSequence(object.sequence, "bundle_ack.sequence", issues),
+    statement_hash: sha256(object.statement_hash, "bundle_ack.statement_hash", issues),
+    result,
+    reason_code: reasonCode,
+    observed_at: canonicalMillisecondTimestamp(object.observed_at, "bundle_ack.observed_at", issues),
+    nonce: exactBase64Url(object.nonce, 16, BASE64URL_16_BYTES, "bundle_ack.nonce", issues),
+    signature_algorithm: constantString(object.signature_algorithm, BUNDLE_ACK_SIGNATURE_ALGORITHM, "bundle_ack.signature_algorithm", issues),
+    signature: canonicalP256Signature(object.signature, "bundle_ack.signature", issues)
+  }, issues, "bundle_ack");
+}
+
+export function refreshHintSigningData(input) {
+  const { signature: _signature, ...statement } = normalizeRefreshHint(input);
+  return Buffer.concat([Buffer.from(REFRESH_HINT_SIGNATURE_DOMAIN, "utf8"), Buffer.from(canonicalJson(statement), "utf8")]);
+}
+
+export function bundleAcknowledgementSigningData(input) {
+  const { signature: _signature, ...statement } = normalizeBundleAcknowledgement(input);
+  return Buffer.concat([Buffer.from(BUNDLE_ACK_SIGNATURE_DOMAIN, "utf8"), Buffer.from(canonicalJson(statement), "utf8")]);
+}
+
+/**
+ * Decode a refresh hint received across an untrusted JSON boundary.
+ *
+ * This intentionally does not use JSON.parse directly: JSON.parse silently
+ * accepts duplicate object members and cannot distinguish malformed UTF-8
+ * after a lossy string conversion. The strict decoder below preserves the
+ * boundary properties before handing the resulting object to the normalizer.
+ */
+export function parseRefreshHintJson(input) {
+  return parseProtocolJson(input, "refresh_hint", normalizeRefreshHint);
+}
+
+/** Decode a bundle acknowledgement received across an untrusted JSON boundary. */
+export function parseBundleAcknowledgementJson(input) {
+  return parseProtocolJson(input, "bundle_ack", normalizeBundleAcknowledgement);
+}
+
 export function validateAgentDescriptor(input) { return normalizeAgentDescriptor(input); }
 export function validateScope(input) { return normalizeScope(input); }
 export function validateOperationRequest(input) { return normalizeOperationRequest(input); }
 export function validateDecision(input) { return normalizeDecision(input); }
 export function validateAuditEvent(input) { return normalizeAuditEvent(input); }
+export function validateRefreshHint(input) { return normalizeRefreshHint(input); }
+export function validateBundleAcknowledgement(input) { return normalizeBundleAcknowledgement(input); }
 
 export function isValidAgentDescriptor(input) { return valid(normalizeAgentDescriptor, input); }
 export function isValidScope(input) { return valid(normalizeScope, input); }
 export function isValidOperationRequest(input) { return valid(normalizeOperationRequest, input); }
 export function isValidDecision(input) { return valid(normalizeDecision, input); }
 export function isValidAuditEvent(input) { return valid(normalizeAuditEvent, input); }
+export function isValidRefreshHint(input) { return valid(normalizeRefreshHint, input); }
+export function isValidBundleAcknowledgement(input) { return valid(normalizeBundleAcknowledgement, input); }
 
 function normalizePatternSet(input, path, issues, required) {
   const object = input === undefined && !required ? {} : asObject(input, path);
@@ -354,6 +472,80 @@ function sequence(value, path, issues) {
   return value;
 }
 
+function positiveSequence(value, path, issues) {
+  if (!Number.isSafeInteger(value) || value < 1) {
+    issues.push(issue(path, "invalid_sequence", "expected a positive safe integer"));
+    return undefined;
+  }
+  return value;
+}
+
+function exactInteger(value, expected, path, issues) {
+  if (value !== expected) {
+    issues.push(issue(path, "invalid_value", `expected integer ${expected}`));
+    return undefined;
+  }
+  return expected;
+}
+
+function constantString(value, expected, path, issues) {
+  if (value !== expected) {
+    issues.push(issue(path, "invalid_value", `expected ${expected}`));
+    return undefined;
+  }
+  return expected;
+}
+
+function canonicalMillisecondTimestamp(value, path, issues) {
+  if (typeof value !== "string" || !CANONICAL_MILLISECOND_TIMESTAMP.test(value)) {
+    issues.push(issue(path, "invalid_timestamp", "expected canonical UTC timestamp with exactly millisecond precision"));
+    return undefined;
+  }
+  const date = new Date(value);
+  if (!Number.isFinite(date.getTime()) || date.toISOString() !== value) {
+    issues.push(issue(path, "invalid_timestamp", "timestamp is not a real canonical UTC instant"));
+    return undefined;
+  }
+  return value;
+}
+
+function exactBase64Url(value, bytes, pattern, path, issues) {
+  if (typeof value !== "string" || !pattern.test(value)) {
+    issues.push(issue(path, "invalid_encoding", `expected canonical unpadded base64url for exactly ${bytes} bytes`));
+    return undefined;
+  }
+  let decoded;
+  try { decoded = Buffer.from(value, "base64url"); }
+  catch { decoded = null; }
+  if (!decoded || decoded.length !== bytes || decoded.toString("base64url") !== value) {
+    issues.push(issue(path, "invalid_encoding", `expected canonical unpadded base64url for exactly ${bytes} bytes`));
+    return undefined;
+  }
+  return value;
+}
+
+function safeKeyId(value, path, issues) {
+  if (typeof value !== "string" || !SAFE_KEY_ID.test(value)) {
+    issues.push(issue(path, "invalid_identifier", "expected a bounded key identifier"));
+    return undefined;
+  }
+  return value;
+}
+
+function canonicalP256Signature(value, path, issues) {
+  const normalized = exactBase64Url(value, 64, BASE64URL_64_BYTES, path, issues);
+  if (normalized === undefined) return undefined;
+  const bytes = Buffer.from(normalized, "base64url");
+  const r = bytes.subarray(0, 32);
+  const s = bytes.subarray(32);
+  const zero = Buffer.alloc(32);
+  if (r.equals(zero) || s.equals(zero) || Buffer.compare(s, P256_HALF_ORDER) > 0) {
+    issues.push(issue(path, "noncanonical_signature", "expected non-zero IEEE-P1363 P-256 signature with canonical low-S encoding"));
+    return undefined;
+  }
+  return normalized;
+}
+
 function booleanValue(value, path, issues) {
   if (typeof value !== "boolean") {
     issues.push(issue(path, "invalid_type", "expected a boolean"));
@@ -455,6 +647,202 @@ function valid(normalizer, value) {
     if (error instanceof ProtocolValidationError) return false;
     throw error;
   }
+}
+
+function parseProtocolJson(input, label, normalizer) {
+  const text = decodeJsonUtf8(input, label);
+  const value = new StrictJsonParser(text, label).parse();
+  return normalizer(value);
+}
+
+function decodeJsonUtf8(input, label) {
+  let bytes;
+  let text;
+  if (typeof input === "string") {
+    if (hasLoneSurrogate(input)) {
+      throw jsonBoundaryError(label, "invalid_utf8", "input string contains an unpaired UTF-16 surrogate");
+    }
+    bytes = Buffer.from(input, "utf8");
+    text = input;
+  } else if (Buffer.isBuffer(input)) {
+    bytes = input;
+  } else if (input instanceof Uint8Array) {
+    bytes = Buffer.from(input.buffer, input.byteOffset, input.byteLength);
+  } else if (input instanceof ArrayBuffer) {
+    bytes = Buffer.from(input);
+  } else if (ArrayBuffer.isView(input)) {
+    bytes = Buffer.from(input.buffer, input.byteOffset, input.byteLength);
+  } else {
+    throw jsonBoundaryError(label, "invalid_type", "expected a UTF-8 JSON string or byte buffer");
+  }
+
+  if (bytes.byteLength > LIMITS.maxDocumentBytes) {
+    throw jsonBoundaryError(label, "limit_exceeded", `JSON document cannot exceed ${LIMITS.maxDocumentBytes} UTF-8 bytes`);
+  }
+
+  if (text === undefined) {
+    try {
+      text = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(bytes);
+    } catch {
+      throw jsonBoundaryError(label, "invalid_utf8", "input is not valid UTF-8");
+    }
+  }
+  if (text.startsWith("\uFEFF")) {
+    throw jsonBoundaryError(label, "malformed_json", "a UTF-8 BOM is not permitted");
+  }
+  return text;
+}
+
+function hasLoneSurrogate(value) {
+  for (let index = 0; index < value.length; index += 1) {
+    const code = value.charCodeAt(index);
+    if (code >= 0xd800 && code <= 0xdbff) {
+      const next = value.charCodeAt(index + 1);
+      if (next < 0xdc00 || next > 0xdfff) return true;
+      index += 1;
+    } else if (code >= 0xdc00 && code <= 0xdfff) {
+      return true;
+    }
+  }
+  return false;
+}
+
+class StrictJsonParser {
+  constructor(text, label) {
+    this.text = text;
+    this.label = label;
+    this.index = 0;
+  }
+
+  parse() {
+    this.skipWhitespace();
+    const value = this.readValue(0, this.label);
+    this.skipWhitespace();
+    if (this.index !== this.text.length) this.fail("malformed_json", "trailing data is not permitted");
+    if (!value || typeof value !== "object" || Array.isArray(value)) {
+      this.fail("invalid_type", "top-level JSON value must be an object");
+    }
+    return value;
+  }
+
+  readValue(depth, path) {
+    this.skipWhitespace();
+    const code = this.text.charCodeAt(this.index);
+    if (code === 0x7b) return this.readObject(depth, path);
+    if (code === 0x5b) return this.readArray(depth, path);
+    if (code === 0x22) return this.readString();
+    if (code === 0x74 && this.consumeLiteral("true")) return true;
+    if (code === 0x66 && this.consumeLiteral("false")) return false;
+    if (code === 0x6e && this.consumeLiteral("null")) return null;
+    if (code === 0x2d || (code >= 0x30 && code <= 0x39)) return this.readNumber();
+    this.fail("malformed_json", "expected a JSON value");
+  }
+
+  readObject(depth, path) {
+    this.enterComposite(depth);
+    this.index += 1;
+    const object = Object.create(null);
+    const keys = new Set();
+    this.skipWhitespace();
+    if (this.consume("}")) return object;
+    while (true) {
+      this.skipWhitespace();
+      if (this.text.charCodeAt(this.index) !== 0x22) this.fail("malformed_json", "object keys must be strings");
+      const key = this.readString();
+      if (keys.has(key)) this.fail("duplicate_field", `duplicate JSON field ${JSON.stringify(key)}`, `${path}.${key}`);
+      keys.add(key);
+      this.skipWhitespace();
+      if (!this.consume(":")) this.fail("malformed_json", "object member is missing a colon");
+      object[key] = this.readValue(depth + 1, `${path}.${key}`);
+      this.skipWhitespace();
+      if (this.consume("}")) return object;
+      if (!this.consume(",")) this.fail("malformed_json", "object members must be comma separated");
+    }
+  }
+
+  readArray(depth, path) {
+    this.enterComposite(depth);
+    this.index += 1;
+    const array = [];
+    this.skipWhitespace();
+    if (this.consume("]")) return array;
+    while (true) {
+      array.push(this.readValue(depth + 1, `${path}[${array.length}]`));
+      this.skipWhitespace();
+      if (this.consume("]")) return array;
+      if (!this.consume(",")) this.fail("malformed_json", "array values must be comma separated");
+    }
+  }
+
+  readString() {
+    const start = this.index;
+    this.index += 1;
+    while (this.index < this.text.length) {
+      const code = this.text.charCodeAt(this.index);
+      if (code === 0x22) {
+        this.index += 1;
+        const raw = this.text.slice(start, this.index);
+        try {
+          const value = JSON.parse(raw);
+          if (typeof value !== "string") this.fail("malformed_json", "invalid JSON string");
+          return value;
+        } catch (error) {
+          if (error instanceof ProtocolValidationError) throw error;
+          this.fail("malformed_json", "invalid JSON string");
+        }
+      }
+      if (code === 0x5c) {
+        this.index += 2;
+        continue;
+      }
+      if (code < 0x20) this.fail("malformed_json", "JSON strings cannot contain control characters");
+      this.index += 1;
+    }
+    this.fail("malformed_json", "unterminated JSON string");
+  }
+
+  readNumber() {
+    const match = this.text.slice(this.index).match(/^-?(?:0|[1-9]\d*)(?:\.\d+)?(?:[eE][+-]?\d+)?/);
+    if (!match) this.fail("malformed_json", "invalid JSON number");
+    this.index += match[0].length;
+    const value = Number(match[0]);
+    if (!Number.isFinite(value)) this.fail("malformed_json", "JSON number is outside the supported range");
+    return value;
+  }
+
+  consume(value) {
+    if (this.text.startsWith(value, this.index)) {
+      this.index += value.length;
+      return true;
+    }
+    return false;
+  }
+
+  consumeLiteral(value) {
+    return this.consume(value);
+  }
+
+  skipWhitespace() {
+    while (this.index < this.text.length) {
+      const code = this.text.charCodeAt(this.index);
+      if (code !== 0x20 && code !== 0x09 && code !== 0x0a && code !== 0x0d) return;
+      this.index += 1;
+    }
+  }
+
+  enterComposite(depth) {
+    if (depth + 1 > LIMITS.maxJsonDepth) {
+      this.fail("json_too_deep", `JSON nesting cannot exceed ${LIMITS.maxJsonDepth} levels`);
+    }
+  }
+
+  fail(code, message, path = this.label) {
+    throw jsonBoundaryError(path, code, message);
+  }
+}
+
+function jsonBoundaryError(path, code, message) {
+  return new ProtocolValidationError([issue(path, code, message)]);
 }
 
 function canonicalizeValue(value, seen, path, inArray) {
