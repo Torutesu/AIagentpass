@@ -167,14 +167,14 @@ function parseQuery(params, method) {
 async function getResource(query, config, fetchImpl, options) {
   const resource = normalizeResource(query.resource);
   if (resource === "summary") return getSummary(query, config, fetchImpl, options);
-  if (resource === "organization") return getSimple("organization", config, fetchImpl, options);
-  if (resource === "devices") return getSimple("devices", config, fetchImpl, options);
-  if (resource === "agents") return getSimple("agents", config, fetchImpl, options);
-  if (resource === "policies") return getSimple("policies", config, fetchImpl, options);
-  if (resource === "capabilities") return getSimple("capabilities", config, fetchImpl, options);
-  if (resource === "revocations") return getSimple("revocations", config, fetchImpl, options);
-  if (resource === "admin-audit") return getSimple("admin-audit", config, fetchImpl, options);
-  if (resource === "audit-health") return getSimple("audit-health", config, fetchImpl, options);
+  if (resource === "organization") return getSimple(query, "organization", config, fetchImpl, options);
+  if (resource === "devices") return getSimple(query, "devices", config, fetchImpl, options);
+  if (resource === "agents") return getSimple(query, "agents", config, fetchImpl, options);
+  if (resource === "policies") return getSimple(query, "policies", config, fetchImpl, options);
+  if (resource === "capabilities") return getSimple(query, "capabilities", config, fetchImpl, options);
+  if (resource === "revocations") return getSimple(query, "revocations", config, fetchImpl, options);
+  if (resource === "admin-audit") return getSimple(query, "admin-audit", config, fetchImpl, options);
+  if (resource === "audit-health") return getSimple(query, "audit-health", config, fetchImpl, options);
 
   if (resource === "audit" || resource === "activity" || resource === "health") {
     const audit = await getAudit(query, config, fetchImpl, options);
@@ -207,7 +207,7 @@ async function getSummary(query, config, fetchImpl, options) {
   };
 }
 
-async function getSimple(resource, config, fetchImpl, options) {
+async function getSimple(query, resource, config, fetchImpl, options) {
   const paths = {
     organization: "",
     devices: "/devices",
@@ -218,8 +218,15 @@ async function getSimple(resource, config, fetchImpl, options) {
     "admin-audit": "/audit/admin-events",
     "audit-health": "/audit/health",
   };
-  const result = await cloudRequest("GET", paths[resource], undefined, config, fetchImpl, options, undefined, true);
+  const suffix = resource === "capabilities" || resource === "revocations" || resource === "admin-audit"
+    ? `${paths[resource]}?limit=${queryLimit(query)}`
+    : paths[resource];
+  const result = await cloudRequest("GET", suffix, undefined, config, fetchImpl, options, undefined, true);
   return { __consoleStatus: result.status, __consoleBody: result.body };
+}
+
+function queryLimit(query) {
+  return Number.isSafeInteger(query?.limit) && query.limit >= 1 && query.limit <= 500 ? query.limit : 100;
 }
 
 async function getAudit(query, config, fetchImpl, options, devicesPayload = undefined) {

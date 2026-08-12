@@ -69,6 +69,29 @@ test("GET summary aggregates tenant resources and bounded audit activity", async
   assert.doesNotMatch(JSON.stringify(body), new RegExp(env.AGENTPASS_CLOUD_TOKEN));
 });
 
+test("bounded list limits are forwarded to Cloud API resources", async () => {
+  const calls = [];
+  const api = authenticatedApi({
+    fetchImpl: async (url, init) => {
+      calls.push({ url: String(url), init });
+      return response({ capabilities: [], revocations: [], events: [] });
+    },
+  });
+
+  for (const [resource, limit, expectedPath] of [
+    ["capabilities", "7", "/capabilities"],
+    ["revocations", "13", "/revocations"],
+    ["admin-audit", "29", "/audit/admin-events"],
+  ]) {
+    const result = await api.handle(request(`/api/console?resource=${resource}&limit=${limit}`));
+    assert.equal(result.status, 200);
+    const cloudUrl = new URL(calls.at(-1).url);
+    assert.equal(cloudUrl.pathname, `/v1/organizations/${env.AGENTPASS_ORGANIZATION_ID}${expectedPath}`);
+    assert.equal(cloudUrl.search, `?limit=${limit}`);
+    assert.equal(calls.at(-1).init.cache, "no-store");
+  }
+});
+
 test("POST policy forwards the idempotency key and preserves Cloud API status", async () => {
   let forwarded;
   const api = authenticatedApi({
