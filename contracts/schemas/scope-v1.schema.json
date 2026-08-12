@@ -1,0 +1,26 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agentpass.dev/contracts/scope-v1.schema.json",
+  "title": "AgentPass scope v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["operations", "repositories", "branches", "remotes"],
+  "properties": {
+    "operations": { "type": "array", "minItems": 1, "maxItems": 64, "uniqueItems": true, "items": { "const": "git.commit.sign" } },
+    "repositories": { "type": "array", "minItems": 1, "maxItems": 64, "uniqueItems": true, "items": { "type": "string", "minLength": 1, "maxLength": 4096, "pattern": "^/" } },
+    "branches": { "$ref": "#/$defs/patternSet" },
+    "remotes": { "$ref": "#/$defs/patternSet" },
+    "tags": { "$ref": "#/$defs/patternSet" }
+  },
+  "$defs": {
+    "patternSet": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["allow", "deny"],
+      "properties": {
+        "allow": { "type": "array", "maxItems": 64, "uniqueItems": true, "items": { "type": "string", "minLength": 1, "maxLength": 2048 } },
+        "deny": { "type": "array", "maxItems": 64, "uniqueItems": true, "items": { "type": "string", "minLength": 1, "maxLength": 2048 } }
+      }
+    }
+  }
+}

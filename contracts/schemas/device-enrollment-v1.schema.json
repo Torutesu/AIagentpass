@@ -1,0 +1,26 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agentpass.dev/contracts/device-enrollment-v1.schema.json",
+  "title": "Device enrollment request v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["version", "enrollment_id", "organization_id", "device_id", "label", "platform", "device_key"],
+  "properties": {
+    "version": { "const": 1 },
+    "enrollment_id": { "$ref": "#/$defs/uuid" },
+    "organization_id": { "$ref": "#/$defs/uuid" },
+    "device_id": { "$ref": "#/$defs/uuid" },
+    "label": { "type": "string", "minLength": 1, "maxLength": 128 },
+    "platform": { "const": "macos" },
+    "device_key": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["algorithm", "spki_pem"],
+      "properties": {
+        "algorithm": { "enum": ["p256-sha256", "ed25519"] },
+        "spki_pem": { "type": "string", "minLength": 80, "maxLength": 8192, "pattern": "^-----BEGIN PUBLIC KEY-----" }
+      }
+    }
+  },
+  "$defs": { "uuid": { "type": "string", "format": "uuid" } }
+}

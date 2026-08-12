@@ -1,0 +1,22 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agentpass.dev/contracts/bundle-ack-v1.schema.json",
+  "title": "Control bundle acknowledgement v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["version", "organization_id", "device_id", "format_epoch", "sequence", "statement_hash", "applied_at", "status"],
+  "properties": {
+    "version": { "const": 1 },
+    "organization_id": { "type": "string", "format": "uuid" },
+    "device_id": { "type": "string", "format": "uuid" },
+    "format_epoch": { "const": 2 },
+    "sequence": { "type": "integer", "minimum": 1, "maximum": 9007199254740991 },
+    "statement_hash": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "applied_at": { "type": "string", "format": "date-time" },
+    "status": { "enum": ["applied", "blocked"] },
+    "reason": { "type": "string", "minLength": 1, "maxLength": 128 }
+  },
+  "allOf": [
+    { "if": { "properties": { "status": { "const": "blocked" } } }, "then": { "required": ["reason"] } }
+  ]
+}

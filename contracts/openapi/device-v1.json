@@ -1,0 +1,21 @@
+{
+  "openapi": "3.1.0",
+  "info": { "title": "AgentPass Device API", "version": "1.0.0" },
+  "servers": [{ "url": "https://api.ai-agentpass.com/v1" }],
+  "paths": {
+    "/enrollments/{enrollment_id}": { "post": { "operationId": "completeDeviceEnrollment", "parameters": [{ "$ref": "#/components/parameters/EnrollmentId" }], "responses": { "201": { "$ref": "#/components/responses/Json" } } } },
+    "/organizations/{organization_id}/bundles/{device_id}": { "get": { "operationId": "fetchControlBundle", "security": [{ "deviceSignature": [] }], "parameters": [{ "$ref": "#/components/parameters/OrganizationId" }, { "$ref": "#/components/parameters/DeviceId" }], "responses": { "200": { "$ref": "#/components/responses/Json" } } } },
+    "/organizations/{organization_id}/bundles/{device_id}/acknowledgements": { "post": { "operationId": "acknowledgeControlBundle", "security": [{ "deviceSignature": [] }], "parameters": [{ "$ref": "#/components/parameters/OrganizationId" }, { "$ref": "#/components/parameters/DeviceId" }], "responses": { "202": { "$ref": "#/components/responses/Json" } } } },
+    "/organizations/{organization_id}/devices/{device_id}/check-ins": { "post": { "operationId": "checkInDevice", "security": [{ "deviceSignature": [] }], "parameters": [{ "$ref": "#/components/parameters/OrganizationId" }, { "$ref": "#/components/parameters/DeviceId" }], "responses": { "202": { "$ref": "#/components/responses/Json" } } } },
+    "/organizations/{organization_id}/audit/events": { "post": { "operationId": "appendDeviceAuditEvents", "security": [{ "deviceSignature": [] }], "parameters": [{ "$ref": "#/components/parameters/OrganizationId" }], "responses": { "202": { "$ref": "#/components/responses/Json" } } } }
+  },
+  "components": {
+    "securitySchemes": { "deviceSignature": { "type": "apiKey", "in": "header", "name": "AgentPass-Signature", "description": "Requires Device, Timestamp, Nonce, Content-SHA256, and Signature headers." } },
+    "parameters": {
+      "EnrollmentId": { "name": "enrollment_id", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } },
+      "OrganizationId": { "name": "organization_id", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } },
+      "DeviceId": { "name": "device_id", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } }
+    },
+    "responses": { "Json": { "description": "JSON response", "content": { "application/json": { "schema": { "type": "object" } } } } }
+  }
+}
