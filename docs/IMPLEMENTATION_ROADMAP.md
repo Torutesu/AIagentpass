@@ -43,7 +43,7 @@ Not yet production-complete:
 - setup can enroll the cloud device with a service-owned fixed Secure Enclave key, atomically provision root service trust, require an authenticated refresh, verify the exact editor entry and signed current commit, and complete its durable journal; physical-Mac E2E qualification remains open;
 - uninstall does not yet offer the separately confirmed current-user-state purge flow;
 - the Cloud API still uses a single-writer file store in its reference runtime;
-- Hash-only human sessions, immutable provider/subject membership resolution, an operator identity-binding CLI, PostgreSQL one-time WebAuthn registration/authentication ceremonies, maintained verifiers, Human API routing, Console BFF, Touch ID/passkey registration, and credential/session management UI are wired. Destructive credential/current-session actions consume an operation-bound recent WebAuthn authorization. Organization invitation APIs, automated real-PostgreSQL multi-instance E2E, and recovery remain open;
+- Hash-only human sessions, immutable provider/subject membership resolution, an operator identity-binding CLI, PostgreSQL one-time WebAuthn registration/authentication ceremonies, maintained verifiers, Human API routing, Console BFF, Touch ID/passkey registration, and credential/session management UI are wired. Destructive credential/current-session actions consume an operation-bound recent WebAuthn authorization. The P1 Human organization, membership, and invitation contract is frozen in `contracts/openapi/human-v1.json`; its runtime invitation APIs, automated real-PostgreSQL multi-instance E2E, and recovery remain open;
 - Device enrollment, root trust provisioning, and authenticated first refresh are connected; durable bundle ACK and the final physical-Mac E2E remain open;
 - Console screens still contain sample presentation state;
 - cloud signing keys are file-backed rather than KMS/HSM-backed;
@@ -181,6 +181,13 @@ M2 exit gate:
 ## 7. Milestone M3 — Human identity, organization, role, session, and WebAuthn
 
 Goal: eliminate the long-lived Console operator bearer-token model for hosted production.
+
+### M3.0 P1 Human contract freeze
+
+- The Human API contract covers organization list/create/rename, member list/role/revocation, and invitation list/create/revocation/acceptance.
+- Every browser mutation requires `humanSession`, `X-CSRF-Token`, and `Idempotency-Key`; updates and revocations also require the quoted `If-Match` resource version. Organization resources are tenant-qualified by `organization_id` and cross-tenant existence is not disclosed.
+- Invitations are identity-neutral: roles are limited to `admin`, `auditor`, or `viewer` and never `owner`; acceptance requires the authenticated human identity plus possession of a random, one-time token. The token is returned only by invitation creation and is not email-bound.
+- Membership changes preserve the final-owner invariant. State changes, immutable admin audit, and outbox publication intent are documented as one atomic transaction, with stable error envelopes for retry, version, authorization, token, and last-owner failures.
 
 ### M3.1 Identity and session foundation
 

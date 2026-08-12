@@ -66,10 +66,57 @@ test("fails closed on an unknown or out-of-order applied version", async () => {
 
 test("loads the reviewed contract migrations in contiguous order without rewriting their SQL", async () => {
   const loaded = await loadSqlMigrations(defaultContractDirectory());
-  assert.deepEqual(loaded.map((migration) => migration.name), ["0001_control_plane.sql", "0002_webauthn_challenges.sql", "0003_webauthn_challenge_bindings.sql", "0004_human_identity_and_webauthn_registration.sql", "0005_human_credential_session_management.sql"]);
+  assert.deepEqual(loaded.map((migration) => migration.name), ["0001_control_plane.sql", "0002_webauthn_challenges.sql", "0003_webauthn_challenge_bindings.sql", "0004_human_identity_and_webauthn_registration.sql", "0005_human_credential_session_management.sql", "0006_organization_membership_invitations.sql"]);
   assert.match(loaded[0].sql, /^BEGIN;/);
   assert.match(loaded[0].sql, /CREATE TABLE schema_migrations/);
   assert.match(loaded[0].sql.trim(), /COMMIT;$/);
+});
+
+test("migration 0006 defines tenant-scoped invitations, audit heads, outbox delivery, and owner protection", async () => {
+  const sql = await readFile(new URL("../../../../contracts/postgres/0006_organization_membership_invitations.sql", import.meta.url), "utf8");
+  const invitations = sql.slice(sql.indexOf("CREATE TABLE organization_invitations"), sql.indexOf("CREATE TABLE admin_audit_heads"));
+
+  assert.match(invitations, /organization_id uuid NOT NULL REFERENCES organizations\(id\)/);
+  assert.match(invitations, /id uuid NOT NULL/);
+  assert.match(invitations, /token_hash bytea NOT NULL UNIQUE CHECK \(octet_length\(token_hash\) = 32\)/);
+  assert.match(invitations, /role text NOT NULL CHECK \(role IN \('admin', 'auditor', 'viewer'\)\)/);
+  assert.doesNotMatch(invitations, /role IN \([^)]*'owner'/);
+  assert.match(invitations, /created_by uuid NOT NULL REFERENCES members\(id\)/);
+  assert.match(invitations, /version bigint NOT NULL DEFAULT 1 CHECK \(version > 0\)/);
+  assert.match(invitations, /created_at timestamptz NOT NULL DEFAULT clock_timestamp\(\)/);
+  assert.match(invitations, /updated_at timestamptz NOT NULL DEFAULT clock_timestamp\(\)/);
+  assert.match(invitations, /FOREIGN KEY \(organization_id, created_by\) REFERENCES memberships\(organization_id, member_id\)/);
+  assert.match(invitations, /FOREIGN KEY \(organization_id, consumed_by\) REFERENCES memberships\(organization_id, member_id\)/);
+  assert.match(invitations, /FOREIGN KEY \(organization_id, revoked_by\) REFERENCES memberships\(organization_id, member_id\)/);
+  assert.match(invitations, /consumed_by IS NULL AND consumed_at IS NULL/);
+  assert.match(invitations, /revoked_by IS NULL AND revoked_at IS NULL AND revoke_reason IS NULL/);
+  assert.match(invitations, /NOT \(consumed_at IS NOT NULL AND revoked_at IS NOT NULL\)/);
+  assert.match(invitations, /CREATE INDEX organization_invitations_active_lookup/);
+  assert.match(invitations, /CREATE INDEX organization_invitations_expiry_lookup/);
+
+  assert.match(sql, /CREATE TABLE admin_audit_heads \([\s\S]*organization_id uuid PRIMARY KEY REFERENCES organizations\(id\)/);
+  assert.match(sql, /sequence bigint NOT NULL DEFAULT 0 CHECK \(sequence >= 0\)/);
+  assert.match(sql, /event_hash text NOT NULL DEFAULT repeat\('0', 64\) CHECK \(event_hash ~ '\^\[0-9a-f\]\{64\}\$'\)/);
+  assert.match(sql, /ALTER TABLE admin_audit_events[\s\S]*ADD COLUMN sequence bigint[\s\S]*ADD COLUMN event_json jsonb/);
+  assert.match(sql, /INSERT INTO admin_audit_heads \(organization_id,sequence,event_hash\)[\s\S]*LEFT JOIN LATERAL/);
+
+  assert.match(sql, /aggregate text NOT NULL CHECK \(char_length\(aggregate\) BETWEEN 1 AND 128\)/);
+  assert.match(sql, /action text NOT NULL CHECK \(char_length\(action\) BETWEEN 1 AND 128\)/);
+  assert.match(sql, /payload jsonb NOT NULL CHECK \(jsonb_typeof\(payload\) = 'object'\)/);
+  assert.match(sql, /status text NOT NULL DEFAULT 'pending' CHECK \(status IN \('pending', 'published'\)\)/);
+  assert.match(sql, /attempts integer NOT NULL DEFAULT 0 CHECK \(attempts BETWEEN 0 AND 100\)/);
+  assert.match(sql, /available_at timestamptz NOT NULL DEFAULT clock_timestamp\(\)/);
+  assert.match(sql, /published_at timestamptz/);
+  assert.match(sql, /status = 'pending' AND published_at IS NULL/);
+  assert.match(sql, /status = 'published' AND published_at IS NOT NULL/);
+  assert.match(sql, /CREATE INDEX outbox_events_pending_delivery[\s\S]*WHERE status = 'pending'/);
+  assert.match(sql, /CREATE INDEX outbox_events_organization_pending[\s\S]*WHERE status = 'pending'/);
+
+  assert.match(sql, /CREATE FUNCTION agentpass_prevent_last_active_owner\(\)/);
+  assert.match(sql, /pg_advisory_xact_lock\([\s\S]*hashtextextended\('agentpass:memberships:owners:' \|\| OLD\.organization_id::text, 0\)/);
+  assert.match(sql, /CREATE TRIGGER memberships_protect_last_active_owner\s+BEFORE UPDATE OF organization_id, role, status OR DELETE ON memberships\s+FOR EACH ROW\s+EXECUTE FUNCTION agentpass_prevent_last_active_owner\(\)/);
+  assert.match(sql, /ERRCODE = 'check_violation'/);
+  assert.match(sql, /CONSTRAINT = 'memberships_last_active_owner'/);
 });
 
 test("migration 0005 preserves version defaults and protects the final active credential", async () => {

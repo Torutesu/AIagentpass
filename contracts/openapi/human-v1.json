@@ -1,33 +1,694 @@
 {
   "openapi": "3.1.0",
-  "info": { "title": "AgentPass Human API", "version": "1.0.0" },
+  "info": {
+    "title": "AgentPass Human API",
+    "version": "1.0.0",
+    "license": { "name": "AgentPass API contract", "identifier": "AgentPass-API-Contract-1.0" },
+    "description": "Cookie-authenticated, tenant-qualified organization and membership management for the Web Console. All timestamps are RFC 3339 strings and all opaque identifiers are UUIDs. Responses never contain session cookies, CSRF tokens, invitation tokens after creation, or email addresses."
+  },
   "servers": [{ "url": "https://app.ai-agentpass.com/api/v1" }],
+  "security": [],
   "paths": {
-    "/auth/github/start": { "post": { "operationId": "startGithubAuthorization", "responses": { "200": { "$ref": "#/components/responses/Json" } } } },
-    "/auth/github/callback": { "post": { "operationId": "completeGithubAuthorization", "responses": { "200": { "$ref": "#/components/responses/Json" } } } },
-    "/auth/logout": { "post": { "operationId": "logout", "security": [{ "humanSession": [] }], "responses": { "204": { "description": "Session revoked" } } } },
-    "/auth/management/credentials": { "get": { "operationId": "listWebAuthnCredentials", "security": [{ "humanSession": [] }], "responses": { "200": { "$ref": "#/components/responses/Json" } } } },
-    "/auth/management/credentials/{credential_id}": { "patch": { "operationId": "renameWebAuthnCredential", "security": [{ "humanSession": [] }], "responses": { "200": { "$ref": "#/components/responses/Json" } } } },
-    "/auth/management/credentials/{credential_id}/revoke": { "post": { "operationId": "revokeWebAuthnCredential", "security": [{ "humanSession": [], "recentWebAuthn": [] }], "responses": { "200": { "$ref": "#/components/responses/Json" } } } },
-    "/auth/management/sessions": { "get": { "operationId": "listHumanSessions", "security": [{ "humanSession": [] }], "responses": { "200": { "$ref": "#/components/responses/Json" } } } },
-    "/auth/management/sessions/{session_id}/revoke": { "post": { "operationId": "revokeHumanSession", "security": [{ "humanSession": [] }], "x-agentpass-recent-webauthn-when": "target-is-current-session", "responses": { "200": { "$ref": "#/components/responses/Json" } } } },
-    "/webauthn/registration/options": { "post": { "operationId": "createRegistrationOptions", "security": [{ "humanSession": [] }], "responses": { "200": { "$ref": "#/components/responses/Json" } } } },
-    "/webauthn/registration/verify": { "post": { "operationId": "verifyRegistration", "security": [{ "humanSession": [] }], "responses": { "200": { "$ref": "#/components/responses/Json" } } } },
-    "/webauthn/authentication/options": { "post": { "operationId": "createAuthenticationOptions", "security": [{ "humanSession": [] }], "responses": { "200": { "$ref": "#/components/responses/Json" } } } },
-    "/webauthn/authentication/verify": { "post": { "operationId": "verifyAuthentication", "security": [{ "humanSession": [] }], "responses": { "200": { "$ref": "#/components/responses/Json" } } } },
-    "/organizations": { "post": { "operationId": "createOrganization", "security": [{ "humanSession": [] }], "responses": { "201": { "$ref": "#/components/responses/Json" } } } },
-    "/organizations/{organization_id}": { "get": { "operationId": "getOrganization", "security": [{ "humanSession": [] }], "parameters": [{ "$ref": "#/components/parameters/OrganizationId" }], "responses": { "200": { "$ref": "#/components/responses/Json" } } } },
-    "/organizations/{organization_id}/members": { "get": { "operationId": "listMembers", "security": [{ "humanSession": [] }], "parameters": [{ "$ref": "#/components/parameters/OrganizationId" }], "responses": { "200": { "$ref": "#/components/responses/Json" } }, "x-agentpass-minimum-role": "admin" }, "post": { "operationId": "addMember", "security": [{ "humanSession": [] }], "parameters": [{ "$ref": "#/components/parameters/OrganizationId" }], "responses": { "201": { "$ref": "#/components/responses/Json" } }, "x-agentpass-minimum-role": "admin" } },
-    "/organizations/{organization_id}/devices": { "get": { "operationId": "listDevices", "security": [{ "humanSession": [] }], "parameters": [{ "$ref": "#/components/parameters/OrganizationId" }], "responses": { "200": { "$ref": "#/components/responses/Json" } } } },
-    "/organizations/{organization_id}/device-enrollments": { "post": { "operationId": "issueDeviceEnrollment", "security": [{ "humanSession": [], "recentWebAuthn": [] }], "parameters": [{ "$ref": "#/components/parameters/OrganizationId" }], "responses": { "201": { "$ref": "#/components/responses/Json" } }, "x-agentpass-minimum-role": "admin" } },
-    "/organizations/{organization_id}/emergency-stop": { "post": { "operationId": "emergencyStop", "security": [{ "humanSession": [], "recentWebAuthn": [] }], "parameters": [{ "$ref": "#/components/parameters/OrganizationId" }], "responses": { "201": { "$ref": "#/components/responses/Json" } }, "x-agentpass-minimum-role": "owner" } }
+    "/auth/github/start": {
+      "post": {
+        "operationId": "startGithubAuthorization",
+        "summary": "Start GitHub authorization",
+        "description": "Starts the upstream identity authorization flow. This is the only unauthenticated Human API operation.",
+        "responses": {
+          "200": { "$ref": "#/components/responses/Json" },
+          "400": { "$ref": "#/components/responses/BadRequest" }
+        }
+      }
+    },
+    "/auth/github/callback": {
+      "post": {
+        "operationId": "completeGithubAuthorization",
+        "summary": "Complete GitHub authorization",
+        "description": "Completes upstream authorization and establishes the HttpOnly humanSession cookie.",
+        "responses": {
+          "200": { "$ref": "#/components/responses/Json" },
+          "400": { "$ref": "#/components/responses/BadRequest" }
+        }
+      }
+    },
+    "/auth/logout": {
+      "post": {
+        "operationId": "logout",
+        "summary": "Revoke the current human session",
+        "security": [{ "humanSession": [] }],
+        "parameters": [{ "$ref": "#/components/parameters/CsrfToken" }, { "$ref": "#/components/parameters/IdempotencyKey" }],
+        "responses": {
+          "204": { "description": "Session revoked" },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" }
+        }
+      }
+    },
+    "/auth/management/credentials": {
+      "get": {
+        "operationId": "listWebAuthnCredentials",
+        "summary": "List WebAuthn credentials",
+        "security": [{ "humanSession": [] }],
+        "responses": { "200": { "$ref": "#/components/responses/Json" }, "401": { "$ref": "#/components/responses/Unauthorized" } }
+      }
+    },
+    "/auth/management/credentials/{credential_id}": {
+      "patch": {
+        "operationId": "renameWebAuthnCredential",
+        "summary": "Rename a WebAuthn credential",
+        "security": [{ "humanSession": [] }],
+        "parameters": [{ "$ref": "#/components/parameters/CredentialId" }, { "$ref": "#/components/parameters/CsrfToken" }, { "$ref": "#/components/parameters/IdempotencyKey" }],
+        "responses": { "200": { "$ref": "#/components/responses/Json" }, "401": { "$ref": "#/components/responses/Unauthorized" } }
+      }
+    },
+    "/auth/management/credentials/{credential_id}/revoke": {
+      "post": {
+        "operationId": "revokeWebAuthnCredential",
+        "summary": "Revoke a WebAuthn credential",
+        "security": [{ "humanSession": [], "recentWebAuthn": [] }],
+        "parameters": [{ "$ref": "#/components/parameters/CredentialId" }, { "$ref": "#/components/parameters/CsrfToken" }, { "$ref": "#/components/parameters/IdempotencyKey" }],
+        "responses": { "200": { "$ref": "#/components/responses/Json" }, "401": { "$ref": "#/components/responses/Unauthorized" } }
+      }
+    },
+    "/auth/management/sessions": {
+      "get": {
+        "operationId": "listHumanSessions",
+        "summary": "List human sessions",
+        "security": [{ "humanSession": [] }],
+        "responses": { "200": { "$ref": "#/components/responses/Json" }, "401": { "$ref": "#/components/responses/Unauthorized" } }
+      }
+    },
+    "/auth/management/sessions/{session_id}/revoke": {
+      "post": {
+        "operationId": "revokeHumanSession",
+        "summary": "Revoke a human session",
+        "security": [{ "humanSession": [] }],
+        "parameters": [{ "$ref": "#/components/parameters/SessionId" }, { "$ref": "#/components/parameters/CsrfToken" }, { "$ref": "#/components/parameters/IdempotencyKey" }],
+        "x-agentpass-recent-webauthn-when": "target-is-current-session",
+        "responses": { "200": { "$ref": "#/components/responses/Json" }, "400": { "$ref": "#/components/responses/BadRequest" }, "401": { "$ref": "#/components/responses/Unauthorized" } }
+      }
+    },
+    "/webauthn/registration/options": {
+      "post": {
+        "operationId": "createRegistrationOptions",
+        "summary": "Create WebAuthn registration options",
+        "security": [{ "humanSession": [] }],
+        "parameters": [{ "$ref": "#/components/parameters/CsrfToken" }, { "$ref": "#/components/parameters/IdempotencyKey" }],
+        "responses": { "200": { "$ref": "#/components/responses/Json" }, "400": { "$ref": "#/components/responses/BadRequest" }, "401": { "$ref": "#/components/responses/Unauthorized" } }
+      }
+    },
+    "/webauthn/registration/verify": {
+      "post": {
+        "operationId": "verifyRegistration",
+        "summary": "Verify WebAuthn registration",
+        "security": [{ "humanSession": [] }],
+        "parameters": [{ "$ref": "#/components/parameters/CsrfToken" }, { "$ref": "#/components/parameters/IdempotencyKey" }],
+        "responses": { "200": { "$ref": "#/components/responses/Json" }, "400": { "$ref": "#/components/responses/BadRequest" }, "401": { "$ref": "#/components/responses/Unauthorized" } }
+      }
+    },
+    "/webauthn/authentication/options": {
+      "post": {
+        "operationId": "createAuthenticationOptions",
+        "summary": "Create WebAuthn authentication options",
+        "security": [{ "humanSession": [] }],
+        "parameters": [{ "$ref": "#/components/parameters/CsrfToken" }, { "$ref": "#/components/parameters/IdempotencyKey" }],
+        "responses": { "200": { "$ref": "#/components/responses/Json" }, "400": { "$ref": "#/components/responses/BadRequest" }, "401": { "$ref": "#/components/responses/Unauthorized" } }
+      }
+    },
+    "/webauthn/authentication/verify": {
+      "post": {
+        "operationId": "verifyAuthentication",
+        "summary": "Verify WebAuthn authentication",
+        "security": [{ "humanSession": [] }],
+        "parameters": [{ "$ref": "#/components/parameters/CsrfToken" }, { "$ref": "#/components/parameters/IdempotencyKey" }],
+        "responses": { "200": { "$ref": "#/components/responses/Json" }, "400": { "$ref": "#/components/responses/BadRequest" }, "401": { "$ref": "#/components/responses/Unauthorized" } }
+      }
+    },
+
+    "/organizations": {
+      "get": {
+        "operationId": "listOrganizations",
+        "summary": "List organizations visible to the authenticated human",
+        "security": [{ "humanSession": [] }],
+        "description": "The authenticated identity is the tenant selector. Only active memberships of that identity are returned; an organization outside that set is never disclosed.",
+        "parameters": [{ "$ref": "#/components/parameters/Cursor" }, { "$ref": "#/components/parameters/Limit" }],
+        "x-agentpass-tenant-scope": { "kind": "organization", "source": "authenticated-human-memberships", "cross-tenant-disclosure": false },
+        "x-agentpass-minimum-role": "authenticated_human",
+        "responses": {
+          "200": { "$ref": "#/components/responses/OrganizationList" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "429": { "$ref": "#/components/responses/TooManyRequests" },
+          "500": { "$ref": "#/components/responses/InternalError" }
+        }
+      },
+      "post": {
+        "operationId": "createOrganization",
+        "summary": "Create an organization and its initial owner membership",
+        "security": [{ "humanSession": [] }],
+        "parameters": [{ "$ref": "#/components/parameters/CsrfToken" }, { "$ref": "#/components/parameters/IdempotencyKey" }],
+        "requestBody": { "$ref": "#/components/requestBodies/CreateOrganization" },
+        "description": "The authenticated identity becomes the initial owner. The organization is the tenant root created by this request, so no organization_id path parameter exists yet.",
+        "x-agentpass-tenant-scope": { "kind": "organization", "source": "created-resource", "cross-tenant-disclosure": false },
+        "x-agentpass-minimum-role": "authenticated_human",
+        "x-agentpass-atomic-admin-audit-outbox": "Create the organization, initial owner membership, immutable admin-audit event, and any notification/outbox intent in one transaction.",
+        "responses": {
+          "201": { "$ref": "#/components/responses/OrganizationCreated" },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "409": { "$ref": "#/components/responses/IdempotencyConflict" },
+          "422": { "$ref": "#/components/responses/ValidationError" },
+          "429": { "$ref": "#/components/responses/TooManyRequests" },
+          "500": { "$ref": "#/components/responses/InternalError" }
+        }
+      }
+    },
+    "/organizations/{organization_id}": {
+      "patch": {
+        "operationId": "renameOrganization",
+        "summary": "Rename an organization",
+        "security": [{ "humanSession": [] }],
+        "parameters": [
+          { "$ref": "#/components/parameters/OrganizationId" },
+          { "$ref": "#/components/parameters/CsrfToken" },
+          { "$ref": "#/components/parameters/IdempotencyKey" },
+          { "$ref": "#/components/parameters/ExpectedVersion" }
+        ],
+        "requestBody": { "$ref": "#/components/requestBodies/RenameOrganization" },
+        "x-agentpass-tenant-scope": { "kind": "organization", "source": "path.organization_id", "cross-tenant-disclosure": false },
+        "x-agentpass-minimum-role": "admin",
+        "x-agentpass-requires-expected-version": true,
+        "x-agentpass-atomic-admin-audit-outbox": "The rename, version increment, immutable admin-audit event, and outbox publication intent commit atomically; a response is not successful if any one is missing.",
+        "responses": {
+          "200": { "$ref": "#/components/responses/OrganizationResponse" },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "409": { "$ref": "#/components/responses/VersionConflict" },
+          "422": { "$ref": "#/components/responses/ValidationError" },
+          "429": { "$ref": "#/components/responses/TooManyRequests" },
+          "500": { "$ref": "#/components/responses/InternalError" }
+        }
+      },
+      "get": {
+        "operationId": "getOrganization",
+        "summary": "Get an organization visible to the authenticated human",
+        "security": [{ "humanSession": [] }],
+        "parameters": [{ "$ref": "#/components/parameters/OrganizationId" }],
+        "x-agentpass-tenant-scope": { "kind": "organization", "source": "path.organization_id", "cross-tenant-disclosure": false },
+        "x-agentpass-minimum-role": "viewer",
+        "responses": {
+          "200": { "$ref": "#/components/responses/OrganizationResponse" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "429": { "$ref": "#/components/responses/TooManyRequests" },
+          "500": { "$ref": "#/components/responses/InternalError" }
+        }
+      }
+    },
+
+    "/organizations/{organization_id}/members": {
+      "get": {
+        "operationId": "listMembers",
+        "summary": "List active and revoked organization memberships",
+        "security": [{ "humanSession": [] }],
+        "parameters": [
+          { "$ref": "#/components/parameters/OrganizationId" },
+          { "$ref": "#/components/parameters/Cursor" },
+          { "$ref": "#/components/parameters/Limit" }
+        ],
+        "x-agentpass-tenant-scope": { "kind": "organization", "source": "path.organization_id", "cross-tenant-disclosure": false },
+        "x-agentpass-minimum-role": "auditor",
+        "responses": {
+          "200": { "$ref": "#/components/responses/MemberList" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "429": { "$ref": "#/components/responses/TooManyRequests" },
+          "500": { "$ref": "#/components/responses/InternalError" }
+        }
+      }
+    },
+    "/organizations/{organization_id}/members/{member_id}/role": {
+      "patch": {
+        "operationId": "updateMemberRole",
+        "summary": "Change a member role",
+        "security": [{ "humanSession": [], "recentWebAuthn": [] }],
+        "parameters": [
+          { "$ref": "#/components/parameters/OrganizationId" },
+          { "$ref": "#/components/parameters/MemberId" },
+          { "$ref": "#/components/parameters/CsrfToken" },
+          { "$ref": "#/components/parameters/IdempotencyKey" },
+          { "$ref": "#/components/parameters/ExpectedVersion" }
+        ],
+        "requestBody": { "$ref": "#/components/requestBodies/UpdateMemberRole" },
+        "description": "The owner role may be assigned or removed only when the resulting organization still has an active owner. This invariant is checked under the organization membership lock.",
+        "x-agentpass-tenant-scope": { "kind": "organization", "source": "path.organization_id", "cross-tenant-disclosure": false },
+        "x-agentpass-minimum-role": "admin",
+        "x-agentpass-requires-expected-version": true,
+        "x-agentpass-final-owner-invariant": "Never leave an organization without at least one active owner; reject the last-owner transition with last_owner_protected.",
+        "x-agentpass-atomic-admin-audit-outbox": "Role change, affected-session/capability revocation, immutable admin-audit event, and outbox publication intent commit atomically.",
+        "responses": {
+          "200": { "$ref": "#/components/responses/MemberResponse" },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "409": { "$ref": "#/components/responses/VersionConflict" },
+          "422": { "$ref": "#/components/responses/ValidationError" },
+          "429": { "$ref": "#/components/responses/TooManyRequests" },
+          "500": { "$ref": "#/components/responses/InternalError" }
+        }
+      }
+    },
+    "/organizations/{organization_id}/members/{member_id}/remove": {
+      "post": {
+        "operationId": "removeMember",
+        "summary": "Revoke a member membership",
+        "security": [{ "humanSession": [], "recentWebAuthn": [] }],
+        "parameters": [
+          { "$ref": "#/components/parameters/OrganizationId" },
+          { "$ref": "#/components/parameters/MemberId" },
+          { "$ref": "#/components/parameters/CsrfToken" },
+          { "$ref": "#/components/parameters/IdempotencyKey" },
+          { "$ref": "#/components/parameters/ExpectedVersion" }
+        ],
+        "description": "Removal is a revocation tombstone, not physical deletion. The final active owner cannot be removed.",
+        "x-agentpass-tenant-scope": { "kind": "organization", "source": "path.organization_id", "cross-tenant-disclosure": false },
+        "x-agentpass-minimum-role": "admin",
+        "x-agentpass-requires-expected-version": true,
+        "x-agentpass-final-owner-invariant": "Never leave an organization without at least one active owner; reject removal of the last active owner with last_owner_protected.",
+        "x-agentpass-atomic-admin-audit-outbox": "Membership revocation, session/capability revocation, immutable admin-audit event, and outbox publication intent commit atomically.",
+        "responses": {
+          "200": { "$ref": "#/components/responses/MemberResponse" },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "409": { "$ref": "#/components/responses/VersionConflict" },
+          "429": { "$ref": "#/components/responses/TooManyRequests" },
+          "500": { "$ref": "#/components/responses/InternalError" }
+        }
+      }
+    },
+
+    "/organizations/{organization_id}/invitations": {
+      "get": {
+        "operationId": "listInvitations",
+        "summary": "List organization invitations",
+        "security": [{ "humanSession": [] }],
+        "parameters": [
+          { "$ref": "#/components/parameters/OrganizationId" },
+          { "$ref": "#/components/parameters/Cursor" },
+          { "$ref": "#/components/parameters/Limit" }
+        ],
+        "x-agentpass-tenant-scope": { "kind": "organization", "source": "path.organization_id", "cross-tenant-disclosure": false },
+        "x-agentpass-minimum-role": "auditor",
+        "responses": {
+          "200": { "$ref": "#/components/responses/InvitationList" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "429": { "$ref": "#/components/responses/TooManyRequests" },
+          "500": { "$ref": "#/components/responses/InternalError" }
+        }
+      },
+      "post": {
+        "operationId": "createInvitation",
+        "summary": "Create an organization invitation",
+        "security": [{ "humanSession": [] }],
+        "parameters": [
+          { "$ref": "#/components/parameters/OrganizationId" },
+          { "$ref": "#/components/parameters/CsrfToken" },
+          { "$ref": "#/components/parameters/IdempotencyKey" }
+        ],
+        "requestBody": { "$ref": "#/components/requestBodies/CreateInvitation" },
+        "description": "Invitation roles are deliberately limited to admin, auditor, and viewer. An invitation can never grant owner. The response contains the random one-time token exactly once; the server stores only its hash. The token is not email-bound.",
+        "x-agentpass-tenant-scope": { "kind": "organization", "source": "path.organization_id", "cross-tenant-disclosure": false },
+        "x-agentpass-minimum-role": "admin",
+        "x-agentpass-invite-roles": ["admin", "auditor", "viewer"],
+        "x-agentpass-one-time-token": "Return the raw random token only in this response; never log, persist, list, or return it again.",
+        "x-agentpass-atomic-admin-audit-outbox": "Invitation creation, token-hash persistence, immutable admin-audit event, and notification/outbox publication intent commit atomically.",
+        "responses": {
+          "201": { "$ref": "#/components/responses/InvitationCreated" },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "409": { "$ref": "#/components/responses/IdempotencyConflict" },
+          "422": { "$ref": "#/components/responses/ValidationError" },
+          "429": { "$ref": "#/components/responses/TooManyRequests" },
+          "500": { "$ref": "#/components/responses/InternalError" }
+        }
+      }
+    },
+    "/organizations/{organization_id}/invitations/{invitation_id}/revoke": {
+      "post": {
+        "operationId": "revokeInvitation",
+        "summary": "Revoke a pending organization invitation",
+        "security": [{ "humanSession": [] }],
+        "parameters": [
+          { "$ref": "#/components/parameters/OrganizationId" },
+          { "$ref": "#/components/parameters/InvitationId" },
+          { "$ref": "#/components/parameters/CsrfToken" },
+          { "$ref": "#/components/parameters/IdempotencyKey" },
+          { "$ref": "#/components/parameters/ExpectedVersion" }
+        ],
+        "description": "Revocation is idempotent for the same request but cannot resurrect or mutate an accepted invitation.",
+        "x-agentpass-tenant-scope": { "kind": "organization", "source": "path.organization_id", "cross-tenant-disclosure": false },
+        "x-agentpass-minimum-role": "admin",
+        "x-agentpass-requires-expected-version": true,
+        "x-agentpass-atomic-admin-audit-outbox": "Invitation revocation, immutable admin-audit event, and outbox publication intent commit atomically.",
+        "responses": {
+          "200": { "$ref": "#/components/responses/InvitationResponse" },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "409": { "$ref": "#/components/responses/VersionConflict" },
+          "429": { "$ref": "#/components/responses/TooManyRequests" },
+          "500": { "$ref": "#/components/responses/InternalError" }
+        }
+      }
+    },
+    "/invitations/accept": {
+      "post": {
+        "operationId": "acceptInvitation",
+        "summary": "Accept an invitation using the authenticated identity and one-time token",
+        "security": [{ "humanSession": [] }],
+        "parameters": [
+          { "$ref": "#/components/parameters/CsrfToken" },
+          { "$ref": "#/components/parameters/IdempotencyKey" }
+        ],
+        "requestBody": { "$ref": "#/components/requestBodies/AcceptInvitation" },
+        "description": "Acceptance requires both a valid authenticated human session and possession of the random one-time token. The token is bearer possession proof only and is intentionally not bound to an email address; the authenticated identity becomes the member. A token is consumed atomically and cannot be reused.",
+        "x-agentpass-tenant-scope": { "kind": "organization", "source": "stored-invitation-selected-by-token-digest", "cross-tenant-disclosure": false },
+        "x-agentpass-minimum-role": "authenticated_human",
+        "x-agentpass-identity-binding": "authenticated-human-session-not-email",
+        "x-agentpass-one-time-token": "Accept exactly once; store only a digest and reject replay, expiry, revocation, or organization mismatch.",
+        "x-agentpass-final-owner-invariant": "Invitation acceptance cannot remove or demote an existing owner; the organization must retain at least one active owner.",
+        "x-agentpass-atomic-admin-audit-outbox": "Token consumption, membership creation, immutable admin-audit event, and outbox publication intent commit atomically.",
+        "responses": {
+          "201": { "$ref": "#/components/responses/InvitationAccepted" },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "409": { "$ref": "#/components/responses/InvitationConflict" },
+          "422": { "$ref": "#/components/responses/ValidationError" },
+          "429": { "$ref": "#/components/responses/TooManyRequests" },
+          "500": { "$ref": "#/components/responses/InternalError" }
+        }
+      }
+    },
+
+    "/organizations/{organization_id}/devices": {
+      "get": {
+        "operationId": "listDevices",
+        "summary": "List organization devices",
+        "security": [{ "humanSession": [] }],
+        "parameters": [{ "$ref": "#/components/parameters/OrganizationId" }],
+        "x-agentpass-tenant-scope": { "kind": "organization", "source": "path.organization_id", "cross-tenant-disclosure": false },
+        "responses": { "200": { "$ref": "#/components/responses/Json" }, "401": { "$ref": "#/components/responses/Unauthorized" }, "403": { "$ref": "#/components/responses/Forbidden" }, "404": { "$ref": "#/components/responses/NotFound" } }
+      }
+    },
+    "/organizations/{organization_id}/device-enrollments": {
+      "post": {
+        "operationId": "issueDeviceEnrollment",
+        "summary": "Issue a device enrollment",
+        "security": [{ "humanSession": [], "recentWebAuthn": [] }],
+        "parameters": [{ "$ref": "#/components/parameters/OrganizationId" }, { "$ref": "#/components/parameters/CsrfToken" }, { "$ref": "#/components/parameters/IdempotencyKey" }],
+        "responses": { "201": { "$ref": "#/components/responses/Json" }, "400": { "$ref": "#/components/responses/BadRequest" }, "401": { "$ref": "#/components/responses/Unauthorized" }, "403": { "$ref": "#/components/responses/Forbidden" }, "404": { "$ref": "#/components/responses/NotFound" }, "409": { "$ref": "#/components/responses/IdempotencyConflict" } },
+        "x-agentpass-tenant-scope": { "kind": "organization", "source": "path.organization_id", "cross-tenant-disclosure": false },
+        "x-agentpass-minimum-role": "admin"
+      }
+    },
+    "/organizations/{organization_id}/emergency-stop": {
+      "post": {
+        "operationId": "emergencyStop",
+        "summary": "Stop all organization devices",
+        "security": [{ "humanSession": [], "recentWebAuthn": [] }],
+        "parameters": [{ "$ref": "#/components/parameters/OrganizationId" }, { "$ref": "#/components/parameters/CsrfToken" }, { "$ref": "#/components/parameters/IdempotencyKey" }],
+        "responses": { "201": { "$ref": "#/components/responses/Json" }, "400": { "$ref": "#/components/responses/BadRequest" }, "401": { "$ref": "#/components/responses/Unauthorized" }, "403": { "$ref": "#/components/responses/Forbidden" }, "404": { "$ref": "#/components/responses/NotFound" }, "409": { "$ref": "#/components/responses/IdempotencyConflict" } },
+        "x-agentpass-tenant-scope": { "kind": "organization", "source": "path.organization_id", "cross-tenant-disclosure": false },
+        "x-agentpass-minimum-role": "owner"
+      }
+    }
   },
   "components": {
     "securitySchemes": {
-      "humanSession": { "type": "apiKey", "in": "cookie", "name": "__Host-agentpass_session" },
-      "recentWebAuthn": { "type": "apiKey", "in": "header", "name": "AgentPass-Recent-Auth" }
+      "humanSession": {
+        "type": "apiKey",
+        "in": "cookie",
+        "name": "__Host-agentpass_session",
+        "description": "Opaque, rotated, HttpOnly, Secure, SameSite session cookie. The server stores only a hash and resolves the authenticated identity server-side."
+      },
+      "recentWebAuthn": {
+        "type": "apiKey",
+        "in": "header",
+        "name": "AgentPass-Recent-Auth",
+        "description": "Operation-bound, server-verified recent WebAuthn authorization; freshness alone is insufficient and reuse is rejected."
+      }
     },
-    "parameters": { "OrganizationId": { "name": "organization_id", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } } },
-    "responses": { "Json": { "description": "JSON response", "content": { "application/json": { "schema": { "type": "object" } } } } }
+    "parameters": {
+      "OrganizationId": {
+        "name": "organization_id",
+        "in": "path",
+        "required": true,
+        "description": "Tenant identifier. Every organization resource lookup is qualified by this value; cross-tenant existence is not disclosed.",
+        "schema": { "type": "string", "format": "uuid" }
+      },
+      "CredentialId": {
+        "name": "credential_id",
+        "in": "path",
+        "required": true,
+        "description": "WebAuthn credential identifier.",
+        "schema": { "type": "string", "minLength": 16, "maxLength": 1024 }
+      },
+      "SessionId": {
+        "name": "session_id",
+        "in": "path",
+        "required": true,
+        "description": "Human session identifier.",
+        "schema": { "type": "string", "format": "uuid" }
+      },
+      "MemberId": {
+        "name": "member_id",
+        "in": "path",
+        "required": true,
+        "description": "Member identifier, interpreted only together with organization_id.",
+        "schema": { "type": "string", "format": "uuid" }
+      },
+      "InvitationId": {
+        "name": "invitation_id",
+        "in": "path",
+        "required": true,
+        "description": "Invitation identifier, interpreted only together with organization_id.",
+        "schema": { "type": "string", "format": "uuid" }
+      },
+      "CsrfToken": {
+        "name": "X-CSRF-Token",
+        "in": "header",
+        "required": true,
+        "description": "Session-bound CSRF token. Same-origin/origin checks remain required; this header is not authentication.",
+        "schema": { "type": "string", "minLength": 32, "maxLength": 512 }
+      },
+      "IdempotencyKey": {
+        "name": "Idempotency-Key",
+        "in": "header",
+        "required": true,
+        "description": "Stable per-operation retry key. Reusing it with a different canonical request is rejected with idempotency_key_reused.",
+        "schema": { "type": "string", "minLength": 8, "maxLength": 255, "pattern": "^[A-Za-z0-9._~-]+$" }
+      },
+      "ExpectedVersion": {
+        "name": "If-Match",
+        "in": "header",
+        "required": true,
+        "description": "Expected resource version for optimistic concurrency. Send the quoted decimal version, for example \"7\". A stale value returns version_conflict.",
+        "schema": { "type": "string", "pattern": "^\"[1-9][0-9]*\"$" }
+      },
+      "Cursor": {
+        "name": "cursor",
+        "in": "query",
+        "required": false,
+        "schema": { "type": "string", "minLength": 1, "maxLength": 512 }
+      },
+      "Limit": {
+        "name": "limit",
+        "in": "query",
+        "required": false,
+        "schema": { "type": "integer", "minimum": 1, "maximum": 100, "default": 50 }
+      }
+    },
+    "requestBodies": {
+      "CreateOrganization": {
+        "required": true,
+        "content": { "application/json": { "schema": { "$ref": "#/components/schemas/CreateOrganizationRequest" } } }
+      },
+      "RenameOrganization": {
+        "required": true,
+        "content": { "application/json": { "schema": { "$ref": "#/components/schemas/RenameOrganizationRequest" } } }
+      },
+      "UpdateMemberRole": {
+        "required": true,
+        "content": { "application/json": { "schema": { "$ref": "#/components/schemas/UpdateMemberRoleRequest" } } }
+      },
+      "CreateInvitation": {
+        "required": true,
+        "content": { "application/json": { "schema": { "$ref": "#/components/schemas/CreateInvitationRequest" } } }
+      },
+      "AcceptInvitation": {
+        "required": true,
+        "content": { "application/json": { "schema": { "$ref": "#/components/schemas/AcceptInvitationRequest" } } }
+      }
+    },
+    "responses": {
+      "Json": {
+        "description": "JSON response",
+        "content": { "application/json": { "schema": { "type": "object", "additionalProperties": true } } }
+      },
+      "OrganizationList": { "description": "Organizations visible to the session", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/OrganizationListResponse" } } } },
+      "OrganizationCreated": { "description": "Organization created", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/OrganizationResponse" } } } },
+      "OrganizationResponse": { "description": "Organization response", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/OrganizationResponse" } } } },
+      "MemberList": { "description": "Membership list", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/MemberListResponse" } } } },
+      "MemberResponse": { "description": "Membership response", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/MemberResponse" } } } },
+      "InvitationList": { "description": "Invitation list without token material", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/InvitationListResponse" } } } },
+      "InvitationCreated": { "description": "Invitation and its one-time token. The token is returned only once.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/InvitationCreatedResponse" } } } },
+      "InvitationResponse": { "description": "Invitation response without token material", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/InvitationResponse" } } } },
+      "InvitationAccepted": { "description": "Invitation accepted and membership created", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/InvitationAcceptedResponse" } } } },
+      "BadRequest": { "description": "Malformed request or missing browser security header", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorEnvelope" } } } },
+      "Unauthorized": { "description": "No valid humanSession", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorEnvelope" } } } },
+      "Forbidden": { "description": "Session lacks the required organization role", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorEnvelope" } } } },
+      "NotFound": { "description": "Tenant or resource is not visible to this session", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorEnvelope" } } } },
+      "VersionConflict": { "description": "Expected version is stale", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorEnvelope" } } } },
+      "IdempotencyConflict": { "description": "Idempotency key is reused with a different request or an incompatible in-flight result", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorEnvelope" } } } },
+      "InvitationConflict": { "description": "Invitation token or state cannot be accepted", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorEnvelope" } } } },
+      "ValidationError": { "description": "Request fields fail the contract", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorEnvelope" } } } },
+      "TooManyRequests": { "description": "Rate limit exceeded", "headers": { "Retry-After": { "schema": { "type": "integer", "minimum": 1 } } }, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorEnvelope" } } } },
+      "InternalError": { "description": "Stable internal failure response; sensitive details are not disclosed", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorEnvelope" } } } }
+    },
+    "schemas": {
+      "RequestId": { "type": "string", "format": "uuid", "description": "Stable request correlation identifier." },
+      "Organization": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["organization_id", "name", "version", "created_at", "updated_at"],
+        "properties": {
+          "organization_id": { "type": "string", "format": "uuid" },
+          "name": { "type": "string", "minLength": 1, "maxLength": 128 },
+          "version": { "type": "integer", "minimum": 1 },
+          "created_at": { "type": "string", "format": "date-time" },
+          "updated_at": { "type": "string", "format": "date-time" }
+        }
+      },
+      "Membership": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["membership_id", "organization_id", "member_id", "role", "status", "version", "created_at", "updated_at"],
+        "properties": {
+          "membership_id": { "type": "string", "format": "uuid" },
+          "organization_id": { "type": "string", "format": "uuid" },
+          "member_id": { "type": "string", "format": "uuid" },
+          "display_name": { "type": ["string", "null"], "maxLength": 128 },
+          "role": { "$ref": "#/components/schemas/MemberRole" },
+          "status": { "type": "string", "enum": ["active", "revoked"] },
+          "version": { "type": "integer", "minimum": 1 },
+          "created_at": { "type": "string", "format": "date-time" },
+          "updated_at": { "type": "string", "format": "date-time" }
+        }
+      },
+      "MemberRole": { "type": "string", "enum": ["owner", "admin", "auditor", "viewer"] },
+      "InviteRole": { "type": "string", "enum": ["admin", "auditor", "viewer"], "description": "Owner is intentionally excluded from invitation roles." },
+      "Invitation": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["invitation_id", "organization_id", "role", "status", "version", "created_at", "expires_at"],
+        "properties": {
+          "invitation_id": { "type": "string", "format": "uuid" },
+          "organization_id": { "type": "string", "format": "uuid" },
+          "role": { "$ref": "#/components/schemas/InviteRole" },
+          "status": { "type": "string", "enum": ["pending", "accepted", "revoked", "expired"] },
+          "version": { "type": "integer", "minimum": 1 },
+          "created_at": { "type": "string", "format": "date-time" },
+          "expires_at": { "type": "string", "format": "date-time" },
+          "accepted_at": { "type": ["string", "null"], "format": "date-time" },
+          "accepted_member_id": { "type": ["string", "null"], "format": "uuid" }
+        }
+      },
+      "CreateOrganizationRequest": {
+        "type": "object", "additionalProperties": false, "required": ["name"],
+        "properties": { "name": { "type": "string", "minLength": 1, "maxLength": 128 } }
+      },
+      "RenameOrganizationRequest": {
+        "type": "object", "additionalProperties": false, "required": ["name"],
+        "properties": { "name": { "type": "string", "minLength": 1, "maxLength": 128 } }
+      },
+      "UpdateMemberRoleRequest": {
+        "type": "object", "additionalProperties": false, "required": ["role"],
+        "properties": { "role": { "$ref": "#/components/schemas/MemberRole" } }
+      },
+      "CreateInvitationRequest": {
+        "type": "object", "additionalProperties": false, "required": ["role", "expires_at"],
+        "properties": {
+          "role": { "$ref": "#/components/schemas/InviteRole" },
+          "expires_at": { "type": "string", "format": "date-time", "description": "Short-lived expiry chosen by the server within its configured maximum." }
+        }
+      },
+      "AcceptInvitationRequest": {
+        "type": "object", "additionalProperties": false, "required": ["one_time_token"],
+        "description": "The request deliberately has no email field. The authenticated humanSession identity, not an email claim, receives the membership.",
+        "properties": {
+          "one_time_token": { "type": "string", "minLength": 43, "maxLength": 512, "writeOnly": true, "description": "Random, single-use bearer token returned by invitation creation." }
+        }
+      },
+      "OrganizationResponse": {
+        "type": "object", "additionalProperties": false, "required": ["request_id", "organization"],
+        "properties": { "request_id": { "$ref": "#/components/schemas/RequestId" }, "organization": { "$ref": "#/components/schemas/Organization" } }
+      },
+      "OrganizationListResponse": {
+        "type": "object", "additionalProperties": false, "required": ["request_id", "organizations"],
+        "properties": { "request_id": { "$ref": "#/components/schemas/RequestId" }, "organizations": { "type": "array", "items": { "$ref": "#/components/schemas/Organization" } }, "next_cursor": { "type": ["string", "null"] } }
+      },
+      "MemberResponse": {
+        "type": "object", "additionalProperties": false, "required": ["request_id", "member"],
+        "properties": { "request_id": { "$ref": "#/components/schemas/RequestId" }, "member": { "$ref": "#/components/schemas/Membership" } }
+      },
+      "MemberListResponse": {
+        "type": "object", "additionalProperties": false, "required": ["request_id", "members"],
+        "properties": { "request_id": { "$ref": "#/components/schemas/RequestId" }, "members": { "type": "array", "items": { "$ref": "#/components/schemas/Membership" } }, "next_cursor": { "type": ["string", "null"] } }
+      },
+      "InvitationResponse": {
+        "type": "object", "additionalProperties": false, "required": ["request_id", "invitation"],
+        "properties": { "request_id": { "$ref": "#/components/schemas/RequestId" }, "invitation": { "$ref": "#/components/schemas/Invitation" } }
+      },
+      "InvitationListResponse": {
+        "type": "object", "additionalProperties": false, "required": ["request_id", "invitations"],
+        "properties": { "request_id": { "$ref": "#/components/schemas/RequestId" }, "invitations": { "type": "array", "items": { "$ref": "#/components/schemas/Invitation" } }, "next_cursor": { "type": ["string", "null"] } }
+      },
+      "InvitationCreatedResponse": {
+        "type": "object", "additionalProperties": false, "required": ["request_id", "invitation", "one_time_token"],
+        "description": "The one_time_token is returned once and must be delivered through a protected channel. It is never returned by list, get, revoke, or accept responses.",
+        "properties": {
+          "request_id": { "$ref": "#/components/schemas/RequestId" },
+          "invitation": { "$ref": "#/components/schemas/Invitation" },
+          "one_time_token": { "type": "string", "minLength": 43, "maxLength": 512, "writeOnly": true, "description": "Random token with at least 256 bits of entropy; only its server-side hash is durable." }
+        }
+      },
+      "InvitationAcceptedResponse": {
+        "type": "object", "additionalProperties": false, "required": ["request_id", "invitation", "member"],
+        "properties": { "request_id": { "$ref": "#/components/schemas/RequestId" }, "invitation": { "$ref": "#/components/schemas/Invitation" }, "member": { "$ref": "#/components/schemas/Membership" } }
+      },
+      "Error": {
+        "type": "object", "additionalProperties": false, "required": ["code", "message"],
+        "properties": {
+          "code": { "type": "string", "enum": ["invalid_request", "csrf_failed", "authentication_required", "forbidden", "resource_not_found", "version_conflict", "idempotency_key_reused", "last_owner_protected", "role_not_allowed", "invitation_invalid", "invitation_expired", "invitation_revoked", "invitation_already_accepted", "invitation_token_replayed", "rate_limited", "internal_error"] },
+          "message": { "type": "string", "minLength": 1, "maxLength": 512 },
+          "details": { "type": "object", "additionalProperties": true }
+        }
+      },
+      "ErrorEnvelope": {
+        "type": "object", "additionalProperties": false, "required": ["error", "request_id"],
+        "properties": { "error": { "$ref": "#/components/schemas/Error" }, "request_id": { "$ref": "#/components/schemas/RequestId" } }
+      }
+    }
   }
 }
