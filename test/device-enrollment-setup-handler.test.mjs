@@ -17,11 +17,14 @@ test("enrolls with native proof and persists only non-secret pinned control trus
   const credential = crypto.randomBytes(32).toString("base64url");
   const original = { version: 4, native_broker: { enabled: true, mach_service: "dev.agentpass.native-service", client: "/Applications/AgentPass.app/client" } };
   let saved;
+  let provisioned;
   const handler = createDeviceEnrollmentSetupHandler({
     runner: {
       publicKey: () => ({ algorithm: "p256-sha256", spki_pem: publicPem, fingerprint }),
       sign: ({ bytes }) => crypto.sign("sha256", bytes, { key: device.privateKey, dsaEncoding: "ieee-p1363" })
     },
+    provisionControl: async (value) => { provisioned = value; return { changed: true, old_fingerprint: null, new_fingerprint: `SHA256:${"A".repeat(43)}` }; },
+    restartService: async () => ({ status: "enabled", control_refreshed: true }),
     invitation: { enrollment_id: enrollmentId, organization_id: organizationId, device_id: deviceId, label: "Build Mac", credential },
     baseUrl: "https://api.example.test/v1",
     loadConfig: () => original,
@@ -38,13 +41,15 @@ test("enrolls with native proof and persists only non-secret pinned control trus
   assert.equal(saved.control_v2.capability_required, true);
   assert.equal(saved.control_v2.url, `https://api.example.test/v1/organizations/${organizationId}/bundles/${deviceId}`);
   assert.equal(saved.native_broker.control_url, saved.control_v2.url);
+  assert.equal(provisioned.control_url, saved.control_v2.url);
+  assert.equal(provisioned.public_key_pem, saved.control_v2.public_key);
   assert.equal(JSON.stringify(saved).includes(credential), false);
   assert.equal(JSON.stringify(result).includes(credential), false);
 });
 
 test("fails before mutation when dispatched outside the enrollment state", async () => {
   let saved = false;
-  const handler = createDeviceEnrollmentSetupHandler({ runner: { publicKey() {}, sign() {} }, invitation: {}, baseUrl: "https://api.example.test/v1", loadConfig: () => ({}), saveConfig: () => { saved = true; } });
+  const handler = createDeviceEnrollmentSetupHandler({ runner: { publicKey() {}, sign() {} }, provisionControl() {}, restartService() {}, invitation: {}, baseUrl: "https://api.example.test/v1", loadConfig: () => ({}), saveConfig: () => { saved = true; } });
   await assert.rejects(() => handler({ current_state: "device_enrolled", target_state: "editor_connected", action: { id: "connect_editor" } }), /wrong setup state/);
   assert.equal(saved, false);
 });

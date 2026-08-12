@@ -43,65 +43,6 @@ private func emitBootstrapObject(_ object: [String: Any]) throws -> Never {
     emit(Output(ok: true, version: nil, stdout_base64: data.base64EncodedString(), public_key: nil, error: nil))
 }
 
-private func emitEnrollmentKey(_ material: NativeEnrollmentKeyMaterial) throws -> Never {
-    // Keep the inner response limited to the enrollment public identity. The
-    // outer JSON remains the existing strict client envelope.
-    try emitBootstrapObject([
-        "fingerprint": material.fingerprint,
-        "public_key_pem": material.publicKeyPEM
-    ])
-}
-
-private func emitEnrollmentSignature(_ signature: Data) throws -> Never {
-    guard signature.count == 64 else {
-        throw AgentPassNativeError.invalidSignature("Enrollment proof signature must be raw 64-byte IEEE-P1363")
-    }
-    try emitBootstrapObject(["signature_base64": signature.base64EncodedString()])
-}
-
-private func readBoundedStdin(maximumBytes: Int) throws -> Data {
-    guard maximumBytes > 0 else {
-        throw AgentPassNativeError.invalidConfiguration("Native stdin bound is invalid")
-    }
-    var result = Data()
-    while true {
-        let remaining = maximumBytes - result.count
-        let chunk = try FileHandle.standardInput.read(upToCount: min(4096, remaining + 1)) ?? Data()
-        if chunk.isEmpty { return result }
-        result.append(chunk)
-        if result.count > maximumBytes {
-            throw AgentPassNativeError.invalidSignature("Enrollment proof preimage exceeds the bounded stdin limit")
-        }
-    }
-}
-
-if CommandLine.arguments.count >= 2, CommandLine.arguments[1] == "device-auth-key" {
-    guard CommandLine.arguments.count == 2 else {
-        emit(Output(ok: false, version: nil, stdout_base64: nil, public_key: nil, error: "device-auth-key does not accept an application tag"), status: 2)
-    }
-    do {
-        let store = SecureEnclaveNativeEnrollmentKeyStore(accessGroup: try approvalKeyAccessGroup())
-        let material = try NativeEnrollmentKeyPrimitive(store: store).loadOrCreate()
-        try emitEnrollmentKey(material)
-    } catch {
-        emit(Output(ok: false, version: nil, stdout_base64: nil, public_key: nil, error: error.localizedDescription), status: 1)
-    }
-}
-
-if CommandLine.arguments.count >= 2, CommandLine.arguments[1] == "device-auth-sign" {
-    guard CommandLine.arguments.count == 2 else {
-        emit(Output(ok: false, version: nil, stdout_base64: nil, public_key: nil, error: "device-auth-sign does not accept an application tag"), status: 2)
-    }
-    do {
-        let preimage = try readBoundedStdin(maximumBytes: NativeEnrollmentProof.maximumPreimageBytes)
-        let store = SecureEnclaveNativeEnrollmentKeyStore(accessGroup: try approvalKeyAccessGroup())
-        let signature = try NativeEnrollmentKeyPrimitive(store: store).signEnrollmentProof(preimage: preimage)
-        try emitEnrollmentSignature(signature)
-    } catch {
-        emit(Output(ok: false, version: nil, stdout_base64: nil, public_key: nil, error: error.localizedDescription), status: 1)
-    }
-}
-
 // These commands intentionally run without XPC: the production service cannot start until all
 // three generation-1 authorities exist. The signed client owns only the approval access group.
 if CommandLine.arguments.count == 3, CommandLine.arguments[1] == "bootstrap-approval-create" {
@@ -162,7 +103,7 @@ if CommandLine.arguments.count == 3, CommandLine.arguments[1] == "bootstrap-sign
 }
 
 guard CommandLine.arguments.count >= 3, CommandLine.arguments[1] == "--service" else {
-    emit(Output(ok: false, version: nil, stdout_base64: nil, public_key: nil, error: "Usage: agentpass-native-client device-auth-key | device-auth-sign | bootstrap-approval-create TAG | bootstrap-sign TAG | --service MACH_SERVICE COMMAND"), status: 2)
+    emit(Output(ok: false, version: nil, stdout_base64: nil, public_key: nil, error: "Usage: agentpass-native-client bootstrap-approval-create TAG | bootstrap-sign TAG | --service MACH_SERVICE COMMAND"), status: 2)
 }
 let serviceName = CommandLine.arguments[2]
 let command = CommandLine.arguments.count > 3 ? CommandLine.arguments[3] : ""

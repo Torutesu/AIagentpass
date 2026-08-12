@@ -24,6 +24,7 @@ import { createDeviceEnrollmentSetupHandler } from "../lib/device-enrollment-set
 import { parseControlBundleJson } from "../lib/control-bundle-v2.mjs";
 import { executeProductionUninstall, planProductionUninstall } from "../lib/platform-uninstall.mjs";
 import { createSetupOrchestrator } from "../lib/setup-orchestrator.mjs";
+import { TEST_COMMIT_VERIFICATION_MARKER, createCompleteSetupHandler, createEditorConnectedHandler, createTestCommitVerifiedHandler } from "../lib/setup-finalization-handlers.mjs";
 import { SETUP_STATES, SetupJournalError, createSetupJournal, loadSetupJournal } from "../lib/setup-journal.mjs";
 import { generateRecoveryIdentity, recoveryPolicyToAnchorPolicy, signAnchorRecoveryAuthorization, signRecoveryRequest, verifyAnchorRecoveryApprovals, verifyRecoveryThreshold } from "../lib/recovery.mjs";
 import { applyControlBundle, controlKeyFingerprint, fetchControlBundle, generateControlKeyPair, loadControlBundle, signControlBundle } from "../lib/remote-control.mjs";
@@ -264,10 +265,35 @@ async function continueNativeSetup() {
     enroll_approval_key: (context) => nativeHandlers().enroll_approval_key(context),
     activate_service_keys: (context) => nativeHandlers().activate_service_keys(context)
   };
+  const onboarding = config.setup_onboarding;
+  const verifyCurrentCommit = () => {
+    if (!onboarding?.server?.env?.AGENTPASS_PROJECT_DIR) throw Object.assign(new Error("Setup onboarding project is unavailable"), { code: "ONBOARDING_PROJECT_MISSING" });
+    const project = onboarding.server.env.AGENTPASS_PROJECT_DIR;
+    const commit = git(["-C", project, "rev-parse", "--verify", "HEAD^{commit}"]);
+    const verified = spawnSync("git", ["-C", project, "verify-commit", commit], { encoding: "utf8", env: { PATH: "/usr/bin:/bin:/usr/sbin:/sbin" } });
+    if (verified.status !== 0) throw Object.assign(new Error("Current Git commit is not cryptographically verified"), { code: "TEST_COMMIT_NOT_VERIFIED" });
+    return { commit, verification: TEST_COMMIT_VERIFICATION_MARKER };
+  };
+  if (journal.status().state === "device_enrolled") handlers.connect_editor = createEditorConnectedHandler({ onboarding });
+  if (journal.status().state === "editor_connected") handlers.verify_test_commit = createTestCommitVerifiedHandler({ verifierResult: verifyCurrentCommit() });
+  if (journal.status().state === "test_commit_verified") handlers.complete_setup = createCompleteSetupHandler({ priorVerificationProof: verifyCurrentCommit() });
   if (enrollmentInvitation) {
-    const enrollmentRunner = createNativeDeviceEnrollmentRunner({ clientPath: application.client });
+    nativeHandlers();
+    const enrollmentRunner = createNativeDeviceEnrollmentRunner({ servicePath: application.service });
     handlers.enroll_device = createDeviceEnrollmentSetupHandler({
       runner: enrollmentRunner,
+      provisionControl: (input) => runner.provisionControl(input),
+      restartService: async () => {
+        const environment = { PATH: "/usr/bin:/bin:/usr/sbin:/sbin" };
+        const unregister = spawnSync(application.manager, ["unregister"], { encoding: "utf8", env: environment });
+        if (unregister.status !== 0 && !/not.registered|not found|does not exist/i.test(`${unregister.stdout ?? ""}\n${unregister.stderr ?? ""}`)) throw Object.assign(new Error("Native service unregister failed during control provisioning"), { code: "SERVICE_RESTART_FAILED" });
+        const register = spawnSync(application.manager, ["register"], { encoding: "utf8", env: environment });
+        if (register.status !== 0) throw Object.assign(new Error("Native service registration failed during control provisioning"), { code: "SERVICE_RESTART_FAILED" });
+        const inspected = inspectNativeApplication(undefined, { expectedTeamId: teamId });
+        if (inspected.serviceStatus !== "enabled") throw Object.assign(new Error("Native service requires approval after control provisioning"), { code: "SERVICE_APPROVAL_REQUIRED" });
+        await brokerRequest({ operation: "native.control.refresh" }, { native: config.native_broker, timeoutMs: 30_000 });
+        return { status: "enabled", control_refreshed: true };
+      },
       invitation: enrollmentInvitation,
       baseUrl: flags.enrollmentUrl,
       loadConfig,
@@ -318,7 +344,7 @@ async function setupNativeBridge() {
     return;
   }
   const next = ["agentpass setup status", "agentpass setup continue --execute"];
-  const configured = { ...config, native_broker: { ...application.nativeBroker, team_id: teamId } };
+  const configured = { ...config, native_broker: { ...application.nativeBroker, team_id: teamId }, setup_onboarding: integration };
   saveConfig(configured);
   try {
     const installed = installIntegration(integration, { dryRun: false });

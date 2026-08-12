@@ -2560,6 +2560,59 @@ private func emitBootstrapSnapshot(_ snapshot: NativeKeyLifecycleSnapshot) throw
     exit(0)
 }
 
+private func emitOfflineObject(_ object: [String: Any]) throws -> Never {
+    let data = try NativeStrictJSON.data(object)
+    FileHandle.standardOutput.write(data + Data("\n".utf8))
+    exit(0)
+}
+
+private func boundedDeviceProofInput() throws -> Data {
+    var result = Data()
+    while true {
+        let remaining = NativeEnrollmentProof.maximumPreimageBytes - result.count
+        let chunk = try FileHandle.standardInput.read(upToCount: min(4096, remaining + 1)) ?? Data()
+        if chunk.isEmpty { return try NativeEnrollmentProof.validatedPreimage(result) }
+        result.append(chunk)
+        if result.count > NativeEnrollmentProof.maximumPreimageBytes {
+            throw AgentPassNativeError.invalidSignature("Enrollment proof preimage exceeds the bounded stdin limit")
+        }
+    }
+}
+
+private func runOfflineDeviceAuthentication(action: String, configPath: String) throws -> Never {
+    guard geteuid() == 0 else {
+        throw AgentPassNativeError.invalidConfiguration("Offline device authentication must run as root")
+    }
+    let configuration = try ServiceConfiguration.load(path: configPath)
+    guard let accessGroup = configuration.keychainAccessGroup, !accessGroup.isEmpty else {
+        throw AgentPassNativeError.invalidConfiguration("Device authentication requires the service keychain access group")
+    }
+    let primitive = NativeEnrollmentKeyPrimitive(store: SecureEnclaveNativeEnrollmentKeyStore(accessGroup: accessGroup))
+    switch action {
+    case "key":
+        let material = try primitive.loadOrCreate()
+        try emitOfflineObject(["fingerprint": material.fingerprint, "public_key_pem": material.publicKeyPEM])
+    case "sign":
+        let signature = try primitive.signEnrollmentProof(preimage: boundedDeviceProofInput())
+        try emitOfflineObject(["signature_base64": signature.base64EncodedString()])
+    default:
+        throw AgentPassNativeError.invalidConfiguration("Unknown offline device-auth action")
+    }
+}
+
+private func runOfflineControlProvisioning(configPath: String) throws -> Never {
+    guard geteuid() == 0 else {
+        throw AgentPassNativeError.invalidConfiguration("Offline control provisioning must run as root")
+    }
+    let input = FileHandle.standardInput.readDataToEndOfFile()
+    let result = try NativeControlProvisioning().provision(canonicalInput: input, at: configPath)
+    try emitOfflineObject([
+        "changed": result.changed,
+        "new_fingerprint": result.newFingerprint,
+        "old_fingerprint": result.oldFingerprint ?? NSNull()
+    ])
+}
+
 private func runOfflineBootstrap(action: String, configPath: String) throws -> Never {
     guard geteuid() == 0 else {
         throw AgentPassNativeError.invalidConfiguration("Offline native bootstrap must run as root")
@@ -2641,13 +2694,23 @@ private func runOfflineBootstrap(action: String, configPath: String) throws -> N
 }
 
 do {
+    if CommandLine.arguments.count == 4,
+       CommandLine.arguments[1] == "--provision-control",
+       CommandLine.arguments[2] == "--config" {
+        try runOfflineControlProvisioning(configPath: CommandLine.arguments[3])
+    }
+    if CommandLine.arguments.count == 5,
+       CommandLine.arguments[1] == "--device-auth",
+       CommandLine.arguments[3] == "--config" {
+        try runOfflineDeviceAuthentication(action: CommandLine.arguments[2], configPath: CommandLine.arguments[4])
+    }
     if CommandLine.arguments.count == 5,
        CommandLine.arguments[1] == "--bootstrap",
        CommandLine.arguments[3] == "--config" {
         try runOfflineBootstrap(action: CommandLine.arguments[2], configPath: CommandLine.arguments[4])
     }
     guard CommandLine.arguments.count == 3, CommandLine.arguments[1] == "--config" else {
-        throw AgentPassNativeError.invalidConfiguration("Usage: agentpass-native-service --config PATH | --bootstrap ACTION --config PATH")
+        throw AgentPassNativeError.invalidConfiguration("Usage: agentpass-native-service --config PATH | --bootstrap ACTION --config PATH | --device-auth key|sign --config PATH | --provision-control --config PATH")
     }
     let configuration = try ServiceConfiguration.load(path: CommandLine.arguments[2])
     try validateProtectedOutputPath(path: configuration.auditLogPath, label: "Native audit log")

@@ -43,6 +43,7 @@ test("runs the resumable native bootstrap protocol with exact privileged handoff
     const action = call.args[1];
     if (call.args[0] === "bootstrap-approval-create") return { status: 0, stdout: envelope({ application_tag: call.args[1], authorized_key: "ecdsa-sha2-nistp256 AAAA", fingerprint: keyFingerprint, public_key_base64: b64("approval-public-key"), version: 1 }) };
     if (call.args[0] === "bootstrap-sign") return { status: 0, stdout: envelope({ generation: 1, role, signature_base64: b64("signature"), signer_fingerprint: keyFingerprint, signer_public_key_base64: b64("approval-public-key"), statement_base64: call.inputBytes.toString("base64"), version: 1 }) };
+    if (call.args[0] === "--provision-control") return { status: 0, stdout: canonical({ changed: true, new_fingerprint: keyFingerprint, old_fingerprint: null }) };
     if (action === "status") return { status: 0, stdout: canonical(snapshot(sequence)) };
     if (action === "prepare-approval") { sequence = 1; role = "session_approval"; return { status: 0, stdout: canonical(plan(role)) }; }
     if (action === "commit-approval") { sequence = 2; return { status: 0, stdout: canonical(snapshot(sequence)) }; }
@@ -60,7 +61,9 @@ test("runs the resumable native bootstrap protocol with exact privileged handoff
     runner.commitService(runner.sign(approval.application_tag, servicePlan.statement_base64));
   }
   assert.deepEqual(runner.status(), snapshot(6));
-  assert.equal(calls.filter((call) => call.privileged).length, 8);
+  assert.deepEqual(runner.provisionControl({ version: 1, issuer: "agentpass-cloud" }), { changed: true, new_fingerprint: keyFingerprint, old_fingerprint: null });
+  assert.deepEqual(calls.at(-1).args, ["--provision-control", "--config", value.config]);
+  assert.equal(calls.filter((call) => call.privileged).length, 9);
   assert.equal(calls.filter((call) => call.inputBytes).length, 3);
   assert.equal(authentications, 1);
 });

@@ -63,7 +63,7 @@ agentpass doctor --client claude-code --project "$PWD" --team-id 'APPLETEAM1'
 
 `enrollment.json` may be the exact canonical response returned by `POST /v1/organizations/{organization_id}/device-enrollments`, or its nested `enrollment` object. It must contain `enrollment_id`, `organization_id`, `device_id`, `label`, and the one-time `credential`; do not paste the credential into argv, an environment variable, a repository, or shell history. Enrollment issuance requires an admin/owner session plus a recent WebAuthn assertion.
 
-Native bootstrap requires the root-owned `/Library/Application Support/AgentPass/native-service.json` and policy to have been provisioned from the release configuration. Device enrollment now persists user-side pinned ControlBundle v2 trust, but provisioning the same trust into the root service configuration, final editor/test-commit verification, and hosted Control Plane setup remain fail-closed work.
+Native bootstrap requires the root-owned `/Library/Application Support/AgentPass/native-service.json` and policy from the release configuration. Device enrollment atomically provisions the pinned ControlBundle v2 trust into that root-owned configuration, restarts the service, and requires an authenticated first refresh before its journal state advances. The final editor check is read-only and setup completes only after `git verify-commit` accepts the current full commit hash. A hosted Control Plane and physical-Mac release qualification remain separate work.
 
 To remove AgentPass while preserving both the root-owned audit/lifecycle state and non-exportable keys, first preview and remove current-user integrations, then perform the separately elevated system phase:
 
