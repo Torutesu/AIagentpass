@@ -48,6 +48,11 @@ if (/PRIVATE KEY/.test(JSON.stringify(enrollment))) fail("device enrollment fixt
 const acknowledgement = readJson("fixtures/bundle-ack.valid.json");
 if (acknowledgement.format_epoch !== 2 || acknowledgement.status !== "applied" || !/^[0-9a-f]{64}$/.test(acknowledgement.statement_hash)) fail("bundle acknowledgement fixture is invalid");
 
+const doctor = readJson("fixtures/doctor-report.valid.json");
+if (doctor.schema_version !== 1 || !["healthy", "action_required", "degraded", "blocked"].includes(doctor.state) || doctor.ok !== (doctor.state === "healthy")) fail("doctor report fixture has inconsistent status");
+if (!Array.isArray(doctor.checks) || doctor.checks.length === 0 || new Set(doctor.checks.map((item) => item.id)).size !== doctor.checks.length) fail("doctor report fixture checks are missing or duplicated");
+if (doctor.checks.length !== Object.values(doctor.summary ?? {}).reduce((total, value) => total + value, 0)) fail("doctor report fixture summary does not match its checks");
+
 const sql = fs.readFileSync(path.join(contracts, "postgres", "0001_control_plane.sql"), "utf8");
 for (const table of ["organizations", "memberships", "human_sessions", "webauthn_credentials", "devices", "device_enrollments", "agents", "policies", "revocations", "capabilities", "bundle_heads", "bundle_acknowledgements", "device_audit_events", "idempotency_records", "admin_audit_events"]) {
   if (!new RegExp(`CREATE TABLE ${table} \\(`).test(sql)) fail(`PostgreSQL migration is missing ${table}`);
@@ -55,4 +60,4 @@ for (const table of ["organizations", "memberships", "human_sessions", "webauthn
 if (!sql.trim().startsWith("BEGIN;") || !sql.trim().endsWith("COMMIT;")) fail("PostgreSQL migration must be transactional");
 if (!/FOREIGN KEY \(organization_id, device_id\)/.test(sql)) fail("PostgreSQL migration must enforce tenant-qualified device references");
 
-if (!process.exitCode) process.stdout.write(`validated ${schemaFiles.length} schemas, 2 OpenAPI documents, 2 fixtures, and 1 PostgreSQL migration\n`);
+if (!process.exitCode) process.stdout.write(`validated ${schemaFiles.length} schemas, 2 OpenAPI documents, 3 fixtures, and 1 PostgreSQL migration\n`);

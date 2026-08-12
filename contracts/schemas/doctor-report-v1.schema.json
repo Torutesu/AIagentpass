@@ -1,0 +1,55 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agentpass.dev/contracts/doctor-report-v1.schema.json",
+  "title": "AgentPass production doctor report v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "state", "ok", "generated_at", "mode", "checks", "summary", "host"],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "state": { "enum": ["healthy", "action_required", "degraded", "blocked"] },
+    "ok": { "type": "boolean" },
+    "generated_at": { "type": "string", "format": "date-time" },
+    "mode": { "enum": ["production-native", "evaluation"] },
+    "checks": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 64,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "state", "severity", "summary"],
+        "properties": {
+          "id": { "type": "string", "pattern": "^[a-z][a-z0-9_]*(?:\\.[a-z][a-z0-9_]*)+$", "maxLength": 96 },
+          "state": { "enum": ["healthy", "action_required", "degraded", "blocked"] },
+          "severity": { "enum": ["info", "warning", "error"] },
+          "summary": { "type": "string", "minLength": 1, "maxLength": 256 },
+          "remediation": { "type": "string", "minLength": 1, "maxLength": 512 },
+          "detail": {}
+        }
+      }
+    },
+    "summary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["healthy", "action_required", "degraded", "blocked"],
+      "properties": {
+        "healthy": { "type": "integer", "minimum": 0 },
+        "action_required": { "type": "integer", "minimum": 0 },
+        "degraded": { "type": "integer", "minimum": 0 },
+        "blocked": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "host": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["platform", "architecture"],
+      "properties": {
+        "platform": { "type": "string", "minLength": 1, "maxLength": 32 },
+        "architecture": { "type": "string", "minLength": 1, "maxLength": 32 },
+        "node": { "type": "string", "minLength": 1, "maxLength": 32 },
+        "hostname": { "type": "string", "minLength": 1, "maxLength": 255 }
+      }
+    }
+  }
+}
