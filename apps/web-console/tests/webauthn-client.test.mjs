@@ -1,0 +1,202 @@
+import assert from "node:assert/strict";
+import test from "node:test";
+import { authenticateRecentAuth, WebAuthnClientError } from "../app/webauthn-client.ts";
+
+const organizationId = "11111111-1111-4111-8111-111111111111";
+const challengeId = "22222222-2222-4222-8222-222222222222";
+const authorizationId = "33333333-3333-4333-8333-333333333333";
+const challenge = "A".repeat(43);
+const csrfToken = "csrf-token-that-is-never-persisted";
+
+const options = Object.freeze({
+  challenge,
+  rpId: "console.example.test",
+  userVerification: "required",
+  allowCredentials: [{ id: "Y3JlZGVudGlhbC0x", type: "public-key", transports: ["internal"] }],
+});
+
+const assertion = Object.freeze({
+  id: "Y3JlZGVudGlhbC0x",
+  rawId: "Y3JlZGVudGlhbC0x",
+  response: {
+    authenticatorData: "YXV0aGVudGljYXRvci1kYXRh",
+    clientDataJSON: "Y2xpZW50LWRhdGE",
+    signature: "c2lnbmF0dXJl",
+  },
+  type: "public-key",
+  clientExtensionResults: {},
+});
+
+function jsonResponse(body, status = 200, headers = {}) {
+  return new Response(JSON.stringify(body), {
+    status,
+    headers: { "content-type": "application/json", ...headers },
+  });
+}
+
+function successfulTransport(calls, overrides = {}) {
+  return async (url, init) => {
+    calls.push({ url: String(url), init });
+    const parsed = new URL(url, "https://console.example.test");
+    if (parsed.pathname === "/api/auth/webauthn/options") return jsonResponse({ challenge_id: challengeId, options });
+    if (parsed.pathname === "/api/auth/webauthn/verify") return jsonResponse({ authorization_id: authorizationId, ...overrides.verify });
+    throw new Error(`unexpected path: ${parsed.pathname}`);
+  };
+}
+
+test("posts options, runs startAuthentication, verifies, and returns only authorization_id", async () => {
+  const calls = [];
+  const authenticationCalls = [];
+  const controller = new AbortController();
+  const result = await authenticateRecentAuth({
+    operation: "device.enrollment.issue",
+    organizationId,
+    csrfToken,
+    signal: controller.signal,
+    fetchImpl: successfulTransport(calls),
+    startAuthenticationImpl: async (input) => {
+      authenticationCalls.push(input);
+      return assertion;
+    },
+  });
+
+  assert.deepEqual(result, { authorization_id: authorizationId });
+  assert.deepEqual(Object.keys(result), ["authorization_id"]);
+  assert.equal(calls.length, 2);
+  assert.deepEqual(calls.map((call) => call.url), ["/api/auth/webauthn/options", "/api/auth/webauthn/verify"]);
+  for (const call of calls) {
+    assert.equal(call.init.method, "POST");
+    assert.equal(call.init.cache, "no-store");
+    assert.equal(call.init.credentials, "same-origin");
+    assert.equal(call.init.redirect, "error");
+    assert.equal(call.init.signal, controller.signal);
+    assert.equal(call.init.headers.get("cache-control"), "no-store");
+    assert.equal(call.init.headers.get("content-type"), "application/json");
+    assert.equal(call.init.headers.get("agentpass-csrf"), csrfToken);
+    assert.equal(call.init.headers.get("accept"), "application/json");
+    assert.equal(call.init.headers.get("pragma"), "no-cache");
+  }
+  assert.deepEqual(JSON.parse(calls[0].init.body), { organization_id: organizationId, operation: "device.enrollment.issue" });
+  assert.deepEqual(authenticationCalls, [{ optionsJSON: options }]);
+  const verifyBody = JSON.parse(calls[1].init.body);
+  assert.deepEqual(verifyBody, { organization_id: organizationId, operation: "device.enrollment.issue", challenge_id: challengeId, credential: assertion });
+  assert.equal(calls[1].url.includes(challenge), false);
+});
+
+test("rejects malformed options without invoking WebAuthn or verification", async () => {
+  const calls = [];
+  let authenticationCalls = 0;
+  await assert.rejects(
+    () => authenticateRecentAuth({
+      operation: "device.enrollment.issue",
+      organizationId,
+      csrfToken,
+      fetchImpl: async (url, init) => {
+        calls.push({ url, init });
+        return jsonResponse({ challenge_id: challengeId, options: { ...options, unexpected: true } });
+      },
+      startAuthenticationImpl: async () => {
+        authenticationCalls += 1;
+        return assertion;
+      },
+    }),
+    (error) => error instanceof WebAuthnClientError && error.code === "invalid_options",
+  );
+  assert.equal(calls.length, 1);
+  assert.equal(authenticationCalls, 0);
+});
+
+test("rejects malformed assertion and never posts it", async () => {
+  const calls = [];
+  await assert.rejects(
+    () => authenticateRecentAuth({
+      operation: "device.enrollment.issue",
+      organizationId,
+      csrfToken,
+      fetchImpl: successfulTransport(calls),
+      startAuthenticationImpl: async () => ({ ...assertion, response: { ...assertion.response, signature: "not base64 with spaces" } }),
+    }),
+    (error) => error instanceof WebAuthnClientError && error.code === "invalid_assertion",
+  );
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].url, "/api/auth/webauthn/options");
+});
+
+test("rejects a non-exact authorization response", async () => {
+  const calls = [];
+  await assert.rejects(
+    () => authenticateRecentAuth({
+      operation: "device.enrollment.issue",
+      organizationId,
+      csrfToken,
+      fetchImpl: successfulTransport(calls, { verify: { extra: "must reject" } }),
+      startAuthenticationImpl: async () => assertion,
+    }),
+    (error) => error instanceof WebAuthnClientError && error.code === "invalid_authorization",
+  );
+  assert.equal(calls.length, 2);
+});
+
+test("allows only same-origin relative endpoint paths", async () => {
+  for (const path of ["https://attacker.example.test/options", "//attacker.example.test/options", "/options?challenge=secret", "/options#challenge"]) {
+    await assert.rejects(
+      () => authenticateRecentAuth({
+        operation: "device.enrollment.issue",
+        organizationId,
+        csrfToken,
+        optionsPath: path,
+        fetchImpl: async () => jsonResponse({}),
+        startAuthenticationImpl: async () => assertion,
+      }),
+      (error) => error instanceof TypeError && /same-origin relative path/.test(error.message),
+    );
+  }
+});
+
+test("propagates AbortSignal through fetch and aborts an active WebAuthn ceremony", async () => {
+  const controller = new AbortController();
+  let resolveAuthentication;
+  let authenticationStarted = false;
+  const promise = authenticateRecentAuth({
+    operation: "device.enrollment.issue",
+    organizationId,
+    csrfToken,
+    signal: controller.signal,
+    fetchImpl: async (url, init) => {
+      assert.equal(init.signal, controller.signal);
+      return jsonResponse({ challenge_id: challengeId, options });
+    },
+    startAuthenticationImpl: async () => {
+      authenticationStarted = true;
+      return new Promise((resolve) => { resolveAuthentication = resolve; });
+    },
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(authenticationStarted, true);
+  controller.abort();
+  await assert.rejects(promise, (error) => error?.name === "AbortError");
+  resolveAuthentication?.(assertion);
+});
+
+test("does not access storage or logging APIs", async () => {
+  const calls = [];
+  const originalLog = console.log;
+  const originalStorage = globalThis.localStorage;
+  let logged = false;
+  Object.defineProperty(console, "log", { configurable: true, value: () => { logged = true; } });
+  Object.defineProperty(globalThis, "localStorage", { configurable: true, get() { throw new Error("storage access is forbidden"); } });
+  try {
+    await authenticateRecentAuth({
+      operation: "device.enrollment.issue",
+      organizationId,
+      csrfToken,
+      fetchImpl: successfulTransport(calls),
+      startAuthenticationImpl: async () => assertion,
+    });
+  } finally {
+    Object.defineProperty(console, "log", { configurable: true, value: originalLog });
+    if (originalStorage === undefined) delete globalThis.localStorage;
+    else Object.defineProperty(globalThis, "localStorage", { configurable: true, value: originalStorage });
+  }
+  assert.equal(logged, false);
+});
