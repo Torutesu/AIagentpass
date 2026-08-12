@@ -16,6 +16,22 @@ const OPAQUE_TOKEN = /^[A-Za-z0-9_-]{43}$/;
 const IDEMPOTENCY_KEY = /^[A-Za-z0-9][A-Za-z0-9._:-]{7,127}$/;
 const SAFE_ERROR_CODE = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$/;
 const SENSITIVE_KEY = /(?:authorization|bearer|cookie|credential|password|private[_-]?key|refresh[_-]?token|secret|session[_-]?token|access[_-]?token|api[_-]?token)/i;
+const RFC3339_UTC = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?Z$/;
+const STABLE_REASON = /^[a-z][a-z0-9._-]{0,127}$/;
+const DEVICE_REFRESH_STATES = new Set(["pending", "fetching", "applied", "blocked", "stale", "offline", "revoked"]);
+const DEVICE_RESPONSE_FIELDS = new Set([
+  "device_id", "name", "status", "created_at", "last_seen_at", "version",
+  "desired_generation", "observed_generation", "refresh_state",
+  "bundle_sequence", "bundle_expires_at", "last_ack_at", "blocked_reason",
+]);
+const DEVICE_STATE_OUTPUT_FIELDS = [
+  "device_id", "name", "status", "created_at", "last_seen_at", "version", "desired_generation",
+  "observed_generation", "refresh_state", "bundle_sequence", "bundle_expires_at", "last_ack_at", "blocked_reason",
+];
+const REVOCATION_RESPONSE_FIELDS = new Set([
+  "revocation_id", "organization_id", "target_type", "target_id", "reason", "status", "sequence",
+  "created_at", "revoked_at", "version",
+]);
 const SIWC_HEADERS = [
   "oai-authenticated-user-id",
   "oai-authenticated-user-email",
@@ -251,12 +267,13 @@ async function getResource(query, config, fetchImpl, options) {
 }
 
 async function getSummary(query, config, fetchImpl, options) {
-  const [organization, devices, agents, policies] = await Promise.all([
+  const [organization, devicesResult, agents, policies] = await Promise.all([
     cloudRequest("GET", "", undefined, config, fetchImpl, options),
-    cloudRequest("GET", "/devices", undefined, config, fetchImpl, options),
+    cloudRequest("GET", "/devices", undefined, config, fetchImpl, options, undefined, true, undefined, true),
     cloudRequest("GET", "/agents", undefined, config, fetchImpl, options),
     cloudRequest("GET", "/policies", undefined, config, fetchImpl, options),
   ]);
+  const devices = normalizeDeviceStateResponse(devicesResult.body);
   const audit = await getAudit({ ...query, deviceId: query.deviceId }, config, fetchImpl, options, devices, "summary");
 
   return {
@@ -286,8 +303,11 @@ async function getSimple(query, resource, config, fetchImpl, options) {
   const suffix = resource === "capabilities" || resource === "revocations" || resource === "admin-audit"
     ? `${paths[resource]}?limit=${queryLimit(query)}`
     : paths[resource];
-  const result = await cloudRequest("GET", suffix, undefined, config, fetchImpl, options, undefined, true);
-  return { __consoleStatus: result.status, __consoleBody: result.body };
+  const result = await cloudRequest("GET", suffix, undefined, config, fetchImpl, options, undefined, true, undefined, resource === "devices");
+  const body = resource === "devices"
+    ? normalizeDeviceStateResponse(result.body)
+    : result.body;
+  return { __consoleStatus: result.status, __consoleBody: body };
 }
 
 function queryLimit(query) {
@@ -298,7 +318,7 @@ async function getAudit(query, config, fetchImpl, options, devicesPayload = unde
   const cursor = query.cursor === null ? null : await decodeActivityCursor(query.cursor, config, cursorResource, query.deviceId);
   let devices = devicesPayload;
   if (!devices) {
-    devices = await cloudRequest("GET", "/devices", undefined, config, fetchImpl, options);
+    devices = await getDeviceState(config, fetchImpl, options);
   }
 
   const deviceIds = query.deviceId
@@ -361,6 +381,103 @@ async function getAudit(query, config, fetchImpl, options, devicesPayload = unde
   });
 
   return { health, activity, next_cursor: nextCursor };
+}
+
+async function getDeviceState(config, fetchImpl, options) {
+  const result = await cloudRequest("GET", "/devices", undefined, config, fetchImpl, options, undefined, false, undefined, true);
+  return normalizeDeviceStateResponse(result);
+}
+
+function normalizeDeviceStateResponse(value) {
+  if (!isPlainRecord(value) || Object.keys(value).some((key) => key !== "devices" && key !== "request_id") || !Array.isArray(value.devices)) {
+    throw invalidCloudResponse();
+  }
+  if (value.request_id !== undefined) normalizeOpaqueResponseId(value.request_id);
+  return { devices: value.devices.map((device) => normalizeDeviceState(device)) };
+}
+
+function normalizeDeviceState(value) {
+  if (!isPlainRecord(value) || Object.keys(value).some((key) => !DEVICE_RESPONSE_FIELDS.has(key))) {
+    throw invalidCloudResponse();
+  }
+  if (value.device_id === undefined || !UUID_OR_OPAQUE_ID.test(value.device_id)) throw invalidCloudResponse();
+  const output = { device_id: value.device_id };
+  if (value.name !== undefined) output.name = normalizeBoundedSafeText(value.name, 128);
+  if (value.status !== undefined) {
+    if (typeof value.status !== "string" || !new Set(["pending", "active", "revoked"]).has(value.status)) throw invalidCloudResponse();
+    output.status = value.status;
+  }
+  for (const field of ["created_at", "last_seen_at", "bundle_expires_at", "last_ack_at"]) {
+    if (value[field] !== undefined) output[field] = normalizeSafeTimestamp(value[field], true);
+  }
+  for (const field of ["version", "desired_generation", "observed_generation", "bundle_sequence"]) {
+    if (value[field] !== undefined) output[field] = normalizeSafeInteger(value[field], field, field === "observed_generation");
+  }
+  if (value.refresh_state !== undefined) {
+    if (typeof value.refresh_state !== "string" || !DEVICE_REFRESH_STATES.has(value.refresh_state)) throw invalidCloudResponse();
+    output.refresh_state = value.refresh_state;
+  }
+  const blockedReason = value.blocked_reason;
+  if (blockedReason !== undefined) output.blocked_reason = blockedReason === null ? null : normalizeStableReason(blockedReason);
+  return Object.fromEntries(DEVICE_STATE_OUTPUT_FIELDS.filter((field) => Object.hasOwn(output, field)).map((field) => [field, output[field]]));
+}
+
+function normalizeDeviceRevocationResponse(value, expectedOrganizationId, targetId) {
+  if (!isPlainRecord(value) || Object.keys(value).some((key) => key !== "revocation" && key !== "request_id") || !isPlainRecord(value.revocation)) {
+    throw invalidCloudResponse();
+  }
+  if (value.request_id !== undefined) normalizeOpaqueResponseId(value.request_id);
+  const revocation = value.revocation;
+  if (Object.keys(revocation).some((key) => !REVOCATION_RESPONSE_FIELDS.has(key))) throw invalidCloudResponse();
+  if (revocation.organization_id !== undefined && revocation.organization_id !== "[redacted]" && (revocation.organization_id !== expectedOrganizationId || !UUID_OR_OPAQUE_ID.test(revocation.organization_id))) throw invalidCloudResponse();
+  if (revocation.target_type !== undefined && revocation.target_type !== "device") throw invalidCloudResponse();
+  if (revocation.target_id !== targetId) throw invalidCloudResponse();
+  if (revocation.reason !== undefined) normalizeBoundedSafeText(revocation.reason, 128);
+  if (revocation.status !== undefined && !new Set(["active", "revoked"]).has(revocation.status)) throw invalidCloudResponse();
+  for (const field of ["created_at", "revoked_at"]) if (revocation[field] !== undefined) normalizeSafeTimestamp(revocation[field], true);
+  for (const field of ["sequence", "version"]) if (revocation[field] !== undefined) normalizeSafeInteger(revocation[field], field, false);
+  if (revocation.revocation_id !== undefined && !UUID_OR_OPAQUE_ID.test(revocation.revocation_id)) throw invalidCloudResponse();
+  return {
+    revocation: Object.fromEntries(["revocation_id", "target_type", "target_id", "reason", "status", "sequence", "created_at", "revoked_at", "version"]
+      .filter((field) => Object.hasOwn(revocation, field)).map((field) => [field, revocation[field]])),
+  };
+}
+
+function normalizeBoundedSafeText(value, maxLength) {
+  if (typeof value !== "string" || value.length < 1 || value.length > maxLength || hasControlCharacters(value)) throw invalidCloudResponse();
+  return value;
+}
+
+function normalizeStableReason(value) {
+  if (typeof value !== "string" || !STABLE_REASON.test(value)) throw invalidCloudResponse();
+  return value;
+}
+
+function normalizeSafeTimestamp(value, nullable) {
+  if (nullable && value === null) return null;
+  if (typeof value !== "string" || !RFC3339_UTC.test(value) || !Number.isFinite(Date.parse(value))) throw invalidCloudResponse();
+  return value;
+}
+
+function normalizeSafeInteger(value, field, nullable) {
+  if (nullable && value === null) return null;
+  if (!Number.isSafeInteger(value) || value < (field === "version" || field.endsWith("generation") ? 1 : 0)) throw invalidCloudResponse();
+  return value;
+}
+
+function normalizeOpaqueResponseId(value) {
+  if (typeof value !== "string" || !UUID_OR_OPAQUE_ID.test(value)) throw invalidCloudResponse();
+  return value;
+}
+
+function invalidCloudResponse() {
+  return new ConsoleApiError(502, "cloud_api_invalid_response", "Cloud API response was invalid");
+}
+
+function isPlainRecord(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const prototype = Object.getPrototypeOf(value);
+  return prototype === Object.prototype || prototype === null;
 }
 
 async function loadActivityStreams({ deviceIds, position, config, fetchImpl, options, limit }) {
@@ -591,6 +708,9 @@ function base64UrlDecode(value) {
 
 async function postOperation(query, body, idempotencyKey, config, fetchImpl, options, recentAuth) {
   const operation = normalizeOperation(query.operation ?? query.resource);
+  if (operation === "request-refresh") {
+    throw new ConsoleApiError(501, "operation_unsupported", "Device refresh requests are not available");
+  }
   if (operation === "create-policy") {
     const policy = validatePolicyBody(body);
     const result = await cloudRequest("POST", "/policies", policy, config, fetchImpl, options, idempotencyKey, true);
@@ -641,8 +761,13 @@ async function postOperation(query, body, idempotencyKey, config, fetchImpl, opt
   if (operation === "revoke-agent" || operation === "revoke-device" || operation === "revoke-capability") {
     const input = validateRevocationBody(body, operation);
     const path = operation === "revoke-agent" ? `/agents/${input.target_id}/revoke` : operation === "revoke-device" ? `/devices/${input.target_id}/revoke` : `/capabilities/${input.target_id}/revoke`;
-    const result = await cloudRequest("POST", path, { reason: input.reason }, config, fetchImpl, options, idempotencyKey, true);
-    return { status: result.status, body: result.body };
+    const recentAuthHeader = operation === "revoke-device" ? requireRecentAuth(recentAuth) : undefined;
+    const result = await cloudRequest("POST", path, { reason: input.reason }, config, fetchImpl, options, idempotencyKey, true,
+      recentAuthHeader === undefined ? undefined : { "agentpass-recent-auth": recentAuthHeader }, operation === "revoke-device");
+    return {
+      status: result.status,
+      body: operation === "revoke-device" ? normalizeDeviceRevocationResponse(result.body, config.organizationId, input.target_id) : result.body,
+    };
   }
   if (operation === "issue-capability") {
     const capability = validateCapabilityBody(body);
@@ -680,6 +805,8 @@ function normalizeOperation(value) {
     "agent.revoke": "revoke-agent",
     "revoke-device": "revoke-device",
     "device.revoke": "revoke-device",
+    "request-refresh": "request-refresh",
+    "device.request-refresh": "request-refresh",
     "issue-capability": "issue-capability",
     capability: "issue-capability",
     "capability.issue": "issue-capability",
@@ -775,6 +902,13 @@ function validateRevocationBody(value, operation) {
   const body = plainObject(value);
   exactKeys(body, ["target_id", "reason"], operation);
   return { target_id: validateIdentifier(body.target_id, `${operation}.target_id`), reason: boundedString(body.reason, `${operation}.reason`, 128, true) };
+}
+
+function requireRecentAuth(value) {
+  if (typeof value !== "string" || value.length < 32 || value.length > 4096 || hasControlCharacters(value)) {
+    throw new ConsoleApiError(401, "recent_auth_required", "Recent WebAuthn authentication is required");
+  }
+  return value;
 }
 
 function validateCapabilityBody(value) {

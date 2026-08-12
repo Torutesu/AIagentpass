@@ -1,7 +1,7 @@
 {
   "openapi": "3.1.0",
   "info": { "title": "AgentPass Device API", "version": "1.0.0", "description": "G4.0 freezes this contract. G4.1 implements the device-bound bundle response, correctness-fallback refresh polling, and signed ACK ingestion in the Cloud runtime with runtime and PostgreSQL conformance evidence. The G4.2 native daemon path is implemented locally and awaits real-boundary qualification; Console presentation remains G4.3 work." },
-  "x-agentpass-implementation-status": { "contract": "frozen-g4.0", "bundle-fetch-target-envelope": "implemented-g4.1", "refresh-poll": "implemented-g4.1", "signed-ack-ingestion": "implemented-g4.1", "native-sync": "in-progress-g4.2", "console-device-state": "planned-g4.3" },
+  "x-agentpass-implementation-status": { "contract": "frozen-g4.0", "bundle-fetch-target-envelope": "implemented-g4.1", "refresh-poll": "implemented-g4.1", "signed-ack-ingestion": "implemented-g4.1", "native-sync": "in-progress-g4.2", "console-device-state": "in-progress-g4.3" },
   "servers": [{ "url": "https://api.ai-agentpass.com/v1" }],
   "paths": {
     "/enrollments/{enrollment_id}": {

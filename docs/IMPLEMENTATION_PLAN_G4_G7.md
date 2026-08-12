@@ -193,6 +193,8 @@ Exit gate: kill the daemon at every durable write boundary and restart. It must 
 
 ### G4.3 Signed ACK and Console device state
 
+Status: in progress on 2026-08-13. Cloud now exposes a bounded tenant-scoped PostgreSQL read model, the BFF accepts only the minimal safe DTO, and Console renders desired/observed generation, bundle expiry, ACK time, and stable blocked/offline/stale states. Device revoke and organization emergency stop use operation-bound recent WebAuthn. A wake-only manual refresh endpoint, browser role-matrix E2E, trusted-HTTPS integration, and physical-Mac ACK observation remain open; the UI intentionally does not invent a refresh mutation before that authority-neutral contract exists.
+
 - sign ACKs with the enrolled device key and a dedicated signature domain;
 - atomically consume ACK nonce, validate key epoch/sequence/hash, update observed state, and append audit;
 - treat duplicate exact ACK as success and conflicting ACK as a stable conflict;

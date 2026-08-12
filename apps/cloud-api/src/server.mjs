@@ -10,6 +10,7 @@ import {
 } from "../../../packages/protocol/src/index.mjs";
 import { RateLimiterCapacityError, createRateLimiter } from "./rate-limit.mjs";
 import { OPERATIONAL_METRIC_KEYS } from "./postgres/operational-health.mjs";
+import { normalizeDeviceReadModels } from "./device-read-model.mjs";
 
 const MAX_BODY_BYTES = 1024 * 1024;
 const HUMAN_AUTH_MAX_BODY_BYTES = 64 * 1024;
@@ -181,7 +182,10 @@ export function createCloudApi({ store, tokenRecords = [], bundleSigner, refresh
     const route = (method, pattern, role, handle, device = false, enrollment = false, recentAuthOperation = undefined) => ({ method, pattern, role, handle, device, enrollment, recentAuthOperation });
     return [
       route("GET", new RegExp(`^/v1/organizations/(?<organizationId>${UUID})$`), "viewer", async ({ organizationId }) => ({ body: { organization: await store.getOrganization({ organizationId }) } })),
-      route("GET", new RegExp(`^/v1/organizations/(?<organizationId>${UUID})/devices$`), "viewer", async ({ organizationId }) => ({ body: { devices: await store.listDevices({ organizationId }) } })),
+      route("GET", new RegExp(`^/v1/organizations/(?<organizationId>${UUID})/devices$`), "viewer", async ({ organizationId }) => {
+        if (typeof store.listDeviceReadModels !== "function") throw apiError("device_read_model_unavailable", 503, "Device read model is unavailable");
+        return { body: { devices: normalizeDeviceReadModels(await store.listDeviceReadModels({ organizationId })) } };
+      }),
       route("POST", new RegExp(`^/v1/organizations/(?<organizationId>${UUID})/devices$`), "admin", async ({ organizationId, body, idempotencyKey, principal }) => ({ status: 201, body: { device: await mutateAndAudit(organizationId, (target) => target.createDevice({ ...body, organizationId, createdBy: principal.member_id, principalId: principal.member_id, idempotencyKey }), ({ mutation }) => ({ organizationId, eventType: "device.created", actorId: principal.member_id, targetType: "device", targetId: mutation.device_id, idempotencyKey: `${idempotencyKey}:audit` })) } })),
       route("POST", new RegExp(`^/v1/organizations/(?<organizationId>${UUID})/device-enrollments$`), "admin", async ({ organizationId, body, idempotencyKey, principal }) => {
         rejectUnknown(body, new Set(["enrollment_id", "device_id", "label", "platform", "ttl_ms"]), "device_enrollment_issue");
@@ -224,7 +228,7 @@ export function createCloudApi({ store, tokenRecords = [], bundleSigner, refresh
           (target) => target.createRevocation({ organizationId, targetType: "device", targetId: match.deviceId, reason: body.reason, createdBy: principal.member_id, principalId: principal.member_id, idempotencyKey }),
           { organizationId, eventType: "device.revoked", actorId: principal.member_id, targetType: "device", targetId: match.deviceId, idempotencyKey: `${idempotencyKey}:audit` });
         return { status: 201, body: { revocation } };
-      }),
+      }, false, false, "device.revoke"),
       route("GET", new RegExp(`^/v1/organizations/(?<organizationId>${UUID})/policies$`), "viewer", async ({ organizationId }) => ({ body: { policies: await store.listPolicies({ organizationId }) } })),
       route("POST", new RegExp(`^/v1/organizations/(?<organizationId>${UUID})/policies$`), "admin", async ({ organizationId, body, idempotencyKey, principal }) => ({ status: 201, body: { policy: await mutateAndAudit(organizationId, (target) => target.createPolicy({ ...body, organizationId, createdBy: principal.member_id, principalId: principal.member_id, idempotencyKey }), ({ mutation }) => ({ organizationId, eventType: "policy.created", actorId: principal.member_id, targetType: "policy", targetId: mutation.policy_id, idempotencyKey: `${idempotencyKey}:audit` })) } })),
       route("POST", new RegExp(`^/v1/organizations/(?<organizationId>${UUID})/policies/(?<policyId>${UUID})/disable$`), "admin", async ({ organizationId, match, body, idempotencyKey, principal }) => {

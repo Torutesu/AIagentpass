@@ -9,6 +9,7 @@ import {
   normalizeScope
 } from "../../../packages/protocol/src/index.mjs";
 import { auditCursorBinding, createAuditCursorCodec, normalizeAuditPageInput } from "./audit-pagination.mjs";
+import { normalizeDeviceReadModel } from "./device-read-model.mjs";
 
 const SCHEMA_VERSION = 1;
 const ZERO_HASH = "0".repeat(64);
@@ -599,6 +600,34 @@ export async function createCloudStore(options = {}) {
   const getCapability = get("capabilities", "capability", ["capabilityId", "capability_id", "id"]);
   const getRevocation = get("revocations", "revocation", ["revocationId", "revocation_id", "id"]);
 
+  const listDeviceReadModels = async (input = {}) => read(() => {
+    const organizationId = requireTenant(input);
+    return Object.values(state.devices)
+      .filter((device) => device.organization_id === organizationId)
+      .sort((left, right) => String(left.created_at).localeCompare(String(right.created_at)) || left.device_id.localeCompare(right.device_id))
+      .map((device) => {
+        const head = state.bundle_heads[device.device_id];
+        return normalizeDeviceReadModel({
+          device_id: device.device_id,
+          organization_id: device.organization_id,
+          name: device.name,
+          ...(device.device_public_key === null ? {} : { device_public_key: device.device_public_key }),
+          status: device.status,
+          metadata: device.metadata,
+          created_at: device.created_at,
+          version: device.version,
+          desired_generation: null,
+          observed_generation: null,
+          refresh_state: device.status === "revoked" ? "revoked" : "offline",
+          current_bundle_sequence: head?.sequence ?? null,
+          current_bundle_expires_at: head?.expires_at ?? null,
+          last_ack_observed_at: null,
+          last_ack_received_at: null,
+          blocked_reason: null
+        });
+      });
+  });
+
   const listAdminAuditEvents = async (input) => read(() => listAudit(state.admin_audit_events, requireTenant(input), input?.limit));
   const listDeviceAuditEvents = async (input) => read(() => {
     const organizationId = requireTenant(input);
@@ -667,7 +696,7 @@ export async function createCloudStore(options = {}) {
   const api = {
     createOrganization, getOrganization, listOrganizations,
     createMembership, getMembership, listMemberships: listTenant("memberships"), updateMembership: (input) => updateResource(input, "memberships", "membership", ["membershipId", "membership_id", "id"], ["role", "status"], (value) => ({ ...value, role: enumText(value.role, "role", ["owner", "admin", "auditor", "viewer"]), status: enumText(value.status, "status", ["active", "revoked"]) })),
-    createDevice, getDevice, listDevices: listTenant("devices"), updateDevice: (input) => updateResource(input, "devices", "device", ["deviceId", "device_id", "id"], ["name", "device_public_key", "metadata", "status"], (value) => { const publicKey = boundedText(value.device_public_key, "device_public_key", 8192, true, true); rejectPrivateKey(publicKey, "device_public_key"); return { ...value, name: boundedText(value.name, "name", 128, true), device_public_key: publicKey, metadata: safeMetadata(value.metadata, "metadata"), status: enumText(value.status, "status", ["active", "revoked"]) }; }),
+    createDevice, getDevice, listDevices: listTenant("devices"), listDeviceReadModels, updateDevice: (input) => updateResource(input, "devices", "device", ["deviceId", "device_id", "id"], ["name", "device_public_key", "metadata", "status"], (value) => { const publicKey = boundedText(value.device_public_key, "device_public_key", 8192, true, true); rejectPrivateKey(publicKey, "device_public_key"); return { ...value, name: boundedText(value.name, "name", 128, true), device_public_key: publicKey, metadata: safeMetadata(value.metadata, "metadata"), status: enumText(value.status, "status", ["active", "revoked"]) }; }),
     createDeviceEnrollment, completeDeviceEnrollment,
     createAgent, getAgent, listAgents: listTenant("agents"), updateAgent: (input) => updateResource(input, "agents", "agent", ["agentId", "agent_id", "id"], ["name", "kind", "public_key", "device_id", "status"], (value) => { const descriptor = normalizeAgentDescriptor({ version: value.version, agent_id: value.agent_id, name: value.name, kind: value.kind, public_key: value.public_key, created_at: value.created_at }); return { ...value, ...descriptor, status: enumText(value.status, "status", ["active", "revoked"]) }; }),
     createPolicy, getPolicy, listPolicies: listTenant("policies"), updatePolicy: (input) => updateResource(input, "policies", "policy", ["policyId", "policy_id", "id"], ["name", "scope", "sequence", "status"], (value) => ({ ...value, name: boundedText(value.name, "name", 128, true), scope: normalizeScope(value.scope), sequence: sequenceValue(value.sequence, "sequence"), status: enumText(value.status, "status", ["active", "disabled"]) })),

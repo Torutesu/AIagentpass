@@ -18,7 +18,7 @@ function repositories(overrides = {}) {
     "appendAdminAuditEvent", "assignBundleHead", "completeDeviceEnrollment", "createAgent", "createDevice",
     "createDeviceEnrollment", "createPolicy", "createRevocation", "getAuditHealth", "getOrganization",
     "ingestDeviceAuditEvents", "issueCapabilityMetadata", "listAdminAuditEvents", "listAgents", "listCapabilities",
-    "listDeviceAuditEvents", "listDevices", "listPolicies", "listRevocations", "listRevokedCapabilityIds",
+    "listDeviceAuditEvents", "listDeviceReadModels", "listDevices", "listPolicies", "listRevocations", "listRevokedCapabilityIds",
     "reserveCapability", "updatePolicy", "snapshotAndAssignBundleHead", "pollDeviceRefresh",
     "getDeviceRefreshState", "acknowledgeBundle"
   ];
@@ -77,9 +77,12 @@ test("qualifies every delegated tenant request without accepting an unscoped cal
   const { repository, calls } = repositories();
   const store = createPostgresControlPlaneStore({ resourceRepository: repository });
   await store.listDevices({ organizationId, limit: 12 });
+  await store.listDeviceReadModels({ organizationId });
   assert.deepEqual(calls[0].input, { organizationId, organization_id: organizationId, limit: 12 });
+  assert.deepEqual(calls[1].input, { organizationId, organization_id: organizationId });
   await assert.rejects(store.listDevices({}), (error) => error.code === CONTROL_PLANE_STORE_ERROR_CODES.TENANT_SCOPE);
-  assert.equal(calls.length, 1);
+  await assert.rejects(store.listDeviceReadModels({}), (error) => error.code === CONTROL_PLANE_STORE_ERROR_CODES.TENANT_SCOPE);
+  assert.equal(calls.length, 2);
 });
 
 test("propagates safe actor/principal identity while dropping session and bearer material", async () => {

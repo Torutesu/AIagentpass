@@ -56,6 +56,16 @@ class FakeClient {
       row.response_json = JSON.parse(params[4]);
       return result([], 1);
     }
+    if (text.startsWith("SELECT devices.organization_id,devices.id,devices.label,devices.key_algorithm") && text.includes("device_control_plane_state")) return result([deviceRow({
+      desired_generation: "7",
+      observed_generation: "6",
+      refresh_state: "blocked",
+      current_bundle_sequence: "12",
+      current_bundle_expires_at: EXPIRES,
+      last_ack_observed_at: NOW,
+      last_ack_received_at: NOW,
+      blocked_reason: "bundle_signature_invalid"
+    })]);
     if (text.startsWith("SELECT devices.organization_id,devices.id,devices.label,devices.key_algorithm")) return result([this.deviceAuthRow ?? deviceRow()]);
     if (text.startsWith("SELECT organization_id,id,device_id,kind,name,public_key_pem,status,version,created_at,last_seen_at\n    FROM agents")) return result([agentRow()]);
     if (text.startsWith("SELECT organization_id,id,sequence,name,scope_json,status,created_by,created_at,updated_at,version\n    FROM policies")) return result([this.policySelectRow ?? policyRow()]);
@@ -100,9 +110,35 @@ test("exposes the CloudStore resource API and requires tenant-scoped identity", 
   assert.equal(Object.isFrozen(repository), true);
   assert.deepEqual(Object.keys(repository).sort(), [
     "completeDeviceEnrollment", "createAgent", "createDevice", "createDeviceEnrollment", "createPolicy",
-    "getAgent", "getDevice", "getPolicy", "listAgents", "listDevices", "listPolicies", "updateAgent", "updateDevice", "updatePolicy"
+    "getAgent", "getDevice", "getPolicy", "listAgents", "listDeviceReadModels", "listDevices", "listPolicies", "updateAgent", "updateDevice", "updatePolicy"
   ].sort());
   assert.rejects(repository.listDevices({ organization_id: "not-a-uuid" }), { code: "ERR_INVALID_UUID" });
+});
+
+test("lists the authoritative device read model with one bounded query and no sensitive bundle fields", async () => {
+  const { repository, client } = repo();
+  const [device] = await repository.listDeviceReadModels({ organization_id: ids.organization });
+  assert.deepEqual(device, {
+    device_id: ids.device,
+    name: "Build Mac",
+    status: "active",
+    created_at: NOW,
+    last_seen_at: null,
+    version: 1,
+    desired_generation: 7,
+    observed_generation: 6,
+    refresh_state: "blocked",
+    bundle_sequence: 12,
+    bundle_expires_at: EXPIRES,
+    last_ack_at: NOW,
+    blocked_reason: "bundle_signature_invalid"
+  });
+  assert.deepEqual(Object.keys(device).filter((key) => /signature|nonce|policy|statement_hash|refresh_nonce_digest|private_key/iu.test(key)), []);
+  const readModelQueries = client.calls.filter(({ text }) => text.includes("device_control_plane_state"));
+  assert.equal(readModelQueries.length, 1);
+  assert.match(readModelQueries[0].text, /WHERE devices\.organization_id=\$1/);
+  assert.match(readModelQueries[0].text, /LEFT JOIN LATERAL/);
+  assert.equal(readModelQueries[0].params[0], ids.organization);
 });
 
 test("creates a device with tenant-qualified SQL, safe idempotency, and the CloudStore shape", async () => {

@@ -1,6 +1,7 @@
 import crypto from "node:crypto";
 
 import { normalizeAgentDescriptor, normalizeScope, canonicalJson } from "../../../../packages/protocol/src/index.mjs";
+import { normalizeDeviceReadModel } from "../device-read-model.mjs";
 import { withTransaction } from "./repository.mjs";
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
@@ -24,6 +25,33 @@ const DEVICE_AUTH_SELECT = `SELECT devices.organization_id,devices.id,devices.la
       FROM devices
       LEFT JOIN device_key_epochs active_epoch
         ON active_epoch.organization_id=devices.organization_id AND active_epoch.device_id=devices.id AND active_epoch.status='active'`;
+
+const DEVICE_READ_MODEL_SELECT = `SELECT devices.organization_id,devices.id,devices.label,devices.key_algorithm,devices.public_key_pem,devices.status,devices.metadata,devices.version,devices.created_at,devices.last_seen_at,
+        active_epoch.key_epoch AS active_key_epoch,active_epoch.public_key_pem AS active_public_key_pem,active_epoch.status AS active_key_epoch_status,
+        (SELECT count(*) FROM device_key_epochs epoch_count
+          WHERE epoch_count.organization_id=devices.organization_id AND epoch_count.device_id=devices.id AND epoch_count.status='active') AS active_key_epoch_count,
+        refresh_state.desired_generation,refresh_state.observed_generation,refresh_state.refresh_state,
+        current_statement.sequence AS current_bundle_sequence,current_statement.expires_at AS current_bundle_expires_at,
+        latest_ack.observed_at AS last_ack_observed_at,latest_ack.received_at AS last_ack_received_at,
+        CASE WHEN refresh_state.refresh_state='blocked' THEN COALESCE(latest_ack.reason_code,refresh_state.last_error_code) ELSE NULL END AS blocked_reason
+      FROM devices
+      LEFT JOIN device_key_epochs active_epoch
+        ON active_epoch.organization_id=devices.organization_id AND active_epoch.device_id=devices.id AND active_epoch.status='active'
+      LEFT JOIN device_control_plane_state refresh_state
+        ON refresh_state.organization_id=devices.organization_id AND refresh_state.device_id=devices.id
+      LEFT JOIN bundle_heads current_head
+        ON current_head.organization_id=devices.organization_id AND current_head.device_id=devices.id
+      LEFT JOIN control_bundle_statements current_statement
+        ON current_statement.organization_id=current_head.organization_id AND current_statement.device_id=current_head.device_id
+        AND current_statement.format_epoch=current_head.format_epoch AND current_statement.sequence=current_head.sequence
+        AND current_statement.statement_hash=current_head.statement_hash
+      LEFT JOIN LATERAL (
+        SELECT acknowledgement.observed_at,acknowledgement.received_at,acknowledgement.reason_code
+        FROM device_bundle_acknowledgements acknowledgement
+        WHERE acknowledgement.organization_id=devices.organization_id AND acknowledgement.device_id=devices.id
+        ORDER BY acknowledgement.sequence DESC,acknowledgement.received_at DESC
+        LIMIT 1
+      ) latest_ack ON true`;
 
 /**
  * A CloudStore-compatible PostgreSQL adapter for the control-plane resources
@@ -56,6 +84,7 @@ export function createPostgresControlPlaneResourceRepository({ client, now = () 
     createDevice: (input = {}) => createDevice(input),
     getDevice: (input = {}) => getDevice(input),
     listDevices: (input = {}) => listDevices(input),
+    listDeviceReadModels: (input = {}) => listDeviceReadModels(input),
     updateDevice: (input = {}) => updateDevice(input),
     createDeviceEnrollment: (input = {}) => createDeviceEnrollment(input),
     completeDeviceEnrollment: (input = {}) => completeDeviceEnrollment(input),
@@ -115,6 +144,16 @@ export function createPostgresControlPlaneResourceRepository({ client, now = () 
       const result = await client.query(`${DEVICE_AUTH_SELECT}
         WHERE devices.organization_id=$1 ORDER BY devices.created_at ASC,devices.id ASC`, [organizationId]);
       return (result.rows ?? []).map((row) => mapDevice(row, { requireActiveEpoch: true }));
+    });
+  }
+
+  async function listDeviceReadModels(input) {
+    const organizationId = tenant(input);
+    return runDatabase(async () => {
+      await assertOrganization(client, organizationId);
+      const result = await client.query(`${DEVICE_READ_MODEL_SELECT}
+        WHERE devices.organization_id=$1 ORDER BY devices.created_at ASC,devices.id ASC`, [organizationId]);
+      return (result.rows ?? []).map((row) => mapDeviceReadModel(row));
     });
   }
 
@@ -526,6 +565,21 @@ function mapDevice(row, { requireActiveEpoch = false } = {}) {
     });
   }
   return device;
+}
+
+function mapDeviceReadModel(row) {
+  const device = mapDevice(row, { requireActiveEpoch: true });
+  return normalizeDeviceReadModel({
+    ...device,
+    desired_generation: row.desired_generation,
+    observed_generation: row.observed_generation,
+    refresh_state: row.refresh_state ?? (row.status === "revoked" ? "revoked" : "offline"),
+    current_bundle_sequence: row.current_bundle_sequence,
+    current_bundle_expires_at: row.current_bundle_expires_at,
+    last_ack_observed_at: row.last_ack_observed_at,
+    last_ack_received_at: row.last_ack_received_at,
+    blocked_reason: row.blocked_reason
+  });
 }
 
 function activeDeviceKeyEpoch(row, deviceStatus, devicePublicKey) {

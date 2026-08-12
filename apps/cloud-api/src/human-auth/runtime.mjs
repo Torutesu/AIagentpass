@@ -19,6 +19,7 @@ import { createSimpleWebAuthnAssertionVerifier } from "./webauthn/simplewebauthn
 
 const ALLOWED_RECENT_AUTH_OPERATIONS = Object.freeze([
   "device.enrollment.issue",
+  "device.revoke",
   "organization.emergency_stop",
   HUMAN_MANAGEMENT_RECENT_AUTH_OPERATIONS.revokeCredential,
   HUMAN_MANAGEMENT_RECENT_AUTH_OPERATIONS.revokeCurrentSession,

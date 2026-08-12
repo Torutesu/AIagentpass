@@ -50,7 +50,11 @@ test("human routes enforce bearer role, tenant, and idempotency", async (t) => {
   const f = await fixture(t);
   const ok = await fetch(`${f.base}/v1/organizations/${org}/devices`, { headers: { authorization: `Bearer ${f.token}` } });
   assert.equal(ok.status, 200);
-  assert.equal((await ok.json()).devices.length, 1);
+  const devices = await ok.json();
+  assert.equal(devices.devices.length, 1);
+  assert.equal(devices.devices[0].refresh_state, "offline");
+  assert.equal(devices.devices[0].desired_generation, null);
+  assert.equal(Object.hasOwn(devices.devices[0], "nonce"), false);
   const noAuth = await fetch(`${f.base}/v1/organizations/${org}/devices`);
   assert.equal(noAuth.status, 401);
   const mutation = await fetch(`${f.base}/v1/organizations/${org}/policies`, { method: "POST", headers: { authorization: `Bearer ${f.token}`, "content-type": "application/json" }, body: JSON.stringify({ name: "missing-key", scope: f.scope }) });
@@ -371,7 +375,7 @@ test("operator routes expose metadata and persist device, policy, and capability
 
   const deviceRevocation = await fetch(`${f.base}/v1/organizations/${org}/devices/${deviceId}/revoke`, {
     method: "POST",
-    headers: { ...auth, "content-type": "application/json", "idempotency-key": "revoke-device-0001" },
+    headers: { ...auth, "content-type": "application/json", "idempotency-key": "revoke-device-0001", "agentpass-recent-auth": "webauthn-proof-abcdefghijklmnopqrstuvwxyz" },
     body: JSON.stringify({ reason: "lost-device" })
   });
   assert.equal(deviceRevocation.status, 201, JSON.stringify(await deviceRevocation.clone().json()));
@@ -384,6 +388,37 @@ test("operator routes expose metadata and persist device, policy, and capability
   const health = await fetch(`${f.base}/v1/organizations/${org}/audit/health`, { headers: auth });
   assert.equal(health.status, 200);
   assert.equal((await health.json()).health[0].chain_status, "continuous");
+});
+
+test("device revoke requires operation-bound recent WebAuthn while retaining the admin route", async (t) => {
+  const operations = [];
+  let returnWrongOperation = true;
+  const ownerToken = "ap_owner_token_abcdefghijklmnopqrstuvwxyz";
+  const viewerToken = "ap_viewer_token_abcdefghijklmnopqrstuvwxyz";
+  const f = await fixture(t, {
+    tokenRecords: [
+      createApiTokenRecord({ token: ownerToken, tokenId: "owner-token", organizationId: org, memberId: "owner-1", role: "owner" }),
+      createApiTokenRecord({ token: viewerToken, tokenId: "viewer-token", organizationId: org, memberId: "viewer-1", role: "viewer" })
+    ],
+    verifyRecentWebAuthn: async ({ proof, operation, principal, organization_id }) => {
+      operations.push(operation);
+      return { verified: proof === "webauthn-proof-abcdefghijklmnopqrstuvwxyz", consumed: true, challenge_id: "99999999-9999-4999-8999-999999999999", member_id: principal.member_id, organization_id, operation: returnWrongOperation ? "organization.emergency_stop" : operation, authenticated_at: now };
+    }
+  });
+  const endpoint = `${f.base}/v1/organizations/${org}/devices/${deviceId}/revoke`;
+  const baseHeaders = { authorization: `Bearer ${f.token}`, "content-type": "application/json", "idempotency-key": "revoke-device-recent-auth-0001" };
+  const viewer = await fetch(endpoint, { method: "POST", headers: { ...baseHeaders, authorization: `Bearer ${viewerToken}`, "agentpass-recent-auth": "webauthn-proof-abcdefghijklmnopqrstuvwxyz" }, body: JSON.stringify({ reason: "viewer-must-not-revoke" }) });
+  assert.equal(viewer.status, 403);
+  const missing = await fetch(endpoint, { method: "POST", headers: baseHeaders, body: JSON.stringify({ reason: "missing-proof" }) });
+  assert.equal(missing.status, 401);
+  assert.equal(operations.length, 0);
+  const wrongOperation = await fetch(endpoint, { method: "POST", headers: { ...baseHeaders, "agentpass-recent-auth": "webauthn-proof-abcdefghijklmnopqrstuvwxyz" }, body: JSON.stringify({ reason: "wrong-operation" }) });
+  assert.equal(wrongOperation.status, 401);
+  assert.deepEqual(operations, ["device.revoke"]);
+  returnWrongOperation = false;
+  const accepted = await fetch(endpoint, { method: "POST", headers: { ...baseHeaders, "agentpass-recent-auth": "webauthn-proof-abcdefghijklmnopqrstuvwxyz" }, body: JSON.stringify({ reason: "verified-proof" }) });
+  assert.equal(accepted.status, 201, JSON.stringify(await accepted.clone().json()));
+  assert.deepEqual(operations, ["device.revoke", "device.revoke"]);
 });
 
 test("rate limits human and device principals independently and returns retry metadata", async (t) => {

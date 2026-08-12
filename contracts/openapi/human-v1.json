@@ -466,7 +466,21 @@
         "security": [{ "humanSession": [] }],
         "parameters": [{ "$ref": "#/components/parameters/OrganizationId" }],
         "x-agentpass-tenant-scope": { "kind": "organization", "source": "path.organization_id", "cross-tenant-disclosure": false },
-        "responses": { "200": { "$ref": "#/components/responses/Json" }, "401": { "$ref": "#/components/responses/Unauthorized" }, "403": { "$ref": "#/components/responses/Forbidden" }, "404": { "$ref": "#/components/responses/NotFound" } }
+        "x-agentpass-minimum-role": "viewer",
+        "responses": { "200": { "$ref": "#/components/responses/DeviceList" }, "401": { "$ref": "#/components/responses/Unauthorized" }, "403": { "$ref": "#/components/responses/Forbidden" }, "404": { "$ref": "#/components/responses/NotFound" } }
+      }
+    },
+    "/organizations/{organization_id}/devices/{device_id}/revoke": {
+      "post": {
+        "operationId": "revokeDevice",
+        "summary": "Revoke a device and reduce its authority",
+        "security": [{ "humanSession": [], "recentWebAuthn": [] }],
+        "parameters": [{ "$ref": "#/components/parameters/OrganizationId" }, { "$ref": "#/components/parameters/DeviceId" }, { "$ref": "#/components/parameters/CsrfToken" }, { "$ref": "#/components/parameters/IdempotencyKey" }],
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "type": "object", "additionalProperties": false, "required": ["reason"], "properties": { "reason": { "type": "string", "minLength": 1, "maxLength": 128 } } } } } },
+        "responses": { "201": { "$ref": "#/components/responses/Json" }, "400": { "$ref": "#/components/responses/BadRequest" }, "401": { "$ref": "#/components/responses/Unauthorized" }, "403": { "$ref": "#/components/responses/Forbidden" }, "404": { "$ref": "#/components/responses/NotFound" }, "409": { "$ref": "#/components/responses/IdempotencyConflict" } },
+        "x-agentpass-tenant-scope": { "kind": "organization", "source": "path.organization_id", "cross-tenant-disclosure": false },
+        "x-agentpass-minimum-role": "admin",
+        "x-agentpass-recent-auth-operation": "device.revoke"
       }
     },
     "/organizations/{organization_id}/device-enrollments": {
@@ -527,6 +541,13 @@
         "in": "path",
         "required": true,
         "description": "Tenant identifier. Every organization resource lookup is qualified by this value; cross-tenant existence is not disclosed.",
+        "schema": { "type": "string", "format": "uuid" }
+      },
+      "DeviceId": {
+        "name": "device_id",
+        "in": "path",
+        "required": true,
+        "description": "Device identifier, interpreted only together with organization_id.",
         "schema": { "type": "string", "format": "uuid" }
       },
       "CredentialId": {
@@ -672,6 +693,7 @@
       "InvitationCreated": { "description": "Invitation and its one-time token. The token is returned only once.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/InvitationCreatedResponse" } } } },
       "InvitationResponse": { "description": "Invitation response without token material", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/InvitationResponse" } } } },
       "InvitationAccepted": { "description": "Invitation accepted and membership created", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/InvitationAcceptedResponse" } } } },
+      "DeviceList": { "description": "Minimal authoritative Console device state without keys, policy, nonce, signature, or metadata.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/DeviceListResponse" } } } },
       "BadRequest": { "description": "Malformed request or missing browser security header", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorEnvelope" } } } },
       "Unauthorized": { "description": "No valid humanSession", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorEnvelope" } } } },
       "Forbidden": { "description": "Session lacks the required organization role", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorEnvelope" } } } },
@@ -716,6 +738,30 @@
         }
       },
       "RequestId": { "type": "string", "format": "uuid", "description": "Stable request correlation identifier." },
+      "DeviceConsoleState": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["device_id", "name", "status", "created_at", "last_seen_at", "version", "desired_generation", "observed_generation", "refresh_state", "bundle_sequence", "bundle_expires_at", "last_ack_at", "blocked_reason"],
+        "properties": {
+          "device_id": { "type": "string", "format": "uuid" },
+          "name": { "type": "string", "minLength": 1, "maxLength": 128 },
+          "status": { "type": "string", "enum": ["pending", "active", "revoked"] },
+          "created_at": { "type": "string", "format": "date-time" },
+          "last_seen_at": { "type": ["string", "null"], "format": "date-time" },
+          "version": { "type": "integer", "minimum": 1 },
+          "desired_generation": { "type": ["integer", "null"], "minimum": 1 },
+          "observed_generation": { "type": ["integer", "null"], "minimum": 1 },
+          "refresh_state": { "type": "string", "enum": ["pending", "fetching", "applied", "blocked", "stale", "offline", "revoked"] },
+          "bundle_sequence": { "type": ["integer", "null"], "minimum": 1 },
+          "bundle_expires_at": { "type": ["string", "null"], "format": "date-time" },
+          "last_ack_at": { "type": ["string", "null"], "format": "date-time" },
+          "blocked_reason": { "type": ["string", "null"], "enum": ["bundle_expired", "bundle_not_yet_valid", "bundle_signature_invalid", "bundle_signer_untrusted", "bundle_audience_mismatch", "bundle_sequence_rollback", "bundle_sequence_conflict", "bundle_storage_failed", "device_revoked", "emergency_stop", "internal_error", null] }
+        }
+      },
+      "DeviceListResponse": {
+        "type": "object", "additionalProperties": false, "required": ["request_id", "devices"],
+        "properties": { "request_id": { "$ref": "#/components/schemas/RequestId" }, "devices": { "type": "array", "items": { "$ref": "#/components/schemas/DeviceConsoleState" } } }
+      },
       "Organization": {
         "type": "object",
         "additionalProperties": false,

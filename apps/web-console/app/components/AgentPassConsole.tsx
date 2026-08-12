@@ -28,6 +28,13 @@ export type AgentPassInitialData = {
     status: string;
     location: string;
     checked: string;
+    desiredGeneration?: number;
+    observedGeneration?: number;
+    refreshState?: string;
+    bundleSequence?: number;
+    bundleExpiresAt?: string;
+    lastAckAt?: string;
+    blockedReason?: string;
   }>;
   agents: Array<{
     agentId?: string;
@@ -67,11 +74,18 @@ export const defaultInitialData: AgentPassInitialData = {
   capabilityRecords: [],
   devices: [
     {
+      deviceId: "11111111-1111-4111-8111-111111111111",
       name: "Hiroko の MacBook Pro",
       detail: "Claude Code · v1.0.58",
       status: "接続中",
       location: "東京 / ローカル",
       checked: "たった今",
+      desiredGeneration: 12,
+      observedGeneration: 12,
+      refreshState: "synced",
+      bundleSequence: 42,
+      bundleExpiresAt: "2026-08-12T18:30:00.000Z",
+      lastAckAt: "2026-08-12T17:48:00.000Z",
     },
     {
       name: "AgentPass Cloud",
@@ -161,6 +175,8 @@ type ToastTone = "success" | "error";
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const BASE64URL_CSRF = /^[A-Za-z0-9_-]{43}$/;
 const RECENT_AUTH_OPERATION = "device.enrollment.issue";
+const DEVICE_REVOKE_RECENT_AUTH_OPERATION = "device.revoke";
+const EMERGENCY_STOP_RECENT_AUTH_OPERATION = "organization.emergency_stop";
 const SESSION_BOOTSTRAP_PATH = "/api/auth/session";
 const CSRF_HEADER = "agentpass-csrf";
 
@@ -396,6 +412,74 @@ function StatusTag({ tone, children }: { tone: "green" | "amber" | "red"; childr
   return <span className={`tag ${tone}`}>{children}</span>;
 }
 
+type DeviceStateLabel = "同期済み" | "反映待ち" | "ブロック中" | "古い状態" | "オフライン" | "失効済み";
+type DeviceStateTone = "synced" | "pending" | "blocked" | "stale" | "offline" | "revoked";
+
+function deviceState(device: AgentPassInitialData["devices"][number], now = Date.now()): DeviceStateTone {
+  const refresh = device.refreshState?.toLowerCase();
+  if (device.status === "停止" || refresh === "revoked" || refresh === "disabled") return "revoked";
+  if (refresh === "offline" || refresh === "disconnected") return "offline";
+  if (refresh === "blocked" || Boolean(device.blockedReason)) return "blocked";
+  if (refresh === "stale" || (device.bundleExpiresAt && Date.parse(device.bundleExpiresAt) <= now)) return "stale";
+  if (refresh === "pending" || refresh === "hinted" || refresh === "fetching" || refresh === "verifying" || refresh === "staging") return "pending";
+  if (typeof device.desiredGeneration === "number" && typeof device.observedGeneration === "number" && device.desiredGeneration > device.observedGeneration) return "pending";
+  return "synced";
+}
+
+function deviceStateLabel(state: DeviceStateTone): DeviceStateLabel {
+  return { synced: "同期済み", pending: "反映待ち", blocked: "ブロック中", stale: "古い状態", offline: "オフライン", revoked: "失効済み" }[state];
+}
+
+function deviceStateDescription(state: DeviceStateTone): string {
+  return {
+    synced: "Cloudのdesired世代と端末のobserved世代が一致しています。",
+    pending: "Cloudの更新を端末がまだ反映しています。",
+    blocked: "更新がブロックされています。理由を確認してください。",
+    stale: "Bundleの期限が切れているか、更新確認が必要です。",
+    offline: "端末からの応答がありません。再接続後に同期されます。",
+    revoked: "端末は失効済みです。新しい操作は許可されません。",
+  }[state];
+}
+
+function deviceDate(value?: string): string {
+  if (!value) return "未取得";
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.getTime())) return "日時不明";
+  return new Intl.DateTimeFormat("ja-JP", { dateStyle: "medium", timeStyle: "short" }).format(parsed);
+}
+
+function DeviceStateCard({ device }: { device: AgentPassInitialData["devices"][number] }) {
+  const state = deviceState(device);
+  const label = deviceStateLabel(state);
+  const desired = device.desiredGeneration;
+  const observed = device.observedGeneration;
+  const hasProgress = typeof desired === "number" && typeof observed === "number";
+  const progress = hasProgress ? Math.max(0, Math.min(100, desired === 0 ? 100 : Math.round((Math.min(observed, desired) / desired) * 100))) : 0;
+  return (
+    <article className={`health-card device-state-card state-${state}`}>
+      <div className="health-head">
+        <div><h3 className="health-name">{device.name}</h3><p className="health-subtitle">{device.detail}</p></div>
+        <span className="device-state-badge" data-state={state} aria-label={`同期状態: ${label}`}><span className="status-dot" aria-hidden="true" />{label}</span>
+      </div>
+      <p className="device-state-description">{deviceStateDescription(state)}</p>
+      <div className="device-sync-progress" aria-label={`${device.name}の世代反映状況`}>
+        <div className="device-sync-progress-heading"><span>Cloud desired世代</span><strong>{desired ?? "未取得"}</strong><span aria-hidden="true">→</span><span>端末 observed世代</span><strong>{observed ?? "未取得"}</strong></div>
+        {hasProgress ? <div className="device-sync-track" role="progressbar" aria-label="desired世代からobserved世代への反映状況" aria-valuemin={0} aria-valuemax={desired} aria-valuenow={Math.min(observed, desired)}><span style={{ width: `${progress}%` }} /></div> : <p className="device-sync-missing">世代情報を取得できていません。</p>}
+      </div>
+      <dl className="device-state-details">
+        <div><dt>Bundle sequence</dt><dd>{device.bundleSequence ?? "未取得"}</dd></div>
+        <div><dt>Bundle有効期限</dt><dd>{device.bundleExpiresAt ? <time dateTime={device.bundleExpiresAt}>{deviceDate(device.bundleExpiresAt)}</time> : "未取得"}</dd></div>
+        <div><dt>最終ACK</dt><dd>{device.lastAckAt ? <time dateTime={device.lastAckAt}>{deviceDate(device.lastAckAt)}</time> : "未取得"}</dd></div>
+        {state === "blocked" ? <div><dt>ブロック理由</dt><dd>{device.blockedReason || "理由はCloudで確認してください"}</dd></div> : null}
+      </dl>
+      <div className="health-details device-state-footer">
+        <span className="health-detail"><span className="health-detail-label">ロケーション</span><span className="health-detail-value">{device.location}</span></span>
+        <span className="health-detail"><span className="health-detail-label">最終確認</span><span className="health-detail-value">{device.checked}</span></span>
+      </div>
+    </article>
+  );
+}
+
 function Overview({ data, goTo }: { data: AgentPassInitialData; goTo: (view: ConsoleView) => void }) {
   const activeAgents = data.agents.filter((agent) => agent.state !== "停止").length;
   const connectedDevices = data.devices.filter((device) => device.status !== "停止").length;
@@ -459,18 +543,7 @@ function Overview({ data, goTo }: { data: AgentPassInitialData; goTo: (view: Con
         <p className="section-note">自動更新：30秒ごと</p>
       </div>
       <div className="health-grid">
-        {data.devices.map((device) => (
-          <article className="health-card" key={device.name}>
-            <div className="health-head">
-              <div><h3 className="health-name">{device.name}</h3><p className="health-subtitle">{device.detail}</p></div>
-              <span className="health-status"><span className="status-dot" aria-hidden="true" />{device.status}</span>
-            </div>
-            <div className="health-details">
-              <span className="health-detail"><span className="health-detail-label">ロケーション</span><span className="health-detail-value">{device.location}</span></span>
-              <span className="health-detail"><span className="health-detail-label">最終確認</span><span className="health-detail-value">{device.checked}</span></span>
-            </div>
-          </article>
-        ))}
+        {data.devices.map((device) => <DeviceStateCard device={device} key={device.deviceId ?? device.name} />)}
       </div>
 
       <div className="section-heading-row">
@@ -877,9 +950,12 @@ export function AgentPassConsole({ initialData = defaultInitialData }: AgentPass
   const triggerStop = async () => {
     setStopPending(true);
     try {
+      const { organizationId, csrfToken } = await consoleSessionContext.get();
+      if (!supportsWebAuthn()) throw new Error("WebAuthn unavailable");
+      const { authorization_id } = await authenticateRecentAuth({ operation: EMERGENCY_STOP_RECENT_AUTH_OPERATION, organizationId, csrfToken });
       const response = await fetchConsole("/api/console?operation=emergency-stop", {
         method: "POST",
-        headers: { "content-type": "application/json", "idempotency-key": crypto.randomUUID() },
+        headers: { "content-type": "application/json", "idempotency-key": crypto.randomUUID(), "agentpass-recent-auth": authorization_id },
         body: JSON.stringify({ reason: "web-console-emergency-stop" }),
       });
       if (!response.ok) throw new Error("stop rejected");
@@ -896,9 +972,16 @@ export function AgentPassConsole({ initialData = defaultInitialData }: AgentPass
 
   const operate = async (operation: string, body: Record<string, unknown>, success: string) => {
     try {
+      let recentAuthHeader: Record<string, string> = {};
+      if (operation === "revoke-device") {
+        const { organizationId, csrfToken } = await consoleSessionContext.get();
+        if (!supportsWebAuthn()) throw new Error("WebAuthn unavailable");
+        const { authorization_id } = await authenticateRecentAuth({ operation: DEVICE_REVOKE_RECENT_AUTH_OPERATION, organizationId, csrfToken });
+        recentAuthHeader = { "agentpass-recent-auth": authorization_id };
+      }
       const response = await fetchConsole(`/api/console?operation=${encodeURIComponent(operation)}`, {
         method: "POST",
-        headers: { "content-type": "application/json", "idempotency-key": crypto.randomUUID() },
+        headers: { "content-type": "application/json", "idempotency-key": crypto.randomUUID(), ...recentAuthHeader },
         body: JSON.stringify(body),
       });
       if (!response.ok) throw new Error("operation rejected");
@@ -971,7 +1054,21 @@ function mergeCloudSummary(fallback: AgentPassInitialData, summary: Record<strin
   return {
     ...fallback,
     workspace: typeof organization.name === "string" ? organization.name : fallback.workspace,
-    devices: rawDevices.map((device) => ({ deviceId: String(device.device_id ?? ""), name: String(device.name ?? "確認済み端末"), detail: String(device.status ?? "active"), status: device.status === "revoked" ? "停止" : "正常", location: "ローカル / Cloud管理", checked: "同期済み" })),
+    devices: rawDevices.map((device) => ({
+      deviceId: typeof device.device_id === "string" ? device.device_id : undefined,
+      name: String(device.name ?? "確認済み端末"),
+      detail: String(device.status ?? "active"),
+      status: device.status === "revoked" ? "停止" : "正常",
+      location: "ローカル / Cloud管理",
+      checked: "同期済み",
+      desiredGeneration: typeof device.desired_generation === "number" && Number.isSafeInteger(device.desired_generation) ? device.desired_generation : undefined,
+      observedGeneration: typeof device.observed_generation === "number" && Number.isSafeInteger(device.observed_generation) ? device.observed_generation : undefined,
+      refreshState: typeof device.refresh_state === "string" ? device.refresh_state : undefined,
+      bundleSequence: typeof device.bundle_sequence === "number" && Number.isSafeInteger(device.bundle_sequence) ? device.bundle_sequence : undefined,
+      bundleExpiresAt: typeof device.bundle_expires_at === "string" ? device.bundle_expires_at : undefined,
+      lastAckAt: typeof device.last_ack_at === "string" ? device.last_ack_at : undefined,
+      blockedReason: typeof device.blocked_reason === "string" ? device.blocked_reason : undefined,
+    })),
     agents: rawAgents.map((agent) => ({ agentId: String(agent.agent_id ?? ""), deviceId: typeof agent.device_id === "string" ? agent.device_id : undefined, name: String(agent.name ?? "Coding Agent"), client: agent.kind === "cursor" ? "Cursor" : "Claude Code", detail: String(agent.device_id ?? "登録済み端末"), state: agent.status === "revoked" ? "停止" : "待機中", stateTone: agent.status === "revoked" ? "red" : "green" as "red" | "green" })),
     policies: rawPolicies.map((policy) => ({ policyId: String(policy.policy_id ?? ""), version: typeof policy.version === "number" ? policy.version : 1, scope: policy.scope as Record<string, unknown> | undefined, name: String(policy.name ?? "Policy"), detail: `sequence ${String(policy.sequence ?? 0)} · Cloud署名対象`, state: policy.status === "active" ? "保護中" : "停止", tone: policy.status === "active" ? "green" : "amber" as "green" | "amber" })),
     activities: rawActivity.slice(-20).reverse().map((event) => ({ symbol: event.decision === "allow" ? "✓" : "□", title: event.decision === "allow" ? "操作を許可しました" : "操作をブロックしました", description: `${String(event.operation ?? "agent operation")} · ${String(event.reason ?? "recorded")}`, time: String(event.device_timestamp ?? "同期済み") })),

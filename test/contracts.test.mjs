@@ -170,7 +170,7 @@ test("G4.2 device sync contract matches the implemented Cloud refresh lane", () 
     "refresh-poll": "implemented-g4.1",
     "signed-ack-ingestion": "implemented-g4.1",
     "native-sync": "in-progress-g4.2",
-    "console-device-state": "planned-g4.3"
+    "console-device-state": "in-progress-g4.3"
   });
   assert.match(openapi.components.securitySchemes.deviceSignature.description, /six newline-delimited fields/i);
   assert.match(openapi.components.securitySchemes.deviceSignature.description, /WHATWG_URL_PATHNAME/);
