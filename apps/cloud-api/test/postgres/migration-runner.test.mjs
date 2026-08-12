@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
 import test from "node:test";
 
 import {
@@ -69,6 +70,24 @@ test("loads the reviewed contract migrations in contiguous order without rewriti
   assert.match(loaded[0].sql, /^BEGIN;/);
   assert.match(loaded[0].sql, /CREATE TABLE schema_migrations/);
   assert.match(loaded[0].sql.trim(), /COMMIT;$/);
+});
+
+test("migration 0005 preserves version defaults and protects the final active credential", async () => {
+  const sql = await readFile(new URL("../../../../contracts/postgres/0005_human_credential_session_management.sql", import.meta.url), "utf8");
+
+  assert.match(sql, /ALTER TABLE webauthn_credentials\s+ADD COLUMN version bigint NOT NULL DEFAULT 1/);
+  assert.match(sql, /ALTER TABLE human_sessions\s+ADD COLUMN version bigint NOT NULL DEFAULT 1/);
+  assert.match(sql, /webauthn_credentials_version_valid CHECK \(version > 0\)/);
+  assert.match(sql, /human_sessions_version_valid CHECK \(version > 0\)/);
+  assert.doesNotMatch(sql, /ALTER TABLE (?:webauthn_credentials|human_sessions)[\s\S]*?version[\s\S]*?DROP DEFAULT/);
+
+  assert.match(sql, /CREATE FUNCTION agentpass_prevent_last_webauthn_credential_revoke\(\)/);
+  assert.match(sql, /ERRCODE = 'check_violation'/);
+  assert.match(sql, /CONSTRAINT = 'webauthn_credentials_last_active'/);
+  assert.match(sql, /MESSAGE = 'cannot revoke the last active WebAuthn credential'/);
+  assert.match(sql, /CREATE TRIGGER webauthn_credentials_protect_last_active/);
+  assert.match(sql, /BEFORE UPDATE OF revoked_at ON webauthn_credentials/);
+  assert.match(sql, /WHEN \(OLD\.revoked_at IS NULL AND NEW\.revoked_at IS NOT NULL\)/);
 });
 
 test("fails closed when the database skips a migration version", async () => {

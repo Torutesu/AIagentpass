@@ -10,18 +10,32 @@ The command prints the owner API token once. Store it as a server secret for the
 
 ## Provision an upstream identity
 
-After the PostgreSQL migrations have been applied, an operator can bind one upstream identity to an existing active organization membership. The command is non-interactive and reads the database connection only from `AGENTPASS_DATABASE_URL`; the URL must use `sslmode=verify-full`.
+Before running `identity-bind`, confirm that:
+
+- the PostgreSQL migrations, including the identity migration, have completed successfully;
+- the exact `(organization_id, member_id)` pair exists as an active membership; and
+- the operator environment can reach PostgreSQL with TLS certificate verification. `AGENTPASS_DATABASE_URL` is required and must use `sslmode=verify-full`.
+
+The command accepts only the four named arguments below. Supply the database URL through the environment or a secret manager; never put it in an argument, shell command, process title, or pasted incident log. The values below are placeholders, not credentials:
 
 ```bash
-export AGENTPASS_DATABASE_URL='postgresql://agentpass:...@db.example/agentpass?sslmode=verify-full'
+export AGENTPASS_DATABASE_URL='postgresql://DB_USER:DB_PASSWORD@DB_HOST:5432/DB_NAME?sslmode=verify-full'
 npm run identity-bind -- \
-  --provider chatgpt \
+  --provider PROVIDER_NAME \
   --subject UPSTREAM_SUBJECT \
-  --member-id 22222222-2222-4222-8222-222222222222 \
-  --organization-id 33333333-3333-4333-8333-333333333333
+  --member-id MEMBER_UUID \
+  --organization-id ORGANIZATION_UUID
 ```
 
-The command first locks and verifies the exact active `(organization_id, member_id)` membership. It then inserts the immutable `(provider, subject) -> member_id` mapping. Repeating the same command is safe and reports `already_exists`; attempting to bind an existing subject to another member fails closed with `identity_rebind_forbidden`. It never updates or deletes an identity mapping, runs no interactive prompt, and emits only bounded JSON metadata; database URLs, passwords, driver errors, and credentials are never printed.
+The operation is transactional. It first locks and verifies the exact active membership, then inserts the immutable `(provider, subject) -> member_id` mapping. An exact repeat is idempotent: it reports `already_exists` and does not update or delete the mapping. If the subject already belongs to another member, the command fails closed with `identity_rebind_forbidden`; it never silently rebinds an identity.
+
+### Failure, rollback, and verification
+
+On any non-zero exit, record only the stable JSON error code and treat a database or network failure as an unknown outcome until verified. The transaction rolls back when membership verification, insertion, or conflict handling fails. A failed membership check or rebind attempt must leave no new mapping and must not change an existing mapping.
+
+Verify the result with an approved read-only database client configured from the environment or a secret manager, not with a connection URL on the command line. Check that the exact provider and subject resolve to the expected member and that the membership remains active. If verification shows `created`, the mapping is immutable: do not attempt a delete-and-rebind rollback. Follow the incident procedure to disable the affected membership or identity access, preserve the audit evidence, and have an authorized operator determine the remediation. After an ambiguous transient failure, verify first and rerun only when the expected state is absent; an `already_exists` result is the safe idempotent completion.
+
+Output is bounded JSON metadata only. Success reports the command, stable result (`created` or `already_exists`), and supplied identity/member/organization identifiers. Failure reports only `ok: false` and a stable error code. Database URLs, passwords, SQL text, stack traces, driver errors, tokens, and other credentials must never appear in stdout, stderr, monitoring, or incident tickets.
 
 ## Production persistence and human authentication
 

@@ -1,13 +1,17 @@
 import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
 import test from "node:test";
-import { getSecuritySnapshot, renamePasskey, revokePasskey, revokeSession, SecurityClientError } from "../app/security-client.ts";
+import { createSecurityClient, getSecuritySnapshot, renamePasskey, revokePasskey, SecurityClientError } from "../app/security-client.ts";
 
 const csrf = "C".repeat(43);
 const credentialId = "A".repeat(22);
 const sessionId = "11111111-1111-4111-8111-111111111111";
+const otherSessionId = "44444444-4444-4444-8444-444444444444";
 const memberId = "22222222-2222-4222-8222-222222222222";
 const organizationId = "33333333-3333-4333-8333-333333333333";
 const date = "2026-08-12T10:00:00.000Z";
+const authorizationId = "55555555-5555-4555-8555-555555555555";
+const authorize = async () => ({ authorization_id: authorizationId });
 
 function sessionResponse() {
   return json({ session: { organization_id: organizationId }, csrf_token: csrf }, 201);
@@ -17,8 +21,8 @@ function credential(status = "active") {
   return { credential_id: credentialId, version: 2, label: "Mac Touch ID", transports: ["internal"], backup_eligible: false, backup_state: false, status, created_at: date, last_used_at: null, revoked_at: status === "revoked" ? date : null };
 }
 
-function session(status = "active", current = true) {
-  return { session_id: sessionId, version: 3, member_id: memberId, organization_id: organizationId, role: "owner", status, is_current: current, created_at: date, expires_at: "2026-08-12T18:00:00.000Z", last_seen_at: date, recent_auth_at: null, revoked_at: null };
+function session(status = "active", current = true, id = current ? sessionId : otherSessionId) {
+  return { session_id: id, version: 3, member_id: memberId, organization_id: organizationId, role: "owner", status, is_current: current, created_at: date, expires_at: "2026-08-12T18:00:00.000Z", last_seen_at: date, recent_auth_at: null, revoked_at: null };
 }
 
 function json(body, status = 200, headers = {}) {
@@ -45,32 +49,95 @@ test("loads only active safe metadata through the same-origin security paths", a
   }
 });
 
-test("sends optimistic versions and never exposes the Cloud credential to the browser client", async () => {
+test("reuses one bootstrap result for every read and mutation in a Security lifecycle", async () => {
   const calls = [];
+  const authorizations = [];
   const fetchImpl = async (url, init) => {
     calls.push({ url: String(url), init });
     if (url === "/api/auth/session") return sessionResponse();
+    if (url === "/api/auth/security/passkeys") return json({ credentials: [credential()], next_cursor: null });
+    if (url === "/api/auth/security/sessions") return json({ sessions: [session()], next_cursor: null });
     if (url.includes("/passkeys/") && init.method === "PATCH") return json({ credential: credential() });
     if (url.includes("/passkeys/") && init.method === "POST") return json({ credential: { ...credential("revoked"), revoked_at: date } });
     if (url.includes("/sessions/") && init.method === "POST") return json({ session: session("revoked", false) });
     throw new Error("unexpected path");
   };
 
-  await renamePasskey(credentialId, "仕事用Touch ID", 2, { fetchImpl });
-  await revokePasskey(credentialId, 3, { fetchImpl });
-  await revokeSession(sessionId, 4, { fetchImpl });
+  const client = createSecurityClient({ fetchImpl, authenticateRecentAuthImpl: async (input) => { authorizations.push(input); return { authorization_id: authorizationId }; } });
+  await client.getSnapshot();
+  await client.renamePasskey(credentialId, "仕事用Touch ID", 2);
+  await client.revokePasskey(credentialId, 3);
+  await client.revokeSession(otherSessionId, 4);
 
   assert.deepEqual(calls.map((call) => [call.url, call.init.method]), [
     ["/api/auth/session", "POST"],
+    ["/api/auth/security/passkeys", "GET"],
+    ["/api/auth/security/sessions", "GET"],
     [`/api/auth/security/passkeys/${credentialId}`, "PATCH"],
-    ["/api/auth/session", "POST"],
     [`/api/auth/security/passkeys/${credentialId}/revoke`, "POST"],
-    ["/api/auth/session", "POST"],
-    [`/api/auth/security/sessions/${sessionId}/revoke`, "POST"],
+    [`/api/auth/security/sessions/${otherSessionId}/revoke`, "POST"],
   ]);
-  assert.deepEqual(JSON.parse(calls[1].init.body), { label: "仕事用Touch ID", expected_version: 2 });
-  assert.deepEqual(JSON.parse(calls[3].init.body), { expected_version: 3 });
+  assert.deepEqual(JSON.parse(calls[3].init.body), { label: "仕事用Touch ID", expected_version: 2 });
+  assert.deepEqual(JSON.parse(calls[4].init.body), { expected_version: 3 });
+  assert.equal(calls[4].init.headers.get("agentpass-recent-auth"), authorizationId);
+  assert.deepEqual(authorizations.map(({ operation, organizationId, csrfToken }) => ({ operation, organizationId, csrfToken })), [{ operation: "human.management.credential.revoke", organizationId, csrfToken: csrf }]);
   assert.deepEqual(JSON.parse(calls[5].init.body), { expected_version: 4 });
+});
+
+test("revokes all other sessions through the existing per-session contract", async () => {
+  const calls = [];
+  const client = createSecurityClient({ authenticateRecentAuthImpl: authorize, fetchImpl: async (url, init) => {
+    calls.push({ url: String(url), init });
+    if (url === "/api/auth/session") return sessionResponse();
+    if (url === "/api/auth/security/passkeys") return json({ credentials: [], next_cursor: null });
+    if (url === "/api/auth/security/sessions") return json({ sessions: [session(), session("active", false), session("active", false, "55555555-5555-4555-8555-555555555555")], next_cursor: null });
+    if (url.includes("/security/sessions/") && init.method === "POST") return json({ session: session("revoked", false, String(url).split("/").at(-2)) });
+    throw new Error("unexpected path");
+  }});
+
+  const snapshot = await client.getSnapshot();
+  assert.equal(await client.revokeOtherSessions(snapshot.sessions), 2);
+  assert.equal(calls.filter((call) => call.url === "/api/auth/session").length, 1);
+  assert.deepEqual(calls.filter((call) => call.url.includes("/security/sessions/")).map((call) => call.url), [
+    `/api/auth/security/sessions/${otherSessionId}/revoke`,
+    "/api/auth/security/sessions/55555555-5555-4555-8555-555555555555/revoke",
+  ]);
+});
+
+test("current-session revoke closes the lifecycle without bootstrapping a replacement", async () => {
+  const calls = [];
+  const client = createSecurityClient({ authenticateRecentAuthImpl: authorize, fetchImpl: async (url, init) => {
+    calls.push({ url: String(url), init });
+    if (url === "/api/auth/session") return sessionResponse();
+    if (url === "/api/auth/security/passkeys") return json({ credentials: [], next_cursor: null });
+    if (url === "/api/auth/security/sessions") return json({ sessions: [session()], next_cursor: null });
+    if (url === `/api/auth/security/sessions/${sessionId}/revoke`) return json({ session: session("revoked", true) });
+    throw new Error("unexpected path");
+  }});
+
+  const snapshot = await client.getSnapshot();
+  await client.revokeCurrentSession(snapshot.sessions[0].id, snapshot.sessions[0].version);
+  assert.equal(calls.at(-1).init.headers.get("agentpass-recent-auth"), authorizationId);
+  await assert.rejects(() => client.getSnapshot(), (error) => error instanceof SecurityClientError && error.status === 401);
+  assert.equal(calls.filter((call) => call.url === "/api/auth/session").length, 1);
+});
+
+test("keeps AbortError identity and permits a retry after an aborted bootstrap", async () => {
+  let bootstraps = 0;
+  const client = createSecurityClient({ fetchImpl: async (url) => {
+    if (url === "/api/auth/session") {
+      bootstraps += 1;
+      if (bootstraps === 1) throw new DOMException("cancelled", "AbortError");
+      return sessionResponse();
+    }
+    if (url === "/api/auth/security/passkeys") return json({ credentials: [], next_cursor: null });
+    if (url === "/api/auth/security/sessions") return json({ sessions: [session()], next_cursor: null });
+    throw new Error("unexpected path");
+  }});
+
+  await assert.rejects(() => client.getSnapshot(), (error) => error instanceof DOMException && error.name === "AbortError");
+  await client.getSnapshot();
+  assert.equal(bootstraps, 2);
 });
 
 test("rejects malformed security responses and invalid mutation input", async () => {
@@ -78,4 +145,36 @@ test("rejects malformed security responses and invalid mutation input", async ()
   assert.equal(malformed, undefined);
   await assert.rejects(() => renamePasskey(credentialId, "", 1, { fetchImpl: async () => sessionResponse() }), (error) => error instanceof SecurityClientError && error.code === "invalid_response");
   await assert.rejects(() => revokePasskey(credentialId, 0, { fetchImpl: async () => sessionResponse() }), (error) => error instanceof SecurityClientError && error.code === "invalid_response");
+});
+
+test("does not access browser storage or log secrets, and does not return the CSRF token", async () => {
+  const source = await readFile(new URL("../app/security-client.ts", import.meta.url), "utf8");
+  assert.doesNotMatch(source, /localStorage|sessionStorage|console\.(?:log|info|warn|error)/);
+
+  const originalLocalStorage = Object.getOwnPropertyDescriptor(globalThis, "localStorage");
+  const originalSessionStorage = Object.getOwnPropertyDescriptor(globalThis, "sessionStorage");
+  const originalLog = console.log;
+  let storageAccesses = 0;
+  let logCalls = 0;
+  Object.defineProperty(globalThis, "localStorage", { configurable: true, get() { storageAccesses += 1; throw new Error("storage access"); } });
+  Object.defineProperty(globalThis, "sessionStorage", { configurable: true, get() { storageAccesses += 1; throw new Error("storage access"); } });
+  console.log = () => { logCalls += 1; };
+  try {
+    const client = createSecurityClient({ fetchImpl: async (url) => {
+      if (url === "/api/auth/session") return sessionResponse();
+      if (url === "/api/auth/security/passkeys") return json({ credentials: [credential()], next_cursor: null });
+      if (url === "/api/auth/security/sessions") return json({ sessions: [session()], next_cursor: null });
+      throw new Error("unexpected path");
+    }});
+    const snapshot = await client.getSnapshot();
+    assert.doesNotMatch(JSON.stringify(snapshot), new RegExp(csrf));
+  } finally {
+    console.log = originalLog;
+    if (originalLocalStorage) Object.defineProperty(globalThis, "localStorage", originalLocalStorage);
+    else delete globalThis.localStorage;
+    if (originalSessionStorage) Object.defineProperty(globalThis, "sessionStorage", originalSessionStorage);
+    else delete globalThis.sessionStorage;
+  }
+  assert.equal(storageAccesses, 0);
+  assert.equal(logCalls, 0);
 });

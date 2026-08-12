@@ -16,6 +16,10 @@ test("Console exposes a Japanese Security surface with bounded loading, empty, e
   assert.match(source, /renamePasskey\(/);
   assert.match(source, /revokePasskey\(/);
   assert.match(source, /revokeSession\(/);
+  assert.match(source, /createSecurityClient\(/);
+  assert.match(source, /revokeCurrentSession\(/);
+  assert.match(source, /revokeOtherSessions\(/);
+  assert.match(source, /サインアウト/);
   assert.match(source, /activeView === "security"/);
   const securityBody = source.slice(source.indexOf("function SecuritySurface"), source.indexOf("function EmergencySurface"));
   assert.doesNotMatch(securityBody, /localStorage|sessionStorage|console\.(?:log|info|warn|error)|public_key|credentialPublicKey|clientDataJSON/);

@@ -2,7 +2,7 @@ import { createHumanSessionService } from "../human-session.mjs";
 import { createConsoleIdentityAdapter } from "./console-identity.mjs";
 import { createPostgresIdentityResolver } from "./identity/postgres-resolver.mjs";
 import { createHumanAuthHttpApi } from "./http-api.mjs";
-import { createHumanManagementHttpApi } from "./management/http-api.mjs";
+import { createHumanManagementHttpApi, HUMAN_MANAGEMENT_RECENT_AUTH_OPERATIONS } from "./management/http-api.mjs";
 import { createPostgresHumanManagementRepository } from "./management/postgres-adapter.mjs";
 import { createWebAuthnRegistrationHttpApi } from "./registration-http-api.mjs";
 import { createRecentAuthService } from "./recent-auth.mjs";
@@ -13,7 +13,12 @@ import { createPostgresWebAuthnRegistrationCeremony } from "./webauthn/postgres-
 import { createSimpleWebAuthnRegistrationVerifier, createWebAuthnRegistrationService } from "./webauthn/registration.mjs";
 import { createSimpleWebAuthnAssertionVerifier } from "./webauthn/simplewebauthn-adapter.mjs";
 
-const ALLOWED_RECENT_AUTH_OPERATIONS = Object.freeze(["device.enrollment.issue", "organization.emergency_stop"]);
+const ALLOWED_RECENT_AUTH_OPERATIONS = Object.freeze([
+  "device.enrollment.issue",
+  "organization.emergency_stop",
+  HUMAN_MANAGEMENT_RECENT_AUTH_OPERATIONS.revokeCredential,
+  HUMAN_MANAGEMENT_RECENT_AUTH_OPERATIONS.revokeCurrentSession
+]);
 
 export function createHumanAuthRuntime({ postgresRuntime, tokenRecords, origin, rpId, identityProvider = "chatgpt", now = () => Date.now() } = {}) {
   const repository = postgresRuntime?.humanRepository;
@@ -44,7 +49,7 @@ export function createHumanAuthRuntime({ postgresRuntime, tokenRecords, origin, 
   });
   const registrationApi = createWebAuthnRegistrationHttpApi({ humanSession, registrationService, origin, basePath: "/api/auth" });
   const managementRepository = createPostgresHumanManagementRepository({ repository, now });
-  const managementApi = createHumanManagementHttpApi({ humanSession, repository: managementRepository, origin });
+  const managementApi = createHumanManagementHttpApi({ humanSession, recentAuthService, repository: managementRepository, origin, now });
   const api = createHumanAuthRouter({ sessionApi, webauthnApi, registrationApi, managementApi });
   return Object.freeze({ api, humanSession, recentAuthService, ceremony, registrationCeremony, registrationService, identityResolver, managementRepository, sessionApi, webauthnApi, registrationApi, managementApi, allowedOperations: ALLOWED_RECENT_AUTH_OPERATIONS });
 }

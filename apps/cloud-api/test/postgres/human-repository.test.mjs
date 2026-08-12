@@ -25,6 +25,8 @@ test("credential lookup and counter update are session and organization scoped",
   assert.equal(await repo.findCredentialForSession({session_id:ids.session,organization_id:ids.org,credential_id:credential}),null);
   assert.equal(await repo.updateCredentialCounter({session_id:ids.session,organization_id:ids.org,credential_id:credential,sign_count:2,expected_sign_count:1}),false);
   assert.match(calls[0].text,/m\.status='active'/); assert.match(calls[1].text,/c\.sign_count=\$5/);
+  assert.match(calls[1].text,/SET sign_count=\$4,last_used_at=clock_timestamp\(\)/);
+  assert.doesNotMatch(calls[1].text,/\bversion\s*=/);
 });
 
 test("credential allow lists are session-bound, active, bounded, and browser-safe", async () => {
@@ -248,3 +250,117 @@ test("other-session revocation is transaction-bound and returns safe rows", asyn
   assert.match(calls.find(({ text }) => text.startsWith("UPDATE human_sessions target")).text, /target\.id<>\$1/);
   assert.equal(calls.at(-1).text, "COMMIT");
 });
+
+test("serializes concurrent revocations so exactly one caller can revoke from two active credentials", async () => {
+  const firstId = Buffer.alloc(16, 1);
+  const secondId = Buffer.alloc(16, 2);
+  const client = new ConcurrentCredentialPool({
+    credentials: [
+      managedCredential(firstId),
+      managedCredential(secondId),
+    ],
+  });
+  const repo = createPostgresHumanRepository({ client });
+  const input = (credentialId) => ({
+    session_id: ids.session,
+    member_id: ids.member,
+    organization_id: ids.org,
+    credential_id: credentialId.toString("base64url"),
+    expected_version: 1,
+    revoked_at: "2026-08-12T00:04:00.000Z",
+  });
+
+  const results = await Promise.allSettled([
+    repo.revokeCredential(input(firstId)),
+    repo.revokeCredential(input(secondId)),
+  ]);
+
+  assert.equal(results.filter((result) => result.status === "fulfilled").length, 1);
+  assert.equal(results.filter((result) => result.status === "rejected").length, 1);
+  assert.equal(results.find((result) => result.status === "rejected").reason.code, "ERR_LAST_ACTIVE_CREDENTIAL");
+  assert.equal(client.credentials.filter(({ revoked_at }) => revoked_at === null).length, 1);
+  assert.equal(client.calls.filter(({ text }) => text.startsWith("UPDATE webauthn_credentials c SET revoked_at")).length, 1);
+  assert.equal(client.lockAcquisitions, 2);
+});
+
+function managedCredential(id) {
+  return {
+    id,
+    member_id: ids.member,
+    label: "Credential",
+    transports: [],
+    backup_eligible: false,
+    backup_state: false,
+    created_at: "2026-08-12T00:00:00.000Z",
+    last_used_at: null,
+    revoked_at: null,
+    version: 1,
+  };
+}
+
+class ConcurrentCredentialPool {
+  constructor({ credentials }) {
+    this.credentials = credentials;
+    this.calls = [];
+    this.locked = false;
+    this.waiters = [];
+    this.lockAcquisitions = 0;
+  }
+
+  async connect() {
+    const connection = { lockHeld: false };
+    connection.query = (text, params = []) => this.query(connection, text, params);
+    connection.release = () => {};
+    return connection;
+  }
+
+  async query(connection, text, params = []) {
+    this.calls.push({ text, params });
+    if (text === "BEGIN" || text === "COMMIT" || text === "ROLLBACK") {
+      if (text !== "BEGIN" && connection.lockHeld) {
+        connection.lockHeld = false;
+        this.releaseLock();
+      }
+      return { rows: [], rowCount: 0 };
+    }
+    if (text.startsWith("SELECT pg_advisory_xact_lock")) {
+      await this.acquireLock();
+      connection.lockHeld = true;
+      this.lockAcquisitions += 1;
+      return { rows: [{ locked: true }], rowCount: 1 };
+    }
+    if (text.startsWith("SELECT c.id FROM webauthn_credentials")) {
+      const id = params[3];
+      const expectedVersion = params[4];
+      const row = this.credentials.find((candidate) => candidate.id.equals(id) && candidate.revoked_at === null && candidate.version === expectedVersion);
+      return { rows: row ? [{ id: row.id }] : [], rowCount: row ? 1 : 0 };
+    }
+    if (text.startsWith("SELECT count(*)::text AS active_count")) {
+      return { rows: [{ active_count: String(this.credentials.filter(({ member_id, revoked_at }) => member_id === ids.member && revoked_at === null).length) }], rowCount: 1 };
+    }
+    if (text.startsWith("UPDATE webauthn_credentials c SET revoked_at")) {
+      const id = params[3];
+      const expectedVersion = params[4];
+      const row = this.credentials.find((candidate) => candidate.id.equals(id) && candidate.revoked_at === null && candidate.version === expectedVersion);
+      if (!row) return { rows: [], rowCount: 0 };
+      row.revoked_at = params[6];
+      row.version += 1;
+      return { rows: [row], rowCount: 1 };
+    }
+    throw new Error(`unexpected query in concurrency mock: ${text}`);
+  }
+
+  async acquireLock() {
+    if (!this.locked) {
+      this.locked = true;
+      return;
+    }
+    await new Promise((resolve) => this.waiters.push(resolve));
+  }
+
+  releaseLock() {
+    const next = this.waiters.shift();
+    if (next) next();
+    else this.locked = false;
+  }
+}

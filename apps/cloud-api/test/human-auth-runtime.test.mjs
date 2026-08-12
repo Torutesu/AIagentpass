@@ -45,6 +45,8 @@ test("composes the production human-auth boundary and bootstraps a hash-only ses
   assert.match(result.body.csrf_token, /^[A-Za-z0-9_-]{43}$/);
   assert.match(result.headers["Set-Cookie"], /^__Host-agentpass_session=/);
   assert.equal(runtime.allowedOperations.includes("device.enrollment.issue"), true);
+  assert.equal(runtime.allowedOperations.includes("human.management.credential.revoke"), true);
+  assert.equal(runtime.allowedOperations.includes("human.management.session.revoke"), true);
   assert.equal(Object.isFrozen(runtime), true);
 });
 

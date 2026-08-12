@@ -61,6 +61,12 @@ export async function handleHumanAuthRequest(request, options = {}) {
       if (csrf === null || csrf.length < 1 || csrf.length > 512 || hasControl(csrf)) fail(403, "csrf_required", "CSRF authentication is required");
       headers.set("agentpass-csrf", csrf);
     }
+    const recentAuth = request.headers.get("agentpass-recent-auth");
+    if (route.requireRecentAuth && recentAuth === null) fail(401, "recent_auth_required", "Recent WebAuthn authentication is required");
+    if (recentAuth !== null) {
+      if (!(route.requireRecentAuth || route.allowRecentAuth) || !isUuid(recentAuth)) fail(400, "invalid_recent_auth", "Recent WebAuthn authentication is invalid");
+      headers.set("agentpass-recent-auth", recentAuth.toLowerCase());
+    }
 
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), config.timeoutMs);
@@ -197,8 +203,8 @@ function resolveRoute(pathname) {
   try { id = decodeURIComponent(match[2]); } catch { return undefined; }
   if (id !== match[2]) return undefined;
   if (match[1] === "passkeys" && isCredentialId(id) && !match[3]) return { cloudPath: `/api/auth/management/credentials/${id}`, methods: ["PATCH"], requireCookie: true, requireCsrf: true, body: "rename" };
-  if (match[1] === "passkeys" && isCredentialId(id) && match[3]) return { cloudPath: `/api/auth/management/credentials/${id}/revoke`, methods: ["POST"], requireCookie: true, requireCsrf: true, body: "version" };
-  if (match[1] === "sessions" && isUuid(id) && match[3]) return { cloudPath: `/api/auth/management/sessions/${id.toLowerCase()}/revoke`, methods: ["POST"], requireCookie: true, requireCsrf: true, body: "version", allowSetCookie: true };
+  if (match[1] === "passkeys" && isCredentialId(id) && match[3]) return { cloudPath: `/api/auth/management/credentials/${id}/revoke`, methods: ["POST"], requireCookie: true, requireCsrf: true, requireRecentAuth: true, body: "version" };
+  if (match[1] === "sessions" && isUuid(id) && match[3]) return { cloudPath: `/api/auth/management/sessions/${id.toLowerCase()}/revoke`, methods: ["POST"], requireCookie: true, requireCsrf: true, allowRecentAuth: true, body: "version", allowSetCookie: true };
   return undefined;
 }
 function isExactObject(value, keys) {

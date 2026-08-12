@@ -18,8 +18,10 @@ const CURRENT_SESSION_ID = "33333333-3333-4333-8333-333333333333";
 const OTHER_SESSION_ID = "44444444-4444-4444-8444-444444444444";
 const CREDENTIAL_ID = Buffer.alloc(16).toString("base64url");
 const OTHER_CREDENTIAL_ID = Buffer.alloc(17, 1).toString("base64url");
+const RECENT_AUTHORIZATION_ID = "55555555-5555-4555-8555-555555555555";
 const CREATED = "2026-08-12T00:00:00.000Z";
 const EXPIRES = "2026-08-12T08:00:00.000Z";
+const NOW = Date.parse(CREATED);
 
 function authenticatedSession(overrides = {}) {
   return {
@@ -100,8 +102,8 @@ function repository(overrides = {}) {
   return { repo, calls };
 }
 
-function fixture({ repositoryOverrides = {}, sessionOverrides = {}, authError = undefined } = {}) {
-  const calls = { auth: [] };
+function fixture({ repositoryOverrides = {}, sessionOverrides = {}, authError = undefined, recentAuthError = undefined, recentAuthResult = undefined, recentAuthService = undefined } = {}) {
+  const calls = { auth: [], recentAuth: [] };
   const { repo, calls: repositoryCalls } = repository(repositoryOverrides);
   const humanSession = {
     expectedOrigin: ORIGIN,
@@ -111,7 +113,23 @@ function fixture({ repositoryOverrides = {}, sessionOverrides = {}, authError = 
       return { session: authenticatedSession(sessionOverrides) };
     }
   };
-  const api = createHumanManagementHttpApi({ humanSession, repository: repo, origin: ORIGIN });
+  const defaultRecentAuthService = {
+    async authorize(input) {
+      calls.recentAuth.push(input);
+      if (recentAuthError) throw recentAuthError;
+      if (typeof recentAuthResult === "function") return recentAuthResult(input);
+      return recentAuthResult ?? {
+        verified: true,
+        consumed: true,
+        challenge_id: RECENT_AUTHORIZATION_ID,
+        member_id: input.principal.member_id,
+        organization_id: input.organization_id,
+        operation: input.operation,
+        authenticated_at: NOW
+      };
+    }
+  };
+  const api = createHumanManagementHttpApi({ humanSession, recentAuthService: recentAuthService ?? defaultRecentAuthService, repository: repo, origin: ORIGIN, now: () => NOW });
   return { api, calls: { ...calls, ...repositoryCalls } };
 }
 
@@ -123,6 +141,7 @@ function request(path, { method = "GET", body = undefined, headers = {} } = {}) 
       origin: ORIGIN,
       cookie: COOKIE,
       "agentpass-csrf": CSRF,
+      "agentpass-recent-auth": RECENT_AUTHORIZATION_ID,
       ...(method === "GET" ? {} : { "content-type": "application/json" }),
       ...headers
     },
@@ -307,12 +326,74 @@ test("revoking the current session clears only the current session cookie", asyn
   assert.equal(current.calls.revokeSession[0].target_session_id, CURRENT_SESSION_ID);
   assert.equal(current.calls.revokeSession[0].expected_version, 1);
   assert.equal(currentResult.body.session.is_current, true);
+  assert.equal(current.calls.recentAuth[0].operation, "human.management.session.revoke");
+  assert.equal(current.calls.recentAuth[0].principal.member_id, MEMBER_ID);
+  assert.equal(current.calls.recentAuth[0].principal.organization_id, ORGANIZATION_ID);
 
   const other = fixture({ repositoryOverrides: { revokeSession: session({ session_id: OTHER_SESSION_ID, id: OTHER_SESSION_ID, status: "revoked", revoked_at: "2026-08-12T01:00:00.000Z", version: 2 }) } });
   const otherResult = await other.api.handle(request(HUMAN_MANAGEMENT_HTTP_PATHS.sessionRevoke(OTHER_SESSION_ID), { method: "POST", body: { expected_version: 1 } }));
   assert.equal(otherResult.status, 200);
   assert.equal(Object.hasOwn(otherResult.headers, "Set-Cookie"), false);
   assert.equal(otherResult.body.session.is_current, false);
+  assert.equal(other.calls.recentAuth.length, 0);
+});
+
+test("requires exact single-use recent auth for credential and current-session revocation", async () => {
+  for (const path of [
+    HUMAN_MANAGEMENT_HTTP_PATHS.credentialRevoke(CREDENTIAL_ID),
+    HUMAN_MANAGEMENT_HTTP_PATHS.sessionRevoke(CURRENT_SESSION_ID)
+  ]) {
+    const missing = fixture();
+    const missingRequest = request(path, { method: "POST", body: { expected_version: 1 } });
+    delete missingRequest.headers["agentpass-recent-auth"];
+    const missingResult = await missing.api.handle(missingRequest);
+    assert.equal(missingResult.status, 401);
+    assert.equal(missingResult.body.error.code, HUMAN_MANAGEMENT_HTTP_ERROR_CODES.RECENT_AUTH_REQUIRED);
+    assert.equal(missing.calls.revokeCredential.length + missing.calls.revokeSession.length, 0);
+
+    const wrong = fixture({ recentAuthResult: (input) => ({
+      verified: true,
+      consumed: true,
+      challenge_id: RECENT_AUTHORIZATION_ID,
+      member_id: input.principal.member_id,
+      organization_id: input.organization_id,
+      operation: "wrong.operation",
+      authenticated_at: NOW
+    }) });
+    const wrongResult = await wrong.api.handle(request(path, { method: "POST", body: { expected_version: 1 } }));
+    assert.equal(wrongResult.status, 401);
+    assert.equal(wrongResult.body.error.code, HUMAN_MANAGEMENT_HTTP_ERROR_CODES.RECENT_AUTH_FAILED);
+    assert.equal(wrong.calls.revokeCredential.length + wrong.calls.revokeSession.length, 0);
+  }
+
+  let consumed = false;
+  const replay = fixture({ recentAuthResult: (input) => {
+    if (consumed) return {
+      verified: false,
+      consumed: false,
+      challenge_id: RECENT_AUTHORIZATION_ID,
+      member_id: input.principal.member_id,
+      organization_id: input.organization_id,
+      operation: input.operation,
+      authenticated_at: NOW
+    };
+    consumed = true;
+    return {
+      verified: true,
+      consumed: true,
+      challenge_id: RECENT_AUTHORIZATION_ID,
+      member_id: input.principal.member_id,
+      organization_id: input.organization_id,
+      operation: input.operation,
+      authenticated_at: NOW
+    };
+  } });
+  const first = await replay.api.handle(request(HUMAN_MANAGEMENT_HTTP_PATHS.credentialRevoke(CREDENTIAL_ID), { method: "POST", body: { expected_version: 1 } }));
+  assert.equal(first.status, 200);
+  const second = await replay.api.handle(request(HUMAN_MANAGEMENT_HTTP_PATHS.credentialRevoke(CREDENTIAL_ID), { method: "POST", body: { expected_version: 1 } }));
+  assert.equal(second.status, 401);
+  assert.equal(second.body.error.code, HUMAN_MANAGEMENT_HTTP_ERROR_CODES.RECENT_AUTH_FAILED);
+  assert.equal(replay.calls.revokeCredential.length, 1);
 });
 
 test("fails closed when repository output crosses tenant bindings or is malformed", async () => {

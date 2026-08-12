@@ -7,6 +7,7 @@ const cookie = "__Host-agentpass_session=" + "A".repeat(43);
 const csrf = "B".repeat(43);
 const credentialId = "A".repeat(22);
 const sessionId = "11111111-1111-4111-8111-111111111111";
+const authorizationId = "55555555-5555-4555-8555-555555555555";
 
 function request(path, { method = "GET", body, headers = {} } = {}) {
   return new Request(`https://console.example.test${path}`, { method, headers: { origin: "https://console.example.test", "content-type": "application/json", ...headers }, body: body === undefined ? undefined : JSON.stringify(body) });
@@ -52,4 +53,24 @@ test("forwards only an allow-listed session clear cookie", async () => {
   const response = await api.handle(request(`/api/auth/security/sessions/${sessionId}/revoke`, { method: "POST", body: { expected_version: 1 }, headers: { cookie, "agentpass-csrf": csrf } }));
   assert.equal(response.status, 200);
   assert.equal(response.headers.get("set-cookie"), "__Host-agentpass_session=; Path=/; HttpOnly; Secure; SameSite=Strict; Max-Age=0");
+});
+
+test("forwards recent auth only to protected Security mutations", async () => {
+  const calls = [];
+  const api = bridge(async (url, init) => {
+    calls.push({ url: String(url), init });
+    return new Response(JSON.stringify({ credential: {} }), { headers: { "content-type": "application/json" } });
+  });
+  const path = `/api/auth/security/passkeys/${credentialId}/revoke`;
+  const missing = await api.handle(request(path, { method: "POST", body: { expected_version: 1 }, headers: { cookie, "agentpass-csrf": csrf } }));
+  assert.equal(missing.status, 401);
+  assert.equal(calls.length, 0);
+
+  const response = await api.handle(request(path, { method: "POST", body: { expected_version: 1 }, headers: { cookie, "agentpass-csrf": csrf, "agentpass-recent-auth": authorizationId } }));
+  assert.equal(response.status, 200);
+  assert.equal(calls[0].init.headers.get("agentpass-recent-auth"), authorizationId);
+
+  const leaked = await api.handle(request("/api/auth/security/passkeys", { headers: { cookie, "agentpass-csrf": csrf, "agentpass-recent-auth": authorizationId } }));
+  assert.equal(leaked.status, 400);
+  assert.equal(calls.length, 1);
 });

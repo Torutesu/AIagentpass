@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { authenticateRecentAuth, registerPasskey, WebAuthnClientError } from "../webauthn-client";
-import { getSecuritySnapshot, renamePasskey, revokePasskey, revokeSession, SecurityClientError, type SecurityPasskey, type SecuritySession, type SecuritySnapshot } from "../security-client";
+import { createSecurityClient, SecurityClientError, type SecurityClient, type SecurityPasskey, type SecuritySession, type SecuritySnapshot } from "../security-client";
 
 export type ConsoleView =
   | "overview"
@@ -544,10 +544,13 @@ function PasskeyRow({ passkey, actionKey, confirmKey, onRename, onRevoke, onCanc
 function SessionRow({ session, actionKey, confirmKey, onRevoke, onCancelRevoke, onConfirmRevoke }: { session: SecuritySession; actionKey: string; confirmKey: string | null; onRevoke: () => void; onCancelRevoke: () => void; onConfirmRevoke: () => void }) {
   const busy = actionKey === `session:${session.id}`;
   const confirming = confirmKey === `session:${session.id}`;
-  return <li className="row-list-item"><div className="row-main"><span className="row-icon" aria-hidden="true">◌</span><div><p className="row-title">{session.label}{session.current ? "（この端末）" : ""}</p><p className="row-description">{session.platform} · 最終確認：{securityDate(session.lastSeenAt)} · 有効期限：{securityDate(session.expiresAt)}</p></div></div><span>{session.current ? <StatusTag tone="green">現在のセッション</StatusTag> : confirming ? <><button className="text-button" type="button" disabled={busy} onClick={onConfirmRevoke}>取り消す</button><button className="text-button" type="button" disabled={busy} onClick={onCancelRevoke}>キャンセル</button></> : <button className="text-button" type="button" disabled={busy} onClick={onRevoke}>無効化</button>}</span></li>;
+  return <li className="row-list-item"><div className="row-main"><span className="row-icon" aria-hidden="true">◌</span><div><p className="row-title">{session.label}{session.current ? "（この端末）" : ""}</p><p className="row-description">{session.platform} · 最終確認：{securityDate(session.lastSeenAt)} · 有効期限：{securityDate(session.expiresAt)}</p></div></div><span>{confirming ? <><button className="text-button" type="button" disabled={busy} onClick={onConfirmRevoke}>{session.current ? "サインアウト" : "取り消す"}</button><button className="text-button" type="button" disabled={busy} onClick={onCancelRevoke}>キャンセル</button></> : <>{session.current ? <StatusTag tone="green">現在のセッション</StatusTag> : null}<button className="text-button" type="button" disabled={busy} onClick={onRevoke}>{session.current ? "サインアウト" : "無効化"}</button></>}</span></li>;
 }
 
 function SecuritySurface() {
+  const securityClientRef = useRef<SecurityClient | null>(null);
+  if (securityClientRef.current === null) securityClientRef.current = createSecurityClient();
+  const securityClient = securityClientRef.current;
   const [snapshot, setSnapshot] = useState<SecuritySnapshot | null>(null);
   const [loadState, setLoadState] = useState<SecurityLoadState>("loading");
   const [error, setError] = useState("");
@@ -556,19 +559,20 @@ function SecuritySurface() {
   const [renameTarget, setRenameTarget] = useState<string | null>(null);
   const [renameLabel, setRenameLabel] = useState("");
   const [notice, setNotice] = useState("");
+  const [signedOut, setSignedOut] = useState(false);
 
   const load = useCallback(async (signal?: AbortSignal) => {
     setLoadState("loading");
     setError("");
     try {
-      setSnapshot(await getSecuritySnapshot({ signal }));
+      setSnapshot(await securityClient.getSnapshot({ signal }));
       setLoadState("ready");
     } catch (caught) {
       if (caught instanceof DOMException && caught.name === "AbortError") return;
       setLoadState("error");
       setError(securityErrorMessage(caught));
     }
-  }, []);
+  }, [securityClient]);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -576,7 +580,7 @@ function SecuritySurface() {
     return () => { window.clearTimeout(timer); controller.abort(); };
   }, [load]);
 
-  const finishAction = async (key: string, action: () => Promise<void>, message: string) => {
+  const finishAction = async (key: string, action: () => Promise<void>, message: string, reload = true) => {
     if (actionKey) return;
     setActionKey(key);
     setError("");
@@ -587,7 +591,12 @@ function SecuritySurface() {
       setRenameTarget(null);
       setRenameLabel("");
       setNotice(message);
-      await load();
+      if (reload) await load();
+      else {
+        setSignedOut(true);
+        setSnapshot(null);
+        setLoadState("ready");
+      }
     } catch (caught) {
       setError(securityErrorMessage(caught));
     } finally {
@@ -604,7 +613,8 @@ function SecuritySurface() {
 
   const passkeys = snapshot?.passkeys ?? [];
   const sessions = snapshot?.sessions ?? [];
-  return <><SurfaceHeader eyebrow="SECURITY / 06" title="アカウントを守る" copy="登録済みのパスキーと、AgentPassへ接続中のセッションを管理します。秘密鍵や認証器の内部データは、この画面には表示されません。" /><div className="surface-content"><article className="surface-card"><div className="stop-title-row"><div><span className="section-kicker">REGISTERED PASSKEYS</span><h2 className="surface-card-title">登録済みのパスキー</h2><p className="surface-card-copy">名前の変更や無効化ができます。無効化したパスキーは、以後の再認証に使えません。</p></div><button className="secondary-button" type="button" disabled={loadState === "loading"} onClick={() => void load()}>再読み込み</button></div>{loadState === "loading" ? <p className="section-note" role="status">読み込み中…</p> : loadState === "error" ? <div role="alert"><p className="section-note">{error}</p><button className="text-button" type="button" onClick={() => void load()}>もう一度試す</button></div> : passkeys.length ? <ul className="row-list">{passkeys.map((passkey) => <PasskeyRow key={passkey.id} passkey={passkey} actionKey={actionKey} confirmKey={confirmKey} onRename={() => startRename(passkey)} onRevoke={() => setConfirmKey(`passkey:${passkey.id}`)} onCancelRevoke={() => setConfirmKey(null)} onConfirmRevoke={() => void finishAction(`passkey:${passkey.id}`, () => revokePasskey(passkey.id, passkey.version), "パスキーを無効化しました")} />)}</ul> : <EmptyState title="登録済みのパスキーはありません" copy="セットアップからTouch IDまたはパスキーを登録してください。" />}{renameTarget ? <form className="form-grid" onSubmit={(event) => { event.preventDefault(); const target = renameTarget; const passkey = passkeys.find((item) => item.id === target); if (!passkey) return; void finishAction(`passkey:${target}`, () => renamePasskey(target, renameLabel, passkey.version), "パスキーの名前を変更しました"); }}><label>パスキーの表示名<input required maxLength={80} value={renameLabel} onChange={(event) => setRenameLabel(event.target.value)} autoComplete="off" /></label><div><button className="primary-button" type="submit" disabled={!renameLabel.trim() || Boolean(actionKey)}>保存</button><button className="text-button" type="button" disabled={Boolean(actionKey)} onClick={() => { setRenameTarget(null); setRenameLabel(""); }}>キャンセル</button></div></form> : null}</article><article className="surface-card"><span className="section-kicker">ACTIVE SESSIONS</span><h2 className="surface-card-title">アクティブなセッション</h2><p className="surface-card-copy">使っていないブラウザや端末のセッションは無効化してください。現在のセッションはここから無効化できません。</p>{loadState === "loading" ? <p className="section-note" role="status">読み込み中…</p> : loadState === "error" ? <p className="section-note">セッション情報を取得できませんでした。</p> : sessions.length ? <ul className="row-list">{sessions.map((session) => <SessionRow key={session.id} session={session} actionKey={actionKey} confirmKey={confirmKey} onRevoke={() => setConfirmKey(`session:${session.id}`)} onCancelRevoke={() => setConfirmKey(null)} onConfirmRevoke={() => void finishAction(`session:${session.id}`, () => revokeSession(session.id, session.version), "セッションを無効化しました")} />)}</ul> : <EmptyState title="アクティブなセッションはありません" copy="再読み込みして、現在のログイン状態を確認してください。" />}</article>{notice ? <p className="section-note" role="status">✓ {notice}</p> : null}{error && loadState === "ready" ? <p className="section-note" role="alert">{error}</p> : null}</div></>;
+  const otherSessions = sessions.filter((session) => !session.current);
+  return <><SurfaceHeader eyebrow="SECURITY / 06" title="アカウントを守る" copy="登録済みのパスキーと、AgentPassへ接続中のセッションを管理します。秘密鍵や認証器の内部データは、この画面には表示されません。" /><div className="surface-content">{signedOut ? <article className="surface-card"><span className="section-kicker">SIGNED OUT</span><h2 className="surface-card-title">このセッションを終了しました</h2><p className="surface-card-copy">現在のブラウザセッションを無効化し、セッション情報を画面から消去しました。続けるにはページを再読み込みしてください。</p></article> : <><article className="surface-card"><div className="stop-title-row"><div><span className="section-kicker">REGISTERED PASSKEYS</span><h2 className="surface-card-title">登録済みのパスキー</h2><p className="surface-card-copy">名前の変更や無効化ができます。無効化したパスキーは、以後の再認証に使えません。</p></div><button className="secondary-button" type="button" disabled={loadState === "loading"} onClick={() => void load()}>再読み込み</button></div>{loadState === "loading" ? <p className="section-note" role="status">読み込み中…</p> : loadState === "error" ? <div role="alert"><p className="section-note">{error}</p><button className="text-button" type="button" onClick={() => void load()}>もう一度試す</button></div> : passkeys.length ? <ul className="row-list">{passkeys.map((passkey) => <PasskeyRow key={passkey.id} passkey={passkey} actionKey={actionKey} confirmKey={confirmKey} onRename={() => startRename(passkey)} onRevoke={() => setConfirmKey(`passkey:${passkey.id}`)} onCancelRevoke={() => setConfirmKey(null)} onConfirmRevoke={() => void finishAction(`passkey:${passkey.id}`, () => securityClient.revokePasskey(passkey.id, passkey.version), "パスキーを無効化しました")} />)}</ul> : <EmptyState title="登録済みのパスキーはありません" copy="セットアップからTouch IDまたはパスキーを登録してください。" />}{renameTarget ? <form className="form-grid" onSubmit={(event) => { event.preventDefault(); const target = renameTarget; const passkey = passkeys.find((item) => item.id === target); if (!passkey) return; void finishAction(`passkey:${target}`, () => securityClient.renamePasskey(target, renameLabel, passkey.version), "パスキーの名前を変更しました"); }}><label>パスキーの表示名<input required maxLength={80} value={renameLabel} onChange={(event) => setRenameLabel(event.target.value)} autoComplete="off" /></label><div><button className="primary-button" type="submit" disabled={!renameLabel.trim() || Boolean(actionKey)}>保存</button><button className="text-button" type="button" disabled={Boolean(actionKey)} onClick={() => { setRenameTarget(null); setRenameLabel(""); }}>キャンセル</button></div></form> : null}</article><article className="surface-card"><div className="stop-title-row"><div><span className="section-kicker">ACTIVE SESSIONS</span><h2 className="surface-card-title">アクティブなセッション</h2></div><button className="secondary-button" type="button" disabled={loadState === "loading" || Boolean(actionKey) || otherSessions.length === 0} onClick={() => setConfirmKey("other-sessions")}>他のセッションをすべて無効化</button></div><p className="surface-card-copy">使っていないブラウザや端末のセッションは無効化してください。現在のセッションからサインアウトすることもできます。</p>{confirmKey === "other-sessions" ? <div className="stop-action-row"><span className="section-note">{otherSessions.length}件の他セッションを無効化します。</span><button className="text-button" type="button" disabled={Boolean(actionKey)} onClick={() => void finishAction("other-sessions", () => securityClient.revokeOtherSessions(sessions).then(() => undefined), "他のセッションをすべて無効化しました")}>確認</button><button className="text-button" type="button" disabled={Boolean(actionKey)} onClick={() => setConfirmKey(null)}>キャンセル</button></div> : null}{loadState === "loading" ? <p className="section-note" role="status">読み込み中…</p> : loadState === "error" ? <p className="section-note">セッション情報を取得できませんでした。</p> : sessions.length ? <ul className="row-list">{sessions.map((session) => <SessionRow key={session.id} session={session} actionKey={actionKey} confirmKey={confirmKey} onRevoke={() => setConfirmKey(`session:${session.id}`)} onCancelRevoke={() => setConfirmKey(null)} onConfirmRevoke={() => void finishAction(`session:${session.id}`, session.current ? () => securityClient.revokeCurrentSession(session.id, session.version) : () => securityClient.revokeSession(session.id, session.version), session.current ? "サインアウトしました" : "セッションを無効化しました", session.current ? false : true)} />)}</ul> : <EmptyState title="アクティブなセッションはありません" copy="再読み込みして、現在のログイン状態を確認してください。" />}</article>{notice ? <p className="section-note" role="status">✓ {notice}</p> : null}{error && loadState === "ready" ? <p className="section-note" role="alert">{error}</p> : null}</>}</div></>;
 }
 
 function EmergencySurface({ data, onOpenConfirm, stopped }: { data: AgentPassInitialData; onOpenConfirm: () => void; stopped: boolean }) {

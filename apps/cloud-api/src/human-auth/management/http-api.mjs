@@ -17,6 +17,7 @@ const MAX_LABEL_LENGTH = 128;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const CREDENTIAL_ID = /^[A-Za-z0-9_-]+$/;
 const OPAQUE_TOKEN = /^[A-Za-z0-9_-]{43}$/;
+const RECENT_AUTH_HEADER = "agentpass-recent-auth";
 const ROLES = new Set(["owner", "admin", "auditor", "viewer"]);
 const TRANSPORTS = new Set(["ble", "cable", "hybrid", "internal", "nfc", "smart-card", "usb"]);
 const METHODS = Object.freeze({
@@ -44,6 +45,11 @@ export const HUMAN_MANAGEMENT_REPOSITORY_METHODS = Object.freeze([
   "revokeSession"
 ]);
 
+export const HUMAN_MANAGEMENT_RECENT_AUTH_OPERATIONS = Object.freeze({
+  revokeCredential: "human.management.credential.revoke",
+  revokeCurrentSession: "human.management.session.revoke"
+});
+
 export const HUMAN_MANAGEMENT_HTTP_ERROR_CODES = Object.freeze({
   INVALID_REQUEST: "human_management_invalid_request",
   METHOD_NOT_ALLOWED: "human_management_method_not_allowed",
@@ -55,6 +61,10 @@ export const HUMAN_MANAGEMENT_HTTP_ERROR_CODES = Object.freeze({
   SESSION_NOT_FOUND: "human_management_session_not_found",
   VERSION_CONFLICT: "human_management_version_conflict",
   LAST_ACTIVE_CREDENTIAL: "human_management_last_active_credential",
+  RECENT_AUTH_REQUIRED: "human_management_recent_auth_required",
+  RECENT_AUTH_FAILED: "human_management_recent_auth_failed",
+  RECENT_AUTH_STALE: "human_management_recent_auth_stale",
+  RECENT_AUTH_UNAVAILABLE: "human_management_recent_auth_unavailable",
   MANAGEMENT_UNAVAILABLE: "human_management_unavailable",
   INTERNAL_ERROR: "human_management_internal_error"
 });
@@ -70,6 +80,10 @@ const ERROR_MESSAGES = Object.freeze({
   [HUMAN_MANAGEMENT_HTTP_ERROR_CODES.SESSION_NOT_FOUND]: "The session was not found",
   [HUMAN_MANAGEMENT_HTTP_ERROR_CODES.VERSION_CONFLICT]: "The resource was changed by another request",
   [HUMAN_MANAGEMENT_HTTP_ERROR_CODES.LAST_ACTIVE_CREDENTIAL]: "The last active credential cannot be revoked",
+  [HUMAN_MANAGEMENT_HTTP_ERROR_CODES.RECENT_AUTH_REQUIRED]: "Recent WebAuthn authentication is required",
+  [HUMAN_MANAGEMENT_HTTP_ERROR_CODES.RECENT_AUTH_FAILED]: "Recent WebAuthn authentication failed",
+  [HUMAN_MANAGEMENT_HTTP_ERROR_CODES.RECENT_AUTH_STALE]: "Recent WebAuthn authentication is stale",
+  [HUMAN_MANAGEMENT_HTTP_ERROR_CODES.RECENT_AUTH_UNAVAILABLE]: "Recent WebAuthn verification is unavailable",
   [HUMAN_MANAGEMENT_HTTP_ERROR_CODES.MANAGEMENT_UNAVAILABLE]: "The management service is unavailable",
   [HUMAN_MANAGEMENT_HTTP_ERROR_CODES.INTERNAL_ERROR]: "The request could not be completed"
 });
@@ -85,6 +99,10 @@ const ERROR_STATUS = Object.freeze({
   [HUMAN_MANAGEMENT_HTTP_ERROR_CODES.SESSION_NOT_FOUND]: 404,
   [HUMAN_MANAGEMENT_HTTP_ERROR_CODES.VERSION_CONFLICT]: 409,
   [HUMAN_MANAGEMENT_HTTP_ERROR_CODES.LAST_ACTIVE_CREDENTIAL]: 409,
+  [HUMAN_MANAGEMENT_HTTP_ERROR_CODES.RECENT_AUTH_REQUIRED]: 401,
+  [HUMAN_MANAGEMENT_HTTP_ERROR_CODES.RECENT_AUTH_FAILED]: 401,
+  [HUMAN_MANAGEMENT_HTTP_ERROR_CODES.RECENT_AUTH_STALE]: 401,
+  [HUMAN_MANAGEMENT_HTTP_ERROR_CODES.RECENT_AUTH_UNAVAILABLE]: 503,
   [HUMAN_MANAGEMENT_HTTP_ERROR_CODES.MANAGEMENT_UNAVAILABLE]: 503,
   [HUMAN_MANAGEMENT_HTTP_ERROR_CODES.INTERNAL_ERROR]: 500
 });
@@ -130,13 +148,18 @@ export class HumanManagementHttpError extends Error {
  */
 export function createHumanManagementHttpApi({
   humanSession,
+  recentAuthService,
   repository,
   origin,
   basePath = "",
-  maxBodyBytes = MAX_BODY_BYTES
+  maxBodyBytes = MAX_BODY_BYTES,
+  now = () => Date.now()
 } = {}) {
   if (!humanSession || typeof humanSession.authenticateRequest !== "function") {
     throw new TypeError("humanSession must expose authenticateRequest()");
+  }
+  if (recentAuthService !== undefined && typeof recentAuthService?.authorize !== "function") {
+    throw new TypeError("recentAuthService must expose authorize()");
   }
   assertRepository(repository);
   const expectedOrigin = origin ?? humanSession.expectedOrigin;
@@ -145,6 +168,7 @@ export function createHumanManagementHttpApi({
   if (!Number.isSafeInteger(maxBodyBytes) || maxBodyBytes < 1_024 || maxBodyBytes > 1_024 * 1_024) {
     throw new TypeError("maxBodyBytes is invalid");
   }
+  if (typeof now !== "function") throw new TypeError("now must be a function");
 
   async function handle(input, nodeResponse = undefined) {
     const result = await dispatch(input);
@@ -168,8 +192,8 @@ export function createHumanManagementHttpApi({
       if (route.name === "listSessions") return await listSessions(session, request);
       const body = await readJsonBody(request, maxBodyBytes);
       if (route.name === "renameCredential") return await renameCredential(session, route.id, body);
-      if (route.name === "revokeCredential") return await revokeCredential(session, route.id, body);
-      return await revokeSession(session, route.id, body);
+      if (route.name === "revokeCredential") return await revokeCredential(session, route.id, body, request);
+      return await revokeSession(session, route.id, body, request);
     } catch (error) {
       return mapError(error);
     }
@@ -263,10 +287,11 @@ export function createHumanManagementHttpApi({
     }
   }
 
-  async function revokeCredential(session, rawId, body) {
+  async function revokeCredential(session, rawId, body, request) {
     const credentialId = requiredRouteCredentialId(rawId);
     const input = parseBody(body, new Set(["expected_version"]));
     const expectedVersion = requiredVersion(input.expected_version);
+    await requireRecentAuth(session, request, HUMAN_MANAGEMENT_RECENT_AUTH_OPERATIONS.revokeCredential);
     try {
       const record = await repository.revokeCredential({
         ...scope(session),
@@ -282,10 +307,13 @@ export function createHumanManagementHttpApi({
     }
   }
 
-  async function revokeSession(session, rawId, body) {
+  async function revokeSession(session, rawId, body, request) {
     const sessionId = requiredRouteUuid(rawId);
     const input = parseBody(body, new Set(["expected_version"]));
     const expectedVersion = requiredVersion(input.expected_version);
+    if (session.session_id === sessionId) {
+      await requireRecentAuth(session, request, HUMAN_MANAGEMENT_RECENT_AUTH_OPERATIONS.revokeCurrentSession);
+    }
     try {
       const record = await repository.revokeSession({
         ...scope(session),
@@ -318,6 +346,57 @@ export function createHumanManagementHttpApi({
       organization_id: session.organization_id,
       ...(page ?? {})
     };
+  }
+
+  async function requireRecentAuth(session, request, operation) {
+    if (!recentAuthService) {
+      throw new HumanManagementHttpError(HUMAN_MANAGEMENT_HTTP_ERROR_CODES.RECENT_AUTH_UNAVAILABLE, { status: 503 });
+    }
+    const proof = header(request.headers, RECENT_AUTH_HEADER);
+    if (typeof proof !== "string" || proof.length < 32 || proof.length > 4_096) {
+      throw new HumanManagementHttpError(HUMAN_MANAGEMENT_HTTP_ERROR_CODES.RECENT_AUTH_REQUIRED, { status: 401 });
+    }
+
+    let authenticatedAt;
+    try {
+      authenticatedAt = now();
+      if (!Number.isSafeInteger(authenticatedAt) || authenticatedAt < 0) throw new Error("recent-auth clock is invalid");
+    } catch (error) {
+      throw new HumanManagementHttpError(HUMAN_MANAGEMENT_HTTP_ERROR_CODES.RECENT_AUTH_UNAVAILABLE, { status: 503, cause: error });
+    }
+
+    let authorization;
+    try {
+      authorization = await recentAuthService.authorize({
+        proof,
+        principal: session,
+        organization_id: session.organization_id,
+        operation,
+        now: authenticatedAt
+      });
+    } catch (error) {
+      throw new HumanManagementHttpError(HUMAN_MANAGEMENT_HTTP_ERROR_CODES.RECENT_AUTH_UNAVAILABLE, { status: 503, cause: error });
+    }
+
+    const expectedKeys = ["authenticated_at", "challenge_id", "consumed", "member_id", "operation", "organization_id", "verified"];
+    const exactShape = authorization && typeof authorization === "object" && !Array.isArray(authorization)
+      && Object.keys(authorization).sort().join(",") === expectedKeys.sort().join(",")
+      && authorization.verified === true
+      && authorization.consumed === true
+      && authorization.member_id === session.member_id
+      && authorization.organization_id === session.organization_id
+      && authorization.operation === operation
+      && typeof authorization.challenge_id === "string"
+      && UUID.test(authorization.challenge_id)
+      && authorization.challenge_id.toLowerCase() === proof.toLowerCase()
+      && Number.isSafeInteger(authorization.authenticated_at)
+      && authorization.authenticated_at >= 0;
+    if (!exactShape) {
+      throw new HumanManagementHttpError(HUMAN_MANAGEMENT_HTTP_ERROR_CODES.RECENT_AUTH_FAILED, { status: 401 });
+    }
+    if (authorization.authenticated_at > authenticatedAt + 30_000 || authenticatedAt - authorization.authenticated_at > 5 * 60_000) {
+      throw new HumanManagementHttpError(HUMAN_MANAGEMENT_HTTP_ERROR_CODES.RECENT_AUTH_STALE, { status: 401 });
+    }
   }
 }
 
@@ -621,7 +700,7 @@ function normalizeRequest(input) {
 
 function normalizeHeaders(input) {
   const result = {};
-  const names = ["origin", "cookie", "content-type", "content-length", HUMAN_SESSION_CSRF_HEADER];
+  const names = ["origin", "cookie", "content-type", "content-length", HUMAN_SESSION_CSRF_HEADER, RECENT_AUTH_HEADER];
   if (input && typeof input.get === "function") {
     for (const name of names) {
       const value = input.get(name);
