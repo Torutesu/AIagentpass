@@ -48,9 +48,12 @@ After the PKG is installed and the local policy has been initialized, preview th
 ```sh
 agentpass setup --client claude-code --project "$PWD"
 agentpass setup --client claude-code --project "$PWD" --execute
+agentpass setup status
 agentpass native daemon-register
-agentpass doctor
+agentpass doctor --client claude-code --project "$PWD" --team-id 'APPLETEAM1'
 ```
+
+`setup status` reads the crash-resumable setup journal and reports the next durable action. The current CLI records verified application, local configuration, native bridge selection, and an already-enabled service; the native bootstrap/device-enrollment stages remain fail-closed until their orchestration handlers are connected.
 
 Upgrading from AgentPass 0.5 or earlier creates the v4 audit identity and, when needed, a signed agent identity:
 
@@ -113,6 +116,13 @@ agentpass integrate claude-code --install
 
 agentpass integrate cursor
 agentpass integrate cursor --install
+```
+
+Preview removal of only the exact AgentPass-owned MCP entry, then apply it. Other MCP servers and settings are preserved, and native keys/audit state are not touched:
+
+```sh
+agentpass integrate claude-code --remove --project "$PWD"
+agentpass integrate claude-code --remove --execute --project "$PWD"
 ```
 
 Claude Code uses `.mcp.json`; Cursor uses `.cursor/mcp.json`. AgentPass preserves unrelated MCP servers in either file and refuses invalid or unsafe existing configuration. Once connected, the available MCP tools are `agentpass_status`, `agentpass_check`, `agentpass_setup`, and `agentpass_audit_tail`.

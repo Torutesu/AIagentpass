@@ -3,6 +3,8 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
+import { spawnSync } from "node:child_process";
+import { fileURLToPath } from "node:url";
 import {
   installIntegration,
   integrationPlan,
@@ -169,4 +171,23 @@ test("rejects unsafe symlink targets and parent directories in dry-run and apply
 test("rejects a plan that escapes its project ownership boundary", () => {
   const plan = makePlan();
   assert.throws(() => removeIntegration({ ...plan, target: path.join(plan.project_dir, "..", "outside.json") }), /escapes/);
+});
+
+test("CLI previews removal and applies it only with explicit execute", () => {
+  const project = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "agentpass-removal-cli-")));
+  const root = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
+  const cli = path.join(root, "bin", "agentpass.mjs");
+  const install = spawnSync(process.execPath, [cli, "integrate", "claude-code", "--install", "--project", project], { encoding: "utf8" });
+  assert.equal(install.status, 0, install.stderr);
+  const target = path.join(project, ".mcp.json");
+  const installed = fs.readFileSync(target, "utf8");
+  const preview = spawnSync(process.execPath, [cli, "integrate", "claude-code", "--remove", "--project", project], { encoding: "utf8" });
+  assert.equal(preview.status, 0, preview.stderr);
+  assert.equal(JSON.parse(preview.stdout).changed, true);
+  assert.equal(JSON.parse(preview.stdout).removed, false);
+  assert.equal(fs.readFileSync(target, "utf8"), installed);
+  const execute = spawnSync(process.execPath, [cli, "integrate", "claude-code", "--remove", "--execute", "--project", project], { encoding: "utf8" });
+  assert.equal(execute.status, 0, execute.stderr);
+  assert.equal(JSON.parse(execute.stdout).removed, true);
+  assert.deepEqual(JSON.parse(fs.readFileSync(target, "utf8")).mcpServers, {});
 });

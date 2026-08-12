@@ -11,12 +11,13 @@ import { audit, createAuditCheckpoint, publicKeyFingerprint, verifyAudit, verify
 import { brokerRequest } from "../lib/broker-client.mjs";
 import { anchorReceiptPath, auditPath, controlBundlePath, defaultConfigDir, loadConfig, loadSession, loadState, saveConfig, saveSession, saveState, socketPath } from "../lib/config.mjs";
 import { canonicalJson, createAgentIdentity, createAuditIdentity, signRequest } from "../lib/identity.mjs";
-import { installIntegration, integrationPlan } from "../lib/integrations.mjs";
+import { installIntegration, integrationPlan, integrationRemovalPlan, removeIntegration } from "../lib/integrations.mjs";
 import { readGitSigningInvocation, writeGitSignature } from "../lib/git-signing.mjs";
 import { evaluateAgentRequest } from "../lib/policy.mjs";
 import { executeProductionInstall, prepareProductionInstall, removeStagedProductionInstall, stageProductionInstall, verifyProductionInstall } from "../lib/platform-install.mjs";
 import { runProductionDoctor } from "../lib/platform-doctor.mjs";
 import { inspectNativeApplication } from "../lib/platform-setup.mjs";
+import { SETUP_STATES, SetupJournalError, createSetupJournal, loadSetupJournal } from "../lib/setup-journal.mjs";
 import { generateRecoveryIdentity, recoveryPolicyToAnchorPolicy, signAnchorRecoveryAuthorization, signRecoveryRequest, verifyAnchorRecoveryApprovals, verifyRecoveryThreshold } from "../lib/recovery.mjs";
 import { applyControlBundle, controlKeyFingerprint, fetchControlBundle, generateControlKeyPair, loadControlBundle, signControlBundle } from "../lib/remote-control.mjs";
 
@@ -29,6 +30,7 @@ Commands:
   install --manifest FILE --signature FILE --public-key FILE
           --fingerprint SHA256:PIN --team-id TEAMID [--execute]
                     verify and optionally install the production macOS package
+  setup status
   setup --client claude-code|cursor [--project DIR] [--execute]
                     configure the native bridge and project MCP integration
   init              create a secure local policy
@@ -79,6 +81,8 @@ Commands:
   integrate CLIENT  preview Claude Code or Cursor MCP setup
   integrate CLIENT --install [--project DIR]
                     install project-scoped MCP setup without replacing other servers
+  integrate CLIENT --remove [--execute] [--project DIR]
+                    remove only the matching AgentPass MCP entry (dry run by default)
   setup-macos       show Secure Enclave setup (use --execute to run)
   install-hook      install a policy-enforcing pre-push hook
   push-check        evaluate a pre-push request
@@ -166,6 +170,16 @@ function installProduction() {
 }
 
 function setupNativeBridge() {
+  if (args[0] === "status") {
+    if (args.length !== 1) throw new Error("Usage: agentpass setup status");
+    try {
+      console.log(JSON.stringify({ initialized: true, ...loadSetupJournal().status() }, null, 2));
+    } catch (error) {
+      if (!(error instanceof SetupJournalError) || error.code !== "NOT_INITIALIZED") throw error;
+      console.log(JSON.stringify({ version: 1, initialized: false, state: "not_started", setup_complete: false, next_actions: [{ id: "verify_app", command: "agentpass setup --client claude-code|cursor --project DIR --execute" }] }, null, 2));
+    }
+    return;
+  }
   if (process.platform !== "darwin") throw new Error("Native AgentPass setup is supported only on macOS");
   if (process.getuid?.() === 0) throw new Error("Run setup as the interactive user, not root");
   const allowed = new Set(["--client", "--project"]);
@@ -197,7 +211,15 @@ function setupNativeBridge() {
   saveConfig(configured);
   try {
     const installed = installIntegration(integration, { dryRun: false });
-    console.log(JSON.stringify({ version: 1, dryRun: false, configured: true, native: application, integration: installed, next }, null, 2));
+    const journal = createSetupJournal();
+    const record = (target) => {
+      if (SETUP_STATES.indexOf(journal.status().state) < SETUP_STATES.indexOf(target)) journal.transition(target);
+    };
+    record("app_verified");
+    record("local_config_initialized");
+    record("native_bridge_selected");
+    if (application.serviceStatus === "enabled") record("service_registered");
+    console.log(JSON.stringify({ version: 1, dryRun: false, configured: true, native: application, integration: installed, setup_journal: journal.status(), next }, null, 2));
   } catch (error) {
     saveConfig(config);
     throw error;
@@ -884,24 +906,34 @@ function integrateAgent() {
   let projectValue = process.cwd();
   let projectSet = false;
   let install = false;
+  let remove = false;
+  let execute = false;
   for (let index = 1; index < args.length; index += 1) {
     if (args[index] === "--install" && !install) install = true;
+    else if (args[index] === "--remove" && !remove) remove = true;
+    else if (args[index] === "--execute" && !execute) execute = true;
     else if (args[index] === "--project" && !projectSet && args[index + 1] && !args[index + 1].startsWith("--")) { projectValue = args[++index]; projectSet = true; }
-    else throw new Error("Usage: agentpass integrate claude-code|cursor [--install] [--project DIR]");
+    else throw new Error("Usage: agentpass integrate claude-code|cursor [--install | --remove [--execute]] [--project DIR]");
   }
+  if (install && remove) throw new Error("Integration install and removal are mutually exclusive");
+  if (execute && !remove) throw new Error("--execute is only valid with --remove");
   const projectDir = path.resolve(projectValue);
   if (!fs.statSync(projectDir).isDirectory()) throw new Error("Integration project must be a directory");
   const mcpServerPath = fileURLToPath(new URL("../adapters/mcp-server/bin/agentpass-mcp.mjs", import.meta.url));
-  const plan = integrationPlan({ client, projectDir, nodePath: process.execPath, mcpServerPath });
-  const result = installIntegration(plan, { dryRun: !install });
+  const plan = remove
+    ? integrationRemovalPlan({ client, projectDir, nodePath: process.execPath, mcpServerPath })
+    : integrationPlan({ client, projectDir, nodePath: process.execPath, mcpServerPath });
+  const result = remove ? removeIntegration(plan, { dryRun: !execute }) : installIntegration(plan, { dryRun: !install });
   console.log(JSON.stringify({
     version: result.version,
     client: result.client,
     target: result.target,
     changed: result.changed,
-    installed: result.installed,
-    configuration: { mcpServers: { [result.server_name]: result.server } },
-    next_steps: [
+    installed: result.installed ?? false,
+    removed: result.removed ?? false,
+    configuration: remove ? undefined : { mcpServers: { [result.server_name]: result.server } },
+    protected_state_preserved: remove ? true : undefined,
+    next_steps: remove && !execute ? ["Review the dry-run output, then rerun with `--remove --execute`."] : remove ? ["The AgentPass MCP entry was removed; protected native state and keys were not changed."] : [
       "Start an AgentPass session and export AGENTPASS_SESSION for the agent process.",
       "Configure this repository to use agentpass-git-sign as Git's SSH signing program.",
       "Ask the agent to run agentpass_check before committing."
