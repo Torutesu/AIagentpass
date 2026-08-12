@@ -67,7 +67,7 @@ function adapterFixture(overrides = {}) {
 }
 
 function request(assertion, extra = {}) {
-  return { headers: { [SIGNED_CONSOLE_IDENTITY_HEADER]: assertion, "agentpass-console-user-id": "attacker-controlled-subject", authorization: "Bearer attacker-token", ...extra } };
+  return { headers: { [SIGNED_CONSOLE_IDENTITY_HEADER]: assertion, ...extra } };
 }
 
 test("verifies the pinned compact Ed25519 assertion, consumes jti, then resolves membership", async () => {
@@ -85,15 +85,22 @@ test("verifies the pinned compact Ed25519 assertion, consumes jti, then resolves
   assert.equal(Object.hasOwn(fixture.events[0][1], "jti"), false);
 });
 
-test("never uses raw identity headers and never returns signed assertion material", async () => {
+test("rejects conflicting caller identity headers and never returns signed assertion material", async () => {
   const fixture = adapterFixture();
   const { compact } = makeAssertion(fixture.pair.privateKey, { sub: "verified-subject" });
   const result = await fixture.adapter.verifyIdentityRequest(request(compact));
   assert.equal(result, fixture.opaque);
   assert.equal(fixture.events[1][1].subject, "verified-subject");
   assert.equal(JSON.stringify(result).includes(compact), false);
-  assert.equal(JSON.stringify(fixture.events[1][1]).includes("attacker-controlled-subject"), false);
-  assert.equal(JSON.stringify(fixture.events[1][1]).includes("attacker-token"), false);
+  for (const headers of [
+    { authorization: "Bearer attacker-token" },
+    { "agentpass-console-user-id": "attacker-controlled-subject" },
+    { "agentpass-member-id": ids.member },
+    { "agentpass-role": "owner" }
+  ]) {
+    await assert.rejects(() => fixture.adapter.verifyIdentityRequest(request(compact, headers)), SignedConsoleIdentityError);
+  }
+  assert.equal(fixture.events.length, 2);
 });
 
 test("rejects replay before resolving the immutable subject", async () => {
@@ -102,6 +109,7 @@ test("rejects replay before resolving the immutable subject", async () => {
   await assert.rejects(() => fixture.adapter.verifyIdentityRequest(request(compact)), (error) => {
     assert.equal(error instanceof SignedConsoleIdentityError, true);
     assert.equal(error.code, SIGNED_CONSOLE_IDENTITY_ERROR_CODES.REPLAY);
+    assert.equal(error.status, 409);
     return true;
   });
   assert.deepEqual(fixture.events.map(([kind]) => kind), ["replay"]);
@@ -113,6 +121,7 @@ test("fails closed on replay-store outage and resolver outage without leaking de
   const signed = makeAssertion(replayOutage.pair.privateKey).compact;
   await assert.rejects(() => replayOutage.adapter.verifyIdentityRequest(request(signed)), (error) => {
     assert.equal(error.code, SIGNED_CONSOLE_IDENTITY_ERROR_CODES.UNAVAILABLE);
+    assert.equal(error.status, 503);
     assert.equal(error.message, "Signed console identity could not be verified");
     assert.equal(error.message.includes("database-password"), false);
     return true;
@@ -122,7 +131,17 @@ test("fails closed on replay-store outage and resolver outage without leaking de
   resolverOutage.adapter = createSignedConsoleIdentityAdapter({ ...config, publicKey: resolverOutage.pair.publicKey, identityResolver: { async resolveIdentity() { throw new Error("provider-subject-secret"); }, identityAdapter: { async verify() {} } }, replayRepository: { async consumeConsoleIdentityJti() { return true; } } });
   await assert.rejects(() => resolverOutage.adapter.verifyIdentityRequest(request(makeAssertion(resolverOutage.pair.privateKey).compact)), (error) => {
     assert.equal(error.code, SIGNED_CONSOLE_IDENTITY_ERROR_CODES.UNAVAILABLE);
+    assert.equal(error.status, 503);
     assert.equal(error.message.includes("provider-subject-secret"), false);
+    return true;
+  });
+
+  const resolverDenial = adapterFixture();
+  resolverDenial.adapter = createSignedConsoleIdentityAdapter({ ...config, publicKey: resolverDenial.pair.publicKey, identityResolver: { async resolveIdentity() { throw Object.assign(new Error("inactive-membership"), { status: 401 }); }, identityAdapter: { async verify() {} } }, replayRepository: { async consumeConsoleIdentityJti() { return true; } } });
+  await assert.rejects(() => resolverDenial.adapter.verifyIdentityRequest(request(makeAssertion(resolverDenial.pair.privateKey).compact)), (error) => {
+    assert.equal(error.code, SIGNED_CONSOLE_IDENTITY_ERROR_CODES.INVALID_ASSERTION);
+    assert.equal(error.status, 401);
+    assert.equal(error.message.includes("inactive-membership"), false);
     return true;
   });
 });
@@ -155,6 +174,7 @@ test("rejects altered, non-canonical, wrong-key, and wrong-binding assertions", 
     makeAssertion(fixture.pair.privateKey, { aud: "other-audience" }).compact,
     makeAssertion(fixture.pair.privateKey, { origin: "https://evil.example.test" }).compact,
     makeAssertion(fixture.pair.privateKey, { redirect_uri: "https://evil.example.test/callback" }).compact,
+    makeAssertion(fixture.pair.privateKey, { jti: "too-short" }).compact,
     makeAssertion(fixture.pair.privateKey, { org: "not-a-uuid" }).compact,
     makeAssertion(fixture.pair.privateKey, { provider: "github" }).compact
   ];

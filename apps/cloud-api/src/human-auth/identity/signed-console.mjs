@@ -17,6 +17,12 @@ const CONTROL_CHARACTERS = /[\u0000-\u001f\u007f]/u;
 const HEADER_KEYS = ["alg", "kid", "typ", "version"];
 const PAYLOAD_KEYS = ["aud", "exp", "iat", "iss", "jti", "nbf", "org", "origin", "provider", "sub"];
 const ASSERTION_TYPE = "agentpass.console.identity";
+const PROHIBITED_IDENTITY_HEADERS = Object.freeze([
+  "authorization",
+  "agentpass-console-user-id",
+  "agentpass-member-id",
+  "agentpass-role"
+]);
 
 export const SIGNED_CONSOLE_IDENTITY_HEADER = ASSERTION_HEADER;
 export const SIGNED_CONSOLE_IDENTITY_ERROR_CODES = Object.freeze({
@@ -32,7 +38,9 @@ export class SignedConsoleIdentityError extends Error {
     super(PUBLIC_FAILURE_MESSAGE);
     this.name = "SignedConsoleIdentityError";
     this.code = code;
-    this.status = 401;
+    this.status = code === SIGNED_CONSOLE_IDENTITY_ERROR_CODES.REPLAY
+      ? 409
+      : code === SIGNED_CONSOLE_IDENTITY_ERROR_CODES.UNAVAILABLE ? 503 : 401;
   }
 }
 
@@ -74,8 +82,10 @@ export function createSignedConsoleIdentityAdapter({
           jti_digest: digest,
           expires_at: new Date(claims.exp * 1000).toISOString()
         });
-      } catch {
-        throw new SignedConsoleIdentityError(SIGNED_CONSOLE_IDENTITY_ERROR_CODES.UNAVAILABLE);
+      } catch (error) {
+        throw new SignedConsoleIdentityError(error?.status === 401
+          ? SIGNED_CONSOLE_IDENTITY_ERROR_CODES.INVALID_ASSERTION
+          : SIGNED_CONSOLE_IDENTITY_ERROR_CODES.UNAVAILABLE);
       }
       if (consumed !== true) throw new SignedConsoleIdentityError(SIGNED_CONSOLE_IDENTITY_ERROR_CODES.REPLAY);
 
@@ -89,8 +99,10 @@ export function createSignedConsoleIdentityAdapter({
         });
         if (!isOpaqueResolverAssertion(resolved)) throw new Error("resolver output is invalid");
         return resolved;
-      } catch {
-        throw new SignedConsoleIdentityError(SIGNED_CONSOLE_IDENTITY_ERROR_CODES.UNAVAILABLE);
+      } catch (error) {
+        throw new SignedConsoleIdentityError(error?.status === 401
+          ? SIGNED_CONSOLE_IDENTITY_ERROR_CODES.INVALID_ASSERTION
+          : SIGNED_CONSOLE_IDENTITY_ERROR_CODES.UNAVAILABLE);
       }
     } catch (error) {
       if (error instanceof SignedConsoleIdentityError) throw error;
@@ -163,10 +175,15 @@ function normalizeConfig({ issuer, audience, provider, origin, keyId, publicKey,
 function readAssertionHeader(headers) {
   const values = [];
   if (headers && typeof headers.get === "function") {
+    if (PROHIBITED_IDENTITY_HEADERS.some((name) => headers.get(name) !== null)) throw new Error("conflicting identity header is invalid");
     const value = headers.get(ASSERTION_HEADER);
     if (value !== null && value !== undefined) values.push(value);
   } else if (headers && typeof headers === "object" && !Array.isArray(headers)) {
-    for (const [name, value] of Object.entries(headers)) if (name.toLowerCase() === ASSERTION_HEADER) values.push(value);
+    for (const [name, value] of Object.entries(headers)) {
+      const normalized = name.toLowerCase();
+      if (PROHIBITED_IDENTITY_HEADERS.includes(normalized)) throw new Error("conflicting identity header is invalid");
+      if (normalized === ASSERTION_HEADER) values.push(value);
+    }
   }
   if (values.length !== 1 || typeof values[0] !== "string" || values[0].length < 1 || Buffer.byteLength(values[0], "utf8") > MAX_ASSERTION_BYTES) throw new Error("identity assertion header is invalid");
   return values[0];
@@ -198,7 +215,7 @@ function decodeBase64Url(value, minBytes, maxBytes) {
 }
 
 function boundedSubject(value) { return typeof value === "string" && value.length > 0 && Buffer.byteLength(value, "utf8") <= MAX_SUBJECT_BYTES && value.trim() === value && !CONTROL_CHARACTERS.test(value); }
-function boundedJti(value) { return typeof value === "string" && value.length > 0 && Buffer.byteLength(value, "utf8") <= MAX_JTI_BYTES && BASE64URL.test(value); }
+function boundedJti(value) { return typeof value === "string" && value.length >= 22 && Buffer.byteLength(value, "utf8") <= MAX_JTI_BYTES && BASE64URL.test(value); }
 function exactText(value, maxBytes) { return typeof value === "string" && value.length > 0 && Buffer.byteLength(value, "utf8") <= maxBytes && !CONTROL_CHARACTERS.test(value); }
 function isOpaqueResolverAssertion(value) {
   return plain(value) && exactKeys(value, ["version", "issued_at", "expires_at"]) && value.version === 1 && Number.isSafeInteger(value.issued_at) && Number.isSafeInteger(value.expires_at) && value.issued_at >= 0 && value.expires_at > value.issued_at && Object.isFrozen(value);

@@ -26,13 +26,14 @@ function row(extra = {}) {
   };
 }
 
-function failure(error) {
+function failureWithStatus(expectedStatus) { return (error) => {
   assert.equal(error instanceof IdentityResolutionError, true);
   assert.equal(error.code, IDENTITY_RESOLVER_ERROR_CODES.RESOLUTION_FAILED);
   assert.equal(error.message, "Identity resolution failed");
-  assert.equal(error.status, 401);
+  assert.equal(error.status, expectedStatus);
   return true;
-}
+}; }
+const failure = failureWithStatus(401);
 
 test("resolves the durable GitHub subject and active membership without trusting caller role/member fields", async () => {
   const calls = [];
@@ -103,8 +104,8 @@ test("expired assertions are burned and all public failures are constant", async
     unavailable.resolveIdentity({ provider: "github", subject, organization_id: "not-a-uuid" }).catch((error) => error),
     unavailable.resolveIdentity({ provider: "google", subject, organization_id: ids.organization }).catch((error) => error)
   ]);
-  errors.forEach((error) => assert.equal(failure(error), true));
-  assert.equal(new Set(errors.map((error) => `${error.code}:${error.message}:${error.status}`)).size, 1);
+  [503, 401, 401, 503].forEach((status, index) => assert.equal(failureWithStatus(status)(errors[index]), true));
+  assert.equal(new Set(errors.map((error) => `${error.code}:${error.message}`)).size, 1);
 });
 
 test("rejects malformed or ambiguous database identity rows and bounded input", async () => {
@@ -116,7 +117,7 @@ test("rejects malformed or ambiguous database identity rows and bounded input", 
   ];
   for (const invalid of invalidRows) {
     const resolver = createPostgresIdentityResolver({ client: { async query() { return { rowCount: 1, rows: [row(invalid)] }; } }, now: () => NOW });
-    await assert.rejects(() => resolver.resolveIdentity({ provider: "github", subject, organization_id: ids.organization }), failure);
+    await assert.rejects(() => resolver.resolveIdentity({ provider: "github", subject, organization_id: ids.organization }), failureWithStatus(503));
   }
 
   const ambiguous = createPostgresIdentityResolver({ client: { async query() { return { rowCount: 2, rows: [row(), row({ membership_id: "55555555-5555-4555-8555-555555555555" })] }; } }, now: () => NOW });
@@ -145,5 +146,5 @@ test("fails closed when the assertion expiry would exceed the safe integer range
     client: { async query() { return { rowCount: 1, rows: [row()] }; } },
     now: () => Number.MAX_SAFE_INTEGER - 999
   });
-  await assert.rejects(() => resolver.resolveIdentity({ provider: "github", subject, organization_id: ids.organization }), failure);
+  await assert.rejects(() => resolver.resolveIdentity({ provider: "github", subject, organization_id: ids.organization }), failureWithStatus(503));
 });

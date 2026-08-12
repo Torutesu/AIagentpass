@@ -137,6 +137,22 @@ test("fails closed for adapter errors and malformed adapter output without leaki
   }
 });
 
+test("preserves replay and identity-store availability semantics without leaking adapter details", async () => {
+  const replay = fixture({ verifyError: Object.assign(new Error("raw-jti-secret"), { status: 409 }) });
+  const replayResult = await replay.api.handle(request());
+  assert.equal(replayResult.status, 409);
+  assert.equal(replayResult.body.error.code, HUMAN_SESSION_HTTP_ERROR_CODES.IDENTITY_REPLAY);
+  assert.equal(JSON.stringify(replayResult.body).includes("raw-jti-secret"), false);
+  assert.equal(replay.calls.issue.length, 0);
+
+  const unavailable = fixture({ verifyError: Object.assign(new Error("database-password"), { status: 503 }) });
+  const unavailableResult = await unavailable.api.handle(request());
+  assert.equal(unavailableResult.status, 503);
+  assert.equal(unavailableResult.body.error.code, HUMAN_SESSION_HTTP_ERROR_CODES.SESSION_UNAVAILABLE);
+  assert.equal(JSON.stringify(unavailableResult.body).includes("database-password"), false);
+  assert.equal(unavailable.calls.issue.length, 0);
+});
+
 test("maps service failures to stable redacted errors and validates issued credentials", async () => {
   const unavailable = fixture({ issueError: new Error("database password") });
   const failed = await unavailable.api.handle(request());

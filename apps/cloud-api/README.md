@@ -51,7 +51,6 @@ Start the API behind a TLS reverse proxy:
 
 ```bash
 export AGENTPASS_CLOUD_DATA_DIR=/absolute/protected/agentpass-cloud/data
-export AGENTPASS_CLOUD_TOKEN_RECORDS_PATH=/absolute/protected/agentpass-cloud/token-records.json
 export AGENTPASS_CLOUD_BUNDLE_PRIVATE_KEY_PATH=/absolute/protected/agentpass-cloud/bundle-private.pem
 export AGENTPASS_CLOUD_HOST=127.0.0.1
 export AGENTPASS_CLOUD_PORT=8080
@@ -68,6 +67,8 @@ export AGENTPASS_IDENTITY_ASSERTION_PUBLIC_KEY_PATH=/absolute/protected/agentpas
 export AGENTPASS_HUMAN_CURSOR_SECRET="$(openssl rand -base64 32 | tr '+/' '-_' | tr -d '=\n')"
 npm start
 ```
+
+`AGENTPASS_CLOUD_TOKEN_RECORDS_PATH` is required only by the explicit self-hosted/evaluation profile where Human Auth is disabled. Hosted Human Auth neither loads that file nor accepts its bearer credentials.
 
 `AGENTPASS_CONSOLE_ORIGIN` must be an exact HTTPS origin. The RP ID must equal its hostname or be a parent suffix. `AGENTPASS_IDENTITY_PROVIDER` defaults to `chatgpt`; every verified Console subject must have an `upstream_identities` row and an active organization membership before session issuance. The identity assertion public-key file must be a regular owner-only Ed25519 SPKI PEM file; missing or unsafe assertion configuration fails startup. The matching private key belongs only in the Console deployment secret manager. `AGENTPASS_HUMAN_CURSOR_SECRET` must be one canonical, unpadded, 32-byte base64url value shared by every Cloud API instance. It authenticates opaque organization/member/invitation cursors and is never returned as configuration metadata. Rotating it invalidates outstanding cursors, so rotate during a controlled deployment and let clients restart pagination. Omitting all three Human Auth selectors keeps the self-hosted compatibility runtime; partially configuring Human Auth fails startup.
 

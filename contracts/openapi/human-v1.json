@@ -38,6 +38,7 @@
           "payload": {
             "claims": ["aud", "exp", "iat", "iss", "jti", "nbf", "org", "origin", "provider", "sub"],
             "additionalProperties": false,
+            "jti": { "encoding": "base64url", "minLength": 22, "maxLength": 256 },
             "max_ttl_seconds": 60,
             "clock_skew_seconds": 5
           },
@@ -47,7 +48,7 @@
             "Require exact configured issuer, audience, origin, provider, and UUID organization context.",
             "Require iat and nbf to be current within the configured clock skew and exp to be no more than 60 seconds after iat.",
             "Consume SHA-256(iss || U+0000 || aud || U+0000 || jti) exactly once in durable PostgreSQL before membership resolution.",
-            "Never trust authorization, member, role, or tenant selection from browser headers."
+            "Reject Authorization and caller-supplied identity/member/role headers before replay consumption or membership resolution."
           ],
           "replay": {
             "digest": "SHA-256(iss || U+0000 || aud || U+0000 || jti)",

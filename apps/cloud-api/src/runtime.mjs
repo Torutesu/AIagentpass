@@ -13,8 +13,8 @@ const IDENTIFIER = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 
 export async function createCloudRuntime({ env = process.env, logger = console, postgresFactory = createPostgresRuntime, humanAuthFactory = createHumanAuthRuntime } = {}) {
   const config = loadRuntimeConfig(env);
-  const tokenRecords = readProtectedJson(config.tokenRecordsPath, "token records", 1024 * 1024);
-  if (!Array.isArray(tokenRecords) || tokenRecords.length < 1 || tokenRecords.length > 256) throw new Error("Cloud token records are invalid");
+  const tokenRecords = config.humanAuth ? [] : readProtectedJson(config.tokenRecordsPath, "token records", 1024 * 1024);
+  if (!Array.isArray(tokenRecords) || tokenRecords.length > 256 || (!config.humanAuth && tokenRecords.length < 1)) throw new Error("Cloud token records are invalid");
   const privateKeyPEM = readProtectedFile(config.bundlePrivateKeyPath, "bundle private key", 16 * 1024).toString("utf8");
   let privateKey;
   try { privateKey = crypto.createPrivateKey(privateKeyPEM); } catch { throw new Error("Cloud bundle private key is invalid"); }
@@ -87,7 +87,6 @@ export async function createCloudRuntime({ env = process.env, logger = console, 
 
 export function loadRuntimeConfig(env = {}) {
   const dataDir = absolute(env.AGENTPASS_CLOUD_DATA_DIR, "AGENTPASS_CLOUD_DATA_DIR");
-  const tokenRecordsPath = absolute(env.AGENTPASS_CLOUD_TOKEN_RECORDS_PATH, "AGENTPASS_CLOUD_TOKEN_RECORDS_PATH");
   const bundlePrivateKeyPath = absolute(env.AGENTPASS_CLOUD_BUNDLE_PRIVATE_KEY_PATH, "AGENTPASS_CLOUD_BUNDLE_PRIVATE_KEY_PATH");
   const issuer = env.AGENTPASS_CLOUD_ISSUER ?? "agentpass-cloud";
   const keyId = env.AGENTPASS_CLOUD_KEY_ID ?? "control-v2";
@@ -98,6 +97,9 @@ export function loadRuntimeConfig(env = {}) {
   const ttlMs = integer(env.AGENTPASS_CLOUD_BUNDLE_TTL_MS ?? "3600000", 1_000, 7 * 24 * 60 * 60 * 1000, "Bundle TTL");
   const offlineTtlMs = integer(env.AGENTPASS_CLOUD_OFFLINE_TTL_MS ?? "3600000", 0, 7 * 24 * 60 * 60 * 1000, "Offline TTL");
   const humanAuth = humanAuthConfig(env);
+  // Hosted Human Auth never loads the legacy operator bearer database. The
+  // token-record file exists only for the explicit evaluation profile.
+  const tokenRecordsPath = humanAuth ? null : absolute(env.AGENTPASS_CLOUD_TOKEN_RECORDS_PATH, "AGENTPASS_CLOUD_TOKEN_RECORDS_PATH");
   return Object.freeze({ dataDir, tokenRecordsPath, bundlePrivateKeyPath, issuer, keyId, host, port, ttlMs, offlineTtlMs, humanAuth });
 }
 

@@ -39,11 +39,11 @@ const MAX_CLOCK_SKEW_MS = 5_000;
  * Database/provider details are never exposed through this error.
  */
 export class IdentityResolutionError extends Error {
-  constructor() {
+  constructor(status = 401) {
     super(PUBLIC_FAILURE_MESSAGE);
     this.name = "IdentityResolutionError";
     this.code = IDENTITY_RESOLVER_ERROR_CODES.RESOLUTION_FAILED;
-    this.status = 401;
+    this.status = status;
   }
 }
 
@@ -73,26 +73,25 @@ export function createPostgresIdentityResolver({
   const capabilities = new WeakMap();
 
   async function resolveIdentity(input) {
+    let request;
     try {
-      const request = parseInput(input);
-      const result = await client.query(RESOLVE_QUERY, [request.provider, request.organization_id, request.subject]);
-      if (!result || result.rowCount !== 1 || !Array.isArray(result.rows) || result.rows.length !== 1) {
-        throw new Error("identity membership not found");
-      }
-
+      request = parseInput(input);
+    } catch { throw publicFailure(401); }
+    let result;
+    try {
+      result = await client.query(RESOLVE_QUERY, [request.provider, request.organization_id, request.subject]);
+    } catch { throw publicFailure(503); }
+    if (!result || result.rowCount !== 1 || !Array.isArray(result.rows) || result.rows.length !== 1) {
+      throw publicFailure(401);
+    }
+    try {
       const identity = normalizeIdentityRow(result.rows[0], request);
       const issuedAt = clock(now());
       if (issuedAt > Number.MAX_SAFE_INTEGER - assertionTtlMs) throw new Error("assertion expiry is unsafe");
-      const assertion = Object.freeze({
-        version: 1,
-        issued_at: issuedAt,
-        expires_at: issuedAt + assertionTtlMs
-      });
+      const assertion = Object.freeze({ version: 1, issued_at: issuedAt, expires_at: issuedAt + assertionTtlMs });
       capabilities.set(assertion, Object.freeze({ ...identity, issued_at: issuedAt, expires_at: assertion.expires_at }));
       return assertion;
-    } catch {
-      throw publicFailure();
-    }
+    } catch { throw publicFailure(503); }
   }
 
   function verifyAssertion(assertion, context = {}) {
@@ -184,8 +183,8 @@ function clock(value) {
   return value;
 }
 
-function publicFailure() {
-  return new IdentityResolutionError();
+function publicFailure(status = 401) {
+  return new IdentityResolutionError(status);
 }
 
 function plain(value) {

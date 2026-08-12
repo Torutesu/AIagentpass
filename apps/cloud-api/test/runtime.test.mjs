@@ -53,7 +53,7 @@ test("runtime rejects unsafe secrets, key algorithms, and configuration", async 
 test("production human auth is composed from PostgreSQL and closed with the runtime", async (t) => {
   const value = files();
   t.after(() => fs.rmSync(value.root, { recursive: true, force: true }));
-  const env = { ...value.env, AGENTPASS_DATABASE_URL: "postgresql://agent:secret@db.example.test/agentpass?sslmode=verify-full", AGENTPASS_CONSOLE_ORIGIN: "https://console.example.test", AGENTPASS_WEBAUTHN_RP_ID: "example.test", AGENTPASS_HUMAN_CURSOR_SECRET: CURSOR_SECRET };
+  const env = { ...value.env, AGENTPASS_CLOUD_TOKEN_RECORDS_PATH: undefined, AGENTPASS_DATABASE_URL: "postgresql://agent:secret@db.example.test/agentpass?sslmode=verify-full", AGENTPASS_CONSOLE_ORIGIN: "https://console.example.test", AGENTPASS_WEBAUTHN_RP_ID: "example.test", AGENTPASS_HUMAN_CURSOR_SECRET: CURSOR_SECRET };
   const calls = [];
   const postgresRuntime = { pool: {}, humanRepository: {}, capabilityAuthorityRepository: { async issueCapabilityMetadata() {}, async listRevokedCapabilityIds() { return []; } }, async close() { calls.push("postgres-close"); } };
   const recentAuthService = { async authorize() { return { verified: false }; } };
@@ -68,6 +68,7 @@ test("production human auth is composed from PostgreSQL and closed with the runt
   assert.equal(calls[1][4].keyId, "console-2026-08");
   assert.match(calls[1][4].publicKey, /BEGIN PUBLIC KEY/);
   assert.equal(Object.hasOwn(runtime.config.humanAuth, "cursorSecret"), false);
+  assert.equal(runtime.config.tokenRecordsPath, null);
   assert.equal(JSON.stringify(runtime.config).includes(CURSOR_SECRET), false);
   await runtime.close();
   assert.equal(calls.at(-1), "postgres-close");

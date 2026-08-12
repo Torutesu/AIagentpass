@@ -19,6 +19,7 @@ export const HUMAN_SESSION_HTTP_ERROR_CODES = Object.freeze({
   METHOD_NOT_ALLOWED: "human_session_method_not_allowed",
   ORIGIN_NOT_ALLOWED: "human_session_origin_not_allowed",
   IDENTITY_VERIFICATION_FAILED: "human_session_identity_verification_failed",
+  IDENTITY_REPLAY: "human_session_identity_replay",
   SESSION_UNAVAILABLE: "human_session_unavailable",
   INTERNAL_ERROR: "human_session_internal_error"
 });
@@ -28,6 +29,7 @@ const ERROR_MESSAGES = Object.freeze({
   [HUMAN_SESSION_HTTP_ERROR_CODES.METHOD_NOT_ALLOWED]: "Only POST is allowed",
   [HUMAN_SESSION_HTTP_ERROR_CODES.ORIGIN_NOT_ALLOWED]: "The request origin is not allowed",
   [HUMAN_SESSION_HTTP_ERROR_CODES.IDENTITY_VERIFICATION_FAILED]: "The identity request could not be verified",
+  [HUMAN_SESSION_HTTP_ERROR_CODES.IDENTITY_REPLAY]: "The identity request was already consumed",
   [HUMAN_SESSION_HTTP_ERROR_CODES.SESSION_UNAVAILABLE]: "The session service is unavailable",
   [HUMAN_SESSION_HTTP_ERROR_CODES.INTERNAL_ERROR]: "The request could not be completed"
 });
@@ -37,6 +39,7 @@ const ERROR_STATUS = Object.freeze({
   [HUMAN_SESSION_HTTP_ERROR_CODES.METHOD_NOT_ALLOWED]: 405,
   [HUMAN_SESSION_HTTP_ERROR_CODES.ORIGIN_NOT_ALLOWED]: 403,
   [HUMAN_SESSION_HTTP_ERROR_CODES.IDENTITY_VERIFICATION_FAILED]: 401,
+  [HUMAN_SESSION_HTTP_ERROR_CODES.IDENTITY_REPLAY]: 409,
   [HUMAN_SESSION_HTTP_ERROR_CODES.SESSION_UNAVAILABLE]: 503,
   [HUMAN_SESSION_HTTP_ERROR_CODES.INTERNAL_ERROR]: 500
 });
@@ -115,6 +118,8 @@ export function createHumanSessionHttpApi({
         // interpreting provider-specific credentials.
         identityAssertion = await verifyIdentityRequest(request.input);
       } catch (error) {
+        if (error?.status === 409) throw new HumanSessionHttpError(HUMAN_SESSION_HTTP_ERROR_CODES.IDENTITY_REPLAY, { status: 409, cause: error });
+        if (error?.status === 503) throw new HumanSessionHttpError(HUMAN_SESSION_HTTP_ERROR_CODES.SESSION_UNAVAILABLE, { status: 503, cause: error });
         throw new HumanSessionHttpError(HUMAN_SESSION_HTTP_ERROR_CODES.IDENTITY_VERIFICATION_FAILED, { cause: error });
       }
       if (!isValidOpaqueAssertion(identityAssertion)) {

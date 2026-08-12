@@ -121,9 +121,11 @@ test("Human session bootstrap freezes the BFF-only SIWC signed assertion contrac
   assert.deepEqual(assertion.payload.claims, ["aud", "exp", "iat", "iss", "jti", "nbf", "org", "origin", "provider", "sub"]);
   assert.equal(assertion.payload.claims.includes("redirect_uri"), false);
   assert.equal(assertion.payload.additionalProperties, false);
+  assert.deepEqual(assertion.payload.jti, { encoding: "base64url", minLength: 22, maxLength: 256 });
   assert.equal(assertion.payload.max_ttl_seconds, 60);
   assert.deepEqual(assertion.forbidden_claims, ["redirect_uri"]);
   assert.match(assertion.verification.join(" "), /consume SHA-256.*exactly once/i);
+  assert.match(assertion.verification.join(" "), /Reject Authorization.*identity\/member\/role headers/i);
   assert.deepEqual(assertion.replay, {
     digest: "SHA-256(iss || U+0000 || aud || U+0000 || jti)",
     table: "human_identity_assertion_replays",

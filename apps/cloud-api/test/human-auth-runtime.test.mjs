@@ -91,7 +91,7 @@ test("composes the signed-console identity adapter without a browser identity he
     : Array.isArray(value) ? `[${value.map(sortJson).join(",")}]` : JSON.stringify(value);
   const encode = (value) => Buffer.from(sortJson(value)).toString("base64url");
   const header = { alg: "EdDSA", kid: "console-2026-08", typ: "agentpass.console.identity", version: 1 };
-  const payload = { aud: audience, exp: 1_800_000_030, iat: 1_800_000_000, iss: issuer, jti: "runtime-jti-42", nbf: 1_800_000_000, org: ids.org, origin: "https://console.example.test", provider: "chatgpt", sub: "siwc-user-1" };
+  const payload = { aud: audience, exp: 1_800_000_030, iat: 1_800_000_000, iss: issuer, jti: "runtime-jti-42-abcdefgh", nbf: 1_800_000_000, org: ids.org, origin: "https://console.example.test", provider: "chatgpt", sub: "siwc-user-1" };
   const signingInput = `${encode(header)}.${encode(payload)}`;
   const assertion = `${signingInput}.${crypto.sign(null, Buffer.from(signingInput, "ascii"), pair.privateKey).toString("base64url")}`;
   const runtime = createHumanAuthRuntime({
@@ -102,7 +102,9 @@ test("composes the signed-console identity adapter without a browser identity he
     signedConsoleIdentity: { issuer, audience, keyId: "console-2026-08", publicKey: pair.publicKey },
     now: () => now
   });
-  const result = await runtime.api.handle({ method: "POST", url: "/api/auth/session", headers: { ["agentpass-console-identity"]: assertion, "agentpass-console-user-id": "must-be-ignored", origin: "https://console.example.test", "content-type": "application/json" }, body: "{}" });
+  const result = await runtime.api.handle({ method: "POST", url: "/api/auth/session", headers: { ["agentpass-console-identity"]: assertion, origin: "https://console.example.test", "content-type": "application/json" }, body: "{}" });
   assert.equal(result.status, 201);
   assert.equal(runtime.consoleIdentity.keyId, "console-2026-08");
+  const conflicting = await runtime.api.handle({ method: "POST", url: "/api/auth/session", headers: { ["agentpass-console-identity"]: assertion, "agentpass-console-user-id": "must-be-rejected", origin: "https://console.example.test", "content-type": "application/json" }, body: "{}" });
+  assert.equal(conflicting.status, 401);
 });
