@@ -15,6 +15,7 @@ import { installIntegration, integrationPlan } from "../lib/integrations.mjs";
 import { readGitSigningInvocation, writeGitSignature } from "../lib/git-signing.mjs";
 import { evaluateAgentRequest } from "../lib/policy.mjs";
 import { executeProductionInstall, prepareProductionInstall, removeStagedProductionInstall, stageProductionInstall, verifyProductionInstall } from "../lib/platform-install.mjs";
+import { inspectNativeApplication } from "../lib/platform-setup.mjs";
 import { generateRecoveryIdentity, recoveryPolicyToAnchorPolicy, signAnchorRecoveryAuthorization, signRecoveryRequest, verifyAnchorRecoveryApprovals, verifyRecoveryThreshold } from "../lib/recovery.mjs";
 import { applyControlBundle, controlKeyFingerprint, fetchControlBundle, generateControlKeyPair, loadControlBundle, signControlBundle } from "../lib/remote-control.mjs";
 
@@ -27,6 +28,8 @@ Commands:
   install --manifest FILE --signature FILE --public-key FILE
           --fingerprint SHA256:PIN --team-id TEAMID [--execute]
                     verify and optionally install the production macOS package
+  setup --client claude-code|cursor [--project DIR] [--execute]
+                    configure the native bridge and project MCP integration
   init              create a secure local policy
   migrate           upgrade an older policy to signed-agent format
   status            show policy and revocation status
@@ -157,6 +160,45 @@ function installProduction() {
     console.log(JSON.stringify({ ...publicPlan, installed: installed.installed, installerOutput: installed.installerOutput, dryRun: false }, null, 2));
   } finally {
     removeStagedProductionInstall(staged.stagingDirectory);
+  }
+}
+
+function setupNativeBridge() {
+  if (process.platform !== "darwin") throw new Error("Native AgentPass setup is supported only on macOS");
+  if (process.getuid?.() === 0) throw new Error("Run setup as the interactive user, not root");
+  const allowed = new Set(["--client", "--project"]);
+  const flags = new Map();
+  for (let index = 0; index < args.length; index += 1) {
+    const argument = args[index];
+    if (argument === "--execute") continue;
+    if (!allowed.has(argument) || flags.has(argument) || index + 1 >= args.length || args[index + 1].startsWith("--")) {
+      throw new Error("Usage: agentpass setup --client claude-code|cursor [--project DIR] [--execute]");
+    }
+    flags.set(argument, args[index + 1]);
+    index += 1;
+  }
+  const clientName = flags.get("--client") ?? "claude-code";
+  const project = path.resolve(flags.get("--project") ?? process.cwd());
+  const application = inspectNativeApplication();
+  const config = loadConfig();
+  const mcpServer = fileURLToPath(new URL("../adapters/mcp-server/bin/agentpass-mcp.mjs", import.meta.url));
+  const integration = integrationPlan({ client: clientName, projectDir: project, nodePath: process.execPath, mcpServerPath: mcpServer });
+  const preview = installIntegration(integration);
+  const next = application.serviceStatus === "enabled"
+    ? ["agentpass doctor", "agentpass native status"]
+    : ["agentpass native daemon-register", "agentpass doctor"];
+  if (!args.includes("--execute")) {
+    console.log(JSON.stringify({ version: 1, dryRun: true, native: application, integration: preview, next }, null, 2));
+    return;
+  }
+  const configured = { ...config, native_broker: application.nativeBroker };
+  saveConfig(configured);
+  try {
+    const installed = installIntegration(integration, { dryRun: false });
+    console.log(JSON.stringify({ version: 1, dryRun: false, configured: true, native: application, integration: installed, next }, null, 2));
+  } catch (error) {
+    saveConfig(config);
+    throw error;
   }
 }
 
@@ -1002,6 +1044,7 @@ function xmlEscape(value) {
 
 try {
   if (command === "install") installProduction();
+  else if (command === "setup") setupNativeBridge();
   else if (command === "init") init();
   else if (command === "migrate") migrate();
   else if (command === "check") check();

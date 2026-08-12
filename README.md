@@ -43,6 +43,15 @@ sudo agentpass install \
 
 Service registration remains a separate, visible macOS approval step. Package installation never overwrites protected AgentPass state.
 
+After the PKG is installed and the local policy has been initialized, preview the native bridge and Claude Code/Cursor project integration, then apply it as the interactive user:
+
+```sh
+agentpass setup --client claude-code --project "$PWD"
+agentpass setup --client claude-code --project "$PWD" --execute
+agentpass native daemon-register
+agentpass doctor
+```
+
 Upgrading from AgentPass 0.5 or earlier creates the v4 audit identity and, when needed, a signed agent identity:
 
 ```sh
