@@ -70,7 +70,7 @@ export async function createPostgresRuntime({ env = process.env, PoolClass = Poo
     });
   };
   const organizationRepository = createPostgresOrganizationRepository({ client: pool, onAuthorityReduction });
-  const capabilityAuthorityRepository = createCapabilityAuthorityRepository({ client: pool });
+  const capabilityAuthorityRepository = createCapabilityAuthorityRepository({ client: pool, onAuthorityReduction });
   const sharedControlRepository = createSharedControlRepository({ client: pool });
   const controlPlaneStore = createPostgresControlPlaneStore({
     client: pool,
@@ -84,7 +84,7 @@ export async function createPostgresRuntime({ env = process.env, PoolClass = Poo
   });
   return Object.freeze({
     pool,
-    humanRepository: createPostgresHumanRepository({ client: pool }),
+    humanRepository: createPostgresHumanRepository({ client: pool, onAuthorityReduction }),
     organizationRepository,
     capabilityAuthorityRepository,
     sharedControlRepository,

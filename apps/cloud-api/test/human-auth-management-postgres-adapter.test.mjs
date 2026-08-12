@@ -191,6 +191,8 @@ test("passes rename through and stamps credential and session revocations from o
     credential_id: ids.credential,
     expected_version: 4,
     reason: "human_management",
+    authority_reduction: true,
+    actor_session_id: ids.session,
     revoked_at: "2026-08-12T12:00:00.000Z",
   });
 
@@ -203,6 +205,7 @@ test("passes rename through and stamps credential and session revocations from o
     expected_version: 2,
     reason: "human_management",
     actor_session_id: ids.session,
+    authority_reduction: true,
     revoked_at: "2026-08-12T12:00:00.000Z",
   });
   assert.equal(clockCalls, 2);

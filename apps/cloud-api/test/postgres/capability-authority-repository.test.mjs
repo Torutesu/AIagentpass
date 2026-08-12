@@ -138,7 +138,9 @@ test("issues metadata from the locked active membership version and never trusts
     issued_by_member_id: ids.member,
     issued_membership_version: 7
   });
-  assert.deepEqual(client.calls.slice(0, 3).map(({ text }) => text), ["BEGIN", "SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", "SELECT member_id,role,version\n        FROM memberships\n        WHERE organization_id=$1 AND member_id=$2 AND status='active'\n        FOR SHARE"]);
+  assert.deepEqual(client.calls.slice(0, 4).map(({ text }) => text), ["BEGIN", "SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", "SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", "SELECT member_id,role,version\n        FROM memberships\n        WHERE organization_id=$1 AND member_id=$2 AND status='active'\n        FOR SHARE"]);
+  assert.deepEqual(client.calls[1].params, [`agentpass:organization:${ids.organization}`]);
+  assert.deepEqual(client.calls[2].params, [`agentpass:capability-authority:${ids.organization}:${ids.member}`]);
   const insert = client.calls.find(({ text }) => text.startsWith("INSERT INTO capabilities"));
   assert.deepEqual(insert.params, [ids.organization, ids.capability, ids.agent, ids.device, 3, HASH, EXPIRES, ids.member, 7]);
 
@@ -174,7 +176,7 @@ test("revokeActiveCapabilitiesForMember atomically updates only unrevoked capabi
     { organization_id: ids.organization, capability_id: ids.capability2, agent_id: ids.agent, device_id: ids.device, sequence: 2, statement_hash: "b".repeat(64), expires_at: EXPIRES, revoked_at: NOW, issued_by_member_id: ids.member, issued_membership_version: 6 },
     { organization_id: "77777777-7777-4777-8777-777777777777", capability_id: ids.capability2, agent_id: ids.agent, device_id: ids.device, sequence: 1, statement_hash: HASH, expires_at: EXPIRES, revoked_at: null, issued_by_member_id: ids.member, issued_membership_version: 7 }
   ] });
-  const result = await createCapabilityAuthorityRepository({ client, now: () => NOW }).revokeActiveCapabilitiesForMember({ organization_id: ids.organization, member_id: ids.member });
+  const result = await createCapabilityAuthorityRepository({ client, now: () => NOW, onAuthorityReduction: async () => ({ generation: 2 }) }).revokeActiveCapabilitiesForMember({ organization_id: ids.organization, member_id: ids.member });
   assert.equal(result.revoked_count, 1);
   assert.deepEqual(result.capability_ids, [ids.capability]);
   assert.equal(result.capabilities[0].revoked_at, NOW);
@@ -182,6 +184,38 @@ test("revokeActiveCapabilitiesForMember atomically updates only unrevoked capabi
   assert.match(update.text, /organization_id=\$1 AND issued_by_member_id=\$2 AND revoked_at IS NULL/);
   assert.deepEqual(update.params, [ids.organization, ids.member, NOW]);
   assert.equal(client.calls.at(-1).text, "COMMIT");
+});
+
+test("couples authority reduction to the same transaction and skips it when nothing is revoked", async () => {
+  const client = new FakeClient({ capabilities: [
+    { organization_id: ids.organization, capability_id: ids.capability, agent_id: ids.agent, device_id: ids.device, sequence: 1, statement_hash: HASH, expires_at: EXPIRES, revoked_at: null, issued_by_member_id: ids.member, issued_membership_version: 7 }
+  ] });
+  const calls = [];
+  const repository = createCapabilityAuthorityRepository({ client, now: () => NOW, onAuthorityReduction: async (input) => {
+    calls.push(input);
+    return { generation: 2 };
+  } });
+  await repository.revokeActiveCapabilitiesForMember({ organization_id: ids.organization, member_id: ids.member });
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].tx, client);
+  assert.deepEqual(calls[0].capabilities.map(({ capability_id }) => capability_id), [ids.capability]);
+  const noOp = new FakeClient({ capabilities: [{ ...client.capabilities[0], revoked_at: NOW }] });
+  let noOpCalls = 0;
+  await createCapabilityAuthorityRepository({ client: noOp, now: () => NOW, onAuthorityReduction: async () => { noOpCalls += 1; return { generation: 3 }; } })
+    .revokeActiveCapabilitiesForMember({ organization_id: ids.organization, member_id: ids.member });
+  assert.equal(noOpCalls, 0);
+});
+
+test("fails closed and rolls back when authority reduction propagation fails", async () => {
+  const client = new FakeClient({ capabilities: [
+    { organization_id: ids.organization, capability_id: ids.capability, agent_id: ids.agent, device_id: ids.device, sequence: 1, statement_hash: HASH, expires_at: EXPIRES, revoked_at: null, issued_by_member_id: ids.member, issued_membership_version: 7 }
+  ] });
+  await assert.rejects(
+    createCapabilityAuthorityRepository({ client, now: () => NOW, onAuthorityReduction: async () => undefined })
+      .revokeActiveCapabilitiesForMember({ organization_id: ids.organization, member_id: ids.member }),
+    { code: "ERR_AUTHORITY_REDUCTION_UNAVAILABLE" }
+  );
+  assert.equal(client.calls.at(-1).text, "ROLLBACK");
 });
 
 test("revoke failure rolls back and does not leak database error details into the public error", async () => {
@@ -245,7 +279,7 @@ test("real PostgreSQL capability authority behavior is exercised when AGENTPASS_
       pool.query("INSERT INTO capabilities (organization_id,id,agent_id,device_id,sequence,statement_hash,expires_at) VALUES ($1,$2,$3,$4,1,$5,$6)", [real.organization, real.capability, real.agent, real.device, HASH, EXPIRES]),
       (error) => error.code === "23514" && error.constraint === "capabilities_active_membership_authority_complete"
     );
-    const repository = createCapabilityAuthorityRepository({ client: pool, now: () => NOW });
+    const repository = createCapabilityAuthorityRepository({ client: pool, now: () => NOW, onAuthorityReduction: async () => ({ generation: 2 }) });
     const issued = await repository.issueCapabilityMetadata({
       organization_id: real.organization, capability_id: real.capability, agent_id: real.agent,
       device_id: real.device, sequence: 1, statement_hash: HASH, expires_at: EXPIRES,

@@ -21,13 +21,15 @@ export class CapabilityAuthorityRepositoryError extends PostgresRepositoryError 
  * The repository never accepts a caller-supplied membership version as the
  * source of truth: it records the locked active membership's current version.
  */
-export function createCapabilityAuthorityRepository({ client, now = () => new Date().toISOString() } = {}) {
+export function createCapabilityAuthorityRepository({ client, now = () => new Date().toISOString(), onAuthorityReduction } = {}) {
   assertClient(client);
   if (typeof now !== "function") throw new CapabilityAuthorityRepositoryError("ERR_CLOCK", "now must be a function");
+  if (onAuthorityReduction !== undefined && typeof onAuthorityReduction !== "function") throw new CapabilityAuthorityRepositoryError("ERR_AUTHORITY_REDUCTION_HOOK", "onAuthorityReduction must be a function");
 
   async function issueCapabilityMetadata(input = {}) {
     const values = normalizeIssueInput(input, now);
     return operation(async () => transaction(async (tx) => {
+      await lockOrganization(tx, values.organizationId);
       await lockAuthority(tx, values.organizationId, values.issuedByMemberId);
       const membership = await tx.query(`SELECT member_id,role,version
         FROM memberships
@@ -78,6 +80,7 @@ export function createCapabilityAuthorityRepository({ client, now = () => new Da
   async function revokeActiveCapabilitiesForMember(input = {}) {
     const values = normalizeRevokeInput(input, now);
     return operation(async () => transaction(async (tx) => {
+      await lockOrganization(tx, values.organizationId);
       await lockAuthority(tx, values.organizationId, values.memberId);
       const result = await tx.query(`UPDATE capabilities
         SET revoked_at=$3::timestamptz
@@ -89,6 +92,27 @@ export function createCapabilityAuthorityRepository({ client, now = () => new Da
         values.revokedAt
       ]);
       const capabilities = (result.rows ?? []).map(publicCapabilityRow);
+      if (capabilities.length > 0) {
+        if (!onAuthorityReduction) {
+          throw new CapabilityAuthorityRepositoryError("ERR_AUTHORITY_REDUCTION_UNAVAILABLE", "authority reduction propagation is unavailable");
+        }
+        let authority;
+        try {
+          authority = await onAuthorityReduction(Object.freeze({
+            tx,
+            organization_id: values.organizationId,
+            member_id: values.memberId,
+            occurred_at: values.revokedAt,
+            capabilities: Object.freeze(capabilities)
+          }));
+        } catch (error) {
+          if (error instanceof CapabilityAuthorityRepositoryError) throw error;
+          throw new CapabilityAuthorityRepositoryError("ERR_AUTHORITY_REDUCTION_UNAVAILABLE", "authority reduction propagation is unavailable", undefined, error);
+        }
+        if (!authority || typeof authority !== "object" || !Number.isSafeInteger(authority.generation) || authority.generation < 1) {
+          throw new CapabilityAuthorityRepositoryError("ERR_AUTHORITY_REDUCTION_UNAVAILABLE", "authority reduction propagation is unavailable");
+        }
+      }
       return Object.freeze({
         organization_id: values.organizationId,
         member_id: values.memberId,
@@ -167,6 +191,10 @@ function normalizeRevokeInput(input, now) {
 
 async function lockAuthority(tx, organizationId, memberId) {
   await tx.query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", [`${LOCK_PREFIX}${organizationId}:${memberId}`]);
+}
+
+async function lockOrganization(tx, organizationId) {
+  await tx.query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", [`agentpass:organization:${organizationId}`]);
 }
 
 function publicCapabilityRow(row) {

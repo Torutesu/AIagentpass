@@ -36,7 +36,7 @@ export function createPostgresHumanManagementRepository({ repository, cursorCode
   }
 
   async function revokeCredential(input) {
-    return repository.revokeCredential({ ...input, revoked_at: timestamp() });
+    return repository.revokeCredential({ ...input, revoked_at: timestamp(), authority_reduction: true, actor_session_id: input.session_id });
   }
 
   async function listSessions(input = {}) {
@@ -55,7 +55,8 @@ export function createPostgresHumanManagementRepository({ repository, cursorCode
       ...input,
       actor_session_id: input.session_id,
       target_session_id: input.target_session_id,
-      revoked_at: timestamp()
+      revoked_at: timestamp(),
+      authority_reduction: true
     });
   }
 

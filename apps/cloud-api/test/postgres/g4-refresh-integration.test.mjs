@@ -16,6 +16,8 @@ import { createRefreshNonceCodec } from "../../src/postgres/refresh-nonce-codec.
 import { createPostgresRefreshHintNotifier } from "../../src/postgres/refresh-hint-notifier.mjs";
 import { createPostgresOrganizationRepository } from "../../src/postgres/organization-repository.mjs";
 import { createPostgresControlPlaneResourceRepository } from "../../src/postgres/control-plane-resource-repository.mjs";
+import { createCapabilityAuthorityRepository } from "../../src/postgres/capability-authority-repository.mjs";
+import { createPostgresHumanRepository } from "../../src/postgres/human-repository.mjs";
 
 const { Pool } = pg;
 const databaseUrl = process.env.AGENTPASS_TEST_POSTGRES_URL;
@@ -33,9 +35,16 @@ test("G4 refresh generation, failover reconstruction, and signed ACK are race-sa
     organization: crypto.randomUUID(),
     member: crypto.randomUUID(),
     removedMember: crypto.randomUUID(),
+    raceMember: crypto.randomUUID(),
     membership: crypto.randomUUID(),
     removedMembership: crypto.randomUUID(),
+    raceMembership: crypto.randomUUID(),
     policy: crypto.randomUUID(),
+    agent: crypto.randomUUID(),
+    capability: crypto.randomUUID(),
+    raceCapability: crypto.randomUUID(),
+    sessionA: crypto.randomUUID(),
+    sessionB: crypto.randomUUID(),
     deviceA: crypto.randomUUID(),
     deviceB: crypto.randomUUID(),
     revocation: crypto.randomUUID()
@@ -45,11 +54,24 @@ test("G4 refresh generation, failover reconstruction, and signed ACK are race-sa
   const deviceAPublic = deviceAKeys.publicKey.export({ type: "spki", format: "pem" }).toString().trimEnd();
   const deviceBPublic = deviceBKeys.publicKey.export({ type: "spki", format: "pem" }).toString().trimEnd();
   await poolA.query("INSERT INTO organizations (id,name) VALUES ($1,'G4 integration')", [ids.organization]);
-  await poolA.query("INSERT INTO members (id,github_subject,display_name) VALUES ($1,$2,'G4 owner'),($3,$4,'G4 removed')", [ids.member, `g4-${ids.member}`, ids.removedMember, `g4-${ids.removedMember}`]);
+  await poolA.query("INSERT INTO members (id,github_subject,display_name) VALUES ($1,$2,'G4 owner'),($3,$4,'G4 removed'),($5,$6,'G4 race member')", [ids.member, `g4-${ids.member}`, ids.removedMember, `g4-${ids.removedMember}`, ids.raceMember, `g4-${ids.raceMember}`]);
   await poolA.query("INSERT INTO memberships (organization_id,id,member_id,role,status) VALUES ($1,$2,$3,'owner','active')", [ids.organization, ids.membership, ids.member]);
   await poolA.query("INSERT INTO memberships (organization_id,id,member_id,role,status) VALUES ($1,$2,$3,'viewer','active')", [ids.organization, ids.removedMembership, ids.removedMember]);
+  await poolA.query("INSERT INTO memberships (organization_id,id,member_id,role,status) VALUES ($1,$2,$3,'admin','active')", [ids.organization, ids.raceMembership, ids.raceMember]);
   await poolA.query(`INSERT INTO devices (organization_id,id,label,key_algorithm,public_key_pem,status,metadata)
     VALUES ($1,$2,'Mac A','p256-sha256',$3,'active','{}'::jsonb),($1,$4,'Mac B','p256-sha256',$5,'active','{}'::jsonb)`, [ids.organization, ids.deviceA, deviceAPublic, ids.deviceB, deviceBPublic]);
+  await poolA.query(`INSERT INTO agents (organization_id,id,device_id,kind,name,public_key_pem,status)
+    VALUES ($1,$2,$3,'claude-code','G4 agent',$4,'active')`, [ids.organization, ids.agent, ids.deviceA, deviceAPublic]);
+  await poolA.query(`INSERT INTO capabilities (organization_id,id,agent_id,device_id,sequence,statement_hash,expires_at,issued_by_member_id,issued_membership_version)
+    VALUES ($1,$2,$3,$4,1,$5,$6,$7,1)`, [ids.organization, ids.capability, ids.agent, ids.deviceA, "a".repeat(64), new Date(Date.now() + 60 * 60_000).toISOString(), ids.member]);
+  const sessionCreatedAt = new Date().toISOString();
+  const sessionExpiresAt = new Date(Date.now() + 60 * 60_000).toISOString();
+  await poolA.query(`INSERT INTO human_sessions (id,member_id,token_hash,created_at,expires_at,organization_id,membership_id,role)
+    VALUES ($1,$2,$3,$4,$5,$6,$7,'owner'),($8,$2,$9,$4,$5,$6,$7,'owner')`, [ids.sessionA, ids.member, crypto.randomBytes(32), sessionCreatedAt, sessionExpiresAt, ids.organization, ids.membership, ids.sessionB, crypto.randomBytes(32)]);
+  const credentialA = crypto.randomBytes(16);
+  const credentialB = crypto.randomBytes(16);
+  await poolA.query(`INSERT INTO webauthn_credentials (id,member_id,public_key,transports,label,backup_eligible,backup_state)
+    VALUES ($1,$2,$3,'{}','Primary',false,false),($4,$2,$5,'{}','Backup',false,false)`, [credentialA, ids.member, Buffer.alloc(32, 0x51), credentialB, Buffer.alloc(32, 0x52)]);
   await poolA.query(`INSERT INTO policies (organization_id,id,sequence,name,scope_json,status,created_by)
     VALUES ($1,$2,1,'default',$3::jsonb,'active',$4)`, [ids.organization, ids.policy, JSON.stringify({ operations: ["git.commit.sign"], repositories: ["/work/repo"], branches: { allow: ["main"], deny: [] }, remotes: { allow: ["origin"], deny: [] } }), ids.member]);
 
@@ -211,6 +233,61 @@ test("G4 refresh generation, failover reconstruction, and signed ACK are race-sa
   assert.equal(replayedPolicy.status, "disabled");
   const policyGenerationAfterReplay = await poolA.query("SELECT generation FROM control_plane_authority_generations WHERE organization_id=$1 AND superseded_at IS NULL", [ids.organization]);
   assert.equal(Number(policyGenerationAfterReplay.rows[0].generation), 4);
+
+  // Model a Cloud process that commits a reduction and exits before it can
+  // publish or answer a poll. A different process must reconstruct and serve
+  // the committed hint from PostgreSQL alone.
+  const committingProcessPool = new Pool({ connectionString: databaseUrl, max: 2 });
+  const committingProcessRepository = createControlPlaneAuthorityRepository({ client: committingProcessPool, cursorSecret: Buffer.alloc(32, 0x44), refreshNonceCodec: codec });
+  const failoverIssuedAt = new Date().toISOString();
+  const processExitReduction = await committingProcessRepository.advanceAuthorityGenerationAndEnqueueRefresh({
+    organization_id: ids.organization,
+    issued_at: failoverIssuedAt,
+    expires_at: new Date(Date.parse(failoverIssuedAt) + 5 * 60_000).toISOString()
+  });
+  assert.equal(processExitReduction.generation, 5);
+  await committingProcessPool.end();
+  const failoverHint = await serviceAfterRestart.poll({ organization_id: ids.organization, device_id: ids.deviceA, after_generation: 4, wait_ms: 0 });
+  assert.equal(failoverHint.authority_generation, 5);
+  const failoverOutbox = await poolB.query("SELECT count(*)::int AS count FROM device_refresh_outbox WHERE organization_id=$1 AND desired_generation=5", [ids.organization]);
+  assert.equal(failoverOutbox.rows[0].count, 2);
+
+  const capabilityRepository = createCapabilityAuthorityRepository({ client: poolB, onAuthorityReduction });
+  const revokedCapabilities = await capabilityRepository.revokeActiveCapabilitiesForMember({ organization_id: ids.organization, member_id: ids.member });
+  assert.equal(revokedCapabilities.revoked_count, 1);
+  const capabilityGeneration = await poolB.query("SELECT generation FROM control_plane_authority_generations WHERE organization_id=$1 AND superseded_at IS NULL", [ids.organization]);
+  assert.equal(Number(capabilityGeneration.rows[0].generation), 6);
+  const replayedCapabilityRevocation = await capabilityRepository.revokeActiveCapabilitiesForMember({ organization_id: ids.organization, member_id: ids.member });
+  assert.equal(replayedCapabilityRevocation.revoked_count, 0);
+  const capabilityGenerationAfterReplay = await poolB.query("SELECT generation FROM control_plane_authority_generations WHERE organization_id=$1 AND superseded_at IS NULL", [ids.organization]);
+  assert.equal(Number(capabilityGenerationAfterReplay.rows[0].generation), 6);
+
+  const humanRepository = createPostgresHumanRepository({ client: poolA, onAuthorityReduction });
+  const credentialRevokedAt = new Date().toISOString();
+  const revokedCredential = await humanRepository.revokeCredential({ session_id: ids.sessionA, actor_session_id: ids.sessionA, member_id: ids.member, organization_id: ids.organization, credential_id: credentialA.toString("base64url"), expected_version: 1, revoked_at: credentialRevokedAt, reason: "integration_management", authority_reduction: true });
+  assert.equal(revokedCredential.version, 2);
+  const credentialGeneration = await poolA.query("SELECT generation FROM control_plane_authority_generations WHERE organization_id=$1 AND superseded_at IS NULL", [ids.organization]);
+  assert.equal(Number(credentialGeneration.rows[0].generation), 7);
+  const sessionRevokedAt = new Date().toISOString();
+  const revokedSession = await humanRepository.revokeManagedSession({ actor_session_id: ids.sessionA, target_session_id: ids.sessionB, member_id: ids.member, organization_id: ids.organization, expected_version: 1, revoked_at: sessionRevokedAt, reason: "integration_management", authority_reduction: true });
+  assert.equal(revokedSession.version, 2);
+  const sessionGeneration = await poolA.query("SELECT generation FROM control_plane_authority_generations WHERE organization_id=$1 AND superseded_at IS NULL", [ids.organization]);
+  assert.equal(Number(sessionGeneration.rows[0].generation), 8);
+  await humanRepository.revokeSession({ session_id: ids.sessionA, revoked_at: new Date().toISOString(), reason: "logout" });
+  const generationAfterLogout = await poolA.query("SELECT generation FROM control_plane_authority_generations WHERE organization_id=$1 AND superseded_at IS NULL", [ids.organization]);
+  assert.equal(Number(generationAfterLogout.rows[0].generation), 8);
+
+  const raceExpiry = new Date(Date.now() + 60 * 60_000).toISOString();
+  const raceResults = await Promise.allSettled([
+    capabilityRepository.issueCapabilityMetadata({ organization_id: ids.organization, capability_id: ids.raceCapability, agent_id: ids.agent, device_id: ids.deviceA, sequence: 2, statement_hash: "b".repeat(64), expires_at: raceExpiry, issued_by_member_id: ids.raceMember }),
+    organizationRepository.removeMember({ organization_id: ids.organization, actor_member_id: ids.member, member_id: ids.raceMember, expected_version: 1, removed_at: new Date().toISOString(), idempotency_key: "g4-race-member-remove" })
+  ]);
+  assert.equal(raceResults[1].status, "fulfilled");
+  if (raceResults[0].status === "rejected") assert.equal(raceResults[0].reason.code, "ERR_MEMBER_NOT_ACTIVE");
+  const activeRaceCapabilities = await poolA.query("SELECT count(*)::int AS count FROM capabilities WHERE organization_id=$1 AND issued_by_member_id=$2 AND revoked_at IS NULL", [ids.organization, ids.raceMember]);
+  assert.equal(activeRaceCapabilities.rows[0].count, 0);
+  const generationAfterRace = await poolA.query("SELECT generation FROM control_plane_authority_generations WHERE organization_id=$1 AND superseded_at IS NULL", [ids.organization]);
+  assert.equal(Number(generationAfterRace.rows[0].generation), 9);
 });
 
 function transactionBoundClient(tx) {

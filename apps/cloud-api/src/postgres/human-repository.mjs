@@ -8,8 +8,9 @@ const CREDENTIAL_TRANSPORTS = new Set(["ble", "cable", "hybrid", "internal", "nf
 const DEFAULT_MANAGEMENT_PAGE_SIZE = 25;
 const MAX_MANAGEMENT_PAGE_SIZE = 100;
 
-export function createPostgresHumanRepository({ client } = {}) {
+export function createPostgresHumanRepository({ client, onAuthorityReduction } = {}) {
   if (!client || typeof client.query !== "function") throw new TypeError("database client is invalid");
+  if (onAuthorityReduction !== undefined && typeof onAuthorityReduction !== "function") throw new TypeError("onAuthorityReduction must be a function");
   return Object.freeze({
     createSession,
     findSessionByTokenHash,
@@ -250,6 +251,7 @@ export function createPostgresHumanRepository({ client } = {}) {
     const expectedVersion = positiveInteger(input?.expected_version ?? input?.expectedVersion);
     try {
       return await inTransaction(async (transactionClient) => {
+        await lockOrganization(transactionClient, scope.organizationId);
         await lockCredentialSet(transactionClient, scope.memberId);
         const result = await transactionClient.query(`UPDATE webauthn_credentials c SET label=$4,version=c.version+1 FROM human_sessions s JOIN memberships m ON m.organization_id=s.organization_id AND m.member_id=s.member_id AND m.id=s.membership_id WHERE s.id=$1 AND s.member_id=$2 AND s.organization_id=$3 AND s.revoked_at IS NULL AND s.expires_at>clock_timestamp() AND (s.idle_expires_at IS NULL OR s.idle_expires_at>clock_timestamp()) AND m.status='active' AND m.role=s.role AND c.id=$5 AND c.member_id=s.member_id AND c.revoked_at IS NULL AND c.version=$6 RETURNING c.id,c.member_id,c.label,c.transports,c.backup_eligible,c.backup_state,c.created_at,c.last_used_at,c.revoked_at,c.version`, [scope.sessionId, scope.memberId, scope.organizationId, label, base64Bytes(input?.credential_id ?? input?.credentialId, 16, 1024), expectedVersion]);
         if (result.rowCount === 0 && await credentialExistsInScope(transactionClient, scope, input?.credential_id ?? input?.credentialId)) throw versionConflict();
@@ -270,6 +272,7 @@ export function createPostgresHumanRepository({ client } = {}) {
     const reason = reasonValue === undefined ? undefined : bounded(reasonValue, 128);
     try {
       return await inTransaction(async (transactionClient) => {
+        await lockOrganization(transactionClient, scope.organizationId);
         await lockCredentialSet(transactionClient, scope.memberId);
         const candidate = await transactionClient.query(`SELECT c.id FROM webauthn_credentials c JOIN human_sessions s ON s.member_id=c.member_id JOIN memberships m ON m.organization_id=s.organization_id AND m.member_id=s.member_id AND m.id=s.membership_id WHERE s.id=$1 AND s.member_id=$2 AND s.organization_id=$3 AND s.revoked_at IS NULL AND s.expires_at>clock_timestamp() AND (s.idle_expires_at IS NULL OR s.idle_expires_at>clock_timestamp()) AND m.status='active' AND m.role=s.role AND c.id=$4 AND c.member_id=s.member_id AND c.revoked_at IS NULL AND c.version=$5 LIMIT 1`, [scope.sessionId, scope.memberId, scope.organizationId, credentialId, expectedVersion]);
         if (candidate.rowCount !== 1) {
@@ -281,7 +284,9 @@ export function createPostgresHumanRepository({ client } = {}) {
         if (!Number.isSafeInteger(activeCount) || activeCount < 1) throw lastCredentialError();
         if (activeCount === 1) throw lastCredentialError();
         const result = await transactionClient.query(`UPDATE webauthn_credentials c SET revoked_at=$7,revoke_reason=COALESCE($6,c.revoke_reason),version=c.version+1 FROM human_sessions s JOIN memberships m ON m.organization_id=s.organization_id AND m.member_id=s.member_id AND m.id=s.membership_id WHERE s.id=$1 AND s.member_id=$2 AND s.organization_id=$3 AND s.revoked_at IS NULL AND s.expires_at>clock_timestamp() AND (s.idle_expires_at IS NULL OR s.idle_expires_at>clock_timestamp()) AND m.status='active' AND m.role=s.role AND c.id=$4 AND c.member_id=s.member_id AND c.revoked_at IS NULL AND c.version=$5 RETURNING c.id,c.member_id,c.label,c.transports,c.backup_eligible,c.backup_state,c.created_at,c.last_used_at,c.revoked_at,c.version`, [scope.sessionId, scope.memberId, scope.organizationId, credentialId, expectedVersion, reason ?? null, revokedAt]);
-        return result.rows?.[0] ? safeCredentialRow(result.rows[0]) : null;
+        const record = result.rows?.[0] ? safeCredentialRow(result.rows[0]) : null;
+        if (record && input?.authority_reduction === true) await notifyAuthorityReduction(transactionClient, { ...scope, memberId: scope.memberId, actorSessionId: input?.actor_session_id ?? input?.actorSessionId ?? scope.sessionId, targetId: record.id, resource: "credential", reason, occurredAt: revokedAt });
+        return record;
       });
     } catch (error) {
       throw normalizeLastCredentialError(error);
@@ -296,6 +301,7 @@ export function createPostgresHumanRepository({ client } = {}) {
     if (typeof revokedAt !== "string" || !Number.isFinite(Date.parse(revokedAt))) throw new TypeError("revoked_at is invalid");
     const reason = bounded(input?.revoke_reason ?? input?.revokeReason ?? input?.reason ?? "other_sessions_revoked", 128);
     return inTransaction(async (transactionClient) => {
+      await lockOrganization(transactionClient, organizationId);
       await lockSessionSet(transactionClient, memberId);
       const result = await transactionClient.query(`UPDATE human_sessions target SET revoked_at=COALESCE(target.revoked_at,$4),revoke_reason=COALESCE(target.revoke_reason,$5) WHERE target.member_id=$2 AND target.id<>$1 AND target.revoked_at IS NULL AND EXISTS (SELECT 1 FROM human_sessions actor JOIN memberships m ON m.organization_id=actor.organization_id AND m.member_id=actor.member_id AND m.id=actor.membership_id WHERE actor.id=$1 AND actor.member_id=$2 AND actor.organization_id=$3 AND actor.revoked_at IS NULL AND actor.expires_at>clock_timestamp() AND (actor.idle_expires_at IS NULL OR actor.idle_expires_at>clock_timestamp()) AND m.status='active' AND m.role=actor.role) RETURNING target.id AS session_id,target.member_id,target.organization_id,target.role,target.created_at,target.expires_at,target.last_seen_at,target.idle_expires_at,target.recent_auth_at,target.revoked_at,target.revoke_reason`, [sessionId, memberId, organizationId, revokedAt, reason]);
       return (result.rows ?? []).map(safeSessionRow);
@@ -312,13 +318,16 @@ export function createPostgresHumanRepository({ client } = {}) {
     if (typeof revokedAt !== "string" || !Number.isFinite(Date.parse(revokedAt))) throw new TypeError("revoked_at is invalid");
     const reason = bounded(input?.reason ?? "human_management", 128);
     return inTransaction(async (transactionClient) => {
+      await lockOrganization(transactionClient, organizationId);
       await lockSessionSet(transactionClient, memberId);
       const result = await transactionClient.query(`UPDATE human_sessions target SET revoked_at=$6,revoke_reason=$7,version=target.version+1 WHERE target.id=$4 AND target.member_id=$2 AND target.organization_id=$3 AND target.revoked_at IS NULL AND target.version=$5 AND EXISTS (SELECT 1 FROM human_sessions actor JOIN memberships m ON m.organization_id=actor.organization_id AND m.member_id=actor.member_id AND m.id=actor.membership_id WHERE actor.id=$1 AND actor.member_id=$2 AND actor.organization_id=$3 AND actor.revoked_at IS NULL AND actor.expires_at>clock_timestamp() AND (actor.idle_expires_at IS NULL OR actor.idle_expires_at>clock_timestamp()) AND m.status='active' AND m.role=actor.role) RETURNING target.id AS session_id,target.member_id,target.organization_id,target.role,target.version,target.created_at,target.expires_at,target.last_seen_at,target.idle_expires_at,target.recent_auth_at,target.revoked_at,target.revoke_reason`, [actorSessionId, memberId, organizationId, targetSessionId, expectedVersion, revokedAt, reason]);
       if (result.rowCount === 0) {
         const exists = await transactionClient.query("SELECT 1 FROM human_sessions WHERE id=$1 AND member_id=$2 AND organization_id=$3 AND revoked_at IS NULL LIMIT 1", [targetSessionId, memberId, organizationId]);
         if (exists.rowCount === 1) throw versionConflict();
       }
-      return result.rows?.[0] ? safeSessionRow(result.rows[0]) : null;
+      const record = result.rows?.[0] ? safeSessionRow(result.rows[0]) : null;
+      if (record && input?.authority_reduction === true) await notifyAuthorityReduction(transactionClient, { organizationId, memberId, actorSessionId, targetId: targetSessionId, resource: "session", reason, occurredAt: revokedAt });
+      return record;
     });
   }
 
@@ -336,8 +345,35 @@ export function createPostgresHumanRepository({ client } = {}) {
     await transactionClient.query("SELECT pg_advisory_xact_lock(hashtextextended('agentpass:webauthn:credentials:' || $1::text, 0)) AS locked", [memberId]);
   }
 
+  async function lockOrganization(transactionClient, organizationId) {
+    await transactionClient.query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", [`agentpass:organization:${organizationId}`]);
+  }
+
   async function lockSessionSet(transactionClient, memberId) {
     await transactionClient.query("SELECT pg_advisory_xact_lock(hashtextextended('agentpass:human:sessions:' || $1::text, 0)) AS locked", [memberId]);
+  }
+
+  async function notifyAuthorityReduction(tx, { organizationId, memberId, actorSessionId, targetId, resource, reason, occurredAt }) {
+    if (!onAuthorityReduction) {
+      const error = new Error("authority reduction propagation is unavailable");
+      error.code = "ERR_AUTHORITY_REDUCTION_UNAVAILABLE";
+      throw error;
+    }
+    const result = await onAuthorityReduction(Object.freeze({
+      tx,
+      organization_id: organizationId,
+      member_id: memberId,
+      actor_session_id: actorSessionId,
+      target_id: targetId,
+      resource,
+      reason: reason ?? null,
+      occurred_at: occurredAt
+    }));
+    if (!result || typeof result !== "object" || !Number.isSafeInteger(result.generation) || result.generation < 1) {
+      const error = new Error("authority reduction propagation is unavailable");
+      error.code = "ERR_AUTHORITY_REDUCTION_UNAVAILABLE";
+      throw error;
+    }
   }
 
   async function credentialExistsInScope(transactionClient, scope, credentialValue) {
