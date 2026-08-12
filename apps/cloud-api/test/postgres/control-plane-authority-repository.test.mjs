@@ -1,0 +1,167 @@
+import assert from "node:assert/strict";
+import crypto from "node:crypto";
+import test from "node:test";
+
+import { canonicalJson } from "../../../../packages/protocol/src/index.mjs";
+import {
+  CONTROL_PLANE_SCHEMA_GAPS,
+  createControlPlaneAuthorityRepository
+} from "../../src/postgres/control-plane-authority-repository.mjs";
+
+const ids = {
+  organization: "11111111-1111-4111-8111-111111111111",
+  member: "33333333-3333-4333-8333-333333333333",
+  device: "44444444-4444-4444-8444-444444444444",
+  agent: "55555555-5555-4555-8555-555555555555",
+  revocation: "66666666-6666-4666-8666-666666666666",
+  capability: "77777777-7777-4777-8777-777777777777"
+};
+const HASH = "a".repeat(64);
+const NOW = "2026-08-13T00:00:00.000Z";
+const LATER = "2026-08-13T00:15:00.000Z";
+
+class FakeClient {
+  constructor() {
+    this.calls = [];
+    this.bundleSequence = 0;
+  }
+
+  async query(text, params = []) {
+    this.calls.push({ text, params });
+    if (["BEGIN", "COMMIT", "ROLLBACK"].includes(text)) return result();
+    if (text.includes("pg_advisory_xact_lock")) return result([{ locked: true }]);
+    if (text.startsWith("SELECT member_id FROM memberships")) return result([{ member_id: ids.member }]);
+    if (text.startsWith("SELECT id FROM devices")) return result([{ id: ids.device }]);
+    if (text.startsWith("SELECT id FROM agents")) return result([{ id: ids.agent }]);
+    if (text.startsWith("SELECT organization_id,id AS revocation_id,target_type,target_id,sequence,reason,status,created_by,created_at")) {
+      if (text.includes("target_type=$2")) return result();
+      return result([revocationRow()]);
+    }
+    if (text.startsWith("SELECT COALESCE(MAX(sequence)")) return result([{ sequence: 1 }]);
+    if (text.startsWith("INSERT INTO revocations")) return result([revocationRow()]);
+    if (text.startsWith("SELECT organization_id,device_id,format_epoch,sequence,statement_hash") && text.includes("bundle_heads")) {
+      return result();
+    }
+    if (text.startsWith("INSERT INTO bundle_heads")) {
+      this.bundleSequence = Number(params[2]);
+      return result([{
+        organization_id: params[0], device_id: params[1], format_epoch: 2, sequence: this.bundleSequence,
+        statement_hash: params[3], issued_at: params[4]
+      }]);
+    }
+    if (text.startsWith("SELECT format_epoch,sequence,statement_hash")) return result([{ format_epoch: 2, sequence: 1, statement_hash: HASH }]);
+    if (text.startsWith("INSERT INTO bundle_acknowledgements")) return result([ackRow(params)]);
+    if (text.startsWith("SELECT organization_id,device_id,format_epoch,sequence,statement_hash") && text.includes("bundle_acknowledgements")) return result([ackRow(params)]);
+    if (text.startsWith("SELECT event_id,event_hash,previous_hash,redacted_json,received_at")) return result();
+    if (text.startsWith("SELECT organization_id,device_id,event_id,previous_hash,event_hash,redacted_json,received_at") && text.includes("event_id=$3")) return result();
+    if (text.startsWith("INSERT INTO device_audit_events")) return result([{ organization_id: params[0], device_id: params[1], event_id: params[2], previous_hash: params[3], event_hash: params[4], redacted_json: params[5], received_at: params[6] }]);
+    if (text.startsWith("SELECT id AS device_id FROM devices")) return result([{ device_id: ids.device }]);
+    if (text.startsWith("SELECT organization_id,device_id,event_id,previous_hash,event_hash,redacted_json,received_at") && text.includes("ORDER BY device_id")) return result();
+    if (text.startsWith("SELECT organization_id,device_id,event_id,redacted_json,received_at")) return result([]);
+    throw new Error(`unexpected SQL: ${text}`);
+  }
+}
+
+function result(rows = [], rowCount = rows.length) { return { rows, rowCount }; }
+function revocationRow() {
+  return { organization_id: ids.organization, revocation_id: ids.revocation, target_type: "device", target_id: ids.device, sequence: 1, reason: "operator-request", status: "active", created_by: ids.member, created_at: NOW };
+}
+function ackRow(params) {
+  return { organization_id: params[0], device_id: params[1], format_epoch: params[2], sequence: params[3], statement_hash: params[4], status: params[5], reason: params[6], applied_at: params[7], received_at: NOW };
+}
+function repository(client) {
+  return createControlPlaneAuthorityRepository({ client, cursorSecret: Buffer.alloc(32, 0x31), now: () => NOW });
+}
+function auditEvent(previousHash = "0".repeat(64)) {
+  const preimage = {
+    version: 1,
+    event_id: crypto.randomUUID(),
+    request_id: crypto.randomUUID(),
+    agent_id: ids.agent,
+    operation: "git.commit.sign",
+    decision: "allow",
+    reason: "allowed",
+    policy_sequence: 1,
+    capability_sequence: 1,
+    repository: "/work/repo",
+    branch: "main",
+    remote: "git@example.test:repo.git",
+    payload_digest: HASH,
+    device_timestamp: NOW,
+    previous_hash: previousHash
+  };
+  return { ...preimage, event_hash: crypto.createHash("sha256").update(canonicalJson(preimage), "utf8").digest("hex") };
+}
+
+test("exposes a frozen control-plane authority API and publishes exact schema gaps", () => {
+  const api = repository(new FakeClient());
+  assert.equal(Object.isFrozen(api), true);
+  for (const method of [
+    "createRevocation", "getRevocation", "listRevocations", "issueCapabilityMetadata", "listRevokedCapabilityIds",
+    "assignBundleHead", "acknowledgeBundle", "getBundleAcknowledgement", "ingestDeviceAuditEvents",
+    "appendDeviceAuditEvent", "listDeviceAuditEvents", "getAuditHealth"
+  ]) assert.equal(typeof api[method], "function", method);
+  assert.ok(CONTROL_PLANE_SCHEMA_GAPS.some((gap) => gap.includes("bundle_heads has no expires_at")));
+  assert.ok(CONTROL_PLANE_SCHEMA_GAPS.some((gap) => gap.includes("device_audit_events has no durable")));
+});
+
+test("revocation mutation is tenant-qualified, locked, transactional, and idempotent by identity", async () => {
+  const client = new FakeClient();
+  const api = repository(client);
+  const revocation = await api.createRevocation({
+    organization_id: ids.organization, revocation_id: ids.revocation, target_type: "device", target_id: ids.device,
+    reason: "operator-request", created_by: ids.member, created_at: NOW
+  });
+  assert.deepEqual(revocation, {
+    revocation_id: ids.revocation, organization_id: ids.organization, target_type: "device", target_id: ids.device,
+    reason: "operator-request", status: "active", revoked_at: NOW, version: 1
+  });
+  assert.equal(client.calls[0].text, "BEGIN");
+  assert.ok(client.calls.some(({ text }) => text.includes("pg_advisory_xact_lock")));
+  const active = client.calls.find(({ text }) => text.includes("target_type=$2"));
+  assert.match(active.text, /organization_id=\$1/);
+  assert.equal(client.calls.at(-1).text, "COMMIT");
+
+});
+
+test("bundle heads remain monotonic and ACKs are append-only against the tenant's current head", async () => {
+  const client = new FakeClient();
+  const api = repository(client);
+  const head = await api.assignBundleHead({ organization_id: ids.organization, device_id: ids.device, state_fingerprint: HASH, minimum_sequence: 7, issued_at: NOW, expires_at: LATER });
+  assert.equal(head.sequence, 7);
+  assert.equal(head.state_fingerprint, HASH);
+  const acknowledgement = await api.acknowledgeBundle({ organization_id: ids.organization, device_id: ids.device, format_epoch: 2, sequence: 1, statement_hash: HASH, status: "applied", applied_at: NOW });
+  assert.equal(acknowledgement.version, 1);
+  assert.equal(acknowledgement.status, "applied");
+  assert.ok(client.calls.some(({ text }) => text.startsWith("INSERT INTO bundle_acknowledgements") && text.includes("ON CONFLICT")));
+  assert.ok(client.calls.some(({ text }) => text.startsWith("INSERT INTO bundle_heads")
+    && text.includes("ON CONFLICT (organization_id,device_id) DO UPDATE SET")));
+  await assert.rejects(() => api.assignBundleHead({ organization_id: ids.organization, device_id: ids.device, state_fingerprint: HASH, minimum_sequence: 1, issued_at: LATER, expires_at: NOW }), { code: "ERR_TIMESTAMP" });
+});
+
+test("audit ingestion verifies the protocol hash, tenant/device agent binding, duplicate evidence, and head shape", async () => {
+  const client = new FakeClient();
+  const api = repository(client);
+  const event = auditEvent();
+  const ingested = await api.ingestDeviceAuditEvents({ organization_id: ids.organization, device_id: ids.device, events: [event], received_at: NOW });
+  assert.deepEqual(ingested.accepted, [event.event_id]);
+  assert.deepEqual(ingested.duplicates, []);
+  assert.deepEqual(ingested.gaps, []);
+  assert.deepEqual(ingested.head, { last_hash: event.event_hash, last_event_id: event.event_id, chain_status: "continuous", gap_count: 0 });
+  const insert = client.calls.find(({ text }) => text.startsWith("INSERT INTO device_audit_events"));
+  assert.match(insert.text, /organization_id,device_id,event_id/);
+  assert.deepEqual(insert.params.slice(0, 2), [ids.organization, ids.device]);
+
+  const tampered = { ...event, event_hash: "f".repeat(64) };
+  await assert.rejects(() => api.ingestDeviceAuditEvents({ organization_id: ids.organization, device_id: ids.device, events: [tampered] }), { code: "ERR_AUDIT_HASH_MISMATCH" });
+  await assert.rejects(() => api.ingestDeviceAuditEvents({ organization_id: ids.organization, device_id: ids.device, events: [] }), { code: "ERR_LIMIT_EXCEEDED" });
+});
+
+test("invalid tenant and acknowledgement inputs fail before opening a transaction", async () => {
+  const client = new FakeClient();
+  const api = repository(client);
+  await assert.rejects(() => api.listRevocations({ organization_id: "not-a-uuid" }), { code: "ERR_TENANT_SCOPE" });
+  await assert.rejects(() => api.acknowledgeBundle({ organization_id: ids.organization, device_id: ids.device, format_epoch: 1, sequence: 1, statement_hash: HASH, status: "blocked" }), { code: "ERR_INPUT" });
+  await assert.rejects(() => api.createRevocation({ organization_id: ids.organization, target_type: "device", target_id: ids.device, reason: "missing actor" }), { code: "ERR_UUID" });
+  assert.equal(client.calls.length, 0);
+});
