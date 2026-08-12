@@ -521,7 +521,7 @@ async function databaseOperation(operation) {
   catch (error) {
     if (error instanceof ControlPlaneAuthorityRepositoryError) throw error;
     if (error?.code === "ERR_AUDIT_CURSOR_INVALID") throw error;
-    throw new ControlPlaneAuthorityRepositoryError("ERR_DATABASE", "control-plane authority storage is unavailable");
+    throw new ControlPlaneAuthorityRepositoryError("ERR_DATABASE", "control-plane authority storage is unavailable", undefined, error);
   }
 }
 

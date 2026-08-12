@@ -17,8 +17,9 @@ const HUMAN_AUTH_ACCEPT_INVITATION_PATH = "/api/auth/invitations/accept";
 const HUMAN_AUTH_UUID = "[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89a-fA-F][0-9a-fA-F]{3}-[0-9a-fA-F]{12}";
 const UUID = "([0-9a-fA-F-]{36})";
 const UUID_VALUE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu;
+const OPERATIONAL_METRIC_KEYS = Object.freeze(["lock_timeout_total", "lock_wait_total", "replay_denial_total", "rate_limit_denial_total", "stale_ack_total", "audit_gap_total"]);
 
-export function createCloudApi({ store, tokenRecords = [], bundleSigner, now = () => Date.now(), monotonicNow, replayCache = createReplayCache(), deviceReplayConsumer, rateLimiter, admissionRateLimiter, verifyRecentWebAuthn, recentAuthService, humanAuthApi, humanSession, capabilityAuthorityRepository, capabilityRevocationSource, auditRepository, enrollmentCredentialSecret } = {}) {
+export function createCloudApi({ store, tokenRecords = [], bundleSigner, now = () => Date.now(), monotonicNow, replayCache = createReplayCache(), deviceReplayConsumer, rateLimiter, admissionRateLimiter, verifyRecentWebAuthn, recentAuthService, humanAuthApi, humanSession, capabilityAuthorityRepository, capabilityRevocationSource, auditRepository, enrollmentCredentialSecret, trackInFlight, readiness, operationalMetrics, operationalProbeSecret } = {}) {
   if (!store) throw new TypeError("store is required");
   if (verifyRecentWebAuthn !== undefined && recentAuthService !== undefined) throw new TypeError("configure verifyRecentWebAuthn or recentAuthService, not both");
   if (humanAuthApi !== undefined && (!humanAuthApi || typeof humanAuthApi.handle !== "function")) throw new TypeError("humanAuthApi must expose handle()");
@@ -28,6 +29,11 @@ export function createCloudApi({ store, tokenRecords = [], bundleSigner, now = (
   if (auditRepository !== undefined && (!auditRepository || typeof auditRepository.listDeviceAuditEvents !== "function")) throw new TypeError("auditRepository must expose listDeviceAuditEvents()");
   if (deviceReplayConsumer !== undefined && typeof deviceReplayConsumer !== "function") throw new TypeError("deviceReplayConsumer must be a function");
   if (enrollmentCredentialSecret !== undefined && (!Buffer.isBuffer(enrollmentCredentialSecret) || enrollmentCredentialSecret.length !== 32)) throw new TypeError("enrollmentCredentialSecret must be an exact 32-byte Buffer");
+  if (trackInFlight !== undefined && typeof trackInFlight !== "function") throw new TypeError("trackInFlight must be a function");
+  if (readiness !== undefined && typeof readiness !== "function") throw new TypeError("readiness must be a function");
+  if (operationalMetrics !== undefined && (!operationalMetrics || typeof operationalMetrics.snapshot !== "function")) throw new TypeError("operationalMetrics must expose snapshot()");
+  if (operationalProbeSecret !== undefined && (!Buffer.isBuffer(operationalProbeSecret) || operationalProbeSecret.length !== 32)) throw new TypeError("operationalProbeSecret must be an exact 32-byte Buffer");
+  if ((readiness !== undefined || operationalMetrics !== undefined) && operationalProbeSecret === undefined) throw new TypeError("operationalProbeSecret is required for operational endpoints");
   const effectiveEnrollmentCredentialSecret = enrollmentCredentialSecret ?? (bundleSigner?.privateKey
     ? crypto.createHash("sha256").update("AgentPass-Evaluation-Enrollment-Root-v1\0").update(bundleSigner.privateKey.export({ type: "pkcs8", format: "der" })).digest()
     : crypto.randomBytes(32));
@@ -50,6 +56,29 @@ export function createCloudApi({ store, tokenRecords = [], bundleSigner, now = (
   }
 
   const server = http.createServer(async (request, response) => {
+    const operation = async () => {
+      const healthPath = new URL(request.url, "http://agentpass.invalid").pathname;
+      if (request.method === "GET" && healthPath === "/health/ready" && readiness) {
+        if (!authorizedOperationalProbe(request, operationalProbeSecret)) return send(response, 404, { error: { code: "not_found", message: "Resource not found" } });
+        const report = await readiness().then(publicReadinessReport).catch(() => ({ version: 1, ready: false, status: "not_ready", code: "health_unavailable" }));
+        return send(response, report.ready === true ? 200 : 503, report);
+      }
+      if (request.method === "GET" && healthPath === "/health/metrics" && operationalMetrics) {
+        if (!authorizedOperationalProbe(request, operationalProbeSecret)) return send(response, 404, { error: { code: "not_found", message: "Resource not found" } });
+        const report = (() => { try { return publicMetricsReport(operationalMetrics.snapshot()); } catch { return null; } })();
+        return report ? send(response, 200, report) : send(response, 503, { version: 1, valid: false, code: "metrics_unavailable" });
+      }
+      return handleRequest(request, response);
+    };
+    try { return await (trackInFlight ? trackInFlight(operation) : operation()); }
+    catch (error) {
+      if (!response.headersSent && error?.code === "draining") return send(response, 503, { error: { code: "draining", message: "Service is draining" }, request_id: crypto.randomUUID() });
+      if (!response.headersSent) return send(response, 500, { error: { code: "internal_error", message: "Internal error" }, request_id: crypto.randomUUID() });
+      response.destroy();
+    }
+  });
+
+  async function handleRequest(request, response) {
     const requestId = crypto.randomUUID();
     try {
       const url = new URL(request.url, "http://agentpass.invalid");
@@ -77,7 +106,7 @@ export function createCloudApi({ store, tokenRecords = [], bundleSigner, now = (
           let accepted = false;
           try { accepted = await deviceReplayConsumer({ organizationId, deviceId: principal.device_id, nonce: request.headers["agentpass-nonce"] }); }
           catch { throw apiError("auth_replay_unavailable", 503, "Authentication replay protection is unavailable"); }
-          if (accepted !== true) throw apiError("auth_replay_detected", 401, "Authentication failed");
+          if (accepted !== true) { recordOperationalMetric(operationalMetrics, "recordReplayDenial"); throw apiError("auth_replay_detected", 401, "Authentication failed"); }
         }
       } else if (route.enrollment) {
         principal = { enrollment_id: match?.groups?.enrollmentId, member_id: admissionId };
@@ -100,15 +129,19 @@ export function createCloudApi({ store, tokenRecords = [], bundleSigner, now = (
         if (error?.code === "RATE_LIMITER_CAPACITY_EXHAUSTED") throw error;
         throw apiError("rate_limiter_unavailable", 503, "Rate limiter is temporarily unavailable", { "Retry-After": "1" });
       }
-      if (!rateLimit.allowed) throw apiError("rate_limited", 429, "Rate limit exceeded", rateLimitHeaders(rateLimit, true));
+      if (!rateLimit.allowed) { recordOperationalMetric(operationalMetrics, "recordRateLimitDenial"); throw apiError("rate_limited", 429, "Rate limit exceeded", rateLimitHeaders(rateLimit, true)); }
       const context = { request, url, body, bodyBytes, organizationId, principal, match: match.groups ?? {}, idempotencyKey: idempotencyKey(request, route), requestId };
       const result = await route.handle(context);
+      const gapCount = result?.body?.ingestion?.gaps?.length;
+      if (Number.isSafeInteger(gapCount) && gapCount > 0) recordOperationalMetric(operationalMetrics, "recordAuditGap", gapCount);
       send(response, result.status ?? 200, { ...result.body, request_id: requestId }, { ...rateLimitHeaders(rateLimit), ...result.headers });
     } catch (error) {
+      if (error?.code === "ERR_BUNDLE_HEAD_MISMATCH") recordOperationalMetric(operationalMetrics, "recordStaleAck");
+      if (hasErrorCode(error, "55P03")) recordOperationalMetric(operationalMetrics, "recordLockTimeout");
       const mapped = mapError(error);
       send(response, mapped.status, { error: { code: mapped.code, message: mapped.message }, request_id: requestId }, mapped.headers);
     }
-  });
+  }
   server.requestTimeout = 15_000;
   server.headersTimeout = 10_000;
   server.keepAliveTimeout = 5_000;
@@ -504,6 +537,58 @@ function rateLimitHeaders(decision, retry = false) {
   };
   if (retry) headers["Retry-After"] = String(decision.retryAfterSeconds);
   return headers;
+}
+
+function authorizedOperationalProbe(request, secret) {
+  const supplied = request.headers["agentpass-operational-token"];
+  if (typeof supplied !== "string" || !/^[A-Za-z0-9_-]{43}$/u.test(supplied)) return false;
+  const bytes = Buffer.from(supplied, "base64url");
+  return bytes.length === 32 && crypto.timingSafeEqual(bytes, secret);
+}
+
+function recordOperationalMetric(metrics, method, amount = 1) {
+  try { metrics?.[method]?.(amount); } catch { /* Observability must never alter authorization or API behavior. */ }
+}
+
+function hasErrorCode(error, expected) {
+  let current = error;
+  for (let depth = 0; depth < 5 && current && typeof current === "object"; depth += 1) {
+    if (current.code === expected) return true;
+    current = current.cause;
+  }
+  return false;
+}
+
+function publicReadinessReport(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value) || value.version !== 1 || typeof value.ready !== "boolean" || typeof value.status !== "string" || typeof value.code !== "string") throw new Error("invalid readiness report");
+  const output = { version: 1, ready: value.ready, status: value.status, code: value.code };
+  if (value.checks !== undefined) output.checks = publicReadinessChecks(value.checks);
+  if (value.metrics !== undefined) output.metrics = publicMetricsReport(value.metrics);
+  return Object.freeze(output);
+}
+
+function publicReadinessChecks(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("invalid readiness checks");
+  const { database, schema, pool, drain } = value;
+  if (!database || typeof database.ok !== "boolean" || typeof database.probe !== "string") throw new Error("invalid readiness checks");
+  const integerOrNull = (item) => item === null || Number.isSafeInteger(item);
+  if (!schema || typeof schema.ok !== "boolean" || !integerOrNull(schema.expected_version) || !integerOrNull(schema.applied_version) || !integerOrNull(schema.migration_count) || !integerOrNull(schema.pending_count) || typeof schema.checksum_status !== "string" || (schema.drift !== null && typeof schema.drift !== "boolean")) throw new Error("invalid readiness checks");
+  if (!pool || typeof pool.ok !== "boolean" || !integerOrNull(pool.max_connections) || !integerOrNull(pool.total_connections) || !integerOrNull(pool.idle_connections) || !integerOrNull(pool.waiting_connections) || !integerOrNull(pool.utilization_percent) || (pool.saturated !== null && typeof pool.saturated !== "boolean")) throw new Error("invalid readiness checks");
+  if (!drain || !["running", "draining", "closed"].includes(drain.state) || typeof drain.accepting !== "boolean" || !Number.isSafeInteger(drain.in_flight) || drain.in_flight < 0) throw new Error("invalid readiness checks");
+  return Object.freeze({
+    database: Object.freeze({ ok: database.ok, probe: database.probe }),
+    schema: Object.freeze({ ok: schema.ok, expected_version: schema.expected_version, applied_version: schema.applied_version, migration_count: schema.migration_count, pending_count: schema.pending_count, checksum_status: schema.checksum_status, drift: schema.drift }),
+    pool: Object.freeze({ ok: pool.ok, max_connections: pool.max_connections, total_connections: pool.total_connections, idle_connections: pool.idle_connections, waiting_connections: pool.waiting_connections, utilization_percent: pool.utilization_percent, saturated: pool.saturated }),
+    drain: Object.freeze({ state: drain.state, accepting: drain.accepting, in_flight: drain.in_flight })
+  });
+}
+
+function publicMetricsReport(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value) || value.version !== 1 || value.valid !== true || !value.counters || typeof value.counters !== "object" || Array.isArray(value.counters)) throw new Error("invalid metrics report");
+  if (Object.keys(value.counters).sort().join(",") !== [...OPERATIONAL_METRIC_KEYS].sort().join(",")) throw new Error("invalid metrics report");
+  const counters = {};
+  for (const key of OPERATIONAL_METRIC_KEYS) { const count = value.counters[key]; if (!Number.isSafeInteger(count) || count < 0) throw new Error("invalid metrics report"); counters[key] = count; }
+  return Object.freeze({ version: 1, counters: Object.freeze(counters), valid: true });
 }
 
 function send(response, status, value, headers = {}) {

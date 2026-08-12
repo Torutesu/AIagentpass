@@ -65,7 +65,11 @@ export async function createCloudRuntime({ env = process.env, logger = console, 
       ...(profile.isHosted ? {
         deviceReplayConsumer: async ({ organizationId, deviceId, nonce }) => (await postgresRuntime.sharedControlRepository.consumeDeviceRequestNonce({ organizationId, deviceId, nonce })).accepted,
         rateLimiter: createHostedRateLimiter(postgresRuntime.sharedControlRepository),
-        enrollmentCredentialSecret: Buffer.from(env.AGENTPASS_CAPABILITY_NONCE_SECRET, "base64url")
+        enrollmentCredentialSecret: Buffer.from(env.AGENTPASS_CAPABILITY_NONCE_SECRET, "base64url"),
+        trackInFlight: postgresRuntime.trackInFlight,
+        readiness: postgresRuntime.readiness,
+        operationalMetrics: postgresRuntime.operationalMetrics,
+        operationalProbeSecret: exactRuntimeSecret(env.AGENTPASS_OPERATIONAL_PROBE_SECRET, "AGENTPASS_OPERATIONAL_PROBE_SECRET")
       } : { rateLimiter: createRateLimiter({ persistencePath: path.join(config.dataDir, "principal-rate-limits.json") }) }),
       admissionRateLimiter: profile.isHosted ? undefined : createRateLimiter({ persistencePath: path.join(config.dataDir, "admission-rate-limits.json"), human: { capacity: 30, refillPerSecond: 1 }, device: { capacity: 60, refillPerSecond: 2 } }),
       bundleSigner: { privateKey, issuer: config.issuer, keyId: config.keyId, ttlMs: config.ttlMs, offlineTtlMs: config.offlineTtlMs },
@@ -75,6 +79,7 @@ export async function createCloudRuntime({ env = process.env, logger = console, 
     });
   } catch (error) { await postgresRuntime?.close?.().catch(() => {}); await store?.close?.(); throw error; }
   let closed = false;
+  let closePromise;
   return Object.freeze({
     config: Object.freeze({ ...config, profile: profile.profile }),
     server,
@@ -89,10 +94,24 @@ export async function createCloudRuntime({ env = process.env, logger = console, 
     },
     async close() {
       if (closed) return;
-      closed = true;
-      if (server.listening) await new Promise((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
-      await postgresRuntime?.close?.();
-      await store.close?.();
+      if (closePromise) return closePromise;
+      closePromise = (async () => {
+        postgresRuntime?.beginDrain?.();
+        const serverClose = server.listening
+          ? new Promise((resolve, reject) => {
+              server.close((error) => error ? reject(error) : resolve());
+              server.closeIdleConnections?.();
+            })
+          : Promise.resolve();
+        const databaseClose = postgresRuntime?.drain ? postgresRuntime.drain() : postgresRuntime?.close?.();
+        const results = await runtimeTimeout(Promise.all([serverClose, databaseClose]), 15_000);
+        const drainResult = results?.[1];
+        if (drainResult?.drained === false) throw new Error("Cloud runtime drain timed out");
+        await store.close?.();
+        closed = true;
+      })();
+      try { return await closePromise; }
+      catch (error) { closePromise = undefined; throw error; }
     }
   });
 }
@@ -148,6 +167,13 @@ function requireHumanCursorSecret(value) {
   return value;
 }
 
+function exactRuntimeSecret(value, name) {
+  if (typeof value !== "string" || !/^[A-Za-z0-9_-]{43}$/u.test(value)) throw new Error(`${name} must be an exact 32-byte base64url secret`);
+  const bytes = Buffer.from(value, "base64url");
+  if (bytes.length !== 32 || bytes.toString("base64url") !== value) throw new Error(`${name} must be an exact 32-byte base64url secret`);
+  return bytes;
+}
+
 function readProtectedJson(file, label, maxBytes) {
   const bytes = readProtectedFile(file, label, maxBytes);
   try { return JSON.parse(bytes); } catch { throw new Error(`Cloud ${label} JSON is invalid`); }
@@ -173,6 +199,14 @@ function integer(value, min, max, label) {
   const result = Number(value);
   if (!Number.isSafeInteger(result) || result < min || result > max) throw new Error(`${label} is invalid`);
   return result;
+}
+
+function runtimeTimeout(promise, timeoutMs) {
+  let timer;
+  return Promise.race([
+    promise,
+    new Promise((_, reject) => { timer = setTimeout(() => reject(new Error("Cloud runtime shutdown timed out")), timeoutMs); })
+  ]).finally(() => clearTimeout(timer));
 }
 
 function createHostedRateLimiter(repository, { now = () => Date.now() } = {}) {

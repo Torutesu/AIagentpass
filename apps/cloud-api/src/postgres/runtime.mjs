@@ -6,10 +6,16 @@ import { createPostgresHumanRepository } from "./human-repository.mjs";
 import { createPostgresOrganizationRepository } from "./organization-repository.mjs";
 import { createTenantRepositoryFactory } from "./repository.mjs";
 import { createSharedControlRepository } from "./shared-control-repository.mjs";
+import {
+  createDrainController,
+  createOperationalHealth,
+  createOperationalMetrics
+} from "./operational-health.mjs";
 
 export async function createPostgresRuntime({ env = process.env, PoolClass = Pool, applicationVersion = "unknown" } = {}) {
   const config = loadPostgresConfig(env);
   const pool = new PoolClass({ connectionString: config.connectionString, ssl: { rejectUnauthorized: true }, max: config.maxConnections, connectionTimeoutMillis: config.connectionTimeoutMs, idleTimeoutMillis: config.idleTimeoutMs, statement_timeout: config.statementTimeoutMs, lock_timeout: config.lockTimeoutMs, query_timeout: config.statementTimeoutMs + 1_000, allowExitOnIdle: false });
+  const migrationRunner = createMigrationRunner({ client: pool, applicationVersion });
   let client;
   try {
     client = await pool.connect();
@@ -23,6 +29,26 @@ export async function createPostgresRuntime({ env = process.env, PoolClass = Poo
   }
   client.release();
   let closed = false;
+  const drainController = createDrainController();
+  const operationalMetrics = createOperationalMetrics();
+  const operationalHealth = createOperationalHealth({
+    pool,
+    maxConnections: config.maxConnections,
+    migrationStatus: () => migrationRunner.status(),
+    metrics: operationalMetrics,
+    drainController
+  });
+  async function closePool() {
+    if (closed) return;
+    closed = true;
+    await pool.end();
+  }
+  async function close() {
+    return drainController.close(closePool);
+  }
+  async function drain(options = {}) {
+    return drainController.drain({ ...options, close: closePool });
+  }
   const organizationRepository = createPostgresOrganizationRepository({ client: pool });
   const capabilityAuthorityRepository = createCapabilityAuthorityRepository({ client: pool });
   const sharedControlRepository = createSharedControlRepository({ client: pool });
@@ -44,12 +70,15 @@ export async function createPostgresRuntime({ env = process.env, PoolClass = Poo
     sharedControlRepository,
     controlPlaneStore,
     tenants: createTenantRepositoryFactory({ client: pool }),
-    async health() {
-      if (closed) return { ready: false, code: "postgres_closed" };
-      const result = await pool.query("SELECT 1 AS ready", []);
-      return { ready: result.rows?.[0]?.ready === 1, code: result.rows?.[0]?.ready === 1 ? "ready" : "postgres_unavailable" };
-    },
-    async close() { if (!closed) { closed = true; await pool.end(); } }
+    operationalHealth,
+    operationalMetrics,
+    metrics: operationalMetrics,
+    readiness: operationalHealth.readiness,
+    health: operationalHealth.health,
+    trackInFlight: drainController.track,
+    beginDrain: drainController.beginDrain,
+    drain,
+    close
   });
 }
 
@@ -58,9 +87,10 @@ export function loadPostgresConfig(env = {}) {
   let url;
   try { url = new URL(raw); } catch { throw new TypeError("AGENTPASS_DATABASE_URL is invalid"); }
   if (url.protocol !== "postgresql:" || !url.hostname || !url.username || !url.password || url.hash) throw new TypeError("AGENTPASS_DATABASE_URL is invalid");
-  const sslMode = url.searchParams.get("sslmode");
-  if (sslMode !== "verify-full") throw new TypeError("PostgreSQL sslmode=verify-full is required");
-  for (const key of url.searchParams.keys()) if (key !== "sslmode") throw new TypeError("AGENTPASS_DATABASE_URL contains unsupported parameters");
+  const parameters = [...url.searchParams.entries()];
+  if (parameters.length !== 1 || parameters[0][0] !== "sslmode" || parameters[0][1] !== "verify-full") {
+    throw new TypeError("PostgreSQL sslmode=verify-full is required and must be the only connection parameter");
+  }
   return Object.freeze({
     connectionString: url.toString(),
     maxConnections: integer(env.AGENTPASS_DATABASE_MAX_CONNECTIONS ?? "10", 1, 100),

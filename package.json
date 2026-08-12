@@ -16,6 +16,7 @@
     "native/macos/Resources",
     "native/macos/scripts",
     "scripts/release",
+    "scripts/postgres",
     "native/macos/Sources",
     "native/macos/Tests",
     "README.md",
@@ -40,7 +41,9 @@
     "release:sign": "node scripts/release/sign-manifest.mjs",
     "release:verify": "node scripts/release/verify-release.mjs",
     "contracts:validate": "node scripts/validate-contracts.mjs",
-    "lint": "node --check bin/*.mjs && node --check lib/*.mjs && node --check packages/*/src/*.mjs && node --check adapters/*/src/*.mjs && node --check adapters/*/bin/*.mjs && node --check apps/cloud-api/src/*.mjs apps/cloud-api/src/human-auth/*.mjs apps/cloud-api/src/human-auth/identity/*.mjs apps/cloud-api/src/human-auth/management/*.mjs apps/cloud-api/src/human-auth/organizations/*.mjs apps/cloud-api/src/human-auth/pagination/*.mjs apps/cloud-api/src/human-auth/webauthn/*.mjs apps/cloud-api/src/postgres/*.mjs && node --check scripts/*.mjs scripts/release/*.mjs && bash -n native/macos/scripts/*.sh scripts/release/*.sh",
+    "postgres:cutover": "node scripts/postgres/cutover.mjs",
+    "postgres:authority-manifest": "node scripts/postgres/authority-manifest.mjs",
+    "lint": "node --check bin/*.mjs && node --check lib/*.mjs && node --check packages/*/src/*.mjs && node --check adapters/*/src/*.mjs && node --check adapters/*/bin/*.mjs && node --check apps/cloud-api/src/*.mjs apps/cloud-api/src/human-auth/*.mjs apps/cloud-api/src/human-auth/identity/*.mjs apps/cloud-api/src/human-auth/management/*.mjs apps/cloud-api/src/human-auth/organizations/*.mjs apps/cloud-api/src/human-auth/pagination/*.mjs apps/cloud-api/src/human-auth/webauthn/*.mjs apps/cloud-api/src/postgres/*.mjs && node --check scripts/*.mjs scripts/postgres/*.mjs scripts/release/*.mjs && bash -n native/macos/scripts/*.sh scripts/release/*.sh",
     "prepack": "npm run release:validate && npm run contracts:validate && npm test && npm run test:native && npm run test:native-app && npm run lint"
   },
   "engines": {
