@@ -19,6 +19,11 @@ function postgres() {
     async listCredentialsForSession() { return []; },
     async getRegistrationUser() { return { id: "EREREREREREREREREREREQ", name: "agentpass:test", display_name: "Test user" }; },
     async createCredential() { return { created: true, credential_id: "Q".repeat(22) }; },
+    async listCredentialMetadataForSession() { return []; },
+    async updateCredentialLabel() { return null; },
+    async revokeCredential() { return null; },
+    async listSafeSessions() { return []; },
+    async revokeManagedSession() { return null; },
     async findCredentialForSession() { return null; },
     async updateCredentialCounter() { return false; },
   };

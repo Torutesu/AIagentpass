@@ -9,6 +9,7 @@ function fixture() {
     sessionApi: { async handle(input) { calls.push(["session", input]); return result; } },
     webauthnApi: { async handle(input) { calls.push(["webauthn", input]); return result; } },
     registrationApi: { async handle(input) { calls.push(["registration", input]); return result; } },
+    managementApi: { async handle(input) { calls.push(["management", input]); return result; } },
   });
   return { router, calls };
 }
@@ -21,7 +22,8 @@ test("routes exact public auth paths and translates only the session path", asyn
   await router.handle({ ...base, url: "/api/auth/webauthn/verify" });
   await router.handle({ ...base, url: "/api/auth/webauthn/registration/options" });
   await router.handle({ ...base, url: "/api/auth/webauthn/registration/verify" });
-  assert.deepEqual(calls.map(([kind, input]) => [kind, input.url]), [["session", "/session"], ["webauthn", "/api/auth/webauthn/options"], ["webauthn", "/api/auth/webauthn/verify"], ["registration", "/api/auth/webauthn/registration/options"], ["registration", "/api/auth/webauthn/registration/verify"]]);
+  await router.handle({ ...base, method: "GET", url: "/api/auth/management/credentials?limit=25" });
+  assert.deepEqual(calls.map(([kind, input]) => [kind, input.url]), [["session", "/session"], ["webauthn", "/api/auth/webauthn/options"], ["webauthn", "/api/auth/webauthn/verify"], ["registration", "/api/auth/webauthn/registration/options"], ["registration", "/api/auth/webauthn/registration/verify"], ["management", "/api/auth/management/credentials?limit=25"]]);
   assert.equal(calls.every(([, input]) => input.headers === base.headers && input.body === base.body), true);
 });
 

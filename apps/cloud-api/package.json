@@ -3,6 +3,6 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "scripts": { "bootstrap": "node src/bootstrap.mjs", "start": "node src/main.mjs", "test": "node --test" },
+  "scripts": { "bootstrap": "node src/bootstrap.mjs", "identity-bind": "node src/identity-bind.mjs", "start": "node src/main.mjs", "test": "node --test" },
   "engines": { "node": ">=20" }
 }

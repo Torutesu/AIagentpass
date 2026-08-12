@@ -8,6 +8,8 @@ const ROUTES = new Map([
   ["/api/auth/webauthn/verify", Object.freeze({ cloudPath: "/api/auth/webauthn/verify", session: false })],
   ["/api/auth/webauthn/registration/options", Object.freeze({ cloudPath: "/api/auth/webauthn/registration/options", session: false })],
   ["/api/auth/webauthn/registration/verify", Object.freeze({ cloudPath: "/api/auth/webauthn/registration/verify", session: false })],
+  ["/api/auth/security/passkeys", Object.freeze({ cloudPath: "/api/auth/management/credentials", methods: ["GET"], requireCookie: true, requireCsrf: true, body: "none" })],
+  ["/api/auth/security/sessions", Object.freeze({ cloudPath: "/api/auth/management/sessions", methods: ["GET"], requireCookie: true, requireCsrf: true, body: "none" })],
 ]);
 
 export class HumanAuthBridgeError extends Error {
@@ -26,16 +28,16 @@ export function createHumanAuthBridge(options = {}) {
 export async function handleHumanAuthRequest(request, options = {}) {
   try {
     const url = new URL(request.url);
-    const route = ROUTES.get(url.pathname);
+    const route = resolveRoute(url.pathname);
     if (!route || url.search || url.hash) fail(404, "not_found", "Resource not found");
-    if (request.method !== "POST") fail(405, "method_not_allowed", "Only POST is allowed");
+    if (!(route.methods ?? ["POST"]).includes(request.method)) fail(405, "method_not_allowed", "Method not allowed");
     const origin = request.headers.get("origin");
     if (origin !== url.origin || origin === "null") fail(403, "origin_not_allowed", "The request origin is not allowed");
 
     const user = await requireUser(request, options);
     const config = readConfig(options.env);
     if (!config.operatorUserIds.has(user.userId)) fail(403, "operator_access_denied", "Operator access is denied");
-    const body = await readBody(request);
+    const body = route.body === "none" ? await readNoBody(request) : await readBody(request, route);
     const fetchImpl = options.fetchImpl ?? options.fetch ?? globalThis.fetch;
     if (typeof fetchImpl !== "function") fail(503, "cloud_api_unavailable", "Cloud API is unavailable");
 
@@ -54,7 +56,8 @@ export async function handleHumanAuthRequest(request, options = {}) {
       if (cookie.length < 1 || cookie.length > 8192 || hasControl(cookie)) fail(400, "invalid_cookie", "The session cookie is invalid");
       headers.set("cookie", cookie);
     }
-    if (!route.session) {
+    if (route.requireCookie && cookie === null) fail(401, "session_required", "An active session is required");
+    if (route.requireCsrf || !route.session) {
       if (csrf === null || csrf.length < 1 || csrf.length > 512 || hasControl(csrf)) fail(403, "csrf_required", "CSRF authentication is required");
       headers.set("agentpass-csrf", csrf);
     }
@@ -63,20 +66,22 @@ export async function handleHumanAuthRequest(request, options = {}) {
     const timeout = setTimeout(() => controller.abort(), config.timeoutMs);
     let upstream;
     try {
-      upstream = await fetchImpl(new URL(route.cloudPath, config.url), {
+      const init = {
         method: "POST",
         headers,
-        body,
         cache: "no-store",
         redirect: "error",
         signal: controller.signal,
-      });
+      };
+      init.method = request.method;
+      if (body !== undefined) init.body = body;
+      upstream = await fetchImpl(new URL(route.cloudPath, config.url), init);
     } catch {
       fail(503, "cloud_api_unavailable", "Cloud API is unavailable");
     } finally {
       clearTimeout(timeout);
     }
-    return await relayResponse(upstream, route.session);
+    return await relayResponse(upstream, route.session === true || route.allowSetCookie === true);
   } catch (error) {
     const mapped = error instanceof HumanAuthBridgeError
       ? error
@@ -94,7 +99,7 @@ async function requireUser(request, options) {
   return user;
 }
 
-async function readBody(request) {
+async function readBody(request, route = {}) {
   const type = request.headers.get("content-type") ?? "";
   if (!/^application\/json(?:\s*;\s*charset=utf-8)?$/i.test(type)) fail(415, "unsupported_media_type", "Content-Type must be application/json");
   const declared = request.headers.get("content-length");
@@ -105,7 +110,36 @@ async function readBody(request) {
   let value;
   try { value = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes)); } catch { fail(400, "invalid_request", "The authentication request is invalid"); }
   if (!value || typeof value !== "object" || Array.isArray(value)) fail(400, "invalid_request", "The authentication request is invalid");
+  validateBody(value, route.body);
   return bytes;
+}
+
+async function readNoBody(request) {
+  const declared = request.headers.get("content-length");
+  if (declared !== null && (!/^\d+$/.test(declared) || Number(declared) !== 0)) fail(400, "invalid_request", "The request body is invalid");
+  let bytes;
+  try { bytes = new Uint8Array(await request.arrayBuffer()); } catch { fail(400, "invalid_request", "The request body is invalid"); }
+  if (bytes.byteLength !== 0) fail(400, "invalid_request", "The request body is invalid");
+  return undefined;
+}
+
+function validateBody(value, shape) {
+  if (!shape) return;
+  if (shape === "empty") {
+    if (!isExactObject(value, [])) fail(400, "invalid_request", "The security request is invalid");
+    return;
+  }
+  if (shape === "rename") {
+    if (!isExactObject(value, ["label", "expected_version"]) || !isSafeLabel(value.label) || !isVersion(value.expected_version)) {
+      fail(400, "invalid_request", "The security request is invalid");
+    }
+    return;
+  }
+  if (shape === "version") {
+    if (!isExactObject(value, ["expected_version"]) || !isVersion(value.expected_version)) fail(400, "invalid_request", "The security request is invalid");
+    return;
+  }
+  fail(500, "human_auth_bridge_failed", "Authentication is unavailable");
 }
 
 async function relayResponse(response, allowSetCookie) {
@@ -122,7 +156,7 @@ async function relayResponse(response, allowSetCookie) {
   const setCookie = response.headers.get("set-cookie");
   if (setCookie !== null && !allowSetCookie) fail(502, "cloud_api_invalid_response", "Cloud API response was invalid");
   if (allowSetCookie && setCookie !== null) {
-    if (!/^__Host-agentpass_session=[A-Za-z0-9_-]{43}; Path=\/; HttpOnly; Secure; SameSite=Strict(?:; Max-Age=\d+)?$/.test(setCookie)) fail(502, "cloud_api_invalid_response", "Cloud API response was invalid");
+    if (!/^__Host-agentpass_session=(?:[A-Za-z0-9_-]{43}|); Path=\/; HttpOnly; Secure; SameSite=Strict(?:; Max-Age=(?:0|[1-9]\d*))?$/.test(setCookie)) fail(502, "cloud_api_invalid_response", "Cloud API response was invalid");
     headers.set("set-cookie", setCookie);
   }
   return new Response(JSON.stringify(value), { status: response.status, headers });
@@ -154,4 +188,27 @@ function hasControl(value) {
   }
   return false;
 }
+function resolveRoute(pathname) {
+  const exact = ROUTES.get(pathname);
+  if (exact) return exact;
+  const match = /^\/api\/auth\/security\/(passkeys|sessions)\/([^/]+)(?:\/(revoke))?$/.exec(pathname);
+  if (!match) return undefined;
+  let id;
+  try { id = decodeURIComponent(match[2]); } catch { return undefined; }
+  if (id !== match[2]) return undefined;
+  if (match[1] === "passkeys" && isCredentialId(id) && !match[3]) return { cloudPath: `/api/auth/management/credentials/${id}`, methods: ["PATCH"], requireCookie: true, requireCsrf: true, body: "rename" };
+  if (match[1] === "passkeys" && isCredentialId(id) && match[3]) return { cloudPath: `/api/auth/management/credentials/${id}/revoke`, methods: ["POST"], requireCookie: true, requireCsrf: true, body: "version" };
+  if (match[1] === "sessions" && isUuid(id) && match[3]) return { cloudPath: `/api/auth/management/sessions/${id.toLowerCase()}/revoke`, methods: ["POST"], requireCookie: true, requireCsrf: true, body: "version", allowSetCookie: true };
+  return undefined;
+}
+function isExactObject(value, keys) {
+  if (!value || typeof value !== "object" || Array.isArray(value) || Object.getPrototypeOf(value) !== Object.prototype) return false;
+  const actual = Object.keys(value).sort();
+  const expected = [...keys].sort();
+  return actual.length === expected.length && actual.every((key, index) => key === expected[index]);
+}
+function isVersion(value) { return Number.isSafeInteger(value) && value > 0; }
+function isCredentialId(value) { return typeof value === "string" && /^[A-Za-z0-9_-]{22,1366}$/.test(value); }
+function isUuid(value) { return typeof value === "string" && /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value); }
+function isSafeLabel(value) { return typeof value === "string" && value.length >= 1 && value.length <= 80 && value.trim() === value && !hasControl(value); }
 function fail(status, code, message) { throw new HumanAuthBridgeError(status, code, message); }

@@ -8,6 +8,21 @@ npm run bootstrap -- --output-dir /absolute/protected/agentpass-cloud --organiza
 
 The command prints the owner API token once. Store it as a server secret for the Web Console. It also writes the token verifier, Ed25519 bundle signer, public key, tenant store, and owner membership. Files are created without overwrite; secret files use mode `0600`.
 
+## Provision an upstream identity
+
+After the PostgreSQL migrations have been applied, an operator can bind one upstream identity to an existing active organization membership. The command is non-interactive and reads the database connection only from `AGENTPASS_DATABASE_URL`; the URL must use `sslmode=verify-full`.
+
+```bash
+export AGENTPASS_DATABASE_URL='postgresql://agentpass:...@db.example/agentpass?sslmode=verify-full'
+npm run identity-bind -- \
+  --provider chatgpt \
+  --subject UPSTREAM_SUBJECT \
+  --member-id 22222222-2222-4222-8222-222222222222 \
+  --organization-id 33333333-3333-4333-8333-333333333333
+```
+
+The command first locks and verifies the exact active `(organization_id, member_id)` membership. It then inserts the immutable `(provider, subject) -> member_id` mapping. Repeating the same command is safe and reports `already_exists`; attempting to bind an existing subject to another member fails closed with `identity_rebind_forbidden`. It never updates or deletes an identity mapping, runs no interactive prompt, and emits only bounded JSON metadata; database URLs, passwords, driver errors, and credentials are never printed.
+
 ## Production persistence and human authentication
 
 The production foundation lives in `src/postgres/` and uses the ordered SQL in `contracts/postgres/`. The migration runner verifies immutable SHA-256 checksums, refuses gaps/newer history/dirty attempts, takes a PostgreSQL advisory lock, and applies migrations transactionally. Run it with a TLS-configured `pg` client; the reference file store remains for self-hosted evaluation and tests.

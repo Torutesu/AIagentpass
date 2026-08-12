@@ -2,6 +2,8 @@ import { createHumanSessionService } from "../human-session.mjs";
 import { createConsoleIdentityAdapter } from "./console-identity.mjs";
 import { createPostgresIdentityResolver } from "./identity/postgres-resolver.mjs";
 import { createHumanAuthHttpApi } from "./http-api.mjs";
+import { createHumanManagementHttpApi } from "./management/http-api.mjs";
+import { createPostgresHumanManagementRepository } from "./management/postgres-adapter.mjs";
 import { createWebAuthnRegistrationHttpApi } from "./registration-http-api.mjs";
 import { createRecentAuthService } from "./recent-auth.mjs";
 import { createHumanAuthRouter } from "./router.mjs";
@@ -41,6 +43,8 @@ export function createHumanAuthRuntime({ postgresRuntime, tokenRecords, origin, 
     now
   });
   const registrationApi = createWebAuthnRegistrationHttpApi({ humanSession, registrationService, origin, basePath: "/api/auth" });
-  const api = createHumanAuthRouter({ sessionApi, webauthnApi, registrationApi });
-  return Object.freeze({ api, humanSession, recentAuthService, ceremony, registrationCeremony, registrationService, identityResolver, sessionApi, webauthnApi, registrationApi, allowedOperations: ALLOWED_RECENT_AUTH_OPERATIONS });
+  const managementRepository = createPostgresHumanManagementRepository({ repository, now });
+  const managementApi = createHumanManagementHttpApi({ humanSession, repository: managementRepository, origin });
+  const api = createHumanAuthRouter({ sessionApi, webauthnApi, registrationApi, managementApi });
+  return Object.freeze({ api, humanSession, recentAuthService, ceremony, registrationCeremony, registrationService, identityResolver, managementRepository, sessionApi, webauthnApi, registrationApi, managementApi, allowedOperations: ALLOWED_RECENT_AUTH_OPERATIONS });
 }

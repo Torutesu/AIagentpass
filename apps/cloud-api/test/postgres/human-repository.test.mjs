@@ -132,3 +132,119 @@ test("registration adapter maps backup metadata and reports duplicate credential
   assert.equal(queryCount, 2);
   assert.match(duplicateSql, /EXISTS \(SELECT 1 FROM human_sessions/);
 });
+
+test("safe session listings never select or return bearer digests", async () => {
+  const calls = [];
+  const row = {
+    session_id: ids.session,
+    member_id: ids.member,
+    organization_id: ids.org,
+    role: "owner",
+    version: 1,
+    created_at: "2026-08-12T00:00:00.000Z",
+    expires_at: "2026-08-12T01:00:00.000Z",
+    last_seen_at: "2026-08-12T00:01:00.000Z",
+    idle_expires_at: "2026-08-12T00:30:00.000Z",
+    recent_auth_at: null,
+    revoked_at: null,
+    revoke_reason: null,
+    token_hash_hex: "a".repeat(64),
+    csrf_token_hash_hex: "b".repeat(64)
+  };
+  const repo = createPostgresHumanRepository({ client: { async query(text, params) { calls.push({ text, params }); return { rows: [row], rowCount: 1 }; } } });
+  const result = await repo.listSafeSessions({ member_id: ids.member, organization_id: ids.org });
+  assert.deepEqual(result, [{
+    session_id: ids.session,
+    member_id: ids.member,
+    organization_id: ids.org,
+    role: "owner",
+    version: 1,
+    created_at: row.created_at,
+    expires_at: row.expires_at,
+    last_seen_at: row.last_seen_at,
+    idle_expires_at: row.idle_expires_at,
+    recent_auth_at: null,
+    revoked_at: null,
+    revoke_reason: null,
+    status: "active"
+  }]);
+  assert.doesNotMatch(calls[0].text, /token_hash|csrf_token_hash/);
+  assert.match(calls[0].text, /m\.status='active'/);
+  assert.match(calls[0].text, /LIMIT 100/);
+});
+
+test("credential management metadata is active-session/member/org scoped and omits key material", async () => {
+  const id = Buffer.alloc(32, 6);
+  const calls = [];
+  const repo = createPostgresHumanRepository({ client: { async query(text, params) {
+    calls.push({ text, params });
+    return { rows: [{ id, member_id: ids.member, label: "MacBook", transports: ["internal"], backup_eligible: true, backup_state: true, created_at: "2026-08-12T00:00:00.000Z", last_used_at: null, revoked_at: null, version: "3", public_key: Buffer.alloc(65), sign_count: 9 }], rowCount: 1 };
+  } } });
+  const result = await repo.listCredentialMetadataForSession({ session_id: ids.session, member_id: ids.member, organization_id: ids.org });
+  assert.deepEqual(result, [{ id: id.toString("base64url"), member_id: ids.member, label: "MacBook", transports: ["internal"], backup_eligible: true, backup_state: true, created_at: "2026-08-12T00:00:00.000Z", last_used_at: null, revoked_at: null, version: 3 }]);
+  assert.doesNotMatch(calls[0].text, /public_key|sign_count|token_hash|csrf_token_hash/);
+  assert.match(calls[0].text, /s\.member_id=\$2/);
+  assert.match(calls[0].text, /s\.organization_id=\$3/);
+  assert.match(calls[0].text, /m\.id=s\.membership_id/);
+});
+
+test("credential label update uses an advisory lock and expected version", async () => {
+  const calls = [];
+  const row = { id: Buffer.alloc(16, 4), member_id: ids.member, label: "Updated", transports: [], backup_eligible: false, backup_state: false, created_at: "2026-08-12T00:00:00.000Z", last_used_at: null, revoked_at: null, version: 2 };
+  const repo = createPostgresHumanRepository({ client: { async query(text, params) {
+    calls.push({ text, params });
+    if (text.startsWith("UPDATE webauthn_credentials c SET label")) return { rows: [row], rowCount: 1 };
+    return { rows: [], rowCount: 0 };
+  } } });
+  const result = await repo.updateCredentialLabel({ session_id: ids.session, member_id: ids.member, organization_id: ids.org, credential_id: row.id.toString("base64url"), label: "Updated", expected_version: 1 });
+  assert.equal(result.version, 2);
+  assert.deepEqual(calls.map(({ text }) => text), ["BEGIN", "SELECT pg_advisory_xact_lock(hashtextextended('agentpass:webauthn:credentials:' || $1::text, 0)) AS locked", calls[2].text, "COMMIT"]);
+  assert.match(calls[2].text, /c\.version=\$6/);
+  assert.equal(calls[2].params[5], 1);
+});
+
+test("credential revoke is optimistic, atomic, and refuses the last active credential", async () => {
+  const credentialId = Buffer.alloc(16, 5);
+  const row = { id: credentialId, member_id: ids.member, label: "Old", transports: [], backup_eligible: false, backup_state: false, created_at: "2026-08-12T00:00:00.000Z", last_used_at: null, revoked_at: "2026-08-12T00:02:00.000Z", version: 2 };
+  const calls = [];
+  const repo = createPostgresHumanRepository({ client: { async query(text, params) {
+    calls.push({ text, params });
+    if (text.startsWith("SELECT c.id FROM webauthn_credentials")) return { rows: [{ id: credentialId }], rowCount: 1 };
+    if (text.startsWith("SELECT count(*)")) return { rows: [{ active_count: "2" }], rowCount: 1 };
+    if (text.startsWith("UPDATE webauthn_credentials c SET revoked_at")) return { rows: [row], rowCount: 1 };
+    return { rows: [], rowCount: 0 };
+  } } });
+  const result = await repo.revokeCredential({ session_id: ids.session, member_id: ids.member, organization_id: ids.org, credential_id: credentialId.toString("base64url"), expected_version: 1, revoked_at: "2026-08-12T00:02:00.000Z", reason: "rotated" });
+  assert.equal(result.revoked_at, row.revoked_at);
+  assert.equal(result.version, 2);
+  assert.equal(calls.filter(({ text }) => text === "BEGIN").length, 1);
+  assert.equal(calls.at(-1).text, "COMMIT");
+  assert.match(calls.find(({ text }) => text.startsWith("UPDATE webauthn_credentials c SET revoked_at")).text, /c\.version=\$5/);
+
+  const lastCalls = [];
+  const lastRepo = createPostgresHumanRepository({ client: { async query(text) {
+    lastCalls.push(text);
+    if (text.startsWith("SELECT c.id FROM webauthn_credentials")) return { rows: [{ id: credentialId }], rowCount: 1 };
+    if (text.startsWith("SELECT count(*)")) return { rows: [{ active_count: "1" }], rowCount: 1 };
+    return { rows: [], rowCount: 0 };
+  } } });
+  await assert.rejects(() => lastRepo.revokeCredential({ session_id: ids.session, member_id: ids.member, organization_id: ids.org, credential_id: credentialId.toString("base64url"), expected_version: 1, revoked_at: "2026-08-12T00:02:00.000Z" }), { code: "ERR_LAST_ACTIVE_CREDENTIAL" });
+  assert.equal(lastCalls.at(-1), "ROLLBACK");
+  assert.equal(lastCalls.some((text) => text.startsWith("UPDATE webauthn_credentials c SET revoked_at")), false);
+});
+
+test("other-session revocation is transaction-bound and returns safe rows", async () => {
+  const calls = [];
+  const other = { session_id: "66666666-6666-4666-8666-666666666666", member_id: ids.member, organization_id: ids.org, role: "owner", created_at: "2026-08-12T00:00:00.000Z", expires_at: "2026-08-12T01:00:00.000Z", last_seen_at: null, idle_expires_at: null, recent_auth_at: null, revoked_at: "2026-08-12T00:03:00.000Z", revoke_reason: "logout_all" , token_hash_hex: "a".repeat(64) };
+  const repo = createPostgresHumanRepository({ client: { async query(text, params) {
+    calls.push({ text, params });
+    if (text.startsWith("UPDATE human_sessions target")) return { rows: [other], rowCount: 1 };
+    return { rows: [], rowCount: 0 };
+  } } });
+  const result = await repo.revokeOtherSessions({ session_id: ids.session, member_id: ids.member, organization_id: ids.org, revoked_at: "2026-08-12T00:03:00.000Z", reason: "logout_all" });
+  assert.equal(result[0].session_id, other.session_id);
+  assert.equal(result[0].status, "revoked");
+  assert.equal(Object.hasOwn(result[0], "token_hash"), false);
+  assert.match(calls.find(({ text }) => text.startsWith("UPDATE human_sessions target")).text, /target\.id<>\$1/);
+  assert.equal(calls.at(-1).text, "COMMIT");
+});

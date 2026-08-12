@@ -93,7 +93,7 @@ export function createCloudApi({ store, tokenRecords = [], bundleSigner, now = (
     try {
       // Preserve the original Node header values. The human-auth boundary
       // authenticates the session from cookie, Origin, and CSRF headers.
-      result = await humanAuthApi.handle({ method: request.method, url: url.pathname, headers: request.headers, body: bodyBytes });
+      result = await humanAuthApi.handle({ method: request.method, url: `${url.pathname}${url.search}`, headers: request.headers, body: bodyBytes });
     } catch {
       return send(response, 503, { error: { code: "human_auth_unavailable", message: "Human authentication is temporarily unavailable" }, request_id: requestId }, rateLimitHeaders(rateLimit));
     }
@@ -254,7 +254,9 @@ export function createCloudApi({ store, tokenRecords = [], bundleSigner, now = (
 }
 
 function isExactHumanAuthPath(url) {
-  return !url.search && !url.hash && (url.pathname === HUMAN_AUTH_SESSION_PATH || url.pathname === HUMAN_AUTH_OPTIONS_PATH || url.pathname === HUMAN_AUTH_VERIFY_PATH || url.pathname === HUMAN_AUTH_REGISTRATION_OPTIONS_PATH || url.pathname === HUMAN_AUTH_REGISTRATION_VERIFY_PATH);
+  if (url.hash) return false;
+  if (!url.search && (url.pathname === HUMAN_AUTH_SESSION_PATH || url.pathname === HUMAN_AUTH_OPTIONS_PATH || url.pathname === HUMAN_AUTH_VERIFY_PATH || url.pathname === HUMAN_AUTH_REGISTRATION_OPTIONS_PATH || url.pathname === HUMAN_AUTH_REGISTRATION_VERIFY_PATH)) return true;
+  return /^\/api\/auth\/management\/(?:credentials(?:\/[A-Za-z0-9_-]+(?:\/revoke)?)?|sessions(?:\/[0-9a-fA-F-]{36}\/revoke)?)$/.test(url.pathname);
 }
 
 function transportPrincipalId(request) {

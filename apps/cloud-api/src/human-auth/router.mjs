@@ -4,10 +4,11 @@ const VERIFY_PATH = "/api/auth/webauthn/verify";
 const REGISTRATION_OPTIONS_PATH = "/api/auth/webauthn/registration/options";
 const REGISTRATION_VERIFY_PATH = "/api/auth/webauthn/registration/verify";
 
-export function createHumanAuthRouter({ sessionApi, webauthnApi, registrationApi } = {}) {
+export function createHumanAuthRouter({ sessionApi, webauthnApi, registrationApi, managementApi } = {}) {
   if (!sessionApi || typeof sessionApi.handle !== "function") throw new TypeError("sessionApi must expose handle()");
   if (!webauthnApi || typeof webauthnApi.handle !== "function") throw new TypeError("webauthnApi must expose handle()");
   if (!registrationApi || typeof registrationApi.handle !== "function") throw new TypeError("registrationApi must expose handle()");
+  if (!managementApi || typeof managementApi.handle !== "function") throw new TypeError("managementApi must expose handle()");
 
   async function handle(input) {
     const url = requestUrl(input);
@@ -20,10 +21,16 @@ export function createHumanAuthRouter({ sessionApi, webauthnApi, registrationApi
     if ((url.pathname === REGISTRATION_OPTIONS_PATH || url.pathname === REGISTRATION_VERIFY_PATH) && !url.search && !url.hash) {
       return registrationApi.handle(cloneRequest(input, url.pathname));
     }
+    if (isManagementPath(url)) return managementApi.handle(cloneRequest(input, `${url.pathname}${url.search}`));
     return response(404, { error: { code: "not_found", message: "Resource not found" } });
   }
 
   return Object.freeze({ handle, paths: Object.freeze({ session: SESSION_PATH, options: OPTIONS_PATH, verify: VERIFY_PATH, registrationOptions: REGISTRATION_OPTIONS_PATH, registrationVerify: REGISTRATION_VERIFY_PATH }) });
+}
+
+function isManagementPath(url) {
+  if (url.hash) return false;
+  return /^\/api\/auth\/management\/(?:credentials(?:\/[A-Za-z0-9_-]+(?:\/revoke)?)?|sessions(?:\/[0-9a-fA-F-]{36}\/revoke)?)$/.test(url.pathname);
 }
 
 function requestUrl(input) {
