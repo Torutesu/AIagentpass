@@ -260,7 +260,7 @@ async function readJsonBody(request, maxBytes) {
   else if (isReadable(input)) raw = await readStream(input, maxBytes);
   else if (isReadable(input.body)) raw = await readStream(input.body, maxBytes);
   else throw new WebAuthnRegistrationHttpError(WEBAUTHN_REGISTRATION_HTTP_ERROR_CODES.INVALID_REQUEST, { status: 400 });
-  if (isObject(raw) || Array.isArray(raw)) {
+  if ((isObject(raw) && !Buffer.isBuffer(raw) && !(raw instanceof Uint8Array)) || Array.isArray(raw)) {
     assertSerializedSize(raw, maxBytes);
     return raw;
   }

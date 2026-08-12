@@ -22,7 +22,6 @@ const BASE64URL = /^[A-Za-z0-9_-]+$/;
 const IDENTIFIER = /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$/;
 const RP_ID = /^[A-Za-z0-9](?:[A-Za-z0-9.-]*[A-Za-z0-9])?$/;
 const ALLOWED_TRANSPORTS = new Set(["ble", "cable", "hybrid", "internal", "nfc", "smart-card", "usb"]);
-const ALLOWED_CLIENT_DATA_KEYS = new Set(["type", "challenge", "origin", "crossOrigin", "tokenBinding"]);
 const ALLOWED_CREDENTIAL_KEYS = new Set(["id", "rawId", "response", "type", "clientExtensionResults", "authenticatorAttachment"]);
 
 export const HUMAN_AUTH_HTTP_PATHS = Object.freeze({
@@ -361,7 +360,7 @@ function extractChallenge(encoded, expectedOrigin) {
   if (Buffer.from(text, "utf8").compare(bytes) !== 0) throw new HumanAuthHttpError(HUMAN_AUTH_HTTP_ERROR_CODES.CHALLENGE_INVALID, { status: 400 });
   let data;
   try { data = JSON.parse(text); } catch { throw new HumanAuthHttpError(HUMAN_AUTH_HTTP_ERROR_CODES.CHALLENGE_INVALID, { status: 400 }); }
-  if (!isObject(data) || Object.keys(data).some((key) => !ALLOWED_CLIENT_DATA_KEYS.has(key)) || data.type !== "webauthn.get" || data.origin !== expectedOrigin || data.crossOrigin !== false || !isBase64Url(data.challenge, 1, MAX_CHALLENGE_BYTES)) throw new HumanAuthHttpError(HUMAN_AUTH_HTTP_ERROR_CODES.CHALLENGE_INVALID, { status: 400 });
+  if (!isObject(data) || data.type !== "webauthn.get" || data.origin !== expectedOrigin || data.crossOrigin !== false || !isBase64Url(data.challenge, 1, MAX_CHALLENGE_BYTES)) throw new HumanAuthHttpError(HUMAN_AUTH_HTTP_ERROR_CODES.CHALLENGE_INVALID, { status: 400 });
   return data.challenge;
 }
 
@@ -448,8 +447,8 @@ async function readJsonBody(request, maxBytes) {
   } else if (isReadable(input)) raw = await readStream(input, maxBytes);
   else if (isReadable(input.body)) raw = await readStream(input.body, maxBytes);
   else throw new HumanAuthHttpError(HUMAN_AUTH_HTTP_ERROR_CODES.INVALID_REQUEST, { status: 400 });
-  if (isObject(raw) || Array.isArray(raw)) return raw;
-  const bytes = Buffer.isBuffer(raw) ? raw : Buffer.from(String(raw), "utf8");
+  if ((isObject(raw) && !Buffer.isBuffer(raw) && !(raw instanceof Uint8Array)) || Array.isArray(raw)) return raw;
+  const bytes = Buffer.isBuffer(raw) ? raw : raw instanceof Uint8Array ? Buffer.from(raw) : Buffer.from(String(raw), "utf8");
   if (bytes.length > maxBytes) throw new HumanAuthHttpError(HUMAN_AUTH_HTTP_ERROR_CODES.INVALID_REQUEST, { status: 413 });
   let value;
   try { value = JSON.parse(bytes.toString("utf8")); } catch (error) { throw new HumanAuthHttpError(HUMAN_AUTH_HTTP_ERROR_CODES.INVALID_REQUEST, { status: 400, cause: error }); }

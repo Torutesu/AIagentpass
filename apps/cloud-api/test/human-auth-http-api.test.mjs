@@ -207,6 +207,13 @@ test("extracts the WebAuthn challenge from clientDataJSON and binds verify to se
   assert.equal(calls.verify[0].assertion.origin, ORIGIN);
 });
 
+test("accepts signed WebAuthn clientData extension members from real browsers", async () => {
+  const { api } = fixture();
+  const credential = browserCredential();
+  credential.response.clientDataJSON = clientData(CHALLENGE, ORIGIN, { other_keys_can_be_added_here: "do not compare clientDataJSON against a template" });
+  assert.equal((await api.handle(request(HUMAN_AUTH_HTTP_PATHS.authenticationVerify, verifyBody({ credential })))).status, 200);
+});
+
 test("rejects challenge substitution, wrong origin, and credentials outside the fresh allow list", async () => {
   const challenge = fixture({ verifyError: new WebAuthnCeremonyError(WEBAUTHN_ERROR_CODES.CHALLENGE_MISMATCH) });
   const substituted = await challenge.api.handle(request(HUMAN_AUTH_HTTP_PATHS.authenticationVerify, verifyBody({ credential: browserCredential({ response: { ...browserCredential().response, clientDataJSON: clientData(Buffer.alloc(32, 8).toString("base64url")) } }) })));
@@ -261,6 +268,17 @@ test("supports Request-like JSON input and Node-style response output", async ()
   assert.equal(nodeResponse.statusCode, 200);
   assert.equal(written.body.challenge_id, CHALLENGE_ID);
   assert.equal(written.headers["Cache-Control"], "no-store, max-age=0");
+});
+
+test("parses Buffer and Uint8Array JSON bodies from the real Node server adapter", async () => {
+  for (const encode of [Buffer.from, (value) => new Uint8Array(Buffer.from(value))]) {
+    const { api } = fixture();
+    const input = request(HUMAN_AUTH_HTTP_PATHS.authenticationOptions, optionsBody());
+    input.body = encode(input.body);
+    const result = await api.handle(input);
+    assert.equal(result.status, 200);
+    assert.equal(result.body.challenge_id, CHALLENGE_ID);
+  }
 });
 
 test("basePath /api/auth produces the frontend's canonical default routes", async () => {

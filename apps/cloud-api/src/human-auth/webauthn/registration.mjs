@@ -22,7 +22,6 @@ const IDENTIFIER = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/;
 const OPERATION = /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,255}$/;
 const RP_ID = /^[A-Za-z0-9](?:[A-Za-z0-9.-]*[A-Za-z0-9])?$/;
 const ORIGIN_SCHEMES = new Set(["https:", "http:"]);
-const CLIENT_DATA_KEYS = new Set(["type", "challenge", "origin", "crossOrigin", "tokenBinding"]);
 const STATUS = new Set(["pending", "consuming", "consumed", "failed", "expired"]);
 const TRANSPORTS = new Set(["ble", "cable", "hybrid", "internal", "nfc", "smart-card", "usb"]);
 const REGISTRATION_OPERATION = "human.webauthn.registration";
@@ -412,7 +411,7 @@ function decodeClientData(encoded, expectedChallenge, expectedOrigin) {
   if (Buffer.from(text, "utf8").compare(bytes) !== 0) fail(WEBAUTHN_REGISTRATION_ERROR_CODES.INVALID_RESPONSE);
   let value;
   try { value = JSON.parse(text); } catch { fail(WEBAUTHN_REGISTRATION_ERROR_CODES.INVALID_RESPONSE); }
-  if (!isObject(value) || Object.keys(value).some((key) => !CLIENT_DATA_KEYS.has(key)) || value.type !== "webauthn.create" || value.challenge !== expectedChallenge || value.origin !== expectedOrigin || (value.crossOrigin !== undefined && value.crossOrigin !== false)) fail(WEBAUTHN_REGISTRATION_ERROR_CODES.INVALID_RESPONSE);
+  if (!isObject(value) || value.type !== "webauthn.create" || value.challenge !== expectedChallenge || value.origin !== expectedOrigin || (value.crossOrigin !== undefined && value.crossOrigin !== false)) fail(WEBAUTHN_REGISTRATION_ERROR_CODES.INVALID_RESPONSE);
   if (value.tokenBinding !== undefined && (!isObject(value.tokenBinding) || typeof value.tokenBinding.status !== "string")) fail(WEBAUTHN_REGISTRATION_ERROR_CODES.INVALID_RESPONSE);
   return { type: value.type, challenge: value.challenge, origin: value.origin, ...(value.crossOrigin === undefined ? {} : { cross_origin: value.crossOrigin }) };
 }
@@ -546,7 +545,7 @@ function extractRegistrationChallenge(encoded, expectedOrigin) {
   if (Buffer.from(text, "utf8").compare(bytes) !== 0) fail(WEBAUTHN_REGISTRATION_ERROR_CODES.INVALID_RESPONSE);
   let value;
   try { value = JSON.parse(text); } catch { fail(WEBAUTHN_REGISTRATION_ERROR_CODES.INVALID_RESPONSE); }
-  if (!isObject(value) || Object.keys(value).some((key) => !CLIENT_DATA_KEYS.has(key)) || value.type !== "webauthn.create" || value.origin !== expectedOrigin || (value.crossOrigin !== undefined && value.crossOrigin !== false) || !isBase64Url(value.challenge, CHALLENGE_BYTES, CHALLENGE_BYTES)) fail(WEBAUTHN_REGISTRATION_ERROR_CODES.INVALID_RESPONSE);
+  if (!isObject(value) || value.type !== "webauthn.create" || value.origin !== expectedOrigin || (value.crossOrigin !== undefined && value.crossOrigin !== false) || !isBase64Url(value.challenge, CHALLENGE_BYTES, CHALLENGE_BYTES)) fail(WEBAUTHN_REGISTRATION_ERROR_CODES.INVALID_RESPONSE);
   return value.challenge;
 }
 

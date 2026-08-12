@@ -70,6 +70,17 @@ test("registration options enforce exact origin/session CSRF and return no-store
   assert.equal(calls.begin[0].session.session_id, SESSION_ID);
   assert.equal(calls.begin[0].organization_id, ORGANIZATION_ID);
 });
+
+test("registration parses Buffer and Uint8Array JSON bodies from the real Node server adapter", async () => {
+  for (const encode of [Buffer.from, (value) => new Uint8Array(Buffer.from(value))]) {
+    const { api } = fixture();
+    const input = request("/api/auth/webauthn/registration/options", { organization_id: ORGANIZATION_ID });
+    input.body = encode(input.body);
+    const result = await api.handle(input);
+    assert.equal(result.status, 200);
+    assert.equal(result.body.challenge_id, CHALLENGE_ID);
+  }
+});
 test("registration verify accepts only the exact browser credential schema and never forwards unknown fields", async () => {
   const { api, calls } = fixture();
   const result = await api.handle(request("/api/auth/webauthn/registration/verify", { organization_id: ORGANIZATION_ID, challenge_id: CHALLENGE_ID, credential: browserCredential() }));
@@ -81,6 +92,13 @@ test("registration verify accepts only the exact browser credential schema and n
   const unknown = await api.handle(request("/api/auth/webauthn/registration/verify", { organization_id: ORGANIZATION_ID, challenge_id: CHALLENGE_ID, credential: { ...browserCredential(), unexpected: "reject" } }));
   assert.equal(unknown.status, 400);
   assert.equal(unknown.body.error.code, WEBAUTHN_REGISTRATION_HTTP_ERROR_CODES.INVALID_REQUEST);
+});
+
+test("registration accepts signed clientData extension members from real browsers", async () => {
+  const { api } = fixture();
+  const credential = browserCredential();
+  credential.response.clientDataJSON = Buffer.from(JSON.stringify({ type: "webauthn.create", challenge: CHALLENGE, origin: ORIGIN, crossOrigin: false, other_keys_can_be_added_here: "do not compare clientDataJSON against a template" })).toString("base64url");
+  assert.equal((await api.handle(request("/api/auth/webauthn/registration/verify", { organization_id: ORGANIZATION_ID, challenge_id: CHALLENGE_ID, credential }))).status, 201);
 });
 
 test("registration HTTP boundary rejects origin, CSRF, tenant mismatch, malformed bodies, and wrong methods", async () => {
