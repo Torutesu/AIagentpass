@@ -36,6 +36,8 @@ test("runs ordered migrations under one advisory-locked transaction and records 
   assert.equal(client.calls.filter(({ text }) => text.startsWith("CREATE TABLE")).length, 2);
   assert.deepEqual(client.calls.filter(({ text }) => text.startsWith("INSERT INTO schema_migrations")).map(({ params }) => params[2] ?? "legacy"), ["legacy", "test-1"]);
   assert.ok(client.calls.every(({ params }) => Array.isArray(params)), "every injected query receives params");
+  assert.deepEqual(client.calls.filter(({ text }) => text === "SELECT to_regclass($1) AS relation").map(({ params }) => params[0]), ["schema_migrations", "schema_migration_attempts"]);
+  assert.equal(client.calls.some(({ text }) => text.startsWith("SELECT version, checksum FROM schema_migrations")), false, "a missing relation is never queried inside the transaction");
 });
 
 test("is idempotent for an unchanged history", async () => {
@@ -161,5 +163,7 @@ test("serializes concurrent calls on one runner", async () => {
 
 test("removes only the outer transaction envelope", () => {
   assert.equal(stripTransactionEnvelope(SQL_ONE), "CREATE TABLE example_one (id integer);");
+  assert.equal(stripTransactionEnvelope("BEGIN; CREATE FUNCTION f() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RETURN NEW; END; $$; COMMIT;"), "CREATE FUNCTION f() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RETURN NEW; END; $$;");
+  assert.equal(stripTransactionEnvelope("BEGIN; SELECT '-----BEGIN PUBLIC KEY-----'; -- ROLLBACK\nCOMMIT;"), "SELECT '-----BEGIN PUBLIC KEY-----'; -- ROLLBACK");
   assert.throws(() => stripTransactionEnvelope("BEGIN; SELECT 1; ROLLBACK; COMMIT;"), MigrationRunnerError);
 });

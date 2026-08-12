@@ -13,7 +13,8 @@ const MAX_BODY_BYTES = 16 * 1024;
 const MAX_HEADER_BYTES = 8 * 1024;
 const MAX_URL_LENGTH = 8 * 1024;
 const MAX_CURSOR_LENGTH = 512;
-const MAX_IDEMPOTENCY_KEY_LENGTH = 256;
+const MAX_IDEMPOTENCY_KEY_LENGTH = 255;
+const IDEMPOTENCY_KEY = /^[A-Za-z0-9._~-]{8,255}$/u;
 const MAX_NAME_LENGTH = 128;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu;
 const PATH_SEGMENT = /^[A-Za-z0-9._~-]+$/u;
@@ -22,6 +23,7 @@ const ROLES = new Set(["owner", "admin", "auditor", "viewer"]);
 const INVITABLE_ROLES = new Set(["admin", "auditor", "viewer"]);
 const AUDITOR_OR_ABOVE = new Set(["owner", "admin", "auditor"]);
 const ADMIN_OR_OWNER = new Set(["owner", "admin"]);
+const RECENT_AUTH_HEADER = "agentpass-recent-auth";
 const SESSION_FAILURES = new Set([
   HUMAN_SESSION_ERROR_CODES.INVALID_COOKIE,
   HUMAN_SESSION_ERROR_CODES.SESSION_NOT_FOUND,
@@ -57,6 +59,11 @@ export const HUMAN_ORGANIZATION_SERVICE_METHODS = Object.freeze([
   "acceptInvitation"
 ]);
 
+export const HUMAN_ORGANIZATIONS_RECENT_AUTH_OPERATIONS = Object.freeze({
+  updateMemberRole: "human.organizations.member.role.update",
+  removeMember: "human.organizations.member.remove"
+});
+
 export const HUMAN_ORGANIZATIONS_HTTP_ERROR_CODES = Object.freeze({
   INVALID_REQUEST: "human_organizations_invalid_request",
   METHOD_NOT_ALLOWED: "human_organizations_method_not_allowed",
@@ -71,6 +78,10 @@ export const HUMAN_ORGANIZATIONS_HTTP_ERROR_CODES = Object.freeze({
   IDEMPOTENCY_REQUIRED: "human_organizations_idempotency_required",
   IDEMPOTENCY_CONFLICT: "human_organizations_idempotency_conflict",
   INVITATION_REPLAYED: "human_organizations_invitation_replayed",
+  RECENT_AUTH_REQUIRED: "human_organizations_recent_auth_required",
+  RECENT_AUTH_FAILED: "human_organizations_recent_auth_failed",
+  RECENT_AUTH_STALE: "human_organizations_recent_auth_stale",
+  RECENT_AUTH_UNAVAILABLE: "human_organizations_recent_auth_unavailable",
   ORGANIZATIONS_UNAVAILABLE: "human_organizations_unavailable",
   INTERNAL_ERROR: "human_organizations_internal_error"
 });
@@ -89,6 +100,10 @@ const ERROR_MESSAGES = Object.freeze({
   [HUMAN_ORGANIZATIONS_HTTP_ERROR_CODES.IDEMPOTENCY_REQUIRED]: "An Idempotency-Key is required",
   [HUMAN_ORGANIZATIONS_HTTP_ERROR_CODES.IDEMPOTENCY_CONFLICT]: "The idempotency key conflicts with another request",
   [HUMAN_ORGANIZATIONS_HTTP_ERROR_CODES.INVITATION_REPLAYED]: "The invitation token is no longer valid",
+  [HUMAN_ORGANIZATIONS_HTTP_ERROR_CODES.RECENT_AUTH_REQUIRED]: "Recent WebAuthn authentication is required",
+  [HUMAN_ORGANIZATIONS_HTTP_ERROR_CODES.RECENT_AUTH_FAILED]: "Recent WebAuthn authentication failed",
+  [HUMAN_ORGANIZATIONS_HTTP_ERROR_CODES.RECENT_AUTH_STALE]: "Recent WebAuthn authentication is stale",
+  [HUMAN_ORGANIZATIONS_HTTP_ERROR_CODES.RECENT_AUTH_UNAVAILABLE]: "Recent WebAuthn verification is unavailable",
   [HUMAN_ORGANIZATIONS_HTTP_ERROR_CODES.ORGANIZATIONS_UNAVAILABLE]: "The organization service is unavailable",
   [HUMAN_ORGANIZATIONS_HTTP_ERROR_CODES.INTERNAL_ERROR]: "The request could not be completed"
 });
@@ -107,6 +122,10 @@ const ERROR_STATUS = Object.freeze({
   [HUMAN_ORGANIZATIONS_HTTP_ERROR_CODES.IDEMPOTENCY_REQUIRED]: 400,
   [HUMAN_ORGANIZATIONS_HTTP_ERROR_CODES.IDEMPOTENCY_CONFLICT]: 409,
   [HUMAN_ORGANIZATIONS_HTTP_ERROR_CODES.INVITATION_REPLAYED]: 409,
+  [HUMAN_ORGANIZATIONS_HTTP_ERROR_CODES.RECENT_AUTH_REQUIRED]: 401,
+  [HUMAN_ORGANIZATIONS_HTTP_ERROR_CODES.RECENT_AUTH_FAILED]: 401,
+  [HUMAN_ORGANIZATIONS_HTTP_ERROR_CODES.RECENT_AUTH_STALE]: 401,
+  [HUMAN_ORGANIZATIONS_HTTP_ERROR_CODES.RECENT_AUTH_UNAVAILABLE]: 503,
   [HUMAN_ORGANIZATIONS_HTTP_ERROR_CODES.ORGANIZATIONS_UNAVAILABLE]: 503,
   [HUMAN_ORGANIZATIONS_HTTP_ERROR_CODES.INTERNAL_ERROR]: 500
 });
@@ -143,17 +162,21 @@ export class HumanOrganizationsHttpError extends Error {
  */
 export function createHumanOrganizationsHttpApi({
   humanSession,
+  recentAuthService,
   organizationService,
   origin,
   basePath = "",
-  maxBodyBytes = MAX_BODY_BYTES
+  maxBodyBytes = MAX_BODY_BYTES,
+  now = () => Date.now()
 } = {}) {
   assertHumanSession(humanSession);
+  if (recentAuthService !== undefined && typeof recentAuthService?.authorize !== "function") throw new TypeError("recentAuthService must expose authorize()");
   assertOrganizationService(organizationService);
   const expectedOrigin = origin ?? humanSession.expectedOrigin;
   assertOriginConfiguration(expectedOrigin);
   const normalizedBasePath = normalizeBasePath(basePath);
   if (!Number.isSafeInteger(maxBodyBytes) || maxBodyBytes < 1_024 || maxBodyBytes > 1_024 * 1_024) throw new TypeError("maxBodyBytes is invalid");
+  if (typeof now !== "function") throw new TypeError("now must be a function");
 
   async function handle(input, nodeResponse = undefined) {
     const result = await dispatch(input);
@@ -182,8 +205,8 @@ export function createHumanOrganizationsHttpApi({
       const body = await readJsonBody(request, maxBodyBytes);
       if (route.name === "createOrganization") return await createOrganization(session, body, idempotencyKey);
       if (route.name === "renameOrganization") return await renameOrganization(session, route, body, idempotencyKey);
-      if (route.name === "updateMemberRole") return await updateMemberRole(session, route, body, idempotencyKey);
-      if (route.name === "removeMember") return await removeMember(session, route, body, idempotencyKey);
+      if (route.name === "updateMemberRole") return await updateMemberRole(session, route, body, idempotencyKey, request);
+      if (route.name === "removeMember") return await removeMember(session, route, body, idempotencyKey, request);
       if (route.name === "createInvitation") return await createInvitation(session, route, body, idempotencyKey);
       if (route.name === "revokeInvitation") return await revokeInvitation(session, route, body, idempotencyKey);
       return await acceptInvitation(session, body, idempotencyKey);
@@ -270,12 +293,13 @@ export function createHumanOrganizationsHttpApi({
     }
   }
 
-  async function updateMemberRole(actor, route, body, idempotencyKey) {
+  async function updateMemberRole(actor, route, body, idempotencyKey, request) {
     requireOrganization(actor, route.organizationId);
     requireRole(actor, ADMIN_OR_OWNER);
     const input = parseBody(body, new Set(["role", "expected_version"]));
     if (typeof input.role !== "string" || !ROLES.has(input.role)) throw invalidRequest();
     const expectedVersion = requiredVersion(input.expected_version);
+    await requireRecentAuth(actor, route.organizationId, request, HUMAN_ORGANIZATIONS_RECENT_AUTH_OPERATIONS.updateMemberRole);
     try {
       const result = await organizationService.updateMemberRole({ actor, organization_id: route.organizationId, member_id: route.memberId, role: input.role, expected_version: expectedVersion, idempotency_key: idempotencyKey });
       return response(200, { member: normalizeMember(result?.member ?? result, route.organizationId, route.memberId) });
@@ -284,11 +308,12 @@ export function createHumanOrganizationsHttpApi({
     }
   }
 
-  async function removeMember(actor, route, body, idempotencyKey) {
+  async function removeMember(actor, route, body, idempotencyKey, request) {
     requireOrganization(actor, route.organizationId);
     requireRole(actor, ADMIN_OR_OWNER);
     const input = parseBody(body, new Set(["expected_version"]));
     const expectedVersion = requiredVersion(input.expected_version);
+    await requireRecentAuth(actor, route.organizationId, request, HUMAN_ORGANIZATIONS_RECENT_AUTH_OPERATIONS.removeMember);
     try {
       const result = await organizationService.removeMember({ actor, organization_id: route.organizationId, member_id: route.memberId, expected_version: expectedVersion, idempotency_key: idempotencyKey });
       return response(200, { member: normalizeMember(result?.member ?? result, route.organizationId, route.memberId) });
@@ -356,6 +381,57 @@ export function createHumanOrganizationsHttpApi({
     expectedOrigin,
     basePath: normalizedBasePath
   });
+
+  async function requireRecentAuth(actor, organizationId, request, operation) {
+    if (!recentAuthService) {
+      throw new HumanOrganizationsHttpError(HUMAN_ORGANIZATIONS_HTTP_ERROR_CODES.RECENT_AUTH_UNAVAILABLE, { status: 503 });
+    }
+    const proof = header(request.headers, RECENT_AUTH_HEADER);
+    if (typeof proof !== "string" || proof.length < 32 || proof.length > 4_096) {
+      throw new HumanOrganizationsHttpError(HUMAN_ORGANIZATIONS_HTTP_ERROR_CODES.RECENT_AUTH_REQUIRED, { status: 401 });
+    }
+
+    let authenticatedAt;
+    try {
+      authenticatedAt = now();
+      if (!Number.isSafeInteger(authenticatedAt) || authenticatedAt < 0) throw new Error("recent-auth clock is invalid");
+    } catch (error) {
+      throw new HumanOrganizationsHttpError(HUMAN_ORGANIZATIONS_HTTP_ERROR_CODES.RECENT_AUTH_UNAVAILABLE, { status: 503, cause: error });
+    }
+
+    let authorization;
+    try {
+      authorization = await recentAuthService.authorize({
+        proof,
+        principal: actor,
+        organization_id: organizationId,
+        operation,
+        now: authenticatedAt
+      });
+    } catch (error) {
+      throw new HumanOrganizationsHttpError(HUMAN_ORGANIZATIONS_HTTP_ERROR_CODES.RECENT_AUTH_UNAVAILABLE, { status: 503, cause: error });
+    }
+
+    const expectedKeys = ["authenticated_at", "challenge_id", "consumed", "member_id", "operation", "organization_id", "verified"];
+    const exactShape = authorization && typeof authorization === "object" && !Array.isArray(authorization)
+      && Object.keys(authorization).sort().join(",") === expectedKeys.sort().join(",")
+      && authorization.verified === true
+      && authorization.consumed === true
+      && authorization.member_id === actor.member_id
+      && authorization.organization_id === organizationId
+      && authorization.operation === operation
+      && typeof authorization.challenge_id === "string"
+      && UUID.test(authorization.challenge_id)
+      && authorization.challenge_id.toLowerCase() === proof.toLowerCase()
+      && Number.isSafeInteger(authorization.authenticated_at)
+      && authorization.authenticated_at >= 0;
+    if (!exactShape) {
+      throw new HumanOrganizationsHttpError(HUMAN_ORGANIZATIONS_HTTP_ERROR_CODES.RECENT_AUTH_FAILED, { status: 401 });
+    }
+    if (authorization.authenticated_at > authenticatedAt + 30_000 || authenticatedAt - authorization.authenticated_at > 5 * 60_000) {
+      throw new HumanOrganizationsHttpError(HUMAN_ORGANIZATIONS_HTTP_ERROR_CODES.RECENT_AUTH_STALE, { status: 401 });
+    }
+  }
 }
 
 function assertHumanSession(value) {
@@ -531,7 +607,7 @@ function nullableDate(value, field) {
 
 function requiredIdempotencyKey(request) {
   const value = header(request.headers, "idempotency-key");
-  if (typeof value !== "string" || value.length < 1 || value.length > MAX_IDEMPOTENCY_KEY_LENGTH || /[\u0000-\u001f\u007f]/u.test(value)) throw new HumanOrganizationsHttpError(HUMAN_ORGANIZATIONS_HTTP_ERROR_CODES.IDEMPOTENCY_REQUIRED, { status: 400 });
+  if (typeof value !== "string" || value.length > MAX_IDEMPOTENCY_KEY_LENGTH || !IDEMPOTENCY_KEY.test(value)) throw new HumanOrganizationsHttpError(HUMAN_ORGANIZATIONS_HTTP_ERROR_CODES.IDEMPOTENCY_REQUIRED, { status: 400 });
   return value;
 }
 
@@ -597,7 +673,7 @@ function normalizeRequest(input) {
 
 function normalizeHeaders(input) {
   const result = {};
-  const names = ["origin", "cookie", "content-type", "content-length", "idempotency-key", HUMAN_SESSION_CSRF_HEADER];
+  const names = ["origin", "cookie", "content-type", "content-length", "idempotency-key", HUMAN_SESSION_CSRF_HEADER, RECENT_AUTH_HEADER];
   if (input && typeof input.get === "function") {
     for (const name of names) {
       const value = input.get(name);

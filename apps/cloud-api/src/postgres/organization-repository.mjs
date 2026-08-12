@@ -7,6 +7,8 @@ const INVITABLE_ROLES = new Set(["admin", "auditor", "viewer"]);
 const CONTROL_CHARACTERS = /[\u0000-\u001f\u007f]/u;
 const RFC3339 = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?(?:Z|[+-]\d{2}:\d{2})$/;
 const ZERO_HASH = "0".repeat(64);
+const IDEMPOTENCY_KEY = /^[A-Za-z0-9._~-]{8,255}$/;
+const IDEMPOTENCY_TTL = "24 hours";
 
 const READ_MEMBER_COLUMNS = `m.id AS member_id,m.github_subject,m.display_name,m.created_at AS member_created_at,
   ms.organization_id,ms.id AS membership_id,ms.role,ms.status,ms.version,ms.created_at,ms.updated_at`;
@@ -57,23 +59,45 @@ export function createPostgresOrganizationRepository({ client, now = () => new D
   }
 
   async function createOrganizationWithOwner(input = {}) {
-    const organizationId = uuid(input.organization_id ?? input.organizationId ?? randomUUID());
     const ownerId = uuid(input.owner_member_id ?? input.ownerMemberId ?? input.member_id ?? input.memberId ?? input.actor?.member_id);
     const actorId = input.actor_member_id ?? input.actorMemberId ?? input.actor?.member_id;
     if (actorId !== undefined && uuid(actorId) !== ownerId) throw new OrganizationRepositoryError("ERR_ACTOR", "actor must be the organization owner");
     const name = text(input.name, 128, "name");
     const createdAt = input.created_at ?? input.createdAt;
     if (createdAt !== undefined) timestamp(createdAt, "created_at");
-    return mutate(organizationId, async (tx) => {
+    const idempotencyKey = requireIdempotencyKey(input);
+    const actorPrincipal = principalId(input, ownerId);
+    const requestedOrganizationId = input.organization_id ?? input.organizationId;
+    const organizationId = uuid(requestedOrganizationId ?? deterministicOrganizationId(actorPrincipal, idempotencyKey));
+    const requestHash = organizationMutationRequestHash("organization.create", {
+      organization_id: requestedOrganizationId === undefined ? null : organizationId,
+      actor_id: ownerId, actor_principal: actorPrincipal, name
+    });
+    return transaction(async (tx) => {
+      await lockOrganization(tx, organizationId);
+      // idempotency_records has an FK to organizations, so establish the
+      // tenant row before acquiring the record. Both statements are still
+      // protected by the same transaction and organization lock.
       const organization = await tx.query(`INSERT INTO organizations (id,name,created_at,updated_at)
         VALUES ($1,$2,COALESCE($3,clock_timestamp()),COALESCE($3,clock_timestamp()))
+        ON CONFLICT (id) DO NOTHING
         RETURNING id AS organization_id,name,version,created_at,updated_at`, [organizationId, name, createdAt ?? null]);
-      if ((organization.rowCount ?? organization.rows?.length ?? 0) !== 1) return null;
+      const idempotency = await acquireIdempotency(tx, {
+        organizationId, actorPrincipal, idempotencyKey, requestHash
+      });
+      if (idempotency.replayed) return idempotency.response;
+      if ((organization.rowCount ?? organization.rows?.length ?? 0) !== 1) {
+        await abandonIdempotency(tx, { organizationId, actorPrincipal, idempotencyKey, requestHash });
+        return null;
+      }
 
       const membership = await tx.query(`INSERT INTO memberships (organization_id,id,member_id,role,status)
         VALUES ($1,$2,$3,'owner','active')
         RETURNING organization_id,id AS membership_id,member_id,role,status,version,created_at,updated_at`, [organizationId, randomUUID(), ownerId]);
-      if ((membership.rowCount ?? membership.rows?.length ?? 0) !== 1) return null;
+      if ((membership.rowCount ?? membership.rows?.length ?? 0) !== 1) {
+        await abandonIdempotency(tx, { organizationId, actorPrincipal, idempotencyKey, requestHash });
+        return null;
+      }
       const org = safeOrganizationRow(organization.rows[0]);
       const member = safeMembershipRow(membership.rows[0]);
       await appendMutationEvents(tx, {
@@ -84,7 +108,9 @@ export function createPostgresOrganizationRepository({ client, now = () => new D
         targetId: organizationId,
         details: { name, owner_member_id: ownerId }
       });
-      return { ...org, owner: member };
+      const result = { ...org, owner: member };
+      await completeIdempotency(tx, { organizationId, actorPrincipal, idempotencyKey, requestHash, response: result, responseStatus: 201 });
+      return result;
     });
   }
 
@@ -93,7 +119,7 @@ export function createPostgresOrganizationRepository({ client, now = () => new D
     const actorId = actorMemberId(input);
     const name = text(input.name, 128, "name");
     const expectedVersion = version(input.expected_version ?? input.expectedVersion);
-    return mutate(organizationId, async (tx) => {
+    return mutate(organizationId, input, "organization.rename", { organization_id: organizationId, actor_id: actorId, name, expected_version: expectedVersion }, async (tx) => {
       const result = await tx.query(`UPDATE organizations o SET name=$2,version=o.version+1,updated_at=clock_timestamp()
         WHERE o.id=$1 AND o.version=$3
           AND EXISTS (SELECT 1 FROM memberships actor
@@ -103,7 +129,7 @@ export function createPostgresOrganizationRepository({ client, now = () => new D
       const row = safeOrganizationRow(result.rows[0]);
       await appendMutationEvents(tx, { organizationId, actorId, action: "organization.renamed", targetType: "organization", targetId: organizationId, details: { name, version: row.version } });
       return row;
-    });
+    }, 200);
   }
 
   async function updateMemberRole(input = {}) {
@@ -113,7 +139,7 @@ export function createPostgresOrganizationRepository({ client, now = () => new D
     const roleValue = input.role;
     const role = memberRole(roleValue);
     const expectedVersion = version(input.expected_version ?? input.expectedVersion);
-    return mutate(organizationId, async (tx) => {
+    return mutate(organizationId, input, "membership.role_update", { organization_id: organizationId, actor_id: actorId, member_id: memberId, role, expected_version: expectedVersion }, async (tx) => {
       const result = await tx.query(`UPDATE memberships target SET role=$4,version=target.version+1,updated_at=clock_timestamp()
         FROM memberships actor
         WHERE target.organization_id=$1 AND target.member_id=$2 AND target.version=$3
@@ -128,7 +154,7 @@ export function createPostgresOrganizationRepository({ client, now = () => new D
       const row = safeMembershipRow(result.rows[0]);
       await appendMutationEvents(tx, { organizationId, actorId, action: "membership.role_updated", targetType: "membership", targetId: row.membership_id, details: { member_id: row.member_id, role, version: row.version } });
       return row;
-    });
+    }, 200);
   }
 
   async function removeMember(input = {}) {
@@ -138,7 +164,7 @@ export function createPostgresOrganizationRepository({ client, now = () => new D
     const expectedVersion = version(input.expected_version ?? input.expectedVersion);
     const removedAt = input.removed_at ?? input.removedAt ?? now();
     timestamp(removedAt, "removed_at");
-    return mutate(organizationId, async (tx) => {
+    return mutate(organizationId, input, "membership.remove", { organization_id: organizationId, actor_id: actorId, member_id: memberId, expected_version: expectedVersion }, async (tx) => {
       const result = await tx.query(`UPDATE memberships target SET status='revoked',version=target.version+1,updated_at=$4
         FROM memberships actor
         WHERE target.organization_id=$1 AND target.member_id=$2 AND target.version=$3 AND target.status='active'
@@ -151,7 +177,7 @@ export function createPostgresOrganizationRepository({ client, now = () => new D
       const row = safeMembershipRow(result.rows[0]);
       await appendMutationEvents(tx, { organizationId, actorId, action: "membership.removed", targetType: "membership", targetId: row.membership_id, details: { member_id: row.member_id, version: row.version, removed_at: removedAt } });
       return row;
-    });
+    }, 200);
   }
 
   async function createInvitation(input = {}) {
@@ -163,18 +189,19 @@ export function createPostgresOrganizationRepository({ client, now = () => new D
     const expiresAt = timestamp(input.expires_at ?? input.expiresAt, "expires_at");
     const createdAtValue = input.created_at ?? input.createdAt;
     if (createdAtValue !== undefined) timestamp(createdAtValue, "created_at");
-    return mutate(organizationId, async (tx) => {
-      const result = await tx.query(`INSERT INTO organization_invitations
+    const evaluatedAt = timestamp(createdAtValue ?? now(), "evaluated_at");
+    return mutate(organizationId, input, "invitation.create", { organization_id: organizationId, actor_id: actorId, role, expires_at: expiresAt }, async (tx) => {
+      const result = await tx.query(`INSERT INTO organization_invitations AS i
         (organization_id,id,token_hash,role,created_by,created_at,expires_at)
         SELECT $1,$2,$3,$4,$5,COALESCE($6,clock_timestamp()),$7
         WHERE EXISTS (SELECT 1 FROM memberships actor
           WHERE actor.organization_id=$1 AND actor.member_id=$5 AND actor.status='active' AND actor.role IN ('owner','admin'))
         RETURNING ${SAFE_INVITATION_COLUMNS}`, [organizationId, invitationId, tokenHash, role, actorId, createdAtValue ?? null, expiresAt]);
       if ((result.rowCount ?? result.rows?.length ?? 0) !== 1) return null;
-      const row = safeInvitationRow(result.rows[0]);
+      const row = safeInvitationRow(result.rows[0], evaluatedAt);
       await appendMutationEvents(tx, { organizationId, actorId, action: "invitation.created", targetType: "invitation", targetId: invitationId, details: { role, expires_at: expiresAt, version: row.version } });
       return row;
-    });
+    }, 201);
   }
 
   async function listInvitations(input = {}) {
@@ -187,7 +214,8 @@ export function createPostgresOrganizationRepository({ client, now = () => new D
           WHERE actor.organization_id=$1 AND actor.member_id=$2 AND actor.status='active'
             AND actor.role IN ('owner','admin','auditor'))
       ORDER BY i.created_at ASC,i.id ASC LIMIT 512`, [organizationId, actorId]);
-    return (result.rows ?? []).map(safeInvitationRow);
+    const evaluatedAt = timestamp(now(), "evaluated_at");
+    return (result.rows ?? []).map((row) => safeInvitationRow(row, evaluatedAt));
   }
 
   async function revokeInvitation(input = {}) {
@@ -198,17 +226,17 @@ export function createPostgresOrganizationRepository({ client, now = () => new D
     const revokedAt = input.revoked_at ?? input.revokedAt ?? now();
     timestamp(revokedAt, "revoked_at");
     const revokeReason = text(input.revoke_reason ?? input.revokeReason ?? "revoked_by_operator", 256, "revoke_reason");
-    return mutate(organizationId, async (tx) => {
+    return mutate(organizationId, input, "invitation.revoke", { organization_id: organizationId, actor_id: actorId, invitation_id: invitationId, expected_version: expectedVersion, revoke_reason: revokeReason }, async (tx) => {
       const result = await tx.query(`UPDATE organization_invitations i SET revoked_by=$5,revoked_at=$4,revoke_reason=$6,version=i.version+1,updated_at=clock_timestamp()
         WHERE i.organization_id=$1 AND i.id=$2 AND i.version=$3 AND i.revoked_at IS NULL AND i.consumed_at IS NULL
           AND EXISTS (SELECT 1 FROM memberships actor
             WHERE actor.organization_id=$1 AND actor.member_id=$5 AND actor.status='active' AND actor.role IN ('owner','admin'))
         RETURNING ${SAFE_INVITATION_COLUMNS}`, [organizationId, invitationId, expectedVersion, revokedAt, actorId, revokeReason]);
       if ((result.rowCount ?? result.rows?.length ?? 0) !== 1) return null;
-      const row = safeInvitationRow(result.rows[0]);
+      const row = safeInvitationRow(result.rows[0], revokedAt);
       await appendMutationEvents(tx, { organizationId, actorId, action: "invitation.revoked", targetType: "invitation", targetId: invitationId, details: { version: row.version, revoked_at: revokedAt } });
       return row;
-    });
+    }, 200);
   }
 
   async function acceptInvitation(input = {}) {
@@ -216,39 +244,117 @@ export function createPostgresOrganizationRepository({ client, now = () => new D
     const actorId = actorMemberId(input);
     const acceptedAt = input.accepted_at ?? input.acceptedAt ?? now();
     timestamp(acceptedAt, "accepted_at");
+    const idempotencyKey = requireIdempotencyKey(input);
+    const actorPrincipal = principalId(input, actorId);
     return transaction(async (tx) => {
       // The token is the only invitation selector. The member is the
       // authenticated actor; role always comes from this locked invitation.
       const invitation = await tx.query(`SELECT ${SAFE_INVITATION_COLUMNS}
         FROM organization_invitations i
-        WHERE i.token_hash=$1 AND i.revoked_at IS NULL AND i.consumed_at IS NULL AND i.expires_at>$2
-        FOR UPDATE`, [tokenHash, acceptedAt]);
+        WHERE i.token_hash=$1
+        FOR UPDATE`, [tokenHash]);
       if ((invitation.rowCount ?? invitation.rows?.length ?? 0) !== 1) return null;
       const stored = invitation.rows[0];
       const organizationId = uuid(stored.organization_id);
+      await lockOrganization(tx, organizationId);
+      const requestHash = organizationMutationRequestHash("invitation.accept", {
+        organization_id: organizationId, actor_id: actorId, actor_principal: actorPrincipal,
+        token_hash: tokenHash.toString("hex")
+      });
+      const idempotency = await acquireIdempotency(tx, {
+        organizationId, actorPrincipal, idempotencyKey, requestHash
+      });
+      if (idempotency.replayed) return idempotency.response;
+
+      const active = stored.revoked_at === null && stored.consumed_at === null && Date.parse(returnedTimestamp(stored.expires_at)) > Date.parse(acceptedAt);
+      if (!active) {
+        await abandonIdempotency(tx, { organizationId, actorPrincipal, idempotencyKey, requestHash });
+        return null;
+      }
       const invitedMemberId = actorId;
       const role = memberRole(stored.role);
-      await tx.query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", [`agentpass:organization:${organizationId}`]);
       const membership = await tx.query(`INSERT INTO memberships (organization_id,id,member_id,role,status)
         VALUES ($1,$2,$3,$4,'active')
         ON CONFLICT (organization_id,member_id) DO UPDATE SET role=EXCLUDED.role,status='active',version=memberships.version+1,updated_at=clock_timestamp()
         RETURNING organization_id,id AS membership_id,member_id,role,status,version,created_at,updated_at`, [organizationId, randomUUID(), invitedMemberId, role]);
-      if ((membership.rowCount ?? membership.rows?.length ?? 0) !== 1) return null;
+      if ((membership.rowCount ?? membership.rows?.length ?? 0) !== 1) {
+        await abandonIdempotency(tx, { organizationId, actorPrincipal, idempotencyKey, requestHash });
+        return null;
+      }
       const row = safeMembershipRow(membership.rows[0]);
       const consumed = await tx.query(`UPDATE organization_invitations i SET consumed_by=$3,consumed_at=$4,version=i.version+1,updated_at=clock_timestamp()
         WHERE i.organization_id=$1 AND i.id=$2 AND i.token_hash=$5 AND i.revoked_at IS NULL AND i.consumed_at IS NULL
         RETURNING ${SAFE_INVITATION_COLUMNS}`, [organizationId, uuid(stored.invitation_id ?? stored.id), invitedMemberId, acceptedAt, tokenHash]);
-      if ((consumed.rowCount ?? consumed.rows?.length ?? 0) !== 1) return null;
+      if ((consumed.rowCount ?? consumed.rows?.length ?? 0) !== 1) {
+        await abandonIdempotency(tx, { organizationId, actorPrincipal, idempotencyKey, requestHash });
+        return null;
+      }
       await appendMutationEvents(tx, { organizationId, actorId: invitedMemberId, action: "invitation.accepted", targetType: "invitation", targetId: uuid(stored.invitation_id ?? stored.id), details: { member_id: row.member_id, role: row.role, membership_id: row.membership_id, accepted_at: acceptedAt } });
+      await completeIdempotency(tx, { organizationId, actorPrincipal, idempotencyKey, requestHash, response: row, responseStatus: 200 });
       return row;
     });
   }
 
-  async function mutate(organizationId, operation) {
+  async function mutate(organizationId, input, operationName, request, operation, responseStatus) {
+    const idempotencyKey = requireIdempotencyKey(input);
+    const actorPrincipal = principalId(input, request.actor_id);
+    const requestHash = organizationMutationRequestHash(operationName, { ...request, actor_principal: actorPrincipal });
     return transaction(async (tx) => {
-      await tx.query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", [`agentpass:organization:${organizationId}`]);
-      return operation(tx);
+      await lockOrganization(tx, organizationId);
+      const idempotency = await acquireIdempotency(tx, {
+        organizationId, actorPrincipal, idempotencyKey, requestHash
+      });
+      if (idempotency.replayed) return idempotency.response;
+      const result = await operation(tx);
+      if (result === null) {
+        await abandonIdempotency(tx, { organizationId, actorPrincipal, idempotencyKey, requestHash });
+        return null;
+      }
+      await completeIdempotency(tx, { organizationId, actorPrincipal, idempotencyKey, requestHash, response: result, responseStatus });
+      return result;
     });
+  }
+
+  async function lockOrganization(tx, organizationId) {
+    await tx.query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", [`agentpass:organization:${organizationId}`]);
+  }
+
+  async function acquireIdempotency(tx, { organizationId, actorPrincipal, idempotencyKey, requestHash }) {
+    await tx.query(`DELETE FROM idempotency_records
+      WHERE organization_id=$1 AND principal_id=$2 AND idempotency_key=$3
+        AND expires_at<=clock_timestamp()`, [organizationId, actorPrincipal, idempotencyKey]);
+    const inserted = await tx.query(`INSERT INTO idempotency_records
+      (organization_id,principal_id,idempotency_key,request_hash,response_status,response_json,expires_at)
+      VALUES ($1,$2,$3,$4,102,'{}'::jsonb,clock_timestamp()+$5::interval)
+      ON CONFLICT (organization_id,principal_id,idempotency_key) DO NOTHING`,
+    [organizationId, actorPrincipal, idempotencyKey, requestHash, IDEMPOTENCY_TTL]);
+    const record = await tx.query(`SELECT request_hash,response_status,response_json
+      FROM idempotency_records
+      WHERE organization_id=$1 AND principal_id=$2 AND idempotency_key=$3
+      FOR UPDATE`, [organizationId, actorPrincipal, idempotencyKey]);
+    if ((record.rowCount ?? record.rows?.length ?? 0) !== 1) throw new OrganizationRepositoryError("ERR_IDEMPOTENCY", "idempotency record could not be acquired");
+    const row = record.rows[0];
+    if (String(row.request_hash).toLowerCase() !== requestHash) {
+      throw new OrganizationRepositoryError("ERR_IDEMPOTENCY_CONFLICT", "idempotency key was already used for a different request");
+    }
+    if ((inserted.rowCount ?? inserted.rows?.length ?? 0) !== 1) return { replayed: true, response: replayResponse(row.response_json) };
+    return { replayed: false };
+  }
+
+  async function completeIdempotency(tx, { organizationId, actorPrincipal, idempotencyKey, requestHash, response, responseStatus }) {
+    const responseJson = JSON.stringify(response === undefined ? null : response);
+    const completed = await tx.query(`UPDATE idempotency_records
+      SET response_status=$4,response_json=$5::jsonb
+      WHERE organization_id=$1 AND principal_id=$2 AND idempotency_key=$3 AND request_hash=$6`,
+    [organizationId, actorPrincipal, idempotencyKey, responseStatus, responseJson, requestHash]);
+    if ((completed.rowCount ?? completed.rows?.length ?? 0) !== 1) throw new OrganizationRepositoryError("ERR_IDEMPOTENCY", "idempotency response could not be completed");
+  }
+
+  async function abandonIdempotency(tx, { organizationId, actorPrincipal, idempotencyKey, requestHash }) {
+    const removed = await tx.query(`DELETE FROM idempotency_records
+      WHERE organization_id=$1 AND principal_id=$2 AND idempotency_key=$3 AND request_hash=$4`,
+    [organizationId, actorPrincipal, idempotencyKey, requestHash]);
+    if ((removed.rowCount ?? removed.rows?.length ?? 0) !== 1) throw new OrganizationRepositoryError("ERR_IDEMPOTENCY", "idempotency response could not be abandoned");
   }
 
   async function transaction(operation) {
@@ -266,7 +372,7 @@ export function createPostgresOrganizationRepository({ client, now = () => new D
         try { await tx.query("ROLLBACK", []); }
         catch (rollbackError) { throw new OrganizationRepositoryError("ERR_ROLLBACK", "transaction rollback failed", { cause: rollbackError.message }); }
       }
-      throw error;
+      throw mapPostgresMutationError(error);
     } finally {
       if (tx !== client) tx.release?.();
     }
@@ -341,8 +447,32 @@ export function sha256Hex(value) {
   return createHash("sha256").update(value, "utf8").digest("hex");
 }
 
+export function canonicalOrganizationMutationRequest(operation, identity) {
+  return stableCanonicalize({ version: 1, operation: text(operation, 128, "operation"), identity });
+}
+
+export function organizationMutationRequestHash(operation, identity) {
+  return sha256Hex(canonicalOrganizationMutationRequest(operation, identity));
+}
+
 function canonicalOutboxPayload(event, eventHash) {
   return { version: 1, audit_event_id: event.audit_event_id, action: event.action, target_type: event.target_type, target_id: event.target_id, event_hash: eventHash, details: event.details };
+}
+
+function replayResponse(value) {
+  const response = typeof value === "string" ? JSON.parse(value) : value;
+  if (response && typeof response === "object" && !Array.isArray(response)) return { ...response, replayed: true };
+  return { result: response, replayed: true };
+}
+
+function stableCanonicalize(value) {
+  if (value === null || typeof value === "string" || typeof value === "boolean") return JSON.stringify(value);
+  if (Number.isSafeInteger(value) || typeof value === "number" && Number.isFinite(value)) return JSON.stringify(value);
+  if (Array.isArray(value)) return `[${value.map(stableCanonicalize).join(",")}]`;
+  if (!value || typeof value !== "object") throw new TypeError("canonical identity contains an invalid value");
+  const keys = Object.keys(value).sort();
+  if (keys.some((key) => value[key] === undefined)) throw new TypeError("canonical identity contains undefined");
+  return `{${keys.map((key) => `${JSON.stringify(key)}:${stableCanonicalize(value[key])}`).join(",")}}`;
 }
 
 function canonicalDetails(value) {
@@ -380,15 +510,16 @@ function safeMemberRow(row = {}) {
   return { member_id: uuid(String(row.member_id ?? row.id)), github_subject: text(String(row.github_subject), 255, "github_subject"), display_name: row.display_name === null || row.display_name === undefined ? null : text(String(row.display_name), 128, "display_name"), member_created_at: returnedTimestamp(row.member_created_at), organization_id: uuid(String(row.organization_id)), membership_id: uuid(String(row.membership_id)), role: memberRole(row.role), status: membershipStatus(row.status), version: returnedVersion(row.version), created_at: returnedTimestamp(row.created_at), updated_at: returnedTimestamp(row.updated_at) };
 }
 
-function safeInvitationRow(row = {}) {
+function safeInvitationRow(row = {}, evaluatedAt) {
   const expiresAt = returnedTimestamp(row.expires_at);
   const consumedAt = nullableReturnedTimestamp(row.consumed_at);
   const revokedAt = nullableReturnedTimestamp(row.revoked_at);
-  return { organization_id: uuid(String(row.organization_id)), invitation_id: uuid(String(row.invitation_id ?? row.id)), role: memberRole(row.role), created_by: uuid(String(row.created_by)), created_at: returnedTimestamp(row.created_at), expires_at: expiresAt, consumed_at: consumedAt, revoked_at: revokedAt, status: invitationStatus({ expires_at: expiresAt, consumed_at: consumedAt, revoked_at: revokedAt }), version: returnedVersion(row.version) };
+  const statusAt = timestamp(evaluatedAt, "evaluated_at");
+  return { organization_id: uuid(String(row.organization_id)), invitation_id: uuid(String(row.invitation_id ?? row.id)), role: memberRole(row.role), created_by: uuid(String(row.created_by)), created_at: returnedTimestamp(row.created_at), expires_at: expiresAt, consumed_at: consumedAt, revoked_at: revokedAt, status: invitationStatus({ expires_at: expiresAt, consumed_at: consumedAt, revoked_at: revokedAt }, statusAt), version: returnedVersion(row.version) };
 }
 
 function membershipStatus(value) { if (value !== "active" && value !== "revoked") throw new TypeError("membership status is invalid"); return value; }
-function invitationStatus({ expires_at: expiresAt, consumed_at: consumedAt, revoked_at: revokedAt }) { if (consumedAt !== null) return "accepted"; if (revokedAt !== null) return "revoked"; if (Date.parse(expiresAt) <= Date.now()) return "expired"; return "pending"; }
+function invitationStatus({ expires_at: expiresAt, consumed_at: consumedAt, revoked_at: revokedAt }, evaluatedAt) { if (consumedAt !== null) return "accepted"; if (revokedAt !== null) return "revoked"; if (Date.parse(expiresAt) <= Date.parse(evaluatedAt)) return "expired"; return "pending"; }
 function memberRole(value) { if (typeof value !== "string" || !ROLES.has(value)) throw new TypeError("membership role is invalid"); return value; }
 function invitationRole(value) { if (typeof value !== "string" || !INVITABLE_ROLES.has(value)) throw new TypeError("invitation role is invalid"); return value; }
 function uuid(value) { if (typeof value !== "string" || !UUID.test(value)) throw new TypeError("UUID is invalid"); return value.toLowerCase(); }
@@ -402,7 +533,35 @@ function returnedTimestamp(value) { if (value instanceof Date) { if (!Number.isF
 function nullableReturnedTimestamp(value) { return value === null || value === undefined ? null : returnedTimestamp(value); }
 function digest(value) { return Buffer.from(digestHex(value, "digest"), "hex"); }
 function digestHex(value, field) { if (Buffer.isBuffer(value) || value instanceof Uint8Array) { if (value.byteLength !== 32) throw new TypeError(`${field} is invalid`); return Buffer.from(value).toString("hex"); } if (typeof value !== "string" || !DIGEST.test(value)) throw new TypeError(`${field} is invalid`); return value.toLowerCase(); }
+function deterministicOrganizationId(actorPrincipal, idempotencyKey) {
+  const bytes = createHash("sha256")
+    .update("agentpass:organization:create:v1\u0000", "utf8")
+    .update(actorPrincipal, "utf8")
+    .update("\u0000", "utf8")
+    .update(idempotencyKey, "utf8")
+    .digest();
+  bytes[6] = (bytes[6] & 0x0f) | 0x40;
+  bytes[8] = (bytes[8] & 0x3f) | 0x80;
+  const hex = bytes.toString("hex");
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20, 32)}`;
+}
 function assertClient(client) { if (!client || typeof client.query !== "function") throw new TypeError("database client is invalid"); }
 function actorMemberId(input) { return uuid(input.actor_member_id ?? input.actorMemberId ?? input.actor?.member_id ?? input.member_id ?? input.memberId); }
+function principalId(input, fallback) {
+  const value = input.principal_id ?? input.principalId ?? input.actor?.principal_id ?? input.actor?.principalId ?? fallback;
+  return text(value, 256, "principal_id");
+}
+function requireIdempotencyKey(input) {
+  const value = input.idempotency_key ?? input.idempotencyKey;
+  if (typeof value !== "string" || !IDEMPOTENCY_KEY.test(value)) throw new OrganizationRepositoryError("ERR_IDEMPOTENCY_KEY_REQUIRED", "mutation requires a valid idempotency_key");
+  return value;
+}
+function mapPostgresMutationError(error) {
+  if (error instanceof OrganizationRepositoryError) return error;
+  if (error?.code === "23514" && error?.constraint === "memberships_last_active_owner") {
+    return new OrganizationRepositoryError("ERR_LAST_OWNER", "the final active organization owner is protected");
+  }
+  return error;
+}
 
 export default createPostgresOrganizationRepository;

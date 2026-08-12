@@ -30,6 +30,10 @@ export class FakePgClient {
       return { rows: [], rowCount: 0 };
     }
     if (text.startsWith("SELECT pg_advisory_xact_lock")) return { rows: [{ locked: true }], rowCount: 1 };
+    if (text === "SELECT to_regclass($1) AS relation") {
+      const exists = params[0] === "schema_migrations" ? this.schemaMigrationsExists : params[0] === "schema_migration_attempts" ? this.migrationAttemptsExists : false;
+      return { rows: [{ relation: exists ? params[0] : null }], rowCount: 1 };
+    }
     if (text.startsWith("SELECT version, checksum FROM schema_migrations")) {
       if (!this.schemaMigrationsExists) throw missingRelation("schema_migrations");
       return { rows: structuredClone(this.applied), rowCount: this.applied.length };

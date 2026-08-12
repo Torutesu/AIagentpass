@@ -4,6 +4,7 @@ import test from "node:test";
 import {
   createHumanOrganizationsHttpApi,
   HUMAN_ORGANIZATION_SERVICE_METHODS,
+  HUMAN_ORGANIZATIONS_RECENT_AUTH_OPERATIONS,
   HUMAN_ORGANIZATIONS_HTTP_ERROR_CODES,
   HUMAN_ORGANIZATIONS_HTTP_PATHS
 } from "../src/human-auth/organizations/http-api.mjs";
@@ -18,7 +19,9 @@ const OTHER_ORGANIZATION_ID = "22222222-2222-4222-8222-222222222222";
 const MEMBER_ID = "33333333-3333-4333-8333-333333333333";
 const OTHER_MEMBER_ID = "44444444-4444-4444-8444-444444444444";
 const INVITATION_ID = "55555555-5555-4555-8555-555555555555";
+const RECENT_AUTH_PROOF = "77777777-7777-4777-8777-777777777777";
 const CREATED_AT = "2026-08-12T00:00:00.000Z";
+const NOW = 1_800_000_000_000;
 
 function actor(overrides = {}) {
   return {
@@ -69,7 +72,7 @@ function service(overrides = {}) {
   return { service: result, calls };
 }
 
-function fixture({ role = "owner", sessionError = undefined, serviceOverrides = {}, api = {} } = {}) {
+function fixture({ role = "owner", sessionError = undefined, serviceOverrides = {}, recentAuthService = undefined, api = {} } = {}) {
   const calls = { authenticate: [] };
   const { service: organizationService, calls: serviceCalls } = service(serviceOverrides);
   const humanSession = {
@@ -82,7 +85,7 @@ function fixture({ role = "owner", sessionError = undefined, serviceOverrides = 
   };
   return {
     calls: { ...calls, ...serviceCalls },
-    api: createHumanOrganizationsHttpApi({ humanSession, organizationService, origin: ORIGIN, ...api })
+    api: createHumanOrganizationsHttpApi({ humanSession, organizationService, origin: ORIGIN, ...api, ...(recentAuthService === undefined ? {} : { recentAuthService }) })
   };
 }
 
@@ -94,7 +97,7 @@ function request(path, { method = "GET", body = undefined, headers = {} } = {}) 
       origin: ORIGIN,
       cookie: COOKIE,
       "agentpass-csrf": CSRF_TOKEN,
-      ...(method === "GET" ? {} : { "content-type": "application/json", "idempotency-key": "key-1" }),
+      ...(method === "GET" ? {} : { "content-type": "application/json", "idempotency-key": "test-key-1" }),
       ...headers
     },
     ...(body === undefined ? {} : { body: JSON.stringify(body) })
@@ -116,6 +119,15 @@ test("requires the complete injected organization service interface", () => {
       origin: ORIGIN
     }), new RegExp(`organizationService is missing ${missing}`));
   }
+});
+
+test("validates recent-auth dependencies and exposes distinct frozen operations", () => {
+  const { service: organizationService } = service();
+  const humanSession = { expectedOrigin: ORIGIN, authenticateRequest: async () => ({ session: actor() }) };
+  assert.throws(() => createHumanOrganizationsHttpApi({ humanSession, organizationService, origin: ORIGIN, recentAuthService: {} }), /recentAuthService must expose authorize/);
+  assert.throws(() => createHumanOrganizationsHttpApi({ humanSession, organizationService, origin: ORIGIN, now: 1 }), /now must be a function/);
+  assert.equal(Object.isFrozen(HUMAN_ORGANIZATIONS_RECENT_AUTH_OPERATIONS), true);
+  assert.notEqual(HUMAN_ORGANIZATIONS_RECENT_AUTH_OPERATIONS.updateMemberRole, HUMAN_ORGANIZATIONS_RECENT_AUTH_OPERATIONS.removeMember);
 });
 
 test("requires an exact HTTPS Origin, valid session cookie, and CSRF on reads and writes", async () => {
@@ -156,11 +168,11 @@ test("creates and renames organizations with strict schemas and optimistic versi
   const created = await api.handle(request(HUMAN_ORGANIZATIONS_HTTP_PATHS.organizations, { method: "POST", body: { name: "New org" } }));
   assert.equal(created.status, 201);
   assert.equal(created.body.organization.name, "New org");
-  assert.deepEqual(calls.createOrganization[0], { actor: actor(), name: "New org", idempotency_key: "key-1" });
+  assert.deepEqual(calls.createOrganization[0], { actor: actor(), name: "New org", idempotency_key: "test-key-1" });
 
   const renamed = await api.handle(request(HUMAN_ORGANIZATIONS_HTTP_PATHS.organization(ORGANIZATION_ID), { method: "PATCH", body: { name: "Renamed", expected_version: 3 } }));
   assert.equal(renamed.status, 200);
-  assert.deepEqual(calls.renameOrganization[0], { actor: actor(), organization_id: ORGANIZATION_ID, name: "Renamed", expected_version: 3, idempotency_key: "key-1" });
+  assert.deepEqual(calls.renameOrganization[0], { actor: actor(), organization_id: ORGANIZATION_ID, name: "Renamed", expected_version: 3, idempotency_key: "test-key-1" });
 
   for (const body of [{ name: " padded" }, { expected_version: 1 }, { name: "x", expected_version: 0 }, { name: "x", expected_version: 1, extra: true }]) {
     const result = await api.handle(request(HUMAN_ORGANIZATIONS_HTTP_PATHS.organization(ORGANIZATION_ID), { method: "PATCH", body }));
@@ -241,14 +253,97 @@ test("lists members and invitations only for auditor, admin, and owner", async (
   }
 });
 
-test("updates and removes members with target IDs from the path only", async () => {
-  const { api, calls } = fixture();
-  const roleResult = await api.handle(request(HUMAN_ORGANIZATIONS_HTTP_PATHS.memberRole(ORGANIZATION_ID, MEMBER_ID), { method: "PATCH", body: { role: "auditor", expected_version: 4 } }));
+test("requires operation-bound recent auth before role updates and member removal", async () => {
+  const recentCalls = [];
+  const recentAuthService = {
+    async authorize(input) {
+      recentCalls.push(input);
+      return {
+        authenticated_at: NOW,
+        challenge_id: input.proof,
+        consumed: true,
+        member_id: input.principal.member_id,
+        operation: input.operation,
+        organization_id: input.organization_id,
+        verified: true
+      };
+    }
+  };
+  const { api, calls } = fixture({ recentAuthService, api: { now: () => NOW } });
+  const roleResult = await api.handle(request(HUMAN_ORGANIZATIONS_HTTP_PATHS.memberRole(ORGANIZATION_ID, MEMBER_ID), { method: "PATCH", body: { role: "auditor", expected_version: 4 }, headers: { "agentpass-recent-auth": RECENT_AUTH_PROOF } }));
   assert.equal(roleResult.status, 200);
-  assert.deepEqual(calls.updateMemberRole[0], { actor: actor(), organization_id: ORGANIZATION_ID, member_id: MEMBER_ID, role: "auditor", expected_version: 4, idempotency_key: "key-1" });
-  const removeResult = await api.handle(request(HUMAN_ORGANIZATIONS_HTTP_PATHS.memberRemove(ORGANIZATION_ID, MEMBER_ID), { method: "POST", body: { expected_version: 5 } }));
+  assert.deepEqual(calls.updateMemberRole[0], { actor: actor(), organization_id: ORGANIZATION_ID, member_id: MEMBER_ID, role: "auditor", expected_version: 4, idempotency_key: "test-key-1" });
+  const removeResult = await api.handle(request(HUMAN_ORGANIZATIONS_HTTP_PATHS.memberRemove(ORGANIZATION_ID, MEMBER_ID), { method: "POST", body: { expected_version: 5 }, headers: { "agentpass-recent-auth": RECENT_AUTH_PROOF } }));
   assert.equal(removeResult.status, 200);
   assert.equal(calls.removeMember[0].member_id, MEMBER_ID);
+  assert.equal(recentCalls.length, 2);
+  assert.deepEqual(recentCalls.map((call) => call.operation), [
+    HUMAN_ORGANIZATIONS_RECENT_AUTH_OPERATIONS.updateMemberRole,
+    HUMAN_ORGANIZATIONS_RECENT_AUTH_OPERATIONS.removeMember
+  ]);
+  assert.deepEqual(recentCalls[0].principal, actor());
+  assert.equal(recentCalls[0].organization_id, ORGANIZATION_ID);
+});
+
+test("rejects missing, cross-operation, cross-tenant, replayed, failed, stale, and unavailable recent auth without mutation", async () => {
+  const protectedRoutes = [
+    [HUMAN_ORGANIZATIONS_HTTP_PATHS.memberRole(ORGANIZATION_ID, MEMBER_ID), "PATCH", { role: "auditor", expected_version: 1 }, "updateMemberRole"],
+    [HUMAN_ORGANIZATIONS_HTTP_PATHS.memberRemove(ORGANIZATION_ID, MEMBER_ID), "POST", { expected_version: 1 }, "removeMember"]
+  ];
+  for (const [path, method, body] of protectedRoutes) {
+    const recentAuthService = { authorize: async () => { throw new Error("should not be called"); } };
+    const { api, calls } = fixture({ recentAuthService, api: { now: () => NOW } });
+    const result = await api.handle(request(path, { method, body }));
+    assert.equal(result.status, 401);
+    assert.equal(result.body.error.code, HUMAN_ORGANIZATIONS_HTTP_ERROR_CODES.RECENT_AUTH_REQUIRED);
+    assert.equal(calls.updateMemberRole.length + calls.removeMember.length, 0);
+  }
+
+  for (const authorization of [
+    { verified: true, consumed: true, operation: HUMAN_ORGANIZATIONS_RECENT_AUTH_OPERATIONS.removeMember },
+    { verified: true, consumed: false },
+    { verified: false, consumed: true }
+  ]) {
+    const { api, calls } = fixture({
+      recentAuthService: { authorize: async () => ({ authenticated_at: NOW, challenge_id: RECENT_AUTH_PROOF, member_id: MEMBER_ID, organization_id: ORGANIZATION_ID, operation: HUMAN_ORGANIZATIONS_RECENT_AUTH_OPERATIONS.updateMemberRole, ...authorization }) },
+      api: { now: () => NOW }
+    });
+    const result = await api.handle(request(HUMAN_ORGANIZATIONS_HTTP_PATHS.memberRole(ORGANIZATION_ID, MEMBER_ID), { method: "PATCH", body: { role: "auditor", expected_version: 1 }, headers: { "agentpass-recent-auth": RECENT_AUTH_PROOF } }));
+    assert.equal(result.status, 401);
+    assert.equal(result.body.error.code, HUMAN_ORGANIZATIONS_HTTP_ERROR_CODES.RECENT_AUTH_FAILED);
+    assert.equal(calls.updateMemberRole.length, 0);
+  }
+
+  const stale = fixture({
+    recentAuthService: { authorize: async (input) => ({ authenticated_at: NOW - 5 * 60_001, challenge_id: input.proof, consumed: true, member_id: MEMBER_ID, organization_id: ORGANIZATION_ID, operation: HUMAN_ORGANIZATIONS_RECENT_AUTH_OPERATIONS.updateMemberRole, verified: true }) },
+    api: { now: () => NOW }
+  });
+  const staleResult = await stale.api.handle(request(HUMAN_ORGANIZATIONS_HTTP_PATHS.memberRole(ORGANIZATION_ID, MEMBER_ID), { method: "PATCH", body: { role: "auditor", expected_version: 1 }, headers: { "agentpass-recent-auth": RECENT_AUTH_PROOF } }));
+  assert.equal(staleResult.body.error.code, HUMAN_ORGANIZATIONS_HTTP_ERROR_CODES.RECENT_AUTH_STALE);
+  assert.equal(stale.calls.updateMemberRole.length, 0);
+
+  const unavailable = fixture({ recentAuthService: { authorize: async () => { throw new Error("secret verifier detail"); } } });
+  const unavailableResult = await unavailable.api.handle(request(HUMAN_ORGANIZATIONS_HTTP_PATHS.memberRole(ORGANIZATION_ID, MEMBER_ID), { method: "PATCH", body: { role: "auditor", expected_version: 1 }, headers: { "agentpass-recent-auth": RECENT_AUTH_PROOF } }));
+  assert.equal(unavailableResult.status, 503);
+  assert.equal(unavailableResult.body.error.code, HUMAN_ORGANIZATIONS_HTTP_ERROR_CODES.RECENT_AUTH_UNAVAILABLE);
+  assertNoSecret(unavailableResult, "secret verifier detail");
+  assert.equal(unavailable.calls.updateMemberRole.length, 0);
+
+  const crossTenant = fixture({ recentAuthService: { authorize: async () => { throw new Error("should not be called"); } } });
+  const crossTenantResult = await crossTenant.api.handle(request(HUMAN_ORGANIZATIONS_HTTP_PATHS.memberRole(OTHER_ORGANIZATION_ID, MEMBER_ID), { method: "PATCH", body: { role: "auditor", expected_version: 1 }, headers: { "agentpass-recent-auth": RECENT_AUTH_PROOF } }));
+  assert.equal(crossTenantResult.status, 404);
+  assert.equal(crossTenantResult.body.error.code, HUMAN_ORGANIZATIONS_HTTP_ERROR_CODES.ORGANIZATION_NOT_FOUND);
+  assert.equal(crossTenant.calls.updateMemberRole.length, 0);
+});
+
+test("does not require recent auth for reads, invitation creation, or invitation acceptance", async () => {
+  const { api, calls } = fixture();
+  assert.equal((await api.handle(request(HUMAN_ORGANIZATIONS_HTTP_PATHS.members(ORGANIZATION_ID)))).status, 200);
+  assert.equal((await api.handle(request(HUMAN_ORGANIZATIONS_HTTP_PATHS.invitations(ORGANIZATION_ID), { method: "POST", body: { role: "viewer", expires_at: "2026-08-19T00:00:00.000Z" } }))).status, 201);
+  assert.equal((await api.handle(request(HUMAN_ORGANIZATIONS_HTTP_PATHS.acceptInvitation, { method: "POST", body: { one_time_token: INVITATION_TOKEN } }))).status, 201);
+  assert.equal(calls.listMembers.length > 0, true);
+  assert.equal(calls.createInvitation.length > 0, true);
+  assert.equal(calls.acceptInvitation.length > 0, true);
 });
 
 test("creates invitations with the raw token exactly once and never exposes it on reads/revokes", async () => {
@@ -276,7 +371,7 @@ test("accepts a one-time token for the authenticated member and never returns to
   const { api, calls } = fixture();
   const result = await api.handle(request(HUMAN_ORGANIZATIONS_HTTP_PATHS.acceptInvitation, { method: "POST", body: { one_time_token: INVITATION_TOKEN } }));
   assert.equal(result.status, 201);
-  assert.deepEqual(calls.acceptInvitation[0], { actor: actor(), one_time_token: INVITATION_TOKEN, idempotency_key: "key-1" });
+  assert.deepEqual(calls.acceptInvitation[0], { actor: actor(), one_time_token: INVITATION_TOKEN, idempotency_key: "test-key-1" });
   assertNoSecret(result, INVITATION_TOKEN, "token_hash", "public_key");
 });
 

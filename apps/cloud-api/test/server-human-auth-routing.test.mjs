@@ -11,6 +11,8 @@ const REGISTRATION_OPTIONS_PATH = "/api/auth/webauthn/registration/options";
 const REGISTRATION_VERIFY_PATH = "/api/auth/webauthn/registration/verify";
 const MANAGEMENT_CREDENTIALS_PATH = "/api/auth/management/credentials";
 const MANAGEMENT_SESSIONS_PATH = "/api/auth/management/sessions";
+const ORGANIZATIONS_PATH = "/api/auth/organizations";
+const ACCEPT_INVITATION_PATH = "/api/auth/invitations/accept";
 const MANAGEMENT_CREDENTIAL_ID = Buffer.alloc(16).toString("base64url");
 const MEMBER_ID = "11111111-1111-4111-8111-111111111111";
 const ORGANIZATION_ID = "22222222-2222-4222-8222-222222222222";
@@ -230,6 +232,46 @@ test("delegates the exact session bootstrap path and preserves Set-Cookie", asyn
   assert.equal(response.headers.get("set-cookie"), cookie);
   assert.equal(calls[0].url, SESSION_PATH);
   assert.equal(calls[0].headers.authorization, "Bearer server-only");
+});
+
+test("routes exact organization and invitation paths, forwarding queries only for lists", async (t) => {
+  const calls = [];
+  const base = await startServer(t, {
+    humanAuthApi: {
+      async handle(input) {
+        calls.push(input);
+        return { status: 200, body: { ok: true }, headers: { "Cache-Control": "no-store, max-age=0" } };
+      }
+    }
+  });
+  const headers = { origin: ORIGIN, cookie: SESSION_COOKIE, "agentpass-csrf": CSRF_TOKEN, "content-type": "application/json" };
+  const memberList = `${ORGANIZATIONS_PATH}/${ORGANIZATION_ID}/members?limit=10&cursor=next`;
+  const listResponse = await fetch(`${base}${memberList}`, { headers });
+  assert.equal(listResponse.status, 200);
+  assert.equal(calls.at(-1).url, memberList);
+
+  const createBody = JSON.stringify({ name: "Acme" });
+  const createResponse = await fetch(`${base}${ORGANIZATIONS_PATH}`, { method: "POST", headers: { ...headers, "idempotency-key": "organization-create-1" }, body: createBody });
+  assert.equal(createResponse.status, 200);
+  assert.equal(calls.at(-1).url, ORGANIZATIONS_PATH);
+  assert.equal(Buffer.from(calls.at(-1).body).toString(), createBody);
+
+  const acceptResponse = await fetch(`${base}${ACCEPT_INVITATION_PATH}`, { method: "POST", headers, body: JSON.stringify({ one_time_token: "A".repeat(43) }) });
+  assert.equal(acceptResponse.status, 200);
+  assert.equal(calls.at(-1).url, ACCEPT_INVITATION_PATH);
+
+  const before = calls.length;
+  for (const path of [
+    `${ORGANIZATIONS_PATH}/?limit=1`,
+    `${ORGANIZATIONS_PATH}/${ORGANIZATION_ID}?unexpected=1`,
+    `${ORGANIZATIONS_PATH}/${ORGANIZATION_ID}/members/`,
+    `${ACCEPT_INVITATION_PATH}?unexpected=1`
+  ]) {
+    const method = path.endsWith("members/") ? "GET" : "POST";
+    const response = await fetch(`${base}${path}`, { method, headers, ...(method === "GET" ? {} : { body: "{}" }) });
+    assert.equal(response.status, 404, path);
+  }
+  assert.equal(calls.length, before);
 });
 
 test("passes the session-clearing cookie only when the current session is revoked", async (t) => {

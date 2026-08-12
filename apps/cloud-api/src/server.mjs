@@ -12,6 +12,9 @@ const HUMAN_AUTH_OPTIONS_PATH = "/api/auth/webauthn/options";
 const HUMAN_AUTH_VERIFY_PATH = "/api/auth/webauthn/verify";
 const HUMAN_AUTH_REGISTRATION_OPTIONS_PATH = "/api/auth/webauthn/registration/options";
 const HUMAN_AUTH_REGISTRATION_VERIFY_PATH = "/api/auth/webauthn/registration/verify";
+const HUMAN_AUTH_ORGANIZATIONS_PATH = "/api/auth/organizations";
+const HUMAN_AUTH_ACCEPT_INVITATION_PATH = "/api/auth/invitations/accept";
+const HUMAN_AUTH_UUID = "[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89a-fA-F][0-9a-fA-F]{3}-[0-9a-fA-F]{12}";
 const UUID = "([0-9a-fA-F-]{36})";
 
 export function createCloudApi({ store, tokenRecords = [], bundleSigner, now = () => Date.now(), monotonicNow, replayCache = createReplayCache(), rateLimiter, admissionRateLimiter, verifyRecentWebAuthn, recentAuthService, humanAuthApi } = {}) {
@@ -29,7 +32,7 @@ export function createCloudApi({ store, tokenRecords = [], bundleSigner, now = (
     const requestId = crypto.randomUUID();
     try {
       const url = new URL(request.url, "http://agentpass.invalid");
-      if (humanAuthApi && isExactHumanAuthPath(url)) return await handleHumanAuth(request, response, url, requestId);
+      if (humanAuthApi && isExactHumanAuthPath(url, request.method)) return await handleHumanAuth(request, response, url, requestId);
       const route = routes.find((candidate) => candidate.method === request.method && candidate.pattern.test(url.pathname));
       if (!route) return send(response, 404, { error: { code: "not_found", message: "Resource not found" }, request_id: requestId });
       const match = route.pattern.exec(url.pathname);
@@ -253,10 +256,21 @@ export function createCloudApi({ store, tokenRecords = [], bundleSigner, now = (
   }
 }
 
-function isExactHumanAuthPath(url) {
+function isExactHumanAuthPath(url, method = undefined) {
   if (url.hash) return false;
   if (!url.search && (url.pathname === HUMAN_AUTH_SESSION_PATH || url.pathname === HUMAN_AUTH_OPTIONS_PATH || url.pathname === HUMAN_AUTH_VERIFY_PATH || url.pathname === HUMAN_AUTH_REGISTRATION_OPTIONS_PATH || url.pathname === HUMAN_AUTH_REGISTRATION_VERIFY_PATH)) return true;
+  if (isExactHumanOrganizationPath(url, method)) return true;
   return /^\/api\/auth\/management\/(?:credentials(?:\/[A-Za-z0-9_-]+(?:\/revoke)?)?|sessions(?:\/[0-9a-fA-F-]{36}\/revoke)?)$/.test(url.pathname);
+}
+
+function isExactHumanOrganizationPath(url, method) {
+  if (url.hash) return false;
+  if (url.pathname === HUMAN_AUTH_ACCEPT_INVITATION_PATH) return !url.search;
+  const organizationPath = new RegExp(`^${HUMAN_AUTH_ORGANIZATIONS_PATH}(?:/${HUMAN_AUTH_UUID}(?:/members(?:/${HUMAN_AUTH_UUID}/(?:role|remove))?|/invitations(?:/${HUMAN_AUTH_UUID}/revoke)?)?)?$`);
+  if (!organizationPath.test(url.pathname)) return false;
+  const requestMethod = String(method ?? "").toUpperCase();
+  const list = requestMethod === "GET" && (url.pathname === HUMAN_AUTH_ORGANIZATIONS_PATH || new RegExp(`^${HUMAN_AUTH_ORGANIZATIONS_PATH}/${HUMAN_AUTH_UUID}/(?:members|invitations)$`).test(url.pathname));
+  return !url.search || list;
 }
 
 function transportPrincipalId(request) {

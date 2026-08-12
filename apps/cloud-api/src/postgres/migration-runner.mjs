@@ -5,7 +5,6 @@ import { fileURLToPath } from "node:url";
 
 const MIGRATION_FILE = /^(\d{4})_([a-z0-9_]+)\.sql$/;
 const SHA256 = /^[0-9a-f]{64}$/;
-const RELATION_MISSING = "42P01";
 const DEFAULT_LOCK_NAMESPACE = "agentpass:postgres:migrations:v1";
 
 export class MigrationRunnerError extends Error {
@@ -171,23 +170,21 @@ async function query(client, text, params) {
 }
 
 async function readAppliedMigrations(client) {
-  try {
-    const result = await query(client, "SELECT version, checksum FROM schema_migrations ORDER BY version ASC", []);
-    return result.rows.map(normalizeAppliedRow);
-  } catch (error) {
-    if (isMissingRelation(error, "schema_migrations")) return [];
-    throw error;
-  }
+  if (!(await relationExists(client, "schema_migrations"))) return [];
+  const result = await query(client, "SELECT version, checksum FROM schema_migrations ORDER BY version ASC", []);
+  return result.rows.map(normalizeAppliedRow);
 }
 
 async function readDirtyMigrations(client) {
-  try {
-    const result = await query(client, "SELECT version, checksum, status, finished_at FROM schema_migration_attempts WHERE status IN ('running', 'failed') ORDER BY version ASC", []);
-    return result.rows.map((row) => ({ version: Number(row.version), checksum: row.checksum, status: row.status, finished_at: row.finished_at ?? null }));
-  } catch (error) {
-    if (isMissingRelation(error, "schema_migration_attempts")) return [];
-    throw error;
-  }
+  if (!(await relationExists(client, "schema_migration_attempts"))) return [];
+  const result = await query(client, "SELECT version, checksum, status, finished_at FROM schema_migration_attempts WHERE status IN ('running', 'failed') ORDER BY version ASC", []);
+  return result.rows.map((row) => ({ version: Number(row.version), checksum: row.checksum, status: row.status, finished_at: row.finished_at ?? null }));
+}
+
+async function relationExists(client, relation) {
+  const result = await query(client, "SELECT to_regclass($1) AS relation", [relation]);
+  const value = result.rows?.[0]?.relation;
+  return typeof value === "string" && value.length > 0;
 }
 
 function normalizeAppliedRow(row) {
@@ -205,13 +202,66 @@ function validateAppliedHistory(rows, migrations) {
   }
 }
 
-function isMissingRelation(error, relation) {
-  return error?.code === RELATION_MISSING || (typeof error?.message === "string" && new RegExp(`relation [^\\n]*${relation}[^\\n]* does not exist`, "i").test(error.message));
-}
-
 export function stripTransactionEnvelope(sql) {
   const match = /^\s*BEGIN\s*;([\s\S]*?)COMMIT\s*;\s*$/i.exec(sql);
   const body = match ? match[1] : sql;
-  if (/\b(?:BEGIN|COMMIT|ROLLBACK)\b/i.test(body)) throw new MigrationRunnerError("ERR_MIGRATION_TRANSACTION", "migration contains nested transaction control statements");
+  if (hasTopLevelTransactionControl(body)) throw new MigrationRunnerError("ERR_MIGRATION_TRANSACTION", "migration contains nested transaction control statements");
   return body.trim();
+}
+
+function hasTopLevelTransactionControl(sql) {
+  for (let index = 0; index < sql.length;) {
+    const character = sql[index];
+    const next = sql[index + 1];
+    if (character === "'") { index = skipQuoted(sql, index, "'"); continue; }
+    if (character === '"') { index = skipQuoted(sql, index, '"'); continue; }
+    if (character === "-" && next === "-") { index = skipLineComment(sql, index + 2); continue; }
+    if (character === "/" && next === "*") { index = skipBlockComment(sql, index + 2); continue; }
+    if (character === "$") {
+      const delimiter = /^\$(?:[A-Za-z_][A-Za-z0-9_]*)?\$/u.exec(sql.slice(index))?.[0];
+      if (delimiter) { index = skipDollarQuote(sql, index, delimiter); continue; }
+    }
+    if (/[A-Za-z_]/u.test(character)) {
+      let end = index + 1;
+      while (end < sql.length && /[A-Za-z0-9_$]/u.test(sql[end])) end += 1;
+      if (["BEGIN", "COMMIT", "ROLLBACK"].includes(sql.slice(index, end).toUpperCase())) return true;
+      index = end;
+      continue;
+    }
+    index += 1;
+  }
+  return false;
+}
+
+function skipQuoted(sql, start, quote) {
+  let index = start + 1;
+  while (index < sql.length) {
+    if (sql[index] !== quote) { index += 1; continue; }
+    if (sql[index + 1] === quote) { index += 2; continue; }
+    return index + 1;
+  }
+  throw new MigrationRunnerError("ERR_MIGRATION_SQL", "migration contains an unterminated quoted value");
+}
+
+function skipLineComment(sql, start) {
+  const end = sql.indexOf("\n", start);
+  return end === -1 ? sql.length : end + 1;
+}
+
+function skipBlockComment(sql, start) {
+  let depth = 1;
+  let index = start;
+  while (index < sql.length && depth > 0) {
+    if (sql[index] === "/" && sql[index + 1] === "*") { depth += 1; index += 2; continue; }
+    if (sql[index] === "*" && sql[index + 1] === "/") { depth -= 1; index += 2; continue; }
+    index += 1;
+  }
+  if (depth !== 0) throw new MigrationRunnerError("ERR_MIGRATION_SQL", "migration contains an unterminated block comment");
+  return index;
+}
+
+function skipDollarQuote(sql, start, delimiter) {
+  const end = sql.indexOf(delimiter, start + delimiter.length);
+  if (end === -1) throw new MigrationRunnerError("ERR_MIGRATION_SQL", "migration contains an unterminated dollar-quoted value");
+  return end + delimiter.length;
 }

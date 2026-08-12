@@ -1,6 +1,7 @@
 import { Pool } from "pg";
 import { createMigrationRunner } from "./migration-runner.mjs";
 import { createPostgresHumanRepository } from "./human-repository.mjs";
+import { createPostgresOrganizationRepository } from "./organization-repository.mjs";
 import { createTenantRepositoryFactory } from "./repository.mjs";
 
 export async function createPostgresRuntime({ env = process.env, PoolClass = Pool, applicationVersion = "unknown" } = {}) {
@@ -19,9 +20,11 @@ export async function createPostgresRuntime({ env = process.env, PoolClass = Poo
   }
   client.release();
   let closed = false;
+  const organizationRepository = createPostgresOrganizationRepository({ client: pool });
   return Object.freeze({
     pool,
     humanRepository: createPostgresHumanRepository({ client: pool }),
+    organizationRepository,
     tenants: createTenantRepositoryFactory({ client: pool }),
     async health() {
       if (closed) return { ready: false, code: "postgres_closed" };

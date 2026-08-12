@@ -4,6 +4,8 @@ import { createPostgresIdentityResolver } from "./identity/postgres-resolver.mjs
 import { createHumanAuthHttpApi } from "./http-api.mjs";
 import { createHumanManagementHttpApi, HUMAN_MANAGEMENT_RECENT_AUTH_OPERATIONS } from "./management/http-api.mjs";
 import { createPostgresHumanManagementRepository } from "./management/postgres-adapter.mjs";
+import { createHumanOrganizationsHttpApi, HUMAN_ORGANIZATIONS_RECENT_AUTH_OPERATIONS } from "./organizations/http-api.mjs";
+import { createPostgresOrganizationService } from "./organizations/postgres-service.mjs";
 import { createWebAuthnRegistrationHttpApi } from "./registration-http-api.mjs";
 import { createRecentAuthService } from "./recent-auth.mjs";
 import { createHumanAuthRouter } from "./router.mjs";
@@ -17,13 +19,15 @@ const ALLOWED_RECENT_AUTH_OPERATIONS = Object.freeze([
   "device.enrollment.issue",
   "organization.emergency_stop",
   HUMAN_MANAGEMENT_RECENT_AUTH_OPERATIONS.revokeCredential,
-  HUMAN_MANAGEMENT_RECENT_AUTH_OPERATIONS.revokeCurrentSession
+  HUMAN_MANAGEMENT_RECENT_AUTH_OPERATIONS.revokeCurrentSession,
+  ...recentAuthOperationValues(HUMAN_ORGANIZATIONS_RECENT_AUTH_OPERATIONS)
 ]);
 
 export function createHumanAuthRuntime({ postgresRuntime, tokenRecords, origin, rpId, identityProvider = "chatgpt", now = () => Date.now() } = {}) {
   const repository = postgresRuntime?.humanRepository;
+  const organizationRepository = postgresRuntime?.organizationRepository;
   const pool = postgresRuntime?.pool;
-  if (!repository || !pool) throw new TypeError("postgresRuntime with pool and humanRepository is required");
+  if (!repository || !organizationRepository || !pool) throw new TypeError("postgresRuntime with pool, humanRepository, and organizationRepository is required");
 
   const identityResolver = createPostgresIdentityResolver({ client: pool, now });
   const consoleIdentity = createConsoleIdentityAdapter({ tokenRecords, identityResolver, provider: identityProvider });
@@ -50,6 +54,14 @@ export function createHumanAuthRuntime({ postgresRuntime, tokenRecords, origin, 
   const registrationApi = createWebAuthnRegistrationHttpApi({ humanSession, registrationService, origin, basePath: "/api/auth" });
   const managementRepository = createPostgresHumanManagementRepository({ repository, now });
   const managementApi = createHumanManagementHttpApi({ humanSession, recentAuthService, repository: managementRepository, origin, now });
-  const api = createHumanAuthRouter({ sessionApi, webauthnApi, registrationApi, managementApi });
-  return Object.freeze({ api, humanSession, recentAuthService, ceremony, registrationCeremony, registrationService, identityResolver, managementRepository, sessionApi, webauthnApi, registrationApi, managementApi, allowedOperations: ALLOWED_RECENT_AUTH_OPERATIONS });
+  const organizationService = createPostgresOrganizationService({ repository: organizationRepository, now });
+  const organizationApi = createHumanOrganizationsHttpApi({ humanSession, recentAuthService, organizationService, origin, now });
+  const api = createHumanAuthRouter({ sessionApi, webauthnApi, registrationApi, managementApi, organizationApi });
+  return Object.freeze({ api, humanSession, recentAuthService, ceremony, registrationCeremony, registrationService, identityResolver, managementRepository, organizationRepository, organizationService, sessionApi, webauthnApi, registrationApi, managementApi, organizationApi, allowedOperations: ALLOWED_RECENT_AUTH_OPERATIONS });
+}
+
+function recentAuthOperationValues(value) {
+  if (Array.isArray(value)) return value;
+  if (!value || typeof value !== "object") return [];
+  return Object.values(value);
 }

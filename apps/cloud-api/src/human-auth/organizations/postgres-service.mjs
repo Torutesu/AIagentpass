@@ -1,0 +1,363 @@
+import { createHash, randomBytes as nodeRandomBytes, randomUUID as nodeRandomUUID } from "node:crypto";
+
+const DEFAULT_PAGE_SIZE = 25;
+const MAX_PAGE_SIZE = 100;
+const MAX_CURSOR_LENGTH = 512;
+const MAX_IDEMPOTENCY_KEY_LENGTH = 255;
+const IDEMPOTENCY_KEY = /^[A-Za-z0-9._~-]{8,255}$/u;
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu;
+const CURSOR = /^[A-Za-z0-9_-]+$/u;
+const RFC3339 = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?(?:Z|[+-]\d{2}:\d{2})$/u;
+const SECRET_FIELDS = new Set(["token_hash", "raw_token", "one_time_token", "invitation_token"]);
+
+export const ORGANIZATION_SERVICE_ERROR_CODES = Object.freeze({
+  INVALID_INPUT: "invalid_input",
+  NOT_FOUND: "not_found",
+  MEMBER_NOT_FOUND: "member_not_found",
+  INVITATION_NOT_FOUND: "invitation_not_found",
+  FORBIDDEN: "forbidden",
+  VERSION_CONFLICT: "version_conflict",
+  IDEMPOTENCY_CONFLICT: "idempotency_conflict",
+  INVITATION_REPLAYED: "invitation_replayed",
+  UNAVAILABLE: "organization_service_unavailable"
+});
+
+const ERROR_MESSAGES = Object.freeze({
+  [ORGANIZATION_SERVICE_ERROR_CODES.INVALID_INPUT]: "The organization input is invalid",
+  [ORGANIZATION_SERVICE_ERROR_CODES.NOT_FOUND]: "The organization resource was not found",
+  [ORGANIZATION_SERVICE_ERROR_CODES.MEMBER_NOT_FOUND]: "The organization member was not found",
+  [ORGANIZATION_SERVICE_ERROR_CODES.INVITATION_NOT_FOUND]: "The invitation was not found",
+  [ORGANIZATION_SERVICE_ERROR_CODES.FORBIDDEN]: "The organization operation is not allowed",
+  [ORGANIZATION_SERVICE_ERROR_CODES.VERSION_CONFLICT]: "The organization resource was changed by another request",
+  [ORGANIZATION_SERVICE_ERROR_CODES.IDEMPOTENCY_CONFLICT]: "The idempotency key conflicts with another request",
+  [ORGANIZATION_SERVICE_ERROR_CODES.INVITATION_REPLAYED]: "The invitation token is no longer valid",
+  [ORGANIZATION_SERVICE_ERROR_CODES.UNAVAILABLE]: "The organization service is unavailable"
+});
+
+export class OrganizationServiceError extends Error {
+  constructor(code) {
+    super(ERROR_MESSAGES[code] ?? ERROR_MESSAGES[ORGANIZATION_SERVICE_ERROR_CODES.UNAVAILABLE]);
+    this.name = "OrganizationServiceError";
+    this.code = ERROR_MESSAGES[code] === undefined ? ORGANIZATION_SERVICE_ERROR_CODES.UNAVAILABLE : code;
+  }
+}
+
+/**
+ * Adapts the PostgreSQL organization repository to the HTTP organization
+ * service contract. The repository remains responsible for authorization,
+ * transactions, and idempotency replay.
+ */
+export function createPostgresOrganizationService({
+  repository,
+  now = () => new Date().toISOString(),
+  randomBytes = nodeRandomBytes,
+  randomUUID = nodeRandomUUID
+} = {}) {
+  assertRepository(repository);
+  if (typeof now !== "function") throw new TypeError("now must be a function");
+  if (typeof randomBytes !== "function") throw new TypeError("randomBytes must be a function");
+  if (typeof randomUUID !== "function") throw new TypeError("randomUUID must be a function");
+
+  return Object.freeze({
+    listOrganizations,
+    createOrganization,
+    renameOrganization,
+    listMembers,
+    updateMemberRole,
+    removeMember,
+    listInvitations,
+    createInvitation,
+    revokeInvitation,
+    acceptInvitation
+  });
+
+  async function listOrganizations(input = {}) {
+    const actor = requiredActor(input);
+    const pageInput = pagination(input);
+    const records = await invoke("listOrganizationsForMember", {
+      member_id: actor.member_id,
+      ...pageInput
+    }, ORGANIZATION_SERVICE_ERROR_CODES.NOT_FOUND);
+    return page(records, pageInput.limit, "organization");
+  }
+
+  async function createOrganization(input = {}) {
+    const actor = requiredActor(input);
+    const idempotency_key = idempotencyKey(input.idempotency_key);
+    const result = await invoke("createOrganizationWithOwner", {
+      owner_member_id: actor.member_id,
+      actor_member_id: actor.member_id,
+      name: input.name,
+      created_at: currentTimestamp(),
+      idempotency_key
+    }, ORGANIZATION_SERVICE_ERROR_CODES.NOT_FOUND);
+    return sanitize(result);
+  }
+
+  async function renameOrganization(input = {}) {
+    const actor = requiredActor(input);
+    const idempotency_key = idempotencyKey(input.idempotency_key);
+    const result = await invoke("renameOrganization", {
+      organization_id: requiredOrganizationId(input.organization_id),
+      actor_member_id: actor.member_id,
+      name: input.name,
+      expected_version: input.expected_version,
+      idempotency_key
+    }, ORGANIZATION_SERVICE_ERROR_CODES.NOT_FOUND);
+    return sanitize(result);
+  }
+
+  async function listMembers(input = {}) {
+    const actor = requiredActor(input);
+    const organization_id = requiredOrganizationId(input.organization_id);
+    const pageInput = pagination(input);
+    const records = await invoke("listMembers", {
+      organization_id,
+      actor_member_id: actor.member_id,
+      ...pageInput
+    }, ORGANIZATION_SERVICE_ERROR_CODES.MEMBER_NOT_FOUND);
+    return page(records, pageInput.limit, "member");
+  }
+
+  async function updateMemberRole(input = {}) {
+    const actor = requiredActor(input);
+    const idempotency_key = idempotencyKey(input.idempotency_key);
+    const result = await invoke("updateMemberRole", {
+      organization_id: requiredOrganizationId(input.organization_id),
+      actor_member_id: actor.member_id,
+      member_id: requiredMemberId(input.member_id),
+      role: input.role,
+      expected_version: input.expected_version,
+      idempotency_key
+    }, ORGANIZATION_SERVICE_ERROR_CODES.MEMBER_NOT_FOUND);
+    return sanitize(result);
+  }
+
+  async function removeMember(input = {}) {
+    const actor = requiredActor(input);
+    const idempotency_key = idempotencyKey(input.idempotency_key);
+    const result = await invoke("removeMember", {
+      organization_id: requiredOrganizationId(input.organization_id),
+      actor_member_id: actor.member_id,
+      member_id: requiredMemberId(input.member_id),
+      expected_version: input.expected_version,
+      removed_at: currentTimestamp(),
+      idempotency_key
+    }, ORGANIZATION_SERVICE_ERROR_CODES.MEMBER_NOT_FOUND);
+    return sanitize(result);
+  }
+
+  async function listInvitations(input = {}) {
+    const actor = requiredActor(input);
+    const organization_id = requiredOrganizationId(input.organization_id);
+    const pageInput = pagination(input);
+    const records = await invoke("listInvitations", {
+      organization_id,
+      actor_member_id: actor.member_id,
+      ...pageInput
+    }, ORGANIZATION_SERVICE_ERROR_CODES.INVITATION_NOT_FOUND);
+    return page(records, pageInput.limit, "invitation");
+  }
+
+  async function createInvitation(input = {}) {
+    const actor = requiredActor(input);
+    const idempotency_key = idempotencyKey(input.idempotency_key);
+    const raw_token = generateToken(randomBytes);
+    const result = await invoke("createInvitation", {
+      organization_id: requiredOrganizationId(input.organization_id),
+      actor_member_id: actor.member_id,
+      invitation_id: generatedUuid(randomUUID),
+      role: input.role,
+      token_hash: hashToken(raw_token),
+      expires_at: input.expires_at,
+      created_at: currentTimestamp(),
+      idempotency_key
+    }, ORGANIZATION_SERVICE_ERROR_CODES.NOT_FOUND);
+    const invitation = sanitize(unwrapInvitation(result));
+    if (isReplay(result)) return Object.freeze({ invitation, replayed: true });
+    return Object.freeze({ invitation, raw_token });
+  }
+
+  async function revokeInvitation(input = {}) {
+    const actor = requiredActor(input);
+    const idempotency_key = idempotencyKey(input.idempotency_key);
+    const result = await invoke("revokeInvitation", {
+      organization_id: requiredOrganizationId(input.organization_id),
+      actor_member_id: actor.member_id,
+      invitation_id: requiredInvitationId(input.invitation_id),
+      expected_version: input.expected_version,
+      revoked_at: currentTimestamp(),
+      idempotency_key
+    }, ORGANIZATION_SERVICE_ERROR_CODES.INVITATION_NOT_FOUND);
+    return sanitize(result);
+  }
+
+  async function acceptInvitation(input = {}) {
+    const actor = requiredActor(input);
+    const idempotency_key = idempotencyKey(input.idempotency_key);
+    const one_time_token = requiredToken(input.one_time_token);
+    const result = await invoke("acceptInvitation", {
+      token_hash: hashToken(one_time_token),
+      actor_member_id: actor.member_id,
+      organization_id: actor.organization_id,
+      accepted_at: currentTimestamp(),
+      idempotency_key
+    }, ORGANIZATION_SERVICE_ERROR_CODES.INVITATION_REPLAYED);
+    return sanitize(result);
+  }
+
+  async function invoke(method, input, nullCode) {
+    let result;
+    try {
+      result = await repository[method](input);
+    } catch (error) {
+      throw mapRepositoryError(error);
+    }
+    if (result === null || result === undefined) throw serviceError(nullCode);
+    return result;
+  }
+
+  function currentTimestamp() {
+    let value;
+    try { value = now(); }
+    catch (error) { throw error instanceof OrganizationServiceError ? error : serviceError(ORGANIZATION_SERVICE_ERROR_CODES.UNAVAILABLE); }
+    if (value instanceof Date) {
+      if (!Number.isFinite(value.getTime())) throw serviceError(ORGANIZATION_SERVICE_ERROR_CODES.INVALID_INPUT);
+      return value.toISOString();
+    }
+    if (Number.isSafeInteger(value) && value >= 0) {
+      const date = new Date(value);
+      if (!Number.isFinite(date.getTime())) throw serviceError(ORGANIZATION_SERVICE_ERROR_CODES.INVALID_INPUT);
+      return date.toISOString();
+    }
+    if (typeof value === "string" && RFC3339.test(value) && Number.isFinite(Date.parse(value))) return value;
+    throw serviceError(ORGANIZATION_SERVICE_ERROR_CODES.INVALID_INPUT);
+  }
+}
+
+function assertRepository(repository) {
+  const methods = [
+    "listOrganizationsForMember", "createOrganizationWithOwner", "renameOrganization", "listMembers",
+    "updateMemberRole", "removeMember", "listInvitations", "createInvitation", "revokeInvitation", "acceptInvitation"
+  ];
+  if (!repository || typeof repository !== "object") throw new TypeError("PostgreSQL organization repository is invalid");
+  for (const method of methods) if (typeof repository[method] !== "function") throw new TypeError(`PostgreSQL organization repository is missing ${method}()`);
+}
+
+function page(records, limit, resource) {
+  if (records && !Array.isArray(records) && Array.isArray(records.items)) {
+    const items = records.items;
+    const next_cursor = records.next_cursor ?? null;
+    return boundedPage(items, limit, next_cursor, resource);
+  }
+  return boundedPage(records, limit, null, resource);
+}
+
+function boundedPage(records, limit, next_cursor, resource) {
+  if (!Array.isArray(records)) throw serviceError(ORGANIZATION_SERVICE_ERROR_CODES.UNAVAILABLE);
+  if (next_cursor !== null && (typeof next_cursor !== "string" || next_cursor.length < 1 || next_cursor.length > MAX_CURSOR_LENGTH || !CURSOR.test(next_cursor))) {
+    throw serviceError(ORGANIZATION_SERVICE_ERROR_CODES.UNAVAILABLE);
+  }
+  const items = records.slice(0, limit).map((record) => sanitize(record));
+  return Object.freeze({ items: Object.freeze(items), next_cursor });
+}
+
+function pagination(input) {
+  const limit = input.limit === undefined ? DEFAULT_PAGE_SIZE : input.limit;
+  if (!Number.isSafeInteger(limit) || limit < 1 || limit > MAX_PAGE_SIZE) throw serviceError(ORGANIZATION_SERVICE_ERROR_CODES.INVALID_INPUT);
+  const cursor = input.cursor;
+  if (cursor !== undefined && (typeof cursor !== "string" || cursor.length < 1 || cursor.length > MAX_CURSOR_LENGTH || !CURSOR.test(cursor))) {
+    throw serviceError(ORGANIZATION_SERVICE_ERROR_CODES.INVALID_INPUT);
+  }
+  return Object.freeze({ limit, ...(cursor === undefined ? {} : { cursor }) });
+}
+
+function requiredActor(input) {
+  const actor = input?.actor;
+  if (!actor || typeof actor !== "object" || Array.isArray(actor) || typeof actor.member_id !== "string" || typeof actor.organization_id !== "string" || !UUID.test(actor.member_id) || !UUID.test(actor.organization_id)) {
+    throw serviceError(ORGANIZATION_SERVICE_ERROR_CODES.INVALID_INPUT);
+  }
+  return actor;
+}
+
+function requiredOrganizationId(value) { return requiredUuid(value, "organization_id"); }
+function requiredMemberId(value) { return requiredUuid(value, "member_id"); }
+function requiredInvitationId(value) { return requiredUuid(value, "invitation_id"); }
+function requiredUuid(value, field) {
+  if (typeof value !== "string" || !UUID.test(value)) throw serviceError(ORGANIZATION_SERVICE_ERROR_CODES.INVALID_INPUT);
+  return value.toLowerCase();
+}
+
+function idempotencyKey(value) {
+  if (typeof value !== "string" || value.length > MAX_IDEMPOTENCY_KEY_LENGTH || !IDEMPOTENCY_KEY.test(value)) {
+    throw serviceError(ORGANIZATION_SERVICE_ERROR_CODES.INVALID_INPUT);
+  }
+  return value;
+}
+
+function requiredToken(value) {
+  if (typeof value !== "string" || !/^[A-Za-z0-9_-]{43,512}$/u.test(value)) throw serviceError(ORGANIZATION_SERVICE_ERROR_CODES.INVALID_INPUT);
+  return value;
+}
+
+function generateToken(randomBytes) {
+  let bytes;
+  try { bytes = randomBytes(32); }
+  catch (error) { throw error instanceof OrganizationServiceError ? error : serviceError(ORGANIZATION_SERVICE_ERROR_CODES.UNAVAILABLE); }
+  if (!Buffer.isBuffer(bytes) && !(bytes instanceof Uint8Array)) throw serviceError(ORGANIZATION_SERVICE_ERROR_CODES.UNAVAILABLE);
+  if (bytes.byteLength !== 32) throw serviceError(ORGANIZATION_SERVICE_ERROR_CODES.UNAVAILABLE);
+  return Buffer.from(bytes).toString("base64url");
+}
+
+function hashToken(value) { return createHash("sha256").update(value, "utf8").digest("hex"); }
+
+function generatedUuid(randomUUID) {
+  let value;
+  try { value = randomUUID(); }
+  catch (error) { throw error instanceof OrganizationServiceError ? error : serviceError(ORGANIZATION_SERVICE_ERROR_CODES.UNAVAILABLE); }
+  if (typeof value !== "string" || !UUID.test(value)) throw serviceError(ORGANIZATION_SERVICE_ERROR_CODES.UNAVAILABLE);
+  return value.toLowerCase();
+}
+
+function unwrapInvitation(result) {
+  let candidate = result;
+  if (result && typeof result === "object" && !Array.isArray(result)) candidate = result.invitation ?? result.record ?? result.result ?? result;
+  if (!candidate || typeof candidate !== "object" || Array.isArray(candidate)) return candidate;
+  const output = { ...candidate };
+  for (const field of ["replayed", "idempotency_replayed", "is_replay", "replay"]) delete output[field];
+  return output;
+}
+
+function isReplay(result) {
+  return Boolean(result && typeof result === "object" && (
+    result.replayed === true || result.idempotency_replayed === true || result.is_replay === true || result.replay === true
+  ));
+}
+
+function sanitize(value) {
+  if (Array.isArray(value)) return value.map(sanitize);
+  if (!value || typeof value !== "object") return value;
+  const result = {};
+  for (const [key, item] of Object.entries(value)) {
+    if (!SECRET_FIELDS.has(key)) result[key] = sanitize(item);
+  }
+  return result;
+}
+
+function mapRepositoryError(error) {
+  if (error instanceof OrganizationServiceError) return error;
+  const code = String(error?.code ?? error?.name ?? "").toLowerCase();
+  if (["invalid_input", "invalid_scope", "tenant_scope_error"].includes(code) || error instanceof TypeError) return serviceError(ORGANIZATION_SERVICE_ERROR_CODES.INVALID_INPUT);
+  if (["forbidden", "not_authorized", "owner_required", "cannot_remove_owner", "last_owner", "err_last_owner", "owner_constraint", "err_actor"].includes(code)) return serviceError(ORGANIZATION_SERVICE_ERROR_CODES.FORBIDDEN);
+  if (["version_conflict", "err_version_conflict", "expected_version_mismatch", "stale_version"].includes(code)) return serviceError(ORGANIZATION_SERVICE_ERROR_CODES.VERSION_CONFLICT);
+  if (["idempotency_conflict", "err_idempotency_conflict", "idempotency_key_reused"].includes(code)) return serviceError(ORGANIZATION_SERVICE_ERROR_CODES.IDEMPOTENCY_CONFLICT);
+  if (["invitation_replayed", "invitation_token_replayed", "token_replayed", "already_used", "invitation_expired"].includes(code)) return serviceError(ORGANIZATION_SERVICE_ERROR_CODES.INVITATION_REPLAYED);
+  if (["member_not_found", "membership_not_found"].includes(code)) return serviceError(ORGANIZATION_SERVICE_ERROR_CODES.MEMBER_NOT_FOUND);
+  if (["invitation_not_found"].includes(code)) return serviceError(ORGANIZATION_SERVICE_ERROR_CODES.INVITATION_NOT_FOUND);
+  if (["not_found", "organization_not_found", "resource_not_found", "tenant_not_found"].includes(code)) return serviceError(ORGANIZATION_SERVICE_ERROR_CODES.NOT_FOUND);
+  return serviceError(ORGANIZATION_SERVICE_ERROR_CODES.UNAVAILABLE);
+}
+
+function serviceError(code) { return new OrganizationServiceError(code); }
+
+export default createPostgresOrganizationService;
