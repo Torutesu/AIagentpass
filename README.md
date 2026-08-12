@@ -260,6 +260,8 @@ Protected native sessions require human presence only when `agentpass session st
 
 See [THREAT_MODEL.md](THREAT_MODEL.md) for the exact security boundary and remaining same-user limitations.
 
+The detailed delivery order, acceptance gates, external blockers, and production definition of done are maintained in [docs/IMPLEMENTATION_ROADMAP.md](docs/IMPLEMENTATION_ROADMAP.md).
+
 ## License
 
 MIT
