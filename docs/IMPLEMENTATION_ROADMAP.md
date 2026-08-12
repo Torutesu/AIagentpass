@@ -1,7 +1,7 @@
 # AgentPass implementation roadmap
 
 Status: active  
-Baseline: current `codex/agent-platform` branch
+Baseline: `ddb3f95` on `codex/agent-platform`
 Updated: 2026-08-12
 
 ## 1. Target outcome
@@ -42,8 +42,8 @@ Not yet production-complete:
 
 - setup can enroll the cloud device with a service-owned fixed Secure Enclave key, atomically provision root service trust, require an authenticated refresh, verify the exact editor entry and signed current commit, and complete its durable journal; physical-Mac E2E qualification remains open;
 - uninstall does not yet offer the separately confirmed current-user-state purge flow;
-- the Cloud API still uses a single-writer file store in its reference runtime;
-- Hash-only human sessions, immutable provider/subject membership resolution, an operator identity-binding CLI, PostgreSQL one-time WebAuthn registration/authentication ceremonies, maintained verifiers, Human API routing, Console BFF, Touch ID/passkey registration, and credential/session management UI are wired. Destructive credential/current-session actions consume an operation-bound recent WebAuthn authorization. The P1 Human organization, membership, and invitation contract is frozen in `contracts/openapi/human-v1.json`; its runtime invitation APIs, automated real-PostgreSQL multi-instance E2E, and recovery remain open;
+- the Cloud API reference control-plane runtime still uses a single-writer file store for device, policy, bundle, capability, and audit resources; the Human identity and organization paths now use PostgreSQL;
+- Hash-only human sessions, immutable provider/subject membership resolution, an operator identity-binding CLI, PostgreSQL one-time WebAuthn registration/authentication ceremonies, maintained verifiers, Human API routing, Console BFF, Touch ID/passkey registration, and credential/session management UI are wired. Destructive credential/current-session actions consume an operation-bound recent WebAuthn authorization. The P1 Human organization, membership, and invitation contract is frozen in `contracts/openapi/human-v1.json`; its PostgreSQL runtime APIs, durable idempotency, operation-bound recent authentication for role/removal operations, and automated real-PostgreSQL E2E are wired. Membership-triggered session/capability invalidation, exact cursor pagination, recovery, and browser organization administration UI remain open;
 - Device enrollment, root trust provisioning, and authenticated first refresh are connected; durable bundle ACK and the final physical-Mac E2E remain open;
 - Console screens still contain sample presentation state;
 - cloud signing keys are file-backed rather than KMS/HSM-backed;
@@ -199,7 +199,7 @@ Goal: eliminate the long-lived Console operator bearer-token model for hosted pr
 
 ### M3.2 Organization and roles
 
-- Implement owner/admin/auditor/member role matrix from the contract.
+- Implement owner/admin/auditor/viewer role matrix from the contract.
 - Support organization creation, invitation/acceptance, member listing, role change, removal, and last-owner protection.
 - Require expected resource version and idempotency key for every mutation.
 - Revoke affected sessions/capabilities when membership or role is removed.
@@ -223,6 +223,39 @@ M3 exit gate:
 - browser E2E covers signup/login, credential registration, expiry, logout, role denial, last-owner protection, high-risk reauth, cloned/replayed challenge denial, and session revocation;
 - no production Console route accepts the bootstrap owner bearer token;
 - authentication secrets and assertions are absent from logs and browser-readable storage.
+
+### M3.5 Immediate execution plan after `ddb3f95`
+
+The next work is split into reviewable slices. A later slice may depend on an earlier contract or repository change, but independent tests and Console work can proceed in parallel.
+
+| Order | Slice | Concrete implementation | Exit evidence |
+| --- | --- | --- | --- |
+| P1-A | Membership authority invalidation | In the same PostgreSQL transaction as role change/removal, revoke the affected member's organization sessions, invalidate organization-scoped capabilities that are no longer permitted, clear unconsumed recent-auth state, append one immutable admin-audit event, and enqueue one outbox event. Keep the final-owner check under the membership lock. | Real PostgreSQL tests prove the old cookie and capability fail immediately after commit, rollback restores all authority, another tenant is untouched, and concurrent owner changes preserve one owner. |
+| P1-B | Exact optimistic-conflict semantics | Distinguish absent/out-of-scope, stale `If-Match`, already-final state, last-owner protection, and idempotency-key reuse without disclosing cross-tenant existence. Map database constraint and zero-row outcomes to the frozen Human API error envelope. | Repository, service, HTTP, and real PostgreSQL tests assert exact status/code pairs and no audit/outbox write on failure. |
+| P1-C | Cursor pagination | Implement opaque signed-or-MACed cursors over immutable `(created_at, id)` ordering for organizations, members, invitations, credentials, sessions, and activity. Query `limit + 1`, emit `next_cursor` only when another row exists, reject malformed/cross-resource cursors, and preserve tenant predicates in the cursor query. | Forward traversal has no duplicate/omitted rows under concurrent inserts; tampered and cross-tenant cursors fail; every limit is bounded in OpenAPI, service, and SQL. |
+| P1-D | Organization Console | Add organization selection, organization creation/rename, member and invitation tables, role/removal/revoke actions, invitation acceptance, conflict refresh, and operation-specific WebAuthn prompts. Remove sample organization state and keep raw invitation tokens in memory only for the one-time reveal. | Browser tests cover owner/admin/auditor/viewer visibility, loading/empty/error/conflict states, one-time token display, recent-auth replay denial, keyboard flow, and no secret in storage/logs. |
+| P1-E | Hosted session boundary | Replace the Console's long-lived Cloud operator bearer-token dependency with browser human-session forwarding to the same-origin BFF. Rotate cookies after authentication and organization switch, bind the selected membership server-side, and enforce no-store/CSP/origin/CSRF consistently. | Production-mode tests prove browser bundles and responses contain no Cloud bearer token; fixation, stale role cookies, CSRF, origin spoofing, and cache replay fail. |
+| P1-F | Human recovery and abuse controls | Add owner recovery policy, bounded recovery codes or an explicitly documented offline recovery ceremony, login/ceremony rate limits in shared storage, concurrent-session limits, security notifications/outbox consumers, and emergency organization session revocation. | Recovery never bypasses recent-auth policy; consumed codes cannot replay; two instances share limits; emergency revocation invalidates all targeted sessions. |
+
+Implementation constraints for P1:
+
+1. P1-A and P1-B share the membership mutation transaction and are delivered together if separating them would create a temporary authorization gap.
+2. P1-C changes the response behavior but not the public schema shape; cursor encoding remains server-private and versioned so it can rotate.
+3. P1-D may build read-only screens against the frozen BFF while P1-A–C are underway, but destructive controls remain feature-gated until their server exit tests pass.
+4. P1-E is required before a hosted-production claim. The existing operator-token bridge remains evaluation-only until removed from production configuration.
+5. Every slice updates threat-model claims, OpenAPI/schema fixtures when applicable, unit tests, real PostgreSQL integration tests, and the security checklist in the same change.
+
+### M3.6 Definition of done for the Human/Organization track
+
+The track is complete only when all of the following are true:
+
+- two Cloud API instances pass concurrent role, invitation, idempotency, session-revocation, and pagination tests against PostgreSQL;
+- the last-owner invariant and authority invalidation are atomic under failure and concurrency;
+- no stale session, recent-auth authorization, or capability survives a membership reduction beyond the committing transaction;
+- the Console contains no sample organization/security state and no production bearer token;
+- Playwright runs with a virtual WebAuthn authenticator and covers the complete organization administration journey;
+- logs, traces, audit payloads, browser storage, error bodies, and support diagnostics contain no cookie, CSRF secret, assertion, invitation token, capability, or raw identity-provider token;
+- the authorization matrix is generated or checked against the frozen contract so HTTP, service, SQL, and UI permissions cannot drift.
 
 ## 8. Milestone M4 — Device API and macOS cloud enrollment
 
