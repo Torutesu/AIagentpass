@@ -31,7 +31,7 @@ async function fixture(t, apiOptions = {}) {
   const token = "ap_owner_token_abcdefghijklmnopqrstuvwxyz";
   const records = [createApiTokenRecord({ token, tokenId: "owner-token", organizationId: org, memberId: "owner-1", role: "owner" })];
   const bundleKeys = crypto.generateKeyPairSync("ed25519");
-  const server = createCloudApi({ store, tokenRecords: records, bundleSigner: { privateKey: bundleKeys.privateKey, issuer: "agentpass-cloud", keyId: "control-v1", ttlMs: 60_000, offlineTtlMs: 120_000 }, now: () => now, verifyRecentWebAuthn: async ({ proof, principal, organization_id }) => ({ verified: proof === "webauthn-proof-abcdefghijklmnopqrstuvwxyz", member_id: principal.member_id, organization_id, authenticated_at: now }), ...apiOptions });
+  const server = createCloudApi({ store, tokenRecords: records, bundleSigner: { privateKey: bundleKeys.privateKey, issuer: "agentpass-cloud", keyId: "control-v1", ttlMs: 60_000, offlineTtlMs: 120_000 }, now: () => now, verifyRecentWebAuthn: async ({ proof, principal, organization_id, operation }) => ({ verified: proof === "webauthn-proof-abcdefghijklmnopqrstuvwxyz", consumed: true, challenge_id: "99999999-9999-4999-8999-999999999999", member_id: principal.member_id, organization_id, operation, authenticated_at: now }), ...apiOptions });
   await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
   const base = `http://127.0.0.1:${server.address().port}`;
   t.after(async () => { await new Promise((resolve) => server.close(resolve)); await store.close(); await fs.rm(directory, { recursive: true, force: true }); });
@@ -98,6 +98,18 @@ test("admin issues a one-time enrollment and a macOS P-256 device completes it",
   const substituted = await fetch(`${f.base}${invitation.endpoint}`, { method: "POST", headers: enrollmentHeaders, body: JSON.stringify({ ...request, label: "Other Mac" }) });
   assert.equal(substituted.status, 401);
   assert.equal((await f.store.getDevice({ organizationId: org, deviceId: pendingDevice })).status, "active");
+});
+
+test("recent WebAuthn authorization is exact-operation bound and must be atomically consumed", async (t) => {
+  const f = await fixture(t, { verifyRecentWebAuthn: async ({ principal, organization_id }) => ({ verified: true, consumed: false, challenge_id: "99999999-9999-4999-8999-999999999999", member_id: principal.member_id, organization_id, operation: "organization.emergency_stop", authenticated_at: now }) });
+  const response = await fetch(`${f.base}/v1/organizations/${org}/device-enrollments`, {
+    method: "POST",
+    headers: { authorization: `Bearer ${f.token}`, "content-type": "application/json", "idempotency-key": "issue-device-enrollment-wrong-binding", "AgentPass-Recent-Auth": "webauthn-proof-abcdefghijklmnopqrstuvwxyz" },
+    body: JSON.stringify({ enrollment_id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaab", device_id: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbc", label: "Rejected Mac", platform: "macos", ttl_ms: 600_000 })
+  });
+  assert.equal(response.status, 401);
+  assert.equal((await response.json()).error.code, "recent_auth_failed");
+  assert.equal((await f.store.listDevices({ organizationId: org })).some((device) => device.device_id === "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbc"), false);
 });
 
 test("device routes verify the exact signed request and issue an audience-bound bundle", async (t) => {

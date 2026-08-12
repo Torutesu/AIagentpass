@@ -8,8 +8,11 @@ import { RateLimiterCapacityError, createRateLimiter } from "./rate-limit.mjs";
 const MAX_BODY_BYTES = 1024 * 1024;
 const UUID = "([0-9a-fA-F-]{36})";
 
-export function createCloudApi({ store, tokenRecords = [], bundleSigner, now = () => Date.now(), monotonicNow, replayCache = createReplayCache(), rateLimiter, admissionRateLimiter, verifyRecentWebAuthn } = {}) {
+export function createCloudApi({ store, tokenRecords = [], bundleSigner, now = () => Date.now(), monotonicNow, replayCache = createReplayCache(), rateLimiter, admissionRateLimiter, verifyRecentWebAuthn, recentAuthService } = {}) {
   if (!store) throw new TypeError("store is required");
+  if (verifyRecentWebAuthn !== undefined && recentAuthService !== undefined) throw new TypeError("configure verifyRecentWebAuthn or recentAuthService, not both");
+  const recentAuthVerifier = recentAuthService === undefined ? verifyRecentWebAuthn : recentAuthService?.authorize?.bind(recentAuthService);
+  if (recentAuthService !== undefined && typeof recentAuthVerifier !== "function") throw new TypeError("recentAuthService must expose authorize()");
   const limiter = rateLimiter ?? createRateLimiter({ now, ...(monotonicNow ? { monotonicNow } : {}) });
   const admission = admissionRateLimiter ?? createRateLimiter({ now, ...(monotonicNow ? { monotonicNow } : {}), human: { capacity: 30, refillPerSecond: 1 }, device: { capacity: 60, refillPerSecond: 2 } });
   if (!limiter || typeof limiter.acquire !== "function") throw new TypeError("rateLimiter must expose acquire()");
@@ -43,7 +46,7 @@ export function createCloudApi({ store, tokenRecords = [], bundleSigner, now = (
       } else {
         principal = authenticateApiToken(bearerToken(request.headers.authorization), tokenRecords);
         requireOrganizationRole(principal, organizationId, route.role);
-        if (route.recentAuth) await requireRecentWebAuthn({ verifier: verifyRecentWebAuthn, principal, proof: request.headers["agentpass-recent-auth"], organizationId, now: now() });
+        if (route.recentAuthOperation) await requireRecentWebAuthn({ verifier: recentAuthVerifier, principal, proof: request.headers["agentpass-recent-auth"], organizationId, operation: route.recentAuthOperation, now: now() });
       }
       let rateLimit;
       try {
@@ -70,7 +73,7 @@ export function createCloudApi({ store, tokenRecords = [], bundleSigner, now = (
   return server;
 
   function buildRoutes() {
-    const route = (method, pattern, role, handle, device = false, enrollment = false, recentAuth = false) => ({ method, pattern, role, handle, device, enrollment, recentAuth });
+    const route = (method, pattern, role, handle, device = false, enrollment = false, recentAuthOperation = undefined) => ({ method, pattern, role, handle, device, enrollment, recentAuthOperation });
     return [
       route("GET", new RegExp(`^/v1/organizations/(?<organizationId>${UUID})$`), "viewer", async ({ organizationId }) => ({ body: { organization: await store.getOrganization({ organizationId }) } })),
       route("GET", new RegExp(`^/v1/organizations/(?<organizationId>${UUID})/devices$`), "viewer", async ({ organizationId }) => ({ body: { devices: await store.listDevices({ organizationId }) } })),
@@ -84,7 +87,7 @@ export function createCloudApi({ store, tokenRecords = [], bundleSigner, now = (
         const enrollment = await store.createDeviceEnrollment({ organizationId, enrollmentId: body.enrollment_id, deviceId: body.device_id, label: body.label, platform: body.platform ?? "macos", credentialDigest: crypto.createHash("sha256").update(credential).digest("hex"), createdAt, expiresAt: new Date(now() + ttl).toISOString(), idempotencyKey });
         await store.appendAdminAuditEvent({ organizationId, eventType: "device.enrollment_issued", actorId: principal.member_id, targetType: "device", targetId: enrollment.device_id, details: { enrollment_id: enrollment.enrollment_id, expires_at: enrollment.expires_at }, idempotencyKey: `${idempotencyKey}:audit` });
         return { status: 201, body: { enrollment: { ...enrollment, credential, endpoint: `/v1/enrollments/${enrollment.enrollment_id}` } } };
-      }, false, false, true),
+      }, false, false, "device.enrollment.issue"),
       route("POST", new RegExp(`^/v1/enrollments/(?<enrollmentId>${UUID})$`), null, async ({ match, body, bodyBytes, request }) => {
         rejectUnknown(body, new Set(["version", "enrollment_id", "organization_id", "device_id", "label", "platform", "device_key"]), "device_enrollment");
         if (body.version !== 1 || body.enrollment_id !== match.enrollmentId || !body.device_key || typeof body.device_key !== "object" || Array.isArray(body.device_key)) throw apiError("invalid_enrollment", 400, "Device enrollment request is invalid");
@@ -215,7 +218,7 @@ export function createCloudApi({ store, tokenRecords = [], bundleSigner, now = (
         const revocation = await store.createRevocation({ organizationId, targetType: "organization", targetId: organizationId, reason: body.reason, idempotencyKey });
         await store.appendAdminAuditEvent({ organizationId, eventType: "organization.emergency_stop", actorId: principal.member_id, targetType: "organization", targetId: organizationId, idempotencyKey: `${idempotencyKey}:audit` });
         return { status: 201, body: { revocation } };
-      })
+      }, false, false, "organization.emergency_stop")
     ];
   }
 }
@@ -232,13 +235,14 @@ function idempotencyKey(request, route) {
   return value;
 }
 
-async function requireRecentWebAuthn({ verifier, principal, proof, organizationId, now }) {
+async function requireRecentWebAuthn({ verifier, principal, proof, organizationId, operation, now }) {
   if (typeof verifier !== "function") throw apiError("recent_auth_unavailable", 503, "Recent WebAuthn verification is unavailable");
   if (typeof proof !== "string" || proof.length < 32 || proof.length > 4096 || /[\u0000-\u001f\u007f]/.test(proof)) throw apiError("recent_auth_required", 401, "Recent WebAuthn authentication is required");
   let result;
-  try { result = await verifier({ proof, principal: { ...principal }, organization_id: organizationId, now }); }
+  try { result = await verifier({ proof, principal: { ...principal }, organization_id: organizationId, operation, now }); }
   catch { throw apiError("recent_auth_failed", 401, "Recent WebAuthn authentication failed"); }
-  if (!result || typeof result !== "object" || Array.isArray(result) || Object.keys(result).sort().join(",") !== ["authenticated_at", "member_id", "organization_id", "verified"].sort().join(",") || result.verified !== true || result.member_id !== principal.member_id || result.organization_id !== organizationId) {
+  const expectedKeys = ["authenticated_at", "challenge_id", "consumed", "member_id", "operation", "organization_id", "verified"];
+  if (!result || typeof result !== "object" || Array.isArray(result) || Object.keys(result).sort().join(",") !== expectedKeys.sort().join(",") || result.verified !== true || result.consumed !== true || result.member_id !== principal.member_id || result.organization_id !== organizationId || result.operation !== operation || typeof result.challenge_id !== "string" || !/^[0-9a-f-]{36}$/.test(result.challenge_id)) {
     throw apiError("recent_auth_failed", 401, "Recent WebAuthn authentication failed");
   }
   const authenticatedAt = typeof result.authenticated_at === "string" ? Date.parse(result.authenticated_at) : result.authenticated_at;

@@ -53,11 +53,18 @@ if (doctor.schema_version !== 1 || !["healthy", "action_required", "degraded", "
 if (!Array.isArray(doctor.checks) || doctor.checks.length === 0 || new Set(doctor.checks.map((item) => item.id)).size !== doctor.checks.length) fail("doctor report fixture checks are missing or duplicated");
 if (doctor.checks.length !== Object.values(doctor.summary ?? {}).reduce((total, value) => total + value, 0)) fail("doctor report fixture summary does not match its checks");
 
-const sql = fs.readFileSync(path.join(contracts, "postgres", "0001_control_plane.sql"), "utf8");
+const migrationNames = fs.readdirSync(path.join(contracts, "postgres")).filter((name) => /^\d{4}_[a-z0-9_]+\.sql$/.test(name)).sort();
+if (migrationNames.length < 1 || migrationNames.some((name, index) => Number(name.slice(0, 4)) !== index + 1)) fail("PostgreSQL migrations must be gap-free and ordered from 0001");
+const migrations = migrationNames.map((name) => ({ name, sql: fs.readFileSync(path.join(contracts, "postgres", name), "utf8") }));
+for (const migration of migrations) {
+  if (!migration.sql.trim().startsWith("BEGIN;") || !migration.sql.trim().endsWith("COMMIT;")) fail(`${migration.name} must be transactional`);
+  if (/\b(?:DROP\s+(?:TABLE|COLUMN)|TRUNCATE)\b/i.test(migration.sql)) fail(`${migration.name} contains a destructive statement`);
+}
+const sql = migrations[0].sql;
 for (const table of ["organizations", "memberships", "human_sessions", "webauthn_credentials", "devices", "device_enrollments", "agents", "policies", "revocations", "capabilities", "bundle_heads", "bundle_acknowledgements", "device_audit_events", "idempotency_records", "admin_audit_events"]) {
   if (!new RegExp(`CREATE TABLE ${table} \\(`).test(sql)) fail(`PostgreSQL migration is missing ${table}`);
 }
-if (!sql.trim().startsWith("BEGIN;") || !sql.trim().endsWith("COMMIT;")) fail("PostgreSQL migration must be transactional");
 if (!/FOREIGN KEY \(organization_id, device_id\)/.test(sql)) fail("PostgreSQL migration must enforce tenant-qualified device references");
+if (!/CREATE TABLE webauthn_challenges \(/.test(migrations.map((item) => item.sql).join("\n"))) fail("PostgreSQL migrations must persist one-time WebAuthn challenges");
 
-if (!process.exitCode) process.stdout.write(`validated ${schemaFiles.length} schemas, 2 OpenAPI documents, 3 fixtures, and 1 PostgreSQL migration\n`);
+if (!process.exitCode) process.stdout.write(`validated ${schemaFiles.length} schemas, 2 OpenAPI documents, 3 fixtures, and ${migrations.length} PostgreSQL migrations\n`);

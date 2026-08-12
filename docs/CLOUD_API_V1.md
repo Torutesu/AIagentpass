@@ -4,7 +4,7 @@ All endpoints are under `/v1`, accept and return JSON, reject unknown request fi
 
 ## Authentication
 
-- Human endpoints use a hashed bearer API token in the initial self-hosted release. Roles are `owner`, `admin`, `auditor`, and `viewer`. Issuing a device enrollment additionally requires a bounded `AgentPass-Recent-Auth` assertion accepted by the configured recent-WebAuthn verifier; the endpoint fails closed with `503` when that verifier is not configured. Durable WebAuthn ceremonies and production identity-provider sessions remain separate work.
+- Human endpoints use a hashed bearer API token only in the initial self-hosted compatibility runtime. Roles are `owner`, `admin`, `auditor`, and `viewer`. High-risk operations require `AgentPass-Recent-Auth` to identify a server-side WebAuthn challenge that was verified for the exact member, organization, and operation and atomically consumed; freshness alone is insufficient and replay fails. The endpoint fails closed with `503` when that verifier is not configured. Hosted production must use durable human sessions and the browser WebAuthn ceremony, never the bootstrap bearer token.
 - Device enrollment uses a one-time 256-bit credential plus a P-256/Ed25519 possession signature over `AgentPass-Enrollment-Proof-v1`, `POST`, the exact path, request-body SHA-256, and credential SHA-256. Only the credential digest is stored. Exact retries are idempotent; expiry, cross-tenant binding changes, key substitution, and consumed-request substitution fail closed.
 - Device endpoints use headers `AgentPass-Device`, `AgentPass-Timestamp`, `AgentPass-Nonce`, `AgentPass-Content-SHA256`, and `AgentPass-Signature`. Ed25519 or P-256/SHA-256 (64-byte IEEE P1363) binds the uppercase method, normalized path and query, body digest, timestamp, and nonce. P-256 is the macOS Secure Enclave profile; the enrolled device record pins the exact public key and therefore the algorithm. ControlBundle and Capability signing remains a separate Ed25519 trust root.
 - Mutating human requests require `Idempotency-Key`. Device audit events are intrinsically idempotent by `(device_id, event_id)`.
@@ -29,7 +29,7 @@ All endpoints are under `/v1`, accept and return JSON, reject unknown request fi
 | `/organizations/:org/bundles/:device` | GET | device | fetch signed effective policy/revocations |
 | `/organizations/:org/audit/events` | POST | device | append device audit events |
 | `/organizations/:org/audit/events` | GET | auditor | query redacted activity |
-| `/organizations/:org/emergency-stop` | POST | owner | publish organization-wide revocation |
+| `/organizations/:org/emergency-stop` | POST | owner + recent WebAuthn | publish organization-wide revocation |
 
 ## Tenant and concurrency rules
 

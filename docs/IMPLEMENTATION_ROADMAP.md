@@ -43,7 +43,7 @@ Not yet production-complete:
 - setup can enroll the cloud device with a service-owned fixed Secure Enclave key, atomically provision root service trust, require an authenticated refresh, verify the exact editor entry and signed current commit, and complete its durable journal; physical-Mac E2E qualification remains open;
 - uninstall does not yet offer the separately confirmed current-user-state purge flow;
 - the Cloud API still uses a single-writer file store in its reference runtime;
-- Human API sessions, organization membership management, and WebAuthn ceremonies are not connected to durable storage; high-risk enrollment issuance already fails closed behind a recent-WebAuthn verifier seam;
+- Hash-only human sessions, one-time operation-bound WebAuthn ceremonies, a maintained verifier adapter, ordered PostgreSQL migrations, and tenant-scoped repository primitives are implemented and tested; production runtime/Human API/Console wiring and real PostgreSQL multi-instance tests remain open;
 - Device enrollment, root trust provisioning, and authenticated first refresh are connected; durable bundle ACK and the final physical-Mac E2E remain open;
 - Console screens still contain sample presentation state;
 - cloud signing keys are file-backed rather than KMS/HSM-backed;
