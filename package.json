@@ -31,7 +31,7 @@
     "agentpass-mcp": "./adapters/mcp-server/bin/agentpass-mcp.mjs"
   },
   "scripts": {
-    "test": "node --test",
+    "test": "node --test test/*.test.mjs packages/*/test/*.test.mjs adapters/*/test/*.test.mjs apps/cloud-api/test/*.test.mjs",
     "test:native": "swift test --package-path native/macos",
     "test:native-app": "native/macos/scripts/test-app-bundle.sh",
     "release:validate": "node scripts/release/validate-version.mjs",
@@ -46,11 +46,11 @@
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/Torutesu/Agentpass.git"
+    "url": "git+https://github.com/Torutesu/AIagentpass.git"
   },
   "bugs": {
-    "url": "https://github.com/Torutesu/Agentpass/issues"
+    "url": "https://github.com/Torutesu/AIagentpass/issues"
   },
-  "homepage": "https://github.com/Torutesu/Agentpass#readme",
+  "homepage": "https://github.com/Torutesu/AIagentpass#readme",
   "license": "MIT"
 }
