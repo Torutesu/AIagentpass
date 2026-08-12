@@ -7,6 +7,7 @@ import { createPostgresAuditRepository } from "../../src/postgres/audit-reposito
 import { createMigrationRunner } from "../../src/postgres/migration-runner.mjs";
 
 const databaseUrl = process.env.AGENTPASS_TEST_DATABASE_URL;
+const TEST_PUBLIC_KEYS = [0, 1].map(() => crypto.generateKeyPairSync("ed25519").publicKey.export({ type: "spki", format: "pem" }).toString().trimEnd());
 
 test("PostgreSQL activity keyset traverses more than 500 rows without duplicates when a newer row is inserted", { skip: !databaseUrl }, async (t) => {
   const pool = new Pool({ connectionString: databaseUrl, max: 8 });
@@ -26,9 +27,9 @@ test("PostgreSQL activity keyset traverses more than 500 rows without duplicates
     VALUES ($1,$2,'Activity device','ed25519',$3,'active'),($1,$4,'Other device','ed25519',$5,'active')`, [
     organizationId,
     deviceId,
-    "-----BEGIN PUBLIC KEY-----\nACTIVITY\n-----END PUBLIC KEY-----",
+    TEST_PUBLIC_KEYS[0],
     otherDeviceId,
-    "-----BEGIN PUBLIC KEY-----\nOTHER\n-----END PUBLIC KEY-----"
+    TEST_PUBLIC_KEYS[1]
   ]);
 
   const initial = [];

@@ -10,7 +10,7 @@ import { createMigrationRunner } from "../../src/postgres/migration-runner.mjs";
 import { createRefreshNonceCodec } from "../../src/postgres/refresh-nonce-codec.mjs";
 
 const { Pool } = pg;
-const databaseUrl = process.env.AGENTPASS_TEST_POSTGRES_URL;
+const databaseUrl = process.env.AGENTPASS_TEST_DATABASE_URL ?? process.env.AGENTPASS_TEST_POSTGRES_URL;
 const workerUrl = new URL("./g4-1-process-kill-worker.mjs", import.meta.url);
 const repositoryRoot = fileURLToPath(new URL("../../../../", import.meta.url));
 const TEST_TIMEOUT_MS = 25_000;

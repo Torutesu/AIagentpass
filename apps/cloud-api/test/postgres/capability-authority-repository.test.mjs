@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { randomUUID } from "node:crypto";
+import { generateKeyPairSync, randomUUID } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
 
@@ -20,6 +20,7 @@ const ids = {
 const NOW = "2026-08-12T00:00:00.000Z";
 const EXPIRES = "2026-08-12T00:15:00.000Z";
 const HASH = "a".repeat(64);
+const TEST_PUBLIC_KEY = generateKeyPairSync("ed25519").publicKey.export({ type: "spki", format: "pem" }).toString().trimEnd();
 
 class FakeClient {
   constructor({ membership = { member_id: ids.member, role: "admin", version: 7 }, capabilities = [], existingCapability = undefined } = {}) {
@@ -273,8 +274,8 @@ test("real PostgreSQL capability authority behavior is exercised when AGENTPASS_
     await pool.query("INSERT INTO organizations (id,name) VALUES ($1,'Capability authority test')", [real.organization]);
     await pool.query("INSERT INTO members (id,github_subject) VALUES ($1,$2)", [real.member, `capability-${real.member}`]);
     await pool.query("INSERT INTO memberships (organization_id,id,member_id,role,status) VALUES ($1,$2,$3,'admin','active')", [real.organization, real.membership, real.member]);
-    await pool.query("INSERT INTO devices (organization_id,id,label,key_algorithm,status,public_key_pem) VALUES ($1,$2,'Test device','ed25519','active',$3)", [real.organization, real.device, "-----BEGIN PUBLIC KEY-----\nTEST\n-----END PUBLIC KEY-----"]);
-    await pool.query("INSERT INTO agents (organization_id,id,device_id,kind,name,public_key_pem,status) VALUES ($1,$2,$3,'cli','Test agent',$4,'active')", [real.organization, real.agent, real.device, "-----BEGIN PUBLIC KEY-----\nAGENT\n-----END PUBLIC KEY-----"]);
+    await pool.query("INSERT INTO devices (organization_id,id,label,key_algorithm,status,public_key_pem) VALUES ($1,$2,'Test device','ed25519','active',$3)", [real.organization, real.device, TEST_PUBLIC_KEY]);
+    await pool.query("INSERT INTO agents (organization_id,id,device_id,kind,name,public_key_pem,status) VALUES ($1,$2,$3,'cli','Test agent',$4,'active')", [real.organization, real.agent, real.device, TEST_PUBLIC_KEY]);
     await assert.rejects(
       pool.query("INSERT INTO capabilities (organization_id,id,agent_id,device_id,sequence,statement_hash,expires_at) VALUES ($1,$2,$3,$4,1,$5,$6)", [real.organization, real.capability, real.agent, real.device, HASH, EXPIRES]),
       (error) => error.code === "23514" && error.constraint === "capabilities_active_membership_authority_complete"

@@ -16,7 +16,7 @@ import { createMigrationRunner } from "../../src/postgres/migration-runner.mjs";
 import { createRefreshNonceCodec } from "../../src/postgres/refresh-nonce-codec.mjs";
 
 const { Pool } = pg;
-const databaseUrl = process.env.AGENTPASS_TEST_POSTGRES_URL;
+const databaseUrl = process.env.AGENTPASS_TEST_DATABASE_URL ?? process.env.AGENTPASS_TEST_POSTGRES_URL;
 const ATTEMPTS = 100;
 const HALF_ORDER = Buffer.from("7fffffff800000007fffffffffffffffde737d56d38bcf4279dce5617e3192a8", "hex");
 

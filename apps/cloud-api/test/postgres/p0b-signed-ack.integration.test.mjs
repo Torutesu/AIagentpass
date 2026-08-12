@@ -63,7 +63,7 @@ test("P0-B: manual wake to signed P-256 ACK produces a synced Console read model
       authorization: `Bearer ${fixture.token}`,
       "content-type": "application/json",
       "idempotency-key": "p0b-manual-wake-0001",
-      "agentpass-recent-auth": "p0b-recent-auth-proof"
+      "agentpass-recent-auth": "webauthn-proof-abcdefghijklmnopqrstuvwxyz"
     },
     body: "{}"
   });
@@ -118,7 +118,7 @@ test("P0-B: manual wake to signed P-256 ACK produces a synced Console read model
     sequence: Number(bundleStatement.sequence),
     statementHash: bundleStatement.statement_hash,
     nonce: hint.nonce,
-    observedAt: nowIso
+    observedAt: new Date().toISOString()
   });
   const ackBody = Buffer.from(JSON.stringify(ack));
   const ackPath = `/v1/organizations/${ids.organization}/bundles/${ids.deviceA}/acknowledgements`;
@@ -144,7 +144,7 @@ test("P0-B: manual wake to signed P-256 ACK produces a synced Console read model
     nonce: hint.nonce,
     result: "blocked",
     reasonCode: "bundle_expired",
-    observedAt: nowIso
+    observedAt: ack.observed_at
   });
   const conflict = await deviceFetch({ base, path: ackPath, method: "POST", body: Buffer.from(JSON.stringify(conflictingAck)), privateKey: keys.deviceA.privateKey, deviceId: ids.deviceA, timestamp: nowMs, nonce: "p0b-ack-conflict-abcdefghijklmnopqrstuvwxyz-0001" });
   const conflictBody = await json(conflict.response);
@@ -229,14 +229,10 @@ async function createFixture(t) {
   };
   const publicA = keys.deviceA.publicKey.export({ type: "spki", format: "pem" }).toString().trimEnd();
   const publicB = keys.deviceB.publicKey.export({ type: "spki", format: "pem" }).toString().trimEnd();
-  const nowMs = Date.now();
-  const nowIso = new Date(nowMs).toISOString();
   const nonceCodec = createRefreshNonceCodec({ keys: { "refresh-nonce-v1": Buffer.alloc(32, 0x51) }, activeKeyId: "refresh-nonce-v1" });
-  const authority = createControlPlaneAuthorityRepository({ client: pool, cursorSecret: Buffer.alloc(32, 0x52), refreshNonceCodec: nonceCodec, now: () => new Date().toISOString() });
   const bundleKeys = crypto.generateKeyPairSync("ed25519");
   const refreshHintKeys = crypto.generateKeyPairSync("ed25519");
   const refreshSigner = createEd25519RefreshHintSigner({ privateKey: refreshHintKeys.privateKey, keyId: "p0b-refresh-v1" });
-  const refreshHintService = createRefreshHintService({ source: authority, nonceDeriver: nonceCodec, signer: refreshSigner, now: () => Date.now() });
   const token = "ap_p0b_owner_token_abcdefghijklmnopqrstuvwxyz";
   const tokenRecords = [createApiTokenRecord({ token, tokenId: "p0b-owner", organizationId: ids.organization, memberId: ids.owner, role: "owner" })];
 
@@ -256,6 +252,13 @@ async function createFixture(t) {
   await pool.query(`INSERT INTO policies (organization_id,id,sequence,name,scope_json,status,created_by)
     VALUES ($1,$2,1,'default',$3::jsonb,'active',$4)`, [ids.organization, ids.policy, JSON.stringify({ operations: ["git.commit.sign"], repositories: ["/work/repo"], branches: { allow: ["main"], deny: [] }, remotes: { allow: ["origin"], deny: [] } }), ids.owner]);
 
+  // Capture the test clock only after the organization insert initialized the
+  // first authority generation. Backdating the next generation by even a few
+  // milliseconds correctly violates the database's monotonic-time invariant.
+  const nowMs = Date.now();
+  const nowIso = new Date(nowMs).toISOString();
+  const authority = createControlPlaneAuthorityRepository({ client: pool, cursorSecret: Buffer.alloc(32, 0x52), refreshNonceCodec: nonceCodec, now: () => new Date().toISOString() });
+  const refreshHintService = createRefreshHintService({ source: authority, nonceDeriver: nonceCodec, signer: refreshSigner, now: () => Date.now() });
   const store = createPostgresControlPlaneStore({ client: pool, cursorSecret: Buffer.alloc(32, 0x53), refreshNonceCodec: nonceCodec, now: () => new Date().toISOString() });
   const server = createCloudApi({
     store,
@@ -264,8 +267,8 @@ async function createFixture(t) {
     refreshHintService,
     now: () => nowMs,
     verifyRecentWebAuthn: async ({ proof, operation, principal, organization_id }) => ({
-      verified: proof === "p0b-recent-auth-proof",
-      consumed: proof === "p0b-recent-auth-proof",
+      verified: proof === "webauthn-proof-abcdefghijklmnopqrstuvwxyz",
+      consumed: proof === "webauthn-proof-abcdefghijklmnopqrstuvwxyz",
       challenge_id: "99999999-9999-4999-8999-999999999999",
       member_id: principal.member_id,
       organization_id,

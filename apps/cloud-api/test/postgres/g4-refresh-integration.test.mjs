@@ -22,7 +22,7 @@ import { createPostgresAdminAuditRepository } from "../../src/postgres/admin-aud
 import { createAuthorityReductionAuditAppender } from "../../src/postgres/authority-reduction-audit.mjs";
 
 const { Pool } = pg;
-const databaseUrl = process.env.AGENTPASS_TEST_POSTGRES_URL;
+const databaseUrl = process.env.AGENTPASS_TEST_DATABASE_URL ?? process.env.AGENTPASS_TEST_POSTGRES_URL;
 const HALF_ORDER = Buffer.from("7fffffff800000007fffffffffffffffde737d56d38bcf4279dce5617e3192a8", "hex");
 
 test("G4 refresh generation, failover reconstruction, and signed ACK are race-safe on PostgreSQL 17", { skip: !databaseUrl, timeout: 15_000 }, async (t) => {

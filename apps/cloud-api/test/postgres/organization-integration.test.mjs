@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { randomUUID } from "node:crypto";
+import { generateKeyPairSync, randomUUID } from "node:crypto";
 import test from "node:test";
 import { Pool } from "pg";
 
@@ -23,6 +23,7 @@ const removeChallengeId = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
 const paginationInvitationId = "dddddddd-dddd-4ddd-8ddd-dddddddddddd";
 const deviceId = "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee";
 const agentId = "ffffffff-ffff-4fff-8fff-ffffffffffff";
+const TEST_PUBLIC_KEY = generateKeyPairSync("ed25519").publicKey.export({ type: "spki", format: "pem" }).toString().trimEnd();
 
 test("Organization P1 is atomic and replay-safe across real PostgreSQL connections", { skip: !databaseUrl }, async (t) => {
   const pool = new Pool({ connectionString: databaseUrl, max: 8 });
@@ -105,9 +106,9 @@ test("Organization P1 is atomic and replay-safe across real PostgreSQL connectio
   assert.equal(new Set([...firstInvitationPage.items, ...secondInvitationPage.items].map((item) => item.invitation_id)).size, 2);
 
   await pool.query(`INSERT INTO devices (organization_id,id,label,key_algorithm,status,public_key_pem)
-    VALUES ($1,$2,'Integration device','ed25519','active',$3)`, [organizationId, deviceId, "-----BEGIN PUBLIC KEY-----\nDEVICE\n-----END PUBLIC KEY-----"]);
+    VALUES ($1,$2,'Integration device','ed25519','active',$3)`, [organizationId, deviceId, TEST_PUBLIC_KEY]);
   await pool.query(`INSERT INTO agents (organization_id,id,device_id,kind,name,public_key_pem,status)
-    VALUES ($1,$2,$3,'cli','Integration agent',$4,'active')`, [organizationId, agentId, deviceId, "-----BEGIN PUBLIC KEY-----\nAGENT\n-----END PUBLIC KEY-----"]);
+    VALUES ($1,$2,$3,'cli','Integration agent',$4,'active')`, [organizationId, agentId, deviceId, TEST_PUBLIC_KEY]);
   await pool.query(`INSERT INTO capabilities
     (organization_id,id,agent_id,device_id,sequence,statement_hash,expires_at,issued_by_member_id,issued_membership_version)
     VALUES ($1,$2,$3,$4,1,$5,$6,$7,$8),($1,$9,$3,$4,2,$10,$6,$11,1)`, [

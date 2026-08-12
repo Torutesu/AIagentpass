@@ -9,7 +9,7 @@ import { createMigrationRunner } from "../../src/postgres/migration-runner.mjs";
 import { createRefreshNonceCodec } from "../../src/postgres/refresh-nonce-codec.mjs";
 
 const { Pool } = pg;
-const databaseUrl = process.env.AGENTPASS_TEST_POSTGRES_URL;
+const databaseUrl = process.env.AGENTPASS_TEST_DATABASE_URL ?? process.env.AGENTPASS_TEST_POSTGRES_URL;
 const TENANT_COUNT = 6;
 const REDUCTIONS_PER_TENANT = 12;
 const DEVICES_PER_TENANT = 2;

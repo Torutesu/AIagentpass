@@ -33,7 +33,40 @@ jobs:
       - name: Run real PostgreSQL authority and signed-session E2E
         env:
           AGENTPASS_TEST_DATABASE_URL: postgresql://postgres:agentpass-integration@127.0.0.1:5432/postgres
-        run: node --test apps/cloud-api/test/postgres/organization-integration.test.mjs apps/cloud-api/test/postgres/capability-authority-repository.test.mjs apps/cloud-api/test/postgres/human-management-pagination-integration.test.mjs apps/cloud-api/test/postgres/signed-console-replay-integration.test.mjs apps/cloud-api/test/postgres/signed-session-bootstrap-integration.test.mjs apps/cloud-api/test/postgres/audit-pagination-integration.test.mjs
+        run: >-
+          node --test
+          apps/cloud-api/test/postgres/organization-integration.test.mjs
+          apps/cloud-api/test/postgres/capability-authority-repository.test.mjs
+          apps/cloud-api/test/postgres/human-management-pagination-integration.test.mjs
+          apps/cloud-api/test/postgres/signed-console-replay-integration.test.mjs
+          apps/cloud-api/test/postgres/signed-session-bootstrap-integration.test.mjs
+          apps/cloud-api/test/postgres/audit-pagination-integration.test.mjs
+      - name: Run real PostgreSQL refresh race, ACK, and nonce-rotation tests
+        env:
+          AGENTPASS_TEST_DATABASE_URL: postgresql://postgres:agentpass-integration@127.0.0.1:5432/postgres
+        run: npm run test:postgres:g4
+
+  browser-e2e:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: apps/web-console/package-lock.json
+      - run: npm ci --prefix apps/web-console
+      - name: Install Chromium and OS dependencies
+        run: npx playwright install --with-deps chromium
+        working-directory: apps/web-console
+      - name: Run WebAuthn, role, device-state, and wake browser E2E
+        run: npm run e2e
+        working-directory: apps/web-console
+      - name: Reject sensitive browser artifacts
+        if: always()
+        env:
+          AGENTPASS_E2E_ARTIFACT_DIR: ${{ github.workspace }}/apps/web-console/e2e/test-results
+        run: node --test test/p0b-artifact-security.test.mjs
 
   test:
     runs-on: macos-latest

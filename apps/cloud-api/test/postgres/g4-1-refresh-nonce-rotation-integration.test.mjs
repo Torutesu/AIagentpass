@@ -11,7 +11,7 @@ import { createRefreshNonceCodec } from "../../src/postgres/refresh-nonce-codec.
 import { createEd25519RefreshHintSigner } from "../../src/refresh-hint-signer.mjs";
 
 const { Pool } = pg;
-const databaseUrl = process.env.AGENTPASS_TEST_POSTGRES_URL;
+const databaseUrl = process.env.AGENTPASS_TEST_DATABASE_URL ?? process.env.AGENTPASS_TEST_POSTGRES_URL;
 const OLD_KEY_ID = "refresh-nonce-v1";
 const NEW_KEY_ID = "refresh-nonce-v3";
 const OLD_KEY = Buffer.alloc(32, 0x51);

@@ -478,7 +478,7 @@ function deviceDate(value?: string): string {
   if (!value) return "未取得";
   const parsed = new Date(value);
   if (Number.isNaN(parsed.getTime())) return "日時不明";
-  return new Intl.DateTimeFormat("ja-JP", { dateStyle: "medium", timeStyle: "short" }).format(parsed);
+  return new Intl.DateTimeFormat("ja-JP", { dateStyle: "medium", timeStyle: "short", timeZone: "Asia/Tokyo" }).format(parsed);
 }
 
 function DeviceStateCard({ device, onRequestRefresh }: { device: AgentPassInitialData["devices"][number]; onRequestRefresh: (deviceId: string) => Promise<DeviceRefreshRequestStatus> }) {
@@ -806,7 +806,7 @@ function securityErrorMessage(error: unknown): string {
 function securityDate(value: string): string {
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return "日時不明";
-  return new Intl.DateTimeFormat("ja-JP", { dateStyle: "medium", timeStyle: "short" }).format(date);
+  return new Intl.DateTimeFormat("ja-JP", { dateStyle: "medium", timeStyle: "short", timeZone: "Asia/Tokyo" }).format(date);
 }
 
 function PasskeyRow({ passkey, actionKey, confirmKey, onRename, onRevoke, onCancelRevoke, onConfirmRevoke }: { passkey: SecurityPasskey; actionKey: string; confirmKey: string | null; onRename: () => void; onRevoke: () => void; onCancelRevoke: () => void; onConfirmRevoke: () => void }) {

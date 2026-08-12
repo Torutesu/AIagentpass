@@ -61,9 +61,9 @@ class FakeClient {
       observed_generation: "6",
       refresh_state: "blocked",
       current_bundle_sequence: "12",
-      current_bundle_expires_at: EXPIRES,
-      last_ack_observed_at: NOW,
-      last_ack_received_at: NOW,
+      current_bundle_expires_at: new Date(EXPIRES),
+      last_ack_observed_at: new Date(NOW),
+      last_ack_received_at: new Date(NOW),
       blocked_reason: "bundle_signature_invalid"
     })]);
     if (text.startsWith("SELECT devices.organization_id,devices.id,devices.label,devices.key_algorithm")) return result([this.deviceAuthRow ?? deviceRow()]);

@@ -357,5 +357,5 @@ function parseDateTimeLocal(value: string): string | undefined {
 
 function formatDate(value: string): string {
   const date = new Date(value);
-  return Number.isFinite(date.getTime()) ? date.toLocaleString("ja-JP") : value;
+  return Number.isFinite(date.getTime()) ? date.toLocaleString("ja-JP", { timeZone: "Asia/Tokyo" }) : value;
 }

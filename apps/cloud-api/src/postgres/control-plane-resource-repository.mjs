@@ -575,9 +575,9 @@ function mapDeviceReadModel(row) {
     observed_generation: row.observed_generation,
     refresh_state: row.refresh_state ?? (row.status === "revoked" ? "revoked" : "offline"),
     current_bundle_sequence: row.current_bundle_sequence,
-    current_bundle_expires_at: row.current_bundle_expires_at,
-    last_ack_observed_at: row.last_ack_observed_at,
-    last_ack_received_at: row.last_ack_received_at,
+    current_bundle_expires_at: nullableStoredTimestamp(row.current_bundle_expires_at, "current_bundle_expires_at"),
+    last_ack_observed_at: nullableStoredTimestamp(row.last_ack_observed_at, "last_ack_observed_at"),
+    last_ack_received_at: nullableStoredTimestamp(row.last_ack_received_at, "last_ack_received_at"),
     blocked_reason: row.blocked_reason
   });
 }
@@ -749,6 +749,7 @@ function sequenceValue(value, label) { const result = typeof value === "string" 
 function requiredVersion(value) { if (!Number.isSafeInteger(value) || value < 1) throw new ControlPlaneResourceRepositoryError("ERR_VERSION_REQUIRED", "expectedVersion must be a positive safe integer"); return value; }
 function safeInteger(value, label) { const number = typeof value === "string" ? Number(value) : value; if (!Number.isSafeInteger(number) || number < 1) throw new ControlPlaneResourceRepositoryError("ERR_DATABASE", `stored ${label} is invalid`); return number; }
 function timestamp(value, label) { if (value instanceof Date) value = value.toISOString(); if (typeof value !== "string" || !RFC3339_UTC.test(value) || !Number.isFinite(Date.parse(value))) throw new ControlPlaneResourceRepositoryError("ERR_INVALID_INPUT", `${label} must be a valid RFC 3339 UTC value`); return new Date(value).toISOString(); }
+function nullableStoredTimestamp(value, label) { return value === null || value === undefined ? null : timestamp(value, label); }
 function dateValue(value) { return Date.parse(value instanceof Date ? value.toISOString() : value); }
 function sha256(value, label) { const result = text(value, label, 64, true); if (!SHA256.test(result)) throw new ControlPlaneResourceRepositoryError("ERR_INVALID_INPUT", `${label} must be SHA-256 hex`); return result.toLowerCase(); }
 function sha256Hex(value) { return crypto.createHash("sha256").update(canonicalJson(value), "utf8").digest("hex"); }

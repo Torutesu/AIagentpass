@@ -63,12 +63,22 @@ export async function scanP0BArtifactDirectory(root) {
       let stat;
       try { stat = await fs.stat(absolute); }
       catch { findings.push({ code: "io_error", path: relative }); continue; }
+      if (stat.nlink !== 1) {
+        findings.push({ code: "hardlink", path: relative });
+        continue;
+      }
       if (stat.size > MAX_FILE_BYTES) {
         findings.push({ code: "file_size", path: relative });
         continue;
       }
       const extension = path.extname(entry.name).toLowerCase();
-      if (!SCANNED_EXTENSIONS.has(extension)) continue;
+      if (!SCANNED_EXTENSIONS.has(extension)) {
+        // Archives and unknown binary formats cannot be proven free of nested
+        // cookies, traces, keys, or request bodies without format-specific
+        // parsing. Refuse them instead of silently declaring them safe.
+        findings.push({ code: "unsupported_file", path: relative });
+        continue;
+      }
       let bytes;
       try { bytes = await fs.readFile(absolute); }
       catch { findings.push({ code: "io_error", path: relative }); continue; }
@@ -116,6 +126,21 @@ test("P0-B artifact scanner fails closed on symlink artifacts", async (t) => {
   await fs.symlink("/tmp", path.join(directory, "linked"));
   const findings = await scanP0BArtifactDirectory(directory);
   assert.deepEqual(findings, [{ code: "symlink", path: "linked" }]);
+});
+
+test("P0-B artifact scanner fails closed on hardlinks and unparsed archives", async (t) => {
+  const directory = await fs.mkdtemp(path.join("/tmp", "agentpass-p0b-artifacts-"));
+  t.after(() => fs.rm(directory, { recursive: true, force: true }));
+  const original = path.join(directory, "original.log");
+  await fs.writeFile(original, "safe diagnostic");
+  await fs.link(original, path.join(directory, "alias.log"));
+  await fs.writeFile(path.join(directory, "trace.zip"), "opaque archive");
+  const findings = await scanP0BArtifactDirectory(directory);
+  assert.deepEqual(findings, [
+    { code: "hardlink", path: "alias.log" },
+    { code: "hardlink", path: "original.log" },
+    { code: "unsupported_file", path: "trace.zip" }
+  ]);
 });
 
 function safeFindingMessage(findings) {
