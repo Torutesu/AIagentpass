@@ -16,12 +16,14 @@ function files() {
   const dataDir = path.join(root, "data");
   const tokenRecordsPath = path.join(root, "tokens.json");
   const bundlePrivateKeyPath = path.join(root, "bundle.pem");
+  const identityPublicKeyPath = path.join(root, "identity-public.pem");
   const token = generateApiToken();
   const records = [createApiTokenRecord({ token, organizationId: crypto.randomUUID(), memberId: crypto.randomUUID(), role: "owner" })];
   const keys = crypto.generateKeyPairSync("ed25519");
   fs.writeFileSync(tokenRecordsPath, JSON.stringify(records), { mode: 0o600 });
   fs.writeFileSync(bundlePrivateKeyPath, keys.privateKey.export({ type: "pkcs8", format: "pem" }), { mode: 0o600 });
-  return { root, env: { AGENTPASS_CLOUD_DATA_DIR: dataDir, AGENTPASS_CLOUD_TOKEN_RECORDS_PATH: tokenRecordsPath, AGENTPASS_CLOUD_BUNDLE_PRIVATE_KEY_PATH: bundlePrivateKeyPath, AGENTPASS_CLOUD_PORT: "0" } };
+  fs.writeFileSync(identityPublicKeyPath, keys.publicKey.export({ type: "spki", format: "pem" }), { mode: 0o600 });
+  return { root, env: { AGENTPASS_CLOUD_DATA_DIR: dataDir, AGENTPASS_CLOUD_TOKEN_RECORDS_PATH: tokenRecordsPath, AGENTPASS_CLOUD_BUNDLE_PRIVATE_KEY_PATH: bundlePrivateKeyPath, AGENTPASS_CLOUD_PORT: "0", AGENTPASS_IDENTITY_ASSERTION_ISSUER: "agentpass-console", AGENTPASS_IDENTITY_ASSERTION_AUDIENCE: "agentpass-cloud-session", AGENTPASS_IDENTITY_ASSERTION_KID: "console-2026-08", AGENTPASS_IDENTITY_ASSERTION_PUBLIC_KEY_PATH: identityPublicKeyPath } };
 }
 
 test("production runtime starts from protected files and closes idempotently", async (t) => {
@@ -55,10 +57,16 @@ test("production human auth is composed from PostgreSQL and closed with the runt
   const calls = [];
   const postgresRuntime = { pool: {}, humanRepository: {}, capabilityAuthorityRepository: { async issueCapabilityMetadata() {}, async listRevokedCapabilityIds() { return []; } }, async close() { calls.push("postgres-close"); } };
   const recentAuthService = { async authorize() { return { verified: false }; } };
-  const runtime = await createCloudRuntime({ env, logger: { info() {} }, postgresFactory: async (input) => { calls.push(["postgres", input.applicationVersion]); return postgresRuntime; }, humanAuthFactory: (input) => { calls.push(["human", input.origin, input.rpId, input.cursorSecret]); return { api: { async handle() { return { status: 404, body: { error: { code: "not_found", message: "Resource not found" } }, headers: {} }; } }, recentAuthService }; } });
+  const humanSession = { async authenticateRequest() { return { session: {} }; } };
+  const runtime = await createCloudRuntime({ env, logger: { info() {} }, postgresFactory: async (input) => { calls.push(["postgres", input.applicationVersion]); return postgresRuntime; }, humanAuthFactory: (input) => { calls.push(["human", input.origin, input.rpId, input.cursorSecret, input.signedConsoleIdentity]); return { api: { async handle() { return { status: 404, body: { error: { code: "not_found", message: "Resource not found" } }, headers: {} }; } }, humanSession, recentAuthService }; } });
   assert.equal(runtime.postgresRuntime, postgresRuntime);
   assert.equal(runtime.humanAuthRuntime.recentAuthService, recentAuthService);
-  assert.deepEqual(calls.slice(0, 2), [["postgres", "0.18.0"], ["human", "https://console.example.test", "example.test", CURSOR_SECRET]]);
+  assert.deepEqual(calls[0], ["postgres", "0.18.0"]);
+  assert.deepEqual(calls[1].slice(0, 4), ["human", "https://console.example.test", "example.test", CURSOR_SECRET]);
+  assert.equal(calls[1][4].issuer, "agentpass-console");
+  assert.equal(calls[1][4].audience, "agentpass-cloud-session");
+  assert.equal(calls[1][4].keyId, "console-2026-08");
+  assert.match(calls[1][4].publicKey, /BEGIN PUBLIC KEY/);
   assert.equal(Object.hasOwn(runtime.config.humanAuth, "cursorSecret"), false);
   assert.equal(JSON.stringify(runtime.config).includes(CURSOR_SECRET), false);
   await runtime.close();

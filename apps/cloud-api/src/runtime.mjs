@@ -19,8 +19,11 @@ export async function createCloudRuntime({ env = process.env, logger = console, 
   let privateKey;
   try { privateKey = crypto.createPrivateKey(privateKeyPEM); } catch { throw new Error("Cloud bundle private key is invalid"); }
   if (privateKey.asymmetricKeyType !== "ed25519") throw new Error("Cloud bundle private key must be Ed25519");
-  const store = await createCloudStore({ dataDir: config.dataDir });
   const cursorSecret = config.humanAuth ? requireHumanCursorSecret(env.AGENTPASS_HUMAN_CURSOR_SECRET) : undefined;
+  const consoleIdentityPublicKey = config.humanAuth
+    ? readProtectedFile(config.humanAuth.identityAssertionPublicKeyPath, "console identity public key", 16 * 1024).toString("utf8")
+    : undefined;
+  const store = await createCloudStore({ dataDir: config.dataDir });
   let postgresRuntime;
   let humanAuthRuntime;
   let server;
@@ -32,7 +35,20 @@ export async function createCloudRuntime({ env = process.env, logger = console, 
         || typeof postgresRuntime.capabilityAuthorityRepository.listRevokedCapabilityIds !== "function") {
         throw new Error("PostgreSQL capability authority is unavailable");
       }
-      humanAuthRuntime = humanAuthFactory({ postgresRuntime, tokenRecords, origin: config.humanAuth.origin, rpId: config.humanAuth.rpId, cursorSecret, identityProvider: config.humanAuth.identityProvider });
+      humanAuthRuntime = humanAuthFactory({
+        postgresRuntime,
+        tokenRecords,
+        origin: config.humanAuth.origin,
+        rpId: config.humanAuth.rpId,
+        cursorSecret,
+        identityProvider: config.humanAuth.identityProvider,
+        signedConsoleIdentity: {
+          issuer: config.humanAuth.identityAssertionIssuer,
+          audience: config.humanAuth.identityAssertionAudience,
+          keyId: config.humanAuth.identityAssertionKeyId,
+          publicKey: consoleIdentityPublicKey
+        }
+      });
     }
     server = createCloudApi({
       store,
@@ -41,7 +57,7 @@ export async function createCloudRuntime({ env = process.env, logger = console, 
       rateLimiter: createRateLimiter({ persistencePath: path.join(config.dataDir, "principal-rate-limits.json") }),
       admissionRateLimiter: createRateLimiter({ persistencePath: path.join(config.dataDir, "admission-rate-limits.json"), human: { capacity: 30, refillPerSecond: 1 }, device: { capacity: 60, refillPerSecond: 2 } }),
       bundleSigner: { privateKey, issuer: config.issuer, keyId: config.keyId, ttlMs: config.ttlMs, offlineTtlMs: config.offlineTtlMs },
-      ...(humanAuthRuntime ? { humanAuthApi: humanAuthRuntime.api, recentAuthService: humanAuthRuntime.recentAuthService } : {}),
+      ...(humanAuthRuntime ? { humanAuthApi: humanAuthRuntime.api, humanSession: humanAuthRuntime.humanSession, recentAuthService: humanAuthRuntime.recentAuthService } : {}),
       ...(postgresRuntime?.capabilityAuthorityRepository ? { capabilityAuthorityRepository: postgresRuntime.capabilityAuthorityRepository } : {}),
       ...(postgresRuntime?.capabilityAuthorityRepository ? { capabilityRevocationSource: postgresRuntime.capabilityAuthorityRepository } : {})
     });
@@ -90,6 +106,10 @@ function humanAuthConfig(env) {
   const origin = env.AGENTPASS_CONSOLE_ORIGIN;
   const rpId = env.AGENTPASS_WEBAUTHN_RP_ID;
   const identityProvider = env.AGENTPASS_IDENTITY_PROVIDER ?? "chatgpt";
+  const identityAssertionIssuer = env.AGENTPASS_IDENTITY_ASSERTION_ISSUER;
+  const identityAssertionAudience = env.AGENTPASS_IDENTITY_ASSERTION_AUDIENCE;
+  const identityAssertionKeyId = env.AGENTPASS_IDENTITY_ASSERTION_KID;
+  const identityAssertionPublicKeyPath = env.AGENTPASS_IDENTITY_ASSERTION_PUBLIC_KEY_PATH;
   if (database === undefined && origin === undefined && rpId === undefined) return null;
   if (typeof database !== "string" || database.length < 1 || typeof origin !== "string" || typeof rpId !== "string") throw new Error("Human auth configuration is incomplete");
   let parsed;
@@ -97,8 +117,12 @@ function humanAuthConfig(env) {
   if (parsed.protocol !== "https:" || parsed.origin !== origin || parsed.pathname !== "/" || parsed.username || parsed.password || parsed.search || parsed.hash) throw new Error("AGENTPASS_CONSOLE_ORIGIN is invalid");
   if (!/^[A-Za-z0-9](?:[A-Za-z0-9.-]*[A-Za-z0-9])?$/.test(rpId) || (parsed.hostname !== rpId && !parsed.hostname.endsWith(`.${rpId}`))) throw new Error("AGENTPASS_WEBAUTHN_RP_ID is invalid");
   if (!/^[a-z][a-z0-9._-]{0,63}$/.test(identityProvider)) throw new Error("AGENTPASS_IDENTITY_PROVIDER is invalid");
+  if (typeof identityAssertionIssuer !== "string" || identityAssertionIssuer.length < 1 || identityAssertionIssuer.length > 256
+    || typeof identityAssertionAudience !== "string" || identityAssertionAudience.length < 1 || identityAssertionAudience.length > 256
+    || !IDENTIFIER.test(identityAssertionKeyId ?? "")) throw new Error("Human identity assertion configuration is incomplete");
+  const publicKeyPath = absolute(identityAssertionPublicKeyPath, "AGENTPASS_IDENTITY_ASSERTION_PUBLIC_KEY_PATH");
   requireHumanCursorSecret(env.AGENTPASS_HUMAN_CURSOR_SECRET);
-  return Object.freeze({ origin, rpId, identityProvider });
+  return Object.freeze({ origin, rpId, identityProvider, identityAssertionIssuer, identityAssertionAudience, identityAssertionKeyId, identityAssertionPublicKeyPath: publicKeyPath });
 }
 
 function requireHumanCursorSecret(value) {

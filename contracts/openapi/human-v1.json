@@ -4,11 +4,68 @@
     "title": "AgentPass Human API",
     "version": "1.0.0",
     "license": { "name": "AgentPass API contract", "identifier": "AgentPass-API-Contract-1.0" },
-    "description": "Cookie-authenticated, tenant-qualified organization and membership management for the Web Console. All timestamps are RFC 3339 strings and all opaque identifiers are UUIDs. Responses never contain session cookies, CSRF tokens, invitation tokens after creation, or email addresses."
+    "description": "Cookie-authenticated, tenant-qualified organization and membership management for the Web Console. All timestamps are RFC 3339 strings and all opaque identifiers are UUIDs. Session cookies are never returned in JSON; the session bootstrap response returns only an ephemeral CSRF token, and invitation tokens are never returned after creation. Responses never contain email addresses."
   },
   "servers": [{ "url": "https://app.ai-agentpass.com/api/v1" }],
   "security": [],
   "paths": {
+    "/auth/session": {
+      "post": {
+        "operationId": "exchangeSignedConsoleIdentityForSession",
+        "summary": "Exchange a verified SIWC Console assertion for a human session",
+        "description": "The hosted Console BFF calls the runtime path /api/auth/session after the platform has verified Sign in with ChatGPT (SIWC). The browser sends no upstream identity claim, Cloud bearer, or caller identity header. Cloud verifies the compact Ed25519 assertion, consumes its namespaced jti digest atomically, and resolves the active member and role from PostgreSQL using the asserted provider, subject, and organization context. This operation never redirects.",
+        "parameters": [
+          { "$ref": "#/components/parameters/ConsoleIdentityAssertion" }
+        ],
+        "requestBody": { "$ref": "#/components/requestBodies/SessionBootstrap" },
+        "x-agentpass-runtime-path": "/api/auth/session",
+        "x-agentpass-bff-only": true,
+        "x-agentpass-no-browser-redirect": true,
+        "x-agentpass-accepted-headers": ["Origin", "Content-Type", "agentpass-console-identity"],
+        "x-agentpass-rejected-identity-headers": ["Authorization", "agentpass-console-user-id", "agentpass-member-id", "agentpass-role"],
+        "x-agentpass-identity-resolution": "Resolve provider/subject/organization membership server-side; never accept member_id, membership_id, or role from the assertion or request body.",
+        "x-agentpass-assertion": {
+          "transport": "agentpass-console-identity",
+          "format": "base64url(canonical-header).base64url(canonical-payload).base64url(ed25519-signature)",
+          "header": {
+            "alg": "EdDSA",
+            "kid": "deployment-selected-key-id",
+            "typ": "agentpass.console.identity",
+            "version": 1,
+            "canonical": true,
+            "additionalProperties": false
+          },
+          "payload": {
+            "claims": ["aud", "exp", "iat", "iss", "jti", "nbf", "org", "origin", "provider", "sub"],
+            "additionalProperties": false,
+            "max_ttl_seconds": 60,
+            "clock_skew_seconds": 5
+          },
+          "forbidden_claims": ["redirect_uri"],
+          "verification": [
+            "Verify Ed25519 with the pinned kid before parsing identity fields.",
+            "Require exact configured issuer, audience, origin, provider, and UUID organization context.",
+            "Require iat and nbf to be current within the configured clock skew and exp to be no more than 60 seconds after iat.",
+            "Consume SHA-256(iss || U+0000 || aud || U+0000 || jti) exactly once in durable PostgreSQL before membership resolution.",
+            "Never trust authorization, member, role, or tenant selection from browser headers."
+          ],
+          "replay": {
+            "digest": "SHA-256(iss || U+0000 || aud || U+0000 || jti)",
+            "table": "human_identity_assertion_replays",
+            "atomic_consume_function": "agentpass_consume_human_identity_assertion",
+            "stored_fields": ["jti_digest", "expires_at"]
+          }
+        },
+        "responses": {
+          "201": { "$ref": "#/components/responses/SessionBootstrapCreated" },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/IdentityAssertionUnauthorized" },
+          "403": { "$ref": "#/components/responses/OriginForbidden" },
+          "409": { "$ref": "#/components/responses/IdentityAssertionReplay" },
+          "503": { "$ref": "#/components/responses/SessionBootstrapUnavailable" }
+        }
+      }
+    },
     "/auth/github/start": {
       "post": {
         "operationId": "startGithubAuthorization",
@@ -450,6 +507,20 @@
       }
     },
     "parameters": {
+      "ConsoleIdentityAssertion": {
+        "name": "agentpass-console-identity",
+        "in": "header",
+        "required": true,
+        "description": "BFF-only compact Ed25519 assertion. It is not a browser credential and must be rejected when supplied together with Authorization or any caller identity header. The header and payload are exact canonical JSON objects; no redirect_uri claim is accepted.",
+        "schema": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 16384,
+          "pattern": "^[A-Za-z0-9_-]+\\.[A-Za-z0-9_-]+\\.[A-Za-z0-9_-]+$"
+        },
+        "x-agentpass-bff-only": true,
+        "x-agentpass-no-raw-browser-claims": true
+      },
       "OrganizationId": {
         "name": "organization_id",
         "in": "path",
@@ -521,6 +592,15 @@
       }
     },
     "requestBodies": {
+      "SessionBootstrap": {
+        "required": true,
+        "description": "The request body is exactly the empty JSON object. Identity, organization, member, role, nonce, and provider fields are forbidden in the body.",
+        "content": {
+          "application/json": {
+            "schema": { "$ref": "#/components/schemas/SessionBootstrapRequest" }
+          }
+        }
+      },
       "CreateOrganization": {
         "required": true,
         "content": { "application/json": { "schema": { "$ref": "#/components/schemas/CreateOrganizationRequest" } } }
@@ -543,6 +623,41 @@
       }
     },
     "responses": {
+      "SessionBootstrapCreated": {
+        "description": "A short-lived opaque human session was issued.",
+        "headers": {
+          "Set-Cookie": {
+            "required": true,
+            "description": "Opaque __Host-agentpass_session cookie. The value is never returned in JSON and must be Secure, HttpOnly, SameSite=Strict, Path=/, and have no Domain attribute.",
+            "schema": { "type": "string", "minLength": 1, "maxLength": 2048 }
+          },
+          "Cache-Control": {
+            "required": true,
+            "schema": { "type": "string", "const": "no-store, max-age=0" }
+          }
+        },
+        "content": { "application/json": { "schema": { "$ref": "#/components/schemas/SessionBootstrapResponse" } } }
+      },
+      "IdentityAssertionUnauthorized": {
+        "description": "The assertion is malformed, has an untrusted signature or binding, is expired, or does not resolve to an active membership. The response is intentionally opaque.",
+        "headers": { "Cache-Control": { "required": true, "schema": { "type": "string", "const": "no-store, max-age=0" } } },
+        "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorEnvelope" } } }
+      },
+      "OriginForbidden": {
+        "description": "The request Origin is not the exact configured HTTPS Console origin.",
+        "headers": { "Cache-Control": { "required": true, "schema": { "type": "string", "const": "no-store, max-age=0" } } },
+        "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorEnvelope" } } }
+      },
+      "IdentityAssertionReplay": {
+        "description": "The signed assertion jti digest was already consumed. No session is issued.",
+        "headers": { "Cache-Control": { "required": true, "schema": { "type": "string", "const": "no-store, max-age=0" } } },
+        "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorEnvelope" } } }
+      },
+      "SessionBootstrapUnavailable": {
+        "description": "The identity replay ledger or membership store is unavailable. The service fails closed and does not issue a session.",
+        "headers": { "Cache-Control": { "required": true, "schema": { "type": "string", "const": "no-store, max-age=0" } } },
+        "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorEnvelope" } } }
+      },
       "Json": {
         "description": "JSON response",
         "content": { "application/json": { "schema": { "type": "object", "additionalProperties": true } } }
@@ -568,6 +683,37 @@
       "InternalError": { "description": "Stable internal failure response; sensitive details are not disclosed", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorEnvelope" } } } }
     },
     "schemas": {
+      "SessionBootstrapRequest": {
+        "type": "object",
+        "additionalProperties": false,
+        "minProperties": 0,
+        "maxProperties": 0,
+        "description": "Exactly {}. All identity and tenant context comes from the BFF-only signed assertion and server-side membership lookup."
+      },
+      "SessionBootstrapResponse": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["session", "csrf_token"],
+        "properties": {
+          "session": { "$ref": "#/components/schemas/HumanSession" },
+          "csrf_token": { "type": "string", "pattern": "^[A-Za-z0-9_-]{43}$" }
+        }
+      },
+      "HumanSession": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["version", "session_id", "member_id", "organization_id", "role", "created_at", "expires_at", "recent_auth_at"],
+        "properties": {
+          "version": { "const": 1 },
+          "session_id": { "type": "string", "format": "uuid" },
+          "member_id": { "type": "string", "format": "uuid" },
+          "organization_id": { "type": "string", "format": "uuid" },
+          "role": { "$ref": "#/components/schemas/MemberRole" },
+          "created_at": { "type": "string", "format": "date-time" },
+          "expires_at": { "type": "string", "format": "date-time" },
+          "recent_auth_at": { "type": ["string", "null"], "format": "date-time" }
+        }
+      },
       "RequestId": { "type": "string", "format": "uuid", "description": "Stable request correlation identifier." },
       "Organization": {
         "type": "object",

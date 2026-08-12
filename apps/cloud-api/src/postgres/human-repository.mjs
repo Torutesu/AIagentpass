@@ -22,6 +22,7 @@ export function createPostgresHumanRepository({ client } = {}) {
     findUpstreamIdentity,
     listMembershipsForUpstreamIdentity,
     resolveUpstreamIdentity,
+    consumeConsoleIdentityJti,
     getRegistrationUser,
     listCredentialsForSession,
     listCredentialMetadataForSession,
@@ -40,8 +41,10 @@ export function createPostgresHumanRepository({ client } = {}) {
 
   async function createSession(record) {
     validateSession(record);
-    const result = await client.query(`INSERT INTO human_sessions (id,member_id,organization_id,role,token_hash,csrf_token_hash,created_at,expires_at,last_seen_at,idle_expires_at,recent_auth_at,revoked_at,revoke_reason) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,NULL,NULL,NULL) RETURNING *,encode(token_hash,'hex') AS token_hash_hex,encode(csrf_token_hash,'hex') AS csrf_token_hash_hex`, [record.session_id, record.member_id, record.organization_id, record.role, bytes32(record.token_hash), bytes32(record.csrf_token_hash), record.created_at, record.expires_at, record.last_seen_at, record.idle_expires_at]);
-    return sessionRow(result.rows?.[0]);
+    const result = await client.query(`INSERT INTO human_sessions (id,member_id,organization_id,membership_id,role,token_hash,csrf_token_hash,created_at,expires_at,last_seen_at,idle_expires_at,recent_auth_at,revoked_at,revoke_reason) SELECT $1,m.member_id,m.organization_id,m.id,m.role,$5,$6,$7,$8,$9,$10,NULL,NULL,NULL FROM memberships m WHERE m.id=$4 AND m.member_id=$2 AND m.organization_id=$3 AND m.role=$11 AND m.status='active' RETURNING *,encode(token_hash,'hex') AS token_hash_hex,encode(csrf_token_hash,'hex') AS csrf_token_hash_hex`, [record.session_id, record.member_id, record.organization_id, record.membership_id, bytes32(record.token_hash), bytes32(record.csrf_token_hash), record.created_at, record.expires_at, record.last_seen_at, record.idle_expires_at, record.role]);
+    const created = sessionRow(result.rows?.[0]);
+    if (!created) throw new TypeError("active session membership is unavailable");
+    return created;
   }
 
   async function findSessionByTokenHash(input) {
@@ -146,6 +149,18 @@ export function createPostgresHumanRepository({ client } = {}) {
       member_id: first.member_id,
       memberships
     });
+  }
+
+  /**
+   * Atomically consume a signed-console identity jti before resolving its
+   * provider subject. The dedicated replay table is created by the contract
+   * migration; this repository method is the only caller-facing seam.
+   */
+  async function consumeConsoleIdentityJti(input) {
+    const digest = digest32(input?.jti_digest ?? input?.jtiDigest);
+    const expiresAt = timestamp(input?.expires_at ?? input?.expiresAt);
+    const result = await client.query("SELECT agentpass_consume_human_identity_assertion($1::bytea,$2::timestamptz) AS consumed", [digest, expiresAt]);
+    return result.rows?.[0]?.consumed === true;
   }
 
   async function getRegistrationUser(input) {
@@ -331,7 +346,7 @@ export function createPostgresHumanRepository({ client } = {}) {
   }
 }
 
-function validateSession(record) { uuid(record?.session_id); uuid(record?.member_id); uuid(record?.organization_id); if (!["owner", "admin", "auditor", "viewer"].includes(record.role)) throw new TypeError("session role is invalid"); bytes32(record.token_hash); bytes32(record.csrf_token_hash); }
+function validateSession(record) { uuid(record?.session_id); uuid(record?.member_id); uuid(record?.membership_id); uuid(record?.organization_id); if (!["owner", "admin", "auditor", "viewer"].includes(record.role)) throw new TypeError("session role is invalid"); bytes32(record.token_hash); bytes32(record.csrf_token_hash); }
 function sessionRow(row) { return row ? { ...row, session_id: row.session_id ?? row.id, token_hash: row.token_hash_hex ?? row.token_hash, csrf_token_hash: row.csrf_token_hash_hex ?? row.csrf_token_hash } : null; }
 function uuid(value) { if (typeof value !== "string" || !UUID.test(value)) throw new TypeError("UUID is invalid"); return value.toLowerCase(); }
 function bounded(value, max) { if (typeof value !== "string" || value.length < 1 || value.length > max || /[\u0000-\u001f\u007f]/.test(value)) throw new TypeError("bounded text is invalid"); return value; }
@@ -339,6 +354,8 @@ function identityProvider(value) { if (typeof value !== "string" || !PROVIDER.te
 function identitySubject(value) { if (typeof value !== "string" || !SUBJECT.test(value) || value.trim() !== value) throw new TypeError("identity subject is invalid"); return value; }
 function uuidUserHandle(value) { return Buffer.from(value.replaceAll("-", ""), "hex").toString("base64url"); }
 function bytes32(value) { if (typeof value !== "string" || !HEX_32.test(value)) throw new TypeError("digest is invalid"); return Buffer.from(value, "hex"); }
+function digest32(value) { if (typeof value !== "string" || !HEX_32.test(value)) throw new TypeError("identity replay digest is invalid"); return Buffer.from(value, "hex"); }
+function timestamp(value) { if (typeof value !== "string" || !Number.isFinite(Date.parse(value))) throw new TypeError("timestamp is invalid"); return value; }
 function base64Bytes(value, min, max) { if (typeof value !== "string" || !/^[A-Za-z0-9_-]+$/.test(value)) throw new TypeError("credential id is invalid"); const bytes=Buffer.from(value,"base64url"); if(bytes.length<min||bytes.length>max||bytes.toString("base64url")!==value) throw new TypeError("credential id is invalid"); return bytes; }
 function credentialId(value) { if (!Buffer.isBuffer(value) || value.length < 16 || value.length > 1024) throw new TypeError("stored credential id is invalid"); return value.toString("base64url"); }
 function credentialTransports(value) { if(!Array.isArray(value)||value.length>7||value.some((item)=>typeof item!=="string"||!CREDENTIAL_TRANSPORTS.has(item))||new Set(value).size!==value.length) throw new TypeError("stored credential transports are invalid"); return [...value]; }

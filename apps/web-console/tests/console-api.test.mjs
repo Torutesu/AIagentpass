@@ -3,12 +3,20 @@ import test from "node:test";
 import { createConsoleApi } from "../lib/console-api.mjs";
 
 const env = Object.freeze({
+  NODE_ENV: "test",
+  AGENTPASS_ALLOW_LEGACY_OPERATOR_BRIDGE: "true",
   AGENTPASS_CLOUD_API_URL: "https://cloud.example.test",
   AGENTPASS_ORGANIZATION_ID: "11111111-1111-4111-8111-111111111111",
   AGENTPASS_CLOUD_TOKEN: "test-server-token-abcdefghijklmnopqrstuvwxyz",
   AGENTPASS_CONSOLE_CURSOR_SECRET: "YWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWE",
   AGENTPASS_OPERATOR_USER_IDS: "user-1",
 });
+const humanEnv = Object.freeze({
+  AGENTPASS_CLOUD_API_URL: env.AGENTPASS_CLOUD_API_URL,
+  AGENTPASS_ORGANIZATION_ID: env.AGENTPASS_ORGANIZATION_ID,
+  AGENTPASS_CONSOLE_CURSOR_SECRET: env.AGENTPASS_CONSOLE_CURSOR_SECRET,
+});
+const sessionCookie = `__Host-agentpass_session=${"s".repeat(43)}`;
 const deviceId = "22222222-2222-4222-8222-222222222222";
 const authenticatedUser = Object.freeze({ userId: "user-1", email: "user@example.test" });
 const auditTimestamps = [
@@ -108,6 +116,44 @@ test("GET summary aggregates tenant resources and bounded audit activity", async
     assert.equal(call.init.headers.get("authorization"), `Bearer ${env.AGENTPASS_CLOUD_TOKEN}`);
   }
   assert.doesNotMatch(JSON.stringify(body), new RegExp(env.AGENTPASS_CLOUD_TOKEN));
+});
+
+test("production control-plane reads use only the Human session and never require the legacy operator bearer", async () => {
+  const calls = [];
+  let siwcCalls = 0;
+  const api = createConsoleApi({
+    env: humanEnv,
+    getSiwcUser: async () => { siwcCalls += 1; throw new Error("SIWC must not authorize an established Human session"); },
+    fetchImpl: async (url, init) => {
+      calls.push({ url: String(url), init });
+      return response({ organization: { organization_id: env.AGENTPASS_ORGANIZATION_ID, name: "Acme" } });
+    },
+  });
+  const result = await api.handle(request("/api/console?resource=organization", { headers: { cookie: `${sessionCookie}; unrelated=value` } }));
+  assert.equal(result.status, 200);
+  assert.equal(siwcCalls, 0);
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].init.headers.get("cookie"), sessionCookie);
+  assert.equal(calls[0].init.headers.get("origin"), "https://console.example.test");
+  assert.equal(calls[0].init.headers.get("authorization"), null);
+  assert.equal(calls[0].init.headers.get("agentpass-csrf"), null);
+});
+
+test("production control-plane mutations require exact origin and CSRF and forward no unrelated cookie", async () => {
+  const calls = [];
+  const api = createConsoleApi({ env: humanEnv, fetchImpl: async (url, init) => { calls.push({ url: String(url), init }); return response({ stopped: true }, 201); } });
+  const body = JSON.stringify({ reason: "incident" });
+  const base = { method: "POST", headers: { cookie: `${sessionCookie}; analytics=other`, origin: "https://console.example.test", "content-type": "application/json", "idempotency-key": "human-stop-0001" }, body };
+  const missingCsrf = await api.handle(request("/api/console?operation=emergency-stop", base));
+  assert.equal(missingCsrf.status, 403);
+  assert.equal(calls.length, 0);
+  const accepted = await api.handle(request("/api/console?operation=emergency-stop", { ...base, headers: { ...base.headers, "agentpass-csrf": "c".repeat(43) } }));
+  assert.equal(accepted.status, 201);
+  assert.equal(calls[0].init.headers.get("authorization"), null);
+  assert.equal(calls[0].init.headers.get("cookie"), sessionCookie);
+  assert.equal(calls[0].init.headers.get("agentpass-csrf"), "c".repeat(43));
+  const duplicate = await api.handle(request("/api/console?resource=organization", { headers: { cookie: `${sessionCookie}; ${sessionCookie}` } }));
+  assert.equal(duplicate.status, 400);
 });
 
 test("activity uses a bounded window, returns limit+1 evidence, and resumes with an opaque cursor", async () => {

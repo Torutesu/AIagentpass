@@ -19,7 +19,7 @@ test("browser-shaped requests cross Console BFF and Cloud Human Auth without exp
     humanAuthApi: {
       async handle(input) {
         cloudCalls.push(input);
-        if (input.url === "/api/auth/session") return { status: 201, headers: { "Set-Cookie": cookie }, body: { session: { organization_id: organizationId }, csrf_token: csrf } };
+        if (input.url === "/api/auth/session") return { status: 201, headers: { "Set-Cookie": cookie }, body: { session: { version: 1, session_id: "11111111-1111-4111-8111-111111111111", member_id: "22222222-2222-4222-8222-222222222222", organization_id: organizationId, role: "owner", created_at: "2026-08-12T00:00:00.000Z", expires_at: "2026-08-12T01:00:00.000Z", recent_auth_at: null }, csrf_token: csrf } };
         if (input.url === "/api/auth/webauthn/options") return { status: 200, headers: {}, body: { challenge_id: challengeId, options: { challenge: "C".repeat(43), rpId: "console.example.test", userVerification: "required", allowCredentials: [] } } };
         if (input.url === "/api/auth/webauthn/verify") return { status: 200, headers: {}, body: { authorization_id: authorizationId } };
         throw new Error("unexpected route");

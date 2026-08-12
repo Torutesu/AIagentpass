@@ -6,6 +6,8 @@ const ACTIVITY_WINDOW_LIMIT = 500;
 const ACTIVITY_CURSOR_VERSION = 1;
 const ACTIVITY_CURSOR_PATTERN = /^[A-Za-z0-9_-]{1,512}\.[A-Za-z0-9_-]{1,512}\.[A-Za-z0-9_-]{1,512}$/;
 const UUID_OR_OPAQUE_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
+const SESSION_COOKIE_NAME = "__Host-agentpass_session";
+const OPAQUE_TOKEN = /^[A-Za-z0-9_-]{43}$/;
 const IDEMPOTENCY_KEY = /^[A-Za-z0-9][A-Za-z0-9._:-]{7,127}$/;
 const SAFE_ERROR_CODE = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$/;
 const SENSITIVE_KEY = /(?:authorization|bearer|cookie|credential|password|private[_-]?key|refresh[_-]?token|secret|session[_-]?token|access[_-]?token|api[_-]?token)/i;
@@ -50,10 +52,15 @@ export function createConsoleApi(options = {}) {
 export async function handleConsoleRequest(request, options = {}) {
   try {
     ensureSameOrigin(request);
-    const user = await requireAuthenticatedUser(request, options);
-    const config = await readConfig(options.env);
-    if (!config.operatorUserIds.has(user.userId)) {
-      throw new ConsoleApiError(403, "operator_access_denied", "Operator access is denied");
+    let config = await readConfig(options.env);
+    if (config.authMode === "human-session") {
+      const authorization = requireHumanSessionAuthorization(request);
+      config = { ...config, authorization, secrets: [...config.secrets, authorization.cookie] };
+    } else {
+      const user = await requireAuthenticatedUser(request, options);
+      if (!config.operatorUserIds.has(user.userId)) {
+        throw new ConsoleApiError(403, "operator_access_denied", "Operator access is denied");
+      }
     }
     const fetchImpl = options.fetchImpl ?? options.fetch ?? globalThis.fetch;
     if (typeof fetchImpl !== "function") {
@@ -103,6 +110,40 @@ async function requireAuthenticatedUser(request, options) {
     throw new ConsoleApiError(401, "authentication_required", "Authentication is required");
   }
   return user;
+}
+
+function requireHumanSessionAuthorization(request) {
+  const cookie = normalizeSessionCookie(request.headers.get("cookie"));
+  const requestOrigin = new URL(request.url).origin;
+  const csrf = request.headers.get("agentpass-csrf");
+  if (request.method === "POST") {
+    if (request.headers.get("origin") !== requestOrigin) throw new ConsoleApiError(403, "same_origin_required", "Same-origin request required");
+    if (!OPAQUE_TOKEN.test(csrf ?? "")) throw new ConsoleApiError(403, "csrf_required", "CSRF authentication is required");
+  } else if (csrf !== null) {
+    throw new ConsoleApiError(400, "invalid_csrf", "CSRF authentication is not allowed");
+  }
+  return Object.freeze({ cookie, origin: requestOrigin, ...(csrf === null ? {} : { csrf }) });
+}
+
+function normalizeSessionCookie(cookieHeader) {
+  if (typeof cookieHeader !== "string" || cookieHeader.length < 1 || cookieHeader.length > 8192 || hasControlCharacters(cookieHeader)) {
+    throw new ConsoleApiError(401, "session_required", "An active session is required");
+  }
+  let token;
+  for (const part of cookieHeader.split(";")) {
+    const separator = part.indexOf("=");
+    if (separator < 1) {
+      if (part.trim() !== "") throw new ConsoleApiError(400, "invalid_cookie", "The session cookie is invalid");
+      continue;
+    }
+    const name = part.slice(0, separator).trim();
+    const value = part.slice(separator + 1).trim();
+    if (name !== SESSION_COOKIE_NAME) continue;
+    if (token !== undefined || !OPAQUE_TOKEN.test(value)) throw new ConsoleApiError(400, "invalid_cookie", "The session cookie is invalid");
+    token = value;
+  }
+  if (token === undefined) throw new ConsoleApiError(401, "session_required", "An active session is required");
+  return `${SESSION_COOKIE_NAME}=${token}`;
 }
 
 export function hasForwardedSiwcHeaders(request) {
@@ -740,7 +781,13 @@ async function cloudRequest(method, suffix, body, config, fetchImpl, options, id
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), config.timeoutMs);
   const headers = new Headers({ accept: "application/json" });
-  headers.set("authorization", `Bearer ${config.token}`);
+  if (config.authMode === "human-session") {
+    headers.set("cookie", config.authorization.cookie);
+    headers.set("origin", config.authorization.origin);
+    if (method !== "GET" && method !== "HEAD" && config.authorization.csrf !== undefined) headers.set("agentpass-csrf", config.authorization.csrf);
+  } else {
+    headers.set("authorization", `Bearer ${config.token}`);
+  }
   const init = {
     method,
     headers,
@@ -826,12 +873,19 @@ async function readConfig(injected) {
   if (source === undefined && typeof process !== "undefined") source = process.env;
   const url = source?.AGENTPASS_CLOUD_API_URL;
   const organizationId = source?.AGENTPASS_ORGANIZATION_ID;
-  const token = source?.AGENTPASS_CLOUD_TOKEN;
   const cursorSecret = source?.AGENTPASS_CONSOLE_CURSOR_SECRET;
-  const rawOperatorUserIds = source?.AGENTPASS_OPERATOR_USER_IDS;
-  const operatorUserIds = typeof rawOperatorUserIds === "string" ? rawOperatorUserIds.split(",").map((value) => value.trim()).filter(Boolean) : [];
-  if (typeof url !== "string" || typeof organizationId !== "string" || typeof token !== "string" || typeof cursorSecret !== "string" || !url || !UUID_OR_OPAQUE_ID.test(organizationId) || !token || token.length > 8192 || hasControlCharacters(token) || !/^[A-Za-z0-9_-]{43}$/.test(cursorSecret) || base64UrlDecode(cursorSecret).byteLength !== 32 || operatorUserIds.length < 1 || operatorUserIds.length > 100 || new Set(operatorUserIds).size !== operatorUserIds.length || operatorUserIds.some((value) => !UUID_OR_OPAQUE_ID.test(value))) {
+  if (typeof url !== "string" || typeof organizationId !== "string" || typeof cursorSecret !== "string" || !url || !UUID_OR_OPAQUE_ID.test(organizationId) || !/^[A-Za-z0-9_-]{43}$/.test(cursorSecret) || base64UrlDecode(cursorSecret).byteLength !== 32) {
     throw new ConsoleApiError(503, "cloud_api_unavailable", "Cloud API is unavailable");
+  }
+  const legacy = source?.AGENTPASS_ALLOW_LEGACY_OPERATOR_BRIDGE === "true" && ["development", "test"].includes(source?.NODE_ENV);
+  let token;
+  let operatorUserIds;
+  if (legacy) {
+    token = source?.AGENTPASS_CLOUD_TOKEN;
+    const rawOperatorUserIds = source?.AGENTPASS_OPERATOR_USER_IDS;
+    const operators = typeof rawOperatorUserIds === "string" ? rawOperatorUserIds.split(",").map((value) => value.trim()).filter(Boolean) : [];
+    if (typeof token !== "string" || !token || token.length > 8192 || hasControlCharacters(token) || operators.length < 1 || operators.length > 100 || new Set(operators).size !== operators.length || operators.some((value) => !UUID_OR_OPAQUE_ID.test(value))) throw new ConsoleApiError(503, "cloud_api_unavailable", "Cloud API is unavailable");
+    operatorUserIds = new Set(operators);
   }
   const timeoutValue = source?.AGENTPASS_CLOUD_TIMEOUT_MS;
   const timeoutMs = typeof timeoutValue === "string" && /^\d+$/.test(timeoutValue)
@@ -841,12 +895,12 @@ async function readConfig(injected) {
   return {
     url,
     organizationId,
-    token,
+    authMode: legacy ? "legacy-operator" : "human-session",
+    ...(legacy ? { token, operatorUserIds } : {}),
     cursorSecret,
     timeoutMs,
     allowInsecureLoopback,
-    operatorUserIds: new Set(operatorUserIds),
-    secrets: [url, organizationId, token, cursorSecret],
+    secrets: [url, organizationId, cursorSecret, ...(legacy ? [token] : [])],
   };
 }
 

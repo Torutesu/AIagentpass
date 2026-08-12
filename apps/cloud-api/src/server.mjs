@@ -18,10 +18,11 @@ const HUMAN_AUTH_UUID = "[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89a-
 const UUID = "([0-9a-fA-F-]{36})";
 const UUID_VALUE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu;
 
-export function createCloudApi({ store, tokenRecords = [], bundleSigner, now = () => Date.now(), monotonicNow, replayCache = createReplayCache(), rateLimiter, admissionRateLimiter, verifyRecentWebAuthn, recentAuthService, humanAuthApi, capabilityAuthorityRepository, capabilityRevocationSource } = {}) {
+export function createCloudApi({ store, tokenRecords = [], bundleSigner, now = () => Date.now(), monotonicNow, replayCache = createReplayCache(), rateLimiter, admissionRateLimiter, verifyRecentWebAuthn, recentAuthService, humanAuthApi, humanSession, capabilityAuthorityRepository, capabilityRevocationSource } = {}) {
   if (!store) throw new TypeError("store is required");
   if (verifyRecentWebAuthn !== undefined && recentAuthService !== undefined) throw new TypeError("configure verifyRecentWebAuthn or recentAuthService, not both");
   if (humanAuthApi !== undefined && (!humanAuthApi || typeof humanAuthApi.handle !== "function")) throw new TypeError("humanAuthApi must expose handle()");
+  if (humanSession !== undefined && (!humanSession || typeof humanSession.authenticateRequest !== "function")) throw new TypeError("humanSession must expose authenticateRequest()");
   if (capabilityRevocationSource !== undefined && (!capabilityRevocationSource || typeof capabilityRevocationSource.listRevokedCapabilityIds !== "function")) throw new TypeError("capabilityRevocationSource must expose listRevokedCapabilityIds()");
   if (capabilityAuthorityRepository !== undefined && (!capabilityAuthorityRepository || typeof capabilityAuthorityRepository.issueCapabilityMetadata !== "function")) throw new TypeError("capabilityAuthorityRepository must expose issueCapabilityMetadata()");
   const recentAuthVerifier = recentAuthService === undefined ? verifyRecentWebAuthn : recentAuthService?.authorize?.bind(recentAuthService);
@@ -57,6 +58,12 @@ export function createCloudApi({ store, tokenRecords = [], bundleSigner, now = (
         principal = verifyDeviceRequest({ method: request.method, path: request.url, body: bodyBytes, headers: request.headers }, devices, { organizationId, now: now(), replayCache });
       } else if (route.enrollment) {
         principal = { enrollment_id: match?.groups?.enrollmentId, member_id: admissionId };
+      } else if (humanSession !== undefined) {
+        const authenticated = await humanSession.authenticateRequest({ method: request.method, headers: request.headers });
+        if (!authenticated?.session || typeof authenticated.session !== "object" || Array.isArray(authenticated.session)) throw apiError("human_session_invalid", 401, "Authentication failed");
+        principal = authenticated.session;
+        requireOrganizationRole(principal, organizationId, route.role);
+        if (route.recentAuthOperation) await requireRecentWebAuthn({ verifier: recentAuthVerifier, principal, proof: request.headers["agentpass-recent-auth"], organizationId, operation: route.recentAuthOperation, now: now() });
       } else {
         principal = authenticateApiToken(bearerToken(request.headers.authorization), tokenRecords);
         requireOrganizationRole(principal, organizationId, route.role);
@@ -466,6 +473,8 @@ function send(response, status, value, headers = {}) {
 function apiError(code, status, message, headers) { const error = new Error(message); error.code = code; error.status = status; if (headers) error.headers = headers; return error; }
 function mapError(error) {
   if (error.status) return error;
+  if (["invalid_session_cookie", "session_not_found", "session_revoked", "session_expired"].includes(error.code)) return { status: 401, code: "human_session_invalid", message: "Authentication failed" };
+  if (["invalid_origin", "csrf_token_required", "invalid_csrf_token"].includes(error.code)) return { status: 403, code: "human_session_request_denied", message: "Authentication failed" };
   if (error instanceof RateLimiterCapacityError || error.code === "RATE_LIMITER_CAPACITY_EXHAUSTED") return { status: 503, code: "rate_limiter_unavailable", message: "Rate limiter is temporarily unavailable", headers: { "Retry-After": "1" } };
   if (String(error.code).startsWith("auth_") || ["invalid_api_token", "device_auth_failed", "invalid_auth_headers"].includes(error.code)) return { status: 401, code: error.code, message: "Authentication failed" };
   if (["role_denied", "organization_mismatch"].includes(error.code)) return { status: 403, code: error.code, message: "Authorization denied" };

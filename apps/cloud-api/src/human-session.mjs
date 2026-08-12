@@ -214,6 +214,7 @@ export function createHumanSessionService(options = {}) {
       const record = {
         session_id: randomUuid(randomBytes),
         member_id: principal.member_id,
+        membership_id: principal.membership_id,
         organization_id: principal.organization_id,
         role: principal.role,
         created_at: createdAt,
@@ -276,6 +277,7 @@ export function createHumanSessionService(options = {}) {
       const newRecord = {
         session_id: randomUuid(randomBytes),
         member_id: oldRecord.member_id,
+        membership_id: oldRecord.membership_id,
         organization_id: oldRecord.organization_id,
         role: oldRecord.role,
         created_at: createdAt,
@@ -417,13 +419,14 @@ function normalizeIdentity(identity) {
   const value = identity?.principal ?? identity?.identity ?? identity;
   if (!value || typeof value !== "object" || value.verified === false) fail(HUMAN_SESSION_ERROR_CODES.IDENTITY_VERIFICATION_FAILED);
   const memberId = value.member_id ?? value.memberId ?? value.sub;
+  const membershipId = value.membership_id ?? value.membershipId;
   const organizationId = value.organization_id ?? value.organizationId ?? value.org_id;
   const role = value.role;
-  if (!isUuid(memberId) || !isUuid(organizationId) || !ROLES.has(role)) fail(HUMAN_SESSION_ERROR_CODES.IDENTITY_VERIFICATION_FAILED);
+  if (!isUuid(memberId) || !isUuid(membershipId) || !isUuid(organizationId) || !ROLES.has(role)) fail(HUMAN_SESSION_ERROR_CODES.IDENTITY_VERIFICATION_FAILED);
   const assertionExpiry = value.expires_at ?? value.expiresAt;
   const assertionExpiresAt = assertionExpiry === undefined ? undefined : Date.parse(assertionExpiry);
   if (assertionExpiry !== undefined && !Number.isFinite(assertionExpiresAt)) fail(HUMAN_SESSION_ERROR_CODES.IDENTITY_VERIFICATION_FAILED);
-  return { member_id: memberId, organization_id: organizationId, role, assertion_expires_at: assertionExpiresAt };
+  return { member_id: memberId, membership_id: membershipId, organization_id: organizationId, role, assertion_expires_at: assertionExpiresAt };
 }
 
 function stripForRepository(record) {

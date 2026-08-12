@@ -9,7 +9,7 @@ const root = path.resolve(import.meta.dirname, "..");
 test("machine-readable platform contracts pass the offline validator", () => {
   const result = spawnSync(process.execPath, [path.join(root, "scripts", "validate-contracts.mjs")], { cwd: root, encoding: "utf8" });
   assert.equal(result.status, 0, result.stderr);
-  assert.match(result.stdout, /validated 5 schemas, 2 OpenAPI documents, 3 fixtures, and 8 PostgreSQL migrations/);
+  assert.match(result.stdout, /validated 5 schemas, 2 OpenAPI documents, 3 fixtures, and 9 PostgreSQL migrations/);
 });
 
 const humanOpenapi = () => JSON.parse(fs.readFileSync(path.join(root, "contracts", "openapi", "human-v1.json"), "utf8"));
@@ -92,6 +92,60 @@ test("human high-risk operations require role and recent WebAuthn", () => {
   const stop = openapi.paths["/organizations/{organization_id}/emergency-stop"].post;
   assert.equal(stop["x-agentpass-minimum-role"], "owner");
   assert.deepEqual(stop.security, [{ humanSession: [], recentWebAuthn: [] }]);
+});
+
+test("Human session bootstrap freezes the BFF-only SIWC signed assertion contract", () => {
+  const openapi = humanOpenapi();
+  const operation = openapi.paths["/auth/session"].post;
+  assert.equal(operation.operationId, "exchangeSignedConsoleIdentityForSession");
+  assert.equal(operation["x-agentpass-runtime-path"], "/api/auth/session");
+  assert.equal(operation["x-agentpass-bff-only"], true);
+  assert.equal(operation["x-agentpass-no-browser-redirect"], true);
+  assert.deepEqual(operation["x-agentpass-accepted-headers"], ["Origin", "Content-Type", "agentpass-console-identity"]);
+  assert.deepEqual(operation["x-agentpass-rejected-identity-headers"], ["Authorization", "agentpass-console-user-id", "agentpass-member-id", "agentpass-role"]);
+  assert.deepEqual(operation.parameters, [{ $ref: "#/components/parameters/ConsoleIdentityAssertion" }]);
+  assert.deepEqual(operation.requestBody, { $ref: "#/components/requestBodies/SessionBootstrap" });
+  assert.ok(operation.responses["201"]);
+  assert.ok(operation.responses["401"]);
+  assert.ok(operation.responses["409"]);
+
+  const assertion = operation["x-agentpass-assertion"];
+  assert.deepEqual(assertion.header, {
+    alg: "EdDSA",
+    kid: "deployment-selected-key-id",
+    typ: "agentpass.console.identity",
+    version: 1,
+    canonical: true,
+    additionalProperties: false
+  });
+  assert.deepEqual(assertion.payload.claims, ["aud", "exp", "iat", "iss", "jti", "nbf", "org", "origin", "provider", "sub"]);
+  assert.equal(assertion.payload.claims.includes("redirect_uri"), false);
+  assert.equal(assertion.payload.additionalProperties, false);
+  assert.equal(assertion.payload.max_ttl_seconds, 60);
+  assert.deepEqual(assertion.forbidden_claims, ["redirect_uri"]);
+  assert.match(assertion.verification.join(" "), /consume SHA-256.*exactly once/i);
+  assert.deepEqual(assertion.replay, {
+    digest: "SHA-256(iss || U+0000 || aud || U+0000 || jti)",
+    table: "human_identity_assertion_replays",
+    atomic_consume_function: "agentpass_consume_human_identity_assertion",
+    stored_fields: ["jti_digest", "expires_at"]
+  });
+
+  const header = openapi.components.parameters.ConsoleIdentityAssertion;
+  assert.equal(header.name, "agentpass-console-identity");
+  assert.equal(header.in, "header");
+  assert.equal(header.required, true);
+  assert.equal(header["x-agentpass-bff-only"], true);
+  assert.match(header.schema.pattern, /\\\./);
+  assert.equal(openapi.components.schemas.SessionBootstrapRequest.type, "object");
+  assert.equal(openapi.components.schemas.SessionBootstrapRequest.minProperties, 0);
+  assert.equal(openapi.components.schemas.SessionBootstrapRequest.maxProperties, 0);
+  assert.equal(openapi.components.schemas.SessionBootstrapRequest.additionalProperties, false);
+  assert.deepEqual(openapi.components.schemas.SessionBootstrapResponse.required, ["session", "csrf_token"]);
+  assert.deepEqual(openapi.components.schemas.HumanSession.required, ["version", "session_id", "member_id", "organization_id", "role", "created_at", "expires_at", "recent_auth_at"]);
+  assert.equal(openapi.components.schemas.HumanSession.additionalProperties, false);
+  assert.equal(openapi.components.responses.SessionBootstrapCreated.headers["Set-Cookie"].required, true);
+  assert.equal(openapi.components.responses.SessionBootstrapCreated.headers["Cache-Control"].required, true);
 });
 
 test("device operations use device signatures and tenant-qualified paths", () => {

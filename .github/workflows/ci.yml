@@ -30,10 +30,10 @@ jobs:
           node-version: 22
           cache: npm
       - run: npm ci
-      - name: Run real PostgreSQL organization and capability authority E2E
+      - name: Run real PostgreSQL authority and signed-session E2E
         env:
           AGENTPASS_TEST_DATABASE_URL: postgresql://postgres:agentpass-integration@127.0.0.1:5432/postgres
-        run: node --test apps/cloud-api/test/postgres/organization-integration.test.mjs apps/cloud-api/test/postgres/capability-authority-repository.test.mjs apps/cloud-api/test/postgres/human-management-pagination-integration.test.mjs
+        run: node --test apps/cloud-api/test/postgres/organization-integration.test.mjs apps/cloud-api/test/postgres/capability-authority-repository.test.mjs apps/cloud-api/test/postgres/human-management-pagination-integration.test.mjs apps/cloud-api/test/postgres/signed-console-replay-integration.test.mjs
 
   test:
     runs-on: macos-latest

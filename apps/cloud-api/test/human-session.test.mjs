@@ -14,6 +14,7 @@ import {
 const ORIGIN = "https://console.agentpass.test";
 const MEMBER_ID = "11111111-1111-4111-8111-111111111111";
 const ORGANIZATION_ID = "22222222-2222-4222-8222-222222222222";
+const MEMBERSHIP_ID = "44444444-4444-4444-8444-444444444444";
 const OTHER_MEMBER_ID = "33333333-3333-4333-8333-333333333333";
 const START = Date.parse("2026-08-12T00:00:00.000Z");
 
@@ -78,7 +79,7 @@ function fixture(options = {}) {
     identityAdapter: {
       async verify(assertion) {
         if (assertion !== "upstream-assertion") return null;
-        return { member_id: MEMBER_ID, organization_id: ORGANIZATION_ID, role: "owner" };
+        return { member_id: MEMBER_ID, membership_id: MEMBERSHIP_ID, organization_id: ORGANIZATION_ID, role: "owner" };
       }
     }
   });
@@ -107,6 +108,7 @@ test("issues a 256-bit opaque cookie and stores only hashes", async () => {
   assert.equal(f.repository.created[0].token_hash.includes(token), false);
   assert.match(f.repository.created[0].token_hash, /^[0-9a-f]{64}$/);
   assert.match(f.repository.created[0].csrf_token_hash, /^[0-9a-f]{64}$/);
+  assert.equal(f.repository.created[0].membership_id, MEMBERSHIP_ID);
 
   assert.deepEqual(Object.keys(issued.session).sort(), [
     "created_at", "expires_at", "member_id", "organization_id", "recent_auth_at", "role", "session_id", "version"

@@ -1,6 +1,7 @@
 import { createHumanSessionService } from "../human-session.mjs";
 import { createConsoleIdentityAdapter } from "./console-identity.mjs";
 import { createPostgresIdentityResolver } from "./identity/postgres-resolver.mjs";
+import { createSignedConsoleIdentityAdapter } from "./identity/signed-console.mjs";
 import { createHumanAuthHttpApi } from "./http-api.mjs";
 import { createHumanManagementHttpApi, HUMAN_MANAGEMENT_RECENT_AUTH_OPERATIONS } from "./management/http-api.mjs";
 import { createPostgresHumanManagementRepository } from "./management/postgres-adapter.mjs";
@@ -24,7 +25,7 @@ const ALLOWED_RECENT_AUTH_OPERATIONS = Object.freeze([
   ...recentAuthOperationValues(HUMAN_ORGANIZATIONS_RECENT_AUTH_OPERATIONS)
 ]);
 
-export function createHumanAuthRuntime({ postgresRuntime, tokenRecords, origin, rpId, cursorSecret, identityProvider = "chatgpt", now = () => Date.now() } = {}) {
+export function createHumanAuthRuntime({ postgresRuntime, tokenRecords, origin, rpId, cursorSecret, identityProvider = "chatgpt", signedConsoleIdentity = undefined, now = () => Date.now() } = {}) {
   const repository = postgresRuntime?.humanRepository;
   const organizationRepository = postgresRuntime?.organizationRepository;
   const pool = postgresRuntime?.pool;
@@ -32,7 +33,16 @@ export function createHumanAuthRuntime({ postgresRuntime, tokenRecords, origin, 
   const cursorCodec = createHumanCursorCodec({ secret: requireCursorSecret(cursorSecret) });
 
   const identityResolver = createPostgresIdentityResolver({ client: pool, now });
-  const consoleIdentity = createConsoleIdentityAdapter({ tokenRecords, identityResolver, provider: identityProvider });
+  const consoleIdentity = signedConsoleIdentity
+    ? createSignedConsoleIdentityAdapter({
+      ...signedConsoleIdentity,
+      identityResolver,
+      replayRepository: signedConsoleIdentity.replayRepository ?? repository,
+      provider: signedConsoleIdentity.provider ?? identityProvider,
+      origin,
+      now
+    })
+    : createConsoleIdentityAdapter({ tokenRecords, identityResolver, provider: identityProvider });
   const humanSession = createHumanSessionService({ repository, identityAdapter: consoleIdentity.identityAdapter, origin, now });
   const verifyAssertion = createSimpleWebAuthnAssertionVerifier({ credentialRepository: repository });
   const ceremony = createPostgresWebAuthnCeremony({ client: pool, verifyAssertion, now });
@@ -59,7 +69,7 @@ export function createHumanAuthRuntime({ postgresRuntime, tokenRecords, origin, 
   const organizationService = createPostgresOrganizationService({ repository: organizationRepository, cursorCodec, now });
   const organizationApi = createHumanOrganizationsHttpApi({ humanSession, recentAuthService, organizationService, origin, now });
   const api = createHumanAuthRouter({ sessionApi, webauthnApi, registrationApi, managementApi, organizationApi });
-  return Object.freeze({ api, humanSession, recentAuthService, ceremony, registrationCeremony, registrationService, identityResolver, managementRepository, organizationRepository, organizationService, sessionApi, webauthnApi, registrationApi, managementApi, organizationApi, allowedOperations: ALLOWED_RECENT_AUTH_OPERATIONS });
+  return Object.freeze({ api, humanSession, recentAuthService, ceremony, registrationCeremony, registrationService, identityResolver, consoleIdentity, managementRepository, organizationRepository, organizationService, sessionApi, webauthnApi, registrationApi, managementApi, organizationApi, allowedOperations: ALLOWED_RECENT_AUTH_OPERATIONS });
 }
 
 function requireCursorSecret(value) {

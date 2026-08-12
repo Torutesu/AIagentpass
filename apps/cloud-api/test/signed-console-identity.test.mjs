@@ -1,0 +1,193 @@
+import assert from "node:assert/strict";
+import crypto from "node:crypto";
+import test from "node:test";
+import {
+  consoleIdentityJtiDigest,
+  createSignedConsoleIdentityAdapter,
+  SIGNED_CONSOLE_IDENTITY_ERROR_CODES,
+  SIGNED_CONSOLE_IDENTITY_HEADER,
+  SignedConsoleIdentityError
+} from "../src/human-auth/identity/signed-console.mjs";
+
+const NOW = 1_800_000_000_000;
+const NOW_SECONDS = Math.floor(NOW / 1_000);
+const ids = { org: "11111111-1111-4111-8111-111111111111", member: "22222222-2222-4222-8222-222222222222" };
+const config = {
+  issuer: "https://console.example.test",
+  audience: "agentpass-cloud-session",
+  provider: "chatgpt",
+  origin: "https://console.example.test",
+  keyId: "console-2026-08",
+  now: () => NOW
+};
+
+function canonicalJson(value) {
+  if (value === null || typeof value === "string" || typeof value === "boolean" || typeof value === "number") return JSON.stringify(value);
+  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(",")}]`;
+  return `{${Object.keys(value).sort().map((key) => `${JSON.stringify(key)}:${canonicalJson(value[key])}`).join(",")}}`;
+}
+
+function b64(value) { return Buffer.from(typeof value === "string" ? value : canonicalJson(value), "utf8").toString("base64url"); }
+
+function makeAssertion(privateKey, overrides = {}) {
+  const header = { alg: "EdDSA", kid: config.keyId, typ: "agentpass.console.identity", version: 1 };
+  const payload = {
+    aud: config.audience,
+    exp: NOW_SECONDS + 30,
+    iat: NOW_SECONDS,
+    iss: config.issuer,
+    jti: "jti-" + crypto.randomBytes(18).toString("base64url"),
+    nbf: NOW_SECONDS,
+    org: ids.org,
+    origin: config.origin,
+    provider: config.provider,
+    sub: "siwc-subject-42",
+    ...overrides
+  };
+  const encodedHeader = b64(header);
+  const encodedPayload = b64(payload);
+  const signingInput = `${encodedHeader}.${encodedPayload}`;
+  const signature = crypto.sign(null, Buffer.from(signingInput, "ascii"), privateKey).toString("base64url");
+  return { compact: `${signingInput}.${signature}`, header, payload };
+}
+
+function adapterFixture(overrides = {}) {
+  const pair = crypto.generateKeyPairSync("ed25519");
+  const events = [];
+  const opaque = Object.freeze({ version: 1, issued_at: NOW, expires_at: NOW + 30_000 });
+  const identityResolver = {
+    identityAdapter: { async verify() { return { member_id: ids.member, organization_id: ids.org, role: "owner", assertion_expires_at: NOW + 30_000 }; } },
+    async resolveIdentity(input) { events.push(["resolve", input]); return opaque; }
+  };
+  const replayRepository = {
+    async consumeConsoleIdentityJti(input) { events.push(["replay", input]); return overrides.replayResult ?? true; }
+  };
+  const adapter = createSignedConsoleIdentityAdapter({ ...config, publicKey: pair.publicKey, identityResolver, replayRepository, ...overrides });
+  return { adapter, pair, events, opaque };
+}
+
+function request(assertion, extra = {}) {
+  return { headers: { [SIGNED_CONSOLE_IDENTITY_HEADER]: assertion, "agentpass-console-user-id": "attacker-controlled-subject", authorization: "Bearer attacker-token", ...extra } };
+}
+
+test("verifies the pinned compact Ed25519 assertion, consumes jti, then resolves membership", async () => {
+  const fixture = adapterFixture();
+  const { compact, header, payload } = makeAssertion(fixture.pair.privateKey);
+  assert.deepEqual(Object.keys(header).sort(), ["alg", "kid", "typ", "version"]);
+  assert.deepEqual(Object.keys(payload).sort(), ["aud", "exp", "iat", "iss", "jti", "nbf", "org", "origin", "provider", "sub"]);
+  assert.equal(Object.hasOwn(payload, "redirect_uri"), false);
+  assert.equal(await fixture.adapter.verifyIdentityRequest(request(compact)), fixture.opaque);
+  assert.equal(fixture.events[0][0], "replay");
+  assert.equal(fixture.events[1][0], "resolve");
+  assert.deepEqual(fixture.events[1][1], { provider: config.provider, subject: payload.sub, organization_id: ids.org });
+  assert.equal(Object.hasOwn(fixture.events[0][1], "organization_id"), false);
+  assert.equal(fixture.events[0][1].jti_digest, consoleIdentityJtiDigest({ iss: payload.iss, aud: payload.aud, jti: payload.jti }));
+  assert.equal(Object.hasOwn(fixture.events[0][1], "jti"), false);
+});
+
+test("never uses raw identity headers and never returns signed assertion material", async () => {
+  const fixture = adapterFixture();
+  const { compact } = makeAssertion(fixture.pair.privateKey, { sub: "verified-subject" });
+  const result = await fixture.adapter.verifyIdentityRequest(request(compact));
+  assert.equal(result, fixture.opaque);
+  assert.equal(fixture.events[1][1].subject, "verified-subject");
+  assert.equal(JSON.stringify(result).includes(compact), false);
+  assert.equal(JSON.stringify(fixture.events[1][1]).includes("attacker-controlled-subject"), false);
+  assert.equal(JSON.stringify(fixture.events[1][1]).includes("attacker-token"), false);
+});
+
+test("rejects replay before resolving the immutable subject", async () => {
+  const fixture = adapterFixture({ replayResult: false });
+  const { compact } = makeAssertion(fixture.pair.privateKey);
+  await assert.rejects(() => fixture.adapter.verifyIdentityRequest(request(compact)), (error) => {
+    assert.equal(error instanceof SignedConsoleIdentityError, true);
+    assert.equal(error.code, SIGNED_CONSOLE_IDENTITY_ERROR_CODES.REPLAY);
+    return true;
+  });
+  assert.deepEqual(fixture.events.map(([kind]) => kind), ["replay"]);
+});
+
+test("fails closed on replay-store outage and resolver outage without leaking details", async () => {
+  const replayOutage = adapterFixture();
+  replayOutage.adapter = createSignedConsoleIdentityAdapter({ ...config, publicKey: replayOutage.pair.publicKey, identityResolver: { async resolveIdentity() { throw new Error("subject-secret"); }, identityAdapter: { async verify() {} } }, replayRepository: { async consumeConsoleIdentityJti() { throw new Error("database-password"); } } });
+  const signed = makeAssertion(replayOutage.pair.privateKey).compact;
+  await assert.rejects(() => replayOutage.adapter.verifyIdentityRequest(request(signed)), (error) => {
+    assert.equal(error.code, SIGNED_CONSOLE_IDENTITY_ERROR_CODES.UNAVAILABLE);
+    assert.equal(error.message, "Signed console identity could not be verified");
+    assert.equal(error.message.includes("database-password"), false);
+    return true;
+  });
+
+  const resolverOutage = adapterFixture();
+  resolverOutage.adapter = createSignedConsoleIdentityAdapter({ ...config, publicKey: resolverOutage.pair.publicKey, identityResolver: { async resolveIdentity() { throw new Error("provider-subject-secret"); }, identityAdapter: { async verify() {} } }, replayRepository: { async consumeConsoleIdentityJti() { return true; } } });
+  await assert.rejects(() => resolverOutage.adapter.verifyIdentityRequest(request(makeAssertion(resolverOutage.pair.privateKey).compact)), (error) => {
+    assert.equal(error.code, SIGNED_CONSOLE_IDENTITY_ERROR_CODES.UNAVAILABLE);
+    assert.equal(error.message.includes("provider-subject-secret"), false);
+    return true;
+  });
+});
+
+test("fails closed when the identity resolver returns a structural or mutable assertion", async () => {
+  const fixture = adapterFixture();
+  const signed = makeAssertion(fixture.pair.privateKey).compact;
+  for (const output of [null, { version: 1 }, { version: 1, issued_at: NOW, expires_at: NOW + 30_000 }, Object.freeze({ version: 1, issued_at: NOW, expires_at: NOW })]) {
+    const adapter = createSignedConsoleIdentityAdapter({
+      ...config,
+      publicKey: fixture.pair.publicKey,
+      replayRepository: { async consumeConsoleIdentityJti() { return true; } },
+      identityResolver: { async resolveIdentity() { return output; }, identityAdapter: { async verify() {} } }
+    });
+    await assert.rejects(() => adapter.verifyIdentityRequest(request(signed)), (error) => {
+      assert.equal(error.code, SIGNED_CONSOLE_IDENTITY_ERROR_CODES.UNAVAILABLE);
+      assert.equal(error.message, "Signed console identity could not be verified");
+      return true;
+    });
+  }
+});
+
+test("rejects altered, non-canonical, wrong-key, and wrong-binding assertions", async () => {
+  const fixture = adapterFixture();
+  const valid = makeAssertion(fixture.pair.privateKey);
+  const cases = [
+    valid.compact.replace(/.$/u, valid.compact.endsWith("A") ? "B" : "A"),
+    `${valid.compact.split(".")[0]}.${b64(" { } ")}.${valid.compact.split(".")[2]}`,
+    makeAssertion(crypto.generateKeyPairSync("ed25519").privateKey).compact,
+    makeAssertion(fixture.pair.privateKey, { aud: "other-audience" }).compact,
+    makeAssertion(fixture.pair.privateKey, { origin: "https://evil.example.test" }).compact,
+    makeAssertion(fixture.pair.privateKey, { redirect_uri: "https://evil.example.test/callback" }).compact,
+    makeAssertion(fixture.pair.privateKey, { org: "not-a-uuid" }).compact,
+    makeAssertion(fixture.pair.privateKey, { provider: "github" }).compact
+  ];
+  for (const compact of cases) {
+    await assert.rejects(() => fixture.adapter.verifyIdentityRequest(request(compact)), (error) => {
+      assert.equal(error instanceof SignedConsoleIdentityError, true);
+      assert.equal(error.message, "Signed console identity could not be verified");
+      return true;
+    });
+  }
+  assert.equal(fixture.events.length, 0);
+});
+
+test("enforces nbf/iat/exp relationships, sixty-second TTL, and configured clock skew", async () => {
+  const fixture = adapterFixture();
+  const invalid = [
+    { exp: NOW_SECONDS + 61 },
+    { nbf: NOW_SECONDS + 6 },
+    { iat: NOW_SECONDS - 66, nbf: NOW_SECONDS - 66, exp: NOW_SECONDS - 6 },
+    { iat: NOW_SECONDS + 6, nbf: NOW_SECONDS + 6 },
+    { nbf: NOW_SECONDS + 1, iat: NOW_SECONDS }
+  ];
+  for (const claims of invalid) {
+    await assert.rejects(() => fixture.adapter.verifyIdentityRequest(request(makeAssertion(fixture.pair.privateKey, claims).compact)), SignedConsoleIdentityError);
+  }
+  const withinSkew = makeAssertion(fixture.pair.privateKey, { iat: NOW_SECONDS + 5, nbf: NOW_SECONDS + 5, exp: NOW_SECONDS + 35 }).compact;
+  assert.equal(await fixture.adapter.verifyIdentityRequest(request(withinSkew)), fixture.opaque);
+});
+
+test("requires an Ed25519 pinned key and complete production configuration", () => {
+  const pair = crypto.generateKeyPairSync("rsa", { modulusLength: 2048 });
+  const resolver = { async resolveIdentity() {}, identityAdapter: { async verify() {} } };
+  assert.throws(() => createSignedConsoleIdentityAdapter({ ...config, publicKey: pair.publicKey, identityResolver: {}, replayRepository: {} }), /identityResolver/);
+  assert.throws(() => createSignedConsoleIdentityAdapter({ ...config, publicKey: pair.publicKey, identityResolver: resolver, replayRepository: { async consumeConsoleIdentityJti() {} } }), /Ed25519/);
+  assert.throws(() => createSignedConsoleIdentityAdapter({ ...config, origin: undefined, publicKey: crypto.generateKeyPairSync("ed25519").publicKey, identityResolver: resolver, replayRepository: { async consumeConsoleIdentityJti() {} } }), /configuration/);
+});

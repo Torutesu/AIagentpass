@@ -53,6 +53,52 @@ test("human routes enforce bearer role, tenant, and idempotency", async (t) => {
   assert.equal((await duplicate.json()).error.code, "invalid_json");
 });
 
+test("Human Auth mode uses the hash-only session as control-plane authority and never falls back to bearer", async (t) => {
+  const calls = [];
+  const humanSession = {
+    async authenticateRequest(input) {
+      calls.push(input);
+      if (input.headers.cookie !== `__Host-agentpass_session=${"s".repeat(43)}`) {
+        const error = new Error("cookie details must be redacted");
+        error.code = "invalid_session_cookie";
+        throw error;
+      }
+      if (input.headers.origin !== "https://console.example.test") {
+        const error = new Error("origin details must be redacted");
+        error.code = "invalid_origin";
+        throw error;
+      }
+      if (input.method === "POST" && input.headers["agentpass-csrf"] !== "c".repeat(43)) {
+        const error = new Error("csrf details must be redacted");
+        error.code = "csrf_token_required";
+        throw error;
+      }
+      return { session: { member_id: "owner-1", organization_id: org, role: "owner" } };
+    }
+  };
+  const f = await fixture(t, { humanSession });
+  const pathName = `/v1/organizations/${org}/devices`;
+  const deniedBearer = await fetch(`${f.base}${pathName}`, { headers: { authorization: `Bearer ${f.token}` } });
+  assert.equal(deniedBearer.status, 401);
+  assert.deepEqual((await deniedBearer.json()).error, { code: "human_session_invalid", message: "Authentication failed" });
+
+  const accepted = await fetch(`${f.base}${pathName}`, { headers: { cookie: `__Host-agentpass_session=${"s".repeat(43)}`, origin: "https://console.example.test" } });
+  assert.equal(accepted.status, 200, JSON.stringify(await accepted.clone().json()));
+  assert.equal((await accepted.json()).devices.length, 1);
+  assert.equal(calls.at(-1).method, "GET");
+
+  const wrongOrigin = await fetch(`${f.base}${pathName}`, { headers: { cookie: `__Host-agentpass_session=${"s".repeat(43)}`, origin: "https://attacker.example.test" } });
+  assert.equal(wrongOrigin.status, 403);
+  assert.deepEqual((await wrongOrigin.json()).error, { code: "human_session_request_denied", message: "Authentication failed" });
+
+  const mutationPath = `/v1/organizations/${org}/policies`;
+  const mutationHeaders = { cookie: `__Host-agentpass_session=${"s".repeat(43)}`, origin: "https://console.example.test", "content-type": "application/json", "idempotency-key": "human-auth-policy-0001" };
+  const missingCsrf = await fetch(`${f.base}${mutationPath}`, { method: "POST", headers: mutationHeaders, body: JSON.stringify({ name: "session-policy", scope: f.scope, sequence: 2 }) });
+  assert.equal(missingCsrf.status, 403);
+  const acceptedMutation = await fetch(`${f.base}${mutationPath}`, { method: "POST", headers: { ...mutationHeaders, "agentpass-csrf": "c".repeat(43), "idempotency-key": "human-auth-policy-0002" }, body: JSON.stringify({ name: "session-policy", scope: f.scope, sequence: 2 }) });
+  assert.equal(acceptedMutation.status, 201, JSON.stringify(await acceptedMutation.clone().json()));
+});
+
 test("admin issues a one-time enrollment and a macOS P-256 device completes it", async (t) => {
   const f = await fixture(t);
   const enrollmentId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";

@@ -68,7 +68,7 @@ test("fails closed on an unknown or out-of-order applied version", async () => {
 
 test("loads the reviewed contract migrations in contiguous order without rewriting their SQL", async () => {
   const loaded = await loadSqlMigrations(defaultContractDirectory());
-  assert.deepEqual(loaded.map((migration) => migration.name), ["0001_control_plane.sql", "0002_webauthn_challenges.sql", "0003_webauthn_challenge_bindings.sql", "0004_human_identity_and_webauthn_registration.sql", "0005_human_credential_session_management.sql", "0006_organization_membership_invitations.sql", "0007_capability_membership_authority.sql", "0008_capability_revocation_bundle_lookup.sql"]);
+  assert.deepEqual(loaded.map((migration) => migration.name), ["0001_control_plane.sql", "0002_webauthn_challenges.sql", "0003_webauthn_challenge_bindings.sql", "0004_human_identity_and_webauthn_registration.sql", "0005_human_credential_session_management.sql", "0006_organization_membership_invitations.sql", "0007_capability_membership_authority.sql", "0008_capability_revocation_bundle_lookup.sql", "0009_human_identity_assertion_replays.sql"]);
   assert.match(loaded[0].sql, /^BEGIN;/);
   assert.match(loaded[0].sql, /CREATE TABLE schema_migrations/);
   assert.match(loaded[0].sql.trim(), /COMMIT;$/);
@@ -145,6 +145,22 @@ test("migration 0008 indexes unexpired revoked capabilities for bounded ControlB
   assert.match(sql, /CREATE INDEX capabilities_revoked_bundle_lookup/);
   assert.match(sql, /ON capabilities \(organization_id, expires_at, id\)/);
   assert.match(sql, /WHERE revoked_at IS NOT NULL/);
+  assert.doesNotMatch(sql, /DROP\s+(?:TABLE|COLUMN)|TRUNCATE/iu);
+});
+
+test("migration 0009 stores only namespaced jti replay state and provides atomic one-time consume", async () => {
+  const sql = await readFile(new URL("../../../../contracts/postgres/0009_human_identity_assertion_replays.sql", import.meta.url), "utf8");
+  assert.match(sql.trim(), /^BEGIN;[\s\S]*COMMIT;$/);
+  assert.match(sql, /CREATE TABLE human_identity_assertion_replays \(/);
+  assert.match(sql, /jti_digest bytea PRIMARY KEY CHECK \(octet_length\(jti_digest\) = 32\)/);
+  assert.match(sql, /expires_at timestamptz NOT NULL/);
+  assert.doesNotMatch(sql, /consumed_at|created_at/);
+  assert.doesNotMatch(sql, /subject|member_id|membership_id|role|assertion_payload|raw_jti/i);
+  assert.match(sql, /CREATE INDEX human_identity_assertion_replays_expiry/);
+  assert.match(sql, /CREATE FUNCTION agentpass_consume_human_identity_assertion\(/);
+  assert.match(sql, /ON CONFLICT \(jti_digest\) DO NOTHING/);
+  assert.match(sql, /RETURN FOUND/);
+  assert.match(sql, /assertion_expires_at <= clock_timestamp\(\)/);
   assert.doesNotMatch(sql, /DROP\s+(?:TABLE|COLUMN)|TRUNCATE/iu);
 });
 

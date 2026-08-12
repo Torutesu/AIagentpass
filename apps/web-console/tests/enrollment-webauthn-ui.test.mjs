@@ -8,7 +8,8 @@ test("enrollment UI uses a session-bound WebAuthn ceremony instead of manual pro
   const source = await readFile(componentPath, "utf8");
 
   assert.match(source, /import \{ authenticateRecentAuth, registerPasskey, WebAuthnClientError \} from "\.\.\/webauthn-client"/);
-  assert.match(source, /fetch\("\/api\/auth\/session", \{[\s\S]*?method: "POST"[\s\S]*?body: "\{\}"[\s\S]*?cache: "no-store"[\s\S]*?credentials: "same-origin"/);
+  assert.match(source, /const SESSION_BOOTSTRAP_PATH = "\/api\/auth\/session"/);
+  assert.match(source, /fetch\(SESSION_BOOTSTRAP_PATH, \{[\s\S]*?method: "POST"[\s\S]*?body: "\{\}"[\s\S]*?cache: "no-store"[\s\S]*?credentials: "same-origin"/);
   assert.match(source, /hasExactKeys\(value, \["session", "csrf_token"\]\)/);
   assert.match(source, /UUID\.test\(session\.organization_id\)/);
   assert.match(source, /BASE64URL_CSRF = \/\^\[A-Za-z0-9_-\]\{43\}\$\//);
@@ -32,7 +33,7 @@ test("enrollment ceremony material is not placed in React state or browser stora
 
   assert.doesNotMatch(setupBody, /useState\([^\n]*(?:csrf|challenge|assertion|proof|authorization)/i);
   assert.doesNotMatch(setupBody, /localStorage|sessionStorage|console\.(?:log|info|warn|error)/);
-  assert.match(setupBody, /const \{ organizationId, csrfToken \} = await startEnrollmentSession\(\)/);
+  assert.match(setupBody, /const \{ organizationId, csrfToken \} = await consoleSessionContext\.get\(\)/);
   assert.match(setupBody, /const \{ authorization_id \} = await authenticateRecentAuth/);
   assert.match(setupBody, /await registerPasskey\(\{ organizationId, csrfToken \}\)/);
   assert.doesNotMatch(setupBody, /useState\([^\n]*(?:credential|attestation|assertion|challenge|label)/i);

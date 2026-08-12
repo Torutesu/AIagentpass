@@ -45,7 +45,7 @@ Human authentication modules provide opaque hash-only sessions, exact-origin and
 
 When Human Auth is enabled, capability issuance also requires the PostgreSQL organization, member, device, and agent projection to exist. The exact canonical signed-statement hash and issuing membership version are recorded before a bearer envelope is returned. Membership reduction revokes those rows transactionally; every subsequent device bundle fetch merges the bounded, unexpired PostgreSQL revocation set into `revoked_capabilities`. If the authority projection is missing, unavailable, malformed, or exceeds the ControlBundle protocol bound, issuance/bundle generation fails closed. Existing installed bundles learn the change on their next authenticated native refresh; push-triggered refresh is still a production hardening item.
 
-When all Human Auth variables below are present, the Cloud runtime constructs PostgreSQL sessions, immutable upstream-identity membership resolution, durable WebAuthn registration/authentication ceremonies, maintained verifiers, and recent-auth middleware. The BFF token authenticates the Console service only; the browser user receives the role stored in their active PostgreSQL membership. Automated real-PostgreSQL multi-instance E2E, identity provisioning/invitation APIs, session-management UI, and full PostgreSQL control-plane storage remain production gates.
+When all Human Auth variables below are present, the Cloud runtime constructs PostgreSQL sessions, immutable upstream-identity membership resolution, durable WebAuthn registration/authentication ceremonies, maintained verifiers, and recent-auth middleware. The Console BFF authenticates with a compact Ed25519 assertion lasting at most 60 seconds; production Human Auth does not accept a Cloud operator bearer or a caller-supplied member/role. Cloud pins the Console public key, issuer, audience, provider, and origin, atomically consumes the assertion JTI in PostgreSQL, and inserts the session only from the exact active membership row. Full PostgreSQL control-plane storage, recovery/abuse controls, and browser/physical-Mac release qualification remain production gates.
 
 Start the API behind a TLS reverse proxy:
 
@@ -60,12 +60,16 @@ export AGENTPASS_DATABASE_URL='postgresql://agentpass:...@db.example/agentpass?s
 export AGENTPASS_CONSOLE_ORIGIN='https://console.example.com'
 export AGENTPASS_WEBAUTHN_RP_ID='example.com'
 export AGENTPASS_IDENTITY_PROVIDER='chatgpt'
+export AGENTPASS_IDENTITY_ASSERTION_ISSUER='agentpass-console'
+export AGENTPASS_IDENTITY_ASSERTION_AUDIENCE='agentpass-cloud-session'
+export AGENTPASS_IDENTITY_ASSERTION_KID='console-2026-08'
+export AGENTPASS_IDENTITY_ASSERTION_PUBLIC_KEY_PATH=/absolute/protected/agentpass-cloud/console-identity-public.pem
 # Generate once, store in the deployment secret manager, and reuse on every instance:
 export AGENTPASS_HUMAN_CURSOR_SECRET="$(openssl rand -base64 32 | tr '+/' '-_' | tr -d '=\n')"
 npm start
 ```
 
-`AGENTPASS_CONSOLE_ORIGIN` must be an exact HTTPS origin. The RP ID must equal its hostname or be a parent suffix. `AGENTPASS_IDENTITY_PROVIDER` defaults to `chatgpt`; every verified Console subject must have an `upstream_identities` row and an active organization membership before session issuance. `AGENTPASS_HUMAN_CURSOR_SECRET` must be one canonical, unpadded, 32-byte base64url value shared by every Cloud API instance. It authenticates opaque organization/member/invitation cursors and is never returned as configuration metadata. Rotating it invalidates outstanding cursors, so rotate during a controlled deployment and let clients restart pagination. Omitting all three Human Auth selectors keeps the self-hosted compatibility runtime; configuring Human Auth without the cursor secret fails startup.
+`AGENTPASS_CONSOLE_ORIGIN` must be an exact HTTPS origin. The RP ID must equal its hostname or be a parent suffix. `AGENTPASS_IDENTITY_PROVIDER` defaults to `chatgpt`; every verified Console subject must have an `upstream_identities` row and an active organization membership before session issuance. The identity assertion public-key file must be a regular owner-only Ed25519 SPKI PEM file; missing or unsafe assertion configuration fails startup. The matching private key belongs only in the Console deployment secret manager. `AGENTPASS_HUMAN_CURSOR_SECRET` must be one canonical, unpadded, 32-byte base64url value shared by every Cloud API instance. It authenticates opaque organization/member/invitation cursors and is never returned as configuration metadata. Rotating it invalidates outstanding cursors, so rotate during a controlled deployment and let clients restart pagination. Omitting all three Human Auth selectors keeps the self-hosted compatibility runtime; partially configuring Human Auth fails startup.
 
 The process binds loopback by default. Terminate with SIGINT/SIGTERM for graceful shutdown. Device replay evidence and both admission/principal rate-limit buckets survive restart. The file store takes an exclusive process lock and refuses a second writer. For multi-instance production, replace the reference file store, replay cache, and limiters with transactional shared storage; never share the JSON data directory between processes.
 

@@ -14,14 +14,18 @@ npm run dev
 npm run build
 ```
 
-The legacy server-side operator bridge requires `AGENTPASS_CLOUD_API_URL`, `AGENTPASS_ORGANIZATION_ID`, `AGENTPASS_CLOUD_TOKEN`, `AGENTPASS_CONSOLE_CURSOR_SECRET`, and `AGENTPASS_OPERATOR_USER_IDS`. Generate the cursor secret as 32 random bytes encoded with unpadded base64url (for example, `openssl rand -base64 32 | tr '+/' '-_' | tr -d '='`). The operator IDs form a comma-separated allowlist of stable SIWC user IDs. Authentication alone never grants use of the privileged Cloud token; a signed-in user must also be in this explicit operator allowlist. Keep the Site private and store both secrets only as server secrets. Human-session organization and security routes do not forward this Cloud token.
+Production human-session bootstrap requires these server-only settings: `AGENTPASS_CLOUD_API_URL`, `AGENTPASS_CONSOLE_ORIGIN`, `AGENTPASS_ORGANIZATION_ID`, `AGENTPASS_IDENTITY_ASSERTION_PRIVATE_KEY` (PKCS#8 Ed25519 PEM), `AGENTPASS_IDENTITY_ASSERTION_ISSUER`, `AGENTPASS_IDENTITY_ASSERTION_AUDIENCE`, and `AGENTPASS_IDENTITY_ASSERTION_KID`. `AGENTPASS_IDENTITY_PROVIDER` defaults to `chatgpt`. The private key and all assertion configuration stay in the server environment; they are never rendered or returned to the browser. Production login does not require `AGENTPASS_CLOUD_TOKEN` or `AGENTPASS_OPERATOR_USER_IDS`.
 
-Deploy this console only on a hosting path that injects SIWC identity headers after authentication and strips client-supplied copies. Do not expose the application server directly behind a generic proxy that forwards `oai-authenticated-user-*` headers. The explicit operator allowlist is mandatory, but it does not make forgeable upstream identity headers trustworthy.
+After `getChatGPTUser` has verified the platform SIWC identity, the BFF signs one compact, short-lived identity assertion and sends it to Cloud only in the `agentpass-console-identity` request header. The protected header is exactly `{alg:"EdDSA",kid,typ:"agentpass.console.identity",version:1}`. The payload is exactly `{aud,exp,iat,iss,jti,nbf,org,origin,provider,sub}`; it contains no `kid` or `redirect_uri`. The signature covers `base64url(header) + "." + base64url(payload)`. The session POST body sent upstream is always exactly `{}`. Cloud verifies and consumes `jti` once, then returns only the rotated HttpOnly session cookie and CSRF/session metadata.
+
+The old operator-token bootstrap is available only when `NODE_ENV` is `development` or `test` and `AGENTPASS_ALLOW_LEGACY_SESSION_BOOTSTRAP=true`, together with its explicit token and operator allowlist. Never enable that path in production. The `/api/console` control-plane bridge also uses the Human session cookie/CSRF boundary in production; its operator-bearer compatibility mode requires the separate explicit `AGENTPASS_ALLOW_LEGACY_OPERATOR_BRIDGE=true` development/test flag.
+
+Deploy this console only on a hosting path that injects SIWC identity headers after authentication and strips client-supplied copies. Do not expose the application server directly behind a generic proxy that forwards `oai-authenticated-user-*` headers. The legacy operator bridge still requires its explicit allowlist when enabled for development/test, but that allowlist is not used by the production human-session bootstrap and does not make forgeable upstream identity headers trustworthy.
 
 ## Security boundary
 
-- SIWC establishes identity; `AGENTPASS_OPERATOR_USER_IDS` supplies authorization.
-- The Cloud bearer token stays server-side and is never returned to the browser.
+- Platform-verified SIWC establishes the upstream identity; Cloud resolves the immutable provider/subject membership.
+- Production session bootstrap uses a server-only Ed25519 assertion header; the browser never receives the assertion or a Cloud bearer token.
 - The bridge enforces same-origin requests, strict request schemas, bounded responses, no redirects, and `no-store` caching.
 - Device enrollment requires a recent WebAuthn proof, forwards it only to the enrollment endpoint, and returns the one-time credential through a separately validated `no-store` response. The UI keeps that response only in React memory; reload or “表示を消す” removes it.
 - Emergency stop, revocation, policy, device, agent, capability, and audit operations all persist in the Cloud API; the UI has no shadow state.
@@ -36,7 +40,7 @@ agentpass setup continue --execute \
   --enrollment-stdin < enrollment.json
 ```
 
-The current Console consumes the Cloud API's recent-WebAuthn verifier seam. A browser-native WebAuthn ceremony and durable human sessions are the next production milestone; until that is connected, the identity layer must supply the proof out of band and the Cloud API continues to fail closed when no verifier is configured.
+The Console bootstraps a durable Human session first, then performs browser-native WebAuthn registration and operation-bound recent-auth ceremonies through the same-origin BFF. The enrollment credential is displayed once in memory and is never written to browser storage. A full Playwright virtual-authenticator suite and physical-Mac qualification remain release gates.
 
 ## Useful Commands
 

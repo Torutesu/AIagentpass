@@ -1,11 +1,15 @@
+import { assertCompactIdentityAssertion, createIdentityAssertionSigner, IDENTITY_ASSERTION_HEADER } from "./identity-assertion.mjs";
+
 const MAX_BODY_BYTES = 128 * 1024;
 const MAX_RESPONSE_BYTES = 256 * 1024;
 const DEFAULT_TIMEOUT_MS = 8_000;
 const ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 const OPAQUE_TOKEN = /^[A-Za-z0-9_-]{43}$/;
 const SESSION_COOKIE_NAME = "__Host-agentpass_session";
+const SESSION_KEYS = Object.freeze(["version", "session_id", "member_id", "organization_id", "role", "created_at", "expires_at", "recent_auth_at"]);
+const SESSION_ROLES = new Set(["owner", "admin", "auditor", "viewer"]);
 const ROUTES = new Map([
-  ["/api/auth/session", Object.freeze({ cloudPath: "/api/auth/session", session: "bootstrap" })],
+  ["/api/auth/session", Object.freeze({ cloudPath: "/api/auth/session", session: "bootstrap", body: "session-bootstrap", requireSetCookie: true })],
   ["/api/auth/webauthn/options", Object.freeze({ cloudPath: "/api/auth/webauthn/options", session: "human", requireCookie: true, requireCsrf: true })],
   ["/api/auth/webauthn/verify", Object.freeze({ cloudPath: "/api/auth/webauthn/verify", session: "human", requireCookie: true, requireCsrf: true })],
   ["/api/auth/webauthn/registration/options", Object.freeze({ cloudPath: "/api/auth/webauthn/registration/options", session: "human", requireCookie: true, requireCsrf: true })],
@@ -39,8 +43,9 @@ export async function handleHumanAuthRequest(request, options = {}) {
     const origin = request.headers.get("origin");
     if (origin !== url.origin || origin === "null") fail(403, "origin_not_allowed", "The request origin is not allowed");
 
-    const config = readConfig(options.env, { legacyBootstrap: route.session === "bootstrap" });
-    const user = route.session === "bootstrap" ? await requireLegacyBootstrapUser(request, options, config) : undefined;
+    const config = readConfig(options.env, { bootstrap: route.session === "bootstrap" });
+    if (route.session === "bootstrap" && config.origin !== undefined && origin !== config.origin) fail(403, "origin_not_allowed", "The request origin is not allowed");
+    const user = route.session === "bootstrap" ? await requireBootstrapUser(request, options, config) : undefined;
     const body = route.body === "none" ? await readNoBody(request) : await readBody(request, route);
     const fetchImpl = options.fetchImpl ?? options.fetch ?? globalThis.fetch;
     if (typeof fetchImpl !== "function") fail(503, "cloud_api_unavailable", "Cloud API is unavailable");
@@ -54,9 +59,25 @@ export async function handleHumanAuthRequest(request, options = {}) {
     });
     const cookie = normalizeSessionCookie(request.headers.get("cookie"), { required: route.requireCookie === true });
     if (route.session === "human" && cookie !== null) headers.set("cookie", cookie);
+    let upstreamBody = body;
     if (route.session === "bootstrap" && user !== undefined) {
-      headers.set("authorization", `Bearer ${config.token}`);
-      headers.set("agentpass-console-user-id", user.userId);
+      if (config.mode === "legacy") {
+        headers.set("authorization", `Bearer ${config.token}`);
+        headers.set("agentpass-console-user-id", user.userId);
+      } else {
+        const signer = options.signIdentityAssertion ?? createIdentityAssertionSigner(config.assertion);
+        const compact = await signer.sign({
+          subject: user.userId,
+          organizationId: config.organizationId,
+          origin,
+          now: options.now?.() ?? Date.now(),
+        });
+        assertCompactIdentityAssertion(compact, { now: options.now?.() ?? Date.now(), expected: config.assertion });
+        headers.set(IDENTITY_ASSERTION_HEADER, compact);
+        // The assertion is transport metadata. The Cloud session endpoint has
+        // one exact request body for this flow and never parses browser data.
+        upstreamBody = new TextEncoder().encode("{}");
+      }
     }
     const csrf = request.headers.get("agentpass-csrf");
     if (route.requireCsrf) {
@@ -92,14 +113,14 @@ export async function handleHumanAuthRequest(request, options = {}) {
         signal: controller.signal,
       };
       init.method = request.method;
-      if (body !== undefined) init.body = body;
+      if (upstreamBody !== undefined) init.body = upstreamBody;
       upstream = await fetchImpl(new URL(route.cloudPath, config.url), init);
     } catch {
       fail(503, "cloud_api_unavailable", "Cloud API is unavailable");
     } finally {
       clearTimeout(timeout);
     }
-    return await relayResponse(upstream, { allowSetCookie: route.session === "bootstrap" || route.allowSetCookie === true, clearCookieOnly: route.clearCookieOnly === true });
+    return await relayResponse(upstream, { allowSetCookie: route.session === "bootstrap" || route.allowSetCookie === true, clearCookieOnly: route.clearCookieOnly === true, requireSetCookie: route.requireSetCookie === true, bootstrap: route.session === "bootstrap" });
   } catch (error) {
     const mapped = error instanceof HumanAuthBridgeError
       ? error
@@ -108,13 +129,13 @@ export async function handleHumanAuthRequest(request, options = {}) {
   }
 }
 
-async function requireLegacyBootstrapUser(request, options, config) {
+async function requireBootstrapUser(request, options, config) {
   const getUser = options.getSiwcUser ?? options.getUser;
   if (typeof getUser !== "function") fail(503, "identity_unavailable", "Identity verification is unavailable");
   let user;
   try { user = await getUser(request); } catch { fail(401, "authentication_required", "Authentication is required"); }
   if (!user || typeof user.userId !== "string" || !ID.test(user.userId)) fail(401, "authentication_required", "Authentication is required");
-  if (!config.operatorUserIds.has(user.userId)) fail(403, "operator_access_denied", "Operator access is denied");
+  if (config.mode === "legacy" && !config.operatorUserIds.has(user.userId)) fail(403, "operator_access_denied", "Operator access is denied");
   return user;
 }
 
@@ -144,6 +165,10 @@ async function readNoBody(request) {
 
 function validateBody(value, shape) {
   if (!shape) return;
+  if (shape === "session-bootstrap") {
+    if (!isExactObject(value, [])) fail(400, "invalid_request", "The session request is invalid");
+    return;
+  }
   if (shape === "empty") {
     if (!isExactObject(value, [])) fail(400, "invalid_request", "The security request is invalid");
     return;
@@ -181,7 +206,7 @@ function validateBody(value, shape) {
   fail(500, "human_auth_bridge_failed", "Authentication is unavailable");
 }
 
-async function relayResponse(response, { allowSetCookie = false, clearCookieOnly = false } = {}) {
+async function relayResponse(response, { allowSetCookie = false, clearCookieOnly = false, requireSetCookie = false, bootstrap = false } = {}) {
   if (!response || typeof response.status !== "number" || response.status < 200 || response.status > 599 || (response.status >= 300 && response.status < 400)) fail(502, "cloud_api_invalid_response", "Cloud API response was invalid");
   const type = response.headers?.get("content-type") ?? "";
   if (!/^application\/json(?:\s*;|\s*$)/i.test(type)) fail(502, "cloud_api_invalid_response", "Cloud API response was invalid");
@@ -191,35 +216,75 @@ async function relayResponse(response, { allowSetCookie = false, clearCookieOnly
   if (bytes.byteLength > MAX_RESPONSE_BYTES) fail(502, "cloud_api_invalid_response", "Cloud API response was invalid");
   let value;
   try { value = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes)); } catch { fail(502, "cloud_api_invalid_response", "Cloud API response was invalid"); }
-  const headers = new Headers({ "content-type": "application/json; charset=utf-8", "cache-control": "no-store, max-age=0", pragma: "no-cache", "x-content-type-options": "nosniff" });
+  if (bootstrap) value = normalizeBootstrapResponse(value, response.status >= 200 && response.status < 300);
+  const headers = new Headers({ "content-type": "application/json; charset=utf-8", "cache-control": "no-store, max-age=0", pragma: "no-cache", expires: "0", "x-content-type-options": "nosniff", "referrer-policy": "no-referrer" });
   const setCookie = response.headers.get("set-cookie");
   if (setCookie !== null && !allowSetCookie) fail(502, "cloud_api_invalid_response", "Cloud API response was invalid");
+  if (requireSetCookie && response.status >= 200 && response.status < 300 && setCookie === null) fail(502, "cloud_api_invalid_response", "Cloud API response was invalid");
   if (allowSetCookie && setCookie !== null) {
     const cookiePattern = clearCookieOnly
       ? /^__Host-agentpass_session=; Path=\/; HttpOnly; Secure; SameSite=Strict; Max-Age=0$/
-      : /^__Host-agentpass_session=(?:[A-Za-z0-9_-]{43}|); Path=\/; HttpOnly; Secure; SameSite=Strict(?:; Max-Age=(?:0|[1-9]\d*))?$/;
+      : /^__Host-agentpass_session=[A-Za-z0-9_-]{43}; Path=\/; HttpOnly; Secure; SameSite=Strict(?:; Max-Age=(?:0|[1-9]\d*))?$/;
     if (!cookiePattern.test(setCookie)) fail(502, "cloud_api_invalid_response", "Cloud API response was invalid");
     headers.set("set-cookie", setCookie);
   }
   return new Response(JSON.stringify(value), { status: response.status, headers });
 }
 
-function readConfig(injected, { legacyBootstrap = false } = {}) {
+function normalizeBootstrapResponse(value, success) {
+  if (!success) {
+    if (!isExactObject(value, ["error"]) || !isExactObject(value.error, ["code", "message"]) || typeof value.error.code !== "string" || typeof value.error.message !== "string" || value.error.code.length > 128 || value.error.message.length > 512 || hasControl(value.error.code) || hasControl(value.error.message)) fail(502, "cloud_api_invalid_response", "Cloud API response was invalid");
+    return { error: { code: value.error.code, message: value.error.message } };
+  }
+  if (!isExactObject(value, ["session", "csrf_token"]) || !isExactObject(value.session, SESSION_KEYS)) fail(502, "cloud_api_invalid_response", "Cloud API response was invalid");
+  const session = value.session;
+  if (session.version !== 1 || !isUuid(session.session_id) || !isUuid(session.member_id) || !isUuid(session.organization_id) || !SESSION_ROLES.has(session.role) || !isRfc3339(session.created_at) || !isRfc3339(session.expires_at) || (session.recent_auth_at !== null && !isRfc3339(session.recent_auth_at)) || !isOpaqueToken(value.csrf_token)) {
+    fail(502, "cloud_api_invalid_response", "Cloud API response was invalid");
+  }
+  return { session: { ...session }, csrf_token: value.csrf_token };
+}
+
+function isConfiguredOrigin(value) {
+  if (typeof value !== "string" || value.length === 0 || value.endsWith("/") || value === "null") return false;
+  try {
+    const url = new URL(value);
+    return url.origin === value && (url.protocol === "https:" || (url.protocol === "http:" && ["localhost", "127.0.0.1", "::1"].includes(url.hostname))) && !url.username && !url.password && !url.search && !url.hash;
+  } catch {
+    return false;
+  }
+}
+
+function readConfig(injected, { bootstrap = false } = {}) {
   const source = injected ?? (typeof process === "undefined" ? undefined : process.env);
   const urlValue = source?.AGENTPASS_CLOUD_API_URL;
-  const token = legacyBootstrap ? source?.AGENTPASS_CLOUD_TOKEN : undefined;
-  const operators = legacyBootstrap && typeof source?.AGENTPASS_OPERATOR_USER_IDS === "string" ? source.AGENTPASS_OPERATOR_USER_IDS.split(",").map((item) => item.trim()).filter(Boolean) : [];
+  const legacy = bootstrap && source?.AGENTPASS_ALLOW_LEGACY_SESSION_BOOTSTRAP === "true" && ["development", "test"].includes(source?.NODE_ENV);
+  const token = legacy ? source?.AGENTPASS_CLOUD_TOKEN : undefined;
+  const operators = legacy && typeof source?.AGENTPASS_OPERATOR_USER_IDS === "string" ? source.AGENTPASS_OPERATOR_USER_IDS.split(",").map((item) => item.trim()).filter(Boolean) : [];
   let url;
   try { url = new URL(urlValue); } catch { fail(503, "cloud_api_unavailable", "Cloud API is unavailable"); }
   const insecureLoopback = source?.AGENTPASS_ALLOW_INSECURE_LOOPBACK_CLOUD_API === "true" && url.protocol === "http:" && ["127.0.0.1", "::1", "localhost"].includes(url.hostname);
   if ((url.protocol !== "https:" && !insecureLoopback) || url.username || url.password || url.search || url.hash || url.pathname !== "/") fail(503, "cloud_api_unavailable", "Cloud API is unavailable");
-  if (legacyBootstrap) {
-    if (source?.AGENTPASS_ALLOW_LEGACY_SESSION_BOOTSTRAP !== "true" || !["development", "test"].includes(source?.NODE_ENV)) fail(503, "legacy_session_bootstrap_disabled", "Legacy session bootstrap is disabled");
-    if (typeof token !== "string" || token.length < 1 || token.length > 8192 || hasControl(token) || operators.length < 1 || operators.length > 100 || new Set(operators).size !== operators.length || operators.some((item) => !ID.test(item))) fail(503, "cloud_api_unavailable", "Cloud API is unavailable");
-  }
   const rawTimeout = source?.AGENTPASS_CLOUD_TIMEOUT_MS;
   const timeoutMs = typeof rawTimeout === "string" && /^\d+$/.test(rawTimeout) ? Math.max(1000, Math.min(30_000, Number(rawTimeout))) : DEFAULT_TIMEOUT_MS;
-  return { url, ...(legacyBootstrap ? { token, operatorUserIds: new Set(operators) } : {}), timeoutMs };
+  if (bootstrap && legacy) {
+    if (typeof token !== "string" || token.length < 1 || token.length > 8192 || hasControl(token) || operators.length < 1 || operators.length > 100 || new Set(operators).size !== operators.length || operators.some((item) => !ID.test(item))) fail(503, "cloud_api_unavailable", "Cloud API is unavailable");
+    return { url, mode: "legacy", token, operatorUserIds: new Set(operators), timeoutMs };
+  }
+  if (bootstrap) {
+    const organizationId = source?.AGENTPASS_ORGANIZATION_ID;
+    const consoleOrigin = source?.AGENTPASS_CONSOLE_ORIGIN;
+    if (!isUuid(organizationId) || !isConfiguredOrigin(consoleOrigin)) fail(503, "identity_unavailable", "Identity verification is unavailable");
+    const assertion = {
+      privateKeyPem: source?.AGENTPASS_IDENTITY_ASSERTION_PRIVATE_KEY,
+      issuer: source?.AGENTPASS_IDENTITY_ASSERTION_ISSUER,
+      audience: source?.AGENTPASS_IDENTITY_ASSERTION_AUDIENCE,
+      keyId: source?.AGENTPASS_IDENTITY_ASSERTION_KID,
+      provider: source?.AGENTPASS_IDENTITY_PROVIDER ?? "chatgpt",
+    };
+    try { createIdentityAssertionSigner(assertion); } catch { fail(503, "identity_unavailable", "Identity verification is unavailable"); }
+    return { url, mode: "assertion", organizationId: organizationId.toLowerCase(), origin: consoleOrigin, assertion, timeoutMs };
+  }
+  return { url, timeoutMs };
 }
 
 function json(status, body, extra) {

@@ -161,6 +161,20 @@ type ToastTone = "success" | "error";
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const BASE64URL_CSRF = /^[A-Za-z0-9_-]{43}$/;
 const RECENT_AUTH_OPERATION = "device.enrollment.issue";
+const SESSION_BOOTSTRAP_PATH = "/api/auth/session";
+const CSRF_HEADER = "agentpass-csrf";
+
+type ConsoleSession = Readonly<{ organizationId: string; csrfToken: string }>;
+
+class ConsoleSessionError extends Error {
+  readonly status?: number;
+
+  constructor(message: string, status?: number) {
+    super(message);
+    this.name = "ConsoleSessionError";
+    this.status = status;
+  }
+}
 
 class EnrollmentFlowError extends Error {
   readonly code: "session" | "enrollment" | "unsupported";
@@ -182,40 +196,154 @@ function hasExactKeys(value: Record<string, unknown>, expected: string[]): boole
   return actual.length === sortedExpected.length && actual.every((key, index) => key === sortedExpected[index]);
 }
 
-function parseSessionBootstrap(value: unknown): { organizationId: string; csrfToken: string } {
-  if (!isPlainRecord(value) || !hasExactKeys(value, ["session", "csrf_token"])) throw new EnrollmentFlowError("session", "セッションを確認できませんでした。ページを再読み込みして、もう一度お試しください。");
+function parseSessionBootstrap(value: unknown): ConsoleSession {
+  if (!isPlainRecord(value) || !hasExactKeys(value, ["session", "csrf_token"])) throw new ConsoleSessionError("セッションを確認できませんでした。ページを再読み込みして、もう一度お試しください。");
   const session = value.session;
   const csrfToken = value.csrf_token;
   if (!isPlainRecord(session) || typeof session.organization_id !== "string" || !UUID.test(session.organization_id) || typeof csrfToken !== "string" || !BASE64URL_CSRF.test(csrfToken)) {
-    throw new EnrollmentFlowError("session", "セッションを確認できませんでした。ページを再読み込みして、もう一度お試しください。");
+    throw new ConsoleSessionError("セッションを確認できませんでした。ページを再読み込みして、もう一度お試しください。");
   }
   return { organizationId: session.organization_id, csrfToken };
 }
 
-async function startEnrollmentSession(): Promise<{ organizationId: string; csrfToken: string }> {
+function abortError(): DOMException {
+  return new DOMException("The operation was aborted", "AbortError");
+}
+
+function throwIfAborted(signal?: AbortSignal): void {
+  if (signal?.aborted) throw abortError();
+}
+
+function isAbortError(error: unknown): boolean {
+  return error instanceof DOMException && error.name === "AbortError";
+}
+
+function clearConsoleSessionOnUnauthorized(error: unknown): void {
+  if (error instanceof WebAuthnClientError && (error.status === 401 || error.status === 403)) consoleSessionContext.clear();
+}
+
+function withAbort<T>(promise: Promise<T>, signal?: AbortSignal): Promise<T> {
+  throwIfAborted(signal);
+  if (!signal) return promise;
+  return new Promise<T>((resolve, reject) => {
+    const onAbort = () => reject(abortError());
+    signal.addEventListener("abort", onAbort, { once: true });
+    promise.then((value) => {
+      signal.removeEventListener("abort", onAbort);
+      resolve(value);
+    }, (error: unknown) => {
+      signal.removeEventListener("abort", onAbort);
+      reject(error);
+    });
+  });
+}
+
+async function bootstrapConsoleSession(signal?: AbortSignal): Promise<ConsoleSession> {
+  throwIfAborted(signal);
   let response: Response;
   try {
-    response = await fetch("/api/auth/session", {
+    response = await fetch(SESSION_BOOTSTRAP_PATH, {
       method: "POST",
       headers: { accept: "application/json", "content-type": "application/json" },
       body: "{}",
       cache: "no-store",
       credentials: "same-origin",
       redirect: "error",
+      signal,
     });
-  } catch {
-    throw new EnrollmentFlowError("session", "セッションを確認できませんでした。ページを再読み込みして、もう一度お試しください。");
+  } catch (error) {
+    if (signal?.aborted || isAbortError(error)) throw abortError();
+    throw new ConsoleSessionError("セッションを確認できませんでした。ページを再読み込みして、もう一度お試しください。");
   }
   if (!response.ok || !/^application\/json(?:\s*;|\s*$)/i.test(response.headers.get("content-type") ?? "")) {
-    throw new EnrollmentFlowError("session", "セッションを確認できませんでした。ページを再読み込みして、もう一度お試しください。");
+    throw new ConsoleSessionError("セッションを確認できませんでした。ページを再読み込みして、もう一度お試しください。", response.status);
   }
   let payload: unknown;
   try {
     payload = await response.json();
   } catch {
-    throw new EnrollmentFlowError("session", "セッションを確認できませんでした。ページを再読み込みして、もう一度お試しください。");
+    throw new ConsoleSessionError("セッションを確認できませんでした。ページを再読み込みして、もう一度お試しください。", response.status);
   }
   return parseSessionBootstrap(payload);
+}
+
+function createConsoleSessionContext() {
+  let result: ConsoleSession | undefined;
+  let pending: Promise<ConsoleSession> | undefined;
+
+  const get = (signal?: AbortSignal): Promise<ConsoleSession> => {
+    throwIfAborted(signal);
+    if (result) return Promise.resolve(result);
+    if (!pending) {
+      const current = bootstrapConsoleSession(signal);
+      const shared = current.then((value) => {
+        result = Object.freeze(value);
+        if (pending === shared) pending = undefined;
+        return result;
+      });
+      pending = shared;
+      void shared.catch(() => {
+        if (pending === shared) pending = undefined;
+      });
+    }
+    return withAbort(pending, signal);
+  };
+
+  const clear = (session?: ConsoleSession): void => {
+    if (!session || result === session) result = undefined;
+  };
+
+  return Object.freeze({ get, clear });
+}
+
+const consoleSessionContext = createConsoleSessionContext();
+
+let nextEnrollmentStoreId = 0;
+const enrollmentStores = new Map<number, Record<string, string>>();
+
+function allocateEnrollmentStoreId(): number {
+  nextEnrollmentStoreId += 1;
+  return nextEnrollmentStoreId;
+}
+
+function readEnrollmentStore(id: number): Record<string, string> | undefined {
+  return enrollmentStores.get(id);
+}
+
+function writeEnrollmentStore(id: number, value: Record<string, string>): void {
+  enrollmentStores.set(id, value);
+}
+
+function clearEnrollmentStore(id: number): void {
+  enrollmentStores.delete(id);
+}
+
+function isMutationMethod(method: string): boolean {
+  return method !== "GET" && method !== "HEAD" && method !== "OPTIONS";
+}
+
+async function fetchConsole(path: string, init: RequestInit = {}): Promise<Response> {
+  const session = await consoleSessionContext.get(init.signal ?? undefined);
+  const method = String(init.method ?? "GET").toUpperCase();
+  const headers = new Headers(init.headers);
+  headers.set("accept", "application/json");
+  if (isMutationMethod(method)) headers.set(CSRF_HEADER, session.csrfToken);
+  let response: Response;
+  try {
+    response = await fetch(path, {
+      ...init,
+      method,
+      headers,
+      cache: "no-store",
+      credentials: "same-origin",
+      redirect: "error",
+    });
+  } catch (error) {
+    if (init.signal?.aborted || isAbortError(error)) throw abortError();
+    throw error;
+  }
+  if (response.status === 401 || response.status === 403) consoleSessionContext.clear(session);
+  return response;
 }
 
 function supportsWebAuthn(): boolean {
@@ -227,6 +355,7 @@ function supportsWebAuthnRegistration(): boolean {
 }
 
 function enrollmentErrorMessage(error: unknown): string {
+  if (error instanceof ConsoleSessionError) return error.message;
   if (error instanceof EnrollmentFlowError) return error.message;
   if (error instanceof WebAuthnClientError) {
     if (error.code === "webauthn_unavailable" || error.code === "fetch_unavailable") return "このブラウザはTouch ID/パスキーに対応していません。対応ブラウザでお試しください。";
@@ -239,6 +368,7 @@ function enrollmentErrorMessage(error: unknown): string {
 }
 
 function passkeyErrorMessage(error: unknown): string {
+  if (error instanceof ConsoleSessionError) return error.message;
   if (error instanceof EnrollmentFlowError) return error.message;
   if (error instanceof WebAuthnClientError) {
     if (error.code === "webauthn_unavailable" || error.code === "fetch_unavailable") return "このブラウザはパスキー登録に対応していません。対応ブラウザでお試しください。";
@@ -379,7 +509,8 @@ function SurfaceHeader({ eyebrow, title, copy }: { eyebrow: string; title: strin
 
 function SetupSurface({ data, goTo, operate, online }: { data: AgentPassInitialData; goTo: (view: ConsoleView) => void; operate: (operation: string, body: Record<string, unknown>, success: string) => Promise<void>; online: boolean }) {
   const [deviceLabel, setDeviceLabel] = useState("");
-  const [enrollment, setEnrollment] = useState<Record<string, string> | null>(null);
+  const [enrollmentStoreId] = useState(allocateEnrollmentStoreId);
+  const [enrollmentVisible, setEnrollmentVisible] = useState(false);
   const [enrollmentPending, setEnrollmentPending] = useState(false);
   const [enrollmentError, setEnrollmentError] = useState("");
   const enrollmentInFlight = useRef(false);
@@ -401,28 +532,29 @@ function SetupSurface({ data, goTo, operate, online }: { data: AgentPassInitialD
     if (enrollmentInFlight.current) return;
     enrollmentInFlight.current = true;
     setEnrollmentPending(true);
-    setEnrollment(null);
+    clearEnrollmentStore(enrollmentStoreId);
+    setEnrollmentVisible(false);
     setEnrollmentError("");
     try {
-      const { organizationId, csrfToken } = await startEnrollmentSession();
+      const { organizationId, csrfToken } = await consoleSessionContext.get();
       if (!supportsWebAuthn()) throw new EnrollmentFlowError("unsupported", "このブラウザはTouch ID/パスキーに対応していません。対応ブラウザでお試しください。");
       const { authorization_id } = await authenticateRecentAuth({
         operation: RECENT_AUTH_OPERATION,
         organizationId,
         csrfToken,
       });
-      const response = await fetch("/api/console?operation=issue-device-enrollment", {
+      const response = await fetchConsole("/api/console?operation=issue-device-enrollment", {
         method: "POST",
-        cache: "no-store",
-        credentials: "same-origin",
         headers: { "content-type": "application/json", "idempotency-key": crypto.randomUUID(), "agentpass-recent-auth": authorization_id },
         body: JSON.stringify({ label: deviceLabel.trim(), platform: "macos", ttl_ms: 10 * 60 * 1000 }),
       });
       let payload: unknown;
       try { payload = await response.json(); } catch { throw new EnrollmentFlowError("enrollment", "登録情報を発行できませんでした。接続と権限を確認して、もう一度お試しください。"); }
       if (!response.ok || !isPlainRecord(payload) || !isPlainRecord(payload.enrollment)) throw new EnrollmentFlowError("enrollment", "登録情報を発行できませんでした。接続と権限を確認して、もう一度お試しください。");
-      setEnrollment(payload.enrollment as Record<string, string>);
+      writeEnrollmentStore(enrollmentStoreId, payload.enrollment as Record<string, string>);
+      setEnrollmentVisible(true);
     } catch (error) {
+      clearConsoleSessionOnUnauthorized(error);
       setEnrollmentError(enrollmentErrorMessage(error));
     } finally {
       enrollmentInFlight.current = false;
@@ -436,23 +568,29 @@ function SetupSurface({ data, goTo, operate, online }: { data: AgentPassInitialD
     setPasskeyRegistered(false);
     setPasskeyError("");
     try {
-      const { organizationId, csrfToken } = await startEnrollmentSession();
+      const { organizationId, csrfToken } = await consoleSessionContext.get();
       if (!supportsWebAuthnRegistration()) throw new EnrollmentFlowError("unsupported", "このブラウザはパスキー登録に対応していません。対応ブラウザでお試しください。");
       await registerPasskey({ organizationId, csrfToken });
       setPasskeyRegistered(true);
     } catch (error) {
+      clearConsoleSessionOnUnauthorized(error);
       setPasskeyError(passkeyErrorMessage(error));
     } finally {
       passkeyInFlight.current = false;
       setPasskeyPending(false);
     }
   };
-  const enrollmentJson = enrollment ? JSON.stringify({ enrollment }, null, 2) : "";
+  const enrollmentPayload = readEnrollmentStore(enrollmentStoreId);
+  const enrollmentJson = enrollmentPayload ? JSON.stringify({ enrollment: enrollmentPayload }, null, 2) : "";
+  useEffect(() => () => clearEnrollmentStore(enrollmentStoreId), [enrollmentStoreId]);
   useEffect(() => {
-    if (!enrollment) return;
-    const timer = window.setTimeout(() => setEnrollment(null), 5 * 60 * 1000);
+    if (!enrollmentVisible) return;
+    const timer = window.setTimeout(() => {
+      clearEnrollmentStore(enrollmentStoreId);
+      setEnrollmentVisible(false);
+    }, 5 * 60 * 1000);
     return () => window.clearTimeout(timer);
-  }, [enrollment]);
+  }, [enrollmentStoreId, enrollmentVisible]);
   const copyEnrollment = async () => {
     await navigator.clipboard.writeText(enrollmentJson);
     window.setTimeout(() => void navigator.clipboard.writeText("").catch(() => {}), 60_000);
@@ -491,7 +629,7 @@ function SetupSurface({ data, goTo, operate, online }: { data: AgentPassInitialD
           <div className="form-grid"><label>端末名<input required maxLength={128} autoComplete="off" value={deviceLabel} onChange={(event) => setDeviceLabel(event.target.value)} /></label></div>
           <button className="secondary-button" type="button" disabled={!online || enrollmentPending || !deviceLabel.trim()} onClick={issueEnrollment}>{enrollmentPending ? "認証・発行中…" : "Touch ID/パスキー確認"}</button>
           {enrollmentError ? <p className="form-error" role="alert">{enrollmentError}</p> : null}
-          {enrollment ? <div className="enrollment-result" aria-live="polite"><p className="row-title">一度だけ表示しています</p><p className="surface-card-copy">下のJSONをMacへ安全に渡し、標準入力からセットアップしてください。5分後または再読込で消え、コピー内容も60秒後に消去を試みます。</p><pre className="secret-output">{enrollmentJson}</pre><div className="stop-action-row"><button className="primary-button" type="button" onClick={() => void copyEnrollment()}>JSONをコピー</button><button className="text-button" type="button" onClick={() => setEnrollment(null)}>表示を消す</button></div><code className="command-hint">agentpass setup continue --execute --enrollment-url &lt;Cloud API URL&gt; --enrollment-stdin</code></div> : null}
+          {enrollmentVisible ? <div className="enrollment-result" aria-live="polite"><p className="row-title">一度だけ表示しています</p><p className="surface-card-copy">下のJSONをMacへ安全に渡し、標準入力からセットアップしてください。5分後または再読込で消え、コピー内容も60秒後に消去を試みます。</p><pre className="secret-output">{enrollmentJson}</pre><div className="stop-action-row"><button className="primary-button" type="button" onClick={() => void copyEnrollment()}>JSONをコピー</button><button className="text-button" type="button" onClick={() => { clearEnrollmentStore(enrollmentStoreId); setEnrollmentVisible(false); }}>表示を消す</button></div><code className="command-hint">agentpass setup continue --execute --enrollment-url &lt;Cloud API URL&gt; --enrollment-stdin</code></div> : null}
         </article>
         <article className="surface-card">
           <span className="section-kicker">REGISTER</span><h2 className="surface-card-title">Agentを追加</h2>
@@ -651,7 +789,7 @@ export function AgentPassConsole({ initialData = defaultInitialData }: AgentPass
   const refreshSummary = useCallback(async (signal?: AbortSignal) => {
     setRefreshing(true);
     try {
-      const response = await fetch("/api/console?resource=summary", { cache: "no-store", signal });
+      const response = await fetchConsole("/api/console?resource=summary", { signal });
       if (!response.ok) throw new Error("summary unavailable");
       setData(mergeCloudSummary(initialData, await response.json()));
       setSyncError(false);
@@ -702,8 +840,8 @@ export function AgentPassConsole({ initialData = defaultInitialData }: AgentPass
   useEffect(() => {
     const controller = new AbortController();
     Promise.all([
-      fetch("/api/console?resource=capabilities&limit=100", { cache: "no-store", signal: controller.signal }),
-      fetch("/api/console?resource=revocations&limit=100", { cache: "no-store", signal: controller.signal }),
+      fetchConsole("/api/console?resource=capabilities&limit=100", { signal: controller.signal }),
+      fetchConsole("/api/console?resource=revocations&limit=100", { signal: controller.signal }),
     ]).then(async ([capabilityResponse, revocationResponse]) => {
       const capabilityPayload = capabilityResponse.ok ? await capabilityResponse.json() : {};
       const revocationPayload = revocationResponse.ok ? await revocationResponse.json() : {};
@@ -718,7 +856,7 @@ export function AgentPassConsole({ initialData = defaultInitialData }: AgentPass
   useEffect(() => {
     if (activeView !== "activity") return;
     const controller = new AbortController();
-    fetch("/api/console?resource=admin-audit&limit=100", { cache: "no-store", signal: controller.signal })
+    fetchConsole("/api/console?resource=admin-audit&limit=100", { signal: controller.signal })
       .then(async (response) => response.ok ? response.json() : Promise.reject(new Error("audit unavailable")))
       .then((payload) => {
         const events = Array.isArray(payload.events) ? payload.events as Array<Record<string, unknown>> : [];
@@ -739,7 +877,7 @@ export function AgentPassConsole({ initialData = defaultInitialData }: AgentPass
   const triggerStop = async () => {
     setStopPending(true);
     try {
-      const response = await fetch("/api/console?operation=emergency-stop", {
+      const response = await fetchConsole("/api/console?operation=emergency-stop", {
         method: "POST",
         headers: { "content-type": "application/json", "idempotency-key": crypto.randomUUID() },
         body: JSON.stringify({ reason: "web-console-emergency-stop" }),
@@ -758,7 +896,7 @@ export function AgentPassConsole({ initialData = defaultInitialData }: AgentPass
 
   const operate = async (operation: string, body: Record<string, unknown>, success: string) => {
     try {
-      const response = await fetch(`/api/console?operation=${encodeURIComponent(operation)}`, {
+      const response = await fetchConsole(`/api/console?operation=${encodeURIComponent(operation)}`, {
         method: "POST",
         headers: { "content-type": "application/json", "idempotency-key": crypto.randomUUID() },
         body: JSON.stringify(body),
@@ -766,7 +904,7 @@ export function AgentPassConsole({ initialData = defaultInitialData }: AgentPass
       if (!response.ok) throw new Error("operation rejected");
       showToast(success);
       await refreshSummary();
-      const capabilityResponse = await fetch("/api/console?resource=capabilities&limit=100", { cache: "no-store" });
+      const capabilityResponse = await fetchConsole("/api/console?resource=capabilities&limit=100");
       if (capabilityResponse.ok) {
         const payload = await capabilityResponse.json();
         const records = Array.isArray(payload.capabilities) ? payload.capabilities as Array<Record<string, unknown>> : [];

@@ -1,6 +1,11 @@
 import assert from "node:assert/strict";
+import crypto from "node:crypto";
 import test from "node:test";
 import { createHumanAuthBridge } from "../lib/human-auth-api.mjs";
+import { assertCompactIdentityAssertion, IDENTITY_ASSERTION_HEADER } from "../lib/identity-assertion.mjs";
+
+const identityKeys = crypto.generateKeyPairSync("ed25519");
+const identityPrivateKey = identityKeys.privateKey.export({ type: "pkcs8", format: "pem" });
 
 const env = Object.freeze({
   AGENTPASS_CLOUD_API_URL: "https://cloud.example.test",
@@ -12,8 +17,38 @@ const legacyEnv = Object.freeze({
   AGENTPASS_CLOUD_TOKEN: "server-only-token",
   AGENTPASS_OPERATOR_USER_IDS: "operator-1",
 });
+const productionEnv = Object.freeze({
+  ...env,
+  AGENTPASS_CLOUD_API_URL: "https://cloud.example.test",
+  AGENTPASS_CONSOLE_ORIGIN: "https://console.example.test",
+  AGENTPASS_ORGANIZATION_ID: "11111111-1111-4111-8111-111111111111",
+  AGENTPASS_IDENTITY_ASSERTION_PRIVATE_KEY: identityPrivateKey,
+  AGENTPASS_IDENTITY_ASSERTION_ISSUER: "agentpass-console",
+  AGENTPASS_IDENTITY_ASSERTION_AUDIENCE: "agentpass-cloud",
+  AGENTPASS_IDENTITY_ASSERTION_KID: "console-2026-08",
+  AGENTPASS_IDENTITY_PROVIDER: "chatgpt",
+  NODE_ENV: "production",
+});
 const csrf = "B".repeat(43);
 const sessionCookie = "__Host-agentpass_session=" + "A".repeat(43);
+const organizationId = productionEnv.AGENTPASS_ORGANIZATION_ID;
+
+function sessionResponse(cookie = sessionCookie) {
+  return {
+    session: {
+      version: 1,
+      session_id: "11111111-1111-4111-8111-111111111111",
+      member_id: "22222222-2222-4222-8222-222222222222",
+      organization_id: organizationId,
+      role: "owner",
+      created_at: "2026-08-12T00:00:00.000Z",
+      expires_at: "2026-08-12T01:00:00.000Z",
+      recent_auth_at: null,
+    },
+    csrf_token: csrf,
+    cookie,
+  };
+}
 
 function request(path, { body = {}, headers = {}, method = "POST" } = {}) {
   return new Request(`https://console.example.test${path}`, { method, headers: { origin: "https://console.example.test", "content-type": "application/json", ...headers }, body: method === "POST" ? JSON.stringify(body) : undefined });
@@ -27,7 +62,8 @@ test("bootstraps a Cloud session without exposing the service credential", async
   const calls = [];
   const api = bridge(async (url, init) => {
     calls.push({ url: String(url), init });
-    return new Response(JSON.stringify({ session: { version: 1 }, csrf_token: "B".repeat(43) }), { status: 201, headers: { "content-type": "application/json", "set-cookie": `${sessionCookie}; Path=/; HttpOnly; Secure; SameSite=Strict; Max-Age=3600` } });
+    const result = sessionResponse();
+    return new Response(JSON.stringify({ session: result.session, csrf_token: result.csrf_token }), { status: 201, headers: { "content-type": "application/json", "set-cookie": `${sessionCookie}; Path=/; HttpOnly; Secure; SameSite=Strict; Max-Age=3600` } });
   }, undefined, legacyEnv);
   const response = await api.handle(request("/api/auth/session"));
   assert.equal(response.status, 201);
@@ -43,12 +79,47 @@ test("does not reuse a stale browser session cookie during bootstrap", async () 
   const replacement = "__Host-agentpass_session=" + "C".repeat(43);
   const api = bridge(async (url, init) => {
     calls.push({ url: String(url), init });
-    return new Response(JSON.stringify({ session: { version: 1 }, csrf_token: csrf }), { status: 201, headers: { "content-type": "application/json", "set-cookie": `${replacement}; Path=/; HttpOnly; Secure; SameSite=Strict; Max-Age=3600` } });
+    const result = sessionResponse(replacement);
+    return new Response(JSON.stringify({ session: result.session, csrf_token: result.csrf_token }), { status: 201, headers: { "content-type": "application/json", "set-cookie": `${replacement}; Path=/; HttpOnly; Secure; SameSite=Strict; Max-Age=3600` } });
   }, undefined, legacyEnv);
   const response = await api.handle(request("/api/auth/session", { headers: { cookie: sessionCookie } }));
   assert.equal(response.status, 201);
   assert.equal(calls[0].init.headers.has("cookie"), false);
   assert.equal(response.headers.get("set-cookie"), `${replacement}; Path=/; HttpOnly; Secure; SameSite=Strict; Max-Age=3600`);
+});
+
+test("production bootstrap sends only the compact server identity header and exact empty JSON body", async () => {
+  assert.equal(Object.hasOwn(productionEnv, "AGENTPASS_CLOUD_TOKEN"), false);
+  assert.equal(Object.hasOwn(productionEnv, "AGENTPASS_OPERATOR_USER_IDS"), false);
+  const calls = [];
+  const api = bridge(async (url, init) => {
+    calls.push({ url: String(url), init });
+    const result = sessionResponse();
+    return new Response(JSON.stringify({ session: result.session, csrf_token: result.csrf_token }), { status: 201, headers: { "content-type": "application/json", "set-cookie": `${sessionCookie}; Path=/; HttpOnly; Secure; SameSite=Strict; Max-Age=3600` } });
+  }, { userId: "siwc-subject-1" }, productionEnv);
+  const response = await api.handle(request("/api/auth/session"));
+  assert.equal(response.status, 201);
+  assert.equal(new TextDecoder().decode(calls[0].init.body), "{}");
+  const compact = calls[0].init.headers.get(IDENTITY_ASSERTION_HEADER);
+  assert.equal(typeof compact, "string");
+  const parsed = assertCompactIdentityAssertion(compact, { expected: {
+    issuer: productionEnv.AGENTPASS_IDENTITY_ASSERTION_ISSUER,
+    audience: productionEnv.AGENTPASS_IDENTITY_ASSERTION_AUDIENCE,
+    keyId: productionEnv.AGENTPASS_IDENTITY_ASSERTION_KID,
+    provider: productionEnv.AGENTPASS_IDENTITY_PROVIDER,
+  } });
+  assert.deepEqual(Object.keys(parsed.header).sort(), ["alg", "kid", "typ", "version"]);
+  assert.deepEqual(Object.keys(parsed.payload).sort(), ["aud", "exp", "iat", "iss", "jti", "nbf", "org", "origin", "provider", "sub"]);
+  assert.equal(parsed.header.alg, "EdDSA");
+  assert.equal(parsed.header.typ, "agentpass.console.identity");
+  assert.equal(parsed.payload.sub, "siwc-subject-1");
+  assert.equal(parsed.payload.kid, undefined);
+  assert.equal(parsed.payload.redirect_uri, undefined);
+  const compactParts = compact.split(".");
+  assert.equal(crypto.verify(null, Buffer.from(`${compactParts[0]}.${compactParts[1]}`, "ascii"), identityKeys.publicKey, Buffer.from(compactParts[2], "base64url")), true);
+  assert.equal(calls[0].init.headers.has("authorization"), false);
+  assert.equal(calls[0].init.headers.has("agentpass-console-user-id"), false);
+  assert.doesNotMatch(await response.text(), /agentpass-console-identity|siwc-subject-1|EdDSA/);
 });
 
 test("forwards only the session cookie and CSRF token to WebAuthn", async () => {
@@ -164,13 +235,13 @@ test("does not forward unrelated or duplicate session cookies and rejects upstre
   assert.equal(redirected.status, 502);
 });
 
-test("fails closed for legacy bootstrap in production", async () => {
+test("fails closed when production assertion signing is not configured", async () => {
   let calls = 0;
   const production = { ...legacyEnv, NODE_ENV: "production" };
   const response = await bridge(async () => { calls += 1; return new Response("{}", { headers: { "content-type": "application/json" } }); }, undefined, production).handle(request("/api/auth/session"));
   assert.equal(response.status, 503);
   assert.equal(calls, 0);
-  assert.match(await response.text(), /legacy_session_bootstrap_disabled/);
+  assert.match(await response.text(), /identity_unavailable/);
 });
 
 test("does not enable legacy bootstrap when the deployment environment is unspecified", async () => {

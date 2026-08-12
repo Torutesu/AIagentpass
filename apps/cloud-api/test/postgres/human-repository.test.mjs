@@ -7,8 +7,14 @@ const ids = { session: "11111111-1111-4111-8111-111111111111", member: "22222222
 test("stores session digests as bytes and uses exact tenant/member binding", async () => {
   const calls=[]; const client={async query(text,params){calls.push({text,params});return {rows:[{id:ids.session}],rowCount:1};}};
   const repo=createPostgresHumanRepository({client});
-  await repo.createSession({session_id:ids.session,member_id:ids.member,organization_id:ids.org,role:"owner",token_hash:"a".repeat(64),csrf_token_hash:"b".repeat(64),created_at:"2026-08-12T00:00:00.000Z",expires_at:"2026-08-12T01:00:00.000Z",last_seen_at:"2026-08-12T00:00:00.000Z",idle_expires_at:"2026-08-12T00:30:00.000Z"});
-  assert.equal(Buffer.isBuffer(calls[0].params[4]),true); assert.equal(calls[0].params[4].length,32); assert.match(calls[0].text,/organization_id/);
+  await repo.createSession({session_id:ids.session,member_id:ids.member,membership_id:ids.membership,organization_id:ids.org,role:"owner",token_hash:"a".repeat(64),csrf_token_hash:"b".repeat(64),created_at:"2026-08-12T00:00:00.000Z",expires_at:"2026-08-12T01:00:00.000Z",last_seen_at:"2026-08-12T00:00:00.000Z",idle_expires_at:"2026-08-12T00:30:00.000Z"});
+  assert.equal(Buffer.isBuffer(calls[0].params[4]),true); assert.equal(calls[0].params[4].length,32); assert.match(calls[0].text,/m\.id=\$4/); assert.match(calls[0].text,/m\.status='active'/);
+});
+
+test("refuses session issuance when the exact active membership no longer exists", async () => {
+  const client = { async query() { return { rows: [], rowCount: 0 }; } };
+  const repo = createPostgresHumanRepository({ client });
+  await assert.rejects(() => repo.createSession({session_id:ids.session,member_id:ids.member,membership_id:ids.membership,organization_id:ids.org,role:"owner",token_hash:"a".repeat(64),csrf_token_hash:"b".repeat(64),created_at:"2026-08-12T00:00:00.000Z",expires_at:"2026-08-12T01:00:00.000Z",last_seen_at:"2026-08-12T00:00:00.000Z",idle_expires_at:"2026-08-12T00:30:00.000Z"}), /active session membership is unavailable/);
 });
 
 test("recent authorization consumption is one atomic exact-binding update", async () => {
@@ -71,6 +77,25 @@ test("upstream identity resolution returns only active organization memberships"
   assert.match(calls[0].text, /m\.status='active'/);
   assert.match(calls[0].text, /JOIN organizations/);
   assert.match(calls[0].text, /LIMIT 128/);
+});
+
+test("signed-console identity jti consumption is a durable atomic insert", async () => {
+  const calls = [];
+  const repo = createPostgresHumanRepository({ client: { async query(text, params) { calls.push({ text, params }); return { rows: [{ consumed: true }], rowCount: 1 }; } } });
+  assert.equal(await repo.consumeConsoleIdentityJti({ jti_digest: "a".repeat(64), expires_at: "2026-08-12T00:01:00.000Z" }), true);
+  assert.match(calls[0].text, /agentpass_consume_human_identity_assertion/);
+  assert.match(calls[0].text, /\$1::bytea/);
+  assert.match(calls[0].text, /\$2::timestamptz/);
+  assert.deepEqual(calls[0].params, [Buffer.alloc(32, 0xaa), "2026-08-12T00:01:00.000Z"]);
+  assert.equal(Buffer.isBuffer(calls[0].params[0]), true);
+});
+
+test("signed-console identity replay inputs are validated before PostgreSQL", async () => {
+  let calls = 0;
+  const repo = createPostgresHumanRepository({ client: { async query() { calls += 1; return { rowCount: 0, rows: [] }; } } });
+  await assert.rejects(() => repo.consumeConsoleIdentityJti({ jti_digest: "not-a-digest", expires_at: "2026-08-12T00:01:00.000Z" }), /replay digest/);
+  await assert.rejects(() => repo.consumeConsoleIdentityJti({ jti_digest: "a".repeat(64), expires_at: "not-a-date" }), /timestamp/);
+  assert.equal(calls, 0);
 });
 
 test("credential registration is session and membership bound, stores metadata, and ignores duplicate IDs", async () => {
