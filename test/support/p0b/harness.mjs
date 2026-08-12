@@ -17,6 +17,10 @@ const PG_DATABASE = /^[a-z][a-z0-9_]{0,62}$/u;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu;
 const SECRET_ENV_PREFIX = "AGENTPASS_";
 const MAX_CAPTURED_OUTPUT = 8 * 1024;
+const MAX_DIAGNOSTIC_OUTPUT = 2 * 1024;
+const MAX_CA_BYTES = 256 * 1024;
+const TRUSTED_HTTPS_LOOPBACK_HOSTS = new Set(["localhost", "127.0.0.1", "[::1]"]);
+const POSTGRES_CA_ENV_NAMES = ["P0B_POSTGRES_CA_FILE", "AGENTPASS_TEST_POSTGRES_CA_FILE"];
 
 export class P0BSkip extends Error {
   constructor(code, diagnostic) {
@@ -32,7 +36,7 @@ export function p0bRepositoryRoot() { return REPOSITORY_ROOT; }
 export function requireTrustedHttpsLoopback(value) {
   let url;
   try { url = new URL(value); } catch { throw new TypeError("P0-B URL is invalid"); }
-  if (url.protocol !== "https:" || !["localhost", "127.0.0.1", "::1"].includes(url.hostname)
+  if (url.protocol !== "https:" || !TRUSTED_HTTPS_LOOPBACK_HOSTS.has(url.hostname)
     || url.username || url.password || url.search || url.hash || url.pathname !== "/") {
     throw new TypeError("P0-B requires a trusted HTTPS loopback origin");
   }
@@ -48,6 +52,50 @@ export function requireVerifiedPostgresUrl(value, label = "PostgreSQL URL") {
     throw new TypeError(`${label} must use authenticated PostgreSQL TLS (sslmode=verify-full)`);
   }
   return url;
+}
+
+export function createVerifiedPostgresPoolOptions(value, { ca } = {}) {
+  const url = requireVerifiedPostgresUrl(value instanceof URL ? value.toString() : value);
+  const options = {
+    host: url.hostname.startsWith("[") && url.hostname.endsWith("]") ? url.hostname.slice(1, -1) : url.hostname,
+    user: decodeUrlComponent(url.username, "PostgreSQL username"),
+    password: decodeUrlComponent(url.password, "PostgreSQL password"),
+    database: url.pathname.length > 1 ? decodeUrlComponent(url.pathname.slice(1), "PostgreSQL database") : undefined,
+    ssl: { rejectUnauthorized: true }
+  };
+  if (url.port) options.port = Number(url.port);
+  if (ca !== undefined) options.ssl.ca = ca;
+  return options;
+}
+
+export async function readPostgresCaFile(caFile, { env = process.env } = {}) {
+  const source = caFile ?? POSTGRES_CA_ENV_NAMES.map((name) => env?.[name]).find((value) => value !== undefined && value !== "");
+  if (source === undefined) return undefined;
+  if (typeof source !== "string" || !path.isAbsolute(source)) throw new TypeError("P0-B PostgreSQL CA file must be an absolute path");
+  let pem;
+  try {
+    const handle = await fsp.open(source, fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW ?? 0));
+    try {
+      const metadata = await handle.stat();
+      if (!metadata.isFile() || (metadata.mode & 0o022) !== 0) throw new Error("invalid CA file metadata");
+      if (metadata.size > MAX_CA_BYTES) throw new Error("CA file is too large");
+      pem = await handle.readFile("utf8");
+    } finally {
+      await handle.close().catch(() => {});
+    }
+  } catch {
+    throw new TypeError("P0-B PostgreSQL CA file is unreadable");
+  }
+  if (pem.length > MAX_CA_BYTES || /-----BEGIN [^-]*PRIVATE KEY-----/u.test(pem)) throw new TypeError("P0-B PostgreSQL CA file is invalid");
+  const certificates = [...pem.matchAll(/-----BEGIN CERTIFICATE-----[\s\S]*?-----END CERTIFICATE-----/gu)].map(([certificate]) => certificate);
+  if (certificates.length === 0 || pem.replaceAll(/-----BEGIN CERTIFICATE-----[\s\S]*?-----END CERTIFICATE-----/gu, "").trim() !== "") throw new TypeError("P0-B PostgreSQL CA file is invalid");
+  try {
+    const parsed = certificates.map((certificate) => new crypto.X509Certificate(certificate));
+    if (parsed.some((certificate) => certificate.ca !== true)) throw new Error("certificate is not a CA");
+  } catch {
+    throw new TypeError("P0-B PostgreSQL CA file is invalid");
+  }
+  return Object.freeze({ file: source, pem });
 }
 
 export function p0bEnvironment(base = process.env, overrides = {}) {
@@ -78,11 +126,13 @@ export async function createTestCertificates(directory) {
   const leafCsr = path.join(directory, "localhost.csr");
   const leafCert = path.join(directory, "localhost-cert.pem");
   const config = path.join(directory, "localhost.cnf");
-  await fsp.writeFile(config, "[req]\nprompt = no\ndistinguished_name = dn\nreq_extensions = ext\n[dn]\nCN = localhost\n[ext]\nsubjectAltName = DNS:localhost,IP:127.0.0.1,IP:::1\n", { mode: 0o600, flag: "wx" });
+  const caConfig = path.join(directory, "ca.cnf");
+  await fsp.writeFile(config, "[req]\nprompt = no\ndistinguished_name = dn\nreq_extensions = v3_req\n[dn]\nCN = localhost\n[v3_req]\nbasicConstraints = critical, CA:false\nkeyUsage = critical, digitalSignature, keyEncipherment\nextendedKeyUsage = serverAuth\nsubjectAltName = DNS:localhost,IP:127.0.0.1,IP:::1\n[v3_ca]\nsubjectKeyIdentifier = hash\nauthorityKeyIdentifier = keyid:always,issuer\nbasicConstraints = critical, CA:true, pathlen:1\nkeyUsage = critical, keyCertSign, cRLSign\n", { mode: 0o600, flag: "wx" });
+  await fsp.writeFile(caConfig, "[req]\nprompt = no\ndistinguished_name = dn\nx509_extensions = v3_ca\n[dn]\nCN = AgentPass P0-B Test CA\n[v3_ca]\nsubjectKeyIdentifier = hash\nauthorityKeyIdentifier = keyid:always,issuer\nbasicConstraints = critical, CA:true, pathlen:1\nkeyUsage = critical, keyCertSign, cRLSign\n", { mode: 0o600, flag: "wx" });
   try {
-    await runCommand(openssl, ["req", "-x509", "-newkey", "rsa:2048", "-nodes", "-keyout", caKey, "-out", caCert, "-subj", "/CN=AgentPass P0-B Test CA", "-days", "1", "-sha256"], directory);
+    await runCommand(openssl, ["req", "-x509", "-newkey", "rsa:2048", "-nodes", "-keyout", caKey, "-out", caCert, "-subj", "/CN=AgentPass P0-B Test CA", "-days", "1", "-sha256", "-config", caConfig, "-extensions", "v3_ca"], directory);
     await runCommand(openssl, ["req", "-new", "-newkey", "rsa:2048", "-nodes", "-keyout", leafKey, "-out", leafCsr, "-config", config], directory);
-    await runCommand(openssl, ["x509", "-req", "-in", leafCsr, "-CA", caCert, "-CAkey", caKey, "-CAcreateserial", "-out", leafCert, "-days", "1", "-sha256", "-extfile", config, "-extensions", "ext"], directory);
+    await runCommand(openssl, ["x509", "-req", "-in", leafCsr, "-CA", caCert, "-CAkey", caKey, "-CAcreateserial", "-out", leafCert, "-days", "1", "-sha256", "-extfile", config, "-extensions", "v3_req"], directory);
   } catch (error) {
     if (error?.code === "ENOENT") throw new P0BSkip("openssl_missing", "openssl is unavailable; P0-B TLS harness skipped");
     throw new Error("P0-B TLS certificate generation failed");
@@ -91,32 +141,41 @@ export async function createTestCertificates(directory) {
   return Object.freeze({ caCert, caKey, cert: leafCert, key: leafKey });
 }
 
-export async function createDisposablePostgres({ adminUrl, databaseName = randomDatabaseName(), env = process.env } = {}) {
+export async function createDisposablePostgres({ adminUrl, databaseName = randomDatabaseName(), env = process.env, caFile } = {}) {
   if (env.P0B_DISABLE_EXTERNAL === "true") throw new P0BSkip("external_disabled", "P0-B external dependencies disabled");
   const source = adminUrl ?? env.P0B_POSTGRES_ADMIN_URL ?? env.AGENTPASS_TEST_POSTGRES_ADMIN_URL;
   if (!source) throw new P0BSkip("postgres_admin_missing", "P0B_POSTGRES_ADMIN_URL is not configured; PostgreSQL lane skipped");
   if (!PG_DATABASE.test(databaseName)) throw new TypeError("P0-B database name is invalid");
   const admin = requireVerifiedPostgresUrl(source, "P0-B PostgreSQL admin URL");
-  const pool = new Pool({ connectionString: admin.toString(), ssl: { rejectUnauthorized: true }, max: 1, connectionTimeoutMillis: 3_000, idleTimeoutMillis: 3_000 });
+  const ca = await readPostgresCaFile(caFile, { env });
+  const baseOptions = createVerifiedPostgresPoolOptions(admin, { ca: ca?.pem });
+  const pool = new Pool({ ...baseOptions, max: 1, connectionTimeoutMillis: 3_000, idleTimeoutMillis: 3_000 });
+  let created = false;
   try {
     await pool.query(`CREATE DATABASE ${quoteIdentifier(databaseName)}`);
+    created = true;
   } catch (error) {
     await pool.end().catch(() => {});
     if (["ECONNREFUSED", "ENOTFOUND", "ETIMEDOUT", "EAI_AGAIN"].includes(error?.code)) throw new P0BSkip("postgres_unavailable", "PostgreSQL is unavailable; P0-B lane skipped");
     throw new Error("P0-B disposable PostgreSQL database could not be created");
   }
-  await pool.end();
+  try { await pool.end(); } catch (error) {
+    if (created) await dropDisposableDatabase(baseOptions, databaseName);
+    throw new Error(`P0-B PostgreSQL admin pool could not close (${redactP0BDiagnostic(error?.message ?? "unknown")})`);
+  }
   const database = new URL(admin.toString());
   database.pathname = `/${databaseName}`;
-  const databasePool = new Pool({ connectionString: database.toString(), ssl: { rejectUnauthorized: true }, max: 8, connectionTimeoutMillis: 3_000, idleTimeoutMillis: 3_000 });
+  const databaseOptions = createVerifiedPostgresPoolOptions(database, { ca: ca?.pem });
+  const databasePool = new Pool({ ...databaseOptions, max: 8, connectionTimeoutMillis: 3_000, idleTimeoutMillis: 3_000 });
   let removed = false;
   return Object.freeze({
     url: database.toString(),
+    caCertificate: ca?.pem,
     async close() {
       if (removed) return;
       removed = true;
       await databasePool.end().catch(() => {});
-      const cleanupPool = new Pool({ connectionString: admin.toString(), ssl: { rejectUnauthorized: true }, max: 1, connectionTimeoutMillis: 3_000, idleTimeoutMillis: 3_000 });
+      const cleanupPool = new Pool({ ...baseOptions, max: 1, connectionTimeoutMillis: 3_000, idleTimeoutMillis: 3_000 });
       try { await cleanupPool.query(`DROP DATABASE ${quoteIdentifier(databaseName)} WITH (FORCE)`); }
       finally { await cleanupPool.end().catch(() => {}); }
     },
@@ -135,6 +194,7 @@ export async function startP0BHarness({ env = process.env, repoRoot = REPOSITORY
   try {
     const certificates = await createTestCertificates(temp);
     database = await createDisposablePostgres({ env });
+    const trustedCaBundle = await createTrustedCaBundle(temp, [certificates.caCert], [database.caCertificate]);
     const files = await createRuntimeFiles(temp);
     const cloudPort = await reservePort();
     const cloudTlsPort = await reservePort();
@@ -158,11 +218,12 @@ export async function startP0BHarness({ env = process.env, repoRoot = REPOSITORY
       AGENTPASS_IDENTITY_ASSERTION_ISSUER: "agentpass-p0b-console",
       AGENTPASS_IDENTITY_ASSERTION_AUDIENCE: "agentpass-p0b-cloud",
       AGENTPASS_IDENTITY_ASSERTION_KID: "p0b-console-v1",
-      AGENTPASS_IDENTITY_ASSERTION_PUBLIC_KEY_PATH: files.identityPublicKey
+      AGENTPASS_IDENTITY_ASSERTION_PUBLIC_KEY_PATH: files.identityPublicKey,
+      NODE_EXTRA_CA_CERTS: trustedCaBundle
     };
     cloudProcess = spawnProcess(process.execPath, [path.join(repoRoot, "apps/cloud-api/src/main.mjs")], repoRoot, p0bEnvironment(env, common));
     cloudProxy = await createTlsProxy({ cert: certificates.cert, key: certificates.key, targetPort: cloudPort, port: cloudTlsPort });
-    await waitForHttps(`https://localhost:${cloudTlsPort}/`, certificates.caCert, { path: "/health/ready", headers: { "AgentPass-Operational-Token": files.probeSecret }, expectedStatus: 200, timeoutMs: waitTimeoutMs });
+    await waitForHttps(`https://localhost:${cloudTlsPort}/`, certificates.caCert, { path: "/health/ready", headers: { "AgentPass-Operational-Token": files.probeSecret }, expectedStatus: 200, timeoutMs: waitTimeoutMs, process: cloudProcess, label: "cloud" });
     const consoleEnv = p0bEnvironment(env, {
       NODE_ENV: "test",
       PORT: consolePort,
@@ -175,14 +236,14 @@ export async function startP0BHarness({ env = process.env, repoRoot = REPOSITORY
       AGENTPASS_IDENTITY_ASSERTION_AUDIENCE: "agentpass-p0b-cloud",
       AGENTPASS_IDENTITY_ASSERTION_KID: "p0b-console-v1",
       AGENTPASS_IDENTITY_PROVIDER: "chatgpt",
-      NODE_EXTRA_CA_CERTS: certificates.caCert,
+      NODE_EXTRA_CA_CERTS: trustedCaBundle,
       WRANGLER_LOG_PATH: path.join(temp, "wrangler.log"),
       MINIFLARE_REGISTRY_PATH: path.join(temp, "registry")
     });
     if (consoleBuild && !fs.existsSync(path.join(repoRoot, "apps/web-console/dist"))) throw new P0BSkip("console_build_missing", "Console dist is missing; run the Console build before P0-B");
     consoleProcess = spawnProcess(process.execPath, [path.join(repoRoot, "apps/web-console/node_modules/vinext/dist/cli.js"), "start", "--hostname", LOOPBACK, "--port", String(consolePort)], path.join(repoRoot, "apps/web-console"), consoleEnv);
     consoleProxy = await createTlsProxy({ cert: certificates.cert, key: certificates.key, targetPort: consolePort, port: consoleTlsPort });
-    await waitForHttps(`https://localhost:${consoleTlsPort}/`, certificates.caCert, { path: "/", expectedStatus: 200, timeoutMs: waitTimeoutMs });
+    await waitForHttps(`https://localhost:${consoleTlsPort}/`, certificates.caCert, { path: "/", expectedStatus: 200, timeoutMs: waitTimeoutMs, process: consoleProcess, label: "console" });
     return Object.freeze({
       cloudUrl: `https://localhost:${cloudTlsPort}/`, consoleUrl: `https://localhost:${consoleTlsPort}/`, caCert: certificates.caCert,
       databaseUrl: database.url, organizationId,
@@ -205,6 +266,33 @@ export async function closeP0BHarness({ cloudProcess, consoleProcess, cloudProxy
 }
 
 export function randomDatabaseName() { return `agentpass_p0b_${process.pid}_${crypto.randomBytes(6).toString("hex")}`.slice(0, 63); }
+
+export function redactP0BDiagnostic(value, secrets = []) {
+  let result = String(value ?? "").replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/gu, "?");
+  for (const secret of secrets) {
+    if (typeof secret === "string" && secret.length >= 4) result = result.replaceAll(secret, "<redacted>");
+  }
+  result = result.replace(/-----BEGIN [^-]*PRIVATE KEY-----[\s\S]*?-----END [^-]*PRIVATE KEY-----/gu, "<redacted-private-key>");
+  result = result.replace(/(postgres(?:ql)?:\/\/[^\s/:@]+:)[^\s@]+(@)/giu, "$1<redacted>$2");
+  result = result.replace(/(https?:\/\/[^\s/:@]+:)[^\s@]+(@)/giu, "$1<redacted>$2");
+  result = result.replace(/(AGENTPASS_[A-Z0-9_]+=)[^\s]+/gu, "$1<redacted>");
+  return result.slice(0, MAX_DIAGNOSTIC_OUTPUT);
+}
+
+async function createTrustedCaBundle(directory, files, certificates = []) {
+  const contents = [];
+  for (const file of files) contents.push(await fsp.readFile(file, "utf8"));
+  for (const certificate of certificates.filter(Boolean)) contents.push(certificate);
+  const bundle = path.join(directory, "trusted-ca-bundle.pem");
+  await fsp.writeFile(bundle, `${contents.join("\n")}\n`, { mode: 0o600, flag: "wx" });
+  return bundle;
+}
+
+async function dropDisposableDatabase(baseOptions, databaseName) {
+  const cleanupPool = new Pool({ ...baseOptions, max: 1, connectionTimeoutMillis: 3_000, idleTimeoutMillis: 3_000 });
+  try { await cleanupPool.query(`DROP DATABASE ${quoteIdentifier(databaseName)} WITH (FORCE)`); }
+  finally { await cleanupPool.end().catch(() => {}); }
+}
 
 async function createRuntimeFiles(directory) {
   const bundle = crypto.generateKeyPairSync("ed25519");
@@ -240,39 +328,74 @@ async function reservePort() {
 
 function spawnProcess(command, args, cwd, env) {
   const child = spawn(command, args, { cwd, env, shell: false, detached: process.platform !== "win32", stdio: ["ignore", "pipe", "pipe"] });
-  drain(child.stdout); drain(child.stderr);
+  const secrets = Object.entries(env).filter(([key]) => key.startsWith("AGENTPASS_") || key.startsWith("P0B_")).map(([, value]) => value);
+  child.p0bDiagnostics = { secrets, stdout: "", stderr: "" };
+  child.once("error", (error) => { child.p0bSpawnError = error?.message ?? "unknown"; });
+  capture(child.stdout, child.p0bDiagnostics, "stdout");
+  capture(child.stderr, child.p0bDiagnostics, "stderr");
   return child;
 }
 
-function drain(stream) { if (!stream) return; let size = 0; stream.on("data", (chunk) => { size = Math.min(MAX_CAPTURED_OUTPUT, size + chunk.length); }); stream.resume(); }
+function capture(stream, target, key) {
+  if (!stream) return;
+  stream.on("data", (chunk) => { target[key] = `${target[key]}${chunk}`.slice(-MAX_CAPTURED_OUTPUT); });
+  stream.resume();
+}
+
+function processDiagnostic(child) {
+  if (!child) return "";
+  const state = child.p0bSpawnError ? `spawn_error_${redactP0BDiagnostic(child.p0bSpawnError)}` : child.signalCode ? `signal_${child.signalCode}` : child.exitCode !== null ? `exit_${child.exitCode}` : "running";
+  const output = [child.p0bDiagnostics?.stdout, child.p0bDiagnostics?.stderr].filter(Boolean).join("\n");
+  const safeOutput = output ? `; output=${redactP0BDiagnostic(output, child.p0bDiagnostics?.secrets)}` : "";
+  return `${state}${safeOutput}`;
+}
 
 async function stopProcess(child) {
   if (!child || child.exitCode !== null || child.signalCode !== null) return;
   const pid = child.pid;
   try { process.kill(process.platform === "win32" ? pid : -pid, "SIGTERM"); } catch { try { child.kill("SIGTERM"); } catch {} }
   await new Promise((resolve) => {
+    if (child.exitCode !== null || child.signalCode !== null) { resolve(); return; }
     const timer = setTimeout(() => { try { process.kill(process.platform === "win32" ? pid : -pid, "SIGKILL"); } catch { try { child.kill("SIGKILL"); } catch {} } resolve(); }, 3_000);
     child.once("exit", () => { clearTimeout(timer); resolve(); });
   });
 }
 
 async function createTlsProxy({ cert, key, targetPort, port }) {
-  const server = https.createServer({ cert: await fsp.readFile(cert), key: await fsp.readFile(key), minVersion: "TLSv1.2" }, (request, response) => {
+  const sockets = new Set();
+  const upstreams = new Set();
+  const server = https.createServer({ cert: await fsp.readFile(cert), key: await fsp.readFile(key), minVersion: "TLSv1.2", requestCert: false }, (request, response) => {
     const headers = { ...request.headers, host: `${LOOPBACK}:${targetPort}` };
     delete headers.connection; delete headers["proxy-connection"]; delete headers["keep-alive"];
     const upstream = http.request({ host: LOOPBACK, port: targetPort, method: request.method, path: request.url, headers }, (incoming) => { response.writeHead(incoming.statusCode ?? 502, incoming.headers); incoming.pipe(response); });
+    upstreams.add(upstream);
+    upstream.once("close", () => upstreams.delete(upstream));
     upstream.on("error", () => { if (!response.headersSent) response.writeHead(502); response.end(); });
+    request.once("aborted", () => upstream.destroy());
+    response.once("close", () => { if (!response.writableEnded) upstream.destroy(); });
     request.pipe(upstream);
   });
+  server.requestTimeout = 15_000;
+  server.headersTimeout = 10_000;
+  server.keepAliveTimeout = 1_000;
+  server.on("connection", (socket) => { sockets.add(socket); socket.once("close", () => sockets.delete(socket)); });
   await new Promise((resolve, reject) => { server.once("error", reject); server.listen(port, LOOPBACK, resolve); });
-  return Object.freeze({ port, async close() { await new Promise((resolve) => server.close(() => resolve())); } });
+  return Object.freeze({
+    port,
+    async close() {
+      for (const upstream of upstreams) upstream.destroy();
+      for (const socket of sockets) socket.destroy();
+      await new Promise((resolve) => server.close(() => resolve()));
+    }
+  });
 }
 
-async function waitForHttps(origin, ca, { path: requestPath, headers = {}, expectedStatus = 200, timeoutMs = 20_000 } = {}) {
+async function waitForHttps(origin, ca, { path: requestPath, headers = {}, expectedStatus = 200, timeoutMs = 20_000, process: child, label = "service" } = {}) {
   const caPem = await fsp.readFile(ca, "utf8");
   const deadline = Date.now() + timeoutMs;
   let lastError;
   while (Date.now() < deadline) {
+    if (child?.p0bSpawnError || child?.exitCode !== null || child?.signalCode !== null) throw new Error(`P0-B ${label} exited before readiness (${processDiagnostic(child)})`);
     try {
       const result = await httpsRequest(new URL(requestPath, origin), { ca: caPem, headers, timeoutMs: 1_500 });
       if (result.status === expectedStatus) return result;
@@ -280,7 +403,8 @@ async function waitForHttps(origin, ca, { path: requestPath, headers = {}, expec
     } catch (error) { lastError = error; }
     await new Promise((resolve) => setTimeout(resolve, 150));
   }
-  throw new Error(`P0-B health check failed (${lastError?.message?.replace(/[^a-z0-9_ -]/giu, "").slice(0, 64) ?? "unavailable"})`);
+  const detail = redactP0BDiagnostic(lastError?.message ?? "unavailable");
+  throw new Error(`P0-B ${label} readiness failed (${detail || "unavailable"}; ${processDiagnostic(child) || "process_unknown"})`);
 }
 
 function httpsRequest(url, { ca, headers, timeoutMs }) {
@@ -299,4 +423,14 @@ function runCommand(command, args, cwd) {
     const child = spawn(command, args, { cwd, shell: false, stdio: ["ignore", "ignore", "ignore"] });
     child.once("error", reject); child.once("exit", (code) => code === 0 ? resolve() : reject(new Error("command failed")));
   });
+}
+
+function decodeUrlComponent(value, label) {
+  try {
+    const decoded = decodeURIComponent(value);
+    if (!decoded) throw new Error("empty");
+    return decoded;
+  } catch {
+    throw new TypeError(`${label} is invalid`);
+  }
 }

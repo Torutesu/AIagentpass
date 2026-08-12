@@ -3,24 +3,31 @@ import { test as base, expect, type Page, type Route } from "@playwright/test";
 
 type Role = "owner" | "admin" | "auditor" | "viewer";
 type WakeStatus = "accepted" | "coalesced" | "no_pending_refresh";
+type AuthorizationFailure = "none" | "stale" | "replayed" | "cross_operation" | "cross_tenant";
 
 type E2EOptions = {
   role: Role;
   recentAuth: boolean;
   wakeStatuses: WakeStatus[];
+  authorizationFailure: AuthorizationFailure;
 };
 
 type RouteState = {
   sessionRole: Role;
   wakeCalls: number;
+  revokeCalls: number;
   recentAuthVerificationCalls: number;
+  recentAuthOperations: string[];
   protocolViolations: string[];
 };
+
+const routeStates = new WeakMap<Page, RouteState>();
 
 const test = base.extend<E2EOptions>({
   role: ["owner", { option: true }],
   recentAuth: [true, { option: true }],
   wakeStatuses: [["accepted", "coalesced", "no_pending_refresh"], { option: true }],
+  authorizationFailure: ["none", { option: true }],
 });
 
 const ORGANIZATION_ID = "11111111-1111-4111-8111-111111111111";
@@ -97,7 +104,9 @@ async function installRoutes(page: Page, options: E2EOptions): Promise<RouteStat
   const state: RouteState = {
     sessionRole: options.role,
     wakeCalls: 0,
+    revokeCalls: 0,
     recentAuthVerificationCalls: 0,
+    recentAuthOperations: [],
     protocolViolations: [],
   };
 
@@ -106,6 +115,7 @@ async function installRoutes(page: Page, options: E2EOptions): Promise<RouteStat
     if (url.pathname === "/api/auth/session") return json(route, session(options.role));
     if (url.pathname === "/api/auth/webauthn/options") {
       if (!options.recentAuth) return json(route, { error: { code: "recent_auth_required", message: "Recent authentication required" } }, 401);
+      state.recentAuthOperations.push(`begin:${requestOperation(route)}`);
       return json(route, {
         challenge_id: CHALLENGE_ID,
         options: {
@@ -118,6 +128,7 @@ async function installRoutes(page: Page, options: E2EOptions): Promise<RouteStat
     }
     if (url.pathname === "/api/auth/webauthn/verify") {
       state.recentAuthVerificationCalls += 1;
+      state.recentAuthOperations.push(`verify:${requestOperation(route)}`);
       return json(route, options.recentAuth ? { authorization_id: AUTHORIZATION_ID } : { error: { code: "recent_auth_required", message: "Recent authentication required" } }, options.recentAuth ? 200 : 401);
     }
     return json(route, { error: { code: "not_found", message: "Not found" } }, 404);
@@ -128,16 +139,36 @@ async function installRoutes(page: Page, options: E2EOptions): Promise<RouteStat
     const url = new URL(request.url());
     if (request.method() === "GET" && url.searchParams.get("resource") === "summary") return json(route, summary());
     if (request.method() === "GET") return json(route, { capabilities: [], revocations: [], events: [] });
-    if (request.method() !== "POST" || url.searchParams.get("operation") !== "device.refresh.request") return json(route, { error: { code: "forbidden", message: "Forbidden" } }, 403);
+    if (request.method() !== "POST") return json(route, { error: { code: "forbidden", message: "Forbidden" } }, 403);
 
     let body: unknown;
     try { body = JSON.parse(request.postData() ?? ""); } catch { body = null; }
     const headers = request.headers();
+    const operation = url.searchParams.get("operation");
+    if (operation === "revoke-device") {
+      if (JSON.stringify(body) !== JSON.stringify({ target_id: DEVICE_IDS[0], reason: "web-console-operator" })) state.protocolViolations.push("revoke-body");
+      if (!headers["agentpass-csrf"] || !headers["idempotency-key"] || headers["agentpass-recent-auth"] !== AUTHORIZATION_ID) state.protocolViolations.push("revoke-auth-headers");
+      if (options.authorizationFailure !== "none" || !options.recentAuth || !["owner", "admin"].includes(options.role)) return json(route, { error: { code: "forbidden", message: "Forbidden" } }, 403);
+      state.revokeCalls += 1;
+      return json(route, {
+        request_id: `revoke-request-${state.revokeCalls}`,
+        revocation: {
+          revocation_id: "69999999-9999-4999-8999-999999999999",
+          organization_id: ORGANIZATION_ID,
+          target_type: "device",
+          target_id: DEVICE_IDS[0],
+          reason: "web-console-operator",
+          status: "active",
+          version: 1,
+        },
+      }, 201);
+    }
+    if (operation !== "device.refresh.request") return json(route, { error: { code: "forbidden", message: "Forbidden" } }, 403);
     if (JSON.stringify(body) !== JSON.stringify({ target_id: DEVICE_IDS[1] }) && JSON.stringify(body) !== JSON.stringify({ target_id: DEVICE_IDS[2] }) && JSON.stringify(body) !== JSON.stringify({ target_id: DEVICE_IDS[3] }) && JSON.stringify(body) !== JSON.stringify({ target_id: DEVICE_IDS[4] })) {
       state.protocolViolations.push("body");
     }
-    if (!headers["agentpass-csrf"] || !headers["idempotency-key"] || !headers["agentpass-recent-auth"]) state.protocolViolations.push("auth-headers");
-    if (!options.recentAuth || !["owner", "admin"].includes(options.role)) return json(route, { error: { code: "forbidden", message: "Forbidden" } }, 403);
+    if (!headers["agentpass-csrf"] || !headers["idempotency-key"] || headers["agentpass-recent-auth"] !== AUTHORIZATION_ID) state.protocolViolations.push("auth-headers");
+    if (options.authorizationFailure !== "none" || !options.recentAuth || !["owner", "admin"].includes(options.role)) return json(route, { error: { code: options.authorizationFailure === "none" ? "forbidden" : options.authorizationFailure, message: "Forbidden" } }, 403);
 
     const status = options.wakeStatuses[Math.min(state.wakeCalls, options.wakeStatuses.length - 1)] ?? "accepted";
     const deviceId = (body as { target_id?: string })?.target_id ?? DEVICE_IDS[1];
@@ -154,7 +185,13 @@ async function installRoutes(page: Page, options: E2EOptions): Promise<RouteStat
       },
     }, 202);
   });
+  routeStates.set(page, state);
   return state;
+}
+
+function requestOperation(route: Route): string {
+  try { return String(JSON.parse(route.request().postData() ?? "{}").operation ?? ""); }
+  catch { return ""; }
 }
 
 async function installVirtualAuthenticator(page: Page): Promise<void> {
@@ -183,9 +220,9 @@ async function installVirtualAuthenticator(page: Page): Promise<void> {
   });
 }
 
-test.beforeEach(async ({ page, role, recentAuth, wakeStatuses }) => {
+test.beforeEach(async ({ page, role, recentAuth, wakeStatuses, authorizationFailure }) => {
   await installVirtualAuthenticator(page);
-  await installRoutes(page, { role, recentAuth, wakeStatuses });
+  await installRoutes(page, { role, recentAuth, wakeStatuses, authorizationFailure });
   await page.goto("/");
   await expect(page.getByRole("heading", { name: "Agentは、" })).toBeVisible();
   await expect(page.getByRole("heading", { name: "同期済み Mac" })).toBeVisible();
@@ -220,6 +257,15 @@ test.describe("role and recent-auth matrix", () => {
       const card = page.getByRole("article").filter({ has: page.getByRole("heading", { name: "反映待ち Mac" }) });
       await card.getByRole("button", { name: "Wake requestを依頼" }).click();
       await expect(card.getByRole("status")).toContainText("依頼を受け付けました");
+      expect(routeStates.get(page)).toMatchObject({ wakeCalls: 1, recentAuthVerificationCalls: 1, recentAuthOperations: ["begin:device.refresh.request", "verify:device.refresh.request"], protocolViolations: [] });
+    });
+
+    test("allows a device revoke bound to its distinct recent-auth operation", async ({ page }) => {
+      await page.getByRole("button", { name: "セットアップ", exact: true }).click();
+      const device = page.getByRole("listitem").filter({ hasText: "同期済み Mac" });
+      await device.getByRole("button", { name: "停止" }).click();
+      await expect(page.getByText("同期済み Macを停止しました")).toBeVisible();
+      expect(routeStates.get(page)).toMatchObject({ revokeCalls: 1, recentAuthVerificationCalls: 1, recentAuthOperations: ["begin:device.revoke", "verify:device.revoke"], protocolViolations: [] });
     });
   });
 
@@ -229,6 +275,15 @@ test.describe("role and recent-auth matrix", () => {
       const card = page.getByRole("article").filter({ has: page.getByRole("heading", { name: "反映待ち Mac" }) });
       await card.getByRole("button", { name: "Wake requestを依頼" }).click();
       await expect(card.getByRole("status")).toContainText("既存の依頼へ統合し、再通知しました");
+      expect(routeStates.get(page)).toMatchObject({ wakeCalls: 1, recentAuthVerificationCalls: 1, recentAuthOperations: ["begin:device.refresh.request", "verify:device.refresh.request"], protocolViolations: [] });
+    });
+
+    test("allows a device revoke without reusing the wake authorization", async ({ page }) => {
+      await page.getByRole("button", { name: "セットアップ", exact: true }).click();
+      const device = page.getByRole("listitem").filter({ hasText: "同期済み Mac" });
+      await device.getByRole("button", { name: "停止" }).click();
+      await expect(page.getByText("同期済み Macを停止しました")).toBeVisible();
+      expect(routeStates.get(page)).toMatchObject({ revokeCalls: 1, recentAuthVerificationCalls: 1, recentAuthOperations: ["begin:device.revoke", "verify:device.revoke"], protocolViolations: [] });
     });
   });
 
@@ -239,6 +294,7 @@ test.describe("role and recent-auth matrix", () => {
         const card = page.getByRole("article").filter({ has: page.getByRole("heading", { name: "反映待ち Mac" }) });
         await card.getByRole("button", { name: "Wake requestを依頼" }).click();
         await expect(card.getByRole("alert")).toContainText("Wake requestを送信できませんでした");
+        expect(routeStates.get(page)).toMatchObject({ wakeCalls: 0, recentAuthVerificationCalls: 1, protocolViolations: [] });
       });
     });
   }
@@ -249,8 +305,21 @@ test.describe("role and recent-auth matrix", () => {
       const card = page.getByRole("article").filter({ has: page.getByRole("heading", { name: "反映待ち Mac" }) });
       await card.getByRole("button", { name: "Wake requestを依頼" }).click();
       await expect(card.getByRole("alert")).toContainText("Wake requestを送信できませんでした");
+      expect(routeStates.get(page)).toMatchObject({ wakeCalls: 0, recentAuthVerificationCalls: 0, protocolViolations: [] });
     });
   });
+
+  for (const failure of ["stale", "replayed", "cross_operation", "cross_tenant"] as const) {
+    test.describe(`owner with ${failure} authorization`, () => {
+      test.use({ role: "owner", recentAuth: true, wakeStatuses: ["accepted"], authorizationFailure: failure });
+      test("fails closed after the WebAuthn ceremony and before wake mutation", async ({ page }) => {
+        const card = page.getByRole("article").filter({ has: page.getByRole("heading", { name: "反映待ち Mac" }) });
+        await card.getByRole("button", { name: "Wake requestを依頼" }).click();
+        await expect(card.getByRole("alert")).toContainText("Wake requestを送信できませんでした");
+        expect(routeStates.get(page)).toMatchObject({ wakeCalls: 0, recentAuthVerificationCalls: 1, recentAuthOperations: ["begin:device.refresh.request", "verify:device.refresh.request"], protocolViolations: [] });
+      });
+    });
+  }
 });
 
 test.afterEach(async ({ page }) => {

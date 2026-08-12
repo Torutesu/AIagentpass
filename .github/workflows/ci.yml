@@ -59,7 +59,7 @@ jobs:
       - name: Install Chromium and OS dependencies
         run: npx playwright install --with-deps chromium
         working-directory: apps/web-console
-      - name: Run WebAuthn, role, device-state, and wake browser E2E
+      - name: Run WebAuthn, role, device-state, wake, and revoke browser E2E
         run: npm run e2e
         working-directory: apps/web-console
       - name: Reject sensitive browser artifacts
