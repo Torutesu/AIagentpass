@@ -10,6 +10,7 @@
     "native/macos/Package.swift",
     "native/macos/Resources",
     "native/macos/scripts",
+    "scripts/release",
     "native/macos/Sources",
     "native/macos/Tests",
     "README.md",
@@ -28,8 +29,12 @@
     "test": "node --test",
     "test:native": "swift test --package-path native/macos",
     "test:native-app": "native/macos/scripts/test-app-bundle.sh",
-    "lint": "node --check bin/*.mjs && node --check lib/*.mjs && bash -n native/macos/scripts/*.sh",
-    "prepack": "npm test && npm run test:native && npm run test:native-app && npm run lint"
+    "release:validate": "node scripts/release/validate-version.mjs",
+    "release:sbom": "node scripts/release/generate-sbom.mjs",
+    "release:sign": "node scripts/release/sign-manifest.mjs",
+    "release:verify": "node scripts/release/verify-release.mjs",
+    "lint": "node --check bin/*.mjs && node --check lib/*.mjs && node --check scripts/release/*.mjs && bash -n native/macos/scripts/*.sh scripts/release/*.sh",
+    "prepack": "npm run release:validate && npm test && npm run test:native && npm run test:native-app && npm run lint"
   },
   "engines": {
     "node": ">=20"

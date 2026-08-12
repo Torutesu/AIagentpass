@@ -1,7 +1,9 @@
 import AgentPassNativeCore
+import AgentPassNativeServiceSupport
 import CryptoKit
 import Darwin
 import Foundation
+import Security
 
 private func loadProtectedFile(path: String, label: String) throws -> Data {
     let original = URL(fileURLWithPath: path).standardizedFileURL
@@ -82,23 +84,152 @@ private func permissions(_ attributes: [FileAttributeKey: Any]) -> UInt16 {
     (attributes[.posixPermissions] as? NSNumber)?.uint16Value ?? 0xffff
 }
 
+private func serviceTimestamp(_ date: Date) -> String {
+    let formatter = ISO8601DateFormatter()
+    formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+    return formatter.string(from: date)
+}
+
+private func serviceDate(_ value: String) -> Date? {
+    let formatter = ISO8601DateFormatter()
+    formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+    return formatter.date(from: value)
+}
+
+private func serviceExactInteger(_ value: Any?) -> Int? {
+    guard let number = value as? NSNumber, String(cString: number.objCType) == "q" else { return nil }
+    return number.intValue
+}
+
+private func recoveryLifecycleStatement(_ plan: NativeAuditKeyRecoveryPlan) throws -> NativeKeyTransitionStatement {
+    try recoveryLifecycleStatement(transition: plan.transition, lifecycleRecordData: plan.lifecycleRecordData)
+}
+
+private func recoveryLifecycleStatement(
+    transition: NativeAuditKeyRecoveryTransition,
+    lifecycleRecordData: Data
+) throws -> NativeKeyTransitionStatement {
+    guard let object = try JSONSerialization.jsonObject(with: lifecycleRecordData) as? [String: Any],
+          let sequenceNumber = object["sequence"] as? NSNumber,
+          String(cString: sequenceNumber.objCType) == "q",
+          let reason = object["reason"] as? String,
+          let challengeID = object["challenge_id"] as? String,
+          let previousHead = object["previous_record_hash"] as? String else {
+        throw AgentPassNativeError.invalidSignature("Durable audit recovery lifecycle statement cannot be reconstructed exactly")
+    }
+    return NativeKeyTransitionStatement(
+        role: .auditCheckpoint,
+        oldGeneration: transition.fromGeneration,
+        newGeneration: transition.toGeneration,
+        oldFingerprint: transition.oldKeyFingerprint,
+        newFingerprint: transition.newKeyFingerprint,
+        stateSequence: sequenceNumber.intValue,
+        reason: reason,
+        challengeID: challengeID,
+        createdAt: transition.createdAt,
+        previousLifecycleHead: previousHead,
+        continuity: .recovered
+    )
+}
+
+private func validateManagementReason(_ value: String) throws {
+    guard !value.isEmpty, value.utf8.count <= 512,
+          value.unicodeScalars.allSatisfy({ $0.value >= 0x20 && $0.value != 0x7f }) else {
+        throw AgentPassNativeError.invalidConfiguration("Management reason must be 1-512 UTF-8 bytes without control characters")
+    }
+}
+
+private func verifiedAuditPruneBoundary(
+    lifecycle: NativeKeyLifecycleSnapshot,
+    checkpoints: [NativeAuditCheckpoint],
+    receipts: [NativeAuditAnchorReceipt],
+    transitions: NativeAuditKeyTransitionStoreStatus
+) throws -> NativeAuditRetentionBoundary {
+    guard let checkpointReceipt = receipts.last,
+          checkpointReceipt.index > 0, checkpointReceipt.index <= checkpoints.count,
+          let checkpointEventIndex = checkpointReceipt.eventIndex,
+          let checkpointPreviousEventHash = checkpointReceipt.previousEventHash,
+          checkpointEventIndex > 0,
+          let checkpoint = checkpoints.dropFirst(checkpointReceipt.index - 1).first,
+          checkpoint.checkpointHash == checkpointReceipt.checkpointHash,
+          checkpoint.lifecycleHeadHash == lifecycle.headHash else {
+        throw AgentPassNativeError.invalidSignature("Audit prune requires a checkpoint receipt bound to the active lifecycle head and global anchor chain")
+    }
+    var eventIndex = checkpointEventIndex
+    var eventHash = checkpointReceipt.receiptHash
+    if let transitionIndex = transitions.latestEventIndex, let transitionHash = transitions.latestEventHash {
+        guard transitionIndex != checkpointEventIndex || transitionHash == checkpointReceipt.receiptHash else {
+            throw AgentPassNativeError.invalidSignature("Audit prune anchor global event index equivocates")
+        }
+        if transitionIndex > eventIndex { eventIndex = transitionIndex; eventHash = transitionHash }
+    }
+    guard !checkpointPreviousEventHash.isEmpty else {
+        throw AgentPassNativeError.invalidSignature("Audit prune checkpoint receipt lacks global-chain ancestry")
+    }
+    return NativeAuditRetentionBoundary(
+        lifecycleHeadHash: lifecycle.headHash,
+        auditKeyTransitionReceiptHash: transitions.latestReceipt?.receiptHash ?? NativeAuditLog.zeroHash,
+        anchorEventIndex: eventIndex, anchorEventHash: eventHash,
+        checkpointIndex: checkpointReceipt.index, checkpointHash: checkpoint.checkpointHash,
+        checkpointReceiptHash: checkpointReceipt.receiptHash
+    )
+}
+
+private func ed25519RecoveryPublicKey(_ pem: String) throws -> Data {
+    let lines = pem.split(whereSeparator: \ .isNewline).map(String.init)
+    guard lines.count >= 3, lines.first == "-----BEGIN PUBLIC KEY-----", lines.last == "-----END PUBLIC KEY-----",
+          lines.dropFirst().dropLast().allSatisfy({ !$0.isEmpty && $0.range(of: "^[A-Za-z0-9+/=]+$", options: .regularExpression) != nil }),
+          let der = Data(base64Encoded: lines.dropFirst().dropLast().joined()) else {
+        throw AgentPassNativeError.invalidKey("Recovery authority must be an Ed25519 SPKI PEM public key")
+    }
+    let prefix = Data([0x30, 0x2a, 0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x70, 0x03, 0x21, 0x00])
+    guard der.count == prefix.count + 32, der.starts(with: prefix) else {
+        throw AgentPassNativeError.invalidKey("Recovery authority must be an Ed25519 SPKI PEM public key")
+    }
+    let raw = Data(der.dropFirst(prefix.count))
+    _ = try Curve25519.Signing.PublicKey(rawRepresentation: raw)
+    return raw
+}
+
 private struct ServiceConfiguration: Decodable {
     let machServiceName: String
     let keyTag: String
     let keychainAccessGroup: String?
+    let keyLifecycleDirectory: String?
+    let keyLifecycleExpectedHeadHash: String?
+    let keyLifecyclePinDirectory: String?
+    let keyLifecycleMutationOutboxDirectory: String?
+    let recoveryPublicKeys: [String]?
+    let recoveryThreshold: Int?
+    let recoveryPolicyPath: String?
+    let installationID: String?
     let policyPath: String
     let auditLogPath: String
     let auditArchiveDirectory: String?
     let auditCheckpointPath: String
+    let auditCheckpointArchiveDirectory: String?
     let auditKeyTag: String
     let auditAnchorURL: String?
     let auditAnchorTenant: String?
     let auditAnchorPublicKey: String?
     let auditAnchorReceiptPath: String?
+    let auditAnchorReceiptArchiveDirectory: String?
+    let auditKeyTransitionPath: String?
+    let auditKeyRotationPlanDirectory: String?
+    let auditKeyRecoveryPlanDirectory: String?
+    let auditKeyRecoveryApprovalDirectory: String?
+    let auditPruneJournalDirectory: String?
+    let auditPruneTrustDirectory: String?
+    let auditPruneEvidenceBundlePath: String?
+    let auditKeyDeletionEvidenceBundlePath: String?
+    let auditKeyDeletionArchiveDirectory: String?
+    let auditRetentionAuthorizerPublicKey: String?
+    let auditKeyDeletionMinimumRetentionSeconds: Int?
     let controlStatePath: String?
     let controlURL: String?
     let controlRefreshSeconds: Int?
     let sessionApprovalPublicKey: String?
+    let sessionApprovalKeyTag: String?
     let clientCodeSigningRequirement: String
     let allowedClientUID: UInt32
 
@@ -106,19 +237,41 @@ private struct ServiceConfiguration: Decodable {
         case machServiceName = "mach_service_name"
         case keyTag = "key_tag"
         case keychainAccessGroup = "keychain_access_group"
+        case keyLifecycleDirectory = "key_lifecycle_directory"
+        case keyLifecycleExpectedHeadHash = "key_lifecycle_expected_head_hash"
+        case keyLifecyclePinDirectory = "key_lifecycle_pin_directory"
+        case keyLifecycleMutationOutboxDirectory = "key_lifecycle_mutation_outbox_directory"
+        case recoveryPublicKeys = "recovery_public_keys"
+        case recoveryThreshold = "recovery_threshold"
+        case recoveryPolicyPath = "recovery_policy_path"
+        case installationID = "installation_id"
         case policyPath = "policy_path"
         case auditLogPath = "audit_log_path"
         case auditArchiveDirectory = "audit_archive_directory"
         case auditCheckpointPath = "audit_checkpoint_path"
+        case auditCheckpointArchiveDirectory = "audit_checkpoint_archive_directory"
         case auditKeyTag = "audit_key_tag"
         case auditAnchorURL = "audit_anchor_url"
         case auditAnchorTenant = "audit_anchor_tenant"
         case auditAnchorPublicKey = "audit_anchor_public_key"
         case auditAnchorReceiptPath = "audit_anchor_receipt_path"
+        case auditAnchorReceiptArchiveDirectory = "audit_anchor_receipt_archive_directory"
+        case auditKeyTransitionPath = "audit_key_transition_path"
+        case auditKeyRotationPlanDirectory = "audit_key_rotation_plan_directory"
+        case auditKeyRecoveryPlanDirectory = "audit_key_recovery_plan_directory"
+        case auditKeyRecoveryApprovalDirectory = "audit_key_recovery_approval_directory"
+        case auditPruneJournalDirectory = "audit_prune_journal_directory"
+        case auditPruneTrustDirectory = "audit_prune_trust_directory"
+        case auditPruneEvidenceBundlePath = "audit_prune_evidence_bundle_path"
+        case auditKeyDeletionEvidenceBundlePath = "audit_key_deletion_evidence_bundle_path"
+        case auditKeyDeletionArchiveDirectory = "audit_key_deletion_archive_directory"
+        case auditRetentionAuthorizerPublicKey = "audit_retention_authorizer_public_key"
+        case auditKeyDeletionMinimumRetentionSeconds = "audit_key_deletion_minimum_retention_seconds"
         case controlStatePath = "control_state_path"
         case controlURL = "control_url"
         case controlRefreshSeconds = "control_refresh_seconds"
         case sessionApprovalPublicKey = "session_approval_public_key"
+        case sessionApprovalKeyTag = "session_approval_key_tag"
         case clientCodeSigningRequirement = "client_code_signing_requirement"
         case allowedClientUID = "allowed_client_uid"
     }
@@ -135,7 +288,79 @@ private struct ServiceConfiguration: Decodable {
             }
             _ = try NativeControlRefreshConfiguration(urlString: rawURL, refreshSeconds: interval)
         }
-        let anchorValues: [Any?] = [value.auditAnchorURL, value.auditAnchorTenant, value.auditAnchorPublicKey, value.auditAnchorReceiptPath]
+        let deletionConfigurationCount: Int = [
+            value.auditKeyDeletionEvidenceBundlePath != nil,
+            value.auditKeyDeletionArchiveDirectory != nil,
+            value.auditRetentionAuthorizerPublicKey != nil,
+            value.auditKeyDeletionMinimumRetentionSeconds != nil
+        ].filter { $0 }.count
+        if deletionConfigurationCount != 0 {
+            guard deletionConfigurationCount == 4,
+                  value.auditKeyDeletionEvidenceBundlePath?.hasPrefix("/") == true,
+                  value.auditKeyDeletionArchiveDirectory?.hasPrefix("/") == true,
+                  let authorizer = value.auditRetentionAuthorizerPublicKey,
+                  let retention = value.auditKeyDeletionMinimumRetentionSeconds,
+                  (86_400...31_536_000).contains(retention),
+                  value.keyLifecycleDirectory != nil,
+                  value.auditAnchorTenant != nil,
+                  value.auditAnchorPublicKey != nil,
+                  value.auditAnchorReceiptPath != nil,
+                  value.auditKeyTransitionPath != nil else {
+                throw AgentPassNativeError.invalidConfiguration("Retired audit-key deletion requires the complete protected evidence, lifecycle, transition, and anchor configuration")
+            }
+            _ = try SSHSIG.p256PublicKey(fromAuthorizedKey: authorizer)
+        }
+        let pruneConfigurationCount = [value.auditPruneJournalDirectory, value.auditPruneTrustDirectory, value.auditPruneEvidenceBundlePath].compactMap { $0 }.count
+        if pruneConfigurationCount != 0 {
+            guard pruneConfigurationCount == 3,
+                  let pruneJournal = value.auditPruneJournalDirectory, pruneJournal.hasPrefix("/"), URL(fileURLWithPath: pruneJournal).standardizedFileURL.path == pruneJournal,
+                  let pruneTrust = value.auditPruneTrustDirectory, pruneTrust.hasPrefix("/"), URL(fileURLWithPath: pruneTrust).standardizedFileURL.path == pruneTrust,
+                  let pruneEvidence = value.auditPruneEvidenceBundlePath, pruneEvidence.hasPrefix("/"), URL(fileURLWithPath: pruneEvidence).standardizedFileURL.path == pruneEvidence,
+                  pruneJournal != pruneTrust,
+                  URL(fileURLWithPath: pruneEvidence).deletingLastPathComponent().path != pruneJournal,
+                  URL(fileURLWithPath: pruneEvidence).deletingLastPathComponent().path != pruneTrust,
+                  value.auditKeyDeletionArchiveDirectory?.hasPrefix("/") == true,
+                  value.auditRetentionAuthorizerPublicKey != nil,
+                  value.auditKeyDeletionMinimumRetentionSeconds != nil,
+                  value.keyLifecycleDirectory != nil,
+                  value.auditAnchorURL != nil, value.auditAnchorTenant != nil,
+                  value.auditAnchorPublicKey != nil, value.auditAnchorReceiptPath != nil,
+                  value.auditKeyTransitionPath != nil else {
+                throw AgentPassNativeError.invalidConfiguration("Audit prune requires complete journal, trust, evidence, archive, lifecycle, transition, and anchor configuration")
+            }
+        }
+        if value.keyLifecycleDirectory != nil || value.keyLifecycleExpectedHeadHash != nil || value.keyLifecyclePinDirectory != nil || value.keyLifecycleMutationOutboxDirectory != nil || value.recoveryPublicKeys?.isEmpty == false {
+            let journalPinIsValid = value.keyLifecyclePinDirectory?.hasPrefix("/") == true
+            guard let directory = value.keyLifecycleDirectory, directory.hasPrefix("/"),
+                  journalPinIsValid,
+                  value.keyLifecycleMutationOutboxDirectory?.hasPrefix("/") == true,
+                  value.sessionApprovalKeyTag?.isEmpty == false else {
+                throw AgentPassNativeError.invalidConfiguration("Native key lifecycle requires absolute ledger, pin-journal, and mutation-outbox directories plus an approval key base tag")
+            }
+            for key in value.recoveryPublicKeys ?? [] { _ = try ed25519RecoveryPublicKey(key) }
+            if let keys = value.recoveryPublicKeys, !keys.isEmpty {
+                guard let threshold = value.recoveryThreshold, (1...keys.count).contains(threshold),
+                      let policyPath = value.recoveryPolicyPath, policyPath.hasPrefix("/"),
+                      let installationID = value.installationID,
+                      installationID.range(of: "^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$", options: .regularExpression) != nil else {
+                    throw AgentPassNativeError.invalidConfiguration("Native recovery requires pinned authorities, threshold, protected policy path, and installation ID")
+                }
+                let policy = try loadProtectedFile(path: policyPath, label: "Native recovery policy")
+                let metadata = try NativeRecoveryVerifier.policyMetadata(policy)
+                let configuredFingerprints = try keys.map {
+                    try NativeRecoveryVerifier.authorityFingerprint(rawEd25519PublicKey: ed25519RecoveryPublicKey($0))
+                }.sorted()
+                guard metadata.threshold == threshold,
+                      metadata.authorityPublicKeyFingerprints == configuredFingerprints else {
+                    throw AgentPassNativeError.invalidSignature("Recovery policy authorities or threshold disagree with lifecycle trust pins")
+                }
+            } else if value.recoveryThreshold != nil {
+                throw AgentPassNativeError.invalidConfiguration("Native recovery threshold requires recovery authorities")
+            } else if value.recoveryPolicyPath != nil || value.installationID != nil {
+                throw AgentPassNativeError.invalidConfiguration("Native recovery policy and installation ID require recovery authorities")
+            }
+        }
+        let anchorValues: [Any?] = [value.auditAnchorURL, value.auditAnchorTenant, value.auditAnchorPublicKey, value.auditAnchorReceiptPath, value.auditAnchorReceiptArchiveDirectory, value.auditKeyTransitionPath, value.auditKeyRotationPlanDirectory, value.auditKeyRecoveryPlanDirectory, value.auditKeyRecoveryApprovalDirectory]
         if anchorValues.contains(where: { $0 != nil }) {
             guard let rawURL = value.auditAnchorURL, let url = URL(string: rawURL), let components = URLComponents(url: url, resolvingAgainstBaseURL: false),
                   let tenant = value.auditAnchorTenant, let publicKey = value.auditAnchorPublicKey,
@@ -146,13 +371,97 @@ private struct ServiceConfiguration: Decodable {
                   components.user == nil, components.password == nil, components.query == nil, components.fragment == nil else {
                 throw AgentPassNativeError.invalidConfiguration("Native audit anchor requires a credential-free HTTPS URL")
             }
-            _ = try NativeAuditAnchorReceipts(path: receiptPath, tenant: tenant, anchorPublicKeyPEM: publicKey)
+            _ = try NativeAuditAnchorReceipts(path: receiptPath, tenant: tenant, anchorPublicKeyPEM: publicKey, archiveDirectory: value.auditAnchorReceiptArchiveDirectory)
+            if value.auditKeyTransitionPath != nil || value.auditKeyRotationPlanDirectory != nil {
+                guard let transitionPath = value.auditKeyTransitionPath, transitionPath.hasPrefix("/"),
+                      let planDirectory = value.auditKeyRotationPlanDirectory, planDirectory.hasPrefix("/") else {
+                    throw AgentPassNativeError.invalidConfiguration("Native audit key rotation requires absolute transition-log and plan-journal paths")
+                }
+                if let recoveryPolicyPath = value.recoveryPolicyPath,
+                   let installationID = value.installationID {
+                    let authorities = try loadProtectedFile(path: recoveryPolicyPath, label: "Native recovery policy")
+                    let converted = try NativeAuditKeyRecoveryPolicy.convertingAuthoritiesPolicy(authorities)
+                    _ = try NativeAuditKeyTransitionStore(
+                        path: transitionPath, tenant: tenant, anchorPublicKeyPEM: publicKey,
+                        recoveryPolicyData: converted.anchorPolicy.canonicalData(),
+                        installationID: installationID
+                    )
+                } else {
+                    _ = try NativeAuditKeyTransitionStore(path: transitionPath, tenant: tenant, anchorPublicKeyPEM: publicKey)
+                }
+                _ = try NativeAuditKeyRotationPlanJournal(rootPath: planDirectory, tenant: tenant)
+            }
+            if value.auditKeyRecoveryPlanDirectory != nil || value.auditKeyRecoveryApprovalDirectory != nil || (value.recoveryPolicyPath != nil && value.auditKeyTransitionPath != nil) {
+                guard let recoveryPlanDirectory = value.auditKeyRecoveryPlanDirectory,
+                      recoveryPlanDirectory.hasPrefix("/"),
+                      let recoveryApprovalDirectory = value.auditKeyRecoveryApprovalDirectory,
+                      recoveryApprovalDirectory.hasPrefix("/"),
+                      let recoveryPolicyPath = value.recoveryPolicyPath,
+                      let installationID = value.installationID,
+                      value.auditKeyTransitionPath != nil else {
+                    throw AgentPassNativeError.invalidConfiguration("Audit-key recovery requires transition storage, pinned authorities policy, installation ID, and an absolute recovery-plan journal directory")
+                }
+                let authorities = try loadProtectedFile(path: recoveryPolicyPath, label: "Native recovery policy")
+                let converted = try NativeAuditKeyRecoveryPolicy.convertingAuthoritiesPolicy(authorities)
+                _ = try NativeAuditKeyRecoveryPlanJournal(
+                    rootPath: recoveryPlanDirectory, tenant: tenant,
+                    pinnedPolicy: converted.anchorPolicy, installationID: installationID
+                )
+                _ = try NativeAuditRecoveryApprovalJournal(rootPath: recoveryApprovalDirectory)
+            }
         }
         return value
     }
 }
 
 private final class ServiceEndpoint: NSObject, AgentPassNativeServiceProtocol, @unchecked Sendable {
+    private struct PendingKeyActivation {
+        let statement: NativeKeyTransitionStatement
+        let expiresAt: Date
+        let approvalPublicKey: Data
+        let approvalApplicationTag: String
+        let auditRotationBoundary: NativeAuditKeyRotationCheckpointBoundary?
+    }
+    private struct PendingKeyAbort {
+        let role: NativeKeyRole
+        let generation: Int
+        let reason: String
+        let statement: Data
+        let lifecycleHead: String
+        let expiresAt: Date
+        let approvalPublicKey: Data
+        let approvalApplicationTag: String
+    }
+    private struct PendingRecovery {
+        let requestData: Data
+        let runtimeState: NativeRecoveryRuntimeState
+        let expiresAt: Date
+        let challengeID: String
+        var verification: NativeRecoveryVerification?
+        var evidenceData: Data?
+        var statement: NativeKeyTransitionStatement?
+        var localSignerPublicKey: Data?
+        var localSignerApplicationTag: String?
+        var localSignerFingerprint: String?
+        var auditPreparation: NativeRecoveredAuditActivationPreparation?
+        var auditAuthorization: NativeAuditKeyRecoveryAuthorization?
+        var auditEvidence: NativeAuditKeyRecoveryEvidence?
+        var auditPlan: NativeAuditKeyRecoveryPlan?
+        var auditSubmissionInFlight: Bool
+
+        var freezesMutations: Bool { verification != nil }
+    }
+    private struct PendingKeyDeletion {
+        let role: NativeKeyRole
+        let generation: Int
+        let reason: String
+        let minimumRetentionSeconds: Int
+        let proof: NativeLifecycleDeletionProof
+        let challengeID: String
+        let statement: Data
+        let expiresAt: Date
+        let approvalPublicKey: Data
+    }
     private let keyStore: SecureEnclaveKeyStore
     private let authorizer: NativeRequestAuthorizer
     private let auditLog: NativeAuditLog
@@ -160,14 +469,42 @@ private final class ServiceEndpoint: NSObject, AgentPassNativeServiceProtocol, @
     private let auditSigner: SecureEnclaveKeyStore
     private let auditAnchorReceipts: NativeAuditAnchorReceipts?
     private let auditAnchorClient: NativeAuditAnchorClient?
+    private let auditKeyRotationCoordinator: NativeAuditKeyRotationCoordinator?
+    private let auditKeyRecoveryCoordinator: NativeAuditKeyRecoveryCoordinator?
+    private let auditKeyRecoveryPlanJournal: NativeAuditKeyRecoveryPlanJournal?
+    private let auditKeyTransitionStore: NativeAuditKeyTransitionStore?
+    private let auditKeyRecoveryPolicy: NativeAuditKeyRecoveryPolicy?
+    private let auditKeyRecoveryApprovalJournal: NativeAuditRecoveryApprovalJournal?
+    private let auditPruneCoordinator: NativeAuditPruneCoordinator?
+    private let auditPruneTrustSource: NativeAuditPruneServiceTrustSource?
+    private let auditPruneEvidenceBundlePath: String?
+    private let auditAnchorTenant: String?
+    private let keychainAccessGroup: String?
+    private let recoveryPolicyData: Data?
+    private let installationID: String?
     private let sessionManager: NativeSessionManager?
     private let controlManager: NativeControlManager?
-    private let authorizationLock = NSLock()
+    private let keyLifecycle: NativeKeyLifecycleStore?
+    private let keyCoordinator: NativeKeyLifecycleCoordinator?
+    private let loadedLifecycleHeadHash: String?
+    private let authorizationLock = ServiceAuthorizationGate()
     private var controlFetcher: NativeControlFetcher?
     private var lastControlFetchAuditReason: String?
     private var lastControlFetchAuditAt: Date?
+    private var pendingKeyActivations: [String: PendingKeyActivation] = [:]
+    private var pendingKeyAborts: [String: PendingKeyAbort] = [:]
+    private var pendingRecovery: PendingRecovery?
+    private var recoveryRequestAttempts: [Date] = []
+    private var pendingKeyDeletions: [String: PendingKeyDeletion] = [:]
+    private var auditAnchorPushInFlight = false
+    private var auditPruneSubmissionInFlight = false
+    private var auditPruneSubmissionOperationID: String?
+    private var auditPruneLastStage: String?
+    private var auditPruneLastDecision: String?
+    private var auditPruneLastError: String?
+    private var auditPruneLastUpdatedAt: String?
 
-    init(keyStore: SecureEnclaveKeyStore, authorizer: NativeRequestAuthorizer, auditLog: NativeAuditLog, auditCheckpoints: NativeAuditCheckpoints, auditSigner: SecureEnclaveKeyStore, auditAnchorReceipts: NativeAuditAnchorReceipts?, auditAnchorClient: NativeAuditAnchorClient?, sessionManager: NativeSessionManager?, controlManager: NativeControlManager?) {
+    init(keyStore: SecureEnclaveKeyStore, authorizer: NativeRequestAuthorizer, auditLog: NativeAuditLog, auditCheckpoints: NativeAuditCheckpoints, auditSigner: SecureEnclaveKeyStore, auditAnchorReceipts: NativeAuditAnchorReceipts?, auditAnchorClient: NativeAuditAnchorClient?, auditKeyRotationCoordinator: NativeAuditKeyRotationCoordinator?, auditKeyRecoveryCoordinator: NativeAuditKeyRecoveryCoordinator?, auditKeyRecoveryPlanJournal: NativeAuditKeyRecoveryPlanJournal?, auditKeyTransitionStore: NativeAuditKeyTransitionStore?, auditKeyRecoveryPolicy: NativeAuditKeyRecoveryPolicy?, auditKeyRecoveryApprovalJournal: NativeAuditRecoveryApprovalJournal?, auditPruneCoordinator: NativeAuditPruneCoordinator?, auditPruneTrustSource: NativeAuditPruneServiceTrustSource?, auditPruneEvidenceBundlePath: String?, auditAnchorTenant: String?, keychainAccessGroup: String?, recoveryPolicyData: Data?, installationID: String?, sessionManager: NativeSessionManager?, controlManager: NativeControlManager?, keyLifecycle: NativeKeyLifecycleStore?, keyCoordinator: NativeKeyLifecycleCoordinator?, loadedLifecycleHeadHash: String?) {
         self.keyStore = keyStore
         self.authorizer = authorizer
         self.auditLog = auditLog
@@ -175,8 +512,24 @@ private final class ServiceEndpoint: NSObject, AgentPassNativeServiceProtocol, @
         self.auditSigner = auditSigner
         self.auditAnchorReceipts = auditAnchorReceipts
         self.auditAnchorClient = auditAnchorClient
+        self.auditKeyRotationCoordinator = auditKeyRotationCoordinator
+        self.auditKeyRecoveryCoordinator = auditKeyRecoveryCoordinator
+        self.auditKeyRecoveryPlanJournal = auditKeyRecoveryPlanJournal
+        self.auditKeyTransitionStore = auditKeyTransitionStore
+        self.auditKeyRecoveryPolicy = auditKeyRecoveryPolicy
+        self.auditKeyRecoveryApprovalJournal = auditKeyRecoveryApprovalJournal
+        self.auditPruneCoordinator = auditPruneCoordinator
+        self.auditPruneTrustSource = auditPruneTrustSource
+        self.auditPruneEvidenceBundlePath = auditPruneEvidenceBundlePath
+        self.auditAnchorTenant = auditAnchorTenant
+        self.keychainAccessGroup = keychainAccessGroup
+        self.recoveryPolicyData = recoveryPolicyData
+        self.installationID = installationID
         self.sessionManager = sessionManager
         self.controlManager = controlManager
+        self.keyLifecycle = keyLifecycle
+        self.keyCoordinator = keyCoordinator
+        self.loadedLifecycleHeadHash = loadedLifecycleHeadHash
     }
 
     func startControlRefresh(url: URL, refreshSeconds: Int) throws {
@@ -190,35 +543,41 @@ private final class ServiceEndpoint: NSObject, AgentPassNativeServiceProtocol, @
 
     func health(withReply reply: @escaping (NSDictionary) -> Void) {
         do {
+            try verifyLifecycleTrust()
             let audit = try auditLog.verify()
             let storage = try auditLog.storageStatus()
             let checkpoints = try auditCheckpoints.verify()
+            let checkpointStorage = try auditCheckpoints.storageStatus()
             let session = sessionManager?.status()
             let approvalFingerprint: Any = sessionManager?.approvalKeyFingerprint ?? NSNull()
             let control = controlManager?.status()
             let fetch = controlFetcher?.status()
             let anchor = try auditAnchorReceipts?.status(checkpoints: checkpoints)
-            reply(["ok": true, "protocol_version": 8, "key_backend": "secure-enclave", "audit_entries": audit.entries, "audit_archive_configured": storage.configured, "audit_archive_segments": storage.segments, "audit_active_bytes": storage.activeBytes, "audit_rotation_ready": storage.rotationReady, "audit_checkpoints": checkpoints.count, "audit_anchor_configured": anchor != nil, "audit_anchor_receipts": anchor?.receipts ?? 0, "audit_anchor_pending": anchor?.pending ?? 0, "audit_anchor_latest_receipt": anchor?.latestReceiptHash ?? NSNull(), "session_required": session?.required ?? false, "active_sessions": session?.active ?? 0, "session_generation": session?.generation ?? 0, "session_approval_key_fingerprint": approvalFingerprint, "control_configured": control != nil, "control_sequence": control?.sequence ?? 0, "control_operational": control?.operational ?? true, "control_expired": control?.expired ?? false, "control_expires_at": control?.expiresAt ?? NSNull(), "control_refresh_configured": fetch != nil, "control_refresh_in_flight": fetch?.inFlight ?? false, "control_refresh_last_attempt_at": fetch?.lastAttemptAt ?? NSNull(), "control_refresh_last_success_at": fetch?.lastSuccessAt ?? NSNull(), "control_refresh_last_error": fetch?.lastError ?? NSNull(), "control_refresh_next_attempt_at": fetch?.nextAttemptAt ?? NSNull(), "control_refresh_consecutive_failures": fetch?.consecutiveFailures ?? 0])
+            let lifecycle = try keyLifecycle?.verify()
+            let receiptStorage = try auditAnchorReceipts?.storageStatus(checkpoints: checkpoints)
+            reply(["ok": true, "protocol_version": 13, "key_backend": "secure-enclave", "key_lifecycle_configured": lifecycle != nil, "key_lifecycle_sequence": lifecycle?.sequence ?? 0, "key_lifecycle_head_hash": lifecycle?.headHash ?? NSNull(), "audit_entries": audit.entries, "audit_archive_configured": storage.configured, "audit_archive_segments": storage.segments, "audit_active_bytes": storage.activeBytes, "audit_rotation_ready": storage.rotationReady, "audit_checkpoints": checkpoints.count, "audit_checkpoint_archive_configured": checkpointStorage.configured, "audit_checkpoint_archive_segments": checkpointStorage.segments, "audit_checkpoint_active_bytes": checkpointStorage.activeBytes, "audit_checkpoint_rotation_ready": checkpointStorage.rotationReady, "audit_anchor_configured": anchor != nil, "audit_anchor_receipts": anchor?.receipts ?? 0, "audit_anchor_pending": anchor?.pending ?? 0, "audit_anchor_latest_receipt": anchor?.latestReceiptHash ?? NSNull(), "audit_receipt_archive_configured": receiptStorage?.configured ?? false, "audit_receipt_archive_segments": receiptStorage?.segments ?? 0, "audit_receipt_active_bytes": receiptStorage?.activeBytes ?? 0, "audit_receipt_rotation_ready": receiptStorage?.rotationReady ?? false, "session_required": session?.required ?? false, "active_sessions": session?.active ?? 0, "session_generation": session?.generation ?? 0, "session_approval_key_fingerprint": approvalFingerprint, "control_configured": control != nil, "control_sequence": control?.sequence ?? 0, "control_operational": control?.operational ?? true, "control_expired": control?.expired ?? false, "control_expires_at": control?.expiresAt ?? NSNull(), "control_refresh_configured": fetch != nil, "control_refresh_in_flight": fetch?.inFlight ?? false, "control_refresh_last_attempt_at": fetch?.lastAttemptAt ?? NSNull(), "control_refresh_last_success_at": fetch?.lastSuccessAt ?? NSNull(), "control_refresh_last_error": fetch?.lastError ?? NSNull(), "control_refresh_next_attempt_at": fetch?.nextAttemptAt ?? NSNull(), "control_refresh_consecutive_failures": fetch?.consecutiveFailures ?? 0])
         } catch {
-            reply(["ok": false, "protocol_version": 8, "error": error.localizedDescription])
+            reply(["ok": false, "protocol_version": 13, "error": error.localizedDescription])
         }
     }
 
     func publicKey(withReply reply: @escaping (NSString?, NSError?) -> Void) {
-        do { reply(try SSHSIG.authorizedKey(publicKeyX963: keyStore.publicKeyX963) as NSString, nil) }
+        do { try verifyLifecycleTrust(); reply(try SSHSIG.authorizedKey(publicKeyX963: keyStore.publicKeyX963) as NSString, nil) }
         catch { reply(nil, error as NSError) }
     }
 
     func sign(request: NSData, withReply reply: @escaping (NSString?, NSError?) -> Void) {
         authorizationLock.lock()
         defer { authorizationLock.unlock() }
-        do { _ = try auditCheckpoints.verify() }
+        do { try verifyLifecycleTrustLocked() }
+        catch { reply(nil, error as NSError); return }
+        do { try rotateAuditIfReady(); _ = try auditCheckpoints.verify() }
         catch { reply(nil, error as NSError); return }
         let authorized: AuthorizedSignRequest
         do {
             authorized = try authorizer.authorize(requestData: request as Data)
         } catch let authorizationError {
-            do { try auditLog.append(NativeAuditEvent(operation: "git.commit.sign", decision: "deny", reason: authorizationError.localizedDescription)) }
+            do { try appendAudit(NativeAuditEvent(operation: "git.commit.sign", decision: "deny", reason: authorizationError.localizedDescription)) }
             catch let auditError {
                 controlManager?.invalidate()
                 reply(nil, auditError as NSError)
@@ -230,10 +589,10 @@ private final class ServiceEndpoint: NSObject, AgentPassNativeServiceProtocol, @
         do {
             let signature = try SSHSIG.sign(payload: authorized.payload, signer: keyStore)
             let payloadHash = SHA256.hash(data: authorized.payload).map { String(format: "%02x", $0) }.joined()
-            try auditLog.append(NativeAuditEvent(operation: "git.commit.sign", decision: "allow", reason: "allowed", agentID: authorized.agentID, repository: authorized.repository, branch: authorized.branch, remote: authorized.remote, payloadSHA256: payloadHash))
+            try appendAudit(NativeAuditEvent(operation: "git.commit.sign", decision: "allow", reason: "allowed", agentID: authorized.agentID, repository: authorized.repository, branch: authorized.branch, remote: authorized.remote, payloadSHA256: payloadHash))
             reply(signature as NSString, nil)
         } catch let signingError {
-            do { try auditLog.append(NativeAuditEvent(operation: "git.commit.sign", decision: "error", reason: signingError.localizedDescription, agentID: authorized.agentID, repository: authorized.repository, branch: authorized.branch, remote: authorized.remote)) }
+            do { try appendAudit(NativeAuditEvent(operation: "git.commit.sign", decision: "error", reason: signingError.localizedDescription, agentID: authorized.agentID, repository: authorized.repository, branch: authorized.branch, remote: authorized.remote)) }
             catch let auditError {
                 controlManager?.invalidate()
                 reply(nil, auditError as NSError)
@@ -248,32 +607,39 @@ private final class ServiceEndpoint: NSObject, AgentPassNativeServiceProtocol, @
             let audit = try auditLog.verify()
             let storage = try auditLog.storageStatus()
             let checkpoints = try auditCheckpoints.verify()
+            let checkpointStorage = try auditCheckpoints.storageStatus()
+            let receiptStorage = try auditAnchorReceipts?.storageStatus(checkpoints: checkpoints)
             let latest: Any = checkpoints.last?.checkpointHash ?? NSNull()
             let fingerprint = NativeAuditCheckpoints.fingerprint(auditSigner.publicKeyX963)
             let session = sessionManager?.status()
             let approvalFingerprint: Any = sessionManager?.approvalKeyFingerprint ?? NSNull()
             let control = controlManager?.status()
             let fetch = controlFetcher?.status()
-            let data = try JSONSerialization.data(withJSONObject: ["valid": true, "entries": audit.entries, "archive_configured": storage.configured, "archive_segments": storage.segments, "active_bytes": storage.activeBytes, "rotation_ready": storage.rotationReady, "head_hash": audit.headHash, "checkpoints": checkpoints.count, "latest_checkpoint": latest, "audit_key_fingerprint": fingerprint, "session_required": session?.required ?? false, "active_sessions": session?.active ?? 0, "session_generation": session?.generation ?? 0, "session_approval_key_fingerprint": approvalFingerprint, "control_configured": control != nil, "control_sequence": control?.sequence ?? 0, "control_operational": control?.operational ?? true, "control_expired": control?.expired ?? false, "control_expires_at": control?.expiresAt ?? NSNull(), "control_refresh_configured": fetch != nil, "control_refresh_last_attempt_at": fetch?.lastAttemptAt ?? NSNull(), "control_refresh_last_success_at": fetch?.lastSuccessAt ?? NSNull(), "control_refresh_last_error": fetch?.lastError ?? NSNull(), "control_refresh_next_attempt_at": fetch?.nextAttemptAt ?? NSNull(), "control_refresh_consecutive_failures": fetch?.consecutiveFailures ?? 0], options: [.sortedKeys])
+            let data = try JSONSerialization.data(withJSONObject: ["valid": true, "entries": audit.entries, "archive_configured": storage.configured, "archive_segments": storage.segments, "active_bytes": storage.activeBytes, "rotation_ready": storage.rotationReady, "head_hash": audit.headHash, "checkpoints": checkpoints.count, "latest_checkpoint": latest, "audit_key_fingerprint": fingerprint, "checkpoint_archive_configured": checkpointStorage.configured, "checkpoint_archive_segments": checkpointStorage.segments, "checkpoint_active_records": checkpointStorage.activeRecords, "checkpoint_active_bytes": checkpointStorage.activeBytes, "checkpoint_rotation_ready": checkpointStorage.rotationReady, "receipt_archive_configured": receiptStorage?.configured ?? false, "receipt_archive_segments": receiptStorage?.segments ?? 0, "receipt_active_records": receiptStorage?.activeRecords ?? 0, "receipt_active_bytes": receiptStorage?.activeBytes ?? 0, "receipt_rotation_ready": receiptStorage?.rotationReady ?? false, "session_required": session?.required ?? false, "active_sessions": session?.active ?? 0, "session_generation": session?.generation ?? 0, "session_approval_key_fingerprint": approvalFingerprint, "control_configured": control != nil, "control_sequence": control?.sequence ?? 0, "control_operational": control?.operational ?? true, "control_expired": control?.expired ?? false, "control_expires_at": control?.expiresAt ?? NSNull(), "control_refresh_configured": fetch != nil, "control_refresh_last_attempt_at": fetch?.lastAttemptAt ?? NSNull(), "control_refresh_last_success_at": fetch?.lastSuccessAt ?? NSNull(), "control_refresh_last_error": fetch?.lastError ?? NSNull(), "control_refresh_next_attempt_at": fetch?.nextAttemptAt ?? NSNull(), "control_refresh_consecutive_failures": fetch?.consecutiveFailures ?? 0], options: [.sortedKeys])
             reply(data as NSData, nil)
         } catch { reply(nil, error as NSError) }
     }
 
     func auditPublicKey(withReply reply: @escaping (NSString?, NSError?) -> Void) {
-        do { reply(try SSHSIG.authorizedKey(publicKeyX963: auditSigner.publicKeyX963) as NSString, nil) }
+        do { try verifyLifecycleTrust(); reply(try SSHSIG.authorizedKey(publicKeyX963: auditSigner.publicKeyX963) as NSString, nil) }
         catch { reply(nil, error as NSError) }
     }
 
     func createAuditCheckpoint(withReply reply: @escaping (NSData?, NSError?) -> Void) {
+        authorizationLock.lock()
+        defer { authorizationLock.unlock() }
+        do { try verifyLifecycleTrustLocked() }
+        catch { reply(nil, error as NSError); return }
         do { _ = try auditCheckpoints.verify() }
         catch { reply(nil, error as NSError); return }
         do {
-            try auditLog.append(NativeAuditEvent(operation: "audit.checkpoint", decision: "allow"))
+            try rotateEvidenceIfReady()
+            try appendAudit(NativeAuditEvent(operation: "audit.checkpoint", decision: "allow"))
             let encoder = JSONEncoder()
             encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
             reply(try encoder.encode(auditCheckpoints.create()) as NSData, nil)
         } catch let checkpointError {
-            do { try auditLog.append(NativeAuditEvent(operation: "audit.checkpoint", decision: "error", reason: checkpointError.localizedDescription)) }
+            do { try appendAudit(NativeAuditEvent(operation: "audit.checkpoint", decision: "error", reason: checkpointError.localizedDescription)) }
             catch let auditError { reply(nil, auditError as NSError); return }
             reply(nil, checkpointError as NSError)
         }
@@ -283,6 +649,7 @@ private final class ServiceEndpoint: NSObject, AgentPassNativeServiceProtocol, @
         authorizationLock.lock()
         defer { authorizationLock.unlock() }
         do {
+            try verifyLifecycleTrustLocked()
             guard try auditLog.canRotate() else {
                 throw AgentPassNativeError.invalidConfiguration("Native audit log has not reached the 64 MiB rotation threshold")
             }
@@ -292,6 +659,824 @@ private final class ServiceEndpoint: NSObject, AgentPassNativeServiceProtocol, @
             encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
             reply(try encoder.encode(rotation) as NSData, nil)
         } catch { reply(nil, error as NSError) }
+    }
+
+    func rotateAuditEvidence(withReply reply: @escaping (NSData?, NSError?) -> Void) {
+        authorizationLock.lock()
+        defer { authorizationLock.unlock() }
+        do {
+            try verifyLifecycleTrustLocked()
+            let checkpoints = try auditCheckpoints.verify()
+            let checkpointStatus = try auditCheckpoints.storageStatus()
+            let receiptStatus = try auditAnchorReceipts?.storageStatus(checkpoints: checkpoints)
+            guard checkpointStatus.rotationReady || receiptStatus?.rotationReady == true else {
+                throw AgentPassNativeError.invalidConfiguration("Native audit evidence has not reached the 64 MiB rotation threshold")
+            }
+            var object: [String: Any] = [:]
+            let encoder = JSONEncoder()
+            encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
+            if receiptStatus?.rotationReady == true, let auditAnchorReceipts {
+                object["receipts"] = try JSONSerialization.jsonObject(with: encoder.encode(auditAnchorReceipts.rotate(checkpoints: checkpoints)))
+            }
+            if checkpointStatus.rotationReady {
+                object["checkpoints"] = try JSONSerialization.jsonObject(with: encoder.encode(auditCheckpoints.rotate()))
+            }
+            try appendAudit(NativeAuditEvent(operation: "audit.evidence.rotate", decision: "allow"))
+            reply(try JSONSerialization.data(withJSONObject: object, options: [.sortedKeys]) as NSData, nil)
+        } catch { reply(nil, error as NSError) }
+    }
+
+    func keyLifecycleStatus(withReply reply: @escaping (NSData?, NSError?) -> Void) {
+        guard let keyLifecycle else {
+            do { reply(try JSONSerialization.data(withJSONObject: ["configured": false], options: [.sortedKeys]) as NSData, nil) }
+            catch { reply(nil, error as NSError) }
+            return
+        }
+        do {
+            let snapshot = try keyLifecycle.verify()
+            let active = Dictionary(uniqueKeysWithValues: NativeKeyRole.allCases.map { role -> (String, Any) in
+                guard let generation = snapshot.active(for: role) else { return (role.rawValue, NSNull()) }
+                return (role.rawValue, ["generation": generation.generation, "application_tag": generation.applicationTag, "fingerprint": generation.fingerprint])
+            })
+            let object: [String: Any] = ["configured": true, "valid": true, "sequence": snapshot.sequence, "head_hash": snapshot.headHash, "active": active]
+            reply(try JSONSerialization.data(withJSONObject: object, options: [.sortedKeys]) as NSData, nil)
+        } catch { reply(nil, error as NSError) }
+    }
+
+    func stageKey(role: NSString, withReply reply: @escaping (NSData?, NSError?) -> Void) {
+        authorizationLock.lock()
+        defer { authorizationLock.unlock() }
+        guard let keyCoordinator, let role = NativeKeyRole(rawValue: role as String) else {
+            reply(nil, AgentPassNativeError.invalidConfiguration("Native key lifecycle coordinator or role is invalid") as NSError)
+            return
+        }
+        do {
+            try verifyLifecycleTrustLocked()
+            let staged = try keyCoordinator.stageServiceKey(role: role)
+            try appendAudit(NativeAuditEvent(operation: "key.stage", decision: "allow", reason: "role=\(role.rawValue);generation=\(staged.generation);fingerprint=\(staged.fingerprint)"))
+            let object: [String: Any] = ["role": role.rawValue, "generation": staged.generation, "application_tag": staged.applicationTag, "fingerprint": staged.fingerprint, "lifecycle_head_hash": staged.lifecycleHeadHash, "configuration_pin_update_required": true]
+            reply(try JSONSerialization.data(withJSONObject: object, options: [.sortedKeys]) as NSData, nil)
+        } catch { reply(nil, error as NSError) }
+    }
+
+    func approvalKeyStagePlan(withReply reply: @escaping (NSData?, NSError?) -> Void) {
+        authorizationLock.lock()
+        defer { authorizationLock.unlock() }
+        guard let keyCoordinator else {
+            reply(nil, AgentPassNativeError.invalidConfiguration("Native key lifecycle coordinator is not configured") as NSError)
+            return
+        }
+        do {
+            try verifyLifecycleTrustLocked()
+            let plan = try keyCoordinator.approvalKeyStagePlan()
+            let object: [String: Any] = ["role": NativeKeyRole.sessionApproval.rawValue, "generation": plan.generation, "application_tag": plan.applicationTag]
+            reply(try JSONSerialization.data(withJSONObject: object, options: [.sortedKeys]) as NSData, nil)
+        } catch { reply(nil, error as NSError) }
+    }
+
+    func stageApprovalKey(generation: Int, applicationTag: NSString, publicKey: NSData, withReply reply: @escaping (NSData?, NSError?) -> Void) {
+        authorizationLock.lock()
+        defer { authorizationLock.unlock() }
+        guard let keyCoordinator else {
+            reply(nil, AgentPassNativeError.invalidConfiguration("Native key lifecycle coordinator is not configured") as NSError)
+            return
+        }
+        do {
+            try verifyLifecycleTrustLocked()
+            let staged = try keyCoordinator.stageApprovalKey(generation: generation, applicationTag: applicationTag as String, publicKeyX963: publicKey as Data)
+            try appendAudit(NativeAuditEvent(operation: "key.stage", decision: "allow", reason: "role=\(staged.role.rawValue);generation=\(staged.generation);fingerprint=\(staged.fingerprint)"))
+            let object: [String: Any] = ["role": staged.role.rawValue, "generation": staged.generation, "application_tag": staged.applicationTag, "fingerprint": staged.fingerprint, "lifecycle_head_hash": staged.lifecycleHeadHash, "configuration_pin_update_required": true]
+            reply(try JSONSerialization.data(withJSONObject: object, options: [.sortedKeys]) as NSData, nil)
+        } catch { reply(nil, error as NSError) }
+    }
+
+    func beginKeyActivation(role: NSString, generation: Int, reason: NSString, withReply reply: @escaping (NSData?, NSError?) -> Void) {
+        authorizationLock.lock()
+        defer { authorizationLock.unlock() }
+        guard let keyCoordinator, let keyLifecycle, let role = NativeKeyRole(rawValue: role as String) else {
+            reply(nil, AgentPassNativeError.invalidConfiguration("Native key activation role is invalid") as NSError)
+            return
+        }
+        do {
+            try verifyLifecycleTrustLocked()
+            pendingKeyActivations = pendingKeyActivations.filter { $0.value.expiresAt > Date() }
+            guard pendingKeyActivations.count < 8 else { throw AgentPassNativeError.invalidConfiguration("Too many pending key activation challenges") }
+            guard pendingKeyActivations.values.filter({ $0.statement.role == role }).count < 2 else {
+                throw AgentPassNativeError.invalidConfiguration("Too many pending key activation challenges for this role")
+            }
+            try validateManagementReason(reason as String)
+            let state = try keyLifecycle.verify()
+            guard let approval = state.active(for: .sessionApproval) else { throw AgentPassNativeError.invalidConfiguration("Active lifecycle approval key is missing") }
+            let challengeID = UUID().uuidString.lowercased()
+            let statement = try keyCoordinator.activationStatement(role: role, generation: generation, reason: reason as String, challengeID: challengeID)
+            let expiresAt = Date().addingTimeInterval(60)
+            let auditRotationBoundary = try role == .auditCheckpoint ? finalAuditKeyRotationBoundary(statement: statement) : nil
+            pendingKeyActivations[challengeID] = PendingKeyActivation(statement: statement, expiresAt: expiresAt, approvalPublicKey: approval.publicKeyX963, approvalApplicationTag: approval.applicationTag, auditRotationBoundary: auditRotationBoundary)
+            var object: [String: Any] = [
+                "challenge_id": challengeID, "expires_at": serviceTimestamp(expiresAt),
+                "role": role.rawValue, "generation": generation, "reason": reason as String,
+                "approval_generation": approval.generation, "approval_application_tag": approval.applicationTag,
+                "approval_fingerprint": approval.fingerprint, "statement_base64": try statement.canonicalData().base64EncodedString()
+            ]
+            if let staged = state.generation(generation, for: role) {
+                object["new_application_tag"] = staged.applicationTag
+                object["new_fingerprint"] = staged.fingerprint
+            }
+            reply(try JSONSerialization.data(withJSONObject: object, options: [.sortedKeys]) as NSData, nil)
+        } catch { reply(nil, error as NSError) }
+    }
+
+    func completeKeyActivation(challengeID: NSString, approvalSignature: NSData, withReply reply: @escaping (NSData?, NSError?) -> Void) {
+        authorizationLock.lock()
+        defer { authorizationLock.unlock() }
+        do { try verifyLifecycleTrustLocked() }
+        catch { reply(nil, error as NSError); return }
+        guard let keyCoordinator else {
+            reply(nil, AgentPassNativeError.invalidConfiguration("Native key lifecycle coordinator is not configured") as NSError)
+            return
+        }
+        let identifier = challengeID as String
+        guard let pending = pendingKeyActivations.removeValue(forKey: identifier) else {
+            reply(nil, AgentPassNativeError.invalidSignature("Key activation challenge is missing or already consumed") as NSError)
+            return
+        }
+        do {
+            guard pending.statement.role != .sessionApproval else { throw AgentPassNativeError.invalidConfiguration("Approval-key activation requires two key signatures") }
+            guard pending.expiresAt >= Date(), approvalSignature.length == 64 else { throw AgentPassNativeError.invalidSignature("Key activation challenge expired or signature is invalid") }
+            let state: NativeKeyLifecycleSnapshot
+            if pending.statement.role == .auditCheckpoint {
+                guard let boundary = pending.auditRotationBoundary,
+                      let rotationCoordinator = auditKeyRotationCoordinator,
+                      let keyLifecycle else {
+                    throw AgentPassNativeError.invalidConfiguration("Audit-key activation requires durable anchor rotation configuration")
+                }
+                let lifecycle = try keyLifecycle.verify()
+                guard let staged = lifecycle.generation(pending.statement.newGeneration, for: .auditCheckpoint), staged.status == .staged else {
+                    throw AgentPassNativeError.invalidConfiguration("Staged audit key is missing")
+                }
+                let replacementSigner = try SecureEnclaveKeyStore.loadExisting(applicationTag: staged.applicationTag, accessGroup: keychainAccessGroup)
+                state = try keyCoordinator.activateServiceKey(statement: pending.statement, approvalSignature: approvalSignature as Data, approvalPublicKeyX963: pending.approvalPublicKey) { preview in
+                    guard preview.retiringPublicKeyX963 == self.auditSigner.publicKeyX963,
+                          preview.replacementPublicKeyX963 == replacementSigner.publicKeyX963 else {
+                        throw AgentPassNativeError.invalidKey("Audit-key activation preview does not match the loaded Secure Enclave keys")
+                    }
+                    let plan = try rotationCoordinator.prepare(
+                        operationID: pending.statement.challengeID,
+                        fromGeneration: pending.statement.oldGeneration,
+                        lifecycleHeadHash: preview.lifecycleHeadHash,
+                        checkpointBoundary: boundary,
+                        retiringSigner: self.auditSigner,
+                        replacementSigner: replacementSigner,
+                        createdAt: pending.statement.createdAt,
+                        lifecycleRecordData: preview.canonicalLifecycleRecord
+                    )
+                    _ = try rotationCoordinator.authorizeActivation(plan: plan, checkpointBoundary: boundary)
+                }
+            } else {
+                state = try keyCoordinator.activateServiceKey(statement: pending.statement, approvalSignature: approvalSignature as Data, approvalPublicKeyX963: pending.approvalPublicKey)
+            }
+            let revoked = sessionManager?.revokeAll()
+            if pending.statement.role != .auditCheckpoint {
+                try appendAudit(NativeAuditEvent(operation: "key.activate", decision: "allow", reason: "role=\(pending.statement.role.rawValue);generation=\(pending.statement.newGeneration);lifecycle_head=\(state.headHash);sessions_revoked=\(revoked?.revokedSessions ?? 0)"))
+            }
+            let object: [String: Any] = ["activated": true, "role": pending.statement.role.rawValue, "generation": pending.statement.newGeneration, "lifecycle_head_hash": state.headHash, "restart_required": true, "configuration_pin_update_required": true]
+            reply(try JSONSerialization.data(withJSONObject: object, options: [.sortedKeys]) as NSData, nil)
+        } catch {
+            if pending.statement.role != .auditCheckpoint {
+                _ = try? appendAudit(NativeAuditEvent(operation: "key.activate", decision: "deny", reason: error.localizedDescription))
+            }
+            reply(nil, error as NSError)
+        }
+    }
+
+    func completeApprovalKeyActivation(challengeID: NSString, oldSignature: NSData, newSignature: NSData, withReply reply: @escaping (NSData?, NSError?) -> Void) {
+        authorizationLock.lock()
+        defer { authorizationLock.unlock() }
+        do { try verifyLifecycleTrustLocked() }
+        catch { reply(nil, error as NSError); return }
+        guard let keyCoordinator else {
+            reply(nil, AgentPassNativeError.invalidConfiguration("Native key lifecycle coordinator is not configured") as NSError)
+            return
+        }
+        let identifier = challengeID as String
+        guard let pending = pendingKeyActivations.removeValue(forKey: identifier) else {
+            reply(nil, AgentPassNativeError.invalidSignature("Key activation challenge is missing or already consumed") as NSError)
+            return
+        }
+        do {
+            guard pending.statement.role == .sessionApproval, pending.expiresAt >= Date(), oldSignature.length == 64, newSignature.length == 64 else {
+                throw AgentPassNativeError.invalidSignature("Approval-key activation challenge or signatures are invalid")
+            }
+            let state = try keyCoordinator.activateApprovalKey(statement: pending.statement, oldApprovalSignature: oldSignature as Data, newApprovalSignature: newSignature as Data, oldApprovalPublicKeyX963: pending.approvalPublicKey)
+            let revoked = sessionManager?.revokeAll()
+            try appendAudit(NativeAuditEvent(operation: "key.activate", decision: "allow", reason: "role=session_approval;generation=\(pending.statement.newGeneration);lifecycle_head=\(state.headHash);sessions_revoked=\(revoked?.revokedSessions ?? 0)"))
+            let object: [String: Any] = ["activated": true, "role": NativeKeyRole.sessionApproval.rawValue, "generation": pending.statement.newGeneration, "lifecycle_head_hash": state.headHash, "restart_required": true, "configuration_pin_update_required": true]
+            reply(try JSONSerialization.data(withJSONObject: object, options: [.sortedKeys]) as NSData, nil)
+        } catch {
+            _ = try? appendAudit(NativeAuditEvent(operation: "key.activate", decision: "deny", reason: error.localizedDescription))
+            reply(nil, error as NSError)
+        }
+    }
+
+    func beginKeyAbort(role: NSString, generation: Int, reason: NSString, withReply reply: @escaping (NSData?, NSError?) -> Void) {
+        authorizationLock.lock()
+        defer { authorizationLock.unlock() }
+        guard let keyCoordinator, let keyLifecycle, let role = NativeKeyRole(rawValue: role as String),
+              role == .gitSigning || role == .auditCheckpoint else {
+            reply(nil, AgentPassNativeError.invalidConfiguration("Only service-owned staged keys can use this abort path") as NSError)
+            return
+        }
+        do {
+            try verifyLifecycleTrustLocked()
+            let value = reason as String
+            try validateManagementReason(value)
+            pendingKeyAborts = pendingKeyAborts.filter { $0.value.expiresAt > Date() }
+            guard pendingKeyAborts.count < 8 else { throw AgentPassNativeError.invalidConfiguration("Too many pending key abort challenges") }
+            guard pendingKeyAborts.values.filter({ $0.role == role }).count < 2 else {
+                throw AgentPassNativeError.invalidConfiguration("Too many pending key abort challenges for this role")
+            }
+            let state = try keyLifecycle.verify()
+            guard let staged = state.generation(generation, for: role), staged.status == .staged,
+                  let approval = state.active(for: .sessionApproval) else {
+                throw AgentPassNativeError.invalidConfiguration("Staged key or approval authority is missing")
+            }
+            let challengeID = UUID().uuidString.lowercased()
+            let statement = try keyCoordinator.abortStatement(role: role, generation: generation, reason: value, challengeID: challengeID, externallyPinnedHeadHash: state.headHash)
+            let expiresAt = Date().addingTimeInterval(60)
+            pendingKeyAborts[challengeID] = PendingKeyAbort(role: role, generation: generation, reason: value, statement: statement, lifecycleHead: state.headHash, expiresAt: expiresAt, approvalPublicKey: approval.publicKeyX963, approvalApplicationTag: approval.applicationTag)
+            let object: [String: Any] = [
+                "challenge_id": challengeID, "expires_at": serviceTimestamp(expiresAt),
+                "role": role.rawValue, "generation": generation, "reason": value,
+                "staged_application_tag": staged.applicationTag, "staged_fingerprint": staged.fingerprint,
+                "approval_application_tag": approval.applicationTag, "approval_fingerprint": approval.fingerprint,
+                "lifecycle_head_hash": state.headHash, "statement_base64": statement.base64EncodedString()
+            ]
+            reply(try JSONSerialization.data(withJSONObject: object, options: [.sortedKeys]) as NSData, nil)
+        } catch { reply(nil, error as NSError) }
+    }
+
+    func completeKeyAbort(challengeID: NSString, approvalSignature: NSData, withReply reply: @escaping (NSData?, NSError?) -> Void) {
+        authorizationLock.lock()
+        defer { authorizationLock.unlock() }
+        do { try verifyLifecycleTrustLocked() }
+        catch { reply(nil, error as NSError); return }
+        guard let keyCoordinator else {
+            reply(nil, AgentPassNativeError.invalidConfiguration("Native key lifecycle coordinator is not configured") as NSError)
+            return
+        }
+        let identifier = challengeID as String
+        guard let pending = pendingKeyAborts.removeValue(forKey: identifier) else {
+            reply(nil, AgentPassNativeError.invalidSignature("Key abort challenge is missing or already consumed") as NSError)
+            return
+        }
+        do {
+            guard pending.expiresAt >= Date(), approvalSignature.length == 64 else {
+                throw AgentPassNativeError.invalidSignature("Key abort challenge expired or signature is invalid")
+            }
+            let state = try keyCoordinator.abortStagedServiceKey(role: pending.role, generation: pending.generation, reason: pending.reason, challengeID: identifier, externallyPinnedHeadHash: pending.lifecycleHead, approvalSignature: approvalSignature as Data, approvalPublicKeyX963: pending.approvalPublicKey)
+            try appendAudit(NativeAuditEvent(operation: "key.abort", decision: "allow", reason: "role=\(pending.role.rawValue);generation=\(pending.generation);lifecycle_head=\(state.headHash)"))
+            let object: [String: Any] = ["aborted": true, "role": pending.role.rawValue, "generation": pending.generation, "lifecycle_head_hash": state.headHash, "restart_required": true, "configuration_pin_update_required": true]
+            reply(try JSONSerialization.data(withJSONObject: object, options: [.sortedKeys]) as NSData, nil)
+        } catch {
+            _ = try? appendAudit(NativeAuditEvent(operation: "key.abort", decision: "deny", reason: error.localizedDescription))
+            reply(nil, error as NSError)
+        }
+    }
+
+    func beginKeyDeletion(role: NSString, generation: Int, reason: NSString, minimumRetentionSeconds: Int, proof: NSData, withReply reply: @escaping (NSData?, NSError?) -> Void) {
+        authorizationLock.lock()
+        defer { authorizationLock.unlock() }
+        guard let role = NativeKeyRole(rawValue: role as String),
+              role == .auditCheckpoint,
+              let keyCoordinator, let keyLifecycle else {
+            reply(nil, AgentPassNativeError.invalidConfiguration("Only retired audit-checkpoint keys have an externally verifiable deletion proof") as NSError)
+            return
+        }
+        do {
+            try verifyLifecycleTrustLocked()
+            try validateManagementReason(reason as String)
+            guard (86_400...31_536_000).contains(minimumRetentionSeconds), generation > 0 else {
+                throw AgentPassNativeError.invalidConfiguration("Key deletion retention or generation is invalid")
+            }
+            let proofData = proof as Data
+            let keys: Set<String> = ["lifecycle_head_hash", "transition_archived_at", "transition_receipt_hash", "verified_at", "version"]
+            guard proofData.count > 0, proofData.count <= 16 * 1024,
+                  let object = try JSONSerialization.jsonObject(with: proofData) as? [String: Any],
+                  Set(object.keys) == keys,
+                  try JSONSerialization.data(withJSONObject: object, options: [.sortedKeys, .withoutEscapingSlashes]) == proofData,
+                  object["version"] as? Int == 1,
+                  let lifecycleHead = object["lifecycle_head_hash"] as? String,
+                  let receiptHash = object["transition_receipt_hash"] as? String,
+                  let archivedAt = object["transition_archived_at"] as? String,
+                  let verifiedAt = object["verified_at"] as? String,
+                  lifecycleHead.range(of: "^[0-9a-f]{64}$", options: .regularExpression) != nil,
+                  receiptHash.range(of: "^[0-9a-f]{64}$", options: .regularExpression) != nil,
+                  serviceDate(archivedAt) != nil, serviceDate(verifiedAt) != nil else {
+                throw AgentPassNativeError.invalidSignature("Key deletion proof is not exact canonical schema")
+            }
+            let deletionProof = NativeLifecycleDeletionProof(
+                lifecycleHeadHash: lifecycleHead,
+                transitionReceiptHash: receiptHash,
+                transitionArchivedAt: archivedAt,
+                verifiedAt: verifiedAt
+            )
+            pendingKeyDeletions = pendingKeyDeletions.filter { $0.value.expiresAt > Date() }
+            guard pendingKeyDeletions.count < 4,
+                  !pendingKeyDeletions.values.contains(where: { $0.role == role && $0.generation == generation }) else {
+                throw AgentPassNativeError.invalidConfiguration("A matching key deletion challenge is already pending")
+            }
+            let lifecycle = try keyLifecycle.verify()
+            guard let target = lifecycle.generation(generation, for: role), target.status == .retired,
+                  let approval = lifecycle.active(for: .sessionApproval) else {
+                throw AgentPassNativeError.invalidConfiguration("Retired deletion target or active approval key is missing")
+            }
+            let challengeID = UUID().uuidString.lowercased()
+            let statement = try keyCoordinator.deletionStatement(
+                role: role, generation: generation, reason: reason as String,
+                challengeID: challengeID, minimumRetirementAgeSeconds: minimumRetentionSeconds,
+                proof: deletionProof
+            )
+            let expires = Date().addingTimeInterval(60)
+            pendingKeyDeletions[challengeID] = PendingKeyDeletion(
+                role: role, generation: generation, reason: reason as String,
+                minimumRetentionSeconds: minimumRetentionSeconds, proof: deletionProof,
+                challengeID: challengeID, statement: statement, expiresAt: expires,
+                approvalPublicKey: approval.publicKeyX963
+            )
+            let response: [String: Any] = [
+                "version": 1, "protocol_version": 11,
+                "challenge_id": challengeID, "expires_at": serviceTimestamp(expires),
+                "role": role.rawValue, "generation": generation,
+                "fingerprint": target.fingerprint, "reason": reason as String,
+                "minimum_retention_seconds": minimumRetentionSeconds,
+                "approval_application_tag": approval.applicationTag,
+                "approval_fingerprint": approval.fingerprint,
+                "lifecycle_head_hash": lifecycle.headHash,
+                "transition_receipt_hash": receiptHash,
+                "statement_base64": statement.base64EncodedString()
+            ]
+            reply(try JSONSerialization.data(withJSONObject: response, options: [.sortedKeys, .withoutEscapingSlashes]) as NSData, nil)
+        } catch { reply(nil, error as NSError) }
+    }
+
+    func completeKeyDeletion(challengeID: NSString, approvalSignature: NSData, withReply reply: @escaping (NSData?, NSError?) -> Void) {
+        authorizationLock.lock()
+        defer { authorizationLock.unlock() }
+        do { try verifyLifecycleTrustLocked() }
+        catch { reply(nil, error as NSError); return }
+        guard let keyCoordinator,
+              let pending = pendingKeyDeletions.removeValue(forKey: challengeID as String) else {
+            reply(nil, AgentPassNativeError.invalidSignature("Key deletion challenge is missing or already consumed") as NSError)
+            return
+        }
+        do {
+            guard pending.expiresAt >= Date(), approvalSignature.length == 64 else {
+                throw AgentPassNativeError.invalidSignature("Key deletion challenge expired or signature is invalid")
+            }
+            let state = try keyCoordinator.deleteRetiredServiceKey(
+                role: pending.role, generation: pending.generation, reason: pending.reason,
+                challengeID: pending.challengeID, minimumRetirementAgeSeconds: pending.minimumRetentionSeconds,
+                proof: pending.proof, approvalSignature: approvalSignature as Data,
+                approvalPublicKeyX963: pending.approvalPublicKey
+            )
+            try appendAudit(NativeAuditEvent(operation: "key.delete", decision: "allow", reason: "role=\(pending.role.rawValue);generation=\(pending.generation);lifecycle_head=\(state.headHash)"))
+            let response: [String: Any] = [
+                "deleted": true, "role": pending.role.rawValue,
+                "generation": pending.generation, "lifecycle_head_hash": state.headHash,
+                "configuration_pin_update_required": true
+            ]
+            reply(try JSONSerialization.data(withJSONObject: response, options: [.sortedKeys]) as NSData, nil)
+        } catch {
+            _ = try? appendAudit(NativeAuditEvent(operation: "key.delete", decision: "deny", reason: error.localizedDescription))
+            reply(nil, error as NSError)
+        }
+    }
+
+    func beginRecovery(role: NSString, withReply reply: @escaping (NSData?, NSError?) -> Void) {
+        authorizationLock.lock()
+        defer { authorizationLock.unlock() }
+        guard let role = NativeKeyRole(rawValue: role as String),
+              let recoveryPolicyData,
+              let keyCoordinator,
+              installationID != nil else {
+            reply(nil, AgentPassNativeError.invalidConfiguration("Native recovery is not fully configured") as NSError)
+            return
+        }
+        do {
+            if role == .auditCheckpoint {
+                guard auditKeyRecoveryCoordinator != nil, auditKeyTransitionStore != nil,
+                      auditKeyRecoveryPolicy != nil, auditAnchorTenant != nil else {
+                    throw AgentPassNativeError.invalidConfiguration("Audit-key recovery anchor transition is not fully configured")
+                }
+            }
+            try verifyLifecycleTrustLocked()
+            let now = Date()
+            recoveryRequestAttempts.removeAll { now.timeIntervalSince($0) >= 60 }
+            guard recoveryRequestAttempts.count < 4 else {
+                throw AgentPassNativeError.invalidConfiguration("Recovery request rate limit exceeded")
+            }
+            if let existing = pendingRecovery, existing.expiresAt > now {
+                throw AgentPassNativeError.invalidConfiguration("A recovery request is already pending")
+            }
+            pendingRecovery = nil
+            recoveryRequestAttempts.append(now)
+            let runtime = try currentRecoveryRuntime(role: role)
+            var nonceBytes = Data(count: 32)
+            let randomStatus = nonceBytes.withUnsafeMutableBytes { SecRandomCopyBytes(kSecRandomDefault, 32, $0.baseAddress!) }
+            guard randomStatus == errSecSuccess else { throw AgentPassNativeError.invalidConfiguration("Recovery nonce generation failed") }
+            let nonce = nonceBytes.base64EncodedString().replacingOccurrences(of: "+", with: "-").replacingOccurrences(of: "/", with: "_").replacingOccurrences(of: "=", with: "")
+            let issued = Date(), expires = issued.addingTimeInterval(10 * 60)
+            let requestData = try NativeRecoveryVerifier.createRequest(
+                state: runtime,
+                policyData: recoveryPolicyData,
+                nonce: nonce,
+                issuedAt: serviceTimestamp(issued),
+                expiresAt: serviceTimestamp(expires)
+            )
+            _ = keyCoordinator // Keep the request bound to a configured mutation coordinator.
+            pendingRecovery = PendingRecovery(
+                requestData: requestData, runtimeState: runtime, expiresAt: expires, challengeID: nonce,
+                verification: nil, evidenceData: nil, statement: nil,
+                localSignerPublicKey: nil, localSignerApplicationTag: nil, localSignerFingerprint: nil,
+                auditPreparation: nil, auditAuthorization: nil, auditEvidence: nil,
+                auditPlan: nil, auditSubmissionInFlight: false
+            )
+            let object: [String: Any] = [
+                "version": 1, "protocol_version": 11, "challenge_id": nonce,
+                "role": role.rawValue, "expires_at": serviceTimestamp(expires),
+                "request_base64": requestData.base64EncodedString(),
+                "request_hash": try NativeRecoveryVerifier.requestHash(requestData),
+                "lifecycle_head_hash": runtime.lifecycleHeadHash
+            ]
+            reply(try JSONSerialization.data(withJSONObject: object, options: [.sortedKeys, .withoutEscapingSlashes]) as NSData, nil)
+        } catch { reply(nil, error as NSError) }
+    }
+
+    func prepareRecoveryInstallation(evidence: NSData, withReply reply: @escaping (NSData?, NSError?) -> Void) {
+        authorizationLock.lock()
+        defer { authorizationLock.unlock() }
+        guard var pending = pendingRecovery, let recoveryPolicyData, let keyCoordinator, let keyLifecycle else {
+            reply(nil, AgentPassNativeError.invalidSignature("Recovery request is missing or no longer active") as NSError)
+            return
+        }
+        do {
+            guard pending.expiresAt >= Date() else { throw AgentPassNativeError.invalidSignature("Recovery request expired") }
+            let evidenceData = evidence as Data
+            let bundle = try NativeRecoveryEvidenceBundle.decode(evidenceData)
+            guard bundle.requestData == pending.requestData,
+                  try NativeRecoveryVerifier.policyHash(bundle.policyData) == NativeRecoveryVerifier.policyHash(recoveryPolicyData) else {
+                throw AgentPassNativeError.invalidSignature("Recovery evidence does not contain the exact pending request and pinned policy")
+            }
+            let verification = try NativeRecoveryVerifier.verify(
+                requestData: bundle.requestData,
+                policyData: bundle.policyData,
+                authorizationData: bundle.authorizationData
+            )
+            let runtime = try currentRecoveryRuntime(role: verification.request.role)
+            guard runtime == pending.runtimeState else {
+                throw AgentPassNativeError.invalidSignature("Recovery-bound runtime state changed after request generation")
+            }
+            try NativeRecoveryVerifier.validateRuntimeState(verification, state: runtime)
+            if verification.request.role == .auditCheckpoint {
+                guard let policy = auditKeyRecoveryPolicy else {
+                    throw AgentPassNativeError.invalidConfiguration("Pinned audit-key recovery policy is unavailable")
+                }
+                let preparation = try keyCoordinator.prepareRecoveredAuditActivation(
+                    verification: verification, evidenceData: evidenceData
+                )
+                let authorization = try makeAuditRecoveryAuthorization(
+                    verification: verification, preparation: preparation, policy: policy
+                )
+                pending.verification = verification
+                pending.evidenceData = evidenceData
+                pending.statement = preparation.statement
+                pending.auditPreparation = preparation
+                pending.auditAuthorization = authorization
+                pendingRecovery = pending
+                let object: [String: Any] = [
+                    "version": 1, "protocol_version": 12,
+                    "challenge_id": pending.challengeID,
+                    "expires_at": authorization.expiresAt,
+                    "role": NativeKeyRole.auditCheckpoint.rawValue,
+                    "request_hash": verification.requestHash,
+                    "anchor_authorization_base64": try authorization.canonicalData().base64EncodedString(),
+                    "anchor_policy_base64": try policy.canonicalData().base64EncodedString(),
+                    "lifecycle_statement_base64": try preparation.statement.canonicalData().base64EncodedString(),
+                    "predicted_lifecycle_head_hash": preparation.lifecycleHeadHash,
+                    "next_step": "native recovery-anchor-install --evidence FILE"
+                ]
+                reply(try JSONSerialization.data(withJSONObject: object, options: [.sortedKeys, .withoutEscapingSlashes]) as NSData, nil)
+                return
+            }
+            let statement = try keyCoordinator.recoveredActivationStatement(verification: verification)
+            let lifecycle = try keyLifecycle.verify()
+            let signer: NativeKeyGeneration
+            let signerKind: String
+            if verification.request.role == .sessionApproval {
+                signer = try requiredGeneration(lifecycle, role: .sessionApproval, generation: verification.request.proposedGeneration, status: .staged)
+                signerKind = "replacement_approval"
+            } else {
+                guard let active = lifecycle.active(for: .sessionApproval) else {
+                    throw AgentPassNativeError.invalidConfiguration("Active local approval key is missing")
+                }
+                signer = active
+                signerKind = "active_approval"
+            }
+            pending.verification = verification
+            pending.evidenceData = evidenceData
+            pending.statement = statement
+            pending.localSignerPublicKey = signer.publicKeyX963
+            pending.localSignerApplicationTag = signer.applicationTag
+            pending.localSignerFingerprint = signer.fingerprint
+            pendingRecovery = pending
+            let object: [String: Any] = [
+                "version": 1, "protocol_version": 11,
+                "challenge_id": pending.challengeID, "expires_at": serviceTimestamp(pending.expiresAt),
+                "role": verification.request.role.rawValue,
+                "generation": verification.request.proposedGeneration,
+                "request_hash": verification.requestHash,
+                "statement_base64": try statement.canonicalData().base64EncodedString(),
+                "local_signer_kind": signerKind,
+                "local_signer_application_tag": signer.applicationTag,
+                "local_signer_fingerprint": signer.fingerprint
+            ]
+            reply(try JSONSerialization.data(withJSONObject: object, options: [.sortedKeys, .withoutEscapingSlashes]) as NSData, nil)
+        } catch { reply(nil, error as NSError) }
+    }
+
+    func completeRecovery(challengeID: NSString, localSignature: NSData, withReply reply: @escaping (NSData?, NSError?) -> Void) {
+        authorizationLock.lock()
+        defer { authorizationLock.unlock() }
+        guard let pending = pendingRecovery,
+              pending.challengeID == challengeID as String,
+              let verification = pending.verification,
+              let evidenceData = pending.evidenceData,
+              let statement = pending.statement,
+              let signerPublicKey = pending.localSignerPublicKey,
+              let keyCoordinator else {
+            reply(nil, AgentPassNativeError.invalidSignature("Prepared recovery installation is missing or already consumed") as NSError)
+            return
+        }
+        do {
+            guard verification.request.role != .auditCheckpoint,
+                  pending.expiresAt >= Date(), localSignature.length == 64,
+                  NativeP256LifecycleVerifier().isValid(signature: localSignature as Data, message: try statement.canonicalData(), publicKeyX963: signerPublicKey) else {
+                throw AgentPassNativeError.invalidSignature("Recovery local-presence proof is expired or invalid")
+            }
+            let state = try keyCoordinator.activateRecoveredKey(
+                verification: verification,
+                evidenceData: evidenceData,
+                clientNewKeySignature: verification.request.role == .sessionApproval ? localSignature as Data : nil
+            )
+            pendingRecovery = nil
+            let revoked = sessionManager?.revokeAll()
+            let object: [String: Any] = [
+                "recovered": true, "role": verification.request.role.rawValue,
+                "generation": verification.request.proposedGeneration,
+                "lifecycle_head_hash": state.headHash,
+                "sessions_revoked": revoked?.revokedSessions ?? 0,
+                "restart_required": true, "fail_stopped": true,
+                "configuration_pin_update_required": true
+            ]
+            reply(try JSONSerialization.data(withJSONObject: object, options: [.sortedKeys, .withoutEscapingSlashes]) as NSData, nil)
+        } catch {
+            pendingRecovery = nil
+            reply(nil, error as NSError)
+        }
+    }
+
+    func prepareAuditRecoveryInstallation(evidence: NSData, withReply reply: @escaping (NSData?, NSError?) -> Void) {
+        authorizationLock.lock()
+        defer { authorizationLock.unlock() }
+        guard var pending = pendingRecovery,
+              let verification = pending.verification,
+              verification.request.role == .auditCheckpoint,
+              let expectedPreparation = pending.auditPreparation,
+              let expectedAuthorization = pending.auditAuthorization,
+              let policy = auditKeyRecoveryPolicy,
+              let keyLifecycle, let keyCoordinator,
+              let lifecycleEvidenceData = pending.evidenceData else {
+            reply(nil, AgentPassNativeError.invalidSignature("Prepared audit-key recovery authorization is missing") as NSError)
+            return
+        }
+        do {
+            let now = Date()
+            guard pending.expiresAt >= now, evidence.length > 0,
+                  evidence.length <= NativeAuditKeyRecoveryTransition.maximumEncodedBytes else {
+                throw AgentPassNativeError.invalidSignature("Audit-key recovery authorization expired or evidence is oversized")
+            }
+            let decoded = try NativeAuditKeyRecoveryEvidence.decodeCanonical(
+                evidence as Data, pinnedPolicy: policy,
+                expectedAuthorization: expectedAuthorization,
+                expectedInstallationID: verification.request.installationID,
+                nowMilliseconds: Int64(now.timeIntervalSince1970 * 1_000)
+            )
+            let current = try currentRecoveryRuntime(role: .auditCheckpoint)
+            guard current == pending.runtimeState else {
+                throw AgentPassNativeError.invalidSignature("Audit-key recovery runtime drifted before local approval")
+            }
+            try NativeRecoveryVerifier.validateRuntimeState(verification, state: current)
+            let repeated = try keyCoordinator.prepareRecoveredAuditActivation(
+                verification: verification, evidenceData: lifecycleEvidenceData
+            )
+            try requireSameAuditPreparation(repeated, expectedPreparation)
+            let repeatedAuthorization = try makeAuditRecoveryAuthorization(
+                verification: verification, preparation: repeated, policy: policy,
+                operationID: expectedAuthorization.operationID
+            )
+            guard repeatedAuthorization == expectedAuthorization else {
+                throw AgentPassNativeError.invalidSignature("Audit-key recovery anchor boundary changed after offline approval")
+            }
+            let lifecycle = try keyLifecycle.verify()
+            guard let approval = lifecycle.active(for: .sessionApproval) else {
+                throw AgentPassNativeError.invalidConfiguration("Active local approval key is missing")
+            }
+            pending.auditEvidence = decoded
+            pending.localSignerPublicKey = approval.publicKeyX963
+            pending.localSignerApplicationTag = approval.applicationTag
+            pending.localSignerFingerprint = approval.fingerprint
+            pendingRecovery = pending
+            let statementData = try expectedPreparation.statement.canonicalData()
+            let object: [String: Any] = [
+                "version": 1, "protocol_version": 12,
+                "challenge_id": pending.challengeID,
+                "expires_at": expectedAuthorization.expiresAt,
+                "role": NativeKeyRole.auditCheckpoint.rawValue,
+                "generation": verification.request.proposedGeneration,
+                "request_hash": verification.requestHash,
+                "anchor_authorization_base64": try expectedAuthorization.canonicalData().base64EncodedString(),
+                "statement_base64": statementData.base64EncodedString(),
+                "predicted_lifecycle_head_hash": expectedPreparation.lifecycleHeadHash,
+                "local_signer_kind": "active_approval",
+                "local_signer_application_tag": approval.applicationTag,
+                "local_signer_fingerprint": approval.fingerprint
+            ]
+            reply(try JSONSerialization.data(withJSONObject: object, options: [.sortedKeys, .withoutEscapingSlashes]) as NSData, nil)
+        } catch { reply(nil, error as NSError) }
+    }
+
+    func completeAuditRecovery(challengeID: NSString, localSignature: NSData, withReply reply: @escaping (NSData?, NSError?) -> Void) {
+        authorizationLock.lock()
+        guard var pending = pendingRecovery,
+              pending.challengeID == challengeID as String,
+              !pending.auditSubmissionInFlight,
+              let verification = pending.verification,
+              verification.request.role == .auditCheckpoint,
+              let evidenceData = pending.evidenceData,
+              let preparation = pending.auditPreparation,
+              let authorization = pending.auditAuthorization,
+              let anchorEvidence = pending.auditEvidence,
+              let signerPublicKey = pending.localSignerPublicKey,
+              let signerFingerprint = pending.localSignerFingerprint,
+              let policy = auditKeyRecoveryPolicy,
+              let recoveryCoordinator = auditKeyRecoveryCoordinator,
+              let approvalJournal = auditKeyRecoveryApprovalJournal,
+              let keyCoordinator, let keyLifecycle else {
+            authorizationLock.unlock()
+            reply(nil, AgentPassNativeError.invalidSignature("Prepared audit-key recovery installation is missing") as NSError)
+            return
+        }
+        let plan: NativeAuditKeyRecoveryPlan
+        do {
+            let now = Date()
+            let statementData = try preparation.statement.canonicalData()
+            let authorizationData = try authorization.canonicalData()
+            guard pending.expiresAt >= now, localSignature.length == 64,
+                  NativeP256LifecycleVerifier().isValid(
+                    signature: localSignature as Data,
+                    message: statementData,
+                    publicKeyX963: signerPublicKey
+                  ) else {
+                throw AgentPassNativeError.invalidSignature("Audit-key recovery local-presence proof is expired or invalid")
+            }
+            let current = try currentRecoveryRuntime(role: .auditCheckpoint)
+            guard current == pending.runtimeState else {
+                throw AgentPassNativeError.invalidSignature("Audit-key recovery runtime drifted before anchor submission")
+            }
+            try NativeRecoveryVerifier.validateRuntimeState(verification, state: current)
+            let repeated = try keyCoordinator.prepareRecoveredAuditActivation(
+                verification: verification, evidenceData: evidenceData
+            )
+            try requireSameAuditPreparation(repeated, preparation)
+            let repeatedAuthorization = try makeAuditRecoveryAuthorization(
+                verification: verification, preparation: repeated, policy: policy,
+                operationID: authorization.operationID
+            )
+            guard repeatedAuthorization == authorization else {
+                throw AgentPassNativeError.invalidSignature("Audit-key recovery authorization drifted before submission")
+            }
+            _ = try NativeAuditKeyRecoveryEvidence.decodeCanonical(
+                try anchorEvidence.canonicalData(),
+                pinnedPolicy: policy, expectedAuthorization: authorization,
+                expectedInstallationID: verification.request.installationID,
+                nowMilliseconds: Int64(now.timeIntervalSince1970 * 1_000)
+            )
+            let lifecycle = try keyLifecycle.verify()
+            let staged = try requiredGeneration(
+                lifecycle, role: .auditCheckpoint,
+                generation: verification.request.proposedGeneration, status: .staged
+            )
+            let replacement = try SecureEnclaveKeyStore.loadExisting(
+                applicationTag: staged.applicationTag, accessGroup: keychainAccessGroup
+            )
+            guard replacement.publicKeyX963 == preparation.replacementPublicKeyX963 else {
+                throw AgentPassNativeError.invalidKey("Audit-key recovery replacement signer was substituted")
+            }
+            _ = try approvalJournal.append(
+                operationID: authorization.operationID,
+                signerFingerprint: signerFingerprint,
+                signerPublicKeyX963: signerPublicKey,
+                statementData: statementData,
+                authorizationData: authorizationData,
+                signature: localSignature as Data,
+                createdAt: serviceTimestamp(now)
+            )
+            if let durable = try recoveryCoordinator.pendingPlan() {
+                guard durable.transition.recoveryEvidence.authorization == authorization,
+                      durable.lifecycleRecordData == preparation.lifecycleRecordData,
+                      durable.retiringPublicKeyX963 == preparation.retiringPublicKeyX963 else {
+                    throw AgentPassNativeError.invalidSignature("Durable audit recovery plan does not match the frozen authorization")
+                }
+                plan = durable
+            } else {
+                plan = try recoveryCoordinator.prepare(
+                    authorization: authorization, approvals: anchorEvidence.approvals,
+                    replacementSignature: try replacement.sign(message: authorizationData),
+                    retiringPublicKeyX963: preparation.retiringPublicKeyX963,
+                    lifecycleRecordData: preparation.lifecycleRecordData,
+                    nowMilliseconds: Int64(now.timeIntervalSince1970 * 1_000)
+                )
+            }
+            pending.auditPlan = plan
+            pending.auditSubmissionInFlight = true
+            pendingRecovery = pending
+            authorizationLock.unlock()
+        } catch {
+            authorizationLock.unlock()
+            reply(nil, error as NSError)
+            return
+        }
+
+        let activation: NativeAuditKeyRecoveryActivationAuthorization
+        do {
+            activation = try recoveryCoordinator.authorizeActivation(plan: plan)
+        } catch {
+            authorizationLock.lock()
+            if var current = pendingRecovery,
+               current.challengeID == pending.challengeID,
+               current.auditPlan == plan {
+                current.auditSubmissionInFlight = false
+                pendingRecovery = current
+            }
+            authorizationLock.unlock()
+            reply(nil, error as NSError)
+            return
+        }
+
+        authorizationLock.lock()
+        defer { authorizationLock.unlock() }
+        do {
+            guard let currentPending = pendingRecovery,
+                  currentPending.challengeID == pending.challengeID,
+                  currentPending.auditSubmissionInFlight,
+                  currentPending.auditPlan == plan,
+                  activation.transitionData == plan.transitionData,
+                  activation.transition == plan.transition else {
+                throw AgentPassNativeError.invalidSignature("Audit recovery pending state changed during anchor submission")
+            }
+            let current = try currentRecoveryRuntime(role: .auditCheckpoint)
+            guard current == pending.runtimeState else {
+                throw AgentPassNativeError.invalidSignature("Audit recovery runtime drifted during anchor submission")
+            }
+            let repeated = try keyCoordinator.prepareRecoveredAuditActivation(
+                verification: verification, evidenceData: evidenceData
+            )
+            try requireSameAuditPreparation(repeated, preparation)
+            _ = try approvalJournal.require(
+                operationID: authorization.operationID,
+                statementData: try preparation.statement.canonicalData(),
+                authorizationData: try authorization.canonicalData(),
+                expectedSignerFingerprint: signerFingerprint
+            )
+            let state = try keyCoordinator.commitAuthorizedAuditActivationRecord(preparation.lifecycleRecordData)
+            pendingRecovery = nil
+            let revoked = sessionManager?.revokeAll()
+            let object: [String: Any] = [
+                "recovered": true, "role": NativeKeyRole.auditCheckpoint.rawValue,
+                "generation": verification.request.proposedGeneration,
+                "lifecycle_head_hash": state.headHash,
+                "sessions_revoked": revoked?.revokedSessions ?? 0,
+                "restart_required": true, "fail_stopped": true,
+                "configuration_pin_update_required": true
+            ]
+            reply(try JSONSerialization.data(withJSONObject: object, options: [.sortedKeys, .withoutEscapingSlashes]) as NSData, nil)
+        } catch {
+            if var current = pendingRecovery, current.challengeID == pending.challengeID {
+                current.auditSubmissionInFlight = false
+                pendingRecovery = current
+            }
+            reply(nil, error as NSError)
+        }
     }
 
     func auditAnchorStatus(withReply reply: @escaping (NSData?, NSError?) -> Void) {
@@ -307,6 +1492,49 @@ private final class ServiceEndpoint: NSObject, AgentPassNativeServiceProtocol, @
         } catch { reply(nil, error as NSError) }
     }
 
+    func abortExpiredAuditRecovery(withReply reply: @escaping (NSData?, NSError?) -> Void) {
+        authorizationLock.lock(); defer { authorizationLock.unlock() }
+        guard let coordinator = auditKeyRecoveryCoordinator else {
+            reply(nil, AgentPassNativeError.invalidConfiguration("Native audit-key recovery is not configured") as NSError); return
+        }
+        do {
+            try verifyLifecycleTrustLocked(allowAuditRecoveryPending: true)
+            let nowMilliseconds = Int64(Date().timeIntervalSince1970 * 1_000)
+            let result = try coordinator.abortExpiredUnsubmittedPending(nowMilliseconds: nowMilliseconds)
+            if pendingRecovery?.auditPlan?.transition.operationID == result.preparation.plan.transition.operationID { pendingRecovery = nil }
+            let object: [String: Any] = [
+                "version": 1, "aborted": true,
+                "operation_id": result.preparation.plan.transition.operationID,
+                "transition_hash": result.preparation.plan.transition.transitionHash,
+                "authorization_expires_at": result.authorizationExpiresAt,
+                "aborted_at": result.abortedAt,
+                "abort_record_hash": result.abortRecordHash
+            ]
+            reply(try JSONSerialization.data(withJSONObject: object, options: [.sortedKeys, .withoutEscapingSlashes]) as NSData, nil)
+        } catch { reply(nil, error as NSError) }
+    }
+
+    func auditRecoveryStatus(withReply reply: @escaping (NSData?, NSError?) -> Void) {
+        authorizationLock.lock(); defer { authorizationLock.unlock() }
+        guard let journal = auditKeyRecoveryPlanJournal else {
+            do { reply(try JSONSerialization.data(withJSONObject: ["configured": false], options: [.sortedKeys]) as NSData, nil) }
+            catch { reply(nil, error as NSError) }; return
+        }
+        do {
+            try verifyLifecycleTrustLocked(allowAuditRecoveryPending: true)
+            let status = try journal.status()
+            let object: [String: Any] = [
+                "configured": true,
+                "pending_operation_id": status.pending?.plan.transition.operationID ?? NSNull(),
+                "pending_expires_at": status.pending?.plan.transition.expiresAt ?? NSNull(),
+                "submission_intent_durable": status.pendingSubmissionIntent != nil,
+                "completed_operations": status.completed.count,
+                "aborted_operations": status.aborted.count
+            ]
+            reply(try JSONSerialization.data(withJSONObject: object, options: [.sortedKeys, .withoutEscapingSlashes]) as NSData, nil)
+        } catch { reply(nil, error as NSError) }
+    }
+
     func pushAuditAnchor(withReply reply: @escaping (NSData?, NSError?) -> Void) {
         guard let auditAnchorReceipts, let auditAnchorClient else {
             reply(nil, AgentPassNativeError.invalidConfiguration("Native audit anchor is not configured") as NSError)
@@ -315,9 +1543,11 @@ private final class ServiceEndpoint: NSObject, AgentPassNativeServiceProtocol, @
         let checkpoint: NativeAuditCheckpoint
         authorizationLock.lock()
         do {
+            try verifyLifecycleTrustLocked()
+            guard !auditAnchorPushInFlight else { throw AgentPassNativeError.invalidConfiguration("Native audit anchor push is already in progress") }
             var checkpoints = try auditCheckpoints.verify()
             if try auditAnchorReceipts.pendingCheckpoint(checkpoints: checkpoints) == nil {
-                try auditLog.append(NativeAuditEvent(operation: "audit.anchor.push", decision: "allow", reason: "queued"))
+                try appendAudit(NativeAuditEvent(operation: "audit.anchor.push", decision: "allow", reason: "queued"))
                 _ = try auditCheckpoints.create()
                 checkpoints = try auditCheckpoints.verify()
             }
@@ -325,6 +1555,7 @@ private final class ServiceEndpoint: NSObject, AgentPassNativeServiceProtocol, @
                 throw AgentPassNativeError.invalidConfiguration("Native audit anchor has no pending checkpoint")
             }
             checkpoint = pending
+            auditAnchorPushInFlight = true
             authorizationLock.unlock()
         } catch {
             authorizationLock.unlock()
@@ -339,17 +1570,20 @@ private final class ServiceEndpoint: NSObject, AgentPassNativeServiceProtocol, @
                 }
                 self.authorizationLock.lock()
                 defer { self.authorizationLock.unlock() }
+                self.auditAnchorPushInFlight = false
                 do {
+                    try self.verifyLifecycleTrustLocked()
                     switch result {
                     case .success(let receiptData):
                         let checkpoints = try self.auditCheckpoints.verify()
                         let status = try auditAnchorReceipts.accept(receiptData: receiptData, checkpoint: checkpoint, checkpoints: checkpoints)
-                        try self.auditLog.append(NativeAuditEvent(operation: "audit.anchor.push", decision: "allow", reason: "checkpoint=\(checkpoint.checkpointHash);receipt=\(status.latestReceiptHash ?? "")"))
+                        try self.appendAudit(NativeAuditEvent(operation: "audit.anchor.push", decision: "allow", reason: "checkpoint=\(checkpoint.checkpointHash);receipt=\(status.latestReceiptHash ?? "")"))
+                        try self.rotateEvidenceIfReady()
                         let encoder = JSONEncoder()
                         encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
                         reply(try encoder.encode(status) as NSData, nil)
                     case .failure(let pushError):
-                        do { try self.auditLog.append(NativeAuditEvent(operation: "audit.anchor.push", decision: "error", reason: pushError.localizedDescription)) }
+                        do { try self.appendAudit(NativeAuditEvent(operation: "audit.anchor.push", decision: "error", reason: pushError.localizedDescription)) }
                         catch { reply(nil, error as NSError); return }
                         reply(nil, pushError as NSError)
                     }
@@ -358,10 +1592,270 @@ private final class ServiceEndpoint: NSObject, AgentPassNativeServiceProtocol, @
         } catch {
             authorizationLock.lock()
             defer { authorizationLock.unlock() }
-            do { try auditLog.append(NativeAuditEvent(operation: "audit.anchor.push", decision: "error", reason: error.localizedDescription)) }
+            auditAnchorPushInFlight = false
+            do { try appendAudit(NativeAuditEvent(operation: "audit.anchor.push", decision: "error", reason: error.localizedDescription)) }
             catch { reply(nil, error as NSError); return }
             reply(nil, error as NSError)
         }
+    }
+
+    private func fetchAuditPruneObservation(purpose: NativeAuditPruneExternalObservationPurpose, operationID: String? = nil) throws -> NativeAuditPruneExternalReceiptObservation {
+        guard let auditAnchorClient, let trust = auditPruneTrustSource else {
+            throw AgentPassNativeError.invalidConfiguration("Native audit prune external receipt observation is not configured")
+        }
+        return try NativeAuditPruneExternalObservationFetcher(provider: auditAnchorClient, trustSource: trust)
+            .fetch(purpose: purpose, operationID: operationID)
+    }
+
+    private func finishAuditPruneObservation(_ observation: NativeAuditPruneExternalReceiptObservation, releaseRemote: Bool) throws {
+        guard let trust = auditPruneTrustSource else { throw AgentPassNativeError.invalidConfiguration("Native audit prune observation completion is not configured") }
+        try trust.finishAuditPruneExternalReceiptObservation(observation)
+        if releaseRemote, let lease = observation.externalLease {
+            guard let client = auditAnchorClient else { throw AgentPassNativeError.invalidConfiguration("Native audit prune lease release is not configured") }
+            try client.releaseAuditPruneReceiptLease(lease)
+        }
+    }
+
+    private func abandonAuditPruneObservation(_ observation: NativeAuditPruneExternalReceiptObservation, releaseRemote: Bool = true) {
+        auditPruneTrustSource?.discardAuditPruneExternalReceiptObservation(observation)
+        if releaseRemote, let lease = observation.externalLease { try? auditAnchorClient?.releaseAuditPruneReceiptLease(lease) }
+    }
+
+    func prepareAuditPrune(request: NSData, withReply reply: @escaping (NSData?, NSError?) -> Void) {
+        guard let coordinator = auditPruneCoordinator else {
+            reply(nil, AgentPassNativeError.invalidConfiguration("Native audit prune is not configured") as NSError); return
+        }
+        var acquiredObservation: NativeAuditPruneExternalReceiptObservation?
+        do {
+            let data = request as Data
+            guard !data.isEmpty, data.count <= 4 * 1024 * 1024,
+                  let object = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  Set(object.keys) == ["version", "operation_id", "retention_seconds", "segments", "expected_next_retained"],
+                  let version = serviceExactInteger(object["version"]), version == 1,
+                  let operationID = object["operation_id"] as? String,
+                  let retentionSeconds = serviceExactInteger(object["retention_seconds"]),
+                  let segmentObjects = object["segments"] as? [[String: Any]], !segmentObjects.isEmpty else {
+                throw AgentPassNativeError.invalidConfiguration("Native audit prune prepare request schema is invalid")
+            }
+            let decoder = JSONDecoder()
+            let segments = try segmentObjects.map { try decoder.decode(NativeAuditRetentionSegment.self, from: JSONSerialization.data(withJSONObject: $0, options: [.sortedKeys, .withoutEscapingSlashes])) }
+            let retained: NativeAuditRetentionSegment?
+            if object["expected_next_retained"] is NSNull { retained = nil }
+            else if let retainedObject = object["expected_next_retained"] as? [String: Any] {
+                retained = try decoder.decode(NativeAuditRetentionSegment.self, from: JSONSerialization.data(withJSONObject: retainedObject, options: [.sortedKeys, .withoutEscapingSlashes]))
+            } else { throw AgentPassNativeError.invalidConfiguration("Native audit prune retained boundary is invalid") }
+            authorizationLock.lock()
+            do {
+                try verifyLifecycleTrustLocked(allowAuditPruneReservation: true); try refreshAuditPruneBoundaryLocked()
+                guard !auditPruneSubmissionInFlight else { throw AgentPassNativeError.invalidConfiguration("Audit prune cannot prepare while anchor submission is in progress") }
+                guard !auditAnchorPushInFlight else { throw AgentPassNativeError.invalidConfiguration("Audit anchor push is already in flight") }
+                authorizationLock.unlock()
+            } catch { authorizationLock.unlock(); throw error }
+            let observation = try fetchAuditPruneObservation(purpose: .prepare, operationID: operationID)
+            acquiredObservation = observation
+            let prepared = try authorizationLock.withLock {
+                try verifyLifecycleTrustLocked(allowAuditPruneReservation: true); try refreshAuditPruneBoundaryLocked()
+                guard !auditPruneSubmissionInFlight, !auditAnchorPushInFlight else {
+                    throw AgentPassNativeError.invalidConfiguration("Audit prune state changed during external head verification")
+                }
+                let prepared = try coordinator.prepare(operationID: operationID, retentionSeconds: retentionSeconds, segments: segments, expectedNextRetained: retained, observation: observation)
+                recordAuditPruneStageLocked(stage: "prepare", decision: "success")
+                return prepared
+            }
+            try finishAuditPruneObservation(observation, releaseRemote: true)
+            acquiredObservation = nil
+            reply(prepared.authorizationData as NSData, nil)
+        } catch {
+            if let acquiredObservation { abandonAuditPruneObservation(acquiredObservation) }
+            authorizationLock.withLock { recordAuditPruneStageLocked(stage: "prepare", decision: "error", error: error) }
+            reply(nil, error as NSError)
+        }
+    }
+
+    func submitAuditPrune(withReply reply: @escaping (NSData?, NSError?) -> Void) {
+        guard let coordinator = auditPruneCoordinator, let trust = auditPruneTrustSource else { reply(nil, AgentPassNativeError.invalidConfiguration("Native audit prune is not configured") as NSError); return }
+        let frozen: NativeAuditPruneTrustSnapshot
+        let operationID: String
+        let observation: NativeAuditPruneExternalReceiptObservation
+        do { observation = try fetchAuditPruneObservation(purpose: .submit) }
+        catch { reply(nil, error as NSError); return }
+        authorizationLock.lock()
+        do {
+            try verifyLifecycleTrustLocked(allowAuditPruneReservation: true); try refreshAuditPruneBoundaryLocked()
+            guard !auditPruneSubmissionInFlight else { throw AgentPassNativeError.invalidConfiguration("Audit prune anchor submission is already in progress") }
+            guard let boundOperationID = observation.operationID, let reservationID = observation.reservationID else {
+                throw AgentPassNativeError.invalidConfiguration("Audit prune submission requires one prepared operation")
+            }
+            frozen = try trust.currentAuditPruneTrustSnapshot()
+            guard frozen.revision == observation.trustRevision,
+                  frozen.activeReservationID == reservationID else {
+                throw AgentPassNativeError.invalidSignature("Audit prune submission reservation is not the exact durable preparation")
+            }
+            operationID = boundOperationID
+            auditPruneSubmissionInFlight = true; auditPruneSubmissionOperationID = operationID
+            recordAuditPruneStageLocked(stage: "submit", decision: "in_progress")
+            authorizationLock.unlock()
+        } catch {
+            recordAuditPruneStageLocked(stage: "submit", decision: "error", error: error)
+            authorizationLock.unlock(); abandonAuditPruneObservation(observation); reply(nil, error as NSError); return
+        }
+        var outcome: Result<NativeAuditPruneAcceptedOperation, Error>
+        do {
+            let accepted = try coordinator.submitPending(observation: observation)
+            try finishAuditPruneObservation(observation, releaseRemote: false)
+            if let lease = observation.externalLease { try? auditAnchorClient?.releaseAuditPruneReceiptLease(lease) }
+            outcome = .success(accepted)
+        } catch {
+            abandonAuditPruneObservation(observation)
+            outcome = .failure(error)
+        }
+        let statusObservation: Result<NativeAuditPruneExternalReceiptObservation, Error>
+        switch outcome {
+        case .success:
+            do { statusObservation = .success(try fetchAuditPruneObservation(purpose: .status)) }
+            catch { statusObservation = .failure(error) }
+        case .failure(let error): statusObservation = .failure(error)
+        }
+        var acquiredStatusObservation: NativeAuditPruneExternalReceiptObservation?
+        if case .success(let value) = statusObservation { acquiredStatusObservation = value }
+        do {
+            let accepted = try authorizationLock.withLock { () throws -> NativeAuditPruneAcceptedOperation in
+                defer { auditPruneSubmissionInFlight = false; auditPruneSubmissionOperationID = nil }
+                try verifyLifecycleTrustLocked(allowAuditPruneReservation: true)
+                let current = try trust.currentAuditPruneTrustSnapshot()
+                guard current == frozen else { throw AgentPassNativeError.invalidSignature("Audit prune trust changed across anchor submission") }
+                let accepted = try outcome.get()
+                let status = try coordinator.status(observation: statusObservation.get())
+                guard status.pendingPreparation?.authorization.operationID == operationID,
+                      status.pendingReceiptData == accepted.receiptData else {
+                    throw AgentPassNativeError.invalidSignature("Audit prune durable receipt does not match the submitted operation")
+                }
+                recordAuditPruneStageLocked(stage: "submit", decision: "success")
+                return accepted
+            }
+            if let statusObservationValue = acquiredStatusObservation {
+                try finishAuditPruneObservation(statusObservationValue, releaseRemote: true)
+                acquiredStatusObservation = nil
+            }
+            reply(accepted.receiptData as NSData, nil)
+        } catch {
+            if let acquiredStatusObservation { abandonAuditPruneObservation(acquiredStatusObservation) }
+            authorizationLock.withLock {
+                auditPruneSubmissionInFlight = false; auditPruneSubmissionOperationID = nil
+                recordAuditPruneStageLocked(stage: "submit", decision: "error", error: error)
+            }
+            reply(nil, error as NSError)
+        }
+    }
+
+    func executeAuditPrune(withReply reply: @escaping (NSData?, NSError?) -> Void) {
+        guard let coordinator = auditPruneCoordinator, let evidencePath = auditPruneEvidenceBundlePath else { reply(nil, AgentPassNativeError.invalidConfiguration("Native audit prune is not configured") as NSError); return }
+        var acquiredObservation: NativeAuditPruneExternalReceiptObservation?
+        do {
+            authorizationLock.lock()
+            do {
+                guard !auditPruneSubmissionInFlight else { throw AgentPassNativeError.invalidConfiguration("Audit prune cannot execute while anchor submission is in progress") }
+                try verifyLifecycleTrustLocked(allowAuditPruneReservation: true); try refreshAuditPruneBoundaryLocked()
+                authorizationLock.unlock()
+            } catch { authorizationLock.unlock(); throw error }
+            let observation = try fetchAuditPruneObservation(purpose: .execute)
+            acquiredObservation = observation
+            let completed = try authorizationLock.withLock {
+                guard !auditPruneSubmissionInFlight else { throw AgentPassNativeError.invalidConfiguration("Audit prune cannot execute while anchor submission is in progress") }
+                try verifyLifecycleTrustLocked(allowAuditPruneReservation: true); try refreshAuditPruneBoundaryLocked()
+                let completed = try coordinator.executePending(observation: observation)
+                try NativeAuditPruneEvidencePublisher.publish(completed.deletionEvidenceBundleData, path: evidencePath)
+                recordAuditPruneStageLocked(stage: "execute", decision: "success")
+                return completed
+            }
+            try finishAuditPruneObservation(observation, releaseRemote: true)
+            acquiredObservation = nil
+            reply(completed.deletionEvidenceBundleData as NSData, nil)
+        } catch {
+            if let acquiredObservation { abandonAuditPruneObservation(acquiredObservation) }
+            authorizationLock.withLock { recordAuditPruneStageLocked(stage: "execute", decision: "error", error: error) }
+            reply(nil, error as NSError)
+        }
+    }
+
+    func auditPruneStatus(withReply reply: @escaping (NSData?, NSError?) -> Void) {
+        guard let coordinator = auditPruneCoordinator, let trust = auditPruneTrustSource else {
+            do { reply(try JSONSerialization.data(withJSONObject: ["configured": false], options: [.sortedKeys]) as NSData, nil) }
+            catch { reply(nil, error as NSError) }; return
+        }
+        var acquiredObservation: NativeAuditPruneExternalReceiptObservation?
+        do {
+            authorizationLock.lock()
+            if auditPruneSubmissionInFlight {
+                defer { authorizationLock.unlock() }
+                try verifyLifecycleTrustLocked(allowAuditPruneReservation: true)
+                let snapshot = try trust.currentAuditPruneTrustSnapshot()
+                let object = try auditPruneStatusObject(
+                    completed: snapshot.chainState.sequence,
+                    pendingOperationID: auditPruneSubmissionOperationID,
+                    receiptDurable: false, snapshot: snapshot, trust: trust
+                )
+                reply(try JSONSerialization.data(withJSONObject: object, options: [.sortedKeys, .withoutEscapingSlashes]) as NSData, nil)
+                return
+            }
+            authorizationLock.unlock()
+            let observation = try fetchAuditPruneObservation(purpose: .status)
+            acquiredObservation = observation
+            let response = try authorizationLock.withLock { () throws -> (Data, Bool) in
+                try verifyLifecycleTrustLocked(allowAuditPruneReservation: true)
+                let snapshot = try trust.currentAuditPruneTrustSnapshot()
+                if auditPruneSubmissionInFlight {
+                    let object = try auditPruneStatusObject(
+                        completed: snapshot.chainState.sequence,
+                        pendingOperationID: auditPruneSubmissionOperationID,
+                        receiptDurable: false, snapshot: snapshot, trust: trust
+                    )
+                    return (try JSONSerialization.data(withJSONObject: object, options: [.sortedKeys, .withoutEscapingSlashes]), false)
+                }
+                let status = try coordinator.status(observation: observation)
+                let object = try auditPruneStatusObject(
+                    completed: status.completed.count,
+                    pendingOperationID: status.pendingPreparation?.authorization.operationID,
+                    receiptDurable: status.pendingReceiptData != nil, snapshot: snapshot, trust: trust
+                )
+                return (try JSONSerialization.data(withJSONObject: object, options: [.sortedKeys, .withoutEscapingSlashes]), true)
+            }
+            if response.1 { try finishAuditPruneObservation(observation, releaseRemote: true) }
+            else { abandonAuditPruneObservation(observation) }
+            acquiredObservation = nil
+            reply(response.0 as NSData, nil)
+        } catch {
+            if let acquiredObservation { abandonAuditPruneObservation(acquiredObservation) }
+            reply(nil, error as NSError)
+        }
+    }
+
+    private func auditPruneStatusObject(completed: Int, pendingOperationID: String?, receiptDurable: Bool, snapshot: NativeAuditPruneTrustSnapshot, trust: NativeAuditPruneServiceTrustSource) throws -> [String: Any] {
+        ["configured": true, "completed_operations": completed,
+         "pending_operation_id": pendingOperationID ?? NSNull(), "pending_receipt_durable": receiptDurable,
+         "submission_in_flight": auditPruneSubmissionInFlight,
+         "trust_revision": snapshot.revision, "trust_head_hash": try trust.currentTrustHeadHash(),
+         "external_receipt_position_provider_configured": trust.externalReceiptPositionProviderConfigured,
+         "active_reservation_id": snapshot.activeReservationID ?? NSNull(),
+         "last_stage": auditPruneLastStage ?? NSNull(), "last_decision": auditPruneLastDecision ?? NSNull(),
+         "last_error": auditPruneLastError ?? NSNull(), "last_updated_at": auditPruneLastUpdatedAt ?? NSNull()]
+    }
+
+    private func recordAuditPruneStageLocked(stage: String, decision: String, error: Error? = nil) {
+        auditPruneLastStage = stage; auditPruneLastDecision = decision
+        auditPruneLastError = error?.localizedDescription; auditPruneLastUpdatedAt = serviceTimestamp(Date())
+    }
+
+    private func refreshAuditPruneBoundaryLocked() throws {
+        guard let trust = auditPruneTrustSource, let keyLifecycle,
+              let auditAnchorReceipts, let auditKeyTransitionStore else {
+            throw AgentPassNativeError.invalidConfiguration("Native audit prune trust dependencies are not configured")
+        }
+        let lifecycle = try keyLifecycle.verify()
+        let checkpoints = try auditCheckpoints.verify()
+        let receipts = try auditAnchorReceipts.verifiedReceipts(checkpoints: checkpoints)
+        let boundary = try verifiedAuditPruneBoundary(lifecycle: lifecycle, checkpoints: checkpoints, receipts: receipts, transitions: auditKeyTransitionStore.status())
+        try trust.refreshVerifiedBoundary(boundary)
     }
 
     func beginSession(agentID: NSString, ttlSeconds: Int, withReply reply: @escaping (NSData?, NSError?) -> Void) {
@@ -371,6 +1865,8 @@ private final class ServiceEndpoint: NSObject, AgentPassNativeServiceProtocol, @
             reply(nil, AgentPassNativeError.invalidConfiguration("Protected native sessions are not configured") as NSError)
             return
         }
+        do { try verifyLifecycleTrustLocked() }
+        catch { reply(nil, error as NSError); return }
         do { _ = try auditCheckpoints.verify() }
         catch { reply(nil, error as NSError); return }
         do {
@@ -378,7 +1874,7 @@ private final class ServiceEndpoint: NSObject, AgentPassNativeServiceProtocol, @
             reply(try sessionManager.beginSession(agentID: agentID as String, requestedTTLSeconds: ttlSeconds) as NSData, nil)
         }
         catch let sessionError {
-            do { try auditLog.append(NativeAuditEvent(operation: "session.start", decision: "deny", reason: sessionError.localizedDescription, agentID: agentID as String)) }
+            do { try appendAudit(NativeAuditEvent(operation: "session.start", decision: "deny", reason: sessionError.localizedDescription, agentID: agentID as String)) }
             catch let auditError { reply(nil, auditError as NSError); return }
             reply(nil, sessionError as NSError)
         }
@@ -391,6 +1887,8 @@ private final class ServiceEndpoint: NSObject, AgentPassNativeServiceProtocol, @
             reply(nil, AgentPassNativeError.invalidConfiguration("Protected native sessions are not configured") as NSError)
             return
         }
+        do { try verifyLifecycleTrustLocked() }
+        catch { reply(nil, error as NSError); return }
         do { _ = try auditCheckpoints.verify() }
         catch { reply(nil, error as NSError); return }
         do {
@@ -400,7 +1898,7 @@ private final class ServiceEndpoint: NSObject, AgentPassNativeServiceProtocol, @
                 sessionManager.discardSession(token: issued.token)
                 throw error
             }
-            do { try auditLog.append(NativeAuditEvent(operation: "session.start", decision: "allow", agentID: issued.agentID, expiresAt: issued.expiresAt)) }
+            do { try appendAudit(NativeAuditEvent(operation: "session.start", decision: "allow", agentID: issued.agentID, expiresAt: issued.expiresAt)) }
             catch let auditError {
                 sessionManager.discardSession(token: issued.token)
                 reply(nil, auditError as NSError)
@@ -410,7 +1908,7 @@ private final class ServiceEndpoint: NSObject, AgentPassNativeServiceProtocol, @
             encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
             reply(try encoder.encode(issued) as NSData, nil)
         } catch let sessionError {
-            do { try auditLog.append(NativeAuditEvent(operation: "session.start", decision: "deny", reason: sessionError.localizedDescription)) }
+            do { try appendAudit(NativeAuditEvent(operation: "session.start", decision: "deny", reason: sessionError.localizedDescription)) }
             catch let auditError { reply(nil, auditError as NSError); return }
             reply(nil, sessionError as NSError)
         }
@@ -423,11 +1921,13 @@ private final class ServiceEndpoint: NSObject, AgentPassNativeServiceProtocol, @
             reply(nil, AgentPassNativeError.invalidConfiguration("Protected native sessions are not configured") as NSError)
             return
         }
+        do { try verifyLifecycleTrustLocked() }
+        catch { reply(nil, error as NSError); return }
         do { _ = try auditCheckpoints.verify() }
         catch { reply(nil, error as NSError); return }
         let revoked = sessionManager.revokeAll()
         do {
-            try auditLog.append(NativeAuditEvent(operation: "session.revoke-all", decision: "allow", reason: "generation=\(revoked.generation);revoked=\(revoked.revokedSessions)"))
+            try appendAudit(NativeAuditEvent(operation: "session.revoke-all", decision: "allow", reason: "generation=\(revoked.generation);revoked=\(revoked.revokedSessions)"))
             let encoder = JSONEncoder()
             encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
             reply(try encoder.encode(revoked) as NSData, nil)
@@ -435,6 +1935,8 @@ private final class ServiceEndpoint: NSObject, AgentPassNativeServiceProtocol, @
     }
 
     func validateSession(token: NSString?, agentID: NSString, withReply reply: @escaping (Bool, NSError?) -> Void) {
+        do { try verifyLifecycleTrust() }
+        catch { reply(false, error as NSError); return }
         do { _ = try auditCheckpoints.verify() }
         catch { reply(false, error as NSError); return }
         guard let sessionManager else { reply(true, nil); return }
@@ -445,7 +1947,11 @@ private final class ServiceEndpoint: NSObject, AgentPassNativeServiceProtocol, @
     }
 
     func applyControlBundle(bundle: NSData, withReply reply: @escaping (NSData?, NSError?) -> Void) {
+        authorizationLock.lock()
+        defer { authorizationLock.unlock() }
         do {
+            try verifyLifecycleTrustLocked()
+            _ = try auditCheckpoints.verify()
             let status = try applyControlUpdate(bundleData: bundle as Data, operation: "control.apply")
             let encoder = JSONEncoder()
             encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
@@ -496,6 +2002,7 @@ private final class ServiceEndpoint: NSObject, AgentPassNativeServiceProtocol, @
             authorizationLock.lock()
             defer { authorizationLock.unlock() }
             guard let controlManager else { throw AgentPassNativeError.invalidConfiguration("Native remote control is not configured") }
+            try verifyLifecycleTrustLocked()
             _ = try auditCheckpoints.verify()
             do { try appendControlFetchFailureIfNeeded(decision: "error", reason: reason) }
             catch {
@@ -509,13 +2016,14 @@ private final class ServiceEndpoint: NSObject, AgentPassNativeServiceProtocol, @
         authorizationLock.lock()
         defer { authorizationLock.unlock() }
         guard let controlManager else { throw AgentPassNativeError.invalidConfiguration("Native remote control is not configured") }
+        try verifyLifecycleTrustLocked()
         _ = try auditCheckpoints.verify()
         let requiresUpdate: Bool
         do { requiresUpdate = try controlManager.validateBundle(bundleData: bundleData) }
         catch let controlError {
             do {
                 if operation == "control.fetch" { try appendControlFetchFailureIfNeeded(decision: "deny", reason: controlError.localizedDescription) }
-                else { try auditLog.append(NativeAuditEvent(operation: operation, decision: "deny", reason: controlError.localizedDescription)) }
+                else { try appendAudit(NativeAuditEvent(operation: operation, decision: "deny", reason: controlError.localizedDescription)) }
             }
             catch {
                 controlManager.invalidate()
@@ -533,13 +2041,13 @@ private final class ServiceEndpoint: NSObject, AgentPassNativeServiceProtocol, @
         do { status = try controlManager.apply(bundleData: bundleData) }
         catch {
             controlManager.invalidate()
-            _ = try? auditLog.append(NativeAuditEvent(operation: operation, decision: "error", reason: error.localizedDescription))
+            _ = try? appendAudit(NativeAuditEvent(operation: operation, decision: "error", reason: error.localizedDescription))
             throw error
         }
         let revokedSessions = sessionManager?.revokeAll()
         do {
             let sessionReason = revokedSessions.map { ";session_generation=\($0.generation);sessions_revoked=\($0.revokedSessions)" } ?? ""
-            try auditLog.append(NativeAuditEvent(operation: operation, decision: "allow", reason: "sequence=\(status.sequence);expires_at=\(status.expiresAt)\(sessionReason)"))
+            try appendAudit(NativeAuditEvent(operation: operation, decision: "allow", reason: "sequence=\(status.sequence);expires_at=\(status.expiresAt)\(sessionReason)"))
             try controlManager.completeAuditedUpdate()
         } catch {
             controlManager.invalidate()
@@ -554,9 +2062,269 @@ private final class ServiceEndpoint: NSObject, AgentPassNativeServiceProtocol, @
         let key = "\(decision):\(reason)"
         let shouldAppend = elapsed.map { $0 >= 3600 || (lastControlFetchAuditReason != key && $0 >= 300) } ?? true
         guard shouldAppend else { return }
-        try auditLog.append(NativeAuditEvent(operation: "control.fetch", decision: decision, reason: reason))
+        try appendAudit(NativeAuditEvent(operation: "control.fetch", decision: decision, reason: reason))
         lastControlFetchAuditReason = key
         lastControlFetchAuditAt = now
+    }
+
+    private func verifyLifecycleTrust() throws {
+        authorizationLock.lock()
+        defer { authorizationLock.unlock() }
+        try verifyLifecycleTrustLocked()
+    }
+
+    /// Requires `authorizationLock` to be held by the caller.
+    private func verifyLifecycleTrustLocked(allowAuditRecoveryPending: Bool = false, allowAuditPruneReservation: Bool = false) throws {
+        if let pendingRecovery, pendingRecovery.expiresAt <= Date() { self.pendingRecovery = nil }
+        guard allowAuditRecoveryPending || pendingRecovery?.freezesMutations != true else {
+            throw AgentPassNativeError.invalidConfiguration("Service operations are frozen while offline recovery is pending")
+        }
+        if !allowAuditPruneReservation,
+           try auditPruneTrustSource?.currentAuditPruneTrustSnapshot().activeReservationID != nil {
+            throw AgentPassNativeError.invalidConfiguration("Service mutations are frozen while an audit prune reservation is pending")
+        }
+        guard let keyLifecycle else { return }
+        let state = try keyLifecycle.verify()
+        guard state.headHash == loadedLifecycleHeadHash,
+              state.active(for: .gitSigning)?.publicKeyX963 == keyStore.publicKeyX963,
+              state.active(for: .auditCheckpoint)?.publicKeyX963 == auditSigner.publicKeyX963,
+              state.active(for: .sessionApproval)?.fingerprint == sessionManager?.approvalKeyFingerprint else {
+            throw AgentPassNativeError.invalidSignature("Active lifecycle keys changed; service is fail-stopped until the external pin is updated and the service restarts")
+        }
+    }
+
+    private func requiredGeneration(_ state: NativeKeyLifecycleSnapshot, role: NativeKeyRole, generation: Int, status: NativeKeyGenerationStatus) throws -> NativeKeyGeneration {
+        guard let value = state.generation(generation, for: role), value.status == status else {
+            throw AgentPassNativeError.invalidConfiguration("Required recovery key generation is missing")
+        }
+        return value
+    }
+
+    private func currentRecoveryRuntime(role: NativeKeyRole) throws -> NativeRecoveryRuntimeState {
+        guard let installationID, let keyLifecycle, let auditAnchorReceipts else {
+            throw AgentPassNativeError.invalidConfiguration("Recovery runtime bindings are not fully configured")
+        }
+        let lifecycle = try keyLifecycle.verify()
+        guard let active = lifecycle.active(for: role),
+              let staged = lifecycle.generations.first(where: { $0.role == role && $0.status == .staged }),
+              staged.generation == active.generation + 1 else {
+            throw AgentPassNativeError.invalidConfiguration("Recovery requires exactly the next staged key generation")
+        }
+        let audit = try auditLog.verify()
+        let checkpoints = try auditCheckpoints.verify()
+        let anchorStatus = try auditAnchorReceipts.status(checkpoints: checkpoints)
+        let receipts = try auditAnchorReceipts.verifiedReceipts(checkpoints: checkpoints)
+        guard let checkpoint = checkpoints.last, let receipt = receipts.last,
+              checkpoint.entries == audit.entries,
+              checkpoint.headHash == audit.headHash,
+              receipt.index == checkpoints.count,
+              receipt.checkpointHash == checkpoint.checkpointHash,
+              anchorStatus.pending == 0 else {
+            throw AgentPassNativeError.invalidSignature("Recovery requires an exact fully anchored current audit boundary")
+        }
+        let rawControlSequence = controlManager?.status().sequence ?? 0
+        guard let controlSequence = Int(exactly: rawControlSequence) else {
+            throw AgentPassNativeError.invalidConfiguration("Recovery control sequence exceeds the supported range")
+        }
+        return NativeRecoveryRuntimeState(
+            installationID: installationID,
+            role: role,
+            activeGeneration: active.generation,
+            activeFingerprint: active.fingerprint,
+            stagedGeneration: staged.generation,
+            stagedPublicKeyX963: staged.publicKeyX963,
+            lifecycleHeadHash: lifecycle.headHash,
+            auditEntries: audit.entries,
+            auditHeadHash: audit.headHash,
+            latestCheckpointHash: checkpoint.checkpointHash,
+            latestReceiptHash: receipt.receiptHash,
+            controlSequence: controlSequence
+        )
+    }
+
+    private func requireSameAuditPreparation(
+        _ observed: NativeRecoveredAuditActivationPreparation,
+        _ expected: NativeRecoveredAuditActivationPreparation
+    ) throws {
+        guard observed.statement == expected.statement,
+              observed.lifecycleRecordData == expected.lifecycleRecordData,
+              observed.lifecycleHeadHash == expected.lifecycleHeadHash,
+              observed.retiringPublicKeyX963 == expected.retiringPublicKeyX963,
+              observed.replacementPublicKeyX963 == expected.replacementPublicKeyX963,
+              observed.replacementSignature == expected.replacementSignature else {
+            throw AgentPassNativeError.invalidSignature("Recovered audit lifecycle preparation changed")
+        }
+    }
+
+    private func makeAuditRecoveryAuthorization(
+        verification: NativeRecoveryVerification,
+        preparation: NativeRecoveredAuditActivationPreparation,
+        policy: NativeAuditKeyRecoveryPolicy,
+        operationID: String? = nil
+    ) throws -> NativeAuditKeyRecoveryAuthorization {
+        guard let tenant = auditAnchorTenant,
+              let transitionStore = auditKeyTransitionStore,
+              let receiptsStore = auditAnchorReceipts else {
+            throw AgentPassNativeError.invalidConfiguration("Audit-key recovery anchor dependencies are unavailable")
+        }
+        let runtime = try currentRecoveryRuntime(role: .auditCheckpoint)
+        guard runtime == pendingRecovery?.runtimeState,
+              verification.request.installationID == installationID,
+              verification.request.fromGeneration == preparation.statement.oldGeneration,
+              verification.request.proposedGeneration == preparation.statement.newGeneration,
+              preparation.statement.continuity == .recovered,
+              preparation.statement.challengeID == verification.request.nonce,
+              preparation.statement.previousLifecycleHead == verification.request.lifecycleHeadHash,
+              preparation.lifecycleHeadHash != verification.request.lifecycleHeadHash else {
+            throw AgentPassNativeError.invalidSignature("Audit-key recovery lifecycle authorization binding is invalid")
+        }
+        let audit = try auditLog.verify()
+        let checkpoints = try auditCheckpoints.verify()
+        let anchorStatus = try receiptsStore.status(checkpoints: checkpoints)
+        let checkpointReceipts = try receiptsStore.verifiedReceipts(checkpoints: checkpoints)
+        guard anchorStatus.pending == 0, anchorStatus.receipts == checkpoints.count,
+              let checkpoint = checkpoints.last, let finalReceipt = checkpointReceipts.last,
+              checkpoint.entries == audit.entries, checkpoint.headHash == audit.headHash,
+              checkpoint.keyGeneration == verification.request.fromGeneration,
+              checkpoint.lifecycleHeadHash == verification.request.lifecycleHeadHash,
+              checkpoint.checkpointHash == verification.request.latestCheckpointHash,
+              finalReceipt.version == 2, finalReceipt.index == checkpoints.count,
+              finalReceipt.checkpointHash == checkpoint.checkpointHash,
+              finalReceipt.receiptHash == verification.request.latestReceiptHash,
+              let finalEventIndex = finalReceipt.eventIndex,
+              let finalPreviousEventHash = finalReceipt.previousEventHash else {
+            throw AgentPassNativeError.invalidSignature("Audit-key recovery requires a fully anchored final retiring-key checkpoint event")
+        }
+        let transitions = try transitionStore.status()
+        let previousTransitionHash: String
+        let previousTransitionReceiptHash: String
+        if transitions.count == 0 {
+            previousTransitionHash = NativeAuditLog.zeroHash
+            previousTransitionReceiptHash = NativeAuditLog.zeroHash
+        } else {
+            guard let transitionReceipt = transitions.latestReceipt,
+                  let latestEventIndex = transitions.latestEventIndex,
+                  finalEventIndex > latestEventIndex else {
+                throw AgentPassNativeError.invalidSignature("Final checkpoint is not newer than the exact latest audit-key transition")
+            }
+            if let latest = transitions.latestRecoveryTransition {
+                previousTransitionHash = latest.transitionHash
+            } else if let latest = transitions.latestTransition {
+                previousTransitionHash = latest.transitionHash
+            } else {
+                throw AgentPassNativeError.invalidSignature("Latest audit-key transition is unavailable")
+            }
+            previousTransitionReceiptHash = transitionReceipt.receiptHash
+        }
+        let precedingCheckpointHash = checkpointReceipts.dropLast().last.flatMap { receipt -> String? in
+            guard receipt.eventIndex == finalEventIndex - 1 else { return nil }
+            return receipt.receiptHash
+        }
+        let precedingTransitionHash: String? = {
+            guard transitions.latestEventIndex == finalEventIndex - 1 else { return nil }
+            return transitions.latestEventHash
+        }()
+        let directPredecessors = [precedingCheckpointHash, precedingTransitionHash].compactMap { $0 }
+        if finalEventIndex == 1 {
+            guard finalPreviousEventHash == NativeAuditLog.zeroHash else {
+                throw AgentPassNativeError.invalidSignature("Initial checkpoint receipt has a nonzero predecessor")
+            }
+        } else {
+            guard directPredecessors.count == 1,
+                  directPredecessors[0] == finalPreviousEventHash else {
+                throw AgentPassNativeError.invalidSignature("Final checkpoint receipt does not directly continue the current global event tip")
+            }
+        }
+        guard let created = serviceDate(verification.request.issuedAt),
+              let expires = serviceDate(verification.request.expiresAt),
+              let checkpointReceived = serviceDate(finalReceipt.receivedAt),
+              created >= checkpointReceived, expires > Date() else {
+            throw AgentPassNativeError.invalidSignature("Audit-key recovery authorization does not follow its final anchor receipt or has expired")
+        }
+        return try NativeAuditKeyRecoveryAuthorization(
+            tenant: tenant, installationID: verification.request.installationID,
+            operationID: operationID ?? UUID().uuidString.lowercased(),
+            recoveryRequestID: verification.requestHash,
+            policy: policy, fromGeneration: verification.request.fromGeneration,
+            oldPublicKeyX963: preparation.retiringPublicKeyX963,
+            newPublicKeyX963: preparation.replacementPublicKeyX963,
+            lifecycleHeadHash: preparation.lifecycleHeadHash,
+            createdAt: verification.request.issuedAt, expiresAt: verification.request.expiresAt,
+            previousTransitionHash: previousTransitionHash,
+            previousTransitionReceiptHash: previousTransitionReceiptHash,
+            lastCheckpointIndex: finalReceipt.index,
+            lastCheckpointHash: checkpoint.checkpointHash,
+            lastCheckpointReceiptHash: finalReceipt.receiptHash,
+            previousAnchorEventIndex: finalEventIndex,
+            previousAnchorEventHash: finalReceipt.receiptHash,
+            retiringGenerationPendingCheckpointCount: anchorStatus.pending
+        )
+    }
+
+    private func finalAuditKeyRotationBoundary(statement: NativeKeyTransitionStatement) throws -> NativeAuditKeyRotationCheckpointBoundary {
+        guard statement.continuity == .clean,
+              let auditAnchorReceipts,
+              auditKeyRotationCoordinator != nil else {
+            throw AgentPassNativeError.invalidConfiguration("Audit-key activation requires clean continuity and configured durable anchor rotation")
+        }
+        guard !pendingKeyActivations.values.contains(where: { $0.statement.role == .auditCheckpoint && $0.expiresAt > Date() }) else {
+            throw AgentPassNativeError.invalidConfiguration("An audit-key activation challenge is already pending")
+        }
+        let audit = try auditLog.verify()
+        let checkpoints = try auditCheckpoints.verify()
+        guard let checkpoint = checkpoints.last,
+              checkpoint.entries == audit.entries,
+              checkpoint.headHash == audit.headHash,
+              checkpoint.keyGeneration == statement.oldGeneration,
+              checkpoint.lifecycleHeadHash == statement.previousLifecycleHead else {
+            throw AgentPassNativeError.invalidSignature("Audit-key activation requires a final checkpoint for the exact current audit and lifecycle heads")
+        }
+        let anchorStatus = try auditAnchorReceipts.status(checkpoints: checkpoints)
+        let receipts = try auditAnchorReceipts.verifiedReceipts(checkpoints: checkpoints)
+        guard anchorStatus.pending == 0,
+              anchorStatus.receipts == checkpoints.count,
+              let receipt = receipts.last,
+              receipt.index == checkpoints.count,
+              receipt.checkpointHash == checkpoint.checkpointHash,
+              receipt.eventIndex != nil else {
+            throw AgentPassNativeError.invalidSignature("Audit-key activation requires the final checkpoint and version-2 anchor receipt with no pending evidence")
+        }
+        return NativeAuditKeyRotationCheckpointBoundary(anchorStatus: anchorStatus, finalReceipt: receipt)
+    }
+
+    @discardableResult
+    private func appendAudit(_ event: NativeAuditEvent, timestamp: Date = Date()) throws -> NativeAuditStatus {
+        authorizationLock.lock()
+        defer { authorizationLock.unlock() }
+        if let pendingRecovery, pendingRecovery.expiresAt <= timestamp { self.pendingRecovery = nil }
+        guard pendingRecovery?.freezesMutations != true else {
+            throw AgentPassNativeError.invalidConfiguration("Audit evidence is frozen while offline recovery is pending")
+        }
+        pendingKeyActivations = pendingKeyActivations.filter { $0.value.expiresAt > timestamp }
+        guard !pendingKeyActivations.values.contains(where: { $0.statement.role == .auditCheckpoint }) else {
+            throw AgentPassNativeError.invalidConfiguration("Audit evidence is frozen at the retiring-key checkpoint boundary")
+        }
+        let status = try auditLog.append(event, timestamp: timestamp, rotationCheckpointing: auditCheckpoints)
+        // An automatic audit rotation creates a checkpoint. Keep checkpoint and receipt segments
+        // bounded as part of the same service-level append path.
+        try rotateEvidenceIfReady()
+        return status
+    }
+
+    private func rotateAuditIfReady() throws {
+        let storage = try auditLog.storageStatus()
+        guard storage.configured, storage.rotationReady else { return }
+        _ = try auditCheckpoints.create()
+        _ = try auditLog.rotate()
+        try rotateEvidenceIfReady()
+    }
+
+    private func rotateEvidenceIfReady() throws {
+        let checkpoints = try auditCheckpoints.verify()
+        if let auditAnchorReceipts, try auditAnchorReceipts.storageStatus(checkpoints: checkpoints).rotationReady {
+            _ = try auditAnchorReceipts.rotate(checkpoints: checkpoints)
+        }
+        if try auditCheckpoints.storageStatus().rotationReady { _ = try auditCheckpoints.rotate() }
     }
 }
 
@@ -579,48 +2347,520 @@ private final class ListenerDelegate: NSObject, NSXPCListenerDelegate {
     }
 }
 
+private func bootstrapInput(expectedKeys: Set<String>) throws -> [String: Any] {
+    let data = FileHandle.standardInput.readDataToEndOfFile()
+    guard !data.isEmpty, data.count <= 64 * 1024,
+          let object = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+          Set(object.keys) == expectedKeys else {
+        throw AgentPassNativeError.invalidConfiguration("Native bootstrap input is not the exact expected schema")
+    }
+    return object
+}
+
+private func bootstrapData(_ object: [String: Any], key: String) throws -> Data {
+    guard let value = object[key] as? String,
+          value.count <= 32 * 1024,
+          let data = Data(base64Encoded: value), data.base64EncodedString() == value else {
+        throw AgentPassNativeError.invalidConfiguration("Native bootstrap \(key) is not canonical base64")
+    }
+    return data
+}
+
+private func emitBootstrap(_ plan: NativeBootstrapPlan, headHash: String) throws -> Never {
+    let object: [String: Any] = [
+        "version": 1,
+        "role": plan.role.rawValue,
+        "generation": plan.generation,
+        "application_tag": plan.applicationTag,
+        "fingerprint": plan.fingerprint,
+        "statement_base64": try plan.statement.canonicalData().base64EncodedString(),
+        "lifecycle_head_hash": headHash,
+        "configuration_pin_update_required": true
+    ]
+    let data = try JSONSerialization.data(withJSONObject: object, options: [.sortedKeys, .withoutEscapingSlashes])
+    FileHandle.standardOutput.write(data + Data("\n".utf8))
+    exit(0)
+}
+
+private func emitBootstrapSnapshot(_ snapshot: NativeKeyLifecycleSnapshot) throws -> Never {
+    let complete = NativeKeyRole.allCases.allSatisfy { snapshot.active(for: $0) != nil }
+    let object: [String: Any] = [
+        "version": 1,
+        "sequence": snapshot.sequence,
+        "lifecycle_head_hash": snapshot.headHash,
+        "bootstrap_complete": complete,
+        "configuration_pin_update_required": true
+    ]
+    let data = try JSONSerialization.data(withJSONObject: object, options: [.sortedKeys, .withoutEscapingSlashes])
+    FileHandle.standardOutput.write(data + Data("\n".utf8))
+    exit(0)
+}
+
+private func runOfflineBootstrap(action: String, configPath: String) throws -> Never {
+    guard geteuid() == 0 else {
+        throw AgentPassNativeError.invalidConfiguration("Offline native bootstrap must run as root")
+    }
+    let configuration = try ServiceConfiguration.load(path: configPath)
+    guard let lifecycleDirectory = configuration.keyLifecycleDirectory,
+          let approvalTag = configuration.sessionApprovalKeyTag else {
+        throw AgentPassNativeError.invalidConfiguration("Offline bootstrap requires lifecycle directory, external head pin, and approval tag")
+    }
+    try validateProtectedDirectoryPath(path: lifecycleDirectory, label: "Native key lifecycle directory")
+    if let pinDirectory = configuration.keyLifecyclePinDirectory {
+        try validateProtectedDirectoryPath(path: pinDirectory, label: "Native key lifecycle pin directory")
+    }
+    if let outboxDirectory = configuration.keyLifecycleMutationOutboxDirectory {
+        try validateProtectedDirectoryPath(path: outboxDirectory, label: "Native key lifecycle mutation outbox directory")
+    }
+    let recoveryKeys = try (configuration.recoveryPublicKeys ?? []).map(ed25519RecoveryPublicKey)
+    let pin = try configuration.keyLifecyclePinDirectory.map { try NativeLifecyclePinTransaction(rootPath: $0) }
+    let store = try NativeKeyLifecycleStore(directory: lifecycleDirectory, recoveryPublicKeys: recoveryKeys, recoveryThreshold: configuration.recoveryThreshold, expectedHeadHash: pin == nil ? configuration.keyLifecycleExpectedHeadHash : nil)
+    let observed = try store.verify()
+    if let pin {
+        if let pending = try pin.pending() {
+            _ = try pin.recover(pending, observedOldLifecycleHead: pending.oldLifecycleHead, observedCurrentLifecycleHead: observed.headHash)
+        }
+        if let durable = try pin.current() {
+            guard durable.newLifecycleHead == observed.headHash else { throw AgentPassNativeError.invalidSignature("Bootstrap ledger does not match its durable pin") }
+        } else if observed.headHash != NativeKeyLifecycleStore.zeroHash {
+            throw AgentPassNativeError.invalidSignature("Non-empty bootstrap ledger has no durable external pin")
+        }
+    }
+    let coordinator = try NativeBootstrapCoordinator(
+        store: store,
+        serviceKeys: SecureEnclaveLifecycleKeyProvider(accessGroup: configuration.keychainAccessGroup),
+        baseTags: [.gitSigning: configuration.keyTag, .auditCheckpoint: configuration.auditKeyTag, .sessionApproval: approvalTag],
+        pinTransaction: pin
+    )
+
+    switch action {
+    case "prepare-approval":
+        let input = try bootstrapInput(expectedKeys: ["public_key_base64", "version"])
+        guard input["version"] as? Int == 1 else { throw AgentPassNativeError.invalidConfiguration("Native bootstrap version is invalid") }
+        let plan = try coordinator.prepareApproval(publicKeyX963: bootstrapData(input, key: "public_key_base64"))
+        try emitBootstrap(plan, headHash: try store.verify().headHash)
+    case "commit-approval":
+        let input = try bootstrapInput(expectedKeys: ["signature_base64", "statement_base64", "version"])
+        guard input["version"] as? Int == 1 else { throw AgentPassNativeError.invalidConfiguration("Native bootstrap version is invalid") }
+        let statement = try NativeKeyTransitionStatement.decodeCanonical(bootstrapData(input, key: "statement_base64"))
+        let state = try store.verify()
+        guard let staged = state.generation(statement.newGeneration, for: .sessionApproval) else { throw AgentPassNativeError.invalidConfiguration("Bootstrap approval generation is not staged") }
+        let plan = NativeBootstrapPlan(role: .sessionApproval, generation: staged.generation, applicationTag: staged.applicationTag, fingerprint: staged.fingerprint, statement: statement)
+        try emitBootstrapSnapshot(try coordinator.commitApproval(plan: plan, signature: bootstrapData(input, key: "signature_base64")))
+    case "prepare-service":
+        let input = try bootstrapInput(expectedKeys: ["role", "version"])
+        guard input["version"] as? Int == 1, let rawRole = input["role"] as? String,
+              let role = NativeKeyRole(rawValue: rawRole), role != .sessionApproval else {
+            throw AgentPassNativeError.invalidConfiguration("Native bootstrap service role is invalid")
+        }
+        let plan = try coordinator.prepareServiceRole(role)
+        try emitBootstrap(plan, headHash: try store.verify().headHash)
+    case "commit-service":
+        let input = try bootstrapInput(expectedKeys: ["approval_public_key_base64", "approval_signature_base64", "statement_base64", "version"])
+        guard input["version"] as? Int == 1 else { throw AgentPassNativeError.invalidConfiguration("Native bootstrap version is invalid") }
+        let statement = try NativeKeyTransitionStatement.decodeCanonical(bootstrapData(input, key: "statement_base64"))
+        let state = try store.verify()
+        guard statement.role != .sessionApproval, let staged = state.generation(statement.newGeneration, for: statement.role) else {
+            throw AgentPassNativeError.invalidConfiguration("Bootstrap service generation is not staged")
+        }
+        let plan = NativeBootstrapPlan(role: statement.role, generation: staged.generation, applicationTag: staged.applicationTag, fingerprint: staged.fingerprint, statement: statement)
+        try emitBootstrapSnapshot(try coordinator.commitServiceRole(
+            plan: plan,
+            approvalSignature: bootstrapData(input, key: "approval_signature_base64"),
+            approvalPublicKeyX963: bootstrapData(input, key: "approval_public_key_base64")
+        ))
+    case "status":
+        try emitBootstrapSnapshot(try coordinator.completedSnapshot())
+    default:
+        throw AgentPassNativeError.invalidConfiguration("Unknown offline bootstrap action")
+    }
+}
+
 do {
+    if CommandLine.arguments.count == 5,
+       CommandLine.arguments[1] == "--bootstrap",
+       CommandLine.arguments[3] == "--config" {
+        try runOfflineBootstrap(action: CommandLine.arguments[2], configPath: CommandLine.arguments[4])
+    }
     guard CommandLine.arguments.count == 3, CommandLine.arguments[1] == "--config" else {
-        throw AgentPassNativeError.invalidConfiguration("Usage: agentpass-native-service --config /Library/Application Support/AgentPass/native-service.json")
+        throw AgentPassNativeError.invalidConfiguration("Usage: agentpass-native-service --config PATH | --bootstrap ACTION --config PATH")
     }
     let configuration = try ServiceConfiguration.load(path: CommandLine.arguments[2])
     try validateProtectedOutputPath(path: configuration.auditLogPath, label: "Native audit log")
     if let archiveDirectory = configuration.auditArchiveDirectory {
         try validateProtectedDirectoryPath(path: archiveDirectory, label: "Native audit archive directory")
     }
+    if let lifecycleDirectory = configuration.keyLifecycleDirectory {
+        try validateProtectedDirectoryPath(path: lifecycleDirectory, label: "Native key lifecycle directory")
+    }
+    if let pinDirectory = configuration.keyLifecyclePinDirectory {
+        try validateProtectedDirectoryPath(path: pinDirectory, label: "Native key lifecycle pin directory")
+    }
+    if let outboxDirectory = configuration.keyLifecycleMutationOutboxDirectory {
+        try validateProtectedDirectoryPath(path: outboxDirectory, label: "Native key lifecycle mutation outbox directory")
+    }
     try validateProtectedOutputPath(path: configuration.auditCheckpointPath, label: "Native audit checkpoint log")
+    if let archiveDirectory = configuration.auditCheckpointArchiveDirectory {
+        try validateProtectedDirectoryPath(path: archiveDirectory, label: "Native audit checkpoint archive directory")
+    }
     if let controlStatePath = configuration.controlStatePath {
         try validateProtectedOutputPath(path: controlStatePath, label: "Native control state")
     }
     if let receiptPath = configuration.auditAnchorReceiptPath {
         try validateProtectedOutputPath(path: receiptPath, label: "Native audit anchor receipt log")
     }
+    if let archiveDirectory = configuration.auditAnchorReceiptArchiveDirectory {
+        try validateProtectedDirectoryPath(path: archiveDirectory, label: "Native audit anchor receipt archive directory")
+    }
+    if let transitionPath = configuration.auditKeyTransitionPath {
+        try validateProtectedOutputPath(path: transitionPath, label: "Native audit key transition log")
+    }
+    if let planDirectory = configuration.auditKeyRotationPlanDirectory {
+        try validateProtectedDirectoryPath(path: planDirectory, label: "Native audit key rotation plan journal")
+    }
+    if let planDirectory = configuration.auditKeyRecoveryPlanDirectory {
+        try validateProtectedDirectoryPath(path: planDirectory, label: "Native audit key recovery plan journal")
+    }
+    if let directory = configuration.auditPruneJournalDirectory {
+        try validateProtectedDirectoryPath(path: directory, label: "Native audit prune journal")
+    }
+    if let directory = configuration.auditPruneTrustDirectory {
+        try validateProtectedDirectoryPath(path: directory, label: "Native audit prune trust state")
+    }
+    if let path = configuration.auditPruneEvidenceBundlePath {
+        try validateProtectedOutputPath(path: path, label: "Native audit prune evidence bundle")
+    }
+    if let evidencePath = configuration.auditKeyDeletionEvidenceBundlePath {
+        _ = try loadProtectedFile(path: evidencePath, label: "Native audit-key deletion evidence bundle")
+    }
+    if let archiveDirectory = configuration.auditKeyDeletionArchiveDirectory {
+        try validateProtectedDirectoryPath(path: archiveDirectory, label: "Native audit-key deletion archive directory")
+    }
     let policyData = try loadProtectedFile(path: configuration.policyPath, label: "Native policy")
-    let sessionManager = try configuration.sessionApprovalPublicKey.map { try NativeSessionManager(policyData: policyData, approvalPublicKey: $0) }
+    let recoveryPolicyData = try configuration.recoveryPolicyPath.map { try loadProtectedFile(path: $0, label: "Native recovery policy") }
+    let auditKeyRecoveryPolicy = try recoveryPolicyData.map {
+        try NativeAuditKeyRecoveryPolicy.convertingAuthoritiesPolicy($0).anchorPolicy
+    }
+    let recoveryKeys = try (configuration.recoveryPublicKeys ?? []).map(ed25519RecoveryPublicKey)
+    let lifecyclePin = try configuration.keyLifecyclePinDirectory.map { try NativeLifecyclePinTransaction(rootPath: $0) }
+    let lifecycleMutationOutbox = try configuration.keyLifecycleMutationOutboxDirectory.map { try NativeLifecycleMutationOutbox(rootPath: $0) }
+    let keyLifecycle = try configuration.keyLifecycleDirectory.map {
+        try NativeKeyLifecycleStore(directory: $0, recoveryPublicKeys: recoveryKeys, recoveryThreshold: configuration.recoveryThreshold, expectedHeadHash: lifecyclePin == nil ? configuration.keyLifecycleExpectedHeadHash : nil)
+    }
+    if lifecycleMutationOutbox == nil, let lifecyclePin, let observedLifecycle = try keyLifecycle?.verify() {
+        if let pending = try lifecyclePin.pending() {
+            _ = try lifecyclePin.recover(pending, observedOldLifecycleHead: pending.oldLifecycleHead, observedCurrentLifecycleHead: observedLifecycle.headHash)
+        }
+    }
+    let deletionProofVerifierBox = ServiceLifecycleDeletionProofVerifierBox()
+    let keyCoordinator = try keyLifecycle.map {
+        try NativeKeyLifecycleCoordinator(store: $0, provider: SecureEnclaveLifecycleKeyProvider(accessGroup: configuration.keychainAccessGroup), baseTags: [.gitSigning: configuration.keyTag, .auditCheckpoint: configuration.auditKeyTag, .sessionApproval: configuration.sessionApprovalKeyTag!], deletionProofVerifier: deletionProofVerifierBox, pinTransaction: lifecyclePin, mutationOutbox: lifecycleMutationOutbox)
+    }
+    let observedLifecycle = try keyLifecycle?.verify()
+    if let lifecyclePin, let observedLifecycle {
+        guard let durable = try lifecyclePin.current(), durable.newLifecycleHead == observedLifecycle.headHash else {
+            throw AgentPassNativeError.invalidSignature("Lifecycle ledger does not match the durable external pin transaction history")
+        }
+        if let staticHead = configuration.keyLifecycleExpectedHeadHash, staticHead != durable.newLifecycleHead {
+            throw AgentPassNativeError.invalidSignature("Static lifecycle pin disagrees with the durable pin transaction history")
+        }
+    }
+    let lifecycleSnapshot = try keyLifecycle?.verify(expectedHeadHash: lifecyclePin == nil ? configuration.keyLifecycleExpectedHeadHash : lifecyclePin?.current()?.newLifecycleHead)
+    let activeSigning = lifecycleSnapshot?.active(for: .gitSigning)
+    let activeAudit = lifecycleSnapshot?.active(for: .auditCheckpoint)
+    let activeApproval = lifecycleSnapshot?.active(for: .sessionApproval)
+    if lifecycleSnapshot != nil, activeSigning == nil || activeAudit == nil || activeApproval == nil {
+        throw AgentPassNativeError.invalidConfiguration("Native key lifecycle must contain active signing, audit, and approval generations")
+    }
+    let approvalPublicKey = try activeApproval.map { try SSHSIG.authorizedKey(publicKeyX963: $0.publicKeyX963) } ?? configuration.sessionApprovalPublicKey
+    let sessionManager = try approvalPublicKey.map { try NativeSessionManager(policyData: policyData, approvalPublicKey: $0) }
     let controlManager = try configuration.controlStatePath.map { try NativeControlManager(policyData: policyData, statePath: $0) }
-    let keyStore = try SecureEnclaveKeyStore(
-        applicationTag: configuration.keyTag,
-        accessGroup: configuration.keychainAccessGroup
-    )
-    let auditSigner = try SecureEnclaveKeyStore(applicationTag: configuration.auditKeyTag, accessGroup: configuration.keychainAccessGroup)
+    let keyStore = try activeSigning.map { try SecureEnclaveKeyStore.loadExisting(applicationTag: $0.applicationTag, accessGroup: configuration.keychainAccessGroup) }
+        ?? SecureEnclaveKeyStore(applicationTag: configuration.keyTag, accessGroup: configuration.keychainAccessGroup)
+    if let activeSigning, keyStore.publicKeyX963 != activeSigning.publicKeyX963 { throw AgentPassNativeError.invalidKey("Active signing key does not match the lifecycle ledger") }
+    let auditSigner = try activeAudit.map { try SecureEnclaveKeyStore.loadExisting(applicationTag: $0.applicationTag, accessGroup: configuration.keychainAccessGroup) }
+        ?? SecureEnclaveKeyStore(applicationTag: configuration.auditKeyTag, accessGroup: configuration.keychainAccessGroup)
+    if let activeAudit, auditSigner.publicKeyX963 != activeAudit.publicKeyX963 { throw AgentPassNativeError.invalidKey("Active audit key does not match the lifecycle ledger") }
     let auditLog = try NativeAuditLog(path: configuration.auditLogPath, archiveDirectory: configuration.auditArchiveDirectory)
-    let auditCheckpoints = try NativeAuditCheckpoints(path: configuration.auditCheckpointPath, auditLog: auditLog, signer: auditSigner)
+    let auditGenerations = lifecycleSnapshot?.generations.filter { $0.role == .auditCheckpoint && $0.status != .staged } ?? []
+    let auditVerificationKeys = auditGenerations.map(\.publicKeyX963)
+    let auditVerificationGenerations = Dictionary(uniqueKeysWithValues: auditGenerations.map { ($0.fingerprint, $0.generation) })
+    let auditCheckpoints = try NativeAuditCheckpoints(path: configuration.auditCheckpointPath, auditLog: auditLog, signer: auditSigner, archiveDirectory: configuration.auditCheckpointArchiveDirectory, verificationPublicKeys: auditVerificationKeys, verificationGenerations: auditVerificationGenerations, keyGeneration: activeAudit?.generation, lifecycleHeadHash: lifecycleSnapshot?.headHash, requireLifecycleBinding: lifecycleSnapshot != nil)
     let auditAnchorReceipts: NativeAuditAnchorReceipts?
     let auditAnchorClient: NativeAuditAnchorClient?
+    let auditKeyRotationCoordinator: NativeAuditKeyRotationCoordinator?
+    let auditKeyRecoveryCoordinator: NativeAuditKeyRecoveryCoordinator?
+    let auditKeyRecoveryPlanJournal: NativeAuditKeyRecoveryPlanJournal?
+    let auditKeyRecoveryApprovalJournal: NativeAuditRecoveryApprovalJournal?
+    let auditKeyTransitionStore: NativeAuditKeyTransitionStore?
+    let auditPruneCoordinator: NativeAuditPruneCoordinator?
+    let auditPruneTrustSource: NativeAuditPruneServiceTrustSource?
     if let rawURL = configuration.auditAnchorURL, let url = URL(string: rawURL),
        let tenant = configuration.auditAnchorTenant, let publicKey = configuration.auditAnchorPublicKey,
        let receiptPath = configuration.auditAnchorReceiptPath {
-        auditAnchorReceipts = try NativeAuditAnchorReceipts(path: receiptPath, tenant: tenant, anchorPublicKeyPEM: publicKey)
-        auditAnchorClient = try NativeAuditAnchorClient(url: url, tenant: tenant)
+        auditAnchorReceipts = try NativeAuditAnchorReceipts(path: receiptPath, tenant: tenant, anchorPublicKeyPEM: publicKey, archiveDirectory: configuration.auditAnchorReceiptArchiveDirectory)
+        auditAnchorClient = try NativeAuditAnchorClient(url: url, tenant: tenant, anchorPublicKeyPEM: publicKey, auditSigner: auditSigner)
+        auditKeyTransitionStore = try configuration.auditKeyTransitionPath.map { transitionPath in
+            if let auditKeyRecoveryPolicy, let installationID = configuration.installationID {
+                return try NativeAuditKeyTransitionStore(
+                    path: transitionPath, tenant: tenant, anchorPublicKeyPEM: publicKey,
+                    recoveryPolicyData: auditKeyRecoveryPolicy.canonicalData(),
+                    installationID: installationID
+                )
+            }
+            return try NativeAuditKeyTransitionStore(path: transitionPath, tenant: tenant, anchorPublicKeyPEM: publicKey)
+        }
+        if let transitionStore = auditKeyTransitionStore,
+           let planDirectory = configuration.auditKeyRotationPlanDirectory,
+           let auditAnchorClient {
+            let planJournal = try NativeAuditKeyRotationPlanJournal(rootPath: planDirectory, tenant: tenant)
+            auditKeyRotationCoordinator = try NativeAuditKeyRotationCoordinator(
+                tenant: tenant,
+                transitionStore: transitionStore,
+                planJournal: planJournal,
+                transport: NativeAuditKeyTransitionHTTPTransport(client: auditAnchorClient)
+            )
+        } else {
+            auditKeyRotationCoordinator = nil
+        }
+        if let transitionStore = auditKeyTransitionStore,
+           let planDirectory = configuration.auditKeyRecoveryPlanDirectory,
+           let approvalDirectory = configuration.auditKeyRecoveryApprovalDirectory,
+           let installationID = configuration.installationID,
+           let auditKeyRecoveryPolicy,
+           let auditAnchorClient,
+           let keyLifecycle {
+            let journal = try NativeAuditKeyRecoveryPlanJournal(
+                rootPath: planDirectory, tenant: tenant,
+                pinnedPolicy: auditKeyRecoveryPolicy, installationID: installationID
+            )
+            auditKeyRecoveryCoordinator = try NativeAuditKeyRecoveryCoordinator(
+                tenant: tenant, installationID: installationID,
+                pinnedPolicy: auditKeyRecoveryPolicy,
+                transitionStore: transitionStore, planJournal: journal,
+                transport: NativeAuditKeyTransitionHTTPTransport(client: auditAnchorClient),
+                preparedRecordVerifier: keyLifecycle,
+                lifecycleAncestryVerifier: keyLifecycle
+            )
+            auditKeyRecoveryPlanJournal = journal
+            auditKeyRecoveryApprovalJournal = try NativeAuditRecoveryApprovalJournal(rootPath: approvalDirectory)
+        } else {
+            auditKeyRecoveryCoordinator = nil
+            auditKeyRecoveryPlanJournal = nil
+            auditKeyRecoveryApprovalJournal = nil
+        }
     } else {
         auditAnchorReceipts = nil
         auditAnchorClient = nil
+        auditKeyTransitionStore = nil
+        auditKeyRotationCoordinator = nil
+        auditKeyRecoveryCoordinator = nil
+        auditKeyRecoveryPlanJournal = nil
+        auditKeyRecoveryApprovalJournal = nil
+    }
+    if let journalDirectory = configuration.auditPruneJournalDirectory,
+       let trustDirectory = configuration.auditPruneTrustDirectory,
+       let archiveDirectory = configuration.auditKeyDeletionArchiveDirectory,
+       let authorizerText = configuration.auditRetentionAuthorizerPublicKey,
+       let minimumRetention = configuration.auditKeyDeletionMinimumRetentionSeconds,
+       let tenant = configuration.auditAnchorTenant,
+       let anchorPublicKey = configuration.auditAnchorPublicKey,
+       let auditAnchorClient, let auditAnchorReceipts, let auditKeyTransitionStore,
+       let lifecycleSnapshot {
+        let authorizerKey = try SSHSIG.p256PublicKey(fromAuthorizedKey: authorizerText)
+        guard authorizerKey == auditSigner.publicKeyX963 else {
+            throw AgentPassNativeError.invalidConfiguration("Audit prune authorizer must be the active non-exportable audit Secure Enclave key")
+        }
+        let checkpoints = try auditCheckpoints.verify()
+        let receipts = try auditAnchorReceipts.verifiedReceipts(checkpoints: checkpoints)
+        let boundary = try verifiedAuditPruneBoundary(lifecycle: lifecycleSnapshot, checkpoints: checkpoints, receipts: receipts, transitions: auditKeyTransitionStore.status())
+        let trust = try NativeAuditPruneServiceTrustSource(
+            rootPath: trustDirectory, tenant: tenant, initialBoundary: boundary,
+            externalReceiptObservationRequired: true
+        )
+        let startupObservationFetcher = NativeAuditPruneExternalObservationFetcher(provider: auditAnchorClient, trustSource: trust)
+        func startupObservation(_ purpose: NativeAuditPruneExternalObservationPurpose) throws -> NativeAuditPruneExternalReceiptObservation {
+            try startupObservationFetcher.fetch(purpose: purpose)
+        }
+        func finishStartupObservation(_ observation: NativeAuditPruneExternalReceiptObservation) throws {
+            try trust.finishAuditPruneExternalReceiptObservation(observation)
+            if let lease = observation.externalLease { try auditAnchorClient.releaseAuditPruneReceiptLease(lease) }
+        }
+        func abandonStartupObservation(_ observation: NativeAuditPruneExternalReceiptObservation) {
+            trust.discardAuditPruneExternalReceiptObservation(observation)
+            if let lease = observation.externalLease { try? auditAnchorClient.releaseAuditPruneReceiptLease(lease) }
+        }
+        let coordinator = try NativeAuditPruneCoordinator(
+            tenant: tenant, archiveDirectory: archiveDirectory,
+            journal: try NativeAuditPruneJournal(directory: journalDirectory, tenant: tenant),
+            verifier: try NativeAuditRetentionVerifier(tenant: tenant, authorizerPublicKeyX963: authorizerKey, anchorPublicKeyPEM: anchorPublicKey, minimumRetentionSeconds: minimumRetention),
+            signer: auditSigner, transport: NativeAuditKeyTransitionHTTPTransport(client: auditAnchorClient), trustSource: trust
+        )
+        let initialStatusObservation = try startupObservation(.status)
+        let startupStatus: NativeAuditPruneJournalStatus
+        do { startupStatus = try coordinator.status(observation: initialStatusObservation); try finishStartupObservation(initialStatusObservation) }
+        catch { abandonStartupObservation(initialStatusObservation); throw error }
+        if startupStatus.pendingPreparation == nil {
+            let reconcileObservation = try startupObservation(.reconcile)
+            do { _ = try coordinator.reconcile(observation: reconcileObservation); try finishStartupObservation(reconcileObservation) }
+            catch { abandonStartupObservation(reconcileObservation); throw error }
+        } else if startupStatus.pendingReceiptData != nil {
+            let executionObservation = try startupObservation(.execute)
+            do { _ = try coordinator.executePending(observation: executionObservation); try finishStartupObservation(executionObservation) }
+            catch { abandonStartupObservation(executionObservation); throw error }
+        }
+        if let evidencePath = configuration.auditPruneEvidenceBundlePath {
+            let finalStatusObservation = try startupObservation(.status)
+            do {
+                if let completed = try coordinator.status(observation: finalStatusObservation).completed.last {
+                    try NativeAuditPruneEvidencePublisher.publish(completed.deletionEvidenceBundleData, path: evidencePath)
+                }
+                try finishStartupObservation(finalStatusObservation)
+            } catch { abandonStartupObservation(finalStatusObservation); throw error }
+        }
+        auditPruneTrustSource = trust; auditPruneCoordinator = coordinator
+    } else {
+        auditPruneTrustSource = nil; auditPruneCoordinator = nil
+    }
+    if let evidencePath = configuration.auditKeyDeletionEvidenceBundlePath {
+        guard let archiveDirectory = configuration.auditKeyDeletionArchiveDirectory,
+              let authorizerPublicKey = configuration.auditRetentionAuthorizerPublicKey,
+              let minimumRetention = configuration.auditKeyDeletionMinimumRetentionSeconds,
+              let tenant = configuration.auditAnchorTenant,
+              let anchorPublicKey = configuration.auditAnchorPublicKey,
+              let keyLifecycle,
+              let auditKeyTransitionStore,
+              let auditAnchorReceipts else {
+            throw AgentPassNativeError.invalidConfiguration("Audit-key deletion proof verifier dependencies are not installed")
+        }
+        let provider = try ServiceAuditKeyDeletionEvidenceProvider(
+            evidenceBundlePath: evidencePath,
+            archiveDirectory: archiveDirectory,
+            tenant: tenant,
+            retentionAuthorizerPublicKeyX963: try SSHSIG.p256PublicKey(fromAuthorizedKey: authorizerPublicKey),
+            anchorPublicKeyPEM: anchorPublicKey,
+            minimumRetentionSeconds: minimumRetention,
+            lifecycleStore: keyLifecycle,
+            transitionStore: auditKeyTransitionStore,
+            auditLog: auditLog,
+            checkpoints: auditCheckpoints,
+            anchorReceipts: auditAnchorReceipts
+        )
+        try provider.validate()
+        try deletionProofVerifierBox.install(provider)
+    }
+    if let keyCoordinator, let keyLifecycle {
+        let beforeRecovery = try keyLifecycle.verify()
+        let afterRecovery = try keyCoordinator.recoverKeychainSideEffects()
+        if afterRecovery.headHash != beforeRecovery.headHash {
+            // Objects above were deliberately constructed against the pre-recovery lifecycle
+            // boundary. Exit fail-closed so launchd restarts and rebuilds every dependent store
+            // against the newly pinned terminal record.
+            throw AgentPassNativeError.invalidConfiguration("Lifecycle key side-effect recovery completed; restart is required to bind service state to the recovered head")
+        }
+    }
+    if let recoveryCoordinator = auditKeyRecoveryCoordinator,
+       let approvalJournal = auditKeyRecoveryApprovalJournal,
+       let transitionStore = auditKeyTransitionStore,
+       let receiptsStore = auditAnchorReceipts,
+       let keyCoordinator,
+       let lifecycleSnapshot,
+       let currentAudit = lifecycleSnapshot.active(for: .auditCheckpoint) {
+        if try recoveryCoordinator.pendingPlan() != nil,
+           try auditKeyRotationCoordinator?.pendingPlan() != nil {
+            throw AgentPassNativeError.invalidSignature("Audit-key rotation and recovery journals cannot both be pending")
+        }
+        let recoveryJournalStatus = try auditKeyRecoveryPlanJournal?.status()
+        let expiredUnsubmitted = recoveryJournalStatus?.pending != nil &&
+            recoveryJournalStatus?.pendingSubmissionIntent == nil &&
+            serviceDate(recoveryJournalStatus!.pending!.plan.transition.expiresAt).map { $0 <= Date() } == true
+        if let pendingPlan = try recoveryCoordinator.pendingPlan(), !expiredUnsubmitted {
+            guard let activeApproval = lifecycleSnapshot.active(for: .sessionApproval) else {
+                throw AgentPassNativeError.invalidSignature("Pending audit recovery has no active local approval authority")
+            }
+            _ = try approvalJournal.require(
+                operationID: pendingPlan.transition.operationID,
+                statementData: try recoveryLifecycleStatement(pendingPlan).canonicalData(),
+                authorizationData: try pendingPlan.transition.recoveryEvidence.authorization.canonicalData(),
+                expectedSignerFingerprint: activeApproval.fingerprint
+            )
+            let audit = try auditLog.verify()
+            let checkpoints = try auditCheckpoints.verify()
+            let anchorStatus = try receiptsStore.status(checkpoints: checkpoints)
+            let receipts = try receiptsStore.verifiedReceipts(checkpoints: checkpoints)
+            guard lifecycleSnapshot.headHash != pendingPlan.transition.lifecycleHeadHash,
+                  currentAudit.generation == pendingPlan.transition.fromGeneration,
+                  currentAudit.publicKeyX963 == pendingPlan.retiringPublicKeyX963,
+                  let checkpoint = checkpoints.last,
+                  let receipt = receipts.last,
+                  checkpoint.entries == audit.entries,
+                  checkpoint.headHash == audit.headHash,
+                  checkpoint.checkpointHash == pendingPlan.transition.lastCheckpointHash,
+                  receipt.receiptHash == pendingPlan.transition.lastCheckpointReceiptHash,
+                  receipt.checkpointHash == checkpoint.checkpointHash,
+                  receipt.eventIndex == pendingPlan.transition.previousAnchorEventIndex,
+                  receipt.receiptHash == pendingPlan.transition.previousAnchorEventHash,
+                  anchorStatus.pending == 0 else {
+                throw AgentPassNativeError.invalidSignature("Pending audit-key recovery no longer matches its frozen lifecycle and anchor boundary")
+            }
+            _ = try recoveryCoordinator.authorizeActivation(plan: pendingPlan)
+        }
+        if let payload = try recoveryCoordinator.recoverAuthorizedLifecycleRecord(
+            currentLifecycleHeadHash: lifecycleSnapshot.headHash,
+            currentAuditGeneration: currentAudit.generation
+        ) {
+            guard let activeApproval = lifecycleSnapshot.active(for: .sessionApproval),
+                  let transition = try transitionStore.status().latestRecoveryTransition else {
+                throw AgentPassNativeError.invalidSignature("Authorized audit recovery lacks its local approval or transition proof")
+            }
+            _ = try approvalJournal.require(
+                operationID: transition.operationID,
+                statementData: try recoveryLifecycleStatement(transition: transition, lifecycleRecordData: payload).canonicalData(),
+                authorizationData: try transition.recoveryEvidence.authorization.canonicalData(),
+                expectedSignerFingerprint: activeApproval.fingerprint
+            )
+            let recovered = try keyCoordinator.commitAuthorizedAuditActivationRecord(payload)
+            throw AgentPassNativeError.invalidConfiguration("Recovered schema-v3 audit-key activation to lifecycle head \(recovered.headHash); restart the native service to load the replacement signer")
+        }
+    }
+    if let rotationCoordinator = auditKeyRotationCoordinator,
+       let receiptsStore = auditAnchorReceipts,
+       let keyCoordinator,
+       let lifecycleSnapshot,
+       let currentAudit = lifecycleSnapshot.active(for: .auditCheckpoint) {
+        if let pendingPlan = try rotationCoordinator.pendingPlan() {
+            let audit = try auditLog.verify()
+            let checkpoints = try auditCheckpoints.verify()
+            let anchorStatus = try receiptsStore.status(checkpoints: checkpoints)
+            let receipts = try receiptsStore.verifiedReceipts(checkpoints: checkpoints)
+            guard let checkpoint = checkpoints.last,
+                  let receipt = receipts.last,
+                  checkpoint.entries == audit.entries,
+                  checkpoint.headHash == audit.headHash,
+                  checkpoint.checkpointHash == pendingPlan.transition.lastCheckpointHash,
+                  receipt.receiptHash == pendingPlan.transition.lastCheckpointReceiptHash,
+                  receipt.checkpointHash == checkpoint.checkpointHash,
+                  anchorStatus.pending == 0 else {
+                throw AgentPassNativeError.invalidSignature("Pending audit-key rotation no longer matches the frozen local anchor boundary")
+            }
+            _ = try rotationCoordinator.authorizeActivation(
+                plan: pendingPlan,
+                checkpointBoundary: NativeAuditKeyRotationCheckpointBoundary(anchorStatus: anchorStatus, finalReceipt: receipt)
+            )
+        }
+        if let payload = try rotationCoordinator.recoverAuthorizedLifecycleRecord(
+            currentLifecycleHeadHash: lifecycleSnapshot.headHash,
+            currentAuditGeneration: currentAudit.generation
+        ) {
+            let recovered = try keyCoordinator.commitAuthorizedAuditActivationRecord(payload)
+            throw AgentPassNativeError.invalidConfiguration("Recovered anchored audit-key activation to lifecycle head \(recovered.headHash); restart the native service to load the replacement signer")
+        }
     }
     _ = try auditLog.verify()
     _ = try auditCheckpoints.verify()
     let authorizer = try NativeRequestAuthorizer(policyData: policyData, sessionValidator: sessionManager, controlValidator: controlManager)
     let listener = NSXPCListener(machServiceName: configuration.machServiceName)
-    let endpoint = ServiceEndpoint(keyStore: keyStore, authorizer: authorizer, auditLog: auditLog, auditCheckpoints: auditCheckpoints, auditSigner: auditSigner, auditAnchorReceipts: auditAnchorReceipts, auditAnchorClient: auditAnchorClient, sessionManager: sessionManager, controlManager: controlManager)
+    let endpoint = ServiceEndpoint(keyStore: keyStore, authorizer: authorizer, auditLog: auditLog, auditCheckpoints: auditCheckpoints, auditSigner: auditSigner, auditAnchorReceipts: auditAnchorReceipts, auditAnchorClient: auditAnchorClient, auditKeyRotationCoordinator: auditKeyRotationCoordinator, auditKeyRecoveryCoordinator: auditKeyRecoveryCoordinator, auditKeyRecoveryPlanJournal: auditKeyRecoveryPlanJournal, auditKeyTransitionStore: auditKeyTransitionStore, auditKeyRecoveryPolicy: auditKeyRecoveryPolicy, auditKeyRecoveryApprovalJournal: auditKeyRecoveryApprovalJournal, auditPruneCoordinator: auditPruneCoordinator, auditPruneTrustSource: auditPruneTrustSource, auditPruneEvidenceBundlePath: configuration.auditPruneEvidenceBundlePath, auditAnchorTenant: configuration.auditAnchorTenant, keychainAccessGroup: configuration.keychainAccessGroup, recoveryPolicyData: recoveryPolicyData, installationID: configuration.installationID, sessionManager: sessionManager, controlManager: controlManager, keyLifecycle: keyLifecycle, keyCoordinator: keyCoordinator, loadedLifecycleHeadHash: lifecycleSnapshot?.headHash)
     if let rawURL = configuration.controlURL, let interval = configuration.controlRefreshSeconds {
         let refresh = try NativeControlRefreshConfiguration(urlString: rawURL, refreshSeconds: interval)
         try endpoint.startControlRefresh(url: refresh.url, refreshSeconds: refresh.refreshSeconds)

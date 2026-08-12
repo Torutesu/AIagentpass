@@ -7,6 +7,23 @@ trap 'rm -rf -- "$TEST_DIR"' EXIT
 
 APP_PATH="$($SCRIPT_DIR/build-app.sh --adhoc --output-dir "$TEST_DIR/output")"
 /usr/bin/codesign --verify --deep --strict "$APP_PATH"
+SERVICE_APP="$APP_PATH/Contents/Library/HelperTools/AgentPassNativeService.app"
+CLIENT_APP="$APP_PATH/Contents/Library/HelperTools/AgentPassNativeClient.app"
+[[ -d "$SERVICE_APP" && -d "$CLIENT_APP" ]] || { echo "Nested helper app layout is missing" >&2; exit 1; }
+[[ ! -e "$APP_PATH/Contents/MacOS/agentpass-native-service" && ! -e "$APP_PATH/Contents/MacOS/agentpass-native-client" ]] || { echo "Helpers were duplicated outside their bundles" >&2; exit 1; }
+[[ ! -e "$SERVICE_APP/Contents/embedded.provisionprofile" && ! -e "$CLIENT_APP/Contents/embedded.provisionprofile" ]] || { echo "Ad-hoc helpers unexpectedly embed profiles" >&2; exit 1; }
+[[ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$SERVICE_APP/Contents/Info.plist")" == "dev.agentpass.native-service" ]] || exit 1
+[[ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$CLIENT_APP/Contents/Info.plist")" == "dev.agentpass.native-client" ]] || exit 1
+[[ "$(/usr/libexec/PlistBuddy -c 'Print :BundleProgram' "$APP_PATH/Contents/Library/LaunchDaemons/dev.agentpass.native-service.plist")" == "Contents/Library/HelperTools/AgentPassNativeService.app/Contents/MacOS/agentpass-native-service" ]] || exit 1
+
+extract_group() {
+  local item="$1" output
+  output="$TEST_DIR/$(basename "$item").entitlements.plist"
+  /usr/bin/codesign -d --entitlements :- "$item" >"$output" 2>/dev/null
+  /usr/libexec/PlistBuddy -c 'Print :keychain-access-groups:0' "$output"
+}
+[[ "$(extract_group "$SERVICE_APP")" == "ADHOC00000.dev.agentpass.service-keys" ]] || exit 1
+[[ "$(extract_group "$CLIENT_APP")" == "ADHOC00000.dev.agentpass.approval-keys" ]] || exit 1
 
 STATUS_JSON="$($APP_PATH/Contents/MacOS/agentpass-native-manager status)"
 node -e '
@@ -26,8 +43,18 @@ if "$SCRIPT_DIR/build-app.sh" --output-dir "$TEST_DIR/unsigned" >/dev/null 2>&1;
   echo "Unsigned production build unexpectedly succeeded" >&2
   exit 1
 fi
-if "$SCRIPT_DIR/build-app.sh" --adhoc --notary-profile invalid --output-dir "$TEST_DIR/notary" >/dev/null 2>&1; then
-  echo "Ad-hoc notarization unexpectedly succeeded" >&2
+if "$SCRIPT_DIR/build-app.sh" --adhoc --service-profile invalid --output-dir "$TEST_DIR/profile" >/dev/null 2>&1; then
+  echo "Ad-hoc build unexpectedly accepted a profile" >&2
+  exit 1
+fi
+if "$SCRIPT_DIR/build-app.sh" --identity invalid --team-id ABCDE12345 --app-identifier-prefix ABCDE12345 --output-dir "$TEST_DIR/missing-profiles" >/dev/null 2>&1; then
+  echo "Production build unexpectedly accepted missing helper profiles" >&2
+  exit 1
+fi
+touch "$TEST_DIR/fake.provisionprofile"
+ln -s "$TEST_DIR/fake.provisionprofile" "$TEST_DIR/profile-link"
+if "$SCRIPT_DIR/verify-profile.sh" "$TEST_DIR/profile-link" ABCDE12345 ABCDE12345 dev.agentpass.native-service ABCDE12345.dev.agentpass.service-keys service >/dev/null 2>&1; then
+  echo "Profile verifier unexpectedly accepted a symlink" >&2
   exit 1
 fi
 if "$SCRIPT_DIR/build-app.sh" --adhoc --output-dir "$TEST_DIR/output" >/dev/null 2>&1; then

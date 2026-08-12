@@ -52,9 +52,13 @@ Native signing events are JSON Lines records linked by `previous_hash` and a SHA
 
 Before accepting XPC traffic, and again on health, signing, checkpoint, and rotation operations, the service verifies the complete chains. Corruption, truncation behind a checkpoint, insecure permissions, ownership changes, key substitution, or an invalid checkpoint signature causes a fail-closed error. Each active or archived audit segment has a 128 MiB verification ceiling.
 
-When `audit_archive_directory` is configured, `agentpass native audit-rotate` becomes available after the active log reaches 64 MiB. The service signs a checkpoint before atomically renaming the active file to `audit-<global-entry-count>-<terminal-head-hash>.jsonl`, changes it to mode `0400`, and fsyncs the file and directories. Verification then walks every segment in global entry order and carries the previous hash into the active log. Unknown directory entries, missing continuity, filename/content disagreement, symlinks, ownership changes, and permissive modes fail closed. The threshold prevents an Agent from creating an unbounded number of empty or tiny segments.
+When `audit_archive_directory` is configured, every service audit append preflights its projected size. At 120 MiB it first signs a checkpoint, rotates the active segment, and only then appends, so signing and non-signing events cannot push the file through the 128 MiB verification ceiling. If archival or checkpointing is unavailable, the append fails before changing the log and reports the active, projected, rotation-threshold, and verification-limit sizes. Manual `agentpass native audit-rotate` remains available after 64 MiB. Rotation atomically renames the active file to `audit-<global-entry-count>-<terminal-head-hash>.jsonl`, changes it to mode `0400`, and fsyncs the file and directories. Verification then walks every segment in global entry order and carries the previous hash into the active log. Unknown directory entries, missing continuity, filename/content disagreement, symlinks, ownership changes, and permissive modes fail closed. The manual threshold prevents an Agent from creating an unbounded number of empty or tiny segments.
 
-Checkpoints use a second, non-exportable Secure Enclave P-256 key. Each checkpoint binds the audit entry count and head, the previous checkpoint hash, timestamp, and key fingerprint. Copy checkpoint records and the audit public key to an independently protected system to make later local truncation detectable. Merely retaining the fingerprint on the same host does not preserve evidence after full host compromise.
+Checkpoints use a second, non-exportable Secure Enclave P-256 key. Schema v2 additionally binds the active key generation and lifecycle head. Verification resolves every historical key fingerprint from the protected lifecycle ledger, so rotating the active audit key does not make older checkpoints unverifiable. A v1 prefix remains readable for migration.
+
+Audit-key activation is not a generic local key swap. The service freezes audit appends at an exact final checkpoint, requires zero pending anchor receipts, persists the dual-signed transition plus the exact signed lifecycle activation record, obtains and stores the anchor transition receipt, and only then commits the lifecycle outbox/pin/ledger transaction. A restart retries the same transition bytes and resumes the same lifecycle record; it never re-signs or invents a replacement challenge. Generation rollback, fingerprint reuse, and lifecycle-binding removal are rejected while verifying the complete checkpoint chain.
+
+`audit_checkpoint_archive_directory` and `audit_anchor_receipt_archive_directory` enable independent 64 MiB checkpoint and receipt rotation. Segment filenames bind absolute first/last indexes and terminal hashes; verification carries both chains across all segments and rejects gaps, overlaps, substitutions, unknown entries, links, unsafe permissions, and cross-filesystem archives. `agentpass native audit-evidence-rotate` rotates only evidence logs that reached the threshold. Pending anchor calculation uses absolute receipt indexes across archived and active files.
 
 The remote anchor accepts both local Ed25519 and native P-256 checkpoint tenants while pinning one algorithm and key per tenant. Native anchor configuration is root-owned; the service itself performs HTTPS submission, rejects redirects and responses over 512 KiB, verifies the returned Ed25519 receipt and both chains, and durably appends the receipt under protected ancestry. A lost response leaves the checkpoint pending, and retrying it returns the anchor's original receipt.
 
@@ -69,19 +73,23 @@ native/macos/scripts/build-app.sh --adhoc --force
 
 The ad-hoc app test verifies the app layout, signing identifiers, embedded keychain access groups, daemon label/program/Mach service, manager diagnostics, strict code-signature validity, and fail-closed build options. It does not prove Apple Developer identity, Service Management registration, notarization, or Secure Enclave access.
 
-For a production build, provide the final provisioning profile and signing identity. Add `--universal` to build arm64 and x86_64 slices and `--notary-profile` to submit and staple the result:
+For a production build, provide distinct service/client provisioning profiles and the final signing identity. Add `--universal` to build arm64 and x86_64 slices. Notarization is a separate release step; the bundle builder never claims an artifact was notarized:
 
 ```sh
 AGENTPASS_SIGNING_IDENTITY="Developer ID Application: Example Corp (TEAMID1234)" \
 AGENTPASS_TEAM_ID="TEAMID1234" \
+AGENTPASS_APP_IDENTIFIER_PREFIX="TEAMID1234" \
 native/macos/scripts/build-app.sh \
   --universal \
-  --profile ./AgentPass.provisionprofile \
-  --notary-profile agentpass-notary \
+  --identity "$AGENTPASS_SIGNING_IDENTITY" \
+  --team-id "$AGENTPASS_TEAM_ID" \
+  --app-identifier-prefix "$AGENTPASS_APP_IDENTIFIER_PREFIX" \
+  --service-profile ./AgentPassNativeService.provisionprofile \
+  --client-profile ./AgentPassNativeClient.provisionprofile \
   --force
 ```
 
-The build refuses a production build without an identity, Team ID, and provisioning profile. It decodes the profile, verifies its Team ID, derives the App Identifier Prefix, and requires the exact AgentPass keychain access group before signing. It also refuses symlinked profiles, refuses ad-hoc notarization, and does not overwrite an existing app unless `--force` is explicit. Set `AGENTPASS_APP_IDENTIFIER_PREFIX` or `--app-identifier-prefix` only when an explicit cross-check against the profile is desired. Tests also verify SSHSIG output with `/usr/bin/ssh-keygen -Y verify` and cover forged requests, session/key/Agent binding, challenge mutation and replay, expiration and revocation, scope bypass, malformed signatures, audit mutation, truncation, checkpoint mutation, audit-key substitution, symlinks, and permissive files. Secure Enclave prompts and signed-XPC behavior require a provisioned macOS integration environment and are not exercised by software-key tests.
+The build refuses missing or shared profiles, wrong Team ID/prefix/bundle ID/keychain group, development profiles, `get-task-allow`, expired profiles, symlinks, and unsafe overwrite. The service receives only `TEAMID.dev.agentpass.service-keys`; the approval client receives only `TEAMID.dev.agentpass.approval-keys`. Signing proceeds inner-to-outer without `codesign --deep` as a signing mechanism. Secure Enclave prompts and signed-XPC behavior still require a provisioned macOS integration environment and are not exercised by software-key tests.
 
 ## Bundle resources and installation inputs
 
@@ -91,9 +99,65 @@ Templates are under `native/macos/Resources/`:
 - the client and service entitlements must use the actual App Identifier Prefix;
 - `native-service.example.json` must replace `TEAMID`, use the interactive user's UID, and be installed root-owned with mode `0600`.
 
-Create `/Library/Application Support/AgentPass` as root with no group/world write permission. Create its `audit-archive` child as root with mode `0700`, then set `audit_archive_directory` to that absolute path. Install the approved version 4 policy there as `policy.json`, owned by root and not group/world writable. This copy—not `~/.agentpass/config.json`—is authoritative inside the service. If it contains `control.required=true`, install an initial signed bundle as `control.bundle.json`, root-owned with mode `0600`, and configure that absolute `control_state_path`. Add `control_url` and `control_refresh_seconds` to enable service-owned refresh. The configured state and audit paths must remain under protected root-owned ancestry.
+Create `/Library/Application Support/AgentPass` as root with no group/world write permission. Create `audit-archive`, `audit-checkpoint-archive`, `audit-receipt-archive`, `audit-retention-archive`, and (when enabled) `key-lifecycle` children as root with mode `0700`. Install the approved version 4 policy there as `policy.json`, owned by root and not group/world writable. This copy—not `~/.agentpass/config.json`—is authoritative inside the service. If it contains `control.required=true`, install an initial signed bundle as `control.bundle.json`, root-owned with mode `0600`, and configure that absolute `control_state_path`. Add `control_url` and `control_refresh_seconds` to enable service-owned refresh. The configured state and audit paths must remain under protected root-owned ancestry.
 
-To anchor native checkpoints, first export `agentpass native audit-key` from the final signed client and enroll it as a unique tenant on the separately administered anchor. Then add `audit_anchor_url`, `audit_anchor_tenant`, `audit_anchor_public_key`, and `audit_anchor_receipt_path` to the root-owned native service configuration. The public key is the anchor's Ed25519 SPKI PEM, not the host P-256 key. All four fields are required together; partial configuration prevents service startup.
+Lifecycle-backed startup is opt-in. Set `key_lifecycle_directory`, `key_lifecycle_pin_directory`, `key_lifecycle_mutation_outbox_directory`, and `session_approval_key_tag`; partial configuration fails closed. The older `key_lifecycle_expected_head_hash` is accepted as a migration pin and must agree with the journal pin when both are present. Startup first resolves an exact outbox/pin/ledger transaction: an old head replays the canonical record bytes, a new head completes the pin and outbox, and every mismatch fails closed. It then requires the ledger head to equal the latest durable pin. The ledger must contain active `git_signing`, `audit_checkpoint`, and `session_approval` generations. The service loads exact existing Secure Enclave tags without auto-creating replacements, compares their public keys with the ledger, and uses every historical audit public key for checkpoint verification. `agentpass native key-lifecycle-status` replays and reports the ledger.
+
+The Core library contains a resumable first-install ceremony which orders generation 1 as: stage approval public key, verify its self-authorization and proof-of-possession, then create and individually approval-sign the Git and audit service keys. It rejects a substituted approval key, an unrecorded exact-tag orphan, unexpected ledger records, and incomplete completion. This state machine intentionally does not make the production daemon listener available with partial authority. Signed client/service bootstrap primitives, transactional pin updates, and byte-exact online mutation replay are implemented; installer orchestration remains required before unattended production provisioning. A newly introduced outbox may join the next existing journal-pin sequence after bootstrap.
+
+The signed helpers now expose the low-level offline ceremony without starting XPC. The client supports `bootstrap-approval-create TAG` and `bootstrap-sign TAG`; it derives exactly one `*.dev.agentpass.approval-keys` entitlement, creates/loads a user-presence generation-1 key, strictly decodes the canonical statement, displays its role/fingerprint/head, and signs it. The service supports root-only `--bootstrap prepare-approval|commit-approval|prepare-service|commit-service|status --config PATH`, accepts bounded exact JSON on stdin, and returns the new lifecycle head. These are operator primitives; the higher-level installer must preserve the returned canonical artifacts and finish the mutation-outbox/pin transaction before registration.
+
+Protocol v11 exposes online staging, activation, and human-approved staged service-key abort:
+
+```sh
+agentpass native key-stage git_signing
+agentpass native key-activate git_signing 2 --reason "scheduled rotation"
+agentpass native key-stage audit_checkpoint
+agentpass native key-stage session_approval
+agentpass native key-activate session_approval 2 --reason "approval key rotation"
+agentpass native key-abort git_signing 2 --reason "cancelled rollout"
+```
+
+Service keys are created under exact generation tags in the service keychain group. Approval keys are created by the signed client with user-presence access control and an explicitly resolved approval-group entitlement. Approval-key activation requires valid signatures from both the old and new approval keys over one canonical, expiring statement. Lifecycle-enabled production configuration requires both the external pin journal and byte-exact mutation outbox; static-pin-only and direct-ledger mutation configurations are rejected. Stage, activation, recovered activation, abort intent/completion, and deletion intent/completion persist their exact canonical ledger record before preparing the external pin. Startup replays pending outbox mutations and finishes exact Keychain deletions recorded by abort/deletion intents without reconstructing expired challenges or biometric signatures. XPC now exposes staged-key abort, offline recovery installation, and retired-key deletion ceremonies. Retired-key deletion is intentionally restricted to `audit_checkpoint`: its external transition receipt and signed retention/prune evidence can identify the exact retired generation. `git_signing` and `session_approval` deletion remain fail-closed until an equivalent externally signed lifecycle-archive proof exists.
+
+Retired audit-key deletion is enabled only when these four root configuration fields are all present; a partial group prevents startup:
+
+- `audit_key_deletion_evidence_bundle_path`: absolute path to the canonical, root-owned mode `0600`, single-link evidence bundle;
+- `audit_key_deletion_archive_directory`: one root-owned mode `0700` directory containing all three archive files named by every authorized segment;
+- `audit_retention_authorizer_public_key`: pinned P-256 SSH public-key line for prune authorization and post-prune manifests;
+- `audit_key_deletion_minimum_retention_seconds`: local floor from 86400 through 31536000 seconds. A signed authorization may increase but cannot lower it.
+
+The evidence bundle is canonical JSON (sorted keys, compact encoding, no trailing newline) with this exact schema. The three Base64 values decode to the exact canonical Core artifacts; arbitrary JSON, alternate Base64 spellings, unknown fields, and noncanonical artifact bytes are rejected.
+
+```json
+{
+  "anchor_prune_receipt_base64": "BASE64_CANONICAL_ANCHOR_PRUNE_RECEIPT",
+  "authorization_base64": "BASE64_CANONICAL_PRUNE_AUTHORIZATION",
+  "expected_next_retained": null,
+  "post_prune_manifest_base64": "BASE64_CANONICAL_POST_PRUNE_MANIFEST",
+  "prior_chain_state": {
+    "authorization_hash": "0000000000000000000000000000000000000000000000000000000000000000",
+    "last_archive_receipt_hash": "0000000000000000000000000000000000000000000000000000000000000000",
+    "last_checkpoint_hash": "0000000000000000000000000000000000000000000000000000000000000000",
+    "last_checkpoint_index": 0,
+    "last_event_hash": "0000000000000000000000000000000000000000000000000000000000000000",
+    "last_event_index": 0,
+    "last_receipt_index": 0,
+    "manifest_hash": "0000000000000000000000000000000000000000000000000000000000000000",
+    "receipt_hash": "0000000000000000000000000000000000000000000000000000000000000000",
+    "sequence": 0
+  },
+  "version": 1
+}
+```
+
+For a noninitial prune, `prior_chain_state` contains the exact previous verified chain tip and `expected_next_retained` is either `null` or one exact `NativeAuditRetentionSegment` JSON object. Initial state must be the all-zero state shown above; partial/nonzero substitutions fail closed.
+
+The service never accepts authorization, receipts, manifests, archive paths, or prior state from XPC. The client-supplied deletion proof is only an assertion of signed hashes/timestamps and must exactly equal the Service-derived values. Before the listener starts, and again during both challenge creation and deletion completion, the Service rereads the protected bundle, canonically decodes every signed artifact, and descriptor-relatively reopens every authorization segment under the one configured archive directory. File hashes, inode/device/mode/owner/link count/size, transition-store tip, lifecycle ancestry, and the current clock are rechecked.
+
+The trusted retention boundary is constructed only from local verified stores. It requires the current lifecycle head to descend from the latest externally receipted audit transition; the transition replacement must be the active audit generation; the complete audit log must equal the latest signed checkpoint; all checkpoints must have receipts with zero pending; and that latest checkpoint receipt must be the event immediately preceding the transition receipt. Its checkpoint index/hash/receipt hash and event index/hash must exactly match the transition and transition receipt. Missing, stale, replaced, recovery-only, or partially configured evidence therefore prevents startup or the operation. A valid evidence replacement after startup is accepted only if it independently satisfies the same complete verification and the pending client assertion still matches it.
+
+To anchor native checkpoints, first export `agentpass native audit-key` from the final signed client and enroll it as a unique tenant on the separately administered anchor. Then add `audit_anchor_url`, `audit_anchor_tenant`, `audit_anchor_public_key`, and `audit_anchor_receipt_path` to the root-owned native service configuration. Production audit-key rotation additionally requires both `audit_key_transition_path` and the private `audit_key_rotation_plan_directory`. The public key is the anchor's Ed25519 SPKI PEM, not the host P-256 key. Partial configuration prevents service startup.
 
 After the signed app and daemon are registered, select the bridge in the user-side configuration:
 
@@ -102,7 +166,7 @@ After the signed app and daemon are registered, select the bridge in the user-si
   "native_broker": {
     "enabled": true,
     "mach_service": "dev.agentpass.native-service",
-    "client": "/Applications/AgentPass.app/Contents/MacOS/agentpass-native-client",
+    "client": "/Applications/AgentPass.app/Contents/Library/HelperTools/AgentPassNativeClient.app/Contents/MacOS/agentpass-native-client",
     "manager": "/Applications/AgentPass.app/Contents/MacOS/agentpass-native-manager"
   }
 }
@@ -130,6 +194,8 @@ agentpass native public-key
 agentpass native audit-key
 agentpass native checkpoint > checkpoint.json
 agentpass native audit-rotate
+agentpass native audit-evidence-rotate
+agentpass native key-lifecycle-status
 agentpass native anchor-push
 agentpass native anchor-status
 export AGENTPASS_SESSION="$(agentpass session start 900)"
@@ -142,12 +208,31 @@ agentpass control status
 
 Copy the final signed app to a stable location before registration. `daemon-register` asks Service Management to register the plist embedded at `Contents/Library/LaunchDaemons/dev.agentpass.native-service.plist`. If macOS reports that administrator approval is required, the manager opens Login Items settings and returns `requires_approval: true`; registration is not operational until the user approves it. `daemon-status` returns the bundle and plist paths as diagnostics. A `not_found` status means Service Management did not find this service and must not be treated as successful registration.
 
-`native status` verifies all audit segments and both signed chains, then reports the audit head, latest checkpoint, session state, control sequence/expiry/operational state, and automatic-refresh status. `native public-key` emits the Git signing public key. `native audit-key` emits the distinct checkpoint verification key. `native checkpoint` first adds an audit event, then signs the resulting exact audit head. `native audit-rotate` refuses logs below 64 MiB and creates a terminal checkpoint before moving the active segment. Archived segments remain part of every verification and must not be deleted or edited; copy them and checkpoints to separately protected storage under an operator retention policy. `session start` prompts once and caps the requested TTL at the root policy value. The pre-push hook asks the service to validate both the session and control state instead of consulting user-writable files. `native revoke-sessions` does not require human approval because it can only remove authority. `control source` stores an optional untrusted manual-fetch URL in user configuration; `control apply` and manual `fetch` cross XPC and are independently verified against the root policy before persistence. Native `control trust` is refused because user configuration cannot rotate the service trust root. Automatic refresh uses only the root-owned service URL.
+`native status` verifies all audit/evidence segments and signed chains, then reports archive readiness, lifecycle head, session state, control state, and refresh status. `native checkpoint` appends an audit event and signs the resulting exact head. `native audit-rotate` rotates the audit log; `native audit-evidence-rotate` rotates eligible checkpoint/receipt logs. Archived segments remain part of every verification and must not be deleted or edited. `native key-lifecycle-status` is read-only. `session start` prompts once and caps the requested TTL at the root policy value. The pre-push hook asks the service to validate both session and control state. Native `control trust` remains refused because user configuration cannot rotate the service trust root.
 
 `native anchor-push` creates a fresh checkpoint only when no older checkpoint is pending, then submits exactly the next pending checkpoint. Re-run it until `native anchor-status` reports `pending: 0`; limiting each call to one checkpoint bounds XPC and network work. Receipt verification and persistence occur inside the privileged service. User-side `audit anchor trust` does not configure or rotate native anchor trust.
+
+## Production audit pruning
+
+Audit pruning is a four-stage management operation exposed by protocol 13:
+
+- `audit-prune-prepare` reads a version-1 JSON request from stdin. It accepts only `operation_id`, `retention_seconds`, `segments`, and `expected_next_retained`; lifecycle, checkpoint, anchor, and prior prune-chain boundaries are always derived and verified inside the privileged service.
+- `audit-prune-submit` posts the exact durable authorization to `POST /v1/audit-prunes/:tenant` and persists the canonical anchor receipt. It does not delete archives.
+- `audit-prune-execute` requires that durable receipt, revalidates the service-owned reservation, deletes only the prepare-time inode identities, and atomically publishes the completion evidence bundle.
+- `audit-prune-status` reports the pending stage, durable trust revision, reservation ID, and exportable `trust_head_hash`.
+
+The settings `audit_prune_journal_directory`, `audit_prune_trust_directory`, and `audit_prune_evidence_bundle_path` are all-or-none. Both directories must already be root-owned mode `0700`; the evidence parent must be root-owned and not group/world writable. Pruning also requires the retention archive, lifecycle, key-transition, and complete anchor configuration. The retention-authorizer public key must equal the active non-exportable audit Secure Enclave key.
+
+The local trust WAL uses immutable records, an fsync'd tip, and durable mutation reservations. Status and startup reads fetch only a fresh nonce-bound, anchor-signed version-2 head and never allocate a Node lease. Prepare, submit, execute, and reconciliation first verify that head, then use the active non-exportable audit Secure Enclave signer to request a separate version-4 exclusive lease bound to the expected position, purpose, operation, nonce, timestamp, process epoch, and audit-principal fingerprint. Node verifies the current post-transition key and canonical low-S signature before mutation. Missing, unauthenticated, stale, replayed, wrong-principal/purpose/operation/head, or forged leases fail closed.
+
+Each verified head/lease becomes a five-second, one-shot local observation bound to trust revision, reservation, and chain generation. Acquire/release and submit HTTPS occur outside both Service authorization and coordinator locks. Submit consumes its same-principal lease atomically with the Node append. Execute revalidates the consumed lease immediately before every irreversible unlink; if the conservative deadline expires, deletion stops and the durable executor WAL resumes under a newly acquired lease. Node uses monotonic process time as the live expiry authority and conservatively fences an old-process-epoch lease for a full TTL after first observation on restart.
+
+Anchor submission snapshots the exact durable reservation under the Service authorization gate, releases that gate during HTTPS I/O, then reacquires it and revalidates the unchanged lifecycle, trust revision, reservation, operation ID, and durable receipt before replying. Concurrent submit and execute calls fail closed through an in-flight marker; status remains available without waiting on the network-owned coordinator lock. Deletion and evidence publication stay in one serialized Service critical section.
+
+Prune stage success/error metadata is returned by `audit-prune-status` (`last_stage`, `last_decision`, `last_error`, and `last_updated_at`). These stage records are deliberately not appended to the ordinary audit log while a prune reservation is frozen: such an append could rotate or checkpoint the very evidence boundary being authorized. The durable prune authorization/receipt/executor/completion WAL and published evidence bundle are the authoritative audit trail. After completion, later ordinary audit activity proceeds normally.
 
 ## Remaining production work
 
 - Publish a Developer ID-signed, provisioned, notarized universal artifact and installer.
-- Add signing, audit, and session-approval key deletion/rotation with interactive authorization and recovery UX.
+- Add an externally signed lifecycle-archive proof for Git/approval-key deletion, and finish transactional external-pin advancement UX.
 - Test notarized universal binaries on Intel and Apple silicon hardware with Secure Enclave.

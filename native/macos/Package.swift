@@ -8,16 +8,19 @@ let package = Package(
         .library(name: "AgentPassNativeCore", targets: ["AgentPassNativeCore"]),
         .executable(name: "agentpass-native-service", targets: ["AgentPassNativeService"]),
         .executable(name: "agentpass-native-client", targets: ["AgentPassNativeClient"]),
-        .executable(name: "agentpass-native-manager", targets: ["AgentPassNativeManager"])
+        .executable(name: "agentpass-native-manager", targets: ["AgentPassNativeManager"]),
+        .executable(name: "agentpass-legacy-service-migration", targets: ["AgentPassLegacyServiceMigration"]),
+        .executable(name: "agentpass-legacy-approval-migration", targets: ["AgentPassLegacyApprovalMigration"])
     ],
     targets: [
         .target(
             name: "AgentPassNativeCore",
             linkerSettings: [.linkedFramework("Security"), .linkedFramework("LocalAuthentication")]
         ),
+        .target(name: "AgentPassNativeServiceSupport", dependencies: ["AgentPassNativeCore"]),
         .executableTarget(
             name: "AgentPassNativeService",
-            dependencies: ["AgentPassNativeCore"]
+            dependencies: ["AgentPassNativeCore", "AgentPassNativeServiceSupport"]
         ),
         .executableTarget(
             name: "AgentPassNativeClient",
@@ -27,9 +30,21 @@ let package = Package(
             name: "AgentPassNativeManager",
             linkerSettings: [.linkedFramework("ServiceManagement")]
         ),
+        .executableTarget(
+            name: "AgentPassLegacyServiceMigration",
+            dependencies: ["AgentPassNativeCore"]
+        ),
+        .executableTarget(
+            name: "AgentPassLegacyApprovalMigration",
+            dependencies: ["AgentPassNativeCore"]
+        ),
         .testTarget(
             name: "AgentPassNativeCoreTests",
             dependencies: ["AgentPassNativeCore"]
+        ),
+        .testTarget(
+            name: "AgentPassNativeServiceSupportTests",
+            dependencies: ["AgentPassNativeServiceSupport", "AgentPassNativeCore"]
         )
     ]
 )

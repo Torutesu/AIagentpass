@@ -10,9 +10,10 @@ import { anchorPendingCheckpoints, verifyStoredAnchorReceipts } from "../lib/anc
 import { audit, createAuditCheckpoint, publicKeyFingerprint, verifyAudit, verifyAuditCheckpoints } from "../lib/audit.mjs";
 import { brokerRequest } from "../lib/broker-client.mjs";
 import { anchorReceiptPath, auditPath, controlBundlePath, defaultConfigDir, loadConfig, loadSession, loadState, saveConfig, saveSession, saveState, socketPath } from "../lib/config.mjs";
-import { createAgentIdentity, createAuditIdentity, signRequest } from "../lib/identity.mjs";
+import { canonicalJson, createAgentIdentity, createAuditIdentity, signRequest } from "../lib/identity.mjs";
 import { readGitSigningInvocation, writeGitSignature } from "../lib/git-signing.mjs";
 import { evaluateAgentRequest } from "../lib/policy.mjs";
+import { generateRecoveryIdentity, recoveryPolicyToAnchorPolicy, signAnchorRecoveryAuthorization, signRecoveryRequest, verifyAnchorRecoveryApprovals, verifyRecoveryThreshold } from "../lib/recovery.mjs";
 import { applyControlBundle, controlKeyFingerprint, fetchControlBundle, generateControlKeyPair, loadControlBundle, signControlBundle } from "../lib/remote-control.mjs";
 
 const [, , command, ...args] = process.argv;
@@ -34,6 +35,23 @@ Commands:
   native audit-key  print the native audit checkpoint public key
   native checkpoint create a protected native audit checkpoint
   native audit-rotate archive a full protected native audit segment
+  native audit-evidence-rotate archive protected checkpoint/receipt evidence
+  native key-lifecycle-status inspect protected key lifecycle state
+  native key-stage ROLE stage a new git_signing, audit_checkpoint, or session_approval generation
+  native key-activate ROLE GENERATION --reason TEXT
+                    approve and activate a staged service key
+  native key-abort ROLE GENERATION --reason TEXT
+                    approve deletion of a staged service key
+  native key-delete audit_checkpoint GENERATION --reason TEXT --retention SECONDS --proof FILE
+                    permanently delete an externally archived retired service key
+  native recovery-request ROLE
+                    emit an exact host recovery request for offline signing
+  native recovery-install --request FILE --policy FILE --authorization FILE...
+                    install an offline-authorized replacement with local presence
+  native recovery-prepare --request FILE --policy FILE --authorization FILE...
+                    prepare canonical anchor authorization for audit-key recovery
+  native recovery-anchor-install --evidence FILE
+                    install threshold-approved schema-v3 audit recovery evidence
   native anchor-push push the next protected checkpoint to the native anchor
   native anchor-status verify protected native anchor receipts
   native session-approval-key  create/print the human-presence approval key
@@ -68,6 +86,18 @@ Commands:
   control apply FILE verify and install a control bundle
   control fetch      fetch and install the configured HTTPS bundle
   control status     inspect active remote revocation state
+  recovery keygen DIR --signer ID
+                    create an offline Ed25519 recovery identity
+  recovery sign --request FILE --key FILE --signer ID
+                    sign one canonical recovery request offline
+  recovery verify --request FILE --policy FILE --authorization FILE...
+                    verify a threshold of offline authorizations
+  recovery anchor-sign --authorization FILE --key FILE --signer ID [--output FILE]
+                    sign one canonical anchor-v3 recovery authorization
+  recovery anchor-policy --policy FILE [--output FILE]
+                    emit the canonical policy pinned during anchor enrollment
+  recovery anchor-verify --authorization FILE --policy FILE --approval FILE...
+                    verify and emit canonical anchor-v3 recovery evidence
 `);
 }
 
@@ -363,9 +393,12 @@ async function brokerPing() {
 }
 
 async function nativeManage() {
+  const action = args[0];
+  if (action === "key-delete" && (args.length !== 9 || args[1] !== "audit_checkpoint" || !/^[1-9]\d*$/.test(args[2]) || args[3] !== "--reason" || !args[4] || args[5] !== "--retention" || !/^[1-9]\d*$/.test(args[6]) || args[7] !== "--proof")) {
+    throw new Error("Usage: agentpass native key-delete audit_checkpoint GENERATION --reason TEXT --retention SECONDS --proof FILE");
+  }
   const config = loadConfig();
   if (!config.native_broker?.enabled) throw new Error("Native broker is not configured");
-  const action = args[0];
   if (["daemon-register", "daemon-unregister", "daemon-status", "daemon-open-settings"].includes(action)) {
     const manager = config.native_broker.manager ?? path.join(path.dirname(config.native_broker.client), "agentpass-native-manager");
     const stat = fs.lstatSync(manager);
@@ -390,6 +423,79 @@ async function nativeManage() {
     console.log(JSON.stringify(JSON.parse(Buffer.from(result.stdout_base64, "base64").toString("utf8")), null, 2));
   } else if (action === "audit-rotate") {
     const result = await brokerRequest({ operation: "native.audit.rotate" }, { native: config.native_broker, timeoutMs: 30_000 });
+    console.log(JSON.stringify(JSON.parse(Buffer.from(result.stdout_base64, "base64").toString("utf8")), null, 2));
+  } else if (action === "audit-evidence-rotate") {
+    if (args.length !== 1) throw new Error("native audit-evidence-rotate does not accept arguments");
+    const result = await brokerRequest({ operation: "native.audit.evidence.rotate" }, { native: config.native_broker, timeoutMs: 30_000 });
+    console.log(JSON.stringify(JSON.parse(Buffer.from(result.stdout_base64, "base64").toString("utf8")), null, 2));
+  } else if (action === "key-lifecycle-status") {
+    if (args.length !== 1) throw new Error("native key-lifecycle-status does not accept arguments");
+    const result = await brokerRequest({ operation: "native.key-lifecycle.status" }, { native: config.native_broker, timeoutMs: 30_000 });
+    console.log(JSON.stringify(JSON.parse(Buffer.from(result.stdout_base64, "base64").toString("utf8")), null, 2));
+  } else if (action === "key-stage") {
+    if (args.length !== 2 || !["git_signing", "audit_checkpoint", "session_approval"].includes(args[1])) throw new Error("Usage: agentpass native key-stage git_signing|audit_checkpoint|session_approval");
+    const result = await brokerRequest({ operation: "native.key.stage", role: args[1] }, { native: config.native_broker, timeoutMs: 30_000 });
+    console.log(JSON.stringify(JSON.parse(Buffer.from(result.stdout_base64, "base64").toString("utf8")), null, 2));
+  } else if (action === "key-activate") {
+    if (args.length !== 5 || !["git_signing", "audit_checkpoint", "session_approval"].includes(args[1]) || !/^[1-9]\d*$/.test(args[2]) || args[3] !== "--reason" || !args[4]) throw new Error("Usage: agentpass native key-activate ROLE GENERATION --reason TEXT");
+    const result = await brokerRequest({ operation: "native.key.activate", role: args[1], generation: Number(args[2]), reason: args[4] }, { native: config.native_broker, timeoutMs: 120_000 });
+    console.log(JSON.stringify(JSON.parse(Buffer.from(result.stdout_base64, "base64").toString("utf8")), null, 2));
+  } else if (action === "key-abort") {
+    if (args.length !== 5 || !["git_signing", "audit_checkpoint"].includes(args[1]) || !/^[1-9]\d*$/.test(args[2]) || args[3] !== "--reason" || !args[4]) throw new Error("Usage: agentpass native key-abort git_signing|audit_checkpoint GENERATION --reason TEXT");
+    const result = await brokerRequest({ operation: "native.key.abort", role: args[1], generation: Number(args[2]), reason: args[4] }, { native: config.native_broker, timeoutMs: 120_000 });
+    console.log(JSON.stringify(JSON.parse(Buffer.from(result.stdout_base64, "base64").toString("utf8")), null, 2));
+  } else if (action === "key-delete") {
+    const proof = readCanonicalJsonFile(path.resolve(args[8]), 16 * 1024, "Lifecycle deletion proof");
+    const result = await brokerRequest({ operation: "native.key.delete", role: args[1], generation: Number(args[2]), reason: args[4], minimum_retention_seconds: Number(args[6]), proof }, { native: config.native_broker, timeoutMs: 120_000 });
+    console.log(JSON.stringify(JSON.parse(Buffer.from(result.stdout_base64, "base64").toString("utf8")), null, 2));
+  } else if (action === "recovery-request") {
+    if (args.length !== 2 || !["git_signing", "audit_checkpoint", "session_approval"].includes(args[1])) throw new Error("Usage: agentpass native recovery-request ROLE");
+    const result = await brokerRequest({ operation: "native.recovery.request", role: args[1] }, { native: config.native_broker, timeoutMs: 30_000 });
+    const response = JSON.parse(Buffer.from(result.stdout_base64, "base64").toString("utf8"));
+    const request = Buffer.from(response.request_base64, "base64");
+    if (request.length === 0 || request.length > 16 * 1024 || request.toString("base64") !== response.request_base64) throw new Error("Native service returned invalid recovery request bytes");
+    process.stdout.write(request);
+    process.stdout.write("\n");
+  } else if (action === "recovery-install") {
+    const flags = strictRecoveryFlags(args.slice(1), ["--request", "--policy", "--authorization"], new Set(["--authorization"]));
+    const request = readCanonicalJsonFile(path.resolve(flags.get("--request")[0]), 16 * 1024, "Recovery request");
+    const policy = readCanonicalJsonFile(path.resolve(flags.get("--policy")[0]), 256 * 1024, "Recovery policy");
+    const authorizations = flags.get("--authorization").map((file) => readCanonicalJsonFile(path.resolve(file), 16 * 1024, "Recovery authorization"));
+    verifyRecoveryThreshold(request, authorizations, policy);
+    const evidence = Buffer.from(canonicalJson({
+      authorizations_base64: authorizations.map((value) => Buffer.from(canonicalJson(value)).toString("base64")),
+      policy_base64: Buffer.from(canonicalJson(policy)).toString("base64"),
+      request_base64: Buffer.from(canonicalJson(request)).toString("base64"),
+      version: 1
+    }));
+    const result = await brokerRequest({ operation: "native.recovery.install", evidence_base64: evidence.toString("base64") }, { native: config.native_broker, timeoutMs: 120_000 });
+    console.log(JSON.stringify(JSON.parse(Buffer.from(result.stdout_base64, "base64").toString("utf8")), null, 2));
+  } else if (action === "recovery-prepare") {
+    const flags = strictRecoveryFlags(args.slice(1), ["--request", "--policy", "--authorization"], new Set(["--authorization"]));
+    const request = readCanonicalJsonFile(path.resolve(flags.get("--request")[0]), 16 * 1024, "Recovery request");
+    if (request.role !== "audit_checkpoint") throw new Error("native recovery-prepare is only for audit_checkpoint; use native recovery-install for this role");
+    const policy = readCanonicalJsonFile(path.resolve(flags.get("--policy")[0]), 256 * 1024, "Recovery policy");
+    const authorizations = flags.get("--authorization").map((file) => readCanonicalJsonFile(path.resolve(file), 16 * 1024, "Recovery authorization"));
+    verifyRecoveryThreshold(request, authorizations, policy);
+    const evidence = Buffer.from(canonicalJson({
+      authorizations_base64: authorizations.map((value) => Buffer.from(canonicalJson(value)).toString("base64")),
+      policy_base64: Buffer.from(canonicalJson(policy)).toString("base64"),
+      request_base64: Buffer.from(canonicalJson(request)).toString("base64"),
+      version: 1
+    }));
+    const result = await brokerRequest({ operation: "native.recovery.prepare", evidence_base64: evidence.toString("base64") }, { native: config.native_broker, timeoutMs: 30_000 });
+    const response = JSON.parse(Buffer.from(result.stdout_base64, "base64").toString("utf8"));
+    const authorization = Buffer.from(response.anchor_authorization_base64 ?? "", "base64");
+    if (!authorization.length || authorization.length > 32 * 1024 || authorization.toString("base64") !== response.anchor_authorization_base64) throw new Error("Native service returned invalid anchor recovery authorization bytes");
+    const parsed = JSON.parse(authorization.toString("utf8"));
+    if (canonicalJson(parsed) !== authorization.toString("utf8")) throw new Error("Native service returned noncanonical anchor recovery authorization");
+    process.stdout.write(authorization);
+    process.stdout.write("\n");
+  } else if (action === "recovery-anchor-install") {
+    const flags = strictRecoveryFlags(args.slice(1), ["--evidence"]);
+    const evidence = readCanonicalJsonFile(path.resolve(flags.get("--evidence")[0]), 512 * 1024, "Anchor recovery evidence");
+    const evidenceBytes = Buffer.from(canonicalJson(evidence));
+    const result = await brokerRequest({ operation: "native.recovery.anchor.install", evidence_base64: evidenceBytes.toString("base64") }, { native: config.native_broker, timeoutMs: 120_000 });
     console.log(JSON.stringify(JSON.parse(Buffer.from(result.stdout_base64, "base64").toString("utf8")), null, 2));
   } else if (action === "anchor-push") {
     const result = await brokerRequest({ operation: "native.audit.anchor.push" }, { native: config.native_broker, timeoutMs: 30_000 });
@@ -511,6 +617,121 @@ function readJsonFile(file, maxBytes) {
   if (!stat.isFile() || stat.isSymbolicLink() || stat.size <= 0 || stat.size > maxBytes) throw new Error("JSON input must be a bounded regular file");
   try { return JSON.parse(fs.readFileSync(file, "utf8")); }
   catch { throw new Error(`Invalid JSON file: ${file}`); }
+}
+
+function recoveryManage() {
+  const action = args[0];
+  if (action === "keygen") {
+    if (args.length !== 4 || args[2] !== "--signer") throw new Error("Usage: agentpass recovery keygen DIR --signer ID");
+    const identity = generateRecoveryIdentity(path.resolve(args[1]), args[3]);
+    writeCanonicalJson({ signer_id: identity.signer_id, public_file: identity.public_file, fingerprint: identity.fingerprint });
+    console.error(`Recovery private key created at ${identity.private_file}; keep it offline.`);
+    return;
+  }
+  if (action === "sign") {
+    const flags = strictRecoveryFlags(args.slice(1), ["--request", "--key", "--signer"]);
+    const request = readCanonicalJsonFile(path.resolve(flags.get("--request")[0]), 16 * 1024, "Recovery request");
+    const authorization = signRecoveryRequest(request, path.resolve(flags.get("--key")[0]), flags.get("--signer")[0]);
+    writeCanonicalJson(authorization);
+    return;
+  }
+  if (action === "verify") {
+    const flags = strictRecoveryFlags(args.slice(1), ["--request", "--policy", "--authorization"], new Set(["--authorization"]));
+    const request = readCanonicalJsonFile(path.resolve(flags.get("--request")[0]), 16 * 1024, "Recovery request");
+    const policy = readCanonicalJsonFile(path.resolve(flags.get("--policy")[0]), 256 * 1024, "Recovery policy");
+    const authorizations = flags.get("--authorization").map((file) => readCanonicalJsonFile(path.resolve(file), 16 * 1024, "Recovery authorization"));
+    writeCanonicalJson(verifyRecoveryThreshold(request, authorizations, policy));
+    return;
+  }
+  if (action === "anchor-sign") {
+    const flags = strictRecoveryFlags(args.slice(1), ["--authorization", "--key", "--signer"], new Set(), new Set(["--output"]));
+    const authorization = readCanonicalJsonFile(path.resolve(flags.get("--authorization")[0]), 32 * 1024, "Anchor recovery authorization");
+    const approval = signAnchorRecoveryAuthorization(authorization, path.resolve(flags.get("--key")[0]), flags.get("--signer")[0]);
+    writeCanonicalJson(approval, flags.get("--output")?.[0]);
+    return;
+  }
+  if (action === "anchor-policy") {
+    const flags = strictRecoveryFlags(args.slice(1), ["--policy"], new Set(), new Set(["--output"]));
+    const policy = readCanonicalJsonFile(path.resolve(flags.get("--policy")[0]), 256 * 1024, "Recovery policy");
+    writeCanonicalJson(recoveryPolicyToAnchorPolicy(policy), flags.get("--output")?.[0]);
+    return;
+  }
+  if (action === "anchor-verify") {
+    const flags = strictRecoveryFlags(args.slice(1), ["--authorization", "--policy", "--approval"], new Set(["--approval"]));
+    const authorization = readCanonicalJsonFile(path.resolve(flags.get("--authorization")[0]), 32 * 1024, "Anchor recovery authorization");
+    const policy = readCanonicalJsonFile(path.resolve(flags.get("--policy")[0]), 256 * 1024, "Recovery policy");
+    const approvals = flags.get("--approval").map((file) => readCanonicalJsonFile(path.resolve(file), 16 * 1024, "Anchor recovery approval"));
+    writeCanonicalJson(verifyAnchorRecoveryApprovals(authorization, policy, approvals));
+    return;
+  }
+  throw new Error("Unknown recovery command");
+}
+
+function strictRecoveryFlags(values, required, repeated = new Set(), optional = new Set()) {
+  if (values.length === 0 || values.length % 2 !== 0) throw new Error("Recovery command flags require a value");
+  const allowed = new Set([...required, ...optional]);
+  const parsed = new Map();
+  for (let index = 0; index < values.length; index += 2) {
+    const flag = values[index];
+    const value = values[index + 1];
+    if (!allowed.has(flag) || !value || value.startsWith("--")) throw new Error(`Unknown or missing recovery flag: ${flag}`);
+    if (parsed.has(flag) && !repeated.has(flag)) throw new Error(`Duplicate recovery flag: ${flag}`);
+    parsed.set(flag, [...(parsed.get(flag) ?? []), value]);
+  }
+  for (const flag of required) if (!parsed.has(flag)) throw new Error(`Missing required ${flag} value`);
+  return parsed;
+}
+
+function readCanonicalJsonFile(file, maxBytes, label) {
+  let descriptor;
+  try {
+    const before = fs.lstatSync(file);
+    if (before.isSymbolicLink()) throw new Error();
+    descriptor = fs.openSync(file, fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW ?? 0));
+    const stat = fs.fstatSync(descriptor);
+    if (!stat.isFile() || stat.nlink !== 1 || stat.size <= 0 || stat.size > maxBytes) throw new Error();
+    const buffer = Buffer.allocUnsafe(maxBytes + 1);
+    let total = 0;
+    while (total < buffer.length) {
+      const count = fs.readSync(descriptor, buffer, total, buffer.length - total, null);
+      if (count === 0) break;
+      total += count;
+    }
+    if (total === 0 || total > maxBytes) throw new Error();
+    let text;
+    try { text = new TextDecoder("utf-8", { fatal: true }).decode(buffer.subarray(0, total)); }
+    catch { throw new Error(`${label} must contain valid UTF-8 canonical JSON`); }
+    let value;
+    try { value = JSON.parse(text); }
+    catch { throw new Error(`${label} must contain valid canonical JSON`); }
+    const canonical = canonicalJson(value);
+    if (text !== canonical && text !== `${canonical}\n`) throw new Error(`${label} must contain canonical JSON`);
+    return value;
+  } catch (error) {
+    if (error.message?.startsWith(label)) throw error;
+    throw new Error(`${label} must be a bounded, single-link regular file`);
+  } finally {
+    if (descriptor !== undefined) fs.closeSync(descriptor);
+  }
+}
+
+function writeCanonicalJson(value, outputFile) {
+  const bytes = `${canonicalJson(value)}\n`;
+  if (outputFile === undefined) {
+    process.stdout.write(bytes);
+    return;
+  }
+  const file = path.resolve(outputFile);
+  let descriptor;
+  try {
+    descriptor = fs.openSync(file, fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL | (fs.constants.O_NOFOLLOW ?? 0), 0o600);
+    fs.writeFileSync(descriptor, bytes, { encoding: "utf8" });
+    fs.fsyncSync(descriptor);
+  } catch (error) {
+    throw new Error(`Recovery output file must not already exist and must be safely creatable: ${file}`);
+  } finally {
+    if (descriptor !== undefined) fs.closeSync(descriptor);
+  }
 }
 
 function agentManage() {
@@ -673,6 +894,7 @@ try {
   else if (command === "native") await nativeManage();
   else if (command === "agent") agentManage();
   else if (command === "control") await controlManage();
+  else if (command === "recovery") recoveryManage();
   else if (command === "setup-macos") setupMacos();
   else if (command === "install-hook") installHook();
   else if (command === "push-check") await pushCheck();
