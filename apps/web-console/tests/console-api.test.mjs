@@ -63,16 +63,19 @@ function auditEvent(eventId, timestamp, extra = {}) {
   };
 }
 
-function activityFixture({ events = [], onEventRequest = () => events, apiEnv = env } = {}) {
+function activityFixture({ events = [], onEventRequest = () => events, apiEnv = env, deviceIds = [deviceId] } = {}) {
   const calls = [];
   const api = authenticatedApi({
     env: apiEnv,
     fetchImpl: async (url, init) => {
       calls.push({ url: String(url), init });
       const parsed = new URL(url);
-      if (parsed.pathname.endsWith("/devices")) return response({ devices: [{ device_id: deviceId, name: "Build Mac" }] });
-      if (parsed.pathname.endsWith("/audit/events")) return response({ events: onEventRequest(parsed) });
-      if (parsed.pathname.endsWith("/audit/health")) return response({ health: [{ device_id: deviceId, chain_status: "continuous", gap_count: 0, last_event_id: "event-3", last_hash: "a".repeat(64) }] });
+      if (parsed.pathname.endsWith("/devices")) return response({ devices: deviceIds.map((id) => ({ device_id: id, name: "Build Mac" })) });
+      if (parsed.pathname.endsWith("/audit/events")) {
+        const page = onEventRequest(parsed);
+        return response(Array.isArray(page) ? { events: page, next_cursor: null } : page);
+      }
+      if (parsed.pathname.endsWith("/audit/health")) return response({ health: deviceIds.map((id) => ({ device_id: id, chain_status: "continuous", gap_count: 0, last_event_id: "event-3", last_hash: "a".repeat(64) })) });
       return response({});
     },
   });
@@ -156,7 +159,7 @@ test("production control-plane mutations require exact origin and CSRF and forwa
   assert.equal(duplicate.status, 400);
 });
 
-test("activity uses a bounded window, returns limit+1 evidence, and resumes with an opaque cursor", async () => {
+test("activity merges a deterministic cross-device page and resumes without duplicates", async () => {
   const { api, calls } = activityFixture({
     events: [
       auditEvent("event-1", auditTimestamps[0]),
@@ -184,6 +187,54 @@ test("activity uses a bounded window, returns limit+1 evidence, and resumes with
     assert.equal(upstreamQuery.has("cursor"), false);
     assert.equal(upstreamQuery.get("limit"), "500");
   }
+});
+
+test("activity follows authoritative Cloud next_cursor pages and deduplicates page overlap", async () => {
+  const pages = new Map([
+    ["", { events: [auditEvent("event-5", auditTimestamps[3]), auditEvent("event-4", auditTimestamps[2])], next_cursor: "page-2" }],
+    ["page-2", { events: [auditEvent("event-4", auditTimestamps[2]), auditEvent("event-3", auditTimestamps[1])], next_cursor: "page-3" }],
+    ["page-3", { events: [auditEvent("event-2", auditTimestamps[0]), auditEvent("event-1", "2026-08-11T23:59:59.000Z")], next_cursor: null }],
+  ]);
+  const { api, calls } = activityFixture({ onEventRequest: (url) => pages.get(url.searchParams.get("cursor") ?? "") ?? { events: [], next_cursor: null } });
+
+  const first = await api.handle(request("/api/console?resource=activity&limit=2"));
+  assert.equal(first.status, 200);
+  const firstBody = await first.json();
+  assert.deepEqual(firstBody.activity.map((event) => event.event_id), ["event-5", "event-4"]);
+  assert.notEqual(firstBody.next_cursor, null);
+  assert.deepEqual(calls.filter((call) => new URL(call.url).pathname.endsWith("/audit/events")).map((call) => new URL(call.url).searchParams.get("cursor")), [null, "page-2"]);
+
+  const second = await api.handle(request(`/api/console?resource=activity&limit=2&cursor=${encodeURIComponent(firstBody.next_cursor)}`));
+  assert.equal(second.status, 200);
+  const secondBody = await second.json();
+  assert.deepEqual(secondBody.activity.map((event) => event.event_id), ["event-3", "event-2"]);
+  assert.notEqual(secondBody.next_cursor, null);
+  assert.deepEqual(calls.filter((call) => new URL(call.url).pathname.endsWith("/audit/events")).map((call) => new URL(call.url).searchParams.get("cursor")), [null, "page-2", null, "page-2", "page-3"]);
+
+  const third = await api.handle(request(`/api/console?resource=activity&limit=2&cursor=${encodeURIComponent(secondBody.next_cursor)}`));
+  assert.equal(third.status, 200);
+  const thirdBody = await third.json();
+  assert.deepEqual(thirdBody.activity.map((event) => event.event_id), ["event-1"]);
+  assert.equal(thirdBody.next_cursor, null);
+});
+
+test("activity ordering is stable across devices with equal timestamps", async () => {
+  const secondDeviceId = "44444444-4444-4444-8444-444444444444";
+  const eventsByDevice = new Map([
+    [deviceId, [auditEvent("device-1-new", auditTimestamps[3]), auditEvent("device-1-old", auditTimestamps[1])]],
+    [secondDeviceId, [auditEvent("device-2-new", auditTimestamps[2], { device_id: secondDeviceId }), auditEvent("device-2-old", auditTimestamps[0], { device_id: secondDeviceId })]],
+  ]);
+  const { api } = activityFixture({
+    deviceIds: [deviceId, secondDeviceId],
+    onEventRequest: (url) => ({ events: eventsByDevice.get(url.searchParams.get("device_id")), next_cursor: null }),
+  });
+  const first = await api.handle(request("/api/console?resource=activity&limit=2"));
+  assert.equal(first.status, 200);
+  const firstBody = await first.json();
+  assert.deepEqual(firstBody.activity.map((event) => event.event_id), ["device-1-new", "device-2-new"]);
+  const second = await api.handle(request(`/api/console?resource=activity&limit=2&cursor=${encodeURIComponent(firstBody.next_cursor)}`));
+  assert.equal(second.status, 200);
+  assert.deepEqual((await second.json()).activity.map((event) => event.event_id), ["device-1-old", "device-2-old"]);
 });
 
 test("activity cursors reject tampering and resource or device-scope substitution", async () => {
@@ -286,12 +337,44 @@ test("activity cursors contain no audit content or secrets and never touch brows
   assert.equal(logCalls, 0);
 });
 
-test("activity rejects an upstream window that cannot prove a terminal page", async () => {
+test("activity no longer treats an exactly full Cloud page as an incomplete window", async () => {
   const saturated = Array.from({ length: 500 }, (_, index) => auditEvent(`event-${index + 1}`, `2026-08-12T00:${String(Math.floor(index / 60)).padStart(2, "0")}:${String(index % 60).padStart(2, "0")}.000Z`));
   const { api } = activityFixture({ events: saturated });
   const result = await api.handle(request("/api/console?resource=activity&limit=2"));
-  assert.equal(result.status, 409);
-  assert.deepEqual(await result.json(), { error: { code: "activity_cursor_requires_upstream_cursor", message: "Activity pagination requires upstream cursor support" } });
+  assert.equal(result.status, 200);
+  const body = await result.json();
+  assert.deepEqual(body.activity.map((event) => event.event_id), ["event-500", "event-499"]);
+  assert.notEqual(body.next_cursor, null);
+});
+
+test("activity fails closed when a Cloud stream exceeds the upstream request budget", async () => {
+  const event = auditEvent("budget-event", "2026-08-12T00:00:00.000Z");
+  const { api, calls } = activityFixture({
+    onEventRequest: (url) => {
+      const cursor = url.searchParams.get("cursor");
+      const page = cursor === null ? 2 : Number(cursor.slice(5)) + 1;
+      return { events: [event], next_cursor: `page-${page}` };
+    },
+  });
+  const result = await api.handle(request("/api/console?resource=activity&limit=2"));
+  assert.equal(result.status, 502);
+  assert.deepEqual(await result.json(), { error: { code: "activity_pagination_budget_exceeded", message: "Activity pagination budget exceeded" } });
+  assert.equal(calls.filter((call) => new URL(call.url).pathname.endsWith("/audit/events")).length, 64);
+});
+
+test("activity fails closed when accumulated Cloud records exceed the memory bound", async () => {
+  const page = Array.from({ length: 500 }, (_, index) => auditEvent(`repeated-${index + 1}`, `2026-08-12T00:${String(Math.floor(index / 60)).padStart(2, "0")}:${String(index % 60).padStart(2, "0")}.000Z`));
+  const { api, calls } = activityFixture({
+    onEventRequest: (url) => {
+      const cursor = url.searchParams.get("cursor");
+      const pageNumber = cursor === null ? 2 : Number(cursor.slice(5)) + 1;
+      return { events: page, next_cursor: `page-${pageNumber}` };
+    },
+  });
+  const result = await api.handle(request("/api/console?resource=activity&limit=500"));
+  assert.equal(result.status, 502);
+  assert.deepEqual(await result.json(), { error: { code: "activity_pagination_budget_exceeded", message: "Activity pagination budget exceeded" } });
+  assert.equal(calls.filter((call) => new URL(call.url).pathname.endsWith("/audit/events")).length, 17);
 });
 
 test("activity derives the immutable position from the Cloud audit record envelope", async () => {

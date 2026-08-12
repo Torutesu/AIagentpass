@@ -30,6 +30,12 @@ Deploy this console only on a hosting path that injects SIWC identity headers af
 - Device enrollment requires a recent WebAuthn proof, forwards it only to the enrollment endpoint, and returns the one-time credential through a separately validated `no-store` response. The UI keeps that response only in React memory; reload or “表示を消す” removes it.
 - Emergency stop, revocation, policy, device, agent, capability, and audit operations all persist in the Cloud API; the UI has no shadow state.
 
+### Activity pagination limits
+
+The Console activity cursor is an HMAC-protected position cursor. It intentionally contains no audit records and no per-device Cloud cursor state: the current 512-character Console cursor limit cannot safely carry an independently sized upstream cursor for every device. A later Console page therefore restarts each device stream at the Cloud head and follows authoritative `next_cursor` pages only as far as the deterministic merge requires.
+
+To bound the resulting repeated-head work and protect availability from a hostile or non-progressing Cloud stream, one Console request may issue at most 64 upstream audit-page requests and accumulate at most 8,192 audit records. Exceeding either limit fails closed with HTTP 502 and `activity_pagination_budget_exceeded`; no partial activity page is returned. A future server-side cursor/state design can remove the repeated-head cost without expanding the browser-visible cursor.
+
 ## Enroll a Mac
 
 Open **セットアップ → Macを安全に追加**, enter a device label and the recent-auth proof issued by the configured identity layer, then issue the ten-minute enrollment. Copy the displayed JSON once and pass it to the CLI through stdin; never put it in argv, an environment variable, a repository, or shell history.

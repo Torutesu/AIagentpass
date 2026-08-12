@@ -7,15 +7,54 @@
     "/organizations/{organization_id}/bundles/{device_id}": { "get": { "operationId": "fetchControlBundle", "security": [{ "deviceSignature": [] }], "parameters": [{ "$ref": "#/components/parameters/OrganizationId" }, { "$ref": "#/components/parameters/DeviceId" }], "responses": { "200": { "$ref": "#/components/responses/Json" } } } },
     "/organizations/{organization_id}/bundles/{device_id}/acknowledgements": { "post": { "operationId": "acknowledgeControlBundle", "security": [{ "deviceSignature": [] }], "parameters": [{ "$ref": "#/components/parameters/OrganizationId" }, { "$ref": "#/components/parameters/DeviceId" }], "responses": { "202": { "$ref": "#/components/responses/Json" } } } },
     "/organizations/{organization_id}/devices/{device_id}/check-ins": { "post": { "operationId": "checkInDevice", "security": [{ "deviceSignature": [] }], "parameters": [{ "$ref": "#/components/parameters/OrganizationId" }, { "$ref": "#/components/parameters/DeviceId" }], "responses": { "202": { "$ref": "#/components/responses/Json" } } } },
-    "/organizations/{organization_id}/audit/events": { "post": { "operationId": "appendDeviceAuditEvents", "security": [{ "deviceSignature": [] }], "parameters": [{ "$ref": "#/components/parameters/OrganizationId" }], "responses": { "202": { "$ref": "#/components/responses/Json" } } } }
+    "/organizations/{organization_id}/audit/events": {
+      "get": {
+        "operationId": "listDeviceAuditEvents",
+        "summary": "List a tenant-qualified device audit stream",
+        "description": "Returns redacted audit records for exactly one organization and device. Results are ordered newest-first by the immutable keyset tuple (device_timestamp, device_id, event_id), using descending comparison. A cursor resumes strictly before the tuple represented by the cursor. The cursor is opaque, versioned, authenticated, expires, and is bound to this resource, organization_id, and device_id; malformed, tampered, expired, cross-tenant, cross-device, or otherwise mismatched cursors fail closed as invalid_cursor. The server reads limit + 1 records and returns only limit records, emitting next_cursor only when another record exists. Concurrent inserts newer than the current page do not change traversal of older records.",
+        "security": [{ "humanSession": [] }, { "auditReader": [] }],
+        "parameters": [
+          { "$ref": "#/components/parameters/OrganizationId" },
+          { "$ref": "#/components/parameters/AuditDeviceId" },
+          { "$ref": "#/components/parameters/AuditCursor" },
+          { "$ref": "#/components/parameters/AuditLimit" }
+        ],
+        "x-agentpass-tenant-scope": { "kind": "organization", "source": "path.organization_id", "cross-tenant-disclosure": false },
+        "x-agentpass-device-scope": { "kind": "device", "source": "query.device_id", "cross-device-disclosure": false },
+        "x-agentpass-ordering": ["device_timestamp", "device_id", "event_id"],
+        "x-agentpass-pagination": { "algorithm": "keyset", "probe": "limit_plus_one", "direction": "descending", "exclusive": true },
+        "responses": {
+          "200": { "$ref": "#/components/responses/DeviceAuditList" },
+          "400": { "$ref": "#/components/responses/InvalidCursor" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" }
+        }
+      },
+      "post": { "operationId": "appendDeviceAuditEvents", "security": [{ "deviceSignature": [] }], "parameters": [{ "$ref": "#/components/parameters/OrganizationId" }], "responses": { "202": { "$ref": "#/components/responses/Json" } } }
+    }
   },
   "components": {
-    "securitySchemes": { "deviceSignature": { "type": "apiKey", "in": "header", "name": "AgentPass-Signature", "description": "Requires Device, Timestamp, Nonce, Content-SHA256, and Signature headers." }, "enrollmentCredential": { "type": "apiKey", "in": "header", "name": "AgentPass-Enrollment-Credential", "description": "One-time 256-bit credential; only its SHA-256 digest is retained by the Control Plane." }, "enrollmentProof": { "type": "apiKey", "in": "header", "name": "AgentPass-Enrollment-Signature", "description": "Raw 64-byte signature over the method, exact path, canonical request-body SHA-256, and enrollment-credential SHA-256." } },
+    "securitySchemes": { "deviceSignature": { "type": "apiKey", "in": "header", "name": "AgentPass-Signature", "description": "Requires Device, Timestamp, Nonce, Content-SHA256, and Signature headers." }, "humanSession": { "type": "apiKey", "in": "cookie", "name": "__Host-agentpass_session", "description": "Hosted Human session forwarded only by the same-origin Console BFF. The session must carry at least the auditor role for the path organization." }, "auditReader": { "type": "http", "scheme": "bearer", "bearerFormat": "opaque", "description": "Evaluation-profile auditor credential. Hosted production uses humanSession instead. The organization and device path/query scope remains authoritative; a credential never widens either scope." }, "enrollmentCredential": { "type": "apiKey", "in": "header", "name": "AgentPass-Enrollment-Credential", "description": "One-time 256-bit credential; only its SHA-256 digest is retained by the Control Plane." }, "enrollmentProof": { "type": "apiKey", "in": "header", "name": "AgentPass-Enrollment-Signature", "description": "Raw 64-byte signature over the method, exact path, canonical request-body SHA-256, and enrollment-credential SHA-256." } },
     "parameters": {
       "EnrollmentId": { "name": "enrollment_id", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } },
       "OrganizationId": { "name": "organization_id", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } },
-      "DeviceId": { "name": "device_id", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } }
+      "DeviceId": { "name": "device_id", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } },
+      "AuditDeviceId": { "name": "device_id", "in": "query", "required": true, "description": "The single device stream to read. This scope is part of cursor authentication and cannot be changed while traversing a stream.", "schema": { "type": "string", "format": "uuid" } },
+      "AuditCursor": { "name": "cursor", "in": "query", "required": false, "description": "Opaque, versioned, authenticated keyset cursor. It is bound to resource device-audit, organization_id, and device_id and contains the exclusive last-seen (device_timestamp, device_id, event_id) tuple plus an expiry. Clients must not inspect or modify it. Invalid, tampered, expired, cross-tenant, cross-device, or otherwise mismatched values return invalid_cursor.", "schema": { "$ref": "#/components/schemas/AuditCursor" } },
+      "AuditLimit": { "name": "limit", "in": "query", "required": false, "description": "Maximum records returned. The server probes limit + 1 records to determine whether next_cursor is present.", "schema": { "type": "integer", "minimum": 1, "maximum": 500, "default": 100 } }
     },
-    "responses": { "Json": { "description": "JSON response", "content": { "application/json": { "schema": { "type": "object" } } } } }
+    "responses": {
+      "Json": { "description": "JSON response", "content": { "application/json": { "schema": { "type": "object" } } } },
+      "DeviceAuditList": { "description": "A bounded, tenant/device-scoped audit page.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/DeviceAuditListResponse" } } } },
+      "InvalidCursor": { "description": "The cursor is malformed, tampered, expired, or bound to another tenant/device/resource.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/InvalidCursorEnvelope" } } } },
+      "Unauthorized": { "description": "Authentication is required or invalid.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorEnvelope" } } } },
+      "Forbidden": { "description": "The authenticated auditor cannot read this organization/device scope.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorEnvelope" } } } }
+    },
+    "schemas": {
+      "AuditCursor": { "$ref": "../schemas/device-audit-list-v1.schema.json#/$defs/cursor" },
+      "DeviceAuditListResponse": { "$ref": "../schemas/device-audit-list-v1.schema.json" },
+      "ErrorEnvelope": { "type": "object", "additionalProperties": false, "required": ["error", "request_id"], "properties": { "error": { "type": "object", "additionalProperties": false, "required": ["code", "message"], "properties": { "code": { "type": "string", "minLength": 1, "maxLength": 64 }, "message": { "type": "string", "minLength": 1, "maxLength": 512 } } }, "request_id": { "type": "string", "format": "uuid" } } },
+      "InvalidCursorEnvelope": { "type": "object", "additionalProperties": false, "required": ["error", "request_id"], "properties": { "error": { "type": "object", "additionalProperties": false, "required": ["code", "message"], "properties": { "code": { "type": "string", "const": "invalid_cursor" }, "message": { "type": "string", "const": "Cursor is invalid" } } }, "request_id": { "type": "string", "format": "uuid" } } }
+    }
   }
 }

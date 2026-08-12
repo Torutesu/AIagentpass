@@ -23,7 +23,13 @@ export async function createCloudRuntime({ env = process.env, logger = console, 
   const consoleIdentityPublicKey = config.humanAuth
     ? readProtectedFile(config.humanAuth.identityAssertionPublicKeyPath, "console identity public key", 16 * 1024).toString("utf8")
     : undefined;
-  const store = await createCloudStore({ dataDir: config.dataDir });
+  // Hosted instances share the Human cursor root, while the audit codec uses
+  // its own domain separator. This keeps Cloud audit cursors valid across
+  // restarts/instances without exposing another secret in runtime metadata.
+  const store = await createCloudStore({
+    dataDir: config.dataDir,
+    ...(cursorSecret ? { auditCursorSecret: Buffer.from(cursorSecret, "base64url") } : {})
+  });
   let postgresRuntime;
   let humanAuthRuntime;
   let server;

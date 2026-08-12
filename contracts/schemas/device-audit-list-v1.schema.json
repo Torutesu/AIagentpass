@@ -1,0 +1,54 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agentpass.dev/contracts/device-audit-list-v1.schema.json",
+  "title": "Device audit list response v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["events", "next_cursor"],
+  "properties": {
+    "events": { "type": "array", "minItems": 0, "maxItems": 500, "items": { "$ref": "#/$defs/record" } },
+    "next_cursor": { "anyOf": [{ "$ref": "#/$defs/cursor" }, { "type": "null" }] }
+  },
+  "$defs": {
+    "uuid": { "type": "string", "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$" },
+    "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "timestamp": { "type": "string", "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$", "format": "date-time" },
+    "cursor": { "type": "string", "minLength": 1, "maxLength": 512, "pattern": "^[A-Za-z0-9_-]+$", "description": "Opaque, versioned, authenticated cursor bound to resource device-audit, organization_id, device_id, and an exclusive (device_timestamp, device_id, event_id) position with expiry." },
+    "audit_event": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["version", "event_id", "request_id", "agent_id", "operation", "decision", "reason", "policy_sequence", "capability_sequence", "repository", "branch", "remote", "payload_digest", "device_timestamp", "previous_hash", "event_hash"],
+      "properties": {
+        "version": { "const": 1 },
+        "event_id": { "$ref": "#/$defs/uuid" },
+        "request_id": { "$ref": "#/$defs/uuid" },
+        "agent_id": { "$ref": "#/$defs/uuid" },
+        "operation": { "const": "git.commit.sign" },
+        "decision": { "enum": ["allow", "deny", "error"] },
+        "reason": { "enum": ["allowed", "branch_denied", "branch_not_allowed", "capability_expired", "capability_missing", "operation_not_allowed", "policy_changed", "remote_control_stale", "remote_denied", "remote_not_allowed", "repository_not_allowed", "revoked", "session_required", "signer_failed", "tag_denied", "tag_not_allowed"] },
+        "policy_sequence": { "type": "integer", "minimum": 0 },
+        "capability_sequence": { "type": "integer", "minimum": 0 },
+        "repository": { "type": "string", "minLength": 1, "maxLength": 4096 },
+        "branch": { "type": "string", "minLength": 1, "maxLength": 2048 },
+        "remote": { "type": "string", "minLength": 1, "maxLength": 2048 },
+        "payload_digest": { "$ref": "#/$defs/sha256" },
+        "device_timestamp": { "$ref": "#/$defs/timestamp" },
+        "previous_hash": { "$ref": "#/$defs/sha256" },
+        "event_hash": { "$ref": "#/$defs/sha256" }
+      }
+    },
+    "record": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["organization_id", "device_id", "event_id", "event", "received_at"],
+      "properties": {
+        "organization_id": { "$ref": "#/$defs/uuid" },
+        "device_id": { "$ref": "#/$defs/uuid" },
+        "event_id": { "$ref": "#/$defs/uuid" },
+        "event": { "$ref": "#/$defs/audit_event" },
+        "received_at": { "$ref": "#/$defs/timestamp" }
+      },
+      "description": "The public record contains exactly organization_id, device_id, event_id, event, and received_at. Adapters normalize source-specific ingestion timestamps such as ingested_at to received_at; chain health is exposed by the separate audit-health resource and is not part of this list record. event_id is the duplicated immutable key used by the source table and must equal event.event_id. device_id is the immutable device scope and must equal the query device_id."
+    }
+  }
+}

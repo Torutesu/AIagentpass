@@ -161,7 +161,7 @@ test("ingests append-only audit events with dedupe and recorded chain gaps", asy
   assert.equal(second.gaps.length, 1);
   assert.equal(second.gaps[0].expected_previous_hash, firstHash);
   assert.equal((await store.getAuditHealth({ organizationId: ids.org }))[0].chain_status, "gap");
-  assert.equal((await store.listDeviceAuditEvents({ organizationId: ids.org, deviceId: ids.device })).length, 2);
+  assert.equal((await store.listDeviceAuditEvents({ organizationId: ids.org, deviceId: ids.device })).events.length, 2);
 });
 
 test("rejects fabricated event hashes before changing the audit head", async (t) => {
@@ -190,7 +190,7 @@ test("rejects fabricated event hashes before changing the audit head", async (t)
     chain_status: "continuous",
     gap_count: 0
   }]);
-  assert.deepEqual(await store.listDeviceAuditEvents({ organizationId: ids.org, deviceId: ids.device }), []);
+  assert.deepEqual(await store.listDeviceAuditEvents({ organizationId: ids.org, deviceId: ids.device }), { events: [], next_cursor: null });
 });
 
 test("uses the redacted event fields as the hash preimage", () => {

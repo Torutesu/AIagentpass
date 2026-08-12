@@ -38,6 +38,11 @@ async function fixture(t, apiOptions = {}) {
   return { store, token, deviceKeys, bundleKeys, base, scope };
 }
 
+function auditListEvent(eventId, requestId, previousHash, deviceTimestamp) {
+  const event = { version: 1, event_id: eventId, request_id: requestId, agent_id: agentId, operation: "git.commit.sign", decision: "allow", reason: "allowed", policy_sequence: 1, capability_sequence: 1, repository: "/work/repo", branch: "feature/activity", remote: "git@example.test:repo.git", payload_digest: "a".repeat(64), device_timestamp: deviceTimestamp, previous_hash: previousHash };
+  return { ...event, event_hash: computeAuditEventHash(event) };
+}
+
 test("human routes enforce bearer role, tenant, and idempotency", async (t) => {
   const f = await fixture(t);
   const ok = await fetch(`${f.base}/v1/organizations/${org}/devices`, { headers: { authorization: `Bearer ${f.token}` } });
@@ -240,6 +245,33 @@ test("device audit ingestion is authenticated and rejects body substitution", as
   assert.equal(accepted.status, 202, JSON.stringify(await accepted.clone().json()));
   const tampered = await fetch(`${f.base}${endpoint}`, { method: "POST", headers: { ...headers, "AgentPass-Nonce": "nonce-audit-zyxwvutsrqponmlkjihgfedcba-54321", "content-type": "application/json" }, body: JSON.stringify({ batch_id: "other", events: [event] }) });
   assert.equal(tampered.status, 401);
+});
+
+test("device audit listing requires one device scope, returns exact records, and maps cursor failures", async (t) => {
+  const f = await fixture(t);
+  const endpoint = `/v1/organizations/${org}/audit/events`;
+  const first = auditListEvent("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb", "0".repeat(64), new Date(now).toISOString());
+  const second = auditListEvent("cccccccc-cccc-4ccc-8ccc-cccccccccccc", "dddddddd-dddd-4ddd-8ddd-dddddddddddd", first.event_hash, new Date(now + 1_000).toISOString());
+  await f.store.ingestDeviceAuditEvents({ organizationId: org, deviceId, events: [first, second], idempotencyKey: "audit-list-page-0001" });
+
+  const firstPageResponse = await fetch(`${f.base}${endpoint}?device_id=${deviceId}&limit=1`, { headers: { authorization: `Bearer ${f.token}` } });
+  assert.equal(firstPageResponse.status, 200);
+  const firstPage = await firstPageResponse.json();
+  assert.equal(firstPage.events.length, 1);
+  assert.deepEqual(Object.keys(firstPage.events[0]).sort(), ["device_id", "event", "event_id", "organization_id", "received_at"]);
+  assert.ok(firstPage.next_cursor);
+
+  const next = await fetch(`${f.base}${endpoint}?device_id=${deviceId}&limit=1&cursor=${encodeURIComponent(firstPage.next_cursor)}`, { headers: { authorization: `Bearer ${f.token}` } });
+  assert.equal(next.status, 200);
+  assert.equal((await next.json()).events.length, 1);
+
+  for (const query of ["", `?device_id=${deviceId}&device_id=${deviceId}`, `?device_id=${deviceId}&unknown=1`, `?device_id=${deviceId}&cursor=${encodeURIComponent(`${firstPage.next_cursor}A`)}`]) {
+    const response = await fetch(`${f.base}${endpoint}${query}`, { headers: { authorization: `Bearer ${f.token}` } });
+    assert.equal(response.status, 400);
+    const body = await response.json();
+    assert.equal(body.error.code, query.includes("cursor") ? "invalid_cursor" : "invalid_query");
+    if (query.includes("cursor")) assert.equal(body.error.message, "Cursor is invalid");
+  }
 });
 
 test("admin issues a signed short-lived capability bound to an active agent and device", async (t) => {

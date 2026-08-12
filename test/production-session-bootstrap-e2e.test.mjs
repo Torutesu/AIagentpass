@@ -202,7 +202,10 @@ test("production Console BFF to Cloud Human Auth boundary rejects adversarial bo
 
     const calls = [];
     const valid = await signer.sign({ subject: TRUSTED_SUBJECT, organizationId: MAIN_ORGANIZATION, origin: ORIGIN, now: NOW, jti: "tampered-assertion-jti-0001" });
-    const tampered = `${valid.slice(0, -1)}${valid.endsWith("A") ? "B" : "A"}`;
+    const compactParts = valid.split(".");
+    const signatureBytes = Buffer.from(compactParts[2], "base64url");
+    signatureBytes[0] ^= 1;
+    const tampered = `${compactParts[0]}.${compactParts[1]}.${signatureBytes.toString("base64url")}`;
     const response = await createBridge({
       env: productionEnv,
       calls,

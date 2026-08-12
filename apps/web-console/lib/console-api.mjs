@@ -2,7 +2,12 @@ const MAX_BYTES = 256 * 1024;
 const DEFAULT_TIMEOUT_MS = 8_000;
 const MAX_TIMEOUT_MS = 30_000;
 const MAX_CURSOR_LENGTH = 512;
-const ACTIVITY_WINDOW_LIMIT = 500;
+// This is the size of one Cloud page, not a completeness limit. A page that
+// returns this many events is still traversable when next_cursor is present.
+const ACTIVITY_PAGE_LIMIT = 500;
+const ACTIVITY_MAX_UPSTREAM_REQUESTS = 64;
+const ACTIVITY_MAX_ACCUMULATED_RECORDS = 8_192;
+const UPSTREAM_CURSOR_PATTERN = /^[A-Za-z0-9_-]{1,512}$/;
 const ACTIVITY_CURSOR_VERSION = 1;
 const ACTIVITY_CURSOR_PATTERN = /^[A-Za-z0-9_-]{1,512}\.[A-Za-z0-9_-]{1,512}\.[A-Za-z0-9_-]{1,512}$/;
 const UUID_OR_OPAQUE_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
@@ -313,31 +318,18 @@ async function getAudit(query, config, fetchImpl, options, devicesPayload = unde
     }
   }
 
-  const [responses, healthPayload] = await Promise.all([
-    Promise.all(deviceIds.map((deviceId) =>
-      cloudRequest(
-        "GET",
-        `/audit/events?device_id=${encodeURIComponent(deviceId)}&limit=${ACTIVITY_WINDOW_LIMIT}`,
-        undefined,
-        config,
-        fetchImpl,
-        options,
-      ),
-    )),
+  const [streams, healthPayload] = await Promise.all([
+    loadActivityStreams({
+      deviceIds,
+      position: cursor?.position ?? null,
+      config,
+      fetchImpl,
+      options,
+      limit: query.limit,
+    }),
     cloudRequest("GET", "/audit/health", undefined, config, fetchImpl, options),
   ]);
-  const streams = responses.map((payload, index) => normalizeActivityStream(payload, deviceIds[index]));
-  const hasSaturatedStream = streams.some((stream) => stream.saturated);
-  // Blocker: GET /v1/organizations/{organization_id}/audit/events currently
-  // accepts only device_id and limit; it has no cursor/before/after parameter
-  // and its response ordering is not a public pagination contract. A saturated
-  // stream can hide older events, so do not emit any page or cursor that would
-  // imply that traversal is complete.
-  if (hasSaturatedStream) {
-    throw new ConsoleApiError(409, "activity_cursor_requires_upstream_cursor", "Activity pagination requires upstream cursor support");
-  }
-  const records = streams.flatMap((stream) => stream.records);
-  records.sort((left, right) => compareActivityTuple(left.tuple, right.tuple));
+  const records = mergeActivityRecords(streams);
   const visibleRecords = cursor
     ? records.filter((record) => compareActivityTuple(record.tuple, cursor.position) < 0)
     : records;
@@ -371,12 +363,86 @@ async function getAudit(query, config, fetchImpl, options, devicesPayload = unde
   return { health, activity, next_cursor: nextCursor };
 }
 
+async function loadActivityStreams({ deviceIds, position, config, fetchImpl, options, limit }) {
+  const budget = { requests: 0, records: 0 };
+  const streams = deviceIds.map((deviceId) => ({
+    deviceId,
+    records: [],
+    nextCursor: null,
+    terminal: false,
+    requestedCursors: new Set(),
+  }));
+
+  await Promise.all(streams.map((stream) => loadNextActivityPage(stream, { config, fetchImpl, options, budget })));
+
+  // A k-way merge is complete once we have limit + 1 candidates and every
+  // non-terminal stream has reached at least the current cutoff. If the
+  // requested page has fewer candidates, all streams must be exhausted. This
+  // is what removes the old "exactly 500 means unsafe" assumption.
+  while (true) {
+    const records = mergeActivityRecords(streams);
+    const candidates = position === null
+      ? records
+      : records.filter((record) => compareActivityTuple(record.tuple, position) < 0);
+    candidates.sort((left, right) => compareActivityTuple(right.tuple, left.tuple));
+    const cutoff = candidates.length > limit ? candidates[limit].tuple : null;
+    const pending = streams.filter((stream) => {
+      if (stream.terminal) return false;
+      if (cutoff === null) return true;
+      const oldest = stream.records[0]?.tuple;
+      return oldest === undefined || compareActivityTuple(oldest, cutoff) > 0;
+    });
+    if (pending.length === 0) return streams.map((stream) => Object.freeze({
+      deviceId: stream.deviceId,
+      records: stream.records,
+    }));
+    await Promise.all(pending.map((stream) => loadNextActivityPage(stream, { config, fetchImpl, options, budget })));
+  }
+}
+
+async function loadNextActivityPage(stream, { config, fetchImpl, options, budget }) {
+  if (stream.terminal) return;
+  const requestedCursor = stream.nextCursor;
+  if (requestedCursor !== null) {
+    if (stream.requestedCursors.has(requestedCursor)) {
+      throw new ConsoleApiError(502, "cloud_api_invalid_response", "Cloud API response was invalid");
+    }
+    stream.requestedCursors.add(requestedCursor);
+  }
+  if (budget.requests >= ACTIVITY_MAX_UPSTREAM_REQUESTS) {
+    throw new ConsoleApiError(502, "activity_pagination_budget_exceeded", "Activity pagination budget exceeded");
+  }
+  budget.requests += 1;
+  const cursorQuery = requestedCursor === null ? "" : `&cursor=${encodeURIComponent(requestedCursor)}`;
+  const payload = await cloudRequest(
+    "GET",
+    `/audit/events?device_id=${encodeURIComponent(stream.deviceId)}&limit=${ACTIVITY_PAGE_LIMIT}${cursorQuery}`,
+    undefined,
+    config,
+    fetchImpl,
+    options,
+  );
+  const page = normalizeActivityStream(payload, stream.deviceId);
+  if (budget.records + page.records.length > ACTIVITY_MAX_ACCUMULATED_RECORDS) {
+    throw new ConsoleApiError(502, "activity_pagination_budget_exceeded", "Activity pagination budget exceeded");
+  }
+  budget.records += page.records.length;
+  stream.records.push(...page.records);
+  stream.records.sort((left, right) => compareActivityTuple(left.tuple, right.tuple));
+  stream.nextCursor = page.nextCursor;
+  stream.terminal = page.nextCursor === null;
+}
+
 function normalizeActivityStream(payload, deviceId) {
   if (!payload || typeof payload !== "object" || Array.isArray(payload) || !Array.isArray(payload.events)) {
     throw new ConsoleApiError(502, "cloud_api_invalid_response", "Cloud API response was invalid");
   }
   const events = payload.events;
-  if (events.length > ACTIVITY_WINDOW_LIMIT) {
+  if (events.length > ACTIVITY_PAGE_LIMIT) {
+    throw new ConsoleApiError(502, "cloud_api_invalid_response", "Cloud API response was invalid");
+  }
+  const nextCursor = payload.next_cursor === undefined || payload.next_cursor === null ? null : payload.next_cursor;
+  if (nextCursor !== null && (typeof nextCursor !== "string" || !UPSTREAM_CURSOR_PATTERN.test(nextCursor))) {
     throw new ConsoleApiError(502, "cloud_api_invalid_response", "Cloud API response was invalid");
   }
   const seen = new Set();
@@ -399,7 +465,25 @@ function normalizeActivityStream(payload, deviceId) {
     return { value: { ...event, device_id: eventDeviceId }, tuple };
   });
   records.sort((left, right) => compareActivityTuple(left.tuple, right.tuple));
-  return Object.freeze({ deviceId, records, saturated: events.length === ACTIVITY_WINDOW_LIMIT });
+  return Object.freeze({ deviceId, records, nextCursor });
+}
+
+function mergeActivityRecords(streams) {
+  const recordsByIdentity = new Map();
+  for (const stream of streams) {
+    for (const record of stream.records) {
+      const identity = `${record.tuple.d}\u0000${record.tuple.e}`;
+      const previous = recordsByIdentity.get(identity);
+      if (previous !== undefined) {
+        if (compareActivityTuple(previous.tuple, record.tuple) !== 0) {
+          throw new ConsoleApiError(502, "cloud_api_invalid_response", "Cloud API response was invalid");
+        }
+        continue;
+      }
+      recordsByIdentity.set(identity, record);
+    }
+  }
+  return [...recordsByIdentity.values()].sort((left, right) => compareActivityTuple(left.tuple, right.tuple));
 }
 
 function normalizeActivityTimestamp(value) {

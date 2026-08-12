@@ -18,17 +18,19 @@ const HUMAN_AUTH_UUID = "[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89a-
 const UUID = "([0-9a-fA-F-]{36})";
 const UUID_VALUE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu;
 
-export function createCloudApi({ store, tokenRecords = [], bundleSigner, now = () => Date.now(), monotonicNow, replayCache = createReplayCache(), rateLimiter, admissionRateLimiter, verifyRecentWebAuthn, recentAuthService, humanAuthApi, humanSession, capabilityAuthorityRepository, capabilityRevocationSource } = {}) {
+export function createCloudApi({ store, tokenRecords = [], bundleSigner, now = () => Date.now(), monotonicNow, replayCache = createReplayCache(), rateLimiter, admissionRateLimiter, verifyRecentWebAuthn, recentAuthService, humanAuthApi, humanSession, capabilityAuthorityRepository, capabilityRevocationSource, auditRepository } = {}) {
   if (!store) throw new TypeError("store is required");
   if (verifyRecentWebAuthn !== undefined && recentAuthService !== undefined) throw new TypeError("configure verifyRecentWebAuthn or recentAuthService, not both");
   if (humanAuthApi !== undefined && (!humanAuthApi || typeof humanAuthApi.handle !== "function")) throw new TypeError("humanAuthApi must expose handle()");
   if (humanSession !== undefined && (!humanSession || typeof humanSession.authenticateRequest !== "function")) throw new TypeError("humanSession must expose authenticateRequest()");
   if (capabilityRevocationSource !== undefined && (!capabilityRevocationSource || typeof capabilityRevocationSource.listRevokedCapabilityIds !== "function")) throw new TypeError("capabilityRevocationSource must expose listRevokedCapabilityIds()");
   if (capabilityAuthorityRepository !== undefined && (!capabilityAuthorityRepository || typeof capabilityAuthorityRepository.issueCapabilityMetadata !== "function")) throw new TypeError("capabilityAuthorityRepository must expose issueCapabilityMetadata()");
+  if (auditRepository !== undefined && (!auditRepository || typeof auditRepository.listDeviceAuditEvents !== "function")) throw new TypeError("auditRepository must expose listDeviceAuditEvents()");
   const recentAuthVerifier = recentAuthService === undefined ? verifyRecentWebAuthn : recentAuthService?.authorize?.bind(recentAuthService);
   if (recentAuthService !== undefined && typeof recentAuthVerifier !== "function") throw new TypeError("recentAuthService must expose authorize()");
   const limiter = rateLimiter ?? createRateLimiter({ now, ...(monotonicNow ? { monotonicNow } : {}) });
   const admission = admissionRateLimiter ?? createRateLimiter({ now, ...(monotonicNow ? { monotonicNow } : {}), human: { capacity: 30, refillPerSecond: 1 }, device: { capacity: 60, refillPerSecond: 2 } });
+  const activitySource = auditRepository ?? store;
   if (!limiter || typeof limiter.acquire !== "function") throw new TypeError("rateLimiter must expose acquire()");
   const routes = buildRoutes();
 
@@ -238,7 +240,12 @@ export function createCloudApi({ store, tokenRecords = [], bundleSigner, now = (
         return { status: 201, body: { revocation } };
       }),
       route("GET", new RegExp(`^/v1/organizations/(?<organizationId>${UUID})/revocations$`), "viewer", async ({ organizationId, url }) => ({ body: { revocations: (await store.listRevocations({ organizationId })).slice(-optionalLimit(url)) } })),
-      route("GET", new RegExp(`^/v1/organizations/(?<organizationId>${UUID})/audit/events$`), "auditor", async ({ organizationId, url }) => ({ body: { events: await store.listDeviceAuditEvents({ organizationId, deviceId: requiredQuery(url, "device_id"), limit: optionalLimit(url) }) } })),
+      route("GET", new RegExp(`^/v1/organizations/(?<organizationId>${UUID})/audit/events$`), "auditor", async ({ organizationId, url }) => {
+        requireExactQueryKeys(url, new Set(["device_id", "cursor", "limit"]));
+        const page = await activitySource.listDeviceAuditEvents({ organizationId, deviceId: requiredUuidQuery(url, "device_id"), cursor: optionalQuery(url, "cursor"), limit: optionalLimit(url) });
+        if (!page || typeof page !== "object" || !Array.isArray(page.events) || (page.next_cursor !== null && typeof page.next_cursor !== "string")) throw new Error("audit repository returned an invalid page");
+        return { body: { events: page.events, next_cursor: page.next_cursor } };
+      }),
       route("GET", new RegExp(`^/v1/organizations/(?<organizationId>${UUID})/audit/admin-events$`), "auditor", async ({ organizationId, url }) => ({ body: { events: await store.listAdminAuditEvents({ organizationId, limit: optionalLimit(url) }) } })),
       route("GET", new RegExp(`^/v1/organizations/(?<organizationId>${UUID})/audit/health$`), "auditor", async ({ organizationId }) => ({ body: { health: await store.getAuditHealth({ organizationId }) } })),
       route("POST", new RegExp(`^/v1/organizations/(?<organizationId>${UUID})/audit/events$`), null, async ({ organizationId, principal, body }) => {
@@ -448,7 +455,27 @@ function rejectUnknown(value, allowed, label) {
 }
 
 function requiredQuery(url, name) { const value = url.searchParams.get(name); if (!value) throw apiError("invalid_query", 400, `${name} is required`); return value; }
-function optionalLimit(url) { const value = url.searchParams.get("limit"); if (value === null) return 100; if (!/^[1-9]\d{0,2}$/.test(value) || Number(value) > 500) throw apiError("invalid_query", 400, "limit is invalid"); return Number(value); }
+function requireExactQueryKeys(url, allowed) {
+  for (const key of url.searchParams.keys()) if (!allowed.has(key)) throw apiError("invalid_query", 400, "query is invalid");
+}
+function requiredUuidQuery(url, name) {
+  const values = url.searchParams.getAll(name);
+  if (values.length !== 1 || !UUID_VALUE.test(values[0])) throw apiError("invalid_query", 400, `${name} is invalid`);
+  return values[0].toLowerCase();
+}
+function optionalQuery(url, name) {
+  const values = url.searchParams.getAll(name);
+  if (values.length > 1 || values[0] === "") throw apiError("invalid_query", 400, `${name} is invalid`);
+  return values[0];
+}
+function optionalLimit(url) {
+  const values = url.searchParams.getAll("limit");
+  if (values.length > 1) throw apiError("invalid_query", 400, "limit is invalid");
+  const value = values[0];
+  if (value === undefined) return 100;
+  if (!/^[1-9]\d{0,2}$/.test(value) || Number(value) > 500) throw apiError("invalid_query", 400, "limit is invalid");
+  return Number(value);
+}
 function publicCapability(capability) {
   const { nonce, ...metadata } = capability;
   return metadata;
@@ -473,6 +500,7 @@ function send(response, status, value, headers = {}) {
 function apiError(code, status, message, headers) { const error = new Error(message); error.code = code; error.status = status; if (headers) error.headers = headers; return error; }
 function mapError(error) {
   if (error.status) return error;
+  if (error.code === "ERR_AUDIT_CURSOR_INVALID") return { status: 400, code: "invalid_cursor", message: "Cursor is invalid" };
   if (["invalid_session_cookie", "session_not_found", "session_revoked", "session_expired"].includes(error.code)) return { status: 401, code: "human_session_invalid", message: "Authentication failed" };
   if (["invalid_origin", "csrf_token_required", "invalid_csrf_token"].includes(error.code)) return { status: 403, code: "human_session_request_denied", message: "Authentication failed" };
   if (error instanceof RateLimiterCapacityError || error.code === "RATE_LIMITER_CAPACITY_EXHAUSTED") return { status: 503, code: "rate_limiter_unavailable", message: "Rate limiter is temporarily unavailable", headers: { "Retry-After": "1" } };

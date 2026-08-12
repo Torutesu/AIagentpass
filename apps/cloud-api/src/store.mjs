@@ -8,6 +8,7 @@ import {
   normalizeAuditEvent,
   normalizeScope
 } from "../../../packages/protocol/src/index.mjs";
+import { auditCursorBinding, createAuditCursorCodec, normalizeAuditPageInput } from "./audit-pagination.mjs";
 
 const SCHEMA_VERSION = 1;
 const ZERO_HASH = "0".repeat(64);
@@ -82,6 +83,7 @@ export function computeAuditEventHash(event) {
 export async function createCloudStore(options = {}) {
   const storage = await prepareStorage(options);
   const processLock = await acquireStoreLock(storage);
+  const auditCursorCodec = options.auditCursorCodec ?? createAuditCursorCodec({ secret: options.auditCursorSecret ?? crypto.randomBytes(32) });
   let state;
   try { state = await loadState(storage); }
   catch (error) { await releaseStoreLock(processLock); throw error; }
@@ -596,10 +598,28 @@ export async function createCloudStore(options = {}) {
   const listAdminAuditEvents = async (input) => read(() => listAudit(state.admin_audit_events, requireTenant(input), input?.limit));
   const listDeviceAuditEvents = async (input) => read(() => {
     const organizationId = requireTenant(input);
-    const deviceId = input.deviceId ?? input.device_id;
-    assertUuid(deviceId, "device_id");
-    tenantRecord("devices", organizationId, deviceId, "device");
-    return state.device_audit_events.filter((item) => item.organization_id === organizationId && item.device_id === deviceId).slice(-boundedLimit(input.limit)).map(clone);
+    const page = normalizeAuditPageInput(input);
+    const deviceId = page.device_id;
+    if (deviceId !== null) tenantRecord("devices", organizationId, deviceId, "device");
+    const position = page.cursor === undefined
+      ? null
+      : auditCursorCodec.decode(page.cursor, auditCursorBinding(organizationId, deviceId));
+    const records = state.device_audit_events
+      .filter((item) => item.organization_id === organizationId && item.device_id === deviceId)
+      .filter((item) => position === null || compareAuditPosition(item, position) < 0)
+      .sort(compareAuditRecords);
+    const selected = records.slice(0, page.limit + 1);
+    const hasNext = selected.length > page.limit;
+    const events = selected.slice(0, page.limit).map(publicAuditRecord);
+    const next_cursor = hasNext
+      ? auditCursorCodec.encode({
+        organization_id: organizationId,
+        device_id: deviceId,
+        device_timestamp: auditDeviceTimestamp(events.at(-1)),
+        event_id: events.at(-1).event_id
+      })
+      : null;
+    return Object.freeze({ events: Object.freeze(events), next_cursor });
   });
   const getAuditHealth = async (input) => read(() => {
     const organizationId = requireTenant(input);
@@ -892,3 +912,21 @@ function timingSafeHex(left, right) {
 function boundedLimit(value) { if (value === undefined) return 100; if (!Number.isSafeInteger(value) || value < 1 || value > MAX_BATCH * 16) throw new CloudStoreError("ERR_LIMIT_EXCEEDED", "limit is out of bounds"); return value; }
 function listAudit(values, organizationId, limit) { return values.filter((item) => item.organization_id === organizationId).slice(-boundedLimit(limit)).map(clone); }
 function devicesHealth(state, organizationId) { return Object.values(state.devices).filter((item) => item.organization_id === organizationId).map((device) => ({ device_id: device.device_id, ...(state.device_audit_heads[device.device_id] ?? { last_hash: ZERO_HASH, last_event_id: null, chain_status: "continuous", gap_count: 0 }) })); }
+function compareAuditRecords(left, right) { return -compareAuditPosition(left, right); }
+function compareAuditPosition(left, right) {
+  const leftTimestamp = auditDeviceTimestamp(left);
+  const rightTimestamp = auditDeviceTimestamp(right);
+  return leftTimestamp.localeCompare(rightTimestamp) || String(left.device_id).localeCompare(String(right.device_id)) || String(left.event_id).localeCompare(String(right.event_id));
+}
+function auditDeviceTimestamp(record) {
+  const value = record?.event?.device_timestamp ?? record?.device_timestamp;
+  if (typeof value !== "string" || !Number.isFinite(Date.parse(value))) throw new CloudStoreError("ERR_INVALID_INPUT", "audit event device_timestamp is invalid");
+  return new Date(value).toISOString();
+}
+function publicAuditRecord(record) {
+  const event = clone(record.event);
+  const eventId = assertUuid(record.event_id, "event_id");
+  const deviceId = assertUuid(record.device_id, "device_id");
+  if (event.event_id !== eventId || event.device_timestamp !== auditDeviceTimestamp(record)) throw new CloudStoreError("ERR_INVALID_INPUT", "audit event key is inconsistent");
+  return { organization_id: assertUuid(record.organization_id, "organization_id"), device_id: deviceId, event_id: eventId, event, received_at: timestamp(record.ingested_at) };
+}
