@@ -7,6 +7,7 @@ import {
   ORGANIZATION_SERVICE_ERROR_CODES,
   createPostgresOrganizationService
 } from "../src/human-auth/organizations/postgres-service.mjs";
+import { createHumanCursorCodec } from "../src/human-auth/pagination/cursor-codec.mjs";
 
 const ids = {
   organization: "11111111-1111-4111-8111-111111111111",
@@ -97,6 +98,59 @@ test("returns bounded frozen pages and passes server-derived actor scope", async
   await assert.rejects(() => service.listMembers({ actor: ACTOR, organization_id: ids.organization, limit: 101 }), { code: "invalid_input" });
 });
 
+test("uses the human-v1 default cursor limit of 50", async () => {
+  const { service, calls } = serviceFixture();
+  await service.listOrganizations({ actor: ACTOR });
+  assert.equal(calls.listOrganizationsForMember[0].limit, 50);
+});
+
+test("authenticates organization cursors and emits the next keyset position", async () => {
+  const cursorCodec = createHumanCursorCodec({ secret: Buffer.alloc(32, 0x42) });
+  const records = [
+    organization({ organization_id: ids.organization, created_at: "2026-08-12T00:00:00.000Z" }),
+    organization({ organization_id: ids.organization2, created_at: "2026-08-12T00:00:01.000Z" }),
+    organization({ organization_id: ids.organization, created_at: "2026-08-12T00:00:02.000Z" })
+  ];
+  const { service, calls } = serviceFixture({ repository: { listOrganizationsForMember: records }, options: { cursorCodec } });
+  const first = await service.listOrganizations({ actor: ACTOR, limit: 2 });
+  assert.match(first.next_cursor, /^[A-Za-z0-9_-]+$/u);
+  assert.deepEqual(cursorCodec.decode(first.next_cursor, { resource: "organizations", tenant_id: ACTOR.organization_id, member_id: ACTOR.member_id, direction: "asc" }), {
+    version: 1,
+    resource: "organizations",
+    tenant_id: ACTOR.organization_id,
+    member_id: ACTOR.member_id,
+    created_at: records[1].created_at,
+    id: records[1].organization_id,
+    direction: "asc"
+  });
+  assert.deepEqual(calls.listOrganizationsForMember[0], { member_id: ACTOR.member_id, limit: 2 });
+
+  await assert.rejects(() => service.listOrganizations({ actor: { ...ACTOR, member_id: ids.member }, limit: 2, cursor: first.next_cursor }), { code: ORGANIZATION_SERVICE_ERROR_CODES.INVALID_INPUT });
+  await assert.rejects(() => service.listOrganizations({ actor: ACTOR, limit: 2, cursor: `${first.next_cursor.slice(0, -1)}!` }), { code: ORGANIZATION_SERVICE_ERROR_CODES.INVALID_INPUT });
+});
+
+test("binds member and invitation cursors to their own resources and keyset fields", async () => {
+  const cursorCodec = createHumanCursorCodec({ secret: Buffer.alloc(32, 0x43) });
+  const members = [
+    member({ membership_id: ids.member, created_at: NOW }),
+    member({ membership_id: ids.invitation, created_at: "2026-08-12T00:00:01.000Z" })
+  ];
+  const invitations = [
+    invitation({ invitation_id: ids.invitation, created_at: NOW }),
+    invitation({ invitation_id: ids.invitation2, created_at: "2026-08-12T00:00:01.000Z" })
+  ];
+  const { service, calls } = serviceFixture({ repository: { listMembers: members, listInvitations: invitations }, options: { cursorCodec } });
+  const memberPage = await service.listMembers({ actor: ACTOR, organization_id: ids.organization, limit: 1 });
+  const invitationPage = await service.listInvitations({ actor: ACTOR, organization_id: ids.organization, limit: 1 });
+  assert.equal(cursorCodec.decode(memberPage.next_cursor, { resource: "members", tenant_id: ACTOR.organization_id, member_id: ACTOR.member_id, direction: "asc" }).id, ids.member);
+  assert.equal(cursorCodec.decode(invitationPage.next_cursor, { resource: "invitations", tenant_id: ACTOR.organization_id, member_id: ACTOR.member_id, direction: "asc" }).id, ids.invitation);
+  await service.listMembers({ actor: ACTOR, organization_id: ids.organization, limit: 1, cursor: memberPage.next_cursor });
+  await service.listInvitations({ actor: ACTOR, organization_id: ids.organization, limit: 1, cursor: invitationPage.next_cursor });
+  assert.deepEqual(calls.listMembers[1], { organization_id: ids.organization, actor_member_id: ids.owner, limit: 1, after_created_at: NOW, after_id: ids.member });
+  assert.deepEqual(calls.listInvitations[1], { organization_id: ids.organization, actor_member_id: ids.owner, limit: 1, after_created_at: NOW, after_id: ids.invitation });
+  await assert.rejects(() => service.listInvitations({ actor: ACTOR, organization_id: ids.organization, limit: 1, cursor: memberPage.next_cursor }), { code: ORGANIZATION_SERVICE_ERROR_CODES.INVALID_INPUT });
+});
+
 test("forwards mutation idempotency keys and injected timestamps and UUIDs", async () => {
   const { service, calls } = serviceFixture();
   const key = "mutation-key-1";
@@ -113,6 +167,7 @@ test("forwards mutation idempotency keys and injected timestamps and UUIDs", asy
   assert.equal(calls.createOrganizationWithOwner[0].idempotency_key, key);
   assert.equal(calls.renameOrganization[0].idempotency_key, key);
   assert.equal(calls.updateMemberRole[0].idempotency_key, key);
+  assert.equal(calls.updateMemberRole[0].revoked_at, NOW);
   assert.equal(calls.removeMember[0].removed_at, NOW);
   assert.equal(calls.removeMember[0].idempotency_key, key);
   assert.equal(calls.createInvitation[0].invitation_id, ids.invitation2);
@@ -182,4 +237,20 @@ test("turns repository nulls and failures into stable, non-secret service errors
     () => finalOwner.removeMember({ actor: ACTOR, organization_id: ids.organization, member_id: ids.owner, expected_version: 1, idempotency_key: "remove-owner-1" }),
     (error) => error.code === ORGANIZATION_SERVICE_ERROR_CODES.FORBIDDEN && !JSON.stringify(error).includes("constraint detail")
   );
+});
+
+test("preserves stale-versus-absent scope errors without exposing repository details", async () => {
+  const cases = [
+    ["ERR_VERSION_CONFLICT", ORGANIZATION_SERVICE_ERROR_CODES.VERSION_CONFLICT],
+    ["ERR_MEMBER_NOT_FOUND", ORGANIZATION_SERVICE_ERROR_CODES.MEMBER_NOT_FOUND],
+    ["ERR_FORBIDDEN", ORGANIZATION_SERVICE_ERROR_CODES.FORBIDDEN]
+  ];
+  for (const [repositoryCode, serviceCode] of cases) {
+    const error = Object.assign(new Error("cross-tenant membership detail"), { code: repositoryCode });
+    const { service } = serviceFixture({ repository: { updateMemberRole: error } });
+    await assert.rejects(
+      () => service.updateMemberRole({ actor: ACTOR, organization_id: ids.organization, member_id: ids.member, role: "admin", expected_version: 1, idempotency_key: "scope-error-1" }),
+      (caught) => caught instanceof OrganizationServiceError && caught.code === serviceCode && !JSON.stringify(caught).includes("cross-tenant membership detail")
+    );
+  }
 });

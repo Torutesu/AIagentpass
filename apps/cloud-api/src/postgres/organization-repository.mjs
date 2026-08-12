@@ -9,6 +9,8 @@ const RFC3339 = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?(?:Z|[+-]\d{2
 const ZERO_HASH = "0".repeat(64);
 const IDEMPOTENCY_KEY = /^[A-Za-z0-9._~-]{8,255}$/;
 const IDEMPOTENCY_TTL = "24 hours";
+const DEFAULT_PAGE_SIZE = 50;
+const MAX_PAGE_SIZE = 100;
 
 const READ_MEMBER_COLUMNS = `m.id AS member_id,m.github_subject,m.display_name,m.created_at AS member_created_at,
   ms.organization_id,ms.id AS membership_id,ms.role,ms.status,ms.version,ms.created_at,ms.updated_at`;
@@ -36,25 +38,55 @@ export function createPostgresOrganizationRepository({ client, now = () => new D
 
   async function listOrganizationsForMember(input = {}) {
     const memberId = uuid(input.member_id ?? input.memberId);
+    const hasPaging = input.limit !== undefined || input.after_created_at !== undefined || input.after_id !== undefined;
+    if (!hasPaging) {
+      const result = await client.query(`SELECT o.id AS organization_id,o.name,o.version,o.created_at,o.updated_at,
+        m.id AS membership_id,m.role,m.status,m.version AS membership_version,m.created_at AS membership_created_at,
+        m.updated_at AS membership_updated_at
+        FROM memberships m JOIN organizations o ON o.id=m.organization_id
+        WHERE m.member_id=$1 AND m.status='active'
+        ORDER BY o.created_at ASC,o.id ASC LIMIT 128`, [memberId]);
+      return (result.rows ?? []).map(safeOrganizationMembershipRow);
+    }
+    const limit = input.limit === undefined ? DEFAULT_PAGE_SIZE : pageLimit(input.limit);
+    const hasAfterCreatedAt = input.after_created_at !== undefined;
+    const hasAfterId = input.after_id !== undefined;
+    if (hasAfterCreatedAt !== hasAfterId) throw new TypeError("organization cursor position is incomplete");
+    const params = [memberId];
+    // node-postgres materializes timestamptz values as millisecond-precision
+    // Date objects. Compare and sort at that same precision so a row with
+    // PostgreSQL-only microseconds cannot reappear after a cursor round-trip.
+    const after = hasAfterCreatedAt ? ` AND (date_trunc('milliseconds',o.created_at),o.id) > ($2,$3)` : "";
+    if (hasAfterCreatedAt) {
+      params.push(timestamp(input.after_created_at, "after_created_at"));
+      params.push(uuid(input.after_id));
+    }
+    params.push(limit + 1);
+    const limitParameter = `$${params.length}`;
     const result = await client.query(`SELECT o.id AS organization_id,o.name,o.version,o.created_at,o.updated_at,
       m.id AS membership_id,m.role,m.status,m.version AS membership_version,m.created_at AS membership_created_at,
       m.updated_at AS membership_updated_at
       FROM memberships m JOIN organizations o ON o.id=m.organization_id
-      WHERE m.member_id=$1 AND m.status='active'
-      ORDER BY o.created_at ASC,o.id ASC LIMIT 128`, [memberId]);
+      WHERE m.member_id=$1 AND m.status='active'${after}
+      ORDER BY date_trunc('milliseconds',o.created_at) ASC,o.id ASC LIMIT ${limitParameter}`, params);
     return (result.rows ?? []).map(safeOrganizationMembershipRow);
   }
 
   async function listMembers(input = {}) {
     const organizationId = uuid(input.organization_id ?? input.organizationId ?? input.actor?.organization_id);
     const actorId = actorMemberId(input);
+    const paging = keysetPagination(input, "member");
+    const params = [organizationId, actorId];
+    const after = paging.after ? ` AND (date_trunc('milliseconds',ms.created_at),ms.id) > ($3,$4)` : "";
+    if (paging.after) params.push(paging.after.createdAt, paging.after.id);
+    params.push(paging.limit + 1);
     const result = await client.query(`SELECT ${READ_MEMBER_COLUMNS}
       FROM memberships ms JOIN members m ON m.id=ms.member_id
       WHERE ms.organization_id=$1 AND ms.status IN ('active','revoked')
         AND EXISTS (SELECT 1 FROM memberships actor
           WHERE actor.organization_id=$1 AND actor.member_id=$2 AND actor.status='active'
-            AND actor.role IN ('owner','admin','auditor'))
-      ORDER BY m.created_at ASC,m.id ASC LIMIT 512`, [organizationId, actorId]);
+            AND actor.role IN ('owner','admin','auditor'))${after}
+      ORDER BY date_trunc('milliseconds',ms.created_at) ASC,ms.id ASC LIMIT $${params.length}`, params);
     return (result.rows ?? []).map(safeMemberRow);
   }
 
@@ -139,7 +171,13 @@ export function createPostgresOrganizationRepository({ client, now = () => new D
     const roleValue = input.role;
     const role = memberRole(roleValue);
     const expectedVersion = version(input.expected_version ?? input.expectedVersion);
+    const sessionsRevokedAt = input.revoked_at ?? input.revokedAt ?? now();
+    timestamp(sessionsRevokedAt, "revoked_at");
     return mutate(organizationId, input, "membership.role_update", { organization_id: organizationId, actor_id: actorId, member_id: memberId, role, expected_version: expectedVersion }, async (tx) => {
+      const actor = await requireMembershipMutationActor(tx, organizationId, actorId);
+      const target = await requireActiveTargetMembership(tx, organizationId, memberId, expectedVersion);
+      if (target.role === "owner" && actor.role !== "owner") throw new OrganizationRepositoryError("ERR_FORBIDDEN", "membership operation is not allowed");
+      if (role === "owner" && actor.role !== "owner") throw new OrganizationRepositoryError("ERR_FORBIDDEN", "membership operation is not allowed");
       const result = await tx.query(`UPDATE memberships target SET role=$4,version=target.version+1,updated_at=clock_timestamp()
         FROM memberships actor
         WHERE target.organization_id=$1 AND target.member_id=$2 AND target.version=$3
@@ -152,6 +190,7 @@ export function createPostgresOrganizationRepository({ client, now = () => new D
           target.version,target.created_at,target.updated_at`, [organizationId, memberId, expectedVersion, role, actorId]);
       if ((result.rowCount ?? result.rows?.length ?? 0) !== 1) return null;
       const row = safeMembershipRow(result.rows[0]);
+      await revokeMemberSessions(tx, { organizationId, memberId, revokedAt: sessionsRevokedAt, reason: "membership_role_changed" });
       await appendMutationEvents(tx, { organizationId, actorId, action: "membership.role_updated", targetType: "membership", targetId: row.membership_id, details: { member_id: row.member_id, role, version: row.version } });
       return row;
     }, 200);
@@ -165,6 +204,9 @@ export function createPostgresOrganizationRepository({ client, now = () => new D
     const removedAt = input.removed_at ?? input.removedAt ?? now();
     timestamp(removedAt, "removed_at");
     return mutate(organizationId, input, "membership.remove", { organization_id: organizationId, actor_id: actorId, member_id: memberId, expected_version: expectedVersion }, async (tx) => {
+      const actor = await requireMembershipMutationActor(tx, organizationId, actorId);
+      const target = await requireActiveTargetMembership(tx, organizationId, memberId, expectedVersion);
+      if (target.role === "owner" && actor.role !== "owner") throw new OrganizationRepositoryError("ERR_FORBIDDEN", "membership operation is not allowed");
       const result = await tx.query(`UPDATE memberships target SET status='revoked',version=target.version+1,updated_at=$4
         FROM memberships actor
         WHERE target.organization_id=$1 AND target.member_id=$2 AND target.version=$3 AND target.status='active'
@@ -175,6 +217,7 @@ export function createPostgresOrganizationRepository({ client, now = () => new D
           target.version,target.created_at,target.updated_at`, [organizationId, memberId, expectedVersion, removedAt, actorId]);
       if ((result.rowCount ?? result.rows?.length ?? 0) !== 1) return null;
       const row = safeMembershipRow(result.rows[0]);
+      await revokeMemberSessions(tx, { organizationId, memberId, revokedAt: removedAt, reason: "membership_removed" });
       await appendMutationEvents(tx, { organizationId, actorId, action: "membership.removed", targetType: "membership", targetId: row.membership_id, details: { member_id: row.member_id, version: row.version, removed_at: removedAt } });
       return row;
     }, 200);
@@ -207,13 +250,18 @@ export function createPostgresOrganizationRepository({ client, now = () => new D
   async function listInvitations(input = {}) {
     const organizationId = uuid(input.organization_id ?? input.organizationId ?? input.actor?.organization_id);
     const actorId = actorMemberId(input);
+    const paging = keysetPagination(input, "invitation");
+    const params = [organizationId, actorId];
+    const after = paging.after ? ` AND (date_trunc('milliseconds',i.created_at),i.id) > ($3,$4)` : "";
+    if (paging.after) params.push(paging.after.createdAt, paging.after.id);
+    params.push(paging.limit + 1);
     const result = await client.query(`SELECT ${SAFE_INVITATION_COLUMNS}
       FROM organization_invitations i
       WHERE i.organization_id=$1
         AND EXISTS (SELECT 1 FROM memberships actor
           WHERE actor.organization_id=$1 AND actor.member_id=$2 AND actor.status='active'
-            AND actor.role IN ('owner','admin','auditor'))
-      ORDER BY i.created_at ASC,i.id ASC LIMIT 512`, [organizationId, actorId]);
+            AND actor.role IN ('owner','admin','auditor'))${after}
+      ORDER BY date_trunc('milliseconds',i.created_at) ASC,i.id ASC LIMIT $${params.length}`, params);
     const evaluatedAt = timestamp(now(), "evaluated_at");
     return (result.rows ?? []).map((row) => safeInvitationRow(row, evaluatedAt));
   }
@@ -317,6 +365,49 @@ export function createPostgresOrganizationRepository({ client, now = () => new D
 
   async function lockOrganization(tx, organizationId) {
     await tx.query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", [`agentpass:organization:${organizationId}`]);
+  }
+
+  async function requireMembershipMutationActor(tx, organizationId, actorId) {
+    const result = await tx.query(`SELECT role,status
+      FROM memberships
+      WHERE organization_id=$1 AND member_id=$2
+      FOR UPDATE`, [organizationId, actorId]);
+    const row = result.rows?.[0];
+    if ((result.rowCount ?? result.rows?.length ?? 0) !== 1 || row.status !== "active" || !["owner", "admin"].includes(row.role)) {
+      throw new OrganizationRepositoryError("ERR_FORBIDDEN", "membership operation is not allowed");
+    }
+    return { role: memberRole(row.role) };
+  }
+
+  async function requireActiveTargetMembership(tx, organizationId, memberId, expectedVersion) {
+    const result = await tx.query(`SELECT organization_id,id AS membership_id,member_id,role,status,version,created_at,updated_at
+      FROM memberships
+      WHERE organization_id=$1 AND member_id=$2
+      FOR UPDATE`, [organizationId, memberId]);
+    const row = result.rows?.[0];
+    if ((result.rowCount ?? result.rows?.length ?? 0) !== 1 || row.status !== "active") {
+      throw new OrganizationRepositoryError("ERR_MEMBER_NOT_FOUND", "organization member was not found");
+    }
+    if (returnedVersion(row.version) !== expectedVersion) {
+      throw new OrganizationRepositoryError("ERR_VERSION_CONFLICT", "organization member version is stale");
+    }
+    return safeMembershipRow(row);
+  }
+
+  async function revokeMemberSessions(tx, { organizationId, memberId, revokedAt, reason }) {
+    await tx.query(`UPDATE webauthn_challenges
+      SET consumed_at=$3,status='consumed'
+      WHERE organization_id=$1 AND member_id=$2
+        AND status IN ('pending','consuming') AND consumed_at IS NULL`, [organizationId, memberId, revokedAt]);
+    await tx.query(`UPDATE human_sessions
+      SET revoked_at=$3,revoke_reason=$4,version=version+1,
+        recent_auth_at=NULL,recent_auth_challenge_id=NULL,
+        recent_auth_organization_id=NULL,recent_auth_operation=NULL,
+        recent_auth_consumed_at=NULL
+      WHERE organization_id=$1 AND member_id=$2 AND revoked_at IS NULL`, [organizationId, memberId, revokedAt, reason]);
+    await tx.query(`UPDATE capabilities
+      SET revoked_at=$3
+      WHERE organization_id=$1 AND issued_by_member_id=$2 AND revoked_at IS NULL`, [organizationId, memberId, revokedAt]);
   }
 
   async function acquireIdempotency(tx, { organizationId, actorPrincipal, idempotencyKey, requestHash }) {
@@ -526,6 +617,14 @@ function uuid(value) { if (typeof value !== "string" || !UUID.test(value)) throw
 function text(value, max, field) { if (typeof value !== "string" || value.length < 1 || value.length > max || CONTROL_CHARACTERS.test(value)) throw new TypeError(`${field} is invalid`); return value; }
 function version(value) { if (!Number.isSafeInteger(value) || value < 1) throw new TypeError("version is invalid"); return value; }
 function timestamp(value, field) { if (typeof value !== "string" || !RFC3339.test(value)) throw new TypeError(`${field} is invalid`); const date = new Date(value); if (!Number.isFinite(date.getTime())) throw new TypeError(`${field} is invalid`); return value; }
+function pageLimit(value) { if (!Number.isSafeInteger(value) || value < 1 || value > MAX_PAGE_SIZE) throw new TypeError("limit is invalid"); return value; }
+function keysetPagination(input, resource) {
+  const limit = input.limit === undefined ? DEFAULT_PAGE_SIZE : pageLimit(input.limit);
+  const hasCreatedAt = input.after_created_at !== undefined;
+  const hasId = input.after_id !== undefined;
+  if (hasCreatedAt !== hasId) throw new TypeError(`${resource} cursor position is incomplete`);
+  return { limit, after: hasCreatedAt ? { createdAt: timestamp(input.after_created_at, "after_created_at"), id: uuid(input.after_id) } : null };
+}
 function nullableTimestamp(value, field) { return value === null || value === undefined ? null : timestamp(value, field); }
 function returnedVersion(value) { const result = typeof value === "bigint" ? Number(value) : typeof value === "string" && /^\d+$/.test(value) ? Number(value) : value; return version(result); }
 function returnedSequence(value) { const result = typeof value === "bigint" ? Number(value) : typeof value === "string" && /^\d+$/.test(value) ? Number(value) : value; if (!Number.isSafeInteger(result) || result < 0) throw new TypeError("audit sequence is invalid"); return result; }

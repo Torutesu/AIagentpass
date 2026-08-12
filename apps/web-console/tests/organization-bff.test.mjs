@@ -36,13 +36,13 @@ test("forwards only the exact Organization API allow-list with bounded query and
   const cases = [
     ["/api/auth/organizations?cursor=next_page&limit=25", "GET", undefined, {}, "https://cloud.example.test/api/auth/organizations?limit=25&cursor=next_page"],
     ["/api/auth/organizations", "POST", { name: "AgentPass Team" }, mutation, "https://cloud.example.test/api/auth/organizations"],
-    [`/api/auth/organizations/${organizationId}`, "PATCH", { name: "Renamed", expected_version: 2 }, mutation, `https://cloud.example.test/api/auth/organizations/${organizationId}`],
+    [`/api/auth/organizations/${organizationId}`, "PATCH", { name: "Renamed" }, { ...mutation, "if-match": '"2"' }, `https://cloud.example.test/api/auth/organizations/${organizationId}`],
     [`/api/auth/organizations/${organizationId}/members?limit=10`, "GET", undefined, {}, `https://cloud.example.test/api/auth/organizations/${organizationId}/members?limit=10`],
-    [`/api/auth/organizations/${organizationId}/members/${memberId}/role`, "PATCH", { role: "admin", expected_version: 3 }, protectedMutation, `https://cloud.example.test/api/auth/organizations/${organizationId}/members/${memberId}/role`],
-    [`/api/auth/organizations/${organizationId}/members/${memberId}/remove`, "POST", { expected_version: 4 }, protectedMutation, `https://cloud.example.test/api/auth/organizations/${organizationId}/members/${memberId}/remove`],
+    [`/api/auth/organizations/${organizationId}/members/${memberId}/role`, "PATCH", { role: "admin" }, { ...protectedMutation, "if-match": '"3"' }, `https://cloud.example.test/api/auth/organizations/${organizationId}/members/${memberId}/role`],
+    [`/api/auth/organizations/${organizationId}/members/${memberId}/remove`, "POST", undefined, { ...protectedMutation, "if-match": '"4"' }, `https://cloud.example.test/api/auth/organizations/${organizationId}/members/${memberId}/remove`],
     [`/api/auth/organizations/${organizationId}/invitations`, "GET", undefined, {}, `https://cloud.example.test/api/auth/organizations/${organizationId}/invitations`],
     [`/api/auth/organizations/${organizationId}/invitations`, "POST", { role: "viewer", expires_at: "2026-08-19T00:00:00.000Z" }, mutation, `https://cloud.example.test/api/auth/organizations/${organizationId}/invitations`],
-    [`/api/auth/organizations/${organizationId}/invitations/${invitationId}/revoke`, "POST", { expected_version: 1 }, mutation, `https://cloud.example.test/api/auth/organizations/${organizationId}/invitations/${invitationId}/revoke`],
+    [`/api/auth/organizations/${organizationId}/invitations/${invitationId}/revoke`, "POST", undefined, { ...mutation, "if-match": '"1"' }, `https://cloud.example.test/api/auth/organizations/${organizationId}/invitations/${invitationId}/revoke`],
     ["/api/auth/invitations/accept", "POST", { one_time_token: token }, mutation, "https://cloud.example.test/api/auth/invitations/accept"]
   ];
   for (const [path, method, body, headers, cloudUrl] of cases) {
@@ -76,6 +76,36 @@ test("fails closed before Cloud for route, query, schema, idempotency, and recen
   ];
   for (const item of invalid) assert.ok((await api.handle(item)).status >= 400);
   assert.equal(calls, 0);
+});
+
+test("forwards If-Match only for versioned Organization mutations", async () => {
+  const calls = [];
+  const api = bridge(async (url, init) => {
+    calls.push({ url: String(url), init });
+    return new Response(JSON.stringify({ ok: true }), { headers: { "content-type": "application/json" } });
+  });
+  const path = `/api/auth/organizations/${organizationId}`;
+  const response = await api.handle(request(path, {
+    method: "PATCH",
+    body: { name: "Renamed" },
+    headers: { "idempotency-key": idempotency, "if-match": '"2"' },
+  }));
+  assert.equal(response.status, 200);
+  assert.equal(calls[0].init.headers.get("if-match"), '"2"');
+
+  const rejected = await api.handle(request("/api/auth/organizations", {
+    headers: { "if-match": '"1"' },
+  }));
+  assert.equal(rejected.status, 400);
+  assert.equal(calls.length, 1);
+
+  const malformed = await api.handle(request(path, {
+    method: "PATCH",
+    body: { name: "Renamed" },
+    headers: { "idempotency-key": idempotency, "if-match": "2" },
+  }));
+  assert.equal(malformed.status, 400);
+  assert.equal(calls.length, 1);
 });
 
 test("never relays invitation or session cookies from Organization responses", async () => {

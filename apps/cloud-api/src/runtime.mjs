@@ -20,13 +20,14 @@ export async function createCloudRuntime({ env = process.env, logger = console, 
   try { privateKey = crypto.createPrivateKey(privateKeyPEM); } catch { throw new Error("Cloud bundle private key is invalid"); }
   if (privateKey.asymmetricKeyType !== "ed25519") throw new Error("Cloud bundle private key must be Ed25519");
   const store = await createCloudStore({ dataDir: config.dataDir });
+  const cursorSecret = config.humanAuth ? requireHumanCursorSecret(env.AGENTPASS_HUMAN_CURSOR_SECRET) : undefined;
   let postgresRuntime;
   let humanAuthRuntime;
   let server;
   try {
     if (config.humanAuth) {
       postgresRuntime = await postgresFactory({ env, applicationVersion: "0.18.0" });
-      humanAuthRuntime = humanAuthFactory({ postgresRuntime, tokenRecords, origin: config.humanAuth.origin, rpId: config.humanAuth.rpId, identityProvider: config.humanAuth.identityProvider });
+      humanAuthRuntime = humanAuthFactory({ postgresRuntime, tokenRecords, origin: config.humanAuth.origin, rpId: config.humanAuth.rpId, cursorSecret, identityProvider: config.humanAuth.identityProvider });
     }
     server = createCloudApi({
       store,
@@ -89,7 +90,16 @@ function humanAuthConfig(env) {
   if (parsed.protocol !== "https:" || parsed.origin !== origin || parsed.pathname !== "/" || parsed.username || parsed.password || parsed.search || parsed.hash) throw new Error("AGENTPASS_CONSOLE_ORIGIN is invalid");
   if (!/^[A-Za-z0-9](?:[A-Za-z0-9.-]*[A-Za-z0-9])?$/.test(rpId) || (parsed.hostname !== rpId && !parsed.hostname.endsWith(`.${rpId}`))) throw new Error("AGENTPASS_WEBAUTHN_RP_ID is invalid");
   if (!/^[a-z][a-z0-9._-]{0,63}$/.test(identityProvider)) throw new Error("AGENTPASS_IDENTITY_PROVIDER is invalid");
+  requireHumanCursorSecret(env.AGENTPASS_HUMAN_CURSOR_SECRET);
   return Object.freeze({ origin, rpId, identityProvider });
+}
+
+function requireHumanCursorSecret(value) {
+  if (typeof value !== "string" || !/^[A-Za-z0-9_-]{43}$/u.test(value)) throw new Error("AGENTPASS_HUMAN_CURSOR_SECRET must be an exact 32-byte base64url secret");
+  let bytes;
+  try { bytes = Buffer.from(value, "base64url"); } catch { throw new Error("AGENTPASS_HUMAN_CURSOR_SECRET must be an exact 32-byte base64url secret"); }
+  if (bytes.length !== 32 || bytes.toString("base64url") !== value) throw new Error("AGENTPASS_HUMAN_CURSOR_SECRET must be an exact 32-byte base64url secret");
+  return value;
 }
 
 function readProtectedJson(file, label, maxBytes) {

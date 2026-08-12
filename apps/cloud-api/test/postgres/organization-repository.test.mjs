@@ -53,6 +53,9 @@ class QueueClient {
     if (text.startsWith("DELETE FROM idempotency_records")) return response([], 1);
     if (text.startsWith("UPDATE idempotency_records")) return response([], 1);
     if (this.responses.length > 0) return this.responses.shift();
+    if (text.startsWith("SELECT role,status")) return response([{ role: "owner", status: "active" }]);
+    if (text.startsWith("SELECT organization_id,id AS membership_id")) return response([membershipRow({ member_id: ids.viewer, role: "viewer" })]);
+    if (text.startsWith("UPDATE human_sessions")) return response([], 0);
     return { rows: [], rowCount: 0 };
   }
 }
@@ -113,6 +116,18 @@ test("lists organizations only through active memberships and returns no secret 
   assert.deepEqual(client.calls[0].params, [ids.viewer]);
 });
 
+test("uses a tuple keyset and fetches one extra organization row for cursor pagination", async () => {
+  const client = new QueueClient([response([
+    orgRow({ membership_id: ids.membership, role: "viewer", status: "active", membership_version: 1, membership_created_at: NOW, membership_updated_at: NOW }),
+    orgRow({ organization_id: ids.organization2, membership_id: ids.membership, role: "viewer", status: "active", membership_version: 1, membership_created_at: NOW, membership_updated_at: NOW, created_at: "2026-08-12T00:00:01.000Z" })
+  ])]);
+  const result = await repo(client).listOrganizationsForMember({ member_id: ids.viewer, limit: 1, after_created_at: NOW, after_id: ids.organization });
+  assert.equal(result.length, 2);
+  assert.match(client.calls[0].text, /\(date_trunc\('milliseconds',o\.created_at\),o\.id\) > \(\$2,\$3\)/);
+  assert.match(client.calls[0].text, /ORDER BY date_trunc\('milliseconds',o\.created_at\) ASC,o\.id ASC LIMIT \$4/);
+  assert.deepEqual(client.calls[0].params, [ids.viewer, NOW, ids.organization, 2]);
+});
+
 test("listMembers tenant-scopes the organization and requires an active actor", async () => {
   const row = { member_id: ids.viewer, github_subject: "github-viewer", display_name: "Viewer", member_created_at: NOW, organization_id: ids.organization, membership_id: ids.membership, role: "viewer", status: "active", version: "2", created_at: NOW, updated_at: NOW, token_hash: TOKEN };
   const client = new QueueClient([response([row])]);
@@ -122,7 +137,7 @@ test("listMembers tenant-scopes the organization and requires an active actor", 
   assert.equal(Object.hasOwn(result[0], "token_hash"), false);
   assert.match(client.calls[0].text, /ms\.organization_id=\$1/);
   assert.match(client.calls[0].text, /actor\.organization_id=\$1 AND actor\.member_id=\$2 AND actor\.status='active'/);
-  assert.deepEqual(client.calls[0].params, [ids.organization, ids.owner]);
+  assert.deepEqual(client.calls[0].params, [ids.organization, ids.owner, 51]);
 });
 
 test("creates an organization and owner, then appends audit and outbox in the same transaction", async () => {
@@ -182,13 +197,51 @@ test("rename and role mutations use optimistic versions and return null out of s
   assert.match(renameSql.text, /actor\.role IN \('owner','admin'\)/);
   assert.equal(renameClient.calls.some((call) => call.text.startsWith("DELETE FROM idempotency_records") && call.text.includes("request_hash=$4")), true);
 
-  const roleClient = new QueueClient([response(), response(), response([membershipRow({ member_id: ids.viewer, role: "admin", version: 2 })]), response(), response([{ sequence: 0, event_hash: ZERO_HASH }]), response(), response(), response(), response()]);
+  const roleClient = new QueueClient([response(), response(), response([{ role: "owner", status: "active" }]), response([membershipRow({ member_id: ids.viewer, role: "viewer" })]), response([membershipRow({ member_id: ids.viewer, role: "admin", version: 2 })]), response(), response(), response([{ sequence: 0, event_hash: ZERO_HASH }]), response(), response(), response(), response()]);
   const role = await repo(roleClient).updateMemberRole({ organization_id: ids.organization, actor_member_id: ids.owner, member_id: ids.viewer, role: "admin", expected_version: 1, idempotency_key: "role-update-1" });
   assert.equal(role.role, "admin");
   const roleSql = roleClient.calls.find((call) => call.text.startsWith("UPDATE memberships"));
   assert.match(roleSql.text, /target\.version=\$3/);
   assert.match(roleSql.text, /target\.organization_id=\$1/);
   assert.deepEqual(roleSql.params.slice(0, 5), [ids.organization, ids.viewer, 1, "admin", ids.owner]);
+  const roleSessionRevoke = roleClient.calls.find((call) => call.text.startsWith("UPDATE human_sessions"));
+  assert.match(roleSessionRevoke.text, /recent_auth_at=NULL/);
+  assert.match(roleSessionRevoke.text, /recent_auth_challenge_id=NULL/);
+  assert.deepEqual(roleSessionRevoke.params, [ids.organization, ids.viewer, NOW, "membership_role_changed"]);
+  const roleChallengeConsume = roleClient.calls.find((call) => call.text.startsWith("UPDATE webauthn_challenges"));
+  assert.match(roleChallengeConsume.text, /status='consumed'/);
+  assert.deepEqual(roleChallengeConsume.params, [ids.organization, ids.viewer, NOW]);
+  const roleCapabilityRevoke = roleClient.calls.find((call) => call.text.startsWith("UPDATE capabilities"));
+  assert.match(roleCapabilityRevoke.text, /issued_by_member_id=\$2/);
+  assert.deepEqual(roleCapabilityRevoke.params, [ids.organization, ids.viewer, NOW]);
+});
+
+test("classifies stale, absent, and out-of-scope member mutations without cross-tenant disclosure", async () => {
+  const staleClient = new QueueClient([
+    response(), response(), response([{ role: "owner", status: "active" }]),
+    response([membershipRow({ member_id: ids.viewer, role: "viewer", version: 2 })])
+  ]);
+  await assert.rejects(
+    repo(staleClient).updateMemberRole({ organization_id: ids.organization, actor_member_id: ids.owner, member_id: ids.viewer, role: "admin", expected_version: 1, idempotency_key: "role-stale-1" }),
+    (error) => error instanceof OrganizationRepositoryError && error.code === "ERR_VERSION_CONFLICT"
+  );
+  assert.equal(staleClient.calls.some((call) => call.text.startsWith("UPDATE memberships")), false);
+
+  const absentClient = new QueueClient([
+    response(), response(), response([{ role: "owner", status: "active" }]), response()
+  ]);
+  await assert.rejects(
+    repo(absentClient).removeMember({ organization_id: ids.organization, actor_member_id: ids.owner, member_id: ids.viewer, expected_version: 1, idempotency_key: "member-absent-1" }),
+    (error) => error instanceof OrganizationRepositoryError && error.code === "ERR_MEMBER_NOT_FOUND"
+  );
+  assert.equal(absentClient.calls.some((call) => call.text.startsWith("UPDATE memberships")), false);
+
+  const outOfScopeClient = new QueueClient([response(), response(), response([{ role: "viewer", status: "active" }])]);
+  await assert.rejects(
+    repo(outOfScopeClient).removeMember({ organization_id: ids.organization2, actor_member_id: ids.owner, member_id: ids.viewer, expected_version: 1, idempotency_key: "member-scope-1" }),
+    (error) => error instanceof OrganizationRepositoryError && error.code === "ERR_FORBIDDEN"
+  );
+  assert.equal(outOfScopeClient.calls.some((call) => call.text.startsWith("SELECT organization_id,id AS membership_id")), false);
 });
 
 test("idempotency acquisition is serialized after the organization lock and before the mutation", async () => {
@@ -249,14 +302,19 @@ test("same canonical request replays without running the mutation, while a diffe
   assert.equal(conflictClient.calls.at(-1).text, "ROLLBACK");
 });
 
-test("removeMember is role-gated, versioned, tenant-scoped, and audit-bound", async () => {
-  const client = new QueueClient([response(), response(), response([membershipRow({ member_id: ids.viewer, role: "viewer", status: "revoked", version: 2 })]), response(), response([{ sequence: 0, event_hash: ZERO_HASH }]), response(), response(), response(), response()]);
+test("removeMember is role-gated, versioned, tenant-scoped, session-revoking, and audit-bound", async () => {
+  const client = new QueueClient([response(), response(), response([{ role: "owner", status: "active" }]), response([membershipRow({ member_id: ids.viewer, role: "viewer" })]), response([membershipRow({ member_id: ids.viewer, role: "viewer", status: "revoked", version: 2 })]), response(), response(), response([{ sequence: 0, event_hash: ZERO_HASH }]), response(), response(), response(), response()]);
   const result = await repo(client).removeMember({ organization_id: ids.organization, actor_member_id: ids.owner, member_id: ids.viewer, expected_version: 1, removed_at: NOW, idempotency_key: "remove-member-1" });
   assert.equal(result.status, "revoked");
   const update = client.calls.find((call) => call.text.startsWith("UPDATE memberships"));
   assert.match(update.text, /status='revoked'/);
   assert.match(update.text, /actor\.status='active'/);
   assert.match(update.text, /target\.organization_id=\$1/);
+  const sessionRevoke = client.calls.find((call) => call.text.startsWith("UPDATE human_sessions"));
+  assert.match(sessionRevoke.text, /recent_auth_consumed_at=NULL/);
+  assert.deepEqual(sessionRevoke.params, [ids.organization, ids.viewer, NOW, "membership_removed"]);
+  assert.equal(client.calls.some((call) => call.text.startsWith("UPDATE webauthn_challenges") && call.text.includes("status='consumed'")), true);
+  assert.equal(client.calls.some((call) => call.text.startsWith("UPDATE capabilities") && call.text.includes("issued_by_member_id=$2")), true);
   assert.equal(client.calls.filter((call) => call.text.startsWith("INSERT INTO admin_audit_events")).length, 1);
 });
 

@@ -7,7 +7,7 @@ import {
 
 const ORGANIZATIONS_PATH = "/api/auth/organizations";
 const ACCEPT_INVITATION_PATH = "/api/auth/invitations/accept";
-const DEFAULT_PAGE_SIZE = 25;
+const DEFAULT_PAGE_SIZE = 50;
 const MAX_PAGE_SIZE = 100;
 const MAX_BODY_BYTES = 16 * 1024;
 const MAX_HEADER_BYTES = 8 * 1024;
@@ -202,13 +202,15 @@ export function createHumanOrganizationsHttpApi({
       if (route.name === "listInvitations") return await listInvitations(session, route, request);
 
       const idempotencyKey = requiredIdempotencyKey(request);
-      const body = await readJsonBody(request, maxBodyBytes);
+      const noBodyMutation = route.name === "removeMember" || route.name === "revokeInvitation";
+      if (noBodyMutation && hasBody(request)) throw invalidRequest();
+      const body = noBodyMutation ? {} : await readJsonBody(request, maxBodyBytes);
       if (route.name === "createOrganization") return await createOrganization(session, body, idempotencyKey);
-      if (route.name === "renameOrganization") return await renameOrganization(session, route, body, idempotencyKey);
+      if (route.name === "renameOrganization") return await renameOrganization(session, route, body, idempotencyKey, request);
       if (route.name === "updateMemberRole") return await updateMemberRole(session, route, body, idempotencyKey, request);
       if (route.name === "removeMember") return await removeMember(session, route, body, idempotencyKey, request);
       if (route.name === "createInvitation") return await createInvitation(session, route, body, idempotencyKey);
-      if (route.name === "revokeInvitation") return await revokeInvitation(session, route, body, idempotencyKey);
+      if (route.name === "revokeInvitation") return await revokeInvitation(session, route, body, idempotencyKey, request);
       return await acceptInvitation(session, body, idempotencyKey);
     } catch (error) {
       return mapError(error);
@@ -267,12 +269,12 @@ export function createHumanOrganizationsHttpApi({
     }
   }
 
-  async function renameOrganization(actor, route, body, idempotencyKey) {
+  async function renameOrganization(actor, route, body, idempotencyKey, request) {
     requireOrganization(actor, route.organizationId);
     requireRole(actor, ADMIN_OR_OWNER);
-    const input = parseBody(body, new Set(["name", "expected_version"]));
+    const input = parseBody(body, new Set(["name"]));
     const name = requiredName(input.name);
-    const expectedVersion = requiredVersion(input.expected_version);
+    const expectedVersion = requiredExpectedVersion(request);
     try {
       const result = await organizationService.renameOrganization({ actor, organization_id: route.organizationId, name, expected_version: expectedVersion, idempotency_key: idempotencyKey });
       return response(200, { organization: normalizeOrganization(result?.organization ?? result, route.organizationId) });
@@ -296,9 +298,9 @@ export function createHumanOrganizationsHttpApi({
   async function updateMemberRole(actor, route, body, idempotencyKey, request) {
     requireOrganization(actor, route.organizationId);
     requireRole(actor, ADMIN_OR_OWNER);
-    const input = parseBody(body, new Set(["role", "expected_version"]));
+    const input = parseBody(body, new Set(["role"]));
     if (typeof input.role !== "string" || !ROLES.has(input.role)) throw invalidRequest();
-    const expectedVersion = requiredVersion(input.expected_version);
+    const expectedVersion = requiredExpectedVersion(request);
     await requireRecentAuth(actor, route.organizationId, request, HUMAN_ORGANIZATIONS_RECENT_AUTH_OPERATIONS.updateMemberRole);
     try {
       const result = await organizationService.updateMemberRole({ actor, organization_id: route.organizationId, member_id: route.memberId, role: input.role, expected_version: expectedVersion, idempotency_key: idempotencyKey });
@@ -311,8 +313,8 @@ export function createHumanOrganizationsHttpApi({
   async function removeMember(actor, route, body, idempotencyKey, request) {
     requireOrganization(actor, route.organizationId);
     requireRole(actor, ADMIN_OR_OWNER);
-    const input = parseBody(body, new Set(["expected_version"]));
-    const expectedVersion = requiredVersion(input.expected_version);
+    parseBody(body, new Set());
+    const expectedVersion = requiredExpectedVersion(request);
     await requireRecentAuth(actor, route.organizationId, request, HUMAN_ORGANIZATIONS_RECENT_AUTH_OPERATIONS.removeMember);
     try {
       const result = await organizationService.removeMember({ actor, organization_id: route.organizationId, member_id: route.memberId, expected_version: expectedVersion, idempotency_key: idempotencyKey });
@@ -351,11 +353,11 @@ export function createHumanOrganizationsHttpApi({
     }
   }
 
-  async function revokeInvitation(actor, route, body, idempotencyKey) {
+  async function revokeInvitation(actor, route, body, idempotencyKey, request) {
     requireOrganization(actor, route.organizationId);
     requireRole(actor, ADMIN_OR_OWNER);
-    const input = parseBody(body, new Set(["expected_version"]));
-    const expectedVersion = requiredVersion(input.expected_version);
+    parseBody(body, new Set());
+    const expectedVersion = requiredExpectedVersion(request);
     try {
       const result = await organizationService.revokeInvitation({ actor, organization_id: route.organizationId, invitation_id: route.invitationId, expected_version: expectedVersion, idempotency_key: idempotencyKey });
       return response(200, { invitation: normalizeInvitation(result?.invitation ?? result, route.organizationId, route.invitationId) });
@@ -611,6 +613,15 @@ function requiredIdempotencyKey(request) {
   return value;
 }
 
+function requiredExpectedVersion(request) {
+  const value = header(request.headers, "if-match");
+  const match = typeof value === "string" ? /^"([1-9][0-9]*)"$/u.exec(value) : null;
+  if (!match) throw invalidRequest();
+  const parsed = Number(match[1]);
+  if (!Number.isSafeInteger(parsed)) throw invalidRequest();
+  return parsed;
+}
+
 function mapServiceError(error, resource) {
   if (error instanceof HumanOrganizationsHttpError) return error;
   const code = String(error?.code ?? error?.name ?? "").toLowerCase();
@@ -673,7 +684,7 @@ function normalizeRequest(input) {
 
 function normalizeHeaders(input) {
   const result = {};
-  const names = ["origin", "cookie", "content-type", "content-length", "idempotency-key", HUMAN_SESSION_CSRF_HEADER, RECENT_AUTH_HEADER];
+  const names = ["origin", "cookie", "content-type", "content-length", "idempotency-key", "if-match", HUMAN_SESSION_CSRF_HEADER, RECENT_AUTH_HEADER];
   if (input && typeof input.get === "function") {
     for (const name of names) {
       const value = input.get(name);

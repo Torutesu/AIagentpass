@@ -510,7 +510,8 @@
         "name": "cursor",
         "in": "query",
         "required": false,
-        "schema": { "type": "string", "minLength": 1, "maxLength": 512 }
+        "description": "Opaque, versioned, authenticated keyset cursor bound to the resource kind and authenticated tenant/member scope. Clients must not inspect or modify it. A malformed, tampered, expired-format, cross-resource, or cross-scope cursor is rejected as invalid_request.",
+        "schema": { "type": "string", "minLength": 1, "maxLength": 512, "pattern": "^[A-Za-z0-9_-]+$" }
       },
       "Limit": {
         "name": "limit",

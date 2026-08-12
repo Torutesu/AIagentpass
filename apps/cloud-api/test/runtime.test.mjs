@@ -8,6 +8,8 @@ import test from "node:test";
 import { createApiTokenRecord, generateApiToken } from "../src/auth.mjs";
 import { createCloudRuntime, loadRuntimeConfig } from "../src/runtime.mjs";
 
+const CURSOR_SECRET = Buffer.alloc(32, 0x42).toString("base64url");
+
 function files() {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "agentpass-cloud-runtime-"));
   fs.chmodSync(root, 0o700);
@@ -41,19 +43,24 @@ test("runtime rejects unsafe secrets, key algorithms, and configuration", async 
   assert.throws(() => loadRuntimeConfig({ ...value.env, AGENTPASS_CLOUD_HOST: "example.com" }), /listen host/);
   assert.throws(() => loadRuntimeConfig({ ...value.env, AGENTPASS_DATABASE_URL: "postgresql://db" }), /Human auth configuration is incomplete/);
   assert.throws(() => loadRuntimeConfig({ ...value.env, AGENTPASS_DATABASE_URL: "postgresql://db", AGENTPASS_CONSOLE_ORIGIN: "https://console.example.test", AGENTPASS_WEBAUTHN_RP_ID: "other.test" }), /RP_ID/);
+  const humanEnv = { ...value.env, AGENTPASS_DATABASE_URL: "postgresql://agent:secret@db.example.test/agentpass?sslmode=verify-full", AGENTPASS_CONSOLE_ORIGIN: "https://console.example.test", AGENTPASS_WEBAUTHN_RP_ID: "example.test" };
+  assert.throws(() => loadRuntimeConfig(humanEnv), /HUMAN_CURSOR_SECRET/);
+  assert.throws(() => loadRuntimeConfig({ ...humanEnv, AGENTPASS_HUMAN_CURSOR_SECRET: "A".repeat(42) }), /HUMAN_CURSOR_SECRET/);
 });
 
 test("production human auth is composed from PostgreSQL and closed with the runtime", async (t) => {
   const value = files();
   t.after(() => fs.rmSync(value.root, { recursive: true, force: true }));
-  const env = { ...value.env, AGENTPASS_DATABASE_URL: "postgresql://agent:secret@db.example.test/agentpass?sslmode=verify-full", AGENTPASS_CONSOLE_ORIGIN: "https://console.example.test", AGENTPASS_WEBAUTHN_RP_ID: "example.test" };
+  const env = { ...value.env, AGENTPASS_DATABASE_URL: "postgresql://agent:secret@db.example.test/agentpass?sslmode=verify-full", AGENTPASS_CONSOLE_ORIGIN: "https://console.example.test", AGENTPASS_WEBAUTHN_RP_ID: "example.test", AGENTPASS_HUMAN_CURSOR_SECRET: CURSOR_SECRET };
   const calls = [];
   const postgresRuntime = { pool: {}, humanRepository: {}, async close() { calls.push("postgres-close"); } };
   const recentAuthService = { async authorize() { return { verified: false }; } };
-  const runtime = await createCloudRuntime({ env, logger: { info() {} }, postgresFactory: async (input) => { calls.push(["postgres", input.applicationVersion]); return postgresRuntime; }, humanAuthFactory: (input) => { calls.push(["human", input.origin, input.rpId]); return { api: { async handle() { return { status: 404, body: { error: { code: "not_found", message: "Resource not found" } }, headers: {} }; } }, recentAuthService }; } });
+  const runtime = await createCloudRuntime({ env, logger: { info() {} }, postgresFactory: async (input) => { calls.push(["postgres", input.applicationVersion]); return postgresRuntime; }, humanAuthFactory: (input) => { calls.push(["human", input.origin, input.rpId, input.cursorSecret]); return { api: { async handle() { return { status: 404, body: { error: { code: "not_found", message: "Resource not found" } }, headers: {} }; } }, recentAuthService }; } });
   assert.equal(runtime.postgresRuntime, postgresRuntime);
   assert.equal(runtime.humanAuthRuntime.recentAuthService, recentAuthService);
-  assert.deepEqual(calls.slice(0, 2), [["postgres", "0.18.0"], ["human", "https://console.example.test", "example.test"]]);
+  assert.deepEqual(calls.slice(0, 2), [["postgres", "0.18.0"], ["human", "https://console.example.test", "example.test", CURSOR_SECRET]]);
+  assert.equal(Object.hasOwn(runtime.config.humanAuth, "cursorSecret"), false);
+  assert.equal(JSON.stringify(runtime.config).includes(CURSOR_SECRET), false);
   await runtime.close();
   assert.equal(calls.at(-1), "postgres-close");
 });

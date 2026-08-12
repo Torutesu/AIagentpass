@@ -24,6 +24,10 @@ export {
 
 export { createPostgresHumanRepository } from "./human-repository.mjs";
 export {
+  CapabilityAuthorityRepositoryError,
+  createCapabilityAuthorityRepository
+} from "./capability-authority-repository.mjs";
+export {
   OrganizationRepositoryError,
   canonicalAuditEvent,
   createOrganizationRepository,

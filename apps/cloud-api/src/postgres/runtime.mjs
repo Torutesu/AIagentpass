@@ -1,5 +1,6 @@
 import { Pool } from "pg";
 import { createMigrationRunner } from "./migration-runner.mjs";
+import { createCapabilityAuthorityRepository } from "./capability-authority-repository.mjs";
 import { createPostgresHumanRepository } from "./human-repository.mjs";
 import { createPostgresOrganizationRepository } from "./organization-repository.mjs";
 import { createTenantRepositoryFactory } from "./repository.mjs";
@@ -25,6 +26,7 @@ export async function createPostgresRuntime({ env = process.env, PoolClass = Poo
     pool,
     humanRepository: createPostgresHumanRepository({ client: pool }),
     organizationRepository,
+    capabilityAuthorityRepository: createCapabilityAuthorityRepository({ client: pool }),
     tenants: createTenantRepositoryFactory({ client: pool }),
     async health() {
       if (closed) return { ready: false, code: "postgres_closed" };

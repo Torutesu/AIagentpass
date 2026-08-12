@@ -5,6 +5,7 @@ import { createApiTokenRecord, generateApiToken } from "../src/auth.mjs";
 import { createHumanAuthRuntime } from "../src/human-auth/runtime.mjs";
 
 const ids = { org: "11111111-1111-4111-8111-111111111111", member: "22222222-2222-4222-8222-222222222222" };
+const CURSOR_SECRET = Buffer.alloc(32, 0x42).toString("base64url");
 
 function postgres() {
   const sessions = [];
@@ -49,6 +50,7 @@ test("composes the production human-auth boundary and bootstraps a hash-only ses
     tokenRecords: [createApiTokenRecord({ token, tokenId: crypto.randomUUID(), organizationId: ids.org, memberId: ids.member, role: "owner" })],
     origin: "https://console.example.test",
     rpId: "console.example.test",
+    cursorSecret: CURSOR_SECRET,
     now: () => 1_800_000_000_000,
   });
   const result = await runtime.api.handle({ method: "POST", url: "/api/auth/session", headers: { authorization: `Bearer ${token}`, "agentpass-console-user-id": "siwc-user-1", origin: "https://console.example.test", "content-type": "application/json" }, body: "{}" });
@@ -70,7 +72,7 @@ test("composes the production human-auth boundary and bootstraps a hash-only ses
 test("requires PostgreSQL and rejects unsupported recent-auth operations", async () => {
   assert.throws(() => createHumanAuthRuntime({}), /postgresRuntime/);
   const token = generateApiToken();
-  const runtime = createHumanAuthRuntime({ postgresRuntime: postgres(), tokenRecords: [createApiTokenRecord({ token, organizationId: ids.org, memberId: ids.member, role: "owner" })], origin: "https://console.example.test", rpId: "console.example.test" });
+  const runtime = createHumanAuthRuntime({ postgresRuntime: postgres(), tokenRecords: [createApiTokenRecord({ token, organizationId: ids.org, memberId: ids.member, role: "owner" })], origin: "https://console.example.test", rpId: "console.example.test", cursorSecret: CURSOR_SECRET });
   const session = await runtime.api.handle({ method: "POST", url: "/api/auth/session", headers: { authorization: `Bearer ${token}`, "agentpass-console-user-id": "siwc-user-1", origin: "https://console.example.test", "content-type": "application/json" }, body: "{}" });
   const cookie = session.headers["Set-Cookie"].split(";", 1)[0];
   const rejected = await runtime.api.handle({ method: "POST", url: "/api/auth/webauthn/options", headers: { cookie, origin: "https://console.example.test", "agentpass-csrf": session.body.csrf_token, "content-type": "application/json" }, body: JSON.stringify({ organization_id: ids.org, operation: "policy.delete" }) });

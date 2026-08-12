@@ -9,7 +9,7 @@ const root = path.resolve(import.meta.dirname, "..");
 test("machine-readable platform contracts pass the offline validator", () => {
   const result = spawnSync(process.execPath, [path.join(root, "scripts", "validate-contracts.mjs")], { cwd: root, encoding: "utf8" });
   assert.equal(result.status, 0, result.stderr);
-  assert.match(result.stdout, /validated 5 schemas, 2 OpenAPI documents, 3 fixtures, and 6 PostgreSQL migrations/);
+  assert.match(result.stdout, /validated 5 schemas, 2 OpenAPI documents, 3 fixtures, and 7 PostgreSQL migrations/);
 });
 
 const humanOpenapi = () => JSON.parse(fs.readFileSync(path.join(root, "contracts", "openapi", "human-v1.json"), "utf8"));
@@ -63,6 +63,10 @@ test("Human P1 organization, member, and invitation operations declare security 
   assert.match(openapi.paths["/invitations/accept"].post.description, /not bound to an email/i);
   assert.match(openapi.components.schemas.AcceptInvitationRequest.description, /no email field/i);
   assert.match(openapi.paths["/organizations/{organization_id}/members/{member_id}/remove"].post["x-agentpass-final-owner-invariant"], /at least one active owner/i);
+  assert.equal(openapi.components.parameters.Cursor.schema.maxLength, 512);
+  assert.equal(openapi.components.parameters.Cursor.schema.pattern, "^[A-Za-z0-9_-]+$");
+  assert.match(openapi.components.parameters.Cursor.description, /authenticated keyset cursor/i);
+  assert.equal(openapi.components.parameters.Limit.schema.default, 50);
 });
 
 test("Human P1 contract assertions reject missing security, idempotency, or tenant semantics", () => {

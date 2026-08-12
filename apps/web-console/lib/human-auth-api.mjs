@@ -74,6 +74,12 @@ export async function handleHumanAuthRequest(request, options = {}) {
     if (route.requireIdempotency && !isIdempotencyKey(idempotencyKey)) fail(400, "idempotency_required", "A valid Idempotency-Key is required");
     if (!route.requireIdempotency && idempotencyKey !== null) fail(400, "invalid_idempotency", "The Idempotency-Key is not allowed");
     if (idempotencyKey !== null) headers.set("idempotency-key", idempotencyKey);
+    const ifMatch = request.headers.get("if-match");
+    if (route.requireIfMatch && ifMatch === null) fail(400, "if_match_required", "A valid If-Match is required");
+    if (ifMatch !== null) {
+      if (!(route.allowIfMatch || route.requireIfMatch) || !isIfMatch(ifMatch)) fail(400, "invalid_if_match", "If-Match is not allowed or invalid");
+      headers.set("if-match", ifMatch);
+    }
 
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), config.timeoutMs);
@@ -157,11 +163,11 @@ function validateBody(value, shape) {
     return;
   }
   if (shape === "organization-rename") {
-    if (!isExactObject(value, ["name", "expected_version"]) || !isSafeName(value.name) || !isVersion(value.expected_version)) fail(400, "invalid_request", "The organization request is invalid");
+    if (!isExactObject(value, ["name"]) || !isSafeName(value.name)) fail(400, "invalid_request", "The organization request is invalid");
     return;
   }
   if (shape === "member-role") {
-    if (!isExactObject(value, ["role", "expected_version"]) || !["owner", "admin", "auditor", "viewer"].includes(value.role) || !isVersion(value.expected_version)) fail(400, "invalid_request", "The organization request is invalid");
+    if (!isExactObject(value, ["role"]) || !["owner", "admin", "auditor", "viewer"].includes(value.role)) fail(400, "invalid_request", "The organization request is invalid");
     return;
   }
   if (shape === "invitation-create") {
@@ -231,9 +237,9 @@ function resolveRoute(pathname) {
   let id;
   try { id = decodeURIComponent(match[2]); } catch { return undefined; }
   if (id !== match[2]) return undefined;
-  if (match[1] === "passkeys" && isCredentialId(id) && !match[3]) return { cloudPath: `/api/auth/management/credentials/${id}`, methods: ["PATCH"], requireCookie: true, requireCsrf: true, body: "rename" };
-  if (match[1] === "passkeys" && isCredentialId(id) && match[3]) return { cloudPath: `/api/auth/management/credentials/${id}/revoke`, methods: ["POST"], requireCookie: true, requireCsrf: true, requireRecentAuth: true, body: "version" };
-  if (match[1] === "sessions" && isUuid(id) && match[3]) return { cloudPath: `/api/auth/management/sessions/${id.toLowerCase()}/revoke`, methods: ["POST"], requireCookie: true, requireCsrf: true, allowRecentAuth: true, body: "version", allowSetCookie: true };
+  if (match[1] === "passkeys" && isCredentialId(id) && !match[3]) return { cloudPath: `/api/auth/management/credentials/${id}`, methods: ["PATCH"], requireCookie: true, requireCsrf: true, body: "rename", allowIfMatch: true };
+  if (match[1] === "passkeys" && isCredentialId(id) && match[3]) return { cloudPath: `/api/auth/management/credentials/${id}/revoke`, methods: ["POST"], requireCookie: true, requireCsrf: true, requireRecentAuth: true, body: "version", allowIfMatch: true };
+  if (match[1] === "sessions" && isUuid(id) && match[3]) return { cloudPath: `/api/auth/management/sessions/${id.toLowerCase()}/revoke`, methods: ["POST"], requireCookie: true, requireCsrf: true, allowRecentAuth: true, body: "version", allowIfMatch: true, allowSetCookie: true };
   return undefined;
 }
 function resolveOrganizationRoute(pathname) {
@@ -242,16 +248,16 @@ function resolveOrganizationRoute(pathname) {
   const segments = pathname.split("/");
   if (segments.length < 5 || segments[1] !== "api" || segments[2] !== "auth" || segments[3] !== "organizations" || !isUuid(segments[4])) return undefined;
   const organizationId = segments[4].toLowerCase();
-  if (segments.length === 5) return { cloudPath: `/api/auth/organizations/${organizationId}`, methods: ["PATCH"], body: "organization-rename", requireCookie: true, requireCsrf: true, requireIdempotency: true };
+  if (segments.length === 5) return { cloudPath: `/api/auth/organizations/${organizationId}`, methods: ["PATCH"], body: "organization-rename", requireCookie: true, requireCsrf: true, requireIdempotency: true, requireIfMatch: true };
   if (segments[5] === "members") {
     if (segments.length === 6) return { cloudPath: `/api/auth/organizations/${organizationId}/members`, methods: ["GET"], queryMethods: ["GET"], body: "none", requireCookie: true, requireCsrf: true };
-    if (segments.length === 8 && isUuid(segments[6]) && segments[7] === "role") return { cloudPath: `/api/auth/organizations/${organizationId}/members/${segments[6].toLowerCase()}/role`, methods: ["PATCH"], body: "member-role", requireCookie: true, requireCsrf: true, requireIdempotency: true, requireRecentAuth: true };
-    if (segments.length === 8 && isUuid(segments[6]) && segments[7] === "remove") return { cloudPath: `/api/auth/organizations/${organizationId}/members/${segments[6].toLowerCase()}/remove`, methods: ["POST"], body: "version", requireCookie: true, requireCsrf: true, requireIdempotency: true, requireRecentAuth: true };
+    if (segments.length === 8 && isUuid(segments[6]) && segments[7] === "role") return { cloudPath: `/api/auth/organizations/${organizationId}/members/${segments[6].toLowerCase()}/role`, methods: ["PATCH"], body: "member-role", requireCookie: true, requireCsrf: true, requireIdempotency: true, requireRecentAuth: true, requireIfMatch: true };
+    if (segments.length === 8 && isUuid(segments[6]) && segments[7] === "remove") return { cloudPath: `/api/auth/organizations/${organizationId}/members/${segments[6].toLowerCase()}/remove`, methods: ["POST"], body: "none", requireCookie: true, requireCsrf: true, requireIdempotency: true, requireRecentAuth: true, requireIfMatch: true };
     return undefined;
   }
   if (segments[5] === "invitations") {
     if (segments.length === 6) return { cloudPath: `/api/auth/organizations/${organizationId}/invitations`, methods: ["GET", "POST"], queryMethods: ["GET"], idempotencyMethods: ["POST"], bodies: { GET: "none", POST: "invitation-create" }, requireCookie: true, requireCsrf: true };
-    if (segments.length === 8 && isUuid(segments[6]) && segments[7] === "revoke") return { cloudPath: `/api/auth/organizations/${organizationId}/invitations/${segments[6].toLowerCase()}/revoke`, methods: ["POST"], body: "version", requireCookie: true, requireCsrf: true, requireIdempotency: true };
+    if (segments.length === 8 && isUuid(segments[6]) && segments[7] === "revoke") return { cloudPath: `/api/auth/organizations/${organizationId}/invitations/${segments[6].toLowerCase()}/revoke`, methods: ["POST"], body: "none", requireCookie: true, requireCsrf: true, requireIdempotency: true, requireIfMatch: true };
   }
   return undefined;
 }
@@ -282,4 +288,5 @@ function isSafeName(value) { return typeof value === "string" && value.length >=
 function isRfc3339(value) { return typeof value === "string" && /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?(?:Z|[+-]\d{2}:\d{2})$/.test(value) && Number.isFinite(Date.parse(value)); }
 function isOpaqueInvitationToken(value) { return typeof value === "string" && /^[A-Za-z0-9_-]{43,512}$/.test(value); }
 function isIdempotencyKey(value) { return typeof value === "string" && /^[A-Za-z0-9._~-]{8,255}$/.test(value); }
+function isIfMatch(value) { return typeof value === "string" && /^"[1-9][0-9]*"$/.test(value); }
 function fail(status, code, message) { throw new HumanAuthBridgeError(status, code, message); }

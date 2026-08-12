@@ -58,10 +58,12 @@ export AGENTPASS_DATABASE_URL='postgresql://agentpass:...@db.example/agentpass?s
 export AGENTPASS_CONSOLE_ORIGIN='https://console.example.com'
 export AGENTPASS_WEBAUTHN_RP_ID='example.com'
 export AGENTPASS_IDENTITY_PROVIDER='chatgpt'
+# Generate once, store in the deployment secret manager, and reuse on every instance:
+export AGENTPASS_HUMAN_CURSOR_SECRET="$(openssl rand -base64 32 | tr '+/' '-_' | tr -d '=\n')"
 npm start
 ```
 
-`AGENTPASS_CONSOLE_ORIGIN` must be an exact HTTPS origin. The RP ID must equal its hostname or be a parent suffix. `AGENTPASS_IDENTITY_PROVIDER` defaults to `chatgpt`; every verified Console subject must have an `upstream_identities` row and an active organization membership before session issuance. Omitting all three required Human Auth variables keeps the self-hosted compatibility runtime; partially configuring them fails startup.
+`AGENTPASS_CONSOLE_ORIGIN` must be an exact HTTPS origin. The RP ID must equal its hostname or be a parent suffix. `AGENTPASS_IDENTITY_PROVIDER` defaults to `chatgpt`; every verified Console subject must have an `upstream_identities` row and an active organization membership before session issuance. `AGENTPASS_HUMAN_CURSOR_SECRET` must be one canonical, unpadded, 32-byte base64url value shared by every Cloud API instance. It authenticates opaque organization/member/invitation cursors and is never returned as configuration metadata. Rotating it invalidates outstanding cursors, so rotate during a controlled deployment and let clients restart pagination. Omitting all three Human Auth selectors keeps the self-hosted compatibility runtime; configuring Human Auth without the cursor secret fails startup.
 
 The process binds loopback by default. Terminate with SIGINT/SIGTERM for graceful shutdown. Device replay evidence and both admission/principal rate-limit buckets survive restart. The file store takes an exclusive process lock and refuses a second writer. For multi-instance production, replace the reference file store, replay cache, and limiters with transactional shared storage; never share the JSON data directory between processes.
 

@@ -90,6 +90,13 @@ function fixture({ role = "owner", sessionError = undefined, serviceOverrides = 
 }
 
 function request(path, { method = "GET", body = undefined, headers = {} } = {}) {
+  let normalizedBody = body;
+  let expectedVersionHeader = {};
+  if (body && typeof body === "object" && !Array.isArray(body) && Object.hasOwn(body, "expected_version")) {
+    const { expected_version: expectedVersion, ...rest } = body;
+    normalizedBody = Object.keys(rest).length === 0 && /\/(?:remove|revoke)$/u.test(path) ? undefined : rest;
+    expectedVersionHeader = { "if-match": `"${expectedVersion}"` };
+  }
   return {
     method,
     url: path,
@@ -98,9 +105,10 @@ function request(path, { method = "GET", body = undefined, headers = {} } = {}) 
       cookie: COOKIE,
       "agentpass-csrf": CSRF_TOKEN,
       ...(method === "GET" ? {} : { "content-type": "application/json", "idempotency-key": "test-key-1" }),
+      ...expectedVersionHeader,
       ...headers
     },
-    ...(body === undefined ? {} : { body: JSON.stringify(body) })
+    ...(normalizedBody === undefined ? {} : { body: JSON.stringify(normalizedBody) })
   };
 }
 
@@ -161,6 +169,13 @@ test("lists organizations for every role and passes only server-derived actor sc
     assert.deepEqual(result.body.organizations[0], organization());
     assert.deepEqual(calls.listOrganizations[0], { actor: actor({ role }), limit: 10, cursor: "page-1" });
   }
+});
+
+test("uses the OpenAPI default organization list limit of 50", async () => {
+  const { api, calls } = fixture();
+  const result = await api.handle(request(HUMAN_ORGANIZATIONS_HTTP_PATHS.organizations));
+  assert.equal(result.status, 200);
+  assert.equal(calls.listOrganizations[0].limit, 50);
 });
 
 test("creates and renames organizations with strict schemas and optimistic versions", async () => {

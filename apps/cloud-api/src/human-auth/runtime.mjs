@@ -6,6 +6,7 @@ import { createHumanManagementHttpApi, HUMAN_MANAGEMENT_RECENT_AUTH_OPERATIONS }
 import { createPostgresHumanManagementRepository } from "./management/postgres-adapter.mjs";
 import { createHumanOrganizationsHttpApi, HUMAN_ORGANIZATIONS_RECENT_AUTH_OPERATIONS } from "./organizations/http-api.mjs";
 import { createPostgresOrganizationService } from "./organizations/postgres-service.mjs";
+import { createHumanCursorCodec } from "./pagination/cursor-codec.mjs";
 import { createWebAuthnRegistrationHttpApi } from "./registration-http-api.mjs";
 import { createRecentAuthService } from "./recent-auth.mjs";
 import { createHumanAuthRouter } from "./router.mjs";
@@ -23,11 +24,12 @@ const ALLOWED_RECENT_AUTH_OPERATIONS = Object.freeze([
   ...recentAuthOperationValues(HUMAN_ORGANIZATIONS_RECENT_AUTH_OPERATIONS)
 ]);
 
-export function createHumanAuthRuntime({ postgresRuntime, tokenRecords, origin, rpId, identityProvider = "chatgpt", now = () => Date.now() } = {}) {
+export function createHumanAuthRuntime({ postgresRuntime, tokenRecords, origin, rpId, cursorSecret, identityProvider = "chatgpt", now = () => Date.now() } = {}) {
   const repository = postgresRuntime?.humanRepository;
   const organizationRepository = postgresRuntime?.organizationRepository;
   const pool = postgresRuntime?.pool;
   if (!repository || !organizationRepository || !pool) throw new TypeError("postgresRuntime with pool, humanRepository, and organizationRepository is required");
+  const cursorCodec = createHumanCursorCodec({ secret: requireCursorSecret(cursorSecret) });
 
   const identityResolver = createPostgresIdentityResolver({ client: pool, now });
   const consoleIdentity = createConsoleIdentityAdapter({ tokenRecords, identityResolver, provider: identityProvider });
@@ -54,10 +56,18 @@ export function createHumanAuthRuntime({ postgresRuntime, tokenRecords, origin, 
   const registrationApi = createWebAuthnRegistrationHttpApi({ humanSession, registrationService, origin, basePath: "/api/auth" });
   const managementRepository = createPostgresHumanManagementRepository({ repository, now });
   const managementApi = createHumanManagementHttpApi({ humanSession, recentAuthService, repository: managementRepository, origin, now });
-  const organizationService = createPostgresOrganizationService({ repository: organizationRepository, now });
+  const organizationService = createPostgresOrganizationService({ repository: organizationRepository, cursorCodec, now });
   const organizationApi = createHumanOrganizationsHttpApi({ humanSession, recentAuthService, organizationService, origin, now });
   const api = createHumanAuthRouter({ sessionApi, webauthnApi, registrationApi, managementApi, organizationApi });
   return Object.freeze({ api, humanSession, recentAuthService, ceremony, registrationCeremony, registrationService, identityResolver, managementRepository, organizationRepository, organizationService, sessionApi, webauthnApi, registrationApi, managementApi, organizationApi, allowedOperations: ALLOWED_RECENT_AUTH_OPERATIONS });
+}
+
+function requireCursorSecret(value) {
+  if (typeof value !== "string" || !/^[A-Za-z0-9_-]{43}$/u.test(value)) throw new TypeError("cursorSecret must be an exact 32-byte base64url secret");
+  let bytes;
+  try { bytes = Buffer.from(value, "base64url"); } catch { throw new TypeError("cursorSecret must be an exact 32-byte base64url secret"); }
+  if (bytes.length !== 32 || bytes.toString("base64url") !== value) throw new TypeError("cursorSecret must be an exact 32-byte base64url secret");
+  return bytes;
 }
 
 function recentAuthOperationValues(value) {

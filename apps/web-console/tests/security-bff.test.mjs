@@ -29,9 +29,10 @@ test("maps Security BFF paths to Cloud management paths and forwards session con
   assert.equal(calls[0].init.headers.get("cookie"), cookie);
   assert.equal(calls[0].init.headers.get("agentpass-csrf"), csrf);
 
-  await api.handle(request(`/api/auth/security/passkeys/${credentialId}`, { method: "PATCH", body: { label: "仕事用", expected_version: 2 }, headers: { cookie, "agentpass-csrf": csrf } }));
+  await api.handle(request(`/api/auth/security/passkeys/${credentialId}`, { method: "PATCH", body: { label: "仕事用", expected_version: 2 }, headers: { cookie, "agentpass-csrf": csrf, "if-match": '"2"' } }));
   assert.equal(calls[1].url, `https://cloud.example.test/api/auth/management/credentials/${credentialId}`);
   assert.equal(calls[1].init.method, "PATCH");
+  assert.equal(calls[1].init.headers.get("if-match"), '"2"');
   assert.deepEqual(JSON.parse(new TextDecoder().decode(calls[1].init.body)), { label: "仕事用", expected_version: 2 });
 
   await api.handle(request(`/api/auth/security/sessions/${sessionId}/revoke`, { method: "POST", body: { expected_version: 4 }, headers: { cookie, "agentpass-csrf": csrf } }));

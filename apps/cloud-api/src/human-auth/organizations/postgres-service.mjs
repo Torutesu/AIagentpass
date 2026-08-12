@@ -1,6 +1,6 @@
 import { createHash, randomBytes as nodeRandomBytes, randomUUID as nodeRandomUUID } from "node:crypto";
 
-const DEFAULT_PAGE_SIZE = 25;
+const DEFAULT_PAGE_SIZE = 50;
 const MAX_PAGE_SIZE = 100;
 const MAX_CURSOR_LENGTH = 512;
 const MAX_IDEMPOTENCY_KEY_LENGTH = 255;
@@ -49,11 +49,13 @@ export class OrganizationServiceError extends Error {
  */
 export function createPostgresOrganizationService({
   repository,
+  cursorCodec,
   now = () => new Date().toISOString(),
   randomBytes = nodeRandomBytes,
   randomUUID = nodeRandomUUID
 } = {}) {
   assertRepository(repository);
+  if (cursorCodec !== undefined) assertCursorCodec(cursorCodec);
   if (typeof now !== "function") throw new TypeError("now must be a function");
   if (typeof randomBytes !== "function") throw new TypeError("randomBytes must be a function");
   if (typeof randomUUID !== "function") throw new TypeError("randomUUID must be a function");
@@ -74,11 +76,16 @@ export function createPostgresOrganizationService({
   async function listOrganizations(input = {}) {
     const actor = requiredActor(input);
     const pageInput = pagination(input);
+    const cursorPosition = decodeCursor(pageInput.cursor, actor, cursorCodec, "organizations");
     const records = await invoke("listOrganizationsForMember", {
       member_id: actor.member_id,
-      ...pageInput
+      limit: pageInput.limit,
+      ...(cursorPosition ? { after_created_at: cursorPosition.created_at, after_id: cursorPosition.id } : {}),
+      // Keep the raw cursor for legacy constructor tests and non-production
+      // adapters. The production runtime always supplies cursorCodec.
+      ...(cursorCodec === undefined && pageInput.cursor !== undefined ? { cursor: pageInput.cursor } : {})
     }, ORGANIZATION_SERVICE_ERROR_CODES.NOT_FOUND);
-    return page(records, pageInput.limit, "organization");
+    return page(records, pageInput.limit, "organizations", { actor, cursorCodec });
   }
 
   async function createOrganization(input = {}) {
@@ -111,12 +118,15 @@ export function createPostgresOrganizationService({
     const actor = requiredActor(input);
     const organization_id = requiredOrganizationId(input.organization_id);
     const pageInput = pagination(input);
+    const cursorPosition = decodeCursor(pageInput.cursor, actor, cursorCodec, "members");
     const records = await invoke("listMembers", {
       organization_id,
       actor_member_id: actor.member_id,
-      ...pageInput
+      limit: pageInput.limit,
+      ...(cursorPosition ? { after_created_at: cursorPosition.created_at, after_id: cursorPosition.id } : {}),
+      ...(cursorCodec === undefined && pageInput.cursor !== undefined ? { cursor: pageInput.cursor } : {})
     }, ORGANIZATION_SERVICE_ERROR_CODES.MEMBER_NOT_FOUND);
-    return page(records, pageInput.limit, "member");
+    return page(records, pageInput.limit, "members", { actor, cursorCodec });
   }
 
   async function updateMemberRole(input = {}) {
@@ -128,6 +138,7 @@ export function createPostgresOrganizationService({
       member_id: requiredMemberId(input.member_id),
       role: input.role,
       expected_version: input.expected_version,
+      revoked_at: currentTimestamp(),
       idempotency_key
     }, ORGANIZATION_SERVICE_ERROR_CODES.MEMBER_NOT_FOUND);
     return sanitize(result);
@@ -151,12 +162,15 @@ export function createPostgresOrganizationService({
     const actor = requiredActor(input);
     const organization_id = requiredOrganizationId(input.organization_id);
     const pageInput = pagination(input);
+    const cursorPosition = decodeCursor(pageInput.cursor, actor, cursorCodec, "invitations");
     const records = await invoke("listInvitations", {
       organization_id,
       actor_member_id: actor.member_id,
-      ...pageInput
+      limit: pageInput.limit,
+      ...(cursorPosition ? { after_created_at: cursorPosition.created_at, after_id: cursorPosition.id } : {}),
+      ...(cursorCodec === undefined && pageInput.cursor !== undefined ? { cursor: pageInput.cursor } : {})
     }, ORGANIZATION_SERVICE_ERROR_CODES.INVITATION_NOT_FOUND);
-    return page(records, pageInput.limit, "invitation");
+    return page(records, pageInput.limit, "invitations", { actor, cursorCodec });
   }
 
   async function createInvitation(input = {}) {
@@ -244,22 +258,68 @@ function assertRepository(repository) {
   for (const method of methods) if (typeof repository[method] !== "function") throw new TypeError(`PostgreSQL organization repository is missing ${method}()`);
 }
 
-function page(records, limit, resource) {
+function assertCursorCodec(cursorCodec) {
+  if (!cursorCodec || typeof cursorCodec !== "object" || typeof cursorCodec.encode !== "function" || typeof cursorCodec.decode !== "function") {
+    throw new TypeError("cursorCodec must expose encode() and decode()");
+  }
+}
+
+function decodeCursor(cursor, actor, cursorCodec, resource) {
+  if (cursor === undefined || cursorCodec === undefined) return undefined;
+  try {
+    return cursorCodec.decode(cursor, {
+      resource,
+      tenant_id: actor.organization_id,
+      member_id: actor.member_id,
+      direction: "asc"
+    });
+  } catch {
+    throw serviceError(ORGANIZATION_SERVICE_ERROR_CODES.INVALID_INPUT);
+  }
+}
+
+function page(records, limit, resource, { actor = undefined, cursorCodec = undefined } = {}) {
   if (records && !Array.isArray(records) && Array.isArray(records.items)) {
     const items = records.items;
     const next_cursor = records.next_cursor ?? null;
-    return boundedPage(items, limit, next_cursor, resource);
+    return boundedPage(items, limit, next_cursor, resource, { actor, cursorCodec });
   }
-  return boundedPage(records, limit, null, resource);
+  return boundedPage(records, limit, null, resource, { actor, cursorCodec });
 }
 
-function boundedPage(records, limit, next_cursor, resource) {
+function boundedPage(records, limit, next_cursor, resource, { actor = undefined, cursorCodec = undefined } = {}) {
   if (!Array.isArray(records)) throw serviceError(ORGANIZATION_SERVICE_ERROR_CODES.UNAVAILABLE);
   if (next_cursor !== null && (typeof next_cursor !== "string" || next_cursor.length < 1 || next_cursor.length > MAX_CURSOR_LENGTH || !CURSOR.test(next_cursor))) {
     throw serviceError(ORGANIZATION_SERVICE_ERROR_CODES.UNAVAILABLE);
   }
+  const hasMore = next_cursor === null && records.length > limit;
   const items = records.slice(0, limit).map((record) => sanitize(record));
-  return Object.freeze({ items: Object.freeze(items), next_cursor });
+  let pageCursor = next_cursor;
+  if (hasMore && cursorCodec !== undefined) {
+    const last = items.at(-1);
+    try {
+      pageCursor = cursorCodec.encode({
+        resource,
+        tenant_id: actor.organization_id,
+        member_id: actor.member_id,
+        created_at: last.created_at,
+        id: cursorRecordId(last, resource),
+        direction: "asc"
+      });
+    } catch {
+      throw serviceError(ORGANIZATION_SERVICE_ERROR_CODES.UNAVAILABLE);
+    }
+  }
+  return Object.freeze({ items: Object.freeze(items), next_cursor: pageCursor });
+}
+
+function cursorRecordId(record, resource) {
+  const value = resource === "organizations" ? record.organization_id
+    : resource === "members" ? record.membership_id
+      : resource === "invitations" ? record.invitation_id
+        : undefined;
+  if (typeof value !== "string" || !UUID.test(value)) throw serviceError(ORGANIZATION_SERVICE_ERROR_CODES.UNAVAILABLE);
+  return value.toLowerCase();
 }
 
 function pagination(input) {
@@ -348,11 +408,11 @@ function mapRepositoryError(error) {
   if (error instanceof OrganizationServiceError) return error;
   const code = String(error?.code ?? error?.name ?? "").toLowerCase();
   if (["invalid_input", "invalid_scope", "tenant_scope_error"].includes(code) || error instanceof TypeError) return serviceError(ORGANIZATION_SERVICE_ERROR_CODES.INVALID_INPUT);
-  if (["forbidden", "not_authorized", "owner_required", "cannot_remove_owner", "last_owner", "err_last_owner", "owner_constraint", "err_actor"].includes(code)) return serviceError(ORGANIZATION_SERVICE_ERROR_CODES.FORBIDDEN);
+  if (["forbidden", "err_forbidden", "not_authorized", "owner_required", "cannot_remove_owner", "last_owner", "err_last_owner", "owner_constraint", "err_actor"].includes(code)) return serviceError(ORGANIZATION_SERVICE_ERROR_CODES.FORBIDDEN);
   if (["version_conflict", "err_version_conflict", "expected_version_mismatch", "stale_version"].includes(code)) return serviceError(ORGANIZATION_SERVICE_ERROR_CODES.VERSION_CONFLICT);
   if (["idempotency_conflict", "err_idempotency_conflict", "idempotency_key_reused"].includes(code)) return serviceError(ORGANIZATION_SERVICE_ERROR_CODES.IDEMPOTENCY_CONFLICT);
   if (["invitation_replayed", "invitation_token_replayed", "token_replayed", "already_used", "invitation_expired"].includes(code)) return serviceError(ORGANIZATION_SERVICE_ERROR_CODES.INVITATION_REPLAYED);
-  if (["member_not_found", "membership_not_found"].includes(code)) return serviceError(ORGANIZATION_SERVICE_ERROR_CODES.MEMBER_NOT_FOUND);
+  if (["member_not_found", "err_member_not_found", "membership_not_found", "err_membership_not_found"].includes(code)) return serviceError(ORGANIZATION_SERVICE_ERROR_CODES.MEMBER_NOT_FOUND);
   if (["invitation_not_found"].includes(code)) return serviceError(ORGANIZATION_SERVICE_ERROR_CODES.INVITATION_NOT_FOUND);
   if (["not_found", "organization_not_found", "resource_not_found", "tenant_not_found"].includes(code)) return serviceError(ORGANIZATION_SERVICE_ERROR_CODES.NOT_FOUND);
   return serviceError(ORGANIZATION_SERVICE_ERROR_CODES.UNAVAILABLE);

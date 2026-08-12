@@ -393,6 +393,17 @@ a:focus-visible {
   padding: 48px clamp(22px, 4vw, 60px) 64px;
 }
 
+.organization-content {
+  width: 100%;
+  min-width: 0;
+  max-width: none;
+  padding: 0;
+}
+
+.organization-content > main {
+  width: 100%;
+}
+
 .eyebrow {
   margin: 0 0 12px;
   color: var(--forest);
@@ -1209,6 +1220,10 @@ a:focus-visible {
 
   .content {
     padding: 34px 18px 52px;
+  }
+
+  .organization-content {
+    padding: 0;
   }
 
   .page-heading {
