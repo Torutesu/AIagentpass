@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 export type ConsoleView =
   | "overview"
@@ -151,6 +151,8 @@ type AgentPassConsoleProps = {
   initialData?: AgentPassInitialData;
 };
 
+type ToastTone = "success" | "error";
+
 const navItems: Array<{ id: ConsoleView; label: string; icon: string; badge?: string }> = [
   { id: "overview", label: "概要", icon: "⌂" },
   { id: "setup", label: "セットアップ", icon: "＋" },
@@ -165,6 +167,9 @@ function StatusTag({ tone, children }: { tone: "green" | "amber" | "red"; childr
 }
 
 function Overview({ data, goTo }: { data: AgentPassInitialData; goTo: (view: ConsoleView) => void }) {
+  const activeAgents = data.agents.filter((agent) => agent.state !== "停止").length;
+  const connectedDevices = data.devices.filter((device) => device.status !== "停止").length;
+  const protectedOperations = data.policies.length + data.capabilities.length;
   return (
     <>
       <header>
@@ -204,18 +209,18 @@ function Overview({ data, goTo }: { data: AgentPassInitialData; goTo: (view: Con
       <div className="metric-grid" aria-label="システム概要">
         <article className="metric-card">
           <div className="metric-topline"><span className="metric-title">接続中のAgent</span><span className="metric-icon" aria-hidden="true">◈</span></div>
-          <p className="metric-value">2 / 2</p>
-          <p className="metric-detail">Claude Code と Cursor</p>
+          <p className="metric-value">{activeAgents} / {data.agents.length}</p>
+          <p className="metric-detail">接続済みのCoding Agent</p>
         </article>
         <article className="metric-card">
           <div className="metric-topline"><span className="metric-title">保護されている操作</span><span className="metric-icon" aria-hidden="true">◆</span></div>
-          <p className="metric-value">12項目</p>
-          <p className="metric-detail">危険な操作はブロック中</p>
+          <p className="metric-value">{protectedOperations}項目</p>
+          <p className="metric-detail">PolicyとCapabilityで保護中</p>
         </article>
         <article className="metric-card">
           <div className="metric-topline"><span className="metric-title">最終チェック</span><span className="metric-icon" aria-hidden="true">✓</span></div>
-          <p className="metric-value">{data.session.lastVerified.replace("たった今確認済み", "たった今")}</p>
-          <p className="metric-detail">異常は見つかりませんでした</p>
+          <p className="metric-value">{connectedDevices}端末</p>
+          <p className="metric-detail">{data.session.lastVerified}</p>
         </article>
       </div>
 
@@ -247,7 +252,12 @@ function Overview({ data, goTo }: { data: AgentPassInitialData; goTo: (view: Con
   );
 }
 
+function EmptyState({ title, copy }: { title: string; copy: string }) {
+  return <div className="empty-state"><span className="empty-state-mark" aria-hidden="true">—</span><p className="empty-state-title">{title}</p><p className="empty-state-copy">{copy}</p></div>;
+}
+
 function ActivityList({ activities }: { activities: AgentPassInitialData["activities"] }) {
+  if (!activities.length) return <EmptyState title="まだ記録はありません" copy="Agentが操作すると、ここに監査ログが表示されます。" />;
   return (
     <div className="activity-panel">
       <ul className="activity-list">
@@ -267,8 +277,12 @@ function SurfaceHeader({ eyebrow, title, copy }: { eyebrow: string; title: strin
   return <header className="surface-header"><div><p className="eyebrow">{eyebrow}</p><h1 className="page-heading">{title}</h1><p className="page-intro">{copy}</p></div></header>;
 }
 
-function SetupSurface({ data, goTo, operate }: { data: AgentPassInitialData; goTo: (view: ConsoleView) => void; operate: (operation: string, body: Record<string, unknown>, success: string) => Promise<void> }) {
-  const [device, setDevice] = useState({ name: "", public_key: "" });
+function SetupSurface({ data, goTo, operate, online }: { data: AgentPassInitialData; goTo: (view: ConsoleView) => void; operate: (operation: string, body: Record<string, unknown>, success: string) => Promise<void>; online: boolean }) {
+  const [deviceLabel, setDeviceLabel] = useState("");
+  const [recentAuth, setRecentAuth] = useState("");
+  const [enrollment, setEnrollment] = useState<Record<string, string> | null>(null);
+  const [enrollmentPending, setEnrollmentPending] = useState(false);
+  const [enrollmentError, setEnrollmentError] = useState("");
   const [agent, setAgent] = useState({ name: "", kind: "claude-code", public_key: "", device_id: data.devices[0]?.deviceId ?? "" });
   const [capabilityPending, setCapabilityPending] = useState(false);
   const defaultScope = data.policies.find((policy) => policy.scope)?.scope ?? { operations: ["git.commit.sign"], repositories: ["/"], branches: { allow: ["*"], deny: [] }, remotes: { allow: ["*"], deny: [] } };
@@ -278,6 +292,37 @@ function SetupSurface({ data, goTo, operate }: { data: AgentPassInitialData; goT
     if (!selectedAgent?.agentId || !selectedDevice?.deviceId) return;
     setCapabilityPending(true);
     try { await operate("issue-capability", { agent_id: selectedAgent.agentId, device_id: selectedDevice.deviceId, scope: defaultScope, ttl_ms: 15 * 60 * 1000 }, "短期Capabilityを発行しました"); } finally { setCapabilityPending(false); }
+  };
+  const issueEnrollment = async () => {
+    setEnrollmentPending(true);
+    setEnrollment(null);
+    setEnrollmentError("");
+    try {
+      const response = await fetch("/api/console?operation=issue-device-enrollment", {
+        method: "POST",
+        cache: "no-store",
+        headers: { "content-type": "application/json", "idempotency-key": crypto.randomUUID(), "agentpass-recent-auth": recentAuth },
+        body: JSON.stringify({ label: deviceLabel.trim(), platform: "macos", ttl_ms: 10 * 60 * 1000 }),
+      });
+      const payload = await response.json() as { enrollment?: Record<string, string>; error?: { message?: string } };
+      if (!response.ok || !payload.enrollment) throw new Error(payload.error?.message ?? "登録コードを発行できませんでした");
+      setEnrollment(payload.enrollment);
+      setRecentAuth("");
+    } catch (error) {
+      setEnrollmentError(error instanceof Error ? error.message : "登録コードを発行できませんでした");
+    } finally {
+      setEnrollmentPending(false);
+    }
+  };
+  const enrollmentJson = enrollment ? JSON.stringify({ enrollment }, null, 2) : "";
+  useEffect(() => {
+    if (!enrollment) return;
+    const timer = window.setTimeout(() => setEnrollment(null), 5 * 60 * 1000);
+    return () => window.clearTimeout(timer);
+  }, [enrollment]);
+  const copyEnrollment = async () => {
+    await navigator.clipboard.writeText(enrollmentJson);
+    window.setTimeout(() => void navigator.clipboard.writeText("").catch(() => {}), 60_000);
   };
   return (
     <>
@@ -300,10 +345,13 @@ function SetupSurface({ data, goTo, operate }: { data: AgentPassInitialData; goT
         </article>
         <article className="surface-card"><span className="section-kicker">DEVICES</span><h2 className="surface-card-title">登録済み端末</h2><ul className="row-list">{data.devices.map((device) => <li className="row-list-item" key={device.deviceId ?? device.name}><div><p className="row-title">{device.name}</p><p className="row-description">{device.deviceId ?? "ID未同期"} · {device.location}</p></div><span><StatusTag tone={device.status === "停止" ? "red" : "green"}>{device.status}</StatusTag>{device.deviceId && device.status !== "停止" ? <button className="text-button" type="button" onClick={() => operate("revoke-device", { target_id: device.deviceId, reason: "web-console-operator" }, `${device.name}を停止しました`)}>停止</button> : null}</span></li>)}</ul></article>
         <article className="surface-card">
-          <span className="section-kicker">REGISTER</span><h2 className="surface-card-title">端末を追加</h2>
-          <p className="surface-card-copy">端末名と公開鍵を登録します。秘密鍵は入力・保存しません。</p>
-          <div className="form-grid"><label>端末名<input value={device.name} onChange={(event) => setDevice({ ...device, name: event.target.value })} /></label><label>公開鍵<textarea value={device.public_key} onChange={(event) => setDevice({ ...device, public_key: event.target.value })} /></label></div>
-          <button className="secondary-button" type="button" disabled={!device.name || !device.public_key} onClick={async () => { await operate("create-device", device, "端末を登録しました"); setDevice({ name: "", public_key: "" }); }}>端末を登録</button>
+          <span className="section-kicker">ENROLL A MAC</span><h2 className="surface-card-title">Macを安全に追加</h2>
+          <p className="surface-card-copy">10分だけ有効なワンタイム登録情報を発行します。秘密鍵はMacのSecure Enclave内で生成され、外へ出ません。</p>
+          <div className="form-grid"><label>端末名<input required maxLength={128} autoComplete="off" value={deviceLabel} onChange={(event) => setDeviceLabel(event.target.value)} /></label><label>直近のWebAuthn証明<input required type="password" autoComplete="off" value={recentAuth} onChange={(event) => setRecentAuth(event.target.value)} /></label></div>
+          <p className="section-note">本番のWebAuthnダイアログ接続までは、認証基盤が発行した直近認証証明を使用します。この値はブラウザ保存しません。</p>
+          <button className="secondary-button" type="button" disabled={!online || enrollmentPending || !deviceLabel.trim() || recentAuth.length < 32} onClick={issueEnrollment}>{enrollmentPending ? "発行中…" : "ワンタイム登録情報を発行"}</button>
+          {enrollmentError ? <p className="form-error" role="alert">{enrollmentError}</p> : null}
+          {enrollment ? <div className="enrollment-result" aria-live="polite"><p className="row-title">一度だけ表示しています</p><p className="surface-card-copy">下のJSONをMacへ安全に渡し、標準入力からセットアップしてください。5分後または再読込で消え、コピー内容も60秒後に消去を試みます。</p><pre className="secret-output">{enrollmentJson}</pre><div className="stop-action-row"><button className="primary-button" type="button" onClick={() => void copyEnrollment()}>JSONをコピー</button><button className="text-button" type="button" onClick={() => setEnrollment(null)}>表示を消す</button></div><code className="command-hint">agentpass setup continue --execute --enrollment-url &lt;Cloud API URL&gt; --enrollment-stdin</code></div> : null}
         </article>
         <article className="surface-card">
           <span className="section-kicker">REGISTER</span><h2 className="surface-card-title">Agentを追加</h2>
@@ -322,14 +370,14 @@ function SetupSurface({ data, goTo, operate }: { data: AgentPassInitialData; goT
 }
 
 function AgentsSurface({ data, operate }: { data: AgentPassInitialData; operate: (operation: string, body: Record<string, unknown>, success: string) => Promise<void> }) {
-  return <><SurfaceHeader eyebrow="AGENTS / 03" title="つながっているAgent" copy="Claude Code と Cursor の作業状態を、プロジェクト単位で確認できます。停止したAgentは新しい作業を開始できません。" /><div className="surface-content"><article className="surface-card"><span className="section-kicker">CONNECTED CLIENTS</span><h2 className="surface-card-title">現在の作業</h2><ul className="row-list">{data.agents.map((agent) => <li className="row-list-item" key={agent.agentId ?? agent.name}><div className="row-main"><span className="row-icon" aria-hidden="true">{agent.client === "Cursor" ? "C" : "A"}</span><div><p className="row-title">{agent.name}</p><p className="row-description">{agent.client} · {agent.detail}</p></div></div><span><StatusTag tone={agent.stateTone}>{agent.state}</StatusTag>{agent.agentId && agent.state !== "停止" ? <button className="text-button" type="button" onClick={() => operate("revoke-agent", { target_id: agent.agentId, reason: "web-console-operator" }, `${agent.name}を停止しました`)}>停止</button> : null}</span></li>)}</ul></article><article className="surface-card"><span className="section-kicker">DEVICE COVERAGE</span><h2 className="surface-card-title">端末のカバレッジ</h2><p className="surface-card-copy">確認済み端末からAgentを操作できます。端末を失った場合は、ここではなく端末の停止操作で即時に認証を止めてください。</p>{data.devices.map((device) => <p className="row-description" key={device.deviceId ?? device.name}>{device.name} · {device.deviceId ?? "ID未同期"}</p>)}</article></div></>;
+  return <><SurfaceHeader eyebrow="AGENTS / 03" title="つながっているAgent" copy="Claude Code と Cursor の作業状態を、プロジェクト単位で確認できます。停止したAgentは新しい作業を開始できません。" /><div className="surface-content"><article className="surface-card"><span className="section-kicker">CONNECTED CLIENTS</span><h2 className="surface-card-title">現在の作業</h2>{data.agents.length ? <ul className="row-list">{data.agents.map((agent) => <li className="row-list-item" key={agent.agentId ?? agent.name}><div className="row-main"><span className="row-icon" aria-hidden="true">{agent.client === "Cursor" ? "C" : "A"}</span><div><p className="row-title">{agent.name}</p><p className="row-description">{agent.client} · {agent.detail}</p></div></div><span><StatusTag tone={agent.stateTone}>{agent.state}</StatusTag>{agent.agentId && agent.state !== "停止" ? <button className="text-button" type="button" onClick={() => operate("revoke-agent", { target_id: agent.agentId, reason: "web-console-operator" }, `${agent.name}を停止しました`)}>停止</button> : null}</span></li>)}</ul> : <EmptyState title="接続されたAgentはありません" copy="Claude CodeまたはCursorを端末から接続すると、ここに表示されます。" />}</article><article className="surface-card"><span className="section-kicker">DEVICE COVERAGE</span><h2 className="surface-card-title">端末のカバレッジ</h2><p className="surface-card-copy">確認済み端末からAgentを操作できます。端末を失った場合は、ここではなく端末の停止操作で即時に認証を止めてください。</p>{data.devices.length ? data.devices.map((device) => <p className="row-description" key={device.deviceId ?? device.name}>{device.name} · {device.deviceId ?? "ID未同期"}</p>) : <EmptyState title="登録済み端末はありません" copy="セットアップから端末を追加してください。" />}</article></div></>;
 }
 
 function PoliciesSurface({ data, operate }: { data: AgentPassInitialData; operate: (operation: string, body: Record<string, unknown>, success: string) => Promise<void> }) {
   const [name, setName] = useState("");
   const [repository, setRepository] = useState("/work/repo");
   const scope = { operations: ["git.commit.sign"], repositories: [repository], branches: { allow: ["*"], deny: ["main"] }, remotes: { allow: ["*"], deny: [] } };
-  return <><SurfaceHeader eyebrow="POLICIES / 04" title="守られているルール" copy="Agentができること・できないことを、読みやすい言葉で表示しています。無効化したPolicyは新しいBundleに入りません。" /><div className="surface-content"><article className="surface-card"><span className="section-kicker">ACTIVE POLICIES</span><h2 className="surface-card-title">現在のポリシー</h2><ul className="row-list">{data.policies.map((policy) => <li className="row-list-item" key={policy.policyId ?? policy.name}><div className="row-main"><span className="row-icon" aria-hidden="true">◆</span><div><p className="row-title">{policy.name}</p><p className="row-description">{policy.detail}</p></div></div><span><StatusTag tone={policy.tone}>{policy.state}</StatusTag>{policy.policyId && policy.state === "保護中" ? <button className="text-button" type="button" onClick={() => operate("disable-policy", { policy_id: policy.policyId, expected_version: policy.version ?? 1, reason: "web-console-operator" }, `${policy.name}を無効化しました`)}>無効化</button> : null}</span></li>)}</ul></article><article className="surface-card"><span className="section-kicker">CREATE POLICY</span><h2 className="surface-card-title">新しいルールを追加</h2><p className="surface-card-copy">許可範囲は狭く始め、必要なRepositoryだけを登録してください。</p><div className="form-grid"><label>ルール名<input value={name} onChange={(event) => setName(event.target.value)} /></label><label>Repositoryの絶対パス<input value={repository} onChange={(event) => setRepository(event.target.value)} /></label></div><button className="secondary-button" type="button" disabled={!name || !repository} onClick={async () => { await operate("create-policy", { name, scope }, "Policyを追加しました"); setName(""); }}>Policyを追加</button></article></div></>;
+  return <><SurfaceHeader eyebrow="POLICIES / 04" title="守られているルール" copy="Agentができること・できないことを、読みやすい言葉で表示しています。無効化したPolicyは新しいBundleに入りません。" /><div className="surface-content"><article className="surface-card"><span className="section-kicker">ACTIVE POLICIES</span><h2 className="surface-card-title">現在のポリシー</h2>{data.policies.length ? <ul className="row-list">{data.policies.map((policy) => <li className="row-list-item" key={policy.policyId ?? policy.name}><div className="row-main"><span className="row-icon" aria-hidden="true">◆</span><div><p className="row-title">{policy.name}</p><p className="row-description">{policy.detail}</p></div></div><span><StatusTag tone={policy.tone}>{policy.state}</StatusTag>{policy.policyId && policy.state === "保護中" ? <button className="text-button" type="button" onClick={() => operate("disable-policy", { policy_id: policy.policyId, expected_version: policy.version ?? 1, reason: "web-console-operator" }, `${policy.name}を無効化しました`)}>無効化</button> : null}</span></li>)}</ul> : <EmptyState title="ポリシーはまだありません" copy="最小限の権限から新しいルールを追加してください。" />}</article><article className="surface-card"><span className="section-kicker">CREATE POLICY</span><h2 className="surface-card-title">新しいルールを追加</h2><p className="surface-card-copy">許可範囲は狭く始め、必要なRepositoryだけを登録してください。</p><div className="form-grid"><label>ルール名<input required value={name} onChange={(event) => setName(event.target.value)} /></label><label>Repositoryの絶対パス<input required value={repository} onChange={(event) => setRepository(event.target.value)} /></label></div><button className="secondary-button" type="button" disabled={!name.trim() || !repository.trim()} onClick={async () => { await operate("create-policy", { name: name.trim(), scope }, "Policyを追加しました"); setName(""); }}>Policyを追加</button></article></div></>;
 }
 
 function ActivitySurface({ data }: { data: AgentPassInitialData }) {
@@ -345,11 +393,41 @@ export function AgentPassConsole({ initialData = defaultInitialData }: AgentPass
   const [data, setData] = useState(initialData);
   const [activeView, setActiveView] = useState<ConsoleView>("overview");
   const [mobileOpen, setMobileOpen] = useState(false);
+  const [workspaceOpen, setWorkspaceOpen] = useState(false);
+  const [helpOpen, setHelpOpen] = useState(false);
   const [confirmOpen, setConfirmOpen] = useState(false);
   const [confirmChecked, setConfirmChecked] = useState(false);
   const [stopped, setStopped] = useState(false);
   const [toast, setToast] = useState("");
+  const [toastTone, setToastTone] = useState<ToastTone>("success");
   const [stopPending, setStopPending] = useState(false);
+  const [refreshing, setRefreshing] = useState(false);
+  const [syncError, setSyncError] = useState(false);
+  const [lastSynced, setLastSynced] = useState("未同期");
+  const modalRef = useRef<HTMLElement | null>(null);
+
+  const showToast = (message: string, tone: ToastTone = "success") => {
+    setToast(message);
+    setToastTone(tone);
+    window.setTimeout(() => setToast(""), 4200);
+  };
+
+  const refreshSummary = useCallback(async (signal?: AbortSignal) => {
+    setRefreshing(true);
+    try {
+      const response = await fetch("/api/console?resource=summary", { cache: "no-store", signal });
+      if (!response.ok) throw new Error("summary unavailable");
+      setData(mergeCloudSummary(initialData, await response.json()));
+      setSyncError(false);
+      setLastSynced("たった今");
+    } catch (error) {
+      if (error instanceof DOMException && error.name === "AbortError") return;
+      setSyncError(true);
+      setData((current) => ({ ...current, devices: [], agents: [], policies: [], activities: [], capabilityRecords: [] }));
+    } finally {
+      if (!signal?.aborted) setRefreshing(false);
+    }
+  }, [initialData]);
 
   useEffect(() => {
     if (!confirmOpen) return;
@@ -361,13 +439,29 @@ export function AgentPassConsole({ initialData = defaultInitialData }: AgentPass
   }, [confirmOpen]);
 
   useEffect(() => {
+    if (!helpOpen && !confirmOpen) return;
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== "Escape") return;
+      setHelpOpen(false);
+      setConfirmOpen(false);
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [helpOpen, confirmOpen]);
+
+  useEffect(() => {
+    if (!confirmOpen) return;
+    modalRef.current?.querySelector<HTMLInputElement>("input")?.focus();
+  }, [confirmOpen]);
+
+  useEffect(() => {
     const controller = new AbortController();
-    fetch("/api/console?resource=summary", { cache: "no-store", signal: controller.signal })
-      .then(async (response) => response.ok ? response.json() : Promise.reject(new Error("summary unavailable")))
-      .then((summary) => setData(mergeCloudSummary(initialData, summary)))
-      .catch(() => {});
-    return () => controller.abort();
-  }, [initialData]);
+    const timer = window.setTimeout(() => void refreshSummary(controller.signal), 0);
+    return () => {
+      window.clearTimeout(timer);
+      controller.abort();
+    };
+  }, [refreshSummary]);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -402,6 +496,7 @@ export function AgentPassConsole({ initialData = defaultInitialData }: AgentPass
   const goTo = (view: ConsoleView) => {
     setActiveView(view);
     setMobileOpen(false);
+    setWorkspaceOpen(false);
     window.scrollTo({ top: 0, behavior: "smooth" });
   };
 
@@ -417,12 +512,11 @@ export function AgentPassConsole({ initialData = defaultInitialData }: AgentPass
       setConfirmOpen(false);
       setConfirmChecked(false);
       setStopped(true);
-      setToast("すべてのAgentを停止しました");
+      showToast("すべてのAgentを停止しました");
     } catch {
-      setToast("停止を確認できませんでした。接続を確認して再試行してください");
+      showToast("停止を確認できませんでした。接続を確認して再試行してください", "error");
     } finally {
       setStopPending(false);
-      window.setTimeout(() => setToast(""), 4200);
     }
   };
 
@@ -434,9 +528,8 @@ export function AgentPassConsole({ initialData = defaultInitialData }: AgentPass
         body: JSON.stringify(body),
       });
       if (!response.ok) throw new Error("operation rejected");
-      setToast(success);
-      const summaryResponse = await fetch("/api/console?resource=summary", { cache: "no-store" });
-      if (summaryResponse.ok) setData(mergeCloudSummary(initialData, await summaryResponse.json()));
+      showToast(success);
+      await refreshSummary();
       const capabilityResponse = await fetch("/api/console?resource=capabilities&limit=100", { cache: "no-store" });
       if (capabilityResponse.ok) {
         const payload = await capabilityResponse.json();
@@ -444,13 +537,12 @@ export function AgentPassConsole({ initialData = defaultInitialData }: AgentPass
         setData((current) => ({ ...current, capabilityRecords: records.map((item) => ({ capabilityId: String(item.capability_id ?? ""), agentId: String(item.agent_id ?? ""), deviceId: String(item.device_id ?? ""), expiresAt: String(item.expires_at ?? ""), sequence: Number(item.sequence ?? 0) })) }));
       }
     } catch {
-      setToast("操作を確認できませんでした。権限と接続を確認してください");
-    } finally {
-      window.setTimeout(() => setToast(""), 4200);
+      showToast("操作を確認できませんでした。権限と接続を確認してください", "error");
     }
   };
 
   const currentLabel = navItems.find((item) => item.id === activeView)?.label ?? "概要";
+  const activeAgents = data.agents.filter((agent) => agent.state !== "停止").length;
 
   return (
     <div className="console-shell">
@@ -459,7 +551,8 @@ export function AgentPassConsole({ initialData = defaultInitialData }: AgentPass
           <span className="brand-mark" aria-hidden="true">A</span>
           <span><span className="brand-name">AgentPass</span><span className="brand-note">CONSOLE</span></span>
         </a>
-        <button className="workspace-switcher" type="button" aria-label={`${data.workspace}ワークスペースを選択`}><span><span className="workspace-label">WORKSPACE</span><span className="workspace-name">{data.workspace}</span></span><span className="chevron" aria-hidden="true">⌄</span></button>
+        <button className="workspace-switcher" type="button" aria-label={`${data.workspace}ワークスペースを選択`} aria-expanded={workspaceOpen} onClick={() => setWorkspaceOpen((open) => !open)}><span><span className="workspace-label">WORKSPACE</span><span className="workspace-name">{data.workspace}</span></span><span className="chevron" aria-hidden="true">⌄</span></button>
+        {workspaceOpen ? <div className="workspace-menu" role="status"><strong>{data.workspace}</strong><span>現在のワークスペース</span><small>ワークスペースの切り替えは管理者設定から行います</small></div> : null}
         <p className="nav-label">MANAGE</p>
         <nav>
           <ul className="nav-list">
@@ -472,11 +565,11 @@ export function AgentPassConsole({ initialData = defaultInitialData }: AgentPass
       <div className="main-column" id="top">
         <div className="topbar">
           <div className="breadcrumbs"><button className="mobile-menu" type="button" aria-label="メニューを開く" aria-expanded={mobileOpen} onClick={() => setMobileOpen((open) => !open)}>☰</button><span className="breadcrumb-root">AgentPass</span><span aria-hidden="true">/</span><span className="breadcrumb-current">{currentLabel}</span></div>
-          <div className="topbar-actions"><span className="connection-status"><span className="status-dot" aria-hidden="true" />システム正常</span><button className="help-button" type="button" aria-label="ヘルプ">?</button><button className="icon-button" type="button" aria-label="通知">◌</button></div>
+          <div className="topbar-actions"><span className={`connection-status${syncError ? " is-error" : ""}`}><span className="status-dot" aria-hidden="true" />{syncError ? "同期を確認" : refreshing ? "同期中…" : "システム正常"}</span><button className="refresh-button" type="button" onClick={() => void refreshSummary()} disabled={refreshing}>{refreshing ? "同期中" : `最終同期 ${lastSynced}`}</button><button className="help-button" type="button" aria-label="ヘルプを開く" aria-expanded={helpOpen} onClick={() => setHelpOpen(true)}>?</button><button className="icon-button" type="button" aria-label="アクティビティを見る" onClick={() => goTo("activity")}>◌</button></div>
         </div>
         <main className="content">
           {activeView === "overview" ? <Overview data={data} goTo={goTo} /> : null}
-          {activeView === "setup" ? <SetupSurface data={data} goTo={goTo} operate={operate} /> : null}
+          {activeView === "setup" ? <SetupSurface data={data} goTo={goTo} operate={operate} online={!syncError} /> : null}
           {activeView === "agents" ? <AgentsSurface data={data} operate={operate} /> : null}
           {activeView === "policies" ? <PoliciesSurface data={data} operate={operate} /> : null}
           {activeView === "activity" ? <ActivitySurface data={data} /> : null}
@@ -484,8 +577,10 @@ export function AgentPassConsole({ initialData = defaultInitialData }: AgentPass
         </main>
       </div>
 
-      {confirmOpen ? <div className="modal-backdrop" role="presentation" onMouseDown={(event) => { if (!stopPending && event.currentTarget === event.target) setConfirmOpen(false); }}><section className="confirm-modal" role="dialog" aria-modal="true" aria-labelledby="confirm-title"><span className="modal-label">EMERGENCY STOP</span><h2 className="modal-title" id="confirm-title">Agentをすべて停止しますか？</h2><p className="modal-copy">接続中の2つのAgentがただちに一時停止します。進行中の作業は再開するまで待機します。</p><label className="confirm-check"><input type="checkbox" checked={confirmChecked} disabled={stopPending} onChange={(event) => setConfirmChecked(event.target.checked)} /><span>影響を理解しました。すべてのAgentを停止します。</span></label><div className="modal-actions"><button className="secondary-button" type="button" disabled={stopPending} onClick={() => setConfirmOpen(false)}>キャンセル</button><button className="danger-button" type="button" disabled={!confirmChecked || stopPending} onClick={triggerStop}>{stopPending ? "停止を配信中…" : "停止を確認する"}</button></div></section></div> : null}
-      {toast ? <div className="toast" role="status">✓ {toast}</div> : null}
+      {mobileOpen ? <button className="mobile-scrim" type="button" aria-label="メニューを閉じる" onClick={() => setMobileOpen(false)} /> : null}
+      {helpOpen ? <div className="modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.currentTarget === event.target) setHelpOpen(false); }}><section className="help-modal" role="dialog" aria-modal="true" aria-labelledby="help-title"><div className="modal-header"><span className="modal-label">HELP / QUICK GUIDE</span><button className="modal-close" type="button" aria-label="ヘルプを閉じる" onClick={() => setHelpOpen(false)}>×</button></div><h2 className="modal-title" id="help-title">AgentPassの見方</h2><p className="modal-copy">Agentが作業を開始する前に、概要で「システム正常」と表示されていることを確認してください。</p><ul className="help-list"><li><strong>セットアップ</strong><span>端末・Agent・短期Capabilityを管理します。</span></li><li><strong>ポリシー</strong><span>Agentに許可する操作とRepositoryを絞ります。</span></li><li><strong>緊急停止</strong><span>不審な動きがあれば、すべてのAgentを即時停止できます。</span></li></ul><button className="secondary-button" type="button" onClick={() => { setHelpOpen(false); goTo("activity"); }}>監査ログを見る</button></section></div> : null}
+      {confirmOpen ? <div className="modal-backdrop" role="presentation" onMouseDown={(event) => { if (!stopPending && event.currentTarget === event.target) setConfirmOpen(false); }}><section className="confirm-modal" ref={modalRef} role="dialog" aria-modal="true" aria-labelledby="confirm-title" aria-describedby="confirm-copy"><span className="modal-label">EMERGENCY STOP</span><h2 className="modal-title" id="confirm-title">Agentをすべて停止しますか？</h2><p className="modal-copy" id="confirm-copy">接続中の{activeAgents}つのAgentがただちに一時停止します。進行中の作業は再開するまで待機します。</p><label className="confirm-check"><input type="checkbox" checked={confirmChecked} disabled={stopPending} onChange={(event) => setConfirmChecked(event.target.checked)} /><span>影響を理解しました。すべてのAgentを停止します。</span></label><div className="modal-actions"><button className="secondary-button" type="button" disabled={stopPending} onClick={() => setConfirmOpen(false)}>キャンセル</button><button className="danger-button" type="button" disabled={!confirmChecked || stopPending} onClick={triggerStop}>{stopPending ? "停止を配信中…" : "停止を確認する"}</button></div></section></div> : null}
+      {toast ? <div className={`toast ${toastTone}`} role="status" aria-live="polite">{toastTone === "success" ? "✓" : "!"} {toast}</div> : null}
     </div>
   );
 }
@@ -500,9 +595,9 @@ function mergeCloudSummary(fallback: AgentPassInitialData, summary: Record<strin
   return {
     ...fallback,
     workspace: typeof organization.name === "string" ? organization.name : fallback.workspace,
-    devices: rawDevices.length ? rawDevices.map((device) => ({ deviceId: String(device.device_id ?? ""), name: String(device.name ?? "確認済み端末"), detail: String(device.status ?? "active"), status: device.status === "revoked" ? "停止" : "正常", location: "ローカル / Cloud管理", checked: "同期済み" })) : fallback.devices,
-    agents: rawAgents.length ? rawAgents.map((agent) => ({ agentId: String(agent.agent_id ?? ""), deviceId: typeof agent.device_id === "string" ? agent.device_id : undefined, name: String(agent.name ?? "Coding Agent"), client: agent.kind === "cursor" ? "Cursor" : "Claude Code", detail: String(agent.device_id ?? "登録済み端末"), state: agent.status === "revoked" ? "停止" : "待機中", stateTone: agent.status === "revoked" ? "red" : "green" as "red" | "green" })) : fallback.agents,
-    policies: rawPolicies.length ? rawPolicies.map((policy) => ({ policyId: String(policy.policy_id ?? ""), version: typeof policy.version === "number" ? policy.version : 1, scope: policy.scope as Record<string, unknown> | undefined, name: String(policy.name ?? "Policy"), detail: `sequence ${String(policy.sequence ?? 0)} · Cloud署名対象`, state: policy.status === "active" ? "保護中" : "停止", tone: policy.status === "active" ? "green" : "amber" as "green" | "amber" })) : fallback.policies,
-    activities: rawActivity.length ? rawActivity.slice(-20).reverse().map((event) => ({ symbol: event.decision === "allow" ? "✓" : "□", title: event.decision === "allow" ? "操作を許可しました" : "操作をブロックしました", description: `${String(event.operation ?? "agent operation")} · ${String(event.reason ?? "recorded")}`, time: String(event.device_timestamp ?? "同期済み") })) : fallback.activities,
+    devices: rawDevices.map((device) => ({ deviceId: String(device.device_id ?? ""), name: String(device.name ?? "確認済み端末"), detail: String(device.status ?? "active"), status: device.status === "revoked" ? "停止" : "正常", location: "ローカル / Cloud管理", checked: "同期済み" })),
+    agents: rawAgents.map((agent) => ({ agentId: String(agent.agent_id ?? ""), deviceId: typeof agent.device_id === "string" ? agent.device_id : undefined, name: String(agent.name ?? "Coding Agent"), client: agent.kind === "cursor" ? "Cursor" : "Claude Code", detail: String(agent.device_id ?? "登録済み端末"), state: agent.status === "revoked" ? "停止" : "待機中", stateTone: agent.status === "revoked" ? "red" : "green" as "red" | "green" })),
+    policies: rawPolicies.map((policy) => ({ policyId: String(policy.policy_id ?? ""), version: typeof policy.version === "number" ? policy.version : 1, scope: policy.scope as Record<string, unknown> | undefined, name: String(policy.name ?? "Policy"), detail: `sequence ${String(policy.sequence ?? 0)} · Cloud署名対象`, state: policy.status === "active" ? "保護中" : "停止", tone: policy.status === "active" ? "green" : "amber" as "green" | "amber" })),
+    activities: rawActivity.slice(-20).reverse().map((event) => ({ symbol: event.decision === "allow" ? "✓" : "□", title: event.decision === "allow" ? "操作を許可しました" : "操作をブロックしました", description: `${String(event.operation ?? "agent operation")} · ${String(event.reason ?? "recorded")}`, time: String(event.device_timestamp ?? "同期済み") })),
   };
 }

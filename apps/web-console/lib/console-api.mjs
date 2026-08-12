@@ -71,8 +71,11 @@ export async function handleConsoleRequest(request, options = {}) {
         throw new ConsoleApiError(400, "idempotency_key_required", "A valid Idempotency-Key is required");
       }
       const body = await readJsonBody(request);
-      const payload = await postOperation(query, body, idempotencyKey, config, fetchImpl, options);
-      return makeJsonResponse(payload.status, payload.body, config);
+      const recentAuth = request.headers.get("agentpass-recent-auth");
+      const payload = await postOperation(query, body, idempotencyKey, config, fetchImpl, options, recentAuth);
+      return payload.oneTimeEnrollment
+        ? makeOneTimeEnrollmentResponse(payload.status, payload.body)
+        : makeJsonResponse(payload.status, payload.body, config);
     }
 
     throw new ConsoleApiError(405, "method_not_allowed", "Method not allowed");
@@ -278,7 +281,7 @@ async function getAudit(query, config, fetchImpl, options, devicesPayload = unde
   return { health, activity };
 }
 
-async function postOperation(query, body, idempotencyKey, config, fetchImpl, options) {
+async function postOperation(query, body, idempotencyKey, config, fetchImpl, options, recentAuth) {
   const operation = normalizeOperation(query.operation ?? query.resource);
   if (operation === "create-policy") {
     const policy = validatePolicyBody(body);
@@ -300,6 +303,22 @@ async function postOperation(query, body, idempotencyKey, config, fetchImpl, opt
     const device = validateDeviceBody(body);
     const result = await cloudRequest("POST", "/devices", device, config, fetchImpl, options, idempotencyKey, true);
     return { status: result.status, body: result.body };
+  }
+  if (operation === "issue-device-enrollment") {
+    const input = validateDeviceEnrollmentBody(body);
+    if (typeof recentAuth !== "string" || recentAuth.length < 32 || recentAuth.length > 4096 || hasControlCharacters(recentAuth)) {
+      throw new ConsoleApiError(401, "recent_auth_required", "Recent WebAuthn authentication is required");
+    }
+    const enrollmentId = crypto.randomUUID();
+    const deviceId = crypto.randomUUID();
+    const result = await cloudRequest("POST", "/device-enrollments", {
+      enrollment_id: enrollmentId,
+      device_id: deviceId,
+      label: input.label,
+      platform: input.platform,
+      ttl_ms: input.ttl_ms,
+    }, config, fetchImpl, options, idempotencyKey, true, { "agentpass-recent-auth": recentAuth }, true);
+    return { status: result.status, body: allowOneTimeEnrollment(result.body, input, config), oneTimeEnrollment: true };
   }
   if (operation === "create-agent") {
     const agent = validateAgentBody(body);
@@ -342,6 +361,8 @@ function normalizeOperation(value) {
     "create-device": "create-device",
     device: "create-device",
     "device.create": "create-device",
+    "issue-device-enrollment": "issue-device-enrollment",
+    "device.enrollment.issue": "issue-device-enrollment",
     "create-agent": "create-agent",
     agent: "create-agent",
     "agent.create": "create-agent",
@@ -414,6 +435,16 @@ function validateDeviceBody(value) {
   if (body.device_id !== undefined) result.device_id = validateIdentifier(body.device_id, "device.device_id");
   if (body.metadata !== undefined) result.metadata = plainObject(body.metadata);
   return result;
+}
+
+function validateDeviceEnrollmentBody(value) {
+  const body = plainObject(value);
+  exactKeys(body, ["label", "platform", "ttl_ms"], "device_enrollment");
+  const platform = body.platform === undefined ? "macos" : boundedString(body.platform, "device_enrollment.platform", 32, true);
+  if (platform !== "macos" || !Number.isSafeInteger(body.ttl_ms) || body.ttl_ms < 60_000 || body.ttl_ms > 24 * 60 * 60 * 1000) {
+    throw new ConsoleApiError(400, "invalid_json_schema", "Request JSON does not match the schema");
+  }
+  return { label: boundedString(body.label, "device_enrollment.label", 128, true), platform, ttl_ms: body.ttl_ms };
 }
 
 function validateAgentBody(value) {
@@ -521,7 +552,7 @@ async function readJsonBody(request) {
   }
 }
 
-async function cloudRequest(method, suffix, body, config, fetchImpl, options, idempotencyKey = undefined, includeStatus = false) {
+async function cloudRequest(method, suffix, body, config, fetchImpl, options, idempotencyKey = undefined, includeStatus = false, extraHeaders = undefined, preserveOneTimeCredential = false) {
   const url = buildCloudUrl(config.url, config.organizationId, suffix, config.allowInsecureLoopback);
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), config.timeoutMs);
@@ -544,6 +575,7 @@ async function cloudRequest(method, suffix, body, config, fetchImpl, options, id
     init.body = encoded;
   }
   if (idempotencyKey !== undefined) headers.set("idempotency-key", idempotencyKey);
+  if (extraHeaders) for (const [name, value] of Object.entries(extraHeaders)) headers.set(name, value);
 
   let response;
   try {
@@ -566,7 +598,8 @@ async function cloudRequest(method, suffix, body, config, fetchImpl, options, id
   }
   const safe = sanitizeValue(parsed, config.secrets);
   if (!response.ok) throw new CloudResponseError(response.status, safe, config.secrets);
-  return includeStatus ? { status: response.status, body: safe } : safe;
+  const successBody = preserveOneTimeCredential ? parsed : safe;
+  return includeStatus ? { status: response.status, body: successBody } : successBody;
 }
 
 function buildCloudUrl(baseValue, organizationId, suffix, allowInsecureLoopback = false) {
@@ -655,6 +688,30 @@ function makeJsonResponse(status, body, config) {
     return jsonResponse(502, { error: { code: "response_too_large", message: "Response is too large" } });
   }
   return jsonResponse(status, safeBody);
+}
+
+function allowOneTimeEnrollment(body, input, config) {
+  const source = plainObject(body);
+  const enrollment = plainObject(source.enrollment);
+  const allowed = ["enrollment_id", "organization_id", "device_id", "label", "platform", "created_at", "expires_at", "credential", "endpoint"];
+  if (Object.keys(enrollment).some((key) => !allowed.includes(key))) throw new ConsoleApiError(502, "cloud_api_invalid_response", "Cloud API response was invalid");
+  for (const key of ["enrollment_id", "organization_id", "device_id", "label", "platform", "expires_at", "credential", "endpoint"]) {
+    if (typeof enrollment[key] !== "string" || !enrollment[key]) throw new ConsoleApiError(502, "cloud_api_invalid_response", "Cloud API response was invalid");
+  }
+  const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+  if (!uuid.test(enrollment.enrollment_id) || !uuid.test(enrollment.device_id)
+    || enrollment.organization_id !== config.organizationId || enrollment.label !== input.label
+    || enrollment.platform !== input.platform || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{3})?Z$/.test(enrollment.expires_at)
+    || (enrollment.created_at !== undefined && (typeof enrollment.created_at !== "string" || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{3})?Z$/.test(enrollment.created_at)))
+    || !/^[A-Za-z0-9_-]{43}$/.test(enrollment.credential)
+    || enrollment.endpoint !== `/v1/enrollments/${enrollment.enrollment_id}`) {
+    throw new ConsoleApiError(502, "cloud_api_invalid_response", "Cloud API response was invalid");
+  }
+  return { enrollment: Object.fromEntries(allowed.filter((key) => enrollment[key] !== undefined).map((key) => [key, enrollment[key]])) };
+}
+
+function makeOneTimeEnrollmentResponse(status, body) {
+  return new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json; charset=utf-8", "cache-control": "no-store, max-age=0", pragma: "no-cache", "x-content-type-options": "nosniff" } });
 }
 
 function errorResponse(error) {

@@ -124,6 +124,31 @@ test("POST policy forwards the idempotency key and preserves Cloud API status", 
   assert.deepEqual(await result.json(), { policy: { policy_id: "policy-1" } });
 });
 
+test("device enrollment requires and forwards recent auth while returning the credential once", async () => {
+  let forwarded;
+  const credential = "a".repeat(43);
+  const api = authenticatedApi({ fetchImpl: async (url, init) => {
+    forwarded = { url: String(url), init };
+    const input = JSON.parse(init.body);
+    return response({ enrollment: { enrollment_id: input.enrollment_id, device_id: input.device_id, label: input.label, platform: input.platform, organization_id: env.AGENTPASS_ORGANIZATION_ID, expires_at: "2026-08-12T00:10:00.000Z", credential, endpoint: `/v1/enrollments/${input.enrollment_id}` } }, 201);
+  } });
+  const body = JSON.stringify({ label: "Build Mac", platform: "macos", ttl_ms: 600_000 });
+  const denied = await api.handle(request("/api/console?operation=issue-device-enrollment", { method: "POST", headers: { "content-type": "application/json", "idempotency-key": "device-enrollment-denied" }, body }));
+  assert.equal(denied.status, 401);
+  assert.equal(forwarded, undefined);
+
+  const proof = "webauthn-proof-abcdefghijklmnopqrstuvwxyz";
+  const result = await api.handle(request("/api/console?operation=issue-device-enrollment", { method: "POST", headers: { "content-type": "application/json", "idempotency-key": "device-enrollment-0001", "agentpass-recent-auth": proof }, body }));
+  assert.equal(result.status, 201);
+  assert.equal(result.headers.get("cache-control"), "no-store, max-age=0");
+  assert.equal(forwarded.init.headers.get("agentpass-recent-auth"), proof);
+  assert.match(forwarded.url, /\/device-enrollments$/);
+  const payload = await result.json();
+  assert.equal(payload.enrollment.credential, credential);
+  assert.match(payload.enrollment.enrollment_id, /^[0-9a-f-]{36}$/);
+  assert.match(payload.enrollment.device_id, /^[0-9a-f-]{36}$/);
+});
+
 test("operator mutations keep tenant paths, strict schemas, and idempotency", async () => {
   const calls = [];
   const api = authenticatedApi({

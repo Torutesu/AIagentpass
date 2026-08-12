@@ -23,7 +23,20 @@ Deploy this console only on a hosting path that injects SIWC identity headers af
 - SIWC establishes identity; `AGENTPASS_OPERATOR_USER_IDS` supplies authorization.
 - The Cloud bearer token stays server-side and is never returned to the browser.
 - The bridge enforces same-origin requests, strict request schemas, bounded responses, no redirects, and `no-store` caching.
+- Device enrollment requires a recent WebAuthn proof, forwards it only to the enrollment endpoint, and returns the one-time credential through a separately validated `no-store` response. The UI keeps that response only in React memory; reload or “表示を消す” removes it.
 - Emergency stop, revocation, policy, device, agent, capability, and audit operations all persist in the Cloud API; the UI has no shadow state.
+
+## Enroll a Mac
+
+Open **セットアップ → Macを安全に追加**, enter a device label and the recent-auth proof issued by the configured identity layer, then issue the ten-minute enrollment. Copy the displayed JSON once and pass it to the CLI through stdin; never put it in argv, an environment variable, a repository, or shell history.
+
+```bash
+agentpass setup continue --execute \
+  --enrollment-url 'https://api.example.com/v1' \
+  --enrollment-stdin < enrollment.json
+```
+
+The current Console consumes the Cloud API's recent-WebAuthn verifier seam. A browser-native WebAuthn ceremony and durable human sessions are the next production milestone; until that is connected, the identity layer must supply the proof out of band and the Cloud API continues to fail closed when no verifier is configured.
 
 ## Useful Commands
 

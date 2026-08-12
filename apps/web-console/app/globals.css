@@ -79,6 +79,26 @@ a:focus-visible {
   background: #f2f0e8;
 }
 
+.workspace-menu {
+  position: absolute;
+  z-index: 2;
+  top: 115px;
+  right: 18px;
+  left: 18px;
+  display: grid;
+  gap: 3px;
+  padding: 12px;
+  border: 1px solid var(--line-strong);
+  border-radius: 8px;
+  background: var(--paper);
+  box-shadow: 0 12px 26px rgba(33, 46, 39, 0.1);
+  font-size: 11px;
+}
+
+.workspace-menu strong { font-size: 12px; }
+.workspace-menu span,
+.workspace-menu small { color: var(--ink-soft); font-size: 10px; }
+
 .brand {
   display: flex;
   align-items: center;
@@ -316,6 +336,24 @@ a:focus-visible {
   font-size: 11px;
   font-weight: 700;
 }
+
+.connection-status.is-error { color: var(--red); }
+.connection-status.is-error .status-dot { box-shadow: 0 0 0 3px rgba(161, 63, 55, 0.12); }
+
+.refresh-button {
+  border: 0;
+  background: transparent;
+  color: var(--ink-faint);
+  font-size: 10px;
+}
+
+.refresh-button:hover:not(:disabled) {
+  color: var(--forest);
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+
+.refresh-button:disabled { cursor: wait; }
 
 .status-dot {
   display: inline-block;
@@ -688,6 +726,27 @@ a:focus-visible {
   background: var(--paper);
 }
 
+.empty-state {
+  padding: 28px 10px 12px;
+  text-align: center;
+}
+
+.empty-state-mark {
+  display: grid;
+  width: 32px;
+  height: 32px;
+  margin: 0 auto 10px;
+  place-items: center;
+  border-radius: 50%;
+  background: var(--canvas-deep);
+  color: var(--ink-faint);
+  font-family: Georgia, serif;
+  font-size: 18px;
+}
+
+.empty-state-title { margin: 0; font-size: 12px; font-weight: 800; }
+.empty-state-copy { max-width: 330px; margin: 4px auto 0; color: var(--ink-soft); font-size: 11px; }
+
 .activity-list {
   margin: 0;
   padding: 0;
@@ -916,6 +975,9 @@ a:focus-visible {
   font: inherit;
 }
 
+.form-grid input::placeholder,
+.form-grid textarea::placeholder { color: var(--ink-faint); }
+
 .form-grid textarea {
   min-height: 68px;
   resize: vertical;
@@ -953,6 +1015,9 @@ a:focus-visible {
   opacity: 0.45;
 }
 
+.primary-button:disabled,
+.secondary-button:disabled { cursor: not-allowed; opacity: 0.45; }
+
 .stop-action-row {
   display: flex;
   flex-wrap: wrap;
@@ -981,6 +1046,23 @@ a:focus-visible {
   background: var(--paper);
   box-shadow: 0 25px 70px rgba(24, 33, 29, 0.22);
 }
+
+.help-modal {
+  width: min(480px, 100%);
+  padding: 26px;
+  border: 1px solid var(--line-strong);
+  border-radius: 11px;
+  background: var(--paper);
+  box-shadow: 0 25px 70px rgba(24, 33, 29, 0.22);
+}
+
+.modal-header { display: flex; align-items: start; justify-content: space-between; gap: 12px; }
+.modal-close { display: inline-grid; width: 28px; height: 28px; place-items: center; border: 1px solid var(--line); border-radius: 50%; background: transparent; color: var(--ink-soft); font-size: 18px; }
+.modal-close:hover { border-color: var(--line-strong); color: var(--ink); }
+.help-list { display: grid; gap: 10px; margin: 20px 0; padding: 0; list-style: none; }
+.help-list li { display: grid; gap: 2px; padding: 11px 12px; border: 1px solid var(--line); border-radius: 7px; background: #f8f7f1; }
+.help-list strong { font-size: 12px; }
+.help-list span { color: var(--ink-soft); font-size: 11px; }
 
 .modal-label {
   color: var(--red);
@@ -1044,6 +1126,10 @@ a:focus-visible {
   font-weight: 700;
 }
 
+.toast.error { border-color: #e0b8b1; background: #fcf0ed; color: var(--red); }
+
+.mobile-scrim { display: none; }
+
 @media (max-width: 980px) {
   .console-shell {
     grid-template-columns: 215px minmax(0, 1fr);
@@ -1083,6 +1169,8 @@ a:focus-visible {
     transform: translateX(0);
   }
 
+  .mobile-scrim { position: fixed; z-index: 7; inset: 0; display: block; width: 100%; height: 100%; border: 0; background: rgba(30, 42, 37, 0.3); }
+
   .mobile-menu {
     display: inline-grid;
     width: 36px;
@@ -1116,6 +1204,8 @@ a:focus-visible {
   .connection-status {
     display: none;
   }
+
+  .refresh-button { max-width: 84px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
   .content {
     padding: 34px 18px 52px;
@@ -1190,3 +1280,7 @@ a:focus-visible {
     transition-duration: 0.01ms !important;
   }
 }
+.enrollment-result { margin-top: 1.25rem; padding: 1rem; border: 1px solid var(--line, #d8ddd9); border-radius: 12px; background: #f7faf8; }
+.secret-output { max-height: 18rem; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; padding: 1rem; border-radius: 8px; background: #132019; color: #e8fff0; font-size: .78rem; line-height: 1.55; }
+.command-hint { display: block; margin-top: .8rem; overflow-wrap: anywhere; color: #46534a; }
+.form-error { margin-top: .8rem; color: #a52222; font-weight: 650; }
