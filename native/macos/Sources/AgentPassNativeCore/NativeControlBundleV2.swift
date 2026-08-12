@@ -386,15 +386,15 @@ private extension NativeControlBundleV2Codec {
     static func rejectUnknown(_ object: [String: Any], allowed: Set<String>) throws { try nativeScopeUnknown(object, allowed) }
 }
 
-enum NativeStrictJSON {
-    static func object(from data: Data, maxBytes: Int, maxDepth: Int) throws -> [String: Any] {
+public enum NativeStrictJSON {
+    public static func object(from data: Data, maxBytes: Int, maxDepth: Int) throws -> [String: Any] {
         guard !data.isEmpty, data.count <= maxBytes, let string = String(data: data, encoding: .utf8) else { throw NativeControlBundleV2Error(.invalidJSON, "JSON is invalid UTF-8 or the size is invalid") }
         let parser = Parser(string: string, maxDepth: maxDepth)
         try parser.read()
         guard parser.isAtEnd, let object = try JSONSerialization.jsonObject(with: data, options: [.fragmentsAllowed]) as? [String: Any] else { throw NativeControlBundleV2Error(.invalidJSON, "JSON must be an object") }
         return object
     }
-    static func data(_ object: [String: Any]) throws -> Data { guard JSONSerialization.isValidJSONObject(object) else { throw NativeControlBundleV2Error(.invalidBundle, "Value is not canonical JSON") }; return try JSONSerialization.data(withJSONObject: object, options: [.sortedKeys, .withoutEscapingSlashes]) }
+    public static func data(_ object: [String: Any]) throws -> Data { guard JSONSerialization.isValidJSONObject(object) else { throw NativeControlBundleV2Error(.invalidBundle, "Value is not canonical JSON") }; return try JSONSerialization.data(withJSONObject: object, options: [.sortedKeys, .withoutEscapingSlashes]) }
     private final class Parser {
         let string: String
         let maxDepth: Int

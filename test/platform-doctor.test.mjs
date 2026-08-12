@@ -36,7 +36,7 @@ function fixture() {
     remotes: { allow: [] },
     audit_signing: { public_key: publicKey() },
     session: { required: true, ttl_seconds: 3600 },
-    native_broker: { enabled: true, mach_service: "dev.agentpass.native-service", client: FIXED_CLIENT, manager: FIXED_MANAGER }
+    native_broker: { enabled: true, mach_service: "dev.agentpass.native-service", client: FIXED_CLIENT, manager: FIXED_MANAGER, team_id: "ABCDE12345" }
   }, configDir);
   fs.writeFileSync(path.join(project, ".mcp.json"), `${JSON.stringify({ mcpServers: { agentpass: { command: process.execPath, args: ["/agentpass-mcp.mjs"], env: { AGENTPASS_PROJECT_DIR: project } } } })}\n`, { mode: 0o600 });
   return { root, configDir, project, application };

@@ -65,6 +65,73 @@ test("dry-run previews owned removal and apply is atomic and idempotent", () => 
   assert.equal(fs.readdirSync(path.dirname(plan.target)).some((name) => name.endsWith(".tmp")), false);
 });
 
+test("recovers a durable removal journal after every replacement boundary", () => {
+  const plan = makePlan();
+  const source = JSON.stringify({ mcpServers: { agentpass: plan.expected_server }, keep: true }, null, 2) + "\n";
+  write(plan, source);
+  const rendered = renderRemoval(plan, source);
+  const quarantine = `${plan.target}.agentpass-remove.quarantine`;
+  const replacement = `${plan.target}.agentpass-remove.replacement`;
+  fs.writeFileSync(replacement, rendered.content, { mode: 0o600 });
+  fs.renameSync(plan.target, quarantine);
+
+  const preview = removeIntegration(plan);
+  assert.equal(preview.reason, "recovery_pending");
+  assert.equal(fs.existsSync(plan.target), false);
+  const recovered = removeIntegration(plan, { dryRun: false });
+  assert.equal(recovered.removed, true);
+  assert.equal(fs.existsSync(quarantine), false);
+  assert.equal(fs.existsSync(replacement), false);
+  assert.equal(fs.readFileSync(plan.target, "utf8"), rendered.content);
+});
+
+test("never overwrites a concurrent writer at the final installation boundary", () => {
+  const plan = makePlan();
+  write(plan, JSON.stringify({ mcpServers: { agentpass: plan.expected_server } }, null, 2) + "\n");
+  const originalLink = fs.linkSync;
+  fs.linkSync = (source, destination) => {
+    if (destination === plan.target && source.endsWith(".agentpass-remove.replacement")) {
+      fs.writeFileSync(destination, '{"mcpServers":{"other":{"command":"concurrent"}}}\n', { flag: "wx", mode: 0o600 });
+    }
+    return originalLink(source, destination);
+  };
+  try {
+    assert.throws(() => removeIntegration(plan, { dryRun: false }), /final installation/);
+  } finally {
+    fs.linkSync = originalLink;
+  }
+  assert.equal(fs.readFileSync(plan.target, "utf8"), '{"mcpServers":{"other":{"command":"concurrent"}}}\n');
+  assert.equal(fs.existsSync(`${plan.target}.agentpass-remove.quarantine`), true);
+});
+
+test("journal reservation and recovery never overwrite competing files", () => {
+  const reservation = makePlan();
+  write(reservation, JSON.stringify({ mcpServers: { agentpass: reservation.expected_server } }) + "\n");
+  const reservationJournal = `${reservation.target}.agentpass-remove.quarantine`;
+  const originalLink = fs.linkSync;
+  fs.linkSync = (source, destination) => {
+    if (destination === reservationJournal) fs.writeFileSync(destination, "competing-journal\n", { flag: "wx", mode: 0o600 });
+    return originalLink(source, destination);
+  };
+  try { assert.throws(() => removeIntegration(reservation, { dryRun: false }), /journal already exists or is competing/); }
+  finally { fs.linkSync = originalLink; }
+  assert.equal(fs.readFileSync(reservationJournal, "utf8"), "competing-journal\n");
+  assert.equal(fs.existsSync(reservation.target), true);
+
+  const recovery = makePlan();
+  write(recovery, JSON.stringify({ mcpServers: { agentpass: recovery.expected_server } }) + "\n");
+  const recoveryJournal = `${recovery.target}.agentpass-remove.quarantine`;
+  fs.renameSync(recovery.target, recoveryJournal);
+  fs.linkSync = (source, destination) => {
+    if (source === recoveryJournal && destination === recovery.target) fs.writeFileSync(destination, "concurrent\n", { flag: "wx", mode: 0o600 });
+    return originalLink(source, destination);
+  };
+  try { assert.throws(() => removeIntegration(recovery, { dryRun: false }), /prevented journal recovery/); }
+  finally { fs.linkSync = originalLink; }
+  assert.equal(fs.readFileSync(recovery.target, "utf8"), "concurrent\n");
+  assert.equal(fs.existsSync(recoveryJournal), true);
+});
+
 test("removes only the owned member while preserving unrelated JSON bytes", () => {
   const plan = makePlan();
   const source = `{

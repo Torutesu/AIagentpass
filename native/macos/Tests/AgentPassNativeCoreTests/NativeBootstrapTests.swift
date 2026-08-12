@@ -30,6 +30,15 @@ private func bootstrapDirectory() throws -> URL {
     return url
 }
 
+@Test func bootstrapTransportJSONIsCanonicalAndDuplicateSafe() throws {
+    let canonical = Data(#"{"public_key_base64":"QUJD","version":1}"#.utf8)
+    let object = try NativeStrictJSON.object(from: canonical, maxBytes: 64 * 1024, maxDepth: 8)
+    #expect(try NativeStrictJSON.data(object) == canonical)
+    #expect(throws: NativeControlBundleV2Error.self) {
+        try NativeStrictJSON.object(from: Data(#"{"version":1,"version":1}"#.utf8), maxBytes: 64 * 1024, maxDepth: 8)
+    }
+}
+
 @Test func bootstrapCeremonyIsOrderedResumableAndComplete() throws {
     let root = try bootstrapDirectory(); defer { try? FileManager.default.removeItem(at: root) }
     let store = try NativeKeyLifecycleStore(directory: root.path)
@@ -38,20 +47,28 @@ private func bootstrapDirectory() throws -> URL {
     let date = Date(timeIntervalSince1970: 1_810_000_000)
     let coordinator = try NativeBootstrapCoordinator(store: store, serviceKeys: provider, baseTags: [.gitSigning: "git", .auditCheckpoint: "audit", .sessionApproval: "approval"], now: { date })
 
+    #expect(try coordinator.bootstrapSnapshot().sequence == 0)
+    #expect(throws: AgentPassNativeError.self) { try coordinator.completedSnapshot() }
     #expect(throws: AgentPassNativeError.self) { try coordinator.prepareServiceRole(.gitSigning) }
     let approvalPlan = try coordinator.prepareApproval(publicKeyX963: approval.publicKeyX963)
+    #expect(approvalPlan.fingerprint.range(of: "^SHA256:[A-Za-z0-9_-]{43}$", options: .regularExpression) != nil)
+    #expect(try coordinator.bootstrapSnapshot().sequence == 1)
     let resumedApproval = try coordinator.prepareApproval(publicKeyX963: approval.publicKeyX963)
     #expect(resumedApproval.fingerprint == approvalPlan.fingerprint)
     let approvalSignature = try approval.sign(message: resumedApproval.statement.canonicalData())
     _ = try coordinator.commitApproval(plan: resumedApproval, signature: approvalSignature)
     _ = try coordinator.commitApproval(plan: resumedApproval, signature: approvalSignature)
+    #expect(try coordinator.bootstrapSnapshot().sequence == 2)
 
     let signingPlan = try coordinator.prepareServiceRole(.gitSigning)
+    #expect(try coordinator.bootstrapSnapshot().sequence == 3)
     let resumedSigning = try coordinator.prepareServiceRole(.gitSigning)
     #expect(resumedSigning.fingerprint == signingPlan.fingerprint)
     _ = try coordinator.commitServiceRole(plan: resumedSigning, approvalSignature: approval.sign(message: resumedSigning.statement.canonicalData()), approvalPublicKeyX963: approval.publicKeyX963)
+    #expect(try coordinator.bootstrapSnapshot().sequence == 4)
 
     let auditPlan = try coordinator.prepareServiceRole(.auditCheckpoint)
+    #expect(try coordinator.bootstrapSnapshot().sequence == 5)
     _ = try coordinator.commitServiceRole(plan: auditPlan, approvalSignature: approval.sign(message: auditPlan.statement.canonicalData()), approvalPublicKeyX963: approval.publicKeyX963)
     let final = try coordinator.completedSnapshot()
     #expect(final.sequence == 6)

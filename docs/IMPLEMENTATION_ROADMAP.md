@@ -1,7 +1,7 @@
 # AgentPass implementation roadmap
 
 Status: active  
-Baseline: `bd5c1a7` on `codex/agent-platform`  
+Baseline: current `codex/agent-platform` branch
 Updated: 2026-08-12
 
 ## 1. Target outcome
@@ -32,11 +32,16 @@ Implemented and tested:
 - OpenAPI, JSON Schema, PostgreSQL DDL, and shared Node/Swift fixtures;
 - signed release manifest, SBOM, universal app/PKG assembly, notarization workflow, and artifact verification;
 - verified `agentpass install` and native/MCP `agentpass setup` dry-run/apply flows.
+- production doctor with a versioned report contract;
+- crash-resumable setup journal and one-step `setup continue` orchestration through native generation-1 key activation;
+- read-only macOS onboarding status adapter;
+- two-phase uninstall that removes user/system components while preserving protected state and keys;
+- Homebrew evaluation formula with production-install safety guards.
 
 Not yet production-complete:
 
-- setup does not perform cloud enrollment or the first native bootstrap ceremony;
-- doctor and uninstall do not cover the complete production lifecycle;
+- setup does not yet provision the root service configuration, enroll the cloud device, or verify the final test commit;
+- uninstall does not yet offer the separately confirmed current-user-state purge flow;
 - the Cloud API still uses a single-writer file store in its reference runtime;
 - Human API sessions, organization membership management, and WebAuthn are not connected to durable storage;
 - Device API is not connected end to end to the macOS service;
@@ -109,7 +114,7 @@ Acceptance:
 
 ### M1.3 Uninstall and recovery-safe removal
 
-- `agentpass uninstall` unregisters the service, removes user integration and application components, and preserves root state and non-exportable keys.
+- `agentpass uninstall --execute` removes byte-matched current-user integrations and the legacy LaunchAgent; `sudo agentpass uninstall --system --execute` separately unregisters the service, removes application components, and forgets the receipt. Both preserve root state and non-exportable keys.
 - `agentpass uninstall --purge-user-state --confirm PURGE_USER_STATE` removes only current-user configuration after preview.
 - A separate root-only `agentpass purge-protected-state --proof ... --confirm DESTROY_PROTECTED_STATE` is deferred until lifecycle archive proof covers every key role.
 - Add removal manifests so only AgentPass-owned MCP entries/hooks are removed; unrelated settings survive.

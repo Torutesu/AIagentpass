@@ -6,6 +6,7 @@ let package = Package(
     platforms: [.macOS(.v14)],
     products: [
         .library(name: "AgentPassNativeCore", targets: ["AgentPassNativeCore"]),
+        .library(name: "AgentPassApp", targets: ["AgentPassApp"]),
         .executable(name: "agentpass-native-service", targets: ["AgentPassNativeService"]),
         .executable(name: "agentpass-native-client", targets: ["AgentPassNativeClient"]),
         .executable(name: "agentpass-native-manager", targets: ["AgentPassNativeManager"]),
@@ -13,6 +14,7 @@ let package = Package(
         .executable(name: "agentpass-legacy-approval-migration", targets: ["AgentPassLegacyApprovalMigration"])
     ],
     targets: [
+        .target(name: "AgentPassApp"),
         .target(
             name: "AgentPassNativeCore",
             linkerSettings: [.linkedFramework("Security"), .linkedFramework("LocalAuthentication")]
@@ -41,6 +43,10 @@ let package = Package(
         .testTarget(
             name: "AgentPassNativeCoreTests",
             dependencies: ["AgentPassNativeCore"]
+        ),
+        .testTarget(
+            name: "AgentPassAppTests",
+            dependencies: ["AgentPassApp"]
         ),
         .testTarget(
             name: "AgentPassNativeServiceSupportTests",

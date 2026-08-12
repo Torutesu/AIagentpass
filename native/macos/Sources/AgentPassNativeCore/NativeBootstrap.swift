@@ -177,12 +177,45 @@ public final class NativeBootstrapCoordinator: @unchecked Sendable {
         return next
     }
 
-    public func completedSnapshot() throws -> NativeKeyLifecycleSnapshot {
+    /// Returns a verified bootstrap-only snapshot, including an interrupted partial ceremony.
+    /// This is the reconciliation boundary used by higher-level installers after a crash between
+    /// a durable lifecycle mutation and their user-owned setup journal update.
+    public func bootstrapSnapshot() throws -> NativeKeyLifecycleSnapshot {
         lock.lock()
         defer { lock.unlock() }
         let state = try store.verify()
-        guard NativeKeyRole.allCases.allSatisfy({ state.active(for: $0)?.generation == 1 }),
-              !state.generations.contains(where: { $0.status == .staged }) else {
+        guard (0...6).contains(state.sequence), state.generations.count <= 3,
+              state.generations.allSatisfy({ generation in
+                  generation.generation == 1 &&
+                  generation.applicationTag == "\(baseTags[generation.role]!).g1" &&
+                  (generation.status == .staged || generation.status == .active)
+              }) else {
+            throw AgentPassNativeError.invalidConfiguration("Bootstrap ledger contains non-bootstrap lifecycle state")
+        }
+        let approval = state.generation(1, for: .sessionApproval)
+        let service = [NativeKeyRole.gitSigning, .auditCheckpoint].compactMap { state.generation(1, for: $0) }
+        let activeServices = service.filter { $0.status == .active }.count
+        let stagedServices = service.filter { $0.status == .staged }.count
+        let legal: Bool
+        switch state.sequence {
+        case 0: legal = approval == nil && service.isEmpty
+        case 1: legal = approval?.status == .staged && service.isEmpty
+        case 2: legal = approval?.status == .active && service.isEmpty
+        case 3: legal = approval?.status == .active && service.count == 1 && stagedServices == 1
+        case 4: legal = approval?.status == .active && service.count == 1 && activeServices == 1
+        case 5: legal = approval?.status == .active && service.count == 2 && activeServices == 1 && stagedServices == 1
+        case 6: legal = approval?.status == .active && service.count == 2 && activeServices == 2
+        default: legal = false
+        }
+        guard legal else {
+            throw AgentPassNativeError.invalidConfiguration("Bootstrap ledger is not in a resumable ordered state")
+        }
+        return state
+    }
+
+    public func completedSnapshot() throws -> NativeKeyLifecycleSnapshot {
+        let state = try bootstrapSnapshot()
+        guard state.sequence == 6 else {
             throw AgentPassNativeError.invalidConfiguration("Bootstrap is incomplete")
         }
         return state

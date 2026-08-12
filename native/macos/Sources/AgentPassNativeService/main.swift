@@ -2503,9 +2503,10 @@ private final class ListenerDelegate: NSObject, NSXPCListenerDelegate {
 
 private func bootstrapInput(expectedKeys: Set<String>) throws -> [String: Any] {
     let data = FileHandle.standardInput.readDataToEndOfFile()
-    guard !data.isEmpty, data.count <= 64 * 1024,
-          let object = try JSONSerialization.jsonObject(with: data) as? [String: Any],
-          Set(object.keys) == expectedKeys else {
+    let payload = data.last == 0x0a ? Data(data.dropLast()) : data
+    guard let object = try? NativeStrictJSON.object(from: payload, maxBytes: 64 * 1024, maxDepth: 8),
+          Set(object.keys) == expectedKeys,
+          (try? NativeStrictJSON.data(object)) == payload else {
         throw AgentPassNativeError.invalidConfiguration("Native bootstrap input is not the exact expected schema")
     }
     return object
@@ -2538,10 +2539,19 @@ private func emitBootstrap(_ plan: NativeBootstrapPlan, headHash: String) throws
 
 private func emitBootstrapSnapshot(_ snapshot: NativeKeyLifecycleSnapshot) throws -> Never {
     let complete = NativeKeyRole.allCases.allSatisfy { snapshot.active(for: $0) != nil }
+    var roles: [String: String] = [:]
+    var fingerprints: [String: Any] = [:]
+    for role in NativeKeyRole.allCases {
+        let generation = snapshot.generation(1, for: role)
+        roles[role.rawValue] = generation?.status.rawValue ?? "absent"
+        fingerprints[role.rawValue] = generation?.fingerprint ?? NSNull()
+    }
     let object: [String: Any] = [
         "version": 1,
         "sequence": snapshot.sequence,
         "lifecycle_head_hash": snapshot.headHash,
+        "fingerprints": fingerprints,
+        "roles": roles,
         "bootstrap_complete": complete,
         "configuration_pin_update_required": true
     ]
@@ -2624,7 +2634,7 @@ private func runOfflineBootstrap(action: String, configPath: String) throws -> N
             approvalPublicKeyX963: bootstrapData(input, key: "approval_public_key_base64")
         ))
     case "status":
-        try emitBootstrapSnapshot(try coordinator.completedSnapshot())
+        try emitBootstrapSnapshot(try coordinator.bootstrapSnapshot())
     default:
         throw AgentPassNativeError.invalidConfiguration("Unknown offline bootstrap action")
     }

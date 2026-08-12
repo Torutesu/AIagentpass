@@ -46,14 +46,28 @@ Service registration remains a separate, visible macOS approval step. Package in
 After the PKG is installed and the local policy has been initialized, preview the native bridge and Claude Code/Cursor project integration, then apply it as the interactive user:
 
 ```sh
-agentpass setup --client claude-code --project "$PWD"
-agentpass setup --client claude-code --project "$PWD" --execute
+agentpass setup --client claude-code --project "$PWD" --team-id 'APPLETEAM1'
+agentpass setup --client claude-code --project "$PWD" --team-id 'APPLETEAM1' --execute
 agentpass setup status
-agentpass native daemon-register
+# Repeat one durable step at a time. Preview is read-only.
+agentpass setup continue
+agentpass setup continue --execute
 agentpass doctor --client claude-code --project "$PWD" --team-id 'APPLETEAM1'
 ```
 
-`setup status` reads the crash-resumable setup journal and reports the next durable action. The current CLI records verified application, local configuration, native bridge selection, and an already-enabled service; the native bootstrap/device-enrollment stages remain fail-closed until their orchestration handlers are connected.
+`setup status` reads the crash-resumable setup journal and reports the next durable action. `setup continue --execute` advances exactly one verified journal state. It registers the Service Management daemon and then uses the signed, root-only native bootstrap primitives to stage and activate the generation-1 approval, Git-signing, and audit keys. Native lifecycle sequence, role state, fingerprint, and head hash are checked before the user journal advances, so a crash after a native commit is safely reconciled on retry. Initial approval signing may request macOS user presence; routine agent signing does not.
+
+Native bootstrap requires the root-owned `/Library/Application Support/AgentPass/native-service.json` and policy to have been provisioned from the release configuration. Device enrollment, final editor/test-commit verification, and hosted Control Plane setup remain fail-closed until their later setup handlers are connected.
+
+To remove AgentPass while preserving both the root-owned audit/lifecycle state and non-exportable keys, first preview and remove current-user integrations, then perform the separately elevated system phase:
+
+```sh
+agentpass uninstall --project "$PWD"
+agentpass uninstall --project "$PWD" --execute
+sudo agentpass uninstall --system --execute
+```
+
+The user phase removes only byte-matched AgentPass MCP members and the legacy user LaunchAgent. The system phase unregisters the signed SMAppService daemon, removes `/Applications/AgentPass.app`, and forgets the PKG receipt. Neither phase deletes `~/.agentpass`, `/Library/Application Support/AgentPass`, Keychain identities, Secure Enclave keys, or audit history.
 
 Upgrading from AgentPass 0.5 or earlier creates the v4 audit identity and, when needed, a signed agent identity:
 

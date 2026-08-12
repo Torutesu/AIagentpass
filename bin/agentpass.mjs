@@ -17,11 +17,20 @@ import { evaluateAgentRequest } from "../lib/policy.mjs";
 import { executeProductionInstall, prepareProductionInstall, removeStagedProductionInstall, stageProductionInstall, verifyProductionInstall } from "../lib/platform-install.mjs";
 import { runProductionDoctor } from "../lib/platform-doctor.mjs";
 import { inspectNativeApplication } from "../lib/platform-setup.mjs";
+import { createNativeBootstrapRunner } from "../lib/native-bootstrap-runner.mjs";
+import { createNativeSetupHandlers } from "../lib/native-setup-handlers.mjs";
+import { executeProductionUninstall, planProductionUninstall } from "../lib/platform-uninstall.mjs";
+import { createSetupOrchestrator } from "../lib/setup-orchestrator.mjs";
 import { SETUP_STATES, SetupJournalError, createSetupJournal, loadSetupJournal } from "../lib/setup-journal.mjs";
 import { generateRecoveryIdentity, recoveryPolicyToAnchorPolicy, signAnchorRecoveryAuthorization, signRecoveryRequest, verifyAnchorRecoveryApprovals, verifyRecoveryThreshold } from "../lib/recovery.mjs";
 import { applyControlBundle, controlKeyFingerprint, fetchControlBundle, generateControlKeyPair, loadControlBundle, signControlBundle } from "../lib/remote-control.mjs";
 
 const [, , command, ...args] = process.argv;
+
+function shellWord(value) {
+  const word = String(value);
+  return /^[A-Za-z0-9_./:@%+=,-]+$/.test(word) ? word : `'${word.replaceAll("'", `'"'"'`)}'`;
+}
 
 function usage() {
   console.log(`AgentPass 0.18.0
@@ -31,7 +40,9 @@ Commands:
           --fingerprint SHA256:PIN --team-id TEAMID [--execute]
                     verify and optionally install the production macOS package
   setup status
-  setup --client claude-code|cursor [--project DIR] [--execute]
+  setup continue [--execute]
+                    advance exactly one verified, crash-resumable setup state
+  setup --client claude-code|cursor --team-id TEAMID [--project DIR] [--execute]
                     configure the native bridge and project MCP integration
   init              create a secure local policy
   migrate           upgrade an older policy to signed-agent format
@@ -39,6 +50,8 @@ Commands:
   check             evaluate the current repository
   doctor [--client claude-code|cursor] [--project DIR] [--team-id TEAMID] [--verbose]
                     diagnose production installation without changing state
+  uninstall [--project DIR] [--execute] [--system]
+                    remove integrations/app registration while preserving all protected state
   broker ping       verify that the signing broker is running
   broker install    install and start the macOS LaunchAgent
   broker stop       stop the macOS LaunchAgent
@@ -169,45 +182,105 @@ function installProduction() {
   }
 }
 
-function setupNativeBridge() {
+function setupContinueFlags() {
+  let execute = false;
+  for (let index = 1; index < args.length; index += 1) {
+    const argument = args[index];
+    if (argument !== "--execute" || execute) throw new Error("Usage: agentpass setup continue [--execute]");
+    execute = true;
+  }
+  return { execute };
+}
+
+async function continueNativeSetup() {
+  const flags = setupContinueFlags();
+  const journal = loadSetupJournal();
+  if (!flags.execute) {
+    console.log(JSON.stringify(createSetupOrchestrator({ journal }).preview(), null, 2));
+    return;
+  }
+  if (process.platform !== "darwin") throw new Error("Native AgentPass setup is supported only on macOS");
+  if (process.getuid?.() === 0) throw new Error("Run setup as the interactive user, not root");
+  const config = loadConfig();
+  const teamId = config.native_broker?.team_id;
+  if (typeof teamId !== "string") throw new Error("Native bridge configuration has no pinned Apple Team ID; rerun agentpass setup --team-id TEAMID");
+  const application = inspectNativeApplication(undefined, { expectedTeamId: teamId });
+  if (config.native_broker?.client !== application.client || config.native_broker?.manager !== application.manager || config.native_broker?.mach_service !== "dev.agentpass.native-service") throw new Error("Native bridge configuration does not match the verified AgentPass application");
+  const registerService = (context) => {
+    let inspected = inspectNativeApplication(undefined, { expectedTeamId: teamId });
+    if (inspected.serviceStatus !== "enabled") {
+      const result = spawnSync(inspected.manager, ["register"], { encoding: "utf8", env: { PATH: "/usr/bin:/bin:/usr/sbin:/sbin" } });
+      if (result.status !== 0) throw Object.assign(new Error("Native service registration failed"), { code: "SERVICE_REGISTRATION_FAILED" });
+      inspected = inspectNativeApplication(undefined, { expectedTeamId: teamId });
+    }
+    if (inspected.serviceStatus !== "enabled") throw Object.assign(new Error("Approve AgentPass in System Settings, then continue setup"), { code: "SERVICE_APPROVAL_REQUIRED" });
+    return { evidence: { version: 1, from_state: context.current_state, to_state: context.target_state, action: context.action.id, operation_id: context.operation_id, outcome: "completed", proof: { service: "dev.agentpass.native-service", status: "enabled" } } };
+  };
+  let runner;
+  const nativeHandlers = () => {
+    runner ??= createNativeBootstrapRunner({
+      clientPath: application.client,
+      servicePath: application.service
+    });
+    return createNativeSetupHandlers({ runner });
+  };
+  const handlers = {
+    verify_app: (context) => ({ evidence: { version: 1, from_state: context.current_state, to_state: context.target_state, action: context.action.id, operation_id: context.operation_id, outcome: "already_completed", proof: { application: application.application, verification: "developer_id_gatekeeper_team_pinned" } } }),
+    initialize_local_config: (context) => {
+      if (config.version !== 4) throw Object.assign(new Error("Local configuration version is not supported"), { code: "CONFIG_VERSION_MISMATCH" });
+      return { evidence: { version: 1, from_state: context.current_state, to_state: context.target_state, action: context.action.id, operation_id: context.operation_id, outcome: "already_completed", proof: { directory: defaultConfigDir, config_version: 4 } } };
+    },
+    select_native_bridge: (context) => ({ evidence: { version: 1, from_state: context.current_state, to_state: context.target_state, action: context.action.id, operation_id: context.operation_id, outcome: "already_completed", proof: { bridge: "production_native", client: application.client, manager: application.manager } } }),
+    register_service: registerService,
+    start_bootstrap: (context) => nativeHandlers().start_bootstrap(context),
+    enroll_approval_key: (context) => nativeHandlers().enroll_approval_key(context),
+    activate_service_keys: (context) => nativeHandlers().activate_service_keys(context)
+  };
+  const result = await createSetupOrchestrator({ journal, handlers }).execute();
+  console.log(JSON.stringify(result, null, 2));
+}
+
+async function setupNativeBridge() {
   if (args[0] === "status") {
     if (args.length !== 1) throw new Error("Usage: agentpass setup status");
     try {
       console.log(JSON.stringify({ initialized: true, ...loadSetupJournal().status() }, null, 2));
     } catch (error) {
       if (!(error instanceof SetupJournalError) || error.code !== "NOT_INITIALIZED") throw error;
-      console.log(JSON.stringify({ version: 1, initialized: false, state: "not_started", setup_complete: false, next_actions: [{ id: "verify_app", command: "agentpass setup --client claude-code|cursor --project DIR --execute" }] }, null, 2));
+      console.log(JSON.stringify({ version: 1, initialized: false, state: "not_started", setup_complete: false, next_actions: [{ id: "verify_app", command: "agentpass setup --client claude-code --project DIR --team-id TEAMID --execute" }] }, null, 2));
     }
     return;
   }
+  if (args[0] === "continue") return continueNativeSetup();
   if (process.platform !== "darwin") throw new Error("Native AgentPass setup is supported only on macOS");
   if (process.getuid?.() === 0) throw new Error("Run setup as the interactive user, not root");
-  const allowed = new Set(["--client", "--project"]);
+  const allowed = new Set(["--client", "--project", "--team-id"]);
   const flags = new Map();
   for (let index = 0; index < args.length; index += 1) {
     const argument = args[index];
     if (argument === "--execute") continue;
     if (!allowed.has(argument) || flags.has(argument) || index + 1 >= args.length || args[index + 1].startsWith("--")) {
-      throw new Error("Usage: agentpass setup --client claude-code|cursor [--project DIR] [--execute]");
+      throw new Error("Usage: agentpass setup --client claude-code|cursor --team-id TEAMID [--project DIR] [--execute]");
     }
     flags.set(argument, args[index + 1]);
     index += 1;
   }
   const clientName = flags.get("--client") ?? "claude-code";
+  const teamId = flags.get("--team-id");
+  if (typeof teamId !== "string" || !/^[A-Z0-9]{10}$/.test(teamId)) throw new Error("setup requires --team-id with the pinned 10-character Apple Team ID");
   const project = path.resolve(flags.get("--project") ?? process.cwd());
-  const application = inspectNativeApplication();
+  const application = inspectNativeApplication(undefined, { expectedTeamId: teamId });
   const config = loadConfig();
   const mcpServer = fileURLToPath(new URL("../adapters/mcp-server/bin/agentpass-mcp.mjs", import.meta.url));
   const integration = integrationPlan({ client: clientName, projectDir: project, nodePath: process.execPath, mcpServerPath: mcpServer });
   const preview = installIntegration(integration);
-  const next = application.serviceStatus === "enabled"
-    ? ["agentpass doctor", "agentpass native status"]
-    : ["agentpass native daemon-register", "agentpass doctor"];
+  const initialExecuteCommand = ["agentpass", "setup", "--client", clientName, "--team-id", teamId, "--project", project, "--execute"].map(shellWord).join(" ");
   if (!args.includes("--execute")) {
-    console.log(JSON.stringify({ version: 1, dryRun: true, native: application, integration: preview, next }, null, 2));
+    console.log(JSON.stringify({ version: 1, dryRun: true, native: application, integration: preview, next: ["agentpass setup status", initialExecuteCommand] }, null, 2));
     return;
   }
-  const configured = { ...config, native_broker: application.nativeBroker };
+  const next = ["agentpass setup status", "agentpass setup continue --execute"];
+  const configured = { ...config, native_broker: { ...application.nativeBroker, team_id: teamId } };
   saveConfig(configured);
   try {
     const installed = installIntegration(integration, { dryRun: false });
@@ -224,6 +297,30 @@ function setupNativeBridge() {
     saveConfig(config);
     throw error;
   }
+}
+
+function uninstallProduction() {
+  const allowed = new Set(["--project"]); const flags = new Map(); const switches = new Set();
+  for (let index = 0; index < args.length; index += 1) {
+    const argument = args[index];
+    if (["--execute", "--system"].includes(argument)) {
+      if (switches.has(argument)) throw new Error("Usage: agentpass uninstall [--project DIR] [--execute] [--system]");
+      switches.add(argument); continue;
+    }
+    if (!allowed.has(argument) || flags.has(argument) || index + 1 >= args.length || args[index + 1].startsWith("--")) throw new Error("Usage: agentpass uninstall [--project DIR] [--execute] [--system]");
+    flags.set(argument, args[++index]);
+  }
+  const system = switches.has("--system");
+  const project = path.resolve(flags.get("--project") ?? process.cwd());
+  const mcpServer = fileURLToPath(new URL("../adapters/mcp-server/bin/agentpass-mcp.mjs", import.meta.url));
+  const integrations = system ? [] : ["claude-code", "cursor"].map((client) => ({ client, projectDir: project, nodePath: process.execPath, mcpServerPath: mcpServer }));
+  const plan = planProductionUninstall({ integrations, includeUser: !system });
+  if (!switches.has("--execute")) {
+    console.log(JSON.stringify({ ...plan, next: system ? "rerun as root with --system --execute" : "rerun with --execute; then run the reported system command" }, null, 2));
+    return;
+  }
+  const result = executeProductionUninstall(plan, { execute: true, scope: system ? "system" : "user", includeUser: !system });
+  console.log(JSON.stringify({ ...result, system_removal_required: !system && plan.requiresRoot, system_command: !system && plan.requiresRoot ? "sudo agentpass uninstall --system --execute" : null }, null, 2));
 }
 
 function init() {
@@ -1084,7 +1181,8 @@ function xmlEscape(value) {
 
 try {
   if (command === "install") installProduction();
-  else if (command === "setup") setupNativeBridge();
+  else if (command === "setup") await setupNativeBridge();
+  else if (command === "uninstall") uninstallProduction();
   else if (command === "init") init();
   else if (command === "migrate") migrate();
   else if (command === "check") check();
