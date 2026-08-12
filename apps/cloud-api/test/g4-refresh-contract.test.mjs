@@ -147,23 +147,26 @@ function createDependencies({ refreshResult = null, acknowledge } = {}) {
       return typeof refreshResult === "function" ? refreshResult(input) : refreshResult;
     },
     snapshotAndAssignBundleHead: async (input) => {
-      calls.bundle.push(structuredClone(input));
+      calls.bundle.push(structuredClone(Object.fromEntries(Object.entries(input).filter(([, value]) => typeof value !== "function"))));
+      const snapshot = {
+        policy_scope: SCOPE,
+        global_revoked: false,
+        revoked_devices: [],
+        revoked_agents: [],
+        revoked_capabilities: []
+      };
+      const head = {
+        organization_id: ORGANIZATION_ID,
+        device_id: DEVICE_ID,
+        format_epoch: 2,
+        sequence: BUNDLE_SEQUENCE,
+        issued_at: new Date(NOW).toISOString(),
+        expires_at: new Date(NOW + 60_000).toISOString()
+      };
+      head.state_fingerprint = await input.statementHashFactory({ snapshot, head });
       return {
-        snapshot: {
-          policy_scope: SCOPE,
-          global_revoked: false,
-          revoked_devices: [],
-          revoked_agents: [],
-          revoked_capabilities: []
-        },
-        head: {
-          organization_id: ORGANIZATION_ID,
-          device_id: DEVICE_ID,
-          format_epoch: 2,
-          sequence: BUNDLE_SEQUENCE,
-          issued_at: new Date(NOW).toISOString(),
-          expires_at: new Date(NOW + 60_000).toISOString()
-        },
+        snapshot,
+        head,
         desired_generation: DESIRED_GENERATION
       };
     },

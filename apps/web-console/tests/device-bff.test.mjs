@@ -68,6 +68,28 @@ test("normalizes the minimal Cloud device state contract", async () => {
   });
 });
 
+test("accepts the real pending-device read model before the first bundle is assigned", async () => {
+  const pending = {
+    device_id: deviceId,
+    name: "Pending Mac",
+    status: "active",
+    created_at: "2026-08-12T00:00:00.000Z",
+    last_seen_at: null,
+    version: 1,
+    desired_generation: 2,
+    observed_generation: null,
+    refresh_state: "pending",
+    bundle_sequence: null,
+    bundle_expires_at: null,
+    last_ack_at: null,
+    blocked_reason: null,
+  };
+  const api = humanApi(async () => response({ request_id: "request-pending-1", devices: [pending] }));
+  const result = await api.handle(request("/api/console?resource=devices", { headers: { cookie: sessionCookie } }));
+  assert.equal(result.status, 200);
+  assert.deepEqual(await result.json(), { devices: [pending] });
+});
+
 test("rejects unknown or secret-bearing device-state shapes before Console output", async () => {
   for (const device of [
     { device_id: deviceId, nonce: "refresh-nonce" },

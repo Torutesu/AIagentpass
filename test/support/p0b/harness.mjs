@@ -183,8 +183,9 @@ export async function createDisposablePostgres({ adminUrl, databaseName = random
   });
 }
 
-export async function startP0BHarness({ env = process.env, repoRoot = REPOSITORY_ROOT, consoleBuild = true, waitTimeoutMs = 20_000 } = {}) {
+export async function startP0BHarness({ env = process.env, repoRoot = REPOSITORY_ROOT, consoleBuild = true, waitTimeoutMs = 20_000, prepareDatabase } = {}) {
   if (env.P0B_DISABLE_EXTERNAL === "true") throw new P0BSkip("external_disabled", "P0-B external dependencies disabled");
+  if (prepareDatabase !== undefined && typeof prepareDatabase !== "function") throw new TypeError("P0-B database preparation must be a function");
   const temp = await createP0BTempDirectory();
   let database;
   let cloudProcess;
@@ -194,13 +195,19 @@ export async function startP0BHarness({ env = process.env, repoRoot = REPOSITORY
   try {
     const certificates = await createTestCertificates(temp);
     database = await createDisposablePostgres({ env });
-    const trustedCaBundle = await createTrustedCaBundle(temp, [certificates.caCert], [database.caCertificate]);
+    const organizationId = crypto.randomUUID();
     const files = await createRuntimeFiles(temp);
+    if (prepareDatabase) await prepareDatabase(Object.freeze({
+      pool: database.pool,
+      organizationId,
+      refreshNonceKeyId: files.refreshNonceKeyId,
+      refreshNonceKey: Buffer.from(files.refreshNonceKey)
+    }));
+    const trustedCaBundle = await createTrustedCaBundle(temp, [certificates.caCert], [database.caCertificate]);
     const cloudPort = await reservePort();
     const cloudTlsPort = await reservePort();
     const consolePort = await reservePort();
     const consoleTlsPort = await reservePort();
-    const organizationId = crypto.randomUUID();
     const common = {
       AGENTPASS_DATABASE_URL: database.url,
       AGENTPASS_CLOUD_PROFILE: "hosted",
@@ -237,6 +244,7 @@ export async function startP0BHarness({ env = process.env, repoRoot = REPOSITORY
       AGENTPASS_IDENTITY_ASSERTION_KID: "p0b-console-v1",
       AGENTPASS_IDENTITY_PROVIDER: "chatgpt",
       NODE_EXTRA_CA_CERTS: trustedCaBundle,
+      VINEXT_TRUSTED_HOSTS: `localhost:${consoleTlsPort}`,
       WRANGLER_LOG_PATH: path.join(temp, "wrangler.log"),
       MINIFLARE_REGISTRY_PATH: path.join(temp, "registry")
     });
@@ -252,7 +260,9 @@ export async function startP0BHarness({ env = process.env, repoRoot = REPOSITORY
   } catch (error) {
     await closeP0BHarness({ cloudProcess, consoleProcess, cloudProxy, consoleProxy, database, temp });
     if (error instanceof P0BSkip) throw error;
-    throw error instanceof Error && error.message.startsWith("P0-B") ? error : new Error("P0-B harness startup failed");
+    if (error instanceof Error && error.message.startsWith("P0-B")) throw error;
+    const diagnostic = redactP0BDiagnostic(error?.message ?? "unknown");
+    throw new Error(`P0-B harness startup failed (${diagnostic || "unknown"})`);
   }
 }
 
@@ -303,11 +313,14 @@ async function createRuntimeFiles(directory) {
   const identityPublicKey = path.join(directory, "identity-public.pem");
   await writePrivate(bundlePrivateKey, bundle.privateKey.export({ type: "pkcs8", format: "pem" }));
   await writePrivate(refreshPrivateKey, refresh.privateKey.export({ type: "pkcs8", format: "pem" }));
-  await fsp.writeFile(identityPublicKey, identity.publicKey.export({ type: "spki", format: "pem" }), { mode: 0o644, flag: "wx" });
+  await fsp.writeFile(identityPublicKey, identity.publicKey.export({ type: "spki", format: "pem" }), { mode: 0o600, flag: "wx" });
   const nonceKeyring = path.join(directory, "refresh-nonce-keyring.json");
-  await writePrivate(nonceKeyring, `${JSON.stringify({ version: 1, active_key_id: "p0b-nonce-v1", keys: { "p0b-nonce-v1": crypto.randomBytes(32).toString("base64url") } })}\n`);
+  const refreshNonceKeyId = "refresh-nonce-v1";
+  const refreshNonceKey = crypto.randomBytes(32);
+  await writePrivate(nonceKeyring, `${JSON.stringify({ version: 1, active_key_id: refreshNonceKeyId, keys: { [refreshNonceKeyId]: refreshNonceKey.toString("base64url") } })}\n`);
   return Object.freeze({
     bundlePrivateKey, refreshPrivateKey, identityPublicKey, nonceKeyring,
+    refreshNonceKeyId, refreshNonceKey,
     identityPrivateKeyPem: identity.privateKey.export({ type: "pkcs8", format: "pem" }),
     capabilitySecret: crypto.randomBytes(32).toString("base64url"), cursorSecret: crypto.randomBytes(32).toString("base64url"),
     probeSecret: crypto.randomBytes(32).toString("base64url")
@@ -365,7 +378,8 @@ async function createTlsProxy({ cert, key, targetPort, port }) {
   const sockets = new Set();
   const upstreams = new Set();
   const server = https.createServer({ cert: await fsp.readFile(cert), key: await fsp.readFile(key), minVersion: "TLSv1.2", requestCert: false }, (request, response) => {
-    const headers = { ...request.headers, host: `${LOOPBACK}:${targetPort}` };
+    const externalHost = request.headers.host;
+    const headers = { ...request.headers, host: externalHost, "x-forwarded-proto": "https", "x-forwarded-host": externalHost };
     delete headers.connection; delete headers["proxy-connection"]; delete headers["keep-alive"];
     const upstream = http.request({ host: LOOPBACK, port: targetPort, method: request.method, path: request.url, headers }, (incoming) => { response.writeHead(incoming.statusCode ?? 502, incoming.headers); incoming.pipe(response); });
     upstreams.add(upstream);

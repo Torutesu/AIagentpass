@@ -149,7 +149,8 @@ test("G4 refresh generation, failover reconstruction, and signed ACK are race-sa
     device_id: ids.deviceA,
     minimum_sequence: 1,
     issued_at: new Date().toISOString(),
-    expires_at: new Date(Date.now() + 60_000).toISOString()
+    expires_at: new Date(Date.now() + 60_000).toISOString(),
+    statement_hash_factory: () => "a".repeat(64)
   });
   assert.equal(bundle.desired_generation, 2);
   const acknowledgement = signAcknowledgement({
@@ -191,7 +192,8 @@ test("G4 refresh generation, failover reconstruction, and signed ACK are race-sa
     device_id: ids.deviceB,
     minimum_sequence: 1,
     issued_at: new Date().toISOString(),
-    expires_at: new Date(Date.now() + 60_000).toISOString()
+    expires_at: new Date(Date.now() + 60_000).toISOString(),
+    statement_hash_factory: () => "b".repeat(64)
   });
   const blocked = signAcknowledgement({
     privateKey: deviceBKeys.privateKey,

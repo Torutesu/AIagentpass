@@ -102,6 +102,10 @@ test("missing external dependencies produce an explicit skip without waiting", a
   await assert.rejects(startP0BHarness({ env: { P0B_DISABLE_EXTERNAL: "true" } }), (error) => error instanceof P0BSkip && error.code === "external_disabled");
 });
 
+test("database preparation hook must be callable", async () => {
+  await assert.rejects(startP0BHarness({ prepareDatabase: true }), /database preparation must be a function/);
+});
+
 function assertHttps({ port, ca, servername }, expectedStatus) {
   return new Promise((resolve, reject) => {
     const request = https.request({ hostname: "127.0.0.1", port, servername, path: "/", ca, rejectUnauthorized: true }, (response) => {

@@ -153,11 +153,24 @@ export function createControlPlaneAuthorityRepository({ client, cursorCodec, cur
     }));
   }
 
-  async function assignBundleHeadInTransaction(tx, values) {
+  async function assignBundleHeadInTransaction(tx, values, options = {}) {
     const currentResult = await tx.query(`SELECT organization_id,device_id,format_epoch,sequence,statement_hash,issued_at,expires_at
       FROM bundle_heads WHERE organization_id=$1 AND device_id=$2 FOR UPDATE`, [values.organizationId, values.deviceId]);
     const current = currentResult.rows?.[0];
     const sequence = Math.max(values.minimumSequence, current ? positiveInteger(current.sequence, "sequence") + 1 : 1);
+    let statementHash = values.stateFingerprint;
+    if (options.statementHashFactory !== undefined) {
+      if (typeof options.statementHashFactory !== "function") throw new ControlPlaneAuthorityRepositoryError("ERR_INPUT", "bundle statement hash factory must be a function");
+      try {
+        statementHash = hash(await options.statementHashFactory(Object.freeze({
+          snapshot: options.snapshot,
+          head: Object.freeze({ format_epoch: 2, sequence, issued_at: values.issuedAt, expires_at: values.expiresAt })
+        })), "statement_hash");
+      } catch (error) {
+        if (error instanceof ControlPlaneAuthorityRepositoryError) throw error;
+        throw new ControlPlaneAuthorityRepositoryError("ERR_BUNDLE_STATEMENT", "bundle statement hash could not be derived", undefined, error);
+      }
+    }
     const result = await tx.query(`INSERT INTO bundle_heads
       (organization_id,device_id,format_epoch,sequence,statement_hash,issued_at,expires_at)
       VALUES ($1,$2,2,$3,$4,$5::timestamptz,$6::timestamptz)
@@ -168,7 +181,7 @@ export function createControlPlaneAuthorityRepository({ client, cursorCodec, cur
         issued_at=EXCLUDED.issued_at,
         expires_at=EXCLUDED.expires_at
       RETURNING organization_id,device_id,format_epoch,sequence,statement_hash,issued_at,expires_at`, [
-      values.organizationId, values.deviceId, sequence, values.stateFingerprint, values.issuedAt, values.expiresAt
+      values.organizationId, values.deviceId, sequence, statementHash, values.issuedAt, values.expiresAt
     ]);
     if (rowCount(result) !== 1) throw new ControlPlaneAuthorityRepositoryError("ERR_DB_RESULT", "bundle head was not created");
     return publicBundleHead(result.rows[0]);
@@ -182,11 +195,16 @@ export function createControlPlaneAuthorityRepository({ client, cursorCodec, cur
    * concurrent revocation; it cannot straddle one.
    *
    * The returned snapshot contains the exact derived fields consumed by
-   * ControlBundle signing.  Callers must sign using snapshot.state_fingerprint
-   * and head.sequence/issued_at/expires_at from this same result.
+   * ControlBundle signing. Production callers supply statementHashFactory so
+   * the transaction persists the hash of the exact wire-computable unsigned
+   * ControlBundle using the assigned sequence/timestamps. The authority
+   * fingerprint remains a concurrency check and is never substituted for the
+   * device's canonical ControlBundle hash.
    */
   async function snapshotAndAssignBundleHead(input = {}) {
     const values = normalizeBundleAuthoritySnapshotInput(input);
+    const statementHashFactory = input.statement_hash_factory ?? input.statementHashFactory;
+    if (typeof statementHashFactory !== "function") throw new ControlPlaneAuthorityRepositoryError("ERR_INPUT", "bundle statement hash factory is required");
     return databaseOperation(() => transaction(client, async (tx) => {
       await lockOrganization(tx, values.organizationId);
       await lockOrganizationRow(tx, values.organizationId);
@@ -236,7 +254,7 @@ export function createControlPlaneAuthorityRepository({ client, cursorCodec, cur
       const head = await assignBundleHeadInTransaction(tx, {
         ...values,
         stateFingerprint: snapshot.state_fingerprint
-      });
+      }, { snapshot, statementHashFactory });
       const stateResult = await tx.query(`SELECT desired_generation,observed_generation,refresh_state
         FROM device_control_plane_state
         WHERE organization_id=$1 AND device_id=$2

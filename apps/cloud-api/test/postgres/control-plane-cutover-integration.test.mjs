@@ -61,14 +61,15 @@ test("G3 authority survives instance switching, restart, replay races, and cross
   const authorityB = createControlPlaneAuthorityRepository({ client: poolB, cursorSecret: Buffer.alloc(32, 0x62), now: () => now });
   const expiresAt = new Date(Date.parse(now) + 60_000).toISOString();
   const atomicSnapshot = await authorityA.snapshotAndAssignBundleHead({
-    organization_id: ids.organization, device_id: ids.device, minimum_sequence: 1, issued_at: now, expires_at: expiresAt
+    organization_id: ids.organization, device_id: ids.device, minimum_sequence: 1, issued_at: now, expires_at: expiresAt,
+    statement_hash_factory: () => "c".repeat(64)
   });
   assert.equal(atomicSnapshot.snapshot.organization_id, ids.organization);
   assert.equal(atomicSnapshot.snapshot.device_id, ids.device);
   assert.equal(atomicSnapshot.snapshot.active_policy.policy_id, ids.policy);
   assert.deepEqual(atomicSnapshot.snapshot.revocations, []);
   assert.equal(atomicSnapshot.head.sequence, 1);
-  assert.equal(atomicSnapshot.head.state_fingerprint, atomicSnapshot.snapshot.state_fingerprint);
+  assert.equal(atomicSnapshot.head.state_fingerprint, "c".repeat(64));
 
   // Hold the same organization authority lock used by createRevocation(),
   // commit a revocation while the snapshot is waiting, and prove the
@@ -84,7 +85,8 @@ test("G3 authority survives instance switching, restart, replay races, and cross
 
     let settled = false;
     const waitingSnapshot = authorityB.snapshotAndAssignBundleHead({
-      organization_id: ids.organization, device_id: ids.device, minimum_sequence: 1, issued_at: now, expires_at: expiresAt
+      organization_id: ids.organization, device_id: ids.device, minimum_sequence: 1, issued_at: now, expires_at: expiresAt,
+      statement_hash_factory: () => "d".repeat(64)
     }).then((value) => { settled = true; return value; });
     await new Promise((resolve) => setTimeout(resolve, 25));
     assert.equal(settled, false);

@@ -182,8 +182,8 @@ test("P0-B: manual wake to signed P-256 ACK produces a synced Console read model
   // unacknowledged outbox without changing device A's synced state.
   const pendingB = await authority.pollDeviceRefresh({ organization_id: ids.organization, device_id: ids.deviceB, after_generation: 1, wait_ms: 0 });
   assert.ok(pendingB);
-  const headB1 = await authority.snapshotAndAssignBundleHead({ organization_id: ids.organization, device_id: ids.deviceB, minimum_sequence: 1, issued_at: nowIso, expires_at: new Date(nowMs + 60_000).toISOString() });
-  const headB2 = await authority.snapshotAndAssignBundleHead({ organization_id: ids.organization, device_id: ids.deviceB, minimum_sequence: 1, issued_at: nowIso, expires_at: new Date(nowMs + 60_000).toISOString() });
+  const headB1 = await authority.snapshotAndAssignBundleHead({ organization_id: ids.organization, device_id: ids.deviceB, minimum_sequence: 1, issued_at: nowIso, expires_at: new Date(nowMs + 60_000).toISOString(), statement_hash_factory: () => "c".repeat(64) });
+  const headB2 = await authority.snapshotAndAssignBundleHead({ organization_id: ids.organization, device_id: ids.deviceB, minimum_sequence: 1, issued_at: nowIso, expires_at: new Date(nowMs + 60_000).toISOString(), statement_hash_factory: () => "d".repeat(64) });
   assert.equal(headB2.head.sequence, headB1.head.sequence + 1);
   const rollbackAck = signAcknowledgement({
     privateKey: keys.deviceB.privateKey,

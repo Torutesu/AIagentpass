@@ -180,7 +180,8 @@ test("bundle authority snapshot and head assignment share the revocation organiz
   const client = new FakeClient();
   const api = repository(client);
   const first = await api.snapshotAndAssignBundleHead({
-    organization_id: ids.organization, device_id: ids.device, minimum_sequence: 1, issued_at: NOW, expires_at: LATER
+    organization_id: ids.organization, device_id: ids.device, minimum_sequence: 1, issued_at: NOW, expires_at: LATER,
+    statement_hash_factory: () => HASH
   });
 
   assert.equal(first.snapshot.organization_id, ids.organization);
@@ -191,7 +192,7 @@ test("bundle authority snapshot and head assignment share the revocation organiz
   assert.equal(first.snapshot.global_revoked, false);
   assert.match(first.snapshot.state_fingerprint, /^[0-9a-f]{64}$/u);
   assert.equal(first.head.sequence, 1);
-  assert.equal(first.head.state_fingerprint, first.snapshot.state_fingerprint);
+  assert.equal(first.head.state_fingerprint, HASH);
   assert.equal(first.desired_generation, 3);
 
   const lockCall = client.calls.find(({ text }) => text.includes("pg_advisory_xact_lock"));
@@ -203,13 +204,41 @@ test("bundle authority snapshot and head assignment share the revocation organiz
 
   const second = await api.snapshotAndAssignBundleHead({
     organization_id: ids.organization, device_id: ids.device, minimum_sequence: 1, issued_at: NOW, expires_at: LATER,
-    state_fingerprint: first.snapshot.state_fingerprint
+    state_fingerprint: first.snapshot.state_fingerprint,
+    statement_hash_factory: () => "a".repeat(64)
   });
   assert.equal(second.head.sequence, first.head.sequence + 1);
+  const wireStatementHash = "b".repeat(64);
+  let factoryInput;
+  const wireBound = await api.snapshotAndAssignBundleHead({
+    organization_id: ids.organization, device_id: ids.device, minimum_sequence: 1, issued_at: NOW, expires_at: LATER,
+    statement_hash_factory: (input) => { factoryInput = input; return wireStatementHash; }
+  });
+  assert.equal(factoryInput.snapshot.state_fingerprint, first.snapshot.state_fingerprint);
+  assert.equal(factoryInput.head.sequence, wireBound.head.sequence);
+  assert.equal(wireBound.head.state_fingerprint, wireStatementHash);
+  assert.equal(client.bundleHead.statement_hash, wireStatementHash);
   await assert.rejects(() => api.snapshotAndAssignBundleHead({
     organization_id: ids.organization, device_id: ids.device, minimum_sequence: 1, issued_at: NOW, expires_at: LATER,
-    state_fingerprint: HASH
+    state_fingerprint: HASH,
+    statement_hash_factory: () => "c".repeat(64)
   }), { code: "ERR_STATE_FINGERPRINT_MISMATCH" });
+});
+
+test("bundle statement hash derivation fails before persistence and rolls back the authority transaction", async () => {
+  const client = new FakeClient();
+  const api = repository(client);
+  await assert.rejects(() => api.snapshotAndAssignBundleHead({
+    organization_id: ids.organization,
+    device_id: ids.device,
+    minimum_sequence: 1,
+    issued_at: NOW,
+    expires_at: LATER,
+    statement_hash_factory: () => { throw new Error("signer configuration unavailable"); }
+  }), { code: "ERR_BUNDLE_STATEMENT" });
+  assert.equal(client.bundleHead, null);
+  assert.equal(client.calls.some(({ text }) => text.startsWith("INSERT INTO bundle_heads")), false);
+  assert.equal(client.calls.at(-1).text, "ROLLBACK");
 });
 
 test("authority reduction derives a restart-safe nonce and sends only key id plus digest to SQL", async () => {

@@ -66,7 +66,8 @@ test("G4.1 PostgreSQL qualification measures 100 commit-to-hint and signed-ACK a
       device_id: fixture.deviceId,
       minimum_sequence: attempt + 1,
       issued_at: new Date().toISOString(),
-      expires_at: new Date(Date.now() + 60_000).toISOString()
+      expires_at: new Date(Date.now() + 60_000).toISOString(),
+      statement_hash_factory: () => attempt.toString(16).padStart(64, "0")
     });
     const acknowledgement = signAcknowledgement({
       privateKey: fixture.devicePrivateKey,

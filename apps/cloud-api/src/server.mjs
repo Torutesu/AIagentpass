@@ -1,7 +1,7 @@
 import crypto from "node:crypto";
 import http from "node:http";
 import { authenticateApiToken, createReplayCache, requireOrganizationRole, verifyDeviceRequest } from "./auth.mjs";
-import { MAX_REVOCATIONS, issueControlBundle, parseControlBundleJson } from "../../../lib/control-bundle-v2.mjs";
+import { MAX_REVOCATIONS, controlBundleStatementHash, issueControlBundle, parseControlBundleJson } from "../../../lib/control-bundle-v2.mjs";
 import { canonicalJson, intersectScopes } from "../../../packages/capability/src/index.mjs";
 import {
   bundleAcknowledgementSigningData,
@@ -351,16 +351,29 @@ export function createCloudApi({ store, tokenRecords = [], bundleSigner, refresh
         const issuedMs = now();
         const ttlMs = bundleSigner.ttlMs ?? 3_600_000;
         if (typeof store.snapshotAndAssignBundleHead === "function") {
-          const authority = await store.snapshotAndAssignBundleHead({ organizationId, deviceId: match.deviceId, minimumSequence: 1, issuedAt: new Date(issuedMs).toISOString(), expiresAt: new Date(issuedMs + ttlMs).toISOString() });
-          const { snapshot, head } = authority;
-          const bundle = issueControlBundle({
-            format_epoch: 2, issuer: bundleSigner.issuer, organization_id: organizationId, device_id: match.deviceId,
-            audience: { organization_id: organizationId, device_id: match.deviceId }, issued_at: head.issued_at,
-            expires_at: head.expires_at, sequence: head.sequence, policy_scope: snapshot.policy_scope,
-            global_revoked: snapshot.global_revoked, revoked_devices: snapshot.revoked_devices,
-            revoked_agents: snapshot.revoked_agents, revoked_capabilities: snapshot.revoked_capabilities,
-            offline_ttl_ms: bundleSigner.offlineTtlMs ?? 3_600_000, key_id: bundleSigner.keyId
-          }, bundleSigner.privateKey, { now: issuedMs, maxTtlMs: ttlMs, maxOfflineTtlMs: bundleSigner.offlineTtlMs ?? 3_600_000 });
+          let preparedStatement;
+          const authority = await store.snapshotAndAssignBundleHead({
+            organizationId,
+            deviceId: match.deviceId,
+            minimumSequence: 1,
+            issuedAt: new Date(issuedMs).toISOString(),
+            expiresAt: new Date(issuedMs + ttlMs).toISOString(),
+            statementHashFactory: ({ snapshot, head }) => {
+              preparedStatement = {
+                format_epoch: 2, issuer: bundleSigner.issuer, organization_id: organizationId, device_id: match.deviceId,
+                audience: { organization_id: organizationId, device_id: match.deviceId }, issued_at: head.issued_at,
+                expires_at: head.expires_at, sequence: head.sequence, policy_scope: snapshot.policy_scope,
+                global_revoked: snapshot.global_revoked, revoked_devices: snapshot.revoked_devices,
+                revoked_agents: snapshot.revoked_agents, revoked_capabilities: snapshot.revoked_capabilities,
+                offline_ttl_ms: bundleSigner.offlineTtlMs ?? 3_600_000, key_id: bundleSigner.keyId
+              };
+              return controlBundleStatementHash(preparedStatement);
+            }
+          });
+          const { head } = authority;
+          if (!preparedStatement || preparedStatement.sequence !== head.sequence) throw apiError("bundle_statement_unavailable", 503, "Bundle statement is unavailable");
+          const bundle = issueControlBundle(preparedStatement, bundleSigner.privateKey, { now: issuedMs, maxTtlMs: ttlMs, maxOfflineTtlMs: bundleSigner.offlineTtlMs ?? 3_600_000 });
+          if (controlBundleStatementHash(bundle) !== head.state_fingerprint) throw apiError("bundle_statement_mismatch", 503, "Bundle statement is unavailable");
           return { body: { bundle, desired_generation: positiveGeneration(authority.desired_generation ?? head.sequence) } };
         }
         const policies = await store.listPolicies({ organizationId });

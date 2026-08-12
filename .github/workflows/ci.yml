@@ -68,6 +68,22 @@ jobs:
           AGENTPASS_E2E_ARTIFACT_DIR: ${{ github.workspace }}/apps/web-console/e2e/test-results
         run: node --test test/p0b-artifact-security.test.mjs
 
+  p0b-live-process:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            apps/web-console/package-lock.json
+      - run: npm ci
+      - run: npm ci --prefix apps/web-console
+      - name: Run live trusted-TLS PostgreSQL, Cloud, Console, and signed-ACK qualification
+        run: npm run test:p0b:live
+
   test:
     runs-on: macos-latest
     steps:

@@ -412,7 +412,7 @@ function normalizeDeviceState(value) {
     if (value[field] !== undefined) output[field] = normalizeSafeTimestamp(value[field], true);
   }
   for (const field of ["version", "desired_generation", "observed_generation", "bundle_sequence"]) {
-    if (value[field] !== undefined) output[field] = normalizeSafeInteger(value[field], field, field === "observed_generation");
+    if (value[field] !== undefined) output[field] = normalizeSafeInteger(value[field], field, field === "observed_generation" || field === "bundle_sequence");
   }
   if (value.refresh_state !== undefined) {
     if (typeof value.refresh_state !== "string" || !DEVICE_REFRESH_STATES.has(value.refresh_state)) throw invalidCloudResponse();
