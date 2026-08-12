@@ -55,13 +55,15 @@ const AUTHORITY_TABLES = Object.freeze([
   ["device_refresh_outbox", "t.organization_id = ANY($1::uuid[])", "outbox"],
   ["device_refresh_delivery_attempts", "t.organization_id = ANY($1::uuid[])", "outbox"],
   ["device_bundle_acknowledgements", "t.organization_id = ANY($1::uuid[])", "security"],
+  ["device_manual_wake_events", "t.organization_id = ANY($1::uuid[])", "outbox"],
+  ["device_manual_wake_requests", "t.organization_id = ANY($1::uuid[])", "security"],
   ["schema_migration_attempts", "$1::uuid[] IS NOT NULL", "migration"]
 ]);
 const AUTHORITY_TABLE_NAMES = Object.freeze(AUTHORITY_TABLES.map(([name]) => name));
 const TENANT_TABLE_NAMES = new Set(AUTHORITY_TABLES.filter(([, , kind]) => ["tenant", "audit", "outbox", "security"].includes(kind)).map(([name]) => name));
 
 export const AUTHORITY_MANIFEST_SCHEMA_VERSION = 2;
-export const REQUIRED_MIGRATION_VERSION = "15";
+export const REQUIRED_MIGRATION_VERSION = "16";
 export const MANIFEST_KIND = "agentpass.authority-manifest";
 
 export const DIAGNOSTICS = Object.freeze({

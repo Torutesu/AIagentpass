@@ -9,7 +9,7 @@ const root = path.resolve(import.meta.dirname, "..");
 test("machine-readable platform contracts pass the offline validator", () => {
   const result = spawnSync(process.execPath, [path.join(root, "scripts", "validate-contracts.mjs")], { cwd: root, encoding: "utf8" });
   assert.equal(result.status, 0, result.stderr);
-  assert.match(result.stdout, /validated 7 schemas, 2 OpenAPI documents, 5 fixtures, and 15 PostgreSQL migrations/);
+  assert.match(result.stdout, /validated 7 schemas, 2 OpenAPI documents, 5 fixtures, and 16 PostgreSQL migrations/);
 });
 
 const humanOpenapi = () => JSON.parse(fs.readFileSync(path.join(root, "contracts", "openapi", "human-v1.json"), "utf8"));
@@ -25,6 +25,66 @@ function operationFor(document, operationId) {
 
 function hasParameter(operation, componentName) {
   return (operation.parameters ?? []).some((parameter) => parameter.$ref === `#/components/parameters/${componentName}`);
+}
+
+function assertHumanP0ARefreshRequestSemantics(document) {
+  const route = "/organizations/{organization_id}/devices/{device_id}/refresh-requests";
+  const operation = document.paths[route]?.post;
+  assert.ok(operation, "P0-A refresh request operation must exist");
+  assert.equal(operation.operationId, "requestDeviceRefresh");
+  assert.deepEqual(operation.security, [{ humanSession: [], recentWebAuthn: [] }]);
+  assert.deepEqual(operation.parameters.map((parameter) => parameter.$ref), [
+    "#/components/parameters/OrganizationId",
+    "#/components/parameters/DeviceId",
+    "#/components/parameters/CsrfToken",
+    "#/components/parameters/IdempotencyKey"
+  ]);
+  assert.deepEqual(operation.requestBody, { $ref: "#/components/requestBodies/DeviceRefreshRequest" });
+  assert.equal(operation["x-agentpass-contract-status"], "frozen-p0-a");
+  assert.equal(operation["x-agentpass-minimum-role"], "admin");
+  assert.equal(operation["x-agentpass-recent-auth-operation"], "device.refresh.request");
+  assert.equal(operation["x-agentpass-authority-neutral"], true);
+  assert.deepEqual(operation["x-agentpass-authority-effects"], {
+    authority_generation: "unchanged",
+    bundle_and_ack_state: "unchanged",
+    device_delivery: "not_proven",
+    device_application: "not_proven"
+  });
+  assert.ok(operation["x-agentpass-tenant-scope"]);
+  assert.match(operation.description, /does not increment authority generation/i);
+  assert.match(operation.description, /does not prove notification delivery/i);
+  assert.deepEqual(operation.responses["202"], { $ref: "#/components/responses/DeviceRefreshRequestAccepted" });
+  for (const status of ["400", "401", "403", "404", "409", "429", "500"]) assert.ok(operation.responses[status], `P0-A must expose stable ${status} response`);
+
+  const body = document.components.requestBodies.DeviceRefreshRequest;
+  assert.equal(body.required, true);
+  assert.equal(body.content["application/json"].schema.$ref, "#/components/schemas/DeviceRefreshRequestBody");
+  const bodySchema = document.components.schemas.DeviceRefreshRequestBody;
+  assert.equal(bodySchema.type, "object");
+  assert.equal(bodySchema.additionalProperties, false);
+  assert.equal(bodySchema.minProperties, 0);
+  assert.equal(bodySchema.maxProperties, 0);
+
+  const response = document.components.responses.DeviceRefreshRequestAccepted;
+  assert.equal(response.content["application/json"].schema.$ref, "#/components/schemas/DeviceRefreshRequestResponse");
+  const responseSchema = document.components.schemas.DeviceRefreshRequestResponse;
+  assert.equal(responseSchema.additionalProperties, false);
+  assert.deepEqual(responseSchema.required, ["request_id", "refresh_request"]);
+  assert.deepEqual(Object.keys(responseSchema.properties).sort(), ["refresh_request", "request_id"]);
+  assert.equal(responseSchema.properties.refresh_request.$ref, "#/components/schemas/DeviceRefreshRequestResult");
+
+  const resultSchema = document.components.schemas.DeviceRefreshRequestResult;
+  assert.equal(resultSchema.additionalProperties, false);
+  assert.deepEqual(resultSchema.required, ["version", "request_id", "device_id", "desired_generation", "status", "requested_at"]);
+  assert.deepEqual(Object.keys(resultSchema.properties).sort(), ["desired_generation", "device_id", "request_id", "requested_at", "status", "version"]);
+  assert.deepEqual(resultSchema.properties.version, { const: 1 });
+  assert.deepEqual(resultSchema.properties.status.enum, ["accepted", "coalesced", "no_pending_refresh"]);
+  assert.deepEqual(resultSchema.properties.desired_generation.type, ["integer", "null"]);
+  assert.equal(resultSchema.properties.desired_generation.minimum, 1);
+  assert.equal(resultSchema.properties.request_id.format, "uuid");
+  assert.equal(resultSchema.properties.device_id.format, "uuid");
+  assert.equal(resultSchema.properties.requested_at.format, "date-time");
+  assert.match(resultSchema.properties.requested_at.description, /RFC 3339/i);
 }
 
 function assertHumanP1Semantics(document) {
@@ -92,6 +152,31 @@ test("human high-risk operations require role and recent WebAuthn", () => {
   const stop = openapi.paths["/organizations/{organization_id}/emergency-stop"].post;
   assert.equal(stop["x-agentpass-minimum-role"], "owner");
   assert.deepEqual(stop.security, [{ humanSession: [], recentWebAuthn: [] }]);
+});
+
+test("Human P0-A refresh request freezes authority-neutral wake semantics", () => {
+  assertHumanP0ARefreshRequestSemantics(humanOpenapi());
+});
+
+test("Human P0-A contract assertions reject weakened refresh request guarantees", () => {
+  const baseline = humanOpenapi();
+  assertHumanP0ARefreshRequestSemantics(baseline);
+
+  const withoutRecentAuth = structuredClone(baseline);
+  withoutRecentAuth.paths["/organizations/{organization_id}/devices/{device_id}/refresh-requests"].post.security = [{ humanSession: [] }];
+  assert.throws(() => assertHumanP0ARefreshRequestSemantics(withoutRecentAuth), /refresh request operation|deep-equal/i);
+
+  const withBodyInput = structuredClone(baseline);
+  withBodyInput.components.schemas.DeviceRefreshRequestBody.maxProperties = 1;
+  assert.throws(() => assertHumanP0ARefreshRequestSemantics(withBodyInput), /strict equal|1|0/);
+
+  const withAuthorityMutation = structuredClone(baseline);
+  withAuthorityMutation.paths["/organizations/{organization_id}/devices/{device_id}/refresh-requests"].post["x-agentpass-authority-neutral"] = false;
+  assert.throws(() => assertHumanP0ARefreshRequestSemantics(withAuthorityMutation), /strict equal|true|false/);
+
+  const withWeakResponse = structuredClone(baseline);
+  delete withWeakResponse.components.schemas.DeviceRefreshRequestResponse.additionalProperties;
+  assert.throws(() => assertHumanP0ARefreshRequestSemantics(withWeakResponse), /strict equal|false|undefined/);
 });
 
 test("Human session bootstrap freezes the BFF-only SIWC signed assertion contract", () => {

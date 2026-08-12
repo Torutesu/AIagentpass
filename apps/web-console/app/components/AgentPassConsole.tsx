@@ -173,12 +173,17 @@ type AgentPassConsoleProps = {
 type ToastTone = "success" | "error";
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const OPAQUE_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
+const RFC3339_UTC = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?Z$/;
 const BASE64URL_CSRF = /^[A-Za-z0-9_-]{43}$/;
 const RECENT_AUTH_OPERATION = "device.enrollment.issue";
 const DEVICE_REVOKE_RECENT_AUTH_OPERATION = "device.revoke";
+const DEVICE_REFRESH_REQUEST_RECENT_AUTH_OPERATION = "device.refresh.request";
 const EMERGENCY_STOP_RECENT_AUTH_OPERATION = "organization.emergency_stop";
 const SESSION_BOOTSTRAP_PATH = "/api/auth/session";
 const CSRF_HEADER = "agentpass-csrf";
+
+type DeviceRefreshRequestStatus = "accepted" | "coalesced" | "no_pending_refresh";
 
 type ConsoleSession = Readonly<{ organizationId: string; csrfToken: string }>;
 
@@ -210,6 +215,34 @@ function hasExactKeys(value: Record<string, unknown>, expected: string[]): boole
   const actual = Object.keys(value).sort();
   const sortedExpected = [...expected].sort();
   return actual.length === sortedExpected.length && actual.every((key, index) => key === sortedExpected[index]);
+}
+
+function parseDeviceRefreshResponse(value: unknown, expectedDeviceId: string): DeviceRefreshRequestStatus {
+  if (!isPlainRecord(value) || !hasExactKeys(value, ["request_id", "refresh_request"]) || typeof value.request_id !== "string" || !OPAQUE_ID.test(value.request_id)) {
+    throw new Error("invalid refresh response");
+  }
+  const refreshRequest = value.refresh_request;
+  if (!isPlainRecord(refreshRequest) || !hasExactKeys(refreshRequest, ["version", "request_id", "device_id", "desired_generation", "status", "requested_at"])) {
+    throw new Error("invalid refresh response");
+  }
+  if (refreshRequest.version !== 1 || typeof refreshRequest.request_id !== "string" || !OPAQUE_ID.test(refreshRequest.request_id) || refreshRequest.device_id !== expectedDeviceId || typeof refreshRequest.device_id !== "string" || !OPAQUE_ID.test(refreshRequest.device_id)) {
+    throw new Error("invalid refresh response");
+  }
+  if (refreshRequest.desired_generation !== null && (!Number.isSafeInteger(refreshRequest.desired_generation) || refreshRequest.desired_generation < 1)) {
+    throw new Error("invalid refresh response");
+  }
+  if (typeof refreshRequest.status !== "string" || !new Set<DeviceRefreshRequestStatus>(["accepted", "coalesced", "no_pending_refresh"]).has(refreshRequest.status as DeviceRefreshRequestStatus) || typeof refreshRequest.requested_at !== "string" || !RFC3339_UTC.test(refreshRequest.requested_at) || !Number.isFinite(Date.parse(refreshRequest.requested_at))) {
+    throw new Error("invalid refresh response");
+  }
+  return refreshRequest.status as DeviceRefreshRequestStatus;
+}
+
+function deviceRefreshOutcome(status: DeviceRefreshRequestStatus): string {
+  return {
+    accepted: "依頼を受け付けました。端末への配信は未確認です。",
+    coalesced: "既存の依頼へ統合し、再通知しました。端末への配信は未確認です。",
+    no_pending_refresh: "反映待ちの更新はなく、通知は送信していません。",
+  }[status];
 }
 
 function parseSessionBootstrap(value: unknown): ConsoleSession {
@@ -417,7 +450,7 @@ type DeviceStateTone = "synced" | "pending" | "blocked" | "stale" | "offline" | 
 
 function deviceState(device: AgentPassInitialData["devices"][number], now = Date.now()): DeviceStateTone {
   const refresh = device.refreshState?.toLowerCase();
-  if (device.status === "停止" || refresh === "revoked" || refresh === "disabled") return "revoked";
+  if (device.status === "停止" || device.status.toLowerCase() === "revoked" || refresh === "revoked" || refresh === "disabled") return "revoked";
   if (refresh === "offline" || refresh === "disconnected") return "offline";
   if (refresh === "blocked" || Boolean(device.blockedReason)) return "blocked";
   if (refresh === "stale" || (device.bundleExpiresAt && Date.parse(device.bundleExpiresAt) <= now)) return "stale";
@@ -448,20 +481,47 @@ function deviceDate(value?: string): string {
   return new Intl.DateTimeFormat("ja-JP", { dateStyle: "medium", timeStyle: "short" }).format(parsed);
 }
 
-function DeviceStateCard({ device }: { device: AgentPassInitialData["devices"][number] }) {
+function DeviceStateCard({ device, onRequestRefresh }: { device: AgentPassInitialData["devices"][number]; onRequestRefresh: (deviceId: string) => Promise<DeviceRefreshRequestStatus> }) {
   const state = deviceState(device);
   const label = deviceStateLabel(state);
   const desired = device.desiredGeneration;
   const observed = device.observedGeneration;
   const hasProgress = typeof desired === "number" && typeof observed === "number";
   const progress = hasProgress ? Math.max(0, Math.min(100, desired === 0 ? 100 : Math.round((Math.min(observed, desired) / desired) * 100))) : 0;
+  const canRequestRefresh = Boolean(device.deviceId && ["pending", "blocked", "stale", "offline"].includes(state));
+  const [wakePending, setWakePending] = useState(false);
+  const [wakeError, setWakeError] = useState("");
+  const [wakeOutcome, setWakeOutcome] = useState("");
+  const wakeInFlight = useRef(false);
+  const requestWake = async () => {
+    if (!canRequestRefresh || !device.deviceId || wakeInFlight.current) return;
+    wakeInFlight.current = true;
+    setWakePending(true);
+    setWakeError("");
+    setWakeOutcome("");
+    try {
+      const status = await onRequestRefresh(device.deviceId);
+      setWakeOutcome(deviceRefreshOutcome(status));
+    } catch {
+      setWakeError("Wake requestを送信できませんでした。接続と権限を確認して、もう一度お試しください。");
+    } finally {
+      wakeInFlight.current = false;
+      setWakePending(false);
+    }
+  };
   return (
-    <article className={`health-card device-state-card state-${state}`}>
+    <article className={`health-card device-state-card state-${state}`} aria-busy={wakePending}>
       <div className="health-head">
         <div><h3 className="health-name">{device.name}</h3><p className="health-subtitle">{device.detail}</p></div>
         <span className="device-state-badge" data-state={state} aria-label={`同期状態: ${label}`}><span className="status-dot" aria-hidden="true" />{label}</span>
       </div>
       <p className="device-state-description">{deviceStateDescription(state)}</p>
+      {canRequestRefresh ? <div className="device-wake-action">
+        <button className="secondary-button device-wake-button" type="button" disabled={wakePending} onClick={() => void requestWake()}>{wakePending ? "Wake requestを送信中…" : "Wake requestを依頼"}</button>
+        <p className="device-wake-copy">端末への配信は未確認です。適用・同期の完了を示す操作ではありません。</p>
+        {wakeOutcome ? <p className="device-wake-outcome" role="status" aria-live="polite">{wakeOutcome}</p> : null}
+        {wakeError ? <p className="device-wake-error" role="alert">{wakeError}</p> : null}
+      </div> : null}
       <div className="device-sync-progress" aria-label={`${device.name}の世代反映状況`}>
         <div className="device-sync-progress-heading"><span>Cloud desired世代</span><strong>{desired ?? "未取得"}</strong><span aria-hidden="true">→</span><span>端末 observed世代</span><strong>{observed ?? "未取得"}</strong></div>
         {hasProgress ? <div className="device-sync-track" role="progressbar" aria-label="desired世代からobserved世代への反映状況" aria-valuemin={0} aria-valuemax={desired} aria-valuenow={Math.min(observed, desired)}><span style={{ width: `${progress}%` }} /></div> : <p className="device-sync-missing">世代情報を取得できていません。</p>}
@@ -480,7 +540,7 @@ function DeviceStateCard({ device }: { device: AgentPassInitialData["devices"][n
   );
 }
 
-function Overview({ data, goTo }: { data: AgentPassInitialData; goTo: (view: ConsoleView) => void }) {
+function Overview({ data, goTo, onRequestRefresh }: { data: AgentPassInitialData; goTo: (view: ConsoleView) => void; onRequestRefresh: (deviceId: string) => Promise<DeviceRefreshRequestStatus> }) {
   const activeAgents = data.agents.filter((agent) => agent.state !== "停止").length;
   const connectedDevices = data.devices.filter((device) => device.status !== "停止").length;
   const protectedOperations = data.policies.length + data.capabilities.length;
@@ -543,7 +603,7 @@ function Overview({ data, goTo }: { data: AgentPassInitialData; goTo: (view: Con
         <p className="section-note">自動更新：30秒ごと</p>
       </div>
       <div className="health-grid">
-        {data.devices.map((device) => <DeviceStateCard device={device} key={device.deviceId ?? device.name} />)}
+        {data.devices.map((device) => <DeviceStateCard device={device} onRequestRefresh={onRequestRefresh} key={device.deviceId ?? device.name} />)}
       </div>
 
       <div className="section-heading-row">
@@ -993,9 +1053,30 @@ export function AgentPassConsole({ initialData = defaultInitialData }: AgentPass
         const records = Array.isArray(payload.capabilities) ? payload.capabilities as Array<Record<string, unknown>> : [];
         setData((current) => ({ ...current, capabilityRecords: records.map((item) => ({ capabilityId: String(item.capability_id ?? ""), agentId: String(item.agent_id ?? ""), deviceId: String(item.device_id ?? ""), expiresAt: String(item.expires_at ?? ""), sequence: Number(item.sequence ?? 0) })) }));
       }
+      return true;
     } catch {
       showToast("操作を確認できませんでした。権限と接続を確認してください", "error");
+      return false;
     }
+  };
+
+  const requestDeviceRefresh = async (deviceId: string): Promise<DeviceRefreshRequestStatus> => {
+    const { organizationId, csrfToken } = await consoleSessionContext.get();
+    if (!supportsWebAuthn()) throw new Error("WebAuthn unavailable");
+    const { authorization_id } = await authenticateRecentAuth({ operation: DEVICE_REFRESH_REQUEST_RECENT_AUTH_OPERATION, organizationId, csrfToken });
+    const response = await fetchConsole("/api/console?operation=device.refresh.request", {
+      method: "POST",
+      headers: { "content-type": "application/json", "idempotency-key": crypto.randomUUID(), "agentpass-recent-auth": authorization_id },
+      body: JSON.stringify({ target_id: deviceId }),
+    });
+    let payload: unknown;
+    try {
+      payload = await response.json();
+    } catch {
+      throw new Error("invalid refresh response");
+    }
+    if (response.status !== 202 || !response.ok) throw new Error("refresh request rejected");
+    return parseDeviceRefreshResponse(payload, deviceId);
   };
 
   const currentLabel = navItems.find((item) => item.id === activeView)?.label ?? "概要";
@@ -1025,7 +1106,7 @@ export function AgentPassConsole({ initialData = defaultInitialData }: AgentPass
           <div className="topbar-actions"><span className={`connection-status${syncError ? " is-error" : ""}`}><span className="status-dot" aria-hidden="true" />{syncError ? "同期を確認" : refreshing ? "同期中…" : "システム正常"}</span><button className="refresh-button" type="button" onClick={() => void refreshSummary()} disabled={refreshing}>{refreshing ? "同期中" : `最終同期 ${lastSynced}`}</button><button className="help-button" type="button" aria-label="ヘルプを開く" aria-expanded={helpOpen} onClick={() => setHelpOpen(true)}>?</button><button className="icon-button" type="button" aria-label="アクティビティを見る" onClick={() => goTo("activity")}>◌</button></div>
         </div>
         <div className={`content${activeView === "organizations" ? " organization-content" : ""}`} role={activeView === "organizations" ? undefined : "main"}>
-          {activeView === "overview" ? <Overview data={data} goTo={goTo} /> : null}
+          {activeView === "overview" ? <Overview data={data} goTo={goTo} onRequestRefresh={requestDeviceRefresh} /> : null}
           {activeView === "setup" ? <SetupSurface data={data} goTo={goTo} operate={operate} online={!syncError} /> : null}
           {activeView === "agents" ? <AgentsSurface data={data} operate={operate} /> : null}
           {activeView === "policies" ? <PoliciesSurface data={data} operate={operate} /> : null}

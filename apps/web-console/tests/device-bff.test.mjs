@@ -138,17 +138,98 @@ test("revoke-device fails closed without recent WebAuthn or valid CSRF", async (
   assert.equal(calls, 0);
 });
 
-test("request-refresh is an explicit fail-closed Cloud dependency and never forwards a guessed path", async () => {
-  let calls = 0;
-  const api = humanApi(async () => { calls += 1; return response({}); });
+test("request-refresh forwards only an empty Cloud body and normalizes the 202 wake response", async () => {
+  const calls = [];
+  const api = humanApi(async (url, init) => {
+    calls.push({ url: String(url), init });
+    return response({
+      request_id: "request-refresh-1",
+      refresh_request: {
+        version: 1,
+        request_id: "refresh-request-1",
+        device_id: deviceId,
+        desired_generation: null,
+        status: "accepted",
+        requested_at: "2026-08-13T00:00:00.000Z",
+      },
+    }, 202);
+  });
   const result = await api.handle(request("/api/console?operation=device.request-refresh", {
     method: "POST",
     headers: { cookie: sessionCookie, "agentpass-csrf": csrf, "idempotency-key": "request-refresh-01", "agentpass-recent-auth": recentAuth },
     body: { target_id: deviceId },
   }));
-  assert.equal(result.status, 501);
-  assert.deepEqual(await result.json(), { error: { code: "operation_unsupported", message: "Device refresh requests are not available" } });
+  assert.equal(result.status, 202);
+  assert.deepEqual(await result.json(), {
+    request_id: "request-refresh-1",
+    refresh_request: {
+      version: 1,
+      request_id: "refresh-request-1",
+      device_id: deviceId,
+      desired_generation: null,
+      status: "accepted",
+      requested_at: "2026-08-13T00:00:00.000Z",
+    },
+  });
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].url, `https://cloud.example.test/v1/organizations/${organizationId}/devices/${deviceId}/refresh-requests`);
+  assert.equal(calls[0].init.headers.get("idempotency-key"), "request-refresh-01");
+  assert.equal(calls[0].init.headers.get("agentpass-recent-auth"), recentAuth);
+  assert.equal(calls[0].init.headers.get("cookie"), sessionCookie);
+  assert.equal(calls[0].init.headers.get("agentpass-csrf"), csrf);
+  assert.deepEqual(JSON.parse(calls[0].init.body), {});
+});
+
+test("request-refresh requires operation-bound WebAuthn and rejects authority or secret fields", async () => {
+  let calls = 0;
+  const api = humanApi(async () => { calls += 1; return response({}); });
+  for (const body of [
+    {},
+    { target_id: deviceId, generation: 4 },
+    { target_id: deviceId, outbox: true },
+    { target_id: deviceId, nonce: "refresh-nonce" },
+    { target_id: deviceId, bundle: { sequence: 1 } },
+    { target_id: deviceId, policy: { operations: ["git.commit.sign"] } },
+    { target_id: deviceId, secret: "must-not-forward" },
+  ]) {
+    const result = await api.handle(request("/api/console?operation=device.refresh.request", {
+      method: "POST",
+      headers: { cookie: sessionCookie, "agentpass-csrf": csrf, "idempotency-key": `request-refresh-${calls + 10}`, "agentpass-recent-auth": recentAuth },
+      body,
+    }));
+    assert.equal(result.status, 400);
+  }
+  const missingAuth = await api.handle(request("/api/console?operation=device.refresh.request", {
+    method: "POST",
+    headers: { cookie: sessionCookie, "agentpass-csrf": csrf, "idempotency-key": "request-refresh-no-auth" },
+    body: { target_id: deviceId },
+  }));
+  assert.equal(missingAuth.status, 401);
   assert.equal(calls, 0);
+});
+
+test("request-refresh rejects a non-202 or secret-bearing Cloud response", async () => {
+  const api = humanApi(async () => response({
+    request_id: "request-refresh-2",
+    refresh_request: {
+      version: 1,
+      request_id: "refresh-request-2",
+      device_id: deviceId,
+      desired_generation: 4,
+      status: "accepted",
+      requested_at: "2026-08-13T00:00:00.000Z",
+      nonce: "must-not-leak",
+    },
+  }, 200));
+  const result = await api.handle(request("/api/console?operation=request-refresh", {
+    method: "POST",
+    headers: { cookie: sessionCookie, "agentpass-csrf": csrf, "idempotency-key": "request-refresh-response-01", "agentpass-recent-auth": recentAuth },
+    body: { target_id: deviceId },
+  }));
+  assert.equal(result.status, 502);
+  const body = await result.text();
+  assert.match(body, /cloud_api_invalid_response/);
+  assert.doesNotMatch(body, /must-not-leak|nonce/);
 });
 
 test("revoke-device rejects malformed or secret-bearing Cloud action responses", async () => {

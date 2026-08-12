@@ -408,9 +408,11 @@ Merge gate: the report names the exact source commit, PKG SHA-256, nested code i
 
 ## 9. Execution backlog after G4.3 Console read model
 
-Baseline commit: `cbd3c49`. The Cloud PostgreSQL device read model, minimal BFF DTO, Console state presentation, device revoke recent-auth flow, and emergency-stop recent-auth flow are implemented. This baseline is not a production-ready claim: manual wake, browser E2E, trusted-HTTPS integration, physical Secure Enclave qualification, managed signing, and production deployment remain open.
+Baseline commit: `cbd3c49`. The Cloud PostgreSQL device read model, minimal BFF DTO, Console state presentation, device revoke recent-auth flow, and emergency-stop recent-auth flow are implemented. The authority-neutral manual wake implementation was added after this baseline. This is not a production-ready claim: browser E2E, trusted-HTTPS integration, physical Secure Enclave qualification, managed signing, and production deployment remain open.
 
 ### P0-A — freeze and implement authority-neutral manual wake
+
+Status: implemented and locally verified on 2026-08-13. Human OpenAPI, Cloud HTTP/recent-auth/audit, file-store evaluation behavior, PostgreSQL migration and replay ledger, post-commit notification, BFF normalization, and outcome-specific Console UI are present. The full Node, Swift, Console, contract, build, and lint gates pass. Real PostgreSQL over trusted TLS and browser/device E2E evidence remain P0-B work; therefore this is not a production-ready claim.
 
 The manual action is a delivery hint, not a new policy generation and not a new authority grant.
 

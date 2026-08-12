@@ -132,6 +132,39 @@ test("creates explicitly scoped tenant resources and keeps IDs unique", async (t
   await assert.rejects(() => store.getDevice({ organizationId: ids.org2, deviceId: ids.device }), { code: "ERR_NOT_FOUND" });
 });
 
+test("manual wake is idempotent and never invents authority in the file-store profile", async (t) => {
+  const { directory, store } = await fixture();
+  t.after(async () => { await store.close(); await fs.rm(directory, { recursive: true, force: true }); });
+  await addDeviceAndAgent(store);
+
+  const input = {
+    organizationId: ids.org,
+    deviceId: ids.device,
+    principalId: "operator-1",
+    idempotencyKey: "manual-wake-0001",
+    requestedAt: "2026-08-11T01:02:00.000Z"
+  };
+  const first = await store.requestDeviceWake(input);
+  const replay = await store.requestDeviceWake({ ...input, requestedAt: "2026-08-11T01:03:00.000Z" });
+  assert.deepEqual(replay, first);
+  assert.deepEqual(first, {
+    version: 1,
+    request_id: first.request_id,
+    device_id: ids.device,
+    desired_generation: null,
+    status: "no_pending_refresh",
+    requested_at: "2026-08-11T01:02:00.000Z"
+  });
+  assert.match(first.request_id, /^[0-9a-f-]{36}$/u);
+  assert.equal(Object.hasOwn(first, "outbox_id"), false);
+  assert.equal(Object.hasOwn(first, "nonce"), false);
+  assert.equal(Object.hasOwn(first, "bundle"), false);
+
+  const otherPrincipal = await store.requestDeviceWake({ ...input, principalId: "operator-2", requestedAt: "2026-08-11T01:04:00.000Z" });
+  assert.notEqual(otherPrincipal.request_id, first.request_id);
+  await assert.rejects(store.requestDeviceWake({ ...input, organizationId: ids.org2 }), { code: "ERR_NOT_FOUND" });
+});
+
 test("serializes mutations, deduplicates idempotency, and enforces optimistic versions", async (t) => {
   const { directory, store } = await fixture();
   t.after(async () => { await store.close(); await fs.rm(directory, { recursive: true, force: true }); });

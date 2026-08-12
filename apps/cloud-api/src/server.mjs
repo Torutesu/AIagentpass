@@ -24,6 +24,7 @@ const HUMAN_AUTH_ACCEPT_INVITATION_PATH = "/api/auth/invitations/accept";
 const HUMAN_AUTH_UUID = "[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89a-fA-F][0-9a-fA-F]{3}-[0-9a-fA-F]{12}";
 const UUID = "([0-9a-fA-F-]{36})";
 const UUID_VALUE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu;
+const RFC3339_UTC = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?Z$/u;
 export function createCloudApi({ store, tokenRecords = [], bundleSigner, refreshHintService, now = () => Date.now(), monotonicNow, replayCache = createReplayCache(), deviceReplayConsumer, rateLimiter, admissionRateLimiter, verifyRecentWebAuthn, recentAuthService, humanAuthApi, humanSession, capabilityAuthorityRepository, capabilityRevocationSource, auditRepository, enrollmentCredentialSecret, trackInFlight, readiness, operationalMetrics, operationalProbeSecret } = {}) {
   if (!store) throw new TypeError("store is required");
   if (verifyRecentWebAuthn !== undefined && recentAuthService !== undefined) throw new TypeError("configure verifyRecentWebAuthn or recentAuthService, not both");
@@ -186,6 +187,35 @@ export function createCloudApi({ store, tokenRecords = [], bundleSigner, refresh
         if (typeof store.listDeviceReadModels !== "function") throw apiError("device_read_model_unavailable", 503, "Device read model is unavailable");
         return { body: { devices: normalizeDeviceReadModels(await store.listDeviceReadModels({ organizationId })) } };
       }),
+      route("POST", new RegExp(`^/v1/organizations/(?<organizationId>${UUID})/devices/(?<deviceId>${UUID})/refresh-requests$`), "admin", async ({ organizationId, match, body, bodyBytes, idempotencyKey, principal }) => {
+        requireExactEmptyJsonObject(body, bodyBytes, "device_refresh_request");
+        if (typeof store.requestDeviceWake !== "function") throw apiError("refresh_request_unavailable", 503, "Refresh request is unavailable");
+        let refreshRequest;
+        try {
+          refreshRequest = await mutateAndAudit(
+            organizationId,
+            (target) => target.requestDeviceWake({
+              organizationId,
+              deviceId: match.deviceId.toLowerCase(),
+              principalId: principal.member_id,
+              idempotencyKey,
+              requestedAt: new Date(now()).toISOString()
+            }),
+            ({ mutation }) => ({
+              organizationId,
+              eventType: "device.refresh_requested",
+              actorId: principal.member_id,
+              targetType: "device",
+              targetId: match.deviceId.toLowerCase(),
+              details: { status: mutation.status, desired_generation: mutation.desired_generation },
+              idempotencyKey: `${idempotencyKey}:audit`
+            })
+          );
+        } catch (error) {
+          throw mapRefreshRequestRepositoryError(error);
+        }
+        return { status: 202, body: { refresh_request: normalizeRefreshRequestResult(refreshRequest, match.deviceId) } };
+      }, false, false, "device.refresh.request"),
       route("POST", new RegExp(`^/v1/organizations/(?<organizationId>${UUID})/devices$`), "admin", async ({ organizationId, body, idempotencyKey, principal }) => ({ status: 201, body: { device: await mutateAndAudit(organizationId, (target) => target.createDevice({ ...body, organizationId, createdBy: principal.member_id, principalId: principal.member_id, idempotencyKey }), ({ mutation }) => ({ organizationId, eventType: "device.created", actorId: principal.member_id, targetType: "device", targetId: mutation.device_id, idempotencyKey: `${idempotencyKey}:audit` })) } })),
       route("POST", new RegExp(`^/v1/organizations/(?<organizationId>${UUID})/device-enrollments$`), "admin", async ({ organizationId, body, idempotencyKey, principal }) => {
         rejectUnknown(body, new Set(["enrollment_id", "device_id", "label", "platform", "ttl_ms"]), "device_enrollment_issue");
@@ -555,6 +585,34 @@ function parseBody(bytes) {
   } catch { throw apiError("invalid_json", 400, "Request body must be a JSON object"); }
 }
 
+function requireExactEmptyJsonObject(body, bodyBytes, label) {
+  if (!Buffer.isBuffer(bodyBytes) || bodyBytes.length === 0 || !body || typeof body !== "object" || Array.isArray(body) || Object.keys(body).length !== 0) {
+    throw apiError("invalid_refresh_request", 400, `${label} body must be exactly an empty JSON object`);
+  }
+}
+
+function normalizeRefreshRequestResult(value, pathDeviceId) {
+  const expectedKeys = ["desired_generation", "device_id", "request_id", "requested_at", "status", "version"];
+  if (!value || typeof value !== "object" || Array.isArray(value) || Object.keys(value).sort().join(",") !== expectedKeys.slice().sort().join(",")) {
+    throw apiError("refresh_request_unavailable", 503, "Refresh request is unavailable");
+  }
+  if (value.version !== 1 || typeof value.request_id !== "string" || !UUID_VALUE.test(value.request_id)
+    || typeof value.device_id !== "string" || !UUID_VALUE.test(value.device_id) || value.device_id.toLowerCase() !== pathDeviceId.toLowerCase()
+    || (value.desired_generation !== null && (!Number.isSafeInteger(value.desired_generation) || value.desired_generation < 1))
+    || !["accepted", "coalesced", "no_pending_refresh"].includes(value.status)
+    || typeof value.requested_at !== "string" || !RFC3339_UTC.test(value.requested_at) || !Number.isFinite(Date.parse(value.requested_at))) {
+    throw apiError("refresh_request_unavailable", 503, "Refresh request is unavailable");
+  }
+  return Object.freeze({
+    version: 1,
+    request_id: value.request_id.toLowerCase(),
+    device_id: value.device_id.toLowerCase(),
+    desired_generation: value.desired_generation,
+    status: value.status,
+    requested_at: new Date(value.requested_at).toISOString()
+  });
+}
+
 function rejectUnknown(value, allowed, label) {
   for (const key of Object.keys(value)) if (!allowed.has(key)) throw apiError("unknown_field", 400, `${label} contains an unknown field`);
 }
@@ -727,6 +785,16 @@ function sendNoContent(response, headers = {}) {
 }
 
 function apiError(code, status, message, headers) { const error = new Error(message); error.code = code; error.status = status; if (headers) error.headers = headers; return error; }
+function mapRefreshRequestRepositoryError(error) {
+  if (error?.status) return error;
+  if (error?.code === "ERR_NOT_FOUND") return apiError("not_found", 404, "Resource not found");
+  if (["ERR_DEVICE_REVOKED", "ERR_DEVICE_UNAVAILABLE"].includes(error?.code)) return apiError("device_unavailable", 409, "Device is not available");
+  if (error?.code === "ERR_ACTOR_UNAVAILABLE") return apiError("authorization_denied", 403, "Authorization denied");
+  if (["ERR_IDEMPOTENCY_CONFLICT", "ERR_UNIQUE_CONSTRAINT"].includes(error?.code)) return apiError("idempotency_conflict", 409, "Mutation conflict");
+  if (["ERR_INPUT", "ERR_INVALID_INPUT", "ERR_INVALID_UUID", "ERR_IDEMPOTENCY_KEY_REQUIRED"].includes(error?.code)) return apiError("invalid_refresh_request", 400, "Refresh request is invalid");
+  if (error?.code === "ERR_TENANT_SCOPE") return apiError("authorization_denied", 403, "Authorization denied");
+  return apiError("refresh_request_unavailable", 503, "Refresh request is unavailable");
+}
 function mapError(error) {
   if (error.status) return error;
   if (error.code === "ERR_AUDIT_CURSOR_INVALID") return { status: 400, code: "invalid_cursor", message: "Cursor is invalid" };

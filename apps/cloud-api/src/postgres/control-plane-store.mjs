@@ -4,6 +4,7 @@ import { createCapabilityAuthorityRepository } from "./capability-authority-repo
 import { createPostgresCapabilityReservationRepository } from "./capability-reservation-repository.mjs";
 import { createControlPlaneAuthorityRepository } from "./control-plane-authority-repository.mjs";
 import { createPostgresControlPlaneResourceRepository } from "./control-plane-resource-repository.mjs";
+import { createPostgresDeviceManualWakeRepository } from "./device-manual-wake-repository.mjs";
 import { createPostgresOrganizationRepository } from "./organization-repository.mjs";
 import { createSharedControlRepository } from "./shared-control-repository.mjs";
 
@@ -38,6 +39,7 @@ export const CONTROL_PLANE_STORE_METHODS = Object.freeze([
   "listRevocations",
   "listRevokedCapabilityIds",
   "reserveCapability",
+  "requestDeviceWake",
   "updatePolicy"
 ]);
 
@@ -95,6 +97,8 @@ export function createPostgresControlPlaneStore(options = {}) {
   const capabilityAuthorityRepository = options.capabilityAuthorityRepository ?? options.capabilityAuthority ?? (client ? createCapabilityAuthorityRepository({ client, now }) : undefined);
   const capabilityReservationRepository = options.capabilityReservationRepository ?? options.capabilityReservation
     ?? (client && options.capabilityNonceSecret ? createPostgresCapabilityReservationRepository({ client, nonceSecret: options.capabilityNonceSecret, now }) : undefined);
+  const deviceManualWakeRepository = options.deviceManualWakeRepository ?? options.deviceManualWake
+    ?? (client ? createPostgresDeviceManualWakeRepository({ client, now }) : undefined);
 
   const delegate = (repository, method, operation, { tenant = true, context = false } = {}) => async (input = {}) => {
     const fn = repository?.[method];
@@ -137,6 +141,7 @@ export function createPostgresControlPlaneStore(options = {}) {
     listRevocations: delegate(authorityRepository, "listRevocations", "listRevocations"),
     listRevokedCapabilityIds: delegate(capabilityAuthorityRepository ?? authorityRepository, "listRevokedCapabilityIds", "listRevokedCapabilityIds"),
     reserveCapability: delegate(capabilityReservationRepository ?? capabilityAuthorityRepository ?? resourceRepository, "reserveCapability", "reserveCapability", { context: true }),
+    requestDeviceWake: delegate(deviceManualWakeRepository, "requestDeviceWake", "requestDeviceWake", { context: true }),
     updatePolicy: delegate(resourceRepository, "updatePolicy", "updatePolicy", { context: true })
   };
 
@@ -198,7 +203,8 @@ export function createPostgresControlPlaneStore(options = {}) {
               adminAuditRepository: undefined, adminAudit: undefined,
               sharedControlRepository: undefined, sharedControl: undefined,
               capabilityAuthorityRepository: undefined, capabilityAuthority: undefined,
-              capabilityReservationRepository: undefined, capabilityReservation: undefined
+              capabilityReservationRepository: undefined, capabilityReservation: undefined,
+              deviceManualWakeRepository: undefined, deviceManualWake: undefined
             });
             const mutation = await input.mutation({ tx, store: transactionStore, organizationId: scope.organization_id });
             const auditInput = typeof input.audit === "function"

@@ -20,7 +20,7 @@ function repositories(overrides = {}) {
     "ingestDeviceAuditEvents", "issueCapabilityMetadata", "listAdminAuditEvents", "listAgents", "listCapabilities",
     "listDeviceAuditEvents", "listDeviceReadModels", "listDevices", "listPolicies", "listRevocations", "listRevokedCapabilityIds",
     "reserveCapability", "updatePolicy", "snapshotAndAssignBundleHead", "pollDeviceRefresh",
-    "getDeviceRefreshState", "acknowledgeBundle"
+    "getDeviceRefreshState", "acknowledgeBundle", "requestDeviceWake"
   ];
   const repository = Object.fromEntries(methods.map((method) => [method, async (input) => {
     calls.push({ method, input });
@@ -38,6 +38,7 @@ test("exposes exactly the Cloud server contract and freezes the facade", () => {
     auditRepository: repository,
     adminAuditRepository: repository,
     capabilityAuthorityRepository: repository,
+    deviceManualWakeRepository: repository,
     sharedControlRepository: { withTransaction() {} }
   });
   assert.equal(Object.isFrozen(store), true);
@@ -83,6 +84,32 @@ test("qualifies every delegated tenant request without accepting an unscoped cal
   await assert.rejects(store.listDevices({}), (error) => error.code === CONTROL_PLANE_STORE_ERROR_CODES.TENANT_SCOPE);
   await assert.rejects(store.listDeviceReadModels({}), (error) => error.code === CONTROL_PLANE_STORE_ERROR_CODES.TENANT_SCOPE);
   assert.equal(calls.length, 2);
+});
+
+test("routes manual wake through the dedicated tenant-scoped repository", async () => {
+  const { repository, calls } = repositories();
+  const store = createPostgresControlPlaneStore({ deviceManualWakeRepository: repository });
+  const result = await store.requestDeviceWake({
+    organizationId,
+    deviceId,
+    principalId: memberId,
+    idempotencyKey: "manual-wake-0001",
+    requestedAt: "2026-08-13T00:00:00.000Z"
+  });
+  assert.deepEqual(result, { method: "requestDeviceWake" });
+  assert.deepEqual(calls, [{
+    method: "requestDeviceWake",
+    input: {
+      organizationId,
+      deviceId,
+      principalId: memberId,
+      idempotencyKey: "manual-wake-0001",
+      requestedAt: "2026-08-13T00:00:00.000Z",
+      organization_id: organizationId,
+      principal_id: memberId,
+      created_by: memberId
+    }
+  }]);
 });
 
 test("propagates safe actor/principal identity while dropping session and bearer material", async () => {

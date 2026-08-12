@@ -19,6 +19,7 @@ const SENSITIVE_KEY = /(?:authorization|bearer|cookie|credential|password|privat
 const RFC3339_UTC = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?Z$/;
 const STABLE_REASON = /^[a-z][a-z0-9._-]{0,127}$/;
 const DEVICE_REFRESH_STATES = new Set(["pending", "fetching", "applied", "blocked", "stale", "offline", "revoked"]);
+const DEVICE_REFRESH_REQUEST_STATUSES = new Set(["accepted", "coalesced", "no_pending_refresh"]);
 const DEVICE_RESPONSE_FIELDS = new Set([
   "device_id", "name", "status", "created_at", "last_seen_at", "version",
   "desired_generation", "observed_generation", "refresh_state",
@@ -443,6 +444,40 @@ function normalizeDeviceRevocationResponse(value, expectedOrganizationId, target
   };
 }
 
+function normalizeDeviceRefreshRequestResponse(value, expectedDeviceId) {
+  if (!isPlainRecord(value) || Object.keys(value).sort().join(",") !== "refresh_request,request_id" || !isPlainRecord(value.refresh_request)) {
+    throw invalidCloudResponse();
+  }
+  normalizeOpaqueResponseId(value.request_id);
+
+  const refreshRequest = value.refresh_request;
+  if (Object.keys(refreshRequest).sort().join(",") !== "desired_generation,device_id,request_id,requested_at,status,version") {
+    throw invalidCloudResponse();
+  }
+  if (refreshRequest.version !== 1 || refreshRequest.device_id !== expectedDeviceId || !UUID_OR_OPAQUE_ID.test(refreshRequest.device_id)) {
+    throw invalidCloudResponse();
+  }
+  normalizeOpaqueResponseId(refreshRequest.request_id);
+  if (refreshRequest.desired_generation !== null) {
+    normalizeSafeInteger(refreshRequest.desired_generation, "desired_generation", false);
+  }
+  if (typeof refreshRequest.status !== "string" || !DEVICE_REFRESH_REQUEST_STATUSES.has(refreshRequest.status)) {
+    throw invalidCloudResponse();
+  }
+  normalizeSafeTimestamp(refreshRequest.requested_at, false);
+  return {
+    request_id: value.request_id,
+    refresh_request: {
+      version: 1,
+      request_id: refreshRequest.request_id,
+      device_id: refreshRequest.device_id,
+      desired_generation: refreshRequest.desired_generation,
+      status: refreshRequest.status,
+      requested_at: refreshRequest.requested_at,
+    },
+  };
+}
+
 function normalizeBoundedSafeText(value, maxLength) {
   if (typeof value !== "string" || value.length < 1 || value.length > maxLength || hasControlCharacters(value)) throw invalidCloudResponse();
   return value;
@@ -709,7 +744,24 @@ function base64UrlDecode(value) {
 async function postOperation(query, body, idempotencyKey, config, fetchImpl, options, recentAuth) {
   const operation = normalizeOperation(query.operation ?? query.resource);
   if (operation === "request-refresh") {
-    throw new ConsoleApiError(501, "operation_unsupported", "Device refresh requests are not available");
+    const input = validateDeviceRefreshRequestBody(body);
+    const recentAuthHeader = requireRecentAuth(recentAuth);
+    const result = await cloudRequest(
+      "POST",
+      `/devices/${encodeURIComponent(input.target_id)}/refresh-requests`,
+      {},
+      config,
+      fetchImpl,
+      options,
+      idempotencyKey,
+      true,
+      { "agentpass-recent-auth": recentAuthHeader },
+    );
+    if (result.status !== 202) throw invalidCloudResponse();
+    return {
+      status: result.status,
+      body: normalizeDeviceRefreshRequestResponse(result.body, input.target_id),
+    };
   }
   if (operation === "create-policy") {
     const policy = validatePolicyBody(body);
@@ -807,6 +859,7 @@ function normalizeOperation(value) {
     "device.revoke": "revoke-device",
     "request-refresh": "request-refresh",
     "device.request-refresh": "request-refresh",
+    "device.refresh.request": "request-refresh",
     "issue-capability": "issue-capability",
     capability: "issue-capability",
     "capability.issue": "issue-capability",
@@ -902,6 +955,15 @@ function validateRevocationBody(value, operation) {
   const body = plainObject(value);
   exactKeys(body, ["target_id", "reason"], operation);
   return { target_id: validateIdentifier(body.target_id, `${operation}.target_id`), reason: boundedString(body.reason, `${operation}.reason`, 128, true) };
+}
+
+function validateDeviceRefreshRequestBody(value) {
+  const body = plainObject(value);
+  exactKeys(body, ["target_id"], "request-refresh");
+  if (Object.keys(body).length !== 1) {
+    throw new ConsoleApiError(400, "invalid_json_schema", "Request JSON does not match the schema");
+  }
+  return { target_id: validateIdentifier(body.target_id, "request-refresh.target_id") };
 }
 
 function requireRecentAuth(value) {

@@ -628,6 +628,31 @@ export async function createCloudStore(options = {}) {
       });
   });
 
+  const requestDeviceWake = async (input = {}) => {
+    const organizationId = requireTenant(input);
+    const deviceId = assertUuid(input.deviceId ?? input.device_id, "device_id");
+    const device = tenantRecord("devices", organizationId, deviceId, "device");
+    if (device.status !== "active") throw new CloudStoreError("ERR_DEVICE_REVOKED", "device is not active");
+    const principalId = boundedText(input.principalId ?? input.principal_id ?? input.createdBy ?? input.created_by, "principal_id", 256, true);
+    const idempotencyKey = requireIdempotencyKey(input.idempotencyKey ?? input.idempotency_key);
+    const requestedAt = timestamp(input.requestedAt ?? input.requested_at ?? now());
+    const requestId = deterministicWakeRequestId({ organizationId, deviceId, principalId, idempotencyKey });
+    return mutate({
+      organizationId,
+      operation: `device-wake:${principalId}`,
+      idempotencyKey,
+      input: { version: 1, device_id: deviceId },
+      action: () => Object.freeze({
+        version: 1,
+        request_id: requestId,
+        device_id: deviceId,
+        desired_generation: null,
+        status: "no_pending_refresh",
+        requested_at: requestedAt
+      })
+    });
+  };
+
   const listAdminAuditEvents = async (input) => read(() => listAudit(state.admin_audit_events, requireTenant(input), input?.limit));
   const listDeviceAuditEvents = async (input) => read(() => {
     const organizationId = requireTenant(input);
@@ -696,7 +721,7 @@ export async function createCloudStore(options = {}) {
   const api = {
     createOrganization, getOrganization, listOrganizations,
     createMembership, getMembership, listMemberships: listTenant("memberships"), updateMembership: (input) => updateResource(input, "memberships", "membership", ["membershipId", "membership_id", "id"], ["role", "status"], (value) => ({ ...value, role: enumText(value.role, "role", ["owner", "admin", "auditor", "viewer"]), status: enumText(value.status, "status", ["active", "revoked"]) })),
-    createDevice, getDevice, listDevices: listTenant("devices"), listDeviceReadModels, updateDevice: (input) => updateResource(input, "devices", "device", ["deviceId", "device_id", "id"], ["name", "device_public_key", "metadata", "status"], (value) => { const publicKey = boundedText(value.device_public_key, "device_public_key", 8192, true, true); rejectPrivateKey(publicKey, "device_public_key"); return { ...value, name: boundedText(value.name, "name", 128, true), device_public_key: publicKey, metadata: safeMetadata(value.metadata, "metadata"), status: enumText(value.status, "status", ["active", "revoked"]) }; }),
+    createDevice, getDevice, listDevices: listTenant("devices"), listDeviceReadModels, requestDeviceWake, updateDevice: (input) => updateResource(input, "devices", "device", ["deviceId", "device_id", "id"], ["name", "device_public_key", "metadata", "status"], (value) => { const publicKey = boundedText(value.device_public_key, "device_public_key", 8192, true, true); rejectPrivateKey(publicKey, "device_public_key"); return { ...value, name: boundedText(value.name, "name", 128, true), device_public_key: publicKey, metadata: safeMetadata(value.metadata, "metadata"), status: enumText(value.status, "status", ["active", "revoked"]) }; }),
     createDeviceEnrollment, completeDeviceEnrollment,
     createAgent, getAgent, listAgents: listTenant("agents"), updateAgent: (input) => updateResource(input, "agents", "agent", ["agentId", "agent_id", "id"], ["name", "kind", "public_key", "device_id", "status"], (value) => { const descriptor = normalizeAgentDescriptor({ version: value.version, agent_id: value.agent_id, name: value.name, kind: value.kind, public_key: value.public_key, created_at: value.created_at }); return { ...value, ...descriptor, status: enumText(value.status, "status", ["active", "revoked"]) }; }),
     createPolicy, getPolicy, listPolicies: listTenant("policies"), updatePolicy: (input) => updateResource(input, "policies", "policy", ["policyId", "policy_id", "id"], ["name", "scope", "sequence", "status"], (value) => ({ ...value, name: boundedText(value.name, "name", 128, true), scope: normalizeScope(value.scope), sequence: sequenceValue(value.sequence, "sequence"), status: enumText(value.status, "status", ["active", "disabled"]) })),
@@ -943,6 +968,13 @@ function requireIdempotencyKey(value) {
 function rejectPrivateKey(value, label) { if (/PRIVATE\s+KEY|BEGIN\s+RSA|BEGIN\s+EC/i.test(value)) throw new CloudStoreError("ERR_SECRET_MATERIAL", `${label} contains private key material`); }
 function clone(value) { return structuredClone(value); }
 function digest(value) { return crypto.createHash("sha256").update(canonicalJson(value)).digest("hex"); }
+function deterministicWakeRequestId({ organizationId, deviceId, principalId, idempotencyKey }) {
+  const bytes = crypto.createHash("sha256").update("AgentPass-Device-Wake-Request-Id-v1\0").update(canonicalJson({ organization_id: organizationId, device_id: deviceId, principal_id: principalId, idempotency_key: idempotencyKey })).digest().subarray(0, 16);
+  bytes[6] = (bytes[6] & 0x0f) | 0x50;
+  bytes[8] = (bytes[8] & 0x3f) | 0x80;
+  const hex = bytes.toString("hex");
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+}
 function idOf(record) { return record.enrollment_id ?? record.organization_id ?? record.membership_id ?? record.device_id ?? record.agent_id ?? record.policy_id ?? record.capability_id ?? record.revocation_id ?? record.audit_event_id ?? ""; }
 function unique(field, value) { return new CloudStoreError("ERR_UNIQUE_CONSTRAINT", `${field} must be unique: ${value}`); }
 function notFound(label, id) { return new CloudStoreError("ERR_NOT_FOUND", `${label} not found: ${id}`); }

@@ -483,6 +483,42 @@
         "x-agentpass-recent-auth-operation": "device.revoke"
       }
     },
+    "/organizations/{organization_id}/devices/{device_id}/refresh-requests": {
+      "post": {
+        "operationId": "requestDeviceRefresh",
+        "summary": "Request an authority-neutral device refresh wake",
+        "description": "Creates or coalesces a delivery hint for the device's current desired generation. This request is authority-neutral: it does not increment authority generation, mutate the ControlBundle, bundle statement, consumed ACK nonce, or observed ACK state, and it does not prove notification delivery, bundle fetch, or device application. The device API polling path remains the correctness fallback. The exact empty JSON object body is intentional; the server derives the current generation and tenant scope from authenticated state.",
+        "security": [{ "humanSession": [], "recentWebAuthn": [] }],
+        "parameters": [
+          { "$ref": "#/components/parameters/OrganizationId" },
+          { "$ref": "#/components/parameters/DeviceId" },
+          { "$ref": "#/components/parameters/CsrfToken" },
+          { "$ref": "#/components/parameters/IdempotencyKey" }
+        ],
+        "requestBody": { "$ref": "#/components/requestBodies/DeviceRefreshRequest" },
+        "responses": {
+          "202": { "$ref": "#/components/responses/DeviceRefreshRequestAccepted" },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "409": { "$ref": "#/components/responses/IdempotencyConflict" },
+          "429": { "$ref": "#/components/responses/TooManyRequests" },
+          "500": { "$ref": "#/components/responses/InternalError" }
+        },
+        "x-agentpass-contract-status": "frozen-p0-a",
+        "x-agentpass-tenant-scope": { "kind": "organization", "source": "path.organization_id", "cross-tenant-disclosure": false },
+        "x-agentpass-minimum-role": "admin",
+        "x-agentpass-recent-auth-operation": "device.refresh.request",
+        "x-agentpass-authority-neutral": true,
+        "x-agentpass-authority-effects": {
+          "authority_generation": "unchanged",
+          "bundle_and_ack_state": "unchanged",
+          "device_delivery": "not_proven",
+          "device_application": "not_proven"
+        }
+      }
+    },
     "/organizations/{organization_id}/device-enrollments": {
       "post": {
         "operationId": "issueDeviceEnrollment",
@@ -642,6 +678,11 @@
       "AcceptInvitation": {
         "required": true,
         "content": { "application/json": { "schema": { "$ref": "#/components/schemas/AcceptInvitationRequest" } } }
+      },
+      "DeviceRefreshRequest": {
+        "required": true,
+        "description": "Exactly {}. The request carries no generation, bundle, ACK, notification, or policy input; those values are resolved from the authenticated organization and device state.",
+        "content": { "application/json": { "schema": { "$ref": "#/components/schemas/DeviceRefreshRequestBody" } } }
       }
     },
     "responses": {
@@ -694,6 +735,7 @@
       "InvitationResponse": { "description": "Invitation response without token material", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/InvitationResponse" } } } },
       "InvitationAccepted": { "description": "Invitation accepted and membership created", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/InvitationAcceptedResponse" } } } },
       "DeviceList": { "description": "Minimal authoritative Console device state without keys, policy, nonce, signature, or metadata.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/DeviceListResponse" } } } },
+      "DeviceRefreshRequestAccepted": { "description": "A wake request was accepted, coalesced with a pending wake, or found unnecessary because no refresh is pending. The response is a delivery hint only; it does not prove device delivery or application.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/DeviceRefreshRequestResponse" } } } },
       "BadRequest": { "description": "Malformed request or missing browser security header", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorEnvelope" } } } },
       "Unauthorized": { "description": "No valid humanSession", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorEnvelope" } } } },
       "Forbidden": { "description": "Session lacks the required organization role", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorEnvelope" } } } },
@@ -738,6 +780,35 @@
         }
       },
       "RequestId": { "type": "string", "format": "uuid", "description": "Stable request correlation identifier." },
+      "DeviceRefreshRequestBody": {
+        "type": "object",
+        "additionalProperties": false,
+        "minProperties": 0,
+        "maxProperties": 0,
+        "description": "Exactly {}. No caller-supplied generation, bundle, ACK, notification, or policy field is accepted."
+      },
+      "DeviceRefreshRequestResult": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["version", "request_id", "device_id", "desired_generation", "status", "requested_at"],
+        "properties": {
+          "version": { "const": 1 },
+          "request_id": { "type": "string", "format": "uuid", "description": "The wake request identifier, distinct from the top-level HTTP request correlation identifier." },
+          "device_id": { "type": "string", "format": "uuid" },
+          "desired_generation": { "type": ["integer", "null"], "minimum": 1 },
+          "status": { "type": "string", "enum": ["accepted", "coalesced", "no_pending_refresh"] },
+          "requested_at": { "type": "string", "format": "date-time", "description": "RFC 3339 timestamp at which the wake request result was recorded." }
+        }
+      },
+      "DeviceRefreshRequestResponse": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["request_id", "refresh_request"],
+        "properties": {
+          "request_id": { "$ref": "#/components/schemas/RequestId" },
+          "refresh_request": { "$ref": "#/components/schemas/DeviceRefreshRequestResult" }
+        }
+      },
       "DeviceConsoleState": {
         "type": "object",
         "additionalProperties": false,

@@ -421,6 +421,195 @@ test("device revoke requires operation-bound recent WebAuthn while retaining the
   assert.deepEqual(operations, ["device.revoke", "device.revoke"]);
 });
 
+test("owner and admin can request an authority-neutral device wake with exact input, while recent auth and repository failures fail closed", async (t) => {
+  const ownerToken = "ap_owner_token_abcdefghijklmnopqrstuvwxyz";
+  const adminToken = "ap_admin_token_abcdefghijklmnopqrstuvwxyz";
+  const viewerToken = "ap_viewer_token_abcdefghijklmnopqrstuvwxyz";
+  const otherOrganization = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+  const calls = [];
+  const auditCalls = [];
+  const operations = [];
+  const consumedProofs = new Set();
+  const f = await fixture(t, {
+    tokenRecords: [
+      createApiTokenRecord({ token: ownerToken, tokenId: "owner-token", organizationId: org, memberId: "owner-1", role: "owner" }),
+      createApiTokenRecord({ token: adminToken, tokenId: "admin-token", organizationId: org, memberId: "admin-1", role: "admin" }),
+      createApiTokenRecord({ token: viewerToken, tokenId: "viewer-token", organizationId: org, memberId: "viewer-1", role: "viewer" })
+    ],
+    storeDecorator: (store) => Object.freeze({
+      ...store,
+      async requestDeviceWake(input) {
+        calls.push(structuredClone(input));
+        return store.requestDeviceWake(input);
+      },
+      async appendAdminAuditEvent(input) {
+        auditCalls.push(structuredClone(input));
+        return store.appendAdminAuditEvent(input);
+      }
+    }),
+    verifyRecentWebAuthn: async ({ proof, operation, principal, organization_id }) => {
+      operations.push(operation);
+      const wrongOperation = proof === "webauthn-wrong-operation-proof-abcdefghijklmnopqrstuvwxyz";
+      const replayed = consumedProofs.has(proof);
+      if (!replayed && !wrongOperation && typeof proof === "string" && proof.startsWith("webauthn-")) consumedProofs.add(proof);
+      return {
+        verified: !replayed && !wrongOperation,
+        consumed: !replayed && !wrongOperation,
+        challenge_id: "99999999-9999-4999-8999-999999999999",
+        member_id: principal.member_id,
+        organization_id,
+        operation: wrongOperation ? "device.revoke" : operation,
+        authenticated_at: now
+      };
+    }
+  });
+  const endpoint = `${f.base}/v1/organizations/${org}/devices/${deviceId}/refresh-requests`;
+  const request = (token, key, proof, body = "{}") => fetch(endpoint, {
+    method: "POST",
+    headers: {
+      authorization: `Bearer ${token}`,
+      "content-type": "application/json",
+      "idempotency-key": key,
+      ...(proof === undefined ? {} : { "agentpass-recent-auth": proof })
+    },
+    body
+  });
+
+  const owner = await request(ownerToken, "wake-owner-0001", "webauthn-valid-proof-abcdefghijklmnopqrstuvwxyz");
+  assert.equal(owner.status, 202, JSON.stringify(await owner.clone().json()));
+  const ownerBody = await owner.json();
+  assert.deepEqual(Object.keys(ownerBody).sort(), ["refresh_request", "request_id"]);
+  assert.deepEqual(Object.keys(ownerBody.refresh_request).sort(), ["desired_generation", "device_id", "request_id", "requested_at", "status", "version"]);
+  assert.equal(ownerBody.refresh_request.version, 1);
+  assert.equal(ownerBody.refresh_request.device_id, deviceId);
+  assert.equal(ownerBody.refresh_request.status, "no_pending_refresh");
+  assert.equal(ownerBody.refresh_request.desired_generation, null);
+  assert.equal(ownerBody.refresh_request.requested_at, new Date(now).toISOString());
+  assert.deepEqual(calls[0], {
+    organizationId: org,
+    deviceId,
+    principalId: "owner-1",
+    idempotencyKey: "wake-owner-0001",
+    requestedAt: new Date(now).toISOString()
+  });
+  assert.deepEqual(auditCalls[0], {
+    organizationId: org,
+    eventType: "device.refresh_requested",
+    actorId: "owner-1",
+    targetType: "device",
+    targetId: deviceId,
+    details: { status: "no_pending_refresh", desired_generation: null },
+    idempotencyKey: "wake-owner-0001:audit"
+  });
+  const auditAfterOwner = await f.store.listAdminAuditEvents({ organizationId: org });
+  assert.equal(auditAfterOwner.at(-1).event_type, "device.refresh_requested");
+  assert.deepEqual(auditAfterOwner.at(-1).details, { desired_generation: null, status: "no_pending_refresh" });
+
+  const exactReplay = await request(ownerToken, "wake-owner-0001", "webauthn-owner-retry-proof-abcdefghijklmnopqrstuvwxyz");
+  assert.equal(exactReplay.status, 202);
+  assert.deepEqual((await exactReplay.json()).refresh_request, ownerBody.refresh_request);
+  assert.equal((await f.store.listAdminAuditEvents({ organizationId: org })).filter((event) => event.event_type === "device.refresh_requested").length, 1, "an exact replay must not duplicate the audit event");
+  assert.deepEqual(operations.slice(0, 2), ["device.refresh.request", "device.refresh.request"]);
+
+  const admin = await request(adminToken, "wake-admin-0001", "webauthn-admin-proof-abcdefghijklmnopqrstuvwxyz");
+  assert.equal(admin.status, 202, JSON.stringify(await admin.clone().json()));
+  assert.equal((await admin.json()).refresh_request.device_id, deviceId);
+  assert.equal(calls.length, 3);
+
+  const adminSuccess = await request(adminToken, "wake-admin-0002", "webauthn-valid-proof-2-abcdefghijklmnopqrstuvwxyz");
+  assert.equal(adminSuccess.status, 202, JSON.stringify(await adminSuccess.clone().json()));
+  assert.equal((await adminSuccess.json()).refresh_request.device_id, deviceId);
+  assert.equal(calls.length, 4);
+
+  const missing = await request(ownerToken, "wake-missing-0001", undefined);
+  assert.equal(missing.status, 401);
+  assert.equal((await missing.json()).error.code, "recent_auth_required");
+  assert.equal(calls.length, 4);
+
+  const wrongOperation = await request(ownerToken, "wake-wrong-0001", "webauthn-wrong-operation-proof-abcdefghijklmnopqrstuvwxyz");
+  assert.equal(wrongOperation.status, 401);
+  assert.equal((await wrongOperation.json()).error.code, "recent_auth_failed");
+  assert.equal(calls.length, 4);
+
+  const replay = await request(ownerToken, "wake-replay-0001", "webauthn-valid-proof-abcdefghijklmnopqrstuvwxyz");
+  assert.equal(replay.status, 401);
+  assert.equal((await replay.json()).error.code, "recent_auth_failed");
+  assert.equal(calls.length, 4);
+
+  const viewer = await request(viewerToken, "wake-viewer-0001", "webauthn-valid-proof-abcdefghijklmnopqrstuvwxyz");
+  assert.equal(viewer.status, 403);
+  assert.equal((await viewer.json()).error.code, "role_denied");
+  assert.equal(calls.length, 4);
+
+  const bodySubstitution = await request(ownerToken, "wake-body-0001", "webauthn-body-proof-abcdefghijklmnopqrstuvwxyz", '{"desired_generation":99}');
+  assert.equal(bodySubstitution.status, 400);
+  assert.equal((await bodySubstitution.json()).error.code, "invalid_refresh_request");
+  assert.equal(calls.length, 4);
+
+  const emptyBody = await request(ownerToken, "wake-empty-0001", "webauthn-empty-body-proof-abcdefghijklmnopqrstuvwxyz", "");
+  assert.equal(emptyBody.status, 400);
+  assert.equal((await emptyBody.json()).error.code, "invalid_refresh_request");
+  assert.equal(calls.length, 4);
+
+  const wrongTenant = await fetch(`${f.base}/v1/organizations/${otherOrganization}/devices/${deviceId}/refresh-requests`, {
+    method: "POST",
+    headers: { authorization: `Bearer ${ownerToken}`, "content-type": "application/json", "idempotency-key": "wake-tenant-0001", "agentpass-recent-auth": "webauthn-valid-proof-abcdefghijklmnopqrstuvwxyz" },
+    body: "{}"
+  });
+  assert.equal(wrongTenant.status, 403);
+  assert.equal(calls.length, 4);
+});
+
+test("refresh request rejects caller fields, missing idempotency, unavailable store methods, and repository details", async (t) => {
+  const proof = "webauthn-proof-abcdefghijklmnopqrstuvwxyz";
+  const endpointSuffix = `/v1/organizations/${org}/devices/${deviceId}/refresh-requests`;
+  const baseHeaders = { authorization: `Bearer ${"ap_owner_token_abcdefghijklmnopqrstuvwxyz"}`, "content-type": "application/json", "agentpass-recent-auth": proof };
+
+  const f = await fixture(t);
+  const missingKey = await fetch(`${f.base}${endpointSuffix}`, { method: "POST", headers: baseHeaders, body: "{}" });
+  assert.equal(missingKey.status, 400);
+  assert.equal((await missingKey.json()).error.code, "idempotency_key_required");
+  const substituted = await fetch(`${f.base}${endpointSuffix}`, {
+    method: "POST",
+    headers: { ...baseHeaders, "idempotency-key": "wake-substituted-0001" },
+    body: '{"generation":1}'
+  });
+  assert.equal(substituted.status, 400);
+  assert.equal((await substituted.json()).error.code, "invalid_refresh_request");
+  const emptyBody = await fetch(`${f.base}${endpointSuffix}`, {
+    method: "POST",
+    headers: { ...baseHeaders, "idempotency-key": "wake-empty-0001" }
+  });
+  assert.equal(emptyBody.status, 400);
+  assert.equal((await emptyBody.json()).error.code, "invalid_refresh_request");
+
+  const unavailable = await fixture(t, { storeDecorator: (store) => {
+    const { requestDeviceWake: _requestDeviceWake, ...withoutWake } = store;
+    return Object.freeze(withoutWake);
+  } });
+  const unavailableResponse = await fetch(`${unavailable.base}${endpointSuffix}`, {
+    method: "POST",
+    headers: { ...baseHeaders, "idempotency-key": "wake-unavailable-0001" },
+    body: "{}"
+  });
+  assert.equal(unavailableResponse.status, 503);
+  assert.equal((await unavailableResponse.json()).error.code, "refresh_request_unavailable");
+
+  const repositoryFailure = await fixture(t, { storeDecorator: (store) => Object.freeze({
+    ...store,
+    async requestDeviceWake() { throw Object.assign(new Error("database password must not escape"), { code: "ERR_DATABASE" }); }
+  }) });
+  const failureResponse = await fetch(`${repositoryFailure.base}${endpointSuffix}`, {
+    method: "POST",
+    headers: { ...baseHeaders, "idempotency-key": "wake-failure-0001" },
+    body: "{}"
+  });
+  assert.equal(failureResponse.status, 503);
+  const failureBody = await failureResponse.json();
+  assert.deepEqual(failureBody.error, { code: "refresh_request_unavailable", message: "Refresh request is unavailable" });
+  assert.doesNotMatch(JSON.stringify(failureBody), /database password/u);
+});
+
 test("rate limits human and device principals independently and returns retry metadata", async (t) => {
   let monotonic = 10_000;
   const limiter = createRateLimiter({

@@ -45,14 +45,26 @@ test("device UI renders expiry, ACK, sequence, and desired/observed progress acc
   assert.match(source, /device\.blockedReason/);
 });
 
-test("device state cards stay read-only while the existing setup revoke uses operation-bound WebAuthn", async () => {
+test("device state cards expose wake only for actionable non-synced states and use operation-bound WebAuthn", async () => {
   const source = await readFile(componentPath, "utf8");
   assert.match(source, /operate\("revoke-device", \{ target_id: device\.deviceId/);
-  assert.match(source, /operation: DEVICE_REVOKE_RECENT_AUTH_OPERATION/);
   assert.match(source, /DEVICE_REVOKE_RECENT_AUTH_OPERATION = "device\.revoke"/);
-  assert.doesNotMatch(source, /device-revoke-button/);
-  assert.doesNotMatch(source, /operation=refresh-device|operate\("refresh-device"|device\.refresh\(/);
-  assert.doesNotMatch(source.slice(source.indexOf("function DeviceStateCard"), source.indexOf("function Overview")), /operate\(|<button/);
+  assert.match(source, /DEVICE_REFRESH_REQUEST_RECENT_AUTH_OPERATION = "device\.refresh\.request"/);
+  assert.match(source, /authenticateRecentAuth\(\{ operation: DEVICE_REFRESH_REQUEST_RECENT_AUTH_OPERATION/);
+  assert.match(source, /\["pending", "blocked", "stale", "offline"\]\.includes\(state\)/);
+  assert.match(source, /const canRequestRefresh = Boolean\(device\.deviceId/);
+  assert.match(source, /Wake requestを依頼/);
+  assert.match(source, /Wake requestを送信中…/);
+  assert.match(source, /role="status" aria-live="polite"/);
+  assert.match(source, /role="alert"/);
+  assert.match(source, /accepted: "依頼を受け付けました。端末への配信は未確認です。"/);
+  assert.match(source, /coalesced: "既存の依頼へ統合し、再通知しました。端末への配信は未確認です。"/);
+  assert.match(source, /no_pending_refresh: "反映待ちの更新はなく、通知は送信していません。"/);
+  assert.match(source, /適用・同期の完了を示す操作ではありません。/);
+  assert.match(source, /parseDeviceRefreshResponse\(payload, deviceId\)/);
+  const requestRefreshSource = source.slice(source.indexOf("const requestDeviceRefresh"), source.indexOf("const currentLabel"));
+  assert.doesNotMatch(requestRefreshSource, /refreshSummary\(\)|capabilit(?:y|ies)/i);
+  assert.doesNotMatch(source, /generation:|outbox:|nonce:|bundle:|policy:|secret:/);
 });
 
 test("state-specific styling preserves a text/status hook in the stylesheet", async () => {
@@ -63,4 +75,8 @@ test("state-specific styling preserves a text/status hook in the stylesheet", as
   assert.match(styles, /\.device-state-badge/);
   assert.match(styles, /\.device-sync-track/);
   assert.match(styles, /\.device-state-details/);
+  assert.match(styles, /\.device-wake-action/);
+  assert.match(styles, /\.device-wake-button/);
+  assert.match(styles, /\.device-wake-outcome/);
+  assert.match(styles, /\.device-wake-error/);
 });
