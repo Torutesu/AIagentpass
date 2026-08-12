@@ -20,6 +20,29 @@ agentpass check
 agentpass doctor
 ```
 
+### Production macOS installation
+
+The production channel is a Developer ID-signed and notarized PKG. AgentPass verifies the signed release manifest, pinned release key, Apple Team ID, stapled notarization ticket, Gatekeeper assessment, package payload, and nested code signatures before installation. Verification is a dry run unless `--execute` is explicit:
+
+```sh
+agentpass install \
+  --manifest "$PWD/AgentPass-v0.18.0.release-manifest.json" \
+  --signature "$PWD/AgentPass-v0.18.0.release-manifest.sig" \
+  --public-key "$PWD/release-manifest.public.pem" \
+  --fingerprint 'SHA256:PINNED_RELEASE_KEY_FINGERPRINT' \
+  --team-id 'APPLETEAM1'
+
+sudo agentpass install \
+  --manifest "$PWD/AgentPass-v0.18.0.release-manifest.json" \
+  --signature "$PWD/AgentPass-v0.18.0.release-manifest.sig" \
+  --public-key "$PWD/release-manifest.public.pem" \
+  --fingerprint 'SHA256:PINNED_RELEASE_KEY_FINGERPRINT' \
+  --team-id 'APPLETEAM1' \
+  --execute
+```
+
+Service registration remains a separate, visible macOS approval step. Package installation never overwrites protected AgentPass state.
+
 Upgrading from AgentPass 0.5 or earlier creates the v4 audit identity and, when needed, a signed agent identity:
 
 ```sh

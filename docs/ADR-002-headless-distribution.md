@@ -14,7 +14,7 @@ Distribution channels are:
 2. a Developer ID-signed and notarized flat PKG for production;
 3. MDM installation of the same verified PKG for managed fleets.
 
-The PKG installs the fixed CLI, Git signing bridge, background-only service host, privileged service, bounded XPC client, and uninstall command. It does not download Node.js or mutable executable code while privileged.
+The PKG installs the background-only service host, privileged service, and bounded XPC client. The CLI and Git signing bridge are installed through the source/npm/Homebrew channel and verify the complete signed release before invoking the PKG installer. The privileged installer does not download Node.js or mutable executable code.
 
 ## Security consequences
 

@@ -14,6 +14,7 @@ import { canonicalJson, createAgentIdentity, createAuditIdentity, signRequest } 
 import { installIntegration, integrationPlan } from "../lib/integrations.mjs";
 import { readGitSigningInvocation, writeGitSignature } from "../lib/git-signing.mjs";
 import { evaluateAgentRequest } from "../lib/policy.mjs";
+import { executeProductionInstall, prepareProductionInstall, removeStagedProductionInstall, stageProductionInstall, verifyProductionInstall } from "../lib/platform-install.mjs";
 import { generateRecoveryIdentity, recoveryPolicyToAnchorPolicy, signAnchorRecoveryAuthorization, signRecoveryRequest, verifyAnchorRecoveryApprovals, verifyRecoveryThreshold } from "../lib/recovery.mjs";
 import { applyControlBundle, controlKeyFingerprint, fetchControlBundle, generateControlKeyPair, loadControlBundle, signControlBundle } from "../lib/remote-control.mjs";
 
@@ -23,6 +24,9 @@ function usage() {
   console.log(`AgentPass 0.18.0
 
 Commands:
+  install --manifest FILE --signature FILE --public-key FILE
+          --fingerprint SHA256:PIN --team-id TEAMID [--execute]
+                    verify and optionally install the production macOS package
   init              create a secure local policy
   migrate           upgrade an older policy to signed-agent format
   status            show policy and revocation status
@@ -112,6 +116,48 @@ function git(gitArgs, optional = false) {
     throw new Error(result.stderr.trim() || `git ${gitArgs.join(" ")} failed`);
   }
   return result.stdout.trim();
+}
+
+function strictInstallFlags() {
+  const values = new Map();
+  const allowed = new Set(["--manifest", "--signature", "--public-key", "--fingerprint", "--team-id"]);
+  for (let index = 0; index < args.length; index += 1) {
+    const argument = args[index];
+    if (argument === "--execute") continue;
+    if (!allowed.has(argument) || values.has(argument) || index + 1 >= args.length || args[index + 1].startsWith("--")) {
+      throw new Error("Usage: agentpass install --manifest FILE --signature FILE --public-key FILE --fingerprint SHA256:PIN --team-id TEAMID [--execute]");
+    }
+    values.set(argument, args[index + 1]);
+    index += 1;
+  }
+  for (const flag of allowed) if (!values.has(flag)) throw new Error(`Install requires ${flag}`);
+  return values;
+}
+
+function installProduction() {
+  const flags = strictInstallFlags();
+  const inputs = prepareProductionInstall({
+    manifest: path.resolve(flags.get("--manifest")),
+    signature: path.resolve(flags.get("--signature")),
+    publicKey: path.resolve(flags.get("--public-key")),
+    fingerprint: flags.get("--fingerprint"),
+    teamId: flags.get("--team-id")
+  });
+  const verifier = fileURLToPath(new URL("../scripts/release/verify-macos-release.sh", import.meta.url));
+  const stager = fileURLToPath(new URL("../scripts/release/stage-release.mjs", import.meta.url));
+  const staged = stageProductionInstall(inputs, stager);
+  try {
+    const plan = verifyProductionInstall(staged, verifier);
+    const publicPlan = { ...plan, package: path.join(path.dirname(inputs.manifest), path.basename(plan.package)), stagingDirectory: undefined };
+    if (!args.includes("--execute")) {
+      console.log(JSON.stringify({ ...publicPlan, installed: false, dryRun: true, next: "rerun this command as root with --execute" }, null, 2));
+      return;
+    }
+    const installed = executeProductionInstall(plan);
+    console.log(JSON.stringify({ ...publicPlan, installed: installed.installed, installerOutput: installed.installerOutput, dryRun: false }, null, 2));
+  } finally {
+    removeStagedProductionInstall(staged.stagingDirectory);
+  }
 }
 
 function init() {
@@ -955,7 +1001,8 @@ function xmlEscape(value) {
 }
 
 try {
-  if (command === "init") init();
+  if (command === "install") installProduction();
+  else if (command === "init") init();
   else if (command === "migrate") migrate();
   else if (command === "check") check();
   else if (command === "status") status();
