@@ -26,3 +26,16 @@ test("credential lookup and counter update are session and organization scoped",
   assert.equal(await repo.updateCredentialCounter({session_id:ids.session,organization_id:ids.org,credential_id:credential,sign_count:2,expected_sign_count:1}),false);
   assert.match(calls[0].text,/m\.status='active'/); assert.match(calls[1].text,/c\.sign_count=\$5/);
 });
+
+test("credential allow lists are session-bound, active, bounded, and browser-safe", async () => {
+  const id = Buffer.alloc(32, 7);
+  const calls = [];
+  const repo = createPostgresHumanRepository({ client: { async query(text, params) { calls.push({ text, params }); return { rows: [{ id, transports: ["internal", "hybrid"] }] }; } } });
+  assert.deepEqual(await repo.listCredentialsForSession({ session_id: ids.session, organization_id: ids.org }), [{ id: id.toString("base64url"), type: "public-key", transports: ["internal", "hybrid"] }]);
+  assert.match(calls[0].text, /s\.id=\$1/);
+  assert.match(calls[0].text, /s\.organization_id=\$2/);
+  assert.match(calls[0].text, /s\.expires_at>clock_timestamp\(\)/);
+  assert.match(calls[0].text, /LIMIT 64/);
+  const invalid = createPostgresHumanRepository({ client: { async query() { return { rows: [{ id, transports: ["internal", "internal"] }] }; } } });
+  await assert.rejects(() => invalid.listCredentialsForSession({ session_id: ids.session, organization_id: ids.org }), /transports/);
+});

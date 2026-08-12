@@ -65,7 +65,7 @@ test("fails closed on an unknown or out-of-order applied version", async () => {
 
 test("loads the reviewed contract migrations in contiguous order without rewriting their SQL", async () => {
   const loaded = await loadSqlMigrations(defaultContractDirectory());
-  assert.deepEqual(loaded.map((migration) => migration.name), ["0001_control_plane.sql", "0002_webauthn_challenges.sql"]);
+  assert.deepEqual(loaded.map((migration) => migration.name), ["0001_control_plane.sql", "0002_webauthn_challenges.sql", "0003_webauthn_challenge_bindings.sql"]);
   assert.match(loaded[0].sql, /^BEGIN;/);
   assert.match(loaded[0].sql, /CREATE TABLE schema_migrations/);
   assert.match(loaded[0].sql.trim(), /COMMIT;$/);

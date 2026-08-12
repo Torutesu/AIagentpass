@@ -1,0 +1,35 @@
+import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
+import test from "node:test";
+
+const componentPath = new URL("../app/components/AgentPassConsole.tsx", import.meta.url);
+
+test("enrollment UI uses a session-bound WebAuthn ceremony instead of manual proof", async () => {
+  const source = await readFile(componentPath, "utf8");
+
+  assert.match(source, /import \{ authenticateRecentAuth, WebAuthnClientError \} from "\.\.\/webauthn-client"/);
+  assert.match(source, /fetch\("\/api\/auth\/session", \{[\s\S]*?method: "POST"[\s\S]*?body: "\{\}"[\s\S]*?cache: "no-store"[\s\S]*?credentials: "same-origin"/);
+  assert.match(source, /hasExactKeys\(value, \["session", "csrf_token"\]\)/);
+  assert.match(source, /UUID\.test\(session\.organization_id\)/);
+  assert.match(source, /BASE64URL_CSRF = \/\^\[A-Za-z0-9_-\]\{43\}\$\//);
+  assert.match(source, /authenticateRecentAuth\(\{[\s\S]*?operation: RECENT_AUTH_OPERATION[\s\S]*?organizationId[\s\S]*?csrfToken/);
+  assert.match(source, /"agentpass-recent-auth": authorization_id/);
+  assert.match(source, /enrollmentInFlight\.current/);
+  assert.match(source, /Touch ID\/パスキー確認/);
+
+  assert.doesNotMatch(source, /\[recentAuth,\s*setRecentAuth\]/);
+  assert.doesNotMatch(source, /setRecentAuth/);
+  assert.doesNotMatch(source, /直近のWebAuthn証明/);
+  assert.doesNotMatch(source, /本番のWebAuthnダイアログ接続までは/);
+  assert.doesNotMatch(source, /autoComplete="off" value=\{recentAuth\}/);
+});
+
+test("enrollment ceremony material is not placed in React state or browser storage", async () => {
+  const source = await readFile(componentPath, "utf8");
+  const setupBody = source.slice(source.indexOf("function SetupSurface"), source.indexOf("function AgentsSurface"));
+
+  assert.doesNotMatch(setupBody, /useState\([^\n]*(?:csrf|challenge|assertion|proof|authorization)/i);
+  assert.doesNotMatch(setupBody, /localStorage|sessionStorage|console\.(?:log|info|warn|error)/);
+  assert.match(setupBody, /const \{ organizationId, csrfToken \} = await startEnrollmentSession\(\)/);
+  assert.match(setupBody, /const \{ authorization_id \} = await authenticateRecentAuth/);
+});

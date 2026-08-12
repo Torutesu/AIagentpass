@@ -39,4 +39,21 @@ test("runtime rejects unsafe secrets, key algorithms, and configuration", async 
   await assert.rejects(createCloudRuntime({ env: value.env }), /permissions are unsafe/);
   assert.throws(() => loadRuntimeConfig({}), /absolute path/);
   assert.throws(() => loadRuntimeConfig({ ...value.env, AGENTPASS_CLOUD_HOST: "example.com" }), /listen host/);
+  assert.throws(() => loadRuntimeConfig({ ...value.env, AGENTPASS_DATABASE_URL: "postgresql://db" }), /Human auth configuration is incomplete/);
+  assert.throws(() => loadRuntimeConfig({ ...value.env, AGENTPASS_DATABASE_URL: "postgresql://db", AGENTPASS_CONSOLE_ORIGIN: "https://console.example.test", AGENTPASS_WEBAUTHN_RP_ID: "other.test" }), /RP_ID/);
+});
+
+test("production human auth is composed from PostgreSQL and closed with the runtime", async (t) => {
+  const value = files();
+  t.after(() => fs.rmSync(value.root, { recursive: true, force: true }));
+  const env = { ...value.env, AGENTPASS_DATABASE_URL: "postgresql://agent:secret@db.example.test/agentpass?sslmode=verify-full", AGENTPASS_CONSOLE_ORIGIN: "https://console.example.test", AGENTPASS_WEBAUTHN_RP_ID: "example.test" };
+  const calls = [];
+  const postgresRuntime = { pool: {}, humanRepository: {}, async close() { calls.push("postgres-close"); } };
+  const recentAuthService = { async authorize() { return { verified: false }; } };
+  const runtime = await createCloudRuntime({ env, logger: { info() {} }, postgresFactory: async (input) => { calls.push(["postgres", input.applicationVersion]); return postgresRuntime; }, humanAuthFactory: (input) => { calls.push(["human", input.origin, input.rpId]); return { api: { async handle() { return { status: 404, body: { error: { code: "not_found", message: "Resource not found" } }, headers: {} }; } }, recentAuthService }; } });
+  assert.equal(runtime.postgresRuntime, postgresRuntime);
+  assert.equal(runtime.humanAuthRuntime.recentAuthService, recentAuthService);
+  assert.deepEqual(calls.slice(0, 2), [["postgres", "0.18.0"], ["human", "https://console.example.test", "example.test"]]);
+  await runtime.close();
+  assert.equal(calls.at(-1), "postgres-close");
 });

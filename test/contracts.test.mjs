@@ -9,7 +9,7 @@ const root = path.resolve(import.meta.dirname, "..");
 test("machine-readable platform contracts pass the offline validator", () => {
   const result = spawnSync(process.execPath, [path.join(root, "scripts", "validate-contracts.mjs")], { cwd: root, encoding: "utf8" });
   assert.equal(result.status, 0, result.stderr);
-  assert.match(result.stdout, /validated 5 schemas, 2 OpenAPI documents, 3 fixtures, and 2 PostgreSQL migrations/);
+  assert.match(result.stdout, /validated 5 schemas, 2 OpenAPI documents, 3 fixtures, and 3 PostgreSQL migrations/);
 });
 
 test("human high-risk operations require role and recent WebAuthn", () => {

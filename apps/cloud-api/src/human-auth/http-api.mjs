@@ -193,7 +193,7 @@ export function createHumanAuthHttpApi({
 
     let issued;
     try {
-      issued = recentAuthService.begin({
+      issued = await recentAuthService.begin({
         session,
         organization_id: input.organization_id,
         operation: input.operation,

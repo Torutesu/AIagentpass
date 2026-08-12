@@ -172,17 +172,17 @@ async function postJson(fetchImpl: typeof fetch, path: string, body: Record<stri
 }
 
 function validateOptionsResponse(value: unknown): Readonly<{ challenge_id: string; options: PublicKeyCredentialRequestOptionsJSON }> {
-  if (!plainObject(value) || exactKeys(value, ["challenge_id", "options"]) === false || !UUID.test(value.challenge_id) || !plainObject(value.options)) {
+  if (!plainObject(value) || exactKeys(value, ["challenge_id", "options"]) === false || typeof value.challenge_id !== "string" || !UUID.test(value.challenge_id) || !plainObject(value.options)) {
     throw new WebAuthnClientError("invalid_options", "WebAuthn options are invalid");
   }
   validateRequestOptions(value.options);
-  return Object.freeze({ challenge_id: value.challenge_id, options: value.options as PublicKeyCredentialRequestOptionsJSON });
+  return Object.freeze({ challenge_id: value.challenge_id, options: value.options as unknown as PublicKeyCredentialRequestOptionsJSON });
 }
 
 function validateRequestOptions(value: Record<string, unknown>): void {
   if (Object.keys(value).some((key) => !OPTION_KEYS.has(key))) throw new WebAuthnClientError("invalid_options", "WebAuthn options are invalid");
   if (!base64url(value.challenge, 16, 128)) throw new WebAuthnClientError("invalid_options", "WebAuthn options are invalid");
-  if (value.timeout !== undefined && (!Number.isSafeInteger(value.timeout) || value.timeout < 1 || value.timeout > MAX_OPTIONS_TIMEOUT_MS)) throw new WebAuthnClientError("invalid_options", "WebAuthn options are invalid");
+  if (value.timeout !== undefined && (typeof value.timeout !== "number" || !Number.isSafeInteger(value.timeout) || value.timeout < 1 || value.timeout > MAX_OPTIONS_TIMEOUT_MS)) throw new WebAuthnClientError("invalid_options", "WebAuthn options are invalid");
   if (value.rpId !== undefined && (!string(value.rpId) || value.rpId.length < 1 || value.rpId.length > 253 || hasControlCharacters(value.rpId) || /[ /\\?#]/.test(value.rpId))) throw new WebAuthnClientError("invalid_options", "WebAuthn options are invalid");
   if (value.userVerification !== undefined && !["required", "preferred", "discouraged"].includes(value.userVerification as string)) throw new WebAuthnClientError("invalid_options", "WebAuthn options are invalid");
   if (value.allowCredentials !== undefined) {
@@ -231,11 +231,11 @@ function validateAssertion(value: unknown): AuthenticationResponseJSON {
   if (value.authenticatorAttachment !== undefined && !["platform", "cross-platform"].includes(value.authenticatorAttachment as string)) throw new WebAuthnClientError("invalid_assertion", "WebAuthn assertion is invalid");
   if (Object.keys(value.response).some((key) => !ASSERTION_RESPONSE_KEYS.has(key)) || !base64url(value.response.authenticatorData, 1, 16_384) || !base64url(value.response.clientDataJSON, 1, 16_384) || !base64url(value.response.signature, 1, 16_384)) throw new WebAuthnClientError("invalid_assertion", "WebAuthn assertion is invalid");
   if (value.response.userHandle !== undefined && value.response.userHandle !== null && !base64url(value.response.userHandle, 1, 1024)) throw new WebAuthnClientError("invalid_assertion", "WebAuthn assertion is invalid");
-  return value as AuthenticationResponseJSON;
+  return value as unknown as AuthenticationResponseJSON;
 }
 
 function validateAuthorizationResponse(value: unknown): AuthorizationResult {
-  if (!plainObject(value) || !exactKeys(value, ["authorization_id"]) || !UUID.test(value.authorization_id)) throw new WebAuthnClientError("invalid_authorization", "Authorization response is invalid");
+  if (!plainObject(value) || !exactKeys(value, ["authorization_id"]) || typeof value.authorization_id !== "string" || !UUID.test(value.authorization_id)) throw new WebAuthnClientError("invalid_authorization", "Authorization response is invalid");
   return Object.freeze({ authorization_id: value.authorization_id });
 }
 

@@ -36,14 +36,14 @@ function withPublicSecurityHeaders(response: Response, url: URL): Response {
   const headers = new Headers(response.headers);
   headers.set("Content-Security-Policy", CONTENT_SECURITY_POLICY);
   headers.set("Cross-Origin-Resource-Policy", "same-origin");
-  headers.set("Permissions-Policy", "camera=(), geolocation=(), microphone=()");
+  headers.set("Permissions-Policy", "camera=(), geolocation=(), microphone=(), publickey-credentials-create=(self), publickey-credentials-get=(self)");
   headers.set("Referrer-Policy", "strict-origin-when-cross-origin");
   headers.set("X-Content-Type-Options", "nosniff");
   headers.set("X-DNS-Prefetch-Control", "off");
   headers.set("X-Frame-Options", "DENY");
   headers.set("X-Permitted-Cross-Domain-Policies", "none");
   headers.set("X-Robots-Tag", "noindex, nofollow, noarchive");
-  if (url.pathname === "/api/console") {
+  if (url.pathname === "/api/console" || url.pathname.startsWith("/api/auth/")) {
     headers.set("Cache-Control", "no-store, max-age=0");
     headers.set("Pragma", "no-cache");
     headers.set("Vary", "Cookie, oai-authenticated-user-id, oai-authenticated-user-email");

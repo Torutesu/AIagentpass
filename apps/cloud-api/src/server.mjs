@@ -6,11 +6,16 @@ import { canonicalJson, intersectScopes } from "../../../packages/capability/src
 import { RateLimiterCapacityError, createRateLimiter } from "./rate-limit.mjs";
 
 const MAX_BODY_BYTES = 1024 * 1024;
+const HUMAN_AUTH_MAX_BODY_BYTES = 64 * 1024;
+const HUMAN_AUTH_SESSION_PATH = "/api/auth/session";
+const HUMAN_AUTH_OPTIONS_PATH = "/api/auth/webauthn/options";
+const HUMAN_AUTH_VERIFY_PATH = "/api/auth/webauthn/verify";
 const UUID = "([0-9a-fA-F-]{36})";
 
-export function createCloudApi({ store, tokenRecords = [], bundleSigner, now = () => Date.now(), monotonicNow, replayCache = createReplayCache(), rateLimiter, admissionRateLimiter, verifyRecentWebAuthn, recentAuthService } = {}) {
+export function createCloudApi({ store, tokenRecords = [], bundleSigner, now = () => Date.now(), monotonicNow, replayCache = createReplayCache(), rateLimiter, admissionRateLimiter, verifyRecentWebAuthn, recentAuthService, humanAuthApi } = {}) {
   if (!store) throw new TypeError("store is required");
   if (verifyRecentWebAuthn !== undefined && recentAuthService !== undefined) throw new TypeError("configure verifyRecentWebAuthn or recentAuthService, not both");
+  if (humanAuthApi !== undefined && (!humanAuthApi || typeof humanAuthApi.handle !== "function")) throw new TypeError("humanAuthApi must expose handle()");
   const recentAuthVerifier = recentAuthService === undefined ? verifyRecentWebAuthn : recentAuthService?.authorize?.bind(recentAuthService);
   if (recentAuthService !== undefined && typeof recentAuthVerifier !== "function") throw new TypeError("recentAuthService must expose authorize()");
   const limiter = rateLimiter ?? createRateLimiter({ now, ...(monotonicNow ? { monotonicNow } : {}) });
@@ -22,6 +27,7 @@ export function createCloudApi({ store, tokenRecords = [], bundleSigner, now = (
     const requestId = crypto.randomUUID();
     try {
       const url = new URL(request.url, "http://agentpass.invalid");
+      if (humanAuthApi && isExactHumanAuthPath(url)) return await handleHumanAuth(request, response, url, requestId);
       const route = routes.find((candidate) => candidate.method === request.method && candidate.pattern.test(url.pathname));
       if (!route) return send(response, 404, { error: { code: "not_found", message: "Resource not found" }, request_id: requestId });
       const match = route.pattern.exec(url.pathname);
@@ -71,6 +77,28 @@ export function createCloudApi({ store, tokenRecords = [], bundleSigner, now = (
   server.maxHeadersCount = 64;
   server.on("connection", (socket) => socket.setTimeout(15_000));
   return server;
+
+  async function handleHumanAuth(request, response, url, requestId) {
+    const principalId = transportPrincipalId(request);
+    const tenantId = "human-auth";
+    const admitted = acquireRateLimit(admission, { tenantId, principalType: "human", principalId });
+    if (!admitted.allowed) throw apiError("rate_limited", 429, "Pre-authentication rate limit exceeded", rateLimitHeaders(admitted, true));
+    const rateLimit = acquireRateLimit(limiter, { tenantId, principalType: "human", principalId });
+    if (!rateLimit.allowed) throw apiError("rate_limited", 429, "Rate limit exceeded", rateLimitHeaders(rateLimit, true));
+
+    const bodyBytes = await readBody(request, HUMAN_AUTH_MAX_BODY_BYTES);
+    let result;
+    try {
+      // Preserve the original Node header values. The human-auth boundary
+      // authenticates the session from cookie, Origin, and CSRF headers.
+      result = await humanAuthApi.handle({ method: request.method, url: url.pathname, headers: request.headers, body: bodyBytes });
+    } catch {
+      return send(response, 503, { error: { code: "human_auth_unavailable", message: "Human authentication is temporarily unavailable" }, request_id: requestId }, rateLimitHeaders(rateLimit));
+    }
+    const normalized = normalizeHumanAuthResult(result);
+    if (!normalized) return send(response, 503, { error: { code: "human_auth_unavailable", message: "Human authentication is temporarily unavailable" }, request_id: requestId }, rateLimitHeaders(rateLimit));
+    sendRawJson(response, normalized.status, normalized.encoded, mergeResponseHeaders(normalized.headers, rateLimitHeaders(rateLimit)));
+  }
 
   function buildRoutes() {
     const route = (method, pattern, role, handle, device = false, enrollment = false, recentAuthOperation = undefined) => ({ method, pattern, role, handle, device, enrollment, recentAuthOperation });
@@ -223,6 +251,62 @@ export function createCloudApi({ store, tokenRecords = [], bundleSigner, now = (
   }
 }
 
+function isExactHumanAuthPath(url) {
+  return !url.search && !url.hash && (url.pathname === HUMAN_AUTH_SESSION_PATH || url.pathname === HUMAN_AUTH_OPTIONS_PATH || url.pathname === HUMAN_AUTH_VERIFY_PATH);
+}
+
+function transportPrincipalId(request) {
+  return crypto.createHash("sha256").update(String(request.socket?.remoteAddress ?? "unknown")).digest("hex");
+}
+
+function acquireRateLimit(limiter, input) {
+  try {
+    const decision = limiter.acquire(input);
+    if (!decision || typeof decision !== "object" || typeof decision.allowed !== "boolean" || !Number.isSafeInteger(decision.limit) || decision.limit < 1 || !Number.isSafeInteger(decision.remaining) || decision.remaining < 0 || decision.remaining > decision.limit || !Number.isSafeInteger(decision.retryAfterSeconds) || decision.retryAfterSeconds < 0 || !Number.isSafeInteger(decision.resetAt) || decision.resetAt < 0) throw new Error("invalid rate limiter decision");
+    return decision;
+  } catch (error) {
+    if (error?.code === "RATE_LIMITER_CAPACITY_EXHAUSTED") throw error;
+    throw apiError("rate_limiter_unavailable", 503, "Rate limiter is temporarily unavailable", { "Retry-After": "1" });
+  }
+}
+
+function normalizeHumanAuthResult(result) {
+  try {
+    if (!result || typeof result !== "object" || Array.isArray(result) || !Number.isSafeInteger(result.status) || result.status < 200 || result.status > 599) return undefined;
+    if (!result.body || typeof result.body !== "object" || Array.isArray(result.body)) return undefined;
+    const encoded = Buffer.from(canonicalJson(result.body), "utf8");
+    if (encoded.length > HUMAN_AUTH_MAX_BODY_BYTES) return undefined;
+    if (!result.headers || typeof result.headers !== "object" || Array.isArray(result.headers)) return undefined;
+    const headerPrototype = Object.getPrototypeOf(result.headers);
+    if (headerPrototype !== Object.prototype && headerPrototype !== null) return undefined;
+    const headers = {};
+    for (const [name, value] of Object.entries(result.headers)) {
+      if (!/^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/.test(name) || typeof value !== "string" || value.length > 8192 || /[\u0000-\u001f\u007f]/.test(value)) return undefined;
+      const normalizedName = name.toLowerCase();
+      if (headers[normalizedName] !== undefined || new Set(["connection", "content-length", "keep-alive", "transfer-encoding", "upgrade"]).has(normalizedName)) return undefined;
+      headers[normalizedName] = value;
+    }
+    if (headers["content-type"] !== undefined && !/^application\/json(?:\s*;|$)/i.test(headers["content-type"])) return undefined;
+    headers["content-type"] ??= "application/json; charset=utf-8";
+    headers["cache-control"] = "no-store";
+    headers["content-length"] = String(encoded.length);
+    return { status: result.status, encoded, headers };
+  } catch {
+    return undefined;
+  }
+}
+
+function mergeResponseHeaders(...sets) {
+  const merged = {};
+  for (const set of sets) for (const [name, value] of Object.entries(set)) merged[name.toLowerCase()] = value;
+  return merged;
+}
+
+function sendRawJson(response, status, encoded, headers = {}) {
+  response.writeHead(status, headers);
+  response.end(encoded);
+}
+
 function bearerToken(value) {
   if (typeof value !== "string" || !/^Bearer [^\s]{16,512}$/.test(value)) throw apiError("invalid_api_token", 401, "API token is invalid");
   return value.slice(7);
@@ -278,12 +362,12 @@ function validateEnrollmentProof(requestPath, body, algorithm, pem, credential, 
   if (!valid) throw apiError("invalid_enrollment_proof", 401, "Device enrollment proof is invalid");
 }
 
-async function readBody(request) {
+async function readBody(request, maxBytes = MAX_BODY_BYTES) {
   const chunks = [];
   let bytes = 0;
   for await (const chunk of request) {
     bytes += chunk.length;
-    if (bytes > MAX_BODY_BYTES) throw apiError("request_too_large", 413, "Request body is too large");
+    if (bytes > maxBytes) throw apiError("request_too_large", 413, "Request body is too large");
     chunks.push(chunk);
   }
   return Buffer.concat(chunks);

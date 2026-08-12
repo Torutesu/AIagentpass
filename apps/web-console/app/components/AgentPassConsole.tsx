@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
+import { authenticateRecentAuth, WebAuthnClientError } from "../webauthn-client";
 
 export type ConsoleView =
   | "overview"
@@ -153,6 +154,82 @@ type AgentPassConsoleProps = {
 
 type ToastTone = "success" | "error";
 
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const BASE64URL_CSRF = /^[A-Za-z0-9_-]{43}$/;
+const RECENT_AUTH_OPERATION = "device.enrollment.issue";
+
+class EnrollmentFlowError extends Error {
+  readonly code: "session" | "enrollment" | "unsupported";
+
+  constructor(code: "session" | "enrollment" | "unsupported", message: string) {
+    super(message);
+    this.name = "EnrollmentFlowError";
+    this.code = code;
+  }
+}
+
+function isPlainRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value) && Object.getPrototypeOf(value) === Object.prototype;
+}
+
+function hasExactKeys(value: Record<string, unknown>, expected: string[]): boolean {
+  const actual = Object.keys(value).sort();
+  const sortedExpected = [...expected].sort();
+  return actual.length === sortedExpected.length && actual.every((key, index) => key === sortedExpected[index]);
+}
+
+function parseSessionBootstrap(value: unknown): { organizationId: string; csrfToken: string } {
+  if (!isPlainRecord(value) || !hasExactKeys(value, ["session", "csrf_token"])) throw new EnrollmentFlowError("session", "セッションを確認できませんでした。ページを再読み込みして、もう一度お試しください。");
+  const session = value.session;
+  const csrfToken = value.csrf_token;
+  if (!isPlainRecord(session) || typeof session.organization_id !== "string" || !UUID.test(session.organization_id) || typeof csrfToken !== "string" || !BASE64URL_CSRF.test(csrfToken)) {
+    throw new EnrollmentFlowError("session", "セッションを確認できませんでした。ページを再読み込みして、もう一度お試しください。");
+  }
+  return { organizationId: session.organization_id, csrfToken };
+}
+
+async function startEnrollmentSession(): Promise<{ organizationId: string; csrfToken: string }> {
+  let response: Response;
+  try {
+    response = await fetch("/api/auth/session", {
+      method: "POST",
+      headers: { accept: "application/json", "content-type": "application/json" },
+      body: "{}",
+      cache: "no-store",
+      credentials: "same-origin",
+      redirect: "error",
+    });
+  } catch {
+    throw new EnrollmentFlowError("session", "セッションを確認できませんでした。ページを再読み込みして、もう一度お試しください。");
+  }
+  if (!response.ok || !/^application\/json(?:\s*;|\s*$)/i.test(response.headers.get("content-type") ?? "")) {
+    throw new EnrollmentFlowError("session", "セッションを確認できませんでした。ページを再読み込みして、もう一度お試しください。");
+  }
+  let payload: unknown;
+  try {
+    payload = await response.json();
+  } catch {
+    throw new EnrollmentFlowError("session", "セッションを確認できませんでした。ページを再読み込みして、もう一度お試しください。");
+  }
+  return parseSessionBootstrap(payload);
+}
+
+function supportsWebAuthn(): boolean {
+  return typeof window !== "undefined" && typeof window.PublicKeyCredential !== "undefined" && typeof navigator.credentials?.get === "function";
+}
+
+function enrollmentErrorMessage(error: unknown): string {
+  if (error instanceof EnrollmentFlowError) return error.message;
+  if (error instanceof WebAuthnClientError) {
+    if (error.code === "webauthn_unavailable" || error.code === "fetch_unavailable") return "このブラウザはTouch ID/パスキーに対応していません。対応ブラウザでお試しください。";
+    if (error.code === "http_failed" && (error.status === 401 || error.status === 403)) return "セッションの有効期限が切れました。ページを再読み込みして、もう一度お試しください。";
+    if (error.code === "aborted" || error.code === "webauthn_failed") return "Touch ID/パスキー確認を完了できませんでした。キャンセルした場合は、もう一度お試しください。";
+    return "認証を確認できませんでした。ページを再読み込みして、もう一度お試しください。";
+  }
+  if (error instanceof DOMException && (error.name === "NotAllowedError" || error.name === "AbortError")) return "Touch ID/パスキー確認を完了できませんでした。キャンセルした場合は、もう一度お試しください。";
+  return "登録情報を発行できませんでした。接続と権限を確認して、もう一度お試しください。";
+}
+
 const navItems: Array<{ id: ConsoleView; label: string; icon: string; badge?: string }> = [
   { id: "overview", label: "概要", icon: "⌂" },
   { id: "setup", label: "セットアップ", icon: "＋" },
@@ -279,10 +356,10 @@ function SurfaceHeader({ eyebrow, title, copy }: { eyebrow: string; title: strin
 
 function SetupSurface({ data, goTo, operate, online }: { data: AgentPassInitialData; goTo: (view: ConsoleView) => void; operate: (operation: string, body: Record<string, unknown>, success: string) => Promise<void>; online: boolean }) {
   const [deviceLabel, setDeviceLabel] = useState("");
-  const [recentAuth, setRecentAuth] = useState("");
   const [enrollment, setEnrollment] = useState<Record<string, string> | null>(null);
   const [enrollmentPending, setEnrollmentPending] = useState(false);
   const [enrollmentError, setEnrollmentError] = useState("");
+  const enrollmentInFlight = useRef(false);
   const [agent, setAgent] = useState({ name: "", kind: "claude-code", public_key: "", device_id: data.devices[0]?.deviceId ?? "" });
   const [capabilityPending, setCapabilityPending] = useState(false);
   const defaultScope = data.policies.find((policy) => policy.scope)?.scope ?? { operations: ["git.commit.sign"], repositories: ["/"], branches: { allow: ["*"], deny: [] }, remotes: { allow: ["*"], deny: [] } };
@@ -294,23 +371,34 @@ function SetupSurface({ data, goTo, operate, online }: { data: AgentPassInitialD
     try { await operate("issue-capability", { agent_id: selectedAgent.agentId, device_id: selectedDevice.deviceId, scope: defaultScope, ttl_ms: 15 * 60 * 1000 }, "短期Capabilityを発行しました"); } finally { setCapabilityPending(false); }
   };
   const issueEnrollment = async () => {
+    if (enrollmentInFlight.current) return;
+    enrollmentInFlight.current = true;
     setEnrollmentPending(true);
     setEnrollment(null);
     setEnrollmentError("");
     try {
+      const { organizationId, csrfToken } = await startEnrollmentSession();
+      if (!supportsWebAuthn()) throw new EnrollmentFlowError("unsupported", "このブラウザはTouch ID/パスキーに対応していません。対応ブラウザでお試しください。");
+      const { authorization_id } = await authenticateRecentAuth({
+        operation: RECENT_AUTH_OPERATION,
+        organizationId,
+        csrfToken,
+      });
       const response = await fetch("/api/console?operation=issue-device-enrollment", {
         method: "POST",
         cache: "no-store",
-        headers: { "content-type": "application/json", "idempotency-key": crypto.randomUUID(), "agentpass-recent-auth": recentAuth },
+        credentials: "same-origin",
+        headers: { "content-type": "application/json", "idempotency-key": crypto.randomUUID(), "agentpass-recent-auth": authorization_id },
         body: JSON.stringify({ label: deviceLabel.trim(), platform: "macos", ttl_ms: 10 * 60 * 1000 }),
       });
-      const payload = await response.json() as { enrollment?: Record<string, string>; error?: { message?: string } };
-      if (!response.ok || !payload.enrollment) throw new Error(payload.error?.message ?? "登録コードを発行できませんでした");
-      setEnrollment(payload.enrollment);
-      setRecentAuth("");
+      let payload: unknown;
+      try { payload = await response.json(); } catch { throw new EnrollmentFlowError("enrollment", "登録情報を発行できませんでした。接続と権限を確認して、もう一度お試しください。"); }
+      if (!response.ok || !isPlainRecord(payload) || !isPlainRecord(payload.enrollment)) throw new EnrollmentFlowError("enrollment", "登録情報を発行できませんでした。接続と権限を確認して、もう一度お試しください。");
+      setEnrollment(payload.enrollment as Record<string, string>);
     } catch (error) {
-      setEnrollmentError(error instanceof Error ? error.message : "登録コードを発行できませんでした");
+      setEnrollmentError(enrollmentErrorMessage(error));
     } finally {
+      enrollmentInFlight.current = false;
       setEnrollmentPending(false);
     }
   };
@@ -347,9 +435,8 @@ function SetupSurface({ data, goTo, operate, online }: { data: AgentPassInitialD
         <article className="surface-card">
           <span className="section-kicker">ENROLL A MAC</span><h2 className="surface-card-title">Macを安全に追加</h2>
           <p className="surface-card-copy">10分だけ有効なワンタイム登録情報を発行します。秘密鍵はMacのSecure Enclave内で生成され、外へ出ません。</p>
-          <div className="form-grid"><label>端末名<input required maxLength={128} autoComplete="off" value={deviceLabel} onChange={(event) => setDeviceLabel(event.target.value)} /></label><label>直近のWebAuthn証明<input required type="password" autoComplete="off" value={recentAuth} onChange={(event) => setRecentAuth(event.target.value)} /></label></div>
-          <p className="section-note">本番のWebAuthnダイアログ接続までは、認証基盤が発行した直近認証証明を使用します。この値はブラウザ保存しません。</p>
-          <button className="secondary-button" type="button" disabled={!online || enrollmentPending || !deviceLabel.trim() || recentAuth.length < 32} onClick={issueEnrollment}>{enrollmentPending ? "発行中…" : "ワンタイム登録情報を発行"}</button>
+          <div className="form-grid"><label>端末名<input required maxLength={128} autoComplete="off" value={deviceLabel} onChange={(event) => setDeviceLabel(event.target.value)} /></label></div>
+          <button className="secondary-button" type="button" disabled={!online || enrollmentPending || !deviceLabel.trim()} onClick={issueEnrollment}>{enrollmentPending ? "認証・発行中…" : "Touch ID/パスキー確認"}</button>
           {enrollmentError ? <p className="form-error" role="alert">{enrollmentError}</p> : null}
           {enrollment ? <div className="enrollment-result" aria-live="polite"><p className="row-title">一度だけ表示しています</p><p className="surface-card-copy">下のJSONをMacへ安全に渡し、標準入力からセットアップしてください。5分後または再読込で消え、コピー内容も60秒後に消去を試みます。</p><pre className="secret-output">{enrollmentJson}</pre><div className="stop-action-row"><button className="primary-button" type="button" onClick={() => void copyEnrollment()}>JSONをコピー</button><button className="text-button" type="button" onClick={() => setEnrollment(null)}>表示を消す</button></div><code className="command-hint">agentpass setup continue --execute --enrollment-url &lt;Cloud API URL&gt; --enrollment-stdin</code></div> : null}
         </article>

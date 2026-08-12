@@ -12,9 +12,9 @@ The command prints the owner API token once. Store it as a server secret for the
 
 The production foundation lives in `src/postgres/` and uses the ordered SQL in `contracts/postgres/`. The migration runner verifies immutable SHA-256 checksums, refuses gaps/newer history/dirty attempts, takes a PostgreSQL advisory lock, and applies migrations transactionally. Run it with a TLS-configured `pg` client; the reference file store remains for self-hosted evaluation and tests.
 
-Human authentication modules provide opaque hash-only sessions, exact-origin and session-bound CSRF enforcement, one-time WebAuthn challenges, a maintained `@simplewebauthn/server` verifier adapter, and operation-bound recent authorization. A recent authorization is consumed atomically for one member, organization, and operation; it is not a reusable bearer token.
+Human authentication modules provide opaque hash-only sessions, exact-origin and session-bound CSRF enforcement, PostgreSQL-backed one-time WebAuthn challenges, a maintained `@simplewebauthn/server` verifier adapter, and operation-bound recent authorization. A recent authorization is consumed atomically for one member, organization, and operation; it is not a reusable bearer token. Migration `0003_webauthn_challenge_bindings.sql` persists the exact RP/origin/UV/state binding and excludes expired rows from the live-operation index.
 
-These modules are production foundations, not a claim that the compatibility runtime is already PostgreSQL-backed. The remaining integration gate is to construct them from the production runtime, expose the Human API ceremony routes, connect the Console browser ceremony, and run the full suite against real ephemeral PostgreSQL with concurrent API instances.
+When all Human Auth variables below are present, the Cloud runtime constructs the PostgreSQL session/challenge repositories, session bootstrap, WebAuthn options/verify routes, maintained verifier, and recent-auth middleware. The Console BFF and enrollment UI use those routes without exposing the Cloud service credential to the browser. WebAuthn credential registration, per-SIWC-user membership mapping, automated real-PostgreSQL multi-instance E2E, and full PostgreSQL control-plane storage remain production gates.
 
 Start the API behind a TLS reverse proxy:
 
@@ -24,8 +24,14 @@ export AGENTPASS_CLOUD_TOKEN_RECORDS_PATH=/absolute/protected/agentpass-cloud/to
 export AGENTPASS_CLOUD_BUNDLE_PRIVATE_KEY_PATH=/absolute/protected/agentpass-cloud/bundle-private.pem
 export AGENTPASS_CLOUD_HOST=127.0.0.1
 export AGENTPASS_CLOUD_PORT=8080
+# Enable the production Human Auth path as one all-or-nothing group:
+export AGENTPASS_DATABASE_URL='postgresql://agentpass:...@db.example/agentpass?sslmode=verify-full'
+export AGENTPASS_CONSOLE_ORIGIN='https://console.example.com'
+export AGENTPASS_WEBAUTHN_RP_ID='example.com'
 npm start
 ```
+
+`AGENTPASS_CONSOLE_ORIGIN` must be an exact HTTPS origin. The RP ID must equal its hostname or be a registrable parent suffix. Omitting all three Human Auth variables keeps the self-hosted compatibility runtime; partially configuring them fails startup.
 
 The process binds loopback by default. Terminate with SIGINT/SIGTERM for graceful shutdown. Device replay evidence and both admission/principal rate-limit buckets survive restart. The file store takes an exclusive process lock and refuses a second writer. For multi-instance production, replace the reference file store, replay cache, and limiters with transactional shared storage; never share the JSON data directory between processes.
 

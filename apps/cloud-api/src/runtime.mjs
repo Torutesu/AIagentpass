@@ -6,10 +6,12 @@ import { createCloudApi } from "./server.mjs";
 import { createCloudStore } from "./store.mjs";
 import { createPersistentReplayCache } from "./auth.mjs";
 import { createRateLimiter } from "./rate-limit.mjs";
+import { createPostgresRuntime } from "./postgres/runtime.mjs";
+import { createHumanAuthRuntime } from "./human-auth/runtime.mjs";
 
 const IDENTIFIER = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 
-export async function createCloudRuntime({ env = process.env, logger = console } = {}) {
+export async function createCloudRuntime({ env = process.env, logger = console, postgresFactory = createPostgresRuntime, humanAuthFactory = createHumanAuthRuntime } = {}) {
   const config = loadRuntimeConfig(env);
   const tokenRecords = readProtectedJson(config.tokenRecordsPath, "token records", 1024 * 1024);
   if (!Array.isArray(tokenRecords) || tokenRecords.length < 1 || tokenRecords.length > 256) throw new Error("Cloud token records are invalid");
@@ -18,22 +20,31 @@ export async function createCloudRuntime({ env = process.env, logger = console }
   try { privateKey = crypto.createPrivateKey(privateKeyPEM); } catch { throw new Error("Cloud bundle private key is invalid"); }
   if (privateKey.asymmetricKeyType !== "ed25519") throw new Error("Cloud bundle private key must be Ed25519");
   const store = await createCloudStore({ dataDir: config.dataDir });
+  let postgresRuntime;
+  let humanAuthRuntime;
   let server;
   try {
+    if (config.humanAuth) {
+      postgresRuntime = await postgresFactory({ env, applicationVersion: "0.18.0" });
+      humanAuthRuntime = humanAuthFactory({ postgresRuntime, tokenRecords, origin: config.humanAuth.origin, rpId: config.humanAuth.rpId });
+    }
     server = createCloudApi({
       store,
       tokenRecords,
       replayCache: createPersistentReplayCache(path.join(config.dataDir, "device-replay-cache.json")),
       rateLimiter: createRateLimiter({ persistencePath: path.join(config.dataDir, "principal-rate-limits.json") }),
       admissionRateLimiter: createRateLimiter({ persistencePath: path.join(config.dataDir, "admission-rate-limits.json"), human: { capacity: 30, refillPerSecond: 1 }, device: { capacity: 60, refillPerSecond: 2 } }),
-      bundleSigner: { privateKey, issuer: config.issuer, keyId: config.keyId, ttlMs: config.ttlMs, offlineTtlMs: config.offlineTtlMs }
+      bundleSigner: { privateKey, issuer: config.issuer, keyId: config.keyId, ttlMs: config.ttlMs, offlineTtlMs: config.offlineTtlMs },
+      ...(humanAuthRuntime ? { humanAuthApi: humanAuthRuntime.api, recentAuthService: humanAuthRuntime.recentAuthService } : {})
     });
-  } catch (error) { await store.close(); throw error; }
+  } catch (error) { await postgresRuntime?.close?.().catch(() => {}); await store.close(); throw error; }
   let closed = false;
   return Object.freeze({
     config,
     server,
     store,
+    postgresRuntime,
+    humanAuthRuntime,
     async listen() {
       if (server.listening) return server.address();
       await new Promise((resolve, reject) => { server.once("error", reject); server.listen(config.port, config.host, () => { server.off("error", reject); resolve(); }); });
@@ -44,6 +55,7 @@ export async function createCloudRuntime({ env = process.env, logger = console }
       if (closed) return;
       closed = true;
       if (server.listening) await new Promise((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+      await postgresRuntime?.close?.();
       await store.close();
     }
   });
@@ -61,7 +73,21 @@ export function loadRuntimeConfig(env = {}) {
   const port = integer(env.AGENTPASS_CLOUD_PORT ?? "8080", 0, 65_535, "Cloud port");
   const ttlMs = integer(env.AGENTPASS_CLOUD_BUNDLE_TTL_MS ?? "3600000", 1_000, 7 * 24 * 60 * 60 * 1000, "Bundle TTL");
   const offlineTtlMs = integer(env.AGENTPASS_CLOUD_OFFLINE_TTL_MS ?? "3600000", 0, 7 * 24 * 60 * 60 * 1000, "Offline TTL");
-  return Object.freeze({ dataDir, tokenRecordsPath, bundlePrivateKeyPath, issuer, keyId, host, port, ttlMs, offlineTtlMs });
+  const humanAuth = humanAuthConfig(env);
+  return Object.freeze({ dataDir, tokenRecordsPath, bundlePrivateKeyPath, issuer, keyId, host, port, ttlMs, offlineTtlMs, humanAuth });
+}
+
+function humanAuthConfig(env) {
+  const database = env.AGENTPASS_DATABASE_URL;
+  const origin = env.AGENTPASS_CONSOLE_ORIGIN;
+  const rpId = env.AGENTPASS_WEBAUTHN_RP_ID;
+  if (database === undefined && origin === undefined && rpId === undefined) return null;
+  if (typeof database !== "string" || database.length < 1 || typeof origin !== "string" || typeof rpId !== "string") throw new Error("Human auth configuration is incomplete");
+  let parsed;
+  try { parsed = new URL(origin); } catch { throw new Error("AGENTPASS_CONSOLE_ORIGIN is invalid"); }
+  if (parsed.protocol !== "https:" || parsed.origin !== origin || parsed.pathname !== "/" || parsed.username || parsed.password || parsed.search || parsed.hash) throw new Error("AGENTPASS_CONSOLE_ORIGIN is invalid");
+  if (!/^[A-Za-z0-9](?:[A-Za-z0-9.-]*[A-Za-z0-9])?$/.test(rpId) || (parsed.hostname !== rpId && !parsed.hostname.endsWith(`.${rpId}`))) throw new Error("AGENTPASS_WEBAUTHN_RP_ID is invalid");
+  return Object.freeze({ origin, rpId });
 }
 
 function readProtectedJson(file, label, maxBytes) {

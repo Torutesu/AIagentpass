@@ -3,7 +3,7 @@ const HEX_32 = /^[0-9a-f]{64}$/;
 
 export function createPostgresHumanRepository({ client } = {}) {
   if (!client || typeof client.query !== "function") throw new TypeError("database client is invalid");
-  return Object.freeze({ createSession, findSessionByTokenHash, updateSessionActivity, revokeSession, listSessions, bindRecentAuth, consumeRecentAuth, findCredentialForSession, updateCredentialCounter });
+  return Object.freeze({ createSession, findSessionByTokenHash, updateSessionActivity, revokeSession, listSessions, bindRecentAuth, consumeRecentAuth, listCredentialsForSession, findCredentialForSession, updateCredentialCounter });
 
   async function createSession(record) {
     validateSession(record);
@@ -41,6 +41,11 @@ export function createPostgresHumanRepository({ client } = {}) {
     return result.rowCount === 1 ? result.rows[0] : null;
   }
 
+  async function listCredentialsForSession(input) {
+    const result = await client.query(`SELECT c.id,c.transports FROM webauthn_credentials c JOIN human_sessions s ON s.member_id=c.member_id JOIN memberships m ON m.organization_id=s.organization_id AND m.member_id=s.member_id WHERE s.id=$1 AND s.organization_id=$2 AND s.revoked_at IS NULL AND s.expires_at>clock_timestamp() AND c.revoked_at IS NULL AND m.status='active' ORDER BY c.created_at ASC,c.id ASC LIMIT 64`, [uuid(input.session_id), uuid(input.organization_id)]);
+    return (result.rows ?? []).map((row) => ({ id: credentialId(row.id), type: "public-key", transports: credentialTransports(row.transports) }));
+  }
+
   async function findCredentialForSession(input) {
     const result = await client.query(`SELECT c.id,c.public_key,c.sign_count,c.transports,c.revoked_at FROM webauthn_credentials c JOIN human_sessions s ON s.member_id=c.member_id JOIN memberships m ON m.organization_id=s.organization_id AND m.member_id=s.member_id WHERE s.id=$1 AND s.organization_id=$2 AND c.id=$3 AND s.revoked_at IS NULL AND c.revoked_at IS NULL AND m.status='active' LIMIT 1`, [uuid(input.session_id), uuid(input.organization_id), base64Bytes(input.credential_id, 16, 1024)]);
     const row = result.rows?.[0];
@@ -59,4 +64,6 @@ function uuid(value) { if (typeof value !== "string" || !UUID.test(value)) throw
 function bounded(value, max) { if (typeof value !== "string" || value.length < 1 || value.length > max || /[\u0000-\u001f\u007f]/.test(value)) throw new TypeError("bounded text is invalid"); return value; }
 function bytes32(value) { if (typeof value !== "string" || !HEX_32.test(value)) throw new TypeError("digest is invalid"); return Buffer.from(value, "hex"); }
 function base64Bytes(value, min, max) { if (typeof value !== "string" || !/^[A-Za-z0-9_-]+$/.test(value)) throw new TypeError("credential id is invalid"); const bytes=Buffer.from(value,"base64url"); if(bytes.length<min||bytes.length>max||bytes.toString("base64url")!==value) throw new TypeError("credential id is invalid"); return bytes; }
+function credentialId(value) { if (!Buffer.isBuffer(value) || value.length < 16 || value.length > 1024) throw new TypeError("stored credential id is invalid"); return value.toString("base64url"); }
+function credentialTransports(value) { const allowed=new Set(["ble","cable","hybrid","internal","nfc","smart-card","usb"]); if(!Array.isArray(value)||value.length>7||value.some((item)=>typeof item!=="string"||!allowed.has(item))||new Set(value).size!==value.length) throw new TypeError("stored credential transports are invalid"); return [...value]; }
 function counter(value) { if (!Number.isSafeInteger(value)||value<0) throw new TypeError("counter is invalid"); return value; }
