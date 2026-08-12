@@ -20,8 +20,8 @@ fi
 stat_field() { /usr/bin/stat -f "$1" "$2"; }
 validate_ancestor() {
   local path="$1" uid mode type
-  [[ -e "$path" ]] || return 0
   [[ ! -L "$path" ]] || { echo "Protected ancestry contains a symlink: $path" >&2; exit 1; }
+  [[ -e "$path" ]] || return 0
   type="$(stat_field '%HT' "$path")"
   uid="$(stat_field '%u' "$path")"
   mode="$(stat_field '%Lp' "$path")"
@@ -32,8 +32,10 @@ validate_ancestor() {
 validate_ancestor "$TARGET_VOLUME"
 validate_ancestor "${TARGET_VOLUME%/}/Library"
 validate_ancestor "${TARGET_VOLUME%/}/Library/Application Support"
+[[ ! -L "$STATE_ROOT" ]] || { echo "Protected state root contains a symlink: $STATE_ROOT" >&2; exit 1; }
 [[ -e "$STATE_ROOT" ]] || exit 0
 validate_ancestor "$STATE_ROOT"
+[[ "$(stat_field '%Lp' "$STATE_ROOT")" == "700" ]] || { echo "Protected state root must be mode 0700: $STATE_ROOT" >&2; exit 1; }
 
 ROOT_DEVICE="$(stat_field '%d' "$STATE_ROOT")"
 while IFS= read -r -d '' path; do

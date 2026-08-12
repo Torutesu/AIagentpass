@@ -54,5 +54,7 @@ jobs:
       - run: npm audit --prefix apps/web-console --audit-level=high
       - run: npm run test:native
       - run: npm run test:native-app
+      - run: npm run test:native-installer-preservation
+      - run: npm run test:native-durability-model
       - run: npm run release:validate
       - run: npm run lint

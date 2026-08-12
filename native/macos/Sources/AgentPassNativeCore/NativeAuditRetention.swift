@@ -508,18 +508,40 @@ public final class NativeAuditRetainedArchiveLease: @unchecked Sendable {
         basename: String?,
         parentDescriptor: Int32?
     ) throws -> OpenDirectoryComponent {
-        var descriptorInfo = stat()
-        guard fstat(descriptor, &descriptorInfo) == 0,
-              (descriptorInfo.st_mode & S_IFMT) == S_IFDIR else { throw posixError() }
-        let identity = identity(descriptorInfo)
-        if let basename, let parentDescriptor {
+        guard let basename, let parentDescriptor else {
+            var descriptorInfo = stat()
+            guard fstat(descriptor, &descriptorInfo) == 0,
+                  (descriptorInfo.st_mode & S_IFMT) == S_IFDIR else { throw posixError() }
+            return OpenDirectoryComponent(descriptor: descriptor, basename: nil, identity: identity(descriptorInfo))
+        }
+
+        // A shared ancestor such as /tmp can gain or lose an unrelated child
+        // between fstat and fstatat, changing only its link count. Require one
+        // stable before/path/after observation instead of treating that benign
+        // concurrent churn as path substitution. Device/inode/type/ownership
+        // must agree on every pass, so a replacement can never be stabilized.
+        for _ in 0..<8 {
+            var descriptorBefore = stat()
+            guard fstat(descriptor, &descriptorBefore) == 0,
+                  (descriptorBefore.st_mode & S_IFMT) == S_IFDIR else { throw posixError() }
+            let observedIdentity = identity(descriptorBefore)
             var pathInfo = stat()
-            guard fstatat(parentDescriptor, basename, &pathInfo, AT_SYMLINK_NOFOLLOW) == 0,
-                  matches(pathInfo, identity), pathInfo.st_nlink == descriptorInfo.st_nlink else {
+            guard fstatat(parentDescriptor, basename, &pathInfo, AT_SYMLINK_NOFOLLOW) == 0 else {
                 throw AgentPassNativeError.invalidSignature("Retained audit archive ancestor changed during lease acquisition")
             }
+            var descriptorAfter = stat()
+            guard fstat(descriptor, &descriptorAfter) == 0 else { throw posixError() }
+            if matches(pathInfo, observedIdentity), matches(descriptorAfter, observedIdentity),
+               pathInfo.st_nlink == descriptorBefore.st_nlink,
+               descriptorAfter.st_nlink == descriptorBefore.st_nlink {
+                return OpenDirectoryComponent(
+                    descriptor: descriptor,
+                    basename: basename,
+                    identity: observedIdentity
+                )
+            }
         }
-        return OpenDirectoryComponent(descriptor: descriptor, basename: basename, identity: identity)
+        throw AgentPassNativeError.invalidSignature("Retained audit archive ancestor changed during lease acquisition")
     }
 
     private static func monitorTopology(of descriptor: Int32, queue: Int32) throws {

@@ -750,7 +750,17 @@ default:
     emit(Output(ok: false, version: nil, stdout_base64: nil, public_key: nil, error: "Unknown native client command"), status: 2)
 }
 
-let timeoutSeconds = (command == "session-start" || command == "recovery-anchor-install" || command == "audit-prune-submit" || command == "audit-prune-execute") ? 120 : 30
+// A manual control refresh may legitimately consume the complete 30-second
+// long-poll allowance before verification, durable activation, and ACK. Keep
+// the client deadline strictly outside that server-side bound.
+let extendedTimeoutCommands: Set<String> = [
+    "session-start",
+    "recovery-anchor-install",
+    "audit-prune-submit",
+    "audit-prune-execute",
+    "control-refresh"
+]
+let timeoutSeconds = extendedTimeoutCommands.contains(command) ? 120 : 30
 let timeout: DispatchTime = .now() + .seconds(timeoutSeconds)
 guard semaphore.wait(timeout: timeout) == .success, let result else {
     emit(Output(ok: false, version: nil, stdout_base64: nil, public_key: nil, error: "Native broker request timed out"), status: 1)

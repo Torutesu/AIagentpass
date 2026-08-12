@@ -163,8 +163,10 @@ test("native recovery and prune bridge pins protocol 13 and dedicated management
   const clientSource = fs.readFileSync(path.resolve(import.meta.dirname, "../native/macos/Sources/AgentPassNativeClient/main.swift"), "utf8");
   const serviceSource = fs.readFileSync(path.resolve(import.meta.dirname, "../native/macos/Sources/AgentPassNativeService/main.swift"), "utf8");
   const protocolSource = fs.readFileSync(path.resolve(import.meta.dirname, "../native/macos/Sources/AgentPassNativeCore/XPCProtocol.swift"), "utf8");
-  assert.match(clientSource, /command == "audit-prune-submit"/);
-  assert.match(clientSource, /command == "audit-prune-execute"/);
+  assert.match(clientSource, /"audit-prune-submit"/);
+  assert.match(clientSource, /"audit-prune-execute"/);
+  assert.match(clientSource, /"control-refresh"/);
+  assert.match(clientSource, /extendedTimeoutCommands\.contains\(command\) \? 120 : 30/);
   assert.match(clientSource, /case "audit-recovery-abort-expired":/);
   assert.match(clientSource, /case "audit-recovery-status":/);
   assert.match(clientSource, /Native service protocol 13 is required/);
