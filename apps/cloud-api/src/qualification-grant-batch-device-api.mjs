@@ -368,8 +368,7 @@ function assertManifestBatchBinding(manifest, batch) {
       || manifestStep.run_binding !== batchStep.run_binding
       || manifestStep.grant_id !== batchStep.grant.statement.grant_id
       || manifestStep.statement_hash !== batchStep.grant.statement_hash
-      || manifestStep.grant_hash !== sha256(canonicalJson(batchStep.grant))
-      || canonicalJson(manifestStep.grant) !== canonicalJson(batchStep.grant)) {
+      || manifestStep.grant_hash !== sha256(canonicalJson(batchStep.grant))) {
       throw new Error("qualification Grant batch manifest Grant binding is invalid");
     }
   }

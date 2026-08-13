@@ -121,6 +121,23 @@ test("accepts hosted only with complete PostgreSQL and Human Auth prerequisites"
   }
 });
 
+test("recognizes hosted KMS routing variables and rejects KMS typos or evaluation use", () => {
+  const kms = {
+    AGENTPASS_KMS_PROVIDER: "aws",
+    AGENTPASS_KMS_AGENT_SESSION_KEY_RESOURCE: "arn:aws:kms:us-east-1:123456789012:key/agent-session",
+    AGENTPASS_KMS_QUALIFICATION_MANIFEST_KEY_RESOURCE: "arn:aws:kms:us-east-1:123456789012:key/qualification-manifest"
+  };
+  assert.equal(parseCloudRuntimeProfile(hostedEnv(kms)).isHosted, true);
+  assertProfileError(
+    () => parseCloudRuntimeProfile(hostedEnv({ ...kms, AGENTPASS_KMS_PRIVATE_KEY_PATH: "/tmp/key" })),
+    CLOUD_RUNTIME_PROFILE_ERROR_CODES.UNKNOWN_CONFIGURATION
+  );
+  assertProfileError(
+    () => parseCloudRuntimeProfile(evaluationEnv(kms)),
+    CLOUD_RUNTIME_PROFILE_ERROR_CODES.EVALUATION_AUTH_FORBIDDEN
+  );
+});
+
 test("accepts a rotation key set as the hosted Agent Session key authority", () => {
   const env = hostedEnv({
     AGENTPASS_CLOUD_AGENT_SESSION_KEY_ID: undefined,

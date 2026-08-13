@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import crypto from 'node:crypto';
+import { spawn as nodeSpawn } from 'node:child_process';
 import fs from 'node:fs';
 import { dirname, isAbsolute, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -23,10 +24,16 @@ export const QUALIFICATION_RELAY_SCHEMA_VERSION = 1;
 export const QUALIFICATION_RELAY_REQUEST_KIND = 'agentpass-n3e-qualification-relay-claim-request';
 export const QUALIFICATION_RELAY_BATCH_KIND = 'agentpass-n3e-qualification-grant-batch';
 export const QUALIFICATION_RELAY_REQUEST_PATH = '/private/var/db/agentpass-qualification/relay-request.json';
+export const QUALIFICATION_RELAY_RESPONSE_PATH = '/private/var/db/agentpass-qualification/device-response.json';
+export const QUALIFICATION_RELAY_CONFIG_PATH = '/private/var/db/agentpass-qualification/device-client-config.json';
+export const QUALIFICATION_RELAY_EXECUTABLE_PATH = '/opt/agentpass/p0c/qualification-client/agentpass-qualification-grant-client';
 export const QUALIFICATION_RELAY_INBOX_PATH = '/private/var/db/agentpass-qualification/input.inbox.json';
 export const QUALIFICATION_RELAY_ROOT_DIRECTORY = dirname(QUALIFICATION_RELAY_REQUEST_PATH);
 export const QUALIFICATION_RELAY_MAX_REQUEST_BYTES = 32 * 1024;
 export const QUALIFICATION_RELAY_MAX_RESPONSE_BYTES = 512 * 1024;
+export const QUALIFICATION_RELAY_MAX_CHILD_STDERR_BYTES = 4 * 1024;
+export const QUALIFICATION_RELAY_CHILD_TIMEOUT_MS = 30_000;
+export const QUALIFICATION_RELAY_CHILD_TERMINAL_WAIT_MS = 2_000;
 export const QUALIFICATION_RELAY_MAX_RUN_BINDING_BYTES = 128;
 export const QUALIFICATION_RELAY_MAX_TTL_SECONDS = 3_600;
 
@@ -41,8 +48,20 @@ const TIMESTAMP = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/u;
 const SIGNATURE = /^[A-Za-z0-9_-]{85}[AEIMQUYcgkosw048]$/u;
 const MANIFEST_SIGNATURE = /^[A-Za-z0-9_-]{86}$/u;
 const SAFE_IDENTIFIER = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$/u;
-const RUN_BINDING = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/u;
+const RUN_BINDING = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$/u;
 const STAGING_FILE = /^\.qualification-relay-input\.[0-9]+\.[a-f0-9]{32}\.tmp$/u;
+const EXECUTABLE_MODES = new Set([0o555, 0o755]);
+const MANIFEST_TYPE = 'agentpass.qualification-grant-batch-manifest';
+const MANIFEST_ISSUER = 'agentpass-cloud';
+const MANIFEST_PURPOSE = MANIFEST_TYPE;
+const MANIFEST_DOMAIN = Buffer.from('AgentPass-Qualification-Grant-Batch-v2\0', 'utf8');
+const ED25519_SPKI_PREFIX = Buffer.from('302a300506032b6570032100', 'hex');
+const QUALIFICATION_CONFIG_KEYS = Object.freeze([
+  'agent_session_key_id', 'agent_session_public_key_base64', 'api_origin',
+  'batch_id', 'device_id', 'keychain_access_group', 'kind', 'manifest_key_id',
+  'manifest_public_key_base64', 'organization_id', 'schema_version'
+]);
+const MANIFEST_ENVELOPE_KEYS = Object.freeze(['version', 'type', 'statement', 'statement_hash', 'signature']);
 
 const REQUEST_KEYS = Object.freeze([
   'agent_id',
@@ -147,7 +166,6 @@ const MANIFEST_STEP_KEYS = Object.freeze([
   'scenario',
   'statement_hash'
 ]);
-const SIGNED_MANIFEST_STEP_KEYS = Object.freeze([...MANIFEST_STEP_KEYS, 'grant']);
 const MANIFEST_STATEMENT_KEYS = Object.freeze([
   'agent_id',
   'agent_kind',
@@ -385,9 +403,9 @@ const normalizeVerifiedManifest = (value, batch, request) => {
     manifestSteps = value.steps;
   } else if (isObject(value) && hasOwn(value, 'statement')) {
     exactKeys(value, ['signature', 'statement', 'statement_hash', 'type', 'version'], 'verified qualification batch manifest');
-    if (value.version !== 1 || value.type !== 'agentpass.qualification-grant-batch-manifest' || typeof value.signature !== 'string' || !MANIFEST_SIGNATURE.test(value.signature) || !DIGEST.test(value.statement_hash)) fail('verified qualification batch manifest envelope is invalid');
+    if (value.version !== 2 || value.type !== 'agentpass.qualification-grant-batch-manifest' || typeof value.signature !== 'string' || !MANIFEST_SIGNATURE.test(value.signature) || !DIGEST.test(value.statement_hash)) fail('verified qualification batch manifest envelope is invalid');
     exactKeys(value.statement, MANIFEST_STATEMENT_KEYS, 'verified qualification batch manifest statement');
-    if (value.statement.version !== 1 || value.statement.type !== 'agentpass.qualification-grant-batch-manifest' || value.statement.issuer !== 'agentpass-cloud') fail('verified qualification batch manifest statement is invalid');
+    if (value.statement.version !== 2 || value.statement.type !== 'agentpass.qualification-grant-batch-manifest' || value.statement.issuer !== 'agentpass-cloud') fail('verified qualification batch manifest statement is invalid');
     candidate = Object.fromEntries(MANIFEST_CANDIDATE_KEYS.map((key) => [key, value.statement[key]]));
     manifestSteps = value.statement.steps;
   } else {
@@ -402,9 +420,8 @@ const normalizeVerifiedManifest = (value, batch, request) => {
   const seenGrantHashes = new Set();
   const seenStatementHashes = new Set();
   const seenRunBindings = new Set();
-  const stepKeys = manifestSteps.some((step) => isObject(step) && hasOwn(step, 'grant')) ? SIGNED_MANIFEST_STEP_KEYS : MANIFEST_STEP_KEYS;
   const steps = manifestSteps.map((step, index) => {
-    exactKeys(step, stepKeys, `qualification batch manifest step ${index}`);
+    exactKeys(step, MANIFEST_STEP_KEYS, `qualification batch manifest step ${index}`);
     const expected = QUALIFICATION_SUITE_STEPS[index];
     if (step.index !== index || step.kind !== expected.kind || step.scenario !== expected.scenario || step.phase !== expected.phase) fail('qualification batch manifest steps are missing, duplicated, or reordered');
     uuid(step.grant_id, 'qualification batch manifest grant_id');
@@ -413,7 +430,7 @@ const normalizeVerifiedManifest = (value, batch, request) => {
     if (typeof step.run_binding !== 'string' || !RUN_BINDING.test(step.run_binding) || seenRunBindings.has(step.run_binding)) fail('qualification batch manifest run binding is invalid or reused');
     if (seenGrantIds.has(step.grant_id) || seenGrantHashes.has(step.grant_hash) || seenStatementHashes.has(step.statement_hash)) fail('qualification batch manifest Grant binding is reused');
     seenGrantIds.add(step.grant_id); seenGrantHashes.add(step.grant_hash); seenStatementHashes.add(step.statement_hash); seenRunBindings.add(step.run_binding);
-    return Object.freeze({ index, kind: step.kind, scenario: step.scenario, phase: step.phase, run_binding: step.run_binding, grant_id: step.grant_id, grant_hash: step.grant_hash, statement_hash: step.statement_hash, ...(hasOwn(step, 'grant') ? { grant: step.grant } : {}) });
+    return Object.freeze({ index, kind: step.kind, scenario: step.scenario, phase: step.phase, run_binding: step.run_binding, grant_id: step.grant_id, grant_hash: step.grant_hash, statement_hash: step.statement_hash });
   });
   return Object.freeze({ candidate: Object.freeze(Object.fromEntries(MANIFEST_CANDIDATE_KEYS.map((key) => [key, candidate[key]]))), steps: Object.freeze(steps) });
 };
@@ -550,12 +567,34 @@ const validateParent = (directory, { fileSystem, expectedUid, production }) => {
   for (;;) {
     let stat;
     try { stat = fileSystem.lstatSync(current, { bigint: true }); } catch { fail('qualification relay root is unavailable'); }
-    if (!stat.isDirectory() || stat.isSymbolicLink() || stat.uid !== BigInt(expectedUid) || (stat.mode & 0o022n) !== 0n) fail('qualification relay root is unsafe');
+    if (!stat.isDirectory() || stat.isSymbolicLink() || stat.uid !== BigInt(expectedUid) || (production && stat.gid !== 0n) || (stat.mode & 0o022n) !== 0n) fail('qualification relay root is unsafe');
     if (current === root && (stat.mode & 0o7777n) !== BigInt(DIRECTORY_MODE)) fail('qualification relay root mode is unsafe');
     if (!production || current === '/') break;
     current = resolve(current, '..');
   }
   return root;
+};
+
+const validateProtectedAncestry = (filePath, { fileSystem, expectedUid, production = false }) => {
+  let current = dirname(filePath);
+  for (;;) {
+    let stat;
+    try { stat = fileSystem.lstatSync(current, { bigint: true }); } catch { fail('qualification relay executable ancestry is unsafe'); }
+    if (!stat.isDirectory() || stat.isSymbolicLink() || stat.uid !== BigInt(expectedUid) || (production && stat.gid !== 0n) || (stat.mode & 0o022n) !== 0n) fail('qualification relay executable ancestry is unsafe');
+    if (!production || current === '/') break;
+    current = resolve(current, '..');
+  }
+};
+
+const validateFixedExecutable = ({ executablePath, fileSystem, expectedUid, production = false }) => {
+  absolutePath(executablePath, 'qualification relay executable');
+  validateProtectedAncestry(executablePath, { fileSystem, expectedUid, production });
+  const parent = fileSystem.lstatSync(dirname(executablePath), { bigint: true });
+  if (production && (parent.uid !== 0n || parent.gid !== 0n || (parent.mode & 0o7777n) !== 0o700n)) fail('qualification relay executable parent is unsafe');
+  let stat;
+  try { stat = fileSystem.lstatSync(executablePath, { bigint: true }); } catch { fail('qualification relay executable is unavailable'); }
+  if (!stat.isFile() || stat.isSymbolicLink() || stat.uid !== BigInt(expectedUid) || (production && stat.gid !== 0n) || stat.nlink !== 1n || (production ? (stat.mode & 0o7777n) !== 0o755n : !EXECUTABLE_MODES.has(Number(stat.mode & 0o7777n)))) fail('qualification relay executable is unsafe');
+  return Object.freeze({ identity: identity(stat) });
 };
 
 const syncDirectory = (directory, fileSystem) => {
@@ -568,12 +607,34 @@ const syncDirectory = (directory, fileSystem) => {
   finally { if (descriptor !== undefined) { try { fileSystem.closeSync(descriptor); } catch { fail('qualification relay directory sync failed'); } } }
 };
 
+const readStablePrivateFile = ({ filePath, fileSystem, expectedUid, expectedGid = null, maximum, label }) => {
+  let descriptor;
+  try { descriptor = fileSystem.openSync(filePath, fileSystem.constants.O_RDONLY | NOFOLLOW); } catch { fail(`${label} is unavailable`); }
+  try {
+    const before = fileSystem.fstatSync(descriptor, { bigint: true });
+    if (!before.isFile() || before.nlink !== 1n || before.uid !== BigInt(expectedUid) || (expectedGid !== null && before.gid !== BigInt(expectedGid)) || (before.mode & 0o7777n) !== BigInt(FILE_MODE) || before.size <= 0n || before.size > BigInt(maximum)) fail(`${label} is unsafe`);
+    const bytes = Buffer.alloc(Number(before.size));
+    let offset = 0;
+    while (offset < bytes.length) {
+      const count = fileSystem.readSync(descriptor, bytes, offset, bytes.length - offset, offset);
+      if (!Number.isInteger(count) || count <= 0) fail(`${label} changed while reading`);
+      offset += count;
+    }
+    const after = fileSystem.fstatSync(descriptor, { bigint: true });
+    let current;
+    try { current = fileSystem.lstatSync(filePath, { bigint: true }); } catch { fail(`${label} changed while reading`); }
+    const beforeIdentity = identity(before);
+    if (!sameIdentity(beforeIdentity, identity(after)) || !sameIdentity(beforeIdentity, identity(current))) fail(`${label} changed while reading`);
+    return Object.freeze({ bytes, identity: beforeIdentity });
+  } finally { fileSystem.closeSync(descriptor); }
+};
+
 const readStableRequest = ({ requestPath, fileSystem, expectedUid, production }) => {
   let descriptor;
   try { descriptor = fileSystem.openSync(requestPath, fileSystem.constants.O_RDONLY | NOFOLLOW); } catch { fail('qualification relay claim request is unavailable'); }
   try {
     const before = fileSystem.fstatSync(descriptor, { bigint: true });
-    if (!before.isFile() || before.nlink !== 1n || before.uid !== BigInt(expectedUid) || (before.mode & 0o7777n) !== BigInt(FILE_MODE) || before.size <= 0n || before.size > BigInt(QUALIFICATION_RELAY_MAX_REQUEST_BYTES)) fail('qualification relay claim request is unsafe');
+    if (!before.isFile() || before.nlink !== 1n || before.uid !== BigInt(expectedUid) || (production && before.gid !== 0n) || (before.mode & 0o7777n) !== BigInt(FILE_MODE) || before.size <= 0n || before.size > BigInt(QUALIFICATION_RELAY_MAX_REQUEST_BYTES)) fail('qualification relay claim request is unsafe');
     const bytes = Buffer.alloc(Number(before.size)); let offset = 0;
     while (offset < bytes.length) {
       const count = fileSystem.readSync(descriptor, bytes, offset, bytes.length - offset, offset);
@@ -589,6 +650,162 @@ const readStableRequest = ({ requestPath, fileSystem, expectedUid, production })
   } finally { fileSystem.closeSync(descriptor); }
 };
 
+const readFixedDeviceConfig = ({ configPath, fileSystem, expectedUid }) => {
+  const snapshot = readStablePrivateFile({ filePath: configPath, fileSystem, expectedUid, expectedGid: expectedUid === 0 ? 0 : null, maximum: 16 * 1024, label: 'qualification relay device client configuration' });
+  const config = parseStrictJson(snapshot.bytes, 'qualification relay device client configuration', 16 * 1024);
+  exactKeys(config, QUALIFICATION_CONFIG_KEYS, 'qualification relay device client configuration');
+  if (config.schema_version !== 1 || config.kind !== 'agentpass-qualification-grant-client-config') fail('qualification relay device client configuration is invalid');
+  uuid(config.organization_id, 'qualification relay device client organization_id');
+  uuid(config.device_id, 'qualification relay device client device_id');
+  uuid(config.batch_id, 'qualification relay device client batch_id');
+  safeIdentifier(config.manifest_key_id, 'qualification relay manifest key id');
+  safeIdentifier(config.agent_session_key_id, 'qualification relay agent session key id');
+  if (config.manifest_key_id === config.agent_session_key_id) fail('qualification relay key purposes must be separate');
+  if (typeof config.api_origin !== 'string') fail('qualification relay device client origin is invalid');
+  let origin;
+  try { origin = new URL(config.api_origin); } catch { fail('qualification relay device client origin is invalid'); }
+  if (origin.protocol !== 'https:' || !origin.hostname || origin.username || origin.password || origin.search || origin.hash || (origin.pathname !== '' && origin.pathname !== '/')) fail('qualification relay device client origin is invalid');
+  if (typeof config.keychain_access_group !== 'string' || !/^[A-Z0-9]{10}\.dev\.agentpass\.service-keys$/u.test(config.keychain_access_group)) fail('qualification relay device client access group is invalid');
+  const parseRawPublicKey = (value, label) => {
+    if (typeof value !== 'string' || !/^(?:[A-Za-z0-9+/]{4}){10}[A-Za-z0-9+/]{3}=$/u.test(value)) fail(`${label} is invalid`);
+    const rawKey = Buffer.from(value, 'base64');
+    if (rawKey.length !== 32 || rawKey.toString('base64') !== value) fail(`${label} is invalid`);
+    try {
+      const publicKey = crypto.createPublicKey({ key: Buffer.concat([ED25519_SPKI_PREFIX, rawKey]), format: 'der', type: 'spki' });
+      if (publicKey.type !== 'public' || publicKey.asymmetricKeyType !== 'ed25519') fail(`${label} is invalid`);
+      return publicKey;
+    } catch { fail(`${label} is invalid`); }
+  };
+  const manifestPublicKey = parseRawPublicKey(config.manifest_public_key_base64, 'qualification relay manifest public key');
+  const agentSessionPublicKey = parseRawPublicKey(config.agent_session_public_key_base64, 'qualification relay agent session public key');
+  const manifestFingerprint = crypto.createHash('sha256').update(manifestPublicKey.export({ type: 'spki', format: 'der' })).digest('hex');
+  const agentSessionFingerprint = crypto.createHash('sha256').update(agentSessionPublicKey.export({ type: 'spki', format: 'der' })).digest('hex');
+  if (timingSafeText(manifestFingerprint, agentSessionFingerprint)) fail('qualification relay key fingerprints must be separate');
+  return Object.freeze({ config: Object.freeze(config), manifestPublicKey, agentSessionPublicKey, identity: snapshot.identity });
+};
+
+const timingSafeText = (left, right) => {
+  const a = Buffer.from(left, 'utf8'); const b = Buffer.from(right, 'utf8');
+  return a.length === b.length && crypto.timingSafeEqual(a, b);
+};
+
+const canonicalSignatureBytes = (value, label) => {
+  if (typeof value !== 'string' || !MANIFEST_SIGNATURE.test(value)) fail(`${label} is invalid`);
+  let bytes;
+  try { bytes = Buffer.from(value, 'base64url'); } catch { fail(`${label} is invalid`); }
+  if (bytes.length !== 64 || bytes.toString('base64url') !== value) fail(`${label} is invalid`);
+  return bytes;
+};
+
+const verifyFixedQualificationManifest = (manifest, { request, batch, manifestPublicKey, manifestKeyId, agentSessionPublicKey, agentSessionKeyId }) => {
+  exactKeys(manifest, MANIFEST_ENVELOPE_KEYS, 'qualification batch manifest');
+  if (manifest.version !== 2 || manifest.type !== MANIFEST_PURPOSE) fail('qualification batch manifest purpose is invalid');
+  exactKeys(manifest.statement, MANIFEST_STATEMENT_KEYS, 'qualification batch manifest statement');
+  const statement = manifest.statement;
+  if (statement.version !== 2 || statement.type !== MANIFEST_PURPOSE || statement.issuer !== MANIFEST_ISSUER || statement.key_id !== manifestKeyId) fail('qualification batch manifest key purpose is invalid');
+  for (const key of MANIFEST_CANDIDATE_KEYS) {
+    if (statement[key] !== request[key] || statement[key] !== batch[key]) fail(`qualification batch manifest ${key} binding is invalid`);
+  }
+  const statementBytes = Buffer.from(canonicalJson(statement), 'utf8');
+  const expectedStatementHash = sha256(statementBytes);
+  if (typeof manifest.statement_hash !== 'string' || !DIGEST.test(manifest.statement_hash) || !timingSafeText(manifest.statement_hash, expectedStatementHash)) fail('qualification batch manifest statement hash is invalid');
+  const signature = canonicalSignatureBytes(manifest.signature, 'qualification batch manifest signature');
+  if (!crypto.verify(null, Buffer.concat([MANIFEST_DOMAIN, statementBytes]), manifestPublicKey, signature)) fail('qualification batch manifest signature is invalid');
+  if (!Array.isArray(statement.steps) || statement.steps.length !== QUALIFICATION_SUITE_STEPS.length) fail('qualification batch manifest steps are invalid');
+  const grantDomain = Buffer.from('AgentPass-Agent-Session-Grant-v1\0', 'utf8');
+  const grantIds = new Set();
+  const grantHashes = new Set();
+  const statementHashes = new Set();
+  const runBindings = new Set();
+  if (!Array.isArray(batch.steps) || batch.steps.length !== QUALIFICATION_SUITE_STEPS.length) fail('qualification relay batch step inventory is invalid');
+  for (const [index, step] of statement.steps.entries()) {
+    exactKeys(step, MANIFEST_STEP_KEYS, `qualification batch manifest step ${index}`);
+    const expected = QUALIFICATION_SUITE_STEPS[index];
+    if (step.index !== index || step.kind !== expected.kind || step.scenario !== expected.scenario || step.phase !== expected.phase || typeof step.run_binding !== 'string' || !RUN_BINDING.test(step.run_binding)) fail('qualification batch manifest steps are invalid');
+    uuid(step.grant_id, `qualification batch manifest step ${index} grant_id`);
+    digest(step.grant_hash, `qualification batch manifest step ${index} grant_hash`);
+    digest(step.statement_hash, `qualification batch manifest step ${index} statement_hash`);
+    if (runBindings.has(step.run_binding) || grantIds.has(step.grant_id) || grantHashes.has(step.grant_hash) || statementHashes.has(step.statement_hash)) fail('qualification batch manifest step binding is reused');
+    runBindings.add(step.run_binding); grantIds.add(step.grant_id); grantHashes.add(step.grant_hash); statementHashes.add(step.statement_hash);
+    const batchStep = batch.steps[index];
+    exactKeys(batchStep, STEP_KEYS, `qualification relay batch step ${index}`);
+    if (batchStep.index !== index || batchStep.kind !== expected.kind || batchStep.scenario !== expected.scenario || batchStep.phase !== expected.phase || batchStep.run_binding !== step.run_binding) fail('qualification batch manifest step binding is invalid');
+    const grant = normalizeGrant(batchStep.grant, batch);
+    if (grant.version !== 1 || grant.type !== 'agentpass.agent-session-grant' || grant.statement.issuer !== MANIFEST_ISSUER || grant.statement.key_id !== agentSessionKeyId) fail('qualification batch manifest Grant key purpose is invalid');
+    if (grant.statement.organization_id !== statement.organization_id || grant.statement.device_id !== statement.device_id || grant.statement.agent_id !== statement.agent_id || grant.statement.agent_kind !== statement.agent_kind || grant.statement.not_before !== statement.issued_at || grant.statement.expires_at !== statement.expires_at) fail('qualification batch manifest Grant binding is invalid');
+    const grantStatementBytes = Buffer.from(canonicalJson(grant.statement), 'utf8');
+    const grantStatementHash = sha256(grantStatementBytes);
+    if (!DIGEST.test(grant.statement_hash) || !timingSafeText(grant.statement_hash, grantStatementHash)) fail('qualification batch manifest Grant statement hash is invalid');
+    const grantBytes = Buffer.from(canonicalJson(grant), 'utf8');
+    if (!timingSafeText(step.grant_hash, sha256(grantBytes)) || step.grant_id !== grant.statement.grant_id || step.statement_hash !== grant.statement_hash) fail('qualification batch manifest Grant binding is invalid');
+    const grantSignature = canonicalSignatureBytes(grant.signature, `qualification batch manifest step ${index} Grant signature`);
+    if (!crypto.verify(null, Buffer.concat([grantDomain, grantStatementBytes]), agentSessionPublicKey, grantSignature)) fail('qualification batch manifest Grant signature is invalid');
+  }
+  return manifest;
+};
+
+const consumeStableFile = ({ filePath, expectedIdentity, fileSystem, root, label }) => {
+  let current;
+  try { current = fileSystem.lstatSync(filePath, { bigint: true }); } catch { fail(`${label} consumption failed`); }
+  if (!sameIdentity(expectedIdentity, identity(current))) fail(`${label} changed before consumption`);
+  try { fileSystem.unlinkSync(filePath); } catch { fail(`${label} consumption failed`); }
+  syncDirectory(root, fileSystem);
+};
+
+const spawnFixedQualificationClient = ({ executablePath, spawnProcess, fileSystem, expectedUid, production, expectedIdentity, timeoutMs }) => new Promise((resolvePromise, rejectPromise) => {
+  let child;
+  try {
+    child = spawnProcess(executablePath, [], {
+      cwd: '/',
+      env: Object.freeze({ PATH: '/usr/bin:/bin:/usr/sbin:/sbin', HOME: '/var/empty', LANG: 'C', LC_ALL: 'C' }),
+      shell: false,
+      windowsHide: true,
+      stdio: ['ignore', 'ignore', 'pipe']
+    });
+  } catch { rejectPromise(new Error('qualification relay native client failed')); return; }
+  let settled = false;
+  let timer;
+  let terminalTimer;
+  let terminalError;
+  let stderrBytes = 0;
+  const finish = (error) => {
+    if (settled) return;
+    settled = true;
+    if (timer) clearTimeout(timer);
+    if (terminalTimer) clearTimeout(terminalTimer);
+    if (error) rejectPromise(error); else resolvePromise();
+  };
+  const kill = () => { try { child.kill('SIGKILL'); } catch {} };
+  const terminate = (error) => {
+    if (terminalError) return;
+    terminalError = error;
+    kill();
+    terminalTimer = setTimeout(() => finish(terminalError), QUALIFICATION_RELAY_CHILD_TERMINAL_WAIT_MS);
+  };
+  if (!child || typeof child.on !== 'function') { terminate(new Error('qualification relay native client failed')); return; }
+  child.on('error', () => terminate(new Error('qualification relay native client failed')));
+  child.on('close', (code, signal) => {
+    if (terminalError) { finish(terminalError); return; }
+    if (code !== 0 || signal !== null) { finish(new Error('qualification relay native client failed')); return; }
+    try {
+      const afterIdentity = validateFixedExecutable({ executablePath, fileSystem, expectedUid, production }).identity;
+      if (!sameIdentity(expectedIdentity, afterIdentity)) throw new Error('qualification relay executable changed while running');
+    } catch { finish(new Error('qualification relay executable changed while running')); return; }
+    finish();
+  });
+  timer = setTimeout(() => terminate(new Error('qualification relay native client timed out')), timeoutMs);
+  if (child.stderr?.on) {
+    child.stderr.on('data', (chunk) => {
+      stderrBytes += Buffer.byteLength(chunk);
+      if (stderrBytes > QUALIFICATION_RELAY_MAX_CHILD_STDERR_BYTES) terminate(new Error('qualification relay native client output exceeded limit'));
+    });
+  }
+  try {
+    const afterSpawnIdentity = validateFixedExecutable({ executablePath, fileSystem, expectedUid, production }).identity;
+    if (!sameIdentity(expectedIdentity, afterSpawnIdentity)) terminate(new Error('qualification relay executable changed after spawn'));
+  } catch { terminate(new Error('qualification relay executable changed after spawn')); }
+});
+
 const consumeRequest = ({ requestPath, expectedIdentity, fileSystem, root }) => {
   const current = fileSystem.lstatSync(requestPath, { bigint: true });
   if (!sameIdentity(expectedIdentity, identity(current))) fail('qualification relay claim request changed before consumption');
@@ -602,7 +819,7 @@ const ensureAbsent = (filePath, fileSystem, label) => {
 };
 
 const assertFile = (stat, expectedUid, expectedSize = null, links = 1n) => {
-  if (!stat.isFile() || stat.isSymbolicLink() || stat.uid !== BigInt(expectedUid) || stat.nlink !== links || (stat.mode & 0o7777n) !== BigInt(FILE_MODE) || (expectedSize !== null && stat.size !== BigInt(expectedSize))) fail('qualification relay output file is unsafe');
+  if (!stat.isFile() || stat.isSymbolicLink() || stat.uid !== BigInt(expectedUid) || (expectedUid === 0 && stat.gid !== 0n) || stat.nlink !== links || (stat.mode & 0o7777n) !== BigInt(FILE_MODE) || (expectedSize !== null && stat.size !== BigInt(expectedSize))) fail('qualification relay output file is unsafe');
 };
 
 const writeAll = (descriptor, bytes, fileSystem) => {
@@ -670,23 +887,29 @@ const resolveOptions = (options = {}) => {
   const expectedUid = options.expectedUid ?? 0;
   const uid = options.uid ?? process.getuid?.();
   const requestPath = options.requestPath ?? QUALIFICATION_RELAY_REQUEST_PATH;
-  const inboxPath = options.inboxPath ?? QUALIFICATION_RELAY_INBOX_PATH;
   const root = dirname(requestPath);
+  const responsePath = options.responsePath ?? (production ? QUALIFICATION_RELAY_RESPONSE_PATH : join(root, 'device-response.json'));
+  const configPath = options.configPath ?? (production ? QUALIFICATION_RELAY_CONFIG_PATH : join(root, 'device-client-config.json'));
+  const executablePath = options.executablePath ?? QUALIFICATION_RELAY_EXECUTABLE_PATH;
+  const inboxPath = options.inboxPath ?? QUALIFICATION_RELAY_INBOX_PATH;
   if (!Number.isInteger(expectedUid) || expectedUid < 0 || !Number.isInteger(uid) || uid < 0) fail('qualification relay owner is invalid');
-  absolutePath(requestPath, 'qualification relay request'); absolutePath(inboxPath, 'qualification relay inbox');
-  if (root !== dirname(inboxPath) || root !== QUALIFICATION_RELAY_ROOT_DIRECTORY && production) fail('qualification relay paths are not fixed');
+  absolutePath(requestPath, 'qualification relay request'); absolutePath(responsePath, 'qualification relay response'); absolutePath(configPath, 'qualification relay config'); absolutePath(executablePath, 'qualification relay executable'); absolutePath(inboxPath, 'qualification relay inbox');
+  if (root !== dirname(inboxPath) || root !== dirname(responsePath) || root !== dirname(configPath) || root !== QUALIFICATION_RELAY_ROOT_DIRECTORY && production) fail('qualification relay paths are not fixed');
   const processId = options.processId ?? process.pid;
   const randomBytes = options.randomBytes ?? crypto.randomBytes;
+  const spawnProcess = options.spawnProcess ?? nodeSpawn;
+  const childTimeoutMs = options.childTimeoutMs ?? QUALIFICATION_RELAY_CHILD_TIMEOUT_MS;
   if (!Number.isInteger(processId) || processId < 0 || typeof randomBytes !== 'function') fail('qualification relay process options are invalid');
-  const resolved = { ...options, fileSystem, production, expectedUid, uid, requestPath, inboxPath, root, processId, randomBytes, platform: options.platform ?? process.platform };
+  if (typeof spawnProcess !== 'function') fail('qualification relay process launcher is invalid');
+  if (!Number.isSafeInteger(childTimeoutMs) || childTimeoutMs < 1 || childTimeoutMs > QUALIFICATION_RELAY_CHILD_TIMEOUT_MS) fail('qualification relay child timeout is invalid');
+  if (production && (responsePath !== QUALIFICATION_RELAY_RESPONSE_PATH || configPath !== QUALIFICATION_RELAY_CONFIG_PATH || executablePath !== QUALIFICATION_RELAY_EXECUTABLE_PATH || spawnProcess !== nodeSpawn || childTimeoutMs !== QUALIFICATION_RELAY_CHILD_TIMEOUT_MS || options.verifyBatchManifest !== undefined || options.deviceClient !== undefined)) fail('qualification relay requires the fixed root production boundary');
+  const resolved = { ...options, fileSystem, production, expectedUid, uid, requestPath, responsePath, configPath, executablePath, inboxPath, root, processId, randomBytes, spawnProcess, childTimeoutMs, platform: options.platform ?? process.platform };
   productionGuard(resolved);
   validateParent(root, resolved);
   return resolved;
 };
 
-const fixedPackagedDeviceClient = Object.freeze({
-  claim: async () => { fail('fixed packaged Device API client is unavailable'); }
-});
+const fixedPackagedDeviceClient = Object.freeze({ claim: async () => { fail('fixed packaged Device API client requires the relay boundary'); } });
 export const fixedQualificationDeviceClient = fixedPackagedDeviceClient;
 
 const resolveDeviceClient = (options) => {
@@ -702,13 +925,26 @@ const resolveDeviceClient = (options) => {
 
 export const claimQualificationDeviceRelay = async (options = {}) => {
   const resolved = resolveOptions(options);
-  if (typeof resolved.verifyBatchManifest !== 'function') fail('qualification batch manifest verifier is required');
-  const client = resolveDeviceClient(resolved);
+  const fixedNative = resolved.production || resolved.spawnProcess !== nodeSpawn;
+  const configSnapshot = fixedNative ? readFixedDeviceConfig(resolved) : undefined;
+  const manifestVerifier = fixedNative
+    ? (manifest, context) => verifyFixedQualificationManifest(manifest, { manifestPublicKey: configSnapshot.manifestPublicKey, manifestKeyId: configSnapshot.config.manifest_key_id, agentSessionPublicKey: configSnapshot.agentSessionPublicKey, agentSessionKeyId: configSnapshot.config.agent_session_key_id, request: context.request, batch: context.batch })
+    : resolved.verifyBatchManifest;
+  if (typeof manifestVerifier !== 'function') fail('qualification batch manifest verifier is required');
+  const client = fixedNative ? undefined : resolveDeviceClient(resolved);
   ensureAbsent(resolved.inboxPath, resolved.fileSystem, 'qualification relay inbox');
+  const executableIdentity = fixedNative ? validateFixedExecutable({ executablePath: resolved.executablePath, fileSystem: resolved.fileSystem, expectedUid: resolved.expectedUid, production: resolved.production }).identity : undefined;
   const claimed = readStableRequest(resolved);
-  consumeRequest({ requestPath: resolved.requestPath, expectedIdentity: claimed.identity, fileSystem: resolved.fileSystem, root: resolved.root });
   let response;
+  let responseSnapshot;
   try {
+    if (fixedNative) {
+      if (configSnapshot.config.organization_id !== claimed.request.organization_id || configSnapshot.config.device_id !== claimed.request.device_id || configSnapshot.config.batch_id !== claimed.request.batch_id || configSnapshot.config.keychain_access_group !== `${claimed.request.team_id}.dev.agentpass.service-keys`) fail('qualification relay device client configuration does not match request');
+      ensureAbsent(resolved.responsePath, resolved.fileSystem, 'qualification relay device response');
+      await spawnFixedQualificationClient({ executablePath: resolved.executablePath, spawnProcess: resolved.spawnProcess, fileSystem: resolved.fileSystem, expectedUid: resolved.expectedUid, production: resolved.production, expectedIdentity: executableIdentity, timeoutMs: resolved.childTimeoutMs });
+      responseSnapshot = readStablePrivateFile({ filePath: resolved.responsePath, fileSystem: resolved.fileSystem, expectedUid: resolved.expectedUid, expectedGid: resolved.expectedUid === 0 ? 0 : null, maximum: QUALIFICATION_RELAY_MAX_RESPONSE_BYTES, label: 'qualification relay device response' });
+      response = parseResponseValue(responseSnapshot.bytes);
+    } else {
     const deviceRequest = Object.freeze({
       schema_version: 1,
       candidate_sha256: claimed.request.candidate_sha256,
@@ -725,14 +961,24 @@ export const claimQualificationDeviceRelay = async (options = {}) => {
       local_request_id: claimed.request.request_id,
       request: deviceRequest
     });
-    const suite = qualificationRelayResponseToSuiteInput(response, claimed.request, { verifyBatchManifest: resolved.verifyBatchManifest });
-    return publishSuite({ bytes: suite.bytes, inboxPath: resolved.inboxPath, root: resolved.root, fileSystem: resolved.fileSystem, expectedUid: resolved.expectedUid, processId: resolved.processId, randomBytes: resolved.randomBytes });
+    }
+    const suite = qualificationRelayResponseToSuiteInput(response, claimed.request, { verifyBatchManifest: manifestVerifier });
+    const revalidated = readStableRequest(resolved);
+    if (!sameIdentity(claimed.identity, revalidated.identity) || !revalidated.bytes.equals(claimed.bytes)) fail('qualification relay claim request changed while native client was reading');
+    consumeStableFile({ filePath: resolved.requestPath, expectedIdentity: revalidated.identity, fileSystem: resolved.fileSystem, root: resolved.root, label: 'qualification relay claim request' });
+    const result = publishSuite({ bytes: suite.bytes, inboxPath: resolved.inboxPath, root: resolved.root, fileSystem: resolved.fileSystem, expectedUid: resolved.expectedUid, processId: resolved.processId, randomBytes: resolved.randomBytes });
+    if (responseSnapshot) consumeStableFile({ filePath: resolved.responsePath, expectedIdentity: responseSnapshot.identity, fileSystem: resolved.fileSystem, root: resolved.root, label: 'qualification relay device response' });
+    return result;
   } catch {
+    if (fixedNative) {
+      try { removeSafeFile(resolved.responsePath, { fileSystem: resolved.fileSystem, expectedUid: resolved.expectedUid, label: 'qualification relay device response' }); } catch {}
+    }
     try {
       const current = resolved.fileSystem.lstatSync(resolved.inboxPath, { bigint: true });
       if (current.isFile() && !current.isSymbolicLink() && current.uid === BigInt(resolved.expectedUid) && current.nlink === 1n && (current.mode & 0o7777n) === BigInt(FILE_MODE)) resolved.fileSystem.unlinkSync(resolved.inboxPath);
       syncDirectory(resolved.root, resolved.fileSystem);
     } catch {}
+    try { syncDirectory(resolved.root, resolved.fileSystem); } catch {}
     fail('qualification relay claim failed');
   }
 };
@@ -750,7 +996,7 @@ export const recoverQualificationDeviceRelay = (options = {}) => {
   const prove = resolved.proveNoActiveRelay ?? (resolved.production ? proveNoQualificationProcesses : undefined);
   if (typeof prove !== 'function' || prove() !== true) fail('qualification relay recovery refused an active qualification process');
   const removed = [];
-  for (const [filePath, label] of [[resolved.requestPath, 'qualification relay claim request'], [resolved.inboxPath, 'qualification relay inbox']]) {
+  for (const [filePath, label] of [[resolved.requestPath, 'qualification relay claim request'], [resolved.responsePath, 'qualification relay device response'], [resolved.inboxPath, 'qualification relay inbox']]) {
     if (removeSafeFile(filePath, { fileSystem: resolved.fileSystem, expectedUid: resolved.expectedUid, label })) removed.push(label);
   }
   for (const entry of resolved.fileSystem.readdirSync(resolved.root, { withFileTypes: true })) {

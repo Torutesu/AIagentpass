@@ -1,5 +1,8 @@
 import assert from "node:assert/strict";
+import crypto from "node:crypto";
 import test from "node:test";
+
+import { canonicalJson } from "../../../packages/protocol/src/index.mjs";
 
 import {
   QUALIFICATION_GRANT_BATCH_ERROR_CODES,
@@ -7,6 +10,7 @@ import {
   QUALIFICATION_GRANT_BATCH_STEPS,
   createQualificationGrantBatchService
 } from "../src/human-auth/agent-sessions/qualification-batch-service.mjs";
+import { QUALIFICATION_GRANT_BATCH_MANIFEST_VERSION } from "../src/qualification-grant-batch-manifest.mjs";
 
 const ids = Array.from({ length: 40 }, (_, index) => `${String(index + 1).padStart(8, "0")}-0000-4000-8000-000000000000`);
 const ORG = "10000000-0000-4000-8000-000000000000";
@@ -43,7 +47,7 @@ function fixture(repositoryOverride = {}) {
       const allocations = value.steps.map((step, index) => ({ grant_id: step.grant_id, control_sequence: index + 10, authority_generation: 7 }));
       const grants = await value.buildGrants({ allocations });
       assert.equal(grants.length, 7);
-      const manifest = await value.buildManifest({ grants });
+      const manifest = await value.buildManifest({ grants, steps: value.steps });
       assert.equal(manifest.statement.batch_id, value.batch_id);
       return { request_id: value.request_id, batch: { schema_version: 1, kind: QUALIFICATION_GRANT_BATCH_KIND, batch_id: value.batch_id, organization_id: value.organization_id, device_id: value.device_id, agent_id: value.agent_id, candidate_sha256: value.request.candidate_sha256, artifact_sha256: value.request.artifact_sha256, candidate_checkpoint_sha256: value.request.candidate_checkpoint_sha256, release_trust_sha256: value.request.release_trust_sha256, source_commit: value.request.source_commit, team_id: value.request.team_id, issued_at: value.issued_at, expires_at: value.expires_at, status: "issued" } };
     },
@@ -51,10 +55,20 @@ function fixture(repositoryOverride = {}) {
   };
   const service = createQualificationGrantBatchService({
     repository,
-    grantBuilder: { async buildSignedGrant(value) { grantCalls.push(value); return { grant: { statement: { grant_id: value.grantId } }, grant_hash: "1".repeat(64), statement_hash: "2".repeat(64), control_sequence: value.controlSequence, authority_generation: value.authorityGeneration }; } },
+    grantBuilder: { async buildSignedGrant(value) {
+      grantCalls.push(value);
+      const grant = { statement: { grant_id: value.grantId } };
+      return {
+        grant,
+        grant_hash: crypto.createHash("sha256").update(canonicalJson(grant), "utf8").digest("hex"),
+        statement_hash: crypto.createHash("sha256").update(canonicalJson(grant.statement), "utf8").digest("hex"),
+        control_sequence: value.controlSequence,
+        authority_generation: value.authorityGeneration
+      };
+    } },
     manifestSigner: {
       async publicKeyMetadata() { return { key_id: "qualification-manifest-v1" }; },
-      async signQualificationGrantBatchManifest(statement) { manifestCalls.push(statement); return { version: 1, type: statement.type, statement, statement_hash: "3".repeat(64), signature: "A".repeat(86) }; }
+      async signQualificationGrantBatchManifest(statement) { manifestCalls.push(statement); return { version: QUALIFICATION_GRANT_BATCH_MANIFEST_VERSION, type: statement.type, statement, statement_hash: "3".repeat(64), signature: "A".repeat(86) }; }
     },
     now: () => NOW,
     uuid: () => ids[cursor++]
@@ -102,6 +116,27 @@ test("rejects allocation omission, duplicate sequence, and grant substitution", 
     const { service } = fixture({ async issueQualificationGrantBatch(value) { await invoke(value); } });
     await assert.rejects(() => service.issue(input()), { code: QUALIFICATION_GRANT_BATCH_ERROR_CODES.UNAVAILABLE });
   }
+});
+
+test("requires repository-owned fresh step bindings when building the signed manifest", async () => {
+  const issue = input();
+  const missingSteps = fixture({
+    async issueQualificationGrantBatch(value) {
+      const allocations = value.steps.map((step, index) => ({ grant_id: step.grant_id, control_sequence: index + 10, authority_generation: 7 }));
+      const grants = await value.buildGrants({ allocations });
+      await assert.rejects(() => value.buildManifest({ grants }), { code: QUALIFICATION_GRANT_BATCH_ERROR_CODES.UNAVAILABLE });
+    }
+  });
+  await assert.rejects(() => missingSteps.service.issue(issue), { code: QUALIFICATION_GRANT_BATCH_ERROR_CODES.UNAVAILABLE });
+
+  const staleSteps = fixture({
+    async issueQualificationGrantBatch(value) {
+      const allocations = value.steps.map((step, index) => ({ grant_id: step.grant_id, control_sequence: index + 10, authority_generation: 7 }));
+      const grants = await value.buildGrants({ allocations });
+      await assert.rejects(() => value.buildManifest({ grants, steps: value.steps.map((step, index) => index === 0 ? { ...step, run_binding: "stale" } : step) }), { code: QUALIFICATION_GRANT_BATCH_ERROR_CODES.UNAVAILABLE });
+    }
+  });
+  await assert.rejects(() => staleSteps.service.issue(issue), { code: QUALIFICATION_GRANT_BATCH_ERROR_CODES.UNAVAILABLE });
 });
 
 test("maps repository failures to stable secret-free errors", async () => {

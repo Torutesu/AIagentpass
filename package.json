@@ -64,6 +64,8 @@
   "homepage": "https://github.com/Torutesu/AIagentpass#readme",
   "license": "MIT",
   "dependencies": {
+    "@aws-sdk/client-kms": "3.1110.0",
+    "@google-cloud/kms": "6.0.0",
     "@simplewebauthn/server": "13.3.2",
     "pg": "8.23.0"
   }

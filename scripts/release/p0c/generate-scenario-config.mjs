@@ -5,7 +5,7 @@ import { canonicalJSON, readProtectedFile, validateScenarioConfig } from './lib/
 
 const EXECUTABLE_FLAGS = Object.freeze({
   '--native-client': 'native_client', '--native-manager': 'native_manager', '--native-service': 'native_service',
-  '--claude-code': 'claude_code', '--cursor': 'cursor'
+  '--claude-code': 'claude_code', '--cursor': 'cursor', '--qualification-grant-client': 'qualification_grant_client'
 });
 const VALUE_FLAGS = new Set([...Object.keys(EXECUTABLE_FLAGS), '--test-repository', '--cloud-probe-url', '--checkpoint-directory', '--output']);
 
@@ -35,9 +35,9 @@ const writeExclusive = (input, bytes) => {
   return path;
 };
 
-export const generateScenarioConfig = ({ nativeClient, nativeManager, nativeService, claudeCode, cursor, testRepository, cloudProbeURL, checkpointDirectory, outputPath } = {}) => {
-  const inputs = { native_client: nativeClient, native_manager: nativeManager, native_service: nativeService, claude_code: claudeCode, cursor };
-  const executables = Object.fromEntries(Object.entries(inputs).map(([name, path]) => { const snapshot = readProtectedFile(path, { maximum: 64 * 1024 * 1024, executable: true, production: false }); return [name, { path: snapshot.path, sha256: snapshot.sha256 }]; }));
+export const generateScenarioConfig = ({ nativeClient, nativeManager, nativeService, claudeCode, cursor, qualificationGrantClient, testRepository, cloudProbeURL, checkpointDirectory, outputPath } = {}) => {
+  const inputs = { native_client: nativeClient, native_manager: nativeManager, native_service: nativeService, claude_code: claudeCode, cursor, qualification_grant_client: qualificationGrantClient };
+  const executables = Object.fromEntries(Object.entries(inputs).map(([name, path]) => { const snapshot = readProtectedFile(path, { maximum: 64 * 1024 * 1024, executable: true, production: false }); return [name, { path: name === 'qualification_grant_client' ? '/opt/agentpass/p0c/qualification-client/agentpass-qualification-grant-client' : snapshot.path, sha256: snapshot.sha256 }]; }));
   const value = {
     schema_version: 1,
     application_path: '/Applications/AgentPass.app',
@@ -55,7 +55,7 @@ export const generateScenarioConfig = ({ nativeClient, nativeManager, nativeServ
 if (import.meta.url === `file://${process.argv[1]}`) {
   try {
     const values = parseArgs(process.argv.slice(2));
-    const result = generateScenarioConfig({ nativeClient: values.get('--native-client'), nativeManager: values.get('--native-manager'), nativeService: values.get('--native-service'), claudeCode: values.get('--claude-code'), cursor: values.get('--cursor'), testRepository: values.get('--test-repository'), cloudProbeURL: values.get('--cloud-probe-url'), checkpointDirectory: values.get('--checkpoint-directory'), outputPath: values.get('--output') });
+    const result = generateScenarioConfig({ nativeClient: values.get('--native-client'), nativeManager: values.get('--native-manager'), nativeService: values.get('--native-service'), claudeCode: values.get('--claude-code'), cursor: values.get('--cursor'), qualificationGrantClient: values.get('--qualification-grant-client'), testRepository: values.get('--test-repository'), cloudProbeURL: values.get('--cloud-probe-url'), checkpointDirectory: values.get('--checkpoint-directory'), outputPath: values.get('--output') });
     process.stdout.write(`${JSON.stringify(result)}\n`);
   } catch { process.stderr.write('P0-C scenario config generation refused\n'); process.exitCode = 1; }
 }

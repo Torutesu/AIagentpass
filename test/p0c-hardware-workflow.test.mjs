@@ -68,11 +68,31 @@ test('hardware lanes are distinct protected self-hosted environments and expose 
   const secretRefs = [...workflow.matchAll(/\$\{\{\s*secrets\.([A-Za-z0-9_]+)\s*\}\}/g)].map(([, name]) => name).sort();
   assert.deepEqual(secretRefs, [
     'AGENTPASS_P0C_APPLE_SILICON_OPERATOR_PRIVATE_KEY_BASE64',
-    'AGENTPASS_P0C_INTEL_T2_OPERATOR_PRIVATE_KEY_BASE64'
+    'AGENTPASS_P0C_INTEL_T2_OPERATOR_PRIVATE_KEY_BASE64',
+    'QUALIFICATION_DEVICE_CLIENT_CONFIG_B64',
+    'QUALIFICATION_DEVICE_CLIENT_CONFIG_B64',
+    'QUALIFICATION_RELAY_REQUEST_B64',
+    'QUALIFICATION_RELAY_REQUEST_B64'
   ]);
   assert.doesNotMatch(workflow, /secrets\.(?:AGENTPASS_(?:SIGNING|INSTALLER|NOTARY|SERVICE_PROFILE|CLIENT_PROFILE)|[A-Za-z0-9_]*(?:CERTIFICATE|PROVISION|KEYCHAIN))/);
   assert.match(workflow, /P0C_GATE_DRIVER_DIR: \/opt\/agentpass\/p0c\/gates/);
   assert.doesNotMatch(workflow, /continue-on-error:\s*true/);
+});
+
+test('each lane verifies the installed profile-bound qualification helper bundle before qualification', () => {
+  for (const laneName of ['apple-silicon-qualification', 'intel-t2-qualification']) {
+    const section = job(laneName);
+    assert.match(section, /QUALIFICATION_CLIENT_SOURCE: \$\{\{ steps\.candidate\.outputs\.qualification_client \}\}/u);
+    assert.match(section, /\/Applications\/AgentPass\.app\/Contents\/Library\/HelperTools\/agentpass-qualification-grant-client/u);
+    assert.match(section, /verify-installed-qualification-client\.sh/);
+    assert.match(section, /qualification-device-relay\.mjs claim/);
+    assert.match(section, /qualification-device-relay\.mjs recover/);
+    assert.match(section, /device-client-config\.json/);
+    assert.match(section, /relay-request\.json/);
+    assert.match(section, /device-response\.json/);
+    assert.match(section, /qualification-input-materializer\.mjs materialize/);
+    assert.ok(section.indexOf('qualification-device-relay.mjs claim') < section.indexOf('qualification-input-materializer.mjs materialize'));
+  }
 });
 
 test('each lane checks out only the trusted workflow commit, verifies the candidate before fixed qualification, and uploads all evidence', () => {

@@ -11,12 +11,13 @@ APP_IDENTIFIER_PREFIX="${AGENTPASS_APP_IDENTIFIER_PREFIX:-}"
 SERVICE_PROFILE="${AGENTPASS_SERVICE_PROVISIONING_PROFILE:-}"
 CLIENT_PROFILE="${AGENTPASS_CLIENT_PROVISIONING_PROFILE:-}"
 AGENT_PROFILE="${AGENTPASS_AGENT_PROVISIONING_PROFILE:-}"
+QUALIFICATION_CLIENT_PROFILE="${AGENTPASS_QUALIFICATION_CLIENT_PROVISIONING_PROFILE:-}"
 ADHOC=0
 FORCE=0
 ARCHITECTURES=("$(uname -m)")
 
 usage() {
-  echo "Usage: build-app.sh [--output-dir DIR] [--identity IDENTITY --team-id TEAMID --app-identifier-prefix PREFIX --service-profile FILE --client-profile FILE --agent-profile FILE] [--universal] [--adhoc] [--force]" >&2
+  echo "Usage: build-app.sh [--output-dir DIR] [--identity IDENTITY --team-id TEAMID --app-identifier-prefix PREFIX --service-profile FILE --client-profile FILE --agent-profile FILE --qualification-client-profile FILE] [--universal] [--adhoc] [--force]" >&2
   exit 2
 }
 
@@ -57,6 +58,7 @@ while [[ $# -gt 0 ]]; do
     --service-profile) [[ $# -ge 2 ]] || usage; SERVICE_PROFILE="$2"; shift 2 ;;
     --client-profile) [[ $# -ge 2 ]] || usage; CLIENT_PROFILE="$2"; shift 2 ;;
     --agent-profile) [[ $# -ge 2 ]] || usage; AGENT_PROFILE="$2"; shift 2 ;;
+    --qualification-client-profile) [[ $# -ge 2 ]] || usage; QUALIFICATION_CLIENT_PROFILE="$2"; shift 2 ;;
     --profile|--notary-profile) echo "$1 is not supported: use separate helper profiles and notarize after assembly" >&2; exit 2 ;;
     --universal) ARCHITECTURES=(arm64 x86_64); shift ;;
     --adhoc) ADHOC=1; shift ;;
@@ -66,7 +68,7 @@ while [[ $# -gt 0 ]]; do
 done
 
 if [[ "$ADHOC" -eq 1 ]]; then
-  [[ -z "$SERVICE_PROFILE" && -z "$CLIENT_PROFILE" && -z "$AGENT_PROFILE" ]] || { echo "Ad-hoc builds must not embed provisioning profiles" >&2; exit 1; }
+  [[ -z "$SERVICE_PROFILE" && -z "$CLIENT_PROFILE" && -z "$AGENT_PROFILE" && -z "$QUALIFICATION_CLIENT_PROFILE" ]] || { echo "Ad-hoc builds must not embed provisioning profiles" >&2; exit 1; }
   TEAM_ID="ADHOC00000"
   APP_IDENTIFIER_PREFIX="ADHOC00000"
   SIGNING_IDENTITY="-"
@@ -74,14 +76,16 @@ else
   [[ -n "$SIGNING_IDENTITY" ]] || { echo "Production build requires --identity" >&2; exit 1; }
   [[ "$TEAM_ID" =~ ^[A-Z0-9]{10}$ ]] || { echo "Production build requires a 10-character --team-id" >&2; exit 1; }
   [[ "$APP_IDENTIFIER_PREFIX" =~ ^[A-Z0-9]{10}$ ]] || { echo "Production build requires a 10-character --app-identifier-prefix" >&2; exit 1; }
-  [[ -n "$SERVICE_PROFILE" && -n "$CLIENT_PROFILE" && -n "$AGENT_PROFILE" ]] || { echo "Production build requires separate --service-profile, --client-profile, and --agent-profile files" >&2; exit 1; }
-  [[ -f "$SERVICE_PROFILE" && ! -L "$SERVICE_PROFILE" && -f "$CLIENT_PROFILE" && ! -L "$CLIENT_PROFILE" && -f "$AGENT_PROFILE" && ! -L "$AGENT_PROFILE" ]] || { echo "Helper profiles must be regular non-symlink files" >&2; exit 1; }
-  [[ ! "$SERVICE_PROFILE" -ef "$CLIENT_PROFILE" && ! "$SERVICE_PROFILE" -ef "$AGENT_PROFILE" && ! "$CLIENT_PROFILE" -ef "$AGENT_PROFILE" ]] || { echo "Service, client, and Agent provisioning profiles must be separate files" >&2; exit 1; }
+  [[ -n "$SERVICE_PROFILE" && -n "$CLIENT_PROFILE" && -n "$AGENT_PROFILE" && -n "$QUALIFICATION_CLIENT_PROFILE" ]] || { echo "Production build requires separate helper profiles including the qualification client profile" >&2; exit 1; }
+  [[ -f "$SERVICE_PROFILE" && ! -L "$SERVICE_PROFILE" && -f "$CLIENT_PROFILE" && ! -L "$CLIENT_PROFILE" && -f "$AGENT_PROFILE" && ! -L "$AGENT_PROFILE" && -f "$QUALIFICATION_CLIENT_PROFILE" && ! -L "$QUALIFICATION_CLIENT_PROFILE" ]] || { echo "Helper profiles must be regular non-symlink files" >&2; exit 1; }
+  [[ ! "$SERVICE_PROFILE" -ef "$CLIENT_PROFILE" && ! "$SERVICE_PROFILE" -ef "$AGENT_PROFILE" && ! "$SERVICE_PROFILE" -ef "$QUALIFICATION_CLIENT_PROFILE" && ! "$CLIENT_PROFILE" -ef "$AGENT_PROFILE" && ! "$CLIENT_PROFILE" -ef "$QUALIFICATION_CLIENT_PROFILE" && ! "$AGENT_PROFILE" -ef "$QUALIFICATION_CLIENT_PROFILE" ]] || { echo "Helper provisioning profiles must be separate files" >&2; exit 1; }
   "$SCRIPT_DIR/verify-profile.sh" "$SERVICE_PROFILE" "$TEAM_ID" "$APP_IDENTIFIER_PREFIX" \
     "dev.agentpass.native-service" "${APP_IDENTIFIER_PREFIX}.dev.agentpass.service-keys" "service"
   "$SCRIPT_DIR/verify-profile.sh" "$CLIENT_PROFILE" "$TEAM_ID" "$APP_IDENTIFIER_PREFIX" \
     "dev.agentpass.native-client" "${APP_IDENTIFIER_PREFIX}.dev.agentpass.approval-keys" "client"
   verify_agent_profile "$AGENT_PROFILE" "$TEAM_ID" "$APP_IDENTIFIER_PREFIX"
+  "$SCRIPT_DIR/verify-profile.sh" "$QUALIFICATION_CLIENT_PROFILE" "$TEAM_ID" "$APP_IDENTIFIER_PREFIX" \
+    "dev.agentpass.qualification-grant-client" "${APP_IDENTIFIER_PREFIX}.dev.agentpass.service-keys" "qualification-client"
 fi
 
 mkdir -p "$OUTPUT_DIR"
@@ -102,8 +106,11 @@ HELPER_DIR="$APP/Contents/Library/HelperTools"
 SERVICE_APP="$HELPER_DIR/AgentPassNativeService.app"
 CLIENT_APP="$HELPER_DIR/AgentPassNativeClient.app"
 AGENT_HOST_APP="$HELPER_DIR/AgentPassNativeAgentHost.app"
+QUALIFICATION_CLIENT="$HELPER_DIR/agentpass-qualification-grant-client"
+QUALIFICATION_CLIENT_APP="$HELPER_DIR/agentpass-qualification-grant-client.app"
+QUALIFICATION_CLIENT_BINARY="$QUALIFICATION_CLIENT_APP/Contents/MacOS/agentpass-qualification-grant-client"
 ENTITLEMENT_DIR="$TEMP_DIR/entitlements"
-mkdir -p "$MACOS_DIR" "$DAEMON_DIR" "$SERVICE_APP/Contents/MacOS" "$CLIENT_APP/Contents/MacOS" "$AGENT_HOST_APP/Contents/MacOS" "$ENTITLEMENT_DIR"
+mkdir -p "$MACOS_DIR" "$DAEMON_DIR" "$SERVICE_APP/Contents/MacOS" "$CLIENT_APP/Contents/MacOS" "$AGENT_HOST_APP/Contents/MacOS" "$QUALIFICATION_CLIENT_APP/Contents/MacOS" "$ENTITLEMENT_DIR"
 
 for architecture in "${ARCHITECTURES[@]}"; do
   MACOSX_DEPLOYMENT_TARGET=14.0 swift build -c release --package-path "$PACKAGE_DIR" --arch "$architecture" >&2
@@ -129,25 +136,33 @@ install_product agentpass-native-service "$SERVICE_APP/Contents/MacOS/agentpass-
 install_product agentpass-native-client "$CLIENT_APP/Contents/MacOS/agentpass-native-client"
 install_product agentpass-native-agent-host "$AGENT_HOST_APP/Contents/MacOS/agentpass-native-agent-host"
 install_product agentpass-atomic-rename "$HELPER_DIR/agentpass-atomic-rename"
+install_product agentpass-qualification-grant-client "$QUALIFICATION_CLIENT_BINARY"
+install -m 0755 "$SCRIPT_DIR/qualification-grant-client-launcher.sh" "$QUALIFICATION_CLIENT"
 install -m 0644 "$RESOURCE_DIR/AgentPass-Info.plist" "$APP/Contents/Info.plist"
 install -m 0644 "$RESOURCE_DIR/AgentPassNativeService-Info.plist" "$SERVICE_APP/Contents/Info.plist"
 install -m 0644 "$RESOURCE_DIR/AgentPassNativeClient-Info.plist" "$CLIENT_APP/Contents/Info.plist"
 install -m 0644 "$RESOURCE_DIR/AgentPassNativeAgentHost-Info.plist" "$AGENT_HOST_APP/Contents/Info.plist"
+install -m 0644 "$SCRIPT_DIR/AgentPassQualificationGrantClient-Info.plist" "$QUALIFICATION_CLIENT_APP/Contents/Info.plist"
 install -m 0644 "$RESOURCE_DIR/dev.agentpass.native-service.plist" "$DAEMON_DIR/dev.agentpass.native-service.plist"
 install -m 0644 "$RESOURCE_DIR/AgentPassNativeManager.entitlements" "$ENTITLEMENT_DIR/manager.plist"
 install -m 0644 "$RESOURCE_DIR/AgentPassNativeClient.entitlements" "$ENTITLEMENT_DIR/client.plist"
 install -m 0644 "$RESOURCE_DIR/AgentPassNativeService.entitlements" "$ENTITLEMENT_DIR/service.plist"
 install -m 0644 "$RESOURCE_DIR/AgentPassNativeAgentHost.entitlements" "$ENTITLEMENT_DIR/agent-host.plist"
+install -m 0644 "$SCRIPT_DIR/qualification-grant-client.entitlements" "$ENTITLEMENT_DIR/qualification-client.plist"
 /usr/libexec/PlistBuddy -c "Set :keychain-access-groups:0 ${APP_IDENTIFIER_PREFIX}.dev.agentpass.approval-keys" "$ENTITLEMENT_DIR/client.plist"
 /usr/libexec/PlistBuddy -c "Set :keychain-access-groups:0 ${APP_IDENTIFIER_PREFIX}.dev.agentpass.service-keys" "$ENTITLEMENT_DIR/service.plist"
+/usr/libexec/PlistBuddy -c "Set :application-identifier ${APP_IDENTIFIER_PREFIX}.dev.agentpass.qualification-grant-client" "$ENTITLEMENT_DIR/qualification-client.plist"
+/usr/libexec/PlistBuddy -c "Set :com.apple.developer.team-identifier ${TEAM_ID}" "$ENTITLEMENT_DIR/qualification-client.plist"
+/usr/libexec/PlistBuddy -c "Set :keychain-access-groups:0 ${APP_IDENTIFIER_PREFIX}.dev.agentpass.service-keys" "$ENTITLEMENT_DIR/qualification-client.plist"
 if [[ "$ADHOC" -eq 0 ]]; then
   install -m 0644 "$SERVICE_PROFILE" "$SERVICE_APP/Contents/embedded.provisionprofile"
   install -m 0644 "$CLIENT_PROFILE" "$CLIENT_APP/Contents/embedded.provisionprofile"
   install -m 0644 "$AGENT_PROFILE" "$AGENT_HOST_APP/Contents/embedded.provisionprofile"
+  install -m 0644 "$QUALIFICATION_CLIENT_PROFILE" "$QUALIFICATION_CLIENT_APP/Contents/embedded.provisionprofile"
 fi
 
 /usr/bin/plutil -lint "$APP/Contents/Info.plist" "$SERVICE_APP/Contents/Info.plist" "$CLIENT_APP/Contents/Info.plist" \
-  "$AGENT_HOST_APP/Contents/Info.plist" "$DAEMON_DIR/dev.agentpass.native-service.plist" "$ENTITLEMENT_DIR/manager.plist" "$ENTITLEMENT_DIR/client.plist" "$ENTITLEMENT_DIR/service.plist" "$ENTITLEMENT_DIR/agent-host.plist" >/dev/null
+  "$AGENT_HOST_APP/Contents/Info.plist" "$QUALIFICATION_CLIENT_APP/Contents/Info.plist" "$DAEMON_DIR/dev.agentpass.native-service.plist" "$ENTITLEMENT_DIR/manager.plist" "$ENTITLEMENT_DIR/client.plist" "$ENTITLEMENT_DIR/service.plist" "$ENTITLEMENT_DIR/agent-host.plist" "$ENTITLEMENT_DIR/qualification-client.plist" >/dev/null
 
 node - "$RESOURCE_DIR/native-service.example.json" <<'NODE'
 const fs = require("node:fs");
@@ -180,6 +195,8 @@ sign_item() {
 sign_item "$SERVICE_APP" "dev.agentpass.native-service" "$ENTITLEMENT_DIR/service.plist"
 sign_item "$CLIENT_APP" "dev.agentpass.native-client" "$ENTITLEMENT_DIR/client.plist"
 sign_item "$AGENT_HOST_APP" "dev.agentpass.agent-host" "$ENTITLEMENT_DIR/agent-host.plist"
+sign_item "$QUALIFICATION_CLIENT_BINARY" "dev.agentpass.qualification-grant-client" "$ENTITLEMENT_DIR/qualification-client.plist"
+sign_item "$QUALIFICATION_CLIENT_APP" "dev.agentpass.qualification-grant-client" "$ENTITLEMENT_DIR/qualification-client.plist"
 if [[ "$ADHOC" -eq 1 ]]; then
   /usr/bin/codesign --force --sign - --identifier "dev.agentpass.atomic-rename" "$HELPER_DIR/agentpass-atomic-rename"
 else
@@ -220,6 +237,7 @@ verify_agent_entitlement() {
 /usr/bin/codesign --verify --strict --verbose=2 "$SERVICE_APP"
 /usr/bin/codesign --verify --strict --verbose=2 "$CLIENT_APP"
 /usr/bin/codesign --verify --strict --verbose=2 "$AGENT_HOST_APP"
+/usr/bin/codesign --verify --strict --verbose=2 "$QUALIFICATION_CLIENT_APP"
 /usr/bin/codesign --verify --strict --verbose=2 "$HELPER_DIR/agentpass-atomic-rename"
 /usr/bin/codesign --verify --strict --verbose=2 "$APP"
 verify_identifier "$SERVICE_APP" "dev.agentpass.native-service"
@@ -232,6 +250,25 @@ verify_identifier "$APP" "dev.agentpass"
 verify_group "$SERVICE_APP" "${APP_IDENTIFIER_PREFIX}.dev.agentpass.service-keys"
 verify_group "$CLIENT_APP" "${APP_IDENTIFIER_PREFIX}.dev.agentpass.approval-keys"
 verify_agent_entitlement "$AGENT_HOST_APP"
+verify_qualification_client_entitlements() {
+  local item="$1" extracted
+  extracted="$TEMP_DIR/qualification-client-signed-entitlements.plist"
+  /usr/bin/codesign -d --entitlements :- "$item" >"$extracted" 2>/dev/null
+  [[ "$(/usr/libexec/PlistBuddy -c 'Print :application-identifier' "$extracted")" == "${APP_IDENTIFIER_PREFIX}.dev.agentpass.qualification-grant-client" ]] || { echo "Qualification client application identifier mismatch" >&2; exit 1; }
+  [[ "$(/usr/libexec/PlistBuddy -c 'Print :com.apple.developer.team-identifier' "$extracted")" == "$TEAM_ID" ]] || { echo "Qualification client Team ID entitlement mismatch" >&2; exit 1; }
+  [[ "$(/usr/libexec/PlistBuddy -c 'Print :keychain-access-groups:0' "$extracted")" == "${APP_IDENTIFIER_PREFIX}.dev.agentpass.service-keys" ]] || { echo "Qualification client keychain group mismatch" >&2; exit 1; }
+  if /usr/libexec/PlistBuddy -c 'Print :keychain-access-groups:1' "$extracted" >/dev/null 2>&1; then
+    echo "Qualification client has an unexpected additional keychain group" >&2
+    exit 1
+  fi
+  for forbidden in get-task-allow com.apple.security.get-task-allow com.apple.security.cs.disable-library-validation com.apple.security.cs.allow-dyld-environment-variables; do
+    if /usr/libexec/PlistBuddy -c "Print :$forbidden" "$extracted" >/dev/null 2>&1; then
+      echo "Qualification client has forbidden entitlement: $forbidden" >&2
+      exit 1
+    fi
+  done
+}
+verify_qualification_client_entitlements "$QUALIFICATION_CLIENT_APP"
 [[ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$APP/Contents/Info.plist")" == "agentpass-onboarding" ]] || { echo "Unexpected outer app executable" >&2; exit 1; }
 [[ "$(/usr/libexec/PlistBuddy -c 'Print :LSUIElement' "$APP/Contents/Info.plist")" == "false" ]] || { echo "Outer app must be visible to users" >&2; exit 1; }
 [[ "$(/usr/libexec/PlistBuddy -c 'Print :Label' "$DAEMON_DIR/dev.agentpass.native-service.plist")" == "dev.agentpass.native-service" ]] || { echo "Unexpected daemon label" >&2; exit 1; }
@@ -241,7 +278,7 @@ verify_agent_entitlement "$AGENT_HOST_APP"
 [[ "$(/usr/libexec/PlistBuddy -c 'Print :MachServices:dev.agentpass.n3e-qualification' "$DAEMON_DIR/dev.agentpass.native-service.plist")" == "true" ]] || { echo "Missing reserved qualification Mach service" >&2; exit 1; }
 
 if [[ "$ADHOC" -eq 0 ]]; then
-  for item in "$SERVICE_APP" "$CLIENT_APP" "$AGENT_HOST_APP" "$HELPER_DIR/agentpass-atomic-rename" "$MACOS_DIR/agentpass-native-manager" "$MACOS_DIR/agentpass-onboarding" "$APP"; do
+  for item in "$SERVICE_APP" "$CLIENT_APP" "$AGENT_HOST_APP" "$QUALIFICATION_CLIENT_APP" "$HELPER_DIR/agentpass-atomic-rename" "$MACOS_DIR/agentpass-native-manager" "$MACOS_DIR/agentpass-onboarding" "$APP"; do
     actual_team="$(/usr/bin/codesign -dv --verbose=4 "$item" 2>&1 | /usr/bin/awk -F= '/^TeamIdentifier=/{print $2; exit}')"
     [[ "$actual_team" == "$TEAM_ID" ]] || { echo "Unexpected TeamIdentifier on $item" >&2; exit 1; }
   done

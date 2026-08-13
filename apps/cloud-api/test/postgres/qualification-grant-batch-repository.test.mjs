@@ -80,14 +80,7 @@ function manifestEnvelope() {
   const steps = Array.from({ length: 7 }, (_, index) => {
     const row = grantRow(index);
     const [kind, scenario, phase] = STEP_IDENTITIES[index];
-    return { index, kind, scenario, phase, run_binding: `run-${index + 1}`, grant_id: row.grant_id, grant_hash: row.grant_hash, statement_hash: row.statement_hash, grant: { version: 1, type: AGENT_SESSION_GRANT_TYPE, statement: normalizeAgentSessionGrantStatement({
-      version: 1, grant_id: row.grant_id, organization_id: ORG, device_id: DEVICE, agent_id: AGENT,
-      agent_kind: "claude-code", adapter_id: row.adapter_id, adapter_version: row.adapter_version,
-      worktree_binding_sha256: row.worktree_binding_sha256, process_binding_policy_id: row.process_binding_policy_id,
-      scope: row.scope_json, max_signatures: row.max_signatures, not_before: NOW, expires_at: EXPIRES,
-      control_sequence: row.control_sequence, authority_generation: row.authority_generation,
-      issuer: row.issuer, key_id: row.signer_key_id
-    }, { allowExpired: true, allowFuture: true }), statement_hash: row.statement_hash, signature: row.signature_base64url } };
+    return { index, kind, scenario, phase, run_binding: `run-${index + 1}`, grant_id: row.grant_id, grant_hash: row.grant_hash, statement_hash: row.statement_hash };
   });
   const statement = {
     version: QUALIFICATION_GRANT_BATCH_MANIFEST_VERSION, type: QUALIFICATION_GRANT_BATCH_MANIFEST_TYPE, batch_id: BATCH,
@@ -96,7 +89,7 @@ function manifestEnvelope() {
     release_trust_sha256: HASH, candidate_checkpoint_sha256: HASH, issued_at: NOW, expires_at: EXPIRES, steps,
     issuer: QUALIFICATION_GRANT_BATCH_MANIFEST_ISSUER, key_id: "manifest-key-v1"
   };
-  return { version: 1, type: QUALIFICATION_GRANT_BATCH_MANIFEST_TYPE, statement, statement_hash: qualificationGrantBatchManifestStatementHash(statement), signature: Buffer.alloc(64, 0x42).toString("base64url") };
+  return { version: QUALIFICATION_GRANT_BATCH_MANIFEST_VERSION, type: QUALIFICATION_GRANT_BATCH_MANIFEST_TYPE, statement, statement_hash: qualificationGrantBatchManifestStatementHash(statement), signature: Buffer.alloc(64, 0x42).toString("base64url") };
 }
 
 function batchRow() {

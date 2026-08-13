@@ -51,7 +51,9 @@ internal struct FixedQualificationClientConfiguration: Sendable {
   let deviceID: String
   let batchID: String
   let keychainAccessGroup: String
-  let trustKey: Curve25519.Signing.PublicKey
+  let manifestPublicKey: Curve25519.Signing.PublicKey
+  let expectedManifestKeyID: String
+  let grantPublicKey: Curve25519.Signing.PublicKey
   let expectedGrantKeyID: String
 }
 
@@ -112,9 +114,9 @@ internal enum FixedQualificationClientParser {
     try exactKeys(
       object,
       [
-        "api_origin", "batch_id", "device_id", "expected_grant_key_id",
-        "keychain_access_group", "kind", "organization_id", "schema_version",
-        "trust_public_key_base64"
+        "agent_session_key_id", "agent_session_public_key_base64", "api_origin", "batch_id",
+        "device_id", "keychain_access_group", "kind", "manifest_key_id",
+        "manifest_public_key_base64", "organization_id", "schema_version"
       ]
     )
     guard object["schema_version"] as? Int == 1,
@@ -124,14 +126,24 @@ internal enum FixedQualificationClientParser {
       let organizationID = uuid(object["organization_id"]),
       let deviceID = uuid(object["device_id"]),
       let batchID = uuid(object["batch_id"]),
-      let keyID = object["expected_grant_key_id"] as? String,
-      validSafeIdentifier(keyID),
+      let grantKeyID = object["agent_session_key_id"] as? String,
+      validSafeIdentifier(grantKeyID),
+      let manifestKeyID = object["manifest_key_id"] as? String,
+      validSafeIdentifier(manifestKeyID),
+      grantKeyID != manifestKeyID,
       let accessGroup = object["keychain_access_group"] as? String,
       validKeychainAccessGroup(accessGroup),
-      let encodedKey = object["trust_public_key_base64"] as? String,
-      let rawKey = Data(base64Encoded: encodedKey),
-      rawKey.count == 32,
-      let trustKey = try? Curve25519.Signing.PublicKey(rawRepresentation: rawKey)
+      let encodedGrantKey = object["agent_session_public_key_base64"] as? String,
+      let grantRawKey = Data(base64Encoded: encodedGrantKey),
+      grantRawKey.count == 32,
+      grantRawKey.base64EncodedString() == encodedGrantKey,
+      let grantKey = try? Curve25519.Signing.PublicKey(rawRepresentation: grantRawKey),
+      let encodedManifestKey = object["manifest_public_key_base64"] as? String,
+      let manifestRawKey = Data(base64Encoded: encodedManifestKey),
+      manifestRawKey.count == 32,
+      manifestRawKey.base64EncodedString() == encodedManifestKey,
+      grantRawKey != manifestRawKey,
+      let manifestKey = try? Curve25519.Signing.PublicKey(rawRepresentation: manifestRawKey)
     else { throw QualificationGrantClientError.invalidConfiguration }
     guard let normalizedOrigin = URLComponents(url: origin, resolvingAgainstBaseURL: false),
       normalizedOrigin.scheme == "https",
@@ -148,8 +160,10 @@ internal enum FixedQualificationClientParser {
       deviceID: deviceID,
       batchID: batchID,
       keychainAccessGroup: accessGroup,
-      trustKey: trustKey,
-      expectedGrantKeyID: keyID
+      manifestPublicKey: manifestKey,
+      expectedManifestKeyID: manifestKeyID,
+      grantPublicKey: grantKey,
+      expectedGrantKeyID: grantKeyID
     )
   }
 
@@ -228,7 +242,7 @@ internal enum FixedQualificationClientParser {
   static func cloudResponseEnvelope(_ data: Data) throws -> [String: Any] {
     let object = try object(data, maximum: relayResponseMaximumBytes)
     try exactKeys(object, ["batch", "request_id"])
-    guard object["request_id"] as? String != nil,
+    guard uuid(object["request_id"]) != nil,
       let batch = object["batch"] as? [String: Any],
       batch["manifest"] as? [String: Any] != nil
     else { throw QualificationGrantClientError.invalidResponse }
@@ -552,7 +566,9 @@ public enum FixedQualificationGrantClient {
         batchID: configuration.batchID,
         transport: capture,
         signer: signer,
-        trustKey: configuration.trustKey,
+        manifestPublicKey: configuration.manifestPublicKey,
+        expectedManifestKeyID: configuration.expectedManifestKeyID,
+        grantPublicKey: configuration.grantPublicKey,
         expectedGrantKeyID: configuration.expectedGrantKeyID
       )
     } catch { throw QualificationGrantClientError.invalidConfiguration }

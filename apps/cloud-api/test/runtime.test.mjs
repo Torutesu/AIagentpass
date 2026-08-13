@@ -71,13 +71,20 @@ test("production human auth is composed from PostgreSQL and closed with the runt
   const recentAuthService = { async authorize() { return { verified: false }; } };
   const humanSession = { async authenticateRequest() { return { session: {} }; } };
   let signerHealthy = true;
+  let qualificationSignerHealthy = true;
   const provider = signerProvider(value);
   const publicKeyMetadata = provider.publicKeyMetadata;
   provider.publicKeyMetadata = async (input) => {
     if (!signerHealthy) throw new Error("simulated provider outage");
     return publicKeyMetadata(input);
   };
-  const runtime = await createCloudRuntime({ env, logger: { info() {} }, agentSessionSignerProvider: provider, qualificationManifestSignerProvider: qualificationSignerProvider(value), postgresFactory: async (input) => { calls.push(["postgres", input.applicationVersion, typeof input.refreshNonceCodec?.derive, typeof input.resolveProcessBindingPolicy]); return postgresRuntime; }, humanAuthFactory: (input) => { calls.push(["human", input.origin, input.rpId, input.cursorSecret, input.signedConsoleIdentity, input.agentSessionSigner, input.qualificationManifestSigner]); return { api: { async handle() { return { status: 404, body: { error: { code: "not_found", message: "Resource not found" } }, headers: {} }; } }, humanSession, recentAuthService }; } });
+  const qualificationProvider = qualificationSignerProvider(value);
+  const qualificationPublicKeyMetadata = qualificationProvider.publicKeyMetadata;
+  qualificationProvider.publicKeyMetadata = async (input) => {
+    if (!qualificationSignerHealthy) throw new Error("simulated qualification provider outage");
+    return qualificationPublicKeyMetadata(input);
+  };
+  const runtime = await createCloudRuntime({ env, logger: { info() {} }, agentSessionSignerProvider: provider, qualificationManifestSignerProvider: qualificationProvider, postgresFactory: async (input) => { calls.push(["postgres", input.applicationVersion, typeof input.refreshNonceCodec?.derive, typeof input.resolveProcessBindingPolicy]); return postgresRuntime; }, humanAuthFactory: (input) => { calls.push(["human", input.origin, input.rpId, input.cursorSecret, input.signedConsoleIdentity, input.agentSessionSigner, input.qualificationManifestSigner]); return { api: { async handle() { return { status: 404, body: { error: { code: "not_found", message: "Resource not found" } }, headers: {} }; } }, humanSession, recentAuthService }; } });
   assert.equal(runtime.postgresRuntime, postgresRuntime);
   assert.equal(runtime.humanAuthRuntime.recentAuthService, recentAuthService);
   assert.deepEqual(calls[0], ["postgres", "0.18.0", "function", "function"]);
@@ -102,6 +109,13 @@ test("production human auth is composed from PostgreSQL and closed with the runt
   const degradedBody = await degraded.json();
   assert.equal(degradedBody.code, "agent_session_signer_unavailable");
   assert.deepEqual(degradedBody.checks.agent_session_signer, { ok: false, purpose: "agent-session-grant", algorithm: "ed25519", key_id: null, public_key_fingerprint: null });
+  signerHealthy = true;
+  qualificationSignerHealthy = false;
+  const qualificationDegraded = await fetch(`http://127.0.0.1:${address.port}/health/ready`, { headers: probeHeaders });
+  assert.equal(qualificationDegraded.status, 503);
+  const qualificationDegradedBody = await qualificationDegraded.json();
+  assert.equal(qualificationDegradedBody.code, "qualification_manifest_signer_unavailable");
+  assert.deepEqual(qualificationDegradedBody.checks.qualification_manifest_signer, { ok: false, purpose: "agentpass.qualification-grant-batch-manifest", algorithm: "ed25519", key_id: null, public_key_fingerprint: null });
   await runtime.close();
   assert.equal(calls.at(-1), "postgres-close");
 });

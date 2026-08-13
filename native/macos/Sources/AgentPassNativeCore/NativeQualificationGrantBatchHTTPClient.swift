@@ -73,10 +73,12 @@ public struct NativeQualificationGrantBatchStep: Sendable {
   public let grantHash: String
   public let statementHash: String
   public let grantCanonicalBytes: Data
+  fileprivate let grantSignature: String
 
   fileprivate init(
     index: Int, kind: String, scenario: String?, phase: String?, runBinding: String,
-    grantID: String, grantHash: String, statementHash: String, grantCanonicalBytes: Data
+    grantID: String, grantHash: String, statementHash: String, grantCanonicalBytes: Data,
+    grantSignature: String
   ) {
     self.index = index
     self.kind = kind
@@ -87,6 +89,7 @@ public struct NativeQualificationGrantBatchStep: Sendable {
     self.grantHash = grantHash
     self.statementHash = statementHash
     self.grantCanonicalBytes = grantCanonicalBytes
+    self.grantSignature = grantSignature
   }
 }
 
@@ -139,8 +142,8 @@ public struct NativeQualificationGrantBatchClaim: Sendable {
 }
 
 /// Native client for the device-authenticated, one-shot qualification claim.
-/// The trust key is the Cloud Ed25519 authority used for both the unchanged
-/// agent-session-grant-v1 envelopes and the separately signed batch manifest.
+/// Grant envelopes and the qualification manifest are signed by separate,
+/// purpose-pinned Ed25519 authorities and are never interchangeable.
 public final class NativeQualificationGrantBatchHTTPClient: @unchecked Sendable {
   public static let maximumRequestBytes = 16 * 1024
   public static let maximumResponseBytes = 512 * 1024
@@ -151,7 +154,7 @@ public final class NativeQualificationGrantBatchHTTPClient: @unchecked Sendable 
   private static let grantSigningDomain = Data("AgentPass-Agent-Session-Grant-v1\0".utf8)
   // Cross-language protocol constant; keep byte-exact with
   // qualification-grant-batch-manifest.mjs.
-  private static let manifestSigningDomain = Data("AgentPass-Qualification-Grant-Batch-v1\0".utf8)
+  private static let manifestSigningDomain = Data("AgentPass-Qualification-Grant-Batch-v2\0".utf8)
   private static let uuidPattern = try! NSRegularExpression(
     pattern: "^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$")
   private static let digestPattern = try! NSRegularExpression(pattern: "^[0-9a-f]{64}$")
@@ -171,8 +174,10 @@ public final class NativeQualificationGrantBatchHTTPClient: @unchecked Sendable 
   private let batchID: String
   private let transport: any NativeAgentHTTPTransporting
   private let signer: any P256MessageSigner
-  private let trustKey: Curve25519.Signing.PublicKey
-  private let expectedGrantKeyID: String?
+  private let manifestPublicKey: Curve25519.Signing.PublicKey
+  private let expectedManifestKeyID: String
+  private let grantPublicKey: Curve25519.Signing.PublicKey
+  private let expectedGrantKeyID: String
   private let random: any NativeAgentRandomBytesGenerating
   private let wallClock: any NativeAgentWallClock
   private let timeoutSeconds: Int
@@ -184,15 +189,20 @@ public final class NativeQualificationGrantBatchHTTPClient: @unchecked Sendable 
     batchID: String,
     transport: any NativeAgentHTTPTransporting,
     signer: any P256MessageSigner,
-    trustKey: Curve25519.Signing.PublicKey,
-    expectedGrantKeyID: String? = nil,
+    manifestPublicKey: Curve25519.Signing.PublicKey,
+    expectedManifestKeyID: String,
+    grantPublicKey: Curve25519.Signing.PublicKey,
+    expectedGrantKeyID: String,
     random: any NativeAgentRandomBytesGenerating = NativeAgentSystemRandomBytesGenerator(),
     wallClock: any NativeAgentWallClock = NativeAgentSystemWallClock(),
     timeoutSeconds: Int = 10
   ) throws {
     guard Self.validHTTPSOrigin(baseURL), Self.validUUID(organizationID), Self.validUUID(deviceID),
       Self.validUUID(batchID), (1...30).contains(timeoutSeconds),
-      expectedGrantKeyID == nil || Self.validSafeIdentifier(expectedGrantKeyID!)
+      Self.validSafeIdentifier(expectedManifestKeyID),
+      Self.validSafeIdentifier(expectedGrantKeyID),
+      expectedManifestKeyID != expectedGrantKeyID,
+      manifestPublicKey.rawRepresentation != grantPublicKey.rawRepresentation
     else { throw NativeQualificationGrantBatchHTTPError.invalidConfiguration }
     self.baseURL = baseURL
     self.organizationID = organizationID
@@ -200,7 +210,9 @@ public final class NativeQualificationGrantBatchHTTPClient: @unchecked Sendable 
     self.batchID = batchID
     self.transport = transport
     self.signer = signer
-    self.trustKey = trustKey
+    self.manifestPublicKey = manifestPublicKey
+    self.expectedManifestKeyID = expectedManifestKeyID
+    self.grantPublicKey = grantPublicKey
     self.expectedGrantKeyID = expectedGrantKeyID
     self.random = random
     self.wallClock = wallClock
@@ -277,14 +289,15 @@ public final class NativeQualificationGrantBatchHTTPClient: @unchecked Sendable 
   ) throws -> NativeQualificationGrantBatchClaim {
     let envelope = try NativeStrictJSON.object(
       from: data, maxBytes: Self.maximumResponseBytes, maxDepth: 32)
-    guard Self.exactKeys(envelope, ["batch", "manifest", "request_id"]),
+    guard Self.exactKeys(envelope, ["batch", "request_id"]),
       let batch = envelope["batch"] as? [String: Any],
-      let manifest = envelope["manifest"] as? [String: Any],
+      let manifest = batch["manifest"] as? [String: Any],
       let requestID = envelope["request_id"] as? String,
       Self.validUUID(requestID)
     else { throw NativeQualificationGrantBatchHTTPError.invalidResponse }
     let batchValue = try parseBatch(batch, request: request, nowMilliseconds: nowMilliseconds)
-    let manifestValue = try parseManifest(manifest, request: request, batch: batchValue)
+    let manifestValue = try parseManifest(
+      manifest, request: request, batch: batchValue, nowMilliseconds: nowMilliseconds)
     guard manifestValue.steps.count == batchValue.steps.count else {
       throw NativeQualificationGrantBatchHTTPError.invalidResponse
     }
@@ -335,7 +348,7 @@ public final class NativeQualificationGrantBatchHTTPClient: @unchecked Sendable 
     let keys = [
       "agent_id", "agent_kind", "artifact_sha256", "batch_id", "candidate_checkpoint_sha256",
       "candidate_sha256", "device_id", "expires_at", "kind", "organization_id", "release_trust_sha256",
-      "requested_ttl_seconds", "schema_version", "source_commit", "steps", "team_id",
+      "requested_ttl_seconds", "schema_version", "source_commit", "steps", "team_id", "manifest",
     ]
     guard Self.exactKeys(value, keys), value["schema_version"] as? Int == 1,
       value["kind"] as? String == "agentpass-n3e-qualification-grant-batch",
@@ -353,7 +366,7 @@ public final class NativeQualificationGrantBatchHTTPClient: @unchecked Sendable 
       let checkpoint = Self.digest(value["candidate_checkpoint_sha256"]), checkpoint == request.candidateCheckpointSHA256,
       let expires = Self.timestamp(value["expires_at"]), let expiresMilliseconds = Self.dateMilliseconds(expires),
       expiresMilliseconds > nowMilliseconds,
-      expiresMilliseconds <= nowMilliseconds + Int64(Self.maximumBatchTTLSeconds) * 1_000,
+      expiresMilliseconds <= nowMilliseconds + Int64(ttl) * 1_000,
       let rawSteps = value["steps"] as? [[String: Any]], rawSteps.count == 7
     else { throw NativeQualificationGrantBatchHTTPError.invalidResponse }
     let steps = try rawSteps.enumerated().map { try parseBatchStep($0.offset, value: $0.element, batch: ParsedBatchPlaceholder(
@@ -361,6 +374,12 @@ public final class NativeQualificationGrantBatchHTTPClient: @unchecked Sendable 
       agentKind: agentKind, expiresAt: expires, candidateSHA256: candidate, sourceCommit: source,
       artifactSHA256: artifact, teamID: team, releaseTrustSHA256: trust,
       candidateCheckpointSHA256: checkpoint, expiresAtMilliseconds: expiresMilliseconds), nowMilliseconds: nowMilliseconds) }
+    guard Set(steps.map(\.grantID)).count == steps.count,
+      Set(steps.map(\.grantHash)).count == steps.count,
+      Set(steps.map(\.statementHash)).count == steps.count,
+      Set(steps.map(\.runBinding)).count == steps.count,
+      Set(steps.map(\.grantSignature)).count == steps.count
+    else { throw NativeQualificationGrantBatchHTTPError.invalidResponse }
     return ParsedBatch(
       batchID: batchID, organizationID: organizationID, deviceID: deviceID, agentID: agentID,
       agentKind: agentKind, requestedTTLSeconds: ttl, candidateSHA256: candidate, sourceCommit: source,
@@ -399,48 +418,67 @@ public final class NativeQualificationGrantBatchHTTPClient: @unchecked Sendable 
       agentID: batch.agentID, agentKind: batch.agentKind, expiresAt: batch.expiresAt,
       runBinding: runBinding, index: index, kind: identity.kind, scenario: identity.scenario,
       phase: identity.phase, nowMilliseconds: nowMilliseconds, expectedGrantID: nil,
-      expectedGrantHash: nil, expectedStatementHash: nil)
+      expectedGrantHash: nil, expectedStatementHash: nil, expectedNotBefore: nil)
     return NativeQualificationGrantBatchStep(
       index: index, kind: identity.kind, scenario: identity.scenario, phase: identity.phase,
       runBinding: runBinding, grantID: parsed.grantID, grantHash: parsed.grantHash,
-      statementHash: parsed.statementHash, grantCanonicalBytes: parsed.grantCanonicalBytes)
+      statementHash: parsed.statementHash, grantCanonicalBytes: parsed.grantCanonicalBytes,
+      grantSignature: parsed.signature)
   }
 
   private func parseManifest(
-    _ value: [String: Any], request: NativeQualificationGrantBatchClaimRequest, batch: ParsedBatch
+    _ value: [String: Any], request: NativeQualificationGrantBatchClaimRequest, batch: ParsedBatch,
+    nowMilliseconds: Int64
   ) throws -> ParsedManifest {
     let envelopeKeys = ["signature", "statement", "statement_hash", "type", "version"]
-    guard Self.exactKeys(value, envelopeKeys), value["version"] as? Int == 1,
+    guard Self.exactKeys(value, envelopeKeys), value["version"] as? Int == 2,
       value["type"] as? String == "agentpass.qualification-grant-batch-manifest",
       let statement = value["statement"] as? [String: Any],
       let statementHash = Self.digest(value["statement_hash"]),
       let signatureText = value["signature"] as? String,
-      let signature = Self.base64URL(signatureText), signature.count == 64,
-      Self.matchesHash(statementHash, data: try NativeStrictJSON.data(statement)),
-      trustKey.isValidSignature(signature, for: Self.signedData(domain: Self.manifestSigningDomain, statement: statement))
+      let signature = Self.base64URL(signatureText), signature.count == 64
+    else { throw NativeQualificationGrantBatchHTTPError.invalidResponse }
+    let statementData = try NativeStrictJSON.data(statement)
+    var manifestSigningData = Self.manifestSigningDomain
+    manifestSigningData.append(statementData)
+    guard manifestSigningData.count <= 4_096,
+      Self.matchesHash(statementHash, data: statementData),
+      manifestPublicKey.isValidSignature(signature, for: manifestSigningData)
     else { throw NativeQualificationGrantBatchHTTPError.invalidResponse }
     let keys = [
-      "artifact_sha256", "batch_id", "candidate_checkpoint_sha256", "candidate_sha256",
-      "device_id", "expires_at", "organization_id", "release_trust_sha256", "schema_version",
-      "source_commit", "steps", "team_id",
+      "agent_id", "agent_kind", "artifact_sha256", "batch_id", "candidate_checkpoint_sha256",
+      "candidate_sha256", "device_id", "expires_at", "issued_at", "issuer", "key_id",
+      "organization_id", "release_trust_sha256", "requested_ttl_seconds", "source_commit",
+      "steps", "team_id", "type", "version",
     ]
-    guard Self.exactKeys(statement, keys), statement["schema_version"] as? Int == 1,
+    guard Self.exactKeys(statement, keys), statement["version"] as? Int == 2,
+      statement["type"] as? String == "agentpass.qualification-grant-batch-manifest",
       Self.uuid(statement["batch_id"]) == batch.batchID,
       Self.uuid(statement["organization_id"]) == batch.organizationID,
       Self.uuid(statement["device_id"]) == batch.deviceID,
+      Self.uuid(statement["agent_id"]) == batch.agentID,
+      statement["agent_kind"] as? String == batch.agentKind,
+      Self.safeInt(statement["requested_ttl_seconds"]) == batch.requestedTTLSeconds,
       Self.digest(statement["candidate_sha256"]) == request.candidateSHA256,
       Self.commit(statement["source_commit"]) == request.sourceCommit,
       Self.digest(statement["artifact_sha256"]) == request.artifactSHA256,
       Self.teamID(statement["team_id"]) == request.teamID,
       Self.digest(statement["release_trust_sha256"]) == request.releaseTrustSHA256,
       Self.digest(statement["candidate_checkpoint_sha256"]) == request.candidateCheckpointSHA256,
+      let issuedAt = Self.timestamp(statement["issued_at"]),
       Self.timestamp(statement["expires_at"]) == batch.expiresAt,
+      statement["issuer"] as? String == "agentpass-cloud",
+      statement["key_id"] as? String == expectedManifestKeyID,
       let rawSteps = statement["steps"] as? [[String: Any]], rawSteps.count == 7
+    else { throw NativeQualificationGrantBatchHTTPError.invalidResponse }
+    guard let issuedAtMilliseconds = Self.dateMilliseconds(issuedAt),
+      issuedAtMilliseconds <= nowMilliseconds,
+      batch.expiresAtMilliseconds > issuedAtMilliseconds,
+      batch.expiresAtMilliseconds - issuedAtMilliseconds == Int64(batch.requestedTTLSeconds) * 1_000
     else { throw NativeQualificationGrantBatchHTTPError.invalidResponse }
     var seenGrantIDs = Set<String>()
     var seenGrantHashes = Set<String>()
     var seenStatementHashes = Set<String>()
-    var seenSignatures = Set<String>()
     var seenRunBindings = Set<String>()
     let steps = try rawSteps.enumerated().map { position, raw in
       let identity = Self.stepIdentity(position)
@@ -455,20 +493,14 @@ public final class NativeQualificationGrantBatchHTTPClient: @unchecked Sendable 
         seenGrantHashes.insert(grantHash).inserted, seenStatementHashes.insert(statementHash).inserted
       else { throw NativeQualificationGrantBatchHTTPError.invalidResponse }
       let batchStep = batch.steps[position]
-      let grant = try parseGrant(
-        batchStep.grantCanonicalBytes, batchID: batch.batchID, organizationID: batch.organizationID,
-        deviceID: batch.deviceID, agentID: batch.agentID, agentKind: batch.agentKind,
-        expiresAt: batch.expiresAt, runBinding: runBinding, index: position, kind: identity.kind,
-        scenario: identity.scenario, phase: identity.phase, nowMilliseconds: batch.expiresAtMilliseconds - 1,
-        expectedGrantID: grantID, expectedGrantHash: grantHash, expectedStatementHash: statementHash)
-      guard grant.grantID == grantID, grant.grantHash == grantHash,
-        grant.statementHash == statementHash, batchStep.runBinding == runBinding,
-        seenSignatures.insert(grant.signature).inserted
+      guard batchStep.grantID == grantID, batchStep.grantHash == grantHash,
+        batchStep.statementHash == statementHash, batchStep.runBinding == runBinding
       else { throw NativeQualificationGrantBatchHTTPError.invalidResponse }
       return NativeQualificationGrantBatchStep(
         index: position, kind: identity.kind, scenario: identity.scenario, phase: identity.phase,
         runBinding: runBinding, grantID: grantID, grantHash: grantHash,
-        statementHash: statementHash, grantCanonicalBytes: grant.grantCanonicalBytes)
+        statementHash: statementHash, grantCanonicalBytes: batchStep.grantCanonicalBytes,
+        grantSignature: batchStep.grantSignature)
     }
     return ParsedManifest(steps: steps)
   }
@@ -485,7 +517,8 @@ public final class NativeQualificationGrantBatchHTTPClient: @unchecked Sendable 
     _ value: [String: Any], batchID: String, organizationID: String, deviceID: String,
     agentID: String, agentKind: String, expiresAt: String, runBinding: String, index: Int,
     kind: String, scenario: String?, phase: String?, nowMilliseconds: Int64,
-    expectedGrantID: String?, expectedGrantHash: String?, expectedStatementHash: String?
+    expectedGrantID: String?, expectedGrantHash: String?, expectedStatementHash: String?,
+    expectedNotBefore: String?
   ) throws -> ParsedGrant {
     let grantBytes = try NativeStrictJSON.data(value)
     return try parseGrant(
@@ -493,14 +526,14 @@ public final class NativeQualificationGrantBatchHTTPClient: @unchecked Sendable 
       agentID: agentID, agentKind: agentKind, expiresAt: expiresAt, runBinding: runBinding,
       index: index, kind: kind, scenario: scenario, phase: phase, nowMilliseconds: nowMilliseconds,
       expectedGrantID: expectedGrantID, expectedGrantHash: expectedGrantHash,
-      expectedStatementHash: expectedStatementHash)
+      expectedStatementHash: expectedStatementHash, expectedNotBefore: expectedNotBefore)
   }
 
   private func parseGrant(
     _ data: Data, batchID: String, organizationID: String, deviceID: String, agentID: String,
     agentKind: String, expiresAt: String, runBinding: String, index: Int, kind: String,
     scenario: String?, phase: String?, nowMilliseconds: Int64, expectedGrantID: String?,
-    expectedGrantHash: String?, expectedStatementHash: String?
+    expectedGrantHash: String?, expectedStatementHash: String?, expectedNotBefore: String?
   ) throws -> ParsedGrant {
     guard data.count > 0, data.count <= Self.maximumGrantBytes else {
       throw NativeQualificationGrantBatchHTTPError.invalidResponse
@@ -521,8 +554,9 @@ public final class NativeQualificationGrantBatchHTTPClient: @unchecked Sendable 
       Self.validSemver(statement["adapter_version"] as? String),
       Self.digest(statement["worktree_binding_sha256"]) != nil,
       Self.validSafeIdentifier(statement["process_binding_policy_id"] as? String),
-      let maxSignatures = Self.safeInt(statement["max_signatures"]), (1...64).contains(maxSignatures),
+      let maxSignatures = Self.safeInt(statement["max_signatures"]), maxSignatures == 1,
       let notBefore = Self.timestamp(statement["not_before"]),
+      expectedNotBefore == nil || notBefore == expectedNotBefore,
       Self.timestamp(statement["expires_at"]) == expiresAt,
       let notBeforeMilliseconds = Self.dateMilliseconds(notBefore),
       let statementExpiresMilliseconds = Self.dateMilliseconds(expiresAt),
@@ -532,19 +566,22 @@ public final class NativeQualificationGrantBatchHTTPClient: @unchecked Sendable 
       let authorityGeneration = Self.positiveSafeInt(statement["authority_generation"]), authorityGeneration > 0,
       statement["issuer"] as? String == "agentpass-cloud",
       let keyID = statement["key_id"] as? String, Self.validSafeIdentifier(keyID),
-      expectedGrantKeyID == nil || keyID == expectedGrantKeyID,
+      keyID == expectedGrantKeyID,
       Self.validScope(statement["scope"] as? [String: Any]),
       let statementHash = Self.digest(value["statement_hash"]),
       Self.matchesHash(statementHash, data: try NativeStrictJSON.data(statement)),
       let signatureText = value["signature"] as? String, Self.validSignature(signatureText),
       let signature = Self.base64URL(signatureText), signature.count == 64,
-      trustKey.isValidSignature(signature, for: Self.signedData(domain: Self.grantSigningDomain, statement: statement))
+      grantPublicKey.isValidSignature(signature, for: Self.signedData(domain: Self.grantSigningDomain, statement: statement))
     else { throw NativeQualificationGrantBatchHTTPError.invalidResponse }
     let grantHash = Self.sha256Hex(data)
     guard expectedGrantHash == nil || grantHash == expectedGrantHash,
       expectedStatementHash == nil || statementHash == expectedStatementHash
     else { throw NativeQualificationGrantBatchHTTPError.invalidResponse }
-    _ = batchID; _ = runBinding; _ = index; _ = kind; _ = scenario; _ = phase
+    guard batchID == self.batchID, organizationID == self.organizationID, deviceID == self.deviceID,
+      agentID.count == 36, ["claude-code", "cursor"].contains(agentKind),
+      runBinding.isEmpty == false, index >= 0, !kind.isEmpty
+    else { throw NativeQualificationGrantBatchHTTPError.invalidResponse }
     return ParsedGrant(
       grantID: grantID, grantHash: grantHash, statementHash: statementHash,
       signature: signatureText, grantCanonicalBytes: data)

@@ -70,6 +70,8 @@ jobs:
           AGENTPASS_APP_IDENTIFIER_PREFIX: ${{ secrets.AGENTPASS_APP_IDENTIFIER_PREFIX }}
           AGENTPASS_SERVICE_PROFILE_BASE64: ${{ secrets.AGENTPASS_SERVICE_PROFILE_BASE64 }}
           AGENTPASS_CLIENT_PROFILE_BASE64: ${{ secrets.AGENTPASS_CLIENT_PROFILE_BASE64 }}
+          AGENTPASS_AGENT_PROFILE_BASE64: ${{ secrets.AGENTPASS_AGENT_PROFILE_BASE64 }}
+          AGENTPASS_QUALIFICATION_CLIENT_PROFILE_BASE64: ${{ secrets.AGENTPASS_QUALIFICATION_CLIENT_PROFILE_BASE64 }}
           AGENTPASS_CONTROLLER_PROFILE_BASE64: ${{ secrets.AGENTPASS_CONTROLLER_PROFILE_BASE64 }}
           AGENTPASS_EPHEMERAL_KEYCHAIN_PASSWORD: ${{ secrets.AGENTPASS_EPHEMERAL_KEYCHAIN_PASSWORD }}
           AGENTPASS_RELEASE_MANIFEST_PRIVATE_KEY_BASE64: ${{ secrets.AGENTPASS_RELEASE_MANIFEST_PRIVATE_KEY_BASE64 }}
@@ -80,9 +82,13 @@ jobs:
       - name: Require dedicated controller profile
         env:
           AGENTPASS_CONTROLLER_PROFILE_BASE64: ${{ secrets.AGENTPASS_CONTROLLER_PROFILE_BASE64 }}
+          AGENTPASS_AGENT_PROFILE_BASE64: ${{ secrets.AGENTPASS_AGENT_PROFILE_BASE64 }}
+          AGENTPASS_QUALIFICATION_CLIENT_PROFILE_BASE64: ${{ secrets.AGENTPASS_QUALIFICATION_CLIENT_PROFILE_BASE64 }}
         run: |
           set -euo pipefail
           : "${AGENTPASS_CONTROLLER_PROFILE_BASE64:?AGENTPASS_CONTROLLER_PROFILE_BASE64 is required}"
+          : "${AGENTPASS_AGENT_PROFILE_BASE64:?AGENTPASS_AGENT_PROFILE_BASE64 is required}"
+          : "${AGENTPASS_QUALIFICATION_CLIENT_PROFILE_BASE64:?AGENTPASS_QUALIFICATION_CLIENT_PROFILE_BASE64 is required}"
       - run: npm ci
       - run: node scripts/release/validate-version.mjs --require-tag --tag="$AGENTPASS_RELEASE_TAG"
       - name: Generate immutable database migration manifest
@@ -100,6 +106,8 @@ jobs:
           AGENTPASS_SIGNING_CERTIFICATE_PASSWORD: ${{ secrets.AGENTPASS_SIGNING_CERTIFICATE_PASSWORD }}
           AGENTPASS_SERVICE_PROFILE_BASE64: ${{ secrets.AGENTPASS_SERVICE_PROFILE_BASE64 }}
           AGENTPASS_CLIENT_PROFILE_BASE64: ${{ secrets.AGENTPASS_CLIENT_PROFILE_BASE64 }}
+          AGENTPASS_AGENT_PROFILE_BASE64: ${{ secrets.AGENTPASS_AGENT_PROFILE_BASE64 }}
+          AGENTPASS_QUALIFICATION_CLIENT_PROFILE_BASE64: ${{ secrets.AGENTPASS_QUALIFICATION_CLIENT_PROFILE_BASE64 }}
           AGENTPASS_CONTROLLER_PROFILE_BASE64: ${{ secrets.AGENTPASS_CONTROLLER_PROFILE_BASE64 }}
           KEYCHAIN_PASSWORD: ${{ secrets.AGENTPASS_EPHEMERAL_KEYCHAIN_PASSWORD }}
           RELEASE_MANIFEST_PRIVATE_KEY: ${{ secrets.AGENTPASS_RELEASE_MANIFEST_PRIVATE_KEY_BASE64 }}
@@ -113,6 +121,8 @@ jobs:
           printf '%s' "$AGENTPASS_SIGNING_CERTIFICATE_P12_BASE64" | base64 --decode > "$RUNNER_TEMP/agentpass-signing/certificate.p12"
           printf '%s' "$AGENTPASS_SERVICE_PROFILE_BASE64" | base64 --decode > "$RUNNER_TEMP/agentpass-signing/service.provisionprofile"
           printf '%s' "$AGENTPASS_CLIENT_PROFILE_BASE64" | base64 --decode > "$RUNNER_TEMP/agentpass-signing/client.provisionprofile"
+          printf '%s' "$AGENTPASS_AGENT_PROFILE_BASE64" | base64 --decode > "$RUNNER_TEMP/agentpass-signing/agent.provisionprofile"
+          printf '%s' "$AGENTPASS_QUALIFICATION_CLIENT_PROFILE_BASE64" | base64 --decode > "$RUNNER_TEMP/agentpass-signing/qualification-client.provisionprofile"
           printf '%s' "$AGENTPASS_CONTROLLER_PROFILE_BASE64" | base64 --decode > "$RUNNER_TEMP/agentpass-signing/controller.provisionprofile"
           [[ -n "$RELEASE_MANIFEST_PUBLIC_KEY" ]] || { echo "Release manifest public key is not configured" >&2; exit 1; }
           printf '%s' "$RELEASE_MANIFEST_PRIVATE_KEY" | base64 --decode > "$RUNNER_TEMP/agentpass-signing/release-manifest.private.pem"
@@ -170,6 +180,7 @@ jobs:
           AGENTPASS_SIGNING_IDENTITY: ${{ secrets.AGENTPASS_SIGNING_IDENTITY }}
           AGENTPASS_TEAM_ID: ${{ secrets.AGENTPASS_TEAM_ID }}
           AGENTPASS_APP_IDENTIFIER_PREFIX: ${{ secrets.AGENTPASS_APP_IDENTIFIER_PREFIX }}
+          AGENTPASS_AGENT_PROFILE_BASE64: ${{ secrets.AGENTPASS_AGENT_PROFILE_BASE64 }}
           AGENTPASS_NOTARY_KEY_ID: ${{ secrets.AGENTPASS_NOTARY_KEY_ID }}
           AGENTPASS_NOTARY_ISSUER_ID: ${{ secrets.AGENTPASS_NOTARY_ISSUER_ID }}
           AGENTPASS_NOTARY_PRIVATE_KEY_PATH: ${{ runner.temp }}/agentpass-signing/notary-auth-key.p8
@@ -228,7 +239,9 @@ jobs:
           set -euo pipefail
           native/macos/scripts/build-app.sh --universal --output-dir "$RUNNER_TEMP/candidate" \
             --identity "$AGENTPASS_SIGNING_IDENTITY" --team-id "$AGENTPASS_TEAM_ID" --app-identifier-prefix "$AGENTPASS_APP_IDENTIFIER_PREFIX" \
-            --service-profile "$RUNNER_TEMP/agentpass-signing/service.provisionprofile" --client-profile "$RUNNER_TEMP/agentpass-signing/client.provisionprofile"
+            --service-profile "$RUNNER_TEMP/agentpass-signing/service.provisionprofile" --client-profile "$RUNNER_TEMP/agentpass-signing/client.provisionprofile" \
+            --agent-profile "$RUNNER_TEMP/agentpass-signing/agent.provisionprofile" \
+            --qualification-client-profile "$RUNNER_TEMP/agentpass-signing/qualification-client.provisionprofile"
           package="$RUNNER_TEMP/candidate/AgentPass-${AGENTPASS_RELEASE_TAG}-macos-universal.pkg"
           native/macos/scripts/build-installer.sh --app "$RUNNER_TEMP/candidate/AgentPass.app" --output "$package" --identity "$AGENTPASS_INSTALLER_SIGNING_IDENTITY"
           scripts/release/notarize-installer.sh "$package" "$RUNNER_TEMP/candidate/notarytool-result.json" "$RUNNER_TEMP/candidate/stapler-result.txt"

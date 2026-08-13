@@ -26,9 +26,20 @@ export function createHostedQualificationManifestSigner({ provider, env = proces
   const signer = createQualificationGrantBatchManifestSigner({ provider, keyId: config.keyId, timeoutMs: config.timeoutMs, now });
 
   async function assertProvider() {
-    const metadata = await signer.publicKeyMetadata();
-    const fingerprint = fingerprintOf(metadata.public_key);
-    if (fingerprint !== config.publicKeyFingerprint) throw invalidConfig();
+    let metadata;
+    try {
+      metadata = await withDeadline((signal) => provider.publicKeyMetadata({
+        key_id: config.keyId,
+        algorithm: QUALIFICATION_GRANT_BATCH_MANIFEST_ALGORITHM,
+        purpose: QUALIFICATION_GRANT_BATCH_MANIFEST_PURPOSE,
+        version: QUALIFICATION_GRANT_BATCH_MANIFEST_VERSION,
+        signal
+      }), config.timeoutMs);
+    } catch { throw invalidConfig(); }
+    if (!metadata || typeof metadata !== "object" || Array.isArray(metadata)
+      || Object.keys(metadata).sort().join(",") !== "algorithm,key_id,public_key"
+      || metadata.key_id !== config.keyId || metadata.algorithm !== QUALIFICATION_GRANT_BATCH_MANIFEST_ALGORITHM
+      || fingerprintOf(metadata.public_key) !== config.publicKeyFingerprint) throw invalidConfig();
     return metadata;
   }
 
@@ -152,4 +163,14 @@ function fingerprintOf(value) {
 function requiredKeyId(value) { if (!KEY_ID.test(value ?? "")) throw invalidConfig(); return value; }
 function integer(value, min, max) { if (!/^\d+$/u.test(value ?? "")) throw invalidConfig(); const number = Number(value); if (!Number.isSafeInteger(number) || number < min || number > max) throw invalidConfig(); return number; }
 function exactNow(value) { const number = value instanceof Date ? value.getTime() : value; if (!Number.isFinite(number) || number < 0) throw invalidConfig(); return number; }
+async function withDeadline(operation, timeoutMs) {
+  const controller = new AbortController();
+  let timer;
+  try {
+    return await Promise.race([
+      Promise.resolve().then(() => operation(controller.signal)),
+      new Promise((_, reject) => { timer = setTimeout(() => { controller.abort(); reject(invalidConfig()); }, timeoutMs); })
+    ]);
+  } finally { clearTimeout(timer); }
+}
 function invalidConfig() { return Object.assign(new Error("qualification manifest signer configuration is invalid"), { code: "ERR_QUALIFICATION_MANIFEST_SIGNER_CONFIG" }); }

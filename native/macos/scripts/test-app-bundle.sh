@@ -10,12 +10,19 @@ APP_PATH="$($SCRIPT_DIR/build-app.sh --adhoc --output-dir "$TEST_DIR/output")"
 SERVICE_APP="$APP_PATH/Contents/Library/HelperTools/AgentPassNativeService.app"
 CLIENT_APP="$APP_PATH/Contents/Library/HelperTools/AgentPassNativeClient.app"
 AGENT_HOST_APP="$APP_PATH/Contents/Library/HelperTools/AgentPassNativeAgentHost.app"
+QUALIFICATION_CLIENT="$APP_PATH/Contents/Library/HelperTools/agentpass-qualification-grant-client"
+QUALIFICATION_CLIENT_APP="$APP_PATH/Contents/Library/HelperTools/agentpass-qualification-grant-client.app"
+QUALIFICATION_CLIENT_BINARY="$QUALIFICATION_CLIENT_APP/Contents/MacOS/agentpass-qualification-grant-client"
 ATOMIC_RENAME="$APP_PATH/Contents/Library/HelperTools/agentpass-atomic-rename"
 ONBOARDING="$APP_PATH/Contents/MacOS/agentpass-onboarding"
 [[ -d "$SERVICE_APP" && -d "$CLIENT_APP" && -d "$AGENT_HOST_APP" ]] || { echo "Nested helper app layout is missing" >&2; exit 1; }
 [[ ! -e "$APP_PATH/Contents/MacOS/agentpass-native-service" && ! -e "$APP_PATH/Contents/MacOS/agentpass-native-client" ]] || { echo "Helpers were duplicated outside their bundles" >&2; exit 1; }
 [[ -x "$ATOMIC_RENAME" && ! -L "$ATOMIC_RENAME" ]] || { echo "Atomic rename helper is missing or unsafe" >&2; exit 1; }
+[[ -x "$QUALIFICATION_CLIENT" && ! -L "$QUALIFICATION_CLIENT" ]] || { echo "Qualification grant client is missing or unsafe" >&2; exit 1; }
+[[ -d "$QUALIFICATION_CLIENT_APP" && -x "$QUALIFICATION_CLIENT_BINARY" && ! -L "$QUALIFICATION_CLIENT_APP" && ! -L "$QUALIFICATION_CLIENT_BINARY" ]] || { echo "Qualification grant client helper bundle is missing or unsafe" >&2; exit 1; }
+grep -q '/opt/agentpass/p0c/qualification-client/agentpass-qualification-grant-client.app/Contents/MacOS/agentpass-qualification-grant-client' "$QUALIFICATION_CLIENT" || { echo "Qualification grant client launcher does not resolve to its signed helper app" >&2; exit 1; }
 [[ -x "$ONBOARDING" && ! -L "$ONBOARDING" ]] || { echo "Onboarding UI executable is missing or unsafe" >&2; exit 1; }
+/usr/bin/codesign --verify --deep --strict "$QUALIFICATION_CLIENT_APP"
 [[ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$APP_PATH/Contents/Info.plist")" == "agentpass-onboarding" ]] || { echo "Unexpected outer app executable" >&2; exit 1; }
 [[ "$(/usr/libexec/PlistBuddy -c 'Print :LSUIElement' "$APP_PATH/Contents/Info.plist")" == "false" ]] || { echo "Onboarding app is unexpectedly hidden" >&2; exit 1; }
 AGENTPASS_ATOMIC_RENAME_HELPER="$ATOMIC_RENAME" "$SCRIPT_DIR/test-atomic-rename.sh"
@@ -55,9 +62,22 @@ extract_agent_entitlement() {
   /usr/bin/codesign -d --entitlements :- "$item" >"$output" 2>/dev/null
   /usr/libexec/PlistBuddy -c 'Print :dev.agentpass.agent-session-client' "$output"
 }
+extract_qualification_entitlements() {
+  local output="$TEST_DIR/qualification-client.entitlements.plist"
+  /usr/bin/codesign -d --entitlements :- "$QUALIFICATION_CLIENT_APP" >"$output" 2>/dev/null
+  [[ "$(/usr/libexec/PlistBuddy -c 'Print :application-identifier' "$output")" == "ADHOC00000.dev.agentpass.qualification-grant-client" ]] || exit 1
+  [[ "$(/usr/libexec/PlistBuddy -c 'Print :com.apple.developer.team-identifier' "$output")" == "ADHOC00000" ]] || exit 1
+  [[ "$(/usr/libexec/PlistBuddy -c 'Print :keychain-access-groups:0' "$output")" == "ADHOC00000.dev.agentpass.service-keys" ]] || exit 1
+  if /usr/libexec/PlistBuddy -c 'Print :keychain-access-groups:1' "$output" >/dev/null 2>&1; then exit 1; fi
+  for forbidden in get-task-allow com.apple.security.get-task-allow com.apple.security.cs.disable-library-validation com.apple.security.cs.allow-dyld-environment-variables; do
+    if /usr/libexec/PlistBuddy -c "Print :$forbidden" "$output" >/dev/null 2>&1; then exit 1; fi
+  done
+}
 [[ "$(extract_group "$SERVICE_APP")" == "ADHOC00000.dev.agentpass.service-keys" ]] || exit 1
 [[ "$(extract_group "$CLIENT_APP")" == "ADHOC00000.dev.agentpass.approval-keys" ]] || exit 1
 [[ "$(extract_agent_entitlement "$AGENT_HOST_APP")" == "true" ]] || exit 1
+extract_qualification_entitlements
+[[ ! -e "$QUALIFICATION_CLIENT_APP/Contents/embedded.provisionprofile" ]] || { echo "Ad-hoc qualification helper unexpectedly embeds a profile" >&2; exit 1; }
 if /usr/libexec/PlistBuddy -c 'Print :keychain-access-groups:0' "$TEST_DIR/$(basename "$AGENT_HOST_APP").agent-entitlements.plist" >/dev/null 2>&1; then
   echo "Ad-hoc Agent Host unexpectedly has a keychain access group" >&2
   exit 1

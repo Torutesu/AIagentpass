@@ -42,6 +42,11 @@ const HOSTED_QUALIFICATION_MANIFEST_ENV = Object.freeze([
   "AGENTPASS_CLOUD_QUALIFICATION_MANIFEST_TIMEOUT_MS",
   "AGENTPASS_CLOUD_QUALIFICATION_MANIFEST_VERIFICATION_KEYS_JSON"
 ]);
+const HOSTED_KMS_ENV = Object.freeze([
+  "AGENTPASS_KMS_PROVIDER",
+  "AGENTPASS_KMS_AGENT_SESSION_KEY_RESOURCE",
+  "AGENTPASS_KMS_QUALIFICATION_MANIFEST_KEY_RESOURCE"
+]);
 const DATABASE_ENV = Object.freeze([
   "AGENTPASS_DATABASE_URL",
   "AGENTPASS_DATABASE_MAX_CONNECTIONS",
@@ -73,6 +78,7 @@ const PROFILE_RELATED_ENV = new Set([
   ...HOSTED_REFRESH_ENV,
   ...HOSTED_AGENT_SESSION_ENV,
   ...HOSTED_QUALIFICATION_MANIFEST_ENV,
+  ...HOSTED_KMS_ENV,
   ...FILE_STORE_ENV,
   ...DATABASE_ENV,
   "AGENTPASS_CONSOLE_ORIGIN",
@@ -96,7 +102,8 @@ const PROFILE_PREFIXES = Object.freeze([
   "AGENTPASS_WEBAUTHN_",
   "AGENTPASS_IDENTITY_",
   "AGENTPASS_HUMAN_",
-  "AGENTPASS_CAPABILITY_"
+  "AGENTPASS_CAPABILITY_",
+  "AGENTPASS_KMS_"
 ]);
 
 const ERROR_MESSAGES = Object.freeze({
@@ -163,6 +170,7 @@ export function parseCloudRuntimeProfile(env = process.env) {
   if (HUMAN_AUTH_ENV.some((name) => configured(env, name)) || DATABASE_ENV.some((name) => configured(env, name))
     || hostedRefresh.present || HOSTED_AGENT_SESSION_ENV.some((name) => configured(env, name))
     || HOSTED_QUALIFICATION_MANIFEST_ENV.some((name) => configured(env, name))
+    || HOSTED_KMS_ENV.some((name) => configured(env, name))
     || configured(env, CAPABILITY_NONCE_SECRET_ENV)) {
     fail(CLOUD_RUNTIME_PROFILE_ERROR_CODES.EVALUATION_AUTH_FORBIDDEN);
   }

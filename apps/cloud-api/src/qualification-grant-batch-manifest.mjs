@@ -3,16 +3,17 @@ import crypto from "node:crypto";
 import { canonicalJson } from "../../../packages/protocol/src/index.mjs";
 import {
   AGENT_SESSION_GRANT_ISSUER,
-  AGENT_SESSION_GRANT_TYPE,
-  normalizeAgentSessionGrantStatement,
   verifyAgentSessionGrant
 } from "./agent-session-grant.mjs";
 
-export const QUALIFICATION_GRANT_BATCH_MANIFEST_VERSION = 1;
+// Version 2 is intentionally incompatible with the first draft: the signed
+// statement contains only Grant identity/digests. The response batch remains
+// the transport for the seven full Grant envelopes.
+export const QUALIFICATION_GRANT_BATCH_MANIFEST_VERSION = 2;
 export const QUALIFICATION_GRANT_BATCH_MANIFEST_TYPE = "agentpass.qualification-grant-batch-manifest";
 export const QUALIFICATION_GRANT_BATCH_MANIFEST_ISSUER = AGENT_SESSION_GRANT_ISSUER;
 export const QUALIFICATION_GRANT_BATCH_MANIFEST_PURPOSE = QUALIFICATION_GRANT_BATCH_MANIFEST_TYPE;
-export const QUALIFICATION_GRANT_BATCH_MANIFEST_SIGNATURE_DOMAIN = "AgentPass-Qualification-Grant-Batch-v1\0";
+export const QUALIFICATION_GRANT_BATCH_MANIFEST_SIGNATURE_DOMAIN = "AgentPass-Qualification-Grant-Batch-v2\0";
 export const QUALIFICATION_GRANT_BATCH_MANIFEST_ALGORITHM = "ed25519";
 
 export const QUALIFICATION_GRANT_BATCH_MANIFEST_STEP_IDENTITIES = Object.freeze([
@@ -40,7 +41,10 @@ const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-
 const SHA256 = /^[0-9a-f]{64}$/u;
 const SOURCE_COMMIT = /^[0-9a-f]{40}$/u;
 const TEAM_ID = /^[A-Z0-9]{10}$/u;
-const IDENTIFIER = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/u;
+// A run binding is an opaque per-step nonce, not a user payload. Keeping its
+// maximum at 64 bytes preserves ample uniqueness while making the maximum
+// valid seven-step statement fit KMS RAW's 4 KiB ceiling.
+const IDENTIFIER = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$/u;
 const KEY_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$/u;
 const SIGNATURE = /^[A-Za-z0-9_-]{86}$/u;
 const TIMESTAMP = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/u;
@@ -50,11 +54,11 @@ const MANIFEST_STATEMENT_KEYS = Object.freeze([
   "release_trust_sha256", "candidate_checkpoint_sha256", "issued_at", "expires_at", "steps", "issuer", "key_id"
 ]);
 const MANIFEST_ENVELOPE_KEYS = Object.freeze(["version", "type", "statement", "statement_hash", "signature"]);
-const STEP_KEYS = Object.freeze(["index", "kind", "scenario", "phase", "run_binding", "grant_id", "grant_hash", "statement_hash", "grant"]);
-const GRANT_ENVELOPE_KEYS = Object.freeze(["version", "type", "statement", "statement_hash", "signature"]);
+const STEP_KEYS = Object.freeze(["index", "kind", "scenario", "phase", "run_binding", "grant_id", "grant_hash", "statement_hash"]);
 const MAX_TTL_SECONDS = 3_600;
 const MIN_TTL_SECONDS = 60;
 const MAX_STATEMENT_BYTES = 128 * 1024;
+export const QUALIFICATION_GRANT_BATCH_MANIFEST_MAX_SIGNING_BYTES = 4_096;
 const MAX_SIGNATURE_TIMEOUT_MS = 30_000;
 const DEFAULT_SIGNATURE_TIMEOUT_MS = 5_000;
 
@@ -67,9 +71,10 @@ export class QualificationGrantBatchManifestError extends Error {
 }
 
 /**
- * Normalize the signed qualification statement. The `grant` member is kept
- * as the unchanged agent-session-grant-v1 envelope; qualification metadata is
- * bound beside it in the step tuple and is never injected into the Grant.
+ * Normalize the signed qualification statement. A step contains only the
+ * exact identity and digests of the corresponding existing
+ * agent-session-grant-v1 envelope. The full Grant is transported separately
+ * in the Device API batch and is independently verified there.
  */
 export function normalizeQualificationGrantBatchManifestStatement(input, {
   allowExpired = true,
@@ -97,7 +102,7 @@ export function normalizeQualificationGrantBatchManifestStatement(input, {
       candidate_checkpoint_sha256: pattern(input.candidate_checkpoint_sha256, SHA256),
       issued_at: timestamp(input.issued_at),
       expires_at: timestamp(input.expires_at),
-      steps: normalizeSteps(input.steps, input),
+      steps: normalizeSteps(input.steps),
       issuer: exact(input.issuer, QUALIFICATION_GRANT_BATCH_MANIFEST_ISSUER),
       key_id: pattern(input.key_id, KEY_ID)
     };
@@ -118,7 +123,9 @@ export function normalizeQualificationGrantBatchManifestStatement(input, {
 
 export function qualificationGrantBatchManifestSigningData(statement) {
   const normalized = normalizeQualificationGrantBatchManifestStatement(statement);
-  return Buffer.concat([DOMAIN, Buffer.from(canonicalJson(normalized), "utf8")]);
+  const bytes = Buffer.concat([DOMAIN, Buffer.from(canonicalJson(normalized), "utf8")]);
+  if (bytes.length > QUALIFICATION_GRANT_BATCH_MANIFEST_MAX_SIGNING_BYTES) fail(QUALIFICATION_GRANT_BATCH_MANIFEST_ERROR_CODES.INPUT);
+  return bytes;
 }
 
 export function qualificationGrantBatchManifestStatementHash(statement) {
@@ -230,6 +237,7 @@ export function verifyQualificationGrantBatchManifest(input, {
   issuer = QUALIFICATION_GRANT_BATCH_MANIFEST_ISSUER,
   now = Date.now(),
   maxTtlSeconds = MAX_TTL_SECONDS,
+  grants,
   grantPublicKey,
   grantKeyId
 } = {}) {
@@ -238,9 +246,18 @@ export function verifyQualificationGrantBatchManifest(input, {
     if (manifest.statement.issuer !== issuer || (keyId !== undefined && manifest.statement.key_id !== keyId)) fail(QUALIFICATION_GRANT_BATCH_MANIFEST_ERROR_CODES.SIGNATURE);
     const key = parsePublicKey(publicKey, QUALIFICATION_GRANT_BATCH_MANIFEST_ERROR_CODES.CONFIG);
     if (!crypto.verify(null, qualificationGrantBatchManifestSigningData(manifest.statement), key, canonicalSignature(manifest.signature, QUALIFICATION_GRANT_BATCH_MANIFEST_ERROR_CODES.INPUT))) fail(QUALIFICATION_GRANT_BATCH_MANIFEST_ERROR_CODES.SIGNATURE);
-    if (grantPublicKey !== undefined) {
-      for (const step of manifest.statement.steps) {
-        verifyAgentSessionGrant(step.grant, { publicKey: grantPublicKey, keyId: grantKeyId, now });
+    const hasGrantVerificationOption = grants !== undefined || grantPublicKey !== undefined || grantKeyId !== undefined;
+    if (hasGrantVerificationOption && (grants === undefined || grantPublicKey === undefined || typeof grantKeyId !== "string" || grantKeyId.length === 0)) {
+      fail(QUALIFICATION_GRANT_BATCH_MANIFEST_ERROR_CODES.INPUT);
+    }
+    if (hasGrantVerificationOption) {
+      if (!Array.isArray(grants) || grants.length !== manifest.statement.steps.length) fail(QUALIFICATION_GRANT_BATCH_MANIFEST_ERROR_CODES.INPUT);
+      for (const [index, grant] of grants.entries()) {
+        const verifiedGrant = verifyAgentSessionGrant(grant, { publicKey: grantPublicKey, keyId: grantKeyId, now });
+        const step = manifest.statement.steps[index];
+        if (verifiedGrant.statement.grant_id !== step.grant_id
+          || verifiedGrant.statement_hash !== step.statement_hash
+          || grantHash(verifiedGrant) !== step.grant_hash) fail(QUALIFICATION_GRANT_BATCH_MANIFEST_ERROR_CODES.SIGNATURE);
       }
     }
     return manifest;
@@ -252,7 +269,7 @@ export function verifyQualificationGrantBatchManifest(input, {
 
 export const verifyQualificationGrantBatchManifestSignature = verifyQualificationGrantBatchManifest;
 
-function normalizeSteps(input, manifest) {
+function normalizeSteps(input) {
   if (!Array.isArray(input) || input.length !== QUALIFICATION_GRANT_BATCH_MANIFEST_STEP_IDENTITIES.length) fail(QUALIFICATION_GRANT_BATCH_MANIFEST_ERROR_CODES.INPUT);
   const grantIds = new Set();
   const grantHashes = new Set();
@@ -264,27 +281,15 @@ function normalizeSteps(input, manifest) {
     const expected = QUALIFICATION_GRANT_BATCH_MANIFEST_STEP_IDENTITIES[index];
     if (step.index !== expected.index || step.kind !== expected.kind || step.scenario !== expected.scenario || step.phase !== expected.phase) fail(QUALIFICATION_GRANT_BATCH_MANIFEST_ERROR_CODES.INPUT);
     const runBinding = pattern(step.run_binding, IDENTIFIER);
-    const grant = normalizeGrant(step.grant);
-    if (step.grant_id !== grant.statement.grant_id || step.statement_hash !== grant.statement_hash || step.grant_hash !== grantHash(grant)) fail(QUALIFICATION_GRANT_BATCH_MANIFEST_ERROR_CODES.INPUT);
-    if (grant.statement.organization_id !== manifest.organization_id || grant.statement.device_id !== manifest.device_id || grant.statement.agent_id !== manifest.agent_id || grant.statement.agent_kind !== manifest.agent_kind || grant.statement.issuer !== AGENT_SESSION_GRANT_ISSUER || grant.statement.max_signatures !== 1 || grant.statement.not_before !== manifest.issued_at || grant.statement.expires_at !== manifest.expires_at) fail(QUALIFICATION_GRANT_BATCH_MANIFEST_ERROR_CODES.INPUT);
-    for (const [set, value] of [[grantIds, grant.statement.grant_id], [grantHashes, step.grant_hash], [statementHashes, step.statement_hash], [runBindings, runBinding]]) {
+    const grantId = pattern(step.grant_id, UUID);
+    const grantHashValue = pattern(step.grant_hash, SHA256);
+    const statementHash = pattern(step.statement_hash, SHA256);
+    for (const [set, value] of [[grantIds, grantId], [grantHashes, grantHashValue], [statementHashes, statementHash], [runBindings, runBinding]]) {
       if (set.has(value)) fail(QUALIFICATION_GRANT_BATCH_MANIFEST_ERROR_CODES.INPUT);
       set.add(value);
     }
-    return Object.freeze({ index: expected.index, kind: expected.kind, scenario: expected.scenario, phase: expected.phase, run_binding: runBinding, grant_id: grant.statement.grant_id, grant_hash: step.grant_hash, statement_hash: grant.statement_hash, grant });
+    return Object.freeze({ index: expected.index, kind: expected.kind, scenario: expected.scenario, phase: expected.phase, run_binding: runBinding, grant_id: grantId, grant_hash: grantHashValue, statement_hash: statementHash });
   }));
-}
-
-function normalizeGrant(input) {
-  assertDataTree(input);
-  exactObject(input, GRANT_ENVELOPE_KEYS);
-  if (input.version !== 1 || input.type !== AGENT_SESSION_GRANT_TYPE) fail(QUALIFICATION_GRANT_BATCH_MANIFEST_ERROR_CODES.INPUT);
-  const statement = normalizeAgentSessionGrantStatement(input.statement, { allowExpired: true, allowFuture: true });
-  const statementHash = sha256Text(canonicalJson(statement));
-  if (input.statement_hash !== statementHash) fail(QUALIFICATION_GRANT_BATCH_MANIFEST_ERROR_CODES.INPUT);
-  canonicalSignature(input.signature, QUALIFICATION_GRANT_BATCH_MANIFEST_ERROR_CODES.INPUT);
-  const normalized = { version: 1, type: AGENT_SESSION_GRANT_TYPE, statement, statement_hash: statementHash, signature: input.signature };
-  return Object.freeze(normalized);
 }
 
 function grantHash(grant) { return sha256Text(canonicalJson(grant)); }

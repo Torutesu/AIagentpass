@@ -119,15 +119,10 @@ export function createQualificationGrantBatchService({
           issuedAt,
           expiresAt
         }),
-        buildManifest: async ({ grants } = {}) => buildManifest({
-          grants,
-          batchId,
-          organizationId,
-          agentId,
-          request,
-          issuedAt,
-          expiresAt
-        })
+        buildManifest: async ({ grants, steps: repositorySteps } = {}) => {
+          if (!sameStepBindings(repositorySteps, steps)) fail(QUALIFICATION_GRANT_BATCH_ERROR_CODES.UNAVAILABLE);
+          return buildManifest({ grants, batchSteps: repositorySteps, batchId, organizationId, agentId, request, issuedAt, expiresAt });
+        }
       }));
     } catch (error) {
       throw mapRepositoryError(error);
@@ -154,13 +149,17 @@ export function createQualificationGrantBatchService({
         authorityGeneration: allocation.authority_generation
       });
       if (!plainObject(built) || !plainObject(built.grant) || built.grant.statement?.grant_id !== allocation.grant_id || built.control_sequence !== allocation.control_sequence || built.authority_generation !== allocation.authority_generation) fail(QUALIFICATION_GRANT_BATCH_ERROR_CODES.UNAVAILABLE);
-      grants.push(Object.freeze({ ...steps[index], grant: built.grant, grant_hash: built.grant_hash, statement_hash: built.statement_hash }));
+      const statementHash = sha256(canonicalJson(built.grant.statement));
+      const grantHash = sha256(canonicalJson(built.grant));
+      if (built.statement_hash !== statementHash || built.grant_hash !== grantHash) fail(QUALIFICATION_GRANT_BATCH_ERROR_CODES.UNAVAILABLE);
+      grants.push(Object.freeze({ ...steps[index], grant: built.grant, grant_hash: grantHash, statement_hash: statementHash }));
     }
     return Object.freeze(grants);
   }
 
-  async function buildManifest({ grants, batchId, organizationId, agentId, request, issuedAt, expiresAt }) {
+  async function buildManifest({ grants, batchSteps, batchId, organizationId, agentId, request, issuedAt, expiresAt }) {
     if (!Array.isArray(grants) || grants.length !== QUALIFICATION_GRANT_BATCH_STEPS.length) fail(QUALIFICATION_GRANT_BATCH_ERROR_CODES.UNAVAILABLE);
+    if (!Array.isArray(batchSteps) || batchSteps.length !== QUALIFICATION_GRANT_BATCH_STEPS.length) fail(QUALIFICATION_GRANT_BATCH_ERROR_CODES.UNAVAILABLE);
     let metadata;
     try { metadata = await manifestSigner.publicKeyMetadata(); }
     catch (error) { throw new QualificationGrantBatchError(QUALIFICATION_GRANT_BATCH_ERROR_CODES.UNAVAILABLE, { cause: error }); }
@@ -182,7 +181,31 @@ export function createQualificationGrantBatchService({
       candidate_checkpoint_sha256: request.candidate_checkpoint_sha256,
       issued_at: issuedAt,
       expires_at: expiresAt,
-      steps: grants,
+      steps: grants.map((value, index) => {
+        const entry = plainObject(value) && plainObject(value.grant) ? value : { grant: value };
+        const batchStep = batchSteps[index];
+        if (!plainObject(entry.grant) || !plainObject(entry.grant.statement) || !plainObject(batchStep)
+          || batchStep.index !== QUALIFICATION_GRANT_BATCH_STEPS[index].index
+          || batchStep.kind !== QUALIFICATION_GRANT_BATCH_STEPS[index].kind
+          || batchStep.scenario !== QUALIFICATION_GRANT_BATCH_STEPS[index].scenario
+          || batchStep.phase !== QUALIFICATION_GRANT_BATCH_STEPS[index].phase
+          || typeof batchStep.run_binding !== "string"
+          || entry.grant.statement.grant_id !== batchStep.grant_id) fail(QUALIFICATION_GRANT_BATCH_ERROR_CODES.UNAVAILABLE);
+        const statementHash = sha256(canonicalJson(entry.grant.statement));
+        const grantHash = sha256(canonicalJson(entry.grant));
+        if (entry.statement_hash !== undefined && entry.statement_hash !== statementHash) fail(QUALIFICATION_GRANT_BATCH_ERROR_CODES.UNAVAILABLE);
+        if (entry.grant_hash !== undefined && entry.grant_hash !== grantHash) fail(QUALIFICATION_GRANT_BATCH_ERROR_CODES.UNAVAILABLE);
+        return Object.freeze({
+          index: batchStep.index,
+          kind: batchStep.kind,
+          scenario: batchStep.scenario,
+          phase: batchStep.phase,
+          run_binding: batchStep.run_binding,
+          grant_id: entry.grant.statement.grant_id,
+          grant_hash: grantHash,
+          statement_hash: statementHash
+        });
+      }),
       issuer: QUALIFICATION_GRANT_BATCH_MANIFEST_ISSUER,
       key_id: metadata.key_id
     };
@@ -224,6 +247,17 @@ function normalizeRecentAuthorization(value, actor, organizationId, nowMs) {
   exactKeys(value, ["authenticated_at", "authorization_id", "member_id", "operation", "organization_id"] , QUALIFICATION_GRANT_BATCH_ERROR_CODES.FORBIDDEN);
   if (!isUuid(value.authorization_id) || value.organization_id !== organizationId || value.member_id !== actor.member_id || value.operation !== ISSUE_OPERATION || !Number.isSafeInteger(value.authenticated_at) || value.authenticated_at < 0 || value.authenticated_at > nowMs + 30_000 || nowMs - value.authenticated_at > 5 * 60_000) fail(QUALIFICATION_GRANT_BATCH_ERROR_CODES.FORBIDDEN);
   return Object.freeze({ authorization_id: value.authorization_id.toLowerCase(), authenticated_at: value.authenticated_at });
+}
+
+function sameStepBindings(actual, expected) {
+  if (!Array.isArray(actual) || actual.length !== expected.length) return false;
+  return actual.every((step, index) => plainObject(step)
+    && step.index === expected[index].index
+    && step.kind === expected[index].kind
+    && step.scenario === expected[index].scenario
+    && step.phase === expected[index].phase
+    && step.grant_id === expected[index].grant_id
+    && step.run_binding === expected[index].run_binding);
 }
 
 function normalizeResult(result, expected) {

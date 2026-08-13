@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { EventEmitter } from 'node:events';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -17,9 +18,13 @@ import {
 } from '../../../apps/cloud-api/src/qualification-grant-batch-manifest.mjs';
 import {
   QUALIFICATION_RELAY_BATCH_KIND,
+  QUALIFICATION_RELAY_CHILD_TERMINAL_WAIT_MS,
+  QUALIFICATION_RELAY_CONFIG_PATH,
+  QUALIFICATION_RELAY_EXECUTABLE_PATH,
   QUALIFICATION_RELAY_INBOX_PATH,
   QUALIFICATION_RELAY_MAX_TTL_SECONDS,
   QUALIFICATION_RELAY_REQUEST_KIND,
+  QUALIFICATION_RELAY_RESPONSE_PATH,
   canonicalQualificationRelayRequest,
   claimQualificationDeviceRelay,
   normalizeQualificationDeviceRelayResponse,
@@ -126,7 +131,7 @@ async function signedResponse(overrides = {}) {
     now: () => NOW
   });
   const manifest = await manifestSigner.signQualificationGrantBatchManifest({
-    version: 1,
+    version: 2,
     type: 'agentpass.qualification-grant-batch-manifest',
     batch_id: IDS.batch,
     organization_id: IDS.organization,
@@ -137,7 +142,7 @@ async function signedResponse(overrides = {}) {
     ...BINDINGS,
     issued_at: ISSUED_AT,
     expires_at: EXPIRES_AT,
-    steps,
+    steps: steps.map(({ grant: _grant, ...step }) => step),
     issuer: 'agentpass-cloud',
     key_id: 'qualification-batch-2026-08'
   });
@@ -150,9 +155,9 @@ async function signedResponse(overrides = {}) {
     agent_id: IDS.agent,
     agent_kind: 'claude-code',
     requested_ttl_seconds: 600,
-    ...BINDINGS,
-    expires_at: EXPIRES_AT,
-    steps: steps.map(({ index, kind, scenario, phase, run_binding, grant }) => ({ index, kind, scenario, phase, run_binding, grant })),
+      ...BINDINGS,
+      expires_at: EXPIRES_AT,
+      steps: steps.map(({ index, kind, scenario, phase, run_binding, grant }) => ({ index, kind, scenario, phase, run_binding, grant })),
     manifest
   };
   return {
@@ -171,6 +176,7 @@ function manifestVerifier() {
       publicKey: manifestKeys.publicKey,
       grantPublicKey: grantKeys.publicKey,
       grantKeyId: 'agent-session-2026-08',
+      grants: context.batch.steps.map((step) => step.grant),
       now: NOW
     });
   };
@@ -186,7 +192,58 @@ function paths(root) {
   return {
     root,
     requestPath: path.join(root, 'relay-request.json'),
+    responsePath: path.join(root, 'device-response.json'),
+    configPath: path.join(root, 'device-client-config.json'),
+    executablePath: path.join(root, 'qualification-client'),
     inboxPath: path.join(root, 'input.inbox.json')
+  };
+}
+
+function rawPublicKey(key) {
+  return key.export({ type: 'spki', format: 'der' }).subarray(-32).toString('base64');
+}
+
+function sorted(value) {
+  return Array.isArray(value) ? value.map(sorted) : value && typeof value === 'object' ? Object.fromEntries(Object.keys(value).sort().map((key) => [key, sorted(value[key])])) : value;
+}
+
+function canonicalResponse(value) {
+  return Buffer.from(`${JSON.stringify(sorted(value), null, 2)}\n`, 'utf8');
+}
+
+function writeFixedConfig(files, { manifestKey = manifestKeys.publicKey, agentSessionKey = grantKeys.publicKey, manifestKeyId = 'qualification-batch-2026-08', agentSessionKeyId = 'agent-session-2026-08', extra = {} } = {}) {
+  const value = {
+    api_origin: 'https://api.example.test',
+    batch_id: IDS.batch,
+    device_id: IDS.device,
+    keychain_access_group: `${BINDINGS.team_id}.dev.agentpass.service-keys`,
+    kind: 'agentpass-qualification-grant-client-config',
+    manifest_key_id: manifestKeyId,
+    manifest_public_key_base64: rawPublicKey(manifestKey),
+    organization_id: IDS.organization,
+    schema_version: 1,
+    agent_session_key_id: agentSessionKeyId,
+    agent_session_public_key_base64: rawPublicKey(agentSessionKey),
+    ...extra
+  };
+  fs.writeFileSync(files.configPath, JSON.stringify(value), { mode: 0o600 });
+  fs.chmodSync(files.configPath, 0o600);
+}
+
+function writeExecutable(files) {
+  fs.writeFileSync(files.executablePath, '#!/bin/sh\n', { mode: 0o755 });
+  fs.chmodSync(files.executablePath, 0o755);
+}
+
+function nativeTestOptions(files, extra = {}) {
+  return {
+    ...files,
+    ...extra,
+    production: false,
+    expectedUid: UID,
+    uid: UID,
+    spawnProcess: extra.spawnProcess,
+    proveNoActiveRelay: () => true
   };
 }
 
@@ -282,6 +339,41 @@ test('custom qualification Grant envelopes are rejected before publication', asy
   assert.throws(() => qualificationRelayResponseToSuiteInput(value.response, value.request, { verifyBatchManifest: manifestVerifier() }), /manifest|Grant/u);
 });
 
+test('fixed native relay rejects v1 and embedded manifests plus cross-step Grant substitution', async () => {
+  const value = await signedResponse();
+  const cases = [
+    ['v1 manifest', (response) => { response.batch.manifest.version = 1; }],
+    ['embedded Grant', (response) => { response.batch.manifest.statement.steps[0].grant = response.batch.steps[0].grant; }],
+    ['cross-step Grant substitution', (response) => {
+      const grant = response.batch.steps[0].grant;
+      response.batch.steps[0].grant = response.batch.steps[1].grant;
+      response.batch.steps[1].grant = grant;
+    }]
+  ];
+  for (const [, mutate] of cases) {
+    const files = paths(tempRoot());
+    try {
+      const response = structuredClone(value.response);
+      mutate(response);
+      writeRequest(files.requestPath, value.request);
+      writeFixedConfig(files);
+      writeExecutable(files);
+      const spawnProcess = () => {
+        const child = new EventEmitter();
+        child.stderr = new EventEmitter();
+        child.kill = () => {};
+        fs.writeFileSync(files.responsePath, canonicalResponse(response), { mode: 0o600 });
+        fs.chmodSync(files.responsePath, 0o600);
+        setImmediate(() => child.emit('close', 0, null));
+        return child;
+      };
+      await assert.rejects(() => claimQualificationDeviceRelay(nativeTestOptions(files, { spawnProcess })), /claim failed/u);
+      assert.equal(fs.existsSync(files.requestPath), true);
+      assert.equal(fs.existsSync(files.inboxPath), false);
+    } finally { fs.rmSync(files.root, { recursive: true, force: true }); }
+  }
+});
+
 test('symlink, unsafe mode, partial staging, and recovery are fail-closed', async () => {
   const value = await signedResponse();
   const files = paths(tempRoot());
@@ -300,12 +392,182 @@ test('symlink, unsafe mode, partial staging, and recovery are fail-closed', asyn
     const staging = path.join(files.root, `.qualification-relay-input.${process.pid}.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.tmp`);
     fs.writeFileSync(staging, 'partial', { mode: 0o600 });
     writeRequest(files.requestPath, value.request);
+    fs.writeFileSync(files.responsePath, 'partial-response', { mode: 0o600 });
     fs.writeFileSync(files.inboxPath, 'partial-output', { mode: 0o600 });
     const recovered = recoverQualificationDeviceRelay(testOptions(files));
     assert.equal(recovered.action, 'recovered');
     assert.equal(fs.existsSync(files.requestPath), false);
+    assert.equal(fs.existsSync(files.responsePath), false);
     assert.equal(fs.existsSync(files.inboxPath), false);
     assert.equal(fs.existsSync(staging), false);
+  } finally { fs.rmSync(files.root, { recursive: true, force: true }); }
+});
+
+test('fixed native relay leaves unsafe response links untouched and never publishes them', async () => {
+  const value = await signedResponse();
+  for (const kind of ['symlink', 'hardlink']) {
+    const files = paths(tempRoot());
+    try {
+      writeRequest(files.requestPath, value.request);
+      writeFixedConfig(files);
+      writeExecutable(files);
+      const target = path.join(files.root, `${kind}-response-target.json`);
+      const spawnProcess = () => {
+        const child = new EventEmitter();
+        child.stderr = new EventEmitter();
+        child.kill = () => {};
+        if (kind === 'symlink') {
+          fs.writeFileSync(target, canonicalResponse(value.response), { mode: 0o600 });
+          fs.symlinkSync(target, files.responsePath);
+        } else {
+          fs.writeFileSync(target, canonicalResponse(value.response), { mode: 0o600 });
+          fs.chmodSync(target, 0o600);
+          fs.linkSync(target, files.responsePath);
+        }
+        setImmediate(() => child.emit('close', 0, null));
+        return child;
+      };
+      await assert.rejects(() => claimQualificationDeviceRelay(nativeTestOptions(files, { spawnProcess })), /claim failed/u);
+      assert.equal(fs.existsSync(files.requestPath), true);
+      assert.equal(fs.existsSync(files.inboxPath), false);
+      assert.equal(fs.lstatSync(files.responsePath).isSymbolicLink(), kind === 'symlink');
+      assert.equal(fs.lstatSync(files.responsePath).nlink, kind === 'hardlink' ? 2 : 1);
+    } finally { fs.rmSync(files.root, { recursive: true, force: true }); }
+  }
+});
+
+test('fixed native relay preserves a replacement request until recovery after child completion', async () => {
+  const value = await signedResponse();
+  const files = paths(tempRoot());
+  try {
+    writeRequest(files.requestPath, value.request);
+    writeFixedConfig(files);
+    writeExecutable(files);
+    const replacement = { ...value.request, request_id: IDS.serverRequest };
+    const spawnProcess = () => {
+      const child = new EventEmitter();
+      child.stderr = new EventEmitter();
+      child.kill = () => {};
+      fs.unlinkSync(files.requestPath);
+      writeRequest(files.requestPath, replacement);
+      setImmediate(() => child.emit('close', 0, null));
+      return child;
+    };
+    await assert.rejects(() => claimQualificationDeviceRelay(nativeTestOptions(files, { spawnProcess })), /claim failed/u);
+    assert.equal(fs.existsSync(files.requestPath), true);
+    assert.deepEqual(parseQualificationRelayRequest(fs.readFileSync(files.requestPath)), replacement);
+    assert.equal(fs.existsSync(files.inboxPath), false);
+  } finally { fs.rmSync(files.root, { recursive: true, force: true }); }
+});
+
+test('fixed native relay uses the two-key config, fixed invocation, and independently verifies nested manifest and Grants', async () => {
+  const value = await signedResponse();
+  const files = paths(tempRoot());
+  let invocation;
+  try {
+    writeRequest(files.requestPath, value.request);
+    writeFixedConfig(files);
+    writeExecutable(files);
+    const spawnProcess = (command, args, options) => {
+      invocation = { command, args, options };
+      const child = new EventEmitter();
+      child.stderr = new EventEmitter();
+      child.kill = () => {};
+      fs.writeFileSync(files.responsePath, canonicalResponse(value.response), { mode: 0o600 });
+      fs.chmodSync(files.responsePath, 0o600);
+      setImmediate(() => child.emit('close', 0, null));
+      return child;
+    };
+    const result = await claimQualificationDeviceRelay(nativeTestOptions(files, { spawnProcess }));
+    assert.equal(result.ok, true);
+    assert.equal(invocation.command, files.executablePath);
+    assert.deepEqual(invocation.args, []);
+    assert.equal(invocation.options.cwd, '/');
+    assert.equal(invocation.options.shell, false);
+    assert.deepEqual(invocation.options.env, { PATH: '/usr/bin:/bin:/usr/sbin:/sbin', HOME: '/var/empty', LANG: 'C', LC_ALL: 'C' });
+    assert.deepEqual(invocation.options.stdio, ['ignore', 'ignore', 'pipe']);
+    assert.equal(fs.existsSync(files.requestPath), false);
+    assert.equal(fs.existsSync(files.responsePath), false);
+    assert.equal(fs.statSync(files.inboxPath).mode & 0o7777, 0o600);
+  } finally { fs.rmSync(files.root, { recursive: true, force: true }); }
+});
+
+test('fixed native relay rejects shared key fingerprints and legacy one-key config fields', async () => {
+  const value = await signedResponse();
+  const files = paths(tempRoot());
+  try {
+    writeRequest(files.requestPath, value.request);
+    writeFixedConfig(files, { agentSessionKey: manifestKeys.publicKey });
+    await assert.rejects(() => claimQualificationDeviceRelay(nativeTestOptions(files, { spawnProcess: () => { throw new Error('must not spawn'); } })), /claim failed|separate/u);
+    assert.equal(fs.existsSync(files.requestPath), true);
+
+    fs.rmSync(files.root, { recursive: true, force: true });
+    fs.mkdirSync(files.root, { mode: 0o700 });
+    writeRequest(files.requestPath, value.request);
+    const legacy = {
+      api_origin: 'https://api.example.test', batch_id: IDS.batch, device_id: IDS.device,
+      expected_grant_key_id: 'legacy-key', keychain_access_group: `${BINDINGS.team_id}.dev.agentpass.service-keys`,
+      kind: 'agentpass-qualification-grant-client-config', organization_id: IDS.organization, schema_version: 1,
+      trust_public_key_base64: rawPublicKey(manifestKeys.publicKey)
+    };
+    fs.writeFileSync(files.configPath, JSON.stringify(legacy), { mode: 0o600 });
+    await assert.rejects(() => claimQualificationDeviceRelay(nativeTestOptions(files, { spawnProcess: () => { throw new Error('must not spawn'); } })), /claim failed|unknown|missing|configuration/u);
+  } finally { fs.rmSync(files.root, { recursive: true, force: true }); }
+});
+
+test('fixed native relay rejects executable replacement after spawn and waits for child close before failure', async () => {
+  const value = await signedResponse();
+  const files = paths(tempRoot());
+  try {
+    writeRequest(files.requestPath, value.request);
+    writeFixedConfig(files);
+    writeExecutable(files);
+    const spawnProcess = () => {
+      const child = new EventEmitter();
+      child.stderr = new EventEmitter();
+      let killed = false;
+      child.kill = () => {
+        killed = true;
+        setTimeout(() => child.emit('close', null, 'SIGKILL'), 25);
+      };
+      fs.unlinkSync(files.executablePath);
+      writeExecutable(files);
+      setImmediate(() => { if (!killed) child.emit('close', 0, null); });
+      return child;
+    };
+    const started = Date.now();
+    await assert.rejects(() => claimQualificationDeviceRelay(nativeTestOptions(files, { spawnProcess })), /claim failed/u);
+    assert.ok(Date.now() - started >= 20);
+    assert.equal(fs.existsSync(files.requestPath), true);
+    assert.equal(fs.existsSync(files.inboxPath), false);
+  } finally { fs.rmSync(files.root, { recursive: true, force: true }); }
+});
+
+test('fixed native relay timeout kills the child but settles only after close', async () => {
+  const value = await signedResponse();
+  const files = paths(tempRoot());
+  try {
+    writeRequest(files.requestPath, value.request);
+    writeFixedConfig(files);
+    writeExecutable(files);
+    let killAt;
+    const spawnProcess = () => {
+      const child = new EventEmitter();
+      child.stderr = new EventEmitter();
+      child.kill = () => {
+        killAt = Date.now();
+        setTimeout(() => child.emit('close', null, 'SIGKILL'), 25);
+      };
+      return child;
+    };
+    const started = Date.now();
+    await assert.rejects(() => claimQualificationDeviceRelay(nativeTestOptions(files, { spawnProcess, childTimeoutMs: 5 })), /claim failed/u);
+    assert.ok(killAt !== undefined);
+    assert.ok(Date.now() - killAt >= 20);
+    assert.ok(Date.now() - started >= 20);
+    assert.equal(fs.existsSync(files.requestPath), true);
+    assert.equal(fs.existsSync(files.responsePath), false);
+    assert.equal(fs.existsSync(files.inboxPath), false);
   } finally { fs.rmSync(files.root, { recursive: true, force: true }); }
 });
 
@@ -314,4 +576,8 @@ test('CLI exposes only fixed claim and recover operations', () => {
   assert.deepEqual(parseQualificationDeviceRelayCLI(['recover']), { operation: 'recover' });
   for (const args of [[], ['claim', '/tmp/proof'], ['recover', '/tmp/path'], ['claim', '--endpoint', 'https://evil.test']]) assert.throws(() => parseQualificationDeviceRelayCLI(args), /usage/u);
   assert.equal(QUALIFICATION_RELAY_INBOX_PATH, '/private/var/db/agentpass-qualification/input.inbox.json');
+  assert.equal(QUALIFICATION_RELAY_CONFIG_PATH, '/private/var/db/agentpass-qualification/device-client-config.json');
+  assert.equal(QUALIFICATION_RELAY_RESPONSE_PATH, '/private/var/db/agentpass-qualification/device-response.json');
+  assert.equal(QUALIFICATION_RELAY_EXECUTABLE_PATH, '/opt/agentpass/p0c/qualification-client/agentpass-qualification-grant-client');
+  assert.equal(QUALIFICATION_RELAY_CHILD_TERMINAL_WAIT_MS, 2_000);
 });

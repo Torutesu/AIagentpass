@@ -9,6 +9,11 @@ const INSTALLED_ENTRYPOINT = `n3e/${ENTRYPOINT}`;
 const SOURCE_ENTRYPOINT = `scripts/release/n3e/${ENTRYPOINT}`;
 const packageJSON = JSON.parse(fs.readFileSync(path.join(ROOT, 'package.json'), 'utf8'));
 const workflow = fs.readFileSync(path.join(ROOT, '.github/workflows/p0c-hardware-qualification.yml'), 'utf8');
+const releaseWorkflow = fs.readFileSync(path.join(ROOT, '.github/workflows/release-candidate.yml'), 'utf8');
+const appBuilder = fs.readFileSync(path.join(ROOT, 'native/macos/scripts/build-app.sh'), 'utf8');
+const installedQualificationVerifier = fs.readFileSync(path.join(ROOT, 'native/macos/scripts/verify-installed-qualification-client.sh'), 'utf8');
+const qualificationEntitlements = fs.readFileSync(path.join(ROOT, 'native/macos/scripts/qualification-grant-client.entitlements'), 'utf8');
+const qualificationLauncher = fs.readFileSync(path.join(ROOT, 'native/macos/scripts/qualification-grant-client-launcher.sh'), 'utf8');
 
 const expectedPair = `['${INSTALLED_ENTRYPOINT}', '${SOURCE_ENTRYPOINT}']`;
 const unarmedPair = "['n3e/qualification-unarmed-control.mjs', 'scripts/release/n3e/qualification-unarmed-control.mjs']";
@@ -33,6 +38,33 @@ test('the N3-E packaging test is included in the package test surface', () => {
   assert.match(packageJSON.scripts.test, /scripts\/release\/n3e\/\*\.test\.mjs/u);
   assert.equal(packageJSON.scripts['test:n3e:packaging'], 'node --test scripts/release/n3e/packaging.test.mjs');
   assert.match(packageJSON.scripts.lint, /scripts\/release\/n3e\/\*\.mjs/u);
+});
+
+test('qualification client distribution carries the launcher and its profile-bound helper app together', () => {
+  assert.match(appBuilder, /QUALIFICATION_CLIENT_APP=.*agentpass-qualification-grant-client\.app/u);
+  assert.match(appBuilder, /--qualification-client-profile/u);
+  assert.match(appBuilder, /embedded\.provisionprofile/u);
+  assert.match(appBuilder, /qualification-grant-client\.entitlements/u);
+  assert.match(qualificationLauncher, /\/opt\/agentpass\/p0c\/qualification-client\/agentpass-qualification-grant-client\.app\/Contents\/MacOS\/agentpass-qualification-grant-client/u);
+  assert.match(releaseWorkflow, /AGENTPASS_QUALIFICATION_CLIENT_PROFILE_BASE64/u);
+  assert.match(releaseWorkflow, /--qualification-client-profile/u);
+  assert.doesNotMatch(releaseWorkflow, /qualification_client_source|qualification_client_artifact|agentpass-qualification-grant-client-\$\{[^}]+\}-macos-universal/u);
+  assert.match(workflow, /qualification_client: '\/Applications\/AgentPass\.app\/Contents\/Library\/HelperTools\/agentpass-qualification-grant-client'/u);
+  assert.doesNotMatch(workflow, /QUALIFICATION_CLIENT_ARTIFACT/u);
+});
+
+test('qualification helper verification checks the app and inner executable independently', () => {
+  assert.doesNotMatch(installedQualificationVerifier, /--deep/u, 'qualification verification must not rely on --deep');
+  for (const label of ['SOURCE_APP', 'SOURCE_BINARY', 'FIXED_APP', 'FIXED_BINARY']) assert.ok(installedQualificationVerifier.includes(`verify_signed_item \"$${label}\"`), `missing independent verification for ${label}`);
+  assert.match(installedQualificationVerifier, /source-profile/u);
+  assert.match(installedQualificationVerifier, /installed-profile/u);
+  assert.match(installedQualificationVerifier, /codesign -d --entitlements :-/u);
+  assert.match(installedQualificationVerifier, /keychain-access-groups:1/u);
+  assert.match(installedQualificationVerifier, /shasum -a 256.*embedded\.provisionprofile/u);
+  assert.match(qualificationEntitlements, /application-identifier/u);
+  assert.match(qualificationEntitlements, /com\.apple\.developer\.team-identifier/u);
+  assert.match(qualificationEntitlements, /keychain-access-groups/u);
+  assert.doesNotMatch(qualificationEntitlements, /get-task-allow|disable-library-validation|allow-dyld-environment-variables/u);
 });
 
 test('both hardware-lane preflights pin the fixed protected entrypoint source and installed names', () => {

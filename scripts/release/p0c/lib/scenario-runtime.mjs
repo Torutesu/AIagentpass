@@ -6,6 +6,7 @@ import os from 'node:os';
 import { isAbsolute, join, resolve } from 'node:path';
 
 const DEFAULT_CONFIG = '/opt/agentpass/p0c/scenario-config.json';
+export const QUALIFICATION_GRANT_CLIENT_PATH = '/opt/agentpass/p0c/qualification-client/agentpass-qualification-grant-client';
 const MAX_CONFIG_BYTES = 1024 * 1024;
 const MAX_OUTPUT_BYTES = 256 * 1024;
 const DEFAULT_TIMEOUT_MS = 5 * 60 * 1000;
@@ -58,7 +59,8 @@ const validateExecutable = (value, label) => {
 export const validateScenarioConfig = (value) => {
   exactKeys(value, ['schema_version', 'application_path', 'executables', 'service_label', 'service_config_path', 'test_repository', 'cloud_probe_url', 'checkpoint_directory'], 'scenario config');
   if (value.schema_version !== 1 || value.application_path !== '/Applications/AgentPass.app' || value.service_label !== 'dev.agentpass.native-service' || value.service_config_path !== '/Library/Application Support/AgentPass/native-service.json' || !isAbsolute(value.test_repository) || !HTTPS_URL.test(value.cloud_probe_url) || !isAbsolute(value.checkpoint_directory)) throw new Error('scenario config identity is invalid');
-  exactKeys(value.executables, ['native_client', 'native_manager', 'native_service', 'claude_code', 'cursor'], 'scenario executables');
+  exactKeys(value.executables, ['native_client', 'native_manager', 'native_service', 'claude_code', 'cursor', 'qualification_grant_client'], 'scenario executables');
+  if (value.executables.qualification_grant_client?.path !== QUALIFICATION_GRANT_CLIENT_PATH) throw new Error('qualification grant client executable path is not fixed');
   return Object.freeze({
     schemaVersion: 1,
     applicationPath: value.application_path,

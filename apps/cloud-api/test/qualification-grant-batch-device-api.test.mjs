@@ -15,6 +15,7 @@ import {
   verifyAgentSessionGrant
 } from "../src/agent-session-grant.mjs";
 import {
+  QUALIFICATION_GRANT_BATCH_MANIFEST_VERSION,
   QUALIFICATION_GRANT_BATCH_MANIFEST_TYPE,
   qualificationGrantBatchManifestSigningData,
   qualificationGrantBatchManifestStatementHash,
@@ -117,7 +118,7 @@ function batch(overrides = {}) {
 
 function manifest(value) {
   const statement = {
-    version: 1,
+    version: QUALIFICATION_GRANT_BATCH_MANIFEST_VERSION,
     type: QUALIFICATION_GRANT_BATCH_MANIFEST_TYPE,
     batch_id: value.batch_id,
     organization_id: value.organization_id,
@@ -142,13 +143,12 @@ function manifest(value) {
       grant_id: step.grant.statement.grant_id,
       grant_hash: digest(canonicalJson(step.grant)),
       statement_hash: step.grant.statement_hash,
-      grant: step.grant
     })),
     issuer: "agentpass-cloud",
     key_id: "qualification-batch-v1"
   };
   return {
-    version: 1,
+    version: QUALIFICATION_GRANT_BATCH_MANIFEST_VERSION,
     type: QUALIFICATION_GRANT_BATCH_MANIFEST_TYPE,
     statement,
     statement_hash: qualificationGrantBatchManifestStatementHash(statement),

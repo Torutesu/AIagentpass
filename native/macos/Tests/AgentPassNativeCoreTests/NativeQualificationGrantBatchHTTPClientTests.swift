@@ -96,7 +96,7 @@ private func qualificationGrant(
     "issuer": "agentpass-cloud",
     "key_id": "agent-session-2026-08",
     "max_signatures": 1,
-    "not_before": "2026-08-14T09:59:00.000Z",
+    "not_before": "2026-08-14T10:00:00.000Z",
     "organization_id": QualificationFixture.organization,
     "process_binding_policy_id": "qualification-v1",
     "scope": [
@@ -120,16 +120,20 @@ private func qualificationGrant(
 }
 
 private func qualificationResponse(
-  trustKey: Curve25519.Signing.PrivateKey,
+  manifestKey: Curve25519.Signing.PrivateKey,
+  grantKey: Curve25519.Signing.PrivateKey,
   batchMutation: ((inout [String: Any]) -> Void)? = nil,
   manifestMutation: ((inout [String: Any]) -> Void)? = nil,
+  manifestStepMutation: ((inout [[String: Any]]) -> Void)? = nil,
   envelopeMutation: ((inout [String: Any]) -> Void)? = nil,
-  expiresAt: String = QualificationFixture.expires
+  expiresAt: String = QualificationFixture.expires,
+  manifestVersion: Int = 2,
+  manifestDomain: String = "AgentPass-Qualification-Grant-Batch-v2\0"
 ) throws -> Data {
   var steps = [[String: Any]]()
   for index in 0..<7 {
     let identity = qualificationStepIdentity(index)
-    let grant = try qualificationGrant(index: index, key: trustKey, expiresAt: expiresAt)
+    let grant = try qualificationGrant(index: index, key: grantKey, expiresAt: expiresAt)
     steps.append([
       "grant": grant,
       "index": index,
@@ -157,7 +161,6 @@ private func qualificationResponse(
     "steps": steps,
     "team_id": QualificationFixture.request.teamID,
   ]
-  batchMutation?(&batch)
   var inventory = [[String: Any]]()
   for (index, step) in steps.enumerated() {
     let grant = step["grant"] as! [String: Any]
@@ -174,52 +177,68 @@ private func qualificationResponse(
       "statement_hash": grant["statement_hash"]!,
     ])
   }
+  manifestStepMutation?(&inventory)
   let manifestStatement: [String: Any] = [
+    "agent_id": QualificationFixture.agent,
+    "agent_kind": "claude-code",
     "artifact_sha256": QualificationFixture.request.artifactSHA256,
     "batch_id": QualificationFixture.batch,
     "candidate_checkpoint_sha256": QualificationFixture.request.candidateCheckpointSHA256,
     "candidate_sha256": QualificationFixture.request.candidateSHA256,
     "device_id": QualificationFixture.device,
     "expires_at": expiresAt,
+    "issued_at": "2026-08-14T10:00:00.000Z",
+    "issuer": "agentpass-cloud",
+    "key_id": "qualification-manifest-2026-08",
     "organization_id": QualificationFixture.organization,
     "release_trust_sha256": QualificationFixture.request.releaseTrustSHA256,
-    "schema_version": 1,
+    "requested_ttl_seconds": 600,
     "source_commit": QualificationFixture.request.sourceCommit,
     "steps": inventory,
     "team_id": QualificationFixture.request.teamID,
+    "type": "agentpass.qualification-grant-batch-manifest",
+    "version": manifestVersion,
   ]
   var manifest: [String: Any] = [
     "signature": try qualificationSignature(
-      trustKey, domain: "AgentPass-Qualification-Grant-Batch-v1\0", statement: manifestStatement),
+      manifestKey, domain: manifestDomain, statement: manifestStatement),
     "statement": manifestStatement,
     "statement_hash": qualificationDigest(try NativeStrictJSON.data(manifestStatement)),
     "type": "agentpass.qualification-grant-batch-manifest",
-    "version": 1,
+    "version": manifestVersion,
   ]
   manifestMutation?(&manifest)
-  var envelope: [String: Any] = ["batch": batch, "manifest": manifest, "request_id": QualificationFixture.requestID]
+  batch["manifest"] = manifest
+  batchMutation?(&batch)
+  var envelope: [String: Any] = ["batch": batch, "request_id": QualificationFixture.requestID]
   envelopeMutation?(&envelope)
   return try NativeStrictJSON.data(envelope)
 }
 
 private func qualificationClient(
-  transport: QualificationHTTPTransport, trustKey: Curve25519.Signing.PrivateKey,
+  transport: QualificationHTTPTransport,
+  manifestKey: Curve25519.Signing.PrivateKey,
+  grantKey: Curve25519.Signing.PrivateKey,
   baseURL: URL = URL(string: "https://api.agentpass.test")!,
-  expectedGrantKeyID: String? = "agent-session-2026-08"
+  expectedManifestKeyID: String = "qualification-manifest-2026-08",
+  expectedGrantKeyID: String = "agent-session-2026-08"
 ) throws -> NativeQualificationGrantBatchHTTPClient {
   try .init(
     baseURL: baseURL, organizationID: QualificationFixture.organization,
     deviceID: QualificationFixture.device, batchID: QualificationFixture.batch,
-    transport: transport, signer: QualificationDeviceSigner(), trustKey: trustKey.publicKey,
-    expectedGrantKeyID: expectedGrantKeyID, random: QualificationRandom(),
+    transport: transport, signer: QualificationDeviceSigner(),
+    manifestPublicKey: manifestKey.publicKey, expectedManifestKeyID: expectedManifestKeyID,
+    grantPublicKey: grantKey.publicKey, expectedGrantKeyID: expectedGrantKeyID,
+    random: QualificationRandom(),
     wallClock: QualificationWall(milliseconds: QualificationFixture.now), timeoutSeconds: 9)
 }
 
 @Test("claims the exact path and canonical request, then verifies the manifest and seven existing Grants")
 func qualificationClaimUsesDeviceAuthAndReturnsRelayBytes() throws {
-  let trust = Curve25519.Signing.PrivateKey()
-  let transport = QualificationHTTPTransport(response: .init(statusCode: 200, body: try qualificationResponse(trustKey: trust)))
-  let value = try qualificationClient(transport: transport, trustKey: trust).claim(QualificationFixture.request)
+  let manifestKey = Curve25519.Signing.PrivateKey()
+  let grantKey = Curve25519.Signing.PrivateKey()
+  let transport = QualificationHTTPTransport(response: .init(statusCode: 200, body: try qualificationResponse(manifestKey: manifestKey, grantKey: grantKey)))
+  let value = try qualificationClient(transport: transport, manifestKey: manifestKey, grantKey: grantKey).claim(QualificationFixture.request)
   let call = try #require(transport.calls.first)
   #expect(call.0.absoluteString == "https://api.agentpass.test/v1/organizations/\(QualificationFixture.organization)/devices/\(QualificationFixture.device)/qualification-grant-batches/\(QualificationFixture.batch)/claim")
   #expect(call.1 == "POST")
@@ -241,82 +260,118 @@ func qualificationClaimUsesDeviceAuthAndReturnsRelayBytes() throws {
 
 @Test("requires a trusted Ed25519 key for the manifest and every existing Grant")
 func qualificationClaimRejectsWrongTrustKeyOrSignature() throws {
-  let signer = Curve25519.Signing.PrivateKey()
-  let wrong = Curve25519.Signing.PrivateKey()
-  let transport = QualificationHTTPTransport(response: .init(statusCode: 200, body: try qualificationResponse(trustKey: signer)))
+  let manifestKey = Curve25519.Signing.PrivateKey()
+  let grantKey = Curve25519.Signing.PrivateKey()
+  let wrongManifestKey = Curve25519.Signing.PrivateKey()
+  let transport = QualificationHTTPTransport(response: .init(statusCode: 200, body: try qualificationResponse(manifestKey: manifestKey, grantKey: grantKey)))
   #expect(throws: NativeQualificationGrantBatchHTTPError.invalidResponse) {
-    _ = try qualificationClient(transport: transport, trustKey: wrong).claim(QualificationFixture.request)
+    _ = try qualificationClient(transport: transport, manifestKey: wrongManifestKey, grantKey: grantKey).claim(QualificationFixture.request)
   }
-  let tampered = QualificationHTTPTransport(response: .init(statusCode: 200, body: try qualificationResponse(trustKey: signer, manifestMutation: { $0["signature"] = String(repeating: "A", count: 86) })))
+  let tampered = QualificationHTTPTransport(response: .init(statusCode: 200, body: try qualificationResponse(manifestKey: manifestKey, grantKey: grantKey, manifestMutation: { $0["signature"] = String(repeating: "A", count: 86) })))
   #expect(throws: NativeQualificationGrantBatchHTTPError.invalidResponse) {
-    _ = try qualificationClient(transport: tampered, trustKey: signer).claim(QualificationFixture.request)
+    _ = try qualificationClient(transport: tampered, manifestKey: manifestKey, grantKey: grantKey).claim(QualificationFixture.request)
+  }
+}
+
+@Test("rejects cross-purpose Ed25519 key substitution between manifest and Grants")
+func qualificationClaimRejectsCrossPurposeKeySubstitution() throws {
+  let manifestKey = Curve25519.Signing.PrivateKey()
+  let grantKey = Curve25519.Signing.PrivateKey()
+  let swappedResponse = try qualificationResponse(manifestKey: grantKey, grantKey: manifestKey)
+  let transport = QualificationHTTPTransport(response: .init(statusCode: 200, body: swappedResponse))
+  #expect(throws: NativeQualificationGrantBatchHTTPError.invalidResponse) {
+    _ = try qualificationClient(transport: transport, manifestKey: manifestKey, grantKey: grantKey).claim(QualificationFixture.request)
+  }
+}
+
+@Test("rejects the signed v1 manifest and the signed v2 embedded-Grant shape")
+func qualificationClaimRejectsOldManifestContracts() throws {
+  let manifestKey = Curve25519.Signing.PrivateKey()
+  let grantKey = Curve25519.Signing.PrivateKey()
+  let oldV1 = try qualificationResponse(
+    manifestKey: manifestKey, grantKey: grantKey, manifestVersion: 1,
+    manifestDomain: "AgentPass-Qualification-Grant-Batch-v1\0")
+  let embedded = try qualificationResponse(
+    manifestKey: manifestKey, grantKey: grantKey,
+    manifestStepMutation: { steps in
+      steps[0]["grant"] = steps[0]
+    })
+  for body in [oldV1, embedded] {
+    let transport = QualificationHTTPTransport(response: .init(statusCode: 200, body: body))
+    #expect(throws: NativeQualificationGrantBatchHTTPError.invalidResponse) {
+      _ = try qualificationClient(transport: transport, manifestKey: manifestKey, grantKey: grantKey)
+        .claim(QualificationFixture.request)
+    }
   }
 }
 
 @Test("rejects transport failures, status failures, and a non-HTTPS or path-bearing origin")
 func qualificationClaimRejectsTransportAndOriginSubstitutions() throws {
-  let trust = Curve25519.Signing.PrivateKey()
-  let response = try qualificationResponse(trustKey: trust)
+  let manifestKey = Curve25519.Signing.PrivateKey()
+  let grantKey = Curve25519.Signing.PrivateKey()
+  let response = try qualificationResponse(manifestKey: manifestKey, grantKey: grantKey)
   let transport = QualificationHTTPTransport(response: .init(statusCode: 200, body: response))
   transport.error = NativeQualificationGrantBatchHTTPError.unavailable
   #expect(throws: NativeQualificationGrantBatchHTTPError.unavailable) {
-    _ = try qualificationClient(transport: transport, trustKey: trust).claim(QualificationFixture.request)
+    _ = try qualificationClient(transport: transport, manifestKey: manifestKey, grantKey: grantKey).claim(QualificationFixture.request)
   }
   for status in [400, 401, 403, 404, 409, 429, 500] {
     let t = QualificationHTTPTransport(response: .init(statusCode: status, body: response))
     let expected: NativeQualificationGrantBatchHTTPError = status == 400 ? .invalidRequest : status == 409 ? .conflict : status == 429 ? .rateLimited : status == 500 ? .unavailable : .unauthorized
-    #expect(throws: expected) { _ = try qualificationClient(transport: t, trustKey: trust).claim(QualificationFixture.request) }
+    #expect(throws: expected) { _ = try qualificationClient(transport: t, manifestKey: manifestKey, grantKey: grantKey).claim(QualificationFixture.request) }
   }
   #expect(throws: NativeQualificationGrantBatchHTTPError.invalidConfiguration) {
-    _ = try qualificationClient(transport: transport, trustKey: trust, baseURL: URL(string: "http://api.agentpass.test")!)
+    _ = try qualificationClient(transport: transport, manifestKey: manifestKey, grantKey: grantKey, baseURL: URL(string: "http://api.agentpass.test")!)
   }
   #expect(throws: NativeQualificationGrantBatchHTTPError.invalidConfiguration) {
-    _ = try qualificationClient(transport: transport, trustKey: trust, baseURL: URL(string: "https://api.agentpass.test/prefix")!)
+    _ = try qualificationClient(transport: transport, manifestKey: manifestKey, grantKey: grantKey, baseURL: URL(string: "https://api.agentpass.test/prefix")!)
   }
 }
 
 @Test("rejects manifest and Grant substitutions, duplicates, order changes, binding changes, and expiry")
 func qualificationClaimRejectsResponseAttacks() throws {
-  let trust = Curve25519.Signing.PrivateKey()
+  let manifestKey = Curve25519.Signing.PrivateKey()
+  let grantKey = Curve25519.Signing.PrivateKey()
   let cases: [Data] = [
-    try qualificationResponse(trustKey: trust, batchMutation: { batch in
+    try qualificationResponse(manifestKey: manifestKey, grantKey: grantKey, batchMutation: { batch in
       var steps = batch["steps"] as! [[String: Any]]; steps.swapAt(0, 1); batch["steps"] = steps
     }),
-    try qualificationResponse(trustKey: trust, manifestMutation: { manifest in
+    try qualificationResponse(manifestKey: manifestKey, grantKey: grantKey, manifestMutation: { manifest in
       var statement = manifest["statement"] as! [String: Any]; statement["candidate_sha256"] = String(repeating: "f", count: 64); manifest["statement"] = statement
     }),
-    try qualificationResponse(trustKey: trust, manifestMutation: { manifest in
+    try qualificationResponse(manifestKey: manifestKey, grantKey: grantKey, manifestMutation: { manifest in
       var statement = manifest["statement"] as! [String: Any]; var steps = statement["steps"] as! [[String: Any]]; steps[1]["run_binding"] = steps[0]["run_binding"]!; statement["steps"] = steps; manifest["statement"] = statement
     }),
-    try qualificationResponse(trustKey: trust, manifestMutation: { manifest in
+    try qualificationResponse(manifestKey: manifestKey, grantKey: grantKey, manifestMutation: { manifest in
       var statement = manifest["statement"] as! [String: Any]; var steps = statement["steps"] as! [[String: Any]]; steps[1]["grant_id"] = steps[0]["grant_id"]!; statement["steps"] = steps; manifest["statement"] = statement
     }),
-    try qualificationResponse(trustKey: trust, batchMutation: { batch in batch["expires_at"] = "2026-08-14T09:59:00.000Z" }),
+    try qualificationResponse(manifestKey: manifestKey, grantKey: grantKey, batchMutation: { batch in batch["expires_at"] = "2026-08-14T09:59:00.000Z" }),
   ]
   for body in cases {
     let transport = QualificationHTTPTransport(response: .init(statusCode: 200, body: body))
     #expect(throws: NativeQualificationGrantBatchHTTPError.invalidResponse) {
-      _ = try qualificationClient(transport: transport, trustKey: trust).claim(QualificationFixture.request)
+      _ = try qualificationClient(transport: transport, manifestKey: manifestKey, grantKey: grantKey).claim(QualificationFixture.request)
     }
   }
 }
 
 @Test("rejects duplicate fields, unknown fields, and bounded oversized responses")
 func qualificationClaimRejectsClosedShapeAndOversize() throws {
-  let trust = Curve25519.Signing.PrivateKey()
-  let duplicate = Data("{\"batch\":{},\"batch\":{},\"manifest\":{},\"request_id\":\"\(QualificationFixture.requestID)\"}".utf8)
+  let manifestKey = Curve25519.Signing.PrivateKey()
+  let grantKey = Curve25519.Signing.PrivateKey()
+  let duplicate = Data("{\"batch\":{},\"batch\":{},\"request_id\":\"\(QualificationFixture.requestID)\"}".utf8)
   let duplicateTransport = QualificationHTTPTransport(response: .init(statusCode: 200, body: duplicate))
   #expect(throws: NativeQualificationGrantBatchHTTPError.invalidResponse) {
-    _ = try qualificationClient(transport: duplicateTransport, trustKey: trust).claim(QualificationFixture.request)
+    _ = try qualificationClient(transport: duplicateTransport, manifestKey: manifestKey, grantKey: grantKey).claim(QualificationFixture.request)
   }
-  let unknown = try qualificationResponse(trustKey: trust, envelopeMutation: { $0["unexpected"] = true })
+  let unknown = try qualificationResponse(manifestKey: manifestKey, grantKey: grantKey, envelopeMutation: { $0["unexpected"] = true })
   let unknownTransport = QualificationHTTPTransport(response: .init(statusCode: 200, body: unknown))
   #expect(throws: NativeQualificationGrantBatchHTTPError.invalidResponse) {
-    _ = try qualificationClient(transport: unknownTransport, trustKey: trust).claim(QualificationFixture.request)
+    _ = try qualificationClient(transport: unknownTransport, manifestKey: manifestKey, grantKey: grantKey).claim(QualificationFixture.request)
   }
   let oversized = QualificationHTTPTransport(response: .init(statusCode: 200, body: Data(repeating: 0x20, count: NativeQualificationGrantBatchHTTPClient.maximumResponseBytes + 1)))
   #expect(throws: NativeQualificationGrantBatchHTTPError.invalidResponse) {
-    _ = try qualificationClient(transport: oversized, trustKey: trust).claim(QualificationFixture.request)
+    _ = try qualificationClient(transport: oversized, manifestKey: manifestKey, grantKey: grantKey).claim(QualificationFixture.request)
   }
 }
 

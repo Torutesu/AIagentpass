@@ -44,17 +44,20 @@ private func pretty(_ object: [String: Any]) throws -> Data {
 }
 
 private func configData() throws -> Data {
-  let trust = Curve25519.Signing.PrivateKey().publicKey.rawRepresentation.base64EncodedString()
+  let grantKey = Curve25519.Signing.PrivateKey().publicKey.rawRepresentation.base64EncodedString()
+  let manifestKey = Curve25519.Signing.PrivateKey().publicKey.rawRepresentation.base64EncodedString()
   return try pretty([
+    "agent_session_key_id": "agent-session-2026-08",
+    "agent_session_public_key_base64": grantKey,
     "api_origin": "https://api.agentpass.test",
     "batch_id": testBatch,
     "device_id": testDevice,
-    "expected_grant_key_id": "agent-session-2026-08",
     "keychain_access_group": "TEAMID1234.dev.agentpass.service-keys",
     "kind": "agentpass-qualification-grant-client-config",
+    "manifest_key_id": "qualification-manifest-2026-08",
+    "manifest_public_key_base64": manifestKey,
     "organization_id": testOrganization,
     "schema_version": 1,
-    "trust_public_key_base64": trust,
   ])
 }
 
@@ -93,6 +96,9 @@ func closedConfigurationAndRequestParsing() throws {
   #expect(configuration.deviceID == testDevice)
   #expect(configuration.batchID == testBatch)
   #expect(configuration.keychainAccessGroup == "TEAMID1234.dev.agentpass.service-keys")
+  #expect(configuration.expectedGrantKeyID == "agent-session-2026-08")
+  #expect(configuration.expectedManifestKeyID == "qualification-manifest-2026-08")
+  #expect(configuration.grantPublicKey.rawRepresentation != configuration.manifestPublicKey.rawRepresentation)
   let request = try FixedQualificationClientParser.request(try pretty(requestObject()))
   #expect(request.agentID == testAgent)
   #expect(request.requestedTTLSeconds == 600)
@@ -107,6 +113,18 @@ func closedConfigurationAndRequestParsing() throws {
   badKey["unexpected"] = true
   #expect(throws: QualificationGrantClientError.self) {
     try FixedQualificationClientParser.configuration(try pretty(badKey))
+  }
+
+  var samePurposeKey = try JSONSerialization.jsonObject(with: configData()) as! [String: Any]
+  samePurposeKey["manifest_key_id"] = samePurposeKey["agent_session_key_id"]
+  #expect(throws: QualificationGrantClientError.self) {
+    try FixedQualificationClientParser.configuration(try pretty(samePurposeKey))
+  }
+
+  var samePublicKey = try JSONSerialization.jsonObject(with: configData()) as! [String: Any]
+  samePublicKey["manifest_public_key_base64"] = samePublicKey["agent_session_public_key_base64"]
+  #expect(throws: QualificationGrantClientError.self) {
+    try FixedQualificationClientParser.configuration(try pretty(samePublicKey))
   }
 
   var badAccessGroup = try JSONSerialization.jsonObject(with: configData()) as! [String: Any]

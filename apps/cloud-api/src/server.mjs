@@ -1210,7 +1210,7 @@ function publicReadinessReport(value) {
 
 function publicReadinessChecks(value) {
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("invalid readiness checks");
-  const { database, schema, pool, drain, agent_session_signer: agentSessionSigner } = value;
+  const { database, schema, pool, drain, agent_session_signer: agentSessionSigner, qualification_manifest_signer: qualificationManifestSigner } = value;
   if (!database || typeof database.ok !== "boolean" || typeof database.probe !== "string") throw new Error("invalid readiness checks");
   const integerOrNull = (item) => item === null || Number.isSafeInteger(item);
   if (!schema || typeof schema.ok !== "boolean" || !integerOrNull(schema.expected_version) || !integerOrNull(schema.applied_version) || !integerOrNull(schema.migration_count) || !integerOrNull(schema.pending_count) || typeof schema.checksum_status !== "string" || (schema.drift !== null && typeof schema.drift !== "boolean")) throw new Error("invalid readiness checks");
@@ -1220,12 +1220,17 @@ function publicReadinessChecks(value) {
     || typeof agentSessionSigner.purpose !== "string" || agentSessionSigner.algorithm !== "ed25519"
     || (agentSessionSigner.key_id !== null && typeof agentSessionSigner.key_id !== "string")
     || (agentSessionSigner.public_key_fingerprint !== null && !/^[0-9a-f]{64}$/u.test(agentSessionSigner.public_key_fingerprint)))) throw new Error("invalid readiness checks");
+  if (qualificationManifestSigner !== undefined && (!qualificationManifestSigner || typeof qualificationManifestSigner.ok !== "boolean"
+    || qualificationManifestSigner.purpose !== "agentpass.qualification-grant-batch-manifest" || qualificationManifestSigner.algorithm !== "ed25519"
+    || (qualificationManifestSigner.key_id !== null && typeof qualificationManifestSigner.key_id !== "string")
+    || (qualificationManifestSigner.public_key_fingerprint !== null && !/^[0-9a-f]{64}$/u.test(qualificationManifestSigner.public_key_fingerprint)))) throw new Error("invalid readiness checks");
   return Object.freeze({
     database: Object.freeze({ ok: database.ok, probe: database.probe }),
     schema: Object.freeze({ ok: schema.ok, expected_version: schema.expected_version, applied_version: schema.applied_version, migration_count: schema.migration_count, pending_count: schema.pending_count, checksum_status: schema.checksum_status, drift: schema.drift }),
     pool: Object.freeze({ ok: pool.ok, max_connections: pool.max_connections, total_connections: pool.total_connections, idle_connections: pool.idle_connections, waiting_connections: pool.waiting_connections, utilization_percent: pool.utilization_percent, saturated: pool.saturated }),
     drain: Object.freeze({ state: drain.state, accepting: drain.accepting, in_flight: drain.in_flight }),
-    ...(agentSessionSigner === undefined ? {} : { agent_session_signer: Object.freeze({ ok: agentSessionSigner.ok, purpose: agentSessionSigner.purpose, algorithm: agentSessionSigner.algorithm, key_id: agentSessionSigner.key_id, public_key_fingerprint: agentSessionSigner.public_key_fingerprint }) })
+    ...(agentSessionSigner === undefined ? {} : { agent_session_signer: Object.freeze({ ok: agentSessionSigner.ok, purpose: agentSessionSigner.purpose, algorithm: agentSessionSigner.algorithm, key_id: agentSessionSigner.key_id, public_key_fingerprint: agentSessionSigner.public_key_fingerprint }) }),
+    ...(qualificationManifestSigner === undefined ? {} : { qualification_manifest_signer: Object.freeze({ ok: qualificationManifestSigner.ok, purpose: qualificationManifestSigner.purpose, algorithm: qualificationManifestSigner.algorithm, key_id: qualificationManifestSigner.key_id, public_key_fingerprint: qualificationManifestSigner.public_key_fingerprint }) })
   });
 }
 

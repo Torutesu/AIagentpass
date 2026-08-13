@@ -158,7 +158,7 @@ test("the normal AgentPass app does not bundle the separately built qualificatio
   const packageSource = read(PACKAGE);
   const resourceNames = fs.readdirSync(join(ROOT, "native/macos/Resources"));
 
-  assert.doesNotMatch(build, /qualification-controller|AgentPassQualification|NativeAgentQualification/u);
+  assert.doesNotMatch(build, /agentpass-qualification-controller|AgentPassQualificationController|NativeAgentQualification/u);
   assert.match(packageSource, /\.executable\([\s\S]*?name:\s*"agentpass-qualification-controller"[\s\S]*?targets:\s*\["AgentPassQualificationController"\]/u);
   assert.match(packageSource, /\.executableTarget\([\s\S]*?name:\s*"AgentPassQualificationController"[\s\S]*?dependencies:\s*\["AgentPassNativeCore"\]/u);
   assert.deepEqual(resourceNames.filter((name) => /qualification-controller/iu.test(name)), []);
