@@ -128,6 +128,19 @@ test('each lane binds the v3 external controller and exports only its architectu
   }
 });
 
+test('each lane accepts only the root-owned digest-pinned qualification config tool', () => {
+  for (const laneName of ['apple-silicon-qualification', 'intel-t2-qualification']) {
+    const section = job(laneName);
+    assert.match(section, /QUALIFICATION_CONFIG_TOOL_ROOT:\s*\/opt\/agentpass\/p0c\/qualification-tool/u);
+    assert.match(section, /Verify root-owned qualification config tool matches the trusted workflow commit/u);
+    assert.match(section, /stat\.uid !== 0/u);
+    assert.match(section, /stat\.mode & 0o022/u);
+    assert.match(section, /stat\.nlink !== 1/u);
+    assert.match(section, /digest\(installed\) !== item\.sha256 \|\| digest\(sourceName\) !== item\.sha256/u);
+    assert.doesNotMatch(section, /sudo\s+node\s+scripts\/release\/n3e\/provision-qualification-config/u);
+  }
+});
+
 test('candidate and aggregate catalogs retain the controller archive outside the product role', () => {
   const aggregate = job('aggregate-qualification');
   assert.match(workflow, /parseCanonicalExternalQualificationControllerIdentity/);

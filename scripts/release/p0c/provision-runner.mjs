@@ -6,6 +6,11 @@ import { canonicalJSON as canonicalScenarioJSON, validateScenarioConfig } from '
 
 const PRODUCTION_ROOT = '/opt/agentpass/p0c';
 const MAX_SOURCE_BYTES = 16 * 1024 * 1024;
+const QUALIFICATION_TOOL_FILES = Object.freeze([
+  Object.freeze({ source: 'generate-release-attestation.mjs', installed: 'generate-release-attestation.mjs' }),
+  Object.freeze({ source: 'n3e/controller-identity-contract.mjs', installed: 'n3e/controller-identity-contract.mjs' }),
+  Object.freeze({ source: 'n3e/provision-qualification-config.mjs', installed: 'n3e/provision-qualification-config.mjs' })
+]);
 export const REQUIRED_GATES = Object.freeze([
   'audit-upload-observation', 'claude-code-unattended-sign', 'clean-install-launchd-xpc',
   'cloud-possession-verification', 'crash-restart-recovery', 'current-user-purge',
@@ -57,15 +62,17 @@ export const inspectProvisioningSources = ({ sourceRoot, scenarioDirectory, mach
   if (driverEntries.length !== REQUIRED_GATES.length || driverEntries.some((entry, index) => entry.name !== REQUIRED_GATES[index] || !entry.isFile() || entry.isSymbolicLink())) throw new Error('driver source inventory is invalid');
   const runtimeNames = ['candidate-checkpoint.mjs', 'driver-runtime.mjs', 'scenario-runtime.mjs'];
   const runtimeDirectory = protectedDirectory(join(source, 'lib'), 'runtime source directory', { ownerUid: sourceOwner, exactEntries: runtimeNames });
+  const releaseSource = protectedDirectory(resolve(source, '..'), 'release source directory', { ownerUid: sourceOwner });
   const scenarios = protectedDirectory(scenarioDirectory, 'scenario source directory', { ownerUid: production ? 0 : undefined, exactEntries: REQUIRED_GATES });
   const drivers = REQUIRED_GATES.map((gate) => ({ gate, ...readStableSource(join(driverDirectory, gate), { executable: true, ownerUid: sourceOwner }) }));
   const scenarioFiles = REQUIRED_GATES.map((gate) => ({ gate, executable: gate, ...readStableSource(join(scenarios, gate), { executable: true, ownerUid: production ? 0 : undefined }) }));
   const runtimes = runtimeNames.map((name) => ({ name, ...readStableSource(join(runtimeDirectory, name), { ownerUid: sourceOwner }) }));
+  const qualificationToolFiles = QUALIFICATION_TOOL_FILES.map((item) => ({ ...item, ...readStableSource(join(releaseSource, item.source), { ownerUid: sourceOwner }) }));
   const machineConfig = readStableSource(machineConfigPath, { ownerUid: production ? 0 : undefined }); let parsedMachineConfig;
   try { parsedMachineConfig = JSON.parse(machineConfig.bytes.toString('utf8')); } catch { throw new Error('machine scenario config is invalid JSON'); }
   if (!machineConfig.bytes.equals(canonicalScenarioJSON(parsedMachineConfig))) throw new Error('machine scenario config is not canonical JSON');
   validateScenarioConfig(parsedMachineConfig);
-  return { source, scenarios, drivers, scenarioFiles, runtimes, machineConfig };
+  return { source, scenarios, drivers, scenarioFiles, runtimes, qualificationToolFiles, machineConfig };
 };
 
 const writeInstalledFile = (path, bytes, mode, uid, gid) => {
@@ -85,13 +92,20 @@ const verifyInstalledTree = (root, expected, uid) => {
   protectedDirectory(join(root, 'gates'), 'installed gate directory', { ownerUid: uid, exactEntries: REQUIRED_GATES });
   protectedDirectory(join(root, 'lib'), 'installed runtime directory', { ownerUid: uid, exactEntries: expected.runtimes.map(({ name }) => name) });
   protectedDirectory(join(root, 'scenarios'), 'installed scenario directory', { ownerUid: uid, exactEntries: REQUIRED_GATES });
+  const qualificationToolDirectory = protectedDirectory(join(root, 'qualification-tool'), 'installed qualification tool directory', { ownerUid: uid });
+  const qualificationToolEntries = fs.readdirSync(qualificationToolDirectory, { withFileTypes: true }).sort((left, right) => left.name.localeCompare(right.name));
+  if (qualificationToolEntries.length !== 3 || qualificationToolEntries[0]?.name !== 'generate-release-attestation.mjs' || !qualificationToolEntries[0].isFile() || qualificationToolEntries[1]?.name !== 'manifest.json' || !qualificationToolEntries[1].isFile() || qualificationToolEntries[2]?.name !== 'n3e' || !qualificationToolEntries[2].isDirectory() || qualificationToolEntries.some((entry) => entry.isSymbolicLink())) throw new Error('installed qualification tool inventory is invalid');
+  protectedDirectory(join(root, 'qualification-tool', 'n3e'), 'installed qualification tool module directory', { ownerUid: uid, exactEntries: ['controller-identity-contract.mjs', 'provision-qualification-config.mjs'] });
   const drivers = REQUIRED_GATES.map((gate) => readStableSource(join(root, 'gates', gate), { executable: true, ownerUid: uid }));
   const scenarios = REQUIRED_GATES.map((gate) => readStableSource(join(root, 'scenarios', gate), { executable: true, ownerUid: uid }));
   const runtimes = expected.runtimes.map(({ name }) => ({ name, ...readStableSource(join(root, 'lib', name), { ownerUid: uid }) }));
+  const qualificationToolFiles = expected.qualificationToolFiles.map(({ installed }) => ({ installed, ...readStableSource(join(root, 'qualification-tool', installed), { ownerUid: uid }) }));
+  const qualificationToolManifest = readStableSource(join(root, 'qualification-tool', 'manifest.json'), { ownerUid: uid });
   const config = readStableSource(join(root, 'driver-config.json'), { ownerUid: uid });
   const machineConfig = readStableSource(join(root, 'scenario-config.json'), { ownerUid: uid });
-  if (drivers.some((item, index) => item.sha256 !== expected.drivers[index].sha256) || scenarios.some((item, index) => item.sha256 !== expected.scenarioFiles[index].sha256) || runtimes.some((item, index) => item.sha256 !== expected.runtimes[index].sha256) || machineConfig.sha256 !== expected.machineConfig.sha256) throw new Error('installed inventory digest mismatch');
-  return { drivers, scenarios, runtimes, config, machineConfig };
+  const expectedToolManifest = canonicalJSON({ schema_version: 1, files: expected.qualificationToolFiles.map(({ installed, sha256: digest }) => ({ path: installed, sha256: digest })) });
+  if (drivers.some((item, index) => item.sha256 !== expected.drivers[index].sha256) || scenarios.some((item, index) => item.sha256 !== expected.scenarioFiles[index].sha256) || runtimes.some((item, index) => item.sha256 !== expected.runtimes[index].sha256) || qualificationToolFiles.some((item, index) => item.sha256 !== expected.qualificationToolFiles[index].sha256) || !qualificationToolManifest.bytes.equals(expectedToolManifest) || machineConfig.sha256 !== expected.machineConfig.sha256) throw new Error('installed inventory digest mismatch');
+  return { drivers, scenarios, runtimes, qualificationToolFiles, qualificationToolManifest, config, machineConfig };
 };
 
 export const provisionRunner = ({ sourceRoot, scenarioDirectory, machineConfigPath, destinationRoot = PRODUCTION_ROOT, platform = process.platform, uid = process.geteuid?.(), gid = 0, production = true } = {}) => {
@@ -105,18 +119,20 @@ export const provisionRunner = ({ sourceRoot, scenarioDirectory, machineConfigPa
   const staging = join(parent, `.p0c-stage-${crypto.randomBytes(12).toString('hex')}`);
   try {
     fs.mkdirSync(staging, { mode: 0o700 }); fs.chownSync(staging, uid, gid);
-    for (const directory of ['gates', 'lib', 'scenarios']) { const path = join(staging, directory); fs.mkdirSync(path, { mode: 0o755 }); fs.chownSync(path, uid, gid); }
+    for (const directory of ['gates', 'lib', 'scenarios', 'qualification-tool', 'qualification-tool/n3e']) { const path = join(staging, directory); fs.mkdirSync(path, { mode: 0o755 }); fs.chownSync(path, uid, gid); }
     for (const item of inspected.drivers) writeInstalledFile(join(staging, 'gates', item.gate), item.bytes, 0o755, uid, gid);
     for (const item of inspected.runtimes) writeInstalledFile(join(staging, 'lib', item.name), item.bytes, 0o644, uid, gid);
+    for (const item of inspected.qualificationToolFiles) writeInstalledFile(join(staging, 'qualification-tool', item.installed), item.bytes, 0o644, uid, gid);
+    writeInstalledFile(join(staging, 'qualification-tool', 'manifest.json'), canonicalJSON({ schema_version: 1, files: inspected.qualificationToolFiles.map(({ installed, sha256: digest }) => ({ path: installed, sha256: digest })) }), 0o644, uid, gid);
     for (const item of inspected.scenarioFiles) writeInstalledFile(join(staging, 'scenarios', item.executable), item.bytes, 0o755, uid, gid);
     const config = { schema_version: 1, scenario_directory: join(destination, 'scenarios'), scenarios: inspected.scenarioFiles.map(({ gate, executable, sha256: digest }) => ({ gate, executable, sha256: digest })) };
     writeInstalledFile(join(staging, 'driver-config.json'), canonicalJSON(config), 0o644, uid, gid);
     writeInstalledFile(join(staging, 'scenario-config.json'), inspected.machineConfig.bytes, 0o644, uid, gid);
-    fs.chmodSync(staging, 0o755); for (const directory of ['gates', 'lib', 'scenarios']) fsyncDirectory(join(staging, directory)); fsyncDirectory(staging);
+    fs.chmodSync(staging, 0o755); for (const directory of ['gates', 'lib', 'scenarios', 'qualification-tool/n3e', 'qualification-tool']) fsyncDirectory(join(staging, directory)); fsyncDirectory(staging);
     verifyInstalledTree(staging, inspected, uid);
     fs.renameSync(staging, destination); fsyncDirectory(parent);
     const installed = verifyInstalledTree(destination, inspected, uid);
-    return Object.freeze({ production: production === true, destination, driver_count: installed.drivers.length, scenario_count: installed.scenarios.length, config_sha256: installed.config.sha256 });
+    return Object.freeze({ production: production === true, destination, driver_count: installed.drivers.length, scenario_count: installed.scenarios.length, qualification_tool_path: join(destination, 'qualification-tool', 'n3e', 'provision-qualification-config.mjs'), qualification_tool_manifest_sha256: installed.qualificationToolManifest.sha256, config_sha256: installed.config.sha256 });
   } catch (error) {
     if (fs.existsSync(staging)) fs.rmSync(staging, { recursive: true, force: false });
     throw error;

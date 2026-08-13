@@ -88,6 +88,7 @@ jobs:
       BROWSER_VERSIONS_JSON: ${{ vars.AGENTPASS_P0C_BROWSER_VERSIONS_JSON }}
       OPERATOR_PRIVATE_KEY_B64: ${{ secrets.AGENTPASS_P0C_APPLE_SILICON_OPERATOR_PRIVATE_KEY_BASE64 }}
       GATE_DRIVER_DIR: /opt/agentpass/p0c/gates
+      QUALIFICATION_CONFIG_TOOL_ROOT: /opt/agentpass/p0c/qualification-tool
       CONTROLLER_ARCHITECTURE: arm64
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -223,6 +224,38 @@ jobs:
           scripts/release/verify-macos-release.sh "$MANIFEST" "$MANIFEST_SIGNATURE" "$MANIFEST_PUBLIC_KEY" "$RELEASE_MANIFEST_FINGERPRINT" "$EXPECTED_TEAM_ID"
           test -s "$PRODUCT_PKG"
 
+      - name: Verify root-owned qualification config tool matches the trusted workflow commit
+        shell: bash
+        run: |
+          set -euo pipefail
+          node --input-type=module <<'NODE'
+          import crypto from 'node:crypto';
+          import fs from 'node:fs';
+          import path from 'node:path';
+          const root = '/opt/agentpass/p0c/qualification-tool';
+          if (process.env.QUALIFICATION_CONFIG_TOOL_ROOT !== root) throw new Error('qualification tool root is not fixed');
+          const expected = [
+            ['generate-release-attestation.mjs', 'scripts/release/generate-release-attestation.mjs'],
+            ['n3e/controller-identity-contract.mjs', 'scripts/release/n3e/controller-identity-contract.mjs'],
+            ['n3e/provision-qualification-config.mjs', 'scripts/release/n3e/provision-qualification-config.mjs']
+          ];
+          const safe = (file, directory = false) => {
+            const stat = fs.lstatSync(file);
+            if (stat.isSymbolicLink() || stat.uid !== 0 || (stat.mode & 0o022) !== 0 || (directory ? !stat.isDirectory() : !stat.isFile() || stat.nlink !== 1)) throw new Error('qualification tool installation is unsafe');
+          };
+          safe(root, true); safe(path.join(root, 'n3e'), true);
+          const manifestPath = path.join(root, 'manifest.json'); safe(manifestPath);
+          const manifestBytes = fs.readFileSync(manifestPath); const manifest = JSON.parse(manifestBytes);
+          if (JSON.stringify(Object.keys(manifest).sort()) !== JSON.stringify(['files', 'schema_version']) || manifest.schema_version !== 1 || !Array.isArray(manifest.files) || manifest.files.length !== expected.length) throw new Error('qualification tool manifest is invalid');
+          for (let index = 0; index < expected.length; index += 1) {
+            const [installedName, sourceName] = expected[index]; const item = manifest.files[index];
+            if (JSON.stringify(Object.keys(item).sort()) !== JSON.stringify(['path', 'sha256']) || item.path !== installedName || !/^[0-9a-f]{64}$/.test(item.sha256)) throw new Error('qualification tool manifest binding is invalid');
+            const installed = path.join(root, installedName); safe(installed);
+            const digest = (file) => crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex');
+            if (digest(installed) !== item.sha256 || digest(sourceName) !== item.sha256) throw new Error('protected qualification tool is stale or substituted');
+          }
+          NODE
+
       - name: Generate immutable hardware report template from signed release evidence
         env:
           TEMPLATE_OUT: ${{ env.OUTPUT_DIR }}/template.json
@@ -349,6 +382,7 @@ jobs:
       BROWSER_VERSIONS_JSON: ${{ vars.AGENTPASS_P0C_BROWSER_VERSIONS_JSON }}
       OPERATOR_PRIVATE_KEY_B64: ${{ secrets.AGENTPASS_P0C_INTEL_T2_OPERATOR_PRIVATE_KEY_BASE64 }}
       GATE_DRIVER_DIR: /opt/agentpass/p0c/gates
+      QUALIFICATION_CONFIG_TOOL_ROOT: /opt/agentpass/p0c/qualification-tool
       CONTROLLER_ARCHITECTURE: x86_64
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -476,6 +510,38 @@ jobs:
           node scripts/release/verify-release.mjs "$MANIFEST" "$MANIFEST_SIGNATURE" "$MANIFEST_PUBLIC_KEY" "$RELEASE_MANIFEST_FINGERPRINT"
           scripts/release/verify-macos-release.sh "$MANIFEST" "$MANIFEST_SIGNATURE" "$MANIFEST_PUBLIC_KEY" "$RELEASE_MANIFEST_FINGERPRINT" "$EXPECTED_TEAM_ID"
           test -s "$PRODUCT_PKG"
+
+      - name: Verify root-owned qualification config tool matches the trusted workflow commit
+        shell: bash
+        run: |
+          set -euo pipefail
+          node --input-type=module <<'NODE'
+          import crypto from 'node:crypto';
+          import fs from 'node:fs';
+          import path from 'node:path';
+          const root = '/opt/agentpass/p0c/qualification-tool';
+          if (process.env.QUALIFICATION_CONFIG_TOOL_ROOT !== root) throw new Error('qualification tool root is not fixed');
+          const expected = [
+            ['generate-release-attestation.mjs', 'scripts/release/generate-release-attestation.mjs'],
+            ['n3e/controller-identity-contract.mjs', 'scripts/release/n3e/controller-identity-contract.mjs'],
+            ['n3e/provision-qualification-config.mjs', 'scripts/release/n3e/provision-qualification-config.mjs']
+          ];
+          const safe = (file, directory = false) => {
+            const stat = fs.lstatSync(file);
+            if (stat.isSymbolicLink() || stat.uid !== 0 || (stat.mode & 0o022) !== 0 || (directory ? !stat.isDirectory() : !stat.isFile() || stat.nlink !== 1)) throw new Error('qualification tool installation is unsafe');
+          };
+          safe(root, true); safe(path.join(root, 'n3e'), true);
+          const manifestPath = path.join(root, 'manifest.json'); safe(manifestPath);
+          const manifestBytes = fs.readFileSync(manifestPath); const manifest = JSON.parse(manifestBytes);
+          if (JSON.stringify(Object.keys(manifest).sort()) !== JSON.stringify(['files', 'schema_version']) || manifest.schema_version !== 1 || !Array.isArray(manifest.files) || manifest.files.length !== expected.length) throw new Error('qualification tool manifest is invalid');
+          for (let index = 0; index < expected.length; index += 1) {
+            const [installedName, sourceName] = expected[index]; const item = manifest.files[index];
+            if (JSON.stringify(Object.keys(item).sort()) !== JSON.stringify(['path', 'sha256']) || item.path !== installedName || !/^[0-9a-f]{64}$/.test(item.sha256)) throw new Error('qualification tool manifest binding is invalid');
+            const installed = path.join(root, installedName); safe(installed);
+            const digest = (file) => crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex');
+            if (digest(installed) !== item.sha256 || digest(sourceName) !== item.sha256) throw new Error('protected qualification tool is stale or substituted');
+          }
+          NODE
 
       - name: Generate immutable hardware report template from signed release evidence
         env:
