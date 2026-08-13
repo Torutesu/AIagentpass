@@ -213,3 +213,39 @@ test("N3-E physical entrypoints fail closed instead of accepting simulation or p
   assert.match(source, /status: 'skipped'/u);
   assert.match(source, /qualified: production && platform === 'darwin'/u);
 });
+
+test("N3-E qualification control stays closed and separate from Agent authority", () => {
+  const xpc = read("native/macos/Sources/AgentPassNativeCore/AgentQualificationXPCProtocol.swift");
+  const controller = read("native/macos/Sources/AgentPassNativeCore/NativeAgentQualificationFaultController.swift");
+  const requirement = read("native/macos/Sources/AgentPassNativeCore/NativeAgentQualificationCodeRequirement.swift");
+  const agentProtocol = read("native/macos/Sources/AgentPassNativeCore/AgentXPCProtocol.swift");
+
+  const phases = [
+    "pre-cloud",
+    "post-cloud-pre-local",
+    "post-activation-pre-audit",
+    "post-audit-pre-reply",
+    "audit-fsync",
+    "transport-reply",
+  ];
+  const scenarios = [
+    "pre-cloud-kill",
+    "post-cloud-pre-local-kill",
+    "post-activation-pre-audit-kill",
+    "post-audit-pre-reply-loss",
+    "audit-fsync-failure",
+    "transport-reply-loss",
+  ];
+
+  for (const phase of phases) {
+    assert.match(xpc, new RegExp(`= "${phase}"`, "u"));
+    assert.match(controller, new RegExp(`= "${phase}"`, "u"));
+  }
+  for (const scenario of scenarios) assert.match(controller, new RegExp(`= "${scenario}"`, "u"));
+  assert.equal((xpc.match(/case \w+ = "/gu) ?? []).length >= phases.length, true);
+  assert.match(xpc, /machServiceName = "dev\.agentpass\.n3e-qualification"/u);
+  assert.match(requirement, /controllerBundleID = "dev\.agentpass\.qualification-controller"/u);
+  assert.match(requirement, /controllerEntitlement = "dev\.agentpass\.qualification-control"/u);
+  assert.match(requirement, /certificate leaf\[subject\.OU\]/u);
+  assert.doesNotMatch(agentProtocol, /armFault|readStatus|disarmFault|n3e-qualification|qualification-control/u);
+});

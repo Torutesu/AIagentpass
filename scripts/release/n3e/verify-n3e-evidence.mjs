@@ -7,10 +7,12 @@ import { pathToFileURL } from 'node:url';
 export const N3E_SCHEMA_VERSION = 1;
 export const MAX_EVIDENCE_BYTES = 2 * 1024 * 1024;
 export const REQUIRED_SCENARIOS = Object.freeze([
-  'service-kill-after-cloud-commit',
-  'daemon-restart-after-cloud-commit',
-  'lost-reply-after-cloud-commit',
-  'audit-fsync-failure-recovery'
+  'pre-cloud-kill',
+  'post-cloud-pre-local-kill',
+  'post-activation-pre-audit-kill',
+  'post-audit-pre-reply-loss',
+  'audit-fsync-failure',
+  'transport-reply-loss'
 ]);
 
 const DIGEST = /^[0-9a-f]{64}$/u;
@@ -20,11 +22,29 @@ const SAFE_NAME = /^[a-z0-9][a-z0-9-]{0,79}$/u;
 const DECIMAL = /^(?:0|[1-9][0-9]*)$/u;
 const ISO_TIME = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/u;
 const MAX_DEPTH = 16;
-const MAX_SCENARIO_EVENTS = 24;
+const MAX_SCENARIO_EVENTS = 16;
 const MAX_PROCESS_OBSERVATIONS = 8;
-const MAX_DIGEST_REFERENCES = 32;
+const MAX_DIGEST_REFERENCES = 24;
 const FORBIDDEN_KEY = /(?:secret|token|password|private|credential|authorization|stdout|stderr|output|response[_-]?body|raw|signature|nonce)/iu;
 const FORBIDDEN_VALUE = /(?:-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----|\bBearer\s+\S+|\b(?:sk|ghp|github_pat|xox[baprs])_[A-Za-z0-9_-]{8,}|\bprivate[-_ ]?(?:key|token|credential)\b)/iu;
+
+const SCENARIO_EVENT_INVENTORY = Object.freeze({
+  'pre-cloud-kill': Object.freeze(['process_alive', 'process_exit', 'process_start', 'cloud_observation', 'local_authority']),
+  'post-cloud-pre-local-kill': Object.freeze(['process_alive', 'cloud_commit', 'process_exit', 'process_start', 'recovery', 'cloud_observation', 'local_authority']),
+  'post-activation-pre-audit-kill': Object.freeze(['process_alive', 'cloud_commit', 'local_activation', 'process_exit', 'process_start', 'cloud_observation', 'local_authority']),
+  'post-audit-pre-reply-loss': Object.freeze(['process_alive', 'cloud_commit', 'local_activation', 'audit_fsync', 'audit_ack', 'process_exit', 'reply_lost', 'process_start', 'recovery', 'cloud_observation', 'local_authority']),
+  'audit-fsync-failure': Object.freeze(['process_alive', 'cloud_commit', 'local_activation', 'audit_fsync', 'compensation', 'cloud_observation', 'local_authority']),
+  'transport-reply-loss': Object.freeze(['process_alive', 'cloud_commit', 'local_activation', 'audit_fsync', 'audit_ack', 'reply_lost', 'recovery', 'cloud_observation', 'local_authority'])
+});
+
+const SCENARIO_DIGEST_INVENTORY = Object.freeze({
+  'pre-cloud-kill': Object.freeze(['cloud-observation-0', 'code-identity-set', 'local-authority-0', 'process-code-identity-0', 'process-executable-0']),
+  'post-cloud-pre-local-kill': Object.freeze(['cloud-commit-0', 'cloud-observation-0', 'code-identity-set', 'local-authority-0', 'process-code-identity-0', 'process-executable-0', 'recovery-result-0']),
+  'post-activation-pre-audit-kill': Object.freeze(['cloud-commit-0', 'cloud-observation-0', 'code-identity-set', 'local-activation-0', 'local-authority-0', 'process-code-identity-0', 'process-executable-0']),
+  'post-audit-pre-reply-loss': Object.freeze(['audit-record-0', 'cloud-commit-0', 'cloud-observation-0', 'code-identity-set', 'local-activation-0', 'local-authority-0', 'process-code-identity-0', 'process-executable-0', 'recovery-result-0', 'reply-result-0', 'transport-0']),
+  'audit-fsync-failure': Object.freeze(['audit-record-0', 'cloud-commit-0', 'cloud-observation-0', 'code-identity-set', 'compensation-0', 'local-activation-0', 'local-authority-0', 'process-code-identity-0', 'process-executable-0']),
+  'transport-reply-loss': Object.freeze(['audit-record-0', 'cloud-commit-0', 'cloud-observation-0', 'code-identity-set', 'local-activation-0', 'local-authority-0', 'process-code-identity-0', 'process-executable-0', 'recovery-result-0', 'reply-result-0', 'transport-0'])
+});
 
 const sha256 = (bytes) => crypto.createHash('sha256').update(bytes).digest('hex');
 
@@ -188,16 +208,56 @@ const validateEvent = (value, label) => {
     return Object.freeze({ kind, observed_at: timestamp(value.observed_at, `${label}.observed_at`), boot_id_digest: digest(value.boot_id_digest, `${label}.boot_id_digest`), process_pid: decimal(value.process_pid, `${label}.process_pid`, 2_147_483_647n), process_start_time_ns: decimal(value.process_start_time_ns, `${label}.process_start_time_ns`), exit_reason: value.exit_reason });
   }
   if (kind === 'cloud_commit') {
-    exactKeys(value, ['kind', 'observed_at', 'boot_id_digest', 'request_digest', 'commit_receipt_digest'], label);
-    return Object.freeze({ kind, observed_at: timestamp(value.observed_at, `${label}.observed_at`), boot_id_digest: digest(value.boot_id_digest, `${label}.boot_id_digest`), request_digest: digest(value.request_digest, `${label}.request_digest`), commit_receipt_digest: digest(value.commit_receipt_digest, `${label}.commit_receipt_digest`) });
+    exactKeys(value, ['kind', 'observed_at', 'boot_id_digest', 'request_digest', 'commit_receipt_digest', 'session_digest'], label);
+    return Object.freeze({ kind, observed_at: timestamp(value.observed_at, `${label}.observed_at`), boot_id_digest: digest(value.boot_id_digest, `${label}.boot_id_digest`), request_digest: digest(value.request_digest, `${label}.request_digest`), commit_receipt_digest: digest(value.commit_receipt_digest, `${label}.commit_receipt_digest`), session_digest: digest(value.session_digest, `${label}.session_digest`) });
+  }
+  if (kind === 'cloud_observation') {
+    exactKeys(value, ['kind', 'observed_at', 'boot_id_digest', 'request_digest', 'observation_digest', 'commit_count', 'session_count', 'active_session_count', 'compensation_count', 'commit_receipt_digest', 'session_digest', 'compensation_digest'], label);
+    const count = (field) => {
+      if (value[field] !== '0' && value[field] !== '1') throw new Error(`${label}.${field} must be 0 or 1`);
+      return value[field];
+    };
+    const nullableDigest = (field) => {
+      if (value[field] !== null) return digest(value[field], `${label}.${field}`);
+      return null;
+    };
+    return Object.freeze({
+      kind,
+      observed_at: timestamp(value.observed_at, `${label}.observed_at`),
+      boot_id_digest: digest(value.boot_id_digest, `${label}.boot_id_digest`),
+      request_digest: digest(value.request_digest, `${label}.request_digest`),
+      observation_digest: digest(value.observation_digest, `${label}.observation_digest`),
+      commit_count: count('commit_count'),
+      session_count: count('session_count'),
+      active_session_count: count('active_session_count'),
+      compensation_count: count('compensation_count'),
+      commit_receipt_digest: nullableDigest('commit_receipt_digest'),
+      session_digest: nullableDigest('session_digest'),
+      compensation_digest: nullableDigest('compensation_digest')
+    });
+  }
+  if (kind === 'local_activation') {
+    exactKeys(value, ['kind', 'observed_at', 'boot_id_digest', 'authority_digest', 'session_digest'], label);
+    return Object.freeze({ kind, observed_at: timestamp(value.observed_at, `${label}.observed_at`), boot_id_digest: digest(value.boot_id_digest, `${label}.boot_id_digest`), authority_digest: digest(value.authority_digest, `${label}.authority_digest`), session_digest: digest(value.session_digest, `${label}.session_digest`) });
+  }
+  if (kind === 'local_authority') {
+    exactKeys(value, ['kind', 'observed_at', 'boot_id_digest', 'authority_digest', 'authority_count', 'state', 'session_digest'], label);
+    if (value.authority_count !== '0' && value.authority_count !== '1') throw new Error(`${label}.authority_count must be 0 or 1`);
+    if (value.state !== 'absent' && value.state !== 'active' && value.state !== 'revoked') throw new Error(`${label}.state is invalid`);
+    if (value.authority_count === '0' && value.state === 'active') throw new Error(`${label} cannot report active authority with a zero count`);
+    if (value.authority_count === '1' && value.state === 'absent') throw new Error(`${label} cannot report absent authority with a non-zero count`);
+    if (value.session_digest !== null) digest(value.session_digest, `${label}.session_digest`);
+    return Object.freeze({ kind, observed_at: timestamp(value.observed_at, `${label}.observed_at`), boot_id_digest: digest(value.boot_id_digest, `${label}.boot_id_digest`), authority_digest: digest(value.authority_digest, `${label}.authority_digest`), authority_count: value.authority_count, state: value.state, session_digest: value.session_digest });
   }
   if (kind === 'reply_lost') {
-    exactKeys(value, ['kind', 'observed_at', 'boot_id_digest', 'transport_digest'], label);
-    return Object.freeze({ kind, observed_at: timestamp(value.observed_at, `${label}.observed_at`), boot_id_digest: digest(value.boot_id_digest, `${label}.boot_id_digest`), transport_digest: digest(value.transport_digest, `${label}.transport_digest`) });
+    exactKeys(value, ['kind', 'observed_at', 'boot_id_digest', 'request_digest', 'transport_digest', 'result_digest', 'loss_boundary'], label);
+    if (value.loss_boundary !== 'daemon-kill' && value.loss_boundary !== 'transport') throw new Error(`${label}.loss_boundary is invalid`);
+    return Object.freeze({ kind, observed_at: timestamp(value.observed_at, `${label}.observed_at`), boot_id_digest: digest(value.boot_id_digest, `${label}.boot_id_digest`), request_digest: digest(value.request_digest, `${label}.request_digest`), transport_digest: digest(value.transport_digest, `${label}.transport_digest`), result_digest: digest(value.result_digest, `${label}.result_digest`), loss_boundary: value.loss_boundary });
   }
   if (kind === 'recovery') {
-    exactKeys(value, ['kind', 'observed_at', 'boot_id_digest', 'request_digest', 'result_digest'], label);
-    return Object.freeze({ kind, observed_at: timestamp(value.observed_at, `${label}.observed_at`), boot_id_digest: digest(value.boot_id_digest, `${label}.boot_id_digest`), request_digest: digest(value.request_digest, `${label}.request_digest`), result_digest: digest(value.result_digest, `${label}.result_digest`) });
+    exactKeys(value, ['kind', 'observed_at', 'boot_id_digest', 'request_digest', 'result_digest', 'commit_receipt_digest', 'session_digest', 'retry_kind'], label);
+    if (value.retry_kind !== 'exact') throw new Error(`${label}.retry_kind must be exact`);
+    return Object.freeze({ kind, observed_at: timestamp(value.observed_at, `${label}.observed_at`), boot_id_digest: digest(value.boot_id_digest, `${label}.boot_id_digest`), request_digest: digest(value.request_digest, `${label}.request_digest`), result_digest: digest(value.result_digest, `${label}.result_digest`), commit_receipt_digest: digest(value.commit_receipt_digest, `${label}.commit_receipt_digest`), session_digest: digest(value.session_digest, `${label}.session_digest`), retry_kind: value.retry_kind });
   }
   if (kind === 'audit_fsync') {
     exactKeys(value, ['kind', 'observed_at', 'boot_id_digest', 'audit_record_digest', 'result'], label);
@@ -207,6 +267,11 @@ const validateEvent = (value, label) => {
   if (kind === 'audit_ack') {
     exactKeys(value, ['kind', 'observed_at', 'boot_id_digest', 'audit_record_digest'], label);
     return Object.freeze({ kind, observed_at: timestamp(value.observed_at, `${label}.observed_at`), boot_id_digest: digest(value.boot_id_digest, `${label}.boot_id_digest`), audit_record_digest: digest(value.audit_record_digest, `${label}.audit_record_digest`) });
+  }
+  if (kind === 'compensation') {
+    exactKeys(value, ['kind', 'observed_at', 'boot_id_digest', 'request_digest', 'session_digest', 'compensation_digest', 'reason', 'result'], label);
+    if (value.reason !== 'audit-fsync-failure' || value.result !== 'revoked') throw new Error(`${label} compensation is invalid`);
+    return Object.freeze({ kind, observed_at: timestamp(value.observed_at, `${label}.observed_at`), boot_id_digest: digest(value.boot_id_digest, `${label}.boot_id_digest`), request_digest: digest(value.request_digest, `${label}.request_digest`), session_digest: digest(value.session_digest, `${label}.session_digest`), compensation_digest: digest(value.compensation_digest, `${label}.compensation_digest`), reason: value.reason, result: value.result });
   }
   throw new Error(`${label}.kind is unknown`);
 };
@@ -225,16 +290,28 @@ const sameProcess = (left, right) => left.pid === right.pid && left.start_time_n
 const processKey = (item) => `${item.pid}:${item.start_time_ns}:${item.boot_id_digest}`;
 const eventTime = (event) => Date.parse(event.observed_at);
 
-const requireSequence = (events, name, sequence) => {
-  let cursor = -1;
-  for (const kind of sequence) {
-    const index = events.findIndex((event, eventIndex) => eventIndex > cursor && event.kind === kind);
-    if (index === -1) throw new Error(`${name} does not prove required ${kind} transition`);
-    cursor = index;
-  }
+const requireDigestReference = (references, kind, expected, label) => {
+  const reference = references.find((item) => item.kind === kind);
+  if (!reference || reference.sha256 !== expected) throw new Error(`${label} is not bound to digest inventory`);
 };
 
-const validateScenario = (value, index, host) => {
+const requireCloudObservationBinding = (references, observation, label) => {
+  requireDigestReference(references, 'cloud-observation-0', observation.observation_digest, `${label}.cloud_observation`);
+  if (observation.commit_count === '0' && (observation.session_count !== '0' || observation.active_session_count !== '0' || observation.compensation_count !== '0' || observation.commit_receipt_digest !== null || observation.session_digest !== null || observation.compensation_digest !== null)) throw new Error(`${label} zero Cloud observation is inconsistent`);
+  if (observation.commit_count === '1' && observation.session_count !== '1') throw new Error(`${label} Cloud commit does not prove one Cloud session`);
+  if (observation.session_count === '1' && observation.session_digest === null) throw new Error(`${label} Cloud session count has no digest`);
+  if (observation.commit_count === '1' && observation.commit_receipt_digest === null) throw new Error(`${label} Cloud commit count has no receipt digest`);
+  if (observation.compensation_count === '1' && observation.compensation_digest === null) throw new Error(`${label} compensation count has no digest`);
+  if (observation.active_session_count === '1' && observation.session_count !== '1') throw new Error(`${label} active Cloud session has no committed session`);
+  if (observation.compensation_count === '1' && observation.active_session_count !== '0') throw new Error(`${label} compensated Cloud session remains active`);
+};
+
+const requireExactDigestInventory = (references, expected, label) => {
+  const actual = references.map((item) => item.kind);
+  if (actual.length !== expected.length || actual.some((kind, index) => kind !== expected[index])) throw new Error(`${label} digest inventory is missing, unknown, duplicated, or out of order`);
+};
+
+const validateScenario = (value, index, host, binding) => {
   const label = `scenarios[${index}]`;
   exactKeys(value, ['name', 'status', 'started_at', 'completed_at', 'process_observations', 'events', 'evidence_digests'], label);
   if (value.name !== REQUIRED_SCENARIOS[index]) throw new Error(`${label}.name is missing, duplicated, or out of order`);
@@ -254,7 +331,7 @@ const validateScenario = (value, index, host) => {
     entries.push(observation);
     processObservationsByKey.set(key, entries);
   }
-  if (!Array.isArray(value.events) || value.events.length < 4 || value.events.length > MAX_SCENARIO_EVENTS) throw new Error(`${label}.events is insufficient`);
+  if (!Array.isArray(value.events) || value.events.length < 1 || value.events.length > MAX_SCENARIO_EVENTS) throw new Error(`${label}.events is insufficient`);
   const events = value.events.map((item, itemIndex) => validateEvent(item, `${label}.events[${itemIndex}]`));
   if (events.some((item, itemIndex) => itemIndex > 0 && eventTime(item) <= eventTime(events[itemIndex - 1]))) throw new Error(`${label}.events must be time ordered`);
   if (events.some((item) => eventTime(item) < Date.parse(started) || eventTime(item) > Date.parse(completed))) throw new Error(`${label}.events escape the scenario window`);
@@ -265,23 +342,80 @@ const validateScenario = (value, index, host) => {
     const expectedState = event.kind === 'process_exit' ? 'exited' : 'running';
     return !observations.some((observation) => observation.state === expectedState);
   })) throw new Error(`${label} has an unobserved process transition`);
+  const evidenceDigests = validateDigestReferences(value.evidence_digests, `${label}.evidence_digests`);
+  requireExactDigestInventory(evidenceDigests, SCENARIO_DIGEST_INVENTORY[value.name], label);
+  requireDigestReference(evidenceDigests, 'code-identity-set', binding.code_identities_sha256, `${label}.code-identity-set`);
+  requireDigestReference(evidenceDigests, 'process-executable-0', processes[0].executable_sha256, `${label}.process-executable-0`);
+  requireDigestReference(evidenceDigests, 'process-code-identity-0', processes[0].code_identity_sha256, `${label}.process-code-identity-0`);
+  if (processes.some((item) => item.process_role !== processes[0].process_role || item.executable_sha256 !== processes[0].executable_sha256 || item.code_identity_sha256 !== processes[0].code_identity_sha256)) throw new Error(`${label} process identity is not stable across the scenario`);
+  const expectedKinds = SCENARIO_EVENT_INVENTORY[value.name];
+  if (events.map((event) => event.kind).some((kind, eventIndex) => kind !== expectedKinds[eventIndex]) || events.length !== expectedKinds.length) throw new Error(`${label} event inventory is missing, unknown, duplicated, or out of order`);
   const first = processes[0];
   const last = processes[processes.length - 1];
-  if (value.name === 'service-kill-after-cloud-commit') {
-    requireSequence(events, value.name, ['process_alive', 'cloud_commit', 'process_exit', 'reply_lost', 'process_start', 'recovery']);
-    if (events.find((event) => event.kind === 'process_exit').exit_reason !== 'SIGKILL' || sameProcess(first, last)) throw new Error(`${label} does not prove a killed and replaced process`);
-  } else if (value.name === 'daemon-restart-after-cloud-commit') {
-    requireSequence(events, value.name, ['process_alive', 'cloud_commit', 'process_exit', 'process_start', 'recovery']);
-    if (events.find((event) => event.kind === 'process_exit').exit_reason !== 'restart' || sameProcess(first, last)) throw new Error(`${label} does not prove a daemon restart`);
-  } else if (value.name === 'lost-reply-after-cloud-commit') {
-    requireSequence(events, value.name, ['process_alive', 'cloud_commit', 'reply_lost', 'recovery']);
-    if (!sameProcess(first, last)) throw new Error(`${label} lost-reply proof must retain the same process identity`);
-  } else if (value.name === 'audit-fsync-failure-recovery') {
-    requireSequence(events, value.name, ['process_alive', 'cloud_commit', 'audit_fsync', 'reply_lost', 'audit_fsync', 'audit_ack', 'recovery']);
-    const fsyncs = events.filter((event) => event.kind === 'audit_fsync');
-    if (fsyncs[0].result !== 'failure' || fsyncs[1].result !== 'success' || fsyncs[0].audit_record_digest !== fsyncs[1].audit_record_digest || fsyncs[1].audit_record_digest !== events.find((event) => event.kind === 'audit_ack').audit_record_digest) throw new Error(`${label} does not prove audit fsync recovery`);
+  const killed = value.name === 'pre-cloud-kill' || value.name === 'post-cloud-pre-local-kill' || value.name === 'post-activation-pre-audit-kill' || value.name === 'post-audit-pre-reply-loss';
+  if (killed) {
+    if (processes.length !== 3 || processes[0].state !== 'running' || processes[1].state !== 'exited' || processes[2].state !== 'running' || !sameProcess(processes[0], processes[1]) || sameProcess(first, last)) throw new Error(`${label} does not prove a killed and replaced process`);
+    const exit = events.find((event) => event.kind === 'process_exit');
+    if (exit.exit_reason !== 'SIGKILL') throw new Error(`${label} must use SIGKILL for the activation fault`);
+  } else if (processes.length !== 2 || processes.some((process) => process.state !== 'running') || !sameProcess(first, last)) {
+    throw new Error(`${label} must retain one running process identity`);
   }
-  const evidenceDigests = validateDigestReferences(value.evidence_digests, `${label}.evidence_digests`);
+  const alive = events.find((event) => event.kind === 'process_alive');
+  if (alive.process_pid !== first.pid || alive.process_start_time_ns !== first.start_time_ns) throw new Error(`${label} process_alive is not bound to the first process`);
+  const start = events.find((event) => event.kind === 'process_start');
+  if (start && (start.process_pid !== last.pid || start.process_start_time_ns !== last.start_time_ns)) throw new Error(`${label} process_start is not bound to the observed process`);
+  const commit = events.find((event) => event.kind === 'cloud_commit');
+  const recovery = events.find((event) => event.kind === 'recovery');
+  const lost = events.find((event) => event.kind === 'reply_lost');
+  const activation = events.find((event) => event.kind === 'local_activation');
+  const observation = events.find((event) => event.kind === 'cloud_observation');
+  const authority = events.find((event) => event.kind === 'local_authority');
+  requireCloudObservationBinding(evidenceDigests, observation, label);
+  if (commit) {
+    requireDigestReference(evidenceDigests, 'cloud-commit-0', commit.commit_receipt_digest, `${label}.cloud-commit`);
+    if (observation.request_digest !== commit.request_digest || observation.commit_receipt_digest !== commit.commit_receipt_digest || observation.session_digest !== commit.session_digest) throw new Error(`${label} Cloud observation does not match the committed Cloud session`);
+    if (observation.commit_count !== '1' || observation.session_count !== '1') throw new Error(`${label} Cloud commit does not prove exactly one Cloud session`);
+  } else if (observation.commit_count !== '0' || observation.session_count !== '0') {
+    throw new Error(`${label} reports Cloud activity without a Cloud commit event`);
+  }
+  if (recovery) {
+    requireDigestReference(evidenceDigests, 'recovery-result-0', recovery.result_digest, `${label}.recovery-result`);
+    if (recovery.commit_receipt_digest !== commit?.commit_receipt_digest || recovery.session_digest !== commit?.session_digest) throw new Error(`${label} recovery is not an exact retry of the committed Cloud Session`);
+    if (lost && (recovery.request_digest !== lost.request_digest || recovery.result_digest !== lost.result_digest)) throw new Error(`${label} recovery is not an exact retry of the lost result`);
+  }
+  if (lost) {
+    requireDigestReference(evidenceDigests, 'transport-0', lost.transport_digest, `${label}.transport`);
+    requireDigestReference(evidenceDigests, 'reply-result-0', lost.result_digest, `${label}.reply-result`);
+  }
+  if (activation) {
+    requireDigestReference(evidenceDigests, 'local-activation-0', activation.authority_digest, `${label}.local-activation`);
+    if (!commit || activation.session_digest !== commit.session_digest) throw new Error(`${label} local activation is not bound to the Cloud session`);
+  }
+  requireDigestReference(evidenceDigests, 'local-authority-0', authority.authority_digest, `${label}.local-authority`);
+  if (authority.session_digest !== null && (!commit || authority.session_digest !== commit.session_digest)) throw new Error(`${label} local authority is bound to the wrong Cloud session`);
+  if (value.name === 'pre-cloud-kill') {
+    if (commit || observation.commit_count !== '0' || observation.session_count !== '0' || authority.authority_count !== '0' || authority.state !== 'absent') throw new Error(`${label} does not prove no Cloud commit, Session, or local authority`);
+  } else if (value.name === 'post-cloud-pre-local-kill') {
+    if (!commit || !recovery || observation.active_session_count !== '1' || observation.compensation_count !== '0' || authority.authority_count !== '0' || authority.state !== 'absent') throw new Error(`${label} does not prove exact Cloud recovery before local activation`);
+  } else if (value.name === 'post-activation-pre-audit-kill') {
+    if (!commit || !activation || observation.active_session_count !== '1' || authority.authority_count !== '0' || authority.state !== 'absent') throw new Error(`${label} does not prove no local authority after restart`);
+  } else if (value.name === 'post-audit-pre-reply-loss') {
+    const fsync = events.find((event) => event.kind === 'audit_fsync');
+    const ack = events.find((event) => event.kind === 'audit_ack');
+    if (!commit || !activation || !lost || lost.loss_boundary !== 'daemon-kill' || fsync.result !== 'success' || ack.audit_record_digest !== fsync.audit_record_digest || authority.authority_count !== '0' || authority.state !== 'absent') throw new Error(`${label} does not prove exact result after post-audit kill`);
+    requireDigestReference(evidenceDigests, 'audit-record-0', fsync.audit_record_digest, `${label}.audit-record`);
+  } else if (value.name === 'audit-fsync-failure') {
+    const fsync = events.find((event) => event.kind === 'audit_fsync');
+    const compensation = events.find((event) => event.kind === 'compensation');
+    if (!commit || !activation || fsync.result !== 'failure' || compensation.request_digest !== commit.request_digest || compensation.session_digest !== commit.session_digest || observation.compensation_count !== '1' || observation.active_session_count !== '0' || observation.compensation_digest !== compensation.compensation_digest || authority.authority_count !== '0' || authority.state !== 'revoked') throw new Error(`${label} does not prove compensation and no authority after audit fsync failure`);
+    requireDigestReference(evidenceDigests, 'audit-record-0', fsync.audit_record_digest, `${label}.audit-record`);
+    requireDigestReference(evidenceDigests, 'compensation-0', compensation.compensation_digest, `${label}.compensation`);
+  } else if (value.name === 'transport-reply-loss') {
+    const fsync = events.find((event) => event.kind === 'audit_fsync');
+    const ack = events.find((event) => event.kind === 'audit_ack');
+    if (!commit || !activation || !lost || lost.loss_boundary !== 'transport' || fsync.result !== 'success' || ack.audit_record_digest !== fsync.audit_record_digest || authority.authority_count !== '1' || authority.state !== 'active' || observation.active_session_count !== '1') throw new Error(`${label} does not prove exact transport retry`);
+    requireDigestReference(evidenceDigests, 'audit-record-0', fsync.audit_record_digest, `${label}.audit-record`);
+  }
   return Object.freeze({ name: value.name, status: value.status, started_at: started, completed_at: completed, process_observations: Object.freeze(processes), events: Object.freeze(events), evidence_digests: evidenceDigests });
 };
 
@@ -305,7 +439,7 @@ export const validateN3EEvidence = (value) => {
   if (value.host.platform !== 'macos' || (value.host.architecture !== 'arm64' && value.host.architecture !== 'x86_64')) throw new Error('host platform or architecture is invalid');
   const host = Object.freeze({ platform: value.host.platform, architecture: value.host.architecture, os_build: stringValue(value.host.os_build, /^[A-Za-z0-9._-]{3,32}$/u, 'host.os_build', 32), boot_id_digest: digest(value.host.boot_id_digest, 'host.boot_id_digest') });
   if (!Array.isArray(value.scenarios) || value.scenarios.length !== REQUIRED_SCENARIOS.length) throw new Error('N3-E scenarios are incomplete');
-  const scenarios = value.scenarios.map((item, index) => validateScenario(item, index, host));
+  const scenarios = value.scenarios.map((item, index) => validateScenario(item, index, host, binding));
   if (scenarios.some((scenario) => Date.parse(scenario.started_at) < Date.parse(started) || Date.parse(scenario.completed_at) > Date.parse(completed))) throw new Error('scenario timestamps escape the qualification window');
   const evidenceSha256 = digest(value.evidence_sha256, 'evidence_sha256');
   const normalized = Object.freeze({ schema_version: N3E_SCHEMA_VERSION, candidate_id: candidateId, binding, started_at: started, completed_at: completed, host, scenarios: Object.freeze(scenarios), evidence_sha256: evidenceSha256 });

@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://agentpass.dev/schemas/n3e-evidence-v1.json",
-  "title": "AgentPass N3-E candidate-bound qualification evidence",
+  "title": "AgentPass N3-E candidate-bound Agent Session activation evidence",
   "type": "object",
   "additionalProperties": false,
   "required": ["schema_version", "candidate_id", "binding", "started_at", "completed_at", "host", "scenarios", "evidence_sha256"],
@@ -13,17 +13,20 @@
     "completed_at": { "$ref": "#/$defs/timestamp" },
     "host": { "$ref": "#/$defs/host" },
     "scenarios": {
-      "type": "array", "minItems": 4, "maxItems": 4,
+      "type": "array", "minItems": 6, "maxItems": 6,
       "items": { "$ref": "#/$defs/scenario" }
     },
     "evidence_sha256": { "$ref": "#/$defs/digest" }
   },
   "$defs": {
     "digest": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "nullable_digest": { "anyOf": [{ "$ref": "#/$defs/digest" }, { "type": "null" }] },
     "commit": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
     "team_id": { "type": "string", "pattern": "^[A-Z0-9]{10}$" },
     "safe_name": { "type": "string", "pattern": "^[a-z0-9][a-z0-9-]{0,79}$" },
     "timestamp": { "type": "string", "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$" },
+    "decimal": { "type": "string", "pattern": "^(?:0|[1-9][0-9]*)$" },
+    "count": { "enum": ["0", "1"] },
     "binding": {
       "type": "object", "additionalProperties": false,
       "required": ["artifact_sha256", "source_commit", "team_id", "code_identities_sha256"],
@@ -49,8 +52,8 @@
       "required": ["process_role", "pid", "start_time_ns", "boot_id_digest", "executable_sha256", "code_identity_sha256", "observed_at", "state"],
       "properties": {
         "process_role": { "$ref": "#/$defs/safe_name" },
-        "pid": { "type": "string", "pattern": "^(?:0|[1-9][0-9]{0,9})$" },
-        "start_time_ns": { "type": "string", "pattern": "^(?:0|[1-9][0-9]{0,19})$" },
+        "pid": { "$ref": "#/$defs/decimal" },
+        "start_time_ns": { "$ref": "#/$defs/decimal" },
         "boot_id_digest": { "$ref": "#/$defs/digest" },
         "executable_sha256": { "$ref": "#/$defs/digest" },
         "code_identity_sha256": { "$ref": "#/$defs/digest" },
@@ -58,15 +61,116 @@
         "state": { "enum": ["running", "exited"] }
       }
     },
+    "event_base": {
+      "type": "object", "additionalProperties": false,
+      "required": ["kind", "observed_at", "boot_id_digest"],
+      "properties": {
+        "kind": { "type": "string" },
+        "observed_at": { "$ref": "#/$defs/timestamp" },
+        "boot_id_digest": { "$ref": "#/$defs/digest" }
+      }
+    },
+    "process_alive_event": {
+      "type": "object", "additionalProperties": false,
+      "required": ["kind", "observed_at", "boot_id_digest", "process_pid", "process_start_time_ns"],
+      "properties": {
+        "kind": { "const": "process_alive" }, "observed_at": { "$ref": "#/$defs/timestamp" }, "boot_id_digest": { "$ref": "#/$defs/digest" },
+        "process_pid": { "$ref": "#/$defs/decimal" }, "process_start_time_ns": { "$ref": "#/$defs/decimal" }
+      }
+    },
+    "process_start_event": {
+      "type": "object", "additionalProperties": false,
+      "required": ["kind", "observed_at", "boot_id_digest", "process_pid", "process_start_time_ns"],
+      "properties": {
+        "kind": { "const": "process_start" }, "observed_at": { "$ref": "#/$defs/timestamp" }, "boot_id_digest": { "$ref": "#/$defs/digest" },
+        "process_pid": { "$ref": "#/$defs/decimal" }, "process_start_time_ns": { "$ref": "#/$defs/decimal" }
+      }
+    },
+    "process_exit_event": {
+      "type": "object", "additionalProperties": false,
+      "required": ["kind", "observed_at", "boot_id_digest", "process_pid", "process_start_time_ns", "exit_reason"],
+      "properties": {
+        "kind": { "const": "process_exit" }, "observed_at": { "$ref": "#/$defs/timestamp" }, "boot_id_digest": { "$ref": "#/$defs/digest" },
+        "process_pid": { "$ref": "#/$defs/decimal" }, "process_start_time_ns": { "$ref": "#/$defs/decimal" }, "exit_reason": { "const": "SIGKILL" }
+      }
+    },
+    "cloud_commit_event": {
+      "type": "object", "additionalProperties": false,
+      "required": ["kind", "observed_at", "boot_id_digest", "request_digest", "commit_receipt_digest", "session_digest"],
+      "properties": {
+        "kind": { "const": "cloud_commit" }, "observed_at": { "$ref": "#/$defs/timestamp" }, "boot_id_digest": { "$ref": "#/$defs/digest" },
+        "request_digest": { "$ref": "#/$defs/digest" }, "commit_receipt_digest": { "$ref": "#/$defs/digest" }, "session_digest": { "$ref": "#/$defs/digest" }
+      }
+    },
+    "cloud_observation_event": {
+      "type": "object", "additionalProperties": false,
+      "required": ["kind", "observed_at", "boot_id_digest", "request_digest", "observation_digest", "commit_count", "session_count", "active_session_count", "compensation_count", "commit_receipt_digest", "session_digest", "compensation_digest"],
+      "properties": {
+        "kind": { "const": "cloud_observation" }, "observed_at": { "$ref": "#/$defs/timestamp" }, "boot_id_digest": { "$ref": "#/$defs/digest" },
+        "request_digest": { "$ref": "#/$defs/digest" }, "observation_digest": { "$ref": "#/$defs/digest" },
+        "commit_count": { "$ref": "#/$defs/count" }, "session_count": { "$ref": "#/$defs/count" }, "active_session_count": { "$ref": "#/$defs/count" }, "compensation_count": { "$ref": "#/$defs/count" },
+        "commit_receipt_digest": { "$ref": "#/$defs/nullable_digest" }, "session_digest": { "$ref": "#/$defs/nullable_digest" }, "compensation_digest": { "$ref": "#/$defs/nullable_digest" }
+      }
+    },
+    "local_activation_event": {
+      "type": "object", "additionalProperties": false,
+      "required": ["kind", "observed_at", "boot_id_digest", "authority_digest", "session_digest"],
+      "properties": {
+        "kind": { "const": "local_activation" }, "observed_at": { "$ref": "#/$defs/timestamp" }, "boot_id_digest": { "$ref": "#/$defs/digest" },
+        "authority_digest": { "$ref": "#/$defs/digest" }, "session_digest": { "$ref": "#/$defs/digest" }
+      }
+    },
+    "local_authority_event": {
+      "type": "object", "additionalProperties": false,
+      "required": ["kind", "observed_at", "boot_id_digest", "authority_digest", "authority_count", "state", "session_digest"],
+      "properties": {
+        "kind": { "const": "local_authority" }, "observed_at": { "$ref": "#/$defs/timestamp" }, "boot_id_digest": { "$ref": "#/$defs/digest" },
+        "authority_digest": { "$ref": "#/$defs/digest" }, "authority_count": { "$ref": "#/$defs/count" }, "state": { "enum": ["absent", "active", "revoked"] }, "session_digest": { "$ref": "#/$defs/nullable_digest" }
+      }
+    },
+    "audit_fsync_event": {
+      "type": "object", "additionalProperties": false,
+      "required": ["kind", "observed_at", "boot_id_digest", "audit_record_digest", "result"],
+      "properties": {
+        "kind": { "const": "audit_fsync" }, "observed_at": { "$ref": "#/$defs/timestamp" }, "boot_id_digest": { "$ref": "#/$defs/digest" }, "audit_record_digest": { "$ref": "#/$defs/digest" }, "result": { "enum": ["success", "failure"] }
+      }
+    },
+    "audit_ack_event": {
+      "type": "object", "additionalProperties": false,
+      "required": ["kind", "observed_at", "boot_id_digest", "audit_record_digest"],
+      "properties": {
+        "kind": { "const": "audit_ack" }, "observed_at": { "$ref": "#/$defs/timestamp" }, "boot_id_digest": { "$ref": "#/$defs/digest" }, "audit_record_digest": { "$ref": "#/$defs/digest" }
+      }
+    },
+    "reply_lost_event": {
+      "type": "object", "additionalProperties": false,
+      "required": ["kind", "observed_at", "boot_id_digest", "request_digest", "transport_digest", "result_digest", "loss_boundary"],
+      "properties": {
+        "kind": { "const": "reply_lost" }, "observed_at": { "$ref": "#/$defs/timestamp" }, "boot_id_digest": { "$ref": "#/$defs/digest" },
+        "request_digest": { "$ref": "#/$defs/digest" }, "transport_digest": { "$ref": "#/$defs/digest" }, "result_digest": { "$ref": "#/$defs/digest" }, "loss_boundary": { "enum": ["daemon-kill", "transport"] }
+      }
+    },
+    "recovery_event": {
+      "type": "object", "additionalProperties": false,
+      "required": ["kind", "observed_at", "boot_id_digest", "request_digest", "result_digest", "commit_receipt_digest", "session_digest", "retry_kind"],
+      "properties": {
+        "kind": { "const": "recovery" }, "observed_at": { "$ref": "#/$defs/timestamp" }, "boot_id_digest": { "$ref": "#/$defs/digest" },
+        "request_digest": { "$ref": "#/$defs/digest" }, "result_digest": { "$ref": "#/$defs/digest" }, "commit_receipt_digest": { "$ref": "#/$defs/digest" }, "session_digest": { "$ref": "#/$defs/digest" }, "retry_kind": { "const": "exact" }
+      }
+    },
+    "compensation_event": {
+      "type": "object", "additionalProperties": false,
+      "required": ["kind", "observed_at", "boot_id_digest", "request_digest", "session_digest", "compensation_digest", "reason", "result"],
+      "properties": {
+        "kind": { "const": "compensation" }, "observed_at": { "$ref": "#/$defs/timestamp" }, "boot_id_digest": { "$ref": "#/$defs/digest" },
+        "request_digest": { "$ref": "#/$defs/digest" }, "session_digest": { "$ref": "#/$defs/digest" }, "compensation_digest": { "$ref": "#/$defs/digest" }, "reason": { "const": "audit-fsync-failure" }, "result": { "const": "revoked" }
+      }
+    },
     "event": {
       "oneOf": [
-        { "type": "object", "additionalProperties": false, "required": ["kind", "observed_at", "boot_id_digest", "process_pid", "process_start_time_ns"], "properties": { "kind": { "enum": ["process_alive", "process_start"] }, "observed_at": { "$ref": "#/$defs/timestamp" }, "boot_id_digest": { "$ref": "#/$defs/digest" }, "process_pid": { "type": "string" }, "process_start_time_ns": { "type": "string" } } },
-        { "type": "object", "additionalProperties": false, "required": ["kind", "observed_at", "boot_id_digest", "process_pid", "process_start_time_ns", "exit_reason"], "properties": { "kind": { "const": "process_exit" }, "observed_at": { "$ref": "#/$defs/timestamp" }, "boot_id_digest": { "$ref": "#/$defs/digest" }, "process_pid": { "type": "string" }, "process_start_time_ns": { "type": "string" }, "exit_reason": { "enum": ["SIGKILL", "restart"] } } },
-        { "type": "object", "additionalProperties": false, "required": ["kind", "observed_at", "boot_id_digest", "request_digest", "commit_receipt_digest"], "properties": { "kind": { "const": "cloud_commit" }, "observed_at": { "$ref": "#/$defs/timestamp" }, "boot_id_digest": { "$ref": "#/$defs/digest" }, "request_digest": { "$ref": "#/$defs/digest" }, "commit_receipt_digest": { "$ref": "#/$defs/digest" } } },
-        { "type": "object", "additionalProperties": false, "required": ["kind", "observed_at", "boot_id_digest", "transport_digest"], "properties": { "kind": { "const": "reply_lost" }, "observed_at": { "$ref": "#/$defs/timestamp" }, "boot_id_digest": { "$ref": "#/$defs/digest" }, "transport_digest": { "$ref": "#/$defs/digest" } } },
-        { "type": "object", "additionalProperties": false, "required": ["kind", "observed_at", "boot_id_digest", "request_digest", "result_digest"], "properties": { "kind": { "const": "recovery" }, "observed_at": { "$ref": "#/$defs/timestamp" }, "boot_id_digest": { "$ref": "#/$defs/digest" }, "request_digest": { "$ref": "#/$defs/digest" }, "result_digest": { "$ref": "#/$defs/digest" } } },
-        { "type": "object", "additionalProperties": false, "required": ["kind", "observed_at", "boot_id_digest", "audit_record_digest", "result"], "properties": { "kind": { "const": "audit_fsync" }, "observed_at": { "$ref": "#/$defs/timestamp" }, "boot_id_digest": { "$ref": "#/$defs/digest" }, "audit_record_digest": { "$ref": "#/$defs/digest" }, "result": { "enum": ["success", "failure"] } } },
-        { "type": "object", "additionalProperties": false, "required": ["kind", "observed_at", "boot_id_digest", "audit_record_digest"], "properties": { "kind": { "const": "audit_ack" }, "observed_at": { "$ref": "#/$defs/timestamp" }, "boot_id_digest": { "$ref": "#/$defs/digest" }, "audit_record_digest": { "$ref": "#/$defs/digest" } } }
+        { "$ref": "#/$defs/process_alive_event" }, { "$ref": "#/$defs/process_start_event" }, { "$ref": "#/$defs/process_exit_event" },
+        { "$ref": "#/$defs/cloud_commit_event" }, { "$ref": "#/$defs/cloud_observation_event" }, { "$ref": "#/$defs/local_activation_event" }, { "$ref": "#/$defs/local_authority_event" },
+        { "$ref": "#/$defs/audit_fsync_event" }, { "$ref": "#/$defs/audit_ack_event" }, { "$ref": "#/$defs/reply_lost_event" }, { "$ref": "#/$defs/recovery_event" }, { "$ref": "#/$defs/compensation_event" }
       ]
     },
     "digest_reference": {
@@ -78,13 +182,11 @@
       "type": "object", "additionalProperties": false,
       "required": ["name", "status", "started_at", "completed_at", "process_observations", "events", "evidence_digests"],
       "properties": {
-        "name": { "enum": ["service-kill-after-cloud-commit", "daemon-restart-after-cloud-commit", "lost-reply-after-cloud-commit", "audit-fsync-failure-recovery"] },
-        "status": { "const": "passed" },
-        "started_at": { "$ref": "#/$defs/timestamp" },
-        "completed_at": { "$ref": "#/$defs/timestamp" },
-        "process_observations": { "type": "array", "minItems": 2, "maxItems": 8, "items": { "$ref": "#/$defs/process_observation" } },
-        "events": { "type": "array", "minItems": 4, "maxItems": 24, "items": { "$ref": "#/$defs/event" } },
-        "evidence_digests": { "type": "array", "minItems": 1, "maxItems": 32, "items": { "$ref": "#/$defs/digest_reference" } }
+        "name": { "enum": ["pre-cloud-kill", "post-cloud-pre-local-kill", "post-activation-pre-audit-kill", "post-audit-pre-reply-loss", "audit-fsync-failure", "transport-reply-loss"] },
+        "status": { "const": "passed" }, "started_at": { "$ref": "#/$defs/timestamp" }, "completed_at": { "$ref": "#/$defs/timestamp" },
+        "process_observations": { "type": "array", "minItems": 2, "maxItems": 3, "items": { "$ref": "#/$defs/process_observation" } },
+        "events": { "type": "array", "minItems": 5, "maxItems": 11, "items": { "$ref": "#/$defs/event" } },
+        "evidence_digests": { "type": "array", "minItems": 5, "maxItems": 16, "items": { "$ref": "#/$defs/digest_reference" } }
       }
     }
   }
