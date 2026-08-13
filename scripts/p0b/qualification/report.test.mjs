@@ -8,6 +8,7 @@ import {
   buildP0BQualificationReport,
   canonicalJson,
   digestArtifactFile,
+  digestArtifactTree,
   parseP0BQualificationReport,
   P0B_REQUIRED_COMMAND_IDS,
   P0B_REQUIRED_GATE_IDS,
@@ -152,6 +153,148 @@ test("artifact digest helper binds bytes without exposing the artifact path", as
     assert.equal(digest.bytes, 15);
     assert.equal(Object.hasOwn(digest, "path"), false);
   } finally {
+    await fs.rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("artifact tree digest is deterministic, path-aware, mode-aware, and provenance-bound", async () => {
+  const first = await fs.mkdtemp(path.join(os.tmpdir(), "agentpass-p0b-qualification-tree-"));
+  const second = await fs.mkdtemp(path.join(os.tmpdir(), "agentpass-p0b-qualification-tree-"));
+  try {
+    for (const directory of [first, second]) {
+      await fs.mkdir(path.join(directory, "assets"));
+      await fs.writeFile(path.join(directory, "assets", "app.js"), "same bytes", { mode: 0o644 });
+      await fs.writeFile(path.join(directory, "index.html"), "entry", { mode: 0o644 });
+    }
+    const firstDigest = await digestArtifactTree(first, { name: "console-dist", kind: "build", maxFiles: 4, maxBytes: 1024 });
+    const secondDigest = await digestArtifactTree(second, { name: "console-dist", kind: "build", maxFiles: 4, maxBytes: 1024 });
+    assert.deepEqual(secondDigest, firstDigest);
+    assert.equal(JSON.stringify(firstDigest).includes(first), false);
+    assert.equal(JSON.stringify(firstDigest).includes("same bytes"), false);
+    assert.doesNotThrow(() => buildP0BQualificationReport({ ...baseInput(), artifacts: [firstDigest] }));
+
+    await fs.chmod(path.join(second, "assets", "app.js"), 0o755);
+    const modeDigest = await digestArtifactTree(second, { name: "console-dist", kind: "build" });
+    assert.notEqual(modeDigest.sha256, firstDigest.sha256);
+  } finally {
+    await fs.rm(first, { recursive: true, force: true });
+    await fs.rm(second, { recursive: true, force: true });
+  }
+});
+
+test("artifact tree canonicalizes ordering but rejects duplicate and case-conflicting names", async (t) => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), "agentpass-p0b-qualification-tree-names-"));
+  try {
+    await fs.mkdir(path.join(directory, "z").normalize("NFC"));
+    await fs.writeFile(path.join(directory, "z", "file.txt"), "x");
+    const ordered = await digestArtifactTree(directory, { name: "tree", kind: "build" });
+    await fs.rename(path.join(directory, "z"), path.join(directory, "a"));
+    await fs.mkdir(path.join(directory, "z"));
+    await fs.writeFile(path.join(directory, "z", "file.txt"), "x");
+    const reordered = await digestArtifactTree(directory, { name: "tree", kind: "build" });
+    assert.notEqual(ordered.sha256, reordered.sha256, "changing a canonical path must change the digest");
+
+    try {
+      await fs.writeFile(path.join(directory, "Z"), "case collision");
+      await assert.rejects(() => digestArtifactTree(directory), { code: "case_conflicting_artifact_entry" });
+    } catch (error) {
+      if (error?.code !== "EEXIST" && error?.code !== "EISDIR") throw error;
+      t.diagnostic("case-conflicting names cannot coexist on this filesystem");
+    }
+
+    const unicodeDirectory = await fs.mkdtemp(path.join(os.tmpdir(), "agentpass-p0b-qualification-tree-unicode-"));
+    try {
+      await fs.writeFile(path.join(unicodeDirectory, "e\u0301.txt"), "one");
+      try {
+        await fs.writeFile(path.join(unicodeDirectory, "é.txt"), "two");
+        const entries = await fs.readdir(unicodeDirectory);
+        if (entries.length === 2) {
+          await assert.rejects(() => digestArtifactTree(unicodeDirectory), { code: "duplicate_artifact_entry" });
+        } else {
+          t.diagnostic("Unicode-normalization-conflicting names alias on this filesystem");
+        }
+      } catch (error) {
+        if (error?.code !== "EEXIST" && error?.code !== "EISDIR") throw error;
+        t.diagnostic("Unicode-normalization-conflicting names cannot coexist on this filesystem");
+      }
+    } finally {
+      await fs.rm(unicodeDirectory, { recursive: true, force: true });
+    }
+  } finally {
+    await fs.rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("artifact tree rejects symlinks, hardlinks, non-regular entries, and unsafe permissions", async (t) => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), "agentpass-p0b-qualification-tree-unsafe-"));
+  try {
+    await fs.writeFile(path.join(directory, "real.txt"), "real", { mode: 0o644 });
+    await fs.symlink("real.txt", path.join(directory, "link.txt"));
+    await assert.rejects(() => digestArtifactTree(directory), { code: "unsafe_artifact_entry" });
+    await fs.unlink(path.join(directory, "link.txt"));
+
+    await fs.link(path.join(directory, "real.txt"), path.join(directory, "hardlink.txt"));
+    await assert.rejects(() => digestArtifactTree(directory), { code: "unsafe_artifact_entry" });
+    await fs.unlink(path.join(directory, "hardlink.txt"));
+
+    if (process.platform !== "win32") {
+      const { spawn } = await import("node:child_process");
+      const fifo = path.join(directory, "pipe");
+      await new Promise((resolve, reject) => {
+        const child = spawn("mkfifo", [fifo], { stdio: "ignore" });
+        child.once("error", reject);
+        child.once("exit", (code) => code === 0 ? resolve() : reject(new Error("mkfifo failed")));
+      });
+      await assert.rejects(() => digestArtifactTree(directory), { code: "unsafe_artifact_entry" });
+      await fs.unlink(fifo);
+    } else {
+      t.skip("non-regular FIFO entries are not available on Windows");
+    }
+
+    await fs.chmod(path.join(directory, "real.txt"), 0o666);
+    await assert.rejects(() => digestArtifactTree(directory), { code: "unsafe_artifact_file" });
+  } finally {
+    await fs.rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("artifact tree enforces file and byte bounds without exposing local paths", async () => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), "agentpass-p0b-qualification-tree-limits-"));
+  try {
+    await fs.writeFile(path.join(directory, "one.txt"), "1234");
+    await fs.writeFile(path.join(directory, "two.txt"), "5678");
+    await assert.rejects(() => digestArtifactTree(directory, { maxFiles: 1 }), { code: "artifact_too_many_files" });
+    await assert.rejects(() => digestArtifactTree(directory, { maxBytes: 7 }), { code: "artifact_too_large" });
+    await assert.rejects(() => digestArtifactTree(directory, { maxFiles: 0 }), { code: "invalid_artifact_limit" });
+    await assert.rejects(() => digestArtifactTree(directory, { maxBytes: 0 }), { code: "invalid_artifact_limit" });
+    await assert.rejects(() => digestArtifactTree(path.join(directory, "missing")), { code: "artifact_tree_read_failed" });
+    await assert.rejects(() => digestArtifactTree(path.join(directory, "one.txt")), { code: "unsafe_artifact_tree" });
+  } finally {
+    await fs.rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("artifact tree detects a file replaced or changed between stat and read", async () => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), "agentpass-p0b-qualification-tree-race-"));
+  const target = path.join(directory, "race.txt");
+  const originalOpen = fs.open;
+  try {
+    await fs.writeFile(target, "stable", { mode: 0o644 });
+    fs.open = async (...args) => {
+      const handle = await originalOpen(...args);
+      const originalStat = handle.stat.bind(handle);
+      let statCalls = 0;
+      handle.stat = async (...statArgs) => {
+        const stat = await originalStat(...statArgs);
+        statCalls += 1;
+        if (statCalls === 1 && args[0] === target) await fs.appendFile(target, "changed");
+        return stat;
+      };
+      return handle;
+    };
+    await assert.rejects(() => digestArtifactTree(directory), { code: "artifact_changed" });
+  } finally {
+    fs.open = originalOpen;
     await fs.rm(directory, { recursive: true, force: true });
   }
 });

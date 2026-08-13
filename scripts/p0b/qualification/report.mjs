@@ -13,6 +13,8 @@ const IMAGE_DIGEST = /^sha256:[0-9a-f]{64}$/u;
 const ISO_UTC = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{3})?Z$/u;
 const MAX_REPORT_BYTES = 8 * 1024 * 1024;
 const MAX_ARTIFACT_BYTES = 4 * 1024 * 1024 * 1024;
+const MAX_ARTIFACT_FILES = 100_000;
+const MAX_ARTIFACT_PATH_BYTES = 4096;
 const SAFE_NAME = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u;
 const USERINFO_URL = /\b[a-z][a-z0-9+.-]{1,31}:\/\/[^\s/@]+(?::[^\s/@]*)?@/iu;
 const SENSITIVE_VALUE = /(?:credential|cookie|csrf|nonce|signature|private[-_ ]?key|public[-_ ]?key|secret|password|bearer|authorization|token|\bkey)\s*[:=]\s*\S+/iu;
@@ -374,6 +376,156 @@ export async function digestArtifactFile(inputFile, { name, kind = "artifact" } 
     throw new QualificationReportError("artifact_read_failed", "artifact could not be read");
   } finally {
     await handle?.close().catch(() => {});
+  }
+}
+
+function artifactTreeOptions(options, inputDirectory) {
+  if (options === null || typeof options !== "object" || Array.isArray(options)) invalid("invalid_artifact_options", "artifact tree options are invalid");
+  optionalKeys(options, new Set(["name", "kind", "maxFiles", "maxBytes"]), "artifact tree options");
+  const artifactName = stringValue(options.name ?? path.basename(inputDirectory), "artifact name", { maximum: 128, pattern: SAFE_NAME });
+  const artifactKind = stringValue(options.kind ?? "artifact-tree", "artifact kind", { maximum: 64, pattern: SAFE_NAME });
+  const maxFiles = options.maxFiles ?? MAX_ARTIFACT_FILES;
+  const maxBytes = options.maxBytes ?? MAX_ARTIFACT_BYTES;
+  if (!Number.isSafeInteger(maxFiles) || maxFiles < 1 || maxFiles > MAX_ARTIFACT_FILES) invalid("invalid_artifact_limit", "artifact tree file limit is invalid");
+  if (!Number.isSafeInteger(maxBytes) || maxBytes < 1 || maxBytes > MAX_ARTIFACT_BYTES) invalid("invalid_artifact_limit", "artifact tree byte limit is invalid");
+  return { artifactName, artifactKind, maxFiles, maxBytes };
+}
+
+function canonicalTreeSegment(segment) {
+  if (typeof segment !== "string" || segment.length === 0 || segment.includes("\u0000") || segment === "." || segment === ".." || segment.includes("/") || segment.includes("\\") || segment.includes("\r") || segment.includes("\n")) {
+    invalid("unsafe_artifact_entry", "artifact tree entry name is unsafe");
+  }
+  const normalized = segment.normalize("NFC");
+  if (normalized === "." || normalized === ".." || normalized.length === 0 || Buffer.byteLength(normalized, "utf8") > 255) invalid("unsafe_artifact_entry", "artifact tree entry name is unsafe");
+  return normalized;
+}
+
+function canonicalTreePath(segments) {
+  const relativePath = segments.map(canonicalTreeSegment).join("/");
+  if (relativePath.length === 0 || Buffer.byteLength(relativePath, "utf8") > MAX_ARTIFACT_PATH_BYTES) invalid("unsafe_artifact_entry", "artifact tree path is unsafe");
+  return relativePath;
+}
+
+function treeCaseKey(relativePath) {
+  return relativePath.normalize("NFC").toLowerCase();
+}
+
+function assertRegularArtifactMode(stat) {
+  // A build tree may contain executable files, but special permission bits and
+  // group/world writable files are unsafe to publish as an executable artifact.
+  const mode = stat.mode & 0o7777;
+  if ((mode & 0o0022) !== 0 || (mode & 0o7000) !== 0) invalid("unsafe_artifact_file", "artifact file permissions are unsafe");
+  return mode;
+}
+
+async function digestArtifactTreeFile(inputFile, expectedStat, relativePath) {
+  let handle;
+  try {
+    handle = await fsp.open(inputFile, fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW ?? 0) | (fs.constants.O_NONBLOCK ?? 0));
+    const openedStat = await handle.stat();
+    if (!openedStat.isFile() || openedStat.nlink !== 1 || statIdentity(expectedStat) !== statIdentity(openedStat)) invalid("artifact_changed", "artifact file changed while being opened");
+    const mode = assertRegularArtifactMode(openedStat);
+    const hash = createHash("sha256");
+    const buffer = Buffer.allocUnsafe(1024 * 1024);
+    let bytes = 0;
+    for (;;) {
+      const count = await handle.read(buffer, 0, buffer.length, null);
+      if (count.bytesRead === 0) break;
+      bytes += count.bytesRead;
+      hash.update(buffer.subarray(0, count.bytesRead));
+    }
+    const afterStat = await handle.stat();
+    if (bytes !== expectedStat.size || statIdentity(expectedStat) !== statIdentity(afterStat)) invalid("artifact_changed", "artifact file changed while being read");
+    return { path: relativePath, mode, bytes, sha256: hash.digest("hex") };
+  } catch (error) {
+    if (error instanceof QualificationReportError) throw error;
+    throw new QualificationReportError("artifact_tree_read_failed", "artifact tree file could not be read");
+  } finally {
+    await handle?.close().catch(() => {});
+  }
+}
+
+/**
+ * Digest a directory as a deterministic, path-aware artifact without making
+ * an archive. The returned descriptor deliberately contains no local path or
+ * file contents; its digest covers the canonical file manifest and contents.
+ */
+export async function digestArtifactTree(inputDirectory, options = {}) {
+  if (typeof inputDirectory !== "string" || !path.isAbsolute(inputDirectory)) invalid("invalid_artifact_path", "artifact tree path must be absolute");
+  const { artifactName, artifactKind, maxFiles, maxBytes } = artifactTreeOptions(options, inputDirectory);
+  const seenPaths = new Set();
+  const seenCasePaths = new Set();
+  const directorySnapshots = [];
+  const files = [];
+  let totalBytes = 0;
+
+  const registerPath = (segments) => {
+    const relativePath = canonicalTreePath(segments);
+    const casePath = treeCaseKey(relativePath);
+    if (seenPaths.has(relativePath)) invalid("duplicate_artifact_entry", "artifact tree entries must be unique");
+    if (seenCasePaths.has(casePath)) invalid("case_conflicting_artifact_entry", "artifact tree entries must not conflict by case");
+    seenPaths.add(relativePath);
+    seenCasePaths.add(casePath);
+    return relativePath;
+  };
+
+  const walk = async (directory, segments) => {
+    let directoryStat;
+    try {
+      directoryStat = await fsp.lstat(directory);
+      if (!directoryStat.isDirectory()) invalid("unsafe_artifact_tree", "artifact tree root or directory is unsafe");
+      directorySnapshots.push({ directory, identity: statIdentity(directoryStat) });
+      const entries = await fsp.readdir(directory, { withFileTypes: true });
+      for (const entry of entries) {
+        const entrySegments = [...segments, entry.name];
+        const relativePath = registerPath(entrySegments);
+        const entryPath = path.join(directory, entry.name);
+        let entryStat;
+        try {
+          entryStat = await fsp.lstat(entryPath);
+        } catch {
+          throw new QualificationReportError("artifact_changed", "artifact tree entry changed while being inspected");
+        }
+        if (entryStat.isSymbolicLink()) invalid("unsafe_artifact_entry", "symbolic links are not allowed in artifact trees");
+        if (entryStat.isDirectory()) {
+          await walk(entryPath, entrySegments);
+          continue;
+        }
+        if (!entryStat.isFile() || entryStat.nlink !== 1) invalid("unsafe_artifact_entry", "artifact tree contains a non-regular or hard-linked entry");
+        const mode = assertRegularArtifactMode(entryStat);
+        void mode;
+        if (files.length >= maxFiles) invalid("artifact_too_many_files", "artifact tree contains too many files");
+        if (entryStat.size > maxBytes - totalBytes) invalid("artifact_too_large", "artifact tree exceeds its byte limit");
+        const file = await digestArtifactTreeFile(entryPath, entryStat, relativePath);
+        totalBytes += file.bytes;
+        if (totalBytes > maxBytes) invalid("artifact_too_large", "artifact tree exceeds its byte limit");
+        files.push(file);
+      }
+      const afterDirectoryStat = await fsp.lstat(directory);
+      if (!afterDirectoryStat.isDirectory() || statIdentity(directoryStat) !== statIdentity(afterDirectoryStat)) invalid("artifact_changed", "artifact tree directory changed while being read");
+    } catch (error) {
+      if (error instanceof QualificationReportError) throw error;
+      throw new QualificationReportError("artifact_tree_read_failed", "artifact tree could not be read");
+    }
+  };
+
+  try {
+    const rootStat = await fsp.lstat(inputDirectory);
+    if (!rootStat.isDirectory() || rootStat.isSymbolicLink()) invalid("unsafe_artifact_tree", "artifact tree root is unsafe");
+    await walk(inputDirectory, []);
+    for (const snapshot of directorySnapshots) {
+      const currentStat = await fsp.lstat(snapshot.directory);
+      if (!currentStat.isDirectory() || statIdentity(currentStat) !== snapshot.identity) invalid("artifact_changed", "artifact tree changed while being read");
+    }
+    if (files.length === 0 || totalBytes === 0) invalid("empty_artifact_tree", "artifact tree must contain file data");
+    files.sort((left, right) => Buffer.from(left.path, "utf8").compare(Buffer.from(right.path, "utf8")));
+    const manifest = canonicalJson({ schema_version: 1, files });
+    const artifact = Object.freeze({ name: artifactName, kind: artifactKind, sha256: sha256(Buffer.from(manifest, "utf8")), bytes: totalBytes });
+    DIGESTED_ARTIFACTS.add(artifact);
+    return artifact;
+  } catch (error) {
+    if (error instanceof QualificationReportError) throw error;
+    throw new QualificationReportError("artifact_tree_read_failed", "artifact tree could not be read");
   }
 }
 
