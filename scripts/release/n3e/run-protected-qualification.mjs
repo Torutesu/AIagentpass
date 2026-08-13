@@ -81,6 +81,15 @@ const normalizeExecutionResult = (value) => {
   return Object.freeze({ ok: true, status: value.status, evidence_sha256: value.evidence_sha256 });
 };
 
+const normalizeCandidateMaterialization = (value) => {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) fail('controller candidate materialization result is invalid');
+  const keys = Object.keys(value).sort();
+  const expected = ['action', 'files', 'manifest_sha256', 'ok', 'public_key_sha256', 'signature_sha256'];
+  if (keys.length !== expected.length || keys.some((key, index) => key !== expected[index])) fail('controller candidate materialization result is not closed');
+  if (value.ok !== true || value.action !== 'materialized' || value.files !== 3 || !DIGEST.test(value.manifest_sha256) || !DIGEST.test(value.signature_sha256) || !DIGEST.test(value.public_key_sha256)) fail('controller candidate materialization result is invalid');
+  return Object.freeze({ ...value });
+};
+
 const defaultSignals = (handler) => {
   for (const signal of SIGNALS) process.once(signal, handler);
   return () => { for (const signal of SIGNALS) process.removeListener(signal, handler); };
@@ -185,13 +194,15 @@ export const recoverProtectedQualification = ({
   lockPath = RUN_LOCK_PATH,
   restore = restoreQualificationConfig,
   restart = restartNativeService,
+  recoverCandidate,
   proveListenerUnavailable,
   proveNoActiveRun
 } = {}) => {
   if (platform !== 'darwin' || uid !== 0) fail('protected qualification recovery requires root on macOS');
-  if (typeof proveListenerUnavailable !== 'function' || typeof proveNoActiveRun !== 'function') fail('qualification recovery proofs are required');
+  if (typeof recoverCandidate !== 'function' || typeof proveListenerUnavailable !== 'function' || typeof proveNoActiveRun !== 'function') fail('qualification recovery callbacks are required');
   try {
     if (proveNoActiveRun() !== true) fail('protected qualification recovery refused an active run');
+    recoverCandidate();
     let restored = false;
     if (stateExists(fileSystem, statePath)) {
       restore();
@@ -208,6 +219,8 @@ export const recoverProtectedQualification = ({
 
 export const runProtectedQualification = async ({
   provisionOptions,
+  materializeCandidate,
+  removeCandidate,
   executeQualification,
   disarmQualification,
   proveListenerUnavailable,
@@ -226,7 +239,7 @@ export const runProtectedQualification = async ({
   if (platform !== 'darwin' || uid !== 0) fail('protected qualification requires root on macOS');
   if (!provisionOptions || typeof provisionOptions !== 'object' || Array.isArray(provisionOptions)) fail('qualification provision options are required');
   if (SCENARIO_PHASE[provisionOptions.scenario] === undefined) fail('qualification scenario is invalid');
-  if (typeof executeQualification !== 'function' || typeof disarmQualification !== 'function' || typeof proveListenerUnavailable !== 'function') fail('fixed qualification lifecycle callbacks are required');
+  if (typeof materializeCandidate !== 'function' || typeof removeCandidate !== 'function' || typeof executeQualification !== 'function' || typeof disarmQualification !== 'function' || typeof proveListenerUnavailable !== 'function') fail('fixed qualification lifecycle callbacks are required');
   if (!Number.isSafeInteger(timeoutMilliseconds) || timeoutMilliseconds < 1_000 || timeoutMilliseconds > DEFAULT_TIMEOUT_MILLISECONDS) fail('qualification timeout is invalid');
 
   const controller = new AbortController();
@@ -244,6 +257,7 @@ export const runProtectedQualification = async ({
   let primaryFailure = null;
   let execution;
   let executionHandle;
+  let candidateMaterialization;
   let provisionAttempted = false;
   let provisioned = false;
   const cleanupFailures = [];
@@ -255,6 +269,7 @@ export const runProtectedQualification = async ({
     provisionAttempted = true;
     const provisionResult = provision(provisionOptions);
     provisioned = true;
+    candidateMaterialization = normalizeCandidateMaterialization(materializeCandidate());
     restart();
     executionHandle = validateExecutionHandle(executeQualification({
         signal: controller.signal,
@@ -280,6 +295,9 @@ export const runProtectedQualification = async ({
     try { durableStatePresent = stateExists(fileSystem, statePath); } catch (error) { cleanupFailures.push(error); }
     if (provisionAttempted && (provisioned || durableStatePresent)) {
       try { await disarmQualification({ signal: controller.signal }); } catch (error) { cleanupFailures.push(error); }
+      if (candidateMaterialization) {
+        try { removeCandidate({ materialization: candidateMaterialization }); } catch (error) { cleanupFailures.push(error); }
+      }
       try { restore(); } catch (error) { cleanupFailures.push(error); }
       try { restart(); } catch (error) { cleanupFailures.push(error); }
     }

@@ -138,6 +138,7 @@ test('each lane accepts only the root-owned digest-pinned qualification config t
     assert.match(section, /stat\.nlink !== 1/u);
     assert.match(section, /digest\(installed\) !== item\.sha256 \|\| digest\(sourceName\) !== item\.sha256/u);
     assert.match(section, /n3e\/run-protected-qualification\.mjs/u);
+    assert.match(section, /n3e\/materialize-controller-candidate\.mjs/u);
     assert.doesNotMatch(section, /sudo\s+node\s+scripts\/release\/n3e\/(?:provision-qualification-config|run-protected-qualification)/u);
   }
 });

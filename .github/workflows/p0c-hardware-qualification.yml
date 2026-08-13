@@ -236,7 +236,9 @@ jobs:
           if (process.env.QUALIFICATION_CONFIG_TOOL_ROOT !== root) throw new Error('qualification tool root is not fixed');
           const expected = [
             ['generate-release-attestation.mjs', 'scripts/release/generate-release-attestation.mjs'],
+            ['n3e/controller-candidate-contract.mjs', 'scripts/release/n3e/controller-candidate-contract.mjs'],
             ['n3e/controller-identity-contract.mjs', 'scripts/release/n3e/controller-identity-contract.mjs'],
+            ['n3e/materialize-controller-candidate.mjs', 'scripts/release/n3e/materialize-controller-candidate.mjs'],
             ['n3e/provision-qualification-config.mjs', 'scripts/release/n3e/provision-qualification-config.mjs'],
             ['n3e/run-protected-qualification.mjs', 'scripts/release/n3e/run-protected-qualification.mjs']
           ];
@@ -524,7 +526,9 @@ jobs:
           if (process.env.QUALIFICATION_CONFIG_TOOL_ROOT !== root) throw new Error('qualification tool root is not fixed');
           const expected = [
             ['generate-release-attestation.mjs', 'scripts/release/generate-release-attestation.mjs'],
+            ['n3e/controller-candidate-contract.mjs', 'scripts/release/n3e/controller-candidate-contract.mjs'],
             ['n3e/controller-identity-contract.mjs', 'scripts/release/n3e/controller-identity-contract.mjs'],
+            ['n3e/materialize-controller-candidate.mjs', 'scripts/release/n3e/materialize-controller-candidate.mjs'],
             ['n3e/provision-qualification-config.mjs', 'scripts/release/n3e/provision-qualification-config.mjs'],
             ['n3e/run-protected-qualification.mjs', 'scripts/release/n3e/run-protected-qualification.mjs']
           ];
