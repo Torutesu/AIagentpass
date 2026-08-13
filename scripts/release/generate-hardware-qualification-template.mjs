@@ -13,6 +13,11 @@ import {
   sep
 } from 'node:path';
 import { TextDecoder } from 'node:util';
+import {
+  CONTROLLER_ARCHIVE_NAME_PATTERN,
+  parseCanonicalExternalQualificationControllerIdentity,
+  validateExternalQualificationControllerIdentity
+} from './n3e/controller-identity-contract.mjs';
 
 const MAX_MANIFEST_BYTES = 16 * 1024 * 1024;
 const MAX_ARTIFACT_BYTES = 16 * 1024 * 1024 * 1024;
@@ -63,7 +68,7 @@ const MEDIA_TYPES = new Set([
   'application/gzip', 'application/x-pem-file', 'application/json', 'text/plain',
   'application/octet-stream'
 ]);
-const ROLES = new Set(['product', 'sbom', 'release_notice', 'trust_root', 'auxiliary']);
+const ROLES = new Set(['product', 'sbom', 'release_notice', 'trust_root', 'auxiliary', 'external_qualification_controller']);
 
 export const canonicalJSON = (value) => Buffer.from(`${JSON.stringify(value, null, 2)}\n`, 'utf8');
 const sha256 = (bytes) => createHash('sha256').update(bytes).digest('hex');
@@ -240,50 +245,50 @@ const validateReleaseAttestation = (value) => {
   };
 };
 
-const validateNotarization = (value, manifestDirectory, occupiedNames) => {
-  exactKeys(value, ['status', 'submission_ids', 'evidence'], 'release notarization');
+const validateNotarization = (value, manifestDirectory, occupiedNames, label = 'release') => {
+  exactKeys(value, ['status', 'submission_ids', 'evidence'], `${label} notarization`);
   if (value.status !== 'accepted_stapled' || !Array.isArray(value.submission_ids) || value.submission_ids.length === 0) {
-    throw new Error('release must have accepted stapled notarization');
+    throw new Error(`${label} must have accepted stapled notarization`);
   }
   const submissionIDs = [];
   let previousSubmission = '';
   for (const id of value.submission_ids) {
-    if (!UUID.test(id) || lexicalCompare(id, previousSubmission) <= 0) throw new Error('release notarization submission IDs are invalid or unsorted');
+    if (!UUID.test(id) || lexicalCompare(id, previousSubmission) <= 0) throw new Error(`${label} notarization submission IDs are invalid or unsorted`);
     submissionIDs.push(id);
     previousSubmission = id;
   }
-  if (!Array.isArray(value.evidence) || value.evidence.length !== 2) throw new Error('release notarization evidence is incomplete');
+  if (!Array.isArray(value.evidence) || value.evidence.length !== 2) throw new Error(`${label} notarization evidence is incomplete`);
   const evidence = [];
   const kinds = new Set();
   let previousName = '';
   const contentByKind = new Map();
   for (const item of value.evidence) {
-    exactKeys(item, ['kind', 'name', 'bytes', 'sha256'], 'release notarization evidence');
+    exactKeys(item, ['kind', 'name', 'bytes', 'sha256'], `${label} notarization evidence`);
     if (!['notarytool_result', 'stapler_result'].includes(item.kind) || kinds.has(item.kind)
       || !SAFE_NAME.test(item.name) || occupiedNames.has(item.name) || lexicalCompare(item.name, previousName) <= 0
       || !Number.isSafeInteger(item.bytes) || item.bytes <= 0 || !DIGEST.test(item.sha256)) {
-      throw new Error('release notarization evidence metadata is invalid');
+      throw new Error(`${label} notarization evidence metadata is invalid`);
     }
-    const snapshot = readStableFile(join(manifestDirectory, item.name), { maximum: MAX_EVIDENCE_BYTES, label: 'release notarization evidence' });
-    if (snapshot.bytes !== item.bytes || snapshot.sha256 !== item.sha256) throw new Error('release notarization evidence digest mismatch');
+    const snapshot = readStableFile(join(manifestDirectory, item.name), { maximum: MAX_EVIDENCE_BYTES, label: `${label} notarization evidence` });
+    if (snapshot.bytes !== item.bytes || snapshot.sha256 !== item.sha256) throw new Error(`${label} notarization evidence digest mismatch`);
     occupiedNames.add(item.name);
     kinds.add(item.kind);
     previousName = item.name;
     contentByKind.set(item.kind, snapshot.content);
     evidence.push({ kind: item.kind, name: item.name, bytes: item.bytes, sha256: item.sha256 });
   }
-  if (!kinds.has('notarytool_result') || !kinds.has('stapler_result')) throw new Error('release notarization evidence kinds are incomplete');
+  if (!kinds.has('notarytool_result') || !kinds.has('stapler_result')) throw new Error(`${label} notarization evidence kinds are incomplete`);
   let notaryResult;
   try { notaryResult = JSON.parse(decodeUTF8(contentByKind.get('notarytool_result'), 'notarytool evidence')); }
   catch (error) {
-    if (error instanceof SyntaxError) throw new Error('notarytool evidence is not valid JSON');
+    if (error instanceof SyntaxError) throw new Error(`${label} notarytool evidence is not valid JSON`);
     throw error;
   }
   if (notaryResult?.status !== 'Accepted' || typeof notaryResult.id !== 'string' || !submissionIDs.includes(notaryResult.id.toLowerCase())) {
-    throw new Error('notarytool evidence does not match an accepted submission');
+    throw new Error(`${label} notarytool evidence does not match an accepted submission`);
   }
   if (!/The validate action worked!/iu.test(decodeUTF8(contentByKind.get('stapler_result'), 'stapler evidence'))) {
-    throw new Error('stapler evidence does not prove successful validation');
+    throw new Error(`${label} stapler evidence does not prove successful validation`);
   }
   return { status: 'accepted_stapled', submission_ids: submissionIDs, evidence };
 };
@@ -323,8 +328,8 @@ const validateSBOM = (value, manifest, sbomBytes) => {
 const validateManifestAndBindings = ({ manifestSnapshot, signaturePath, publicKeyPath, fingerprint, artifactPath }) => {
   const manifest = parseCanonicalJSON(manifestSnapshot, 'release manifest');
   verifyDetachedSignature(manifestSnapshot.content, signaturePath, publicKeyPath, fingerprint, 'release manifest');
-  exactKeys(manifest, ['schema_version', 'product', 'version', 'source', 'generated_at', 'artifacts', 'evidence'], 'release manifest');
-  if (manifest.schema_version !== 2 || manifest.product !== 'AgentPass' || !VERSION_STRING.test(manifest.version) || !CANONICAL_DATE(manifest.generated_at)) throw new Error('release manifest identity is invalid');
+  exactKeys(manifest, ['schema_version', 'product', 'version', 'source', 'generated_at', 'artifacts', 'external_qualification_controller', 'evidence'], 'release manifest');
+  if (manifest.schema_version !== 3 || manifest.product !== 'AgentPass' || !VERSION_STRING.test(manifest.version) || !CANONICAL_DATE(manifest.generated_at)) throw new Error('release manifest identity is invalid');
   exactKeys(manifest.source, ['commit', 'tree', 'tag'], 'release manifest source');
   if (!COMMIT.test(manifest.source.commit) || manifest.source.commit === ZERO_40 || !COMMIT.test(manifest.source.tree) || manifest.source.tree === ZERO_40
     || (manifest.source.tag !== null && manifest.source.tag !== `v${manifest.version}`)) throw new Error('release manifest source identity is invalid');
@@ -361,14 +366,50 @@ const validateManifestAndBindings = ({ manifestSnapshot, signaturePath, publicKe
     || migrationArtifacts[0].sha256 !== attestation.database_migration_manifest_sha256) {
     throw new Error('signed migration manifest does not match the release attestation');
   }
+  const controllerArtifacts = artifacts.filter((item) => item.role === 'external_qualification_controller');
+  if (controllerArtifacts.length !== 1 || controllerArtifacts[0].media_type !== 'application/octet-stream'
+    || !CONTROLLER_ARCHIVE_NAME_PATTERN.test(controllerArtifacts[0].name)
+    || controllerArtifacts[0].name !== `AgentPassQualificationController-${manifest.version}-macos-universal.tar`) {
+    throw new Error('release manifest must contain exactly one version-bound external qualification controller archive');
+  }
+  const controllerArtifact = controllerArtifacts[0];
+  exactKeys(manifest.external_qualification_controller, ['identity_document', 'identity', 'notarization'], 'external qualification controller');
+  const controllerBinding = manifest.external_qualification_controller.identity_document;
+  exactKeys(controllerBinding, ['name', 'bytes', 'sha256'], 'controller identity document');
+  if (!SAFE_NAME.test(controllerBinding.name) || names.has(controllerBinding.name)
+    || !Number.isSafeInteger(controllerBinding.bytes) || controllerBinding.bytes <= 0 || controllerBinding.bytes > 1024 * 1024
+    || !DIGEST.test(controllerBinding.sha256)) throw new Error('controller identity document binding is invalid');
+  const identitySnapshot = readStableFile(join(directory, controllerBinding.name), {
+    maximum: 1024 * 1024,
+    label: 'controller identity document'
+  });
+  if (identitySnapshot.bytes !== controllerBinding.bytes || identitySnapshot.sha256 !== controllerBinding.sha256) throw new Error('controller identity document digest mismatch');
+  let documentIdentity;
+  try { documentIdentity = parseCanonicalExternalQualificationControllerIdentity(identitySnapshot.content); }
+  catch (error) { throw new Error(`controller identity document is invalid: ${error.message}`); }
+  let embeddedIdentity;
+  try { embeddedIdentity = validateExternalQualificationControllerIdentity(manifest.external_qualification_controller.identity); }
+  catch (error) { throw new Error(`embedded controller identity is invalid: ${error.message}`); }
+  if (JSON.stringify(documentIdentity) !== JSON.stringify(embeddedIdentity)) throw new Error('embedded controller identity differs from its bound document');
+  if (documentIdentity.archive_name !== controllerArtifact.name
+    || documentIdentity.archive_sha256 !== controllerArtifact.sha256
+    || documentIdentity.archive_bytes !== controllerArtifact.bytes) throw new Error('controller identity does not bind the exact external archive');
+  if (documentIdentity.team_id !== attestation.team_id) throw new Error('controller identity Team ID does not match the release attestation');
+  names.add(controllerBinding.name);
+  const controllerNotarization = validateNotarization(manifest.external_qualification_controller.notarization, directory, names, 'controller');
   exactKeys(manifest.evidence, ['checksums', 'sbom', 'notarization'], 'release manifest evidence');
   const notarization = validateNotarization(manifest.evidence.notarization, directory, names);
   const checksums = manifest.evidence.checksums;
   exactKeys(checksums, ['name', 'bytes', 'sha256', 'entry_count'], 'release checksums evidence');
   if (!SAFE_NAME.test(checksums.name) || names.has(checksums.name) || !Number.isSafeInteger(checksums.bytes) || checksums.bytes <= 0
-    || !DIGEST.test(checksums.sha256) || checksums.entry_count !== artifacts.length + notarization.evidence.length) throw new Error('release checksums evidence is invalid');
+    || !DIGEST.test(checksums.sha256) || checksums.entry_count !== artifacts.length + notarization.evidence.length + 1 + controllerNotarization.evidence.length) throw new Error('release checksums evidence is invalid');
   const checksumSnapshot = readStableFile(join(directory, checksums.name), { maximum: 16 * 1024 * 1024, label: 'release checksums' });
-  const checksumEntries = [...artifacts, ...notarization.evidence].sort((left, right) => lexicalCompare(left.name, right.name));
+  const checksumEntries = [
+    ...artifacts,
+    ...notarization.evidence,
+    { name: controllerBinding.name, bytes: controllerBinding.bytes, sha256: controllerBinding.sha256 },
+    ...controllerNotarization.evidence
+  ].sort((left, right) => lexicalCompare(left.name, right.name));
   const expectedChecksums = Buffer.from(`${checksumEntries.map((item) => `${item.sha256}  ${item.name}`).join('\n')}\n`, 'utf8');
   if (checksumSnapshot.bytes !== checksums.bytes || checksumSnapshot.sha256 !== checksums.sha256 || !checksumSnapshot.content.equals(expectedChecksums)) throw new Error('release checksums content mismatch');
   const sbomArtifact = artifacts.find((item) => item.role === 'sbom');

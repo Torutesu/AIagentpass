@@ -52,10 +52,12 @@ try { manifest = JSON.parse(fs.readFileSync(join(destination, manifestName), 'ut
 
 const safeName = (name) => typeof name === 'string' && /^[0-9A-Za-z][0-9A-Za-z._-]*$/.test(name) && name === basename(name);
 const declared = [];
-if (!Array.isArray(manifest?.artifacts) || !Array.isArray(manifest?.evidence?.notarization?.evidence)) throw new Error('staged release manifest cannot enumerate release files');
+if (manifest?.schema_version !== 3 || !Array.isArray(manifest?.artifacts) || !Array.isArray(manifest?.evidence?.notarization?.evidence) || !Array.isArray(manifest?.external_qualification_controller?.notarization?.evidence)) throw new Error('staged release manifest cannot enumerate release files');
 for (const item of manifest.artifacts) declared.push(item?.name);
 declared.push(manifest?.evidence?.checksums?.name);
 for (const item of manifest.evidence.notarization.evidence) declared.push(item?.name);
+declared.push(manifest.external_qualification_controller?.identity_document?.name);
+for (const item of manifest.external_qualification_controller.notarization.evidence) declared.push(item?.name);
 const reserved = new Set([manifestName, 'release-manifest.sig', 'release-public.pem']);
 const unique = new Set();
 for (const name of declared) {

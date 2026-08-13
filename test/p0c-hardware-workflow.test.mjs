@@ -105,6 +105,39 @@ test('each lane checks out only the trusted workflow commit, verifies the candid
   }
 });
 
+test('each lane binds the v3 external controller and exports only its architecture CDHash for later root provisioning', () => {
+  for (const [name, architecture] of [['apple-silicon-qualification', 'arm64'], ['intel-t2-qualification', 'x86_64']]) {
+    const section = job(name);
+    assert.match(section, new RegExp(`CONTROLLER_ARCHITECTURE: ${architecture}`));
+    assert.match(section, /schema_version !== 3/);
+    assert.match(section, /external_qualification_controller/);
+    assert.match(section, /identity_document/);
+    assert.match(section, /identity/);
+    assert.match(section, /notarization/);
+    assert.match(section, /role === 'external_qualification_controller'/);
+    assert.match(section, /role === 'product'/);
+    assert.match(section, /archive_sha256/);
+    assert.match(section, /archive_bytes/);
+    assert.match(section, /code_directory_hashes/);
+    assert.match(section, /process\.env\.CONTROLLER_ARCHITECTURE/);
+    assert.match(section, /AGENTPASS_P0C_QUALIFICATION_CONTROLLER_CDHASH=/);
+    assert.match(section, /QUALIFICATION_CONTROLLER_CDHASH=/);
+    const selector = section.slice(section.indexOf('id: controller-cdhash'));
+    assert.match(selector, /without claiming physical execution/);
+    assert.doesNotMatch(selector, /qualified\s*[:=]\s*true/);
+  }
+});
+
+test('candidate and aggregate catalogs retain the controller archive outside the product role', () => {
+  const aggregate = job('aggregate-qualification');
+  assert.match(workflow, /parseCanonicalExternalQualificationControllerIdentity/);
+  assert.match(workflow, /validateExternalQualificationControllerIdentity/);
+  assert.match(aggregate, /aggregate candidate contains unexpected or missing files/);
+  assert.match(aggregate, /controllerArchive\.name/);
+  assert.match(aggregate, /controllerEvidence/);
+  assert.match(aggregate, /controllerArchive\.role === 'product'/);
+});
+
 test('aggregate is secret-free, depends fail-closed on both successful lanes, and verifies external policy', () => {
   const section = job('aggregate-qualification');
   assert.match(section, /needs: \[validate-candidate, apple-silicon-qualification, intel-t2-qualification\]/);

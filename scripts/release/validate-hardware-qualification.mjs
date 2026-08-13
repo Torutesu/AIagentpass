@@ -2,6 +2,11 @@
 import { createHash, createPublicKey, verify } from 'node:crypto';
 import fs from 'node:fs';
 import { basename, dirname, resolve } from 'node:path';
+import {
+  CONTROLLER_ARCHIVE_NAME_PATTERN,
+  canonicalExternalQualificationControllerIdentity,
+  parseCanonicalExternalQualificationControllerIdentity
+} from './n3e/controller-identity-contract.mjs';
 
 const args = process.argv.slice(2);
 const [input, artifactInput, manifestInput, manifestSignatureInput, manifestPublicKeyInput,
@@ -78,13 +83,14 @@ const verifyDetached = (payload, signaturePath, publicKeyPath, expected, label) 
   return { publicKey, fingerprint: actualFingerprint };
 };
 
-const validateManifest = (manifestSnapshot, manifestSignaturePath, manifestPublicKeyPath, expectedFingerprint) => {
+const validateManifest = (manifestSnapshot, manifestSignaturePath, manifestPublicKeyPath, expectedFingerprint, expectedTeamId) => {
   const manifestBytes = manifestSnapshot.content;
   if (!manifestBytes.equals(canonicalJSON(readJSON(manifestSnapshot, 'release manifest')))) throw new Error('release manifest is not canonical JSON');
   const signed = verifyDetached(manifestBytes, manifestSignaturePath, manifestPublicKeyPath, expectedFingerprint, 'release manifest');
   const manifest = readJSON(manifestSnapshot, 'release manifest');
-  exactKeys(manifest, ['schema_version', 'product', 'version', 'source', 'generated_at', 'artifacts', 'evidence'], 'release manifest');
-  if (manifest.schema_version !== 2 || manifest.product !== 'AgentPass') throw new Error('unsupported release manifest identity');
+  if (![2, 3].includes(manifest.schema_version) || manifest.product !== 'AgentPass') throw new Error('unsupported release manifest identity');
+  const isV3 = manifest.schema_version === 3;
+  exactKeys(manifest, ['schema_version', 'product', 'version', 'source', 'generated_at', 'artifacts', ...(isV3 ? ['external_qualification_controller'] : []), 'evidence'], 'release manifest');
   if (typeof manifest.version !== 'string' || !/^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/.test(manifest.version) || !canonicalDate(manifest.generated_at)) throw new Error('invalid release metadata');
   exactKeys(manifest.source, ['commit', 'tree', 'tag'], 'release manifest source');
   if (!/^[0-9a-f]{40}$/.test(manifest.source.commit) || !/^[0-9a-f]{40}$/.test(manifest.source.tree)) throw new Error('release manifest source identity is invalid');
@@ -93,17 +99,21 @@ const validateManifest = (manifestSnapshot, manifestSignaturePath, manifestPubli
   const manifestDirectory = dirname(manifestSnapshot.path);
   const artifacts = [];
   const names = new Set();
-  const roles = new Set(['product', 'sbom', 'release_notice', 'trust_root', 'auxiliary']);
+  const roles = new Set(['product', 'sbom', 'release_notice', 'trust_root', 'auxiliary', 'external_qualification_controller']);
   const mediaTypes = new Set(['application/spdx+json', 'application/zip', 'application/vnd.apple.installer+xml', 'application/gzip', 'application/x-pem-file', 'application/json', 'text/plain', 'application/octet-stream']);
   let previousName = '';
   for (const artifact of manifest.artifacts) {
     exactKeys(artifact, ['name', 'role', 'media_type', 'bytes', 'sha256'], 'release artifact');
-    if (!safeName(artifact.name) || names.has(artifact.name) || lexicalCompare(artifact.name, previousName) <= 0 || !roles.has(artifact.role) || !mediaTypes.has(artifact.media_type) || !Number.isSafeInteger(artifact.bytes) || artifact.bytes <= 0 || !validDigest(artifact.sha256) || ((artifact.role === 'sbom') !== (artifact.media_type === 'application/spdx+json'))) throw new Error('release manifest artifact metadata is invalid');
+    const isControllerArchive = CONTROLLER_ARCHIVE_NAME_PATTERN.test(artifact.name);
+    if (!safeName(artifact.name) || names.has(artifact.name) || lexicalCompare(artifact.name, previousName) <= 0 || !roles.has(artifact.role) || !mediaTypes.has(artifact.media_type) || !Number.isSafeInteger(artifact.bytes) || artifact.bytes <= 0 || !validDigest(artifact.sha256) || ((artifact.role === 'sbom') !== (artifact.media_type === 'application/spdx+json')) || (isControllerArchive !== (artifact.role === 'external_qualification_controller')) || (artifact.role === 'external_qualification_controller' && artifact.media_type !== 'application/octet-stream') || (!isV3 && artifact.role === 'external_qualification_controller')) throw new Error('release manifest artifact metadata is invalid');
     snapshotFile(resolve(manifestDirectory, artifact.name), { maximum: 16 * 1024 * 1024 * 1024, expectedBytes: artifact.bytes, expectedSHA256: artifact.sha256, label: 'release artifact' });
     names.add(artifact.name); previousName = artifact.name; artifacts.push(artifact);
   }
   const products = artifacts.filter((item) => item.role === 'product');
   if (products.length !== 1 || products[0].name !== `AgentPass-v${manifest.version}-macos-universal.pkg` || products[0].media_type !== 'application/vnd.apple.installer+xml') throw new Error('release manifest must contain exactly one canonical macOS product artifact');
+  const controllerArtifacts = artifacts.filter((item) => item.role === 'external_qualification_controller');
+  if (isV3 !== (controllerArtifacts.length === 1)) throw new Error('release manifest must contain exactly one external qualification controller archive for schema v3');
+  if (isV3 && controllerArtifacts[0].name !== `AgentPassQualificationController-${manifest.version}-macos-universal.tar`) throw new Error('external qualification controller archive version does not match the release');
   exactKeys(manifest.evidence, ['checksums', 'sbom', 'notarization'], 'release manifest evidence');
   const notarization = manifest.evidence.notarization;
   exactKeys(notarization, ['status', 'submission_ids', 'evidence'], 'release notarization');
@@ -132,10 +142,54 @@ const validateManifest = (manifestSnapshot, manifestSignaturePath, manifestPubli
     if (typeof result !== 'object' || result === null || result.status !== 'Accepted' || typeof result.id !== 'string' || !submissionIDs.has(result.id.toLowerCase())) throw new Error('notarytool evidence does not match an accepted submission');
     if (!/The validate action worked!/i.test(evidenceContent.get('stapler_result').toString('utf8'))) throw new Error('stapler evidence does not record successful validation');
   }
+  let controllerIdentityDocument;
+  let controllerIdentity;
+  let controllerNotarization;
+  const controllerNotarizationEvidence = [];
+  if (isV3) {
+    exactKeys(manifest.external_qualification_controller, ['identity_document', 'identity', 'notarization'], 'external qualification controller');
+    const identityDocument = manifest.external_qualification_controller.identity_document;
+    exactKeys(identityDocument, ['name', 'bytes', 'sha256'], 'external qualification controller identity document');
+    if (!safeName(identityDocument.name) || names.has(identityDocument.name) || !Number.isSafeInteger(identityDocument.bytes) || identityDocument.bytes <= 0 || !validDigest(identityDocument.sha256)) throw new Error('external qualification controller identity document metadata is invalid');
+    const identitySnapshot = snapshotFile(resolve(manifestDirectory, identityDocument.name), { maximum: 1024 * 1024, capture: true, expectedBytes: identityDocument.bytes, expectedSHA256: identityDocument.sha256, label: 'external qualification controller identity document' });
+    try { controllerIdentity = parseCanonicalExternalQualificationControllerIdentity(identitySnapshot.content); } catch (error) { throw new Error(`external qualification controller identity document is invalid: ${error.message}`); }
+    let embeddedIdentity;
+    try { embeddedIdentity = canonicalExternalQualificationControllerIdentity(manifest.external_qualification_controller.identity); } catch (error) { throw new Error(`external qualification controller embedded identity is invalid: ${error.message}`); }
+    if (JSON.stringify(controllerIdentity) !== JSON.stringify(embeddedIdentity)) throw new Error('external qualification controller identity document and embedded identity disagree');
+    const controllerArtifact = controllerArtifacts[0];
+    if (controllerIdentity.archive_name !== controllerArtifact.name || controllerIdentity.archive_sha256 !== controllerArtifact.sha256 || controllerIdentity.archive_bytes !== controllerArtifact.bytes || controllerIdentity.team_id !== expectedTeamId) throw new Error('external qualification controller identity does not bind the exact archive or release Team ID');
+    controllerIdentityDocument = identityDocument;
+    names.add(identityDocument.name);
+
+    controllerNotarization = manifest.external_qualification_controller.notarization;
+    exactKeys(controllerNotarization, ['status', 'submission_ids', 'evidence'], 'external qualification controller notarization');
+    if (controllerNotarization.status !== 'accepted_stapled' || !Array.isArray(controllerNotarization.submission_ids) || controllerNotarization.submission_ids.length === 0 || !Array.isArray(controllerNotarization.evidence) || controllerNotarization.evidence.length !== 2) throw new Error('external qualification controller notarization must be complete accepted_stapled evidence');
+    let previousControllerSubmission = '';
+    const controllerSubmissionIDs = new Set();
+    for (const id of controllerNotarization.submission_ids) {
+      if (typeof id !== 'string' || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(id) || controllerSubmissionIDs.has(id) || lexicalCompare(id, previousControllerSubmission) <= 0) throw new Error('external qualification controller notarization submission ID is invalid');
+      controllerSubmissionIDs.add(id); previousControllerSubmission = id;
+    }
+    const controllerEvidenceKinds = new Set();
+    let previousControllerEvidenceName = '';
+    const controllerEvidenceContent = new Map();
+    for (const item of controllerNotarization.evidence) {
+      exactKeys(item, ['kind', 'name', 'bytes', 'sha256'], 'external qualification controller notarization evidence');
+      if (!['notarytool_result', 'stapler_result'].includes(item.kind) || controllerEvidenceKinds.has(item.kind) || !safeName(item.name) || names.has(item.name) || lexicalCompare(item.name, previousControllerEvidenceName) <= 0 || !Number.isSafeInteger(item.bytes) || item.bytes <= 0 || !validDigest(item.sha256)) throw new Error('external qualification controller notarization evidence metadata is invalid');
+      const snapshot = snapshotFile(resolve(manifestDirectory, item.name), { maximum: 4 * 1024 * 1024, capture: true, expectedBytes: item.bytes, expectedSHA256: item.sha256, label: 'external qualification controller notarization evidence' });
+      names.add(item.name); controllerEvidenceKinds.add(item.kind); controllerEvidenceContent.set(item.kind, snapshot.content); previousControllerEvidenceName = item.name; controllerNotarizationEvidence.push(item);
+    }
+    if (controllerEvidenceKinds.size !== 2 || !controllerEvidenceKinds.has('notarytool_result') || !controllerEvidenceKinds.has('stapler_result')) throw new Error('external qualification controller notarization evidence is incomplete');
+    let controllerNotaryResult;
+    try { controllerNotaryResult = JSON.parse(controllerEvidenceContent.get('notarytool_result').toString('utf8')); } catch { throw new Error('external qualification controller notarytool evidence is not valid JSON'); }
+    if (typeof controllerNotaryResult !== 'object' || controllerNotaryResult === null || controllerNotaryResult.status !== 'Accepted' || typeof controllerNotaryResult.id !== 'string' || !controllerSubmissionIDs.has(controllerNotaryResult.id.toLowerCase())) throw new Error('external qualification controller notarytool evidence does not match an accepted submission');
+    if (!/The validate action worked!/i.test(controllerEvidenceContent.get('stapler_result').toString('utf8'))) throw new Error('external qualification controller stapler evidence does not record successful validation');
+  }
   const checksums = manifest.evidence.checksums;
   exactKeys(checksums, ['name', 'bytes', 'sha256', 'entry_count'], 'release checksums evidence');
-  if (!safeName(checksums.name) || names.has(checksums.name) || !Number.isSafeInteger(checksums.bytes) || checksums.bytes <= 0 || !validDigest(checksums.sha256) || checksums.entry_count !== artifacts.length + evidence.length) throw new Error('release checksums evidence metadata is invalid');
-  const checksumEntries = [...artifacts, ...evidence].sort((left, right) => lexicalCompare(left.name, right.name));
+  const extraChecksumEntries = isV3 ? [controllerIdentityDocument, ...controllerNotarizationEvidence] : [];
+  if (!safeName(checksums.name) || names.has(checksums.name) || !Number.isSafeInteger(checksums.bytes) || checksums.bytes <= 0 || !validDigest(checksums.sha256) || checksums.entry_count !== artifacts.length + evidence.length + extraChecksumEntries.length) throw new Error('release checksums evidence metadata is invalid');
+  const checksumEntries = [...artifacts, ...evidence, ...extraChecksumEntries].sort((left, right) => lexicalCompare(left.name, right.name));
   const expectedChecksums = Buffer.from(`${checksumEntries.map((item) => `${item.sha256}  ${item.name}`).join('\n')}\n`, 'utf8');
   const checksumSnapshot = snapshotFile(resolve(manifestDirectory, checksums.name), { maximum: 16 * 1024 * 1024, capture: true, expectedBytes: checksums.bytes, expectedSHA256: checksums.sha256, label: 'release checksums' });
   if (!checksumSnapshot.content.equals(expectedChecksums)) throw new Error('release checksums content mismatch');
@@ -259,7 +313,7 @@ if (!suppliedGate) {
   console.log(JSON.stringify({ ok: true, schema_version: 2, qualified: false, production: false, operator_signature_verified: false }));
 } else {
   const evidenceDirectory = resolve(evidenceDirectoryInput);
-  const release = validateManifest(snapshotFile(manifestInput, { maximum: 16 * 1024 * 1024, capture: true, label: 'release manifest' }), manifestSignatureInput, manifestPublicKeyInput, manifestFingerprint);
+  const release = validateManifest(snapshotFile(manifestInput, { maximum: 16 * 1024 * 1024, capture: true, label: 'release manifest' }), manifestSignatureInput, manifestPublicKeyInput, manifestFingerprint, reportValue.team_id);
   if (release.manifest.source.commit !== reportValue.source_commit) throw new Error('source commit mismatch between report and signed release manifest');
   if (createHash('sha256').update(release.manifestBytes).digest('hex') !== reportValue.release_manifest_sha256) throw new Error('release manifest digest mismatch');
   const product = release.artifacts.find((item) => item.role === 'product');

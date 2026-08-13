@@ -63,7 +63,7 @@ const codesignOutput = (architecture = 'arm64', entitlements = ENTITLEMENTS) => 
     `Identifier=${CONTROLLER_BUNDLE_ID}`,
     `TeamIdentifier=${TEAM_ID}`,
     `CDHash=${ARCH_HASHES[architecture]}`,
-    `designated => ${designatedRequirement(architecture)}`
+    `designated => identifier "${CONTROLLER_BUNDLE_ID}" and anchor apple generic`
   ].join('\n')
 });
 
@@ -82,6 +82,7 @@ test('collects a closed canonical identity through injected codesign and lipo ru
     runCodesign: (command, args, options) => {
       calls.push({ runner: 'codesign', command, args, options });
       const architecture = args[args.indexOf('--arch') + 1];
+      if (args[0] === '--verify') return { status: 0, signal: null, stdout: '', stderr: '' };
       return codesignOutput(architecture);
     },
     runLipo: (command, args, options) => {
@@ -100,18 +101,21 @@ test('collects a closed canonical identity through injected codesign and lipo ru
     team_id: TEAM_ID,
     entitlements_sha256: ENTITLEMENTS_SHA256,
     code_directory_hashes: ARCHITECTURES.map((architecture) => ({ architecture, hash: ARCH_HASHES[architecture] })),
-    designated_requirements: ARCHITECTURES.map((architecture) => ({ architecture, requirement: designatedRequirement(architecture) }))
+    designated_requirements: ARCHITECTURES.map((architecture) => ({ architecture, requirement: `identifier "${CONTROLLER_BUNDLE_ID}" and anchor apple generic` })),
+    authorization_requirements: ARCHITECTURES.map((architecture) => ({ architecture, requirement: designatedRequirement(architecture) }))
   });
-  assert.equal(calls.length, 3);
+  assert.equal(calls.length, 5);
   assert.deepEqual(calls[0].args, ['-archs', value.executablePath]);
   assert.deepEqual(calls[1].args, ['--display', '--verbose=4', '--arch', 'arm64', '--requirements', '-', '--entitlements', ':-', value.bundlePath]);
-  assert.deepEqual(calls[2].args, ['--display', '--verbose=4', '--arch', 'x86_64', '--requirements', '-', '--entitlements', ':-', value.bundlePath]);
+  assert.match(calls[2].args.join(' '), /--verify --strict --verbose=4 --arch arm64 --test-requirement =anchor apple generic/u);
+  assert.deepEqual(calls[3].args, ['--display', '--verbose=4', '--arch', 'x86_64', '--requirements', '-', '--entitlements', ':-', value.bundlePath]);
+  assert.match(calls[4].args.join(' '), /--verify --strict --verbose=4 --arch x86_64 --test-requirement =anchor apple generic/u);
   assert.equal(calls[0].command, '/usr/bin/lipo');
   assert.equal(calls[1].command, '/usr/bin/codesign');
-  assert.equal(calls[2].command, '/usr/bin/codesign');
+  assert.equal(calls[4].command, '/usr/bin/codesign');
   assert.equal(calls[0].options.shell, false);
   assert.equal(calls[1].options.shell, false);
-  assert.equal(calls[2].options.shell, false);
+  assert.equal(calls[4].options.shell, false);
 });
 
 test('canonical bytes are fixed and unknown, missing, or non-canonical fields are rejected', () => {
@@ -125,7 +129,8 @@ test('canonical bytes are fixed and unknown, missing, or non-canonical fields ar
     team_id: TEAM_ID,
     entitlements_sha256: ENTITLEMENTS_SHA256,
     code_directory_hashes: ARCHITECTURES.map((architecture) => ({ architecture, hash: ARCH_HASHES[architecture] })),
-    designated_requirements: ARCHITECTURES.map((architecture) => ({ architecture, requirement: designatedRequirement(architecture) }))
+    designated_requirements: ARCHITECTURES.map((architecture) => ({ architecture, requirement: `identifier "${CONTROLLER_BUNDLE_ID}" and anchor apple generic` })),
+    authorization_requirements: ARCHITECTURES.map((architecture) => ({ architecture, requirement: designatedRequirement(architecture) }))
   };
   const bytes = canonicalJSON(value);
   assert.deepEqual(parseCanonicalExternalQualificationControllerIdentity(bytes), value);
@@ -140,7 +145,7 @@ test('canonical bytes are fixed and unknown, missing, or non-canonical fields ar
   const duplicate = JSON.stringify(value).replace('"schema_version":1,', '"schema_version":1,"schema_version":1,');
   assert.throws(() => parseCanonicalExternalQualificationControllerIdentity(Buffer.from(duplicate)), /duplicate key/iu);
   assert.throws(() => validateExternalQualificationControllerIdentity({ ...value, code_directory_hashes: [...value.code_directory_hashes].reverse() }), /sorted|substituted/iu);
-  assert.throws(() => validateExternalQualificationControllerIdentity({ ...value, designated_requirements: [{ ...value.designated_requirements[0], requirement: designatedRequirement('x86_64') }, value.designated_requirements[1]] }), /exact|bind|match/iu);
+  assert.throws(() => validateExternalQualificationControllerIdentity({ ...value, authorization_requirements: [{ ...value.authorization_requirements[0], requirement: designatedRequirement('x86_64') }, value.authorization_requirements[1]] }), /exact|bind|match/iu);
   const invalidFields = [
     ['archive_name', 'controller.tar', /archive name/iu],
     ['archive_sha256', 'not-a-digest', /archive_sha256/iu],
@@ -149,7 +154,8 @@ test('canonical bytes are fixed and unknown, missing, or non-canonical fields ar
     ['team_id', 'wrong-team', /team_id/iu],
     ['entitlements_sha256', 'not-a-digest', /entitlements_sha256/iu],
     ['code_directory_hashes', [{ architecture: 'arm64', hash: 'not-a-cdhash' }], /code_directory_hashes/iu],
-    ['designated_requirements', [{ architecture: 'arm64', requirement: 'anchor apple generic' }], /designated_requirements/iu]
+    ['designated_requirements', [{ architecture: 'arm64', requirement: 'anchor apple generic' }], /designated_requirements/iu],
+    ['authorization_requirements', [{ architecture: 'arm64', requirement: 'anchor apple generic' }], /designated_requirements|authorization_requirements/iu]
   ];
   for (const [field, replacement, error] of invalidFields) assert.throws(() => validateExternalQualificationControllerIdentity({ ...value, [field]: replacement }), error);
 });
@@ -159,16 +165,14 @@ test('identity parsers bind exact signed metadata and entitlement bytes', () => 
   assert.deepEqual(parsed, {
     bundle_id: CONTROLLER_BUNDLE_ID,
     team_id: TEAM_ID,
-    designated_requirement: designatedRequirement('arm64'),
+    designated_requirement: `identifier "${CONTROLLER_BUNDLE_ID}" and anchor apple generic`,
     hash: ARCH_HASHES.arm64,
     entitlements_sha256: ENTITLEMENTS_SHA256
   });
   assert.deepEqual(parseLipoArchitectures('arm64 x86_64\n'), ARCHITECTURES);
   for (const mutation of [
-    () => parseCodesignIdentity({ ...codesignOutput(), stderr: codesignOutput().stderr.replace(`TeamIdentifier=${TEAM_ID}`, 'TeamIdentifier=WRONG12345') }),
-    () => parseCodesignIdentity({ ...codesignOutput('arm64'), stderr: codesignOutput('arm64').stderr.replace(`TeamIdentifier=${TEAM_ID}`, 'TeamIdentifier=WRONG12345') }),
+    () => parseCodesignIdentity({ ...codesignOutput(), stderr: codesignOutput().stderr.replace(`TeamIdentifier=${TEAM_ID}`, 'TeamIdentifier=wrong-team') }),
     () => parseCodesignIdentity({ ...codesignOutput('arm64'), stderr: codesignOutput('arm64').stderr.replace(`CDHash=${ARCH_HASHES.arm64}`, 'CDHash=not-a-hash') }),
-    () => parseCodesignIdentity({ ...codesignOutput('arm64'), stderr: codesignOutput('arm64').stderr.replace(`cdhash H"${ARCH_HASHES.arm64}"`, `cdhash H"${'b'.repeat(40)}"`) }),
     () => parseCodesignIdentity({ ...codesignOutput('arm64'), stderr: codesignOutput('arm64').stderr.replace(`CDHash=${ARCH_HASHES.arm64}`, `CDHash=${'A'.repeat(40)}`) }),
     () => parseCodesignIdentity({ ...codesignOutput('arm64'), stdout: Buffer.from('not a plist') }),
     () => parseLipoArchitectures('x86_64 arm64\n'),

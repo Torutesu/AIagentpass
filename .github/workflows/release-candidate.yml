@@ -70,12 +70,19 @@ jobs:
           AGENTPASS_APP_IDENTIFIER_PREFIX: ${{ secrets.AGENTPASS_APP_IDENTIFIER_PREFIX }}
           AGENTPASS_SERVICE_PROFILE_BASE64: ${{ secrets.AGENTPASS_SERVICE_PROFILE_BASE64 }}
           AGENTPASS_CLIENT_PROFILE_BASE64: ${{ secrets.AGENTPASS_CLIENT_PROFILE_BASE64 }}
+          AGENTPASS_CONTROLLER_PROFILE_BASE64: ${{ secrets.AGENTPASS_CONTROLLER_PROFILE_BASE64 }}
           AGENTPASS_EPHEMERAL_KEYCHAIN_PASSWORD: ${{ secrets.AGENTPASS_EPHEMERAL_KEYCHAIN_PASSWORD }}
           AGENTPASS_RELEASE_MANIFEST_PRIVATE_KEY_BASE64: ${{ secrets.AGENTPASS_RELEASE_MANIFEST_PRIVATE_KEY_BASE64 }}
           AGENTPASS_NOTARY_KEY_ID: ${{ secrets.AGENTPASS_NOTARY_KEY_ID }}
           AGENTPASS_NOTARY_ISSUER_ID: ${{ secrets.AGENTPASS_NOTARY_ISSUER_ID }}
           AGENTPASS_NOTARY_PRIVATE_KEY_BASE64: ${{ secrets.AGENTPASS_NOTARY_PRIVATE_KEY_BASE64 }}
         run: scripts/release/require-credentials.sh
+      - name: Require dedicated controller profile
+        env:
+          AGENTPASS_CONTROLLER_PROFILE_BASE64: ${{ secrets.AGENTPASS_CONTROLLER_PROFILE_BASE64 }}
+        run: |
+          set -euo pipefail
+          : "${AGENTPASS_CONTROLLER_PROFILE_BASE64:?AGENTPASS_CONTROLLER_PROFILE_BASE64 is required}"
       - run: npm ci
       - run: node scripts/release/validate-version.mjs --require-tag --tag="$AGENTPASS_RELEASE_TAG"
       - name: Generate immutable database migration manifest
@@ -93,6 +100,7 @@ jobs:
           AGENTPASS_SIGNING_CERTIFICATE_PASSWORD: ${{ secrets.AGENTPASS_SIGNING_CERTIFICATE_PASSWORD }}
           AGENTPASS_SERVICE_PROFILE_BASE64: ${{ secrets.AGENTPASS_SERVICE_PROFILE_BASE64 }}
           AGENTPASS_CLIENT_PROFILE_BASE64: ${{ secrets.AGENTPASS_CLIENT_PROFILE_BASE64 }}
+          AGENTPASS_CONTROLLER_PROFILE_BASE64: ${{ secrets.AGENTPASS_CONTROLLER_PROFILE_BASE64 }}
           KEYCHAIN_PASSWORD: ${{ secrets.AGENTPASS_EPHEMERAL_KEYCHAIN_PASSWORD }}
           RELEASE_MANIFEST_PRIVATE_KEY: ${{ secrets.AGENTPASS_RELEASE_MANIFEST_PRIVATE_KEY_BASE64 }}
           RELEASE_MANIFEST_PUBLIC_KEY: ${{ vars.AGENTPASS_RELEASE_MANIFEST_PUBLIC_KEY_BASE64 }}
@@ -105,6 +113,7 @@ jobs:
           printf '%s' "$AGENTPASS_SIGNING_CERTIFICATE_P12_BASE64" | base64 --decode > "$RUNNER_TEMP/agentpass-signing/certificate.p12"
           printf '%s' "$AGENTPASS_SERVICE_PROFILE_BASE64" | base64 --decode > "$RUNNER_TEMP/agentpass-signing/service.provisionprofile"
           printf '%s' "$AGENTPASS_CLIENT_PROFILE_BASE64" | base64 --decode > "$RUNNER_TEMP/agentpass-signing/client.provisionprofile"
+          printf '%s' "$AGENTPASS_CONTROLLER_PROFILE_BASE64" | base64 --decode > "$RUNNER_TEMP/agentpass-signing/controller.provisionprofile"
           [[ -n "$RELEASE_MANIFEST_PUBLIC_KEY" ]] || { echo "Release manifest public key is not configured" >&2; exit 1; }
           printf '%s' "$RELEASE_MANIFEST_PRIVATE_KEY" | base64 --decode > "$RUNNER_TEMP/agentpass-signing/release-manifest.private.pem"
           printf '%s' "$RELEASE_MANIFEST_PUBLIC_KEY" | base64 --decode > "$RUNNER_TEMP/agentpass-signing/release-manifest.public.pem"
@@ -156,6 +165,54 @@ jobs:
           }
           NODE
           [[ "$(stat -f '%Lp' "$input_dir/signer-key-versions.json")" == 600 ]] || { echo "signer key versions file permissions are unsafe" >&2; exit 1; }
+      - name: Build, independently notarize, staple, and archive external qualification controller
+        env:
+          AGENTPASS_SIGNING_IDENTITY: ${{ secrets.AGENTPASS_SIGNING_IDENTITY }}
+          AGENTPASS_TEAM_ID: ${{ secrets.AGENTPASS_TEAM_ID }}
+          AGENTPASS_APP_IDENTIFIER_PREFIX: ${{ secrets.AGENTPASS_APP_IDENTIFIER_PREFIX }}
+          AGENTPASS_NOTARY_KEY_ID: ${{ secrets.AGENTPASS_NOTARY_KEY_ID }}
+          AGENTPASS_NOTARY_ISSUER_ID: ${{ secrets.AGENTPASS_NOTARY_ISSUER_ID }}
+          AGENTPASS_NOTARY_PRIVATE_KEY_PATH: ${{ runner.temp }}/agentpass-signing/notary-auth-key.p8
+        run: |
+          set -euo pipefail
+          controller_dir="$RUNNER_TEMP/controller"
+          controller_build_dir="$controller_dir/build"
+          controller_app="$controller_dir/AgentPassQualificationController.app"
+          controller_binary="$controller_dir/agentpass-qualification-controller-universal"
+          controller_notarytool="$controller_dir/controller-notarytool-result.json"
+          controller_stapler="$controller_dir/controller-stapler-result.txt"
+          release_version="${AGENTPASS_RELEASE_TAG#v}"
+          controller_archive="$controller_dir/AgentPassQualificationController-${release_version}-macos-universal.tar"
+          mkdir -m 0700 -p "$controller_build_dir"
+          for architecture in arm64 x86_64; do
+            MACOSX_DEPLOYMENT_TARGET=14.0 swift build -c release --package-path native/macos --arch "$architecture"
+            bin_path="$(MACOSX_DEPLOYMENT_TARGET=14.0 swift build -c release --package-path native/macos --arch "$architecture" --show-bin-path)"
+            install -m 0755 "$bin_path/agentpass-qualification-controller" "$controller_build_dir/agentpass-qualification-controller-$architecture"
+          done
+          xcrun lipo -create \
+            "$controller_build_dir/agentpass-qualification-controller-arm64" \
+            "$controller_build_dir/agentpass-qualification-controller-x86_64" \
+            -output "$controller_binary"
+          chmod 0755 "$controller_binary"
+          native/macos/Qualification/build-controller.sh \
+            --source-binary "$controller_binary" --output "$controller_app" \
+            --identity "$AGENTPASS_SIGNING_IDENTITY" --team-id "$AGENTPASS_TEAM_ID" \
+            --app-identifier-prefix "$AGENTPASS_APP_IDENTIFIER_PREFIX" \
+            --profile "$RUNNER_TEMP/agentpass-signing/controller.provisionprofile"
+          scripts/release/notarize-controller.sh "$controller_app" "$controller_notarytool" "$controller_stapler"
+          node native/macos/Qualification/archive-controller.mjs "$controller_app" "$controller_archive" "$release_version"
+      - name: Collect external qualification controller identity
+        env:
+          AGENTPASS_TEAM_ID: ${{ secrets.AGENTPASS_TEAM_ID }}
+        run: |
+          set -euo pipefail
+          controller_dir="$RUNNER_TEMP/controller"
+          controller_identity="$controller_dir/controller-identity.json"
+          controller_identity_cli="scripts/release/n3e/controller-identity-contract.mjs"
+          node "$controller_identity_cli" collect \
+            "$controller_dir/AgentPassQualificationController-${AGENTPASS_RELEASE_TAG#v}-macos-universal.tar" \
+            "$controller_dir/AgentPassQualificationController.app" "$AGENTPASS_TEAM_ID" "$controller_identity"
+          test -s "$controller_identity"
       - name: Build, notarize, staple, and bind installer candidate
         env:
           AGENTPASS_SIGNING_IDENTITY: ${{ secrets.AGENTPASS_SIGNING_IDENTITY }}
@@ -176,6 +233,11 @@ jobs:
           native/macos/scripts/build-installer.sh --app "$RUNNER_TEMP/candidate/AgentPass.app" --output "$package" --identity "$AGENTPASS_INSTALLER_SIGNING_IDENTITY"
           scripts/release/notarize-installer.sh "$package" "$RUNNER_TEMP/candidate/notarytool-result.json" "$RUNNER_TEMP/candidate/stapler-result.txt"
           submission_id="$(node -e 'process.stdout.write(JSON.parse(require("node:fs").readFileSync(process.argv[1], "utf8")).id)' "$RUNNER_TEMP/candidate/notarytool-result.json")"
+          controller_submission_id="$(node -e 'process.stdout.write(JSON.parse(require("node:fs").readFileSync(process.argv[1], "utf8")).id)' "$RUNNER_TEMP/controller/controller-notarytool-result.json")"
+          install -m 0644 "$RUNNER_TEMP/controller/AgentPassQualificationController-${AGENTPASS_RELEASE_TAG#v}-macos-universal.tar" "$RUNNER_TEMP/candidate/"
+          install -m 0644 "$RUNNER_TEMP/controller/controller-identity.json" "$RUNNER_TEMP/candidate/controller-identity.json"
+          install -m 0644 "$RUNNER_TEMP/controller/controller-notarytool-result.json" "$RUNNER_TEMP/candidate/controller-notarytool-result.json"
+          install -m 0644 "$RUNNER_TEMP/controller/controller-stapler-result.txt" "$RUNNER_TEMP/candidate/controller-stapler-result.txt"
           node scripts/release/generate-sbom.mjs "$RUNNER_TEMP/candidate/AgentPass-${AGENTPASS_RELEASE_TAG}.spdx.json"
           node scripts/release/generate-release-attestation.mjs \
             --app "$RUNNER_TEMP/candidate/AgentPass.app" \
@@ -189,10 +251,16 @@ jobs:
           node scripts/release/generate-manifest.mjs "$RUNNER_TEMP/candidate/AgentPass-${AGENTPASS_RELEASE_TAG}.release-manifest.json" "$RUNNER_TEMP/candidate/SHA256SUMS" \
             --notarization-status=accepted_stapled --notary-submission="$submission_id" \
             --notarytool-evidence="$RUNNER_TEMP/candidate/notarytool-result.json" --stapler-evidence="$RUNNER_TEMP/candidate/stapler-result.txt" \
+            --controller-identity="$RUNNER_TEMP/candidate/controller-identity.json" \
+            --controller-notarization-status=accepted_stapled \
+            --controller-notary-submission="$controller_submission_id" \
+            --controller-notarytool-evidence="$RUNNER_TEMP/candidate/controller-notarytool-result.json" \
+            --controller-stapler-evidence="$RUNNER_TEMP/candidate/controller-stapler-result.txt" \
             "$package" "$RUNNER_TEMP/candidate/AgentPass-${AGENTPASS_RELEASE_TAG}.spdx.json" \
             "$RUNNER_TEMP/candidate/AgentPass-${AGENTPASS_RELEASE_TAG}.database-migration-manifest.json" \
             "$RUNNER_TEMP/candidate/release-attestation.json" \
-            "$RUNNER_TEMP/candidate/release-manifest.public.pem"
+            "$RUNNER_TEMP/candidate/release-manifest.public.pem" \
+            "$RUNNER_TEMP/candidate/AgentPassQualificationController-${AGENTPASS_RELEASE_TAG#v}-macos-universal.tar"
           node scripts/release/sign-manifest.mjs "$RUNNER_TEMP/candidate/AgentPass-${AGENTPASS_RELEASE_TAG}.release-manifest.json" "$RUNNER_TEMP/agentpass-signing/release-manifest.private.pem" "$RUNNER_TEMP/candidate/AgentPass-${AGENTPASS_RELEASE_TAG}.release-manifest.sig"
           node scripts/release/verify-release.mjs "$RUNNER_TEMP/candidate/AgentPass-${AGENTPASS_RELEASE_TAG}.release-manifest.json" "$RUNNER_TEMP/candidate/AgentPass-${AGENTPASS_RELEASE_TAG}.release-manifest.sig" "$RUNNER_TEMP/candidate/release-manifest.public.pem" "$AGENTPASS_RELEASE_MANIFEST_KEY_FINGERPRINT"
           scripts/release/verify-macos-release.sh "$RUNNER_TEMP/candidate/AgentPass-${AGENTPASS_RELEASE_TAG}.release-manifest.json" "$RUNNER_TEMP/candidate/AgentPass-${AGENTPASS_RELEASE_TAG}.release-manifest.sig" "$RUNNER_TEMP/candidate/release-manifest.public.pem" "$AGENTPASS_RELEASE_MANIFEST_KEY_FINGERPRINT" "$AGENTPASS_TEAM_ID"
@@ -210,6 +278,10 @@ jobs:
             ${{ runner.temp }}/candidate/SHA256SUMS
             ${{ runner.temp }}/candidate/notarytool-result.json
             ${{ runner.temp }}/candidate/stapler-result.txt
+            ${{ runner.temp }}/candidate/AgentPassQualificationController-*-macos-universal.tar
+            ${{ runner.temp }}/candidate/controller-identity.json
+            ${{ runner.temp }}/candidate/controller-notarytool-result.json
+            ${{ runner.temp }}/candidate/controller-stapler-result.txt
           if-no-files-found: error
       - name: Remove signing material
         if: always()
@@ -217,3 +289,4 @@ jobs:
           security delete-keychain "$RUNNER_TEMP/agentpass-signing.keychain-db" 2>/dev/null || true
           rm -rf "$RUNNER_TEMP/agentpass-signing"
           rm -rf "$RUNNER_TEMP/agentpass-attestation-inputs"
+          rm -rf "$RUNNER_TEMP/controller"

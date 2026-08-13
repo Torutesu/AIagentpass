@@ -20,6 +20,17 @@ PUBLIC_KEY="$STAGED_DIR/release-public.pem"
 node "$SCRIPT_DIR/verify-release.mjs" "$MANIFEST" "$SIGNATURE" "$PUBLIC_KEY" "$EXPECTED_FINGERPRINT" >/dev/null
 [[ "$(node -e 'process.stdout.write(require(process.argv[1]).evidence?.notarization?.status || "")' "$MANIFEST")" == "accepted_stapled" ]] || { echo "Manifest does not claim an explicitly accepted and stapled release" >&2; exit 1; }
 ARTIFACT_DIR="$(dirname "$MANIFEST")"
+CONTROLLER_ARCHIVE_NAME="$(node -e 'const m=require(process.argv[1]); const a=m.artifacts.filter(x=>x.role==="external_qualification_controller" && x.media_type==="application/octet-stream"); if(a.length!==1) process.exit(1); process.stdout.write(a[0].name)' "$MANIFEST")" || { echo "Manifest must contain exactly one external qualification controller archive" >&2; exit 1; }
+CONTROLLER_IDENTITY_NAME="$(node -e 'const m=require(process.argv[1]); const d=m.external_qualification_controller?.identity_document; if(!d || typeof d.name!=="string") process.exit(1); process.stdout.write(d.name)' "$MANIFEST")" || { echo "Manifest lacks the controller identity document" >&2; exit 1; }
+CONTROLLER_PARENT="$TEMP_DIR/controller"
+/bin/mkdir -m 0700 "$CONTROLLER_PARENT"
+CONTROLLER_APP="$CONTROLLER_PARENT/AgentPassQualificationController.app"
+node "$SCRIPT_DIR/n3e/verify-controller-archive.mjs" "$ARTIFACT_DIR/$CONTROLLER_ARCHIVE_NAME" "$CONTROLLER_APP" >/dev/null
+node "$SCRIPT_DIR/n3e/controller-identity-contract.mjs" collect "$ARTIFACT_DIR/$CONTROLLER_ARCHIVE_NAME" "$CONTROLLER_APP" "$EXPECTED_TEAM_ID" "$CONTROLLER_PARENT/recollected-identity.json" >/dev/null
+/usr/bin/cmp -s "$ARTIFACT_DIR/$CONTROLLER_IDENTITY_NAME" "$CONTROLLER_PARENT/recollected-identity.json" || { echo "Extracted controller identity differs from the signed manifest binding" >&2; exit 1; }
+/usr/bin/xcrun stapler validate "$CONTROLLER_APP"
+/usr/sbin/spctl --assess --type execute --verbose=4 "$CONTROLLER_APP"
+/usr/bin/codesign --verify --strict --verbose=4 "$CONTROLLER_APP"
 PKG_NAME="$(node -e 'const m=require(process.argv[1]); const a=m.artifacts.filter(x=>x.role==="product" && x.name.endsWith("-macos-universal.pkg") && x.media_type==="application/vnd.apple.installer+xml"); if(a.length!==1) process.exit(1); process.stdout.write(a[0].name)' "$MANIFEST")" || { echo "Manifest must contain exactly one macOS universal installer package" >&2; exit 1; }
 PACKAGE="$ARTIFACT_DIR/$PKG_NAME"
 ROOT_DIR="$(cd "$SCRIPT_DIR/../.." && pwd -P)"

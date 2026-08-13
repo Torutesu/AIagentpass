@@ -3,6 +3,7 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
+import { pathToFileURL } from 'node:url';
 
 /**
  * The external qualification controller is a release artifact, not a member
@@ -28,7 +29,8 @@ export const CONTRACT_FIELDS = Object.freeze([
   'team_id',
   'entitlements_sha256',
   'code_directory_hashes',
-  'designated_requirements'
+  'designated_requirements',
+  'authorization_requirements'
 ]);
 
 export const MAX_ARCHIVE_BYTES = 512 * 1024 * 1024;
@@ -304,7 +306,6 @@ export const parseCodesignIdentity = ({ stdout = '', stderr = '' } = {}) => {
   if (!TEAM_ID.test(teamId)) fail('codesign Team ID is invalid');
   if (!CODE_DIRECTORY_HASH.test(codeDirectoryHash)) fail('codesign CodeDirectory hash is invalid');
   validateDesignatedRequirement(designatedRequirement, 'codesign designated requirement');
-  if (designatedRequirement !== designatedRequirementForTeam(teamId, codeDirectoryHash)) fail('codesign designated requirement does not bind the exact controller identity');
   return Object.freeze({
     bundle_id: bundleId,
     team_id: teamId,
@@ -356,10 +357,8 @@ const validateDesignatedRequirements = (value, teamId, hashes) => {
   if (!Array.isArray(value) || value.length !== hashes.length) fail('designated_requirements must contain one exact requirement per architecture');
   const normalized = value.map((item, index) => {
     exactKeys(item, ['architecture', 'requirement'], `designated_requirements[${index}]`);
-    const expectedHash = hashes[index].hash;
     if (item.architecture !== hashes[index].architecture) fail('designated_requirements are unsorted or do not match code_directory_hashes');
     validateDesignatedRequirement(item.requirement, `designated_requirements[${index}].requirement`);
-    if (item.requirement !== designatedRequirementForTeam(teamId, expectedHash)) fail('designated_requirements do not bind the exact per-architecture CDHash');
     return Object.freeze({ architecture: item.architecture, requirement: item.requirement });
   });
   return Object.freeze(normalized);
@@ -377,6 +376,10 @@ export const validateExternalQualificationControllerIdentity = (value, { expecte
   assertDigest(value.entitlements_sha256, 'entitlements_sha256');
   const codeDirectoryHashes = validateCodeDirectoryHashes(value.code_directory_hashes);
   const designatedRequirements = validateDesignatedRequirements(value.designated_requirements, value.team_id, codeDirectoryHashes);
+  const authorizationRequirements = validateDesignatedRequirements(value.authorization_requirements, value.team_id, codeDirectoryHashes);
+  for (let index = 0; index < authorizationRequirements.length; index += 1) {
+    if (authorizationRequirements[index].requirement !== designatedRequirementForTeam(value.team_id, codeDirectoryHashes[index].hash)) fail('authorization_requirements do not bind the exact per-architecture CDHash');
+  }
   return Object.freeze({
     schema_version: SCHEMA_VERSION,
     kind: CONTRACT_KIND,
@@ -387,7 +390,8 @@ export const validateExternalQualificationControllerIdentity = (value, { expecte
     team_id: value.team_id,
     entitlements_sha256: value.entitlements_sha256,
     code_directory_hashes: Object.freeze([...codeDirectoryHashes]),
-    designated_requirements: Object.freeze([...designatedRequirements])
+    designated_requirements: Object.freeze([...designatedRequirements]),
+    authorization_requirements: Object.freeze([...authorizationRequirements])
   });
 };
 
@@ -429,7 +433,13 @@ export const collectExternalQualificationControllerIdentity = ({
     const codesign = normalizeToolResult(runCodesign('/usr/bin/codesign', [
       '--display', '--verbose=4', '--arch', architecture, '--requirements', '-', '--entitlements', ':-', bundle.bundlePath
     ], { cwd: dirname(bundle.bundlePath), env: FIXED_ENV, shell: false }), 'codesign');
-    return Object.freeze({ architecture, ...parseCodesignIdentity(codesign) });
+    const identity = parseCodesignIdentity(codesign);
+    const authorizationRequirement = designatedRequirementForTeam(identity.team_id, identity.hash);
+    normalizeToolResult(runCodesign('/usr/bin/codesign', [
+      '--verify', '--strict', '--verbose=4', '--arch', architecture,
+      '--test-requirement', `=${authorizationRequirement}`, bundle.bundlePath
+    ], { cwd: dirname(bundle.bundlePath), env: FIXED_ENV, shell: false }), 'codesign authorization requirement');
+    return Object.freeze({ architecture, ...identity, authorization_requirement: authorizationRequirement });
   });
   const first = slices[0];
   if (slices.some((slice) => slice.bundle_id !== first.bundle_id || slice.team_id !== first.team_id || slice.entitlements_sha256 !== first.entitlements_sha256)) fail('per-architecture controller identities do not agree');
@@ -442,7 +452,8 @@ export const collectExternalQualificationControllerIdentity = ({
     team_id: first.team_id,
     entitlements_sha256: first.entitlements_sha256,
     code_directory_hashes: slices.map(({ architecture, hash }) => ({ architecture, hash })),
-    designated_requirements: slices.map(({ architecture, designated_requirement }) => ({ architecture, requirement: designated_requirement }))
+    designated_requirements: slices.map(({ architecture, designated_requirement }) => ({ architecture, requirement: designated_requirement })),
+    authorization_requirements: slices.map(({ architecture, authorization_requirement }) => ({ architecture, requirement: authorization_requirement }))
   }, { expectedTeamId });
 };
 
@@ -451,3 +462,30 @@ export const collectExternalQualificationControllerIdentity = ({
 export const validateControllerIdentity = validateExternalQualificationControllerIdentity;
 export const collectControllerIdentity = collectExternalQualificationControllerIdentity;
 export const makeControllerIdentity = validateExternalQualificationControllerIdentity;
+
+const writeCanonicalIdentity = (outputPath, identity) => {
+  const output = assertAbsolutePath(outputPath, 'identity output path');
+  assertNoSymlinkPath(dirname(output), 'identity output directory');
+  assertProtectedDirectory(dirname(output), 'identity output directory');
+  const bytes = canonicalJSON(identity);
+  const descriptor = fs.openSync(output, fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL | NOFOLLOW, 0o644);
+  try {
+    let offset = 0;
+    while (offset < bytes.length) offset += fs.writeSync(descriptor, bytes, offset, bytes.length - offset, offset);
+    fs.fsyncSync(descriptor);
+  } finally {
+    fs.closeSync(descriptor);
+  }
+  return Object.freeze({ output, bytes: bytes.length, sha256: crypto.createHash('sha256').update(bytes).digest('hex') });
+};
+
+const main = (argv) => {
+  if (argv.length !== 5 || argv[0] !== 'collect') throw new Error('Usage: controller-identity-contract.mjs collect ABSOLUTE-ARCHIVE ABSOLUTE-CONTROLLER-APP TEAM-ID ABSOLUTE-OUTPUT');
+  const identity = collectExternalQualificationControllerIdentity({ archivePath: argv[1], bundlePath: argv[2], expectedTeamId: argv[3] });
+  process.stdout.write(`${JSON.stringify(writeCanonicalIdentity(argv[4], identity))}\n`);
+};
+
+if (process.argv[1] && pathToFileURL(resolve(process.argv[1])).href === import.meta.url) {
+  try { main(process.argv.slice(2)); }
+  catch (error) { process.stderr.write(`${error.message}\n`); process.exitCode = 1; }
+}

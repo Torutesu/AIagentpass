@@ -70,11 +70,25 @@ test("release staging snapshots inputs and only removes its private directory", 
   try {
     const checksum = path.join(value.directory, "SHA256SUMS");
     const evidence = path.join(value.directory, "notarization.json");
+    const controller = path.join(value.directory, "AgentPassQualificationController-0.18.0-macos-universal.tar");
+    const controllerIdentity = path.join(value.directory, "qualification-controller-identity.json");
+    const controllerEvidence = path.join(value.directory, "qualification-controller-notarization.json");
     fs.writeFileSync(checksum, "checksums");
     fs.writeFileSync(evidence, "evidence");
+    fs.writeFileSync(controller, "controller archive");
+    fs.writeFileSync(controllerIdentity, "controller identity");
+    fs.writeFileSync(controllerEvidence, "controller notarization evidence");
     fs.writeFileSync(value.manifest, JSON.stringify({
-      artifacts: [{ role: "product", media_type: "application/vnd.apple.installer+xml", name: path.basename(value.pkg) }],
-      evidence: { checksums: { name: path.basename(checksum) }, notarization: { evidence: [{ name: path.basename(evidence) }] } }
+      schema_version: 3,
+      artifacts: [
+        { role: "product", media_type: "application/vnd.apple.installer+xml", name: path.basename(value.pkg) },
+        { role: "external_qualification_controller", media_type: "application/x-tar", name: path.basename(controller) }
+      ],
+      evidence: { checksums: { name: path.basename(checksum) }, notarization: { evidence: [{ name: path.basename(evidence) }] } },
+      external_qualification_controller: {
+        identity_document: { name: path.basename(controllerIdentity) },
+        notarization: { evidence: [{ name: path.basename(controllerEvidence) }] }
+      }
     }));
     const inputs = prepareProductionInstall({ manifest: value.manifest, signature: value.signature, publicKey: value.publicKey, fingerprint: "SHA256:abcdefghijklmnopqrstuvwx", teamId: "ABCDE12345" }, { platform: "darwin" });
     const staged = stageProductionInstall(inputs, stager);

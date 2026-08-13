@@ -88,6 +88,7 @@ jobs:
       BROWSER_VERSIONS_JSON: ${{ vars.AGENTPASS_P0C_BROWSER_VERSIONS_JSON }}
       OPERATOR_PRIVATE_KEY_B64: ${{ secrets.AGENTPASS_P0C_APPLE_SILICON_OPERATOR_PRIVATE_KEY_BASE64 }}
       GATE_DRIVER_DIR: /opt/agentpass/p0c/gates
+      CONTROLLER_ARCHITECTURE: arm64
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -119,6 +120,7 @@ jobs:
         name: Catalog exact candidate files without executing candidate content
         env:
           CANDIDATE_DIR: ${{ env.CANDIDATE_DIR }}
+          EXPECTED_TEAM_ID: ${{ env.EXPECTED_TEAM_ID }}
         shell: bash
         run: |
           set -euo pipefail
@@ -126,6 +128,10 @@ jobs:
           import crypto from 'node:crypto';
           import fs from 'node:fs';
           import path from 'node:path';
+          import {
+            parseCanonicalExternalQualificationControllerIdentity,
+            validateExternalQualificationControllerIdentity
+          } from './scripts/release/n3e/controller-identity-contract.mjs';
 
           const dir = path.resolve(process.env.CANDIDATE_DIR);
           const entries = fs.readdirSync(dir, { withFileTypes: true });
@@ -148,16 +154,58 @@ jobs:
           const sbom = exactlyOne((name) => name.endsWith('.spdx.json'), 'SPDX SBOM');
           const artifact = exactlyOne((name) => name.endsWith('-macos-universal.pkg'), 'universal PKG');
           const migration = exactlyOne((name) => name.endsWith('.database-migration-manifest.json'), 'database migration manifest');
-          const allowed = new Set([...fixed, path.basename(manifest), path.basename(signature), path.basename(sbom), path.basename(artifact), path.basename(migration)]);
-          if (files.size !== allowed.size || [...files.keys()].some((name) => !allowed.has(name))) throw new Error('candidate contains unexpected files');
           const manifestValue = JSON.parse(fs.readFileSync(manifest, 'utf8'));
+          if (manifestValue.schema_version !== 3) throw new Error('candidate release manifest must be v3');
+          const controller = manifestValue.external_qualification_controller;
+          if (!controller || JSON.stringify(Object.keys(controller).sort()) !== JSON.stringify(['identity', 'identity_document', 'notarization'])) throw new Error('candidate external controller binding is not exact');
+          const identityDocument = controller.identity_document;
+          if (!identityDocument || JSON.stringify(Object.keys(identityDocument).sort()) !== JSON.stringify(['bytes', 'name', 'sha256']) || !files.has(identityDocument.name)) throw new Error('candidate controller identity document binding is invalid');
+          const identityBytes = fs.readFileSync(path.join(dir, identityDocument.name));
+          if (identityBytes.length !== identityDocument.bytes || crypto.createHash('sha256').update(identityBytes).digest('hex') !== identityDocument.sha256) throw new Error('candidate controller identity document digest mismatch');
+          const identity = parseCanonicalExternalQualificationControllerIdentity(identityBytes);
+          if (JSON.stringify(identity) !== JSON.stringify(validateExternalQualificationControllerIdentity(controller.identity, { expectedTeamId: process.env.EXPECTED_TEAM_ID }))) throw new Error('candidate controller identity does not match its document');
+          const controllerArtifacts = manifestValue.artifacts?.filter((item) => item.role === 'external_qualification_controller');
+          if (controllerArtifacts?.length !== 1 || controllerArtifacts[0].name !== identity.archive_name || controllerArtifacts[0].role === 'product' || !files.has(identity.archive_name)) throw new Error('candidate controller archive role is not exact');
+          const controllerArchive = controllerArtifacts[0];
+          const controllerBytes = fs.readFileSync(path.join(dir, controllerArchive.name));
+          if (controllerBytes.length !== controllerArchive.bytes || crypto.createHash('sha256').update(controllerBytes).digest('hex') !== controllerArchive.sha256 || identity.archive_bytes !== controllerArchive.bytes || identity.archive_sha256 !== controllerArchive.sha256) throw new Error('candidate controller archive digest mismatch');
+          const controllerNotarization = controller.notarization;
+          if (!controllerNotarization || JSON.stringify(Object.keys(controllerNotarization).sort()) !== JSON.stringify(['evidence', 'status', 'submission_ids']) || controllerNotarization.status !== 'accepted_stapled' || !Array.isArray(controllerNotarization.submission_ids) || controllerNotarization.submission_ids.length === 0 || !Array.isArray(controllerNotarization.evidence) || controllerNotarization.evidence.length !== 2) throw new Error('candidate controller notarization is incomplete');
+          const controllerEvidenceKinds = new Set();
+          for (const evidence of controllerNotarization.evidence) {
+            if (JSON.stringify(Object.keys(evidence).sort()) !== JSON.stringify(['bytes', 'kind', 'name', 'sha256']) || !files.has(evidence.name) || !['notarytool_result', 'stapler_result'].includes(evidence.kind) || controllerEvidenceKinds.has(evidence.kind)) throw new Error('candidate controller notarization evidence is invalid');
+            controllerEvidenceKinds.add(evidence.kind);
+            const evidenceBytes = fs.readFileSync(path.join(dir, evidence.name));
+            if (evidenceBytes.length !== evidence.bytes || crypto.createHash('sha256').update(evidenceBytes).digest('hex') !== evidence.sha256) throw new Error('candidate controller notarization evidence digest mismatch');
+          }
+          if (!controllerEvidenceKinds.has('notarytool_result') || !controllerEvidenceKinds.has('stapler_result')) throw new Error('candidate controller notarization evidence kinds are incomplete');
+          const allowed = new Set([...fixed, path.basename(manifest), path.basename(signature), path.basename(sbom), path.basename(artifact), path.basename(migration), controllerArchive.name, identityDocument.name, ...controllerNotarization.evidence.map((item) => item.name)]);
+          if (files.size !== allowed.size || [...files.keys()].some((name) => !allowed.has(name))) throw new Error('candidate contains unexpected files');
           const product = manifestValue.artifacts?.filter((item) => item.role === 'product');
-          if (product?.length !== 1 || product[0].name !== path.basename(artifact)) throw new Error('candidate product does not match its signed manifest');
+          if (product?.length !== 1 || product[0].name !== path.basename(artifact) || product[0].name === controllerArchive.name) throw new Error('candidate product does not match its signed manifest');
           if (manifestValue.artifacts?.every((item) => item.name !== 'release-attestation.json')) throw new Error('signed candidate must include release-attestation.json');
           const artifactHash = crypto.createHash('sha256').update(fs.readFileSync(artifact)).digest('hex');
           if (product[0].sha256 !== artifactHash) throw new Error('candidate product hash does not match its signed manifest');
           const output = process.env.GITHUB_OUTPUT;
-          for (const [key, value] of Object.entries({ manifest, signature, public_key: path.join(dir, 'release-manifest.public.pem'), artifact, sbom, attestation: path.join(dir, 'release-attestation.json') })) fs.appendFileSync(output, `${key}=${value}\n`);
+          for (const [key, value] of Object.entries({ manifest, signature, public_key: path.join(dir, 'release-manifest.public.pem'), artifact, sbom, attestation: path.join(dir, 'release-attestation.json'), controller_archive: path.join(dir, controllerArchive.name), controller_identity: path.join(dir, identityDocument.name) })) fs.appendFileSync(output, `${key}=${value}\n`);
+          NODE
+
+      - id: controller-cdhash
+        name: Select matching controller architecture CDHash for later root provisioning without claiming physical execution
+        env:
+          MANIFEST: ${{ steps.candidate.outputs.manifest }}
+          CONTROLLER_ARCHITECTURE: ${{ env.CONTROLLER_ARCHITECTURE }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          node --input-type=module <<'NODE'
+          import fs from 'node:fs';
+          const manifest = JSON.parse(fs.readFileSync(process.env.MANIFEST, 'utf8'));
+          const hashes = manifest.external_qualification_controller?.identity?.code_directory_hashes;
+          const matches = Array.isArray(hashes) ? hashes.filter((item) => item?.architecture === process.env.CONTROLLER_ARCHITECTURE) : [];
+          if (matches.length !== 1 || !/^[0-9a-f]{40}$/.test(matches[0].hash) || /^0+$/.test(matches[0].hash)) throw new Error('controller CDHash does not match the lane architecture');
+          fs.appendFileSync(process.env.GITHUB_ENV, `AGENTPASS_P0C_QUALIFICATION_CONTROLLER_CDHASH=${matches[0].hash}\nQUALIFICATION_CONTROLLER_CDHASH=${matches[0].hash}\n`);
+          fs.appendFileSync(process.env.GITHUB_OUTPUT, `controller_cdhash=${matches[0].hash}\n`);
           NODE
 
       - name: Verify signed candidate before any qualification driver
@@ -301,6 +349,7 @@ jobs:
       BROWSER_VERSIONS_JSON: ${{ vars.AGENTPASS_P0C_BROWSER_VERSIONS_JSON }}
       OPERATOR_PRIVATE_KEY_B64: ${{ secrets.AGENTPASS_P0C_INTEL_T2_OPERATOR_PRIVATE_KEY_BASE64 }}
       GATE_DRIVER_DIR: /opt/agentpass/p0c/gates
+      CONTROLLER_ARCHITECTURE: x86_64
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -332,6 +381,7 @@ jobs:
         name: Catalog exact candidate files without executing candidate content
         env:
           CANDIDATE_DIR: ${{ env.CANDIDATE_DIR }}
+          EXPECTED_TEAM_ID: ${{ env.EXPECTED_TEAM_ID }}
         shell: bash
         run: |
           set -euo pipefail
@@ -339,6 +389,10 @@ jobs:
           import crypto from 'node:crypto';
           import fs from 'node:fs';
           import path from 'node:path';
+          import {
+            parseCanonicalExternalQualificationControllerIdentity,
+            validateExternalQualificationControllerIdentity
+          } from './scripts/release/n3e/controller-identity-contract.mjs';
           const dir = path.resolve(process.env.CANDIDATE_DIR);
           const entries = fs.readdirSync(dir, { withFileTypes: true });
           const files = new Map();
@@ -355,14 +409,57 @@ jobs:
           const sbom = exactlyOne((name) => name.endsWith('.spdx.json'), 'SPDX SBOM');
           const artifact = exactlyOne((name) => name.endsWith('-macos-universal.pkg'), 'universal PKG');
           const migration = exactlyOne((name) => name.endsWith('.database-migration-manifest.json'), 'database migration manifest');
-          const allowed = new Set([...fixed, path.basename(manifest), path.basename(signature), path.basename(sbom), path.basename(artifact), path.basename(migration)]);
+          const manifestValue = JSON.parse(fs.readFileSync(manifest, 'utf8'));
+          if (manifestValue.schema_version !== 3) throw new Error('candidate release manifest must be v3');
+          const controller = manifestValue.external_qualification_controller;
+          if (!controller || JSON.stringify(Object.keys(controller).sort()) !== JSON.stringify(['identity', 'identity_document', 'notarization'])) throw new Error('candidate external controller binding is not exact');
+          const identityDocument = controller.identity_document;
+          if (!identityDocument || JSON.stringify(Object.keys(identityDocument).sort()) !== JSON.stringify(['bytes', 'name', 'sha256']) || !files.has(identityDocument.name)) throw new Error('candidate controller identity document binding is invalid');
+          const identityBytes = fs.readFileSync(path.join(dir, identityDocument.name));
+          if (identityBytes.length !== identityDocument.bytes || crypto.createHash('sha256').update(identityBytes).digest('hex') !== identityDocument.sha256) throw new Error('candidate controller identity document digest mismatch');
+          const identity = parseCanonicalExternalQualificationControllerIdentity(identityBytes);
+          if (JSON.stringify(identity) !== JSON.stringify(validateExternalQualificationControllerIdentity(controller.identity, { expectedTeamId: process.env.EXPECTED_TEAM_ID }))) throw new Error('candidate controller identity does not match its document');
+          const controllerArtifacts = manifestValue.artifacts?.filter((item) => item.role === 'external_qualification_controller');
+          if (controllerArtifacts?.length !== 1 || controllerArtifacts[0].name !== identity.archive_name || controllerArtifacts[0].role === 'product' || !files.has(identity.archive_name)) throw new Error('candidate controller archive role is not exact');
+          const controllerArchive = controllerArtifacts[0];
+          const controllerBytes = fs.readFileSync(path.join(dir, controllerArchive.name));
+          if (controllerBytes.length !== controllerArchive.bytes || crypto.createHash('sha256').update(controllerBytes).digest('hex') !== controllerArchive.sha256 || identity.archive_bytes !== controllerArchive.bytes || identity.archive_sha256 !== controllerArchive.sha256) throw new Error('candidate controller archive digest mismatch');
+          const controllerNotarization = controller.notarization;
+          if (!controllerNotarization || JSON.stringify(Object.keys(controllerNotarization).sort()) !== JSON.stringify(['evidence', 'status', 'submission_ids']) || controllerNotarization.status !== 'accepted_stapled' || !Array.isArray(controllerNotarization.submission_ids) || controllerNotarization.submission_ids.length === 0 || !Array.isArray(controllerNotarization.evidence) || controllerNotarization.evidence.length !== 2) throw new Error('candidate controller notarization is incomplete');
+          const controllerEvidenceKinds = new Set();
+          for (const evidence of controllerNotarization.evidence) {
+            if (JSON.stringify(Object.keys(evidence).sort()) !== JSON.stringify(['bytes', 'kind', 'name', 'sha256']) || !files.has(evidence.name) || !['notarytool_result', 'stapler_result'].includes(evidence.kind) || controllerEvidenceKinds.has(evidence.kind)) throw new Error('candidate controller notarization evidence is invalid');
+            controllerEvidenceKinds.add(evidence.kind);
+            const evidenceBytes = fs.readFileSync(path.join(dir, evidence.name));
+            if (evidenceBytes.length !== evidence.bytes || crypto.createHash('sha256').update(evidenceBytes).digest('hex') !== evidence.sha256) throw new Error('candidate controller notarization evidence digest mismatch');
+          }
+          if (!controllerEvidenceKinds.has('notarytool_result') || !controllerEvidenceKinds.has('stapler_result')) throw new Error('candidate controller notarization evidence kinds are incomplete');
+          const allowed = new Set([...fixed, path.basename(manifest), path.basename(signature), path.basename(sbom), path.basename(artifact), path.basename(migration), controllerArchive.name, identityDocument.name, ...controllerNotarization.evidence.map((item) => item.name)]);
           if (files.size !== allowed.size || [...files.keys()].some((name) => !allowed.has(name))) throw new Error('candidate contains unexpected files');
-          const manifestValue = JSON.parse(fs.readFileSync(manifest, 'utf8')); const product = manifestValue.artifacts?.filter((item) => item.role === 'product');
-          if (product?.length !== 1 || product[0].name !== path.basename(artifact)) throw new Error('candidate product does not match its signed manifest');
+          const product = manifestValue.artifacts?.filter((item) => item.role === 'product');
+          if (product?.length !== 1 || product[0].name !== path.basename(artifact) || product[0].name === controllerArchive.name) throw new Error('candidate product does not match its signed manifest');
           if (manifestValue.artifacts?.every((item) => item.name !== 'release-attestation.json')) throw new Error('signed candidate must include release-attestation.json');
           if (product[0].sha256 !== crypto.createHash('sha256').update(fs.readFileSync(artifact)).digest('hex')) throw new Error('candidate product hash does not match its signed manifest');
           const output = process.env.GITHUB_OUTPUT;
-          for (const [key, value] of Object.entries({ manifest, signature, public_key: path.join(dir, 'release-manifest.public.pem'), artifact, sbom, attestation: path.join(dir, 'release-attestation.json') })) fs.appendFileSync(output, `${key}=${value}\n`);
+          for (const [key, value] of Object.entries({ manifest, signature, public_key: path.join(dir, 'release-manifest.public.pem'), artifact, sbom, attestation: path.join(dir, 'release-attestation.json'), controller_archive: path.join(dir, controllerArchive.name), controller_identity: path.join(dir, identityDocument.name) })) fs.appendFileSync(output, `${key}=${value}\n`);
+          NODE
+
+      - id: controller-cdhash
+        name: Select matching controller architecture CDHash for later root provisioning without claiming physical execution
+        env:
+          MANIFEST: ${{ steps.candidate.outputs.manifest }}
+          CONTROLLER_ARCHITECTURE: ${{ env.CONTROLLER_ARCHITECTURE }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          node --input-type=module <<'NODE'
+          import fs from 'node:fs';
+          const manifest = JSON.parse(fs.readFileSync(process.env.MANIFEST, 'utf8'));
+          const hashes = manifest.external_qualification_controller?.identity?.code_directory_hashes;
+          const matches = Array.isArray(hashes) ? hashes.filter((item) => item?.architecture === process.env.CONTROLLER_ARCHITECTURE) : [];
+          if (matches.length !== 1 || !/^[0-9a-f]{40}$/.test(matches[0].hash) || /^0+$/.test(matches[0].hash)) throw new Error('controller CDHash does not match the lane architecture');
+          fs.appendFileSync(process.env.GITHUB_ENV, `AGENTPASS_P0C_QUALIFICATION_CONTROLLER_CDHASH=${matches[0].hash}\nQUALIFICATION_CONTROLLER_CDHASH=${matches[0].hash}\n`);
+          fs.appendFileSync(process.env.GITHUB_OUTPUT, `controller_cdhash=${matches[0].hash}\n`);
           NODE
 
       - name: Verify signed candidate before any qualification driver
@@ -534,15 +631,39 @@ jobs:
         name: Re-catalog candidate before aggregate verification
         env:
           CANDIDATE_DIR: ${{ env.CANDIDATE_DIR }}
+          EXPECTED_TEAM_ID: ${{ vars.AGENTPASS_RELEASE_TEAM_ID }}
         shell: bash
         run: |
           set -euo pipefail
           node --input-type=module <<'NODE'
+          import crypto from 'node:crypto';
           import fs from 'node:fs'; import path from 'node:path';
+          import { parseCanonicalExternalQualificationControllerIdentity, validateExternalQualificationControllerIdentity } from './scripts/release/n3e/controller-identity-contract.mjs';
           const dir = path.resolve(process.env.CANDIDATE_DIR); const names = fs.readdirSync(dir, { withFileTypes: true });
           for (const item of names) { if (item.isSymbolicLink() || !item.isFile() || !/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(item.name)) throw new Error('aggregate candidate contains an unsafe entry'); }
           const one = (test, label) => { const found = names.filter((item) => test(item.name)); if (found.length !== 1) throw new Error(`aggregate candidate requires exactly one ${label}`); return path.join(dir, found[0].name); };
           const manifest = one((name) => name.endsWith('.release-manifest.json'), 'release manifest'); const signature = one((name) => name.endsWith('.release-manifest.sig'), 'release signature'); const pkg = one((name) => name.endsWith('-macos-universal.pkg'), 'universal PKG');
+          const manifestValue = JSON.parse(fs.readFileSync(manifest, 'utf8'));
+          if (manifestValue.schema_version !== 3) throw new Error('aggregate candidate release manifest must be v3');
+          const external = manifestValue.external_qualification_controller;
+          if (!external || JSON.stringify(Object.keys(external).sort()) !== JSON.stringify(['identity', 'identity_document', 'notarization'])) throw new Error('aggregate candidate external controller binding is not exact');
+          const identityDocument = external.identity_document;
+          const identityPath = path.join(dir, identityDocument?.name ?? '');
+          if (!identityDocument || JSON.stringify(Object.keys(identityDocument).sort()) !== JSON.stringify(['bytes', 'name', 'sha256']) || !fs.existsSync(identityPath)) throw new Error('aggregate controller identity document binding is invalid');
+          const identityBytes = fs.readFileSync(identityPath);
+          if (identityBytes.length !== identityDocument.bytes || crypto.createHash('sha256').update(identityBytes).digest('hex') !== identityDocument.sha256) throw new Error('aggregate controller identity document digest mismatch');
+          const identity = parseCanonicalExternalQualificationControllerIdentity(identityBytes);
+          if (JSON.stringify(identity) !== JSON.stringify(validateExternalQualificationControllerIdentity(external.identity, { expectedTeamId: process.env.EXPECTED_TEAM_ID }))) throw new Error('aggregate controller identity does not match its document');
+          const controllerArtifacts = manifestValue.artifacts?.filter((item) => item.role === 'external_qualification_controller');
+          if (controllerArtifacts?.length !== 1 || controllerArtifacts[0].name !== identity.archive_name || !fs.existsSync(path.join(dir, identity.archive_name))) throw new Error('aggregate controller archive role is not exact');
+          const controllerArchive = controllerArtifacts[0];
+          const controllerBytes = fs.readFileSync(path.join(dir, controllerArchive.name));
+          if (controllerArchive.role === 'product' || controllerBytes.length !== controllerArchive.bytes || crypto.createHash('sha256').update(controllerBytes).digest('hex') !== controllerArchive.sha256 || identity.archive_bytes !== controllerArchive.bytes || identity.archive_sha256 !== controllerArchive.sha256) throw new Error('aggregate controller archive digest mismatch');
+          const controllerEvidence = external.notarization?.evidence;
+          if (!Array.isArray(controllerEvidence) || controllerEvidence.length !== 2 || controllerEvidence.some((item) => !fs.existsSync(path.join(dir, item.name)))) throw new Error('aggregate controller notarization evidence is incomplete');
+          for (const item of controllerEvidence) { const bytes = fs.readFileSync(path.join(dir, item.name)); if (bytes.length !== item.bytes || crypto.createHash('sha256').update(bytes).digest('hex') !== item.sha256) throw new Error('aggregate controller notarization evidence digest mismatch'); }
+          const expected = new Set([path.basename(manifest), path.basename(signature), path.basename(pkg), 'release-manifest.public.pem', 'SHA256SUMS', 'notarytool-result.json', 'stapler-result.txt', 'release-attestation.json', identityDocument.name, controllerArchive.name, ...controllerEvidence.map((item) => item.name), ...names.filter((item) => item.name.endsWith('.spdx.json') || item.name.endsWith('.database-migration-manifest.json')).map((item) => item.name)]);
+          if (names.length !== expected.size || names.some((item) => !expected.has(item.name))) throw new Error('aggregate candidate contains unexpected or missing files');
           const output = process.env.GITHUB_OUTPUT; for (const [key, value] of Object.entries({ manifest, signature, public_key: path.join(dir, 'release-manifest.public.pem'), artifact: pkg })) fs.appendFileSync(output, `${key}=${value}\n`);
           NODE
 

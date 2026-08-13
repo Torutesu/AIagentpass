@@ -15,6 +15,11 @@ import {
   readPinnedBrowserVersions,
   writeCanonicalExclusive
 } from '../scripts/release/generate-hardware-qualification-template.mjs';
+import {
+  CONTRACT_KIND,
+  designatedRequirementForTeam,
+  canonicalJSON as canonicalControllerIdentityJSON
+} from '../scripts/release/n3e/controller-identity-contract.mjs';
 
 const ROOT = new URL('..', import.meta.url).pathname.replace(/\/$/u, '');
 const GENERATOR = join(ROOT, 'scripts/release/generate-hardware-qualification-template.mjs');
@@ -40,6 +45,8 @@ const makeFixture = () => {
   const sourceTree = 'b'.repeat(40);
   const productName = 'AgentPass-v0.18.0-macos-universal.pkg';
   const productBytes = Buffer.from('signed and notarized AgentPass product fixture\n');
+  const controllerName = 'AgentPassQualificationController-0.18.0-macos-universal.tar';
+  const controllerBytes = Buffer.from('external qualification controller fixture\n');
   const nestedCodeIdentities = REQUIRED_CODE_IDENTITIES.map((item, index) => ({
     path: item.path,
     bundle_id: item.bundle_id,
@@ -62,6 +69,29 @@ const makeFixture = () => {
     database_migration_manifest_sha256: digest(migrationBytes),
     signer_key_versions: signerKeyVersions
   };
+  const controllerIdentity = {
+    schema_version: 1,
+    kind: CONTRACT_KIND,
+    archive_name: controllerName,
+    archive_sha256: digest(controllerBytes),
+    archive_bytes: controllerBytes.length,
+    bundle_id: 'dev.agentpass.qualification-controller',
+    team_id: teamID,
+    entitlements_sha256: digest(Buffer.from('qualification-control.entitlements\n')),
+    code_directory_hashes: [
+      { architecture: 'arm64', hash: 'd'.repeat(40) },
+      { architecture: 'x86_64', hash: 'e'.repeat(40) }
+    ],
+    designated_requirements: [
+      { architecture: 'arm64', requirement: designatedRequirementForTeam(teamID, 'd'.repeat(40)) },
+      { architecture: 'x86_64', requirement: designatedRequirementForTeam(teamID, 'e'.repeat(40)) }
+    ],
+    authorization_requirements: [
+      { architecture: 'arm64', requirement: designatedRequirementForTeam(teamID, 'd'.repeat(40)) },
+      { architecture: 'x86_64', requirement: designatedRequirementForTeam(teamID, 'e'.repeat(40)) }
+    ]
+  };
+  const identityBytes = canonicalControllerIdentityJSON(controllerIdentity);
   const sbom = {
     spdxVersion: 'SPDX-2.3',
     SPDXID: 'SPDXRef-DOCUMENT',
@@ -78,21 +108,29 @@ const makeFixture = () => {
   };
   const files = new Map([
     [productName, productBytes],
+    [controllerName, controllerBytes],
     ['AgentPass-0.18.0.spdx.json', canonical(sbom)],
     ['database-migration-manifest.json', migrationBytes],
     ['package-lock.json', lockBytes],
     ['release-attestation.json', canonical(attestation)]
   ]);
   for (const [name, bytes] of files) fs.writeFileSync(join(releaseDirectory, name), bytes, { mode: 0o644 });
+  const identityName = 'AgentPassQualificationController.identity.json';
+  fs.writeFileSync(join(releaseDirectory, identityName), identityBytes, { mode: 0o644 });
   const notaryID = '12345678-1234-1234-1234-123456789abc';
   const notaryBytes = canonical({ status: 'Accepted', id: notaryID });
   const staplerBytes = Buffer.from('The validate action worked!\n');
+  const controllerNotaryID = 'abcdefab-cdef-cdef-cdef-abcdefabcdef';
+  const controllerNotaryBytes = canonical({ status: 'Accepted', id: controllerNotaryID });
+  const controllerStaplerBytes = Buffer.from('The validate action worked!\n');
   fs.writeFileSync(join(releaseDirectory, 'notarytool-result.json'), notaryBytes, { mode: 0o644 });
   fs.writeFileSync(join(releaseDirectory, 'stapler-result.txt'), staplerBytes, { mode: 0o644 });
+  fs.writeFileSync(join(releaseDirectory, 'controller-notarytool-result.json'), controllerNotaryBytes, { mode: 0o644 });
+  fs.writeFileSync(join(releaseDirectory, 'controller-stapler-result.txt'), controllerStaplerBytes, { mode: 0o644 });
   const artifacts = [...files.entries()].map(([name, bytes]) => ({
     name,
-    role: name.endsWith('.spdx.json') ? 'sbom' : name === productName ? 'product' : 'auxiliary',
-    media_type: name.endsWith('.spdx.json') ? 'application/spdx+json' : name.endsWith('.pkg') ? 'application/vnd.apple.installer+xml' : 'application/json',
+    role: name.endsWith('.spdx.json') ? 'sbom' : name === productName ? 'product' : name === controllerName ? 'external_qualification_controller' : 'auxiliary',
+    media_type: name.endsWith('.spdx.json') ? 'application/spdx+json' : name.endsWith('.pkg') ? 'application/vnd.apple.installer+xml' : name === controllerName ? 'application/octet-stream' : 'application/json',
     bytes: bytes.length,
     sha256: digest(bytes)
   })).sort((left, right) => left.name.localeCompare(right.name));
@@ -100,16 +138,26 @@ const makeFixture = () => {
     { kind: 'notarytool_result', name: 'notarytool-result.json', bytes: notaryBytes.length, sha256: digest(notaryBytes) },
     { kind: 'stapler_result', name: 'stapler-result.txt', bytes: staplerBytes.length, sha256: digest(staplerBytes) }
   ];
-  const checksumEntries = [...artifacts, ...notarizationEvidence].sort((left, right) => left.name.localeCompare(right.name));
+  const controllerNotarizationEvidence = [
+    { kind: 'notarytool_result', name: 'controller-notarytool-result.json', bytes: controllerNotaryBytes.length, sha256: digest(controllerNotaryBytes) },
+    { kind: 'stapler_result', name: 'controller-stapler-result.txt', bytes: controllerStaplerBytes.length, sha256: digest(controllerStaplerBytes) }
+  ];
+  const identityDocument = { name: identityName, bytes: identityBytes.length, sha256: digest(identityBytes) };
+  const checksumEntries = [...artifacts, ...notarizationEvidence, identityDocument, ...controllerNotarizationEvidence].sort((left, right) => left.name.localeCompare(right.name));
   const checksumsBytes = Buffer.from(`${checksumEntries.map((item) => `${item.sha256}  ${item.name}`).join('\n')}\n`, 'utf8');
   fs.writeFileSync(join(releaseDirectory, 'SHA256SUMS'), checksumsBytes, { mode: 0o644 });
   const manifest = {
-    schema_version: 2,
+    schema_version: 3,
     product: 'AgentPass',
     version: '0.18.0',
     source: { commit: sourceCommit, tree: sourceTree, tag: 'v0.18.0' },
     generated_at: '2026-08-13T00:00:00.000Z',
     artifacts,
+    external_qualification_controller: {
+      identity_document: identityDocument,
+      identity: controllerIdentity,
+      notarization: { status: 'accepted_stapled', submission_ids: [controllerNotaryID], evidence: controllerNotarizationEvidence }
+    },
     evidence: {
       checksums: { name: 'SHA256SUMS', bytes: checksumsBytes.length, sha256: digest(checksumsBytes), entry_count: checksumEntries.length },
       sbom: {
@@ -153,6 +201,10 @@ const makeFixture = () => {
     operatorFingerprint: VALID_RELEASE_KEY_FINGERPRINT(operatorKeys.publicKey),
     manifest,
     attestation,
+    controllerIdentity,
+    identityBytes,
+    identityDocument,
+    controllerNotarizationEvidence,
     productName,
     releaseKeys,
     operatorKeys
@@ -171,7 +223,37 @@ const generateArgs = (fixture, outputPath) => ({
   outputPath
 });
 
-test('creates a canonical, unqualified v2 template bound to the signed release', () => {
+const rewriteSignedManifest = (fixture, mutate) => {
+  const manifest = JSON.parse(fs.readFileSync(fixture.manifestPath));
+  mutate(manifest);
+  const bytes = canonical(manifest);
+  fs.writeFileSync(fixture.manifestPath, bytes);
+  writeSignature(fixture.signaturePath, bytes, fixture.releaseKeys.privateKey);
+  return manifest;
+};
+
+const rewriteIdentityBinding = (fixture, identity, { canonicalBytes = canonicalControllerIdentityJSON(identity) } = {}) => {
+  const identityPath = join(fixture.releaseDirectory, fixture.identityDocument.name);
+  fs.writeFileSync(identityPath, canonicalBytes);
+  const checksumPath = join(fixture.releaseDirectory, fixture.manifest.evidence.checksums.name);
+  const manifest = JSON.parse(fs.readFileSync(fixture.manifestPath));
+  const binding = manifest.external_qualification_controller.identity_document;
+  binding.bytes = canonicalBytes.length;
+  binding.sha256 = digest(canonicalBytes);
+  manifest.external_qualification_controller.identity = identity;
+  const checksums = fs.readFileSync(checksumPath, 'utf8').split('\n');
+  const identityIndex = checksums.findIndex((line) => line.endsWith(`  ${binding.name}`));
+  checksums[identityIndex] = `${binding.sha256}  ${binding.name}`;
+  const checksumBytes = Buffer.from(checksums.join('\n'), 'utf8');
+  fs.writeFileSync(checksumPath, checksumBytes);
+  manifest.evidence.checksums.bytes = checksumBytes.length;
+  manifest.evidence.checksums.sha256 = digest(checksumBytes);
+  const manifestBytes = canonical(manifest);
+  fs.writeFileSync(fixture.manifestPath, manifestBytes);
+  writeSignature(fixture.signaturePath, manifestBytes, fixture.releaseKeys.privateKey);
+};
+
+test('creates a canonical, unqualified v2 template bound to the signed v3 release', () => {
   const fixture = makeFixture();
   const output = join(fixture.directory, 'hardware-qualification-template.json');
   const template = generateHardwareQualificationTemplate(generateArgs(fixture, output));
@@ -189,6 +271,19 @@ test('creates a canonical, unqualified v2 template bound to the signed release',
   assert.deepEqual(template.browser_versions, fixture.browserVersions);
   assert.equal(template.operator, fixture.operator);
   assert.equal(template.operator_key_fingerprint, fixture.operatorFingerprint);
+  assert.equal(Object.keys(template).some((key) => key.includes('controller')), false);
+  assert.equal(fixture.manifest.schema_version, 3);
+  assert.equal(fixture.manifest.artifacts.filter((item) => item.role === 'external_qualification_controller').length, 1);
+  assert.equal(fixture.manifest.artifacts.filter((item) => item.role === 'product').length, 1);
+  assert.equal(fixture.manifest.external_qualification_controller.identity_document.bytes, fixture.identityBytes.length);
+  assert.equal(fixture.manifest.external_qualification_controller.identity_document.sha256, digest(fixture.identityBytes));
+  assert.equal(fixture.manifest.evidence.checksums.entry_count,
+    fixture.manifest.artifacts.length + fixture.manifest.evidence.notarization.evidence.length + 1
+      + fixture.manifest.external_qualification_controller.notarization.evidence.length);
+  const checksumText = fs.readFileSync(join(fixture.releaseDirectory, 'SHA256SUMS'), 'utf8');
+  for (const name of [fixture.identityDocument.name, ...fixture.controllerNotarizationEvidence.map((item) => item.name)]) {
+    assert.match(checksumText, new RegExp(`  ${name.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&')}\\n`, 'u'));
+  }
   assert.equal(template.qualified, false);
   assert.equal(template.tests[0].status, 'skipped');
   assert.equal(template.gates[0].status, 'skipped');
@@ -214,6 +309,61 @@ test('accepts only canonical, sorted external browser pins and rejects unknown f
   const unsorted = join(fixture.directory, 'browser-unsorted.json');
   fs.writeFileSync(unsorted, canonical([...fixture.browserVersions].reverse()));
   assert.throws(() => readPinnedBrowserVersions(unsorted), /unsorted/u);
+});
+
+test('attacks v3 controller bindings and release-manifest boundaries', () => {
+  const missingController = makeFixture();
+  rewriteSignedManifest(missingController, (manifest) => { delete manifest.external_qualification_controller; });
+  assert.throws(() => generateHardwareQualificationTemplate(generateArgs(missingController, join(missingController.directory, 'missing.json'))), /release manifest has missing or unknown fields/u);
+
+  const wrongRole = makeFixture();
+  rewriteSignedManifest(wrongRole, (manifest) => {
+    manifest.artifacts.find((item) => item.name === wrongRole.controllerIdentity.archive_name).role = 'product';
+  });
+  assert.throws(() => generateHardwareQualificationTemplate(generateArgs(wrongRole, join(wrongRole.directory, 'wrong-role.json'))), /exactly one canonical macOS product|external qualification controller/u);
+
+  for (const [label, mutate] of [
+    ['digest', (identity) => { identity.archive_sha256 = 'f'.repeat(64); }],
+    ['bytes', (identity) => { identity.archive_bytes += 1; }],
+    ['versioned name', (identity) => { identity.archive_name = 'AgentPassQualificationController-0.18.1-macos-universal.tar'; }]
+  ]) {
+    const archiveBinding = makeFixture();
+    const substitutedIdentity = structuredClone(archiveBinding.controllerIdentity);
+    mutate(substitutedIdentity);
+    rewriteIdentityBinding(archiveBinding, substitutedIdentity);
+    assert.throws(() => generateHardwareQualificationTemplate(generateArgs(archiveBinding, join(archiveBinding.directory, `${label}.json`))), /controller identity does not bind the exact external archive/u);
+  }
+
+  const noncanonicalIdentity = makeFixture();
+  const prettyIdentity = Buffer.from(`${JSON.stringify(noncanonicalIdentity.controllerIdentity, null, 2)}\n`, 'utf8');
+  rewriteIdentityBinding(noncanonicalIdentity, noncanonicalIdentity.controllerIdentity, { canonicalBytes: prettyIdentity });
+  assert.throws(() => generateHardwareQualificationTemplate(generateArgs(noncanonicalIdentity, join(noncanonicalIdentity.directory, 'noncanonical.json'))), /controller identity document.*canonical JSON/u);
+
+  const wrongTeam = makeFixture();
+  const substitutedIdentity = structuredClone(wrongTeam.controllerIdentity);
+  substitutedIdentity.team_id = 'ZZZZZZ9999';
+  substitutedIdentity.designated_requirements = substitutedIdentity.designated_requirements.map((item) => ({
+    ...item,
+    requirement: designatedRequirementForTeam(substitutedIdentity.team_id, substitutedIdentity.code_directory_hashes.find((hash) => hash.architecture === item.architecture).hash)
+  }));
+  substitutedIdentity.authorization_requirements = substitutedIdentity.authorization_requirements.map((item) => ({
+    ...item,
+    requirement: designatedRequirementForTeam(substitutedIdentity.team_id, substitutedIdentity.code_directory_hashes.find((hash) => hash.architecture === item.architecture).hash)
+  }));
+  rewriteIdentityBinding(wrongTeam, substitutedIdentity);
+  assert.throws(() => generateHardwareQualificationTemplate(generateArgs(wrongTeam, join(wrongTeam.directory, 'wrong-team.json'))), /Team ID does not match/u);
+
+  const incompleteControllerNotarization = makeFixture();
+  rewriteSignedManifest(incompleteControllerNotarization, (manifest) => {
+    manifest.external_qualification_controller.notarization.evidence.pop();
+  });
+  assert.throws(() => generateHardwareQualificationTemplate(generateArgs(incompleteControllerNotarization, join(incompleteControllerNotarization.directory, 'incomplete-notarization.json'))), /controller notarization evidence is incomplete/u);
+
+  const omittedControllerChecksum = makeFixture();
+  rewriteSignedManifest(omittedControllerChecksum, (manifest) => {
+    manifest.evidence.checksums.entry_count -= 1;
+  });
+  assert.throws(() => generateHardwareQualificationTemplate(generateArgs(omittedControllerChecksum, join(omittedControllerChecksum.directory, 'omitted-checksum.json'))), /checksums evidence is invalid/u);
 });
 
 test('rejects signature, manifest, attestation, notarization, and artifact substitutions', () => {

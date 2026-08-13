@@ -86,3 +86,68 @@ test('P0-C1 preserves exact v-tagged universal package naming', () => {
   assert.doesNotMatch(workflow, /AgentPass-\$\{AGENTPASS_RELEASE_TAG\}-macos-universal\.pkg[^\n]*\$\{AGENTPASS_RELEASE_TAG\}/);
   assert.doesNotMatch(workflow, /AgentPass-\$\{AGENTPASS_RELEASE_TAG\}-macos-universal\.pkg[^"]*\b(?:no-v|pkg-)\b/);
 });
+
+test('P0-C1 requires and materializes the dedicated controller profile', () => {
+  assert.match(signedCandidate, /AGENTPASS_CONTROLLER_PROFILE_BASE64: \$\{\{ secrets\.AGENTPASS_CONTROLLER_PROFILE_BASE64 \}\}/);
+  const requireControllerProfile = runBlock(signedCandidate, 'Require dedicated controller profile');
+  assert.match(requireControllerProfile, /AGENTPASS_CONTROLLER_PROFILE_BASE64:\?AGENTPASS_CONTROLLER_PROFILE_BASE64 is required/);
+  const importMaterial = runBlock(signedCandidate, 'Import ephemeral signing material');
+  assert.match(importMaterial, /printf '%s' "\$AGENTPASS_CONTROLLER_PROFILE_BASE64" \| base64 --decode > "\$RUNNER_TEMP\/agentpass-signing\/controller\.provisionprofile"/);
+  assert.match(signedCandidate, /rm -rf "\$RUNNER_TEMP\/agentpass-signing"/);
+});
+
+test('P0-C1 builds the external controller as a universal artifact outside the product', () => {
+  const controllerBuild = runBlock(signedCandidate, 'Build, independently notarize, staple, and archive external qualification controller');
+  assert.match(controllerBuild, /swift build -c release --package-path native\/macos --arch "\$architecture"/);
+  assert.match(controllerBuild, /for architecture in arm64 x86_64/);
+  assert.match(controllerBuild, /xcrun lipo -create/);
+  assert.match(controllerBuild, /--source-binary "\$controller_binary"/);
+  assert.match(controllerBuild, /--output "\$controller_app"/);
+  assert.match(controllerBuild, /--profile "\$RUNNER_TEMP\/agentpass-signing\/controller\.provisionprofile"/);
+  assert.match(controllerBuild, /controller_dir="\$RUNNER_TEMP\/controller"/);
+  assert.doesNotMatch(controllerBuild, /candidate\/AgentPass\.app|candidate\/.*\.pkg/);
+  assert.match(controllerBuild, /scripts\/release\/notarize-controller\.sh "\$controller_app" "\$controller_notarytool" "\$controller_stapler"/);
+  assert.match(controllerBuild, /controller-notarytool-result\.json/);
+  assert.match(controllerBuild, /archive-controller\.mjs "\$controller_app" "\$controller_archive" "\$release_version"/);
+  assert.match(controllerBuild, /release_version="\$\{AGENTPASS_RELEASE_TAG#v\}"/);
+  assert.match(controllerBuild, /AgentPassQualificationController-\$\{release_version\}-macos-universal\.tar/);
+});
+
+test('P0-C1 uses the fixed controller identity CLI without a second collector path', () => {
+  const collect = runBlock(signedCandidate, 'Collect external qualification controller identity');
+  assert.match(collect, /controller-identity\.json/);
+  assert.match(collect, /controller-identity-contract\.mjs/);
+  assert.doesNotMatch(collect, /Controller identity CLI is not available|--input-type=module/);
+  assert.match(collect, /node "\$controller_identity_cli" collect \\\n+\s+"\$controller_dir\/AgentPassQualificationController-\$\{AGENTPASS_RELEASE_TAG#v\}-macos-universal\.tar" \\\n+\s+"\$controller_dir\/AgentPassQualificationController\.app" "\$AGENTPASS_TEAM_ID" "\$controller_identity"/);
+  assert.doesNotMatch(collect, /collectExternalQualificationControllerIdentity|canonicalJSON/);
+});
+
+test('P0-C1 binds the exact controller manifest contract', () => {
+  const build = runBlock(signedCandidate, 'Build, notarize, staple, and bind installer candidate');
+  const manifest = build.indexOf('generate-manifest.mjs');
+  assert.ok(manifest >= 0);
+  const manifestCommand = build.slice(manifest);
+  for (const option of [
+    '--controller-identity="$RUNNER_TEMP/candidate/controller-identity.json"',
+    '--controller-notarization-status=accepted_stapled',
+    '--controller-notary-submission="$controller_submission_id"',
+    '--controller-notarytool-evidence="$RUNNER_TEMP/candidate/controller-notarytool-result.json"',
+    '--controller-stapler-evidence="$RUNNER_TEMP/candidate/controller-stapler-result.txt"'
+  ]) assert.ok(manifestCommand.indexOf(option) >= 0, `missing exact controller manifest option: ${option}`);
+  assert.ok(manifestCommand.indexOf('--controller-identity=') < manifestCommand.indexOf('--controller-notarization-status='));
+  assert.ok(manifestCommand.indexOf('--controller-notarization-status=') < manifestCommand.indexOf('--controller-notary-submission='));
+  assert.ok(manifestCommand.indexOf('--controller-notary-submission=') < manifestCommand.indexOf('--controller-notarytool-evidence='));
+  assert.ok(manifestCommand.indexOf('--controller-notarytool-evidence=') < manifestCommand.indexOf('--controller-stapler-evidence='));
+  assert.match(manifestCommand, /AgentPassQualificationController-\$\{AGENTPASS_RELEASE_TAG#v\}-macos-universal\.tar/);
+});
+
+test('P0-C1 uploads every external controller artifact and evidence file', () => {
+  const upload = stepContaining(signedCandidate, 'actions/upload-artifact@');
+  for (const path of [
+    'candidate/AgentPassQualificationController-*-macos-universal.tar',
+    'candidate/controller-identity.json',
+    'candidate/controller-notarytool-result.json',
+    'candidate/controller-stapler-result.txt'
+  ]) assert.ok(upload.includes(`\${{ runner.temp }}/${path}`), `missing controller upload path: ${path}`);
+  assert.match(signedCandidate, /rm -rf "\$RUNNER_TEMP\/controller"/);
+});

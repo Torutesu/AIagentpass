@@ -90,6 +90,22 @@ test('downloads candidate from release run and all three P0-C artifacts from qua
   assert.match(catalog, /qualification artifact has unexpected files/);
 });
 
+test('promotion catalogs the v3 external controller and keeps its archive out of the product binding', () => {
+  const catalog = step('Catalog only the exact downloaded candidate and qualification evidence');
+  const release = step('Verify signed release candidate and derive its tag');
+  assert.match(catalog, /schema_version !== 3/);
+  assert.match(catalog, /external_qualification_controller/);
+  assert.match(catalog, /identity_document/);
+  assert.match(catalog, /identity/);
+  assert.match(catalog, /notarization/);
+  assert.match(catalog, /role === 'external_qualification_controller'/);
+  assert.match(catalog, /role === 'product'/);
+  assert.match(catalog, /controller_archive/);
+  assert.match(catalog, /controller_identity/);
+  assert.match(release, /release manifest must be v3/);
+  assert.match(release, /controller archive role is invalid/);
+});
+
 test('re-runs signed macOS and cross-hardware qualification verification, including byte comparison', () => {
   const release = step('Verify signed release candidate and derive its tag');
   assert.match(release, /verify-release\.mjs/);
@@ -119,6 +135,8 @@ test('release creation is last, refuses existing tags, and uploads an explicit m
   assert.match(upload, /manifest\.artifacts\.map/);
   assert.match(upload, /manifest\.evidence\.notarization\.evidence\.map/);
   assert.match(upload, /manifest\.evidence\.checksums/);
+  assert.match(upload, /manifest\.external_qualification_controller\.identity_document\.name/);
+  assert.match(upload, /manifest\.external_qualification_controller\.notarization\.evidence\.map/);
   assert.match(upload, /spawnSync\('gh', \['release', 'upload', tag, '--repo', repository, \.\.\.files\]/);
   assert.match(upload, /shell: false/);
   const qualificationAssets = step('Upload the verified signed qualification evidence');

@@ -192,6 +192,21 @@ test("N3-E physical evidence is candidate-bound and secret-free by construction"
   assert.doesNotMatch(workflow.match(/actions\/upload-artifact[\s\S]*?Remove private operator key/u)?.[0] ?? "", /operator-private\.pem/iu);
 });
 
+test("N3-E release binding keeps the controller identity separate from the v2 physical report", () => {
+  const workflow = read(".github/workflows/p0c-hardware-qualification.yml");
+  const qualification = read("scripts/release/run-p0c-qualification.mjs");
+  assert.match(workflow, /schema_version !== 3/u);
+  assert.match(workflow, /external_qualification_controller/u);
+  assert.match(workflow, /identity_document/u);
+  assert.match(workflow, /role === 'external_qualification_controller'/u);
+  assert.match(workflow, /AGENTPASS_P0C_QUALIFICATION_CONTROLLER_CDHASH=/u);
+  assert.match(workflow, /QUALIFICATION_CONTROLLER_CDHASH=/u);
+  assert.match(workflow, /without claiming physical execution/u);
+  assert.match(qualification, /template\.schema_version !== 2/u);
+  assert.match(workflow, /report\.json/u);
+  assert.doesNotMatch(workflow, /controller.*role:\s*['"]product['"]/iu);
+});
+
 test("N3-E physical entrypoints fail closed instead of accepting simulation or partial input", () => {
   const qualification = runCLI("scripts/release/run-p0c-qualification.mjs");
   assert.notEqual(qualification.status, 0);

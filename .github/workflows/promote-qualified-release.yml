@@ -202,6 +202,8 @@ jobs:
           node --input-type=module <<'NODE'
           import fs from 'node:fs';
           import path from 'node:path';
+          import crypto from 'node:crypto';
+          import { parseCanonicalExternalQualificationControllerIdentity, validateExternalQualificationControllerIdentity } from './scripts/release/n3e/controller-identity-contract.mjs';
 
           const safeName = (value) => /^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(value) && value === path.basename(value);
           const filesIn = (directory, label) => {
@@ -225,11 +227,28 @@ jobs:
           const sbomName = exactly(candidateNames, (name) => name.endsWith('.spdx.json'), 'SBOM');
           const packageName = exactly(candidateNames, (name) => name.endsWith('-macos-universal.pkg'), 'universal package');
           const migrationName = exactly(candidateNames, (name) => name.endsWith('.database-migration-manifest.json'), 'migration manifest');
-          const fixed = new Set([manifestName, signatureName, sbomName, packageName, migrationName, 'release-manifest.public.pem', 'release-attestation.json', 'SHA256SUMS', 'notarytool-result.json', 'stapler-result.txt']);
-          if (candidateNames.length !== fixed.size || candidateNames.some((name) => !fixed.has(name))) throw new Error('candidate artifact contains unexpected or missing files');
           const manifest = JSON.parse(fs.readFileSync(path.join(candidate, manifestName), 'utf8'));
+          if (manifest.schema_version !== 3) throw new Error('candidate release manifest must be v3');
+          const controller = manifest.external_qualification_controller;
+          if (!controller || JSON.stringify(Object.keys(controller).sort()) !== JSON.stringify(['identity', 'identity_document', 'notarization'])) throw new Error('candidate external controller binding is not exact');
+          const identityDocument = controller.identity_document;
+          if (!identityDocument || JSON.stringify(Object.keys(identityDocument).sort()) !== JSON.stringify(['bytes', 'name', 'sha256']) || !safeName(identityDocument.name)) throw new Error('candidate controller identity document binding is invalid');
+          const identityBytes = fs.readFileSync(path.join(candidate, identityDocument.name));
+          if (identityBytes.length !== identityDocument.bytes || crypto.createHash('sha256').update(identityBytes).digest('hex') !== identityDocument.sha256) throw new Error('candidate controller identity document digest mismatch');
+          const identity = parseCanonicalExternalQualificationControllerIdentity(identityBytes);
+          if (JSON.stringify(identity) !== JSON.stringify(validateExternalQualificationControllerIdentity(controller.identity, { expectedTeamId: process.env.EXPECTED_TEAM_ID }))) throw new Error('candidate controller identity does not match its document');
+          const controllerArtifacts = manifest.artifacts?.filter((item) => item.role === 'external_qualification_controller');
+          if (controllerArtifacts?.length !== 1 || controllerArtifacts[0].name !== identity.archive_name || controllerArtifacts[0].role === 'product') throw new Error('candidate controller archive role is not exact');
+          const controllerArchive = controllerArtifacts[0];
+          const controllerBytes = fs.readFileSync(path.join(candidate, controllerArchive.name));
+          if (controllerBytes.length !== controllerArchive.bytes || crypto.createHash('sha256').update(controllerBytes).digest('hex') !== controllerArchive.sha256 || identity.archive_bytes !== controllerArchive.bytes || identity.archive_sha256 !== controllerArchive.sha256) throw new Error('candidate controller archive digest mismatch');
+          const controllerEvidence = controller.notarization?.evidence;
+          if (!controller.notarization || controller.notarization.status !== 'accepted_stapled' || !Array.isArray(controller.notarization.submission_ids) || controller.notarization.submission_ids.length === 0 || !Array.isArray(controllerEvidence) || controllerEvidence.length !== 2 || new Set(controllerEvidence.map((item) => item.kind)).size !== 2 || !controllerEvidence.some((item) => item.kind === 'notarytool_result') || !controllerEvidence.some((item) => item.kind === 'stapler_result')) throw new Error('candidate controller notarization is incomplete');
+          for (const evidence of controllerEvidence) { if (!safeName(evidence.name)) throw new Error('candidate controller notarization evidence name is unsafe'); const bytes = fs.readFileSync(path.join(candidate, evidence.name)); if (bytes.length !== evidence.bytes || crypto.createHash('sha256').update(bytes).digest('hex') !== evidence.sha256) throw new Error('candidate controller notarization evidence digest mismatch'); }
+          const fixed = new Set([manifestName, signatureName, sbomName, packageName, migrationName, 'release-manifest.public.pem', 'release-attestation.json', 'SHA256SUMS', 'notarytool-result.json', 'stapler-result.txt', controllerArchive.name, identityDocument.name, ...controllerEvidence.map((item) => item.name)]);
+          if (candidateNames.length !== fixed.size || candidateNames.some((name) => !fixed.has(name))) throw new Error('candidate artifact contains unexpected or missing files');
           const product = manifest.artifacts?.filter((item) => item.role === 'product');
-          if (product?.length !== 1 || product[0].name !== packageName) throw new Error('candidate product is not manifest-bound');
+          if (product?.length !== 1 || product[0].name !== packageName || product[0].name === controllerArchive.name) throw new Error('candidate product is not manifest-bound');
 
           const lane = (directory, label) => {
             const root = path.resolve(directory);
@@ -258,6 +277,8 @@ jobs:
             signature: path.join(candidate, signatureName),
             public_key: path.join(candidate, 'release-manifest.public.pem'),
             artifact: path.join(candidate, packageName),
+            controller_archive: path.join(candidate, controllerArchive.name),
+            controller_identity: path.join(candidate, identityDocument.name),
             apple_report: path.join(lane(process.env.APPLE_DIR, 'Apple Silicon'), 'report.json'),
             apple_signature: path.join(process.env.APPLE_DIR, 'report.sig'),
             apple_public_key: path.join(process.env.APPLE_DIR, 'operator-public.pem'),
@@ -291,6 +312,12 @@ jobs:
           import path from 'node:path';
           const [manifestPath, packagePath, fingerprint] = process.argv.slice(2);
           const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
+          if (manifest.schema_version !== 3) throw new Error('release manifest must be v3');
+          const controller = manifest.external_qualification_controller;
+          if (!controller || JSON.stringify(Object.keys(controller).sort()) !== JSON.stringify(['identity', 'identity_document', 'notarization'])) throw new Error('release manifest external controller binding is not exact');
+          const controllerArtifacts = manifest.artifacts.filter((item) => item.role === 'external_qualification_controller');
+          if (controllerArtifacts.length !== 1 || controllerArtifacts[0].role === 'product' || controllerArtifacts[0].name !== controller.identity.archive_name) throw new Error('release manifest controller archive role is invalid');
+          if (controller.notarization.status !== 'accepted_stapled' || !Array.isArray(controller.notarization.evidence) || controller.notarization.evidence.length !== 2) throw new Error('release manifest controller notarization is incomplete');
           if (!manifest.source || typeof manifest.source.tag !== 'string' || !/^v[0-9]+\.[0-9]+\.[0-9]+(?:[-.][0-9A-Za-z.-]+)?$/.test(manifest.source.tag)) throw new Error('release manifest has no canonical release tag');
           if (manifest.source.tag !== `v${manifest.version}`) throw new Error('release tag and manifest version disagree');
           if (fingerprint !== process.env.RELEASE_MANIFEST_FINGERPRINT) throw new Error('release fingerprint binding changed');
@@ -441,10 +468,12 @@ jobs:
           if (!/^Torutesu\/AIagentpass$/.test(repository)) throw new Error('release repository is not canonical');
           const safe = (value) => typeof value === 'string' && /^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(value) && value === path.basename(value);
           const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
-          if (!Array.isArray(manifest.artifacts) || !manifest.evidence?.notarization || !Array.isArray(manifest.evidence.notarization.evidence)) throw new Error('signed manifest lacks complete upload bindings');
+          if (!Array.isArray(manifest.artifacts) || !manifest.evidence?.notarization || !Array.isArray(manifest.evidence.notarization.evidence) || !manifest.external_qualification_controller?.identity_document || !Array.isArray(manifest.external_qualification_controller.notarization?.evidence)) throw new Error('signed manifest lacks complete upload bindings');
           const names = [
             ...manifest.artifacts.map((item) => item.name),
             ...manifest.evidence.notarization.evidence.map((item) => item.name),
+            manifest.external_qualification_controller.identity_document.name,
+            ...manifest.external_qualification_controller.notarization.evidence.map((item) => item.name),
             manifest.evidence.checksums?.name
           ];
           if (names.some((name) => !safe(name)) || new Set(names).size !== names.length) throw new Error('signed manifest upload list contains unsafe or duplicate names');
