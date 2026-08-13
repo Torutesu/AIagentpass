@@ -228,6 +228,17 @@ test("consumes through an atomic pending-to-consuming CAS and returns the same p
   assert.equal([...client.rows.values()][0].status, "consumed");
 });
 
+test("accepts signed clientData extension members emitted by real browsers", async () => {
+  const { coordinator } = create();
+  const issued = await coordinator.begin(context);
+  const request = { ...assertion(issued.challenge), challenge_id: issued.challenge_id };
+  request.client_data_json = Buffer.from(JSON.stringify({
+    type: "webauthn.get", challenge: issued.challenge, origin: context.origin, crossOrigin: false,
+    other_keys_can_be_added_here: "do not compare clientDataJSON against a template"
+  })).toString("base64url");
+  assert.equal((await coordinator.consume(request)).verified, true);
+});
+
 test("acquires and releases an independent transaction client for each concurrent begin", async () => {
   const time = clock();
   const random = randomSource();

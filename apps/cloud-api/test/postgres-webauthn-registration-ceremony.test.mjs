@@ -224,6 +224,17 @@ test("uses pending-to-consuming CAS and returns the registration service contrac
   assert.equal(calls[0].ceremony.expected_challenge, issued.challenge);
 });
 
+test("accepts signed clientData extension members emitted by real browsers", async () => {
+  const { ceremony } = create();
+  const issued = await ceremony.begin(context);
+  const request = registration(issued.challenge);
+  request.client_data_json = Buffer.from(JSON.stringify({
+    type: "webauthn.create", challenge: issued.challenge, origin: context.origin, crossOrigin: false,
+    other_keys_can_be_added_here: "do not compare clientDataJSON against a template"
+  })).toString("base64url");
+  assert.equal((await ceremony.consume(request)).verified, true);
+});
+
 test("allows one verifier, reports busy, and rejects replay", async () => {
   let release;
   const gate = new Promise((resolve) => { release = resolve; });

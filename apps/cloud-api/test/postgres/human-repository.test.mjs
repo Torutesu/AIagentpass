@@ -35,6 +35,25 @@ test("credential lookup and counter update are session and organization scoped",
   assert.doesNotMatch(calls[1].text,/\bversion\s*=/);
 });
 
+test("bounds PostgreSQL bigint WebAuthn counters and rejects malformed or overflowing values", async () => {
+  const credential=Buffer.alloc(16,7); let signCount=String(Number.MAX_SAFE_INTEGER); let calls=0;
+  const repo=createPostgresHumanRepository({client:{async query(){calls += 1; return {rows:[{id:credential,sign_count:signCount}],rowCount:1};}}});
+  const input={session_id:ids.session,organization_id:ids.org,credential_id:credential.toString("base64url")};
+  assert.equal((await repo.findCredentialForSession(input)).sign_count,Number.MAX_SAFE_INTEGER);
+  for (const invalid of ["01","1.5","-1","1e3",String(Number.MAX_SAFE_INTEGER + 1),"9223372036854775807"]) {
+    signCount=invalid;
+    await assert.rejects(() => repo.findCredentialForSession(input), /counter is invalid/);
+  }
+  assert.equal(calls,7);
+
+  let updateCalls=0;
+  const updateRepo=createPostgresHumanRepository({client:{async query(){updateCalls += 1; return {rows:[],rowCount:0};}}});
+  for (const invalid of ["1",Number.MAX_SAFE_INTEGER + 1,-1,1.5]) {
+    await assert.rejects(() => updateRepo.updateCredentialCounter({...input,sign_count:invalid,expected_sign_count:0}), /counter is invalid/);
+  }
+  assert.equal(updateCalls,0);
+});
+
 test("credential allow lists are session-bound, active, bounded, and browser-safe", async () => {
   const id = Buffer.alloc(32, 7);
   const calls = [];

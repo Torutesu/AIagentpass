@@ -18,7 +18,6 @@ const UUID_V4 = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f
 const IDENTIFIER = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/;
 const OPERATION = /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,255}$/;
 const ORIGIN_SCHEMES = new Set(["https:", "http:"]);
-const CLIENT_DATA_KEYS = new Set(["type", "challenge", "origin", "crossOrigin", "tokenBinding"]);
 const VERIFIER_RESULT_KEYS = new Set(["verified", "credential_id", "sign_count", "authenticated_at"]);
 const CEREMONY = "authentication";
 const STATUS = new Set(["pending", "consuming", "consumed", "failed", "expired"]);
@@ -427,7 +426,7 @@ function decodeClientData(encoded, expectedChallenge, expectedOrigin) {
   if (Buffer.from(text, "utf8").compare(bytes) !== 0) fail(WEBAUTHN_ERROR_CODES.INVALID_RESPONSE);
   let value;
   try { value = JSON.parse(text); } catch { fail(WEBAUTHN_ERROR_CODES.INVALID_RESPONSE); }
-  if (!isObject(value) || Object.keys(value).some((key) => !CLIENT_DATA_KEYS.has(key)) || value.type !== "webauthn.get" || value.challenge !== expectedChallenge || value.origin !== expectedOrigin) fail(WEBAUTHN_ERROR_CODES.INVALID_RESPONSE);
+  if (!isObject(value) || value.type !== "webauthn.get" || value.challenge !== expectedChallenge || value.origin !== expectedOrigin) fail(WEBAUTHN_ERROR_CODES.INVALID_RESPONSE);
   if (value.crossOrigin !== undefined && value.crossOrigin !== false) fail(WEBAUTHN_ERROR_CODES.INVALID_RESPONSE);
   if (value.tokenBinding !== undefined && (!isObject(value.tokenBinding) || typeof value.tokenBinding.status !== "string")) fail(WEBAUTHN_ERROR_CODES.INVALID_RESPONSE);
   return { type: value.type, challenge: value.challenge, origin: value.origin, ...(value.crossOrigin === undefined ? {} : { cross_origin: value.crossOrigin }) };
