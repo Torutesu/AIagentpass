@@ -1,0 +1,9 @@
+#!/usr/bin/env node
+
+import { runGateDriver } from "../lib/driver-runtime.mjs";
+
+await runGateDriver({
+  gate: "sleep-wake-network-clock",
+  tests: ["sleep-wake-recovery", "network-clock-failure"],
+  scenario: "sleep-wake-network-clock"
+});

@@ -1,0 +1,9 @@
+#!/usr/bin/env node
+
+import { runGateDriver } from '../lib/driver-runtime.mjs';
+
+await runGateDriver({
+  gate: 'secure-enclave-enrollment',
+  tests: ['secure-enclave-key-creation', 'secure-enclave-nonexportability'],
+  scenario: 'secure-enclave-enrollment',
+});

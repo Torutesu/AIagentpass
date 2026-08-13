@@ -1,0 +1,9 @@
+#!/usr/bin/env node
+
+import { runGateDriver } from "../lib/driver-runtime.mjs";
+
+await runGateDriver({
+  gate: "offline-expiry",
+  tests: ["offline-expiry-denied"],
+  scenario: "offline-expiry"
+});

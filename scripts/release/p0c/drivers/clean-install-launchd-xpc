@@ -1,0 +1,9 @@
+#!/usr/bin/env node
+
+import { runGateDriver } from '../lib/driver-runtime.mjs';
+
+await runGateDriver({
+  gate: 'clean-install-launchd-xpc',
+  tests: ['launchd-xpc-approval'],
+  scenario: 'clean-install-launchd-xpc',
+});

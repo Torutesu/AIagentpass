@@ -66,7 +66,7 @@ current-user-purge
 negative-identity-and-entitlement-cases
 ```
 
-Each driver is started directly with no arguments. It must exit `0` and print one bounded JSON object to stdout:
+Each driver is started directly with no arguments. The runner supplies only four non-secret immutable release bindings (`AGENTPASS_P0C_ARTIFACT_PATH`, `AGENTPASS_P0C_ARTIFACT_SHA256`, `AGENTPASS_P0C_SOURCE_COMMIT`, and `AGENTPASS_P0C_TEAM_ID`). It must exit `0` and print one bounded JSON object to stdout:
 
 ```json
 {
@@ -91,6 +91,30 @@ service-crash-recovery, os-reboot-recovery, sleep-wake-recovery,
 network-clock-failure, upgrade-preserves-state, uninstall-reinstall-recovery,
 current-user-purge
 ```
+
+### Checked-in driver runtime
+
+The repository contains the 16 thin entrypoints under `scripts/release/p0c/drivers`. They have a fixed, test-enforced one-to-one assignment of all 20 tests and cannot accept arguments, print their own passing result, or execute a path chosen by the workflow. Each entrypoint delegates to `scripts/release/p0c/lib/driver-runtime.mjs`.
+
+The runtime recomputes the exact candidate PKG digest and binds every scenario result to the candidate SHA-256, source commit, and Developer ID Team ID supplied by the qualification runner. It then executes only the root-owned, digest-pinned scenario executable assigned in canonical `/opt/agentpass/p0c/driver-config.json`. The config, scenario directory, and executable must be protected single-link files; scenario replacement before or during execution fails closed. Child stdin is closed, no shell is used, the environment is reduced to fixed system paths plus non-secret release bindings, and stdout/stderr are bounded. Raw scenario stderr is never copied into the runner protocol.
+
+A scenario must perform the physical operation and return this internal protocol:
+
+```json
+{
+  "schema_version": 1,
+  "gate": "gatekeeper-notarization",
+  "status": "passed",
+  "tests": [{ "name": "exact-pkg-install", "status": "passed" }],
+  "bindings": {
+    "artifact_sha256": "<64 lowercase hex>",
+    "source_commit": "<40 lowercase hex>",
+    "team_id": "ABCDEFGHIJ"
+  }
+}
+```
+
+Static configuration, an operator assertion, a prior run, or a result bound to another candidate cannot pass. The checked-in entrypoints and runtime are the trust adapter. The destructive scenario executables are separately provisioned machine procedures and remain physical qualification work until each procedure is implemented, reviewed, and executed on both hardware lanes.
 
 stdout and stderr are bounded to 256 KiB per stream. The runner records only byte counts, SHA-256 digests, truncation, exit code/signal, timeout/output-limit state, and duration. Raw child output is never written to the report, evidence directory, or error output. A timeout sends `SIGTERM`, then `SIGKILL` after the bounded grace period. An output limit does the same.
 

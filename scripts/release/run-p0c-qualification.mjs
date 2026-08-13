@@ -180,12 +180,19 @@ export const runQualification = async ({ templatePath, outputPath, artifactPath,
   if (!metadata || !['arm64', 'x86_64'].includes(metadata.architecture) || !['apple_silicon', 'intel_t2', 'intel_without_t2'].includes(metadata.hardwareClass) || typeof metadata.modelIdentifier !== 'string' || typeof metadata.macosVersion !== 'string' || typeof metadata.macosBuild !== 'string' || typeof metadata.secureEnclave !== 'boolean') throw new Error('injected physical metadata is invalid');
   if ((metadata.hardwareClass === 'apple_silicon') !== (metadata.architecture === 'arm64') || (metadata.hardwareClass === 'intel_without_t2' && metadata.secureEnclave)) throw new Error('physical metadata hardware identity is inconsistent');
   const gateResults = new Map(); const testSources = new Map(); const duplicateTests = new Set(); const writtenEvidence = [];
+  const driverEnvironment = Object.freeze({
+    ...SANITIZED_ENV,
+    AGENTPASS_P0C_ARTIFACT_PATH: artifact.path,
+    AGENTPASS_P0C_ARTIFACT_SHA256: artifact.sha256,
+    AGENTPASS_P0C_SOURCE_COMMIT: template.source_commit,
+    AGENTPASS_P0C_TEAM_ID: template.team_id
+  });
   for (let index = 0; index < REQUIRED_GATES.length; index += 1) {
     const gate = REQUIRED_GATES[index]; let result; let protocolTests = [];
     try {
       const driverPath = join(drivers.path, gate);
       if (assertRegularExecutable(driverPath, `gate driver ${gate}`, production) !== drivers.identities.get(gate)) throw new Error('gate driver changed before execution');
-      result = normalizeCommandResult(await runCommand(driverPath, [], { cwd: '/', env: SANITIZED_ENV, shell: false, stdio: ['ignore', 'pipe', 'pipe'], timeoutMs, maxOutputBytes }));
+      result = normalizeCommandResult(await runCommand(driverPath, [], { cwd: '/', env: driverEnvironment, shell: false, stdio: ['ignore', 'pipe', 'pipe'], timeoutMs, maxOutputBytes }));
       if (assertRegularExecutable(driverPath, `gate driver ${gate}`, production) !== drivers.identities.get(gate)) throw new Error('gate driver changed during execution');
       if (result.exitCode === 0 && !result.signal && !result.timedOut && !result.outputLimit && !result.spawnError) { try { protocolTests = protocolFor(result.stdout, gate); } catch { protocolTests = []; } }
     } catch { const empty = Buffer.alloc(0); result = { exitCode: null, signal: null, timedOut: false, outputLimit: false, spawnError: true, durationMs: 0, stdout: empty, stderr: empty, stdoutBytes: 0, stderrBytes: 0, stdoutSha256: sha256(empty), stderrSha256: sha256(empty) }; }

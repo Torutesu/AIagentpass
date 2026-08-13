@@ -1,0 +1,9 @@
+#!/usr/bin/env node
+
+import { runGateDriver } from '../lib/driver-runtime.mjs';
+
+await runGateDriver({
+  gate: 'negative-identity-and-entitlement-cases',
+  tests: ['unrelated-process-denied'],
+  scenario: 'negative-identity-and-entitlement-cases',
+});

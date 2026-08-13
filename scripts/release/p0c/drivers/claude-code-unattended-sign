@@ -1,0 +1,9 @@
+#!/usr/bin/env node
+
+import { runGateDriver } from '../lib/driver-runtime.mjs';
+
+await runGateDriver({
+  gate: 'claude-code-unattended-sign',
+  tests: ['claude-code-unattended-sign'],
+  scenario: 'claude-code-unattended-sign',
+});
