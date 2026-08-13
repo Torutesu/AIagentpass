@@ -41,7 +41,7 @@ test("coordinator binds terminal recovery to Cloud result and durable audit rece
   assert.match(dependencies, /struct NativeAgentSessionAuditReceipt/);
   assert.match(dependencies, /func appendAgentSessionAudit[\s\S]*-> NativeAgentSessionAuditReceipt/);
   assert.match(dependencies, /func reconcileAgentSessionActivationAudit/);
-  assert.match(service, /lookupAgentSessionActivationAudit\(/);
+  assert.match(service, /lookupAgentSessionActivationOutcomeAudit\(/);
   assert.match(service, /recordDigest: recordDigest/);
 });
 

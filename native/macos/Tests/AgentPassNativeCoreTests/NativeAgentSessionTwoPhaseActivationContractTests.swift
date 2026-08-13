@@ -7,8 +7,10 @@
 // The contract frozen here is:
 //
 //   reserveActivation(...) -> NativeAgentSessionActivationReservation
-//   commitActivation(_:)   -> NativeAgentSessionRegistryStatus
-//   publishActivation(_:)  -> NativeAgentSessionRegistryStatus
+//   commitActivation(_:connectionTokenIdentity:wallClock:monotonicClock:)
+//     -> NativeAgentSessionRegistryStatus
+//   publishActivation(_:connectionTokenIdentity:wallClock:monotonicClock:)
+//     -> NativeAgentSessionRegistryStatus
 //   cancelActivation(_:)   -> Void
 //
 // reserveActivation records only an authority-free admission reservation.
@@ -23,6 +25,13 @@ import Testing
 private let twoPhaseToken = String(repeating: "a", count: 64)
 private let twoPhaseWallClock = NativeAgentWallClockValue(
   millisecondsSinceUnixEpoch: 1_786_615_201_000
+)
+private let twoPhaseExpiredWallClock = NativeAgentWallClockValue(
+  millisecondsSinceUnixEpoch: 1_786_616_100_000
+)
+private let twoPhaseExpiredMonotonicClock = try! NativeAgentMonotonicClockValue(
+  nanoseconds: 900_000_001_000,
+  bootIdentity: "two-phase-contract-boot"
 )
 private func twoPhaseMonotonicClock() throws -> NativeAgentMonotonicClockValue {
   try NativeAgentMonotonicClockValue(
@@ -43,7 +52,11 @@ private struct TwoPhaseFixture: Sendable {
 private func twoPhaseFixture(
   index: Int,
   agentID: String = "33333333-3333-4333-8333-333333333333",
-  token: String = twoPhaseToken
+  token: String = twoPhaseToken,
+  expiryMilliseconds: Int64 = 1_786_616_100_000,
+  expiryText: String = "2026-08-13T10:15:00.000Z",
+  activationWallMilliseconds: Int64 = 1_786_615_200_000,
+  activationMonotonicNanoseconds: UInt64 = 1_000
 ) throws -> TwoPhaseFixture {
   let suffix = String(format: "%012x", index + 1)
   let sessionID = String(format: "%08x-1111-4111-8111-%@", index + 1, suffix)
@@ -76,7 +89,7 @@ private func twoPhaseFixture(
     "max_signatures": 2,
     "used_signatures": 0,
     "not_before": "2026-08-13T10:00:00.000Z",
-    "expires_at": "2026-08-13T10:15:00.000Z",
+    "expires_at": expiryText,
     "control_sequence": 12,
     "authority_generation": 7,
   ]
@@ -85,12 +98,12 @@ private func twoPhaseFixture(
     expectedBinding: binding
   )
   let deadline = try NativeAgentSessionDeadline(
-    signedWallExpiryMilliseconds: 1_786_616_100_000,
+    signedWallExpiryMilliseconds: expiryMilliseconds,
     wallClock: NativeAgentWallClockValue(
-      millisecondsSinceUnixEpoch: 1_786_615_200_000
+      millisecondsSinceUnixEpoch: activationWallMilliseconds
     ),
     monotonicClock: NativeAgentMonotonicClockValue(
-      nanoseconds: 1_000,
+      nanoseconds: activationMonotonicNanoseconds,
       bootIdentity: "two-phase-contract-boot"
     )
   )
@@ -109,7 +122,9 @@ private func reserveActivation(
   _ fixture: TwoPhaseFixture,
   globalLimit: Int = 1,
   perAgentLimit: Int = 1,
-  perWorktreeLimit: Int = 1
+  perWorktreeLimit: Int = 1,
+  wallClock: NativeAgentWallClockValue? = nil,
+  monotonicClock: NativeAgentMonotonicClockValue? = nil
 ) throws -> NativeAgentSessionActivationReservation {
   try registry.reserveActivation(
     lease: fixture.lease,
@@ -118,7 +133,39 @@ private func reserveActivation(
     deadline: fixture.deadline,
     globalLimit: globalLimit,
     perAgentLimit: perAgentLimit,
-    perWorktreeLimit: perWorktreeLimit
+    perWorktreeLimit: perWorktreeLimit,
+    wallClock: wallClock,
+    monotonicClock: monotonicClock
+  )
+}
+
+private func commitActivation(
+  _ registry: NativeAgentSessionRegistry,
+  _ fixture: TwoPhaseFixture,
+  _ reservation: NativeAgentSessionActivationReservation,
+  wallClock: NativeAgentWallClockValue = twoPhaseWallClock,
+  monotonicClock: NativeAgentMonotonicClockValue? = nil
+) throws -> NativeAgentSessionRegistryStatus {
+  try registry.commitActivation(
+    reservation,
+    connectionTokenIdentity: fixture.connectionTokenIdentity,
+    wallClock: wallClock,
+    monotonicClock: try monotonicClock ?? twoPhaseMonotonicClock()
+  )
+}
+
+private func publishActivation(
+  _ registry: NativeAgentSessionRegistry,
+  _ fixture: TwoPhaseFixture,
+  _ reservation: NativeAgentSessionActivationReservation,
+  wallClock: NativeAgentWallClockValue = twoPhaseWallClock,
+  monotonicClock: NativeAgentMonotonicClockValue? = nil
+) throws -> NativeAgentSessionRegistryStatus {
+  try registry.publishActivation(
+    reservation,
+    connectionTokenIdentity: fixture.connectionTokenIdentity,
+    wallClock: wallClock,
+    monotonicClock: try monotonicClock ?? twoPhaseMonotonicClock()
   )
 }
 
@@ -179,7 +226,7 @@ func unpublishedActivationGrantsNoStatusOrSigningAuthority() throws {
     )
   }
 
-  _ = try registry.commitActivation(reservation)
+  _ = try commitActivation(registry, fixture, reservation)
   #expect(throws: NativeAgentSessionRegistryError.sessionMissing) {
     _ = try registry.status(
       sessionID: fixture.sessionID,
@@ -217,11 +264,11 @@ func reservationCommitAndPublishAreExactlyOnce() throws {
   let fixture = try twoPhaseFixture(index: 1)
   let reservation = try reserveActivation(registry, fixture)
 
-  let committed = try registry.commitActivation(reservation)
+  let committed = try commitActivation(registry, fixture, reservation)
   #expect(committed.sessionID == fixture.sessionID)
   #expect(committed.state == .active)
 
-  expectClosedCommit { _ = try registry.commitActivation(reservation) }
+  expectClosedCommit { _ = try commitActivation(registry, fixture, reservation) }
   #expect(throws: NativeAgentSessionRegistryError.sessionMissing) {
     _ = try registry.status(
       sessionID: fixture.sessionID,
@@ -231,8 +278,8 @@ func reservationCommitAndPublishAreExactlyOnce() throws {
       monotonicClock: try twoPhaseMonotonicClock()
     )
   }
-  let published = try registry.publishActivation(reservation)
-  expectClosedCommit { _ = try registry.publishActivation(reservation) }
+  let published = try publishActivation(registry, fixture, reservation)
+  expectClosedCommit { _ = try publishActivation(registry, fixture, reservation) }
   #expect(
     try registry.status(
       sessionID: fixture.sessionID,
@@ -266,14 +313,14 @@ func reservationCannotMoveBetweenRegistryOwners() throws {
   let fixture = try twoPhaseFixture(index: 3)
   let reservation = try reserveActivation(owner, fixture)
 
-  expectClosedCommit { _ = try foreign.commitActivation(reservation) }
-  expectClosedCommit { _ = try foreign.publishActivation(reservation) }
+  expectClosedCommit { _ = try commitActivation(foreign, fixture, reservation) }
+  expectClosedCommit { _ = try publishActivation(foreign, fixture, reservation) }
   #expect(try !foreign.cancelActivation(reservation))
 
   // The owner still has the only valid copy; a failed foreign operation must
   // not consume or mutate it.
-  #expect(try owner.commitActivation(reservation).state == .active)
-  #expect(try owner.publishActivation(reservation).state == .active)
+  #expect(try commitActivation(owner, fixture, reservation).state == .active)
+  #expect(try publishActivation(owner, fixture, reservation).state == .active)
 }
 
 @Test("N3-E3c-1c: pending reservations consume admission capacity")
@@ -295,7 +342,7 @@ func invalidationRemovesPendingReservation() throws {
   let reservation = try reserveActivation(registry, fixture)
 
   registry.invalidateAll(as: .revoked)
-  expectClosedCommit { _ = try registry.commitActivation(reservation) }
+  expectClosedCommit { _ = try commitActivation(registry, fixture, reservation) }
 
   // The pending slot is gone, and a replacement may be admitted.  It is still
   // authority-free until its own commit.
@@ -308,10 +355,10 @@ func invalidationRemovesHiddenCommit() throws {
   let registry = NativeAgentSessionRegistry()
   let fixture = try twoPhaseFixture(index: 8)
   let reservation = try reserveActivation(registry, fixture)
-  _ = try registry.commitActivation(reservation)
+  _ = try commitActivation(registry, fixture, reservation)
 
   registry.invalidateAll(as: .revoked)
-  expectClosedCommit { _ = try registry.publishActivation(reservation) }
+  expectClosedCommit { _ = try publishActivation(registry, fixture, reservation) }
   #expect(throws: NativeAgentSessionRegistryError.sessionMissing) {
     _ = try registry.status(
       sessionID: fixture.sessionID,
@@ -332,7 +379,7 @@ func hiddenCommitCountsAgainstCapacity() throws {
   let first = try twoPhaseFixture(index: 9)
   let second = try twoPhaseFixture(index: 10)
   let reservation = try reserveActivation(registry, first, globalLimit: 1)
-  _ = try registry.commitActivation(reservation)
+  _ = try commitActivation(registry, first, reservation)
 
   #expect(throws: NativeAgentSessionRegistryError.sessionCapacityExceeded) {
     _ = try reserveActivation(registry, second, globalLimit: 1)
@@ -354,7 +401,7 @@ func competingReservationsCannotOverAdmit() throws {
         perAgentLimit: 1,
         perWorktreeLimit: 1
       )
-      _ = try registry.commitActivation(reservation)
+      _ = try commitActivation(registry, fixtures[index], reservation)
       committedCount.increment()
     } catch NativeAgentSessionRegistryError.sessionCapacityExceeded {
       // Expected for every contender except the linearized winner.
@@ -374,7 +421,136 @@ func freshRegistryCannotUsePriorReservation() throws {
   let fixture = try twoPhaseFixture(index: 7)
   let reservation = try reserveActivation(original, fixture)
 
-  expectClosedCommit { _ = try fresh.commitActivation(reservation) }
-  expectClosedCommit { _ = try fresh.publishActivation(reservation) }
+  expectClosedCommit { _ = try commitActivation(fresh, fixture, reservation) }
+  expectClosedCommit { _ = try publishActivation(fresh, fixture, reservation) }
   #expect(try !fresh.cancelActivation(reservation))
+}
+
+@Test("N3-E3c-1c: commit requires the exact connection owner")
+func commitRejectsWrongConnectionOwner() throws {
+  let registry = NativeAgentSessionRegistry()
+  let fixture = try twoPhaseFixture(index: 11)
+  let reservation = try reserveActivation(registry, fixture)
+  let wrongOwner = String(repeating: "b", count: 64)
+
+  #expect(throws: NativeAgentSessionRegistryError.connectionMismatch) {
+    _ = try registry.commitActivation(
+      reservation,
+      connectionTokenIdentity: wrongOwner,
+      wallClock: twoPhaseWallClock,
+      monotonicClock: try twoPhaseMonotonicClock()
+    )
+  }
+  #expect(try commitActivation(registry, fixture, reservation).state == .active)
+}
+
+@Test("N3-E3c-1c: publish requires the exact connection owner")
+func publishRejectsWrongConnectionOwner() throws {
+  let registry = NativeAgentSessionRegistry()
+  let fixture = try twoPhaseFixture(index: 12)
+  let reservation = try reserveActivation(registry, fixture)
+  _ = try commitActivation(registry, fixture, reservation)
+  let wrongOwner = String(repeating: "b", count: 64)
+
+  #expect(throws: NativeAgentSessionRegistryError.connectionMismatch) {
+    _ = try registry.publishActivation(
+      reservation,
+      connectionTokenIdentity: wrongOwner,
+      wallClock: twoPhaseWallClock,
+      monotonicClock: try twoPhaseMonotonicClock()
+    )
+  }
+  #expect(try publishActivation(registry, fixture, reservation).state == .active)
+}
+
+@Test("N3-E3c-1c: expiry before commit removes unpublished authority")
+func expiryBeforeCommitRemovesPendingActivation() throws {
+  let registry = NativeAgentSessionRegistry()
+  let fixture = try twoPhaseFixture(index: 13)
+  let reservation = try reserveActivation(registry, fixture)
+
+  #expect(throws: NativeAgentSessionRegistryError.reservationMissing) {
+    _ = try commitActivation(
+      registry,
+      fixture,
+      reservation,
+      wallClock: twoPhaseExpiredWallClock,
+      monotonicClock: twoPhaseExpiredMonotonicClock
+    )
+  }
+  #expect(try !registry.cancelActivation(reservation))
+}
+
+@Test("N3-E3c-1c: expiry before publish removes hidden authority")
+func expiryBeforePublishRemovesCommittedActivation() throws {
+  let registry = NativeAgentSessionRegistry()
+  let fixture = try twoPhaseFixture(index: 14)
+  let reservation = try reserveActivation(registry, fixture)
+  _ = try commitActivation(registry, fixture, reservation)
+
+  #expect(throws: NativeAgentSessionRegistryError.reservationMissing) {
+    _ = try publishActivation(
+      registry,
+      fixture,
+      reservation,
+      wallClock: twoPhaseExpiredWallClock,
+      monotonicClock: twoPhaseExpiredMonotonicClock
+    )
+  }
+  #expect(try !registry.cancelActivation(reservation))
+}
+
+@Test("N3-E3c-1c: abort removes exact pending and hidden reservations only")
+func abortActivationReleasesUnpublishedCapacityButNotPublishedAuthority() throws {
+  let registry = NativeAgentSessionRegistry()
+  let pendingFixture = try twoPhaseFixture(index: 15)
+  let pending = try reserveActivation(registry, pendingFixture)
+  #expect(try registry.abortActivation(
+    pending,
+    connectionTokenIdentity: pendingFixture.connectionTokenIdentity
+  ))
+
+  let hiddenFixture = try twoPhaseFixture(index: 16)
+  let hidden = try reserveActivation(registry, hiddenFixture)
+  _ = try commitActivation(registry, hiddenFixture, hidden)
+  #expect(try registry.abortActivation(
+    hidden,
+    connectionTokenIdentity: hiddenFixture.connectionTokenIdentity
+  ))
+
+  let publishedFixture = try twoPhaseFixture(index: 17)
+  let published = try reserveActivation(registry, publishedFixture)
+  _ = try commitActivation(registry, publishedFixture, published)
+  _ = try publishActivation(registry, publishedFixture, published)
+  #expect(throws: NativeAgentSessionRegistryError.transitionDenied) {
+    _ = try registry.abortActivation(
+      published,
+      connectionTokenIdentity: publishedFixture.connectionTokenIdentity
+    )
+  }
+}
+
+@Test("N3-E3c-1c: pruning expired unpublished entries recovers capacity")
+func expiredUnpublishedEntriesReleaseCapacityDuringReserve() throws {
+  let registry = NativeAgentSessionRegistry()
+  let expired = try twoPhaseFixture(index: 18)
+  _ = try reserveActivation(registry, expired, globalLimit: 1)
+
+  let fresh = try twoPhaseFixture(
+    index: 19,
+    expiryMilliseconds: 1_786_617_000_000,
+    expiryText: "2026-08-13T10:30:00.000Z",
+    activationWallMilliseconds: 1_786_616_100_001
+  )
+  let replacement = try reserveActivation(
+    registry,
+    fresh,
+    globalLimit: 1,
+    wallClock: twoPhaseExpiredWallClock
+  )
+  #expect(replacement.plannedStatus.sessionID == fresh.sessionID)
+  #expect(try registry.abortActivation(
+    replacement,
+    connectionTokenIdentity: fresh.connectionTokenIdentity
+  ))
 }

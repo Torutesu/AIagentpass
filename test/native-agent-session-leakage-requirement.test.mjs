@@ -204,6 +204,8 @@ test("audit evidence is an exact secret-free allowlist and is hashed before the 
     ["requestID", "String?"],
     ["capabilityID", "String?"],
     ["payloadDigest", "Data?"],
+    ["activationTransactionDigest", "Data?"],
+    ["activationCommitReceiptDigest", "Data?"],
     ["binding", "NativeAgentSessionBinding"],
     ["reasonCode", "String?"]
   ]);
@@ -230,6 +232,8 @@ test("audit evidence is an exact secret-free allowlist and is hashed before the 
     "request_id",
     "capability_id",
     "payload_sha256",
+    "activation_transaction_sha256",
+    "activation_commit_receipt_sha256",
     "reason_code"
   ]);
   for (const key of [...new Set([...literalKeys, ...optionalKeys])]) {

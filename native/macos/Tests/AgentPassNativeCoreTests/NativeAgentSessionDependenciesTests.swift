@@ -91,6 +91,34 @@ private func dependencyBinding() throws -> NativeAgentSessionBinding {
     }
 }
 
+@Test func activationOutcomeAuditBindsTypedTransactionAndCommitDigests() throws {
+    let transaction = Data(repeating: 0xa1, count: 32)
+    let commit = Data(repeating: 0xb2, count: 32)
+    let evidence = try NativeAgentSessionAuditEvidence(
+        action: .sessionActivated,
+        sessionID: "33333333-3333-4333-8333-333333333333",
+        activationTransactionDigest: transaction,
+        activationCommitReceiptDigest: commit,
+        binding: dependencyBinding()
+    )
+    #expect(evidence.activationTransactionDigest == transaction)
+    #expect(evidence.activationCommitReceiptDigest == commit)
+    #expect(try evidence.evidenceDigest().count == 32)
+
+    #expect(throws: NativeAgentSessionBoundaryError.invalidAuditEvidence) {
+        _ = try NativeAgentSessionAuditEvidence(
+            action: .signingIntent,
+            activationTransactionDigest: transaction,
+            binding: dependencyBinding())
+    }
+    #expect(throws: NativeAgentSessionBoundaryError.invalidAuditEvidence) {
+        _ = try NativeAgentSessionAuditEvidence(
+            action: .sessionActivationOutcomeUnknown,
+            activationCommitReceiptDigest: commit,
+            binding: dependencyBinding())
+    }
+}
+
 @Test func fixedSignerProtocolHasNoOperationOrKeySelectionParameters() throws {
     final class Signer: NativeAgentGitCommitSigning, @unchecked Sendable {
         func signGitCommitPayload(_ payload: Data) throws -> Data { Data(payload.reversed()) }

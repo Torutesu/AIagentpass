@@ -114,6 +114,8 @@ public protocol NativeAgentGitCommitSigning: Sendable {
 public enum NativeAgentSessionAuditAction: String, CaseIterable, Codable, Sendable {
     case challengeCreated = "challenge_created"
     case sessionActivated = "session_activated"
+    case sessionActivationAborted = "session_activation_aborted"
+    case sessionActivationOutcomeUnknown = "session_activation_outcome_unknown"
     case requestReserved = "request_reserved"
     case signingIntent = "signing_intent"
     case signingCompleted = "signing_completed"
@@ -132,6 +134,8 @@ public struct NativeAgentSessionAuditEvidence: Equatable, Sendable {
     public let requestID: String?
     public let capabilityID: String?
     public let payloadDigest: Data?
+    public let activationTransactionDigest: Data?
+    public let activationCommitReceiptDigest: Data?
     public let binding: NativeAgentSessionBinding
     public let reasonCode: String?
 
@@ -141,6 +145,8 @@ public struct NativeAgentSessionAuditEvidence: Equatable, Sendable {
         requestID: String? = nil,
         capabilityID: String? = nil,
         payloadDigest: Data? = nil,
+        activationTransactionDigest: Data? = nil,
+        activationCommitReceiptDigest: Data? = nil,
         binding: NativeAgentSessionBinding,
         reasonCode: String? = nil
     ) throws {
@@ -152,6 +158,19 @@ public struct NativeAgentSessionAuditEvidence: Equatable, Sendable {
         guard payloadDigest == nil || payloadDigest?.count == NativeAgentSessionBinding.digestByteCount else {
             throw NativeAgentSessionBoundaryError.invalidAuditEvidence
         }
+        let activationOutcomes: Set<NativeAgentSessionAuditAction> = [
+            .sessionActivated, .sessionActivationAborted,
+            .sessionActivationOutcomeUnknown
+        ]
+        guard activationTransactionDigest == nil
+                || activationTransactionDigest?.count == NativeAgentSessionBinding.digestByteCount,
+              activationCommitReceiptDigest == nil
+                || activationCommitReceiptDigest?.count == NativeAgentSessionBinding.digestByteCount,
+              (activationTransactionDigest == nil && activationCommitReceiptDigest == nil)
+                || activationOutcomes.contains(action),
+              activationCommitReceiptDigest == nil || activationTransactionDigest != nil else {
+            throw NativeAgentSessionBoundaryError.invalidAuditEvidence
+        }
         guard reasonCode == nil || Self.reason(reasonCode!) else {
             throw NativeAgentSessionBoundaryError.invalidAuditEvidence
         }
@@ -160,6 +179,8 @@ public struct NativeAgentSessionAuditEvidence: Equatable, Sendable {
         self.requestID = requestID?.lowercased()
         self.capabilityID = capabilityID?.lowercased()
         self.payloadDigest = payloadDigest
+        self.activationTransactionDigest = activationTransactionDigest
+        self.activationCommitReceiptDigest = activationCommitReceiptDigest
         self.binding = binding
         self.reasonCode = reasonCode
     }
@@ -191,6 +212,12 @@ public struct NativeAgentSessionAuditEvidence: Equatable, Sendable {
         if let requestID { object["request_id"] = requestID }
         if let capabilityID { object["capability_id"] = capabilityID }
         if let payloadDigest { object["payload_sha256"] = Self.hex(payloadDigest) }
+        if let activationTransactionDigest {
+            object["activation_transaction_sha256"] = Self.hex(activationTransactionDigest)
+        }
+        if let activationCommitReceiptDigest {
+            object["activation_commit_receipt_sha256"] = Self.hex(activationCommitReceiptDigest)
+        }
         if let reasonCode { object["reason_code"] = reasonCode }
         return Data(SHA256.hash(data: try NativeStrictJSON.data(object)))
     }
@@ -232,4 +259,23 @@ public protocol NativeAgentSessionAuditAppending: Sendable {
     func reconcileAgentSessionActivationAudit(
         _ evidence: NativeAgentSessionAuditEvidence
     ) throws -> NativeAgentSessionAuditReceipt
+
+    /// Reconciles one exact terminal activation outcome. Implementations must
+    /// search the complete verified audit history, reject cross-outcome
+    /// substitution, and append only after verified absence.
+    @discardableResult
+    func reconcileAgentSessionActivationOutcomeAudit(
+        _ evidence: NativeAgentSessionAuditEvidence
+    ) throws -> NativeAgentSessionAuditReceipt
+}
+
+public extension NativeAgentSessionAuditAppending {
+    func reconcileAgentSessionActivationOutcomeAudit(
+        _ evidence: NativeAgentSessionAuditEvidence
+    ) throws -> NativeAgentSessionAuditReceipt {
+        guard evidence.action == .sessionActivated else {
+            throw NativeAgentSessionBoundaryError.invalidAuditEvidence
+        }
+        return try reconcileAgentSessionActivationAudit(evidence)
+    }
 }

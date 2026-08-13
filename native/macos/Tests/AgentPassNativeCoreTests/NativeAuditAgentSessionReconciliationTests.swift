@@ -183,3 +183,86 @@ func nativeAuditAgentSessionActivationLookupRejectsMalformedInputsAndNonCanonica
       evidenceDigest: reconciliationDigest)
   }
 }
+
+@Test func nativeAuditActivationOutcomeLookupAcceptsOnlyTheExactClosedOutcome() throws {
+  let cases: [(NativeAgentSessionAuditAction, String, String)] = [
+    (.sessionActivated, "agent.session.session_activated", "allow"),
+    (.sessionActivationAborted, "agent.session.session_activation_aborted", "deny"),
+    (
+      .sessionActivationOutcomeUnknown,
+      "agent.session.session_activation_outcome_unknown",
+      "error"
+    ),
+  ]
+
+  for (action, operation, decision) in cases {
+    let root = try reconciliationRoot()
+    defer { try? FileManager.default.removeItem(at: root) }
+    let log = try NativeAuditLog(path: root.appendingPathComponent("audit.jsonl").path)
+    let status = try log.append(
+      NativeAuditEvent(
+        operation: operation,
+        decision: decision,
+        requestID: reconciliationSessionID.uuidString.lowercased(),
+        agentID: reconciliationAgentID.uuidString.lowercased(),
+        payloadSHA256: reconciliationHex(reconciliationDigest)
+      ),
+      timestamp: Date(timeIntervalSince1970: 1)
+    )
+
+    #expect(
+      try log.lookupAgentSessionActivationOutcomeAudit(
+        action: action,
+        sessionID: reconciliationSessionID,
+        expectedAgentID: reconciliationAgentID,
+        evidenceDigest: reconciliationDigest
+      ) == .exact(
+        try NativeAuditRecordReceipt(index: status.entries, recordHash: status.headHash))
+    )
+  }
+}
+
+@Test func nativeAuditActivationOutcomeLookupRejectsCrossOutcomeSubstitution() throws {
+  let root = try reconciliationRoot()
+  defer { try? FileManager.default.removeItem(at: root) }
+  let log = try NativeAuditLog(path: root.appendingPathComponent("audit.jsonl").path)
+  _ = try log.append(
+    NativeAuditEvent(
+      operation: "agent.session.session_activation_outcome_unknown",
+      decision: "error",
+      requestID: reconciliationSessionID.uuidString.lowercased(),
+      agentID: reconciliationAgentID.uuidString.lowercased(),
+      payloadSHA256: reconciliationHex(reconciliationDigest)
+    ),
+    timestamp: Date(timeIntervalSince1970: 1)
+  )
+
+  #expect(
+    try log.lookupAgentSessionActivationOutcomeAudit(
+      action: .sessionActivated,
+      sessionID: reconciliationSessionID,
+      expectedAgentID: reconciliationAgentID,
+      evidenceDigest: reconciliationDigest
+    ) == .conflict
+  )
+
+  let malformed = try NativeAuditLog(
+    path: root.appendingPathComponent("wrong-decision.jsonl").path)
+  _ = try malformed.append(
+    NativeAuditEvent(
+      operation: "agent.session.session_activation_aborted",
+      decision: "allow",
+      requestID: reconciliationSessionID.uuidString.lowercased(),
+      agentID: reconciliationAgentID.uuidString.lowercased(),
+      payloadSHA256: reconciliationHex(reconciliationDigest)
+    ),
+    timestamp: Date(timeIntervalSince1970: 1)
+  )
+  #expect(throws: AgentPassNativeError.self) {
+    try malformed.lookupAgentSessionActivationOutcomeAudit(
+      action: .sessionActivationAborted,
+      sessionID: reconciliationSessionID,
+      expectedAgentID: reconciliationAgentID,
+      evidenceDigest: reconciliationDigest)
+  }
+}

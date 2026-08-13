@@ -201,13 +201,45 @@ public final class NativeAuditLog: @unchecked Sendable {
     /// evidenceDigest)` pair can produce `.exact`; duplicate or substituted
     /// activation evidence produces `.conflict`. This method never appends.
     public func lookupAgentSessionActivationAudit(sessionID: UUID, expectedAgentID: UUID, evidenceDigest: Data) throws -> NativeAuditAgentSessionActivationAuditLookup {
+        try lookupAgentSessionActivationOutcomeAudit(
+            action: .sessionActivated,
+            sessionID: sessionID,
+            expectedAgentID: expectedAgentID,
+            evidenceDigest: evidenceDigest
+        )
+    }
+
+    /// Looks up one exact terminal activation outcome while rejecting a
+    /// different outcome that reuses either the session or evidence digest.
+    /// Every candidate record is validated against the closed field set and
+    /// fixed decision for its action before it can participate in matching.
+    public func lookupAgentSessionActivationOutcomeAudit(
+        action: NativeAgentSessionAuditAction,
+        sessionID: UUID,
+        expectedAgentID: UUID,
+        evidenceDigest: Data
+    ) throws -> NativeAuditAgentSessionActivationAuditLookup {
         guard evidenceDigest.count == 32 else {
             throw AgentPassNativeError.invalidConfiguration("Native audit evidence digest must contain 32 bytes")
+        }
+        let expectedDecision: String
+        switch action {
+        case .sessionActivated: expectedDecision = "allow"
+        case .sessionActivationAborted: expectedDecision = "deny"
+        case .sessionActivationOutcomeUnknown: expectedDecision = "error"
+        default:
+            throw AgentPassNativeError.invalidConfiguration("Native audit action is not an activation outcome")
         }
         let sessionID = sessionID.uuidString.lowercased()
         let expectedAgentID = expectedAgentID.uuidString.lowercased()
         let evidenceDigest = evidenceDigest.map { String(format: "%02x", $0) }.joined()
         let activationKeys: Set<String> = ["timestamp", "previous_hash", "operation", "decision", "request_id", "agent_id", "payload_sha256"]
+        let outcomeDecisions: [String: String] = [
+            "agent.session.session_activated": "allow",
+            "agent.session.session_activation_aborted": "deny",
+            "agent.session.session_activation_outcome_unknown": "error"
+        ]
+        let expectedOperation = "agent.session.\(action.rawValue)"
         appendAndRotationLock.lock()
         defer { appendAndRotationLock.unlock() }
         lock.lock()
@@ -216,12 +248,13 @@ public final class NativeAuditLog: @unchecked Sendable {
         var matches: [NativeAuditRecordReceipt] = []
         var conflictingCandidate = false
         _ = try verifyUnlocked(onRecord: { index, recordHash, record in
-            guard record["operation"] as? String == "agent.session.session_activated" else { return }
+            guard let operation = record["operation"] as? String,
+                  let requiredDecision = outcomeDecisions[operation] else { return }
             guard Set(record.keys) == activationKeys else {
                 throw AgentPassNativeError.invalidSignature("Native session activation audit record has an invalid field set")
             }
             guard let decision = record["decision"] as? String,
-                  decision == "allow",
+                  decision == requiredDecision,
                   let requestID = record["request_id"] as? String,
                   let agentID = record["agent_id"] as? String,
                   let payloadSHA256 = record["payload_sha256"] as? String else {
@@ -234,7 +267,11 @@ public final class NativeAuditLog: @unchecked Sendable {
                   payloadSHA256.range(of: "^[0-9a-f]{64}$", options: .regularExpression) != nil else {
                 throw AgentPassNativeError.invalidSignature("Native session activation audit identity is malformed")
             }
-            if requestID == sessionID && agentID == expectedAgentID && payloadSHA256 == evidenceDigest {
+            if operation == expectedOperation,
+               decision == expectedDecision,
+               requestID == sessionID,
+               agentID == expectedAgentID,
+               payloadSHA256 == evidenceDigest {
                 matches.append(try NativeAuditRecordReceipt(index: index, recordHash: recordHash))
             } else if requestID == sessionID || payloadSHA256 == evidenceDigest {
                 conflictingCandidate = true

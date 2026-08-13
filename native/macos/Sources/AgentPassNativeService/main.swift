@@ -2864,7 +2864,8 @@ private final class ServiceEndpoint: NSObject, AgentPassNativeServiceProtocol, N
         let decision: String
         switch evidence.action {
         case .sessionDenied: decision = "deny"
-        case .signingOutcomeUnknown: decision = "error"
+        case .sessionActivationAborted: decision = "deny"
+        case .signingOutcomeUnknown, .sessionActivationOutcomeUnknown: decision = "error"
         default: decision = "allow"
         }
         let status = try appendAudit(NativeAuditEvent(
@@ -2886,7 +2887,22 @@ private final class ServiceEndpoint: NSObject, AgentPassNativeServiceProtocol, N
     }
 
     func reconcileAgentSessionActivationAudit(_ evidence: NativeAgentSessionAuditEvidence) throws -> NativeAgentSessionAuditReceipt {
-        guard evidence.action == .sessionActivated,
+        guard evidence.action == .sessionActivated else {
+            throw AgentPassNativeError.invalidSignature("Native Agent activation audit reconciliation input is invalid")
+        }
+        return try reconcileAgentSessionActivationOutcomeAudit(evidence)
+    }
+
+    func reconcileAgentSessionActivationOutcomeAudit(_ evidence: NativeAgentSessionAuditEvidence) throws -> NativeAgentSessionAuditReceipt {
+        let decision: String
+        switch evidence.action {
+        case .sessionActivated: decision = "allow"
+        case .sessionActivationAborted: decision = "deny"
+        case .sessionActivationOutcomeUnknown: decision = "error"
+        default:
+            throw AgentPassNativeError.invalidSignature("Native Agent activation outcome audit reconciliation input is invalid")
+        }
+        guard
               let sessionIDString = evidence.sessionID,
               let sessionID = UUID(uuidString: sessionIDString),
               sessionID.uuidString.lowercased() == sessionIDString,
@@ -2898,7 +2914,8 @@ private final class ServiceEndpoint: NSObject, AgentPassNativeServiceProtocol, N
         authorizationLock.lock()
         defer { authorizationLock.unlock() }
 
-        switch try auditLog.lookupAgentSessionActivationAudit(
+        switch try auditLog.lookupAgentSessionActivationOutcomeAudit(
+            action: evidence.action,
             sessionID: sessionID,
             expectedAgentID: agentID,
             evidenceDigest: evidenceDigestData
@@ -2917,8 +2934,8 @@ private final class ServiceEndpoint: NSObject, AgentPassNativeServiceProtocol, N
         case .missing:
             let evidenceDigest = evidenceDigestData.map { String(format: "%02x", $0) }.joined()
             let status = try appendAuditLocked(NativeAuditEvent(
-                operation: "agent.session.session_activated",
-                decision: "allow",
+                operation: "agent.session.\(evidence.action.rawValue)",
+                decision: decision,
                 requestID: sessionIDString,
                 agentID: evidence.binding.agentID,
                 payloadSHA256: evidenceDigest
