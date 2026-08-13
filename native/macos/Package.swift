@@ -14,7 +14,8 @@ let package = Package(
         .executable(name: "agentpass-native-manager", targets: ["AgentPassNativeManager"]),
         .executable(name: "agentpass-legacy-service-migration", targets: ["AgentPassLegacyServiceMigration"]),
         .executable(name: "agentpass-legacy-approval-migration", targets: ["AgentPassLegacyApprovalMigration"]),
-        .executable(name: "agentpass-atomic-rename", targets: ["AgentPassAtomicRename"])
+        .executable(name: "agentpass-atomic-rename", targets: ["AgentPassAtomicRename"]),
+        .executable(name: "agentpass-negative-xpc-probe", targets: ["AgentPassNegativeXPCProbe"])
     ],
     targets: [
         .target(name: "AgentPassApp"),
@@ -52,6 +53,10 @@ let package = Package(
             dependencies: ["AgentPassNativeCore"]
         ),
         .executableTarget(name: "AgentPassAtomicRename"),
+        .executableTarget(
+            name: "AgentPassNegativeXPCProbe",
+            dependencies: ["AgentPassNativeCore"]
+        ),
         .testTarget(
             name: "AgentPassNativeCoreTests",
             dependencies: ["AgentPassNativeCore"]

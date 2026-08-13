@@ -44,7 +44,7 @@ Every implementation slice must keep these invariants:
 
 ### M1.1 Cloud possession verification
 
-Status: the strict v2 contracts, deterministic candidate-bound challenge, P-256 proof verification, canonical Cloud receipt signer, file/PostgreSQL persistence, device-authenticated receipt read, and native client primitives are implemented and locally verified on 2026-08-13. Production KMS/HSM wiring and execution from both physical qualification runners remain open.
+Status: the strict v2 contracts, deterministic candidate-bound challenge, P-256 proof verification, canonical Cloud receipt signer, file/PostgreSQL persistence, device-authenticated receipt read, native v2 Secure Enclave signing, and a fail-closed physical scenario are implemented and locally verified on 2026-08-13. A one-time operator-authorized qualification ticket/relay, production KMS/HSM wiring, and execution from both physical qualification runners remain open.
 
 Implement `cloud-possession-verification` as an authenticated enrollment round trip, not a local signature-only assertion.
 
@@ -82,7 +82,7 @@ Exit evidence: same-content replacement, symlink/hard-link substitution, stale c
 
 ### M1.3 Negative identity and entitlement probe
 
-Status: the strict four-role manifest/verifier and service-side exact Developer ID/Team ID/approval-entitlement requirement are implemented and locally verified. Signed probe bundle production and physical XPC allow/deny execution remain open.
+Status: the strict four-role manifest/verifier, release signing helper, four probe applications, physical scenario, and service-side exact Developer ID/Team ID/approval-entitlement requirement are implemented and locally verified. Production Developer ID signing and physical XPC allow/deny execution against the notarized candidate remain open.
 
 Implement `negative-identity-and-entitlement-cases` with signed probe binaries created by the release pipeline:
 
@@ -97,6 +97,8 @@ The scenario must prove the approved probe reaches only the allow-listed XPC met
 Exit evidence: denial remains effective after service restart and cannot be bypassed by PID reuse, copied binaries, parent-process substitution, or concurrent approved/unapproved calls.
 
 ## 4. Milestone M2 — unattended Claude Code and Cursor signing
+
+The frozen implementation sequence, process/ancestry boundary, contracts, migrations, state machine, tests, and rollout gates are specified in `PROCESS_BOUND_AGENT_IMPLEMENTATION_PLAN.md`.
 
 ### M2.1 Agent adapter contract
 

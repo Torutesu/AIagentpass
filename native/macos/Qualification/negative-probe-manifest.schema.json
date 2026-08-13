@@ -64,7 +64,7 @@
             "additionalProperties": false,
             "required": ["mode", "value"],
             "properties": {
-              "mode": { "enum": ["exact", "not-release"] },
+              "mode": { "enum": ["exact", "absent"] },
               "value": { "type": ["string", "null"] }
             }
           },
@@ -73,7 +73,7 @@
             "additionalProperties": false,
             "required": ["mode", "value"],
             "properties": {
-              "mode": { "enum": ["exact", "absent"] },
+              "mode": { "enum": ["exact", "not-release"] },
               "value": { "type": ["string", "null"] }
             }
           },

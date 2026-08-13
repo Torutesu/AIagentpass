@@ -4,11 +4,12 @@ import Security
 
 public enum NativeEnrollmentProof {
     public static let protocolIdentifier = "AgentPass-Enrollment-Proof-v1"
+    public static let protocolIdentifierV2 = "AgentPass-Enrollment-Proof-v2"
     public static let maximumPreimageBytes = 16 * 1024
 
-    /// Validates the exact five-line v1 proof preimage emitted by the
-    /// enrollment client. No normalization is performed: the bytes signed are
-    /// exactly the bytes received from stdin.
+    /// Validates the exact v1 or candidate-bound v2 proof preimage emitted by
+    /// the enrollment client. No normalization is performed: the bytes signed
+    /// are exactly the bytes received from stdin.
     public static func validatedPreimage(_ preimage: Data) throws -> Data {
         guard !preimage.isEmpty, preimage.count <= maximumPreimageBytes,
               let text = String(data: preimage, encoding: .utf8),
@@ -17,13 +18,24 @@ public enum NativeEnrollmentProof {
         }
 
         let fields = text.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
-        guard fields.count == 5,
-              fields[0] == protocolIdentifier,
-              fields[1] == "POST",
-              fields[2].range(of: "^/v1/enrollments/[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$", options: .regularExpression) != nil,
-              fields[3].range(of: "^[0-9a-f]{64}$", options: .regularExpression) != nil,
-              fields[4].range(of: "^[0-9a-f]{64}$", options: .regularExpression) != nil else {
-            throw AgentPassNativeError.invalidSignature("Enrollment proof preimage is not the exact AgentPass-Enrollment-Proof-v1 schema")
+        let enrollmentPath = "^/v1/enrollments/[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+        let digest = "^[0-9a-f]{64}$"
+        let nonce = "^[A-Za-z0-9_-]{43}$"
+        let validV1 = fields.count == 5
+            && fields[0] == protocolIdentifier
+            && fields[1] == "POST"
+            && fields[2].range(of: enrollmentPath, options: .regularExpression) != nil
+            && fields[3].range(of: digest, options: .regularExpression) != nil
+            && fields[4].range(of: digest, options: .regularExpression) != nil
+        let validV2 = fields.count == 6
+            && fields[0] == "\(protocolIdentifierV2)\0POST"
+            && fields[1].range(of: enrollmentPath, options: .regularExpression) != nil
+            && fields[2].range(of: digest, options: .regularExpression) != nil
+            && fields[3].range(of: digest, options: .regularExpression) != nil
+            && fields[4].range(of: nonce, options: .regularExpression) != nil
+            && fields[5].range(of: digest, options: .regularExpression) != nil
+        guard validV1 || validV2 else {
+            throw AgentPassNativeError.invalidSignature("Enrollment proof preimage is not an exact supported AgentPass enrollment schema")
         }
         return preimage
     }

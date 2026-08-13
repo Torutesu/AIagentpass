@@ -1,0 +1,261 @@
+#!/usr/bin/env node
+import crypto from 'node:crypto';
+import { pathToFileURL } from 'node:url';
+import { resolve, join } from 'node:path';
+import { executePhysicalScenario, readProtectedFile, requireCommandSuccess, runPinnedExecutable, runPhysicalScenario } from '../lib/scenario-runtime.mjs';
+import { withVerifiedCandidateCheckpoint } from '../lib/candidate-checkpoint.mjs';
+
+const GATE = 'cloud-possession-verification';
+const TESTS = Object.freeze(['cloud-possession-proof']);
+const CLOUD_CONFIG_PATH = '/opt/agentpass/p0c/cloud-possession-verification.json';
+const MAX_CONFIG_BYTES = 64 * 1024;
+const MAX_RESPONSE_BYTES = 128 * 1024;
+const MAX_PROOF_BYTES = 16 * 1024;
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u;
+const HASH = /^[0-9a-f]{64}$/u;
+const COMMIT = /^[0-9a-f]{40}$/u;
+const TEAM_ID = /^[A-Z0-9]{10}$/u;
+const TIMESTAMP = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/u;
+const CANDIDATE_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/u;
+const FINGERPRINT = /^SHA256:[A-Za-z0-9_-]{43}$/u;
+const NONCE = /^[A-Za-z0-9_-]{43}$/u;
+const BASE64_64 = /^(?:[A-Za-z0-9+/]{4}){21}[A-Za-z0-9+/]{2}==$/u;
+const BASE64URL_64 = /^[A-Za-z0-9_-]{86}$/u;
+const SECRET_FIELD = /(?:private|secret|bearer|password|token|credential)/iu;
+const CONFIG_KEYS = Object.freeze(['schema_version', 'issue_url', 'organization_id', 'candidate_id', 'label', 'ttl_ms', 'receipt_signer_public_key']);
+const ISSUE_KEYS = Object.freeze(['request_id', 'enrollment']);
+const ISSUE_ENROLLMENT_KEYS = Object.freeze(['version', 'proof_version', 'enrollment_id', 'organization_id', 'device_id', 'label', 'platform', 'candidate_binding', 'challenge_id', 'nonce', 'expires_at', 'challenge', 'credential', 'endpoint']);
+const COMPLETION_ENROLLMENT_KEYS = Object.freeze(['version', 'enrollment_id', 'organization_id', 'device_id', 'status', 'key_algorithm', 'device_key_epoch', 'control']);
+const RECEIPT_KEYS = Object.freeze(['receipt', 'request_id']);
+const RECEIPT_ENVELOPE_KEYS = Object.freeze(['version', 'purpose', 'key_id', 'algorithm', 'statement', 'statement_hash', 'signature']);
+const RECEIPT_STATEMENT_KEYS = Object.freeze(['version', 'enrollment_id', 'organization_id', 'device_id', 'candidate_id', 'artifact_sha256', 'source_commit', 'team_id', 'device_key_fingerprint', 'device_key_epoch', 'challenge_nonce_digest', 'issued_at']);
+
+const exactKeys = (value, keys, label) => {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) throw new Error(`${label} is invalid`);
+  const actual = Object.keys(value).sort();
+  const expected = [...keys].sort();
+  if (actual.length !== expected.length || actual.some((key, index) => key !== expected[index])) throw new Error(`${label} has missing or unknown fields`);
+};
+
+const sha256 = (value) => crypto.createHash('sha256').update(value).digest('hex');
+const canonicalJson = (value) => {
+  if (value === null || typeof value !== 'object') return JSON.stringify(value);
+  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(',')}]`;
+  return `{${Object.keys(value).sort().map((key) => `${JSON.stringify(key)}:${canonicalJson(value[key])}`).join(',')}}`;
+};
+const publicKeyFingerprint = (pem) => `SHA256:${crypto.createHash('sha256').update(crypto.createPublicKey(pem).export({ type: 'spki', format: 'der' })).digest('base64url')}`;
+const parseJson = (bytes, label) => {
+  if (!Buffer.isBuffer(bytes) || bytes.length === 0 || bytes.length > MAX_RESPONSE_BYTES) throw new Error(`${label} is too large`);
+  try { return JSON.parse(bytes.toString('utf8')); } catch { throw new Error(`${label} is invalid JSON`); }
+};
+const parseDirect = (result, label) => parseJson(requireCommandSuccess(result, label), label);
+
+function readCloudConfig({ machine, production, configPath = CLOUD_CONFIG_PATH, readConfig } = {}) {
+  const bytes = readConfig
+    ? readConfig(configPath)
+    : readProtectedFile(configPath, { maximum: MAX_CONFIG_BYTES, production }).bytes;
+  const value = typeof bytes === 'object' && !Buffer.isBuffer(bytes) ? bytes : parseJson(bytes, 'Cloud possession configuration');
+  exactKeys(value, CONFIG_KEYS, 'Cloud possession configuration');
+  if (value.schema_version !== 1 || typeof value.issue_url !== 'string' || value.issue_url !== machine.cloudProbeURL
+    || !UUID.test(value.organization_id) || !CANDIDATE_ID.test(value.candidate_id) || typeof value.label !== 'string'
+    || value.label.length < 1 || value.label.length > 128 || /[\u0000-\u001f\u007f]/u.test(value.label)
+    || !Number.isSafeInteger(value.ttl_ms) || value.ttl_ms < 60_000 || value.ttl_ms > 24 * 60 * 60 * 1000
+    || typeof value.receipt_signer_public_key !== 'string' || SECRET_FIELD.test(Object.keys(value).join(','))) throw new Error('Cloud possession configuration is invalid');
+  let endpoint;
+  try { endpoint = new URL(value.issue_url); } catch { throw new Error('Cloud possession issue URL is invalid'); }
+  if (endpoint.protocol !== 'https:' || endpoint.username || endpoint.password || endpoint.search || endpoint.hash
+    || endpoint.pathname !== `/v1/organizations/${value.organization_id}/device-enrollments`) throw new Error('Cloud possession issue URL is invalid');
+  let receiptSigner;
+  try { receiptSigner = crypto.createPublicKey(value.receipt_signer_public_key); } catch { throw new Error('Cloud possession receipt signer is invalid'); }
+  if (receiptSigner.type !== 'public' || !['ed25519', 'ec'].includes(receiptSigner.asymmetricKeyType)
+    || (receiptSigner.asymmetricKeyType === 'ec' && receiptSigner.asymmetricKeyDetails?.namedCurve !== 'prime256v1')
+    || /PRIVATE KEY/i.test(value.receipt_signer_public_key)
+    || receiptSigner.export({ type: 'spki', format: 'pem' }).toString() !== value.receipt_signer_public_key) throw new Error('Cloud possession receipt signer is invalid');
+  return Object.freeze({ ...value, issueURL: endpoint, receiptSignerPEM: value.receipt_signer_public_key });
+}
+
+async function nativeServiceJSON({ machine, action, input, production, runPinned, runCommand }) {
+  const args = ['--device-auth', action, '--config', machine.serviceConfigPath];
+  return parseDirect(await runPinned(machine.executables.native_service, args, { production, runCommand, input }), `native device-auth ${action}`);
+}
+
+async function readNativePublicKey(options) {
+  const value = await nativeServiceJSON({ ...options, action: 'key' });
+  exactKeys(value, ['fingerprint', 'public_key_pem'], 'native enrollment public key');
+  if (!FINGERPRINT.test(value.fingerprint) || typeof value.public_key_pem !== 'string' || /PRIVATE KEY/i.test(value.public_key_pem)) throw new Error('native enrollment public key is invalid');
+  let key;
+  try { key = crypto.createPublicKey(value.public_key_pem); } catch { throw new Error('native enrollment public key is invalid'); }
+  if (key.asymmetricKeyType !== 'ec' || key.asymmetricKeyDetails?.namedCurve !== 'prime256v1'
+    || key.export({ type: 'spki', format: 'pem' }).toString() !== value.public_key_pem || publicKeyFingerprint(value.public_key_pem) !== value.fingerprint) throw new Error('native enrollment public key is invalid');
+  return Object.freeze({ algorithm: 'p256-sha256', spki_pem: value.public_key_pem, fingerprint: value.fingerprint });
+}
+
+async function nativeSign(options, bytes) {
+  if (!Buffer.isBuffer(bytes) || bytes.length === 0 || bytes.length > MAX_PROOF_BYTES) throw new Error('native signing input is invalid');
+  const value = await nativeServiceJSON({ ...options, action: 'sign', input: bytes });
+  exactKeys(value, ['signature_base64'], 'native device-auth signature');
+  if (typeof value.signature_base64 !== 'string' || !BASE64_64.test(value.signature_base64)) throw new Error('native device-auth signature is invalid');
+  const signature = Buffer.from(value.signature_base64, 'base64');
+  if (signature.length !== 64 || signature.toString('base64') !== value.signature_base64) throw new Error('native device-auth signature is invalid');
+  return signature;
+}
+
+async function readResponse(response, label, expectedStatus) {
+  if (!response || !Number.isInteger(response.status) || response.status !== expectedStatus || response.status >= 300) throw new Error(`${label} failed`);
+  const length = response.headers?.get?.('content-length') ?? response.headers?.['content-length'];
+  if (length !== undefined && (!/^\d+$/u.test(String(length)) || Number(length) > MAX_RESPONSE_BYTES)) throw new Error(`${label} response is too large`);
+  let bytes;
+  if (typeof response.arrayBuffer === 'function') bytes = Buffer.from(await response.arrayBuffer());
+  else if (typeof response.text === 'function') bytes = Buffer.from(await response.text(), 'utf8');
+  else throw new Error(`${label} response is unreadable`);
+  return parseJson(bytes, label);
+}
+
+async function requestJSON(fetchImpl, url, { method, body, headers, expectedStatus, label }) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 15_000);
+  try {
+    const response = await fetchImpl(url.toString(), { method, headers, body, redirect: 'error', signal: controller.signal });
+    return await readResponse(response, label, expectedStatus);
+  } catch (error) {
+    if (error?.message === `${label} failed` || error?.message?.startsWith(`${label} response`)) throw error;
+    throw new Error(`${label} could not be completed`);
+  } finally { clearTimeout(timer); }
+}
+
+function candidateBindingMatches(binding, release, config, key, enrollment) {
+  exactKeys(binding, ['version', 'enrollment_id', 'organization_id', 'device_id', 'candidate_id', 'artifact_sha256', 'source_commit', 'team_id', 'device_key_fingerprint', 'expires_at'], 'candidate binding');
+  if (binding.version !== 1 || binding.enrollment_id !== enrollment.enrollment_id || binding.organization_id !== config.organization_id
+    || binding.device_id !== enrollment.device_id || binding.candidate_id !== config.candidate_id || binding.artifact_sha256 !== release.artifactSha256
+    || binding.source_commit !== release.sourceCommit || binding.team_id !== release.teamId || binding.device_key_fingerprint !== key.fingerprint
+    || typeof binding.expires_at !== 'string' || !TIMESTAMP.test(binding.expires_at) || new Date(binding.expires_at).toISOString() !== binding.expires_at || Date.parse(binding.expires_at) <= Date.now()) throw new Error('Cloud possession candidate binding does not match the release');
+  return binding;
+}
+
+function issueBody(config, key) {
+  return { proof_version: 2, candidate_id: config.candidate_id, device_key_fingerprint: key.fingerprint, label: config.label, platform: 'macos', ttl_ms: config.ttl_ms };
+}
+
+function validateIssue(value, release, config, key) {
+  exactKeys(value, ISSUE_KEYS, 'Cloud possession issue response');
+  if (!UUID.test(value.request_id)) throw new Error('Cloud possession issue request ID is invalid');
+  exactKeys(value.enrollment, ISSUE_ENROLLMENT_KEYS, 'Cloud possession issue enrollment');
+  const enrollment = value.enrollment;
+  if (enrollment.version !== 2 || enrollment.proof_version !== 2 || enrollment.organization_id !== config.organization_id
+    || enrollment.candidate_binding === undefined || enrollment.challenge_id !== enrollment.enrollment_id || enrollment.platform !== 'macos'
+    || enrollment.label !== config.label || !UUID.test(enrollment.enrollment_id) || !UUID.test(enrollment.device_id)
+    || !NONCE.test(enrollment.nonce) || enrollment.nonce.length !== 43 || typeof enrollment.credential !== 'string'
+    || !/^[A-Za-z0-9_-]{43}$/u.test(enrollment.credential) || enrollment.credential.length !== 43
+    || enrollment.endpoint !== `/v1/enrollments/${enrollment.enrollment_id}`) throw new Error('Cloud possession issue response is invalid');
+  const binding = candidateBindingMatches(enrollment.candidate_binding, release, config, key, enrollment);
+  exactKeys(enrollment.challenge, ['challenge_id', 'nonce', 'expires_at', 'candidate_id', 'device_key_fingerprint'], 'Cloud possession challenge');
+  if (enrollment.challenge.challenge_id !== enrollment.enrollment_id || enrollment.challenge.nonce !== enrollment.nonce
+    || enrollment.challenge.expires_at !== enrollment.expires_at || enrollment.challenge.candidate_id !== binding.candidate_id
+    || enrollment.challenge.device_key_fingerprint !== key.fingerprint) throw new Error('Cloud possession challenge does not match the issue binding');
+  if (Date.parse(enrollment.expires_at) !== Date.parse(binding.expires_at)) throw new Error('Cloud possession expiry does not match');
+  return Object.freeze({ enrollment, binding });
+}
+
+function completionBody(issued, key) {
+  const { enrollment } = issued;
+  return {
+    version: 2,
+    proof_version: 2,
+    enrollment_id: enrollment.enrollment_id,
+    organization_id: enrollment.organization_id,
+    device_id: enrollment.device_id,
+    label: enrollment.label,
+    platform: enrollment.platform,
+    device_key: { algorithm: key.algorithm, spki_pem: key.spki_pem },
+    candidate_id: enrollment.candidate_binding.candidate_id,
+    device_key_fingerprint: key.fingerprint,
+    challenge: { challenge_id: enrollment.challenge.challenge_id, nonce: enrollment.challenge.nonce, expires_at: enrollment.challenge.expires_at, candidate_id: enrollment.challenge.candidate_id, device_key_fingerprint: key.fingerprint }
+  };
+}
+
+function v2Proof(path, body, credential, challengeNonce, binding) {
+  const bodyDigest = sha256(body);
+  const credentialDigest = sha256(Buffer.from(credential, 'utf8'));
+  const bindingDigest = sha256(Buffer.from(canonicalJson(binding), 'utf8'));
+  return Buffer.from(`AgentPass-Enrollment-Proof-v2\0POST\n${path}\n${bodyDigest}\n${credentialDigest}\n${challengeNonce}\n${bindingDigest}`, 'utf8');
+}
+
+function validateCompletion(value, issued, key) {
+  exactKeys(value, ISSUE_KEYS, 'Cloud possession completion response');
+  if (!UUID.test(value.request_id)) throw new Error('Cloud possession completion request ID is invalid');
+  exactKeys(value.enrollment, COMPLETION_ENROLLMENT_KEYS, 'Cloud possession completion enrollment');
+  const enrollment = value.enrollment;
+  if (enrollment.version !== 1 || enrollment.enrollment_id !== issued.enrollment.enrollment_id || enrollment.organization_id !== issued.enrollment.organization_id
+    || enrollment.device_id !== issued.enrollment.device_id || enrollment.status !== 'active' || enrollment.key_algorithm !== key.algorithm
+    || !Number.isSafeInteger(enrollment.device_key_epoch) || enrollment.device_key_epoch < 1) throw new Error('Cloud possession completion is not bound to the native key');
+  return enrollment.device_key_epoch;
+}
+
+function deviceRequestSignatureInput(method, target, body, timestamp, nonce) {
+  return Buffer.from([method, target, '', sha256(body), String(timestamp), nonce].join('\n'), 'utf8');
+}
+
+function validateReceipt(value, config, release, issued, key, epoch) {
+  exactKeys(value, RECEIPT_KEYS, 'Cloud possession receipt response');
+  if (!UUID.test(value.request_id)) throw new Error('Cloud possession receipt request ID is invalid');
+  const receipt = value.receipt;
+  exactKeys(receipt, RECEIPT_ENVELOPE_KEYS, 'Cloud possession receipt');
+  if (receipt.version !== 1 || receipt.purpose !== 'device-enrollment-possession-receipt' || !['ed25519', 'p256-sha256'].includes(receipt.algorithm)
+    || typeof receipt.key_id !== 'string' || !CANDIDATE_ID.test(receipt.key_id) || typeof receipt.statement_hash !== 'string' || !HASH.test(receipt.statement_hash)
+    || typeof receipt.signature !== 'string' || !BASE64URL_64.test(receipt.signature)) throw new Error('Cloud possession receipt metadata is invalid');
+  const statement = receipt.statement;
+  exactKeys(statement, RECEIPT_STATEMENT_KEYS, 'Cloud possession receipt statement');
+  if (statement.version !== 1 || statement.enrollment_id !== issued.enrollment.enrollment_id || statement.organization_id !== config.organization_id
+    || statement.device_id !== issued.enrollment.device_id || statement.candidate_id !== config.candidate_id || statement.artifact_sha256 !== release.artifactSha256
+    || statement.source_commit !== release.sourceCommit || statement.team_id !== release.teamId || statement.device_key_fingerprint !== key.fingerprint
+    || statement.device_key_epoch !== epoch || statement.challenge_nonce_digest !== sha256(Buffer.from(issued.enrollment.nonce, 'utf8'))
+    || typeof statement.issued_at !== 'string' || !TIMESTAMP.test(statement.issued_at) || new Date(statement.issued_at).toISOString() !== statement.issued_at) throw new Error('Cloud possession receipt binding is invalid');
+  const statementBytes = Buffer.from(canonicalJson(statement), 'utf8');
+  if (receipt.statement_hash !== sha256(statementBytes)) throw new Error('Cloud possession receipt statement hash is invalid');
+  const signed = Buffer.from(`AgentPass-Cloud-Possession-Receipt-v1\0${canonicalJson(statement)}`, 'utf8');
+  const signer = crypto.createPublicKey(config.receipt_signer_public_key);
+  const signature = Buffer.from(receipt.signature, 'base64url');
+  let valid = false;
+  try { valid = receipt.algorithm === 'ed25519' ? crypto.verify(null, signed, signer, signature) : crypto.verify('sha256', signed, { key: signer, dsaEncoding: 'ieee-p1363' }, signature); } catch { valid = false; }
+  if (!valid) throw new Error('Cloud possession receipt signature is invalid');
+  return Object.freeze({ statement_hash: receipt.statement_hash, key_id: receipt.key_id, device_key_epoch: epoch });
+}
+
+export const performCloudPossessionVerification = async ({ release, machine, production = true, runCommand, runPinned = runPinnedExecutable, fetchImpl = globalThis.fetch, getUid = process.getuid, withCheckpoint = withVerifiedCandidateCheckpoint, cloudConfig, configPath, readConfig } = {}) => {
+  if (typeof getUid !== 'function' || getUid() !== 0) throw new Error('physical scenario requires root');
+  if (typeof fetchImpl !== 'function') throw new Error('Cloud possession requires a configured HTTPS fetch implementation');
+  const config = cloudConfig
+    ? readCloudConfig({ machine, production, readConfig: () => cloudConfig })
+    : readCloudConfig({ machine, production, configPath, readConfig });
+  if (release.gate !== GATE) throw new Error('Cloud possession release gate is invalid');
+  return withCheckpoint(join(machine.checkpointDirectory, 'candidate-checkpoint.json'), async () => {
+    const native = { machine, production, runPinned, runCommand };
+    const key = await readNativePublicKey(native);
+    const issuedJSON = await requestJSON(fetchImpl, config.issueURL, {
+      method: 'POST', body: Buffer.from(canonicalJson(issueBody(config, key)), 'utf8'),
+      headers: { accept: 'application/json', 'content-type': 'application/json', 'idempotency-key': crypto.randomUUID() }, expectedStatus: 201, label: 'Cloud possession issue'
+    });
+    const issued = validateIssue(issuedJSON, release, config, key);
+    const body = Buffer.from(canonicalJson(completionBody(issued, key)), 'utf8');
+    const completionPath = issued.enrollment.endpoint;
+    const completionSignature = await nativeSign(native, v2Proof(completionPath, body, issued.enrollment.credential, issued.enrollment.nonce, issued.binding));
+    const completedJSON = await requestJSON(fetchImpl, new URL(completionPath, config.issueURL), {
+      method: 'POST', body, headers: { accept: 'application/json', 'content-type': 'application/json', 'AgentPass-Enrollment-Signature': completionSignature.toString('base64'), 'AgentPass-Enrollment-Credential': issued.enrollment.credential, 'AgentPass-Enrollment-Nonce': issued.enrollment.nonce, 'AgentPass-Enrollment-Candidate-Binding': canonicalJson(issued.binding) }, expectedStatus: 201, label: 'Cloud possession completion'
+    });
+    const epoch = validateCompletion(completedJSON, issued, key);
+    const receiptPath = `/v1/organizations/${config.organization_id}/devices/${issued.enrollment.device_id}/enrollment-receipt`;
+    const receiptURL = new URL(receiptPath, config.issueURL);
+    const timestamp = Date.now();
+    const nonce = crypto.randomBytes(32).toString('base64url');
+    const receiptSignature = await nativeSign(native, deviceRequestSignatureInput('GET', receiptPath, Buffer.alloc(0), timestamp, nonce));
+    const receiptJSON = await requestJSON(fetchImpl, receiptURL, {
+      method: 'GET', body: undefined, headers: { accept: 'application/json', 'AgentPass-Device': issued.enrollment.device_id, 'AgentPass-Timestamp': String(timestamp), 'AgentPass-Nonce': nonce, 'AgentPass-Content-SHA256': sha256(Buffer.alloc(0)), 'AgentPass-Signature': receiptSignature.toString('base64') }, expectedStatus: 200, label: 'Cloud possession receipt read'
+    });
+    validateReceipt(receiptJSON, config, release, issued, key, epoch);
+    return TESTS;
+  }, { production, expected: { artifactSha256: release.artifactSha256, sourceCommit: release.sourceCommit, teamId: release.teamId, applicationPath: '/Applications/AgentPass.app' } });
+};
+
+export const executeCloudPossessionVerification = (options) => executePhysicalScenario({ gate: GATE, tests: TESTS, ...options, execute: (context) => performCloudPossessionVerification(context) });
+
+if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) await runPhysicalScenario({ gate: GATE, tests: TESTS, execute: (context) => performCloudPossessionVerification(context) });

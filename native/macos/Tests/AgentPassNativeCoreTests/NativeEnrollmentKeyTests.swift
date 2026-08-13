@@ -61,6 +61,10 @@ private func enrollmentProofPreimage(bodyDigest: String = String(repeating: "a",
     ].joined(separator: "\n").utf8)
 }
 
+private func enrollmentProofPreimageV2(nonce: String = String(repeating: "N", count: 43)) -> Data {
+    Data("\(NativeEnrollmentProof.protocolIdentifierV2)\0POST\n/v1/enrollments/11111111-1111-4111-8111-111111111111\n\(String(repeating: "a", count: 64))\n\(String(repeating: "b", count: 64))\n\(nonce)\n\(String(repeating: "c", count: 64))".utf8)
+}
+
 @Test func enrollmentKeyPrimitiveCreatesOnlyFixedVersionedBindingAndIsIdempotent() throws {
     let store = FakeEnrollmentKeyStore()
     let primitive = NativeEnrollmentKeyPrimitive(store: store)
@@ -104,6 +108,37 @@ private func enrollmentProofPreimage(bodyDigest: String = String(repeating: "a",
     #expect(publicKey.isValidSignature(ecdsa, for: preimage))
     #expect(store.signCount == 1)
     #expect(store.signedPreimages == [preimage])
+}
+
+@Test func enrollmentKeyPrimitiveSignsCandidateBoundV2ProofWithoutNormalizingBytes() throws {
+    let store = FakeEnrollmentKeyStore()
+    let primitive = NativeEnrollmentKeyPrimitive(store: store)
+    let preimage = enrollmentProofPreimageV2()
+
+    let signature = try primitive.signEnrollmentProof(preimage: preimage)
+    let publicKey = try P256.Signing.PublicKey(x963Representation: store.publicKeyX963ForTesting)
+    let ecdsa = try P256.Signing.ECDSASignature(rawRepresentation: signature)
+
+    #expect(publicKey.isValidSignature(ecdsa, for: preimage))
+    #expect(store.signedPreimages == [preimage])
+}
+
+@Test func enrollmentKeyPrimitiveRejectsV2DomainAndBindingSubstitution() throws {
+    let store = FakeEnrollmentKeyStore()
+    let primitive = NativeEnrollmentKeyPrimitive(store: store)
+
+    #expect(throws: AgentPassNativeError.self) {
+        _ = try primitive.signEnrollmentProof(preimage: Data(enrollmentProofPreimageV2().dropFirst()))
+    }
+    #expect(throws: AgentPassNativeError.self) {
+        _ = try primitive.signEnrollmentProof(preimage: enrollmentProofPreimageV2(nonce: String(repeating: "N", count: 42)))
+    }
+    var nonCanonical = enrollmentProofPreimageV2()
+    nonCanonical.append(0x0a)
+    #expect(throws: AgentPassNativeError.self) {
+        _ = try primitive.signEnrollmentProof(preimage: nonCanonical)
+    }
+    #expect(store.signCount == 0)
 }
 
 @Test func enrollmentKeyPrimitiveRejectsNonCanonicalOrOversizedProofBeforeSigning() throws {
