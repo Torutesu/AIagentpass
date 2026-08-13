@@ -2,7 +2,7 @@
 
 Status: active
 
-Updated: 2026-08-13
+Updated: 2026-08-14
 
 Baseline branch: `codex/agent-platform`
 
@@ -17,6 +17,8 @@ Three physical scenarios are implemented:
 3. Secure Enclave enrollment-key existence, uniqueness, fixed tag/access group, non-exportability, live signature possession, and ControlBundle v2 key binding.
 
 The remaining 13 scenarios are not production-qualified. A passing modeled test, simulator test, ad-hoc signed build, or operator assertion cannot replace execution of the exact scenario on both protected hardware lanes.
+
+The process-bound Agent-session foundation now also includes the frozen Human Grant and Device Lease contracts, PostgreSQL-backed issuance/consumption, a split privileged Agent XPC service, a fixed-FD activation document, and a signed Agent Host lifecycle. The protected qualification runner can provision the candidate/controller/activation inputs. Durable fired evidence for daemon-kill boundaries is being closed before this baseline is promoted. None of these local or modeled results is physical-release evidence.
 
 ## 2. Delivery rule
 
@@ -235,6 +237,130 @@ Each merge requires:
 
 ## 10. Next executable slice
 
-Two lanes now proceed without conflating evidence: finish the remaining M1 physical evidence by signing all four negative XPC probes and driving M1.1 possession through the real Device API on both protected hardware runners; in parallel, implement M2-A Cloud grant issuance/consumption and M2-B live Darwin observation plus the separate Agent XPC service. M2-C may integrate only after both M2-A and M2-B gates pass.
+The next slice closes N3-E as an executable protected qualification path before adding another product surface. It has five ordered boundaries:
 
-The slice is complete when an exact installed candidate can mint a protected checkpoint, every later scenario consumes it, the approved probe reaches the XPC service, all negative identities are denied, and replacement/replay tests pass before any Cloud credential or physical qualification secret is introduced.
+1. finish the Agent Host activation lifecycle and exact `AgentPass-Device` Device API request contract;
+2. persist a secret-free fired receipt before every injected kill, throw, or reply drop, and require an exact candidate/source/code-identity/run/scenario/phase/generation match when reading or deleting it;
+3. make the root runner invoke only packaged, fixed-path materializers, Controller, Agent Host, and cleanup helpers rather than caller-provided production callbacks;
+4. prove all six one-shot fault scenarios, including daemon loss after durable consume and exact start retry after transport reply loss;
+5. run the same immutable candidate through both protected Mac lanes and retain only schema-validated public evidence.
+
+The slice is complete only when interrupted cleanup and explicit recovery remove the activation document, candidate controller bundle, fired receipt, temporary execution copy, launchd qualification configuration, and run lock in identity-bound order; the production Agent XPC surface contains no qualification selector; and the full Node/Swift/contracts/package gates pass from a clean source tree.
+
+## 11. Detailed execution waves after N3-E
+
+### Wave 1 — protected qualification closure
+
+Implementation:
+
+- replace the remaining injected runner callbacks with fixed packaged commands and closed schemas;
+- bind the activation document to the exact canonical signed Grant without putting proof bytes in argv, environment, stdout, logs, or evidence;
+- supervise Controller, Agent Host, launchd restart, and timeout as separate processes with bounded termination;
+- distinguish expected daemon-loss outcomes from Host lifecycle failures without accepting a missing fired receipt;
+- add stale-run recovery that proves no active run, validates every durable identity, and deletes in least-authority-first order;
+- add source/symbol/entitlement checks proving the qualification listener and receipt writer are unavailable in production configuration.
+
+Acceptance:
+
+- six scenarios each fire exactly once and a seventh unarmed control run has no injected outcome;
+- kill at every receipt write/rename/fsync/cleanup boundary converges to a valid old or complete new state;
+- replay, symlink, hard-link, ownership, mode, digest, generation, scenario, and phase substitution tests fail closed;
+- one cleanup-safe command produces a canonical evidence report bound to source commit, PKG digest, Team ID, code identities, OS/hardware lane, and scenario result.
+
+Dependencies: the notarized candidate checkpoint, protected runner entitlement, real Device API Grant/Lease route, and both Mac runners. Work on packaging tests and evidence schema can proceed in parallel; edits to the XPC protocol, durable receipt schema, and root storage layout are serialized.
+
+### Wave 2 — first usable Claude Code path
+
+Implementation:
+
+- ship `agentpass install`, `agentpass setup`, `agentpass doctor`, `agentpass launch --agent claude-code`, and repository-local Git signing configuration;
+- enroll the Secure Enclave device identity, select organization/repository/worktree/branch/scope/TTL, and install a least-authority policy;
+- launch the pinned Claude Code process through the signed Agent Host so the process/ancestry observation and FD handoff are created by one trusted path;
+- implement status, close, expiry, revoke, offline-deny, and actionable diagnostics without exposing authority-bearing material;
+- preserve existing Git configuration and provide an exact, resumable uninstall/rollback path.
+
+Acceptance:
+
+- a new user completes setup and two unattended verified commits using documented commands;
+- changed executable, PID reuse, ancestry, repository, worktree, branch, operation, TTL, generation, and proof replay are denied;
+- secrets and reusable capabilities are absent from process listings, environment, shell history, repository files, logs, crash reports, and browser storage;
+- install/upgrade/uninstall tests preserve or deliberately purge state according to the documented lifecycle.
+
+Dependencies: Wave 1, current ControlBundle apply/ACK path, Human Grant issuance, Device Lease consumption, and a pinned supported Claude Code execution contract. CLI/onboarding copy and Git integration tests may proceed in parallel with native lifecycle work.
+
+### Wave 3 — Cursor parity and real Console onboarding
+
+Implementation:
+
+- add Cursor only through a pinned, production-supported headless process identity and reuse the common Agent Host/session contract;
+- remove all sample operational state from Console views;
+- complete the guided flow for organization creation/selection, invitation and role administration, passkey lifecycle, device enrollment, repository policy, Agent launch instructions, session/audit visibility, revoke, and emergency stop;
+- show pending/fetched/applied/blocked/stale/offline/revoked states from authoritative PostgreSQL data and signed ACKs, never from optimistic browser state;
+- add keyboard, screen-reader, localization, conflict, expiry, recovery, and lockout behavior.
+
+Acceptance:
+
+- owner/admin/auditor/viewer Playwright matrices pass over production-built Console and Cloud with real PostgreSQL TLS and virtual WebAuthn;
+- Claude Code and Cursor pass the same authorization and negative-substitution suite;
+- a non-engineer can enroll, launch, verify commits, inspect audit, and revoke from one guided journey;
+- revoke and emergency stop remain reductions only and cannot mint or widen native authority.
+
+Dependencies: Wave 2 common session contract and authoritative audit upload/read model. Cursor adapter work and Console presentation may run in parallel after the shared API DTOs are frozen.
+
+### Wave 4 — recovery, abuse resistance, and managed signing
+
+Implementation:
+
+- add PostgreSQL-backed shared rate limits, concurrent-session ceilings, organization session epochs, bounded WebAuthn ceremonies, and enumeration-safe errors;
+- implement versioned threshold owner recovery with hashed one-time material, restricted recovery sessions, passkey re-enrollment, and fresh operation-bound recent WebAuthn;
+- move bundle, capability, refresh, Console identity, and qualification/release evidence signing behind purpose-separated KMS/HSM keys and IAM;
+- implement rotation, retiring-key verification windows, drain, rollback refusal, audit, alerts, and disaster-recovery procedures;
+- finish native hash-chain audit upload and authoritative Cloud/Console observation.
+
+Acceptance:
+
+- two-instance race tests prove shared throttles and one-time recovery consumption;
+- no support operator or single lost owner can silently seize an organization;
+- KMS outage, timeout, response loss, version rollback, and cross-purpose/key substitution fail closed or replay the exact committed result;
+- backup/PITR restore and signer rotation drills preserve tenant isolation, generations, audit continuity, and revocations.
+
+Dependencies: stable hosted schemas from Waves 2–3. Recovery and KMS adapters can be built in parallel but promotion waits for joint incident and restore drills.
+
+### Wave 5 — signed distribution and production promotion
+
+Implementation:
+
+- build universal, reproducible release artifacts; generate SBOM, provenance, nested code-identity manifest, and checksums;
+- sign with Developer ID, notarize, staple, and publish one immutable PKG consumed by direct download, Homebrew bootstrap, and CI qualification;
+- deploy immutable Cloud/Console images, run forward-only migrations through a separate role, and add canary, rollback, monitoring, paging, backup, and incident runbooks;
+- commission an independent review of native/XPC/process binding, WebAuthn/recovery, tenant SQL/RLS, KMS IAM, installer lifecycle, evidence, and log redaction;
+- promote through an allow-listed tenant cohort before general availability.
+
+Acceptance:
+
+- both physical Mac lanes and both Agent adapters pass against the same source commit and notarized PKG;
+- browser, Cloud, PostgreSQL, native, packaging, upgrade, recovery, and rollback gates are linked from one signed promotion record;
+- secret scans and artifact inspection pass, and there are zero unresolved critical/high findings or P0/P1 defects;
+- rollback disables new authority without invalidating already-required audit and recovery evidence.
+
+Dependencies: Waves 1–4 and external Apple/KMS/deployment credentials. Credential-dependent execution may be scheduled later, but no production-ready claim is made before the evidence exists.
+
+## 12. Workstream ownership and merge cadence
+
+Use four parallel workstreams with one integration owner:
+
+| Workstream | Owns | Must not independently change |
+| --- | --- | --- |
+| Native/session | Agent Host, XPC service, Secure Enclave, process binding, local durable state | OpenAPI, SQL migration numbering, release identities |
+| Cloud/data | Human/Device APIs, PostgreSQL transactions/RLS, audit ingest, KMS adapters | native XPC DTOs, installer paths |
+| Console/onboarding | BFF DTOs, setup journey, WebAuthn UI, device/session/activity views | authority semantics, browser-held credentials |
+| Qualification/release | protected runners, evidence schemas, package/notarization, deployment gates | product protocol or storage changes without integration review |
+
+Merge cadence:
+
+1. freeze or version any shared contract first;
+2. land implementation plus deterministic negative tests in its owning workstream;
+3. run cross-boundary integration and secret scans;
+4. update the operator/user documentation and compatibility notes;
+5. record modeled, integration, physical, and production evidence as different evidence classes;
+6. promote only a clean commit that passes every gate required by the affected boundary.
