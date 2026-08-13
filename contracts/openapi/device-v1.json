@@ -13,13 +13,43 @@
         "parameters": [{ "$ref": "#/components/parameters/EnrollmentId" }],
         "requestBody": {
           "required": true,
-          "content": { "application/json": { "schema": { "$ref": "../schemas/device-enrollment-v1.schema.json" } } }
+          "content": {
+            "application/json": {
+              "schema": {
+                "oneOf": [
+                  { "$ref": "../schemas/device-enrollment-v1.schema.json" },
+                  { "$ref": "../schemas/device-enrollment-completion-v2.schema.json" }
+                ],
+                "discriminator": { "propertyName": "version" }
+              }
+            }
+          }
         },
         "responses": {
           "201": { "$ref": "#/components/responses/DeviceEnrollmentCompleted" },
           "400": { "$ref": "#/components/responses/BadRequest" },
           "401": { "$ref": "#/components/responses/Unauthorized" },
           "409": { "$ref": "#/components/responses/Conflict" },
+          "429": { "$ref": "#/components/responses/RateLimited" },
+          "503": { "$ref": "#/components/responses/ServiceUnavailable" }
+        }
+      }
+    },
+    "/organizations/{organization_id}/devices/{device_id}/enrollment-receipt": {
+      "get": {
+        "operationId": "getDeviceEnrollmentPossessionReceipt",
+        "summary": "Fetch the device-bound Cloud possession receipt",
+        "description": "Returns the latest Cloud-signed possession receipt for exactly the device identified by both path parameters. The device signature authenticates the read and is bound to this exact tenant/device path. The receipt contains only candidate provenance, public-key fingerprint, key epoch, and signed hashes; it never contains a private key, enrollment credential, or raw challenge nonce. The response is no-store and redirects are forbidden.",
+        "security": [{ "deviceSignature": [] }],
+        "parameters": [{ "$ref": "#/components/parameters/OrganizationId" }, { "$ref": "#/components/parameters/DeviceId" }],
+        "x-agentpass-tenant-scope": { "kind": "organization", "source": "path.organization_id", "cross-tenant-disclosure": false, "additionalProperties": false },
+        "x-agentpass-device-scope": { "kind": "device", "source": "path.device_id", "cross-device-disclosure": false, "additionalProperties": false },
+        "x-agentpass-transport": { "redirects": "forbidden", "cache-control": "no-store", "additionalProperties": false },
+        "responses": {
+          "200": { "$ref": "#/components/responses/DeviceEnrollmentReceipt" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "404": { "$ref": "#/components/responses/NotFound" },
           "429": { "$ref": "#/components/responses/RateLimited" },
           "503": { "$ref": "#/components/responses/ServiceUnavailable" }
         }
@@ -149,6 +179,7 @@
     "responses": {
       "Json": { "description": "JSON response", "content": { "application/json": { "schema": { "type": "object" } } } },
       "DeviceEnrollmentCompleted": { "description": "The one-time enrollment was consumed and the device is active. The response is no-store and contains no private key or enrollment credential.", "headers": { "Cache-Control": { "$ref": "#/components/headers/CacheControl" }, "X-RateLimit-Limit": { "$ref": "#/components/headers/RateLimitLimit" }, "X-RateLimit-Remaining": { "$ref": "#/components/headers/RateLimitRemaining" }, "X-RateLimit-Reset": { "$ref": "#/components/headers/RateLimitReset" } }, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/DeviceEnrollmentCompletedResponse" } } } },
+      "DeviceEnrollmentReceipt": { "description": "A device-authenticated, Cloud-signed possession receipt. The response is no-store and contains no private key, enrollment credential, or raw challenge nonce.", "headers": { "Cache-Control": { "$ref": "#/components/headers/CacheControl" }, "X-RateLimit-Limit": { "$ref": "#/components/headers/RateLimitLimit" }, "X-RateLimit-Remaining": { "$ref": "#/components/headers/RateLimitRemaining" }, "X-RateLimit-Reset": { "$ref": "#/components/headers/RateLimitReset" } }, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/DevicePossessionReceiptV1" } } } },
       "ControlRefreshPoll": { "description": "A newer device-bound refresh hint. The hint accelerates a bundle fetch but cannot authorize or extend expiry. The response is no-store and includes a request_id envelope field.", "headers": { "Cache-Control": { "$ref": "#/components/headers/CacheControl" }, "X-RateLimit-Limit": { "$ref": "#/components/headers/RateLimitLimit" }, "X-RateLimit-Remaining": { "$ref": "#/components/headers/RateLimitRemaining" }, "X-RateLimit-Reset": { "$ref": "#/components/headers/RateLimitReset" } }, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ControlRefreshPollResponse" } } } },
       "ControlBundleFetch": { "description": "The exact signed ControlBundle v2 for the path organization and device. The response is no-store and must not be obtained through a redirect. It includes a request_id envelope field.", "headers": { "Cache-Control": { "$ref": "#/components/headers/CacheControl" }, "X-RateLimit-Limit": { "$ref": "#/components/headers/RateLimitLimit" }, "X-RateLimit-Remaining": { "$ref": "#/components/headers/RateLimitRemaining" }, "X-RateLimit-Reset": { "$ref": "#/components/headers/RateLimitReset" } }, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ControlBundleFetchResponse" } } } },
       "ControlBundleAcknowledgementAccepted": { "description": "The exact acknowledgement was accepted or recognized as an idempotent duplicate. The response is no-store and includes a request_id envelope field.", "headers": { "Cache-Control": { "$ref": "#/components/headers/CacheControl" }, "X-RateLimit-Limit": { "$ref": "#/components/headers/RateLimitLimit" }, "X-RateLimit-Remaining": { "$ref": "#/components/headers/RateLimitRemaining" }, "X-RateLimit-Reset": { "$ref": "#/components/headers/RateLimitReset" } }, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ControlBundleAcknowledgementResponse" } } } },
@@ -166,6 +197,8 @@
       "ScopeV1": { "$ref": "../schemas/scope-v1.schema.json" },
       "BundleAckV1": { "$ref": "../schemas/bundle-ack-v1.schema.json" },
       "RefreshHintV1": { "$ref": "../schemas/refresh-hint-v1.schema.json" },
+      "DeviceEnrollmentCompletionV2": { "$ref": "../schemas/device-enrollment-completion-v2.schema.json" },
+      "DevicePossessionReceiptV1": { "$ref": "../schemas/device-possession-receipt-v1.schema.json" },
       "DeviceRefreshState": { "type": "string", "enum": ["pending", "fetching", "applied", "blocked", "stale", "offline", "revoked"] },
       "ControlBundleAudience": {
         "type": "object",

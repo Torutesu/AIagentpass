@@ -525,9 +525,16 @@
         "summary": "Issue a device enrollment",
         "security": [{ "humanSession": [], "recentWebAuthn": [] }],
         "parameters": [{ "$ref": "#/components/parameters/OrganizationId" }, { "$ref": "#/components/parameters/CsrfToken" }, { "$ref": "#/components/parameters/IdempotencyKey" }],
+        "requestBody": { "$ref": "#/components/requestBodies/DeviceEnrollmentIssue" },
         "responses": { "201": { "$ref": "#/components/responses/Json" }, "400": { "$ref": "#/components/responses/BadRequest" }, "401": { "$ref": "#/components/responses/Unauthorized" }, "403": { "$ref": "#/components/responses/Forbidden" }, "404": { "$ref": "#/components/responses/NotFound" }, "409": { "$ref": "#/components/responses/IdempotencyConflict" } },
         "x-agentpass-tenant-scope": { "kind": "organization", "source": "path.organization_id", "cross-tenant-disclosure": false },
-        "x-agentpass-minimum-role": "admin"
+        "x-agentpass-minimum-role": "admin",
+        "x-agentpass-enrollment-v2": {
+          "request_schema": "../schemas/device-enrollment-issue-v2.schema.json",
+          "candidate_binding": "candidate_id is resolved against the server-side release candidate registry; artifact_sha256, source_commit, team_id, and manifest_sha256 are never accepted as caller input",
+          "device_key_binding": "device_key_fingerprint is bound to the one-time challenge and must match the public key used at completion",
+          "forbidden_request_fields": ["artifact_sha256", "source_commit", "team_id", "manifest_sha256", "release_manifest", "private_key", "credential"]
+        }
       }
     },
     "/organizations/{organization_id}/emergency-stop": {
@@ -683,6 +690,20 @@
         "required": true,
         "description": "Exactly {}. The request carries no generation, bundle, ACK, notification, or policy input; those values are resolved from the authenticated organization and device state.",
         "content": { "application/json": { "schema": { "$ref": "#/components/schemas/DeviceRefreshRequestBody" } } }
+      },
+      "DeviceEnrollmentIssue": {
+        "required": true,
+        "description": "The legacy request shape remains accepted. A v2 request must use proof_version=2, candidate_id, and device_key_fingerprint; release artifact metadata is resolved by Cloud and cannot be supplied by the caller.",
+        "content": {
+          "application/json": {
+            "schema": {
+              "oneOf": [
+                { "$ref": "#/components/schemas/DeviceEnrollmentIssueRequestV1" },
+                { "$ref": "../schemas/device-enrollment-issue-v2.schema.json" }
+              ]
+            }
+          }
+        }
       }
     },
     "responses": {
@@ -786,6 +807,20 @@
         "minProperties": 0,
         "maxProperties": 0,
         "description": "Exactly {}. No caller-supplied generation, bundle, ACK, notification, or policy field is accepted."
+      },
+      "DeviceEnrollmentIssueRequestV1": {
+        "type": "object",
+        "additionalProperties": false,
+        "maxProperties": 5,
+        "required": ["label"],
+        "description": "Legacy enrollment issuance request. It contains no release candidate or artifact identity and remains valid for v1 enrollment proof.",
+        "properties": {
+          "enrollment_id": { "type": "string", "format": "uuid" },
+          "device_id": { "type": "string", "format": "uuid" },
+          "label": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[^\\u0000-\\u001f\\u007f]{1,128}$" },
+          "platform": { "const": "macos" },
+          "ttl_ms": { "type": "integer", "minimum": 60000, "maximum": 86400000 }
+        }
       },
       "DeviceRefreshRequestResult": {
         "type": "object",

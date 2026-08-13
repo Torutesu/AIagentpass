@@ -55,7 +55,7 @@ export const inspectProvisioningSources = ({ sourceRoot, scenarioDirectory, mach
   const driverDirectory = protectedDirectory(join(source, 'drivers'), 'driver source directory', { ownerUid: sourceOwner });
   const driverEntries = fs.readdirSync(driverDirectory, { withFileTypes: true }).filter((entry) => !entry.name.endsWith('.test.mjs')).sort((a, b) => a.name.localeCompare(b.name));
   if (driverEntries.length !== REQUIRED_GATES.length || driverEntries.some((entry, index) => entry.name !== REQUIRED_GATES[index] || !entry.isFile() || entry.isSymbolicLink())) throw new Error('driver source inventory is invalid');
-  const runtimeNames = ['driver-runtime.mjs', 'scenario-runtime.mjs'];
+  const runtimeNames = ['candidate-checkpoint.mjs', 'driver-runtime.mjs', 'scenario-runtime.mjs'];
   const runtimeDirectory = protectedDirectory(join(source, 'lib'), 'runtime source directory', { ownerUid: sourceOwner, exactEntries: runtimeNames });
   const scenarios = protectedDirectory(scenarioDirectory, 'scenario source directory', { ownerUid: production ? 0 : undefined, exactEntries: REQUIRED_GATES });
   const drivers = REQUIRED_GATES.map((gate) => ({ gate, ...readStableSource(join(driverDirectory, gate), { executable: true, ownerUid: sourceOwner }) }));

@@ -2,6 +2,8 @@
 import crypto from 'node:crypto';
 import { pathToFileURL } from 'node:url';
 import { resolve } from 'node:path';
+import { join } from 'node:path';
+import { withVerifiedCandidateCheckpoint } from '../lib/candidate-checkpoint.mjs';
 import { executePhysicalScenario, parseJSONOutput, requireCommandSuccess, runPinnedExecutable, runPhysicalScenario } from '../lib/scenario-runtime.mjs';
 
 const GATE = 'secure-enclave-enrollment';
@@ -24,8 +26,9 @@ const parseNativeClient = (result, label) => {
   return parseJSONOutput(bytes, label);
 };
 
-export const performSecureEnclaveEnrollment = async ({ release, machine, production = true, runCommand, runPinned = runPinnedExecutable, getUid = process.getuid } = {}) => {
+export const performSecureEnclaveEnrollment = async ({ release, machine, production = true, runCommand, runPinned = runPinnedExecutable, getUid = process.getuid, withCheckpoint = withVerifiedCandidateCheckpoint } = {}) => {
   requireRoot(getUid);
+  return withCheckpoint(join(machine.checkpointDirectory, 'candidate-checkpoint.json'), async () => {
   const serviceArgs = (action) => ['--device-auth', action, '--config', machine.serviceConfigPath];
   const snapshot = parseDirect(await runPinned(machine.executables.native_service, serviceArgs('qualify'), { production, runCommand }), 'Secure Enclave qualification');
   exactKeys(snapshot, SNAPSHOT_KEYS, 'Secure Enclave qualification');
@@ -47,6 +50,7 @@ export const performSecureEnclaveEnrollment = async ({ release, machine, product
   const control = parseNativeClient(await runPinned(machine.executables.native_client, ['--service', machine.serviceLabel, 'control-status'], { production, runCommand }), 'native control status');
   if (control.control_configured !== true || control.control_format_epoch !== 2 || control.control_operational !== true || control.control_device_auth_public_key !== key.public_key_pem) throw new Error('ControlBundle device authentication is not bound to the enrollment key');
   return TESTS;
+  }, { production, expected: { artifactSha256: release.artifactSha256, sourceCommit: release.sourceCommit, teamId: release.teamId, applicationPath: '/Applications/AgentPass.app' } });
 };
 
 export const executeSecureEnclaveEnrollment = (options) => executePhysicalScenario({ gate: GATE, tests: TESTS, ...options, execute: (context) => performSecureEnclaveEnrollment(context) });

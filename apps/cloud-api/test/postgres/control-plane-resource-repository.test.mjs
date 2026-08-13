@@ -2,6 +2,8 @@ import assert from "node:assert/strict";
 import crypto from "node:crypto";
 import test from "node:test";
 
+import { canonicalJson } from "../../../../packages/protocol/src/index.mjs";
+
 import {
   ControlPlaneResourceRepositoryError,
   createPostgresControlPlaneResourceRepository
@@ -20,6 +22,9 @@ const ids = {
 const NOW = "2026-08-12T00:00:00.000Z";
 const EXPIRES = "2026-08-12T00:15:00.000Z";
 const DIGEST = "a".repeat(64);
+const CANDIDATE = { candidate_id: "release-2026.08.13", source_commit: "b".repeat(40), artifact_sha256: "c".repeat(64), manifest_sha256: "d".repeat(64), team_id: "ABCDE12345", status: "active", created_at: NOW, retired_at: null };
+const DEVICE_FINGERPRINT = `SHA256:${"E".repeat(43)}`;
+const CHALLENGE_DIGEST = "f".repeat(64);
 const SCOPE = { operations: ["git.commit.sign"], repositories: ["/repo"], branches: { allow: ["main"], deny: [] }, remotes: { allow: ["origin"], deny: [] } };
 const PUBLIC_KEY = "-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==\n-----END PUBLIC KEY-----";
 
@@ -89,6 +94,33 @@ class FakeClient {
   }
 }
 
+class PossessionFakeClient extends FakeClient {
+  constructor() {
+    super();
+    this.calls = [];
+    this.candidate = { ...CANDIDATE };
+    this.v2Enrollment = enrollmentRow({ proof_version: 2, candidate_id: CANDIDATE.candidate_id, device_key_fingerprint: DEVICE_FINGERPRINT, challenge_nonce_digest: CHALLENGE_DIGEST });
+    this.receipt = possessionReceipt();
+  }
+
+  async query(text, params = []) {
+    this.calls.push({ text, params });
+    if (text.startsWith("INSERT INTO release_candidates")) return result([this.candidate], 1);
+    if (text.startsWith("SELECT candidate_id,source_commit")) return result([this.candidate]);
+    if (text.startsWith("UPDATE release_candidates")) {
+      this.candidate = { ...this.candidate, status: "retired", retired_at: params[1] };
+      return result([this.candidate], 1);
+    }
+    if (text.startsWith("SELECT id,organization_id,device_id,label,platform,created_at,expires_at,consumed_at,completion_hash") && text.includes("proof_version")) return result([this.v2Enrollment]);
+    if (text.startsWith("INSERT INTO device_enrollments") && text.includes("proof_version")) return result([this.v2Enrollment], 1);
+    if (text.startsWith("INSERT INTO device_enrollment_possession_receipts")) return result([possessionReceiptRow()], 1);
+    if (text.startsWith("SELECT organization_id,enrollment_id,device_id,candidate_id,artifact_sha256")) return result([possessionReceiptRow()]);
+    if (text.startsWith("SELECT organization_id,id,label,key_algorithm,public_key_pem,status,metadata,version,created_at,last_seen_at") && params[1] === ids.device2) return result([deviceRow({ id: ids.device2, label: "New Mac", key_algorithm: null, status: "pending", public_key_pem: null })]);
+    if (text.startsWith("UPDATE devices SET key_algorithm")) return result([deviceRow({ id: ids.device2, status: "active", public_key_pem: PUBLIC_KEY, version: 2 })], 1);
+    return super.query(text, params);
+  }
+}
+
 function result(rows = [], rowCount = rows.length) { return { rows, rowCount }; }
 function deviceRow(overrides = {}) {
   const row = { organization_id: ids.organization, id: ids.device, label: "Build Mac", key_algorithm: "ed25519", public_key_pem: PUBLIC_KEY, status: "active", metadata: {}, version: 1, created_at: NOW, last_seen_at: null, active_key_epoch: 1, active_public_key_pem: PUBLIC_KEY, active_key_epoch_status: "active", active_key_epoch_count: "1", ...overrides };
@@ -103,6 +135,17 @@ function deviceRow(overrides = {}) {
 function agentRow(overrides = {}) { return { organization_id: ids.organization, id: ids.agent, device_id: ids.device, kind: "claude-code", name: "Claude", public_key_pem: PUBLIC_KEY, status: "active", version: 1, created_at: NOW, last_seen_at: null, ...overrides }; }
 function policyRow(overrides = {}) { return { organization_id: ids.organization, id: ids.policy, sequence: 1, name: "default", scope_json: SCOPE, status: "active", created_by: ids.member, created_at: NOW, updated_at: NOW, version: 1, ...overrides }; }
 function enrollmentRow(overrides = {}) { return { id: ids.enrollment, organization_id: ids.organization, device_id: ids.device2, label: "New Mac", platform: "macos", created_at: NOW, expires_at: EXPIRES, consumed_at: null, completion_hash: null, ...overrides }; }
+function possessionReceiptStatement() {
+  return { version: 1, enrollment_id: ids.enrollment, organization_id: ids.organization, device_id: ids.device2, candidate_id: CANDIDATE.candidate_id, artifact_sha256: CANDIDATE.artifact_sha256, source_commit: CANDIDATE.source_commit, team_id: CANDIDATE.team_id, device_key_fingerprint: DEVICE_FINGERPRINT, device_key_epoch: 1, challenge_nonce_digest: CHALLENGE_DIGEST, issued_at: NOW };
+}
+function possessionReceipt() {
+  const statement = possessionReceiptStatement();
+  return { version: 1, purpose: "device-enrollment-possession-receipt", key_id: "possession-2026-08", algorithm: "ed25519", statement, statement_hash: crypto.createHash("sha256").update(canonicalJson(statement), "utf8").digest("hex"), signature: "A".repeat(86) };
+}
+function possessionReceiptRow() {
+  const receipt = possessionReceipt();
+  return { organization_id: ids.organization, enrollment_id: ids.enrollment, device_id: ids.device2, candidate_id: CANDIDATE.candidate_id, artifact_sha256: CANDIDATE.artifact_sha256, source_commit: CANDIDATE.source_commit, team_id: CANDIDATE.team_id, device_key_fingerprint: DEVICE_FINGERPRINT, device_key_epoch: 1, challenge_nonce_digest: CHALLENGE_DIGEST, purpose: receipt.purpose, signer_key_id: receipt.key_id, signature_algorithm: receipt.algorithm, statement_json: receipt.statement, statement_hash: receipt.statement_hash, signature_base64url: receipt.signature, issued_at: NOW };
+}
 function repo(client = new FakeClient()) { return { repository: createPostgresControlPlaneResourceRepository({ client, now: () => NOW }), client }; }
 
 test("exposes the CloudStore resource API and requires tenant-scoped identity", () => {
@@ -112,6 +155,8 @@ test("exposes the CloudStore resource API and requires tenant-scoped identity", 
     "completeDeviceEnrollment", "createAgent", "createDevice", "createDeviceEnrollment", "createPolicy",
     "getAgent", "getDevice", "getPolicy", "listAgents", "listDeviceReadModels", "listDevices", "listPolicies", "updateAgent", "updateDevice", "updatePolicy"
   ].sort());
+  assert.equal(typeof repository.createDeviceEnrollmentV2, "function");
+  assert.equal(typeof repository.getDeviceEnrollmentPossessionReceipt, "function");
   assert.rejects(repository.listDevices({ organization_id: "not-a-uuid" }), { code: "ERR_INVALID_UUID" });
 });
 
@@ -340,4 +385,100 @@ test("does not leak database error details", async () => {
   };
   const { repository } = repo(client);
   await assert.rejects(repository.createAgent({ organization_id: ids.organization, agent_id: ids.agent, device_id: ids.device, version: 1, name: "Claude", kind: "claude-code", public_key: PUBLIC_KEY, created_at: NOW, principal_id: ids.member, idempotency_key: "agent-error-1" }), (error) => error instanceof ControlPlaneResourceRepositoryError && error.code === "ERR_DATABASE" && !error.message.includes("do-not-leak"));
+});
+
+test("resolves an active release candidate server-side and stores only v2 binding digests", async () => {
+  const client = new PossessionFakeClient();
+  const { repository } = repo(client);
+  const candidate = await repository.createReleaseCandidate(CANDIDATE);
+  assert.deepEqual(candidate, CANDIDATE);
+  assert.deepEqual(await repository.resolveActiveReleaseCandidate({ candidate_id: CANDIDATE.candidate_id }), CANDIDATE);
+  const enrollment = await repository.createDeviceEnrollment({
+    proof_version: 2,
+    organization_id: ids.organization,
+    enrollment_id: ids.enrollment,
+    device_id: ids.device2,
+    label: "New Mac",
+    platform: "macos",
+    credential_digest: DIGEST,
+    challenge_nonce_digest: CHALLENGE_DIGEST,
+    candidate_id: CANDIDATE.candidate_id,
+    device_key_fingerprint: DEVICE_FINGERPRINT,
+    created_at: NOW,
+    expires_at: EXPIRES,
+    created_by: ids.member,
+    principal_id: ids.member,
+    idempotency_key: "enrollment-v2-1"
+  });
+  assert.equal(enrollment.proof_version, 2);
+  assert.equal(enrollment.candidate_id, CANDIDATE.candidate_id);
+  assert.equal(enrollment.challenge_nonce_digest, CHALLENGE_DIGEST);
+  assert.deepEqual(enrollment.candidate_binding, {
+    candidate_id: CANDIDATE.candidate_id,
+    artifact_sha256: CANDIDATE.artifact_sha256,
+    source_commit: CANDIDATE.source_commit,
+    manifest_sha256: CANDIDATE.manifest_sha256,
+    team_id: CANDIDATE.team_id
+  });
+  const insert = client.calls.find(({ text }) => text.startsWith("INSERT INTO device_enrollments") && text.includes("proof_version"));
+  assert.match(insert.text, /decode\(\$12,'hex'\)/u);
+  assert.doesNotMatch(insert.text, /challenge_id|raw_nonce|credential_secret|private_key/iu);
+  assert.deepEqual(insert.params.filter((value) => typeof value === "string" && value.includes("nonce")), []);
+});
+
+test("completes v2 atomically with the signer envelope and exposes a tenant-safe receipt lookup", async () => {
+  const client = new PossessionFakeClient();
+  const { repository } = repo(client);
+  const receipt = possessionReceipt();
+  const completed = await repository.completeDeviceEnrollment({
+    proof_version: 2,
+    organization_id: ids.organization,
+    enrollment_id: ids.enrollment,
+    device_id: ids.device2,
+    label: "New Mac",
+    platform: "macos",
+    algorithm: "p256-sha256",
+    public_key: PUBLIC_KEY,
+    credential_digest: DIGEST,
+    candidate_id: CANDIDATE.candidate_id,
+    device_key_fingerprint: DEVICE_FINGERPRINT,
+    challenge_nonce_digest: CHALLENGE_DIGEST,
+    possession_receipt: receipt,
+    completed_at: NOW
+  });
+  assert.equal(completed.status, "active");
+  assert.equal(completed.key_epoch, 1);
+  const receiptInsertIndex = client.calls.findIndex(({ text }) => text.startsWith("INSERT INTO device_enrollment_possession_receipts"));
+  const enrollmentUpdateIndex = client.calls.findIndex(({ text }) => text.startsWith("UPDATE device_enrollments"));
+  assert.ok(receiptInsertIndex > -1 && receiptInsertIndex < enrollmentUpdateIndex);
+  const receiptInsert = client.calls[receiptInsertIndex];
+  assert.match(receiptInsert.text, /purpose,signer_key_id,signature_algorithm,statement_json,statement_hash,signature_base64url/u);
+  assert.match(receiptInsert.text, /decode\(\$10,'hex'\)/u);
+  assert.doesNotMatch(receiptInsert.text, /challenge_id|raw_nonce|credential_secret|private_key/iu);
+  assert.deepEqual(await repository.getDeviceEnrollmentPossessionReceipt({ organization_id: ids.organization, device_id: ids.device2 }), receipt);
+});
+
+test("rejects raw v2 possession material and preserves retired candidate receipts", async () => {
+  const client = new PossessionFakeClient();
+  const { repository } = repo(client);
+  await assert.rejects(repository.createDeviceEnrollmentV2({
+    organization_id: ids.organization,
+    enrollment_id: ids.enrollment,
+    device_id: ids.device2,
+    label: "New Mac",
+    platform: "macos",
+    credential_digest: DIGEST,
+    challenge_nonce_digest: CHALLENGE_DIGEST,
+    candidate_id: CANDIDATE.candidate_id,
+    device_key_fingerprint: DEVICE_FINGERPRINT,
+    created_at: NOW,
+    expires_at: EXPIRES,
+    created_by: ids.member,
+    principal_id: ids.member,
+    idempotency_key: "enrollment-v2-2",
+    nonce: "raw-challenge-value"
+  }), { code: "ERR_SECRET_MATERIAL" });
+  const retired = await repository.retireReleaseCandidate({ candidate_id: CANDIDATE.candidate_id, retired_at: EXPIRES });
+  assert.equal(retired.status, "retired");
+  assert.equal(retired.retired_at, EXPIRES);
 });

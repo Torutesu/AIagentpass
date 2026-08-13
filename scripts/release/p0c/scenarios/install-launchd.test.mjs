@@ -9,6 +9,14 @@ const TEAM_ID = 'ABCDE12345';
 const APP_PATH = '/Applications/AgentPass.app';
 const CLIENT_BINARY = `${APP_PATH}/Contents/Library/HelperTools/AgentPassNativeClient.app/Contents/MacOS/agentpass-native-client`;
 const SERVICE_BINARY = `${APP_PATH}/Contents/Library/HelperTools/AgentPassNativeService.app/Contents/MacOS/agentpass-native-service`;
+const CODE_IDENTITIES = [
+  ['AgentPass.app', 'dev.agentpass'],
+  ['AgentPass.app/Contents/Library/HelperTools/AgentPassNativeClient.app', 'dev.agentpass.native-client'],
+  ['AgentPass.app/Contents/Library/HelperTools/AgentPassNativeService.app', 'dev.agentpass.native-service'],
+  ['AgentPass.app/Contents/Library/HelperTools/agentpass-atomic-rename', 'dev.agentpass.atomic-rename'],
+  ['AgentPass.app/Contents/MacOS/agentpass-native-manager', 'dev.agentpass.native-manager'],
+  ['AgentPass.app/Contents/MacOS/agentpass-onboarding', 'dev.agentpass']
+].map(([identityPath, bundleId], index) => ({ path: identityPath, bundle_id: bundleId, team_id: TEAM_ID, code_directory_hash: String(index + 1).repeat(40) }));
 
 const stat = (kind) => ({
   uid: 0,
@@ -28,14 +36,16 @@ const fakeFileSystem = (directories, files) => ({
   },
 });
 
-const release = (artifactPath = '/private/tmp/AgentPass.pkg') => ({ artifactPath, artifactSha256: 'a'.repeat(64), sourceCommit: 'b'.repeat(40), teamId: TEAM_ID });
+const release = (artifactPath = '/private/tmp/AgentPass.pkg') => ({ artifactPath, artifactSha256: 'a'.repeat(64), sourceCommit: 'b'.repeat(40), teamId: TEAM_ID, codeIdentities: CODE_IDENTITIES });
 const machine = (nativeClientPath = CLIENT_BINARY) => ({
   applicationPath: APP_PATH,
   serviceLabel: 'dev.agentpass.native-service',
+  checkpointDirectory: '/private/var/db/agentpass-qualification',
   executables: { native_client: { path: nativeClientPath, sha256: 'c'.repeat(64) } },
 });
 
 const successful = (extra = {}) => ({ ok: true, exitCode: 0, signal: null, stdout: Buffer.alloc(0), stderr: Buffer.alloc(0), ...extra });
+const verifiedCheckpoint = async (_path, operation) => operation();
 
 test('gatekeeper scenario injects fixed assessment, install, and post-install verification', async () => {
   const commands = [];
@@ -45,8 +55,12 @@ test('gatekeeper scenario injects fixed assessment, install, and post-install ve
     return successful();
   };
   const fileSystem = fakeFileSystem(new Set([APP_PATH]), new Set());
-  const result = await performGatekeeperNotarization({ release: release(), machine: machine(), production: false, getUid: () => 0, runCommand, fileSystem });
+  let checkpointRequest;
+  const result = await performGatekeeperNotarization({ release: release(), machine: machine(), production: false, getUid: () => 0, runCommand, fileSystem, readCodeIdentity: () => ({ designated_requirement: 'fixed requirement' }), mintCheckpoint: (request) => { checkpointRequest = request; } });
   assert.deepEqual(result, ['exact-pkg-install']);
+  assert.equal(checkpointRequest.checkpoint_path, '/private/var/db/agentpass-qualification/candidate-checkpoint.json');
+  assert.equal(checkpointRequest.code_objects.length, 6);
+  assert.deepEqual(checkpointRequest.code_objects.map((item) => item.role).sort(), ['application', 'atomic-rename', 'native-client', 'native-manager', 'native-service', 'onboarding']);
   assert.deepEqual(commands, [
     ['/usr/sbin/spctl', ['--assess', '--type', 'install', '--verbose=4', '/private/tmp/AgentPass.pkg']],
     ['/usr/sbin/pkgutil', ['--check-signature', '/private/tmp/AgentPass.pkg']],
@@ -74,7 +88,7 @@ test('clean install scenario injects launchd, signatures, and both pinned XPC co
     `${APP_PATH}/Contents/Library/HelperTools/AgentPassNativeService.app`,
   ]);
   const files = new Set([CLIENT_BINARY, SERVICE_BINARY]);
-  const result = await performCleanInstallLaunchdXpc({ release: release(), machine: machine(), production: false, getUid: () => 0, runCommand, runPinned, fileSystem: fakeFileSystem(directories, files) });
+  const result = await performCleanInstallLaunchdXpc({ release: release(), machine: machine(), production: false, getUid: () => 0, runCommand, runPinned, fileSystem: fakeFileSystem(directories, files), withCheckpoint: verifiedCheckpoint });
   assert.deepEqual(result, ['launchd-xpc-approval']);
   assert.deepEqual(commands[0], ['/bin/launchctl', ['print', 'system/dev.agentpass.native-service']]);
   assert.deepEqual(commands.at(-2), ['pinned', CLIENT_BINARY, ['--service', 'dev.agentpass.native-service', 'ping']]);
@@ -97,5 +111,5 @@ test('physical scenario sources are fixed-path, root-gated, and cannot use a she
 
 test('dependency injection still rejects a non-root physical invocation', async () => {
   await assert.rejects(() => performGatekeeperNotarization({ release: release(), machine: machine(), production: false, getUid: () => 501 }), /requires root/u);
-  await assert.rejects(() => performCleanInstallLaunchdXpc({ release: release(), machine: machine(), production: false, getUid: () => 501 }), /requires root/u);
+  await assert.rejects(() => performCleanInstallLaunchdXpc({ release: release(), machine: machine(), production: false, getUid: () => 501, withCheckpoint: verifiedCheckpoint }), /requires root/u);
 });

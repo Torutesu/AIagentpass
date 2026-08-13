@@ -5,10 +5,14 @@ import test from "node:test";
 import {
   DEVICE_ENROLLMENT_ERRORS,
   DeviceEnrollmentError,
+  buildEnrollmentCandidateBinding,
   buildDeviceEnrollmentRequest,
+  candidateBindingDigest,
   canonicalEnrollmentProof,
+  canonicalEnrollmentProofV2,
   createDeviceEnrollmentClient,
-  deviceEnrollmentEvidence
+  deviceEnrollmentEvidence,
+  verifyDeviceEnrollmentReceipt
 } from "../lib/device-enrollment-client.mjs";
 
 const ENROLLMENT = "11111111-1111-4111-8111-111111111111";
@@ -16,6 +20,8 @@ const ORGANIZATION = "22222222-2222-4222-8222-222222222222";
 const DEVICE = "33333333-3333-4333-8333-333333333333";
 const BASE_URL = "https://api.example.test/v1";
 const CREDENTIAL = "Abcdefghijklmnopqrstuvwxyz0123456789-_ABCDE";
+const CHALLENGE_NONCE = "A".repeat(43);
+const CHALLENGE_ID = "44444444-4444-4444-8444-444444444444";
 
 function keys(algorithm = "p256-sha256") {
   const pair = algorithm === "ed25519"
@@ -80,6 +86,22 @@ function enrolledResponse(pair, extra = {}) {
       }
     },
     ...extra
+  };
+}
+
+function candidate(pair, overrides = {}) {
+  return {
+    version: 1,
+    enrollment_id: ENROLLMENT,
+    organization_id: ORGANIZATION,
+    device_id: DEVICE,
+    candidate_id: "release-2026-08-13-01",
+    artifact_sha256: "a".repeat(64),
+    source_commit: "b".repeat(40),
+    team_id: "TEAMID1234",
+    device_key_fingerprint: fingerprint(pair),
+    expires_at: "2099-01-02T03:04:05.000Z",
+    ...overrides
   };
 }
 
@@ -302,4 +324,105 @@ test("exposes only the exact non-secret setup evidence", () => {
   const keyFingerprint = fingerprint(pair);
   assert.deepEqual(deviceEnrollmentEvidence({ enrollment_id: ENROLLMENT, organization_id: ORGANIZATION, device_id: DEVICE, device_key_epoch: 2, key_fingerprint: keyFingerprint, private_key: "ignored" }), { organization_id: ORGANIZATION, device_id: DEVICE, enrollment_id: ENROLLMENT, device_key_epoch: 2, key_fingerprint: keyFingerprint });
   assert.throws(() => deviceEnrollmentEvidence({ enrollment_id: ENROLLMENT, organization_id: ORGANIZATION, device_id: DEVICE }), (error) => error.code === DEVICE_ENROLLMENT_ERRORS.BINDING);
+});
+
+test("builds a strict candidate binding and rejects replay/substitution fields", () => {
+  const pair = keys();
+  const binding = buildEnrollmentCandidateBinding(candidate(pair));
+  assert.deepEqual(Object.keys(binding).sort(), ["artifact_sha256", "candidate_id", "device_id", "device_key_fingerprint", "enrollment_id", "expires_at", "organization_id", "source_commit", "team_id", "version"].sort());
+  assert.equal(candidateBindingDigest(binding), crypto.createHash("sha256").update(JSON.stringify({
+    artifact_sha256: "a".repeat(64),
+    candidate_id: "release-2026-08-13-01",
+    device_id: DEVICE,
+    device_key_fingerprint: fingerprint(pair),
+    enrollment_id: ENROLLMENT,
+    expires_at: "2099-01-02T03:04:05.000Z",
+    organization_id: ORGANIZATION,
+    source_commit: "b".repeat(40),
+    team_id: "TEAMID1234",
+    version: 1
+  })).digest("hex"));
+  for (const bad of [
+    { ...candidate(pair), extra: true },
+    { ...candidate(pair), source_commit: "B".repeat(40) },
+    { ...candidate(pair), team_id: "teamid1234" },
+    { ...candidate(pair), expires_at: "2099-01-02T03:04:05Z" },
+    { ...candidate(pair), artifact_sha256: "c".repeat(63) }
+  ]) assert.throws(() => buildEnrollmentCandidateBinding(bad));
+});
+
+test("v2 proof is domain-separated, exact-path, nonce-bound, and candidate-bound", () => {
+  const pair = keys();
+  const binding = candidate(pair);
+  const bodyDigest = "1".repeat(64);
+  const credentialDigest = "2".repeat(64);
+  const proof = canonicalEnrollmentProofV2({ path: `/v1/enrollments/${ENROLLMENT}`, bodyDigest, credentialDigest, challengeNonce: CHALLENGE_NONCE, candidateBinding: binding });
+  assert.equal(proof, `AgentPass-Enrollment-Proof-v2\0POST\n/v1/enrollments/${ENROLLMENT}\n${bodyDigest}\n${credentialDigest}\n${CHALLENGE_NONCE}\n${candidateBindingDigest(binding)}`);
+  assert.equal(proof.startsWith("AgentPass-Enrollment-Proof-v2\0"), true);
+  assert.throws(() => canonicalEnrollmentProofV2({ path: `/v1/enrollments/${ORGANIZATION}`, bodyDigest, credentialDigest, challengeNonce: CHALLENGE_NONCE, candidateBinding: binding }));
+  assert.throws(() => canonicalEnrollmentProofV2({ path: `/v1/enrollments/${ENROLLMENT}?x=1`, bodyDigest, credentialDigest, challengeNonce: CHALLENGE_NONCE, candidateBinding: binding }));
+  assert.throws(() => canonicalEnrollmentProofV2({ path: `/v1/enrollments/${ENROLLMENT}`, bodyDigest, credentialDigest, challengeNonce: "A", candidateBinding: binding }));
+});
+
+test("v2 client pins the pathname, sends candidate and nonce, and enforces P-256 qualification", async () => {
+  const pair = keys();
+  let captured;
+  const client = createDeviceEnrollmentClient({
+    ...input(pair),
+    proofVersion: 2,
+    qualification: "p256-sha256",
+    challengeId: CHALLENGE_ID,
+    challengeNonce: CHALLENGE_NONCE,
+    candidateBinding: candidate(pair),
+    signer: signWith(pair),
+    fetchImpl: async (url, init) => { captured = { url, init }; return jsonResponse(enrolledResponse(pair)); }
+  });
+  assert.equal((await client.enroll()).status, "enrolled");
+  assert.equal(captured.url, `https://api.example.test/v1/enrollments/${ENROLLMENT}`);
+  assert.equal(captured.init.headers["AgentPass-Enrollment-Nonce"], CHALLENGE_NONCE);
+  assert.equal(JSON.parse(captured.init.headers["AgentPass-Enrollment-Candidate-Binding"]).candidate_id, "release-2026-08-13-01");
+  const v2Body = JSON.parse(captured.init.body.toString("utf8"));
+  assert.equal(v2Body.version, 2);
+  assert.equal(v2Body.challenge.challenge_id, CHALLENGE_ID);
+  assert.equal(client.config.proof_version, 2);
+  const ed = keys("ed25519");
+  assert.throws(() => createDeviceEnrollmentClient({ ...input(ed, { deviceKey: { algorithm: "ed25519", spkiPem: ed.publicPem }, keyFingerprint: fingerprint(ed) }), proofVersion: 2, qualification: "p256-sha256", challengeId: CHALLENGE_ID, challengeNonce: CHALLENGE_NONCE, candidateBinding: candidate(ed), signer: signWith(ed, "ed25519"), fetchImpl: async () => jsonResponse(enrolledResponse(ed)) }), (error) => error.code === DEVICE_ENROLLMENT_ERRORS.INVALID_CONFIG);
+});
+
+test("verifies a purpose-separated possession receipt and rejects receipt substitution", () => {
+  const pair = keys("ed25519");
+  const statement = {
+    version: 1,
+    enrollment_id: ENROLLMENT,
+    organization_id: ORGANIZATION,
+    device_id: DEVICE,
+    candidate_id: "release-2026-08-13-01",
+    artifact_sha256: "a".repeat(64),
+    source_commit: "b".repeat(40),
+    team_id: "TEAMID1234",
+    device_key_fingerprint: fingerprint(keys()),
+    device_key_epoch: 3,
+    challenge_nonce_digest: crypto.createHash("sha256").update(CHALLENGE_NONCE).digest("hex"),
+    issued_at: "2099-01-02T03:04:05.000Z"
+  };
+  const statementBytes = Buffer.from(JSON.stringify(Object.fromEntries(Object.entries(statement).sort(([a], [b]) => a.localeCompare(b)))), "utf8");
+  const receiptHash = crypto.createHash("sha256").update(statementBytes).digest("hex");
+  const signed = Buffer.from(`AgentPass-Cloud-Possession-Receipt-v1\0${statementBytes.toString("utf8")}`);
+  const receipt = { version: 1, purpose: "device-enrollment-possession-receipt", key_id: "receipt-key-v1", algorithm: "ed25519", statement, statement_hash: receiptHash, signature: crypto.sign(null, signed, pair.privateKey).toString("base64url") };
+  const verified = verifyDeviceEnrollmentReceipt(receipt, pair.publicKey.export({ type: "spki", format: "pem" }).toString(), { challengeNonce: CHALLENGE_NONCE, enrollmentId: ENROLLMENT, deviceKeyEpoch: 3 });
+  assert.equal(verified.statement_hash, receiptHash);
+  const p256Signer = keys();
+  const p256ReceiptBytes = Buffer.from(`AgentPass-Cloud-Possession-Receipt-v1\0${statementBytes.toString("utf8")}`);
+  const p256Receipt = {
+    version: 1,
+    purpose: "device-enrollment-possession-receipt",
+    key_id: "receipt-p256-v1",
+    algorithm: "p256-sha256",
+    statement,
+    statement_hash: receiptHash,
+    signature: crypto.sign("sha256", p256ReceiptBytes, { key: p256Signer.privateKey, dsaEncoding: "ieee-p1363" }).toString("base64url")
+  };
+  assert.equal(verifyDeviceEnrollmentReceipt(p256Receipt, p256Signer.publicKey.export({ type: "spki", format: "pem" }).toString(), { candidateId: statement.candidate_id }).algorithm, "p256-sha256");
+  assert.throws(() => verifyDeviceEnrollmentReceipt({ ...receipt, statement: { ...statement, device_id: ORGANIZATION } }, pair.publicKey.export({ type: "spki", format: "pem" }).toString()));
+  assert.throws(() => verifyDeviceEnrollmentReceipt({ ...receipt, unknown: true }, pair.publicKey.export({ type: "spki", format: "pem" }).toString()));
 });

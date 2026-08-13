@@ -3,6 +3,8 @@
 import fs from 'node:fs';
 import { pathToFileURL } from 'node:url';
 import { resolve } from 'node:path';
+import { join } from 'node:path';
+import { withVerifiedCandidateCheckpoint } from '../lib/candidate-checkpoint.mjs';
 import {
   executePhysicalScenario,
   requireCommandSuccess,
@@ -57,10 +59,12 @@ const verifySignedPath = async (runCommand, path, teamId) => {
   verifyTeamIdentifier(details, teamId);
 };
 
-export const performCleanInstallLaunchdXpc = async ({ release, machine, production = true, runCommand = runFixedCommand, runPinned = runPinnedExecutable, fileSystem = fs, getUid = process.getuid } = {}) => {
+export const performCleanInstallLaunchdXpc = async ({ release, machine, production = true, runCommand = runFixedCommand, runPinned = runPinnedExecutable, fileSystem = fs, getUid = process.getuid, withCheckpoint = withVerifiedCandidateCheckpoint } = {}) => {
   requireRoot(getUid);
   if (machine.applicationPath !== APP_PATH || machine.serviceLabel !== SERVICE_LABEL) throw new Error('scenario config identity is not fixed');
   if (machine.executables.native_client.path !== CLIENT_BINARY) throw new Error('native client path is not fixed');
+
+  return withCheckpoint(join(machine.checkpointDirectory, 'candidate-checkpoint.json'), async () => {
 
   await runAndRequire(runCommand, LAUNCHCTL, ['print', `system/${SERVICE_LABEL}`]);
 
@@ -80,6 +84,7 @@ export const performCleanInstallLaunchdXpc = async ({ release, machine, producti
   requireCommandSuccess(status, 'native client control status');
 
   return TESTS;
+  }, { production, expected: { artifactSha256: release.artifactSha256, sourceCommit: release.sourceCommit, teamId: release.teamId, applicationPath: APP_PATH } });
 };
 
 export const executeCleanInstallLaunchdXpc = (options) => executePhysicalScenario({

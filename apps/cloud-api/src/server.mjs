@@ -11,6 +11,7 @@ import {
 import { RateLimiterCapacityError, createRateLimiter } from "./rate-limit.mjs";
 import { OPERATIONAL_METRIC_KEYS } from "./postgres/operational-health.mjs";
 import { normalizeDeviceReadModels } from "./device-read-model.mjs";
+import { normalizePossessionReceiptStatement } from "./possession-receipt-signer.mjs";
 
 const MAX_BODY_BYTES = 1024 * 1024;
 const HUMAN_AUTH_MAX_BODY_BYTES = 64 * 1024;
@@ -25,7 +26,22 @@ const HUMAN_AUTH_UUID = "[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89a-
 const UUID = "([0-9a-fA-F-]{36})";
 const UUID_VALUE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu;
 const RFC3339_UTC = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?Z$/u;
-export function createCloudApi({ store, tokenRecords = [], bundleSigner, refreshHintService, now = () => Date.now(), monotonicNow, replayCache = createReplayCache(), deviceReplayConsumer, rateLimiter, admissionRateLimiter, verifyRecentWebAuthn, recentAuthService, humanAuthApi, humanSession, capabilityAuthorityRepository, capabilityRevocationSource, auditRepository, enrollmentCredentialSecret, trackInFlight, readiness, operationalMetrics, operationalProbeSecret } = {}) {
+const RFC3339_MILLISECONDS_UTC = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/u;
+const SAFE_CANDIDATE_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/u;
+const SHA256_HEX = /^[0-9a-f]{64}$/u;
+const SOURCE_COMMIT = /^[0-9a-f]{40}$/u;
+const TEAM_ID = /^[A-Z0-9]{10}$/u;
+const DEVICE_FINGERPRINT = /^SHA256:[A-Za-z0-9_-]{43}$/u;
+const BASE64URL_32 = /^[A-Za-z0-9_-]{43}$/u;
+const BASE64URL_SIGNATURE = /^[A-Za-z0-9_-]{86}$/u;
+const V2_CANDIDATE_BINDING_KEYS = Object.freeze([
+  "version", "enrollment_id", "organization_id", "device_id", "candidate_id",
+  "artifact_sha256", "source_commit", "team_id", "device_key_fingerprint", "expires_at"
+]);
+const V2_COMPLETION_KEYS = new Set(["version", "proof_version", "enrollment_id", "organization_id", "device_id", "label", "platform", "device_key", "candidate_id", "device_key_fingerprint", "challenge"]);
+const V2_CHALLENGE_KEYS = new Set(["challenge_id", "nonce", "expires_at", "candidate_id", "device_key_fingerprint"]);
+const V2_PROOF_DOMAIN = "AgentPass-Enrollment-Proof-v2\0";
+export function createCloudApi({ store, tokenRecords = [], bundleSigner, refreshHintService, now = () => Date.now(), monotonicNow, replayCache = createReplayCache(), deviceReplayConsumer, rateLimiter, admissionRateLimiter, verifyRecentWebAuthn, recentAuthService, humanAuthApi, humanSession, capabilityAuthorityRepository, capabilityRevocationSource, auditRepository, enrollmentCredentialSecret, possessionReceiptSigner, trackInFlight, readiness, operationalMetrics, operationalProbeSecret } = {}) {
   if (!store) throw new TypeError("store is required");
   if (verifyRecentWebAuthn !== undefined && recentAuthService !== undefined) throw new TypeError("configure verifyRecentWebAuthn or recentAuthService, not both");
   if (humanAuthApi !== undefined && (!humanAuthApi || typeof humanAuthApi.handle !== "function")) throw new TypeError("humanAuthApi must expose handle()");
@@ -36,6 +52,7 @@ export function createCloudApi({ store, tokenRecords = [], bundleSigner, refresh
   if (refreshHintService !== undefined && (!refreshHintService || typeof refreshHintService.poll !== "function")) throw new TypeError("refreshHintService must expose poll()");
   if (deviceReplayConsumer !== undefined && typeof deviceReplayConsumer !== "function") throw new TypeError("deviceReplayConsumer must be a function");
   if (enrollmentCredentialSecret !== undefined && (!Buffer.isBuffer(enrollmentCredentialSecret) || enrollmentCredentialSecret.length !== 32)) throw new TypeError("enrollmentCredentialSecret must be an exact 32-byte Buffer");
+  if (possessionReceiptSigner !== undefined && (!possessionReceiptSigner || typeof possessionReceiptSigner.signPossessionReceipt !== "function")) throw new TypeError("possessionReceiptSigner must expose signPossessionReceipt()");
   if (trackInFlight !== undefined && typeof trackInFlight !== "function") throw new TypeError("trackInFlight must be a function");
   if (readiness !== undefined && typeof readiness !== "function") throw new TypeError("readiness must be a function");
   if (operationalMetrics !== undefined && (!operationalMetrics || typeof operationalMetrics.snapshot !== "function")) throw new TypeError("operationalMetrics must expose snapshot()");
@@ -218,6 +235,111 @@ export function createCloudApi({ store, tokenRecords = [], bundleSigner, refresh
       }, false, false, "device.refresh.request"),
       route("POST", new RegExp(`^/v1/organizations/(?<organizationId>${UUID})/devices$`), "admin", async ({ organizationId, body, idempotencyKey, principal }) => ({ status: 201, body: { device: await mutateAndAudit(organizationId, (target) => target.createDevice({ ...body, organizationId, createdBy: principal.member_id, principalId: principal.member_id, idempotencyKey }), ({ mutation }) => ({ organizationId, eventType: "device.created", actorId: principal.member_id, targetType: "device", targetId: mutation.device_id, idempotencyKey: `${idempotencyKey}:audit` })) } })),
       route("POST", new RegExp(`^/v1/organizations/(?<organizationId>${UUID})/device-enrollments$`), "admin", async ({ organizationId, body, idempotencyKey, principal }) => {
+        if (body.proof_version === 2) {
+          validateV2IssueBody(body);
+          const ttlMs = body.ttl_ms ?? 15 * 60 * 1000;
+          const enrollmentId = body.enrollment_id ?? deterministicEnrollmentUuid(effectiveEnrollmentCredentialSecret, "enrollment", {
+            organization_id: organizationId,
+            principal_id: principal.member_id,
+            idempotency_key: idempotencyKey,
+            candidate_id: body.candidate_id,
+            device_key_fingerprint: body.device_key_fingerprint,
+            label: body.label,
+            platform: body.platform ?? "macos",
+            ttl_ms: ttlMs
+          });
+          const deviceId = body.device_id ?? deterministicEnrollmentUuid(effectiveEnrollmentCredentialSecret, "device", {
+            organization_id: organizationId,
+            principal_id: principal.member_id,
+            idempotency_key: idempotencyKey,
+            candidate_id: body.candidate_id,
+            device_key_fingerprint: body.device_key_fingerprint,
+            label: body.label,
+            platform: body.platform ?? "macos",
+            ttl_ms: ttlMs
+          });
+          const createdAt = new Date(now()).toISOString();
+          const expiresAt = new Date(now() + ttlMs).toISOString();
+          const candidate = await resolveActiveReleaseCandidate(store, body.candidate_id);
+          const candidateBinding = makeCandidateBinding({
+            enrollmentId,
+            organizationId,
+            deviceId,
+            candidate,
+            deviceKeyFingerprint: body.device_key_fingerprint,
+            expiresAt
+          });
+          const credential = deriveEnrollmentV2Credential(effectiveEnrollmentCredentialSecret, {
+            organization_id: organizationId,
+            principal_id: principal.member_id,
+            idempotency_key: idempotencyKey,
+            enrollment_id: enrollmentId,
+            device_id: deviceId,
+            candidate_id: body.candidate_id,
+            device_key_fingerprint: body.device_key_fingerprint,
+            label: body.label,
+            platform: body.platform ?? "macos",
+            ttl_ms: ttlMs
+          });
+          const nonce = deriveEnrollmentV2Nonce(effectiveEnrollmentCredentialSecret, candidateBinding);
+          const enrollment = await mutateAndAudit(organizationId,
+            (target) => createV2EnrollmentInStore(target, {
+              proofVersion: 2,
+              organizationId,
+              enrollmentId,
+              deviceId,
+              label: body.label,
+              platform: body.platform ?? "macos",
+              candidateId: body.candidate_id,
+              deviceKeyFingerprint: body.device_key_fingerprint,
+              credentialDigest: sha256HexText(credential),
+              challengeNonceDigest: sha256Text(nonce),
+              createdAt,
+              expiresAt,
+              createdBy: principal.member_id,
+              principalId: principal.member_id,
+              idempotencyKey
+            }),
+            ({ mutation }) => ({
+              organizationId,
+              eventType: "device.enrollment_v2_issued",
+              actorId: principal.member_id,
+              targetType: "device",
+              targetId: mutation.device_id,
+              details: { enrollment_id: mutation.enrollment_id, candidate_id: body.candidate_id, device_key_fingerprint: body.device_key_fingerprint, expires_at: expiresAt },
+              idempotencyKey: `${idempotencyKey}:audit`
+            }));
+          const effectiveEnrollmentId = enrollment?.enrollment_id ?? enrollmentId;
+          const effectiveDeviceId = enrollment?.device_id ?? deviceId;
+          if (effectiveEnrollmentId !== enrollmentId || effectiveDeviceId !== deviceId) throw apiError("enrollment_binding_unavailable", 503, "Enrollment binding is unavailable");
+          return {
+            status: 201,
+            body: {
+              enrollment: {
+                version: 2,
+                proof_version: 2,
+                enrollment_id: enrollmentId,
+                organization_id: organizationId,
+                device_id: deviceId,
+                label: body.label,
+                platform: body.platform ?? "macos",
+                candidate_binding: candidateBinding,
+                challenge_id: enrollmentId,
+                nonce,
+                expires_at: candidateBinding.expires_at,
+                challenge: {
+                  challenge_id: enrollmentId,
+                  nonce,
+                  expires_at: candidateBinding.expires_at,
+                  candidate_id: candidateBinding.candidate_id,
+                  device_key_fingerprint: candidateBinding.device_key_fingerprint
+                },
+                credential,
+                endpoint: `/v1/enrollments/${enrollmentId}`
+              }
+            }
+          };
+        }
         rejectUnknown(body, new Set(["enrollment_id", "device_id", "label", "platform", "ttl_ms"]), "device_enrollment_issue");
         const ttl = body.ttl_ms ?? 15 * 60 * 1000;
         if (!Number.isSafeInteger(ttl) || ttl < 60_000 || ttl > 24 * 60 * 60 * 1000) throw apiError("invalid_enrollment_ttl", 400, "Enrollment TTL must be between 1 minute and 24 hours");
@@ -228,7 +350,103 @@ export function createCloudApi({ store, tokenRecords = [], bundleSigner, refresh
           ({ mutation }) => ({ organizationId, eventType: "device.enrollment_issued", actorId: principal.member_id, targetType: "device", targetId: mutation.device_id, details: { enrollment_id: mutation.enrollment_id, expires_at: mutation.expires_at }, idempotencyKey: `${idempotencyKey}:audit` }));
         return { status: 201, body: { enrollment: { ...enrollment, credential, endpoint: `/v1/enrollments/${enrollment.enrollment_id}` } } };
       }, false, false, "device.enrollment.issue"),
-      route("POST", new RegExp(`^/v1/enrollments/(?<enrollmentId>${UUID})$`), null, async ({ match, body, bodyBytes, request }) => {
+      route("POST", new RegExp(`^/v1/enrollments/(?<enrollmentId>${UUID})$`), null, async ({ match, body, bodyBytes, request, url }) => {
+        if (body.proof_version === 2) {
+          validateV2CompletionBody(body, match.enrollmentId);
+          if (url.search) throw apiError("invalid_enrollment_proof", 401, "Device enrollment proof is invalid");
+          const credential = request.headers["agentpass-enrollment-credential"];
+          if (typeof credential !== "string" || !BASE64URL_32.test(credential) || Buffer.from(credential, "base64url").length !== 32 || Buffer.from(credential, "base64url").toString("base64url") !== credential) throw apiError("invalid_enrollment_credential", 401, "Device enrollment credential is invalid");
+          const candidateBinding = parseV2CandidateBindingHeader(request.headers["agentpass-enrollment-candidate-binding"]);
+          const expectedCandidate = await resolveActiveReleaseCandidate(store, body.candidate_id);
+          const expectedBinding = makeCandidateBinding({
+            enrollmentId: body.enrollment_id,
+            organizationId: body.organization_id,
+            deviceId: body.device_id,
+            candidate: expectedCandidate,
+            deviceKeyFingerprint: body.device_key_fingerprint,
+            expiresAt: body.challenge.expires_at
+          });
+          assertV2CandidateBinding(candidateBinding, expectedBinding);
+          if (body.challenge.challenge_id !== body.enrollment_id
+            || body.challenge.candidate_id !== body.candidate_id
+            || body.challenge.device_key_fingerprint !== body.device_key_fingerprint
+            || body.challenge.expires_at !== candidateBinding.expires_at
+            || request.headers["agentpass-enrollment-nonce"] !== body.challenge.nonce) {
+            throw apiError("invalid_enrollment_proof", 401, "Device enrollment proof is invalid");
+          }
+          const expectedNonce = deriveEnrollmentV2Nonce(effectiveEnrollmentCredentialSecret, candidateBinding);
+          if (body.challenge.nonce !== expectedNonce) throw apiError("invalid_enrollment_proof", 401, "Device enrollment proof is invalid");
+          const credentialDigest = sha256HexText(credential);
+          const challengeNonceDigest = sha256Text(body.challenge.nonce);
+          validateEnrollmentPublicKey("p256-sha256", body.device_key.spki_pem);
+          const actualFingerprint = publicKeyFingerprint(body.device_key.spki_pem);
+          if (actualFingerprint !== body.device_key_fingerprint) throw apiError("invalid_enrollment_proof", 401, "Device enrollment proof is invalid");
+          validateEnrollmentProofV2(url.pathname, bodyBytes, credentialDigest, body.challenge.nonce, candidateBinding, body.device_key.spki_pem, request.headers["agentpass-enrollment-signature"]);
+          if (!bundleSigner?.privateKey || !bundleSigner?.issuer || !bundleSigner?.keyId) throw apiError("bundle_signer_unavailable", 503, "Control bundle signer is unavailable");
+          if (!possessionReceiptSigner) throw apiError("possession_receipt_signer_unavailable", 503, "Possession receipt signer is unavailable");
+          const pendingDevice = typeof store.getDevice === "function" ? await store.getDevice({ organizationId: body.organization_id, deviceId: body.device_id }) : undefined;
+          const deviceKeyEpoch = nextEnrollmentDeviceKeyEpoch(pendingDevice);
+          const issuedAt = new Date(now()).toISOString();
+          const possessionReceipt = await signAndValidatePossessionReceipt(possessionReceiptSigner, {
+            version: 1,
+            enrollment_id: body.enrollment_id,
+            organization_id: body.organization_id,
+            device_id: body.device_id,
+            candidate_id: expectedCandidate.candidate_id,
+            artifact_sha256: expectedCandidate.artifact_sha256,
+            source_commit: expectedCandidate.source_commit,
+            team_id: expectedCandidate.team_id,
+            device_key_fingerprint: body.device_key_fingerprint,
+            device_key_epoch: deviceKeyEpoch,
+            challenge_nonce_digest: challengeNonceDigest,
+            issued_at: issuedAt
+          });
+          const device = await completeV2EnrollmentInStore(store, {
+            proofVersion: 2,
+            enrollmentId: body.enrollment_id,
+            organizationId: body.organization_id,
+            deviceId: body.device_id,
+            label: body.label,
+            platform: body.platform,
+            algorithm: body.device_key.algorithm,
+            publicKey: body.device_key.spki_pem,
+            deviceKey: body.device_key,
+            candidateId: body.candidate_id,
+            deviceKeyFingerprint: body.device_key_fingerprint,
+            credentialDigest,
+            challengeNonceDigest,
+            possessionReceipt,
+            completedAt: issuedAt
+          });
+          if (typeof store.getDeviceEnrollmentPossessionReceipt !== "function" && typeof store.appendDevicePossessionReceipt === "function") {
+            await store.appendDevicePossessionReceipt({ organizationId: body.organization_id, deviceId: body.device_id, receipt: possessionReceipt });
+          }
+          const controlPublicKey = crypto.createPublicKey(bundleSigner.privateKey).export({ type: "spki", format: "pem" }).toString();
+          const refreshHintTrust = await enrollmentRefreshHintTrustMetadata(refreshHintService, controlPublicKey);
+          const completedEpoch = positiveDeviceKeyEpoch(device);
+          return {
+            status: 201,
+            body: {
+              enrollment: {
+                version: 1,
+                enrollment_id: body.enrollment_id,
+                organization_id: device.organization_id,
+                device_id: device.device_id,
+                status: device.status,
+                key_algorithm: device.key_algorithm,
+                device_key_epoch: completedEpoch,
+                control: {
+                  format_epoch: 2,
+                  issuer: bundleSigner.issuer,
+                  key_id: bundleSigner.keyId,
+                  public_key: controlPublicKey,
+                  bundle_path: `/v1/organizations/${device.organization_id}/bundles/${device.device_id}`,
+                  refresh_hint: refreshHintTrust
+                }
+              }
+            }
+          };
+        }
         rejectUnknown(body, new Set(["version", "enrollment_id", "organization_id", "device_id", "label", "platform", "device_key"]), "device_enrollment");
         if (body.version !== 1 || body.enrollment_id !== match.enrollmentId || !body.device_key || typeof body.device_key !== "object" || Array.isArray(body.device_key)) throw apiError("invalid_enrollment", 400, "Device enrollment request is invalid");
         rejectUnknown(body.device_key, new Set(["algorithm", "spki_pem"]), "device_key");
@@ -344,6 +562,13 @@ export function createCloudApi({ store, tokenRecords = [], bundleSigner, refresh
         if (result === null || result === undefined) return { status: 204, body: undefined };
         const hint = validateRefreshHintResponse(result, { organizationId, deviceId: match.deviceId, afterGeneration, now: now() });
         return { body: { hint } };
+      }, true),
+      route("GET", new RegExp(`^/v1/organizations/(?<organizationId>${UUID})/devices/(?<deviceId>${UUID})/enrollment-receipt$`), null, async ({ organizationId, principal, match, url }) => {
+        if (url.search || principal.device_id !== match.deviceId) throw apiError("audience_mismatch", 403, "Device cannot fetch another device's enrollment receipt");
+        const readReceipt = store.getDevicePossessionReceipt ?? store.getDeviceEnrollmentPossessionReceipt;
+        if (typeof readReceipt !== "function") throw apiError("possession_receipt_unavailable", 503, "Possession receipt is unavailable");
+        const receipt = await readReceipt.call(store, { organizationId, deviceId: match.deviceId });
+        return { body: { receipt } };
       }, true),
       route("GET", new RegExp(`^/v1/organizations/(?<organizationId>${UUID})/bundles/(?<deviceId>${UUID})$`), null, async ({ organizationId, principal, match }) => {
         if (principal.device_id !== match.deviceId) throw apiError("audience_mismatch", 403, "Device cannot fetch another device's bundle");
@@ -576,6 +801,163 @@ function validateEnrollmentProof(requestPath, body, algorithm, pem, credential, 
       : crypto.verify("sha256", proof, { key, dsaEncoding: "ieee-p1363" }, signature);
   } catch { valid = false; }
   if (!valid) throw apiError("invalid_enrollment_proof", 401, "Device enrollment proof is invalid");
+}
+
+function validateV2IssueBody(body) {
+  rejectUnknown(body, new Set(["proof_version", "candidate_id", "device_key_fingerprint", "enrollment_id", "device_id", "label", "platform", "ttl_ms"]), "device_enrollment_issue_v2");
+  if (body.proof_version !== 2 || !SAFE_CANDIDATE_ID.test(body.candidate_id ?? "") || !DEVICE_FINGERPRINT.test(body.device_key_fingerprint ?? "")
+    || (body.enrollment_id !== undefined && !canonicalUuid(body.enrollment_id)) || (body.device_id !== undefined && !canonicalUuid(body.device_id))
+    || !boundedEnrollmentLabel(body.label) || (body.platform !== undefined && body.platform !== "macos")
+    || (body.ttl_ms !== undefined && (!Number.isSafeInteger(body.ttl_ms) || body.ttl_ms < 60_000 || body.ttl_ms > 24 * 60 * 60 * 1000))) {
+    throw apiError("invalid_enrollment", 400, "Device enrollment request is invalid");
+  }
+}
+
+function validateV2CompletionBody(body, enrollmentId) {
+  rejectUnknown(body, V2_COMPLETION_KEYS, "device_enrollment_v2");
+  if (body.version !== 2 || body.proof_version !== 2 || body.enrollment_id !== enrollmentId || !canonicalUuid(body.organization_id) || !canonicalUuid(body.device_id)
+    || !boundedEnrollmentLabel(body.label) || body.platform !== "macos" || !SAFE_CANDIDATE_ID.test(body.candidate_id ?? "")
+    || !DEVICE_FINGERPRINT.test(body.device_key_fingerprint ?? "") || !body.device_key || typeof body.device_key !== "object" || Array.isArray(body.device_key)) {
+    throw apiError("invalid_enrollment", 400, "Device enrollment request is invalid");
+  }
+  rejectUnknown(body.device_key, new Set(["algorithm", "spki_pem"]), "device_key");
+  if (body.device_key.algorithm !== "p256-sha256" || typeof body.device_key.spki_pem !== "string") throw apiError("invalid_device_key", 400, "Device public key is invalid");
+  const challenge = body.challenge;
+  if (!challenge || typeof challenge !== "object" || Array.isArray(challenge)) throw apiError("invalid_enrollment", 400, "Device enrollment request is invalid");
+  rejectUnknown(challenge, V2_CHALLENGE_KEYS, "enrollment_challenge");
+  if (!canonicalUuid(challenge.challenge_id) || !BASE64URL_32.test(challenge.nonce) || Buffer.from(challenge.nonce, "base64url").length !== 32
+    || Buffer.from(challenge.nonce, "base64url").toString("base64url") !== challenge.nonce || !RFC3339_MILLISECONDS_UTC.test(challenge.expires_at)
+    || !SAFE_CANDIDATE_ID.test(challenge.candidate_id ?? "") || !DEVICE_FINGERPRINT.test(challenge.device_key_fingerprint ?? "")) {
+    throw apiError("invalid_enrollment", 400, "Device enrollment request is invalid");
+  }
+}
+
+function parseV2CandidateBindingHeader(value) {
+  if (typeof value !== "string" || Buffer.byteLength(value, "utf8") > 16 * 1024) throw apiError("invalid_enrollment_proof", 401, "Device enrollment proof is invalid");
+  let parsed;
+  try { parsed = parseControlBundleJson(Buffer.from(value, "utf8"), { maxBytes: 16 * 1024, maxDepth: 8 }); }
+  catch { throw apiError("invalid_enrollment_proof", 401, "Device enrollment proof is invalid"); }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed) || canonicalJson(parsed) !== value) throw apiError("invalid_enrollment_proof", 401, "Device enrollment proof is invalid");
+  try { return normalizeCandidateBinding(parsed); }
+  catch { throw apiError("invalid_enrollment_proof", 401, "Device enrollment proof is invalid"); }
+}
+
+function normalizeCandidateBinding(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value) || Object.keys(value).length !== V2_CANDIDATE_BINDING_KEYS.length
+    || Object.keys(value).some((key) => !V2_CANDIDATE_BINDING_KEYS.includes(key))) throw new Error("invalid candidate binding");
+  const normalized = {
+    version: value.version,
+    enrollment_id: value.enrollment_id,
+    organization_id: value.organization_id,
+    device_id: value.device_id,
+    candidate_id: value.candidate_id,
+    artifact_sha256: value.artifact_sha256,
+    source_commit: value.source_commit,
+    team_id: value.team_id,
+    device_key_fingerprint: value.device_key_fingerprint,
+    expires_at: value.expires_at
+  };
+  if (normalized.version !== 1 || !canonicalUuid(normalized.enrollment_id) || !canonicalUuid(normalized.organization_id) || !canonicalUuid(normalized.device_id)
+    || !SAFE_CANDIDATE_ID.test(normalized.candidate_id ?? "") || !SHA256_HEX.test(normalized.artifact_sha256 ?? "") || !SOURCE_COMMIT.test(normalized.source_commit ?? "")
+    || !TEAM_ID.test(normalized.team_id ?? "") || !DEVICE_FINGERPRINT.test(normalized.device_key_fingerprint ?? "") || !RFC3339_MILLISECONDS_UTC.test(normalized.expires_at ?? "")) throw new Error("invalid candidate binding");
+  if (new Date(normalized.expires_at).toISOString() !== normalized.expires_at) throw new Error("invalid candidate binding");
+  return Object.freeze(normalized);
+}
+
+function makeCandidateBinding({ enrollmentId, organizationId, deviceId, candidate, deviceKeyFingerprint, expiresAt }) {
+  return normalizeCandidateBinding({
+    version: 1,
+    enrollment_id: enrollmentId,
+    organization_id: organizationId,
+    device_id: deviceId,
+    candidate_id: candidate?.candidate_id,
+    artifact_sha256: candidate?.artifact_sha256,
+    source_commit: candidate?.source_commit,
+    team_id: candidate?.team_id,
+    device_key_fingerprint: deviceKeyFingerprint,
+    expires_at: expiresAt
+  });
+}
+
+function assertV2CandidateBinding(actual, expected) {
+  if (canonicalJson(actual) !== canonicalJson(expected)) throw apiError("invalid_enrollment_proof", 401, "Device enrollment proof is invalid");
+}
+
+function validateEnrollmentProofV2(requestPath, body, credentialDigest, nonce, candidateBinding, pem, encodedSignature) {
+  if (typeof encodedSignature !== "string" || !/^(?:[A-Za-z0-9+/]{4}){21}(?:[A-Za-z0-9+/]{2}==)$/.test(encodedSignature)) throw apiError("invalid_enrollment_proof", 401, "Device enrollment proof is invalid");
+  const signature = Buffer.from(encodedSignature, "base64");
+  if (signature.length !== 64 || signature.toString("base64") !== encodedSignature) throw apiError("invalid_enrollment_proof", 401, "Device enrollment proof is invalid");
+  const bodyDigest = sha256Text(body);
+  const bindingDigest = sha256Text(canonicalJson(candidateBinding));
+  const proof = Buffer.from(`${V2_PROOF_DOMAIN}POST\n${requestPath}\n${bodyDigest}\n${credentialDigest}\n${nonce}\n${bindingDigest}`, "utf8");
+  let valid = false;
+  try { valid = crypto.verify("sha256", proof, { key: crypto.createPublicKey(pem), dsaEncoding: "ieee-p1363" }, signature); }
+  catch { valid = false; }
+  if (!valid) throw apiError("invalid_enrollment_proof", 401, "Device enrollment proof is invalid");
+}
+
+async function resolveActiveReleaseCandidate(store, candidateId) {
+  let candidate;
+  if (typeof store.resolveActiveReleaseCandidate === "function") candidate = await store.resolveActiveReleaseCandidate({ candidateId });
+  else if (typeof store.getReleaseCandidate === "function") candidate = await store.getReleaseCandidate({ candidateId });
+  else throw apiError("release_candidate_unavailable", 503, "Release candidate registry is unavailable");
+  if (!candidate || candidate.candidate_id !== candidateId || candidate.status !== "active") throw apiError("release_candidate_unavailable", 409, "Release candidate is unavailable");
+  return candidate;
+}
+
+async function createV2EnrollmentInStore(store, input) {
+  const method = typeof store.createDeviceEnrollment === "function" ? store.createDeviceEnrollment : store.createDeviceEnrollmentV2;
+  if (typeof method !== "function") throw apiError("enrollment_unavailable", 503, "Device enrollment is unavailable");
+  return method.call(store, input);
+}
+
+async function completeV2EnrollmentInStore(store, input) {
+  const method = typeof store.completeDeviceEnrollment === "function" ? store.completeDeviceEnrollment : store.completeDeviceEnrollmentV2;
+  if (typeof method !== "function") throw apiError("enrollment_unavailable", 503, "Device enrollment is unavailable");
+  return method.call(store, input);
+}
+
+async function signAndValidatePossessionReceipt(signer, statement) {
+  let receipt;
+  try { receipt = await signer.signPossessionReceipt(statement); }
+  catch { throw apiError("possession_receipt_signing_unavailable", 503, "Possession receipt signing is unavailable"); }
+  try {
+    const normalizedStatement = normalizePossessionReceiptStatement(statement);
+    const keys = ["version", "purpose", "key_id", "algorithm", "statement", "statement_hash", "signature"];
+    if (!receipt || typeof receipt !== "object" || Array.isArray(receipt) || Object.keys(receipt).sort().join(",") !== keys.slice().sort().join(",")
+      || receipt.version !== 1 || receipt.purpose !== "device-enrollment-possession-receipt" || !["ed25519", "p256-sha256"].includes(receipt.algorithm)
+      || typeof receipt.key_id !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$/u.test(receipt.key_id) || canonicalJson(receipt.statement) !== canonicalJson(normalizedStatement)
+      || !SHA256_HEX.test(receipt.statement_hash ?? "") || receipt.statement_hash !== sha256Text(canonicalJson(normalizedStatement))
+      || !BASE64URL_SIGNATURE.test(receipt.signature) || Buffer.from(receipt.signature, "base64url").length !== 64 || Buffer.from(receipt.signature, "base64url").toString("base64url") !== receipt.signature) throw new Error("invalid receipt");
+    return Object.freeze({ ...receipt, statement: normalizedStatement });
+  } catch { throw apiError("possession_receipt_signing_unavailable", 503, "Possession receipt signing is unavailable"); }
+}
+
+function deriveEnrollmentV2Credential(secret, identity) {
+  return crypto.createHmac("sha256", secret).update("AgentPass-Enrollment-Credential-v2\0", "utf8").update(canonicalJson(identity), "utf8").digest("base64url");
+}
+
+function deriveEnrollmentV2Nonce(secret, binding) {
+  return crypto.createHmac("sha256", secret).update("AgentPass-Enrollment-Challenge-v2\0", "utf8").update(canonicalJson(binding), "utf8").digest("base64url");
+}
+
+function deterministicEnrollmentUuid(secret, purpose, identity) {
+  const bytes = crypto.createHmac("sha256", secret).update(`AgentPass-Enrollment-${purpose}-id-v2\0`, "utf8").update(canonicalJson(identity), "utf8").digest().subarray(0, 16);
+  bytes[6] = (bytes[6] & 0x0f) | 0x40;
+  bytes[8] = (bytes[8] & 0x3f) | 0x80;
+  const hex = bytes.toString("hex");
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+}
+
+function canonicalUuid(value) { return typeof value === "string" && UUID_VALUE.test(value) && value === value.toLowerCase(); }
+function boundedEnrollmentLabel(value) { return typeof value === "string" && value.length >= 1 && value.length <= 128 && Buffer.byteLength(value, "utf8") <= 512 && !/[\u0000-\u001f\u007f]/u.test(value); }
+function sha256Text(value) { return crypto.createHash("sha256").update(Buffer.isBuffer(value) ? value : Buffer.from(String(value), "utf8")).digest("hex"); }
+function sha256HexText(value) { return sha256Text(value); }
+function publicKeyFingerprint(pem) { return `SHA256:${crypto.createHash("sha256").update(crypto.createPublicKey(pem).export({ type: "spki", format: "der" })).digest("base64url")}`; }
+function nextEnrollmentDeviceKeyEpoch(device) {
+  const current = Number(device?.key_epoch);
+  if (device && Number.isSafeInteger(current) && current >= 0) return current + 1;
+  return 1;
 }
 
 async function readBody(request, maxBytes = MAX_BODY_BYTES) {

@@ -124,6 +124,12 @@ The first three physical procedures are now checked in under `scripts/release/p0
 
 These procedures cannot pass on injected Linux execution, a non-root runner, a substituted executable, a different device key, an exportable-key claim, or a static operator assertion. The remaining 13 procedures are still open and therefore production provisioning continues to require an externally reviewed exact 16-scenario directory; missing scenario names fail closed.
 
+The candidate checkpoint currently revalidates pinned executable identity before and after each implemented operation. This detects replacement during execution, but production qualification must not claim prevention of the final pathname-open race until the runner executes an already verified file descriptor or an equivalent root-private immutable copy.
+
+The exact PKG scenario now creates `/candidate-checkpoint.json` exclusively inside the configured protected checkpoint directory after installation. The checkpoint binds the artifact digest, source commit, Team ID, all six release-attested CodeDirectory hashes, observed designated requirements, content-tree digests, and filesystem identities. It is never overwritten. Every implemented post-install scenario verifies the checkpoint and installed code objects before and after its physical operation; symlink, hard-link, same-content inode replacement, writable ancestry, digest change, and mixed nested identities fail closed.
+
+The negative-identity lane has a strict release-bound four-role manifest for the approved client, same-identity client missing its required entitlement, wrong-Team-ID client, and ad-hoc client. The native service now accepts only the exact configured peer requirement that combines the fixed client identifier, Developer ID Application certificate marker, Team ID, and approval-key entitlement. This is supporting implementation evidence only: the negative gate remains open until all four signed probes are built and the real launchd/XPC service physically proves the allow/deny matrix.
+
 ### One-time runner provisioning
 
 Provisioning is deliberately separate from the GitHub Actions job. First create the fixed parent once as root. Materialize a dedicated, reviewed copy of `scripts/release/p0c` and the 16 scenario executables in root-owned, non-group/world-writable source directories; do not point the root provisioner at the CI user's mutable working checkout. The scenario filenames must exactly match the gate list. Then run:

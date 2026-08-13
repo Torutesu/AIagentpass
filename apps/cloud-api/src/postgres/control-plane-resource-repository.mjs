@@ -98,6 +98,19 @@ export function createPostgresControlPlaneResourceRepository({ client, now = () 
     updatePolicy: (input = {}) => updatePolicy(input)
   };
 
+  // The legacy CloudStore surface remains enumerable and unchanged. These
+  // opt-in methods are deliberately non-enumerable so v1 adapters cannot
+  // accidentally start depending on the v2 release/possession contract.
+  Object.defineProperties(api, {
+    createReleaseCandidate: { enumerable: false, value: (input = {}) => createReleaseCandidate(input) },
+    getReleaseCandidate: { enumerable: false, value: (input = {}) => getReleaseCandidate(input) },
+    resolveActiveReleaseCandidate: { enumerable: false, value: (input = {}) => resolveActiveReleaseCandidate(input) },
+    retireReleaseCandidate: { enumerable: false, value: (input = {}) => retireReleaseCandidate(input) },
+    createDeviceEnrollmentV2: { enumerable: false, value: (input = {}) => createDeviceEnrollmentV2(input) },
+    completeDeviceEnrollmentV2: { enumerable: false, value: (input = {}) => completeDeviceEnrollmentV2(input) },
+    getDeviceEnrollmentPossessionReceipt: { enumerable: false, value: (input = {}) => getDeviceEnrollmentPossessionReceipt(input) }
+  });
+
   return Object.freeze(api);
 
   async function createDevice(input) {
@@ -194,6 +207,7 @@ export function createPostgresControlPlaneResourceRepository({ client, now = () 
   }
 
   async function createDeviceEnrollment(input) {
+    if ((input.proofVersion ?? input.proof_version) === 2) return createDeviceEnrollmentV2(input);
     const organizationId = tenant(input);
     const createdBy = requiredCreatedBy(input);
     const principalId = requiredPrincipalId(input);
@@ -230,6 +244,7 @@ export function createPostgresControlPlaneResourceRepository({ client, now = () 
   }
 
   async function completeDeviceEnrollment(input) {
+    if ((input.proofVersion ?? input.proof_version) === 2) return completeDeviceEnrollmentV2(input);
     const enrollmentId = requiredUuid(input.enrollmentId ?? input.enrollment_id, "enrollment_id");
     const organizationId = requiredUuid(input.organizationId ?? input.organization_id, "organization_id");
     const deviceId = requiredUuid(input.deviceId ?? input.device_id, "device_id");
@@ -268,6 +283,193 @@ export function createPostgresControlPlaneResourceRepository({ client, now = () 
       if (rowCount(consumed) !== 1) throw new ControlPlaneResourceRepositoryError("ERR_ENROLLMENT_CONSUMED", "device enrollment was already consumed");
       return await mapCompletedDevice(tx, organizationId, deviceId, update.rows[0]);
     }));
+  }
+
+  async function createReleaseCandidate(input) {
+    const values = normalizeReleaseCandidateInput(input);
+    const createdAt = timestamp(input.createdAt ?? input.created_at ?? now(), "created_at");
+    return runDatabase(async () => inTransaction(async (tx) => {
+      const inserted = await tx.query(`INSERT INTO release_candidates
+        (candidate_id,source_commit,artifact_sha256,manifest_sha256,team_id,created_at)
+        VALUES ($1,$2,$3,$4,$5,$6)
+        ON CONFLICT (candidate_id) DO NOTHING
+        RETURNING candidate_id,source_commit,artifact_sha256,manifest_sha256,team_id,status,created_at,retired_at`,
+      [values.candidateId, values.sourceCommit, values.artifactSha256, values.manifestSha256, values.teamId, createdAt]);
+      if (rowCount(inserted) === 1) return mapReleaseCandidate(inserted.rows[0]);
+      const existing = await tx.query(`SELECT candidate_id,source_commit,artifact_sha256,manifest_sha256,team_id,status,created_at,retired_at
+        FROM release_candidates WHERE candidate_id=$1 FOR SHARE`, [values.candidateId]);
+      if (rowCount(existing) !== 1) throw new ControlPlaneResourceRepositoryError("ERR_DATABASE", "release candidate disappeared during creation");
+      const candidate = mapReleaseCandidate(existing.rows[0]);
+      if (candidate.source_commit !== values.sourceCommit
+        || candidate.artifact_sha256 !== values.artifactSha256
+        || candidate.manifest_sha256 !== values.manifestSha256
+        || candidate.team_id !== values.teamId) {
+        throw new ControlPlaneResourceRepositoryError("ERR_IDENTITY_CONFLICT", "release candidate identity conflicts with an existing candidate");
+      }
+      return candidate;
+    }));
+  }
+
+  async function getReleaseCandidate(input) {
+    const candidateId = candidateIdValue(input.candidateId ?? input.candidate_id);
+    return runDatabase(async () => {
+      const result = await client.query(`SELECT candidate_id,source_commit,artifact_sha256,manifest_sha256,team_id,status,created_at,retired_at
+        FROM release_candidates WHERE candidate_id=$1`, [candidateId]);
+      if (rowCount(result) !== 1) throw notFound("release candidate", candidateId);
+      return mapReleaseCandidate(result.rows[0]);
+    });
+  }
+
+  async function resolveActiveReleaseCandidate(input) {
+    const candidateId = candidateIdValue(input.candidateId ?? input.candidate_id);
+    return runDatabase(async () => {
+      const result = await client.query(`SELECT candidate_id,source_commit,artifact_sha256,manifest_sha256,team_id,status,created_at,retired_at
+        FROM release_candidates WHERE candidate_id=$1 AND status='active'`, [candidateId]);
+      if (rowCount(result) !== 1) throw notFound("active release candidate", candidateId);
+      return mapReleaseCandidate(result.rows[0]);
+    });
+  }
+
+  async function retireReleaseCandidate(input) {
+    const candidateId = candidateIdValue(input.candidateId ?? input.candidate_id);
+    const retiredAt = timestamp(input.retiredAt ?? input.retired_at ?? now(), "retired_at");
+    return runDatabase(async () => inTransaction(async (tx) => {
+      const result = await tx.query(`UPDATE release_candidates SET status='retired',retired_at=$2
+        WHERE candidate_id=$1 AND status='active'
+        RETURNING candidate_id,source_commit,artifact_sha256,manifest_sha256,team_id,status,created_at,retired_at`, [candidateId, retiredAt]);
+      if (rowCount(result) === 1) return mapReleaseCandidate(result.rows[0]);
+      const existing = await tx.query(`SELECT candidate_id,source_commit,artifact_sha256,manifest_sha256,team_id,status,created_at,retired_at
+        FROM release_candidates WHERE candidate_id=$1`, [candidateId]);
+      if (rowCount(existing) !== 1) throw notFound("release candidate", candidateId);
+      const candidate = mapReleaseCandidate(existing.rows[0]);
+      if (candidate.status === "retired") return candidate;
+      throw new ControlPlaneResourceRepositoryError("ERR_DATABASE", "release candidate could not be retired");
+    }));
+  }
+
+  async function createDeviceEnrollmentV2(input) {
+    const organizationId = tenant(input);
+    const createdBy = requiredCreatedBy(input);
+    const principalId = requiredPrincipalId(input);
+    const idempotencyKey = requireIdempotencyKey(input.idempotencyKey ?? input.idempotency_key);
+    const enrollmentId = optionalUuid(input.enrollmentId ?? input.enrollment_id, "enrollment_id") ?? deterministicUuid("enrollment", organizationId, principalId, idempotencyKey);
+    const deviceId = optionalUuid(input.deviceId ?? input.device_id, "device_id") ?? deterministicUuid("enrollment-device", organizationId, principalId, idempotencyKey);
+    const label = text(input.label ?? input.name, "label", 128, true);
+    const platform = enumValue(input.platform ?? "macos", "platform", new Set(["macos"]));
+    const credentialDigest = sha256(input.credentialDigest ?? input.credential_digest, "credential_digest");
+    const challengeDigest = sha256(input.challengeNonceDigest ?? input.challenge_nonce_digest, "challenge_nonce_digest");
+    rejectRawPossessionMaterial(input);
+    const fingerprint = deviceKeyFingerprint(input.deviceKeyFingerprint ?? input.device_key_fingerprint);
+    const candidateId = candidateIdValue(input.candidateId ?? input.candidate_id);
+    const createdAt = timestamp(input.createdAt ?? input.created_at ?? now(), "created_at");
+    const expiresAt = timestamp(input.expiresAt ?? input.expires_at, "expires_at");
+    if (Date.parse(expiresAt) <= Date.parse(createdAt) || Date.parse(expiresAt) - Date.parse(createdAt) > 24 * 60 * 60 * 1000) {
+      throw new ControlPlaneResourceRepositoryError("ERR_INVALID_INPUT", "enrollment expiry must be within 24 hours after creation");
+    }
+    const request = {
+      proof_version: 2, organization_id: organizationId, enrollment_id: enrollmentId, device_id: deviceId,
+      label, platform, credential_digest: credentialDigest, challenge_nonce_digest: challengeDigest,
+      candidate_id: candidateId, device_key_fingerprint: fingerprint,
+      ttl_ms: Date.parse(expiresAt) - Date.parse(createdAt), created_by: createdBy
+    };
+    return runDatabase(async () => inTransaction(async (tx) => {
+      await lockOrganization(tx, organizationId);
+      const replay = await acquireIdempotency(tx, organizationId, principalId, idempotencyKey, request);
+      if (replay !== undefined) return replay;
+      const candidate = await selectActiveReleaseCandidate(tx, candidateId);
+      const deviceResult = await tx.query(`INSERT INTO devices (organization_id,id,label,key_algorithm,public_key_pem,status)
+        VALUES ($1,$2,$3,NULL,NULL,'pending')
+        RETURNING organization_id,id,label,key_algorithm,public_key_pem,status,metadata,version,created_at,last_seen_at`,
+      [organizationId, deviceId, label]);
+      if (rowCount(deviceResult) !== 1) throw new ControlPlaneResourceRepositoryError("ERR_DATABASE", "pending device creation did not return a row");
+      const enrollmentResult = await tx.query(`INSERT INTO device_enrollments
+        (id,organization_id,device_id,secret_hash,created_by,created_at,expires_at,label,platform,proof_version,candidate_id,device_key_fingerprint,challenge_nonce_digest)
+        VALUES ($1,$2,$3,decode($4,'hex'),$5,$6,$7,$8,$9,2,$10,$11,decode($12,'hex'))
+        RETURNING id,organization_id,device_id,label,platform,created_at,expires_at,consumed_at,completion_hash,proof_version,candidate_id,device_key_fingerprint,encode(challenge_nonce_digest,'hex') AS challenge_nonce_digest`,
+      [enrollmentId, organizationId, deviceId, credentialDigest, createdBy, createdAt, expiresAt, label, platform, candidateId, fingerprint, challengeDigest]);
+      if (rowCount(enrollmentResult) !== 1) throw new ControlPlaneResourceRepositoryError("ERR_DATABASE", "device enrollment creation did not return a row");
+      const enrollment = mapEnrollmentV2(enrollmentResult.rows[0], candidate);
+      await finishIdempotency(tx, organizationId, principalId, idempotencyKey, 201, enrollment);
+      return enrollment;
+    }));
+  }
+
+  async function completeDeviceEnrollmentV2(input) {
+    const enrollmentId = requiredUuid(input.enrollmentId ?? input.enrollment_id, "enrollment_id");
+    const organizationId = requiredUuid(input.organizationId ?? input.organization_id, "organization_id");
+    const deviceId = requiredUuid(input.deviceId ?? input.device_id, "device_id");
+    const label = text(input.label, "label", 128, true);
+    const platform = enumValue(input.platform, "platform", new Set(["macos"]));
+    const algorithm = enumValue(input.algorithm ?? input.deviceKey?.algorithm ?? input.device_key?.algorithm, "algorithm", new Set(["p256-sha256"]));
+    const publicKey = publicKeyText(input.publicKey ?? input.public_key ?? input.deviceKey?.spki_pem ?? input.device_key?.spki_pem, "device_public_key");
+    const credentialDigest = sha256(input.credentialDigest ?? input.credential_digest, "credential_digest");
+    const candidateId = candidateIdValue(input.candidateId ?? input.candidate_id);
+    const fingerprint = deviceKeyFingerprint(input.deviceKeyFingerprint ?? input.device_key_fingerprint);
+    const challengeDigest = sha256(input.challengeNonceDigest ?? input.challenge_nonce_digest, "challenge_nonce_digest");
+    rejectRawPossessionMaterial(input);
+    const completedAt = timestamp(input.completedAt ?? input.completed_at ?? now(), "completed_at");
+    const receipt = normalizePossessionReceipt(input.possessionReceipt ?? input.possession_receipt ?? input.receipt);
+    const receiptEnvelopeHash = sha256Hex(receipt);
+    const completionHash = sha256Hex({ version: 2, enrollment_id: enrollmentId, organization_id: organizationId, device_id: deviceId, label, platform, algorithm, public_key: publicKey, candidate_id: candidateId, device_key_fingerprint: fingerprint, challenge_nonce_digest: challengeDigest, receipt_hash: receiptEnvelopeHash });
+    return runDatabase(async () => inTransaction(async (tx) => {
+      const enrollmentResult = await tx.query(`SELECT id,organization_id,device_id,label,platform,created_at,expires_at,consumed_at,completion_hash,proof_version,candidate_id,device_key_fingerprint,encode(challenge_nonce_digest,'hex') AS challenge_nonce_digest
+        FROM device_enrollments
+        WHERE organization_id=$1 AND id=$2 AND encode(secret_hash,'hex')=$3
+        FOR UPDATE`, [organizationId, enrollmentId, credentialDigest]);
+      if (rowCount(enrollmentResult) !== 1) throw new ControlPlaneResourceRepositoryError("ERR_ENROLLMENT_AUTH", "device enrollment authentication failed");
+      const enrollment = enrollmentResult.rows[0];
+      if (enrollment.proof_version !== 2 && Number(enrollment.proof_version) !== 2) throw new ControlPlaneResourceRepositoryError("ERR_ENROLLMENT_BINDING", "device enrollment is not a v2 possession challenge");
+      if (enrollment.device_id !== deviceId || enrollment.label !== label || enrollment.platform !== platform
+        || enrollment.candidate_id !== candidateId || enrollment.device_key_fingerprint !== fingerprint
+        || String(enrollment.challenge_nonce_digest).toLowerCase() !== challengeDigest) {
+        throw new ControlPlaneResourceRepositoryError("ERR_ENROLLMENT_BINDING", "device enrollment request does not match its possession binding");
+      }
+      const candidate = await selectReleaseCandidate(tx, candidateId);
+      assertPossessionReceiptBinding(receipt, { enrollmentId, organizationId, deviceId, candidate, fingerprint, challengeDigest });
+      const device = await selectDevice(tx, organizationId, deviceId, true);
+      if (enrollment.consumed_at !== null) {
+        if (enrollment.completion_hash !== completionHash || device.label !== label || device.key_algorithm !== algorithm || device.public_key_pem !== publicKey || device.status !== "active") {
+          throw new ControlPlaneResourceRepositoryError("ERR_ENROLLMENT_CONSUMED", "device enrollment was already consumed");
+        }
+        const existingReceipt = await selectPossessionReceipt(tx, organizationId, enrollmentId);
+        if (sha256Hex(existingReceipt) !== receiptEnvelopeHash) throw new ControlPlaneResourceRepositoryError("ERR_ENROLLMENT_CONSUMED", "device enrollment was already consumed");
+        return mapCompletedDevice(tx, organizationId, deviceId, device);
+      }
+      if (Date.parse(completedAt) > dateValue(enrollment.expires_at)) throw new ControlPlaneResourceRepositoryError("ERR_ENROLLMENT_EXPIRED", "device enrollment has expired");
+      if (device.status !== "pending" || device.public_key_pem !== null || device.label !== label) throw new ControlPlaneResourceRepositoryError("ERR_ENROLLMENT_STATE", "pending device state is invalid");
+      const update = await tx.query(`UPDATE devices SET key_algorithm=$3,public_key_pem=$4,status='active',version=version+1
+        WHERE organization_id=$1 AND id=$2 AND status='pending' AND public_key_pem IS NULL
+        RETURNING organization_id,id,label,key_algorithm,public_key_pem,status,metadata,version,created_at,last_seen_at`, [organizationId, deviceId, algorithm, publicKey]);
+      if (rowCount(update) !== 1) throw new ControlPlaneResourceRepositoryError("ERR_ENROLLMENT_STATE", "pending device state is invalid");
+      const completedDevice = await mapCompletedDevice(tx, organizationId, deviceId, update.rows[0]);
+      const keyEpoch = completedDevice.key_epoch;
+      if (receipt.statement.device_key_epoch !== keyEpoch) throw new ControlPlaneResourceRepositoryError("ERR_ENROLLMENT_BINDING", "possession receipt key epoch does not match the enrolled device");
+      const insertedReceipt = await tx.query(`INSERT INTO device_enrollment_possession_receipts
+        (organization_id,enrollment_id,device_id,candidate_id,artifact_sha256,source_commit,team_id,device_key_fingerprint,device_key_epoch,challenge_nonce_digest,purpose,signer_key_id,signature_algorithm,statement_json,statement_hash,signature_base64url,issued_at)
+        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,decode($10,'hex'),$11,$12,$13,$14::jsonb,$15,$16,$17)
+        RETURNING organization_id,enrollment_id,device_id,candidate_id,artifact_sha256,source_commit,team_id,device_key_fingerprint,device_key_epoch,encode(challenge_nonce_digest,'hex') AS challenge_nonce_digest,purpose,signer_key_id,signature_algorithm,statement_json,statement_hash,signature_base64url,issued_at`,
+      [organizationId, enrollmentId, deviceId, candidateId, candidate.artifact_sha256, candidate.source_commit, candidate.team_id, fingerprint, keyEpoch, challengeDigest, receipt.purpose, receipt.key_id, receipt.algorithm, JSON.stringify(receipt.statement), receipt.statement_hash, receipt.signature, receipt.statement.issued_at]);
+      if (rowCount(insertedReceipt) !== 1) throw new ControlPlaneResourceRepositoryError("ERR_DATABASE", "device possession receipt insertion did not return a row");
+      const consumed = await tx.query(`UPDATE device_enrollments SET consumed_at=$3,completion_hash=$4
+        WHERE organization_id=$1 AND id=$2 AND consumed_at IS NULL
+        RETURNING id,organization_id,device_id,label,platform,created_at,expires_at,consumed_at,completion_hash`, [organizationId, enrollmentId, completedAt, completionHash]);
+      if (rowCount(consumed) !== 1) throw new ControlPlaneResourceRepositoryError("ERR_ENROLLMENT_CONSUMED", "device enrollment was already consumed");
+      return completedDevice;
+    }));
+  }
+
+  async function getDeviceEnrollmentPossessionReceipt(input) {
+    const organizationId = tenant(input);
+    const deviceId = requiredUuid(input.deviceId ?? input.device_id, "device_id");
+    return runDatabase(async () => {
+      await assertOrganization(client, organizationId);
+      const result = await client.query(`SELECT organization_id,enrollment_id,device_id,candidate_id,artifact_sha256,source_commit,team_id,device_key_fingerprint,device_key_epoch,encode(challenge_nonce_digest,'hex') AS challenge_nonce_digest,purpose,signer_key_id,signature_algorithm,statement_json,statement_hash,signature_base64url,issued_at
+        FROM device_enrollment_possession_receipts
+        WHERE organization_id=$1 AND device_id=$2
+        ORDER BY issued_at DESC,enrollment_id DESC LIMIT 1`, [organizationId, deviceId]);
+      if (rowCount(result) !== 1) throw notFound("device possession receipt", deviceId);
+      return mapPossessionReceiptRow(result.rows[0]);
+    });
   }
 
   async function createAgent(input) {
@@ -502,6 +704,28 @@ async function assertOrganization(client, organizationId) {
   if (rowCount(result) !== 1) throw notFound("organization", organizationId);
 }
 
+async function selectReleaseCandidate(client, candidateId) {
+  const result = await client.query(`SELECT candidate_id,source_commit,artifact_sha256,manifest_sha256,team_id,status,created_at,retired_at
+    FROM release_candidates WHERE candidate_id=$1 FOR SHARE`, [candidateId]);
+  if (rowCount(result) !== 1) throw notFound("release candidate", candidateId);
+  return mapReleaseCandidate(result.rows[0]);
+}
+
+async function selectActiveReleaseCandidate(client, candidateId) {
+  const result = await client.query(`SELECT candidate_id,source_commit,artifact_sha256,manifest_sha256,team_id,status,created_at,retired_at
+    FROM release_candidates WHERE candidate_id=$1 AND status='active' FOR SHARE`, [candidateId]);
+  if (rowCount(result) !== 1) throw notFound("active release candidate", candidateId);
+  return mapReleaseCandidate(result.rows[0]);
+}
+
+async function selectPossessionReceipt(client, organizationId, enrollmentId) {
+  const result = await client.query(`SELECT organization_id,enrollment_id,device_id,candidate_id,artifact_sha256,source_commit,team_id,device_key_fingerprint,device_key_epoch,encode(challenge_nonce_digest,'hex') AS challenge_nonce_digest,purpose,signer_key_id,signature_algorithm,statement_json,statement_hash,signature_base64url,issued_at
+    FROM device_enrollment_possession_receipts
+    WHERE organization_id=$1 AND enrollment_id=$2 FOR SHARE`, [organizationId, enrollmentId]);
+  if (rowCount(result) !== 1) throw notFound("device possession receipt", enrollmentId);
+  return mapPossessionReceiptRow(result.rows[0]);
+}
+
 async function requireDevice(client, organizationId, deviceId) {
   const result = await client.query("SELECT id FROM devices WHERE organization_id=$1 AND id=$2", [organizationId, deviceId]);
   if (rowCount(result) !== 1) throw notFound("device", deviceId);
@@ -619,6 +843,73 @@ function mapEnrollment(row) {
   };
 }
 
+function mapEnrollmentV2(row, candidate) {
+  const enrollment = mapEnrollment(row);
+  const proofVersion = Number(row.proof_version);
+  if (proofVersion !== 2 || candidate.status !== "active") throw new ControlPlaneResourceRepositoryError("ERR_DATABASE", "stored v2 enrollment binding is invalid");
+  return {
+    ...enrollment,
+    proof_version: 2,
+    candidate_id: candidate.candidate_id,
+    device_key_fingerprint: deviceKeyFingerprint(row.device_key_fingerprint),
+    challenge_nonce_digest: sha256(row.challenge_nonce_digest, "challenge_nonce_digest"),
+    candidate_binding: {
+      candidate_id: candidate.candidate_id,
+      artifact_sha256: candidate.artifact_sha256,
+      source_commit: candidate.source_commit,
+      manifest_sha256: candidate.manifest_sha256,
+      team_id: candidate.team_id
+    }
+  };
+}
+
+function mapReleaseCandidate(row) {
+  const status = enumValue(row.status, "status", new Set(["active", "retired"]));
+  return {
+    candidate_id: candidateIdValue(row.candidate_id),
+    source_commit: exactLowerPattern(row.source_commit, /^[0-9a-f]{40}$/u, "source_commit"),
+    artifact_sha256: exactLowerPattern(row.artifact_sha256, SHA256, "artifact_sha256"),
+    manifest_sha256: exactLowerPattern(row.manifest_sha256, SHA256, "manifest_sha256"),
+    team_id: exactPattern(row.team_id, /^[A-Z0-9]{10}$/u, "team_id"),
+    status,
+    created_at: timestamp(row.created_at, "created_at"),
+    retired_at: row.retired_at === null || row.retired_at === undefined ? null : timestamp(row.retired_at, "retired_at")
+  };
+}
+
+function mapPossessionReceiptRow(row) {
+  const statement = normalizePossessionReceiptStatement(row.statement_json);
+  const statementHash = sha256(row.statement_hash, "statement_hash");
+  if (sha256Hex(statement) !== statementHash) throw new ControlPlaneResourceRepositoryError("ERR_DATABASE", "stored possession receipt hash is invalid");
+  if (safeInteger(row.device_key_epoch, "device_key_epoch") !== statement.device_key_epoch
+    || sha256(row.challenge_nonce_digest, "challenge_nonce_digest") !== statement.challenge_nonce_digest) {
+    throw new ControlPlaneResourceRepositoryError("ERR_DATABASE", "stored possession receipt binding is invalid");
+  }
+  const receipt = {
+    version: 1,
+    purpose: text(row.purpose, "purpose", 128, true),
+    key_id: signerKeyId(row.signer_key_id),
+    algorithm: enumValue(row.signature_algorithm, "signature_algorithm", new Set(["ed25519", "p256-sha256"])),
+    statement,
+    statement_hash: statementHash,
+    signature: signatureBase64Url(row.signature_base64url)
+  };
+  assertPossessionReceiptBinding(receipt, {
+    enrollmentId: requiredUuid(row.enrollment_id, "enrollment_id"),
+    organizationId: requiredUuid(row.organization_id, "organization_id"),
+    deviceId: requiredUuid(row.device_id, "device_id"),
+    candidate: {
+      candidate_id: candidateIdValue(row.candidate_id),
+      artifact_sha256: exactLowerPattern(row.artifact_sha256, SHA256, "artifact_sha256"),
+      source_commit: exactLowerPattern(row.source_commit, /^[0-9a-f]{40}$/u, "source_commit"),
+      team_id: exactPattern(row.team_id, /^[A-Z0-9]{10}$/u, "team_id")
+    },
+    fingerprint: deviceKeyFingerprint(row.device_key_fingerprint),
+    challengeDigest: sha256(row.challenge_nonce_digest, "challenge_nonce_digest")
+  });
+  return receipt;
+}
+
 function mapAgent(row) {
   return {
     version: safeInteger(row.version, "version"),
@@ -723,6 +1014,118 @@ function requiredCreatedBy(input) {
   const value = input.createdBy ?? input.created_by ?? input.memberId ?? input.member_id;
   if (value === undefined || value === null) throw new ControlPlaneResourceRepositoryError("ERR_ACTOR_REQUIRED", "mutation requires an authenticated member actor");
   return requiredUuid(value, "created_by");
+}
+
+function normalizeReleaseCandidateInput(input) {
+  return {
+    candidateId: candidateIdValue(input.candidateId ?? input.candidate_id),
+    sourceCommit: exactLowerPattern(input.sourceCommit ?? input.source_commit, /^[0-9a-f]{40}$/u, "source_commit"),
+    artifactSha256: exactLowerPattern(input.artifactSha256 ?? input.artifact_sha256, SHA256, "artifact_sha256"),
+    manifestSha256: exactLowerPattern(input.manifestSha256 ?? input.manifest_sha256, SHA256, "manifest_sha256"),
+    teamId: exactPattern(input.teamId ?? input.team_id, /^[A-Z0-9]{10}$/u, "team_id")
+  };
+}
+
+function candidateIdValue(value) {
+  return exactPattern(value, /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/u, "candidate_id");
+}
+
+function deviceKeyFingerprint(value) {
+  return exactPattern(value, /^SHA256:[A-Za-z0-9_-]{43}$/u, "device_key_fingerprint");
+}
+
+function signerKeyId(value) {
+  return exactPattern(value, /^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$/u, "signer_key_id");
+}
+
+function signatureBase64Url(value) {
+  return exactPattern(value, /^[A-Za-z0-9_-]{86}$/u, "signature");
+}
+
+function exactPattern(value, pattern, label) {
+  if (typeof value !== "string" || !pattern.test(value)) throw new ControlPlaneResourceRepositoryError("ERR_INVALID_INPUT", `${label} is invalid`);
+  return value;
+}
+
+function exactLowerPattern(value, pattern, label) {
+  const result = exactPattern(value, pattern, label);
+  return result.toLowerCase();
+}
+
+function normalizePossessionReceipt(input) {
+  if (!input || typeof input !== "object" || Array.isArray(input)) throw new ControlPlaneResourceRepositoryError("ERR_INVALID_INPUT", "possession_receipt must be an object");
+  const keys = Object.keys(input);
+  if (keys.length !== 7 || keys.some((key) => !["version", "purpose", "key_id", "algorithm", "statement", "statement_hash", "signature"].includes(key))) {
+    throw new ControlPlaneResourceRepositoryError("ERR_INVALID_INPUT", "possession_receipt has invalid fields");
+  }
+  if (input.version !== 1) throw new ControlPlaneResourceRepositoryError("ERR_INVALID_INPUT", "possession_receipt version is invalid");
+  if (input.purpose !== "device-enrollment-possession-receipt") throw new ControlPlaneResourceRepositoryError("ERR_INVALID_INPUT", "possession_receipt purpose is invalid");
+  const statement = normalizePossessionReceiptStatement(input.statement);
+  const statementHash = sha256(input.statement_hash, "statement_hash");
+  if (sha256Hex(statement) !== statementHash) throw new ControlPlaneResourceRepositoryError("ERR_INVALID_INPUT", "possession_receipt statement hash is invalid");
+  return {
+    version: 1,
+    purpose: input.purpose,
+    key_id: signerKeyId(input.key_id),
+    algorithm: enumValue(input.algorithm, "signature_algorithm", new Set(["ed25519", "p256-sha256"])),
+    statement,
+    statement_hash: statementHash,
+    signature: signatureBase64Url(input.signature)
+  };
+}
+
+function normalizePossessionReceiptStatement(input) {
+  if (!input || typeof input !== "object" || Array.isArray(input)) throw new ControlPlaneResourceRepositoryError("ERR_INVALID_INPUT", "possession receipt statement must be an object");
+  const keys = Object.keys(input);
+  const allowed = ["version", "enrollment_id", "organization_id", "device_id", "candidate_id", "artifact_sha256", "source_commit", "team_id", "device_key_fingerprint", "device_key_epoch", "challenge_nonce_digest", "issued_at"];
+  if (keys.length !== allowed.length || keys.some((key) => !allowed.includes(key))) throw new ControlPlaneResourceRepositoryError("ERR_INVALID_INPUT", "possession receipt statement has invalid fields");
+  const issuedAt = input.issued_at;
+  if (typeof issuedAt !== "string" || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/u.test(issuedAt) || timestamp(issuedAt, "issued_at") !== issuedAt) {
+    throw new ControlPlaneResourceRepositoryError("ERR_INVALID_INPUT", "issued_at is not canonical");
+  }
+  const statement = {
+    version: input.version,
+    enrollment_id: requiredUuid(input.enrollment_id, "enrollment_id"),
+    organization_id: requiredUuid(input.organization_id, "organization_id"),
+    device_id: requiredUuid(input.device_id, "device_id"),
+    candidate_id: candidateIdValue(input.candidate_id),
+    artifact_sha256: exactLowerPattern(input.artifact_sha256, SHA256, "artifact_sha256"),
+    source_commit: exactLowerPattern(input.source_commit, /^[0-9a-f]{40}$/u, "source_commit"),
+    team_id: exactPattern(input.team_id, /^[A-Z0-9]{10}$/u, "team_id"),
+    device_key_fingerprint: deviceKeyFingerprint(input.device_key_fingerprint),
+    device_key_epoch: safeInteger(input.device_key_epoch, "device_key_epoch"),
+    challenge_nonce_digest: exactLowerPattern(input.challenge_nonce_digest, SHA256, "challenge_nonce_digest"),
+    issued_at: issuedAt
+  };
+  if (statement.version !== 1) throw new ControlPlaneResourceRepositoryError("ERR_INVALID_INPUT", "possession receipt statement version is invalid");
+  return statement;
+}
+
+function assertPossessionReceiptBinding(receipt, { enrollmentId, organizationId, deviceId, candidate, fingerprint, challengeDigest }) {
+  if (receipt.purpose !== "device-enrollment-possession-receipt"
+    || receipt.statement.enrollment_id !== enrollmentId
+    || receipt.statement.organization_id !== organizationId
+    || receipt.statement.device_id !== deviceId
+    || receipt.statement.candidate_id !== candidate.candidate_id
+    || receipt.statement.artifact_sha256 !== candidate.artifact_sha256
+    || receipt.statement.source_commit !== candidate.source_commit
+    || receipt.statement.team_id !== candidate.team_id
+    || receipt.statement.device_key_fingerprint !== fingerprint
+    || receipt.statement.challenge_nonce_digest !== challengeDigest) {
+    throw new ControlPlaneResourceRepositoryError("ERR_ENROLLMENT_BINDING", "possession receipt does not match its enrollment binding");
+  }
+}
+
+function rejectRawPossessionMaterial(input) {
+  const forbidden = new Set(["nonce", "rawnonce", "noncevalue", "challengenonce", "challenge", "challengeid", "credential", "credentialsecret", "privatekey", "privatekeypem"]);
+  const visit = (value) => {
+    if (!value || typeof value !== "object") return;
+    for (const [key, child] of Object.entries(value)) {
+      if (forbidden.has(key.replace(/[_-]/gu, "").toLowerCase())) throw new ControlPlaneResourceRepositoryError("ERR_SECRET_MATERIAL", "raw possession material is not accepted");
+      visit(child);
+    }
+  };
+  visit(input);
 }
 
 function requiredPrincipalId(input) {

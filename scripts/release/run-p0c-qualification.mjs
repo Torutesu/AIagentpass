@@ -10,6 +10,14 @@ const MAX_OUTPUT_BYTES = 256 * 1024;
 const DEFAULT_TIMEOUT_MS = 5 * 60 * 1000;
 const TERMINATION_GRACE_MS = 250;
 const SANITIZED_ENV = Object.freeze({ HOME: '/var/empty', LANG: 'C', LC_ALL: 'C', PATH: '/usr/bin:/bin:/usr/sbin:/sbin' });
+const REQUIRED_CODE_IDENTITIES = Object.freeze([
+  Object.freeze({ path: 'AgentPass.app', bundle_id: 'dev.agentpass' }),
+  Object.freeze({ path: 'AgentPass.app/Contents/Library/HelperTools/AgentPassNativeClient.app', bundle_id: 'dev.agentpass.native-client' }),
+  Object.freeze({ path: 'AgentPass.app/Contents/Library/HelperTools/AgentPassNativeService.app', bundle_id: 'dev.agentpass.native-service' }),
+  Object.freeze({ path: 'AgentPass.app/Contents/Library/HelperTools/agentpass-atomic-rename', bundle_id: 'dev.agentpass.atomic-rename' }),
+  Object.freeze({ path: 'AgentPass.app/Contents/MacOS/agentpass-native-manager', bundle_id: 'dev.agentpass.native-manager' }),
+  Object.freeze({ path: 'AgentPass.app/Contents/MacOS/agentpass-onboarding', bundle_id: 'dev.agentpass' })
+]);
 
 export const REQUIRED_GATES = Object.freeze([
   'gatekeeper-notarization', 'clean-install-launchd-xpc', 'secure-enclave-enrollment',
@@ -150,6 +158,12 @@ const validateTemplate = (snapshot) => {
   if (!safeName(template.artifact_name) || !validDigest(template.artifact_sha256) || !/^[0-9a-f]{40}$/.test(template.source_commit) || !validDigest(template.dependency_lock_sha256) || !validDigest(template.release_manifest_sha256) || !validDigest(template.database_migration_manifest_sha256) || template.source_commit === '0'.repeat(40) || [template.artifact_sha256, template.dependency_lock_sha256, template.release_manifest_sha256, template.database_migration_manifest_sha256].some((value) => value === '0'.repeat(64)) || JSON.stringify(template).includes('REPLACE_WITH') || template.team_id === 'TEAMID1234') throw new Error('production report template lacks release bindings');
   if (template.notarization?.status !== 'accepted_stapled') throw new Error('production report template must bind an accepted notarized release');
   if (template.secure_enclave !== true || !/^SHA256:[A-Za-z0-9_-]{43}$/.test(template.operator_key_fingerprint)) throw new Error('production report template is not a production qualification template');
+  if (!Array.isArray(template.nested_code_identities) || template.nested_code_identities.length !== REQUIRED_CODE_IDENTITIES.length) throw new Error('production report template must bind all required code identities');
+  template.nested_code_identities.forEach((identity, index) => {
+    exactKeys(identity, ['path', 'bundle_id', 'team_id', 'code_directory_hash'], 'production code identity');
+    const expected = REQUIRED_CODE_IDENTITIES[index];
+    if (identity.path !== expected.path || identity.bundle_id !== expected.bundle_id || identity.team_id !== template.team_id || !/^[0-9a-f]{40,64}$/.test(identity.code_directory_hash)) throw new Error('production report template code identity is substituted or out of order');
+  });
   return template;
 };
 const validateGateDirectory = (input, production) => {
@@ -185,7 +199,8 @@ export const runQualification = async ({ templatePath, outputPath, artifactPath,
     AGENTPASS_P0C_ARTIFACT_PATH: artifact.path,
     AGENTPASS_P0C_ARTIFACT_SHA256: artifact.sha256,
     AGENTPASS_P0C_SOURCE_COMMIT: template.source_commit,
-    AGENTPASS_P0C_TEAM_ID: template.team_id
+    AGENTPASS_P0C_TEAM_ID: template.team_id,
+    AGENTPASS_P0C_CODE_IDENTITIES_JSON: JSON.stringify(template.nested_code_identities)
   });
   for (let index = 0; index < REQUIRED_GATES.length; index += 1) {
     const gate = REQUIRED_GATES[index]; let result; let protocolTests = [];

@@ -11,9 +11,18 @@ const DEFAULT_TIMEOUT_MS = 5 * 60 * 1000;
 const DIGEST = /^[0-9a-f]{64}$/u;
 const COMMIT = /^[0-9a-f]{40}$/u;
 const TEAM_ID = /^[A-Z0-9]{10}$/u;
+const CODE_HASH = /^[0-9a-f]{40,64}$/u;
 const SAFE_NAME = /^[a-z0-9][a-z0-9-]{0,79}$/u;
 const HTTPS_URL = /^https:\/\/[^\s/?#]+(?::\d{1,5})?(?:\/[^\s]*)?$/u;
 const FIXED_ENV = Object.freeze({ HOME: '/var/empty', LANG: 'C', LC_ALL: 'C', PATH: '/usr/bin:/bin:/usr/sbin:/sbin' });
+const REQUIRED_CODE_IDENTITIES = Object.freeze([
+  Object.freeze({ path: 'AgentPass.app', bundle_id: 'dev.agentpass' }),
+  Object.freeze({ path: 'AgentPass.app/Contents/Library/HelperTools/AgentPassNativeClient.app', bundle_id: 'dev.agentpass.native-client' }),
+  Object.freeze({ path: 'AgentPass.app/Contents/Library/HelperTools/AgentPassNativeService.app', bundle_id: 'dev.agentpass.native-service' }),
+  Object.freeze({ path: 'AgentPass.app/Contents/Library/HelperTools/agentpass-atomic-rename', bundle_id: 'dev.agentpass.atomic-rename' }),
+  Object.freeze({ path: 'AgentPass.app/Contents/MacOS/agentpass-native-manager', bundle_id: 'dev.agentpass.native-manager' }),
+  Object.freeze({ path: 'AgentPass.app/Contents/MacOS/agentpass-onboarding', bundle_id: 'dev.agentpass' })
+]);
 
 export const canonicalJSON = (value) => Buffer.from(`${JSON.stringify(value, null, 2)}\n`, 'utf8');
 const sha256 = (bytes) => crypto.createHash('sha256').update(bytes).digest('hex');
@@ -70,10 +79,16 @@ export const loadScenarioConfig = (path = DEFAULT_CONFIG, { production = process
 
 export const releaseBindings = (env = process.env) => {
   const value = { artifactPath: env.AGENTPASS_P0C_ARTIFACT_PATH, artifactSha256: env.AGENTPASS_P0C_ARTIFACT_SHA256, sourceCommit: env.AGENTPASS_P0C_SOURCE_COMMIT, teamId: env.AGENTPASS_P0C_TEAM_ID, gate: env.AGENTPASS_P0C_GATE };
-  let tests; try { tests = JSON.parse(env.AGENTPASS_P0C_TESTS_JSON ?? ''); } catch { throw new Error('scenario test binding is invalid'); }
-  if (!isAbsolute(value.artifactPath ?? '') || !DIGEST.test(value.artifactSha256 ?? '') || !COMMIT.test(value.sourceCommit ?? '') || !TEAM_ID.test(value.teamId ?? '') || !SAFE_NAME.test(value.gate ?? '') || !Array.isArray(tests) || tests.length === 0 || new Set(tests).size !== tests.length || tests.some((test) => !SAFE_NAME.test(test))) throw new Error('scenario release bindings are invalid');
+  let tests; let codeIdentities;
+  try { tests = JSON.parse(env.AGENTPASS_P0C_TESTS_JSON ?? ''); codeIdentities = JSON.parse(env.AGENTPASS_P0C_CODE_IDENTITIES_JSON ?? ''); } catch { throw new Error('scenario release binding is invalid'); }
+  if (!isAbsolute(value.artifactPath ?? '') || !DIGEST.test(value.artifactSha256 ?? '') || !COMMIT.test(value.sourceCommit ?? '') || !TEAM_ID.test(value.teamId ?? '') || !SAFE_NAME.test(value.gate ?? '') || !Array.isArray(tests) || tests.length === 0 || new Set(tests).size !== tests.length || tests.some((test) => !SAFE_NAME.test(test)) || !Array.isArray(codeIdentities) || codeIdentities.length !== REQUIRED_CODE_IDENTITIES.length) throw new Error('scenario release bindings are invalid');
+  codeIdentities.forEach((identity, index) => {
+    exactKeys(identity, ['path', 'bundle_id', 'team_id', 'code_directory_hash'], 'scenario code identity');
+    const expected = REQUIRED_CODE_IDENTITIES[index];
+    if (identity.path !== expected.path || identity.bundle_id !== expected.bundle_id || identity.team_id !== value.teamId || !CODE_HASH.test(identity.code_directory_hash)) throw new Error('scenario code identity binding is invalid');
+  });
   readProtectedFile(value.artifactPath, { maximum: 16 * 1024 * 1024 * 1024, production: false, expectedSha256: value.artifactSha256 });
-  return Object.freeze({ ...value, tests: Object.freeze([...tests]) });
+  return Object.freeze({ ...value, tests: Object.freeze([...tests]), codeIdentities: Object.freeze(codeIdentities.map((identity) => Object.freeze({ ...identity }))) });
 };
 
 const capture = (maximum) => ({ chunks: [], bytes: 0, exceeded: false, append(chunk) { const remaining = Math.max(0, maximum - this.bytes); const accepted = chunk.subarray(0, remaining); if (accepted.length) { this.chunks.push(Buffer.from(accepted)); this.bytes += accepted.length; } if (accepted.length !== chunk.length) this.exceeded = true; }, bytesValue() { return Buffer.concat(this.chunks, this.bytes); } });
@@ -108,7 +123,7 @@ export const executePhysicalScenario = async ({ gate, tests, execute, config, bi
   const machine = config ?? loadScenarioConfig(undefined, { production });
   const passed = await execute(Object.freeze({ release, machine, production, runCommand }));
   if (!Array.isArray(passed) || passed.length !== tests.length || passed.some((name, index) => name !== tests[index])) throw new Error('physical scenario did not prove every assigned test');
-  return { schema_version: 1, gate, status: 'passed', tests: tests.map((name) => ({ name, status: 'passed' })), bindings: { artifact_sha256: release.artifactSha256, source_commit: release.sourceCommit, team_id: release.teamId } };
+  return { schema_version: 1, gate, status: 'passed', tests: tests.map((name) => ({ name, status: 'passed' })), bindings: { artifact_sha256: release.artifactSha256, source_commit: release.sourceCommit, team_id: release.teamId, code_identities_sha256: sha256(Buffer.from(JSON.stringify(release.codeIdentities))) } };
 };
 
 export const runPhysicalScenario = async (declaration) => {

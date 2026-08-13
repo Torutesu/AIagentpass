@@ -74,7 +74,7 @@ test("refresh metrics are bounded fixed-key counters and never retain labels", (
   assert.deepEqual(Object.keys(metrics.snapshot().counters), OPERATIONAL_METRIC_KEYS);
 });
 
-test("readiness requires exact schema 16, verified checksums, a DB probe, and a non-waiting pool", async () => {
+test("readiness requires the exact schema version, verified checksums, a DB probe, and a non-waiting pool", async () => {
   const metrics = createOperationalMetrics();
   const drain = createDrainController();
   let probeCalls = 0;
@@ -90,7 +90,7 @@ test("readiness requires exact schema 16, verified checksums, a DB probe, and a 
   assert.equal(result.ready, true);
   assert.equal(result.status, "ready");
   assert.equal(result.code, "ready");
-  assert.equal(result.checks.schema.applied_version, 16);
+  assert.equal(result.checks.schema.applied_version, EXPECTED_POSTGRES_SCHEMA_VERSION);
   assert.equal(result.checks.schema.schema_version_status, "exact");
   assert.equal(result.checks.schema.checksum_status, "verified");
   assert.equal(result.checks.schema.drift, false);

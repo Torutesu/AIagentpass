@@ -9,7 +9,7 @@ const root = path.resolve(import.meta.dirname, "..");
 test("machine-readable platform contracts pass the offline validator", () => {
   const result = spawnSync(process.execPath, [path.join(root, "scripts", "validate-contracts.mjs")], { cwd: root, encoding: "utf8" });
   assert.equal(result.status, 0, result.stderr);
-  assert.match(result.stdout, /validated 7 schemas, 2 OpenAPI documents, 5 fixtures, and 16 PostgreSQL migrations/);
+  assert.match(result.stdout, /validated 10 schemas, 2 OpenAPI documents, 5 fixtures, and 17 PostgreSQL migrations/);
 });
 
 const humanOpenapi = () => JSON.parse(fs.readFileSync(path.join(root, "contracts", "openapi", "human-v1.json"), "utf8"));
@@ -266,7 +266,10 @@ test("G4.2 device sync contract matches the implemented Cloud refresh lane", () 
   assert.deepEqual(openapi.components.schemas.DeviceRefreshState.enum, ["pending", "fetching", "applied", "blocked", "stale", "offline", "revoked"]);
   assert.equal(openapi.components.schemas.ControlBundleV2.properties.signature.pattern, "^[A-Za-z0-9+/]{86}==$" );
   assert.equal(openapi.components.schemas.ControlBundleV2.properties.issued_at.maxLength, 24);
-  assert.equal(openapi.paths["/enrollments/{enrollment_id}"].post.requestBody.content["application/json"].schema.$ref, "../schemas/device-enrollment-v1.schema.json");
+  assert.deepEqual(openapi.paths["/enrollments/{enrollment_id}"].post.requestBody.content["application/json"].schema.oneOf, [
+    { $ref: "../schemas/device-enrollment-v1.schema.json" },
+    { $ref: "../schemas/device-enrollment-completion-v2.schema.json" }
+  ]);
   assert.equal(openapi.paths["/enrollments/{enrollment_id}"].post.responses["201"].$ref, "#/components/responses/DeviceEnrollmentCompleted");
   assert.deepEqual(openapi.components.schemas.ControlRefreshPollResponse.required, ["hint", "request_id"]);
   assert.deepEqual(openapi.components.schemas.ControlBundleFetchResponse.required, ["bundle", "desired_generation", "request_id"]);

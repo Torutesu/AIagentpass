@@ -337,6 +337,10 @@ private struct ServiceConfiguration: Decodable {
               !value.clientCodeSigningRequirement.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             throw AgentPassNativeError.invalidConfiguration("Native service configuration contains empty trust parameters")
         }
+        guard let serviceAccessGroup = value.keychainAccessGroup,
+              value.clientCodeSigningRequirement == (try? NativeClientCodeRequirement.requirement(serviceAccessGroup: serviceAccessGroup)) else {
+            throw AgentPassNativeError.invalidConfiguration("Native client code-signing requirement must bind the fixed Team ID, Developer ID identity, and approval-key entitlement")
+        }
         if value.controlURL != nil || value.controlRefreshSeconds != nil {
             guard let rawURL = value.controlURL, let interval = value.controlRefreshSeconds,
                   value.controlV2StatePath != nil ? value.controlV2DeviceKeyTag == NativeEnrollmentKeyMaterial.fixedApplicationTag : value.controlStatePath != nil else {

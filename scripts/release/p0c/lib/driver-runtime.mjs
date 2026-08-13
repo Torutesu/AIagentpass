@@ -12,7 +12,16 @@ const DIGEST = /^[0-9a-f]{64}$/u;
 const COMMIT = /^[0-9a-f]{40}$/u;
 const TEAM_ID = /^[A-Z0-9]{10}$/u;
 const SAFE_NAME = /^[a-z0-9][a-z0-9-]{0,79}$/u;
+const CODE_HASH = /^[0-9a-f]{40,64}$/u;
 const BASE_ENV = Object.freeze({ HOME: '/var/empty', LANG: 'C', LC_ALL: 'C', PATH: '/usr/bin:/bin:/usr/sbin:/sbin' });
+const REQUIRED_CODE_IDENTITIES = Object.freeze([
+  Object.freeze({ path: 'AgentPass.app', bundle_id: 'dev.agentpass' }),
+  Object.freeze({ path: 'AgentPass.app/Contents/Library/HelperTools/AgentPassNativeClient.app', bundle_id: 'dev.agentpass.native-client' }),
+  Object.freeze({ path: 'AgentPass.app/Contents/Library/HelperTools/AgentPassNativeService.app', bundle_id: 'dev.agentpass.native-service' }),
+  Object.freeze({ path: 'AgentPass.app/Contents/Library/HelperTools/agentpass-atomic-rename', bundle_id: 'dev.agentpass.atomic-rename' }),
+  Object.freeze({ path: 'AgentPass.app/Contents/MacOS/agentpass-native-manager', bundle_id: 'dev.agentpass.native-manager' }),
+  Object.freeze({ path: 'AgentPass.app/Contents/MacOS/agentpass-onboarding', bundle_id: 'dev.agentpass' })
+]);
 const REQUIRED_GATES = Object.freeze([
   'audit-upload-observation', 'claude-code-unattended-sign', 'clean-install-launchd-xpc',
   'cloud-possession-verification', 'crash-restart-recovery', 'current-user-purge',
@@ -77,9 +86,16 @@ export const validateReleaseBindings = (env = process.env) => {
   const artifactSha256 = env.AGENTPASS_P0C_ARTIFACT_SHA256;
   const sourceCommit = env.AGENTPASS_P0C_SOURCE_COMMIT;
   const teamId = env.AGENTPASS_P0C_TEAM_ID;
-  if (!isAbsolute(artifactPath ?? '') || !DIGEST.test(artifactSha256 ?? '') || !COMMIT.test(sourceCommit ?? '') || !TEAM_ID.test(teamId ?? '')) throw new Error('release bindings are missing or invalid');
+  let codeIdentities;
+  try { codeIdentities = JSON.parse(env.AGENTPASS_P0C_CODE_IDENTITIES_JSON ?? ''); } catch { throw new Error('release code identity binding is invalid'); }
+  if (!isAbsolute(artifactPath ?? '') || !DIGEST.test(artifactSha256 ?? '') || !COMMIT.test(sourceCommit ?? '') || !TEAM_ID.test(teamId ?? '') || !Array.isArray(codeIdentities) || codeIdentities.length !== REQUIRED_CODE_IDENTITIES.length) throw new Error('release bindings are missing or invalid');
+  codeIdentities.forEach((identity, index) => {
+    exactKeys(identity, ['path', 'bundle_id', 'team_id', 'code_directory_hash'], 'release code identity');
+    const expected = REQUIRED_CODE_IDENTITIES[index];
+    if (identity.path !== expected.path || identity.bundle_id !== expected.bundle_id || identity.team_id !== teamId || !CODE_HASH.test(identity.code_directory_hash)) throw new Error('release code identity binding is invalid');
+  });
   const artifact = readProtectedFile(artifactPath, { maximum: 16 * 1024 * 1024 * 1024, production: false, expectedSha256: artifactSha256 });
-  return { artifactPath: artifact.path, artifactSha256, sourceCommit, teamId };
+  return { artifactPath: artifact.path, artifactSha256, sourceCommit, teamId, codeIdentities: codeIdentities.map((identity) => ({ ...identity })) };
 };
 
 const runScenario = (command, env, { timeoutMs = DEFAULT_TIMEOUT_MS, maxOutputBytes = MAX_OUTPUT_BYTES } = {}) => new Promise((resolveResult) => {
@@ -97,8 +113,9 @@ const validateScenarioProtocol = (bytes, gate, tests, bindings) => {
   let value; try { value = JSON.parse(bytes.toString('utf8')); } catch { throw new Error('scenario returned invalid protocol'); }
   if (!bytes.equals(canonicalJSON(value))) throw new Error('scenario protocol is not canonical JSON');
   exactKeys(value, ['schema_version', 'gate', 'status', 'tests', 'bindings'], 'scenario result');
-  exactKeys(value.bindings, ['artifact_sha256', 'source_commit', 'team_id'], 'scenario bindings');
-  if (value.schema_version !== 1 || value.gate !== gate || value.status !== 'passed' || JSON.stringify(value.bindings) !== JSON.stringify({ artifact_sha256: bindings.artifactSha256, source_commit: bindings.sourceCommit, team_id: bindings.teamId })) throw new Error('scenario result is not bound to this release');
+  exactKeys(value.bindings, ['artifact_sha256', 'source_commit', 'team_id', 'code_identities_sha256'], 'scenario bindings');
+  const identityDigest = sha256(Buffer.from(JSON.stringify(bindings.codeIdentities)));
+  if (value.schema_version !== 1 || value.gate !== gate || value.status !== 'passed' || JSON.stringify(value.bindings) !== JSON.stringify({ artifact_sha256: bindings.artifactSha256, source_commit: bindings.sourceCommit, team_id: bindings.teamId, code_identities_sha256: identityDigest })) throw new Error('scenario result is not bound to this release');
   if (!Array.isArray(value.tests) || value.tests.length !== tests.length || value.tests.some((item, index) => item?.name !== tests[index] || item?.status !== 'passed' || Object.keys(item).sort().join(',') !== 'name,status')) throw new Error('scenario did not pass the exact assigned tests');
   return value.tests;
 };
@@ -109,7 +126,7 @@ export const executeGateDriver = async ({ gate, tests, scenario = gate, config, 
   const release = validateReleaseBindings(env); const loaded = config ?? loadDriverConfig(undefined, { production }); const entry = loaded.scenarios.get(gate);
   if (!entry || entry.executable !== scenario) throw new Error('scenario is not allowlisted for this gate');
   const executable = readProtectedFile(entry.path, { maximum: 16 * 1024 * 1024, executable: true, production, expectedSha256: entry.sha256 });
-  const scenarioEnv = { ...BASE_ENV, AGENTPASS_P0C_ARTIFACT_PATH: release.artifactPath, AGENTPASS_P0C_ARTIFACT_SHA256: release.artifactSha256, AGENTPASS_P0C_SOURCE_COMMIT: release.sourceCommit, AGENTPASS_P0C_TEAM_ID: release.teamId, AGENTPASS_P0C_GATE: gate, AGENTPASS_P0C_TESTS_JSON: JSON.stringify(tests) };
+  const scenarioEnv = { ...BASE_ENV, AGENTPASS_P0C_ARTIFACT_PATH: release.artifactPath, AGENTPASS_P0C_ARTIFACT_SHA256: release.artifactSha256, AGENTPASS_P0C_SOURCE_COMMIT: release.sourceCommit, AGENTPASS_P0C_TEAM_ID: release.teamId, AGENTPASS_P0C_CODE_IDENTITIES_JSON: JSON.stringify(release.codeIdentities), AGENTPASS_P0C_GATE: gate, AGENTPASS_P0C_TESTS_JSON: JSON.stringify(tests) };
   const result = await run(executable.path, scenarioEnv, {});
   const after = readProtectedFile(entry.path, { maximum: 16 * 1024 * 1024, executable: true, production, expectedSha256: entry.sha256 });
   if (after.identity !== executable.identity || result.exitCode !== 0 || result.signal || result.spawnError || result.timedOut || result.outputLimit) throw new Error('physical scenario failed');

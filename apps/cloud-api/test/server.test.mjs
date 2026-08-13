@@ -7,6 +7,7 @@ import test from "node:test";
 import { createApiTokenRecord, signDeviceRequest } from "../src/auth.mjs";
 import { createCloudApi } from "../src/server.mjs";
 import { computeAuditEventHash, createCloudStore } from "../src/store.mjs";
+import { createLocalPossessionReceiptSigner } from "../src/possession-receipt-signer.mjs";
 import { verifyControlBundle } from "../../../lib/control-bundle-v2.mjs";
 import { canonicalJson, verifyCapability } from "../../../packages/capability/src/index.mjs";
 import { createRateLimiter } from "../src/rate-limit.mjs";
@@ -44,6 +45,50 @@ async function fixture(t, apiOptions = {}) {
 function auditListEvent(eventId, requestId, previousHash, deviceTimestamp) {
   const event = { version: 1, event_id: eventId, request_id: requestId, agent_id: agentId, operation: "git.commit.sign", decision: "allow", reason: "allowed", policy_sequence: 1, capability_sequence: 1, repository: "/work/repo", branch: "feature/activity", remote: "git@example.test:repo.git", payload_digest: "a".repeat(64), device_timestamp: deviceTimestamp, previous_hash: previousHash };
   return { ...event, event_hash: computeAuditEventHash(event) };
+}
+
+async function v2Fixture(t) {
+  const completionKeys = crypto.generateKeyPairSync("ec", { namedCurve: "prime256v1" });
+  const device = { device_id: deviceId, organization_id: org, status: "active", key_epoch: 1, device_public_key: completionKeys.publicKey.export({ type: "spki", format: "pem" }).toString() };
+  const candidate = { candidate_id: "release-2026-08-13-01", source_commit: "a".repeat(40), artifact_sha256: "b".repeat(64), manifest_sha256: "c".repeat(64), team_id: "TEAM123456", status: "active" };
+  const state = { receipt: undefined, enrollment: undefined };
+  const receiptKeys = crypto.generateKeyPairSync("ed25519");
+  const receiptSigner = createLocalPossessionReceiptSigner({ privateKey: receiptKeys.privateKey, keyId: "possession-v1", algorithm: "ed25519" });
+  const store = {
+    async listDevices() { return [device]; },
+    async getReleaseCandidate({ candidateId }) { if (candidateId !== candidate.candidate_id) { const error = new Error("not found"); error.code = "ERR_NOT_FOUND"; throw error; } return candidate; },
+    async createDeviceEnrollment(input) {
+      state.enrollment = { enrollment_id: input.enrollmentId, organization_id: input.organizationId, device_id: input.deviceId, label: input.label, platform: input.platform, proof_version: 2, candidate_id: input.candidateId, device_key_fingerprint: input.deviceKeyFingerprint, expires_at: input.expiresAt, challenge_nonce_digest: input.challengeNonceDigest };
+      return state.enrollment;
+    },
+    async completeDeviceEnrollment(input) {
+      assert.equal(input.proofVersion, 2);
+      assert.equal(input.challengeNonceDigest, state.enrollment.challenge_nonce_digest);
+      assert.equal(input.possessionReceipt.statement.candidate_id, candidate.candidate_id);
+      state.receipt = input.possessionReceipt;
+      return { ...device, status: "active", key_algorithm: "p256-sha256", key_epoch: 1, organization_id: org, device_id: deviceId };
+    },
+    async appendDevicePossessionReceipt({ receipt }) { state.receipt ??= receipt; return state.receipt; },
+    async getDevicePossessionReceipt() { return state.receipt; },
+    async appendAdminAuditEvent() {}
+  };
+  const bundleKeys = crypto.generateKeyPairSync("ed25519");
+  const refreshKeys = crypto.generateKeyPairSync("ed25519");
+  const token = "ap_owner_token_v2_abcdefghijklmnopqrstuvwxyz";
+  const server = createCloudApi({
+    store,
+    tokenRecords: [createApiTokenRecord({ token, tokenId: "owner-token-v2", organizationId: org, memberId: "owner-1", role: "owner" })],
+    bundleSigner: { privateKey: bundleKeys.privateKey, issuer: "agentpass-cloud", keyId: "control-v1" },
+    refreshHintService: { publicKeyMetadata: async () => ({ key_id: "refresh-hint-v1", algorithm: "ed25519", public_key: refreshKeys.publicKey.export({ type: "spki", format: "pem" }).toString() }), poll: async () => null },
+    possessionReceiptSigner: receiptSigner,
+    enrollmentCredentialSecret: Buffer.alloc(32, 0x42),
+    now: () => now,
+    verifyRecentWebAuthn: async ({ principal, organization_id, operation }) => ({ verified: true, consumed: true, challenge_id: "99999999-9999-4999-8999-999999999999", member_id: principal.member_id, organization_id, operation, authenticated_at: now })
+  });
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const base = `http://127.0.0.1:${server.address().port}`;
+  t.after(async () => { await new Promise((resolve) => server.close(resolve)); });
+  return { base, token, candidate, completionKeys, device, state, receiptKeys };
 }
 
 test("human routes enforce bearer role, tenant, and idempotency", async (t) => {
@@ -177,6 +222,63 @@ test("admin issues a one-time enrollment and a macOS P-256 device completes it",
   const substituted = await fetch(`${f.base}${invitation.endpoint}`, { method: "POST", headers: enrollmentHeaders, body: JSON.stringify({ ...request, label: "Other Mac" }) });
   assert.equal(substituted.status, 401);
   assert.equal((await f.store.getDevice({ organizationId: org, deviceId: pendingDevice })).status, "active");
+});
+
+test("v2 enrollment is candidate-bound end to end and receipt reads are exact-device authenticated", async (t) => {
+  const f = await v2Fixture(t);
+  const publicKey = f.completionKeys.publicKey.export({ type: "spki", format: "pem" }).toString();
+  const fingerprint = `SHA256:${crypto.createHash("sha256").update(crypto.createPublicKey(publicKey).export({ type: "spki", format: "der" })).digest("base64url")}`;
+  const issueHeaders = { authorization: `Bearer ${f.token}`, "content-type": "application/json", "idempotency-key": "issue-v2-0001", "AgentPass-Recent-Auth": "webauthn-proof-abcdefghijklmnopqrstuvwxyz" };
+  const issueBody = { proof_version: 2, candidate_id: f.candidate.candidate_id, device_key_fingerprint: fingerprint, enrollment_id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", device_id: deviceId, label: "Build Mac v2", platform: "macos", ttl_ms: 600_000 };
+  const forbiddenArtifact = await fetch(`${f.base}/v1/organizations/${org}/device-enrollments`, { method: "POST", headers: issueHeaders, body: JSON.stringify({ ...issueBody, artifact_sha256: f.candidate.artifact_sha256 }) });
+  assert.equal(forbiddenArtifact.status, 400);
+  const issuedResponse = await fetch(`${f.base}/v1/organizations/${org}/device-enrollments`, { method: "POST", headers: issueHeaders, body: JSON.stringify(issueBody) });
+  assert.equal(issuedResponse.status, 201, JSON.stringify(await issuedResponse.clone().json()));
+  const issued = (await issuedResponse.json()).enrollment;
+  assert.equal(issued.challenge_id, issueBody.enrollment_id);
+  assert.equal(issued.candidate_binding.artifact_sha256, f.candidate.artifact_sha256);
+  assert.equal(issued.candidate_binding.source_commit, f.candidate.source_commit);
+  assert.equal(issued.candidate_binding.team_id, f.candidate.team_id);
+
+  const binding = { ...issued.candidate_binding, device_key_fingerprint: fingerprint };
+  const body = { version: 2, proof_version: 2, enrollment_id: issued.enrollment_id, organization_id: org, device_id: deviceId, label: issueBody.label, platform: "macos", device_key: { algorithm: "p256-sha256", spki_pem: publicKey }, candidate_id: f.candidate.candidate_id, device_key_fingerprint: fingerprint, challenge: { challenge_id: issued.challenge_id, nonce: issued.nonce, expires_at: issued.expires_at, candidate_id: f.candidate.candidate_id, device_key_fingerprint: fingerprint } };
+  const makeCompletion = (bodyOverride = {}, headerBinding = binding, path = `/v1/enrollments/${issued.enrollment_id}`) => {
+    const requestBody = { ...body, ...bodyOverride };
+    const encoded = JSON.stringify(requestBody);
+    const credentialDigest = crypto.createHash("sha256").update(issued.credential).digest("hex");
+    const bindingDigest = crypto.createHash("sha256").update(canonicalJson(headerBinding)).digest("hex");
+    const proof = Buffer.from(`AgentPass-Enrollment-Proof-v2\0POST\n${path}\n${crypto.createHash("sha256").update(encoded).digest("hex")}\n${credentialDigest}\n${requestBody.challenge.nonce}\n${bindingDigest}`);
+    return { path, body: encoded, headers: { "content-type": "application/json", "AgentPass-Enrollment-Credential": issued.credential, "AgentPass-Enrollment-Nonce": requestBody.challenge.nonce, "AgentPass-Enrollment-Candidate-Binding": canonicalJson(headerBinding), "AgentPass-Enrollment-Signature": crypto.sign("sha256", proof, { key: f.completionKeys.privateKey, dsaEncoding: "ieee-p1363" }).toString("base64") } };
+  };
+  for (const attempt of [
+    makeCompletion({ challenge: { ...body.challenge, nonce: "B".repeat(43) } }),
+    makeCompletion({}, { ...binding, candidate_id: "release-other" }),
+    makeCompletion({ device_key_fingerprint: "SHA256:" + "B".repeat(43) }),
+    makeCompletion({ organization_id: "99999999-9999-4999-8999-999999999999" }),
+    makeCompletion({}, binding, "/v1/enrollments/bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb")
+  ]) {
+    const response = await fetch(`${f.base}${attempt.path}`, { method: "POST", headers: attempt.headers, body: attempt.body });
+    assert.ok([400, 401, 404].includes(response.status), `unexpected adversarial status ${response.status}`);
+  }
+  const valid = makeCompletion();
+  const completed = await fetch(`${f.base}${valid.path}`, { method: "POST", headers: valid.headers, body: valid.body });
+  assert.equal(completed.status, 201, JSON.stringify(await completed.clone().json()));
+  const replay = await fetch(`${f.base}${valid.path}`, { method: "POST", headers: valid.headers, body: valid.body });
+  assert.equal(replay.status, 201);
+
+  const receiptPath = `/v1/organizations/${org}/devices/${deviceId}/enrollment-receipt`;
+  const receiptHeaders = signDeviceRequest({ method: "GET", path: receiptPath, body: Buffer.alloc(0), device_id: deviceId, timestamp: now, nonce: "receipt-v2-abcdefghijklmnopqrstuvwxyz-123456" }, f.completionKeys.privateKey);
+  const receiptResponse = await fetch(`${f.base}${receiptPath}`, { headers: receiptHeaders });
+  assert.equal(receiptResponse.status, 200, JSON.stringify(await receiptResponse.clone().json()));
+  const receipt = (await receiptResponse.json()).receipt;
+  assert.equal(receipt.statement.candidate_id, f.candidate.candidate_id);
+  assert.equal(receipt.statement.device_id, deviceId);
+  assert.equal(receipt.statement.artifact_sha256, f.candidate.artifact_sha256);
+  assert.equal(receipt.statement.challenge_nonce_digest, crypto.createHash("sha256").update(issued.nonce).digest("hex"));
+  const wrongTenantPath = `/v1/organizations/99999999-9999-4999-8999-999999999999/devices/${deviceId}/enrollment-receipt`;
+  const wrongTenantHeaders = signDeviceRequest({ method: "GET", path: wrongTenantPath, body: Buffer.alloc(0), device_id: deviceId, timestamp: now, nonce: "receipt-v2-wrong-tenant-abcdefghijklmnopqrstuvwxyz" }, f.completionKeys.privateKey);
+  const wrongTenant = await fetch(`${f.base}${wrongTenantPath}`, { headers: wrongTenantHeaders });
+  assert.ok([401, 403, 404].includes(wrongTenant.status));
 });
 
 test("recent WebAuthn authorization is exact-operation bound and must be atomically consumed", async (t) => {

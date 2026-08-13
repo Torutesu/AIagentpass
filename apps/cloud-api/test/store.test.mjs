@@ -339,6 +339,114 @@ test("device enrollment stores only a digest and consumes an exact bound request
   assert.equal(rotated.key_epoch, 2);
 });
 
+test("v2 enrollment is candidate-bound, digest-only, and stores append-only possession receipts", async (t) => {
+  const { directory, store } = await fixture();
+  t.after(async () => { await store.close(); await fs.rm(directory, { recursive: true, force: true }); });
+  const candidate = await store.registerReleaseCandidate({
+    candidateId: "release-2026-08-13-01",
+    sourceCommit: "c".repeat(40),
+    artifactSha256: "b".repeat(64),
+    manifestSha256: "d".repeat(64),
+    teamId: "ABCDE12345",
+    createdAt: "2026-08-13T10:00:00.000Z",
+    idempotencyKey: "candidate-1"
+  });
+  assert.equal((await store.getReleaseCandidate({ candidateId: candidate.candidate_id })).artifact_sha256, "b".repeat(64));
+  const keys = crypto.generateKeyPairSync("ec", { namedCurve: "prime256v1" });
+  const publicKey = keys.publicKey.export({ type: "spki", format: "pem" }).toString();
+  const fingerprint = `SHA256:${crypto.createHash("sha256").update(keys.publicKey.export({ type: "spki", format: "der" })).digest("base64url")}`;
+  const credential = "v2-credential-never-persisted";
+  const credentialDigest = crypto.createHash("sha256").update(credential).digest("hex");
+  const challengeNonceDigest = "e".repeat(64);
+  const enrollment = await store.createDeviceEnrollment({
+    proofVersion: 2,
+    organizationId: ids.org,
+    enrollmentId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+    deviceId: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+    candidateId: candidate.candidate_id,
+    deviceKeyFingerprint: fingerprint,
+    credentialDigest,
+    challengeNonceDigest,
+    label: "Build Mac v2",
+    platform: "macos",
+    createdAt: "2026-08-13T10:00:00.000Z",
+    ttlMs: 15 * 60 * 1000,
+    idempotencyKey: "enrollment-v2-1"
+  });
+  assert.equal(enrollment.proof_version, 2);
+  assert.equal(enrollment.challenge.nonce, undefined);
+  assert.equal(enrollment.credential_digest, undefined);
+  const diskBeforeCompletion = await fs.readFile(path.join(directory, "cloud-store.json"), "utf8");
+  assert.equal(diskBeforeCompletion.includes("v2-credential-never-persisted"), false);
+  assert.equal(diskBeforeCompletion.includes("challenge_nonce"), true);
+  assert.equal(diskBeforeCompletion.includes("raw-challenge-never-accepted"), false);
+  await assert.rejects(() => store.completeDeviceEnrollment({
+    proofVersion: 2,
+    enrollmentId: enrollment.enrollment_id,
+    organizationId: ids.org,
+    deviceId: enrollment.device_id,
+    label: enrollment.label,
+    platform: enrollment.platform,
+    candidateId: candidate.candidate_id,
+    deviceKeyFingerprint: fingerprint,
+    credentialDigest,
+    challengeNonceDigest,
+    challenge: { nonce: "raw-challenge-never-accepted" },
+    deviceKey: { algorithm: "p256-sha256", spki_pem: publicKey }
+  }), { code: "ERR_INVALID_INPUT" });
+  const statement = {
+    version: 1,
+    enrollment_id: enrollment.enrollment_id,
+    organization_id: ids.org,
+    device_id: enrollment.device_id,
+    candidate_id: candidate.candidate_id,
+    artifact_sha256: candidate.artifact_sha256,
+    source_commit: candidate.source_commit,
+    team_id: candidate.team_id,
+    device_key_fingerprint: fingerprint,
+    device_key_epoch: 1,
+    challenge_nonce_digest: challengeNonceDigest,
+    issued_at: "2026-08-13T10:01:00.000Z"
+  };
+  const possessionReceipt = {
+    version: 1,
+    purpose: "device-enrollment-possession-receipt",
+    key_id: "possession-receipt-v1",
+    algorithm: "p256-sha256",
+    statement,
+    statement_hash: crypto.createHash("sha256").update(canonicalJson(statement), "utf8").digest("hex"),
+    signature: Buffer.alloc(64, 7).toString("base64url")
+  };
+  const completed = await store.completeDeviceEnrollment({
+    proofVersion: 2,
+    enrollmentId: enrollment.enrollment_id,
+    organizationId: ids.org,
+    deviceId: enrollment.device_id,
+    label: enrollment.label,
+    platform: enrollment.platform,
+    candidateId: candidate.candidate_id,
+    deviceKeyFingerprint: fingerprint,
+    credentialDigest,
+    challengeNonceDigest,
+    deviceKey: { algorithm: "p256-sha256", spki_pem: publicKey },
+    possessionReceipt
+  });
+  assert.equal(completed.status, "active");
+  const stored = await store.getDevicePossessionReceipt({ organizationId: ids.org, deviceId: enrollment.device_id });
+  assert.equal(stored.statement_hash, possessionReceipt.statement_hash);
+  assert.equal(stored.signature, possessionReceipt.signature);
+  assert.deepEqual(stored.statement, statement);
+  assert.equal((await store.listDevicePossessionReceipts({ organizationId: ids.org, deviceId: enrollment.device_id })).length, 1);
+  await assert.rejects(() => store.appendDevicePossessionReceipt({
+    organizationId: ids.org,
+    deviceId: enrollment.device_id,
+    receipt: { ...possessionReceipt, statement_hash: "a".repeat(64) },
+    idempotencyKey: "receipt-conflict"
+  }), { code: "ERR_RECEIPT_BINDING" });
+  await store.createOrganization({ organizationId: ids.org2, name: "Other Org", idempotencyKey: "org-2" });
+  await assert.rejects(() => store.getDevicePossessionReceipt({ organizationId: ids.org2, deviceId: enrollment.device_id }), { code: "ERR_NOT_FOUND" });
+});
+
 test("exports a clean, frozen API", async (t) => {
   const { directory, store } = await fixture();
   t.after(async () => { await store.close(); await fs.rm(directory, { recursive: true, force: true }); });

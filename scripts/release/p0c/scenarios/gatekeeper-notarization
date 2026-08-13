@@ -2,7 +2,8 @@
 
 import fs from 'node:fs';
 import { pathToFileURL } from 'node:url';
-import { resolve } from 'node:path';
+import { join, resolve } from 'node:path';
+import { mintCandidateCheckpoint, readInstalledCodeSignatureIdentity } from '../lib/candidate-checkpoint.mjs';
 import {
   executePhysicalScenario,
   requireCommandSuccess,
@@ -19,6 +20,7 @@ const XCRUN = '/usr/bin/xcrun';
 const INSTALLER = '/usr/sbin/installer';
 const CODESIGN = '/usr/bin/codesign';
 const TEAM_ID_PATTERN = /^[A-Z0-9]{10}$/u;
+const CODE_ROLES = Object.freeze(['application', 'native-client', 'native-service', 'atomic-rename', 'native-manager', 'onboarding']);
 
 const zero = (value) => value === 0 || value === 0n;
 
@@ -47,7 +49,7 @@ const teamIdentifier = (result, expectedTeamId) => {
   if (!TEAM_ID_PATTERN.test(expectedTeamId) || identifiers.length !== 1 || identifiers[0] !== expectedTeamId) throw new Error('installed application TeamIdentifier mismatch');
 };
 
-export const performGatekeeperNotarization = async ({ release, machine, production = true, runCommand = runFixedCommand, fileSystem = fs, getUid = process.getuid } = {}) => {
+export const performGatekeeperNotarization = async ({ release, machine, production = true, runCommand = runFixedCommand, fileSystem = fs, getUid = process.getuid, mintCheckpoint = mintCandidateCheckpoint, readCodeIdentity = readInstalledCodeSignatureIdentity } = {}) => {
   requireRoot(getUid);
   if (machine.applicationPath !== APP_PATH) throw new Error('scenario config application path is not fixed');
 
@@ -61,6 +63,28 @@ export const performGatekeeperNotarization = async ({ release, machine, producti
   const details = await runCommand(CODESIGN, ['-dv', '--verbose=4', APP_PATH], { cwd: '/' });
   requireCommandSuccess(details, CODESIGN);
   teamIdentifier(details, release.teamId);
+
+  if (!Array.isArray(release.codeIdentities) || release.codeIdentities.length !== CODE_ROLES.length) throw new Error('release code identity inventory is incomplete');
+  const descriptors = release.codeIdentities.map((identity, index) => {
+    const installedPath = identity.path === 'AgentPass.app' ? APP_PATH : join('/Applications', identity.path);
+    const observed = readCodeIdentity(installedPath);
+    return {
+      path: installedPath,
+      role: CODE_ROLES[index],
+      bundle_id: identity.bundle_id,
+      team_id: identity.team_id,
+      code_directory_hash: identity.code_directory_hash,
+      designated_requirement: observed.designated_requirement
+    };
+  }).sort((left, right) => left.path.localeCompare(right.path));
+  mintCheckpoint({
+    checkpoint_path: join(machine.checkpointDirectory, 'candidate-checkpoint.json'),
+    artifact_sha256: release.artifactSha256,
+    source_commit: release.sourceCommit,
+    team_id: release.teamId,
+    application_path: APP_PATH,
+    code_objects: descriptors
+  }, { production });
 
   return TESTS;
 };

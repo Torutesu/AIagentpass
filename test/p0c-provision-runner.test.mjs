@@ -28,7 +28,7 @@ test('non-production provisioning atomically installs the exact protected invent
   assert.deepEqual(fs.readdirSync(path.join(fixture.destination, 'scenarios')).sort(), [...REQUIRED_GATES]);
   const config = JSON.parse(fs.readFileSync(path.join(fixture.destination, 'driver-config.json'), 'utf8'));
   assert.equal(config.scenario_directory, path.join(fixture.destination, 'scenarios')); assert.deepEqual(config.scenarios.map((item) => item.gate), [...REQUIRED_GATES]);
-  assert.equal(fs.existsSync(path.join(fixture.destination, 'scenario-config.json')), true); assert.deepEqual(fs.readdirSync(path.join(fixture.destination, 'lib')).sort(), ['driver-runtime.mjs', 'scenario-runtime.mjs']);
+  assert.equal(fs.existsSync(path.join(fixture.destination, 'scenario-config.json')), true); assert.deepEqual(fs.readdirSync(path.join(fixture.destination, 'lib')).sort(), ['candidate-checkpoint.mjs', 'driver-runtime.mjs', 'scenario-runtime.mjs']);
   assert.equal(fs.readdirSync(fixture.parent).some((name) => name.startsWith('.p0c-stage-')), false);
 });
 
