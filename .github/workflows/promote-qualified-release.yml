@@ -1,0 +1,519 @@
+name: Promote qualified release
+
+run-name: Promote qualified release (${{ inputs.release_run_id }} / ${{ inputs.qualification_run_id }})
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_run_id:
+        description: Successful Release candidate workflow run ID
+        required: true
+        type: string
+      qualification_run_id:
+        description: Successful P0-C hardware qualification workflow run ID
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: promote-qualified-release-${{ inputs.release_run_id }}-${{ inputs.qualification_run_id }}
+  cancel-in-progress: false
+
+env:
+  CANONICAL_REPOSITORY: Torutesu/AIagentpass
+  EXPECTED_CANDIDATE_ARTIFACT: notarized-release-candidate
+  EXPECTED_APPLE_ARTIFACT: p0c-hardware-apple-silicon
+  EXPECTED_INTEL_ARTIFACT: p0c-hardware-intel-t2
+  EXPECTED_SUMMARY_ARTIFACT: p0c-hardware-qualification-summary
+
+jobs:
+  promote:
+    if: ${{ github.event_name == 'workflow_dispatch' && github.repository == 'Torutesu/AIagentpass' && github.ref == 'refs/heads/main' }}
+    runs-on: macos-15
+    environment: production-release
+    timeout-minutes: 60
+    permissions:
+      contents: write
+      actions: read
+    env:
+      GH_TOKEN: ${{ github.token }}
+      RELEASE_RUN_ID: ${{ inputs.release_run_id }}
+      QUALIFICATION_RUN_ID: ${{ inputs.qualification_run_id }}
+      RELEASE_MANIFEST_FINGERPRINT: ${{ vars.AGENTPASS_RELEASE_MANIFEST_KEY_FINGERPRINT }}
+      EXPECTED_TEAM_ID: ${{ vars.AGENTPASS_RELEASE_TEAM_ID }}
+      RELEASE_ALLOWED_SIGNERS: ${{ vars.AGENTPASS_RELEASE_ALLOWED_SIGNERS }}
+      APPLE_OPERATOR_FINGERPRINT: ${{ vars.AGENTPASS_P0C_APPLE_SILICON_OPERATOR_FINGERPRINT }}
+      INTEL_OPERATOR_FINGERPRINT: ${{ vars.AGENTPASS_P0C_INTEL_T2_OPERATOR_FINGERPRINT }}
+      APPROVED_OPERATOR_POLICY_JSON: ${{ vars.AGENTPASS_P0C_APPROVED_OPERATOR_POLICY_JSON }}
+      PROMOTION_ROOT: ${{ runner.temp }}/agentpass-qualified-promotion-${{ github.run_id }}-${{ github.run_attempt }}
+
+    steps:
+      - id: preflight
+        name: Validate exact successful source and qualification runs through the GitHub API
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$GITHUB_REPOSITORY" == "$CANONICAL_REPOSITORY" ]] || { echo "canonical repository required" >&2; exit 1; }
+          [[ "$GITHUB_REF" == "refs/heads/main" ]] || { echo "protected main ref required" >&2; exit 1; }
+          [[ "$RELEASE_RUN_ID" =~ ^[1-9][0-9]{0,18}$ ]] || { echo "release_run_id must be a decimal run ID" >&2; exit 1; }
+          [[ "$QUALIFICATION_RUN_ID" =~ ^[1-9][0-9]{0,18}$ ]] || { echo "qualification_run_id must be a decimal run ID" >&2; exit 1; }
+          [[ "$RELEASE_RUN_ID" != "$QUALIFICATION_RUN_ID" ]] || { echo "release and qualification runs must be distinct" >&2; exit 1; }
+          : "${RELEASE_MANIFEST_FINGERPRINT:?release manifest fingerprint is required}"
+          : "${EXPECTED_TEAM_ID:?release Team ID is required}"
+          : "${RELEASE_ALLOWED_SIGNERS:?annotated-tag signer policy is required}"
+          : "${APPLE_OPERATOR_FINGERPRINT:?Apple Silicon operator fingerprint is required}"
+          : "${INTEL_OPERATOR_FINGERPRINT:?Intel T2 operator fingerprint is required}"
+          : "${APPROVED_OPERATOR_POLICY_JSON:?approved operator policy is required}"
+
+          mkdir -m 0700 -p "$PROMOTION_ROOT/api"
+          release_run="$PROMOTION_ROOT/api/release-run.json"
+          qualification_run="$PROMOTION_ROOT/api/qualification-run.json"
+          release_artifacts="$PROMOTION_ROOT/api/release-artifacts.json"
+          qualification_artifacts="$PROMOTION_ROOT/api/qualification-artifacts.json"
+          qualification_jobs="$PROMOTION_ROOT/api/qualification-jobs.json"
+
+          gh api --method GET -H 'Accept: application/vnd.github+json' \
+            "repos/$CANONICAL_REPOSITORY/actions/runs/$RELEASE_RUN_ID" > "$release_run"
+          gh api --method GET -H 'Accept: application/vnd.github+json' \
+            "repos/$CANONICAL_REPOSITORY/actions/runs/$QUALIFICATION_RUN_ID" > "$qualification_run"
+          gh api --method GET -H 'Accept: application/vnd.github+json' \
+            "repos/$CANONICAL_REPOSITORY/actions/runs/$RELEASE_RUN_ID/artifacts?per_page=100" > "$release_artifacts"
+          gh api --method GET -H 'Accept: application/vnd.github+json' \
+            "repos/$CANONICAL_REPOSITORY/actions/runs/$QUALIFICATION_RUN_ID/artifacts?per_page=100" > "$qualification_artifacts"
+          gh api --method GET -H 'Accept: application/vnd.github+json' \
+            "repos/$CANONICAL_REPOSITORY/actions/runs/$QUALIFICATION_RUN_ID/jobs?per_page=100" > "$qualification_jobs"
+
+          jq -e --arg repo "$CANONICAL_REPOSITORY" --arg run "$RELEASE_RUN_ID" '
+            (.id | tostring) == $run and
+            .repository.full_name == $repo and
+            .head_repository.full_name == $repo and
+            .name == "Release candidate" and
+            .path == ".github/workflows/release-candidate.yml" and
+            .event == "workflow_dispatch" and
+            .status == "completed" and
+            .conclusion == "success" and
+            .head_branch == "main" and
+            (.head_sha | test("^[0-9a-f]{40}$"))
+          ' "$release_run" >/dev/null
+          jq -e --arg repo "$CANONICAL_REPOSITORY" --arg run "$QUALIFICATION_RUN_ID" '
+            (.id | tostring) == $run and
+            .repository.full_name == $repo and
+            .head_repository.full_name == $repo and
+            .name == "P0-C hardware qualification" and
+            .path == ".github/workflows/p0c-hardware-qualification.yml" and
+            .event == "workflow_dispatch" and
+            .status == "completed" and
+            .conclusion == "success" and
+            .head_branch == "main" and
+            (.head_sha | test("^[0-9a-f]{40}$"))
+          ' "$qualification_run" >/dev/null
+          jq -e '
+            ([.jobs[] | select(.name == "validate-candidate" and .conclusion == "success" and any(.steps[]?; .name == "Validate exact same-repository release-candidate run" and .conclusion == "success"))] | length) == 1 and
+            ([.jobs[] | select(.name == "aggregate-qualification" and .conclusion == "success")] | length) == 1
+          ' "$qualification_jobs" >/dev/null
+
+          jq -e --arg name "$EXPECTED_CANDIDATE_ARTIFACT" --arg run "$RELEASE_RUN_ID" '
+            ([.artifacts[] | select(.name == $name and .expired == false and (.workflow_run.id | tostring) == $run)] | length) == 1
+          ' "$release_artifacts" >/dev/null
+          for artifact_name in "$EXPECTED_APPLE_ARTIFACT" "$EXPECTED_INTEL_ARTIFACT" "$EXPECTED_SUMMARY_ARTIFACT"; do
+            jq -e --arg name "$artifact_name" --arg run "$QUALIFICATION_RUN_ID" '
+              ([.artifacts[] | select(.name == $name and .expired == false and (.workflow_run.id | tostring) == $run)] | length) == 1
+            ' "$qualification_artifacts" >/dev/null
+          done
+
+          release_head_sha="$(jq -er '.head_sha' "$release_run")"
+          qualification_head_sha="$(jq -er '.head_sha' "$qualification_run")"
+          {
+            printf 'release_run_id=%s\n' "$RELEASE_RUN_ID"
+            printf 'qualification_run_id=%s\n' "$QUALIFICATION_RUN_ID"
+            printf 'release_head_sha=%s\n' "$release_head_sha"
+            printf 'qualification_head_sha=%s\n' "$qualification_head_sha"
+          } >> "$GITHUB_OUTPUT"
+
+          # Completed-run metadata does not expose workflow_dispatch inputs in the
+          # GitHub REST API. The trusted aggregate job therefore emits a canonical
+          # dispatch binding containing both run IDs and the summary digest. That
+          # binding is checked after artifact download together with both signed
+          # reports' exact artifact/manifest bindings.
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+          clean: true
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 20
+
+      - name: Create clean promotion directories
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ ! -e "$PROMOTION_ROOT/candidate" && ! -e "$PROMOTION_ROOT/apple" && ! -e "$PROMOTION_ROOT/intel" && ! -e "$PROMOTION_ROOT/summary" && ! -e "$PROMOTION_ROOT/output" ]] || { echo "promotion paths already exist" >&2; exit 1; }
+          mkdir -m 0700 -p "$PROMOTION_ROOT/candidate" "$PROMOTION_ROOT/apple" "$PROMOTION_ROOT/intel" "$PROMOTION_ROOT/summary" "$PROMOTION_ROOT/output"
+
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: notarized-release-candidate
+          repository: Torutesu/AIagentpass
+          run-id: ${{ steps.preflight.outputs.release_run_id }}
+          github-token: ${{ github.token }}
+          path: ${{ runner.temp }}/agentpass-qualified-promotion-${{ github.run_id }}-${{ github.run_attempt }}/candidate
+
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: p0c-hardware-apple-silicon
+          repository: Torutesu/AIagentpass
+          run-id: ${{ steps.preflight.outputs.qualification_run_id }}
+          github-token: ${{ github.token }}
+          path: ${{ runner.temp }}/agentpass-qualified-promotion-${{ github.run_id }}-${{ github.run_attempt }}/apple
+
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: p0c-hardware-intel-t2
+          repository: Torutesu/AIagentpass
+          run-id: ${{ steps.preflight.outputs.qualification_run_id }}
+          github-token: ${{ github.token }}
+          path: ${{ runner.temp }}/agentpass-qualified-promotion-${{ github.run_id }}-${{ github.run_attempt }}/intel
+
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: p0c-hardware-qualification-summary
+          repository: Torutesu/AIagentpass
+          run-id: ${{ steps.preflight.outputs.qualification_run_id }}
+          github-token: ${{ github.token }}
+          path: ${{ runner.temp }}/agentpass-qualified-promotion-${{ github.run_id }}-${{ github.run_attempt }}/summary
+
+      - id: catalog
+        name: Catalog only the exact downloaded candidate and qualification evidence
+        shell: bash
+        env:
+          CANDIDATE_DIR: ${{ env.PROMOTION_ROOT }}/candidate
+          APPLE_DIR: ${{ env.PROMOTION_ROOT }}/apple
+          INTEL_DIR: ${{ env.PROMOTION_ROOT }}/intel
+          SUMMARY_DIR: ${{ env.PROMOTION_ROOT }}/summary
+        run: |
+          set -euo pipefail
+          node --input-type=module <<'NODE'
+          import fs from 'node:fs';
+          import path from 'node:path';
+
+          const safeName = (value) => /^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(value) && value === path.basename(value);
+          const filesIn = (directory, label) => {
+            const entries = fs.readdirSync(directory, { withFileTypes: true });
+            for (const entry of entries) {
+              if (!safeName(entry.name) || entry.isSymbolicLink() || !entry.isFile()) throw new Error(`${label} contains an unsafe entry`);
+              const stat = fs.lstatSync(path.join(directory, entry.name));
+              if (stat.nlink !== 1 || (stat.mode & 0o022) !== 0) throw new Error(`${label} contains an unprotected file`);
+            }
+            return entries.map((entry) => entry.name);
+          };
+          const exactly = (names, predicate, label) => {
+            const matches = names.filter(predicate);
+            if (matches.length !== 1) throw new Error(`${label} must contain exactly one matching file`);
+            return matches[0];
+          };
+          const candidate = path.resolve(process.env.CANDIDATE_DIR);
+          const candidateNames = filesIn(candidate, 'candidate artifact');
+          const manifestName = exactly(candidateNames, (name) => name.endsWith('.release-manifest.json'), 'release manifest');
+          const signatureName = exactly(candidateNames, (name) => name.endsWith('.release-manifest.sig'), 'release manifest signature');
+          const sbomName = exactly(candidateNames, (name) => name.endsWith('.spdx.json'), 'SBOM');
+          const packageName = exactly(candidateNames, (name) => name.endsWith('-macos-universal.pkg'), 'universal package');
+          const migrationName = exactly(candidateNames, (name) => name.endsWith('.database-migration-manifest.json'), 'migration manifest');
+          const fixed = new Set([manifestName, signatureName, sbomName, packageName, migrationName, 'release-manifest.public.pem', 'release-attestation.json', 'SHA256SUMS', 'notarytool-result.json', 'stapler-result.txt']);
+          if (candidateNames.length !== fixed.size || candidateNames.some((name) => !fixed.has(name))) throw new Error('candidate artifact contains unexpected or missing files');
+          const manifest = JSON.parse(fs.readFileSync(path.join(candidate, manifestName), 'utf8'));
+          const product = manifest.artifacts?.filter((item) => item.role === 'product');
+          if (product?.length !== 1 || product[0].name !== packageName) throw new Error('candidate product is not manifest-bound');
+
+          const lane = (directory, label) => {
+            const root = path.resolve(directory);
+            const entries = fs.readdirSync(root, { withFileTypes: true });
+            for (const entry of entries) {
+              if (!safeName(entry.name) || entry.isSymbolicLink() || (entry.name === 'evidence' ? !entry.isDirectory() : !entry.isFile())) throw new Error(`${label} qualification artifact contains an unsafe entry`);
+              if (entry.name !== 'evidence') {
+                const stat = fs.lstatSync(path.join(root, entry.name));
+                if (stat.nlink !== 1 || (stat.mode & 0o022) !== 0) throw new Error(`${label} qualification artifact contains an unprotected file`);
+              }
+            }
+            const names = entries.map((entry) => entry.name);
+            const expected = new Set(['report.json', 'report.sig', 'operator-public.pem', 'evidence']);
+            if (names.length !== 4 || names.some((name) => !expected.has(name))) throw new Error(`${label} qualification artifact has unexpected files`);
+            const evidence = path.join(root, 'evidence');
+            const evidenceStat = fs.lstatSync(evidence);
+            if (!evidenceStat.isDirectory() || evidenceStat.nlink <= 0 || (evidenceStat.mode & 0o022) !== 0) throw new Error(`${label} evidence directory is invalid`);
+            return root;
+          };
+          const summary = path.resolve(process.env.SUMMARY_DIR);
+          const summaryNames = filesIn(summary, 'aggregate summary artifact');
+          if (summaryNames.length !== 2 || !summaryNames.includes('qualification-summary.json') || !summaryNames.includes('qualification-dispatch-binding.json')) throw new Error('aggregate summary artifact is not exact');
+          const output = process.env.GITHUB_OUTPUT;
+          const values = {
+            manifest: path.join(candidate, manifestName),
+            signature: path.join(candidate, signatureName),
+            public_key: path.join(candidate, 'release-manifest.public.pem'),
+            artifact: path.join(candidate, packageName),
+            apple_report: path.join(lane(process.env.APPLE_DIR, 'Apple Silicon'), 'report.json'),
+            apple_signature: path.join(process.env.APPLE_DIR, 'report.sig'),
+            apple_public_key: path.join(process.env.APPLE_DIR, 'operator-public.pem'),
+            apple_evidence: path.join(process.env.APPLE_DIR, 'evidence'),
+            intel_report: path.join(lane(process.env.INTEL_DIR, 'Intel T2'), 'report.json'),
+            intel_signature: path.join(process.env.INTEL_DIR, 'report.sig'),
+            intel_public_key: path.join(process.env.INTEL_DIR, 'operator-public.pem'),
+            intel_evidence: path.join(process.env.INTEL_DIR, 'evidence'),
+            retained_summary: path.join(summary, 'qualification-summary.json'),
+            dispatch_binding: path.join(summary, 'qualification-dispatch-binding.json')
+          };
+          for (const [key, value] of Object.entries(values)) fs.appendFileSync(output, `${key}=${value}\n`);
+          NODE
+
+      - id: release
+        name: Verify signed release candidate and derive its tag
+        env:
+          MANIFEST: ${{ steps.catalog.outputs.manifest }}
+          MANIFEST_SIGNATURE: ${{ steps.catalog.outputs.signature }}
+          MANIFEST_PUBLIC_KEY: ${{ steps.catalog.outputs.public_key }}
+          PRODUCT_PKG: ${{ steps.catalog.outputs.artifact }}
+          RELEASE_RUN_HEAD_SHA: ${{ steps.preflight.outputs.release_head_sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          node scripts/release/verify-release.mjs "$MANIFEST" "$MANIFEST_SIGNATURE" "$MANIFEST_PUBLIC_KEY" "$RELEASE_MANIFEST_FINGERPRINT"
+          scripts/release/verify-macos-release.sh "$MANIFEST" "$MANIFEST_SIGNATURE" "$MANIFEST_PUBLIC_KEY" "$RELEASE_MANIFEST_FINGERPRINT" "$EXPECTED_TEAM_ID"
+          node --input-type=module - "$MANIFEST" "$PRODUCT_PKG" "$RELEASE_MANIFEST_FINGERPRINT" <<'NODE'
+          import crypto from 'node:crypto';
+          import fs from 'node:fs';
+          import path from 'node:path';
+          const [manifestPath, packagePath, fingerprint] = process.argv.slice(2);
+          const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
+          if (!manifest.source || typeof manifest.source.tag !== 'string' || !/^v[0-9]+\.[0-9]+\.[0-9]+(?:[-.][0-9A-Za-z.-]+)?$/.test(manifest.source.tag)) throw new Error('release manifest has no canonical release tag');
+          if (manifest.source.tag !== `v${manifest.version}`) throw new Error('release tag and manifest version disagree');
+          if (fingerprint !== process.env.RELEASE_MANIFEST_FINGERPRINT) throw new Error('release fingerprint binding changed');
+          const product = manifest.artifacts.find((item) => item.role === 'product');
+          const bytes = fs.readFileSync(packagePath);
+          if (!product || product.name !== path.basename(packagePath) || product.bytes !== bytes.length || product.sha256 !== crypto.createHash('sha256').update(bytes).digest('hex')) throw new Error('product package is not exactly manifest-bound');
+          fs.appendFileSync(process.env.GITHUB_OUTPUT, `release_tag=${manifest.source.tag}\nsource_commit=${manifest.source.commit}\nsource_tree=${manifest.source.tree}\n`);
+          NODE
+
+      - id: source
+        name: Verify annotated tag and source identity before promotion
+        env:
+          RELEASE_TAG: ${{ steps.release.outputs.release_tag }}
+          MANIFEST_SOURCE_COMMIT: ${{ steps.release.outputs.source_commit }}
+          MANIFEST_SOURCE_TREE: ${{ steps.release.outputs.source_tree }}
+          RELEASE_RUN_HEAD_SHA: ${{ steps.preflight.outputs.release_head_sha }}
+          ALLOWED_SIGNERS: ${{ env.RELEASE_ALLOWED_SIGNERS }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([-.][0-9A-Za-z.-]+)?$ ]] || { echo "manifest release tag is invalid" >&2; exit 1; }
+          : "${ALLOWED_SIGNERS:?allowed signer policy is required}"
+          allowed="$PROMOTION_ROOT/allowed-signers"
+          node --input-type=module - "$allowed" <<'NODE'
+          import fs from 'node:fs';
+          const output = process.argv[2];
+          const value = process.env.ALLOWED_SIGNERS;
+          if (!output || typeof value !== 'string' || value.length === 0 || value.includes('\0')) throw new Error('allowed signer policy must be non-empty');
+          const bytes = value.endsWith('\n') ? value : `${value}\n`;
+          const fd = fs.openSync(output, fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL | fs.constants.O_NOFOLLOW, 0o600);
+          try { fs.writeSync(fd, bytes, 'utf8'); fs.fsyncSync(fd); } finally { fs.closeSync(fd); }
+          NODE
+          git fetch --force origin "refs/heads/main:refs/remotes/origin/main" "refs/tags/$RELEASE_TAG:refs/tags/$RELEASE_TAG"
+          [[ "$(git cat-file -t "$RELEASE_TAG")" == "tag" ]] || { echo "release tag must be annotated" >&2; exit 1; }
+          git -c gpg.format=ssh -c gpg.ssh.allowedSignersFile="$allowed" verify-tag "$RELEASE_TAG"
+          tag_commit="$(git rev-parse "$RELEASE_TAG^{commit}")"
+          tag_tree="$(git rev-parse "$RELEASE_TAG^{tree}")"
+          [[ "$tag_commit" == "$MANIFEST_SOURCE_COMMIT" ]] || { echo "annotated tag commit differs from signed manifest" >&2; exit 1; }
+          [[ "$tag_tree" == "$MANIFEST_SOURCE_TREE" ]] || { echo "annotated tag tree differs from signed manifest" >&2; exit 1; }
+          git merge-base --is-ancestor "$tag_commit" refs/remotes/origin/main
+          [[ "$(git show "$tag_commit:package.json" | node -e 'let s="";process.stdin.on("data",(chunk)=>s+=chunk).on("end",()=>process.stdout.write(`v${JSON.parse(s).version}`))')" == "$RELEASE_TAG" ]] || { echo "tag and package version disagree" >&2; exit 1; }
+          printf 'tag_commit=%s\n' "$tag_commit" >> "$GITHUB_OUTPUT"
+
+      - name: Materialize the externally pinned operator policy
+        env:
+          POLICY_PATH: ${{ env.PROMOTION_ROOT }}/output/approved-operator-policy.json
+        shell: bash
+        run: |
+          set -euo pipefail
+          node --input-type=module - "$POLICY_PATH" <<'NODE'
+          import fs from 'node:fs';
+          const output = process.argv[2];
+          const input = process.env.APPROVED_OPERATOR_POLICY_JSON;
+          if (!output || typeof input !== 'string' || input.length === 0) throw new Error('approved operator policy is missing');
+          let value;
+          try { value = JSON.parse(input); } catch { throw new Error('approved operator policy is not JSON'); }
+          const canonical = `${JSON.stringify(value, null, 2)}\n`;
+          if (input !== canonical) throw new Error('approved operator policy must be canonical JSON');
+          const fd = fs.openSync(output, fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL | fs.constants.O_NOFOLLOW, 0o600);
+          try { fs.writeSync(fd, canonical, 'utf8'); fs.fsyncSync(fd); } finally { fs.closeSync(fd); }
+          NODE
+
+      - id: qualification
+        name: Re-run hardware qualification verification against the exact candidate
+        env:
+          MANIFEST: ${{ steps.catalog.outputs.manifest }}
+          MANIFEST_SIGNATURE: ${{ steps.catalog.outputs.signature }}
+          MANIFEST_PUBLIC_KEY: ${{ steps.catalog.outputs.public_key }}
+          PRODUCT_PKG: ${{ steps.catalog.outputs.artifact }}
+          APPLE_REPORT: ${{ steps.catalog.outputs.apple_report }}
+          APPLE_SIGNATURE: ${{ steps.catalog.outputs.apple_signature }}
+          APPLE_PUBLIC_KEY: ${{ steps.catalog.outputs.apple_public_key }}
+          APPLE_EVIDENCE: ${{ steps.catalog.outputs.apple_evidence }}
+          INTEL_REPORT: ${{ steps.catalog.outputs.intel_report }}
+          INTEL_SIGNATURE: ${{ steps.catalog.outputs.intel_signature }}
+          INTEL_PUBLIC_KEY: ${{ steps.catalog.outputs.intel_public_key }}
+          INTEL_EVIDENCE: ${{ steps.catalog.outputs.intel_evidence }}
+          POLICY: ${{ env.PROMOTION_ROOT }}/output/approved-operator-policy.json
+          RETAINED_SUMMARY: ${{ steps.catalog.outputs.retained_summary }}
+          DISPATCH_BINDING: ${{ steps.catalog.outputs.dispatch_binding }}
+          GENERATED_SUMMARY: ${{ env.PROMOTION_ROOT }}/output/qualification-summary.generated.json
+        shell: bash
+        run: |
+          set -euo pipefail
+          node scripts/release/verify-hardware-qualification-set.mjs \
+            "$MANIFEST" "$MANIFEST_SIGNATURE" "$MANIFEST_PUBLIC_KEY" "$RELEASE_MANIFEST_FINGERPRINT" "$PRODUCT_PKG" \
+            "$APPLE_REPORT" "$APPLE_SIGNATURE" "$APPLE_PUBLIC_KEY" "$APPLE_OPERATOR_FINGERPRINT" "$APPLE_EVIDENCE" \
+            "$INTEL_REPORT" "$INTEL_SIGNATURE" "$INTEL_PUBLIC_KEY" "$INTEL_OPERATOR_FINGERPRINT" "$INTEL_EVIDENCE" \
+            "$POLICY" > "$GENERATED_SUMMARY"
+          cmp -s "$GENERATED_SUMMARY" "$RETAINED_SUMMARY" || { echo "generated qualification summary differs byte-for-byte from retained summary" >&2; exit 1; }
+          node --input-type=module - "$GENERATED_SUMMARY" "$MANIFEST" "$PRODUCT_PKG" "$DISPATCH_BINDING" <<'NODE'
+          import crypto from 'node:crypto';
+          import fs from 'node:fs';
+          const [summaryPath, manifestPath, packagePath, bindingPath] = process.argv.slice(2);
+          const summary = JSON.parse(fs.readFileSync(summaryPath, 'utf8'));
+          const bindingBytes = fs.readFileSync(bindingPath);
+          const binding = JSON.parse(bindingBytes);
+          if (!bindingBytes.equals(Buffer.from(`${JSON.stringify(binding, null, 2)}\n`, 'utf8'))) throw new Error('qualification dispatch binding is not canonical JSON');
+          if (JSON.stringify(Object.keys(binding).sort()) !== JSON.stringify(['candidate_artifact_name', 'qualification_run_id', 'qualification_summary_sha256', 'release_run_id', 'schema_version'])) throw new Error('qualification dispatch binding schema is invalid');
+          if (binding.schema_version !== 1 || binding.release_run_id !== process.env.RELEASE_RUN_ID || binding.qualification_run_id !== process.env.QUALIFICATION_RUN_ID || binding.candidate_artifact_name !== process.env.EXPECTED_CANDIDATE_ARTIFACT) throw new Error('qualification run was not dispatched for the selected release run');
+          if (binding.qualification_summary_sha256 !== crypto.createHash('sha256').update(fs.readFileSync(summaryPath)).digest('hex')) throw new Error('qualification dispatch binding summary digest mismatch');
+          const manifestBytes = fs.readFileSync(manifestPath);
+          const manifest = JSON.parse(manifestBytes);
+          const product = manifest.artifacts.find((item) => item.role === 'product');
+          const packageBytes = fs.readFileSync(packagePath);
+          const expectedManifestDigest = crypto.createHash('sha256').update(manifestBytes).digest('hex');
+          const expectedPackageDigest = crypto.createHash('sha256').update(packageBytes).digest('hex');
+          if (summary.ok !== true || summary.qualified !== true || summary.production !== true || summary.source_commit !== manifest.source.commit || summary.artifact_name !== product.name || summary.artifact_sha256 !== expectedPackageDigest || summary.release_manifest_sha256 !== expectedManifestDigest) throw new Error('qualification summary is not bound to the selected release');
+          if (summary.artifact_sha256 !== product.sha256) throw new Error('qualification summary product digest differs from signed manifest');
+          NODE
+
+      - name: Refuse an existing release before creating the public release
+        env:
+          RELEASE_TAG: ${{ steps.release.outputs.release_tag }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          lookup_error="$PROMOTION_ROOT/output/release-lookup.error"
+          if gh api --method GET -H 'Accept: application/vnd.github+json' "repos/$CANONICAL_REPOSITORY/releases/tags/$RELEASE_TAG" > "$lookup_error" 2>&1; then
+            echo "a GitHub Release already exists for $RELEASE_TAG" >&2
+            exit 1
+          fi
+          grep -Eq 'HTTP 404|Not Found' "$lookup_error" || { echo "release existence check failed closed" >&2; cat "$lookup_error" >&2; exit 1; }
+
+      - name: Create draft release after every verification gate
+        env:
+          RELEASE_TAG: ${{ steps.release.outputs.release_tag }}
+          RELEASE_COMMIT: ${{ steps.source.outputs.tag_commit }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          gh release create "$RELEASE_TAG" --repo "$CANONICAL_REPOSITORY" --draft --verify-tag --target "$RELEASE_COMMIT" --title "AgentPass $RELEASE_TAG" --notes "Production installer promoted only after signed cross-hardware qualification."
+
+      - name: Upload only the explicit signed-manifest-bound release list
+        env:
+          RELEASE_TAG: ${{ steps.release.outputs.release_tag }}
+          MANIFEST: ${{ steps.catalog.outputs.manifest }}
+          MANIFEST_SIGNATURE: ${{ steps.catalog.outputs.signature }}
+          CANDIDATE_DIR: ${{ env.PROMOTION_ROOT }}/candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          node --input-type=module - "$RELEASE_TAG" "$MANIFEST" "$MANIFEST_SIGNATURE" "$CANDIDATE_DIR" "$CANONICAL_REPOSITORY" <<'NODE'
+          import fs from 'node:fs';
+          import path from 'node:path';
+          import { spawnSync } from 'node:child_process';
+          const [tag, manifestPath, signaturePath, directory, repository] = process.argv.slice(2);
+          if (!/^Torutesu\/AIagentpass$/.test(repository)) throw new Error('release repository is not canonical');
+          const safe = (value) => typeof value === 'string' && /^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(value) && value === path.basename(value);
+          const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
+          if (!Array.isArray(manifest.artifacts) || !manifest.evidence?.notarization || !Array.isArray(manifest.evidence.notarization.evidence)) throw new Error('signed manifest lacks complete upload bindings');
+          const names = [
+            ...manifest.artifacts.map((item) => item.name),
+            ...manifest.evidence.notarization.evidence.map((item) => item.name),
+            manifest.evidence.checksums?.name
+          ];
+          if (names.some((name) => !safe(name)) || new Set(names).size !== names.length) throw new Error('signed manifest upload list contains unsafe or duplicate names');
+          const files = [manifestPath, signaturePath, ...names.map((name) => path.join(directory, name))];
+          for (const file of files) {
+            const stat = fs.lstatSync(file);
+            if (!stat.isFile() || stat.nlink !== 1 || (stat.mode & 0o022) !== 0) throw new Error(`manifest-bound upload is unsafe: ${path.basename(file)}`);
+          }
+          const result = spawnSync('gh', ['release', 'upload', tag, '--repo', repository, ...files], { shell: false, stdio: 'inherit' });
+          if (result.error || result.status !== 0) throw new Error('manifest-bound release upload failed');
+          NODE
+
+      - name: Upload the verified signed qualification evidence
+        env:
+          RELEASE_TAG: ${{ steps.release.outputs.release_tag }}
+          APPLE_REPORT: ${{ steps.catalog.outputs.apple_report }}
+          APPLE_SIGNATURE: ${{ steps.catalog.outputs.apple_signature }}
+          APPLE_PUBLIC_KEY: ${{ steps.catalog.outputs.apple_public_key }}
+          APPLE_EVIDENCE: ${{ steps.catalog.outputs.apple_evidence }}
+          INTEL_REPORT: ${{ steps.catalog.outputs.intel_report }}
+          INTEL_SIGNATURE: ${{ steps.catalog.outputs.intel_signature }}
+          INTEL_PUBLIC_KEY: ${{ steps.catalog.outputs.intel_public_key }}
+          INTEL_EVIDENCE: ${{ steps.catalog.outputs.intel_evidence }}
+          QUALIFICATION_SUMMARY: ${{ steps.catalog.outputs.retained_summary }}
+          OPERATOR_POLICY: ${{ env.PROMOTION_ROOT }}/output/approved-operator-policy.json
+          QUALIFICATION_ASSETS: ${{ env.PROMOTION_ROOT }}/qualification-release-assets
+        shell: bash
+        run: |
+          set -euo pipefail
+          /bin/mkdir -m 0700 "$QUALIFICATION_ASSETS"
+          /usr/bin/install -m 0644 "$APPLE_REPORT" "$QUALIFICATION_ASSETS/p0c-apple-silicon-report.json"
+          /usr/bin/install -m 0644 "$APPLE_SIGNATURE" "$QUALIFICATION_ASSETS/p0c-apple-silicon-report.sig"
+          /usr/bin/install -m 0644 "$APPLE_PUBLIC_KEY" "$QUALIFICATION_ASSETS/p0c-apple-silicon-operator.public.pem"
+          /usr/bin/install -m 0644 "$INTEL_REPORT" "$QUALIFICATION_ASSETS/p0c-intel-t2-report.json"
+          /usr/bin/install -m 0644 "$INTEL_SIGNATURE" "$QUALIFICATION_ASSETS/p0c-intel-t2-report.sig"
+          /usr/bin/install -m 0644 "$INTEL_PUBLIC_KEY" "$QUALIFICATION_ASSETS/p0c-intel-t2-operator.public.pem"
+          /usr/bin/install -m 0644 "$QUALIFICATION_SUMMARY" "$QUALIFICATION_ASSETS/p0c-hardware-qualification-summary.json"
+          /usr/bin/install -m 0644 "$OPERATOR_POLICY" "$QUALIFICATION_ASSETS/p0c-approved-operator-policy.json"
+          /usr/bin/tar -czf "$QUALIFICATION_ASSETS/p0c-apple-silicon-evidence.tar.gz" -C "$APPLE_EVIDENCE" .
+          /usr/bin/tar -czf "$QUALIFICATION_ASSETS/p0c-intel-t2-evidence.tar.gz" -C "$INTEL_EVIDENCE" .
+          (
+            cd "$QUALIFICATION_ASSETS"
+            /usr/bin/shasum -a 256 p0c-* > P0C-SHA256SUMS
+          )
+          gh release upload "$RELEASE_TAG" --repo "$CANONICAL_REPOSITORY" \
+            "$QUALIFICATION_ASSETS/p0c-apple-silicon-report.json" \
+            "$QUALIFICATION_ASSETS/p0c-apple-silicon-report.sig" \
+            "$QUALIFICATION_ASSETS/p0c-apple-silicon-operator.public.pem" \
+            "$QUALIFICATION_ASSETS/p0c-apple-silicon-evidence.tar.gz" \
+            "$QUALIFICATION_ASSETS/p0c-intel-t2-report.json" \
+            "$QUALIFICATION_ASSETS/p0c-intel-t2-report.sig" \
+            "$QUALIFICATION_ASSETS/p0c-intel-t2-operator.public.pem" \
+            "$QUALIFICATION_ASSETS/p0c-intel-t2-evidence.tar.gz" \
+            "$QUALIFICATION_ASSETS/p0c-hardware-qualification-summary.json" \
+            "$QUALIFICATION_ASSETS/p0c-approved-operator-policy.json" \
+            "$QUALIFICATION_ASSETS/P0C-SHA256SUMS"
+
+      - name: Publish the fully uploaded public release
+        env:
+          RELEASE_TAG: ${{ steps.release.outputs.release_tag }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          gh release edit "$RELEASE_TAG" --repo "$CANONICAL_REPOSITORY" --draft=false
+
+      - name: Remove promotion material
+        if: ${{ always() }}
+        shell: bash
+        run: |
+          set +e
+          chmod -R go-rwx "$PROMOTION_ROOT" 2>/dev/null
+          rm -rf -- "$PROMOTION_ROOT"

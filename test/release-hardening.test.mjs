@@ -371,7 +371,7 @@ test('hardware reports reject unknown fields and self-asserted qualification', (
   assert.match(selfFailure.stderr, /signed release manifest|detached operator signature|self-asserted/);
 });
 
-test('release workflow verifies signed source before the secret-bearing job', () => {
+test('release candidate verifies signed source before the secret-bearing job and cannot publish', () => {
   const workflow = readFileSync(resolve(root, '.github/workflows/release-candidate.yml'), 'utf8');
   assert.doesNotMatch(workflow, /pull_request(?:_target)?:/);
   assert.doesNotMatch(workflow, /push:\s*\n\s*tags:/);
@@ -387,12 +387,8 @@ test('release workflow verifies signed source before the secret-bearing job', ()
   assert.match(workflow, /notarize-installer\.sh/);
   assert.match(workflow, /--notarization-status=accepted_stapled/);
   assert.match(workflow, /verify-macos-release\.sh/);
-  assert.match(workflow, /gh release create .*--draft/);
-  assert.match(workflow, /gh release edit "\$RELEASE_TAG" --draft=false/);
+  assert.doesNotMatch(workflow, /gh release (?:create|upload|edit)|^  publish:/m);
   assert.doesNotMatch(workflow, /NOT_NOTARIZED/);
   const verifySource = workflow.slice(workflow.indexOf('  verify-source:'), workflow.indexOf('  signed-candidate:'));
-  const publish = workflow.slice(workflow.indexOf('  publish:'));
   assert.doesNotMatch(verifySource, /secrets\./);
-  assert.doesNotMatch(publish, /AGENTPASS_(?:SIGNING|INSTALLER_SIGNING|NOTARY).*secrets\.|secrets\.AGENTPASS_(?:SIGNING|INSTALLER_SIGNING|NOTARY)/);
-  assert.ok(workflow.indexOf('verify-macos-release.sh', workflow.indexOf('  publish:')) < workflow.indexOf('gh release create'));
 });

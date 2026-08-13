@@ -10,7 +10,7 @@ The CLI refuses every non-darwin host before it reads the requested files. It ha
 node scripts/release/run-p0c-qualification.mjs \
   --template /absolute/path/production-report-template.json \
   --output /absolute/path/qualification.json \
-  --artifact /absolute/path/AgentPass-0.18.0-macos-universal.pkg \
+  --artifact /absolute/path/AgentPass-v0.18.0-macos-universal.pkg \
   --gate-drivers /absolute/path/p0c-gates \
   --evidence-dir /absolute/path/p0c-evidence \
   --operator operator@example.com
@@ -45,7 +45,7 @@ The command environment is replaced with the fixed non-secret environment `HOME=
 
 ## Gate-driver contract
 
-The driver directory must contain exactly these 16 single-link, regular, non-group/world-writable executable basenames:
+The driver directory must contain exactly these 16 single-link, regular, non-group/world-writable executable basenames. In production, the directory and every driver must be owned by root. The runner snapshots each driver identity and fails its gate if the file changes before or during execution:
 
 ```text
 gatekeeper-notarization
@@ -109,3 +109,30 @@ Every gate and test receives a separate JSON evidence file. Evidence files are c
 Injected metadata and command runners are exposed only for deterministic unit tests. An injected run is always emitted as `qualified:false`, even if every injected gate says “passed”. This is deliberate: ad-hoc, simulator, Linux, fake-provider, and modeled durability evidence can support development but can never be called physical production qualification.
 
 The resulting report is unsigned. The release process must separately verify the signed release manifest, exact notarized package, report evidence, and detached operator signature using `scripts/release/validate-hardware-qualification.mjs`. A report that has not gone through that verifier is not a production release claim.
+
+## Protected GitHub execution
+
+`.github/workflows/p0c-hardware-qualification.yml` accepts only the fixed `notarized-release-candidate` artifact from a successful same-repository `Release candidate` workflow run on protected `main`. It has two independent self-hosted lanes:
+
+- `agentpass-p0c-apple-silicon` with environment `p0c-hardware-apple-silicon`;
+- `agentpass-p0c-intel-t2` with environment `p0c-hardware-intel-t2`.
+
+Each environment supplies only its own operator private key. Developer ID, installer, provisioning-profile, release-manifest, and notarization secrets are never exposed to these runners. Repository/environment variables pin the release fingerprint, Team ID, operator IDs/fingerprints/public keys, canonical browser-version inventory, and the external approved-operator policy. Gate drivers are provisioned outside the checkout at `/opt/agentpass/p0c/gates` and must satisfy the root-ownership contract above.
+
+The final aggregate job is hosted and secret-free. It re-verifies both reports and the signed candidate, requires the two hardware classes to be distinct, applies the external operator policy, and emits `p0c-hardware-qualification-summary`. It does not publish a release.
+
+Required protected configuration:
+
+- repository variables: `AGENTPASS_CLOUD_IMAGE_DIGEST`, `AGENTPASS_RELEASE_MANIFEST_KEY_FINGERPRINT`, `AGENTPASS_RELEASE_TEAM_ID`, `AGENTPASS_RELEASE_ALLOWED_SIGNERS`, `AGENTPASS_P0C_BROWSER_VERSIONS_JSON`, `AGENTPASS_P0C_APPROVED_OPERATOR_POLICY_JSON`, both lane operator IDs, fingerprints, and base64 public keys;
+- `production-signing` secret: `AGENTPASS_SIGNER_KEY_VERSIONS_JSON`, in addition to the documented signing/notarization credentials;
+- Apple Silicon environment secret: `AGENTPASS_P0C_APPLE_SILICON_OPERATOR_PRIVATE_KEY_BASE64`;
+- Intel T2 environment secret: `AGENTPASS_P0C_INTEL_T2_OPERATOR_PRIVATE_KEY_BASE64`;
+- `production-release` environment protection: required reviewers and restricted protected-main deployment.
+
+The three manual workflows run in this order:
+
+1. Run `Release candidate` with an existing signed release tag. Record its workflow run ID.
+2. Run `P0-C hardware qualification` from protected `main` with that release run ID and the fixed artifact name `notarized-release-candidate`. Record the successful qualification run ID.
+3. Run `Promote qualified release` with both IDs. It validates the API provenance, canonical dispatch binding, signed reports, retained aggregate summary, notarized PKG, and annotated tag before creating the public release.
+
+The promotion workflow also publishes both signed reports, operator public keys, the approved policy, aggregate summary, per-lane evidence archives, and `P0C-SHA256SUMS`. A failed upload leaves only a draft release; it is never switched to public state.

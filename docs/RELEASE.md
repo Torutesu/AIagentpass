@@ -203,15 +203,24 @@ application signing, installer signing, manifest signing, and App Store Connect
 notary credentials. There is no `pull_request`, `pull_request_target`, tag-push,
 or untrusted-ref path into that job.
 
+The signing job also generates a migration manifest from the exact committed Git
+objects and a canonical `release-attestation.json` binding `package-lock.json`,
+the migration digest, immutable Cloud image digest, signer key versions, Team ID,
+and all six nested code identities. Both files are included in the signed
+manifest and candidate artifact.
+
 The signing job uploads a private workflow artifact only after notarytool
 returns `Accepted`, stapling succeeds, `stapler validate` succeeds, Gatekeeper
 accepts the installer, and the post-staple package bytes are included in the
-signed manifest. A separate `production-release` job receives no signing or
-notary secrets. It downloads those exact bytes, repeats manifest, package,
-ticket, Gatekeeper, code-signing, entitlement, profile, and source checks, then
-creates a draft GitHub Release. It uploads an explicit manifest-bound file list
-and makes the draft public only after every upload succeeds. Existing releases
-are never overwritten.
+signed manifest. It has no GitHub Release publication job. The candidate must
+subsequently pass `.github/workflows/p0c-hardware-qualification.yml` on both
+protected hardware classes. A separate protected, secret-free promotion workflow
+repeats manifest, package, ticket, Gatekeeper, code-signing, entitlement, report,
+operator-policy, and aggregate-summary checks before creating the public release.
+It publishes both signed hardware reports, operator public keys, the approved
+operator policy, aggregate summary, evidence archives, and qualification
+checksums alongside the manifest-bound candidate files. Existing releases are
+never overwritten.
 
 Production promotion remains fail closed until all of these are available and
 independently checked:

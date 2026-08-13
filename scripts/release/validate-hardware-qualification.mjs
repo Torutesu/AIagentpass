@@ -150,7 +150,7 @@ const validateManifest = (manifestSnapshot, manifestSignaturePath, manifestPubli
 
 const requiredGates = [
   'gatekeeper-notarization', 'clean-install-launchd-xpc', 'secure-enclave-enrollment',
-  'cloud-possession-verification', 'claude-code-unattended-sign', 'cursor-unattended-sign',
+  'cloud-possession-verification', 'claude-code-unattended-sign', 'cursor-code-unattended-sign',
   'audit-upload-observation', 'policy-reduction-refresh-ack', 'offline-expiry',
   'revoke-emergency-stop', 'crash-restart-recovery', 'sleep-wake-network-clock',
   'upgrade-preserves-state', 'uninstall-reinstall-recovery', 'current-user-purge',
@@ -159,7 +159,7 @@ const requiredGates = [
 const requiredTests = [
   'exact-pkg-install', 'launchd-xpc-approval', 'secure-enclave-key-creation',
   'secure-enclave-nonexportability', 'cloud-possession-proof',
-  'claude-code-unattended-sign', 'cursor-unattended-sign', 'unrelated-process-denied',
+  'claude-code-unattended-sign', 'cursor-code-unattended-sign', 'unrelated-process-denied',
   'audit-console-observation', 'policy-reduction-denied', 'offline-expiry-denied',
   'revoke-denied', 'emergency-stop-denied', 'service-crash-recovery', 'os-reboot-recovery',
   'sleep-wake-recovery', 'network-clock-failure', 'upgrade-preserves-state',

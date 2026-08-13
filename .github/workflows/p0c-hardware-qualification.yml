@@ -1,0 +1,607 @@
+name: P0-C hardware qualification
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_run_id:
+        description: Completed Release candidate workflow run ID to qualify
+        required: true
+        type: string
+      release_artifact_name:
+        description: Exact artifact name emitted by that run
+        required: true
+        default: notarized-release-candidate
+        type: string
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: p0c-hardware-qualification-${{ inputs.release_run_id }}
+  cancel-in-progress: false
+
+env:
+  EXPECTED_CANDIDATE_ARTIFACT: notarized-release-candidate
+  P0C_GATE_DRIVER_DIR: /opt/agentpass/p0c/gates
+
+jobs:
+  validate-candidate:
+    if: ${{ github.event_name == 'workflow_dispatch' && github.repository == 'Torutesu/AIagentpass' && github.ref == 'refs/heads/main' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      run_id: ${{ steps.validate.outputs.run_id }}
+      artifact_name: ${{ steps.validate.outputs.artifact_name }}
+      candidate_head_sha: ${{ steps.validate.outputs.candidate_head_sha }}
+    steps:
+      - id: validate
+        name: Validate exact same-repository release-candidate run
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_RUN_ID: ${{ inputs.release_run_id }}
+          RELEASE_ARTIFACT_NAME: ${{ inputs.release_artifact_name }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$GITHUB_REPOSITORY" == "Torutesu/AIagentpass" ]] || { echo "This workflow is restricted to the canonical repository" >&2; exit 1; }
+          [[ "$GITHUB_REF" == "refs/heads/main" ]] || { echo "This workflow must run from the protected main branch" >&2; exit 1; }
+          [[ "$RELEASE_RUN_ID" =~ ^[1-9][0-9]{0,18}$ ]] || { echo "release_run_id must be a decimal workflow run ID" >&2; exit 1; }
+          [[ "$RELEASE_ARTIFACT_NAME" == "$EXPECTED_CANDIDATE_ARTIFACT" ]] || { echo "Only the exact notarized-release-candidate artifact is accepted" >&2; exit 1; }
+
+          run_json="$(gh api --method GET "repos/$GITHUB_REPOSITORY/actions/runs/$RELEASE_RUN_ID")"
+          jq -e --arg repo "$GITHUB_REPOSITORY" '
+            .name == "Release candidate" and
+            .path == ".github/workflows/release-candidate.yml" and
+            .event == "workflow_dispatch" and
+            .status == "completed" and
+            .conclusion == "success" and
+            .head_branch == "main" and
+            .head_repository.full_name == $repo and
+            (.head_sha | test("^[0-9a-f]{40}$"))
+          ' <<<"$run_json" >/dev/null
+
+          candidate_head_sha="$(jq -er '.head_sha' <<<"$run_json")"
+          printf 'run_id=%s\n' "$RELEASE_RUN_ID" >> "$GITHUB_OUTPUT"
+          printf 'artifact_name=%s\n' "$RELEASE_ARTIFACT_NAME" >> "$GITHUB_OUTPUT"
+          printf 'candidate_head_sha=%s\n' "$candidate_head_sha" >> "$GITHUB_OUTPUT"
+
+  apple-silicon-qualification:
+    if: ${{ needs.validate-candidate.result == 'success' && github.event_name == 'workflow_dispatch' && github.repository == 'Torutesu/AIagentpass' && github.ref == 'refs/heads/main' }}
+    needs: validate-candidate
+    runs-on: [self-hosted, macOS, agentpass-p0c-apple-silicon]
+    environment: p0c-hardware-apple-silicon
+    timeout-minutes: 120
+    permissions:
+      contents: read
+      actions: read
+    env:
+      CANDIDATE_RUN_ID: ${{ needs.validate-candidate.outputs.run_id }}
+      CANDIDATE_ARTIFACT_NAME: ${{ needs.validate-candidate.outputs.artifact_name }}
+      CANDIDATE_DIR: ${{ runner.temp }}/agentpass-p0c-candidate-${{ github.run_id }}-${{ github.run_attempt }}-apple-silicon
+      OUTPUT_DIR: ${{ runner.temp }}/agentpass-p0c-output-${{ github.run_id }}-${{ github.run_attempt }}-apple-silicon
+      RELEASE_MANIFEST_FINGERPRINT: ${{ vars.AGENTPASS_RELEASE_MANIFEST_KEY_FINGERPRINT }}
+      EXPECTED_TEAM_ID: ${{ vars.AGENTPASS_RELEASE_TEAM_ID }}
+      OPERATOR_ID: ${{ vars.AGENTPASS_P0C_APPLE_SILICON_OPERATOR_ID }}
+      OPERATOR_FINGERPRINT: ${{ vars.AGENTPASS_P0C_APPLE_SILICON_OPERATOR_FINGERPRINT }}
+      OPERATOR_PUBLIC_KEY_B64: ${{ vars.AGENTPASS_P0C_APPLE_SILICON_OPERATOR_PUBLIC_KEY_BASE64 }}
+      BROWSER_VERSIONS_JSON: ${{ vars.AGENTPASS_P0C_BROWSER_VERSIONS_JSON }}
+      OPERATOR_PRIVATE_KEY_B64: ${{ secrets.AGENTPASS_P0C_APPLE_SILICON_OPERATOR_PRIVATE_KEY_BASE64 }}
+      GATE_DRIVER_DIR: /opt/agentpass/p0c/gates
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 1
+          persist-credentials: false
+          clean: true
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 20
+
+      - name: Create clean candidate and qualification directories
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ ! -e "$CANDIDATE_DIR" && ! -e "$OUTPUT_DIR" ]] || { echo "runner temporary paths already exist" >&2; exit 1; }
+          /bin/mkdir -m 0700 "$CANDIDATE_DIR" "$OUTPUT_DIR"
+
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: ${{ needs.validate-candidate.outputs.artifact_name }}
+          repository: ${{ github.repository }}
+          run-id: ${{ needs.validate-candidate.outputs.run_id }}
+          github-token: ${{ github.token }}
+          path: ${{ runner.temp }}/agentpass-p0c-candidate-${{ github.run_id }}-${{ github.run_attempt }}-apple-silicon
+
+      - id: candidate
+        name: Catalog exact candidate files without executing candidate content
+        env:
+          CANDIDATE_DIR: ${{ env.CANDIDATE_DIR }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          node --input-type=module <<'NODE'
+          import crypto from 'node:crypto';
+          import fs from 'node:fs';
+          import path from 'node:path';
+
+          const dir = path.resolve(process.env.CANDIDATE_DIR);
+          const entries = fs.readdirSync(dir, { withFileTypes: true });
+          const files = new Map();
+          for (const entry of entries) {
+            if (!/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(entry.name) || entry.isSymbolicLink() || !entry.isFile()) throw new Error('candidate contains an unsafe entry');
+            const full = path.join(dir, entry.name);
+            const stat = fs.lstatSync(full);
+            if (stat.nlink !== 1 || (stat.mode & 0o022) !== 0) throw new Error('candidate file is not a protected single-link file');
+            files.set(entry.name, full);
+          }
+          const exactlyOne = (predicate, label) => {
+            const matches = [...files.entries()].filter(([name]) => predicate(name));
+            if (matches.length !== 1) throw new Error(`candidate must contain exactly one ${label}`);
+            return matches[0][1];
+          };
+          const fixed = ['release-manifest.public.pem', 'SHA256SUMS', 'notarytool-result.json', 'stapler-result.txt', 'release-attestation.json'];
+          const manifest = exactlyOne((name) => name.endsWith('.release-manifest.json'), 'release manifest');
+          const signature = exactlyOne((name) => name.endsWith('.release-manifest.sig'), 'release manifest signature');
+          const sbom = exactlyOne((name) => name.endsWith('.spdx.json'), 'SPDX SBOM');
+          const artifact = exactlyOne((name) => name.endsWith('-macos-universal.pkg'), 'universal PKG');
+          const migration = exactlyOne((name) => name.endsWith('.database-migration-manifest.json'), 'database migration manifest');
+          const allowed = new Set([...fixed, path.basename(manifest), path.basename(signature), path.basename(sbom), path.basename(artifact), path.basename(migration)]);
+          if (files.size !== allowed.size || [...files.keys()].some((name) => !allowed.has(name))) throw new Error('candidate contains unexpected files');
+          const manifestValue = JSON.parse(fs.readFileSync(manifest, 'utf8'));
+          const product = manifestValue.artifacts?.filter((item) => item.role === 'product');
+          if (product?.length !== 1 || product[0].name !== path.basename(artifact)) throw new Error('candidate product does not match its signed manifest');
+          if (manifestValue.artifacts?.every((item) => item.name !== 'release-attestation.json')) throw new Error('signed candidate must include release-attestation.json');
+          const artifactHash = crypto.createHash('sha256').update(fs.readFileSync(artifact)).digest('hex');
+          if (product[0].sha256 !== artifactHash) throw new Error('candidate product hash does not match its signed manifest');
+          const output = process.env.GITHUB_OUTPUT;
+          for (const [key, value] of Object.entries({ manifest, signature, public_key: path.join(dir, 'release-manifest.public.pem'), artifact, sbom, attestation: path.join(dir, 'release-attestation.json') })) fs.appendFileSync(output, `${key}=${value}\n`);
+          NODE
+
+      - name: Verify signed candidate before any qualification driver
+        env:
+          MANIFEST: ${{ steps.candidate.outputs.manifest }}
+          MANIFEST_SIGNATURE: ${{ steps.candidate.outputs.signature }}
+          MANIFEST_PUBLIC_KEY: ${{ steps.candidate.outputs.public_key }}
+          PRODUCT_PKG: ${{ steps.candidate.outputs.artifact }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          : "${RELEASE_MANIFEST_FINGERPRINT:?release manifest verification fingerprint is required}"
+          : "${EXPECTED_TEAM_ID:?release Team ID is required}"
+          node scripts/release/verify-release.mjs "$MANIFEST" "$MANIFEST_SIGNATURE" "$MANIFEST_PUBLIC_KEY" "$RELEASE_MANIFEST_FINGERPRINT"
+          scripts/release/verify-macos-release.sh "$MANIFEST" "$MANIFEST_SIGNATURE" "$MANIFEST_PUBLIC_KEY" "$RELEASE_MANIFEST_FINGERPRINT" "$EXPECTED_TEAM_ID"
+          test -s "$PRODUCT_PKG"
+
+      - name: Generate immutable hardware report template from signed release evidence
+        env:
+          TEMPLATE_OUT: ${{ env.OUTPUT_DIR }}/template.json
+          BROWSER_VERSIONS_PATH: ${{ env.OUTPUT_DIR }}/browser-versions.json
+          MANIFEST: ${{ steps.candidate.outputs.manifest }}
+          MANIFEST_SIGNATURE: ${{ steps.candidate.outputs.signature }}
+          MANIFEST_PUBLIC_KEY: ${{ steps.candidate.outputs.public_key }}
+          PRODUCT_PKG: ${{ steps.candidate.outputs.artifact }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          : "${BROWSER_VERSIONS_JSON:?protected browser version inventory is required}"
+          node --input-type=module - "$BROWSER_VERSIONS_PATH" <<'NODE'
+          import fs from 'node:fs';
+          const path = process.argv[2];
+          const bytes = Buffer.from(process.env.BROWSER_VERSIONS_JSON, 'utf8');
+          const fd = fs.openSync(path, fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL | fs.constants.O_NOFOLLOW, 0o600);
+          try { fs.writeSync(fd, bytes); fs.fsyncSync(fd); } finally { fs.closeSync(fd); }
+          NODE
+          node scripts/release/generate-hardware-qualification-template.mjs \
+            --release-manifest "$MANIFEST" --release-signature "$MANIFEST_SIGNATURE" \
+            --release-public-key "$MANIFEST_PUBLIC_KEY" --release-fingerprint "$RELEASE_MANIFEST_FINGERPRINT" \
+            --artifact "$PRODUCT_PKG" --operator "$OPERATOR_ID" \
+            --operator-key-fingerprint "$OPERATOR_FINGERPRINT" --browser-versions "$BROWSER_VERSIONS_PATH" \
+            --output "$TEMPLATE_OUT"
+
+      - name: Materialize lane operator key in private temporary storage
+        env:
+          PRIVATE_KEY_PATH: ${{ env.OUTPUT_DIR }}/operator-private.pem
+          PUBLIC_KEY_PATH: ${{ env.OUTPUT_DIR }}/operator-public.pem
+        shell: bash
+        run: |
+          set -euo pipefail
+          : "${OPERATOR_PRIVATE_KEY_B64:?lane operator private key is required}"
+          : "${OPERATOR_PUBLIC_KEY_B64:?lane operator public key is required}"
+          : "${OPERATOR_FINGERPRINT:?lane operator fingerprint is required}"
+          umask 077
+          node --input-type=module <<'NODE'
+          import fs from 'node:fs';
+          const write = (path, value, mode) => fs.writeFileSync(path, Buffer.from(value, 'base64'), { flag: 'wx', mode });
+          write(process.env.PRIVATE_KEY_PATH, process.env.OPERATOR_PRIVATE_KEY_B64, 0o600);
+          write(process.env.PUBLIC_KEY_PATH, process.env.OPERATOR_PUBLIC_KEY_B64, 0o644);
+          NODE
+
+      - name: Run fixed root-owned P0-C gate drivers
+        env:
+          TEMPLATE: ${{ env.OUTPUT_DIR }}/template.json
+          REPORT: ${{ env.OUTPUT_DIR }}/report.json
+          EVIDENCE_DIR: ${{ env.OUTPUT_DIR }}/evidence
+          PRODUCT_PKG: ${{ steps.candidate.outputs.artifact }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          /bin/mkdir -m 0700 "$EVIDENCE_DIR"
+          node scripts/release/run-p0c-qualification.mjs \
+            --template "$TEMPLATE" \
+            --output "$REPORT" \
+            --artifact "$PRODUCT_PKG" \
+            --gate-drivers "$GATE_DRIVER_DIR" \
+            --evidence-dir "$EVIDENCE_DIR" \
+            --operator "$OPERATOR_ID"
+
+      - name: Sign and independently verify lane report
+        env:
+          REPORT: ${{ env.OUTPUT_DIR }}/report.json
+          SIGNATURE: ${{ env.OUTPUT_DIR }}/report.sig
+          PUBLIC_KEY: ${{ env.OUTPUT_DIR }}/operator-public.pem
+          PRIVATE_KEY: ${{ env.OUTPUT_DIR }}/operator-private.pem
+          MANIFEST: ${{ steps.candidate.outputs.manifest }}
+          MANIFEST_SIGNATURE: ${{ steps.candidate.outputs.signature }}
+          MANIFEST_PUBLIC_KEY: ${{ steps.candidate.outputs.public_key }}
+          PRODUCT_PKG: ${{ steps.candidate.outputs.artifact }}
+          EVIDENCE_DIR: ${{ env.OUTPUT_DIR }}/evidence
+        shell: bash
+        run: |
+          set -euo pipefail
+          node scripts/release/sign-hardware-qualification.mjs \
+            --report "$REPORT" --private-key "$PRIVATE_KEY" --signature "$SIGNATURE" \
+            --public-key "$PUBLIC_KEY" --expected-fingerprint "$OPERATOR_FINGERPRINT"
+          node scripts/release/validate-hardware-qualification.mjs \
+            "$REPORT" "$PRODUCT_PKG" "$MANIFEST" "$MANIFEST_SIGNATURE" "$MANIFEST_PUBLIC_KEY" \
+            "$RELEASE_MANIFEST_FINGERPRINT" "$SIGNATURE" "$PUBLIC_KEY" "$OPERATOR_FINGERPRINT" "$EVIDENCE_DIR"
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: p0c-hardware-apple-silicon
+          path: |
+            ${{ runner.temp }}/agentpass-p0c-output-${{ github.run_id }}-${{ github.run_attempt }}-apple-silicon/report.json
+            ${{ runner.temp }}/agentpass-p0c-output-${{ github.run_id }}-${{ github.run_attempt }}-apple-silicon/report.sig
+            ${{ runner.temp }}/agentpass-p0c-output-${{ github.run_id }}-${{ github.run_attempt }}-apple-silicon/operator-public.pem
+            ${{ runner.temp }}/agentpass-p0c-output-${{ github.run_id }}-${{ github.run_attempt }}-apple-silicon/evidence/**
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Remove private operator key
+        if: ${{ always() }}
+        env:
+          PRIVATE_KEY_PATH: ${{ env.OUTPUT_DIR }}/operator-private.pem
+        shell: bash
+        run: |
+          set +e
+          chmod 000 "$PRIVATE_KEY_PATH" 2>/dev/null
+          rm -f -- "$PRIVATE_KEY_PATH"
+
+  intel-t2-qualification:
+    if: ${{ needs.validate-candidate.result == 'success' && github.event_name == 'workflow_dispatch' && github.repository == 'Torutesu/AIagentpass' && github.ref == 'refs/heads/main' }}
+    needs: validate-candidate
+    runs-on: [self-hosted, macOS, agentpass-p0c-intel-t2]
+    environment: p0c-hardware-intel-t2
+    timeout-minutes: 120
+    permissions:
+      contents: read
+      actions: read
+    env:
+      CANDIDATE_RUN_ID: ${{ needs.validate-candidate.outputs.run_id }}
+      CANDIDATE_ARTIFACT_NAME: ${{ needs.validate-candidate.outputs.artifact_name }}
+      CANDIDATE_DIR: ${{ runner.temp }}/agentpass-p0c-candidate-${{ github.run_id }}-${{ github.run_attempt }}-intel-t2
+      OUTPUT_DIR: ${{ runner.temp }}/agentpass-p0c-output-${{ github.run_id }}-${{ github.run_attempt }}-intel-t2
+      RELEASE_MANIFEST_FINGERPRINT: ${{ vars.AGENTPASS_RELEASE_MANIFEST_KEY_FINGERPRINT }}
+      EXPECTED_TEAM_ID: ${{ vars.AGENTPASS_RELEASE_TEAM_ID }}
+      OPERATOR_ID: ${{ vars.AGENTPASS_P0C_INTEL_T2_OPERATOR_ID }}
+      OPERATOR_FINGERPRINT: ${{ vars.AGENTPASS_P0C_INTEL_T2_OPERATOR_FINGERPRINT }}
+      OPERATOR_PUBLIC_KEY_B64: ${{ vars.AGENTPASS_P0C_INTEL_T2_OPERATOR_PUBLIC_KEY_BASE64 }}
+      BROWSER_VERSIONS_JSON: ${{ vars.AGENTPASS_P0C_BROWSER_VERSIONS_JSON }}
+      OPERATOR_PRIVATE_KEY_B64: ${{ secrets.AGENTPASS_P0C_INTEL_T2_OPERATOR_PRIVATE_KEY_BASE64 }}
+      GATE_DRIVER_DIR: /opt/agentpass/p0c/gates
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 1
+          persist-credentials: false
+          clean: true
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 20
+
+      - name: Create clean candidate and qualification directories
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ ! -e "$CANDIDATE_DIR" && ! -e "$OUTPUT_DIR" ]] || { echo "runner temporary paths already exist" >&2; exit 1; }
+          /bin/mkdir -m 0700 "$CANDIDATE_DIR" "$OUTPUT_DIR"
+
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: ${{ needs.validate-candidate.outputs.artifact_name }}
+          repository: ${{ github.repository }}
+          run-id: ${{ needs.validate-candidate.outputs.run_id }}
+          github-token: ${{ github.token }}
+          path: ${{ runner.temp }}/agentpass-p0c-candidate-${{ github.run_id }}-${{ github.run_attempt }}-intel-t2
+
+      - id: candidate
+        name: Catalog exact candidate files without executing candidate content
+        env:
+          CANDIDATE_DIR: ${{ env.CANDIDATE_DIR }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          node --input-type=module <<'NODE'
+          import crypto from 'node:crypto';
+          import fs from 'node:fs';
+          import path from 'node:path';
+          const dir = path.resolve(process.env.CANDIDATE_DIR);
+          const entries = fs.readdirSync(dir, { withFileTypes: true });
+          const files = new Map();
+          for (const entry of entries) {
+            if (!/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(entry.name) || entry.isSymbolicLink() || !entry.isFile()) throw new Error('candidate contains an unsafe entry');
+            const full = path.join(dir, entry.name); const stat = fs.lstatSync(full);
+            if (stat.nlink !== 1 || (stat.mode & 0o022) !== 0) throw new Error('candidate file is not a protected single-link file');
+            files.set(entry.name, full);
+          }
+          const exactlyOne = (predicate, label) => { const matches = [...files.entries()].filter(([name]) => predicate(name)); if (matches.length !== 1) throw new Error(`candidate must contain exactly one ${label}`); return matches[0][1]; };
+          const fixed = ['release-manifest.public.pem', 'SHA256SUMS', 'notarytool-result.json', 'stapler-result.txt', 'release-attestation.json'];
+          const manifest = exactlyOne((name) => name.endsWith('.release-manifest.json'), 'release manifest');
+          const signature = exactlyOne((name) => name.endsWith('.release-manifest.sig'), 'release manifest signature');
+          const sbom = exactlyOne((name) => name.endsWith('.spdx.json'), 'SPDX SBOM');
+          const artifact = exactlyOne((name) => name.endsWith('-macos-universal.pkg'), 'universal PKG');
+          const migration = exactlyOne((name) => name.endsWith('.database-migration-manifest.json'), 'database migration manifest');
+          const allowed = new Set([...fixed, path.basename(manifest), path.basename(signature), path.basename(sbom), path.basename(artifact), path.basename(migration)]);
+          if (files.size !== allowed.size || [...files.keys()].some((name) => !allowed.has(name))) throw new Error('candidate contains unexpected files');
+          const manifestValue = JSON.parse(fs.readFileSync(manifest, 'utf8')); const product = manifestValue.artifacts?.filter((item) => item.role === 'product');
+          if (product?.length !== 1 || product[0].name !== path.basename(artifact)) throw new Error('candidate product does not match its signed manifest');
+          if (manifestValue.artifacts?.every((item) => item.name !== 'release-attestation.json')) throw new Error('signed candidate must include release-attestation.json');
+          if (product[0].sha256 !== crypto.createHash('sha256').update(fs.readFileSync(artifact)).digest('hex')) throw new Error('candidate product hash does not match its signed manifest');
+          const output = process.env.GITHUB_OUTPUT;
+          for (const [key, value] of Object.entries({ manifest, signature, public_key: path.join(dir, 'release-manifest.public.pem'), artifact, sbom, attestation: path.join(dir, 'release-attestation.json') })) fs.appendFileSync(output, `${key}=${value}\n`);
+          NODE
+
+      - name: Verify signed candidate before any qualification driver
+        env:
+          MANIFEST: ${{ steps.candidate.outputs.manifest }}
+          MANIFEST_SIGNATURE: ${{ steps.candidate.outputs.signature }}
+          MANIFEST_PUBLIC_KEY: ${{ steps.candidate.outputs.public_key }}
+          PRODUCT_PKG: ${{ steps.candidate.outputs.artifact }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          : "${RELEASE_MANIFEST_FINGERPRINT:?release manifest verification fingerprint is required}"
+          : "${EXPECTED_TEAM_ID:?release Team ID is required}"
+          node scripts/release/verify-release.mjs "$MANIFEST" "$MANIFEST_SIGNATURE" "$MANIFEST_PUBLIC_KEY" "$RELEASE_MANIFEST_FINGERPRINT"
+          scripts/release/verify-macos-release.sh "$MANIFEST" "$MANIFEST_SIGNATURE" "$MANIFEST_PUBLIC_KEY" "$RELEASE_MANIFEST_FINGERPRINT" "$EXPECTED_TEAM_ID"
+          test -s "$PRODUCT_PKG"
+
+      - name: Generate immutable hardware report template from signed release evidence
+        env:
+          TEMPLATE_OUT: ${{ env.OUTPUT_DIR }}/template.json
+          BROWSER_VERSIONS_PATH: ${{ env.OUTPUT_DIR }}/browser-versions.json
+          MANIFEST: ${{ steps.candidate.outputs.manifest }}
+          MANIFEST_SIGNATURE: ${{ steps.candidate.outputs.signature }}
+          MANIFEST_PUBLIC_KEY: ${{ steps.candidate.outputs.public_key }}
+          PRODUCT_PKG: ${{ steps.candidate.outputs.artifact }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          : "${BROWSER_VERSIONS_JSON:?protected browser version inventory is required}"
+          node --input-type=module - "$BROWSER_VERSIONS_PATH" <<'NODE'
+          import fs from 'node:fs';
+          const path = process.argv[2];
+          const bytes = Buffer.from(process.env.BROWSER_VERSIONS_JSON, 'utf8');
+          const fd = fs.openSync(path, fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL | fs.constants.O_NOFOLLOW, 0o600);
+          try { fs.writeSync(fd, bytes); fs.fsyncSync(fd); } finally { fs.closeSync(fd); }
+          NODE
+          node scripts/release/generate-hardware-qualification-template.mjs \
+            --release-manifest "$MANIFEST" --release-signature "$MANIFEST_SIGNATURE" \
+            --release-public-key "$MANIFEST_PUBLIC_KEY" --release-fingerprint "$RELEASE_MANIFEST_FINGERPRINT" \
+            --artifact "$PRODUCT_PKG" --operator "$OPERATOR_ID" \
+            --operator-key-fingerprint "$OPERATOR_FINGERPRINT" --browser-versions "$BROWSER_VERSIONS_PATH" \
+            --output "$TEMPLATE_OUT"
+
+      - name: Materialize lane operator key in private temporary storage
+        env:
+          PRIVATE_KEY_PATH: ${{ env.OUTPUT_DIR }}/operator-private.pem
+          PUBLIC_KEY_PATH: ${{ env.OUTPUT_DIR }}/operator-public.pem
+        shell: bash
+        run: |
+          set -euo pipefail
+          : "${OPERATOR_PRIVATE_KEY_B64:?lane operator private key is required}"
+          : "${OPERATOR_PUBLIC_KEY_B64:?lane operator public key is required}"
+          : "${OPERATOR_FINGERPRINT:?lane operator fingerprint is required}"
+          umask 077
+          node --input-type=module <<'NODE'
+          import fs from 'node:fs';
+          const write = (path, value, mode) => fs.writeFileSync(path, Buffer.from(value, 'base64'), { flag: 'wx', mode });
+          write(process.env.PRIVATE_KEY_PATH, process.env.OPERATOR_PRIVATE_KEY_B64, 0o600);
+          write(process.env.PUBLIC_KEY_PATH, process.env.OPERATOR_PUBLIC_KEY_B64, 0o644);
+          NODE
+
+      - name: Run fixed root-owned P0-C gate drivers
+        env:
+          TEMPLATE: ${{ env.OUTPUT_DIR }}/template.json
+          REPORT: ${{ env.OUTPUT_DIR }}/report.json
+          EVIDENCE_DIR: ${{ env.OUTPUT_DIR }}/evidence
+          PRODUCT_PKG: ${{ steps.candidate.outputs.artifact }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          /bin/mkdir -m 0700 "$EVIDENCE_DIR"
+          node scripts/release/run-p0c-qualification.mjs --template "$TEMPLATE" --output "$REPORT" --artifact "$PRODUCT_PKG" --gate-drivers "$GATE_DRIVER_DIR" --evidence-dir "$EVIDENCE_DIR" --operator "$OPERATOR_ID"
+
+      - name: Sign and independently verify lane report
+        env:
+          REPORT: ${{ env.OUTPUT_DIR }}/report.json
+          SIGNATURE: ${{ env.OUTPUT_DIR }}/report.sig
+          PUBLIC_KEY: ${{ env.OUTPUT_DIR }}/operator-public.pem
+          PRIVATE_KEY: ${{ env.OUTPUT_DIR }}/operator-private.pem
+          MANIFEST: ${{ steps.candidate.outputs.manifest }}
+          MANIFEST_SIGNATURE: ${{ steps.candidate.outputs.signature }}
+          MANIFEST_PUBLIC_KEY: ${{ steps.candidate.outputs.public_key }}
+          PRODUCT_PKG: ${{ steps.candidate.outputs.artifact }}
+          EVIDENCE_DIR: ${{ env.OUTPUT_DIR }}/evidence
+        shell: bash
+        run: |
+          set -euo pipefail
+          node scripts/release/sign-hardware-qualification.mjs --report "$REPORT" --private-key "$PRIVATE_KEY" --signature "$SIGNATURE" --public-key "$PUBLIC_KEY" --expected-fingerprint "$OPERATOR_FINGERPRINT"
+          node scripts/release/validate-hardware-qualification.mjs "$REPORT" "$PRODUCT_PKG" "$MANIFEST" "$MANIFEST_SIGNATURE" "$MANIFEST_PUBLIC_KEY" "$RELEASE_MANIFEST_FINGERPRINT" "$SIGNATURE" "$PUBLIC_KEY" "$OPERATOR_FINGERPRINT" "$EVIDENCE_DIR"
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: p0c-hardware-intel-t2
+          path: |
+            ${{ runner.temp }}/agentpass-p0c-output-${{ github.run_id }}-${{ github.run_attempt }}-intel-t2/report.json
+            ${{ runner.temp }}/agentpass-p0c-output-${{ github.run_id }}-${{ github.run_attempt }}-intel-t2/report.sig
+            ${{ runner.temp }}/agentpass-p0c-output-${{ github.run_id }}-${{ github.run_attempt }}-intel-t2/operator-public.pem
+            ${{ runner.temp }}/agentpass-p0c-output-${{ github.run_id }}-${{ github.run_attempt }}-intel-t2/evidence/**
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Remove private operator key
+        if: ${{ always() }}
+        env:
+          PRIVATE_KEY_PATH: ${{ env.OUTPUT_DIR }}/operator-private.pem
+        shell: bash
+        run: |
+          set +e
+          chmod 000 "$PRIVATE_KEY_PATH" 2>/dev/null
+          rm -f -- "$PRIVATE_KEY_PATH"
+
+  aggregate-qualification:
+    if: ${{ needs.validate-candidate.result == 'success' && needs.apple-silicon-qualification.result == 'success' && needs.intel-t2-qualification.result == 'success' && github.event_name == 'workflow_dispatch' && github.repository == 'Torutesu/AIagentpass' && github.ref == 'refs/heads/main' }}
+    needs: [validate-candidate, apple-silicon-qualification, intel-t2-qualification]
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      actions: read
+    env:
+      CANDIDATE_RUN_ID: ${{ needs.validate-candidate.outputs.run_id }}
+      CANDIDATE_ARTIFACT_NAME: ${{ needs.validate-candidate.outputs.artifact_name }}
+      CANDIDATE_DIR: ${{ runner.temp }}/agentpass-p0c-aggregate-candidate-${{ github.run_id }}-${{ github.run_attempt }}
+      APPLE_DIR: ${{ runner.temp }}/agentpass-p0c-aggregate-apple-${{ github.run_id }}-${{ github.run_attempt }}
+      INTEL_DIR: ${{ runner.temp }}/agentpass-p0c-aggregate-intel-${{ github.run_id }}-${{ github.run_attempt }}
+      OUTPUT_DIR: ${{ runner.temp }}/agentpass-p0c-aggregate-output-${{ github.run_id }}-${{ github.run_attempt }}
+      RELEASE_MANIFEST_FINGERPRINT: ${{ vars.AGENTPASS_RELEASE_MANIFEST_KEY_FINGERPRINT }}
+      APPLE_OPERATOR_FINGERPRINT: ${{ vars.AGENTPASS_P0C_APPLE_SILICON_OPERATOR_FINGERPRINT }}
+      INTEL_OPERATOR_FINGERPRINT: ${{ vars.AGENTPASS_P0C_INTEL_T2_OPERATOR_FINGERPRINT }}
+      APPROVED_OPERATOR_POLICY_JSON: ${{ vars.AGENTPASS_P0C_APPROVED_OPERATOR_POLICY_JSON }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 1
+          persist-credentials: false
+          clean: true
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 20
+
+      - name: Create clean aggregate directories
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ ! -e "$CANDIDATE_DIR" && ! -e "$APPLE_DIR" && ! -e "$INTEL_DIR" && ! -e "$OUTPUT_DIR" ]] || { echo "aggregate temporary paths already exist" >&2; exit 1; }
+          /bin/mkdir -m 0700 "$CANDIDATE_DIR" "$APPLE_DIR" "$INTEL_DIR" "$OUTPUT_DIR"
+
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: ${{ needs.validate-candidate.outputs.artifact_name }}
+          repository: ${{ github.repository }}
+          run-id: ${{ needs.validate-candidate.outputs.run_id }}
+          github-token: ${{ github.token }}
+          path: ${{ runner.temp }}/agentpass-p0c-aggregate-candidate-${{ github.run_id }}-${{ github.run_attempt }}
+
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: p0c-hardware-apple-silicon
+          path: ${{ runner.temp }}/agentpass-p0c-aggregate-apple-${{ github.run_id }}-${{ github.run_attempt }}
+
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: p0c-hardware-intel-t2
+          path: ${{ runner.temp }}/agentpass-p0c-aggregate-intel-${{ github.run_id }}-${{ github.run_attempt }}
+
+      - id: candidate
+        name: Re-catalog candidate before aggregate verification
+        env:
+          CANDIDATE_DIR: ${{ env.CANDIDATE_DIR }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          node --input-type=module <<'NODE'
+          import fs from 'node:fs'; import path from 'node:path';
+          const dir = path.resolve(process.env.CANDIDATE_DIR); const names = fs.readdirSync(dir, { withFileTypes: true });
+          for (const item of names) { if (item.isSymbolicLink() || !item.isFile() || !/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(item.name)) throw new Error('aggregate candidate contains an unsafe entry'); }
+          const one = (test, label) => { const found = names.filter((item) => test(item.name)); if (found.length !== 1) throw new Error(`aggregate candidate requires exactly one ${label}`); return path.join(dir, found[0].name); };
+          const manifest = one((name) => name.endsWith('.release-manifest.json'), 'release manifest'); const signature = one((name) => name.endsWith('.release-manifest.sig'), 'release signature'); const pkg = one((name) => name.endsWith('-macos-universal.pkg'), 'universal PKG');
+          const output = process.env.GITHUB_OUTPUT; for (const [key, value] of Object.entries({ manifest, signature, public_key: path.join(dir, 'release-manifest.public.pem'), artifact: pkg })) fs.appendFileSync(output, `${key}=${value}\n`);
+          NODE
+
+      - name: Write externally supplied approved operator policy
+        env:
+          POLICY_PATH: ${{ env.OUTPUT_DIR }}/approved-operator-policy.json
+        shell: bash
+        run: |
+          set -euo pipefail
+          : "${APPROVED_OPERATOR_POLICY_JSON:?approved operator policy must be supplied as a protected repository variable}"
+          node --input-type=module <<'NODE'
+          import fs from 'node:fs';
+          const path = process.env.POLICY_PATH;
+          const bytes = Buffer.from(process.env.APPROVED_OPERATOR_POLICY_JSON, 'utf8');
+          const fd = fs.openSync(path, fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL | fs.constants.O_NOFOLLOW, 0o600);
+          try { fs.writeSync(fd, bytes); fs.fsyncSync(fd); } finally { fs.closeSync(fd); }
+          NODE
+
+      - id: aggregate
+        name: Verify both signed hardware reports with the external policy
+        env:
+          MANIFEST: ${{ steps.candidate.outputs.manifest }}
+          MANIFEST_SIGNATURE: ${{ steps.candidate.outputs.signature }}
+          MANIFEST_PUBLIC_KEY: ${{ steps.candidate.outputs.public_key }}
+          PRODUCT_PKG: ${{ steps.candidate.outputs.artifact }}
+          POLICY_PATH: ${{ env.OUTPUT_DIR }}/approved-operator-policy.json
+          APPLE_DIR: ${{ env.APPLE_DIR }}
+          INTEL_DIR: ${{ env.INTEL_DIR }}
+          SUMMARY_PATH: ${{ env.OUTPUT_DIR }}/qualification-summary.json
+        shell: bash
+        run: |
+          set -euo pipefail
+          node scripts/release/verify-hardware-qualification-set.mjs \
+            "$MANIFEST" "$MANIFEST_SIGNATURE" "$MANIFEST_PUBLIC_KEY" "$RELEASE_MANIFEST_FINGERPRINT" "$PRODUCT_PKG" \
+            "$APPLE_DIR/report.json" "$APPLE_DIR/report.sig" "$APPLE_DIR/operator-public.pem" "$APPLE_OPERATOR_FINGERPRINT" "$APPLE_DIR/evidence" \
+            "$INTEL_DIR/report.json" "$INTEL_DIR/report.sig" "$INTEL_DIR/operator-public.pem" "$INTEL_OPERATOR_FINGERPRINT" "$INTEL_DIR/evidence" \
+            "$POLICY_PATH" > "$SUMMARY_PATH"
+          node --input-type=module - "$SUMMARY_PATH" "$OUTPUT_DIR/qualification-dispatch-binding.json" <<'NODE'
+          import crypto from 'node:crypto';
+          import fs from 'node:fs';
+          const [summaryPath, outputPath] = process.argv.slice(2);
+          if (!/^[1-9][0-9]{0,18}$/.test(process.env.CANDIDATE_RUN_ID || '') || !/^[1-9][0-9]{0,18}$/.test(process.env.GITHUB_RUN_ID || '')) throw new Error('workflow run identity is invalid');
+          const summary = fs.readFileSync(summaryPath);
+          const binding = {
+            schema_version: 1,
+            release_run_id: process.env.CANDIDATE_RUN_ID,
+            qualification_run_id: process.env.GITHUB_RUN_ID,
+            candidate_artifact_name: process.env.CANDIDATE_ARTIFACT_NAME,
+            qualification_summary_sha256: crypto.createHash('sha256').update(summary).digest('hex')
+          };
+          const bytes = Buffer.from(`${JSON.stringify(binding, null, 2)}\n`, 'utf8');
+          fs.writeFileSync(outputPath, bytes, { flag: 'wx', mode: 0o600 });
+          NODE
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: p0c-hardware-qualification-summary
+          path: |
+            ${{ runner.temp }}/agentpass-p0c-aggregate-output-${{ github.run_id }}-${{ github.run_attempt }}/qualification-summary.json
+            ${{ runner.temp }}/agentpass-p0c-aggregate-output-${{ github.run_id }}-${{ github.run_attempt }}/qualification-dispatch-binding.json
+          if-no-files-found: error
+          retention-days: 30

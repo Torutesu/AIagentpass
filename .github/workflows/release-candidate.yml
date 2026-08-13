@@ -49,6 +49,7 @@ jobs:
     environment: production-signing
     env:
       AGENTPASS_RELEASE_TAG: ${{ needs.verify-source.outputs.tag }}
+      AGENTPASS_RELEASE_COMMIT: ${{ needs.verify-source.outputs.commit }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -77,6 +78,15 @@ jobs:
         run: scripts/release/require-credentials.sh
       - run: npm ci
       - run: node scripts/release/validate-version.mjs --require-tag --tag="$AGENTPASS_RELEASE_TAG"
+      - name: Generate immutable database migration manifest
+        run: |
+          set -euo pipefail
+          migration_manifest="$RUNNER_TEMP/candidate/AgentPass-${AGENTPASS_RELEASE_TAG}.database-migration-manifest.json"
+          mkdir -p "$RUNNER_TEMP/candidate"
+          node scripts/release/generate-database-migration-manifest.mjs \
+            --repository-root "$GITHUB_WORKSPACE" \
+            --commit "$AGENTPASS_RELEASE_COMMIT" \
+            --output "$migration_manifest"
       - name: Import ephemeral signing material
         env:
           AGENTPASS_SIGNING_CERTIFICATE_P12_BASE64: ${{ secrets.AGENTPASS_SIGNING_CERTIFICATE_P12_BASE64 }}
@@ -105,6 +115,47 @@ jobs:
           security import "$RUNNER_TEMP/agentpass-signing/certificate.p12" -k "$RUNNER_TEMP/agentpass-signing.keychain-db" -P "$AGENTPASS_SIGNING_CERTIFICATE_PASSWORD" -T /usr/bin/codesign
           security set-key-partition-list -S apple-tool:,apple: -s -k "$KEYCHAIN_PASSWORD" "$RUNNER_TEMP/agentpass-signing.keychain-db"
           security list-keychains -d user -s "$RUNNER_TEMP/agentpass-signing.keychain-db"
+      - name: Materialize protected attestation inputs
+        env:
+          AGENTPASS_CLOUD_IMAGE_DIGEST: ${{ vars.AGENTPASS_CLOUD_IMAGE_DIGEST }}
+          AGENTPASS_SIGNER_KEY_VERSIONS_JSON: ${{ secrets.AGENTPASS_SIGNER_KEY_VERSIONS_JSON }}
+        run: |
+          set -euo pipefail
+          : "${AGENTPASS_CLOUD_IMAGE_DIGEST:?AGENTPASS_CLOUD_IMAGE_DIGEST is required}"
+          : "${AGENTPASS_SIGNER_KEY_VERSIONS_JSON:?AGENTPASS_SIGNER_KEY_VERSIONS_JSON is required}"
+          umask 077
+          input_dir="$RUNNER_TEMP/agentpass-attestation-inputs"
+          mkdir -m 0700 -p "$input_dir"
+          node --input-type=module - "$input_dir/signer-key-versions.json" <<'NODE'
+          import fs from "node:fs";
+          import process from "node:process";
+
+          const output = process.argv[2];
+          const input = process.env.AGENTPASS_SIGNER_KEY_VERSIONS_JSON;
+          if (!output || typeof input !== "string" || input.length === 0) throw new Error("protected signer key versions input is missing");
+          let value;
+          try { value = JSON.parse(input); } catch { throw new Error("protected signer key versions input is not valid JSON"); }
+          if (!Array.isArray(value) || value.length === 0 || value.length > 64) throw new Error("protected signer key versions input must be a non-empty array");
+          const names = new Set();
+          let previous = "";
+          for (const item of value) {
+            if (!item || typeof item !== "object" || Array.isArray(item) || Object.keys(item).sort().join(",") !== "name,version") throw new Error("protected signer key versions contain an invalid entry");
+            if (!/^[A-Za-z0-9._-]{1,80}$/.test(item.name) || !/^[A-Za-z0-9][A-Za-z0-9._+~-]{0,127}$/.test(item.version) || names.has(item.name) || item.name <= previous) throw new Error("protected signer key versions must be unique, sorted, and canonical");
+            names.add(item.name);
+            previous = item.name;
+          }
+          const canonical = `${JSON.stringify(value, null, 2)}\n`;
+          if (input !== canonical) throw new Error("protected signer key versions must use canonical JSON");
+          const flags = fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL | fs.constants.O_NOFOLLOW;
+          const fd = fs.openSync(output, flags, 0o600);
+          try {
+            fs.writeFileSync(fd, canonical, { encoding: "utf8" });
+            fs.fsyncSync(fd);
+          } finally {
+            fs.closeSync(fd);
+          }
+          NODE
+          [[ "$(stat -f '%Lp' "$input_dir/signer-key-versions.json")" == 600 ]] || { echo "signer key versions file permissions are unsafe" >&2; exit 1; }
       - name: Build, notarize, staple, and bind installer candidate
         env:
           AGENTPASS_SIGNING_IDENTITY: ${{ secrets.AGENTPASS_SIGNING_IDENTITY }}
@@ -112,6 +163,7 @@ jobs:
           AGENTPASS_TEAM_ID: ${{ secrets.AGENTPASS_TEAM_ID }}
           AGENTPASS_APP_IDENTIFIER_PREFIX: ${{ secrets.AGENTPASS_APP_IDENTIFIER_PREFIX }}
           AGENTPASS_RELEASE_MANIFEST_KEY_FINGERPRINT: ${{ vars.AGENTPASS_RELEASE_MANIFEST_KEY_FINGERPRINT }}
+          AGENTPASS_CLOUD_IMAGE_DIGEST: ${{ vars.AGENTPASS_CLOUD_IMAGE_DIGEST }}
           AGENTPASS_NOTARY_KEY_ID: ${{ secrets.AGENTPASS_NOTARY_KEY_ID }}
           AGENTPASS_NOTARY_ISSUER_ID: ${{ secrets.AGENTPASS_NOTARY_ISSUER_ID }}
           AGENTPASS_NOTARY_PRIVATE_KEY_PATH: ${{ runner.temp }}/agentpass-signing/notary-auth-key.p8
@@ -125,11 +177,22 @@ jobs:
           scripts/release/notarize-installer.sh "$package" "$RUNNER_TEMP/candidate/notarytool-result.json" "$RUNNER_TEMP/candidate/stapler-result.txt"
           submission_id="$(node -e 'process.stdout.write(JSON.parse(require("node:fs").readFileSync(process.argv[1], "utf8")).id)' "$RUNNER_TEMP/candidate/notarytool-result.json")"
           node scripts/release/generate-sbom.mjs "$RUNNER_TEMP/candidate/AgentPass-${AGENTPASS_RELEASE_TAG}.spdx.json"
+          node scripts/release/generate-release-attestation.mjs \
+            --app "$RUNNER_TEMP/candidate/AgentPass.app" \
+            --team-id "$AGENTPASS_TEAM_ID" \
+            --dependency-lock "$GITHUB_WORKSPACE/package-lock.json" \
+            --database-migration-manifest "$RUNNER_TEMP/candidate/AgentPass-${AGENTPASS_RELEASE_TAG}.database-migration-manifest.json" \
+            --cloud-image-digest "$AGENTPASS_CLOUD_IMAGE_DIGEST" \
+            --signer-key-versions "$RUNNER_TEMP/agentpass-attestation-inputs/signer-key-versions.json" \
+            --output "$RUNNER_TEMP/candidate/release-attestation.json"
           install -m 0644 "$RUNNER_TEMP/agentpass-signing/release-manifest.public.pem" "$RUNNER_TEMP/candidate/release-manifest.public.pem"
           node scripts/release/generate-manifest.mjs "$RUNNER_TEMP/candidate/AgentPass-${AGENTPASS_RELEASE_TAG}.release-manifest.json" "$RUNNER_TEMP/candidate/SHA256SUMS" \
             --notarization-status=accepted_stapled --notary-submission="$submission_id" \
             --notarytool-evidence="$RUNNER_TEMP/candidate/notarytool-result.json" --stapler-evidence="$RUNNER_TEMP/candidate/stapler-result.txt" \
-            "$package" "$RUNNER_TEMP/candidate/AgentPass-${AGENTPASS_RELEASE_TAG}.spdx.json" "$RUNNER_TEMP/candidate/release-manifest.public.pem"
+            "$package" "$RUNNER_TEMP/candidate/AgentPass-${AGENTPASS_RELEASE_TAG}.spdx.json" \
+            "$RUNNER_TEMP/candidate/AgentPass-${AGENTPASS_RELEASE_TAG}.database-migration-manifest.json" \
+            "$RUNNER_TEMP/candidate/release-attestation.json" \
+            "$RUNNER_TEMP/candidate/release-manifest.public.pem"
           node scripts/release/sign-manifest.mjs "$RUNNER_TEMP/candidate/AgentPass-${AGENTPASS_RELEASE_TAG}.release-manifest.json" "$RUNNER_TEMP/agentpass-signing/release-manifest.private.pem" "$RUNNER_TEMP/candidate/AgentPass-${AGENTPASS_RELEASE_TAG}.release-manifest.sig"
           node scripts/release/verify-release.mjs "$RUNNER_TEMP/candidate/AgentPass-${AGENTPASS_RELEASE_TAG}.release-manifest.json" "$RUNNER_TEMP/candidate/AgentPass-${AGENTPASS_RELEASE_TAG}.release-manifest.sig" "$RUNNER_TEMP/candidate/release-manifest.public.pem" "$AGENTPASS_RELEASE_MANIFEST_KEY_FINGERPRINT"
           scripts/release/verify-macos-release.sh "$RUNNER_TEMP/candidate/AgentPass-${AGENTPASS_RELEASE_TAG}.release-manifest.json" "$RUNNER_TEMP/candidate/AgentPass-${AGENTPASS_RELEASE_TAG}.release-manifest.sig" "$RUNNER_TEMP/candidate/release-manifest.public.pem" "$AGENTPASS_RELEASE_MANIFEST_KEY_FINGERPRINT" "$AGENTPASS_TEAM_ID"
@@ -139,6 +202,8 @@ jobs:
           path: |
             ${{ runner.temp }}/candidate/*.pkg
             ${{ runner.temp }}/candidate/*.spdx.json
+            ${{ runner.temp }}/candidate/*.database-migration-manifest.json
+            ${{ runner.temp }}/candidate/release-attestation.json
             ${{ runner.temp }}/candidate/*.release-manifest.json
             ${{ runner.temp }}/candidate/*.release-manifest.sig
             ${{ runner.temp }}/candidate/release-manifest.public.pem
@@ -151,50 +216,4 @@ jobs:
         run: |
           security delete-keychain "$RUNNER_TEMP/agentpass-signing.keychain-db" 2>/dev/null || true
           rm -rf "$RUNNER_TEMP/agentpass-signing"
-
-  publish:
-    needs: [verify-source, signed-candidate]
-    runs-on: macos-15
-    environment: production-release
-    permissions:
-      contents: write
-    env:
-      GH_TOKEN: ${{ github.token }}
-      RELEASE_TAG: ${{ needs.verify-source.outputs.tag }}
-      RELEASE_COMMIT: ${{ needs.verify-source.outputs.commit }}
-      RELEASE_KEY_FINGERPRINT: ${{ vars.AGENTPASS_RELEASE_MANIFEST_KEY_FINGERPRINT }}
-      EXPECTED_TEAM_ID: ${{ vars.AGENTPASS_RELEASE_TEAM_ID }}
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          fetch-depth: 0
-          persist-credentials: false
-          ref: ${{ needs.verify-source.outputs.commit }}
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
-        with:
-          name: notarized-release-candidate
-          path: ${{ runner.temp }}/publish
-      - name: Reverify manifest, package signature, ticket, and Gatekeeper before publish
-        run: |
-          set -euo pipefail
-          [[ -n "$RELEASE_KEY_FINGERPRINT" && -n "$EXPECTED_TEAM_ID" ]] || { echo "Pinned release verification variables are missing" >&2; exit 1; }
-          manifest="$RUNNER_TEMP/publish/AgentPass-${RELEASE_TAG}.release-manifest.json"
-          signature="$RUNNER_TEMP/publish/AgentPass-${RELEASE_TAG}.release-manifest.sig"
-          public_key="$RUNNER_TEMP/publish/release-manifest.public.pem"
-          node scripts/release/verify-release.mjs "$manifest" "$signature" "$public_key" "$RELEASE_KEY_FINGERPRINT"
-          scripts/release/verify-macos-release.sh "$manifest" "$signature" "$public_key" "$RELEASE_KEY_FINGERPRINT" "$EXPECTED_TEAM_ID"
-      - name: Publish only the reverified, manifest-bound release set
-        run: |
-          set -euo pipefail
-          gh release view "$RELEASE_TAG" >/dev/null 2>&1 && { echo "Release already exists" >&2; exit 1; }
-          gh release create "$RELEASE_TAG" --verify-tag --target "$RELEASE_COMMIT" --draft --title "AgentPass $RELEASE_TAG" --notes "Production installer; see the signed release manifest for notarization and source evidence."
-          gh release upload "$RELEASE_TAG" \
-            "$RUNNER_TEMP/publish/AgentPass-${RELEASE_TAG}-macos-universal.pkg" \
-            "$RUNNER_TEMP/publish/AgentPass-${RELEASE_TAG}.spdx.json" \
-            "$RUNNER_TEMP/publish/AgentPass-${RELEASE_TAG}.release-manifest.json" \
-            "$RUNNER_TEMP/publish/AgentPass-${RELEASE_TAG}.release-manifest.sig" \
-            "$RUNNER_TEMP/publish/release-manifest.public.pem" \
-            "$RUNNER_TEMP/publish/SHA256SUMS" \
-            "$RUNNER_TEMP/publish/notarytool-result.json" \
-            "$RUNNER_TEMP/publish/stapler-result.txt"
-          gh release edit "$RELEASE_TAG" --draft=false
+          rm -rf "$RUNNER_TEMP/agentpass-attestation-inputs"

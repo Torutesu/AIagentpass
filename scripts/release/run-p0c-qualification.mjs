@@ -84,9 +84,10 @@ const assertDirectory = (input, label, privateDirectory = false) => {
   if (!stat.isDirectory() || (privateDirectory && (stat.mode & 0o077) !== 0)) throw new Error(`${label} must be a safe directory`);
   return path;
 };
-const assertRegularExecutable = (path, label) => {
+const assertRegularExecutable = (path, label, requireRootOwner = false) => {
   let stat; try { stat = fs.lstatSync(path); } catch { throw new Error(`${label} is unavailable`); }
-  if (!stat.isFile() || stat.nlink !== 1 || (stat.mode & 0o111) === 0 || (stat.mode & 0o022) !== 0) throw new Error(`${label} must be a non-writable regular executable`);
+  if (!stat.isFile() || stat.nlink !== 1 || (stat.mode & 0o111) === 0 || (stat.mode & 0o022) !== 0 || (requireRootOwner && stat.uid !== 0)) throw new Error(`${label} must be a protected regular executable`);
+  return statIdentity(stat);
 };
 const ensureEmptyEvidenceDirectory = (input) => {
   const path = assertDirectory(input, 'evidence directory', true);
@@ -151,10 +152,12 @@ const validateTemplate = (snapshot) => {
   if (template.secure_enclave !== true || !/^SHA256:[A-Za-z0-9_-]{43}$/.test(template.operator_key_fingerprint)) throw new Error('production report template is not a production qualification template');
   return template;
 };
-const validateGateDirectory = (input) => {
-  const directory = assertDirectory(input, 'gate-driver directory'); const entries = fs.readdirSync(directory, { withFileTypes: true }).map((entry) => entry.name).filter((entry) => entry !== '.DS_Store');
+const validateGateDirectory = (input, production) => {
+  const directory = assertDirectory(input, 'gate-driver directory'); const directoryStat = fs.lstatSync(directory);
+  if (production && (directoryStat.uid !== 0 || (directoryStat.mode & 0o022) !== 0)) throw new Error('production gate-driver directory must be root-owned and protected');
+  const entries = fs.readdirSync(directory, { withFileTypes: true }).map((entry) => entry.name);
   const expected = [...REQUIRED_GATES].sort(); if (entries.sort().join('\n') !== expected.join('\n')) throw new Error('gate-driver directory must contain exactly the fixed required gate basenames');
-  for (const gate of REQUIRED_GATES) assertRegularExecutable(join(directory, gate), `gate driver ${gate}`); return directory;
+  const identities = new Map(); for (const gate of REQUIRED_GATES) identities.set(gate, assertRegularExecutable(join(directory, gate), `gate driver ${gate}`, production)); return { path: directory, identities };
 };
 const protocolFor = (bytes, gate) => {
   let value; try { value = JSON.parse(bytes.toString('utf8')); } catch { throw new Error('gate driver protocol is not valid JSON'); }
@@ -171,7 +174,7 @@ export const runQualification = async ({ templatePath, outputPath, artifactPath,
   const template = validateTemplate(snapshotFile(assertAbsolutePath(templatePath, 'template path'), MAX_TEMPLATE_BYTES, 'production report template'));
   const output = assertAbsolutePath(outputPath, 'output path'); const artifact = snapshotFile(assertAbsolutePath(artifactPath, 'artifact path'), MAX_ARTIFACT_BYTES, 'production artifact');
   if (basename(artifact.path) !== template.artifact_name || artifact.sha256 !== template.artifact_sha256) throw new Error('exact production artifact does not match report template');
-  const drivers = validateGateDirectory(gateDriverDirectory); const evidence = ensureEmptyEvidenceDirectory(evidenceDirectory); if (resolve(output) === resolve(evidence)) throw new Error('output path must not be the evidence directory'); if (fs.existsSync(output)) throw new Error('output path already exists');
+  const drivers = validateGateDirectory(gateDriverDirectory, production); const evidence = ensureEmptyEvidenceDirectory(evidenceDirectory); if (resolve(output) === resolve(evidence)) throw new Error('output path must not be the evidence directory'); if (fs.existsSync(output)) throw new Error('output path already exists');
   if (!/^[A-Za-z0-9][A-Za-z0-9@._-]{2,127}$/.test(operator ?? '')) throw new Error('operator is invalid');
   const startedAt = utc(now()); const metadata = platformMetadata ?? (metadataProvider ? await metadataProvider({ runCommand, timeoutMs, maxOutputBytes }) : await collectPhysicalMetadata({ runCommand, timeoutMs, maxOutputBytes }));
   if (!metadata || !['arm64', 'x86_64'].includes(metadata.architecture) || !['apple_silicon', 'intel_t2', 'intel_without_t2'].includes(metadata.hardwareClass) || typeof metadata.modelIdentifier !== 'string' || typeof metadata.macosVersion !== 'string' || typeof metadata.macosBuild !== 'string' || typeof metadata.secureEnclave !== 'boolean') throw new Error('injected physical metadata is invalid');
@@ -180,7 +183,10 @@ export const runQualification = async ({ templatePath, outputPath, artifactPath,
   for (let index = 0; index < REQUIRED_GATES.length; index += 1) {
     const gate = REQUIRED_GATES[index]; let result; let protocolTests = [];
     try {
-      result = normalizeCommandResult(await runCommand(join(drivers, gate), [], { cwd: '/', env: SANITIZED_ENV, shell: false, stdio: ['ignore', 'pipe', 'pipe'], timeoutMs, maxOutputBytes }));
+      const driverPath = join(drivers.path, gate);
+      if (assertRegularExecutable(driverPath, `gate driver ${gate}`, production) !== drivers.identities.get(gate)) throw new Error('gate driver changed before execution');
+      result = normalizeCommandResult(await runCommand(driverPath, [], { cwd: '/', env: SANITIZED_ENV, shell: false, stdio: ['ignore', 'pipe', 'pipe'], timeoutMs, maxOutputBytes }));
+      if (assertRegularExecutable(driverPath, `gate driver ${gate}`, production) !== drivers.identities.get(gate)) throw new Error('gate driver changed during execution');
       if (result.exitCode === 0 && !result.signal && !result.timedOut && !result.outputLimit && !result.spawnError) { try { protocolTests = protocolFor(result.stdout, gate); } catch { protocolTests = []; } }
     } catch { const empty = Buffer.alloc(0); result = { exitCode: null, signal: null, timedOut: false, outputLimit: false, spawnError: true, durationMs: 0, stdout: empty, stderr: empty, stdoutBytes: 0, stderrBytes: 0, stdoutSha256: sha256(empty), stderrSha256: sha256(empty) }; }
     const passed = result.exitCode === 0 && !result.signal && !result.timedOut && !result.outputLimit && !result.spawnError && protocolTests.length > 0;

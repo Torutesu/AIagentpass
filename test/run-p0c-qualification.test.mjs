@@ -64,6 +64,23 @@ test('a missing, writable, symlinked, or extra driver fails closed', async () =>
   }
 });
 
+test('a gate driver changed during execution is recorded as failed', async () => {
+  const fixture = makeFixture();
+  const changedGate = REQUIRED_GATES[0];
+  const result = await runQualification({
+    ...fixture,
+    platform: 'linux',
+    platformMetadata: fixtureMetadata,
+    runCommand: async (command) => {
+      const gate = command.split('/').pop();
+      if (gate === changedGate) chmodSync(command, 0o777);
+      return passedCommand(gate);
+    }
+  });
+  assert.equal(result.report.qualified, false);
+  assert.equal(result.report.gates.find((item) => item.name === changedGate).status, 'failed');
+});
+
 test('failed and timed out gate output can never qualify and raw output is not persisted', async () => {
   const fixture = makeFixture();
   const result = await runQualification({ ...fixture, platform: 'linux', platformMetadata: fixtureMetadata, runCommand: async (command) => { const gate = command.split('/').pop(); if (gate === REQUIRED_GATES[0]) return { exitCode: 1, signal: null, timedOut: false, outputLimit: false, spawnError: false, durationMs: 2, stdout: Buffer.from('raw secret output'), stderr: Buffer.from('raw error') }; if (gate === REQUIRED_GATES[1]) return { exitCode: null, signal: 'SIGKILL', timedOut: true, outputLimit: false, spawnError: false, durationMs: 3, stdout: Buffer.alloc(0), stderr: Buffer.alloc(0) }; return passedCommand(gate); } });
