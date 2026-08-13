@@ -11,7 +11,7 @@ public enum NativeAgentRuntimeConfigurationError: String, Error, Equatable, Send
 }
 
 public enum NativeAgentWorktreeObservationPolicyVersion: Int, CaseIterable, Sendable {
-  case v1 = 1
+  case v2 = 2
 }
 
 /// The complete immutable authority needed to construct the production Agent

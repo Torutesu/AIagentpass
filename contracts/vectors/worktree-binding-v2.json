@@ -1,0 +1,46 @@
+{
+  "binding": {
+    "version": 2,
+    "layout": "embedded",
+    "repository_path": "/Users/build/project",
+    "git_directory_path": "/Users/build/project/.git",
+    "common_directory_path": "/Users/build/project/.git",
+    "repository_identity": {
+      "device": "7",
+      "inode": "11",
+      "generation": 1,
+      "owner_user_id": 501,
+      "permissions": 493
+    },
+    "git_directory_identity": {
+      "device": "7",
+      "inode": "12",
+      "generation": 1,
+      "owner_user_id": 501,
+      "permissions": 493
+    },
+    "common_directory_identity": {
+      "device": "7",
+      "inode": "12",
+      "generation": 1,
+      "owner_user_id": 501,
+      "permissions": 493
+    },
+    "object_format": "sha1",
+    "head": {
+      "kind": "branch",
+      "state": "resolved",
+      "value": "feature/agent-pass",
+      "object_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "tree_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    },
+    "remotes": [
+      {
+        "name": "origin",
+        "url": "git@github.com:org/project.git"
+      }
+    ]
+  },
+  "domain": "AgentPass-Worktree-Binding-v2\\0",
+  "sha256": "85402470107f2c6ff4ac615a4f16f11c00aae865b85debd702d252626f8ff15b"
+}

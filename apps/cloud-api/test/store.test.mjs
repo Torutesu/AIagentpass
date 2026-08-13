@@ -429,7 +429,8 @@ test("v2 enrollment is candidate-bound, digest-only, and stores append-only poss
     credentialDigest,
     challengeNonceDigest,
     deviceKey: { algorithm: "p256-sha256", spki_pem: publicKey },
-    possessionReceipt
+    possessionReceipt,
+    completedAt: "2026-08-13T10:02:00.000Z"
   });
   assert.equal(completed.status, "active");
   const stored = await store.getDevicePossessionReceipt({ organizationId: ids.org, deviceId: enrollment.device_id });

@@ -6,6 +6,7 @@ public enum NativeAgentWorktreeBindingError: String, Error, Equatable, Sendable 
   case invalidIdentity = "invalid_identity"
   case invalidLayout = "invalid_layout"
   case invalidHead = "invalid_head"
+  case invalidObjectAuthority = "invalid_object_authority"
   case invalidRemote = "invalid_remote"
   case invalidCanonicalEncoding = "invalid_canonical_encoding"
 }
@@ -13,6 +14,18 @@ public enum NativeAgentWorktreeBindingError: String, Error, Equatable, Sendable 
 public enum NativeAgentGitDirectoryLayout: String, CaseIterable, Sendable {
   case embedded
   case linked
+}
+
+public enum NativeAgentGitObjectFormat: String, CaseIterable, Sendable {
+  case sha1
+  case sha256
+
+  public var objectIDHexLength: Int {
+    switch self {
+    case .sha1: return 40
+    case .sha256: return 64
+    }
+  }
 }
 
 /// Stable directory identity captured from an already-open descriptor. Paths
@@ -114,8 +127,8 @@ public struct NativeAgentGitRemote: Equatable, Sendable {
 /// stay process-local; only `digest` is permitted in Lease, XPC, or audit
 /// projections. This codec does not perform filesystem observation itself.
 public struct NativeAgentWorktreeBinding: Equatable, Sendable {
-  public static let version = 1
-  private static let domain = Data("AgentPass-Worktree-Binding-v1\0".utf8)
+  public static let version = 2
+  private static let domain = Data("AgentPass-Worktree-Binding-v2\0".utf8)
   private static let maximumPathBytes = 4_096
   private static let maximumRemotes = 32
 
@@ -126,7 +139,10 @@ public struct NativeAgentWorktreeBinding: Equatable, Sendable {
   public let repositoryIdentity: NativeAgentWorktreeDirectoryIdentity
   public let gitDirectoryIdentity: NativeAgentWorktreeDirectoryIdentity
   public let commonDirectoryIdentity: NativeAgentWorktreeDirectoryIdentity
+  public let objectFormat: NativeAgentGitObjectFormat
   public let head: NativeAgentGitHead
+  public let headObjectID: String?
+  public let headTreeID: String?
   public let remotes: [NativeAgentGitRemote]
   public let digest: Data
 
@@ -138,7 +154,10 @@ public struct NativeAgentWorktreeBinding: Equatable, Sendable {
     repositoryIdentity: NativeAgentWorktreeDirectoryIdentity,
     gitDirectoryIdentity: NativeAgentWorktreeDirectoryIdentity,
     commonDirectoryIdentity: NativeAgentWorktreeDirectoryIdentity,
+    objectFormat: NativeAgentGitObjectFormat,
     head: NativeAgentGitHead,
+    headObjectID: String?,
+    headTreeID: String?,
     remotes: [NativeAgentGitRemote]
   ) throws {
     let repositoryPath = try Self.path(repositoryPath)
@@ -154,6 +173,8 @@ public struct NativeAgentWorktreeBinding: Equatable, Sendable {
       commonIdentity: commonDirectoryIdentity
     )
     try Self.validateHead(head)
+    try Self.validateObjectAuthority(
+      format: objectFormat, head: head, objectID: headObjectID, treeID: headTreeID)
     guard remotes.count <= Self.maximumRemotes,
       remotes.map(\.name) == remotes.map(\.name).sorted(),
       Set(remotes.map(\.name)).count == remotes.count
@@ -168,7 +189,10 @@ public struct NativeAgentWorktreeBinding: Equatable, Sendable {
     self.repositoryIdentity = repositoryIdentity
     self.gitDirectoryIdentity = gitDirectoryIdentity
     self.commonDirectoryIdentity = commonDirectoryIdentity
+    self.objectFormat = objectFormat
     self.head = head
+    self.headObjectID = headObjectID
+    self.headTreeID = headTreeID
     self.remotes = remotes
     let canonical = Self.canonicalObject(
       layout: layout,
@@ -178,7 +202,10 @@ public struct NativeAgentWorktreeBinding: Equatable, Sendable {
       repositoryIdentity: repositoryIdentity,
       gitDirectoryIdentity: gitDirectoryIdentity,
       commonDirectoryIdentity: commonDirectoryIdentity,
+      objectFormat: objectFormat,
       head: head,
+      headObjectID: headObjectID,
+      headTreeID: headTreeID,
       remotes: remotes
     )
     do {
@@ -198,10 +225,22 @@ public struct NativeAgentWorktreeBinding: Equatable, Sendable {
         repositoryIdentity: repositoryIdentity,
         gitDirectoryIdentity: gitDirectoryIdentity,
         commonDirectoryIdentity: commonDirectoryIdentity,
+        objectFormat: objectFormat,
         head: head,
+        headObjectID: headObjectID,
+        headTreeID: headTreeID,
         remotes: remotes
       )
     )
+  }
+
+  internal var authoritySnapshot: NativeAgentWorktreeAuthoritySnapshot {
+    NativeAgentWorktreeAuthoritySnapshot(
+      objectFormat: objectFormat,
+      head: head,
+      objectID: headObjectID,
+      treeID: headTreeID,
+      remotes: remotes)
   }
 
   private static func path(_ value: String) throws -> String {
@@ -271,6 +310,29 @@ public struct NativeAgentWorktreeBinding: Equatable, Sendable {
     }
   }
 
+  private static func validateObjectAuthority(
+    format: NativeAgentGitObjectFormat,
+    head: NativeAgentGitHead,
+    objectID: String?,
+    treeID: String?
+  ) throws {
+    switch head {
+    case .branch:
+      guard (objectID == nil) == (treeID == nil) else {
+        throw NativeAgentWorktreeBindingError.invalidObjectAuthority
+      }
+    case .detached(let detachedObjectID):
+      guard objectID == detachedObjectID, treeID != nil else {
+        throw NativeAgentWorktreeBindingError.invalidObjectAuthority
+      }
+    }
+    for value in [objectID, treeID].compactMap({ $0 }) {
+      guard value.utf8.count == format.objectIDHexLength,
+        value.range(of: "^[0-9a-f]+$", options: .regularExpression) != nil
+      else { throw NativeAgentWorktreeBindingError.invalidObjectAuthority }
+    }
+  }
+
   private static func canonicalObject(
     layout: NativeAgentGitDirectoryLayout,
     repositoryPath: String,
@@ -279,7 +341,10 @@ public struct NativeAgentWorktreeBinding: Equatable, Sendable {
     repositoryIdentity: NativeAgentWorktreeDirectoryIdentity,
     gitDirectoryIdentity: NativeAgentWorktreeDirectoryIdentity,
     commonDirectoryIdentity: NativeAgentWorktreeDirectoryIdentity,
+    objectFormat: NativeAgentGitObjectFormat,
     head: NativeAgentGitHead,
+    headObjectID: String?,
+    headTreeID: String?,
     remotes: [NativeAgentGitRemote]
   ) -> [String: Any] {
     [
@@ -291,7 +356,14 @@ public struct NativeAgentWorktreeBinding: Equatable, Sendable {
       "repository_identity": identityObject(repositoryIdentity),
       "git_directory_identity": identityObject(gitDirectoryIdentity),
       "common_directory_identity": identityObject(commonDirectoryIdentity),
-      "head": ["kind": head.kind, "value": head.value],
+      "object_format": objectFormat.rawValue,
+      "head": [
+        "kind": head.kind,
+        "state": headObjectID == nil ? "unborn" : "resolved",
+        "value": head.value,
+        "object_id": headObjectID.map { $0 as Any } ?? NSNull(),
+        "tree_id": headTreeID.map { $0 as Any } ?? NSNull(),
+      ],
       "remotes": remotes.map { ["name": $0.name, "url": $0.url] },
     ]
   }
@@ -308,4 +380,12 @@ public struct NativeAgentWorktreeBinding: Equatable, Sendable {
       "permissions": value.permissions,
     ]
   }
+}
+
+internal struct NativeAgentWorktreeAuthoritySnapshot: Equatable, Sendable {
+  let objectFormat: NativeAgentGitObjectFormat
+  let head: NativeAgentGitHead
+  let objectID: String?
+  let treeID: String?
+  let remotes: [NativeAgentGitRemote]
 }

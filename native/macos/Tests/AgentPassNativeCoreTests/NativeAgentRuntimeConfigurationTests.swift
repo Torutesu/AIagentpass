@@ -17,7 +17,7 @@ private func runtimeConfiguration(
   perAgentLimit: Int? = 8,
   perWorktreeLimit: Int? = 4,
   bootstrapLimit: Int? = 16,
-  observationPolicy: Int? = 1
+  observationPolicy: Int? = 2
 ) throws -> NativeAgentRuntimeConfiguration {
   try NativeAgentRuntimeConfiguration(
     deviceAPIOrigin: origin,
@@ -57,7 +57,7 @@ private func runtimeConfiguration(
   #expect(authority.perAgentSessionLimit == 8)
   #expect(authority.perWorktreeSessionLimit == 4)
   #expect(authority.bootstrapAttemptLimit == 16)
-  #expect(authority.worktreeObservationPolicy == .v1)
+  #expect(authority.worktreeObservationPolicy == .v2)
 }
 
 @Test func agentRuntimeConfigurationRejectsUnsafeOriginsAndIdentities() throws {
@@ -98,6 +98,6 @@ private func runtimeConfiguration(
     }
   }
   #expect(throws: NativeAgentRuntimeConfigurationError.unsupportedObservationPolicy) {
-    _ = try runtimeConfiguration(observationPolicy: 2)
+    _ = try runtimeConfiguration(observationPolicy: 1)
   }
 }

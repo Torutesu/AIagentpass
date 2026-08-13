@@ -35,7 +35,7 @@ test('Agent runtime authority configuration is complete, bounded, and device-enr
   assert.equal(example.agent_per_agent_session_limit, 8);
   assert.equal(example.agent_per_worktree_session_limit, 4);
   assert.equal(example.agent_bootstrap_attempt_limit, 16);
-  assert.equal(example.agent_worktree_observation_policy_version, 1);
+  assert.equal(example.agent_worktree_observation_policy_version, 2);
   assert.match(service, /agentRuntimeCount\s*!=\s*0/u);
   assert.match(service, /agentRuntimeCount\s*==\s*agentRuntimeValues\.count/u);
   assert.match(service, /v2Count\s*==\s*v2Values\.count/u);

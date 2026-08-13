@@ -61,6 +61,22 @@ private func runGit(_ arguments: [String], currentDirectory: URL?) throws {
   }
 }
 
+private func gitOutput(_ arguments: [String], currentDirectory: URL) throws -> String {
+  let process = Process()
+  let output = Pipe()
+  process.executableURL = URL(fileURLWithPath: "/usr/bin/git")
+  process.arguments = arguments
+  process.currentDirectoryURL = currentDirectory
+  process.standardOutput = output
+  process.standardError = FileHandle.nullDevice
+  try process.run()
+  process.waitUntilExit()
+  guard process.terminationStatus == 0,
+    let value = String(data: output.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8)
+  else { throw NativeDarwinGitWorktreeObservationError.malformedGitMetadata }
+  return value.trimmingCharacters(in: .whitespacesAndNewlines)
+}
+
 private func cwdSnapshot(_ path: String) throws -> NativeDarwinCurrentDirectorySnapshot {
   var info = stat()
   guard lstat(path, &info) == 0 else {
@@ -85,10 +101,57 @@ private func cwdSnapshot(_ path: String) throws -> NativeDarwinCurrentDirectoryS
   #expect(first == second)
   #expect(first.repositoryPath == repository.path)
   #expect(first.branch == "main")
+  #expect(first.binding.objectFormat == .sha1)
+  #expect(first.binding.headObjectID == nil)
+  #expect(first.binding.headTreeID == nil)
   #expect(
     first.binding.remotes == [
       try NativeAgentGitRemote(name: "origin", url: "git@github.com:org/project.git")
     ])
+}
+
+@Test func filesystemObserverBindsResolvedCommitAndTreeAndPackedReference() throws {
+  let repository = try temporaryGitRepository()
+  defer { try? FileManager.default.removeItem(at: repository) }
+  try runGit(
+    [
+      "-c", "user.name=AgentPass Test", "-c", "user.email=test@agentpass.local", "commit",
+      "--allow-empty", "-m", "initial",
+    ],
+    currentDirectory: repository)
+  let expectedCommit = try gitOutput(["rev-parse", "HEAD"], currentDirectory: repository)
+  let expectedTree = try gitOutput(["rev-parse", "HEAD^{tree}"], currentDirectory: repository)
+  let loose = try NativeGitFilesystemObserver().observe(
+    currentDirectory: repository.path, expectedUserID: UInt32(geteuid()))
+  #expect(loose.binding.headObjectID == expectedCommit)
+  #expect(loose.binding.headTreeID == expectedTree)
+
+  try runGit(["pack-refs", "--all"], currentDirectory: repository)
+  let packed = try NativeGitFilesystemObserver().observe(
+    currentDirectory: repository.path, expectedUserID: UInt32(geteuid()))
+  #expect(packed.binding.headObjectID == expectedCommit)
+  #expect(packed.binding.headTreeID == expectedTree)
+  #expect(packed.binding.digest == loose.binding.digest)
+}
+
+@Test func filesystemObserverSupportsSHA256RepositoryAuthority() throws {
+  let repository = try temporaryGitRepository()
+  defer { try? FileManager.default.removeItem(at: repository) }
+  try FileManager.default.removeItem(at: repository)
+  try runGit(
+    ["init", "--object-format=sha256", "--initial-branch=main", repository.path],
+    currentDirectory: nil)
+  try runGit(
+    [
+      "-c", "user.name=AgentPass Test", "-c", "user.email=test@agentpass.local", "commit",
+      "--allow-empty", "-m", "initial",
+    ],
+    currentDirectory: repository)
+  let observation = try NativeGitFilesystemObserver().observe(
+    currentDirectory: repository.path, expectedUserID: UInt32(geteuid()))
+  #expect(observation.binding.objectFormat == .sha256)
+  #expect(observation.binding.headObjectID?.count == 64)
+  #expect(observation.binding.headTreeID?.count == 64)
 }
 
 @Test func filesystemObserverSupportsRealLinkedWorktree() throws {
@@ -226,6 +289,59 @@ private func cwdSnapshot(_ path: String) throws -> NativeDarwinCurrentDirectoryS
   }
 }
 
+@Test func filesystemObserverRejectsAlternativeAndMutableGitAuthorityFeatures() throws {
+  let repository = try temporaryGitRepository()
+  defer { try? FileManager.default.removeItem(at: repository) }
+  try runGit(
+    [
+      "-c", "user.name=AgentPass Test", "-c", "user.email=test@agentpass.local", "commit",
+      "--allow-empty", "-m", "initial",
+    ], currentDirectory: repository)
+  let forbidden = [
+    ".git/objects/info/alternates",
+    ".git/objects/info/http-alternates",
+    ".git/info/grafts",
+    ".git/shallow",
+    ".git/config.worktree",
+  ]
+  for relative in forbidden {
+    let target = repository.appendingPathComponent(relative)
+    try "forbidden\n".write(to: target, atomically: true, encoding: .utf8)
+    #expect(throws: NativeDarwinGitWorktreeObservationError.unsupportedGitLayout) {
+      _ = try NativeGitFilesystemObserver().observe(
+        currentDirectory: repository.path, expectedUserID: UInt32(geteuid()))
+    }
+    try FileManager.default.removeItem(at: target)
+  }
+}
+
+@Test func filesystemObserverRejectsMalformedPackedRefsAndUnsupportedExtensions() throws {
+  let repository = try temporaryGitRepository()
+  defer { try? FileManager.default.removeItem(at: repository) }
+  try runGit(
+    [
+      "-c", "user.name=AgentPass Test", "-c", "user.email=test@agentpass.local", "commit",
+      "--allow-empty", "-m", "initial",
+    ], currentDirectory: repository)
+  let head = try gitOutput(["rev-parse", "HEAD"], currentDirectory: repository)
+  try FileManager.default.removeItem(at: repository.appendingPathComponent(".git/refs/heads/main"))
+  try "\(head) refs/heads/main\n\(head) refs/heads/main\n".write(
+    to: repository.appendingPathComponent(".git/packed-refs"), atomically: true, encoding: .utf8)
+  #expect(throws: NativeDarwinGitWorktreeObservationError.malformedGitMetadata) {
+    _ = try NativeGitFilesystemObserver().observe(
+      currentDirectory: repository.path, expectedUserID: UInt32(geteuid()))
+  }
+
+  try
+    "[core]\n\trepositoryformatversion = 1\n\tbare = false\n[extensions]\n\tworktreeConfig = true\n"
+    .write(
+      to: repository.appendingPathComponent(".git/config"), atomically: true, encoding: .utf8)
+  #expect(throws: NativeDarwinGitWorktreeObservationError.unsupportedGitLayout) {
+    _ = try NativeGitFilesystemObserver().observe(
+      currentDirectory: repository.path, expectedUserID: UInt32(geteuid()))
+  }
+}
+
 @Test func filesystemObserverBindsNearestRepositoryAndRejectsBareRepository() throws {
   let repository = try temporaryGitRepository()
   defer { try? FileManager.default.removeItem(at: repository) }
@@ -282,6 +398,22 @@ private func cwdSnapshot(_ path: String) throws -> NativeDarwinCurrentDirectoryS
       processes: [process], directories: [directory, directory]
     ))
   #expect(throws: NativeDarwinGitWorktreeObservationError.processUnavailable) {
+    _ = try observer.observe(pid: 42, expectedUserID: UInt32(geteuid()))
+  }
+}
+
+@Test func processObserverRejectsDriftAfterFilesystemRevalidation() throws {
+  let repository = try temporaryGitRepository()
+  defer { try? FileManager.default.removeItem(at: repository) }
+  let directory = try cwdSnapshot(repository.path)
+  let process = NativeDarwinWorktreeProcessSnapshot(
+    pid: 42, uid: UInt32(geteuid()), pidVersion: 7)
+  let observer = NativeDarwinGitWorktreeObserver(
+    processAdapter: WorktreeProcessAdapter(
+      processes: [process, process, .init(pid: 42, uid: UInt32(geteuid()), pidVersion: 8)],
+      directories: [directory, directory, directory]
+    ))
+  #expect(throws: NativeDarwinGitWorktreeObservationError.processChanged) {
     _ = try observer.observe(pid: 42, expectedUserID: UInt32(geteuid()))
   }
 }

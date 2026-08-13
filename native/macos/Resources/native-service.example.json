@@ -58,7 +58,7 @@
   "agent_per_agent_session_limit": 8,
   "agent_per_worktree_session_limit": 4,
   "agent_bootstrap_attempt_limit": 16,
-  "agent_worktree_observation_policy_version": 1,
+  "agent_worktree_observation_policy_version": 2,
   "session_approval_public_key": "ecdsa-sha2-nistp256 REPLACE_WITH_AGENTPASS_NATIVE_SESSION_APPROVAL_KEY",
   "session_approval_key_tag": "dev.agentpass.session-approval",
   "client_code_signing_requirement": "anchor apple generic and identifier \"dev.agentpass.native-client\" and certificate leaf[field.1.2.840.113635.100.6.1.13] exists and certificate leaf[subject.OU] = \"TEAMID\" and entitlement[\"keychain-access-groups\"] = \"TEAMID.dev.agentpass.approval-keys\"",

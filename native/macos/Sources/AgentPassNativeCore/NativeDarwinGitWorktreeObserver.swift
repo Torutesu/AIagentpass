@@ -82,6 +82,14 @@ public struct NativeDarwinGitWorktreeObserver: Sendable {
       throw NativeDarwinGitWorktreeObservationError.currentDirectoryChanged
     }
     try NativeGitFilesystemObserver().revalidate(observation.binding)
+    let cwdFinal = try processAdapter.currentDirectory(pid: pid)
+    let processFinal = try processAdapter.process(pid: pid)
+    guard processBefore == processFinal else {
+      throw NativeDarwinGitWorktreeObservationError.processChanged
+    }
+    guard cwdBefore == cwdFinal else {
+      throw NativeDarwinGitWorktreeObservationError.currentDirectoryChanged
+    }
     return observation
   }
 }
@@ -135,6 +143,8 @@ internal struct NativeGitFilesystemObserver: Sendable {
   private static let maximumGitFileBytes = 8 * 1_024
   private static let maximumHeadBytes = 2 * 1_024
   private static let maximumConfigBytes = 256 * 1_024
+  private static let maximumPackedRefsBytes = 8 * 1_024 * 1_024
+  private static let maximumReferenceDepth = 8
   private static let maximumAncestors = 64
 
   func observe(
@@ -161,8 +171,12 @@ internal struct NativeGitFilesystemObserver: Sendable {
         metadata.commonDirectory.close()
       }
     }
-    let head = try readHead(from: metadata.gitDirectory)
-    let remotes = try readRemotes(from: metadata.commonDirectory)
+    let configuration = try readConfiguration(from: metadata.commonDirectory)
+    try rejectUnsupportedAuthorityFeatures(metadata)
+    let headAuthority = try readHeadAuthority(
+      gitDirectory: metadata.gitDirectory,
+      commonDirectory: metadata.commonDirectory,
+      objectFormat: configuration.objectFormat)
     let binding: NativeAgentWorktreeBinding
     do {
       binding = try NativeAgentWorktreeBinding(
@@ -173,8 +187,11 @@ internal struct NativeGitFilesystemObserver: Sendable {
         repositoryIdentity: repository.directory.identity,
         gitDirectoryIdentity: metadata.gitDirectory.identity,
         commonDirectoryIdentity: metadata.commonDirectory.identity,
-        head: head,
-        remotes: remotes
+        objectFormat: configuration.objectFormat,
+        head: headAuthority.head,
+        headObjectID: headAuthority.objectID,
+        headTreeID: headAuthority.treeID,
+        remotes: configuration.remotes
       )
     } catch {
       throw NativeDarwinGitWorktreeObservationError.malformedGitMetadata
@@ -196,8 +213,7 @@ internal struct NativeGitFilesystemObserver: Sendable {
     guard repository.identity == binding.repositoryIdentity,
       git.identity == binding.gitDirectoryIdentity,
       common.identity == binding.commonDirectoryIdentity,
-      try readHead(from: git) == binding.head,
-      try readRemotes(from: common) == binding.remotes
+      try currentAuthority(gitDirectory: git, commonDirectory: common) == binding.authoritySnapshot
     else { throw NativeDarwinGitWorktreeObservationError.observationChanged }
   }
 
@@ -251,7 +267,20 @@ internal struct NativeGitFilesystemObserver: Sendable {
       }
       let commonPath = try Self.resolve(String(commonFile.dropLast()), relativeTo: gitPath)
       let common = try SecureDirectory.open(commonPath, expectedUserID: expectedUserID)
-      return GitLayout(layout: .linked, gitDirectory: git, commonDirectory: common)
+      do {
+        let backlink = try readFile(
+          directory: git, name: "gitdir", maximum: Self.maximumGitFileBytes)
+        guard backlink.hasSuffix("\n"), !backlink.dropLast().contains("\n"),
+          try Self.resolve(String(backlink.dropLast()), relativeTo: gitPath)
+            == repository.path + "/.git"
+        else {
+          throw NativeDarwinGitWorktreeObservationError.unsupportedGitLayout
+        }
+        return GitLayout(layout: .linked, gitDirectory: git, commonDirectory: common)
+      } catch {
+        common.close()
+        throw error
+      }
     } catch let error as NativeDarwinGitWorktreeObservationError {
       git.close()
       throw error
@@ -273,11 +302,269 @@ internal struct NativeGitFilesystemObserver: Sendable {
     return .detached(line)
   }
 
-  private func readRemotes(from directory: SecureDirectory) throws -> [NativeAgentGitRemote] {
+  private func currentAuthority(
+    gitDirectory: SecureDirectory,
+    commonDirectory: SecureDirectory
+  ) throws -> NativeAgentWorktreeAuthoritySnapshot {
+    let configuration = try readConfiguration(from: commonDirectory)
+    let layout = GitLayout(
+      layout: gitDirectory.path == commonDirectory.path ? .embedded : .linked,
+      gitDirectory: gitDirectory,
+      commonDirectory: commonDirectory)
+    try rejectUnsupportedAuthorityFeatures(layout)
+    let head = try readHeadAuthority(
+      gitDirectory: gitDirectory,
+      commonDirectory: commonDirectory,
+      objectFormat: configuration.objectFormat)
+    return NativeAgentWorktreeAuthoritySnapshot(
+      objectFormat: configuration.objectFormat,
+      head: head.head,
+      objectID: head.objectID,
+      treeID: head.treeID,
+      remotes: configuration.remotes)
+  }
+
+  private func readHeadAuthority(
+    gitDirectory: SecureDirectory,
+    commonDirectory: SecureDirectory,
+    objectFormat: NativeAgentGitObjectFormat
+  ) throws -> GitHeadAuthority {
+    let head = try readHead(from: gitDirectory)
+    let objectID: String?
+    switch head {
+    case .branch(let branch):
+      objectID = try resolveReference(
+        "refs/heads/" + branch,
+        commonDirectory: commonDirectory,
+        objectFormat: objectFormat,
+        visited: [],
+        depth: 0)
+    case .detached(let value):
+      guard Self.validObjectID(value, format: objectFormat) else {
+        throw NativeDarwinGitWorktreeObservationError.malformedGitMetadata
+      }
+      objectID = value
+    }
+    guard let objectID else {
+      return GitHeadAuthority(head: head, objectID: nil, treeID: nil)
+    }
+    let treeID = try readCommitTreeID(
+      objectID: objectID,
+      commonDirectory: commonDirectory,
+      objectFormat: objectFormat)
+    return GitHeadAuthority(head: head, objectID: objectID, treeID: treeID)
+  }
+
+  private func resolveReference(
+    _ name: String,
+    commonDirectory: SecureDirectory,
+    objectFormat: NativeAgentGitObjectFormat,
+    visited: Set<String>,
+    depth: Int
+  ) throws -> String? {
+    guard depth < Self.maximumReferenceDepth, Self.validReferenceName(name),
+      !visited.contains(name)
+    else { throw NativeDarwinGitWorktreeObservationError.malformedGitMetadata }
+    var visited = visited
+    visited.insert(name)
+    if let loose = try readOptionalFile(
+      path: commonDirectory.path + "/" + name,
+      expectedUserID: commonDirectory.identity.ownerUserID,
+      maximum: Self.maximumHeadBytes)
+    {
+      guard loose.hasSuffix("\n"), !loose.dropLast().contains("\n") else {
+        throw NativeDarwinGitWorktreeObservationError.malformedGitMetadata
+      }
+      let value = String(loose.dropLast())
+      if value.hasPrefix("ref: ") {
+        // Files-backend symbolic branch refs add another mutable authority
+        // chain. v2 permits a symbolic HEAD only and rejects symbolic branch
+        // refs rather than silently following them.
+        throw NativeDarwinGitWorktreeObservationError.unsupportedGitLayout
+      }
+      guard Self.validObjectID(value, format: objectFormat) else {
+        throw NativeDarwinGitWorktreeObservationError.malformedGitMetadata
+      }
+      return value
+    }
+    return try readPackedReference(
+      name,
+      commonDirectory: commonDirectory,
+      objectFormat: objectFormat)
+  }
+
+  private func readPackedReference(
+    _ target: String,
+    commonDirectory: SecureDirectory,
+    objectFormat: NativeAgentGitObjectFormat
+  ) throws -> String? {
+    guard
+      let packed = try readOptionalFile(
+        path: commonDirectory.path + "/packed-refs",
+        expectedUserID: commonDirectory.identity.ownerUserID,
+        maximum: Self.maximumPackedRefsBytes)
+    else { return nil }
+    guard packed.hasSuffix("\n") else {
+      throw NativeDarwinGitWorktreeObservationError.malformedGitMetadata
+    }
+    var result: String?
+    var previousRecord: String?
+    var seen = Set<String>()
+    var advertisedSorted = false
+    var previousSortedName: String?
+    var recordCount = 0
+    for rawLine in packed.split(separator: "\n", omittingEmptySubsequences: false).dropLast() {
+      let line = String(rawLine)
+      guard line.utf8.count <= 2_100 else {
+        throw NativeDarwinGitWorktreeObservationError.malformedGitMetadata
+      }
+      if line.isEmpty { continue }
+      if line.hasPrefix("#") {
+        if line.hasPrefix("# pack-refs with:") {
+          advertisedSorted = line.split(separator: " ").contains("sorted")
+        }
+        continue
+      }
+      if line.hasPrefix("^") {
+        guard previousRecord != nil,
+          previousRecord?.hasPrefix("refs/tags/") == true,
+          Self.validObjectID(String(line.dropFirst()), format: objectFormat)
+        else { throw NativeDarwinGitWorktreeObservationError.malformedGitMetadata }
+        continue
+      }
+      recordCount += 1
+      guard recordCount <= 100_000,
+        let separator = line.firstIndex(of: " "),
+        line[line.index(after: separator)...].firstIndex(of: " ") == nil
+      else { throw NativeDarwinGitWorktreeObservationError.malformedGitMetadata }
+      let objectID = String(line[..<separator])
+      let name = String(line[line.index(after: separator)...])
+      guard Self.validObjectID(objectID, format: objectFormat), Self.validReferenceName(name)
+      else { throw NativeDarwinGitWorktreeObservationError.malformedGitMetadata }
+      guard seen.insert(name).inserted else {
+        throw NativeDarwinGitWorktreeObservationError.malformedGitMetadata
+      }
+      guard !name.hasPrefix("refs/replace/") else {
+        throw NativeDarwinGitWorktreeObservationError.unsupportedGitLayout
+      }
+      if advertisedSorted, let previousSortedName, name <= previousSortedName {
+        throw NativeDarwinGitWorktreeObservationError.malformedGitMetadata
+      }
+      previousSortedName = name
+      previousRecord = name
+      if name == target {
+        guard result == nil else {
+          throw NativeDarwinGitWorktreeObservationError.malformedGitMetadata
+        }
+        result = objectID
+      }
+    }
+    return result
+  }
+
+  private func readCommitTreeID(
+    objectID: String,
+    commonDirectory: SecureDirectory,
+    objectFormat: NativeAgentGitObjectFormat
+  ) throws -> String {
+    do {
+      let store = try NativeGitObjectStore(
+        commonGitDirectoryPath: commonDirectory.path,
+        expectedUserID: commonDirectory.identity.ownerUserID)
+      let treeID = try store.readCommitTreeOID(oid: objectID)
+      guard Self.validObjectID(treeID, format: objectFormat) else {
+        throw NativeDarwinGitWorktreeObservationError.malformedGitMetadata
+      }
+      _ = try store.readCommitRootTree(oid: objectID)
+      return treeID
+    } catch let error as NativeDarwinGitWorktreeObservationError {
+      throw error
+    } catch {
+      throw NativeDarwinGitWorktreeObservationError.malformedGitMetadata
+    }
+  }
+
+  private func rejectUnsupportedAuthorityFeatures(_ metadata: GitLayout) throws {
+    let candidates = [
+      metadata.commonDirectory.path + "/objects/info/alternates",
+      metadata.commonDirectory.path + "/objects/info/http-alternates",
+      metadata.commonDirectory.path + "/info/grafts",
+      metadata.commonDirectory.path + "/refs/replace",
+      metadata.commonDirectory.path + "/shallow",
+      metadata.commonDirectory.path + "/config.worktree",
+      metadata.gitDirectory.path + "/shallow",
+      metadata.gitDirectory.path + "/config.worktree",
+    ]
+    for path in Set(candidates) where try Self.filesystemEntryExists(path) {
+      throw NativeDarwinGitWorktreeObservationError.unsupportedGitLayout
+    }
+  }
+
+  private func readOptionalFile(
+    path: String,
+    expectedUserID: UInt32,
+    maximum: Int
+  ) throws -> String? {
+    var pathInformation = stat()
+    if lstat(path, &pathInformation) != 0 {
+      if errno == ENOENT { return nil }
+      throw NativeDarwinGitWorktreeObservationError.unsafeFilesystemObject
+    }
+    guard let slash = path.lastIndex(of: "/"), slash != path.startIndex else {
+      throw NativeDarwinGitWorktreeObservationError.malformedGitMetadata
+    }
+    let parentPath = String(path[..<slash])
+    let name = String(path[path.index(after: slash)...])
+    let parent = try SecureDirectory.open(parentPath, expectedUserID: expectedUserID)
+    defer { parent.close() }
+    var descriptorInformation = stat()
+    if fstatat(parent.descriptor, name, &descriptorInformation, AT_SYMLINK_NOFOLLOW) != 0 {
+      throw NativeDarwinGitWorktreeObservationError.unsafeFilesystemObject
+    }
+    guard pathInformation.st_dev == descriptorInformation.st_dev,
+      pathInformation.st_ino == descriptorInformation.st_ino,
+      pathInformation.st_gen == descriptorInformation.st_gen
+    else { throw NativeDarwinGitWorktreeObservationError.observationChanged }
+    return try readFile(directory: parent, name: name, maximum: maximum)
+  }
+
+  private static func filesystemEntryExists(_ path: String) throws -> Bool {
+    var information = stat()
+    if lstat(path, &information) == 0 { return true }
+    if errno == ENOENT { return false }
+    throw NativeDarwinGitWorktreeObservationError.unsafeFilesystemObject
+  }
+
+  private static func validObjectID(
+    _ value: String,
+    format: NativeAgentGitObjectFormat
+  ) -> Bool {
+    value.utf8.count == format.objectIDHexLength
+      && value.range(of: "^[0-9a-f]+$", options: .regularExpression) != nil
+  }
+
+  private static func validReferenceName(_ value: String) -> Bool {
+    guard value.hasPrefix("refs/"), value.utf8.count <= 1_024,
+      !value.contains(".."), !value.contains("@{")
+    else { return false }
+    return value.split(separator: "/", omittingEmptySubsequences: false).allSatisfy {
+      !$0.isEmpty && !$0.hasPrefix(".") && !$0.hasSuffix(".") && !$0.hasSuffix(".lock")
+        && !$0.unicodeScalars.contains(where: {
+          $0.value < 0x20 || $0.value == 0x7f || " ~^:?*[\\".unicodeScalars.contains($0)
+        })
+    }
+  }
+
+  private func readConfiguration(from directory: SecureDirectory) throws -> GitConfiguration {
     let config = try readFile(
       directory: directory, name: "config", maximum: Self.maximumConfigBytes)
-    var currentRemote: String?
-    var URLs: [String: String] = [:]
+    var section = GitConfigSection.other
+    var urls: [String: String] = [:]
+    var repositoryFormatVersion: Int?
+    var objectFormat: NativeAgentGitObjectFormat?
+    var compatibilityObjectFormat: NativeAgentGitObjectFormat?
+    var referenceStorage: String?
+    var sawExtension = false
     let remotePattern = #"^\[[Rr][Ee][Mm][Oo][Tt][Ee] \"([A-Za-z0-9][A-Za-z0-9._-]{0,127})\"\]$"#
     for rawLine in config.split(separator: "\n", omittingEmptySubsequences: false) {
       let line = rawLine.trimmingCharacters(in: .whitespaces)
@@ -287,8 +574,16 @@ internal struct NativeGitFilesystemObserver: Sendable {
         guard lower != "[include]", !lower.hasPrefix("[includeif ") else {
           throw NativeDarwinGitWorktreeObservationError.unsupportedGitLayout
         }
-        currentRemote = Self.firstCapture(in: line, pattern: remotePattern)
-        if lower.hasPrefix("[remote "), currentRemote == nil {
+        if let remote = Self.firstCapture(in: line, pattern: remotePattern) {
+          section = .remote(remote)
+        } else if lower == "[core]" {
+          section = .core
+        } else if lower == "[extensions]" {
+          section = .extensions
+        } else {
+          section = .other
+        }
+        if lower.hasPrefix("[remote "), case .other = section {
           throw NativeDarwinGitWorktreeObservationError.malformedGitMetadata
         }
         continue
@@ -296,26 +591,76 @@ internal struct NativeGitFilesystemObserver: Sendable {
       guard !lower.hasPrefix("include"), !line.hasSuffix("\\") else {
         throw NativeDarwinGitWorktreeObservationError.unsupportedGitLayout
       }
-      guard let name = currentRemote else { continue }
       let pieces = line.split(separator: "=", maxSplits: 1).map {
         $0.trimmingCharacters(in: .whitespaces)
       }
       guard pieces.count == 2 else {
         throw NativeDarwinGitWorktreeObservationError.malformedGitMetadata
       }
-      if pieces[0].lowercased() == "url" {
-        guard URLs[name] == nil else {
+      let key = pieces[0].lowercased()
+      let value = pieces[1]
+      switch section {
+      case .remote(let name) where key == "url":
+        guard urls[name] == nil else {
           throw NativeDarwinGitWorktreeObservationError.malformedGitMetadata
         }
-        URLs[name] = pieces[1]
-      } else if pieces[0].lowercased() == "pushurl" {
+        urls[name] = value
+      case .remote where key == "pushurl":
         // Push-only authority must not be silently omitted from the digest.
         throw NativeDarwinGitWorktreeObservationError.unsupportedGitLayout
+      case .remote where key == "promisor" || key == "partialclonefilter":
+        throw NativeDarwinGitWorktreeObservationError.unsupportedGitLayout
+      case .core where key == "repositoryformatversion":
+        guard repositoryFormatVersion == nil, let parsed = Int(value), parsed == 0 || parsed == 1
+        else { throw NativeDarwinGitWorktreeObservationError.unsupportedGitLayout }
+        repositoryFormatVersion = parsed
+      case .core where key == "bare":
+        guard value.lowercased() == "false" else {
+          throw NativeDarwinGitWorktreeObservationError.unsupportedGitLayout
+        }
+      case .core where key == "worktree" || key == "alternaterefscommand":
+        throw NativeDarwinGitWorktreeObservationError.unsupportedGitLayout
+      case .extensions where key == "objectformat":
+        guard objectFormat == nil,
+          let parsed = NativeAgentGitObjectFormat(rawValue: value.lowercased())
+        else { throw NativeDarwinGitWorktreeObservationError.unsupportedGitLayout }
+        objectFormat = parsed
+        sawExtension = true
+      case .extensions where key == "compatobjectformat":
+        guard compatibilityObjectFormat == nil,
+          let parsed = NativeAgentGitObjectFormat(rawValue: value.lowercased())
+        else { throw NativeDarwinGitWorktreeObservationError.unsupportedGitLayout }
+        compatibilityObjectFormat = parsed
+        sawExtension = true
+      case .extensions where key == "refstorage":
+        guard referenceStorage == nil, value.lowercased() == "files" else {
+          throw NativeDarwinGitWorktreeObservationError.unsupportedGitLayout
+        }
+        referenceStorage = "files"
+        sawExtension = true
+      case .extensions:
+        // partialClone, worktreeConfig, reftable, compatObjectFormat, and
+        // every future extension require a separately reviewed observer.
+        throw NativeDarwinGitWorktreeObservationError.unsupportedGitLayout
+      default:
+        break
       }
     }
     do {
-      return try URLs.keys.sorted().map { try NativeAgentGitRemote(name: $0, url: URLs[$0]!) }
+      let format = objectFormat ?? .sha1
+      guard !sawExtension || repositoryFormatVersion == 1,
+        format == .sha1 || repositoryFormatVersion == 1,
+        compatibilityObjectFormat == nil
+          || (format == .sha256 && compatibilityObjectFormat == .sha1),
+        referenceStorage == nil || referenceStorage == "files"
+      else { throw NativeDarwinGitWorktreeObservationError.unsupportedGitLayout }
+      return GitConfiguration(
+        objectFormat: format,
+        remotes: try urls.keys.sorted().map {
+          try NativeAgentGitRemote(name: $0, url: urls[$0]!)
+        })
     } catch {
+      if let error = error as? NativeDarwinGitWorktreeObservationError { throw error }
       throw NativeDarwinGitWorktreeObservationError.malformedGitMetadata
     }
   }
@@ -412,6 +757,24 @@ private struct GitLayout {
   let layout: NativeAgentGitDirectoryLayout
   let gitDirectory: SecureDirectory
   let commonDirectory: SecureDirectory
+}
+
+private struct GitHeadAuthority {
+  let head: NativeAgentGitHead
+  let objectID: String?
+  let treeID: String?
+}
+
+private struct GitConfiguration {
+  let objectFormat: NativeAgentGitObjectFormat
+  let remotes: [NativeAgentGitRemote]
+}
+
+private enum GitConfigSection {
+  case core
+  case extensions
+  case remote(String)
+  case other
 }
 
 private final class SecureDirectory: @unchecked Sendable {
