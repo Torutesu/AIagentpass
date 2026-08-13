@@ -42,6 +42,7 @@ jobs:
           apps/cloud-api/test/postgres/signed-session-bootstrap-integration.test.mjs
           apps/cloud-api/test/postgres/audit-pagination-integration.test.mjs
           apps/cloud-api/test/postgres/agent-session-issuance-integration.test.mjs
+          apps/cloud-api/test/postgres/agent-session-human-http-qualification.integration.test.mjs
           apps/cloud-api/test/postgres/agent-session-http-qualification.integration.test.mjs
       - name: Run real PostgreSQL refresh race, ACK, and nonce-rotation tests
         env:
