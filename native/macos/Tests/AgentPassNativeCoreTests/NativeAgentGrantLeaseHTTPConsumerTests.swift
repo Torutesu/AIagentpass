@@ -103,6 +103,13 @@ private func consumer(_ transport: GrantHTTPTransport) throws -> NativeAgentGran
       == "/v1/organizations/66666666-6666-4666-8666-666666666666/devices/44444444-4444-4444-8444-444444444444/agent-session-grants/55555555-5555-4555-8555-555555555555/consume"
   )
   #expect(call.1["AgentPass-Signature"] != nil)
+  #expect(call.1["AgentPass-Device"] == "44444444-4444-4444-8444-444444444444")
+  #expect(call.1["AgentPass-Device-ID"] == nil)
+  #expect(
+    Set(call.1.keys) == [
+      "Accept", "Content-Type", "AgentPass-Device", "AgentPass-Timestamp",
+      "AgentPass-Nonce", "AgentPass-Content-SHA256", "AgentPass-Signature",
+    ])
   let body = try NativeStrictJSON.object(from: call.2, maxBytes: 16384, maxDepth: 32)
   #expect(Set(body.keys) == ["grant", "process_binding_sha256", "ancestry_binding_sha256"])
   #expect(body["process_binding_sha256"] as? String == String(repeating: "b", count: 64))

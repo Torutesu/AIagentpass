@@ -123,6 +123,11 @@ const makeLifecycle = ({ scenario = 'pre-cloud-kill', staleState = false, lockPr
       events.push('materialize-candidate');
       return { ok: true, action: 'materialized', files: 3, manifest_sha256: DIGEST_A, signature_sha256: DIGEST_B, public_key_sha256: 'c'.repeat(64) };
     },
+    materializeActivation() {
+      events.push('materialize-activation');
+      return { ok: true, action: 'materialized', document_sha256: DIGEST_A, proof_sha256: DIGEST_B, proof_bytes: 256 };
+    },
+    removeActivation() { events.push('remove-activation'); },
     removeCandidate() { events.push('remove-candidate'); },
     executeQualification(input) {
       events.push('execute-controller-driver');
@@ -213,10 +218,11 @@ test('provision completes before the first launchd reload and controller/driver 
   const value = makeLifecycle();
   const result = await run(value.lifecycle);
 
-  assert.deepEqual(value.events.slice(0, 7), [
+  assert.deepEqual(value.events.slice(0, 8), [
     'register-signals',
     'provision:pre-cloud-kill',
     'materialize-candidate',
+    'materialize-activation',
     'restart',
     'execute-controller-driver',
     'set-timer',
@@ -280,10 +286,11 @@ test('restore, disarm, reload, and listener proof are attempted on execution fai
     assert.doesNotMatch(String(error), new RegExp(SECRET));
     return true;
   });
-  assert.deepEqual(value.events.slice(-7), [
+  assert.deepEqual(value.events.slice(-8), [
     'terminate:failure',
     'clear-timer',
     'disarm-fails',
+    'remove-activation',
     'remove-candidate',
     'restore',
     'restart',
@@ -312,9 +319,10 @@ test('timeout is modeled through the injected timer and still cleans up the prot
   await assert.rejects(() => run(value.lifecycle, { timeoutMilliseconds: 1000 }), /protected qualification failed/);
   assert.equal(observedSignal.aborted, true);
   assert.ok(value.events.includes('terminate:timeout'));
-  assert.deepEqual(value.events.slice(-6), [
+  assert.deepEqual(value.events.slice(-7), [
     'clear-timer',
     'disarm',
+    'remove-activation',
     'remove-candidate',
     'restore',
     'restart',
@@ -354,12 +362,14 @@ test('stale state requires explicit recovery, which requires no-active proof', a
   assert.throws(() => recoverProtectedQualification({
     platform: 'darwin', uid: 0, fileSystem: value.lifecycle.fileSystem,
     proveListenerUnavailable: () => true, proveNoActiveRun: () => false,
+    recoverActivation: () => {},
     recoverCandidate: () => {},
     restore: () => { throw new Error(SECRET); }, restart: () => {}
   }), /recovery failed/);
   const recovery = recoverProtectedQualification({
     platform: 'darwin', uid: 0, fileSystem: value.lifecycle.fileSystem,
     proveListenerUnavailable: () => true, proveNoActiveRun: () => true,
+    recoverActivation: () => value.events.push('recover-activation'),
     recoverCandidate: () => value.events.push('recover-candidate'),
     restore: () => { value.events.push('restore'); value.state.present = false; },
     restart: () => value.events.push('restart')
@@ -367,7 +377,7 @@ test('stale state requires explicit recovery, which requires no-active proof', a
   assert.deepEqual(recovery, {
     ok: true, action: 'recovered', restored: true, stale_lock_removed: false, listener_unreachable: true
   });
-  assert.deepEqual(value.events, ['recover-candidate', 'restore', 'restart']);
+  assert.deepEqual(value.events, ['recover-activation', 'recover-candidate', 'restore', 'restart']);
 });
 
 test('exclusive lock rejects concurrent runs and releases after success', async () => {

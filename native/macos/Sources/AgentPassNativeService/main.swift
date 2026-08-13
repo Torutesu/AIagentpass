@@ -3155,6 +3155,34 @@ private func terminateCurrentDaemonForQualification() -> Never {
     fatalError("Qualification fault SIGKILL failed")
 }
 
+private func qualificationReceiptBinding(
+    values: NativeAgentQualificationConfiguration.Values
+) throws -> NativeAgentQualificationDurableReceiptBinding {
+    func digest(_ value: String) throws -> Data {
+        guard value.utf8.count == 64 else {
+            throw AgentPassNativeError.invalidConfiguration("Agent qualification digest is invalid")
+        }
+        var result = Data(capacity: 32)
+        var index = value.startIndex
+        for _ in 0..<32 {
+            let next = value.index(index, offsetBy: 2)
+            guard let byte = UInt8(value[index..<next], radix: 16) else {
+                throw AgentPassNativeError.invalidConfiguration("Agent qualification digest is invalid")
+            }
+            result.append(byte)
+            index = next
+        }
+        return result
+    }
+    return try NativeAgentQualificationDurableReceiptBinding(
+        candidateDigest: digest(values.candidateDigest),
+        sourceCommitDigest: digest(values.sourceCommitDigest),
+        codeIdentityDigest: digest(values.codeIdentityDigest),
+        runIDDigest: digest(values.runBindingDigest),
+        scenario: values.scenario,
+        phase: values.phase)
+}
+
 /// Service-only bridge between the root-authorized qualification controller and
 /// the process-local coordinator checkpoints.  The Agent protocol never sees
 /// this object or any of its selectors.
@@ -3169,10 +3197,13 @@ private final class NativeAgentSessionQualificationFaultConsumerAdapter:
     private let expiresAtEpochSeconds: UInt64
     private let wallTime: @Sendable () -> Date
     private let fatalAction: NativeAgentSessionQualificationFatalAction
+    private let durableReceiptStore: NativeAgentQualificationDurableReceiptStore
+    private let durableBinding: NativeAgentQualificationDurableReceiptBinding
 
     init(
         controller: NativeAgentQualificationFaultController,
         values: NativeAgentQualificationConfiguration.Values,
+        durableReceiptStore: NativeAgentQualificationDurableReceiptStore,
         wallTime: @escaping @Sendable () -> Date = Date.init,
         fatalAction: @escaping NativeAgentSessionQualificationFatalAction = terminateCurrentDaemonForQualification
     ) throws {
@@ -3188,6 +3219,8 @@ private final class NativeAgentSessionQualificationFaultConsumerAdapter:
         self.expiresAtEpochSeconds = values.expiresAtEpochSeconds
         self.wallTime = wallTime
         self.fatalAction = fatalAction
+        self.durableReceiptStore = durableReceiptStore
+        self.durableBinding = try qualificationReceiptBinding(values: values)
     }
 
     func reach(_ boundary: NativeAgentSessionQualificationBoundary) throws {
@@ -3203,6 +3236,12 @@ private final class NativeAgentSessionQualificationFaultConsumerAdapter:
             phase: phase
         )
         guard receipt.outcome == .injected else { return }
+        // This is deliberately the first side effect after consume. The
+        // daemon may be terminated immediately after this call returns, so
+        // the external controller must have durable fired evidence before any
+        // kill/throw/drop action is reached.
+        try durableReceiptStore.writeInjected(
+            binding: durableBinding, generation: receipt.generation)
         fatalAction()
     }
 
@@ -3235,10 +3274,13 @@ private final class NativeAgentAuditDurabilityQualificationFaultConsumerAdapter:
     private let enabled: Bool
     private let expiresAtEpochSeconds: UInt64
     private let wallTime: @Sendable () -> Date
+    private let durableReceiptStore: NativeAgentQualificationDurableReceiptStore
+    private let durableBinding: NativeAgentQualificationDurableReceiptBinding
 
     init(
         controller: NativeAgentQualificationFaultController,
         values: NativeAgentQualificationConfiguration.Values,
+        durableReceiptStore: NativeAgentQualificationDurableReceiptStore,
         wallTime: @escaping @Sendable () -> Date = Date.init
     ) throws {
         self.controller = controller
@@ -3246,6 +3288,8 @@ private final class NativeAgentAuditDurabilityQualificationFaultConsumerAdapter:
         enabled = values.scenario == .auditFsyncFailure && values.phase == .auditFsync
         expiresAtEpochSeconds = values.expiresAtEpochSeconds
         self.wallTime = wallTime
+        self.durableReceiptStore = durableReceiptStore
+        self.durableBinding = try qualificationReceiptBinding(values: values)
     }
 
     func reachBeforeAgentActivationFsync() throws {
@@ -3261,6 +3305,8 @@ private final class NativeAgentAuditDurabilityQualificationFaultConsumerAdapter:
             phase: .auditFsync
         )
         guard receipt.outcome == .injected else { return }
+        try durableReceiptStore.writeInjected(
+            binding: durableBinding, generation: receipt.generation)
         throw AgentPassNativeError.invalidConfiguration(
             "Agent qualification injected an audit durability failure")
     }
@@ -3274,10 +3320,13 @@ private final class NativeAgentTransportReplyQualificationFaultConsumerAdapter:
     private let enabled: Bool
     private let expiresAtEpochSeconds: UInt64
     private let wallTime: @Sendable () -> Date
+    private let durableReceiptStore: NativeAgentQualificationDurableReceiptStore
+    private let durableBinding: NativeAgentQualificationDurableReceiptBinding
 
     init(
         controller: NativeAgentQualificationFaultController,
         values: NativeAgentQualificationConfiguration.Values,
+        durableReceiptStore: NativeAgentQualificationDurableReceiptStore,
         wallTime: @escaping @Sendable () -> Date = Date.init
     ) throws {
         self.controller = controller
@@ -3285,6 +3334,8 @@ private final class NativeAgentTransportReplyQualificationFaultConsumerAdapter:
         enabled = values.scenario == .transportReplyLoss && values.phase == .transportReply
         expiresAtEpochSeconds = values.expiresAtEpochSeconds
         self.wallTime = wallTime
+        self.durableReceiptStore = durableReceiptStore
+        self.durableBinding = try qualificationReceiptBinding(values: values)
     }
 
     func shouldDropEncodedResult() -> Bool {
@@ -3299,7 +3350,16 @@ private final class NativeAgentTransportReplyQualificationFaultConsumerAdapter:
             scenario: .transportReplyLoss,
             phase: .transportReply
         )
-        return receipt.outcome == .injected
+        guard receipt.outcome == .injected else { return false }
+        do {
+            try durableReceiptStore.writeInjected(
+                binding: durableBinding, generation: receipt.generation)
+        } catch {
+            // A failed durable commit is not an injected transport fault. Do
+            // not drop the reply when the evidence boundary is unavailable.
+            return false
+        }
+        return true
     }
 }
 
@@ -3736,23 +3796,29 @@ private final class QualificationRuntime {
     let auditDurabilityFaultConsumer: any NativeAuditDurabilityQualificationFaultConsuming
     let transportReplyFaultConsumer: any NativeAgentSessionTransportReplyFaultConsuming
     let endpoint: NativeAgentQualificationEndpoint
+    let durableReceiptStore: NativeAgentQualificationDurableReceiptStore
     private let listener: NSXPCListener
     private let delegate: QualificationListenerDelegate
 
     init(values: NativeAgentQualificationConfiguration.Values) throws {
         let controller = NativeAgentQualificationFaultController(enabled: true)
         self.controller = controller
+        let durableReceiptStore = try NativeAgentQualificationDurableReceiptStore()
+        self.durableReceiptStore = durableReceiptStore
         faultConsumer = try NativeAgentSessionQualificationFaultConsumerAdapter(
             controller: controller,
-            values: values
+            values: values,
+            durableReceiptStore: durableReceiptStore
         )
         auditDurabilityFaultConsumer = try NativeAgentAuditDurabilityQualificationFaultConsumerAdapter(
             controller: controller,
-            values: values
+            values: values,
+            durableReceiptStore: durableReceiptStore
         )
         transportReplyFaultConsumer = try NativeAgentTransportReplyQualificationFaultConsumerAdapter(
             controller: controller,
-            values: values
+            values: values,
+            durableReceiptStore: durableReceiptStore
         )
         endpoint = try NativeAgentQualificationEndpoint(controller: controller, values: values)
         listener = NSXPCListener(machServiceName: values.machServiceName)

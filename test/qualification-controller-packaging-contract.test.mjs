@@ -184,7 +184,8 @@ test("N3-E2b-1a keeps an armed fault bound to one live XPC connection", () => {
   const arm = source.slice(armStart, statusStart);
   assert.match(arm, /writeOutput\(armedOutput\)[\s\S]*while\s+Date\(\)/u);
   assert.match(arm, /client\.status\(statusRequest\)/u);
-  assert.match(arm, /client\.disarm\(disarmRequest\)/u);
+  assert.match(arm, /finishAfterFired\(client:\s*client/u);
+  assert.match(source, /func\s+finishAfterFired\([\s\S]*client\.disarm\(disarmRequest\)/u);
   assert.doesNotMatch(arm, /QualificationClient\(\)/u);
 });
 

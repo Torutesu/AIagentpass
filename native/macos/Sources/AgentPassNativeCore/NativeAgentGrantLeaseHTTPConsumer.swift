@@ -184,7 +184,7 @@ public final class NativeAgentGrantLeaseHTTPConsumer: NativeAgentGrantLeaseConsu
     } catch { throw NativeAgentGrantLeaseHTTPError.authenticationFailed }
     let headers = [
       "Content-Type": "application/json", "Accept": "application/json",
-      "AgentPass-Device-ID": authentication.deviceID,
+      "AgentPass-Device": authentication.deviceID,
       "AgentPass-Timestamp": authentication.timestamp, "AgentPass-Nonce": authentication.nonce,
       "AgentPass-Content-SHA256": authentication.contentSHA256,
       "AgentPass-Signature": authentication.signature,

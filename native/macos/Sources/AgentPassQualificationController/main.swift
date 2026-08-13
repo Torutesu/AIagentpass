@@ -254,6 +254,92 @@ private func successValue(
     runIDSHA256: hex(context.runIDDigest), receiptSHA256: hex(receipt), error: nil)
 }
 
+private func durableReceipt(
+  context: NativeAgentQualificationControllerContext
+) throws -> NativeAgentQualificationDurableReceipt? {
+  let binding = try NativeAgentQualificationDurableReceiptBinding(
+    candidateDigest: context.candidateDigest,
+    sourceCommitDigest: context.sourceCommitDigest,
+    codeIdentityDigest: context.codeIdentityDigest,
+    runIDDigest: context.runIDDigest,
+    scenario: context.scenario,
+    phase: context.phase)
+  return try NativeAgentQualificationDurableReceiptStore().read(expected: binding)
+}
+
+private func removeDurableReceipt(
+  context: NativeAgentQualificationControllerContext,
+  expectedDigest: Data
+) throws {
+  guard let receipt = try durableReceipt(context: context),
+    receipt.armedReceiptDigest == expectedDigest else {
+    throw ControllerFailure.responseInvalid
+  }
+  let binding = receipt.binding
+  guard try NativeAgentQualificationDurableReceiptStore().remove(expected: binding) else {
+    throw ControllerFailure.responseInvalid
+  }
+}
+
+private func finishAfterFired(
+  client: QualificationClient,
+  context: NativeAgentQualificationControllerContext,
+  receiptDigest: Data
+) -> Never {
+  guard let durable = try? durableReceipt(context: context),
+    durable.armedReceiptDigest == receiptDigest else {
+    fail(NativeAgentQualificationControllerCommand.arm.rawValue, .responseInvalid)
+  }
+
+  let disarmRequest: AgentPassQualificationDisarmRequest
+  do { disarmRequest = try context.makeDisarmRequest(receiptDigest: receiptDigest) }
+  catch { fail(NativeAgentQualificationControllerCommand.arm.rawValue, .responseInvalid) }
+
+  do {
+    let reply = try client.disarm(disarmRequest)
+    if case .disarm(let response, let error) = reply,
+      error == nil, let response,
+      response.status == AgentPassQualificationXPCContract.Status.disarmed.rawValue,
+      validateCommon(context: context, candidate: response.candidateDigest, run: response.runIDDigest) {
+      try removeDurableReceipt(context: context, expectedDigest: receiptDigest)
+      output(
+        command: .arm, context: context, status: response.status,
+        receipt: response.receiptDigest)
+    }
+  } catch {
+    // A daemon restart loses the in-memory endpoint state. The durable
+    // receipt is the only accepted recovery authority in that case.
+  }
+
+  do {
+    try removeDurableReceipt(context: context, expectedDigest: receiptDigest)
+    output(
+      command: .arm, context: context,
+      status: AgentPassQualificationXPCContract.Status.disarmed.rawValue,
+      receipt: receiptDigest)
+  } catch {
+    fail(NativeAgentQualificationControllerCommand.arm.rawValue, .endpointUnavailable)
+  }
+}
+
+private func recoverDisarmAfterXPCLoss(
+  context: NativeAgentQualificationControllerContext
+) -> Never {
+  guard let durable = try? durableReceipt(context: context) else {
+    fail(NativeAgentQualificationControllerCommand.disarm.rawValue, .endpointUnavailable)
+  }
+  do {
+    try removeDurableReceipt(
+      context: context, expectedDigest: durable.armedReceiptDigest)
+    output(
+      command: .disarm, context: context,
+      status: AgentPassQualificationXPCContract.Status.disarmed.rawValue,
+      receipt: durable.armedReceiptDigest)
+  } catch {
+    fail(NativeAgentQualificationControllerCommand.disarm.rawValue, .endpointUnavailable)
+  }
+}
+
 let arguments = Array(CommandLine.arguments.dropFirst())
 let command: NativeAgentQualificationControllerCommand
 do {
@@ -326,32 +412,50 @@ do {
     let statusRequest = try context.makeStatusRequest()
     while Date().timeIntervalSince1970 < Double(context.expiresAtEpochSeconds) {
       usleep(100_000)
-      let statusReply = try client.status(statusRequest)
+      let statusReply: WireReply
+      do {
+        statusReply = try client.status(statusRequest)
+      } catch {
+        guard let durable = try? durableReceipt(context: context),
+          durable.armedReceiptDigest == response.receiptDigest,
+          let firedOutput = successValue(
+            command: command, context: context,
+            status: AgentPassQualificationXPCContract.Status.fired.rawValue,
+            receipt: durable.armedReceiptDigest)
+        else { fail(command.rawValue, .endpointUnavailable) }
+        writeOutput(firedOutput)
+        finishAfterFired(client: client, context: context, receiptDigest: durable.armedReceiptDigest)
+      }
       guard case .status(let current, let statusError) = statusReply,
         statusError == nil, let current,
         validateCommon(context: context, candidate: current.candidateDigest, run: current.runIDDigest),
         current.sourceCommitDigest == context.sourceCommitDigest,
         current.codeIdentityDigest == context.codeIdentityDigest,
         current.receiptDigest == response.receiptDigest
-      else { fail(command.rawValue, .endpointUnavailable) }
+      else {
+        if let durable = try? durableReceipt(context: context),
+          durable.armedReceiptDigest == response.receiptDigest {
+          let firedOutput = successValue(
+            command: command, context: context,
+            status: AgentPassQualificationXPCContract.Status.fired.rawValue,
+            receipt: durable.armedReceiptDigest)!
+          writeOutput(firedOutput)
+          finishAfterFired(client: client, context: context, receiptDigest: durable.armedReceiptDigest)
+        }
+        fail(command.rawValue, .endpointUnavailable)
+      }
       if current.status == AgentPassQualificationXPCContract.Status.armed.rawValue { continue }
+      guard let durable = try? durableReceipt(context: context) else {
+        fail(command.rawValue, .responseInvalid)
+      }
       guard current.status == AgentPassQualificationXPCContract.Status.fired.rawValue,
+        durable.armedReceiptDigest == current.receiptDigest,
         let firedOutput = successValue(
           command: command, context: context, status: current.status,
           receipt: current.receiptDigest)
       else { fail(command.rawValue, .responseInvalid) }
       writeOutput(firedOutput)
-      let disarmRequest = try context.makeDisarmRequest(receiptDigest: current.receiptDigest)
-      let disarmReply = try client.disarm(disarmRequest)
-      guard case .disarm(let disarmed, let disarmError) = disarmReply,
-        disarmError == nil, let disarmed,
-        disarmed.status == AgentPassQualificationXPCContract.Status.disarmed.rawValue,
-        validateCommon(
-          context: context, candidate: disarmed.candidateDigest, run: disarmed.runIDDigest)
-      else { fail(command.rawValue, .endpointRejected) }
-      output(
-        command: command, context: context, status: disarmed.status,
-        receipt: disarmed.receiptDigest)
+      finishAfterFired(client: client, context: context, receiptDigest: current.receiptDigest)
     }
     fail(command.rawValue, .endpointTimeout)
 
@@ -363,17 +467,39 @@ do {
       response.sourceCommitDigest == context.sourceCommitDigest,
       response.codeIdentityDigest == context.codeIdentityDigest
     else { fail(command.rawValue, .endpointRejected) }
+    if response.status == AgentPassQualificationXPCContract.Status.fired.rawValue {
+      guard let durable = try? durableReceipt(context: context),
+        durable.armedReceiptDigest == response.receiptDigest else {
+        fail(command.rawValue, .responseInvalid)
+      }
+    }
     output(command: command, context: context, status: response.status, receipt: response.receiptDigest)
 
   case .disarm:
     let statusRequest = try context.makeStatusRequest()
-    let statusReply = try client.status(statusRequest)
+    let statusReply: WireReply
+    do {
+      statusReply = try client.status(statusRequest)
+    } catch {
+      recoverDisarmAfterXPCLoss(context: context)
+    }
     guard case .status(let current, let statusError) = statusReply,
       statusError == nil, let current,
       validateCommon(context: context, candidate: current.candidateDigest, run: current.runIDDigest)
-    else { fail(command.rawValue, .endpointRejected) }
+    else {
+      if case .connectionFailure = statusReply {
+        recoverDisarmAfterXPCLoss(context: context)
+      }
+      fail(command.rawValue, .endpointRejected)
+    }
     if current.status == AgentPassQualificationXPCContract.Status.disarmed.rawValue {
       output(command: command, context: context, status: current.status, receipt: current.receiptDigest)
+    }
+    if current.status == AgentPassQualificationXPCContract.Status.fired.rawValue {
+      guard let durable = try? durableReceipt(context: context),
+        durable.armedReceiptDigest == current.receiptDigest else {
+        fail(command.rawValue, .responseInvalid)
+      }
     }
     let disarmRequest = try context.makeDisarmRequest(receiptDigest: current.receiptDigest)
     let reply = try client.disarm(disarmRequest)
@@ -381,6 +507,13 @@ do {
       response.status == AgentPassQualificationXPCContract.Status.disarmed.rawValue,
       validateCommon(context: context, candidate: response.candidateDigest, run: response.runIDDigest)
     else { fail(command.rawValue, .endpointRejected) }
+    if current.status == AgentPassQualificationXPCContract.Status.fired.rawValue {
+      do {
+        try removeDurableReceipt(context: context, expectedDigest: current.receiptDigest)
+      } catch {
+        fail(command.rawValue, .responseInvalid)
+      }
+    }
     output(command: command, context: context, status: response.status, receipt: response.receiptDigest)
   }
 } catch let failure as ControllerFailure {
