@@ -28,6 +28,7 @@ const ORG = "11111111-1111-4111-8111-111111111111";
 const TABLES = [
   "organizations", "members", "memberships", "human_sessions", "webauthn_credentials", "webauthn_challenges", "upstream_identities",
   "devices", "device_enrollments", "release_candidates", "device_enrollment_possession_receipts", "agents", "agent_session_grants", "agent_sessions", "policies", "revocations", "capabilities", "bundle_heads", "bundle_acknowledgements",
+  "cloud_agent_audit_heads", "cloud_agent_audit_events",
   "admin_audit_heads", "admin_audit_events", "outbox_events", "organization_invitations", "device_audit_events", "device_audit_heads",
   "device_audit_gaps", "idempotency_records", "device_request_nonces", "rate_limit_buckets", "human_identity_assertion_replays", "control_plane_authority_generations", "device_key_epochs", "device_control_plane_state", "control_bundle_statements", "device_refresh_outbox", "device_refresh_delivery_attempts", "device_bundle_acknowledgements", "device_manual_wake_events", "device_manual_wake_requests", "schema_migration_attempts"
 ];
@@ -72,7 +73,7 @@ async function emptyManifest(artifact_digest = undefined) {
   return sealAuthorityManifest({
     schema_version: AUTHORITY_MANIFEST_SCHEMA_VERSION,
     kind: MANIFEST_KIND,
-    migration_version: "21",
+    migration_version: "22",
     migrations: migrations.map(({ version, name, checksum }) => ({ version: String(version), name, checksum })),
     tenant_ids: [ORG],
     tenants: [{ organization_id: ORG }],

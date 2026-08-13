@@ -36,6 +36,8 @@ const AUTHORITY_TABLES = Object.freeze([
   ["agents", "t.organization_id = ANY($1::uuid[])", "tenant"],
   ["agent_session_grants", "t.organization_id = ANY($1::uuid[])", "security"],
   ["agent_sessions", "t.organization_id = ANY($1::uuid[])", "security"],
+  ["cloud_agent_audit_heads", "t.organization_id = ANY($1::uuid[])", "audit"],
+  ["cloud_agent_audit_events", "t.organization_id = ANY($1::uuid[])", "audit"],
   ["policies", "t.organization_id = ANY($1::uuid[])", "tenant"],
   ["revocations", "t.organization_id = ANY($1::uuid[])", "tenant"],
   ["capabilities", "t.organization_id = ANY($1::uuid[])", "tenant"],
@@ -67,7 +69,7 @@ const AUTHORITY_TABLE_NAMES = Object.freeze(AUTHORITY_TABLES.map(([name]) => nam
 const TENANT_TABLE_NAMES = new Set(AUTHORITY_TABLES.filter(([, , kind]) => ["tenant", "audit", "outbox", "security"].includes(kind)).map(([name]) => name));
 
 export const AUTHORITY_MANIFEST_SCHEMA_VERSION = 2;
-export const REQUIRED_MIGRATION_VERSION = "21";
+export const REQUIRED_MIGRATION_VERSION = "22";
 export const MANIFEST_KIND = "agentpass.authority-manifest";
 
 export const DIAGNOSTICS = Object.freeze({

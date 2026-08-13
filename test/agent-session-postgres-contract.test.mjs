@@ -34,22 +34,24 @@ const grantSql = readMigration("0018_agent_session_grants.sql");
 const sessionSql = readMigration("0019_agent_sessions.sql");
 const auditSql = readMigration("0020_agent_audit_binding.sql");
 const authorityGenerationSql = readMigration("0021_agent_session_authority_generation.sql");
+const cloudAuditSql = readMigration("0022_cloud_agent_audit.sql");
 
 test("M2 migrations are ordered, transactional, and non-destructive", () => {
   for (const [name, sql] of [
     ["0018_agent_session_grants.sql", grantSql],
     ["0019_agent_sessions.sql", sessionSql],
     ["0020_agent_audit_binding.sql", auditSql],
-    ["0021_agent_session_authority_generation.sql", authorityGenerationSql]
+    ["0021_agent_session_authority_generation.sql", authorityGenerationSql],
+    ["0022_cloud_agent_audit.sql", cloudAuditSql]
   ]) assertTransactional(sql, name);
 
   assert.ok(fs.existsSync(path.join(migrationDirectory, "0017_device_possession_verification.sql")));
   const orderedMigrations = fs.readdirSync(migrationDirectory)
-    .filter((name) => /^00(?:1[89]|2[01])_[a-z0-9_]+\.sql$/u.test(name))
+    .filter((name) => /^00(?:1[89]|2[0-2])_[a-z0-9_]+\.sql$/u.test(name))
     .sort();
   assert.deepEqual(
     orderedMigrations,
-    ["0018_agent_session_grants.sql", "0019_agent_sessions.sql", "0020_agent_audit_binding.sql", "0021_agent_session_authority_generation.sql"]
+    ["0018_agent_session_grants.sql", "0019_agent_sessions.sql", "0020_agent_audit_binding.sql", "0021_agent_session_authority_generation.sql", "0022_cloud_agent_audit.sql"]
   );
 });
 
@@ -163,4 +165,38 @@ test("audit binding stores only public ids/digests and preserves tenant identity
   assert.match(auditSql, /CREATE INDEX device_audit_events_agent_session_lookup/iu);
   assert.doesNotMatch(auditSql, /ALTER TABLE device_audit_events (?:ENABLE|FORCE) ROW LEVEL SECURITY/iu);
   assert.match(auditSql, /every added foreign key is tenant-qualified/iu);
+});
+
+test("Cloud audit is a separate tenant-isolated consume hash chain", () => {
+  const eventColumns = tableColumns(cloudAuditSql, "cloud_agent_audit_events");
+  const headColumns = tableColumns(cloudAuditSql, "cloud_agent_audit_heads");
+  for (const column of [
+    "organization_id", "event_id", "sequence", "event_type", "grant_id", "session_id",
+    "device_id", "agent_id", "grant_hash", "statement_hash", "signer_key_id",
+    "process_binding_sha256", "ancestry_binding_sha256", "worktree_binding_sha256",
+    "control_sequence", "authority_generation", "consumed_at", "previous_hash", "event_hash", "recorded_at"
+  ]) assert.ok(eventColumns.has(column), `cloud audit event column ${column} is required`);
+  for (const column of ["organization_id", "sequence", "last_event_id", "last_event_hash", "updated_at"])
+    assert.ok(headColumns.has(column), `cloud audit head column ${column} is required`);
+
+  const forbidden = /(?:^|_)(?:private(?:_key)?|secret|token|credential|password|raw_audit_token|argv|environment|payload)(?:_|$)/iu;
+  for (const column of [...eventColumns, ...headColumns]) assert.doesNotMatch(column, forbidden, `cloud audit column ${column} must not hold secret material`);
+
+  assert.doesNotMatch(cloudAuditSql, /device_audit_(?:events|heads)/iu);
+  assert.match(cloudAuditSql, /event_type text NOT NULL CHECK \(event_type = 'agent_session_grant\.consumed'\)/iu);
+  assert.match(cloudAuditSql, /UNIQUE \(organization_id, grant_id\)/iu);
+  assert.match(cloudAuditSql, /FOREIGN KEY \(organization_id, grant_id, device_id, agent_id, grant_hash\)\s+REFERENCES agent_session_grants\(organization_id, grant_id, device_id, agent_id, grant_hash\)/iu);
+  assert.match(cloudAuditSql, /FOREIGN KEY \(organization_id, session_id, grant_id, device_id\)\s+REFERENCES agent_sessions\(organization_id, session_id, grant_id, device_id\)/iu);
+  assert.match(cloudAuditSql, /sequence bigint NOT NULL CHECK \(sequence > 0\)/iu);
+  assert.match(cloudAuditSql, /last_event_hash text NOT NULL DEFAULT repeat\('0', 64\)[\s\S]*CHECK \(last_event_hash ~ '\^\[0-9a-f\]\{64\}\$'\)/iu);
+  assert.match(cloudAuditSql, /NEW\.sequence <> head\.sequence \+ 1[\s\S]*NEW\.previous_hash <> head\.last_event_hash/iu);
+  assert.match(cloudAuditSql, /CREATE TRIGGER cloud_agent_audit_events_record_head/iu);
+  assert.match(cloudAuditSql, /cloud_agent_audit_events_append_only/iu);
+  assert.match(cloudAuditSql, /cloud_agent_audit_heads_forward_only/iu);
+  for (const table of ["cloud_agent_audit_events", "cloud_agent_audit_heads"]) {
+    assert.match(cloudAuditSql, new RegExp(`ALTER TABLE ${table} ENABLE ROW LEVEL SECURITY`, "iu"));
+    assert.match(cloudAuditSql, new RegExp(`ALTER TABLE ${table} FORCE ROW LEVEL SECURITY`, "iu"));
+    assert.match(cloudAuditSql, new RegExp(`CREATE POLICY ${table}_tenant_select`, "iu"));
+    assert.match(cloudAuditSql, new RegExp(`organization_id = agentpass_current_organization_id\\(\\)`, "iu"));
+  }
 });

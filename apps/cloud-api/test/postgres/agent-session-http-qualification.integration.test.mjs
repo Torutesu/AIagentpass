@@ -26,6 +26,7 @@ import { createControlPlaneAuthorityRepository } from "../../src/postgres/contro
 import { createPostgresControlPlaneStore } from "../../src/postgres/control-plane-store.mjs";
 import { createSharedControlRepository } from "../../src/postgres/shared-control-repository.mjs";
 import { createAgentSessionAuthorityRepository } from "../../src/postgres/agent-session-authority-repository.mjs";
+import { createPostgresAgentSessionConsumptionRepository } from "../../src/postgres/agent-session-consumption-repository.mjs";
 import {
   BUNDLE_ACK_TYPE,
   bundleAcknowledgementSigningData,
@@ -53,6 +54,28 @@ test("M2-A2Q: real PostgreSQL Device HTTP consume survives restart, converges co
   timeout: 45_000
 }, async (t) => {
   const fixture = await createFixture(t);
+  const rollbackGrant = await issueGrant(fixture);
+  const rollbackAuthority = createAgentSessionAuthorityRepository({ client: fixture.pool, now: () => new Date().toISOString() });
+  const failingConsumption = createPostgresAgentSessionConsumptionRepository({
+    client: fixture.pool,
+    authorityRepository: rollbackAuthority,
+    auditRepository: {
+      async appendAgentSessionGrantConsumedInTransaction() { throw new Error("injected audit failure"); }
+    }
+  });
+  await assert.rejects(failingConsumption.consumeAgentSessionGrant({
+    organization_id: fixture.ids.organization,
+    device_id: fixture.ids.device,
+    grant_id: rollbackGrant.statement.grant_id,
+    grant: rollbackGrant,
+    process_binding_sha256: PROCESS_BINDING,
+    ancestry_binding_sha256: ANCESTRY_BINDING
+  }));
+  const rolledBack = await fixture.pool.query(`SELECT g.status,g.consumed_session_id,
+      (SELECT count(*)::int FROM agent_sessions s WHERE s.organization_id=g.organization_id AND s.grant_id=g.grant_id) AS sessions,
+      (SELECT count(*)::int FROM cloud_agent_audit_events e WHERE e.organization_id=g.organization_id AND e.grant_id=g.grant_id) AS events
+    FROM agent_session_grants g WHERE g.organization_id=$1 AND g.grant_id=$2`, [fixture.ids.organization, rollbackGrant.statement.grant_id]);
+  assert.deepEqual(rolledBack.rows, [{ status: "issued", consumed_session_id: null, sessions: 0, events: 0 }]);
   const firstGrant = await issueGrant(fixture);
   const firstServer = await fixture.startServer();
 
@@ -113,6 +136,11 @@ test("M2-A2Q: real PostgreSQL Device HTTP consume survives restart, converges co
     consumed_session_id: a.body.lease.session_id,
     session_count: 1
   }]);
+  const audit = await fixture.pool.query(`SELECT
+    (SELECT count(*)::int FROM cloud_agent_audit_events WHERE organization_id=$1) AS events,
+    (SELECT sequence::int FROM cloud_agent_audit_heads WHERE organization_id=$1) AS head_sequence,
+    (SELECT count(*)::int FROM device_audit_events WHERE organization_id=$1) AS device_events`, [fixture.ids.organization]);
+  assert.deepEqual(audit.rows, [{ events: 3, head_sequence: 3, device_events: 0 }]);
 
   // The exact frozen path is intercepted before generic route dispatch. A
   // query-string variant must not fall through to a weaker authenticated
@@ -176,7 +204,7 @@ async function createFixture(t) {
       client: migrationClient,
       applicationVersion: "m2-a2q-agent-session-http"
     }).run();
-    assert.equal(migration.currentVersion, 21);
+    assert.equal(migration.currentVersion, 22);
   } finally {
     migrationClient.release();
   }
@@ -289,10 +317,14 @@ async function createFixture(t) {
         client: pool,
         now: () => new Date().toISOString()
       });
+      const consumptionRepository = createPostgresAgentSessionConsumptionRepository({
+        client: pool,
+        authorityRepository
+      });
       const repository = {
         async consumeAgentSessionGrant(input) {
           try {
-            return await authorityRepository.consumeAgentSessionGrant(input);
+            return await consumptionRepository.consumeAgentSessionGrant(input);
           } catch (error) {
             diagnostics.consumeError = { code: error?.code ?? null, name: error?.name ?? null };
             throw error;

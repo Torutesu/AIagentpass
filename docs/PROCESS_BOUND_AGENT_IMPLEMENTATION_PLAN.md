@@ -160,7 +160,7 @@ The critical path is N1 through N4. UI and adapter convenience work must not pre
 | Component | State | What is proven | What remains before production use |
 | --- | --- | --- | --- |
 | Grant/Lease schemas and OpenAPI | Implemented | Closed shapes, canonical timestamps, bounded scope/TTL/budget, Human and Device operations | Compatibility fixtures and deployed-client negotiation |
-| PostgreSQL migrations 0018–0021 | Implemented | Immutable Grant identity, one-way consumption, process-bound session rows, authority-generation binding, RLS, audit binding columns | Retain migration, rollback, and ambiguity evidence across supported PostgreSQL versions |
+| PostgreSQL migrations 0018–0022 | Implemented | Immutable Grant identity, one-way consumption, process-bound session rows, authority-generation binding, separate Cloud/device audit chains, RLS | Retain migration, rollback, and ambiguity evidence across supported PostgreSQL versions |
 | Grant crypto | Runtime-composed | Purpose-domain-separated canonical Ed25519 signing, pinned public-key verification, strict output validation, hosted provider timeout/error boundary, purpose-key separation, continuous metadata readiness | Verification-key rotation set and production KMS/HSM provider |
 | Human HTTP boundary | Runtime-composed and PostgreSQL-qualified | Origin, session, CSRF, role, recent WebAuthn, strict JSON, pre-WebAuthn exact replay, stable errors, exact route dispatch, restart-safe HTTP retry without duplicate signing/audit/outbox | External KMS rotation and physical drain qualification |
 | Device HTTP boundary | Runtime-composed | Exact raw path/body device authentication, shared nonce and rate-limit authority, Grant verification, exact binding retry, stable errors, exact frozen route interception | Consumption audit/outbox and real-PostgreSQL route contention evidence |
@@ -214,6 +214,8 @@ Qualification backlog, in dependency order:
 4. Export metrics for issue/consume outcome, replay, conflict, stale generation, signer latency/failure, and transaction rollback without labels containing tenant IDs or secret material.
 
 Exit gate: concurrent real-PostgreSQL and route-level tests prove exactly one Lease, exact retry convergence, changed-process/ancestry conflict, revoke/expiry races, audit/outbox atomicity, and bounded telemetry.
+
+Implemented evidence on 2026-08-13: migration 0022 introduces an append-only, tenant-isolated Cloud consume chain that is structurally independent from the device-origin chain. The hosted PostgreSQL runtime now composes Lease creation and Cloud event append in one transaction. Real PostgreSQL HTTP qualification proves restart and concurrent retries converge on one Lease and one event per Grant, the device chain remains untouched, and an injected audit failure rolls back the Session row and Grant lifecycle transition. Lifecycle cleanup, publication/outbox policy, revoke/expiry race qualification, and bounded outcome metrics remain open.
 
 ### Wave M2-B — live macOS observation and Agent XPC split
 

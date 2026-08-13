@@ -10,6 +10,7 @@ import { createSharedControlRepository } from "./shared-control-repository.mjs";
 import { createPostgresRefreshHintNotifier } from "./refresh-hint-notifier.mjs";
 import { createPostgresAdminAuditRepository } from "./admin-audit-repository.mjs";
 import { createAgentSessionAuthorityRepository } from "./agent-session-authority-repository.mjs";
+import { createPostgresAgentSessionConsumptionRepository } from "./agent-session-consumption-repository.mjs";
 import { createPostgresAgentSessionIssuanceRepository } from "./agent-session-issuance-repository.mjs";
 import { createAuthorityReductionAuditAppender } from "./authority-reduction-audit.mjs";
 import {
@@ -63,6 +64,11 @@ export async function createPostgresRuntime({ env = process.env, PoolClass = Poo
   const adminAuditRepository = createPostgresAdminAuditRepository({ client: pool });
   const agentSessionAuthorityRepository = createAgentSessionAuthorityRepository({ client: pool });
   const sharedControlRepository = createSharedControlRepository({ client: pool });
+  const agentSessionConsumptionRepository = createPostgresAgentSessionConsumptionRepository({
+    client: pool,
+    authorityRepository: agentSessionAuthorityRepository,
+    sharedControls: sharedControlRepository
+  });
   const agentSessionIssuanceRepository = resolveProcessBindingPolicy === undefined ? undefined : createPostgresAgentSessionIssuanceRepository({
     client: pool,
     authorityRepository: agentSessionAuthorityRepository,
@@ -105,7 +111,8 @@ export async function createPostgresRuntime({ env = process.env, PoolClass = Poo
     humanRepository: createPostgresHumanRepository({ client: pool, onAuthorityReduction }),
     organizationRepository,
     capabilityAuthorityRepository,
-    agentSessionAuthorityRepository,
+    agentSessionAuthorityRepository: agentSessionConsumptionRepository,
+    agentSessionConsumptionRepository,
     ...(agentSessionIssuanceRepository ? { agentSessionIssuanceRepository } : {}),
     sharedControlRepository,
     controlPlaneStore,
