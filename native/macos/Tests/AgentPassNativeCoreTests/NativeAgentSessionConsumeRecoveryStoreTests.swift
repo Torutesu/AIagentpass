@@ -6,6 +6,7 @@ import Testing
 private let recoveryOrganization = "33333333-3333-4333-8333-333333333333"
 private let recoveryDevice = "44444444-4444-4444-8444-444444444444"
 private let recoveryAgent = "55555555-5555-4555-8555-555555555555"
+private let recoverySession = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
 
 private func recoveryDirectory() throws -> (URL, String) {
   let requestedRoot = FileManager.default.temporaryDirectory
@@ -38,17 +39,50 @@ private func recoveryEvidence(
     recoveryExpiresAtMilliseconds: expiry)
 }
 
+private func preparedRecoveryRecord(
+  _ evidence: NativeAgentSessionConsumeRecoveryEvidence,
+  expiry: Int64? = nil,
+  digestByte: UInt8 = 0xe
+) throws -> NativeAgentSessionConsumeRecoveryPreparedRecord {
+  try NativeAgentSessionConsumeRecoveryPreparedRecord(
+    evidence: evidence,
+    sessionID: recoverySession,
+    sessionDigest: Data(repeating: digestByte, count: 32),
+    resultDigest: Data(repeating: digestByte &+ 1, count: 32),
+    auditEvidenceDigest: Data(repeating: digestByte &+ 2, count: 32),
+    expiresAtMilliseconds: expiry)
+}
+
 private func auditedRecoveryRecord(
   _ evidence: NativeAgentSessionConsumeRecoveryEvidence,
   expiry: Int64? = nil,
   digestByte: UInt8 = 0xe
 ) throws -> NativeAgentSessionConsumeRecoveryAuditedRecord {
-  try NativeAgentSessionConsumeRecoveryAuditedRecord(
-    evidence: evidence,
-    sessionDigest: Data(repeating: digestByte, count: 32),
-    resultDigest: Data(repeating: digestByte &+ 1, count: 32),
-    auditDigest: Data(repeating: digestByte &+ 2, count: 32),
-    expiresAtMilliseconds: expiry)
+  let prepared = try preparedRecoveryRecord(evidence, expiry: expiry, digestByte: digestByte)
+  return try NativeAgentSessionConsumeRecoveryAuditedRecord(
+    preparedRecord: prepared,
+    auditDigest: Data(repeating: digestByte &+ 3, count: 32))
+}
+
+private func completeRecovery(
+  _ store: NativeAgentSessionConsumeRecoveryStore,
+  evidence: NativeAgentSessionConsumeRecoveryEvidence,
+  auditedRecord: NativeAgentSessionConsumeRecoveryAuditedRecord
+) throws -> NativeAgentSessionConsumeRecoveryAuditedRecord {
+  switch try store.lookupExact(evidence) {
+  case .pending:
+    _ = try store.prepareForActivation(
+      evidence, preparedRecord: auditedRecord.preparedRecord)
+  case .auditPrepared(let prepared) where prepared == auditedRecord.preparedRecord:
+    break
+  case .audited:
+    break
+  default:
+    throw NativeAgentSessionConsumeRecoveryStoreError.conflict
+  }
+  return try store.completeAfterAudit(
+    evidence, preparedRecord: auditedRecord.preparedRecord,
+    auditedRecord: auditedRecord)
 }
 
 @Test func recoveryStoreRestartAndExactReplayPreserveOnlyDigestEvidence() throws {
@@ -87,8 +121,8 @@ private func auditedRecoveryRecord(
     _ = try store.save(changed)
   }
   #expect(throws: NativeAgentSessionConsumeRecoveryStoreError.conflict) {
-    _ = try store.completeAfterLocalActivation(
-      changed, auditedRecord: try auditedRecoveryRecord(changed))
+    _ = try completeRecovery(
+      store, evidence: changed, auditedRecord: try auditedRecoveryRecord(changed))
   }
 }
 
@@ -175,7 +209,7 @@ private func auditedRecoveryRecord(
   let evidence = try recoveryEvidence()
   _ = try store.save(evidence)
   let audited = try auditedRecoveryRecord(evidence)
-  #expect(try store.completeAfterLocalActivation(evidence, auditedRecord: audited) == audited)
+  #expect(try completeRecovery(store, evidence: evidence, auditedRecord: audited) == audited)
   #expect(FileManager.default.fileExists(atPath: path))
   #expect(try store.lookupExact(evidence) == .audited(audited))
   #expect(throws: NativeAgentSessionConsumeRecoveryStoreError.conflict) {
@@ -196,7 +230,7 @@ private func auditedRecoveryRecord(
   let audited = try auditedRecoveryRecord(evidence, expiry: 1_900_000)
   let store = try NativeAgentSessionConsumeRecoveryStore(path: path)
   _ = try store.save(evidence)
-  _ = try store.completeAfterLocalActivation(evidence, auditedRecord: audited)
+  _ = try completeRecovery(store, evidence: evidence, auditedRecord: audited)
 
   let text = String(decoding: try Data(contentsOf: URL(fileURLWithPath: path)), as: UTF8.self)
   #expect(text.contains("\"state\":\"audited\""))
@@ -209,7 +243,7 @@ private func auditedRecoveryRecord(
   let restarted = try NativeAgentSessionConsumeRecoveryStore(path: path)
   #expect(try restarted.lookupExact(evidence) == .audited(audited))
   #expect(
-    try restarted.completeAfterLocalActivation(evidence, auditedRecord: audited) == audited)
+    try completeRecovery(restarted, evidence: evidence, auditedRecord: audited) == audited)
   #expect(
     try restarted.lookupExact(evidence, nowMilliseconds: audited.expiresAtMilliseconds)
       == .missing)
@@ -223,7 +257,7 @@ private func auditedRecoveryRecord(
   let audited = try auditedRecoveryRecord(evidence)
   let store = try NativeAgentSessionConsumeRecoveryStore(path: path)
   _ = try store.save(evidence)
-  _ = try store.completeAfterLocalActivation(evidence, auditedRecord: audited)
+  _ = try completeRecovery(store, evidence: evidence, auditedRecord: audited)
 
   let changedTuple = try recoveryEvidence(worktreeByte: 0xf)
   #expect(throws: NativeAgentSessionConsumeRecoveryStoreError.conflict) {
@@ -231,10 +265,70 @@ private func auditedRecoveryRecord(
   }
   let changedResult = try auditedRecoveryRecord(evidence, digestByte: 0x1)
   #expect(throws: NativeAgentSessionConsumeRecoveryStoreError.conflict) {
-    _ = try store.completeAfterLocalActivation(evidence, auditedRecord: changedResult)
+    _ = try completeRecovery(store, evidence: evidence, auditedRecord: changedResult)
   }
   #expect(throws: NativeAgentSessionConsumeRecoveryStoreError.conflict) {
-    _ = try store.completeAfterLocalActivation(changedTuple, auditedRecord: audited)
+    _ = try completeRecovery(store, evidence: changedTuple, auditedRecord: audited)
+  }
+}
+
+@Test func recoveryStorePreparedStateBindsPublicSessionAndPrunesWithoutAuthority() throws {
+  let (root, path) = try recoveryDirectory()
+  defer { try? FileManager.default.removeItem(at: root) }
+  let evidence = try recoveryEvidence(expiry: 1_800_000)
+  let prepared = try preparedRecoveryRecord(evidence, expiry: 1_700_000)
+  let store = try NativeAgentSessionConsumeRecoveryStore(path: path)
+  _ = try store.save(evidence)
+  #expect(try store.prepareForActivation(evidence, preparedRecord: prepared) == prepared)
+
+  let text = String(decoding: try Data(contentsOf: URL(fileURLWithPath: path)), as: UTF8.self)
+  #expect(text.contains("\"state\":\"audit_prepared\""))
+  #expect(text.contains("\"session_id\":\"\(recoverySession)\""))
+  #expect(!text.contains("local_lease_id"))
+  #expect(!text.contains("credential"))
+  #expect(
+    try NativeAgentSessionConsumeRecoveryStore(path: path).lookupExact(evidence)
+      == .auditPrepared(prepared))
+
+  #expect(try store.pruneExpired(nowMilliseconds: prepared.expiresAtMilliseconds) == 1)
+  #expect(try store.lookupExact(evidence) == .missing)
+  #expect(throws: NativeAgentSessionConsumeRecoveryStoreError.invalidState) {
+    _ = try store.completeAfterAudit(
+      evidence,
+      preparedRecord: prepared,
+      auditedRecord: try NativeAgentSessionConsumeRecoveryAuditedRecord(
+        preparedRecord: prepared, auditDigest: Data(repeating: 0x4, count: 32)))
+  }
+}
+
+@Test func recoveryStoreRejectsSessionIDSubstitutionAndNonCanonicalEncoding() throws {
+  let (root, path) = try recoveryDirectory()
+  defer { try? FileManager.default.removeItem(at: root) }
+  let evidence = try recoveryEvidence()
+  let prepared = try preparedRecoveryRecord(evidence)
+  let store = try NativeAgentSessionConsumeRecoveryStore(path: path)
+  _ = try store.save(evidence)
+  _ = try store.prepareForActivation(evidence, preparedRecord: prepared)
+  let changed = try NativeAgentSessionConsumeRecoveryPreparedRecord(
+    evidence: evidence,
+    sessionID: "22222222-2222-4222-8222-222222222222",
+    sessionDigest: prepared.sessionDigest,
+    resultDigest: prepared.resultDigest,
+    auditEvidenceDigest: prepared.auditEvidenceDigest,
+    expiresAtMilliseconds: prepared.expiresAtMilliseconds)
+  #expect(throws: NativeAgentSessionConsumeRecoveryStoreError.conflict) {
+    _ = try store.prepareForActivation(evidence, preparedRecord: changed)
+  }
+
+  let url = URL(fileURLWithPath: path)
+  let current = try String(contentsOf: url, encoding: .utf8)
+  let uppercase = current.replacingOccurrences(
+    of: recoverySession, with: recoverySession.uppercased())
+  #expect(uppercase != current)
+  try Data(uppercase.utf8).write(to: url)
+  try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: path)
+  #expect(throws: NativeAgentSessionConsumeRecoveryStoreError.invalidState) {
+    _ = try NativeAgentSessionConsumeRecoveryStore(path: path)
   }
 }
 
@@ -245,12 +339,14 @@ private func auditedRecoveryRecord(
   _ = try NativeAgentSessionConsumeRecoveryStore(path: path).save(evidence)
   let url = URL(fileURLWithPath: path)
   let current = String(decoding: try Data(contentsOf: url), as: UTF8.self)
-  let legacy = current.replacingOccurrences(of: "\"version\":2", with: "\"version\":1")
-  #expect(legacy != current)
-  try Data(legacy.utf8).write(to: url)
-  try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: path)
-  #expect(throws: NativeAgentSessionConsumeRecoveryStoreError.invalidState) {
-    _ = try NativeAgentSessionConsumeRecoveryStore(path: path)
+  for version in ["1", "2"] {
+    let legacy = current.replacingOccurrences(of: "\"version\":3", with: "\"version\":\(version)")
+    #expect(legacy != current)
+    try Data(legacy.utf8).write(to: url)
+    try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: path)
+    #expect(throws: NativeAgentSessionConsumeRecoveryStoreError.invalidState) {
+      _ = try NativeAgentSessionConsumeRecoveryStore(path: path)
+    }
   }
 }
 
@@ -261,7 +357,7 @@ private func auditedRecoveryRecord(
   let audited = try auditedRecoveryRecord(evidence)
   let store = try NativeAgentSessionConsumeRecoveryStore(path: path)
   _ = try store.save(evidence)
-  _ = try store.completeAfterLocalActivation(evidence, auditedRecord: audited)
+  _ = try completeRecovery(store, evidence: evidence, auditedRecord: audited)
   let url = URL(fileURLWithPath: path)
   let current = try Data(contentsOf: url)
 
@@ -289,18 +385,25 @@ private func auditedRecoveryRecord(
 @Test func recoveryStoreRejectsUnboundedTerminalData() throws {
   let evidence = try recoveryEvidence()
   #expect(throws: NativeAgentSessionConsumeRecoveryStoreError.invalidEvidence) {
-    _ = try NativeAgentSessionConsumeRecoveryAuditedRecord(
+    _ = try NativeAgentSessionConsumeRecoveryPreparedRecord(
       evidence: evidence,
+      sessionID: recoverySession,
       sessionDigest: Data(repeating: 1, count: 31),
       resultDigest: Data(repeating: 2, count: 32),
-      auditDigest: Data(repeating: 3, count: 32))
+      auditEvidenceDigest: Data(repeating: 3, count: 32))
   }
   #expect(throws: NativeAgentSessionConsumeRecoveryStoreError.invalidEvidence) {
-    _ = try NativeAgentSessionConsumeRecoveryAuditedRecord(
+    _ = try NativeAgentSessionConsumeRecoveryPreparedRecord(
       evidence: evidence,
+      sessionID: recoverySession,
       sessionDigest: Data(repeating: 1, count: 32),
       resultDigest: Data(repeating: 2, count: 32),
-      auditDigest: Data(repeating: 3, count: 32),
+      auditEvidenceDigest: Data(repeating: 3, count: 32),
       expiresAtMilliseconds: evidence.recoveryExpiresAtMilliseconds + 1)
+  }
+  let prepared = try preparedRecoveryRecord(evidence)
+  #expect(throws: NativeAgentSessionConsumeRecoveryStoreError.invalidEvidence) {
+    _ = try NativeAgentSessionConsumeRecoveryAuditedRecord(
+      preparedRecord: prepared, auditDigest: Data(repeating: 1, count: 31))
   }
 }

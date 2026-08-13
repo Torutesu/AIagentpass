@@ -177,39 +177,104 @@ public struct NativeAgentSessionConsumeRecoveryEvidence: Equatable, Sendable {
   }
 }
 
-/// The bounded terminal result retained after the local activation audit is
-/// durable.  It is deliberately composed only of the immutable recovery
-/// tuple and fixed-size digests; it carries no session authority or replayable
-/// secret.  The terminal expiry may shorten, but never extend, the recovery
-/// tuple's expiry.
-public struct NativeAgentSessionConsumeRecoveryAuditedRecord: Equatable, Sendable {
+/// The bounded record written before an activation audit is appended.
+///
+/// This is the durable hand-off between local activation and the audit
+/// appender.  It contains only immutable authority evidence and fixed-size
+/// digests.  In particular, it contains neither the audit payload nor any
+/// session credential.  The canonical audit-evidence digest is what lets a
+/// restarted coordinator find and reuse an exact append instead of emitting a
+/// second audit event.
+public struct NativeAgentSessionConsumeRecoveryPreparedRecord: Equatable, Sendable {
   public static let digestByteCount = NativeAgentSessionConsumeRecoveryEvidence.digestByteCount
 
   public let evidence: NativeAgentSessionConsumeRecoveryEvidence
+  /// The public Cloud session identifier used to locate an exact audit event.
+  /// This is not a local lease ID and carries no authority or credential.
+  public let sessionID: String
   public let sessionDigest: Data
   public let resultDigest: Data
-  public let auditDigest: Data
+  public let auditEvidenceDigest: Data
   public let expiresAtMilliseconds: Int64
 
   public init(
     evidence: NativeAgentSessionConsumeRecoveryEvidence,
+    sessionID: String,
     sessionDigest: Data,
     resultDigest: Data,
-    auditDigest: Data,
+    auditEvidenceDigest: Data,
     expiresAtMilliseconds: Int64? = nil
   ) throws {
-    let terminalExpiry = expiresAtMilliseconds ?? evidence.recoveryExpiresAtMilliseconds
-    guard Self.digest(sessionDigest), Self.digest(resultDigest), Self.digest(auditDigest),
-      terminalExpiry > 0,
-      terminalExpiry <= evidence.recoveryExpiresAtMilliseconds
+    let preparedExpiry = expiresAtMilliseconds ?? evidence.recoveryExpiresAtMilliseconds
+    guard let sessionID = Self.uuid(sessionID),
+      Self.digest(sessionDigest), Self.digest(resultDigest),
+      Self.digest(auditEvidenceDigest),
+      preparedExpiry > 0,
+      preparedExpiry <= evidence.recoveryExpiresAtMilliseconds
     else {
       throw NativeAgentSessionConsumeRecoveryStoreError.invalidEvidence
     }
     self.evidence = evidence
+    self.sessionID = sessionID
     self.sessionDigest = sessionDigest
     self.resultDigest = resultDigest
+    self.auditEvidenceDigest = auditEvidenceDigest
+    self.expiresAtMilliseconds = preparedExpiry
+  }
+
+  fileprivate func matchesExact(
+    _ other: NativeAgentSessionConsumeRecoveryPreparedRecord
+  ) -> Bool {
+    evidence == other.evidence
+      && sessionID == other.sessionID
+      && sessionDigest == other.sessionDigest
+      && resultDigest == other.resultDigest
+      && auditEvidenceDigest == other.auditEvidenceDigest
+      && expiresAtMilliseconds == other.expiresAtMilliseconds
+  }
+
+  private static func digest(_ value: Data) -> Bool {
+    value.count == digestByteCount
+  }
+
+  private static func uuid(_ value: String) -> String? {
+    guard value.utf8.count == 36,
+      value.range(
+        of: "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$",
+        options: .regularExpression) != nil,
+      UUID(uuidString: value) != nil
+    else { return nil }
+    return value.lowercased()
+  }
+}
+
+/// The bounded terminal result retained after the local activation audit is
+/// durable.  It is deliberately composed only of the prepared record and one
+/// fixed-size durable audit-chain digest; it carries no session authority or
+/// replayable secret.  The terminal expiry may shorten, but never extend, the
+/// recovery tuple's expiry.
+public struct NativeAgentSessionConsumeRecoveryAuditedRecord: Equatable, Sendable {
+  public static let digestByteCount = NativeAgentSessionConsumeRecoveryEvidence.digestByteCount
+
+  public let preparedRecord: NativeAgentSessionConsumeRecoveryPreparedRecord
+  public let auditDigest: Data
+
+  public var evidence: NativeAgentSessionConsumeRecoveryEvidence { preparedRecord.evidence }
+  public var sessionID: String { preparedRecord.sessionID }
+  public var sessionDigest: Data { preparedRecord.sessionDigest }
+  public var resultDigest: Data { preparedRecord.resultDigest }
+  public var auditEvidenceDigest: Data { preparedRecord.auditEvidenceDigest }
+  public var expiresAtMilliseconds: Int64 { preparedRecord.expiresAtMilliseconds }
+
+  public init(
+    preparedRecord: NativeAgentSessionConsumeRecoveryPreparedRecord,
+    auditDigest: Data
+  ) throws {
+    guard Self.digest(auditDigest) else {
+      throw NativeAgentSessionConsumeRecoveryStoreError.invalidEvidence
+    }
+    self.preparedRecord = preparedRecord
     self.auditDigest = auditDigest
-    self.expiresAtMilliseconds = terminalExpiry
   }
 
   private static func digest(_ value: Data) -> Bool {
@@ -217,12 +282,14 @@ public struct NativeAgentSessionConsumeRecoveryAuditedRecord: Equatable, Sendabl
   }
 }
 
-/// Exact recovery lookup.  `audited` is a terminal replay record and must not
-/// be treated as a missing pending request: it is the only safe source for an
-/// exact retry result after a daemon restart.
+/// Exact recovery lookup.  `auditPrepared` is the durable hand-off to the
+/// audit appender and must be reconciled before another append is attempted.
+/// `audited` is a terminal replay record and must not be treated as a missing
+/// pending request.
 public enum NativeAgentSessionConsumeRecoveryLookup: Equatable, Sendable {
   case missing
   case pending(NativeAgentSessionConsumeRecoveryEvidence)
+  case auditPrepared(NativeAgentSessionConsumeRecoveryPreparedRecord)
   case audited(NativeAgentSessionConsumeRecoveryAuditedRecord)
 }
 
@@ -233,9 +300,21 @@ public protocol NativeAgentSessionConsumeRecoveryStoring: Sendable {
     nowMilliseconds: Int64?
   ) throws -> NativeAgentSessionConsumeRecoveryEvidence
 
+  /// Durably records the exact audit intent before an audit append begins.
+  /// Repeating the same transition is idempotent; every substituted digest or
+  /// tuple is rejected.
   @discardableResult
-  func completeAfterLocalActivation(
+  func prepareForActivation(
     _ expected: NativeAgentSessionConsumeRecoveryEvidence,
+    preparedRecord: NativeAgentSessionConsumeRecoveryPreparedRecord
+  ) throws -> NativeAgentSessionConsumeRecoveryPreparedRecord
+
+  /// Completes an exact prepared audit with the durable audit-chain digest.
+  /// This is the only API that advances `audit_prepared -> audited`.
+  @discardableResult
+  func completeAfterAudit(
+    _ expected: NativeAgentSessionConsumeRecoveryEvidence,
+    preparedRecord: NativeAgentSessionConsumeRecoveryPreparedRecord,
     auditedRecord: NativeAgentSessionConsumeRecoveryAuditedRecord
   ) throws -> NativeAgentSessionConsumeRecoveryAuditedRecord
 
@@ -250,15 +329,16 @@ public protocol NativeAgentSessionConsumeRecoveryStoring: Sendable {
 
 /// A bounded, digest-only, crash-safe recovery evidence store.
 ///
-/// The on-disk format has two explicit states.  A bootstrap tuple is immutable
-/// while pending.  After the activation audit is durable, the same file is
-/// atomically replaced with an audited terminal record.  Repeating `save` with
-/// a pending tuple is idempotent; any attempt to reinterpret an audited record
-/// as pending fails closed.
+/// The v3 on-disk format has three explicit states. A bootstrap tuple is
+/// immutable while pending. Before an audit append, the exact session/result/
+/// audit-evidence tuple is atomically published as `audit_prepared`. Once the
+/// audit chain returns its durable record digest, that same tuple is atomically
+/// replaced with `audited`. Every transition is exact and idempotent; a v1 or
+/// v2 file is rejected rather than reinterpreted.
 public final class NativeAgentSessionConsumeRecoveryStore:
   NativeAgentSessionConsumeRecoveryStoring, @unchecked Sendable
 {
-  private static let version = 2
+  private static let version = 3
   private static let maximumEntries = 128
   private static let maximumBytes = 256 * 1024
   private static let fileMode: mode_t = 0o600
@@ -271,17 +351,23 @@ public final class NativeAgentSessionConsumeRecoveryStore:
     "worktree_binding_sha256",
   ]
   private static let pendingRecordKeys = immutableRecordKeys.union(["state"])
-  private static let auditedRecordKeys = immutableRecordKeys.union([
-    "audit_sha256", "expires_at_ms", "result_sha256", "session_sha256", "state",
+  private static let preparedRecordKeys = immutableRecordKeys.union([
+    "audit_evidence_sha256", "expires_at_ms", "result_sha256", "session_id",
+    "session_sha256", "state",
+  ])
+  private static let auditedRecordKeys = preparedRecordKeys.union([
+    "audit_sha256"
   ])
 
   private enum Record: Equatable, Sendable {
     case pending(NativeAgentSessionConsumeRecoveryEvidence)
+    case auditPrepared(NativeAgentSessionConsumeRecoveryPreparedRecord)
     case audited(NativeAgentSessionConsumeRecoveryAuditedRecord)
 
     var evidence: NativeAgentSessionConsumeRecoveryEvidence {
       switch self {
       case .pending(let evidence): evidence
+      case .auditPrepared(let prepared): prepared.evidence
       case .audited(let record): record.evidence
       }
     }
@@ -291,6 +377,7 @@ public final class NativeAgentSessionConsumeRecoveryStore:
     var expiresAtMilliseconds: Int64 {
       switch self {
       case .pending(let evidence): evidence.recoveryExpiresAtMilliseconds
+      case .auditPrepared(let prepared): prepared.expiresAtMilliseconds
       case .audited(let record): record.expiresAtMilliseconds
       }
     }
@@ -298,6 +385,7 @@ public final class NativeAgentSessionConsumeRecoveryStore:
     var state: String {
       switch self {
       case .pending: "pending"
+      case .auditPrepared: "audit_prepared"
       case .audited: "audited"
       }
     }
@@ -357,7 +445,7 @@ public final class NativeAgentSessionConsumeRecoveryStore:
           throw NativeAgentSessionConsumeRecoveryStoreError.conflict
         }
         return pending
-      case .audited:
+      case .auditPrepared, .audited:
         throw NativeAgentSessionConsumeRecoveryStoreError.conflict
       }
     }
@@ -397,7 +485,7 @@ public final class NativeAgentSessionConsumeRecoveryStore:
       return nil
     case .pending(let evidence):
       return evidence
-    case .audited:
+    case .auditPrepared, .audited:
       throw NativeAgentSessionConsumeRecoveryStoreError.conflict
     }
   }
@@ -423,6 +511,11 @@ public final class NativeAgentSessionConsumeRecoveryStore:
         throw NativeAgentSessionConsumeRecoveryStoreError.conflict
       }
       return .pending(evidence)
+    case .auditPrepared(let preparedRecord):
+      guard preparedRecord.evidence.matchesAuthority(expected) else {
+        throw NativeAgentSessionConsumeRecoveryStoreError.conflict
+      }
+      return .auditPrepared(preparedRecord)
     case .audited(let auditedRecord):
       guard auditedRecord.evidence.matchesAuthority(expected) else {
         throw NativeAgentSessionConsumeRecoveryStoreError.conflict
@@ -431,15 +524,16 @@ public final class NativeAgentSessionConsumeRecoveryStore:
     }
   }
 
-  /// Atomically advances a matching pending record to its durable audited
-  /// terminal state.  The in-memory transition is rolled back if the canonical
-  /// write, file fsync, rename, or parent-directory fsync fails.
+  /// Atomically advances a matching pending record to `audit_prepared`.
+  /// Repeating the exact transition is idempotent. The in-memory transition is
+  /// rolled back if the canonical write, file fsync, rename, or parent-directory
+  /// fsync fails.
   @discardableResult
-  public func completeAfterLocalActivation(
+  public func prepareForActivation(
     _ expected: NativeAgentSessionConsumeRecoveryEvidence,
-    auditedRecord: NativeAgentSessionConsumeRecoveryAuditedRecord
-  ) throws -> NativeAgentSessionConsumeRecoveryAuditedRecord {
-    guard auditedRecord.evidence == expected else {
+    preparedRecord: NativeAgentSessionConsumeRecoveryPreparedRecord
+  ) throws -> NativeAgentSessionConsumeRecoveryPreparedRecord {
+    guard preparedRecord.evidence == expected else {
       throw NativeAgentSessionConsumeRecoveryStoreError.conflict
     }
     lock.lock()
@@ -450,6 +544,52 @@ public final class NativeAgentSessionConsumeRecoveryStore:
     switch actual {
     case .pending(let pending):
       guard pending == expected else {
+        throw NativeAgentSessionConsumeRecoveryStoreError.conflict
+      }
+    case .auditPrepared(let existing):
+      guard existing == preparedRecord else {
+        throw NativeAgentSessionConsumeRecoveryStoreError.conflict
+      }
+      return existing
+    case .audited:
+      throw NativeAgentSessionConsumeRecoveryStoreError.conflict
+    }
+    let old = records
+    records[expected.recoveryKey] = .auditPrepared(preparedRecord)
+    do {
+      try persistLocked()
+      return preparedRecord
+    } catch {
+      records = old
+      throw error
+    }
+  }
+
+  /// Atomically advances an exact `audit_prepared` record to `audited`.
+  /// Repeating the exact terminalization is idempotent. A pending record can
+  /// never skip the prepared state, and an existing audited record must match
+  /// the complete prepared tuple and audit-chain digest byte-for-byte.
+  @discardableResult
+  public func completeAfterAudit(
+    _ expected: NativeAgentSessionConsumeRecoveryEvidence,
+    preparedRecord: NativeAgentSessionConsumeRecoveryPreparedRecord,
+    auditedRecord: NativeAgentSessionConsumeRecoveryAuditedRecord
+  ) throws -> NativeAgentSessionConsumeRecoveryAuditedRecord {
+    guard preparedRecord.evidence == expected,
+      auditedRecord.preparedRecord == preparedRecord
+    else {
+      throw NativeAgentSessionConsumeRecoveryStoreError.conflict
+    }
+    lock.lock()
+    defer { lock.unlock() }
+    guard let actual = records[expected.recoveryKey] else {
+      throw NativeAgentSessionConsumeRecoveryStoreError.invalidState
+    }
+    switch actual {
+    case .pending:
+      throw NativeAgentSessionConsumeRecoveryStoreError.invalidState
+    case .auditPrepared(let existing):
+      guard existing == preparedRecord else {
         throw NativeAgentSessionConsumeRecoveryStoreError.conflict
       }
     case .audited(let existing):
@@ -561,6 +701,7 @@ public final class NativeAgentSessionConsumeRecoveryStore:
     let recordKeys: Set<String>
     switch state {
     case "pending": recordKeys = pendingRecordKeys
+    case "audit_prepared": recordKeys = preparedRecordKeys
     case "audited": recordKeys = auditedRecordKeys
     default: throw NativeAgentSessionConsumeRecoveryStoreError.invalidState
     }
@@ -578,14 +719,19 @@ public final class NativeAgentSessionConsumeRecoveryStore:
       if state == "pending" { return .pending(evidence) }
       guard let sessionDigest = digest(value["session_sha256"]),
         let resultDigest = digest(value["result_sha256"]),
-        let auditDigest = digest(value["audit_sha256"]),
         let expiresAtMilliseconds = integer(value["expires_at_ms"])
       else { throw NativeAgentSessionConsumeRecoveryStoreError.invalidState }
+      let prepared = try NativeAgentSessionConsumeRecoveryPreparedRecord(
+        evidence: evidence, sessionID: try requiredUUID(value["session_id"]),
+        sessionDigest: sessionDigest,
+        resultDigest: resultDigest,
+        auditEvidenceDigest: try requiredDigest(value["audit_evidence_sha256"]),
+        expiresAtMilliseconds: expiresAtMilliseconds)
+      if state == "audit_prepared" { return .auditPrepared(prepared) }
       return .audited(
         try NativeAgentSessionConsumeRecoveryAuditedRecord(
-          evidence: evidence, sessionDigest: sessionDigest,
-          resultDigest: resultDigest, auditDigest: auditDigest,
-          expiresAtMilliseconds: expiresAtMilliseconds))
+          preparedRecord: prepared,
+          auditDigest: try requiredDigest(value["audit_sha256"])))
     } catch {
       if let error = error as? NativeAgentSessionConsumeRecoveryStoreError { throw error }
       throw NativeAgentSessionConsumeRecoveryStoreError.invalidState
@@ -609,10 +755,21 @@ public final class NativeAgentSessionConsumeRecoveryStore:
       "state": record.state,
       "worktree_binding_sha256": hex(evidence.worktreeBindingDigest),
     ]
-    if case .audited(let auditedRecord) = record {
+    switch record {
+    case .pending:
+      break
+    case .auditPrepared(let preparedRecord):
+      object["audit_evidence_sha256"] = hex(preparedRecord.auditEvidenceDigest)
+      object["expires_at_ms"] = preparedRecord.expiresAtMilliseconds
+      object["result_sha256"] = hex(preparedRecord.resultDigest)
+      object["session_id"] = preparedRecord.sessionID
+      object["session_sha256"] = hex(preparedRecord.sessionDigest)
+    case .audited(let auditedRecord):
+      object["audit_evidence_sha256"] = hex(auditedRecord.auditEvidenceDigest)
       object["audit_sha256"] = hex(auditedRecord.auditDigest)
       object["expires_at_ms"] = auditedRecord.expiresAtMilliseconds
       object["result_sha256"] = hex(auditedRecord.resultDigest)
+      object["session_id"] = auditedRecord.sessionID
       object["session_sha256"] = hex(auditedRecord.sessionDigest)
     }
     return object
@@ -836,6 +993,26 @@ public final class NativeAgentSessionConsumeRecoveryStore:
       data.count == NativeAgentSessionConsumeRecoveryEvidence.digestByteCount
     else { return nil }
     return data
+  }
+
+  private static func requiredDigest(_ value: Any?) throws -> Data {
+    guard let result = digest(value) else {
+      throw NativeAgentSessionConsumeRecoveryStoreError.invalidState
+    }
+    return result
+  }
+
+  private static func requiredUUID(_ value: Any?) throws -> String {
+    guard let value = value as? String,
+      value.utf8.count == 36,
+      value.range(
+        of: "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+        options: .regularExpression) != nil,
+      UUID(uuidString: value) != nil
+    else {
+      throw NativeAgentSessionConsumeRecoveryStoreError.invalidState
+    }
+    return value
   }
 
   private static func integer(_ value: Any?) -> Int64? {

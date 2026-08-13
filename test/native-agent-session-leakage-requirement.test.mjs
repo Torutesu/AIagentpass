@@ -262,7 +262,7 @@ test("restart recovery persists only Grant and authority digests", () => {
   const evidence = between(
     recovery,
     "public struct NativeAgentSessionConsumeRecoveryEvidence",
-    "public struct NativeAgentSessionConsumeRecoveryAuditedRecord"
+    "public struct NativeAgentSessionConsumeRecoveryPreparedRecord"
   );
   assert.deepEqual(publicFields(evidence).map(({ name }) => name), [
     "organizationID",
@@ -279,19 +279,30 @@ test("restart recovery persists only Grant and authority digests", () => {
     "recoveryExpiresAtMilliseconds"
   ]);
   assert.doesNotMatch(evidence, /public let (?:proof|path|pid|token|credential|privateKey|bootstrapID|grantID)\b/u);
+  const prepared = between(
+    recovery,
+    "public struct NativeAgentSessionConsumeRecoveryPreparedRecord",
+    "public struct NativeAgentSessionConsumeRecoveryAuditedRecord"
+  );
+  assert.deepEqual(publicFields(prepared).map(({ name }) => name), [
+    "evidence",
+    "sessionID",
+    "sessionDigest",
+    "resultDigest",
+    "auditEvidenceDigest",
+    "expiresAtMilliseconds"
+  ]);
+  assert.doesNotMatch(prepared, /public let (?:leaseID|lease|proof|path|pid|token|credential|privateKey|bootstrapID|grantID)\b/u);
   const audited = between(
     recovery,
     "public struct NativeAgentSessionConsumeRecoveryAuditedRecord",
     "public enum NativeAgentSessionConsumeRecoveryLookup"
   );
   assert.deepEqual(publicFields(audited).map(({ name }) => name), [
-    "evidence",
-    "sessionDigest",
-    "resultDigest",
-    "auditDigest",
-    "expiresAtMilliseconds"
+    "preparedRecord",
+    "auditDigest"
   ]);
-  assert.doesNotMatch(audited, /public let (?:lease|proof|path|pid|token|credential|privateKey|bootstrapID|grantID|sessionID)\b/u);
+  assert.doesNotMatch(audited, /public let (?:lease|proof|path|pid|token|credential|privateKey|bootstrapID|grantID)\b/u);
   assert.match(recovery, /NativeStrictJSON\.data\(object\)/u);
   assert.match(recovery, /O_NOFOLLOW/u);
   assert.match(recovery, /info\.st_nlink == 1/u);

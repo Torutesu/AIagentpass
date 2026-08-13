@@ -35,6 +35,33 @@ public struct NativeAuditStatus: Codable, Equatable, Sendable {
     enum CodingKeys: String, CodingKey { case valid, entries; case headHash = "head_hash" }
 }
 
+/// The durable identity of one record in the verified audit chain.
+///
+/// This is intentionally limited to the fields needed to reconcile a prepared
+/// agent-session activation. It is not a generic audit-record query result.
+public struct NativeAuditRecordReceipt: Equatable, Sendable {
+    public let index: Int
+    public let recordHash: String
+
+    public init(index: Int, recordHash: String) throws {
+        guard index >= 1,
+              recordHash.range(of: "^[0-9a-f]{64}$", options: .regularExpression) != nil else {
+            throw AgentPassNativeError.invalidSignature("Native audit record receipt is invalid")
+        }
+        self.index = index
+        self.recordHash = recordHash
+    }
+}
+
+/// Result of the narrowly-scoped lookup for an agent session activation audit.
+/// The enum is deliberately closed: callers cannot treat an unverified record
+/// or an ambiguous match as an exact durable audit receipt.
+public enum NativeAuditAgentSessionActivationAuditLookup: Equatable, Sendable {
+    case missing
+    case exact(NativeAuditRecordReceipt)
+    case conflict
+}
+
 public struct NativeAuditRotation: Codable, Equatable, Sendable {
     public let entries: Int
     public let headHash: String
@@ -165,6 +192,80 @@ public final class NativeAuditLog: @unchecked Sendable {
         lock.lock()
         defer { lock.unlock() }
         return try verifyUnlocked()
+    }
+
+    /// Looks up one exact `agent.session.session_activated` audit event.
+    ///
+    /// The complete active log and every configured archive are verified while
+    /// the audit lock is held. Only an exact, unique `(sessionID,
+    /// evidenceDigest)` pair can produce `.exact`; duplicate or substituted
+    /// activation evidence produces `.conflict`. This method never appends.
+    public func lookupAgentSessionActivationAudit(sessionID: UUID, expectedAgentID: UUID, evidenceDigest: Data) throws -> NativeAuditAgentSessionActivationAuditLookup {
+        guard evidenceDigest.count == 32 else {
+            throw AgentPassNativeError.invalidConfiguration("Native audit evidence digest must contain 32 bytes")
+        }
+        let sessionID = sessionID.uuidString.lowercased()
+        let expectedAgentID = expectedAgentID.uuidString.lowercased()
+        let evidenceDigest = evidenceDigest.map { String(format: "%02x", $0) }.joined()
+        let activationKeys: Set<String> = ["timestamp", "previous_hash", "operation", "decision", "request_id", "agent_id", "payload_sha256"]
+        appendAndRotationLock.lock()
+        defer { appendAndRotationLock.unlock() }
+        lock.lock()
+        defer { lock.unlock() }
+
+        var matches: [NativeAuditRecordReceipt] = []
+        var conflictingCandidate = false
+        _ = try verifyUnlocked(onRecord: { index, recordHash, record in
+            guard record["operation"] as? String == "agent.session.session_activated" else { return }
+            guard Set(record.keys) == activationKeys else {
+                throw AgentPassNativeError.invalidSignature("Native session activation audit record has an invalid field set")
+            }
+            guard let decision = record["decision"] as? String,
+                  decision == "allow",
+                  let requestID = record["request_id"] as? String,
+                  let agentID = record["agent_id"] as? String,
+                  let payloadSHA256 = record["payload_sha256"] as? String else {
+                throw AgentPassNativeError.invalidSignature("Native session activation audit record is malformed")
+            }
+            guard requestID == requestID.lowercased(),
+                  UUID(uuidString: requestID)?.uuidString.lowercased() == requestID,
+                  agentID == agentID.lowercased(),
+                  UUID(uuidString: agentID)?.uuidString.lowercased() == agentID,
+                  payloadSHA256.range(of: "^[0-9a-f]{64}$", options: .regularExpression) != nil else {
+                throw AgentPassNativeError.invalidSignature("Native session activation audit identity is malformed")
+            }
+            if requestID == sessionID && agentID == expectedAgentID && payloadSHA256 == evidenceDigest {
+                matches.append(try NativeAuditRecordReceipt(index: index, recordHash: recordHash))
+            } else if requestID == sessionID || payloadSHA256 == evidenceDigest {
+                conflictingCandidate = true
+            }
+        })
+
+        guard !conflictingCandidate, matches.count == 1 else {
+            if matches.isEmpty && !conflictingCandidate { return .missing }
+            return .conflict
+        }
+        return .exact(matches[0])
+    }
+
+    /// Hex convenience overload. The string must already be lowercase and
+    /// exactly 64 hexadecimal characters; normalization is intentionally not
+    /// performed at this untrusted boundary.
+    public func lookupAgentSessionActivationAudit(sessionID: UUID, expectedAgentID: UUID, evidenceDigest: String) throws -> NativeAuditAgentSessionActivationAuditLookup {
+        guard evidenceDigest.range(of: "^[0-9a-f]{64}$", options: .regularExpression) != nil else {
+            throw AgentPassNativeError.invalidConfiguration("Native audit evidence digest must be lowercase hexadecimal")
+        }
+        var bytes = Data(capacity: 32)
+        var cursor = evidenceDigest.startIndex
+        while cursor < evidenceDigest.endIndex {
+            let next = evidenceDigest.index(cursor, offsetBy: 2)
+            guard let byte = UInt8(evidenceDigest[cursor..<next], radix: 16) else {
+                throw AgentPassNativeError.invalidConfiguration("Native audit evidence digest is invalid")
+            }
+            bytes.append(byte)
+            cursor = next
+        }
+        return try lookupAgentSessionActivationAudit(sessionID: sessionID, expectedAgentID: expectedAgentID, evidenceDigest: bytes)
     }
 
     func verify(headsAtEntries requestedEntries: Set<Int>) throws -> (status: NativeAuditStatus, heads: [Int: String]) {
@@ -374,21 +475,21 @@ public final class NativeAuditLog: @unchecked Sendable {
         return NativeAuditRotation(entries: status.entries, headHash: status.headHash, archiveFile: name)
     }
 
-    private func verifyUnlocked(onEntry: ((Int, String) -> Void)? = nil) throws -> NativeAuditStatus {
+    private func verifyUnlocked(onEntry: ((Int, String) -> Void)? = nil, onRecord: ((Int, String, [String: Any]) throws -> Void)? = nil) throws -> NativeAuditStatus {
         var previous = Self.zeroHash
         var entries = 0
         if let archiveDirectory {
             try validatePrivateDirectory(archiveDirectory, label: "Native audit archive directory")
             for segment in try archiveSegments(directory: archiveDirectory) {
                 let before = entries
-                try verifySegment(path: segment.path, label: "Native audit archive segment", previous: &previous, entries: &entries, onEntry: onEntry)
+                try verifySegment(path: segment.path, label: "Native audit archive segment", previous: &previous, entries: &entries, onEntry: onEntry, onRecord: onRecord)
                 guard entries > before, entries == segment.entries, previous == segment.headHash else {
                     throw AgentPassNativeError.invalidSignature("Native audit archive filename does not match its terminal state")
                 }
             }
         }
         if try pathEntryExists(file) {
-            try verifySegment(path: file, label: "Native audit log", previous: &previous, entries: &entries, onEntry: onEntry)
+            try verifySegment(path: file, label: "Native audit log", previous: &previous, entries: &entries, onEntry: onEntry, onRecord: onRecord)
         }
         return NativeAuditStatus(valid: true, entries: entries, headHash: previous)
     }
@@ -403,13 +504,19 @@ public final class NativeAuditLog: @unchecked Sendable {
         return Int(info.st_size)
     }
 
-    private func verifySegment(path: String, label: String, previous: inout String, entries: inout Int, onEntry: ((Int, String) -> Void)? = nil) throws {
+    private func verifySegment(path: String, label: String, previous: inout String, entries: inout Int, onEntry: ((Int, String) -> Void)? = nil, onRecord: ((Int, String, [String: Any]) throws -> Void)? = nil) throws {
         try validatePrivateRegularFile(path, label: label)
         let data = try Data(contentsOf: URL(fileURLWithPath: path), options: .mappedIfSafe)
         guard data.count <= verificationLimitBytes else { throw AgentPassNativeError.invalidSignature("\(label) exceeds the verification limit") }
         try validateJSONLinesFraming(data, label: label)
         for line in data.split(separator: 0x0a, omittingEmptySubsequences: true) {
-            guard var record = try JSONSerialization.jsonObject(with: Data(line)) as? [String: Any],
+            let object: Any
+            do {
+                object = try JSONSerialization.jsonObject(with: Data(line))
+            } catch {
+                throw AgentPassNativeError.invalidSignature("\(label) contains malformed JSON")
+            }
+            guard var record = object as? [String: Any],
                   let expected = record.removeValue(forKey: "hash") as? String,
                   expected.range(of: "^[0-9a-f]{64}$", options: .regularExpression) != nil,
                   let previousHash = record["previous_hash"] as? String,
@@ -419,6 +526,7 @@ public final class NativeAuditLog: @unchecked Sendable {
                   let operation = record["operation"] as? String, !operation.isEmpty, operation.utf8.count <= 64,
                   let decision = record["decision"] as? String, ["allow", "deny", "error"].contains(decision),
                   Self.validOptionalString(record, key: "reason", bytes: 1024),
+                  Self.validOptionalUUID(record, key: "request_id"),
                   Self.validOptionalString(record, key: "agent_id", bytes: 128),
                   Self.validOptionalString(record, key: "repository", bytes: 4096),
                   Self.validOptionalString(record, key: "branch", bytes: 512),
@@ -428,10 +536,16 @@ public final class NativeAuditLog: @unchecked Sendable {
                   expected == Self.hash(try Self.canonical(record)) else {
                 throw AgentPassNativeError.invalidSignature("Native audit chain is invalid at entry \(entries + 1)")
             }
+            var canonicalRecord = record
+            canonicalRecord["hash"] = expected
+            guard try Self.canonical(canonicalRecord) == Data(line) else {
+                throw AgentPassNativeError.invalidSignature("Native audit record is not canonical at entry \(entries + 1)")
+            }
             previous = expected
             guard entries < Int.max else { throw AgentPassNativeError.invalidSignature("Native audit entry count exceeds the supported range") }
             entries += 1
             onEntry?(entries, expected)
+            try onRecord?(entries, expected, record)
         }
     }
 
@@ -491,6 +605,12 @@ public final class NativeAuditLog: @unchecked Sendable {
         guard let value = record[key] else { return true }
         guard let string = value as? String else { return false }
         return string.utf8.count <= bytes
+    }
+
+    private static func validOptionalUUID(_ record: [String: Any], key: String) -> Bool {
+        guard let value = record[key] else { return true }
+        guard let string = value as? String, UUID(uuidString: string)?.uuidString.lowercased() == string else { return false }
+        return true
     }
 
     private static func validOptionalHash(_ record: [String: Any], key: String) -> Bool {

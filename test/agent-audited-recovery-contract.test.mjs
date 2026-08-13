@@ -5,16 +5,19 @@ import test from "node:test";
 const root = new URL("../", import.meta.url);
 const read = (path) => readFile(new URL(path, root), "utf8");
 
-test("audited recovery is a closed v2 pending-to-terminal store", async () => {
+test("audited recovery is a closed v3 pending-prepared-terminal store", async () => {
   const source = await read(
     "native/macos/Sources/AgentPassNativeCore/NativeAgentSessionConsumeRecoveryStore.swift",
   );
-  assert.match(source, /private static let version = 2/);
+  assert.match(source, /private static let version = 3/);
   assert.match(source, /case pending\(NativeAgentSessionConsumeRecoveryEvidence\)/);
+  assert.match(source, /case auditPrepared\(NativeAgentSessionConsumeRecoveryPreparedRecord\)/);
   assert.match(source, /case audited\(NativeAgentSessionConsumeRecoveryAuditedRecord\)/);
+  assert.match(source, /records\[expected\.recoveryKey\] = \.auditPrepared\(preparedRecord\)/);
   assert.match(source, /records\[expected\.recoveryKey\] = \.audited\(auditedRecord\)/);
   assert.match(source, /try persistLocked\(\)/);
   assert.match(source, /"audit_sha256"/);
+  assert.match(source, /"audit_evidence_sha256"/);
   assert.match(source, /"result_sha256"/);
   assert.match(source, /"session_sha256"/);
   for (const forbidden of ["proof_bytes", "private_key", "connection_token", "cloud_lease", "repository_path"]) {
@@ -31,12 +34,14 @@ test("coordinator binds terminal recovery to Cloud result and durable audit rece
   assert.match(coordinator, /recoveryStore\.lookupExact\(/);
   assert.match(coordinator, /auditedRecovery\.sessionDigest == sessionDigest/);
   assert.match(coordinator, /throw NativeAgentSessionCoordinatorError\.sessionDenied/);
-  assert.match(coordinator, /auditReceipt = try audit\.appendAgentSessionAudit/);
+  assert.match(coordinator, /auditReceipt = try audit\.reconcileAgentSessionActivationAudit/);
   assert.match(coordinator, /auditDigest: auditReceipt\.recordDigest/);
-  assert.match(coordinator, /completeAfterLocalActivation\([\s\S]*auditedRecord: auditedRecord/);
+  assert.match(coordinator, /prepareForActivation\([\s\S]*preparedRecord: preparedRecord/);
+  assert.match(coordinator, /completeAfterAudit\([\s\S]*auditedRecord: auditedRecord/);
   assert.match(dependencies, /struct NativeAgentSessionAuditReceipt/);
   assert.match(dependencies, /func appendAgentSessionAudit[\s\S]*-> NativeAgentSessionAuditReceipt/);
-  assert.match(service, /let status = try appendAudit\(/);
+  assert.match(dependencies, /func reconcileAgentSessionActivationAudit/);
+  assert.match(service, /lookupAgentSessionActivationAudit\(/);
   assert.match(service, /recordDigest: recordDigest/);
 });
 

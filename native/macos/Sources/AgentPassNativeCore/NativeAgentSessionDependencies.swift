@@ -223,4 +223,13 @@ public protocol NativeAgentSessionAuditAppending: Sendable {
     @discardableResult
     func appendAgentSessionAudit(_ evidence: NativeAgentSessionAuditEvidence) throws
         -> NativeAgentSessionAuditReceipt
+
+    /// Reconciles the one activation event identified by the exact session and
+    /// canonical evidence digest. Implementations must return an existing
+    /// durable record when present, append only after verified absence, and
+    /// fail closed on duplicates or substitution.
+    @discardableResult
+    func reconcileAgentSessionActivationAudit(
+        _ evidence: NativeAgentSessionAuditEvidence
+    ) throws -> NativeAgentSessionAuditReceipt
 }

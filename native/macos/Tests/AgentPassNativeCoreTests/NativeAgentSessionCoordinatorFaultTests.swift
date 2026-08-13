@@ -212,6 +212,33 @@ private final class N3EAudit: NativeAgentSessionAuditAppending, @unchecked Senda
       recordDigest: Data(repeating: UInt8(index), count: 32), recordIndex: index)
   }
 
+  func reconcileAgentSessionActivationAudit(
+    _ evidence: NativeAgentSessionAuditEvidence
+  ) throws -> NativeAgentSessionAuditReceipt {
+    let digest = try evidence.evidenceDigest()
+    let existing: (Int, NativeAgentSessionAuditEvidence)? = try lock.withLock {
+      let candidates = try events.enumerated().compactMap {
+        index, candidate -> (Int, NativeAgentSessionAuditEvidence)? in
+        guard candidate.action == .sessionActivated else { return nil }
+        let candidateDigest = try candidate.evidenceDigest()
+        if candidate.sessionID == evidence.sessionID || candidateDigest == digest {
+          guard candidate == evidence else { throw N3EFault.injected }
+          return (index + 1, candidate)
+        }
+        return nil
+      }
+      guard candidates.count <= 1 else { throw N3EFault.injected }
+      return candidates.first
+    }
+    if let existing {
+      return try NativeAgentSessionAuditReceipt(
+        evidenceDigest: digest,
+        recordDigest: Data(repeating: UInt8(existing.0), count: 32),
+        recordIndex: existing.0)
+    }
+    return try appendAgentSessionAudit(evidence)
+  }
+
   func fail(_ action: NativeAgentSessionAuditAction) {
     _ = lock.withLock { failingActions.insert(action) }
   }
@@ -238,19 +265,42 @@ private final class N3ERecoveryStore: NativeAgentSessionConsumeRecoveryStoring,
     }
   }
 
-  func completeAfterLocalActivation(
+  func prepareForActivation(
     _ expected: NativeAgentSessionConsumeRecoveryEvidence,
-    auditedRecord: NativeAgentSessionConsumeRecoveryAuditedRecord
-  ) throws -> NativeAgentSessionConsumeRecoveryAuditedRecord {
+    preparedRecord: NativeAgentSessionConsumeRecoveryPreparedRecord
+  ) throws -> NativeAgentSessionConsumeRecoveryPreparedRecord {
     try lock.withLock {
-      guard auditedRecord.evidence == expected else {
+      guard preparedRecord.evidence == expected else {
         throw NativeAgentSessionConsumeRecoveryStoreError.conflict
       }
       switch state {
       case .pending(let existing) where existing == expected:
+        state = .auditPrepared(preparedRecord)
+      case .auditPrepared(let existing) where existing == preparedRecord:
+        break
+      default:
+        throw NativeAgentSessionConsumeRecoveryStoreError.conflict
+      }
+      return preparedRecord
+    }
+  }
+
+  func completeAfterAudit(
+    _ expected: NativeAgentSessionConsumeRecoveryEvidence,
+    preparedRecord: NativeAgentSessionConsumeRecoveryPreparedRecord,
+    auditedRecord: NativeAgentSessionConsumeRecoveryAuditedRecord
+  ) throws -> NativeAgentSessionConsumeRecoveryAuditedRecord {
+    try lock.withLock {
+      guard preparedRecord.evidence == expected,
+        auditedRecord.preparedRecord == preparedRecord
+      else { throw NativeAgentSessionConsumeRecoveryStoreError.conflict }
+      switch state {
+      case .auditPrepared(let existing) where existing == preparedRecord:
         state = .audited(auditedRecord)
-      case .audited(let existing) where existing == auditedRecord: break
-      default: throw NativeAgentSessionConsumeRecoveryStoreError.conflict
+      case .audited(let existing) where existing == auditedRecord:
+        break
+      default:
+        throw NativeAgentSessionConsumeRecoveryStoreError.conflict
       }
       return auditedRecord
     }
@@ -265,6 +315,10 @@ private final class N3ERecoveryStore: NativeAgentSessionConsumeRecoveryStoring,
       case .missing: return .missing
       case .pending(let existing):
         guard existing == expected else {
+          throw NativeAgentSessionConsumeRecoveryStoreError.conflict
+        }
+      case .auditPrepared(let existing):
+        guard existing.evidence == expected else {
           throw NativeAgentSessionConsumeRecoveryStoreError.conflict
         }
       case .audited(let existing):
@@ -384,6 +438,7 @@ private func n3eFixture(
   randomByte: UInt8 = 1,
   recoveryStore: any NativeAgentSessionConsumeRecoveryStoring = N3ERecoveryStore(),
   grantConsumer: N3EGrantConsumer? = nil,
+  auditAppender: N3EAudit? = nil,
   bootstrapIssuedAt: Int64 = n3eWall
 ) throws -> N3EFixture {
   let binding = try n3eBinding()
@@ -409,7 +464,7 @@ private func n3eFixture(
   let connection = N3EConnection()
   let observer = N3EBindingObserver(binding)
   let grant = grantConsumer ?? N3EGrantConsumer(lease: lease, ambiguity: ambiguity)
-  let audit = N3EAudit()
+  let audit = auditAppender ?? N3EAudit()
   let wall = N3EWallClock(bootstrapIssuedAt + 1_000)
   let monotonic = N3EMonotonicClock(2_000)
   let coordinator = try NativeAgentSessionCoordinator(
@@ -560,7 +615,9 @@ func n3eRegistryAndActivationAuditFaults() throws {
       bootstrapID: auditFailure.bootstrapID, proof: auditFailure.proof)
   }
   #expect(try n3eDirectStatus(auditFailure).state == .revoked)
-  #expect(auditFailure.audit.events.map(\.action) == [.sessionActivated])
+  #expect(
+    auditFailure.audit.events.map(\.action)
+      == [.sessionActivated, .sessionInvalidated])
 
   let capacityFailure = try n3eFixture(globalLimit: 1)
   let blockingLease = try n3eLease(
@@ -793,5 +850,57 @@ func n3eRestartAfterCloudCommitConvergesExactlyWithoutRestoringAuthority() throw
   #expect(afterAuditedRestart.audit.events.isEmpty)
   #expect(throws: NativeAgentSessionRegistryError.sessionMissing) {
     _ = try n3eDirectStatus(afterAuditedRestart)
+  }
+}
+
+@Test("N3-E3c-1b restart reconciles a durable activation audit exactly once")
+func n3ePreparedAuditRestartReusesExactDurableRecord() throws {
+  let requestedRoot = FileManager.default.temporaryDirectory
+    .appendingPathComponent("agentpass-n3e-audit-reconcile-\(UUID().uuidString)")
+  try FileManager.default.createDirectory(
+    at: requestedRoot, withIntermediateDirectories: true,
+    attributes: [.posixPermissions: 0o700])
+  let canonicalPath =
+    requestedRoot.path.hasPrefix("/var/")
+    ? "/private\(requestedRoot.path)" : requestedRoot.path
+  let root = URL(fileURLWithPath: canonicalPath, isDirectory: true)
+  defer { try? FileManager.default.removeItem(at: root) }
+  let recoveryPath = root.appendingPathComponent("consume-recovery.json").path
+  let binding = try n3eBinding()
+  let cloud = N3EGrantConsumer(lease: try n3eLease(binding: binding))
+  let audit = N3EAudit()
+  audit.fail(.sessionActivated)
+
+  let first = try n3eFixture(
+    recoveryStore: try NativeAgentSessionConsumeRecoveryStore(path: recoveryPath),
+    grantConsumer: cloud, auditAppender: audit)
+  #expect(throws: NativeAgentSessionCoordinatorError.auditUnavailable) {
+    _ = try first.coordinator.start(bootstrapID: first.bootstrapID, proof: first.proof)
+  }
+  #expect(cloud.commitCount == 1)
+  #expect(audit.events.filter { $0.action == .sessionActivated }.count == 1)
+  #expect(
+    String(decoding: try Data(contentsOf: URL(fileURLWithPath: recoveryPath)), as: UTF8.self)
+      .contains("\"state\":\"audit_prepared\""))
+  #expect(try n3eDirectStatus(first).state == .revoked)
+
+  let restarted = try n3eFixture(
+    randomByte: 2,
+    recoveryStore: try NativeAgentSessionConsumeRecoveryStore(path: recoveryPath),
+    grantConsumer: cloud,
+    auditAppender: audit,
+    bootstrapIssuedAt: n3eWall + 5_000)
+  #expect(throws: NativeAgentSessionCoordinatorError.sessionDenied) {
+    _ = try restarted.coordinator.start(
+      bootstrapID: restarted.bootstrapID, proof: restarted.proof)
+  }
+  #expect(cloud.commitCount == 1)
+  #expect(cloud.calls == 1)
+  #expect(audit.events.filter { $0.action == .sessionActivated }.count == 1)
+  #expect(
+    String(decoding: try Data(contentsOf: URL(fileURLWithPath: recoveryPath)), as: UTF8.self)
+      .contains("\"state\":\"audited\""))
+  #expect(throws: NativeAgentSessionRegistryError.sessionMissing) {
+    _ = try n3eDirectStatus(restarted)
   }
 }

@@ -5,12 +5,15 @@ import Testing
 
 @testable import AgentPassNativeCore
 
-// N3-E3c-1 freezes the production surface already being introduced by the
-// recovery-store transition:
+// N3-E3c-1b freezes the closed production surface of the v3 recovery-store
+// transition:
 //
 //   NativeAgentSessionConsumeRecoveryAuditedRecord
-//   NativeAgentSessionConsumeRecoveryStoring.completeAfterLocalActivation(
-//     _:auditedRecord:
+//   NativeAgentSessionConsumeRecoveryStoring.prepareForActivation(
+//     _:preparedRecord:
+//   ) -> NativeAgentSessionConsumeRecoveryPreparedRecord
+//   NativeAgentSessionConsumeRecoveryStoring.completeAfterAudit(
+//     _:preparedRecord:auditedRecord:
 //   ) -> NativeAgentSessionConsumeRecoveryAuditedRecord
 //   NativeAgentSessionConsumeRecoveryStoring.lookupExact(
 //     _:
@@ -40,13 +43,18 @@ private let n3eAuditedImmutableKeys: Set<String> = [
   "worktree_binding_sha256",
 ]
 
-private let n3eAuditedTerminalKeys: Set<String> = n3eAuditedImmutableKeys.union([
-  "audit_sha256", "expires_at_ms", "result_sha256", "session_sha256", "state",
+private let n3eAuditedPreparedKeys: Set<String> = n3eAuditedImmutableKeys.union([
+  "audit_evidence_sha256", "expires_at_ms", "result_sha256", "session_id",
+  "session_sha256", "state",
+])
+
+private let n3eAuditedTerminalKeys: Set<String> = n3eAuditedPreparedKeys.union([
+  "audit_sha256"
 ])
 
 private let n3eAuditedForbiddenKeys: Set<String> = [
   "bootstrap_id", "cloud_lease", "connection_token", "credential", "lease", "lease_id",
-  "path", "pid", "proof", "proof_bytes", "private_key", "secret", "session_id",
+  "path", "pid", "proof", "proof_bytes", "private_key", "secret",
 ]
 
 private func n3eAuditedHex(_ data: Data) -> String {
@@ -157,13 +165,27 @@ private func n3eAuditedRecord(
       authorityGeneration: evidence.authorityGeneration,
       keyGeneration: evidence.keyGeneration),
     sessionID: sessionID)
-  let auditDigest = try auditEvidence.evidenceDigest()
-  return try NativeAgentSessionConsumeRecoveryAuditedRecord(
+  let auditEvidenceDigest = try auditEvidence.evidenceDigest()
+  let prepared = try NativeAgentSessionConsumeRecoveryPreparedRecord(
     evidence: evidence,
+    sessionID: sessionID,
     sessionDigest: sessionDigest,
     resultDigest: resultDigest,
-    auditDigest: auditDigest,
+    auditEvidenceDigest: auditEvidenceDigest,
     expiresAtMilliseconds: terminalExpiry)
+  return try NativeAgentSessionConsumeRecoveryAuditedRecord(
+    preparedRecord: prepared,
+    auditDigest: Data(repeating: 0x44, count: 32))
+}
+
+private func n3eComplete(
+  _ store: NativeAgentSessionConsumeRecoveryStore,
+  evidence: NativeAgentSessionConsumeRecoveryEvidence,
+  record: NativeAgentSessionConsumeRecoveryAuditedRecord
+) throws {
+  _ = try store.prepareForActivation(evidence, preparedRecord: record.preparedRecord)
+  _ = try store.completeAfterAudit(
+    evidence, preparedRecord: record.preparedRecord, auditedRecord: record)
 }
 
 private func n3eAuditedRecoveryDirectory() throws -> (root: URL, path: String) {
@@ -188,14 +210,14 @@ func n3eAuditedRecoveryTerminalShapeIsFrozen() throws {
   let record = try n3eAuditedRecord(evidence: evidence)
   let store = try NativeAgentSessionConsumeRecoveryStore(path: path)
   _ = try store.save(evidence)
-  _ = try store.completeAfterLocalActivation(evidence, auditedRecord: record)
+  _ = try n3eComplete(store, evidence: evidence, record: record)
 
   let bytes = try Data(contentsOf: URL(fileURLWithPath: path))
   #expect(bytes.count <= 256 * 1024)
   #expect(bytes.last == 0x0a)
   let payload = Data(bytes.dropLast())
   let object = try NativeStrictJSON.object(from: payload, maxBytes: 256 * 1024, maxDepth: 8)
-  #expect(n3eAuditedInt(object["version"]) == 2)
+  #expect(n3eAuditedInt(object["version"]) == 3)
   let records = try #require(object["records"] as? [[String: Any]])
   let terminal = try #require(records.first)
   #expect(Set(terminal.keys) == n3eAuditedTerminalKeys)
@@ -203,6 +225,8 @@ func n3eAuditedRecoveryTerminalShapeIsFrozen() throws {
   #expect(terminal.keys.allSatisfy { !n3eAuditedForbiddenKeys.contains($0) })
   #expect(n3eAuditedData(terminal["session_sha256"]) != nil)
   #expect(n3eAuditedData(terminal["result_sha256"]) != nil)
+  #expect(n3eAuditedData(terminal["audit_evidence_sha256"]) != nil)
+  #expect(terminal["session_id"] as? String == n3eAuditedSessionID)
   #expect(n3eAuditedData(terminal["audit_sha256"]) != nil)
   #expect(n3eAuditedInt(terminal["expires_at_ms"]) == n3eAuditedTerminalExpiry)
 
@@ -216,29 +240,34 @@ func n3eAuditedRecoveryTerminalShapeIsFrozen() throws {
 @Test("N3-E3c-1 terminal expiry cannot extend the immutable recovery bound")
 func n3eAuditedRecoveryExpiryIsBounded() throws {
   let evidence = try n3eAuditedRecoveryEvidence()
-  let shortened = try NativeAgentSessionConsumeRecoveryAuditedRecord(
+  let prepared = try NativeAgentSessionConsumeRecoveryPreparedRecord(
     evidence: evidence,
+    sessionID: n3eAuditedSessionID,
     sessionDigest: Data(repeating: 1, count: 32),
     resultDigest: Data(repeating: 2, count: 32),
-    auditDigest: Data(repeating: 3, count: 32),
+    auditEvidenceDigest: Data(repeating: 3, count: 32),
     expiresAtMilliseconds: n3eAuditedTerminalExpiry)
+  let shortened = try NativeAgentSessionConsumeRecoveryAuditedRecord(
+    preparedRecord: prepared, auditDigest: Data(repeating: 4, count: 32))
   #expect(shortened.expiresAtMilliseconds == n3eAuditedTerminalExpiry)
   #expect(shortened.expiresAtMilliseconds < evidence.recoveryExpiresAtMilliseconds)
 
   #expect(throws: NativeAgentSessionConsumeRecoveryStoreError.invalidEvidence) {
-    _ = try NativeAgentSessionConsumeRecoveryAuditedRecord(
+    _ = try NativeAgentSessionConsumeRecoveryPreparedRecord(
       evidence: evidence,
+      sessionID: n3eAuditedSessionID,
       sessionDigest: Data(repeating: 1, count: 32),
       resultDigest: Data(repeating: 2, count: 32),
-      auditDigest: Data(repeating: 3, count: 32),
+      auditEvidenceDigest: Data(repeating: 3, count: 32),
       expiresAtMilliseconds: evidence.recoveryExpiresAtMilliseconds + 1)
   }
   #expect(throws: NativeAgentSessionConsumeRecoveryStoreError.invalidEvidence) {
-    _ = try NativeAgentSessionConsumeRecoveryAuditedRecord(
+    _ = try NativeAgentSessionConsumeRecoveryPreparedRecord(
       evidence: evidence,
+      sessionID: n3eAuditedSessionID,
       sessionDigest: Data(repeating: 1, count: 31),
       resultDigest: Data(repeating: 2, count: 32),
-      auditDigest: Data(repeating: 3, count: 32),
+      auditEvidenceDigest: Data(repeating: 3, count: 32),
       expiresAtMilliseconds: n3eAuditedTerminalExpiry)
   }
 }
@@ -278,17 +307,27 @@ func n3eAuditedRecoveryTransitionIsOneWay() throws {
   let store = try NativeAgentSessionConsumeRecoveryStore(path: path)
   _ = try store.save(evidence)
 
-  #expect(try store.completeAfterLocalActivation(evidence, auditedRecord: record) == record)
-  #expect(try store.completeAfterLocalActivation(evidence, auditedRecord: record) == record)
+  #expect(
+    try store.prepareForActivation(evidence, preparedRecord: record.preparedRecord)
+      == record.preparedRecord)
+  #expect(
+    try store.prepareForActivation(evidence, preparedRecord: record.preparedRecord)
+      == record.preparedRecord)
+  #expect(
+    try store.completeAfterAudit(
+      evidence, preparedRecord: record.preparedRecord, auditedRecord: record) == record)
+  #expect(
+    try store.completeAfterAudit(
+      evidence, preparedRecord: record.preparedRecord, auditedRecord: record) == record)
   #expect(try store.lookupExact(evidence) == .audited(record))
 
   #expect(throws: NativeAgentSessionConsumeRecoveryStoreError.conflict) {
     _ = try store.save(evidence)
   }
   #expect(throws: NativeAgentSessionConsumeRecoveryStoreError.conflict) {
-    _ = try store.completeAfterLocalActivation(
-      evidence,
-      auditedRecord: try n3eAuditedRecord(evidence: evidence, terminalExpiry: n3eAuditedAt))
+    let changed = try n3eAuditedRecord(evidence: evidence, terminalExpiry: n3eAuditedAt)
+    _ = try store.completeAfterAudit(
+      evidence, preparedRecord: changed.preparedRecord, auditedRecord: changed)
   }
   #expect(throws: NativeAgentSessionConsumeRecoveryStoreError.conflict) {
     _ = try store.lookupExact(try n3eAuditedRecoveryEvidence(worktreeByte: 0xab))
@@ -303,7 +342,7 @@ func n3eAuditedRecoveryRestartHasExactRetryAndNoAuthority() throws {
   let record = try n3eAuditedRecord(evidence: evidence)
   let firstStore = try NativeAgentSessionConsumeRecoveryStore(path: path)
   _ = try firstStore.save(evidence)
-  _ = try firstStore.completeAfterLocalActivation(evidence, auditedRecord: record)
+  _ = try n3eComplete(firstStore, evidence: evidence, record: record)
 
   // Reopening the store returns the same terminal bytes without reconstructing
   // local authority. Coordinator tests separately cover exact Cloud recovery.
@@ -332,7 +371,7 @@ func n3eAuditedRecoveryRestartRejectsMalformedTerminalRecord() throws {
   let record = try n3eAuditedRecord(evidence: evidence)
   let store = try NativeAgentSessionConsumeRecoveryStore(path: path)
   _ = try store.save(evidence)
-  _ = try store.completeAfterLocalActivation(evidence, auditedRecord: record)
+  _ = try n3eComplete(store, evidence: evidence, record: record)
 
   var text = try String(contentsOfFile: path, encoding: .utf8)
   text = text.replacingOccurrences(

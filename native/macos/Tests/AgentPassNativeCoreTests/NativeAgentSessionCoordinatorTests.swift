@@ -91,6 +91,12 @@ private final class CoordinatorAudit: NativeAgentSessionAuditAppending, @uncheck
         ? Data(repeating: 0xff, count: 32) : evidence.evidenceDigest(),
       recordDigest: Data(repeating: UInt8(index), count: 32), recordIndex: index)
   }
+
+  func reconcileAgentSessionActivationAudit(
+    _ evidence: NativeAgentSessionAuditEvidence
+  ) throws -> NativeAgentSessionAuditReceipt {
+    try appendAgentSessionAudit(evidence)
+  }
 }
 
 private final class CoordinatorRecoveryStore: NativeAgentSessionConsumeRecoveryStoring,
@@ -116,16 +122,37 @@ private final class CoordinatorRecoveryStore: NativeAgentSessionConsumeRecoveryS
     }
   }
 
-  func completeAfterLocalActivation(
+  func prepareForActivation(
     _ expected: NativeAgentSessionConsumeRecoveryEvidence,
-    auditedRecord: NativeAgentSessionConsumeRecoveryAuditedRecord
-  ) throws -> NativeAgentSessionConsumeRecoveryAuditedRecord {
+    preparedRecord: NativeAgentSessionConsumeRecoveryPreparedRecord
+  ) throws -> NativeAgentSessionConsumeRecoveryPreparedRecord {
     try lock.withLock {
-      guard auditedRecord.evidence == expected else {
+      guard preparedRecord.evidence == expected else {
         throw NativeAgentSessionConsumeRecoveryStoreError.conflict
       }
       switch state {
       case .pending(let existing) where existing == expected:
+        state = .auditPrepared(preparedRecord)
+      case .auditPrepared(let existing) where existing == preparedRecord:
+        break
+      default:
+        throw NativeAgentSessionConsumeRecoveryStoreError.conflict
+      }
+      return preparedRecord
+    }
+  }
+
+  func completeAfterAudit(
+    _ expected: NativeAgentSessionConsumeRecoveryEvidence,
+    preparedRecord: NativeAgentSessionConsumeRecoveryPreparedRecord,
+    auditedRecord: NativeAgentSessionConsumeRecoveryAuditedRecord
+  ) throws -> NativeAgentSessionConsumeRecoveryAuditedRecord {
+    try lock.withLock {
+      guard preparedRecord.evidence == expected,
+        auditedRecord.preparedRecord == preparedRecord
+      else { throw NativeAgentSessionConsumeRecoveryStoreError.conflict }
+      switch state {
+      case .auditPrepared(let existing) where existing == preparedRecord:
         state = .audited(auditedRecord)
       case .audited(let existing) where existing == auditedRecord:
         break
@@ -145,6 +172,10 @@ private final class CoordinatorRecoveryStore: NativeAgentSessionConsumeRecoveryS
       case .missing: return .missing
       case .pending(let existing):
         guard existing == expected else {
+          throw NativeAgentSessionConsumeRecoveryStoreError.conflict
+        }
+      case .auditPrepared(let existing):
+        guard existing.evidence == expected else {
           throw NativeAgentSessionConsumeRecoveryStoreError.conflict
         }
       case .audited(let existing):
@@ -192,6 +223,12 @@ private final class InvalidatingCoordinatorAudit: NativeAgentSessionAuditAppendi
       evidenceDigest: evidence.evidenceDigest(),
       recordDigest: Data(repeating: UInt8(index), count: 32),
       recordIndex: index)
+  }
+
+  func reconcileAgentSessionActivationAudit(
+    _ evidence: NativeAgentSessionAuditEvidence
+  ) throws -> NativeAgentSessionAuditReceipt {
+    try appendAgentSessionAudit(evidence)
   }
 }
 
@@ -355,7 +392,7 @@ private func coordinatorFixture(
   #expect(throws: NativeAgentSessionCoordinatorError.auditUnavailable) {
     _ = try fixture.coordinator.start(bootstrapID: fixture.bootstrapID, proof: fixture.proof)
   }
-  #expect(fixture.audit.events.map(\.action) == [.sessionActivated])
+  #expect(fixture.audit.events.map(\.action) == [.sessionActivated, .sessionInvalidated])
   let status = try fixture.registry.status(
     sessionID: coordinatorSessionID, connectionTokenIdentity: coordinatorToken,
     binding: try coordinatorBinding(),

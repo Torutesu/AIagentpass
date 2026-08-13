@@ -2836,6 +2836,13 @@ private final class ServiceEndpoint: NSObject, AgentPassNativeServiceProtocol, N
     private func appendAudit(_ event: NativeAuditEvent, timestamp: Date = Date()) throws -> NativeAuditStatus {
         authorizationLock.lock()
         defer { authorizationLock.unlock() }
+        return try appendAuditLocked(event, timestamp: timestamp)
+    }
+
+    /// Caller must hold `authorizationLock`. Keeping reconciliation lookup and
+    /// append under this same service-wide mutation gate makes verified absence
+    /// and the subsequent durable append one serialized decision.
+    private func appendAuditLocked(_ event: NativeAuditEvent, timestamp: Date) throws -> NativeAuditStatus {
         if let pendingRecovery, pendingRecovery.expiresAt <= timestamp { self.pendingRecovery = nil }
         guard pendingRecovery?.freezesMutations != true else {
             throw AgentPassNativeError.invalidConfiguration("Audit evidence is frozen while offline recovery is pending")
@@ -2876,6 +2883,55 @@ private final class ServiceEndpoint: NSObject, AgentPassNativeServiceProtocol, N
             recordDigest: recordDigest,
             recordIndex: status.entries
         )
+    }
+
+    func reconcileAgentSessionActivationAudit(_ evidence: NativeAgentSessionAuditEvidence) throws -> NativeAgentSessionAuditReceipt {
+        guard evidence.action == .sessionActivated,
+              let sessionIDString = evidence.sessionID,
+              let sessionID = UUID(uuidString: sessionIDString),
+              sessionID.uuidString.lowercased() == sessionIDString,
+              let agentID = UUID(uuidString: evidence.binding.agentID),
+              agentID.uuidString.lowercased() == evidence.binding.agentID else {
+            throw AgentPassNativeError.invalidSignature("Native Agent activation audit reconciliation input is invalid")
+        }
+        let evidenceDigestData = try evidence.evidenceDigest()
+        authorizationLock.lock()
+        defer { authorizationLock.unlock() }
+
+        switch try auditLog.lookupAgentSessionActivationAudit(
+            sessionID: sessionID,
+            expectedAgentID: agentID,
+            evidenceDigest: evidenceDigestData
+        ) {
+        case .exact(let receipt):
+            guard let recordDigest = Self.lowercaseHexDigest(receipt.recordHash) else {
+                throw AgentPassNativeError.invalidSignature("Native Agent activation audit receipt is invalid")
+            }
+            return try NativeAgentSessionAuditReceipt(
+                evidenceDigest: evidenceDigestData,
+                recordDigest: recordDigest,
+                recordIndex: receipt.index
+            )
+        case .conflict:
+            throw AgentPassNativeError.invalidSignature("Native Agent activation audit conflicts with durable evidence")
+        case .missing:
+            let evidenceDigest = evidenceDigestData.map { String(format: "%02x", $0) }.joined()
+            let status = try appendAuditLocked(NativeAuditEvent(
+                operation: "agent.session.session_activated",
+                decision: "allow",
+                requestID: sessionIDString,
+                agentID: evidence.binding.agentID,
+                payloadSHA256: evidenceDigest
+            ), timestamp: Date())
+            guard let recordDigest = Self.lowercaseHexDigest(status.headHash) else {
+                throw AgentPassNativeError.invalidSignature("Native Agent audit returned an invalid durable head")
+            }
+            return try NativeAgentSessionAuditReceipt(
+                evidenceDigest: evidenceDigestData,
+                recordDigest: recordDigest,
+                recordIndex: status.entries
+            )
+        }
     }
 
     private static func lowercaseHexDigest(_ value: String) -> Data? {

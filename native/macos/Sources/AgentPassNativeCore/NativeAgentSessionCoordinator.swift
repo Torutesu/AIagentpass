@@ -34,6 +34,7 @@ public final class NativeAgentSessionCoordinator: @unchecked Sendable {
     var lease: NativeAgentVerifiedCloudLease?
     var localLeaseID: String?
     var recoveryEvidence: NativeAgentSessionConsumeRecoveryEvidence?
+    var preparedRecovery: NativeAgentSessionConsumeRecoveryPreparedRecord?
     var auditedRecovery: NativeAgentSessionConsumeRecoveryAuditedRecord?
     var attempts: Int
   }
@@ -178,7 +179,7 @@ public final class NativeAgentSessionCoordinator: @unchecked Sendable {
       attempt = Attempt(
         bootstrapID: bootstrapID.lowercased(), proofDigest: proofDigest,
         evidence: evidence, binding: binding, lease: nil, localLeaseID: nil,
-        recoveryEvidence: nil, auditedRecovery: nil, attempts: 1)
+        recoveryEvidence: nil, preparedRecovery: nil, auditedRecovery: nil, attempts: 1)
     }
     stateLock.withLock { pendingAttempt = attempt }
 
@@ -205,6 +206,9 @@ public final class NativeAgentSessionCoordinator: @unchecked Sendable {
             recoveryEvidence, nowMilliseconds: now)
         case .pending(let savedEvidence):
           attempt.recoveryEvidence = savedEvidence
+        case .auditPrepared(let preparedRecord):
+          attempt.recoveryEvidence = preparedRecord.evidence
+          attempt.preparedRecovery = preparedRecord
         case .audited(let auditedRecord):
           attempt.recoveryEvidence = auditedRecord.evidence
           attempt.auditedRecovery = auditedRecord
@@ -214,6 +218,38 @@ public final class NativeAgentSessionCoordinator: @unchecked Sendable {
       }
     }
     stateLock.withLock { pendingAttempt = attempt }
+
+    // `audit_prepared` is already a durable, authority-free hand-off. Reconcile
+    // it before any network retry so an unavailable or expired Cloud Lease
+    // cannot force a duplicate audit append. This path never activates the
+    // in-memory registry and therefore cannot recreate authority after restart.
+    if let preparedRecovery = attempt.preparedRecovery,
+      let recoveryEvidence = attempt.recoveryEvidence
+    {
+      do {
+        let auditEvidence = try NativeAgentSessionAuditEvidence(
+          action: .sessionActivated, sessionID: preparedRecovery.sessionID,
+          binding: attempt.binding)
+        let auditEvidenceDigest = try auditEvidence.evidenceDigest()
+        guard preparedRecovery.evidence == recoveryEvidence,
+          preparedRecovery.auditEvidenceDigest == auditEvidenceDigest
+        else { throw NativeAgentSessionCoordinatorError.auditUnavailable }
+        let receipt = try audit.reconcileAgentSessionActivationAudit(auditEvidence)
+        guard receipt.evidenceDigest == auditEvidenceDigest else {
+          throw NativeAgentSessionCoordinatorError.auditUnavailable
+        }
+        let auditedRecord = try NativeAgentSessionConsumeRecoveryAuditedRecord(
+          preparedRecord: preparedRecovery, auditDigest: receipt.recordDigest)
+        _ = try recoveryStore.completeAfterAudit(
+          recoveryEvidence, preparedRecord: preparedRecovery,
+          auditedRecord: auditedRecord)
+      } catch {
+        stateLock.withLock { pendingAttempt = attempt }
+        throw NativeAgentSessionCoordinatorError.auditUnavailable
+      }
+      stateLock.withLock { pendingAttempt = nil }
+      throw NativeAgentSessionCoordinatorError.sessionDenied
+    }
 
     if attempt.lease == nil {
       do {
@@ -246,8 +282,25 @@ public final class NativeAgentSessionCoordinator: @unchecked Sendable {
     } catch {
       throw NativeAgentSessionCoordinatorError.leaseDenied
     }
+    let auditEvidence: NativeAgentSessionAuditEvidence
+    let auditEvidenceDigest: Data
+    do {
+      auditEvidence = try NativeAgentSessionAuditEvidence(
+        action: .sessionActivated, sessionID: lease.sessionID, binding: attempt.binding)
+      auditEvidenceDigest = try auditEvidence.evidenceDigest()
+    } catch {
+      throw NativeAgentSessionCoordinatorError.auditUnavailable
+    }
+    guard let recoveryEvidence = attempt.recoveryEvidence else {
+      throw NativeAgentSessionCoordinatorError.activationDenied
+    }
     if let auditedRecovery = attempt.auditedRecovery {
-      guard auditedRecovery.sessionDigest == sessionDigest else {
+      guard auditedRecovery.sessionDigest == sessionDigest,
+        auditedRecovery.sessionID == lease.sessionID,
+        auditedRecovery.auditEvidenceDigest == auditEvidenceDigest,
+        auditedRecovery.expiresAtMilliseconds
+          == min(recoveryEvidence.recoveryExpiresAtMilliseconds, lease.expiresAtMilliseconds)
+      else {
         throw NativeAgentSessionCoordinatorError.leaseDenied
       }
       stateLock.withLock { pendingAttempt = nil }
@@ -292,48 +345,45 @@ public final class NativeAgentSessionCoordinator: @unchecked Sendable {
       stateLock.withLock { pendingAttempt = nil }
       throw error
     }
-    let auditReceipt: NativeAgentSessionAuditReceipt
-    do {
-      let auditEvidence = try NativeAgentSessionAuditEvidence(
-        action: .sessionActivated, sessionID: status.sessionID, binding: attempt.binding)
-      auditReceipt = try audit.appendAgentSessionAudit(auditEvidence)
-      guard auditReceipt.evidenceDigest == (try auditEvidence.evidenceDigest()) else {
-        throw NativeAgentSessionCoordinatorError.auditUnavailable
-      }
-    } catch {
-      try? registry.invalidate(
-        sessionID: status.sessionID,
-        connectionTokenIdentity: connectionTokenIdentity,
-        as: .revoked)
-      stateLock.withLock { pendingAttempt = nil }
-      throw NativeAgentSessionCoordinatorError.auditUnavailable
-    }
-
     let result = NativeAgentSessionActivationResult(status: status, binding: attempt.binding)
-    guard let recoveryEvidence = attempt.recoveryEvidence else {
-      invalidateSession(
-        sessionID: status.sessionID, binding: attempt.binding,
-        reasonCode: "recovery_store_unavailable")
-      stateLock.withLock { pendingAttempt = nil }
-      throw NativeAgentSessionCoordinatorError.activationDenied
-    }
+    let preparedRecord: NativeAgentSessionConsumeRecoveryPreparedRecord
     do {
-      let resultDigest = try Self.activationResultDigest(result)
-      let auditedRecord = try NativeAgentSessionConsumeRecoveryAuditedRecord(
+      preparedRecord = try NativeAgentSessionConsumeRecoveryPreparedRecord(
         evidence: recoveryEvidence,
+        sessionID: lease.sessionID,
         sessionDigest: sessionDigest,
-        resultDigest: resultDigest,
-        auditDigest: auditReceipt.recordDigest,
+        resultDigest: Self.activationResultDigest(result),
+        auditEvidenceDigest: auditEvidenceDigest,
         expiresAtMilliseconds: min(
           recoveryEvidence.recoveryExpiresAtMilliseconds, lease.expiresAtMilliseconds))
-      _ = try recoveryStore.completeAfterLocalActivation(
-        recoveryEvidence, auditedRecord: auditedRecord)
+      attempt.preparedRecovery = try recoveryStore.prepareForActivation(
+        recoveryEvidence, preparedRecord: preparedRecord)
+      stateLock.withLock { pendingAttempt = attempt }
     } catch {
       invalidateSession(
         sessionID: status.sessionID, binding: attempt.binding,
         reasonCode: "recovery_store_unavailable")
       stateLock.withLock { pendingAttempt = nil }
       throw NativeAgentSessionCoordinatorError.activationDenied
+    }
+
+    let auditReceipt: NativeAgentSessionAuditReceipt
+    do {
+      auditReceipt = try audit.reconcileAgentSessionActivationAudit(auditEvidence)
+      guard auditReceipt.evidenceDigest == auditEvidenceDigest else {
+        throw NativeAgentSessionCoordinatorError.auditUnavailable
+      }
+      let auditedRecord = try NativeAgentSessionConsumeRecoveryAuditedRecord(
+        preparedRecord: preparedRecord, auditDigest: auditReceipt.recordDigest)
+      _ = try recoveryStore.completeAfterAudit(
+        recoveryEvidence, preparedRecord: preparedRecord,
+        auditedRecord: auditedRecord)
+    } catch {
+      invalidateSession(
+        sessionID: status.sessionID, binding: attempt.binding,
+        reasonCode: "audit_unavailable")
+      stateLock.withLock { pendingAttempt = attempt }
+      throw NativeAgentSessionCoordinatorError.auditUnavailable
     }
 
     let published = stateLock.withLock { () -> Bool in
