@@ -74,7 +74,7 @@ function validateSafeMetadata(value, depth, state) {
     if (RAW_OUTPUT_KEYS.has(normalizedKey) || (UNSAFE_KEY.test(key) && !SAFE_DIGEST_KEY.test(normalizedKey))) {
       fail("unsafe_metadata");
     }
-    if (SAFE_DIGEST_KEY.test(normalizedKey) && child !== null && (typeof child !== "string" || !SHA256.test(child))) {
+    if (SAFE_DIGEST_KEY.test(normalizedKey) && child !== null && (typeof child !== "string" || !/^(?:sha256:)?[0-9a-f]{64}$/u.test(child))) {
       fail("unsafe_metadata");
     }
     validateSafeMetadata(child, depth + 1, state);

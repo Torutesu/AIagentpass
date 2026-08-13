@@ -132,6 +132,7 @@ test("accepts digest-only command evidence but rejects paths, raw output, and se
     }
   };
   assert.match(evidenceDigest(safe), /^[0-9a-f]{64}$/u);
+  assert.match(evidenceDigest({ postgres: { image_digest: `sha256:${"c".repeat(64)}` } }), /^[0-9a-f]{64}$/u);
 
   for (const unsafe of [
     { path: "/tmp/qualification.json" },
