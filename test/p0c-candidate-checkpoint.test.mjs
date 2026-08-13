@@ -11,7 +11,8 @@ import {
   readCandidateCheckpoint,
   validateCandidateCheckpoint,
   verifyCandidateCheckpoint,
-  withVerifiedCandidateCheckpoint
+  withVerifiedCandidateCheckpoint,
+  writeCandidateCheckpoint
 } from '../scripts/release/p0c/lib/candidate-checkpoint.mjs';
 
 const digest = (value) => crypto.createHash('sha256').update(value).digest('hex');
@@ -85,6 +86,17 @@ test('canonical and schema validation reject tampering, reordered objects, and m
   assert.throws(() => readCandidateCheckpoint(value.checkpoint, { production: false }), /digest mismatch|canonical/);
 });
 
+test('rejects duplicate JSON keys even when the duplicate value is unchanged', () => {
+  const value = fixture();
+  mintCandidateCheckpoint(request(value), { production: false, identityReader: value.identityReader });
+  const artifactLine = `  "artifact_sha256": "${'1'.repeat(64)}",`;
+  const duplicateLine = `${artifactLine}\n${artifactLine}`;
+  const bytes = fs.readFileSync(value.checkpoint, 'utf8');
+  assert.equal(bytes.includes(artifactLine), true);
+  fs.writeFileSync(value.checkpoint, bytes.replace(artifactLine, duplicateLine), { mode: 0o600 });
+  assert.throws(() => readCandidateCheckpoint(value.checkpoint, { production: false }), /canonical JSON/);
+});
+
 test('symlink, hard-link, mode, owner, and digest substitutions fail closed', () => {
   const value = fixture();
   const linkPath = path.join(value.root, 'link.app');
@@ -112,6 +124,113 @@ test('verification re-observes every object and catches substitution during use'
   assert.doesNotThrow(() => verifyCandidateCheckpoint(value.checkpoint, { production: false, identityReader: value.identityReader, expected: { artifactSha256: '1'.repeat(64), sourceCommit: '2'.repeat(40), teamId: value.teamId, applicationPath: value.app } }));
   await assert.rejects(() => withVerifiedCandidateCheckpoint(value.checkpoint, async () => { fs.appendFileSync(value.nested, 'replacement'); }, { production: false, identityReader: value.identityReader }), /digest|identity|mismatch/);
   assert.throws(() => verifyCandidateCheckpoint(value.checkpoint, { production: false, identityReader: value.identityReader }), /digest|identity|mismatch/);
+});
+
+test('rejects every externally supplied artifact, source, team, and application binding substitution', () => {
+  const value = fixture();
+  mintCandidateCheckpoint(request(value), { production: false, identityReader: value.identityReader });
+  const expected = { artifactSha256: '1'.repeat(64), sourceCommit: '2'.repeat(40), teamId: value.teamId, applicationPath: value.app };
+  assert.doesNotThrow(() => verifyCandidateCheckpoint(value.checkpoint, { production: false, identityReader: value.identityReader, expected }));
+  assert.throws(() => verifyCandidateCheckpoint(value.checkpoint, { production: false, identityReader: value.identityReader, expected: { ...expected, artifactSha256: '3'.repeat(64) } }), /artifact binding mismatch/);
+  assert.throws(() => verifyCandidateCheckpoint(value.checkpoint, { production: false, identityReader: value.identityReader, expected: { ...expected, sourceCommit: '4'.repeat(40) } }), /source binding mismatch/);
+  assert.throws(() => verifyCandidateCheckpoint(value.checkpoint, { production: false, identityReader: value.identityReader, expected: { ...expected, teamId: 'F6G7H8I9J0' } }), /Team ID binding mismatch/);
+  assert.throws(() => verifyCandidateCheckpoint(value.checkpoint, { production: false, identityReader: value.identityReader, expected: { ...expected, applicationPath: path.join(value.root, 'Substituted.app') } }), /application binding mismatch/);
+});
+
+test('rejects checkpoint pathname replacement between the initial and final verification snapshots', () => {
+  const value = fixture();
+  mintCandidateCheckpoint(request(value), { production: false, identityReader: value.identityReader });
+  let replaced = false;
+  const descriptors = new Map();
+  const raceFs = {
+    ...fs,
+    constants: fs.constants,
+    openSync: (...args) => {
+      const descriptor = fs.openSync(...args);
+      descriptors.set(descriptor, args[0]);
+      return descriptor;
+    },
+    closeSync: (descriptor) => {
+      descriptors.delete(descriptor);
+      return fs.closeSync(descriptor);
+    },
+    readSync: (descriptor, ...args) => {
+      const count = fs.readSync(descriptor, ...args);
+      if (!replaced && descriptors.get(descriptor) === value.checkpoint && count > 0) {
+        const replacement = `${value.checkpoint}.replacement`;
+        fs.copyFileSync(value.checkpoint, replacement);
+        fs.chmodSync(replacement, 0o600);
+        fs.renameSync(replacement, value.checkpoint);
+        replaced = true;
+      }
+      return count;
+    }
+  };
+  assert.throws(() => verifyCandidateCheckpoint(value.checkpoint, { production: false, identityReader: value.identityReader, fsImpl: raceFs }), /changed (?:during verification|while reading)/);
+  assert.equal(replaced, true);
+});
+
+test('detects application mutation between the descriptor read and its post-read identity check', () => {
+  const value = fixture();
+  let mutated = false;
+  const descriptors = new Map();
+  const raceFs = {
+    ...fs,
+    constants: fs.constants,
+    openSync: (...args) => {
+      const descriptor = fs.openSync(...args);
+      descriptors.set(descriptor, args[0]);
+      return descriptor;
+    },
+    closeSync: (descriptor) => {
+      descriptors.delete(descriptor);
+      return fs.closeSync(descriptor);
+    },
+    readSync: (descriptor, ...args) => {
+      const count = fs.readSync(descriptor, ...args);
+      if (!mutated && descriptors.get(descriptor) === value.nested && count > 0) {
+        fs.appendFileSync(value.nested, 'mutation during read');
+        mutated = true;
+      }
+      return count;
+    }
+  };
+  assert.throws(() => observeInstalledFileIdentity(value.nested, { production: false, fsImpl: raceFs }), /changed while reading/);
+  assert.equal(mutated, true);
+});
+
+test('rejects a same-content code-object pathname replacement during verification', () => {
+  const value = fixture();
+  mintCandidateCheckpoint(request(value), { production: false, identityReader: value.identityReader });
+  let replaced = false;
+  const descriptors = new Map();
+  const raceFs = {
+    ...fs,
+    constants: fs.constants,
+    openSync: (...args) => {
+      const descriptor = fs.openSync(...args);
+      descriptors.set(descriptor, args[0]);
+      return descriptor;
+    },
+    closeSync: (descriptor) => {
+      descriptors.delete(descriptor);
+      return fs.closeSync(descriptor);
+    },
+    readSync: (descriptor, ...args) => {
+      const count = fs.readSync(descriptor, ...args);
+      if (!replaced && descriptors.get(descriptor) === value.nested && count > 0) {
+        const oldPath = `${value.nested}.old`;
+        fs.renameSync(value.nested, oldPath);
+        fs.writeFileSync(value.nested, fs.readFileSync(oldPath), { mode: 0o755 });
+        fs.chmodSync(value.nested, 0o755);
+        fs.unlinkSync(oldPath);
+        replaced = true;
+      }
+      return count;
+    }
+  };
+  assert.throws(() => verifyCandidateCheckpoint(value.checkpoint, { production: false, identityReader: value.identityReader, fsImpl: raceFs }), /changed|identity|digest/);
+  assert.equal(replaced, true);
 });
 
 test('rejects a same-content inode replacement after the checkpoint was minted', async () => {
@@ -196,4 +315,29 @@ test('requires protected checkpoint mode and rejects forged file identities', ()
   const forged = { ...checkpoint, code_objects: checkpoint.code_objects.map((item) => item.role === 'native-client' ? { ...item, file_identity: { ...item.file_identity, mode: '33188' } } : item) };
   forged.checkpoint_sha256 = candidateCheckpointHash(forged);
   assert.throws(() => validateCandidateCheckpoint(forged), /file identity is unsafe/);
+});
+
+test('rejects writable checkpoint parents before publication', () => {
+  const value = fixture();
+  const parent = path.join(value.root, 'writable-checkpoints');
+  fs.mkdirSync(parent, { mode: 0o700 });
+  fs.chmodSync(parent, 0o770);
+  assert.throws(() => mintCandidateCheckpoint({ ...request(value), checkpoint_path: path.join(parent, 'candidate.json') }, { production: false, identityReader: value.identityReader }), /directory is unsafe/);
+});
+
+test('rejects a checkpoint parent whose owner is not trusted in production mode', () => {
+  const value = fixture();
+  const parent = path.join(value.root, 'owner-checkpoints');
+  fs.mkdirSync(parent, { mode: 0o700 });
+  const checkpoint = mintCandidateCheckpoint(request(value), { production: false, identityReader: value.identityReader });
+  const untrustedFs = {
+    ...fs,
+    constants: fs.constants,
+    lstatSync: (input, ...args) => {
+      const stat = fs.lstatSync(input, ...args);
+      if (path.resolve(input) !== path.resolve(parent)) return stat;
+      return Object.create(stat, { uid: { value: BigInt((process.getuid?.() ?? 1000) + 1) } });
+    }
+  };
+  assert.throws(() => writeCandidateCheckpoint({ checkpointPath: path.join(parent, 'candidate.json'), checkpoint }, { production: true, fsImpl: untrustedFs }), /directory is unsafe/);
 });

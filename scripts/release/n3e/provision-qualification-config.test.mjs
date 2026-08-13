@@ -264,6 +264,28 @@ test('provisions signed release-v3 data, selects arm64 CDHash, and restores exac
   assert.equal(fs.existsSync(fixture.statePath), false);
 });
 
+test('candidate-checkpoint bindings constrain the signed release artifact, source, and Team ID', () => {
+  const valid = makeCase();
+  const manifest = JSON.parse(readFileSync(valid.manifestPath));
+  const artifact = manifest.artifacts.find((item) => item.role === 'product');
+  const expected = {
+    expectedArtifactSha256: artifact.sha256,
+    expectedSourceCommit: manifest.source.commit,
+    expectedTeamId: controllerTeamId
+  };
+  provision(valid, expected);
+  restoreQualificationConfig({ serviceConfigPath: valid.serviceConfigPath, statePath: valid.statePath, expectedUid });
+
+  for (const [field, value, pattern] of [
+    ['expectedArtifactSha256', 'f'.repeat(64), /artifact.*candidate checkpoint/iu],
+    ['expectedSourceCommit', 'f'.repeat(40), /source.*candidate checkpoint/iu],
+    ['expectedTeamId', 'ZZZZZ99999', /Team ID.*candidate checkpoint/iu]
+  ]) {
+    const fixture = makeCase();
+    expectFailure(fixture, () => provision(fixture, { ...expected, [field]: value }), pattern);
+  }
+});
+
 test('selects the x86_64 CDHash independently of the arm64 slice', () => {
   const fixture = makeCase();
   const result = provision(fixture, { architecture: 'x86_64' });

@@ -18,7 +18,7 @@ Three physical scenarios are implemented:
 
 The remaining 13 scenarios are not production-qualified. A passing modeled test, simulator test, ad-hoc signed build, or operator assertion cannot replace execution of the exact scenario on both protected hardware lanes.
 
-The process-bound Agent-session foundation now also includes the frozen Human Grant and Device Lease contracts, PostgreSQL-backed issuance/consumption, a split privileged Agent XPC service, a fixed-FD activation document, and a signed Agent Host lifecycle. The protected qualification runner now has a fixed-path production composition, one-shot root-private input consumption, durable fired-evidence recovery across daemon loss, bounded Controller/Agent Host supervision, and packaged unarmed-control execution. These changes are locally verified only: the hardware workflow does not yet materialize and invoke the fixed input, and none of these local or modeled results is physical-release evidence.
+The process-bound Agent-session foundation now also includes the frozen Human Grant and Device Lease contracts, PostgreSQL-backed issuance/consumption, a split privileged Agent XPC service, a fixed-FD activation document, and a signed Agent Host lifecycle. The protected qualification runner now has a candidate-checkpoint-bound release trust, fixed root release staging, one-shot root-private input consumption, per-step run-binding materialization, durable fired-evidence recovery across daemon loss, bounded Controller/Agent Host supervision, and a seven-step unarmed-plus-six-scenario suite. Both hardware lanes pin and invoke the installed composition and fail when the protected seven-Grant inbox is absent. These changes are locally verified only: the Device API relay that writes that inbox and execution on both physical lanes remain open, and none of these local or modeled results is physical-release evidence.
 
 ## 2. Delivery rule
 
@@ -237,21 +237,24 @@ Each merge requires:
 
 ## 10. Next executable slice
 
-The next slice closes N3-E as an executable protected qualification path before adding another product surface. It has five ordered boundaries:
+The next slice converts the locally verified seven-step N3-E suite into independently verifiable physical-release evidence. The fixed materializers, candidate-bound release trust, distinct-Grant suite, and installed workflow entrypoint are already implemented. Work now proceeds through four ordered boundaries:
 
-1. finish the Agent Host activation lifecycle and exact `AgentPass-Device` Device API request contract;
-2. persist a secret-free fired receipt before every injected kill, throw, or reply drop, and require an exact candidate/source/code-identity/run/scenario/phase/generation match when reading or deleting it;
-3. make the root runner invoke only packaged, fixed-path materializers, Controller, Agent Host, and cleanup helpers rather than caller-provided production callbacks;
-4. prove all six one-shot fault scenarios, including daemon loss after durable consume and exact start retry after transport reply loss;
-5. run the same immutable candidate through both protected Mac lanes and retain only schema-validated public evidence.
+1. add a device-authenticated qualification relay that obtains seven independent, operation-bound Grants and publishes exactly one closed suite document to the fixed root inbox;
+2. version the hardware report schema so it binds the suite digest, ordered public step digests, release-trust digest, candidate-checkpoint digest, source commit, PKG digest, Team ID, lane identity, and timestamps, then verify the report independently before upload;
+3. inject interruption at every release publication, inbox publication, run-binding, fired-receipt, restart, disarm, restoration, and cleanup boundary and prove deterministic recovery with no reusable authority or partial trust root left behind;
+4. execute the same source commit and notarized PKG on Apple Silicon and Intel T2, preserve both untouched signed reports, and cross-check that every bound identity agrees.
 
-The slice is complete only when interrupted cleanup and explicit recovery remove the activation document, candidate controller bundle, fired receipt, temporary execution copy, launchd qualification configuration, and run lock in identity-bound order; the production Agent XPC surface contains no qualification selector; and the full Node/Swift/contracts/package gates pass from a clean source tree.
+The relay must use the existing Device API authentication and lease/grant verification boundaries; proof bytes may exist only in bounded protected memory and root-private files and must never appear in argv, environment, stdout/stderr, workflow logs, cache, or uploaded artifacts. Publication must be exclusive, canonical, fsynced, one-shot, and rejected if the fixed inbox or active run already exists.
+
+The evidence change must be additive and versioned. The workflow may print only bounded result classes and public digests. A report is invalid if a step is missing, reordered, duplicated, uses a repeated Grant or run binding, disagrees with the candidate checkpoint, or was signed by an unapproved lane/operator key.
+
+The slice is complete only when all adversarial relay/report/recovery tests pass, the full Node/Swift/contracts/package gates pass from a clean source tree, both physical lanes validate independently, and the two signed reports bind the same candidate. Until then, N3-E remains locally verified rather than physically qualified.
 
 ## 11. Detailed execution waves after N3-E
 
 ### Wave 1 — protected qualification closure
 
-Implementation status (2026-08-14): the fixed `run`/`recover` entrypoint, root-private one-shot input handling, six-scenario driver, daemon-restart receipt recovery, Controller durable-receipt preference, unarmed-control contract, package inventory, and immutable workflow preflight are implemented and locally verified. The remaining closure work is to move the trusted release fingerprint and artifact selection out of mutable one-shot input and bind them to the protected candidate checkpoint, add the root-side workflow input materializer and fixed-entrypoint invocation, orchestrate the unarmed control alongside all six armed scenarios, and execute the resulting flow on both protected Mac lanes.
+Implementation status (2026-08-14): the fixed `run`/`recover` entrypoint, root-private input/inbox materializers, candidate-checkpoint-bound release trust and staging, per-step run-binding lifecycle, six-scenario driver, daemon-restart receipt recovery, Controller durable-receipt preference, seven-distinct-Grant suite, package inventory, immutable workflow preflight, and installed workflow invocation are implemented and locally verified. The remaining closure work is to implement the authenticated Device API relay that writes the fixed root inbox, complete release-stage recovery/cleanup qualification, retain schema-validated suite evidence in the lane report, and execute the exact flow on both protected Mac lanes.
 
 Implementation:
 
@@ -273,11 +276,11 @@ Dependencies: the notarized candidate checkpoint, protected runner entitlement, 
 
 Immediate remaining gates:
 
-1. derive the expected release fingerprint, artifact identity, and executable paths from the root-owned candidate checkpoint or another independently installed trust root; never accept them from the one-shot run document;
-2. add a protected workflow command that writes the closed-schema input with exclusive creation, syncs it, invokes the fixed entrypoint, and consumes it exactly once;
-3. run the unarmed control and six armed scenarios through that same composition and aggregate only identity-bound public evidence;
-4. prove interruption and explicit `recover` behavior at every materialize, receipt, restart, disarm, restore, and cleanup boundary;
-5. execute the exact source commit and notarized PKG on Apple Silicon and Intel T2 lanes before changing the scenario status to physically qualified.
+1. implement a device-authenticated relay that issues seven independent Grants and atomically writes the closed suite document to `/private/var/db/agentpass-qualification/input.inbox.json` without exposing proof bytes to workflow argv, environment, logs, or artifacts;
+2. bind the suite digest and seven public step digests into the canonical hardware report and independent verifier rather than relying on workflow log output;
+3. finish release-stage recovery and prove interruption behavior at every release copy/trust publication, input publication, run-binding, receipt, restart, disarm, restore, and cleanup boundary;
+4. execute the exact source commit and notarized PKG on Apple Silicon and Intel T2 lanes and retain the untouched signed reports;
+5. only after both reports independently validate, change the six scenarios and unarmed control from locally verified to physically qualified.
 
 ### Wave 2 — first usable Claude Code path
 

@@ -9,6 +9,7 @@ import {
   FIXED_DEPENDENCY_KEYS,
   FIXED_INPUT_KIND,
   FIXED_INPUT_SCHEMA_VERSION,
+  FIXED_QUALIFICATION_APPLICATION_PATH,
   FIXED_QUALIFICATION_INPUT_PATH,
   consumeFixedQualificationInput,
   parseFixedQualificationCLI,
@@ -32,14 +33,9 @@ const validInput = () => ({
   schema_version: FIXED_INPUT_SCHEMA_VERSION,
   kind: FIXED_INPUT_KIND,
   provision: {
-    manifest_path: '/opt/agentpass/release/release-manifest.json',
-    signature_path: '/opt/agentpass/release/release-manifest.sig',
-    public_key_path: '/opt/agentpass/release/release-public.pem',
-    expected_fingerprint: 'SHA256:' + 'A'.repeat(43),
-    product_path: '/opt/agentpass/release/AgentPass.pkg',
-    run_binding_path: '/Library/Application Support/AgentPass/n3e-run-binding',
     scenario: 'pre-cloud-kill',
-    expires_at_epoch_seconds: 1_800_000_000
+    expires_at_epoch_seconds: 1_800_000_000,
+    run_binding: 'run-0'
   },
   activation: {
     schema_version: 1,
@@ -60,20 +56,26 @@ const inputFixture = () => {
 
 test('exports the fixed dependency inventory and fixed production input path', () => {
   assert.equal(FIXED_QUALIFICATION_INPUT_PATH, '/private/var/db/agentpass-qualification/input.json');
+  assert.equal(FIXED_QUALIFICATION_APPLICATION_PATH, '/Applications/AgentPass.app');
   assert.deepEqual([...FIXED_DEPENDENCY_KEYS], [
     'disarmQualification',
     'executeQualification',
     'materializeControllerCandidate',
     'materializeQualificationActivation',
+    'materializeQualificationRunBinding',
     'proveNoQualificationProcesses',
     'proveQualificationListenerUnavailable',
     'provisionQualificationConfig',
     'recoverProtectedQualification',
+    'recoverQualificationRunBinding',
+    'resolveQualificationReleaseTrust',
     'removeControllerCandidate',
     'removeQualificationActivation',
+    'removeQualificationRunBinding',
     'restartNativeService',
     'restoreQualificationConfig',
-    'runProtectedQualification'
+    'runProtectedQualification',
+    'withVerifiedCandidateCheckpoint'
   ]);
 });
 
@@ -91,8 +93,10 @@ test('source contract separates no-active-process proof from post-restore listen
 
 test('input document is closed, canonical, and keeps activation proof out of the CLI contract', () => {
   const parsed = parseFixedQualificationInput(canonical(validInput()));
-  assert.equal(parsed.provisionOptions.scenario, 'pre-cloud-kill');
+  assert.equal(parsed.provisionRequest.scenario, 'pre-cloud-kill');
   assert.equal(parsed.activation.agent_kind, 'claude_code');
+  assert.equal(JSON.stringify(validInput()).includes('fingerprint'), false);
+  assert.equal(JSON.stringify(validInput()).includes('_path'), false);
 
   const missing = validInput();
   delete missing.activation;

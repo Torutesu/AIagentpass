@@ -370,6 +370,7 @@ const validateState = (value, serviceConfigPath) => {
 
 export const provisionQualificationConfig = ({
   manifestPath, signaturePath, publicKeyPath, expectedFingerprint, productPath, runBindingPath,
+  expectedArtifactSha256, expectedSourceCommit, expectedTeamId,
   scenario, expiresAtEpochSeconds, serviceConfigPath = SERVICE_CONFIG_PATH,
   statePath = PROVISION_STATE_PATH, expectedUid = 0, nowEpochSeconds = Math.floor(Date.now() / 1000),
   architecture = detectControllerArchitecture()
@@ -384,6 +385,9 @@ export const provisionQualificationConfig = ({
   if (!phase) fail('qualification scenario is invalid');
   if (!['arm64', 'x86_64'].includes(architecture)) fail('qualification architecture is invalid');
   const release = validateRelease({ manifestPath, signaturePath, publicKeyPath, expectedFingerprint, productPath });
+  if (expectedArtifactSha256 !== undefined && release.product.sha256 !== expectedArtifactSha256) fail('signed release artifact does not match the candidate checkpoint');
+  if (expectedSourceCommit !== undefined && release.manifest.source.commit !== expectedSourceCommit) fail('signed release source does not match the candidate checkpoint');
+  if (expectedTeamId !== undefined && release.attestation.team_id !== expectedTeamId) fail('signed release Team ID does not match the candidate checkpoint');
   const hashes = release.identity.code_directory_hashes.filter((item) => item.architecture === architecture);
   if (hashes.length !== 1 || !validCDHash(hashes[0].hash)) fail('signed controller identity lacks the host architecture CDHash');
   const runSnapshot = readStable(runBindingPath, { label: 'qualification run binding', maximum: 128, expectedUid, exactMode: 0o600 });

@@ -12,6 +12,15 @@ const workflow = fs.readFileSync(path.join(ROOT, '.github/workflows/p0c-hardware
 
 const expectedPair = `['${INSTALLED_ENTRYPOINT}', '${SOURCE_ENTRYPOINT}']`;
 const unarmedPair = "['n3e/qualification-unarmed-control.mjs', 'scripts/release/n3e/qualification-unarmed-control.mjs']";
+const releaseTrustPair = "['n3e/qualification-release-trust.mjs', 'scripts/release/n3e/qualification-release-trust.mjs']";
+const checkpointPair = "['p0c/lib/candidate-checkpoint.mjs', 'scripts/release/p0c/lib/candidate-checkpoint.mjs']";
+const addedPairs = Object.freeze([
+  "['n3e/qualification-input-materializer.mjs', 'scripts/release/n3e/qualification-input-materializer.mjs']",
+  "['n3e/qualification-release-materializer.mjs', 'scripts/release/n3e/qualification-release-materializer.mjs']",
+  "['n3e/qualification-run-binding.mjs', 'scripts/release/n3e/qualification-run-binding.mjs']",
+  "['n3e/qualification-suite-input.mjs', 'scripts/release/n3e/qualification-suite-input.mjs']",
+  "['n3e/qualification-suite-orchestrator.mjs', 'scripts/release/n3e/qualification-suite-orchestrator.mjs']"
+]);
 
 test('the fixed protected qualification entrypoint is present in the source tree', () => {
   assert.equal(fs.existsSync(path.join(ROOT, SOURCE_ENTRYPOINT)), true, `missing ${SOURCE_ENTRYPOINT}`);
@@ -26,5 +35,8 @@ test('the N3-E packaging test is included in the package test surface', () => {
 test('both hardware-lane preflights pin the fixed protected entrypoint source and installed names', () => {
   assert.equal(workflow.split(expectedPair).length - 1, 2, `expected the fixed pair in both hardware-lane preflights: ${expectedPair}`);
   assert.equal(workflow.split(unarmedPair).length - 1, 2, 'expected the unarmed control in both hardware-lane preflights');
+  assert.equal(workflow.split(releaseTrustPair).length - 1, 2, 'expected the release trust resolver in both hardware-lane preflights');
+  assert.equal(workflow.split(checkpointPair).length - 1, 2, 'expected the candidate checkpoint verifier in both hardware-lane preflights');
+  for (const pair of addedPairs) assert.equal(workflow.split(pair).length - 1, 2, `expected ${pair} in both hardware-lane preflights`);
   assert.equal(workflow.split(`qualification tool manifest is invalid`).length - 1, 2, 'expected duplicated immutable manifest checks for both hardware lanes');
 });

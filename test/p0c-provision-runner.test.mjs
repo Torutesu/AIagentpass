@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { QUALIFICATION_TOOL_FILES, REQUIRED_GATES, inspectProvisioningSources, provisionRunner, verifyInstalledTree } from '../scripts/release/p0c/provision-runner.mjs';
 import { canonicalJSON } from '../scripts/release/p0c/lib/scenario-runtime.mjs';
 import crypto from 'node:crypto';
@@ -18,10 +18,17 @@ const EXPECTED_QUALIFICATION_TOOL_FILES = Object.freeze([
   'n3e/materialize-qualification-activation.mjs',
   'n3e/provision-qualification-config.mjs',
   'n3e/qualification-activation-contract.mjs',
+  'n3e/qualification-input-materializer.mjs',
+  'n3e/qualification-release-materializer.mjs',
+  'n3e/qualification-release-trust.mjs',
+  'n3e/qualification-run-binding.mjs',
   'n3e/qualification-scenario-driver.mjs',
+  'n3e/qualification-suite-input.mjs',
+  'n3e/qualification-suite-orchestrator.mjs',
   'n3e/qualification-unarmed-control.mjs',
   'n3e/run-fixed-protected-qualification.mjs',
-  'n3e/run-protected-qualification.mjs'
+  'n3e/run-protected-qualification.mjs',
+  'p0c/lib/candidate-checkpoint.mjs'
 ]);
 
 const cloneSourceRoot = () => {
@@ -57,7 +64,8 @@ test('non-production provisioning atomically installs the exact protected invent
   assert.equal(result.qualification_orchestrator_path, path.join(fixture.destination, 'qualification-tool/n3e/run-protected-qualification.mjs'));
   assert.equal(result.fixed_qualification_entrypoint_path, path.join(fixture.destination, 'qualification-tool/n3e/run-fixed-protected-qualification.mjs'));
   assert.equal(result.qualification_scenario_driver_path, path.join(fixture.destination, 'qualification-tool/n3e/qualification-scenario-driver.mjs'));
-  assert.deepEqual(fs.readdirSync(path.join(fixture.destination, 'qualification-tool')).sort(), ['generate-release-attestation.mjs', 'manifest.json', 'n3e']);
+  assert.deepEqual(fs.readdirSync(path.join(fixture.destination, 'qualification-tool')).sort(), ['generate-release-attestation.mjs', 'manifest.json', 'n3e', 'p0c']);
+  assert.deepEqual(fs.readdirSync(path.join(fixture.destination, 'qualification-tool/p0c/lib')).sort(), ['candidate-checkpoint.mjs']);
   assert.deepEqual(fs.readdirSync(path.join(fixture.destination, 'qualification-tool/n3e')).sort(), QUALIFICATION_TOOL_FILES.filter(({ installed }) => installed.startsWith('n3e/')).map(({ installed }) => installed.slice('n3e/'.length)));
   const toolManifest = JSON.parse(fs.readFileSync(path.join(fixture.destination, 'qualification-tool/manifest.json'), 'utf8'));
   assert.equal(toolManifest.schema_version, 1); assert.deepEqual(toolManifest.files.map((item) => item.path), QUALIFICATION_TOOL_FILES.map(({ installed }) => installed));
@@ -66,9 +74,18 @@ test('non-production provisioning atomically installs the exact protected invent
   assert.equal(fs.readdirSync(fixture.parent).some((name) => name.startsWith('.p0c-stage-')), false);
 });
 
+test('installed fixed entrypoints resolve every packaged production dependency', async () => {
+  const fixture = makeFixture();
+  provisionRunner({ sourceRoot, scenarioDirectory: fixture.scenarios, machineConfigPath: fixture.machineConfig, destinationRoot: fixture.destination, production: false, uid: process.geteuid(), gid: process.getegid() });
+  for (const name of ['qualification-input-materializer.mjs', 'qualification-release-materializer.mjs', 'qualification-suite-orchestrator.mjs', 'run-fixed-protected-qualification.mjs']) {
+    const module = await import(`${pathToFileURL(path.join(fixture.destination, 'qualification-tool/n3e', name)).href}?fixture=${encodeURIComponent(fixture.root)}`);
+    assert.equal(typeof module, 'object');
+  }
+});
+
 test('qualification driver, fixed entrypoint, unarmed control, and activation dependency omission and source substitution are rejected before installation', () => {
   const fixture = makeFixture();
-  for (const file of ['qualification-scenario-driver.mjs', 'qualification-unarmed-control.mjs', 'run-fixed-protected-qualification.mjs', 'qualification-activation-contract.mjs', 'materialize-qualification-activation.mjs']) {
+  for (const file of ['qualification-input-materializer.mjs', 'qualification-release-materializer.mjs', 'qualification-release-trust.mjs', 'qualification-run-binding.mjs', 'qualification-scenario-driver.mjs', 'qualification-suite-input.mjs', 'qualification-suite-orchestrator.mjs', 'qualification-unarmed-control.mjs', 'run-fixed-protected-qualification.mjs', 'qualification-activation-contract.mjs', 'materialize-qualification-activation.mjs']) {
     const omittedRoot = cloneSourceRoot();
     fs.unlinkSync(path.join(path.dirname(omittedRoot), 'n3e', file));
     assert.throws(() => inspectProvisioningSources({ sourceRoot: omittedRoot, scenarioDirectory: fixture.scenarios, machineConfigPath: fixture.machineConfig, production: false }), /provisioning source is unavailable/);
@@ -82,7 +99,7 @@ test('qualification driver, fixed entrypoint, unarmed control, and activation de
 });
 
 test('installed qualification driver, fixed entrypoint, unarmed control, and activation dependencies fail closed on omission and substitution', () => {
-  for (const file of ['qualification-scenario-driver.mjs', 'qualification-unarmed-control.mjs', 'run-fixed-protected-qualification.mjs', 'qualification-activation-contract.mjs', 'materialize-qualification-activation.mjs']) {
+  for (const file of ['qualification-input-materializer.mjs', 'qualification-release-materializer.mjs', 'qualification-release-trust.mjs', 'qualification-run-binding.mjs', 'qualification-scenario-driver.mjs', 'qualification-suite-input.mjs', 'qualification-suite-orchestrator.mjs', 'qualification-unarmed-control.mjs', 'run-fixed-protected-qualification.mjs', 'qualification-activation-contract.mjs', 'materialize-qualification-activation.mjs']) {
     const fixture = makeFixture();
     provisionRunner({ sourceRoot, scenarioDirectory: fixture.scenarios, machineConfigPath: fixture.machineConfig, destinationRoot: fixture.destination, production: false, uid: process.geteuid(), gid: process.getegid() });
     const inspected = inspectProvisioningSources({ sourceRoot, scenarioDirectory: fixture.scenarios, machineConfigPath: fixture.machineConfig, production: false });

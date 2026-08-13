@@ -14,10 +14,17 @@ export const QUALIFICATION_TOOL_FILES = Object.freeze([
   Object.freeze({ source: 'n3e/materialize-qualification-activation.mjs', installed: 'n3e/materialize-qualification-activation.mjs' }),
   Object.freeze({ source: 'n3e/provision-qualification-config.mjs', installed: 'n3e/provision-qualification-config.mjs' }),
   Object.freeze({ source: 'n3e/qualification-activation-contract.mjs', installed: 'n3e/qualification-activation-contract.mjs' }),
+  Object.freeze({ source: 'n3e/qualification-input-materializer.mjs', installed: 'n3e/qualification-input-materializer.mjs' }),
+  Object.freeze({ source: 'n3e/qualification-release-materializer.mjs', installed: 'n3e/qualification-release-materializer.mjs' }),
+  Object.freeze({ source: 'n3e/qualification-release-trust.mjs', installed: 'n3e/qualification-release-trust.mjs' }),
+  Object.freeze({ source: 'n3e/qualification-run-binding.mjs', installed: 'n3e/qualification-run-binding.mjs' }),
   Object.freeze({ source: 'n3e/qualification-scenario-driver.mjs', installed: 'n3e/qualification-scenario-driver.mjs' }),
+  Object.freeze({ source: 'n3e/qualification-suite-input.mjs', installed: 'n3e/qualification-suite-input.mjs' }),
+  Object.freeze({ source: 'n3e/qualification-suite-orchestrator.mjs', installed: 'n3e/qualification-suite-orchestrator.mjs' }),
   Object.freeze({ source: 'n3e/qualification-unarmed-control.mjs', installed: 'n3e/qualification-unarmed-control.mjs' }),
   Object.freeze({ source: 'n3e/run-fixed-protected-qualification.mjs', installed: 'n3e/run-fixed-protected-qualification.mjs' }),
-  Object.freeze({ source: 'n3e/run-protected-qualification.mjs', installed: 'n3e/run-protected-qualification.mjs' })
+  Object.freeze({ source: 'n3e/run-protected-qualification.mjs', installed: 'n3e/run-protected-qualification.mjs' }),
+  Object.freeze({ source: 'p0c/lib/candidate-checkpoint.mjs', installed: 'p0c/lib/candidate-checkpoint.mjs' })
 ]);
 export const REQUIRED_GATES = Object.freeze([
   'audit-upload-observation', 'claude-code-unattended-sign', 'clean-install-launchd-xpc',
@@ -102,8 +109,10 @@ export const verifyInstalledTree = (root, expected, uid) => {
   protectedDirectory(join(root, 'scenarios'), 'installed scenario directory', { ownerUid: uid, exactEntries: REQUIRED_GATES });
   const qualificationToolDirectory = protectedDirectory(join(root, 'qualification-tool'), 'installed qualification tool directory', { ownerUid: uid });
   const qualificationToolEntries = fs.readdirSync(qualificationToolDirectory, { withFileTypes: true }).sort((left, right) => left.name.localeCompare(right.name));
-  if (qualificationToolEntries.length !== 3 || qualificationToolEntries[0]?.name !== 'generate-release-attestation.mjs' || !qualificationToolEntries[0].isFile() || qualificationToolEntries[1]?.name !== 'manifest.json' || !qualificationToolEntries[1].isFile() || qualificationToolEntries[2]?.name !== 'n3e' || !qualificationToolEntries[2].isDirectory() || qualificationToolEntries.some((entry) => entry.isSymbolicLink())) throw new Error('installed qualification tool inventory is invalid');
+  if (qualificationToolEntries.length !== 4 || qualificationToolEntries[0]?.name !== 'generate-release-attestation.mjs' || !qualificationToolEntries[0].isFile() || qualificationToolEntries[1]?.name !== 'manifest.json' || !qualificationToolEntries[1].isFile() || qualificationToolEntries[2]?.name !== 'n3e' || !qualificationToolEntries[2].isDirectory() || qualificationToolEntries[3]?.name !== 'p0c' || !qualificationToolEntries[3].isDirectory() || qualificationToolEntries.some((entry) => entry.isSymbolicLink())) throw new Error('installed qualification tool inventory is invalid');
   protectedDirectory(join(root, 'qualification-tool', 'n3e'), 'installed qualification tool module directory', { ownerUid: uid, exactEntries: QUALIFICATION_TOOL_FILES.filter(({ installed }) => installed.startsWith('n3e/')).map(({ installed }) => installed.slice('n3e/'.length)) });
+  protectedDirectory(join(root, 'qualification-tool', 'p0c'), 'installed qualification P0-C directory', { ownerUid: uid });
+  protectedDirectory(join(root, 'qualification-tool', 'p0c', 'lib'), 'installed qualification P0-C library directory', { ownerUid: uid, exactEntries: ['candidate-checkpoint.mjs'] });
   const drivers = REQUIRED_GATES.map((gate) => readStableSource(join(root, 'gates', gate), { executable: true, ownerUid: uid }));
   const scenarios = REQUIRED_GATES.map((gate) => readStableSource(join(root, 'scenarios', gate), { executable: true, ownerUid: uid }));
   const runtimes = expected.runtimes.map(({ name }) => ({ name, ...readStableSource(join(root, 'lib', name), { ownerUid: uid }) }));
@@ -127,7 +136,7 @@ export const provisionRunner = ({ sourceRoot, scenarioDirectory, machineConfigPa
   const staging = join(parent, `.p0c-stage-${crypto.randomBytes(12).toString('hex')}`);
   try {
     fs.mkdirSync(staging, { mode: 0o700 }); fs.chownSync(staging, uid, gid);
-    for (const directory of ['gates', 'lib', 'scenarios', 'qualification-tool', 'qualification-tool/n3e']) { const path = join(staging, directory); fs.mkdirSync(path, { mode: 0o755 }); fs.chownSync(path, uid, gid); }
+    for (const directory of ['gates', 'lib', 'scenarios', 'qualification-tool', 'qualification-tool/n3e', 'qualification-tool/p0c', 'qualification-tool/p0c/lib']) { const path = join(staging, directory); fs.mkdirSync(path, { mode: 0o755 }); fs.chownSync(path, uid, gid); }
     for (const item of inspected.drivers) writeInstalledFile(join(staging, 'gates', item.gate), item.bytes, 0o755, uid, gid);
     for (const item of inspected.runtimes) writeInstalledFile(join(staging, 'lib', item.name), item.bytes, 0o644, uid, gid);
     for (const item of inspected.qualificationToolFiles) writeInstalledFile(join(staging, 'qualification-tool', item.installed), item.bytes, 0o644, uid, gid);
@@ -136,7 +145,7 @@ export const provisionRunner = ({ sourceRoot, scenarioDirectory, machineConfigPa
     const config = { schema_version: 1, scenario_directory: join(destination, 'scenarios'), scenarios: inspected.scenarioFiles.map(({ gate, executable, sha256: digest }) => ({ gate, executable, sha256: digest })) };
     writeInstalledFile(join(staging, 'driver-config.json'), canonicalJSON(config), 0o644, uid, gid);
     writeInstalledFile(join(staging, 'scenario-config.json'), inspected.machineConfig.bytes, 0o644, uid, gid);
-    fs.chmodSync(staging, 0o755); for (const directory of ['gates', 'lib', 'scenarios', 'qualification-tool/n3e', 'qualification-tool']) fsyncDirectory(join(staging, directory)); fsyncDirectory(staging);
+    fs.chmodSync(staging, 0o755); for (const directory of ['gates', 'lib', 'scenarios', 'qualification-tool/n3e', 'qualification-tool/p0c/lib', 'qualification-tool/p0c', 'qualification-tool']) fsyncDirectory(join(staging, directory)); fsyncDirectory(staging);
     verifyInstalledTree(staging, inspected, uid);
     fs.renameSync(staging, destination); fsyncDirectory(parent);
     const installed = verifyInstalledTree(destination, inspected, uid);

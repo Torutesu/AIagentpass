@@ -33,8 +33,19 @@ import {
   restartNativeService,
   runProtectedQualification
 } from './run-protected-qualification.mjs';
+import {
+  FIXED_CANDIDATE_CHECKPOINT_PATH,
+  resolveQualificationReleaseTrust
+} from './qualification-release-trust.mjs';
+import { withVerifiedCandidateCheckpoint } from '../p0c/lib/candidate-checkpoint.mjs';
+import {
+  materializeQualificationRunBinding,
+  recoverQualificationRunBinding,
+  removeQualificationRunBinding
+} from './qualification-run-binding.mjs';
 
 export const FIXED_QUALIFICATION_INPUT_PATH = '/private/var/db/agentpass-qualification/input.json';
+export const FIXED_QUALIFICATION_APPLICATION_PATH = '/Applications/AgentPass.app';
 export const QUALIFICATION_INPUT_DOCUMENT_PATH = FIXED_QUALIFICATION_INPUT_PATH;
 export const FIXED_INPUT_DOCUMENT_PATH = FIXED_QUALIFICATION_INPUT_PATH;
 export const FIXED_INPUT_SCHEMA_VERSION = 1;
@@ -46,31 +57,31 @@ export const FIXED_DEPENDENCY_KEYS = Object.freeze([
   'executeQualification',
   'materializeControllerCandidate',
   'materializeQualificationActivation',
+  'materializeQualificationRunBinding',
   'proveNoQualificationProcesses',
   'proveQualificationListenerUnavailable',
   'provisionQualificationConfig',
   'recoverProtectedQualification',
+  'recoverQualificationRunBinding',
+  'resolveQualificationReleaseTrust',
   'removeControllerCandidate',
   'removeQualificationActivation',
+  'removeQualificationRunBinding',
   'restartNativeService',
   'restoreQualificationConfig',
-  'runProtectedQualification'
+  'runProtectedQualification',
+  'withVerifiedCandidateCheckpoint'
 ]);
 
 const PROVISION_INPUT_KEYS = Object.freeze([
   'expires_at_epoch_seconds',
-  'expected_fingerprint',
-  'manifest_path',
-  'product_path',
-  'public_key_path',
-  'run_binding_path',
-  'scenario',
-  'signature_path'
+  'run_binding',
+  'scenario'
 ]);
 const INPUT_KEYS = Object.freeze(['activation', 'kind', 'provision', 'schema_version']);
-const DIGEST_FINGERPRINT = /^SHA256:[A-Za-z0-9_-]{43}$/u;
 const NOFOLLOW = fs.constants.O_NOFOLLOW;
 const UINT32_MAX = 0xffff_ffff;
+const RUN_BINDING = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/u;
 
 const fail = (message) => { throw new Error(message); };
 
@@ -106,23 +117,18 @@ export const parseFixedQualificationInput = (bytes) => {
   if (value.schema_version !== FIXED_INPUT_SCHEMA_VERSION || value.kind !== FIXED_INPUT_KIND || !bytes.equals(canonicalInput(value))) fail('qualification input document is not canonical');
 
   exactKeys(value.provision, PROVISION_INPUT_KEYS, 'qualification provision input');
-  const provisionOptions = {
-    manifestPath: absolutePath(value.provision.manifest_path, 'release manifest'),
-    signaturePath: absolutePath(value.provision.signature_path, 'release manifest signature'),
-    publicKeyPath: absolutePath(value.provision.public_key_path, 'release public key'),
-    productPath: absolutePath(value.provision.product_path, 'release product'),
-    runBindingPath: absolutePath(value.provision.run_binding_path, 'qualification run binding'),
-    expectedFingerprint: value.provision.expected_fingerprint,
+  const provisionRequest = {
     scenario: value.provision.scenario,
-    expiresAtEpochSeconds: value.provision.expires_at_epoch_seconds
+    expiresAtEpochSeconds: value.provision.expires_at_epoch_seconds,
+    runBinding: value.provision.run_binding
   };
-  if (!DIGEST_FINGERPRINT.test(provisionOptions.expectedFingerprint)) fail('qualification release fingerprint is invalid');
-  if (!Object.hasOwn(SCENARIO_PHASE, provisionOptions.scenario)) fail('qualification scenario is invalid');
-  if (!Number.isSafeInteger(provisionOptions.expiresAtEpochSeconds) || provisionOptions.expiresAtEpochSeconds <= 0) fail('qualification expiry is invalid');
+  if (!Object.hasOwn(SCENARIO_PHASE, provisionRequest.scenario)) fail('qualification scenario is invalid');
+  if (!Number.isSafeInteger(provisionRequest.expiresAtEpochSeconds) || provisionRequest.expiresAtEpochSeconds <= 0) fail('qualification expiry is invalid');
+  if (!RUN_BINDING.test(provisionRequest.runBinding)) fail('qualification run binding is invalid');
 
   let activation;
   try { activation = normalizeQualificationActivation(value.activation); } catch { fail('qualification activation input is invalid'); }
-  return Object.freeze({ provisionOptions: Object.freeze(provisionOptions), activation });
+  return Object.freeze({ provisionRequest: Object.freeze(provisionRequest), activation });
 };
 
 const statIdentity = (stat) => [stat.dev, stat.ino, stat.mode, stat.nlink, stat.size, stat.mtimeNs, stat.ctimeNs, stat.uid, stat.gid].map(String).join(':');
@@ -290,13 +296,34 @@ export const runFixedProtectedQualification = async (...args) => {
   rejectCallerDependencies(args, 'fixed protected qualification');
   productionIdentity();
   const input = consumeFixedQualificationInput();
-  return runProtectedQualification(makeRunOptions(input));
+  return withVerifiedCandidateCheckpoint(FIXED_CANDIDATE_CHECKPOINT_PATH, async (checkpoint) => {
+    const trusted = resolveQualificationReleaseTrust({ checkpoint });
+    const runBinding = materializeQualificationRunBinding({ value: input.provisionRequest.runBinding });
+    const provisionOptions = Object.freeze({
+      manifestPath: trusted.manifestPath,
+      signaturePath: trusted.signaturePath,
+      publicKeyPath: trusted.publicKeyPath,
+      expectedFingerprint: trusted.expectedFingerprint,
+      productPath: trusted.productPath,
+      runBindingPath: trusted.runBindingPath,
+      expectedArtifactSha256: trusted.expectedArtifactSha256,
+      expectedSourceCommit: trusted.expectedSourceCommit,
+      expectedTeamId: trusted.expectedTeamId,
+      ...input.provisionRequest
+    });
+    try {
+      return await runProtectedQualification(makeRunOptions({ provisionOptions, activation: input.activation }));
+    } finally {
+      removeQualificationRunBinding({ expected: runBinding });
+    }
+  }, { expected: { applicationPath: FIXED_QUALIFICATION_APPLICATION_PATH }, production: true });
 };
 
 export const recoverFixedProtectedQualification = (...args) => {
   rejectCallerDependencies(args, 'fixed protected qualification recovery');
   productionIdentity();
   recoverFixedQualificationInput({ proveNoActiveRun: fixedNoActiveProof });
+  recoverQualificationRunBinding({ proveNoActiveRun: fixedNoActiveProof });
   return recoverProtectedQualification(makeRecoveryOptions());
 };
 
