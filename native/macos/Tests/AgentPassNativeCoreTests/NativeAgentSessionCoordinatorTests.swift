@@ -85,6 +85,47 @@ private final class CoordinatorAudit: NativeAgentSessionAuditAppending, @uncheck
   }
 }
 
+private final class CoordinatorRecoveryStore: NativeAgentSessionConsumeRecoveryStoring,
+  @unchecked Sendable
+{
+  private let lock = NSLock()
+  private var evidence: NativeAgentSessionConsumeRecoveryEvidence?
+
+  func save(
+    _ evidence: NativeAgentSessionConsumeRecoveryEvidence,
+    nowMilliseconds: Int64?
+  ) throws -> NativeAgentSessionConsumeRecoveryEvidence {
+    try lock.withLock {
+      if let existing = self.evidence, existing != evidence {
+        throw NativeAgentSessionConsumeRecoveryStoreError.conflict
+      }
+      self.evidence = evidence
+      return evidence
+    }
+  }
+
+  func completeAfterLocalActivation(
+    _ expected: NativeAgentSessionConsumeRecoveryEvidence
+  ) throws -> Bool {
+    try remove(expected)
+  }
+
+  func abandon(_ expected: NativeAgentSessionConsumeRecoveryEvidence) throws -> Bool {
+    try remove(expected)
+  }
+
+  private func remove(_ expected: NativeAgentSessionConsumeRecoveryEvidence) throws -> Bool {
+    try lock.withLock {
+      guard let evidence else { return false }
+      guard evidence == expected else {
+        throw NativeAgentSessionConsumeRecoveryStoreError.conflict
+      }
+      self.evidence = nil
+      return true
+    }
+  }
+}
+
 private final class InvalidatingCoordinatorAudit: NativeAgentSessionAuditAppending,
   @unchecked Sendable
 {
@@ -187,6 +228,7 @@ private func coordinatorFixture(
   let coordinator = try NativeAgentSessionCoordinator(
     connectionTokenIdentity: coordinatorToken, connectionRevalidator: {},
     bootstrapStore: store, bindingObserver: observer, grantConsumer: consumer,
+    recoveryStore: CoordinatorRecoveryStore(),
     registry: registry, audit: audit,
     wallClock: CoordinatorWallClock(milliseconds: coordinatorWall + 1_000),
     monotonicClock: CoordinatorMonotonicClock(
@@ -339,6 +381,7 @@ private func coordinatorFixture(
     connectionTokenIdentity: coordinatorToken, connectionRevalidator: {},
     bootstrapStore: store, bindingObserver: CoordinatorBindingObserver(binding),
     grantConsumer: CoordinatorGrantConsumer(try coordinatorLease(binding: binding)),
+    recoveryStore: CoordinatorRecoveryStore(),
     registry: registry, audit: audit,
     wallClock: CoordinatorWallClock(milliseconds: coordinatorWall + 1_000),
     monotonicClock: CoordinatorMonotonicClock(nanoseconds: 2_000, bootIdentity: "boot"),

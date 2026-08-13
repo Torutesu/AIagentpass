@@ -2913,6 +2913,7 @@ private final class AgentRuntimeDependencies: @unchecked Sendable {
     let authority: NativeAgentRuntimeAuthorityConfiguration
     let grantConsumer: NativeAgentGrantLeaseHTTPConsumer
     let registry = NativeAgentSessionRegistry()
+    let consumeRecoveryStore: NativeAgentSessionConsumeRecoveryStore
     let signingIntentStore: NativeAgentSigningIntentStore
     let gitCommitSigner: NativeAgentGitCommitSigner
     let authorityState: AgentRuntimeAuthorityState
@@ -2934,6 +2935,9 @@ private final class AgentRuntimeDependencies: @unchecked Sendable {
         )
         signingIntentStore = try NativeAgentSigningIntentStore(
             path: authority.signingIntentDirectory + "/signing-intents.v1.json"
+        )
+        consumeRecoveryStore = try NativeAgentSessionConsumeRecoveryStore(
+            path: authority.signingIntentDirectory + "/session-consume-recovery.v1.json"
         )
         gitCommitSigner = try NativeAgentGitCommitSigner(signer: gitSigner)
     }
@@ -3011,6 +3015,7 @@ private final class AgentConnectionEndpoint: NSObject, AgentPassAgentXPCProtocol
                 bootstrapStore: bootstrapStore,
                 bindingObserver: bindingObserver,
                 grantConsumer: runtime.grantConsumer,
+                recoveryStore: runtime.consumeRecoveryStore,
                 registry: runtime.registry,
                 audit: auditAppender,
                 wallClock: clocks.wallClock,
@@ -3927,12 +3932,13 @@ do {
         agentRuntime = nil
     case .enabled(let authority):
         guard let deviceSigner = controlV2DeviceSigner,
-              let controlV2Manager else {
-            throw AgentPassNativeError.invalidConfiguration("Agent runtime device authentication is unavailable")
+              let controlV2Manager,
+              let activeSigning else {
+            throw AgentPassNativeError.invalidConfiguration("Agent runtime device and signing lifecycle authority is unavailable")
         }
         let authorityState = try AgentRuntimeAuthorityState(
             control: controlV2Manager,
-            keyGeneration: activeSigning?.generation ?? 1
+            keyGeneration: activeSigning.generation
         )
         agentRuntime = try AgentRuntimeDependencies(
             authority: authority,

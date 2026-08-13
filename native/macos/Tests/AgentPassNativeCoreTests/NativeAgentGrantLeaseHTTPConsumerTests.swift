@@ -108,6 +108,30 @@ private func consumer(_ transport: GrantHTTPTransport) throws -> NativeAgentGran
   #expect(body["process_binding_sha256"] as? String == String(repeating: "b", count: 64))
 }
 
+@Test func exactCloudRetryIsIndependentOfTheConnectionLocalBootstrapID() throws {
+  let response = try NativeStrictJSON.data([
+    "lease": leaseObject(), "request_id": "88888888-8888-4888-8888-888888888888",
+  ])
+  let transport = GrantHTTPTransport(.init(statusCode: 201, body: response))
+  let value = try consumer(transport)
+  let proof = try NativeStrictJSON.data(grantObject())
+  let binding = try grantBinding()
+
+  _ = try value.consumeGrant(
+    .init(
+      bootstrapID: "99999999-9999-4999-8999-999999999999", proof: proof,
+      binding: binding))
+  _ = try value.consumeGrant(
+    .init(
+      bootstrapID: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", proof: proof,
+      binding: binding))
+
+  #expect(transport.calls.count == 2)
+  #expect(transport.calls[0].0 == transport.calls[1].0)
+  #expect(transport.calls[0].2 == transport.calls[1].2)
+  #expect(transport.calls[0].1["AgentPass-Content-SHA256"] == transport.calls[1].1["AgentPass-Content-SHA256"])
+}
+
 @Test func grantConsumerRejectsGrantFromAnotherConfiguredOrganizationBeforeTransport() throws {
   let transport = GrantHTTPTransport(.init(statusCode: 500, body: Data()))
   var grant = grantObject()

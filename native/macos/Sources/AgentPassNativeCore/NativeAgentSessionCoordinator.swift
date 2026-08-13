@@ -33,6 +33,7 @@ public final class NativeAgentSessionCoordinator: @unchecked Sendable {
     let binding: NativeAgentSessionBinding
     var lease: NativeAgentVerifiedCloudLease?
     var localLeaseID: String?
+    var recoveryEvidence: NativeAgentSessionConsumeRecoveryEvidence?
     var attempts: Int
   }
 
@@ -47,6 +48,7 @@ public final class NativeAgentSessionCoordinator: @unchecked Sendable {
   private let bootstrapStore: NativeAgentBootstrapChallengeStore
   private let bindingObserver: any NativeAgentSessionBindingObserving
   private let grantConsumer: any NativeAgentGrantLeaseConsuming
+  private let recoveryStore: any NativeAgentSessionConsumeRecoveryStoring
   private let registry: NativeAgentSessionRegistry
   private let audit: any NativeAgentSessionAuditAppending
   private let wallClock: any NativeAgentWallClock
@@ -67,6 +69,7 @@ public final class NativeAgentSessionCoordinator: @unchecked Sendable {
     bootstrapStore: NativeAgentBootstrapChallengeStore,
     bindingObserver: any NativeAgentSessionBindingObserving,
     grantConsumer: any NativeAgentGrantLeaseConsuming,
+    recoveryStore: any NativeAgentSessionConsumeRecoveryStoring,
     registry: NativeAgentSessionRegistry,
     audit: any NativeAgentSessionAuditAppending,
     wallClock: any NativeAgentWallClock,
@@ -82,6 +85,7 @@ public final class NativeAgentSessionCoordinator: @unchecked Sendable {
     self.bootstrapStore = bootstrapStore
     self.bindingObserver = bindingObserver
     self.grantConsumer = grantConsumer
+    self.recoveryStore = recoveryStore
     self.registry = registry
     self.audit = audit
     self.wallClock = wallClock
@@ -172,7 +176,33 @@ public final class NativeAgentSessionCoordinator: @unchecked Sendable {
       try validate(evidence: evidence, binding: binding, monotonic: monotonic)
       attempt = Attempt(
         bootstrapID: bootstrapID.lowercased(), proofDigest: proofDigest,
-        evidence: evidence, binding: binding, lease: nil, localLeaseID: nil, attempts: 1)
+        evidence: evidence, binding: binding, lease: nil, localLeaseID: nil,
+        recoveryEvidence: nil, attempts: 1)
+    }
+    stateLock.withLock { pendingAttempt = attempt }
+
+    if attempt.recoveryEvidence == nil {
+      do {
+        let recoveryEvidence = try NativeAgentSessionConsumeRecoveryEvidence(
+          organizationID: authority.organizationID,
+          deviceID: attempt.binding.deviceID,
+          agentID: attempt.binding.agentID,
+          adapterKind: attempt.evidence.adapterKind,
+          grantProofDigest: attempt.proofDigest,
+          processBindingDigest: attempt.binding.processBindingDigest,
+          ancestryBindingDigest: attempt.binding.ancestryBindingDigest,
+          worktreeBindingDigest: attempt.binding.worktreeBindingDigest,
+          controlSequence: attempt.binding.controlSequence,
+          authorityGeneration: attempt.binding.authorityGeneration,
+          keyGeneration: attempt.binding.keyGeneration,
+          bootstrapIssuedAtMilliseconds: attempt.evidence.issuedAtMilliseconds,
+          requestedTTLSeconds: attempt.evidence.requestedTTLSeconds)
+        let savedEvidence = try recoveryStore.save(
+          recoveryEvidence, nowMilliseconds: try sampleWall().millisecondsSinceUnixEpoch)
+        attempt.recoveryEvidence = savedEvidence
+      } catch {
+        throw NativeAgentSessionCoordinatorError.activationDenied
+      }
     }
     stateLock.withLock { pendingAttempt = attempt }
 
@@ -194,6 +224,12 @@ public final class NativeAgentSessionCoordinator: @unchecked Sendable {
 
     let monotonic = try sampleMonotonic()
     let wall = try sampleWall()
+    guard
+      attempt.evidence.connectionBinding.bootIdentityHash
+        == Self.hex(Data(SHA256.hash(data: Data(monotonic.bootIdentity.utf8))))
+    else {
+      throw NativeAgentSessionCoordinatorError.bindingDenied
+    }
     try validate(lease: lease, evidence: attempt.evidence, activationWall: wall)
     let deadline: NativeAgentSessionDeadline
     do {
@@ -245,6 +281,25 @@ public final class NativeAgentSessionCoordinator: @unchecked Sendable {
         as: .revoked)
       stateLock.withLock { pendingAttempt = nil }
       throw NativeAgentSessionCoordinatorError.auditUnavailable
+    }
+
+    guard let recoveryEvidence = attempt.recoveryEvidence else {
+      invalidateSession(
+        sessionID: status.sessionID, binding: attempt.binding,
+        reasonCode: "recovery_store_unavailable")
+      stateLock.withLock { pendingAttempt = nil }
+      throw NativeAgentSessionCoordinatorError.activationDenied
+    }
+    do {
+      guard try recoveryStore.completeAfterLocalActivation(recoveryEvidence) else {
+        throw NativeAgentSessionConsumeRecoveryStoreError.invalidState
+      }
+    } catch {
+      invalidateSession(
+        sessionID: status.sessionID, binding: attempt.binding,
+        reasonCode: "recovery_store_unavailable")
+      stateLock.withLock { pendingAttempt = nil }
+      throw NativeAgentSessionCoordinatorError.activationDenied
     }
 
     let result = NativeAgentSessionActivationResult(status: status, binding: attempt.binding)

@@ -85,3 +85,9 @@ test('Agent bootstrap and session lifecycle are connection-bound while signing r
   assert.match(agentEndpoint, /func signGitCommit[\s\S]*unavailableAfterAuthorization\(\)/u);
   assert.doesNotMatch(agentEndpoint, /AGENTPASS_SESSION|privateKey|private_key|authorizeV2|NativeSessionManager|\.sign\(/u);
 });
+
+test('Agent runtime never invents a signing-key generation', () => {
+  assert.match(service, /guard let deviceSigner = controlV2DeviceSigner,\s*let controlV2Manager,\s*let activeSigning else/u);
+  assert.match(service, /keyGeneration: activeSigning\.generation/u);
+  assert.doesNotMatch(service, /keyGeneration: activeSigning\?\.generation \?\?/u);
+});
