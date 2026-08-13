@@ -2951,6 +2951,41 @@ private final class ServiceEndpoint: NSObject, AgentPassNativeServiceProtocol, N
         }
     }
 
+    func lookupAgentSessionActivationOutcomeAudit(
+        _ evidence: NativeAgentSessionAuditEvidence
+    ) throws -> NativeAgentSessionAuditReceipt? {
+        guard evidence.action == .sessionActivated,
+              let sessionIDString = evidence.sessionID,
+              let sessionID = UUID(uuidString: sessionIDString),
+              sessionID.uuidString.lowercased() == sessionIDString,
+              let agentID = UUID(uuidString: evidence.binding.agentID),
+              agentID.uuidString.lowercased() == evidence.binding.agentID else {
+            throw AgentPassNativeError.invalidSignature("Native Agent activation lookup input is invalid")
+        }
+        let evidenceDigestData = try evidence.evidenceDigest()
+        authorizationLock.lock()
+        defer { authorizationLock.unlock() }
+        switch try auditLog.lookupAgentSessionActivationOutcomeAudit(
+            action: evidence.action,
+            sessionID: sessionID,
+            expectedAgentID: agentID,
+            evidenceDigest: evidenceDigestData
+        ) {
+        case .missing:
+            return nil
+        case .conflict:
+            throw AgentPassNativeError.invalidSignature("Native Agent activation audit conflicts with durable evidence")
+        case .exact(let receipt):
+            guard let recordDigest = Self.lowercaseHexDigest(receipt.recordHash) else {
+                throw AgentPassNativeError.invalidSignature("Native Agent activation audit receipt is invalid")
+            }
+            return try NativeAgentSessionAuditReceipt(
+                evidenceDigest: evidenceDigestData,
+                recordDigest: recordDigest,
+                recordIndex: receipt.index)
+        }
+    }
+
     private static func lowercaseHexDigest(_ value: String) -> Data? {
         guard value.utf8.count == 64,
               value.range(of: "^[0-9a-f]{64}$", options: .regularExpression) != nil else { return nil }
@@ -3112,6 +3147,7 @@ private final class AgentRuntimeDependencies: @unchecked Sendable {
     let grantConsumer: NativeAgentGrantLeaseHTTPConsumer
     let registry = NativeAgentSessionRegistry()
     let consumeRecoveryStore: NativeAgentSessionConsumeRecoveryStore
+    let activationRecoveryStore: NativeAgentSessionConsumeRecoveryV4Store
     let signingIntentStore: NativeAgentSigningIntentStore
     let gitCommitSigner: NativeAgentGitCommitSigner
     let authorityState: AgentRuntimeAuthorityState
@@ -3136,6 +3172,9 @@ private final class AgentRuntimeDependencies: @unchecked Sendable {
         )
         consumeRecoveryStore = try NativeAgentSessionConsumeRecoveryStore(
             path: authority.signingIntentDirectory + "/session-consume-recovery.v1.json"
+        )
+        activationRecoveryStore = try NativeAgentSessionConsumeRecoveryV4Store(
+            path: authority.signingIntentDirectory + "/session-activation-recovery.v4.json"
         )
         gitCommitSigner = try NativeAgentGitCommitSigner(signer: gitSigner)
     }
@@ -3214,6 +3253,7 @@ private final class AgentConnectionEndpoint: NSObject, AgentPassAgentXPCProtocol
                 bindingObserver: bindingObserver,
                 grantConsumer: runtime.grantConsumer,
                 recoveryStore: runtime.consumeRecoveryStore,
+                activationRecoveryStore: runtime.activationRecoveryStore,
                 registry: runtime.registry,
                 audit: auditAppender,
                 wallClock: clocks.wallClock,

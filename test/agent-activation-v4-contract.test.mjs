@@ -48,3 +48,20 @@ test("activation outcomes bind typed transaction and commit receipt digests", as
   assert.match(audit, /lookupAgentSessionActivationOutcomeAudit/);
   assert.match(service, /reconcileAgentSessionActivationOutcomeAudit/);
 });
+
+test("coordinator uses the durable staged activation order", async () => {
+  const source = await read(
+    "native/macos/Sources/AgentPassNativeCore/NativeAgentSessionCoordinator.swift",
+  );
+  const reserve = source.indexOf("registry.reserveActivation(");
+  const prepare = source.indexOf("activationRecoveryStore.prepareForActivation(", reserve);
+  const commit = source.indexOf("registry.commitActivation(", prepare);
+  const receipt = source.indexOf("activationRecoveryStore.recordCommitReceipt(", commit);
+  const audit = source.indexOf("audit.reconcileAgentSessionActivationOutcomeAudit(", receipt);
+  const terminal = source.indexOf("activationRecoveryStore.completeAfterAudit(", audit);
+  const publish = source.indexOf("registry.publishActivation(", terminal);
+  assert.ok(reserve >= 0);
+  assert.ok(reserve < prepare && prepare < commit && commit < receipt);
+  assert.ok(receipt < audit && audit < terminal && terminal < publish);
+  assert.doesNotMatch(source.slice(reserve, publish), /registry\.activate\(/);
+});

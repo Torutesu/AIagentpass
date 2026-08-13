@@ -267,6 +267,12 @@ public protocol NativeAgentSessionAuditAppending: Sendable {
     func reconcileAgentSessionActivationOutcomeAudit(
         _ evidence: NativeAgentSessionAuditEvidence
     ) throws -> NativeAgentSessionAuditReceipt
+
+    /// Pure verified lookup. `nil` means verified absence; malformed,
+    /// duplicate, or substituted history must throw instead of returning nil.
+    func lookupAgentSessionActivationOutcomeAudit(
+        _ evidence: NativeAgentSessionAuditEvidence
+    ) throws -> NativeAgentSessionAuditReceipt?
 }
 
 public extension NativeAgentSessionAuditAppending {
@@ -278,4 +284,5 @@ public extension NativeAgentSessionAuditAppending {
         }
         return try reconcileAgentSessionActivationAudit(evidence)
     }
+
 }

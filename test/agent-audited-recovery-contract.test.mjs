@@ -34,10 +34,12 @@ test("coordinator binds terminal recovery to Cloud result and durable audit rece
   assert.match(coordinator, /recoveryStore\.lookupExact\(/);
   assert.match(coordinator, /auditedRecovery\.sessionDigest == sessionDigest/);
   assert.match(coordinator, /throw NativeAgentSessionCoordinatorError\.sessionDenied/);
-  assert.match(coordinator, /auditReceipt = try audit\.reconcileAgentSessionActivationAudit/);
-  assert.match(coordinator, /auditDigest: auditReceipt\.recordDigest/);
-  assert.match(coordinator, /prepareForActivation\([\s\S]*preparedRecord: preparedRecord/);
-  assert.match(coordinator, /completeAfterAudit\([\s\S]*auditedRecord: auditedRecord/);
+  assert.match(coordinator, /reconcileAgentSessionActivationAudit\(auditEvidence\)/);
+  assert.match(coordinator, /reconcileAgentSessionActivationOutcomeAudit/);
+  assert.match(coordinator, /recordCommitReceipt\(/);
+  assert.match(coordinator, /registry\.publishActivation\(/);
+  assert.match(coordinator, /activationRecoveryStore\.prepareForActivation\(/);
+  assert.match(coordinator, /activationRecoveryStore\.completeAfterAudit\(/);
   assert.match(dependencies, /struct NativeAgentSessionAuditReceipt/);
   assert.match(dependencies, /func appendAgentSessionAudit[\s\S]*-> NativeAgentSessionAuditReceipt/);
   assert.match(dependencies, /func reconcileAgentSessionActivationAudit/);

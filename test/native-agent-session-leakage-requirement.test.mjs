@@ -315,5 +315,6 @@ test("restart recovery persists only Grant and authority digests", () => {
   assert.match(recovery, /fsync\(parentFD\)/u);
   assert.doesNotMatch(recovery, /"proof"\s*:|"path"\s*:|"pid"\s*:|"token"\s*:/u);
   assert.match(service, /NativeAgentSessionConsumeRecoveryStore\([\s\S]*session-consume-recovery\.v1\.json/u);
+  assert.match(service, /NativeAgentSessionConsumeRecoveryV4Store\([\s\S]*session-activation-recovery\.v4\.json/u);
   assert.match(service, /recoveryStore: runtime\.consumeRecoveryStore/u);
 });

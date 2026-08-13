@@ -196,6 +196,7 @@ private final class N3EAudit: NativeAgentSessionAuditAppending, @unchecked Senda
   private let lock = NSLock()
   private var failingActions: Set<NativeAgentSessionAuditAction> = []
   private(set) var events: [NativeAgentSessionAuditEvidence] = []
+  private var durableEvents: [NativeAgentSessionAuditEvidence] = []
   var onAppend: (@Sendable (NativeAgentSessionAuditEvidence) -> Void)?
 
   func appendAgentSessionAudit(_ evidence: NativeAgentSessionAuditEvidence) throws
@@ -207,6 +208,7 @@ private final class N3EAudit: NativeAgentSessionAuditAppending, @unchecked Senda
     }
     callback?(evidence)
     if shouldFail { throw N3EFault.injected }
+    lock.withLock { durableEvents.append(evidence) }
     return try NativeAgentSessionAuditReceipt(
       evidenceDigest: evidence.evidenceDigest(),
       recordDigest: Data(repeating: UInt8(index), count: 32), recordIndex: index)
@@ -217,7 +219,7 @@ private final class N3EAudit: NativeAgentSessionAuditAppending, @unchecked Senda
   ) throws -> NativeAgentSessionAuditReceipt {
     let digest = try evidence.evidenceDigest()
     let existing: (Int, NativeAgentSessionAuditEvidence)? = try lock.withLock {
-      let candidates = try events.enumerated().compactMap {
+      let candidates = try durableEvents.enumerated().compactMap {
         index, candidate -> (Int, NativeAgentSessionAuditEvidence)? in
         guard candidate.action == .sessionActivated else { return nil }
         let candidateDigest = try candidate.evidenceDigest()
@@ -239,8 +241,45 @@ private final class N3EAudit: NativeAgentSessionAuditAppending, @unchecked Senda
     return try appendAgentSessionAudit(evidence)
   }
 
+  func reconcileAgentSessionActivationOutcomeAudit(
+    _ evidence: NativeAgentSessionAuditEvidence
+  ) throws -> NativeAgentSessionAuditReceipt {
+    if let existing = try lookupAgentSessionActivationOutcomeAudit(evidence) {
+      return existing
+    }
+    return try appendAgentSessionAudit(evidence)
+  }
+
   func fail(_ action: NativeAgentSessionAuditAction) {
     _ = lock.withLock { failingActions.insert(action) }
+  }
+
+  func lookupAgentSessionActivationOutcomeAudit(
+    _ evidence: NativeAgentSessionAuditEvidence
+  ) throws -> NativeAgentSessionAuditReceipt? {
+    let digest = try evidence.evidenceDigest()
+    return try lock.withLock {
+      let candidates = try durableEvents.enumerated().compactMap {
+        index, candidate -> (Int, NativeAgentSessionAuditEvidence)? in
+        let activationOutcomes: Set<NativeAgentSessionAuditAction> = [
+          .sessionActivated, .sessionActivationAborted,
+          .sessionActivationOutcomeUnknown,
+        ]
+        guard activationOutcomes.contains(candidate.action) else { return nil }
+        let candidateDigest = try candidate.evidenceDigest()
+        if candidate.sessionID == evidence.sessionID || candidateDigest == digest {
+          guard candidate == evidence else { throw N3EFault.injected }
+          return (index + 1, candidate)
+        }
+        return nil
+      }
+      guard candidates.count <= 1 else { throw N3EFault.injected }
+      guard let existing = candidates.first else { return nil }
+      return try NativeAgentSessionAuditReceipt(
+        evidenceDigest: digest,
+        recordDigest: Data(repeating: UInt8(existing.0), count: 32),
+        recordIndex: existing.0)
+    }
   }
 }
 
@@ -345,6 +384,186 @@ private final class N3ERecoveryStore: NativeAgentSessionConsumeRecoveryStoring,
   }
 }
 
+private enum N3EV4RecoveryFailurePoint: Hashable, Sendable {
+  case prepare
+  case receipt
+  case terminal
+}
+
+private final class N3ERecoveryV4Store: NativeAgentSessionConsumeRecoveryV4Storing,
+  @unchecked Sendable
+{
+  private let lock = NSLock()
+  private var failingPoints: Set<N3EV4RecoveryFailurePoint> = []
+  private(set) var state: NativeAgentSessionConsumeRecoveryV4Lookup = .missing
+  private(set) var prepareCalls = 0
+  private(set) var receiptCalls = 0
+  private(set) var terminalCalls = 0
+
+  func fail(_ point: N3EV4RecoveryFailurePoint) {
+    _ = lock.withLock { failingPoints.insert(point) }
+  }
+
+  func save(
+    _ evidence: NativeAgentSessionConsumeRecoveryV4Evidence,
+    nowMilliseconds: Int64?
+  ) throws -> NativeAgentSessionConsumeRecoveryV4Evidence {
+    try lock.withLock {
+      if let nowMilliseconds {
+        guard nowMilliseconds >= 0,
+          evidence.recoveryExpiresAtMilliseconds > nowMilliseconds
+        else { throw NativeAgentSessionConsumeRecoveryStoreError.invalidEvidence }
+      }
+      switch state {
+      case .missing:
+        state = .pending(evidence)
+      case .pending(let existing) where existing == evidence:
+        break
+      default:
+        throw NativeAgentSessionConsumeRecoveryStoreError.conflict
+      }
+      return evidence
+    }
+  }
+
+  func prepareForActivation(
+    _ expected: NativeAgentSessionConsumeRecoveryV4Evidence,
+    preparedRecord: NativeAgentSessionConsumeRecoveryV4PreparedRecord
+  ) throws -> NativeAgentSessionConsumeRecoveryV4PreparedRecord {
+    try lock.withLock {
+      prepareCalls += 1
+      if failingPoints.remove(.prepare) != nil { throw N3EFault.injected }
+      guard preparedRecord.evidence == expected else {
+        throw NativeAgentSessionConsumeRecoveryStoreError.conflict
+      }
+      switch state {
+      case .pending(let existing) where existing == expected:
+        state = .auditPrepared(preparedRecord)
+      case .auditPrepared(let existing) where existing == preparedRecord:
+        break
+      default:
+        throw NativeAgentSessionConsumeRecoveryStoreError.conflict
+      }
+      return preparedRecord
+    }
+  }
+
+  func recordCommitReceipt(
+    _ expected: NativeAgentSessionConsumeRecoveryV4Evidence,
+    preparedRecord: NativeAgentSessionConsumeRecoveryV4PreparedRecord,
+    commitReceipt: NativeAgentSessionConsumeRecoveryV4CommitReceipt
+  ) throws -> NativeAgentSessionConsumeRecoveryV4CommitReceipt {
+    try lock.withLock {
+      receiptCalls += 1
+      if failingPoints.remove(.receipt) != nil { throw N3EFault.injected }
+      guard preparedRecord.evidence == expected,
+        commitReceipt.preparedRecord == preparedRecord
+      else { throw NativeAgentSessionConsumeRecoveryStoreError.conflict }
+      switch state {
+      case .auditPrepared(let existing) where existing == preparedRecord:
+        state = .commitReceipt(commitReceipt)
+      case .commitReceipt(let existing) where existing == commitReceipt:
+        break
+      default:
+        throw NativeAgentSessionConsumeRecoveryStoreError.conflict
+      }
+      return commitReceipt
+    }
+  }
+
+  func completeAfterAudit(
+    _ expected: NativeAgentSessionConsumeRecoveryV4Evidence,
+    preparedRecord: NativeAgentSessionConsumeRecoveryV4PreparedRecord,
+    auditedRecord: NativeAgentSessionConsumeRecoveryV4AuditedTerminalRecord
+  ) throws -> NativeAgentSessionConsumeRecoveryV4AuditedTerminalRecord {
+    try lock.withLock {
+      terminalCalls += 1
+      if failingPoints.remove(.terminal) != nil { throw N3EFault.injected }
+      guard preparedRecord.evidence == expected,
+        auditedRecord.preparedRecord == preparedRecord
+      else { throw NativeAgentSessionConsumeRecoveryStoreError.conflict }
+      switch state {
+      case .auditPrepared(let existing)
+        where existing == preparedRecord
+          && auditedRecord.outcome != .activated
+          && auditedRecord.commitReceiptDigest == nil:
+        state = .audited(auditedRecord)
+      case .commitReceipt(let existing)
+        where existing.preparedRecord == preparedRecord
+          && (auditedRecord.outcome == .activated
+            || auditedRecord.outcome == .outcomeUnknown)
+          && auditedRecord.commitReceiptDigest == existing.commitReceiptDigest:
+        state = .audited(auditedRecord)
+      case .audited(let existing) where existing == auditedRecord:
+        break
+      default:
+        throw NativeAgentSessionConsumeRecoveryStoreError.conflict
+      }
+      return auditedRecord
+    }
+  }
+
+  func lookupExact(
+    _ expected: NativeAgentSessionConsumeRecoveryV4Evidence,
+    nowMilliseconds: Int64?
+  ) throws -> NativeAgentSessionConsumeRecoveryV4Lookup {
+    try lock.withLock {
+      if let nowMilliseconds {
+        guard nowMilliseconds >= 0 else {
+          throw NativeAgentSessionConsumeRecoveryStoreError.invalidEvidence
+        }
+        let expiry: Int64? = switch state {
+        case .missing: nil
+        case .pending(let value): value.recoveryExpiresAtMilliseconds
+        case .auditPrepared(let value): value.expiresAtMilliseconds
+        case .commitReceipt(let value): value.expiresAtMilliseconds
+        case .audited(let value): value.expiresAtMilliseconds
+        }
+        if let expiry, expiry <= nowMilliseconds { state = .missing }
+      }
+      switch state {
+      case .missing:
+        return .missing
+      case .pending(let existing):
+        guard existing == expected else {
+          throw NativeAgentSessionConsumeRecoveryStoreError.conflict
+        }
+      case .auditPrepared(let existing):
+        guard existing.evidence == expected else {
+          throw NativeAgentSessionConsumeRecoveryStoreError.conflict
+        }
+      case .commitReceipt(let existing):
+        guard existing.evidence == expected else {
+          throw NativeAgentSessionConsumeRecoveryStoreError.conflict
+        }
+      case .audited(let existing):
+        guard existing.evidence == expected else {
+          throw NativeAgentSessionConsumeRecoveryStoreError.conflict
+        }
+      }
+      return state
+    }
+  }
+
+  func pruneExpired(nowMilliseconds: Int64) throws -> Int {
+    try lock.withLock {
+      guard nowMilliseconds >= 0 else {
+        throw NativeAgentSessionConsumeRecoveryStoreError.invalidEvidence
+      }
+      let expiry: Int64? = switch state {
+      case .missing: nil
+      case .pending(let value): value.recoveryExpiresAtMilliseconds
+      case .auditPrepared(let value): value.expiresAtMilliseconds
+      case .commitReceipt(let value): value.expiresAtMilliseconds
+      case .audited(let value): value.expiresAtMilliseconds
+      }
+      guard let expiry, expiry <= nowMilliseconds else { return 0 }
+      state = .missing
+      return 1
+    }
+  }
+}
+
 private struct N3EFixture {
   let coordinator: NativeAgentSessionCoordinator
   let store: NativeAgentBootstrapChallengeStore
@@ -359,6 +578,7 @@ private struct N3EFixture {
   let audit: N3EAudit
   let wall: N3EWallClock
   let monotonic: N3EMonotonicClock
+  let activationRecoveryStore: any NativeAgentSessionConsumeRecoveryV4Storing
 }
 
 private func n3eHex(_ data: Data) -> String {
@@ -437,6 +657,7 @@ private func n3eFixture(
   ambiguity: N3EGrantAmbiguity? = nil,
   randomByte: UInt8 = 1,
   recoveryStore: any NativeAgentSessionConsumeRecoveryStoring = N3ERecoveryStore(),
+  activationRecoveryStore: any NativeAgentSessionConsumeRecoveryV4Storing = N3ERecoveryV4Store(),
   grantConsumer: N3EGrantConsumer? = nil,
   auditAppender: N3EAudit? = nil,
   bootstrapIssuedAt: Int64 = n3eWall
@@ -474,6 +695,7 @@ private func n3eFixture(
     bindingObserver: observer,
     grantConsumer: grant,
     recoveryStore: recoveryStore,
+    activationRecoveryStore: activationRecoveryStore,
     registry: actualRegistry,
     audit: audit,
     wallClock: wall,
@@ -494,7 +716,8 @@ private func n3eFixture(
     grant: grant,
     audit: audit,
     wall: wall,
-    monotonic: monotonic
+    monotonic: monotonic,
+    activationRecoveryStore: activationRecoveryStore
   )
 }
 
@@ -571,6 +794,27 @@ func n3eGrantAmbiguityIsExactRetry() throws {
   }
 }
 
+@Test("N3-E3c-1c binding drift before hidden commit or publish never exposes authority")
+func n3eActivationRevalidatesBindingAtCommitAndPublish() throws {
+  for driftValidationCall in [2, 3] {
+    let fixture = try n3eFixture()
+    fixture.connection.onValidate = { [weak connection = fixture.connection, weak observer = fixture.observer] in
+      guard connection?.calls == driftValidationCall,
+        let changed = try? n3eBinding(worktreeByte: UInt8(0xaa + driftValidationCall))
+      else { return }
+      observer?.replace(changed)
+    }
+
+    #expect(throws: NativeAgentSessionCoordinatorError.bindingDenied) {
+      _ = try fixture.coordinator.start(
+        bootstrapID: fixture.bootstrapID, proof: fixture.proof)
+    }
+    #expect(throws: NativeAgentSessionRegistryError.sessionMissing) {
+      _ = try n3eDirectStatus(fixture)
+    }
+  }
+}
+
 @Test("N3-E table: activation clock faults remain bounded and retryable")
 func n3eActivationClockFaults() throws {
   enum ClockKind {
@@ -614,10 +858,10 @@ func n3eRegistryAndActivationAuditFaults() throws {
     _ = try auditFailure.coordinator.start(
       bootstrapID: auditFailure.bootstrapID, proof: auditFailure.proof)
   }
-  #expect(try n3eDirectStatus(auditFailure).state == .revoked)
-  #expect(
-    auditFailure.audit.events.map(\.action)
-      == [.sessionActivated, .sessionInvalidated])
+  #expect(throws: NativeAgentSessionRegistryError.sessionMissing) {
+    _ = try n3eDirectStatus(auditFailure)
+  }
+  #expect(auditFailure.audit.events.map(\.action) == [.sessionActivated])
 
   let capacityFailure = try n3eFixture(globalLimit: 1)
   let blockingLease = try n3eLease(
@@ -679,8 +923,10 @@ func n3eConnectionLossDuringCloudAndAudit() throws {
         _ = try fixture.coordinator.start(
           bootstrapID: fixture.bootstrapID, proof: fixture.proof)
       }
-      #expect(try n3eDirectStatus(fixture).state == .revoked)
-      #expect(fixture.audit.events.map(\.action) == [.sessionActivated, .sessionInvalidated])
+      #expect(throws: NativeAgentSessionRegistryError.sessionMissing) {
+        _ = try n3eDirectStatus(fixture)
+      }
+      #expect(fixture.audit.events.map(\.action) == [.sessionActivated])
     }
   }
 }
@@ -804,12 +1050,16 @@ func n3eRestartAfterCloudCommitConvergesExactlyWithoutRestoringAuthority() throw
   let root = URL(fileURLWithPath: canonicalPath, isDirectory: true)
   defer { try? FileManager.default.removeItem(at: root) }
   let recoveryPath = root.appendingPathComponent("consume-recovery.json").path
+  let activationRecoveryPath = root.appendingPathComponent("activation-recovery-v4.json").path
   let firstRecovery = try NativeAgentSessionConsumeRecoveryStore(path: recoveryPath)
   let binding = try n3eBinding()
   let cloud = N3EGrantConsumer(
     lease: try n3eLease(binding: binding), ambiguity: .afterCommitResponseLost)
   let first = try n3eFixture(
-    recoveryStore: firstRecovery, grantConsumer: cloud)
+    recoveryStore: firstRecovery,
+    activationRecoveryStore: try NativeAgentSessionConsumeRecoveryV4Store(
+      path: activationRecoveryPath),
+    grantConsumer: cloud)
 
   #expect(throws: NativeAgentSessionCoordinatorError.grantDenied) {
     _ = try first.coordinator.start(bootstrapID: first.bootstrapID, proof: first.proof)
@@ -822,7 +1072,10 @@ func n3eRestartAfterCloudCommitConvergesExactlyWithoutRestoringAuthority() throw
 
   let restartedRecovery = try NativeAgentSessionConsumeRecoveryStore(path: recoveryPath)
   let restarted = try n3eFixture(
-    randomByte: 2, recoveryStore: restartedRecovery, grantConsumer: cloud,
+    randomByte: 2, recoveryStore: restartedRecovery,
+    activationRecoveryStore: try NativeAgentSessionConsumeRecoveryV4Store(
+      path: activationRecoveryPath),
+    grantConsumer: cloud,
     bootstrapIssuedAt: n3eWall + 5_000)
   #expect(restarted.bootstrapID != first.bootstrapID)
   let result = try restarted.coordinator.start(
@@ -833,13 +1086,16 @@ func n3eRestartAfterCloudCommitConvergesExactlyWithoutRestoringAuthority() throw
   #expect(cloud.requests[0].proof == cloud.requests[1].proof)
   #expect(cloud.requests[0].binding == cloud.requests[1].binding)
   #expect(FileManager.default.fileExists(atPath: recoveryPath))
-  let recoveryBytes = try Data(contentsOf: URL(fileURLWithPath: recoveryPath))
+  let recoveryBytes = try Data(contentsOf: URL(fileURLWithPath: activationRecoveryPath))
   #expect(String(decoding: recoveryBytes, as: UTF8.self).contains("\"state\":\"audited\""))
   #expect(try restarted.coordinator.status(sessionID: n3eSessionID).state == .active)
 
   let terminalStore = try NativeAgentSessionConsumeRecoveryStore(path: recoveryPath)
   let afterAuditedRestart = try n3eFixture(
-    randomByte: 3, recoveryStore: terminalStore, grantConsumer: cloud,
+    randomByte: 3, recoveryStore: terminalStore,
+    activationRecoveryStore: try NativeAgentSessionConsumeRecoveryV4Store(
+      path: activationRecoveryPath),
+    grantConsumer: cloud,
     bootstrapIssuedAt: n3eWall + 10_000)
   #expect(throws: NativeAgentSessionCoordinatorError.sessionDenied) {
     _ = try afterAuditedRestart.coordinator.start(
@@ -853,8 +1109,8 @@ func n3eRestartAfterCloudCommitConvergesExactlyWithoutRestoringAuthority() throw
   }
 }
 
-@Test("N3-E3c-1b restart reconciles a durable activation audit exactly once")
-func n3ePreparedAuditRestartReusesExactDurableRecord() throws {
+@Test("N3-E3c-1c restart terminalizes a commit-receipt audit failure as outcome unknown")
+func n3eCommitReceiptRestartBecomesOutcomeUnknownWithoutAuthority() throws {
   let requestedRoot = FileManager.default.temporaryDirectory
     .appendingPathComponent("agentpass-n3e-audit-reconcile-\(UUID().uuidString)")
   try FileManager.default.createDirectory(
@@ -866,6 +1122,7 @@ func n3ePreparedAuditRestartReusesExactDurableRecord() throws {
   let root = URL(fileURLWithPath: canonicalPath, isDirectory: true)
   defer { try? FileManager.default.removeItem(at: root) }
   let recoveryPath = root.appendingPathComponent("consume-recovery.json").path
+  let activationRecoveryPath = root.appendingPathComponent("activation-recovery-v4.json").path
   let binding = try n3eBinding()
   let cloud = N3EGrantConsumer(lease: try n3eLease(binding: binding))
   let audit = N3EAudit()
@@ -873,6 +1130,8 @@ func n3ePreparedAuditRestartReusesExactDurableRecord() throws {
 
   let first = try n3eFixture(
     recoveryStore: try NativeAgentSessionConsumeRecoveryStore(path: recoveryPath),
+    activationRecoveryStore: try NativeAgentSessionConsumeRecoveryV4Store(
+      path: activationRecoveryPath),
     grantConsumer: cloud, auditAppender: audit)
   #expect(throws: NativeAgentSessionCoordinatorError.auditUnavailable) {
     _ = try first.coordinator.start(bootstrapID: first.bootstrapID, proof: first.proof)
@@ -880,27 +1139,111 @@ func n3ePreparedAuditRestartReusesExactDurableRecord() throws {
   #expect(cloud.commitCount == 1)
   #expect(audit.events.filter { $0.action == .sessionActivated }.count == 1)
   #expect(
-    String(decoding: try Data(contentsOf: URL(fileURLWithPath: recoveryPath)), as: UTF8.self)
-      .contains("\"state\":\"audit_prepared\""))
-  #expect(try n3eDirectStatus(first).state == .revoked)
+    String(
+      decoding: try Data(contentsOf: URL(fileURLWithPath: activationRecoveryPath)),
+      as: UTF8.self
+    ).contains("\"state\":\"commit_receipt\""))
+  #expect(throws: NativeAgentSessionRegistryError.sessionMissing) {
+    _ = try n3eDirectStatus(first)
+  }
 
   let restarted = try n3eFixture(
     randomByte: 2,
     recoveryStore: try NativeAgentSessionConsumeRecoveryStore(path: recoveryPath),
+    activationRecoveryStore: try NativeAgentSessionConsumeRecoveryV4Store(
+      path: activationRecoveryPath),
     grantConsumer: cloud,
     auditAppender: audit,
-    bootstrapIssuedAt: n3eWall + 5_000)
+    bootstrapIssuedAt: n3eWall)
   #expect(throws: NativeAgentSessionCoordinatorError.sessionDenied) {
     _ = try restarted.coordinator.start(
       bootstrapID: restarted.bootstrapID, proof: restarted.proof)
   }
   #expect(cloud.commitCount == 1)
-  #expect(cloud.calls == 1)
+  #expect(cloud.calls == 2)
   #expect(audit.events.filter { $0.action == .sessionActivated }.count == 1)
   #expect(
-    String(decoding: try Data(contentsOf: URL(fileURLWithPath: recoveryPath)), as: UTF8.self)
-      .contains("\"state\":\"audited\""))
+    audit.events.filter { $0.action == .sessionActivationOutcomeUnknown }.count == 1)
+  #expect(
+    String(
+      decoding: try Data(contentsOf: URL(fileURLWithPath: activationRecoveryPath)),
+      as: UTF8.self
+    ).contains("\"outcome\":\"outcome_unknown\""))
   #expect(throws: NativeAgentSessionRegistryError.sessionMissing) {
     _ = try n3eDirectStatus(restarted)
+  }
+}
+
+@Test("N3-E3c-1c v4 durability failures never publish hidden authority")
+func n3eV4DurabilityFailureMatrix() throws {
+  for point in [
+    N3EV4RecoveryFailurePoint.prepare,
+    .receipt,
+    .terminal,
+  ] {
+    let activationStore = N3ERecoveryV4Store()
+    activationStore.fail(point)
+    let fixture = try n3eFixture(activationRecoveryStore: activationStore)
+    let expected: NativeAgentSessionCoordinatorError =
+      point == .terminal ? .auditUnavailable : .activationDenied
+    #expect(throws: expected) {
+      _ = try fixture.coordinator.start(
+        bootstrapID: fixture.bootstrapID, proof: fixture.proof)
+    }
+    #expect(throws: NativeAgentSessionRegistryError.sessionMissing) {
+      _ = try n3eDirectStatus(fixture)
+    }
+
+    switch point {
+    case .prepare:
+      guard case .pending = activationStore.state else {
+        Issue.record("prepare failure must retain only pending v4 evidence")
+        continue
+      }
+      #expect(fixture.audit.events.isEmpty)
+      #expect(
+        try fixture.coordinator.start(
+          bootstrapID: fixture.bootstrapID, proof: fixture.proof
+        ).status.state == .active)
+    case .receipt:
+      guard case .auditPrepared = activationStore.state else {
+        Issue.record("receipt failure must retain durable prepared evidence")
+        continue
+      }
+      #expect(fixture.audit.events.isEmpty)
+      #expect(throws: NativeAgentSessionCoordinatorError.sessionDenied) {
+        _ = try fixture.coordinator.start(
+          bootstrapID: fixture.bootstrapID, proof: fixture.proof)
+      }
+      guard case .audited(let terminal) = activationStore.state else {
+        Issue.record("prepared retry must terminalize")
+        continue
+      }
+      #expect(terminal.outcome == .outcomeUnknown)
+      #expect(throws: NativeAgentSessionCoordinatorError.challengeDenied) {
+        _ = try fixture.coordinator.start(
+          bootstrapID: fixture.bootstrapID, proof: fixture.proof)
+      }
+    case .terminal:
+      guard case .commitReceipt = activationStore.state else {
+        Issue.record("terminal failure must retain the exact commit receipt")
+        continue
+      }
+      #expect(fixture.audit.events.map(\.action) == [.sessionActivated])
+      #expect(throws: NativeAgentSessionCoordinatorError.sessionDenied) {
+        _ = try fixture.coordinator.start(
+          bootstrapID: fixture.bootstrapID, proof: fixture.proof)
+      }
+      guard case .audited(let terminal) = activationStore.state else {
+        Issue.record("durable success audit must be reused")
+        continue
+      }
+      #expect(terminal.outcome == .activated)
+      #expect(fixture.audit.events.map(\.action) == [.sessionActivated])
+      #expect(throws: NativeAgentSessionCoordinatorError.challengeDenied) {
+        _ = try fixture.coordinator.start(
+          bootstrapID: fixture.bootstrapID, proof: fixture.proof)
+      }
+    }
   }
 }

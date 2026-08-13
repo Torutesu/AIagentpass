@@ -51,6 +51,7 @@ public final class NativeAgentSessionCoordinator: @unchecked Sendable {
   private let bindingObserver: any NativeAgentSessionBindingObserving
   private let grantConsumer: any NativeAgentGrantLeaseConsuming
   private let recoveryStore: any NativeAgentSessionConsumeRecoveryStoring
+  private let activationRecoveryStore: any NativeAgentSessionConsumeRecoveryV4Storing
   private let registry: NativeAgentSessionRegistry
   private let audit: any NativeAgentSessionAuditAppending
   private let wallClock: any NativeAgentWallClock
@@ -72,6 +73,7 @@ public final class NativeAgentSessionCoordinator: @unchecked Sendable {
     bindingObserver: any NativeAgentSessionBindingObserving,
     grantConsumer: any NativeAgentGrantLeaseConsuming,
     recoveryStore: any NativeAgentSessionConsumeRecoveryStoring,
+    activationRecoveryStore: any NativeAgentSessionConsumeRecoveryV4Storing,
     registry: NativeAgentSessionRegistry,
     audit: any NativeAgentSessionAuditAppending,
     wallClock: any NativeAgentWallClock,
@@ -88,6 +90,7 @@ public final class NativeAgentSessionCoordinator: @unchecked Sendable {
     self.bindingObserver = bindingObserver
     self.grantConsumer = grantConsumer
     self.recoveryStore = recoveryStore
+    self.activationRecoveryStore = activationRecoveryStore
     self.registry = registry
     self.audit = audit
     self.wallClock = wallClock
@@ -317,76 +320,194 @@ public final class NativeAgentSessionCoordinator: @unchecked Sendable {
     }
 
     if attempt.localLeaseID == nil {
-      attempt.localLeaseID = try localLeaseID()
+      attempt.localLeaseID = try Self.localLeaseID(
+        sessionID: lease.sessionID, proofDigest: attempt.proofDigest)
       stateLock.withLock { pendingAttempt = attempt }
     }
     guard let localLeaseID = attempt.localLeaseID else {
       throw NativeAgentSessionCoordinatorError.activationDenied
     }
-    let status: NativeAgentSessionRegistryStatus
+    let reservation: NativeAgentSessionActivationReservation
     do {
-      status = try registry.activate(
+      reservation = try registry.reserveActivation(
         lease: lease,
         localLeaseID: localLeaseID,
         connectionTokenIdentity: connectionTokenIdentity,
         deadline: deadline,
         globalLimit: authority.globalSessionLimit,
         perAgentLimit: authority.perAgentSessionLimit,
-        perWorktreeLimit: authority.perWorktreeSessionLimit)
+        perWorktreeLimit: authority.perWorktreeSessionLimit,
+        wallClock: wall,
+        monotonicClock: monotonic)
     } catch {
       throw NativeAgentSessionCoordinatorError.activationDenied
     }
+    let plannedResult = NativeAgentSessionActivationResult(
+      status: reservation.plannedStatus, binding: attempt.binding)
+    let resultDigest: Data
+    let transactionDigest: Data
+    let commitReceiptDigest: Data
+    let v4Evidence: NativeAgentSessionConsumeRecoveryV4Evidence
+    let activationAuditEvidence: NativeAgentSessionAuditEvidence
+    let activationAuditEvidenceDigest: Data
     do {
-      try ensureLive()
-    } catch {
-      invalidateSession(
-        sessionID: status.sessionID, binding: attempt.binding,
-        reasonCode: "connection_invalidated")
-      stateLock.withLock { pendingAttempt = nil }
-      throw error
-    }
-    let result = NativeAgentSessionActivationResult(status: status, binding: attempt.binding)
-    let preparedRecord: NativeAgentSessionConsumeRecoveryPreparedRecord
-    do {
-      preparedRecord = try NativeAgentSessionConsumeRecoveryPreparedRecord(
-        evidence: recoveryEvidence,
-        sessionID: lease.sessionID,
+      resultDigest = try Self.activationResultDigest(plannedResult)
+      transactionDigest = try Self.activationTransactionDigest(
+        recoveryEvidence: recoveryEvidence,
         sessionDigest: sessionDigest,
-        resultDigest: Self.activationResultDigest(result),
-        auditEvidenceDigest: auditEvidenceDigest,
+        resultDigest: resultDigest,
         expiresAtMilliseconds: min(
           recoveryEvidence.recoveryExpiresAtMilliseconds, lease.expiresAtMilliseconds))
-      attempt.preparedRecovery = try recoveryStore.prepareForActivation(
-        recoveryEvidence, preparedRecord: preparedRecord)
-      stateLock.withLock { pendingAttempt = attempt }
+      commitReceiptDigest = try Self.activationCommitReceiptDigest(
+        transactionDigest: transactionDigest,
+        sessionID: lease.sessionID,
+        resultDigest: resultDigest)
+      v4Evidence = try NativeAgentSessionConsumeRecoveryV4Evidence(
+        evidence: recoveryEvidence, transactionDigest: transactionDigest)
+      activationAuditEvidence = try NativeAgentSessionAuditEvidence(
+        action: .sessionActivated,
+        sessionID: lease.sessionID,
+        activationTransactionDigest: transactionDigest,
+        activationCommitReceiptDigest: commitReceiptDigest,
+        binding: attempt.binding)
+      activationAuditEvidenceDigest = try activationAuditEvidence.evidenceDigest()
     } catch {
-      invalidateSession(
-        sessionID: status.sessionID, binding: attempt.binding,
-        reasonCode: "recovery_store_unavailable")
-      stateLock.withLock { pendingAttempt = nil }
+      _ = try? registry.abortActivation(
+        reservation, connectionTokenIdentity: connectionTokenIdentity)
       throw NativeAgentSessionCoordinatorError.activationDenied
     }
 
-    let auditReceipt: NativeAgentSessionAuditReceipt
+    let preparedRecord: NativeAgentSessionConsumeRecoveryV4PreparedRecord
     do {
-      auditReceipt = try audit.reconcileAgentSessionActivationAudit(auditEvidence)
-      guard auditReceipt.evidenceDigest == auditEvidenceDigest else {
+      let now = try sampleWall().millisecondsSinceUnixEpoch
+      let lookup = try activationRecoveryStore.lookupExact(
+        v4Evidence, nowMilliseconds: now)
+      switch lookup {
+      case .missing:
+        _ = try activationRecoveryStore.save(v4Evidence, nowMilliseconds: now)
+      case .pending:
+        break
+      case .auditPrepared(let existing):
+        _ = try? registry.abortActivation(
+          reservation, connectionTokenIdentity: connectionTokenIdentity)
+        try completeRecoveredV4Outcome(
+          preparedRecord: existing, outcome: .outcomeUnknown,
+          commitReceiptDigest: nil, binding: attempt.binding)
+        stateLock.withLock { pendingAttempt = nil }
+        throw NativeAgentSessionCoordinatorError.sessionDenied
+      case .commitReceipt(let existing):
+        _ = try? registry.abortActivation(
+          reservation, connectionTokenIdentity: connectionTokenIdentity)
+        try completeRecoveredV4CommitReceipt(
+          existing, binding: attempt.binding)
+        stateLock.withLock { pendingAttempt = nil }
+        throw NativeAgentSessionCoordinatorError.sessionDenied
+      case .audited:
+        _ = try? registry.abortActivation(
+          reservation, connectionTokenIdentity: connectionTokenIdentity)
+        stateLock.withLock { pendingAttempt = nil }
+        throw NativeAgentSessionCoordinatorError.sessionDenied
+      }
+      preparedRecord = try NativeAgentSessionConsumeRecoveryV4PreparedRecord(
+        evidence: v4Evidence,
+        sessionID: lease.sessionID,
+        sessionDigest: sessionDigest,
+        resultDigest: resultDigest,
+        auditEvidenceDigest: activationAuditEvidenceDigest,
+        expiresAtMilliseconds: min(
+          recoveryEvidence.recoveryExpiresAtMilliseconds, lease.expiresAtMilliseconds))
+      _ = try activationRecoveryStore.prepareForActivation(
+        v4Evidence, preparedRecord: preparedRecord)
+    } catch {
+      _ = try? registry.abortActivation(
+        reservation, connectionTokenIdentity: connectionTokenIdentity)
+      if let error = error as? NativeAgentSessionCoordinatorError,
+        error == .sessionDenied
+      {
+        // A recovered v4 terminal is final.  Do not resurrect the consumed
+        // bootstrap attempt in this process after durable reconciliation.
+        stateLock.withLock { pendingAttempt = nil }
+        throw error
+      }
+      stateLock.withLock { pendingAttempt = attempt }
+      if let error = error as? NativeAgentSessionCoordinatorError { throw error }
+      throw NativeAgentSessionCoordinatorError.activationDenied
+    }
+
+    do {
+      try revalidateConnection()
+      try revalidate(binding: attempt.binding)
+      try ensureLive()
+      _ = try registry.commitActivation(
+        reservation,
+        connectionTokenIdentity: connectionTokenIdentity,
+        wallClock: sampleWall(),
+        monotonicClock: sampleMonotonic())
+    } catch {
+      _ = try? registry.abortActivation(
+        reservation, connectionTokenIdentity: connectionTokenIdentity)
+      _ = try? completeV4Outcome(
+        preparedRecord: preparedRecord, outcome: .aborted,
+        commitReceiptDigest: nil, binding: attempt.binding)
+      stateLock.withLock { pendingAttempt = nil }
+      if let error = error as? NativeAgentSessionCoordinatorError { throw error }
+      throw NativeAgentSessionCoordinatorError.activationDenied
+    }
+
+    let commitReceipt: NativeAgentSessionConsumeRecoveryV4CommitReceipt
+    do {
+      commitReceipt = try NativeAgentSessionConsumeRecoveryV4CommitReceipt(
+        preparedRecord: preparedRecord,
+        commitReceiptDigest: commitReceiptDigest)
+      _ = try activationRecoveryStore.recordCommitReceipt(
+        v4Evidence, preparedRecord: preparedRecord,
+        commitReceipt: commitReceipt)
+    } catch {
+      _ = try? registry.abortActivation(
+        reservation, connectionTokenIdentity: connectionTokenIdentity)
+      stateLock.withLock { pendingAttempt = attempt }
+      throw NativeAgentSessionCoordinatorError.activationDenied
+    }
+
+    do {
+      let receipt = try audit.reconcileAgentSessionActivationOutcomeAudit(
+        activationAuditEvidence)
+      guard receipt.evidenceDigest == activationAuditEvidenceDigest else {
         throw NativeAgentSessionCoordinatorError.auditUnavailable
       }
-      let auditedRecord = try NativeAgentSessionConsumeRecoveryAuditedRecord(
-        preparedRecord: preparedRecord, auditDigest: auditReceipt.recordDigest)
-      _ = try recoveryStore.completeAfterAudit(
-        recoveryEvidence, preparedRecord: preparedRecord,
-        auditedRecord: auditedRecord)
+      let terminal = try NativeAgentSessionConsumeRecoveryV4AuditedTerminalRecord(
+        preparedRecord: preparedRecord,
+        outcome: .activated,
+        commitReceiptDigest: commitReceipt.commitReceiptDigest,
+        auditDigest: receipt.recordDigest)
+      _ = try activationRecoveryStore.completeAfterAudit(
+        v4Evidence, preparedRecord: preparedRecord, auditedRecord: terminal)
     } catch {
-      invalidateSession(
-        sessionID: status.sessionID, binding: attempt.binding,
-        reasonCode: "audit_unavailable")
+      _ = try? registry.abortActivation(
+        reservation, connectionTokenIdentity: connectionTokenIdentity)
       stateLock.withLock { pendingAttempt = attempt }
       throw NativeAgentSessionCoordinatorError.auditUnavailable
     }
 
-    let published = stateLock.withLock { () -> Bool in
+    let status: NativeAgentSessionRegistryStatus
+    do {
+      try revalidateConnection()
+      try revalidate(binding: attempt.binding)
+      try ensureLive()
+      status = try registry.publishActivation(
+        reservation,
+        connectionTokenIdentity: connectionTokenIdentity,
+        wallClock: sampleWall(),
+        monotonicClock: sampleMonotonic())
+    } catch {
+      _ = try? registry.abortActivation(
+        reservation, connectionTokenIdentity: connectionTokenIdentity)
+      stateLock.withLock { pendingAttempt = nil }
+      if let error = error as? NativeAgentSessionCoordinatorError { throw error }
+      throw NativeAgentSessionCoordinatorError.activationDenied
+    }
+    let result = NativeAgentSessionActivationResult(status: status, binding: attempt.binding)
+    let resultPublished = stateLock.withLock { () -> Bool in
       guard !invalidated else {
         pendingAttempt = nil
         return false
@@ -397,7 +518,7 @@ public final class NativeAgentSessionCoordinator: @unchecked Sendable {
       pendingAttempt = nil
       return true
     }
-    guard published else {
+    guard resultPublished else {
       invalidateSession(
         sessionID: status.sessionID, binding: attempt.binding,
         reasonCode: "connection_invalidated")
@@ -546,6 +667,18 @@ public final class NativeAgentSessionCoordinator: @unchecked Sendable {
     }
   }
 
+  private func revalidate(binding expected: NativeAgentSessionBinding) throws {
+    let observed: NativeAgentSessionBinding
+    do {
+      observed = try bindingObserver.observeSessionBinding(agentID: expected.agentID)
+    } catch {
+      throw NativeAgentSessionCoordinatorError.bindingDenied
+    }
+    guard observed == expected else {
+      throw NativeAgentSessionCoordinatorError.bindingDenied
+    }
+  }
+
   private func ensureLive() throws {
     guard !stateLock.withLock({ invalidated }) else {
       throw NativeAgentSessionCoordinatorError.invalidated
@@ -567,6 +700,87 @@ public final class NativeAgentSessionCoordinator: @unchecked Sendable {
         binding: binding, reasonCode: reasonCode))
   }
 
+  private func completeRecoveredV4Outcome(
+    preparedRecord: NativeAgentSessionConsumeRecoveryV4PreparedRecord,
+    outcome: NativeAgentSessionConsumeRecoveryV4Outcome,
+    commitReceiptDigest: Data?,
+    binding: NativeAgentSessionBinding
+  ) throws {
+    _ = try completeV4Outcome(
+      preparedRecord: preparedRecord, outcome: outcome,
+      commitReceiptDigest: commitReceiptDigest, binding: binding)
+  }
+
+  @discardableResult
+  private func completeV4Outcome(
+    preparedRecord: NativeAgentSessionConsumeRecoveryV4PreparedRecord,
+    outcome: NativeAgentSessionConsumeRecoveryV4Outcome,
+    commitReceiptDigest: Data?,
+    binding: NativeAgentSessionBinding
+  ) throws -> NativeAgentSessionConsumeRecoveryV4AuditedTerminalRecord {
+    let action: NativeAgentSessionAuditAction
+    switch outcome {
+    case .activated: action = .sessionActivated
+    case .aborted: action = .sessionActivationAborted
+    case .outcomeUnknown: action = .sessionActivationOutcomeUnknown
+    }
+    let evidence = try NativeAgentSessionAuditEvidence(
+      action: action,
+      sessionID: preparedRecord.sessionID,
+      activationTransactionDigest: preparedRecord.evidence.transactionDigest,
+      activationCommitReceiptDigest: commitReceiptDigest,
+      binding: binding)
+    let receipt = try audit.reconcileAgentSessionActivationOutcomeAudit(evidence)
+    let evidenceDigest = try evidence.evidenceDigest()
+    guard receipt.evidenceDigest == evidenceDigest else {
+      throw NativeAgentSessionCoordinatorError.auditUnavailable
+    }
+    let terminal = try NativeAgentSessionConsumeRecoveryV4AuditedTerminalRecord(
+      preparedRecord: preparedRecord,
+      outcome: outcome,
+      commitReceiptDigest: commitReceiptDigest,
+      auditDigest: receipt.recordDigest)
+    return try activationRecoveryStore.completeAfterAudit(
+      preparedRecord.evidence,
+      preparedRecord: preparedRecord,
+      auditedRecord: terminal)
+  }
+
+  private func completeRecoveredV4CommitReceipt(
+    _ commitReceipt: NativeAgentSessionConsumeRecoveryV4CommitReceipt,
+    binding: NativeAgentSessionBinding
+  ) throws {
+    let prepared = commitReceipt.preparedRecord
+    let successEvidence = try NativeAgentSessionAuditEvidence(
+      action: .sessionActivated,
+      sessionID: prepared.sessionID,
+      activationTransactionDigest: prepared.evidence.transactionDigest,
+      activationCommitReceiptDigest: commitReceipt.commitReceiptDigest,
+      binding: binding)
+    let successDigest = try successEvidence.evidenceDigest()
+    guard successDigest == prepared.auditEvidenceDigest else {
+      throw NativeAgentSessionCoordinatorError.auditUnavailable
+    }
+    if let existing = try audit.lookupAgentSessionActivationOutcomeAudit(successEvidence) {
+      guard existing.evidenceDigest == successDigest else {
+        throw NativeAgentSessionCoordinatorError.auditUnavailable
+      }
+      let terminal = try NativeAgentSessionConsumeRecoveryV4AuditedTerminalRecord(
+        preparedRecord: prepared,
+        outcome: .activated,
+        commitReceiptDigest: commitReceipt.commitReceiptDigest,
+        auditDigest: existing.recordDigest)
+      _ = try activationRecoveryStore.completeAfterAudit(
+        prepared.evidence, preparedRecord: prepared, auditedRecord: terminal)
+      return
+    }
+    _ = try completeV4Outcome(
+      preparedRecord: prepared,
+      outcome: .outcomeUnknown,
+      commitReceiptDigest: commitReceipt.commitReceiptDigest,
+      binding: binding)
+  }
+
   private func sampleWall() throws -> NativeAgentWallClockValue {
     do { return try wallClock.sample() } catch {
       throw NativeAgentSessionCoordinatorError.activationDenied
@@ -579,18 +793,61 @@ public final class NativeAgentSessionCoordinator: @unchecked Sendable {
     }
   }
 
-  private func localLeaseID() throws -> String {
-    let bytes: Data
-    do { bytes = try random.randomBytes(count: 16) } catch {
+  private static func localLeaseID(sessionID: String, proofDigest: Data) throws -> String {
+    guard uuid(sessionID), proofDigest.count == 32 else {
       throw NativeAgentSessionCoordinatorError.activationDenied
     }
-    guard bytes.count == 16 else { throw NativeAgentSessionCoordinatorError.activationDenied }
-    var value = Array(bytes)
+    let statement: [String: Any] = [
+      "version": 1,
+      "purpose": "agentpass-local-session-correlation",
+      "session_id": sessionID.lowercased(),
+      "grant_proof_sha256": hex(proofDigest),
+    ]
+    let digest = Data(SHA256.hash(data: try NativeStrictJSON.data(statement)))
+    var value = Array(digest.prefix(16))
     value[6] = (value[6] & 0x0f) | 0x40
     value[8] = (value[8] & 0x3f) | 0x80
     let hex = value.map { String(format: "%02x", $0) }
     return hex[0...3].joined() + "-" + hex[4...5].joined() + "-"
       + hex[6...7].joined() + "-" + hex[8...9].joined() + "-" + hex[10...15].joined()
+  }
+
+  private static func activationTransactionDigest(
+    recoveryEvidence: NativeAgentSessionConsumeRecoveryEvidence,
+    sessionDigest: Data,
+    resultDigest: Data,
+    expiresAtMilliseconds: Int64
+  ) throws -> Data {
+    let object: [String: Any] = [
+      "version": 1,
+      "purpose": "agentpass-session-activation",
+      "grant_proof_sha256": hex(recoveryEvidence.grantProofDigest),
+      "session_sha256": hex(sessionDigest),
+      "result_sha256": hex(resultDigest),
+      "control_sequence": recoveryEvidence.controlSequence,
+      "authority_generation": recoveryEvidence.authorityGeneration,
+      "key_generation": recoveryEvidence.keyGeneration,
+      "expires_at_ms": expiresAtMilliseconds,
+    ]
+    return Data(SHA256.hash(data: try NativeStrictJSON.data(object)))
+  }
+
+  private static func activationCommitReceiptDigest(
+    transactionDigest: Data,
+    sessionID: String,
+    resultDigest: Data
+  ) throws -> Data {
+    guard transactionDigest.count == 32, resultDigest.count == 32, uuid(sessionID) else {
+      throw NativeAgentSessionCoordinatorError.activationDenied
+    }
+    let object: [String: Any] = [
+      "version": 1,
+      "purpose": "agentpass-session-hidden-commit",
+      "transaction_sha256": hex(transactionDigest),
+      "session_id": sessionID.lowercased(),
+      "result_sha256": hex(resultDigest),
+    ]
+    return Data(SHA256.hash(data: try NativeStrictJSON.data(object)))
   }
 
   private static func agentKind(for adapter: AgentPassAgentAdapterKind) -> String? {
