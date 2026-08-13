@@ -1,6 +1,6 @@
 # AgentPass
 
-The agent platform's implementation-level security and product design is documented in [docs/DETAILED_DESIGN.md](docs/DETAILED_DESIGN.md); the concise component contract is in [docs/AGENT_PLATFORM_ARCHITECTURE.md](docs/AGENT_PLATFORM_ARCHITECTURE.md).
+The agent platform's implementation-level security and product design is documented in [docs/DETAILED_DESIGN.md](docs/DETAILED_DESIGN.md); the concise component contract is in [docs/AGENT_PLATFORM_ARCHITECTURE.md](docs/AGENT_PLATFORM_ARCHITECTURE.md). The active process-bound implementation sequence is in [docs/PROCESS_BOUND_AGENT_IMPLEMENTATION_PLAN.md](docs/PROCESS_BOUND_AGENT_IMPLEMENTATION_PLAN.md), and the signed-macOS qualification status/runbook is in [docs/AGENT_SESSION_N3E_PHYSICAL_QUALIFICATION.md](docs/AGENT_SESSION_N3E_PHYSICAL_QUALIFICATION.md).
 
 AgentPass is an OSS policy broker for coding-agent operations. It keeps signing keys in the platform security boundary and gives an agent permission to perform a narrowly scoped operation, rather than handing the agent a secret.
 

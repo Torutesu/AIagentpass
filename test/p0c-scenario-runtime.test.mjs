@@ -35,9 +35,11 @@ test('scenario success requires exact declaration, release binding, and explicit
 });
 
 test('fixed commands have bounded output, no shell, closed stdin, and fixed environment', async () => {
-  const successful = await runFixedCommand(process.execPath, ['-e', 'process.stdout.write(JSON.stringify({home:process.env.HOME,extra:process.env.EXTRA||null}))'], { timeoutMs: 1000 });
+  // The full suite launches many child-process tests concurrently on CI. Keep
+  // this deadline bounded without making scheduler contention a false failure.
+  const successful = await runFixedCommand(process.execPath, ['-e', 'process.stdout.write(JSON.stringify({home:process.env.HOME,extra:process.env.EXTRA||null}))'], { timeoutMs: 5000 });
   assert.equal(successful.ok, true); assert.deepEqual(JSON.parse(successful.stdout), { home: '/var/empty', extra: null });
-  const limited = await runFixedCommand(process.execPath, ['-e', 'process.stdout.write("x".repeat(1024))'], { timeoutMs: 1000, maxOutputBytes: 32 }); assert.equal(limited.ok, false); assert.equal(limited.outputLimit, true); assert.equal(limited.stdout.length, 32);
+  const limited = await runFixedCommand(process.execPath, ['-e', 'process.stdout.write("x".repeat(1024))'], { timeoutMs: 5000, maxOutputBytes: 32 }); assert.equal(limited.ok, false); assert.equal(limited.outputLimit, true); assert.equal(limited.stdout.length, 32);
   await assert.rejects(() => runFixedCommand('relative', []), /invalid/);
   await assert.rejects(() => runFixedCommand(process.execPath, [], { env: { PATH: '/tmp' } }), /invalid/);
 });

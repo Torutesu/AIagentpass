@@ -33,7 +33,7 @@
     "agentpass-mcp": "./adapters/mcp-server/bin/agentpass-mcp.mjs"
   },
   "scripts": {
-    "test": "node --test test/*.test.mjs test/support/p0b/*.test.mjs packages/*/test/*.test.mjs adapters/*/test/*.test.mjs apps/cloud-api/test/*.test.mjs apps/cloud-api/test/postgres/*.test.mjs scripts/p0b/*.test.mjs scripts/p0b/qualification/*.test.mjs",
+    "test": "node --test test/*.test.mjs test/support/p0b/*.test.mjs packages/*/test/*.test.mjs adapters/*/test/*.test.mjs apps/cloud-api/test/*.test.mjs apps/cloud-api/test/postgres/*.test.mjs scripts/p0b/*.test.mjs scripts/p0b/qualification/*.test.mjs scripts/release/p0c/drivers/*.test.mjs scripts/release/p0c/scenarios/*.test.mjs scripts/release/n3e/*.test.mjs",
     "test:native": "swift test --package-path native/macos",
     "test:native-app": "native/macos/scripts/test-app-bundle.sh",
     "test:native-installer-preservation": "native/macos/scripts/test-installer-preservation.sh",
@@ -47,7 +47,7 @@
     "contracts:validate": "node scripts/validate-contracts.mjs",
     "postgres:cutover": "node scripts/postgres/cutover.mjs",
     "postgres:authority-manifest": "node scripts/postgres/authority-manifest.mjs",
-    "lint": "node --check bin/*.mjs && node --check lib/*.mjs && node --check packages/*/src/*.mjs && node --check adapters/*/src/*.mjs && node --check adapters/*/bin/*.mjs && node --check apps/cloud-api/src/*.mjs apps/cloud-api/src/human-auth/*.mjs apps/cloud-api/src/human-auth/agent-sessions/*.mjs apps/cloud-api/src/human-auth/identity/*.mjs apps/cloud-api/src/human-auth/management/*.mjs apps/cloud-api/src/human-auth/organizations/*.mjs apps/cloud-api/src/human-auth/pagination/*.mjs apps/cloud-api/src/human-auth/webauthn/*.mjs apps/cloud-api/src/postgres/*.mjs && node --check scripts/*.mjs scripts/postgres/*.mjs scripts/release/*.mjs scripts/release/p0c/lib/*.mjs scripts/release/p0c/drivers/* scripts/release/p0c/scenarios/* scripts/p0b/*.mjs scripts/p0b/postgres-tls/*.mjs scripts/p0b/qualification/*.mjs && bash -n native/macos/scripts/*.sh scripts/release/*.sh",
+    "lint": "node --check bin/*.mjs && node --check lib/*.mjs && node --check packages/*/src/*.mjs && node --check adapters/*/src/*.mjs && node --check adapters/*/bin/*.mjs && node --check apps/cloud-api/src/*.mjs apps/cloud-api/src/human-auth/*.mjs apps/cloud-api/src/human-auth/agent-sessions/*.mjs apps/cloud-api/src/human-auth/identity/*.mjs apps/cloud-api/src/human-auth/management/*.mjs apps/cloud-api/src/human-auth/organizations/*.mjs apps/cloud-api/src/human-auth/pagination/*.mjs apps/cloud-api/src/human-auth/webauthn/*.mjs apps/cloud-api/src/postgres/*.mjs && node --check scripts/*.mjs scripts/postgres/*.mjs scripts/release/*.mjs scripts/release/n3e/*.mjs scripts/release/p0c/lib/*.mjs scripts/release/p0c/drivers/* scripts/release/p0c/scenarios/* scripts/p0b/*.mjs scripts/p0b/postgres-tls/*.mjs scripts/p0b/qualification/*.mjs && bash -n native/macos/scripts/*.sh scripts/release/*.sh",
     "prepack": "npm run release:validate && npm run contracts:validate && npm test && npm run test:native && npm run test:native-app && npm run test:native-installer-preservation && npm run test:native-durability-model && npm run lint"
   },
   "engines": {
