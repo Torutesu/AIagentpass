@@ -153,13 +153,14 @@ test("the six scenario/phase pairs agree across Swift, XPC, and N3-E evidence", 
   }
 });
 
-test("the normal AgentPass app does not bundle an external qualification controller", () => {
+test("the normal AgentPass app does not bundle the separately built qualification controller", () => {
   const build = read(BUILD);
   const packageSource = read(PACKAGE);
   const resourceNames = fs.readdirSync(join(ROOT, "native/macos/Resources"));
 
   assert.doesNotMatch(build, /qualification-controller|AgentPassQualification|NativeAgentQualification/u);
-  assert.doesNotMatch(packageSource, /qualification-controller|AgentPassQualificationController/u);
+  assert.match(packageSource, /\.executable\([\s\S]*?name:\s*"agentpass-qualification-controller"[\s\S]*?targets:\s*\["AgentPassQualificationController"\]/u);
+  assert.match(packageSource, /\.executableTarget\([\s\S]*?name:\s*"AgentPassQualificationController"[\s\S]*?dependencies:\s*\["AgentPassNativeCore"\]/u);
   assert.deepEqual(resourceNames.filter((name) => /qualification-controller/iu.test(name)), []);
 
   const plist = read(LAUNCHD);

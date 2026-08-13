@@ -78,9 +78,10 @@ public enum AgentPassQualificationXPCContract {
 
 /// Request to arm exactly one fixed fault phase.
 ///
-/// The request contains only digests plus a closed phase name. `runID` is an
-/// input to the initializer, not a stored property or an encoded field; only
-/// its SHA-256 digest is sent over XPC.
+/// The request contains only digests plus a closed phase name. Callers that
+/// originate a run may supply `runID` and have it hashed immediately; the
+/// external controller uses the signed manifest's already-bound digest. No
+/// raw run ID is a stored property or encoded field.
 @objc(AgentPassQualificationArmFaultRequest)
 public final class AgentPassQualificationArmFaultRequest: NSObject, NSSecureCoding {
   public static var supportsSecureCoding: Bool { true }
@@ -108,6 +109,32 @@ public final class AgentPassQualificationArmFaultRequest: NSObject, NSSecureCodi
     else {
       return nil
     }
+    self.protocolVersion = protocolVersion
+    self.faultPhase = faultPhase.rawValue
+    self.candidateDigest = candidateDigest
+    self.sourceCommitDigest = sourceCommitDigest
+    self.codeIdentityDigest = codeIdentityDigest
+    self.runIDDigest = runIDDigest
+    super.init()
+  }
+
+  /// Controller-only construction path for an already authenticated,
+  /// candidate-bound run digest. This keeps the raw qualification run ID out
+  /// of the external controller process and every persisted manifest.
+  public init?(
+    protocolVersion: Int = AgentPassQualificationXPCContract.protocolVersion,
+    faultPhase: AgentPassQualificationXPCContract.FaultPhase,
+    candidateDigest: Data,
+    sourceCommitDigest: Data,
+    codeIdentityDigest: Data,
+    runIDDigest: Data
+  ) {
+    guard protocolVersion == AgentPassQualificationXPCContract.protocolVersion,
+      AgentPassQualificationXPCContract.isDigest(candidateDigest),
+      AgentPassQualificationXPCContract.isDigest(sourceCommitDigest),
+      AgentPassQualificationXPCContract.isDigest(codeIdentityDigest),
+      AgentPassQualificationXPCContract.isDigest(runIDDigest)
+    else { return nil }
     self.protocolVersion = protocolVersion
     self.faultPhase = faultPhase.rawValue
     self.candidateDigest = candidateDigest
