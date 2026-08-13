@@ -12,6 +12,26 @@ private enum N3EFault: Error, Sendable {
   case injected
 }
 
+private final class N3EQualificationFaultConsumer:
+  NativeAgentSessionQualificationFaultConsuming, @unchecked Sendable
+{
+  private let lock = NSLock()
+  private let failingBoundary: NativeAgentSessionQualificationBoundary?
+  private(set) var reached: [NativeAgentSessionQualificationBoundary] = []
+
+  init(failingAt boundary: NativeAgentSessionQualificationBoundary? = nil) {
+    failingBoundary = boundary
+  }
+
+  func reach(_ boundary: NativeAgentSessionQualificationBoundary) throws {
+    let shouldFail = lock.withLock { () -> Bool in
+      reached.append(boundary)
+      return boundary == failingBoundary
+    }
+    if shouldFail { throw N3EFault.injected }
+  }
+}
+
 private let n3eAgentID = "33333333-3333-4333-8333-333333333333"
 private let n3eDeviceID = "44444444-4444-4444-8444-444444444444"
 private let n3eOrganizationID = "66666666-6666-4666-8666-666666666666"
@@ -579,6 +599,7 @@ private struct N3EFixture {
   let wall: N3EWallClock
   let monotonic: N3EMonotonicClock
   let activationRecoveryStore: any NativeAgentSessionConsumeRecoveryV4Storing
+  let qualificationFaultConsumer: N3EQualificationFaultConsumer
 }
 
 private func n3eHex(_ data: Data) -> String {
@@ -658,6 +679,7 @@ private func n3eFixture(
   randomByte: UInt8 = 1,
   recoveryStore: any NativeAgentSessionConsumeRecoveryStoring = N3ERecoveryStore(),
   activationRecoveryStore: any NativeAgentSessionConsumeRecoveryV4Storing = N3ERecoveryV4Store(),
+  qualificationFaultConsumer: N3EQualificationFaultConsumer = N3EQualificationFaultConsumer(),
   grantConsumer: N3EGrantConsumer? = nil,
   auditAppender: N3EAudit? = nil,
   bootstrapIssuedAt: Int64 = n3eWall
@@ -696,6 +718,7 @@ private func n3eFixture(
     grantConsumer: grant,
     recoveryStore: recoveryStore,
     activationRecoveryStore: activationRecoveryStore,
+    qualificationFaultConsumer: qualificationFaultConsumer,
     registry: actualRegistry,
     audit: audit,
     wallClock: wall,
@@ -717,7 +740,8 @@ private func n3eFixture(
     audit: audit,
     wall: wall,
     monotonic: monotonic,
-    activationRecoveryStore: activationRecoveryStore
+    activationRecoveryStore: activationRecoveryStore,
+    qualificationFaultConsumer: qualificationFaultConsumer
   )
 }
 
@@ -791,6 +815,54 @@ func n3eGrantAmbiguityIsExactRetry() throws {
     #expect(fixture.grant.requests[0] == fixture.grant.requests[1])
     #expect(fixture.grant.commitCount == 1)
     #expect(try n3eDirectStatus(fixture).state == .active)
+  }
+}
+
+@Test("N3-E3c-2 qualification checkpoints are ordered and fail closed")
+func n3eQualificationCheckpointMatrix() throws {
+  let coordinatorBoundaries = Array(
+    NativeAgentSessionQualificationBoundary.allCases.dropLast())
+  #expect(
+    coordinatorBoundaries == [
+      .beforeCloudConsume,
+      .afterCloudLeaseVerified,
+      .afterAdmissionReserved,
+      .afterRecoveryPrepared,
+      .afterHiddenCommit,
+      .afterCommitReceipt,
+      .afterAuditDurable,
+      .afterRecoveryTerminal,
+      .afterPublication,
+    ])
+
+  let successConsumer = N3EQualificationFaultConsumer()
+  let success = try n3eFixture(qualificationFaultConsumer: successConsumer)
+  #expect(
+    try success.coordinator.start(
+      bootstrapID: success.bootstrapID, proof: success.proof
+    ).status.state == .active)
+  #expect(successConsumer.reached == coordinatorBoundaries)
+
+  for boundary in coordinatorBoundaries {
+    let consumer = N3EQualificationFaultConsumer(failingAt: boundary)
+    let fixture = try n3eFixture(qualificationFaultConsumer: consumer)
+    let expected: NativeAgentSessionCoordinatorError = switch boundary {
+    case .beforeCloudConsume, .afterCloudLeaseVerified: .grantDenied
+    case .afterAuditDurable, .afterRecoveryTerminal: .auditUnavailable
+    default: .activationDenied
+    }
+    #expect(throws: expected) {
+      _ = try fixture.coordinator.start(
+        bootstrapID: fixture.bootstrapID, proof: fixture.proof)
+    }
+    #expect(consumer.reached.filter { $0 == boundary }.count == 1)
+    if boundary == .afterPublication {
+      #expect(try n3eDirectStatus(fixture).state == .revoked)
+    } else {
+      #expect(throws: NativeAgentSessionRegistryError.sessionMissing) {
+        _ = try n3eDirectStatus(fixture)
+      }
+    }
   }
 }
 

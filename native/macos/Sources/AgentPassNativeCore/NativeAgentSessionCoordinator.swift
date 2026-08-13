@@ -52,6 +52,7 @@ public final class NativeAgentSessionCoordinator: @unchecked Sendable {
   private let grantConsumer: any NativeAgentGrantLeaseConsuming
   private let recoveryStore: any NativeAgentSessionConsumeRecoveryStoring
   private let activationRecoveryStore: any NativeAgentSessionConsumeRecoveryV4Storing
+  private let qualificationFaultConsumer: any NativeAgentSessionQualificationFaultConsuming
   private let registry: NativeAgentSessionRegistry
   private let audit: any NativeAgentSessionAuditAppending
   private let wallClock: any NativeAgentWallClock
@@ -74,6 +75,8 @@ public final class NativeAgentSessionCoordinator: @unchecked Sendable {
     grantConsumer: any NativeAgentGrantLeaseConsuming,
     recoveryStore: any NativeAgentSessionConsumeRecoveryStoring,
     activationRecoveryStore: any NativeAgentSessionConsumeRecoveryV4Storing,
+    qualificationFaultConsumer: any NativeAgentSessionQualificationFaultConsuming =
+      NativeAgentSessionQualificationNoopFaultConsumer(),
     registry: NativeAgentSessionRegistry,
     audit: any NativeAgentSessionAuditAppending,
     wallClock: any NativeAgentWallClock,
@@ -91,6 +94,7 @@ public final class NativeAgentSessionCoordinator: @unchecked Sendable {
     self.grantConsumer = grantConsumer
     self.recoveryStore = recoveryStore
     self.activationRecoveryStore = activationRecoveryStore
+    self.qualificationFaultConsumer = qualificationFaultConsumer
     self.registry = registry
     self.audit = audit
     self.wallClock = wallClock
@@ -256,9 +260,11 @@ public final class NativeAgentSessionCoordinator: @unchecked Sendable {
 
     if attempt.lease == nil {
       do {
+        try qualificationFaultConsumer.reach(.beforeCloudConsume)
         attempt.lease = try grantConsumer.consumeGrant(
           NativeAgentGrantConsumptionRequest(
             bootstrapID: attempt.bootstrapID, proof: proof, binding: attempt.binding))
+        try qualificationFaultConsumer.reach(.afterCloudLeaseVerified)
       } catch {
         stateLock.withLock { pendingAttempt = attempt }
         throw NativeAgentSessionCoordinatorError.grantDenied
@@ -342,6 +348,14 @@ public final class NativeAgentSessionCoordinator: @unchecked Sendable {
     } catch {
       throw NativeAgentSessionCoordinatorError.activationDenied
     }
+    do {
+      try qualificationFaultConsumer.reach(.afterAdmissionReserved)
+    } catch {
+      _ = try? registry.abortActivation(
+        reservation, connectionTokenIdentity: connectionTokenIdentity)
+      stateLock.withLock { pendingAttempt = attempt }
+      throw NativeAgentSessionCoordinatorError.activationDenied
+    }
     let plannedResult = NativeAgentSessionActivationResult(
       status: reservation.plannedStatus, binding: attempt.binding)
     let resultDigest: Data
@@ -418,6 +432,7 @@ public final class NativeAgentSessionCoordinator: @unchecked Sendable {
           recoveryEvidence.recoveryExpiresAtMilliseconds, lease.expiresAtMilliseconds))
       _ = try activationRecoveryStore.prepareForActivation(
         v4Evidence, preparedRecord: preparedRecord)
+      try qualificationFaultConsumer.reach(.afterRecoveryPrepared)
     } catch {
       _ = try? registry.abortActivation(
         reservation, connectionTokenIdentity: connectionTokenIdentity)
@@ -443,6 +458,7 @@ public final class NativeAgentSessionCoordinator: @unchecked Sendable {
         connectionTokenIdentity: connectionTokenIdentity,
         wallClock: sampleWall(),
         monotonicClock: sampleMonotonic())
+      try qualificationFaultConsumer.reach(.afterHiddenCommit)
     } catch {
       _ = try? registry.abortActivation(
         reservation, connectionTokenIdentity: connectionTokenIdentity)
@@ -462,6 +478,7 @@ public final class NativeAgentSessionCoordinator: @unchecked Sendable {
       _ = try activationRecoveryStore.recordCommitReceipt(
         v4Evidence, preparedRecord: preparedRecord,
         commitReceipt: commitReceipt)
+      try qualificationFaultConsumer.reach(.afterCommitReceipt)
     } catch {
       _ = try? registry.abortActivation(
         reservation, connectionTokenIdentity: connectionTokenIdentity)
@@ -475,6 +492,7 @@ public final class NativeAgentSessionCoordinator: @unchecked Sendable {
       guard receipt.evidenceDigest == activationAuditEvidenceDigest else {
         throw NativeAgentSessionCoordinatorError.auditUnavailable
       }
+      try qualificationFaultConsumer.reach(.afterAuditDurable)
       let terminal = try NativeAgentSessionConsumeRecoveryV4AuditedTerminalRecord(
         preparedRecord: preparedRecord,
         outcome: .activated,
@@ -482,6 +500,7 @@ public final class NativeAgentSessionCoordinator: @unchecked Sendable {
         auditDigest: receipt.recordDigest)
       _ = try activationRecoveryStore.completeAfterAudit(
         v4Evidence, preparedRecord: preparedRecord, auditedRecord: terminal)
+      try qualificationFaultConsumer.reach(.afterRecoveryTerminal)
     } catch {
       _ = try? registry.abortActivation(
         reservation, connectionTokenIdentity: connectionTokenIdentity)
@@ -504,6 +523,15 @@ public final class NativeAgentSessionCoordinator: @unchecked Sendable {
         reservation, connectionTokenIdentity: connectionTokenIdentity)
       stateLock.withLock { pendingAttempt = nil }
       if let error = error as? NativeAgentSessionCoordinatorError { throw error }
+      throw NativeAgentSessionCoordinatorError.activationDenied
+    }
+    do {
+      try qualificationFaultConsumer.reach(.afterPublication)
+    } catch {
+      invalidateSession(
+        sessionID: status.sessionID, binding: attempt.binding,
+        reasonCode: "qualification_interrupted")
+      stateLock.withLock { pendingAttempt = nil }
       throw NativeAgentSessionCoordinatorError.activationDenied
     }
     let result = NativeAgentSessionActivationResult(status: status, binding: attempt.binding)

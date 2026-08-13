@@ -3142,6 +3142,87 @@ private struct AgentConnectionSessionBindingObserver: NativeAgentSessionBindingO
     }
 }
 
+private typealias NativeAgentSessionQualificationFatalAction = @Sendable () -> Never
+
+private func terminateCurrentDaemonForQualification() -> Never {
+    if Darwin.kill(getpid(), SIGKILL) == 0 {
+        fatalError("Qualification fault SIGKILL unexpectedly returned")
+    }
+    fatalError("Qualification fault SIGKILL failed")
+}
+
+/// Service-only bridge between the root-authorized qualification controller and
+/// the process-local coordinator checkpoints.  The Agent protocol never sees
+/// this object or any of its selectors.
+private final class NativeAgentSessionQualificationFaultConsumerAdapter:
+    NativeAgentSessionQualificationFaultConsuming, @unchecked Sendable
+{
+    private let controller: NativeAgentQualificationFaultController
+    private let runBinding: NativeAgentQualificationRunBinding
+    private let scenario: NativeAgentQualificationFaultScenario
+    private let phase: NativeAgentQualificationFaultPhase
+    private let intendedBoundary: NativeAgentSessionQualificationBoundary?
+    private let expiresAtEpochSeconds: UInt64
+    private let wallTime: @Sendable () -> Date
+    private let fatalAction: NativeAgentSessionQualificationFatalAction
+
+    init(
+        controller: NativeAgentQualificationFaultController,
+        values: NativeAgentQualificationConfiguration.Values,
+        wallTime: @escaping @Sendable () -> Date = Date.init,
+        fatalAction: @escaping NativeAgentSessionQualificationFatalAction = terminateCurrentDaemonForQualification
+    ) throws {
+        guard values.phase == values.scenario.phase else {
+            throw AgentPassNativeError.invalidConfiguration(
+                "Agent qualification scenario and phase are not an exact pair")
+        }
+        self.controller = controller
+        self.runBinding = try NativeAgentQualificationRunBinding(values.runBindingDigest)
+        self.scenario = values.scenario
+        self.phase = values.phase
+        self.intendedBoundary = Self.boundary(for: values.scenario)
+        self.expiresAtEpochSeconds = values.expiresAtEpochSeconds
+        self.wallTime = wallTime
+        self.fatalAction = fatalAction
+    }
+
+    func reach(_ boundary: NativeAgentSessionQualificationBoundary) throws {
+        guard intendedBoundary == boundary else { return }
+        let now = wallTime().timeIntervalSince1970
+        guard now.isFinite, now >= 0, now < Double(expiresAtEpochSeconds) else {
+            controller.disable()
+            return
+        }
+        let receipt = controller.consume(
+            runBinding: runBinding,
+            scenario: scenario,
+            phase: phase
+        )
+        guard receipt.outcome == .injected else { return }
+        fatalAction()
+    }
+
+    private static func boundary(
+        for scenario: NativeAgentQualificationFaultScenario
+    ) -> NativeAgentSessionQualificationBoundary? {
+        switch scenario {
+        case .preCloudKill:
+            return .beforeCloudConsume
+        case .postCloudPreLocalKill:
+            return .afterCloudLeaseVerified
+        case .postActivationPreAuditKill:
+            return .afterHiddenCommit
+        case .postAuditPreReplyLoss:
+            return .afterResultEncoded
+        case .auditFsyncFailure, .transportReplyLoss:
+            // These are N3-E3c-3 writer/transport faults. They must not be
+            // approximated by a coordinator checkpoint in this adapter.
+            return nil
+        }
+    }
+
+}
+
 private final class AgentRuntimeDependencies: @unchecked Sendable {
     let authority: NativeAgentRuntimeAuthorityConfiguration
     let grantConsumer: NativeAgentGrantLeaseHTTPConsumer
@@ -3151,16 +3232,19 @@ private final class AgentRuntimeDependencies: @unchecked Sendable {
     let signingIntentStore: NativeAgentSigningIntentStore
     let gitCommitSigner: NativeAgentGitCommitSigner
     let authorityState: AgentRuntimeAuthorityState
+    let qualificationFaultConsumer: any NativeAgentSessionQualificationFaultConsuming
 
     init(
         authority: NativeAgentRuntimeAuthorityConfiguration,
         authorityState: AgentRuntimeAuthorityState,
         deviceSigner: SecureEnclaveKeyStore,
-        gitSigner: SecureEnclaveKeyStore
+        gitSigner: SecureEnclaveKeyStore,
+        qualificationFaultConsumer: any NativeAgentSessionQualificationFaultConsuming
     ) throws {
         try Self.validatePrivateDirectory(authority.signingIntentDirectory)
         self.authority = authority
         self.authorityState = authorityState
+        self.qualificationFaultConsumer = qualificationFaultConsumer
         grantConsumer = try NativeAgentGrantLeaseHTTPConsumer(
             baseURL: authority.deviceAPIOrigin,
             organizationID: authority.organizationID,
@@ -3218,6 +3302,7 @@ private final class AgentConnectionEndpoint: NSObject, AgentPassAgentXPCProtocol
     private let connectionGuard: NativeAgentConnectionGuard
     private let observer: NativeDarwinProcessObservationSource
     private let runtime: AgentRuntimeDependencies?
+    private let qualificationFaultConsumer: any NativeAgentSessionQualificationFaultConsuming
     private let bootstrapStore = NativeAgentBootstrapChallengeStore()
     private let clocks = NativeAgentSystemClocks()
     private let worker = DispatchQueue(label: "dev.agentpass.agent-session.connection")
@@ -3227,11 +3312,13 @@ private final class AgentConnectionEndpoint: NSObject, AgentPassAgentXPCProtocol
         connectionGuard: NativeAgentConnectionGuard,
         observer: NativeDarwinProcessObservationSource,
         runtime: AgentRuntimeDependencies?,
-        auditAppender: any NativeAgentSessionAuditAppending
+        auditAppender: any NativeAgentSessionAuditAppending,
+        qualificationFaultConsumer: any NativeAgentSessionQualificationFaultConsuming
     ) {
         self.connectionGuard = connectionGuard
         self.observer = observer
         self.runtime = runtime
+        self.qualificationFaultConsumer = qualificationFaultConsumer
         if let runtime {
             let bindingObserver = AgentConnectionSessionBindingObserver(
                 connectionGuard: connectionGuard,
@@ -3254,6 +3341,7 @@ private final class AgentConnectionEndpoint: NSObject, AgentPassAgentXPCProtocol
                 grantConsumer: runtime.grantConsumer,
                 recoveryStore: runtime.consumeRecoveryStore,
                 activationRecoveryStore: runtime.activationRecoveryStore,
+                qualificationFaultConsumer: runtime.qualificationFaultConsumer,
                 registry: runtime.registry,
                 audit: auditAppender,
                 wallClock: clocks.wallClock,
@@ -3340,7 +3428,7 @@ private final class AgentConnectionEndpoint: NSObject, AgentPassAgentXPCProtocol
         let bootstrapID = request.bootstrapID
         let proof = request.proof
         let replyBox = AgentXPCReplyBox(reply)
-        worker.async { [coordinator] in
+        worker.async { [coordinator, qualificationFaultConsumer] in
             guard let coordinator else {
                 replyBox.call(nil, NativeAgentSessionDenialReason.unavailable.nsError)
                 return
@@ -3358,6 +3446,16 @@ private final class AgentConnectionEndpoint: NSObject, AgentPassAgentXPCProtocol
                     coordinator.abortActivation(sessionID: activation.status.sessionID)
                     replyBox.call(nil, NativeAgentSessionDenialReason.internalFailure.nsError)
                     return
+                }
+                do {
+                    try qualificationFaultConsumer.reach(.afterResultEncoded)
+                } catch {
+                    // The production injected branch never returns after its
+                    // atomic receipt. Any ordinary throwing implementation is
+                    // therefore a local fault and must not strand reply-less
+                    // authority.
+                    coordinator.abortActivation(sessionID: activation.status.sessionID)
+                    throw error
                 }
                 replyBox.call(response, nil)
             } catch {
@@ -3452,16 +3550,19 @@ private final class AgentListenerDelegate: NSObject, NSXPCListenerDelegate {
     private let configuration: ServiceConfiguration
     private let runtime: AgentRuntimeDependencies?
     private let auditAppender: any NativeAgentSessionAuditAppending
+    private let qualificationFaultConsumer: any NativeAgentSessionQualificationFaultConsuming
     private let observer = NativeDarwinProcessObservationSource()
 
     init(
         configuration: ServiceConfiguration,
         runtime: AgentRuntimeDependencies?,
-        auditAppender: any NativeAgentSessionAuditAppending
+        auditAppender: any NativeAgentSessionAuditAppending,
+        qualificationFaultConsumer: any NativeAgentSessionQualificationFaultConsuming
     ) {
         self.configuration = configuration
         self.runtime = runtime
         self.auditAppender = auditAppender
+        self.qualificationFaultConsumer = qualificationFaultConsumer
     }
 
     func listener(_ listener: NSXPCListener, shouldAcceptNewConnection connection: NSXPCConnection) -> Bool {
@@ -3487,7 +3588,8 @@ private final class AgentListenerDelegate: NSObject, NSXPCListenerDelegate {
                 connectionGuard: guardValue,
                 observer: observer,
                 runtime: runtime,
-                auditAppender: auditAppender
+                auditAppender: auditAppender,
+                qualificationFaultConsumer: qualificationFaultConsumer
             )
             connection.exportedObject = endpoint
             connection.invalidationHandler = { [weak endpoint] in
@@ -3542,12 +3644,18 @@ private final class QualificationListenerDelegate: NSObject, NSXPCListenerDelega
 
 private final class QualificationRuntime {
     let controller: NativeAgentQualificationFaultController
+    let faultConsumer: any NativeAgentSessionQualificationFaultConsuming
     let endpoint: NativeAgentQualificationEndpoint
     private let listener: NSXPCListener
     private let delegate: QualificationListenerDelegate
 
     init(values: NativeAgentQualificationConfiguration.Values) throws {
-        controller = NativeAgentQualificationFaultController(enabled: true)
+        let controller = NativeAgentQualificationFaultController(enabled: true)
+        self.controller = controller
+        faultConsumer = try NativeAgentSessionQualificationFaultConsumerAdapter(
+            controller: controller,
+            values: values
+        )
         endpoint = try NativeAgentQualificationEndpoint(controller: controller, values: values)
         listener = NSXPCListener(machServiceName: values.machServiceName)
         delegate = QualificationListenerDelegate(
@@ -4229,6 +4337,17 @@ do {
     _ = try auditLog.verify()
     _ = try auditCheckpoints.verify()
     let authorizer = try NativeRequestAuthorizer(policyData: policyData, sessionValidator: sessionManager, controlValidator: controlManager, capabilityValidator: capabilityVerifier, v2ControlManager: controlV2Manager, requestEvidenceStore: requestEvidenceStore, controlV2Configured: configuration.controlV2StatePath != nil, v2DeviceID: configuration.controlV2DeviceID)
+    let qualificationRuntime: QualificationRuntime?
+    let qualificationFaultConsumer: any NativeAgentSessionQualificationFaultConsuming
+    switch try configuration.qualificationConfiguration().state {
+    case .disabled:
+        qualificationRuntime = nil
+        qualificationFaultConsumer = NativeAgentSessionQualificationNoopFaultConsumer()
+    case .configured(let values):
+        let runtime = try QualificationRuntime(values: values)
+        qualificationRuntime = runtime
+        qualificationFaultConsumer = runtime.faultConsumer
+    }
     let agentRuntime: AgentRuntimeDependencies?
     switch try configuration.agentRuntimeConfiguration() {
     case .disabled:
@@ -4247,15 +4366,9 @@ do {
             authority: authority,
             authorityState: authorityState,
             deviceSigner: deviceSigner,
-            gitSigner: keyStore
+            gitSigner: keyStore,
+            qualificationFaultConsumer: qualificationFaultConsumer
         )
-    }
-    let qualificationRuntime: QualificationRuntime?
-    switch try configuration.qualificationConfiguration().state {
-    case .disabled:
-        qualificationRuntime = nil
-    case .configured(let values):
-        qualificationRuntime = try QualificationRuntime(values: values)
     }
     let managementListener = NSXPCListener(machServiceName: configuration.machServiceName)
     let agentListener = NSXPCListener(machServiceName: configuration.agentMachServiceName)
@@ -4337,7 +4450,8 @@ do {
     let agentDelegate = AgentListenerDelegate(
         configuration: configuration,
         runtime: agentRuntime,
-        auditAppender: endpoint
+        auditAppender: endpoint,
+        qualificationFaultConsumer: qualificationFaultConsumer
     )
     managementListener.delegate = managementDelegate
     agentListener.delegate = agentDelegate

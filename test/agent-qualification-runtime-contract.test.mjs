@@ -214,7 +214,8 @@ test("root-owned service configuration is the only future qualification enableme
   assert.doesNotMatch(service, /ProcessInfo\.processInfo\.environment|AGENTPASS_[A-Z0-9_]*(?:N3E|QUALIFICATION)|(?:N3E|QUALIFICATION)[A-Z0-9_]*_AGENTPASS/iu);
   assert.match(service, /switch try configuration\.qualificationConfiguration\(\)\.state/u);
   assert.match(service, /case \.disabled:\s*qualificationRuntime = nil/u);
-  assert.match(service, /case \.configured\(let values\):\s*qualificationRuntime = try QualificationRuntime/u);
+  assert.match(service, /case \.configured\(let values\):\s*let runtime = try QualificationRuntime/u);
+  assert.match(service, /qualificationRuntime = runtime\s*qualificationFaultConsumer = runtime\.faultConsumer/u);
   assert.match(service, /connection\.effectiveUserIdentifier == 0/u);
   assert.match(service, /connection\.setCodeSigningRequirement\(designatedRequirement\)/u);
   assert.match(service, /connection\.exportedInterface = AgentPassQualificationXPCInterface\.make\(\)/u);

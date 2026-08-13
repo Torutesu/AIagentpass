@@ -55,7 +55,7 @@ test('production listeners export separate management and connection-scoped Agen
   assert.match(service, /NSXPCListener\(machServiceName: configuration\.machServiceName\)/u);
   assert.match(service, /NSXPCListener\(machServiceName: configuration\.agentMachServiceName\)/u);
   assert.match(service, /connection\.exportedInterface = AgentPassAgentXPCInterface\.make\(\)/u);
-  assert.match(service, /let endpoint = AgentConnectionEndpoint\(\s*connectionGuard: guardValue,\s*observer: observer,\s*runtime: runtime,\s*auditAppender: auditAppender\s*\)/u);
+  assert.match(service, /let endpoint = AgentConnectionEndpoint\(\s*connectionGuard: guardValue,\s*observer: observer,\s*runtime: runtime,\s*auditAppender: auditAppender,\s*qualificationFaultConsumer: qualificationFaultConsumer\s*\)/u);
   assert.match(service, /connection\.invalidationHandler[\s\S]*endpoint\?\.invalidateConnection\(\)/u);
   assert.match(service, /observer\.observe\(pid: peerPID, expectedUserID: peerUID\)/u);
   assert.match(service, /connection\.processIdentifier/u);
