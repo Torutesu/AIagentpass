@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import { spawnSync } from "node:child_process";
 import test, { after, before } from "node:test";
 
 import {
@@ -13,11 +14,11 @@ import {
   P0B_REQUIRED_COMMAND_IDS,
   P0B_REQUIRED_GATE_IDS,
   resolveSourceCommit,
+  resolveSourceState,
   serializeP0BQualificationReport,
   writeP0BQualificationReport
 } from "./report.mjs";
 
-const repositoryRoot = path.resolve(path.dirname(new URL(import.meta.url).pathname), "../../..");
 let fixtureDirectory;
 let verifiedArtifact;
 
@@ -36,9 +37,9 @@ const baseInput = () => ({
   source_commit: "0123456789abcdef0123456789abcdef01234567",
   started_at: "2026-08-13T01:02:03.000Z",
   completed_at: "2026-08-13T01:04:05.000Z",
-  commands: [{
-    id: "browser-e2e",
-    argv: ["node", "apps/web-console/e2e/p0-b-browser.spec.ts", "--project=chromium"],
+  commands: P0B_REQUIRED_COMMAND_IDS.map((id) => ({
+    id,
+    argv: ["node", `${id}.mjs`],
     cwd: "/workspace/ai-coding-agent-claude-code-cursor",
     result: {
       status: "passed",
@@ -48,7 +49,7 @@ const baseInput = () => ({
       stdout: "secret-looking test output is hashed and never serialized",
       stderr: ""
     }
-  }],
+  })),
   postgres: {
     image: "postgres:17-alpine",
     image_digest: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
@@ -58,7 +59,7 @@ const baseInput = () => ({
   },
   browser: { name: "Chromium", version: "140.0.7339.1", engine: "Playwright" },
   artifacts: [verifiedArtifact],
-  gates: [{ id: P0B_REQUIRED_GATE_IDS[0], status: "passed", evidence_sha256: "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc" }]
+  gates: P0B_REQUIRED_GATE_IDS.map((id) => ({ id, status: "passed", evidence_sha256: "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc" }))
 });
 
 test("builds a provenance-bound canonical report with digested command output", () => {
@@ -75,11 +76,11 @@ test("builds a provenance-bound canonical report with digested command output", 
 
 test("a skipped gate is converted to a failed gate and can never qualify", () => {
   const input = baseInput();
-  input.gates[0] = { id: "browser-flow", status: "skipped", reason: "operator_not_present" };
+  input.gates[1] = { id: "browser-flow", status: "skipped", reason: "operator_not_present" };
   const report = buildP0BQualificationReport(input);
   assert.equal(report.overall.status, "failed");
   assert.deepEqual(report.overall.failed_gates, ["browser-flow"]);
-  assert.deepEqual(report.gates[0], { id: "browser-flow", status: "failed", evidence_sha256: null, reason: "gate_skipped" });
+  assert.deepEqual(report.gates[1], { id: "browser-flow", status: "failed", evidence_sha256: null, reason: "gate_skipped" });
   assert.equal(JSON.stringify(report).includes('"status":"skipped"'), false);
 });
 
@@ -102,8 +103,8 @@ test("rejects secret-bearing commands and PostgreSQL URLs with userinfo", () => 
 });
 
 test("requires the canonical command and gate ids in canonical order", () => {
-  assert.deepEqual(P0B_REQUIRED_COMMAND_IDS, ["browser-e2e"]);
-  assert.deepEqual(P0B_REQUIRED_GATE_IDS, ["browser-flow"]);
+  assert.deepEqual(P0B_REQUIRED_COMMAND_IDS, ["console-build", "browser-e2e", "process-e2e"]);
+  assert.deepEqual(P0B_REQUIRED_GATE_IDS, ["build-integrity", "browser-flow", "process-flow"]);
 
   const command = baseInput();
   command.commands[0].id = "renamed-browser-e2e";
@@ -118,13 +119,109 @@ test("requires the canonical command and gate ids in canonical order", () => {
   assert.throws(() => buildP0BQualificationReport(missing), { code: "invalid_gate_ids" });
 });
 
-test("optionally binds supplied source commit to the repository HEAD", () => {
-  const input = baseInput();
-  input.source_commit = resolveSourceCommit(repositoryRoot);
-  assert.equal(buildP0BQualificationReport(input, { repositoryRoot }).source_commit, input.source_commit);
+test("schema v2 records the complete command and gate matrix", () => {
+  const report = buildP0BQualificationReport(baseInput());
+  assert.equal(report.schema_version, 2);
+  assert.deepEqual(report.commands.map(({ id }) => id), ["console-build", "browser-e2e", "process-e2e"]);
+  assert.deepEqual(report.gates.map(({ id }) => id), ["build-integrity", "browser-flow", "process-flow"]);
+});
 
-  const mismatch = baseInput();
-  assert.throws(() => buildP0BQualificationReport(mismatch, { repositoryRoot }), { code: "source_commit_mismatch" });
+test("allows a failed spawn with a null exit code only with a stable reason", () => {
+  const failed = baseInput();
+  failed.commands[0].result = {
+    ...failed.commands[0].result,
+    status: "failed",
+    exit_code: null,
+    signal: null,
+    reason: "spawn_error"
+  };
+  const report = buildP0BQualificationReport(failed);
+  assert.equal(report.overall.status, "failed");
+  assert.equal(report.commands[0].result.exit_code, null);
+  assert.equal(report.commands[0].result.reason, "spawn_error");
+
+  const missingReason = structuredClone(failed);
+  delete missingReason.commands[0].result.reason;
+  assert.throws(() => buildP0BQualificationReport(missingReason), { code: "missing_failure_reason" });
+
+  const unstableReason = structuredClone(failed);
+  unstableReason.commands[0].result.reason = "spawn failed with pid 1234";
+  assert.throws(() => buildP0BQualificationReport(unstableReason), { code: "invalid_value" });
+
+  const skippedWithoutExit = structuredClone(failed);
+  skippedWithoutExit.commands[0].result.status = "skipped";
+  assert.throws(() => buildP0BQualificationReport(skippedWithoutExit), { code: "invalid_command_result" });
+});
+
+test("passed commands require exit code zero and no signal", () => {
+  const nonzero = baseInput();
+  nonzero.commands[0].result.exit_code = 1;
+  assert.throws(() => buildP0BQualificationReport(nonzero), { code: "invalid_command_result" });
+
+  const signaled = baseInput();
+  signaled.commands[0].result.signal = "SIGTERM";
+  assert.throws(() => buildP0BQualificationReport(signaled), { code: "invalid_command_result" });
+
+  const absentExit = baseInput();
+  absentExit.commands[0].result.exit_code = null;
+  assert.throws(() => buildP0BQualificationReport(absentExit), { code: "invalid_command_result" });
+});
+
+test("optionally binds supplied source commit to a clean repository state", async () => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), "agentpass-p0b-source-state-"));
+  const git = (args) => {
+    const result = spawnSync("git", ["-C", directory, ...args], { encoding: "utf8", shell: false, stdio: ["ignore", "pipe", "pipe"] });
+    assert.equal(result.status, 0, `git ${args[0]} should succeed`);
+    return result.stdout.trim();
+  };
+  try {
+    git(["init", "-q"]);
+    git(["config", "user.email", "qualification@example.invalid"]);
+    git(["config", "user.name", "Qualification Test"]);
+    await fs.writeFile(path.join(directory, "tracked.txt"), "tracked\n");
+    git(["add", "tracked.txt"]);
+    git(["commit", "-q", "-m", "fixture"]);
+
+    const state = resolveSourceState(directory);
+    assert.equal(state.clean, true);
+    assert.equal(state.commit, resolveSourceCommit(directory));
+    const input = baseInput();
+    input.source_commit = state.commit;
+    assert.equal(buildP0BQualificationReport(input, { repositoryRoot: directory }).source_commit, input.source_commit);
+
+    const mismatch = baseInput();
+    assert.throws(() => buildP0BQualificationReport(mismatch, { repositoryRoot: directory }), { code: "source_commit_mismatch" });
+
+    await fs.writeFile(path.join(directory, "untracked-secret-looking-name.txt"), "dirty\n");
+    let dirtyError;
+    try {
+      resolveSourceState(directory);
+    } catch (error) {
+      dirtyError = error;
+    }
+    assert.equal(dirtyError?.code, "source_repository_dirty");
+    assert.equal(dirtyError.message.includes("untracked-secret-looking-name.txt"), false);
+    assert.throws(() => buildP0BQualificationReport(input, { repositoryRoot: directory }), { code: "source_repository_dirty" });
+    assert.throws(() => buildP0BQualificationReport(mismatch, { repositoryRoot: directory }), { code: "source_repository_dirty" });
+  } finally {
+    await fs.rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("source state resolution fails closed for a repository without HEAD", async () => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), "agentpass-p0b-source-no-head-"));
+  try {
+    let error;
+    try {
+      resolveSourceState(directory);
+    } catch (caught) {
+      error = caught;
+    }
+    assert.equal(error?.code, "source_commit_unavailable");
+    assert.equal(error?.message.includes(directory), false);
+  } finally {
+    await fs.rm(directory, { recursive: true, force: true });
+  }
 });
 
 test("rejects caller-supplied artifact metadata and accepts only digested descriptors", () => {

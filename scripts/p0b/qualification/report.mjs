@@ -21,10 +21,10 @@ const SENSITIVE_VALUE = /(?:credential|cookie|csrf|nonce|signature|private[-_ ]?
 const SENSITIVE_COMMAND_OPTION = /(?:^|[-_])(credential|cookie|csrf|nonce|signature|private[-_ ]?key|public[-_ ]?key|secret|password|bearer|authorization|token|keys?)(?:=|$)/iu;
 const DIGESTED_ARTIFACTS = new WeakSet();
 
-export const P0B_REQUIRED_COMMAND_IDS = Object.freeze(["browser-e2e"]);
-export const P0B_REQUIRED_GATE_IDS = Object.freeze(["browser-flow"]);
+export const P0B_REQUIRED_COMMAND_IDS = Object.freeze(["console-build", "browser-e2e", "process-e2e"]);
+export const P0B_REQUIRED_GATE_IDS = Object.freeze(["build-integrity", "browser-flow", "process-flow"]);
 
-export const P0B_QUALIFICATION_SCHEMA_VERSION = 1;
+export const P0B_QUALIFICATION_SCHEMA_VERSION = 2;
 
 export class QualificationReportError extends Error {
   constructor(code, message = code) {
@@ -100,11 +100,14 @@ function normalizeCommand(command, index) {
   const skipped = inputStatus === "skipped";
   const status = skipped ? "failed" : inputStatus;
   if (status !== "passed" && status !== "failed") invalid("invalid_command_result", "command result status is invalid");
-  if (!Number.isSafeInteger(result.exit_code) || result.exit_code < 0 || result.exit_code > 255) invalid("invalid_command_result", "command exit code is invalid");
+  if (result.exit_code !== null && (!Number.isSafeInteger(result.exit_code) || result.exit_code < 0 || result.exit_code > 255)) invalid("invalid_command_result", "command exit code is invalid");
   if (result.signal !== null && result.signal !== undefined && !/^[A-Z][A-Z0-9]{0,15}$/u.test(result.signal)) invalid("invalid_command_result", "command signal is invalid");
   if (!Number.isSafeInteger(result.duration_ms) || result.duration_ms < 0 || result.duration_ms > 7 * 24 * 60 * 60 * 1000) invalid("invalid_command_result", "command duration is invalid");
   const stdout = digestAndSize(result.stdout, result.stdout_sha256, result.stdout_bytes, "stdout");
   const stderr = digestAndSize(result.stderr, result.stderr_sha256, result.stderr_bytes, "stderr");
+  if (status === "passed" && (result.exit_code !== 0 || (result.signal ?? null) !== null)) invalid("invalid_command_result", "passed commands require exit code 0 and no signal");
+  if (result.exit_code === null && inputStatus !== "failed") invalid("invalid_command_result", "only failed commands may omit an exit code");
+  if (status === "failed" && result.exit_code === null && typeof result.reason !== "string") invalid("missing_failure_reason", "failed commands without an exit code require a stable reason");
   const reason = skipped ? "command_skipped" : status === "failed" ? stringValue(result.reason ?? "command_failed", "command failure reason", { maximum: 128, pattern: /^[a-z][a-z0-9._-]{1,127}$/u }) : null;
   return {
     id,
@@ -264,8 +267,8 @@ export function buildP0BQualificationReport(input, options = {}) {
   optionalKeys(options, new Set(["repositoryRoot"]), "qualification options");
   const normalized = normalizeQualificationInput(input);
   if (options.repositoryRoot !== undefined) {
-    const resolvedCommit = resolveSourceCommit(options.repositoryRoot);
-    if (normalized.sourceCommit !== resolvedCommit) invalid("source_commit_mismatch", "source commit does not match the repository HEAD");
+    const sourceState = resolveSourceState(options.repositoryRoot);
+    if (normalized.sourceCommit !== sourceState.commit) invalid("source_commit_mismatch", "source commit does not match the repository HEAD");
   }
   return makeQualificationReport(normalized);
 }
@@ -529,12 +532,40 @@ export async function digestArtifactTree(inputDirectory, options = {}) {
   }
 }
 
-export function resolveSourceCommit(repositoryRoot) {
+function resolveHeadCommit(repositoryRoot) {
   if (typeof repositoryRoot !== "string" || !path.isAbsolute(repositoryRoot)) invalid("invalid_repository_path", "repository path must be absolute");
-  const result = spawnSync("git", ["-C", repositoryRoot, "rev-parse", "--verify", "HEAD"], { encoding: "utf8", shell: false, stdio: ["ignore", "pipe", "ignore"] });
+  let result;
+  try {
+    result = spawnSync("git", ["-C", repositoryRoot, "rev-parse", "--verify", "HEAD^{commit}"], { encoding: "utf8", shell: false, stdio: ["ignore", "pipe", "ignore"] });
+  } catch {
+    invalid("source_commit_unavailable", "source commit could not be resolved");
+  }
   const commit = result.status === 0 ? result.stdout.trim() : "";
   if (!COMMIT.test(commit)) invalid("source_commit_unavailable", "source commit could not be resolved");
   return commit;
+}
+
+export function resolveSourceCommit(repositoryRoot) {
+  return resolveHeadCommit(repositoryRoot);
+}
+
+/**
+ * Resolve the source identity used by qualification and fail closed when the
+ * checkout is not a clean, commit-addressable repository. Git's porcelain
+ * output is intentionally inspected only as a boolean; filenames and other
+ * repository details never enter an exception or the returned state.
+ */
+export function resolveSourceState(repositoryRoot) {
+  const commit = resolveHeadCommit(repositoryRoot);
+  let result;
+  try {
+    result = spawnSync("git", ["-C", repositoryRoot, "status", "--porcelain=v1", "--untracked-files=all"], { encoding: "utf8", shell: false, stdio: ["ignore", "pipe", "ignore"] });
+  } catch {
+    invalid("source_state_unavailable", "source repository state could not be resolved");
+  }
+  if (result.status !== 0 || result.error || typeof result.stdout !== "string") invalid("source_state_unavailable", "source repository state could not be resolved");
+  if (result.stdout.length !== 0) invalid("source_repository_dirty", "source repository must be clean");
+  return Object.freeze({ commit, clean: true });
 }
 
 if (process.argv[1] && path.resolve(process.argv[1]) === path.resolve(new URL(import.meta.url).pathname)) {

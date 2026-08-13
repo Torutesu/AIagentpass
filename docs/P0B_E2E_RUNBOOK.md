@@ -69,7 +69,17 @@ npm run test:p0b:live
 ```
 
 The command treats any skipped browser or process lane as failure and always
-removes the PostgreSQL container and temporary credentials.
+removes the PostgreSQL container and temporary credentials. On success it
+writes a private canonical report to `.agentpass/qualification/p0b.json` (or
+the absolute `P0B_QUALIFICATION_OUTPUT`/`--report-output` path). The report
+binds the clean source commit, Console build-tree digest, actual PostgreSQL
+container image digest and TLS server version, Chromium version, and digested
+results for the build, browser, and process gates. Verify it against the
+current clean source with:
+
+```bash
+node scripts/p0b/qualification/verify.mjs "$PWD/.agentpass/qualification/p0b.json"
+```
 
 The reusable API is in `test/support/p0b/harness.mjs`. A test can call
 `startP0BHarness()` and register `harness.close()` in its test teardown:

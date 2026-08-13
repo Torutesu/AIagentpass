@@ -21,6 +21,16 @@ const LOOPBACK = "127.0.0.1";
 const POSTGRES_DATABASE = "agentpass_p0b";
 const POSTGRES_USER = "agentpass_p0b";
 const STATE_SCHEMA_VERSION = 1;
+const PROVENANCE_INSPECT_FORMAT = [
+  "{{.Id}}",
+  "{{.Image}}",
+  "{{.State.StartedAt}}",
+  '{{index .Config.Labels "com.agentpass.fixture"}}',
+  '{{index .Config.Labels "com.agentpass.fixture-state"}}'
+].join("\t");
+const MAX_CLOCK_SKEW_MS = 5_000;
+const MAX_PROTECTED_ENV_BYTES = 16 * 1024;
+const MAX_CA_BYTES = 1024 * 1024;
 
 export class FixtureError extends Error {
   constructor(code, message) {
@@ -206,6 +216,246 @@ export function publicManifest(state) {
   });
 }
 
+/**
+ * Collects the small, non-secret set of facts that qualifies a live fixture.
+ *
+ * `manifest` is the public manifest emitted by startFixture. `adminUrl` and
+ * `caFile` must come from the protected fixture environment, rather than from
+ * the public manifest. The command runner and Client constructor are
+ * injectable so this boundary can be tested without Docker or PostgreSQL.
+ */
+export async function collectFixtureProvenance({
+  manifest,
+  adminUrl,
+  caFile,
+  runDocker: docker = runDocker,
+  Client: ClientConstructor = Client
+} = {}) {
+  const normalized = validateProvenanceManifest(manifest);
+  const connection = validateAdminUrl(adminUrl, normalized);
+  await validateManifestEnvironment({ manifest: normalized, adminUrl, caFile });
+  const ca = await readProtectedCa(caFile);
+
+  let inspected;
+  try {
+    const output = await docker([
+      "inspect",
+      "--format",
+      PROVENANCE_INSPECT_FORMAT,
+      normalized.container_id
+    ]);
+    inspected = parseProvenanceInspect(output, normalized);
+  } catch (error) {
+    if (error instanceof FixtureError && [
+      "provenance_container_metadata_invalid",
+      "provenance_container_started_in_future",
+      "provenance_ownership_mismatch"
+    ].includes(error.code)) throw error;
+    throw new FixtureError("provenance_docker_inspect_failed", "Docker provenance could not be collected");
+  }
+
+  let client;
+  let row;
+  try {
+    client = new ClientConstructor({
+      host: connection.host,
+      port: connection.port,
+      user: connection.user,
+      password: connection.password,
+      database: connection.database,
+      ssl: {
+        ca,
+        rejectUnauthorized: true,
+        servername: connection.host
+      },
+      connectionTimeoutMillis: 2_000
+    });
+    await client.connect();
+    const result = await client.query(`SELECT
+      current_setting('server_version') AS server_version,
+      current_setting('server_version_num') AS server_version_num,
+      (SELECT ssl FROM pg_stat_ssl WHERE pid = pg_backend_pid()) AS ssl`);
+    row = result?.rows?.[0];
+  } catch {
+    throw new FixtureError("provenance_postgres_connect_failed", "PostgreSQL provenance connection failed");
+  } finally {
+    if (client) await client.end().catch(() => {});
+  }
+
+  const serverVersion = validatePostgresProvenanceRow(row);
+  return Object.freeze({
+    image: normalized.image,
+    image_digest: inspected.imageDigest,
+    container_id: inspected.containerId,
+    container_started_at: inspected.startedAt,
+    server_version: serverVersion
+  });
+}
+
+function validateProvenanceManifest(manifest) {
+  if (!manifest || typeof manifest !== "object" || Array.isArray(manifest)) {
+    throw new FixtureError("invalid_manifest", "fixture manifest is invalid");
+  }
+  if (manifest.schema_version !== STATE_SCHEMA_VERSION || manifest.fixture !== "agentpass-p0b-postgres-tls" || manifest.status !== "ready") {
+    throw new FixtureError("invalid_manifest", "fixture manifest is invalid");
+  }
+  try {
+    validatePostgres17Image(manifest.image);
+  } catch {
+    throw new FixtureError("invalid_manifest", "fixture manifest is invalid");
+  }
+  if (!/^[a-f0-9]{12,64}$/u.test(manifest.container_id ?? "")) {
+    throw new FixtureError("invalid_manifest", "fixture manifest is invalid");
+  }
+  if (manifest.host !== "localhost" || !Number.isInteger(manifest.port) || manifest.port < 1 || manifest.port > 65_535) {
+    throw new FixtureError("invalid_manifest", "fixture manifest is invalid");
+  }
+  if (typeof manifest.user !== "string" || manifest.user.length === 0 || typeof manifest.database !== "string" || manifest.database.length === 0) {
+    throw new FixtureError("invalid_manifest", "fixture manifest is invalid");
+  }
+  for (const field of ["root_dir", "state_file", "env_file", "ca_file"]) {
+    if (!isSafeAbsolutePath(manifest[field])) throw new FixtureError("invalid_manifest", "fixture manifest is invalid");
+  }
+  if (manifest.state_file !== path.join(manifest.root_dir, "state.json")) {
+    throw new FixtureError("invalid_manifest", "fixture manifest is invalid");
+  }
+  return manifest;
+}
+
+function validateAdminUrl(adminUrl, manifest) {
+  if (typeof adminUrl !== "string" || adminUrl.length === 0 || adminUrl.length > 4_096) {
+    throw new FixtureError("invalid_manifest_identity", "fixture environment identity is invalid");
+  }
+  let url;
+  try {
+    url = new URL(adminUrl);
+  } catch {
+    throw new FixtureError("invalid_manifest_identity", "fixture environment identity is invalid");
+  }
+  if (!["postgresql:", "postgres:"].includes(url.protocol) || url.hostname !== manifest.host || url.port !== String(manifest.port) || url.hash !== "") {
+    throw new FixtureError("invalid_manifest_identity", "fixture environment identity is invalid");
+  }
+  if (url.searchParams.get("sslmode") !== "verify-full" || url.searchParams.getAll("sslmode").length !== 1) {
+    throw new FixtureError("invalid_manifest_identity", "fixture environment identity is invalid");
+  }
+  let user;
+  let password;
+  let database;
+  try {
+    user = decodeURIComponent(url.username);
+    password = decodeURIComponent(url.password);
+    database = decodeURIComponent(url.pathname.slice(1));
+  } catch {
+    throw new FixtureError("invalid_manifest_identity", "fixture environment identity is invalid");
+  }
+  if (!user || !password || !database || user !== manifest.user || database !== manifest.database || url.pathname === "/") {
+    throw new FixtureError("invalid_manifest_identity", "fixture environment identity is invalid");
+  }
+  return Object.freeze({ host: url.hostname, port: manifest.port, user, password, database });
+}
+
+async function validateManifestEnvironment({ manifest, adminUrl, caFile }) {
+  if (!isSafeAbsolutePath(caFile) || caFile !== manifest.ca_file) {
+    throw new FixtureError("invalid_manifest_identity", "fixture environment identity is invalid");
+  }
+  const environment = await readProtectedEnvironment(manifest.env_file);
+  const expected = {
+    P0B_POSTGRES_ADMIN_URL: adminUrl,
+    AGENTPASS_TEST_POSTGRES_ADMIN_URL: adminUrl,
+    P0B_POSTGRES_CA_FILE: caFile,
+    PGSSLROOTCERT: caFile,
+    P0B_POSTGRES_TLS_STATE_FILE: manifest.state_file,
+    P0B_POSTGRES_TLS_IMAGE: manifest.image,
+    P0B_POSTGRES_TLS_CONTAINER_ID: manifest.container_id
+  };
+  for (const [key, value] of Object.entries(expected)) {
+    if (environment[key] !== value) throw new FixtureError("invalid_manifest_identity", "fixture environment identity is invalid");
+  }
+}
+
+async function readProtectedEnvironment(file) {
+  await assertProtectedRegularFile(file, "invalid_manifest_identity", MAX_PROTECTED_ENV_BYTES);
+  let contents;
+  try {
+    contents = await fsp.readFile(file, "utf8");
+  } catch {
+    throw new FixtureError("invalid_manifest_identity", "fixture environment identity is invalid");
+  }
+  const values = Object.create(null);
+  for (const line of contents.split(/\r?\n/u)) {
+    if (line === "") continue;
+    const separator = line.indexOf("=");
+    if (separator < 1 || !/^[A-Z][A-Z0-9_]*$/u.test(line.slice(0, separator))) {
+      throw new FixtureError("invalid_manifest_identity", "fixture environment identity is invalid");
+    }
+    const key = line.slice(0, separator);
+    if (Object.hasOwn(values, key)) throw new FixtureError("invalid_manifest_identity", "fixture environment identity is invalid");
+    values[key] = line.slice(separator + 1);
+  }
+  return values;
+}
+
+async function readProtectedCa(file) {
+  if (!isSafeAbsolutePath(file)) throw new FixtureError("invalid_manifest_identity", "fixture environment identity is invalid");
+  await assertProtectedRegularFile(file, "invalid_manifest_identity", MAX_CA_BYTES);
+  try {
+    return await fsp.readFile(file, "utf8");
+  } catch {
+    throw new FixtureError("invalid_manifest_identity", "fixture environment identity is invalid");
+  }
+}
+
+async function assertProtectedRegularFile(file, errorCode, maxBytes) {
+  try {
+    const stats = await fsp.lstat(file);
+    if (!stats.isFile() || (stats.mode & 0o077) !== 0 || (maxBytes !== undefined && stats.size > maxBytes)) {
+      throw new Error("unsafe file");
+    }
+  } catch {
+    throw new FixtureError(errorCode, "fixture environment identity is invalid");
+  }
+}
+
+function parseProvenanceInspect(output, manifest) {
+  if (typeof output !== "string") throw new FixtureError("provenance_container_metadata_invalid", "Docker container metadata is invalid");
+  const fields = output.trimEnd().split("\t");
+  if (fields.length !== 5 || fields.some((field) => field.length === 0)) {
+    throw new FixtureError("provenance_container_metadata_invalid", "Docker container metadata is invalid");
+  }
+  const [containerId, imageDigest, startedAt, fixtureLabel, stateLabel] = fields;
+  if (!/^[a-f0-9]{12,64}$/u.test(containerId) || containerId !== manifest.container_id || !/^sha256:[a-f0-9]{64}$/u.test(imageDigest)) {
+    throw new FixtureError("provenance_container_metadata_invalid", "Docker container metadata is invalid");
+  }
+  const startedTimestamp = Date.parse(startedAt);
+  if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z$/u.test(startedAt) || !Number.isFinite(startedTimestamp) || startedTimestamp <= 0) {
+    throw new FixtureError("provenance_container_metadata_invalid", "Docker container metadata is invalid");
+  }
+  if (startedTimestamp > Date.now() + MAX_CLOCK_SKEW_MS) {
+    throw new FixtureError("provenance_container_started_in_future", "Docker container start time is in the future");
+  }
+  if (fixtureLabel !== FIXTURE_LABEL || stateLabel !== manifest.state_file) {
+    throw new FixtureError("provenance_ownership_mismatch", "Docker container ownership does not match the fixture");
+  }
+  return Object.freeze({ containerId, imageDigest, startedAt: new Date(startedTimestamp).toISOString() });
+}
+
+function validatePostgresProvenanceRow(row) {
+  if (!row || row.ssl !== true) throw new FixtureError("provenance_postgres_not_tls", "PostgreSQL connection is not TLS protected");
+  const serverVersion = typeof row.server_version === "string" ? row.server_version : "";
+  const versionNumber = typeof row.server_version_num === "string" ? row.server_version_num : String(row.server_version_num ?? "");
+  const numericVersion = Number(versionNumber);
+  const major = Math.floor(numericVersion / 10_000);
+  const minor = numericVersion % 10_000;
+  if (!/^17(?:[.\s]|$)/u.test(serverVersion) || !/^\d+$/u.test(versionNumber) || major !== 17 || !Number.isSafeInteger(minor)) {
+    throw new FixtureError("provenance_postgres_version_invalid", "PostgreSQL server version is not 17");
+  }
+  return `${major}.${minor}`;
+}
+
+function isSafeAbsolutePath(value) {
+  return typeof value === "string" && value.length > 0 && value.length <= 4_096 && path.isAbsolute(value) && !value.includes("\0") && !value.includes("\n") && !value.includes("\r");
+}
+
 export async function startFixture({ outputFile, timeoutMs = DEFAULT_TIMEOUT_MS, image = DEFAULT_IMAGE } = {}) {
   image = validatePostgres17Image(image);
   const rootDir = await createFixtureRoot();
@@ -366,6 +616,8 @@ async function assertOwnedContainer(state) {
 async function removeContainer(containerId) {
   if (!containerId) return;
   await runDocker(["rm", "--force", containerId], { allowFailure: true });
+  const remaining = await runDocker(["inspect", "--format", "{{.Id}}", containerId], { allowFailure: true });
+  if (remaining.trim() !== "") throw new FixtureError("container_cleanup_failed", "Docker fixture cleanup failed");
 }
 
 async function readAndValidateState(stateFile) {

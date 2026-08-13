@@ -5,9 +5,17 @@ import fsp from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { spawn } from "node:child_process";
 
-import { startFixture, stopFixture } from "./postgres-tls/fixture.mjs";
+import { chromium } from "../../apps/web-console/node_modules/@playwright/test/index.mjs";
+import { collectFixtureProvenance, startFixture, stopFixture } from "./postgres-tls/fixture.mjs";
+import { runQualificationCommand } from "./qualification/command.mjs";
+import {
+  buildP0BQualificationReport,
+  digestArtifactTree,
+  resolveSourceState,
+  writeP0BQualificationReport
+} from "./qualification/report.mjs";
+import { collectBrowserMetadata, evidenceDigest } from "./qualification/runtime-evidence.mjs";
 
 const SCRIPT_DIRECTORY = path.dirname(fileURLToPath(import.meta.url));
 const REPOSITORY_ROOT = path.resolve(SCRIPT_DIRECTORY, "../..");
@@ -16,7 +24,10 @@ const LIVE_TEST = path.join(REPOSITORY_ROOT, "test/p0b-live-process.integration.
 const LIVE_BROWSER_TEST = path.join(REPOSITORY_ROOT, "test/p0b-live-browser.integration.test.mjs");
 const DEFAULT_FIXTURE_TIMEOUT_MS = 45_000;
 const MAX_ENV_FILE_BYTES = 16 * 1024;
-const MAX_CHILD_OUTPUT_BYTES = 256 * 1024;
+const DEFAULT_REPORT_OUTPUT = path.join(REPOSITORY_ROOT, ".agentpass", "qualification", "p0b.json");
+const BUILD_TIMEOUT_MS = 180_000;
+const BROWSER_TIMEOUT_MS = 600_000;
+const PROCESS_TIMEOUT_MS = 180_000;
 const REQUIRED_ENV_KEYS = Object.freeze([
   "P0B_POSTGRES_ADMIN_URL",
   "AGENTPASS_TEST_POSTGRES_ADMIN_URL",
@@ -56,6 +67,12 @@ export function parseArgs(argv) {
         throw new OrchestrationError("invalid_argument", "fixture image is invalid");
       }
       options.fixtureImage = value;
+      continue;
+    }
+    if (argument === "--report-output") {
+      const value = argv[++index];
+      if (!isSafeAbsolutePath(value)) throw new OrchestrationError("invalid_argument", "report output must be an absolute path");
+      options.reportOutput = value;
       continue;
     }
     throw new OrchestrationError("invalid_argument", "unknown option");
@@ -128,7 +145,7 @@ export function parseProtectedEnvironment(contents) {
 export function buildTestEnvironment(base, fixtureEnvironment) {
   if (!base || typeof base !== "object") throw new TypeError("base environment is required");
   return Object.freeze({
-    ...base,
+    ...qualificationBaseEnvironment(base),
     ...fixtureEnvironment,
     // A caller's stale disable flag must not turn this live qualification into
     // a successful-looking skipped test.
@@ -150,6 +167,7 @@ PostgreSQL process qualification, and always stops the fixture.
 Options:
   --fixture-timeout-ms <integer>  PostgreSQL fixture readiness timeout
   --fixture-image <image>        PostgreSQL 17 image override
+  --report-output <absolute>     qualification report output path
   --help                         Show this help
 `;
 }
@@ -167,12 +185,30 @@ export async function main(argv = process.argv.slice(2)) {
     return 0;
   }
 
+  let sourceBefore;
+  let reportOutput;
+  try {
+    reportOutput = resolveQualificationOutput(options.reportOutput, process.env.P0B_QUALIFICATION_OUTPUT);
+    await prepareQualificationOutput(reportOutput);
+    sourceBefore = resolveSourceState(REPOSITORY_ROOT);
+  } catch (error) {
+    emitFailure("source", error);
+    return 1;
+  }
+
+  const startedAt = new Date().toISOString();
   const orchestrationRoot = await fsp.mkdtemp(path.join(os.tmpdir(), "agentpass-p0b-run-"));
   const manifestFile = path.join(orchestrationRoot, "fixture.manifest.json");
   let manifest;
   let failure;
   let interrupted = false;
   let activeChild;
+  let publicManifest;
+  let fixtureEnvironment;
+  let postgresEvidence;
+  let browserEvidence;
+  let consoleArtifact;
+  const commands = [];
   const onSignal = (signal) => {
     interrupted = true;
     if (activeChild && !activeChild.killed) activeChild.kill("SIGTERM");
@@ -195,13 +231,14 @@ export async function main(argv = process.argv.slice(2)) {
       failure = { stage: "fixture-start", error };
     }
 
-    let fixtureEnvironment;
     if (!failure) {
       try {
-        const publicManifest = await readManifest(manifestFile, manifest);
+        publicManifest = await readManifest(manifestFile, manifest);
         fixtureEnvironment = await readProtectedEnvironment(publicManifest.env_file);
         if (fixtureEnvironment.P0B_POSTGRES_TLS_STATE_FILE !== publicManifest.state_file
-          || fixtureEnvironment.P0B_POSTGRES_CA_FILE !== publicManifest.ca_file) {
+          || fixtureEnvironment.P0B_POSTGRES_CA_FILE !== publicManifest.ca_file
+          || fixtureEnvironment.P0B_POSTGRES_TLS_IMAGE !== publicManifest.image
+          || fixtureEnvironment.P0B_POSTGRES_TLS_CONTAINER_ID !== publicManifest.container_id) {
           throw new OrchestrationError("fixture_manifest_mismatch");
         }
       } catch (error) {
@@ -210,30 +247,54 @@ export async function main(argv = process.argv.slice(2)) {
     }
 
     if (!failure) {
-      const result = await runChild(process.env.npm_execpath ? process.execPath : "npm",
-        process.env.npm_execpath ? [process.env.npm_execpath, "run", "build"] : ["run", "build"],
-        { cwd: CONSOLE_ROOT, env: process.env, setActive: (child) => { activeChild = child; } });
+      try {
+        postgresEvidence = await collectFixtureProvenance({
+          manifest: publicManifest,
+          adminUrl: fixtureEnvironment.P0B_POSTGRES_ADMIN_URL,
+          caFile: fixtureEnvironment.P0B_POSTGRES_CA_FILE
+        });
+      } catch (error) {
+        failure = { stage: "postgres-provenance", error };
+      }
+    }
+
+    if (!failure) {
+      const result = await runQualificationCommand("npm", ["run", "build"], {
+        cwd: CONSOLE_ROOT,
+        env: qualificationBaseEnvironment(process.env),
+        timeoutMs: BUILD_TIMEOUT_MS,
+        onChild: (child) => { activeChild = child; }
+      });
+      commands.push(commandEvidence("console-build", ["npm", "run", "build"], "apps/web-console", result));
       activeChild = undefined;
-      if (result.spawnError || result.code !== 0 || result.signal) {
+      if (result.status !== "passed") {
         failure = { stage: "console-build", error: new OrchestrationError(result.reason) };
       }
     }
 
     if (!failure) {
       try {
+        consoleArtifact = await digestArtifactTree(path.join(CONSOLE_ROOT, "dist"), { name: "console-dist", kind: "build" });
+        browserEvidence = await collectBrowserMetadata({ chromium });
+      } catch (error) {
+        failure = { stage: "build-provenance", error };
+      }
+    }
+
+    if (!failure) {
+      try {
         if (interrupted) throw new OrchestrationError("interrupted");
-        const result = await runChild(process.execPath,
-          ["--test", "--test-reporter", "tap", path.relative(REPOSITORY_ROOT, LIVE_BROWSER_TEST)],
-          {
-            cwd: REPOSITORY_ROOT,
-            env: { ...buildTestEnvironment(process.env, fixtureEnvironment), P0B_LIVE_BROWSER: "1" },
-            setActive: (child) => { activeChild = child; }
-          });
+        const childArgs = ["--test", "--test-reporter", "tap", path.relative(REPOSITORY_ROOT, LIVE_BROWSER_TEST)];
+        const result = await runQualificationCommand(process.execPath, childArgs, {
+          cwd: REPOSITORY_ROOT,
+          env: { ...buildTestEnvironment(process.env, fixtureEnvironment), P0B_LIVE_BROWSER: "1" },
+          timeoutMs: BROWSER_TIMEOUT_MS,
+          onChild: (child) => { activeChild = child; }
+        });
+        commands.push(commandEvidence("browser-e2e", ["node", ...childArgs], "repository", result));
         activeChild = undefined;
-        if (result.spawnError || result.signal || result.code !== 0) {
+        if (result.status !== "passed") {
           failure = { stage: "live-browser", error: new OrchestrationError(result.reason) };
-        } else if (result.output.includes("# SKIP")) {
-          failure = { stage: "live-browser", error: new OrchestrationError("test_skipped") };
         } else if (interrupted) {
           failure = { stage: "live-browser", error: new OrchestrationError("interrupted") };
         }
@@ -245,23 +306,35 @@ export async function main(argv = process.argv.slice(2)) {
     if (!failure) {
       try {
         if (interrupted) throw new OrchestrationError("interrupted");
-        const result = await runChild(process.execPath,
-          ["--test", "--test-reporter", "tap", "test/p0b-live-process.integration.test.mjs"],
-          {
-            cwd: REPOSITORY_ROOT,
-            env: buildTestEnvironment(process.env, fixtureEnvironment),
-            setActive: (child) => { activeChild = child; }
-          });
+        const childArgs = ["--test", "--test-reporter", "tap", "test/p0b-live-process.integration.test.mjs"];
+        const result = await runQualificationCommand(process.execPath, childArgs, {
+          cwd: REPOSITORY_ROOT,
+          env: buildTestEnvironment(process.env, fixtureEnvironment),
+          timeoutMs: PROCESS_TIMEOUT_MS,
+          onChild: (child) => { activeChild = child; }
+        });
+        commands.push(commandEvidence("process-e2e", ["node", ...childArgs], "repository", result));
         activeChild = undefined;
-        if (result.spawnError || result.signal || result.code !== 0) {
+        if (result.status !== "passed") {
           failure = { stage: "live-test", error: new OrchestrationError(result.reason) };
-        } else if (result.output.includes("# SKIP")) {
-          failure = { stage: "live-test", error: new OrchestrationError("test_skipped") };
         } else if (interrupted) {
           failure = { stage: "live-test", error: new OrchestrationError("interrupted") };
         }
       } catch (error) {
         failure = { stage: "live-test", error };
+      }
+    }
+
+    if (!failure) {
+      try {
+        const afterArtifact = await digestArtifactTree(path.join(CONSOLE_ROOT, "dist"), { name: "console-dist-after", kind: "build-verification" });
+        if (afterArtifact.sha256 !== consoleArtifact.sha256 || afterArtifact.bytes !== consoleArtifact.bytes) {
+          throw new OrchestrationError("build_artifact_changed");
+        }
+        const sourceAfter = resolveSourceState(REPOSITORY_ROOT);
+        if (sourceAfter.commit !== sourceBefore.commit) throw new OrchestrationError("source_commit_changed");
+      } catch (error) {
+        failure = { stage: "final-provenance", error };
       }
     }
   } catch (error) {
@@ -284,6 +357,28 @@ export async function main(argv = process.argv.slice(2)) {
 
   if (failure) {
     emitFailure(failure.stage, failure.error, failure.cleanup);
+    return 1;
+  }
+  try {
+    const completedAt = new Date().toISOString();
+    const report = buildP0BQualificationReport({
+      source_commit: sourceBefore.commit,
+      started_at: startedAt,
+      completed_at: completedAt,
+      commands,
+      postgres: postgresEvidence,
+      browser: browserEvidence,
+      artifacts: [consoleArtifact],
+      gates: [
+        gateEvidence("build-integrity", { source_commit: sourceBefore.commit, command: commands[0].result, artifact: consoleArtifact }),
+        gateEvidence("browser-flow", { source_commit: sourceBefore.commit, command: commands[1].result, browser: browserEvidence, artifact: consoleArtifact }),
+        gateEvidence("process-flow", { source_commit: sourceBefore.commit, command: commands[2].result, postgres: postgresEvidence, artifact: consoleArtifact })
+      ]
+    }, { repositoryRoot: REPOSITORY_ROOT });
+    await writeP0BQualificationReport(reportOutput, report);
+    process.stdout.write(`p0b-qualification: ${report.report_digest}\n`);
+  } catch (error) {
+    emitFailure("qualification-report", error);
     return 1;
   }
   process.stdout.write("p0b-orchestration: pass\n");
@@ -319,30 +414,53 @@ function validatePostgresUrl(value) {
   }
 }
 
-function runChild(command, args, { cwd, env, setActive }) {
-  return new Promise((resolve) => {
-    let output = "";
-    let child;
-    try {
-      child = spawn(command, args, { cwd, env, shell: false, stdio: ["ignore", "pipe", "pipe"] });
-    } catch {
-      resolve({ spawnError: true, reason: "child_spawn_failed", output });
-      return;
+export function qualificationBaseEnvironment(base) {
+  if (!base || typeof base !== "object") throw new TypeError("base environment is required");
+  const result = Object.create(null);
+  const exact = new Set(["PATH", "HOME", "TMPDIR", "LANG", "CI", "NO_COLOR", "PLAYWRIGHT_BROWSERS_PATH"]);
+  for (const [key, value] of Object.entries(base)) {
+    if ((exact.has(key) || key.startsWith("LC_")) && typeof value === "string") result[key] = value;
+  }
+  return result;
+}
+
+export function resolveQualificationOutput(argument, environment) {
+  const value = argument ?? environment ?? DEFAULT_REPORT_OUTPUT;
+  if (!isSafeAbsolutePath(value)) throw new OrchestrationError("invalid_report_output");
+  return path.resolve(value);
+}
+
+export async function prepareQualificationOutput(outputFile) {
+  if (!isSafeAbsolutePath(outputFile)) throw new OrchestrationError("invalid_report_output");
+  const directory = path.dirname(outputFile);
+  await fsp.mkdir(directory, { recursive: true, mode: 0o700 });
+  const metadata = await fsp.lstat(directory);
+  const uid = typeof process.getuid === "function" ? process.getuid() : undefined;
+  if (!metadata.isDirectory() || metadata.isSymbolicLink() || (metadata.mode & 0o077) !== 0 || (uid !== undefined && metadata.uid !== uid)) {
+    throw new OrchestrationError("unsafe_report_directory");
+  }
+  try {
+    const existing = await fsp.lstat(outputFile);
+    if (!existing.isFile() || existing.nlink !== 1 || (existing.mode & 0o077) !== 0 || (uid !== undefined && existing.uid !== uid)) {
+      throw new OrchestrationError("unsafe_report_output");
     }
-    setActive(child);
-    const capture = (chunk) => {
-      if (output.length < MAX_CHILD_OUTPUT_BYTES) output += String(chunk).slice(0, MAX_CHILD_OUTPUT_BYTES - output.length);
-    };
-    child.stdout?.on("data", capture);
-    child.stderr?.on("data", capture);
-    child.once("error", () => resolve({ spawnError: true, reason: "child_spawn_failed", output }));
-    child.once("close", (code, signal) => resolve({
-      code,
-      signal,
-      reason: signal ? `child_signal_${String(signal).toLowerCase()}` : `child_exit_${code ?? "unknown"}`,
-      output
-    }));
-  });
+    await fsp.unlink(outputFile);
+  } catch (error) {
+    if (error?.code !== "ENOENT") throw error;
+  }
+}
+
+function commandEvidence(id, argv, cwd, result) {
+  return Object.freeze({ id, argv: Object.freeze(argv), cwd, result });
+}
+
+function gateEvidence(id, metadata) {
+  return Object.freeze({ id, status: "passed", evidence_sha256: evidenceDigest(metadata) });
+}
+
+function isSafeAbsolutePath(value) {
+  return typeof value === "string" && value.length > 0 && value.length <= 4096 && path.isAbsolute(value)
+    && !value.includes("\u0000") && !value.includes("\n") && !value.includes("\r");
 }
 
 function emitFailure(stage, error, cleanup = false) {

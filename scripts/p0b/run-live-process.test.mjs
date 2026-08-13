@@ -8,7 +8,10 @@ import {
   buildTestEnvironment,
   parseArgs,
   parseProtectedEnvironment,
+  prepareQualificationOutput,
+  qualificationBaseEnvironment,
   readProtectedEnvironment,
+  resolveQualificationOutput,
   stableReason
 } from "./run-live-process.mjs";
 
@@ -47,9 +50,29 @@ test("protected environment file requires owner-only permissions and never retur
 });
 
 test("test environment overrides stale external-disable state without printing secrets", () => {
-  const env = buildTestEnvironment({ PATH: "/bin", P0B_DISABLE_EXTERNAL: "true" }, { P0B_POSTGRES_ADMIN_URL: ADMIN_URL });
+  const env = buildTestEnvironment({ PATH: "/bin", HOME: "/safe/home", NODE_OPTIONS: "--inspect", AGENTPASS_SECRET: "never" }, { P0B_POSTGRES_ADMIN_URL: ADMIN_URL });
   assert.equal(env.P0B_DISABLE_EXTERNAL, "false");
   assert.equal(env.P0B_POSTGRES_ADMIN_URL, ADMIN_URL);
+  assert.equal(env.NODE_OPTIONS, undefined);
+  assert.equal(env.AGENTPASS_SECRET, undefined);
+  assert.deepEqual({ ...qualificationBaseEnvironment({ PATH: "/bin", HOME: "/safe/home", LC_ALL: "C", npm_config_userconfig: "/secret" }) }, {
+    PATH: "/bin", HOME: "/safe/home", LC_ALL: "C"
+  });
+});
+
+test("qualification output is absolute, private, and removes stale evidence before a run", async () => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), "agentpass-p0b-report-test-"));
+  const output = path.join(directory, "qualification.json");
+  try {
+    await fs.chmod(directory, 0o700);
+    await fs.writeFile(output, "stale pass", { mode: 0o600 });
+    assert.equal(resolveQualificationOutput(output), output);
+    assert.throws(() => resolveQualificationOutput("relative.json"), { code: "invalid_report_output" });
+    await prepareQualificationOutput(output);
+    await assert.rejects(fs.stat(output), { code: "ENOENT" });
+  } finally {
+    await fs.rm(directory, { recursive: true, force: true });
+  }
 });
 
 test("diagnostic reason is stable and code-only", () => {

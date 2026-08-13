@@ -8,6 +8,7 @@ import test from "node:test";
 
 import {
   buildAdminUrl,
+  collectFixtureProvenance,
   createFixtureRoot,
   createTlsMaterial,
   generateCredentials,
@@ -76,3 +77,220 @@ test("fixture temp roots are created below the operating system temp directory",
   await fs.rm(directory, { recursive: true, force: true });
   assert.equal(path.dirname(directory), os.tmpdir());
 });
+
+test("collectFixtureProvenance returns only safe Docker and PostgreSQL metadata", async (t) => {
+  const fixture = await createProvenanceFixture(t);
+  const dockerCalls = [];
+  const clientConfigs = [];
+  let queryText = "";
+  class FakeClient {
+    constructor(config) {
+      clientConfigs.push(config);
+    }
+
+    async connect() {}
+
+    async query(query) {
+      queryText = query;
+      return {
+        rows: [{
+          server_version: "17.5 (AgentPass qualification build)",
+          server_version_num: "170005",
+          ssl: true
+        }]
+      };
+    }
+
+    async end() {}
+  }
+
+  const provenance = await collectFixtureProvenance({
+    ...fixture,
+    Client: FakeClient,
+    runDocker: async (args) => {
+      dockerCalls.push(args);
+      return fixture.manifest.container_id + "\tsha256:" + "b".repeat(64) + "\t" + fixture.startedAt + "\tagentpass.p0b.postgres-tls\t" + fixture.manifest.state_file + "\n";
+    }
+  });
+
+  assert.deepEqual(provenance, {
+    image: fixture.manifest.image,
+    image_digest: "sha256:" + "b".repeat(64),
+    container_id: fixture.manifest.container_id,
+    container_started_at: fixture.startedAt,
+    server_version: "17.5"
+  });
+  assert.equal(dockerCalls.length, 1);
+  assert.equal(dockerCalls[0][0], "inspect");
+  assert.equal(dockerCalls[0][1], "--format");
+  assert.equal(dockerCalls[0][3], fixture.manifest.container_id);
+  assert.match(dockerCalls[0][2], /\.Id/u);
+  assert.match(dockerCalls[0][2], /\.Image/u);
+  assert.match(dockerCalls[0][2], /\.State\.StartedAt/u);
+  assert.match(dockerCalls[0][2], /\.Config\.Labels/u);
+  assert.doesNotMatch(dockerCalls[0][2], /\.Config\.Env|\.Config\.Mounts|json/u);
+  assert.equal(clientConfigs.length, 1);
+  assert.equal(clientConfigs[0].ssl.rejectUnauthorized, true);
+  assert.equal(clientConfigs[0].ssl.servername, "localhost");
+  assert.equal(clientConfigs[0].ssl.ca, "test-ca\n");
+  assert.match(queryText, /pg_stat_ssl/u);
+  assert.match(queryText, /server_version_num/u);
+});
+
+test("collectFixtureProvenance rejects malformed, future, and foreign Docker metadata", async (t) => {
+  const fixture = await createProvenanceFixture(t);
+  const validDigest = "sha256:" + "b".repeat(64);
+  const inspect = (id, startedAt, fixtureLabel = "agentpass.p0b.postgres-tls", stateFile = fixture.manifest.state_file) => (
+    id + "\t" + validDigest + "\t" + startedAt + "\t" + fixtureLabel + "\t" + stateFile + "\n"
+  );
+  const run = (output) => async () => output;
+  const noDb = class {
+    async connect() {}
+    async end() {}
+  };
+
+  await assertProvenanceError(
+    collectFixtureProvenance({
+      ...fixture,
+      Client: noDb,
+      runDocker: run("malformed")
+    }),
+    "provenance_container_metadata_invalid"
+  );
+  await assertProvenanceError(
+    collectFixtureProvenance({
+      ...fixture,
+      Client: noDb,
+      runDocker: async () => {
+        throw new Error("password=do-not-leak");
+      }
+    }),
+    "provenance_docker_inspect_failed"
+  );
+  await assertProvenanceError(
+    collectFixtureProvenance({
+      ...fixture,
+      Client: noDb,
+      runDocker: run(inspect(fixture.manifest.container_id, new Date(Date.now() + 60_000).toISOString()))
+    }),
+    "provenance_container_started_in_future"
+  );
+  await assertProvenanceError(
+    collectFixtureProvenance({
+      ...fixture,
+      Client: noDb,
+      runDocker: run(inspect(fixture.manifest.container_id, fixture.startedAt, "other.fixture"))
+    }),
+    "provenance_ownership_mismatch"
+  );
+});
+
+test("collectFixtureProvenance rejects manifest and protected environment identity mismatches", async (t) => {
+  const fixture = await createProvenanceFixture(t);
+  await fs.writeFile(fixture.envFile, [
+    "P0B_POSTGRES_ADMIN_URL=" + fixture.adminUrl,
+    "AGENTPASS_TEST_POSTGRES_ADMIN_URL=" + fixture.adminUrl,
+    "P0B_POSTGRES_CA_FILE=" + fixture.caFile,
+    "PGSSLROOTCERT=" + fixture.caFile,
+    "P0B_POSTGRES_TLS_STATE_FILE=" + fixture.manifest.state_file,
+    "P0B_POSTGRES_TLS_IMAGE=" + fixture.manifest.image,
+    "P0B_POSTGRES_TLS_CONTAINER_ID=" + "c".repeat(64),
+    ""
+  ].join("\n"), { mode: 0o600 });
+  await fs.chmod(fixture.envFile, 0o600);
+
+  await assertProvenanceError(
+    collectFixtureProvenance({
+      ...fixture,
+      Client: class {},
+      runDocker: async () => ""
+    }),
+    "invalid_manifest_identity"
+  );
+});
+
+test("collectFixtureProvenance requires a TLS PostgreSQL 17 connection", async (t) => {
+  const fixture = await createProvenanceFixture(t);
+  const inspect = async () => fixture.manifest.container_id + "\tsha256:" + "b".repeat(64) + "\t" + fixture.startedAt + "\tagentpass.p0b.postgres-tls\t" + fixture.manifest.state_file + "\n";
+  const clientFor = (row) => class {
+    constructor(config) {
+      this.config = config;
+    }
+
+    async connect() {}
+
+    async query() {
+      return { rows: [row] };
+    }
+
+    async end() {}
+  };
+
+  await assertProvenanceError(
+    collectFixtureProvenance({
+      ...fixture,
+      Client: clientFor({ server_version: "17.5", server_version_num: "170005", ssl: false }),
+      runDocker: inspect
+    }),
+    "provenance_postgres_not_tls"
+  );
+  await assertProvenanceError(
+    collectFixtureProvenance({
+      ...fixture,
+      Client: clientFor({ server_version: "16.4", server_version_num: "160004", ssl: true }),
+      runDocker: inspect
+    }),
+    "provenance_postgres_version_invalid"
+  );
+});
+
+async function createProvenanceFixture(t) {
+  const rootDir = await createFixtureRoot("agentpass-p0b-postgres-tls-provenance-test-");
+  t.after(() => fs.rm(rootDir, { recursive: true, force: true }));
+  const manifest = {
+    schema_version: 1,
+    fixture: "agentpass-p0b-postgres-tls",
+    status: "ready",
+    image: "postgres:17-alpine",
+    container_id: "a".repeat(64),
+    host: "localhost",
+    port: 54_321,
+    database: "agentpass_p0b",
+    user: "agentpass_p0b",
+    root_dir: rootDir,
+    state_file: path.join(rootDir, "state.json"),
+    env_file: path.join(rootDir, "fixture.env"),
+    ca_file: path.join(rootDir, "ca.cert.pem"),
+    started_at: new Date(Date.now() - 1_000).toISOString()
+  };
+  const credentials = {
+    user: manifest.user,
+    password: "test-password",
+    database: manifest.database
+  };
+  const adminUrl = buildAdminUrl({ ...credentials, port: manifest.port });
+  const caFile = manifest.ca_file;
+  const environment = [
+    "P0B_POSTGRES_ADMIN_URL=" + adminUrl,
+    "AGENTPASS_TEST_POSTGRES_ADMIN_URL=" + adminUrl,
+    "P0B_POSTGRES_CA_FILE=" + caFile,
+    "PGSSLROOTCERT=" + caFile,
+    "P0B_POSTGRES_TLS_STATE_FILE=" + manifest.state_file,
+    "P0B_POSTGRES_TLS_IMAGE=" + manifest.image,
+    "P0B_POSTGRES_TLS_CONTAINER_ID=" + manifest.container_id,
+    ""
+  ].join("\n");
+  await fs.writeFile(caFile, "test-ca\n", { mode: 0o600 });
+  await fs.writeFile(manifest.env_file, environment, { mode: 0o600 });
+  await fs.chmod(caFile, 0o600);
+  await fs.chmod(manifest.env_file, 0o600);
+  return { manifest, adminUrl, caFile, envFile: manifest.env_file, startedAt: manifest.started_at };
+}
+
+async function assertProvenanceError(promise, code) {
+  await assert.rejects(promise, (error) => (
+    error?.code === code
+    && !/password|test-ca/iu.test(error.message)
+    && !error.message.includes("postgresql://")
+  ));
+}

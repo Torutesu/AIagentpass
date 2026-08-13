@@ -85,14 +85,28 @@ jobs:
         run: npx playwright install --with-deps chromium
         working-directory: apps/web-console
       - name: Prepare P0-B evidence and artifact directory
-        run: mkdir -p "$GITHUB_WORKSPACE/apps/web-console/e2e/test-results"
+        run: |
+          mkdir -p "$GITHUB_WORKSPACE/apps/web-console/e2e/test-results"
+          chmod 0700 "$GITHUB_WORKSPACE/apps/web-console/e2e/test-results"
       - name: Run live trusted-TLS PostgreSQL, Cloud, Console, and signed-ACK qualification
+        env:
+          P0B_QUALIFICATION_OUTPUT: ${{ github.workspace }}/apps/web-console/e2e/test-results/p0b-qualification.json
         run: npm run test:p0b:live
+      - name: Verify source-bound P0-B qualification report
+        run: node scripts/p0b/qualification/verify.mjs "$GITHUB_WORKSPACE/apps/web-console/e2e/test-results/p0b-qualification.json"
       - name: Reject sensitive P0-B evidence and browser artifacts
         if: always()
         env:
           AGENTPASS_E2E_ARTIFACT_DIR: ${{ github.workspace }}/apps/web-console/e2e/test-results
         run: node --test test/p0b-artifact-security.test.mjs
+      - name: Retain verified secret-free P0-B qualification evidence
+        if: success()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: p0b-qualification-${{ github.sha }}
+          path: apps/web-console/e2e/test-results/p0b-qualification.json
+          if-no-files-found: error
+          retention-days: 30
 
   test:
     runs-on: macos-latest
