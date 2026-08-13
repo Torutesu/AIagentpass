@@ -1,0 +1,270 @@
+import Foundation
+
+public enum NativeAgentSessionRegistryError: String, Error, Equatable, Sendable {
+    case invalidInput = "invalid_input"
+    case sessionExists = "session_exists"
+    case sessionMissing = "session_missing"
+    case connectionMismatch = "connection_mismatch"
+    case bindingMismatch = "binding_mismatch"
+    case deadlineMismatch = "deadline_mismatch"
+    case sessionNotActive = "session_not_active"
+    case requestReplay = "request_replay"
+    case requestConflict = "request_conflict"
+    case capabilityReplay = "capability_replay"
+    case nonceReplay = "nonce_replay"
+    case budgetExhausted = "budget_exhausted"
+    case reservationMissing = "reservation_missing"
+    case reservationMismatch = "reservation_mismatch"
+    case transitionDenied = "transition_denied"
+    case sessionCapacityExceeded = "session_capacity_exceeded"
+}
+public struct NativeAgentSessionRegistryStatus: Equatable, Sendable {
+    public let sessionID: String
+    public let leaseID: String
+    public let state: NativeAgentSessionState
+    public let expiresAtMilliseconds: Int64
+    public let maxSignatures: Int
+    public let usedSignatures: Int
+
+    public var remainingSignatures: Int { maxSignatures - usedSignatures }
+}
+
+public struct NativeAgentSessionReservation: Equatable, Sendable {
+    public let sessionID: String
+    public let requestID: String
+    public let capabilityID: String
+    public let payloadDigest: Data
+    public let budgetSequence: Int
+}
+
+/// Service-wide, in-memory M2 authority owner. All session transitions and
+/// replay/budget reservations are serialized by one lock. The registry is
+/// intentionally not Codable: active authority never survives service restart.
+public final class NativeAgentSessionRegistry: @unchecked Sendable {
+    public static let maximumActiveSessions = 1_024
+
+    private struct RequestIdentity: Equatable {
+        let capabilityID: String
+        let nonce: Data
+        let payloadDigest: Data
+    }
+
+    private struct Entry {
+        let lease: NativeAgentVerifiedCloudLease
+        let leaseID: String
+        let connectionTokenIdentity: String
+        var deadline: NativeAgentSessionDeadline
+        var state: NativeAgentSessionState
+        var usedSignatures: Int
+        var requests: [String: RequestIdentity]
+        var consumedCapabilities: Set<String>
+        var consumedNonces: Set<Data>
+        var reservation: NativeAgentSessionReservation?
+    }
+
+    private let lock = NSLock()
+    private var entries: [String: Entry] = [:]
+
+    public init() {}
+
+    public func activate(
+        lease: NativeAgentVerifiedCloudLease,
+        localLeaseID: String,
+        connectionTokenIdentity: String,
+        deadline: NativeAgentSessionDeadline
+    ) throws -> NativeAgentSessionRegistryStatus {
+        guard Self.uuid(localLeaseID), Self.hash(connectionTokenIdentity),
+              deadline.signedWallExpiryMilliseconds == lease.expiresAtMilliseconds,
+              lease.usedSignatures <= lease.maxSignatures else {
+            throw NativeAgentSessionRegistryError.invalidInput
+        }
+        lock.lock()
+        defer { lock.unlock() }
+        guard entries.count < Self.maximumActiveSessions else {
+            throw NativeAgentSessionRegistryError.sessionCapacityExceeded
+        }
+        guard entries[lease.sessionID] == nil else { throw NativeAgentSessionRegistryError.sessionExists }
+        let state: NativeAgentSessionState = lease.usedSignatures == lease.maxSignatures ? .closed : .active
+        let entry = Entry(
+            lease: lease,
+            leaseID: localLeaseID.lowercased(),
+            connectionTokenIdentity: connectionTokenIdentity,
+            deadline: deadline,
+            state: state,
+            usedSignatures: lease.usedSignatures,
+            requests: [:],
+            consumedCapabilities: [],
+            consumedNonces: [],
+            reservation: nil
+        )
+        entries[lease.sessionID] = entry
+        return Self.status(entry)
+    }
+
+    public func status(
+        sessionID: String,
+        connectionTokenIdentity: String,
+        binding: NativeAgentSessionBinding,
+        wallClock: NativeAgentWallClockValue,
+        monotonicClock: NativeAgentMonotonicClockValue
+    ) throws -> NativeAgentSessionRegistryStatus {
+        try lock.withLock {
+            var entry = try checkedEntry(sessionID: sessionID, connectionTokenIdentity: connectionTokenIdentity, binding: binding)
+            if !entry.state.isTerminal {
+                do { _ = try entry.deadline.revalidate(wallClock: wallClock, monotonicClock: monotonicClock) }
+                catch { entry.state = .expired; entry.reservation = nil }
+                entries[sessionID] = entry
+            }
+            return Self.status(entry)
+        }
+    }
+
+    public func reserve(
+        sessionID: String,
+        requestID: String,
+        capabilityID: String,
+        nonce: Data,
+        payloadDigest: Data,
+        connectionTokenIdentity: String,
+        binding: NativeAgentSessionBinding,
+        wallClock: NativeAgentWallClockValue,
+        monotonicClock: NativeAgentMonotonicClockValue
+    ) throws -> NativeAgentSessionReservation {
+        guard Self.uuid(requestID), Self.uuid(capabilityID), (16...64).contains(nonce.count), payloadDigest.count == 32 else {
+            throw NativeAgentSessionRegistryError.invalidInput
+        }
+        return try lock.withLock {
+            var entry = try checkedEntry(sessionID: sessionID, connectionTokenIdentity: connectionTokenIdentity, binding: binding)
+            guard entry.state == .active else { throw NativeAgentSessionRegistryError.sessionNotActive }
+            do { _ = try entry.deadline.revalidate(wallClock: wallClock, monotonicClock: monotonicClock) }
+            catch {
+                entry.state = .expired; entries[sessionID] = entry
+                throw NativeAgentSessionRegistryError.sessionNotActive
+            }
+            let identity = RequestIdentity(capabilityID: capabilityID.lowercased(), nonce: nonce, payloadDigest: payloadDigest)
+            if let prior = entry.requests[requestID.lowercased()] {
+                throw prior == identity ? NativeAgentSessionRegistryError.requestReplay : NativeAgentSessionRegistryError.requestConflict
+            }
+            guard !entry.consumedCapabilities.contains(identity.capabilityID) else { throw NativeAgentSessionRegistryError.capabilityReplay }
+            guard !entry.consumedNonces.contains(nonce) else { throw NativeAgentSessionRegistryError.nonceReplay }
+            guard entry.usedSignatures < entry.lease.maxSignatures else { throw NativeAgentSessionRegistryError.budgetExhausted }
+            try Self.transition(&entry, to: .requestReserved)
+            entry.usedSignatures += 1 // reserve before authorizer or key access
+            entry.requests[requestID.lowercased()] = identity
+            entry.consumedCapabilities.insert(identity.capabilityID)
+            entry.consumedNonces.insert(nonce)
+            let reservation = NativeAgentSessionReservation(sessionID: sessionID, requestID: requestID.lowercased(), capabilityID: identity.capabilityID, payloadDigest: payloadDigest, budgetSequence: entry.usedSignatures)
+            entry.reservation = reservation
+            entries[sessionID] = entry
+            return reservation
+        }
+    }
+
+    public func beginSigningIntent(_ reservation: NativeAgentSessionReservation) throws {
+        try mutateReservation(reservation, required: .requestReserved, next: .signingIntent)
+    }
+
+    public func recordSigned(_ reservation: NativeAgentSessionReservation) throws {
+        try mutateReservation(reservation, required: .signingIntent, next: .signed)
+    }
+
+    public func complete(_ reservation: NativeAgentSessionReservation) throws -> NativeAgentSessionRegistryStatus {
+        try lock.withLock {
+            var entry = try reservationEntry(reservation, required: .signed)
+            let next: NativeAgentSessionState = entry.usedSignatures == entry.lease.maxSignatures ? .closed : .active
+            try Self.transition(&entry, to: next)
+            entry.reservation = nil
+            entries[reservation.sessionID] = entry
+            return Self.status(entry)
+        }
+    }
+
+    /// Releases only a reservation that has not crossed the durable intent/key
+    /// boundary. Replay identities remain consumed, but the budget is refunded.
+    public func releaseBeforeKey(_ reservation: NativeAgentSessionReservation) throws {
+        try lock.withLock {
+            var entry = try reservationEntry(reservation, required: .requestReserved)
+            try Self.transition(&entry, to: .active)
+            entry.usedSignatures -= 1
+            entry.reservation = nil
+            entries[reservation.sessionID] = entry
+        }
+    }
+
+    public func markOutcomeUnknown(_ reservation: NativeAgentSessionReservation) throws {
+        try mutateReservation(reservation, required: .signingIntent, next: .outcomeUnknown, clear: true)
+    }
+
+    public func invalidate(sessionID: String, as terminalState: NativeAgentSessionState) throws {
+        guard terminalState.isTerminal, terminalState != .outcomeUnknown else { throw NativeAgentSessionRegistryError.invalidInput }
+        try lock.withLock {
+            guard var entry = entries[sessionID] else { throw NativeAgentSessionRegistryError.sessionMissing }
+            if entry.state == terminalState { return }
+            guard !entry.state.isTerminal else { throw NativeAgentSessionRegistryError.transitionDenied }
+            try Self.transition(&entry, to: terminalState)
+            entry.reservation = nil
+            entries[sessionID] = entry
+        }
+    }
+
+    public func close(sessionID: String, connectionTokenIdentity: String) throws -> NativeAgentSessionRegistryStatus {
+        try lock.withLock {
+            guard var entry = entries[sessionID] else { throw NativeAgentSessionRegistryError.sessionMissing }
+            guard entry.connectionTokenIdentity == connectionTokenIdentity else { throw NativeAgentSessionRegistryError.connectionMismatch }
+            if entry.state == .closed { return Self.status(entry) }
+            guard !entry.state.isTerminal else { throw NativeAgentSessionRegistryError.transitionDenied }
+            try Self.transition(&entry, to: .closed)
+            entry.reservation = nil
+            entries[sessionID] = entry
+            return Self.status(entry)
+        }
+    }
+
+    public func invalidateAll(as terminalState: NativeAgentSessionState = .revoked) {
+        guard terminalState.isTerminal, terminalState != .outcomeUnknown else { return }
+        lock.withLock {
+            for id in entries.keys {
+                guard var entry = entries[id], !entry.state.isTerminal,
+                      (try? Self.transition(&entry, to: terminalState)) != nil else { continue }
+                entry.reservation = nil
+                entries[id] = entry
+            }
+        }
+    }
+
+    private func mutateReservation(_ reservation: NativeAgentSessionReservation, required: NativeAgentSessionState, next: NativeAgentSessionState, clear: Bool = false) throws {
+        try lock.withLock {
+            var entry = try reservationEntry(reservation, required: required)
+            try Self.transition(&entry, to: next)
+            if clear { entry.reservation = nil }
+            entries[reservation.sessionID] = entry
+        }
+    }
+
+    private func checkedEntry(sessionID: String, connectionTokenIdentity: String, binding: NativeAgentSessionBinding) throws -> Entry {
+        guard let entry = entries[sessionID] else { throw NativeAgentSessionRegistryError.sessionMissing }
+        guard entry.connectionTokenIdentity == connectionTokenIdentity else { throw NativeAgentSessionRegistryError.connectionMismatch }
+        guard entry.lease.binding == binding else { throw NativeAgentSessionRegistryError.bindingMismatch }
+        return entry
+    }
+
+    private func reservationEntry(_ reservation: NativeAgentSessionReservation, required: NativeAgentSessionState) throws -> Entry {
+        guard let entry = entries[reservation.sessionID] else { throw NativeAgentSessionRegistryError.sessionMissing }
+        guard entry.state == required else { throw NativeAgentSessionRegistryError.transitionDenied }
+        guard entry.reservation == reservation else { throw NativeAgentSessionRegistryError.reservationMismatch }
+        return entry
+    }
+
+    private static func transition(_ entry: inout Entry, to next: NativeAgentSessionState) throws {
+        do { try NativeAgentSessionTransitionValidator.validate(from: entry.state, to: next) }
+        catch { throw NativeAgentSessionRegistryError.transitionDenied }
+        entry.state = next
+    }
+
+    private static func status(_ entry: Entry) -> NativeAgentSessionRegistryStatus {
+        NativeAgentSessionRegistryStatus(sessionID: entry.lease.sessionID, leaseID: entry.leaseID, state: entry.state, expiresAtMilliseconds: entry.lease.expiresAtMilliseconds, maxSignatures: entry.lease.maxSignatures, usedSignatures: entry.usedSignatures)
+    }
+
+    private static func uuid(_ value: String) -> Bool { value.utf8.count == 36 && UUID(uuidString: value) != nil }
+    private static func hash(_ value: String) -> Bool { value.range(of: "^[0-9a-f]{64}$", options: .regularExpression) != nil }
+}

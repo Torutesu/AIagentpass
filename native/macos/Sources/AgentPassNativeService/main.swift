@@ -2685,12 +2685,14 @@ private final class ManagementListenerDelegate: NSObject, NSXPCListenerDelegate 
 
 /// One exported object is created per accepted Agent connection. It owns the
 /// immutable peer guard and cannot expose or forward any management selector.
-/// N2 deliberately fails Agent operations closed until the N3 durable session
-/// state machine is installed; this prevents a compatibility fallback to the
-/// bearer-oriented management endpoint.
+/// Bootstrap is connection-bound and one-time. All authority-bearing methods
+/// continue to fail closed until the N3 lease registry is installed; there is
+/// no compatibility fallback to the bearer-oriented management endpoint.
 private final class AgentConnectionEndpoint: NSObject, AgentPassAgentXPCProtocol, @unchecked Sendable {
     private let connectionGuard: NativeAgentConnectionGuard
     private let observer: NativeDarwinProcessObservationSource
+    private let bootstrapStore = NativeAgentBootstrapChallengeStore()
+    private let clocks = NativeAgentSystemClocks()
 
     init(connectionGuard: NativeAgentConnectionGuard, observer: NativeDarwinProcessObservationSource) {
         self.connectionGuard = connectionGuard
@@ -2705,47 +2707,80 @@ private final class AgentConnectionEndpoint: NSObject, AgentPassAgentXPCProtocol
         try connectionGuard.revalidate(observation: observation)
     }
 
-    private func unavailableError() -> NSError {
-        NSError(
-            domain: "AgentPass.AgentXPC",
-            code: 1,
-            userInfo: [NSLocalizedDescriptionKey: "agent_v2_session_state_machine_unavailable"]
-        )
-    }
-
-    private func authorizeOrError() -> NSError {
+    private func unavailableAfterAuthorization() -> NSError {
         do {
             try authorizeConnection()
-            return unavailableError()
+            return NativeAgentSessionDenialReason.unavailable.nsError
         } catch {
-            return NSError(
-                domain: "AgentPass.AgentXPC",
-                code: 2,
-                userInfo: [NSLocalizedDescriptionKey: "agent_peer_revalidation_failed"]
-            )
+            bootstrapStore.invalidate()
+            return NativeAgentSessionDenialReason.peerDenied.nsError
         }
     }
 
     func bootstrapAgent(_ request: AgentPassAgentBootstrapRequest, withReply reply: @escaping (AgentPassAgentBootstrapResponse?, NSError?) -> Void) {
-        reply(nil, authorizeOrError())
+        do {
+            try authorizeConnection()
+        } catch {
+            bootstrapStore.invalidate()
+            reply(nil, NativeAgentSessionDenialReason.peerDenied.nsError)
+            return
+        }
+        do {
+            guard let adapterKind = AgentPassAgentAdapterKind(rawValue: request.adapterKind) else {
+                throw NativeAgentBootstrapChallengeError.invalidInput
+            }
+            let bootIdentityHash = SHA256.hash(data: Data(connectionGuard.initialIdentity.bootIdentity.utf8))
+                .map { String(format: "%02x", $0) }.joined()
+            let binding = try NativeAgentBootstrapConnectionBinding(
+                connectionTokenIdentity: connectionGuard.context.tokenIdentity,
+                processBindingHash: connectionGuard.processBindingHash,
+                ancestryBindingHash: connectionGuard.ancestryBindingHash,
+                bootIdentityHash: bootIdentityHash
+            )
+            // Capture monotonic first so the challenge can only receive a
+            // shorter authority window during sampling, never a longer one.
+            let monotonic = try clocks.monotonicClock.sample()
+            let wall = try clocks.wallClock.sample()
+            let challenge = try bootstrapStore.begin(
+                agentID: request.agentID,
+                adapterKind: adapterKind,
+                requestedTTLSeconds: request.requestedTTLSeconds,
+                clientNonce: request.bootstrapNonce,
+                connectionBinding: binding,
+                nowMilliseconds: wall.millisecondsSinceUnixEpoch,
+                nowMonotonicNanoseconds: monotonic.nanoseconds
+            )
+            guard let response = AgentPassAgentBootstrapResponse(
+                bootstrapID: challenge.bootstrapID,
+                challenge: challenge.challenge,
+                expiresAtMilliseconds: challenge.expiresAtMilliseconds
+            ) else {
+                throw NativeAgentBootstrapChallengeError.invalidInput
+            }
+            reply(response, nil)
+        } catch {
+            bootstrapStore.invalidate()
+            reply(nil, NativeAgentSessionDenialReason.challengeDenied.nsError)
+        }
     }
 
     func startAgentSession(_ request: AgentPassAgentSessionRequest, withReply reply: @escaping (AgentPassAgentSessionResponse?, NSError?) -> Void) {
-        reply(nil, authorizeOrError())
+        reply(nil, unavailableAfterAuthorization())
     }
 
     func agentSessionStatus(_ request: AgentPassAgentSessionStatusRequest, withReply reply: @escaping (AgentPassAgentSessionStatusResponse?, NSError?) -> Void) {
-        reply(nil, authorizeOrError())
+        reply(nil, unavailableAfterAuthorization())
     }
 
     func signGitCommit(_ request: AgentPassAgentSignRequest, withReply reply: @escaping (AgentPassAgentSignResponse?, NSError?) -> Void) {
         // Re-observation is deliberately the last operation before the N3/N4
         // signing implementation will be allowed to reserve and touch a key.
-        reply(nil, authorizeOrError())
+        reply(nil, unavailableAfterAuthorization())
     }
 
     func closeAgentSession(_ request: AgentPassAgentCloseSessionRequest, withReply reply: @escaping (AgentPassAgentCloseSessionResponse?, NSError?) -> Void) {
-        reply(nil, authorizeOrError())
+        bootstrapStore.invalidate()
+        reply(nil, unavailableAfterAuthorization())
     }
 }
 

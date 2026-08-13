@@ -39,3 +39,18 @@ test('production listeners export separate management and connection-scoped Agen
   const agentEndpoint = service.slice(service.indexOf('private final class AgentConnectionEndpoint'), service.indexOf('private final class AgentListenerDelegate'));
   assert.doesNotMatch(agentEndpoint, /ServiceEndpoint|AgentPassNativeServiceProtocol|rotateAudit|stageKey|applyControlBundle/u);
 });
+
+test('Agent bootstrap is connection-bound while authority-bearing methods remain fail closed', () => {
+  const agentEndpoint = service.slice(service.indexOf('private final class AgentConnectionEndpoint'), service.indexOf('private final class AgentListenerDelegate'));
+  assert.match(agentEndpoint, /NativeAgentBootstrapChallengeStore/u);
+  assert.match(agentEndpoint, /connectionGuard\.context\.tokenIdentity/u);
+  assert.match(agentEndpoint, /connectionGuard\.processBindingHash/u);
+  assert.match(agentEndpoint, /connectionGuard\.ancestryBindingHash/u);
+  assert.match(agentEndpoint, /NativeAgentSystemClocks/u);
+  assert.match(agentEndpoint, /clocks\.monotonicClock\.sample\(\)/u);
+  assert.match(agentEndpoint, /clocks\.wallClock\.sample\(\)/u);
+  assert.match(agentEndpoint, /NativeAgentSessionDenialReason\.peerDenied\.nsError/u);
+  assert.match(agentEndpoint, /NativeAgentSessionDenialReason\.challengeDenied\.nsError/u);
+  assert.match(agentEndpoint, /NativeAgentSessionDenialReason\.unavailable\.nsError/u);
+  assert.doesNotMatch(agentEndpoint, /AGENTPASS_SESSION|privateKey|private_key|authorizeV2|NativeSessionManager|\.sign\(/u);
+});
