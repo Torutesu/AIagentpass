@@ -30,10 +30,11 @@ test('non-production provisioning atomically installs the exact protected invent
   assert.equal(config.scenario_directory, path.join(fixture.destination, 'scenarios')); assert.deepEqual(config.scenarios.map((item) => item.gate), [...REQUIRED_GATES]);
   assert.equal(fs.existsSync(path.join(fixture.destination, 'scenario-config.json')), true); assert.deepEqual(fs.readdirSync(path.join(fixture.destination, 'lib')).sort(), ['candidate-checkpoint.mjs', 'driver-runtime.mjs', 'scenario-runtime.mjs']);
   assert.equal(result.qualification_tool_path, path.join(fixture.destination, 'qualification-tool/n3e/provision-qualification-config.mjs'));
+  assert.equal(result.qualification_orchestrator_path, path.join(fixture.destination, 'qualification-tool/n3e/run-protected-qualification.mjs'));
   assert.deepEqual(fs.readdirSync(path.join(fixture.destination, 'qualification-tool')).sort(), ['generate-release-attestation.mjs', 'manifest.json', 'n3e']);
-  assert.deepEqual(fs.readdirSync(path.join(fixture.destination, 'qualification-tool/n3e')).sort(), ['controller-identity-contract.mjs', 'provision-qualification-config.mjs']);
+  assert.deepEqual(fs.readdirSync(path.join(fixture.destination, 'qualification-tool/n3e')).sort(), ['controller-identity-contract.mjs', 'provision-qualification-config.mjs', 'run-protected-qualification.mjs']);
   const toolManifest = JSON.parse(fs.readFileSync(path.join(fixture.destination, 'qualification-tool/manifest.json'), 'utf8'));
-  assert.equal(toolManifest.schema_version, 1); assert.deepEqual(toolManifest.files.map((item) => item.path), ['generate-release-attestation.mjs', 'n3e/controller-identity-contract.mjs', 'n3e/provision-qualification-config.mjs']);
+  assert.equal(toolManifest.schema_version, 1); assert.deepEqual(toolManifest.files.map((item) => item.path), ['generate-release-attestation.mjs', 'n3e/controller-identity-contract.mjs', 'n3e/provision-qualification-config.mjs', 'n3e/run-protected-qualification.mjs']);
   assert.equal(result.qualification_tool_manifest_sha256, crypto.createHash('sha256').update(fs.readFileSync(path.join(fixture.destination, 'qualification-tool/manifest.json'))).digest('hex'));
   assert.equal(fs.readdirSync(fixture.parent).some((name) => name.startsWith('.p0c-stage-')), false);
 });

@@ -9,7 +9,8 @@ const MAX_SOURCE_BYTES = 16 * 1024 * 1024;
 const QUALIFICATION_TOOL_FILES = Object.freeze([
   Object.freeze({ source: 'generate-release-attestation.mjs', installed: 'generate-release-attestation.mjs' }),
   Object.freeze({ source: 'n3e/controller-identity-contract.mjs', installed: 'n3e/controller-identity-contract.mjs' }),
-  Object.freeze({ source: 'n3e/provision-qualification-config.mjs', installed: 'n3e/provision-qualification-config.mjs' })
+  Object.freeze({ source: 'n3e/provision-qualification-config.mjs', installed: 'n3e/provision-qualification-config.mjs' }),
+  Object.freeze({ source: 'n3e/run-protected-qualification.mjs', installed: 'n3e/run-protected-qualification.mjs' })
 ]);
 export const REQUIRED_GATES = Object.freeze([
   'audit-upload-observation', 'claude-code-unattended-sign', 'clean-install-launchd-xpc',
@@ -95,7 +96,7 @@ const verifyInstalledTree = (root, expected, uid) => {
   const qualificationToolDirectory = protectedDirectory(join(root, 'qualification-tool'), 'installed qualification tool directory', { ownerUid: uid });
   const qualificationToolEntries = fs.readdirSync(qualificationToolDirectory, { withFileTypes: true }).sort((left, right) => left.name.localeCompare(right.name));
   if (qualificationToolEntries.length !== 3 || qualificationToolEntries[0]?.name !== 'generate-release-attestation.mjs' || !qualificationToolEntries[0].isFile() || qualificationToolEntries[1]?.name !== 'manifest.json' || !qualificationToolEntries[1].isFile() || qualificationToolEntries[2]?.name !== 'n3e' || !qualificationToolEntries[2].isDirectory() || qualificationToolEntries.some((entry) => entry.isSymbolicLink())) throw new Error('installed qualification tool inventory is invalid');
-  protectedDirectory(join(root, 'qualification-tool', 'n3e'), 'installed qualification tool module directory', { ownerUid: uid, exactEntries: ['controller-identity-contract.mjs', 'provision-qualification-config.mjs'] });
+  protectedDirectory(join(root, 'qualification-tool', 'n3e'), 'installed qualification tool module directory', { ownerUid: uid, exactEntries: ['controller-identity-contract.mjs', 'provision-qualification-config.mjs', 'run-protected-qualification.mjs'] });
   const drivers = REQUIRED_GATES.map((gate) => readStableSource(join(root, 'gates', gate), { executable: true, ownerUid: uid }));
   const scenarios = REQUIRED_GATES.map((gate) => readStableSource(join(root, 'scenarios', gate), { executable: true, ownerUid: uid }));
   const runtimes = expected.runtimes.map(({ name }) => ({ name, ...readStableSource(join(root, 'lib', name), { ownerUid: uid }) }));
@@ -132,7 +133,7 @@ export const provisionRunner = ({ sourceRoot, scenarioDirectory, machineConfigPa
     verifyInstalledTree(staging, inspected, uid);
     fs.renameSync(staging, destination); fsyncDirectory(parent);
     const installed = verifyInstalledTree(destination, inspected, uid);
-    return Object.freeze({ production: production === true, destination, driver_count: installed.drivers.length, scenario_count: installed.scenarios.length, qualification_tool_path: join(destination, 'qualification-tool', 'n3e', 'provision-qualification-config.mjs'), qualification_tool_manifest_sha256: installed.qualificationToolManifest.sha256, config_sha256: installed.config.sha256 });
+    return Object.freeze({ production: production === true, destination, driver_count: installed.drivers.length, scenario_count: installed.scenarios.length, qualification_tool_path: join(destination, 'qualification-tool', 'n3e', 'provision-qualification-config.mjs'), qualification_orchestrator_path: join(destination, 'qualification-tool', 'n3e', 'run-protected-qualification.mjs'), qualification_tool_manifest_sha256: installed.qualificationToolManifest.sha256, config_sha256: installed.config.sha256 });
   } catch (error) {
     if (fs.existsSync(staging)) fs.rmSync(staging, { recursive: true, force: false });
     throw error;

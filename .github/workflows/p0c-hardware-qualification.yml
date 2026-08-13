@@ -237,7 +237,8 @@ jobs:
           const expected = [
             ['generate-release-attestation.mjs', 'scripts/release/generate-release-attestation.mjs'],
             ['n3e/controller-identity-contract.mjs', 'scripts/release/n3e/controller-identity-contract.mjs'],
-            ['n3e/provision-qualification-config.mjs', 'scripts/release/n3e/provision-qualification-config.mjs']
+            ['n3e/provision-qualification-config.mjs', 'scripts/release/n3e/provision-qualification-config.mjs'],
+            ['n3e/run-protected-qualification.mjs', 'scripts/release/n3e/run-protected-qualification.mjs']
           ];
           const safe = (file, directory = false) => {
             const stat = fs.lstatSync(file);
@@ -524,7 +525,8 @@ jobs:
           const expected = [
             ['generate-release-attestation.mjs', 'scripts/release/generate-release-attestation.mjs'],
             ['n3e/controller-identity-contract.mjs', 'scripts/release/n3e/controller-identity-contract.mjs'],
-            ['n3e/provision-qualification-config.mjs', 'scripts/release/n3e/provision-qualification-config.mjs']
+            ['n3e/provision-qualification-config.mjs', 'scripts/release/n3e/provision-qualification-config.mjs'],
+            ['n3e/run-protected-qualification.mjs', 'scripts/release/n3e/run-protected-qualification.mjs']
           ];
           const safe = (file, directory = false) => {
             const stat = fs.lstatSync(file);
