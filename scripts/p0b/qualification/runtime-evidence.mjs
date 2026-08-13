@@ -4,7 +4,6 @@ import { createHash } from "node:crypto";
 
 import { canonicalJson } from "./report.mjs";
 
-const SHA256 = /^[0-9a-f]{64}$/u;
 const SAFE_BROWSER_VERSION = /^[0-9][0-9A-Za-z._+-]{0,63}$/u;
 const SAFE_KEY = /^[A-Za-z][A-Za-z0-9_.-]{0,127}$/u;
 const ABSOLUTE_PATH = /(?:^|[\s=])(?:\/(?:[^\s/]+\/)*[^\s/]+|[A-Za-z]:\\[^\s]+|file:\/\/)/u;
