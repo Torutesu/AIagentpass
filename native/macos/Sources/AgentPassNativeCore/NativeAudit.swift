@@ -148,6 +148,19 @@ public struct NativeAuditEvidenceRotation: Codable, Equatable, Sendable {
     }
 }
 
+/// Qualification-only durability boundary for the exact Agent activation
+/// audit append. Ordinary runtimes use the immutable no-op implementation.
+public protocol NativeAuditDurabilityQualificationFaultConsuming: Sendable {
+    func reachBeforeAgentActivationFsync() throws
+}
+
+public struct NativeAuditDurabilityQualificationNoopFaultConsumer:
+    NativeAuditDurabilityQualificationFaultConsuming, Sendable
+{
+    public init() {}
+    public func reachBeforeAgentActivationFsync() throws {}
+}
+
 public final class NativeAuditLog: @unchecked Sendable {
     public static let zeroHash = String(repeating: "0", count: 64)
     public static let defaultRotationMinimumBytes = 64 * 1024 * 1024
@@ -157,10 +170,11 @@ public final class NativeAuditLog: @unchecked Sendable {
     private let archiveDirectory: String?
     private let verificationLimitBytes: Int
     private let appendRotationThresholdBytes: Int
+    private let durabilityQualificationFaultConsumer: any NativeAuditDurabilityQualificationFaultConsuming
     private let appendAndRotationLock = NSLock()
     private let lock = NSLock()
 
-    public init(path: String, archiveDirectory: String? = nil, verificationLimitBytes: Int = NativeAuditLog.defaultVerificationLimitBytes, appendRotationThresholdBytes: Int = NativeAuditLog.defaultAppendRotationThresholdBytes) throws {
+    public init(path: String, archiveDirectory: String? = nil, verificationLimitBytes: Int = NativeAuditLog.defaultVerificationLimitBytes, appendRotationThresholdBytes: Int = NativeAuditLog.defaultAppendRotationThresholdBytes, durabilityQualificationFaultConsumer: any NativeAuditDurabilityQualificationFaultConsuming = NativeAuditDurabilityQualificationNoopFaultConsumer()) throws {
         guard path.hasPrefix("/") else { throw AgentPassNativeError.invalidConfiguration("Native audit path must be absolute") }
         guard verificationLimitBytes > 0,
               appendRotationThresholdBytes > 0,
@@ -170,6 +184,7 @@ public final class NativeAuditLog: @unchecked Sendable {
         file = URL(fileURLWithPath: path).standardizedFileURL.path
         self.verificationLimitBytes = verificationLimitBytes
         self.appendRotationThresholdBytes = appendRotationThresholdBytes
+        self.durabilityQualificationFaultConsumer = durabilityQualificationFaultConsumer
         if let archiveDirectory {
             guard archiveDirectory.hasPrefix("/") else { throw AgentPassNativeError.invalidConfiguration("Native audit archive directory must be absolute") }
             let directory = URL(fileURLWithPath: archiveDirectory).standardizedFileURL.path
@@ -393,7 +408,13 @@ public final class NativeAuditLog: @unchecked Sendable {
                 guard preflight.action == .append else {
                     throw AgentPassNativeError.invalidConfiguration("Native audit event cannot fit below the configured rotation threshold")
                 }
-                try durableAppend(path: file, data: appendData)
+                try durableAppend(
+                    path: file,
+                    data: appendData,
+                    beforeFsync: event.operation == "agent.session.session_activated"
+                        ? { try self.durabilityQualificationFaultConsumer.reachBeforeAgentActivationFsync() }
+                        : nil
+                )
                 lock.unlock()
             } catch {
                 lock.unlock()
@@ -406,7 +427,13 @@ public final class NativeAuditLog: @unchecked Sendable {
                 guard current == status else {
                     throw AgentPassNativeError.invalidSignature("Native audit changed after append preflight; retry the append")
                 }
-                try durableAppend(path: file, data: appendData)
+                try durableAppend(
+                    path: file,
+                    data: appendData,
+                    beforeFsync: event.operation == "agent.session.session_activated"
+                        ? { try self.durabilityQualificationFaultConsumer.reachBeforeAgentActivationFsync() }
+                        : nil
+                )
                 lock.unlock()
             } catch {
                 lock.unlock()
@@ -1220,7 +1247,11 @@ public final class NativeAuditAnchorReceipts: @unchecked Sendable {
     }
 }
 
-private func durableAppend(path: String, data: Data) throws {
+private func durableAppend(
+    path: String,
+    data: Data,
+    beforeFsync: (() throws -> Void)? = nil
+) throws {
     guard !data.isEmpty else { throw AgentPassNativeError.invalidConfiguration("Native audit append must not be empty") }
     let existed = try pathEntryExists(path)
     let descriptor = open(path, O_WRONLY | O_APPEND | O_CREAT | O_NOFOLLOW | O_CLOEXEC, 0o600)
@@ -1236,7 +1267,11 @@ private func durableAppend(path: String, data: Data) throws {
             offset += written
         }
     }
-    guard fchmod(descriptor, 0o600) == 0, fsync(descriptor) == 0 else {
+    guard fchmod(descriptor, 0o600) == 0 else {
+        throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+    }
+    try beforeFsync?()
+    guard fsync(descriptor) == 0 else {
         throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
     }
     if !existed {

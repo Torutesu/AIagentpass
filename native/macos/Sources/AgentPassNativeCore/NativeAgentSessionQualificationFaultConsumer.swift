@@ -37,3 +37,17 @@ public struct NativeAgentSessionQualificationNoopFaultConsumer:
 
   public func reach(_ boundary: NativeAgentSessionQualificationBoundary) throws {}
 }
+
+/// Separate transport disposition used only after a complete response has
+/// been encoded. Returning `true` drops that one reply without revoking the
+/// already audited session, allowing an exact client retry to recover it.
+public protocol NativeAgentSessionTransportReplyFaultConsuming: Sendable {
+  func shouldDropEncodedResult() -> Bool
+}
+
+public struct NativeAgentSessionTransportReplyNoopFaultConsumer:
+  NativeAgentSessionTransportReplyFaultConsuming, Sendable
+{
+  public init() {}
+  public func shouldDropEncodedResult() -> Bool { false }
+}

@@ -3223,6 +3223,82 @@ private final class NativeAgentSessionQualificationFaultConsumerAdapter:
 
 }
 
+private final class NativeAgentAuditDurabilityQualificationFaultConsumerAdapter:
+    NativeAuditDurabilityQualificationFaultConsuming, @unchecked Sendable
+{
+    private let controller: NativeAgentQualificationFaultController
+    private let runBinding: NativeAgentQualificationRunBinding
+    private let enabled: Bool
+    private let expiresAtEpochSeconds: UInt64
+    private let wallTime: @Sendable () -> Date
+
+    init(
+        controller: NativeAgentQualificationFaultController,
+        values: NativeAgentQualificationConfiguration.Values,
+        wallTime: @escaping @Sendable () -> Date = Date.init
+    ) throws {
+        self.controller = controller
+        runBinding = try NativeAgentQualificationRunBinding(values.runBindingDigest)
+        enabled = values.scenario == .auditFsyncFailure && values.phase == .auditFsync
+        expiresAtEpochSeconds = values.expiresAtEpochSeconds
+        self.wallTime = wallTime
+    }
+
+    func reachBeforeAgentActivationFsync() throws {
+        guard enabled else { return }
+        let now = wallTime().timeIntervalSince1970
+        guard now.isFinite, now >= 0, now < Double(expiresAtEpochSeconds) else {
+            controller.disable()
+            return
+        }
+        let receipt = controller.consume(
+            runBinding: runBinding,
+            scenario: .auditFsyncFailure,
+            phase: .auditFsync
+        )
+        guard receipt.outcome == .injected else { return }
+        throw AgentPassNativeError.invalidConfiguration(
+            "Agent qualification injected an audit durability failure")
+    }
+}
+
+private final class NativeAgentTransportReplyQualificationFaultConsumerAdapter:
+    NativeAgentSessionTransportReplyFaultConsuming, @unchecked Sendable
+{
+    private let controller: NativeAgentQualificationFaultController
+    private let runBinding: NativeAgentQualificationRunBinding
+    private let enabled: Bool
+    private let expiresAtEpochSeconds: UInt64
+    private let wallTime: @Sendable () -> Date
+
+    init(
+        controller: NativeAgentQualificationFaultController,
+        values: NativeAgentQualificationConfiguration.Values,
+        wallTime: @escaping @Sendable () -> Date = Date.init
+    ) throws {
+        self.controller = controller
+        runBinding = try NativeAgentQualificationRunBinding(values.runBindingDigest)
+        enabled = values.scenario == .transportReplyLoss && values.phase == .transportReply
+        expiresAtEpochSeconds = values.expiresAtEpochSeconds
+        self.wallTime = wallTime
+    }
+
+    func shouldDropEncodedResult() -> Bool {
+        guard enabled else { return false }
+        let now = wallTime().timeIntervalSince1970
+        guard now.isFinite, now >= 0, now < Double(expiresAtEpochSeconds) else {
+            controller.disable()
+            return false
+        }
+        let receipt = controller.consume(
+            runBinding: runBinding,
+            scenario: .transportReplyLoss,
+            phase: .transportReply
+        )
+        return receipt.outcome == .injected
+    }
+}
+
 private final class AgentRuntimeDependencies: @unchecked Sendable {
     let authority: NativeAgentRuntimeAuthorityConfiguration
     let grantConsumer: NativeAgentGrantLeaseHTTPConsumer
@@ -3303,6 +3379,7 @@ private final class AgentConnectionEndpoint: NSObject, AgentPassAgentXPCProtocol
     private let observer: NativeDarwinProcessObservationSource
     private let runtime: AgentRuntimeDependencies?
     private let qualificationFaultConsumer: any NativeAgentSessionQualificationFaultConsuming
+    private let transportReplyFaultConsumer: any NativeAgentSessionTransportReplyFaultConsuming
     private let bootstrapStore = NativeAgentBootstrapChallengeStore()
     private let clocks = NativeAgentSystemClocks()
     private let worker = DispatchQueue(label: "dev.agentpass.agent-session.connection")
@@ -3313,12 +3390,14 @@ private final class AgentConnectionEndpoint: NSObject, AgentPassAgentXPCProtocol
         observer: NativeDarwinProcessObservationSource,
         runtime: AgentRuntimeDependencies?,
         auditAppender: any NativeAgentSessionAuditAppending,
-        qualificationFaultConsumer: any NativeAgentSessionQualificationFaultConsuming
+        qualificationFaultConsumer: any NativeAgentSessionQualificationFaultConsuming,
+        transportReplyFaultConsumer: any NativeAgentSessionTransportReplyFaultConsuming
     ) {
         self.connectionGuard = connectionGuard
         self.observer = observer
         self.runtime = runtime
         self.qualificationFaultConsumer = qualificationFaultConsumer
+        self.transportReplyFaultConsumer = transportReplyFaultConsumer
         if let runtime {
             let bindingObserver = AgentConnectionSessionBindingObserver(
                 connectionGuard: connectionGuard,
@@ -3428,7 +3507,7 @@ private final class AgentConnectionEndpoint: NSObject, AgentPassAgentXPCProtocol
         let bootstrapID = request.bootstrapID
         let proof = request.proof
         let replyBox = AgentXPCReplyBox(reply)
-        worker.async { [coordinator, qualificationFaultConsumer] in
+        worker.async { [coordinator, qualificationFaultConsumer, transportReplyFaultConsumer] in
             guard let coordinator else {
                 replyBox.call(nil, NativeAgentSessionDenialReason.unavailable.nsError)
                 return
@@ -3457,6 +3536,7 @@ private final class AgentConnectionEndpoint: NSObject, AgentPassAgentXPCProtocol
                     coordinator.abortActivation(sessionID: activation.status.sessionID)
                     throw error
                 }
+                guard !transportReplyFaultConsumer.shouldDropEncodedResult() else { return }
                 replyBox.call(response, nil)
             } catch {
                 replyBox.call(nil, Self.denial(for: error).nsError)
@@ -3551,18 +3631,21 @@ private final class AgentListenerDelegate: NSObject, NSXPCListenerDelegate {
     private let runtime: AgentRuntimeDependencies?
     private let auditAppender: any NativeAgentSessionAuditAppending
     private let qualificationFaultConsumer: any NativeAgentSessionQualificationFaultConsuming
+    private let transportReplyFaultConsumer: any NativeAgentSessionTransportReplyFaultConsuming
     private let observer = NativeDarwinProcessObservationSource()
 
     init(
         configuration: ServiceConfiguration,
         runtime: AgentRuntimeDependencies?,
         auditAppender: any NativeAgentSessionAuditAppending,
-        qualificationFaultConsumer: any NativeAgentSessionQualificationFaultConsuming
+        qualificationFaultConsumer: any NativeAgentSessionQualificationFaultConsuming,
+        transportReplyFaultConsumer: any NativeAgentSessionTransportReplyFaultConsuming
     ) {
         self.configuration = configuration
         self.runtime = runtime
         self.auditAppender = auditAppender
         self.qualificationFaultConsumer = qualificationFaultConsumer
+        self.transportReplyFaultConsumer = transportReplyFaultConsumer
     }
 
     func listener(_ listener: NSXPCListener, shouldAcceptNewConnection connection: NSXPCConnection) -> Bool {
@@ -3589,7 +3672,8 @@ private final class AgentListenerDelegate: NSObject, NSXPCListenerDelegate {
                 observer: observer,
                 runtime: runtime,
                 auditAppender: auditAppender,
-                qualificationFaultConsumer: qualificationFaultConsumer
+                qualificationFaultConsumer: qualificationFaultConsumer,
+                transportReplyFaultConsumer: transportReplyFaultConsumer
             )
             connection.exportedObject = endpoint
             connection.invalidationHandler = { [weak endpoint] in
@@ -3645,6 +3729,8 @@ private final class QualificationListenerDelegate: NSObject, NSXPCListenerDelega
 private final class QualificationRuntime {
     let controller: NativeAgentQualificationFaultController
     let faultConsumer: any NativeAgentSessionQualificationFaultConsuming
+    let auditDurabilityFaultConsumer: any NativeAuditDurabilityQualificationFaultConsuming
+    let transportReplyFaultConsumer: any NativeAgentSessionTransportReplyFaultConsuming
     let endpoint: NativeAgentQualificationEndpoint
     private let listener: NSXPCListener
     private let delegate: QualificationListenerDelegate
@@ -3653,6 +3739,14 @@ private final class QualificationRuntime {
         let controller = NativeAgentQualificationFaultController(enabled: true)
         self.controller = controller
         faultConsumer = try NativeAgentSessionQualificationFaultConsumerAdapter(
+            controller: controller,
+            values: values
+        )
+        auditDurabilityFaultConsumer = try NativeAgentAuditDurabilityQualificationFaultConsumerAdapter(
+            controller: controller,
+            values: values
+        )
+        transportReplyFaultConsumer = try NativeAgentTransportReplyQualificationFaultConsumerAdapter(
             controller: controller,
             values: values
         )
@@ -4055,7 +4149,28 @@ do {
     let auditSigner = try activeAudit.map { try SecureEnclaveKeyStore.loadExisting(applicationTag: $0.applicationTag, accessGroup: configuration.keychainAccessGroup) }
         ?? SecureEnclaveKeyStore(applicationTag: configuration.auditKeyTag, accessGroup: configuration.keychainAccessGroup)
     if let activeAudit, auditSigner.publicKeyX963 != activeAudit.publicKeyX963 { throw AgentPassNativeError.invalidKey("Active audit key does not match the lifecycle ledger") }
-    let auditLog = try NativeAuditLog(path: configuration.auditLogPath, archiveDirectory: configuration.auditArchiveDirectory)
+    let qualificationRuntime: QualificationRuntime?
+    let qualificationFaultConsumer: any NativeAgentSessionQualificationFaultConsuming
+    let auditDurabilityFaultConsumer: any NativeAuditDurabilityQualificationFaultConsuming
+    let transportReplyFaultConsumer: any NativeAgentSessionTransportReplyFaultConsuming
+    switch try configuration.qualificationConfiguration().state {
+    case .disabled:
+        qualificationRuntime = nil
+        qualificationFaultConsumer = NativeAgentSessionQualificationNoopFaultConsumer()
+        auditDurabilityFaultConsumer = NativeAuditDurabilityQualificationNoopFaultConsumer()
+        transportReplyFaultConsumer = NativeAgentSessionTransportReplyNoopFaultConsumer()
+    case .configured(let values):
+        let runtime = try QualificationRuntime(values: values)
+        qualificationRuntime = runtime
+        qualificationFaultConsumer = runtime.faultConsumer
+        auditDurabilityFaultConsumer = runtime.auditDurabilityFaultConsumer
+        transportReplyFaultConsumer = runtime.transportReplyFaultConsumer
+    }
+    let auditLog = try NativeAuditLog(
+        path: configuration.auditLogPath,
+        archiveDirectory: configuration.auditArchiveDirectory,
+        durabilityQualificationFaultConsumer: auditDurabilityFaultConsumer
+    )
     let signingTransactions = try NativeSigningTransactionStore(path: signingTransactionPath)
     let controlV2DeviceSigner = try configuration.controlV2DeviceKeyTag.map {
         try SecureEnclaveKeyStore(applicationTag: $0, accessGroup: configuration.keychainAccessGroup)
@@ -4337,17 +4452,6 @@ do {
     _ = try auditLog.verify()
     _ = try auditCheckpoints.verify()
     let authorizer = try NativeRequestAuthorizer(policyData: policyData, sessionValidator: sessionManager, controlValidator: controlManager, capabilityValidator: capabilityVerifier, v2ControlManager: controlV2Manager, requestEvidenceStore: requestEvidenceStore, controlV2Configured: configuration.controlV2StatePath != nil, v2DeviceID: configuration.controlV2DeviceID)
-    let qualificationRuntime: QualificationRuntime?
-    let qualificationFaultConsumer: any NativeAgentSessionQualificationFaultConsuming
-    switch try configuration.qualificationConfiguration().state {
-    case .disabled:
-        qualificationRuntime = nil
-        qualificationFaultConsumer = NativeAgentSessionQualificationNoopFaultConsumer()
-    case .configured(let values):
-        let runtime = try QualificationRuntime(values: values)
-        qualificationRuntime = runtime
-        qualificationFaultConsumer = runtime.faultConsumer
-    }
     let agentRuntime: AgentRuntimeDependencies?
     switch try configuration.agentRuntimeConfiguration() {
     case .disabled:
@@ -4451,7 +4555,8 @@ do {
         configuration: configuration,
         runtime: agentRuntime,
         auditAppender: endpoint,
-        qualificationFaultConsumer: qualificationFaultConsumer
+        qualificationFaultConsumer: qualificationFaultConsumer,
+        transportReplyFaultConsumer: transportReplyFaultConsumer
     )
     managementListener.delegate = managementDelegate
     agentListener.delegate = agentDelegate
