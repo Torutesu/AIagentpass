@@ -93,6 +93,8 @@ if [[ "$OWNER" == "0" ]]; then
   /usr/bin/ditto "$APP_PATH" "$TEST_ROOT/Applications/AgentPass.app"
   postinstall_args=(package-id package-file "$TEST_ROOT")
   "$SCRIPT_DIR/installer-postinstall.sh" "${postinstall_args[@]}" >/dev/null
+  [[ -d "$STATE_ROOT/agent-signing-intents" && ! -L "$STATE_ROOT/agent-signing-intents" ]] || { echo "postinstall did not create the Agent signing-intent store" >&2; exit 1; }
+  [[ "$(/usr/bin/stat -f '%u:%Lp' "$STATE_ROOT/agent-signing-intents")" == "0:700" ]] || { echo "Agent signing-intent store is not root-owned mode 0700" >&2; exit 1; }
   first_postinstall="$(store_fingerprint)"
   "$SCRIPT_DIR/installer-postinstall.sh" "${postinstall_args[@]}" >/dev/null
   second_postinstall="$(store_fingerprint)"

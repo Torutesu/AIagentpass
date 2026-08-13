@@ -270,13 +270,19 @@ private struct ServiceConfiguration: Decodable {
     let controlV2DeviceKeyEpoch: Int64?
     let controlV2RefreshHintKeyring: [ServiceRefreshHintKey]?
     let controlV2DeviceKeyTag: String?
+    let agentSigningIntentDirectory: String?
+    let agentGlobalSessionLimit: Int?
+    let agentPerAgentSessionLimit: Int?
+    let agentPerWorktreeSessionLimit: Int?
+    let agentBootstrapAttemptLimit: Int?
+    let agentWorktreeObservationPolicyVersion: Int?
     let sessionApprovalPublicKey: String?
     let sessionApprovalKeyTag: String?
     let clientCodeSigningRequirement: String
     let agentClientCodeSigningRequirement: String
     let allowedClientUID: UInt32
 
-    enum CodingKeys: String, CodingKey {
+    enum CodingKeys: String, CodingKey, CaseIterable {
         case machServiceName = "mach_service_name"
         case agentMachServiceName = "agent_mach_service_name"
         case keyTag = "key_tag"
@@ -328,6 +334,12 @@ private struct ServiceConfiguration: Decodable {
         case controlV2DeviceKeyEpoch = "control_v2_device_key_epoch"
         case controlV2RefreshHintKeyring = "control_v2_refresh_hint_keyring"
         case controlV2DeviceKeyTag = "control_v2_device_key_tag"
+        case agentSigningIntentDirectory = "agent_signing_intent_directory"
+        case agentGlobalSessionLimit = "agent_global_session_limit"
+        case agentPerAgentSessionLimit = "agent_per_agent_session_limit"
+        case agentPerWorktreeSessionLimit = "agent_per_worktree_session_limit"
+        case agentBootstrapAttemptLimit = "agent_bootstrap_attempt_limit"
+        case agentWorktreeObservationPolicyVersion = "agent_worktree_observation_policy_version"
         case sessionApprovalPublicKey = "session_approval_public_key"
         case sessionApprovalKeyTag = "session_approval_key_tag"
         case clientCodeSigningRequirement = "client_code_signing_requirement"
@@ -336,7 +348,12 @@ private struct ServiceConfiguration: Decodable {
     }
 
     static func load(path: String) throws -> Self {
-        let value = try JSONDecoder().decode(Self.self, from: loadProtectedFile(path: path, label: "Native service configuration"))
+        let data = try loadProtectedFile(path: path, label: "Native service configuration")
+        let object = try NativeStrictJSON.object(from: data, maxBytes: 1 * 1024 * 1024, maxDepth: 16)
+        guard Set(object.keys).isSubset(of: Set(CodingKeys.allCases.map(\.rawValue))) else {
+            throw AgentPassNativeError.invalidConfiguration("Native service configuration contains unknown fields")
+        }
+        let value = try JSONDecoder().decode(Self.self, from: data)
         guard !value.machServiceName.isEmpty,
               !value.agentMachServiceName.isEmpty,
               value.machServiceName == "dev.agentpass.native-service",
@@ -408,6 +425,39 @@ private struct ServiceConfiguration: Decodable {
                 guard tag == NativeEnrollmentKeyMaterial.fixedApplicationTag,
                       tag != value.keyTag, tag != value.auditKeyTag, tag != value.sessionApprovalKeyTag else { throw AgentPassNativeError.invalidConfiguration("ControlBundle v2 device authentication requires the fixed dedicated enrollment Secure Enclave key tag") }
             }
+        }
+        let agentRuntimeValues: [Any?] = [
+            value.agentSigningIntentDirectory,
+            value.agentGlobalSessionLimit,
+            value.agentPerAgentSessionLimit,
+            value.agentPerWorktreeSessionLimit,
+            value.agentBootstrapAttemptLimit,
+            value.agentWorktreeObservationPolicyVersion
+        ]
+        let agentRuntimeCount = agentRuntimeValues.compactMap { $0 }.count
+        if agentRuntimeCount != 0 {
+            guard agentRuntimeCount == agentRuntimeValues.count,
+                  v2Count == v2Values.count,
+                  value.controlV2DeviceKeyTag == NativeEnrollmentKeyMaterial.fixedApplicationTag,
+                  let intentDirectory = value.agentSigningIntentDirectory,
+                  intentDirectory.hasPrefix("/"),
+                  URL(fileURLWithPath: intentDirectory, isDirectory: true).standardizedFileURL.path == intentDirectory,
+                  let globalLimit = value.agentGlobalSessionLimit,
+                  (1...NativeAgentSessionRegistry.maximumActiveSessions).contains(globalLimit),
+                  let perAgentLimit = value.agentPerAgentSessionLimit,
+                  (1...globalLimit).contains(perAgentLimit),
+                  let perWorktreeLimit = value.agentPerWorktreeSessionLimit,
+                  (1...globalLimit).contains(perWorktreeLimit),
+                  let bootstrapLimit = value.agentBootstrapAttemptLimit,
+                  (1...64).contains(bootstrapLimit),
+                  value.agentWorktreeObservationPolicyVersion == 1 else {
+                throw AgentPassNativeError.invalidConfiguration("Agent runtime requires complete bounded authority configuration and ControlBundle v2 device enrollment")
+            }
+        }
+        do {
+            _ = try value.agentRuntimeConfiguration()
+        } catch {
+            throw AgentPassNativeError.invalidConfiguration("Agent runtime authority configuration is invalid")
         }
         let deletionConfigurationCount: Int = [
             value.auditKeyDeletionEvidenceBundlePath != nil,
@@ -532,6 +582,38 @@ private struct ServiceConfiguration: Decodable {
             }
         }
         return value
+    }
+
+    func agentRuntimeConfiguration() throws -> NativeAgentRuntimeConfiguration {
+        let configured = [
+            agentSigningIntentDirectory != nil,
+            agentGlobalSessionLimit != nil,
+            agentPerAgentSessionLimit != nil,
+            agentPerWorktreeSessionLimit != nil,
+            agentBootstrapAttemptLimit != nil,
+            agentWorktreeObservationPolicyVersion != nil,
+        ].contains(true)
+        var origin: URL?
+        if configured, let apiBaseText = controlV2APIBaseURL,
+           let apiBase = URL(string: apiBaseText),
+           var components = URLComponents(url: apiBase, resolvingAgainstBaseURL: false) {
+            components.path = "/"
+            components.query = nil
+            components.fragment = nil
+            origin = components.url
+        }
+        return try NativeAgentRuntimeConfiguration(
+            deviceAPIOrigin: configured ? origin : nil,
+            organizationID: configured ? controlV2OrganizationID : nil,
+            deviceID: configured ? controlV2DeviceID : nil,
+            deviceKeyTag: configured ? controlV2DeviceKeyTag : nil,
+            signingIntentDirectory: configured ? agentSigningIntentDirectory : nil,
+            globalSessionLimit: configured ? agentGlobalSessionLimit : nil,
+            perAgentSessionLimit: configured ? agentPerAgentSessionLimit : nil,
+            perWorktreeSessionLimit: configured ? agentPerWorktreeSessionLimit : nil,
+            bootstrapAttemptLimit: configured ? agentBootstrapAttemptLimit : nil,
+            worktreeObservationPolicyVersion: configured ? agentWorktreeObservationPolicyVersion : nil
+        )
     }
 }
 
@@ -2683,6 +2765,58 @@ private final class ManagementListenerDelegate: NSObject, NSXPCListenerDelegate 
     }
 }
 
+/// Service-wide production dependencies for the process-bound Agent runtime.
+/// Construction is all-or-none; an absent value means every Agent authority
+/// method remains fail-closed while the separate Mach service stays observable.
+private final class AgentRuntimeDependencies: @unchecked Sendable {
+    let authority: NativeAgentRuntimeAuthorityConfiguration
+    let grantConsumer: NativeAgentGrantLeaseHTTPConsumer
+    let registry = NativeAgentSessionRegistry()
+    let signingIntentStore: NativeAgentSigningIntentStore
+    let gitCommitSigner: NativeAgentGitCommitSigner
+
+    init(
+        authority: NativeAgentRuntimeAuthorityConfiguration,
+        deviceSigner: SecureEnclaveKeyStore,
+        gitSigner: SecureEnclaveKeyStore
+    ) throws {
+        try Self.validatePrivateDirectory(authority.signingIntentDirectory)
+        self.authority = authority
+        grantConsumer = try NativeAgentGrantLeaseHTTPConsumer(
+            baseURL: authority.deviceAPIOrigin,
+            transport: NativeAgentURLSessionHTTPTransport(),
+            signer: deviceSigner
+        )
+        signingIntentStore = try NativeAgentSigningIntentStore(
+            path: authority.signingIntentDirectory + "/signing-intents.v1.json"
+        )
+        gitCommitSigner = try NativeAgentGitCommitSigner(signer: gitSigner)
+    }
+
+    private static func validatePrivateDirectory(_ path: String) throws {
+        var info = stat()
+        guard lstat(path, &info) == 0,
+              (info.st_mode & S_IFMT) == S_IFDIR,
+              info.st_uid == geteuid(),
+              info.st_mode & 0o077 == 0,
+              URL(fileURLWithPath: path, isDirectory: true).resolvingSymlinksInPath().path == path else {
+            throw AgentPassNativeError.invalidConfiguration("Agent signing-intent directory is unavailable")
+        }
+        var current = URL(fileURLWithPath: path, isDirectory: true)
+        while true {
+            var ancestor = stat()
+            guard lstat(current.path, &ancestor) == 0,
+                  (ancestor.st_mode & S_IFMT) == S_IFDIR,
+                  ancestor.st_uid == 0 || ancestor.st_uid == geteuid(),
+                  ancestor.st_mode & 0o022 == 0 else {
+                throw AgentPassNativeError.invalidConfiguration("Agent signing-intent directory ancestry is unavailable")
+            }
+            if current.path == "/" { break }
+            current.deleteLastPathComponent()
+        }
+    }
+}
+
 /// One exported object is created per accepted Agent connection. It owns the
 /// immutable peer guard and cannot expose or forward any management selector.
 /// Bootstrap is connection-bound and one-time. All authority-bearing methods
@@ -2691,12 +2825,18 @@ private final class ManagementListenerDelegate: NSObject, NSXPCListenerDelegate 
 private final class AgentConnectionEndpoint: NSObject, AgentPassAgentXPCProtocol, @unchecked Sendable {
     private let connectionGuard: NativeAgentConnectionGuard
     private let observer: NativeDarwinProcessObservationSource
+    private let runtime: AgentRuntimeDependencies?
     private let bootstrapStore = NativeAgentBootstrapChallengeStore()
     private let clocks = NativeAgentSystemClocks()
 
-    init(connectionGuard: NativeAgentConnectionGuard, observer: NativeDarwinProcessObservationSource) {
+    init(
+        connectionGuard: NativeAgentConnectionGuard,
+        observer: NativeDarwinProcessObservationSource,
+        runtime: AgentRuntimeDependencies?
+    ) {
         self.connectionGuard = connectionGuard
         self.observer = observer
+        self.runtime = runtime
     }
 
     private func authorizeConnection() throws {
@@ -2723,6 +2863,11 @@ private final class AgentConnectionEndpoint: NSObject, AgentPassAgentXPCProtocol
         } catch {
             bootstrapStore.invalidate()
             reply(nil, NativeAgentSessionDenialReason.peerDenied.nsError)
+            return
+        }
+        guard runtime != nil else {
+            bootstrapStore.invalidate()
+            reply(nil, NativeAgentSessionDenialReason.unavailable.nsError)
             return
         }
         do {
@@ -2786,10 +2931,12 @@ private final class AgentConnectionEndpoint: NSObject, AgentPassAgentXPCProtocol
 
 private final class AgentListenerDelegate: NSObject, NSXPCListenerDelegate {
     private let configuration: ServiceConfiguration
+    private let runtime: AgentRuntimeDependencies?
     private let observer = NativeDarwinProcessObservationSource()
 
-    init(configuration: ServiceConfiguration) {
+    init(configuration: ServiceConfiguration, runtime: AgentRuntimeDependencies?) {
         self.configuration = configuration
+        self.runtime = runtime
     }
 
     func listener(_ listener: NSXPCListener, shouldAcceptNewConnection connection: NSXPCConnection) -> Bool {
@@ -2811,7 +2958,11 @@ private final class AgentListenerDelegate: NSObject, NSXPCListenerDelegate {
             )
             let guardValue = try NativeAgentConnectionGuard(context: context, observation: observation)
             connection.exportedInterface = AgentPassAgentXPCInterface.make()
-            connection.exportedObject = AgentConnectionEndpoint(connectionGuard: guardValue, observer: observer)
+            connection.exportedObject = AgentConnectionEndpoint(
+                connectionGuard: guardValue,
+                observer: observer,
+                runtime: runtime
+            )
             connection.resume()
             return true
         } catch {
@@ -3483,6 +3634,20 @@ do {
     _ = try auditLog.verify()
     _ = try auditCheckpoints.verify()
     let authorizer = try NativeRequestAuthorizer(policyData: policyData, sessionValidator: sessionManager, controlValidator: controlManager, capabilityValidator: capabilityVerifier, v2ControlManager: controlV2Manager, requestEvidenceStore: requestEvidenceStore, controlV2Configured: configuration.controlV2StatePath != nil, v2DeviceID: configuration.controlV2DeviceID)
+    let agentRuntime: AgentRuntimeDependencies?
+    switch try configuration.agentRuntimeConfiguration() {
+    case .disabled:
+        agentRuntime = nil
+    case .enabled(let authority):
+        guard let deviceSigner = controlV2DeviceSigner else {
+            throw AgentPassNativeError.invalidConfiguration("Agent runtime device authentication is unavailable")
+        }
+        agentRuntime = try AgentRuntimeDependencies(
+            authority: authority,
+            deviceSigner: deviceSigner,
+            gitSigner: keyStore
+        )
+    }
     let managementListener = NSXPCListener(machServiceName: configuration.machServiceName)
     let agentListener = NSXPCListener(machServiceName: configuration.agentMachServiceName)
     let endpoint = ServiceEndpoint(keyStore: keyStore, authorizer: authorizer, auditLog: auditLog, auditCheckpoints: auditCheckpoints, auditSigner: auditSigner, auditAnchorReceipts: auditAnchorReceipts, auditAnchorClient: auditAnchorClient, auditKeyRotationCoordinator: auditKeyRotationCoordinator, auditKeyRecoveryCoordinator: auditKeyRecoveryCoordinator, auditKeyRecoveryPlanJournal: auditKeyRecoveryPlanJournal, auditKeyTransitionStore: auditKeyTransitionStore, auditKeyRecoveryPolicy: auditKeyRecoveryPolicy, auditKeyRecoveryApprovalJournal: auditKeyRecoveryApprovalJournal, auditPruneCoordinator: auditPruneCoordinator, auditPruneTrustSource: auditPruneTrustSource, auditPruneEvidenceBundlePath: configuration.auditPruneEvidenceBundlePath, auditAnchorTenant: configuration.auditAnchorTenant, keychainAccessGroup: configuration.keychainAccessGroup, recoveryPolicyData: recoveryPolicyData, installationID: configuration.installationID, sessionManager: sessionManager, controlManager: controlManager, controlV2Manager: controlV2Manager, signingTransactions: signingTransactions, keyLifecycle: keyLifecycle, keyCoordinator: keyCoordinator, loadedLifecycleHeadHash: lifecycleSnapshot?.headHash)
@@ -3559,7 +3724,7 @@ do {
         try endpoint.startControlRefresh(url: refresh.url, refreshSeconds: refresh.refreshSeconds)
     }
     let managementDelegate = ManagementListenerDelegate(configuration: configuration, endpoint: endpoint)
-    let agentDelegate = AgentListenerDelegate(configuration: configuration)
+    let agentDelegate = AgentListenerDelegate(configuration: configuration, runtime: agentRuntime)
     managementListener.delegate = managementDelegate
     agentListener.delegate = agentDelegate
     managementListener.resume()

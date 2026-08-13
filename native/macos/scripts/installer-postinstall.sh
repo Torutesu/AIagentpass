@@ -22,14 +22,20 @@ if [[ ! -e "$STATE_ROOT" ]]; then
 fi
 [[ -d "$STATE_ROOT" && ! -L "$STATE_ROOT" ]] || { echo "Protected AgentPass state root is not a real directory" >&2; exit 1; }
 CONTROL_V2_BUNDLE_STORE="$STATE_ROOT/control-v2-bundles"
-[[ ! -L "$CONTROL_V2_BUNDLE_STORE" ]] || { echo "Existing ControlBundle store is a symlink" >&2; exit 1; }
-if [[ ! -e "$CONTROL_V2_BUNDLE_STORE" ]]; then
-  /bin/mkdir -m 0700 "$CONTROL_V2_BUNDLE_STORE"
-  /usr/sbin/chown 0:0 "$CONTROL_V2_BUNDLE_STORE"
-else
-  [[ -d "$CONTROL_V2_BUNDLE_STORE" && ! -L "$CONTROL_V2_BUNDLE_STORE" ]] || { echo "Existing ControlBundle store is not a real directory" >&2; exit 1; }
-  [[ "$(/usr/bin/stat -f '%u:%Lp' "$CONTROL_V2_BUNDLE_STORE")" == "0:700" ]] || { echo "Existing ControlBundle store is not root-owned mode 0700" >&2; exit 1; }
-fi
+AGENT_SIGNING_INTENT_STORE="$STATE_ROOT/agent-signing-intents"
+ensure_private_store() {
+  local store="$1" label="$2"
+  [[ ! -L "$store" ]] || { echo "Existing $label is a symlink" >&2; exit 1; }
+  if [[ ! -e "$store" ]]; then
+    /bin/mkdir -m 0700 "$store"
+    /usr/sbin/chown 0:0 "$store"
+  else
+    [[ -d "$store" && ! -L "$store" ]] || { echo "Existing $label is not a real directory" >&2; exit 1; }
+    [[ "$(/usr/bin/stat -f '%u:%Lp' "$store")" == "0:700" ]] || { echo "Existing $label is not root-owned mode 0700" >&2; exit 1; }
+  fi
+}
+ensure_private_store "$CONTROL_V2_BUNDLE_STORE" "ControlBundle store"
+ensure_private_store "$AGENT_SIGNING_INTENT_STORE" "Agent signing-intent store"
 "$SCRIPT_DIR/validate-preserved-state.sh" "$TARGET_VOLUME" 0
 [[ -d "$APP" && ! -L "$APP" ]] || { echo "Installed AgentPass.app is missing or substituted" >&2; exit 1; }
 if /usr/bin/find -P "$APP" -type l -print -quit | /usr/bin/grep -q .; then

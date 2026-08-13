@@ -5,6 +5,7 @@ import test from 'node:test';
 const service = fs.readFileSync(new URL('../native/macos/Sources/AgentPassNativeService/main.swift', import.meta.url), 'utf8');
 const example = JSON.parse(fs.readFileSync(new URL('../native/macos/Resources/native-service.example.json', import.meta.url), 'utf8'));
 const launchd = fs.readFileSync(new URL('../native/macos/Resources/dev.agentpass.native-service.plist', import.meta.url), 'utf8');
+const postinstall = fs.readFileSync(new URL('../native/macos/scripts/installer-postinstall.sh', import.meta.url), 'utf8');
 
 test('native service requires the exact Team ID, Developer ID leaf, and approval entitlement requirement', () => {
   assert.match(service, /NativeClientCodeRequirement\.requirement\(serviceAccessGroup: serviceAccessGroup\)/u);
@@ -28,11 +29,33 @@ test('native service example separates the Agent session endpoint and client req
   assert.match(launchd, /<key>dev\.agentpass\.agent-session<\/key><true\/>/u);
 });
 
+test('Agent runtime authority configuration is complete, bounded, and device-enrollment dependent', () => {
+  assert.equal(example.agent_signing_intent_directory, '/Library/Application Support/AgentPass/agent-signing-intents');
+  assert.equal(example.agent_global_session_limit, 128);
+  assert.equal(example.agent_per_agent_session_limit, 8);
+  assert.equal(example.agent_per_worktree_session_limit, 4);
+  assert.equal(example.agent_bootstrap_attempt_limit, 16);
+  assert.equal(example.agent_worktree_observation_policy_version, 1);
+  assert.match(service, /agentRuntimeCount\s*!=\s*0/u);
+  assert.match(service, /agentRuntimeCount\s*==\s*agentRuntimeValues\.count/u);
+  assert.match(service, /v2Count\s*==\s*v2Values\.count/u);
+  assert.match(service, /NativeEnrollmentKeyMaterial\.fixedApplicationTag/u);
+  assert.match(service, /NativeAgentSessionRegistry\.maximumActiveSessions/u);
+  assert.match(service, /CodingKeys\.allCases\.map\(\\\.rawValue\)/u);
+  assert.match(service, /private final class AgentRuntimeDependencies/u);
+  assert.match(service, /NativeAgentGrantLeaseHTTPConsumer/u);
+  assert.match(service, /NativeAgentSigningIntentStore/u);
+  assert.match(service, /NativeAgentGitCommitSigner/u);
+  assert.match(service, /switch try configuration\.agentRuntimeConfiguration\(\)/u);
+  assert.match(postinstall, /AGENT_SIGNING_INTENT_STORE="\$STATE_ROOT\/agent-signing-intents"/u);
+  assert.match(postinstall, /ensure_private_store "\$AGENT_SIGNING_INTENT_STORE"/u);
+});
+
 test('production listeners export separate management and connection-scoped Agent objects', () => {
   assert.match(service, /NSXPCListener\(machServiceName: configuration\.machServiceName\)/u);
   assert.match(service, /NSXPCListener\(machServiceName: configuration\.agentMachServiceName\)/u);
   assert.match(service, /connection\.exportedInterface = AgentPassAgentXPCInterface\.make\(\)/u);
-  assert.match(service, /connection\.exportedObject = AgentConnectionEndpoint\(connectionGuard: guardValue, observer: observer\)/u);
+  assert.match(service, /connection\.exportedObject = AgentConnectionEndpoint\(\s*connectionGuard: guardValue,\s*observer: observer,\s*runtime: runtime\s*\)/u);
   assert.match(service, /observer\.observe\(pid: peerPID, expectedUserID: peerUID\)/u);
   assert.match(service, /connection\.processIdentifier/u);
   assert.match(service, /connection\.auditSessionIdentifier/u);
@@ -52,5 +75,6 @@ test('Agent bootstrap is connection-bound while authority-bearing methods remain
   assert.match(agentEndpoint, /NativeAgentSessionDenialReason\.peerDenied\.nsError/u);
   assert.match(agentEndpoint, /NativeAgentSessionDenialReason\.challengeDenied\.nsError/u);
   assert.match(agentEndpoint, /NativeAgentSessionDenialReason\.unavailable\.nsError/u);
+  assert.match(agentEndpoint, /guard runtime != nil/u);
   assert.doesNotMatch(agentEndpoint, /AGENTPASS_SESSION|privateKey|private_key|authorizeV2|NativeSessionManager|\.sign\(/u);
 });
