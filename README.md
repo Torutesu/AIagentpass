@@ -43,6 +43,8 @@ sudo agentpass install \
 
 Service registration remains a separate, visible macOS approval step. Package installation never overwrites protected AgentPass state.
 
+Opening `/Applications/AgentPass.app` now shows a native, read-only onboarding window. It displays the validated setup state, progress, the next canonical CLI command, and blocked-state remediation. The app can refresh status or copy the command, but it cannot execute setup, enroll a key, register a service, or mutate security state. Those operations remain explicit CLI steps until the privileged UI action protocol is implemented and qualified.
+
 After the PKG is installed and the local policy has been initialized, preview the native bridge and Claude Code/Cursor project integration, then apply it as the interactive user:
 
 ```sh
@@ -59,7 +61,7 @@ agentpass setup continue --execute \
 agentpass doctor --client claude-code --project "$PWD" --team-id 'APPLETEAM1'
 ```
 
-`setup status` reads the crash-resumable setup journal and reports the next durable action. `setup continue --execute` advances exactly one verified journal state. It registers the Service Management daemon and then uses the signed, root-only native bootstrap primitives to stage and activate the generation-1 approval, Git-signing, and audit keys. At device enrollment, the short-lived credential is accepted only through bounded stdin; a fixed Secure Enclave P-256 key signs the exact enrollment request and credential digest. The credential is never written to config, logs, results, or journal evidence.
+`setup status` reads the crash-resumable setup journal and reports the next durable action; the macOS onboarding window renders this same fail-closed status contract. `setup continue --execute` advances exactly one verified journal state. It registers the Service Management daemon and then uses the signed, root-only native bootstrap primitives to stage and activate the generation-1 approval, Git-signing, and audit keys. At device enrollment, the short-lived credential is accepted only through bounded stdin; a fixed Secure Enclave P-256 key signs the exact enrollment request and credential digest. The credential is never written to config, logs, results, or journal evidence.
 
 `enrollment.json` may be the exact canonical response returned by `POST /v1/organizations/{organization_id}/device-enrollments`, or its nested `enrollment` object. It must contain `enrollment_id`, `organization_id`, `device_id`, `label`, and the one-time `credential`; do not paste the credential into argv, an environment variable, a repository, or shell history. Enrollment issuance requires an admin/owner session plus a recent WebAuthn assertion.
 

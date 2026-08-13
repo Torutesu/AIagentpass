@@ -91,6 +91,7 @@ install_product() {
   fi
 }
 
+install_product agentpass-onboarding "$MACOS_DIR/agentpass-onboarding"
 install_product agentpass-native-manager "$MACOS_DIR/agentpass-native-manager"
 install_product agentpass-native-service "$SERVICE_APP/Contents/MacOS/agentpass-native-service"
 install_product agentpass-native-client "$CLIENT_APP/Contents/MacOS/agentpass-native-client"
@@ -129,7 +130,8 @@ if [[ "$ADHOC" -eq 1 ]]; then
 else
   /usr/bin/codesign --force --sign "$SIGNING_IDENTITY" --identifier "dev.agentpass.atomic-rename" --options runtime --timestamp "$HELPER_DIR/agentpass-atomic-rename"
 fi
-sign_item "$MACOS_DIR/agentpass-native-manager" "dev.agentpass" "$ENTITLEMENT_DIR/manager.plist"
+sign_item "$MACOS_DIR/agentpass-native-manager" "dev.agentpass.native-manager" "$ENTITLEMENT_DIR/manager.plist"
+sign_item "$MACOS_DIR/agentpass-onboarding" "dev.agentpass" "$ENTITLEMENT_DIR/manager.plist"
 sign_item "$APP" "dev.agentpass" "$ENTITLEMENT_DIR/manager.plist"
 
 verify_identifier() {
@@ -156,17 +158,19 @@ verify_group() {
 verify_identifier "$SERVICE_APP" "dev.agentpass.native-service"
 verify_identifier "$CLIENT_APP" "dev.agentpass.native-client"
 verify_identifier "$HELPER_DIR/agentpass-atomic-rename" "dev.agentpass.atomic-rename"
-verify_identifier "$MACOS_DIR/agentpass-native-manager" "dev.agentpass"
+verify_identifier "$MACOS_DIR/agentpass-native-manager" "dev.agentpass.native-manager"
+verify_identifier "$MACOS_DIR/agentpass-onboarding" "dev.agentpass"
 verify_identifier "$APP" "dev.agentpass"
 verify_group "$SERVICE_APP" "${APP_IDENTIFIER_PREFIX}.dev.agentpass.service-keys"
 verify_group "$CLIENT_APP" "${APP_IDENTIFIER_PREFIX}.dev.agentpass.approval-keys"
-[[ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$APP/Contents/Info.plist")" == "agentpass-native-manager" ]] || { echo "Unexpected outer app executable" >&2; exit 1; }
+[[ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$APP/Contents/Info.plist")" == "agentpass-onboarding" ]] || { echo "Unexpected outer app executable" >&2; exit 1; }
+[[ "$(/usr/libexec/PlistBuddy -c 'Print :LSUIElement' "$APP/Contents/Info.plist")" == "false" ]] || { echo "Outer app must be visible to users" >&2; exit 1; }
 [[ "$(/usr/libexec/PlistBuddy -c 'Print :Label' "$DAEMON_DIR/dev.agentpass.native-service.plist")" == "dev.agentpass.native-service" ]] || { echo "Unexpected daemon label" >&2; exit 1; }
 [[ "$(/usr/libexec/PlistBuddy -c 'Print :BundleProgram' "$DAEMON_DIR/dev.agentpass.native-service.plist")" == "Contents/Library/HelperTools/AgentPassNativeService.app/Contents/MacOS/agentpass-native-service" ]] || { echo "Unexpected daemon BundleProgram" >&2; exit 1; }
 [[ "$(/usr/libexec/PlistBuddy -c 'Print :MachServices:dev.agentpass.native-service' "$DAEMON_DIR/dev.agentpass.native-service.plist")" == "true" ]] || { echo "Missing daemon Mach service" >&2; exit 1; }
 
 if [[ "$ADHOC" -eq 0 ]]; then
-  for item in "$SERVICE_APP" "$CLIENT_APP" "$HELPER_DIR/agentpass-atomic-rename" "$MACOS_DIR/agentpass-native-manager" "$APP"; do
+  for item in "$SERVICE_APP" "$CLIENT_APP" "$HELPER_DIR/agentpass-atomic-rename" "$MACOS_DIR/agentpass-native-manager" "$MACOS_DIR/agentpass-onboarding" "$APP"; do
     actual_team="$(/usr/bin/codesign -dv --verbose=4 "$item" 2>&1 | /usr/bin/awk -F= '/^TeamIdentifier=/{print $2; exit}')"
     [[ "$actual_team" == "$TEAM_ID" ]] || { echo "Unexpected TeamIdentifier on $item" >&2; exit 1; }
   done

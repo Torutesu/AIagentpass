@@ -7,6 +7,8 @@ let package = Package(
     products: [
         .library(name: "AgentPassNativeCore", targets: ["AgentPassNativeCore"]),
         .library(name: "AgentPassApp", targets: ["AgentPassApp"]),
+        .library(name: "AgentPassOnboardingUI", targets: ["AgentPassOnboardingUI"]),
+        .executable(name: "agentpass-onboarding", targets: ["AgentPassOnboardingApp"]),
         .executable(name: "agentpass-native-service", targets: ["AgentPassNativeService"]),
         .executable(name: "agentpass-native-client", targets: ["AgentPassNativeClient"]),
         .executable(name: "agentpass-native-manager", targets: ["AgentPassNativeManager"]),
@@ -16,6 +18,14 @@ let package = Package(
     ],
     targets: [
         .target(name: "AgentPassApp"),
+        .target(
+            name: "AgentPassOnboardingUI",
+            dependencies: ["AgentPassApp"]
+        ),
+        .executableTarget(
+            name: "AgentPassOnboardingApp",
+            dependencies: ["AgentPassOnboardingUI"]
+        ),
         .target(
             name: "AgentPassNativeCore",
             linkerSettings: [.linkedFramework("Security"), .linkedFramework("LocalAuthentication")]
@@ -49,6 +59,10 @@ let package = Package(
         .testTarget(
             name: "AgentPassAppTests",
             dependencies: ["AgentPassApp"]
+        ),
+        .testTarget(
+            name: "AgentPassOnboardingUITests",
+            dependencies: ["AgentPassOnboardingUI", "AgentPassApp"]
         ),
         .testTarget(
             name: "AgentPassNativeServiceSupportTests",

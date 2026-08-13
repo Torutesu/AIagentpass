@@ -5,7 +5,8 @@ AgentPass 0.17 implements the native security boundary described by ADR-001. It 
 - `AgentPassNativeCore`: Secure Enclave P-256 key management, OpenSSH SSHSIG encoding, signed Agent request verification, protected sessions and remote control, replay prevention, policy/Git validation, and protected audit primitives;
 - `agentpass-native-service`: a privileged Mach XPC service that owns the signing key, session hashes, audit key, root-owned policy and control state, audit chain, and checkpoint chain;
 - `agentpass-native-client`: a bounded bridge used by the Node signing wrapper and native management commands.
-- `agentpass-native-manager`: the app host and `SMAppService` register/status/unregister entry point.
+- `agentpass-onboarding`: the visible, read-only SwiftUI onboarding app.
+- `agentpass-native-manager`: the internal `SMAppService` register/status/unregister entry point.
 
 The repository now assembles the required app layout, signs its nested executables, supports universal binaries and notarization, and verifies identifiers and keychain access groups. It is not a pre-signed binary distribution. Production installation still requires an Apple Developer Team ID, matching provisioning, signing credentials, notarization credentials, and hardware validation. An ad-hoc build is suitable only for structure tests and does not activate the claimed client-identity and keychain-access-group boundary.
 

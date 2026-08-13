@@ -198,7 +198,7 @@ test('macOS verifier uses staged payloads and enforces production signing policy
   assert.match(verifier, /verify-installer-package\.sh/);
   assert.match(verifier, /stapler validate "\$PACKAGE"/);
   assert.match(verifier, /spctl --assess --type install/);
-  assert.match(verifier, /for item in "\$SERVICE" "\$CLIENT" "\$MANAGER_BINARY" "\$APP"/);
+  assert.match(verifier, /for item in "\$SERVICE" "\$CLIENT" "\$MANAGER_BINARY" "\$ONBOARDING_BINARY" "\$APP"/);
   assert.match(verifier, /--test-requirement "=identifier/);
   assert.doesNotMatch(verifier, /=designated =>/);
   assert.match(verifier, /certificate leaf\[subject\.OU\]/);
@@ -208,6 +208,7 @@ test('macOS verifier uses staged payloads and enforces production signing policy
   assert.match(entitlementVerifier, /com\.apple\.security\.get-task-allow/);
   assert.match(entitlementVerifier, /com\.apple\.security\.cs\.disable-library-validation/);
   assert.match(verifier, /verify_no_dangerous_entitlements "\$MANAGER_BINARY" manager/);
+  assert.match(verifier, /verify_no_dangerous_entitlements "\$ONBOARDING_BINARY" onboarding/);
   assert.match(verifier, /verify_no_dangerous_entitlements "\$APP" outer/);
 });
 
@@ -313,7 +314,7 @@ test('signed entitlement policy rejects privilege expansion without production c
   assert.notEqual(check('outer', { 'com.apple.security.cs.disable-library-validation': true }).status, 0);
 });
 
-test('hardware qualification requires complete tests, exact artifact, and a pinned operator signature', () => {
+test('legacy hardware qualification cannot assert production qualification', () => {
   const template = resolve(root, 'scripts/release/hardware-qualification.template.json');
   assert.equal(JSON.parse(run('validate-hardware-qualification.mjs', [template])).qualified, false);
 
@@ -349,18 +350,9 @@ test('hardware qualification requires complete tests, exact artifact, and a pinn
   writeDetachedSignature(signature, reportBytes, keys.privateKey);
   writeFileSync(publicKeyFile, keys.publicKey.export({ type: 'spki', format: 'pem' }));
 
-  const unsigned = spawn('validate-hardware-qualification.mjs', [report]);
-  assert.notEqual(unsigned.status, 0);
-  assert.match(unsigned.stderr, /complete set|detached operator signature/);
-  const verified = JSON.parse(run('validate-hardware-qualification.mjs', [report, artifact, signature, publicKeyFile, fingerprint(keys.publicKey)]));
-  assert.equal(verified.qualified, true);
-  assert.equal(verified.operator_signature_verified, true);
-  assert.equal(verified.artifact_sha256, artifactDigest);
-
-  const other = crypto.generateKeyPairSync('ed25519');
-  const wrongTrustRoot = spawn('validate-hardware-qualification.mjs', [report, artifact, signature, publicKeyFile, fingerprint(other.publicKey)]);
-  assert.notEqual(wrongTrustRoot.status, 0);
-  assert.match(wrongTrustRoot.stderr, /fingerprint mismatch/);
+  const rejected = spawn('validate-hardware-qualification.mjs', [report]);
+  assert.notEqual(rejected.status, 0);
+  assert.match(rejected.stderr, /v1 hardware qualification is accepted only as unqualified\/non-production/);
 });
 
 test('hardware reports reject unknown fields and self-asserted qualification', () => {
@@ -376,7 +368,7 @@ test('hardware reports reject unknown fields and self-asserted qualification', (
   const selfAsserted = join(dir, 'self-asserted.json'); writeFileSync(selfAsserted, canonical(template));
   const selfFailure = spawn('validate-hardware-qualification.mjs', [selfAsserted]);
   assert.notEqual(selfFailure.status, 0);
-  assert.match(selfFailure.stderr, /required passing|cannot qualify/);
+  assert.match(selfFailure.stderr, /signed release manifest|detached operator signature|self-asserted/);
 });
 
 test('release workflow verifies signed source before the secret-bearing job', () => {

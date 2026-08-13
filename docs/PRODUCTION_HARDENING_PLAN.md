@@ -249,6 +249,7 @@ Target layout:
 
 ```text
 AgentPass.app/Contents/
+  MacOS/agentpass-onboarding
   MacOS/agentpass-native-manager
   Library/LaunchDaemons/dev.agentpass.native-service.plist
   Library/HelperTools/AgentPassNativeService.app/Contents/{Info.plist,embedded.provisionprofile,MacOS/agentpass-native-service}

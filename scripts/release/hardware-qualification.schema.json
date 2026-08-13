@@ -1,24 +1,120 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://agentpass.dev/schemas/hardware-qualification-v1.json",
-  "title": "AgentPass hardware qualification result",
+  "$id": "https://agentpass.dev/schemas/hardware-qualification-v2.json",
+  "title": "AgentPass physical hardware qualification result",
   "type": "object",
   "additionalProperties": false,
-  "required": ["schema_version", "artifact_sha256", "architecture", "hardware_class", "model_identifier", "macos_version", "macos_build", "secure_enclave", "started_at", "completed_at", "operator", "qualified", "tests"],
+  "required": [
+    "schema_version", "source_commit", "dependency_lock_sha256", "release_manifest_sha256", "artifact_name", "artifact_sha256",
+    "architecture", "hardware_class", "model_identifier", "macos_version", "macos_build", "secure_enclave", "team_id",
+    "nested_code_identities", "notarization", "cloud_image_digest", "database_migration_manifest_sha256", "signer_key_versions",
+    "browser_versions", "started_at", "completed_at", "operator", "operator_key_fingerprint", "qualified", "tests", "gates"
+  ],
   "properties": {
-    "schema_version": { "const": 1 },
-    "artifact_sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "schema_version": { "const": 2 },
+    "source_commit": { "$ref": "#/$defs/sha1" },
+    "dependency_lock_sha256": { "$ref": "#/$defs/digest" },
+    "release_manifest_sha256": { "$ref": "#/$defs/digest" },
+    "artifact_name": { "$ref": "#/$defs/safe_name" },
+    "artifact_sha256": { "$ref": "#/$defs/digest" },
     "architecture": { "enum": ["arm64", "x86_64"] },
     "hardware_class": { "enum": ["apple_silicon", "intel_t2", "intel_without_t2"] },
-    "model_identifier": { "type": "string", "minLength": 1 },
+    "model_identifier": { "type": "string", "pattern": "^[A-Za-z0-9,._-]{3,80}$" },
     "macos_version": { "type": "string", "pattern": "^[0-9]+\\.[0-9]+(?:\\.[0-9]+)?$" },
-    "macos_build": { "type": "string", "minLength": 1 },
-    "secure_enclave": { "const": true },
+    "macos_build": { "type": "string", "pattern": "^[A-Za-z0-9]{3,32}$" },
+    "secure_enclave": { "type": "boolean" },
+    "team_id": { "$ref": "#/$defs/team_id" },
+    "nested_code_identities": { "type": "array", "minItems": 1, "maxItems": 64, "items": { "$ref": "#/$defs/code_identity" } },
+    "notarization": { "$ref": "#/$defs/notarization" },
+    "cloud_image_digest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+    "database_migration_manifest_sha256": { "$ref": "#/$defs/digest" },
+    "signer_key_versions": { "$ref": "#/$defs/version_list" },
+    "browser_versions": { "$ref": "#/$defs/version_list" },
     "started_at": { "type": "string", "format": "date-time" },
     "completed_at": { "type": "string", "format": "date-time" },
-    "operator": { "type": "string", "minLength": 1 },
+    "operator": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9@._-]{2,127}$" },
+    "operator_key_fingerprint": { "type": "string", "pattern": "^SHA256:[A-Za-z0-9_-]{43}$" },
     "qualified": { "type": "boolean" },
-    "tests": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/test" } }
+    "tests": { "$ref": "#/$defs/result_list" },
+    "gates": { "$ref": "#/$defs/result_list" }
   },
-  "$defs": { "test": { "type": "object", "additionalProperties": false, "required": ["name", "status"], "properties": { "name": { "type": "string", "minLength": 1 }, "status": { "enum": ["passed", "failed", "skipped"] }, "reason": { "type": "string" }, "evidence": { "type": "string" } } } }
+  "$defs": {
+    "digest": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "sha1": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+    "safe_name": { "type": "string", "pattern": "^[0-9A-Za-z][0-9A-Za-z._-]*$" },
+    "team_id": { "type": "string", "pattern": "^[A-Z0-9]{10}$" },
+    "code_identity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "bundle_id", "team_id", "code_directory_hash"],
+      "properties": {
+        "path": { "type": "string", "pattern": "^[A-Za-z0-9._/-]+$" },
+        "bundle_id": { "type": "string", "pattern": "^[A-Za-z0-9.-]+$" },
+        "team_id": { "$ref": "#/$defs/team_id" },
+        "code_directory_hash": { "type": "string", "pattern": "^[0-9a-f]{40,64}$" }
+      }
+    },
+    "notarization": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status", "submission_ids", "evidence"],
+      "properties": {
+        "status": { "enum": ["not_verified", "accepted_stapled"] },
+        "submission_ids": { "type": "array", "items": { "type": "string", "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$" } },
+        "evidence": { "type": "array", "items": { "$ref": "#/$defs/release_evidence" } }
+      }
+    },
+    "release_evidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "name", "bytes", "sha256"],
+      "properties": {
+        "kind": { "enum": ["notarytool_result", "stapler_result"] },
+        "name": { "$ref": "#/$defs/safe_name" },
+        "bytes": { "type": "integer", "minimum": 1 },
+        "sha256": { "$ref": "#/$defs/digest" }
+      }
+    },
+    "version_list": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 64,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["name", "version"],
+        "properties": {
+          "name": { "type": "string", "pattern": "^[A-Za-z0-9._-]{1,80}$" },
+          "version": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._+~-]{0,127}$" }
+        }
+      }
+    },
+    "result_list": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 256,
+      "items": { "$ref": "#/$defs/result" }
+    },
+    "result": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "status", "evidence"],
+      "properties": {
+        "name": { "type": "string", "pattern": "^[a-z0-9][a-z0-9-]{1,127}$" },
+        "status": { "enum": ["passed", "failed", "skipped"] },
+        "reason": { "type": "string", "minLength": 3, "maxLength": 1024 },
+        "evidence": { "type": "array", "maxItems": 16, "items": { "$ref": "#/$defs/test_evidence" } }
+      }
+    },
+    "test_evidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "bytes", "sha256"],
+      "properties": {
+        "name": { "$ref": "#/$defs/safe_name" },
+        "bytes": { "type": "integer", "minimum": 1 },
+        "sha256": { "$ref": "#/$defs/digest" }
+      }
+    }
+  }
 }

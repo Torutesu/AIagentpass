@@ -38,13 +38,14 @@ identifier() { /usr/bin/codesign -dv --verbose=4 "$1" 2>&1 | /usr/bin/awk -F= '/
 SERVICE_BINARY="$SERVICE/Contents/MacOS/agentpass-native-service"
 CLIENT_BINARY="$CLIENT/Contents/MacOS/agentpass-native-client"
 MANAGER_BINARY="$APP/Contents/MacOS/agentpass-native-manager"
+ONBOARDING_BINARY="$APP/Contents/MacOS/agentpass-onboarding"
 ATOMIC_RENAME_BINARY="$APP/Contents/Library/HelperTools/agentpass-atomic-rename"
-[[ "$(identifier "$SERVICE")" == "dev.agentpass.native-service" && "$(identifier "$CLIENT")" == "dev.agentpass.native-client" && "$(identifier "$ATOMIC_RENAME_BINARY")" == "dev.agentpass.atomic-rename" && "$(identifier "$MANAGER_BINARY")" == "dev.agentpass" && "$(identifier "$APP")" == "dev.agentpass" ]] || { echo "Release signing identifier mismatch" >&2; exit 1; }
-for binary in "$SERVICE_BINARY" "$CLIENT_BINARY" "$ATOMIC_RENAME_BINARY" "$MANAGER_BINARY"; do
+[[ "$(identifier "$SERVICE")" == "dev.agentpass.native-service" && "$(identifier "$CLIENT")" == "dev.agentpass.native-client" && "$(identifier "$ATOMIC_RENAME_BINARY")" == "dev.agentpass.atomic-rename" && "$(identifier "$MANAGER_BINARY")" == "dev.agentpass.native-manager" && "$(identifier "$ONBOARDING_BINARY")" == "dev.agentpass" && "$(identifier "$APP")" == "dev.agentpass" ]] || { echo "Release signing identifier mismatch" >&2; exit 1; }
+for binary in "$SERVICE_BINARY" "$CLIENT_BINARY" "$ATOMIC_RENAME_BINARY" "$MANAGER_BINARY" "$ONBOARDING_BINARY"; do
   [[ "$(/usr/bin/lipo -archs "$binary")" == *arm64* && "$(/usr/bin/lipo -archs "$binary")" == *x86_64* ]] || { echo "Universal slices missing from $binary" >&2; exit 1; }
 done
 team_identifier() { /usr/bin/codesign -dv --verbose=4 "$1" 2>&1 | /usr/bin/awk -F= '/^TeamIdentifier=/{print $2; exit}'; }
-for item in "$SERVICE" "$CLIENT" "$ATOMIC_RENAME_BINARY" "$MANAGER_BINARY" "$APP"; do
+for item in "$SERVICE" "$CLIENT" "$ATOMIC_RENAME_BINARY" "$MANAGER_BINARY" "$ONBOARDING_BINARY" "$APP"; do
   [[ "$(team_identifier "$item")" == "$EXPECTED_TEAM_ID" ]] || { echo "TeamIdentifier mismatch on $item" >&2; exit 1; }
 done
 TEAM_ID="$EXPECTED_TEAM_ID"
@@ -55,7 +56,8 @@ verify_requirement() {
 verify_requirement "$SERVICE" dev.agentpass.native-service
 verify_requirement "$CLIENT" dev.agentpass.native-client
 verify_requirement "$ATOMIC_RENAME_BINARY" dev.agentpass.atomic-rename
-verify_requirement "$MANAGER_BINARY" dev.agentpass
+verify_requirement "$MANAGER_BINARY" dev.agentpass.native-manager
+verify_requirement "$ONBOARDING_BINARY" dev.agentpass
 verify_requirement "$APP" dev.agentpass
 for helper in "$SERVICE" "$CLIENT"; do [[ -f "$helper/Contents/embedded.provisionprofile" && ! -L "$helper/Contents/embedded.provisionprofile" ]] || { echo "Helper provisioning profile missing" >&2; exit 1; }; done
 /usr/bin/security cms -D -i "$SERVICE/Contents/embedded.provisionprofile" >"$TEMP_DIR/service-profile.plist"
@@ -80,8 +82,9 @@ verify_no_dangerous_entitlements() {
 verify_helper_entitlements "$SERVICE" "${PREFIX}.dev.agentpass.service-keys" service
 verify_helper_entitlements "$CLIENT" "${PREFIX}.dev.agentpass.approval-keys" client
 verify_no_dangerous_entitlements "$MANAGER_BINARY" manager
+verify_no_dangerous_entitlements "$ONBOARDING_BINARY" onboarding
 verify_no_dangerous_entitlements "$APP" outer
-for item in "$SERVICE" "$CLIENT" "$MANAGER_BINARY" "$APP"; do
+for item in "$SERVICE" "$CLIENT" "$MANAGER_BINARY" "$ONBOARDING_BINARY" "$APP"; do
   details="$(/usr/bin/codesign -dv --verbose=4 "$item" 2>&1)"
   grep -q '^Runtime Version=' <<<"$details" || { echo "Hardened Runtime missing on $item" >&2; exit 1; }
   grep -q '^Timestamp=' <<<"$details" || { echo "Secure timestamp missing on $item" >&2; exit 1; }

@@ -113,12 +113,12 @@ directory. Changing an original
 release path after staging therefore cannot change the bytes later executed or
 assessed.
 
-The macOS verifier checks the outer app, manager executable, service helper, and
-approval client independently. Each must have the expected identifier, pinned
+The macOS verifier checks the outer app, native onboarding executable, manager
+executable, service helper, and approval client independently. Each must have the expected identifier, pinned
 TeamIdentifier, hardened runtime, secure timestamp, and a Developer ID
 designated requirement bound to that Team ID. The service and client signed
 entitlements must each contain exactly their own expected keychain access group.
-The manager and outer app must have no keychain group. Every component rejects
+The onboarding executable, manager, and outer app must have no keychain group. Every component rejects
 `get-task-allow` and disabled library validation. The helper provisioning
 profiles are separately CMS-verified, and their identifiers and sole keychain
 groups must agree with the signed code. The verifier also requires a trusted
@@ -164,25 +164,35 @@ An unqualified template can be schema-checked without credentials:
 node scripts/release/validate-hardware-qualification.mjs RESULT.json
 ```
 
-A report with `qualified: true` is rejected unless all required and
-architecture-specific tests passed, every passing test binds a
-`sha256:<64-hex>` evidence digest, the exact candidate artifact matches the
-report, and a detached Ed25519 operator signature verifies under an independently
+A report with `qualified: true` is rejected unless all required physical tests
+and gates passed, every passing result binds an existing evidence file by size
+and SHA-256, and the exact candidate PKG is bound by the signed release manifest.
+The report also binds source, dependency lock, Team ID, every code identity,
+notarization, Cloud image, database migrations, signer-key versions, browser
+versions, and a detached Ed25519 operator signature under an independently
 pinned operator-key fingerprint:
 
 ```sh
 node scripts/release/validate-hardware-qualification.mjs \
-  RESULT.json ARTIFACT RESULT.sig OPERATOR.public.pem \
-  'SHA256:PINNED_OPERATOR_KEY_FINGERPRINT'
+  RESULT.json \
+  AgentPass-0.18.0-macos-universal.pkg \
+  AgentPass-0.18.0.release-manifest.json \
+  AgentPass-0.18.0.release-manifest.sig \
+  RELEASE.public.pem \
+  'SHA256:PINNED_RELEASE_KEY_FINGERPRINT' \
+  RESULT.sig OPERATOR.public.pem \
+  'SHA256:PINNED_OPERATOR_KEY_FINGERPRINT' \
+  QUALIFICATION-EVIDENCE-DIRECTORY
 ```
 
-The detached signature is over the exact canonical report bytes and is encoded
-as one base64 line. Apple Silicon and Intel T2 reports must be signed by approved
+Both detached signatures are over exact canonical bytes and are encoded as one
+base64 line. Evidence names are basenames only; symlinks, hard links, missing
+files, size changes, and digest substitutions fail closed. Apple Silicon and Intel T2 reports must be signed by approved
 operators and must name the same candidate artifact SHA-256 before promotion.
 Intel hardware without T2 cannot qualify. Operator-key enrollment, revocation,
-and the requirement for both architecture reports are external protected-release
-policy gates; a fingerprint supplied by an untrusted artifact is not a trust
-root.
+and the aggregate two-report verifier remain protected-release gates; a
+fingerprint supplied by an untrusted artifact is not a trust root. A single
+qualified report therefore does not authorize publication by itself.
 
 ## Workflow and promotion rule
 
