@@ -1,0 +1,107 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agentpass.dev/contracts/agent-sign-request-v2.schema.json",
+  "title": "AgentPass fixed Git signing request v2",
+  "description": "A process-bound request for one Git commit signature. The nested capability is Cloud-signed; this request has no agent signature or selectable signer arguments.",
+  "type": "object",
+  "additionalProperties": false,
+  "maxProperties": 9,
+  "required": ["version", "request_id", "operation", "session_id", "cwd", "payload_base64", "capability", "timestamp_ms", "nonce"],
+  "properties": {
+    "version": { "const": 2 },
+    "request_id": { "$ref": "#/$defs/uuid" },
+    "operation": { "const": "git.commit.sign" },
+    "session_id": { "$ref": "#/$defs/uuid" },
+    "cwd": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 4096,
+      "pattern": "^/[^\\u0000-\\u001f\\u007f]*$"
+    },
+    "payload_base64": {
+      "type": "string",
+      "minLength": 4,
+      "maxLength": 11184812,
+      "pattern": "^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$"
+    },
+    "capability": { "$ref": "#/$defs/capability" },
+    "timestamp_ms": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 9007199254740991
+    },
+    "nonce": { "$ref": "#/$defs/requestNonce" }
+  },
+  "$defs": {
+    "capability": {
+      "type": "object",
+      "additionalProperties": false,
+      "maxProperties": 11,
+      "required": ["version", "capability_id", "nonce", "issuer", "key_id", "audience", "scope", "not_before", "expires_at", "sequence", "signature"],
+      "properties": {
+        "version": { "const": 1 },
+        "capability_id": { "$ref": "#/$defs/uuid" },
+        "nonce": { "$ref": "#/$defs/capabilityNonce" },
+        "issuer": { "$ref": "#/$defs/safeIdentifier" },
+        "key_id": { "$ref": "#/$defs/safeIdentifier" },
+        "audience": { "$ref": "#/$defs/audience" },
+        "scope": { "$ref": "https://agentpass.dev/contracts/scope-v1.schema.json" },
+        "not_before": { "$ref": "#/$defs/canonicalTimestamp" },
+        "expires_at": { "$ref": "#/$defs/canonicalTimestamp" },
+        "sequence": { "$ref": "#/$defs/positiveSafeInteger" },
+        "signature": { "$ref": "#/$defs/ed25519Signature" }
+      }
+    },
+    "audience": {
+      "type": "object",
+      "additionalProperties": false,
+      "maxProperties": 2,
+      "required": ["agent_id", "device_id"],
+      "properties": {
+        "agent_id": { "$ref": "#/$defs/uuid" },
+        "device_id": { "$ref": "#/$defs/uuid" }
+      }
+    },
+    "uuid": {
+      "type": "string",
+      "format": "uuid",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+    },
+    "safeIdentifier": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 64,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$"
+    },
+    "positiveSafeInteger": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 9007199254740991
+    },
+    "canonicalTimestamp": {
+      "type": "string",
+      "minLength": 24,
+      "maxLength": 24,
+      "format": "date-time",
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$"
+    },
+    "capabilityNonce": {
+      "type": "string",
+      "minLength": 32,
+      "maxLength": 128,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{31,127}$"
+    },
+    "requestNonce": {
+      "type": "string",
+      "minLength": 43,
+      "maxLength": 43,
+      "pattern": "^[A-Za-z0-9_-]{43}$"
+    },
+    "ed25519Signature": {
+      "type": "string",
+      "minLength": 88,
+      "maxLength": 88,
+      "pattern": "^[A-Za-z0-9+/]{86}==$"
+    }
+  }
+}

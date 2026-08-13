@@ -1,6 +1,6 @@
 # Process-bound Agent implementation plan
 
-Status: approved implementation sequence after the M1 physical-qualification slice. This document is the execution contract for M2; passing unit tests alone does not make a lane production-ready.
+Status: approved implementation sequence after the M1 physical-qualification slice. The M2 contract/persistence foundation (three schemas, two API operations, migrations 0018–0020, and injectable native process-identity models) is implemented as of 2026-08-13. Runtime routes, live macOS observation, split XPC services, adapter qualification, and physical evidence remain open. Passing unit tests alone does not make a lane production-ready.
 
 ## 1. Security outcome
 
@@ -63,7 +63,7 @@ Add strict, canonical schemas with `additionalProperties: false` and duplicate-k
    - timestamp and nonce;
    - no arbitrary `ssh-keygen` arguments, agent signature, or session bearer.
 
-Human API adds idempotent, recent-WebAuthn-protected grant issuance. Device API adds device-authenticated one-time grant consumption. Exact retries return the same committed result; a changed digest returns conflict. Tenant, device, agent, candidate, generation, expiry, and scope substitutions fail before consumption.
+Human API adds idempotent, recent-WebAuthn-protected grant issuance. Device API adds device-authenticated one-time grant consumption and carries the native service's process and ancestry binding digests. Exact retries are identified by the grant statement hash plus both binding digests and return the same committed result; any changed digest returns conflict. Tenant, device, agent, candidate, generation, expiry, and scope substitutions fail before consumption.
 
 ## 4. Durable Cloud state
 
@@ -74,6 +74,8 @@ Migrations are deliberately separated so rollback and authority review remain un
 - `0020_agent_audit_binding.sql`: nullable public grant/session/adapter/process/worktree/capability bindings on device audit events.
 
 Transactions must atomically consume a grant, create the session record, increment any organization/device epoch, append admin/device audit, and enqueue refresh work. Database rollback must leave no observable session. Ambiguous commit is resolved by reading the immutable grant hash; it never issues a second grant or signature budget.
+
+The Cloud session row is a durable coordination and audit mirror, not the per-sign authorization oracle. Once a valid lease is established, normal offline signing is authorized by the in-memory native state machine, the live process/worktree observations, and the latest locally verified ControlBundle. A signature must not require a Cloud round trip. Repositories accessing the new RLS-protected tables must set the organization context inside the same database transaction.
 
 ## 5. Native implementation slices
 
@@ -150,3 +152,35 @@ Prohibited fields include raw audit tokens, process arguments, environment value
 11. Run independent security review, notarized release qualification, staged production rollout, and recovery drill.
 
 The critical path is N1 through N4. UI and adapter convenience work must not precede the process-bound enforcement boundary, because configuration alone cannot prove that an operation originated from the authorized coding agent.
+
+## 10. Detailed next implementation waves
+
+### Wave M2-A — Cloud runtime authority
+
+Implement grant issuance and consumption repositories, transaction services, and the two frozen HTTP routes. Issuance must verify organization role, recent WebAuthn, CSRF, agent/device membership, policy scope, ControlBundle sequence, TTL, and idempotency before signing the canonical grant. Consumption must verify the device request signature over the exact path/body, the Cloud grant signature/hash, process and ancestry digests, expiry, generation, and one-time state. Exact retry returns the original lease; a different binding fails with conflict. Every repository transaction sets and verifies the PostgreSQL organization context required by RLS.
+
+Exit gate: route-level integration tests cover cross-tenant/device/agent substitution, concurrent consumption, rollback, ambiguous commit recovery, stale generation, expiry boundaries, replay, and audit/outbox atomicity against real PostgreSQL.
+
+### Wave M2-B — live macOS observation and Agent XPC split
+
+Implement the Darwin observation source from the XPC audit token, `proc_pidinfo`/kernel PID version, boot identity, executable vnode identity, Security.framework code requirement and CodeDirectory data, entitlements, and bounded ancestry traversal. Introduce the separate Agent Mach service and connection-scoped facade; keep all management selectors unreachable. Raw observations remain transient and only canonical digests and stable reason codes may enter audit.
+
+Exit gate: signed positive and negative probe binaries prove Team ID, entitlement, bundle, ad-hoc, PID reuse, exec, parent death, unknown ancestor, boot change, and cross-service selector denial. Test-only observation injection cannot be enabled in release builds.
+
+### Wave M2-C — native lease and signing state machine
+
+Implement one-time bootstrap handoff, grant verification, monotonic lease deadlines, signature-budget reservation, request/capability replay stores, crash-safe signing intent, `outcome_unknown`, and invalidation on process/worktree/control/key/device changes. Wire request v2 through the fixed Git SSHSIG path; reject arbitrary signer arguments, bearer sessions, and private PEM input in v2.
+
+Exit gate: deterministic concurrency, restart, sleep/wake, clock rollback/advance, emergency stop, revoke, max-budget, duplicate request, duplicate capability, Secure Enclave failure, and ambiguous signer outcome tests all fail closed. Normal signing performs no Cloud call after lease establishment.
+
+### Wave M2-D — Claude Code adapter and onboarding
+
+Ship a signed launcher and repository-local Git integration that establish the intended process ancestry and pass the one-time capability through a private FD. Add CLI/Web Console onboarding that creates the agent policy, selects a repository/worktree, displays the exact scope and expiry, and provides copyable Claude Code launch instructions. Do not expose secrets in configuration, argv, environment, shell history, or logs.
+
+Exit gate: a notarized candidate creates two unattended, verifiably signed commits on Apple silicon/Secure Enclave and Intel/T2; all wrong-repository, branch, executable, ancestry, expiry, revoke, and extra-signature cases are denied.
+
+### Wave M2-E — Cursor, release, and production qualification
+
+Add a separately versioned Cursor policy only after its supported headless contract is pinned. Complete installer/update/uninstall preservation, Developer ID signing and notarization, SBOM/provenance, staged deployment, observability, backup/restore, incident/revocation drills, and independent security review.
+
+Exit gate: both hardware lanes and both adapters pass the retained physical evidence matrix; no open P0/P1 finding remains; rollback and emergency-stop exercises succeed; production enablement is allow-listed and reversible.

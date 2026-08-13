@@ -537,6 +537,41 @@
         }
       }
     },
+    "/organizations/{organization_id}/agents/{agent_id}/session-grants": {
+      "post": {
+        "operationId": "issueAgentSessionGrant",
+        "summary": "Issue a bounded Agent Session Grant",
+        "description": "Issues one Cloud-signed Agent Session Grant for the exact organization and agent in the path. The authenticated human must have an admin role and a fresh, operation-bound WebAuthn authorization. Idempotency-Key retries with the same canonical request return the same committed grant; reusing a key with a different request returns idempotency_key_reused. The grant contains no private key, session token, raw WebAuthn assertion, or reusable bearer credential.",
+        "security": [{ "humanSession": [], "recentWebAuthn": [] }],
+        "parameters": [
+          { "$ref": "#/components/parameters/OrganizationId" },
+          { "$ref": "#/components/parameters/AgentId" },
+          { "$ref": "#/components/parameters/CsrfToken" },
+          { "$ref": "#/components/parameters/IdempotencyKey" }
+        ],
+        "requestBody": { "$ref": "#/components/requestBodies/IssueAgentSessionGrant" },
+        "x-agentpass-contract-status": "frozen-m2",
+        "x-agentpass-runtime-path": "/api/v1/organizations/{organization_id}/agents/{agent_id}/session-grants",
+        "x-agentpass-tenant-scope": { "kind": "organization", "source": "path.organization_id", "cross-tenant-disclosure": false, "additionalProperties": false },
+        "x-agentpass-agent-scope": { "kind": "agent", "source": "path.agent_id", "cross-agent-disclosure": false, "additionalProperties": false },
+        "x-agentpass-minimum-role": "admin",
+        "x-agentpass-recent-auth-operation": "agent.session_grant.issue",
+        "x-agentpass-idempotency": { "same-key-same-canonical-request": "return-original-committed-result", "same-key-different-canonical-request": "idempotency_key_reused", "additionalProperties": false },
+        "x-agentpass-atomic-admin-audit-outbox": "Grant issuance, immutable admin-audit event, idempotency record, and publication intent commit atomically. A successful response is not returned if any one is missing.",
+        "x-agentpass-authority": { "issuer": "agentpass-cloud", "grant-schema": "../schemas/agent-session-grant-v1.schema.json", "private-material": "never-returned", "additionalProperties": false },
+        "responses": {
+          "201": { "$ref": "#/components/responses/AgentSessionGrantIssued" },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "409": { "$ref": "#/components/responses/IdempotencyConflict" },
+          "422": { "$ref": "#/components/responses/ValidationError" },
+          "429": { "$ref": "#/components/responses/TooManyRequests" },
+          "500": { "$ref": "#/components/responses/InternalError" }
+        }
+      }
+    },
     "/organizations/{organization_id}/emergency-stop": {
       "post": {
         "operationId": "emergencyStop",
@@ -591,6 +626,13 @@
         "in": "path",
         "required": true,
         "description": "Device identifier, interpreted only together with organization_id.",
+        "schema": { "type": "string", "format": "uuid" }
+      },
+      "AgentId": {
+        "name": "agent_id",
+        "in": "path",
+        "required": true,
+        "description": "Agent identifier, interpreted only together with organization_id. The path value is authoritative for the grant subject.",
         "schema": { "type": "string", "format": "uuid" }
       },
       "CredentialId": {
@@ -704,6 +746,11 @@
             }
           }
         }
+      },
+      "IssueAgentSessionGrant": {
+        "required": true,
+        "description": "The request contains only grant issuance intent. organization_id and agent_id are taken from the path; signed authority fields such as grant_id, issuer, key_id, signature, not-before, expiry, and control sequence are Cloud-assigned and cannot be supplied by the caller.",
+        "content": { "application/json": { "schema": { "$ref": "#/components/schemas/AgentSessionGrantIssueRequest" } } }
       }
     },
     "responses": {
@@ -757,6 +804,11 @@
       "InvitationAccepted": { "description": "Invitation accepted and membership created", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/InvitationAcceptedResponse" } } } },
       "DeviceList": { "description": "Minimal authoritative Console device state without keys, policy, nonce, signature, or metadata.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/DeviceListResponse" } } } },
       "DeviceRefreshRequestAccepted": { "description": "A wake request was accepted, coalesced with a pending wake, or found unnecessary because no refresh is pending. The response is a delivery hint only; it does not prove device delivery or application.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/DeviceRefreshRequestResponse" } } } },
+      "AgentSessionGrantIssued": {
+        "description": "A Cloud-signed Agent Session Grant was issued or returned as the exact idempotent retry result. The response is no-store and never contains private key material, a session token, a WebAuthn assertion, or a reusable bearer credential.",
+        "headers": { "Cache-Control": { "required": true, "schema": { "type": "string", "const": "no-store, max-age=0" } } },
+        "content": { "application/json": { "schema": { "$ref": "#/components/schemas/AgentSessionGrantIssuedResponse" } } }
+      },
       "BadRequest": { "description": "Malformed request or missing browser security header", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorEnvelope" } } } },
       "Unauthorized": { "description": "No valid humanSession", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorEnvelope" } } } },
       "Forbidden": { "description": "Session lacks the required organization role", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorEnvelope" } } } },
@@ -820,6 +872,34 @@
           "label": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[^\\u0000-\\u001f\\u007f]{1,128}$" },
           "platform": { "const": "macos" },
           "ttl_ms": { "type": "integer", "minimum": 60000, "maximum": 86400000 }
+        }
+      },
+      "AgentSessionGrantV1": { "$ref": "../schemas/agent-session-grant-v1.schema.json" },
+      "AgentSessionGrantIssueRequest": {
+        "type": "object",
+        "additionalProperties": false,
+        "maxProperties": 9,
+        "required": ["device_id", "agent_kind", "adapter_id", "adapter_version", "worktree_binding_sha256", "process_binding_policy_id", "scope", "max_signatures", "ttl_seconds"],
+        "description": "Grant issuance intent only. Cloud derives and signs the grant identity, tenant/agent subject, validity timestamps, control sequence, issuer, key identifier, statement hash, and signature.",
+        "properties": {
+          "device_id": { "type": "string", "format": "uuid" },
+          "agent_kind": { "type": "string", "enum": ["claude-code", "cursor"] },
+          "adapter_id": { "type": "string", "format": "uuid" },
+          "adapter_version": { "type": "string", "minLength": 5, "maxLength": 32, "pattern": "^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(?:-[0-9A-Za-z.-]+)?(?:\\+[0-9A-Za-z.-]+)?$" },
+          "worktree_binding_sha256": { "type": "string", "minLength": 64, "maxLength": 64, "pattern": "^[0-9a-f]{64}$" },
+          "process_binding_policy_id": { "type": "string", "minLength": 1, "maxLength": 64, "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$" },
+          "scope": { "$ref": "../schemas/scope-v1.schema.json" },
+          "max_signatures": { "type": "integer", "minimum": 1, "maximum": 64 },
+          "ttl_seconds": { "type": "integer", "minimum": 60, "maximum": 3600 }
+        }
+      },
+      "AgentSessionGrantIssuedResponse": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["grant", "request_id"],
+        "properties": {
+          "grant": { "$ref": "#/components/schemas/AgentSessionGrantV1" },
+          "request_id": { "$ref": "#/components/schemas/RequestId" }
         }
       },
       "DeviceRefreshRequestResult": {

@@ -102,6 +102,8 @@ The frozen implementation sequence, process/ancestry boundary, contracts, migrat
 
 ### M2.1 Agent adapter contract
 
+Foundation status (2026-08-13): frozen grant/lease/request-v2 schemas, Human issuance and Device consumption OpenAPI operations, PostgreSQL migrations 0018–0020, and the injectable native process/ancestry identity model are implemented. Cloud repositories/routes, live Darwin observation, the split Agent XPC service, and physical qualification are not yet implemented.
+
 Freeze one local adapter contract shared by Claude Code and Cursor:
 
 - agent executable identity is captured at setup and revalidated for every session;
@@ -233,6 +235,6 @@ Each merge requires:
 
 ## 10. Next executable slice
 
-The next slice is the remaining M1 physical evidence: build and sign all four negative XPC probes, and drive M1.1 possession through the real Device API from both protected hardware runners. After that, M2 implements the process-bound Claude Code and Cursor adapter/session contract.
+Two lanes now proceed without conflating evidence: finish the remaining M1 physical evidence by signing all four negative XPC probes and driving M1.1 possession through the real Device API on both protected hardware runners; in parallel, implement M2-A Cloud grant issuance/consumption and M2-B live Darwin observation plus the separate Agent XPC service. M2-C may integrate only after both M2-A and M2-B gates pass.
 
 The slice is complete when an exact installed candidate can mint a protected checkpoint, every later scenario consumes it, the approved probe reaches the XPC service, all negative identities are denied, and replacement/replay tests pass before any Cloud credential or physical qualification secret is introduced.

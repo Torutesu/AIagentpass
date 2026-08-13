@@ -34,6 +34,8 @@ const AUTHORITY_TABLES = Object.freeze([
   ["release_candidates", "$1::uuid[] IS NOT NULL", "security"],
   ["device_enrollment_possession_receipts", "t.organization_id = ANY($1::uuid[])", "security"],
   ["agents", "t.organization_id = ANY($1::uuid[])", "tenant"],
+  ["agent_session_grants", "t.organization_id = ANY($1::uuid[])", "security"],
+  ["agent_sessions", "t.organization_id = ANY($1::uuid[])", "security"],
   ["policies", "t.organization_id = ANY($1::uuid[])", "tenant"],
   ["revocations", "t.organization_id = ANY($1::uuid[])", "tenant"],
   ["capabilities", "t.organization_id = ANY($1::uuid[])", "tenant"],
@@ -65,7 +67,7 @@ const AUTHORITY_TABLE_NAMES = Object.freeze(AUTHORITY_TABLES.map(([name]) => nam
 const TENANT_TABLE_NAMES = new Set(AUTHORITY_TABLES.filter(([, , kind]) => ["tenant", "audit", "outbox", "security"].includes(kind)).map(([name]) => name));
 
 export const AUTHORITY_MANIFEST_SCHEMA_VERSION = 2;
-export const REQUIRED_MIGRATION_VERSION = "17";
+export const REQUIRED_MIGRATION_VERSION = "20";
 export const MANIFEST_KIND = "agentpass.authority-manifest";
 
 export const DIAGNOSTICS = Object.freeze({
@@ -130,6 +132,14 @@ WITH tenants AS (SELECT unnest($1::uuid[]) AS organization_id), violations AS (
        OR NOT EXISTS (SELECT 1 FROM memberships m WHERE m.organization_id=e.organization_id AND m.member_id=e.created_by)
   UNION ALL SELECT count(*) FROM agents a JOIN tenants t ON t.organization_id=a.organization_id
     WHERE NOT EXISTS (SELECT 1 FROM devices d WHERE d.organization_id=a.organization_id AND d.id=a.device_id)
+  UNION ALL SELECT count(*) FROM agent_session_grants g JOIN tenants t ON t.organization_id=g.organization_id
+    WHERE NOT EXISTS (SELECT 1 FROM devices d WHERE d.organization_id=g.organization_id AND d.id=g.device_id)
+       OR NOT EXISTS (SELECT 1 FROM agents a WHERE a.organization_id=g.organization_id AND a.id=g.agent_id AND a.device_id=g.device_id)
+       OR NOT EXISTS (SELECT 1 FROM memberships m WHERE m.organization_id=g.organization_id AND m.member_id=g.created_by)
+  UNION ALL SELECT count(*) FROM agent_sessions s JOIN tenants t ON t.organization_id=s.organization_id
+    WHERE NOT EXISTS (SELECT 1 FROM agent_session_grants g WHERE g.organization_id=s.organization_id AND g.grant_id=s.grant_id AND g.device_id=s.device_id AND g.agent_id=s.agent_id AND g.grant_hash=s.grant_hash)
+       OR NOT EXISTS (SELECT 1 FROM agents a WHERE a.organization_id=s.organization_id AND a.id=s.agent_id AND a.device_id=s.device_id)
+       OR NOT EXISTS (SELECT 1 FROM devices d WHERE d.organization_id=s.organization_id AND d.id=s.device_id)
   UNION ALL SELECT count(*) FROM policies p JOIN tenants t ON t.organization_id=p.organization_id
     WHERE NOT EXISTS (SELECT 1 FROM memberships m WHERE m.organization_id=p.organization_id AND m.member_id=p.created_by)
   UNION ALL SELECT count(*) FROM revocations r JOIN tenants t ON t.organization_id=r.organization_id
@@ -417,7 +427,11 @@ function normalizeManifestBody(value) {
   if (constraints.some((constraint) => constraint.validated !== true)) throw new AuthorityManifestError(DIAGNOSTICS.INVALID_FILE);
   const body = { schema_version: AUTHORITY_MANIFEST_SCHEMA_VERSION, kind: MANIFEST_KIND, migration_version: REQUIRED_MIGRATION_VERSION, migrations: normalizeMigrations(value.migrations, undefined), tenant_ids: tenantIds, tenants, row_counts: rowCounts, tables, constraints };
   if (value.artifact_digest !== undefined) body.artifact_digest = normalizeHash(value.artifact_digest);
-  rejectSensitiveKeys(body);
+  // row_counts keys are already normalized against the exact authority-table
+  // allowlist. Do not interpret an allowlisted table name such as
+  // agent_session_grants as a secret-bearing manifest field.
+  const { row_counts: _normalizedRowCounts, ...sensitiveFieldCheckBody } = body;
+  rejectSensitiveKeys(sensitiveFieldCheckBody);
   return body;
 }
 
