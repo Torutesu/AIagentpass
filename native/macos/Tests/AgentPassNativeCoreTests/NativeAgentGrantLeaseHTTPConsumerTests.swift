@@ -82,7 +82,8 @@ private func leaseObject() -> [String: Any] {
 }
 private func consumer(_ transport: GrantHTTPTransport) throws -> NativeAgentGrantLeaseHTTPConsumer {
   try .init(
-    baseURL: URL(string: "https://api.agentpass.test")!, transport: transport,
+    baseURL: URL(string: "https://api.agentpass.test")!,
+    organizationID: "66666666-6666-4666-8666-666666666666", transport: transport,
     signer: GrantSigner(), random: GrantFixedRandom(), wallClock: GrantFixedWall())
 }
 
@@ -103,7 +104,26 @@ private func consumer(_ transport: GrantHTTPTransport) throws -> NativeAgentGran
   )
   #expect(call.1["AgentPass-Signature"] != nil)
   let body = try NativeStrictJSON.object(from: call.2, maxBytes: 16384, maxDepth: 32)
+  #expect(Set(body.keys) == ["grant", "process_binding_sha256", "ancestry_binding_sha256"])
   #expect(body["process_binding_sha256"] as? String == String(repeating: "b", count: 64))
+}
+
+@Test func grantConsumerRejectsGrantFromAnotherConfiguredOrganizationBeforeTransport() throws {
+  let transport = GrantHTTPTransport(.init(statusCode: 500, body: Data()))
+  var grant = grantObject()
+  var statement = grant["statement"] as! [String: Any]
+  statement["organization_id"] = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+  grant["statement"] = statement
+  grant["statement_hash"] = Data(SHA256.hash(data: try NativeStrictJSON.data(statement))).map {
+    String(format: "%02x", $0)
+  }.joined()
+  #expect(throws: NativeAgentGrantLeaseHTTPError.unauthorized) {
+    _ = try consumer(transport).consumeGrant(
+      .init(
+        bootstrapID: "99999999-9999-4999-8999-999999999999",
+        proof: try NativeStrictJSON.data(grant), binding: try grantBinding()))
+  }
+  #expect(transport.calls.isEmpty)
 }
 @Test func grantConsumerRejectsAudienceAndBindingSubstitutionBeforeTransport() throws {
   let t = GrantHTTPTransport(.init(statusCode: 500, body: Data()))

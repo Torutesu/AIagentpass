@@ -77,3 +77,24 @@ private final class RegistryResultBox: @unchecked Sendable {
     }
     #expect(box.count == 1)
 }
+
+private func registryLeaseDocument(sessionID: String) throws -> NativeAgentVerifiedCloudLease {
+    let object: [String: Any] = ["version":1,"type":"agentpass.agent-session-lease","session_id":sessionID,"grant_id":"55555555-5555-4555-8555-555555555555","organization_id":"66666666-6666-4666-8666-666666666666","device_id":"44444444-4444-4444-8444-444444444444","agent_id":"33333333-3333-4333-8333-333333333333","agent_kind":"claude-code","adapter_id":"77777777-7777-4777-8777-777777777777","adapter_version":"1.0.0","process_binding_sha256":String(repeating:"b",count:64),"ancestry_binding_sha256":String(repeating:"c",count:64),"worktree_binding_sha256":String(repeating:"a",count:64),"max_signatures":2,"used_signatures":0,"not_before":"2026-08-13T10:00:00.000Z","expires_at":"2026-08-13T10:15:00.000Z","control_sequence":12,"authority_generation":7]
+    return try NativeAgentLeaseCodec.decode(try NativeStrictJSON.data(object), expectedBinding: registryBinding())
+}
+
+@Test func registryEnforcesConfiguredAdmissionLimitsAndInvalidatesOnlyConnectionOwner() throws {
+    let registry = NativeAgentSessionRegistry()
+    let firstSession = "11111111-1111-4111-8111-111111111111"
+    let secondSession = "22222222-2222-4222-8222-222222222222"
+    let firstToken = String(repeating: "a", count: 64)
+    let secondToken = String(repeating: "b", count: 64)
+    _ = try registry.activate(lease: registryLeaseDocument(sessionID: firstSession), localLeaseID: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", connectionTokenIdentity: firstToken, deadline: registryDeadline(), globalLimit: 2, perAgentLimit: 1, perWorktreeLimit: 2)
+    #expect(throws: NativeAgentSessionRegistryError.sessionCapacityExceeded) {
+        _ = try registry.activate(lease: try registryLeaseDocument(sessionID: secondSession), localLeaseID: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb", connectionTokenIdentity: secondToken, deadline: try registryDeadline(), globalLimit: 2, perAgentLimit: 1, perWorktreeLimit: 2)
+    }
+    _ = try registry.close(sessionID: firstSession, connectionTokenIdentity: firstToken)
+    _ = try registry.activate(lease: registryLeaseDocument(sessionID: secondSession), localLeaseID: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb", connectionTokenIdentity: secondToken, deadline: registryDeadline(), globalLimit: 2, perAgentLimit: 1, perWorktreeLimit: 2)
+    #expect(registry.invalidateOwned(by: firstToken).isEmpty)
+    #expect(registry.invalidateOwned(by: secondToken).first?.state == .revoked)
+}

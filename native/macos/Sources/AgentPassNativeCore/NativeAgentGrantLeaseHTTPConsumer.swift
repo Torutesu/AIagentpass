@@ -119,6 +119,7 @@ public final class NativeAgentGrantLeaseHTTPConsumer: NativeAgentGrantLeaseConsu
   private static let maximumGrantBytes = NativeAgentGrantConsumptionRequest.maximumProofBytes
   private static let maximumBodyBytes = 16 * 1024
   private let baseURL: URL
+  private let organizationID: String
   private let transport: any NativeAgentHTTPTransporting
   private let signer: any P256MessageSigner
   private let random: any NativeAgentRandomBytesGenerating
@@ -126,14 +127,17 @@ public final class NativeAgentGrantLeaseHTTPConsumer: NativeAgentGrantLeaseConsu
   private let timeoutSeconds: Int
 
   public init(
-    baseURL: URL, transport: any NativeAgentHTTPTransporting, signer: any P256MessageSigner,
+    baseURL: URL, organizationID: String, transport: any NativeAgentHTTPTransporting,
+    signer: any P256MessageSigner,
     random: any NativeAgentRandomBytesGenerating = NativeAgentSystemRandomBytesGenerator(),
     wallClock: any NativeAgentWallClock = NativeAgentSystemWallClock(), timeoutSeconds: Int = 10
   ) throws {
     guard baseURL.scheme == "https", baseURL.user == nil, baseURL.password == nil,
-      baseURL.query == nil, baseURL.fragment == nil, (1...30).contains(timeoutSeconds)
+      baseURL.query == nil, baseURL.fragment == nil, (1...30).contains(timeoutSeconds),
+      let organizationID = Self.uuid(organizationID)
     else { throw NativeAgentGrantLeaseHTTPError.invalidConfiguration }
     self.baseURL = baseURL
+    self.organizationID = organizationID
     self.transport = transport
     self.signer = signer
     self.random = random
@@ -145,7 +149,8 @@ public final class NativeAgentGrantLeaseHTTPConsumer: NativeAgentGrantLeaseConsu
     -> NativeAgentVerifiedCloudLease
   {
     let grant = try Self.parseGrant(request.proof)
-    guard grant.deviceID == request.binding.deviceID, grant.agentID == request.binding.agentID,
+    guard grant.organizationID == organizationID,
+      grant.deviceID == request.binding.deviceID, grant.agentID == request.binding.agentID,
       grant.worktreeBindingSHA256 == Self.hex(request.binding.worktreeBindingDigest),
       grant.controlSequence == request.binding.controlSequence,
       grant.authorityGeneration == request.binding.authorityGeneration

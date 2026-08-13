@@ -71,16 +71,25 @@ public final class NativeAgentSessionRegistry: @unchecked Sendable {
         lease: NativeAgentVerifiedCloudLease,
         localLeaseID: String,
         connectionTokenIdentity: String,
-        deadline: NativeAgentSessionDeadline
+        deadline: NativeAgentSessionDeadline,
+        globalLimit: Int = NativeAgentSessionRegistry.maximumActiveSessions,
+        perAgentLimit: Int = NativeAgentSessionRegistry.maximumActiveSessions,
+        perWorktreeLimit: Int = NativeAgentSessionRegistry.maximumActiveSessions
     ) throws -> NativeAgentSessionRegistryStatus {
         guard Self.uuid(localLeaseID), Self.hash(connectionTokenIdentity),
               deadline.signedWallExpiryMilliseconds == lease.expiresAtMilliseconds,
-              lease.usedSignatures <= lease.maxSignatures else {
+              lease.usedSignatures <= lease.maxSignatures,
+              (1...Self.maximumActiveSessions).contains(globalLimit),
+              (1...globalLimit).contains(perAgentLimit),
+              (1...globalLimit).contains(perWorktreeLimit) else {
             throw NativeAgentSessionRegistryError.invalidInput
         }
         lock.lock()
         defer { lock.unlock() }
-        guard entries.count < Self.maximumActiveSessions else {
+        let activeEntries = entries.values.filter { !$0.state.isTerminal }
+        guard activeEntries.count < globalLimit,
+              activeEntries.filter({ $0.lease.binding.agentID == lease.binding.agentID }).count < perAgentLimit,
+              activeEntries.filter({ $0.lease.binding.worktreeBindingDigest == lease.binding.worktreeBindingDigest }).count < perWorktreeLimit else {
             throw NativeAgentSessionRegistryError.sessionCapacityExceeded
         }
         guard entries[lease.sessionID] == nil else { throw NativeAgentSessionRegistryError.sessionExists }
@@ -195,15 +204,33 @@ public final class NativeAgentSessionRegistry: @unchecked Sendable {
         try mutateReservation(reservation, required: .signingIntent, next: .outcomeUnknown, clear: true)
     }
 
-    public func invalidate(sessionID: String, as terminalState: NativeAgentSessionState) throws {
-        guard terminalState.isTerminal, terminalState != .outcomeUnknown else { throw NativeAgentSessionRegistryError.invalidInput }
+    public func invalidate(sessionID: String, connectionTokenIdentity: String, as terminalState: NativeAgentSessionState) throws {
+        guard Self.hash(connectionTokenIdentity), terminalState.isTerminal, terminalState != .outcomeUnknown else { throw NativeAgentSessionRegistryError.invalidInput }
         try lock.withLock {
             guard var entry = entries[sessionID] else { throw NativeAgentSessionRegistryError.sessionMissing }
+            guard entry.connectionTokenIdentity == connectionTokenIdentity else { throw NativeAgentSessionRegistryError.connectionMismatch }
             if entry.state == terminalState { return }
             guard !entry.state.isTerminal else { throw NativeAgentSessionRegistryError.transitionDenied }
             try Self.transition(&entry, to: terminalState)
             entry.reservation = nil
             entries[sessionID] = entry
+        }
+    }
+
+    @discardableResult
+    public func invalidateOwned(by connectionTokenIdentity: String, as terminalState: NativeAgentSessionState = .revoked) -> [NativeAgentSessionRegistryStatus] {
+        guard Self.hash(connectionTokenIdentity), terminalState.isTerminal, terminalState != .outcomeUnknown else { return [] }
+        return lock.withLock {
+            var statuses: [NativeAgentSessionRegistryStatus] = []
+            for id in entries.keys.sorted() {
+                guard var entry = entries[id], entry.connectionTokenIdentity == connectionTokenIdentity else { continue }
+                if !entry.state.isTerminal, (try? Self.transition(&entry, to: terminalState)) != nil {
+                    entry.reservation = nil
+                    entries[id] = entry
+                    statuses.append(Self.status(entry))
+                }
+            }
+            return statuses
         }
     }
 

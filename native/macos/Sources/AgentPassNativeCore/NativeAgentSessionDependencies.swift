@@ -100,7 +100,7 @@ public protocol NativeAgentGrantLeaseConsuming: Sendable {
 /// The service compares the complete result with the Lease binding before each
 /// protected operation.
 public protocol NativeAgentSessionBindingObserving: Sendable {
-    func observeSessionBinding() throws -> NativeAgentSessionBinding
+    func observeSessionBinding(agentID: String) throws -> NativeAgentSessionBinding
 }
 
 /// Fixed Git commit signing boundary. There is no operation, key selector,

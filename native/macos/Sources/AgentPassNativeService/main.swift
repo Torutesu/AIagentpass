@@ -450,7 +450,7 @@ private struct ServiceConfiguration: Decodable {
                   (1...globalLimit).contains(perWorktreeLimit),
                   let bootstrapLimit = value.agentBootstrapAttemptLimit,
                   (1...64).contains(bootstrapLimit),
-                  value.agentWorktreeObservationPolicyVersion == 1 else {
+                  value.agentWorktreeObservationPolicyVersion == NativeAgentWorktreeObservationPolicyVersion.v2.rawValue else {
                 throw AgentPassNativeError.invalidConfiguration("Agent runtime requires complete bounded authority configuration and ControlBundle v2 device enrollment")
             }
         }
@@ -635,7 +635,7 @@ private final class ServiceDataReply: @unchecked Sendable {
     func call(_ data: NSData?, _ error: NSError?) { body(data, error) }
 }
 
-private final class ServiceEndpoint: NSObject, AgentPassNativeServiceProtocol, @unchecked Sendable {
+private final class ServiceEndpoint: NSObject, AgentPassNativeServiceProtocol, NativeAgentSessionAuditAppending, @unchecked Sendable {
     private struct PendingKeyActivation {
         let statement: NativeKeyTransitionStatement
         let expiresAt: Date
@@ -2729,6 +2729,44 @@ private final class ServiceEndpoint: NSObject, AgentPassNativeServiceProtocol, @
         return status
     }
 
+    func appendAgentSessionAudit(_ evidence: NativeAgentSessionAuditEvidence) throws {
+        var object: [String: Any] = [
+            "version": 1,
+            "action": evidence.action.rawValue,
+            "agent_id": evidence.binding.agentID,
+            "device_id": evidence.binding.deviceID,
+            "process_binding_sha256": evidence.binding.processBindingDigest.map { String(format: "%02x", $0) }.joined(),
+            "ancestry_binding_sha256": evidence.binding.ancestryBindingDigest.map { String(format: "%02x", $0) }.joined(),
+            "worktree_binding_sha256": evidence.binding.worktreeBindingDigest.map { String(format: "%02x", $0) }.joined(),
+            "control_sequence": evidence.binding.controlSequence,
+            "authority_generation": evidence.binding.authorityGeneration,
+            "key_generation": evidence.binding.keyGeneration
+        ]
+        if let value = evidence.sessionID { object["session_id"] = value }
+        if let value = evidence.requestID { object["request_id"] = value }
+        if let value = evidence.capabilityID { object["capability_id"] = value }
+        if let value = evidence.payloadDigest {
+            object["payload_sha256"] = value.map { String(format: "%02x", $0) }.joined()
+        }
+        if let value = evidence.reasonCode { object["reason_code"] = value }
+        let evidenceDigest = Data(SHA256.hash(data: try NativeStrictJSON.data(object)))
+            .map { String(format: "%02x", $0) }.joined()
+        let decision: String
+        switch evidence.action {
+        case .sessionDenied: decision = "deny"
+        case .signingOutcomeUnknown: decision = "error"
+        default: decision = "allow"
+        }
+        _ = try appendAudit(NativeAuditEvent(
+            operation: "agent.session.\(evidence.action.rawValue)",
+            decision: decision,
+            requestID: evidence.requestID ?? evidence.sessionID,
+            reason: evidence.reasonCode,
+            agentID: evidence.binding.agentID,
+            payloadSHA256: evidenceDigest
+        ))
+    }
+
     private func rotateAuditIfReady() throws {
         let storage = try auditLog.storageStatus()
         guard storage.configured, storage.rotationReady else { return }
@@ -2768,22 +2806,129 @@ private final class ManagementListenerDelegate: NSObject, NSXPCListenerDelegate 
 /// Service-wide production dependencies for the process-bound Agent runtime.
 /// Construction is all-or-none; an absent value means every Agent authority
 /// method remains fail-closed while the separate Mach service stays observable.
+private final class AgentRuntimeAuthorityState: @unchecked Sendable {
+    struct Snapshot {
+        let controlSequence: Int64
+        let authorityGeneration: Int64
+        let keyGeneration: Int64
+    }
+
+    private let control: NativeControlBundleV2Manager
+    private let keyGeneration: Int64
+    private let lock = NSLock()
+    private var runner: NativeDeviceSyncRunner?
+
+    init(control: NativeControlBundleV2Manager, keyGeneration: Int) throws {
+        guard keyGeneration >= 1, let normalized = Int64(exactly: keyGeneration) else {
+            throw NativeAgentSessionCoordinatorError.invalidConfiguration
+        }
+        self.control = control
+        self.keyGeneration = normalized
+    }
+
+    func install(runner: NativeDeviceSyncRunner) {
+        lock.withLock { self.runner = runner }
+    }
+
+    func snapshot(agentID: String) throws -> Snapshot {
+        let controlBefore = control.status()
+        try control.validateControl(agentID: agentID)
+        guard let runner = lock.withLock({ runner }) else {
+            throw NativeAgentSessionCoordinatorError.bindingDenied
+        }
+        let refresh = runner.status()
+        let controlAfter = control.status()
+        guard controlBefore == controlAfter,
+              controlAfter.operational, !controlAfter.globalRevoked,
+              !controlAfter.expired, !controlAfter.deviceRevoked,
+              controlAfter.sequence >= 1,
+              refresh.lifecycle == .running, refresh.state != .blocked,
+              refresh.generation >= 1, refresh.sequence == controlAfter.sequence else {
+            throw NativeAgentSessionCoordinatorError.bindingDenied
+        }
+        return Snapshot(
+            controlSequence: controlAfter.sequence,
+            authorityGeneration: refresh.generation,
+            keyGeneration: keyGeneration
+        )
+    }
+}
+
+private struct AgentConnectionSessionBindingObserver: NativeAgentSessionBindingObserving, Sendable {
+    let connectionGuard: NativeAgentConnectionGuard
+    let processObserver: NativeDarwinProcessObservationSource
+    let worktreeObserver: NativeDarwinGitWorktreeObserver
+    let authority: AgentRuntimeAuthorityState
+    let deviceID: String
+
+    func observeSessionBinding(agentID: String) throws -> NativeAgentSessionBinding {
+        let processBefore = try processObserver.observe(
+            pid: connectionGuard.context.pid,
+            expectedUserID: connectionGuard.context.effectiveUserID
+        )
+        try connectionGuard.revalidate(observation: processBefore)
+        let worktree = try worktreeObserver.observe(
+            pid: connectionGuard.context.pid,
+            expectedUserID: connectionGuard.context.effectiveUserID
+        ).binding
+        guard worktree.headObjectID != nil, worktree.headTreeID != nil,
+              let processDigest = Self.digest(connectionGuard.processBindingHash),
+              let ancestryDigest = Self.digest(connectionGuard.ancestryBindingHash) else {
+            throw NativeAgentSessionCoordinatorError.bindingDenied
+        }
+        let processAfter = try processObserver.observe(
+            pid: connectionGuard.context.pid,
+            expectedUserID: connectionGuard.context.effectiveUserID
+        )
+        try connectionGuard.revalidate(observation: processAfter)
+        let state = try authority.snapshot(agentID: agentID)
+        return try NativeAgentSessionBinding(
+            agentID: agentID,
+            deviceID: deviceID,
+            processBindingDigest: processDigest,
+            ancestryBindingDigest: ancestryDigest,
+            worktreeBindingDigest: worktree.digest,
+            controlSequence: state.controlSequence,
+            authorityGeneration: state.authorityGeneration,
+            keyGeneration: state.keyGeneration
+        )
+    }
+
+    private static func digest(_ value: String) -> Data? {
+        guard value.count == 64 else { return nil }
+        var bytes = [UInt8]()
+        bytes.reserveCapacity(32)
+        var index = value.startIndex
+        while index < value.endIndex {
+            let next = value.index(index, offsetBy: 2)
+            guard let byte = UInt8(value[index..<next], radix: 16) else { return nil }
+            bytes.append(byte)
+            index = next
+        }
+        return Data(bytes)
+    }
+}
+
 private final class AgentRuntimeDependencies: @unchecked Sendable {
     let authority: NativeAgentRuntimeAuthorityConfiguration
     let grantConsumer: NativeAgentGrantLeaseHTTPConsumer
     let registry = NativeAgentSessionRegistry()
     let signingIntentStore: NativeAgentSigningIntentStore
     let gitCommitSigner: NativeAgentGitCommitSigner
+    let authorityState: AgentRuntimeAuthorityState
 
     init(
         authority: NativeAgentRuntimeAuthorityConfiguration,
+        authorityState: AgentRuntimeAuthorityState,
         deviceSigner: SecureEnclaveKeyStore,
         gitSigner: SecureEnclaveKeyStore
     ) throws {
         try Self.validatePrivateDirectory(authority.signingIntentDirectory)
         self.authority = authority
+        self.authorityState = authorityState
         grantConsumer = try NativeAgentGrantLeaseHTTPConsumer(
             baseURL: authority.deviceAPIOrigin,
+            organizationID: authority.organizationID,
             transport: NativeAgentURLSessionHTTPTransport(),
             signer: deviceSigner
         )
@@ -2822,21 +2967,59 @@ private final class AgentRuntimeDependencies: @unchecked Sendable {
 /// Bootstrap is connection-bound and one-time. All authority-bearing methods
 /// continue to fail closed until the N3 lease registry is installed; there is
 /// no compatibility fallback to the bearer-oriented management endpoint.
+private final class AgentXPCReplyBox<Response>: @unchecked Sendable {
+    private let callback: (Response?, NSError?) -> Void
+    init(_ callback: @escaping (Response?, NSError?) -> Void) { self.callback = callback }
+    func call(_ response: Response?, _ error: NSError?) { callback(response, error) }
+}
+
 private final class AgentConnectionEndpoint: NSObject, AgentPassAgentXPCProtocol, @unchecked Sendable {
     private let connectionGuard: NativeAgentConnectionGuard
     private let observer: NativeDarwinProcessObservationSource
     private let runtime: AgentRuntimeDependencies?
     private let bootstrapStore = NativeAgentBootstrapChallengeStore()
     private let clocks = NativeAgentSystemClocks()
+    private let worker = DispatchQueue(label: "dev.agentpass.agent-session.connection")
+    private let coordinator: NativeAgentSessionCoordinator?
 
     init(
         connectionGuard: NativeAgentConnectionGuard,
         observer: NativeDarwinProcessObservationSource,
-        runtime: AgentRuntimeDependencies?
+        runtime: AgentRuntimeDependencies?,
+        auditAppender: any NativeAgentSessionAuditAppending
     ) {
         self.connectionGuard = connectionGuard
         self.observer = observer
         self.runtime = runtime
+        if let runtime {
+            let bindingObserver = AgentConnectionSessionBindingObserver(
+                connectionGuard: connectionGuard,
+                processObserver: observer,
+                worktreeObserver: NativeDarwinGitWorktreeObserver(),
+                authority: runtime.authorityState,
+                deviceID: runtime.authority.deviceID
+            )
+            coordinator = try? NativeAgentSessionCoordinator(
+                connectionTokenIdentity: connectionGuard.context.tokenIdentity,
+                connectionRevalidator: {
+                    let observation = try observer.observe(
+                        pid: connectionGuard.context.pid,
+                        expectedUserID: connectionGuard.context.effectiveUserID
+                    )
+                    try connectionGuard.revalidate(observation: observation)
+                },
+                bootstrapStore: bootstrapStore,
+                bindingObserver: bindingObserver,
+                grantConsumer: runtime.grantConsumer,
+                registry: runtime.registry,
+                audit: auditAppender,
+                wallClock: clocks.wallClock,
+                monotonicClock: clocks.monotonicClock,
+                authority: runtime.authority
+            )
+        } else {
+            coordinator = nil
+        }
     }
 
     private func authorizeConnection() throws {
@@ -2853,6 +3036,7 @@ private final class AgentConnectionEndpoint: NSObject, AgentPassAgentXPCProtocol
             return NativeAgentSessionDenialReason.unavailable.nsError
         } catch {
             bootstrapStore.invalidate()
+            coordinator?.invalidateConnection()
             return NativeAgentSessionDenialReason.peerDenied.nsError
         }
     }
@@ -2910,11 +3094,60 @@ private final class AgentConnectionEndpoint: NSObject, AgentPassAgentXPCProtocol
     }
 
     func startAgentSession(_ request: AgentPassAgentSessionRequest, withReply reply: @escaping (AgentPassAgentSessionResponse?, NSError?) -> Void) {
-        reply(nil, unavailableAfterAuthorization())
+        let bootstrapID = request.bootstrapID
+        let proof = request.proof
+        let replyBox = AgentXPCReplyBox(reply)
+        worker.async { [coordinator] in
+            guard let coordinator else {
+                replyBox.call(nil, NativeAgentSessionDenialReason.unavailable.nsError)
+                return
+            }
+            do {
+                let activation = try coordinator.start(bootstrapID: bootstrapID, proof: proof)
+                guard let response = AgentPassAgentSessionResponse(
+                    sessionID: activation.status.sessionID,
+                    leaseID: activation.status.leaseID,
+                    processBindingDigest: activation.binding.processBindingDigest,
+                    worktreeBindingDigest: activation.binding.worktreeBindingDigest,
+                    expiresAtMilliseconds: activation.status.expiresAtMilliseconds,
+                    maxSignatures: activation.status.maxSignatures
+                ) else {
+                    coordinator.abortActivation(sessionID: activation.status.sessionID)
+                    replyBox.call(nil, NativeAgentSessionDenialReason.internalFailure.nsError)
+                    return
+                }
+                replyBox.call(response, nil)
+            } catch {
+                replyBox.call(nil, Self.denial(for: error).nsError)
+            }
+        }
     }
 
     func agentSessionStatus(_ request: AgentPassAgentSessionStatusRequest, withReply reply: @escaping (AgentPassAgentSessionStatusResponse?, NSError?) -> Void) {
-        reply(nil, unavailableAfterAuthorization())
+        let sessionID = request.sessionID
+        let replyBox = AgentXPCReplyBox(reply)
+        worker.async { [coordinator] in
+            guard let coordinator else {
+                replyBox.call(nil, NativeAgentSessionDenialReason.unavailable.nsError)
+                return
+            }
+            do {
+                let status = try coordinator.status(sessionID: sessionID)
+                guard let response = AgentPassAgentSessionStatusResponse(
+                    sessionID: status.sessionID,
+                    status: status.state.rawValue,
+                    expiresAtMilliseconds: status.expiresAtMilliseconds,
+                    maxSignatures: status.maxSignatures,
+                    usedSignatures: status.usedSignatures
+                ) else {
+                    replyBox.call(nil, NativeAgentSessionDenialReason.internalFailure.nsError)
+                    return
+                }
+                replyBox.call(response, nil)
+            } catch {
+                replyBox.call(nil, Self.denial(for: error).nsError)
+            }
+        }
     }
 
     func signGitCommit(_ request: AgentPassAgentSignRequest, withReply reply: @escaping (AgentPassAgentSignResponse?, NSError?) -> Void) {
@@ -2924,19 +3157,68 @@ private final class AgentConnectionEndpoint: NSObject, AgentPassAgentXPCProtocol
     }
 
     func closeAgentSession(_ request: AgentPassAgentCloseSessionRequest, withReply reply: @escaping (AgentPassAgentCloseSessionResponse?, NSError?) -> Void) {
+        let sessionID = request.sessionID
+        let reason = AgentPassAgentSessionCloseReason(rawValue: request.reason)
+        let replyBox = AgentXPCReplyBox(reply)
+        worker.async { [coordinator, clocks] in
+            guard let coordinator, let reason else {
+                replyBox.call(nil, NativeAgentSessionDenialReason.unavailable.nsError)
+                return
+            }
+            do {
+                let status = try coordinator.close(sessionID: sessionID, reason: reason)
+                let closedAt = try clocks.wallClock.sample().millisecondsSinceUnixEpoch
+                guard let response = AgentPassAgentCloseSessionResponse(
+                    sessionID: status.sessionID,
+                    closedAtMilliseconds: closedAt
+                ) else {
+                    replyBox.call(nil, NativeAgentSessionDenialReason.internalFailure.nsError)
+                    return
+                }
+                replyBox.call(response, nil)
+            } catch {
+                replyBox.call(nil, Self.denial(for: error).nsError)
+            }
+        }
+    }
+
+    func invalidateConnection() {
+        coordinator?.invalidateConnection()
         bootstrapStore.invalidate()
-        reply(nil, unavailableAfterAuthorization())
+    }
+
+    private static func denial(for error: Error) -> NativeAgentSessionDenialReason {
+        guard let error = error as? NativeAgentSessionCoordinatorError else {
+            return .internalFailure
+        }
+        switch error {
+        case .invalidInput: return .malformedRequest
+        case .connectionDenied: return .peerDenied
+        case .challengeDenied: return .challengeDenied
+        case .bindingDenied: return .worktreeDenied
+        case .grantDenied: return .grantDenied
+        case .leaseDenied, .activationDenied: return .leaseUnavailable
+        case .sessionDenied, .invalidated: return .revoked
+        case .invalidConfiguration: return .unavailable
+        case .auditUnavailable: return .internalFailure
+        }
     }
 }
 
 private final class AgentListenerDelegate: NSObject, NSXPCListenerDelegate {
     private let configuration: ServiceConfiguration
     private let runtime: AgentRuntimeDependencies?
+    private let auditAppender: any NativeAgentSessionAuditAppending
     private let observer = NativeDarwinProcessObservationSource()
 
-    init(configuration: ServiceConfiguration, runtime: AgentRuntimeDependencies?) {
+    init(
+        configuration: ServiceConfiguration,
+        runtime: AgentRuntimeDependencies?,
+        auditAppender: any NativeAgentSessionAuditAppending
+    ) {
         self.configuration = configuration
         self.runtime = runtime
+        self.auditAppender = auditAppender
     }
 
     func listener(_ listener: NSXPCListener, shouldAcceptNewConnection connection: NSXPCConnection) -> Bool {
@@ -2958,11 +3240,16 @@ private final class AgentListenerDelegate: NSObject, NSXPCListenerDelegate {
             )
             let guardValue = try NativeAgentConnectionGuard(context: context, observation: observation)
             connection.exportedInterface = AgentPassAgentXPCInterface.make()
-            connection.exportedObject = AgentConnectionEndpoint(
+            let endpoint = AgentConnectionEndpoint(
                 connectionGuard: guardValue,
                 observer: observer,
-                runtime: runtime
+                runtime: runtime,
+                auditAppender: auditAppender
             )
+            connection.exportedObject = endpoint
+            connection.invalidationHandler = { [weak endpoint] in
+                endpoint?.invalidateConnection()
+            }
             connection.resume()
             return true
         } catch {
@@ -3639,11 +3926,17 @@ do {
     case .disabled:
         agentRuntime = nil
     case .enabled(let authority):
-        guard let deviceSigner = controlV2DeviceSigner else {
+        guard let deviceSigner = controlV2DeviceSigner,
+              let controlV2Manager else {
             throw AgentPassNativeError.invalidConfiguration("Agent runtime device authentication is unavailable")
         }
+        let authorityState = try AgentRuntimeAuthorityState(
+            control: controlV2Manager,
+            keyGeneration: activeSigning?.generation ?? 1
+        )
         agentRuntime = try AgentRuntimeDependencies(
             authority: authority,
+            authorityState: authorityState,
             deviceSigner: deviceSigner,
             gitSigner: keyStore
         )
@@ -3714,6 +4007,7 @@ do {
                 jitterFraction: 0.10
             )
         )
+        agentRuntime?.authorityState.install(runner: runner)
         try endpoint.installDeviceSyncRunner(
             runner,
             devicePublicKeyPEM: try p256SubjectPublicKeyInfoPEM(x963: deviceSigner.publicKeyX963),
@@ -3724,7 +4018,11 @@ do {
         try endpoint.startControlRefresh(url: refresh.url, refreshSeconds: refresh.refreshSeconds)
     }
     let managementDelegate = ManagementListenerDelegate(configuration: configuration, endpoint: endpoint)
-    let agentDelegate = AgentListenerDelegate(configuration: configuration, runtime: agentRuntime)
+    let agentDelegate = AgentListenerDelegate(
+        configuration: configuration,
+        runtime: agentRuntime,
+        auditAppender: endpoint
+    )
     managementListener.delegate = managementDelegate
     agentListener.delegate = agentDelegate
     managementListener.resume()

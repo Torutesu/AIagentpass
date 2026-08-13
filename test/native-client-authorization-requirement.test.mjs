@@ -55,7 +55,8 @@ test('production listeners export separate management and connection-scoped Agen
   assert.match(service, /NSXPCListener\(machServiceName: configuration\.machServiceName\)/u);
   assert.match(service, /NSXPCListener\(machServiceName: configuration\.agentMachServiceName\)/u);
   assert.match(service, /connection\.exportedInterface = AgentPassAgentXPCInterface\.make\(\)/u);
-  assert.match(service, /connection\.exportedObject = AgentConnectionEndpoint\(\s*connectionGuard: guardValue,\s*observer: observer,\s*runtime: runtime\s*\)/u);
+  assert.match(service, /let endpoint = AgentConnectionEndpoint\(\s*connectionGuard: guardValue,\s*observer: observer,\s*runtime: runtime,\s*auditAppender: auditAppender\s*\)/u);
+  assert.match(service, /connection\.invalidationHandler[\s\S]*endpoint\?\.invalidateConnection\(\)/u);
   assert.match(service, /observer\.observe\(pid: peerPID, expectedUserID: peerUID\)/u);
   assert.match(service, /connection\.processIdentifier/u);
   assert.match(service, /connection\.auditSessionIdentifier/u);
@@ -63,7 +64,7 @@ test('production listeners export separate management and connection-scoped Agen
   assert.doesNotMatch(agentEndpoint, /ServiceEndpoint|AgentPassNativeServiceProtocol|rotateAudit|stageKey|applyControlBundle/u);
 });
 
-test('Agent bootstrap is connection-bound while authority-bearing methods remain fail closed', () => {
+test('Agent bootstrap and session lifecycle are connection-bound while signing remains fail closed', () => {
   const agentEndpoint = service.slice(service.indexOf('private final class AgentConnectionEndpoint'), service.indexOf('private final class AgentListenerDelegate'));
   assert.match(agentEndpoint, /NativeAgentBootstrapChallengeStore/u);
   assert.match(agentEndpoint, /connectionGuard\.context\.tokenIdentity/u);
@@ -76,5 +77,11 @@ test('Agent bootstrap is connection-bound while authority-bearing methods remain
   assert.match(agentEndpoint, /NativeAgentSessionDenialReason\.challengeDenied\.nsError/u);
   assert.match(agentEndpoint, /NativeAgentSessionDenialReason\.unavailable\.nsError/u);
   assert.match(agentEndpoint, /guard runtime != nil/u);
+  assert.match(agentEndpoint, /NativeAgentSessionCoordinator/u);
+  assert.match(agentEndpoint, /coordinator\.start\(bootstrapID: bootstrapID, proof: proof\)/u);
+  assert.match(agentEndpoint, /coordinator\.status\(sessionID: sessionID\)/u);
+  assert.match(agentEndpoint, /coordinator\.close\(sessionID: sessionID, reason: reason\)/u);
+  assert.match(agentEndpoint, /coordinator\?\.invalidateConnection\(\)/u);
+  assert.match(agentEndpoint, /func signGitCommit[\s\S]*unavailableAfterAuthorization\(\)/u);
   assert.doesNotMatch(agentEndpoint, /AGENTPASS_SESSION|privateKey|private_key|authorizeV2|NativeSessionManager|\.sign\(/u);
 });
