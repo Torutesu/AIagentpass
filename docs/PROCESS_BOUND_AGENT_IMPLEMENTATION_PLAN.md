@@ -161,14 +161,14 @@ The critical path is N1 through N4. UI and adapter convenience work must not pre
 | --- | --- | --- | --- |
 | Grant/Lease schemas and OpenAPI | Implemented | Closed shapes, canonical timestamps, bounded scope/TTL/budget, Human and Device operations | Compatibility fixtures and deployed-client negotiation |
 | PostgreSQL migrations 0018–0021 | Implemented | Immutable Grant identity, one-way consumption, process-bound session rows, authority-generation binding, RLS, audit binding columns | Retain migration, rollback, and ambiguity evidence across supported PostgreSQL versions |
-| Grant crypto | Implemented | Purpose-domain-separated canonical Ed25519 signing, pinned public-key verification, strict output validation | Hosted KMS/HSM adapter, rotation set, runtime key configuration |
-| Human HTTP boundary | Implemented, not routed | Origin, session, CSRF, role, recent WebAuthn, strict JSON, pre-WebAuthn exact replay, stable errors | Hosted signer, process-policy resolver, and server/runtime wiring |
-| Device HTTP boundary | Implemented, not routed | Exact raw path/body device-auth boundary, Grant verification hook, exact binding retry, stable errors | Shared nonce/rate limiter wiring, server/runtime route, audit/outbox |
+| Grant crypto | Runtime-composed | Purpose-domain-separated canonical Ed25519 signing, pinned public-key verification, strict output validation, hosted provider timeout/error boundary, purpose-key separation, continuous metadata readiness | Verification-key rotation set and production KMS/HSM provider |
+| Human HTTP boundary | Runtime-composed | Origin, session, CSRF, role, recent WebAuthn, strict JSON, pre-WebAuthn exact replay, stable errors, exact frozen route dispatch | Real-PostgreSQL HTTP restart/rotation/drain qualification |
+| Device HTTP boundary | Runtime-composed | Exact raw path/body device authentication, shared nonce and rate-limit authority, Grant verification, exact binding retry, stable errors, exact frozen route interception | Consumption audit/outbox and real-PostgreSQL route contention evidence |
 | PostgreSQL session authority | Issuance implemented; consumption partial | Tenant-local transactions, canonical fingerprint re-derivation, deterministic Grant identity, current applied generation/bundle/ACK checks, one-time consume, binding conflict, issuance audit/outbox atomicity, rollback and exact response-loss recovery | Consumption-side device audit/outbox, cleanup, metrics, and route-level contention evidence |
 | Darwin observation | Partial | Live current-process facts, executable file race checks, code identity, boot identity, bounded ancestry | Derive the XPC peer from its audit token; observe/re-observe that peer per connection |
 | Agent XPC and native lease machine | Not started | Contracts and injectable identity model exist | N2–N4 implementation and release-only enforcement |
 
-The Human issuance service deliberately depends on a higher-level repository contract than the low-level Grant/Lease persistence repository. That security boundary is now implemented: it re-derives the canonical request fingerprint, reauthorizes the Human session and membership under lock, validates the agent/device/policy/current applied bundle authority, invokes signing once, and commits the immutable Grant, audit event, publication intent, and idempotency pointer atomically. It requires an injected process-binding-policy resolver and remains intentionally absent from production runtime composition until the hosted signer and route-readiness work in M2-A2 is complete.
+The Human issuance service deliberately depends on a higher-level repository contract than the low-level Grant/Lease persistence repository. That security boundary is now runtime-composed: it re-derives the canonical request fingerprint, reauthorizes the Human session and membership under lock, validates the agent/device/policy/current applied bundle authority, invokes the purpose-separated hosted signer once, and commits the immutable Grant, audit event, publication intent, and idempotency pointer atomically. A protected release-policy registry constrains the process-binding policy tuple, and signer metadata degradation now fails readiness closed. M2-A2 remains open until restart, rotation, drain, and no-fallthrough behavior is proven through real HTTP against PostgreSQL.
 
 ### Wave M2-A — Cloud runtime authority
 
@@ -187,7 +187,7 @@ Exit gate: a real-PostgreSQL test proves new issue, exact retry, changed-key con
 
 Evidence: unit and real-PostgreSQL tests cover canonical-fingerprint tampering, exact retry without a second WebAuthn proof, changed-request conflict, simultaneous issue convergence with one signer call, inactive member/device/agent and kind mismatch, scope escalation, stale authority generation, signer rollback, audit rollback, outbox rollback, and exact retry after the committed response is lost. Runtime exposure remains gated on M2-A2 and does not inherit this milestone automatically.
 
-#### M2-A2 — hosted signer and route composition
+#### M2-A2 — hosted signer and route composition (implementation complete; qualification open)
 
 1. Add purpose-separated `AGENTPASS_CLOUD_AGENT_SESSION_*` key configuration. Hosted mode must reject reuse of bundle or refresh keys.
 2. Implement the KMS/HSM signer adapter with pinned Ed25519 public metadata, timeout, bounded errors, and rotation-aware verification keys. Keep the local signer test/evaluation-only.
@@ -195,6 +195,17 @@ Evidence: unit and real-PostgreSQL tests cover canonical-fingerprint tampering, 
 4. Add readiness checks for issuance storage, signing-key metadata, and verification-key freshness. A failed dependency disables issuance/consumption rather than falling back to bearer authority.
 
 Exit gate: hosted runtime tests send real HTTP requests through the Node server, restart between retries, rotate verification keys, drain in-flight requests, and prove no route falls through to weaker authentication.
+
+Implemented evidence: hosted mode requires purpose-separated Agent Session signer configuration and a protected process-policy registry; provider metadata is pinned to the configured Ed25519 public key; forged output, metadata substitution, timeout, and bundle/refresh key reuse fail closed; Human issuance and Device consumption are composed only on the frozen routes; Device authentication reuses PostgreSQL nonce and rate-limit authorities; and readiness becomes unavailable when signer metadata can no longer be verified. Unit and in-process HTTP tests cover exact-path interception and weaker-route non-fallthrough.
+
+Qualification backlog, in dependency order:
+
+1. Add a real-PostgreSQL HTTP fixture that creates organization, owner session, WebAuthn freshness, agent, device, policy, and applied ControlBundle state through supported boundaries.
+2. Issue through the Human route, restart the Cloud runtime, and prove an exact idempotent retry returns the byte-equivalent Grant without a second signer invocation.
+3. Consume through the signed Device route from two concurrent clients and prove one Lease plus exact-retry convergence; repeat after runtime restart.
+4. Replace the single verification-key pin with an active/retiring key set. Prove old Grants remain verifiable through the overlap window, new Grants use only the active key, unknown/expired keys fail, and readiness rejects provider/config disagreement.
+5. Hold an issuance and consumption request in flight, begin drain, prove the requests finish atomically, and prove subsequent requests receive `503 draining` without signer or repository mutation.
+6. Run the alias/query/trailing-slash/case/method substitution matrix against the complete hosted server and retain the HTTP evidence as a CI artifact.
 
 #### M2-A3 — consume/audit completion
 

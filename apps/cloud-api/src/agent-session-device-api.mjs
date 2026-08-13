@@ -96,6 +96,7 @@ export function createAgentSessionDeviceApi({
   verifyDeviceRequest,
   grantVerifier,
   repository,
+  rateLimiter = undefined,
   now = () => Date.now(),
   requestIdFactory = () => crypto.randomUUID(),
   maxBodyBytes = DEFAULT_MAX_BODY_BYTES
@@ -105,6 +106,7 @@ export function createAgentSessionDeviceApi({
   if (!repository || typeof repository.consumeAgentSessionGrant !== "function") {
     throw new TypeError("repository must expose consumeAgentSessionGrant()");
   }
+  if (rateLimiter !== undefined && (!rateLimiter || typeof rateLimiter.acquire !== "function")) throw new TypeError("rateLimiter must expose acquire()");
   if (typeof now !== "function") throw new TypeError("now must be a function");
   if (typeof requestIdFactory !== "function") throw new TypeError("requestIdFactory must be a function");
   if (!Number.isSafeInteger(maxBodyBytes) || maxBodyBytes < 1_024 || maxBodyBytes > DEFAULT_MAX_BODY_BYTES) {
@@ -145,6 +147,17 @@ export function createAgentSessionDeviceApi({
         throw mapDeviceAuthenticationError(error);
       }
       assertAuthenticatedDevice(authenticated, route);
+      if (rateLimiter) {
+        let decision;
+        try {
+          decision = await rateLimiter.acquire({ tenantId: route.organizationId, principalType: "device", principalId: route.deviceId });
+        } catch (error) {
+          if (isRateLimitCode(error?.code) || error?.status === 429) throw mapRepositoryError(error);
+          throw new AgentSessionDeviceHttpError(AGENT_SESSION_DEVICE_HTTP_ERROR_CODES.UNAVAILABLE, { cause: error });
+        }
+        if (!validRateLimitDecision(decision)) throw new AgentSessionDeviceHttpError(AGENT_SESSION_DEVICE_HTTP_ERROR_CODES.UNAVAILABLE);
+        if (!decision.allowed) throw new AgentSessionDeviceHttpError(AGENT_SESSION_DEVICE_HTTP_ERROR_CODES.RATE_LIMITED, { status: 429, retryAfterSeconds: decision.retryAfterSeconds });
+      }
 
       const body = parseBody(request.body, maxBodyBytes);
       assertExactKeys(body, BODY_KEYS, "consume request");
@@ -231,6 +244,13 @@ function resolveVerifier(value, label) {
   if (value && typeof value.verifyGrant === "function") return value.verifyGrant.bind(value);
   if (value && typeof value.authenticate === "function") return value.authenticate.bind(value);
   throw new TypeError(`${label} must be a function or expose verify()/authenticate()`);
+}
+
+function validRateLimitDecision(value) {
+  return value && typeof value === "object" && typeof value.allowed === "boolean"
+    && Number.isSafeInteger(value.limit) && value.limit > 0
+    && Number.isSafeInteger(value.remaining) && value.remaining >= 0 && value.remaining <= value.limit
+    && Number.isSafeInteger(value.retryAfterSeconds) && value.retryAfterSeconds >= 0;
 }
 
 async function normalizeRequest(input, maxBodyBytes) {

@@ -60,7 +60,7 @@ function statement() {
   };
 }
 
-async function fixture({ repository = undefined, grantVerifier = undefined } = {}) {
+async function fixture({ repository = undefined, grantVerifier = undefined, rateLimiter = undefined } = {}) {
   const deviceKeys = crypto.generateKeyPairSync("ed25519");
   const grantKeys = crypto.generateKeyPairSync("ed25519");
   const grantSigner = createLocalAgentSessionGrantSigner({
@@ -76,7 +76,7 @@ async function fixture({ repository = undefined, grantVerifier = undefined } = {
     device_public_key: deviceKeys.publicKey.export({ type: "spki", format: "pem" }).toString()
   };
   const replayCache = createReplayCache();
-  const calls = { authenticate: [], grantVerify: [], repository: [] };
+  const calls = { authenticate: [], grantVerify: [], repository: [], rateLimit: [] };
   const defaultRepository = async (input) => {
     calls.repository.push(input);
     return { lease: lease(grant) };
@@ -93,10 +93,22 @@ async function fixture({ repository = undefined, grantVerifier = undefined } = {
       if (grantVerifier) return grantVerifier(value, options);
       return verifyAgentSessionGrant(value, { publicKey: grantKeys.publicKey, keyId: statement().key_id, now: NOW });
     },
-    repository: { consumeAgentSessionGrant: repository ?? defaultRepository }
+    repository: { consumeAgentSessionGrant: repository ?? defaultRepository },
+    ...(rateLimiter === undefined ? {} : { rateLimiter: { async acquire(input) { calls.rateLimit.push(input); return rateLimiter(input); } } })
   });
   return { api, grant, grantKeys, deviceKeys, calls };
 }
+
+test("applies the shared post-authentication Device rate limit before Grant verification", async () => {
+  const f = await fixture({ rateLimiter: async () => ({ allowed: false, limit: 10, remaining: 0, retryAfterSeconds: 7 }) });
+  const result = await f.api.handle(requestFor(f));
+  assert.equal(result.status, 429);
+  assert.equal(result.body.error.code, AGENT_SESSION_DEVICE_HTTP_ERROR_CODES.RATE_LIMITED);
+  assert.equal(result.headers["Retry-After"], "7");
+  assert.deepEqual(f.calls.rateLimit, [{ tenantId: IDS.organization, principalType: "device", principalId: IDS.device }]);
+  assert.equal(f.calls.grantVerify.length, 0);
+  assert.equal(f.calls.repository.length, 0);
+});
 
 function lease(grant, overrides = {}) {
   return {

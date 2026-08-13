@@ -102,7 +102,7 @@ The frozen implementation sequence, process/ancestry boundary, contracts, migrat
 
 ### M2.1 Agent adapter contract
 
-Foundation status (2026-08-13): frozen grant/lease/request-v2 schemas, Human issuance and Device consumption OpenAPI operations, PostgreSQL migrations 0018–0021, the atomic PostgreSQL Human issuance repository, low-level consumption authority, and the injectable native process/ancestry identity model are implemented. Hosted signer/runtime route composition, consumption audit/outbox completion, audit-token-scoped Darwin peer observation, the split Agent XPC service, and physical qualification are not yet implemented.
+Foundation status (2026-08-13): frozen grant/lease/request-v2 schemas, Human issuance and Device consumption OpenAPI operations, PostgreSQL migrations 0018–0021, the atomic PostgreSQL Human issuance repository, low-level consumption authority, protected process-policy registry, purpose-separated hosted signer boundary, exact hosted runtime route composition, and injectable native process/ancestry identity model are implemented. Real-PostgreSQL HTTP restart/rotation/drain qualification, consumption audit/outbox completion, audit-token-scoped Darwin peer observation, the split Agent XPC service, and physical qualification remain open.
 
 Freeze one local adapter contract shared by Claude Code and Cursor:
 

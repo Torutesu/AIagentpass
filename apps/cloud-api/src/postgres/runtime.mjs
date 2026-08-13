@@ -10,6 +10,7 @@ import { createSharedControlRepository } from "./shared-control-repository.mjs";
 import { createPostgresRefreshHintNotifier } from "./refresh-hint-notifier.mjs";
 import { createPostgresAdminAuditRepository } from "./admin-audit-repository.mjs";
 import { createAgentSessionAuthorityRepository } from "./agent-session-authority-repository.mjs";
+import { createPostgresAgentSessionIssuanceRepository } from "./agent-session-issuance-repository.mjs";
 import { createAuthorityReductionAuditAppender } from "./authority-reduction-audit.mjs";
 import {
   createDrainController,
@@ -17,7 +18,8 @@ import {
   createOperationalMetrics
 } from "./operational-health.mjs";
 
-export async function createPostgresRuntime({ env = process.env, PoolClass = Pool, applicationVersion = "unknown", refreshNonceCodec } = {}) {
+export async function createPostgresRuntime({ env = process.env, PoolClass = Pool, applicationVersion = "unknown", refreshNonceCodec, resolveProcessBindingPolicy } = {}) {
+  if (resolveProcessBindingPolicy !== undefined && typeof resolveProcessBindingPolicy !== "function") throw new TypeError("resolveProcessBindingPolicy must be a function");
   const config = loadPostgresConfig(env);
   const pool = new PoolClass({ connectionString: config.connectionString, ssl: { rejectUnauthorized: true }, max: config.maxConnections, connectionTimeoutMillis: config.connectionTimeoutMs, idleTimeoutMillis: config.idleTimeoutMs, statement_timeout: config.statementTimeoutMs, lock_timeout: config.lockTimeoutMs, query_timeout: config.statementTimeoutMs + 1_000, allowExitOnIdle: false });
   const migrationRunner = createMigrationRunner({ client: pool, applicationVersion });
@@ -60,6 +62,14 @@ export async function createPostgresRuntime({ env = process.env, PoolClass = Poo
   const capabilityNonceSecret = exactSecret(env.AGENTPASS_CAPABILITY_NONCE_SECRET, "AGENTPASS_CAPABILITY_NONCE_SECRET");
   const adminAuditRepository = createPostgresAdminAuditRepository({ client: pool });
   const agentSessionAuthorityRepository = createAgentSessionAuthorityRepository({ client: pool });
+  const sharedControlRepository = createSharedControlRepository({ client: pool });
+  const agentSessionIssuanceRepository = resolveProcessBindingPolicy === undefined ? undefined : createPostgresAgentSessionIssuanceRepository({
+    client: pool,
+    authorityRepository: agentSessionAuthorityRepository,
+    sharedControls: sharedControlRepository,
+    auditRepository: adminAuditRepository,
+    resolveProcessBindingPolicy
+  });
   const authorityReductionAuditAppender = createAuthorityReductionAuditAppender({ adminAuditRepository });
   const onAuthorityReduction = async ({ tx, organization_id, occurred_at, policy, resource, member_id, actor_member_id, capabilities }) => {
     const issuedAt = occurred_at ?? policy?.updated_at;
@@ -80,7 +90,6 @@ export async function createPostgresRuntime({ env = process.env, PoolClass = Poo
   };
   const organizationRepository = createPostgresOrganizationRepository({ client: pool, onAuthorityReduction });
   const capabilityAuthorityRepository = createCapabilityAuthorityRepository({ client: pool, onAuthorityReduction });
-  const sharedControlRepository = createSharedControlRepository({ client: pool });
   const controlPlaneStore = createPostgresControlPlaneStore({
     client: pool,
     organizationRepository,
@@ -97,6 +106,7 @@ export async function createPostgresRuntime({ env = process.env, PoolClass = Poo
     organizationRepository,
     capabilityAuthorityRepository,
     agentSessionAuthorityRepository,
+    ...(agentSessionIssuanceRepository ? { agentSessionIssuanceRepository } : {}),
     sharedControlRepository,
     controlPlaneStore,
     refreshHintNotifier,

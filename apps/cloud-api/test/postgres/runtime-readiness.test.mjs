@@ -59,10 +59,11 @@ function env() {
 
 test("PostgreSQL runtime exposes exact-schema readiness, tracked work, and bounded drain", async () => {
   const migrations = await loadSqlMigrations();
-  const runtime = await createPostgresRuntime({ env: env(), PoolClass: FakePool, applicationVersion: "runtime-readiness-test" });
+  const runtime = await createPostgresRuntime({ env: env(), PoolClass: FakePool, applicationVersion: "runtime-readiness-test", resolveProcessBindingPolicy: () => true });
   assert.equal(runtime.pool.applied.length, migrations.length);
   assert.equal(migrations.length, 21);
   assert.equal((await runtime.readiness()).code, "ready");
+  assert.equal(typeof runtime.agentSessionIssuanceRepository?.issueAgentSessionGrant, "function");
 
   let finish;
   const inFlight = runtime.trackInFlight(() => new Promise((resolve) => { finish = resolve; }));

@@ -35,6 +35,9 @@ function hostedEnv(overrides = {}) {
     AGENTPASS_CLOUD_REFRESH_PRIVATE_KEY_PATH: "/srv/agentpass/hosted/refresh-private.pem",
     AGENTPASS_CLOUD_REFRESH_KEY_ID: "refresh-2026-08",
     AGENTPASS_CLOUD_REFRESH_NONCE_KEYRING_PATH: "/srv/agentpass/hosted/refresh-nonce-keyring.json",
+    AGENTPASS_CLOUD_AGENT_SESSION_KEY_ID: "agent-session-2026-08",
+    AGENTPASS_CLOUD_AGENT_SESSION_PUBLIC_KEY: "hosted-public-key-pin",
+    AGENTPASS_CLOUD_AGENT_SESSION_PROCESS_POLICIES_PATH: "/srv/agentpass/hosted/process-policies.json",
     ...overrides
   };
 }
@@ -103,7 +106,10 @@ test("accepts hosted only with complete PostgreSQL and Human Auth prerequisites"
     "AGENTPASS_CAPABILITY_NONCE_SECRET",
     "AGENTPASS_CLOUD_REFRESH_PRIVATE_KEY_PATH",
     "AGENTPASS_CLOUD_REFRESH_KEY_ID",
-    "AGENTPASS_CLOUD_REFRESH_NONCE_KEYRING_PATH"
+    "AGENTPASS_CLOUD_REFRESH_NONCE_KEYRING_PATH",
+    "AGENTPASS_CLOUD_AGENT_SESSION_KEY_ID",
+    "AGENTPASS_CLOUD_AGENT_SESSION_PUBLIC_KEY",
+    "AGENTPASS_CLOUD_AGENT_SESSION_PROCESS_POLICIES_PATH"
   ]) {
     const env = hostedEnv();
     delete env[name];

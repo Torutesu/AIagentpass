@@ -4,7 +4,7 @@ import path from "node:path";
 
 import { createCloudApi } from "./server.mjs";
 import { createCloudStore } from "./store.mjs";
-import { createPersistentReplayCache } from "./auth.mjs";
+import { createPersistentReplayCache, verifyDeviceRequest } from "./auth.mjs";
 import { createRateLimiter } from "./rate-limit.mjs";
 import { createPostgresRuntime } from "./postgres/runtime.mjs";
 import { createHumanAuthRuntime } from "./human-auth/runtime.mjs";
@@ -12,10 +12,14 @@ import { parseCloudRuntimeProfile } from "./runtime-profile.mjs";
 import { createRefreshHintService } from "./refresh-hint-service.mjs";
 import { createEd25519RefreshHintSigner } from "./refresh-hint-signer.mjs";
 import { createRefreshNonceCodec } from "./postgres/refresh-nonce-codec.mjs";
+import { createHostedAgentSessionGrantSigner } from "./agent-session-signer-config.mjs";
+import { createProcessBindingPolicyRegistry } from "./process-binding-policy-registry.mjs";
+import { createAgentSessionDeviceApi } from "./agent-session-device-api.mjs";
+import { verifyAgentSessionGrant } from "./agent-session-grant.mjs";
 
 const IDENTIFIER = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 
-export async function createCloudRuntime({ env = process.env, logger = console, postgresFactory = createPostgresRuntime, humanAuthFactory = createHumanAuthRuntime } = {}) {
+export async function createCloudRuntime({ env = process.env, logger = console, postgresFactory = createPostgresRuntime, humanAuthFactory = createHumanAuthRuntime, agentSessionSignerProvider, agentSessionSignerFactory = createHostedAgentSessionGrantSigner } = {}) {
   const profile = parseCloudRuntimeProfile(env);
   const config = loadRuntimeConfig(env);
   const tokenRecords = profile.isHosted ? [] : readProtectedJson(config.tokenRecordsPath, "token records", 1024 * 1024);
@@ -26,6 +30,8 @@ export async function createCloudRuntime({ env = process.env, logger = console, 
   if (privateKey.asymmetricKeyType !== "ed25519") throw new Error("Cloud bundle private key must be Ed25519");
   let refreshHintSigner;
   let refreshNonceCodec;
+  let agentSessionSigner;
+  let processBindingPolicies;
   if (profile.isHosted) {
     const refreshPrivateKeyPEM = readProtectedFile(config.refreshPrivateKeyPath, "refresh private key", 16 * 1024).toString("utf8");
     let refreshPrivateKey;
@@ -36,6 +42,18 @@ export async function createCloudRuntime({ env = process.env, logger = console, 
     if (bundlePublic.equals(refreshPublic)) throw new Error("Cloud refresh key must be purpose-separated from the bundle key");
     refreshHintSigner = createEd25519RefreshHintSigner({ privateKey: refreshPrivateKey, keyId: config.refreshKeyId });
     refreshNonceCodec = loadRefreshNonceCodec(config.refreshNonceKeyringPath);
+    processBindingPolicies = createProcessBindingPolicyRegistry(readProtectedJson(config.agentSessionProcessPoliciesPath, "Agent Session process policies", 256 * 1024));
+    agentSessionSigner = await agentSessionSignerFactory({
+      provider: agentSessionSignerProvider,
+      env,
+      references: {
+        bundle: { keyId: config.keyId, publicKey: privateKey },
+        refresh: { keyId: config.refreshKeyId, publicKey: refreshPrivateKey }
+      }
+    });
+    if (!agentSessionSigner || typeof agentSessionSigner.signAgentSessionGrant !== "function" || typeof agentSessionSigner.health !== "function" || typeof agentSessionSigner.key_id !== "string") throw new Error("Cloud Agent Session signer is unavailable");
+    const signerHealth = await agentSessionSigner.health();
+    if (signerHealth?.ready !== true || signerHealth.key_id !== agentSessionSigner.key_id) throw new Error("Cloud Agent Session signer is unavailable");
   }
   const cursorSecret = config.humanAuth ? requireHumanCursorSecret(env.AGENTPASS_HUMAN_CURSOR_SECRET) : undefined;
   const consoleIdentityPublicKey = config.humanAuth
@@ -50,13 +68,14 @@ export async function createCloudRuntime({ env = process.env, logger = console, 
   let server;
   try {
     if (profile.isHosted) {
-      postgresRuntime = await postgresFactory({ env, applicationVersion: "0.18.0", refreshNonceCodec });
+      postgresRuntime = await postgresFactory({ env, applicationVersion: "0.18.0", refreshNonceCodec, resolveProcessBindingPolicy: processBindingPolicies.resolve });
       if (!postgresRuntime?.capabilityAuthorityRepository
         || typeof postgresRuntime.capabilityAuthorityRepository.issueCapabilityMetadata !== "function"
         || typeof postgresRuntime.capabilityAuthorityRepository.listRevokedCapabilityIds !== "function") {
         throw new Error("PostgreSQL capability authority is unavailable");
       }
       if (!postgresRuntime?.controlPlaneStore) throw new Error("PostgreSQL control-plane store is unavailable");
+      if (!postgresRuntime?.agentSessionIssuanceRepository || !postgresRuntime?.agentSessionAuthorityRepository) throw new Error("PostgreSQL Agent Session authority is unavailable");
       if (!postgresRuntime?.sharedControlRepository || typeof postgresRuntime.sharedControlRepository.consumeDeviceRequestNonce !== "function" || typeof postgresRuntime.sharedControlRepository.acquireRateLimit !== "function") throw new Error("PostgreSQL shared controls are unavailable");
       store = postgresRuntime.controlPlaneStore;
       if (typeof store.pollDeviceRefresh !== "function" || typeof store.markDeviceRefreshDelivered !== "function") throw new Error("PostgreSQL refresh polling is unavailable");
@@ -73,19 +92,40 @@ export async function createCloudRuntime({ env = process.env, logger = console, 
           audience: config.humanAuth.identityAssertionAudience,
           keyId: config.humanAuth.identityAssertionKeyId,
           publicKey: consoleIdentityPublicKey
-        }
+        },
+        agentSessionSigner
       });
     } else store = await createCloudStore({ dataDir: config.dataDir });
+    const hostedRateLimiter = profile.isHosted ? createHostedRateLimiter(postgresRuntime.sharedControlRepository) : undefined;
+    let agentSessionDeviceApi;
+    if (profile.isHosted) {
+      const deviceRequestVerifier = async (request, options) => {
+        const devices = await store.listDevices({ organizationId: options.organizationId });
+        const principal = verifyDeviceRequest(request, devices, { ...options, deferReplayConsumption: true });
+        const nonce = request.headers?.["agentpass-nonce"] ?? request.headers?.["AgentPass-Nonce"];
+        let consumed;
+        try { consumed = await postgresRuntime.sharedControlRepository.consumeDeviceRequestNonce({ organizationId: options.organizationId, deviceId: principal.device_id, nonce }); }
+        catch { const unavailable = new Error("device replay authority unavailable"); unavailable.code = "ERR_REPOSITORY_UNAVAILABLE"; throw unavailable; }
+        if (consumed?.accepted !== true) { const replay = new Error("device request replay denied"); replay.code = "ERR_REPLAY_DETECTED"; throw replay; }
+        return principal;
+      };
+      agentSessionDeviceApi = createAgentSessionDeviceApi({
+        deviceRequestVerifier,
+        grantVerifier: (grant, context) => verifyAgentSessionGrant(grant, { publicKey: agentSessionSigner.config.publicKeyPem, keyId: agentSessionSigner.key_id, now: context.now }),
+        repository: postgresRuntime.agentSessionAuthorityRepository,
+        rateLimiter: hostedRateLimiter
+      });
+    }
     server = createCloudApi({
       store,
       tokenRecords,
       replayCache: profile.isHosted ? undefined : createPersistentReplayCache(path.join(config.dataDir, "device-replay-cache.json")),
       ...(profile.isHosted ? {
         deviceReplayConsumer: async ({ organizationId, deviceId, nonce }) => (await postgresRuntime.sharedControlRepository.consumeDeviceRequestNonce({ organizationId, deviceId, nonce })).accepted,
-        rateLimiter: createHostedRateLimiter(postgresRuntime.sharedControlRepository),
+        rateLimiter: hostedRateLimiter,
         enrollmentCredentialSecret: Buffer.from(env.AGENTPASS_CAPABILITY_NONCE_SECRET, "base64url"),
         trackInFlight: postgresRuntime.trackInFlight,
-        readiness: postgresRuntime.readiness,
+        readiness: createHostedReadiness(postgresRuntime.readiness, agentSessionSigner.health),
         operationalMetrics: postgresRuntime.operationalMetrics,
         operationalProbeSecret: exactRuntimeSecret(env.AGENTPASS_OPERATIONAL_PROBE_SECRET, "AGENTPASS_OPERATIONAL_PROBE_SECRET")
       } : { rateLimiter: createRateLimiter({ persistencePath: path.join(config.dataDir, "principal-rate-limits.json") }) }),
@@ -93,6 +133,7 @@ export async function createCloudRuntime({ env = process.env, logger = console, 
       bundleSigner: { privateKey, issuer: config.issuer, keyId: config.keyId, ttlMs: config.ttlMs, offlineTtlMs: config.offlineTtlMs },
       ...(profile.isHosted ? { refreshHintService: createRefreshHintService({ source: store, nonceDeriver: refreshNonceCodec, signer: refreshHintSigner, notifier: postgresRuntime.refreshHintNotifier, metrics: postgresRuntime.operationalMetrics }) } : {}),
       ...(humanAuthRuntime ? { humanAuthApi: humanAuthRuntime.api, humanSession: humanAuthRuntime.humanSession, recentAuthService: humanAuthRuntime.recentAuthService } : {}),
+      ...(agentSessionDeviceApi ? { agentSessionDeviceApi } : {}),
       ...(postgresRuntime?.capabilityAuthorityRepository ? { capabilityAuthorityRepository: postgresRuntime.capabilityAuthorityRepository } : {}),
       ...(postgresRuntime?.capabilityAuthorityRepository ? { capabilityRevocationSource: postgresRuntime.capabilityAuthorityRepository } : {})
     });
@@ -152,10 +193,11 @@ export function loadRuntimeConfig(env = {}) {
   const refreshNonceKeyringPath = profile.isHosted ? absolute(env.AGENTPASS_CLOUD_REFRESH_NONCE_KEYRING_PATH, "AGENTPASS_CLOUD_REFRESH_NONCE_KEYRING_PATH") : null;
   const refreshKeyId = profile.isHosted ? env.AGENTPASS_CLOUD_REFRESH_KEY_ID : null;
   if (profile.isHosted && !IDENTIFIER.test(refreshKeyId ?? "")) throw new Error("Cloud refresh signer identifier is invalid");
+  const agentSessionProcessPoliciesPath = profile.isHosted ? absolute(env.AGENTPASS_CLOUD_AGENT_SESSION_PROCESS_POLICIES_PATH, "AGENTPASS_CLOUD_AGENT_SESSION_PROCESS_POLICIES_PATH") : null;
   // Hosted Human Auth never loads the legacy operator bearer database. The
   // token-record file exists only for the explicit evaluation profile.
   const tokenRecordsPath = profile.isHosted ? null : absolute(env.AGENTPASS_CLOUD_TOKEN_RECORDS_PATH, "AGENTPASS_CLOUD_TOKEN_RECORDS_PATH");
-  return Object.freeze({ dataDir, tokenRecordsPath, bundlePrivateKeyPath, issuer, keyId, host, port, ttlMs, offlineTtlMs, humanAuth, refreshPrivateKeyPath, refreshNonceKeyringPath, refreshKeyId });
+  return Object.freeze({ dataDir, tokenRecordsPath, bundlePrivateKeyPath, issuer, keyId, host, port, ttlMs, offlineTtlMs, humanAuth, refreshPrivateKeyPath, refreshNonceKeyringPath, refreshKeyId, agentSessionProcessPoliciesPath });
 }
 
 function loadRefreshNonceCodec(file) {
@@ -268,4 +310,28 @@ function createHostedRateLimiter(repository, { now = () => Date.now() } = {}) {
       return repository.acquireRateLimit({ organizationId: tenantId, principalType, principalId, capacity: policy.capacity, refillPerSecond: policy.refillPerSecond, cost: 1 });
     }
   });
+}
+
+function createHostedReadiness(databaseReadiness, signerHealth) {
+  if (typeof databaseReadiness !== "function" || typeof signerHealth !== "function") throw new Error("Hosted readiness dependencies are unavailable");
+  return async function hostedReadiness() {
+    const databaseReport = await databaseReadiness();
+    let signer;
+    try {
+      const value = await signerHealth();
+      if (!value || value.ready !== true || typeof value.purpose !== "string" || value.algorithm !== "ed25519"
+        || typeof value.key_id !== "string" || !/^[0-9a-f]{64}$/u.test(value.public_key_fingerprint ?? "")) throw new Error("invalid signer health");
+      signer = Object.freeze({ ok: true, purpose: value.purpose, algorithm: value.algorithm, key_id: value.key_id, public_key_fingerprint: value.public_key_fingerprint });
+    } catch {
+      signer = Object.freeze({ ok: false, purpose: "agent-session-grant", algorithm: "ed25519", key_id: null, public_key_fingerprint: null });
+    }
+    if (!databaseReport || typeof databaseReport !== "object" || Array.isArray(databaseReport)) throw new Error("invalid database readiness");
+    return Object.freeze({
+      ...databaseReport,
+      ready: databaseReport.ready === true && signer.ok,
+      status: databaseReport.ready !== true ? databaseReport.status : signer.ok ? databaseReport.status : "not_ready",
+      code: databaseReport.ready !== true ? databaseReport.code : signer.ok ? databaseReport.code : "agent_session_signer_unavailable",
+      checks: Object.freeze({ ...(databaseReport.checks ?? {}), agent_session_signer: signer })
+    });
+  };
 }

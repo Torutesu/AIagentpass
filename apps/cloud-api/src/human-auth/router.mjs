@@ -4,16 +4,19 @@ const VERIFY_PATH = "/api/auth/webauthn/verify";
 const REGISTRATION_OPTIONS_PATH = "/api/auth/webauthn/registration/options";
 const REGISTRATION_VERIFY_PATH = "/api/auth/webauthn/registration/verify";
 const ORGANIZATIONS_PATH = "/api/auth/organizations";
+const AGENT_SESSION_GRANTS_PATH = "/api/v1/organizations";
 const ACCEPT_INVITATION_PATH = "/api/auth/invitations/accept";
 const UUID = "[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89a-fA-F][0-9a-fA-F]{3}-[0-9a-fA-F]{12}";
 const ORGANIZATION_ROUTE = new RegExp(`^${ORGANIZATIONS_PATH}(?:/${UUID}(?:/members(?:/${UUID}/(?:role|remove))?|/invitations(?:/${UUID}/revoke)?)?)?$`);
+const AGENT_SESSION_GRANT_ROUTE = new RegExp(`^${AGENT_SESSION_GRANTS_PATH}/${UUID}/agents/${UUID}/session-grants$`);
 
-export function createHumanAuthRouter({ sessionApi, webauthnApi, registrationApi, managementApi, organizationApi } = {}) {
+export function createHumanAuthRouter({ sessionApi, webauthnApi, registrationApi, managementApi, organizationApi, agentSessionGrantApi } = {}) {
   if (!sessionApi || typeof sessionApi.handle !== "function") throw new TypeError("sessionApi must expose handle()");
   if (!webauthnApi || typeof webauthnApi.handle !== "function") throw new TypeError("webauthnApi must expose handle()");
   if (!registrationApi || typeof registrationApi.handle !== "function") throw new TypeError("registrationApi must expose handle()");
   if (!managementApi || typeof managementApi.handle !== "function") throw new TypeError("managementApi must expose handle()");
   if (!organizationApi || typeof organizationApi.handle !== "function") throw new TypeError("organizationApi must expose handle()");
+  if (agentSessionGrantApi !== undefined && (!agentSessionGrantApi || typeof agentSessionGrantApi.handle !== "function")) throw new TypeError("agentSessionGrantApi must expose handle()");
 
   async function handle(input) {
     const url = requestUrl(input);
@@ -25,6 +28,10 @@ export function createHumanAuthRouter({ sessionApi, webauthnApi, registrationApi
     }
     if ((url.pathname === REGISTRATION_OPTIONS_PATH || url.pathname === REGISTRATION_VERIFY_PATH) && !url.search && !url.hash) {
       return registrationApi.handle(cloneRequest(input, url.pathname));
+    }
+    if (isAgentSessionGrantPath(url)) {
+      if (!agentSessionGrantApi) return response(404, { error: { code: "not_found", message: "Resource not found" } });
+      return agentSessionGrantApi.handle(cloneRequest(input, `${url.pathname}${url.search}`));
     }
     if (isOrganizationPath(url)) {
       const list = isOrganizationListPath(url, input);
@@ -41,6 +48,10 @@ export function createHumanAuthRouter({ sessionApi, webauthnApi, registrationApi
 function isOrganizationPath(url) {
   if (url.hash || url.pathname === ACCEPT_INVITATION_PATH) return url.pathname === ACCEPT_INVITATION_PATH && !url.hash;
   return ORGANIZATION_ROUTE.test(url.pathname);
+}
+
+function isAgentSessionGrantPath(url) {
+  return !url.hash && AGENT_SESSION_GRANT_ROUTE.test(url.pathname);
 }
 
 function isOrganizationListPath(url, input) {
