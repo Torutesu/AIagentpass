@@ -37,6 +37,21 @@ public struct NativeAgentSessionReservation: Equatable, Sendable {
     public let budgetSequence: Int
 }
 
+/// An in-memory, authority-free admission held while the coordinator makes its
+/// activation intent durable. It is deliberately non-Codable and cannot be
+/// constructed outside this file.
+public struct NativeAgentSessionActivationReservation: Equatable, Sendable {
+    public let plannedStatus: NativeAgentSessionRegistryStatus
+    fileprivate let token: String
+
+    public var sessionID: String { plannedStatus.sessionID }
+
+    fileprivate init(plannedStatus: NativeAgentSessionRegistryStatus, token: String) {
+        self.plannedStatus = plannedStatus
+        self.token = token
+    }
+}
+
 /// Service-wide, in-memory M2 authority owner. All session transitions and
 /// replay/budget reservations are serialized by one lock. The registry is
 /// intentionally not Codable: active authority never survives service restart.
@@ -62,8 +77,15 @@ public final class NativeAgentSessionRegistry: @unchecked Sendable {
         var reservation: NativeAgentSessionReservation?
     }
 
+    private struct PendingActivation {
+        let reservation: NativeAgentSessionActivationReservation
+        let entry: Entry
+    }
+
     private let lock = NSLock()
     private var entries: [String: Entry] = [:]
+    private var pendingActivations: [String: PendingActivation] = [:]
+    private var committedActivations: [String: PendingActivation] = [:]
 
     public init() {}
 
@@ -76,6 +98,36 @@ public final class NativeAgentSessionRegistry: @unchecked Sendable {
         perAgentLimit: Int = NativeAgentSessionRegistry.maximumActiveSessions,
         perWorktreeLimit: Int = NativeAgentSessionRegistry.maximumActiveSessions
     ) throws -> NativeAgentSessionRegistryStatus {
+        let reservation = try reserveActivation(
+            lease: lease,
+            localLeaseID: localLeaseID,
+            connectionTokenIdentity: connectionTokenIdentity,
+            deadline: deadline,
+            globalLimit: globalLimit,
+            perAgentLimit: perAgentLimit,
+            perWorktreeLimit: perWorktreeLimit
+        )
+        do {
+            _ = try commitActivation(reservation)
+            return try publishActivation(reservation)
+        } catch {
+            _ = try? cancelActivation(reservation)
+            throw error
+        }
+    }
+
+    /// Reserves capacity and the exact activation tuple without publishing a
+    /// session into the authority-bearing registry. Status/signing operations
+    /// cannot observe or use this reservation.
+    public func reserveActivation(
+        lease: NativeAgentVerifiedCloudLease,
+        localLeaseID: String,
+        connectionTokenIdentity: String,
+        deadline: NativeAgentSessionDeadline,
+        globalLimit: Int = NativeAgentSessionRegistry.maximumActiveSessions,
+        perAgentLimit: Int = NativeAgentSessionRegistry.maximumActiveSessions,
+        perWorktreeLimit: Int = NativeAgentSessionRegistry.maximumActiveSessions
+    ) throws -> NativeAgentSessionActivationReservation {
         guard Self.uuid(localLeaseID), Self.hash(connectionTokenIdentity),
               deadline.signedWallExpiryMilliseconds == lease.expiresAtMilliseconds,
               lease.usedSignatures <= lease.maxSignatures,
@@ -87,12 +139,22 @@ public final class NativeAgentSessionRegistry: @unchecked Sendable {
         lock.lock()
         defer { lock.unlock() }
         let activeEntries = entries.values.filter { !$0.state.isTerminal }
-        guard activeEntries.count < globalLimit,
-              activeEntries.filter({ $0.lease.binding.agentID == lease.binding.agentID }).count < perAgentLimit,
-              activeEntries.filter({ $0.lease.binding.worktreeBindingDigest == lease.binding.worktreeBindingDigest }).count < perWorktreeLimit else {
+        let unpublishedEntries = pendingActivations.values.map(\.entry)
+            + committedActivations.values.map(\.entry)
+        guard activeEntries.count + unpublishedEntries.count < globalLimit,
+              activeEntries.filter({ $0.lease.binding.agentID == lease.binding.agentID }).count
+                + unpublishedEntries.filter({ $0.lease.binding.agentID == lease.binding.agentID }).count
+                < perAgentLimit,
+              activeEntries.filter({ $0.lease.binding.worktreeBindingDigest == lease.binding.worktreeBindingDigest }).count
+                + unpublishedEntries.filter({ $0.lease.binding.worktreeBindingDigest == lease.binding.worktreeBindingDigest }).count
+                < perWorktreeLimit else {
             throw NativeAgentSessionRegistryError.sessionCapacityExceeded
         }
-        guard entries[lease.sessionID] == nil else { throw NativeAgentSessionRegistryError.sessionExists }
+        guard entries[lease.sessionID] == nil,
+              pendingActivations[lease.sessionID] == nil,
+              committedActivations[lease.sessionID] == nil else {
+            throw NativeAgentSessionRegistryError.sessionExists
+        }
         let state: NativeAgentSessionState = lease.usedSignatures == lease.maxSignatures ? .closed : .active
         let entry = Entry(
             lease: lease,
@@ -106,8 +168,81 @@ public final class NativeAgentSessionRegistry: @unchecked Sendable {
             consumedNonces: [],
             reservation: nil
         )
-        entries[lease.sessionID] = entry
-        return Self.status(entry)
+        let reservation = NativeAgentSessionActivationReservation(
+            plannedStatus: Self.status(entry),
+            token: UUID().uuidString.lowercased()
+        )
+        pendingActivations[lease.sessionID] = PendingActivation(
+            reservation: reservation,
+            entry: entry
+        )
+        return reservation
+    }
+
+    /// Commits the exact reserved entry into an in-memory hidden state. The
+    /// status/signing APIs still cannot observe or use it until publication.
+    public func commitActivation(
+        _ reservation: NativeAgentSessionActivationReservation
+    ) throws -> NativeAgentSessionRegistryStatus {
+        try lock.withLock {
+            let sessionID = reservation.plannedStatus.sessionID
+            guard let pending = pendingActivations[sessionID] else {
+                throw NativeAgentSessionRegistryError.reservationMissing
+            }
+            guard pending.reservation == reservation,
+                  Self.status(pending.entry) == reservation.plannedStatus,
+                  entries[sessionID] == nil,
+                  committedActivations[sessionID] == nil else {
+                throw NativeAgentSessionRegistryError.reservationMismatch
+            }
+            pendingActivations.removeValue(forKey: sessionID)
+            committedActivations[sessionID] = pending
+            return Self.status(pending.entry)
+        }
+    }
+
+    /// Publishes a committed activation. This is the only transition that
+    /// makes the session visible to status, close, or signing-budget APIs.
+    public func publishActivation(
+        _ reservation: NativeAgentSessionActivationReservation
+    ) throws -> NativeAgentSessionRegistryStatus {
+        try lock.withLock {
+            let sessionID = reservation.sessionID
+            guard let committed = committedActivations[sessionID] else {
+                throw NativeAgentSessionRegistryError.reservationMissing
+            }
+            guard committed.reservation == reservation,
+                  Self.status(committed.entry) == reservation.plannedStatus,
+                  entries[sessionID] == nil else {
+                throw NativeAgentSessionRegistryError.reservationMismatch
+            }
+            committedActivations.removeValue(forKey: sessionID)
+            entries[sessionID] = committed.entry
+            return Self.status(committed.entry)
+        }
+    }
+
+    /// Releases only an authority-free activation reservation. Exact repeated
+    /// cancellation is reported as `false`; a substituted live reservation is
+    /// rejected and committed authority is never removed here.
+    @discardableResult
+    public func cancelActivation(
+        _ reservation: NativeAgentSessionActivationReservation
+    ) throws -> Bool {
+        try lock.withLock {
+            let sessionID = reservation.plannedStatus.sessionID
+            guard let pending = pendingActivations[sessionID] else {
+                if committedActivations[sessionID] != nil || entries[sessionID] != nil {
+                    throw NativeAgentSessionRegistryError.transitionDenied
+                }
+                return false
+            }
+            guard pending.reservation == reservation else {
+                throw NativeAgentSessionRegistryError.reservationMismatch
+            }
+            pendingActivations.removeValue(forKey: sessionID)
+            return true
+        }
     }
 
     public func status(
@@ -207,6 +342,20 @@ public final class NativeAgentSessionRegistry: @unchecked Sendable {
     public func invalidate(sessionID: String, connectionTokenIdentity: String, as terminalState: NativeAgentSessionState) throws {
         guard Self.hash(connectionTokenIdentity), terminalState.isTerminal, terminalState != .outcomeUnknown else { throw NativeAgentSessionRegistryError.invalidInput }
         try lock.withLock {
+            if let pending = pendingActivations[sessionID] {
+                guard pending.entry.connectionTokenIdentity == connectionTokenIdentity else {
+                    throw NativeAgentSessionRegistryError.connectionMismatch
+                }
+                pendingActivations.removeValue(forKey: sessionID)
+                return
+            }
+            if let committed = committedActivations[sessionID] {
+                guard committed.entry.connectionTokenIdentity == connectionTokenIdentity else {
+                    throw NativeAgentSessionRegistryError.connectionMismatch
+                }
+                committedActivations.removeValue(forKey: sessionID)
+                return
+            }
             guard var entry = entries[sessionID] else { throw NativeAgentSessionRegistryError.sessionMissing }
             guard entry.connectionTokenIdentity == connectionTokenIdentity else { throw NativeAgentSessionRegistryError.connectionMismatch }
             if entry.state == terminalState { return }
@@ -221,6 +370,12 @@ public final class NativeAgentSessionRegistry: @unchecked Sendable {
     public func invalidateOwned(by connectionTokenIdentity: String, as terminalState: NativeAgentSessionState = .revoked) -> [NativeAgentSessionRegistryStatus] {
         guard Self.hash(connectionTokenIdentity), terminalState.isTerminal, terminalState != .outcomeUnknown else { return [] }
         return lock.withLock {
+            pendingActivations = pendingActivations.filter {
+                $0.value.entry.connectionTokenIdentity != connectionTokenIdentity
+            }
+            committedActivations = committedActivations.filter {
+                $0.value.entry.connectionTokenIdentity != connectionTokenIdentity
+            }
             var statuses: [NativeAgentSessionRegistryStatus] = []
             for id in entries.keys.sorted() {
                 guard var entry = entries[id], entry.connectionTokenIdentity == connectionTokenIdentity else { continue }
@@ -250,6 +405,8 @@ public final class NativeAgentSessionRegistry: @unchecked Sendable {
     public func invalidateAll(as terminalState: NativeAgentSessionState = .revoked) {
         guard terminalState.isTerminal, terminalState != .outcomeUnknown else { return }
         lock.withLock {
+            pendingActivations.removeAll(keepingCapacity: false)
+            committedActivations.removeAll(keepingCapacity: false)
             for id in entries.keys {
                 guard var entry = entries[id], !entry.state.isTerminal,
                       (try? Self.transition(&entry, to: terminalState)) != nil else { continue }
