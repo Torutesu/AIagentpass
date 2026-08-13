@@ -120,6 +120,68 @@ private func qualify(serviceName: String) -> Never {
     emit(observation, status: observation.outcome == "method-reached-but-unhealthy" ? 1 : 0)
 }
 
+/// Probe only the qualification listener's caller boundary. The request uses
+/// fixed, non-secret, deliberately non-matching digests: an authorized caller
+/// must reach `readStatus` and receive the endpoint's stable binding error,
+/// while every unauthorized identity must fail in the proxy error handler
+/// before the selector is dispatched.
+private func qualifyController() -> Never {
+    let candidateDigest = Data(repeating: 0xa5, count: AgentPassQualificationXPCContract.digestBytes)
+    let runIDDigest = Data(repeating: 0x5a, count: AgentPassQualificationXPCContract.digestBytes)
+    guard let request = AgentPassQualificationStatusRequest(
+        candidateDigest: candidateDigest,
+        runIDDigest: runIDDigest
+    ) else { fail("qualification-controller request creation failed") }
+
+    let connection = NSXPCConnection(
+        machServiceName: AgentPassQualificationXPCContract.machServiceName,
+        options: .privileged
+    )
+    connection.remoteObjectInterface = AgentPassQualificationXPCContract.makeInterface()
+    connection.invalidationHandler = { }
+    connection.interruptionHandler = { }
+    connection.resume()
+    defer { connection.invalidate() }
+
+    let semaphore = DispatchSemaphore(value: 0)
+    var observation: QualificationObservation?
+    let proxy = connection.remoteObjectProxyWithErrorHandler { _ in
+        observation = QualificationObservation(
+            schema_version: protocolVersion,
+            operation: "qualification-controller-status",
+            outcome: "denied-before-selector",
+            service_protocol_version: nil
+        )
+        semaphore.signal()
+    } as! AgentPassQualificationXPCProtocol
+    proxy.readStatus(request) { response, error in
+        let outcome: String
+        let version: Int?
+        if error != nil {
+            outcome = "selector-reached-binding-rejected"
+            version = nil
+        } else if let response {
+            outcome = "selector-reached-unexpected-response"
+            version = response.protocolVersion
+        } else {
+            outcome = "selector-reached-invalid-reply"
+            version = nil
+        }
+        observation = QualificationObservation(
+            schema_version: protocolVersion,
+            operation: "qualification-controller-status",
+            outcome: outcome,
+            service_protocol_version: version
+        )
+        semaphore.signal()
+    }
+    if semaphore.wait(timeout: .now() + 20) == .timedOut {
+        fail("qualification-controller timed out")
+    }
+    guard let observation else { fail("qualification-controller produced no result") }
+    emit(observation, status: observation.outcome == "selector-reached-unexpected-response" || observation.outcome == "selector-reached-invalid-reply" ? 1 : 0)
+}
+
 guard CommandLine.arguments.count >= 2 else { fail("missing command", status: 2) }
 switch CommandLine.arguments[1] {
 case "identity":
@@ -127,6 +189,9 @@ case "identity":
 case "--service":
     guard CommandLine.arguments.count == 4, CommandLine.arguments[3] == "qualification" else { fail("invalid qualification command", status: 2) }
     qualify(serviceName: CommandLine.arguments[2])
+case "qualification-controller":
+    guard CommandLine.arguments.count == 2 else { fail("invalid qualification-controller command", status: 2) }
+    qualifyController()
 default:
     fail("unknown command", status: 2)
 }

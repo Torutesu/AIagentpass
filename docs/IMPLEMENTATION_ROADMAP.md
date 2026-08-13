@@ -2,7 +2,7 @@
 
 Status: active  
 Baseline: current `codex/agent-platform` P0-C software-chain checkpoint
-Updated: 2026-08-13
+Updated: 2026-08-14
 
 The executable PR sequence, security gates, and evidence requirements for the remaining G4–G7 work are maintained in [IMPLEMENTATION_PLAN_G4_G7.md](./IMPLEMENTATION_PLAN_G4_G7.md).
 
@@ -80,6 +80,22 @@ flowchart LR
 ```
 
 M2 can begin while M1 is being completed because the API and SQL contracts are frozen. M3 and M4 can proceed in parallel after the transaction/repository interface in M2 is stable. Console production wiring waits for both Human and Device APIs. External release credentials and hardware qualification do not block local development, but they block the production-ready claim.
+
+### 4.1 Immediate execution queue from the external-controller checkpoint
+
+This queue is the current implementation order. It supersedes older “next” labels elsewhere in this document when they conflict; completed foundations remain valid.
+
+| Order | Slice | Concrete output | Verification / exit gate | Parallel work allowed |
+| --- | --- | --- | --- | --- |
+| 1 | N3-E2b-1b release binding | Deterministic archive of the external `AgentPassQualificationController.app`; a separate signed-manifest role containing artifact SHA-256, bundle ID, Team ID, designated requirement, CDHash/CodeDirectory hash, exact signed-entitlement digest, and architecture inventory. Add the controller CDHash to the root qualification configuration and derive the XPC requirement from that signed value. Never append it to the six nested product identities or ordinary PKG. | Substituted same-Team/same-bundle/same-entitlement code is denied; archive mutation, unknown fields, stale release binding, architecture omission, and entitlement expansion fail before XPC. Release and promotion workflow allowlists retain only the exact external archive role. | Workflow contract tests and archive verifier can proceed in parallel; the service configuration/CDHash change is the authority-path critical section. |
+| 2 | N3-E2b-1b physical identity matrix | Build the approved, missing-entitlement, wrong-Team, and ad-hoc controller probes with real Developer ID identities/profiles. Execute approved root selector reachability, non-root local denial, negative identity denial before selector, and second-live-controller denial against the installed service. | Retained bounded JSONL plus independent identity inspection proves every outcome. No raw run ID, signature blob, local path, or key material enters evidence. Both Apple silicon and Intel/T2 lanes use the same source and product PKG digest. | Runner provisioning and redaction/evidence tests may proceed together after slice 1. |
+| 3 | N3-E2b-2 launchd fault driver | For all six fixed phase/scenario pairs: install exact PKG, atomically provision root `0600` qualification inputs, run external controller `arm → fired → status → disarm`, invoke the real Agent request, observe daemon PID/start/boot transitions, and always tear down/restart with the listener unreachable. | Kill/restart at every irreversible boundary converges to one authorized result. Interrupted teardown, stale config, replay, wrong phase/digest, clock expiry, and concurrent invocation fail closed. | Six scenario adapters may be implemented in disjoint files; shared driver/runtime and evidence schema remain serialized. |
+| 4 | N3-E2b-2 evidence and N3-E2c aggregation | Emit six canonical secret-free evidence records, independently verify them, sign lane reports, and aggregate unchanged Apple silicon/Secure Enclave and Intel/T2 results. | Reports bind source, PKG and controller archive digests, all product and controller identities, Team ID, notarization ticket, Cloud/schema/signer versions, OS/hardware/boot facts, and scenario transitions. Any edit, omission, cross-lane mismatch, or skipped scenario blocks promotion. | Evidence schema/verifier and protected-runner operations can proceed in parallel once slice 1 contracts freeze. |
+| 5 | N4 production authority | Complete PostgreSQL-backed shared abuse controls and organization/member session epochs; replace file signers with purpose-separated KMS/HSM adapters; finish transactional audit/outbox consumption and device propagation. | Two-instance race/restart tests prove immediate authority reduction, no fallback signer, exact key-version use, transactionally coupled audit/outbox state, and bounded non-secret metrics. | Session epochs/rate limits, managed signer adapter, and audit/outbox completion are independent lanes behind their frozen contracts. |
+| 6 | N5–N6 Agent integrations and Console completion | Finish process-bound Agent session lifecycle, then pin and qualify Claude Code and Cursor adapters. Remove remaining Console sample state and complete device/session/activity/recovery UI with WebAuthn for high-risk actions. | Real unattended signed commits expose no reusable secret; PID/exec/ancestry/worktree/repository/branch substitutions fail. Browser role/accessibility/E2E and signed device ACK transitions pass against PostgreSQL over production-like TLS. | Claude and Cursor adapters can run in parallel after the common session contract; Console screens can run in parallel with native adapter work. |
+| 7 | N7 release and operations | Produce the notarized universal PKG and CLI bootstrap channel, run install/upgrade/rollback/uninstall-preserve/reinstall/purge qualification, deploy Cloud/Console with PITR and rollback, and complete independent security review. | Clean-machine installation needs no Xcode or separate visible Mac app. Restore/rollback drills pass; SBOM, release manifest, notarization, physical reports, and deployed image bind one source commit; no unresolved critical/high finding remains. | Deployment rehearsal, documentation, and review preparation may proceed while physical lanes execute, but publication waits for every gate. |
+
+The next coding commit is slice 1: external-controller release identity plus CDHash-bound XPC authorization. Real certificate, notarization, protected runner, KMS/HSM, and independent-review work are explicit external gates and must never be represented by simulated or ad-hoc evidence.
 
 ## 5. Milestone M1 — complete the headless local lifecycle
 
