@@ -2,7 +2,8 @@
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import { spawn } from 'node:child_process';
-import { isAbsolute, resolve } from 'node:path';
+import os from 'node:os';
+import { isAbsolute, join, resolve } from 'node:path';
 
 const DEFAULT_CONFIG = '/opt/agentpass/p0c/scenario-config.json';
 const MAX_CONFIG_BYTES = 1024 * 1024;
@@ -107,10 +108,28 @@ export const runFixedCommand = (command, args = [], { timeoutMs = DEFAULT_TIMEOU
 
 export const runPinnedExecutable = async (entry, args, options = {}) => {
   const before = readProtectedFile(entry.path, { maximum: 64 * 1024 * 1024, executable: true, production: options.production !== false, expectedSha256: entry.sha256 });
-  const result = await (options.runCommand ?? runFixedCommand)(before.path, args, options);
-  const after = readProtectedFile(entry.path, { maximum: 64 * 1024 * 1024, executable: true, production: options.production !== false, expectedSha256: entry.sha256 });
-  if (before.identity !== after.identity) throw new Error('pinned executable changed during scenario');
-  return result;
+  const production = options.production !== false;
+  const stagingRoot = resolve(options.executionStagingRoot ?? (production ? '/private/var/run' : os.tmpdir()));
+  const rootStat = fs.lstatSync(stagingRoot, { bigint: true });
+  if (!rootStat.isDirectory() || rootStat.isSymbolicLink() || (rootStat.mode & 0o022n) !== 0n || (production && rootStat.uid !== 0n)) throw new Error('execution staging root is unsafe');
+  const directory = fs.mkdtempSync(join(stagingRoot, 'agentpass-p0c-exec-'));
+  const stagedPath = join(directory, 'verified-executable');
+  try {
+    fs.chmodSync(directory, 0o700);
+    const descriptor = fs.openSync(stagedPath, fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL | fs.constants.O_NOFOLLOW, 0o500);
+    try { fs.writeFileSync(descriptor, before.bytes); fs.fsyncSync(descriptor); } finally { fs.closeSync(descriptor); }
+    fs.chmodSync(stagedPath, 0o500);
+    const stagedBefore = readProtectedFile(stagedPath, { maximum: 64 * 1024 * 1024, executable: true, production, expectedSha256: entry.sha256 });
+    const result = await (options.runCommand ?? runFixedCommand)(stagedBefore.path, args, options);
+    const stagedAfter = readProtectedFile(stagedPath, { maximum: 64 * 1024 * 1024, executable: true, production, expectedSha256: entry.sha256 });
+    if (stagedBefore.identity !== stagedAfter.identity) throw new Error('staged executable changed during scenario');
+    const after = readProtectedFile(entry.path, { maximum: 64 * 1024 * 1024, executable: true, production, expectedSha256: entry.sha256 });
+    if (before.identity !== after.identity) throw new Error('pinned executable changed during scenario');
+    return result;
+  } finally {
+    try { fs.unlinkSync(stagedPath); } catch (error) { if (error?.code !== 'ENOENT') throw error; }
+    fs.rmdirSync(directory);
+  }
 };
 
 export const requireCommandSuccess = (result, label) => { if (!result?.ok) throw new Error(`${label} failed`); return result.stdout; };

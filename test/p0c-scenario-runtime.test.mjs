@@ -44,6 +44,37 @@ test('fixed commands have bounded output, no shell, closed stdin, and fixed envi
 
 test('pinned executable replacement and artifact substitution fail closed', async () => {
   const value = fixture();
-  await assert.rejects(() => runPinnedExecutable(value.entry, [], { production: false, runCommand: async (command) => { fs.appendFileSync(command, 'mutation'); return { ok: true, stdout: Buffer.alloc(0) }; } }), /digest mismatch/);
+  await assert.rejects(() => runPinnedExecutable(value.entry, [], { production: false, executionStagingRoot: value.root, runCommand: async (command) => { fs.chmodSync(command, 0o700); fs.appendFileSync(command, 'mutation'); return { ok: true, stdout: Buffer.alloc(0) }; } }), /digest mismatch|unsafe/);
   fs.appendFileSync(value.artifact, 'tamper'); assert.throws(() => releaseBindings({ AGENTPASS_P0C_ARTIFACT_PATH: value.artifact, AGENTPASS_P0C_ARTIFACT_SHA256: value.bindings.artifactSha256, AGENTPASS_P0C_SOURCE_COMMIT: 'a'.repeat(40), AGENTPASS_P0C_TEAM_ID: teamId, AGENTPASS_P0C_CODE_IDENTITIES_JSON: JSON.stringify(codeIdentities), AGENTPASS_P0C_GATE: 'gatekeeper-notarization', AGENTPASS_P0C_TESTS_JSON: '["exact-pkg-install"]' }), /digest mismatch/);
+});
+
+test('pinned execution uses a private verified copy and cleans it after original-path substitution', async () => {
+  const value = fixture();
+  const original = fs.readFileSync(value.executable);
+  let executedPath;
+  await assert.rejects(() => runPinnedExecutable(value.entry, ['probe'], {
+    production: false,
+    executionStagingRoot: value.root,
+    runCommand: async (command) => {
+      executedPath = command;
+      assert.notEqual(command, value.executable);
+      assert.deepEqual(fs.readFileSync(command), original);
+      fs.renameSync(value.executable, `${value.executable}.old`);
+      fs.writeFileSync(value.executable, '#!/bin/sh\nexit 99\n', { mode: 0o755 });
+      return { ok: true, stdout: Buffer.from('verified') };
+    }
+  }), /digest mismatch|changed during scenario/);
+  assert.equal(fs.existsSync(executedPath), false);
+  assert.equal(fs.existsSync(path.dirname(executedPath)), false);
+  assert.notDeepEqual(fs.readFileSync(value.executable), original);
+});
+
+test('pinned execution rejects an unsafe staging root before running', async () => {
+  const value = fixture();
+  const unsafe = path.join(value.root, 'unsafe-stage');
+  fs.mkdirSync(unsafe, { mode: 0o777 });
+  fs.chmodSync(unsafe, 0o777);
+  let invoked = false;
+  await assert.rejects(() => runPinnedExecutable(value.entry, [], { production: false, executionStagingRoot: unsafe, runCommand: async () => { invoked = true; } }), /staging root is unsafe/);
+  assert.equal(invoked, false);
 });

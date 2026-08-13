@@ -69,7 +69,7 @@ Exit evidence: exact duplicate is idempotent; conflicting duplicate, expired cha
 
 ### M1.2 Candidate-bound machine identity
 
-Status: checkpoint creation, six nested identity bindings, and before/after revalidation are implemented and locally verified on 2026-08-13. Execution against the first real notarized candidate and execution-from-an-already-verified-FD (or equivalent immutable private-copy handoff) remain open; before/after checks alone detect but do not prevent a last-instant pathname replacement.
+Status: checkpoint creation, six nested identity bindings, before/after revalidation, and execution from a root-private immutable copy created from the already verified bytes are implemented and locally verified on 2026-08-13. Execution against the first real notarized candidate remains open.
 
 Replace static candidate executable assumptions with a two-level identity model:
 
@@ -78,7 +78,7 @@ Replace static candidate executable assumptions with a two-level identity model:
 
 The Gatekeeper scenario atomically writes a root-owned, exclusive candidate checkpoint after successful installation. Later scenarios read and verify that checkpoint before and after use. It binds source commit, artifact digest, Team ID, nested designated requirements, CodeDirectory hashes, and file identities. Reinstall or upgrade creates a new checkpoint through an explicit transition; it never edits the active checkpoint in place.
 
-Exit evidence: same-content replacement, symlink/hard-link substitution, stale checkpoint replay, and mixed nested binaries are rejected. The remaining execution TOCTOU exit requires the process to execute from an already verified descriptor or equivalent root-private immutable copy, not by reopening the verified pathname.
+Exit evidence: same-content replacement, symlink/hard-link substitution, stale checkpoint replay, mixed nested binaries, original-path replacement after snapshot, and mutation of the private execution copy are rejected. The private copy is removed after child completion.
 
 ### M1.3 Negative identity and entitlement probe
 
@@ -231,6 +231,6 @@ Each merge requires:
 
 ## 10. Next executable slice
 
-The next slice is the remaining M1 physical evidence: close the verified-executable TOCTOU handoff, build and sign all four negative XPC probes, and drive M1.1 possession through the real Device API from both protected hardware runners. After that, M2 implements the process-bound Claude Code and Cursor adapter/session contract.
+The next slice is the remaining M1 physical evidence: build and sign all four negative XPC probes, and drive M1.1 possession through the real Device API from both protected hardware runners. After that, M2 implements the process-bound Claude Code and Cursor adapter/session contract.
 
 The slice is complete when an exact installed candidate can mint a protected checkpoint, every later scenario consumes it, the approved probe reaches the XPC service, all negative identities are denied, and replacement/replay tests pass before any Cloud credential or physical qualification secret is introduced.
