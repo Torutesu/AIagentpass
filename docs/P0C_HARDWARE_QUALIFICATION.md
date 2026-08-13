@@ -116,6 +116,21 @@ A scenario must perform the physical operation and return this internal protocol
 
 Static configuration, an operator assertion, a prior run, or a result bound to another candidate cannot pass. The checked-in entrypoints and runtime are the trust adapter. The destructive scenario executables are separately provisioned machine procedures and remain physical qualification work until each procedure is implemented, reviewed, and executed on both hardware lanes.
 
+### One-time runner provisioning
+
+Provisioning is deliberately separate from the GitHub Actions job. First create the fixed parent once as root. Materialize a dedicated, reviewed copy of `scripts/release/p0c` and the 16 scenario executables in root-owned, non-group/world-writable source directories; do not point the root provisioner at the CI user's mutable working checkout. The scenario filenames must exactly match the gate list. Then run:
+
+```text
+sudo /usr/bin/install -d -o root -g wheel -m 0755 /opt/agentpass
+sudo /absolute/path/to/node /absolute/root-owned/path/reviewed-p0c-source/provision-runner.mjs \
+  --source-root /absolute/root-owned/path/reviewed-p0c-source \
+  --scenarios /absolute/root-owned/path/p0c-scenarios
+```
+
+The provisioner is production-locked to root on macOS and `/opt/agentpass/p0c`. It verifies an exact 16-driver and 16-scenario inventory, refuses symlinks, hard links, writable or changed source files, copies through a private sibling staging directory, applies root ownership and fixed modes, generates the canonical digest-pinned config, verifies every installed digest, and atomically renames the completed tree into place. It refuses an existing destination; upgrades require a separately reviewed replacement/rollback procedure and cannot silently alter a qualification runner.
+
+No operator private key, Developer ID credential, candidate artifact, or Cloud secret is written into the provisioned tree. Scenario executables must also remain secret-free and obtain only the non-secret candidate bindings passed by the driver runtime.
+
 stdout and stderr are bounded to 256 KiB per stream. The runner records only byte counts, SHA-256 digests, truncation, exit code/signal, timeout/output-limit state, and duration. Raw child output is never written to the report, evidence directory, or error output. A timeout sends `SIGTERM`, then `SIGKILL` after the bounded grace period. An output limit does the same.
 
 ## Evidence and qualification rule
