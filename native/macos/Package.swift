@@ -18,6 +18,10 @@ let package = Package(
         .executable(name: "agentpass-atomic-rename", targets: ["AgentPassAtomicRename"]),
         .executable(name: "agentpass-negative-xpc-probe", targets: ["AgentPassNegativeXPCProbe"]),
         .executable(
+            name: "agentpass-qualification-grant-client",
+            targets: ["AgentPassQualificationGrantClient"]
+        ),
+        .executable(
             name: "agentpass-qualification-controller",
             targets: ["AgentPassQualificationController"]
         )
@@ -67,6 +71,10 @@ let package = Package(
             dependencies: ["AgentPassNativeCore"]
         ),
         .executableTarget(
+            name: "AgentPassQualificationGrantClient",
+            dependencies: ["AgentPassNativeCore"]
+        ),
+        .executableTarget(
             name: "AgentPassQualificationController",
             dependencies: ["AgentPassNativeCore"]
         ),
@@ -85,6 +93,10 @@ let package = Package(
         .testTarget(
             name: "AgentPassNativeServiceSupportTests",
             dependencies: ["AgentPassNativeServiceSupport", "AgentPassNativeCore"]
+        ),
+        .testTarget(
+            name: "AgentPassQualificationGrantClientTests",
+            dependencies: ["AgentPassQualificationGrantClient", "AgentPassNativeCore"]
         )
     ]
 )

@@ -7,8 +7,9 @@ const REPORT_KEYS = [
   "schema_version", "source_commit", "dependency_lock_sha256", "release_manifest_sha256", "artifact_name", "artifact_sha256",
   "architecture", "hardware_class", "model_identifier", "macos_version", "macos_build", "secure_enclave", "team_id",
   "nested_code_identities", "notarization", "cloud_image_digest", "database_migration_manifest_sha256", "signer_key_versions",
-  "browser_versions", "started_at", "completed_at", "operator", "operator_key_fingerprint", "qualified", "tests", "gates"
+  "browser_versions", "started_at", "completed_at", "operator", "operator_key_fingerprint", "qualified", "tests", "gates", "n3e_qualification_suite_evidence"
 ];
+const LEGACY_REPORT_KEYS = REPORT_KEYS.filter((key) => key !== "n3e_qualification_suite_evidence");
 const FINGERPRINT = /^SHA256:[A-Za-z0-9_-]{43}$/u;
 const COMMIT = /^[0-9a-f]{40}$/u;
 const DIGEST = /^[0-9a-f]{64}$/u;
@@ -61,7 +62,8 @@ function parseCanonicalReport(bytes) {
   try { value = JSON.parse(text); }
   catch (error) { throw new Error("hardware qualification report is not valid JSON", { cause: error }); }
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("hardware qualification report must be an object");
-  if (JSON.stringify(Object.keys(value).sort()) !== JSON.stringify([...REPORT_KEYS].sort())) throw new Error("hardware qualification report schema keys are invalid");
+  const expectedKeys = Object.hasOwn(value, "n3e_qualification_suite_evidence") ? REPORT_KEYS : LEGACY_REPORT_KEYS;
+  if (JSON.stringify(Object.keys(value).sort()) !== JSON.stringify([...expectedKeys].sort())) throw new Error("hardware qualification report schema keys are invalid");
   if (value.schema_version !== 2 || !COMMIT.test(value.source_commit) || typeof value.operator !== "string" || !OPERATOR.test(value.operator) || !FINGERPRINT.test(value.operator_key_fingerprint) || typeof value.qualified !== "boolean" || !Array.isArray(value.tests) || !Array.isArray(value.gates)) throw new Error("hardware qualification report structure is invalid");
   for (const field of ["dependency_lock_sha256", "release_manifest_sha256", "artifact_sha256", "database_migration_manifest_sha256"]) if (!DIGEST.test(value[field])) throw new Error(`hardware qualification report has invalid ${field}`);
   const canonical = Buffer.from(`${JSON.stringify(value, null, 2)}\n`, "utf8");

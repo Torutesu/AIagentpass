@@ -10,6 +10,7 @@ import { tmpdir } from 'node:os';
 const root = new URL('..', import.meta.url).pathname.replace(/\/$/, '');
 const validator = join(root, 'scripts/release/validate-hardware-qualification.mjs');
 const canonical = (value) => `${JSON.stringify(value, null, 2)}\n`;
+const sorted = (value) => Array.isArray(value) ? value.map(sorted) : value && typeof value === 'object' ? Object.fromEntries(Object.keys(value).sort().map((key) => [key, sorted(value[key])])) : value;
 const digest = (value) => crypto.createHash('sha256').update(value).digest('hex');
 const fingerprint = (key) => `SHA256:${crypto.createHash('sha256').update(key.export({ type: 'spki', format: 'der' })).digest('base64url')}`;
 const writeSignature = (path, bytes, privateKey) => writeFileSync(path, `${crypto.sign(null, bytes, privateKey).toString('base64')}\n`);
@@ -102,7 +103,17 @@ const makeFixture = ({ manifestVersion = 3 } = {}) => {
   const gates = requiredGates.map((name, index) => { const evidence = { name: `gate-${String(index).padStart(2, '0')}.txt`, bytes: Buffer.byteLength(`${name} passed\n`), sha256: digest(Buffer.from(`${name} passed\n`)) }; writeFileSync(join(evidenceDir, evidence.name), `${name} passed\n`); return { name, status: 'passed', evidence: [evidence] }; });
   const requiredTests = ['exact-pkg-install', 'launchd-xpc-approval', 'secure-enclave-key-creation', 'secure-enclave-nonexportability', 'cloud-possession-proof', 'claude-code-unattended-sign', 'cursor-code-unattended-sign', 'unrelated-process-denied', 'audit-console-observation', 'policy-reduction-denied', 'offline-expiry-denied', 'revoke-denied', 'emergency-stop-denied', 'service-crash-recovery', 'os-reboot-recovery', 'sleep-wake-recovery', 'network-clock-failure', 'upgrade-preserves-state', 'uninstall-reinstall-recovery', 'current-user-purge'];
   const tests = requiredTests.map((name, index) => { const content = Buffer.from(`${name} passed\n`); const evidence = { name: `test-${String(index).padStart(2, '0')}.txt`, bytes: content.length, sha256: digest(content) }; writeFileSync(join(evidenceDir, evidence.name), content); return { name, status: 'passed', evidence: [evidence] }; });
-  const report = { schema_version: 2, source_commit: sourceCommit, dependency_lock_sha256: digest(lockContent), release_manifest_sha256: digest(manifestBytes), artifact_name: 'AgentPass-v0.18.0-macos-universal.pkg', artifact_sha256: digest(productContent), architecture: 'arm64', hardware_class: 'apple_silicon', model_identifier: 'Mac15,7', macos_version: '26.0.1', macos_build: '25A100', secure_enclave: true, team_id: teamID, nested_code_identities: nestedCodeIdentities, notarization: manifest.evidence.notarization, cloud_image_digest: cloudImageDigest, database_migration_manifest_sha256: digest(migrationContent), signer_key_versions: signerKeyVersions, browser_versions: browserVersions, started_at: '2026-08-13T00:00:00.000Z', completed_at: '2026-08-13T00:10:00.000Z', operator: 'qualification@example.com', operator_key_fingerprint: fingerprint(operatorKeys.publicKey), qualified: true, tests, gates };
+  const suiteRecord = { schema_version: 1, kind: 'agentpass-n3e-qualification-suite-evidence', suite_input_sha256: digest(Buffer.from('suite-input')), release_trust_sha256: digest(Buffer.from('release-trust')), candidate_checkpoint_sha256: digest(Buffer.from('candidate-checkpoint')), source_commit: sourceCommit, artifact_sha256: digest(productContent), team_id: teamID, lane_class: 'apple_silicon', started_at: '2026-08-13T00:01:00.000Z', completed_at: '2026-08-13T00:09:00.000Z', teardown_proof_sha256: digest(Buffer.from('teardown')), steps: [
+    { kind: 'unarmed-control', scenario: null, phase: null, status: 'passed', evidence_sha256: digest(Buffer.from('suite-step-0')) },
+    { kind: 'scenario', scenario: 'pre-cloud-kill', phase: 'pre-cloud', status: 'passed', evidence_sha256: digest(Buffer.from('suite-step-1')) },
+    { kind: 'scenario', scenario: 'post-cloud-pre-local-kill', phase: 'post-cloud-pre-local', status: 'passed', evidence_sha256: digest(Buffer.from('suite-step-2')) },
+    { kind: 'scenario', scenario: 'post-activation-pre-audit-kill', phase: 'post-activation-pre-audit', status: 'passed', evidence_sha256: digest(Buffer.from('suite-step-3')) },
+    { kind: 'scenario', scenario: 'post-audit-pre-reply-loss', phase: 'post-audit-pre-reply', status: 'passed', evidence_sha256: digest(Buffer.from('suite-step-4')) },
+    { kind: 'scenario', scenario: 'audit-fsync-failure', phase: 'audit-fsync', status: 'passed', evidence_sha256: digest(Buffer.from('suite-step-5')) },
+    { kind: 'scenario', scenario: 'transport-reply-loss', phase: 'transport-reply', status: 'passed', evidence_sha256: digest(Buffer.from('suite-step-6')) }
+  ] };
+  const suiteBinding = { schema_version: 1, record: suiteRecord, record_sha256: digest(Buffer.from(`${JSON.stringify(sorted(suiteRecord), null, 2)}\n`)) };
+  const report = { schema_version: 2, source_commit: sourceCommit, dependency_lock_sha256: digest(lockContent), release_manifest_sha256: digest(manifestBytes), artifact_name: 'AgentPass-v0.18.0-macos-universal.pkg', artifact_sha256: digest(productContent), architecture: 'arm64', hardware_class: 'apple_silicon', model_identifier: 'Mac15,7', macos_version: '26.0.1', macos_build: '25A100', secure_enclave: true, team_id: teamID, nested_code_identities: nestedCodeIdentities, notarization: manifest.evidence.notarization, cloud_image_digest: cloudImageDigest, database_migration_manifest_sha256: digest(migrationContent), signer_key_versions: signerKeyVersions, browser_versions: browserVersions, started_at: '2026-08-13T00:00:00.000Z', completed_at: '2026-08-13T00:10:00.000Z', operator: 'qualification@example.com', operator_key_fingerprint: fingerprint(operatorKeys.publicKey), qualified: true, tests, gates, n3e_qualification_suite_evidence: suiteBinding };
   const reportPath = join(dir, 'qualification.json'); writeFileSync(reportPath, canonical(report)); writeSignature(operatorSignaturePath, Buffer.from(canonical(report)), operatorKeys.privateKey); writeFileSync(operatorPublicKeyPath, operatorKeys.publicKey.export({ type: 'spki', format: 'pem' }));
   return { dir, evidenceDir, releaseDir, report, reportPath, manifestPath, manifestSignaturePath, manifestPublicKeyPath, operatorSignaturePath, operatorPublicKeyPath, operatorPrivateKey: operatorKeys.privateKey, manifestPrivateKey: releaseKeys.privateKey, artifactPath: join(releaseDir, 'AgentPass-v0.18.0-macos-universal.pkg'), releaseFingerprint: fingerprint(releaseKeys.publicKey), operatorFingerprint: fingerprint(operatorKeys.publicKey) };
 };
@@ -117,6 +128,32 @@ test('v2 report accepts a signed release manifest v3 with an external controller
   assert.deepEqual({ qualified: output.qualified, production: output.production, release_manifest_signature_verified: output.release_manifest_signature_verified, operator_signature_verified: output.operator_signature_verified }, { qualified: true, production: true, release_manifest_signature_verified: true, operator_signature_verified: true });
   assert.equal(output.artifact_name, fixture.report.artifact_name);
   assert.equal(output.source_commit, fixture.report.source_commit);
+});
+
+test('independently revalidates the seven-step N3-E binding and rejects evidence attacks', () => {
+  const attack = (mutate, pattern) => {
+    const fixture = makeFixture();
+    const report = structuredClone(fixture.report);
+    mutate(report);
+    const reportBytes = Buffer.from(canonical(report));
+    const reportPath = join(fixture.dir, 'attacked-report.json');
+    writeFileSync(reportPath, reportBytes);
+    writeSignature(fixture.operatorSignaturePath, reportBytes, fixture.operatorPrivateKey);
+    const args = argsFor(fixture); args[0] = reportPath;
+    const result = run(args);
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, pattern);
+  };
+
+  attack((report) => { delete report.n3e_qualification_suite_evidence; }, /requires N3-E qualification suite evidence/u);
+  attack((report) => { report.n3e_qualification_suite_evidence.record.steps.reverse(); }, /missing, duplicated, reordered, or substituted/u);
+  attack((report) => { report.n3e_qualification_suite_evidence.record.steps[6].evidence_sha256 = report.n3e_qualification_suite_evidence.record.steps[0].evidence_sha256; }, /evidence digest is repeated/u);
+  attack((report) => { report.n3e_qualification_suite_evidence.record.steps[2].scenario = 'transport-reply-loss'; }, /missing, duplicated, reordered, or substituted/u);
+  attack((report) => { report.n3e_qualification_suite_evidence.record.source_commit = 'b'.repeat(40); }, /does not bind the report source/u);
+  attack((report) => { report.n3e_qualification_suite_evidence.record.grant_id = 'repeated-grant'; }, /missing or unknown fields|forbidden Grant/u);
+  attack((report) => { report.n3e_qualification_suite_evidence.record.run_binding = 'repeated-run-binding'; }, /missing or unknown fields|forbidden Grant/u);
+  attack((report) => { report.n3e_qualification_suite_evidence.record_sha256 = 'f'.repeat(64); }, /record digest mismatch/u);
+  attack((report) => { report.n3e_qualification_suite_evidence.record.steps[1].evidence_sha256 = '-----BEGIN PRIVATE KEY-----'; }, /invalid|secret/u);
 });
 
 test('v2 report remains compatible with a signed release manifest v2', () => {

@@ -17,6 +17,9 @@ import { createPostgresWebAuthnRegistrationCeremony } from "./webauthn/postgres-
 import { createSimpleWebAuthnRegistrationVerifier, createWebAuthnRegistrationService } from "./webauthn/registration.mjs";
 import { createSimpleWebAuthnAssertionVerifier } from "./webauthn/simplewebauthn-adapter.mjs";
 import { createHumanAgentSessionGrantHttpApi } from "./agent-sessions/http-api.mjs";
+import { createAgentSessionGrantIssuanceService } from "./agent-sessions/issuance-service.mjs";
+import { createHumanQualificationGrantBatchHttpApi } from "./agent-sessions/qualification-batch-http-api.mjs";
+import { createQualificationGrantBatchService } from "./agent-sessions/qualification-batch-service.mjs";
 
 const ALLOWED_RECENT_AUTH_OPERATIONS = Object.freeze([
   "device.enrollment.issue",
@@ -24,12 +27,13 @@ const ALLOWED_RECENT_AUTH_OPERATIONS = Object.freeze([
   "device.refresh.request",
   "organization.emergency_stop",
   "agent.session_grant.issue",
+  "qualification.grant_batch.issue",
   HUMAN_MANAGEMENT_RECENT_AUTH_OPERATIONS.revokeCredential,
   HUMAN_MANAGEMENT_RECENT_AUTH_OPERATIONS.revokeCurrentSession,
   ...recentAuthOperationValues(HUMAN_ORGANIZATIONS_RECENT_AUTH_OPERATIONS)
 ]);
 
-export function createHumanAuthRuntime({ postgresRuntime, tokenRecords, origin, rpId, cursorSecret, identityProvider = "chatgpt", signedConsoleIdentity = undefined, agentSessionSigner = undefined, now = () => Date.now() } = {}) {
+export function createHumanAuthRuntime({ postgresRuntime, tokenRecords, origin, rpId, cursorSecret, identityProvider = "chatgpt", signedConsoleIdentity = undefined, agentSessionSigner = undefined, qualificationManifestSigner = undefined, now = () => Date.now() } = {}) {
   const repository = postgresRuntime?.humanRepository;
   const organizationRepository = postgresRuntime?.organizationRepository;
   const pool = postgresRuntime?.pool;
@@ -73,6 +77,7 @@ export function createHumanAuthRuntime({ postgresRuntime, tokenRecords, origin, 
   const organizationService = createPostgresOrganizationService({ repository: organizationRepository, cursorCodec, now });
   const organizationApi = createHumanOrganizationsHttpApi({ humanSession, recentAuthService, organizationService, origin, now });
   let agentSessionGrantApi;
+  let qualificationGrantBatchApi;
   if (agentSessionSigner !== undefined) {
     if (!postgresRuntime.agentSessionIssuanceRepository) throw new TypeError("PostgreSQL Agent Session issuance repository is required");
     agentSessionGrantApi = createHumanAgentSessionGrantHttpApi({
@@ -83,9 +88,32 @@ export function createHumanAuthRuntime({ postgresRuntime, tokenRecords, origin, 
       origin,
       now
     });
+    if (qualificationManifestSigner !== undefined) {
+      if (!postgresRuntime.qualificationGrantBatchRepository) throw new TypeError("PostgreSQL qualification Grant batch repository is required");
+      const grantBuilder = createAgentSessionGrantIssuanceService({
+        repository: postgresRuntime.agentSessionIssuanceRepository,
+        signer: agentSessionSigner,
+        now
+      });
+      const qualificationBatchService = createQualificationGrantBatchService({
+        repository: postgresRuntime.qualificationGrantBatchRepository,
+        grantBuilder,
+        manifestSigner: qualificationManifestSigner,
+        now
+      });
+      qualificationGrantBatchApi = createHumanQualificationGrantBatchHttpApi({
+        humanSession,
+        recentAuthService,
+        qualificationBatchService,
+        origin,
+        now
+      });
+    }
+  } else if (qualificationManifestSigner !== undefined) {
+    throw new TypeError("Agent Session signer is required for qualification Grant batches");
   }
-  const api = createHumanAuthRouter({ sessionApi, webauthnApi, registrationApi, managementApi, organizationApi, ...(agentSessionGrantApi ? { agentSessionGrantApi } : {}) });
-  return Object.freeze({ api, humanSession, recentAuthService, ceremony, registrationCeremony, registrationService, identityResolver, consoleIdentity, managementRepository, organizationRepository, organizationService, sessionApi, webauthnApi, registrationApi, managementApi, organizationApi, ...(agentSessionGrantApi ? { agentSessionGrantApi } : {}), allowedOperations: ALLOWED_RECENT_AUTH_OPERATIONS });
+  const api = createHumanAuthRouter({ sessionApi, webauthnApi, registrationApi, managementApi, organizationApi, ...(agentSessionGrantApi ? { agentSessionGrantApi } : {}), ...(qualificationGrantBatchApi ? { qualificationGrantBatchApi } : {}) });
+  return Object.freeze({ api, humanSession, recentAuthService, ceremony, registrationCeremony, registrationService, identityResolver, consoleIdentity, managementRepository, organizationRepository, organizationService, sessionApi, webauthnApi, registrationApi, managementApi, organizationApi, ...(agentSessionGrantApi ? { agentSessionGrantApi } : {}), ...(qualificationGrantBatchApi ? { qualificationGrantBatchApi } : {}), allowedOperations: ALLOWED_RECENT_AUTH_OPERATIONS });
 }
 
 function requireCursorSecret(value) {

@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import crypto from "node:crypto";
+import { readFile } from "node:fs/promises";
 import test from "node:test";
 
 import { canonicalJson } from "../../../packages/protocol/src/index.mjs";
@@ -37,6 +38,13 @@ const otherKeys = crypto.generateKeyPairSync("ed25519");
 
 const digest = (value) => crypto.createHash("sha256").update(value, "utf8").digest("hex");
 const grantId = (index) => `60000000-0000-4000-8000-${String(index + 1).padStart(12, "0")}`;
+
+test("pins the byte-exact manifest signature domain across Node and Swift", async () => {
+  assert.equal(QUALIFICATION_GRANT_BATCH_MANIFEST_SIGNATURE_DOMAIN, "AgentPass-Qualification-Grant-Batch-v1\0");
+  const swift = await readFile(new URL("../../../native/macos/Sources/AgentPassNativeCore/NativeQualificationGrantBatchHTTPClient.swift", import.meta.url), "utf8");
+  assert.match(swift, /manifestSigningDomain = Data\("AgentPass-Qualification-Grant-Batch-v1\\0"\.utf8\)/u);
+  assert.doesNotMatch(swift, /Qualification-Grant-Batch-Manifest-v1/u);
+});
 
 function grantStatement(index) {
   return {

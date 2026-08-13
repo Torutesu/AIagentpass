@@ -51,7 +51,7 @@ export const REPORT_KEYS = Object.freeze([
   'macos_version', 'macos_build', 'secure_enclave', 'team_id', 'nested_code_identities',
   'notarization', 'cloud_image_digest', 'database_migration_manifest_sha256',
   'signer_key_versions', 'browser_versions', 'started_at', 'completed_at', 'operator',
-  'operator_key_fingerprint', 'qualified', 'tests', 'gates'
+  'operator_key_fingerprint', 'qualified', 'tests', 'gates', 'n3e_qualification_suite_evidence'
 ]);
 
 export const REQUIRED_CODE_IDENTITIES = Object.freeze([
@@ -452,7 +452,10 @@ const buildTemplate = ({ release, operator, operatorKeyFingerprint, browserVersi
     operator_key_fingerprint: external.operator_key_fingerprint,
     qualified: false,
     tests: [{ name: 'template', status: 'skipped', reason: 'template only; physical qualification is required', evidence: [] }],
-    gates: [{ name: 'template', status: 'skipped', reason: 'template only; physical qualification is required', evidence: [] }]
+    gates: [{ name: 'template', status: 'skipped', reason: 'template only; physical qualification is required', evidence: [] }],
+    // The protected N3-E runner adds the signed/canonical suite projection
+    // after the physical lane has completed. A template must never claim it.
+    n3e_qualification_suite_evidence: null
   };
   exactKeys(template, REPORT_KEYS, 'hardware qualification template');
   if (template.qualified !== false || template.tests.some((item) => item.status === 'passed') || template.gates.some((item) => item.status === 'passed')) throw new Error('generator cannot self-qualify');

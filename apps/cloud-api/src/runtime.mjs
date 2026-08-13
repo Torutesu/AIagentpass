@@ -15,10 +15,12 @@ import { createRefreshNonceCodec } from "./postgres/refresh-nonce-codec.mjs";
 import { createHostedAgentSessionGrantSigner } from "./agent-session-signer-config.mjs";
 import { createProcessBindingPolicyRegistry } from "./process-binding-policy-registry.mjs";
 import { createAgentSessionDeviceApi } from "./agent-session-device-api.mjs";
+import { createQualificationGrantBatchDeviceApi } from "./qualification-grant-batch-device-api.mjs";
+import { createHostedQualificationManifestSigner } from "./qualification-manifest-signer-config.mjs";
 
 const IDENTIFIER = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 
-export async function createCloudRuntime({ env = process.env, logger = console, postgresFactory = createPostgresRuntime, humanAuthFactory = createHumanAuthRuntime, agentSessionSignerProvider, agentSessionSignerFactory = createHostedAgentSessionGrantSigner } = {}) {
+export async function createCloudRuntime({ env = process.env, logger = console, postgresFactory = createPostgresRuntime, humanAuthFactory = createHumanAuthRuntime, agentSessionSignerProvider, agentSessionSignerFactory = createHostedAgentSessionGrantSigner, qualificationManifestSignerProvider, qualificationManifestSignerFactory = createHostedQualificationManifestSigner } = {}) {
   const profile = parseCloudRuntimeProfile(env);
   const config = loadRuntimeConfig(env);
   const tokenRecords = profile.isHosted ? [] : readProtectedJson(config.tokenRecordsPath, "token records", 1024 * 1024);
@@ -30,6 +32,7 @@ export async function createCloudRuntime({ env = process.env, logger = console, 
   let refreshHintSigner;
   let refreshNonceCodec;
   let agentSessionSigner;
+  let qualificationManifestSigner;
   let processBindingPolicies;
   if (profile.isHosted) {
     const refreshPrivateKeyPEM = readProtectedFile(config.refreshPrivateKeyPath, "refresh private key", 16 * 1024).toString("utf8");
@@ -56,6 +59,22 @@ export async function createCloudRuntime({ env = process.env, logger = console, 
       || typeof agentSessionSigner.health !== "function" || typeof agentSessionSigner.key_id !== "string") throw new Error("Cloud Agent Session signer is unavailable");
     const signerHealth = await agentSessionSigner.health();
     if (signerHealth?.ready !== true || signerHealth.key_id !== agentSessionSigner.key_id) throw new Error("Cloud Agent Session signer is unavailable");
+    const agentSessionVerificationKeys = await agentSessionSigner.verificationKeyMetadata();
+    qualificationManifestSigner = await qualificationManifestSignerFactory({
+      provider: qualificationManifestSignerProvider,
+      env,
+      references: {
+        bundle: { keyId: config.keyId, publicKey: privateKey },
+        refresh: { keyId: config.refreshKeyId, publicKey: refreshPrivateKey },
+        agentSession: agentSessionVerificationKeys.keys.map((key) => ({ keyId: key.key_id, publicKey: key.public_key }))
+      }
+    });
+    if (!qualificationManifestSigner || typeof qualificationManifestSigner.signQualificationGrantBatchManifest !== "function"
+      || typeof qualificationManifestSigner.verifyQualificationGrantBatchManifest !== "function"
+      || typeof qualificationManifestSigner.verificationKeyMetadata !== "function"
+      || typeof qualificationManifestSigner.health !== "function" || typeof qualificationManifestSigner.key_id !== "string") throw new Error("Cloud qualification manifest signer is unavailable");
+    const qualificationSignerHealth = await qualificationManifestSigner.health();
+    if (qualificationSignerHealth?.ready !== true || qualificationSignerHealth.key_id !== qualificationManifestSigner.key_id) throw new Error("Cloud qualification manifest signer is unavailable");
   }
   const cursorSecret = config.humanAuth ? requireHumanCursorSecret(env.AGENTPASS_HUMAN_CURSOR_SECRET) : undefined;
   const consoleIdentityPublicKey = config.humanAuth
@@ -95,11 +114,13 @@ export async function createCloudRuntime({ env = process.env, logger = console, 
           keyId: config.humanAuth.identityAssertionKeyId,
           publicKey: consoleIdentityPublicKey
         },
-        agentSessionSigner
+        agentSessionSigner,
+        qualificationManifestSigner
       });
     } else store = await createCloudStore({ dataDir: config.dataDir });
     const hostedRateLimiter = profile.isHosted ? createHostedRateLimiter(postgresRuntime.sharedControlRepository) : undefined;
     let agentSessionDeviceApi;
+    let qualificationGrantBatchDeviceApi;
     if (profile.isHosted) {
       const deviceRequestVerifier = async (request, options) => {
         const devices = await store.listDevices({ organizationId: options.organizationId });
@@ -120,6 +141,20 @@ export async function createCloudRuntime({ env = process.env, logger = console, 
         repository: postgresRuntime.agentSessionAuthorityRepository,
         rateLimiter: hostedRateLimiter
       });
+      if (!postgresRuntime.qualificationGrantBatchRepository
+        || typeof postgresRuntime.qualificationGrantBatchRepository.claimQualificationGrantBatch !== "function") {
+        throw new Error("PostgreSQL qualification Grant batch authority is unavailable");
+      }
+      qualificationGrantBatchDeviceApi = createQualificationGrantBatchDeviceApi({
+        deviceRequestVerifier,
+        grantVerifier: async (grant, context) => {
+          await agentSessionSigner.verificationKeyMetadata(grant?.statement?.key_id, { at: context.now });
+          return agentSessionSigner.verifyAgentSessionGrant(grant, { at: context.now });
+        },
+        manifestVerifier: async (manifest, context) => qualificationManifestSigner.verifyQualificationGrantBatchManifest(manifest, { at: context.now }),
+        repository: postgresRuntime.qualificationGrantBatchRepository,
+        rateLimiter: hostedRateLimiter
+      });
     }
     server = createCloudApi({
       store,
@@ -130,7 +165,10 @@ export async function createCloudRuntime({ env = process.env, logger = console, 
         rateLimiter: hostedRateLimiter,
         enrollmentCredentialSecret: Buffer.from(env.AGENTPASS_CAPABILITY_NONCE_SECRET, "base64url"),
         trackInFlight: postgresRuntime.trackInFlight,
-        readiness: createHostedReadiness(postgresRuntime.readiness, agentSessionSigner.health, agentSessionSigner.verificationKeyMetadata),
+        readiness: createHostedReadiness(postgresRuntime.readiness, [
+          { name: "agent_session_signer", purpose: "agent-session-grant", unavailableCode: "agent_session_signer_unavailable", signer: agentSessionSigner },
+          { name: "qualification_manifest_signer", purpose: "agentpass.qualification-grant-batch-manifest", unavailableCode: "qualification_manifest_signer_unavailable", signer: qualificationManifestSigner }
+        ]),
         operationalMetrics: postgresRuntime.operationalMetrics,
         operationalProbeSecret: exactRuntimeSecret(env.AGENTPASS_OPERATIONAL_PROBE_SECRET, "AGENTPASS_OPERATIONAL_PROBE_SECRET")
       } : { rateLimiter: createRateLimiter({ persistencePath: path.join(config.dataDir, "principal-rate-limits.json") }) }),
@@ -139,6 +177,7 @@ export async function createCloudRuntime({ env = process.env, logger = console, 
       ...(profile.isHosted ? { refreshHintService: createRefreshHintService({ source: store, nonceDeriver: refreshNonceCodec, signer: refreshHintSigner, notifier: postgresRuntime.refreshHintNotifier, metrics: postgresRuntime.operationalMetrics }) } : {}),
       ...(humanAuthRuntime ? { humanAuthApi: humanAuthRuntime.api, humanSession: humanAuthRuntime.humanSession, recentAuthService: humanAuthRuntime.recentAuthService } : {}),
       ...(agentSessionDeviceApi ? { agentSessionDeviceApi } : {}),
+      ...(qualificationGrantBatchDeviceApi ? { qualificationGrantBatchDeviceApi } : {}),
       ...(postgresRuntime?.capabilityAuthorityRepository ? { capabilityAuthorityRepository: postgresRuntime.capabilityAuthorityRepository } : {}),
       ...(postgresRuntime?.capabilityAuthorityRepository ? { capabilityRevocationSource: postgresRuntime.capabilityAuthorityRepository } : {})
     });
@@ -317,31 +356,39 @@ function createHostedRateLimiter(repository, { now = () => Date.now() } = {}) {
   });
 }
 
-function createHostedReadiness(databaseReadiness, signerHealth, verificationKeyMetadata) {
-  if (typeof databaseReadiness !== "function" || typeof signerHealth !== "function" || typeof verificationKeyMetadata !== "function") throw new Error("Hosted readiness dependencies are unavailable");
+function createHostedReadiness(databaseReadiness, signers) {
+  if (typeof databaseReadiness !== "function" || !Array.isArray(signers) || signers.length < 1
+    || signers.some(({ name, purpose, unavailableCode, signer }) => typeof name !== "string" || typeof purpose !== "string" || typeof unavailableCode !== "string"
+      || typeof signer?.health !== "function" || typeof signer?.verificationKeyMetadata !== "function")) throw new Error("Hosted readiness dependencies are unavailable");
   return async function hostedReadiness() {
     const databaseReport = await databaseReadiness();
-    let signer;
-    try {
-      const [value, keyRing] = await Promise.all([signerHealth(), verificationKeyMetadata()]);
-      if (!value || value.ready !== true || typeof value.purpose !== "string" || value.algorithm !== "ed25519"
-        || typeof value.key_id !== "string" || !/^[0-9a-f]{64}$/u.test(value.public_key_fingerprint ?? "")) throw new Error("invalid signer health");
-      if (!keyRing || keyRing.version !== 1 || keyRing.purpose !== value.purpose || keyRing.active_key_id !== value.key_id
-        || !Array.isArray(keyRing.keys) || keyRing.keys.length < 1 || keyRing.keys.length > 4
-        || !keyRing.keys.some((key) => key?.status === "active" && key.key_id === value.key_id)
-        || keyRing.keys.some((key) => !key || key.algorithm !== "ed25519" || typeof key.key_id !== "string"
-          || !/^[0-9a-f]{64}$/u.test(key.public_key_fingerprint ?? "") || !["active", "retiring"].includes(key.status))) throw new Error("invalid verification key metadata");
-      signer = Object.freeze({ ok: true, purpose: value.purpose, algorithm: value.algorithm, key_id: value.key_id, public_key_fingerprint: value.public_key_fingerprint });
-    } catch {
-      signer = Object.freeze({ ok: false, purpose: "agent-session-grant", algorithm: "ed25519", key_id: null, public_key_fingerprint: null });
+    const checks = {};
+    let signerFailure;
+    for (const dependency of signers) {
+      let report;
+      try {
+        const [value, keyRing] = await Promise.all([dependency.signer.health(), dependency.signer.verificationKeyMetadata()]);
+        if (!value || value.ready !== true || typeof value.purpose !== "string" || value.algorithm !== "ed25519"
+          || typeof value.key_id !== "string" || !/^[0-9a-f]{64}$/u.test(value.public_key_fingerprint ?? "")) throw new Error("invalid signer health");
+        if (!keyRing || keyRing.version !== 1 || keyRing.purpose !== value.purpose || keyRing.active_key_id !== value.key_id
+          || !Array.isArray(keyRing.keys) || keyRing.keys.length < 1 || keyRing.keys.length > 4
+          || !keyRing.keys.some((key) => key?.status === "active" && key.key_id === value.key_id)
+          || keyRing.keys.some((key) => !key || key.algorithm !== "ed25519" || typeof key.key_id !== "string"
+            || !/^[0-9a-f]{64}$/u.test(key.public_key_fingerprint ?? "") || !["active", "retiring"].includes(key.status))) throw new Error("invalid verification key metadata");
+        report = Object.freeze({ ok: true, purpose: value.purpose, algorithm: value.algorithm, key_id: value.key_id, public_key_fingerprint: value.public_key_fingerprint });
+      } catch {
+        signerFailure ??= dependency.unavailableCode;
+        report = Object.freeze({ ok: false, purpose: dependency.purpose, algorithm: "ed25519", key_id: null, public_key_fingerprint: null });
+      }
+      checks[dependency.name] = report;
     }
     if (!databaseReport || typeof databaseReport !== "object" || Array.isArray(databaseReport)) throw new Error("invalid database readiness");
     return Object.freeze({
       ...databaseReport,
-      ready: databaseReport.ready === true && signer.ok,
-      status: databaseReport.ready !== true ? databaseReport.status : signer.ok ? databaseReport.status : "not_ready",
-      code: databaseReport.ready !== true ? databaseReport.code : signer.ok ? databaseReport.code : "agent_session_signer_unavailable",
-      checks: Object.freeze({ ...(databaseReport.checks ?? {}), agent_session_signer: signer })
+      ready: databaseReport.ready === true && signerFailure === undefined,
+      status: databaseReport.ready !== true ? databaseReport.status : signerFailure === undefined ? databaseReport.status : "not_ready",
+      code: databaseReport.ready !== true ? databaseReport.code : signerFailure === undefined ? databaseReport.code : signerFailure,
+      checks: Object.freeze({ ...(databaseReport.checks ?? {}), ...checks })
     });
   };
 }

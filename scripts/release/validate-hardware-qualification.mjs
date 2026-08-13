@@ -67,6 +67,85 @@ const readJSON = (snapshot, label) => {
   try { return JSON.parse(snapshot.content.toString('utf8')); } catch { throw new Error(`${label} is not valid UTF-8 JSON`); }
 };
 const canonicalJSON = (value) => Buffer.from(`${JSON.stringify(value, null, 2)}\n`, 'utf8');
+const sortedJSON = (value) => {
+  if (Array.isArray(value)) return value.map(sortedJSON);
+  if (value && typeof value === 'object') return Object.fromEntries(Object.keys(value).sort().map((key) => [key, sortedJSON(value[key])]));
+  return value;
+};
+const canonicalN3ESuiteRecord = (value) => Buffer.from(`${JSON.stringify(sortedJSON(value), null, 2)}\n`, 'utf8');
+const N3E_SUITE_KIND = 'agentpass-n3e-qualification-suite-evidence';
+const N3E_SUITE_STEPS = Object.freeze([
+  Object.freeze({ kind: 'unarmed-control', scenario: null, phase: null }),
+  Object.freeze({ kind: 'scenario', scenario: 'pre-cloud-kill', phase: 'pre-cloud' }),
+  Object.freeze({ kind: 'scenario', scenario: 'post-cloud-pre-local-kill', phase: 'post-cloud-pre-local' }),
+  Object.freeze({ kind: 'scenario', scenario: 'post-activation-pre-audit-kill', phase: 'post-activation-pre-audit' }),
+  Object.freeze({ kind: 'scenario', scenario: 'post-audit-pre-reply-loss', phase: 'post-audit-pre-reply' }),
+  Object.freeze({ kind: 'scenario', scenario: 'audit-fsync-failure', phase: 'audit-fsync' }),
+  Object.freeze({ kind: 'scenario', scenario: 'transport-reply-loss', phase: 'transport-reply' })
+]);
+const N3E_RECORD_KEYS = Object.freeze([
+  'artifact_sha256', 'candidate_checkpoint_sha256', 'completed_at', 'kind', 'lane_class',
+  'release_trust_sha256', 'schema_version', 'source_commit', 'started_at', 'steps',
+  'suite_input_sha256', 'team_id', 'teardown_proof_sha256'
+]);
+const N3E_STEP_KEYS = Object.freeze(['evidence_sha256', 'kind', 'phase', 'scenario', 'status']);
+const N3E_SECRET_KEY = /(?:grant|run[_-]?binding|secret|token|password|private|credential|authorization|stdout|stderr|raw|signature|nonce|output)/iu;
+const N3E_SECRET_VALUE = /(?:-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----|\bBearer\s+\S+|\b(?:sk|ghp|github_pat|xox[baprs])_[A-Za-z0-9_-]{8,}|\bprivate[-_ ]?(?:key|token|credential)\b)/iu;
+const n3eNonzeroDigest = (value, label) => {
+  if (!validDigest(value) || value === '0'.repeat(64)) throw new Error(`${label} is invalid`);
+  return value;
+};
+const rejectN3ESecretMaterial = (value, path = '$') => {
+  if (Array.isArray(value)) { value.forEach((item, index) => rejectN3ESecretMaterial(item, `${path}[${index}]`)); return; }
+  if (value && typeof value === 'object') {
+    for (const [key, child] of Object.entries(value)) {
+      if (N3E_SECRET_KEY.test(key)) throw new Error(`${path}.${key} contains forbidden Grant, run binding, or secret material`);
+      rejectN3ESecretMaterial(child, `${path}.${key}`);
+    }
+    return;
+  }
+  if (typeof value === 'string' && N3E_SECRET_VALUE.test(value)) throw new Error(`${path} contains secret material`);
+};
+const validateN3ESuiteReportEvidence = (value, report) => {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('N3-E report evidence binding is invalid');
+  exactKeys(value, ['schema_version', 'record', 'record_sha256'], 'N3-E report evidence binding');
+  if (value.schema_version !== 1 || !validDigest(value.record_sha256)) throw new Error('N3-E report evidence binding version or digest is invalid');
+  const record = value.record;
+  exactKeys(record, N3E_RECORD_KEYS, 'N3-E suite evidence record');
+  if (record.schema_version !== 1 || record.kind !== N3E_SUITE_KIND) throw new Error('N3-E suite evidence identity is invalid');
+  n3eNonzeroDigest(record.suite_input_sha256, 'N3-E suite input digest');
+  n3eNonzeroDigest(record.release_trust_sha256, 'N3-E release trust digest');
+  n3eNonzeroDigest(record.candidate_checkpoint_sha256, 'N3-E candidate checkpoint digest');
+  n3eNonzeroDigest(record.artifact_sha256, 'N3-E artifact digest');
+  n3eNonzeroDigest(record.teardown_proof_sha256, 'N3-E teardown proof digest');
+  if (typeof record.source_commit !== 'string' || !/^[0-9a-f]{40}$/.test(record.source_commit) || record.source_commit === '0'.repeat(40)) throw new Error('N3-E source commit is invalid');
+  if (typeof record.team_id !== 'string' || !/^[A-Z0-9]{10}$/.test(record.team_id)) throw new Error('N3-E Team ID is invalid');
+  if (!['apple_silicon', 'intel_t2'].includes(record.lane_class)) throw new Error('N3-E lane class is invalid');
+  if (record.source_commit !== report.source_commit || record.artifact_sha256 !== report.artifact_sha256 || record.team_id !== report.team_id || record.lane_class !== report.hardware_class) throw new Error('N3-E suite evidence does not bind the report source, artifact, Team ID, or lane');
+  const parseN3ETimestamp = (timestamp, label) => {
+    if (typeof timestamp !== 'string' || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/.test(timestamp) || !Number.isFinite(Date.parse(timestamp)) || new Date(Date.parse(timestamp)).toISOString() !== timestamp) throw new Error(`${label} is invalid`);
+    return Date.parse(timestamp);
+  };
+  const started = parseN3ETimestamp(record.started_at, 'N3-E suite started_at');
+  const completed = parseN3ETimestamp(record.completed_at, 'N3-E suite completed_at');
+  if (completed <= started || completed - started > 2 * 60 * 60 * 1000) throw new Error('N3-E suite timestamp window is invalid');
+  const reportStarted = Date.parse(report.started_at); const reportCompleted = Date.parse(report.completed_at);
+  if (started < reportStarted || completed > reportCompleted) throw new Error('N3-E suite timestamps fall outside the hardware report window');
+  if (!Array.isArray(record.steps) || record.steps.length !== N3E_SUITE_STEPS.length) throw new Error('N3-E suite evidence must contain exactly seven steps');
+  const stepDigests = new Set();
+  record.steps.forEach((step, index) => {
+    exactKeys(step, N3E_STEP_KEYS, `N3-E suite step ${index}`);
+    const expected = N3E_SUITE_STEPS[index];
+    if (step.kind !== expected.kind || step.scenario !== expected.scenario || step.phase !== expected.phase || step.status !== 'passed') throw new Error('N3-E suite steps are missing, duplicated, reordered, or substituted');
+    n3eNonzeroDigest(step.evidence_sha256, `N3-E suite step ${index} evidence digest`);
+    if (stepDigests.has(step.evidence_sha256)) throw new Error('N3-E suite step evidence digest is repeated');
+    stepDigests.add(step.evidence_sha256);
+  });
+  rejectN3ESecretMaterial(value);
+  const expectedRecordDigest = createHash('sha256').update(canonicalN3ESuiteRecord(record)).digest('hex');
+  if (value.record_sha256 !== expectedRecordDigest) throw new Error('N3-E suite evidence record digest mismatch');
+  return value.record_sha256;
+};
 const fingerprintFor = (publicKey) => `SHA256:${createHash('sha256').update(publicKey.export({ type: 'spki', format: 'der' })).digest('base64url')}`;
 const verifyDetached = (payload, signaturePath, publicKeyPath, expected, label) => {
   if (!/^SHA256:[A-Za-z0-9_-]{43}$/.test(expected)) throw new Error(`invalid expected ${label} key fingerprint`);
@@ -261,12 +340,14 @@ const reportValue = readJSON(reportSnapshot, 'hardware qualification report');
 if (reportValue.schema_version === 1) { validateV1(reportValue); process.exit(0); }
 if (reportValue.schema_version !== 2) throw new Error('unsupported hardware qualification schema version');
 if (!reportSnapshot.content.equals(canonicalJSON(reportValue))) throw new Error('hardware qualification report is not canonical JSON');
-exactKeys(reportValue, [
+const reportKeys = [
   'schema_version', 'source_commit', 'dependency_lock_sha256', 'release_manifest_sha256', 'artifact_name', 'artifact_sha256',
   'architecture', 'hardware_class', 'model_identifier', 'macos_version', 'macos_build', 'secure_enclave', 'team_id',
   'nested_code_identities', 'notarization', 'cloud_image_digest', 'database_migration_manifest_sha256', 'signer_key_versions',
   'browser_versions', 'started_at', 'completed_at', 'operator', 'operator_key_fingerprint', 'qualified', 'tests', 'gates'
-], 'hardware qualification report');
+];
+if (Object.hasOwn(reportValue, 'n3e_qualification_suite_evidence')) reportKeys.push('n3e_qualification_suite_evidence');
+exactKeys(reportValue, reportKeys, 'hardware qualification report');
 for (const field of ['source_commit']) if (typeof reportValue[field] !== 'string' || !/^[0-9a-f]{40}$/.test(reportValue[field])) throw new Error(`invalid ${field}`);
 for (const field of ['dependency_lock_sha256', 'release_manifest_sha256', 'artifact_sha256', 'database_migration_manifest_sha256']) if (!validDigest(reportValue[field])) throw new Error(`invalid ${field}`);
 if (!safeName(reportValue.artifact_name) || !['arm64', 'x86_64'].includes(reportValue.architecture) || !['apple_silicon', 'intel_t2', 'intel_without_t2'].includes(reportValue.hardware_class)) throw new Error('invalid artifact or hardware identity');
@@ -303,6 +384,12 @@ validateVersionList(reportValue.browser_versions, 'browser versions');
 if (typeof reportValue.operator !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9@._-]{2,127}$/.test(reportValue.operator) || !/^SHA256:[A-Za-z0-9_-]{43}$/.test(reportValue.operator_key_fingerprint) || typeof reportValue.qualified !== 'boolean') throw new Error('invalid qualification conclusion');
 const started = Date.parse(reportValue.started_at); const completed = Date.parse(reportValue.completed_at);
 if (!Number.isFinite(started) || !Number.isFinite(completed) || !utcTimestamp.test(reportValue.started_at) || !utcTimestamp.test(reportValue.completed_at) || completed < started || completed - started > 24 * 60 * 60 * 1000) throw new Error('invalid hardware qualification time window');
+let n3eSuiteEvidenceSHA256 = null;
+if (Object.hasOwn(reportValue, 'n3e_qualification_suite_evidence') && reportValue.n3e_qualification_suite_evidence !== null) {
+  n3eSuiteEvidenceSHA256 = validateN3ESuiteReportEvidence(reportValue.n3e_qualification_suite_evidence, reportValue);
+} else if (reportValue.qualified) {
+  throw new Error('qualified result cannot be self-asserted and requires N3-E qualification suite evidence');
+}
 
 const suppliedGate = args.length === V2_ARGUMENTS;
 if (reportValue.qualified && !suppliedGate) throw new Error('qualified result requires signed release manifest, exact artifact, and detached operator signature inputs');
@@ -335,5 +422,5 @@ if (!suppliedGate) {
   const operator = verifyDetached(reportSnapshot.content, operatorSignatureInput, operatorPublicKeyInput, operatorFingerprint, 'operator');
   if (operator.fingerprint !== reportValue.operator_key_fingerprint) throw new Error('report operator key fingerprint does not match detached operator signature');
   if (reportValue.qualified && seenEvidence.size === 0) throw new Error('qualified result requires real evidence files');
-  console.log(JSON.stringify({ ok: true, schema_version: 2, qualified: reportValue.qualified, production: reportValue.qualified, tests: testNames.size, gates: gateNames.size, artifact_name: reportValue.artifact_name, artifact_sha256: reportValue.artifact_sha256, source_commit: reportValue.source_commit, release_manifest_sha256: reportValue.release_manifest_sha256, operator_key_fingerprint: operator.fingerprint, operator_signature_verified: true, release_manifest_signature_verified: true }));
+  console.log(JSON.stringify({ ok: true, schema_version: 2, qualified: reportValue.qualified, production: reportValue.qualified, tests: testNames.size, gates: gateNames.size, artifact_name: reportValue.artifact_name, artifact_sha256: reportValue.artifact_sha256, source_commit: reportValue.source_commit, release_manifest_sha256: reportValue.release_manifest_sha256, operator_key_fingerprint: operator.fingerprint, operator_signature_verified: true, release_manifest_signature_verified: true, ...(n3eSuiteEvidenceSHA256 ? { n3e_suite_evidence_sha256: n3eSuiteEvidenceSHA256 } : {}) }));
 }

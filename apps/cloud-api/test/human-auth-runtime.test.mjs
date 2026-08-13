@@ -61,6 +61,7 @@ test("composes the production human-auth boundary and bootstraps a hash-only ses
   assert.match(result.headers["Set-Cookie"], /^__Host-agentpass_session=/);
   assert.equal(runtime.allowedOperations.includes("device.enrollment.issue"), true);
   assert.equal(runtime.allowedOperations.includes("agent.session_grant.issue"), true);
+  assert.equal(runtime.allowedOperations.includes("qualification.grant_batch.issue"), true);
   assert.equal(runtime.allowedOperations.includes("human.management.credential.revoke"), true);
   assert.equal(runtime.allowedOperations.includes("human.management.session.revoke"), true);
   assert.equal(runtime.allowedOperations.includes("human.organizations.member.role.update"), true);
@@ -90,6 +91,23 @@ test("composes the Agent Session Human API only with the dedicated signer and is
   const runtime = createHumanAuthRuntime({ postgresRuntime: configured, tokenRecords, origin: "https://console.example.test", rpId: "console.example.test", cursorSecret: CURSOR_SECRET, agentSessionSigner: signer });
   assert.equal(typeof runtime.agentSessionGrantApi?.handle, "function");
   assert.throws(() => createHumanAuthRuntime({ postgresRuntime: postgres(), tokenRecords, origin: "https://console.example.test", rpId: "console.example.test", cursorSecret: CURSOR_SECRET, agentSessionSigner: signer }), /issuance repository/iu);
+});
+
+test("composes qualification batch authorization only with both purpose-separated signers and repositories", () => {
+  const configured = postgres();
+  configured.agentSessionIssuanceRepository = { async issueAgentSessionGrant() { throw new Error("not invoked"); } };
+  configured.qualificationGrantBatchRepository = { async issueQualificationGrantBatch() { throw new Error("not invoked"); } };
+  const agentSessionSigner = { key_id: "agent-session-2026-08", algorithm: "ed25519", async signAgentSessionGrant() { throw new Error("not invoked"); } };
+  const qualificationManifestSigner = {
+    async publicKeyMetadata() { return { key_id: "qualification-manifest-2026-08" }; },
+    async signQualificationGrantBatchManifest() { throw new Error("not invoked"); }
+  };
+  const tokenRecords = [createApiTokenRecord({ token: generateApiToken(), organizationId: ids.org, memberId: ids.member, role: "owner" })];
+  const runtime = createHumanAuthRuntime({ postgresRuntime: configured, tokenRecords, origin: "https://console.example.test", rpId: "console.example.test", cursorSecret: CURSOR_SECRET, agentSessionSigner, qualificationManifestSigner });
+  assert.equal(typeof runtime.qualificationGrantBatchApi?.handle, "function");
+  assert.throws(() => createHumanAuthRuntime({ postgresRuntime: configured, tokenRecords, origin: "https://console.example.test", rpId: "console.example.test", cursorSecret: CURSOR_SECRET, qualificationManifestSigner }), /Agent Session signer/iu);
+  delete configured.qualificationGrantBatchRepository;
+  assert.throws(() => createHumanAuthRuntime({ postgresRuntime: configured, tokenRecords, origin: "https://console.example.test", rpId: "console.example.test", cursorSecret: CURSOR_SECRET, agentSessionSigner, qualificationManifestSigner }), /qualification Grant batch repository/iu);
 });
 
 test("composes the signed-console identity adapter without a browser identity header", async () => {

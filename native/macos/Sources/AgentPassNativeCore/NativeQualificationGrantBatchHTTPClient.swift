@@ -149,7 +149,9 @@ public final class NativeQualificationGrantBatchHTTPClient: @unchecked Sendable 
   public static let maximumBatchTTLSeconds = 3_600
 
   private static let grantSigningDomain = Data("AgentPass-Agent-Session-Grant-v1\0".utf8)
-  private static let manifestSigningDomain = Data("AgentPass-Qualification-Grant-Batch-Manifest-v1\0".utf8)
+  // Cross-language protocol constant; keep byte-exact with
+  // qualification-grant-batch-manifest.mjs.
+  private static let manifestSigningDomain = Data("AgentPass-Qualification-Grant-Batch-v1\0".utf8)
   private static let uuidPattern = try! NSRegularExpression(
     pattern: "^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$")
   private static let digestPattern = try! NSRegularExpression(pattern: "^[0-9a-f]{64}$")

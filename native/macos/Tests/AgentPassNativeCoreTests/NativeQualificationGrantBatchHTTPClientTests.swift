@@ -190,7 +190,7 @@ private func qualificationResponse(
   ]
   var manifest: [String: Any] = [
     "signature": try qualificationSignature(
-      trustKey, domain: "AgentPass-Qualification-Grant-Batch-Manifest-v1\0", statement: manifestStatement),
+      trustKey, domain: "AgentPass-Qualification-Grant-Batch-v1\0", statement: manifestStatement),
     "statement": manifestStatement,
     "statement_hash": qualificationDigest(try NativeStrictJSON.data(manifestStatement)),
     "type": "agentpass.qualification-grant-batch-manifest",

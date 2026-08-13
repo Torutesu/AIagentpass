@@ -9,6 +9,8 @@ import { REQUIRED_GATES, REQUIRED_TESTS, collectPhysicalMetadata, runBoundedComm
 
 const digest = (value) => crypto.createHash('sha256').update(value).digest('hex');
 const canonical = (value) => `${JSON.stringify(value, null, 2)}\n`;
+const sortedCanonical = (value) => `${JSON.stringify(Array.isArray(value) ? value.map(sortedCanonicalValue) : sortedCanonicalValue(value), null, 2)}\n`;
+const sortedCanonicalValue = (value) => Array.isArray(value) ? value.map(sortedCanonicalValue) : value && typeof value === 'object' ? Object.fromEntries(Object.keys(value).sort().map((key) => [key, sortedCanonicalValue(value[key])])) : value;
 const fixtureMetadata = { architecture: 'arm64', hardwareClass: 'apple_silicon', modelIdentifier: 'Mac15,7', macosVersion: '26.5.2', macosBuild: '25G100', secureEnclave: true };
 const codeIdentities = (team) => [
   ['AgentPass.app', 'dev.agentpass'],
@@ -37,6 +39,42 @@ const passedCommand = (gate) => {
   const tests = REQUIRED_TESTS.filter((_, index) => Math.floor(index * REQUIRED_GATES.length / REQUIRED_TESTS.length) === gateIndex).map((name) => ({ name, status: 'passed' }));
   return { exitCode: 0, signal: null, timedOut: false, outputLimit: false, spawnError: false, durationMs: 1, stdout: Buffer.from(canonical({ schema_version: 1, gate, status: 'passed', tests })), stderr: Buffer.from('secret-on-stderr-do-not-persist') };
 };
+
+const suiteEvidenceFor = (fixture) => ({
+  schema_version: 1,
+  kind: 'agentpass-n3e-qualification-suite-evidence',
+  suite_input_sha256: digest(Buffer.from('suite-input')),
+  release_trust_sha256: digest(Buffer.from('release-trust')),
+  candidate_checkpoint_sha256: digest(Buffer.from('candidate-checkpoint')),
+  source_commit: 'a'.repeat(40),
+  artifact_sha256: digest(Buffer.from('signed notarized production package fixture\n')),
+  team_id: 'A1B2C3D4E5',
+  lane_class: 'apple_silicon',
+  started_at: '2026-08-13T00:01:00.000Z',
+  completed_at: '2026-08-13T00:01:30.000Z',
+  teardown_proof_sha256: digest(Buffer.from('teardown')),
+  steps: [
+    { kind: 'unarmed-control', scenario: null, phase: null, status: 'passed', evidence_sha256: digest(Buffer.from('suite-step-0')) },
+    { kind: 'scenario', scenario: 'pre-cloud-kill', phase: 'pre-cloud', status: 'passed', evidence_sha256: digest(Buffer.from('suite-step-1')) },
+    { kind: 'scenario', scenario: 'post-cloud-pre-local-kill', phase: 'post-cloud-pre-local', status: 'passed', evidence_sha256: digest(Buffer.from('suite-step-2')) },
+    { kind: 'scenario', scenario: 'post-activation-pre-audit-kill', phase: 'post-activation-pre-audit', status: 'passed', evidence_sha256: digest(Buffer.from('suite-step-3')) },
+    { kind: 'scenario', scenario: 'post-audit-pre-reply-loss', phase: 'post-audit-pre-reply', status: 'passed', evidence_sha256: digest(Buffer.from('suite-step-4')) },
+    { kind: 'scenario', scenario: 'audit-fsync-failure', phase: 'audit-fsync', status: 'passed', evidence_sha256: digest(Buffer.from('suite-step-5')) },
+    { kind: 'scenario', scenario: 'transport-reply-loss', phase: 'transport-reply', status: 'passed', evidence_sha256: digest(Buffer.from('suite-step-6')) }
+  ]
+});
+
+test('report generator carries the canonical N3-E record only when explicitly supplied', async () => {
+  const fixture = makeFixture();
+  const suitePath = join(fixture.dir, 'suite-evidence.json');
+  writeFileSync(suitePath, sortedCanonical(suiteEvidenceFor(fixture)), { mode: 0o600 });
+  let nowCall = 0;
+  const result = await runQualification({ ...fixture, qualificationSuiteEvidencePath: suitePath, platform: 'darwin', platformMetadata: fixtureMetadata, runCommand: async (command) => passedCommand(command.split('/').pop()), now: () => new Date(nowCall++ === 0 ? '2026-08-13T00:01:00.000Z' : '2026-08-13T00:02:00.000Z') });
+  assert.equal(result.report.qualified, false);
+  assert.equal(result.report.n3e_qualification_suite_evidence.schema_version, 1);
+  assert.equal(result.report.n3e_qualification_suite_evidence.record.steps.length, 7);
+  assert.match(fs.readFileSync(fixture.outputPath, 'utf8'), /n3e_qualification_suite_evidence/u);
+});
 
 test('injected Linux execution stays unqualified even when every fake gate reports passed', async () => {
   const fixture = makeFixture();

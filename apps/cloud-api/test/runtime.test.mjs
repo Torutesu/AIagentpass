@@ -26,13 +26,14 @@ function files() {
   const keys = crypto.generateKeyPairSync("ed25519");
   const refreshKeys = crypto.generateKeyPairSync("ed25519");
   const agentSessionKeys = crypto.generateKeyPairSync("ed25519");
+  const qualificationManifestKeys = crypto.generateKeyPairSync("ed25519");
   fs.writeFileSync(tokenRecordsPath, JSON.stringify(records), { mode: 0o600 });
   fs.writeFileSync(bundlePrivateKeyPath, keys.privateKey.export({ type: "pkcs8", format: "pem" }), { mode: 0o600 });
   fs.writeFileSync(identityPublicKeyPath, keys.publicKey.export({ type: "spki", format: "pem" }), { mode: 0o600 });
   fs.writeFileSync(refreshPrivateKeyPath, refreshKeys.privateKey.export({ type: "pkcs8", format: "pem" }), { mode: 0o600 });
   fs.writeFileSync(refreshNonceKeyringPath, JSON.stringify({ version: 1, active_key_id: "refresh-nonce-v1", keys: { "refresh-nonce-v1": Buffer.alloc(32, 0x35).toString("base64url") } }), { mode: 0o600 });
   fs.writeFileSync(agentSessionProcessPoliciesPath, JSON.stringify({ version: 1, policies: [{ policy_id: "claude-code-v1", release_id: "agentpass-0.18.0", agent_kind: "claude-code", adapter_id: "11111111-1111-4111-8111-111111111111", adapter_versions: ["1.0.0"], status: "enabled" }] }), { mode: 0o600 });
-  return { root, identityPublicKeyPath, refreshPrivateKeyPath, refreshNonceKeyringPath, agentSessionProcessPoliciesPath, agentSessionKeys, env: { AGENTPASS_CLOUD_PROFILE: "evaluation", AGENTPASS_CLOUD_DATA_DIR: dataDir, AGENTPASS_CLOUD_TOKEN_RECORDS_PATH: tokenRecordsPath, AGENTPASS_CLOUD_BUNDLE_PRIVATE_KEY_PATH: bundlePrivateKeyPath, AGENTPASS_CLOUD_PORT: "0" } };
+  return { root, identityPublicKeyPath, refreshPrivateKeyPath, refreshNonceKeyringPath, agentSessionProcessPoliciesPath, agentSessionKeys, qualificationManifestKeys, env: { AGENTPASS_CLOUD_PROFILE: "evaluation", AGENTPASS_CLOUD_DATA_DIR: dataDir, AGENTPASS_CLOUD_TOKEN_RECORDS_PATH: tokenRecordsPath, AGENTPASS_CLOUD_BUNDLE_PRIVATE_KEY_PATH: bundlePrivateKeyPath, AGENTPASS_CLOUD_PORT: "0" } };
 }
 
 test("production runtime starts from protected files and closes idempotently", async (t) => {
@@ -66,7 +67,7 @@ test("production human auth is composed from PostgreSQL and closed with the runt
   const calls = [];
   const controlPlaneStore = await createCloudStore({ dataDir: path.join(value.root, "hosted-test-store"), auditCursorSecret: Buffer.from(CURSOR_SECRET, "base64url") });
   const hostedControlPlaneStore = new Proxy(controlPlaneStore, { get(target, property, receiver) { if (property === "pollDeviceRefresh") return async () => null; if (property === "markDeviceRefreshDelivered") return async () => {}; return Reflect.get(target, property, receiver); } });
-  const postgresRuntime = { pool: {}, humanRepository: {}, controlPlaneStore: hostedControlPlaneStore, refreshHintNotifier: { async waitForRefresh() { return false; } }, sharedControlRepository: { async consumeDeviceRequestNonce() { return { accepted: true }; }, async acquireRateLimit() { return { allowed: true, limit: 120, remaining: 119, retryAfterMs: 0, retryAfterSeconds: 0, resetAt: Date.now() }; } }, capabilityAuthorityRepository: { async issueCapabilityMetadata() {}, async listRevokedCapabilityIds() { return []; } }, agentSessionIssuanceRepository: { async issueAgentSessionGrant() {} }, agentSessionAuthorityRepository: { async consumeAgentSessionGrant() {} }, async readiness() { return readyDatabaseReport(); }, async close() { calls.push("postgres-close"); await controlPlaneStore.close(); } };
+  const postgresRuntime = { pool: {}, humanRepository: {}, controlPlaneStore: hostedControlPlaneStore, refreshHintNotifier: { async waitForRefresh() { return false; } }, sharedControlRepository: { async consumeDeviceRequestNonce() { return { accepted: true }; }, async acquireRateLimit() { return { allowed: true, limit: 120, remaining: 119, retryAfterMs: 0, retryAfterSeconds: 0, resetAt: Date.now() }; } }, capabilityAuthorityRepository: { async issueCapabilityMetadata() {}, async listRevokedCapabilityIds() { return []; } }, agentSessionIssuanceRepository: { async issueAgentSessionGrant() {} }, agentSessionAuthorityRepository: { async consumeAgentSessionGrant() {} }, qualificationGrantBatchRepository: { async claimQualificationGrantBatch() {} }, async readiness() { return readyDatabaseReport(); }, async close() { calls.push("postgres-close"); await controlPlaneStore.close(); } };
   const recentAuthService = { async authorize() { return { verified: false }; } };
   const humanSession = { async authenticateRequest() { return { session: {} }; } };
   let signerHealthy = true;
@@ -76,7 +77,7 @@ test("production human auth is composed from PostgreSQL and closed with the runt
     if (!signerHealthy) throw new Error("simulated provider outage");
     return publicKeyMetadata(input);
   };
-  const runtime = await createCloudRuntime({ env, logger: { info() {} }, agentSessionSignerProvider: provider, postgresFactory: async (input) => { calls.push(["postgres", input.applicationVersion, typeof input.refreshNonceCodec?.derive, typeof input.resolveProcessBindingPolicy]); return postgresRuntime; }, humanAuthFactory: (input) => { calls.push(["human", input.origin, input.rpId, input.cursorSecret, input.signedConsoleIdentity, input.agentSessionSigner]); return { api: { async handle() { return { status: 404, body: { error: { code: "not_found", message: "Resource not found" } }, headers: {} }; } }, humanSession, recentAuthService }; } });
+  const runtime = await createCloudRuntime({ env, logger: { info() {} }, agentSessionSignerProvider: provider, qualificationManifestSignerProvider: qualificationSignerProvider(value), postgresFactory: async (input) => { calls.push(["postgres", input.applicationVersion, typeof input.refreshNonceCodec?.derive, typeof input.resolveProcessBindingPolicy]); return postgresRuntime; }, humanAuthFactory: (input) => { calls.push(["human", input.origin, input.rpId, input.cursorSecret, input.signedConsoleIdentity, input.agentSessionSigner, input.qualificationManifestSigner]); return { api: { async handle() { return { status: 404, body: { error: { code: "not_found", message: "Resource not found" } }, headers: {} }; } }, humanSession, recentAuthService }; } });
   assert.equal(runtime.postgresRuntime, postgresRuntime);
   assert.equal(runtime.humanAuthRuntime.recentAuthService, recentAuthService);
   assert.deepEqual(calls[0], ["postgres", "0.18.0", "function", "function"]);
@@ -86,6 +87,7 @@ test("production human auth is composed from PostgreSQL and closed with the runt
   assert.equal(calls[1][4].keyId, "console-2026-08");
   assert.match(calls[1][4].publicKey, /BEGIN PUBLIC KEY/);
   assert.equal(typeof calls[1][5].signAgentSessionGrant, "function");
+  assert.equal(typeof calls[1][6].signQualificationGrantBatchManifest, "function");
   assert.equal(Object.hasOwn(runtime.config.humanAuth, "cursorSecret"), false);
   assert.equal(runtime.config.tokenRecordsPath, null);
   assert.equal(JSON.stringify(runtime.config).includes(CURSOR_SECRET), false);
@@ -112,6 +114,7 @@ test("production human auth fails closed without PostgreSQL capability authority
   await assert.rejects(createCloudRuntime({
     env,
     agentSessionSignerProvider: signerProvider(value),
+    qualificationManifestSignerProvider: qualificationSignerProvider(value),
     postgresFactory: async () => ({ pool: {}, humanRepository: {}, async close() { closed = true; } }),
     humanAuthFactory: () => { throw new Error("human auth must not be constructed"); }
   }), /capability authority is unavailable/);
@@ -119,7 +122,7 @@ test("production human auth fails closed without PostgreSQL capability authority
 });
 
 function hostedEnv(value) {
-  return { ...value.env, AGENTPASS_CLOUD_PROFILE: "hosted", AGENTPASS_CLOUD_DATA_DIR: undefined, AGENTPASS_CLOUD_TOKEN_RECORDS_PATH: undefined, AGENTPASS_DATABASE_URL: "postgresql://agent:secret@db.example.test/agentpass?sslmode=verify-full", AGENTPASS_CONSOLE_ORIGIN: "https://console.example.test", AGENTPASS_WEBAUTHN_RP_ID: "example.test", AGENTPASS_HUMAN_CURSOR_SECRET: CURSOR_SECRET, AGENTPASS_CAPABILITY_NONCE_SECRET: Buffer.alloc(32, 0x33).toString("base64url"), AGENTPASS_OPERATIONAL_PROBE_SECRET: Buffer.alloc(32, 0x34).toString("base64url"), AGENTPASS_IDENTITY_ASSERTION_ISSUER: "agentpass-console", AGENTPASS_IDENTITY_ASSERTION_AUDIENCE: "agentpass-cloud-session", AGENTPASS_IDENTITY_ASSERTION_KID: "console-2026-08", AGENTPASS_IDENTITY_ASSERTION_PUBLIC_KEY_PATH: value.identityPublicKeyPath, AGENTPASS_CLOUD_REFRESH_PRIVATE_KEY_PATH: value.refreshPrivateKeyPath, AGENTPASS_CLOUD_REFRESH_KEY_ID: "refresh-2026-08", AGENTPASS_CLOUD_REFRESH_NONCE_KEYRING_PATH: value.refreshNonceKeyringPath, AGENTPASS_CLOUD_AGENT_SESSION_KEY_ID: "agent-session-2026-08", AGENTPASS_CLOUD_AGENT_SESSION_PUBLIC_KEY: value.agentSessionKeys.publicKey.export({ type: "spki", format: "pem" }).toString(), AGENTPASS_CLOUD_AGENT_SESSION_PROCESS_POLICIES_PATH: value.agentSessionProcessPoliciesPath };
+  return { ...value.env, AGENTPASS_CLOUD_PROFILE: "hosted", AGENTPASS_CLOUD_DATA_DIR: undefined, AGENTPASS_CLOUD_TOKEN_RECORDS_PATH: undefined, AGENTPASS_DATABASE_URL: "postgresql://agent:secret@db.example.test/agentpass?sslmode=verify-full", AGENTPASS_CONSOLE_ORIGIN: "https://console.example.test", AGENTPASS_WEBAUTHN_RP_ID: "example.test", AGENTPASS_HUMAN_CURSOR_SECRET: CURSOR_SECRET, AGENTPASS_CAPABILITY_NONCE_SECRET: Buffer.alloc(32, 0x33).toString("base64url"), AGENTPASS_OPERATIONAL_PROBE_SECRET: Buffer.alloc(32, 0x34).toString("base64url"), AGENTPASS_IDENTITY_ASSERTION_ISSUER: "agentpass-console", AGENTPASS_IDENTITY_ASSERTION_AUDIENCE: "agentpass-cloud-session", AGENTPASS_IDENTITY_ASSERTION_KID: "console-2026-08", AGENTPASS_IDENTITY_ASSERTION_PUBLIC_KEY_PATH: value.identityPublicKeyPath, AGENTPASS_CLOUD_REFRESH_PRIVATE_KEY_PATH: value.refreshPrivateKeyPath, AGENTPASS_CLOUD_REFRESH_KEY_ID: "refresh-2026-08", AGENTPASS_CLOUD_REFRESH_NONCE_KEYRING_PATH: value.refreshNonceKeyringPath, AGENTPASS_CLOUD_AGENT_SESSION_KEY_ID: "agent-session-2026-08", AGENTPASS_CLOUD_AGENT_SESSION_PUBLIC_KEY: value.agentSessionKeys.publicKey.export({ type: "spki", format: "pem" }).toString(), AGENTPASS_CLOUD_AGENT_SESSION_PROCESS_POLICIES_PATH: value.agentSessionProcessPoliciesPath, AGENTPASS_CLOUD_QUALIFICATION_MANIFEST_KEY_ID: "qualification-manifest-2026-08", AGENTPASS_CLOUD_QUALIFICATION_MANIFEST_PUBLIC_KEY: value.qualificationManifestKeys.publicKey.export({ type: "spki", format: "pem" }).toString() };
 }
 
 function signerProvider(value) {
@@ -127,6 +130,14 @@ function signerProvider(value) {
   return {
     async publicKeyMetadata(input) { return { key_id: input.key_id, algorithm: "ed25519", public_key: publicKey }; },
     async sign({ bytes }) { return crypto.sign(null, bytes, value.agentSessionKeys.privateKey); }
+  };
+}
+
+function qualificationSignerProvider(value) {
+  const publicKey = value.qualificationManifestKeys.publicKey.export({ type: "spki", format: "pem" }).toString();
+  return {
+    async publicKeyMetadata(input) { return { key_id: input.key_id, algorithm: "ed25519", public_key: publicKey }; },
+    async sign({ bytes }) { return crypto.sign(null, bytes, value.qualificationManifestKeys.privateKey); }
   };
 }
 

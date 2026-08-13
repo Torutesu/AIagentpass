@@ -3,6 +3,10 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import { spawn } from 'node:child_process';
 import { basename, isAbsolute, join, resolve } from 'node:path';
+import {
+  parseQualificationSuiteEvidence,
+  qualificationSuiteEvidenceSHA256
+} from './n3e/qualification-suite-evidence.mjs';
 
 const MAX_TEMPLATE_BYTES = 4 * 1024 * 1024;
 const MAX_ARTIFACT_BYTES = 16 * 1024 * 1024 * 1024;
@@ -44,8 +48,10 @@ const REPORT_KEYS = Object.freeze([
   'macos_version', 'macos_build', 'secure_enclave', 'team_id', 'nested_code_identities',
   'notarization', 'cloud_image_digest', 'database_migration_manifest_sha256',
   'signer_key_versions', 'browser_versions', 'started_at', 'completed_at', 'operator',
-  'operator_key_fingerprint', 'qualified', 'tests', 'gates'
+  'operator_key_fingerprint', 'qualified', 'tests', 'gates', 'n3e_qualification_suite_evidence'
 ]);
+const LEGACY_REPORT_KEYS = Object.freeze(REPORT_KEYS.filter((key) => key !== 'n3e_qualification_suite_evidence'));
+const N3E_REPORT_EVIDENCE_KEY = 'n3e_qualification_suite_evidence';
 
 const METADATA_COMMANDS = Object.freeze({
   architecture: ['/usr/bin/uname', ['-m']],
@@ -153,8 +159,9 @@ export const collectPhysicalMetadata = async ({ runCommand = runBoundedCommand, 
 const validateTemplate = (snapshot) => {
   let template; try { template = JSON.parse(snapshot.bytes.toString('utf8')); } catch { throw new Error('production report template is not valid JSON'); }
   if (!snapshot.bytes.equals(canonicalJSON(template))) throw new Error('production report template is not canonical JSON');
-  exactKeys(template, REPORT_KEYS, 'production report template');
+  exactKeys(template, Object.hasOwn(template, N3E_REPORT_EVIDENCE_KEY) ? REPORT_KEYS : LEGACY_REPORT_KEYS, 'production report template');
   if (template.schema_version !== 2 || template.qualified !== false) throw new Error('production report template must be unsigned v2 and unqualified');
+  if (Object.hasOwn(template, N3E_REPORT_EVIDENCE_KEY) && template[N3E_REPORT_EVIDENCE_KEY] !== null) throw new Error('production report template cannot contain N3-E qualification evidence');
   if (!safeName(template.artifact_name) || !validDigest(template.artifact_sha256) || !/^[0-9a-f]{40}$/.test(template.source_commit) || !validDigest(template.dependency_lock_sha256) || !validDigest(template.release_manifest_sha256) || !validDigest(template.database_migration_manifest_sha256) || template.source_commit === '0'.repeat(40) || [template.artifact_sha256, template.dependency_lock_sha256, template.release_manifest_sha256, template.database_migration_manifest_sha256].some((value) => value === '0'.repeat(64)) || JSON.stringify(template).includes('REPLACE_WITH') || template.team_id === 'TEAMID1234') throw new Error('production report template lacks release bindings');
   if (template.notarization?.status !== 'accepted_stapled') throw new Error('production report template must bind an accepted notarized release');
   if (template.secure_enclave !== true || !/^SHA256:[A-Za-z0-9_-]{43}$/.test(template.operator_key_fingerprint)) throw new Error('production report template is not a production qualification template');
@@ -182,7 +189,7 @@ const resultEvidence = (kind, name, result, status) => canonicalJSON({ schema_ve
 const failedResult = (name, reason, evidence) => ({ name, status: 'failed', reason: failReason(reason), evidence: [evidence] });
 const skippedResult = (name, evidence) => ({ name, status: 'skipped', reason: 'required test did not physically pass', evidence: [evidence] });
 
-export const runQualification = async ({ templatePath, outputPath, artifactPath, gateDriverDirectory, evidenceDirectory, operator, platform = process.platform, production = false, platformMetadata = null, metadataProvider = null, runCommand = runBoundedCommand, now = () => new Date(), timeoutMs = DEFAULT_TIMEOUT_MS, maxOutputBytes = MAX_OUTPUT_BYTES } = {}) => {
+export const runQualification = async ({ templatePath, outputPath, artifactPath, gateDriverDirectory, evidenceDirectory, operator, qualificationSuiteEvidencePath = null, platform = process.platform, production = false, platformMetadata = null, metadataProvider = null, runCommand = runBoundedCommand, now = () => new Date(), timeoutMs = DEFAULT_TIMEOUT_MS, maxOutputBytes = MAX_OUTPUT_BYTES } = {}) => {
   if (production && platform !== 'darwin') throw new Error('P0-C production qualification is supported only on darwin');
   if (production && (platformMetadata || metadataProvider || runCommand !== runBoundedCommand)) throw new Error('production qualification cannot use injected runners or metadata');
   const template = validateTemplate(snapshotFile(assertAbsolutePath(templatePath, 'template path'), MAX_TEMPLATE_BYTES, 'production report template'));
@@ -193,6 +200,14 @@ export const runQualification = async ({ templatePath, outputPath, artifactPath,
   const startedAt = utc(now()); const metadata = platformMetadata ?? (metadataProvider ? await metadataProvider({ runCommand, timeoutMs, maxOutputBytes }) : await collectPhysicalMetadata({ runCommand, timeoutMs, maxOutputBytes }));
   if (!metadata || !['arm64', 'x86_64'].includes(metadata.architecture) || !['apple_silicon', 'intel_t2', 'intel_without_t2'].includes(metadata.hardwareClass) || typeof metadata.modelIdentifier !== 'string' || typeof metadata.macosVersion !== 'string' || typeof metadata.macosBuild !== 'string' || typeof metadata.secureEnclave !== 'boolean') throw new Error('injected physical metadata is invalid');
   if ((metadata.hardwareClass === 'apple_silicon') !== (metadata.architecture === 'arm64') || (metadata.hardwareClass === 'intel_without_t2' && metadata.secureEnclave)) throw new Error('physical metadata hardware identity is inconsistent');
+  let suiteBinding = null;
+  if (qualificationSuiteEvidencePath !== null) {
+    const suiteSnapshot = snapshotFile(assertAbsolutePath(qualificationSuiteEvidencePath, 'N3-E suite evidence path'), 64 * 1024, 'N3-E suite evidence');
+    let suiteRecord;
+    try { suiteRecord = parseQualificationSuiteEvidence(suiteSnapshot.bytes); } catch { throw new Error('N3-E suite evidence is invalid or non-canonical'); }
+    if (suiteRecord.source_commit !== template.source_commit || suiteRecord.artifact_sha256 !== artifact.sha256 || suiteRecord.team_id !== template.team_id || suiteRecord.lane_class !== metadata.hardwareClass) throw new Error('N3-E suite evidence does not bind the exact report lane');
+    suiteBinding = { schema_version: 1, record: suiteRecord, record_sha256: qualificationSuiteEvidenceSHA256(suiteRecord) };
+  }
   const gateResults = new Map(); const testSources = new Map(); const duplicateTests = new Set(); const writtenEvidence = [];
   const driverEnvironment = Object.freeze({
     ...SANITIZED_ENV,
@@ -222,15 +237,17 @@ export const runQualification = async ({ templatePath, outputPath, artifactPath,
     const empty = Buffer.alloc(0); const synthetic = { exitCode: gatePassed ? 0 : null, signal: null, timedOut: false, outputLimit: false, spawnError: !gatePassed, durationMs: 0, stdoutBytes: 0, stderrBytes: 0, stdoutSha256: sha256(empty), stderrSha256: sha256(empty) }; const evidenceName = `test-${String(index).padStart(2, '0')}-${test}.json`; const binding = writePrivateFile(join(evidence, evidenceName), resultEvidence('p0c-test-result', test, synthetic, status)); writtenEvidence.push(binding);
     testResults.push(status === 'passed' ? { name: test, status, evidence: [binding] } : status === 'failed' ? failedResult(test, duplicateTests.has(test) ? 'test was reported by multiple gate drivers' : 'source gate did not pass', binding) : skippedResult(test, binding));
   }
-  const report = { ...template, architecture: metadata.architecture, hardware_class: metadata.hardwareClass, model_identifier: metadata.modelIdentifier, macos_version: metadata.macosVersion, macos_build: metadata.macosBuild, secure_enclave: metadata.secureEnclave, started_at: startedAt, completed_at: utc(now()), operator, qualified: production && platform === 'darwin' && metadata.secureEnclave === true && metadata.hardwareClass !== 'intel_without_t2' && REQUIRED_GATES.every((gate) => gateResults.get(gate)?.status === 'passed') && testResults.every((item) => item.status === 'passed'), tests: testResults, gates: REQUIRED_GATES.map((gate) => { const item = gateResults.get(gate); return item.status === 'passed' ? { name: gate, status: 'passed', evidence: [item.evidence] } : failedResult(gate, item.reason, item.evidence); }) };
-  exactKeys(report, REPORT_KEYS, 'generated hardware qualification report'); const reportBytes = canonicalJSON(report); writePrivateFile(output, reportBytes);
+  const completedAt = utc(now());
+  if (suiteBinding && (Date.parse(suiteBinding.record.started_at) < Date.parse(startedAt) || Date.parse(suiteBinding.record.completed_at) > Date.parse(completedAt))) throw new Error('N3-E suite evidence timestamps fall outside the hardware qualification window');
+  const report = { ...template, architecture: metadata.architecture, hardware_class: metadata.hardwareClass, model_identifier: metadata.modelIdentifier, macos_version: metadata.macosVersion, macos_build: metadata.macosBuild, secure_enclave: metadata.secureEnclave, started_at: startedAt, completed_at: completedAt, operator, qualified: production && platform === 'darwin' && metadata.secureEnclave === true && metadata.hardwareClass !== 'intel_without_t2' && suiteBinding !== null && REQUIRED_GATES.every((gate) => gateResults.get(gate)?.status === 'passed') && testResults.every((item) => item.status === 'passed'), tests: testResults, gates: REQUIRED_GATES.map((gate) => { const item = gateResults.get(gate); return item.status === 'passed' ? { name: gate, status: 'passed', evidence: [item.evidence] } : failedResult(gate, item.reason, item.evidence); }), ...(suiteBinding ? { [N3E_REPORT_EVIDENCE_KEY]: suiteBinding } : {}) };
+  exactKeys(report, Object.hasOwn(report, N3E_REPORT_EVIDENCE_KEY) ? REPORT_KEYS : LEGACY_REPORT_KEYS, 'generated hardware qualification report'); const reportBytes = canonicalJSON(report); writePrivateFile(output, reportBytes);
   return { report, outputPath: output, evidenceDirectory: evidence, evidence: writtenEvidence };
 };
 
 const parseArgs = (args) => {
-  const values = {}; for (let index = 0; index < args.length; index += 1) { const key = args[index]; const value = args[index + 1]; if (!key?.startsWith('--') || !value || value.startsWith('--')) throw new Error('invalid P0-C qualification arguments'); const name = key.slice(2); if (!['template', 'output', 'artifact', 'gate-drivers', 'evidence-dir', 'operator'].includes(name) || values[name]) throw new Error('invalid or duplicate P0-C qualification argument'); values[name] = value; index += 1; }
-  if (Object.keys(values).length !== 6) throw new Error('usage: run-p0c-qualification.mjs --template TEMPLATE --output OUTPUT --artifact PKG --gate-drivers DIR --evidence-dir DIR --operator OPERATOR');
-  return { templatePath: values.template, outputPath: values.output, artifactPath: values.artifact, gateDriverDirectory: values['gate-drivers'], evidenceDirectory: values['evidence-dir'], operator: values.operator };
+  const values = {}; for (let index = 0; index < args.length; index += 1) { const key = args[index]; const value = args[index + 1]; if (!key?.startsWith('--') || !value || value.startsWith('--')) throw new Error('invalid P0-C qualification arguments'); const name = key.slice(2); if (!['template', 'output', 'artifact', 'gate-drivers', 'evidence-dir', 'operator', 'n3e-suite-evidence'].includes(name) || values[name]) throw new Error('invalid or duplicate P0-C qualification argument'); values[name] = value; index += 1; }
+  if (![6, 7].includes(Object.keys(values).length)) throw new Error('usage: run-p0c-qualification.mjs --template TEMPLATE --output OUTPUT --artifact PKG --gate-drivers DIR --evidence-dir DIR --operator OPERATOR [--n3e-suite-evidence EVIDENCE]');
+  return { templatePath: values.template, outputPath: values.output, artifactPath: values.artifact, gateDriverDirectory: values['gate-drivers'], evidenceDirectory: values['evidence-dir'], operator: values.operator, qualificationSuiteEvidencePath: values['n3e-suite-evidence'] ?? null };
 };
 
 if (import.meta.url === `file://${process.argv[1]}`) {
