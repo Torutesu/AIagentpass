@@ -9,6 +9,7 @@ import { createTenantRepositoryFactory } from "./repository.mjs";
 import { createSharedControlRepository } from "./shared-control-repository.mjs";
 import { createPostgresRefreshHintNotifier } from "./refresh-hint-notifier.mjs";
 import { createPostgresAdminAuditRepository } from "./admin-audit-repository.mjs";
+import { createAgentSessionAuthorityRepository } from "./agent-session-authority-repository.mjs";
 import { createAuthorityReductionAuditAppender } from "./authority-reduction-audit.mjs";
 import {
   createDrainController,
@@ -58,6 +59,7 @@ export async function createPostgresRuntime({ env = process.env, PoolClass = Poo
   const auditCursorSecret = exactSecret(env.AGENTPASS_HUMAN_CURSOR_SECRET, "AGENTPASS_HUMAN_CURSOR_SECRET");
   const capabilityNonceSecret = exactSecret(env.AGENTPASS_CAPABILITY_NONCE_SECRET, "AGENTPASS_CAPABILITY_NONCE_SECRET");
   const adminAuditRepository = createPostgresAdminAuditRepository({ client: pool });
+  const agentSessionAuthorityRepository = createAgentSessionAuthorityRepository({ client: pool });
   const authorityReductionAuditAppender = createAuthorityReductionAuditAppender({ adminAuditRepository });
   const onAuthorityReduction = async ({ tx, organization_id, occurred_at, policy, resource, member_id, actor_member_id, capabilities }) => {
     const issuedAt = occurred_at ?? policy?.updated_at;
@@ -94,6 +96,7 @@ export async function createPostgresRuntime({ env = process.env, PoolClass = Poo
     humanRepository: createPostgresHumanRepository({ client: pool, onAuthorityReduction }),
     organizationRepository,
     capabilityAuthorityRepository,
+    agentSessionAuthorityRepository,
     sharedControlRepository,
     controlPlaneStore,
     refreshHintNotifier,

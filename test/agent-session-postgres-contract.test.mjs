@@ -84,6 +84,8 @@ test("grant lifecycle is immutable, one-way, time-bounded, and tenant-isolated",
   assert.match(grantSql, /agentpass_guard_agent_session_grant_forward_only/iu);
   assert.match(grantSql, /OLD\.status <> 'issued' OR NEW\.status NOT IN \('consumed', 'expired', 'revoked'\)/iu);
   assert.match(grantSql, /clock_timestamp\(\) < OLD\.expires_at/iu);
+  assert.match(grantSql, /CHECK \(not_before <= issued_at \+ interval '5 minutes'\)/iu);
+  assert.doesNotMatch(grantSql, /CHECK \(not_before >= issued_at\)/iu);
   assert.match(grantSql, /ALTER TABLE agent_session_grants ENABLE ROW LEVEL SECURITY/iu);
   assert.match(grantSql, /ALTER TABLE agent_session_grants FORCE ROW LEVEL SECURITY/iu);
   assert.match(grantSql, /organization_id = agentpass_current_organization_id\(\)/iu);
@@ -96,13 +98,15 @@ test("session schema enforces grant identity, one active session, and used<=max"
     "organization_id", "session_id", "grant_id", "device_id", "agent_id", "adapter_id", "grant_hash",
     "process_binding_sha256", "ancestry_binding_sha256", "worktree_binding_sha256",
     "control_sequence", "max_signatures", "used_signatures", "reserved_signatures",
-    "status", "active_request_id", "last_request_id", "expires_at"
+    "status", "active_request_id", "last_request_id", "not_before", "expires_at"
   ]) assert.ok(columns.has(column), `session column ${column} is required`);
 
   const forbidden = /(?:^|_)(?:private(?:_key)?|secret|token|credential|password|raw_audit_token|argv|environment|payload)(?:_|$)/iu;
   for (const column of columns) assert.doesNotMatch(column, forbidden, `session column ${column} must not hold secret material`);
 
   assert.match(sessionSql, /FOREIGN KEY \(organization_id, grant_id, device_id, agent_id, grant_hash\)\s+REFERENCES agent_session_grants\(organization_id, grant_id, device_id, agent_id, grant_hash\)/iu);
+  assert.match(sessionSql, /NEW\.not_before <> grant_row\.not_before/iu);
+  assert.match(sessionSql, /NEW\.not_before <> OLD\.not_before/iu);
   assert.match(sessionSql, /UNIQUE \(organization_id, grant_id\)/iu);
   assert.match(sessionSql, /CREATE UNIQUE INDEX agent_sessions_one_active_per_grant[\s\S]*WHERE status IN \('challenge_pending', 'active', 'request_reserved', 'signing_intent', 'signed'\)/iu);
   assert.match(sessionSql, /CREATE UNIQUE INDEX agent_sessions_grant_process_binding_identity[\s\S]*ON agent_sessions \(organization_id, grant_hash, process_binding_sha256\)/iu);

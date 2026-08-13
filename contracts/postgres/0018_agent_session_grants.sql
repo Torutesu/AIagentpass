@@ -99,7 +99,10 @@ CREATE TABLE agent_session_grants (
     REFERENCES agents(organization_id, id, device_id),
   FOREIGN KEY (organization_id, created_by)
     REFERENCES memberships(organization_id, member_id),
-  CHECK (not_before >= issued_at),
+  -- Signing necessarily precedes INSERT by a small amount. Permit only a
+  -- bounded future not-before skew; requiring not_before >= issued_at would
+  -- reject normally signed grants as soon as the database clock advances.
+  CHECK (not_before <= issued_at + interval '5 minutes'),
   CHECK (expires_at > not_before),
   CHECK (expires_at > issued_at),
   CHECK (

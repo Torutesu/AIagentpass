@@ -293,6 +293,7 @@ test("M2 schemas are frozen, strict, bounded, and reuse scope-v1 exactly", () =>
   assert.equal(leaseSchema.maxProperties, leaseSchema.required.length);
   assert.equal(requestSchema.maxProperties, requestSchema.required.length);
   assert.equal(grantSchema.$defs.statement.properties.scope.$ref, SCOPE_ID);
+  assert.match(grantSchema.$defs.signature.description, /AgentPass-Agent-Session-Grant-v1\\u0000.*canonical JSON statement/iu);
   assert.equal(requestSchema.$defs.capability.properties.scope.$ref, SCOPE_ID);
   assert.equal(leaseSchema.properties.type.const, "agentpass.agent-session-lease");
   assert.equal(requestSchema.properties.operation.const, "git.commit.sign");

@@ -80,6 +80,7 @@ function assertHumanOperation(document) {
     "process_binding_policy_id", "scope", "max_signatures", "ttl_seconds"
   ]);
   assert.equal(request.properties.scope.$ref, "../schemas/scope-v1.schema.json");
+  assert.equal(request.properties.adapter_version.pattern, "^(0|[1-9][0-9]{0,8})\\.(0|[1-9][0-9]{0,8})\\.(0|[1-9][0-9]{0,8})(?:-[0-9A-Za-z-]+(?:\\.[0-9A-Za-z-]+)*)?$");
   for (const forbidden of ["organization_id", "agent_id", "grant_id", "issuer", "key_id", "signature", "not_before", "expires_at", "control_sequence"]) {
     assert.equal(Object.hasOwn(request.properties, forbidden), false, `issuance intent must not accept ${forbidden}`);
   }

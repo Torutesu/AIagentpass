@@ -56,6 +56,11 @@ export {
   createPostgresAdminAuditRepository
 } from "./admin-audit-repository.mjs";
 export {
+  AGENT_SESSION_AUTHORITY_ERROR_CODES,
+  AgentSessionAuthorityRepositoryError,
+  createAgentSessionAuthorityRepository
+} from "./agent-session-authority-repository.mjs";
+export {
   CONTROL_PLANE_STORE_METHODS,
   ControlPlaneStoreError,
   createPostgresControlPlaneStore

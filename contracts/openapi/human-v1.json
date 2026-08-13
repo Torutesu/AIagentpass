@@ -885,7 +885,7 @@
           "device_id": { "type": "string", "format": "uuid" },
           "agent_kind": { "type": "string", "enum": ["claude-code", "cursor"] },
           "adapter_id": { "type": "string", "format": "uuid" },
-          "adapter_version": { "type": "string", "minLength": 5, "maxLength": 32, "pattern": "^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(?:-[0-9A-Za-z.-]+)?(?:\\+[0-9A-Za-z.-]+)?$" },
+          "adapter_version": { "type": "string", "minLength": 5, "maxLength": 32, "pattern": "^(0|[1-9][0-9]{0,8})\\.(0|[1-9][0-9]{0,8})\\.(0|[1-9][0-9]{0,8})(?:-[0-9A-Za-z-]+(?:\\.[0-9A-Za-z-]+)*)?$" },
           "worktree_binding_sha256": { "type": "string", "minLength": 64, "maxLength": 64, "pattern": "^[0-9a-f]{64}$" },
           "process_binding_policy_id": { "type": "string", "minLength": 1, "maxLength": 64, "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$" },
           "scope": { "$ref": "../schemas/scope-v1.schema.json" },

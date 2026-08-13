@@ -34,6 +34,7 @@ CREATE TABLE agent_sessions (
   active_request_id uuid,
   last_request_id uuid,
   created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+  not_before timestamptz NOT NULL,
   expires_at timestamptz NOT NULL,
   closed_at timestamptz,
   expired_at timestamptz,
@@ -48,7 +49,8 @@ CREATE TABLE agent_sessions (
   FOREIGN KEY (organization_id, agent_id, device_id)
     REFERENCES agents(organization_id, id, device_id),
   FOREIGN KEY (organization_id, device_id) REFERENCES devices(organization_id, id),
-  CHECK (expires_at > created_at),
+  CHECK (expires_at > not_before),
+  CHECK (created_at >= not_before),
   CHECK (used_signatures <= max_signatures),
   CHECK (used_signatures + reserved_signatures <= max_signatures),
   CHECK (active_request_id IS NULL OR active_request_id IS DISTINCT FROM last_request_id),
@@ -177,6 +179,7 @@ BEGIN
      OR NEW.grant_hash <> grant_row.grant_hash
      OR clock_timestamp() < grant_row.not_before
      OR clock_timestamp() >= grant_row.expires_at
+     OR NEW.not_before <> grant_row.not_before
      OR NEW.expires_at <> grant_row.expires_at
      OR NEW.agent_kind <> grant_row.agent_kind
      OR NEW.adapter_id <> grant_row.adapter_id
@@ -247,6 +250,7 @@ BEGIN
      OR NEW.control_sequence <> OLD.control_sequence
      OR NEW.max_signatures <> OLD.max_signatures
      OR NEW.created_at <> OLD.created_at
+     OR NEW.not_before <> OLD.not_before
      OR NEW.expires_at <> OLD.expires_at THEN
     RAISE EXCEPTION USING
       ERRCODE = 'check_violation',
