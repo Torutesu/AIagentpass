@@ -103,7 +103,7 @@ const validateManifest = (manifestSnapshot, manifestSignaturePath, manifestPubli
     names.add(artifact.name); previousName = artifact.name; artifacts.push(artifact);
   }
   const products = artifacts.filter((item) => item.role === 'product');
-  if (products.length !== 1 || products[0].name !== `AgentPass-${manifest.version}-macos-universal.pkg` || products[0].media_type !== 'application/vnd.apple.installer+xml') throw new Error('release manifest must contain exactly one canonical macOS product artifact');
+  if (products.length !== 1 || products[0].name !== `AgentPass-v${manifest.version}-macos-universal.pkg` || products[0].media_type !== 'application/vnd.apple.installer+xml') throw new Error('release manifest must contain exactly one canonical macOS product artifact');
   exactKeys(manifest.evidence, ['checksums', 'sbom', 'notarization'], 'release manifest evidence');
   const notarization = manifest.evidence.notarization;
   exactKeys(notarization, ['status', 'submission_ids', 'evidence'], 'release notarization');

@@ -175,7 +175,7 @@ pinned operator-key fingerprint:
 ```sh
 node scripts/release/validate-hardware-qualification.mjs \
   RESULT.json \
-  AgentPass-0.18.0-macos-universal.pkg \
+  AgentPass-v0.18.0-macos-universal.pkg \
   AgentPass-0.18.0.release-manifest.json \
   AgentPass-0.18.0.release-manifest.sig \
   RELEASE.public.pem \

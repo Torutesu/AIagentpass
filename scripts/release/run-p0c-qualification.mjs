@@ -1,0 +1,211 @@
+#!/usr/bin/env node
+import crypto from 'node:crypto';
+import fs from 'node:fs';
+import { spawn } from 'node:child_process';
+import { basename, isAbsolute, join, resolve } from 'node:path';
+
+const MAX_TEMPLATE_BYTES = 4 * 1024 * 1024;
+const MAX_ARTIFACT_BYTES = 16 * 1024 * 1024 * 1024;
+const MAX_OUTPUT_BYTES = 256 * 1024;
+const DEFAULT_TIMEOUT_MS = 5 * 60 * 1000;
+const TERMINATION_GRACE_MS = 250;
+const SANITIZED_ENV = Object.freeze({ HOME: '/var/empty', LANG: 'C', LC_ALL: 'C', PATH: '/usr/bin:/bin:/usr/sbin:/sbin' });
+
+export const REQUIRED_GATES = Object.freeze([
+  'gatekeeper-notarization', 'clean-install-launchd-xpc', 'secure-enclave-enrollment',
+  'cloud-possession-verification', 'claude-code-unattended-sign', 'cursor-code-unattended-sign',
+  'audit-upload-observation', 'policy-reduction-refresh-ack', 'offline-expiry',
+  'revoke-emergency-stop', 'crash-restart-recovery', 'sleep-wake-network-clock',
+  'upgrade-preserves-state', 'uninstall-reinstall-recovery', 'current-user-purge',
+  'negative-identity-and-entitlement-cases'
+]);
+
+export const REQUIRED_TESTS = Object.freeze([
+  'exact-pkg-install', 'launchd-xpc-approval', 'secure-enclave-key-creation',
+  'secure-enclave-nonexportability', 'cloud-possession-proof',
+  'claude-code-unattended-sign', 'cursor-code-unattended-sign', 'unrelated-process-denied',
+  'audit-console-observation', 'policy-reduction-denied', 'offline-expiry-denied',
+  'revoke-denied', 'emergency-stop-denied', 'service-crash-recovery', 'os-reboot-recovery',
+  'sleep-wake-recovery', 'network-clock-failure', 'upgrade-preserves-state',
+  'uninstall-reinstall-recovery', 'current-user-purge'
+]);
+
+const REPORT_KEYS = Object.freeze([
+  'schema_version', 'source_commit', 'dependency_lock_sha256', 'release_manifest_sha256',
+  'artifact_name', 'artifact_sha256', 'architecture', 'hardware_class', 'model_identifier',
+  'macos_version', 'macos_build', 'secure_enclave', 'team_id', 'nested_code_identities',
+  'notarization', 'cloud_image_digest', 'database_migration_manifest_sha256',
+  'signer_key_versions', 'browser_versions', 'started_at', 'completed_at', 'operator',
+  'operator_key_fingerprint', 'qualified', 'tests', 'gates'
+]);
+
+const METADATA_COMMANDS = Object.freeze({
+  architecture: ['/usr/bin/uname', ['-m']],
+  modelIdentifier: ['/usr/sbin/sysctl', ['-n', 'hw.model']],
+  macosVersion: ['/usr/bin/sw_vers', ['-productVersion']],
+  macosBuild: ['/usr/bin/sw_vers', ['-buildVersion']],
+  secureEnclaveProbe: ['/usr/sbin/ioreg', ['-rd1', '-c', 'AppleSEPManager']]
+});
+
+const canonicalJSON = (value) => Buffer.from(`${JSON.stringify(value, null, 2)}\n`, 'utf8');
+const sha256 = (bytes) => crypto.createHash('sha256').update(bytes).digest('hex');
+const statIdentity = (stat) => [stat.dev, stat.ino, stat.mode, stat.nlink, stat.size, stat.mtimeNs, stat.ctimeNs].join(':');
+const validDigest = (value) => typeof value === 'string' && /^[0-9a-f]{64}$/.test(value);
+const safeName = (value) => typeof value === 'string' && /^[0-9A-Za-z][0-9A-Za-z._-]*$/.test(value) && value === basename(value);
+const utc = (date) => {
+  const value = date instanceof Date ? date : new Date(date);
+  if (!Number.isFinite(value.getTime())) throw new Error('qualification clock returned an invalid time');
+  return value.toISOString();
+};
+const exactKeys = (value, keys, label) => {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) throw new Error(`${label} must be an object`);
+  const actual = Object.keys(value).sort(); const expected = [...keys].sort();
+  if (actual.length !== expected.length || actual.some((key, index) => key !== expected[index])) throw new Error(`${label} has missing or unknown fields`);
+};
+const failReason = (reason) => String(reason).replace(/[^A-Za-z0-9 .,;:_()\/-]/g, '?').slice(0, 256) || 'physical gate did not pass';
+
+const snapshotFile = (input, maximum, label) => {
+  const path = resolve(input); let fd;
+  try { fd = fs.openSync(path, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW); } catch { throw new Error(`${label} is not a readable regular file`); }
+  try {
+    const before = fs.fstatSync(fd, { bigint: true });
+    if (!before.isFile() || before.nlink !== 1n || before.size === 0n || before.size > BigInt(maximum) || before.size > BigInt(Number.MAX_SAFE_INTEGER)) throw new Error(`${label} is not a safe regular file`);
+    const size = Number(before.size); const bytes = Buffer.allocUnsafe(size); let offset = 0;
+    while (offset < size) { const count = fs.readSync(fd, bytes, offset, size - offset, offset); if (count === 0) throw new Error(`${label} changed while reading`); offset += count; }
+    const after = fs.fstatSync(fd, { bigint: true }); if (statIdentity(before) !== statIdentity(after)) throw new Error(`${label} changed while reading`);
+    return { path, bytes, size, sha256: sha256(bytes) };
+  } finally { fs.closeSync(fd); }
+};
+
+const assertAbsolutePath = (value, label) => { if (typeof value !== 'string' || !isAbsolute(value)) throw new Error(`${label} must be an absolute path`); return value; };
+const assertDirectory = (input, label, privateDirectory = false) => {
+  const path = assertAbsolutePath(input, label); let stat;
+  try { stat = fs.lstatSync(path); } catch { throw new Error(`${label} is unavailable`); }
+  if (!stat.isDirectory() || (privateDirectory && (stat.mode & 0o077) !== 0)) throw new Error(`${label} must be a safe directory`);
+  return path;
+};
+const assertRegularExecutable = (path, label) => {
+  let stat; try { stat = fs.lstatSync(path); } catch { throw new Error(`${label} is unavailable`); }
+  if (!stat.isFile() || stat.nlink !== 1 || (stat.mode & 0o111) === 0 || (stat.mode & 0o022) !== 0) throw new Error(`${label} must be a non-writable regular executable`);
+};
+const ensureEmptyEvidenceDirectory = (input) => {
+  const path = assertDirectory(input, 'evidence directory', true);
+  if (fs.readdirSync(path, { withFileTypes: true }).length !== 0) throw new Error('evidence directory must be empty');
+  return path;
+};
+const writePrivateFile = (path, bytes) => {
+  let fd;
+  try {
+    fd = fs.openSync(path, fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL | fs.constants.O_NOFOLLOW, 0o600);
+    const opened = fs.fstatSync(fd); if (!opened.isFile() || opened.nlink !== 1 || (opened.mode & 0o077) !== 0) throw new Error('new evidence file is not private');
+    let offset = 0; while (offset < bytes.length) offset += fs.writeSync(fd, bytes, offset, bytes.length - offset); fs.fsyncSync(fd);
+  } finally { if (fd !== undefined) fs.closeSync(fd); }
+  const after = fs.lstatSync(path); if (!after.isFile() || after.nlink !== 1 || (after.mode & 0o077) !== 0 || after.size !== bytes.length) throw new Error('written evidence file is unsafe');
+  return { name: basename(path), bytes: bytes.length, sha256: sha256(bytes) };
+};
+
+const makeBoundedCapture = (maximum) => ({
+  chunks: [], bytes: 0, exceeded: false, hash: crypto.createHash('sha256'),
+  append(chunk) { const remaining = Math.max(0, maximum - this.bytes); const accepted = chunk.subarray(0, remaining); if (accepted.length > 0) { this.chunks.push(Buffer.from(accepted)); this.hash.update(accepted); this.bytes += accepted.length; } if (accepted.length !== chunk.length) this.exceeded = true; },
+  finish() { return { bytes: this.bytes, sha256: this.hash.digest('hex'), truncated: this.exceeded, content: Buffer.concat(this.chunks, this.bytes) }; }
+});
+
+export const runBoundedCommand = (command, args = [], { timeoutMs = DEFAULT_TIMEOUT_MS, maxOutputBytes = MAX_OUTPUT_BYTES, cwd = '/', env = SANITIZED_ENV } = {}) => new Promise((resolveResult) => {
+  let child;
+  try { child = spawn(command, args, { cwd, env: { ...SANITIZED_ENV, ...env }, shell: false, stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true }); } catch { const empty = Buffer.alloc(0); resolveResult({ exitCode: null, signal: null, timedOut: false, outputLimit: false, spawnError: true, durationMs: 0, stdout: empty, stderr: empty, stdoutBytes: 0, stderrBytes: 0, stdoutSha256: sha256(empty), stderrSha256: sha256(empty) }); return; }
+  const started = Date.now(); const stdout = makeBoundedCapture(maxOutputBytes); const stderr = makeBoundedCapture(maxOutputBytes);
+  let timedOut = false; let outputLimit = false; let termTimer; let timeoutTimer; let settled = false;
+  const terminate = (kind) => { if (kind === 'timeout') timedOut = true; if (kind === 'output') outputLimit = true; if (child.exitCode === null && child.signalCode === null) child.kill('SIGTERM'); clearTimeout(termTimer); termTimer = setTimeout(() => { if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL'); }, TERMINATION_GRACE_MS); };
+  const onData = (capture, chunk) => { capture.append(chunk); if (capture.exceeded && !outputLimit && !timedOut) terminate('output'); };
+  child.stdout.on('data', (chunk) => onData(stdout, chunk)); child.stderr.on('data', (chunk) => onData(stderr, chunk));
+  timeoutTimer = setTimeout(() => { if (!settled) terminate('timeout'); }, timeoutMs);
+  const finish = (extra) => { if (settled) return; settled = true; clearTimeout(timeoutTimer); clearTimeout(termTimer); const out = stdout.finish(); const err = stderr.finish(); resolveResult({ ...extra, timedOut, outputLimit, durationMs: Date.now() - started, stdout: out.content, stderr: err.content, stdoutBytes: out.bytes, stderrBytes: err.bytes, stdoutSha256: out.sha256, stderrSha256: err.sha256, stdoutTruncated: out.truncated, stderrTruncated: err.truncated }); };
+  child.on('error', () => finish({ exitCode: null, signal: null, spawnError: true })); child.on('close', (exitCode, signal) => finish({ exitCode, signal, spawnError: false }));
+});
+
+const normalizeCommandResult = (result) => {
+  if (!result || typeof result !== 'object') throw new Error('command runner returned an invalid result');
+  const stdout = Buffer.isBuffer(result.stdout) ? result.stdout : Buffer.from(result.stdout ?? ''); const stderr = Buffer.isBuffer(result.stderr) ? result.stderr : Buffer.from(result.stderr ?? '');
+  if (!Number.isSafeInteger(result.exitCode) && result.exitCode !== null && result.exitCode !== undefined) throw new Error('command runner returned an invalid exit code');
+  return { ...result, stdout, stderr, exitCode: result.exitCode ?? null, signal: result.signal ?? null, timedOut: result.timedOut === true, outputLimit: result.outputLimit === true, spawnError: result.spawnError === true, durationMs: Number.isSafeInteger(result.durationMs) ? result.durationMs : 0, stdoutBytes: stdout.length, stderrBytes: stderr.length, stdoutSha256: sha256(stdout), stderrSha256: sha256(stderr) };
+};
+
+export const collectPhysicalMetadata = async ({ runCommand = runBoundedCommand, timeoutMs = DEFAULT_TIMEOUT_MS, maxOutputBytes = MAX_OUTPUT_BYTES } = {}) => {
+  const execute = async (command, args) => normalizeCommandResult(await runCommand(command, args, { timeoutMs, maxOutputBytes, cwd: '/', env: SANITIZED_ENV, shell: false, stdio: ['ignore', 'pipe', 'pipe'] }));
+  const results = {};
+  for (const [key, [command, args]] of Object.entries(METADATA_COMMANDS)) { const result = await execute(command, args); if (result.exitCode !== 0 || result.signal || result.timedOut || result.outputLimit || result.spawnError) throw new Error(`physical metadata command failed: ${key}`); results[key] = result.stdout.toString('utf8').trim(); }
+  if (!['arm64', 'x86_64'].includes(results.architecture)) throw new Error('unsupported physical architecture');
+  if (!/^[A-Za-z0-9,._-]{3,80}$/.test(results.modelIdentifier)) throw new Error('invalid physical model identifier');
+  if (!/^\d+\.\d+(?:\.\d+)?$/.test(results.macosVersion) || !/^[A-Za-z0-9]{3,32}$/.test(results.macosBuild)) throw new Error('invalid macOS version metadata');
+  const secureEnclave = /AppleSEPManager/i.test(results.secureEnclaveProbe);
+  return { architecture: results.architecture, hardwareClass: results.architecture === 'arm64' ? 'apple_silicon' : secureEnclave ? 'intel_t2' : 'intel_without_t2', modelIdentifier: results.modelIdentifier, macosVersion: results.macosVersion, macosBuild: results.macosBuild, secureEnclave };
+};
+
+const validateTemplate = (snapshot) => {
+  let template; try { template = JSON.parse(snapshot.bytes.toString('utf8')); } catch { throw new Error('production report template is not valid JSON'); }
+  if (!snapshot.bytes.equals(canonicalJSON(template))) throw new Error('production report template is not canonical JSON');
+  exactKeys(template, REPORT_KEYS, 'production report template');
+  if (template.schema_version !== 2 || template.qualified !== false) throw new Error('production report template must be unsigned v2 and unqualified');
+  if (!safeName(template.artifact_name) || !validDigest(template.artifact_sha256) || !/^[0-9a-f]{40}$/.test(template.source_commit) || !validDigest(template.dependency_lock_sha256) || !validDigest(template.release_manifest_sha256) || !validDigest(template.database_migration_manifest_sha256) || template.source_commit === '0'.repeat(40) || [template.artifact_sha256, template.dependency_lock_sha256, template.release_manifest_sha256, template.database_migration_manifest_sha256].some((value) => value === '0'.repeat(64)) || JSON.stringify(template).includes('REPLACE_WITH') || template.team_id === 'TEAMID1234') throw new Error('production report template lacks release bindings');
+  if (template.notarization?.status !== 'accepted_stapled') throw new Error('production report template must bind an accepted notarized release');
+  if (template.secure_enclave !== true || !/^SHA256:[A-Za-z0-9_-]{43}$/.test(template.operator_key_fingerprint)) throw new Error('production report template is not a production qualification template');
+  return template;
+};
+const validateGateDirectory = (input) => {
+  const directory = assertDirectory(input, 'gate-driver directory'); const entries = fs.readdirSync(directory, { withFileTypes: true }).map((entry) => entry.name).filter((entry) => entry !== '.DS_Store');
+  const expected = [...REQUIRED_GATES].sort(); if (entries.sort().join('\n') !== expected.join('\n')) throw new Error('gate-driver directory must contain exactly the fixed required gate basenames');
+  for (const gate of REQUIRED_GATES) assertRegularExecutable(join(directory, gate), `gate driver ${gate}`); return directory;
+};
+const protocolFor = (bytes, gate) => {
+  let value; try { value = JSON.parse(bytes.toString('utf8')); } catch { throw new Error('gate driver protocol is not valid JSON'); }
+  exactKeys(value, ['schema_version', 'gate', 'status', 'tests'], 'gate driver protocol'); if (value.schema_version !== 1 || value.gate !== gate || value.status !== 'passed' || !Array.isArray(value.tests) || value.tests.length === 0) throw new Error('gate driver protocol is not a passing result');
+  const seen = new Set(); const tests = []; for (const item of value.tests) { exactKeys(item, ['name', 'status'], 'gate driver test'); if (!REQUIRED_TESTS.includes(item.name) || item.status !== 'passed' || seen.has(item.name)) throw new Error('gate driver protocol contains an invalid or duplicate test'); seen.add(item.name); tests.push(item.name); } return tests;
+};
+const resultEvidence = (kind, name, result, status) => canonicalJSON({ schema_version: 1, kind, name, status, exit_code: result.exitCode, signal: result.signal, timed_out: result.timedOut, output_limit: result.outputLimit, duration_ms: result.durationMs, stdout_bytes: result.stdoutBytes, stdout_sha256: result.stdoutSha256, stderr_bytes: result.stderrBytes, stderr_sha256: result.stderrSha256 });
+const failedResult = (name, reason, evidence) => ({ name, status: 'failed', reason: failReason(reason), evidence: [evidence] });
+const skippedResult = (name, evidence) => ({ name, status: 'skipped', reason: 'required test did not physically pass', evidence: [evidence] });
+
+export const runQualification = async ({ templatePath, outputPath, artifactPath, gateDriverDirectory, evidenceDirectory, operator, platform = process.platform, production = false, platformMetadata = null, metadataProvider = null, runCommand = runBoundedCommand, now = () => new Date(), timeoutMs = DEFAULT_TIMEOUT_MS, maxOutputBytes = MAX_OUTPUT_BYTES } = {}) => {
+  if (production && platform !== 'darwin') throw new Error('P0-C production qualification is supported only on darwin');
+  if (production && (platformMetadata || metadataProvider || runCommand !== runBoundedCommand)) throw new Error('production qualification cannot use injected runners or metadata');
+  const template = validateTemplate(snapshotFile(assertAbsolutePath(templatePath, 'template path'), MAX_TEMPLATE_BYTES, 'production report template'));
+  const output = assertAbsolutePath(outputPath, 'output path'); const artifact = snapshotFile(assertAbsolutePath(artifactPath, 'artifact path'), MAX_ARTIFACT_BYTES, 'production artifact');
+  if (basename(artifact.path) !== template.artifact_name || artifact.sha256 !== template.artifact_sha256) throw new Error('exact production artifact does not match report template');
+  const drivers = validateGateDirectory(gateDriverDirectory); const evidence = ensureEmptyEvidenceDirectory(evidenceDirectory); if (resolve(output) === resolve(evidence)) throw new Error('output path must not be the evidence directory'); if (fs.existsSync(output)) throw new Error('output path already exists');
+  if (!/^[A-Za-z0-9][A-Za-z0-9@._-]{2,127}$/.test(operator ?? '')) throw new Error('operator is invalid');
+  const startedAt = utc(now()); const metadata = platformMetadata ?? (metadataProvider ? await metadataProvider({ runCommand, timeoutMs, maxOutputBytes }) : await collectPhysicalMetadata({ runCommand, timeoutMs, maxOutputBytes }));
+  if (!metadata || !['arm64', 'x86_64'].includes(metadata.architecture) || !['apple_silicon', 'intel_t2', 'intel_without_t2'].includes(metadata.hardwareClass) || typeof metadata.modelIdentifier !== 'string' || typeof metadata.macosVersion !== 'string' || typeof metadata.macosBuild !== 'string' || typeof metadata.secureEnclave !== 'boolean') throw new Error('injected physical metadata is invalid');
+  if ((metadata.hardwareClass === 'apple_silicon') !== (metadata.architecture === 'arm64') || (metadata.hardwareClass === 'intel_without_t2' && metadata.secureEnclave)) throw new Error('physical metadata hardware identity is inconsistent');
+  const gateResults = new Map(); const testSources = new Map(); const duplicateTests = new Set(); const writtenEvidence = [];
+  for (let index = 0; index < REQUIRED_GATES.length; index += 1) {
+    const gate = REQUIRED_GATES[index]; let result; let protocolTests = [];
+    try {
+      result = normalizeCommandResult(await runCommand(join(drivers, gate), [], { cwd: '/', env: SANITIZED_ENV, shell: false, stdio: ['ignore', 'pipe', 'pipe'], timeoutMs, maxOutputBytes }));
+      if (result.exitCode === 0 && !result.signal && !result.timedOut && !result.outputLimit && !result.spawnError) { try { protocolTests = protocolFor(result.stdout, gate); } catch { protocolTests = []; } }
+    } catch { const empty = Buffer.alloc(0); result = { exitCode: null, signal: null, timedOut: false, outputLimit: false, spawnError: true, durationMs: 0, stdout: empty, stderr: empty, stdoutBytes: 0, stderrBytes: 0, stdoutSha256: sha256(empty), stderrSha256: sha256(empty) }; }
+    const passed = result.exitCode === 0 && !result.signal && !result.timedOut && !result.outputLimit && !result.spawnError && protocolTests.length > 0;
+    gateResults.set(gate, { status: passed ? 'passed' : 'failed', reason: passed ? null : result.timedOut ? 'gate driver timed out' : result.outputLimit ? 'gate driver exceeded bounded output' : 'gate driver did not return a passing protocol', result });
+    for (const test of protocolTests) { if (testSources.has(test)) duplicateTests.add(test); else testSources.set(test, gate); }
+    const evidenceName = `gate-${String(index).padStart(2, '0')}-${gate}.json`; const binding = writePrivateFile(join(evidence, evidenceName), resultEvidence('p0c-gate-result', gate, result, passed ? 'passed' : 'failed')); writtenEvidence.push(binding); gateResults.get(gate).evidence = binding;
+  }
+  const testResults = [];
+  for (let index = 0; index < REQUIRED_TESTS.length; index += 1) {
+    const test = REQUIRED_TESTS[index]; const sourceGate = testSources.get(test); const gatePassed = sourceGate && gateResults.get(sourceGate)?.status === 'passed' && !duplicateTests.has(test); const status = gatePassed ? 'passed' : duplicateTests.has(test) || sourceGate ? 'failed' : 'skipped';
+    const empty = Buffer.alloc(0); const synthetic = { exitCode: gatePassed ? 0 : null, signal: null, timedOut: false, outputLimit: false, spawnError: !gatePassed, durationMs: 0, stdoutBytes: 0, stderrBytes: 0, stdoutSha256: sha256(empty), stderrSha256: sha256(empty) }; const evidenceName = `test-${String(index).padStart(2, '0')}-${test}.json`; const binding = writePrivateFile(join(evidence, evidenceName), resultEvidence('p0c-test-result', test, synthetic, status)); writtenEvidence.push(binding);
+    testResults.push(status === 'passed' ? { name: test, status, evidence: [binding] } : status === 'failed' ? failedResult(test, duplicateTests.has(test) ? 'test was reported by multiple gate drivers' : 'source gate did not pass', binding) : skippedResult(test, binding));
+  }
+  const report = { ...template, architecture: metadata.architecture, hardware_class: metadata.hardwareClass, model_identifier: metadata.modelIdentifier, macos_version: metadata.macosVersion, macos_build: metadata.macosBuild, secure_enclave: metadata.secureEnclave, started_at: startedAt, completed_at: utc(now()), operator, qualified: production && platform === 'darwin' && metadata.secureEnclave === true && metadata.hardwareClass !== 'intel_without_t2' && REQUIRED_GATES.every((gate) => gateResults.get(gate)?.status === 'passed') && testResults.every((item) => item.status === 'passed'), tests: testResults, gates: REQUIRED_GATES.map((gate) => { const item = gateResults.get(gate); return item.status === 'passed' ? { name: gate, status: 'passed', evidence: [item.evidence] } : failedResult(gate, item.reason, item.evidence); }) };
+  exactKeys(report, REPORT_KEYS, 'generated hardware qualification report'); const reportBytes = canonicalJSON(report); writePrivateFile(output, reportBytes);
+  return { report, outputPath: output, evidenceDirectory: evidence, evidence: writtenEvidence };
+};
+
+const parseArgs = (args) => {
+  const values = {}; for (let index = 0; index < args.length; index += 1) { const key = args[index]; const value = args[index + 1]; if (!key?.startsWith('--') || !value || value.startsWith('--')) throw new Error('invalid P0-C qualification arguments'); const name = key.slice(2); if (!['template', 'output', 'artifact', 'gate-drivers', 'evidence-dir', 'operator'].includes(name) || values[name]) throw new Error('invalid or duplicate P0-C qualification argument'); values[name] = value; index += 1; }
+  if (Object.keys(values).length !== 6) throw new Error('usage: run-p0c-qualification.mjs --template TEMPLATE --output OUTPUT --artifact PKG --gate-drivers DIR --evidence-dir DIR --operator OPERATOR');
+  return { templatePath: values.template, outputPath: values.output, artifactPath: values.artifact, gateDriverDirectory: values['gate-drivers'], evidenceDirectory: values['evidence-dir'], operator: values.operator };
+};
+
+if (import.meta.url === `file://${process.argv[1]}`) {
+  try { const result = await runQualification({ ...parseArgs(process.argv.slice(2)), platform: process.platform, production: true }); process.stdout.write(`${JSON.stringify({ ok: true, qualified: result.report.qualified, output: result.outputPath, evidence_directory: result.evidenceDirectory })}\n`); }
+  catch (error) { process.stderr.write(`p0c qualification refused: ${failReason(error.message)}\n`); process.exitCode = 1; }
+}

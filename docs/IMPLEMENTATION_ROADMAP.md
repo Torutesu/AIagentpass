@@ -1,7 +1,7 @@
 # AgentPass implementation roadmap
 
 Status: active  
-Baseline: `349220c` on `codex/agent-platform`
+Baseline: current `codex/agent-platform` P0-C software-chain checkpoint
 Updated: 2026-08-13
 
 The executable PR sequence, security gates, and evidence requirements for the remaining G4–G7 work are maintained in [IMPLEMENTATION_PLAN_G4_G7.md](./IMPLEMENTATION_PLAN_G4_G7.md).
@@ -39,6 +39,8 @@ Implemented and tested:
 - read-only macOS onboarding status adapter;
 - two-phase uninstall that removes user/system components while preserving protected state and keys;
 - Homebrew evaluation formula with production-install safety guards.
+- read-only SwiftUI onboarding app and a hardened status subprocess boundary;
+- hardware-qualification v2 validation, release-attestation generation, committed-database-migration inventory, detached operator report signing, physical-Mac gate execution, and two-hardware-class aggregate verification.
 
 Not yet production-complete:
 
@@ -49,7 +51,7 @@ Not yet production-complete:
 - Device enrollment, root trust provisioning, and authenticated first refresh are connected; durable bundle ACK and the final physical-Mac E2E remain open;
 - Console screens still contain sample presentation state;
 - cloud signing keys are file-backed rather than KMS/HSM-backed;
-- no published Developer ID/notarized release has passed physical-hardware qualification;
+- no published Developer ID/notarized release has yet passed the required Apple Silicon plus Intel T2 physical-hardware qualification; the fail-closed runner and aggregate verifier are implemented, but protected runners, physical gate drivers, operator policies, and retained evidence still need to be provisioned;
 - managed hosted deployment, PITR scheduling, production alert routing, and independent security review remain open.
 
 ## 3. Delivery rules
