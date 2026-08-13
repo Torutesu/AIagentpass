@@ -2,6 +2,7 @@
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import { basename, isAbsolute, join, resolve } from 'node:path';
+import { canonicalJSON as canonicalScenarioJSON, validateScenarioConfig } from './lib/scenario-runtime.mjs';
 
 const PRODUCTION_ROOT = '/opt/agentpass/p0c';
 const MAX_SOURCE_BYTES = 16 * 1024 * 1024;
@@ -44,21 +45,27 @@ const readStableSource = (path, { executable = false, ownerUid } = {}) => {
   } finally { fs.closeSync(descriptor); }
 };
 
-export const inspectProvisioningSources = ({ sourceRoot, scenarioDirectory, production = true } = {}) => {
-  const expectedSourceEntries = ['drivers', 'lib', 'provision-runner.mjs'];
+export const inspectProvisioningSources = ({ sourceRoot, scenarioDirectory, machineConfigPath, production = true } = {}) => {
+  const requiredSourceEntries = new Set(['drivers', 'generate-scenario-config.mjs', 'lib', 'provision-runner.mjs']);
+  const allowedSourceEntries = new Set([...requiredSourceEntries, 'scenarios']);
   const sourceOwner = production ? 0 : undefined;
   const source = protectedDirectory(sourceRoot, 'P0-C source root', { ownerUid: sourceOwner });
   const actualSourceEntries = fs.readdirSync(source, { withFileTypes: true }).filter((entry) => !entry.name.endsWith('.test.mjs')).map((entry) => entry.name).sort();
-  if (actualSourceEntries.length !== expectedSourceEntries.length || actualSourceEntries.some((name, index) => name !== expectedSourceEntries[index])) throw new Error('P0-C source root has unexpected production entries');
+  if ([...requiredSourceEntries].some((name) => !actualSourceEntries.includes(name)) || actualSourceEntries.some((name) => !allowedSourceEntries.has(name))) throw new Error('P0-C source root has unexpected production entries');
   const driverDirectory = protectedDirectory(join(source, 'drivers'), 'driver source directory', { ownerUid: sourceOwner });
   const driverEntries = fs.readdirSync(driverDirectory, { withFileTypes: true }).filter((entry) => !entry.name.endsWith('.test.mjs')).sort((a, b) => a.name.localeCompare(b.name));
   if (driverEntries.length !== REQUIRED_GATES.length || driverEntries.some((entry, index) => entry.name !== REQUIRED_GATES[index] || !entry.isFile() || entry.isSymbolicLink())) throw new Error('driver source inventory is invalid');
-  const runtimeDirectory = protectedDirectory(join(source, 'lib'), 'runtime source directory', { ownerUid: sourceOwner, exactEntries: ['driver-runtime.mjs'] });
+  const runtimeNames = ['driver-runtime.mjs', 'scenario-runtime.mjs'];
+  const runtimeDirectory = protectedDirectory(join(source, 'lib'), 'runtime source directory', { ownerUid: sourceOwner, exactEntries: runtimeNames });
   const scenarios = protectedDirectory(scenarioDirectory, 'scenario source directory', { ownerUid: production ? 0 : undefined, exactEntries: REQUIRED_GATES });
   const drivers = REQUIRED_GATES.map((gate) => ({ gate, ...readStableSource(join(driverDirectory, gate), { executable: true, ownerUid: sourceOwner }) }));
   const scenarioFiles = REQUIRED_GATES.map((gate) => ({ gate, executable: gate, ...readStableSource(join(scenarios, gate), { executable: true, ownerUid: production ? 0 : undefined }) }));
-  const runtime = readStableSource(join(runtimeDirectory, 'driver-runtime.mjs'), { ownerUid: sourceOwner });
-  return { source, scenarios, drivers, scenarioFiles, runtime };
+  const runtimes = runtimeNames.map((name) => ({ name, ...readStableSource(join(runtimeDirectory, name), { ownerUid: sourceOwner }) }));
+  const machineConfig = readStableSource(machineConfigPath, { ownerUid: production ? 0 : undefined }); let parsedMachineConfig;
+  try { parsedMachineConfig = JSON.parse(machineConfig.bytes.toString('utf8')); } catch { throw new Error('machine scenario config is invalid JSON'); }
+  if (!machineConfig.bytes.equals(canonicalScenarioJSON(parsedMachineConfig))) throw new Error('machine scenario config is not canonical JSON');
+  validateScenarioConfig(parsedMachineConfig);
+  return { source, scenarios, drivers, scenarioFiles, runtimes, machineConfig };
 };
 
 const writeInstalledFile = (path, bytes, mode, uid, gid) => {
@@ -76,33 +83,35 @@ const fsyncDirectory = (path) => { const descriptor = fs.openSync(path, fs.const
 
 const verifyInstalledTree = (root, expected, uid) => {
   protectedDirectory(join(root, 'gates'), 'installed gate directory', { ownerUid: uid, exactEntries: REQUIRED_GATES });
-  protectedDirectory(join(root, 'lib'), 'installed runtime directory', { ownerUid: uid, exactEntries: ['driver-runtime.mjs'] });
+  protectedDirectory(join(root, 'lib'), 'installed runtime directory', { ownerUid: uid, exactEntries: expected.runtimes.map(({ name }) => name) });
   protectedDirectory(join(root, 'scenarios'), 'installed scenario directory', { ownerUid: uid, exactEntries: REQUIRED_GATES });
   const drivers = REQUIRED_GATES.map((gate) => readStableSource(join(root, 'gates', gate), { executable: true, ownerUid: uid }));
   const scenarios = REQUIRED_GATES.map((gate) => readStableSource(join(root, 'scenarios', gate), { executable: true, ownerUid: uid }));
-  const runtime = readStableSource(join(root, 'lib', 'driver-runtime.mjs'), { ownerUid: uid });
+  const runtimes = expected.runtimes.map(({ name }) => ({ name, ...readStableSource(join(root, 'lib', name), { ownerUid: uid }) }));
   const config = readStableSource(join(root, 'driver-config.json'), { ownerUid: uid });
-  if (drivers.some((item, index) => item.sha256 !== expected.drivers[index].sha256) || scenarios.some((item, index) => item.sha256 !== expected.scenarioFiles[index].sha256) || runtime.sha256 !== expected.runtime.sha256) throw new Error('installed inventory digest mismatch');
-  return { drivers, scenarios, runtime, config };
+  const machineConfig = readStableSource(join(root, 'scenario-config.json'), { ownerUid: uid });
+  if (drivers.some((item, index) => item.sha256 !== expected.drivers[index].sha256) || scenarios.some((item, index) => item.sha256 !== expected.scenarioFiles[index].sha256) || runtimes.some((item, index) => item.sha256 !== expected.runtimes[index].sha256) || machineConfig.sha256 !== expected.machineConfig.sha256) throw new Error('installed inventory digest mismatch');
+  return { drivers, scenarios, runtimes, config, machineConfig };
 };
 
-export const provisionRunner = ({ sourceRoot, scenarioDirectory, destinationRoot = PRODUCTION_ROOT, platform = process.platform, uid = process.geteuid?.(), gid = 0, production = true } = {}) => {
+export const provisionRunner = ({ sourceRoot, scenarioDirectory, machineConfigPath, destinationRoot = PRODUCTION_ROOT, platform = process.platform, uid = process.geteuid?.(), gid = 0, production = true } = {}) => {
   if (production && (platform !== 'darwin' || uid !== 0 || destinationRoot !== PRODUCTION_ROOT)) throw new Error('production provisioning requires root on macOS and the fixed destination');
   if (!production && destinationRoot === PRODUCTION_ROOT) throw new Error('non-production provisioning cannot write the production destination');
   if (!isAbsolute(destinationRoot) || basename(destinationRoot) !== 'p0c') throw new Error('destination root is invalid');
   const destination = resolve(destinationRoot); const parent = resolve(destination, '..');
   protectedDirectory(parent, 'destination parent', { ownerUid: uid });
   if (fs.existsSync(destination)) throw new Error('destination already exists; in-place replacement is forbidden');
-  const inspected = inspectProvisioningSources({ sourceRoot, scenarioDirectory, production });
+  const inspected = inspectProvisioningSources({ sourceRoot, scenarioDirectory, machineConfigPath, production });
   const staging = join(parent, `.p0c-stage-${crypto.randomBytes(12).toString('hex')}`);
   try {
     fs.mkdirSync(staging, { mode: 0o700 }); fs.chownSync(staging, uid, gid);
     for (const directory of ['gates', 'lib', 'scenarios']) { const path = join(staging, directory); fs.mkdirSync(path, { mode: 0o755 }); fs.chownSync(path, uid, gid); }
     for (const item of inspected.drivers) writeInstalledFile(join(staging, 'gates', item.gate), item.bytes, 0o755, uid, gid);
-    writeInstalledFile(join(staging, 'lib', 'driver-runtime.mjs'), inspected.runtime.bytes, 0o644, uid, gid);
+    for (const item of inspected.runtimes) writeInstalledFile(join(staging, 'lib', item.name), item.bytes, 0o644, uid, gid);
     for (const item of inspected.scenarioFiles) writeInstalledFile(join(staging, 'scenarios', item.executable), item.bytes, 0o755, uid, gid);
     const config = { schema_version: 1, scenario_directory: join(destination, 'scenarios'), scenarios: inspected.scenarioFiles.map(({ gate, executable, sha256: digest }) => ({ gate, executable, sha256: digest })) };
     writeInstalledFile(join(staging, 'driver-config.json'), canonicalJSON(config), 0o644, uid, gid);
+    writeInstalledFile(join(staging, 'scenario-config.json'), inspected.machineConfig.bytes, 0o644, uid, gid);
     fs.chmodSync(staging, 0o755); for (const directory of ['gates', 'lib', 'scenarios']) fsyncDirectory(join(staging, directory)); fsyncDirectory(staging);
     verifyInstalledTree(staging, inspected, uid);
     fs.renameSync(staging, destination); fsyncDirectory(parent);
@@ -115,9 +124,9 @@ export const provisionRunner = ({ sourceRoot, scenarioDirectory, destinationRoot
 };
 
 const parseArgs = (args) => {
-  const value = {}; for (let index = 0; index < args.length; index += 2) { const key = args[index]; const item = args[index + 1]; if (!['--source-root', '--scenarios'].includes(key) || !item || value[key]) throw new Error('invalid provisioning arguments'); value[key] = item; }
-  if (Object.keys(value).length !== 2) throw new Error('usage: provision-runner.mjs --source-root ABSOLUTE_PATH --scenarios ABSOLUTE_PATH');
-  return { sourceRoot: value['--source-root'], scenarioDirectory: value['--scenarios'] };
+  const value = {}; for (let index = 0; index < args.length; index += 2) { const key = args[index]; const item = args[index + 1]; if (!['--source-root', '--scenarios', '--machine-config'].includes(key) || !item || value[key]) throw new Error('invalid provisioning arguments'); value[key] = item; }
+  if (Object.keys(value).length !== 3) throw new Error('usage: provision-runner.mjs --source-root ABSOLUTE_PATH --scenarios ABSOLUTE_PATH --machine-config ABSOLUTE_PATH');
+  return { sourceRoot: value['--source-root'], scenarioDirectory: value['--scenarios'], machineConfigPath: value['--machine-config'] };
 };
 
 if (import.meta.url === `file://${process.argv[1]}`) {

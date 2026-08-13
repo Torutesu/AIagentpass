@@ -1,0 +1,54 @@
+#!/usr/bin/env node
+import crypto from 'node:crypto';
+import { pathToFileURL } from 'node:url';
+import { resolve } from 'node:path';
+import { executePhysicalScenario, parseJSONOutput, requireCommandSuccess, runPinnedExecutable, runPhysicalScenario } from '../lib/scenario-runtime.mjs';
+
+const GATE = 'secure-enclave-enrollment';
+const TESTS = Object.freeze(['secure-enclave-key-creation', 'secure-enclave-nonexportability']);
+const FIXED_TAG = 'dev.agentpass.device-auth.v1';
+const FINGERPRINT = /^SHA256:[A-Za-z0-9_-]{43}$/u;
+const SNAPSHOT_KEYS = Object.freeze(['access_group', 'application_tag', 'key_class', 'key_size_bits', 'keychain_match_count', 'private_exportable', 'public_key_fingerprint', 'secure_enclave', 'sign_supported', 'status', 'token_id', 'version']);
+const KEY_KEYS = Object.freeze(['fingerprint', 'public_key_pem']);
+
+const exactKeys = (value, keys, label) => {
+  if (value === null || typeof value !== 'object' || Array.isArray(value) || Object.keys(value).sort().join(',') !== [...keys].sort().join(',')) throw new Error(`${label} has missing or unknown fields`);
+};
+const requireRoot = (getUid = process.getuid) => { if (typeof getUid !== 'function' || getUid() !== 0) throw new Error('physical scenario requires root'); };
+const sha256 = (bytes) => crypto.createHash('sha256').update(bytes).digest('hex');
+const parseDirect = (result, label) => parseJSONOutput(requireCommandSuccess(result, label), label);
+const parseNativeClient = (result, label) => {
+  const outer = parseDirect(result, label); exactKeys(outer, ['ok', 'stdout_base64'], `${label} envelope`);
+  if (outer.ok !== true || typeof outer.stdout_base64 !== 'string') throw new Error(`${label} envelope is invalid`);
+  const bytes = Buffer.from(outer.stdout_base64, 'base64'); if (bytes.length === 0 || bytes.toString('base64') !== outer.stdout_base64) throw new Error(`${label} payload is invalid`);
+  return parseJSONOutput(bytes, label);
+};
+
+export const performSecureEnclaveEnrollment = async ({ release, machine, production = true, runCommand, runPinned = runPinnedExecutable, getUid = process.getuid } = {}) => {
+  requireRoot(getUid);
+  const serviceArgs = (action) => ['--device-auth', action, '--config', machine.serviceConfigPath];
+  const snapshot = parseDirect(await runPinned(machine.executables.native_service, serviceArgs('qualify'), { production, runCommand }), 'Secure Enclave qualification');
+  exactKeys(snapshot, SNAPSHOT_KEYS, 'Secure Enclave qualification');
+  const expectedGroup = `${release.teamId}.dev.agentpass.service-keys`;
+  if (snapshot.version !== 1 || snapshot.status !== 'passed' || snapshot.application_tag !== FIXED_TAG || snapshot.access_group !== expectedGroup || snapshot.keychain_match_count !== 1 || snapshot.key_class !== 'private' || snapshot.key_size_bits !== 256 || snapshot.token_id !== 'SecureEnclave' || snapshot.secure_enclave !== true || snapshot.sign_supported !== true || snapshot.private_exportable !== false || !FINGERPRINT.test(snapshot.public_key_fingerprint)) throw new Error('Secure Enclave qualification did not prove the fixed non-exportable key');
+
+  const key = parseDirect(await runPinned(machine.executables.native_service, serviceArgs('key'), { production, runCommand }), 'enrollment public key');
+  exactKeys(key, KEY_KEYS, 'enrollment public key');
+  if (key.fingerprint !== snapshot.public_key_fingerprint || typeof key.public_key_pem !== 'string' || !key.public_key_pem.startsWith('-----BEGIN PUBLIC KEY-----\n') || key.public_key_pem.includes('PRIVATE')) throw new Error('enrollment public key does not match qualification');
+
+  const bindingHash = sha256(Buffer.from(`${release.sourceCommit}\n${release.teamId}\n${release.artifactSha256}`, 'utf8'));
+  const preimage = Buffer.from(`AgentPass-Enrollment-Proof-v1\nPOST\n/v1/enrollments/00000000-0000-4000-8000-000000000001\n${release.artifactSha256}\n${bindingHash}`, 'utf8');
+  const signed = parseDirect(await runPinned(machine.executables.native_service, serviceArgs('sign'), { production, runCommand, input: preimage }), 'enrollment proof signature');
+  exactKeys(signed, ['signature_base64'], 'enrollment proof signature');
+  if (typeof signed.signature_base64 !== 'string') throw new Error('enrollment proof signature is missing');
+  const signature = Buffer.from(signed.signature_base64, 'base64');
+  if (signature.length !== 64 || signature.toString('base64') !== signed.signature_base64 || !crypto.verify('sha256', preimage, { key: key.public_key_pem, dsaEncoding: 'ieee-p1363' }, signature)) throw new Error('enrollment proof signature is invalid');
+
+  const control = parseNativeClient(await runPinned(machine.executables.native_client, ['--service', machine.serviceLabel, 'control-status'], { production, runCommand }), 'native control status');
+  if (control.control_configured !== true || control.control_format_epoch !== 2 || control.control_operational !== true || control.control_device_auth_public_key !== key.public_key_pem) throw new Error('ControlBundle device authentication is not bound to the enrollment key');
+  return TESTS;
+};
+
+export const executeSecureEnclaveEnrollment = (options) => executePhysicalScenario({ gate: GATE, tests: TESTS, ...options, execute: (context) => performSecureEnclaveEnrollment(context) });
+
+if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) await runPhysicalScenario({ gate: GATE, tests: TESTS, execute: (context) => performSecureEnclaveEnrollment(context) });

@@ -339,7 +339,7 @@ private struct ServiceConfiguration: Decodable {
         }
         if value.controlURL != nil || value.controlRefreshSeconds != nil {
             guard let rawURL = value.controlURL, let interval = value.controlRefreshSeconds,
-                  value.controlV2StatePath != nil ? value.controlV2DeviceKeyTag?.isEmpty == false : value.controlStatePath != nil else {
+                  value.controlV2StatePath != nil ? value.controlV2DeviceKeyTag == NativeEnrollmentKeyMaterial.fixedApplicationTag : value.controlStatePath != nil else {
                 throw AgentPassNativeError.invalidConfiguration("Native control refresh requires protected state, URL, and interval")
             }
             _ = try NativeControlRefreshConfiguration(urlString: rawURL, refreshSeconds: interval)
@@ -368,7 +368,7 @@ private struct ServiceConfiguration: Decodable {
                   let refreshHintKeyring = value.controlV2RefreshHintKeyring,
                   !refreshHintKeyring.isEmpty, refreshHintKeyring.count <= NativeRefreshHintTrust.maximumKeys,
                   value.controlURL != nil, value.controlRefreshSeconds != nil,
-                  value.controlV2DeviceKeyTag?.isEmpty == false else {
+                  value.controlV2DeviceKeyTag == NativeEnrollmentKeyMaterial.fixedApplicationTag else {
                 throw AgentPassNativeError.invalidConfiguration("ControlBundle v2 requires complete pinned trust, API base, audience, device_key_epoch, refresh hint keyring, and protected state paths; reprovision the native service")
             }
             _ = try NativeControlBundleV2Trust(publicKeyPEM: publicKey, issuer: issuer, keyID: keyID, audience: NativeControlBundleV2Audience(organizationID: organizationID, deviceID: deviceID))
@@ -387,7 +387,8 @@ private struct ServiceConfiguration: Decodable {
             }
             _ = try NativeRefreshHintTrust(organizationID: organizationID, deviceID: deviceID, publicKeysPEM: refreshKeys)
             if let tag = value.controlV2DeviceKeyTag {
-                guard !tag.isEmpty, tag != value.keyTag, tag != value.auditKeyTag, tag != value.sessionApprovalKeyTag else { throw AgentPassNativeError.invalidConfiguration("ControlBundle v2 device authentication requires a dedicated Secure Enclave key tag") }
+                guard tag == NativeEnrollmentKeyMaterial.fixedApplicationTag,
+                      tag != value.keyTag, tag != value.auditKeyTag, tag != value.sessionApprovalKeyTag else { throw AgentPassNativeError.invalidConfiguration("ControlBundle v2 device authentication requires the fixed dedicated enrollment Secure Enclave key tag") }
             }
         }
         let deletionConfigurationCount: Int = [
@@ -2729,6 +2730,42 @@ private func emitOfflineObject(_ object: [String: Any]) throws -> Never {
     exit(0)
 }
 
+private let qualificationSnapshotKeys: Set<String> = [
+    "access_group",
+    "application_tag",
+    "key_class",
+    "key_size_bits",
+    "keychain_match_count",
+    "private_exportable",
+    "public_key_fingerprint",
+    "secure_enclave",
+    "sign_supported",
+    "status",
+    "token_id",
+    "version"
+]
+
+private func emitQualificationSnapshot<T: Encodable>(_ snapshot: T) throws -> Never {
+    let encoder = JSONEncoder()
+    encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
+    let encoded = try encoder.encode(snapshot)
+    let object = try NativeStrictJSON.object(from: encoded, maxBytes: 64 * 1024, maxDepth: 4)
+
+    // The snapshot is intentionally an allowlisted public binding. Rejecting
+    // every extra field prevents private key material or provider-specific
+    // Keychain attributes from crossing this process boundary if the snapshot
+    // schema is ever extended.
+    guard Set(object.keys) == qualificationSnapshotKeys else {
+        throw AgentPassNativeError.invalidKey("Secure Enclave qualification snapshot contains an unsupported field")
+    }
+    let canonical = try NativeStrictJSON.data(object)
+    guard canonical == encoded else {
+        throw AgentPassNativeError.invalidKey("Secure Enclave qualification snapshot is not canonical JSON")
+    }
+    FileHandle.standardOutput.write(canonical + Data("\n".utf8))
+    exit(0)
+}
+
 private func boundedDeviceProofInput() throws -> Data {
     var result = Data()
     while true {
@@ -2750,14 +2787,18 @@ private func runOfflineDeviceAuthentication(action: String, configPath: String) 
     guard let accessGroup = configuration.keychainAccessGroup, !accessGroup.isEmpty else {
         throw AgentPassNativeError.invalidConfiguration("Device authentication requires the service keychain access group")
     }
-    let primitive = NativeEnrollmentKeyPrimitive(store: SecureEnclaveNativeEnrollmentKeyStore(accessGroup: accessGroup))
     switch action {
     case "key":
+        let primitive = NativeEnrollmentKeyPrimitive(store: SecureEnclaveNativeEnrollmentKeyStore(accessGroup: accessGroup))
         let material = try primitive.loadOrCreate()
         try emitOfflineObject(["fingerprint": material.fingerprint, "public_key_pem": material.publicKeyPEM])
     case "sign":
+        let primitive = NativeEnrollmentKeyPrimitive(store: SecureEnclaveNativeEnrollmentKeyStore(accessGroup: accessGroup))
         let signature = try primitive.signEnrollmentProof(preimage: boundedDeviceProofInput())
         try emitOfflineObject(["signature_base64": signature.base64EncodedString()])
+    case "qualify":
+        let snapshot = try SecureEnclaveNativeEnrollmentKeyStore(accessGroup: accessGroup).qualificationSnapshot()
+        try emitQualificationSnapshot(snapshot)
     default:
         throw AgentPassNativeError.invalidConfiguration("Unknown offline device-auth action")
     }
@@ -2873,7 +2914,7 @@ do {
         try runOfflineBootstrap(action: CommandLine.arguments[2], configPath: CommandLine.arguments[4])
     }
     guard CommandLine.arguments.count == 3, CommandLine.arguments[1] == "--config" else {
-        throw AgentPassNativeError.invalidConfiguration("Usage: agentpass-native-service --config PATH | --bootstrap ACTION --config PATH | --device-auth key|sign --config PATH | --provision-control --config PATH")
+        throw AgentPassNativeError.invalidConfiguration("Usage: agentpass-native-service --config PATH | --bootstrap ACTION --config PATH | --device-auth key|sign|qualify --config PATH | --provision-control --config PATH")
     }
     let configuration = try ServiceConfiguration.load(path: CommandLine.arguments[2])
     try validateProtectedOutputPath(path: configuration.auditLogPath, label: "Native audit log")

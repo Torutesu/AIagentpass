@@ -116,18 +116,38 @@ A scenario must perform the physical operation and return this internal protocol
 
 Static configuration, an operator assertion, a prior run, or a result bound to another candidate cannot pass. The checked-in entrypoints and runtime are the trust adapter. The destructive scenario executables are separately provisioned machine procedures and remain physical qualification work until each procedure is implemented, reviewed, and executed on both hardware lanes.
 
+The first three physical procedures are now checked in under `scripts/release/p0c/scenarios`:
+
+- `gatekeeper-notarization` performs Gatekeeper assessment, PKG signature and stapler validation, installs the exact bound PKG as root, and revalidates the installed app signature and Team ID;
+- `clean-install-launchd-xpc` verifies root-owned installed components, all relevant code signatures, the system launchd service, and real native-client XPC `ping`/`control-status` calls;
+- `secure-enclave-enrollment` calls the production service's non-creating `--device-auth qualify` probe, proves the fixed P-256 Secure Enclave key is non-exportable and sign-capable, verifies a fresh release-bound possession signature, and requires ControlBundle v2 to expose the same public key.
+
+These procedures cannot pass on injected Linux execution, a non-root runner, a substituted executable, a different device key, an exportable-key claim, or a static operator assertion. The remaining 13 procedures are still open and therefore production provisioning continues to require an externally reviewed exact 16-scenario directory; missing scenario names fail closed.
+
 ### One-time runner provisioning
 
 Provisioning is deliberately separate from the GitHub Actions job. First create the fixed parent once as root. Materialize a dedicated, reviewed copy of `scripts/release/p0c` and the 16 scenario executables in root-owned, non-group/world-writable source directories; do not point the root provisioner at the CI user's mutable working checkout. The scenario filenames must exactly match the gate list. Then run:
 
 ```text
+node scripts/release/p0c/generate-scenario-config.mjs \
+  --native-client /Applications/AgentPass.app/Contents/Library/HelperTools/AgentPassNativeClient.app/Contents/MacOS/agentpass-native-client \
+  --native-manager /Applications/AgentPass.app/Contents/MacOS/agentpass-native-manager \
+  --native-service /Applications/AgentPass.app/Contents/Library/HelperTools/AgentPassNativeService.app/Contents/MacOS/agentpass-native-service \
+  --claude-code /absolute/root-owned/path/to/claude \
+  --cursor /absolute/root-owned/path/to/cursor-agent \
+  --test-repository /absolute/path/to/isolated-qualification-repository \
+  --cloud-probe-url https://qualification.example.invalid/v1/probe \
+  --checkpoint-directory /absolute/root-owned/path/p0c-checkpoints \
+  --output /absolute/path/scenario-config.json
+
 sudo /usr/bin/install -d -o root -g wheel -m 0755 /opt/agentpass
 sudo /absolute/path/to/node /absolute/root-owned/path/reviewed-p0c-source/provision-runner.mjs \
   --source-root /absolute/root-owned/path/reviewed-p0c-source \
-  --scenarios /absolute/root-owned/path/p0c-scenarios
+  --scenarios /absolute/root-owned/path/p0c-scenarios \
+  --machine-config /absolute/root-owned/path/scenario-config.json
 ```
 
-The provisioner is production-locked to root on macOS and `/opt/agentpass/p0c`. It verifies an exact 16-driver and 16-scenario inventory, refuses symlinks, hard links, writable or changed source files, copies through a private sibling staging directory, applies root ownership and fixed modes, generates the canonical digest-pinned config, verifies every installed digest, and atomically renames the completed tree into place. It refuses an existing destination; upgrades require a separately reviewed replacement/rollback procedure and cannot silently alter a qualification runner.
+The config generator snapshots the SHA-256 of the exact native client, native manager, native service, Claude Code, and Cursor Agent executables and refuses unsafe inputs or output replacement. The provisioner is production-locked to root on macOS and `/opt/agentpass/p0c`. It verifies an exact 16-driver and 16-scenario inventory, refuses symlinks, hard links, writable or changed source files, copies both runtimes and the machine config through a private sibling staging directory, applies root ownership and fixed modes, generates the canonical digest-pinned driver config, verifies every installed digest, and atomically renames the completed tree into place. It refuses an existing destination; upgrades require a separately reviewed replacement/rollback procedure and cannot silently alter a qualification runner.
 
 No operator private key, Developer ID credential, candidate artifact, or Cloud secret is written into the provisioned tree. Scenario executables must also remain secret-free and obtain only the non-secret candidate bindings passed by the driver runtime.
 

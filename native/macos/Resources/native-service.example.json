@@ -52,7 +52,7 @@
       "public_key": "-----BEGIN PUBLIC KEY-----\nREPLACE_WITH_REFRESH_HINT_ED25519_PUBLIC_KEY\n-----END PUBLIC KEY-----\n"
     }
   ],
-  "control_v2_device_key_tag": "dev.agentpass.device-auth",
+  "control_v2_device_key_tag": "dev.agentpass.device-auth.v1",
   "session_approval_public_key": "ecdsa-sha2-nistp256 REPLACE_WITH_AGENTPASS_NATIVE_SESSION_APPROVAL_KEY",
   "session_approval_key_tag": "dev.agentpass.session-approval",
   "client_code_signing_requirement": "anchor apple generic and identifier \"dev.agentpass.native-client\" and certificate leaf[subject.OU] = \"TEAMID\"",

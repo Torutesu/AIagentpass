@@ -1,0 +1,77 @@
+#!/usr/bin/env node
+
+import fs from 'node:fs';
+import { pathToFileURL } from 'node:url';
+import { resolve } from 'node:path';
+import {
+  executePhysicalScenario,
+  requireCommandSuccess,
+  runFixedCommand,
+  runPhysicalScenario,
+} from '../lib/scenario-runtime.mjs';
+
+const GATE = 'gatekeeper-notarization';
+const TESTS = Object.freeze(['exact-pkg-install']);
+const APP_PATH = '/Applications/AgentPass.app';
+const SPCTL = '/usr/sbin/spctl';
+const PKGUTIL = '/usr/sbin/pkgutil';
+const XCRUN = '/usr/bin/xcrun';
+const INSTALLER = '/usr/sbin/installer';
+const CODESIGN = '/usr/bin/codesign';
+const TEAM_ID_PATTERN = /^[A-Z0-9]{10}$/u;
+
+const zero = (value) => value === 0 || value === 0n;
+
+const requireRoot = (getUid = process.getuid) => {
+  if (typeof getUid !== 'function' || getUid() !== 0) throw new Error('physical scenario requires root');
+};
+
+const requireProtectedApp = (fileSystem, path) => {
+  if (path !== APP_PATH) throw new Error('unexpected application path');
+  let stat;
+  try {
+    stat = fileSystem.lstatSync(path);
+  } catch {
+    throw new Error('installed application is unavailable');
+  }
+  if (!stat.isDirectory() || stat.isSymbolicLink() || !zero(stat.uid) || !zero(stat.gid) || stat.nlink !== 1 || (Number(stat.mode) & 0o777) !== 0o755) {
+    throw new Error('installed application ownership or mode is unsafe');
+  }
+};
+
+const runAndRequire = async (runCommand, command, args) => requireCommandSuccess(await runCommand(command, args, { cwd: '/' }), command);
+
+const teamIdentifier = (result, expectedTeamId) => {
+  const output = Buffer.concat([result.stdout ?? Buffer.alloc(0), result.stderr ?? Buffer.alloc(0)]).toString('utf8');
+  const identifiers = [...output.matchAll(/^TeamIdentifier=([A-Z0-9]{10})$/gmu)].map((match) => match[1]);
+  if (!TEAM_ID_PATTERN.test(expectedTeamId) || identifiers.length !== 1 || identifiers[0] !== expectedTeamId) throw new Error('installed application TeamIdentifier mismatch');
+};
+
+export const performGatekeeperNotarization = async ({ release, machine, production = true, runCommand = runFixedCommand, fileSystem = fs, getUid = process.getuid } = {}) => {
+  requireRoot(getUid);
+  if (machine.applicationPath !== APP_PATH) throw new Error('scenario config application path is not fixed');
+
+  await runAndRequire(runCommand, SPCTL, ['--assess', '--type', 'install', '--verbose=4', release.artifactPath]);
+  await runAndRequire(runCommand, PKGUTIL, ['--check-signature', release.artifactPath]);
+  await runAndRequire(runCommand, XCRUN, ['stapler', 'validate', release.artifactPath]);
+  await runAndRequire(runCommand, INSTALLER, ['-pkg', release.artifactPath, '-target', '/']);
+
+  requireProtectedApp(fileSystem, APP_PATH);
+  await runAndRequire(runCommand, CODESIGN, ['--verify', '--strict', '--verbose=2', APP_PATH]);
+  const details = await runCommand(CODESIGN, ['-dv', '--verbose=4', APP_PATH], { cwd: '/' });
+  requireCommandSuccess(details, CODESIGN);
+  teamIdentifier(details, release.teamId);
+
+  return TESTS;
+};
+
+export const executeGatekeeperNotarization = (options) => executePhysicalScenario({
+  gate: GATE,
+  tests: TESTS,
+  ...options,
+  execute: (context) => performGatekeeperNotarization(context),
+});
+
+if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
+  await runPhysicalScenario({ gate: GATE, tests: TESTS, execute: (context) => performGatekeeperNotarization(context) });
+}

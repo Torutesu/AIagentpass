@@ -138,3 +138,17 @@ private func enrollmentProofPreimage(bodyDigest: String = String(repeating: "a",
     #expect(!material.publicKeyPEM.contains("PRIVATE"))
     #expect(material.fingerprint.hasPrefix("SHA256:"))
 }
+
+@Test func qualificationSnapshotSchemaHasNoPrivateKeyMaterialOrMutableClaims() throws {
+    let source = try String(contentsOf: URL(fileURLWithPath: #filePath)
+        .deletingLastPathComponent()
+        .deletingLastPathComponent()
+        .deletingLastPathComponent()
+        .appendingPathComponent("Sources/AgentPassNativeCore/NativeEnrollmentKey.swift"), encoding: .utf8)
+    #expect(source.contains("public struct NativeSecureEnclaveQualificationSnapshot"))
+    #expect(source.contains("fileprivate init(accessGroup: String, publicKeyFingerprint: String)"))
+    #expect(source.contains("public func qualificationSnapshot() throws -> NativeSecureEnclaveQualificationSnapshot"))
+    #expect(source.contains("SecKeyCopyExternalRepresentation(key, nil) == nil"))
+    #expect(!source.contains("private_key_base64"))
+    #expect(!source.contains("privateKeyData"))
+}

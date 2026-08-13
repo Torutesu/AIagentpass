@@ -83,6 +83,53 @@ public struct NativeEnrollmentKeyMaterial: Equatable, Sendable {
     }
 }
 
+/// Public, non-secret evidence derived from one existing production enrollment
+/// key. There is intentionally no public initializer: only the Security-backed
+/// store can construct a passing snapshot after revalidating the live key.
+public struct NativeSecureEnclaveQualificationSnapshot: Codable, Equatable, Sendable {
+    public let version: Int
+    public let status: String
+    public let applicationTag: String
+    public let accessGroup: String
+    public let keychainMatchCount: Int
+    public let keyClass: String
+    public let keySizeBits: Int
+    public let tokenID: String
+    public let secureEnclave: Bool
+    public let signSupported: Bool
+    public let privateExportable: Bool
+    public let publicKeyFingerprint: String
+
+    enum CodingKeys: String, CodingKey {
+        case version, status
+        case applicationTag = "application_tag"
+        case accessGroup = "access_group"
+        case keychainMatchCount = "keychain_match_count"
+        case keyClass = "key_class"
+        case keySizeBits = "key_size_bits"
+        case tokenID = "token_id"
+        case secureEnclave = "secure_enclave"
+        case signSupported = "sign_supported"
+        case privateExportable = "private_exportable"
+        case publicKeyFingerprint = "public_key_fingerprint"
+    }
+
+    fileprivate init(accessGroup: String, publicKeyFingerprint: String) {
+        version = 1
+        status = "passed"
+        applicationTag = NativeEnrollmentKeyMaterial.fixedApplicationTag
+        self.accessGroup = accessGroup
+        keychainMatchCount = 1
+        keyClass = "private"
+        keySizeBits = 256
+        tokenID = "SecureEnclave"
+        secureEnclave = true
+        signSupported = true
+        privateExportable = false
+        self.publicKeyFingerprint = publicKeyFingerprint
+    }
+}
+
 /// Idempotent orchestration is deliberately separate from Keychain/Secure
 /// Enclave access so CI can exercise all output and retry invariants with a
 /// fake provider.
@@ -199,6 +246,30 @@ public struct SecureEnclaveNativeEnrollmentKeyStore: NativeEnrollmentKeyStore, S
             throw AgentPassNativeError.invalidSignature("Secure Enclave enrollment proof signature is not raw IEEE-P1363")
         }
         return raw
+    }
+
+    /// Revalidates the live fixed binding without creating or replacing a key.
+    /// The returned object contains public metadata only. A missing key,
+    /// ambiguous query, wrong access group, software-backed key, unsupported
+    /// algorithm, or exportable private representation fails closed.
+    public func qualificationSnapshot() throws -> NativeSecureEnclaveQualificationSnapshot {
+        guard let accessGroup,
+              accessGroup.range(
+                of: "^[A-Z0-9]{10}\\.dev\\.agentpass\\.service-keys$",
+                options: .regularExpression
+              ) != nil else {
+            throw AgentPassNativeError.invalidConfiguration("Secure Enclave qualification requires the exact service keychain access group")
+        }
+        guard let key = try loadKey() else {
+            throw AgentPassNativeError.invalidKey("Secure Enclave enrollment key does not exist for qualification")
+        }
+        try Self.validateSecureEnclavePrivateKey(key)
+        let publicKey = try Self.exportPublicKey(from: key)
+        let material = try NativeEnrollmentKeyMaterial(publicKeyX963: publicKey)
+        return NativeSecureEnclaveQualificationSnapshot(
+            accessGroup: accessGroup,
+            publicKeyFingerprint: material.fingerprint
+        )
     }
 
     private func loadKey() throws -> SecKey? {
