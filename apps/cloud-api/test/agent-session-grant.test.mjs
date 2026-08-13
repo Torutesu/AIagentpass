@@ -46,6 +46,7 @@ function statement(overrides = {}) {
     not_before: "2026-08-13T09:59:00.000Z",
     expires_at: "2026-08-13T10:14:00.000Z",
     control_sequence: 12,
+    authority_generation: 7,
     issuer: "agentpass-cloud",
     key_id: "agent-session-2026-08",
     ...overrides

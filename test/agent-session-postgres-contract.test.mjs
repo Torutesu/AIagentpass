@@ -33,30 +33,34 @@ function assertTransactional(sql, name) {
 const grantSql = readMigration("0018_agent_session_grants.sql");
 const sessionSql = readMigration("0019_agent_sessions.sql");
 const auditSql = readMigration("0020_agent_audit_binding.sql");
+const authorityGenerationSql = readMigration("0021_agent_session_authority_generation.sql");
 
 test("M2 migrations are ordered, transactional, and non-destructive", () => {
   for (const [name, sql] of [
     ["0018_agent_session_grants.sql", grantSql],
     ["0019_agent_sessions.sql", sessionSql],
-    ["0020_agent_audit_binding.sql", auditSql]
+    ["0020_agent_audit_binding.sql", auditSql],
+    ["0021_agent_session_authority_generation.sql", authorityGenerationSql]
   ]) assertTransactional(sql, name);
 
   assert.ok(fs.existsSync(path.join(migrationDirectory, "0017_device_possession_verification.sql")));
   const orderedMigrations = fs.readdirSync(migrationDirectory)
-    .filter((name) => /^00(?:1[89]|20)_[a-z0-9_]+\.sql$/u.test(name))
+    .filter((name) => /^00(?:1[89]|2[01])_[a-z0-9_]+\.sql$/u.test(name))
     .sort();
   assert.deepEqual(
     orderedMigrations,
-    ["0018_agent_session_grants.sql", "0019_agent_sessions.sql", "0020_agent_audit_binding.sql"]
+    ["0018_agent_session_grants.sql", "0019_agent_sessions.sql", "0020_agent_audit_binding.sql", "0021_agent_session_authority_generation.sql"]
   );
 });
 
 test("grant schema binds one tenant/device/agent identity and excludes secret-bearing columns", () => {
   const columns = tableColumns(grantSql, "agent_session_grants");
+  columns.add("authority_generation");
   for (const column of [
     "organization_id", "grant_id", "device_id", "agent_id", "agent_kind", "adapter_id",
     "worktree_binding_sha256", "process_binding_policy_id", "scope_json", "max_signatures",
     "not_before", "expires_at", "control_sequence", "grant_hash", "statement_hash",
+    "authority_generation",
     "signature_base64url", "status", "consumed_at", "consumed_session_id", "expired_at",
     "consumed_process_binding_sha256", "revoked_at", "created_by"
   ]) assert.ok(columns.has(column), `grant column ${column} is required`);
@@ -66,12 +70,16 @@ test("grant schema binds one tenant/device/agent identity and excludes secret-be
 
   assert.match(grantSql, /FOREIGN KEY \(organization_id, device_id\)\s+REFERENCES devices\(organization_id, id\)/iu);
   assert.match(grantSql, /FOREIGN KEY \(organization_id, agent_id, device_id\)\s+REFERENCES agents\(organization_id, id, device_id\)/iu);
+  assert.match(authorityGenerationSql, /ALTER TABLE agent_session_grants[\s\S]*ADD COLUMN authority_generation bigint/iu);
+  assert.match(authorityGenerationSql, /agent_session_grants_authority_generation_positive[\s\S]*CHECK \(authority_generation > 0\)/iu);
+  assert.match(authorityGenerationSql, /FOREIGN KEY \(organization_id, authority_generation\)\s+REFERENCES control_plane_authority_generations\(organization_id, generation\)/iu);
   assert.match(grantSql, /FOREIGN KEY \(organization_id, created_by\)\s+REFERENCES memberships\(organization_id, member_id\)/iu);
   assert.match(grantSql, /UNIQUE \(organization_id, grant_id, device_id, agent_id\)/iu);
   assert.match(grantSql, /UNIQUE \(organization_id, consumed_session_id\)/iu);
   assert.match(grantSql, /consumed_process_binding_sha256 text[\s\S]*\^\[0-9a-f\]\{64\}\$/iu);
   assert.match(grantSql, /status = 'consumed'[\s\S]*consumed_process_binding_sha256 IS NOT NULL/iu);
   assert.match(grantSql, /NEW\.consumed_process_binding_sha256 IS DISTINCT FROM OLD\.consumed_process_binding_sha256/iu);
+  assert.match(authorityGenerationSql, /NEW\.authority_generation <> OLD\.authority_generation/iu);
   assert.match(grantSql, /scope_json jsonb NOT NULL[\s\S]*agentpass_public_scope_json_valid/iu);
   assert.match(grantSql, /grant_hash text NOT NULL[\s\S]*\^\[0-9a-f\]\{64\}\$/iu);
 });
@@ -94,10 +102,11 @@ test("grant lifecycle is immutable, one-way, time-bounded, and tenant-isolated",
 
 test("session schema enforces grant identity, one active session, and used<=max", () => {
   const columns = tableColumns(sessionSql, "agent_sessions");
+  columns.add("authority_generation");
   for (const column of [
     "organization_id", "session_id", "grant_id", "device_id", "agent_id", "adapter_id", "grant_hash",
     "process_binding_sha256", "ancestry_binding_sha256", "worktree_binding_sha256",
-    "control_sequence", "max_signatures", "used_signatures", "reserved_signatures",
+    "control_sequence", "authority_generation", "max_signatures", "used_signatures", "reserved_signatures",
     "status", "active_request_id", "last_request_id", "not_before", "expires_at"
   ]) assert.ok(columns.has(column), `session column ${column} is required`);
 
@@ -105,6 +114,9 @@ test("session schema enforces grant identity, one active session, and used<=max"
   for (const column of columns) assert.doesNotMatch(column, forbidden, `session column ${column} must not hold secret material`);
 
   assert.match(sessionSql, /FOREIGN KEY \(organization_id, grant_id, device_id, agent_id, grant_hash\)\s+REFERENCES agent_session_grants\(organization_id, grant_id, device_id, agent_id, grant_hash\)/iu);
+  assert.match(authorityGenerationSql, /ALTER TABLE agent_sessions[\s\S]*ADD COLUMN authority_generation bigint/iu);
+  assert.match(authorityGenerationSql, /agent_sessions_authority_generation_positive[\s\S]*CHECK \(authority_generation > 0\)/iu);
+  assert.match(authorityGenerationSql, /FOREIGN KEY \(organization_id, authority_generation\)\s+REFERENCES control_plane_authority_generations\(organization_id, generation\)/iu);
   assert.match(sessionSql, /NEW\.not_before <> grant_row\.not_before/iu);
   assert.match(sessionSql, /NEW\.not_before <> OLD\.not_before/iu);
   assert.match(sessionSql, /UNIQUE \(organization_id, grant_id\)/iu);
@@ -116,6 +128,8 @@ test("session schema enforces grant identity, one active session, and used<=max"
   assert.match(sessionSql, /UPDATE agent_session_grants[\s\S]*SET status = 'consumed'[\s\S]*consumed_session_id = NEW\.session_id/iu);
   assert.match(sessionSql, /consumed_process_binding_sha256 = NEW\.process_binding_sha256/iu);
   assert.match(sessionSql, /NEW\.grant_hash <> grant_row\.grant_hash/iu);
+  assert.match(authorityGenerationSql, /NEW\.authority_generation <> grant_generation/iu);
+  assert.match(authorityGenerationSql, /NEW\.authority_generation <> OLD\.authority_generation/iu);
   assert.match(sessionSql, /serialization_failure/iu);
 });
 

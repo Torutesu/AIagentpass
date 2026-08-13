@@ -34,7 +34,8 @@ const SCOPE = Object.freeze({
 class ContractClient {
   constructor(options = {}, shared = undefined) {
     this.options = options;
-    this.shared = shared ?? { grants: [], sessions: [] };
+    this.shared = shared ?? { grants: [], sessions: [], lockTail: new Map() };
+    this.shared.lockTail ??= new Map();
     this.calls = [];
     this.snapshot = undefined;
     this.inTransaction = false;
@@ -46,7 +47,7 @@ class ContractClient {
     this.calls.push({ text, params: structuredClone(params) });
     if (text === "BEGIN") {
       this.inTransaction = true;
-      this.snapshot = structuredClone(this.shared);
+      this.snapshot = { grants: structuredClone(this.shared.grants), sessions: structuredClone(this.shared.sessions) };
       return result();
     }
     if (text === "COMMIT") {
@@ -55,6 +56,7 @@ class ContractClient {
         this.commitApplied = true;
         throw new Error("commit response lost private key material");
       }
+      this.releaseLocks();
       this.inTransaction = false;
       this.snapshot = undefined;
       return result();
@@ -64,6 +66,7 @@ class ContractClient {
         this.shared.grants = this.snapshot.grants;
         this.shared.sessions = this.snapshot.sessions;
       }
+      this.releaseLocks();
       this.inTransaction = false;
       this.snapshot = undefined;
       return result();
@@ -74,12 +77,32 @@ class ContractClient {
     if (text.startsWith("SELECT current_setting")) {
       return result([{ organization_id: this.options.tenantDrift ? ids.otherOrganization : this.calls.findLast((call) => call.text.startsWith("SELECT set_config"))?.params[0] }]);
     }
-    if (text.startsWith("SELECT pg_advisory_xact_lock")) return result([{ locked: true }]);
+    if (text.startsWith("SELECT pg_advisory_xact_lock")) {
+      const key = params[0];
+      const previous = this.shared.lockTail.get(key) ?? Promise.resolve();
+      let release;
+      const held = new Promise((resolve) => { release = resolve; });
+      const tail = previous.then(() => held);
+      this.shared.lockTail.set(key, tail);
+      await previous;
+      this.locks ??= [];
+      this.locks.push({ key, tail, release });
+      return result([{ locked: true }]);
+    }
+    if (/FROM agents a[\s\S]*JOIN control_plane_authority_generations/u.test(text)) return this.options.staleAuthority ? result() : result([{ "?column?": 1 }]);
     if (text.startsWith("INSERT INTO agent_session_grants")) return this.insertGrant(params);
     if (text.startsWith("SELECT organization_id,grant_id,device_id,agent_id,agent_kind")) return this.selectGrant(text, params);
     if (text.startsWith("INSERT INTO agent_sessions")) return this.insertSession(params);
     if (text.startsWith("SELECT organization_id,session_id,grant_id,device_id,agent_id,agent_kind")) return this.selectSession(params);
     throw new Error(`unexpected query: ${text}`);
+  }
+
+  releaseLocks() {
+    for (const lock of this.locks ?? []) {
+      lock.release();
+      if (this.shared.lockTail.get(lock.key) === lock.tail) this.shared.lockTail.delete(lock.key);
+    }
+    this.locks = [];
   }
 
   insertGrant(params) {
@@ -90,9 +113,9 @@ class ContractClient {
       organization_id: params[0], grant_id: params[1], device_id: params[2], agent_id: params[3], agent_kind: params[4],
       adapter_id: params[5], adapter_version: params[6], worktree_binding_sha256: params[7], process_binding_policy_id: params[8],
       scope_json: JSON.parse(params[9]), max_signatures: params[10], not_before: params[11], expires_at: params[12],
-      control_sequence: params[13], issuer: params[14], signer_key_id: params[15], statement_hash: params[16],
-      grant_hash: params[17], signature_base64url: params[18], status: params[19], issued_at: params[20],
-      consumed_at: null, consumed_session_id: null, consumed_process_binding_sha256: null, created_by: params[21]
+      control_sequence: params[13], authority_generation: params[14], issuer: params[15], signer_key_id: params[16], statement_hash: params[17],
+      grant_hash: params[18], signature_base64url: params[19], status: params[20], issued_at: params[21],
+      consumed_at: null, consumed_session_id: null, consumed_process_binding_sha256: null, created_by: params[22]
     };
     this.shared.grants.push(row);
     if (this.options.malformedGrantReturn) return result([{ organization_id: params[0], grant_id: params[1] }]);
@@ -122,8 +145,8 @@ class ContractClient {
       organization_id: params[0], session_id: params[1], grant_id: params[2], device_id: params[3], agent_id: params[4],
       agent_kind: params[5], adapter_id: params[6], adapter_version: params[7], process_binding_policy_id: params[8],
       grant_hash: params[9], process_binding_sha256: params[10], ancestry_binding_sha256: params[11],
-      worktree_binding_sha256: params[12], control_sequence: params[13], max_signatures: params[14],
-      used_signatures: 0, reserved_signatures: 0, status: "challenge_pending", created_at: params[15], not_before: params[16], expires_at: params[17]
+      worktree_binding_sha256: params[12], control_sequence: params[13], authority_generation: params[14], max_signatures: params[15],
+      used_signatures: 0, reserved_signatures: 0, status: "challenge_pending", created_at: params[16], not_before: params[17], expires_at: params[18]
     };
     this.shared.sessions.push(row);
     return result([row]);
@@ -157,6 +180,7 @@ function statement(overrides = {}) {
     not_before: NOT_BEFORE,
     expires_at: EXPIRES,
     control_sequence: 12,
+    authority_generation: 7,
     issuer: "agentpass-cloud",
     key_id: "agent-session-2026-08",
     ...overrides
@@ -214,7 +238,7 @@ test("persists a canonical grant and returns the exact committed data on retry",
   assert.match(insert.text, /statement_hash/u);
   assert.match(insert.text, /grant_hash/u);
   assert.equal(insert.params[0], ids.organization);
-  assert.equal(insert.params[16], first.grant.statement_hash);
+  assert.equal(insert.params[17], first.grant.statement_hash);
   assert.equal(client.calls.filter((call) => call.text === "BEGIN").length, 2);
 });
 
@@ -244,14 +268,14 @@ test("consumes once, binds both process and ancestry, and replays the original l
   assert.match(insert.text, /ancestry_binding_sha256/u);
   assert.equal(insert.params[10], PROCESS);
   assert.equal(insert.params[11], ANCESTRY);
-  assert.equal(insert.params[16], NOT_BEFORE);
-  assert.equal(insert.params[17], EXPIRES);
+  assert.equal(insert.params[17], NOT_BEFORE);
+  assert.equal(insert.params[18], EXPIRES);
   await assert.rejects(repo.consumeAgentSessionGrant({ ...request, ancestry_binding_sha256: "d".repeat(64) }), { code: "ERR_BINDING_CONFLICT" });
   assert.equal(client.calls.at(-1).text, "ROLLBACK");
 });
 
 test("two competing consumption attempts converge on one committed lease", async () => {
-  const shared = { grants: [], sessions: [] };
+  const shared = { grants: [], sessions: [], lockTail: new Map() };
   const firstClient = new ContractClient({}, shared);
   const secondClient = new ContractClient({}, shared);
   const firstRepo = repository(firstClient, { uuid: () => ids.session });

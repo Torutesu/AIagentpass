@@ -30,13 +30,13 @@ const GRANT_KEYS = new Set(["version", "type", "statement", "statement_hash", "s
 const STATEMENT_KEYS = new Set([
   "version", "grant_id", "organization_id", "device_id", "agent_id", "agent_kind",
   "adapter_id", "adapter_version", "worktree_binding_sha256", "process_binding_policy_id",
-  "scope", "max_signatures", "not_before", "expires_at", "control_sequence", "issuer", "key_id"
+  "scope", "max_signatures", "not_before", "expires_at", "control_sequence", "authority_generation", "issuer", "key_id"
 ]);
 const LEASE_KEYS = new Set([
   "version", "type", "session_id", "grant_id", "organization_id", "device_id", "agent_id",
   "agent_kind", "adapter_id", "adapter_version", "process_binding_sha256",
   "ancestry_binding_sha256", "worktree_binding_sha256", "max_signatures", "used_signatures",
-  "not_before", "expires_at", "control_sequence"
+  "not_before", "expires_at", "control_sequence", "authority_generation"
 ]);
 
 export const AGENT_SESSION_DEVICE_HTTP_PATHS = Object.freeze({ consume: DEVICE_ROUTE });
@@ -194,6 +194,7 @@ export function createAgentSessionDeviceApi({
           not_before: statement.not_before,
           expires_at: statement.expires_at,
           control_sequence: statement.control_sequence,
+          authority_generation: statement.authority_generation,
           issuer: statement.issuer,
           key_id: statement.key_id,
           grant: deepFreeze(clonePublicValue(grant)),
@@ -312,6 +313,7 @@ function validateGrantStatement(value) {
     || !Number.isSafeInteger(value.max_signatures) || value.max_signatures < 1 || value.max_signatures > 64
     || !TIMESTAMP.test(value.not_before ?? "") || !TIMESTAMP.test(value.expires_at ?? "")
     || !Number.isSafeInteger(value.control_sequence) || value.control_sequence < 1
+    || !Number.isSafeInteger(value.authority_generation) || value.authority_generation < 1
     || value.issuer !== "agentpass-cloud" || !SAFE_IDENTIFIER.test(value.key_id ?? "")) {
     throw invalidRequest();
   }
@@ -366,7 +368,8 @@ function normalizeLease(value, statement, processBinding, ancestryBinding) {
     || value.max_signatures !== statement.max_signatures || !Number.isSafeInteger(value.used_signatures)
     || value.used_signatures < 0 || value.used_signatures > value.max_signatures
     || value.not_before !== statement.not_before || value.expires_at !== statement.expires_at
-    || value.control_sequence !== statement.control_sequence) throw unavailable();
+    || value.control_sequence !== statement.control_sequence
+    || value.authority_generation !== statement.authority_generation) throw unavailable();
   try {
     parseCanonicalTimestamp(value.not_before);
     parseCanonicalTimestamp(value.expires_at);

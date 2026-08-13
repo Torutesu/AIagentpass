@@ -1,6 +1,6 @@
 # Process-bound Agent implementation plan
 
-Status: active implementation sequence after the M1 physical-qualification slice. As of 2026-08-13, the M2 contract/persistence foundation, canonical Grant signing and verification, public Lease normalization, low-level PostgreSQL Grant/Lease authority repository, framework-neutral Human/Device HTTP boundaries, and a live Darwin observation primitive are implemented. The Human issuance orchestrator, production runtime route wiring, XPC audit-token peer observation, split XPC services, adapter qualification, and physical evidence remain open. Passing unit tests alone does not make a lane production-ready.
+Status: active implementation sequence after the M1 physical-qualification slice. As of 2026-08-13, the M2 contract/persistence foundation, canonical Grant signing and verification, public Lease normalization, PostgreSQL Grant/Lease authority repositories, the atomic Human issuance orchestrator, framework-neutral Human/Device HTTP boundaries, and a live Darwin observation primitive are implemented. Production runtime route wiring, hosted signing, consumption audit/outbox completion, XPC audit-token peer observation, split XPC services, adapter qualification, and physical evidence remain open. Passing unit tests alone does not make a lane production-ready.
 
 ## 1. Security outcome
 
@@ -160,15 +160,15 @@ The critical path is N1 through N4. UI and adapter convenience work must not pre
 | Component | State | What is proven | What remains before production use |
 | --- | --- | --- | --- |
 | Grant/Lease schemas and OpenAPI | Implemented | Closed shapes, canonical timestamps, bounded scope/TTL/budget, Human and Device operations | Compatibility fixtures and deployed-client negotiation |
-| PostgreSQL migrations 0018–0020 | Implemented | Immutable Grant identity, one-way consumption, process-bound session rows, RLS, audit binding columns | Re-run all revised migrations on real PostgreSQL and retain rollback/ambiguity evidence |
+| PostgreSQL migrations 0018–0021 | Implemented | Immutable Grant identity, one-way consumption, process-bound session rows, authority-generation binding, RLS, audit binding columns | Retain migration, rollback, and ambiguity evidence across supported PostgreSQL versions |
 | Grant crypto | Implemented | Purpose-domain-separated canonical Ed25519 signing, pinned public-key verification, strict output validation | Hosted KMS/HSM adapter, rotation set, runtime key configuration |
-| Human HTTP boundary | Implemented, not routed | Origin, session, CSRF, role, recent WebAuthn, strict JSON, stable errors | Production issuance orchestrator and server/runtime wiring |
+| Human HTTP boundary | Implemented, not routed | Origin, session, CSRF, role, recent WebAuthn, strict JSON, pre-WebAuthn exact replay, stable errors | Hosted signer, process-policy resolver, and server/runtime wiring |
 | Device HTTP boundary | Implemented, not routed | Exact raw path/body device-auth boundary, Grant verification hook, exact binding retry, stable errors | Shared nonce/rate limiter wiring, server/runtime route, audit/outbox |
-| PostgreSQL session authority | Implemented at low level | Tenant-local transactions, immutable Grant insert/replay, one-time consume, binding conflict, rollback and ambiguous-commit recovery | Human idempotency/authorization composition, current generation lookup, atomic audit/outbox |
+| PostgreSQL session authority | Issuance implemented; consumption partial | Tenant-local transactions, canonical fingerprint re-derivation, deterministic Grant identity, current applied generation/bundle/ACK checks, one-time consume, binding conflict, issuance audit/outbox atomicity, rollback and exact response-loss recovery | Consumption-side device audit/outbox, cleanup, metrics, and route-level contention evidence |
 | Darwin observation | Partial | Live current-process facts, executable file race checks, code identity, boot identity, bounded ancestry | Derive the XPC peer from its audit token; observe/re-observe that peer per connection |
 | Agent XPC and native lease machine | Not started | Contracts and injectable identity model exist | N2–N4 implementation and release-only enforcement |
 
-The Human issuance service deliberately depends on a higher-level repository contract than the low-level Grant/Lease persistence repository. The missing adapter is a security boundary, not naming glue: it must authorize current tenant resources, lock idempotency and authority state, select the current ControlBundle sequence, invoke signing once, persist the exact result, append audit, and enqueue publication in one transaction. Runtime routing stays disabled until that composition exists.
+The Human issuance service deliberately depends on a higher-level repository contract than the low-level Grant/Lease persistence repository. That security boundary is now implemented: it re-derives the canonical request fingerprint, reauthorizes the Human session and membership under lock, validates the agent/device/policy/current applied bundle authority, invokes signing once, and commits the immutable Grant, audit event, publication intent, and idempotency pointer atomically. It requires an injected process-binding-policy resolver and remains intentionally absent from production runtime composition until the hosted signer and route-readiness work in M2-A2 is complete.
 
 ### Wave M2-A — Cloud runtime authority
 
@@ -176,7 +176,7 @@ Implement grant issuance and consumption repositories, transaction services, and
 
 Exit gate: route-level integration tests cover cross-tenant/device/agent substitution, concurrent consumption, rollback, ambiguous commit recovery, stale generation, expiry boundaries, replay, and audit/outbox atomicity against real PostgreSQL.
 
-#### M2-A1 — production issuance transaction (next critical path)
+#### M2-A1 — production issuance transaction (implemented 2026-08-13)
 
 1. Add a PostgreSQL issuance orchestrator over `sharedControlRepository`, the control-plane tables, `agentSessionAuthorityRepository`, admin audit, and refresh/outbox facilities.
 2. In one transaction, set and verify tenant context; lock the Human idempotency record; re-read active membership and `owner|admin` role; lock and validate active agent/device composite identity and agent kind; select the current non-superseded ControlBundle sequence; validate requested scope against effective policy; and reject stale/revoked authority.
@@ -184,6 +184,8 @@ Exit gate: route-level integration tests cover cross-tenant/device/agent substit
 4. On exact retry, return the stored response without signing. On changed input, return conflict. On ambiguous commit, read the immutable completed idempotency result. Never mint a second Grant.
 
 Exit gate: a real-PostgreSQL test proves new issue, exact retry, changed-key conflict, simultaneous issue, inactive member/device/agent, kind mismatch, scope escalation, stale generation, signer failure rollback, audit/outbox failure rollback, and post-commit connection loss recovery.
+
+Evidence: unit and real-PostgreSQL tests cover canonical-fingerprint tampering, exact retry without a second WebAuthn proof, changed-request conflict, simultaneous issue convergence with one signer call, inactive member/device/agent and kind mismatch, scope escalation, stale authority generation, signer rollback, audit rollback, outbox rollback, and exact retry after the committed response is lost. Runtime exposure remains gated on M2-A2 and does not inherit this milestone automatically.
 
 #### M2-A2 — hosted signer and route composition
 

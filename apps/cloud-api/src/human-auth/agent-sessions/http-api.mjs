@@ -178,6 +178,22 @@ export function createHumanAgentSessionGrantHttpApi({
       catch (error) { throw mapIssuanceError(error); }
       if (actor.organization_id !== route.organizationId) throw new HumanAgentSessionGrantHttpError(HUMAN_AGENT_SESSION_GRANT_HTTP_ERROR_CODES.NOT_FOUND, { status: 404 });
       if (!ADMIN_ROLES.has(actor.role)) throw new HumanAgentSessionGrantHttpError(HUMAN_AGENT_SESSION_GRANT_HTTP_ERROR_CODES.FORBIDDEN, { status: 403 });
+      const replayMethod = serviceReplayMethod(service);
+      if (replayMethod !== undefined) {
+        let replayed;
+        try {
+          replayed = await service[replayMethod]({
+            actor,
+            organization_id: route.organizationId,
+            agent_id: route.agentId,
+            intent,
+            idempotency_key: idempotencyKey
+          });
+        } catch (error) {
+          throw mapIssuanceError(error);
+        }
+        if (replayed !== null) return response(201, normalizeIssuedResponse(replayed, { organizationId: route.organizationId, agentId: route.agentId, intent }));
+      }
       const recentAuthorization = await requireRecentAuth({ actor, organizationId: route.organizationId, request });
       let issued;
       try {
@@ -266,6 +282,10 @@ function assertIssuanceService(value) {
 
 function serviceIssueMethod(service) {
   return ["issue", "issueGrant", "issueAgentSessionGrant"].find((method) => typeof service[method] === "function");
+}
+
+function serviceReplayMethod(service) {
+  return ["replay", "replayGrant", "replayAgentSessionGrant"].find((method) => typeof service[method] === "function");
 }
 
 function normalizeActor(value) {

@@ -62,6 +62,7 @@ function grantStatement() {
     not_before: timestamps.notBefore,
     expires_at: timestamps.expiresAt,
     control_sequence: 12,
+    authority_generation: 7,
     issuer: "agentpass-cloud",
     key_id: "session-grant-2026-08"
   };
@@ -97,7 +98,8 @@ function lease() {
     used_signatures: 0,
     not_before: timestamps.notBefore,
     expires_at: timestamps.expiresAt,
-    control_sequence: 12
+    control_sequence: 12,
+    authority_generation: 7
   };
 }
 
@@ -191,16 +193,18 @@ function assertValid(schema, value, label) {
 function assertGrantContext(value, expected = grantStatement()) {
   assert.equal(value.type, "agentpass.agent-session-grant");
   assert.equal(value.statement_hash, sha256(canonicalJson(value.statement)), "grant statement hash");
-  for (const key of ["organization_id", "device_id", "agent_id", "agent_kind", "adapter_id", "adapter_version", "worktree_binding_sha256", "max_signatures", "control_sequence"]) {
+  for (const key of ["organization_id", "device_id", "agent_id", "agent_kind", "adapter_id", "adapter_version", "worktree_binding_sha256", "max_signatures", "control_sequence", "authority_generation"]) {
     assert.equal(value.statement[key], expected[key], `grant binding ${key}`);
   }
+  assert.notEqual(value.statement.control_sequence, value.statement.authority_generation, "authority_generation is distinct from control_sequence");
   assert.ok(Date.parse(value.statement.expires_at) > Date.parse(value.statement.not_before), "grant expiry must be after not-before");
 }
 
 function assertLeaseContext(value, expectedGrant = grantStatement()) {
-  for (const key of ["organization_id", "device_id", "agent_id", "agent_kind", "adapter_id", "adapter_version", "worktree_binding_sha256", "max_signatures", "control_sequence"]) {
+  for (const key of ["organization_id", "device_id", "agent_id", "agent_kind", "adapter_id", "adapter_version", "worktree_binding_sha256", "max_signatures", "control_sequence", "authority_generation"]) {
     assert.equal(value[key], expectedGrant[key], `lease binding ${key}`);
   }
+  assert.notEqual(value.control_sequence, value.authority_generation, "authority_generation is distinct from control_sequence");
   assert.equal(value.grant_id, expectedGrant.grant_id, "lease grant binding");
   assert.ok(value.used_signatures >= 0 && value.used_signatures <= value.max_signatures, "lease signature budget");
   assert.ok(Date.parse(value.expires_at) > Date.parse(value.not_before), "lease expiry must be after not-before");
@@ -293,6 +297,12 @@ test("M2 schemas are frozen, strict, bounded, and reuse scope-v1 exactly", () =>
   assert.equal(leaseSchema.maxProperties, leaseSchema.required.length);
   assert.equal(requestSchema.maxProperties, requestSchema.required.length);
   assert.equal(grantSchema.$defs.statement.properties.scope.$ref, SCOPE_ID);
+  assert.equal(grantSchema.$defs.statement.maxProperties, 18);
+  assert.ok(grantSchema.$defs.statement.required.includes("authority_generation"));
+  assert.equal(grantSchema.$defs.statement.properties.authority_generation.$ref, "#/$defs/positiveSafeInteger");
+  assert.equal(leaseSchema.maxProperties, 19);
+  assert.ok(leaseSchema.required.includes("authority_generation"));
+  assert.equal(leaseSchema.properties.authority_generation.$ref, "#/$defs/positiveSafeInteger");
   assert.match(grantSchema.$defs.signature.description, /AgentPass-Agent-Session-Grant-v1\\u0000.*canonical JSON statement/iu);
   assert.equal(requestSchema.$defs.capability.properties.scope.$ref, SCOPE_ID);
   assert.equal(leaseSchema.properties.type.const, "agentpass.agent-session-lease");
@@ -312,6 +322,11 @@ test("Grant validates signed statement separation, bindings, bounds, and canonic
     (item) => { item.statement.extra = true; },
     (item) => { item.statement.max_signatures = 0; },
     (item) => { item.statement.max_signatures = 65; },
+    (item) => { delete item.statement.authority_generation; },
+    (item) => { item.statement.authority_generation = 0; },
+    (item) => { item.statement.authority_generation = -1; },
+    (item) => { item.statement.authority_generation = 1.5; },
+    (item) => { item.statement.authority_generation = "7"; },
     (item) => { item.statement.expires_at = "2026-08-13T10:15:00Z"; },
     (item) => { item.statement.adapter_version = "01.0.0"; }
   ]) {
@@ -337,6 +352,11 @@ test("Lease exposes only bounded public bindings and prevents cross-binding or b
     (item) => { delete item.process_binding_sha256; },
     (item) => { item.used_signatures = 65; },
     (item) => { item.max_signatures = 0; },
+    (item) => { delete item.authority_generation; },
+    (item) => { item.authority_generation = 0; },
+    (item) => { item.authority_generation = -1; },
+    (item) => { item.authority_generation = 1.5; },
+    (item) => { item.authority_generation = "7"; },
     (item) => { item.expires_at = item.not_before; }
   ]) {
     const mutated = structuredClone(value);

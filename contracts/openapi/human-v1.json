@@ -541,7 +541,7 @@
       "post": {
         "operationId": "issueAgentSessionGrant",
         "summary": "Issue a bounded Agent Session Grant",
-        "description": "Issues one Cloud-signed Agent Session Grant for the exact organization and agent in the path. The authenticated human must have an admin role and a fresh, operation-bound WebAuthn authorization. Idempotency-Key retries with the same canonical request return the same committed grant; reusing a key with a different request returns idempotency_key_reused. The grant contains no private key, session token, raw WebAuthn assertion, or reusable bearer credential.",
+        "description": "Issues one Cloud-signed Agent Session Grant for the exact organization and agent in the path. The authenticated human must have an admin role and a fresh, operation-bound WebAuthn authorization. Idempotency-Key retries with the same canonical request return the same committed grant; reusing a key with a different request returns idempotency_key_reused. The grant contains no private key, session token, raw WebAuthn assertion, or reusable bearer credential. Cloud derives both control_sequence and authority_generation; they are distinct authority bindings and neither is accepted from the caller.",
         "security": [{ "humanSession": [], "recentWebAuthn": [] }],
         "parameters": [
           { "$ref": "#/components/parameters/OrganizationId" },
@@ -558,7 +558,7 @@
         "x-agentpass-recent-auth-operation": "agent.session_grant.issue",
         "x-agentpass-idempotency": { "same-key-same-canonical-request": "return-original-committed-result", "same-key-different-canonical-request": "idempotency_key_reused", "additionalProperties": false },
         "x-agentpass-atomic-admin-audit-outbox": "Grant issuance, immutable admin-audit event, idempotency record, and publication intent commit atomically. A successful response is not returned if any one is missing.",
-        "x-agentpass-authority": { "issuer": "agentpass-cloud", "grant-schema": "../schemas/agent-session-grant-v1.schema.json", "private-material": "never-returned", "additionalProperties": false },
+        "x-agentpass-authority": { "issuer": "agentpass-cloud", "grant-schema": "../schemas/agent-session-grant-v1.schema.json", "derived-bindings": ["control_sequence", "authority_generation"], "private-material": "never-returned", "additionalProperties": false },
         "responses": {
           "201": { "$ref": "#/components/responses/AgentSessionGrantIssued" },
           "400": { "$ref": "#/components/responses/BadRequest" },
@@ -880,7 +880,7 @@
         "additionalProperties": false,
         "maxProperties": 9,
         "required": ["device_id", "agent_kind", "adapter_id", "adapter_version", "worktree_binding_sha256", "process_binding_policy_id", "scope", "max_signatures", "ttl_seconds"],
-        "description": "Grant issuance intent only. Cloud derives and signs the grant identity, tenant/agent subject, validity timestamps, control sequence, issuer, key identifier, statement hash, and signature.",
+        "description": "Grant issuance intent only. Cloud derives and signs the grant identity, tenant/agent subject, validity timestamps, distinct control sequence and authority generation, issuer, key identifier, statement hash, and signature.",
         "properties": {
           "device_id": { "type": "string", "format": "uuid" },
           "agent_kind": { "type": "string", "enum": ["claude-code", "cursor"] },

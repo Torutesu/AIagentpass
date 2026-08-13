@@ -5,7 +5,7 @@
   "description": "A bounded local session record containing only public correlation and binding digests.",
   "type": "object",
   "additionalProperties": false,
-  "maxProperties": 18,
+  "maxProperties": 19,
   "required": [
     "version",
     "type",
@@ -24,7 +24,8 @@
     "used_signatures",
     "not_before",
     "expires_at",
-    "control_sequence"
+    "control_sequence",
+    "authority_generation"
   ],
   "properties": {
     "version": { "const": 1 },
@@ -49,7 +50,8 @@
     "used_signatures": { "type": "integer", "minimum": 0, "maximum": 64 },
     "not_before": { "$ref": "#/$defs/canonicalTimestamp" },
     "expires_at": { "$ref": "#/$defs/canonicalTimestamp" },
-    "control_sequence": { "$ref": "#/$defs/positiveSafeInteger" }
+    "control_sequence": { "$ref": "#/$defs/positiveSafeInteger" },
+    "authority_generation": { "$ref": "#/$defs/positiveSafeInteger" }
   },
   "$defs": {
     "uuid": {

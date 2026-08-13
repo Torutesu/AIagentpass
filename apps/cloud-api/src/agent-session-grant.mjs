@@ -26,7 +26,7 @@ const AGENT_KINDS = Object.freeze(["claude-code", "cursor"]);
 const STATEMENT_KEYS = Object.freeze([
   "version", "grant_id", "organization_id", "device_id", "agent_id", "agent_kind",
   "adapter_id", "adapter_version", "worktree_binding_sha256", "process_binding_policy_id",
-  "scope", "max_signatures", "not_before", "expires_at", "control_sequence", "issuer", "key_id"
+  "scope", "max_signatures", "not_before", "expires_at", "control_sequence", "authority_generation", "issuer", "key_id"
 ]);
 const ENVELOPE_KEYS = Object.freeze(["version", "type", "statement", "statement_hash", "signature"]);
 const MAX_STATEMENT_BYTES = 32 * 1024;
@@ -60,6 +60,7 @@ export function normalizeAgentSessionGrantStatement(input, { now, allowExpired =
       not_before: timestamp(input.not_before),
       expires_at: timestamp(input.expires_at),
       control_sequence: integer(input.control_sequence, 1, Number.MAX_SAFE_INTEGER),
+      authority_generation: integer(input.authority_generation, 1, Number.MAX_SAFE_INTEGER),
       issuer: exact(input.issuer, AGENT_SESSION_GRANT_ISSUER),
       key_id: pattern(input.key_id, IDENTIFIER)
     };

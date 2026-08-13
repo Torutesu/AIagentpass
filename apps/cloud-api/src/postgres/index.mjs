@@ -61,6 +61,12 @@ export {
   createAgentSessionAuthorityRepository
 } from "./agent-session-authority-repository.mjs";
 export {
+  AGENT_SESSION_ISSUANCE_REPOSITORY_ERROR_CODES,
+  AgentSessionIssuanceRepositoryError,
+  createPostgresAgentSessionIssuanceRepository,
+  deterministicAgentSessionIssuanceUuid
+} from "./agent-session-issuance-repository.mjs";
+export {
   CONTROL_PLANE_STORE_METHODS,
   ControlPlaneStoreError,
   createPostgresControlPlaneStore

@@ -42,19 +42,19 @@ const PUBLIC_MESSAGES = Object.freeze({
 const IMMUTABLE_GRANT_COLUMNS = [
   "organization_id", "grant_id", "device_id", "agent_id", "agent_kind", "adapter_id",
   "adapter_version", "worktree_binding_sha256", "process_binding_policy_id", "scope_json",
-  "max_signatures", "not_before", "expires_at", "control_sequence", "issuer", "signer_key_id",
+  "max_signatures", "not_before", "expires_at", "control_sequence", "authority_generation", "issuer", "signer_key_id",
   "statement_hash", "grant_hash", "signature_base64url", "status", "issued_at", "created_by"
 ];
 
 const GRANT_RETURNING = `organization_id,grant_id,device_id,agent_id,agent_kind,adapter_id,
       adapter_version,worktree_binding_sha256,process_binding_policy_id,scope_json,max_signatures,
-      not_before,expires_at,control_sequence,issuer,signer_key_id,statement_hash,grant_hash,
+      not_before,expires_at,control_sequence,authority_generation,issuer,signer_key_id,statement_hash,grant_hash,
       signature_base64url,status,issued_at,consumed_at,consumed_session_id,
       consumed_process_binding_sha256,created_by`;
 
 const SESSION_RETURNING = `organization_id,session_id,grant_id,device_id,agent_id,agent_kind,adapter_id,
       adapter_version,process_binding_policy_id,grant_hash,process_binding_sha256,
-      ancestry_binding_sha256,worktree_binding_sha256,control_sequence,max_signatures,
+      ancestry_binding_sha256,worktree_binding_sha256,control_sequence,authority_generation,max_signatures,
       used_signatures,reserved_signatures,status,created_at,not_before,expires_at`;
 
 export const AGENT_SESSION_AUTHORITY_ERROR_CODES = Object.freeze(Object.keys(PUBLIC_MESSAGES));
@@ -104,7 +104,7 @@ export function createAgentSessionAuthorityRepository({ client, now, clock, uuid
       const inserted = await tx.query(`INSERT INTO agent_session_grants
         (${IMMUTABLE_GRANT_COLUMNS.join(",")})
         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10::jsonb,$11,$12::timestamptz,$13::timestamptz,
-          $14,$15,$16,$17,$18,$19,$20,$21::timestamptz,$22)
+          $14,$15,$16,$17,$18,$19,$20,$21,$22::timestamptz,$23)
         ON CONFLICT (organization_id,grant_id) DO NOTHING
         RETURNING ${GRANT_RETURNING}`, issueGrantParameters(values));
 
@@ -136,6 +136,34 @@ export function createAgentSessionAuthorityRepository({ client, now, clock, uuid
     }
   }
 
+  async function getAgentSessionGrant(input = {}) {
+    const organizationId = tenant(input.organization_id ?? input.organizationId);
+    const grantId = uuidValue(input.grant_id ?? input.grantId, "grant_id");
+    try {
+      return await withTransaction(client, (tx) => getAgentSessionGrantInTransaction({ tx, organization_id: organizationId, grant_id: grantId }));
+    } catch (error) {
+      throw mapError(error);
+    }
+  }
+
+  async function getAgentSessionGrantInTransaction(input = {}) {
+    const tx = input.tx;
+    assertTransactionClient(tx);
+    const organizationId = tenant(input.organization_id ?? input.organizationId);
+    const grantId = uuidValue(input.grant_id ?? input.grantId, "grant_id");
+    try {
+      await setTenantContext(tx, organizationId);
+      const result = await tx.query(`SELECT ${GRANT_RETURNING}
+        FROM agent_session_grants
+        WHERE organization_id=$1 AND grant_id=$2
+        FOR SHARE`, [organizationId, grantId]);
+      if (rowCount(result) !== 1) throw new AgentSessionAuthorityRepositoryError("ERR_GRANT_NOT_FOUND");
+      return publicGrantResult(publicGrant(validateGrantRow(result.rows[0], organizationId)), true);
+    } catch (error) {
+      throw mapError(error);
+    }
+  }
+
   async function consumeAgentSessionGrantInTransaction(input = {}) {
     const tx = input.tx;
     assertTransactionClient(tx);
@@ -152,6 +180,7 @@ export function createAgentSessionAuthorityRepository({ client, now, clock, uuid
       const grant = validateGrantRow(grantResult.rows[0], values.organizationId);
       if (grant.device_id !== values.deviceId) throw new AgentSessionAuthorityRepositoryError("ERR_TENANT_DRIFT");
       if (!sameGrantEnvelope(grant, values)) throw new AgentSessionAuthorityRepositoryError("ERR_GRANT_CONFLICT");
+      await assertCurrentGrantAuthority(tx, grant);
 
       if (grant.status === "consumed") {
         return consumeExistingSession(tx, grant, values);
@@ -164,14 +193,14 @@ export function createAgentSessionAuthorityRepository({ client, now, clock, uuid
       const inserted = await tx.query(`INSERT INTO agent_sessions
         (organization_id,session_id,grant_id,device_id,agent_id,agent_kind,adapter_id,adapter_version,
          process_binding_policy_id,grant_hash,process_binding_sha256,ancestry_binding_sha256,
-         worktree_binding_sha256,control_sequence,max_signatures,used_signatures,reserved_signatures,
+         worktree_binding_sha256,control_sequence,authority_generation,max_signatures,used_signatures,reserved_signatures,
          status,created_at,not_before,expires_at)
-        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,0,0,'challenge_pending',$16::timestamptz,$17::timestamptz,$18::timestamptz)
+        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,0,0,'challenge_pending',$17::timestamptz,$18::timestamptz,$19::timestamptz)
         RETURNING ${SESSION_RETURNING}`, [
         values.organizationId, sessionId, grant.grant_id, grant.device_id, grant.agent_id, grant.agent_kind,
         grant.adapter_id, grant.adapter_version, grant.process_binding_policy_id, grant.grant_hash,
         values.processBindingSha256, values.ancestryBindingSha256, grant.worktree_binding_sha256,
-        grant.control_sequence, grant.max_signatures, values.now, grant.not_before, grant.expires_at
+        grant.control_sequence, grant.authority_generation, grant.max_signatures, values.now, grant.not_before, grant.expires_at
       ]);
       if (rowCount(inserted) !== 1) throw new AgentSessionAuthorityRepositoryError("ERR_DB_RESULT");
       const session = validateSessionRow(inserted.rows[0], values.organizationId);
@@ -203,9 +232,12 @@ export function createAgentSessionAuthorityRepository({ client, now, clock, uuid
   return Object.freeze({
     issueAgentSessionGrant,
     issueAgentSessionGrantInTransaction,
+    getAgentSessionGrant,
+    getAgentSessionGrantInTransaction,
     consumeAgentSessionGrant,
     consumeAgentSessionGrantInTransaction,
     issueGrant: issueAgentSessionGrant,
+    getGrant: getAgentSessionGrant,
     consumeGrant: consumeAgentSessionGrant,
     issueGrantInTransaction: issueAgentSessionGrantInTransaction,
     consumeGrantInTransaction: consumeAgentSessionGrantInTransaction
@@ -238,6 +270,7 @@ function normalizeIssueInput(input, now) {
     throw new AgentSessionAuthorityRepositoryError("ERR_INPUT");
   }
   const controlSequence = boundedInteger(input.control_sequence ?? input.controlSequence ?? source.control_sequence, 1, Number.MAX_SAFE_INTEGER, "control_sequence");
+  const authorityGeneration = boundedInteger(input.authority_generation ?? input.authorityGeneration ?? source.authority_generation, 1, Number.MAX_SAFE_INTEGER, "authority_generation");
   const issuer = input.issuer ?? source.issuer ?? GRANT_ISSUER;
   const keyId = stringPattern(input.key_id ?? input.keyId ?? input.signer_key_id ?? input.signerKeyId ?? source.key_id, SAFE_IDENTIFIER, "key_id");
   const signature = stringPattern(input.signature ?? input.signature_base64url ?? input.signatureBase64url ?? suppliedEnvelope?.signature, SIGNATURE, "signature");
@@ -260,6 +293,7 @@ function normalizeIssueInput(input, now) {
       not_before: notBefore,
       expires_at: expiresAt,
       control_sequence: controlSequence,
+      authority_generation: authorityGeneration,
       issuer: GRANT_ISSUER,
       key_id: keyId
     });
@@ -274,7 +308,7 @@ function normalizeIssueInput(input, now) {
   return Object.freeze({
     organizationId, grantId, deviceId, agentId, agentKind, adapterId, adapterVersion,
     worktreeBindingSha256, processBindingPolicyId, scope, maxSignatures, issuedAt, notBefore,
-    expiresAt, controlSequence, issuer: GRANT_ISSUER, keyId, signature, createdBy,
+    expiresAt, controlSequence, authorityGeneration, issuer: GRANT_ISSUER, keyId, signature, createdBy,
     statement, envelope, statementHash, grantHash
   });
 }
@@ -315,7 +349,7 @@ function issueGrantParameters(values) {
   return [
     values.organizationId, values.grantId, values.deviceId, values.agentId, values.agentKind, values.adapterId,
     values.adapterVersion, values.worktreeBindingSha256, values.processBindingPolicyId, JSON.stringify(values.scope),
-    values.maxSignatures, values.notBefore, values.expiresAt, values.controlSequence, values.issuer, values.keyId,
+    values.maxSignatures, values.notBefore, values.expiresAt, values.controlSequence, values.authorityGeneration, values.issuer, values.keyId,
     values.statementHash, values.grantHash, values.signature, "issued", values.issuedAt, values.createdBy
   ];
 }
@@ -345,6 +379,7 @@ function publicGrant(row) {
     not_before: row.not_before,
     expires_at: row.expires_at,
     control_sequence: row.control_sequence,
+    authority_generation: row.authority_generation,
     issuer: row.issuer,
     key_id: row.signer_key_id
   });
@@ -376,7 +411,8 @@ function publicLease(row) {
     used_signatures: row.used_signatures,
     not_before: row.not_before,
     expires_at: row.expires_at,
-    control_sequence: row.control_sequence
+    control_sequence: row.control_sequence,
+    authority_generation: row.authority_generation
   });
 }
 
@@ -406,6 +442,7 @@ function validateGrantRowUnchecked(row, organizationId) {
     not_before: timestamp(row.not_before, "not_before"),
     expires_at: timestamp(row.expires_at, "expires_at"),
     control_sequence: boundedInteger(row.control_sequence, 1, Number.MAX_SAFE_INTEGER, "control_sequence"),
+    authority_generation: boundedInteger(row.authority_generation, 1, Number.MAX_SAFE_INTEGER, "authority_generation"),
     issuer: row.issuer,
     signer_key_id: stringPattern(row.signer_key_id, SAFE_IDENTIFIER, "signer_key_id"),
     statement_hash: hashValue(row.statement_hash, "statement_hash"),
@@ -465,6 +502,7 @@ function validateSessionRowUnchecked(row, organizationId) {
     ancestry_binding_sha256: hashValue(row.ancestry_binding_sha256, "ancestry_binding_sha256"),
     worktree_binding_sha256: hashValue(row.worktree_binding_sha256, "worktree_binding_sha256"),
     control_sequence: boundedInteger(row.control_sequence, 1, Number.MAX_SAFE_INTEGER, "control_sequence"),
+    authority_generation: boundedInteger(row.authority_generation, 1, Number.MAX_SAFE_INTEGER, "authority_generation"),
     max_signatures: boundedInteger(row.max_signatures, 1, 64, "max_signatures"),
     used_signatures: boundedInteger(row.used_signatures, 0, 64, "used_signatures"),
     reserved_signatures: boundedInteger(row.reserved_signatures, 0, 64, "reserved_signatures"),
@@ -496,6 +534,7 @@ function statementFromGrantRow(row) {
     not_before: row.not_before,
     expires_at: row.expires_at,
     control_sequence: row.control_sequence,
+    authority_generation: row.authority_generation,
     issuer: row.issuer,
     key_id: row.signer_key_id
   });
@@ -516,6 +555,7 @@ function sameImmutableGrant(row, values) {
     && row.not_before === values.notBefore
     && row.expires_at === values.expiresAt
     && row.control_sequence === values.controlSequence
+    && row.authority_generation === values.authorityGeneration
     && row.issuer === values.issuer
     && row.signer_key_id === values.keyId
     && row.statement_hash === values.statementHash
@@ -548,6 +588,7 @@ function sameNewSession(session, grant, values) {
     && session.ancestry_binding_sha256 === values.ancestryBindingSha256
     && session.worktree_binding_sha256 === grant.worktree_binding_sha256
     && session.control_sequence === grant.control_sequence
+    && session.authority_generation === grant.authority_generation
     && session.max_signatures === grant.max_signatures
     && session.not_before === grant.not_before
     && session.expires_at === grant.expires_at
@@ -568,6 +609,37 @@ async function setTenantContext(tx, organizationId) {
 
 async function lockGrant(tx, organizationId, grantId) {
   await tx.query("SELECT pg_advisory_xact_lock(hashtextextended($1,0)) AS locked", [`agentpass:agent-session-grant:${organizationId}:${grantId}`]);
+}
+
+async function assertCurrentGrantAuthority(tx, grant) {
+  const current = await tx.query(`SELECT 1
+    FROM agents a
+    JOIN devices d ON d.organization_id=a.organization_id AND d.id=a.device_id
+    JOIN control_plane_authority_generations g ON g.organization_id=a.organization_id
+      AND g.generation=$4 AND g.superseded_at IS NULL
+    JOIN device_control_plane_state state ON state.organization_id=d.organization_id AND state.device_id=d.id
+      AND state.desired_generation=g.generation AND state.observed_generation=g.generation
+      AND state.refresh_state='applied'
+    JOIN bundle_heads h ON h.organization_id=d.organization_id AND h.device_id=d.id
+      AND h.format_epoch=2 AND h.sequence=$5 AND h.expires_at>clock_timestamp()
+    JOIN control_bundle_statements s ON s.organization_id=h.organization_id AND s.device_id=h.device_id
+      AND s.format_epoch=h.format_epoch AND s.sequence=h.sequence AND s.statement_hash=h.statement_hash
+      AND s.authority_generation=g.generation
+    JOIN bundle_acknowledgements ack ON ack.organization_id=h.organization_id AND ack.device_id=h.device_id
+      AND ack.format_epoch=h.format_epoch AND ack.sequence=h.sequence AND ack.statement_hash=h.statement_hash
+      AND ack.status='applied'
+    WHERE a.organization_id=$1 AND a.id=$2 AND a.device_id=$3
+      AND a.kind=$6 AND a.status='active' AND d.status='active'
+      AND NOT EXISTS (
+        SELECT 1 FROM revocations r WHERE r.organization_id=a.organization_id AND r.status='active'
+          AND (r.target_type='organization'
+            OR (r.target_type='device' AND r.target_id=d.id)
+            OR (r.target_type='agent' AND r.target_id=a.id)))
+    FOR SHARE OF a,d,g,state,h,s,ack`, [
+    grant.organization_id, grant.agent_id, grant.device_id, grant.authority_generation,
+    grant.control_sequence, grant.agent_kind
+  ]);
+  if (rowCount(current) !== 1) throw new AgentSessionAuthorityRepositoryError("ERR_GRANT_UNAVAILABLE");
 }
 
 function mapError(error) {

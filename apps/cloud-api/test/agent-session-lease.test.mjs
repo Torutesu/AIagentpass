@@ -15,7 +15,8 @@ const statement = Object.freeze({
   max_signatures: 2,
   not_before: "2026-08-13T10:00:00.000Z",
   expires_at: "2026-08-13T10:15:00.000Z",
-  control_sequence: 12
+  control_sequence: 12,
+  authority_generation: 7
 });
 
 function lease(overrides = {}) {
@@ -55,6 +56,7 @@ test("maps PostgreSQL rows without exposing lifecycle or private columns", () =>
     max_signatures: "2",
     used_signatures: "0",
     control_sequence: "12",
+    authority_generation: "7",
     not_before: new Date(statement.not_before),
     expires_at: new Date(statement.expires_at),
     status: "challenge_pending",

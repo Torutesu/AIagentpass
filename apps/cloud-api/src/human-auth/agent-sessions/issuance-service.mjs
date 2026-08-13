@@ -142,14 +142,15 @@ export function createAgentSessionGrantIssuanceService({
         not_before: issuedAt,
         expires_at: expiresAt,
         recent_auth: recentAuth,
-        buildGrant: async ({ control_sequence } = {}) => buildSignedGrant({
-          grantId,
+        buildGrant: async ({ control_sequence, authority_generation, grant_id = grantId } = {}) => buildSignedGrant({
+          grantId: grant_id,
           organizationId,
           agentId,
           intent,
           issuedAt,
           expiresAt,
-          controlSequence: control_sequence
+          controlSequence: control_sequence,
+          authorityGeneration: authority_generation
         })
       });
     } catch (error) {
@@ -159,8 +160,37 @@ export function createAgentSessionGrantIssuanceService({
     return normalizeRepositoryResult(result, requestId, { organizationId, agentId, intent });
   }
 
-  async function buildSignedGrant({ grantId, organizationId, agentId, intent, issuedAt, expiresAt, controlSequence } = {}) {
+  async function replay(input = {}) {
+    if (typeof repository.replayAgentSessionGrant !== "function") return null;
+    const actor = normalizeActor(input.actor);
+    const organizationId = requiredUuid(input.organization_id, "organization_id");
+    const agentId = requiredUuid(input.agent_id, "agent_id");
+    if (actor.organization_id !== organizationId) throw issuanceError(AGENT_SESSION_GRANT_ISSUANCE_ERROR_CODES.NOT_FOUND);
+    const intent = normalizeIntent(input.intent ?? input.request);
+    const idempotencyKey = requiredIdempotencyKey(input.idempotency_key);
+    const requestFingerprint = sha256(canonicalJson({ organization_id: organizationId, agent_id: agentId, ...intent }));
+    let result;
+    try {
+      result = await repository.replayAgentSessionGrant({
+        actor,
+        organization_id: organizationId,
+        agent_id: agentId,
+        device_id: intent.device_id,
+        intent,
+        idempotency_key: idempotencyKey,
+        request_fingerprint: requestFingerprint
+      });
+    } catch (error) {
+      throw mapRepositoryError(error);
+    }
+    return result === null ? null : normalizeRepositoryResult(result, undefined, { organizationId, agentId, intent });
+  }
+
+  async function buildSignedGrant({ grantId, organizationId, agentId, intent, issuedAt, expiresAt, controlSequence, authorityGeneration } = {}) {
     if (!Number.isSafeInteger(controlSequence) || controlSequence < 1) {
+      throw issuanceError(AGENT_SESSION_GRANT_ISSUANCE_ERROR_CODES.UNAVAILABLE);
+    }
+    if (!Number.isSafeInteger(authorityGeneration) || authorityGeneration < 1) {
       throw issuanceError(AGENT_SESSION_GRANT_ISSUANCE_ERROR_CODES.UNAVAILABLE);
     }
     const keyId = resolvedSignerKeyId(signer, configuredSignerKeyId);
@@ -180,6 +210,7 @@ export function createAgentSessionGrantIssuanceService({
       not_before: issuedAt,
       expires_at: expiresAt,
       control_sequence: controlSequence,
+      authority_generation: authorityGeneration,
       issuer: AGENT_SESSION_GRANT_ISSUER,
       key_id: keyId
     };
@@ -223,14 +254,18 @@ export function createAgentSessionGrantIssuanceService({
       grant,
       grant_hash: sha256(canonicalJson(grant)),
       statement_hash: statementHash,
-      control_sequence: controlSequence
+      control_sequence: controlSequence,
+      authority_generation: authorityGeneration
     });
   }
 
   return Object.freeze({
     issue,
+    replay,
     issueGrant: issue,
+    replayGrant: replay,
     issueAgentSessionGrant: issue,
+    replayAgentSessionGrant: replay,
     buildSignedGrant
   });
 }

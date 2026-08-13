@@ -42,6 +42,8 @@ function assertHumanOperation(document) {
   });
   assert.equal(operation["x-agentpass-minimum-role"], "admin");
   assert.equal(operation["x-agentpass-recent-auth-operation"], "agent.session_grant.issue");
+  assert.deepEqual(operation["x-agentpass-authority"]["derived-bindings"], ["control_sequence", "authority_generation"]);
+  assert.match(operation.description, /control_sequence and authority_generation.*distinct/iu);
   assert.deepEqual(operation["x-agentpass-idempotency"], {
     "same-key-same-canonical-request": "return-original-committed-result",
     "same-key-different-canonical-request": "idempotency_key_reused",
@@ -81,7 +83,7 @@ function assertHumanOperation(document) {
   ]);
   assert.equal(request.properties.scope.$ref, "../schemas/scope-v1.schema.json");
   assert.equal(request.properties.adapter_version.pattern, "^(0|[1-9][0-9]{0,8})\\.(0|[1-9][0-9]{0,8})\\.(0|[1-9][0-9]{0,8})(?:-[0-9A-Za-z-]+(?:\\.[0-9A-Za-z-]+)*)?$");
-  for (const forbidden of ["organization_id", "agent_id", "grant_id", "issuer", "key_id", "signature", "not_before", "expires_at", "control_sequence"]) {
+  for (const forbidden of ["organization_id", "agent_id", "grant_id", "issuer", "key_id", "signature", "not_before", "expires_at", "control_sequence", "authority_generation"]) {
     assert.equal(Object.hasOwn(request.properties, forbidden), false, `issuance intent must not accept ${forbidden}`);
   }
   assert.deepEqual(document.components.schemas.AgentSessionGrantV1, { $ref: "../schemas/agent-session-grant-v1.schema.json" });
@@ -110,12 +112,16 @@ function assertDeviceOperation(document) {
     path_grant_id: "grant.statement.grant_id",
     path_organization_id: "grant.statement.organization_id",
     path_device_id: "grant.statement.device_id",
+    control_sequence: "grant.statement.control_sequence",
+    authority_generation: "grant.statement.authority_generation",
     process_binding: "body.process_binding_sha256",
     ancestry_binding: "body.ancestry_binding_sha256",
     retry_identity: "grant.statement_hash + body.process_binding_sha256 + body.ancestry_binding_sha256",
     consume: "one-time",
     additionalProperties: false
   });
+  assert.deepEqual(operation["x-agentpass-authority"]["derived-bindings"], ["control_sequence", "authority_generation"]);
+  assert.match(operation.description, /control_sequence.*authority_generation.*distinct bindings/iu);
   assertResponseRefs(operation, {
     "201": "#/components/responses/AgentSessionGrantConsumed",
     "400": "#/components/responses/BadRequest",

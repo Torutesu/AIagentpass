@@ -8,7 +8,7 @@ const TIMESTAMP = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/u;
 const KEYS = Object.freeze([
   "version", "type", "session_id", "grant_id", "organization_id", "device_id", "agent_id",
   "agent_kind", "adapter_id", "adapter_version", "process_binding_sha256", "ancestry_binding_sha256",
-  "worktree_binding_sha256", "max_signatures", "used_signatures", "not_before", "expires_at", "control_sequence"
+  "worktree_binding_sha256", "max_signatures", "used_signatures", "not_before", "expires_at", "control_sequence", "authority_generation"
 ]);
 
 export class AgentSessionLeaseError extends TypeError {
@@ -40,7 +40,8 @@ export function normalizeAgentSessionLease(input, { expectedGrant, processBindin
       used_signatures: integer(input.used_signatures, 0, 64),
       not_before: timestamp(input.not_before),
       expires_at: timestamp(input.expires_at),
-      control_sequence: integer(input.control_sequence, 1, Number.MAX_SAFE_INTEGER)
+      control_sequence: integer(input.control_sequence, 1, Number.MAX_SAFE_INTEGER),
+      authority_generation: integer(input.authority_generation, 1, Number.MAX_SAFE_INTEGER)
     };
     if (lease.used_signatures > lease.max_signatures || Date.parse(lease.expires_at) <= Date.parse(lease.not_before)) fail();
     if (now !== undefined && !allowExpired && exactNow(now) >= Date.parse(lease.expires_at)) fail();
@@ -74,7 +75,8 @@ export function agentSessionLeaseFromRow(row) {
     used_signatures: numeric(row.used_signatures),
     not_before: databaseTimestamp(row.not_before ?? row.created_at),
     expires_at: databaseTimestamp(row.expires_at),
-    control_sequence: numeric(row.control_sequence)
+    control_sequence: numeric(row.control_sequence),
+    authority_generation: numeric(row.authority_generation)
   });
 }
 
@@ -85,7 +87,7 @@ function bindGrant(lease, statement) {
     ["agent_id", "agent_id"], ["agent_kind", "agent_kind"], ["adapter_id", "adapter_id"],
     ["adapter_version", "adapter_version"], ["worktree_binding_sha256", "worktree_binding_sha256"],
     ["max_signatures", "max_signatures"], ["not_before", "not_before"], ["expires_at", "expires_at"],
-    ["control_sequence", "control_sequence"]
+    ["control_sequence", "control_sequence"], ["authority_generation", "authority_generation"]
   ];
   for (const [leaseKey, statementKey] of bindings) if (lease[leaseKey] !== statement[statementKey]) fail();
 }

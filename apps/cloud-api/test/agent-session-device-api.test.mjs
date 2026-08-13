@@ -54,6 +54,7 @@ function statement() {
     not_before: new Date(NOW - 1_000).toISOString(),
     expires_at: new Date(NOW + 60_000).toISOString(),
     control_sequence: 12,
+    authority_generation: 7,
     issuer: "agentpass-cloud",
     key_id: "session-grant-2026-08"
   };
@@ -117,6 +118,7 @@ function lease(grant, overrides = {}) {
     not_before: grant.statement.not_before,
     expires_at: grant.statement.expires_at,
     control_sequence: grant.statement.control_sequence,
+    authority_generation: grant.statement.authority_generation,
     ...overrides
   };
 }

@@ -77,7 +77,7 @@ function baseRequest(path = HUMAN_AGENT_SESSION_GRANT_HTTP_PATHS.issue(ORGANIZAT
 }
 
 function fixture({ sessionOverrides = {}, repositoryOverrides = {}, recentAuthResult = undefined, recentAuthError = undefined, signerOverrides = {} } = {}) {
-  const calls = { auth: [], recentAuth: [], repository: [], signer: [] };
+  const calls = { auth: [], recentAuth: [], repository: [], replay: [], signer: [] };
   const { privateKey, publicKey } = crypto.generateKeyPairSync("ed25519");
   const grantSigner = {
     key_id: "grant-key-v1",
@@ -93,9 +93,16 @@ function fixture({ sessionOverrides = {}, repositoryOverrides = {}, recentAuthRe
       calls.repository.push(input);
       if (repositoryOverrides.error) throw repositoryOverrides.error;
       if (repositoryOverrides.result) return repositoryOverrides.result;
-      const built = await input.buildGrant({ control_sequence: 9 });
+      const built = await input.buildGrant({ control_sequence: 9, authority_generation: 7 });
       return { grant: built.grant, request_id: input.request_id };
-    }
+    },
+    ...(Object.hasOwn(repositoryOverrides, "replayResult") ? {
+      async replayAgentSessionGrant(input) {
+        calls.replay.push(input);
+        if (repositoryOverrides.replayError) throw repositoryOverrides.replayError;
+        return repositoryOverrides.replayResult;
+      }
+    } : {})
   };
   const humanSession = {
     expectedOrigin: ORIGIN,
@@ -177,6 +184,21 @@ test("passes the repository's committed retry result through without signing aga
   const result = await retry.api.handle(baseRequest());
   assert.equal(result.status, 201);
   assert.deepEqual(result.body, issued.body);
+  assert.equal(retry.calls.signer.length, 0);
+});
+
+test("recovers a committed idempotent response before consuming another recent-auth proof", async () => {
+  const first = fixture();
+  const issued = await first.api.handle(baseRequest());
+  const retry = fixture({ repositoryOverrides: { replayResult: { grant: issued.body.grant, request_id: issued.body.request_id, replayed: true } } });
+  const request = baseRequest();
+  delete request.headers["agentpass-recent-auth"];
+  const result = await retry.api.handle(request);
+  assert.equal(result.status, 201);
+  assert.deepEqual(result.body, issued.body);
+  assert.equal(retry.calls.replay.length, 1);
+  assert.equal(retry.calls.recentAuth.length, 0);
+  assert.equal(retry.calls.repository.length, 0);
   assert.equal(retry.calls.signer.length, 0);
 });
 
