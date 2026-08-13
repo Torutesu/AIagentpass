@@ -15,9 +15,12 @@ const unarmedPair = "['n3e/qualification-unarmed-control.mjs', 'scripts/release/
 const releaseTrustPair = "['n3e/qualification-release-trust.mjs', 'scripts/release/n3e/qualification-release-trust.mjs']";
 const checkpointPair = "['p0c/lib/candidate-checkpoint.mjs', 'scripts/release/p0c/lib/candidate-checkpoint.mjs']";
 const addedPairs = Object.freeze([
+  "['n3e/qualification-canonical-json.mjs', 'scripts/release/n3e/qualification-canonical-json.mjs']",
+  "['n3e/qualification-device-relay.mjs', 'scripts/release/n3e/qualification-device-relay.mjs']",
   "['n3e/qualification-input-materializer.mjs', 'scripts/release/n3e/qualification-input-materializer.mjs']",
   "['n3e/qualification-release-materializer.mjs', 'scripts/release/n3e/qualification-release-materializer.mjs']",
   "['n3e/qualification-run-binding.mjs', 'scripts/release/n3e/qualification-run-binding.mjs']",
+  "['n3e/qualification-suite-evidence.mjs', 'scripts/release/n3e/qualification-suite-evidence.mjs']",
   "['n3e/qualification-suite-input.mjs', 'scripts/release/n3e/qualification-suite-input.mjs']",
   "['n3e/qualification-suite-orchestrator.mjs', 'scripts/release/n3e/qualification-suite-orchestrator.mjs']"
 ]);
@@ -39,4 +42,13 @@ test('both hardware-lane preflights pin the fixed protected entrypoint source an
   assert.equal(workflow.split(checkpointPair).length - 1, 2, 'expected the candidate checkpoint verifier in both hardware-lane preflights');
   for (const pair of addedPairs) assert.equal(workflow.split(pair).length - 1, 2, `expected ${pair} in both hardware-lane preflights`);
   assert.equal(workflow.split(`qualification tool manifest is invalid`).length - 1, 2, 'expected duplicated immutable manifest checks for both hardware lanes');
+});
+
+test('the protected relay and evidence modules are source-pinned with their local canonical dependency', () => {
+  const relay = fs.readFileSync(path.join(ROOT, 'scripts/release/n3e/qualification-device-relay.mjs'), 'utf8');
+  assert.match(relay, /from ['"]\.\/qualification-canonical-json\.mjs['"]/u);
+  assert.doesNotMatch(relay, /packages\/protocol/u);
+  for (const file of ['qualification-canonical-json.mjs', 'qualification-device-relay.mjs', 'qualification-suite-evidence.mjs']) {
+    assert.equal(fs.existsSync(path.join(ROOT, 'scripts/release/n3e', file)), true, `missing protected module ${file}`);
+  }
 });

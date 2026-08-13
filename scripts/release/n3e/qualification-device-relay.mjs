@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import { dirname, isAbsolute, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import { canonicalJson } from '../../../packages/protocol/src/index.mjs';
+import { canonicalJson } from './qualification-canonical-json.mjs';
 import {
   QUALIFICATION_ACTIVATION_MIN_TTL_SECONDS,
 } from './qualification-activation-contract.mjs';

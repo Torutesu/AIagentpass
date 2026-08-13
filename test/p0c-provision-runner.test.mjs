@@ -18,11 +18,14 @@ const EXPECTED_QUALIFICATION_TOOL_FILES = Object.freeze([
   'n3e/materialize-qualification-activation.mjs',
   'n3e/provision-qualification-config.mjs',
   'n3e/qualification-activation-contract.mjs',
+  'n3e/qualification-canonical-json.mjs',
+  'n3e/qualification-device-relay.mjs',
   'n3e/qualification-input-materializer.mjs',
   'n3e/qualification-release-materializer.mjs',
   'n3e/qualification-release-trust.mjs',
   'n3e/qualification-run-binding.mjs',
   'n3e/qualification-scenario-driver.mjs',
+  'n3e/qualification-suite-evidence.mjs',
   'n3e/qualification-suite-input.mjs',
   'n3e/qualification-suite-orchestrator.mjs',
   'n3e/qualification-unarmed-control.mjs',
@@ -77,7 +80,7 @@ test('non-production provisioning atomically installs the exact protected invent
 test('installed fixed entrypoints resolve every packaged production dependency', async () => {
   const fixture = makeFixture();
   provisionRunner({ sourceRoot, scenarioDirectory: fixture.scenarios, machineConfigPath: fixture.machineConfig, destinationRoot: fixture.destination, production: false, uid: process.geteuid(), gid: process.getegid() });
-  for (const name of ['qualification-input-materializer.mjs', 'qualification-release-materializer.mjs', 'qualification-suite-orchestrator.mjs', 'run-fixed-protected-qualification.mjs']) {
+  for (const name of ['qualification-canonical-json.mjs', 'qualification-device-relay.mjs', 'qualification-suite-evidence.mjs', 'qualification-input-materializer.mjs', 'qualification-release-materializer.mjs', 'qualification-suite-orchestrator.mjs', 'run-fixed-protected-qualification.mjs']) {
     const module = await import(`${pathToFileURL(path.join(fixture.destination, 'qualification-tool/n3e', name)).href}?fixture=${encodeURIComponent(fixture.root)}`);
     assert.equal(typeof module, 'object');
   }
