@@ -124,6 +124,7 @@ jobs:
             package-lock.json
             apps/web-console/package-lock.json
       - run: npm ci
+      - run: npm run contracts:validate
       - run: npm test
       - run: npm ci --prefix apps/web-console
       - run: npm test --prefix apps/web-console

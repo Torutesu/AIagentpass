@@ -4110,6 +4110,9 @@ do {
         throw AgentPassNativeError.invalidConfiguration("Usage: agentpass-native-service --config PATH | --bootstrap ACTION --config PATH | --device-auth key|sign|qualify --config PATH | --provision-control --config PATH")
     }
     let configuration = try ServiceConfiguration.load(path: CommandLine.arguments[2])
+    // Fail before opening either Mach service if the compiled selectors, DTO
+    // registrations, type encodings, or frozen fingerprint drifted.
+    try AgentPassNativeXPCContract.verifyRuntimeSurface()
     try validateProtectedOutputPath(path: configuration.auditLogPath, label: "Native audit log")
     let signingTransactionPath = configuration.auditLogPath + ".signing-transactions.json"
     try validateProtectedOutputPath(path: signingTransactionPath, label: "Native signing transaction state")

@@ -2,8 +2,10 @@ import fs from "node:fs";
 import path from "node:path";
 import process from "node:process";
 
-const root = path.resolve(import.meta.dirname, "..");
-const contracts = path.join(root, "contracts");
+const repositoryRoot = path.resolve(import.meta.dirname, "..");
+const root = path.resolve(process.env.AGENTPASS_REPOSITORY_ROOT ?? repositoryRoot);
+const contracts = path.resolve(process.env.AGENTPASS_CONTRACTS_DIR ?? path.join(root, "contracts"));
+const catalogPath = path.join(contracts, "catalog-v1.json");
 const SAFE_INTEGER_MAX = Number.MAX_SAFE_INTEGER;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const CANONICAL_TIMESTAMP = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
@@ -147,5 +149,163 @@ for (const table of ["organizations", "memberships", "human_sessions", "webauthn
 if (!/FOREIGN KEY \(organization_id, device_id\)/.test(sql)) fail("PostgreSQL migration must enforce tenant-qualified device references");
 if (!/CREATE TABLE webauthn_challenges \(/.test(migrations.map((item) => item.sql).join("\n"))) fail("PostgreSQL migrations must persist one-time WebAuthn challenges");
 if (!migrations.some((migration) => /CREATE INDEX device_audit_events_activity_keyset[\s\S]*redacted_json\s*->>\s*'device_timestamp'[\s\S]*event_id DESC/i.test(migration.sql))) fail("PostgreSQL migrations must index the device audit activity keyset");
+
+function catalogEntryKey(entry) {
+  return [entry.kind, entry.source, entry.method ?? "", entry.path ?? "", entry.operation_id ?? ""].join("|");
+}
+
+function containsKey(value, key) {
+  if (!value || typeof value !== "object") return false;
+  if (Array.isArray(value)) return value.some((item) => containsKey(item, key));
+  return Object.entries(value).some(([name, child]) => name === key || containsKey(child, key));
+}
+
+function validateExactKeys(value, allowed, label) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return;
+  const actual = Object.keys(value).sort();
+  const expected = [...allowed].sort();
+  if (JSON.stringify(actual) !== JSON.stringify(expected)) fail(`${label} has an unexpected field set`);
+}
+
+function resolveReference(reference) {
+  if (typeof reference !== "string" || reference.length === 0 || path.isAbsolute(reference)) return null;
+  const fileReference = reference.split("#", 1)[0];
+  const resolved = path.resolve(root, fileReference);
+  if (resolved !== root && !resolved.startsWith(`${root}${path.sep}`)) return null;
+  return resolved;
+}
+
+function validateCatalogBinding(binding, label, requiredWhenDetected = false, requireSource = false) {
+  const sources = ["document", "transport", "runtime", "session", "database", "none"];
+  const sourceIsValid = requireSource ? sources.includes(binding?.source) : binding?.source === undefined || sources.includes(binding.source);
+  if (!binding || typeof binding !== "object" || Array.isArray(binding) || typeof binding.required !== "boolean" || !sourceIsValid || !Array.isArray(binding.paths) || binding.paths.some((item) => typeof item !== "string" || item.length === 0)) {
+    fail(`${label} must declare a binding source, boolean required flag, and string paths`);
+    return;
+  }
+  validateExactKeys(binding, requireSource ? ["required", "source", "paths"] : ["required", "paths"], label);
+  if (binding.required && binding.paths.length === 0) fail(`${label} requires at least one binding path`);
+  if (binding.source === "none" && (binding.required || binding.paths.length > 0)) fail(`${label} none source cannot carry a binding`);
+  if (binding.source !== "none" && binding.required && binding.paths.length === 0) fail(`${label} binding source requires a path`);
+  if (binding.source === "runtime" && binding.paths.some((item) => !item.startsWith("runtime."))) fail(`${label} runtime paths must use the runtime prefix`);
+  if (binding.source === "session" && binding.paths.some((item) => !item.startsWith("session."))) fail(`${label} session paths must use the session prefix`);
+  if (binding.source === "database" && binding.paths.some((item) => !item.startsWith("tables."))) fail(`${label} database paths must use the tables prefix`);
+  if (binding.source === "transport" && binding.paths.some((item) => !item.startsWith("path.") && !item.startsWith("transport."))) fail(`${label} transport paths must identify path or transport authority`);
+  if (requiredWhenDetected && !binding.required) fail(`${label} is missing a required tenant binding`);
+}
+
+function validateCatalogPolicy(entry, effective) {
+  const label = `catalog entry ${entry.id}`;
+  if (!["cloud", "device", "human"].includes(effective.authority_owner)) fail(`${label} has an invalid authority owner`);
+  validateCatalogBinding(effective.tenant_binding, `${label}.tenant_binding`, entry.kind === "openapi-operation" && entry.path.includes("{organization_id}"), true);
+  validateCatalogBinding(effective.actor_binding, `${label}.actor_binding`);
+  if (!effective.signature || typeof effective.signature !== "object" || typeof effective.signature.signed !== "boolean") fail(`${label} must declare signature metadata`);
+  else if (effective.signature.signed) {
+    validateExactKeys(effective.signature, ["signed", "algorithm", "domain"], `${label}.signature`);
+    if (typeof effective.signature.algorithm !== "string" || effective.signature.algorithm.length === 0 || typeof effective.signature.domain !== "string" || effective.signature.domain.length === 0) fail(`${label} signed contract must declare algorithm and signature domain`);
+  } else {
+    validateExactKeys(effective.signature, ["signed", "algorithm", "domain"], `${label}.signature`);
+    if (effective.signature.algorithm !== null || effective.signature.domain !== null) fail(`${label} unsigned contract must not declare a signature domain`);
+  }
+  validateExactKeys(effective.idempotency, ["required", "key_paths", "scope", "replay"], `${label}.idempotency`);
+  if (!effective.idempotency || typeof effective.idempotency !== "object" || typeof effective.idempotency.required !== "boolean" || !Array.isArray(effective.idempotency.key_paths) || effective.idempotency.key_paths.some((item) => typeof item !== "string" || item.length === 0)) fail(`${label} must declare idempotency metadata`);
+  else if (effective.idempotency.required && (effective.idempotency.key_paths.length === 0 || typeof effective.idempotency.scope !== "string" || effective.idempotency.scope.length === 0 || typeof effective.idempotency.replay !== "string" || effective.idempotency.replay.length === 0)) fail(`${label} required idempotency must declare keys, scope, and replay behavior`);
+  validateExactKeys(effective.expiry, ["required", "paths", "rule"], `${label}.expiry`);
+  if (!effective.expiry || typeof effective.expiry !== "object" || typeof effective.expiry.required !== "boolean" || !Array.isArray(effective.expiry.paths) || effective.expiry.paths.some((item) => typeof item !== "string" || item.length === 0) || typeof effective.expiry.rule !== "string" || effective.expiry.rule.length === 0) fail(`${label} must declare expiry metadata`);
+  else if (effective.expiry.required && effective.expiry.paths.length === 0) fail(`${label} required expiry must declare paths`);
+  if (!Array.isArray(entry.implementation_refs) || entry.implementation_refs.length === 0) fail(`${label} must declare implementation references`);
+  if (!Array.isArray(entry.compatibility_fixtures) || entry.compatibility_fixtures.length === 0) fail(`${label} must declare compatibility fixtures`);
+  for (const field of ["implementation_refs", "compatibility_fixtures"]) {
+    for (const reference of entry[field] ?? []) {
+      const resolved = resolveReference(reference);
+      if (!resolved || !fs.existsSync(resolved) || !fs.statSync(resolved).isFile()) fail(`${label} references an absent or invalid ${field} file: ${reference}`);
+    }
+  }
+}
+
+function validateContractCatalog() {
+  const catalog = readJson("catalog-v1.json");
+  validateExactKeys(catalog, ["$schema", "$id", "title", "description", "catalog_id", "catalog_version", "status", "authority_owners", "profiles", "entries"], "catalog");
+  if (catalog.catalog_id !== "agentpass.contract-catalog" || catalog.catalog_version !== 1 || catalog.status !== "frozen") fail("catalog must be the frozen AgentPass v1 catalog");
+  if (JSON.stringify(catalog.authority_owners) !== JSON.stringify(["cloud", "device", "human"])) fail("catalog authority owners are out of contract");
+  if (!catalog.profiles || typeof catalog.profiles !== "object" || Array.isArray(catalog.profiles)) fail("catalog profiles are missing");
+  for (const [name, profile] of Object.entries(catalog.profiles)) {
+    if (!/^[a-z0-9-]+$/.test(name)) fail(`catalog profile name is invalid: ${name}`);
+    validateExactKeys(profile, ["authority_owner", "tenant_binding", "actor_binding", "signature", "idempotency", "expiry"], `catalog profile ${name}`);
+    validateCatalogBinding(profile.tenant_binding, `catalog profile ${name}.tenant_binding`, false, true);
+    validateCatalogBinding(profile.actor_binding, `catalog profile ${name}.actor_binding`);
+    validateExactKeys(profile.signature, ["signed", "algorithm", "domain"], `catalog profile ${name}.signature`);
+    validateExactKeys(profile.idempotency, ["required", "key_paths", "scope", "replay"], `catalog profile ${name}.idempotency`);
+    validateExactKeys(profile.expiry, ["required", "paths", "rule"], `catalog profile ${name}.expiry`);
+    if (!profile.signature || typeof profile.signature.signed !== "boolean") fail(`catalog profile ${name} has invalid signature metadata`);
+    if (!profile.idempotency || typeof profile.idempotency.required !== "boolean" || !Array.isArray(profile.idempotency.key_paths)) fail(`catalog profile ${name} has invalid idempotency metadata`);
+    if (!profile.expiry || typeof profile.expiry.required !== "boolean" || !Array.isArray(profile.expiry.paths)) fail(`catalog profile ${name} has invalid expiry metadata`);
+  }
+  if (!Array.isArray(catalog.entries) || catalog.entries.length === 0) fail("catalog entries are missing");
+
+  const expected = new Map();
+  for (const name of schemaFiles) {
+    const schema = readJson(path.join("schemas", name));
+    const versionMatch = name.match(/-v(\d+)\.schema\.json$/);
+    expected.set(["json-schema", `schemas/${name}`, "", "", ""].join("|"), { kind: "json-schema", source: `schemas/${name}`, version: Number(versionMatch?.[1] ?? schema.properties?.version?.const ?? schema.properties?.schema_version?.const ?? 0), requiresTenant: containsKey(schema, "organization_id"), document: schema });
+  }
+  for (const name of ["device-v1.json", "human-v1.json"]) {
+    const document = readJson(path.join("openapi", name));
+    for (const [route, methods] of Object.entries(document.paths)) {
+      for (const method of ["get", "post", "patch", "put", "delete"]) {
+        const operation = methods[method];
+        if (!operation) continue;
+        const expectedEntry = { kind: "openapi-operation", source: `openapi/${name}`, method: method.toUpperCase(), path: route, operation_id: operation.operationId, version: Number(name.match(/-v(\d+)\.json$/)?.[1] ?? 0), requiresTenant: route.includes("{organization_id}") };
+        expected.set(catalogEntryKey(expectedEntry), expectedEntry);
+      }
+    }
+  }
+  for (const name of migrationNames) {
+    const migration = migrations.find((item) => item.name === name);
+    const version = Number(name.slice(0, 4));
+    expected.set(["postgres-migration", `postgres/${name}`, "", "", ""].join("|"), { kind: "postgres-migration", source: `postgres/${name}`, version, requiresTenant: /\borganization_id\b/.test(migration.sql) });
+  }
+
+  const seenKeys = new Set();
+  const ids = new Set();
+  const purposes = new Set();
+  for (const entry of catalog.entries) {
+    if (!entry || typeof entry !== "object" || Array.isArray(entry)) {
+      fail("catalog contains a non-object entry");
+      continue;
+    }
+    const allowedKeys = ["id", "kind", "source", "method", "path", "operation_id", "version", "profile", "purpose", "authority_owner", "tenant_binding", "actor_binding", "signature", "idempotency", "expiry", "implementation_refs", "compatibility_fixtures"];
+    if (JSON.stringify(Object.keys(entry).sort()) !== JSON.stringify([...allowedKeys].filter((key) => Object.hasOwn(entry, key)).sort())) fail(`catalog entry ${entry.id ?? "<unknown>"} has an unexpected field set`);
+    if (typeof entry.id !== "string" || entry.id.length === 0) fail("catalog entry id is missing");
+    else if (ids.has(entry.id)) fail(`catalog contains a duplicate id: ${entry.id}`);
+    else ids.add(entry.id);
+    if (seenKeys.has(catalogEntryKey(entry))) fail(`catalog contains a duplicate entry: ${catalogEntryKey(entry)}`);
+    seenKeys.add(catalogEntryKey(entry));
+    const expectedEntry = expected.get(catalogEntryKey(entry));
+    if (!expectedEntry) {
+      fail(`catalog contains an unknown or malformed source entry: ${catalogEntryKey(entry)}`);
+      continue;
+    }
+    if (entry.version !== expectedEntry.version) fail(`${entry.id} has version ${entry.version}, expected ${expectedEntry.version}`);
+    if (typeof entry.profile !== "string" || !catalog.profiles[entry.profile]) fail(`${entry.id} references an unknown profile`);
+    if (typeof entry.purpose !== "string" || entry.purpose.length === 0) fail(`${entry.id} must declare a purpose`);
+    if (purposes.has(entry.purpose)) fail(`catalog contains a duplicate purpose: ${entry.purpose}`);
+    purposes.add(entry.purpose);
+    const profile = catalog.profiles[entry.profile] ?? {};
+    const effective = { ...profile };
+    for (const key of ["authority_owner", "tenant_binding", "actor_binding", "signature", "idempotency", "expiry"]) if (Object.hasOwn(entry, key)) effective[key] = entry[key];
+    validateCatalogPolicy(entry, effective);
+    validateCatalogBinding(effective.tenant_binding, `${entry.id}.tenant_binding`, expectedEntry.requiresTenant, true);
+    if (entry.kind === "json-schema" && effective.tenant_binding.source === "document") {
+      for (const bindingPath of effective.tenant_binding.paths) {
+        const key = bindingPath.split(".").at(-1);
+        if (!containsKey(expectedEntry.document, key)) fail(`${entry.id}.tenant_binding path is absent from its JSON Schema: ${bindingPath}`);
+      }
+    }
+  }
+  for (const [key, expectedEntry] of expected) if (!seenKeys.has(key)) fail(`catalog is missing an entry for ${key}`);
+  if (!process.exitCode) process.stdout.write(`validated frozen contract catalog: ${catalog.entries.length} entries (${schemaFiles.length} schemas, ${expected.size - schemaFiles.length - migrationNames.length} OpenAPI operations, ${migrationNames.length} migrations)\n`);
+}
+
+validateContractCatalog();
 
 if (!process.exitCode) process.stdout.write(`validated ${schemaFiles.length} schemas, 2 OpenAPI documents, ${fixtureFiles.length} fixtures, and ${migrations.length} PostgreSQL migrations\n`);

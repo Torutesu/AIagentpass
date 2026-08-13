@@ -90,6 +90,10 @@ jobs:
           : "${AGENTPASS_AGENT_PROFILE_BASE64:?AGENTPASS_AGENT_PROFILE_BASE64 is required}"
           : "${AGENTPASS_QUALIFICATION_CLIENT_PROFILE_BASE64:?AGENTPASS_QUALIFICATION_CLIENT_PROFILE_BASE64 is required}"
       - run: npm ci
+      - name: Validate frozen protocol and schema catalog before signing
+        run: |
+          npm run contracts:validate
+          node --test test/contract-catalog.test.mjs
       - run: node scripts/release/validate-version.mjs --require-tag --tag="$AGENTPASS_RELEASE_TAG"
       - name: Generate immutable database migration manifest
         run: |

@@ -12,9 +12,21 @@ test("select always binds the repository tenant and shifts caller parameters", a
   const repository = createTenantRepository({ client, organizationId });
   await repository.select({ table: "devices", columns: ["id", "label"], where: "status = $1", params: ["active"], orderBy: { column: "created_at", direction: "DESC" }, limit: 20 });
   const call = client.calls.at(-1);
-  assert.match(call.text, /FROM "devices" WHERE organization_id = \$1 AND status = \$2/);
+  assert.match(call.text, /FROM "devices" WHERE organization_id = \$1 AND \(status = \$2\)/);
   assert.match(call.text, /ORDER BY "created_at" DESC, "id" DESC LIMIT 20/);
   assert.deepEqual(call.params, [organizationId, "active"]);
+});
+
+test("select groups caller predicates so OR cannot escape the repository tenant", async () => {
+  const client = new FakePgClient();
+  const repository = createTenantRepository({ client, organizationId });
+  await repository.select({
+    table: "devices",
+    where: "status = $1 OR organization_id = $2",
+    params: ["active", "33333333-3333-4333-8333-333333333333"]
+  });
+  assert.match(client.calls[0].text, /WHERE organization_id = \$1 AND \(status = \$2 OR organization_id = \$3\)/);
+  assert.deepEqual(client.calls[0].params, [organizationId, "active", "33333333-3333-4333-8333-333333333333"]);
 });
 
 test("insert and update cannot override tenant or version ownership", async () => {
@@ -37,6 +49,67 @@ test("raw tenant primitive requires an explicit organization predicate", async (
   await repository.queryTenant({ text: "SELECT * FROM devices WHERE organization_id = $1 AND status = $2", params: ["active"] });
   assert.deepEqual(client.calls.at(-1).params, [organizationId, "active"]);
   await assert.rejects(repository.queryTenant({ text: "SELECT * FROM devices", params: [] }), TenantScopeError);
+});
+
+test("tenant predicate cannot be rebound to caller input or a scope escape operator", async () => {
+  const client = new FakePgClient();
+  const repository = createTenantRepository({ client, organizationId });
+
+  await assert.rejects(
+    repository.queryTenant({
+      text: "SELECT * FROM devices WHERE organization_id = $2 AND status = $3",
+      params: ["33333333-3333-4333-8333-333333333333", "active"],
+      organizationPlaceholder: "$2"
+    }),
+    (error) => error instanceof TenantScopeError && error.message.includes("reserve $1")
+  );
+  await assert.rejects(
+    repository.queryTenant({ text: "SELECT * FROM devices WHERE organization_id = $1 OR organization_id = $2", params: ["33333333-3333-4333-8333-333333333333"] }),
+    TenantScopeError
+  );
+  await assert.rejects(
+    repository.queryTenant({ text: "SELECT * FROM devices WHERE organization_id = $1 UNION ALL SELECT * FROM devices", params: [] }),
+    TenantScopeError
+  );
+  await assert.rejects(
+    repository.queryTenant({ text: "SELECT 'organization_id = $1' FROM devices", params: [] }),
+    TenantScopeError
+  );
+  await assert.rejects(
+    repository.queryTenant({ text: "SELECT organization_id = $1 AS belongs_to_tenant FROM devices", params: [] }),
+    TenantScopeError
+  );
+  await assert.rejects(
+    repository.queryTenant({ text: "SELECT * FROM devices WHERE NOT organization_id = $1", params: [] }),
+    TenantScopeError
+  );
+  await assert.rejects(
+    repository.queryTenant({ text: "SELECT * FROM devices WHERE organization_id = $1 IS FALSE", params: [] }),
+    TenantScopeError
+  );
+  await assert.rejects(
+    repository.queryTenant({ text: "SELECT * FROM devices WHERE TRUE ORDER BY organization_id = $1", params: [] }),
+    TenantScopeError
+  );
+  await assert.rejects(
+    repository.queryTenant({ text: "SELECT * FROM devices d, devices other WHERE d.organization_id = $1", params: [] }),
+    TenantScopeError
+  );
+  assert.equal(client.calls.length, 0, "cross-tenant candidates are rejected before PostgreSQL");
+});
+
+test("tenant query placeholders are contiguous after the immutable tenant parameter", async () => {
+  const client = new FakePgClient();
+  const repository = createTenantRepository({ client, organizationId });
+  await assert.rejects(
+    repository.queryTenant({ text: "SELECT * FROM devices WHERE organization_id = $1 AND status = $3", params: ["active"] }),
+    (error) => error.code === "ERR_QUERY"
+  );
+  await assert.rejects(
+    repository.queryTenant({ text: "SELECT * FROM devices WHERE organization_id = $1; SELECT * FROM devices", params: [] }),
+    (error) => error.code === "ERR_QUERY"
+  );
+  assert.equal(client.calls.length, 0);
 });
 
 test("rejects unapproved identifiers and missing tenant scope", async () => {

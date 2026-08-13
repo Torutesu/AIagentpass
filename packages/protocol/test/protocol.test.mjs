@@ -7,10 +7,14 @@ import {
   ALLOWED_AGENT_KINDS,
   ALLOWED_OPERATIONS,
   AUDIT_DECISIONS,
+  CONTRACT_KINDS,
+  CONTRACT_MANIFEST,
+  CONTRACT_MANIFEST_VERSION,
   DECISION_REASONS,
   DEVICE_REFRESH_STATES,
   LIMITS,
   OPERATIONS,
+  PUBLIC_CONTRACT_MANIFEST,
   PROTOCOL_VERSION,
   ProtocolValidationError,
   canonicalJson,
@@ -18,6 +22,8 @@ import {
   BUNDLE_ACK_SIGNATURE_DOMAIN,
   REFRESH_HINT_SIGNATURE_DOMAIN,
   bundleAcknowledgementSigningData,
+  getContractMetadata,
+  getPublicContractManifest,
   isValidAgentDescriptor,
   isValidScope,
   normalizeAgentDescriptor,
@@ -27,6 +33,7 @@ import {
   normalizeOperationRequest,
   normalizeRefreshHint,
   normalizeScope,
+  parseContractJson,
   parseBundleAcknowledgementJson,
   parseRefreshHintJson,
   refreshHintSigningData
@@ -108,6 +115,77 @@ test("exports frozen v1 protocol constants", () => {
   assert.ok(DECISION_REASONS.includes("session_required"));
   assert.deepEqual(DEVICE_REFRESH_STATES, ["pending", "fetching", "applied", "blocked", "stale", "offline", "revoked"]);
   assert.ok(Object.isFrozen(DEVICE_REFRESH_STATES));
+});
+
+test("publishes a closed, immutable, private-material-free contract manifest", () => {
+  assert.equal(CONTRACT_MANIFEST_VERSION, PROTOCOL_VERSION);
+  assert.equal(PUBLIC_CONTRACT_MANIFEST, CONTRACT_MANIFEST);
+  assert.equal(getPublicContractManifest(), PUBLIC_CONTRACT_MANIFEST);
+  assert.deepEqual(CONTRACT_KINDS, ["agent_descriptor_v1", "operation_request_v1", "operation_decision_v1", "audit_event_v1", "refresh_hint_v1", "bundle_ack_v1"]);
+  assert.equal(PUBLIC_CONTRACT_MANIFEST.version, CONTRACT_MANIFEST_VERSION);
+  assert.deepEqual(
+    PUBLIC_CONTRACT_MANIFEST.contracts.map(({ kind, version, purpose, parser_version }) => ({ kind, version, purpose, parser_version })),
+    [
+      { kind: "agent_descriptor_v1", version: 1, purpose: "agent-descriptor", parser_version: 1 },
+      { kind: "operation_request_v1", version: 1, purpose: "operation-request", parser_version: 1 },
+      { kind: "operation_decision_v1", version: 1, purpose: "operation-decision", parser_version: 1 },
+      { kind: "audit_event_v1", version: 1, purpose: "audit-event", parser_version: 1 },
+      { kind: "refresh_hint_v1", version: 1, purpose: "refresh-hint", parser_version: 1 },
+      { kind: "bundle_ack_v1", version: 1, purpose: "bundle-ack", parser_version: 1 }
+    ]
+  );
+  assert.equal(new Set(PUBLIC_CONTRACT_MANIFEST.contracts.map(({ purpose }) => purpose)).size, PUBLIC_CONTRACT_MANIFEST.contracts.length);
+  assert.equal(new Set(PUBLIC_CONTRACT_MANIFEST.contracts.map(({ kind }) => kind)).size, PUBLIC_CONTRACT_MANIFEST.contracts.length);
+
+  assert.ok(Object.isFrozen(PUBLIC_CONTRACT_MANIFEST));
+  assert.ok(Object.isFrozen(PUBLIC_CONTRACT_MANIFEST.contracts));
+  for (const contract of PUBLIC_CONTRACT_MANIFEST.contracts) {
+    assert.ok(Object.isFrozen(contract));
+    assert.equal(getContractMetadata(contract.kind), contract);
+    assert.deepEqual(Object.keys(contract).sort(), ["kind", "parser_version", "purpose", "version"]);
+  }
+
+  const serialized = JSON.stringify(PUBLIC_CONTRACT_MANIFEST).toLowerCase();
+  assert.doesNotMatch(serialized, /private|secret|credential|bearer|token|password|signature/);
+  assert.throws(() => { PUBLIC_CONTRACT_MANIFEST.contracts.push({}); }, TypeError);
+  assert.throws(() => { PUBLIC_CONTRACT_MANIFEST.contracts[0].purpose = "other"; }, TypeError);
+  assert.throws(() => { getContractMetadata("agent_descriptor_v1").version = 99; }, TypeError);
+});
+
+test("rejects unknown contract kinds and dispatches every parser at its manifest version", () => {
+  const samples = {
+    agent_descriptor_v1: agent(),
+    operation_request_v1: request(),
+    operation_decision_v1: {
+      version: 1,
+      allowed: true,
+      reason: "allowed",
+      operation: "git.commit.sign",
+      request_id: ids.request,
+      evaluated_at: timestamp
+    },
+    audit_event_v1: audit(),
+    refresh_hint_v1: refreshHint(),
+    bundle_ack_v1: bundleAcknowledgement()
+  };
+
+  for (const contract of PUBLIC_CONTRACT_MANIFEST.contracts) {
+    const parsed = parseContractJson(contract.kind, JSON.stringify(samples[contract.kind]));
+    assert.equal(parsed.version, contract.version, `${contract.kind} parser version must match manifest`);
+    assert.equal(contract.parser_version, contract.version, `${contract.kind} parser metadata must match contract version`);
+    assert.deepEqual(parsed, samples[contract.kind]);
+    assert.throws(
+      () => parseContractJson(contract.kind, JSON.stringify({ ...samples[contract.kind], version: contract.version + 1 })),
+      /invalid_version/
+    );
+  }
+
+  for (const unknown of ["unknown", "agent.v1", "__proto__", "constructor", "", null, 1]) {
+    assert.throws(() => getContractMetadata(unknown), ProtocolValidationError);
+    assert.throws(() => parseContractJson(unknown, "{}"), ProtocolValidationError);
+  }
+  assert.throws(() => getContractMetadata("unknown"), /unknown_kind/);
+  assert.throws(() => parseContractJson("unknown", "{}"), /unknown_kind/);
 });
 
 test("normalizes valid protocol values and canonical timestamps", () => {

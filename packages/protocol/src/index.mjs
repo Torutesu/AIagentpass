@@ -318,6 +318,77 @@ export function normalizeBundleAcknowledgement(input) {
   }, issues, "bundle_ack");
 }
 
+// This is the closed public inventory of the wire contracts exposed by this
+// package.  Keep this data deliberately boring: it is metadata for discovery
+// and compatibility checks, not an authority document.  In particular, it
+// must never grow parser functions, signing keys, signatures, or credentials.
+const CONTRACT_DEFINITIONS = [
+  { kind: "agent_descriptor_v1", version: PROTOCOL_VERSION, purpose: "agent-descriptor", parser_version: PROTOCOL_VERSION },
+  { kind: "operation_request_v1", version: PROTOCOL_VERSION, purpose: "operation-request", parser_version: PROTOCOL_VERSION },
+  { kind: "operation_decision_v1", version: PROTOCOL_VERSION, purpose: "operation-decision", parser_version: PROTOCOL_VERSION },
+  { kind: "audit_event_v1", version: PROTOCOL_VERSION, purpose: "audit-event", parser_version: PROTOCOL_VERSION },
+  { kind: "refresh_hint_v1", version: PROTOCOL_VERSION, purpose: "refresh-hint", parser_version: PROTOCOL_VERSION },
+  { kind: "bundle_ack_v1", version: PROTOCOL_VERSION, purpose: "bundle-ack", parser_version: PROTOCOL_VERSION }
+];
+
+const CONTRACT_PARSERS = Object.freeze({
+  agent_descriptor_v1: normalizeAgentDescriptor,
+  operation_request_v1: normalizeOperationRequest,
+  operation_decision_v1: normalizeDecision,
+  audit_event_v1: normalizeAuditEvent,
+  refresh_hint_v1: normalizeRefreshHint,
+  bundle_ack_v1: normalizeBundleAcknowledgement
+});
+const PUBLIC_CONTRACT_METADATA_KEYS = Object.freeze(["kind", "version", "purpose", "parser_version"]);
+
+function createPublicContractManifest(definitions) {
+  const kinds = new Set();
+  const purposes = new Set();
+  const contracts = definitions.map((definition) => {
+    const keys = Object.keys(definition).sort();
+    if (keys.length !== PUBLIC_CONTRACT_METADATA_KEYS.length || keys.some((key, index) => key !== PUBLIC_CONTRACT_METADATA_KEYS.toSorted()[index])) {
+      throw new Error(`public contract metadata has an unsupported shape: ${definition.kind}`);
+    }
+    if (kinds.has(definition.kind)) throw new Error(`duplicate public contract kind: ${definition.kind}`);
+    if (purposes.has(definition.purpose)) throw new Error(`duplicate public contract purpose: ${definition.purpose}`);
+    if (typeof CONTRACT_PARSERS[definition.kind] !== "function") throw new Error(`missing parser for public contract kind: ${definition.kind}`);
+    kinds.add(definition.kind);
+    purposes.add(definition.purpose);
+    return Object.freeze({ ...definition });
+  });
+  return deepFreeze({
+    version: PROTOCOL_VERSION,
+    contracts
+  });
+}
+
+export const CONTRACT_MANIFEST_VERSION = PROTOCOL_VERSION;
+export const CONTRACT_KINDS = Object.freeze(CONTRACT_DEFINITIONS.map(({ kind }) => kind));
+export const PUBLIC_CONTRACT_MANIFEST = createPublicContractManifest(CONTRACT_DEFINITIONS);
+const CONTRACT_METADATA_BY_KIND = Object.freeze(Object.fromEntries(
+  PUBLIC_CONTRACT_MANIFEST.contracts.map((contract) => [contract.kind, contract])
+));
+
+// Alias retained for consumers that refer to the public inventory simply as
+// the contract manifest. Both names point to the same immutable object.
+export const CONTRACT_MANIFEST = PUBLIC_CONTRACT_MANIFEST;
+
+/** Return the immutable public contract inventory. */
+export function getPublicContractManifest() {
+  return PUBLIC_CONTRACT_MANIFEST;
+}
+
+/** Return immutable metadata for one known contract kind. */
+export function getContractMetadata(kind) {
+  if (typeof kind !== "string") {
+    throw new ProtocolValidationError([issue("kind", "invalid_type", "expected a known contract kind")]);
+  }
+  if (!Object.hasOwn(CONTRACT_METADATA_BY_KIND, kind)) {
+    throw new ProtocolValidationError([issue("kind", "unknown_kind", `expected one of ${CONTRACT_KINDS.join(", ")}`)]);
+  }
+  return CONTRACT_METADATA_BY_KIND[kind];
+}
+
 export function refreshHintSigningData(input) {
   const { signature: _signature, ...statement } = normalizeRefreshHint(input);
   return Buffer.concat([Buffer.from(REFRESH_HINT_SIGNATURE_DOMAIN, "utf8"), Buffer.from(canonicalJson(statement), "utf8")]);
@@ -337,13 +408,28 @@ export function bundleAcknowledgementSigningData(input) {
  * boundary properties before handing the resulting object to the normalizer.
  */
 export function parseRefreshHintJson(input) {
-  return parseProtocolJson(input, "refresh_hint", normalizeRefreshHint);
+  return parseContractJson("refresh_hint_v1", input);
 }
 
 /** Decode a bundle acknowledgement received across an untrusted JSON boundary. */
 export function parseBundleAcknowledgementJson(input) {
-  return parseProtocolJson(input, "bundle_ack", normalizeBundleAcknowledgement);
+  return parseContractJson("bundle_ack_v1", input);
 }
+
+/**
+ * Decode any public contract through the parser selected by the closed
+ * manifest. Unknown kinds fail before the input crosses the JSON boundary.
+ */
+export function parseContractJson(kind, input) {
+  const metadata = getContractMetadata(kind);
+  const parser = CONTRACT_PARSERS[metadata.kind];
+  return parseProtocolJson(input, metadata.kind, parser);
+}
+
+export function parseAgentJson(input) { return parseContractJson("agent_descriptor_v1", input); }
+export function parseOperationRequestJson(input) { return parseContractJson("operation_request_v1", input); }
+export function parseDecisionJson(input) { return parseContractJson("operation_decision_v1", input); }
+export function parseAuditEventJson(input) { return parseContractJson("audit_event_v1", input); }
 
 export function validateAgentDescriptor(input) { return normalizeAgentDescriptor(input); }
 export function validateScope(input) { return normalizeScope(input); }

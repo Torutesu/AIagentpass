@@ -18,6 +18,7 @@ const humanEnv = Object.freeze({
 });
 const sessionCookie = `__Host-agentpass_session=${"s".repeat(43)}`;
 const deviceId = "22222222-2222-4222-8222-222222222222";
+const agentId = "33333333-3333-4333-8333-333333333333";
 const authenticatedUser = Object.freeze({ userId: "user-1", email: "user@example.test" });
 const auditTimestamps = [
   "2026-08-12T00:00:00.000Z",
@@ -459,7 +460,10 @@ test("bounded list limits are forwarded to Cloud API resources", async () => {
   const api = authenticatedApi({
     fetchImpl: async (url, init) => {
       calls.push({ url: String(url), init });
-      return response({ capabilities: [], revocations: [], events: [] });
+      const path = new URL(url).pathname;
+      if (path.endsWith("/capabilities")) return response({ capabilities: [] });
+      if (path.endsWith("/revocations")) return response({ revocations: [] });
+      return response({ events: [] });
     },
   });
 
@@ -534,12 +538,137 @@ test("device enrollment requires and forwards recent auth while returning the cr
   assert.match(payload.enrollment.device_id, /^[0-9a-f-]{36}$/);
 });
 
+test("capability reads expose only tenant-bound lifecycle metadata, never signed authority", async () => {
+  const capability = {
+    version: 1,
+    capability_id: "44444444-4444-4444-8444-444444444444",
+    organization_id: env.AGENTPASS_ORGANIZATION_ID,
+    issuer: "agentpass-cloud",
+    key_id: "capability-key-1",
+    agent_id: agentId,
+    device_id: deviceId,
+    operations: ["git.commit.sign"],
+    scope: { operations: ["git.commit.sign"], repositories: ["/work/repo"], branches: { allow: ["main"], deny: [] }, remotes: { allow: ["origin"], deny: [] } },
+    nonce: "nonce-must-not-reach-browser",
+    capability_hash: "a".repeat(64),
+    not_before: "2026-08-12T00:00:00.000Z",
+    expires_at: "2026-08-12T00:15:00.000Z",
+    sequence: 7,
+    issued_at: "2026-08-12T00:00:00.000Z",
+    status: "active",
+    signature: "signed-authority-must-not-reach-browser",
+  };
+  const api = authenticatedApi({ fetchImpl: async () => response({ capabilities: [capability] }) });
+  const result = await api.handle(request("/api/console?resource=capabilities&limit=100"));
+  assert.equal(result.status, 200);
+  const resultText = await result.text();
+  assert.deepEqual(JSON.parse(resultText), {
+    capabilities: [{
+      version: 1,
+      capability_id: capability.capability_id,
+      agent_id: agentId,
+      device_id: deviceId,
+      expires_at: capability.expires_at,
+      sequence: 7,
+    }],
+  });
+  assert.doesNotMatch(resultText, /nonce-must-not-reach-browser|signed-authority/);
+});
+
+test("capability reads fail closed on tenant drift, version drift, and unknown fields", async () => {
+  const base = {
+    version: 1,
+    capability_id: "44444444-4444-4444-8444-444444444444",
+    organization_id: env.AGENTPASS_ORGANIZATION_ID,
+    agent_id: agentId,
+    device_id: deviceId,
+    expires_at: "2026-08-12T00:15:00.000Z",
+    sequence: 1,
+  };
+  for (const capability of [
+    { ...base, organization_id: "55555555-5555-4555-8555-555555555555" },
+    { ...base, version: 2 },
+    { ...base, unexpected: "must-not-cross-boundary" },
+  ]) {
+    const api = authenticatedApi({ fetchImpl: async () => response({ capabilities: [capability] }) });
+    const result = await api.handle(request("/api/console?resource=capabilities"));
+    assert.equal(result.status, 502);
+    assert.deepEqual(await result.json(), { error: { code: "cloud_api_invalid_response", message: "Cloud API response was invalid" } });
+  }
+});
+
+test("capability issuance binds the audience and returns no bearer authority to the UI", async () => {
+  const signed = {
+    version: 1,
+    capability_id: "44444444-4444-4444-8444-444444444444",
+    nonce: "nonce-must-not-reach-browser",
+    issuer: "agentpass-cloud",
+    key_id: "capability-key-1",
+    audience: { agent_id: agentId, device_id: deviceId },
+    scope: { operations: ["git.commit.sign"], repositories: ["/work/repo"], branches: { allow: ["main"], deny: [] }, remotes: { allow: ["origin"], deny: [] } },
+    not_before: "2026-08-12T00:00:00.000Z",
+    expires_at: "2026-08-12T00:15:00.000Z",
+    sequence: 8,
+    signature: "signed-authority-must-not-reach-browser",
+  };
+  const body = {
+    agent_id: agentId,
+    device_id: deviceId,
+    scope: signed.scope,
+    ttl_ms: 900_000,
+    sequence: 8,
+  };
+  const api = authenticatedApi({ fetchImpl: async () => response({ capability: signed }, 201) });
+  const result = await api.handle(request("/api/console?operation=issue-capability", {
+    method: "POST",
+    headers: { "content-type": "application/json", "idempotency-key": "capability-issue-001" },
+    body: JSON.stringify(body),
+  }));
+  assert.equal(result.status, 201);
+  const resultText = await result.text();
+  assert.deepEqual(JSON.parse(resultText), {
+    capability: {
+      version: 1,
+      capability_id: signed.capability_id,
+      agent_id: agentId,
+      device_id: deviceId,
+      expires_at: signed.expires_at,
+      sequence: 8,
+    },
+  });
+  assert.doesNotMatch(resultText, /nonce-must-not-reach-browser|signed-authority/);
+
+  const driftApi = authenticatedApi({ fetchImpl: async () => response({ capability: { ...signed, audience: { agent_id: "55555555-5555-4555-8555-555555555555", device_id: deviceId } } }, 201) });
+  const drift = await driftApi.handle(request("/api/console?operation=issue-capability", {
+    method: "POST",
+    headers: { "content-type": "application/json", "idempotency-key": "capability-issue-002" },
+    body: JSON.stringify(body),
+  }));
+  assert.equal(drift.status, 502);
+});
+
 test("operator mutations keep tenant paths, strict schemas, and idempotency", async () => {
   const calls = [];
   const api = authenticatedApi({
     fetchImpl: async (url, init) => {
       calls.push({ url: String(url), init });
-      return response({ device: { device_id: deviceId }, capability: { capability_id: "33333333-3333-4333-8333-333333333333" } }, 201);
+      const path = new URL(url).pathname;
+      if (path.endsWith("/capabilities")) {
+        return response({ capability: {
+          version: 1,
+          capability_id: "44444444-4444-4444-8444-444444444444",
+          nonce: "nonce",
+          issuer: "agentpass-cloud",
+          key_id: "capability-key-1",
+          audience: { agent_id: agentId, device_id: deviceId },
+          scope: { operations: ["git.commit.sign"], repositories: ["/work/repo"], branches: { allow: ["*"], deny: [] }, remotes: { allow: ["*"], deny: [] } },
+          not_before: "2026-08-12T00:00:00.000Z",
+          expires_at: "2026-08-12T00:15:00.000Z",
+          sequence: 1,
+          signature: "signature",
+        } }, 201);
+      }
+      return response({ device: { device_id: deviceId } }, 201);
     },
   });
   const operations = [

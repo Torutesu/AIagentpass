@@ -33,6 +33,18 @@ const REVOCATION_RESPONSE_FIELDS = new Set([
   "revocation_id", "organization_id", "target_type", "target_id", "reason", "status", "sequence",
   "created_at", "revoked_at", "version",
 ]);
+// Capability responses contain authority-bearing material for the device
+// plane (nonce, signature, and the full signed scope).  The Console only
+// needs lifecycle metadata, so keep the upstream input closed while exposing
+// a deliberately smaller DTO to the browser.
+const CAPABILITY_RESPONSE_FIELDS = new Set([
+  "version", "capability_id", "organization_id", "issuer", "key_id", "agent_id", "device_id",
+  "operations", "scope", "nonce", "capability_hash", "statement_hash", "not_before", "expires_at",
+  "sequence", "issued_at", "status", "revoked_at", "issued_by_member_id", "issued_membership_version", "signature",
+]);
+const CAPABILITY_ISSUE_FIELDS = new Set([
+  "version", "capability_id", "nonce", "issuer", "key_id", "audience", "scope", "not_before", "expires_at", "sequence", "signature",
+]);
 const SIWC_HEADERS = [
   "oai-authenticated-user-id",
   "oai-authenticated-user-email",
@@ -320,9 +332,11 @@ async function getSimple(query, resource, config, fetchImpl, options) {
   const suffix = resource === "capabilities" || resource === "revocations" || resource === "admin-audit"
     ? `${paths[resource]}?limit=${queryLimit(query)}`
     : paths[resource];
-  const result = await cloudRequest("GET", suffix, undefined, config, fetchImpl, options, undefined, true, undefined, resource === "devices");
+  const result = await cloudRequest("GET", suffix, undefined, config, fetchImpl, options, undefined, true, undefined, resource === "devices" || resource === "capabilities");
   const body = resource === "devices"
     ? normalizeDeviceStateResponse(result.body)
+    : resource === "capabilities"
+      ? normalizeCapabilityListResponse(result.body, config.organizationId)
     : result.body;
   return { __consoleStatus: result.status, __consoleBody: body };
 }
@@ -490,6 +504,80 @@ function normalizeDeviceRefreshRequestResponse(value, expectedDeviceId) {
       desired_generation: refreshRequest.desired_generation,
       status: refreshRequest.status,
       requested_at: refreshRequest.requested_at,
+    },
+  };
+}
+
+function normalizeCapabilityListResponse(value, expectedOrganizationId) {
+  if (!isPlainRecord(value) || Object.keys(value).some((key) => key !== "capabilities" && key !== "request_id") || !Array.isArray(value.capabilities)) {
+    throw invalidCloudResponse();
+  }
+  if (value.request_id !== undefined) normalizeOpaqueResponseId(value.request_id);
+  return {
+    ...(value.request_id === undefined ? {} : { request_id: value.request_id }),
+    capabilities: value.capabilities.map((capability) => normalizeCapabilityMetadata(capability, expectedOrganizationId)),
+  };
+}
+
+function normalizeCapabilityMetadata(value, expectedOrganizationId) {
+  if (!isPlainRecord(value) || Object.keys(value).some((key) => !CAPABILITY_RESPONSE_FIELDS.has(key))) throw invalidCloudResponse();
+  if (value.version !== 1
+    || typeof value.capability_id !== "string"
+    || !UUID_OR_OPAQUE_ID.test(value.capability_id)
+    || value.organization_id !== expectedOrganizationId
+    || typeof value.agent_id !== "string"
+    || !UUID_OR_OPAQUE_ID.test(value.agent_id)
+    || typeof value.device_id !== "string"
+    || !UUID_OR_OPAQUE_ID.test(value.device_id)) {
+    throw invalidCloudResponse();
+  }
+  const expiresAt = normalizeSafeTimestamp(value.expires_at, false);
+  const sequence = normalizeSafeInteger(value.sequence, "sequence", false);
+  if (sequence < 1) throw invalidCloudResponse();
+  return {
+    version: 1,
+    capability_id: value.capability_id,
+    agent_id: value.agent_id,
+    device_id: value.device_id,
+    expires_at: expiresAt,
+    sequence,
+  };
+}
+
+function normalizeCapabilityIssueResponse(value, expectedOrganizationId, expectedAgentId, expectedDeviceId) {
+  if (!isPlainRecord(value) || Object.keys(value).some((key) => key !== "capability" && key !== "request_id") || !isPlainRecord(value.capability)) {
+    throw invalidCloudResponse();
+  }
+  if (value.request_id !== undefined) normalizeOpaqueResponseId(value.request_id);
+  const capability = value.capability;
+  if (Object.keys(capability).sort().join(",") !== [...CAPABILITY_ISSUE_FIELDS].sort().join(",")
+    || capability.version !== 1
+    || typeof capability.capability_id !== "string"
+    || !UUID_OR_OPAQUE_ID.test(capability.capability_id)
+    || !isPlainRecord(capability.audience)
+    || Object.keys(capability.audience).sort().join(",") !== "agent_id,device_id"
+    || typeof capability.audience.agent_id !== "string"
+    || !UUID_OR_OPAQUE_ID.test(capability.audience.agent_id)
+    || typeof capability.audience.device_id !== "string"
+    || !UUID_OR_OPAQUE_ID.test(capability.audience.device_id)
+    || capability.audience.agent_id !== expectedAgentId
+    || capability.audience.device_id !== expectedDeviceId
+    || typeof capability.nonce !== "string"
+    || typeof capability.signature !== "string") {
+    throw invalidCloudResponse();
+  }
+  const expiresAt = normalizeSafeTimestamp(capability.expires_at, false);
+  const sequence = normalizeSafeInteger(capability.sequence, "sequence", false);
+  if (sequence < 1) throw invalidCloudResponse();
+  return {
+    ...(value.request_id === undefined ? {} : { request_id: value.request_id }),
+    capability: {
+      version: 1,
+      capability_id: capability.capability_id,
+      agent_id: expectedAgentId,
+      device_id: expectedDeviceId,
+      expires_at: expiresAt,
+      sequence,
     },
   };
 }
@@ -839,8 +927,11 @@ async function postOperation(query, body, idempotencyKey, config, fetchImpl, opt
   }
   if (operation === "issue-capability") {
     const capability = validateCapabilityBody(body);
-    const result = await cloudRequest("POST", "/capabilities", capability, config, fetchImpl, options, idempotencyKey, true);
-    return { status: result.status, body: result.body };
+    const result = await cloudRequest("POST", "/capabilities", capability, config, fetchImpl, options, idempotencyKey, true, undefined, true);
+    return {
+      status: result.status,
+      body: normalizeCapabilityIssueResponse(result.body, config.organizationId, capability.agent_id, capability.device_id),
+    };
   }
   throw new ConsoleApiError(400, "invalid_operation", "Operation is invalid");
 }

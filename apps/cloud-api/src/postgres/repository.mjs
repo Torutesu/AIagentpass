@@ -47,7 +47,7 @@ export function createTenantRepository({ client, organizationId } = {}) {
     if (where !== undefined) {
       if (typeof where !== "string" || where.trim().length === 0) throw new PostgresRepositoryError("ERR_QUERY", "where must be a non-empty SQL predicate");
       if (!Array.isArray(params)) throw new PostgresRepositoryError("ERR_QUERY", "where parameters must be an array");
-      clauses.push(shiftPlaceholders(where.trim(), 1, params.length));
+      clauses.push(`(${shiftPlaceholders(where.trim(), 1, params.length)})`);
       values.push(...params);
     } else if (params.length > 0) throw new PostgresRepositoryError("ERR_QUERY", "where parameters require a where predicate");
     const order = normalizeOrder(orderBy, safeTable);
@@ -101,10 +101,9 @@ export function createTenantRepository({ client, organizationId } = {}) {
   const queryTenant = async ({ text, params = [], organizationPlaceholder = "$1" } = {}) => {
     if (typeof text !== "string" || text.trim().length === 0) throw new PostgresRepositoryError("ERR_QUERY", "tenant query text is required");
     if (!Array.isArray(params)) throw new PostgresRepositoryError("ERR_QUERY", "tenant query parameters must be an array");
-    if (typeof organizationPlaceholder !== "string" || !/^\$[1-9][0-9]*$/.test(organizationPlaceholder)) throw new PostgresRepositoryError("ERR_QUERY", "organization placeholder is invalid");
+    if (organizationPlaceholder !== "$1") throw new TenantScopeError("tenant query must reserve $1 for the repository tenant");
     if (!/^\s*SELECT\b/i.test(text)) throw new PostgresRepositoryError("ERR_QUERY", "raw tenant queries are read-only; use insert or updateById for writes");
-    const organizationParameter = organizationPlaceholder.slice(1);
-    if (!new RegExp(`\\borganization_id\\s*=\\s*\\$${organizationParameter}\\b`, "i").test(text)) throw new TenantScopeError("tenant query must bind organization_id to the repository tenant");
+    assertTenantQueryShape(text, params.length);
     return client.query(text, [tenantId, ...params]);
   };
 
@@ -200,4 +199,103 @@ function normalizeLimit(limit) {
   if (limit === undefined || limit === null) return undefined;
   if (!Number.isSafeInteger(limit) || limit < 1 || limit > 1000) throw new PostgresRepositoryError("ERR_LIMIT", "limit must be an integer between 1 and 1000");
   return limit;
+}
+
+function assertTenantQueryShape(text, parameterCount) {
+  const tokens = sqlWords(text);
+  const code = sqlCode(text);
+  if (tokens.some((token) => ["OR", "UNION", "INTERSECT", "EXCEPT", "WITH", "JOIN"].includes(token))) {
+    throw new TenantScopeError("tenant query contains an ambiguous scope operator");
+  }
+  if (tokens[0] !== "SELECT" || tokens.filter((token) => token === "SELECT").length !== 1) {
+    throw new PostgresRepositoryError("ERR_QUERY", "tenant queries must contain one top-level SELECT");
+  }
+  assertSingleTenantTable(code);
+
+  const where = /\bWHERE\b/iu.exec(code);
+  if (!where) throw new TenantScopeError("tenant query must contain a WHERE tenant predicate");
+  const predicateClause = code.slice(where.index + where[0].length);
+  const tenantPredicates = [...code.matchAll(/(?:\b[a-z_][a-z0-9_]*\.)?organization_id\s*=\s*\$(\d+)/giu)];
+  const leadingTenantPredicate = /^\s*(?:[a-z_][a-z0-9_]*\.)?organization_id\s*=\s*\$1(?=\s*(?:AND\b|GROUP\b|ORDER\b|LIMIT\b|OFFSET\b|FETCH\b|FOR\b|HAVING\b|$))/iu;
+  if (tenantPredicates.length !== 1 || tenantPredicates[0][1] !== "1" || !leadingTenantPredicate.test(predicateClause)) {
+    throw new TenantScopeError("tenant query WHERE clause must begin with one exact organization_id = $1 conjunct");
+  }
+
+  const placeholders = [...code.matchAll(/\$(\d+)/g)].map((match) => Number(match[1]));
+  const expected = new Set([1, ...Array.from({ length: parameterCount }, (_, index) => index + 2)]);
+  const actual = new Set(placeholders);
+  if (actual.size !== expected.size || [...expected].some((placeholder) => !actual.has(placeholder))) {
+    throw new PostgresRepositoryError("ERR_QUERY", "tenant query placeholders must be contiguous after the reserved tenant parameter");
+  }
+  if (code.includes(";") || code.includes("--") || code.includes("/*") || code.includes("*/")) {
+    throw new PostgresRepositoryError("ERR_QUERY", "tenant query must be a single statement without comments");
+  }
+}
+
+function assertSingleTenantTable(code) {
+  const from = /\bFROM\b/iu.exec(code);
+  if (!from) throw new TenantScopeError("tenant query must select from one approved tenant table");
+  const tail = code.slice(from.index + from[0].length);
+  const clause = /\b(?:WHERE|GROUP|ORDER|LIMIT|OFFSET|FETCH|FOR|HAVING)\b/iu.exec(tail);
+  const source = tail.slice(0, clause?.index ?? tail.length).trim();
+  const match = /^(?:[a-z_][a-z0-9_]*\.)?([a-z_][a-z0-9_]*)(?:\s+(?:AS\s+)?[a-z_][a-z0-9_]*)?$/iu.exec(source);
+  if (!match || !TABLES.has(match[1])) throw new TenantScopeError("tenant query must select from one approved tenant table");
+}
+
+function sqlCode(text) {
+  const code = [];
+  let index = 0;
+  while (index < text.length) {
+    const character = text[index];
+    if (character === "'") {
+      const end = skipSqlQuoted(text, index, "'");
+      code.push(" ".repeat(end - index));
+      index = end;
+      continue;
+    }
+    if (character === '"') {
+      const end = skipSqlQuoted(text, index, '"');
+      code.push(" ".repeat(end - index));
+      index = end;
+      continue;
+    }
+    code.push(character);
+    index += 1;
+  }
+  return code.join("");
+}
+
+function sqlWords(text) {
+  const words = [];
+  let index = 0;
+  while (index < text.length) {
+    const character = text[index];
+    const next = text[index + 1];
+    if (character === "'") { index = skipSqlQuoted(text, index, "'"); continue; }
+    if (character === '"') { index = skipSqlQuoted(text, index, '"'); continue; }
+    if (character === "-" && next === "-") throw new PostgresRepositoryError("ERR_QUERY", "tenant query comments are not allowed");
+    if (character === "/" && next === "*") throw new PostgresRepositoryError("ERR_QUERY", "tenant query comments are not allowed");
+    if (character === "$" && /^\$(?:[A-Za-z_][A-Za-z0-9_]*)?\$/.test(text.slice(index))) {
+      throw new PostgresRepositoryError("ERR_QUERY", "tenant query dollar-quoted text is not allowed");
+    }
+    if (/[A-Za-z_]/u.test(character)) {
+      let end = index + 1;
+      while (end < text.length && /[A-Za-z0-9_$]/u.test(text[end])) end += 1;
+      words.push(text.slice(index, end).toUpperCase());
+      index = end;
+      continue;
+    }
+    index += 1;
+  }
+  return words;
+}
+
+function skipSqlQuoted(text, start, quote) {
+  let index = start + 1;
+  while (index < text.length) {
+    if (text[index] !== quote) { index += 1; continue; }
+    if (text[index + 1] === quote) { index += 2; continue; }
+    return index + 1;
+  }
+  throw new PostgresRepositoryError("ERR_QUERY", "tenant query contains an unterminated quoted value");
 }

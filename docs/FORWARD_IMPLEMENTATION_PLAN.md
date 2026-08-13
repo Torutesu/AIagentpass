@@ -261,6 +261,10 @@ This is the implementation sequence after the 16/16 software-procedure checkpoin
 
 ### Phase 1 — freeze Core protocol and schema contracts
 
+The authority split and compatibility rules are fixed by [`ADR-003-contract-authority-and-versioning.md`](./ADR-003-contract-authority-and-versioning.md). CI must validate the machine-readable catalog before running product tests so missing or ambiguous contracts cannot merge behind unrelated green tests.
+
+Implementation status (2026-08-14): the current 16 JSON Schemas, 41 OpenAPI operations, and 23 forward-only PostgreSQL migrations are inventoried in a frozen machine-readable catalog with tenant/actor, idempotency, expiry, signature-domain, implementation, and fixture metadata. The public Node protocol exposes a closed immutable parser manifest; the macOS management and Agent XPC surfaces have a runtime-verified selector/DTO/type-encoding fingerprint; raw PostgreSQL tenant queries reserve `$1` for the repository tenant; and Console capability responses are reduced to tenant- and audience-bound lifecycle metadata. CI and release-candidate workflows validate the catalog before product or signing steps. Phase 1 remains open until the still-embedded organization, membership, WebAuthn, policy, purge, and promotion structures are promoted to explicit versioned schemas and added to cross-language compatibility evidence.
+
 Deliverables:
 
 1. publish versioned schemas for organization, membership/role, human session, WebAuthn credential, device, enrollment, agent, policy, ControlBundle, capability, Agent Session Grant, audit event, purge authorization/receipt, and promotion evidence;

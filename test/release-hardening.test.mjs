@@ -558,6 +558,7 @@ test('release candidate verifies signed source before the secret-bearing job and
   assert.match(workflow, /notarize-controller\.sh/);
   assert.match(workflow, /--notarization-status=accepted_stapled/);
   assert.match(workflow, /verify-macos-release\.sh/);
+  assert.match(workflow, /Validate frozen protocol and schema catalog before signing[\s\S]*?npm run contracts:validate[\s\S]*?node --test test\/contract-catalog\.test\.mjs/);
   assert.doesNotMatch(workflow, /gh release (?:create|upload|edit)|^  publish:/m);
   assert.doesNotMatch(workflow, /NOT_NOTARIZED/);
   const controllerNotary = readFileSync(scriptPath('notarize-controller.sh'), 'utf8');
