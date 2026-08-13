@@ -33,6 +33,7 @@ const HOSTED_AGENT_SESSION_ENV = Object.freeze([
   "AGENTPASS_CLOUD_AGENT_SESSION_KEY_ID",
   "AGENTPASS_CLOUD_AGENT_SESSION_PUBLIC_KEY",
   "AGENTPASS_CLOUD_AGENT_SESSION_TIMEOUT_MS",
+  "AGENTPASS_CLOUD_AGENT_SESSION_VERIFICATION_KEYS_JSON",
   "AGENTPASS_CLOUD_AGENT_SESSION_PROCESS_POLICIES_PATH"
 ]);
 const DATABASE_ENV = Object.freeze([
@@ -182,12 +183,16 @@ function parseHostedRefresh(env) {
 }
 
 function parseHostedAgentSession(env) {
-  const required = ["AGENTPASS_CLOUD_AGENT_SESSION_KEY_ID", "AGENTPASS_CLOUD_AGENT_SESSION_PUBLIC_KEY", "AGENTPASS_CLOUD_AGENT_SESSION_PROCESS_POLICIES_PATH"];
   const present = HOSTED_AGENT_SESSION_ENV.some((name) => configured(env, name));
   if (!present) return { present: false, complete: false };
-  const complete = required.every((name) => configured(env, name))
-    && IDENTIFIER.test(env.AGENTPASS_CLOUD_AGENT_SESSION_KEY_ID)
-    && nonEmptyString(env.AGENTPASS_CLOUD_AGENT_SESSION_PUBLIC_KEY)
+  const hasKeyId = configured(env, "AGENTPASS_CLOUD_AGENT_SESSION_KEY_ID");
+  const hasPublicKey = configured(env, "AGENTPASS_CLOUD_AGENT_SESSION_PUBLIC_KEY");
+  const hasRotationSet = configured(env, "AGENTPASS_CLOUD_AGENT_SESSION_VERIFICATION_KEYS_JSON");
+  const legacyComplete = hasKeyId && hasPublicKey && IDENTIFIER.test(env.AGENTPASS_CLOUD_AGENT_SESSION_KEY_ID)
+    && nonEmptyString(env.AGENTPASS_CLOUD_AGENT_SESSION_PUBLIC_KEY);
+  const rotationComplete = hasRotationSet && nonEmptyString(env.AGENTPASS_CLOUD_AGENT_SESSION_VERIFICATION_KEYS_JSON)
+    && (legacyComplete || (!hasKeyId && !hasPublicKey));
+  const complete = (legacyComplete || rotationComplete)
     && absolutePath(env.AGENTPASS_CLOUD_AGENT_SESSION_PROCESS_POLICIES_PATH);
   return { present: true, complete };
 }

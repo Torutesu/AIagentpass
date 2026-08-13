@@ -15,7 +15,6 @@ import { createRefreshNonceCodec } from "./postgres/refresh-nonce-codec.mjs";
 import { createHostedAgentSessionGrantSigner } from "./agent-session-signer-config.mjs";
 import { createProcessBindingPolicyRegistry } from "./process-binding-policy-registry.mjs";
 import { createAgentSessionDeviceApi } from "./agent-session-device-api.mjs";
-import { verifyAgentSessionGrant } from "./agent-session-grant.mjs";
 
 const IDENTIFIER = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 
@@ -51,7 +50,10 @@ export async function createCloudRuntime({ env = process.env, logger = console, 
         refresh: { keyId: config.refreshKeyId, publicKey: refreshPrivateKey }
       }
     });
-    if (!agentSessionSigner || typeof agentSessionSigner.signAgentSessionGrant !== "function" || typeof agentSessionSigner.health !== "function" || typeof agentSessionSigner.key_id !== "string") throw new Error("Cloud Agent Session signer is unavailable");
+    if (!agentSessionSigner || typeof agentSessionSigner.signAgentSessionGrant !== "function"
+      || typeof agentSessionSigner.verifyAgentSessionGrant !== "function"
+      || typeof agentSessionSigner.verificationKeyMetadata !== "function"
+      || typeof agentSessionSigner.health !== "function" || typeof agentSessionSigner.key_id !== "string") throw new Error("Cloud Agent Session signer is unavailable");
     const signerHealth = await agentSessionSigner.health();
     if (signerHealth?.ready !== true || signerHealth.key_id !== agentSessionSigner.key_id) throw new Error("Cloud Agent Session signer is unavailable");
   }
@@ -111,7 +113,10 @@ export async function createCloudRuntime({ env = process.env, logger = console, 
       };
       agentSessionDeviceApi = createAgentSessionDeviceApi({
         deviceRequestVerifier,
-        grantVerifier: (grant, context) => verifyAgentSessionGrant(grant, { publicKey: agentSessionSigner.config.publicKeyPem, keyId: agentSessionSigner.key_id, now: context.now }),
+        grantVerifier: async (grant, context) => {
+          await agentSessionSigner.verificationKeyMetadata(grant?.statement?.key_id, { at: context.now });
+          return agentSessionSigner.verifyAgentSessionGrant(grant, { at: context.now });
+        },
         repository: postgresRuntime.agentSessionAuthorityRepository,
         rateLimiter: hostedRateLimiter
       });
@@ -125,7 +130,7 @@ export async function createCloudRuntime({ env = process.env, logger = console, 
         rateLimiter: hostedRateLimiter,
         enrollmentCredentialSecret: Buffer.from(env.AGENTPASS_CAPABILITY_NONCE_SECRET, "base64url"),
         trackInFlight: postgresRuntime.trackInFlight,
-        readiness: createHostedReadiness(postgresRuntime.readiness, agentSessionSigner.health),
+        readiness: createHostedReadiness(postgresRuntime.readiness, agentSessionSigner.health, agentSessionSigner.verificationKeyMetadata),
         operationalMetrics: postgresRuntime.operationalMetrics,
         operationalProbeSecret: exactRuntimeSecret(env.AGENTPASS_OPERATIONAL_PROBE_SECRET, "AGENTPASS_OPERATIONAL_PROBE_SECRET")
       } : { rateLimiter: createRateLimiter({ persistencePath: path.join(config.dataDir, "principal-rate-limits.json") }) }),
@@ -312,15 +317,20 @@ function createHostedRateLimiter(repository, { now = () => Date.now() } = {}) {
   });
 }
 
-function createHostedReadiness(databaseReadiness, signerHealth) {
-  if (typeof databaseReadiness !== "function" || typeof signerHealth !== "function") throw new Error("Hosted readiness dependencies are unavailable");
+function createHostedReadiness(databaseReadiness, signerHealth, verificationKeyMetadata) {
+  if (typeof databaseReadiness !== "function" || typeof signerHealth !== "function" || typeof verificationKeyMetadata !== "function") throw new Error("Hosted readiness dependencies are unavailable");
   return async function hostedReadiness() {
     const databaseReport = await databaseReadiness();
     let signer;
     try {
-      const value = await signerHealth();
+      const [value, keyRing] = await Promise.all([signerHealth(), verificationKeyMetadata()]);
       if (!value || value.ready !== true || typeof value.purpose !== "string" || value.algorithm !== "ed25519"
         || typeof value.key_id !== "string" || !/^[0-9a-f]{64}$/u.test(value.public_key_fingerprint ?? "")) throw new Error("invalid signer health");
+      if (!keyRing || keyRing.version !== 1 || keyRing.purpose !== value.purpose || keyRing.active_key_id !== value.key_id
+        || !Array.isArray(keyRing.keys) || keyRing.keys.length < 1 || keyRing.keys.length > 4
+        || !keyRing.keys.some((key) => key?.status === "active" && key.key_id === value.key_id)
+        || keyRing.keys.some((key) => !key || key.algorithm !== "ed25519" || typeof key.key_id !== "string"
+          || !/^[0-9a-f]{64}$/u.test(key.public_key_fingerprint ?? "") || !["active", "retiring"].includes(key.status))) throw new Error("invalid verification key metadata");
       signer = Object.freeze({ ok: true, purpose: value.purpose, algorithm: value.algorithm, key_id: value.key_id, public_key_fingerprint: value.public_key_fingerprint });
     } catch {
       signer = Object.freeze({ ok: false, purpose: "agent-session-grant", algorithm: "ed25519", key_id: null, public_key_fingerprint: null });

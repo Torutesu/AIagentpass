@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import crypto from "node:crypto";
+import { readFileSync } from "node:fs";
 import test from "node:test";
 
 import { canonicalJson } from "../../../../packages/protocol/src/index.mjs";
@@ -30,6 +31,7 @@ const SCOPE = Object.freeze({
   branches: { allow: ["feature/*"], deny: ["main"] },
   remotes: { allow: ["git@example.test:project.git"], deny: [] }
 });
+const AGENT_SESSIONS_MIGRATION = readFileSync(new URL("../../../../contracts/postgres/0019_agent_sessions.sql", import.meta.url), "utf8");
 
 class ContractClient {
   constructor(options = {}, shared = undefined) {
@@ -132,15 +134,18 @@ class ContractClient {
   }
 
   insertSession(params) {
-    if (this.options.failSessionInsert) throw new Error("session insert failed after grant lock");
     const grant = this.shared.grants.find((row) => row.organization_id === params[0] && row.grant_id === params[2]);
-    if (!grant || grant.status !== "issued") throw new Error("grant was consumed concurrently");
     const existing = this.shared.sessions.find((row) => row.organization_id === params[0] && row.session_id === params[1]);
     if (existing) return result([existing]);
-    grant.status = "consumed";
-    grant.consumed_at = NOW;
-    grant.consumed_session_id = params[1];
-    grant.consumed_process_binding_sha256 = params[10];
+    // This is the BEFORE INSERT agent_sessions_consume_grant trigger from
+    // contracts/postgres/0019_agent_sessions.sql. Keep it explicit: the
+    // repository intentionally does not issue a second UPDATE for the grant.
+    if (!this.options.disableAgentSessionsConsumeGrantTrigger) {
+      this.agentSessionsConsumeGrantTrigger(params, grant);
+    }
+    // The trigger runs before the base INSERT. A later INSERT failure must be
+    // undone by the same transaction, just as PostgreSQL would do.
+    if (this.options.failSessionInsert) throw new Error("session insert failed after grant trigger");
     const row = {
       organization_id: params[0], session_id: params[1], grant_id: params[2], device_id: params[3], agent_id: params[4],
       agent_kind: params[5], adapter_id: params[6], adapter_version: params[7], process_binding_policy_id: params[8],
@@ -150,6 +155,15 @@ class ContractClient {
     };
     this.shared.sessions.push(row);
     return result([row]);
+  }
+
+  agentSessionsConsumeGrantTrigger(params, grant) {
+    if (!grant || grant.status !== "issued") throw new Error("grant was consumed concurrently");
+    if (this.options.failAgentSessionGrantConsumeUpdate) throw new Error("grant consume update failed");
+    grant.status = "consumed";
+    grant.consumed_at = NOW;
+    grant.consumed_session_id = params[1];
+    grant.consumed_process_binding_sha256 = params[10];
   }
 
   selectSession(params) {
@@ -270,7 +284,55 @@ test("consumes once, binds both process and ancestry, and replays the original l
   assert.equal(insert.params[11], ANCESTRY);
   assert.equal(insert.params[17], NOT_BEFORE);
   assert.equal(insert.params[18], EXPIRES);
+  assert.equal(client.shared.grants[0].status, "consumed");
+  assert.equal(client.shared.grants[0].consumed_at, NOW);
+  assert.equal(client.shared.grants[0].consumed_session_id, ids.session);
+  assert.equal(client.shared.grants[0].consumed_process_binding_sha256, PROCESS);
+  assert.doesNotMatch(insert.text, /UPDATE\s+agent_session_grants/iu);
+  assert.equal(client.calls.some(({ text }) => /UPDATE\s+agent_session_grants/iu.test(text)), false);
+  await assert.rejects(repo.consumeAgentSessionGrant({ ...request, process_binding_sha256: "e".repeat(64) }), { code: "ERR_BINDING_CONFLICT" });
   await assert.rejects(repo.consumeAgentSessionGrant({ ...request, ancestry_binding_sha256: "d".repeat(64) }), { code: "ERR_BINDING_CONFLICT" });
+  assert.equal(client.calls.at(-1).text, "ROLLBACK");
+});
+
+test("pins the migration trigger as the only grant-consumption transition", () => {
+  const migration = AGENT_SESSIONS_MIGRATION.replace(/--[^\n]*\n/g, " ").replace(/\s+/gu, " ");
+  assert.match(migration, /CREATE FUNCTION agentpass_consume_agent_session_grant_for_session\(\)/u);
+  assert.match(migration, /SELECT grant_record\.\* INTO grant_row FROM agent_session_grants AS grant_record/u);
+  assert.match(migration, /FOR UPDATE; IF NOT FOUND THEN/u);
+  assert.match(migration, /UPDATE agent_session_grants SET status = 'consumed', consumed_at = clock_timestamp\(\), consumed_session_id = NEW\.session_id, consumed_process_binding_sha256 = NEW\.process_binding_sha256 WHERE organization_id = grant_row\.organization_id AND grant_id = grant_row\.grant_id AND status = 'issued';/u);
+  assert.match(migration, /GET DIAGNOSTICS changed = ROW_COUNT; IF changed <> 1 THEN/u);
+  assert.match(migration, /CREATE TRIGGER agent_sessions_consume_grant BEFORE INSERT ON agent_sessions FOR EACH ROW EXECUTE FUNCTION agentpass_consume_agent_session_grant_for_session\(\);/u);
+});
+
+test("does not mask an absent migration trigger in the fake client", async () => {
+  const client = new ContractClient({ disableAgentSessionsConsumeGrantTrigger: true });
+  const repo = repository(client);
+  const issued = issueInput();
+  await repo.issueAgentSessionGrant(issued);
+  const request = consumeInput({ grant: issued.grant });
+  const first = await repo.consumeAgentSessionGrant(request);
+  assert.equal(first.replayed, false);
+  assert.equal(client.shared.grants[0].status, "issued");
+  assert.equal(client.shared.grants[0].consumed_session_id, null);
+
+  const retry = await repo.consumeAgentSessionGrant(request);
+  assert.equal(retry.replayed, false);
+  assert.equal(client.shared.grants[0].status, "issued");
+});
+
+test("rolls back when the migration trigger's grant update fails", async () => {
+  const client = new ContractClient({ failAgentSessionGrantConsumeUpdate: true });
+  const repo = repository(client);
+  const issued = issueInput();
+  await repo.issueAgentSessionGrant(issued);
+
+  await assert.rejects(repo.consumeAgentSessionGrant(consumeInput({ grant: issued.grant })), { code: "ERR_DATABASE" });
+  assert.equal(client.shared.grants[0].status, "issued");
+  assert.equal(client.shared.grants[0].consumed_at, null);
+  assert.equal(client.shared.grants[0].consumed_session_id, null);
+  assert.equal(client.shared.grants[0].consumed_process_binding_sha256, null);
+  assert.equal(client.shared.sessions.length, 0);
   assert.equal(client.calls.at(-1).text, "ROLLBACK");
 });
 

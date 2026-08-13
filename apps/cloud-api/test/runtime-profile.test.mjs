@@ -117,6 +117,27 @@ test("accepts hosted only with complete PostgreSQL and Human Auth prerequisites"
   }
 });
 
+test("accepts a rotation key set as the hosted Agent Session key authority", () => {
+  const env = hostedEnv({
+    AGENTPASS_CLOUD_AGENT_SESSION_KEY_ID: undefined,
+    AGENTPASS_CLOUD_AGENT_SESSION_PUBLIC_KEY: undefined,
+    AGENTPASS_CLOUD_AGENT_SESSION_VERIFICATION_KEYS_JSON: JSON.stringify({
+      version: 1,
+      active: { key_id: "agent-session-2026-09", algorithm: "ed25519", public_key: "public-key-pin" },
+      retiring: []
+    })
+  });
+  assert.equal(parseCloudRuntimeProfile(env).isHosted, true);
+  assertProfileError(
+    () => parseCloudRuntimeProfile({ ...env, AGENTPASS_CLOUD_AGENT_SESSION_KEY_ID: "partial-active" }),
+    CLOUD_RUNTIME_PROFILE_ERROR_CODES.HOSTED_AUTH_INCOMPLETE
+  );
+  assertProfileError(
+    () => parseCloudRuntimeProfile(evaluationEnv({ AGENTPASS_CLOUD_AGENT_SESSION_VERIFICATION_KEYS_JSON: "{}" })),
+    CLOUD_RUNTIME_PROFILE_ERROR_CODES.EVALUATION_AUTH_FORBIDDEN
+  );
+});
+
 test("rejects hosted file-store compatibility inputs and evaluation auth inputs", () => {
   assertProfileError(
     () => parseCloudRuntimeProfile(hostedEnv({ AGENTPASS_CLOUD_DATA_DIR: "/srv/agentpass/data" })),

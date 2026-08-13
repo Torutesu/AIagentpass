@@ -1,4 +1,5 @@
 import crypto from "node:crypto";
+import { parseBoundedJson } from "../../../lib/control-bundle-v2.mjs";
 
 import {
   AGENT_SESSION_GRANT_ISSUER,
@@ -6,15 +7,20 @@ import {
   AGENT_SESSION_GRANT_VERSION,
   agentSessionGrantSigningData,
   agentSessionGrantStatementHash,
-  normalizeAgentSessionGrantStatement
+  normalizeAgentSessionGrantStatement,
+  verifyAgentSessionGrant as verifyGrant
 } from "./agent-session-grant.mjs";
 
 export const AGENT_SESSION_SIGNER_PURPOSE = AGENT_SESSION_GRANT_TYPE;
 export const AGENT_SESSION_SIGNER_ALGORITHM = "ed25519";
+export const AGENT_SESSION_SIGNER_VERIFICATION_KEYS_ENV = "AGENTPASS_CLOUD_AGENT_SESSION_VERIFICATION_KEYS_JSON";
+export const AGENT_SESSION_SIGNER_MAX_RETIRING_KEYS = 3;
+export const AGENT_SESSION_SIGNER_MAX_RETIRING_KEY_LIFETIME_MS = 90 * 24 * 60 * 60 * 1000;
 export const AGENT_SESSION_SIGNER_ENV = Object.freeze([
   "AGENTPASS_CLOUD_AGENT_SESSION_KEY_ID",
   "AGENTPASS_CLOUD_AGENT_SESSION_PUBLIC_KEY",
-  "AGENTPASS_CLOUD_AGENT_SESSION_TIMEOUT_MS"
+  "AGENTPASS_CLOUD_AGENT_SESSION_TIMEOUT_MS",
+  AGENT_SESSION_SIGNER_VERIFICATION_KEYS_ENV
 ]);
 
 export const AGENT_SESSION_SIGNER_ERROR_CODES = Object.freeze({
@@ -24,6 +30,9 @@ export const AGENT_SESSION_SIGNER_ERROR_CODES = Object.freeze({
   TIMEOUT: "ERR_AGENT_SESSION_SIGNER_TIMEOUT",
   METADATA: "ERR_AGENT_SESSION_SIGNER_METADATA",
   KEY_REUSE: "ERR_AGENT_SESSION_SIGNER_KEY_REUSE",
+  DUPLICATE_KEY: "ERR_AGENT_SESSION_SIGNER_DUPLICATE_KEY",
+  AMBIGUOUS_KEY: "ERR_AGENT_SESSION_SIGNER_AMBIGUOUS_KEY",
+  KEY_NOT_TRUSTED: "ERR_AGENT_SESSION_SIGNER_KEY_NOT_TRUSTED",
   OUTPUT: "ERR_AGENT_SESSION_SIGNER_OUTPUT",
   VERIFICATION: "ERR_AGENT_SESSION_SIGNER_VERIFICATION"
 });
@@ -45,6 +54,9 @@ const ERROR_MESSAGES = Object.freeze({
   [AGENT_SESSION_SIGNER_ERROR_CODES.TIMEOUT]: "agent session signer provider timed out",
   [AGENT_SESSION_SIGNER_ERROR_CODES.METADATA]: "agent session signer metadata is invalid",
   [AGENT_SESSION_SIGNER_ERROR_CODES.KEY_REUSE]: "agent session signer key is not purpose separated",
+  [AGENT_SESSION_SIGNER_ERROR_CODES.DUPLICATE_KEY]: "agent session signer verification keys contain a duplicate",
+  [AGENT_SESSION_SIGNER_ERROR_CODES.AMBIGUOUS_KEY]: "agent session signer active and retiring keys are ambiguous",
+  [AGENT_SESSION_SIGNER_ERROR_CODES.KEY_NOT_TRUSTED]: "agent session signer verification key is not trusted",
   [AGENT_SESSION_SIGNER_ERROR_CODES.OUTPUT]: "agent session signer output is invalid",
   [AGENT_SESSION_SIGNER_ERROR_CODES.VERIFICATION]: "agent session signer output could not be verified"
 });
@@ -64,23 +76,39 @@ export class AgentSessionSignerConfigError extends Error {
  * value. It remains behind the injected provider's KMS/HSM boundary. The
  * public key is an SPKI PEM pin used to detect provider/key substitution.
  */
-export function parseAgentSessionSignerConfig(env = process.env, references = {}) {
+export function parseAgentSessionSignerConfig(env = process.env, references = {}, options = {}) {
   try {
     if (!plainObject(env) || env.AGENTPASS_CLOUD_PROFILE !== PROFILE) fail(AGENT_SESSION_SIGNER_ERROR_CODES.CONFIG);
-    const keyId = requiredKeyId(env.AGENTPASS_CLOUD_AGENT_SESSION_KEY_ID);
-    const publicKey = parseConfiguredPublicKey(env.AGENTPASS_CLOUD_AGENT_SESSION_PUBLIC_KEY);
+    const currentNow = readNow(options?.now);
+    const verification = parseVerificationConfiguration(env, currentNow);
     const timeoutMs = parseTimeout(env.AGENTPASS_CLOUD_AGENT_SESSION_TIMEOUT_MS);
     const referenceKeys = normalizeReferenceKeys(references);
-    rejectPurposeKeyReuse(keyId, publicKey.fingerprint, referenceKeys);
-    return deepFreeze({
+    rejectPurposeKeyReuse(verification.keys, referenceKeys);
+    const result = {
       profile: PROFILE,
       purpose: AGENT_SESSION_SIGNER_PURPOSE,
       algorithm: AGENT_SESSION_SIGNER_ALGORITHM,
-      keyId,
+      keyId: verification.active.keyId,
       timeoutMs,
-      publicKeyPem: publicKey.pem,
-      publicKeyFingerprint: publicKey.fingerprint
+      publicKeyPem: verification.active.publicKeyPem,
+      publicKeyFingerprint: verification.active.publicKeyFingerprint
+    };
+    const safeKeys = verification.keys.map(toSafeVerificationKey);
+    const safeActive = safeKeys[0];
+    const safeRetiring = safeKeys.slice(1);
+    const safeRing = Object.freeze({
+      version: verification.version,
+      purpose: AGENT_SESSION_SIGNER_PURPOSE,
+      active_key_id: verification.active.keyId,
+      keys: Object.freeze(safeKeys)
     });
+    Object.defineProperties(result, {
+      activeVerificationKey: { value: safeActive, enumerable: false },
+      retiringVerificationKeys: { value: Object.freeze(safeRetiring), enumerable: false },
+      verificationKeys: { value: Object.freeze(safeKeys), enumerable: false },
+      verificationKeyRing: { value: safeRing, enumerable: false }
+    });
+    return deepFreeze(result);
   } catch (error) {
     if (error instanceof AgentSessionSignerConfigError) throw error;
     throw new AgentSessionSignerConfigError(AGENT_SESSION_SIGNER_ERROR_CODES.CONFIG);
@@ -97,7 +125,7 @@ export const parseHostedAgentSessionSignerConfig = parseAgentSessionSignerConfig
  * purpose-bound public metadata lookup and a raw Ed25519 signature call.
  */
 export function createHostedAgentSessionGrantSigner({ provider, env = process.env, references, now = () => Date.now() } = {}) {
-  const config = parseAgentSessionSignerConfig(env, references);
+  const config = parseAgentSessionSignerConfig(env, references, { now });
   if (!provider || typeof provider.publicKeyMetadata !== "function" || typeof provider.sign !== "function" || typeof now !== "function") {
     throw new AgentSessionSignerConfigError(AGENT_SESSION_SIGNER_ERROR_CODES.CONFIG);
   }
@@ -132,6 +160,23 @@ export function createHostedAgentSessionGrantSigner({ provider, env = process.en
 
   async function publicKeyMetadata() {
     return loadMetadata();
+  }
+
+  /**
+   * Return the current public verification set. The active key is the only
+   * key the injected provider may use for signing; retiring keys are
+   * verification-only and are accepted only until their configured expiry.
+   */
+  async function verificationKeyMetadata(keyId, { at = undefined } = {}) {
+    await loadMetadata();
+    const current = readNow(at === undefined ? now : at);
+    if (keyId !== undefined) return resolveVerificationKey(config, keyId, current);
+    return Object.freeze({
+      version: AGENT_SESSION_GRANT_VERSION,
+      purpose: AGENT_SESSION_SIGNER_PURPOSE,
+      active_key_id: config.keyId,
+      keys: Object.freeze(config.verificationKeys.filter((key) => isCurrentlyVerifiable(key, current)))
+    });
   }
 
   async function signAgentSessionGrant(statement) {
@@ -173,13 +218,34 @@ export function createHostedAgentSessionGrantSigner({ provider, env = process.en
 
   async function health() {
     const metadata = await loadMetadata();
-    return Object.freeze({
+    const result = {
       ready: true,
       purpose: metadata.purpose,
       algorithm: metadata.algorithm,
       key_id: metadata.key_id,
       public_key_fingerprint: metadata.public_key_fingerprint
-    });
+    };
+    if (config.retiringVerificationKeys.length > 0) {
+      result.verification_key_ids = config.verificationKeys
+        .filter((key) => isCurrentlyVerifiable(key, readNow(now)))
+        .map((key) => key.key_id);
+    }
+    return Object.freeze(result);
+  }
+
+  function verifyAgentSessionGrant(envelope, { at = undefined } = {}) {
+    const current = readNow(at === undefined ? now : at);
+    const keyId = envelope?.statement?.key_id;
+    const key = resolveVerificationKey(config, keyId, current);
+    try {
+      return verifyGrant(envelope, {
+        publicKey: key.public_key,
+        keyId: key.key_id,
+        now: current
+      });
+    } catch {
+      throw new AgentSessionSignerConfigError(AGENT_SESSION_SIGNER_ERROR_CODES.VERIFICATION);
+    }
   }
 
   return Object.freeze({
@@ -187,7 +253,9 @@ export function createHostedAgentSessionGrantSigner({ provider, env = process.en
     algorithm: config.algorithm,
     config,
     publicKeyMetadata,
+    verificationKeyMetadata,
     signAgentSessionGrant,
+    verifyAgentSessionGrant,
     health
   });
 }
@@ -201,6 +269,139 @@ function normalizeStatement(statement, now) {
   } catch {
     throw new AgentSessionSignerConfigError(AGENT_SESSION_SIGNER_ERROR_CODES.INPUT);
   }
+}
+
+function parseVerificationConfiguration(env, currentNow) {
+  const rawDocument = env[AGENT_SESSION_SIGNER_VERIFICATION_KEYS_ENV];
+  if (rawDocument === undefined) {
+    const active = parseLegacyActiveKey(env);
+    return { version: AGENT_SESSION_GRANT_VERSION, active, keys: [active] };
+  }
+  if (typeof rawDocument !== "string" || Buffer.byteLength(rawDocument, "utf8") < 1 || Buffer.byteLength(rawDocument, "utf8") > 64 * 1024) {
+    fail(AGENT_SESSION_SIGNER_ERROR_CODES.CONFIG);
+  }
+  let document;
+  try { document = parseBoundedJson(Buffer.from(rawDocument, "utf8"), { maxBytes: 64 * 1024, maxDepth: 8 }); }
+  catch { fail(AGENT_SESSION_SIGNER_ERROR_CODES.CONFIG); }
+  exactKeys(document, ["active", "retiring", "version"], AGENT_SESSION_SIGNER_ERROR_CODES.CONFIG);
+  if (document.version !== AGENT_SESSION_GRANT_VERSION || !Array.isArray(document.retiring)
+    || document.retiring.length > AGENT_SESSION_SIGNER_MAX_RETIRING_KEYS) {
+    fail(AGENT_SESSION_SIGNER_ERROR_CODES.CONFIG);
+  }
+  const active = parseRotationKey(document.active, "active", currentNow);
+  const retiring = document.retiring.map((key) => parseRotationKey(key, "retiring", currentNow));
+  const keys = [active, ...retiring];
+  rejectRotationDuplicates(active, retiring);
+  assertLegacyActiveMatches(env, active);
+  return { version: document.version, active, keys };
+}
+
+function parseLegacyActiveKey(env) {
+  const keyId = requiredKeyId(env.AGENTPASS_CLOUD_AGENT_SESSION_KEY_ID);
+  const publicKey = parseConfiguredPublicKey(env.AGENTPASS_CLOUD_AGENT_SESSION_PUBLIC_KEY);
+  return {
+    keyId,
+    algorithm: AGENT_SESSION_SIGNER_ALGORITHM,
+    publicKeyPem: publicKey.pem,
+    publicKeyFingerprint: publicKey.fingerprint,
+    status: "active"
+  };
+}
+
+function assertLegacyActiveMatches(env, active) {
+  const legacyKeyId = env.AGENTPASS_CLOUD_AGENT_SESSION_KEY_ID;
+  const legacyPublicKey = env.AGENTPASS_CLOUD_AGENT_SESSION_PUBLIC_KEY;
+  const hasLegacyKeyId = legacyKeyId !== undefined;
+  const hasLegacyPublicKey = legacyPublicKey !== undefined;
+  if (!hasLegacyKeyId && !hasLegacyPublicKey) return;
+  if (!hasLegacyKeyId || !hasLegacyPublicKey) fail(AGENT_SESSION_SIGNER_ERROR_CODES.AMBIGUOUS_KEY);
+  const legacy = parseLegacyActiveKey(env);
+  if (legacy.keyId !== active.keyId || legacy.publicKeyFingerprint !== active.publicKeyFingerprint) {
+    fail(AGENT_SESSION_SIGNER_ERROR_CODES.AMBIGUOUS_KEY);
+  }
+}
+
+function parseRotationKey(value, status, currentNow) {
+  const expectedKeys = status === "active"
+    ? ["algorithm", "key_id", "public_key"]
+    : ["algorithm", "expires_at", "key_id", "public_key"];
+  exactKeys(value, expectedKeys, AGENT_SESSION_SIGNER_ERROR_CODES.CONFIG);
+  const keyId = requiredKeyId(value.key_id);
+  if (value.algorithm !== AGENT_SESSION_SIGNER_ALGORITHM) fail(AGENT_SESSION_SIGNER_ERROR_CODES.CONFIG);
+  const publicKey = parseConfiguredPublicKey(value.public_key);
+  let expiresAt;
+  let expiresAtMs;
+  if (status === "retiring") {
+    ({ value: expiresAt, milliseconds: expiresAtMs } = parseRetiringExpiry(value.expires_at, currentNow));
+  }
+  return {
+    keyId,
+    algorithm: value.algorithm,
+    publicKeyPem: publicKey.pem,
+    publicKeyFingerprint: publicKey.fingerprint,
+    status,
+    ...(expiresAt === undefined ? {} : { expiresAt, expiresAtMs })
+  };
+}
+
+function parseRetiringExpiry(value, currentNow) {
+  if (typeof value !== "string") fail(AGENT_SESSION_SIGNER_ERROR_CODES.CONFIG);
+  let milliseconds;
+  try { milliseconds = Date.parse(value); } catch { milliseconds = Number.NaN; }
+  if (!Number.isFinite(milliseconds) || new Date(milliseconds).toISOString() !== value
+    || milliseconds <= currentNow
+    || milliseconds > currentNow + AGENT_SESSION_SIGNER_MAX_RETIRING_KEY_LIFETIME_MS) {
+    fail(AGENT_SESSION_SIGNER_ERROR_CODES.CONFIG);
+  }
+  return { value, milliseconds };
+}
+
+function rejectRotationDuplicates(active, retiring) {
+  const retiringIds = new Set();
+  const retiringFingerprints = new Set();
+  for (const key of retiring) {
+    if (key.keyId === active.keyId || key.publicKeyFingerprint === active.publicKeyFingerprint) {
+      fail(AGENT_SESSION_SIGNER_ERROR_CODES.AMBIGUOUS_KEY);
+    }
+    if (retiringIds.has(key.keyId) || retiringFingerprints.has(key.publicKeyFingerprint)) {
+      fail(AGENT_SESSION_SIGNER_ERROR_CODES.DUPLICATE_KEY);
+    }
+    retiringIds.add(key.keyId);
+    retiringFingerprints.add(key.publicKeyFingerprint);
+  }
+}
+
+function exactKeys(value, expected, errorCode) {
+  if (!plainObject(value) || Object.keys(value).sort().join(",") !== expected.slice().sort().join(",")) fail(errorCode);
+}
+
+function toSafeVerificationKey(key) {
+  return Object.freeze({
+    key_id: key.keyId,
+    algorithm: key.algorithm,
+    public_key: key.publicKeyPem,
+    public_key_fingerprint: key.publicKeyFingerprint,
+    status: key.status,
+    ...(key.expiresAt === undefined ? {} : { expires_at: key.expiresAt })
+  });
+}
+
+function resolveVerificationKey(config, keyId, currentNow) {
+  if (typeof keyId !== "string") fail(AGENT_SESSION_SIGNER_ERROR_CODES.KEY_NOT_TRUSTED);
+  const key = config.verificationKeys.find((candidate) => candidate.key_id === keyId);
+  if (!key || !isCurrentlyVerifiable(key, currentNow)) fail(AGENT_SESSION_SIGNER_ERROR_CODES.KEY_NOT_TRUSTED);
+  return key;
+}
+
+function isCurrentlyVerifiable(key, currentNow) {
+  return key.status === "active" || (typeof key.expires_at === "string" && Date.parse(key.expires_at) > currentNow);
+}
+
+function readNow(value) {
+  const observed = typeof value === "function" ? value() : value === undefined ? Date.now() : value;
+  const resolved = observed instanceof Date ? observed.getTime() : observed;
+  if (!Number.isSafeInteger(resolved) || resolved < 0) fail(AGENT_SESSION_SIGNER_ERROR_CODES.CONFIG);
+  return resolved;
 }
 
 function validateProviderMetadata(value, config) {
@@ -239,8 +440,8 @@ function normalizeReferenceKeys(references) {
   return entries;
 }
 
-function rejectPurposeKeyReuse(keyId, fingerprint, references) {
-  if (references.some((reference) => reference.keyId === keyId || reference.fingerprint === fingerprint)) {
+function rejectPurposeKeyReuse(keys, references) {
+  if (keys.some((key) => references.some((reference) => reference.keyId === key.keyId || reference.fingerprint === key.publicKeyFingerprint))) {
     throw new AgentSessionSignerConfigError(AGENT_SESSION_SIGNER_ERROR_CODES.KEY_REUSE);
   }
 }

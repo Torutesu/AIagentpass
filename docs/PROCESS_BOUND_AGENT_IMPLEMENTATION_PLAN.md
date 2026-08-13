@@ -198,14 +198,15 @@ Exit gate: hosted runtime tests send real HTTP requests through the Node server,
 
 Implemented evidence: hosted mode requires purpose-separated Agent Session signer configuration and a protected process-policy registry; provider metadata is pinned to the configured Ed25519 public key; forged output, metadata substitution, timeout, and bundle/refresh key reuse fail closed; Human issuance and Device consumption are composed only on the frozen routes; Device authentication reuses PostgreSQL nonce and rate-limit authorities; and readiness becomes unavailable when signer metadata can no longer be verified. Unit and in-process HTTP tests cover exact-path interception and weaker-route non-fallthrough.
 
+Qualification evidence added on 2026-08-13: the PostgreSQL 17 CI lane now executes atomic Human issuance tests plus a real Device HTTP qualification. The Device test applies and acknowledges a current ControlBundle, consumes through the actual Node server, restarts the server and proves exact retry, runs concurrent consumption through two servers and proves one durable Lease, accepts an unexpired retiring verification key, rejects changed process binding, and proves query/method variants do not fall through. In-process HTTP tests additionally prove Human/Device alias rejection and drain behavior. The remaining M2-A2Q gap is the full Human HTTP issuance flow with real session/CSRF/recent-WebAuthn state followed by restart retry, plus an external KMS rotation exercise.
+
 Qualification backlog, in dependency order:
 
-1. Add a real-PostgreSQL HTTP fixture that creates organization, owner session, WebAuthn freshness, agent, device, policy, and applied ControlBundle state through supported boundaries.
+1. Add the remaining real-PostgreSQL Human HTTP fixture with owner session, CSRF, and recent-WebAuthn state.
 2. Issue through the Human route, restart the Cloud runtime, and prove an exact idempotent retry returns the byte-equivalent Grant without a second signer invocation.
-3. Consume through the signed Device route from two concurrent clients and prove one Lease plus exact-retry convergence; repeat after runtime restart.
-4. Replace the single verification-key pin with an active/retiring key set. Prove old Grants remain verifiable through the overlap window, new Grants use only the active key, unknown/expired keys fail, and readiness rejects provider/config disagreement.
-5. Hold an issuance and consumption request in flight, begin drain, prove the requests finish atomically, and prove subsequent requests receive `503 draining` without signer or repository mutation.
-6. Run the alias/query/trailing-slash/case/method substitution matrix against the complete hosted server and retain the HTTP evidence as a CI artifact.
+3. Exercise active-to-retiring rotation against the production KMS/HSM provider and retain provider-version evidence; local and real-PostgreSQL tests already cover active-only signing, overlap verification, expiry, unknown keys, and provider/config disagreement.
+4. Extend drain qualification from the in-process server boundary to real PostgreSQL issuance and consumption transactions.
+5. Retain the complete hosted alias/query/trailing-slash/case/method substitution matrix as a CI artifact rather than only pass/fail output.
 
 #### M2-A3 — consume/audit completion
 
