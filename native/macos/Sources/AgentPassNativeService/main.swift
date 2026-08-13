@@ -2383,6 +2383,26 @@ private final class ServiceEndpoint: NSObject, AgentPassNativeServiceProtocol, N
         } catch { reply(nil, error as NSError) }
     }
 
+    func revokeSessions(agentID: NSString, withReply reply: @escaping (NSData?, NSError?) -> Void) {
+        authorizationLock.lock()
+        defer { authorizationLock.unlock() }
+        guard let sessionManager else {
+            reply(nil, AgentPassNativeError.invalidConfiguration("Protected native sessions are not configured") as NSError)
+            return
+        }
+        do { try verifyLifecycleTrustLocked() }
+        catch { reply(nil, error as NSError); return }
+        do { _ = try auditCheckpoints.verify() }
+        catch { reply(nil, error as NSError); return }
+        do {
+            let revoked = try sessionManager.revoke(agentID: agentID as String)
+            try appendAudit(NativeAuditEvent(operation: "session.revoke-agent", decision: "allow", reason: "generation=\(revoked.generation);revoked=\(revoked.revokedSessions)", agentID: agentID as String))
+            let encoder = JSONEncoder()
+            encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
+            reply(try encoder.encode(revoked) as NSData, nil)
+        } catch { reply(nil, error as NSError) }
+    }
+
     func validateSession(token: NSString?, agentID: NSString, withReply reply: @escaping (Bool, NSError?) -> Void) {
         do { try verifyLifecycleTrust() }
         catch { reply(false, error as NSError); return }

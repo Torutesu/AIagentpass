@@ -42,6 +42,10 @@ test('fixed commands have bounded output, no shell, closed stdin, and fixed envi
   const limited = await runFixedCommand(process.execPath, ['-e', 'process.stdout.write("x".repeat(1024))'], { timeoutMs: 5000, maxOutputBytes: 32 }); assert.equal(limited.ok, false); assert.equal(limited.outputLimit, true); assert.equal(limited.stdout.length, 32);
   await assert.rejects(() => runFixedCommand('relative', []), /invalid/);
   await assert.rejects(() => runFixedCommand(process.execPath, [], { env: { PATH: '/tmp' } }), /invalid/);
+  const secret = 'qualification-session-value';
+  const protectedEnvironment = await runFixedCommand(process.execPath, ['-e', 'process.stdout.write(JSON.stringify({session:Boolean(process.env.AGENTPASS_SESSION),agent:process.env.AGENTPASS_AGENT_ID}))'], { sensitiveEnv: { AGENTPASS_SESSION: secret, AGENTPASS_AGENT_ID: 'agent-1' } });
+  assert.equal(protectedEnvironment.ok, true); assert.deepEqual(JSON.parse(protectedEnvironment.stdout), { session: true, agent: 'agent-1' }); assert.equal(protectedEnvironment.stdout.includes(secret), false);
+  await assert.rejects(() => runFixedCommand(process.execPath, [], { sensitiveEnv: { PATH: secret } }), /invalid/);
 });
 
 test('pinned executable replacement and artifact substitution fail closed', async () => {

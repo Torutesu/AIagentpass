@@ -10,13 +10,14 @@ Baseline branch: `codex/agent-platform`
 
 AgentPass has a locally verified Cloud/Console/native foundation and a fail-closed physical-release harness. The physical harness fixes 16 gates and 20 tests to one source commit, one notarized PKG digest, one Developer ID Team ID, and two independently operated Mac hardware lanes.
 
-Three physical scenarios are implemented:
+All 16 frozen physical scenario procedures are now implemented in software:
 
-1. exact PKG, Gatekeeper, signature, notarization, and install verification;
-2. launchd, XPC, installed ownership, nested signature, and Team ID verification;
-3. Secure Enclave enrollment-key existence, uniqueness, fixed tag/access group, non-exportability, live signature possession, and ControlBundle v2 key binding.
+1. exact PKG/Gatekeeper installation, launchd/XPC identity, Secure Enclave enrollment, Cloud possession, and negative peer probes;
+2. unattended Claude Code/Cursor signed commits with independent Git verification;
+3. policy reduction, offline expiry, revoke/emergency stop, and local-to-Cloud audit observation;
+4. crash/reboot, sleep/wake/network/clock, upgrade, uninstall/reinstall, and explicit current-user purge.
 
-The remaining 13 scenarios are not production-qualified. A passing modeled test, simulator test, ad-hoc signed build, or operator assertion cannot replace execution of the exact scenario on both protected hardware lanes.
+These procedures are locally/adversarially tested but are not production-qualified. A passing modeled test, simulator test, ad-hoc signed build, or operator assertion cannot replace execution of all 16 exact scenarios against the same notarized PKG on both protected hardware lanes.
 
 The process-bound Agent-session foundation now also includes the frozen Human Grant and Device Lease contracts, PostgreSQL-backed issuance/consumption, a split privileged Agent XPC service, a fixed-FD activation document, and a signed Agent Host lifecycle. The protected qualification runner now has a candidate-checkpoint-bound release trust, fixed root release staging, one-shot root-private input consumption, per-step run-binding materialization, durable fired-evidence recovery across daemon loss, bounded Controller/Agent Host supervision, and a seven-step unarmed-plus-six-scenario suite. Both hardware lanes pin and invoke the installed composition and fail when the protected seven-Grant inbox is absent.
 
@@ -183,6 +184,8 @@ Define uninstall semantics explicitly: binaries and launchd jobs are removed; pr
 
 Provide a separate, explicit destructive purge operation requiring local administrator authorization and recent owner WebAuthn. It revokes the Cloud device first, records a receipt, unloads services, removes retained keys/state using exact root-owned paths, and verifies absence. Partial failure leaves a resumable purge journal and signing remains denied.
 
+Implementation checkpoint (2026-08-14): the product CLI now exposes an explicit preview and `--confirm PURGE_USER_STATE --execute` flow, validates a closed current-user state tree, quarantines it before deletion, rejects symlink/hardlink/mutation/substitution cases, preserves unrelated home and system state, and uses target-specific native session revocation. Cloud device revocation, recent-owner WebAuthn authorization, a durable cross-process purge receipt/journal, service unloading, and protected-key destruction remain production work; the current physical procedure must not be interpreted as proof of those later controls.
+
 Exit evidence for M4: process loss, OS reboot, sleep, network loss, clock changes, upgrade, uninstall/reinstall, and purge have deterministic recovery with no authority widening and no orphaned signing path.
 
 ## 7. Milestone M5 — hosted production and release
@@ -252,7 +255,75 @@ The evidence change must be additive and versioned. The workflow may print only 
 
 The slice is complete only when all adversarial relay/report/recovery tests pass, the full Node/Swift/contracts/package gates pass from a clean source tree, both physical lanes validate independently, and the two signed reports bind the same candidate. Until then, N3-E remains locally verified rather than physically qualified.
 
-## 11. Detailed execution waves after N3-E
+## 11. Post-checkpoint implementation plan
+
+This is the implementation sequence after the 16/16 software-procedure checkpoint. The recommended product shape is one hosted Web Console plus a signed/notarized macOS PKG, with Homebrew acting only as a bootstrap and update-discovery channel for that same verified PKG. The privileged native boundary is not replaced by a browser, Electron shell, or a Homebrew-only Node process.
+
+### Phase 1 — freeze Core protocol and schema contracts
+
+Deliverables:
+
+1. publish versioned schemas for organization, membership/role, human session, WebAuthn credential, device, enrollment, agent, policy, ControlBundle, capability, Agent Session Grant, audit event, purge authorization/receipt, and promotion evidence;
+2. give every request an organization binding, actor binding, idempotency key, expiry, purpose, and canonical signing preimage;
+3. add compatibility fixtures for the current native client, Cloud API, Console BFF, PostgreSQL repositories, and release verifier;
+4. reject unknown fields, mixed schema versions, tenant ambiguity, signer-purpose reuse, stale epochs, and downgrade paths;
+5. record an architecture decision for which authority is Cloud-owned, device-owned, and human-only.
+
+Exit gate: contract validation and cross-language fixtures pass; no open schema question can change a database key, XPC selector, signature preimage, or tenant boundary in later phases.
+
+### Phase 2 — production Console identity and organization control
+
+Deliverables:
+
+1. finish organization creation, invitation, membership lifecycle, and fixed Owner/Admin/Developer/Viewer permissions;
+2. implement WebAuthn registration/authentication with exact RP ID/origin checks, sign-counter policy, credential lifecycle, and recent-auth step-up;
+3. use rotating, server-side human sessions with CSRF protection, device/session inventory, revocation, organization/member epochs, and bounded recovery;
+4. build Console screens for onboarding, devices, agents, policies, approvals, audit, emergency stop, and purge authorization;
+5. add accessible empty/error/recovery states and secret-free telemetry.
+
+Exit gate: browser E2E proves two organizations cannot cross-read or mutate; role downgrades and session revocation take effect transactionally; WebAuthn replay/origin/RP/counter negative tests pass.
+
+### Phase 3 — PostgreSQL Device API and managed signers
+
+Deliverables:
+
+1. complete forward-only PostgreSQL migrations and transactional repositories for all authority, replay, outbox, ACK, audit, and recovery state;
+2. run one migration job per deployment, enforce schema/version checks at startup, and qualify backup, PITR, and restore;
+3. compose the real Device API for enrollment, challenge/receipt, refresh, ACK, audit ingest, Agent Session Grant consumption, revoke, and emergency stop;
+4. replace development keys with purpose-separated KMS/HSM keys and narrowly scoped workload identities; pin key version in signed evidence;
+5. add transactional outbox workers, retry/dead-letter policy, rate limits, abuse controls, metrics, and alerts.
+
+Exit gate: real PostgreSQL contention/process-kill tests pass; tenant SQL review is clean; KMS IAM prevents cross-purpose signing; restore produces the same authoritative heads without replaying consumed grants.
+
+### Phase 4 — macOS onboarding and distribution
+
+Deliverables:
+
+1. finish the native onboarding state machine: verify app, initialize local state, enroll approval/device keys, bind organization/device, connect Claude Code/Cursor, and verify a test commit;
+2. make every step resumable and show actionable status without exposing bearer material or private evidence;
+3. ship one universal Developer ID-signed, hardened-runtime, notarized and stapled PKG containing the app, XPC services, launchd jobs, helper, CLI, and signer;
+4. publish a Homebrew formula/bootstrap that downloads and verifies the exact PKG digest/signature, plus direct GitHub Release installation and an offline verification path;
+5. implement update, rollback refusal, uninstall-preserve, reinstall recovery, explicit current-user purge, and compatibility reporting.
+
+Exit gate: clean-machine install → onboarding → Claude/Cursor signed commit → upgrade → uninstall/reinstall passes on supported Apple Silicon and Intel T2 hardware without Xcode.
+
+### Phase 5 — end-to-end qualification, security review, and production deployment
+
+Deliverables:
+
+1. deploy immutable Console/API/worker images with migration, canary, rollback, TLS, secrets, observability, alerting, backup, and incident runbooks;
+2. run browser-to-Cloud-to-device-to-Secure-Enclave E2E, failure injection, long-duration unattended operation, and all 16 physical gates on both lanes against one candidate;
+3. commission independent review of XPC/code identity, native storage, canonical signatures, WebAuthn/recovery, tenant SQL, KMS IAM, supply chain, updater, purge, and qualification infrastructure;
+4. resolve every critical/high finding and either fix or explicitly accept lower findings with owner and deadline;
+5. produce one signed promotion record binding commit, PKG and nested identities, notarization, image digests, migrations, KMS versions, E2E evidence, security review, and both hardware reports.
+
+Exit gate: the promotion verifier independently accepts the record, production smoke/restore tests pass, and no unresolved critical/high security finding remains.
+
+### Parallel execution and integration locks
+
+After Phase 1 freezes shared contracts, four lanes may proceed concurrently: Console identity, PostgreSQL/Device API, native onboarding, and release/operations. Migration numbers, OpenAPI changes, XPC selectors, entitlement/designated requirements, durable native formats, canonical signing preimages, and release identities remain serialized integration locks. Every lane merges behind full contract, Node, Swift, package, E2E, and secret-scan gates appropriate to its boundary.
+
+## 12. Detailed execution waves after N3-E
 
 ### Wave 1 — protected qualification closure
 
@@ -361,7 +432,7 @@ Acceptance:
 
 Dependencies: Waves 1–4 and external Apple/KMS/deployment credentials. Credential-dependent execution may be scheduled later, but no production-ready claim is made before the evidence exists.
 
-## 12. Workstream ownership and merge cadence
+## 13. Workstream ownership and merge cadence
 
 Use four parallel workstreams with one integration owner:
 

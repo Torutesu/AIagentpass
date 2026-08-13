@@ -96,10 +96,11 @@ export const releaseBindings = (env = process.env) => {
 
 const capture = (maximum) => ({ chunks: [], bytes: 0, exceeded: false, append(chunk) { const remaining = Math.max(0, maximum - this.bytes); const accepted = chunk.subarray(0, remaining); if (accepted.length) { this.chunks.push(Buffer.from(accepted)); this.bytes += accepted.length; } if (accepted.length !== chunk.length) this.exceeded = true; }, bytesValue() { return Buffer.concat(this.chunks, this.bytes); } });
 
-export const runFixedCommand = (command, args = [], { timeoutMs = DEFAULT_TIMEOUT_MS, maxOutputBytes = MAX_OUTPUT_BYTES, env = {}, cwd = '/', input } = {}) => new Promise((resolveResult) => {
-  if (!isAbsolute(command) || !Array.isArray(args) || args.some((arg) => typeof arg !== 'string') || !isAbsolute(cwd) || Object.keys(env).some((key) => !/^AGENTPASS_P0C_[A-Z0-9_]+$/u.test(key)) || (input !== undefined && !Buffer.isBuffer(input))) throw new Error('fixed command request is invalid');
+export const runFixedCommand = (command, args = [], { timeoutMs = DEFAULT_TIMEOUT_MS, maxOutputBytes = MAX_OUTPUT_BYTES, env = {}, sensitiveEnv = {}, cwd = '/', input } = {}) => new Promise((resolveResult) => {
+  const sensitiveKeys = Object.keys(sensitiveEnv);
+  if (!isAbsolute(command) || !Array.isArray(args) || args.some((arg) => typeof arg !== 'string') || !isAbsolute(cwd) || Object.keys(env).some((key) => !/^AGENTPASS_P0C_[A-Z0-9_]+$/u.test(key)) || sensitiveKeys.some((key) => !['AGENTPASS_SESSION', 'AGENTPASS_AGENT_ID'].includes(key)) || sensitiveKeys.some((key) => typeof sensitiveEnv[key] !== 'string' || sensitiveEnv[key].length < 1 || sensitiveEnv[key].length > 4096) || (input !== undefined && !Buffer.isBuffer(input))) throw new Error('fixed command request is invalid');
   const stdout = capture(maxOutputBytes); const stderr = capture(maxOutputBytes); let child; let timedOut = false; let settled = false;
-  try { child = spawn(command, args, { cwd, env: { ...FIXED_ENV, ...env }, shell: false, stdio: [input ? 'pipe' : 'ignore', 'pipe', 'pipe'] }); } catch { resolveResult({ ok: false, exitCode: null, signal: null, timedOut: false, outputLimit: false, spawnError: true, stdout: Buffer.alloc(0), stderr: Buffer.alloc(0) }); return; }
+  try { child = spawn(command, args, { cwd, env: { ...FIXED_ENV, ...env, ...sensitiveEnv }, shell: false, stdio: [input ? 'pipe' : 'ignore', 'pipe', 'pipe'] }); } catch { resolveResult({ ok: false, exitCode: null, signal: null, timedOut: false, outputLimit: false, spawnError: true, stdout: Buffer.alloc(0), stderr: Buffer.alloc(0) }); return; }
   if (input) { child.stdin.end(input); }
   const stop = () => { if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL'); };
   child.stdout.on('data', (chunk) => { stdout.append(chunk); if (stdout.exceeded) stop(); }); child.stderr.on('data', (chunk) => { stderr.append(chunk); if (stderr.exceeded) stop(); });

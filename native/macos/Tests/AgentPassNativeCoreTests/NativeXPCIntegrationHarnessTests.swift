@@ -179,6 +179,7 @@ private final class NativeXPCHarnessService: NSObject, AgentPassNativeServicePro
     func beginSession(agentID: NSString, ttlSeconds: Int, withReply reply: @escaping (NSData?, NSError?) -> Void) { reply(nil, unsupportedError()) }
     func completeSession(challenge: NSData, signature: NSData, withReply reply: @escaping (NSData?, NSError?) -> Void) { reply(nil, unsupportedError()) }
     func revokeSessions(withReply reply: @escaping (NSData?, NSError?) -> Void) { reply(nil, unsupportedError()) }
+    func revokeSessions(agentID: NSString, withReply reply: @escaping (NSData?, NSError?) -> Void) { reply(nil, unsupportedError()) }
     func validateSession(token: NSString?, agentID: NSString, withReply reply: @escaping (Bool, NSError?) -> Void) { reply(false, unsupportedError()) }
     func applyControlBundle(bundle: NSData, withReply reply: @escaping (NSData?, NSError?) -> Void) { reply(nil, unsupportedError()) }
     func validateControl(agentID: NSString, withReply reply: @escaping (Bool, NSError?) -> Void) { reply(false, unsupportedError()) }

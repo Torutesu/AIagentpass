@@ -1,0 +1,410 @@
+#!/usr/bin/env node
+import crypto from "node:crypto";
+import fs from "node:fs";
+import { pathToFileURL } from "node:url";
+import { join, resolve } from "node:path";
+import {
+  readInstalledCodeSignatureIdentity,
+  verifyCandidateCheckpoint,
+  withVerifiedCandidateCheckpoint,
+} from "../lib/candidate-checkpoint.mjs";
+import {
+  canonicalJSON,
+  executePhysicalScenario,
+  parseJSONOutput,
+  readProtectedFile,
+  requireCommandSuccess,
+  runFixedCommand,
+  runPinnedExecutable,
+  runPhysicalScenario,
+} from "../lib/scenario-runtime.mjs";
+
+const GATE = "upgrade-preserves-state";
+const TESTS = Object.freeze(["upgrade-preserves-state"]);
+const INSTALLER = "/usr/sbin/installer";
+const SPCTL = "/usr/sbin/spctl";
+const PKGUTIL = "/usr/sbin/pkgutil";
+const XCRUN = "/usr/bin/xcrun";
+const APP = "/Applications/AgentPass.app";
+const PREVIOUS_PKG = "/opt/agentpass/p0c/upgrade/previous/AgentPass.pkg";
+const PREVIOUS_CONFIG = "/opt/agentpass/p0c/upgrade/previous/config.json";
+const MARKER = "upgrade-preserves-state.json";
+const DIGEST = /^[0-9a-f]{64}$/u;
+const COMMIT = /^[0-9a-f]{40}$/u;
+const TEAM = /^[A-Z0-9]{10}$/u;
+const FP = /^SHA256:[A-Za-z0-9_-]{43}$/u;
+const exact = (v, k, l) => {
+  if (!v || typeof v !== "object" || Array.isArray(v))
+    throw Error(`${l} invalid`);
+  const a = Object.keys(v).sort(),
+    b = [...k].sort();
+  if (a.length !== b.length || a.some((x, i) => x !== b[i]))
+    throw Error(`${l} fields invalid`);
+};
+const hash = (b) => crypto.createHash("sha256").update(b).digest("hex");
+const root = (uid = process.getuid) => {
+  if (typeof uid !== "function" || uid() !== 0)
+    throw Error("physical scenario requires root");
+};
+const mpath = (d) => resolve(join(d, MARKER));
+const write = (p, v, fsImpl = fs) => {
+  const t = `${p}.${process.pid}.tmp`,
+    d = fsImpl.openSync(
+      t,
+      fsImpl.constants.O_WRONLY |
+        fsImpl.constants.O_CREAT |
+        fsImpl.constants.O_EXCL |
+        fsImpl.constants.O_NOFOLLOW,
+      0o600,
+    );
+  try {
+    fsImpl.writeFileSync(d, canonicalJSON(v));
+    fsImpl.fsyncSync(d);
+  } finally {
+    fsImpl.closeSync(d);
+  }
+  fsImpl.renameSync(t, p);
+  const q = fsImpl.openSync(
+    resolve(p, ".."),
+    fsImpl.constants.O_RDONLY |
+      (fsImpl.constants.O_DIRECTORY ?? 0) |
+      fsImpl.constants.O_NOFOLLOW,
+  );
+  try {
+    fsImpl.fsyncSync(q);
+  } finally {
+    fsImpl.closeSync(q);
+  }
+};
+const read = (p, production) => {
+  let s;
+  try {
+    s = readProtectedFile(p, { maximum: 64 * 1024, production });
+  } catch (e) {
+    if (e.message === "protected file is unavailable") return null;
+    throw Error("upgrade marker unsafe");
+  }
+  let v;
+  try {
+    v = JSON.parse(s.bytes);
+  } catch {
+    throw Error("upgrade marker invalid");
+  }
+  if (!s.bytes.equals(canonicalJSON(v)))
+    throw Error("upgrade marker not canonical");
+  exact(
+    v,
+    [
+      "artifact_sha256",
+      "checkpoint_sha256",
+      "key_fingerprint",
+      "phase",
+      "pre_audit_entries",
+      "pre_audit_sha256",
+      "previous_package_sha256",
+      "schema_version",
+      "source_commit",
+      "team_id",
+    ],
+    "upgrade marker",
+  );
+  if (
+    v.schema_version !== 1 ||
+    !["upgrade-started", "upgrade-installed"].includes(v.phase) ||
+    !DIGEST.test(v.artifact_sha256) ||
+    !DIGEST.test(v.checkpoint_sha256) ||
+    !DIGEST.test(v.previous_package_sha256) ||
+    !DIGEST.test(v.pre_audit_sha256) ||
+    !Number.isSafeInteger(v.pre_audit_entries) ||
+    v.pre_audit_entries < 0 ||
+    !COMMIT.test(v.source_commit) ||
+    !TEAM.test(v.team_id) ||
+    !FP.test(v.key_fingerprint)
+  )
+    throw Error("upgrade marker contents invalid");
+  return v;
+};
+const previousConfig = (b, pkgPath, pkgHash, production) => {
+  let v;
+  try {
+    v = JSON.parse(b);
+  } catch {
+    throw Error("previous upgrade config invalid");
+  }
+  exact(
+    v,
+    [
+      "artifact_sha256",
+      "config_sha256",
+      "key_fingerprint",
+      "notarization_ticket_sha256",
+      "package_id",
+      "package_sha256",
+      "schema_version",
+      "source_commit",
+      "team_id",
+    ],
+    "previous upgrade config",
+  );
+  const { config_sha256, ...body } = v;
+  if (
+    v.schema_version !== 1 ||
+    config_sha256 !== hash(canonicalJSON(body)) ||
+    v.package_sha256 !== pkgHash ||
+    !DIGEST.test(v.artifact_sha256) ||
+    !DIGEST.test(config_sha256) ||
+    !DIGEST.test(v.package_sha256) ||
+    !DIGEST.test(v.notarization_ticket_sha256) ||
+    !COMMIT.test(v.source_commit) ||
+    !TEAM.test(v.team_id) ||
+    !FP.test(v.key_fingerprint) ||
+    (production && pkgPath !== PREVIOUS_PKG)
+  )
+    throw Error("previous upgrade config binding invalid");
+  return v;
+};
+const native = async ({
+  machine,
+  action,
+  runPinned,
+  runCommand,
+  production,
+}) => {
+  const r = await runPinned(
+    machine.executables.native_service,
+    ["--device-auth", action, "--config", machine.serviceConfigPath],
+    { production, runCommand },
+  );
+  const o = parseJSONOutput(
+    requireCommandSuccess(r, `native ${action}`),
+    `native ${action}`,
+  );
+  if (o.ok !== true || typeof o.stdout_base64 !== "string")
+    throw Error(`native ${action} failed`);
+  return parseJSONOutput(
+    Buffer.from(o.stdout_base64, "base64"),
+    `native ${action} payload`,
+  );
+};
+const state = async (o) => {
+  const q = await native({ ...o, action: "qualify" });
+  if (
+    q.private_exportable !== false ||
+    q.secure_enclave !== true ||
+    !FP.test(q.public_key_fingerprint)
+  )
+    throw Error("non-exportable key not proven");
+  const k = await native({ ...o, action: "key" });
+  if (
+    k.fingerprint !== q.public_key_fingerprint ||
+    typeof k.public_key_pem !== "string" ||
+    /PRIVATE KEY/iu.test(k.public_key_pem)
+  )
+    throw Error("protected key identity mismatch");
+  const a = await native({ ...o, action: "audit-status" });
+  if (a.valid !== true || !Number.isSafeInteger(a.entries) || a.entries < 0)
+    throw Error("protected audit state invalid");
+  return { key: k.fingerprint, audit: a, auditSha: hash(canonicalJSON(a)) };
+};
+export const performUpgradePreservesState = async ({
+  release,
+  machine,
+  production = true,
+  runCommand = runFixedCommand,
+  runPinned = runPinnedExecutable,
+  getUid = process.getuid,
+  withCheckpoint = withVerifiedCandidateCheckpoint,
+  fileSystem = fs,
+  previousPackagePath = PREVIOUS_PKG,
+  previousConfigPath = PREVIOUS_CONFIG,
+  marker = mpath(machine.checkpointDirectory),
+  readCodeIdentity = readInstalledCodeSignatureIdentity,
+  verifyCheckpoint = verifyCandidateCheckpoint,
+} = {}) => {
+  root(getUid);
+  const checkpoint = join(
+    machine.checkpointDirectory,
+    "candidate-checkpoint.json",
+  );
+  const existing = read(marker, production);
+  const preflight = async () => {
+    if (
+      production &&
+      (previousPackagePath !== PREVIOUS_PKG ||
+        previousConfigPath !== PREVIOUS_CONFIG)
+    )
+      throw Error("previous upgrade inputs must use fixed protected paths");
+    const pkg = readProtectedFile(previousPackagePath, {
+      maximum: 16 * 1024 * 1024 * 1024,
+      production,
+    });
+    const cfg = previousConfig(
+      readProtectedFile(previousConfigPath, {
+        maximum: 64 * 1024,
+        production,
+      }).bytes.toString(),
+      previousPackagePath,
+      pkg.sha256,
+      production,
+    );
+    if (
+      cfg.artifact_sha256 === release.artifactSha256 ||
+      cfg.source_commit === release.sourceCommit
+    )
+      throw Error("previous release is not distinct");
+    for (const [c, a, l] of [
+      [
+        SPCTL,
+        ["--assess", "--type", "install", "--verbose=4", previousPackagePath],
+        "previous notarization",
+      ],
+      [
+        PKGUTIL,
+        ["--check-signature", previousPackagePath],
+        "previous signature",
+      ],
+      [XCRUN, ["stapler", "validate", previousPackagePath], "previous staple"],
+    ])
+      requireCommandSuccess(await runCommand(c, a, { cwd: "/" }), l);
+    const before = existing
+      ? {
+          key: existing.key_fingerprint,
+          auditEntries: existing.pre_audit_entries,
+          auditSha: existing.pre_audit_sha256,
+          checkpointSha: existing.checkpoint_sha256,
+        }
+      : await state({ machine, runPinned, runCommand, production });
+    if (cfg.key_fingerprint !== before.key)
+      throw Error("previous config key identity mismatch");
+    if (!existing)
+      write(
+        marker,
+        {
+          schema_version: 1,
+          phase: "upgrade-started",
+          artifact_sha256: release.artifactSha256,
+          source_commit: release.sourceCommit,
+          team_id: release.teamId,
+          previous_package_sha256: pkg.sha256,
+          checkpoint_sha256: readProtectedFile(checkpoint, {
+            maximum: 64 * 1024,
+            production,
+          }).sha256,
+          key_fingerprint: before.key,
+          pre_audit_entries: before.auditEntries ?? before.audit.entries,
+          pre_audit_sha256: before.auditSha ?? before.auditSha256,
+        },
+        fileSystem,
+      );
+    return { pkg, before };
+  };
+  if (existing) {
+    verifyCheckpoint(checkpoint, {
+      production,
+      expected: {
+        artifactSha256: release.artifactSha256,
+        sourceCommit: release.sourceCommit,
+        teamId: release.teamId,
+        applicationPath: machine.applicationPath,
+      },
+    });
+    const resumedCheckpoint = readProtectedFile(checkpoint, { maximum: 64 * 1024, production });
+    if (resumedCheckpoint.sha256 !== existing.checkpoint_sha256)
+      throw Error("upgrade marker checkpoint binding mismatch");
+  }
+  const { pkg, before } = existing
+    ? await preflight()
+    : await withCheckpoint(checkpoint, preflight, {
+        production,
+        expected: {
+          artifactSha256: release.artifactSha256,
+          sourceCommit: release.sourceCommit,
+          teamId: release.teamId,
+          applicationPath: machine.applicationPath,
+        },
+      });
+  const current = readProtectedFile(release.artifactPath, {
+    maximum: 16 * 1024 * 1024 * 1024,
+    production: false,
+    expectedSha256: release.artifactSha256,
+  });
+  void current;
+  for (const [c, a, l] of [
+    [
+      SPCTL,
+      ["--assess", "--type", "install", "--verbose=4", release.artifactPath],
+      "current notarization",
+    ],
+    [PKGUTIL, ["--check-signature", release.artifactPath], "current signature"],
+    [XCRUN, ["stapler", "validate", release.artifactPath], "current staple"],
+  ])
+    requireCommandSuccess(await runCommand(c, a, { cwd: "/" }), l);
+  requireCommandSuccess(
+    await runCommand(
+      INSTALLER,
+      ["-pkg", release.artifactPath, "-target", "/"],
+      { cwd: "/" },
+    ),
+    "current exact package installation",
+  );
+  const after = await state({ machine, runPinned, runCommand, production });
+  if (after.key !== before.key || after.audit.entries < before.auditEntries)
+    throw Error("protected state was reset");
+  const expected = release.codeIdentities?.find(
+    (x) => x.path === "AgentPass.app",
+  );
+  if (!expected) throw Error("current code identity binding missing");
+  const observed = readCodeIdentity(machine.applicationPath, { production });
+  if (
+    observed.bundle_id !== expected.bundle_id ||
+    observed.team_id !== release.teamId ||
+    observed.code_directory_hash !== expected.code_directory_hash
+  )
+    throw Error("current code identity mismatch");
+  verifyCheckpoint(checkpoint, {
+    production,
+    expected: {
+      artifactSha256: release.artifactSha256,
+      sourceCommit: release.sourceCommit,
+      teamId: release.teamId,
+      applicationPath: machine.applicationPath,
+    },
+  });
+  const cp = readProtectedFile(checkpoint, { maximum: 64 * 1024, production });
+  if (cp.sha256 === before.checkpointSha)
+    throw Error("current checkpoint identity did not change");
+  write(
+    marker,
+    {
+      schema_version: 1,
+      phase: "upgrade-installed",
+      artifact_sha256: release.artifactSha256,
+      source_commit: release.sourceCommit,
+      team_id: release.teamId,
+      previous_package_sha256: pkg.sha256,
+      checkpoint_sha256: cp.sha256,
+      key_fingerprint: after.key,
+      pre_audit_entries: before.auditEntries,
+      pre_audit_sha256: before.auditSha,
+    },
+    fileSystem,
+  );
+  fileSystem.unlinkSync(marker);
+  return TESTS;
+};
+export const executeUpgradePreservesState = (options) =>
+  executePhysicalScenario({
+    gate: GATE,
+    tests: TESTS,
+    ...options,
+    execute: (c) => performUpgradePreservesState(c),
+  });
+if (
+  process.argv[1] &&
+  import.meta.url === pathToFileURL(resolve(process.argv[1])).href
+)
+  await runPhysicalScenario({
+    gate: GATE,
+    tests: TESTS,
+    execute: (c) => performUpgradePreservesState(c),
+  });

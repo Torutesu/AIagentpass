@@ -136,11 +136,17 @@ test("N3-E physical contract freezes the scenario and evidence-verifier inventor
 
   const scenarioDirectory = p0c("scenarios");
   const checkedInScenarioNames = names(scenarioDirectory, (entry) => entry.isFile() && !entry.name.endsWith(".test.mjs"));
-  assert.ok(checkedInScenarioNames.length > 0, "at least one physical scenario implementation must be checked in");
+  assert.deepEqual(checkedInScenarioNames, [...PHYSICAL_SCENARIO_FILES].sort(), "all and only frozen physical scenarios must be implemented");
   for (const scenario of checkedInScenarioNames) {
-    const source = read(`scripts/release/p0c/scenarios/${scenario}`);
+    const scenarioPath = join(scenarioDirectory, scenario);
+    const source = fs.readFileSync(scenarioPath, "utf8");
+    assert.notEqual(fs.statSync(scenarioPath).mode & 0o111, 0, `${scenario} must be executable`);
     assert.match(source, /executePhysicalScenario/u, `${scenario} must use the physical scenario runtime`);
-    assert.doesNotMatch(source, /automaticPresenceSimulation|production\s*:\s*false/iu, `${scenario} contains a simulation shortcut`);
+    if (scenario === "gatekeeper-notarization") assert.match(source, /mintCandidateCheckpoint/u, `${scenario} must mint the candidate checkpoint`);
+    else assert.match(source, /withVerifiedCandidateCheckpoint/u, `${scenario} must verify the candidate checkpoint`);
+    assert.doesNotMatch(source, /automaticPresenceSimulation/iu, `${scenario} contains a simulation shortcut`);
+    assert.doesNotMatch(source, /executePhysicalScenario\s*\(\s*\{[^}]*production\s*:\s*false/iu, `${scenario} disables production enforcement at its entrypoint`);
+    assert.doesNotMatch(source, /\b(?:todo|placeholder|not[- ]implemented)\b/iu, `${scenario} contains unfinished procedure text`);
   }
   assert.match(scenarioRuntime, /if \(production && process\.platform !== 'darwin'\)/u);
   assert.match(scenarioRuntime, /release\.gate !== gate/u);

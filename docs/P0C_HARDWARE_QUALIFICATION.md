@@ -116,13 +116,13 @@ A scenario must perform the physical operation and return this internal protocol
 
 Static configuration, an operator assertion, a prior run, or a result bound to another candidate cannot pass. The checked-in entrypoints and runtime are the trust adapter. The destructive scenario executables are separately provisioned machine procedures and remain physical qualification work until each procedure is implemented, reviewed, and executed on both hardware lanes.
 
-The first three physical procedures are now checked in under `scripts/release/p0c/scenarios`:
+All 16 physical procedure entrypoints are now checked in under `scripts/release/p0c/scenarios`. The initial trust-boundary procedures include:
 
 - `gatekeeper-notarization` performs Gatekeeper assessment, PKG signature and stapler validation, installs the exact bound PKG as root, and revalidates the installed app signature and Team ID;
 - `clean-install-launchd-xpc` verifies root-owned installed components, all relevant code signatures, the system launchd service, and real native-client XPC `ping`/`control-status` calls;
 - `secure-enclave-enrollment` calls the production service's non-creating `--device-auth qualify` probe, proves the fixed P-256 Secure Enclave key is non-exportable and sign-capable, verifies a fresh release-bound possession signature, and requires ControlBundle v2 to expose the same public key.
 
-These procedures cannot pass on injected Linux execution, a non-root runner, a substituted executable, a different device key, an exportable-key claim, or a static operator assertion. The remaining 13 procedures are still open and therefore production provisioning continues to require an externally reviewed exact 16-scenario directory; missing scenario names fail closed.
+The remaining entrypoints cover Cloud possession, negative identity, unattended Claude Code/Cursor signing, policy reduction, offline expiry, revoke/emergency stop, audit upload/Console observation, crash/reboot, sleep/wake/network/clock, upgrade, uninstall/reinstall, and current-user purge. A repository completeness gate requires all 16 names to be executable, runtime-backed, candidate-checkpoint-bound procedures without placeholder paths. They cannot pass on injected Linux execution, a non-root runner, a substituted executable, a different device key, an exportable-key claim, or a static operator assertion. Production qualification remains open until the exact 16-scenario set executes successfully on both protected hardware lanes.
 
 The candidate checkpoint revalidates pinned executable identity before and after each implemented operation. Pinned commands execute from an exclusive root-private immutable copy created from the already verified bytes, so replacing the original pathname after the snapshot cannot change the child image; the copy is reverified and removed after child completion.
 

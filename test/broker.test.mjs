@@ -147,6 +147,8 @@ process.stdin.on("end", () => {
   assert.equal(nativeSession.command, "session-start");
   const revokeSessions = await brokerRequest({ operation: "native.session.revoke" }, { native: { enabled: true, client, mach_service: "dev.agentpass.native" } });
   assert.equal(revokeSessions.command, "session-revoke");
+  const revokeAgentSessions = await brokerRequest({ operation: "native.session.revoke-agent", agent_id: "agent" }, { native: { enabled: true, client, mach_service: "dev.agentpass.native" } });
+  assert.equal(revokeAgentSessions.command, "session-revoke-agent");
   const validateSession = await brokerRequest({ operation: "native.session.validate", agent_id: "agent", session: "token" }, { native: { enabled: true, client, mach_service: "dev.agentpass.native" } });
   assert.equal(validateSession.command, "session-validate");
   const applyControl = await brokerRequest({ operation: "native.control.apply", bundle: { version: 1 } }, { native: { enabled: true, client, mach_service: "dev.agentpass.native" } });

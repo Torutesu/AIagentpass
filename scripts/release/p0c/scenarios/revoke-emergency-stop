@@ -1,0 +1,94 @@
+#!/usr/bin/env node
+import crypto from 'node:crypto';
+import { pathToFileURL } from 'node:url';
+import { join, resolve } from 'node:path';
+import { withVerifiedCandidateCheckpoint } from '../lib/candidate-checkpoint.mjs';
+import { executePhysicalScenario, parseJSONOutput, readProtectedFile, requireCommandSuccess, runFixedCommand, runPinnedExecutable, runPhysicalScenario } from '../lib/scenario-runtime.mjs';
+
+const GATE = 'revoke-emergency-stop';
+const TESTS = Object.freeze(['revoke-denied', 'emergency-stop-denied']);
+const INPUT = '/opt/agentpass/p0c/revoke-emergency-stop.json';
+const SIGNER = '/Applications/AgentPass.app/Contents/Resources/bin/agentpass-git-sign';
+const GIT = '/usr/bin/git';
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u;
+const HASH = /^[0-9a-f]{64}$/u;
+const exact = (value, keys, label) => { if (!value || typeof value !== 'object' || Array.isArray(value) || JSON.stringify(Object.keys(value).sort()) !== JSON.stringify([...keys].sort())) throw new Error(`${label} is not closed`); };
+const root = (uid = process.getuid) => { if (typeof uid !== 'function' || uid() !== 0) throw new Error('physical scenario requires root'); };
+const parsed = (result, label) => parseJSONOutput(requireCommandSuccess(result, label), label);
+const sleep = (ms) => new Promise((resolvePromise) => setTimeout(resolvePromise, ms));
+
+function protectedInput({ machine, production, readConfig }) {
+  const raw = readConfig ? readConfig(INPUT) : parsed({ ok: true, stdout: readProtectedFile(INPUT, { maximum: 64 * 1024, production }).bytes }, 'input');
+  const value = Buffer.isBuffer(raw) ? JSON.parse(raw.toString('utf8')) : raw;
+  exact(value, ['schema_version', 'organization_id', 'device_id', 'agent_id', 'ttl_seconds', 'device_revoke_url', 'emergency_stop_url', 'recovery_url', 'refresh_observation_url', 'reason_prefix'], 'revoke input');
+  if (value.schema_version !== 1 || !UUID.test(value.organization_id) || !UUID.test(value.device_id) || !UUID.test(value.agent_id) || !Number.isSafeInteger(value.ttl_seconds) || value.ttl_seconds < 30 || value.ttl_seconds > 300 || typeof value.reason_prefix !== 'string') throw new Error('revoke input is invalid');
+  for (const [key, path] of [['device_revoke_url', `/v1/organizations/${value.organization_id}/devices/${value.device_id}/revoke`], ['emergency_stop_url', `/v1/organizations/${value.organization_id}/emergency-stop`], ['recovery_url', `/v1/organizations/${value.organization_id}/devices/${value.device_id}/restore`], ['refresh_observation_url', `/v1/organizations/${value.organization_id}/devices/${value.device_id}/refresh`]]) {
+    const url = new URL(value[key]); const probe = new URL(machine.cloudProbeURL);
+    if (url.protocol !== 'https:' || url.username || url.password || url.search || url.hash || url.pathname !== path || url.origin !== probe.origin) throw new Error(`${key} is not a fixed protected HTTPS endpoint`);
+  }
+  return Object.freeze(value);
+}
+
+function nativeEnvelope(result, label) {
+  const value = parsed(result, label); exact(value, ['error', 'ok', 'public_key', 'stdout_base64', 'version'], `${label} envelope`);
+  if (value.ok !== true || typeof value.stdout_base64 !== 'string') throw new Error(`${label} failed`);
+  const bytes = Buffer.from(value.stdout_base64, 'base64'); if (!bytes.length || bytes.toString('base64') !== value.stdout_base64) throw new Error(`${label} payload is invalid`);
+  return JSON.parse(bytes.toString('utf8'));
+}
+const native = async (runPinned, machine, action, options) => nativeEnvelope(await runPinned(machine.executables.native_client, ['--service', machine.serviceLabel, action], options), `native ${action}`);
+
+async function post(fetchImpl, url, body, status, key, label) {
+  const response = await fetchImpl(url, { method: 'POST', headers: { accept: 'application/json', 'content-type': 'application/json', 'idempotency-key': key }, body: JSON.stringify(body), redirect: 'error' });
+  if (response.status !== status) throw new Error(`${label} returned unexpected status`);
+  const bytes = Buffer.from(await response.arrayBuffer()); if (!bytes.length || bytes.length > 128 * 1024) throw new Error(`${label} response is invalid`);
+  return JSON.parse(bytes.toString('utf8'));
+}
+
+const git = (runCommand, repository, args, session, agentId, input) => runCommand(GIT, ['-C', repository, ...args], { cwd: '/', input, sensitiveEnv: { AGENTPASS_SESSION: session, AGENTPASS_AGENT_ID: agentId } });
+
+/** The production adapter executes the real AgentPass Git signer. It never manufactures a decision. */
+export const createDefaultAgentSigner = ({ machine, production, runCommand = runFixedCommand, runPinned = runPinnedExecutable, readSigner = readProtectedFile } = {}) => async ({ session, phase }) => {
+  if (!session?.token || !UUID.test(session.agent_id) || !machine?.testRepository || resolve(machine.testRepository) !== machine.testRepository) throw new Error('real AgentPass signing inputs are unavailable');
+  const before = readSigner(SIGNER, { maximum: 16 * 1024 * 1024, executable: true, production });
+  requireCommandSuccess(await runPinned(machine.executables.native_client, ['--service', machine.serviceLabel, 'ping'], { production, runCommand }), 'pinned native client health');
+  await git(runCommand, machine.testRepository, ['init', '--initial-branch=main'], session.token, session.agent_id).catch(() => undefined);
+  for (const args of [['clean', '-ffdxx'], ['read-tree', '--empty'], ['config', '--local', 'user.name', 'AgentPass P0-C'], ['config', '--local', 'user.email', 'agentpass-p0c@agentpass.invalid'], ['config', '--local', 'gpg.format', 'ssh'], ['config', '--local', 'commit.gpgsign', 'true'], ['config', '--local', 'gpg.ssh.program', SIGNER]]) requireCommandSuccess(await git(runCommand, machine.testRepository, args, session.token, session.agent_id), `Git AgentPass setup ${args[0]}`);
+  const marker = `.agentpass-p0c-${String(phase).replace(/[^A-Za-z0-9._-]/gu, '-')}-${crypto.randomUUID()}.txt`;
+  const blob = requireCommandSuccess(await git(runCommand, machine.testRepository, ['hash-object', '-w', '--stdin'], session.token, session.agent_id, Buffer.from(`AgentPass ${phase}\n`)), 'Git marker').toString('utf8').trim();
+  if (!HASH.test(blob)) throw new Error('Git marker hash is invalid');
+  requireCommandSuccess(await git(runCommand, machine.testRepository, ['update-index', '--add', '--cacheinfo', `100644,${blob},${marker}`], session.token, session.agent_id), 'Git marker staging');
+  const commit = await git(runCommand, machine.testRepository, ['commit', '--no-verify', '-m', `AgentPass P0-C ${phase}`], session.token, session.agent_id);
+  if (!commit.ok) return Object.freeze({ allowed: false, session: null });
+  const head = requireCommandSuccess(await git(runCommand, machine.testRepository, ['rev-parse', '--verify', 'HEAD'], session.token, session.agent_id), 'Git head').toString('utf8').trim();
+  const verified = await git(runCommand, machine.testRepository, ['verify-commit', '--raw', head], session.token, session.agent_id);
+  if (!verified.ok || !/GOOD|Good|ssh signature/iu.test(`${verified.stdout.toString('utf8')}${verified.stderr.toString('utf8')}`)) throw new Error('real AgentPass signature was not independently verified');
+  const after = readSigner(SIGNER, { maximum: 16 * 1024 * 1024, executable: true, production }); if (before.sha256 !== after.sha256) throw new Error('AgentPass signer changed during signing');
+  return Object.freeze({ allowed: true, session: session.token });
+};
+
+async function runPhase({ kind, input, release, machine, production, runCommand, runPinned, fetchImpl, signer, sleepFn }) {
+  const before = await native(runPinned, machine, 'control-status', { production, runCommand });
+  exact(before, ['control_refresh_generation', 'session_generation', 'control_refresh_state', 'control_refresh_last_error', 'control_operational', 'control_expired'], 'control status');
+  const session = await native(runPinned, machine, 'session-start', { production, runCommand, input: Buffer.from(JSON.stringify({ agent_id: input.agent_id, ttl_seconds: input.ttl_seconds })) });
+  exact(session, ['agent_id', 'expires_at', 'token'], 'native session'); if (session.agent_id !== input.agent_id || typeof session.token !== 'string' || !UUID.test(session.agent_id)) throw new Error('session binding is invalid');
+  const baseline = await signer({ machine, session, phase: `${kind}-baseline`, input }); if (baseline.allowed !== true || baseline.session !== session.token) throw new Error(`${kind} real baseline sign was not successful`);
+  const generation = before.control_refresh_generation; const idempotency = `${release.sourceCommit}-${kind}-${crypto.randomUUID()}`;
+  const endpoint = kind === 'revoke' ? input.device_revoke_url : input.emergency_stop_url;
+  const response = await post(fetchImpl, endpoint, { reason: `${input.reason_prefix} ${kind}` }, 201, idempotency, `${kind} operator action`); exact(response, ['revocation'], `${kind} action`);
+  const revocation = response.revocation; if (!UUID.test(revocation.revocation_id) || revocation.status !== 'active' || revocation.sequence < 1 || (kind === 'revoke' ? revocation.target_type !== 'device' || revocation.target_id !== input.device_id : revocation.target_type !== 'organization' || revocation.target_id !== input.organization_id)) throw new Error(`${kind} revocation binding is invalid`);
+  let denied; try { denied = await signer({ machine, session, phase: `${kind}-stale`, input }); } catch { denied = { allowed: false }; }
+  if (denied.allowed !== false || denied.session === session.token) throw new Error(`${kind} stale session bypassed local denial`);
+  let status;
+  for (let attempt = 0; attempt < 20; attempt += 1) { await native(runPinned, machine, 'control-refresh', { production, runCommand }); status = await native(runPinned, machine, 'control-status', { production, runCommand }); if (status.control_refresh_generation > generation && ['idle', 'revoked'].includes(status.control_refresh_state) && status.control_refresh_last_error === null) break; if (attempt === 19) throw new Error(`${kind} refresh/ACK did not converge`); await sleepFn(250); }
+  if (status.control_operational === true || status.control_expired === true) throw new Error(`${kind} local control remained operational`);
+  const valid = await native(runPinned, machine, 'session-validate', { production, runCommand, input: Buffer.from(JSON.stringify({ agent_id: input.agent_id, session: session.token })) }); exact(valid, ['valid'], `${kind} stale session validation`); if (valid.valid !== false) throw new Error(`${kind} stale session remained valid`);
+  const observed = await post(fetchImpl, input.refresh_observation_url, { organization_id: input.organization_id, device_id: input.device_id, after_generation: generation }, 200, `${idempotency}-observe`, `${kind} refresh observation`); exact(observed, ['authority_generation', 'device_id', 'organization_id', 'refresh_state'], `${kind} refresh observation`); if (observed.organization_id !== input.organization_id || observed.device_id !== input.device_id || observed.authority_generation <= generation || !['applied', 'revoked'].includes(observed.refresh_state)) throw new Error(`${kind} Cloud/ACK convergence was not observed`);
+  await native(runPinned, machine, 'session-revoke', { production, runCommand }); return Object.freeze({ revocation });
+}
+
+export const performRevokeEmergencyStop = async ({ release, machine, production = true, runCommand = runFixedCommand, runPinned = runPinnedExecutable, getUid = process.getuid, withCheckpoint = withVerifiedCandidateCheckpoint, readConfig, fetchImpl = fetch, signWithAgent, readSigner = readProtectedFile, sleepFn = sleep } = {}) => {
+  root(getUid);
+  return withCheckpoint(join(machine.checkpointDirectory, 'candidate-checkpoint.json'), async () => { const input = protectedInput({ machine, production, readConfig }); const signer = signWithAgent ?? createDefaultAgentSigner({ machine, production, runCommand, runPinned, readSigner }); await runPhase({ kind: 'revoke', input, release, machine, production, runCommand, runPinned, fetchImpl, signer, sleepFn }); const recovery = await post(fetchImpl, input.recovery_url, { organization_id: input.organization_id, device_id: input.device_id, reason: `${input.reason_prefix} recovery` }, 200, `${release.sourceCommit}-recovery-${crypto.randomUUID()}`, 'revoke recovery'); exact(recovery, ['device_id', 'organization_id', 'status'], 'revoke recovery'); if (recovery.status !== 'active') throw new Error('revoke recovery was not confirmed'); await runPhase({ kind: 'emergency', input, release, machine, production, runCommand, runPinned, fetchImpl, signer, sleepFn }); return TESTS; }, { production, expected: { artifactSha256: release.artifactSha256, sourceCommit: release.sourceCommit, teamId: release.teamId, applicationPath: '/Applications/AgentPass.app' } });
+};
+export const executeRevokeEmergencyStop = (options) => executePhysicalScenario({ gate: GATE, tests: TESTS, ...options, execute: (context) => performRevokeEmergencyStop(context) });
+if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) await runPhysicalScenario({ gate: GATE, tests: TESTS, execute: (context) => performRevokeEmergencyStop(context) });

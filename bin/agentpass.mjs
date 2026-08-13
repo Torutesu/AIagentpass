@@ -23,6 +23,7 @@ import { createNativeSetupHandlers } from "../lib/native-setup-handlers.mjs";
 import { createDeviceEnrollmentSetupHandler } from "../lib/device-enrollment-setup-handler.mjs";
 import { parseControlBundleJson } from "../lib/control-bundle-v2.mjs";
 import { executeProductionUninstall, planProductionUninstall } from "../lib/platform-uninstall.mjs";
+import { runUserStatePurge } from "../lib/platform-user-purge.mjs";
 import { createSetupOrchestrator } from "../lib/setup-orchestrator.mjs";
 import { TEST_COMMIT_VERIFICATION_MARKER, createCompleteSetupHandler, createEditorConnectedHandler, createTestCommitVerifiedHandler } from "../lib/setup-finalization-handlers.mjs";
 import { SETUP_STATES, SetupJournalError, createSetupJournal, loadSetupJournal } from "../lib/setup-journal.mjs";
@@ -363,17 +364,30 @@ async function setupNativeBridge() {
   }
 }
 
-function uninstallProduction() {
-  const allowed = new Set(["--project", "--team-id"]); const flags = new Map(); const switches = new Set();
+async function uninstallProduction() {
+  const allowed = new Set(["--project", "--team-id", "--confirm"]); const flags = new Map(); const switches = new Set();
   for (let index = 0; index < args.length; index += 1) {
     const argument = args[index];
-    if (["--execute", "--system"].includes(argument)) {
-      if (switches.has(argument)) throw new Error("Usage: agentpass uninstall [--project DIR] [--team-id TEAMID] [--execute] [--system]");
+    if (["--execute", "--system", "--purge-user-state"].includes(argument)) {
+      if (switches.has(argument)) throw new Error("Usage: agentpass uninstall [--project DIR] [--team-id TEAMID] [--execute] [--system] | agentpass uninstall --purge-user-state [--confirm PURGE_USER_STATE] [--execute]");
       switches.add(argument); continue;
     }
-    if (!allowed.has(argument) || flags.has(argument) || index + 1 >= args.length || args[index + 1].startsWith("--")) throw new Error("Usage: agentpass uninstall [--project DIR] [--team-id TEAMID] [--execute] [--system]");
+    if (!allowed.has(argument) || flags.has(argument) || index + 1 >= args.length || args[index + 1].startsWith("--")) throw new Error("Usage: agentpass uninstall [--project DIR] [--team-id TEAMID] [--execute] [--system] | agentpass uninstall --purge-user-state [--confirm PURGE_USER_STATE] [--execute]");
     flags.set(argument, args[++index]);
   }
+  if (switches.has("--purge-user-state")) {
+    if (switches.has("--system") || flags.has("--project") || flags.has("--team-id")) throw new Error("--purge-user-state cannot be combined with system uninstall options");
+    const execute = switches.has("--execute");
+    const config = execute ? loadConfig() : null;
+    const result = await runUserStatePurge({ execute, confirm: flags.get("--confirm"), native: config?.native_broker, agentId: config?.default_agent_id, requestNative: brokerRequest });
+    if (!switches.has("--execute")) {
+      console.log(JSON.stringify({ ...result, next: "agentpass uninstall --purge-user-state --confirm PURGE_USER_STATE --execute" }, null, 2));
+      return;
+    }
+    console.log(JSON.stringify(result, null, 2));
+    return;
+  }
+  if (flags.has("--confirm")) throw new Error("--confirm is valid only with --purge-user-state");
   const system = switches.has("--system");
   const configuredTeamId = system ? undefined : loadConfig().native_broker?.team_id;
   const teamId = flags.get("--team-id") ?? configuredTeamId;
@@ -1249,7 +1263,7 @@ function xmlEscape(value) {
 try {
   if (command === "install") installProduction();
   else if (command === "setup") await setupNativeBridge();
-  else if (command === "uninstall") uninstallProduction();
+  else if (command === "uninstall") await uninstallProduction();
   else if (command === "init") init();
   else if (command === "migrate") migrate();
   else if (command === "check") check();

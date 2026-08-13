@@ -693,6 +693,19 @@ case "session-revoke":
         result = dataOutput(data, error: error)
         semaphore.signal()
     }
+case "session-revoke-agent":
+    let request = FileHandle.standardInput.readDataToEndOfFile()
+    guard request.count > 0, request.count <= 16 * 1024,
+          let object = try? JSONSerialization.jsonObject(with: request) as? [String: Any],
+          Set(object.keys) == Set(["agent_id"]),
+          let agentID = object["agent_id"] as? String,
+          !agentID.isEmpty, agentID.utf8.count <= 128 else {
+        emit(Output(ok: false, version: nil, stdout_base64: nil, public_key: nil, error: "Native Agent session revocation request is invalid"), status: 1)
+    }
+    proxy.revokeSessions(agentID: agentID as NSString) { data, error in
+        result = dataOutput(data, error: error)
+        semaphore.signal()
+    }
 case "session-validate":
     let request = FileHandle.standardInput.readDataToEndOfFile()
     guard request.count > 0, request.count <= 16 * 1024,

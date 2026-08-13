@@ -1,0 +1,68 @@
+#!/usr/bin/env node
+import crypto from 'node:crypto';
+import { pathToFileURL } from 'node:url';
+import { join, resolve } from 'node:path';
+import { withVerifiedCandidateCheckpoint } from '../lib/candidate-checkpoint.mjs';
+import { executePhysicalScenario, parseJSONOutput, readProtectedFile, requireCommandSuccess, runFixedCommand, runPinnedExecutable, runPhysicalScenario } from '../lib/scenario-runtime.mjs';
+import { createDefaultAgentSigner } from './revoke-emergency-stop';
+
+const GATE = 'audit-upload-observation';
+const TESTS = Object.freeze(['audit-console-observation']);
+const INPUT = '/opt/agentpass/p0c/audit-upload-observation.json';
+const ZERO = '0'.repeat(64);
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u;
+const HASH = /^[0-9a-f]{64}$/u;
+const SECRET = /(?:private|secret|password|bearer|cookie|credential|token|signature|command)/iu;
+const exact = (value, keys, label) => { if (!value || typeof value !== 'object' || Array.isArray(value) || JSON.stringify(Object.keys(value).sort()) !== JSON.stringify([...keys].sort())) throw new Error(`${label} is not closed`); };
+const root = (uid = process.getuid) => { if (typeof uid !== 'function' || uid() !== 0) throw new Error('physical scenario requires root'); };
+const canonical = (value) => value === null || typeof value !== 'object' ? JSON.stringify(value) : Array.isArray(value) ? `[${value.map(canonical).join(',')}]` : `{${Object.keys(value).sort().map((key) => `${JSON.stringify(key)}:${canonical(value[key])}`).join(',')}}`;
+const digest = (value) => crypto.createHash('sha256').update(canonical(value)).digest('hex');
+const sleep = (ms) => new Promise((resolvePromise) => setTimeout(resolvePromise, ms));
+
+function protectedInput({ machine, production, readConfig }) {
+  const raw = readConfig ? readConfig(INPUT) : readProtectedFile(INPUT, { maximum: 64 * 1024, production }).bytes;
+  const value = Buffer.isBuffer(raw) ? JSON.parse(raw.toString('utf8')) : raw;
+  exact(value, ['schema_version', 'organization_id', 'device_id', 'agent_id', 'ttl_seconds', 'audit_upload_url', 'audit_probe_url', 'repository', 'branch', 'remote'], 'audit input');
+  if (value.schema_version !== 1 || !UUID.test(value.organization_id) || !UUID.test(value.device_id) || !UUID.test(value.agent_id) || !Number.isSafeInteger(value.ttl_seconds) || value.ttl_seconds < 30 || value.ttl_seconds > 300 || typeof value.repository !== 'string' || !value.repository.startsWith('/') || typeof value.branch !== 'string' || typeof value.remote !== 'string' || Object.keys(value).some((key) => SECRET.test(key))) throw new Error('audit input is invalid');
+  if (resolve(value.repository) !== resolve(machine.testRepository)) throw new Error('audit repository is not the fixed qualification repository');
+  for (const key of ['audit_upload_url', 'audit_probe_url']) { const url = new URL(value[key]); if (url.protocol !== 'https:' || url.username || url.password || url.search || url.hash || url.origin !== new URL(machine.cloudProbeURL).origin) throw new Error(`${key} is not a fixed HTTPS probe`); }
+  return Object.freeze(value);
+}
+
+function nativeEnvelope(result, label) { const value = JSON.parse(requireCommandSuccess(result, label).toString('utf8')); exact(value, ['error', 'ok', 'public_key', 'stdout_base64', 'version'], `${label} envelope`); if (value.ok !== true || typeof value.stdout_base64 !== 'string') throw new Error(`${label} failed`); const bytes = Buffer.from(value.stdout_base64, 'base64'); if (!bytes.length || bytes.toString('base64') !== value.stdout_base64) throw new Error(`${label} payload is invalid`); return JSON.parse(bytes.toString('utf8')); }
+const native = async (runPinned, machine, action, options) => nativeEnvelope(await runPinned(machine.executables.native_client, ['--service', machine.serviceLabel, action], options), `native ${action}`);
+
+function readLocalAudit(serviceConfigPath, production, readServiceConfig, readAudit) {
+  const raw = readServiceConfig ? readServiceConfig(serviceConfigPath) : readProtectedFile(serviceConfigPath, { maximum: 256 * 1024, production }).bytes;
+  const config = Buffer.isBuffer(raw) ? JSON.parse(raw.toString('utf8')) : raw; if (typeof config.audit_log_path !== 'string' || !config.audit_log_path.startsWith('/')) throw new Error('native audit log path is not fixed');
+  return readAudit ? readAudit(config.audit_log_path) : readProtectedFile(config.audit_log_path, { maximum: 8 * 1024 * 1024, production }).bytes;
+}
+function auditRecords(bytes) {
+  const lines = Buffer.from(bytes).toString('utf8').split('\n').filter(Boolean); let previous = ZERO; const records = [];
+  for (const line of lines) { let value; try { value = JSON.parse(line); } catch { throw new Error('native audit log is invalid JSON'); } if (!value || value.previous_hash !== previous || !HASH.test(value.hash) || digest(Object.fromEntries(Object.entries(value).filter(([key]) => key !== 'hash'))) !== value.hash) throw new Error('native audit chain is invalid'); previous = value.hash; if (value.operation === 'git.commit.sign') records.push(value); }
+  return Object.freeze({ head: previous, records: Object.freeze(records) });
+}
+function latestSignMetadata(bytes, label) {
+  const records = auditRecords(bytes).records; const value = records.at(-1); if (!value || !UUID.test(value.request_id ?? '') || !HASH.test(value.payload_sha256 ?? '')) throw new Error(`${label} did not expose a native request identity`); return Object.freeze({ request_id: value.request_id, payload_digest: value.payload_sha256 });
+}
+
+async function post(fetchImpl, url, body, status, label) { const response = await fetchImpl(url, { method: 'POST', headers: { accept: 'application/json', 'content-type': 'application/json' }, body: JSON.stringify(body), redirect: 'error' }); if (response.status !== status) throw new Error(`${label} returned unexpected status`); const bytes = Buffer.from(await response.arrayBuffer()); if (!bytes.length || bytes.length > 512 * 1024) throw new Error(`${label} response is invalid`); return JSON.parse(bytes.toString('utf8')); }
+
+export const performAuditUploadObservation = async ({ release, machine, production = true, runCommand = runFixedCommand, runPinned = runPinnedExecutable, getUid = process.getuid, withCheckpoint = withVerifiedCandidateCheckpoint, readConfig, readServiceConfig, readAudit, readSigner, fetchImpl = fetch, signWithAgent, sleepFn = sleep } = {}) => {
+  root(getUid);
+  return withCheckpoint(join(machine.checkpointDirectory, 'candidate-checkpoint.json'), async () => {
+    const input = protectedInput({ machine, production, readConfig }); const baseSigner = signWithAgent ?? createDefaultAgentSigner({ machine, production, runCommand, runPinned, readSigner }); const operationId = `${release.sourceCommit}:${crypto.randomUUID()}`;
+    const session = await native(runPinned, machine, 'session-start', { production, runCommand, input: Buffer.from(JSON.stringify({ agent_id: input.agent_id, ttl_seconds: input.ttl_seconds })) });
+    exact(session, ['agent_id', 'expires_at', 'token'], 'audit native session'); if (session.agent_id !== input.agent_id || typeof session.token !== 'string' || session.token.length < 32) throw new Error('audit session binding is invalid');
+    const allowed = await baseSigner({ machine, session, phase: 'audit-allowed', operationId, input }); const allowedMeta = signWithAgent ? allowed : latestSignMetadata(await readLocalAudit(machine.serviceConfigPath, production, readServiceConfig, readAudit), 'allowed sign');
+    await native(runPinned, machine, 'session-revoke', { production, runCommand });
+    const denied = await baseSigner({ machine, session, phase: 'audit-denied-stale', operationId, deny: true, input }); const deniedMeta = signWithAgent ? denied : latestSignMetadata(await readLocalAudit(machine.serviceConfigPath, production, readServiceConfig, readAudit), 'denied sign');
+    if (!allowed || allowed.allowed !== true || !UUID.test(allowedMeta.request_id) || !HASH.test(allowedMeta.payload_digest) || !denied || denied.allowed !== false || denied.session === session.token || !UUID.test(deniedMeta.request_id) || !HASH.test(deniedMeta.payload_digest)) throw new Error('real AgentPass allow/deny evidence is incomplete');
+    const local = auditRecords(await readLocalAudit(machine.serviceConfigPath, production, readServiceConfig, readAudit)); if (local.records.length < 2) throw new Error('local durable audit is incomplete');
+    const status = await native(runPinned, machine, 'audit-status', { production, runCommand }); if (status.valid !== true || status.head_hash !== local.head || status.entries < local.records.length) throw new Error('native audit status does not match durable audit');
+    const upload = await post(fetchImpl, input.audit_upload_url, { organization_id: input.organization_id, device_id: input.device_id, operation_id: operationId, event_ids: [allowedMeta.request_id, deniedMeta.request_id], local_head_hash: local.head }, 202, 'audit upload'); exact(upload, ['accepted', 'batch_id', 'event_ids', 'operation_id'], 'audit upload response'); if (upload.accepted !== true || upload.operation_id !== operationId || !Array.isArray(upload.event_ids) || upload.event_ids.length !== 2 || upload.event_ids.some((id) => !UUID.test(id))) throw new Error('Cloud did not accept the real audit batch');
+    for (let attempt = 0; attempt < 20; attempt += 1) { const page = await post(fetchImpl, input.audit_probe_url, { organization_id: input.organization_id, device_id: input.device_id, operation_id: operationId }, 200, 'Cloud/Console audit probe'); exact(page, ['device_id', 'events', 'next_cursor', 'operation_id', 'organization_id'], 'audit probe response'); if (page.organization_id !== input.organization_id || page.device_id !== input.device_id || page.operation_id !== operationId || !Array.isArray(page.events)) throw new Error('audit probe binding is invalid'); const events = page.events.map((event) => { if (Object.keys(event).some((key) => SECRET.test(key))) throw new Error('Cloud audit contains a secret-bearing field'); exact(event, ['version', 'event_id', 'request_id', 'agent_id', 'operation', 'decision', 'reason', 'policy_sequence', 'capability_sequence', 'repository', 'branch', 'remote', 'payload_digest', 'device_timestamp', 'previous_hash', 'event_hash'], 'Cloud audit event'); if (!UUID.test(event.event_id) || !UUID.test(event.request_id) || event.agent_id !== input.agent_id || event.operation !== 'git.commit.sign' || !['allow', 'deny', 'error'].includes(event.decision) || event.repository !== input.repository || event.branch !== input.branch || event.remote !== input.remote || !HASH.test(event.payload_digest) || !HASH.test(event.previous_hash) || !HASH.test(event.event_hash) || digest(Object.fromEntries(Object.entries(event).filter(([key]) => key !== 'event_hash'))) !== event.event_hash) throw new Error('Cloud audit event binding/hash is invalid'); return event; }); const selected = events.filter((event) => upload.event_ids.includes(event.event_id)); if (selected.length === 2 && new Set(selected.map((event) => event.event_id)).size === 2 && selected.some((event) => event.decision === 'allow') && selected.some((event) => event.decision !== 'allow')) { const ordered = [...selected].sort((a, b) => a.device_timestamp.localeCompare(b.device_timestamp)); if (ordered[1].previous_hash !== ordered[0].event_hash) throw new Error('Cloud audit order/linkage is invalid'); return TESTS; } if (attempt === 19) throw new Error('Cloud/Console audit observation timed out'); await sleepFn(250); }
+  }, { production, expected: { artifactSha256: release.artifactSha256, sourceCommit: release.sourceCommit, teamId: release.teamId, applicationPath: '/Applications/AgentPass.app' } });
+};
+export const executeAuditUploadObservation = (options) => executePhysicalScenario({ gate: GATE, tests: TESTS, ...options, execute: (context) => performAuditUploadObservation(context) });
+if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) await runPhysicalScenario({ gate: GATE, tests: TESTS, execute: (context) => performAuditUploadObservation(context) });

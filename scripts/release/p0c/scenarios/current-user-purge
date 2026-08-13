@@ -1,0 +1,333 @@
+#!/usr/bin/env node
+import crypto from "node:crypto";
+import fs from "node:fs";
+import { pathToFileURL } from "node:url";
+import { isAbsolute, join, relative, resolve } from "node:path";
+import { withVerifiedCandidateCheckpoint } from "../lib/candidate-checkpoint.mjs";
+import {
+  executePhysicalScenario,
+  parseJSONOutput,
+  readProtectedFile,
+  requireCommandSuccess,
+  runFixedCommand,
+  runPinnedExecutable,
+  runPhysicalScenario,
+} from "../lib/scenario-runtime.mjs";
+const GATE = "current-user-purge";
+const TESTS = Object.freeze(["current-user-purge"]);
+const INPUT = "/opt/agentpass/p0c/current-user-purge.json";
+const SERVICE = "dev.agentpass.native-service";
+const SUDO = "/usr/bin/sudo";
+const CLI = "/usr/local/bin/agentpass";
+const exact = (v, k, l) => {
+  if (
+    !v ||
+    typeof v !== "object" ||
+    Array.isArray(v) ||
+    JSON.stringify(Object.keys(v).sort()) !== JSON.stringify([...k].sort())
+  )
+    throw Error(`${l} schema is invalid`);
+};
+const sha = (v) => crypto.createHash("sha256").update(v).digest("hex");
+const rootOnly = (u = process.getuid) => {
+  if (typeof u !== "function" || u() !== 0)
+    throw Error("physical scenario requires root");
+};
+const ok = (r, l) => requireCommandSuccess(r, l);
+const safe = (v, b, l) => {
+  if (
+    typeof v !== "string" ||
+    !isAbsolute(v) ||
+    resolve(v) !== v ||
+    v.includes("\0")
+  )
+    throw Error(`${l} is invalid`);
+  const r = relative(b, v);
+  if (!r || r === ".." || r.startsWith("../") || isAbsolute(r))
+    throw Error(`${l} escapes target user`);
+  return v;
+};
+const file = (x, t, l, u) => {
+  let s;
+  try {
+    s = x.lstatSync(t);
+  } catch {
+    throw Error(`${l} unavailable`);
+  }
+  if (
+    !s.isFile() ||
+    s.isSymbolicLink() ||
+    s.nlink !== 1 ||
+    (u !== undefined && s.uid !== u)
+  )
+    throw Error(`${l} is not a trusted single-link file`);
+  return {
+    target: t,
+    dev: s.dev,
+    ino: s.ino,
+    size: s.size,
+    digest: sha(x.readFileSync(t)),
+  };
+};
+const same = (x, e, l) => {
+  if (JSON.stringify(file(x, e.target, l)) !== JSON.stringify(e))
+    throw Error(`${l} was replaced concurrently`);
+};
+const gone = (x, t, l) => {
+  try {
+    x.lstatSync(t);
+  } catch (e) {
+    if (e?.code === "ENOENT") return;
+    throw e;
+  }
+  throw Error(`${l} remains after purge`);
+};
+const native = (r, l) => {
+  const v = parseJSONOutput(ok(r, l), l);
+  exact(
+    v,
+    ["error", "ok", "public_key", "stdout_base64", "version"],
+    `${l} envelope`,
+  );
+  if (v.ok !== true || v.error !== null) throw Error(`${l} failed`);
+  return v;
+};
+const payload = (r, l) => {
+  const v = native(r, l);
+  if (typeof v.stdout_base64 !== "string") throw Error(`${l} payload missing`);
+  return parseJSONOutput(Buffer.from(v.stdout_base64, "base64"), l);
+};
+const readInput = ({ production, readConfig }) => {
+  const raw = readConfig
+    ? readConfig(INPUT)
+    : readProtectedFile(INPUT, { maximum: 128 * 1024, production }).bytes;
+  const v = Buffer.isBuffer(raw) ? parseJSONOutput(raw, "purge input") : raw;
+  exact(
+    v,
+    [
+      "schema_version",
+      "target_uid",
+      "target_home",
+      "control_file",
+      "target_files",
+      "agent_id",
+      "ttl_seconds",
+    ],
+    "purge input",
+  );
+  if (
+    v.schema_version !== 1 ||
+    !Number.isSafeInteger(v.target_uid) ||
+    v.target_uid <= 0 ||
+    typeof v.target_home !== "string" ||
+    !isAbsolute(v.target_home) ||
+    typeof v.control_file !== "string" ||
+    !isAbsolute(v.control_file) ||
+    v.control_file.startsWith(`${resolve(v.target_home)}/`) ||
+    typeof v.agent_id !== "string" ||
+    !/^[A-Za-z0-9._:-]{1,128}$/u.test(v.agent_id) ||
+    !Number.isSafeInteger(v.ttl_seconds) ||
+    v.ttl_seconds < 60 ||
+    v.ttl_seconds > 86400 ||
+    !Array.isArray(v.target_files) ||
+    !v.target_files.length ||
+    new Set(v.target_files).size !== v.target_files.length
+  )
+    throw Error("purge input is invalid");
+  const purgeRoot = join(resolve(v.target_home), ".agentpass");
+  for (const p of v.target_files) safe(p, purgeRoot, "target purge path");
+  return v;
+};
+export const performCurrentUserPurge = async ({
+  release,
+  machine,
+  production = true,
+  artifactProduction = production,
+  runCommand = runFixedCommand,
+  runPinned = runPinnedExecutable,
+  getUid = process.getuid,
+  withCheckpoint = withVerifiedCandidateCheckpoint,
+  fileSystem = fs,
+  readConfig,
+  sleepFn = async () => {},
+} = {}) => {
+  rootOnly(getUid);
+  return withCheckpoint(
+    join(machine.checkpointDirectory, "candidate-checkpoint.json"),
+    async () => {
+      const a = readProtectedFile(release.artifactPath, {
+        maximum: 16 * 1024 * 1024 * 1024,
+        production: artifactProduction,
+        expectedSha256: release.artifactSha256,
+      });
+      if (!a.path.endsWith(".pkg"))
+        throw Error("candidate artifact is not a PKG");
+      const i = readInput({ production, readConfig });
+      const home = resolve(i.target_home);
+      const h = fileSystem.lstatSync(home);
+      if (!h.isDirectory() || h.isSymbolicLink() || h.uid !== i.target_uid)
+        throw Error("target user home is not bound");
+      const purgeRoot = join(home, ".agentpass");
+      const targets = i.target_files.map((p) =>
+        safe(p, purgeRoot, "target purge path"),
+      );
+      const control = file(fileSystem, i.control_file, "control user data");
+      const auditBefore = payload(
+        await runPinned(
+          machine.executables.native_client,
+          ["--service", SERVICE, "audit-status"],
+          { production, runCommand },
+        ),
+        "audit before purge",
+      );
+      const authorityBefore = payload(
+        await runPinned(
+          machine.executables.native_client,
+          ["--service", SERVICE, "key-lifecycle-status"],
+          { production, runCommand },
+        ),
+        "authority before purge",
+      );
+      const session = payload(
+        await runPinned(
+          machine.executables.native_client,
+          ["--service", SERVICE, "session-start"],
+          {
+            production,
+            runCommand,
+            input: Buffer.from(
+              JSON.stringify({
+                agent_id: i.agent_id,
+                ttl_seconds: i.ttl_seconds,
+              }),
+            ),
+          },
+        ),
+        "target session",
+      );
+      exact(session, ["agent_id", "expires_at", "token"], "target session");
+      if (
+        session.agent_id !== i.agent_id ||
+        typeof session.token !== "string" ||
+        session.token.length < 32
+      )
+        throw Error("target session binding is invalid");
+      const initial = targets.map((p) =>
+        file(fileSystem, p, "target user state", i.target_uid),
+      );
+      const prefix = [
+        "-n",
+        "-u",
+        `#${i.target_uid}`,
+        "-H",
+        CLI,
+        "uninstall",
+        "--purge-user-state",
+      ];
+      const preview = parseJSONOutput(
+        ok(
+          await runCommand(SUDO, prefix, { cwd: "/" }),
+          "user state purge preview",
+        ),
+        "user state purge preview",
+      );
+      if (preview.operation !== "purge-user-state" || preview.dryRun !== true)
+        throw Error("product purge preview is invalid");
+      const purged = parseJSONOutput(
+        ok(
+          await runCommand(
+            SUDO,
+            [...prefix, "--confirm", "PURGE_USER_STATE", "--execute"],
+            { cwd: "/" },
+          ),
+          "user state purge execution",
+        ),
+        "user state purge execution",
+      );
+      if (
+        purged.operation !== "purge-user-state" ||
+        purged.code !== "USER_STATE_PURGE_COMPLETE" ||
+        purged.removed !== true
+      )
+        throw Error("product purge execution is invalid");
+      const invalid = payload(
+        await runPinned(
+          machine.executables.native_client,
+          ["--service", SERVICE, "session-validate"],
+          {
+            production,
+            runCommand,
+            input: Buffer.from(
+              JSON.stringify({ agent_id: i.agent_id, session: session.token }),
+            ),
+          },
+        ),
+        "purged session validation",
+      );
+      exact(invalid, ["valid"], "purged session validation");
+      if (invalid.valid !== false) throw Error("target session remained valid");
+      for (const p of initial) gone(fileSystem, p.target, "target user state");
+      same(fileSystem, control, "control user data");
+      const auditAfter = payload(
+        await runPinned(
+          machine.executables.native_client,
+          ["--service", SERVICE, "audit-status"],
+          { production, runCommand },
+        ),
+        "audit after purge",
+      );
+      const count = (v) =>
+        Array.isArray(v.events)
+          ? v.events.length
+          : Number.isSafeInteger(v.event_count)
+            ? v.event_count
+            : null;
+      if (
+        count(auditBefore) === null ||
+        count(auditAfter) === null ||
+        count(auditAfter) < count(auditBefore)
+      )
+        throw Error("audit history regressed");
+      const authorityAfter = payload(
+        await runPinned(
+          machine.executables.native_client,
+          ["--service", SERVICE, "key-lifecycle-status"],
+          { production, runCommand },
+        ),
+        "authority after purge",
+      );
+      if (JSON.stringify(authorityAfter) !== JSON.stringify(authorityBefore))
+        throw Error("root authority changed");
+      await sleepFn(0);
+      for (const p of initial)
+        gone(fileSystem, p.target, "target state after recovery");
+      same(fileSystem, control, "control user data after recovery");
+      return TESTS;
+    },
+    {
+      production,
+      expected: {
+        artifactSha256: release.artifactSha256,
+        sourceCommit: release.sourceCommit,
+        teamId: release.teamId,
+        applicationPath: machine.applicationPath,
+      },
+    },
+  );
+};
+export const executeCurrentUserPurge = (options) =>
+  executePhysicalScenario({
+    gate: GATE,
+    tests: TESTS,
+    ...options,
+    execute: (context) => performCurrentUserPurge(context),
+  });
+if (
+  process.argv[1] &&
+  import.meta.url === pathToFileURL(resolve(process.argv[1])).href
+)
+  await runPhysicalScenario({
+    gate: GATE,
+    tests: TESTS,
+    execute: (context) => performCurrentUserPurge(context),
+  });
