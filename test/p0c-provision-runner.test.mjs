@@ -4,12 +4,33 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { REQUIRED_GATES, inspectProvisioningSources, provisionRunner } from '../scripts/release/p0c/provision-runner.mjs';
+import { QUALIFICATION_TOOL_FILES, REQUIRED_GATES, inspectProvisioningSources, provisionRunner, verifyInstalledTree } from '../scripts/release/p0c/provision-runner.mjs';
 import { canonicalJSON } from '../scripts/release/p0c/lib/scenario-runtime.mjs';
 import crypto from 'node:crypto';
 
 const repository = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const sourceRoot = path.join(repository, 'scripts/release/p0c');
+const EXPECTED_QUALIFICATION_TOOL_FILES = Object.freeze([
+  'generate-release-attestation.mjs',
+  'n3e/controller-candidate-contract.mjs',
+  'n3e/controller-identity-contract.mjs',
+  'n3e/materialize-controller-candidate.mjs',
+  'n3e/materialize-qualification-activation.mjs',
+  'n3e/provision-qualification-config.mjs',
+  'n3e/qualification-activation-contract.mjs',
+  'n3e/qualification-scenario-driver.mjs',
+  'n3e/run-protected-qualification.mjs'
+]);
+
+const cloneSourceRoot = () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'agentpass-p0c-source-'));
+  const release = path.join(root, 'release');
+  fs.mkdirSync(release, { mode: 0o755 });
+  fs.cpSync(sourceRoot, path.join(release, 'p0c'), { recursive: true });
+  fs.cpSync(path.join(repository, 'scripts/release/n3e'), path.join(release, 'n3e'), { recursive: true });
+  fs.copyFileSync(path.join(repository, 'scripts/release/generate-release-attestation.mjs'), path.join(release, 'generate-release-attestation.mjs'));
+  return path.join(release, 'p0c');
+};
 
 const makeFixture = () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'agentpass-p0c-provision-'));
@@ -22,6 +43,7 @@ const makeFixture = () => {
 };
 
 test('non-production provisioning atomically installs the exact protected inventory', () => {
+  assert.deepEqual(QUALIFICATION_TOOL_FILES.map(({ installed }) => installed), EXPECTED_QUALIFICATION_TOOL_FILES);
   const fixture = makeFixture(); const result = provisionRunner({ sourceRoot, scenarioDirectory: fixture.scenarios, machineConfigPath: fixture.machineConfig, destinationRoot: fixture.destination, production: false, uid: process.geteuid(), gid: process.getegid() });
   assert.deepEqual({ production: result.production, driver_count: result.driver_count, scenario_count: result.scenario_count }, { production: false, driver_count: 16, scenario_count: 16 });
   assert.deepEqual(fs.readdirSync(path.join(fixture.destination, 'gates')).sort(), [...REQUIRED_GATES]);
@@ -31,12 +53,43 @@ test('non-production provisioning atomically installs the exact protected invent
   assert.equal(fs.existsSync(path.join(fixture.destination, 'scenario-config.json')), true); assert.deepEqual(fs.readdirSync(path.join(fixture.destination, 'lib')).sort(), ['candidate-checkpoint.mjs', 'driver-runtime.mjs', 'scenario-runtime.mjs']);
   assert.equal(result.qualification_tool_path, path.join(fixture.destination, 'qualification-tool/n3e/provision-qualification-config.mjs'));
   assert.equal(result.qualification_orchestrator_path, path.join(fixture.destination, 'qualification-tool/n3e/run-protected-qualification.mjs'));
+  assert.equal(result.qualification_scenario_driver_path, path.join(fixture.destination, 'qualification-tool/n3e/qualification-scenario-driver.mjs'));
   assert.deepEqual(fs.readdirSync(path.join(fixture.destination, 'qualification-tool')).sort(), ['generate-release-attestation.mjs', 'manifest.json', 'n3e']);
-  assert.deepEqual(fs.readdirSync(path.join(fixture.destination, 'qualification-tool/n3e')).sort(), ['controller-candidate-contract.mjs', 'controller-identity-contract.mjs', 'materialize-controller-candidate.mjs', 'provision-qualification-config.mjs', 'run-protected-qualification.mjs']);
+  assert.deepEqual(fs.readdirSync(path.join(fixture.destination, 'qualification-tool/n3e')).sort(), QUALIFICATION_TOOL_FILES.filter(({ installed }) => installed.startsWith('n3e/')).map(({ installed }) => installed.slice('n3e/'.length)));
   const toolManifest = JSON.parse(fs.readFileSync(path.join(fixture.destination, 'qualification-tool/manifest.json'), 'utf8'));
-  assert.equal(toolManifest.schema_version, 1); assert.deepEqual(toolManifest.files.map((item) => item.path), ['generate-release-attestation.mjs', 'n3e/controller-candidate-contract.mjs', 'n3e/controller-identity-contract.mjs', 'n3e/materialize-controller-candidate.mjs', 'n3e/provision-qualification-config.mjs', 'n3e/run-protected-qualification.mjs']);
+  assert.equal(toolManifest.schema_version, 1); assert.deepEqual(toolManifest.files.map((item) => item.path), QUALIFICATION_TOOL_FILES.map(({ installed }) => installed));
+  for (const item of toolManifest.files) assert.equal(item.sha256, crypto.createHash('sha256').update(fs.readFileSync(path.join(fixture.destination, 'qualification-tool', item.path))).digest('hex'));
   assert.equal(result.qualification_tool_manifest_sha256, crypto.createHash('sha256').update(fs.readFileSync(path.join(fixture.destination, 'qualification-tool/manifest.json'))).digest('hex'));
   assert.equal(fs.readdirSync(fixture.parent).some((name) => name.startsWith('.p0c-stage-')), false);
+});
+
+test('qualification driver and activation dependency omission and source substitution are rejected before installation', () => {
+  const fixture = makeFixture();
+  for (const file of ['qualification-scenario-driver.mjs', 'qualification-activation-contract.mjs', 'materialize-qualification-activation.mjs']) {
+    const omittedRoot = cloneSourceRoot();
+    fs.unlinkSync(path.join(path.dirname(omittedRoot), 'n3e', file));
+    assert.throws(() => inspectProvisioningSources({ sourceRoot: omittedRoot, scenarioDirectory: fixture.scenarios, machineConfigPath: fixture.machineConfig, production: false }), /provisioning source is unavailable/);
+
+    const substitutedRoot = cloneSourceRoot();
+    const substituted = path.join(path.dirname(substitutedRoot), 'n3e', file);
+    fs.unlinkSync(substituted);
+    fs.symlinkSync(path.join(path.dirname(substitutedRoot), 'n3e/provision-qualification-config.mjs'), substituted);
+    assert.throws(() => inspectProvisioningSources({ sourceRoot: substitutedRoot, scenarioDirectory: fixture.scenarios, machineConfigPath: fixture.machineConfig, production: false }), /provisioning source is unavailable/);
+  }
+});
+
+test('installed qualification driver and activation dependencies fail closed on omission and substitution', () => {
+  for (const file of ['qualification-scenario-driver.mjs', 'qualification-activation-contract.mjs', 'materialize-qualification-activation.mjs']) {
+    const fixture = makeFixture();
+    provisionRunner({ sourceRoot, scenarioDirectory: fixture.scenarios, machineConfigPath: fixture.machineConfig, destinationRoot: fixture.destination, production: false, uid: process.geteuid(), gid: process.getegid() });
+    const inspected = inspectProvisioningSources({ sourceRoot, scenarioDirectory: fixture.scenarios, machineConfigPath: fixture.machineConfig, production: false });
+    const installed = path.join(fixture.destination, 'qualification-tool/n3e', file);
+    fs.unlinkSync(installed);
+    assert.throws(() => verifyInstalledTree(fixture.destination, inspected, process.geteuid()), /exact inventory/);
+
+    fs.writeFileSync(installed, Buffer.from(`substituted ${file}\n`), { mode: 0o644 });
+    assert.throws(() => verifyInstalledTree(fixture.destination, inspected, process.geteuid()), /digest mismatch/);
+  }
 });
 
 test('provisioning refuses replacement, incomplete scenarios, and unsafe source links', () => {

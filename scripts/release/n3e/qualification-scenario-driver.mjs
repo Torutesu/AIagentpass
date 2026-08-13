@@ -1,11 +1,17 @@
 import crypto from 'node:crypto';
 import { spawn, spawnSync } from 'node:child_process';
+import fs from 'node:fs';
+import { isAbsolute, resolve } from 'node:path';
 import { SCENARIO_PHASE } from './provision-qualification-config.mjs';
+import { QUALIFICATION_ACTIVATION_MAX_BYTES, parseQualificationActivation } from './qualification-activation-contract.mjs';
 
 export const SCENARIOS = Object.freeze(Object.keys(SCENARIO_PHASE));
 export const CONTROLLER_EXECUTABLE_PATH = '/Library/Application Support/AgentPass/Qualification/AgentPassQualificationController.app/Contents/MacOS/agentpass-qualification-controller';
 export const AGENT_HOST_EXECUTABLE_PATH = '/Applications/AgentPass.app/Contents/Library/HelperTools/AgentPassNativeAgentHost.app/Contents/MacOS/agentpass-native-agent-host';
 export const APPROVED_LISTENER_PROBE_PATH = '/opt/agentpass/p0c/probes/controller-approved/AgentPassNegativeXPCProbe.app/Contents/MacOS/agentpass-negative-xpc-probe';
+export const SERVICE_CONFIGURATION_PATH = '/Library/Application Support/AgentPass/native-service.json';
+export const SCENARIO_CONFIGURATION_PATH = '/opt/agentpass/p0c/scenario-config.json';
+export const ACTIVATION_DOCUMENT_PATH = '/private/var/db/agentpass-qualification/activation/activation.json';
 export const AGENT_ACTIVATION_ARGUMENTS = Object.freeze(['qualification-activate']);
 export const LISTENER_PROBE_ARGUMENTS = Object.freeze(['qualification-controller']);
 
@@ -15,6 +21,7 @@ const RECEIPT = /^[0-9a-f]{64}$/u;
 const MAX_OUTPUT_BYTES = 64 * 1024;
 const MAX_LINE_BYTES = 2048;
 const TERMINATION_GRACE_MS = 5_000;
+const UINT32_MAX = 0xffff_ffff;
 
 const fail = (message) => { throw new Error(message); };
 const exactKeys = (value, keys, label) => {
@@ -32,37 +39,127 @@ const parseControllerLine = (line, candidateSHA256, runIDSHA256) => {
   return value;
 };
 
-const defaultStartAgentActivation = () => {
-  const child = spawn(AGENT_HOST_EXECUTABLE_PATH, AGENT_ACTIVATION_ARGUMENTS, {
-    cwd: '/', env: CLEAN_ENVIRONMENT, shell: false, stdio: ['ignore', 'pipe', 'pipe']
-  });
-  let stdoutBytes = 0; let stderrBytes = 0; let settled = false;
-  const completion = new Promise((resolve, reject) => {
-    const failOnce = (message) => { if (!settled) { settled = true; reject(new Error(message)); } };
-    const consume = (stream) => (chunk) => {
-      if (stream === 'stdout') stdoutBytes += chunk.length; else stderrBytes += chunk.length;
-      if (stdoutBytes > MAX_OUTPUT_BYTES || stderrBytes > MAX_OUTPUT_BYTES) {
-        child.kill('SIGKILL');
-        failOnce('agent activation output exceeded its bound');
-      }
-    };
-    child.stdout.on('data', consume('stdout')); child.stderr.on('data', consume('stderr'));
-    child.once('error', () => failOnce('agent activation process failed'));
-    child.once('close', (code, signal) => {
-      if (settled) return;
-      if (stdoutBytes > MAX_OUTPUT_BYTES || stderrBytes > MAX_OUTPUT_BYTES || signal !== null || code !== 0) failOnce('agent activation process failed');
-      else { settled = true; resolve(Object.freeze({ exited: true })); }
-    });
-  });
-  return Object.freeze({ completion, terminate: (signal = 'SIGTERM') => child.kill(signal) });
-};
+const defaultStartAgentActivation = () => startQualificationAgentActivation();
 
 const validateActivationHandle = (handle) => {
   if (!handle || typeof handle !== 'object' || typeof handle.completion?.then !== 'function' || typeof handle.terminate !== 'function') fail('agent activation handle is invalid');
   return handle;
 };
 
+const validateAgentActivationOutput = (bytes) => {
+  const source = bytes.toString('utf8');
+  if (!source.endsWith('\n')) fail('agent activation output is invalid');
+  const lines = source.slice(0, -1).split('\n');
+  if (lines.length !== 2) fail('agent activation output is invalid');
+  const expectedStatuses = ['active', 'closed'];
+  for (let index = 0; index < lines.length; index += 1) {
+    let value;
+    try { value = JSON.parse(lines[index]); } catch { fail('agent activation output is invalid'); }
+    exactKeys(value, ['error', 'ok', 'operation', 'status'], 'agent activation result');
+    if (value.error !== null || value.ok !== true || value.operation !== 'qualification-activate' || value.status !== expectedStatuses[index]) fail('agent activation output is invalid');
+    const canonical = JSON.stringify(Object.fromEntries(Object.keys(value).sort().map((key) => [key, value[key]])));
+    if (canonical !== lines[index]) fail('agent activation output is invalid');
+  }
+};
+
 const delay = (milliseconds) => new Promise((resolvePromise) => setTimeout(resolvePromise, milliseconds));
+
+const identity = (value) => [value.dev, value.ino, value.mode, value.nlink, value.size, value.mtimeNs, value.ctimeNs, value.uid, value.gid].map(String).join(':');
+const canonicalDocument = (value) => Buffer.from(`${JSON.stringify(value, null, 2)}\n`, 'utf8');
+
+const protectedParents = (path, fileSystem, expectedUid) => {
+  let current = resolve(path, '..');
+  for (;;) {
+    const state = fileSystem.lstatSync(current, { bigint: true });
+    if (!state.isDirectory() || state.isSymbolicLink() || state.uid !== BigInt(expectedUid) || (state.mode & 0o022n) !== 0n) fail('qualification activation parent is unsafe');
+    if (current === '/') break;
+    current = resolve(current, '..');
+  }
+};
+
+const openStableFile = (path, { fileSystem, expectedUid, exactMode, maximumBytes, keepOpen = false, production }) => {
+  if (!isAbsolute(path) || resolve(path) !== path) fail('qualification activation path is invalid');
+  if (production) protectedParents(path, fileSystem, expectedUid);
+  let descriptor;
+  try { descriptor = fileSystem.openSync(path, fileSystem.constants.O_RDONLY | fileSystem.constants.O_NOFOLLOW); }
+  catch { fail('qualification activation input is unavailable'); }
+  try {
+    const before = fileSystem.fstatSync(descriptor, { bigint: true });
+    if (!before.isFile() || before.isSymbolicLink?.() || before.uid !== BigInt(expectedUid) || before.nlink !== 1n || (before.mode & 0o7777n) !== BigInt(exactMode) || before.size <= 0n || before.size > BigInt(maximumBytes)) fail('qualification activation input is unsafe');
+    const bytes = Buffer.alloc(Number(before.size)); let offset = 0;
+    while (offset < bytes.length) {
+      const count = fileSystem.readSync(descriptor, bytes, offset, bytes.length - offset, offset);
+      if (count <= 0) fail('qualification activation input changed');
+      offset += count;
+    }
+    const after = fileSystem.fstatSync(descriptor, { bigint: true });
+    if (identity(before) !== identity(after)) fail('qualification activation input changed');
+    if (keepOpen) return { descriptor, bytes };
+    fileSystem.closeSync(descriptor); descriptor = undefined;
+    return { bytes };
+  } finally {
+    if (!keepOpen && descriptor !== undefined) fileSystem.closeSync(descriptor);
+  }
+};
+
+const parseCanonicalConfiguration = (snapshot, label) => {
+  let value;
+  try { value = JSON.parse(snapshot.bytes.toString('utf8')); } catch { fail(`${label} is invalid`); }
+  if (!value || typeof value !== 'object' || Array.isArray(value) || !snapshot.bytes.equals(canonicalDocument(value))) fail(`${label} is invalid`);
+  return value;
+};
+
+export const startQualificationAgentActivation = ({
+  spawnProcess = spawn, fileSystem = fs, platform = process.platform, effectiveUID = process.geteuid?.(), production = true,
+  serviceConfigurationPath = SERVICE_CONFIGURATION_PATH, scenarioConfigurationPath = SCENARIO_CONFIGURATION_PATH,
+  activationDocumentPath = ACTIVATION_DOCUMENT_PATH
+} = {}) => {
+  if (production && (platform !== 'darwin' || effectiveUID !== 0 || serviceConfigurationPath !== SERVICE_CONFIGURATION_PATH || scenarioConfigurationPath !== SCENARIO_CONFIGURATION_PATH || activationDocumentPath !== ACTIVATION_DOCUMENT_PATH)) fail('production qualification activation requires root on macOS and fixed paths');
+  const expectedUid = production ? 0 : effectiveUID;
+  if (!Number.isSafeInteger(expectedUid) || expectedUid < 0 || expectedUid > UINT32_MAX) fail('qualification activation identity is invalid');
+  const service = parseCanonicalConfiguration(openStableFile(serviceConfigurationPath, { fileSystem, expectedUid, exactMode: 0o600, maximumBytes: 1024 * 1024, production }), 'qualification service configuration');
+  const runnerUID = service.allowed_client_uid;
+  if (!Number.isSafeInteger(runnerUID) || runnerUID <= 0 || runnerUID >= UINT32_MAX) fail('qualification runner identity is invalid');
+  const scenario = parseCanonicalConfiguration(openStableFile(scenarioConfigurationPath, { fileSystem, expectedUid, exactMode: 0o644, maximumBytes: 1024 * 1024, production }), 'qualification scenario configuration');
+  const repository = scenario.test_repository;
+  if (scenario.schema_version !== 1 || typeof repository !== 'string' || !isAbsolute(repository) || resolve(repository) !== repository || fileSystem.realpathSync(repository) !== repository) fail('qualification repository is invalid');
+  const repositoryState = fileSystem.lstatSync(repository, { bigint: true });
+  if (!repositoryState.isDirectory() || repositoryState.isSymbolicLink() || repositoryState.uid !== BigInt(runnerUID) || (repositoryState.mode & 0o022n) !== 0n) fail('qualification repository is unsafe');
+
+  const activation = openStableFile(activationDocumentPath, { fileSystem, expectedUid, exactMode: 0o600, maximumBytes: QUALIFICATION_ACTIVATION_MAX_BYTES, keepOpen: true, production });
+  try { parseQualificationActivation(activation.bytes); }
+  catch { fileSystem.closeSync(activation.descriptor); fail('qualification activation document is invalid'); }
+
+  let child;
+  try {
+    child = spawnProcess(AGENT_HOST_EXECUTABLE_PATH, AGENT_ACTIVATION_ARGUMENTS, {
+      cwd: repository, env: CLEAN_ENVIRONMENT, shell: false,
+      stdio: ['ignore', 'pipe', 'pipe', activation.descriptor], uid: runnerUID, gid: Number(repositoryState.gid)
+    });
+  } catch {
+    fileSystem.closeSync(activation.descriptor);
+    fail('agent activation process failed');
+  }
+  fileSystem.closeSync(activation.descriptor);
+  if (!child || typeof child.once !== 'function' || typeof child.kill !== 'function' || typeof child.stdout?.on !== 'function' || typeof child.stderr?.on !== 'function') fail('agent activation process failed');
+  let stdoutBytes = 0; let stderrBytes = 0; let settled = false; const stdoutChunks = [];
+  const completion = new Promise((resolveCompletion, rejectCompletion) => {
+    const rejectOnce = () => { if (!settled) { settled = true; rejectCompletion(new Error('agent activation process failed')); } };
+    const consume = (stream) => (chunk) => {
+      if (stream === 'stdout') { stdoutBytes += chunk.length; stdoutChunks.push(Buffer.from(chunk)); } else stderrBytes += chunk.length;
+      if (stdoutBytes > MAX_OUTPUT_BYTES || stderrBytes > MAX_OUTPUT_BYTES) { child.kill('SIGKILL'); rejectOnce(); }
+    };
+    child.stdout.on('data', consume('stdout')); child.stderr.on('data', consume('stderr'));
+    child.once('error', rejectOnce);
+    child.once('close', (code, closeSignal) => {
+      if (settled) return;
+      if (code !== 0 || closeSignal !== null || stderrBytes !== 0) { rejectOnce(); return; }
+      try { validateAgentActivationOutput(Buffer.concat(stdoutChunks, stdoutBytes)); } catch { rejectOnce(); return; }
+      settled = true; resolveCompletion(Object.freeze({ exited: true }));
+    });
+  });
+  return Object.freeze({ completion, terminate: (terminationSignal = 'SIGTERM') => child.kill(terminationSignal) });
+};
 
 export const executeQualification = ({
   scenario, phase, candidateSHA256, runIDSHA256, signal,
@@ -112,6 +209,7 @@ export const executeQualification = ({
   child.once('close', (code, closeSignal) => {
     if (settled) return;
     if (code !== 0 || closeSignal !== null || pending.length !== 0 || transcript.length !== 3 || !activationStarted) { rejectOnce(); return; }
+    try { activationHandle.terminate('SIGTERM'); } catch { rejectOnce(); return; }
     activationHandle.completion.then(() => {
       if (settled) return;
       settled = true;

@@ -239,7 +239,10 @@ jobs:
             ['n3e/controller-candidate-contract.mjs', 'scripts/release/n3e/controller-candidate-contract.mjs'],
             ['n3e/controller-identity-contract.mjs', 'scripts/release/n3e/controller-identity-contract.mjs'],
             ['n3e/materialize-controller-candidate.mjs', 'scripts/release/n3e/materialize-controller-candidate.mjs'],
+            ['n3e/materialize-qualification-activation.mjs', 'scripts/release/n3e/materialize-qualification-activation.mjs'],
             ['n3e/provision-qualification-config.mjs', 'scripts/release/n3e/provision-qualification-config.mjs'],
+            ['n3e/qualification-activation-contract.mjs', 'scripts/release/n3e/qualification-activation-contract.mjs'],
+            ['n3e/qualification-scenario-driver.mjs', 'scripts/release/n3e/qualification-scenario-driver.mjs'],
             ['n3e/run-protected-qualification.mjs', 'scripts/release/n3e/run-protected-qualification.mjs']
           ];
           const safe = (file, directory = false) => {
@@ -529,7 +532,10 @@ jobs:
             ['n3e/controller-candidate-contract.mjs', 'scripts/release/n3e/controller-candidate-contract.mjs'],
             ['n3e/controller-identity-contract.mjs', 'scripts/release/n3e/controller-identity-contract.mjs'],
             ['n3e/materialize-controller-candidate.mjs', 'scripts/release/n3e/materialize-controller-candidate.mjs'],
+            ['n3e/materialize-qualification-activation.mjs', 'scripts/release/n3e/materialize-qualification-activation.mjs'],
             ['n3e/provision-qualification-config.mjs', 'scripts/release/n3e/provision-qualification-config.mjs'],
+            ['n3e/qualification-activation-contract.mjs', 'scripts/release/n3e/qualification-activation-contract.mjs'],
+            ['n3e/qualification-scenario-driver.mjs', 'scripts/release/n3e/qualification-scenario-driver.mjs'],
             ['n3e/run-protected-qualification.mjs', 'scripts/release/n3e/run-protected-qualification.mjs']
           ];
           const safe = (file, directory = false) => {

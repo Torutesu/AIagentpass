@@ -1,17 +1,25 @@
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import test from 'node:test';
 
+import { canonicalQualificationActivation } from './qualification-activation-contract.mjs';
 import {
+  ACTIVATION_DOCUMENT_PATH,
   AGENT_ACTIVATION_ARGUMENTS,
   AGENT_HOST_EXECUTABLE_PATH,
   APPROVED_LISTENER_PROBE_PATH,
   CONTROLLER_EXECUTABLE_PATH,
   LISTENER_PROBE_ARGUMENTS,
+  SCENARIO_CONFIGURATION_PATH,
+  SERVICE_CONFIGURATION_PATH,
   SCENARIOS,
   disarmQualification,
   executeQualification,
-  proveQualificationListenerUnavailable
+  proveQualificationListenerUnavailable,
+  startQualificationAgentActivation
 } from './qualification-scenario-driver.mjs';
 
 const DIGEST_A = 'a'.repeat(64);
@@ -68,8 +76,62 @@ test('the scenario inventory and executable bindings are closed constants', () =
   assert.equal(CONTROLLER_EXECUTABLE_PATH, '/Library/Application Support/AgentPass/Qualification/AgentPassQualificationController.app/Contents/MacOS/agentpass-qualification-controller');
   assert.equal(AGENT_HOST_EXECUTABLE_PATH, '/Applications/AgentPass.app/Contents/Library/HelperTools/AgentPassNativeAgentHost.app/Contents/MacOS/agentpass-native-agent-host');
   assert.equal(APPROVED_LISTENER_PROBE_PATH, '/opt/agentpass/p0c/probes/controller-approved/AgentPassNegativeXPCProbe.app/Contents/MacOS/agentpass-negative-xpc-probe');
+  assert.equal(SERVICE_CONFIGURATION_PATH, '/Library/Application Support/AgentPass/native-service.json');
+  assert.equal(SCENARIO_CONFIGURATION_PATH, '/opt/agentpass/p0c/scenario-config.json');
+  assert.equal(ACTIVATION_DOCUMENT_PATH, '/private/var/db/agentpass-qualification/activation/activation.json');
   assert.deepEqual([...AGENT_ACTIVATION_ARGUMENTS], ['qualification-activate']);
   assert.deepEqual([...LISTENER_PROBE_ARGUMENTS], ['qualification-controller']);
+});
+
+test('the real activation launcher passes the protected document only through fd 3 as the repository owner', async () => {
+  const directory = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'agentpass-activation-driver-')));
+  try {
+    const repository = path.join(directory, 'repository');
+    const servicePath = path.join(directory, 'service.json');
+    const scenarioPath = path.join(directory, 'scenario.json');
+    const activationPath = path.join(directory, 'activation.json');
+    fs.mkdirSync(repository, { mode: 0o700 });
+    const owner = fs.lstatSync(repository);
+    fs.writeFileSync(servicePath, `${JSON.stringify({ allowed_client_uid: owner.uid }, null, 2)}\n`, { mode: 0o600 });
+    fs.writeFileSync(scenarioPath, `${JSON.stringify({ schema_version: 1, test_repository: repository }, null, 2)}\n`, { mode: 0o644 });
+    const activationBytes = canonicalQualificationActivation({
+      schema_version: 1,
+      agent_id: '12345678-1234-4123-8123-123456789abc',
+      agent_kind: 'claude_code',
+      requested_ttl_seconds: 60,
+      proof: '{"grant":"xxxxxxxxxxxxxxxx"}'
+    });
+    fs.writeFileSync(activationPath, activationBytes, { mode: 0o600 });
+    fs.chmodSync(servicePath, 0o600); fs.chmodSync(scenarioPath, 0o644); fs.chmodSync(activationPath, 0o600);
+
+    const child = fakeChild(); let invocation;
+    const handle = startQualificationAgentActivation({
+      production: false, platform: process.platform, effectiveUID: process.geteuid(),
+      serviceConfigurationPath: servicePath, scenarioConfigurationPath: scenarioPath, activationDocumentPath: activationPath,
+      spawnProcess(command, args, options) {
+        invocation = { command, args, options, descriptorBytes: fs.readFileSync(options.stdio[3]) };
+        queueMicrotask(() => {
+          child.stdout.emit('data', Buffer.from('{"error":null,"ok":true,"operation":"qualification-activate","status":"active"}\n{"error":null,"ok":true,"operation":"qualification-activate","status":"closed"}\n'));
+          child.emit('close', 0, null);
+        });
+        return child;
+      }
+    });
+    await handle.completion;
+    assert.equal(invocation.command, AGENT_HOST_EXECUTABLE_PATH);
+    assert.deepEqual(invocation.args, ['qualification-activate']);
+    assert.equal(invocation.options.cwd, repository);
+    assert.equal(invocation.options.shell, false);
+    assert.equal(invocation.options.uid, owner.uid);
+    assert.equal(invocation.options.gid, owner.gid);
+    assert.equal(invocation.options.env.AGENTPASS_SECRET, undefined);
+    assert.deepEqual(invocation.options.stdio.slice(0, 3), ['ignore', 'pipe', 'pipe']);
+    assert.ok(Number.isInteger(invocation.options.stdio[3]));
+    assert.deepEqual(invocation.descriptorBytes, activationBytes);
+    assert.throws(() => fs.fstatSync(invocation.options.stdio[3]), /bad file descriptor/iu);
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
 });
 
 test('the driver accepts exactly armed, fired, disarmed and waits for Agent Host exit', async () => {
@@ -103,6 +165,7 @@ test('the driver accepts exactly armed, fired, disarmed and waits for Agent Host
   assert.equal(calls[0].options.shell, false);
   assert.deepEqual(calls[0].options.stdio, ['ignore', 'pipe', 'pipe']);
   assert.deepEqual(calls[1], { signal: controller.signal, scenario: EXPECTED_SCENARIOS[0], phase: 'pre-cloud', candidateSHA256: DIGEST_A, runIDSHA256: DIGEST_B });
+  assert.deepEqual(activation.signals, ['SIGTERM']);
 });
 
 test('the driver rejects invalid order, digest binding, and early clean exit', async () => {
