@@ -18,7 +18,9 @@ Three physical scenarios are implemented:
 
 The remaining 13 scenarios are not production-qualified. A passing modeled test, simulator test, ad-hoc signed build, or operator assertion cannot replace execution of the exact scenario on both protected hardware lanes.
 
-The process-bound Agent-session foundation now also includes the frozen Human Grant and Device Lease contracts, PostgreSQL-backed issuance/consumption, a split privileged Agent XPC service, a fixed-FD activation document, and a signed Agent Host lifecycle. The protected qualification runner now has a candidate-checkpoint-bound release trust, fixed root release staging, one-shot root-private input consumption, per-step run-binding materialization, durable fired-evidence recovery across daemon loss, bounded Controller/Agent Host supervision, and a seven-step unarmed-plus-six-scenario suite. Both hardware lanes pin and invoke the installed composition and fail when the protected seven-Grant inbox is absent. These changes are locally verified only: the Device API relay that writes that inbox and execution on both physical lanes remain open, and none of these local or modeled results is physical-release evidence.
+The process-bound Agent-session foundation now also includes the frozen Human Grant and Device Lease contracts, PostgreSQL-backed issuance/consumption, a split privileged Agent XPC service, a fixed-FD activation document, and a signed Agent Host lifecycle. The protected qualification runner now has a candidate-checkpoint-bound release trust, fixed root release staging, one-shot root-private input consumption, per-step run-binding materialization, durable fired-evidence recovery across daemon loss, bounded Controller/Agent Host supervision, and a seven-step unarmed-plus-six-scenario suite. Both hardware lanes pin and invoke the installed composition and fail when the protected seven-Grant inbox is absent.
+
+The qualification relay contract is now implemented locally: Human/WebAuthn authorization returns public metadata only; a purpose-separated Cloud-signed manifest binds the exact ordered seven existing Agent Session Grants; the Device API authenticates the raw claim, verifies both Grant and manifest signatures, and delegates atomic one-shot/exact-retry state to PostgreSQL; the macOS client validates HTTPS, the signed response, and every binding; and the root relay publishes one canonical suite inbox without putting proof bytes in argv, environment, or logs. Secret-free suite evidence has a closed canonical schema. Production runtime composition, packaged native invocation, report integration, and execution on both physical lanes remain open, so none of these local results is physical-release evidence.
 
 ## 2. Delivery rule
 
@@ -254,7 +256,7 @@ The slice is complete only when all adversarial relay/report/recovery tests pass
 
 ### Wave 1 — protected qualification closure
 
-Implementation status (2026-08-14): the fixed `run`/`recover` entrypoint, root-private input/inbox materializers, candidate-checkpoint-bound release trust and staging, per-step run-binding lifecycle, six-scenario driver, daemon-restart receipt recovery, Controller durable-receipt preference, seven-distinct-Grant suite, package inventory, immutable workflow preflight, and installed workflow invocation are implemented and locally verified. The remaining closure work is to implement the authenticated Device API relay that writes the fixed root inbox, complete release-stage recovery/cleanup qualification, retain schema-validated suite evidence in the lane report, and execute the exact flow on both protected Mac lanes.
+Implementation status (2026-08-14): the fixed `run`/`recover` entrypoint, root-private input/inbox materializers, candidate-checkpoint-bound release trust and staging, per-step run-binding lifecycle, six-scenario driver, daemon-restart receipt recovery, Controller durable-receipt preference, seven-distinct-Grant suite, package inventory, immutable workflow preflight, installed workflow invocation, qualification Human/Device API contracts, purpose-separated signed batch manifest, macOS response verifier, root relay, and canonical suite-evidence record are implemented and locally verified. The remaining closure work is production runtime/KMS composition, packaging the fixed native relay client, binding suite evidence into the signed lane report, release-stage recovery/cleanup qualification, and exact execution on both protected Mac lanes.
 
 Implementation:
 
@@ -276,11 +278,12 @@ Dependencies: the notarized candidate checkpoint, protected runner entitlement, 
 
 Immediate remaining gates:
 
-1. implement a device-authenticated relay that issues seven independent Grants and atomically writes the closed suite document to `/private/var/db/agentpass-qualification/input.inbox.json` without exposing proof bytes to workflow argv, environment, logs, or artifacts;
-2. bind the suite digest and seven public step digests into the canonical hardware report and independent verifier rather than relying on workflow log output;
-3. finish release-stage recovery and prove interruption behavior at every release copy/trust publication, input publication, run-binding, receipt, restart, disarm, restore, and cleanup boundary;
-4. execute the exact source commit and notarized PKG on Apple Silicon and Intel T2 lanes and retain the untouched signed reports;
-5. only after both reports independently validate, change the six scenarios and unarmed control from locally verified to physically qualified.
+1. compose the qualification repository, Human API, Device API, purpose-separated KMS signer, and pinned verification keys in the hosted runtime; add readiness and rotation checks that fail closed when either Grant or manifest verification is unavailable;
+2. package a fixed signed native executable around `NativeQualificationGrantBatchHTTPClient`, call it from the root relay without mutable executable selection, and prove that cookies, browser sessions, bearer credentials, proof bytes, and private keys never cross the boundary;
+3. bind the suite digest and seven public step digests into the canonical hardware report and independent verifier rather than relying on workflow log output;
+4. finish release-stage recovery and prove interruption behavior at every release copy/trust publication, input publication, run-binding, receipt, restart, disarm, restore, and cleanup boundary;
+5. execute the exact source commit and notarized PKG on Apple Silicon and Intel T2 lanes and retain the untouched signed reports;
+6. only after both reports independently validate, change the six scenarios and unarmed control from locally verified to physically qualified.
 
 ### Wave 2 — first usable Claude Code path
 

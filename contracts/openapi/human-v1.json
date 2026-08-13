@@ -572,6 +572,41 @@
         }
       }
     },
+    "/organizations/{organization_id}/agents/{agent_id}/qualification-grant-batches": {
+      "post": {
+        "operationId": "issueQualificationGrantBatch",
+        "summary": "Authorize a seven-step qualification Grant batch",
+        "description": "Authorizes one device-bound qualification batch for the exact organization and agent in the path. The authenticated human must have an admin role and a fresh, operation-bound WebAuthn authorization. The response is deliberately limited to public batch metadata; it never contains an Agent Session Grant, the signed qualification manifest, private key material, a session token, or a reusable bearer credential. The device receives the authority-bearing manifest only through the separately device-authenticated claim endpoint.",
+        "security": [{ "humanSession": [], "recentWebAuthn": [] }],
+        "parameters": [
+          { "$ref": "#/components/parameters/OrganizationId" },
+          { "$ref": "#/components/parameters/AgentId" },
+          { "$ref": "#/components/parameters/CsrfToken" },
+          { "$ref": "#/components/parameters/IdempotencyKey" }
+        ],
+        "requestBody": { "$ref": "#/components/requestBodies/IssueQualificationGrantBatch" },
+        "x-agentpass-contract-status": "frozen-qualification-batch-v1",
+        "x-agentpass-runtime-path": "/api/v1/organizations/{organization_id}/agents/{agent_id}/qualification-grant-batches",
+        "x-agentpass-tenant-scope": { "kind": "organization", "source": "path.organization_id", "cross-tenant-disclosure": false, "additionalProperties": false },
+        "x-agentpass-agent-scope": { "kind": "agent", "source": "path.agent_id", "cross-agent-disclosure": false, "additionalProperties": false },
+        "x-agentpass-minimum-role": "admin",
+        "x-agentpass-recent-auth-operation": "qualification.grant_batch.issue",
+        "x-agentpass-idempotency": { "same-key-same-canonical-request": "return-original-public-metadata", "same-key-different-canonical-request": "idempotency_key_reused", "additionalProperties": false },
+        "x-agentpass-authority": { "grant-count": 7, "manifest": "issued only to the device claim boundary", "human-response": "public-metadata-only", "private-material": "never-returned", "additionalProperties": false },
+        "responses": {
+          "201": { "$ref": "#/components/responses/QualificationGrantBatchIssued" },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "409": { "$ref": "#/components/responses/IdempotencyConflict" },
+          "422": { "$ref": "#/components/responses/ValidationError" },
+          "429": { "$ref": "#/components/responses/TooManyRequests" },
+          "500": { "$ref": "#/components/responses/InternalError" },
+          "503": { "$ref": "#/components/responses/InternalError" }
+        }
+      }
+    },
     "/organizations/{organization_id}/emergency-stop": {
       "post": {
         "operationId": "emergencyStop",
@@ -751,6 +786,11 @@
         "required": true,
         "description": "The request contains only grant issuance intent. organization_id and agent_id are taken from the path; signed authority fields such as grant_id, issuer, key_id, signature, not-before, expiry, and control sequence are Cloud-assigned and cannot be supplied by the caller.",
         "content": { "application/json": { "schema": { "$ref": "#/components/schemas/AgentSessionGrantIssueRequest" } } }
+      },
+      "IssueQualificationGrantBatch": {
+        "required": true,
+        "description": "The request contains public release bindings and the existing Agent Session Grant issuance intent. The organization_id and agent_id are taken from the path. Cloud allocates the seven grant identities, validity window, control bindings, and the purpose-separated manifest; those authority fields cannot be supplied by the caller.",
+        "content": { "application/json": { "schema": { "$ref": "#/components/schemas/QualificationGrantBatchIssueRequest" } } }
       }
     },
     "responses": {
@@ -808,6 +848,11 @@
         "description": "A Cloud-signed Agent Session Grant was issued or returned as the exact idempotent retry result. The response is no-store and never contains private key material, a session token, a WebAuthn assertion, or a reusable bearer credential.",
         "headers": { "Cache-Control": { "required": true, "schema": { "type": "string", "const": "no-store, max-age=0" } } },
         "content": { "application/json": { "schema": { "$ref": "#/components/schemas/AgentSessionGrantIssuedResponse" } } }
+      },
+      "QualificationGrantBatchIssued": {
+        "description": "Public qualification batch metadata was issued or returned as the exact idempotent retry result. The response is no-store and contains no Agent Session Grant, signed manifest, private key material, session token, or reusable bearer credential.",
+        "headers": { "Cache-Control": { "required": true, "schema": { "type": "string", "const": "no-store, max-age=0" } } },
+        "content": { "application/json": { "schema": { "$ref": "#/components/schemas/QualificationGrantBatchIssueResponse" } } }
       },
       "BadRequest": { "description": "Malformed request or missing browser security header", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorEnvelope" } } } },
       "Unauthorized": { "description": "No valid humanSession", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorEnvelope" } } } },
@@ -875,6 +920,7 @@
         }
       },
       "AgentSessionGrantV1": { "$ref": "../schemas/agent-session-grant-v1.schema.json" },
+      "QualificationGrantBatchV1": { "$ref": "../schemas/qualification-grant-batch-v1.schema.json" },
       "AgentSessionGrantIssueRequest": {
         "type": "object",
         "additionalProperties": false,
@@ -900,6 +946,33 @@
         "properties": {
           "grant": { "$ref": "#/components/schemas/AgentSessionGrantV1" },
           "request_id": { "$ref": "#/components/schemas/RequestId" }
+        }
+      },
+      "QualificationGrantBatchIssueRequest": {
+        "type": "object",
+        "additionalProperties": false,
+        "maxProperties": 7,
+        "required": ["artifact_sha256", "candidate_checkpoint_sha256", "candidate_sha256", "grant_intent", "release_trust_sha256", "source_commit", "team_id"],
+        "description": "Qualification request intent only. Cloud derives the batch and Grant identities, exact seven-step order, timestamps, control bindings, issuer, key identifiers, statement hashes, signatures, and manifest.",
+        "properties": {
+          "artifact_sha256": { "type": "string", "minLength": 64, "maxLength": 64, "pattern": "^[0-9a-f]{64}$" },
+          "candidate_checkpoint_sha256": { "type": "string", "minLength": 64, "maxLength": 64, "pattern": "^[0-9a-f]{64}$" },
+          "candidate_sha256": { "type": "string", "minLength": 64, "maxLength": 64, "pattern": "^[0-9a-f]{64}$" },
+          "grant_intent": { "$ref": "#/components/schemas/AgentSessionGrantIssueRequest" },
+          "release_trust_sha256": { "type": "string", "minLength": 64, "maxLength": 64, "pattern": "^[0-9a-f]{64}$" },
+          "source_commit": { "type": "string", "minLength": 40, "maxLength": 40, "pattern": "^[0-9a-f]{40}$" },
+          "team_id": { "type": "string", "minLength": 10, "maxLength": 10, "pattern": "^[A-Z0-9]{10}$" }
+        }
+      },
+      "QualificationGrantBatchIssueResponse": {
+        "type": "object",
+        "additionalProperties": false,
+        "maxProperties": 3,
+        "required": ["batch", "request_id"],
+        "properties": {
+          "batch": { "$ref": "#/components/schemas/QualificationGrantBatchV1" },
+          "request_id": { "$ref": "#/components/schemas/RequestId" },
+          "replayed": { "const": true }
         }
       },
       "DeviceRefreshRequestResult": {

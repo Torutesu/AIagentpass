@@ -1,0 +1,22 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agentpass.dev/contracts/qualification-grant-batch-claim-v1.schema.json",
+  "title": "AgentPass qualification Grant batch claim v1",
+  "description": "Exactly the public candidate and release bindings authenticated by the enrolled device when claiming one operator-authorized seven-Grant qualification batch. organization_id, device_id, and batch_id are path/authentication bindings and are intentionally excluded from this body; Grants, the signed manifest, signatures, private keys, and nonces are forbidden.",
+  "type": "object",
+  "additionalProperties": false,
+  "maxProperties": 7,
+  "required": ["schema_version", "candidate_sha256", "artifact_sha256", "source_commit", "team_id", "release_trust_sha256", "candidate_checkpoint_sha256"],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "candidate_sha256": { "$ref": "#/$defs/sha256Hex" },
+    "artifact_sha256": { "$ref": "#/$defs/sha256Hex" },
+    "source_commit": { "type": "string", "minLength": 40, "maxLength": 40, "pattern": "^[0-9a-f]{40}$" },
+    "team_id": { "type": "string", "minLength": 10, "maxLength": 10, "pattern": "^[A-Z0-9]{10}$" },
+    "release_trust_sha256": { "$ref": "#/$defs/sha256Hex" },
+    "candidate_checkpoint_sha256": { "$ref": "#/$defs/sha256Hex" }
+  },
+  "$defs": {
+    "sha256Hex": { "type": "string", "minLength": 64, "maxLength": 64, "pattern": "^[0-9a-f]{64}$" }
+  }
+}

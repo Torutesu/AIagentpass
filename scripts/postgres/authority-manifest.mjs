@@ -36,6 +36,9 @@ const AUTHORITY_TABLES = Object.freeze([
   ["agents", "t.organization_id = ANY($1::uuid[])", "tenant"],
   ["agent_session_grants", "t.organization_id = ANY($1::uuid[])", "security"],
   ["agent_sessions", "t.organization_id = ANY($1::uuid[])", "security"],
+  ["qualification_grant_control_heads", "t.organization_id = ANY($1::uuid[])", "security"],
+  ["qualification_grant_batches", "t.organization_id = ANY($1::uuid[])", "security"],
+  ["qualification_grant_batch_steps", "t.organization_id = ANY($1::uuid[])", "security"],
   ["cloud_agent_audit_heads", "t.organization_id = ANY($1::uuid[])", "audit"],
   ["cloud_agent_audit_events", "t.organization_id = ANY($1::uuid[])", "audit"],
   ["policies", "t.organization_id = ANY($1::uuid[])", "tenant"],
@@ -69,7 +72,7 @@ const AUTHORITY_TABLE_NAMES = Object.freeze(AUTHORITY_TABLES.map(([name]) => nam
 const TENANT_TABLE_NAMES = new Set(AUTHORITY_TABLES.filter(([, , kind]) => ["tenant", "audit", "outbox", "security"].includes(kind)).map(([name]) => name));
 
 export const AUTHORITY_MANIFEST_SCHEMA_VERSION = 2;
-export const REQUIRED_MIGRATION_VERSION = "22";
+export const REQUIRED_MIGRATION_VERSION = "23";
 export const MANIFEST_KIND = "agentpass.authority-manifest";
 
 export const DIAGNOSTICS = Object.freeze({
@@ -142,6 +145,15 @@ WITH tenants AS (SELECT unnest($1::uuid[]) AS organization_id), violations AS (
     WHERE NOT EXISTS (SELECT 1 FROM agent_session_grants g WHERE g.organization_id=s.organization_id AND g.grant_id=s.grant_id AND g.device_id=s.device_id AND g.agent_id=s.agent_id AND g.grant_hash=s.grant_hash)
        OR NOT EXISTS (SELECT 1 FROM agents a WHERE a.organization_id=s.organization_id AND a.id=s.agent_id AND a.device_id=s.device_id)
        OR NOT EXISTS (SELECT 1 FROM devices d WHERE d.organization_id=s.organization_id AND d.id=s.device_id)
+  UNION ALL SELECT count(*) FROM qualification_grant_control_heads q JOIN tenants t ON t.organization_id=q.organization_id
+    WHERE NOT EXISTS (SELECT 1 FROM devices d WHERE d.organization_id=q.organization_id AND d.id=q.device_id)
+  UNION ALL SELECT count(*) FROM qualification_grant_batches q JOIN tenants t ON t.organization_id=q.organization_id
+    WHERE NOT EXISTS (SELECT 1 FROM devices d WHERE d.organization_id=q.organization_id AND d.id=q.device_id)
+       OR NOT EXISTS (SELECT 1 FROM agents a WHERE a.organization_id=q.organization_id AND a.id=q.agent_id AND a.device_id=q.device_id)
+       OR NOT EXISTS (SELECT 1 FROM memberships m WHERE m.organization_id=q.organization_id AND m.member_id=q.authorized_member_id)
+  UNION ALL SELECT count(*) FROM qualification_grant_batch_steps q JOIN tenants t ON t.organization_id=q.organization_id
+    WHERE NOT EXISTS (SELECT 1 FROM qualification_grant_batches b WHERE b.organization_id=q.organization_id AND b.batch_id=q.batch_id AND b.device_id=q.device_id AND b.agent_id=q.agent_id)
+       OR NOT EXISTS (SELECT 1 FROM agent_session_grants g WHERE g.organization_id=q.organization_id AND g.grant_id=q.grant_id AND g.device_id=q.device_id AND g.agent_id=q.agent_id AND g.grant_hash=q.grant_hash)
   UNION ALL SELECT count(*) FROM policies p JOIN tenants t ON t.organization_id=p.organization_id
     WHERE NOT EXISTS (SELECT 1 FROM memberships m WHERE m.organization_id=p.organization_id AND m.member_id=p.created_by)
   UNION ALL SELECT count(*) FROM revocations r JOIN tenants t ON t.organization_id=r.organization_id

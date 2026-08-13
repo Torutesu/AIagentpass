@@ -1,0 +1,33 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agentpass.dev/contracts/qualification-grant-batch-v1.schema.json",
+  "title": "AgentPass qualification Grant batch v1",
+  "description": "Public metadata for one device-bound, operator-authorized, one-shot qualification batch. Authority-bearing Grants and the signed manifest are never returned by the Human issue response.",
+  "type": "object",
+  "additionalProperties": false,
+  "maxProperties": 15,
+  "required": ["schema_version", "kind", "batch_id", "organization_id", "device_id", "agent_id", "candidate_sha256", "artifact_sha256", "source_commit", "team_id", "release_trust_sha256", "candidate_checkpoint_sha256", "issued_at", "expires_at", "status"],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "kind": { "const": "agentpass-n3e-qualification-grant-batch" },
+    "batch_id": { "$ref": "#/$defs/uuid" },
+    "organization_id": { "$ref": "#/$defs/uuid" },
+    "device_id": { "$ref": "#/$defs/uuid" },
+    "agent_id": { "$ref": "#/$defs/uuid" },
+    "candidate_sha256": { "$ref": "#/$defs/sha256Hex" },
+    "artifact_sha256": { "$ref": "#/$defs/sha256Hex" },
+    "source_commit": { "type": "string", "minLength": 40, "maxLength": 40, "pattern": "^[0-9a-f]{40}$" },
+    "team_id": { "type": "string", "minLength": 10, "maxLength": 10, "pattern": "^[A-Z0-9]{10}$" },
+    "release_trust_sha256": { "$ref": "#/$defs/sha256Hex" },
+    "candidate_checkpoint_sha256": { "$ref": "#/$defs/sha256Hex" },
+    "issued_at": { "$ref": "#/$defs/canonicalTimestamp" },
+    "expires_at": { "$ref": "#/$defs/canonicalTimestamp" },
+    "status": { "const": "issued" }
+  },
+  "$defs": {
+    "uuid": { "type": "string", "format": "uuid", "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$" },
+    "sha256Hex": { "type": "string", "minLength": 64, "maxLength": 64, "pattern": "^[0-9a-f]{64}$" },
+    "canonicalTimestamp": { "type": "string", "minLength": 24, "maxLength": 24, "format": "date-time", "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$" },
+    "status": { "const": "issued" }
+  }
+}

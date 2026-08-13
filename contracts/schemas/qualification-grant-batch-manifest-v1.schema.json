@@ -1,0 +1,127 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agentpass.dev/contracts/qualification-grant-batch-manifest-v1.schema.json",
+  "title": "AgentPass qualification Grant batch manifest v1",
+  "description": "A purpose-separated Cloud-signed Ed25519 manifest for a one-shot qualification batch. It contains exactly seven ordered steps and embeds the unchanged Agent Session Grant v1 envelopes.",
+  "type": "object",
+  "additionalProperties": false,
+  "maxProperties": 5,
+  "required": ["version", "type", "statement", "statement_hash", "signature"],
+  "properties": {
+    "version": { "const": 1 },
+    "type": { "const": "agentpass.qualification-grant-batch-manifest" },
+    "statement": { "$ref": "#/$defs/statement" },
+    "statement_hash": { "$ref": "#/$defs/sha256Hex" },
+    "signature": { "$ref": "#/$defs/ed25519Signature" }
+  },
+  "$defs": {
+    "uuid": { "type": "string", "format": "uuid", "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$" },
+    "sha256Hex": { "type": "string", "minLength": 64, "maxLength": 64, "pattern": "^[0-9a-f]{64}$" },
+    "sourceCommit": { "type": "string", "minLength": 40, "maxLength": 40, "pattern": "^[0-9a-f]{40}$" },
+    "teamId": { "type": "string", "minLength": 10, "maxLength": 10, "pattern": "^[A-Z0-9]{10}$" },
+    "canonicalTimestamp": { "type": "string", "minLength": 24, "maxLength": 24, "format": "date-time", "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$" },
+    "identifier": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$" },
+    "keyId": { "type": "string", "minLength": 1, "maxLength": 64, "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$" },
+    "ed25519Signature": { "type": "string", "minLength": 86, "maxLength": 86, "pattern": "^[A-Za-z0-9_-]{86}$" },
+    "statement": {
+      "type": "object",
+      "additionalProperties": false,
+      "maxProperties": 19,
+      "required": ["version", "type", "batch_id", "organization_id", "device_id", "agent_id", "agent_kind", "requested_ttl_seconds", "candidate_sha256", "artifact_sha256", "source_commit", "team_id", "release_trust_sha256", "candidate_checkpoint_sha256", "issued_at", "expires_at", "steps", "issuer", "key_id"],
+      "properties": {
+        "version": { "const": 1 },
+        "type": { "const": "agentpass.qualification-grant-batch-manifest" },
+        "batch_id": { "$ref": "#/$defs/uuid" },
+        "organization_id": { "$ref": "#/$defs/uuid" },
+        "device_id": { "$ref": "#/$defs/uuid" },
+        "agent_id": { "$ref": "#/$defs/uuid" },
+        "agent_kind": { "enum": ["claude-code", "cursor"] },
+        "requested_ttl_seconds": { "type": "integer", "minimum": 60, "maximum": 3600 },
+        "candidate_sha256": { "$ref": "#/$defs/sha256Hex" },
+        "artifact_sha256": { "$ref": "#/$defs/sha256Hex" },
+        "source_commit": { "$ref": "#/$defs/sourceCommit" },
+        "team_id": { "$ref": "#/$defs/teamId" },
+        "release_trust_sha256": { "$ref": "#/$defs/sha256Hex" },
+        "candidate_checkpoint_sha256": { "$ref": "#/$defs/sha256Hex" },
+        "issued_at": { "$ref": "#/$defs/canonicalTimestamp" },
+        "expires_at": { "$ref": "#/$defs/canonicalTimestamp" },
+        "steps": {
+          "type": "array",
+          "minItems": 7,
+          "maxItems": 7,
+          "prefixItems": [
+            { "$ref": "#/$defs/unarmedControlStep" },
+            { "$ref": "#/$defs/preCloudStep" },
+            { "$ref": "#/$defs/postCloudStep" },
+            { "$ref": "#/$defs/postActivationStep" },
+            { "$ref": "#/$defs/postAuditStep" },
+            { "$ref": "#/$defs/auditFsyncStep" },
+            { "$ref": "#/$defs/transportReplyStep" }
+          ],
+          "items": false
+        },
+        "issuer": { "const": "agentpass-cloud" },
+        "key_id": { "$ref": "#/$defs/keyId" }
+      }
+    },
+    "step": {
+      "type": "object",
+      "additionalProperties": false,
+      "maxProperties": 9,
+      "required": ["index", "kind", "scenario", "phase", "run_binding", "grant_id", "grant_hash", "statement_hash", "grant"],
+      "properties": {
+        "index": { "type": "integer", "minimum": 0, "maximum": 6 },
+        "kind": { "enum": ["unarmed-control", "scenario"] },
+        "scenario": { "type": ["string", "null"] },
+        "phase": { "type": ["string", "null"] },
+        "run_binding": { "$ref": "#/$defs/identifier" },
+        "grant_id": { "$ref": "#/$defs/uuid" },
+        "grant_hash": { "$ref": "#/$defs/sha256Hex" },
+        "statement_hash": { "$ref": "#/$defs/sha256Hex" },
+        "grant": { "$ref": "https://agentpass.dev/contracts/agent-session-grant-v1.schema.json" }
+      }
+    },
+    "unarmedControlStep": {
+      "allOf": [
+        { "$ref": "#/$defs/step" },
+        { "properties": { "index": { "const": 0 }, "kind": { "const": "unarmed-control" }, "scenario": { "const": null }, "phase": { "const": null } } }
+      ]
+    },
+    "preCloudStep": {
+      "allOf": [
+        { "$ref": "#/$defs/step" },
+        { "properties": { "index": { "const": 1 }, "kind": { "const": "scenario" }, "scenario": { "const": "pre-cloud-kill" }, "phase": { "const": "pre-cloud" } } }
+      ]
+    },
+    "postCloudStep": {
+      "allOf": [
+        { "$ref": "#/$defs/step" },
+        { "properties": { "index": { "const": 2 }, "kind": { "const": "scenario" }, "scenario": { "const": "post-cloud-pre-local-kill" }, "phase": { "const": "post-cloud-pre-local" } } }
+      ]
+    },
+    "postActivationStep": {
+      "allOf": [
+        { "$ref": "#/$defs/step" },
+        { "properties": { "index": { "const": 3 }, "kind": { "const": "scenario" }, "scenario": { "const": "post-activation-pre-audit-kill" }, "phase": { "const": "post-activation-pre-audit" } } }
+      ]
+    },
+    "postAuditStep": {
+      "allOf": [
+        { "$ref": "#/$defs/step" },
+        { "properties": { "index": { "const": 4 }, "kind": { "const": "scenario" }, "scenario": { "const": "post-audit-pre-reply-loss" }, "phase": { "const": "post-audit-pre-reply" } } }
+      ]
+    },
+    "auditFsyncStep": {
+      "allOf": [
+        { "$ref": "#/$defs/step" },
+        { "properties": { "index": { "const": 5 }, "kind": { "const": "scenario" }, "scenario": { "const": "audit-fsync-failure" }, "phase": { "const": "audit-fsync" } } }
+      ]
+    },
+    "transportReplyStep": {
+      "allOf": [
+        { "$ref": "#/$defs/step" },
+        { "properties": { "index": { "const": 6 }, "kind": { "const": "scenario" }, "scenario": { "const": "transport-reply-loss" }, "phase": { "const": "transport-reply" } } }
+      ]
+    }
+  }
+}

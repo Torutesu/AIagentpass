@@ -13,6 +13,7 @@ import { createAgentSessionAuthorityRepository } from "./agent-session-authority
 import { createPostgresAgentSessionConsumptionRepository } from "./agent-session-consumption-repository.mjs";
 import { createPostgresAgentSessionLifecycleRepository } from "./agent-session-lifecycle-repository.mjs";
 import { createPostgresAgentSessionIssuanceRepository } from "./agent-session-issuance-repository.mjs";
+import { createQualificationGrantBatchRepository } from "./qualification-grant-batch-repository.mjs";
 import { createAuthorityReductionAuditAppender } from "./authority-reduction-audit.mjs";
 import {
   createDrainController,
@@ -80,6 +81,11 @@ export async function createPostgresRuntime({ env = process.env, PoolClass = Poo
     metrics: operationalMetrics,
     resolveProcessBindingPolicy
   });
+  const qualificationGrantBatchRepository = createQualificationGrantBatchRepository({
+    client: pool,
+    sharedControls: sharedControlRepository,
+    adminAuditRepository
+  });
   const authorityReductionAuditAppender = createAuthorityReductionAuditAppender({ adminAuditRepository });
   const onAuthorityReduction = async ({ tx, organization_id, occurred_at, policy, resource, member_id, actor_member_id, capabilities }) => {
     const issuedAt = occurred_at ?? policy?.updated_at;
@@ -134,6 +140,7 @@ export async function createPostgresRuntime({ env = process.env, PoolClass = Poo
     agentSessionConsumptionRepository,
     agentSessionLifecycleRepository,
     ...(agentSessionIssuanceRepository ? { agentSessionIssuanceRepository } : {}),
+    qualificationGrantBatchRepository,
     sharedControlRepository,
     controlPlaneStore,
     refreshHintNotifier,

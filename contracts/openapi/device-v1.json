@@ -86,6 +86,37 @@
         }
       }
     },
+    "/organizations/{organization_id}/devices/{device_id}/qualification-grant-batches/{batch_id}/claim": {
+      "post": {
+        "operationId": "claimQualificationGrantBatch",
+        "summary": "Claim a device-bound qualification Grant batch",
+        "description": "Claims exactly one operator-authorized qualification batch for the authenticated device and the organization, device, and batch identifiers in the path. The device signature authenticates the exact raw request before the claim body is interpreted. A successful response contains one purpose-separated Ed25519 qualification manifest whose statement contains exactly seven ordered steps, each with an unchanged Agent Session Grant v1 envelope. The claim is one-shot with an exact retry identity; path, candidate, release, team, expiry, manifest signature, Grant signature, or step substitutions fail closed. The response is no-store and redirects are forbidden.",
+        "security": [{ "deviceSignature": [] }],
+        "parameters": [
+          { "$ref": "#/components/parameters/OrganizationId" },
+          { "$ref": "#/components/parameters/DeviceId" },
+          { "$ref": "#/components/parameters/QualificationBatchId" }
+        ],
+        "requestBody": { "$ref": "#/components/requestBodies/ClaimQualificationGrantBatch" },
+        "x-agentpass-contract-status": "frozen-qualification-batch-v1",
+        "x-agentpass-runtime-path": "/v1/organizations/{organization_id}/devices/{device_id}/qualification-grant-batches/{batch_id}/claim",
+        "x-agentpass-tenant-scope": { "kind": "organization", "source": "path.organization_id + manifest.statement.organization_id", "binding": "manifest.statement.organization_id == path.organization_id", "cross-tenant-disclosure": false, "additionalProperties": false },
+        "x-agentpass-device-scope": { "kind": "device", "source": "path.device_id + manifest.statement.device_id + authenticated-device", "binding": "manifest.statement.device_id == path.device_id == authenticated.device_id", "cross-device-disclosure": false, "additionalProperties": false },
+        "x-agentpass-batch-binding": { "path_batch_id": "manifest.statement.batch_id", "candidate_bindings": ["candidate_sha256", "artifact_sha256", "source_commit", "team_id", "release_trust_sha256", "candidate_checkpoint_sha256"], "step_count": 7, "step_order": "fixed", "claim": "one-shot with exact retry", "additionalProperties": false },
+        "x-agentpass-authority": { "manifest-schema": "../schemas/qualification-grant-batch-manifest-v1.schema.json", "manifest-type": "agentpass.qualification-grant-batch-manifest", "signature-algorithm": "ed25519", "signature-purpose": "agentpass.qualification-grant-batch-manifest", "grant-schema": "../schemas/agent-session-grant-v1.schema.json", "grant-envelope": "unchanged", "private-material": "never-accepted-or-returned", "additionalProperties": false },
+        "x-agentpass-transport": { "redirects": "forbidden", "cache-control": "no-store", "additionalProperties": false },
+        "responses": {
+          "200": { "$ref": "#/components/responses/QualificationGrantBatchClaimed" },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "409": { "$ref": "#/components/responses/Conflict" },
+          "429": { "$ref": "#/components/responses/RateLimited" },
+          "503": { "$ref": "#/components/responses/ServiceUnavailable" }
+        }
+      }
+    },
     "/organizations/{organization_id}/bundles/{device_id}": {
       "get": {
         "operationId": "fetchControlBundle",
@@ -202,6 +233,7 @@
       "OrganizationId": { "name": "organization_id", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } },
       "DeviceId": { "name": "device_id", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } },
       "GrantId": { "name": "grant_id", "in": "path", "required": true, "description": "Agent Session Grant identifier. The body statement.grant_id must exactly equal this path value.", "schema": { "type": "string", "format": "uuid" } },
+      "QualificationBatchId": { "name": "batch_id", "in": "path", "required": true, "description": "Qualification batch identifier. The manifest.statement.batch_id must exactly equal this path value.", "schema": { "type": "string", "format": "uuid" } },
       "AfterGeneration": { "name": "after_generation", "in": "query", "required": false, "description": "Return a hint only when a strictly newer committed authority generation exists. This is a cursor, not authority.", "schema": { "type": "integer", "minimum": 0, "maximum": 9007199254740991, "default": 0 } },
       "WaitMs": { "name": "wait_ms", "in": "query", "required": false, "description": "Bounded long-poll wait duration in milliseconds.", "schema": { "type": "integer", "minimum": 0, "maximum": 30000, "default": 0 } },
       "AuditDeviceId": { "name": "device_id", "in": "query", "required": true, "description": "The single device stream to read. This scope is part of cursor authentication and cannot be changed while traversing a stream.", "schema": { "type": "string", "format": "uuid" } },
@@ -213,6 +245,11 @@
         "required": true,
         "description": "The body binds the exact Cloud-signed grant to the process and ancestry binding digests derived by the native service. No lease, raw process identity, audit token, PID, ancestry record, or second authority object is accepted.",
         "content": { "application/json": { "schema": { "$ref": "#/components/schemas/AgentSessionGrantConsumeRequest" } } }
+      },
+      "ClaimQualificationGrantBatch": {
+        "required": true,
+        "description": "Public candidate and release bindings for the batch claim. The batch_id, organization_id, and device_id are path/authentication bindings. No Grant, manifest, signature, private key, or nonce is accepted in the body.",
+        "content": { "application/json": { "schema": { "$ref": "#/components/schemas/QualificationGrantBatchClaimRequest" } } }
       }
     },
     "responses": {
@@ -220,6 +257,7 @@
       "DeviceEnrollmentCompleted": { "description": "The one-time enrollment was consumed and the device is active. The response is no-store and contains no private key or enrollment credential.", "headers": { "Cache-Control": { "$ref": "#/components/headers/CacheControl" }, "X-RateLimit-Limit": { "$ref": "#/components/headers/RateLimitLimit" }, "X-RateLimit-Remaining": { "$ref": "#/components/headers/RateLimitRemaining" }, "X-RateLimit-Reset": { "$ref": "#/components/headers/RateLimitReset" } }, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/DeviceEnrollmentCompletedResponse" } } } },
       "DeviceEnrollmentReceipt": { "description": "A device-authenticated, Cloud-signed possession receipt. The response is no-store and contains no private key, enrollment credential, or raw challenge nonce.", "headers": { "Cache-Control": { "$ref": "#/components/headers/CacheControl" }, "X-RateLimit-Limit": { "$ref": "#/components/headers/RateLimitLimit" }, "X-RateLimit-Remaining": { "$ref": "#/components/headers/RateLimitRemaining" }, "X-RateLimit-Reset": { "$ref": "#/components/headers/RateLimitReset" } }, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/DevicePossessionReceiptV1" } } } },
       "AgentSessionGrantConsumed": { "description": "The exact Agent Session Grant was consumed or recognized as an idempotent duplicate and a process-bound Session Lease was committed. The response is no-store and contains no private key or bearer session token.", "headers": { "Cache-Control": { "$ref": "#/components/headers/CacheControl" }, "X-RateLimit-Limit": { "$ref": "#/components/headers/RateLimitLimit" }, "X-RateLimit-Remaining": { "$ref": "#/components/headers/RateLimitRemaining" }, "X-RateLimit-Reset": { "$ref": "#/components/headers/RateLimitReset" } }, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/AgentSessionLeaseResponse" } } } },
+      "QualificationGrantBatchClaimed": { "description": "The exact device-bound qualification batch was claimed or recognized as an exact retry. The response is no-store, contains one purpose-separated Ed25519 manifest with exactly seven ordered steps, and embeds only the unchanged Agent Session Grant v1 envelopes; it contains no private key or bearer token.", "headers": { "Cache-Control": { "$ref": "#/components/headers/CacheControl" }, "X-RateLimit-Limit": { "$ref": "#/components/headers/RateLimitLimit" }, "X-RateLimit-Remaining": { "$ref": "#/components/headers/RateLimitRemaining" }, "X-RateLimit-Reset": { "$ref": "#/components/headers/RateLimitReset" } }, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/QualificationGrantBatchClaimResponse" } } } },
       "ControlRefreshPoll": { "description": "A newer device-bound refresh hint. The hint accelerates a bundle fetch but cannot authorize or extend expiry. The response is no-store and includes a request_id envelope field.", "headers": { "Cache-Control": { "$ref": "#/components/headers/CacheControl" }, "X-RateLimit-Limit": { "$ref": "#/components/headers/RateLimitLimit" }, "X-RateLimit-Remaining": { "$ref": "#/components/headers/RateLimitRemaining" }, "X-RateLimit-Reset": { "$ref": "#/components/headers/RateLimitReset" } }, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ControlRefreshPollResponse" } } } },
       "ControlBundleFetch": { "description": "The exact signed ControlBundle v2 for the path organization and device. The response is no-store and must not be obtained through a redirect. It includes a request_id envelope field.", "headers": { "Cache-Control": { "$ref": "#/components/headers/CacheControl" }, "X-RateLimit-Limit": { "$ref": "#/components/headers/RateLimitLimit" }, "X-RateLimit-Remaining": { "$ref": "#/components/headers/RateLimitRemaining" }, "X-RateLimit-Reset": { "$ref": "#/components/headers/RateLimitReset" } }, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ControlBundleFetchResponse" } } } },
       "ControlBundleAcknowledgementAccepted": { "description": "The exact acknowledgement was accepted or recognized as an idempotent duplicate. The response is no-store and includes a request_id envelope field.", "headers": { "Cache-Control": { "$ref": "#/components/headers/CacheControl" }, "X-RateLimit-Limit": { "$ref": "#/components/headers/RateLimitLimit" }, "X-RateLimit-Remaining": { "$ref": "#/components/headers/RateLimitRemaining" }, "X-RateLimit-Reset": { "$ref": "#/components/headers/RateLimitReset" } }, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ControlBundleAcknowledgementResponse" } } } },
@@ -241,6 +279,8 @@
       "DevicePossessionReceiptV1": { "$ref": "../schemas/device-possession-receipt-v1.schema.json" },
       "AgentSessionGrantV1": { "$ref": "../schemas/agent-session-grant-v1.schema.json" },
       "AgentSessionLeaseV1": { "$ref": "../schemas/agent-session-lease-v1.schema.json" },
+      "QualificationGrantBatchClaimRequest": { "$ref": "../schemas/qualification-grant-batch-claim-v1.schema.json" },
+      "QualificationGrantBatchManifestV1": { "$ref": "../schemas/qualification-grant-batch-manifest-v1.schema.json" },
       "AgentSessionGrantConsumeRequest": {
         "type": "object",
         "additionalProperties": false,
@@ -338,6 +378,15 @@
         "required": ["lease", "request_id"],
         "properties": {
           "lease": { "$ref": "#/components/schemas/AgentSessionLeaseV1" },
+          "request_id": { "$ref": "#/components/schemas/RequestId" }
+        }
+      },
+      "QualificationGrantBatchClaimResponse": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["batch", "request_id"],
+        "properties": {
+          "batch": { "$ref": "#/components/schemas/QualificationGrantBatchManifestV1" },
           "request_id": { "$ref": "#/components/schemas/RequestId" }
         }
       },

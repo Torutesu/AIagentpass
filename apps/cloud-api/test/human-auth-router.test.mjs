@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { createHumanAuthRouter } from "../src/human-auth/router.mjs";
 
-function fixture({ agentSessionGrantApi = undefined } = {}) {
+function fixture({ agentSessionGrantApi = undefined, qualificationGrantBatchApi = undefined } = {}) {
   const calls = [];
   const result = { status: 200, headers: {}, body: { ok: true } };
   const router = createHumanAuthRouter({
@@ -12,9 +12,24 @@ function fixture({ agentSessionGrantApi = undefined } = {}) {
     managementApi: { async handle(input) { calls.push(["management", input]); return result; } },
     organizationApi: { async handle(input) { calls.push(["organization", input]); return result; } },
     ...(agentSessionGrantApi === undefined ? {} : { agentSessionGrantApi }),
+    ...(qualificationGrantBatchApi === undefined ? {} : { qualificationGrantBatchApi }),
   });
   return { router, calls };
 }
+
+test("routes only the exact qualification Grant batch path to its dedicated API", async () => {
+  const calls = [];
+  const qualificationGrantBatchApi = { async handle(input) { calls.push(input); return { status: 201, body: { batch: true } }; } };
+  const { router, calls: otherCalls } = fixture({ qualificationGrantBatchApi });
+  const exact = "/api/v1/organizations/11111111-1111-4111-8111-111111111111/agents/22222222-2222-4222-8222-222222222222/qualification-grant-batches";
+  assert.equal((await router.handle({ method: "POST", url: exact, headers: {}, body: Buffer.alloc(0) })).status, 201);
+  assert.equal(calls.length, 1);
+  assert.equal(otherCalls.length, 0);
+  for (const suffix of ["/", "/extra", "?query=1#fragment"]) {
+    const result = await router.handle({ method: "POST", url: `${exact}${suffix}`, headers: {}, body: Buffer.alloc(0) });
+    assert.equal(result.status, 404);
+  }
+});
 
 test("routes exact public auth paths and translates only the session path", async () => {
   const { router, calls } = fixture();
@@ -104,4 +119,5 @@ test("does not fall through Agent Session Grant aliases or the frozen route when
 
 test("rejects an invalid optional Agent Session Grant adapter", () => {
   assert.throws(() => fixture({ agentSessionGrantApi: {} }), /agentSessionGrantApi must expose handle/);
+  assert.throws(() => fixture({ qualificationGrantBatchApi: {} }), /qualificationGrantBatchApi must expose handle/);
 });

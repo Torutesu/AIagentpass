@@ -24,9 +24,11 @@ const HUMAN_AUTH_ORGANIZATIONS_PATH = "/api/auth/organizations";
 const HUMAN_AUTH_ACCEPT_INVITATION_PATH = "/api/auth/invitations/accept";
 const HUMAN_AUTH_UUID = "[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89a-fA-F][0-9a-fA-F]{3}-[0-9a-fA-F]{12}";
 const HUMAN_AGENT_SESSION_GRANT_PATH = new RegExp(`^/api/v1/organizations/${HUMAN_AUTH_UUID}/agents/${HUMAN_AUTH_UUID}/session-grants$`);
+const HUMAN_QUALIFICATION_GRANT_BATCH_PATH = new RegExp(`^/api/v1/organizations/${HUMAN_AUTH_UUID}/agents/${HUMAN_AUTH_UUID}/qualification-grant-batches$`);
 const UUID = "([0-9a-fA-F-]{36})";
 const UUID_VALUE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu;
 const AGENT_SESSION_DEVICE_CONSUME_PATH = /^\/v1\/organizations\/(?<organizationId>[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})\/devices\/(?<deviceId>[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})\/agent-session-grants\/(?<grantId>[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})\/consume$/u;
+const QUALIFICATION_GRANT_BATCH_DEVICE_CLAIM_PATH = /^\/v1\/organizations\/(?<organizationId>[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})\/devices\/(?<deviceId>[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})\/qualification-grant-batches\/(?<batchId>[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})\/claim$/u;
 const RFC3339_UTC = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?Z$/u;
 const RFC3339_MILLISECONDS_UTC = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/u;
 const SAFE_CANDIDATE_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/u;
@@ -43,12 +45,13 @@ const V2_CANDIDATE_BINDING_KEYS = Object.freeze([
 const V2_COMPLETION_KEYS = new Set(["version", "proof_version", "enrollment_id", "organization_id", "device_id", "label", "platform", "device_key", "candidate_id", "device_key_fingerprint", "challenge"]);
 const V2_CHALLENGE_KEYS = new Set(["challenge_id", "nonce", "expires_at", "candidate_id", "device_key_fingerprint"]);
 const V2_PROOF_DOMAIN = "AgentPass-Enrollment-Proof-v2\0";
-export function createCloudApi({ store, tokenRecords = [], bundleSigner, refreshHintService, now = () => Date.now(), monotonicNow, replayCache = createReplayCache(), deviceReplayConsumer, agentSessionDeviceApi, rateLimiter, admissionRateLimiter, verifyRecentWebAuthn, recentAuthService, humanAuthApi, humanSession, capabilityAuthorityRepository, capabilityRevocationSource, auditRepository, enrollmentCredentialSecret, possessionReceiptSigner, trackInFlight, readiness, operationalMetrics, operationalProbeSecret } = {}) {
+export function createCloudApi({ store, tokenRecords = [], bundleSigner, refreshHintService, now = () => Date.now(), monotonicNow, replayCache = createReplayCache(), deviceReplayConsumer, agentSessionDeviceApi, qualificationGrantBatchDeviceApi, rateLimiter, admissionRateLimiter, verifyRecentWebAuthn, recentAuthService, humanAuthApi, humanSession, capabilityAuthorityRepository, capabilityRevocationSource, auditRepository, enrollmentCredentialSecret, possessionReceiptSigner, trackInFlight, readiness, operationalMetrics, operationalProbeSecret } = {}) {
   if (!store) throw new TypeError("store is required");
   if (verifyRecentWebAuthn !== undefined && recentAuthService !== undefined) throw new TypeError("configure verifyRecentWebAuthn or recentAuthService, not both");
   if (humanAuthApi !== undefined && (!humanAuthApi || typeof humanAuthApi.handle !== "function")) throw new TypeError("humanAuthApi must expose handle()");
   if (humanSession !== undefined && (!humanSession || typeof humanSession.authenticateRequest !== "function")) throw new TypeError("humanSession must expose authenticateRequest()");
   if (agentSessionDeviceApi !== undefined && (!agentSessionDeviceApi || typeof agentSessionDeviceApi.handle !== "function")) throw new TypeError("agentSessionDeviceApi must expose handle()");
+  if (qualificationGrantBatchDeviceApi !== undefined && (!qualificationGrantBatchDeviceApi || typeof qualificationGrantBatchDeviceApi.handle !== "function")) throw new TypeError("qualificationGrantBatchDeviceApi must expose handle()");
   if (capabilityRevocationSource !== undefined && (!capabilityRevocationSource || typeof capabilityRevocationSource.listRevokedCapabilityIds !== "function")) throw new TypeError("capabilityRevocationSource must expose listRevokedCapabilityIds()");
   if (capabilityAuthorityRepository !== undefined && (!capabilityAuthorityRepository || typeof capabilityAuthorityRepository.issueCapabilityMetadata !== "function")) throw new TypeError("capabilityAuthorityRepository must expose issueCapabilityMetadata()");
   if (auditRepository !== undefined && (!auditRepository || typeof auditRepository.listDeviceAuditEvents !== "function")) throw new TypeError("auditRepository must expose listDeviceAuditEvents()");
@@ -120,6 +123,20 @@ export function createCloudApi({ store, tokenRecords = [], bundleSigner, refresh
         const result = await agentSessionDeviceApi.handle({ method: request.method, url: request.url, headers: request.headers, body: bodyBytes });
         const normalized = normalizeAgentSessionDeviceResult(result);
         if (!normalized) throw apiError("agent_session_unavailable", 503, "Agent Session Device API is unavailable");
+        return sendRawJson(response, normalized.status, normalized.encoded, normalized.headers);
+      }
+      const qualificationBatchRoute = request.method === "POST" ? QUALIFICATION_GRANT_BATCH_DEVICE_CLAIM_PATH.exec(request.url) : null;
+      if (qualificationGrantBatchDeviceApi && qualificationBatchRoute) {
+        const admissionDecision = await acquireRateLimit(admission, {
+          tenantId: qualificationBatchRoute.groups.organizationId,
+          principalType: "device",
+          principalId: transportPrincipalId(request)
+        });
+        if (!admissionDecision.allowed) return send(response, 429, { error: { code: "rate_limited", message: "Pre-authentication rate limit exceeded" }, request_id: requestId }, rateLimitHeaders(admissionDecision, true));
+        const bodyBytes = await readBody(request);
+        const result = await qualificationGrantBatchDeviceApi.handle({ method: request.method, url: request.url, headers: request.headers, body: bodyBytes });
+        const normalized = normalizeAgentSessionDeviceResult(result);
+        if (!normalized) throw apiError("qualification_grant_batch_unavailable", 503, "Qualification Grant batch Device API is unavailable");
         return sendRawJson(response, normalized.status, normalized.encoded, normalized.headers);
       }
       const url = new URL(request.url, "http://agentpass.invalid");
@@ -692,6 +709,7 @@ export function createCloudApi({ store, tokenRecords = [], bundleSigner, refresh
 function isExactHumanAuthPath(url, method = undefined) {
   if (url.hash) return false;
   if (HUMAN_AGENT_SESSION_GRANT_PATH.test(url.pathname)) return true;
+  if (HUMAN_QUALIFICATION_GRANT_BATCH_PATH.test(url.pathname)) return true;
   if (!url.search && (url.pathname === HUMAN_AUTH_SESSION_PATH || url.pathname === HUMAN_AUTH_OPTIONS_PATH || url.pathname === HUMAN_AUTH_VERIFY_PATH || url.pathname === HUMAN_AUTH_REGISTRATION_OPTIONS_PATH || url.pathname === HUMAN_AUTH_REGISTRATION_VERIFY_PATH)) return true;
   if (isExactHumanOrganizationPath(url, method)) return true;
   return /^\/api\/auth\/management\/(?:credentials(?:\/[A-Za-z0-9_-]+(?:\/revoke)?)?|sessions(?:\/[0-9a-fA-F-]{36}\/revoke)?)$/.test(url.pathname);
