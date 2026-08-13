@@ -19,6 +19,8 @@ const EXPECTED_QUALIFICATION_TOOL_FILES = Object.freeze([
   'n3e/provision-qualification-config.mjs',
   'n3e/qualification-activation-contract.mjs',
   'n3e/qualification-scenario-driver.mjs',
+  'n3e/qualification-unarmed-control.mjs',
+  'n3e/run-fixed-protected-qualification.mjs',
   'n3e/run-protected-qualification.mjs'
 ]);
 
@@ -53,6 +55,7 @@ test('non-production provisioning atomically installs the exact protected invent
   assert.equal(fs.existsSync(path.join(fixture.destination, 'scenario-config.json')), true); assert.deepEqual(fs.readdirSync(path.join(fixture.destination, 'lib')).sort(), ['candidate-checkpoint.mjs', 'driver-runtime.mjs', 'scenario-runtime.mjs']);
   assert.equal(result.qualification_tool_path, path.join(fixture.destination, 'qualification-tool/n3e/provision-qualification-config.mjs'));
   assert.equal(result.qualification_orchestrator_path, path.join(fixture.destination, 'qualification-tool/n3e/run-protected-qualification.mjs'));
+  assert.equal(result.fixed_qualification_entrypoint_path, path.join(fixture.destination, 'qualification-tool/n3e/run-fixed-protected-qualification.mjs'));
   assert.equal(result.qualification_scenario_driver_path, path.join(fixture.destination, 'qualification-tool/n3e/qualification-scenario-driver.mjs'));
   assert.deepEqual(fs.readdirSync(path.join(fixture.destination, 'qualification-tool')).sort(), ['generate-release-attestation.mjs', 'manifest.json', 'n3e']);
   assert.deepEqual(fs.readdirSync(path.join(fixture.destination, 'qualification-tool/n3e')).sort(), QUALIFICATION_TOOL_FILES.filter(({ installed }) => installed.startsWith('n3e/')).map(({ installed }) => installed.slice('n3e/'.length)));
@@ -63,9 +66,9 @@ test('non-production provisioning atomically installs the exact protected invent
   assert.equal(fs.readdirSync(fixture.parent).some((name) => name.startsWith('.p0c-stage-')), false);
 });
 
-test('qualification driver and activation dependency omission and source substitution are rejected before installation', () => {
+test('qualification driver, fixed entrypoint, unarmed control, and activation dependency omission and source substitution are rejected before installation', () => {
   const fixture = makeFixture();
-  for (const file of ['qualification-scenario-driver.mjs', 'qualification-activation-contract.mjs', 'materialize-qualification-activation.mjs']) {
+  for (const file of ['qualification-scenario-driver.mjs', 'qualification-unarmed-control.mjs', 'run-fixed-protected-qualification.mjs', 'qualification-activation-contract.mjs', 'materialize-qualification-activation.mjs']) {
     const omittedRoot = cloneSourceRoot();
     fs.unlinkSync(path.join(path.dirname(omittedRoot), 'n3e', file));
     assert.throws(() => inspectProvisioningSources({ sourceRoot: omittedRoot, scenarioDirectory: fixture.scenarios, machineConfigPath: fixture.machineConfig, production: false }), /provisioning source is unavailable/);
@@ -78,8 +81,8 @@ test('qualification driver and activation dependency omission and source substit
   }
 });
 
-test('installed qualification driver and activation dependencies fail closed on omission and substitution', () => {
-  for (const file of ['qualification-scenario-driver.mjs', 'qualification-activation-contract.mjs', 'materialize-qualification-activation.mjs']) {
+test('installed qualification driver, fixed entrypoint, unarmed control, and activation dependencies fail closed on omission and substitution', () => {
+  for (const file of ['qualification-scenario-driver.mjs', 'qualification-unarmed-control.mjs', 'run-fixed-protected-qualification.mjs', 'qualification-activation-contract.mjs', 'materialize-qualification-activation.mjs']) {
     const fixture = makeFixture();
     provisionRunner({ sourceRoot, scenarioDirectory: fixture.scenarios, machineConfigPath: fixture.machineConfig, destinationRoot: fixture.destination, production: false, uid: process.geteuid(), gid: process.getegid() });
     const inspected = inspectProvisioningSources({ sourceRoot, scenarioDirectory: fixture.scenarios, machineConfigPath: fixture.machineConfig, production: false });

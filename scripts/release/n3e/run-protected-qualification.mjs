@@ -309,7 +309,13 @@ export const runProtectedQualification = async ({
     let durableStatePresent = false;
     try { durableStatePresent = stateExists(fileSystem, statePath); } catch (error) { cleanupFailures.push(error); }
     if (provisionAttempted && (provisioned || durableStatePresent)) {
-      try { await disarmQualification({ signal: controller.signal }); } catch (error) { cleanupFailures.push(error); }
+      // A passed driver already observed armed -> fired -> disarmed and
+      // consumed the durable receipt. Explicit disarm is only recovery for an
+      // interrupted/failed run; repeating it after daemon loss can no longer
+      // prove the consumed receipt and would turn success into cleanup failure.
+      if (primaryFailure) {
+        try { await disarmQualification({ signal: controller.signal }); } catch (error) { cleanupFailures.push(error); }
+      }
       if (activationMaterialization) {
         try { removeActivation({ materialization: activationMaterialization }); } catch (error) { cleanupFailures.push(error); }
       }

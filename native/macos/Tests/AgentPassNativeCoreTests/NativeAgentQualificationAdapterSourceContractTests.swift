@@ -76,4 +76,14 @@ func qualificationControllerHasDigestBoundRecovery() throws {
   #expect(source.contains("durable.armedReceiptDigest"))
   #expect(source.contains("if case .connectionFailure = statusReply"))
   #expect(source.contains("status: AgentPassQualificationXPCContract.Status.disarmed.rawValue"))
+  let disarm = try sourceSlice(
+    source,
+    from: "case .disarm:",
+    to: "} catch let failure as ControllerFailure")
+  let emptyEndpoint = try #require(disarm.range(
+    of: "if current.status == AgentPassQualificationXPCContract.Status.disarmed.rawValue"))
+  let remainder = disarm[emptyEndpoint.lowerBound...]
+  #expect(remainder.contains("if let durable = try? durableReceipt(context: context)"))
+  #expect(remainder.contains("expectedDigest: durable.armedReceiptDigest"))
+  #expect(remainder.contains("receipt: durable.armedReceiptDigest"))
 }

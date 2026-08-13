@@ -18,7 +18,7 @@ Three physical scenarios are implemented:
 
 The remaining 13 scenarios are not production-qualified. A passing modeled test, simulator test, ad-hoc signed build, or operator assertion cannot replace execution of the exact scenario on both protected hardware lanes.
 
-The process-bound Agent-session foundation now also includes the frozen Human Grant and Device Lease contracts, PostgreSQL-backed issuance/consumption, a split privileged Agent XPC service, a fixed-FD activation document, and a signed Agent Host lifecycle. The protected qualification runner can provision the candidate/controller/activation inputs. Durable fired evidence for daemon-kill boundaries is being closed before this baseline is promoted. None of these local or modeled results is physical-release evidence.
+The process-bound Agent-session foundation now also includes the frozen Human Grant and Device Lease contracts, PostgreSQL-backed issuance/consumption, a split privileged Agent XPC service, a fixed-FD activation document, and a signed Agent Host lifecycle. The protected qualification runner now has a fixed-path production composition, one-shot root-private input consumption, durable fired-evidence recovery across daemon loss, bounded Controller/Agent Host supervision, and packaged unarmed-control execution. These changes are locally verified only: the hardware workflow does not yet materialize and invoke the fixed input, and none of these local or modeled results is physical-release evidence.
 
 ## 2. Delivery rule
 
@@ -251,6 +251,8 @@ The slice is complete only when interrupted cleanup and explicit recovery remove
 
 ### Wave 1 — protected qualification closure
 
+Implementation status (2026-08-14): the fixed `run`/`recover` entrypoint, root-private one-shot input handling, six-scenario driver, daemon-restart receipt recovery, Controller durable-receipt preference, unarmed-control contract, package inventory, and immutable workflow preflight are implemented and locally verified. The remaining closure work is to move the trusted release fingerprint and artifact selection out of mutable one-shot input and bind them to the protected candidate checkpoint, add the root-side workflow input materializer and fixed-entrypoint invocation, orchestrate the unarmed control alongside all six armed scenarios, and execute the resulting flow on both protected Mac lanes.
+
 Implementation:
 
 - replace the remaining injected runner callbacks with fixed packaged commands and closed schemas;
@@ -268,6 +270,14 @@ Acceptance:
 - one cleanup-safe command produces a canonical evidence report bound to source commit, PKG digest, Team ID, code identities, OS/hardware lane, and scenario result.
 
 Dependencies: the notarized candidate checkpoint, protected runner entitlement, real Device API Grant/Lease route, and both Mac runners. Work on packaging tests and evidence schema can proceed in parallel; edits to the XPC protocol, durable receipt schema, and root storage layout are serialized.
+
+Immediate remaining gates:
+
+1. derive the expected release fingerprint, artifact identity, and executable paths from the root-owned candidate checkpoint or another independently installed trust root; never accept them from the one-shot run document;
+2. add a protected workflow command that writes the closed-schema input with exclusive creation, syncs it, invokes the fixed entrypoint, and consumes it exactly once;
+3. run the unarmed control and six armed scenarios through that same composition and aggregate only identity-bound public evidence;
+4. prove interruption and explicit `recover` behavior at every materialize, receipt, restart, disarm, restore, and cleanup boundary;
+5. execute the exact source commit and notarized PKG on Apple Silicon and Intel T2 lanes before changing the scenario status to physically qualified.
 
 ### Wave 2 — first usable Claude Code path
 

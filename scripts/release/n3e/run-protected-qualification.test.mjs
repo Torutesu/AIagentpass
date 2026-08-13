@@ -236,6 +236,7 @@ test('provision completes before the first launchd reload and controller/driver 
     status: 'passed',
     evidence_sha256: DIGEST_A
   });
+  assert.equal(value.events.includes('disarm'), false, 'a passed driver already proves and performs disarm');
 });
 
 test('launchd invocation uses fixed argv and never enables shell interpolation', () => {

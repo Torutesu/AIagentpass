@@ -12,13 +12,21 @@ import {
   AGENT_HOST_EXECUTABLE_PATH,
   APPROVED_LISTENER_PROBE_PATH,
   CONTROLLER_EXECUTABLE_PATH,
+  LAUNCHCTL_PATH,
   LISTENER_PROBE_ARGUMENTS,
+  PS_ARGUMENTS,
+  PS_MAX_OUTPUT_BYTES,
+  PS_PATH,
+  SERVICE_TARGET,
   SCENARIO_CONFIGURATION_PATH,
   SERVICE_CONFIGURATION_PATH,
   SCENARIOS,
   disarmQualification,
   executeQualification,
   proveQualificationListenerUnavailable,
+  proveNoQualificationProcesses,
+  recoverQualification,
+  restartQualificationDaemon,
   startQualificationAgentActivation
 } from './qualification-scenario-driver.mjs';
 
@@ -70,6 +78,14 @@ const emitSuccessfulControllerRun = (child) => {
   child.stdout.emit('data', protocolLine('arm', 'disarmed'));
   child.emit('close', 0, null);
 };
+
+const disarmLine = (receipt = RECEIPT) => protocolLine('disarm', 'disarmed', { receipt_sha256: receipt });
+
+const launchctlResult = (stdout = Buffer.alloc(0), status = 0) => ({
+  status, signal: null, stdout: Buffer.from(stdout), stderr: Buffer.alloc(0)
+});
+
+const processListing = (command = '/usr/bin/other-process') => `0 1 ${command}\n`;
 
 test('the scenario inventory and executable bindings are closed constants', () => {
   assert.deepEqual([...SCENARIOS], EXPECTED_SCENARIOS);
@@ -236,6 +252,143 @@ test('an already-aborted signal still terminates the controller', async () => {
   assert.deepEqual(child.killCalls, ['SIGTERM']);
 });
 
+test('Controller interruption recovers only the observed fired receipt before restarting the daemon', async () => {
+  const child = fakeChild({ closeOnKill: false });
+  const activation = activationHandle();
+  const calls = [];
+  const handle = executeQualification({
+    scenario: EXPECTED_SCENARIOS[0], phase: 'pre-cloud', candidateSHA256: DIGEST_A, runIDSHA256: DIGEST_B,
+    signal: new AbortController().signal, spawnProcess: () => child,
+    startAgentActivation: () => activation.handle,
+    runCommand(command, args) {
+      calls.push([command, args]);
+      if (command === PS_PATH) return launchctlResult(processListing());
+      if (command === CONTROLLER_EXECUTABLE_PATH) return { status: 0, signal: null, stdout: Buffer.from(args[0] === 'status' ? protocolLine('status', 'fired') : disarmLine()), stderr: Buffer.alloc(0) };
+      return command === LAUNCHCTL_PATH && args[0] === 'print'
+        ? launchctlResult('pid = 8123\n')
+        : launchctlResult();
+    }
+  });
+  child.stdout.emit('data', protocolLine('arm', 'armed'));
+  child.emit('close', null, 'SIGKILL');
+  await assert.rejects(handle.completion, /scenario execution failed/u);
+  assert.deepEqual(calls, [
+    [PS_PATH, [...PS_ARGUMENTS]],
+    [CONTROLLER_EXECUTABLE_PATH, ['status']],
+    [CONTROLLER_EXECUTABLE_PATH, ['disarm']],
+    [LAUNCHCTL_PATH, ['kickstart', '-k', SERVICE_TARGET]],
+    [LAUNCHCTL_PATH, ['print', SERVICE_TARGET]],
+    [PS_PATH, [...PS_ARGUMENTS]]
+  ]);
+  assert.deepEqual(activation.signals, ['SIGTERM']);
+});
+
+test('daemon-unavailable recovery retries once with fixed restart and rejects a failed restart', () => {
+  const unavailable = { status: 1, signal: null, stdout: Buffer.alloc(0), stderr: Buffer.alloc(0) };
+  const calls = [];
+  let controllerCalls = 0;
+  const runCommand = (command, args) => {
+    calls.push([command, args]);
+    if (command === PS_PATH) return launchctlResult(processListing());
+    if (command === CONTROLLER_EXECUTABLE_PATH) {
+      controllerCalls += 1;
+      return controllerCalls <= 2 ? unavailable : { status: 0, signal: null, stdout: Buffer.from(disarmLine()), stderr: Buffer.alloc(0) };
+    }
+    return args[0] === 'print' ? launchctlResult('pid = 91\n') : launchctlResult();
+  };
+  assert.equal(recoverQualification({ expectedReceiptSHA256: RECEIPT, runCommand }), true);
+  assert.equal(calls.length, 9);
+
+  assert.throws(() => recoverQualification({
+    expectedReceiptSHA256: RECEIPT,
+    runCommand(command) {
+      if (command === PS_PATH) return launchctlResult(processListing());
+      if (command === CONTROLLER_EXECUTABLE_PATH) return { status: 0, signal: null, stdout: Buffer.from(disarmLine()), stderr: Buffer.alloc(0) };
+      return { status: 1, signal: null, stdout: Buffer.alloc(0), stderr: Buffer.alloc(0) };
+    }
+  }), /daemon restart failed/u);
+});
+
+test('recovery refuses a missing or substituted durable receipt after daemon restart', () => {
+  let controllerCalls = 0;
+  assert.throws(() => recoverQualification({
+    expectedReceiptSHA256: RECEIPT,
+    runCommand(command, args) {
+      if (command === PS_PATH) return launchctlResult(processListing());
+      if (command === CONTROLLER_EXECUTABLE_PATH) {
+        controllerCalls += 1;
+        if (controllerCalls === 1) return { status: 1, signal: null, stdout: Buffer.alloc(0), stderr: Buffer.alloc(0) };
+        return { status: 0, signal: null, stdout: Buffer.from(disarmLine('d'.repeat(64))), stderr: Buffer.alloc(0) };
+      }
+      return args[0] === 'print' ? launchctlResult('pid = 92\n') : launchctlResult();
+    }
+  }), /missing or mismatched/u);
+
+  assert.throws(() => recoverQualification({
+    expectedReceiptSHA256: RECEIPT,
+    runCommand(command, args) {
+      if (command === PS_PATH) return launchctlResult(processListing());
+      if (command === CONTROLLER_EXECUTABLE_PATH && args[0] === 'status') return { status: 0, signal: null, stdout: Buffer.from(protocolLine('status', 'armed')), stderr: Buffer.alloc(0) };
+      throw new Error('disarm must not run while only armed');
+    }
+  }), /missing or mismatched/u);
+});
+
+test('Agent Host accepts scenario-correct rejected exit only for daemon-loss scenarios', async () => {
+  const directory = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'agentpass-host-outcome-')));
+  try {
+    const repository = path.join(directory, 'repository');
+    const servicePath = path.join(directory, 'service.json');
+    const scenarioPath = path.join(directory, 'scenario.json');
+    const activationPath = path.join(directory, 'activation.json');
+    fs.mkdirSync(repository, { mode: 0o700 });
+    const owner = fs.lstatSync(repository);
+    fs.writeFileSync(servicePath, `${JSON.stringify({ allowed_client_uid: owner.uid }, null, 2)}\n`, { mode: 0o600 });
+    fs.writeFileSync(scenarioPath, `${JSON.stringify({ schema_version: 1, test_repository: repository }, null, 2)}\n`, { mode: 0o644 });
+    fs.writeFileSync(activationPath, canonicalQualificationActivation({
+      schema_version: 1, agent_id: '12345678-1234-4123-8123-123456789abc', agent_kind: 'claude_code', requested_ttl_seconds: 60, proof: '{"grant":"xxxxxxxxxxxxxxxx"}'
+    }), { mode: 0o600 });
+    const launch = (scenario, output, code) => {
+      const child = fakeChild();
+      const handle = startQualificationAgentActivation({
+        production: false, platform: process.platform, effectiveUID: process.geteuid(),
+        serviceConfigurationPath: servicePath, scenarioConfigurationPath: scenarioPath, activationDocumentPath: activationPath, scenario,
+        spawnProcess() {
+          queueMicrotask(() => { child.stdout.emit('data', Buffer.from(output)); child.emit('close', code, null); });
+          return child;
+        }
+      });
+      return handle.completion;
+    };
+    const rejected = '{"error":"agent_activation_rejected","ok":false,"operation":"qualification-activate","status":"rejected"}\n';
+    await launch('pre-cloud-kill', rejected, 1);
+    await assert.rejects(launch('transport-reply-loss', rejected, 1), /agent activation process failed/u);
+
+    const controllerChild = fakeChild();
+    const driver = executeQualification({
+      scenario: 'transport-reply-loss', phase: 'transport-reply', candidateSHA256: DIGEST_A, runIDSHA256: DIGEST_B,
+      signal: new AbortController().signal, spawnProcess: () => controllerChild,
+      startAgentActivation: () => ({ completion: Promise.reject(new Error('host secret')), terminate: () => undefined })
+    });
+    emitSuccessfulControllerRun(controllerChild);
+    await assert.rejects(driver.completion, /scenario execution failed/u);
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test('execution timeout escalates Controller termination and remains bounded', async () => {
+  const child = fakeChild({ closeOnKill: false });
+  const handle = executeQualification({
+    scenario: EXPECTED_SCENARIOS[5], phase: 'transport-reply', candidateSHA256: DIGEST_A, runIDSHA256: DIGEST_B,
+    signal: new AbortController().signal, spawnProcess: () => child, timeoutMs: 1,
+    startAgentActivation: () => activationHandle().handle,
+    wait: async () => undefined
+  });
+  await assert.rejects(handle.completion, /scenario execution failed/u);
+  assert.deepEqual(child.killCalls, ['SIGTERM', 'SIGKILL']);
+});
+
 test('invalid caller-controlled bindings are rejected before spawning', () => {
   let spawned = false;
   assert.throws(() => executeQualification({
@@ -255,6 +408,59 @@ test('disarm uses the fixed controller and validates a closed bound receipt', ()
   assert.equal(call.command, CONTROLLER_EXECUTABLE_PATH);
   assert.deepEqual(call.args, ['disarm']);
   assert.equal(call.options.shell, false);
+});
+
+test('daemon restart uses only fixed launchctl argv, cwd, environment, and bounded pipes', () => {
+  const calls = [];
+  const result = (stdout) => ({ status: 0, signal: null, stdout: Buffer.from(stdout), stderr: Buffer.alloc(0) });
+  const observed = restartQualificationDaemon({ runCommand(command, args, options) {
+    calls.push({ command, args, options });
+    return args[0] === 'print' ? result('pid = 4312\n') : result('');
+  } });
+  assert.deepEqual(observed, { pid: 4312 });
+  assert.deepEqual(calls.map(({ command, args }) => [command, args]), [
+    [LAUNCHCTL_PATH, ['kickstart', '-k', SERVICE_TARGET]],
+    [LAUNCHCTL_PATH, ['print', SERVICE_TARGET]]
+  ]);
+  for (const { options } of calls) {
+    assert.equal(options.cwd, '/');
+    assert.equal(options.shell, false);
+    assert.deepEqual(options.env, { HOME: '/var/empty', LANG: 'C', LC_ALL: 'C', PATH: '/usr/bin:/bin:/usr/sbin:/sbin' });
+    assert.deepEqual(options.stdio, ['ignore', 'pipe', 'pipe']);
+    assert.equal(options.maxBuffer, 64 * 1024);
+  }
+});
+
+test('qualification process proof uses fixed ps and detects exact active Controller or Host paths', () => {
+  const calls = [];
+  const runCommand = (command, args, options) => {
+    calls.push({ command, args, options });
+    return launchctlResult(`${processListing('/usr/bin/other-process')}501 812 ${CONTROLLER_EXECUTABLE_PATH}\n`);
+  };
+  assert.equal(proveNoQualificationProcesses({ runCommand }), false);
+  assert.equal(calls[0].command, PS_PATH);
+  assert.deepEqual(calls[0].args, [...PS_ARGUMENTS]);
+  assert.equal(calls[0].options.cwd, '/');
+  assert.equal(calls[0].options.shell, false);
+  assert.deepEqual(calls[0].options.env, { HOME: '/var/empty', LANG: 'C', LC_ALL: 'C', PATH: '/usr/bin:/bin:/usr/sbin:/sbin' });
+
+  assert.equal(proveNoQualificationProcesses({ runCommand: (command) => {
+    assert.equal(command, PS_PATH);
+    return launchctlResult(`501 812 ${AGENT_HOST_EXECUTABLE_PATH}\n`);
+  } }), false);
+  assert.equal(proveNoQualificationProcesses({ runCommand: () => launchctlResult(processListing()) }), true);
+});
+
+test('qualification process proof fails closed on malformed, oversized, and failed ps output', () => {
+  for (const result of [
+    launchctlResult('not-a-process-row\n'),
+    launchctlResult(`501 812 ${CONTROLLER_EXECUTABLE_PATH}\nnot-a-process-row\n`),
+    launchctlResult(Buffer.alloc(PS_MAX_OUTPUT_BYTES + 1)),
+    { status: 1, signal: null, stdout: Buffer.alloc(0), stderr: Buffer.alloc(0) },
+    { status: 0, signal: null, stdout: Buffer.from('0 1 /usr/bin/other\n'), stderr: Buffer.from('ps failed') }
+  ]) {
+    assert.throws(() => proveNoQualificationProcesses({ runCommand: () => result }), /qualification (?:process listing is invalid|process listing exceeded its bound|process proof failed)/u);
+  }
 });
 
 test('listener proof accepts only denied-before-selector from the approved fixed probe', () => {

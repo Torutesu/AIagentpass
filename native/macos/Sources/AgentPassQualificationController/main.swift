@@ -493,6 +493,23 @@ do {
       fail(command.rawValue, .endpointRejected)
     }
     if current.status == AgentPassQualificationXPCContract.Status.disarmed.rawValue {
+      // A restarted daemon has an intentionally empty in-memory endpoint, but
+      // a fault consumed immediately before process death leaves the exact
+      // root-owned fired receipt. Prefer and consume that run-bound evidence;
+      // the newly generated cleared endpoint receipt is not proof that the
+      // pre-restart fault was disarmed.
+      if let durable = try? durableReceipt(context: context) {
+        do {
+          try removeDurableReceipt(
+            context: context, expectedDigest: durable.armedReceiptDigest)
+          output(
+            command: command, context: context,
+            status: AgentPassQualificationXPCContract.Status.disarmed.rawValue,
+            receipt: durable.armedReceiptDigest)
+        } catch {
+          fail(command.rawValue, .responseInvalid)
+        }
+      }
       output(command: command, context: context, status: current.status, receipt: current.receiptDigest)
     }
     if current.status == AgentPassQualificationXPCContract.Status.fired.rawValue {

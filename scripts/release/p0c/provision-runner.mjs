@@ -15,6 +15,8 @@ export const QUALIFICATION_TOOL_FILES = Object.freeze([
   Object.freeze({ source: 'n3e/provision-qualification-config.mjs', installed: 'n3e/provision-qualification-config.mjs' }),
   Object.freeze({ source: 'n3e/qualification-activation-contract.mjs', installed: 'n3e/qualification-activation-contract.mjs' }),
   Object.freeze({ source: 'n3e/qualification-scenario-driver.mjs', installed: 'n3e/qualification-scenario-driver.mjs' }),
+  Object.freeze({ source: 'n3e/qualification-unarmed-control.mjs', installed: 'n3e/qualification-unarmed-control.mjs' }),
+  Object.freeze({ source: 'n3e/run-fixed-protected-qualification.mjs', installed: 'n3e/run-fixed-protected-qualification.mjs' }),
   Object.freeze({ source: 'n3e/run-protected-qualification.mjs', installed: 'n3e/run-protected-qualification.mjs' })
 ]);
 export const REQUIRED_GATES = Object.freeze([
@@ -138,7 +140,7 @@ export const provisionRunner = ({ sourceRoot, scenarioDirectory, machineConfigPa
     verifyInstalledTree(staging, inspected, uid);
     fs.renameSync(staging, destination); fsyncDirectory(parent);
     const installed = verifyInstalledTree(destination, inspected, uid);
-    return Object.freeze({ production: production === true, destination, driver_count: installed.drivers.length, scenario_count: installed.scenarios.length, qualification_tool_path: join(destination, 'qualification-tool', 'n3e', 'provision-qualification-config.mjs'), qualification_orchestrator_path: join(destination, 'qualification-tool', 'n3e', 'run-protected-qualification.mjs'), qualification_scenario_driver_path: join(destination, 'qualification-tool', 'n3e', 'qualification-scenario-driver.mjs'), qualification_tool_manifest_sha256: installed.qualificationToolManifest.sha256, config_sha256: installed.config.sha256 });
+    return Object.freeze({ production: production === true, destination, driver_count: installed.drivers.length, scenario_count: installed.scenarios.length, qualification_tool_path: join(destination, 'qualification-tool', 'n3e', 'provision-qualification-config.mjs'), qualification_orchestrator_path: join(destination, 'qualification-tool', 'n3e', 'run-protected-qualification.mjs'), fixed_qualification_entrypoint_path: join(destination, 'qualification-tool', 'n3e', 'run-fixed-protected-qualification.mjs'), qualification_scenario_driver_path: join(destination, 'qualification-tool', 'n3e', 'qualification-scenario-driver.mjs'), qualification_tool_manifest_sha256: installed.qualificationToolManifest.sha256, config_sha256: installed.config.sha256 });
   } catch (error) {
     if (fs.existsSync(staging)) fs.rmSync(staging, { recursive: true, force: false });
     throw error;

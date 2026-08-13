@@ -14,6 +14,12 @@ export const SCENARIO_CONFIGURATION_PATH = '/opt/agentpass/p0c/scenario-config.j
 export const ACTIVATION_DOCUMENT_PATH = '/private/var/db/agentpass-qualification/activation/activation.json';
 export const AGENT_ACTIVATION_ARGUMENTS = Object.freeze(['qualification-activate']);
 export const LISTENER_PROBE_ARGUMENTS = Object.freeze(['qualification-controller']);
+export const LAUNCHCTL_PATH = '/bin/launchctl';
+export const SERVICE_LABEL = 'dev.agentpass.native-service';
+export const SERVICE_TARGET = `system/${SERVICE_LABEL}`;
+export const PS_PATH = '/bin/ps';
+export const PS_ARGUMENTS = Object.freeze(['-axo', 'uid=,pid=,comm=']);
+export const PS_MAX_OUTPUT_BYTES = 1024 * 1024;
 
 const CLEAN_ENVIRONMENT = Object.freeze({ HOME: '/var/empty', LANG: 'C', LC_ALL: 'C', PATH: '/usr/bin:/bin:/usr/sbin:/sbin' });
 const DIGEST = /^[0-9a-f]{64}$/u;
@@ -21,7 +27,18 @@ const RECEIPT = /^[0-9a-f]{64}$/u;
 const MAX_OUTPUT_BYTES = 64 * 1024;
 const MAX_LINE_BYTES = 2048;
 const TERMINATION_GRACE_MS = 5_000;
+const COMMAND_TIMEOUT_MS = 30_000;
+const SCENARIO_TIMEOUT_MS = 15 * 60 * 1000;
 const UINT32_MAX = 0xffff_ffff;
+
+const HOST_EXPECTED_OUTCOME = Object.freeze({
+  'pre-cloud-kill': 'rejected',
+  'post-cloud-pre-local-kill': 'rejected',
+  'post-activation-pre-audit-kill': 'rejected',
+  'post-audit-pre-reply-loss': 'rejected',
+  'audit-fsync-failure': 'rejected',
+  'transport-reply-loss': 'active-closed'
+});
 
 const fail = (message) => { throw new Error(message); };
 const exactKeys = (value, keys, label) => {
@@ -39,30 +56,59 @@ const parseControllerLine = (line, candidateSHA256, runIDSHA256) => {
   return value;
 };
 
-const defaultStartAgentActivation = () => startQualificationAgentActivation();
+const defaultStartAgentActivation = (input) => startQualificationAgentActivation(input);
 
 const validateActivationHandle = (handle) => {
   if (!handle || typeof handle !== 'object' || typeof handle.completion?.then !== 'function' || typeof handle.terminate !== 'function') fail('agent activation handle is invalid');
   return handle;
 };
 
-const validateAgentActivationOutput = (bytes) => {
+const validateAgentActivationOutput = (bytes, scenario = 'transport-reply-loss') => {
   const source = bytes.toString('utf8');
   if (!source.endsWith('\n')) fail('agent activation output is invalid');
   const lines = source.slice(0, -1).split('\n');
-  if (lines.length !== 2) fail('agent activation output is invalid');
-  const expectedStatuses = ['active', 'closed'];
+  const expectedOutcome = HOST_EXPECTED_OUTCOME[scenario];
+  if (!expectedOutcome) fail('agent activation scenario is invalid');
+  const expectedStatuses = expectedOutcome === 'rejected' ? ['rejected'] : ['active', 'closed'];
+  if (lines.length !== expectedStatuses.length) fail('agent activation output is invalid');
   for (let index = 0; index < lines.length; index += 1) {
     let value;
     try { value = JSON.parse(lines[index]); } catch { fail('agent activation output is invalid'); }
     exactKeys(value, ['error', 'ok', 'operation', 'status'], 'agent activation result');
-    if (value.error !== null || value.ok !== true || value.operation !== 'qualification-activate' || value.status !== expectedStatuses[index]) fail('agent activation output is invalid');
+    const expectedError = expectedOutcome === 'rejected' ? 'agent_activation_rejected' : null;
+    if (value.error !== expectedError || value.ok !== (expectedOutcome !== 'rejected') || value.operation !== 'qualification-activate' || value.status !== expectedStatuses[index]) fail('agent activation output is invalid');
     const canonical = JSON.stringify(Object.fromEntries(Object.keys(value).sort().map((key) => [key, value[key]])));
     if (canonical !== lines[index]) fail('agent activation output is invalid');
   }
 };
 
 const delay = (milliseconds) => new Promise((resolvePromise) => setTimeout(resolvePromise, milliseconds));
+
+const cancellableWait = (milliseconds, wait) => {
+  if (wait !== delay) {
+    let cancelled = false;
+    return {
+      promise: Promise.resolve().then(() => wait(milliseconds)).then((value) => (cancelled ? undefined : value)),
+      cancel: () => { cancelled = true; }
+    };
+  }
+  let timer;
+  let resolvePromise;
+  const promise = new Promise((resolveValue) => {
+    resolvePromise = resolveValue;
+    timer = setTimeout(resolveValue, milliseconds);
+  });
+  return {
+    promise,
+    cancel: () => {
+      if (timer !== undefined) {
+        clearTimeout(timer);
+        timer = undefined;
+        resolvePromise();
+      }
+    }
+  };
+};
 
 const identity = (value) => [value.dev, value.ino, value.mode, value.nlink, value.size, value.mtimeNs, value.ctimeNs, value.uid, value.gid].map(String).join(':');
 const canonicalDocument = (value) => Buffer.from(`${JSON.stringify(value, null, 2)}\n`, 'utf8');
@@ -112,8 +158,9 @@ const parseCanonicalConfiguration = (snapshot, label) => {
 export const startQualificationAgentActivation = ({
   spawnProcess = spawn, fileSystem = fs, platform = process.platform, effectiveUID = process.geteuid?.(), production = true,
   serviceConfigurationPath = SERVICE_CONFIGURATION_PATH, scenarioConfigurationPath = SCENARIO_CONFIGURATION_PATH,
-  activationDocumentPath = ACTIVATION_DOCUMENT_PATH
+  activationDocumentPath = ACTIVATION_DOCUMENT_PATH, scenario: activationScenario = 'transport-reply-loss'
 } = {}) => {
+  if (!HOST_EXPECTED_OUTCOME[activationScenario]) fail('qualification activation scenario is invalid');
   if (production && (platform !== 'darwin' || effectiveUID !== 0 || serviceConfigurationPath !== SERVICE_CONFIGURATION_PATH || scenarioConfigurationPath !== SCENARIO_CONFIGURATION_PATH || activationDocumentPath !== ACTIVATION_DOCUMENT_PATH)) fail('production qualification activation requires root on macOS and fixed paths');
   const expectedUid = production ? 0 : effectiveUID;
   if (!Number.isSafeInteger(expectedUid) || expectedUid < 0 || expectedUid > UINT32_MAX) fail('qualification activation identity is invalid');
@@ -153,8 +200,10 @@ export const startQualificationAgentActivation = ({
     child.once('error', rejectOnce);
     child.once('close', (code, closeSignal) => {
       if (settled) return;
-      if (code !== 0 || closeSignal !== null || stderrBytes !== 0) { rejectOnce(); return; }
-      try { validateAgentActivationOutput(Buffer.concat(stdoutChunks, stdoutBytes)); } catch { rejectOnce(); return; }
+      const output = Buffer.concat(stdoutChunks, stdoutBytes);
+      const expectedFailure = HOST_EXPECTED_OUTCOME[activationScenario] === 'rejected';
+      if (closeSignal !== null || stderrBytes !== 0 || (expectedFailure ? code !== 1 : code !== 0)) { rejectOnce(); return; }
+      try { validateAgentActivationOutput(output, activationScenario); } catch { rejectOnce(); return; }
       settled = true; resolveCompletion(Object.freeze({ exited: true }));
     });
   });
@@ -165,18 +214,28 @@ export const executeQualification = ({
   scenario, phase, candidateSHA256, runIDSHA256, signal,
   spawnProcess = spawn,
   startAgentActivation = defaultStartAgentActivation,
-  wait = delay
+  wait = delay,
+  runCommand = spawnSync,
+  restart = restartQualificationDaemon,
+  timeoutMs = SCENARIO_TIMEOUT_MS
 } = {}) => {
-  if (SCENARIO_PHASE[scenario] !== phase || !DIGEST.test(candidateSHA256 ?? '') || !DIGEST.test(runIDSHA256 ?? '') || !(signal instanceof AbortSignal)) fail('qualification scenario binding is invalid');
+  if (SCENARIO_PHASE[scenario] !== phase || !DIGEST.test(candidateSHA256 ?? '') || !DIGEST.test(runIDSHA256 ?? '') || !(signal instanceof AbortSignal) || !Number.isSafeInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > SCENARIO_TIMEOUT_MS) fail('qualification scenario binding is invalid');
   const child = spawnProcess(CONTROLLER_EXECUTABLE_PATH, ['arm'], { cwd: '/', env: CLEAN_ENVIRONMENT, shell: false, stdio: ['ignore', 'pipe', 'pipe'] });
   if (!child || typeof child.once !== 'function' || typeof child.kill !== 'function' || typeof child.stdout?.on !== 'function' || typeof child.stderr?.on !== 'function') fail('qualification controller process is invalid');
 
-  let stdoutBytes = 0; let stderrBytes = 0; let pending = ''; let settled = false; let activationHandle; let activationStarted = false;
+  let stdoutBytes = 0; let stderrBytes = 0; let pending = ''; let settled = false; let activationHandle; let activationStarted = false; let timeoutHandle; let escalationWait;
   const transcript = [];
   let resolveCompletion; let rejectCompletion;
   const completion = new Promise((resolvePromise, rejectPromise) => { resolveCompletion = resolvePromise; rejectCompletion = rejectPromise; });
   const removeAbortListener = () => signal.removeEventListener('abort', abort);
-  const rejectOnce = () => { if (!settled) { settled = true; removeAbortListener(); rejectCompletion(new Error('qualification scenario execution failed')); } };
+  const rejectOnce = () => {
+    if (settled) return;
+    settled = true;
+    removeAbortListener();
+    if (timeoutHandle !== undefined) clearTimeout(timeoutHandle);
+    escalationWait?.cancel();
+    rejectCompletion(new Error('qualification scenario execution failed'));
+  };
   const terminateChild = (terminationSignal) => { try { child.kill(terminationSignal); } catch {} };
 
   const consume = (chunk, stdout) => {
@@ -206,34 +265,106 @@ export const executeQualification = ({
   child.stdout.on('data', (chunk) => consume(Buffer.from(chunk), true));
   child.stderr.on('data', (chunk) => consume(Buffer.from(chunk), false));
   child.once('error', rejectOnce);
-  child.once('close', (code, closeSignal) => {
+
+  const stopActivationBounded = async () => {
+    if (!activationHandle) return;
+    try { activationHandle.terminate('SIGTERM'); } catch { throw new Error('qualification Agent Host termination failed'); }
+    let hostFailed = false;
+    const completion = activationHandle.completion.then(() => undefined, () => { hostFailed = true; });
+    let expired = false;
+    const grace = cancellableWait(TERMINATION_GRACE_MS, wait);
+    try {
+      await Promise.race([completion, grace.promise.then(() => { expired = true; })]);
+    } finally { grace.cancel(); }
+    if (!expired) {
+      if (hostFailed) throw new Error('qualification Agent Host failed');
+      return;
+    }
+    try { activationHandle.terminate('SIGKILL'); } catch { throw new Error('qualification Agent Host termination failed'); }
+    let stillRunning = false;
+    const killGrace = cancellableWait(TERMINATION_GRACE_MS, wait);
+    try {
+      await Promise.race([completion, killGrace.promise.then(() => { stillRunning = true; })]);
+    } finally { killGrace.cancel(); }
+    if (stillRunning) throw new Error('qualification Agent Host termination timed out');
+    if (hostFailed) throw new Error('qualification Agent Host failed');
+  };
+
+  child.once('close', async (code, closeSignal) => {
     if (settled) return;
-    if (code !== 0 || closeSignal !== null || pending.length !== 0 || transcript.length !== 3 || !activationStarted) { rejectOnce(); return; }
-    try { activationHandle.terminate('SIGTERM'); } catch { rejectOnce(); return; }
-    activationHandle.completion.then(() => {
+    const controllerLost = code !== 0 || closeSignal !== null || pending.length !== 0 || transcript.length !== 3 || !activationStarted;
+    try {
+      if (controllerLost) {
+        await stopActivationBounded();
+        if (transcript.length > 0) await Promise.resolve().then(() => recoverQualification({ expectedReceiptSHA256: transcript[0].receipt_sha256, runCommand, restart }));
+        rejectOnce();
+        return;
+      }
+      await stopActivationBounded();
       if (settled) return;
       settled = true;
       removeAbortListener();
+      if (timeoutHandle !== undefined) clearTimeout(timeoutHandle);
+      escalationWait?.cancel();
       const evidence = Buffer.from(transcript.map((value) => JSON.stringify(value)).join('\n') + '\n', 'utf8');
       resolveCompletion(Object.freeze({ ok: true, status: 'passed', evidence_sha256: crypto.createHash('sha256').update(evidence).digest('hex') }));
-    }).catch(rejectOnce);
+    } catch { rejectOnce(); }
   });
   const abort = () => { terminateChild('SIGTERM'); try { activationHandle?.terminate('SIGTERM'); } catch {} };
   signal.addEventListener('abort', abort, { once: true });
   if (signal.aborted) queueMicrotask(abort);
+  timeoutHandle = setTimeout(() => {
+    if (settled) return;
+    timeoutHandle = undefined;
+    terminateChild('SIGTERM');
+    try { activationHandle?.terminate('SIGTERM'); } catch {}
+    escalationWait = cancellableWait(TERMINATION_GRACE_MS, wait);
+    escalationWait.promise.then(() => {
+      escalationWait = undefined;
+      if (settled) return;
+      terminateChild('SIGKILL');
+      try { activationHandle?.terminate('SIGKILL'); } catch {}
+      rejectOnce();
+    });
+  }, timeoutMs);
 
   const terminate = async () => {
+    if (timeoutHandle !== undefined) { clearTimeout(timeoutHandle); timeoutHandle = undefined; }
+    escalationWait?.cancel();
+    escalationWait = undefined;
     abort();
-    await wait(TERMINATION_GRACE_MS);
+    const grace = cancellableWait(TERMINATION_GRACE_MS, wait);
+    try { await grace.promise; } finally { grace.cancel(); }
     if (!settled) terminateChild('SIGKILL');
     try { activationHandle?.terminate('SIGKILL'); } catch {}
   };
   return Object.freeze({ completion, terminate });
 };
 
+const runLaunchctl = (args, runCommand = spawnSync) => {
+  const result = runCommand(LAUNCHCTL_PATH, args, {
+    cwd: '/', env: CLEAN_ENVIRONMENT, encoding: null, shell: false,
+    stdio: ['ignore', 'pipe', 'pipe'], timeout: COMMAND_TIMEOUT_MS, maxBuffer: MAX_OUTPUT_BYTES
+  });
+  const stdout = Buffer.isBuffer(result?.stdout) ? result.stdout : Buffer.from(result?.stdout ?? '');
+  const stderr = Buffer.isBuffer(result?.stderr) ? result.stderr : Buffer.from(result?.stderr ?? '');
+  if (!result || result.error || result.signal !== null || result.status !== 0 || stdout.length + stderr.length > MAX_OUTPUT_BYTES) fail('qualification daemon command failed');
+  return stdout;
+};
+
+export const restartQualificationDaemon = ({ runCommand = spawnSync } = {}) => {
+  runLaunchctl(['kickstart', '-k', SERVICE_TARGET], runCommand);
+  const output = runLaunchctl(['print', SERVICE_TARGET], runCommand).toString('utf8');
+  const pids = [...output.matchAll(/(?:^|\n)\s*pid\s*=\s*([1-9][0-9]*)\s*$/gmu)];
+  if (pids.length !== 1) fail('qualification daemon did not become observable');
+  const pid = Number(pids[0][1]);
+  if (!Number.isSafeInteger(pid) || pid <= 0) fail('qualification daemon PID is invalid');
+  return Object.freeze({ pid });
+};
+
 const runFixed = (command, args, runCommand = spawnSync) => runCommand(command, args, {
   cwd: '/', env: CLEAN_ENVIRONMENT, encoding: null, shell: false,
-  stdio: ['ignore', 'pipe', 'pipe'], timeout: 30_000, maxBuffer: MAX_OUTPUT_BYTES
+  stdio: ['ignore', 'pipe', 'pipe'], timeout: COMMAND_TIMEOUT_MS, maxBuffer: MAX_OUTPUT_BYTES
 });
 
 const oneJSON = (result, label) => {
@@ -245,10 +376,79 @@ const oneJSON = (result, label) => {
   return value;
 };
 
-export const disarmQualification = ({ runCommand = spawnSync } = {}) => {
+const boundedCommandOutput = (result, label, maximumStdoutBytes = MAX_OUTPUT_BYTES, maximumStderrBytes = MAX_OUTPUT_BYTES, requireEmptyStderr = false) => {
+  const stdout = Buffer.isBuffer(result?.stdout) ? result.stdout : Buffer.from(result?.stdout ?? '');
+  const stderr = Buffer.isBuffer(result?.stderr) ? result.stderr : Buffer.from(result?.stderr ?? '');
+  if (!result || result.error || result.signal !== null || result.status !== 0 || (requireEmptyStderr && stderr.length !== 0) || stdout.length > maximumStdoutBytes || stderr.length > maximumStderrBytes) fail(`${label} failed`);
+  return stdout;
+};
+
+const parseQualificationProcessList = (bytes) => {
+  if (bytes.length > PS_MAX_OUTPUT_BYTES) fail('qualification process listing exceeded its bound');
+  const source = bytes.toString('utf8');
+  if (source.length === 0) return true;
+  if (!source.endsWith('\n')) fail('qualification process listing is invalid');
+  const lines = source.slice(0, -1).split('\n');
+  let active = false;
+  for (const line of lines) {
+    const match = /^\s*([0-9]+)\s+([0-9]+)\s+(.+?)\s*$/u.exec(line);
+    if (!match) fail('qualification process listing is invalid');
+    const uid = Number(match[1]);
+    const pid = Number(match[2]);
+    const command = match[3];
+    if (!Number.isSafeInteger(uid) || uid < 0 || uid > UINT32_MAX || !Number.isSafeInteger(pid) || pid <= 0 || command.length === 0) fail('qualification process listing is invalid');
+    if (command === CONTROLLER_EXECUTABLE_PATH || command === AGENT_HOST_EXECUTABLE_PATH) active = true;
+  }
+  return !active;
+};
+
+export const proveNoQualificationProcesses = ({ runCommand = spawnSync } = {}) => parseQualificationProcessList(boundedCommandOutput(runFixed(PS_PATH, PS_ARGUMENTS, runCommand), 'qualification process proof', PS_MAX_OUTPUT_BYTES, MAX_OUTPUT_BYTES, true));
+
+const controllerDisarmResult = ({ runCommand = spawnSync } = {}) => {
   const value = oneJSON(runFixed(CONTROLLER_EXECUTABLE_PATH, ['disarm'], runCommand), 'qualification disarm');
   exactKeys(value, ['schema_version', 'command', 'ok', 'status', 'candidate_sha256', 'run_id_sha256', 'receipt_sha256', 'error'], 'qualification disarm result');
   if (value.schema_version !== 1 || value.command !== 'disarm' || value.ok !== true || value.status !== 'disarmed' || value.error !== null || !DIGEST.test(value.candidate_sha256) || !DIGEST.test(value.run_id_sha256) || !RECEIPT.test(value.receipt_sha256)) fail('qualification disarm result is invalid');
+  return value;
+};
+
+const controllerStatusResult = ({ runCommand = spawnSync } = {}) => {
+  const value = oneJSON(runFixed(CONTROLLER_EXECUTABLE_PATH, ['status'], runCommand), 'qualification status');
+  exactKeys(value, ['schema_version', 'command', 'ok', 'status', 'candidate_sha256', 'run_id_sha256', 'receipt_sha256', 'error'], 'qualification status result');
+  if (value.schema_version !== 1 || value.command !== 'status' || value.ok !== true || !['armed', 'fired', 'disarmed'].includes(value.status) || value.error !== null || !DIGEST.test(value.candidate_sha256) || !DIGEST.test(value.run_id_sha256) || !RECEIPT.test(value.receipt_sha256)) fail('qualification status result is invalid');
+  return value;
+};
+
+export const recoverQualification = ({
+  expectedReceiptSHA256, runCommand = spawnSync, restart = restartQualificationDaemon,
+  proveNoProcesses = proveNoQualificationProcesses
+} = {}) => {
+  if (!RECEIPT.test(expectedReceiptSHA256 ?? '')) fail('qualification recovery receipt is invalid');
+  if (proveNoProcesses({ runCommand }) !== true) fail('qualification process remained active');
+  let value;
+  try {
+    const status = controllerStatusResult({ runCommand });
+    if (status.status !== 'fired' || status.receipt_sha256 !== expectedReceiptSHA256) fail('qualification fired receipt is missing or mismatched');
+  } catch (error) {
+    if (error?.message === 'qualification fired receipt is missing or mismatched') throw error;
+  }
+  try {
+    value = controllerDisarmResult({ runCommand });
+  } catch {
+    try {
+      restart({ runCommand });
+      value = controllerDisarmResult({ runCommand });
+    } catch {
+      fail('qualification recovery failed');
+    }
+  }
+  if (value.receipt_sha256 !== expectedReceiptSHA256) fail('qualification fired receipt is missing or mismatched');
+  try { restart({ runCommand }); } catch { fail('qualification daemon restart failed'); }
+  if (proveNoProcesses({ runCommand }) !== true) fail('qualification process remained active');
+  return true;
+};
+
+export const disarmQualification = ({ runCommand = spawnSync } = {}) => {
+  controllerDisarmResult({ runCommand });
   return true;
 };
 
