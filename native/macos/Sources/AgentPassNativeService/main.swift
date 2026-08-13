@@ -2851,35 +2851,16 @@ private final class ServiceEndpoint: NSObject, AgentPassNativeServiceProtocol, N
         return status
     }
 
-    func appendAgentSessionAudit(_ evidence: NativeAgentSessionAuditEvidence) throws {
-        var object: [String: Any] = [
-            "version": 1,
-            "action": evidence.action.rawValue,
-            "agent_id": evidence.binding.agentID,
-            "device_id": evidence.binding.deviceID,
-            "process_binding_sha256": evidence.binding.processBindingDigest.map { String(format: "%02x", $0) }.joined(),
-            "ancestry_binding_sha256": evidence.binding.ancestryBindingDigest.map { String(format: "%02x", $0) }.joined(),
-            "worktree_binding_sha256": evidence.binding.worktreeBindingDigest.map { String(format: "%02x", $0) }.joined(),
-            "control_sequence": evidence.binding.controlSequence,
-            "authority_generation": evidence.binding.authorityGeneration,
-            "key_generation": evidence.binding.keyGeneration
-        ]
-        if let value = evidence.sessionID { object["session_id"] = value }
-        if let value = evidence.requestID { object["request_id"] = value }
-        if let value = evidence.capabilityID { object["capability_id"] = value }
-        if let value = evidence.payloadDigest {
-            object["payload_sha256"] = value.map { String(format: "%02x", $0) }.joined()
-        }
-        if let value = evidence.reasonCode { object["reason_code"] = value }
-        let evidenceDigest = Data(SHA256.hash(data: try NativeStrictJSON.data(object)))
-            .map { String(format: "%02x", $0) }.joined()
+    func appendAgentSessionAudit(_ evidence: NativeAgentSessionAuditEvidence) throws -> NativeAgentSessionAuditReceipt {
+        let evidenceDigestData = try evidence.evidenceDigest()
+        let evidenceDigest = evidenceDigestData.map { String(format: "%02x", $0) }.joined()
         let decision: String
         switch evidence.action {
         case .sessionDenied: decision = "deny"
         case .signingOutcomeUnknown: decision = "error"
         default: decision = "allow"
         }
-        _ = try appendAudit(NativeAuditEvent(
+        let status = try appendAudit(NativeAuditEvent(
             operation: "agent.session.\(evidence.action.rawValue)",
             decision: decision,
             requestID: evidence.requestID ?? evidence.sessionID,
@@ -2887,6 +2868,28 @@ private final class ServiceEndpoint: NSObject, AgentPassNativeServiceProtocol, N
             agentID: evidence.binding.agentID,
             payloadSHA256: evidenceDigest
         ))
+        guard let recordDigest = Self.lowercaseHexDigest(status.headHash) else {
+            throw AgentPassNativeError.invalidSignature("Native Agent audit returned an invalid durable head")
+        }
+        return try NativeAgentSessionAuditReceipt(
+            evidenceDigest: evidenceDigestData,
+            recordDigest: recordDigest,
+            recordIndex: status.entries
+        )
+    }
+
+    private static func lowercaseHexDigest(_ value: String) -> Data? {
+        guard value.utf8.count == 64,
+              value.range(of: "^[0-9a-f]{64}$", options: .regularExpression) != nil else { return nil }
+        var result = Data(capacity: 32)
+        var index = value.startIndex
+        while index < value.endIndex {
+            let next = value.index(index, offsetBy: 2)
+            guard let byte = UInt8(value[index..<next], radix: 16) else { return nil }
+            result.append(byte)
+            index = next
+        }
+        return result
     }
 
     private func rotateAuditIfReady() throws {

@@ -212,9 +212,9 @@ test("audit evidence is an exact secret-free allowlist and is hashed before the 
   assert.match(evidenceImplementation, /payloadDigest\?\.count == NativeAgentSessionBinding\.digestByteCount/u);
   assert.match(evidenceImplementation, /unicodeScalars\.allSatisfy/u);
 
-  const appendAudit = between(service, "func appendAgentSessionAudit", "private func rotateAuditIfReady");
-  const literalKeys = [...appendAudit.matchAll(/^\s*"([^"]+)":/gmu)].map((match) => match[1]);
-  const optionalKeys = [...appendAudit.matchAll(/object\["([^"]+)"\]/gu)].map((match) => match[1]);
+  const digestImplementation = between(dependencies, "public func evidenceDigest()", "private static func hex");
+  const literalKeys = [...digestImplementation.matchAll(/^\s*"([^"]+)":/gmu)].map((match) => match[1]);
+  const optionalKeys = [...digestImplementation.matchAll(/object\["([^"]+)"\]/gu)].map((match) => match[1]);
   assert.deepEqual([...new Set([...literalKeys, ...optionalKeys])], [
     "version",
     "action",
@@ -235,8 +235,10 @@ test("audit evidence is an exact secret-free allowlist and is hashed before the 
   for (const key of [...new Set([...literalKeys, ...optionalKeys])]) {
     assert.doesNotMatch(key, /path|cwd|argv|environment|env|pid|audit[_-]?token|proof|grant|credential|private[_-]?key|bearer|session[_-]?token/u, key);
   }
-  assert.match(appendAudit, /NativeStrictJSON\.data\(object\)/u);
-  assert.match(appendAudit, /SHA256\.hash\(data:/u);
+  assert.match(digestImplementation, /NativeStrictJSON\.data\(object\)/u);
+  assert.match(digestImplementation, /SHA256\.hash\(data:/u);
+  const appendAudit = between(service, "func appendAgentSessionAudit", "private static func lowercaseHexDigest");
+  assert.match(appendAudit, /evidence\.evidenceDigest\(\)/u);
   assert.match(appendAudit, /payloadSHA256: evidenceDigest/u);
   assert.match(appendAudit, /reason: evidence\.reasonCode/u);
   assert.doesNotMatch(appendAudit, /localizedDescription|error\.userInfo|String\(describing:|proof|grant|private[_-]?key|credential/u);
@@ -260,7 +262,7 @@ test("restart recovery persists only Grant and authority digests", () => {
   const evidence = between(
     recovery,
     "public struct NativeAgentSessionConsumeRecoveryEvidence",
-    "public protocol NativeAgentSessionConsumeRecoveryStoring"
+    "public struct NativeAgentSessionConsumeRecoveryAuditedRecord"
   );
   assert.deepEqual(publicFields(evidence).map(({ name }) => name), [
     "organizationID",
@@ -277,6 +279,19 @@ test("restart recovery persists only Grant and authority digests", () => {
     "recoveryExpiresAtMilliseconds"
   ]);
   assert.doesNotMatch(evidence, /public let (?:proof|path|pid|token|credential|privateKey|bootstrapID|grantID)\b/u);
+  const audited = between(
+    recovery,
+    "public struct NativeAgentSessionConsumeRecoveryAuditedRecord",
+    "public enum NativeAgentSessionConsumeRecoveryLookup"
+  );
+  assert.deepEqual(publicFields(audited).map(({ name }) => name), [
+    "evidence",
+    "sessionDigest",
+    "resultDigest",
+    "auditDigest",
+    "expiresAtMilliseconds"
+  ]);
+  assert.doesNotMatch(audited, /public let (?:lease|proof|path|pid|token|credential|privateKey|bootstrapID|grantID|sessionID)\b/u);
   assert.match(recovery, /NativeStrictJSON\.data\(object\)/u);
   assert.match(recovery, /O_NOFOLLOW/u);
   assert.match(recovery, /info\.st_nlink == 1/u);

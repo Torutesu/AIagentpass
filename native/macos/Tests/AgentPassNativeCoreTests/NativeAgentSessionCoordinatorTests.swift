@@ -76,12 +76,20 @@ private final class CoordinatorGrantConsumer: NativeAgentGrantLeaseConsuming,
 private final class CoordinatorAudit: NativeAgentSessionAuditAppending, @unchecked Sendable {
   private let lock = NSLock()
   var fail = false
+  var substituteReceiptEvidence = false
   private(set) var events: [NativeAgentSessionAuditEvidence] = []
-  func appendAgentSessionAudit(_ evidence: NativeAgentSessionAuditEvidence) throws {
-    try lock.withLock {
+  func appendAgentSessionAudit(_ evidence: NativeAgentSessionAuditEvidence) throws
+    -> NativeAgentSessionAuditReceipt
+  {
+    let index = try lock.withLock {
       if fail { throw NativeAgentSessionCoordinatorError.auditUnavailable }
       events.append(evidence)
+      return events.count
     }
+    return try NativeAgentSessionAuditReceipt(
+      evidenceDigest: substituteReceiptEvidence
+        ? Data(repeating: 0xff, count: 32) : evidence.evidenceDigest(),
+      recordDigest: Data(repeating: UInt8(index), count: 32), recordIndex: index)
   }
 }
 
@@ -89,38 +97,75 @@ private final class CoordinatorRecoveryStore: NativeAgentSessionConsumeRecoveryS
   @unchecked Sendable
 {
   private let lock = NSLock()
-  private var evidence: NativeAgentSessionConsumeRecoveryEvidence?
+  private var state: NativeAgentSessionConsumeRecoveryLookup = .missing
 
   func save(
     _ evidence: NativeAgentSessionConsumeRecoveryEvidence,
     nowMilliseconds: Int64?
   ) throws -> NativeAgentSessionConsumeRecoveryEvidence {
     try lock.withLock {
-      if let existing = self.evidence, existing != evidence {
+      switch state {
+      case .missing:
+        state = .pending(evidence)
+      case .pending(let existing) where existing == evidence:
+        break
+      default:
         throw NativeAgentSessionConsumeRecoveryStoreError.conflict
       }
-      self.evidence = evidence
       return evidence
     }
   }
 
   func completeAfterLocalActivation(
-    _ expected: NativeAgentSessionConsumeRecoveryEvidence
-  ) throws -> Bool {
-    try remove(expected)
+    _ expected: NativeAgentSessionConsumeRecoveryEvidence,
+    auditedRecord: NativeAgentSessionConsumeRecoveryAuditedRecord
+  ) throws -> NativeAgentSessionConsumeRecoveryAuditedRecord {
+    try lock.withLock {
+      guard auditedRecord.evidence == expected else {
+        throw NativeAgentSessionConsumeRecoveryStoreError.conflict
+      }
+      switch state {
+      case .pending(let existing) where existing == expected:
+        state = .audited(auditedRecord)
+      case .audited(let existing) where existing == auditedRecord:
+        break
+      default:
+        throw NativeAgentSessionConsumeRecoveryStoreError.conflict
+      }
+      return auditedRecord
+    }
+  }
+
+  func lookupExact(
+    _ expected: NativeAgentSessionConsumeRecoveryEvidence,
+    nowMilliseconds: Int64?
+  ) throws -> NativeAgentSessionConsumeRecoveryLookup {
+    try lock.withLock {
+      switch state {
+      case .missing: return .missing
+      case .pending(let existing):
+        guard existing == expected else {
+          throw NativeAgentSessionConsumeRecoveryStoreError.conflict
+        }
+      case .audited(let existing):
+        guard existing.evidence == expected else {
+          throw NativeAgentSessionConsumeRecoveryStoreError.conflict
+        }
+      }
+      return state
+    }
   }
 
   func abandon(_ expected: NativeAgentSessionConsumeRecoveryEvidence) throws -> Bool {
-    try remove(expected)
-  }
-
-  private func remove(_ expected: NativeAgentSessionConsumeRecoveryEvidence) throws -> Bool {
     try lock.withLock {
-      guard let evidence else { return false }
-      guard evidence == expected else {
+      guard case .pending(let existing) = state else {
+        if case .missing = state { return false }
         throw NativeAgentSessionConsumeRecoveryStoreError.conflict
       }
-      self.evidence = nil
+      guard existing == expected else {
+        throw NativeAgentSessionConsumeRecoveryStoreError.conflict
+      }
+      state = .missing
       return true
     }
   }
@@ -133,11 +178,20 @@ private final class InvalidatingCoordinatorAudit: NativeAgentSessionAuditAppendi
   weak var coordinator: NativeAgentSessionCoordinator?
   private(set) var events: [NativeAgentSessionAuditEvidence] = []
 
-  func appendAgentSessionAudit(_ evidence: NativeAgentSessionAuditEvidence) throws {
-    lock.withLock { events.append(evidence) }
+  func appendAgentSessionAudit(_ evidence: NativeAgentSessionAuditEvidence) throws
+    -> NativeAgentSessionAuditReceipt
+  {
+    let index = lock.withLock {
+      events.append(evidence)
+      return events.count
+    }
     if evidence.action == .sessionActivated {
       coordinator?.invalidateConnection()
     }
+    return try NativeAgentSessionAuditReceipt(
+      evidenceDigest: evidence.evidenceDigest(),
+      recordDigest: Data(repeating: UInt8(index), count: 32),
+      recordIndex: index)
   }
 }
 
@@ -286,6 +340,22 @@ private func coordinatorFixture(
   #expect(throws: NativeAgentSessionCoordinatorError.auditUnavailable) {
     _ = try fixture.coordinator.start(bootstrapID: fixture.bootstrapID, proof: fixture.proof)
   }
+  let status = try fixture.registry.status(
+    sessionID: coordinatorSessionID, connectionTokenIdentity: coordinatorToken,
+    binding: try coordinatorBinding(),
+    wallClock: NativeAgentWallClockValue(millisecondsSinceUnixEpoch: coordinatorWall + 2_000),
+    monotonicClock: NativeAgentMonotonicClockValue(
+      nanoseconds: 3_000, bootIdentity: "boot"))
+  #expect(status.state == .revoked)
+}
+
+@Test func coordinatorRejectsSubstitutedAuditReceiptAndRevokesAuthority() throws {
+  let fixture = try coordinatorFixture()
+  fixture.audit.substituteReceiptEvidence = true
+  #expect(throws: NativeAgentSessionCoordinatorError.auditUnavailable) {
+    _ = try fixture.coordinator.start(bootstrapID: fixture.bootstrapID, proof: fixture.proof)
+  }
+  #expect(fixture.audit.events.map(\.action) == [.sessionActivated])
   let status = try fixture.registry.status(
     sessionID: coordinatorSessionID, connectionTokenIdentity: coordinatorToken,
     binding: try coordinatorBinding(),

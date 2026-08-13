@@ -59,6 +59,38 @@ private func dependencyBinding() throws -> NativeAgentSessionBinding {
     }
 }
 
+@Test func agentSessionAuditReceiptBindsCanonicalEvidenceAndDurableRecord() throws {
+    let evidence = try NativeAgentSessionAuditEvidence(
+        action: .signingIntent,
+        sessionID: "33333333-3333-4333-8333-333333333333",
+        requestID: "55555555-5555-4555-8555-555555555555",
+        capabilityID: "44444444-4444-4444-8444-444444444444",
+        payloadDigest: Data(repeating: 7, count: 32),
+        binding: dependencyBinding(),
+        reasonCode: "request_reserved"
+    )
+    let digest = try evidence.evidenceDigest()
+    #expect(digest.map { String(format: "%02x", $0) }.joined() == "16745baeadd964683c7cfe3560927663a5e2e03e73e0f11bc4fed0e48ed523d3")
+
+    let receipt = try NativeAgentSessionAuditReceipt(
+        evidenceDigest: digest,
+        recordDigest: Data(repeating: 8, count: 32),
+        recordIndex: 42
+    )
+    #expect(receipt.evidenceDigest == digest)
+    #expect(receipt.recordIndex == 42)
+    #expect(throws: NativeAgentSessionBoundaryError.invalidAuditEvidence) {
+        _ = try NativeAgentSessionAuditReceipt(
+            evidenceDigest: Data(repeating: 1, count: 31),
+            recordDigest: Data(repeating: 2, count: 32), recordIndex: 1)
+    }
+    #expect(throws: NativeAgentSessionBoundaryError.invalidAuditEvidence) {
+        _ = try NativeAgentSessionAuditReceipt(
+            evidenceDigest: digest,
+            recordDigest: Data(repeating: 2, count: 32), recordIndex: 0)
+    }
+}
+
 @Test func fixedSignerProtocolHasNoOperationOrKeySelectionParameters() throws {
     final class Signer: NativeAgentGitCommitSigning, @unchecked Sendable {
         func signGitCommitPayload(_ payload: Data) throws -> Data { Data(payload.reversed()) }

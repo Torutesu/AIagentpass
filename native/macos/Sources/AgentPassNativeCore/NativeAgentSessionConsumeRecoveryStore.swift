@@ -177,6 +177,55 @@ public struct NativeAgentSessionConsumeRecoveryEvidence: Equatable, Sendable {
   }
 }
 
+/// The bounded terminal result retained after the local activation audit is
+/// durable.  It is deliberately composed only of the immutable recovery
+/// tuple and fixed-size digests; it carries no session authority or replayable
+/// secret.  The terminal expiry may shorten, but never extend, the recovery
+/// tuple's expiry.
+public struct NativeAgentSessionConsumeRecoveryAuditedRecord: Equatable, Sendable {
+  public static let digestByteCount = NativeAgentSessionConsumeRecoveryEvidence.digestByteCount
+
+  public let evidence: NativeAgentSessionConsumeRecoveryEvidence
+  public let sessionDigest: Data
+  public let resultDigest: Data
+  public let auditDigest: Data
+  public let expiresAtMilliseconds: Int64
+
+  public init(
+    evidence: NativeAgentSessionConsumeRecoveryEvidence,
+    sessionDigest: Data,
+    resultDigest: Data,
+    auditDigest: Data,
+    expiresAtMilliseconds: Int64? = nil
+  ) throws {
+    let terminalExpiry = expiresAtMilliseconds ?? evidence.recoveryExpiresAtMilliseconds
+    guard Self.digest(sessionDigest), Self.digest(resultDigest), Self.digest(auditDigest),
+      terminalExpiry > 0,
+      terminalExpiry <= evidence.recoveryExpiresAtMilliseconds
+    else {
+      throw NativeAgentSessionConsumeRecoveryStoreError.invalidEvidence
+    }
+    self.evidence = evidence
+    self.sessionDigest = sessionDigest
+    self.resultDigest = resultDigest
+    self.auditDigest = auditDigest
+    self.expiresAtMilliseconds = terminalExpiry
+  }
+
+  private static func digest(_ value: Data) -> Bool {
+    value.count == digestByteCount
+  }
+}
+
+/// Exact recovery lookup.  `audited` is a terminal replay record and must not
+/// be treated as a missing pending request: it is the only safe source for an
+/// exact retry result after a daemon restart.
+public enum NativeAgentSessionConsumeRecoveryLookup: Equatable, Sendable {
+  case missing
+  case pending(NativeAgentSessionConsumeRecoveryEvidence)
+  case audited(NativeAgentSessionConsumeRecoveryAuditedRecord)
+}
+
 public protocol NativeAgentSessionConsumeRecoveryStoring: Sendable {
   @discardableResult
   func save(
@@ -186,8 +235,14 @@ public protocol NativeAgentSessionConsumeRecoveryStoring: Sendable {
 
   @discardableResult
   func completeAfterLocalActivation(
-    _ expected: NativeAgentSessionConsumeRecoveryEvidence
-  ) throws -> Bool
+    _ expected: NativeAgentSessionConsumeRecoveryEvidence,
+    auditedRecord: NativeAgentSessionConsumeRecoveryAuditedRecord
+  ) throws -> NativeAgentSessionConsumeRecoveryAuditedRecord
+
+  func lookupExact(
+    _ expected: NativeAgentSessionConsumeRecoveryEvidence,
+    nowMilliseconds: Int64?
+  ) throws -> NativeAgentSessionConsumeRecoveryLookup
 
   @discardableResult
   func abandon(_ expected: NativeAgentSessionConsumeRecoveryEvidence) throws -> Bool
@@ -195,29 +250,62 @@ public protocol NativeAgentSessionConsumeRecoveryStoring: Sendable {
 
 /// A bounded, digest-only, crash-safe recovery evidence store.
 ///
-/// There is deliberately no update operation.  A bootstrap tuple is immutable
-/// until local activation or explicit abandonment, both of which remove the
-/// record.  Repeating `save` with the exact same tuple is idempotent; repeating
-/// it with any changed field fails closed.
+/// The on-disk format has two explicit states.  A bootstrap tuple is immutable
+/// while pending.  After the activation audit is durable, the same file is
+/// atomically replaced with an audited terminal record.  Repeating `save` with
+/// a pending tuple is idempotent; any attempt to reinterpret an audited record
+/// as pending fails closed.
 public final class NativeAgentSessionConsumeRecoveryStore:
   NativeAgentSessionConsumeRecoveryStoring, @unchecked Sendable
 {
-  private static let version = 1
+  private static let version = 2
   private static let maximumEntries = 128
   private static let maximumBytes = 256 * 1024
   private static let fileMode: mode_t = 0o600
   private static let directoryMode: mode_t = 0o700
   private static let temporaryPrefix = ".agentpass-session-consume-recovery.tmp-"
-  private static let recordKeys: Set<String> = [
+  private static let immutableRecordKeys: Set<String> = [
     "adapter_kind", "agent_id", "ancestry_binding_sha256", "authority_generation",
     "control_sequence", "device_id", "grant_proof_sha256", "key_generation",
     "organization_id", "process_binding_sha256", "recovery_expires_at_ms",
     "worktree_binding_sha256",
   ]
+  private static let pendingRecordKeys = immutableRecordKeys.union(["state"])
+  private static let auditedRecordKeys = immutableRecordKeys.union([
+    "audit_sha256", "expires_at_ms", "result_sha256", "session_sha256", "state",
+  ])
+
+  private enum Record: Equatable, Sendable {
+    case pending(NativeAgentSessionConsumeRecoveryEvidence)
+    case audited(NativeAgentSessionConsumeRecoveryAuditedRecord)
+
+    var evidence: NativeAgentSessionConsumeRecoveryEvidence {
+      switch self {
+      case .pending(let evidence): evidence
+      case .audited(let record): record.evidence
+      }
+    }
+
+    var recoveryKey: String { evidence.recoveryKey }
+
+    var expiresAtMilliseconds: Int64 {
+      switch self {
+      case .pending(let evidence): evidence.recoveryExpiresAtMilliseconds
+      case .audited(let record): record.expiresAtMilliseconds
+      }
+    }
+
+    var state: String {
+      switch self {
+      case .pending: "pending"
+      case .audited: "audited"
+      }
+    }
+  }
 
   private let path: String
   private let lock = NSLock()
-  private var records: [String: NativeAgentSessionConsumeRecoveryEvidence] = [:]
+  private var records: [String: Record] = [:]
 
   public init(path: String) throws {
     let components = path.split(separator: "/", omittingEmptySubsequences: false)
@@ -261,17 +349,22 @@ public final class NativeAgentSessionConsumeRecoveryStore:
       }
     }
     if let old = records[evidence.recoveryKey] {
-      guard old.matchesAuthority(evidence),
-        nowMilliseconds.map({ old.recoveryExpiresAtMilliseconds > $0 }) ?? true
-      else {
+      switch old {
+      case .pending(let pending):
+        guard pending.matchesAuthority(evidence),
+          nowMilliseconds.map({ pending.recoveryExpiresAtMilliseconds > $0 }) ?? true
+        else {
+          throw NativeAgentSessionConsumeRecoveryStoreError.conflict
+        }
+        return pending
+      case .audited:
         throw NativeAgentSessionConsumeRecoveryStoreError.conflict
       }
-      return old
     }
     guard records.count < Self.maximumEntries else {
       throw NativeAgentSessionConsumeRecoveryStoreError.capacityExceeded
     }
-    records[evidence.recoveryKey] = evidence
+    records[evidence.recoveryKey] = .pending(evidence)
     do {
       try persistLocked()
     } catch {
@@ -293,40 +386,117 @@ public final class NativeAgentSessionConsumeRecoveryStore:
     return try pruneExpiredLocked(nowMilliseconds: nowMilliseconds)
   }
 
-  /// Returns a record only when every immutable field matches exactly.
-  /// A missing record is normal after terminal deletion; a tuple mismatch is
-  /// never treated as a cache miss.
+  /// Compatibility lookup for pending callers.  An audited terminal record is
+  /// deliberately reported as a conflict instead of a cache miss so callers
+  /// cannot create a second pending transaction.
   public func lookup(_ expected: NativeAgentSessionConsumeRecoveryEvidence)
     throws -> NativeAgentSessionConsumeRecoveryEvidence?
   {
-    lock.lock()
-    defer { lock.unlock() }
-    guard let actual = records[expected.recoveryKey] else { return nil }
-    guard actual == expected else {
+    switch try lookupExact(expected) {
+    case .missing:
+      return nil
+    case .pending(let evidence):
+      return evidence
+    case .audited:
       throw NativeAgentSessionConsumeRecoveryStoreError.conflict
     }
-    return actual
   }
 
-  /// Terminally deletes a record after local activation.
+  /// Returns the exact durable state for retry.  A tuple mismatch, including
+  /// a mismatch against an audited record, is never treated as a cache miss.
+  public func lookupExact(
+    _ expected: NativeAgentSessionConsumeRecoveryEvidence,
+    nowMilliseconds: Int64? = nil
+  ) throws -> NativeAgentSessionConsumeRecoveryLookup {
+    lock.lock()
+    defer { lock.unlock() }
+    if let nowMilliseconds {
+      guard nowMilliseconds >= 0 else {
+        throw NativeAgentSessionConsumeRecoveryStoreError.invalidEvidence
+      }
+      _ = try pruneExpiredLocked(nowMilliseconds: nowMilliseconds)
+    }
+    guard let actual = records[expected.recoveryKey] else { return .missing }
+    switch actual {
+    case .pending(let evidence):
+      guard evidence.matchesAuthority(expected) else {
+        throw NativeAgentSessionConsumeRecoveryStoreError.conflict
+      }
+      return .pending(evidence)
+    case .audited(let auditedRecord):
+      guard auditedRecord.evidence.matchesAuthority(expected) else {
+        throw NativeAgentSessionConsumeRecoveryStoreError.conflict
+      }
+      return .audited(auditedRecord)
+    }
+  }
+
+  /// Atomically advances a matching pending record to its durable audited
+  /// terminal state.  The in-memory transition is rolled back if the canonical
+  /// write, file fsync, rename, or parent-directory fsync fails.
   @discardableResult
   public func completeAfterLocalActivation(
-    _ expected: NativeAgentSessionConsumeRecoveryEvidence
-  ) throws -> Bool {
-    try removeExact(expected)
+    _ expected: NativeAgentSessionConsumeRecoveryEvidence,
+    auditedRecord: NativeAgentSessionConsumeRecoveryAuditedRecord
+  ) throws -> NativeAgentSessionConsumeRecoveryAuditedRecord {
+    guard auditedRecord.evidence == expected else {
+      throw NativeAgentSessionConsumeRecoveryStoreError.conflict
+    }
+    lock.lock()
+    defer { lock.unlock() }
+    guard let actual = records[expected.recoveryKey] else {
+      throw NativeAgentSessionConsumeRecoveryStoreError.invalidState
+    }
+    switch actual {
+    case .pending(let pending):
+      guard pending == expected else {
+        throw NativeAgentSessionConsumeRecoveryStoreError.conflict
+      }
+    case .audited(let existing):
+      guard existing == auditedRecord else {
+        throw NativeAgentSessionConsumeRecoveryStoreError.conflict
+      }
+      return existing
+    }
+    let old = records
+    records[expected.recoveryKey] = .audited(auditedRecord)
+    do {
+      try persistLocked()
+      return auditedRecord
+    } catch {
+      records = old
+      throw error
+    }
   }
 
   /// Terminally deletes a record when activation has been explicitly
   /// abandoned.  It uses the same exact-match guard as activation completion.
   @discardableResult
   public func abandon(_ expected: NativeAgentSessionConsumeRecoveryEvidence) throws -> Bool {
-    try removeExact(expected)
+    lock.lock()
+    defer { lock.unlock() }
+    guard let actual = records[expected.recoveryKey] else { return false }
+    guard case .pending(let pending) = actual else {
+      throw NativeAgentSessionConsumeRecoveryStoreError.conflict
+    }
+    guard pending == expected else {
+      throw NativeAgentSessionConsumeRecoveryStoreError.conflict
+    }
+    let old = records
+    records.removeValue(forKey: expected.recoveryKey)
+    do {
+      try persistLocked()
+      return true
+    } catch {
+      records = old
+      throw error
+    }
   }
 
   // MARK: - Loading and canonical validation
 
   private static func load(pathName: String, parentFD: Int32) throws
-    -> [String: NativeAgentSessionConsumeRecoveryEvidence]
+    -> [String: Record]
   {
     var metadata = stat()
     if fstatat(parentFD, pathName, &metadata, AT_SYMLINK_NOFOLLOW) != 0 {
@@ -356,13 +526,13 @@ public final class NativeAgentSessionConsumeRecoveryStore:
         try NativeStrictJSON.data(object) == payload
       else { throw NativeAgentSessionConsumeRecoveryStoreError.invalidState }
 
-      var decoded: [String: NativeAgentSessionConsumeRecoveryEvidence] = [:]
+      var decoded: [String: Record] = [:]
       for value in values {
-        let evidence = try decode(value)
-        guard decoded[evidence.recoveryKey] == nil,
-          try NativeStrictJSON.data(encode(evidence)) == NativeStrictJSON.data(value)
+        let record = try decode(value)
+        guard decoded[record.recoveryKey] == nil,
+          try NativeStrictJSON.data(encode(record)) == NativeStrictJSON.data(value)
         else { throw NativeAgentSessionConsumeRecoveryStoreError.invalidState }
-        decoded[evidence.recoveryKey] = evidence
+        decoded[record.recoveryKey] = record
       }
       return decoded
     } catch let error as NativeAgentSessionConsumeRecoveryStoreError {
@@ -372,10 +542,8 @@ public final class NativeAgentSessionConsumeRecoveryStore:
     }
   }
 
-  private static func decode(_ value: [String: Any]) throws
-    -> NativeAgentSessionConsumeRecoveryEvidence
-  {
-    guard Set(value.keys) == recordKeys,
+  private static func decode(_ value: [String: Any]) throws -> Record {
+    guard let state = value["state"] as? String,
       let organizationID = value["organization_id"] as? String,
       let deviceID = value["device_id"] as? String,
       let agentID = value["agent_id"] as? String,
@@ -390,23 +558,43 @@ public final class NativeAgentSessionConsumeRecoveryStore:
       let keyGeneration = integer(value["key_generation"]),
       let recoveryExpiresAtMilliseconds = integer(value["recovery_expires_at_ms"])
     else { throw NativeAgentSessionConsumeRecoveryStoreError.invalidState }
+    let recordKeys: Set<String>
+    switch state {
+    case "pending": recordKeys = pendingRecordKeys
+    case "audited": recordKeys = auditedRecordKeys
+    default: throw NativeAgentSessionConsumeRecoveryStoreError.invalidState
+    }
+    guard Set(value.keys) == recordKeys else {
+      throw NativeAgentSessionConsumeRecoveryStoreError.invalidState
+    }
     do {
-      return try NativeAgentSessionConsumeRecoveryEvidence(
+      let evidence = try NativeAgentSessionConsumeRecoveryEvidence(
         organizationID: organizationID, deviceID: deviceID, agentID: agentID,
         adapterKind: adapterKind, grantProofDigest: grantProofDigest,
         processBindingDigest: processDigest, ancestryBindingDigest: ancestryDigest,
         worktreeBindingDigest: worktreeDigest, controlSequence: controlSequence,
         authorityGeneration: authorityGeneration, keyGeneration: keyGeneration,
         recoveryExpiresAtMilliseconds: recoveryExpiresAtMilliseconds)
+      if state == "pending" { return .pending(evidence) }
+      guard let sessionDigest = digest(value["session_sha256"]),
+        let resultDigest = digest(value["result_sha256"]),
+        let auditDigest = digest(value["audit_sha256"]),
+        let expiresAtMilliseconds = integer(value["expires_at_ms"])
+      else { throw NativeAgentSessionConsumeRecoveryStoreError.invalidState }
+      return .audited(
+        try NativeAgentSessionConsumeRecoveryAuditedRecord(
+          evidence: evidence, sessionDigest: sessionDigest,
+          resultDigest: resultDigest, auditDigest: auditDigest,
+          expiresAtMilliseconds: expiresAtMilliseconds))
     } catch {
+      if let error = error as? NativeAgentSessionConsumeRecoveryStoreError { throw error }
       throw NativeAgentSessionConsumeRecoveryStoreError.invalidState
     }
   }
 
-  private static func encode(_ evidence: NativeAgentSessionConsumeRecoveryEvidence)
-    -> [String: Any]
-  {
-    [
+  private static func encode(_ record: Record) -> [String: Any] {
+    let evidence = record.evidence
+    var object: [String: Any] = [
       "adapter_kind": evidence.adapterKind.rawValue,
       "agent_id": evidence.agentID,
       "ancestry_binding_sha256": hex(evidence.ancestryBindingDigest),
@@ -418,8 +606,16 @@ public final class NativeAgentSessionConsumeRecoveryStore:
       "organization_id": evidence.organizationID,
       "process_binding_sha256": hex(evidence.processBindingDigest),
       "recovery_expires_at_ms": evidence.recoveryExpiresAtMilliseconds,
+      "state": record.state,
       "worktree_binding_sha256": hex(evidence.worktreeBindingDigest),
     ]
+    if case .audited(let auditedRecord) = record {
+      object["audit_sha256"] = hex(auditedRecord.auditDigest)
+      object["expires_at_ms"] = auditedRecord.expiresAtMilliseconds
+      object["result_sha256"] = hex(auditedRecord.resultDigest)
+      object["session_sha256"] = hex(auditedRecord.sessionDigest)
+    }
+    return object
   }
 
   private func persistLocked() throws {
@@ -444,33 +640,13 @@ public final class NativeAgentSessionConsumeRecoveryStore:
       parentFD: parent.fd, parentName: parent.name, data: data)
   }
 
-  // MARK: - Terminal deletion
-
-  private func removeExact(_ expected: NativeAgentSessionConsumeRecoveryEvidence) throws -> Bool {
-    lock.lock()
-    defer { lock.unlock() }
-    guard let actual = records[expected.recoveryKey] else { return false }
-    guard actual == expected else {
-      throw NativeAgentSessionConsumeRecoveryStoreError.conflict
-    }
-    let old = records
-    records.removeValue(forKey: expected.recoveryKey)
-    do {
-      try persistLocked()
-      return true
-    } catch {
-      records = old
-      throw error
-    }
-  }
-
   private func pruneExpiredLocked(nowMilliseconds: Int64) throws -> Int {
     let expired = records.values.filter {
-      $0.recoveryExpiresAtMilliseconds <= nowMilliseconds
+      $0.expiresAtMilliseconds <= nowMilliseconds
     }
     guard !expired.isEmpty else { return 0 }
     let old = records
-    for evidence in expired { records.removeValue(forKey: evidence.recoveryKey) }
+    for record in expired { records.removeValue(forKey: record.recoveryKey) }
     do {
       try persistLocked()
       return expired.count

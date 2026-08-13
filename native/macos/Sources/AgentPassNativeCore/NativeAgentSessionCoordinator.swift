@@ -34,6 +34,7 @@ public final class NativeAgentSessionCoordinator: @unchecked Sendable {
     var lease: NativeAgentVerifiedCloudLease?
     var localLeaseID: String?
     var recoveryEvidence: NativeAgentSessionConsumeRecoveryEvidence?
+    var auditedRecovery: NativeAgentSessionConsumeRecoveryAuditedRecord?
     var attempts: Int
   }
 
@@ -177,7 +178,7 @@ public final class NativeAgentSessionCoordinator: @unchecked Sendable {
       attempt = Attempt(
         bootstrapID: bootstrapID.lowercased(), proofDigest: proofDigest,
         evidence: evidence, binding: binding, lease: nil, localLeaseID: nil,
-        recoveryEvidence: nil, attempts: 1)
+        recoveryEvidence: nil, auditedRecovery: nil, attempts: 1)
     }
     stateLock.withLock { pendingAttempt = attempt }
 
@@ -197,9 +198,17 @@ public final class NativeAgentSessionCoordinator: @unchecked Sendable {
           keyGeneration: attempt.binding.keyGeneration,
           bootstrapIssuedAtMilliseconds: attempt.evidence.issuedAtMilliseconds,
           requestedTTLSeconds: attempt.evidence.requestedTTLSeconds)
-        let savedEvidence = try recoveryStore.save(
-          recoveryEvidence, nowMilliseconds: try sampleWall().millisecondsSinceUnixEpoch)
-        attempt.recoveryEvidence = savedEvidence
+        let now = try sampleWall().millisecondsSinceUnixEpoch
+        switch try recoveryStore.lookupExact(recoveryEvidence, nowMilliseconds: now) {
+        case .missing:
+          attempt.recoveryEvidence = try recoveryStore.save(
+            recoveryEvidence, nowMilliseconds: now)
+        case .pending(let savedEvidence):
+          attempt.recoveryEvidence = savedEvidence
+        case .audited(let auditedRecord):
+          attempt.recoveryEvidence = auditedRecord.evidence
+          attempt.auditedRecovery = auditedRecord
+        }
       } catch {
         throw NativeAgentSessionCoordinatorError.activationDenied
       }
@@ -231,6 +240,19 @@ public final class NativeAgentSessionCoordinator: @unchecked Sendable {
       throw NativeAgentSessionCoordinatorError.bindingDenied
     }
     try validate(lease: lease, evidence: attempt.evidence, activationWall: wall)
+    let sessionDigest: Data
+    do {
+      sessionDigest = Data(SHA256.hash(data: try NativeAgentLeaseCodec.canonicalJSON(lease)))
+    } catch {
+      throw NativeAgentSessionCoordinatorError.leaseDenied
+    }
+    if let auditedRecovery = attempt.auditedRecovery {
+      guard auditedRecovery.sessionDigest == sessionDigest else {
+        throw NativeAgentSessionCoordinatorError.leaseDenied
+      }
+      stateLock.withLock { pendingAttempt = nil }
+      throw NativeAgentSessionCoordinatorError.sessionDenied
+    }
     let deadline: NativeAgentSessionDeadline
     do {
       deadline = try NativeAgentSessionDeadline(
@@ -270,10 +292,14 @@ public final class NativeAgentSessionCoordinator: @unchecked Sendable {
       stateLock.withLock { pendingAttempt = nil }
       throw error
     }
+    let auditReceipt: NativeAgentSessionAuditReceipt
     do {
-      try audit.appendAgentSessionAudit(
-        NativeAgentSessionAuditEvidence(
-          action: .sessionActivated, sessionID: status.sessionID, binding: attempt.binding))
+      let auditEvidence = try NativeAgentSessionAuditEvidence(
+        action: .sessionActivated, sessionID: status.sessionID, binding: attempt.binding)
+      auditReceipt = try audit.appendAgentSessionAudit(auditEvidence)
+      guard auditReceipt.evidenceDigest == (try auditEvidence.evidenceDigest()) else {
+        throw NativeAgentSessionCoordinatorError.auditUnavailable
+      }
     } catch {
       try? registry.invalidate(
         sessionID: status.sessionID,
@@ -283,6 +309,7 @@ public final class NativeAgentSessionCoordinator: @unchecked Sendable {
       throw NativeAgentSessionCoordinatorError.auditUnavailable
     }
 
+    let result = NativeAgentSessionActivationResult(status: status, binding: attempt.binding)
     guard let recoveryEvidence = attempt.recoveryEvidence else {
       invalidateSession(
         sessionID: status.sessionID, binding: attempt.binding,
@@ -291,9 +318,16 @@ public final class NativeAgentSessionCoordinator: @unchecked Sendable {
       throw NativeAgentSessionCoordinatorError.activationDenied
     }
     do {
-      guard try recoveryStore.completeAfterLocalActivation(recoveryEvidence) else {
-        throw NativeAgentSessionConsumeRecoveryStoreError.invalidState
-      }
+      let resultDigest = try Self.activationResultDigest(result)
+      let auditedRecord = try NativeAgentSessionConsumeRecoveryAuditedRecord(
+        evidence: recoveryEvidence,
+        sessionDigest: sessionDigest,
+        resultDigest: resultDigest,
+        auditDigest: auditReceipt.recordDigest,
+        expiresAtMilliseconds: min(
+          recoveryEvidence.recoveryExpiresAtMilliseconds, lease.expiresAtMilliseconds))
+      _ = try recoveryStore.completeAfterLocalActivation(
+        recoveryEvidence, auditedRecord: auditedRecord)
     } catch {
       invalidateSession(
         sessionID: status.sessionID, binding: attempt.binding,
@@ -302,7 +336,6 @@ public final class NativeAgentSessionCoordinator: @unchecked Sendable {
       throw NativeAgentSessionCoordinatorError.activationDenied
     }
 
-    let result = NativeAgentSessionActivationResult(status: status, binding: attempt.binding)
     let published = stateLock.withLock { () -> Bool in
       guard !invalidated else {
         pendingAttempt = nil
@@ -403,7 +436,7 @@ public final class NativeAgentSessionCoordinator: @unchecked Sendable {
       by: connectionTokenIdentity, as: .revoked)
     for status in statuses {
       guard let binding = bindings[status.sessionID] else { continue }
-      try? audit.appendAgentSessionAudit(
+      _ = try? audit.appendAgentSessionAudit(
         NativeAgentSessionAuditEvidence(
           action: .sessionInvalidated, sessionID: status.sessionID,
           binding: binding, reasonCode: "connection_invalidated"))
@@ -478,7 +511,7 @@ public final class NativeAgentSessionCoordinator: @unchecked Sendable {
       sessionID: sessionID.lowercased(),
       connectionTokenIdentity: connectionTokenIdentity,
       as: .revoked)
-    try? audit.appendAgentSessionAudit(
+    _ = try? audit.appendAgentSessionAudit(
       NativeAgentSessionAuditEvidence(
         action: .sessionInvalidated, sessionID: sessionID.lowercased(),
         binding: binding, reasonCode: reasonCode))
@@ -524,6 +557,29 @@ public final class NativeAgentSessionCoordinator: @unchecked Sendable {
 
   private static func hash(_ value: String) -> Bool {
     value.range(of: "^[0-9a-f]{64}$", options: .regularExpression) != nil
+  }
+
+  private static func activationResultDigest(
+    _ result: NativeAgentSessionActivationResult
+  ) throws -> Data {
+    let object: [String: Any] = [
+      "version": 1,
+      "session_id": result.status.sessionID,
+      "lease_id": result.status.leaseID,
+      "state": result.status.state.rawValue,
+      "expires_at_ms": result.status.expiresAtMilliseconds,
+      "max_signatures": result.status.maxSignatures,
+      "used_signatures": result.status.usedSignatures,
+      "agent_id": result.binding.agentID,
+      "device_id": result.binding.deviceID,
+      "process_binding_sha256": hex(result.binding.processBindingDigest),
+      "ancestry_binding_sha256": hex(result.binding.ancestryBindingDigest),
+      "worktree_binding_sha256": hex(result.binding.worktreeBindingDigest),
+      "control_sequence": result.binding.controlSequence,
+      "authority_generation": result.binding.authorityGeneration,
+      "key_generation": result.binding.keyGeneration,
+    ]
+    return Data(SHA256.hash(data: try NativeStrictJSON.data(object)))
   }
 
   private static func hex(_ data: Data) -> String {

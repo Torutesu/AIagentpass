@@ -1,3 +1,4 @@
+import CryptoKit
 import Foundation
 
 /// Failures raised while constructing the internal M2 Agent authority boundary.
@@ -169,8 +170,57 @@ public struct NativeAgentSessionAuditEvidence: Equatable, Sendable {
             ($0.value >= 97 && $0.value <= 122) || ($0.value >= 48 && $0.value <= 57) || $0.value == 95
         }
     }
+
+    /// Digest of the closed, secret-free evidence object embedded in the
+    /// durable audit record. This deliberately excludes the audit timestamp
+    /// and chain predecessor; the appender receipt binds those final bytes.
+    public func evidenceDigest() throws -> Data {
+        var object: [String: Any] = [
+            "version": 1,
+            "action": action.rawValue,
+            "agent_id": binding.agentID,
+            "device_id": binding.deviceID,
+            "process_binding_sha256": Self.hex(binding.processBindingDigest),
+            "ancestry_binding_sha256": Self.hex(binding.ancestryBindingDigest),
+            "worktree_binding_sha256": Self.hex(binding.worktreeBindingDigest),
+            "control_sequence": binding.controlSequence,
+            "authority_generation": binding.authorityGeneration,
+            "key_generation": binding.keyGeneration
+        ]
+        if let sessionID { object["session_id"] = sessionID }
+        if let requestID { object["request_id"] = requestID }
+        if let capabilityID { object["capability_id"] = capabilityID }
+        if let payloadDigest { object["payload_sha256"] = Self.hex(payloadDigest) }
+        if let reasonCode { object["reason_code"] = reasonCode }
+        return Data(SHA256.hash(data: try NativeStrictJSON.data(object)))
+    }
+
+    private static func hex(_ value: Data) -> String {
+        value.map { String(format: "%02x", $0) }.joined()
+    }
+}
+
+/// Proof returned only after the concrete audit writer has durably appended
+/// the event. `recordDigest` is the resulting chain head, not caller input.
+public struct NativeAgentSessionAuditReceipt: Equatable, Sendable {
+    public let evidenceDigest: Data
+    public let recordDigest: Data
+    public let recordIndex: Int
+
+    public init(evidenceDigest: Data, recordDigest: Data, recordIndex: Int) throws {
+        guard evidenceDigest.count == NativeAgentSessionBinding.digestByteCount,
+              recordDigest.count == NativeAgentSessionBinding.digestByteCount,
+              recordIndex >= 1 else {
+            throw NativeAgentSessionBoundaryError.invalidAuditEvidence
+        }
+        self.evidenceDigest = evidenceDigest
+        self.recordDigest = recordDigest
+        self.recordIndex = recordIndex
+    }
 }
 
 public protocol NativeAgentSessionAuditAppending: Sendable {
+    @discardableResult
     func appendAgentSessionAudit(_ evidence: NativeAgentSessionAuditEvidence) throws
+        -> NativeAgentSessionAuditReceipt
 }
