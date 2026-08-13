@@ -238,6 +238,7 @@ verify_agent_entitlement "$AGENT_HOST_APP"
 [[ "$(/usr/libexec/PlistBuddy -c 'Print :BundleProgram' "$DAEMON_DIR/dev.agentpass.native-service.plist")" == "Contents/Library/HelperTools/AgentPassNativeService.app/Contents/MacOS/agentpass-native-service" ]] || { echo "Unexpected daemon BundleProgram" >&2; exit 1; }
 [[ "$(/usr/libexec/PlistBuddy -c 'Print :MachServices:dev.agentpass.native-service' "$DAEMON_DIR/dev.agentpass.native-service.plist")" == "true" ]] || { echo "Missing daemon Mach service" >&2; exit 1; }
 [[ "$(/usr/libexec/PlistBuddy -c 'Print :MachServices:dev.agentpass.agent-session' "$DAEMON_DIR/dev.agentpass.native-service.plist")" == "true" ]] || { echo "Missing Agent session Mach service" >&2; exit 1; }
+[[ "$(/usr/libexec/PlistBuddy -c 'Print :MachServices:dev.agentpass.n3e-qualification' "$DAEMON_DIR/dev.agentpass.native-service.plist")" == "true" ]] || { echo "Missing reserved qualification Mach service" >&2; exit 1; }
 
 if [[ "$ADHOC" -eq 0 ]]; then
   for item in "$SERVICE_APP" "$CLIENT_APP" "$AGENT_HOST_APP" "$HELPER_DIR/agentpass-atomic-rename" "$MACOS_DIR/agentpass-native-manager" "$MACOS_DIR/agentpass-onboarding" "$APP"; do

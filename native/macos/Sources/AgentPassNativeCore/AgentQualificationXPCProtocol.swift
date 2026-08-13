@@ -8,7 +8,10 @@ import Foundation
 /// capability plane: it can arm one fixed fault, read a redacted receipt, and
 /// disarm that fault. It cannot sign, carry a proof, or read a secret.
 public enum AgentPassQualificationXPCContract {
-  /// This name must not be added to the production launchd service.
+  /// The production launchd job reserves this name so qualification can test
+  /// the exact candidate bytes. The service constructs no listener unless a
+  /// complete, root-owned, candidate-bound qualification configuration is
+  /// present; the ordinary product does not bundle the controller principal.
   public static let machServiceName = "dev.agentpass.n3e-qualification"
   public static let protocolVersion = 1
   public static let digestBytes = 32

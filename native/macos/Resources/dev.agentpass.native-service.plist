@@ -11,6 +11,7 @@
   <key>MachServices</key><dict>
     <key>dev.agentpass.native-service</key><true/>
     <key>dev.agentpass.agent-session</key><true/>
+    <key>dev.agentpass.n3e-qualification</key><true/>
   </dict>
   <key>RunAtLoad</key><true/>
   <key>ProcessType</key><string>Interactive</string>

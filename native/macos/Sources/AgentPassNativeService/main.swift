@@ -28,6 +28,54 @@ private func loadProtectedFile(path: String, label: String) throws -> Data {
     return try Data(contentsOf: original, options: .mappedIfSafe)
 }
 
+private func verifyQualificationConfigurationFile(path: String, expectedData: Data) throws {
+    let descriptor = Darwin.open(path, O_RDONLY | O_NOFOLLOW | O_CLOEXEC)
+    guard descriptor >= 0 else {
+        throw AgentPassNativeError.invalidConfiguration("Agent qualification configuration is unavailable")
+    }
+    defer { Darwin.close(descriptor) }
+
+    var before = stat()
+    guard fstat(descriptor, &before) == 0,
+          (before.st_mode & S_IFMT) == S_IFREG,
+          before.st_uid == 0,
+          (before.st_mode & 0o7777) == 0o600,
+          before.st_nlink == 1,
+          before.st_size > 0,
+          before.st_size <= 1 * 1024 * 1024 else {
+        throw AgentPassNativeError.invalidConfiguration("Agent qualification configuration must be a root-owned 0600 single-link regular file")
+    }
+
+    var bytes = Data(count: Int(before.st_size))
+    let readCount = bytes.withUnsafeMutableBytes { buffer -> Int in
+        guard let base = buffer.baseAddress else { return -1 }
+        var offset = 0
+        while offset < buffer.count {
+            let count = Darwin.read(descriptor, base.advanced(by: offset), buffer.count - offset)
+            if count <= 0 { return -1 }
+            offset += count
+        }
+        return offset
+    }
+    var after = stat()
+    var pathState = stat()
+    guard readCount == bytes.count,
+          fstat(descriptor, &after) == 0,
+          lstat(path, &pathState) == 0,
+          before.st_dev == after.st_dev,
+          before.st_ino == after.st_ino,
+          before.st_size == after.st_size,
+          before.st_mtimespec.tv_sec == after.st_mtimespec.tv_sec,
+          before.st_mtimespec.tv_nsec == after.st_mtimespec.tv_nsec,
+          before.st_ctimespec.tv_sec == after.st_ctimespec.tv_sec,
+          before.st_ctimespec.tv_nsec == after.st_ctimespec.tv_nsec,
+          after.st_dev == pathState.st_dev,
+          after.st_ino == pathState.st_ino,
+          bytes == expectedData else {
+        throw AgentPassNativeError.invalidConfiguration("Agent qualification configuration changed while being verified")
+    }
+}
+
 private func validateProtectedOutputPath(path: String, label: String) throws {
     let original = URL(fileURLWithPath: path).standardizedFileURL
     guard original.path.hasPrefix("/") else {
@@ -276,6 +324,15 @@ private struct ServiceConfiguration: Decodable {
     let agentPerWorktreeSessionLimit: Int?
     let agentBootstrapAttemptLimit: Int?
     let agentWorktreeObservationPolicyVersion: Int?
+    let qualificationMode: String?
+    let qualificationMachServiceName: String?
+    let qualificationCandidateSHA256: String?
+    let qualificationSourceCommitSHA256: String?
+    let qualificationCodeIdentitiesSHA256: String?
+    let qualificationRunIDSHA256: String?
+    let qualificationExpiresAtEpochSeconds: UInt64?
+    let qualificationScenario: String?
+    let qualificationPhase: String?
     let sessionApprovalPublicKey: String?
     let sessionApprovalKeyTag: String?
     let clientCodeSigningRequirement: String
@@ -340,6 +397,15 @@ private struct ServiceConfiguration: Decodable {
         case agentPerWorktreeSessionLimit = "agent_per_worktree_session_limit"
         case agentBootstrapAttemptLimit = "agent_bootstrap_attempt_limit"
         case agentWorktreeObservationPolicyVersion = "agent_worktree_observation_policy_version"
+        case qualificationMode = "qualification_mode"
+        case qualificationMachServiceName = "qualification_mach_service_name"
+        case qualificationCandidateSHA256 = "qualification_candidate_sha256"
+        case qualificationSourceCommitSHA256 = "qualification_source_commit_sha256"
+        case qualificationCodeIdentitiesSHA256 = "qualification_code_identities_sha256"
+        case qualificationRunIDSHA256 = "qualification_run_id_sha256"
+        case qualificationExpiresAtEpochSeconds = "qualification_expires_at_epoch_seconds"
+        case qualificationScenario = "qualification_scenario"
+        case qualificationPhase = "qualification_phase"
         case sessionApprovalPublicKey = "session_approval_public_key"
         case sessionApprovalKeyTag = "session_approval_key_tag"
         case clientCodeSigningRequirement = "client_code_signing_requirement"
@@ -458,6 +524,14 @@ private struct ServiceConfiguration: Decodable {
             _ = try value.agentRuntimeConfiguration()
         } catch {
             throw AgentPassNativeError.invalidConfiguration("Agent runtime authority configuration is invalid")
+        }
+        do {
+            let qualification = try value.qualificationConfiguration()
+            if qualification.isConfigured {
+                try verifyQualificationConfigurationFile(path: path, expectedData: data)
+            }
+        } catch {
+            throw AgentPassNativeError.invalidConfiguration("Agent qualification configuration is incomplete, expired, or invalid")
         }
         let deletionConfigurationCount: Int = [
             value.auditKeyDeletionEvidenceBundlePath != nil,
@@ -613,6 +687,54 @@ private struct ServiceConfiguration: Decodable {
             perWorktreeSessionLimit: configured ? agentPerWorktreeSessionLimit : nil,
             bootstrapAttemptLimit: configured ? agentBootstrapAttemptLimit : nil,
             worktreeObservationPolicyVersion: configured ? agentWorktreeObservationPolicyVersion : nil
+        )
+    }
+
+    func qualificationConfiguration(
+        wallTime: Date = Date()
+    ) throws -> NativeAgentQualificationConfiguration {
+        let rawValues: [Any?] = [
+            qualificationMode,
+            qualificationMachServiceName,
+            qualificationCandidateSHA256,
+            qualificationSourceCommitSHA256,
+            qualificationCodeIdentitiesSHA256,
+            qualificationRunIDSHA256,
+            qualificationExpiresAtEpochSeconds,
+            qualificationScenario,
+            qualificationPhase,
+        ]
+        let configured = rawValues.contains { $0 != nil }
+        let scenario: NativeAgentQualificationFaultScenario?
+        let phase: NativeAgentQualificationFaultPhase?
+        if let raw = qualificationScenario {
+            guard let parsed = NativeAgentQualificationFaultScenario(rawValue: raw) else {
+                throw NativeAgentQualificationConfigurationError.invalidPhaseScenarioPair
+            }
+            scenario = parsed
+        } else {
+            scenario = nil
+        }
+        if let raw = qualificationPhase {
+            guard let parsed = NativeAgentQualificationFaultPhase(rawValue: raw) else {
+                throw NativeAgentQualificationConfigurationError.invalidPhaseScenarioPair
+            }
+            phase = parsed
+        } else {
+            phase = nil
+        }
+        return try NativeAgentQualificationConfiguration(
+            mode: qualificationMode,
+            machServiceName: qualificationMachServiceName,
+            candidateDigest: qualificationCandidateSHA256,
+            sourceCommitDigest: qualificationSourceCommitSHA256,
+            codeIdentityDigest: qualificationCodeIdentitiesSHA256,
+            runBindingDigest: qualificationRunIDSHA256,
+            controllerServiceAccessGroup: configured ? keychainAccessGroup : nil,
+            expiresAtEpochSeconds: qualificationExpiresAtEpochSeconds,
+            scenario: scenario,
+            phase: phase,
+            wallTime: wallTime
         )
     }
 }
@@ -3263,6 +3385,71 @@ private final class AgentListenerDelegate: NSObject, NSXPCListenerDelegate {
     }
 }
 
+
+private final class QualificationListenerDelegate: NSObject, NSXPCListenerDelegate {
+    private let designatedRequirement: String
+    private let endpoint: NativeAgentQualificationEndpoint
+    private let lock = NSLock()
+    private var hasConnection = false
+
+    init(
+        designatedRequirement: String,
+        endpoint: NativeAgentQualificationEndpoint
+    ) {
+        self.designatedRequirement = designatedRequirement
+        self.endpoint = endpoint
+    }
+
+    func listener(
+        _ listener: NSXPCListener,
+        shouldAcceptNewConnection connection: NSXPCConnection
+    ) -> Bool {
+        guard connection.processIdentifier > 0,
+              connection.effectiveUserIdentifier == 0,
+              lock.withLock({
+                  guard !hasConnection else { return false }
+                  hasConnection = true
+                  return true
+              }) else { return false }
+        connection.setCodeSigningRequirement(designatedRequirement)
+        connection.exportedInterface = AgentPassQualificationXPCInterface.make()
+        connection.exportedObject = endpoint
+        connection.invalidationHandler = { [weak self] in
+            guard let self else { return }
+            self.endpoint.invalidate()
+            self.lock.withLock { self.hasConnection = false }
+        }
+        connection.resume()
+        return true
+    }
+}
+
+private final class QualificationRuntime {
+    let controller: NativeAgentQualificationFaultController
+    let endpoint: NativeAgentQualificationEndpoint
+    private let listener: NSXPCListener
+    private let delegate: QualificationListenerDelegate
+
+    init(values: NativeAgentQualificationConfiguration.Values) throws {
+        controller = NativeAgentQualificationFaultController(enabled: true)
+        endpoint = try NativeAgentQualificationEndpoint(controller: controller, values: values)
+        listener = NSXPCListener(machServiceName: values.machServiceName)
+        delegate = QualificationListenerDelegate(
+            designatedRequirement: values.controllerDesignatedRequirement,
+            endpoint: endpoint
+        )
+        listener.delegate = delegate
+    }
+
+    func resume() {
+        listener.resume()
+    }
+
+    deinit {
+        endpoint.shutdown()
+    }
+}
+
 private func bootstrapInput(expectedKeys: Set<String>) throws -> [String: Any] {
     let data = FileHandle.standardInput.readDataToEndOfFile()
     let payload = data.last == 0x0a ? Data(data.dropLast()) : data
@@ -3947,6 +4134,13 @@ do {
             gitSigner: keyStore
         )
     }
+    let qualificationRuntime: QualificationRuntime?
+    switch try configuration.qualificationConfiguration().state {
+    case .disabled:
+        qualificationRuntime = nil
+    case .configured(let values):
+        qualificationRuntime = try QualificationRuntime(values: values)
+    }
     let managementListener = NSXPCListener(machServiceName: configuration.machServiceName)
     let agentListener = NSXPCListener(machServiceName: configuration.agentMachServiceName)
     let endpoint = ServiceEndpoint(keyStore: keyStore, authorizer: authorizer, auditLog: auditLog, auditCheckpoints: auditCheckpoints, auditSigner: auditSigner, auditAnchorReceipts: auditAnchorReceipts, auditAnchorClient: auditAnchorClient, auditKeyRotationCoordinator: auditKeyRotationCoordinator, auditKeyRecoveryCoordinator: auditKeyRecoveryCoordinator, auditKeyRecoveryPlanJournal: auditKeyRecoveryPlanJournal, auditKeyTransitionStore: auditKeyTransitionStore, auditKeyRecoveryPolicy: auditKeyRecoveryPolicy, auditKeyRecoveryApprovalJournal: auditKeyRecoveryApprovalJournal, auditPruneCoordinator: auditPruneCoordinator, auditPruneTrustSource: auditPruneTrustSource, auditPruneEvidenceBundlePath: configuration.auditPruneEvidenceBundlePath, auditAnchorTenant: configuration.auditAnchorTenant, keychainAccessGroup: configuration.keychainAccessGroup, recoveryPolicyData: recoveryPolicyData, installationID: configuration.installationID, sessionManager: sessionManager, controlManager: controlManager, controlV2Manager: controlV2Manager, signingTransactions: signingTransactions, keyLifecycle: keyLifecycle, keyCoordinator: keyCoordinator, loadedLifecycleHeadHash: lifecycleSnapshot?.headHash)
@@ -4033,6 +4227,7 @@ do {
     agentListener.delegate = agentDelegate
     managementListener.resume()
     agentListener.resume()
+    qualificationRuntime?.resume()
     RunLoop.current.run()
 } catch {
     FileHandle.standardError.write(Data("agentpass-native-service: \(error.localizedDescription)\n".utf8))

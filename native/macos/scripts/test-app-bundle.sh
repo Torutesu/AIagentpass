@@ -27,6 +27,8 @@ AGENTPASS_ATOMIC_RENAME_HELPER="$ATOMIC_RENAME" "$SCRIPT_DIR/test-atomic-rename.
 [[ "$(/usr/libexec/PlistBuddy -c 'Print :BundleProgram' "$APP_PATH/Contents/Library/LaunchDaemons/dev.agentpass.native-service.plist")" == "Contents/Library/HelperTools/AgentPassNativeService.app/Contents/MacOS/agentpass-native-service" ]] || exit 1
 [[ "$(/usr/libexec/PlistBuddy -c 'Print :MachServices:dev.agentpass.native-service' "$APP_PATH/Contents/Library/LaunchDaemons/dev.agentpass.native-service.plist")" == "true" ]] || { echo "Management Mach service is missing" >&2; exit 1; }
 [[ "$(/usr/libexec/PlistBuddy -c 'Print :MachServices:dev.agentpass.agent-session' "$APP_PATH/Contents/Library/LaunchDaemons/dev.agentpass.native-service.plist")" == "true" ]] || { echo "Agent session Mach service is missing" >&2; exit 1; }
+[[ "$(/usr/libexec/PlistBuddy -c 'Print :MachServices:dev.agentpass.n3e-qualification' "$APP_PATH/Contents/Library/LaunchDaemons/dev.agentpass.native-service.plist")" == "true" ]] || { echo "Reserved qualification Mach service is missing" >&2; exit 1; }
+[[ ! -e "$APP_PATH/Contents/Library/HelperTools/AgentPassQualificationController.app" && ! -e "$APP_PATH/Contents/MacOS/agentpass-qualification-controller" ]] || { echo "Qualification controller must not be bundled" >&2; exit 1; }
 
 node - "$SCRIPT_DIR/../Resources/native-service.example.json" <<'NODE'
 const fs = require("node:fs");
