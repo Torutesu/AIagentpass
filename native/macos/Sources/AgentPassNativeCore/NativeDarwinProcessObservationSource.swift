@@ -90,11 +90,12 @@ internal protocol NativeDarwinProcessObservationAdapter: Sendable {
 
 /// Darwin-backed implementation of `NativeProcessObservationSource`.
 ///
-/// This source observes the current process only.  It never accepts a PID,
-/// path, argv, environment, or audit token from the caller.  The only path
-/// handled by the implementation is a transient kernel-provided path used to
-/// query `stat` and Security.framework; it is never returned or retained in
-/// the resulting model.
+/// `observe()` retains its compatibility meaning of observing the current
+/// process. `observe(pid:)` is the explicit peer-observation entry point: its
+/// PID is authoritative and it never falls back to the current process. The
+/// only path handled by the implementation is a transient kernel-provided
+/// path used to query `stat` and Security.framework; it is never returned or
+/// retained in the resulting model.
 public struct NativeDarwinProcessObservationSource: NativeProcessObservationSource, Sendable {
     internal static let maximumAncestors = 16
 
@@ -110,7 +111,29 @@ public struct NativeDarwinProcessObservationSource: NativeProcessObservationSour
 
     public func observe() throws -> NativeProcessObservation {
         let pid = try readCurrentProcessID()
-        let uid = try readEffectiveUserID()
+        return try observe(pid: pid)
+    }
+
+    /// Observes the explicitly supplied Darwin process ID.
+    ///
+    /// This method deliberately does not call `currentProcessID()`. A caller
+    /// using an XPC audit-token PID must not be silently downgraded to
+    /// observing the service itself when the peer PID is unavailable or
+    /// invalid. The peer must also be owned by the service's effective user;
+    /// cross-user observations fail closed.
+    public func observe(pid: Int32) throws -> NativeProcessObservation {
+        try observe(pid: pid, expectedUserID: readEffectiveUserID())
+    }
+
+    /// Observes a peer PID and binds it to an effective UID obtained from the
+    /// connection's OS-owned metadata. Privileged services must use this
+    /// overload: comparing a user peer to the daemon's own root EUID would
+    /// reject every legitimate connection. The UID is an adapter input, never
+    /// a request field controlled by the Agent protocol.
+    public func observe(pid: Int32, expectedUserID uid: UInt32) throws -> NativeProcessObservation {
+        guard pid > 0 else {
+            throw nativeDarwinObservationFailure(.processSnapshotInvalid)
+        }
         let bootIdentity = try readBootIdentity()
 
         let process = try observeFacts(
@@ -144,6 +167,22 @@ public struct NativeDarwinProcessObservationSource: NativeProcessObservationSour
             )
             ancestry.append(.observed(ancestor.facts))
             nextPID = ancestor.parentPID
+        }
+
+        // The root peer is sampled again only after the complete ancestry
+        // walk. This closes the window in which a peer can be replaced or
+        // exec'd after its first fact collection but before the observation
+        // is consumed by policy. observeFacts performs its own before/after
+        // snapshot as well, so the second collection covers both PID-version
+        // reuse and code/file identity substitution.
+        let rootAfterAncestry = try observeFacts(
+            pid: pid,
+            expectedUID: uid,
+            bootIdentity: bootIdentity
+        )
+        guard rootAfterAncestry.initialSnapshot == process.initialSnapshot,
+              canonicalProcessFacts(rootAfterAncestry.facts) == canonicalProcessFacts(process.facts) else {
+            throw nativeDarwinObservationFailure(.processChangedDuringObservation)
         }
 
         do {
@@ -194,7 +233,7 @@ public struct NativeDarwinProcessObservationSource: NativeProcessObservationSour
         pid: Int32,
         expectedUID: UInt32,
         bootIdentity: String
-    ) throws -> (facts: NativeObservedProcessFacts, parentPID: Int32) {
+    ) throws -> ObservedProcessFacts {
         let before = try snapshot(pid: pid)
         guard before.pid == pid, before.parentPID >= 0, before.uid == expectedUID,
               before.pidVersion > 0 else {
@@ -253,12 +292,23 @@ public struct NativeDarwinProcessObservationSource: NativeProcessObservationSour
                 signatureKind: codeIdentity.signatureKind,
                 entitlements: codeIdentity.entitlements
             )
-            return (facts, before.parentPID)
+            return ObservedProcessFacts(
+                facts: facts,
+                parentPID: before.parentPID,
+                initialSnapshot: before
+            )
         } catch NativeProcessIdentityError.invalidObservation {
             throw nativeDarwinObservationFailure(.observationConstructionFailed)
         } catch {
             throw nativeDarwinObservationFailure(.observationConstructionFailed)
         }
+    }
+
+    private func canonicalProcessFacts(_ facts: NativeObservedProcessFacts) -> String {
+        guard let observation = try? NativeProcessObservation(process: facts, ancestry: []) else {
+            return ""
+        }
+        return NativeProcessIdentity(observation: observation).canonicalRepresentation
     }
 
     private func snapshot(pid: Int32) throws -> NativeDarwinProcessSnapshot {
@@ -272,6 +322,12 @@ public struct NativeDarwinProcessObservationSource: NativeProcessObservationSour
             throw nativeDarwinObservationFailure(.processUnavailable)
         }
     }
+}
+
+private struct ObservedProcessFacts: Sendable {
+    let facts: NativeObservedProcessFacts
+    let parentPID: Int32
+    let initialSnapshot: NativeDarwinProcessSnapshot
 }
 
 private struct NativeDarwinSystemObservationAdapter: NativeDarwinProcessObservationAdapter {

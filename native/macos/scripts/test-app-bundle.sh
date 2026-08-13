@@ -9,19 +9,37 @@ APP_PATH="$($SCRIPT_DIR/build-app.sh --adhoc --output-dir "$TEST_DIR/output")"
 /usr/bin/codesign --verify --deep --strict "$APP_PATH"
 SERVICE_APP="$APP_PATH/Contents/Library/HelperTools/AgentPassNativeService.app"
 CLIENT_APP="$APP_PATH/Contents/Library/HelperTools/AgentPassNativeClient.app"
+AGENT_HOST_APP="$APP_PATH/Contents/Library/HelperTools/AgentPassNativeAgentHost.app"
 ATOMIC_RENAME="$APP_PATH/Contents/Library/HelperTools/agentpass-atomic-rename"
 ONBOARDING="$APP_PATH/Contents/MacOS/agentpass-onboarding"
-[[ -d "$SERVICE_APP" && -d "$CLIENT_APP" ]] || { echo "Nested helper app layout is missing" >&2; exit 1; }
+[[ -d "$SERVICE_APP" && -d "$CLIENT_APP" && -d "$AGENT_HOST_APP" ]] || { echo "Nested helper app layout is missing" >&2; exit 1; }
 [[ ! -e "$APP_PATH/Contents/MacOS/agentpass-native-service" && ! -e "$APP_PATH/Contents/MacOS/agentpass-native-client" ]] || { echo "Helpers were duplicated outside their bundles" >&2; exit 1; }
 [[ -x "$ATOMIC_RENAME" && ! -L "$ATOMIC_RENAME" ]] || { echo "Atomic rename helper is missing or unsafe" >&2; exit 1; }
 [[ -x "$ONBOARDING" && ! -L "$ONBOARDING" ]] || { echo "Onboarding UI executable is missing or unsafe" >&2; exit 1; }
 [[ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$APP_PATH/Contents/Info.plist")" == "agentpass-onboarding" ]] || { echo "Unexpected outer app executable" >&2; exit 1; }
 [[ "$(/usr/libexec/PlistBuddy -c 'Print :LSUIElement' "$APP_PATH/Contents/Info.plist")" == "false" ]] || { echo "Onboarding app is unexpectedly hidden" >&2; exit 1; }
 AGENTPASS_ATOMIC_RENAME_HELPER="$ATOMIC_RENAME" "$SCRIPT_DIR/test-atomic-rename.sh"
-[[ ! -e "$SERVICE_APP/Contents/embedded.provisionprofile" && ! -e "$CLIENT_APP/Contents/embedded.provisionprofile" ]] || { echo "Ad-hoc helpers unexpectedly embed profiles" >&2; exit 1; }
+[[ ! -e "$SERVICE_APP/Contents/embedded.provisionprofile" && ! -e "$CLIENT_APP/Contents/embedded.provisionprofile" && ! -e "$AGENT_HOST_APP/Contents/embedded.provisionprofile" ]] || { echo "Ad-hoc helpers unexpectedly embed profiles" >&2; exit 1; }
 [[ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$SERVICE_APP/Contents/Info.plist")" == "dev.agentpass.native-service" ]] || exit 1
 [[ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$CLIENT_APP/Contents/Info.plist")" == "dev.agentpass.native-client" ]] || exit 1
+[[ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$AGENT_HOST_APP/Contents/Info.plist")" == "dev.agentpass.agent-host" ]] || exit 1
+[[ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$AGENT_HOST_APP/Contents/Info.plist")" == "agentpass-native-agent-host" ]] || exit 1
 [[ "$(/usr/libexec/PlistBuddy -c 'Print :BundleProgram' "$APP_PATH/Contents/Library/LaunchDaemons/dev.agentpass.native-service.plist")" == "Contents/Library/HelperTools/AgentPassNativeService.app/Contents/MacOS/agentpass-native-service" ]] || exit 1
+[[ "$(/usr/libexec/PlistBuddy -c 'Print :MachServices:dev.agentpass.native-service' "$APP_PATH/Contents/Library/LaunchDaemons/dev.agentpass.native-service.plist")" == "true" ]] || { echo "Management Mach service is missing" >&2; exit 1; }
+[[ "$(/usr/libexec/PlistBuddy -c 'Print :MachServices:dev.agentpass.agent-session' "$APP_PATH/Contents/Library/LaunchDaemons/dev.agentpass.native-service.plist")" == "true" ]] || { echo "Agent session Mach service is missing" >&2; exit 1; }
+
+node - "$SCRIPT_DIR/../Resources/native-service.example.json" <<'NODE'
+const fs = require("node:fs");
+
+const [configPath] = process.argv.slice(2);
+const config = JSON.parse(fs.readFileSync(configPath, "utf8"));
+const expectedManagementRequirement = 'anchor apple generic and identifier "dev.agentpass.native-client" and certificate leaf[field.1.2.840.113635.100.6.1.13] exists and certificate leaf[subject.OU] = "TEAMID" and entitlement["keychain-access-groups"] = "TEAMID.dev.agentpass.approval-keys"';
+const expectedAgentRequirement = 'anchor apple generic and identifier "dev.agentpass.agent-host" and certificate leaf[field.1.2.840.113635.100.6.1.13] exists and certificate leaf[subject.OU] = "TEAMID" and entitlement["dev.agentpass.agent-session-client"] = true';
+if (config.mach_service_name !== "dev.agentpass.native-service") throw new Error("Management Mach service example changed");
+if (config.agent_mach_service_name !== "dev.agentpass.agent-session") throw new Error("Agent Mach service example is missing or invalid");
+if (config.client_code_signing_requirement !== expectedManagementRequirement) throw new Error("Management code-signing requirement example changed");
+if (config.agent_client_code_signing_requirement !== expectedAgentRequirement) throw new Error("Agent code-signing requirement example is missing or invalid");
+NODE
 
 extract_group() {
   local item="$1" output
@@ -29,8 +47,19 @@ extract_group() {
   /usr/bin/codesign -d --entitlements :- "$item" >"$output" 2>/dev/null
   /usr/libexec/PlistBuddy -c 'Print :keychain-access-groups:0' "$output"
 }
+extract_agent_entitlement() {
+  local item="$1" output
+  output="$TEST_DIR/$(basename "$item").agent-entitlements.plist"
+  /usr/bin/codesign -d --entitlements :- "$item" >"$output" 2>/dev/null
+  /usr/libexec/PlistBuddy -c 'Print :dev.agentpass.agent-session-client' "$output"
+}
 [[ "$(extract_group "$SERVICE_APP")" == "ADHOC00000.dev.agentpass.service-keys" ]] || exit 1
 [[ "$(extract_group "$CLIENT_APP")" == "ADHOC00000.dev.agentpass.approval-keys" ]] || exit 1
+[[ "$(extract_agent_entitlement "$AGENT_HOST_APP")" == "true" ]] || exit 1
+if /usr/libexec/PlistBuddy -c 'Print :keychain-access-groups:0' "$TEST_DIR/$(basename "$AGENT_HOST_APP").agent-entitlements.plist" >/dev/null 2>&1; then
+  echo "Ad-hoc Agent Host unexpectedly has a keychain access group" >&2
+  exit 1
+fi
 
 STATUS_JSON="$($APP_PATH/Contents/MacOS/agentpass-native-manager status)"
 node -e '
@@ -54,8 +83,8 @@ if "$SCRIPT_DIR/build-app.sh" --adhoc --service-profile invalid --output-dir "$T
   echo "Ad-hoc build unexpectedly accepted a profile" >&2
   exit 1
 fi
-if "$SCRIPT_DIR/build-app.sh" --identity invalid --team-id ABCDE12345 --app-identifier-prefix ABCDE12345 --output-dir "$TEST_DIR/missing-profiles" >/dev/null 2>&1; then
-  echo "Production build unexpectedly accepted missing helper profiles" >&2
+if "$SCRIPT_DIR/build-app.sh" --identity invalid --team-id ABCDE12345 --app-identifier-prefix ABCDE12345 --service-profile "$TEST_DIR/fake.provisionprofile" --client-profile "$TEST_DIR/fake.provisionprofile" --output-dir "$TEST_DIR/missing-agent-profile" >/dev/null 2>&1; then
+  echo "Production build unexpectedly accepted a missing Agent profile" >&2
   exit 1
 fi
 touch "$TEST_DIR/fake.provisionprofile"

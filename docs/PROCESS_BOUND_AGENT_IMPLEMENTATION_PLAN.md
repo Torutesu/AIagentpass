@@ -1,6 +1,6 @@
 # Process-bound Agent implementation plan
 
-Status: active implementation sequence after the M1 physical-qualification slice. As of 2026-08-13, the M2 contract/persistence foundation, canonical Grant signing and verification, public Lease normalization, PostgreSQL Grant/Lease authority repositories, the atomic Human issuance orchestrator, framework-neutral Human/Device HTTP boundaries, and a live Darwin observation primitive are implemented. Production runtime route wiring, hosted signing, consumption audit/outbox completion, XPC audit-token peer observation, split XPC services, adapter qualification, and physical evidence remain open. Passing unit tests alone does not make a lane production-ready.
+Status: active implementation sequence after the M1 physical-qualification slice. As of 2026-08-13, the M2 contract/persistence foundation, hosted Grant/Lease authority, atomic consume audit/outbox and lifecycle revocation, audit-token-derived XPC peer metadata capture, PID-scoped Darwin observation, and the split fail-closed Agent XPC listener are implemented. The native lease/signing state machine, signed-host physical qualification, adapters, external KMS exercises, and production evidence remain open. Passing unit tests alone does not make a lane production-ready.
 
 ## 1. Security outcome
 
@@ -165,8 +165,9 @@ The critical path is N1 through N4. UI and adapter convenience work must not pre
 | Human HTTP boundary | Runtime-composed and PostgreSQL-qualified | Origin, session, CSRF, role, recent WebAuthn, strict JSON, pre-WebAuthn exact replay, stable errors, exact route dispatch, restart-safe HTTP retry without duplicate signing/audit/outbox | External KMS rotation and physical drain qualification |
 | Device HTTP boundary | Runtime-composed | Exact raw path/body device authentication, shared nonce and rate-limit authority, Grant verification, exact binding retry, stable errors, exact frozen route interception | Consumption audit/outbox and real-PostgreSQL route contention evidence |
 | PostgreSQL session authority | Issuance and consumption implemented | Tenant-local transactions, canonical fingerprint re-derivation, deterministic Grant identity, current applied generation/bundle/ACK checks, one-time consume, binding conflict, separate Cloud audit chain, deterministic outbox, lifecycle cleanup, direct revocation composition, bounded metrics, rollback and exact response-loss recovery | Production expiry scheduling, external KMS rotation, physical drain qualification, and supported-version evidence |
-| Darwin observation | Partial | Live current-process facts, executable file race checks, code identity, boot identity, bounded ancestry | Derive the XPC peer from its audit token; observe/re-observe that peer per connection |
-| Agent XPC and native lease machine | Not started | Contracts and injectable identity model exist | N2–N4 implementation and release-only enforcement |
+| Darwin peer observation | Implemented foundation | Explicit peer PID/effective UID observation, full-width kernel generation, executable/code/ancestry binding, root-peer substitution checks, re-observation on every Agent RPC | Signed launchd probes for exec, PID reuse, parent/ancestor changes, and release-symbol inspection |
+| Agent XPC split | Implemented fail-closed foundation | Separate fixed Mach service, exact five-selector protocol, per-connection facade and immutable guard, distinct host requirement/entitlement, cross-service negative harness | Developer ID-signed physical positive/negative matrix and notarized-package evidence |
+| Native lease/sign machine | Not started | Grant/Lease/request contracts, capability verifier, request authorizer, signing transaction and audit primitives exist | M2-C state machine, one-time bootstrap handoff, fixed Git signer wiring, crash/restart and concurrency qualification |
 
 The Human issuance service deliberately depends on a higher-level repository contract than the low-level Grant/Lease persistence repository. That security boundary is now runtime-composed: it re-derives the canonical request fingerprint, reauthorizes the Human session and membership under lock, validates the agent/device/policy/current applied bundle authority, invokes the purpose-separated hosted signer once, and commits the immutable Grant, audit event, publication intent, and idempotency pointer atomically. A protected release-policy registry constrains the process-binding policy tuple, and signer metadata degradation now fails readiness closed. M2-A2 remains open until external KMS rotation and physical drain evidence are captured.
 
@@ -225,11 +226,72 @@ Exit gate: signed positive and negative probe binaries prove Team ID, entitlemen
 
 Implementation order: first add an audit-token adapter that extracts peer PID/effective UID from `NSXPCConnection`; then make observation explicitly PID-scoped; then capture an immutable `NativeConnectionContext` during listener acceptance; finally re-observe the same peer before each key use. The existing current-process Darwin source is a reusable primitive but is not evidence of peer authentication.
 
+Implemented foundation on 2026-08-13: the daemon registers fixed management and Agent Mach service names with distinct exact Developer ID requirements. The Agent listener uses only public OS-owned `NSXPCConnection` peer PID, effective UID, and audit-session metadata, combines them with the full-width kernel process-generation snapshot, and captures a connection-scoped immutable guard over the complete process and ancestry identity. Privileged-daemon observation accepts the connection-derived user UID explicitly and never falls back to the daemon's root EUID. The peer is re-observed on every Agent RPC. The Agent interface contains only bootstrap, start, status, fixed Git-sign, and close selectors; its per-connection facade has no management endpoint reference. Until Wave M2-C installs the durable lease and budget state machine, all five methods deliberately return a stable unavailable error after peer revalidation instead of falling back to the legacy bearer signing surface. Deterministic tests cover PID reuse, root exec drift, cross-user observation, context substitution, DTO bounds, secure-coding allowlists, and selector exclusion. The remaining M2-B exit evidence is the signed Agent host, real launchd positive/negative probes, release-symbol inspection, and physical code-signing/exec/ancestry cases.
+
 ### Wave M2-C — native lease and signing state machine
 
 Implement one-time bootstrap handoff, grant verification, monotonic lease deadlines, signature-budget reservation, request/capability replay stores, crash-safe signing intent, `outcome_unknown`, and invalidation on process/worktree/control/key/device changes. Wire request v2 through the fixed Git SSHSIG path; reject arbitrary signer arguments, bearer sessions, and private PEM input in v2.
 
 Exit gate: deterministic concurrency, restart, sleep/wake, clock rollback/advance, emergency stop, revoke, max-budget, duplicate request, duplicate capability, Secure Enclave failure, and ambiguous signer outcome tests all fail closed. Normal signing performs no Cloud call after lease establishment.
+
+#### M2-C0 — freeze native boundaries and denial taxonomy
+
+1. Add `NativeAgentSessionState`, `NativeAgentSessionRecord`, and a closed `NativeAgentSessionDenialReason` enum. The public XPC layer maps these to a small stable `NSError` domain/code set and never returns paths, audit tokens, code requirements, payloads, keychain errors, or localized Security.framework details.
+2. Define injectable protocols for monotonic time, signed wall-clock verification, Grant verification/consumption, process/worktree/control observation, signing, audit append, and lifecycle invalidation. Production implementations are constructed only in `AgentPassNativeService`; tests receive deterministic fakes from the test target rather than release environment switches.
+3. Keep one authority owner: the Agent connection endpoint owns a reference to a service-wide session registry, while the immutable `NativeAgentConnectionGuard` remains connection-local. No state-machine type accepts PID, UID, process digest, ancestry digest, or worktree path from an Agent DTO.
+
+Exit: exhaustive transition-table tests prove every unspecified edge is denied without mutation; exported Agent selectors remain exactly five; release sources contain no test-observation switch.
+
+#### M2-C1 — bootstrap challenge and one-time Grant handoff
+
+1. `bootstrapAgent` creates a random, expiring challenge bound to connection token identity, complete process/ancestry binding hashes, boot identity, adapter policy, and a server nonce. At most one live challenge exists per connection and replacement invalidates the prior challenge.
+2. `startAgentSession` consumes a Cloud Grant through the Device API using device authentication and exact process/ancestry/worktree digests. The Agent never receives the signed Grant or Device credential. The returned Cloud Lease is verified locally, normalized, and bound to the already captured connection and challenge before activation.
+3. Persist only replay evidence required to prevent a consumed Grant/capability from being reused. Active lease authority stays in memory and is deliberately lost on service restart. Ambiguous Cloud consumption is recovered only by exact idempotent read using the immutable Grant and binding hashes.
+
+Exit: tests cover challenge replay/replacement/expiry, connection substitution, changed binding, Cloud timeout before and after commit, exact retry, changed retry, Grant reuse, wrong tenant/device/agent/policy/generation, and restart between consume and activation.
+
+#### M2-C2 — linearizable in-memory session registry
+
+1. Implement transitions `none → challenge_pending → active → request_reserved → signing_intent → signed → active|closed`, plus terminal `expired|revoked|process_lost|worktree_lost|control_changed|key_changed|outcome_unknown|closed`.
+2. Serialize each session by an actor or equivalent lock-isolated state cell. Reserve request ID, capability ID, nonce, and one signature-budget unit in a single critical section before authorizer or key access. Concurrent requests cannot both observe the same remaining unit.
+3. Pair the signed wall-clock expiry with a monotonic deadline calculated at activation. Sleep/wake may shorten remaining authority but never extend it; wall-clock rollback, boot change, arithmetic overflow, or missing monotonic evidence closes the session.
+4. `status` returns only bounded public counters/timestamps and terminal state. `close` is idempotent for the same session/connection and cannot close or inspect another connection's session.
+
+Exit: model-based transition tests plus 100-way concurrency tests prove one reservation per budget unit, terminal-state monotonicity, exact status projection, and no authority after restart, sleep/wake drift, or clock manipulation.
+
+#### M2-C3 — crash-safe signing intent and outcome discipline
+
+1. Before Secure Enclave access, append and fsync a canonical signing intent containing only request/session/capability IDs, payload hash, binding hashes, key generation, control sequence, and reserved budget sequence. Use the existing atomic-file and signing-transaction primitives; reject symlink, hardlink, ownership, mode, truncation, rollback, and path-swap conditions.
+2. After key use, append the exact signature-result hash and durable audit completion before releasing the reservation. A failure known to occur before key use may return to `active`; any interruption or ambiguous failure after intent reaches the key boundary becomes terminal `outcome_unknown` and the budget remains consumed.
+3. Startup verifies the intent/result chain. Active sessions are not restored. Any intent without a provable matching result is retained as forensic evidence and cannot be retried under the same request or capability.
+
+Exit: fault injection at every durability/key/audit boundary proves no duplicate signature, no budget refund after ambiguous key use, no forged completion, and fail-closed restart recovery.
+
+#### M2-C4 — fixed Git commit signing composition
+
+1. Convert `AgentPassAgentSignRequest` into the frozen `git.commit.sign` authorization input internally. Fix SSHSIG namespace/hash/output; reject arbitrary signer arguments, key selection, operation selection, bearer session, PEM, raw Grant, and caller-supplied repository path.
+2. Immediately before intent and again immediately before key use, revalidate connection/process/ancestry, repository/worktree/Git state, request/capability replay, ControlBundle generation/revocations, device/key lifecycle, expiry, and emergency stop.
+3. Compose existing `NativeRequestAuthorizer`, `NativeCapabilityVerifier`, `NativeSigningTransactionStore`, audit chain, and `SecureEnclaveKeyStore` behind a single production coordinator. The response contains only request ID, signature bytes in the fixed format, and remaining budget.
+
+Exit: a deterministic end-to-end native test verifies a real Git commit signature and denies payload, branch, remote, repository, capability, process, control, and key-generation substitutions before key access.
+
+#### M2-C5 — lifecycle invalidation and operational controls
+
+1. Subscribe the registry to ControlBundle apply/revoke, device/agent revoke, key rotation/deletion, emergency stop, process exit, and worktree drift. Invalidation first prevents new reservations, then drains or marks an existing signing intent according to C3; it never silently preserves authority across generation changes.
+2. Bound global/per-agent/per-repository active sessions and bootstrap attempts. Emit label-bounded metrics and stable audit events for challenge, activation, reserve, intent, complete, deny, invalidate, close, and outcome unknown.
+3. Make service shutdown enter drain: reject bootstrap/start/new reservations, allow only already durable post-key completion to finish, then invalidate all in-memory sessions.
+
+Exit: race tests cover revoke-versus-reserve, stop-versus-key-use, key rotation, process exit, control update, drain, and resource exhaustion without deadlock or post-revoke signing.
+
+#### M2-C6 — signed integration and promotion gate
+
+1. Extend the signed Agent host with fixed bootstrap/start/status/sign/close qualification scenarios while continuing to accept no secret, payload, repository path, or signer option through argv/environment/stdin.
+2. Run the real launchd services from the same candidate bundle. Retain redacted evidence for positive host access; management-to-Agent and Agent-to-management denial; missing entitlement; wrong Team/bundle; ad-hoc binary; exec/PID reuse; ancestor death/substitution; expiry/revoke; restart; and budget exhaustion.
+3. Promote Agent signing from stable unavailable to enabled only when all production dependencies are configured and healthy. Any absent Device API, verifier key, control state, audit store, Secure Enclave key, or signing-intent store leaves the five-selector service available but signing fail-closed.
+
+Exit: unit, integration, bundle, installer-preservation, contract, PostgreSQL, and notarized physical gates pass from one immutable source commit. M2-D starts only after this evidence is retained.
+
+Implementation order is C0 → C1 → C2 → C3 → C4 → C5 → C6. C1 protocol adapters and C3 durability primitives may be developed in parallel after C0, but neither is wired into the production endpoint until C2 owns all authority transitions. C6 is evidence collection, not a substitute for any prior deterministic gate.
 
 ### Wave M2-D — Claude Code adapter and onboarding
 

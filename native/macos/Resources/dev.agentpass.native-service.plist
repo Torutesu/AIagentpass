@@ -8,7 +8,10 @@
     <string>--config</string>
     <string>/Library/Application Support/AgentPass/native-service.json</string>
   </array>
-  <key>MachServices</key><dict><key>dev.agentpass.native-service</key><true/></dict>
+  <key>MachServices</key><dict>
+    <key>dev.agentpass.native-service</key><true/>
+    <key>dev.agentpass.agent-session</key><true/>
+  </dict>
   <key>RunAtLoad</key><true/>
   <key>ProcessType</key><string>Interactive</string>
 </dict></plist>

@@ -56,5 +56,7 @@
   "session_approval_public_key": "ecdsa-sha2-nistp256 REPLACE_WITH_AGENTPASS_NATIVE_SESSION_APPROVAL_KEY",
   "session_approval_key_tag": "dev.agentpass.session-approval",
   "client_code_signing_requirement": "anchor apple generic and identifier \"dev.agentpass.native-client\" and certificate leaf[field.1.2.840.113635.100.6.1.13] exists and certificate leaf[subject.OU] = \"TEAMID\" and entitlement[\"keychain-access-groups\"] = \"TEAMID.dev.agentpass.approval-keys\"",
+  "agent_mach_service_name": "dev.agentpass.agent-session",
+  "agent_client_code_signing_requirement": "anchor apple generic and identifier \"dev.agentpass.agent-host\" and certificate leaf[field.1.2.840.113635.100.6.1.13] exists and certificate leaf[subject.OU] = \"TEAMID\" and entitlement[\"dev.agentpass.agent-session-client\"] = true",
   "allowed_client_uid": 501
 }

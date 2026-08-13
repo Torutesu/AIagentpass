@@ -220,6 +220,7 @@ private struct ServiceRefreshHintKey: Decodable {
 
 private struct ServiceConfiguration: Decodable {
     let machServiceName: String
+    let agentMachServiceName: String
     let keyTag: String
     let keychainAccessGroup: String?
     let keyLifecycleDirectory: String?
@@ -272,10 +273,12 @@ private struct ServiceConfiguration: Decodable {
     let sessionApprovalPublicKey: String?
     let sessionApprovalKeyTag: String?
     let clientCodeSigningRequirement: String
+    let agentClientCodeSigningRequirement: String
     let allowedClientUID: UInt32
 
     enum CodingKeys: String, CodingKey {
         case machServiceName = "mach_service_name"
+        case agentMachServiceName = "agent_mach_service_name"
         case keyTag = "key_tag"
         case keychainAccessGroup = "keychain_access_group"
         case keyLifecycleDirectory = "key_lifecycle_directory"
@@ -328,18 +331,29 @@ private struct ServiceConfiguration: Decodable {
         case sessionApprovalPublicKey = "session_approval_public_key"
         case sessionApprovalKeyTag = "session_approval_key_tag"
         case clientCodeSigningRequirement = "client_code_signing_requirement"
+        case agentClientCodeSigningRequirement = "agent_client_code_signing_requirement"
         case allowedClientUID = "allowed_client_uid"
     }
 
     static func load(path: String) throws -> Self {
         let value = try JSONDecoder().decode(Self.self, from: loadProtectedFile(path: path, label: "Native service configuration"))
-        guard !value.machServiceName.isEmpty, !value.keyTag.isEmpty, !value.auditKeyTag.isEmpty, value.policyPath.hasPrefix("/"), value.auditLogPath.hasPrefix("/"), value.auditCheckpointPath.hasPrefix("/"),
-              !value.clientCodeSigningRequirement.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+        guard !value.machServiceName.isEmpty,
+              !value.agentMachServiceName.isEmpty,
+              value.machServiceName == "dev.agentpass.native-service",
+              value.agentMachServiceName == "dev.agentpass.agent-session",
+              value.machServiceName != value.agentMachServiceName,
+              !value.keyTag.isEmpty, !value.auditKeyTag.isEmpty, value.policyPath.hasPrefix("/"), value.auditLogPath.hasPrefix("/"), value.auditCheckpointPath.hasPrefix("/"),
+              !value.clientCodeSigningRequirement.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              !value.agentClientCodeSigningRequirement.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              value.clientCodeSigningRequirement != value.agentClientCodeSigningRequirement else {
             throw AgentPassNativeError.invalidConfiguration("Native service configuration contains empty trust parameters")
         }
         guard let serviceAccessGroup = value.keychainAccessGroup,
               value.clientCodeSigningRequirement == (try? NativeClientCodeRequirement.requirement(serviceAccessGroup: serviceAccessGroup)) else {
             throw AgentPassNativeError.invalidConfiguration("Native client code-signing requirement must bind the fixed Team ID, Developer ID identity, and approval-key entitlement")
+        }
+        guard value.agentClientCodeSigningRequirement == (try? NativeAgentCodeRequirement.requirement(serviceAccessGroup: serviceAccessGroup)) else {
+            throw AgentPassNativeError.invalidConfiguration("Native Agent host code-signing requirement must bind its fixed Team ID, Developer ID identity, and dedicated entitlement")
         }
         if value.controlURL != nil || value.controlRefreshSeconds != nil {
             guard let rawURL = value.controlURL, let interval = value.controlRefreshSeconds,
@@ -2650,7 +2664,7 @@ private final class ServiceEndpoint: NSObject, AgentPassNativeServiceProtocol, @
     }
 }
 
-private final class ListenerDelegate: NSObject, NSXPCListenerDelegate {
+private final class ManagementListenerDelegate: NSObject, NSXPCListenerDelegate {
     private let configuration: ServiceConfiguration
     private let endpoint: ServiceEndpoint
 
@@ -2666,6 +2680,108 @@ private final class ListenerDelegate: NSObject, NSXPCListenerDelegate {
         connection.exportedObject = endpoint
         connection.resume()
         return true
+    }
+}
+
+/// One exported object is created per accepted Agent connection. It owns the
+/// immutable peer guard and cannot expose or forward any management selector.
+/// N2 deliberately fails Agent operations closed until the N3 durable session
+/// state machine is installed; this prevents a compatibility fallback to the
+/// bearer-oriented management endpoint.
+private final class AgentConnectionEndpoint: NSObject, AgentPassAgentXPCProtocol, @unchecked Sendable {
+    private let connectionGuard: NativeAgentConnectionGuard
+    private let observer: NativeDarwinProcessObservationSource
+
+    init(connectionGuard: NativeAgentConnectionGuard, observer: NativeDarwinProcessObservationSource) {
+        self.connectionGuard = connectionGuard
+        self.observer = observer
+    }
+
+    private func authorizeConnection() throws {
+        let observation = try observer.observe(
+            pid: connectionGuard.context.pid,
+            expectedUserID: connectionGuard.context.effectiveUserID
+        )
+        try connectionGuard.revalidate(observation: observation)
+    }
+
+    private func unavailableError() -> NSError {
+        NSError(
+            domain: "AgentPass.AgentXPC",
+            code: 1,
+            userInfo: [NSLocalizedDescriptionKey: "agent_v2_session_state_machine_unavailable"]
+        )
+    }
+
+    private func authorizeOrError() -> NSError {
+        do {
+            try authorizeConnection()
+            return unavailableError()
+        } catch {
+            return NSError(
+                domain: "AgentPass.AgentXPC",
+                code: 2,
+                userInfo: [NSLocalizedDescriptionKey: "agent_peer_revalidation_failed"]
+            )
+        }
+    }
+
+    func bootstrapAgent(_ request: AgentPassAgentBootstrapRequest, withReply reply: @escaping (AgentPassAgentBootstrapResponse?, NSError?) -> Void) {
+        reply(nil, authorizeOrError())
+    }
+
+    func startAgentSession(_ request: AgentPassAgentSessionRequest, withReply reply: @escaping (AgentPassAgentSessionResponse?, NSError?) -> Void) {
+        reply(nil, authorizeOrError())
+    }
+
+    func agentSessionStatus(_ request: AgentPassAgentSessionStatusRequest, withReply reply: @escaping (AgentPassAgentSessionStatusResponse?, NSError?) -> Void) {
+        reply(nil, authorizeOrError())
+    }
+
+    func signGitCommit(_ request: AgentPassAgentSignRequest, withReply reply: @escaping (AgentPassAgentSignResponse?, NSError?) -> Void) {
+        // Re-observation is deliberately the last operation before the N3/N4
+        // signing implementation will be allowed to reserve and touch a key.
+        reply(nil, authorizeOrError())
+    }
+
+    func closeAgentSession(_ request: AgentPassAgentCloseSessionRequest, withReply reply: @escaping (AgentPassAgentCloseSessionResponse?, NSError?) -> Void) {
+        reply(nil, authorizeOrError())
+    }
+}
+
+private final class AgentListenerDelegate: NSObject, NSXPCListenerDelegate {
+    private let configuration: ServiceConfiguration
+    private let observer = NativeDarwinProcessObservationSource()
+
+    init(configuration: ServiceConfiguration) {
+        self.configuration = configuration
+    }
+
+    func listener(_ listener: NSXPCListener, shouldAcceptNewConnection connection: NSXPCConnection) -> Bool {
+        let peerPID = connection.processIdentifier
+        let peerUID = connection.effectiveUserIdentifier
+        let auditSessionID = connection.auditSessionIdentifier
+        guard peerPID > 0,
+              peerUID == configuration.allowedClientUID,
+              auditSessionID > 0,
+              let normalizedAuditSessionID = UInt32(exactly: auditSessionID) else { return false }
+        connection.setCodeSigningRequirement(configuration.agentClientCodeSigningRequirement)
+        do {
+            let observation = try observer.observe(pid: peerPID, expectedUserID: peerUID)
+            let context = try NativeConnectionContext(
+                osProcessID: peerPID,
+                effectiveUserID: peerUID,
+                auditSessionID: normalizedAuditSessionID,
+                pidVersion: observation.process.pidVersion
+            )
+            let guardValue = try NativeAgentConnectionGuard(context: context, observation: observation)
+            connection.exportedInterface = AgentPassAgentXPCInterface.make()
+            connection.exportedObject = AgentConnectionEndpoint(connectionGuard: guardValue, observer: observer)
+            connection.resume()
+            return true
+        } catch {
+            return false
+        }
     }
 }
 
@@ -3332,7 +3448,8 @@ do {
     _ = try auditLog.verify()
     _ = try auditCheckpoints.verify()
     let authorizer = try NativeRequestAuthorizer(policyData: policyData, sessionValidator: sessionManager, controlValidator: controlManager, capabilityValidator: capabilityVerifier, v2ControlManager: controlV2Manager, requestEvidenceStore: requestEvidenceStore, controlV2Configured: configuration.controlV2StatePath != nil, v2DeviceID: configuration.controlV2DeviceID)
-    let listener = NSXPCListener(machServiceName: configuration.machServiceName)
+    let managementListener = NSXPCListener(machServiceName: configuration.machServiceName)
+    let agentListener = NSXPCListener(machServiceName: configuration.agentMachServiceName)
     let endpoint = ServiceEndpoint(keyStore: keyStore, authorizer: authorizer, auditLog: auditLog, auditCheckpoints: auditCheckpoints, auditSigner: auditSigner, auditAnchorReceipts: auditAnchorReceipts, auditAnchorClient: auditAnchorClient, auditKeyRotationCoordinator: auditKeyRotationCoordinator, auditKeyRecoveryCoordinator: auditKeyRecoveryCoordinator, auditKeyRecoveryPlanJournal: auditKeyRecoveryPlanJournal, auditKeyTransitionStore: auditKeyTransitionStore, auditKeyRecoveryPolicy: auditKeyRecoveryPolicy, auditKeyRecoveryApprovalJournal: auditKeyRecoveryApprovalJournal, auditPruneCoordinator: auditPruneCoordinator, auditPruneTrustSource: auditPruneTrustSource, auditPruneEvidenceBundlePath: configuration.auditPruneEvidenceBundlePath, auditAnchorTenant: configuration.auditAnchorTenant, keychainAccessGroup: configuration.keychainAccessGroup, recoveryPolicyData: recoveryPolicyData, installationID: configuration.installationID, sessionManager: sessionManager, controlManager: controlManager, controlV2Manager: controlV2Manager, signingTransactions: signingTransactions, keyLifecycle: keyLifecycle, keyCoordinator: keyCoordinator, loadedLifecycleHeadHash: lifecycleSnapshot?.headHash)
     if controlV2Manager != nil {
         guard let apiBaseText = configuration.controlV2APIBaseURL,
@@ -3406,9 +3523,12 @@ do {
         let refresh = try NativeControlRefreshConfiguration(urlString: rawURL, refreshSeconds: interval)
         try endpoint.startControlRefresh(url: refresh.url, refreshSeconds: refresh.refreshSeconds)
     }
-    let delegate = ListenerDelegate(configuration: configuration, endpoint: endpoint)
-    listener.delegate = delegate
-    listener.resume()
+    let managementDelegate = ManagementListenerDelegate(configuration: configuration, endpoint: endpoint)
+    let agentDelegate = AgentListenerDelegate(configuration: configuration)
+    managementListener.delegate = managementDelegate
+    agentListener.delegate = agentDelegate
+    managementListener.resume()
+    agentListener.resume()
     RunLoop.current.run()
 } catch {
     FileHandle.standardError.write(Data("agentpass-native-service: \(error.localizedDescription)\n".utf8))

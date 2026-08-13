@@ -17,8 +17,14 @@ private final class FixtureDarwinAdapter: NativeDarwinProcessObservationAdapter,
     var fileIdentities: [NativeExecutableFileIdentity]
     var fileIdentityIndex = 0
     var identity: NativeDarwinCodeIdentity
+    var codeIdentities: [NativeDarwinCodeIdentity]
+    var codeIdentityIndex = 0
     var snapshots: [Int32: [NativeDarwinProcessSnapshot]]
     var snapshotIndexes: [Int32: Int] = [:]
+    var currentProcessIDReadCount = 0
+    var observedSnapshotPIDs: [Int32] = []
+    var observedPathPIDs: [Int32] = []
+    var observedCodeIdentityPIDs: [Int32] = []
     var pathFailure = false
     var fileFailure = false
     var codeFailure = false
@@ -39,14 +45,19 @@ private final class FixtureDarwinAdapter: NativeDarwinProcessObservationAdapter,
         self.fileIdentity = fileIdentity
         self.fileIdentities = [fileIdentity]
         self.identity = identity
+        self.codeIdentities = [identity]
         self.snapshots = snapshots
     }
 
-    func currentProcessID() throws -> Int32 { currentPID }
+    func currentProcessID() throws -> Int32 {
+        currentProcessIDReadCount += 1
+        return currentPID
+    }
     func effectiveUserID() throws -> UInt32 { uid }
     func bootIdentity() throws -> String { boot }
 
     func processSnapshot(pid: Int32) throws -> NativeDarwinProcessSnapshot {
+        observedSnapshotPIDs.append(pid)
         if snapshotFailures.contains(pid) { throw FixtureFailure.unavailable }
         guard let values = snapshots[pid], !values.isEmpty else {
             throw FixtureFailure.unavailable
@@ -57,6 +68,7 @@ private final class FixtureDarwinAdapter: NativeDarwinProcessObservationAdapter,
     }
 
     func executablePath(pid: Int32) throws -> String {
+        observedPathPIDs.append(pid)
         if pathFailure { throw FixtureFailure.unavailable }
         return pathValue
     }
@@ -70,7 +82,10 @@ private final class FixtureDarwinAdapter: NativeDarwinProcessObservationAdapter,
 
     func codeIdentity(pid: Int32) throws -> NativeDarwinCodeIdentity {
         if codeFailure { throw FixtureFailure.unavailable }
-        return identity
+        observedCodeIdentityPIDs.append(pid)
+        let index = codeIdentityIndex
+        codeIdentityIndex += 1
+        return codeIdentities[min(index, codeIdentities.count - 1)]
     }
 }
 
@@ -100,18 +115,19 @@ private func snapshots(for pid: Int32, parentPID: Int32, uid: UInt32 = 501) -> [
     ]
 }
 
-private func fixtureAdapter(ancestorCount: Int = 0) throws -> FixtureDarwinAdapter {
+private func fixtureAdapter(ancestorCount: Int = 0, uid: UInt32 = 501) throws -> FixtureDarwinAdapter {
     var processSnapshots: [Int32: [NativeDarwinProcessSnapshot]] = [
-        900: snapshots(for: 900, parentPID: ancestorCount == 0 ? 1 : 100)
+        900: snapshots(for: 900, parentPID: ancestorCount == 0 ? 1 : 100, uid: uid)
     ]
     if ancestorCount > 0 {
         for offset in 0..<ancestorCount {
             let pid = Int32(100 + offset)
             let parent = offset + 1 == ancestorCount ? 1 : Int32(100 + offset + 1)
-            processSnapshots[pid] = snapshots(for: pid, parentPID: parent)
+            processSnapshots[pid] = snapshots(for: pid, parentPID: parent, uid: uid)
         }
     }
     return FixtureDarwinAdapter(
+        uid: uid,
         fileIdentity: try fixtureFileIdentity(),
         identity: fixtureCodeIdentity(),
         snapshots: processSnapshots
@@ -179,6 +195,65 @@ private func reason(from operation: () throws -> Void) -> String? {
     #expect(!identity.canonicalRepresentation.localizedCaseInsensitiveContains("environment"))
 }
 
+@Test func nativeDarwinSourceObservesExplicitArbitraryPeerPIDWithoutCurrentProcessFallback() throws {
+    let adapter = try fixtureAdapter()
+    adapter.snapshots[321] = snapshots(for: 321, parentPID: 1)
+
+    let observation = try NativeDarwinProcessObservationSource(adapter: adapter).observe(pid: 321)
+
+    #expect(observation.process.pid == 321)
+    #expect(adapter.currentProcessIDReadCount == 0)
+    #expect(adapter.observedSnapshotPIDs.allSatisfy { $0 == 321 })
+    #expect(adapter.observedPathPIDs.allSatisfy { $0 == 321 })
+    #expect(adapter.observedCodeIdentityPIDs.allSatisfy { $0 == 321 })
+}
+
+@Test func nativeDarwinSourceRejectsInvalidExplicitPIDWithoutFallback() throws {
+    let adapter = try fixtureAdapter()
+
+    #expect(reason { _ = try NativeDarwinProcessObservationSource(adapter: adapter).observe(pid: 0) } == NativeDarwinProcessObservationReason.processSnapshotInvalid.rawValue)
+    #expect(adapter.currentProcessIDReadCount == 0)
+    #expect(adapter.observedSnapshotPIDs.isEmpty)
+}
+
+@Test func privilegedDarwinSourceUsesConnectionDerivedPeerUIDInsteadOfDaemonEUID() throws {
+    let adapter = try fixtureAdapter(uid: 0)
+    adapter.snapshots[321] = snapshots(for: 321, parentPID: 1, uid: 501)
+
+    let observation = try NativeDarwinProcessObservationSource(adapter: adapter).observe(pid: 321, expectedUserID: 501)
+
+    #expect(observation.process.uid == 501)
+    #expect(adapter.currentProcessIDReadCount == 0)
+}
+
+@Test func nativeDarwinSourceResnapshotsRootPeerAfterAncestryForPIDSubstitution() throws {
+    let adapter = try fixtureAdapter(ancestorCount: 1)
+    adapter.snapshots[900] = [
+        NativeDarwinProcessSnapshot(pid: 900, parentPID: 100, uid: 501, pidVersion: 10),
+        NativeDarwinProcessSnapshot(pid: 900, parentPID: 100, uid: 501, pidVersion: 10),
+        NativeDarwinProcessSnapshot(pid: 900, parentPID: 100, uid: 501, pidVersion: 10),
+        NativeDarwinProcessSnapshot(pid: 900, parentPID: 100, uid: 501, pidVersion: 11)
+    ]
+
+    #expect(reason { _ = try NativeDarwinProcessObservationSource(adapter: adapter).observe() } == NativeDarwinProcessObservationReason.processChangedDuringObservation.rawValue)
+    #expect(adapter.observedSnapshotPIDs == [900, 900, 100, 100, 900, 900])
+}
+
+@Test func nativeDarwinSourceRejectsRootExecIdentityChangeAfterAncestry() throws {
+    let adapter = try fixtureAdapter()
+    let execIdentity = NativeDarwinCodeIdentity(
+        codeDirectoryHash: String(repeating: "e", count: 64),
+        bundleIdentifier: "dev.agentpass.exec-fixture",
+        teamIdentifier: "FIXTURETEAM",
+        signatureKind: .developerID,
+        entitlements: ["dev.agentpass.fixture": .boolean(true)]
+    )
+    adapter.codeIdentities = [fixtureCodeIdentity(), execIdentity]
+
+    #expect(reason { _ = try NativeDarwinProcessObservationSource(adapter: adapter).observe() } == NativeDarwinProcessObservationReason.processChangedDuringObservation.rawValue)
+    #expect(adapter.observedCodeIdentityPIDs == [900, 900])
+}
+
 @Test func nativeDarwinSourceRejectsPIDReuseDuringObservationWithStableReason() throws {
     let adapter = try fixtureAdapter()
     adapter.snapshots[900] = [
@@ -240,5 +315,6 @@ private func reason(from operation: () throws -> Void) -> String? {
         signatureKind: .developerID,
         entitlements: [:]
     )
+    invalidCode.codeIdentities = [invalidCode.identity]
     #expect(reason { _ = try NativeDarwinProcessObservationSource(adapter: invalidCode).observe() } == NativeDarwinProcessObservationReason.observationConstructionFailed.rawValue)
 }
