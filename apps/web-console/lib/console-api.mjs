@@ -275,7 +275,17 @@ async function getSummary(query, config, fetchImpl, options) {
     cloudRequest("GET", "/policies", undefined, config, fetchImpl, options),
   ]);
   const devices = normalizeDeviceStateResponse(devicesResult.body);
-  const audit = await getAudit({ ...query, deviceId: query.deviceId }, config, fetchImpl, options, devices, "summary");
+  let audit;
+  try {
+    audit = await getAudit({ ...query, deviceId: query.deviceId }, config, fetchImpl, options, devices, "summary");
+  } catch (error) {
+    // The summary is also the viewer landing resource. Audit routes require
+    // the auditor role, so an exact role denial must not hide the resources a
+    // viewer is entitled to see. Other authorization and upstream failures
+    // remain fail-closed.
+    if (!isAuditRoleDenial(error)) throw error;
+    audit = { health: [], activity: [], next_cursor: null };
+  }
 
   return {
     organization: organization.organization,
@@ -288,6 +298,12 @@ async function getSummary(query, config, fetchImpl, options) {
       next_cursor: audit.next_cursor,
     },
   };
+}
+
+function isAuditRoleDenial(error) {
+  return error instanceof CloudResponseError
+    && error.status === 403
+    && error.body?.error?.code === "role_denied";
 }
 
 async function getSimple(query, resource, config, fetchImpl, options) {

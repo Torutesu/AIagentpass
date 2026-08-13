@@ -6,6 +6,7 @@ import { Pool } from "pg";
 
 import {
   P0BSkip,
+  certificateSpkiPin,
   createVerifiedPostgresPoolOptions,
   createP0BTempDirectory,
   createTestCertificates,
@@ -49,6 +50,7 @@ test("certificate generation is temporary and creates a localhost CA chain", asy
   assert.match(await fs.readFile(certificates.key, "utf8"), /BEGIN (?:RSA )?PRIVATE KEY/);
   const mode = (await fs.stat(certificates.key)).mode & 0o777;
   assert.equal(mode, 0o600);
+  assert.match(await certificateSpkiPin(certificates.cert), /^[A-Za-z0-9+/]{43}=$/u);
   const ca = await readPostgresCaFile(certificates.caCert);
   assert.equal(ca.file, certificates.caCert);
   assert.match(ca.pem, /BEGIN CERTIFICATE/);

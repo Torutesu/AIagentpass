@@ -121,6 +121,71 @@ test("GET summary aggregates tenant resources and bounded audit activity", async
   assert.doesNotMatch(JSON.stringify(body), new RegExp(env.AGENTPASS_CLOUD_TOKEN));
 });
 
+test("GET summary keeps viewer resources visible when audit access is role denied", async () => {
+  const calls = [];
+  const api = authenticatedApi({
+    env,
+    fetchImpl: async (url) => {
+      calls.push(String(url));
+      const parsed = new URL(url);
+      if (parsed.pathname.endsWith("/devices")) return response({ devices: [{ device_id: deviceId, name: "Build Mac" }] });
+      if (parsed.pathname.endsWith("/agents")) return response({ agents: [{ agent_id: "agent-1" }] });
+      if (parsed.pathname.endsWith("/policies")) return response({ policies: [{ policy_id: "policy-1" }] });
+      if (parsed.pathname.endsWith("/audit/events") || parsed.pathname.endsWith("/audit/health")) {
+        return response({ error: { code: "role_denied", message: "Authorization denied" } }, 403);
+      }
+      return response({ organization: { organization_id: env.AGENTPASS_ORGANIZATION_ID, name: "Acme" } });
+    },
+  });
+
+  const result = await api.handle(request("/api/console?resource=summary"));
+  assert.equal(result.status, 200);
+  const body = await result.json();
+  assert.equal(body.organization.name, "Acme");
+  assert.equal(body.devices[0].device_id, deviceId);
+  assert.deepEqual(body.audit, { health: [], activity: [], next_cursor: null });
+  assert.ok(calls.some((url) => new URL(url).pathname.endsWith("/audit/events")));
+});
+
+test("GET summary does not suppress non-role audit failures", async () => {
+  const api = authenticatedApi({
+    env,
+    fetchImpl: async (url) => {
+      const parsed = new URL(url);
+      if (parsed.pathname.endsWith("/devices")) return response({ devices: [{ device_id: deviceId, name: "Build Mac" }] });
+      if (parsed.pathname.endsWith("/agents")) return response({ agents: [] });
+      if (parsed.pathname.endsWith("/policies")) return response({ policies: [] });
+      if (parsed.pathname.endsWith("/audit/events") || parsed.pathname.endsWith("/audit/health")) {
+        return response({ error: { code: "audit_unavailable", message: "Unavailable" } }, 503);
+      }
+      return response({ organization: { organization_id: env.AGENTPASS_ORGANIZATION_ID, name: "Acme" } });
+    },
+  });
+
+  const result = await api.handle(request("/api/console?resource=summary"));
+  assert.equal(result.status, 503);
+  assert.deepEqual(await result.json(), {
+    error: { code: "audit_unavailable", message: "Cloud API request failed" },
+  });
+});
+
+test("direct audit access still preserves role denial", async () => {
+  const api = authenticatedApi({
+    env,
+    fetchImpl: async (url) => {
+      const parsed = new URL(url);
+      if (parsed.pathname.endsWith("/devices")) return response({ devices: [{ device_id: deviceId }] });
+      return response({ error: { code: "role_denied", message: "Authorization denied" } }, 403);
+    },
+  });
+
+  const result = await api.handle(request("/api/console?resource=audit"));
+  assert.equal(result.status, 403);
+  assert.deepEqual(await result.json(), {
+    error: { code: "role_denied", message: "Cloud API request failed" },
+  });
+});
+
 test("production control-plane reads use only the Human session and never require the legacy operator bearer", async () => {
   const calls = [];
   let siwcCalls = 0;

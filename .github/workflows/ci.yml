@@ -81,8 +81,18 @@ jobs:
             apps/web-console/package-lock.json
       - run: npm ci
       - run: npm ci --prefix apps/web-console
+      - name: Install Chromium and OS dependencies
+        run: npx playwright install --with-deps chromium
+        working-directory: apps/web-console
+      - name: Prepare P0-B evidence and artifact directory
+        run: mkdir -p "$GITHUB_WORKSPACE/apps/web-console/e2e/test-results"
       - name: Run live trusted-TLS PostgreSQL, Cloud, Console, and signed-ACK qualification
         run: npm run test:p0b:live
+      - name: Reject sensitive P0-B evidence and browser artifacts
+        if: always()
+        env:
+          AGENTPASS_E2E_ARTIFACT_DIR: ${{ github.workspace }}/apps/web-console/e2e/test-results
+        run: node --test test/p0b-artifact-security.test.mjs
 
   test:
     runs-on: macos-latest

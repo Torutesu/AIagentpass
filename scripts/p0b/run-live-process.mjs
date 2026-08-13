@@ -13,6 +13,7 @@ const SCRIPT_DIRECTORY = path.dirname(fileURLToPath(import.meta.url));
 const REPOSITORY_ROOT = path.resolve(SCRIPT_DIRECTORY, "../..");
 const CONSOLE_ROOT = path.join(REPOSITORY_ROOT, "apps/web-console");
 const LIVE_TEST = path.join(REPOSITORY_ROOT, "test/p0b-live-process.integration.test.mjs");
+const LIVE_BROWSER_TEST = path.join(REPOSITORY_ROOT, "test/p0b-live-browser.integration.test.mjs");
 const DEFAULT_FIXTURE_TIMEOUT_MS = 45_000;
 const MAX_ENV_FILE_BYTES = 16 * 1024;
 const MAX_CHILD_OUTPUT_BYTES = 256 * 1024;
@@ -209,17 +210,35 @@ export async function main(argv = process.argv.slice(2)) {
     }
 
     if (!failure) {
+      const result = await runChild(process.env.npm_execpath ? process.execPath : "npm",
+        process.env.npm_execpath ? [process.env.npm_execpath, "run", "build"] : ["run", "build"],
+        { cwd: CONSOLE_ROOT, env: process.env, setActive: (child) => { activeChild = child; } });
+      activeChild = undefined;
+      if (result.spawnError || result.code !== 0 || result.signal) {
+        failure = { stage: "console-build", error: new OrchestrationError(result.reason) };
+      }
+    }
+
+    if (!failure) {
       try {
-        const dist = await fsp.stat(path.join(CONSOLE_ROOT, "dist"));
-        if (!dist.isDirectory()) throw new Error("dist is not a directory");
-      } catch {
-        const result = await runChild(process.env.npm_execpath ? process.execPath : "npm",
-          process.env.npm_execpath ? [process.env.npm_execpath, "run", "build"] : ["run", "build"],
-          { cwd: CONSOLE_ROOT, env: process.env, setActive: (child) => { activeChild = child; } });
+        if (interrupted) throw new OrchestrationError("interrupted");
+        const result = await runChild(process.execPath,
+          ["--test", "--test-reporter", "tap", path.relative(REPOSITORY_ROOT, LIVE_BROWSER_TEST)],
+          {
+            cwd: REPOSITORY_ROOT,
+            env: { ...buildTestEnvironment(process.env, fixtureEnvironment), P0B_LIVE_BROWSER: "1" },
+            setActive: (child) => { activeChild = child; }
+          });
         activeChild = undefined;
-        if (result.spawnError || result.code !== 0 || result.signal) {
-          failure = { stage: "console-build", error: new OrchestrationError(result.reason) };
+        if (result.spawnError || result.signal || result.code !== 0) {
+          failure = { stage: "live-browser", error: new OrchestrationError(result.reason) };
+        } else if (result.output.includes("# SKIP")) {
+          failure = { stage: "live-browser", error: new OrchestrationError("test_skipped") };
+        } else if (interrupted) {
+          failure = { stage: "live-browser", error: new OrchestrationError("interrupted") };
         }
+      } catch (error) {
+        failure = { stage: "live-browser", error };
       }
     }
 

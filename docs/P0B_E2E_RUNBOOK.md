@@ -15,8 +15,9 @@ stored in the repository or printed by the harness.
   `P0B_POSTGRES_ADMIN_URL` (or `AGENTPASS_TEST_POSTGRES_ADMIN_URL`). It must be
   `postgresql://user:password@host/database?sslmode=verify-full`; extra query
   parameters and non-TLS modes are rejected.
-- `apps/web-console/dist` exists. Build it first with `npm --prefix
-  apps/web-console run build`.
+- Chromium is installed for Playwright (`npm --prefix apps/web-console run
+  e2e:install`). The combined runner always rebuilds `apps/web-console/dist`
+  from the current source before qualification and never reuses a stale build.
 
 If `openssl` or the administrator URL is unavailable, the lane reports a
 stable `P0-B` skip diagnostic. It does not fall back to HTTP, the file store,
@@ -58,6 +59,17 @@ authorization material, nonces, private keys, enrollment material, and policy
 bodies without echoing matched values.
 
 ## Run the harness
+
+Run the complete cleanup-safe qualification (current Console build, real
+Chromium/WebAuthn matrix, trusted HTTPS Cloud/Console, disposable PostgreSQL,
+and signed-ACK convergence) with:
+
+```bash
+npm run test:p0b:live
+```
+
+The command treats any skipped browser or process lane as failure and always
+removes the PostgreSQL container and temporary credentials.
 
 The reusable API is in `test/support/p0b/harness.mjs`. A test can call
 `startP0BHarness()` and register `harness.close()` in its test teardown:

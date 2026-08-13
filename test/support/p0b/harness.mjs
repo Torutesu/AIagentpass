@@ -141,6 +141,23 @@ export async function createTestCertificates(directory) {
   return Object.freeze({ caCert, caKey, cert: leafCert, key: leafKey });
 }
 
+export async function certificateSpkiPin(file) {
+  if (typeof file !== "string" || !path.isAbsolute(file)) throw new TypeError("certificate path must be absolute");
+  let handle;
+  try {
+    handle = await fsp.open(file, fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW ?? 0));
+    const metadata = await handle.stat();
+    if (!metadata.isFile() || (metadata.mode & 0o022) !== 0 || metadata.size > MAX_CA_BYTES) throw new Error("unsafe certificate");
+    const certificate = new crypto.X509Certificate(await handle.readFile());
+    const spki = certificate.publicKey.export({ type: "spki", format: "der" });
+    return crypto.createHash("sha256").update(spki).digest("base64");
+  } catch {
+    throw new TypeError("P0-B certificate pin could not be derived");
+  } finally {
+    await handle?.close().catch(() => {});
+  }
+}
+
 export async function createDisposablePostgres({ adminUrl, databaseName = randomDatabaseName(), env = process.env, caFile } = {}) {
   if (env.P0B_DISABLE_EXTERNAL === "true") throw new P0BSkip("external_disabled", "P0-B external dependencies disabled");
   const source = adminUrl ?? env.P0B_POSTGRES_ADMIN_URL ?? env.AGENTPASS_TEST_POSTGRES_ADMIN_URL;
@@ -254,6 +271,7 @@ export async function startP0BHarness({ env = process.env, repoRoot = REPOSITORY
     await waitForHttps(`https://localhost:${consoleTlsPort}/`, certificates.caCert, { path: "/", expectedStatus: 200, timeoutMs: waitTimeoutMs, process: consoleProcess, label: "console" });
     return Object.freeze({
       cloudUrl: `https://localhost:${cloudTlsPort}/`, consoleUrl: `https://localhost:${consoleTlsPort}/`, caCert: certificates.caCert,
+      tlsSpkiPin: await certificateSpkiPin(certificates.cert),
       databaseUrl: database.url, organizationId,
       async close() { await closeP0BHarness({ cloudProcess, consoleProcess, cloudProxy, consoleProxy, database, temp }); }
     });
