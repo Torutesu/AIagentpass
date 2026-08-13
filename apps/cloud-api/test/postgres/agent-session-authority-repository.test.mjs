@@ -295,6 +295,22 @@ test("consumes once, binds both process and ancestry, and replays the original l
   assert.equal(client.calls.at(-1).text, "ROLLBACK");
 });
 
+test("never replays a terminal or expired session as a usable Lease", async () => {
+  const client = new ContractClient();
+  const repo = repository(client);
+  const issued = issueInput();
+  await repo.issueAgentSessionGrant(issued);
+  const request = consumeInput({ grant: issued.grant });
+  await repo.consumeAgentSessionGrant(request);
+  client.shared.sessions[0].status = "revoked";
+  client.shared.sessions[0].revoked_at = NOW;
+  await assert.rejects(repo.consumeAgentSessionGrant(request), { code: "ERR_GRANT_UNAVAILABLE" });
+  client.shared.sessions[0].status = "challenge_pending";
+  client.shared.sessions[0].revoked_at = null;
+  const expiredRepo = repository(client, { now: () => EXPIRES });
+  await assert.rejects(expiredRepo.consumeAgentSessionGrant(request), { code: "ERR_GRANT_EXPIRED" });
+});
+
 test("pins the migration trigger as the only grant-consumption transition", () => {
   const migration = AGENT_SESSIONS_MIGRATION.replace(/--[^\n]*\n/g, " ").replace(/\s+/gu, " ");
   assert.match(migration, /CREATE FUNCTION agentpass_consume_agent_session_grant_for_session\(\)/u);

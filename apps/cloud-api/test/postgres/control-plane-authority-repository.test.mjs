@@ -101,12 +101,13 @@ function policyRow() {
 function ackRow(params) {
   return { organization_id: params[0], device_id: params[1], format_epoch: params[2], sequence: params[3], statement_hash: params[4], status: params[5], reason: params[6], applied_at: params[7], received_at: NOW };
 }
-function repository(client) {
+function repository(client, options = {}) {
   return createControlPlaneAuthorityRepository({
     client,
     cursorSecret: Buffer.alloc(32, 0x31),
     refreshNonceCodec: createRefreshNonceCodec({ keys: { "refresh-nonce-v3": Buffer.alloc(32, 0x33) }, activeKeyId: "refresh-nonce-v3" }),
-    now: () => NOW
+    now: () => NOW,
+    ...options
   });
 }
 function auditEvent(previousHash = "0".repeat(64)) {
@@ -159,6 +160,28 @@ test("revocation mutation is tenant-qualified, locked, transactional, and idempo
   assert.match(active.text, /organization_id=\$1/);
   assert.equal(client.calls.at(-1).text, "COMMIT");
 
+});
+
+test("runs Agent Session revocation propagation inside the exact revocation transaction", async () => {
+  const client = new FakeClient();
+  const calls = [];
+  const api = repository(client, { onRevocation: async (input) => calls.push(input) });
+  await api.createRevocation({
+    organization_id: ids.organization, revocation_id: ids.revocation, target_type: "device", target_id: ids.device,
+    reason: "operator-request", created_by: ids.member, created_at: NOW
+  });
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].tx, client);
+  assert.equal(calls[0].revocation.target_type, "device");
+  assert.equal(client.calls.at(-1).text, "COMMIT");
+
+  const failing = new FakeClient();
+  const failureApi = repository(failing, { onRevocation: async () => { throw new Error("session lifecycle unavailable"); } });
+  await assert.rejects(failureApi.createRevocation({
+    organization_id: ids.organization, revocation_id: ids.revocation, target_type: "device", target_id: ids.device,
+    reason: "operator-request", created_by: ids.member, created_at: NOW
+  }));
+  assert.equal(failing.calls.at(-1).text, "ROLLBACK");
 });
 
 test("bundle heads remain monotonic and ACKs are append-only against the tenant's current head", async () => {

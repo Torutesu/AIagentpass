@@ -35,9 +35,29 @@ test("metrics are fixed-key, monotonic, and free of caller labels", () => {
   metrics.recordRefreshNotificationWakeFailure(2);
   metrics.recordRefreshPropagationObservation(4);
   metrics.recordRefreshPropagationTimeout();
+  metrics.recordAgentSessionIssueSuccess();
+  metrics.recordAgentSessionIssueReplay(2);
+  metrics.recordAgentSessionIssueConflict();
+  metrics.recordAgentSessionIssueFailure(3);
+  metrics.recordAgentSessionIssueRollback();
+  metrics.recordAgentSessionConsumeSuccess(2);
+  metrics.recordAgentSessionConsumeReplay();
+  metrics.recordAgentSessionConsumeConflict(3);
+  metrics.recordAgentSessionConsumeStale();
+  metrics.recordAgentSessionConsumeFailure(2);
+  metrics.recordAgentSessionConsumeRollback();
+  metrics.recordAgentSessionSignerSuccess(2);
+  metrics.recordAgentSessionSignerFailure();
+  metrics.recordAgentSessionSignerLatency(17);
+  metrics.recordAgentSessionLifecycleExpired(3);
+  metrics.recordAgentSessionLifecycleRevoked();
+  metrics.recordCloudAuditAppend(2);
+  metrics.recordCloudAuditFailure();
   const snapshot = metrics.snapshot();
   assert.deepEqual(Object.keys(snapshot), ["version", "counters", "valid"]);
   assert.deepEqual(Object.keys(snapshot.counters), OPERATIONAL_METRIC_KEYS);
+  assert.equal(Object.isFrozen(snapshot), true);
+  assert.equal(Object.isFrozen(snapshot.counters), true);
   assert.deepEqual(snapshot.counters, {
     lock_timeout_total: 2,
     lock_wait_total: 1,
@@ -51,11 +71,32 @@ test("metrics are fixed-key, monotonic, and free of caller labels", () => {
     refresh_notification_reconnect_total: 1,
     refresh_notification_wake_failure_total: 2,
     refresh_propagation_observation_total: 4,
-    refresh_propagation_timeout_total: 1
+    refresh_propagation_timeout_total: 1,
+    agent_session_issue_success_total: 1,
+    agent_session_issue_replay_total: 2,
+    agent_session_issue_conflict_total: 1,
+    agent_session_issue_failure_total: 3,
+    agent_session_issue_rollback_total: 1,
+    agent_session_consume_success_total: 2,
+    agent_session_consume_replay_total: 1,
+    agent_session_consume_conflict_total: 3,
+    agent_session_consume_stale_total: 1,
+    agent_session_consume_failure_total: 2,
+    agent_session_consume_rollback_total: 1,
+    agent_session_signer_success_total: 2,
+    agent_session_signer_failure_total: 1,
+    agent_session_signer_latency_count: 1,
+    agent_session_signer_latency_total_ms: 17,
+    agent_session_lifecycle_expired_total: 3,
+    agent_session_lifecycle_revoked_total: 1,
+    cloud_audit_append_total: 2,
+    cloud_audit_failure_total: 1
   });
   assert.equal(JSON.stringify(snapshot).includes("tenant"), false);
   assert.throws(() => metrics.increment("tenant_id", 1), { code: "invalid_input" });
   assert.throws(() => metrics.recordAuditGap(-1), { code: "invalid_input" });
+  assert.throws(() => metrics.recordAgentSessionIssueSuccess({ tenant_id: "tenant-a" }), { code: "invalid_input" });
+  assert.throws(() => metrics.recordAgentSessionSignerLatency(1, { request_id: "request-a" }), { code: "invalid_input" });
 });
 
 test("refresh metrics are bounded fixed-key counters and never retain labels", () => {
@@ -72,6 +113,25 @@ test("refresh metrics are bounded fixed-key counters and never retain labels", (
   assert.equal(serialized.includes("tenant-a"), false);
   assert.equal(serialized.includes("label"), false);
   assert.deepEqual(Object.keys(metrics.snapshot().counters), OPERATIONAL_METRIC_KEYS);
+});
+
+test("M2 signer latency is a bounded count and total without caller labels", () => {
+  const metrics = createOperationalMetrics({
+    initial: {
+      agent_session_signer_latency_count: Number.MAX_SAFE_INTEGER - 1,
+      agent_session_signer_latency_total_ms: Number.MAX_SAFE_INTEGER - 2,
+      cloud_audit_append_total: Number.MAX_SAFE_INTEGER - 1
+    }
+  });
+  assert.equal(metrics.recordAgentSessionSignerLatency(Number.MAX_SAFE_INTEGER), Number.MAX_SAFE_INTEGER);
+  assert.equal(metrics.snapshot().counters.agent_session_signer_latency_count, Number.MAX_SAFE_INTEGER);
+  assert.equal(metrics.snapshot().counters.agent_session_signer_latency_total_ms, Number.MAX_SAFE_INTEGER);
+  assert.equal(metrics.recordCloudAuditAppend(10), Number.MAX_SAFE_INTEGER);
+  for (const latency of [undefined, -1, 1.5, Number.NaN, Number.POSITIVE_INFINITY, "5", { milliseconds: 5 }]) {
+    assert.throws(() => metrics.recordAgentSessionSignerLatency(latency), { code: "invalid_input" });
+  }
+  assert.deepEqual(Object.keys(metrics.snapshot().counters), OPERATIONAL_METRIC_KEYS);
+  assert.equal(JSON.stringify(metrics.snapshot()).includes("request_id"), false);
 });
 
 test("readiness requires the exact schema version, verified checksums, a DB probe, and a non-waiting pool", async () => {

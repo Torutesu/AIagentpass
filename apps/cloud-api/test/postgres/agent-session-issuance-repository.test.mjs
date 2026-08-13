@@ -4,6 +4,7 @@ import test from "node:test";
 
 import { canonicalJson } from "../../../../packages/protocol/src/index.mjs";
 import { createAgentSessionGrantIssuanceService } from "../../src/human-auth/agent-sessions/issuance-service.mjs";
+import { createOperationalMetrics } from "../../src/postgres/operational-health.mjs";
 import {
   AgentSessionIssuanceRepositoryError,
   createPostgresAgentSessionIssuanceRepository
@@ -44,7 +45,7 @@ function intent(overrides = {}) {
   };
 }
 
-function harness({ role = "admin", agentStatus = "active", deviceStatus = "active", agentKind = "claude-code", revoked = false, policyScope = intent().scope, controlAvailable = true, processPolicyAllowed = true } = {}) {
+function harness({ role = "admin", agentStatus = "active", deviceStatus = "active", agentKind = "claude-code", revoked = false, policyScope = intent().scope, controlAvailable = true, processPolicyAllowed = true, metrics = undefined, clock = undefined } = {}) {
   let committedIdempotency = new Map();
   const committedGrants = new Map();
   const calls = { signer: 0, audit: 0, processPolicy: 0, queries: [] };
@@ -125,6 +126,8 @@ function harness({ role = "admin", agentStatus = "active", deviceStatus = "activ
     authorityRepository,
     sharedControls: controls,
     auditRepository,
+    metrics,
+    clock,
     async resolveProcessBindingPolicy(input) {
       calls.processPolicy += 1;
       assert.equal(input.process_binding_policy_id, "claude-code-v1");
@@ -158,6 +161,20 @@ test("issues once with current Human, audience, policy, generation, process poli
   assert.equal(fixture.idempotency().get("grant-request-1").status, 201);
 });
 
+test("records label-free issue, signer success, and integer signer latency metrics", async () => {
+  const metrics = createOperationalMetrics();
+  const clockValues = [100, 102.6];
+  const fixture = harness({ metrics, clock: () => clockValues.shift() });
+  await fixture.service.issue(fixture.issueInput());
+  const counters = metrics.snapshot().counters;
+  assert.equal(counters.agent_session_issue_success_total, 1);
+  assert.equal(counters.agent_session_signer_success_total, 1);
+  assert.equal(counters.agent_session_signer_latency_count, 1);
+  assert.equal(counters.agent_session_signer_latency_total_ms, 3);
+  assert.equal(counters.agent_session_issue_failure_total, 0);
+  assert.equal(counters.agent_session_issue_rollback_total, 0);
+});
+
 test("pre-WebAuthn replay returns the exact committed Grant and never signs or audits twice", async () => {
   const fixture = harness();
   const first = await fixture.service.issue(fixture.issueInput());
@@ -169,10 +186,44 @@ test("pre-WebAuthn replay returns the exact committed Grant and never signs or a
   assert.equal(fixture.calls.audit, 1);
 });
 
+test("records exact replay without recording signer metrics", async () => {
+  const metrics = createOperationalMetrics();
+  const fixture = harness({ metrics });
+  await fixture.service.issue(fixture.issueInput());
+  await fixture.service.issue(fixture.issueInput());
+  const counters = metrics.snapshot().counters;
+  assert.equal(counters.agent_session_issue_success_total, 1);
+  assert.equal(counters.agent_session_issue_replay_total, 1);
+  assert.equal(counters.agent_session_signer_success_total, 1);
+  assert.equal(counters.agent_session_signer_failure_total, 0);
+  assert.equal(counters.agent_session_signer_latency_count, 1);
+});
+
 test("same idempotency key with a changed canonical request is a stable conflict", async () => {
   const fixture = harness();
   await fixture.service.issue(fixture.issueInput());
   await assert.rejects(() => fixture.service.replay(fixture.issueInput({ intent: intent({ max_signatures: 3 }) })), (error) => error.code === "agent_session_grant_idempotency_conflict");
+});
+
+test("records idempotency conflict and transaction rollback without labels", async () => {
+  const calls = [];
+  const metrics = Object.fromEntries([
+    "recordAgentSessionIssueSuccess",
+    "recordAgentSessionIssueReplay",
+    "recordAgentSessionIssueConflict",
+    "recordAgentSessionIssueFailure",
+    "recordAgentSessionIssueRollback",
+    "recordAgentSessionSignerSuccess",
+    "recordAgentSessionSignerFailure"
+  ].map((method) => [method, (...args) => calls.push([method, ...args])]));
+  metrics.recordAgentSessionSignerLatency = (...args) => calls.push(["recordAgentSessionSignerLatency", ...args]);
+  const fixture = harness({ metrics });
+  await fixture.service.issue(fixture.issueInput());
+  await assert.rejects(() => fixture.service.replay(fixture.issueInput({ intent: intent({ max_signatures: 3 }) })), (error) => error.code === "agent_session_grant_idempotency_conflict");
+  assert.deepEqual(calls.filter(([method]) => method === "recordAgentSessionIssueConflict"), [["recordAgentSessionIssueConflict"]]);
+  assert.deepEqual(calls.filter(([method]) => method === "recordAgentSessionIssueRollback"), [["recordAgentSessionIssueRollback"]]);
+  assert.equal(calls.some((entry) => entry[0] === "recordAgentSessionIssueConflict" && entry.length !== 1), false);
+  assert.equal(calls.some((entry) => entry[0] === "recordAgentSessionIssueRollback" && entry.length !== 1), false);
 });
 
 test("fails closed for inactive or mismatched audience, revoked authority, policy escalation, stale control, and untrusted process policy", async () => {
@@ -205,6 +256,35 @@ test("signer failure rolls back provisional idempotency so an exact retry can is
   assert.equal(fixture.idempotency().has("grant-request-1"), false);
   const issued = await fixture.service.issue(fixture.issueInput());
   assert.match(issued.grant.statement.grant_id, /^[0-9a-f-]{36}$/u);
+});
+
+test("records signer failure, latency, issue failure, and rollback while hiding the signer error", async () => {
+  const metrics = createOperationalMetrics();
+  const clockValues = [50, 53.1];
+  const fixture = harness({ metrics, clock: () => clockValues.shift() });
+  await assert.rejects(() => fixture.repository.issueAgentSessionGrant({
+    actor: actor(), organization_id: ORGANIZATION_ID, agent_id: AGENT_ID, intent: intent(),
+    idempotency_key: "grant-request-1", request_fingerprint: requestFingerprint(intent()), request_id: REQUEST_ID,
+    issued_at: new Date(NOW).toISOString(), recent_auth: { authorization_id: RECENT_AUTH_ID, authenticated_at: new Date(NOW).toISOString() },
+    async buildGrant() { throw new Error("private signer detail"); }
+  }), (error) => error instanceof AgentSessionIssuanceRepositoryError && error.code === "unavailable");
+  const counters = metrics.snapshot().counters;
+  assert.equal(counters.agent_session_signer_success_total, 0);
+  assert.equal(counters.agent_session_signer_failure_total, 1);
+  assert.equal(counters.agent_session_signer_latency_count, 1);
+  assert.equal(counters.agent_session_signer_latency_total_ms, 3);
+  assert.equal(counters.agent_session_issue_failure_total, 1);
+  assert.equal(counters.agent_session_issue_rollback_total, 1);
+});
+
+test("validates all fixed metrics methods when metrics are supplied and preserves omission", async () => {
+  const fixture = harness();
+  await fixture.service.issue(fixture.issueInput());
+  assert.throws(() => createPostgresAgentSessionIssuanceRepository({
+    client: { query() {} },
+    resolveProcessBindingPolicy: async () => true,
+    metrics: { recordAgentSessionIssueSuccess() {} }
+  }), /metrics must expose/u);
 });
 
 test("rejects a caller-supplied request fingerprint that does not match the canonical intent", async () => {

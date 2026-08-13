@@ -215,10 +215,12 @@ export function createAgentSessionAuthorityRepository({ client, now, clock, uuid
     const consumedSessionId = uuidValue(grant.consumed_session_id, "consumed_session_id");
     const sessionResult = await tx.query(`SELECT ${SESSION_RETURNING}
       FROM agent_sessions
-      WHERE organization_id=$1 AND session_id=$2 AND grant_id=$3
+    WHERE organization_id=$1 AND session_id=$2 AND grant_id=$3
       FOR SHARE`, [values.organizationId, consumedSessionId, grant.grant_id]);
     if (rowCount(sessionResult) !== 1) throw new AgentSessionAuthorityRepositoryError("ERR_DB_RESULT");
+    if (!ACTIVE_SESSION_STATUSES.has(sessionResult.rows[0]?.status)) throw new AgentSessionAuthorityRepositoryError("ERR_GRANT_UNAVAILABLE");
     const session = validateSessionRow(sessionResult.rows[0], values.organizationId);
+    if (values.nowMs >= Date.parse(session.expires_at)) throw new AgentSessionAuthorityRepositoryError("ERR_GRANT_EXPIRED");
     if (session.process_binding_sha256 !== values.processBindingSha256
       || session.ancestry_binding_sha256 !== values.ancestryBindingSha256) {
       throw new AgentSessionAuthorityRepositoryError("ERR_BINDING_CONFLICT");

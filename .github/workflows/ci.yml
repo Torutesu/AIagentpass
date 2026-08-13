@@ -44,6 +44,7 @@ jobs:
           apps/cloud-api/test/postgres/agent-session-issuance-integration.test.mjs
           apps/cloud-api/test/postgres/agent-session-human-http-qualification.integration.test.mjs
           apps/cloud-api/test/postgres/agent-session-http-qualification.integration.test.mjs
+          apps/cloud-api/test/postgres/agent-session-lifecycle-integration.test.mjs
       - name: Run real PostgreSQL refresh race, ACK, and nonce-rotation tests
         env:
           AGENTPASS_TEST_DATABASE_URL: postgresql://postgres:agentpass-integration@127.0.0.1:5432/postgres

@@ -70,9 +70,10 @@ export class ControlPlaneAuthorityRepositoryError extends PostgresRepositoryErro
  * lock.  The method names intentionally mirror the file CloudStore and the
  * capability/audit interfaces consumed by server.mjs.
  */
-export function createControlPlaneAuthorityRepository({ client, cursorCodec, cursorSecret, refreshNonceCodec, now = () => new Date().toISOString() } = {}) {
+export function createControlPlaneAuthorityRepository({ client, cursorCodec, cursorSecret, refreshNonceCodec, now = () => new Date().toISOString(), onRevocation } = {}) {
   assertClient(client);
   if (typeof now !== "function") throw new ControlPlaneAuthorityRepositoryError("ERR_CLOCK", "now must be a function");
+  if (onRevocation !== undefined && typeof onRevocation !== "function") throw new TypeError("onRevocation must be a function");
 
   const capabilityAuthority = createCapabilityAuthorityRepository({ client, now });
   if (refreshNonceCodec !== undefined && (!refreshNonceCodec || typeof refreshNonceCodec.derive !== "function" || typeof refreshNonceCodec.activeKeyId !== "string")) {
@@ -119,7 +120,9 @@ export function createControlPlaneAuthorityRepository({ client, cursorCodec, cur
         }
         replayed = true;
       }
-      return publicRevocation(result.rows[0], replayed);
+      const revocation = publicRevocation(result.rows[0], replayed);
+      await onRevocation?.({ tx, revocation });
+      return revocation;
     }));
   }
 
@@ -377,6 +380,7 @@ export function createControlPlaneAuthorityRepository({ client, cursorCodec, cur
         await assertActiveMember(tx, values.organizationId, values.reduction.createdBy);
         await assertRevocationTarget(tx, values.reduction);
         revocation = await insertRevocationInTransaction(tx, values.reduction);
+        await onRevocation?.({ tx, revocation });
         if (revocation.replayed === true) {
           const current = await tx.query(`SELECT generation
             FROM control_plane_authority_generations

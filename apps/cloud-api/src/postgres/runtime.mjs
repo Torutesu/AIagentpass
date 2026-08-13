@@ -11,6 +11,7 @@ import { createPostgresRefreshHintNotifier } from "./refresh-hint-notifier.mjs";
 import { createPostgresAdminAuditRepository } from "./admin-audit-repository.mjs";
 import { createAgentSessionAuthorityRepository } from "./agent-session-authority-repository.mjs";
 import { createPostgresAgentSessionConsumptionRepository } from "./agent-session-consumption-repository.mjs";
+import { createPostgresAgentSessionLifecycleRepository } from "./agent-session-lifecycle-repository.mjs";
 import { createPostgresAgentSessionIssuanceRepository } from "./agent-session-issuance-repository.mjs";
 import { createAuthorityReductionAuditAppender } from "./authority-reduction-audit.mjs";
 import {
@@ -67,13 +68,16 @@ export async function createPostgresRuntime({ env = process.env, PoolClass = Poo
   const agentSessionConsumptionRepository = createPostgresAgentSessionConsumptionRepository({
     client: pool,
     authorityRepository: agentSessionAuthorityRepository,
-    sharedControls: sharedControlRepository
+    sharedControls: sharedControlRepository,
+    metrics: operationalMetrics
   });
+  const agentSessionLifecycleRepository = createPostgresAgentSessionLifecycleRepository({ client: pool, metrics: operationalMetrics });
   const agentSessionIssuanceRepository = resolveProcessBindingPolicy === undefined ? undefined : createPostgresAgentSessionIssuanceRepository({
     client: pool,
     authorityRepository: agentSessionAuthorityRepository,
     sharedControls: sharedControlRepository,
     auditRepository: adminAuditRepository,
+    metrics: operationalMetrics,
     resolveProcessBindingPolicy
   });
   const authorityReductionAuditAppender = createAuthorityReductionAuditAppender({ adminAuditRepository });
@@ -104,6 +108,21 @@ export async function createPostgresRuntime({ env = process.env, PoolClass = Poo
     auditCursorSecret,
     capabilityNonceSecret,
     refreshNonceCodec,
+    onRevocation: async ({ tx, revocation }) => {
+      const selector = revocation.target_type === "organization"
+        ? { organization_wide: true }
+        : revocation.target_type === "device"
+          ? { device_id: revocation.target_id }
+          : revocation.target_type === "agent"
+            ? { agent_id: revocation.target_id }
+            : null;
+      if (selector) await agentSessionLifecycleRepository.revokeAuthorityInTransaction({
+        tx,
+        organization_id: revocation.organization_id,
+        ...selector,
+        revoked_at: revocation.revoked_at
+      });
+    },
     onAuthorityReduction
   });
   return Object.freeze({
@@ -113,6 +132,7 @@ export async function createPostgresRuntime({ env = process.env, PoolClass = Poo
     capabilityAuthorityRepository,
     agentSessionAuthorityRepository: agentSessionConsumptionRepository,
     agentSessionConsumptionRepository,
+    agentSessionLifecycleRepository,
     ...(agentSessionIssuanceRepository ? { agentSessionIssuanceRepository } : {}),
     sharedControlRepository,
     controlPlaneStore,

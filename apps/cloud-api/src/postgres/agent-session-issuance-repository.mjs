@@ -14,6 +14,16 @@ const ADMIN_ROLES = new Set(["owner", "admin"]);
 const AGENT_KINDS = new Set(["claude-code", "cursor"]);
 const RECENT_AUTH_OPERATION = "agent.session_grant.issue";
 const IDEMPOTENCY_TTL_MS = 24 * 60 * 60 * 1000;
+const ISSUE_METRIC_METHODS = Object.freeze([
+  "recordAgentSessionIssueSuccess",
+  "recordAgentSessionIssueReplay",
+  "recordAgentSessionIssueConflict",
+  "recordAgentSessionIssueFailure",
+  "recordAgentSessionIssueRollback",
+  "recordAgentSessionSignerSuccess",
+  "recordAgentSessionSignerFailure",
+  "recordAgentSessionSignerLatency"
+]);
 
 export const AGENT_SESSION_ISSUANCE_REPOSITORY_ERROR_CODES = Object.freeze({
   INVALID_INPUT: "invalid_input",
@@ -58,10 +68,14 @@ export function createPostgresAgentSessionIssuanceRepository({
   authorityRepository = undefined,
   sharedControls = undefined,
   auditRepository = undefined,
-  resolveProcessBindingPolicy
+  resolveProcessBindingPolicy,
+  metrics = undefined,
+  clock = undefined
 } = {}) {
   assertClient(client);
   if (typeof resolveProcessBindingPolicy !== "function") throw new TypeError("resolveProcessBindingPolicy must be a function");
+  const metricRecorder = validateMetrics(metrics);
+  const readClock = normalizeClock(clock);
   const authority = authorityRepository ?? createAgentSessionAuthorityRepository({ client });
   const controls = sharedControls ?? createSharedControlRepository({ client });
   const audit = auditRepository ?? createPostgresAdminAuditRepository({ client });
@@ -74,8 +88,14 @@ export function createPostgresAgentSessionIssuanceRepository({
   assertMethod(audit, "appendAdminAuditEventInTransaction");
 
   async function replayAgentSessionGrant(input = {}) {
-    const values = normalizeReplayInput(input);
-    return transaction(async (tx) => {
+    let values;
+    try {
+      values = normalizeReplayInput(input);
+    } catch (error) {
+      recordMetric("recordAgentSessionIssueFailure");
+      throw error;
+    }
+    const result = await transaction(async (tx) => {
       await prepareTenantAndOrganization(tx, values.organizationId);
       await authorizeHumanSession(tx, values, { requireRecentAuth: false });
       const acquired = await acquire(tx, values);
@@ -93,11 +113,19 @@ export function createPostgresAgentSessionIssuanceRepository({
       if (acquired.state === "in_progress") throw failure("unavailable");
       return replayResult(tx, values, acquired);
     });
+    if (result?.replayed === true) recordMetric("recordAgentSessionIssueReplay");
+    return result;
   }
 
   async function issueAgentSessionGrant(input = {}) {
-    const values = normalizeIssueInput(input);
-    return transaction(async (tx) => {
+    let values;
+    try {
+      values = normalizeIssueInput(input);
+    } catch (error) {
+      recordMetric("recordAgentSessionIssueFailure");
+      throw error;
+    }
+    const result = await transaction(async (tx) => {
       await prepareTenantAndOrganization(tx, values.organizationId);
       await authorizeHumanSession(tx, values, { requireRecentAuth: true });
       const acquired = await acquire(tx, values);
@@ -116,6 +144,7 @@ export function createPostgresAgentSessionIssuanceRepository({
       const grantId = deterministicAgentSessionIssuanceUuid("grant", stableIdentity);
       const requestId = deterministicAgentSessionIssuanceUuid("request", stableIdentity);
       let built;
+      const signerStartedAt = metricRecorder ? readClockSafely(readClock) : undefined;
       try {
         built = await values.buildGrant({
           grant_id: grantId,
@@ -125,10 +154,14 @@ export function createPostgresAgentSessionIssuanceRepository({
           policy_sequence: authorityState.policySequence,
           authority_generation: authorityState.authorityGeneration
         });
+        recordMetric("recordAgentSessionSignerSuccess");
       } catch (error) {
+        recordMetric("recordAgentSessionSignerFailure");
         // Signer errors are intentionally collapsed. The surrounding
         // transaction rolls the provisional idempotency row back.
         throw failure(error?.code === "agent_session_grant_signer_unavailable" ? "unavailable" : "unavailable");
+      } finally {
+        if (metricRecorder) recordMetric("recordAgentSessionSignerLatency", signerLatencyMs(signerStartedAt, readClockSafely(readClock)));
       }
       const grant = normalizeBuiltGrant(built, values, authorityState, grantId);
       const persisted = await authority.issueAgentSessionGrantInTransaction({
@@ -194,6 +227,8 @@ export function createPostgresAgentSessionIssuanceRepository({
       });
       return Object.freeze({ grant: persisted.grant, request_id: requestId, replayed: false });
     });
+    recordMetric(result?.replayed === true ? "recordAgentSessionIssueReplay" : "recordAgentSessionIssueSuccess");
+    return result;
   }
 
   return Object.freeze({ issueAgentSessionGrant, replayAgentSessionGrant });
@@ -202,10 +237,26 @@ export function createPostgresAgentSessionIssuanceRepository({
     try {
       return await controls.withTransaction(operation);
     } catch (error) {
-      if (error instanceof AgentSessionIssuanceRepositoryError) throw error;
-      if (error?.code === "idempotency_conflict" || error?.code === "ERR_IDEMPOTENCY_CONFLICT") throw failure("idempotency_conflict");
+      recordMetric("recordAgentSessionIssueRollback");
+      if (error instanceof AgentSessionIssuanceRepositoryError) {
+        recordMetric(error.code === "idempotency_conflict" ? "recordAgentSessionIssueConflict" : "recordAgentSessionIssueFailure");
+        throw error;
+      }
+      if (error?.code === "idempotency_conflict" || error?.code === "ERR_IDEMPOTENCY_CONFLICT") {
+        recordMetric("recordAgentSessionIssueConflict");
+        throw failure("idempotency_conflict");
+      }
+      recordMetric("recordAgentSessionIssueFailure");
       throw failure("unavailable");
     }
+  }
+
+  function recordMetric(method, amount = undefined) {
+    if (!metricRecorder) return;
+    try {
+      if (amount === undefined) metricRecorder[method]();
+      else metricRecorder[method](amount);
+    } catch { /* Metrics never alter issuance correctness. */ }
   }
 
   async function acquire(tx, values) {
@@ -441,6 +492,35 @@ function assertClient(value) { if (!value || typeof value.query !== "function") 
 function assertMethod(value, method) { if (!value || typeof value[method] !== "function") throw new TypeError(`${method} is required`); }
 function failure(code) { return new AgentSessionIssuanceRepositoryError(code); }
 function sha256(value) { return crypto.createHash("sha256").update(value).digest("hex"); }
+
+function validateMetrics(value) {
+  if (value === undefined) return undefined;
+  if (!isObject(value) || ISSUE_METRIC_METHODS.some((method) => typeof value[method] !== "function")) {
+    throw new TypeError("metrics must expose the agent session issuance recorder methods");
+  }
+  return value;
+}
+
+function normalizeClock(value) {
+  if (value === undefined) return () => globalThis.performance?.now?.() ?? Date.now();
+  if (typeof value === "function") return value;
+  if (isObject(value) && typeof value.now === "function") return () => value.now();
+  throw new TypeError("clock must be a function");
+}
+
+function readClockSafely(clock) {
+  try {
+    const value = clock();
+    return typeof value === "number" && Number.isFinite(value) ? value : undefined;
+  } catch { return undefined; }
+}
+
+function signerLatencyMs(startedAt, finishedAt) {
+  if (startedAt === undefined || finishedAt === undefined) return 0;
+  const elapsed = finishedAt - startedAt;
+  if (!Number.isFinite(elapsed) || elapsed <= 0) return 0;
+  return Math.min(Number.MAX_SAFE_INTEGER, Math.round(elapsed));
+}
 
 export function deterministicAgentSessionIssuanceUuid(kind, identity) {
   if (typeof kind !== "string" || kind.length < 1 || kind.length > 64 || !isObject(identity)) throw failure("invalid_input");

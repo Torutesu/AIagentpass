@@ -62,6 +62,11 @@ export {
 } from "./agent-session-authority-repository.mjs";
 export { createPostgresAgentSessionConsumptionRepository } from "./agent-session-consumption-repository.mjs";
 export {
+  AGENT_SESSION_LIFECYCLE_ERROR_CODES,
+  AgentSessionLifecycleRepositoryError,
+  createPostgresAgentSessionLifecycleRepository
+} from "./agent-session-lifecycle-repository.mjs";
+export {
   CloudAgentAuditRepositoryError,
   createPostgresCloudAgentAuditRepository
 } from "./cloud-agent-audit-repository.mjs";

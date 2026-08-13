@@ -73,9 +73,10 @@ test("M2-A2Q: real PostgreSQL Device HTTP consume survives restart, converges co
   }));
   const rolledBack = await fixture.pool.query(`SELECT g.status,g.consumed_session_id,
       (SELECT count(*)::int FROM agent_sessions s WHERE s.organization_id=g.organization_id AND s.grant_id=g.grant_id) AS sessions,
-      (SELECT count(*)::int FROM cloud_agent_audit_events e WHERE e.organization_id=g.organization_id AND e.grant_id=g.grant_id) AS events
+      (SELECT count(*)::int FROM cloud_agent_audit_events e WHERE e.organization_id=g.organization_id AND e.grant_id=g.grant_id) AS events,
+      (SELECT count(*)::int FROM outbox_events o WHERE o.organization_id=g.organization_id AND o.action='agent_session_grant.consumed' AND o.payload->>'grant_id'=g.grant_id::text) AS publications
     FROM agent_session_grants g WHERE g.organization_id=$1 AND g.grant_id=$2`, [fixture.ids.organization, rollbackGrant.statement.grant_id]);
-  assert.deepEqual(rolledBack.rows, [{ status: "issued", consumed_session_id: null, sessions: 0, events: 0 }]);
+  assert.deepEqual(rolledBack.rows, [{ status: "issued", consumed_session_id: null, sessions: 0, events: 0, publications: 0 }]);
   const firstGrant = await issueGrant(fixture);
   const firstServer = await fixture.startServer();
 
@@ -139,8 +140,9 @@ test("M2-A2Q: real PostgreSQL Device HTTP consume survives restart, converges co
   const audit = await fixture.pool.query(`SELECT
     (SELECT count(*)::int FROM cloud_agent_audit_events WHERE organization_id=$1) AS events,
     (SELECT sequence::int FROM cloud_agent_audit_heads WHERE organization_id=$1) AS head_sequence,
-    (SELECT count(*)::int FROM device_audit_events WHERE organization_id=$1) AS device_events`, [fixture.ids.organization]);
-  assert.deepEqual(audit.rows, [{ events: 3, head_sequence: 3, device_events: 0 }]);
+    (SELECT count(*)::int FROM device_audit_events WHERE organization_id=$1) AS device_events,
+    (SELECT count(*)::int FROM outbox_events WHERE organization_id=$1 AND action='agent_session_grant.consumed') AS publications`, [fixture.ids.organization]);
+  assert.deepEqual(audit.rows, [{ events: 3, head_sequence: 3, device_events: 0, publications: 3 }]);
 
   // The exact frozen path is intercepted before generic route dispatch. A
   // query-string variant must not fall through to a weaker authenticated

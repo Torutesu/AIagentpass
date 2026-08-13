@@ -90,7 +90,7 @@ export function createPostgresControlPlaneStore(options = {}) {
 
   const organizationRepository = options.organizationRepository ?? options.organization ?? (client ? createPostgresOrganizationRepository({ client, now }) : undefined);
   const resourceRepository = options.resourceRepository ?? options.resource ?? (client ? createPostgresControlPlaneResourceRepository({ client, now, onAuthorityReduction: options.onAuthorityReduction }) : undefined);
-  const authorityRepository = options.authorityRepository ?? options.authority ?? (client && (cursorCodec || cursorSecret) ? createControlPlaneAuthorityRepository({ client, cursorCodec, cursorSecret, refreshNonceCodec: options.refreshNonceCodec, now }) : undefined);
+  const authorityRepository = options.authorityRepository ?? options.authority ?? (client && (cursorCodec || cursorSecret) ? createControlPlaneAuthorityRepository({ client, cursorCodec, cursorSecret, refreshNonceCodec: options.refreshNonceCodec, now, onRevocation: options.onRevocation }) : undefined);
   const auditRepository = options.auditRepository ?? options.audit ?? (client && (cursorCodec || cursorSecret) ? createPostgresAuditRepository({ client, cursorCodec, cursorSecret, now: () => clockMillis(now) }) : undefined);
   const adminAuditRepository = options.adminAuditRepository ?? options.adminAudit ?? (client ? createPostgresAdminAuditRepository({ client, now }) : undefined);
   const sharedControlRepository = options.sharedControlRepository ?? options.sharedControl ?? (client ? createSharedControlRepository({ client }) : undefined);

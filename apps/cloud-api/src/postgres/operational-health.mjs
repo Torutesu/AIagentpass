@@ -14,7 +14,26 @@ export const OPERATIONAL_METRIC_KEYS = Object.freeze([
   "refresh_notification_reconnect_total",
   "refresh_notification_wake_failure_total",
   "refresh_propagation_observation_total",
-  "refresh_propagation_timeout_total"
+  "refresh_propagation_timeout_total",
+  "agent_session_issue_success_total",
+  "agent_session_issue_replay_total",
+  "agent_session_issue_conflict_total",
+  "agent_session_issue_failure_total",
+  "agent_session_issue_rollback_total",
+  "agent_session_consume_success_total",
+  "agent_session_consume_replay_total",
+  "agent_session_consume_conflict_total",
+  "agent_session_consume_stale_total",
+  "agent_session_consume_failure_total",
+  "agent_session_consume_rollback_total",
+  "agent_session_signer_success_total",
+  "agent_session_signer_failure_total",
+  "agent_session_signer_latency_count",
+  "agent_session_signer_latency_total_ms",
+  "agent_session_lifecycle_expired_total",
+  "agent_session_lifecycle_revoked_total",
+  "cloud_audit_append_total",
+  "cloud_audit_failure_total"
 ]);
 
 const METRIC_KEY_SET = new Set(OPERATIONAL_METRIC_KEYS);
@@ -55,8 +74,15 @@ export function createOperationalMetrics({ initial = {} } = {}) {
     if (!METRIC_KEY_SET.has(key)) throw invalidOperationalInput();
     const value = boundedCounter(amount);
     if (value < 1) throw invalidOperationalInput();
-    counters[key] = Math.min(MAX_COUNTER, counters[key] + value);
+    counters[key] = boundedAdd(counters[key], value);
     return counters[key];
+  }
+
+  function recordSignerLatency(milliseconds) {
+    if (arguments.length !== 1 || !Number.isSafeInteger(milliseconds) || milliseconds < 0) throw invalidOperationalInput();
+    counters.agent_session_signer_latency_count = boundedAdd(counters.agent_session_signer_latency_count, 1);
+    counters.agent_session_signer_latency_total_ms = boundedAdd(counters.agent_session_signer_latency_total_ms, milliseconds);
+    return counters.agent_session_signer_latency_total_ms;
   }
 
   function snapshot() {
@@ -84,6 +110,24 @@ export function createOperationalMetrics({ initial = {} } = {}) {
     recordRefreshNotificationWakeFailure: (amount = 1) => increment("refresh_notification_wake_failure_total", amount),
     recordRefreshPropagationObservation: (amount = 1) => increment("refresh_propagation_observation_total", amount),
     recordRefreshPropagationTimeout: (amount = 1) => increment("refresh_propagation_timeout_total", amount),
+    recordAgentSessionIssueSuccess: (amount = 1) => increment("agent_session_issue_success_total", amount),
+    recordAgentSessionIssueReplay: (amount = 1) => increment("agent_session_issue_replay_total", amount),
+    recordAgentSessionIssueConflict: (amount = 1) => increment("agent_session_issue_conflict_total", amount),
+    recordAgentSessionIssueFailure: (amount = 1) => increment("agent_session_issue_failure_total", amount),
+    recordAgentSessionIssueRollback: (amount = 1) => increment("agent_session_issue_rollback_total", amount),
+    recordAgentSessionConsumeSuccess: (amount = 1) => increment("agent_session_consume_success_total", amount),
+    recordAgentSessionConsumeReplay: (amount = 1) => increment("agent_session_consume_replay_total", amount),
+    recordAgentSessionConsumeConflict: (amount = 1) => increment("agent_session_consume_conflict_total", amount),
+    recordAgentSessionConsumeStale: (amount = 1) => increment("agent_session_consume_stale_total", amount),
+    recordAgentSessionConsumeFailure: (amount = 1) => increment("agent_session_consume_failure_total", amount),
+    recordAgentSessionConsumeRollback: (amount = 1) => increment("agent_session_consume_rollback_total", amount),
+    recordAgentSessionSignerSuccess: (amount = 1) => increment("agent_session_signer_success_total", amount),
+    recordAgentSessionSignerFailure: (amount = 1) => increment("agent_session_signer_failure_total", amount),
+    recordAgentSessionSignerLatency: recordSignerLatency,
+    recordAgentSessionLifecycleExpired: (amount = 1) => increment("agent_session_lifecycle_expired_total", amount),
+    recordAgentSessionLifecycleRevoked: (amount = 1) => increment("agent_session_lifecycle_revoked_total", amount),
+    recordCloudAuditAppend: (amount = 1) => increment("cloud_audit_append_total", amount),
+    recordCloudAuditFailure: (amount = 1) => increment("cloud_audit_failure_total", amount),
     snapshot
   });
 }
@@ -460,6 +504,10 @@ function boundedTimeout(value, max) {
 function boundedCounter(value) {
   if (!Number.isSafeInteger(value) || value < 0 || value > MAX_COUNTER) throw invalidOperationalInput();
   return value;
+}
+
+function boundedAdd(current, amount) {
+  return current >= MAX_COUNTER - amount ? MAX_COUNTER : current + amount;
 }
 
 function positiveInteger(value) {

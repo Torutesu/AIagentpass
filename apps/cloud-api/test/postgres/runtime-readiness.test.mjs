@@ -64,6 +64,9 @@ test("PostgreSQL runtime exposes exact-schema readiness, tracked work, and bound
   assert.equal(migrations.length, 22);
   assert.equal((await runtime.readiness()).code, "ready");
   assert.equal(typeof runtime.agentSessionIssuanceRepository?.issueAgentSessionGrant, "function");
+  assert.equal(typeof runtime.agentSessionConsumptionRepository?.consumeAgentSessionGrant, "function");
+  assert.equal(typeof runtime.agentSessionLifecycleRepository?.expireDue, "function");
+  assert.equal(typeof runtime.agentSessionLifecycleRepository?.revokeAuthority, "function");
 
   let finish;
   const inFlight = runtime.trackInFlight(() => new Promise((resolve) => { finish = resolve; }));
