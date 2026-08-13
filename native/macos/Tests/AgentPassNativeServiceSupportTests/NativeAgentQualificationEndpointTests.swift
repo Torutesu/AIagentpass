@@ -30,6 +30,7 @@ private func endpointValues(
     codeIdentityDigest: endpointHex(endpointCodeIdentity),
     runBindingDigest: endpointHex(endpointRunDigest),
     controllerServiceAccessGroup: endpointServiceAccessGroup,
+    controllerCodeDirectoryHash: String(repeating: "e", count: 40),
     expiresAtEpochSeconds: expiresAtEpochSeconds,
     scenario: scenario,
     phase: scenario.phase,

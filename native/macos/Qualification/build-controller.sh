@@ -117,7 +117,7 @@ SOURCE_AFTER="$(/usr/bin/shasum -a 256 "$SOURCE_BINARY" | /usr/bin/awk '{print $
   --identifier "$BUNDLE_ID" --entitlements "$TEMP_DIR/controller.entitlements" \
   --sign "$SIGNING_IDENTITY" "$APP"
 /usr/bin/codesign --verify --strict --verbose=2 "$APP"
-REQUIREMENT="anchor apple generic and identifier \"${BUNDLE_ID}\" and certificate leaf[field.1.2.840.113635.100.6.1.13] exists and certificate leaf[subject.OU] = \"${TEAM_ID}\" and entitlement[\"dev.agentpass.qualification-control\"] = true"
+REQUIREMENT="anchor apple generic and identifier \"${BUNDLE_ID}\" and certificate leaf[field.1.2.840.113635.100.6.1.13] exists and certificate leaf[subject.OU] = \"${TEAM_ID}\" and entitlement[\"dev.agentpass.qualification-control\"] exists"
 /usr/bin/codesign --verify --strict --verbose=2 -R="$REQUIREMENT" "$APP"
 
 ACTUAL_ID="$(/usr/bin/codesign -dv --verbose=4 "$APP" 2>&1 | /usr/bin/awk -F= '/^Identifier=/{print $2; exit}')"

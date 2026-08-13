@@ -329,6 +329,7 @@ private struct ServiceConfiguration: Decodable {
     let qualificationCandidateSHA256: String?
     let qualificationSourceCommitSHA256: String?
     let qualificationCodeIdentitiesSHA256: String?
+    let qualificationControllerCDHash: String?
     let qualificationRunIDSHA256: String?
     let qualificationExpiresAtEpochSeconds: UInt64?
     let qualificationScenario: String?
@@ -402,6 +403,7 @@ private struct ServiceConfiguration: Decodable {
         case qualificationCandidateSHA256 = "qualification_candidate_sha256"
         case qualificationSourceCommitSHA256 = "qualification_source_commit_sha256"
         case qualificationCodeIdentitiesSHA256 = "qualification_code_identities_sha256"
+        case qualificationControllerCDHash = "qualification_controller_cdhash"
         case qualificationRunIDSHA256 = "qualification_run_id_sha256"
         case qualificationExpiresAtEpochSeconds = "qualification_expires_at_epoch_seconds"
         case qualificationScenario = "qualification_scenario"
@@ -699,6 +701,7 @@ private struct ServiceConfiguration: Decodable {
             qualificationCandidateSHA256,
             qualificationSourceCommitSHA256,
             qualificationCodeIdentitiesSHA256,
+            qualificationControllerCDHash,
             qualificationRunIDSHA256,
             qualificationExpiresAtEpochSeconds,
             qualificationScenario,
@@ -731,6 +734,7 @@ private struct ServiceConfiguration: Decodable {
             codeIdentityDigest: qualificationCodeIdentitiesSHA256,
             runBindingDigest: qualificationRunIDSHA256,
             controllerServiceAccessGroup: configured ? keychainAccessGroup : nil,
+            controllerCodeDirectoryHash: qualificationControllerCDHash,
             expiresAtEpochSeconds: qualificationExpiresAtEpochSeconds,
             scenario: scenario,
             phase: phase,

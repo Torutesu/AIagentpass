@@ -14,6 +14,7 @@ public enum NativeAgentQualificationConfigurationError: Error, Equatable, Sendab
   case invalidDigest(field: String)
   case zeroDigest(field: String)
   case invalidControllerServiceAccessGroup
+  case invalidControllerCodeDirectoryHash
   case invalidWallTime
   case expired
   case expiryTooFarInFuture
@@ -111,6 +112,7 @@ public struct NativeAgentQualificationConfiguration: Equatable, Sendable {
     codeIdentityDigest: String? = nil,
     runBindingDigest: String? = nil,
     controllerServiceAccessGroup: String? = nil,
+    controllerCodeDirectoryHash: String? = nil,
     expiresAtEpochSeconds: UInt64? = nil,
     scenario: NativeAgentQualificationFaultScenario? = nil,
     phase: NativeAgentQualificationFaultPhase? = nil,
@@ -124,6 +126,7 @@ public struct NativeAgentQualificationConfiguration: Equatable, Sendable {
       codeIdentityDigest != nil,
       runBindingDigest != nil,
       controllerServiceAccessGroup != nil,
+      controllerCodeDirectoryHash != nil,
       expiresAtEpochSeconds != nil,
       scenario != nil,
       phase != nil,
@@ -149,6 +152,7 @@ public struct NativeAgentQualificationConfiguration: Equatable, Sendable {
       let codeIdentityDigest,
       let runBindingDigest,
       let controllerServiceAccessGroup,
+      let controllerCodeDirectoryHash,
       let expiresAtEpochSeconds,
       let scenario,
       let phase
@@ -186,9 +190,15 @@ public struct NativeAgentQualificationConfiguration: Equatable, Sendable {
     let controllerRequirement: String
     do {
       controllerRequirement = try NativeAgentQualificationCodeRequirement.requirement(
-        serviceAccessGroup: controllerServiceAccessGroup)
+        serviceAccessGroup: controllerServiceAccessGroup,
+        controllerCodeDirectoryHash: controllerCodeDirectoryHash)
     } catch {
-      throw NativeAgentQualificationConfigurationError.invalidControllerServiceAccessGroup
+      if (try? NativeClientCodeRequirement.teamID(
+        serviceAccessGroup: controllerServiceAccessGroup)) == nil
+      {
+        throw NativeAgentQualificationConfigurationError.invalidControllerServiceAccessGroup
+      }
+      throw NativeAgentQualificationConfigurationError.invalidControllerCodeDirectoryHash
     }
 
     self.state = .configured(

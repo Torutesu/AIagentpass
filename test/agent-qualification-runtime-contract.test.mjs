@@ -189,6 +189,7 @@ test("root-owned service configuration is the only future qualification enableme
     ["qualificationCandidateSHA256", "qualification_candidate_sha256"],
     ["qualificationSourceCommitSHA256", "qualification_source_commit_sha256"],
     ["qualificationCodeIdentitiesSHA256", "qualification_code_identities_sha256"],
+    ["qualificationControllerCDHash", "qualification_controller_cdhash"],
     ["qualificationRunIDSHA256", "qualification_run_id_sha256"],
     ["qualificationExpiresAtEpochSeconds", "qualification_expires_at_epoch_seconds"],
     ["qualificationScenario", "qualification_scenario"],
@@ -200,6 +201,8 @@ test("root-owned service configuration is the only future qualification enableme
   assert.match(configuration, /supplied\.allSatisfy\(\{ \$0 \}\)/u);
   assert.match(configuration, /modeMarker\s*=\s*NativeAgentQualificationMode\.qualification\.rawValue/u);
   assert.match(configuration, /NativeAgentQualificationCodeRequirement\.requirement/u);
+  assert.match(configuration, /controllerCodeDirectoryHash:\s*controllerCodeDirectoryHash/u);
+  assert.match(configuration, /invalidControllerCodeDirectoryHash/u);
   assert.doesNotMatch(configuration, /ProcessInfo\.processInfo\.environment|CommandLine\.arguments/iu);
 
   assert.match(service, /let data = try loadProtectedFile\(path: path, label: "Native service configuration"\)/u);
@@ -245,7 +248,8 @@ test("qualification controller uses a distinct bundle, entitlement, and Develope
   assert.match(source, /identifier.*controllerBundleID/u);
   assert.match(source, /certificate leaf\[field\.1\.2\.840\.113635\.100\.6\.1\.13\] exists/u);
   assert.match(source, /certificate leaf\[subject\.OU\].*teamID/u);
-  assert.match(source, /entitlement\[.*controllerEntitlement.*\] = true/u);
+  assert.match(source, /entitlement\[.*controllerEntitlement.*\] exists/u);
+  assert.match(source, /cdhash H\\"\\\(controllerCodeDirectoryHash\)\\"/u);
   assert.match(source, /NativeClientCodeRequirement\.teamID/u);
   assert.doesNotMatch(source, /\*|path\s*=/u);
 });

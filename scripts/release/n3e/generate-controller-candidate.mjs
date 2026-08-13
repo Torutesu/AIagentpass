@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import { dirname, isAbsolute, join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
-export const SCHEMA_VERSION = 1;
+export const SCHEMA_VERSION = 2;
 export const MANIFEST_KIND = 'agentpass-n3e-controller-candidate';
 export const QUALIFICATION_MODE = 'n3e-qualification';
 export const QUALIFICATION_MACH_SERVICE = 'dev.agentpass.n3e-qualification';
@@ -19,6 +19,7 @@ export const OUTPUT_FILES = Object.freeze([
 const NOFOLLOW = fs.constants.O_NOFOLLOW;
 const O_DIRECTORY = fs.constants.O_DIRECTORY ?? 0;
 const DIGEST = /^[0-9a-f]{64}$/u;
+const CDHASH = /^[0-9a-f]{40}$/u;
 const MAX_LIFETIME_SECONDS = 15 * 60;
 const QUALIFICATION_FIELDS = Object.freeze([
   'qualification_mode',
@@ -26,6 +27,7 @@ const QUALIFICATION_FIELDS = Object.freeze([
   'qualification_candidate_sha256',
   'qualification_source_commit_sha256',
   'qualification_code_identities_sha256',
+  'qualification_controller_cdhash',
   'qualification_run_id_sha256',
   'qualification_expires_at_epoch_seconds',
   'qualification_scenario',
@@ -109,6 +111,11 @@ const digest = (value, field) => {
   return value;
 };
 
+const cdhash = (value) => {
+  if (typeof value !== 'string' || !CDHASH.test(value) || /^0+$/u.test(value)) fail('controller_cdhash is invalid');
+  return value;
+};
+
 const integer = (value, field) => {
   if (!Number.isSafeInteger(value) || value < 0) fail(`${field} is invalid`);
   return value;
@@ -126,6 +133,7 @@ const readQualification = (serviceBytes) => {
   const candidate = digest(values.qualification_candidate_sha256, 'candidate_sha256');
   const source = digest(values.qualification_source_commit_sha256, 'source_commit_sha256');
   const identities = digest(values.qualification_code_identities_sha256, 'code_identities_sha256');
+  const controller = cdhash(values.qualification_controller_cdhash);
   const run = digest(values.qualification_run_id_sha256, 'run_id_sha256');
   const expiry = integer(values.qualification_expires_at_epoch_seconds, 'expires_at_epoch_seconds');
   const now = Date.now() / 1000;
@@ -133,7 +141,7 @@ const readQualification = (serviceBytes) => {
   const scenario = values.qualification_scenario;
   const phase = values.qualification_phase;
   if (typeof scenario !== 'string' || SCENARIO_PHASE.get(scenario) !== phase) fail('service config scenario/phase pair is invalid');
-  return Object.freeze({ candidate, source, identities, run, expiry, scenario, phase });
+  return Object.freeze({ candidate, source, identities, controller, run, expiry, scenario, phase });
 };
 
 const sortedValue = (value) => {
@@ -172,6 +180,7 @@ export const makeControllerCandidate = (qualification) => ({
   candidate_sha256: qualification.candidate,
   source_commit_sha256: qualification.source,
   code_identities_sha256: qualification.identities,
+  controller_cdhash: qualification.controller,
   run_id_sha256: qualification.run,
   expires_at_epoch_seconds: qualification.expiry,
   scenario: qualification.scenario,

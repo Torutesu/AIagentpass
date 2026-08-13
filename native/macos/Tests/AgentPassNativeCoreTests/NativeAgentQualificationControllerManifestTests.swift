@@ -90,7 +90,7 @@ struct NativeAgentQualificationControllerManifestTests {
     }
 
     var wrongSchema = fixture.manifestObject
-    wrongSchema["schema_version"] = 2
+    wrongSchema["schema_version"] = 1
     let wrongSchemaData = try NativeStrictJSON.data(wrongSchema)
     #expect(throws: NativeAgentQualificationControllerManifestError.invalidSchema) {
       _ = try verify(fixture, manifestData: wrongSchemaData)
@@ -138,6 +138,7 @@ struct NativeAgentQualificationControllerManifestTests {
       ("candidate_sha256", String(repeating: "A", count: 64)),
       ("source_commit_sha256", String(repeating: "b", count: 63)),
       ("code_identities_sha256", String(repeating: "g", count: 64)),
+      ("controller_cdhash", String(repeating: "A", count: 40)),
       ("run_id_sha256", String(repeating: "0", count: 64)),
     ]
 
@@ -178,6 +179,7 @@ struct NativeAgentQualificationControllerManifestTests {
       ("qualification_candidate_sha256", hex(Data(repeating: 0x91, count: 32))),
       ("qualification_source_commit_sha256", hex(Data(repeating: 0x92, count: 32))),
       ("qualification_code_identities_sha256", hex(Data(repeating: 0x93, count: 32))),
+      ("qualification_controller_cdhash", String(repeating: "9", count: 40)),
       ("qualification_run_id_sha256", hex(Data(repeating: 0x94, count: 32))),
       ("qualification_scenario", NativeAgentQualificationFaultScenario.preCloudKill.rawValue),
       ("qualification_phase", NativeAgentQualificationFaultPhase.preCloud.rawValue),
@@ -247,6 +249,7 @@ struct NativeAgentQualificationControllerManifestTests {
         "candidate_sha256": hex(candidateDigest),
         "source_commit_sha256": hex(sourceCommitDigest),
         "code_identities_sha256": hex(codeIdentityDigest),
+        "controller_cdhash": String(repeating: "a", count: 40),
         "run_id_sha256": hex(runIDDigest),
         "expires_at_epoch_seconds": NSNumber(value: expiry),
         "scenario": scenario.rawValue,
@@ -268,6 +271,7 @@ struct NativeAgentQualificationControllerManifestTests {
         "qualification_candidate_sha256": hex(candidateDigest),
         "qualification_source_commit_sha256": hex(sourceCommitDigest),
         "qualification_code_identities_sha256": hex(codeIdentityDigest),
+        "qualification_controller_cdhash": String(repeating: "a", count: 40),
         "qualification_run_id_sha256": hex(runIDDigest),
         "qualification_expires_at_epoch_seconds": NSNumber(value: expiry),
         "qualification_scenario": scenario.rawValue,

@@ -38,7 +38,7 @@ public enum NativeAgentQualificationControllerManifestError: Error, Equatable, S
 /// manifest. Only the run digest is present; the raw run ID is never persisted,
 /// loaded by this process, emitted, or returned by the service.
 public struct NativeAgentQualificationControllerContext: Sendable {
-  public static let manifestSchemaVersion = 1
+  public static let manifestSchemaVersion = 2
   public static let manifestKind = "agentpass-n3e-controller-candidate"
   public static let maximumManifestBytes = 16 * 1024
   public static let maximumServiceConfigurationBytes = 1 * 1024 * 1024
@@ -97,7 +97,7 @@ public struct NativeAgentQualificationControllerContext: Sendable {
 
     let fields: Set<String> = [
       "schema_version", "kind", "candidate_sha256", "source_commit_sha256",
-      "code_identities_sha256", "run_id_sha256", "expires_at_epoch_seconds",
+      "code_identities_sha256", "controller_cdhash", "run_id_sha256", "expires_at_epoch_seconds",
       "scenario", "phase",
     ]
     guard Set(manifest.keys) == fields else {
@@ -122,6 +122,8 @@ public struct NativeAgentQualificationControllerContext: Sendable {
     let candidate = try digest(manifest["candidate_sha256"], field: "candidate_sha256")
     let source = try digest(manifest["source_commit_sha256"], field: "source_commit_sha256")
     let identities = try digest(manifest["code_identities_sha256"], field: "code_identities_sha256")
+    let controllerCDHash = try codeDirectoryHash(
+      manifest["controller_cdhash"], field: "controller_cdhash")
     let runDigest = try digest(manifest["run_id_sha256"], field: "run_id_sha256")
     guard let expiry = integer(manifest["expires_at_epoch_seconds"]),
       let scenarioText = manifest["scenario"] as? String,
@@ -144,6 +146,7 @@ public struct NativeAgentQualificationControllerContext: Sendable {
     try match(service, key: "qualification_candidate_sha256", string: hex(candidate))
     try match(service, key: "qualification_source_commit_sha256", string: hex(source))
     try match(service, key: "qualification_code_identities_sha256", string: hex(identities))
+    try match(service, key: "qualification_controller_cdhash", string: controllerCDHash)
     try match(service, key: "qualification_run_id_sha256", string: hex(runDigest))
     try match(service, key: "qualification_scenario", string: scenario.rawValue)
     try match(service, key: "qualification_phase", string: phase.rawValue)
@@ -228,6 +231,19 @@ public struct NativeAgentQualificationControllerContext: Sendable {
       index = next
     }
     return result
+  }
+
+  private static func codeDirectoryHash(_ value: Any?, field: String) throws -> String {
+    guard let text = value as? String,
+      text.utf8.count == NativeAgentQualificationCodeRequirement.codeDirectoryHashHexLength,
+      text.utf8.allSatisfy({ byte in
+        (byte >= 48 && byte <= 57) || (byte >= 97 && byte <= 102)
+      }),
+      text.utf8.contains(where: { $0 != 48 })
+    else {
+      throw NativeAgentQualificationControllerManifestError.invalidValue(field: field)
+    }
+    return text
   }
 
   private static func integer(_ value: Any?) -> UInt64? {

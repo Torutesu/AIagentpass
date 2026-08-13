@@ -18,6 +18,7 @@ import {
 
 const SCRIPT = path.join(path.dirname(new URL(import.meta.url).pathname), 'generate-controller-candidate.mjs');
 const digest = (letter) => letter.repeat(64);
+const cdhash = (letter) => letter.repeat(40);
 
 const fixture = () => {
   const root = fs.mkdtempSync(path.join(fs.realpathSync.native(os.tmpdir()), 'agentpass-n3e-controller-'));
@@ -33,6 +34,7 @@ const fixture = () => {
     qualification_candidate_sha256: digest('a'),
     qualification_source_commit_sha256: digest('b'),
     qualification_code_identities_sha256: digest('c'),
+    qualification_controller_cdhash: cdhash('e'),
     qualification_run_id_sha256: digest('d'),
     qualification_expires_at_epoch_seconds: Math.ceil(Date.now() / 1000) + 300,
     qualification_scenario: 'pre-cloud-kill',
@@ -72,11 +74,12 @@ test('valid config emits compact sorted signed context and protected files', () 
   assert.deepEqual(Object.keys(manifest), [...Object.keys(manifest).sort()]);
   assert.equal(manifestBytes.toString(), JSON.stringify(manifest));
   assert.deepEqual(manifest, {
-    schema_version: 1,
+    schema_version: 2,
     kind: MANIFEST_KIND,
     candidate_sha256: digest('a'),
     source_commit_sha256: digest('b'),
     code_identities_sha256: digest('c'),
+    controller_cdhash: cdhash('e'),
     run_id_sha256: digest('d'),
     expires_at_epoch_seconds: value.service.qualification_expires_at_epoch_seconds,
     scenario: 'pre-cloud-kill',
@@ -106,6 +109,13 @@ test('identity substitutions come only from service config and unknown identity 
     '--output', path.join(value.root, 'other'),
     '--run-id', 'must-not-be-an-option'
   ]), /Usage/u);
+  assert.throws(() => parseArguments([
+    '--service-config', value.serviceConfigPath,
+    '--private-key', value.privateKeyPath,
+    '--public-key', value.publicKeyPath,
+    '--output', path.join(value.root, 'third'),
+    '--controller-cdhash', cdhash('e')
+  ]), /Usage/u);
 });
 
 test('service config rejects mode, service, closed-pair, digest, and expiry substitutions', () => {
@@ -115,6 +125,9 @@ test('service config rejects mode, service, closed-pair, digest, and expiry subs
     { qualification_scenario: 'pre-cloud-kill', qualification_phase: 'transport-reply' },
     { qualification_candidate_sha256: digest('A') },
     { qualification_candidate_sha256: '0'.repeat(64) },
+    { qualification_controller_cdhash: cdhash('A') },
+    { qualification_controller_cdhash: '0'.repeat(40) },
+    { qualification_controller_cdhash: undefined },
     { qualification_expires_at_epoch_seconds: Math.ceil(Date.now() / 1000) + 901 }
   ]) {
     const value = fixture();
@@ -207,12 +220,12 @@ test('CLI is strict and stdout is a fixed bounded summary', () => {
 
 test('manifest helper is canonical and has the native context keys', () => {
   const value = makeControllerCandidate({
-    candidate: digest('a'), source: digest('b'), identities: digest('c'), run: digest('d'),
+    candidate: digest('a'), source: digest('b'), identities: digest('c'), controller: cdhash('e'), run: digest('d'),
     expiry: 1_900_000_000, scenario: 'transport-reply-loss', phase: 'transport-reply'
   });
-  assert.equal(canonicalJSON(value).toString(), '{"candidate_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","code_identities_sha256":"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc","expires_at_epoch_seconds":1900000000,"kind":"agentpass-n3e-controller-candidate","phase":"transport-reply","run_id_sha256":"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd","scenario":"transport-reply-loss","schema_version":1,"source_commit_sha256":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}');
+  assert.equal(canonicalJSON(value).toString(), '{"candidate_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","code_identities_sha256":"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc","controller_cdhash":"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee","expires_at_epoch_seconds":1900000000,"kind":"agentpass-n3e-controller-candidate","phase":"transport-reply","run_id_sha256":"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd","scenario":"transport-reply-loss","schema_version":2,"source_commit_sha256":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}');
   assert.deepEqual(Object.keys(value).sort(), [
-    'candidate_sha256', 'code_identities_sha256', 'expires_at_epoch_seconds', 'kind',
+    'candidate_sha256', 'code_identities_sha256', 'controller_cdhash', 'expires_at_epoch_seconds', 'kind',
     'phase', 'run_id_sha256', 'scenario', 'schema_version', 'source_commit_sha256'
   ]);
 });

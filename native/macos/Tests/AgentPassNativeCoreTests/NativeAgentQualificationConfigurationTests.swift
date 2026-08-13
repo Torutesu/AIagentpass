@@ -7,6 +7,7 @@ struct NativeAgentQualificationConfigurationTests {
   private let now = Date(timeIntervalSince1970: 2_000_000_000)
   private let digest = String(repeating: "a", count: 64)
   private let serviceAccessGroup = "ABCDE12345.dev.agentpass.service-keys"
+  private let controllerCDHash = String(repeating: "b", count: 40)
 
   private func make(
     mode: String? = NativeAgentQualificationConfiguration.modeMarker,
@@ -16,6 +17,7 @@ struct NativeAgentQualificationConfigurationTests {
     codeIdentityDigest: String? = nil,
     runBindingDigest: String? = nil,
     controllerServiceAccessGroup: String? = nil,
+    controllerCodeDirectoryHash: String? = nil,
     expiresAtEpochSeconds: UInt64? = nil,
     scenario: NativeAgentQualificationFaultScenario? = nil,
     phase: NativeAgentQualificationFaultPhase? = nil
@@ -28,6 +30,7 @@ struct NativeAgentQualificationConfigurationTests {
       codeIdentityDigest: codeIdentityDigest ?? digest,
       runBindingDigest: runBindingDigest ?? digest,
       controllerServiceAccessGroup: controllerServiceAccessGroup ?? serviceAccessGroup,
+      controllerCodeDirectoryHash: controllerCodeDirectoryHash ?? controllerCDHash,
       expiresAtEpochSeconds:
         expiresAtEpochSeconds ?? UInt64(now.timeIntervalSince1970) + 60,
       scenario: scenario ?? .preCloudKill,
@@ -51,6 +54,21 @@ struct NativeAgentQualificationConfigurationTests {
         mode: NativeAgentQualificationConfiguration.modeMarker,
         wallTime: now
       )
+    }
+    #expect(throws: NativeAgentQualificationConfigurationError.partialConfiguration) {
+      _ = try NativeAgentQualificationConfiguration(
+        mode: NativeAgentQualificationConfiguration.modeMarker,
+        machServiceName: NativeAgentQualificationConfiguration.machServiceName,
+        candidateDigest: digest,
+        sourceCommitDigest: digest,
+        codeIdentityDigest: digest,
+        runBindingDigest: digest,
+        controllerServiceAccessGroup: serviceAccessGroup,
+        controllerCodeDirectoryHash: nil,
+        expiresAtEpochSeconds: UInt64(now.timeIntervalSince1970) + 60,
+        scenario: .preCloudKill,
+        phase: .preCloud,
+        wallTime: now)
     }
   }
 
@@ -112,11 +130,18 @@ struct NativeAgentQualificationConfigurationTests {
     let value = try make()
     let configured = try #require(value.values)
     let expectedRequirement = try NativeAgentQualificationCodeRequirement.requirement(
-      serviceAccessGroup: serviceAccessGroup)
+      serviceAccessGroup: serviceAccessGroup,
+      controllerCodeDirectoryHash: controllerCDHash)
     #expect(configured.controllerDesignatedRequirement == expectedRequirement)
+    let other = try make(controllerCodeDirectoryHash: String(repeating: "c", count: 40))
+    #expect(other.values?.controllerDesignatedRequirement != configured.controllerDesignatedRequirement)
     #expect(throws: NativeAgentQualificationConfigurationError.invalidControllerServiceAccessGroup)
     {
       _ = try make(controllerServiceAccessGroup: "ABCDE12345.dev.agentpass.approval-keys")
+    }
+    #expect(throws: NativeAgentQualificationConfigurationError.invalidControllerCodeDirectoryHash)
+    {
+      _ = try make(controllerCodeDirectoryHash: String(repeating: "c", count: 39))
     }
   }
 
