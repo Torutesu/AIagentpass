@@ -61,6 +61,36 @@ jobs:
         env:
           AGENTPASS_TEST_DATABASE_URL: postgresql://postgres:agentpass-integration@127.0.0.1:5432/postgres
         run: npm run test:postgres:g4
+      - name: Prepare C1.5 provider-operation evidence directory
+        run: |
+          mkdir -p "$GITHUB_WORKSPACE/c1-provider-operation-evidence"
+          chmod 0700 "$GITHUB_WORKSPACE/c1-provider-operation-evidence"
+      - name: Qualify C1.4 provider-operation maintenance and races on PostgreSQL 17
+        env:
+          AGENTPASS_TEST_DATABASE_URL: postgresql://postgres:agentpass-integration@127.0.0.1:5432/postgres
+        run: >-
+          node --test --test-concurrency=1
+          apps/cloud-api/test/postgres/provider-operation-query-indexes.integration.test.mjs
+          apps/cloud-api/test/postgres/provider-operation-repository.integration.test.mjs
+      - name: Create and independently verify source-bound C1.5 evidence
+        env:
+          AGENTPASS_C1_SOURCE_COMMIT: ${{ github.sha }}
+          AGENTPASS_C1_RUN_ID: ${{ github.run_id }}
+          AGENTPASS_C1_RUN_ATTEMPT: ${{ github.run_attempt }}
+          PGPASSWORD: agentpass-integration
+        run: |
+          AGENTPASS_C1_POSTGRES_VERSION="$(psql --host=127.0.0.1 --port=5432 --username=postgres --dbname=postgres --tuples-only --no-align --command='SHOW server_version')"
+          export AGENTPASS_C1_POSTGRES_VERSION
+          node scripts/postgres/provider-operation-qualification-evidence.mjs write "$GITHUB_WORKSPACE/c1-provider-operation-evidence/provider-operation.json"
+          node scripts/postgres/provider-operation-qualification-evidence.mjs verify "$GITHUB_WORKSPACE/c1-provider-operation-evidence/provider-operation.json" "$GITHUB_SHA"
+      - name: Retain verified source-bound C1.5 provider-operation evidence
+        if: success()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: c1-provider-operation-${{ github.sha }}
+          path: c1-provider-operation-evidence/provider-operation.json
+          if-no-files-found: error
+          retention-days: 30
       - name: Prepare isolated PostgreSQL 16 least-privilege database
         env:
           PGPASSWORD: agentpass-w15-integration
