@@ -493,10 +493,69 @@ Planned commit sequence:
 7. `C2/C3-qualification`: real PostgreSQL two-instance matrix, full regression,
    threat-model/runbook updates, and source-bound retained evidence.
 
-The immediate commit is step 1. It is contract/domain implementation evidence,
-not completion of C2 or C3. Neither producer is production-complete until its
-PostgreSQL ledger, managed-signer runtime, historical verification, API
-authorization, two-instance fault matrix, and retained evidence are merged.
+#### Persistence checkpoint after migrations 43-45
+
+The contract checkpoint and the first persistence checkpoint are now
+implemented. Migration 43 stores tenant-qualified audit-export reservations,
+immutable evidence authority, database-clock claim leases, and terminal
+committed/uncertain outcomes. Its repository owns reserve/reclaim/commit and
+response-loss replay without persisting a clear claim token. Migration 44
+stores immutable deployment-scoped platform approvals and derives a canonical
+record digest that is byte-identical to the JavaScript contract. Migration 45
+adds the organization-wide export ordering required to export device audit
+events whose source chains remain per-device. All three migrations are in the
+frozen catalog as versions 43-45.
+
+This checkpoint is not C2 or C3 completion. The audit repository still receives
+an injected snapshot reader; production code must derive every range, event,
+root, and key lifecycle binding from authoritative PostgreSQL rows in the same
+transaction. C3 has an approval authority but does not yet have the promotion
+issuance ledger, managed-signer transaction, or atomic deployment transition.
+
+The next implementation commits, in dependency order, are:
+
+1. `C2-snapshot-reader`: read admin and cloud-agent organization sequences and
+   the migration-45 device export sequence in the reservation transaction;
+   require a contiguous range and exact previous boundary; build one bounded,
+   canonical payload; and return only repository-derived key/lifecycle data.
+2. `C2-postgres-qualification`: exercise reserve, expired-claim reclaim,
+   concurrent range exclusion, exact replay, commit-response loss, RLS, and
+   restart across two real PostgreSQL pools. The test must prove that a reader
+   cannot re-snapshot frozen authority during reclaim.
+3. `C2-runtime`: compose the ledger with the audit-purpose managed signer,
+   exact output self-verification, historical key resolution, retrieval, and
+   verification. Signer acceptance with an unknown commit outcome must become
+   a durable uncertain state; no automatic second signature is allowed.
+4. `C3-promotion-ledger`: persist candidate identity, artifact/manifest/SBOM
+   digests, the exact qualification-report set, approval digest, signer
+   lifecycle, opaque claim lease, provider operation, and deployment transition.
+   Concurrent promotions for one deployment/environment are serialized.
+5. `C3-runtime`: resolve an unexpired environment quorum, issue promotion
+   evidence v3 through the promotion-only managed signer, self-verify it, and
+   commit evidence plus deployment state atomically. Rebuild-on-promotion and
+   v2 issuance are rejected.
+6. `C2/C3-apis-console`: expose bounded Human-BFF audit export operations and a
+   separate platform-operator promotion surface. Add role/recent-WebAuthn/CSRF/
+   `If-Match`/idempotency enforcement, redacted DTOs, and Console loading,
+   empty, conflict, uncertain, expired, and verification states.
+7. `C2/C3-production-qualification`: run two-instance PostgreSQL and real KMS
+   fault matrices, backup/PITR and rotation drills, browser/log/metric secret
+   scans, independent security review, and source-bound retained evidence on
+   the exact pushed SHA.
+
+Before either producer is enabled for a runtime role, C6 must also revoke
+direct `INSERT`/`UPDATE`/`DELETE`/`TRUNCATE` on the three authority ledgers,
+revoke database `TEMP` and `CREATE ON SCHEMA public`, and expose only reviewed
+purpose-specific stored procedures/views. Those procedures must prove the
+previous committed boundary and derive authority rather than accepting it.
+Migration 45 also requires a production preflight (row count, duplicate check,
+estimated WAL/lock duration), a maintenance window or staged online backfill,
+and an abort threshold before it is applied to a populated deployment.
+
+Each commit exits only when focused unit tests, contract validation, lint, real
+PostgreSQL tests, and the root regression suite pass. Steps 1-3 close C2; steps
+4-5 close C3; step 6 depends on the matching producer; step 7 is the production
+gate and cannot be replaced by mocks or a local successful demo.
 
 After C1, C2 and C3 can proceed in parallel because their schemas and signer
 purposes are disjoint. C6 PostgreSQL role/TLS/backup work and C9 packaging may
@@ -580,7 +639,7 @@ use a provider operation service/ledger or remain blocked from production.
 
 Merge role-separated PostgreSQL CI first, followed by backup/PITR evidence and
 cutover hardening. The CI lane creates the migrator, app, and backup roles from
-scratch, applies all 42 migrations, executes repository smoke tests as the app,
+scratch, applies all 45 current migrations, executes repository smoke tests as the app,
 and proves the negative privilege matrix. The protected-environment lane then
 records encrypted backup, point-in-time restore, row/checksum/authority
 comparison, RPO, RTO, and rollback rehearsal.

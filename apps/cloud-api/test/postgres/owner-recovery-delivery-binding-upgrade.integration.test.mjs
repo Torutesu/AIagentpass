@@ -25,7 +25,7 @@ test("0034 to 0035 quarantines legacy delivery, preserves terminals, and starts 
   });
 
   const migrations = await loadSqlMigrations();
-  assert.equal(migrations.length, 42);
+  assert.equal(migrations.length, 45);
   const through35 = migrations.slice(0, 35);
 
   const before35Client = await pool.connect();

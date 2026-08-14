@@ -528,6 +528,7 @@ export function createControlPlaneAuthorityRepository({ client, cursorCodec, cur
   async function ingestDeviceAuditEvents(input = {}) {
     const values = normalizeAuditInput(input);
     return databaseOperation(() => transaction(client, async (tx) => {
+      await establishTenantContext(tx, values.organizationId);
       await lockDevice(tx, values.organizationId, values.deviceId);
       await assertDevice(tx, values.organizationId, values.deviceId);
       await assertAuditAgents(tx, values.organizationId, values.deviceId, values.events);
@@ -654,6 +655,17 @@ export function createControlPlaneAuthorityRepository({ client, cursorCodec, cur
     revoke: createRevocation,
     revokeActiveCapabilitiesForMember: capabilityAuthority.revokeActiveCapabilitiesForMember
   });
+}
+
+async function establishTenantContext(tx, organizationId) {
+  const configured = await tx.query("SELECT set_config('agentpass.organization_id',$1,true) AS organization_id", [organizationId]);
+  if (rowCount(configured) !== 1 || configured.rows[0]?.organization_id !== organizationId) {
+    throw new ControlPlaneAuthorityRepositoryError("ERR_DATABASE", "tenant context is unavailable");
+  }
+  const verified = await tx.query("SELECT current_setting('agentpass.organization_id',true) AS organization_id", []);
+  if (rowCount(verified) !== 1 || verified.rows[0]?.organization_id !== organizationId) {
+    throw new ControlPlaneAuthorityRepositoryError("ERR_DATABASE", "tenant context is unavailable");
+  }
 }
 
 export const createPostgresControlPlaneAuthorityRepository = createControlPlaneAuthorityRepository;

@@ -53,6 +53,9 @@ const AUTHORITY_TABLES = Object.freeze([
   ["device_audit_events", "t.organization_id = ANY($1::uuid[])", "audit"],
   ["device_audit_heads", "t.organization_id = ANY($1::uuid[])", "audit"],
   ["device_audit_gaps", "t.organization_id = ANY($1::uuid[])", "audit"],
+  ["device_audit_export_heads", "t.organization_id = ANY($1::uuid[])", "audit"],
+  ["device_audit_export_entries", "t.organization_id = ANY($1::uuid[])", "audit"],
+  ["audit_export_issuances", "t.organization_id = ANY($1::uuid[])", "audit"],
   ["idempotency_records", "t.organization_id = ANY($1::uuid[])", "security"],
   ["device_request_nonces", "t.organization_id = ANY($1::uuid[])", "security"],
   ["rate_limit_buckets", "t.organization_id = ANY($1::uuid[])", "security"],
@@ -81,13 +84,14 @@ const AUTHORITY_TABLES = Object.freeze([
   ["managed_signer_keys", "$1::uuid[] IS NOT NULL", "security"],
   ["managed_signer_key_lifecycle_operations", "$1::uuid[] IS NOT NULL", "security"],
   ["managed_signer_signing_idempotency", "$1::uuid[] IS NOT NULL", "security"],
+  ["platform_promotion_approvals", "$1::uuid[] IS NOT NULL", "security"],
   ["schema_migration_attempts", "$1::uuid[] IS NOT NULL", "migration"]
 ]);
 const AUTHORITY_TABLE_NAMES = Object.freeze(AUTHORITY_TABLES.map(([name]) => name));
 const TENANT_TABLE_NAMES = new Set(AUTHORITY_TABLES.filter(([, , kind]) => ["tenant", "audit", "outbox", "security"].includes(kind)).map(([name]) => name));
 
 export const AUTHORITY_MANIFEST_SCHEMA_VERSION = 2;
-export const REQUIRED_MIGRATION_VERSION = "42";
+export const REQUIRED_MIGRATION_VERSION = "45";
 export const MANIFEST_KIND = "agentpass.authority-manifest";
 
 export const DIAGNOSTICS = Object.freeze({
