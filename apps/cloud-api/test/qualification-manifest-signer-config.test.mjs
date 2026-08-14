@@ -25,6 +25,11 @@ test("hosted qualification signer exposes bounded public health and a purpose-se
   const value = fixture();
   const signer = createHostedQualificationManifestSigner({ provider: value.provider, env: value.env, now: () => NOW });
   assert.equal(signer.key_id, "qualification-2026-08");
+  assert.deepEqual(await signer.publicKeyMetadata(), {
+    key_id: "qualification-2026-08",
+    algorithm: "ed25519",
+    public_key: value.pem
+  });
   assert.deepEqual((await signer.verificationKeyMetadata()).keys.map(({ key_id, status }) => ({ key_id, status })), [
     { key_id: "qualification-2026-08", status: "active" }
   ]);

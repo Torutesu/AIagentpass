@@ -21,6 +21,7 @@ const MAX_DIAGNOSTIC_OUTPUT = 2 * 1024;
 const MAX_CA_BYTES = 256 * 1024;
 const TRUSTED_HTTPS_LOOPBACK_HOSTS = new Set(["localhost", "127.0.0.1", "[::1]"]);
 const POSTGRES_CA_ENV_NAMES = ["P0B_POSTGRES_CA_FILE", "AGENTPASS_TEST_POSTGRES_CA_FILE"];
+const P0B_CLOUD_PROCESS = path.join(REPOSITORY_ROOT, "test/support/p0b/cloud-runtime-process.mjs");
 
 export class P0BSkip extends Error {
   constructor(code, diagnostic) {
@@ -237,6 +238,7 @@ export async function startP0BHarness({ env = process.env, repoRoot = REPOSITORY
       AGENTPASS_CAPABILITY_NONCE_SECRET: files.capabilitySecret,
       AGENTPASS_HUMAN_CURSOR_SECRET: files.cursorSecret,
       AGENTPASS_HUMAN_AUTH_SECRET: Buffer.alloc(32, 0x35).toString("base64url"),
+      AGENTPASS_IDENTITY_PROVIDER: "chatgpt",
       AGENTPASS_OPERATIONAL_PROBE_SECRET: files.probeSecret,
       AGENTPASS_CONSOLE_ORIGIN: `https://localhost:${consoleTlsPort}`,
       AGENTPASS_WEBAUTHN_RP_ID: "localhost",
@@ -244,9 +246,26 @@ export async function startP0BHarness({ env = process.env, repoRoot = REPOSITORY
       AGENTPASS_IDENTITY_ASSERTION_AUDIENCE: "agentpass-p0b-cloud",
       AGENTPASS_IDENTITY_ASSERTION_KID: "p0b-console-v1",
       AGENTPASS_IDENTITY_ASSERTION_PUBLIC_KEY_PATH: files.identityPublicKey,
+      AGENTPASS_CLOUD_AGENT_SESSION_KEY_ID: "p0b-agent-session-v1",
+      AGENTPASS_CLOUD_AGENT_SESSION_PUBLIC_KEY: files.agentSessionPublicKeyPem,
+      AGENTPASS_CLOUD_AGENT_SESSION_PROCESS_POLICIES_PATH: files.processPolicies,
+      AGENTPASS_CLOUD_QUALIFICATION_MANIFEST_KEY_ID: "p0b-qualification-manifest-v1",
+      AGENTPASS_CLOUD_QUALIFICATION_MANIFEST_PUBLIC_KEY: files.qualificationManifestPublicKeyPem,
+      AGENTPASS_KMS_PROVIDER: "aws",
+      AGENTPASS_KMS_AGENT_SESSION_KEY_RESOURCE: "arn:aws:kms:us-east-1:000000000000:key/p0b-agent-session",
+      AGENTPASS_KMS_QUALIFICATION_MANIFEST_KEY_RESOURCE: "arn:aws:kms:us-east-1:000000000000:key/p0b-qualification-manifest",
+      AGENTPASS_OWNER_RECOVERY_NOTIFICATION_WEBHOOK_URL: "https://notifications.example.test/owner-recovery",
+      AGENTPASS_OWNER_RECOVERY_NOTIFICATION_CONFIRMATION_URL: "https://notifications.example.test/owner-recovery/acceptance",
+      AGENTPASS_OWNER_RECOVERY_NOTIFICATION_AUTHORIZATION_PATH: files.ownerRecoveryAuthorization,
+      AGENTPASS_OWNER_RECOVERY_NOTIFICATION_BINDING_ID: "p0b-owner-recovery",
+      AGENTPASS_OWNER_RECOVERY_NOTIFICATION_BINDING_KEY_VERSION: "1",
+      AGENTPASS_OWNER_RECOVERY_NOTIFICATION_BINDING_DIGEST: "a".repeat(64),
+      P0B_LIVE_BROWSER: "1",
+      P0B_AGENT_SESSION_PRIVATE_KEY_PATH: files.agentSessionPrivateKey,
+      P0B_QUALIFICATION_MANIFEST_PRIVATE_KEY_PATH: files.qualificationManifestPrivateKey,
       NODE_EXTRA_CA_CERTS: trustedCaBundle
     };
-    cloudProcess = spawnProcess(process.execPath, [path.join(repoRoot, "apps/cloud-api/src/main.mjs")], repoRoot, p0bEnvironment(env, common));
+    cloudProcess = spawnProcess(process.execPath, [P0B_CLOUD_PROCESS], repoRoot, p0bEnvironment(env, common));
     cloudProxy = await createTlsProxy({ cert: certificates.cert, key: certificates.key, targetPort: cloudPort, port: cloudTlsPort });
     await waitForHttps(`https://localhost:${cloudTlsPort}/`, certificates.caCert, { path: "/health/ready", headers: { "AgentPass-Operational-Token": files.probeSecret }, expectedStatus: 200, timeoutMs: waitTimeoutMs, process: cloudProcess, label: "cloud" });
     const consoleEnv = p0bEnvironment(env, {
@@ -327,18 +346,31 @@ async function createRuntimeFiles(directory) {
   const bundle = crypto.generateKeyPairSync("ed25519");
   const refresh = crypto.generateKeyPairSync("ed25519");
   const identity = crypto.generateKeyPairSync("ed25519");
+  const agentSession = crypto.generateKeyPairSync("ed25519");
+  const qualificationManifest = crypto.generateKeyPairSync("ed25519");
   const bundlePrivateKey = path.join(directory, "bundle-private.pem");
   const refreshPrivateKey = path.join(directory, "refresh-private.pem");
   const identityPublicKey = path.join(directory, "identity-public.pem");
+  const agentSessionPrivateKey = path.join(directory, "agent-session-private.pem");
+  const qualificationManifestPrivateKey = path.join(directory, "qualification-manifest-private.pem");
+  const processPolicies = path.join(directory, "agent-session-process-policies.json");
+  const ownerRecoveryAuthorization = path.join(directory, "owner-recovery-notification-authorization");
   await writePrivate(bundlePrivateKey, bundle.privateKey.export({ type: "pkcs8", format: "pem" }));
   await writePrivate(refreshPrivateKey, refresh.privateKey.export({ type: "pkcs8", format: "pem" }));
   await fsp.writeFile(identityPublicKey, identity.publicKey.export({ type: "spki", format: "pem" }), { mode: 0o600, flag: "wx" });
+  await writePrivate(agentSessionPrivateKey, agentSession.privateKey.export({ type: "pkcs8", format: "pem" }));
+  await writePrivate(qualificationManifestPrivateKey, qualificationManifest.privateKey.export({ type: "pkcs8", format: "pem" }));
+  await writePrivate(processPolicies, `${JSON.stringify({ version: 1, policies: [{ policy_id: "claude-code-v1", release_id: "agentpass-0.18.0", agent_kind: "claude-code", adapter_id: "33333333-3333-4333-8333-333333333333", adapter_versions: ["1.0.0"], status: "enabled" }] })}\n`);
+  await writePrivate(ownerRecoveryAuthorization, "p0b-owner-recovery-authorization");
   const nonceKeyring = path.join(directory, "refresh-nonce-keyring.json");
   const refreshNonceKeyId = "refresh-nonce-v1";
   const refreshNonceKey = crypto.randomBytes(32);
   await writePrivate(nonceKeyring, `${JSON.stringify({ version: 1, active_key_id: refreshNonceKeyId, keys: { [refreshNonceKeyId]: refreshNonceKey.toString("base64url") } })}\n`);
   return Object.freeze({
     bundlePrivateKey, refreshPrivateKey, identityPublicKey, nonceKeyring,
+    agentSessionPrivateKey, qualificationManifestPrivateKey, processPolicies, ownerRecoveryAuthorization,
+    agentSessionPublicKeyPem: agentSession.publicKey.export({ type: "spki", format: "pem" }).toString(),
+    qualificationManifestPublicKeyPem: qualificationManifest.publicKey.export({ type: "spki", format: "pem" }).toString(),
     refreshNonceKeyId, refreshNonceKey,
     identityPrivateKeyPem: identity.privateKey.export({ type: "pkcs8", format: "pem" }),
     capabilitySecret: crypto.randomBytes(32).toString("base64url"), cursorSecret: crypto.randomBytes(32).toString("base64url"),

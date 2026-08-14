@@ -55,6 +55,11 @@ export function createHostedQualificationManifestSigner({ provider, env = proces
     return Object.freeze({ version: 1, purpose: QUALIFICATION_GRANT_BATCH_MANIFEST_PURPOSE, active_key_id: config.keyId, keys: Object.freeze(activeKeys) });
   }
 
+  async function publicKeyMetadata() {
+    const metadata = await assertProvider();
+    return Object.freeze({ ...metadata });
+  }
+
   async function verifyManifest(manifest, { at = undefined } = {}) {
     const key = await verificationKeyMetadata(manifest?.statement?.key_id, { at });
     return verifyQualificationGrantBatchManifest(manifest, {
@@ -82,6 +87,7 @@ export function createHostedQualificationManifestSigner({ provider, env = proces
 
   return Object.freeze({
     key_id: config.keyId,
+    publicKeyMetadata,
     signQualificationGrantBatchManifest: signManifest,
     verifyQualificationGrantBatchManifest: verifyManifest,
     verificationKeyMetadata,

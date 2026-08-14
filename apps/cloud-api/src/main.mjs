@@ -5,10 +5,11 @@ import { createHostedKmsProviders } from "./kms-provider-runtime.mjs";
 let signerProviders;
 let runtime;
 try {
-  signerProviders = process.env.AGENTPASS_CLOUD_PROFILE === "hosted"
-    ? await createHostedKmsProviders({ env: process.env })
+  const env = Object.freeze({ ...process.env });
+  signerProviders = env.AGENTPASS_CLOUD_PROFILE === "hosted"
+    ? await createHostedKmsProviders({ env })
     : {};
-  runtime = await createCloudRuntime({ ...signerProviders });
+  runtime = await createCloudRuntime({ env, ...signerProviders });
   await runtime.listen();
 } catch (error) {
   await signerProviders?.close?.().catch(() => {});

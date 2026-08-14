@@ -369,7 +369,35 @@ export async function startP0BLiveBrowserFixture({
       } else if (failure === "cross_operation") {
         await databasePool.query("UPDATE human_sessions SET recent_auth_operation='device.revoke' WHERE id=$1", [sessionId]);
       } else {
-        await databasePool.query("UPDATE human_sessions SET recent_auth_organization_id=$2 WHERE id=$1", [sessionId, safeSeed.otherOrganizationId]);
+        const client = await databasePool.connect();
+        try {
+          const challengeId = crypto.randomUUID();
+          await client.query("BEGIN");
+          const copied = await client.query(
+            `INSERT INTO webauthn_challenges
+              (id,session_id,member_id,organization_id,ceremony,operation,challenge_hash,created_at,expires_at,
+               rp_id,origin,user_verification,status,consume_started_at,consumed_at,failed_at,context_hash)
+             SELECT $3,challenge.session_id,challenge.member_id,$2,challenge.ceremony,challenge.operation,$4,
+                    challenge.created_at,challenge.expires_at,challenge.rp_id,challenge.origin,
+                    challenge.user_verification,'consumed',challenge.consume_started_at,challenge.consumed_at,NULL,
+                    challenge.context_hash
+             FROM human_sessions AS session
+             JOIN webauthn_challenges AS challenge ON challenge.id=session.recent_auth_challenge_id
+             WHERE session.id=$1`,
+            [sessionId, safeSeed.otherOrganizationId, challengeId, crypto.randomBytes(32)]
+          );
+          if (copied.rowCount !== 1) throw new Error("recent authorization challenge is unavailable");
+          await client.query(
+            "UPDATE human_sessions SET recent_auth_challenge_id=$3,recent_auth_organization_id=$2 WHERE id=$1",
+            [sessionId, safeSeed.otherOrganizationId, challengeId]
+          );
+          await client.query("COMMIT");
+        } catch (error) {
+          await client.query("ROLLBACK").catch(() => {});
+          throw error;
+        } finally {
+          client.release();
+        }
       }
     },
 

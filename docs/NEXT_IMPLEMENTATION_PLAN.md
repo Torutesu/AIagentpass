@@ -14,9 +14,18 @@ The primary macOS delivery is not a required menu-bar application. The release a
 
 The current branch has the versioned Core/OpenAPI/JSON Schema catalog, 36 forward-only PostgreSQL migrations, tenant-qualified hosted repositories, Human sessions and organization roles, WebAuthn registration/authentication and operation-bound recent authorization, Device API foundations, signed control bundles and ACK state, audit ingestion, emergency revocation, threshold-owner recovery, and a secret-free recovery-notification outbox with dead-letter management, durable uncertain-delivery quarantine, and bounded retention.
 
-At the `5a5842c` checkpoint, recovery dead-letter redrive and suppression require an exact resource-bound WebAuthn context. The repository recomputes that context and consumes the proof in the same organization-locked transaction. The full suite passes with 1,682 tests (1,648 pass and 34 intentionally skipped), lint and contract validation pass, and all 31 migrations apply to PostgreSQL 16.
+At the current checkpoint, recovery dead-letter redrive and suppression require
+an exact resource-bound WebAuthn context. The repository recomputes that
+context and consumes the proof in the same organization-locked transaction.
+All 36 migrations apply, the root suite passes 1,792 tests (1,744 pass and 48
+intentionally skipped), and the frozen catalog validates 120 entries. The
+authenticated P0-B Cloud/Console/PostgreSQL/browser journey also passes all 12
+role, WebAuthn, wake, tenant-substitution, and revocation scenarios locally.
 
-This is not yet a production release. Browser qualification, complete Console operations, managed production signers, physical Mac qualification, signed/notarized artifacts, deployment infrastructure, restore drills, and independent security review remain open.
+This is not yet a production release. The pushed GitHub CI rerun and retained
+W1.5 evidence, complete Console operations, cloud IAM qualification for managed
+signers, physical Mac qualification, signed/notarized artifacts, deployment
+infrastructure, restore drills, and independent security review remain open.
 
 ## 3. Delivery rules
 
@@ -143,7 +152,7 @@ W1 closure execution order:
 | --- | --- | --- | --- |
 | W1.4a session bootstrap admission | Add fixed `human.session.bootstrap` policies to the shared PostgreSQL limiter; apply anonymous/global admission before identity-provider work, then subject/member/organization admission after verified identity resolution and before session insertion. Keep identifiers HMAC-derived and never persist the assertion or provider subject as a label. | Two API instances must share each bucket; unknown-subject floods must not create unbounded buckets; provider and limiter outages fail closed; identity replay and denied requests create no session. | The bootstrap route has no process-local allowance path, returns bounded `Retry-After`, and its atomic session ceiling still holds under concurrent accepted requests. |
 | W1.4b recovery state latency — complete | Observe database timestamps only after confirmed committed recovery transitions and report fixed-key count/total aggregates through `recordOwnerRecoveryStateLatency`. Do not label by organization, member, request, state, or error. Metrics failures remain post-commit and non-authoritative. | Fixed source-state CAS, negative/malformed timestamp, rollback, WebAuthn caller-owned commit, exact-once flush, and sync/async metric-sink failure tests; real PostgreSQL proves commit and rollback outcomes. | Confirmed commits emit one bounded observation per forward transition in normal operation; retries do not observe another transition and no recovery identity appears in health output. |
-| W1.5 delivery fault matrix — implementation and local PostgreSQL 16 qualification complete; CI pending | Durable `uncertain` quarantine, immutable provider binding, append-only transition ledger, Owner/Admin retry/suppress API, independent-process `SIGKILL`, durable provider acceptance, automatic exact-binding confirmation, 34→35 upgrade, prune/redrive CAS, secret-free evidence, the two-worker race matrix, authenticated HTTPS-provider/worker/PostgreSQL faults, and retention/confirmation races. | Provider timeout/response loss, malformed/oversized/truncated/delayed lookup responses, binding/key substitution, stale publish/fail/uncertain/confirmation CAS, retry/suppress/prune races, duplicate-acceptance convergence, and bounded lookup scheduling against real PostgreSQL. | The pushed PostgreSQL 16 CI lane, including the composed qualification, passes and retains the independently verified bounded evidence artifact; every case converges to one logical delivery or an explicit uncertain/dead-letter state. External CI remains unverified until its artifact exists. |
+| W1.5 delivery fault matrix — implementation and local PostgreSQL 16 qualification complete; CI rerun pending | Durable `uncertain` quarantine, immutable provider binding, append-only transition ledger, Owner/Admin retry/suppress API, independent-process `SIGKILL`, durable provider acceptance, automatic exact-binding confirmation, 34→35 upgrade, prune/redrive CAS, secret-free evidence, the two-worker race matrix, authenticated HTTPS-provider/worker/PostgreSQL faults, and retention/confirmation races. The first branch CI run exposed and locally closed stale schema fixtures, invalid inactive-session seeding, dependency ordering, and P0-B hosted-composition drift. | Provider timeout/response loss, malformed/oversized/truncated/delayed lookup responses, binding/key substitution, stale publish/fail/uncertain/confirmation CAS, retry/suppress/prune races, duplicate-acceptance convergence, bounded lookup scheduling, and the complete P0-B browser journey against real PostgreSQL. | The next pushed PostgreSQL 16 CI lane, including the composed qualification, passes and retains the independently verified bounded evidence artifact; P0-B retains its source-bound report; every case converges to one logical delivery or an explicit uncertain/dead-letter state. External CI remains unverified until those artifacts exist. |
 | W1.6 operational closure | Add fixed-key alerts/runbook thresholds for queue age, uncertain outcomes, dead letters, redrive failure, prune failure, limiter denial/unavailability, and recovery latency. Update threat model and evidence index. | Snapshot tests must reject new labels/fields; runbook drill covers provider outage, worker restart, limiter outage, and dead-letter recovery. | W1 exit gate is reproducible from one documented command sequence and produces no secret-bearing artifact. |
 
 #### W1.4a completed merge sequence
@@ -422,15 +431,17 @@ Add real PostgreSQL, two-instance, Playwright, KMS/IAM, packaging/notarization, 
 3. `feat: bind recovery delivery and operator quarantine controls` (W1.5, merged)
 4. `feat: confirm provider acceptance and qualify delivery races` (W1.5, complete in this change)
 5. `test: compose https provider faults with worker and postgres` (W1.5 hardening, implemented; PostgreSQL 16 CI verification pending)
-6. `ops: wire recovery alerts and execute the staging outage drill` (W1.6, pending)
-7. `test: close the production console browser matrix` (W2)
-8. `feat: add purpose-separated managed signer providers` (W3)
-9. `feat: complete claude code headless onboarding` (W4)
-10. `feat: add cursor adapter parity` (W4)
-11. `build: produce signed notarized immutable pkg` (W5)
-12. `ops: qualify and promote hosted production release` (W6)
+6. `ci: repair full qualification prerequisites` (W1.5 CI repair, complete)
+7. `test: restore hosted p0b runtime composition` (W1.5 CI repair, locally complete; external rerun pending)
+8. `ops: wire recovery alerts and execute the staging outage drill` (W1.6, pending)
+9. `test: close the production console browser matrix` (W2)
+10. `feat: qualify purpose-separated managed signer providers` (W3; AWS/GCP adapters implemented, IAM/outage/rotation evidence pending)
+11. `feat: complete claude code headless onboarding` (W4)
+12. `feat: add cursor adapter parity` (W4)
+13. `build: produce signed notarized immutable pkg` (W5)
+14. `ops: qualify and promote hosted production release` (W6)
 
-Items 10 and 11 remain externally gated until the required Apple, cloud,
+Items 10, 13, and 14 remain externally gated until the required Apple, cloud,
 hardware, deployment, and independent-review resources are available.
 
 ## 8. Final definition of done
