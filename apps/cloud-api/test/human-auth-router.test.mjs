@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { createHumanAuthRouter } from "../src/human-auth/router.mjs";
 
-function fixture({ agentSessionGrantApi = undefined, qualificationGrantBatchApi = undefined } = {}) {
+function fixture({ recoveryApi = undefined, agentSessionGrantApi = undefined, qualificationGrantBatchApi = undefined } = {}) {
   const calls = [];
   const result = { status: 200, headers: {}, body: { ok: true } };
   const router = createHumanAuthRouter({
@@ -11,6 +11,7 @@ function fixture({ agentSessionGrantApi = undefined, qualificationGrantBatchApi 
     registrationApi: { async handle(input) { calls.push(["registration", input]); return result; } },
     managementApi: { async handle(input) { calls.push(["management", input]); return result; } },
     organizationApi: { async handle(input) { calls.push(["organization", input]); return result; } },
+    ...(recoveryApi === undefined ? {} : { recoveryApi }),
     ...(agentSessionGrantApi === undefined ? {} : { agentSessionGrantApi }),
     ...(qualificationGrantBatchApi === undefined ? {} : { qualificationGrantBatchApi }),
   });
@@ -56,6 +57,41 @@ test("rejects aliases, queries, and malformed input without delegation", async (
     assert.match(result.headers["Cache-Control"], /no-store/);
   }
   assert.equal(calls.length, 0);
+});
+
+test("routes only the owner recovery paths to the dedicated recovery API", async () => {
+  const calls = [];
+  const recoveryApi = { async handle(input) { calls.push(input); return { status: 202, headers: {}, body: { recovery: true } }; } };
+  const { router, calls: otherCalls } = fixture({ recoveryApi });
+  const organization = "11111111-1111-4111-8111-111111111111";
+  const request = "33333333-3333-4333-8333-333333333333";
+  const exact = [
+    "/api/auth/recovery/exchange",
+    "/api/auth/recovery/webauthn/registration/options",
+    "/api/auth/recovery/webauthn/registration/verify",
+    "/api/auth/recovery/activate",
+    `/api/auth/organizations/${organization}/recovery-requests`,
+    `/api/auth/organizations/${organization}/recovery-requests/${request}`,
+    `/api/auth/organizations/${organization}/recovery-requests/${request}/approve`,
+    `/api/auth/organizations/${organization}/recovery-requests/${request}/cancel`
+  ];
+  for (const path of exact) {
+    const result = await router.handle({ method: "POST", url: path, headers: {}, body: "{}" });
+    assert.equal(result.status, 202, path);
+  }
+  assert.equal(calls.length, exact.length);
+  assert.equal(otherCalls.length, 0);
+  assert.equal(calls.every((input, index) => input.url === exact[index]), true);
+  for (const path of [
+    "/api/auth/recovery/exchange/",
+    "/api/auth/recovery/exchange?x=1",
+    "/api/auth/recovery/exchange?x=1#fragment",
+    `/api/auth/organizations/${organization}/recovery-requests/${request}/approve/`,
+    `/api/auth/organizations/${organization}/recovery-requests/not-a-uuid`
+  ]) {
+    const result = await router.handle({ method: "POST", url: path, headers: {}, body: "{}" });
+    assert.equal(result.status, 404, path);
+  }
 });
 
 test("forwards organization queries only for list routes and rejects malformed paths", async () => {
@@ -120,4 +156,5 @@ test("does not fall through Agent Session Grant aliases or the frozen route when
 test("rejects an invalid optional Agent Session Grant adapter", () => {
   assert.throws(() => fixture({ agentSessionGrantApi: {} }), /agentSessionGrantApi must expose handle/);
   assert.throws(() => fixture({ qualificationGrantBatchApi: {} }), /qualificationGrantBatchApi must expose handle/);
+  assert.throws(() => fixture({ recoveryApi: {} }), /recoveryApi must expose handle/);
 });

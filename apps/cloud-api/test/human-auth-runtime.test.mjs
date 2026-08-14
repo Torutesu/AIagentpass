@@ -44,6 +44,29 @@ function postgres() {
   return { pool: { async query(sql) { if (String(sql).includes("FROM upstream_identities")) return { rows: [{ provider: "chatgpt", subject: "siwc-user-1", member_id: ids.member, membership_id: "33333333-3333-4333-8333-333333333333", organization_id: ids.org, role: "owner" }], rowCount: 1 }; return { rows: [], rowCount: 0 }; }, async connect() { throw new Error("not used by session bootstrap"); } }, humanRepository, organizationRepository, sharedControlRepository: { async acquireRateLimit({ capacity }) { return { allowed: true, limit: capacity, remaining: capacity - 1, retryAfterMs: 0, resetAt: Date.now() }; } } };
 }
 
+function recoveryPostgres() {
+  const configured = postgres();
+  configured.ownerRecoveryRepository = {
+    async createRecoveryRequest() {},
+    async getRecoveryRequest() {},
+    async approveRecoveryRequest() {},
+    async cancelRecoveryRequest() {},
+    async consumeRecoveryExchange() {},
+    async authenticateRecoverySession() {},
+    async enrollRecoveryCredentialInTransaction() {},
+    async activateRecoveryInTransaction() {},
+    async findRecoveryCredential() {},
+    async updateRecoveryCredentialCounterInTransaction() {}
+  };
+  configured.ownerRecoveryWebAuthnRepository = {
+    async begin() {},
+    async claim() {},
+    async complete() {},
+    async burn() {}
+  };
+  return configured;
+}
+
 test("composes the production human-auth boundary and bootstraps a hash-only session", async () => {
   const token = generateApiToken();
   const runtime = createHumanAuthRuntime({
@@ -81,6 +104,24 @@ test("requires PostgreSQL and rejects unsupported recent-auth operations", async
   const rejected = await runtime.api.handle({ method: "POST", url: "/api/auth/webauthn/options", headers: { cookie, origin: "https://console.example.test", "agentpass-csrf": session.body.csrf_token, "content-type": "application/json" }, body: JSON.stringify({ organization_id: ids.org, operation: "policy.delete" }) });
   assert.equal(rejected.status, 400);
   assert.equal(rejected.body.error.code, "human_auth_invalid_request");
+});
+
+test("composes owner recovery only when both durable repositories are available", () => {
+  const token = generateApiToken();
+  const tokenRecords = [createApiTokenRecord({ token, organizationId: ids.org, memberId: ids.member, role: "owner" })];
+  const runtime = createHumanAuthRuntime({
+    postgresRuntime: recoveryPostgres(),
+    tokenRecords,
+    origin: "https://console.example.test",
+    rpId: "console.example.test",
+    cursorSecret: CURSOR_SECRET
+  });
+  assert.equal(typeof runtime.recoveryCeremony?.beginRegistration, "function");
+  assert.equal(typeof runtime.recoveryService?.registrationVerify, "function");
+  assert.equal(typeof runtime.recoveryApi?.handle, "function");
+  const incomplete = postgres();
+  incomplete.ownerRecoveryRepository = recoveryPostgres().ownerRecoveryRepository;
+  assert.throws(() => createHumanAuthRuntime({ postgresRuntime: incomplete, tokenRecords, origin: "https://console.example.test", rpId: "console.example.test", cursorSecret: CURSOR_SECRET }), /provisioned together/iu);
 });
 
 test("fails closed when the shared Human-auth limiter dependency is missing", () => {

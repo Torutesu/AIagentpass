@@ -6,12 +6,12 @@ import { defaultContractDirectory, loadSqlMigrations } from "../../src/postgres/
 
 const migrationUrl = new URL("../../../../contracts/postgres/0025_threshold_owner_recovery.sql", import.meta.url);
 
-test("0025 is the contiguous current migration and remains forward-only", async () => {
+test("0025 remains the reviewed recovery state-machine migration", async () => {
   const migrations = await loadSqlMigrations(defaultContractDirectory());
-  assert.equal(migrations.at(-1)?.version, 25);
-  assert.equal(migrations.at(-1)?.name, "0025_threshold_owner_recovery.sql");
-  assert.match(migrations.at(-1)?.sql ?? "", /^BEGIN;[\s\S]*COMMIT;\s*$/);
-  assert.match(migrations.at(-1)?.sql ?? "", /owner_recovery_request_state_forward_only/);
+  const migration = migrations.find((item) => item.version === 25);
+  assert.equal(migration?.name, "0025_threshold_owner_recovery.sql");
+  assert.match(migration?.sql ?? "", /^BEGIN;[\s\S]*COMMIT;\s*$/);
+  assert.match(migration?.sql ?? "", /owner_recovery_request_state_forward_only/);
 });
 
 test("0025 permits terminal recovery-session history after credential enrollment", async () => {

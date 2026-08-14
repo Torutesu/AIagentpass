@@ -100,3 +100,52 @@ test("cross-tenant scope is denied before PostgreSQL and emits only an aggregate
   assert.equal(calls, 0);
   assert.deepEqual(metrics, [[HUMAN_AUTH_ABUSE_METRIC_KEYS.tenantDenial, 1]]);
 });
+
+test("recovery exposes one stable limiter operation per route and check preserves fail-closed behavior", async () => {
+  const recoveryOperations = [
+    ["recoveryCreate", "human.recovery.create"],
+    ["recoveryStatus", "human.recovery.status"],
+    ["recoveryApprove", "human.recovery.approve"],
+    ["recoveryCancel", "human.recovery.cancel"],
+    ["recoveryExchange", "human.recovery.exchange"],
+    ["recoveryRegistrationOptions", "human.recovery.registration.options"],
+    ["recoveryRegistrationVerify", "human.recovery.registration.verify"],
+    ["recoveryActivate", "human.recovery.activate"]
+  ];
+  assert.deepEqual(recoveryOperations.map(([name]) => HUMAN_AUTH_RATE_LIMIT_OPERATIONS[name]), recoveryOperations.map(([, operation]) => operation));
+
+  const calls = [];
+  const metricKeys = [];
+  const controls = createHumanAuthAbuseControls({
+    metrics: { increment(key, amount) { metricKeys.push([key, amount]); } },
+    repository: {
+      async acquireRateLimit(input) {
+        calls.push(input);
+        return { allowed: true, limit: input.capacity, remaining: input.capacity - 1, retryAfterMs: 0 };
+      }
+    }
+  });
+  const result = await controls.check({ operation: HUMAN_AUTH_RATE_LIMIT_OPERATIONS.recoveryRegistrationVerify, session });
+  assert.equal(result.operation, "human.recovery.registration.verify");
+  assert.equal(calls.length, 3);
+  assert.deepEqual(metricKeys, [["human_recovery_registration_verify_total", 1]]);
+  assert.strictEqual(controls.authorize, controls.check);
+  assert.equal(controls.policies[HUMAN_AUTH_RATE_LIMIT_OPERATIONS.recoveryStatus].capacity, 60);
+});
+
+test("recovery operation counters are fixed-key and limiter outages remain fail-closed", async () => {
+  const metrics = [];
+  const controls = createHumanAuthAbuseControls({
+    metrics: { increment(key, amount) { metrics.push([key, amount]); } },
+    repository: { async acquireRateLimit() { throw new Error("provider secret must not escape"); } }
+  });
+  await assert.rejects(
+    () => controls.check({ operation: HUMAN_AUTH_RATE_LIMIT_OPERATIONS.recoveryActivate, session }),
+    (error) => error.code === HUMAN_AUTH_ABUSE_ERROR_CODES.CONTROL_UNAVAILABLE && error.cause === undefined
+  );
+  assert.deepEqual(metrics, [
+    ["human_recovery_activate_total", 1],
+    [HUMAN_AUTH_ABUSE_METRIC_KEYS.controlUnavailable, 1]
+  ]);
+  await assert.rejects(() => controls.check({ operation: "human.recovery.activate?organization_id=secret", session }), TypeError);
+});

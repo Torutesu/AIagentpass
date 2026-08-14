@@ -10,13 +10,15 @@ const UUID = "[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89a-fA-F][0-9a-
 const ORGANIZATION_ROUTE = new RegExp(`^${ORGANIZATIONS_PATH}(?:/${UUID}(?:/members(?:/${UUID}/(?:role|remove))?|/invitations(?:/${UUID}/revoke)?)?)?$`);
 const AGENT_SESSION_GRANT_ROUTE = new RegExp(`^${AGENT_SESSION_GRANTS_PATH}/${UUID}/agents/${UUID}/session-grants$`);
 const QUALIFICATION_GRANT_BATCH_ROUTE = new RegExp(`^${AGENT_SESSION_GRANTS_PATH}/${UUID}/agents/${UUID}/qualification-grant-batches$`);
+const OWNER_RECOVERY_ROUTE = new RegExp(`^/api/auth/(?:recovery/(?:exchange|webauthn/registration/(?:options|verify)|activate)|organizations/${UUID}/recovery-requests(?:/${UUID}(?:/(?:approve|cancel))?)?)$`);
 
-export function createHumanAuthRouter({ sessionApi, webauthnApi, registrationApi, managementApi, organizationApi, agentSessionGrantApi, qualificationGrantBatchApi } = {}) {
+export function createHumanAuthRouter({ sessionApi, webauthnApi, registrationApi, managementApi, organizationApi, recoveryApi, agentSessionGrantApi, qualificationGrantBatchApi } = {}) {
   if (!sessionApi || typeof sessionApi.handle !== "function") throw new TypeError("sessionApi must expose handle()");
   if (!webauthnApi || typeof webauthnApi.handle !== "function") throw new TypeError("webauthnApi must expose handle()");
   if (!registrationApi || typeof registrationApi.handle !== "function") throw new TypeError("registrationApi must expose handle()");
   if (!managementApi || typeof managementApi.handle !== "function") throw new TypeError("managementApi must expose handle()");
   if (!organizationApi || typeof organizationApi.handle !== "function") throw new TypeError("organizationApi must expose handle()");
+  if (recoveryApi !== undefined && (!recoveryApi || typeof recoveryApi.handle !== "function")) throw new TypeError("recoveryApi must expose handle()");
   if (agentSessionGrantApi !== undefined && (!agentSessionGrantApi || typeof agentSessionGrantApi.handle !== "function")) throw new TypeError("agentSessionGrantApi must expose handle()");
   if (qualificationGrantBatchApi !== undefined && (!qualificationGrantBatchApi || typeof qualificationGrantBatchApi.handle !== "function")) throw new TypeError("qualificationGrantBatchApi must expose handle()");
 
@@ -30,6 +32,10 @@ export function createHumanAuthRouter({ sessionApi, webauthnApi, registrationApi
     }
     if ((url.pathname === REGISTRATION_OPTIONS_PATH || url.pathname === REGISTRATION_VERIFY_PATH) && !url.search && !url.hash) {
       return registrationApi.handle(cloneRequest(input, url.pathname));
+    }
+    if (isOwnerRecoveryPath(url)) {
+      if (!recoveryApi) return response(404, { error: { code: "not_found", message: "Resource not found" } });
+      return recoveryApi.handle(cloneRequest(input, `${url.pathname}${url.search}`));
     }
     if (isAgentSessionGrantPath(url)) {
       if (!agentSessionGrantApi) return response(404, { error: { code: "not_found", message: "Resource not found" } });
@@ -62,6 +68,10 @@ function isAgentSessionGrantPath(url) {
 
 function isQualificationGrantBatchPath(url) {
   return !url.hash && QUALIFICATION_GRANT_BATCH_ROUTE.test(url.pathname);
+}
+
+function isOwnerRecoveryPath(url) {
+  return !url.search && !url.hash && OWNER_RECOVERY_ROUTE.test(url.pathname);
 }
 
 function isOrganizationListPath(url, input) {

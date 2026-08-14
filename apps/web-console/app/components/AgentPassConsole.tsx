@@ -4,6 +4,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { authenticateRecentAuth, registerPasskey, WebAuthnClientError } from "../webauthn-client";
 import { createSecurityClient, SecurityClientError, type SecurityClient, type SecurityPasskey, type SecuritySession, type SecuritySnapshot } from "../security-client";
 import { OrganizationPanel } from "./OrganizationPanel";
+import { OwnerRecoveryPanel } from "./OwnerRecoveryPanel";
 
 export type ConsoleView =
   | "overview"
@@ -13,6 +14,7 @@ export type ConsoleView =
   | "activity"
   | "security"
   | "organizations"
+  | "recovery"
   | "emergency";
 
 export type AgentPassInitialData = {
@@ -438,6 +440,7 @@ const navItems: Array<{ id: ConsoleView; label: string; icon: string; badge?: st
   { id: "activity", label: "アクティビティ", icon: "◷" },
   { id: "security", label: "セキュリティ", icon: "◇" },
   { id: "organizations", label: "Organizations", icon: "◎" },
+  { id: "recovery", label: "アカウント復旧", icon: "◌" },
   { id: "emergency", label: "緊急停止", icon: "■" },
 ];
 
@@ -1105,7 +1108,7 @@ export function AgentPassConsole({ initialData = defaultInitialData }: AgentPass
           <div className="breadcrumbs"><button className="mobile-menu" type="button" aria-label="メニューを開く" aria-expanded={mobileOpen} onClick={() => setMobileOpen((open) => !open)}>☰</button><span className="breadcrumb-root">AgentPass</span><span aria-hidden="true">/</span><span className="breadcrumb-current">{currentLabel}</span></div>
           <div className="topbar-actions"><span className={`connection-status${syncError ? " is-error" : ""}`}><span className="status-dot" aria-hidden="true" />{syncError ? "同期を確認" : refreshing ? "同期中…" : "システム正常"}</span><button className="refresh-button" type="button" onClick={() => void refreshSummary()} disabled={refreshing}>{refreshing ? "同期中" : `最終同期 ${lastSynced}`}</button><button className="help-button" type="button" aria-label="ヘルプを開く" aria-expanded={helpOpen} onClick={() => setHelpOpen(true)}>?</button><button className="icon-button" type="button" aria-label="アクティビティを見る" onClick={() => goTo("activity")}>◌</button></div>
         </div>
-        <div className={`content${activeView === "organizations" ? " organization-content" : ""}`} role={activeView === "organizations" ? undefined : "main"}>
+        <div className={`content${activeView === "organizations" || activeView === "recovery" ? " organization-content" : ""}`} role={activeView === "organizations" || activeView === "recovery" ? undefined : "main"}>
           {activeView === "overview" ? <Overview data={data} goTo={goTo} onRequestRefresh={requestDeviceRefresh} /> : null}
           {activeView === "setup" ? <SetupSurface data={data} goTo={goTo} operate={operate} online={!syncError} /> : null}
           {activeView === "agents" ? <AgentsSurface data={data} operate={operate} /> : null}
@@ -1113,6 +1116,7 @@ export function AgentPassConsole({ initialData = defaultInitialData }: AgentPass
           {activeView === "activity" ? <ActivitySurface data={data} /> : null}
           {activeView === "security" ? <SecuritySurface /> : null}
           {activeView === "organizations" ? <OrganizationPanel /> : null}
+          {activeView === "recovery" ? <OwnerRecoveryPanel /> : null}
           {activeView === "emergency" ? <EmergencySurface data={data} onOpenConfirm={() => setConfirmOpen(true)} stopped={stopped} /> : null}
         </div>
       </div>

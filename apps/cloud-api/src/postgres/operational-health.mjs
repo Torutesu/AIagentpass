@@ -1,5 +1,31 @@
 export const OPERATIONAL_HEALTH_VERSION = 1;
-export const EXPECTED_POSTGRES_SCHEMA_VERSION = 25;
+export const EXPECTED_POSTGRES_SCHEMA_VERSION = 26;
+
+// Recovery operations are deliberately a closed set.  These names are also
+// the admission-control names used by human-auth/rate-limit.mjs; keeping the
+// vocabulary here makes the exported metrics contract independently useful to
+// health reporters and metric adapters.
+export const HUMAN_RECOVERY_OPERATIONS = Object.freeze({
+  create: "human.recovery.create",
+  status: "human.recovery.status",
+  approve: "human.recovery.approve",
+  cancel: "human.recovery.cancel",
+  exchange: "human.recovery.exchange",
+  registrationOptions: "human.recovery.registration.options",
+  registrationVerify: "human.recovery.registration.verify",
+  activate: "human.recovery.activate"
+});
+
+export const HUMAN_RECOVERY_METRIC_KEYS = Object.freeze({
+  [HUMAN_RECOVERY_OPERATIONS.create]: "human_recovery_create_total",
+  [HUMAN_RECOVERY_OPERATIONS.status]: "human_recovery_status_total",
+  [HUMAN_RECOVERY_OPERATIONS.approve]: "human_recovery_approve_total",
+  [HUMAN_RECOVERY_OPERATIONS.cancel]: "human_recovery_cancel_total",
+  [HUMAN_RECOVERY_OPERATIONS.exchange]: "human_recovery_exchange_total",
+  [HUMAN_RECOVERY_OPERATIONS.registrationOptions]: "human_recovery_registration_options_total",
+  [HUMAN_RECOVERY_OPERATIONS.registrationVerify]: "human_recovery_registration_verify_total",
+  [HUMAN_RECOVERY_OPERATIONS.activate]: "human_recovery_activate_total"
+});
 
 export const OPERATIONAL_METRIC_KEYS = Object.freeze([
   "lock_timeout_total",
@@ -39,7 +65,8 @@ export const OPERATIONAL_METRIC_KEYS = Object.freeze([
   "human_auth_tenant_denial_total",
   "human_auth_replay_denial_total",
   "human_auth_verifier_timeout_total",
-  "human_auth_stale_claim_recovery_total"
+  "human_auth_stale_claim_recovery_total",
+  ...Object.values(HUMAN_RECOVERY_METRIC_KEYS)
 ]);
 
 const METRIC_KEY_SET = new Set(OPERATIONAL_METRIC_KEYS);
@@ -140,6 +167,11 @@ export function createOperationalMetrics({ initial = {} } = {}) {
     recordHumanAuthReplayDenial: (amount = 1) => increment("human_auth_replay_denial_total", amount),
     recordHumanAuthVerifierTimeout: (amount = 1) => increment("human_auth_verifier_timeout_total", amount),
     recordHumanAuthStaleClaimRecovery: (amount = 1) => increment("human_auth_stale_claim_recovery_total", amount),
+    recordHumanRecoveryOperation: (operation, amount = 1) => {
+      const key = HUMAN_RECOVERY_METRIC_KEYS[operation];
+      if (!key) throw invalidOperationalInput();
+      return increment(key, amount);
+    },
     snapshot
   });
 }

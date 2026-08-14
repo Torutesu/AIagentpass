@@ -617,6 +617,127 @@
         "x-agentpass-tenant-scope": { "kind": "organization", "source": "path.organization_id", "cross-tenant-disclosure": false },
         "x-agentpass-minimum-role": "owner"
       }
+    },
+    "/organizations/{organization_id}/recovery-requests": {
+      "post": {
+        "operationId": "createOwnerRecoveryRequest",
+        "summary": "Create a threshold owner recovery request",
+        "description": "Creates a recovery request for the authenticated member after credential loss. The authenticated session is the recovery subject; subject_member_id is never accepted from the caller. The server requires at least two distinct active owners other than that subject. The response contains only public recovery state and, when the server has issued it, a one-time exchange value that must be shown only in memory.",
+        "security": [{ "humanSession": [] }],
+        "parameters": [{ "$ref": "#/components/parameters/OrganizationId" }, { "$ref": "#/components/parameters/CsrfToken" }, { "$ref": "#/components/parameters/IdempotencyKey" }],
+        "requestBody": { "$ref": "#/components/requestBodies/CreateOwnerRecovery" },
+        "x-agentpass-runtime-path": "/api/auth/organizations/{organization_id}/recovery-requests",
+        "x-agentpass-tenant-scope": { "kind": "organization", "source": "path.organization_id", "cross-tenant-disclosure": false, "additionalProperties": false },
+        "x-agentpass-minimum-role": "owner",
+        "x-agentpass-recovery": { "threshold": 2, "independent-owners": "two distinct active owners other than authenticated session member", "subject": "authenticated session member", "insufficient-owners": "deny-and-direct-to-add-recovery-owners", "additionalProperties": false },
+        "x-agentpass-idempotency": { "same-key-same-canonical-request": "return-original-public-recovery-state", "same-key-different-canonical-request": "idempotency_key_reused", "additionalProperties": false },
+        "responses": { "201": { "$ref": "#/components/responses/RecoveryRequestCreated" }, "400": { "$ref": "#/components/responses/BadRequest" }, "401": { "$ref": "#/components/responses/Unauthorized" }, "403": { "$ref": "#/components/responses/Forbidden" }, "409": { "$ref": "#/components/responses/IdempotencyConflict" }, "422": { "$ref": "#/components/responses/ValidationError" }, "429": { "$ref": "#/components/responses/TooManyRequests" }, "500": { "$ref": "#/components/responses/InternalError" } }
+      }
+    },
+    "/organizations/{organization_id}/recovery-requests/{request_id}": {
+      "get": {
+        "operationId": "getOwnerRecoveryRequest",
+        "summary": "Get secret-free owner recovery status",
+        "description": "Returns the versioned, secret-free recovery state for the tenant and request. A delayed request may include the raw one-time exchange value exactly once; clients must display it only in memory, must never persist or log it, and must not place it in a URL. Every later response is secret-free.",
+        "security": [{ "humanSession": [] }],
+        "parameters": [{ "$ref": "#/components/parameters/OrganizationId" }, { "$ref": "#/components/parameters/RecoveryRequestId" }, { "$ref": "#/components/parameters/CsrfToken" }],
+        "x-agentpass-runtime-path": "/api/auth/organizations/{organization_id}/recovery-requests/{request_id}",
+        "x-agentpass-tenant-scope": { "kind": "organization", "source": "path.organization_id", "cross-tenant-disclosure": false, "additionalProperties": false },
+        "x-agentpass-minimum-role": "owner",
+        "x-agentpass-secret-policy": { "durable": "no-raw-exchange-or-session-material", "browser": "memory-only-one-time-display", "logs": "never", "url": "never", "additionalProperties": false },
+        "responses": { "200": { "$ref": "#/components/responses/RecoveryRequestStatus" }, "400": { "$ref": "#/components/responses/BadRequest" }, "401": { "$ref": "#/components/responses/Unauthorized" }, "403": { "$ref": "#/components/responses/Forbidden" }, "404": { "$ref": "#/components/responses/NotFound" }, "500": { "$ref": "#/components/responses/InternalError" } }
+      }
+    },
+    "/organizations/{organization_id}/recovery-requests/{request_id}/approve": {
+      "post": {
+        "operationId": "approveOwnerRecoveryRequest",
+        "summary": "Approve an owner recovery request",
+        "description": "Records one distinct eligible owner approval. The authenticated member cannot approve their own request, duplicate approvals are rejected, and every approval consumes a fresh operation-bound WebAuthn authorization. Replaying an authorization or using a stale request version fails closed.",
+        "security": [{ "humanSession": [], "recentWebAuthn": [] }],
+        "parameters": [{ "$ref": "#/components/parameters/OrganizationId" }, { "$ref": "#/components/parameters/RecoveryRequestId" }, { "$ref": "#/components/parameters/CsrfToken" }, { "$ref": "#/components/parameters/IdempotencyKey" }, { "$ref": "#/components/parameters/ExpectedVersion" }],
+        "requestBody": { "$ref": "#/components/requestBodies/RecoveryEmpty" },
+        "x-agentpass-runtime-path": "/api/auth/organizations/{organization_id}/recovery-requests/{request_id}/approve",
+        "x-agentpass-tenant-scope": { "kind": "organization", "source": "path.organization_id", "cross-tenant-disclosure": false, "additionalProperties": false },
+        "x-agentpass-minimum-role": "owner",
+        "x-agentpass-recent-auth-operation": "human.recovery.approve",
+        "x-agentpass-recovery": { "self-approval": "denied", "duplicate-owner": "denied", "stale-version": "denied", "threshold": "two-distinct-active-owners-other-than-subject", "additionalProperties": false },
+        "x-agentpass-idempotency": { "same-key-same-canonical-request": "return-original-public-recovery-state", "same-key-different-canonical-request": "idempotency_key_reused", "additionalProperties": false },
+        "responses": { "200": { "$ref": "#/components/responses/RecoveryRequestUpdated" }, "400": { "$ref": "#/components/responses/BadRequest" }, "401": { "$ref": "#/components/responses/Unauthorized" }, "403": { "$ref": "#/components/responses/Forbidden" }, "404": { "$ref": "#/components/responses/NotFound" }, "409": { "$ref": "#/components/responses/VersionConflict" }, "422": { "$ref": "#/components/responses/ValidationError" }, "429": { "$ref": "#/components/responses/TooManyRequests" }, "500": { "$ref": "#/components/responses/InternalError" } }
+      }
+    },
+    "/organizations/{organization_id}/recovery-requests/{request_id}/cancel": {
+      "post": {
+        "operationId": "cancelOwnerRecoveryRequest",
+        "summary": "Cancel an owner recovery request",
+        "description": "Cancels a live recovery request using a compare-and-set version. Cancellation is terminal, cannot shorten or bypass the fixed delay, and cannot be used to reactivate any terminal request.",
+        "security": [{ "humanSession": [] }],
+        "parameters": [{ "$ref": "#/components/parameters/OrganizationId" }, { "$ref": "#/components/parameters/RecoveryRequestId" }, { "$ref": "#/components/parameters/CsrfToken" }, { "$ref": "#/components/parameters/IdempotencyKey" }, { "$ref": "#/components/parameters/ExpectedVersion" }],
+        "requestBody": { "$ref": "#/components/requestBodies/RecoveryEmpty" },
+        "x-agentpass-runtime-path": "/api/auth/organizations/{organization_id}/recovery-requests/{request_id}/cancel",
+        "x-agentpass-tenant-scope": { "kind": "organization", "source": "path.organization_id", "cross-tenant-disclosure": false, "additionalProperties": false },
+        "x-agentpass-minimum-role": "owner",
+        "x-agentpass-recovery": { "terminal": true, "fixed-delay": "cannot-be-shortened", "stale-version": "denied", "additionalProperties": false },
+        "x-agentpass-idempotency": { "same-key-same-canonical-request": "return-original-public-recovery-state", "same-key-different-canonical-request": "idempotency_key_reused", "additionalProperties": false },
+        "responses": { "200": { "$ref": "#/components/responses/RecoveryRequestUpdated" }, "400": { "$ref": "#/components/responses/BadRequest" }, "401": { "$ref": "#/components/responses/Unauthorized" }, "403": { "$ref": "#/components/responses/Forbidden" }, "404": { "$ref": "#/components/responses/NotFound" }, "409": { "$ref": "#/components/responses/VersionConflict" }, "422": { "$ref": "#/components/responses/ValidationError" }, "500": { "$ref": "#/components/responses/InternalError" } }
+      }
+    },
+    "/recovery/exchange": {
+      "post": {
+        "operationId": "exchangeOwnerRecoveryValue",
+        "summary": "Consume a one-time recovery exchange value",
+        "description": "Atomically consumes one hashed exchange value after the fixed delay and establishes a restricted recovery session in an HttpOnly cookie. Replays, expired values, wrong organization bindings, wrong members, and wrong request bindings are denied. JSON contains public session metadata only; the raw restricted-session bearer is never returned in JSON.",
+        "security": [],
+        "requestBody": { "$ref": "#/components/requestBodies/RecoveryExchange" },
+        "x-agentpass-runtime-path": "/api/auth/recovery/exchange",
+        "x-agentpass-session": { "issued": "restricted-recovery-session-cookie", "allowed-stages": ["session_issued", "credential_enrolled"], "normal-session": "not-issued-or-returned", "additionalProperties": false },
+        "x-agentpass-one-time": { "input": "exchange", "durable": "sha256-digest-only", "replay": "reject", "additionalProperties": false },
+        "responses": { "200": { "$ref": "#/components/responses/RecoverySessionIssued" }, "400": { "$ref": "#/components/responses/BadRequest" }, "401": { "$ref": "#/components/responses/Unauthorized" }, "403": { "$ref": "#/components/responses/Forbidden" }, "409": { "$ref": "#/components/responses/RecoveryReplay" }, "410": { "$ref": "#/components/responses/RecoveryExpired" }, "500": { "$ref": "#/components/responses/InternalError" } }
+      }
+    },
+    "/recovery/webauthn/registration/options": {
+      "post": {
+        "operationId": "createOwnerRecoveryRegistrationOptions",
+        "summary": "Create restricted-session recovery registration options",
+        "description": "Only a restricted recovery session in session_issued or credential_enrolled stage may call this operation. request_id is checked against the restricted cookie binding. The challenge is short-lived, request-bound, and never durable as raw ceremony material.",
+        "security": [{ "recoverySession": [] }],
+        "parameters": [{ "$ref": "#/components/parameters/CsrfToken" }, { "$ref": "#/components/parameters/IdempotencyKey" }],
+        "requestBody": { "$ref": "#/components/requestBodies/RecoveryRegistrationOptions" },
+        "x-agentpass-runtime-path": "/api/auth/recovery/webauthn/registration/options",
+        "x-agentpass-restricted-session": { "required": true, "stages": ["session_issued", "credential_enrolled"], "organization": "session-bound", "member": "session-bound", "additionalProperties": false },
+        "x-agentpass-secret-policy": { "challenge": "transport-only", "browser": "WebAuthn-call-frame-only", "durable": "digest-or-challenge-id-only", "additionalProperties": false },
+        "responses": { "200": { "$ref": "#/components/responses/RecoveryRegistrationOptions" }, "400": { "$ref": "#/components/responses/BadRequest" }, "401": { "$ref": "#/components/responses/Unauthorized" }, "403": { "$ref": "#/components/responses/Forbidden" }, "409": { "$ref": "#/components/responses/RecoveryReplay" }, "500": { "$ref": "#/components/responses/InternalError" } }
+      }
+    },
+    "/recovery/webauthn/registration/verify": {
+      "post": {
+        "operationId": "verifyOwnerRecoveryRegistration",
+        "summary": "Verify the restricted-session recovery credential",
+        "description": "Verifies and serializes insertion of the newly enrolled credential under the member credential lock. The restricted session advances only once to credential_enrolled; raw assertions, attestation, private keys, and reusable bearer material are never returned or stored.",
+        "security": [{ "recoverySession": [] }],
+        "parameters": [{ "$ref": "#/components/parameters/CsrfToken" }, { "$ref": "#/components/parameters/IdempotencyKey" }],
+        "requestBody": { "$ref": "#/components/requestBodies/RecoveryRegistrationVerify" },
+        "x-agentpass-runtime-path": "/api/auth/recovery/webauthn/registration/verify",
+        "x-agentpass-restricted-session": { "required": true, "stages": ["session_issued"], "next-stage": "credential_enrolled", "additionalProperties": false },
+        "x-agentpass-secret-policy": { "assertion": "transport-only", "response": "public-recovery-state-only", "durable": "credential-public-id-only", "additionalProperties": false },
+        "responses": { "201": { "$ref": "#/components/responses/RecoveryRegistrationVerified" }, "400": { "$ref": "#/components/responses/BadRequest" }, "401": { "$ref": "#/components/responses/Unauthorized" }, "403": { "$ref": "#/components/responses/Forbidden" }, "409": { "$ref": "#/components/responses/RecoveryReplay" }, "422": { "$ref": "#/components/responses/ValidationError" }, "500": { "$ref": "#/components/responses/InternalError" } }
+      }
+    },
+    "/recovery/activate": {
+      "post": {
+        "operationId": "activateOwnerRecovery",
+        "summary": "Activate owner authority after recovery",
+        "description": "Verifies and consumes a fresh WebAuthn authentication assertion created by the newly enrolled credential and bound server-side to human.recovery.activate. Activation atomically invalidates the restricted recovery session and all prior normal sessions, advances the membership session epoch, appends audit state, and commits the secret-free notification outbox entry.",
+        "security": [{ "recoverySession": [] }],
+        "parameters": [{ "$ref": "#/components/parameters/CsrfToken" }, { "$ref": "#/components/parameters/IdempotencyKey" }],
+        "requestBody": { "$ref": "#/components/requestBodies/RecoveryActivation" },
+        "x-agentpass-runtime-path": "/api/auth/recovery/activate",
+        "x-agentpass-webauthn-operation": "human.recovery.activate",
+        "x-agentpass-restricted-session": { "required": true, "stages": ["credential_enrolled"], "next-stage": "activated", "revoked-after-success": true, "additionalProperties": false },
+        "x-agentpass-atomic-activation": ["consume-human.recovery.activate-challenge", "invalidate-recovery-session", "invalidate-prior-normal-sessions", "advance-membership-session-epoch", "append-audit-event", "commit-secret-free-notification-outbox"],
+        "x-agentpass-secret-policy": { "response": "secret-free", "raw-session": "never-json", "raw-assertion": "never-json-or-durable", "additionalProperties": false },
+        "x-agentpass-idempotency": { "same-key-same-canonical-request": "return-original-public-activated-state", "same-key-different-canonical-request": "idempotency_key_reused", "additionalProperties": false },
+        "responses": { "200": { "$ref": "#/components/responses/RecoveryActivated" }, "400": { "$ref": "#/components/responses/BadRequest" }, "401": { "$ref": "#/components/responses/Unauthorized" }, "403": { "$ref": "#/components/responses/Forbidden" }, "409": { "$ref": "#/components/responses/RecoveryReplay" }, "422": { "$ref": "#/components/responses/ValidationError" }, "500": { "$ref": "#/components/responses/InternalError" } }
+      }
     }
   },
   "components": {
@@ -632,6 +753,12 @@
         "in": "header",
         "name": "AgentPass-Recent-Auth",
         "description": "Operation-bound, server-verified recent WebAuthn authorization; freshness alone is insufficient and reuse is rejected."
+      },
+      "recoverySession": {
+        "type": "apiKey",
+        "in": "cookie",
+        "name": "__Host-agentpass_recovery_session",
+        "description": "Opaque, restricted, HttpOnly recovery-session cookie. It is bound to one organization, request, member, stage, absolute expiry, and idle expiry; the raw value is never returned in JSON."
       }
     },
     "parameters": {
@@ -689,6 +816,13 @@
         "in": "path",
         "required": true,
         "description": "Member identifier, interpreted only together with organization_id.",
+        "schema": { "type": "string", "format": "uuid" }
+      },
+      "RecoveryRequestId": {
+        "name": "request_id",
+        "in": "path",
+        "required": true,
+        "description": "Threshold owner recovery request identifier, interpreted only with organization_id and the authenticated or restricted session binding.",
         "schema": { "type": "string", "format": "uuid" }
       },
       "InvitationId": {
@@ -762,6 +896,31 @@
       "AcceptInvitation": {
         "required": true,
         "content": { "application/json": { "schema": { "$ref": "#/components/schemas/AcceptInvitationRequest" } } }
+      },
+      "CreateOwnerRecovery": {
+        "required": true,
+        "content": { "application/json": { "schema": { "$ref": "#/components/schemas/CreateOwnerRecoveryRequest" } } }
+      },
+      "RecoveryEmpty": {
+        "required": true,
+        "description": "Exactly {}. The request is bound to the authenticated human or restricted recovery session and never accepts caller-supplied organization, member, role, or state.",
+        "content": { "application/json": { "schema": { "$ref": "#/components/schemas/RecoveryEmptyRequest" } } }
+      },
+      "RecoveryExchange": {
+        "required": true,
+        "content": { "application/json": { "schema": { "$ref": "#/components/schemas/RecoveryExchangeRequest" } } }
+      },
+      "RecoveryRegistrationOptions": {
+        "required": true,
+        "content": { "application/json": { "schema": { "$ref": "#/components/schemas/RecoveryRegistrationOptionsRequest" } } }
+      },
+      "RecoveryRegistrationVerify": {
+        "required": true,
+        "content": { "application/json": { "schema": { "$ref": "#/components/schemas/RecoveryRegistrationVerifyRequest" } } }
+      },
+      "RecoveryActivation": {
+        "required": true,
+        "content": { "application/json": { "schema": { "$ref": "#/components/schemas/RecoveryActivationRequest" } } }
       },
       "DeviceRefreshRequest": {
         "required": true,
@@ -854,6 +1013,43 @@
         "headers": { "Cache-Control": { "required": true, "schema": { "type": "string", "const": "no-store, max-age=0" } } },
         "content": { "application/json": { "schema": { "$ref": "#/components/schemas/QualificationGrantBatchIssueResponse" } } }
       },
+      "RecoveryRequestCreated": {
+        "description": "Created public recovery state. No session token, WebAuthn material, notification destination, or durable secret is returned.",
+        "headers": { "Cache-Control": { "required": true, "schema": { "type": "string", "const": "no-store, max-age=0" } } },
+        "content": { "application/json": { "schema": { "$ref": "#/components/schemas/RecoveryRequestResponse" } } }
+      },
+      "RecoveryRequestStatus": {
+        "description": "Secret-free recovery state, except for an eligible one-time exchange value returned at most once and intended for memory-only display.",
+        "headers": { "Cache-Control": { "required": true, "schema": { "type": "string", "const": "no-store, max-age=0" } } },
+        "content": { "application/json": { "schema": { "$ref": "#/components/schemas/RecoveryRequestResponse" } } }
+      },
+      "RecoveryRequestUpdated": {
+        "description": "Updated public recovery state without raw exchange or session material.",
+        "headers": { "Cache-Control": { "required": true, "schema": { "type": "string", "const": "no-store, max-age=0" } } },
+        "content": { "application/json": { "schema": { "$ref": "#/components/schemas/RecoveryRequestResponse" } } }
+      },
+      "RecoverySessionIssued": {
+        "description": "Restricted recovery session established in an HttpOnly cookie. JSON contains metadata only; the raw cookie value is never returned.",
+        "headers": { "Set-Cookie": { "required": true, "description": "Opaque __Host-agentpass_recovery_session cookie, Secure, HttpOnly, SameSite=Strict, Path=/, with no Domain attribute.", "schema": { "type": "string", "minLength": 1, "maxLength": 2048 } }, "Cache-Control": { "required": true, "schema": { "type": "string", "const": "no-store, max-age=0" } } },
+        "content": { "application/json": { "schema": { "$ref": "#/components/schemas/RecoverySessionResponse" } } }
+      },
+      "RecoveryRegistrationOptions": {
+        "description": "Short-lived public WebAuthn registration options. Challenge material is transport-only and is never durable or logged.",
+        "headers": { "Cache-Control": { "required": true, "schema": { "type": "string", "const": "no-store, max-age=0" } } },
+        "content": { "application/json": { "schema": { "$ref": "#/components/schemas/RecoveryRegistrationOptionsResponse" } } }
+      },
+      "RecoveryRegistrationVerified": {
+        "description": "The recovery credential was enrolled; response is public recovery state only.",
+        "headers": { "Cache-Control": { "required": true, "schema": { "type": "string", "const": "no-store, max-age=0" } } },
+        "content": { "application/json": { "schema": { "$ref": "#/components/schemas/RecoveryRegistrationVerifiedResponse" } } }
+      },
+      "RecoveryActivated": {
+        "description": "Recovery authority was activated and prior sessions were invalidated. Response is secret-free.",
+        "headers": { "Cache-Control": { "required": true, "schema": { "type": "string", "const": "no-store, max-age=0" } } },
+        "content": { "application/json": { "schema": { "$ref": "#/components/schemas/RecoveryActivatedResponse" } } }
+      },
+      "RecoveryReplay": { "description": "A one-time exchange, challenge, recent-auth proof, restricted session, or activation was replayed or already consumed.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorEnvelope" } } } },
+      "RecoveryExpired": { "description": "The recovery request, exchange value, challenge, or restricted session has expired.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorEnvelope" } } } },
       "BadRequest": { "description": "Malformed request or missing browser security header", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorEnvelope" } } } },
       "Unauthorized": { "description": "No valid humanSession", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorEnvelope" } } } },
       "Forbidden": { "description": "Session lacks the required organization role", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorEnvelope" } } } },
@@ -1012,6 +1208,141 @@
       "MemberRole": { "type": "string", "enum": ["owner", "admin", "auditor", "viewer"] },
       "InviteRole": { "type": "string", "enum": ["admin", "auditor", "viewer"], "description": "Owner is intentionally excluded from invitation roles." },
       "Invitation": { "$ref": "../schemas/invitation-v1.schema.json" },
+      "OwnerRecoveryV1": { "$ref": "../schemas/owner-recovery-v1.schema.json" },
+      "CreateOwnerRecoveryRequest": {
+        "type": "object", "additionalProperties": false, "required": [], "maxProperties": 1,
+        "description": "The authenticated session member is the subject. The optional threshold is a bounded policy request; organization, subject, creator, owner eligibility, delay, expiry, and all authority metadata are resolved server-side.",
+        "properties": { "threshold": { "type": "integer", "minimum": 2, "maximum": 32 } }
+      },
+      "RecoveryEmptyRequest": { "type": "object", "additionalProperties": false, "minProperties": 0, "maxProperties": 0 },
+      "RecoveryExchangeRequest": {
+        "type": "object", "additionalProperties": false, "required": ["exchange"],
+        "description": "One-time random exchange material. Only its SHA-256 digest is durable. Clients must not place this value in browser storage, logs, telemetry, or URLs.",
+        "properties": { "exchange": { "type": "string", "minLength": 43, "maxLength": 512, "pattern": "^[A-Za-z0-9_-]+$", "writeOnly": true } }
+      },
+      "RecoveryRegistrationOptionsRequest": {
+        "type": "object", "additionalProperties": false, "required": ["request_id"],
+        "properties": { "request_id": { "type": "string", "format": "uuid" } }
+      },
+      "RecoveryRegistrationVerifyRequest": {
+        "type": "object", "additionalProperties": false, "required": ["organization_id", "challenge_id", "credential"],
+        "description": "WebAuthn registration material is transport-only. The server accepts the exact browser serialization and never returns it or stores raw assertion/attestation material.",
+        "properties": {
+          "organization_id": { "type": "string", "format": "uuid" },
+          "challenge_id": { "type": "string", "format": "uuid" },
+          "credential": {
+            "type": "object", "additionalProperties": false, "required": ["id", "rawId", "response", "type", "clientExtensionResults"],
+            "properties": {
+              "id": { "type": "string", "minLength": 16, "maxLength": 1024, "pattern": "^[A-Za-z0-9_-]+$" },
+              "rawId": { "type": "string", "minLength": 16, "maxLength": 1024, "pattern": "^[A-Za-z0-9_-]+$" },
+              "type": { "const": "public-key" },
+              "clientExtensionResults": { "type": "object", "additionalProperties": true },
+              "authenticatorAttachment": { "type": "string", "enum": ["platform", "cross-platform"] },
+              "response": {
+                "type": "object", "additionalProperties": false, "required": ["clientDataJSON", "attestationObject"],
+                "properties": {
+                  "clientDataJSON": { "type": "string", "minLength": 1, "maxLength": 8192, "pattern": "^[A-Za-z0-9_-]+$" },
+                  "attestationObject": { "type": "string", "minLength": 1, "maxLength": 32768, "pattern": "^[A-Za-z0-9_-]+$" },
+                  "transports": { "type": "array", "items": { "type": "string", "enum": ["usb", "nfc", "ble", "internal", "hybrid"] }, "maxItems": 8 },
+                  "publicKeyAlgorithm": { "type": "integer" },
+                  "publicKey": { "type": "string", "pattern": "^[A-Za-z0-9_-]+$" },
+                  "authenticatorData": { "type": "string", "pattern": "^[A-Za-z0-9_-]+$" }
+                }
+              }
+            }
+          }
+        }
+      },
+      "RecoveryActivationRequest": {
+        "type": "object", "additionalProperties": false, "required": ["organization_id", "assertion"],
+        "description": "The newly enrolled credential creates this WebAuthn assertion. The server binds its challenge and operation to human.recovery.activate and consumes it exactly once. No session bearer is accepted in this JSON body.",
+        "properties": {
+          "organization_id": { "type": "string", "format": "uuid" },
+          "assertion": { "$ref": "#/components/schemas/RecoveryAuthenticationAssertion" }
+        }
+      },
+      "RecoveryAuthenticationAssertion": {
+        "type": "object", "additionalProperties": false, "required": ["id", "rawId", "response", "type", "clientExtensionResults"],
+        "description": "WebAuthn authentication assertion created by the newly enrolled recovery credential. It is transport-only and never returned, logged, or durably stored.",
+        "properties": {
+          "id": { "type": "string", "minLength": 16, "maxLength": 1024, "pattern": "^[A-Za-z0-9_-]+$" },
+          "rawId": { "type": "string", "minLength": 16, "maxLength": 1024, "pattern": "^[A-Za-z0-9_-]+$" },
+          "type": { "const": "public-key" },
+          "clientExtensionResults": { "type": "object", "additionalProperties": true },
+          "authenticatorAttachment": { "type": "string", "enum": ["platform", "cross-platform"] },
+          "response": {
+            "type": "object", "additionalProperties": false, "required": ["authenticatorData", "clientDataJSON", "signature"],
+            "properties": {
+              "authenticatorData": { "type": "string", "minLength": 1, "maxLength": 8192, "pattern": "^[A-Za-z0-9_-]+$" },
+              "clientDataJSON": { "type": "string", "minLength": 1, "maxLength": 8192, "pattern": "^[A-Za-z0-9_-]+$" },
+              "signature": { "type": "string", "minLength": 1, "maxLength": 8192, "pattern": "^[A-Za-z0-9_-]+$" },
+              "userHandle": { "type": ["string", "null"], "pattern": "^[A-Za-z0-9_-]+$" }
+            }
+          }
+        }
+      },
+      "RecoveryEligibility": {
+        "type": "object", "additionalProperties": false, "required": ["eligible_owner_count", "threshold", "recoverable"],
+        "properties": { "eligible_owner_count": { "type": "integer", "minimum": 0, "maximum": 32 }, "threshold": { "type": "integer", "minimum": 2, "maximum": 32 }, "recoverable": { "type": "boolean" } }
+      },
+      "RecoveryRequestResponse": {
+        "type": "object", "additionalProperties": false, "required": ["request_id", "recovery"],
+        "description": "Public state only. exchange_value is an exceptional one-time field and is not returned after consumption or on ordinary status responses.",
+        "properties": {
+          "request_id": { "$ref": "#/components/schemas/RequestId" },
+          "recovery": { "$ref": "#/components/schemas/OwnerRecoveryV1" },
+          "exchange_value": { "type": "string", "minLength": 43, "maxLength": 512, "pattern": "^[A-Za-z0-9_-]+$", "writeOnly": true, "description": "Returned at most once after delay; memory-only display and immediate exchange." },
+          "eligibility": { "$ref": "#/components/schemas/RecoveryEligibility" },
+          "replayed": { "const": true }
+        }
+      },
+      "RecoverySessionMetadata": {
+        "type": "object", "additionalProperties": false, "required": ["recovery_session_id", "request_id", "member_id", "stage", "expires_at", "idle_expires_at"],
+        "properties": {
+          "recovery_session_id": { "type": "string", "format": "uuid" },
+          "request_id": { "type": "string", "format": "uuid" },
+          "member_id": { "type": "string", "format": "uuid" },
+          "stage": { "type": "string", "enum": ["session_issued", "credential_enrolled", "activated", "revoked", "expired"] },
+          "expires_at": { "type": "string", "format": "date-time" },
+          "idle_expires_at": { "type": "string", "format": "date-time" }
+        }
+      },
+      "RecoverySessionResponse": {
+        "type": "object", "additionalProperties": false, "required": ["request_id", "recovery_session"],
+        "properties": { "request_id": { "$ref": "#/components/schemas/RequestId" }, "recovery_session": { "$ref": "#/components/schemas/RecoverySessionMetadata" } }
+      },
+      "RecoveryRegistrationOptions": {
+        "type": "object", "additionalProperties": false, "required": ["rp", "user", "challenge", "pubKeyCredParams"],
+        "properties": {
+          "rp": { "type": "object", "additionalProperties": false, "required": ["id", "name"], "properties": { "id": { "type": "string", "minLength": 1, "maxLength": 253 }, "name": { "type": "string", "minLength": 1, "maxLength": 128 } } },
+          "user": { "type": "object", "additionalProperties": false, "required": ["id", "name", "displayName"], "properties": { "id": { "type": "string", "pattern": "^[A-Za-z0-9_-]+$" }, "name": { "type": "string", "minLength": 1, "maxLength": 320 }, "displayName": { "type": "string", "minLength": 1, "maxLength": 128 } } },
+          "challenge": { "type": "string", "minLength": 16, "maxLength": 128, "pattern": "^[A-Za-z0-9_-]+$" },
+          "pubKeyCredParams": { "type": "array", "minItems": 1, "maxItems": 32, "items": { "type": "object", "additionalProperties": false, "required": ["type", "alg"], "properties": { "type": { "const": "public-key" }, "alg": { "type": "integer" } } } },
+          "timeout": { "type": "integer", "minimum": 1, "maximum": 120000 },
+          "excludeCredentials": { "type": "array", "maxItems": 100, "items": { "type": "object", "additionalProperties": false, "required": ["id", "type"], "properties": { "id": { "type": "string", "pattern": "^[A-Za-z0-9_-]+$" }, "type": { "const": "public-key" }, "transports": { "type": "array", "items": { "type": "string" }, "maxItems": 8 } } } },
+          "authenticatorSelection": { "type": "object", "additionalProperties": false, "properties": { "authenticatorAttachment": { "type": "string" }, "residentKey": { "type": "string" }, "requireResidentKey": { "type": "boolean" }, "userVerification": { "type": "string" } } },
+          "hints": { "type": "array", "items": { "type": "string" }, "maxItems": 8 },
+          "attestation": { "type": "string" },
+          "attestationFormats": { "type": "array", "items": { "type": "string" }, "maxItems": 16 },
+          "extensions": { "type": "object", "additionalProperties": true }
+        }
+      },
+      "RecoveryRegistrationOptionsResponse": {
+        "type": "object", "additionalProperties": false, "required": ["request_id", "challenge_id", "options"],
+        "properties": { "request_id": { "$ref": "#/components/schemas/RequestId" }, "challenge_id": { "type": "string", "format": "uuid" }, "options": { "$ref": "#/components/schemas/RecoveryRegistrationOptions" } }
+      },
+      "RecoveryRegistrationVerifiedResponse": {
+        "type": "object", "additionalProperties": false, "required": ["request_id", "recovery", "registered", "activation"],
+        "properties": { "request_id": { "$ref": "#/components/schemas/RequestId" }, "recovery": { "$ref": "#/components/schemas/OwnerRecoveryV1" }, "registered": { "const": true }, "activation": { "$ref": "#/components/schemas/RecoveryActivationChallenge" } }
+      },
+      "RecoveryActivationChallenge": {
+        "type": "object", "additionalProperties": false, "required": ["challenge_id", "options"],
+        "properties": { "challenge_id": { "type": "string", "format": "uuid" }, "options": { "type": "object", "additionalProperties": true } }
+      },
+      "RecoveryActivatedResponse": {
+        "type": "object", "additionalProperties": false, "required": ["request_id", "recovery", "activated"],
+        "properties": { "request_id": { "$ref": "#/components/schemas/RequestId" }, "recovery": { "$ref": "#/components/schemas/OwnerRecoveryV1" }, "activated": { "const": true } }
+      },
       "CreateOrganizationRequest": {
         "type": "object", "additionalProperties": false, "required": ["name"],
         "properties": { "name": { "type": "string", "minLength": 1, "maxLength": 128 } }

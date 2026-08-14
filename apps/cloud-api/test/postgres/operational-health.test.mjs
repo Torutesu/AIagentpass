@@ -6,7 +6,9 @@ import {
   OPERATIONAL_METRIC_KEYS,
   createDrainController,
   createOperationalHealth,
-  createOperationalMetrics
+  createOperationalMetrics,
+  HUMAN_RECOVERY_METRIC_KEYS,
+  HUMAN_RECOVERY_OPERATIONS
 } from "../../src/postgres/operational-health.mjs";
 
 const APPLIED = Object.freeze({
@@ -59,6 +61,7 @@ test("metrics are fixed-key, monotonic, and free of caller labels", () => {
   metrics.recordHumanAuthReplayDenial(4);
   metrics.recordHumanAuthVerifierTimeout();
   metrics.recordHumanAuthStaleClaimRecovery(5);
+  for (const operation of Object.values(HUMAN_RECOVERY_OPERATIONS)) metrics.recordHumanRecoveryOperation(operation);
   const snapshot = metrics.snapshot();
   assert.deepEqual(Object.keys(snapshot), ["version", "counters", "valid"]);
   assert.deepEqual(Object.keys(snapshot.counters), OPERATIONAL_METRIC_KEYS);
@@ -102,13 +105,22 @@ test("metrics are fixed-key, monotonic, and free of caller labels", () => {
     human_auth_tenant_denial_total: 3,
     human_auth_replay_denial_total: 4,
     human_auth_verifier_timeout_total: 1,
-    human_auth_stale_claim_recovery_total: 5
+    human_auth_stale_claim_recovery_total: 5,
+    human_recovery_create_total: 1,
+    human_recovery_status_total: 1,
+    human_recovery_approve_total: 1,
+    human_recovery_cancel_total: 1,
+    human_recovery_exchange_total: 1,
+    human_recovery_registration_options_total: 1,
+    human_recovery_registration_verify_total: 1,
+    human_recovery_activate_total: 1
   });
   assert.doesNotMatch(JSON.stringify(snapshot), /tenant_id|organization_id|member_id|session_id|request_id/);
   assert.throws(() => metrics.increment("tenant_id", 1), { code: "invalid_input" });
   assert.throws(() => metrics.recordAuditGap(-1), { code: "invalid_input" });
   assert.throws(() => metrics.recordAgentSessionIssueSuccess({ tenant_id: "tenant-a" }), { code: "invalid_input" });
   assert.throws(() => metrics.recordAgentSessionSignerLatency(1, { request_id: "request-a" }), { code: "invalid_input" });
+  assert.throws(() => metrics.recordHumanRecoveryOperation("human.recovery.unknown"), { code: "invalid_input" });
 });
 
 test("refresh metrics are bounded fixed-key counters and never retain labels", () => {

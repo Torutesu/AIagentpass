@@ -9,6 +9,8 @@ import { createTenantRepositoryFactory } from "./repository.mjs";
 import { createSharedControlRepository } from "./shared-control-repository.mjs";
 import { createPostgresRefreshHintNotifier } from "./refresh-hint-notifier.mjs";
 import { createPostgresAdminAuditRepository } from "./admin-audit-repository.mjs";
+import { createPostgresOwnerRecoveryRepository } from "./owner-recovery-repository.mjs";
+import { createPostgresOwnerRecoveryWebAuthnRepository } from "./owner-recovery-webauthn-repository.mjs";
 import { createAgentSessionAuthorityRepository } from "./agent-session-authority-repository.mjs";
 import { createPostgresAgentSessionConsumptionRepository } from "./agent-session-consumption-repository.mjs";
 import { createPostgresAgentSessionLifecycleRepository } from "./agent-session-lifecycle-repository.mjs";
@@ -64,6 +66,11 @@ export async function createPostgresRuntime({ env = process.env, PoolClass = Poo
   const auditCursorSecret = exactSecret(env.AGENTPASS_HUMAN_CURSOR_SECRET, "AGENTPASS_HUMAN_CURSOR_SECRET");
   const capabilityNonceSecret = exactSecret(env.AGENTPASS_CAPABILITY_NONCE_SECRET, "AGENTPASS_CAPABILITY_NONCE_SECRET");
   const adminAuditRepository = createPostgresAdminAuditRepository({ client: pool });
+  const ownerRecoveryRepository = createPostgresOwnerRecoveryRepository({
+    client: pool,
+    auditRepository: adminAuditRepository
+  });
+  const ownerRecoveryWebAuthnRepository = createPostgresOwnerRecoveryWebAuthnRepository({ client: pool });
   const agentSessionAuthorityRepository = createAgentSessionAuthorityRepository({ client: pool });
   const sharedControlRepository = createSharedControlRepository({ client: pool });
   const agentSessionConsumptionRepository = createPostgresAgentSessionConsumptionRepository({
@@ -141,6 +148,8 @@ export async function createPostgresRuntime({ env = process.env, PoolClass = Poo
     agentSessionLifecycleRepository,
     ...(agentSessionIssuanceRepository ? { agentSessionIssuanceRepository } : {}),
     qualificationGrantBatchRepository,
+    ownerRecoveryRepository,
+    ownerRecoveryWebAuthnRepository,
     sharedControlRepository,
     controlPlaneStore,
     refreshHintNotifier,

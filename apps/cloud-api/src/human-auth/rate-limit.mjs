@@ -1,5 +1,10 @@
 import crypto from "node:crypto";
 
+import {
+  HUMAN_RECOVERY_METRIC_KEYS,
+  HUMAN_RECOVERY_OPERATIONS
+} from "../postgres/operational-health.mjs";
+
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu;
 const MAX_RETRY_AFTER_MS = 60_000;
 const MAX_RETRY_AFTER_SECONDS = Math.ceil(MAX_RETRY_AFTER_MS / 1_000);
@@ -26,6 +31,17 @@ export const HUMAN_AUTH_RATE_LIMIT_OPERATIONS = Object.freeze({
   invitationCreate: "human.invitation.create",
   invitationRevoke: "human.invitation.revoke",
   invitationAccept: "human.invitation.accept",
+  recoveryCreate: HUMAN_RECOVERY_OPERATIONS.create,
+  recoveryStatus: HUMAN_RECOVERY_OPERATIONS.status,
+  recoveryApprove: HUMAN_RECOVERY_OPERATIONS.approve,
+  recoveryCancel: HUMAN_RECOVERY_OPERATIONS.cancel,
+  recoveryExchange: HUMAN_RECOVERY_OPERATIONS.exchange,
+  recoveryRegistrationOptions: HUMAN_RECOVERY_OPERATIONS.registrationOptions,
+  recoveryRegistrationVerify: HUMAN_RECOVERY_OPERATIONS.registrationVerify,
+  recoveryActivate: HUMAN_RECOVERY_OPERATIONS.activate,
+  // Retain the original names for callers compiled against the first
+  // recovery limiter contract. New recovery HTTP routes must use the
+  // operation names above so each route has its own bounded bucket.
   recoveryBegin: "human.recovery.begin",
   recoveryVerify: "human.recovery.verify"
 });
@@ -39,6 +55,14 @@ const DEFAULT_POLICIES = Object.freeze({
   [HUMAN_AUTH_RATE_LIMIT_OPERATIONS.invitationCreate]: Object.freeze({ capacity: 12, refillPerSecond: 0.2 }),
   [HUMAN_AUTH_RATE_LIMIT_OPERATIONS.invitationRevoke]: Object.freeze({ capacity: 24, refillPerSecond: 0.4 }),
   [HUMAN_AUTH_RATE_LIMIT_OPERATIONS.invitationAccept]: Object.freeze({ capacity: 8, refillPerSecond: 0.1 }),
+  [HUMAN_AUTH_RATE_LIMIT_OPERATIONS.recoveryCreate]: Object.freeze({ capacity: 6, refillPerSecond: 0.05 }),
+  [HUMAN_AUTH_RATE_LIMIT_OPERATIONS.recoveryStatus]: Object.freeze({ capacity: 60, refillPerSecond: 1 }),
+  [HUMAN_AUTH_RATE_LIMIT_OPERATIONS.recoveryApprove]: Object.freeze({ capacity: 12, refillPerSecond: 0.1 }),
+  [HUMAN_AUTH_RATE_LIMIT_OPERATIONS.recoveryCancel]: Object.freeze({ capacity: 12, refillPerSecond: 0.1 }),
+  [HUMAN_AUTH_RATE_LIMIT_OPERATIONS.recoveryExchange]: Object.freeze({ capacity: 8, refillPerSecond: 0.1 }),
+  [HUMAN_AUTH_RATE_LIMIT_OPERATIONS.recoveryRegistrationOptions]: Object.freeze({ capacity: 8, refillPerSecond: 0.1 }),
+  [HUMAN_AUTH_RATE_LIMIT_OPERATIONS.recoveryRegistrationVerify]: Object.freeze({ capacity: 6, refillPerSecond: 0.05 }),
+  [HUMAN_AUTH_RATE_LIMIT_OPERATIONS.recoveryActivate]: Object.freeze({ capacity: 6, refillPerSecond: 0.05 }),
   [HUMAN_AUTH_RATE_LIMIT_OPERATIONS.recoveryBegin]: Object.freeze({ capacity: 6, refillPerSecond: 0.05 }),
   [HUMAN_AUTH_RATE_LIMIT_OPERATIONS.recoveryVerify]: Object.freeze({ capacity: 8, refillPerSecond: 0.1 })
 });
@@ -86,8 +110,9 @@ export function createHumanAuthAbuseControls({ repository, metrics, policies = {
   if (!Number.isSafeInteger(idleTtlMs) || idleTtlMs < 1_000 || idleTtlMs > 24 * 60 * 60 * 1000) throw new TypeError("idleTtlMs is invalid");
   const mergedPolicies = Object.freeze(Object.fromEntries([...OPERATION_SET].map((operation) => [operation, normalizePolicy(policies[operation] ?? DEFAULT_POLICIES[operation])] )));
 
-  async function authorize({ operation, session, organizationId = undefined, cost = 1 } = {}) {
+  async function check({ operation, session, organizationId = undefined, cost = 1 } = {}) {
     if (!OPERATION_SET.has(operation)) throw new TypeError("Human auth rate-limit operation is invalid");
+    recordRecoveryOperation(metrics, operation);
     const ids = normalizeSession(session);
     const targetOrganizationId = normalizeUuid(organizationId ?? ids.organizationId, "organizationId");
     if (targetOrganizationId !== ids.organizationId) {
@@ -129,10 +154,25 @@ export function createHumanAuthAbuseControls({ repository, metrics, policies = {
   }
 
   return Object.freeze({
-    authorize,
+    check,
+    // `authorize` is the existing public name. Keep it as a strict alias so
+    // old human-auth routes and new recovery routes share identical fail-
+    // closed semantics and bucket derivation.
+    authorize: check,
     policies: mergedPolicies,
     maxRetryAfterSeconds: MAX_RETRY_AFTER_SECONDS
   });
+}
+
+function recordRecoveryOperation(metrics, operation) {
+  const key = HUMAN_RECOVERY_METRIC_KEYS[operation];
+  if (!key) return;
+  try {
+    if (typeof metrics?.increment === "function") metrics.increment(key, 1);
+    else metrics?.recordHumanRecoveryOperation?.(operation, 1);
+  } catch {
+    // Telemetry must never change the authentication decision.
+  }
 }
 
 export function recordHumanAuthMetric(metrics, key, amount = 1) {
