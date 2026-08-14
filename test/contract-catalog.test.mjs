@@ -8,6 +8,7 @@ import test from "node:test";
 import { AGENT_SESSION_GRANT_SIGNATURE_DOMAIN } from "../apps/cloud-api/src/agent-session-grant.mjs";
 import { POSSESSION_RECEIPT_SIGNATURE_DOMAIN } from "../apps/cloud-api/src/possession-receipt-signer.mjs";
 import { QUALIFICATION_GRANT_BATCH_MANIFEST_SIGNATURE_DOMAIN } from "../apps/cloud-api/src/qualification-grant-batch-manifest.mjs";
+import { PROMOTION_EVIDENCE_V3_SIGNATURE_DOMAIN } from "../apps/cloud-api/src/promotion-evidence-v3-statement.mjs";
 import {
   BUNDLE_ACK_SIGNATURE_DOMAIN,
   REFRESH_HINT_SIGNATURE_DOMAIN
@@ -62,6 +63,7 @@ test("catalog signed domains exactly match implementation constants", () => {
     ["schema.bundle-ack-v1", BUNDLE_ACK_SIGNATURE_DOMAIN],
     ["schema.device-possession-receipt-v1", POSSESSION_RECEIPT_SIGNATURE_DOMAIN],
     ["schema.qualification-grant-batch-manifest-v1", QUALIFICATION_GRANT_BATCH_MANIFEST_SIGNATURE_DOMAIN],
+    ["schema.promotion-evidence-v3", PROMOTION_EVIDENCE_V3_SIGNATURE_DOMAIN],
     ["schema.refresh-hint-v1", REFRESH_HINT_SIGNATURE_DOMAIN]
   ]);
   for (const [id, domain] of expected) {
@@ -79,9 +81,9 @@ test("catalog freezes the complete current contract inventory", () => {
   assert.equal(catalog.catalog_id, "agentpass.contract-catalog");
   assert.equal(catalog.catalog_version, 1);
   assert.equal(catalog.status, "frozen");
-  assert.equal(catalog.entries.length, 129);
+  assert.equal(catalog.entries.length, 130);
   const counts = catalog.entries.reduce((result, entry) => ({ ...result, [entry.kind]: (result[entry.kind] ?? 0) + 1 }), {});
-  assert.deepEqual(counts, { "json-schema": 32, "openapi-operation": 55, "postgres-migration": 42 });
+  assert.deepEqual(counts, { "json-schema": 33, "openapi-operation": 55, "postgres-migration": 42 });
   assert.equal(new Set(catalog.entries.map((entry) => entry.purpose)).size, catalog.entries.length);
   for (const entry of catalog.entries) {
     assert.ok(catalog.profiles[entry.profile], `${entry.id} profile`);
@@ -90,7 +92,7 @@ test("catalog freezes the complete current contract inventory", () => {
   }
   const result = runValidatorWithCatalog();
   assert.equal(result.status, 0, result.stderr);
-  assert.match(result.stdout, /validated frozen contract catalog: 129 entries/);
+  assert.match(result.stdout, /validated frozen contract catalog: 130 entries/);
 });
 
 test("catalog includes every promoted Phase 1 schema and fixture", () => {
@@ -109,14 +111,15 @@ test("catalog includes every promoted Phase 1 schema and fixture", () => {
     "purge-authorization-v1",
     "purge-receipt-v1",
     "promotion-evidence-v1",
-    "promotion-evidence-v2"
+    "promotion-evidence-v2",
+    "promotion-evidence-v3"
   ];
   for (const name of promoted) {
     const entry = catalog.entries.find((item) => item.id === `schema.${name}`);
     assert.ok(entry, `${name} catalog entry`);
     assert.equal(entry.source, `schemas/${name}.schema.json`);
-    const fixture = name === "promotion-evidence-v2"
-      ? "promotion-evidence-v2.valid.json"
+    const fixture = name === "promotion-evidence-v2" || name === "promotion-evidence-v3"
+      ? `${name}.valid.json`
       : name.replace(/-v\d+$/, "") + ".valid.json";
     assert.deepEqual(entry.compatibility_fixtures, [`contracts/fixtures/${fixture}`]);
   }
@@ -124,7 +127,7 @@ test("catalog includes every promoted Phase 1 schema and fixture", () => {
 
 test("catalog distinguishes implemented contracts from future specified envelopes", () => {
   const catalog = readCatalog();
-  for (const id of ["schema.purge-authorization-v1", "schema.purge-receipt-v1", "schema.promotion-evidence-v1", "schema.promotion-evidence-v2", "schema.audit-anchor-v1"]) {
+  for (const id of ["schema.purge-authorization-v1", "schema.purge-receipt-v1", "schema.promotion-evidence-v1", "schema.promotion-evidence-v2", "schema.promotion-evidence-v3", "schema.audit-anchor-v1"]) {
     assert.equal(catalog.entries.find((entry) => entry.id === id)?.implementation_status, "specified", `${id} is not represented as implemented`);
   }
   for (const id of ["schema.capability-v1", "schema.control-bundle-v2"]) {

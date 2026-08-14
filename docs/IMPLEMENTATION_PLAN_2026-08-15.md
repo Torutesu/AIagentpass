@@ -31,8 +31,8 @@ Production completion means:
 
 ## 2. Current trusted baseline
 
-Implemented in the branch baseline; C1.4 has complete local evidence and still
-requires the C1.5 source-bound CI artifact before C1 is closed:
+Implemented in the branch baseline; C1 is closed by the retained, independently
+verified source-bound CI artifact described below:
 
 - frozen Core/OpenAPI/JSON Schema contracts and 42 forward-only migrations;
 - organization roles, Human sessions, WebAuthn, Device APIs, control state,
@@ -325,8 +325,8 @@ and source-bound CI is green.
 | --- | --- | --- | --- | --- |
 | M1a evidence contracts | implemented locally | Q2B-1 | Audit-anchor v1 and promotion-evidence v2 canonical statements, schemas, fixtures, signers, and verifiers. | Canonical round trips and binding/substitution tests; catalog validation. |
 | M1b managed runtime binding | implemented locally | M1a, Q2B-2 | Both evidence signers bind to distinct managed lifecycle repositories and pinned public keys. | Hosted startup rejects a missing, stale, shared, substituted, or local authority. |
-| M1c provider-operation convergence | implemented locally; qualification expansion in progress | M1b | A durable operation adapter and PostgreSQL operation ledger for deterministic Ed25519 retry/reconciliation. | Accepted-but-response-lost, restart, contention, receipt conflict, rotation, disable, and lost-commit tests converge without ambiguous success. |
-| M1d authoritative producers | queued | M1c | Audit-export anchor issuance and release-promotion evidence issuance in the real transaction flows. | Neither production flow can finish unsigned, locally signed, or without a committed receipt. |
+| M1c provider-operation convergence | complete (C1) | M1b | A durable operation adapter and PostgreSQL operation ledger for deterministic Ed25519 retry/reconciliation. | Source-bound PostgreSQL 17 CI evidence verifies six scenarios with zero skips. |
+| M1d authoritative producers | in progress | M1c | Audit-export anchor issuance, platform promotion approval, and promotion-evidence v3 issuance in the real transaction flows. | Neither production flow can finish unsigned, locally signed, or without a committed receipt. |
 | M1e operator/API surfaces | queued | M1d | Read-only retrieval, verification, bounded export, and adjudication APIs plus audit events. | Tenant/role/recent-auth/replay/stale-state negative matrix passes. |
 | M2 eight-purpose runtime closure | queued | M1d | Fixed-cardinality readiness, metrics, drain, and secret/image scan for all eight purposes. | Any unhealthy purpose blocks readiness; shutdown leaves no unfenced operation. |
 | M3 two-instance real KMS | blocked on protected infrastructure | M2 | AWS and GCP two-instance fault-matrix evidence bundle. | Every operation reaches one verified result or an explicit durable terminal/operator state. |
@@ -348,7 +348,7 @@ physical evidence must be attached separately.
 
 | ID | Scope and concrete output | Required proof before merge | Depends on |
 | --- | --- | --- | --- |
-| C1 | Finish provider-operation qualification: combine the low-level `0040` ledger with the existing lifecycle/idempotency ledger; add retention and aggregate health; document the at-least-once provider-call boundary. | Real PostgreSQL two-pool tests for 100-request contention, accepted-response loss, stale claim, process restart, lost DB commit response, rotation, emergency disable, and operation substitution. No test may infer a provider receipt that the provider did not issue. | in progress: lost-commit, pinning, rotation/disable fencing, and shutdown order are implemented |
+| C1 | Complete provider-operation qualification and retain source-bound evidence. | Real PostgreSQL two-pool matrix plus canonical evidence bound to source, catalog, migration, command, scenarios, and zero skips. | complete at `36a9981`; CI run `31842646306` and independently verified artifact SHA-256 `34a1276aa276a452cf0f6a2bd3a7dfa40d161fbd95ba2c9effb42f179ff9d8c4` |
 | C2 | Implement authoritative audit-export issuance. Reserve an export sequence and payload digest transactionally, sign the frozen audit-anchor statement, commit the receipt, and expose immutable retrieval/verification. | Cross-tenant, range/digest substitution, duplicate request, signer timeout, response loss, restart, stale lifecycle, unsigned export, and local-signer-in-hosted-mode tests. | C1 |
 | C3 | Implement authoritative release-promotion issuance. Bind source commit, candidate/image/PKG/SBOM digests, environment, qualification report digests, signer lifecycle, and approval state; prohibit rebuild-on-promotion. | Candidate/environment/evidence substitution, partial evidence, replay, concurrent promotion, signer failure, emergency disable, and exact-digest verifier compatibility tests. | C1 |
 | C4 | Add operator reconciliation surfaces for uncertain signer operations and evidence. Provide bounded list/detail/verify and explicit retry/reject controls through the Human BFF. | Owner/Admin/Auditor/Viewer matrix; recent WebAuthn, CSRF, `If-Match`, idempotency, tenant hiding, stale-state, concurrent adjudication, and audit-event tests. | C2, C3 |
@@ -388,8 +388,8 @@ call after an ambiguous response. Its deterministic receipt is an AgentPass
 ledger receipt, not provider-issued acceptance evidence. The safety claim is
 one exact verified result committed and returned, not exactly-once KMS use.
 
-C1 remains open, but its automatic maintenance and local contention boundary is
-now implemented. Migration `0041` records closed uncertainty reasons and
+C1 is closed. Its automatic maintenance and contention boundary is implemented.
+Migration `0041` records closed uncertainty reasons and
 provides bounded stale-operation quarantine. One deployment-wide repository
 maintains every purpose and historical key version under a single budget, and
 one runtime worker publishes aggregate-only readiness and fixed counters. The
@@ -399,11 +399,10 @@ drain, and finishes before PostgreSQL closes. Two independent pools converge
 consecutive runs. Public health contains no operation ID, receipt, signing
 bytes, tenant identifier, purpose, key version, or provider diagnostic.
 
-The remaining C1 boundary is retention/reconciliation race qualification,
-constructor-failure cleanup, a bounded index for the deployment-wide oldest
-nonterminal lookup, the frozen operator-adjudication contract, and source-bound
-CI evidence. A lifecycle-fenced result remains explicitly uncertain and is
-never automatically converted into success.
+Retention/reconciliation race qualification, constructor-failure cleanup, the
+bounded nonterminal index, and the frozen internal adjudication contract are
+included in the closed checkpoint. A lifecycle-fenced result remains explicitly
+uncertain and is never automatically converted into success.
 
 #### C1 completion sequence after migration 0041
 
@@ -421,7 +420,7 @@ The remaining work is split into reviewable commits with explicit gates:
 | C1.2 runtime and observability — pushed | One deployment-wide worker is constructed after migration, performs an initial cycle, exposes aggregate readiness and six fixed counters, and drains before PostgreSQL closes. | Startup enabled/disabled, non-overlap, sink failure, readiness timeout/failure/privacy, shutdown timeout, and resource-order tests pass. | Runtime and maintenance composition are pushed through `c6ddcd0`. |
 | C1.3 two-pool PostgreSQL qualification — pushed | 100 identical requests run through two independent pools; stale started and pending separation, bounded cooperative quarantine, closed reasons, and terminal immutability are exercised. | PostgreSQL 17 integration passes repeatedly; one exact result converges without blind high-level replay. | Provider-operation classification and maintenance are pushed through `9092bad` and `c6ddcd0`. |
 | C1.4 retention and operator boundary — pushed | Prove retention under two workers and locked rows; define bounded read-only uncertainty summaries and a purpose-bound, deployment-internal adjudication command contract, without adding the Human API yet. Document that direct KMS invocation may be at-least-once after ambiguity. | Retention/reconciliation races, stale lifecycle, unsupported reason, recovery exhaustion, privacy snapshots, purpose-crossing verification denial, PostgreSQL bigint key bounds, and threat-model/runbook review. | Implemented in `a89f557`; automatic maintenance never invents provider acceptance and the internal contract is exposed to no Human/tenant route. |
-| C1.5 closure gate — evidence workflow implemented locally | Run lint, contract validation, complete root suite, real-PostgreSQL matrix, and source-bound CI; archive exact command/environment results. | Zero unexpected skips/failures, schema version 42 everywhere, catalog count 129, clean worktree, pushed commit, and a verified retained artifact. | The workflow now binds source SHA, PostgreSQL 17 version, migration 42, catalog digest, exact command, six scenarios, and zero skips. C1 closes only after this workflow is pushed and green. |
+| C1.5 closure gate — complete | Run lint, contract validation, complete root suite, real-PostgreSQL matrix, and source-bound CI; archive exact command/environment results. | Zero unexpected skips/failures, schema version 42 everywhere, source-bound catalog digest, pushed commit, and a verified retained artifact. | GitHub run `31842646306` passed all four jobs for `36a9981`; retained artifact SHA-256 is `34a1276aa276a452cf0f6a2bd3a7dfa40d161fbd95ba2c9effb42f179ff9d8c4`. |
 
 Local checkpoint evidence for C1.1-C1.4:
 
@@ -446,7 +445,7 @@ operator authority, and product UI do not change in one review boundary.
 | 2 | C1.4b lifecycle/retention race matrix — implemented locally | Real PostgreSQL qualification now covers bounded two-worker reconcile/prune, locked-row `SKIP LOCKED`, pending preservation, stale/disabled lifecycle non-promotion, and correlated pair deletion. First-reservation insert races converge through `ON CONFLICT`; opaque base64url claim tokens accept every valid leading character. | The complete five-scenario provider-operation matrix passes ten consecutive runs; one exact history converges without duplicate maintenance or blind signing. |
 | 3 | C1.4c runtime construction safety — implemented locally | Post-pool construction uses deterministic best-effort cleanup, preserves the original error, releases the migration client once, closes each constructed worker/notifier, and ends the pool once. All workers start only after every constructor succeeds. | Migration, late-constructor, and worker-start failure injections pass; no scheduled timer survives and runtime regressions remain green. |
 | 4 | C1.4d operator contract — implemented locally | The tenant-neutral internal contract permits exact SQL reconciliation, exact-purpose provider verification when explicitly allow-listed, and non-terminal producer handoff. Generic retry, confirm/reject invention, caller output, and direct Human/Console exposure are forbidden. | Bounded/privacy/purpose-crossing/bigint/result-state tests and the adjudication/runbook documents pass. Human role/WebAuthn/CSRF tests intentionally wait for C2/C3 producer-ledger organization correlation. |
-| 5 | C1.5 closure — evidence workflow implemented locally | Push the dedicated C1.5 workflow, run the six-scenario PostgreSQL 17 matrix on the exact source commit, generate a canonical private evidence file, independently verify it, and retain it for 30 days. | Catalog/schema consistency, lint, 2,085-test root suite, and the local evidence rehearsal are green. The retained artifact binds source SHA, PostgreSQL version, migration 42, catalog digest, exact command, six outcomes, and zero skips; a green pushed run closes C1. |
+| 5 | C1.5 closure — complete | The dedicated workflow ran the six-scenario PostgreSQL 17 matrix on the exact source commit, generated a canonical private evidence file, independently verified it, and retained it for 30 days. | Run `31842646306` is green for `36a9981`; all four jobs succeeded and the artifact binds the exact source/catalog/migration/command/scenarios with zero skips. |
 | 6 | C2 and C3 in parallel | Build authoritative audit-export and release-promotion issuance on the closed ledger, each with its own schema, sequence/idempotency repository, signer purpose, retrieval, and verifier. | Cross-purpose/tenant/digest/environment substitution, response loss, restart, rotation, emergency stop, concurrent issuance, and hosted-local-fallback rejection. |
 | 7 | C4 and C7 vertical slice | Add Human BFF uncertainty/reconciliation APIs, then the Console queue/detail/adjudication UI. UI consumes only frozen BFF DTOs and authoritative post-commit state. | Playwright role/a11y/loading/empty/error/stale/offline/response-loss tests; browser storage, URL, logs, traces, and rendered-output secret scan. |
 | 8 | C5 and C6 infrastructure closure | Complete eight-purpose provider/lifecycle readiness and deterministic shutdown; add PostgreSQL migrator/app/backup role CI, TLS/deadlines, backup/PITR restore, and cutover checks. | Partial/shared/stale/disabled signer sets fail readiness; negative DB privilege matrix passes; protected restore records measured RPO/RTO and authority comparison. |
@@ -458,6 +457,46 @@ Parallelization rule: after C1, C2 and C3 may run in parallel; C6 database work
 and C9 packaging may run beside them. C4 waits for the producer contracts, C7
 waits for each matching BFF authority, C8 waits for C5 and C6, and production
 promotion waits for every protected, physical, staging, and review gate.
+
+#### C2/C3 authoritative-producer execution plan
+
+This is the active implementation plan after C1 closure. C2 is tenant-bound;
+C3 is deployment/platform-operator scoped and must never derive authority from
+Organization Owner/Admin membership. Promotion-evidence v1/v2 remain legacy
+verification formats. New issuance uses v3 and cannot silently weaken itself to
+v2.
+
+| Step | C2 audit export | C3 release promotion | Merge/exit condition |
+| --- | --- | --- | --- |
+| 1. Domain contract | Accept only organization, export, environment, chain, and idempotency identity from the caller. Derive the frozen contiguous range, roots, count, payload digest, request digest, timestamps, and signer lifecycle from authoritative repositories. | Freeze platform approval v1 and promotion-evidence v3. Bind deployment, environment, candidate, source commit/tree, PKG/image/SBOM/manifest, qualification-report set, approval digest, lifecycle, and key version. | Closed fields, canonical bytes, domain separation, exact versions, strict arrays, unknown-field/accessor/prototype rejection, and substitution tests pass. |
+| 2. Durable reservation | Add an organization-qualified export issuance ledger with unique request identity, immutable range/payload snapshot, database-clock lease, opaque fencing claim, and terminal committed/uncertain states. | Add platform approval and promotion ledgers keyed by deployment/environment/candidate/promotion. Persist immutable artifact and qualification bindings before signing. | Migration is forward-only; conflicting idempotency returns conflict; concurrent exact requests converge; caller cannot choose authoritative digest/range/approval state. |
+| 3. Sign and commit | Sign only the repository-produced audit-anchor statement through the audit purpose signer. Verify the exact output against the pinned key before terminal commit. | Resolve a valid unexpired quorum approval, sign only v3 through the promotion purpose signer, verify exact bytes/key/lifecycle, then commit the evidence and deployment transition together or leave an explicit uncertain state. | No unsigned/local/cross-purpose/stale/disabled result commits. Accepted-but-response-lost and lost-commit paths replay one immutable result without blind re-signing. |
+| 4. Historical verification | Resolve the exact historical public key by purpose/key ID/key version/fingerprint; committed evidence remains retrievable after expiry and reports `active` or `expired`. | Resolve both the historical promotion key and exact approval record. Verification proves approval/artifact/qualification bindings without exposing platform principal IDs or authorization evidence digests. | Rotation-safe replay passes; missing, private, diagnostic-leaking, wrong-purpose, wrong-version, or wrong-fingerprint resolver outputs fail closed. |
+| 5. Narrow APIs | Device/Human BFF receives bounded export create/get/verify DTOs with tenant authorization and redacted errors. No claim token, provider receipt, raw signing bytes, or diagnostics cross the boundary. | Platform-operator service receives approve/promote/get/verify commands. Organization roles have no promotion authority. Public status exposes artifact identity, quorum count, timestamps, validity, and digest only. | OpenAPI/schema/catalog entries and role/tenant/privacy tests are green; browser-visible state contains no reusable authority. |
+| 6. Fault qualification | Two instances exercise range contention, duplicate request, signer timeout, response loss, restart, rotation, disable, lifecycle fence, repository outage, and tampered historical rows. | Two instances exercise approval quorum races, artifact/report substitution, concurrent promotion, signer ambiguity, emergency disable, stale approval, expiry, and rebuild-on-promotion attempts. | Each operation ends in one verified committed result or one durable, bounded, operator-actionable state. No ambiguous success is returned. |
+| 7. Documentation and evidence | Update threat model, operator export/replay runbook, retention behavior, privacy fields, and source-bound test artifact. | Update platform-operator trust model, approval ceremony, promotion rollback rule, evidence index, and source-bound qualification artifact. | Full contracts/lint/root/PostgreSQL suites pass on the pushed SHA; retained artifacts are independently verifiable. |
+
+Planned commit sequence:
+
+1. `C2/C3-contracts`: audit-export service boundary, platform approval v1,
+   promotion-evidence v3, schema/fixture/catalog, and focused negative tests.
+2. `C2-ledger`: migration and PostgreSQL repository for authoritative export
+   snapshot/reserve/commit/replay/uncertain transitions.
+3. `C3-ledgers`: migrations and repositories for platform approval and exact
+   candidate promotion, including production quorum and immutable artifacts.
+4. `C2-runtime`: compose audit export with managed signer, historical resolver,
+   retrieval/verifier, readiness, and fault injection.
+5. `C3-runtime`: compose approval resolution, v3 signer/verifier, deployment
+   transition, historical verification, and fault injection.
+6. `C2/C3-apis`: narrow BFF/platform APIs, schemas, authorization, privacy,
+   audit events, and bounded operator read models.
+7. `C2/C3-qualification`: real PostgreSQL two-instance matrix, full regression,
+   threat-model/runbook updates, and source-bound retained evidence.
+
+The immediate commit is step 1. It is contract/domain implementation evidence,
+not completion of C2 or C3. Neither producer is production-complete until its
+PostgreSQL ledger, managed-signer runtime, historical verification, API
+authorization, two-instance fault matrix, and retained evidence are merged.
 
 After C1, C2 and C3 can proceed in parallel because their schemas and signer
 purposes are disjoint. C6 PostgreSQL role/TLS/backup work and C9 packaging may

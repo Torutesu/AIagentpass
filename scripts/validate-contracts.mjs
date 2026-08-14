@@ -41,7 +41,8 @@ const PROMOTED_SCHEMA_FIXTURES = Object.freeze({
   "purge-authorization-v1.schema.json": "purge-authorization.valid.json",
   "purge-receipt-v1.schema.json": "purge-receipt.valid.json",
   "promotion-evidence-v1.schema.json": "promotion-evidence.valid.json",
-  "promotion-evidence-v2.schema.json": "promotion-evidence-v2.valid.json"
+  "promotion-evidence-v2.schema.json": "promotion-evidence-v2.valid.json",
+  "promotion-evidence-v3.schema.json": "promotion-evidence-v3.valid.json"
 });
 const BASELINE_SCHEMA_FIXTURES = Object.freeze({
   "bundle-ack-v1.schema.json": "bundle-ack.valid.json",

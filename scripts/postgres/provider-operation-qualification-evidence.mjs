@@ -72,7 +72,7 @@ export async function createProviderOperationQualificationEvidence({
   let catalog;
   try { catalog = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(catalogBytes)); }
   catch { fail("invalid_catalog"); }
-  if (!plainObject(catalog) || !Array.isArray(catalog.entries) || catalog.entries.length !== 129) fail("invalid_catalog");
+  const catalogState = catalogMetadata(catalog);
 
   return normalizeProviderOperationQualificationEvidence({
     version: 1,
@@ -82,25 +82,35 @@ export async function createProviderOperationQualificationEvidence({
     run_id: String(runId ?? ""),
     run_attempt: positiveInteger(runAttempt),
     postgres_version: postgresVersion,
-    migration_version: 42,
-    catalog_entries: 129,
+    migration_version: catalogState.migrationVersion,
+    catalog_entries: catalogState.entries,
     catalog_sha256: sha256(catalogBytes),
     command: PROVIDER_OPERATION_QUALIFICATION_COMMAND,
     test_files: [...TEST_FILES],
     scenarios: [...PROVIDER_OPERATION_QUALIFICATION_SCENARIOS],
     summary: { passed: 6, failed: 0, skipped: 0 },
     outcome: "passed"
-  }, { expectedSourceCommit: sourceCommit, expectedCatalogSha256: sha256(catalogBytes) });
+  }, {
+    expectedSourceCommit: sourceCommit,
+    expectedCatalogSha256: sha256(catalogBytes),
+    expectedCatalogEntries: catalogState.entries,
+    expectedMigrationVersion: catalogState.migrationVersion
+  });
 }
 
 export function normalizeProviderOperationQualificationEvidence(value, {
   expectedSourceCommit,
-  expectedCatalogSha256
+  expectedCatalogSha256,
+  expectedCatalogEntries,
+  expectedMigrationVersion
 } = {}) {
   if (!plainObject(value) || !sameArray(Object.keys(value).sort(), TOP_LEVEL_KEYS)) fail("invalid_evidence");
   if (value.version !== 1 || value.kind !== "agentpass-provider-operation-qualification"
     || value.workflow !== "CI/postgres-integration" || value.outcome !== "passed"
-    || value.migration_version !== 42 || value.catalog_entries !== 129
+    || !Number.isSafeInteger(value.migration_version) || value.migration_version < 42 || value.migration_version > 9_999
+    || (expectedMigrationVersion !== undefined && value.migration_version !== expectedMigrationVersion)
+    || !Number.isSafeInteger(value.catalog_entries) || value.catalog_entries < 129 || value.catalog_entries > 10_000
+    || (expectedCatalogEntries !== undefined && value.catalog_entries !== expectedCatalogEntries)
     || typeof value.source_commit !== "string" || !SOURCE_COMMIT.test(value.source_commit)
     || (expectedSourceCommit !== undefined && value.source_commit !== expectedSourceCommit)
     || typeof value.catalog_sha256 !== "string" || !DIGEST.test(value.catalog_sha256)
@@ -148,12 +158,18 @@ export async function verifyProviderOperationQualificationEvidence(inputFile, {
   ]);
   let value;
   try {
+    let catalog;
+    try { catalog = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(catalogBytes)); }
+    catch { fail("invalid_catalog"); }
+    const catalogState = catalogMetadata(catalog);
     const text = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
     if (!text.endsWith("\n")) fail("invalid_evidence");
     value = JSON.parse(text);
     const normalized = normalizeProviderOperationQualificationEvidence(value, {
       expectedSourceCommit,
-      expectedCatalogSha256: sha256(catalogBytes)
+      expectedCatalogSha256: sha256(catalogBytes),
+      expectedCatalogEntries: catalogState.entries,
+      expectedMigrationVersion: catalogState.migrationVersion
     });
     if (`${canonicalJson(normalized)}\n` !== text) fail("invalid_evidence");
   } catch (error) {
@@ -191,6 +207,19 @@ function positiveInteger(value) {
   const number = typeof value === "string" && /^[1-9][0-9]{0,3}$/u.test(value) ? Number(value) : value;
   if (!Number.isSafeInteger(number) || number < 1 || number > 1_000) fail("invalid_arguments");
   return number;
+}
+
+function catalogMetadata(value) {
+  if (!plainObject(value) || !Array.isArray(value.entries) || value.entries.length < 129 || value.entries.length > 10_000) {
+    fail("invalid_catalog");
+  }
+  const migrations = value.entries.filter((entry) => plainObject(entry) && entry.kind === "postgres-migration");
+  if (migrations.length < 42 || migrations.some((entry) => !Number.isSafeInteger(entry.version) || entry.version < 1 || entry.version > 9_999)) {
+    fail("invalid_catalog");
+  }
+  const migrationVersion = Math.max(...migrations.map((entry) => entry.version));
+  if (migrationVersion < 42) fail("invalid_catalog");
+  return Object.freeze({ entries: value.entries.length, migrationVersion });
 }
 
 function sha256(bytes) { return crypto.createHash("sha256").update(bytes).digest("hex"); }
