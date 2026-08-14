@@ -43,6 +43,8 @@ The public `event_id` is the provider idempotency key. A provider response can b
 
 Claimed events in one batch are delivered concurrently so the configured publish timeout cannot serially exhaust later events' leases. Runtime shutdown first stops scheduling, tracks manual and scheduled cycles, waits a bounded time for active deliveries, then closes notification listeners and PostgreSQL. Concurrent drain callers share one result. A worker that cannot drain keeps storage open and makes shutdown fail closed. Operators observe only aggregate pending/dead-letter counts and age plus label-free claim, publish, retry, dead-letter, claim-loss, uncertain-outcome, failure, and lag counters. Readiness fails closed when the worker is unavailable, a dead letter exists, or the hard backlog/lag threshold is exceeded.
 
+Dead-letter management is tenant-scoped and never edits the immutable event identity. Migration 0030 binds each event to the recovery request's exact subject, tracks a monotonic management version, at most three redrives, cumulative delivery attempts, and a terminal suppression state. Redrive and suppression require a current owner/admin session and consumed operation-bound recent WebAuthn to be revalidated inside the same organization-locked transaction before idempotency claim, CAS mutation, audit append, and commit. The management repository is not exposed over HTTP until the recent-auth ceremony also binds the proof to the exact event, action, and expected management version.
+
 ## Transaction and lock order
 
 Every mutation uses the same order:

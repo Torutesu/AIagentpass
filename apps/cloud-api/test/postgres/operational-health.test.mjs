@@ -296,6 +296,27 @@ test("owner recovery outbox readiness is aggregate-only and fails closed on dead
   assert.equal((await health.readiness()).code, "owner_recovery_outbox_unavailable");
 });
 
+test("readiness returns a fixed failure within its application deadline when a provider never settles", async () => {
+  const drain = createDrainController();
+  const health = createOperationalHealth({
+    pool: pool(),
+    maxConnections: 10,
+    migrationStatus: () => new Promise(() => {}),
+    probe: () => new Promise(() => {}),
+    metrics: createOperationalMetrics(),
+    drainController: drain,
+    readinessTimeoutMs: 10
+  });
+  const started = Date.now();
+  const report = await health.readiness();
+  assert.ok(Date.now() - started < 250);
+  assert.equal(report.ready, false);
+  assert.equal(report.code, "database_unavailable");
+  assert.deepEqual(report.checks.database, { ok: false, probe: "failed" });
+  assert.equal(report.checks.schema.checksum_status, "unknown");
+  assert.doesNotMatch(JSON.stringify(report), /drain_timeout|Promise|stack|SELECT/u);
+});
+
 test("drain rejects readiness immediately and waits for tracked work within the bound", async () => {
   const drain = createDrainController({ defaultTimeoutMs: 100, maxTimeoutMs: 200 });
   const release = drain.acquire();

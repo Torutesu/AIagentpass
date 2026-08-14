@@ -1,5 +1,5 @@
 export const OPERATIONAL_HEALTH_VERSION = 1;
-export const EXPECTED_POSTGRES_SCHEMA_VERSION = 29;
+export const EXPECTED_POSTGRES_SCHEMA_VERSION = 30;
 
 // Recovery operations are deliberately a closed set.  These names are also
 // the admission-control names used by human-auth/rate-limit.mjs; keeping the
@@ -350,6 +350,7 @@ export function createOperationalHealth({
   outboxStatus,
   outboxMaxPending = 10_000,
   outboxMaxLagMs = 15 * 60_000,
+  readinessTimeoutMs = 5_000,
   now = () => Date.now()
 } = {}) {
   if (!pool || typeof pool !== "object") throw invalidOperationalInput();
@@ -358,7 +359,7 @@ export function createOperationalHealth({
   if (!metrics || typeof metrics.snapshot !== "function") throw invalidOperationalInput();
   if (!drainController || typeof drainController.snapshot !== "function") throw invalidOperationalInput();
   if (outboxStatus !== undefined && typeof outboxStatus !== "function") throw invalidOperationalInput();
-  if (!Number.isSafeInteger(outboxMaxPending) || outboxMaxPending < 0 || outboxMaxPending > 1_000_000 || !Number.isSafeInteger(outboxMaxLagMs) || outboxMaxLagMs < 1_000 || outboxMaxLagMs > 24 * 60 * 60_000 || typeof now !== "function") throw invalidOperationalInput();
+  if (!Number.isSafeInteger(outboxMaxPending) || outboxMaxPending < 0 || outboxMaxPending > 1_000_000 || !Number.isSafeInteger(outboxMaxLagMs) || outboxMaxLagMs < 1_000 || outboxMaxLagMs > 24 * 60 * 60_000 || !Number.isSafeInteger(readinessTimeoutMs) || readinessTimeoutMs < 10 || readinessTimeoutMs > 30_000 || typeof now !== "function") throw invalidOperationalInput();
   const configuredMax = positiveInteger(maxConnections ?? pool.options?.max);
 
   async function readiness() {
@@ -380,9 +381,9 @@ export function createOperationalHealth({
     }
 
     const [databaseResult, migrationResult, outboxResult] = await Promise.allSettled([
-      Promise.resolve().then(() => probe(pool)),
-      Promise.resolve().then(() => migrationStatus()),
-      outboxStatus === undefined ? Promise.resolve(undefined) : Promise.resolve().then(() => outboxStatus())
+      withTimeout(Promise.resolve().then(() => probe(pool)), readinessTimeoutMs),
+      withTimeout(Promise.resolve().then(() => migrationStatus()), readinessTimeoutMs),
+      outboxStatus === undefined ? Promise.resolve(undefined) : withTimeout(Promise.resolve().then(() => outboxStatus()), readinessTimeoutMs)
     ]);
     recordObservedLockWaits(metrics, databaseResult);
     const database = normalizeProbeResult(databaseResult);

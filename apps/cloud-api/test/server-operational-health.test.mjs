@@ -67,7 +67,7 @@ test("readiness exposes only aggregate owner recovery outbox state", async (t) =
     code: "owner_recovery_outbox_dead_letter_present",
     checks: {
       database: { ok: true, probe: "ok" },
-      schema: { ok: true, expected_version: 29, applied_version: 29, migration_count: 29, pending_count: 0, checksum_status: "verified", drift: false },
+      schema: { ok: true, expected_version: 30, applied_version: 30, migration_count: 30, pending_count: 0, checksum_status: "verified", drift: false },
       pool: { ok: true, max_connections: 10, total_connections: 1, idle_connections: 1, waiting_connections: 0, utilization_percent: 10, saturated: false },
       drain: { state: "running", accepting: true, in_flight: 0 },
       owner_recovery_outbox: { ok: false, code: "dead_letter_present", worker_state: "running", pending_count: 2, dead_letter_count: 1, oldest_pending_age_ms: 500, organization_id: "must-not-leak" }
