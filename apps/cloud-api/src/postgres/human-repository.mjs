@@ -58,11 +58,20 @@ export function createPostgresHumanRepository({ client, onAuthorityReduction } =
     if (limit > 10_000) throw new TypeError("max concurrent sessions is invalid");
     const issuedAt = timestamp(input?.issued_at ?? input?.issuedAt ?? record.created_at);
     const reason = bounded(input?.revoke_reason ?? input?.revokeReason ?? "concurrent_session_limit", 128);
+    const identityReplay = optionalIdentityReplay(input?.identity_replay ?? input?.identityReplay);
 
     return inTransaction(async (transactionClient) => {
       // The global member lock, rather than a process-local mutex, makes the
       // ceiling authoritative across every API replica and organization.
       await lockSessionSet(transactionClient, record.member_id);
+      if (identityReplay !== undefined) {
+        const replay = await transactionClient.query("SELECT agentpass_consume_human_identity_assertion($1::bytea,$2::timestamptz) AS consumed", [identityReplay.jti_digest, identityReplay.expires_at]);
+        if (replay.rows?.[0]?.consumed !== true) {
+          const error = new Error("human identity assertion was already consumed");
+          error.code = "human_identity_assertion_replay";
+          throw error;
+        }
+      }
       const reduced = await transactionClient.query(`WITH ranked AS (
           SELECT s.id,row_number() OVER (ORDER BY s.created_at DESC,s.id DESC) AS position
           FROM human_sessions s
@@ -235,6 +244,14 @@ export function createPostgresHumanRepository({ client, onAuthorityReduction } =
     const expiresAt = timestamp(input?.expires_at ?? input?.expiresAt);
     const result = await client.query("SELECT agentpass_consume_human_identity_assertion($1::bytea,$2::timestamptz) AS consumed", [digest, expiresAt]);
     return result.rows?.[0]?.consumed === true;
+  }
+
+  function optionalIdentityReplay(value) {
+    if (value === undefined) return undefined;
+    return Object.freeze({
+      jti_digest: digest32(value?.jti_digest ?? value?.jtiDigest),
+      expires_at: timestamp(value?.expires_at ?? value?.expiresAt)
+    });
   }
 
   async function getRegistrationUser(input) {

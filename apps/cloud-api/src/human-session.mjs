@@ -26,6 +26,7 @@ export const HUMAN_SESSION_ERROR_CODES = Object.freeze({
   INVALID_CONFIGURATION: "invalid_session_configuration",
   INVALID_INPUT: "invalid_session_input",
   IDENTITY_VERIFICATION_FAILED: "identity_verification_failed",
+  IDENTITY_REPLAY: "identity_assertion_replay",
   INVALID_ORIGIN: "invalid_origin",
   INVALID_COOKIE: "invalid_session_cookie",
   SESSION_NOT_FOUND: "session_not_found",
@@ -40,6 +41,7 @@ const ERROR_MESSAGES = Object.freeze({
   [HUMAN_SESSION_ERROR_CODES.INVALID_CONFIGURATION]: "Human session configuration is invalid",
   [HUMAN_SESSION_ERROR_CODES.INVALID_INPUT]: "Human session input is invalid",
   [HUMAN_SESSION_ERROR_CODES.IDENTITY_VERIFICATION_FAILED]: "Upstream identity assertion could not be verified",
+  [HUMAN_SESSION_ERROR_CODES.IDENTITY_REPLAY]: "Upstream identity assertion was already consumed",
   [HUMAN_SESSION_ERROR_CODES.INVALID_ORIGIN]: "Request origin is not allowed",
   [HUMAN_SESSION_ERROR_CODES.INVALID_COOKIE]: "Session cookie is invalid",
   [HUMAN_SESSION_ERROR_CODES.SESSION_NOT_FOUND]: "Session is invalid",
@@ -163,6 +165,8 @@ export function assertStrictOrigin(actual, expected) {
 /**
  * Create the identity-backed session service. `identityAdapter.verify` is
  * mandatory: caller-supplied identity fields are never trusted directly.
+ * `authorizeIdentity` is also mandatory and runs after one-use identity
+ * verification but before credential generation or durable insertion.
  */
 export function createHumanSessionService(options = {}) {
   const repository = assertHumanSessionRepository(options.repository);
@@ -171,6 +175,8 @@ export function createHumanSessionService(options = {}) {
     ? identityAdapter
     : identityAdapter?.verify ?? identityAdapter?.assert;
   if (typeof verifyIdentity !== "function") fail(HUMAN_SESSION_ERROR_CODES.INVALID_CONFIGURATION);
+  const authorizeIdentity = options.authorizeIdentity;
+  if (typeof authorizeIdentity !== "function") fail(HUMAN_SESSION_ERROR_CODES.INVALID_CONFIGURATION);
 
   const expectedOrigin = options.origin ?? options.expectedOrigin;
   if (typeof expectedOrigin !== "string" || expectedOrigin.length === 0 || expectedOrigin.endsWith("/")) {
@@ -207,6 +213,11 @@ export function createHumanSessionService(options = {}) {
     if (principal.assertion_expires_at !== undefined && principal.assertion_expires_at <= now) {
       fail(HUMAN_SESSION_ERROR_CODES.IDENTITY_VERIFICATION_FAILED);
     }
+    await authorizeIdentity(Object.freeze({
+      subject_bucket_id: principal.subject_bucket_id,
+      member_id: principal.member_id,
+      organization_id: principal.organization_id
+    }));
 
     return withLock(locks, principal.member_id, async () => {
       const token = generateOpaqueToken(randomBytes);
@@ -231,13 +242,20 @@ export function createHumanSessionService(options = {}) {
       };
       const storedRecord = stripForRepository(record);
       if (typeof repository.createSessionWithLimit === "function") {
-        await repository.createSessionWithLimit({
-          session: storedRecord,
-          max_concurrent_sessions: maxConcurrentSessions,
-          issued_at: createdAt,
-          revoke_reason: "concurrent_session_limit"
-        });
+        try {
+          await repository.createSessionWithLimit({
+            session: storedRecord,
+            max_concurrent_sessions: maxConcurrentSessions,
+            issued_at: createdAt,
+            revoke_reason: "concurrent_session_limit",
+            ...(principal.identity_replay === undefined ? {} : { identity_replay: principal.identity_replay })
+          });
+        } catch (error) {
+          if (error?.code === "human_identity_assertion_replay") fail(HUMAN_SESSION_ERROR_CODES.IDENTITY_REPLAY);
+          throw error;
+        }
       } else {
+        if (principal.identity_replay !== undefined) fail(HUMAN_SESSION_ERROR_CODES.INVALID_CONFIGURATION);
         await enforceSessionLimit(principal.member_id, now, maxConcurrentSessions);
         await repository.createSession(storedRecord);
       }
@@ -440,11 +458,20 @@ function normalizeIdentity(identity) {
   const membershipId = value.membership_id ?? value.membershipId;
   const organizationId = value.organization_id ?? value.organizationId ?? value.org_id;
   const role = value.role;
-  if (!isUuid(memberId) || !isUuid(membershipId) || !isUuid(organizationId) || !ROLES.has(role)) fail(HUMAN_SESSION_ERROR_CODES.IDENTITY_VERIFICATION_FAILED);
+  const subjectBucketId = identity?.subject_bucket_id ?? identity?.subjectBucketId ?? value.subject_bucket_id ?? value.subjectBucketId;
+  if (!isUuid(memberId) || !isUuid(membershipId) || !isUuid(organizationId) || !isUuid(subjectBucketId) || !ROLES.has(role)) fail(HUMAN_SESSION_ERROR_CODES.IDENTITY_VERIFICATION_FAILED);
   const assertionExpiry = value.expires_at ?? value.expiresAt;
   const assertionExpiresAt = assertionExpiry === undefined ? undefined : Date.parse(assertionExpiry);
   if (assertionExpiry !== undefined && !Number.isFinite(assertionExpiresAt)) fail(HUMAN_SESSION_ERROR_CODES.IDENTITY_VERIFICATION_FAILED);
-  return { member_id: memberId, membership_id: membershipId, organization_id: organizationId, role, assertion_expires_at: assertionExpiresAt };
+  const replayValue = identity?.identity_replay ?? identity?.identityReplay;
+  let identityReplay;
+  if (replayValue !== undefined) {
+    const jtiDigest = replayValue?.jti_digest ?? replayValue?.jtiDigest;
+    const expiresAt = replayValue?.expires_at ?? replayValue?.expiresAt;
+    if (typeof jtiDigest !== "string" || !HASH_PATTERN.test(jtiDigest) || typeof expiresAt !== "string" || !Number.isFinite(Date.parse(expiresAt))) fail(HUMAN_SESSION_ERROR_CODES.IDENTITY_VERIFICATION_FAILED);
+    identityReplay = Object.freeze({ jti_digest: jtiDigest, expires_at: expiresAt });
+  }
+  return { member_id: memberId, membership_id: membershipId, organization_id: organizationId, subject_bucket_id: subjectBucketId, role, assertion_expires_at: assertionExpiresAt, identity_replay: identityReplay };
 }
 
 function stripForRepository(record) {

@@ -81,6 +81,7 @@ export async function createCloudRuntime({ env = process.env, logger = console, 
     if (qualificationSignerHealth?.ready !== true || qualificationSignerHealth.key_id !== qualificationManifestSigner.key_id) throw new Error("Cloud qualification manifest signer is unavailable");
   }
   const cursorSecret = config.humanAuth ? requireHumanCursorSecret(env.AGENTPASS_HUMAN_CURSOR_SECRET) : undefined;
+  const humanAuthSecret = config.humanAuth ? exactRuntimeSecret(env.AGENTPASS_HUMAN_AUTH_SECRET, "AGENTPASS_HUMAN_AUTH_SECRET") : undefined;
   const consoleIdentityPublicKey = config.humanAuth
     ? readProtectedFile(config.humanAuth.identityAssertionPublicKeyPath, "console identity public key", 16 * 1024).toString("utf8")
     : undefined;
@@ -111,6 +112,7 @@ export async function createCloudRuntime({ env = process.env, logger = console, 
         origin: config.humanAuth.origin,
         rpId: config.humanAuth.rpId,
         cursorSecret,
+        securitySecret: humanAuthSecret,
         identityProvider: config.humanAuth.identityProvider,
         signedConsoleIdentity: {
           issuer: config.humanAuth.identityAssertionIssuer,
@@ -307,6 +309,7 @@ function humanAuthConfig(env) {
     || !IDENTIFIER.test(identityAssertionKeyId ?? "")) throw new Error("Human identity assertion configuration is incomplete");
   const publicKeyPath = absolute(identityAssertionPublicKeyPath, "AGENTPASS_IDENTITY_ASSERTION_PUBLIC_KEY_PATH");
   requireHumanCursorSecret(env.AGENTPASS_HUMAN_CURSOR_SECRET);
+  exactRuntimeSecret(env.AGENTPASS_HUMAN_AUTH_SECRET, "AGENTPASS_HUMAN_AUTH_SECRET");
   return Object.freeze({ origin, rpId, identityProvider, identityAssertionIssuer, identityAssertionAudience, identityAssertionKeyId, identityAssertionPublicKeyPath: publicKeyPath });
 }
 

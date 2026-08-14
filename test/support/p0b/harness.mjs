@@ -236,6 +236,7 @@ export async function startP0BHarness({ env = process.env, repoRoot = REPOSITORY
       AGENTPASS_CLOUD_REFRESH_NONCE_KEYRING_PATH: files.nonceKeyring,
       AGENTPASS_CAPABILITY_NONCE_SECRET: files.capabilitySecret,
       AGENTPASS_HUMAN_CURSOR_SECRET: files.cursorSecret,
+      AGENTPASS_HUMAN_AUTH_SECRET: Buffer.alloc(32, 0x35).toString("base64url"),
       AGENTPASS_OPERATIONAL_PROBE_SECRET: files.probeSecret,
       AGENTPASS_CONSOLE_ORIGIN: `https://localhost:${consoleTlsPort}`,
       AGENTPASS_WEBAUTHN_RP_ID: "localhost",

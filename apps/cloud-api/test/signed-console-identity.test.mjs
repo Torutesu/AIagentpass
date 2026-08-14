@@ -11,6 +11,7 @@ import {
 
 const NOW = 1_800_000_000_000;
 const NOW_SECONDS = Math.floor(NOW / 1_000);
+const REPLAY_SECRET = Buffer.alloc(32, 0x61);
 const ids = { org: "11111111-1111-4111-8111-111111111111", member: "22222222-2222-4222-8222-222222222222" };
 const config = {
   issuer: "https://console.example.test",
@@ -59,10 +60,7 @@ function adapterFixture(overrides = {}) {
     identityAdapter: { async verify() { return { member_id: ids.member, organization_id: ids.org, role: "owner", assertion_expires_at: NOW + 30_000 }; } },
     async resolveIdentity(input) { events.push(["resolve", input]); return opaque; }
   };
-  const replayRepository = {
-    async consumeConsoleIdentityJti(input) { events.push(["replay", input]); return overrides.replayResult ?? true; }
-  };
-  const adapter = createSignedConsoleIdentityAdapter({ ...config, publicKey: pair.publicKey, identityResolver, replayRepository, ...overrides });
+  const adapter = createSignedConsoleIdentityAdapter({ ...config, publicKey: pair.publicKey, identityResolver, replaySecret: REPLAY_SECRET, ...overrides });
   return { adapter, pair, events, opaque };
 }
 
@@ -70,19 +68,19 @@ function request(assertion, extra = {}) {
   return { headers: { [SIGNED_CONSOLE_IDENTITY_HEADER]: assertion, ...extra } };
 }
 
-test("verifies the pinned compact Ed25519 assertion, consumes jti, then resolves membership", async () => {
+test("verifies the pinned compact Ed25519 assertion and carries only a keyed replay digest", async () => {
   const fixture = adapterFixture();
   const { compact, header, payload } = makeAssertion(fixture.pair.privateKey);
   assert.deepEqual(Object.keys(header).sort(), ["alg", "kid", "typ", "version"]);
   assert.deepEqual(Object.keys(payload).sort(), ["aud", "exp", "iat", "iss", "jti", "nbf", "org", "origin", "provider", "sub"]);
   assert.equal(Object.hasOwn(payload, "redirect_uri"), false);
   assert.equal(await fixture.adapter.verifyIdentityRequest(request(compact)), fixture.opaque);
-  assert.equal(fixture.events[0][0], "replay");
-  assert.equal(fixture.events[1][0], "resolve");
-  assert.deepEqual(fixture.events[1][1], { provider: config.provider, subject: payload.sub, organization_id: ids.org });
-  assert.equal(Object.hasOwn(fixture.events[0][1], "organization_id"), false);
-  assert.equal(fixture.events[0][1].jti_digest, consoleIdentityJtiDigest({ iss: payload.iss, aud: payload.aud, jti: payload.jti }));
-  assert.equal(Object.hasOwn(fixture.events[0][1], "jti"), false);
+  assert.equal(fixture.events[0][0], "resolve");
+  assert.deepEqual(fixture.events[0][1], { provider: config.provider, subject: payload.sub, organization_id: ids.org });
+  const verified = await fixture.adapter.identityAdapter.verify(fixture.opaque, { now: NOW });
+  assert.equal(verified.identity_replay.jti_digest, consoleIdentityJtiDigest({ iss: payload.iss, aud: payload.aud, jti: payload.jti }, REPLAY_SECRET));
+  assert.equal(Object.hasOwn(verified.identity_replay, "jti"), false);
+  await assert.rejects(() => fixture.adapter.identityAdapter.verify(fixture.opaque, { now: NOW }), SignedConsoleIdentityError);
 });
 
 test("rejects conflicting caller identity headers and never returns signed assertion material", async () => {
@@ -90,7 +88,7 @@ test("rejects conflicting caller identity headers and never returns signed asser
   const { compact } = makeAssertion(fixture.pair.privateKey, { sub: "verified-subject" });
   const result = await fixture.adapter.verifyIdentityRequest(request(compact));
   assert.equal(result, fixture.opaque);
-  assert.equal(fixture.events[1][1].subject, "verified-subject");
+  assert.equal(fixture.events[0][1].subject, "verified-subject");
   assert.equal(JSON.stringify(result).includes(compact), false);
   for (const headers of [
     { authorization: "Bearer attacker-token" },
@@ -100,35 +98,21 @@ test("rejects conflicting caller identity headers and never returns signed asser
   ]) {
     await assert.rejects(() => fixture.adapter.verifyIdentityRequest(request(compact, headers)), SignedConsoleIdentityError);
   }
-  assert.equal(fixture.events.length, 2);
+  assert.equal(fixture.events.length, 1);
 });
 
-test("rejects replay before resolving the immutable subject", async () => {
-  const fixture = adapterFixture({ replayResult: false });
-  const { compact } = makeAssertion(fixture.pair.privateKey);
-  await assert.rejects(() => fixture.adapter.verifyIdentityRequest(request(compact)), (error) => {
-    assert.equal(error instanceof SignedConsoleIdentityError, true);
-    assert.equal(error.code, SIGNED_CONSOLE_IDENTITY_ERROR_CODES.REPLAY);
-    assert.equal(error.status, 409);
-    return true;
-  });
-  assert.deepEqual(fixture.events.map(([kind]) => kind), ["replay"]);
+test("keys replay digests so raw assertion identifiers are not stable database identifiers", () => {
+  const claims = { iss: config.issuer, aud: config.audience, jti: "jti-replay-digest-abcdefgh" };
+  const first = consoleIdentityJtiDigest(claims, REPLAY_SECRET);
+  const second = consoleIdentityJtiDigest(claims, Buffer.alloc(32, 0x62));
+  assert.match(first, /^[0-9a-f]{64}$/u);
+  assert.notEqual(first, second);
+  assert.equal(first.includes(claims.jti), false);
 });
 
-test("fails closed on replay-store outage and resolver outage without leaking details", async () => {
-  const replayOutage = adapterFixture();
-  replayOutage.adapter = createSignedConsoleIdentityAdapter({ ...config, publicKey: replayOutage.pair.publicKey, identityResolver: { async resolveIdentity() { throw new Error("subject-secret"); }, identityAdapter: { async verify() {} } }, replayRepository: { async consumeConsoleIdentityJti() { throw new Error("database-password"); } } });
-  const signed = makeAssertion(replayOutage.pair.privateKey).compact;
-  await assert.rejects(() => replayOutage.adapter.verifyIdentityRequest(request(signed)), (error) => {
-    assert.equal(error.code, SIGNED_CONSOLE_IDENTITY_ERROR_CODES.UNAVAILABLE);
-    assert.equal(error.status, 503);
-    assert.equal(error.message, "Signed console identity could not be verified");
-    assert.equal(error.message.includes("database-password"), false);
-    return true;
-  });
-
+test("fails closed on resolver outage without leaking details", async () => {
   const resolverOutage = adapterFixture();
-  resolverOutage.adapter = createSignedConsoleIdentityAdapter({ ...config, publicKey: resolverOutage.pair.publicKey, identityResolver: { async resolveIdentity() { throw new Error("provider-subject-secret"); }, identityAdapter: { async verify() {} } }, replayRepository: { async consumeConsoleIdentityJti() { return true; } } });
+  resolverOutage.adapter = createSignedConsoleIdentityAdapter({ ...config, replaySecret: REPLAY_SECRET, publicKey: resolverOutage.pair.publicKey, identityResolver: { async resolveIdentity() { throw new Error("provider-subject-secret"); }, identityAdapter: { async verify() {} } } });
   await assert.rejects(() => resolverOutage.adapter.verifyIdentityRequest(request(makeAssertion(resolverOutage.pair.privateKey).compact)), (error) => {
     assert.equal(error.code, SIGNED_CONSOLE_IDENTITY_ERROR_CODES.UNAVAILABLE);
     assert.equal(error.status, 503);
@@ -137,7 +121,7 @@ test("fails closed on replay-store outage and resolver outage without leaking de
   });
 
   const resolverDenial = adapterFixture();
-  resolverDenial.adapter = createSignedConsoleIdentityAdapter({ ...config, publicKey: resolverDenial.pair.publicKey, identityResolver: { async resolveIdentity() { throw Object.assign(new Error("inactive-membership"), { status: 401 }); }, identityAdapter: { async verify() {} } }, replayRepository: { async consumeConsoleIdentityJti() { return true; } } });
+  resolverDenial.adapter = createSignedConsoleIdentityAdapter({ ...config, replaySecret: REPLAY_SECRET, publicKey: resolverDenial.pair.publicKey, identityResolver: { async resolveIdentity() { throw Object.assign(new Error("inactive-membership"), { status: 401 }); }, identityAdapter: { async verify() {} } } });
   await assert.rejects(() => resolverDenial.adapter.verifyIdentityRequest(request(makeAssertion(resolverDenial.pair.privateKey).compact)), (error) => {
     assert.equal(error.code, SIGNED_CONSOLE_IDENTITY_ERROR_CODES.INVALID_ASSERTION);
     assert.equal(error.status, 401);
@@ -152,8 +136,8 @@ test("fails closed when the identity resolver returns a structural or mutable as
   for (const output of [null, { version: 1 }, { version: 1, issued_at: NOW, expires_at: NOW + 30_000 }, Object.freeze({ version: 1, issued_at: NOW, expires_at: NOW })]) {
     const adapter = createSignedConsoleIdentityAdapter({
       ...config,
+      replaySecret: REPLAY_SECRET,
       publicKey: fixture.pair.publicKey,
-      replayRepository: { async consumeConsoleIdentityJti() { return true; } },
       identityResolver: { async resolveIdentity() { return output; }, identityAdapter: { async verify() {} } }
     });
     await assert.rejects(() => adapter.verifyIdentityRequest(request(signed)), (error) => {
@@ -207,7 +191,8 @@ test("enforces nbf/iat/exp relationships, sixty-second TTL, and configured clock
 test("requires an Ed25519 pinned key and complete production configuration", () => {
   const pair = crypto.generateKeyPairSync("rsa", { modulusLength: 2048 });
   const resolver = { async resolveIdentity() {}, identityAdapter: { async verify() {} } };
-  assert.throws(() => createSignedConsoleIdentityAdapter({ ...config, publicKey: pair.publicKey, identityResolver: {}, replayRepository: {} }), /identityResolver/);
-  assert.throws(() => createSignedConsoleIdentityAdapter({ ...config, publicKey: pair.publicKey, identityResolver: resolver, replayRepository: { async consumeConsoleIdentityJti() {} } }), /Ed25519/);
-  assert.throws(() => createSignedConsoleIdentityAdapter({ ...config, origin: undefined, publicKey: crypto.generateKeyPairSync("ed25519").publicKey, identityResolver: resolver, replayRepository: { async consumeConsoleIdentityJti() {} } }), /configuration/);
+  assert.throws(() => createSignedConsoleIdentityAdapter({ ...config, replaySecret: REPLAY_SECRET, publicKey: pair.publicKey, identityResolver: {} }), /identityResolver/);
+  assert.throws(() => createSignedConsoleIdentityAdapter({ ...config, replaySecret: REPLAY_SECRET, publicKey: pair.publicKey, identityResolver: resolver }), /Ed25519/);
+  assert.throws(() => createSignedConsoleIdentityAdapter({ ...config, replaySecret: REPLAY_SECRET, origin: undefined, publicKey: crypto.generateKeyPairSync("ed25519").publicKey, identityResolver: resolver }), /configuration/);
+  assert.throws(() => createSignedConsoleIdentityAdapter({ ...config, publicKey: crypto.generateKeyPairSync("ed25519").publicKey, identityResolver: resolver }), /replay secret/);
 });

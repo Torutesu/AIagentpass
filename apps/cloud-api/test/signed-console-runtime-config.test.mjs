@@ -80,6 +80,7 @@ function createFixture({ identityPublicKey, bundlePrivateKey } = {}) {
       AGENTPASS_CONSOLE_ORIGIN: "https://console.example.test",
       AGENTPASS_WEBAUTHN_RP_ID: "example.test",
       AGENTPASS_HUMAN_CURSOR_SECRET: CURSOR_SECRET,
+      AGENTPASS_HUMAN_AUTH_SECRET: Buffer.alloc(32, 0x5b).toString("base64url"),
       AGENTPASS_CAPABILITY_NONCE_SECRET: Buffer.alloc(32, 0x33).toString("base64url"),
       AGENTPASS_OPERATIONAL_PROBE_SECRET: Buffer.alloc(32, 0x34).toString("base64url"),
       AGENTPASS_IDENTITY_PROVIDER: "chatgpt",
@@ -145,7 +146,8 @@ function fakePostgresRuntime() {
     refreshHintNotifier: { async waitForRefresh() { return false; } },
     sharedControlRepository: {
       async consumeDeviceRequestNonce() { return { accepted: true }; },
-      async acquireRateLimit() { return { allowed: true, limit: 120, remaining: 119, retryAfterMs: 0, retryAfterSeconds: 0, resetAt: Date.now() }; }
+      async acquireRateLimit() { return { allowed: true, limit: 120, remaining: 119, retryAfterMs: 0, retryAfterSeconds: 0, resetAt: Date.now() }; },
+      async acquireAnonymousRateLimit() { return { allowed: true, limit: 120, remaining: 119, retryAfterMs: 0, retryAfterSeconds: 0, resetAt: Date.now() }; }
     },
     async readiness() { return { version: 1, ready: true, status: "ready", code: "ready" }; },
     async close() { closed = true; },
@@ -346,12 +348,13 @@ test("complete production configuration wires only the pinned signedConsoleIdent
     });
     assert.equal(Object.hasOwn(calls[0], "privateKeyPEM"), false);
     assert.equal(Object.hasOwn(calls[0], "databaseUrl"), false);
+    assert.equal(Buffer.from(calls[0].securitySecret).toString("base64url"), fixture.env.AGENTPASS_HUMAN_AUTH_SECRET);
     assert.equal(Object.hasOwn(runtime.config.humanAuth, "cursorSecret"), false);
     assert.equal(Object.hasOwn(runtime.config.humanAuth, "database"), false);
     assert.equal(runtime.config.tokenRecordsPath, null);
     const serializedConfig = JSON.stringify(runtime.config);
     const serializedLogs = JSON.stringify(logs);
-    for (const secret of [DATABASE_URL, CURSOR_SECRET, fixture.bundlePEM]) {
+    for (const secret of [DATABASE_URL, CURSOR_SECRET, fixture.env.AGENTPASS_HUMAN_AUTH_SECRET, fixture.bundlePEM]) {
       assert.doesNotMatch(serializedConfig, new RegExp(escapeRegExp(secret)), "secret leaked into runtime config");
       assert.doesNotMatch(serializedLogs, new RegExp(escapeRegExp(secret)), "secret leaked into runtime logs");
     }

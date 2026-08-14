@@ -60,6 +60,8 @@ test("runtime rejects unsafe secrets, key algorithms, and configuration", async 
   assert.throws(() => loadRuntimeConfig({ ...humanEnv, AGENTPASS_WEBAUTHN_RP_ID: "other.test" }), /Human Auth configuration is invalid/);
   assert.throws(() => loadRuntimeConfig({ ...humanEnv, AGENTPASS_HUMAN_CURSOR_SECRET: undefined }), /requires complete PostgreSQL/);
   assert.throws(() => loadRuntimeConfig({ ...humanEnv, AGENTPASS_HUMAN_CURSOR_SECRET: "A".repeat(42) }), /Human Auth configuration is invalid/);
+  assert.throws(() => loadRuntimeConfig({ ...humanEnv, AGENTPASS_HUMAN_AUTH_SECRET: undefined }), /requires complete PostgreSQL/);
+  assert.throws(() => loadRuntimeConfig({ ...humanEnv, AGENTPASS_HUMAN_AUTH_SECRET: "A".repeat(42) }), /Human Auth configuration is invalid/);
   assert.throws(() => loadRuntimeConfig({ ...humanEnv, AGENTPASS_OWNER_RECOVERY_NOTIFICATION_AUTHORIZATION_PATH: undefined }), /requires complete PostgreSQL/);
   const withoutNotifications = { ...humanEnv, AGENTPASS_OWNER_RECOVERY_NOTIFICATION_WEBHOOK_URL: undefined, AGENTPASS_OWNER_RECOVERY_NOTIFICATION_AUTHORIZATION_PATH: undefined };
   await assert.rejects(createCloudRuntime({ env: withoutNotifications, agentSessionSignerProvider: signerProvider(value), qualificationManifestSignerProvider: qualificationSignerProvider(value) }), /requires complete PostgreSQL/);
@@ -90,20 +92,22 @@ test("production human auth is composed from PostgreSQL and closed with the runt
     if (!qualificationSignerHealthy) throw new Error("simulated qualification provider outage");
     return qualificationPublicKeyMetadata(input);
   };
-  const runtime = await createCloudRuntime({ env, logger: { info() {} }, agentSessionSignerProvider: provider, qualificationManifestSignerProvider: qualificationProvider, ownerRecoveryPublisher, postgresFactory: async (input) => { calls.push(["postgres", input.applicationVersion, typeof input.refreshNonceCodec?.derive, typeof input.resolveProcessBindingPolicy, input.ownerRecoveryPublisher]); return postgresRuntime; }, humanAuthFactory: (input) => { calls.push(["human", input.origin, input.rpId, input.cursorSecret, input.signedConsoleIdentity, input.agentSessionSigner, input.qualificationManifestSigner]); return { api: { async handle() { return { status: 404, body: { error: { code: "not_found", message: "Resource not found" } }, headers: {} }; } }, humanSession, recentAuthService }; } });
+  const runtime = await createCloudRuntime({ env, logger: { info() {} }, agentSessionSignerProvider: provider, qualificationManifestSignerProvider: qualificationProvider, ownerRecoveryPublisher, postgresFactory: async (input) => { calls.push(["postgres", input.applicationVersion, typeof input.refreshNonceCodec?.derive, typeof input.resolveProcessBindingPolicy, input.ownerRecoveryPublisher]); return postgresRuntime; }, humanAuthFactory: (input) => { calls.push(["human", input.origin, input.rpId, input.cursorSecret, input.securitySecret, input.signedConsoleIdentity, input.agentSessionSigner, input.qualificationManifestSigner]); return { api: { async handle() { return { status: 404, body: { error: { code: "not_found", message: "Resource not found" } }, headers: {} }; } }, humanSession, recentAuthService }; } });
   assert.equal(runtime.postgresRuntime, postgresRuntime);
   assert.equal(runtime.humanAuthRuntime.recentAuthService, recentAuthService);
   assert.deepEqual(calls[0], ["postgres", "0.18.0", "function", "function", ownerRecoveryPublisher]);
   assert.deepEqual(calls[1].slice(0, 4), ["human", "https://console.example.test", "example.test", CURSOR_SECRET]);
-  assert.equal(calls[1][4].issuer, "agentpass-console");
-  assert.equal(calls[1][4].audience, "agentpass-cloud-session");
-  assert.equal(calls[1][4].keyId, "console-2026-08");
-  assert.match(calls[1][4].publicKey, /BEGIN PUBLIC KEY/);
-  assert.equal(typeof calls[1][5].signAgentSessionGrant, "function");
-  assert.equal(typeof calls[1][6].signQualificationGrantBatchManifest, "function");
+  assert.equal(Buffer.from(calls[1][4]).toString("base64url"), env.AGENTPASS_HUMAN_AUTH_SECRET);
+  assert.equal(calls[1][5].issuer, "agentpass-console");
+  assert.equal(calls[1][5].audience, "agentpass-cloud-session");
+  assert.equal(calls[1][5].keyId, "console-2026-08");
+  assert.match(calls[1][5].publicKey, /BEGIN PUBLIC KEY/);
+  assert.equal(typeof calls[1][6].signAgentSessionGrant, "function");
+  assert.equal(typeof calls[1][7].signQualificationGrantBatchManifest, "function");
   assert.equal(Object.hasOwn(runtime.config.humanAuth, "cursorSecret"), false);
   assert.equal(runtime.config.tokenRecordsPath, null);
   assert.equal(JSON.stringify(runtime.config).includes(CURSOR_SECRET), false);
+  assert.equal(JSON.stringify(runtime.config).includes(env.AGENTPASS_HUMAN_AUTH_SECRET), false);
   const address = await runtime.listen();
   const probeHeaders = { "AgentPass-Operational-Token": env.AGENTPASS_OPERATIONAL_PROBE_SECRET };
   const ready = await fetch(`http://127.0.0.1:${address.port}/health/ready`, { headers: probeHeaders });
@@ -143,7 +147,7 @@ test("production human auth fails closed without PostgreSQL capability authority
 });
 
 function hostedEnv(value) {
-  return { ...value.env, AGENTPASS_CLOUD_PROFILE: "hosted", AGENTPASS_CLOUD_DATA_DIR: undefined, AGENTPASS_CLOUD_TOKEN_RECORDS_PATH: undefined, AGENTPASS_DATABASE_URL: "postgresql://agent:secret@db.example.test/agentpass?sslmode=verify-full", AGENTPASS_CONSOLE_ORIGIN: "https://console.example.test", AGENTPASS_WEBAUTHN_RP_ID: "example.test", AGENTPASS_HUMAN_CURSOR_SECRET: CURSOR_SECRET, AGENTPASS_CAPABILITY_NONCE_SECRET: Buffer.alloc(32, 0x33).toString("base64url"), AGENTPASS_OPERATIONAL_PROBE_SECRET: Buffer.alloc(32, 0x34).toString("base64url"), AGENTPASS_IDENTITY_ASSERTION_ISSUER: "agentpass-console", AGENTPASS_IDENTITY_ASSERTION_AUDIENCE: "agentpass-cloud-session", AGENTPASS_IDENTITY_ASSERTION_KID: "console-2026-08", AGENTPASS_IDENTITY_ASSERTION_PUBLIC_KEY_PATH: value.identityPublicKeyPath, AGENTPASS_CLOUD_REFRESH_PRIVATE_KEY_PATH: value.refreshPrivateKeyPath, AGENTPASS_CLOUD_REFRESH_KEY_ID: "refresh-2026-08", AGENTPASS_CLOUD_REFRESH_NONCE_KEYRING_PATH: value.refreshNonceKeyringPath, AGENTPASS_CLOUD_AGENT_SESSION_KEY_ID: "agent-session-2026-08", AGENTPASS_CLOUD_AGENT_SESSION_PUBLIC_KEY: value.agentSessionKeys.publicKey.export({ type: "spki", format: "pem" }).toString(), AGENTPASS_CLOUD_AGENT_SESSION_PROCESS_POLICIES_PATH: value.agentSessionProcessPoliciesPath, AGENTPASS_CLOUD_QUALIFICATION_MANIFEST_KEY_ID: "qualification-manifest-2026-08", AGENTPASS_CLOUD_QUALIFICATION_MANIFEST_PUBLIC_KEY: value.qualificationManifestKeys.publicKey.export({ type: "spki", format: "pem" }).toString(), AGENTPASS_OWNER_RECOVERY_NOTIFICATION_WEBHOOK_URL: "https://notifications.example.test/owner-recovery", AGENTPASS_OWNER_RECOVERY_NOTIFICATION_AUTHORIZATION_PATH: value.ownerRecoveryNotificationAuthorizationPath };
+  return { ...value.env, AGENTPASS_CLOUD_PROFILE: "hosted", AGENTPASS_CLOUD_DATA_DIR: undefined, AGENTPASS_CLOUD_TOKEN_RECORDS_PATH: undefined, AGENTPASS_DATABASE_URL: "postgresql://agent:secret@db.example.test/agentpass?sslmode=verify-full", AGENTPASS_CONSOLE_ORIGIN: "https://console.example.test", AGENTPASS_WEBAUTHN_RP_ID: "example.test", AGENTPASS_HUMAN_CURSOR_SECRET: CURSOR_SECRET, AGENTPASS_HUMAN_AUTH_SECRET: Buffer.alloc(32, 0x43).toString("base64url"), AGENTPASS_CAPABILITY_NONCE_SECRET: Buffer.alloc(32, 0x33).toString("base64url"), AGENTPASS_OPERATIONAL_PROBE_SECRET: Buffer.alloc(32, 0x34).toString("base64url"), AGENTPASS_IDENTITY_ASSERTION_ISSUER: "agentpass-console", AGENTPASS_IDENTITY_ASSERTION_AUDIENCE: "agentpass-cloud-session", AGENTPASS_IDENTITY_ASSERTION_KID: "console-2026-08", AGENTPASS_IDENTITY_ASSERTION_PUBLIC_KEY_PATH: value.identityPublicKeyPath, AGENTPASS_CLOUD_REFRESH_PRIVATE_KEY_PATH: value.refreshPrivateKeyPath, AGENTPASS_CLOUD_REFRESH_KEY_ID: "refresh-2026-08", AGENTPASS_CLOUD_REFRESH_NONCE_KEYRING_PATH: value.refreshNonceKeyringPath, AGENTPASS_CLOUD_AGENT_SESSION_KEY_ID: "agent-session-2026-08", AGENTPASS_CLOUD_AGENT_SESSION_PUBLIC_KEY: value.agentSessionKeys.publicKey.export({ type: "spki", format: "pem" }).toString(), AGENTPASS_CLOUD_AGENT_SESSION_PROCESS_POLICIES_PATH: value.agentSessionProcessPoliciesPath, AGENTPASS_CLOUD_QUALIFICATION_MANIFEST_KEY_ID: "qualification-manifest-2026-08", AGENTPASS_CLOUD_QUALIFICATION_MANIFEST_PUBLIC_KEY: value.qualificationManifestKeys.publicKey.export({ type: "spki", format: "pem" }).toString(), AGENTPASS_OWNER_RECOVERY_NOTIFICATION_WEBHOOK_URL: "https://notifications.example.test/owner-recovery", AGENTPASS_OWNER_RECOVERY_NOTIFICATION_AUTHORIZATION_PATH: value.ownerRecoveryNotificationAuthorizationPath };
 }
 
 function signerProvider(value) {

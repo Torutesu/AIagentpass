@@ -15,6 +15,7 @@ const ORIGIN = "https://console.agentpass.test";
 const MEMBER_ID = "11111111-1111-4111-8111-111111111111";
 const ORGANIZATION_ID = "22222222-2222-4222-8222-222222222222";
 const MEMBERSHIP_ID = "44444444-4444-4444-8444-444444444444";
+const SUBJECT_BUCKET_ID = "55555555-5555-4555-8555-555555555555";
 const OTHER_MEMBER_ID = "33333333-3333-4333-8333-333333333333";
 const START = Date.parse("2026-08-12T00:00:00.000Z");
 
@@ -68,6 +69,7 @@ class MemorySessionRepository {
 
 function fixture(options = {}) {
   const repository = options.repository ?? new MemorySessionRepository();
+  const authorizedIdentities = [];
   let now = options.start ?? START;
   const service = createHumanSessionService({
     repository,
@@ -76,14 +78,15 @@ function fixture(options = {}) {
     absoluteTtlMs: options.absoluteTtlMs ?? 120_000,
     maxConcurrentSessions: options.maxConcurrentSessions ?? 3,
     now: () => now,
+    authorizeIdentity: options.authorizeIdentity ?? (async (identity) => { authorizedIdentities.push(identity); }),
     identityAdapter: {
       async verify(assertion) {
         if (assertion !== "upstream-assertion") return null;
-        return { member_id: MEMBER_ID, membership_id: MEMBERSHIP_ID, organization_id: ORGANIZATION_ID, role: "owner" };
+        return { member_id: MEMBER_ID, membership_id: MEMBERSHIP_ID, organization_id: ORGANIZATION_ID, subject_bucket_id: SUBJECT_BUCKET_ID, role: "owner" };
       }
     }
   });
-  return { repository, service, advance: (milliseconds) => { now += milliseconds; } };
+  return { repository, service, authorizedIdentities, advance: (milliseconds) => { now += milliseconds; } };
 }
 
 async function issue(fixtureValue, assertion = "upstream-assertion") {
@@ -109,6 +112,7 @@ test("issues a 256-bit opaque cookie and stores only hashes", async () => {
   assert.match(f.repository.created[0].token_hash, /^[0-9a-f]{64}$/);
   assert.match(f.repository.created[0].csrf_token_hash, /^[0-9a-f]{64}$/);
   assert.equal(f.repository.created[0].membership_id, MEMBERSHIP_ID);
+  assert.deepEqual(f.authorizedIdentities, [{ subject_bucket_id: SUBJECT_BUCKET_ID, member_id: MEMBER_ID, organization_id: ORGANIZATION_ID }]);
 
   assert.deepEqual(Object.keys(issued.session).sort(), [
     "created_at", "expires_at", "member_id", "organization_id", "recent_auth_at", "role", "session_id", "version"
@@ -273,7 +277,30 @@ test("publicSession is a closed, secret-free projection", () => {
 });
 
 test("does not silently accept a repository without the required adapter surface", () => {
-  assert.throws(() => createHumanSessionService({ repository: {}, origin: ORIGIN, identityAdapter: async () => ({}) }), (error) => error.code === HUMAN_SESSION_ERROR_CODES.REPOSITORY_INVALID);
-  assert.throws(() => createHumanSessionService({ repository: new MemorySessionRepository(), origin: ORIGIN }), (error) => error.code === HUMAN_SESSION_ERROR_CODES.INVALID_CONFIGURATION);
+  assert.throws(() => createHumanSessionService({ repository: {}, origin: ORIGIN, identityAdapter: async () => ({}), authorizeIdentity: async () => {} }), (error) => error.code === HUMAN_SESSION_ERROR_CODES.REPOSITORY_INVALID);
+  assert.throws(() => createHumanSessionService({ repository: new MemorySessionRepository(), origin: ORIGIN, authorizeIdentity: async () => {} }), (error) => error.code === HUMAN_SESSION_ERROR_CODES.INVALID_CONFIGURATION);
+  assert.throws(() => createHumanSessionService({ repository: new MemorySessionRepository(), origin: ORIGIN, identityAdapter: async () => ({}) }), (error) => error.code === HUMAN_SESSION_ERROR_CODES.INVALID_CONFIGURATION);
   void OTHER_MEMBER_ID;
+});
+
+test("verified identity admission runs before token generation and session insertion", async () => {
+  let randomCalls = 0;
+  const repository = new MemorySessionRepository();
+  const denial = Object.assign(new Error("limiter-secret"), { code: "human_auth_rate_limited", status: 429 });
+  const service = createHumanSessionService({
+    repository,
+    origin: ORIGIN,
+    idleTtlMs: 30_000,
+    absoluteTtlMs: 120_000,
+    now: () => START,
+    randomBytes(size) { randomCalls += 1; return Buffer.alloc(size, 1); },
+    identityAdapter: { async verify() { return { member_id: MEMBER_ID, membership_id: MEMBERSHIP_ID, organization_id: ORGANIZATION_ID, subject_bucket_id: SUBJECT_BUCKET_ID, role: "owner" }; } },
+    async authorizeIdentity(identity) {
+      assert.deepEqual(identity, { subject_bucket_id: SUBJECT_BUCKET_ID, member_id: MEMBER_ID, organization_id: ORGANIZATION_ID });
+      throw denial;
+    }
+  });
+  await assert.rejects(() => service.issueSession({ identityAssertion: "upstream-assertion", origin: ORIGIN }), (error) => error === denial);
+  assert.equal(randomCalls, 0);
+  assert.equal(repository.created.length, 0);
 });

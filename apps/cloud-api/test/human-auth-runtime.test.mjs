@@ -6,11 +6,17 @@ import { createHumanAuthRuntime } from "../src/human-auth/runtime.mjs";
 
 const ids = { org: "11111111-1111-4111-8111-111111111111", member: "22222222-2222-4222-8222-222222222222" };
 const CURSOR_SECRET = Buffer.alloc(32, 0x42).toString("base64url");
+const SECURITY_SECRET = Buffer.alloc(32, 0x43).toString("base64url");
 
 function postgres() {
   const sessions = [];
   const humanRepository = {
     async createSession(record) { sessions.push({ ...record }); return record; },
+    async createSessionWithLimit({ session, identity_replay }) {
+      if (identity_replay !== undefined) humanRepository.consumedReplay = identity_replay;
+      sessions.push({ ...session });
+      return session;
+    },
     async findSessionByTokenHash({ token_hash }) { return sessions.find((item) => item.token_hash === token_hash) ?? null; },
     async updateSessionActivity(input) { const found=sessions.find((item)=>item.session_id===input.session_id); return found ? Object.assign(found,{last_seen_at:input.last_seen_at,idle_expires_at:input.idle_expires_at}) : null; },
     async revokeSession() { return null; },
@@ -41,7 +47,7 @@ function postgres() {
     async revokeInvitation() { return null; },
     async acceptInvitation() { return null; }
   };
-  return { pool: { async query(sql) { if (String(sql).includes("FROM upstream_identities")) return { rows: [{ provider: "chatgpt", subject: "siwc-user-1", member_id: ids.member, membership_id: "33333333-3333-4333-8333-333333333333", organization_id: ids.org, role: "owner" }], rowCount: 1 }; return { rows: [], rowCount: 0 }; }, async connect() { throw new Error("not used by session bootstrap"); } }, humanRepository, organizationRepository, sharedControlRepository: { async acquireRateLimit({ capacity }) { return { allowed: true, limit: capacity, remaining: capacity - 1, retryAfterMs: 0, resetAt: Date.now() }; } } };
+  return { pool: { async query(sql) { if (String(sql).includes("FROM upstream_identities")) return { rows: [{ provider: "chatgpt", subject: "siwc-user-1", member_id: ids.member, membership_id: "33333333-3333-4333-8333-333333333333", organization_id: ids.org, role: "owner" }], rowCount: 1 }; return { rows: [], rowCount: 0 }; }, async connect() { throw new Error("not used by session bootstrap"); } }, humanRepository, organizationRepository, sharedControlRepository: { async acquireRateLimit({ capacity }) { return { allowed: true, limit: capacity, remaining: capacity - 1, retryAfterMs: 0, resetAt: Date.now() }; }, async acquireAnonymousRateLimit({ capacity }) { return { allowed: true, limit: capacity, remaining: capacity - 1, retryAfterMs: 0, resetAt: Date.now() }; } } };
 }
 
 function recoveryPostgres() {
@@ -75,6 +81,7 @@ test("composes the production human-auth boundary and bootstraps a hash-only ses
     origin: "https://console.example.test",
     rpId: "console.example.test",
     cursorSecret: CURSOR_SECRET,
+    securitySecret: SECURITY_SECRET,
     now: () => 1_800_000_000_000,
   });
   const result = await runtime.api.handle({ method: "POST", url: "/api/auth/session", headers: { authorization: `Bearer ${token}`, "agentpass-console-user-id": "siwc-user-1", origin: "https://console.example.test", "content-type": "application/json" }, body: "{}" });
@@ -105,14 +112,14 @@ test("composes recovery dead-letter management only from its durable repository"
     async suppressDeadLetter() { throw new Error("not invoked"); }
   };
   const tokenRecords = [createApiTokenRecord({ token: generateApiToken(), organizationId: ids.org, memberId: ids.member, role: "owner" })];
-  const runtime = createHumanAuthRuntime({ postgresRuntime: configured, tokenRecords, origin: "https://console.example.test", rpId: "console.example.test", cursorSecret: CURSOR_SECRET });
+  const runtime = createHumanAuthRuntime({ postgresRuntime: configured, tokenRecords, origin: "https://console.example.test", rpId: "console.example.test", cursorSecret: CURSOR_SECRET, securitySecret: SECURITY_SECRET });
   assert.equal(typeof runtime.recoveryDeadLetterApi?.handle, "function");
 });
 
 test("requires PostgreSQL and rejects unsupported recent-auth operations", async () => {
   assert.throws(() => createHumanAuthRuntime({}), /postgresRuntime/);
   const token = generateApiToken();
-  const runtime = createHumanAuthRuntime({ postgresRuntime: postgres(), tokenRecords: [createApiTokenRecord({ token, organizationId: ids.org, memberId: ids.member, role: "owner" })], origin: "https://console.example.test", rpId: "console.example.test", cursorSecret: CURSOR_SECRET });
+  const runtime = createHumanAuthRuntime({ postgresRuntime: postgres(), tokenRecords: [createApiTokenRecord({ token, organizationId: ids.org, memberId: ids.member, role: "owner" })], origin: "https://console.example.test", rpId: "console.example.test", cursorSecret: CURSOR_SECRET, securitySecret: SECURITY_SECRET });
   const session = await runtime.api.handle({ method: "POST", url: "/api/auth/session", headers: { authorization: `Bearer ${token}`, "agentpass-console-user-id": "siwc-user-1", origin: "https://console.example.test", "content-type": "application/json" }, body: "{}" });
   const cookie = session.headers["Set-Cookie"].split(";", 1)[0];
   const rejected = await runtime.api.handle({ method: "POST", url: "/api/auth/webauthn/options", headers: { cookie, origin: "https://console.example.test", "agentpass-csrf": session.body.csrf_token, "content-type": "application/json" }, body: JSON.stringify({ organization_id: ids.org, operation: "policy.delete" }) });
@@ -128,20 +135,24 @@ test("composes owner recovery only when both durable repositories are available"
     tokenRecords,
     origin: "https://console.example.test",
     rpId: "console.example.test",
-    cursorSecret: CURSOR_SECRET
+    cursorSecret: CURSOR_SECRET,
+    securitySecret: SECURITY_SECRET
   });
   assert.equal(typeof runtime.recoveryCeremony?.beginRegistration, "function");
   assert.equal(typeof runtime.recoveryService?.registrationVerify, "function");
   assert.equal(typeof runtime.recoveryApi?.handle, "function");
   const incomplete = postgres();
   incomplete.ownerRecoveryRepository = recoveryPostgres().ownerRecoveryRepository;
-  assert.throws(() => createHumanAuthRuntime({ postgresRuntime: incomplete, tokenRecords, origin: "https://console.example.test", rpId: "console.example.test", cursorSecret: CURSOR_SECRET }), /provisioned together/iu);
+  assert.throws(() => createHumanAuthRuntime({ postgresRuntime: incomplete, tokenRecords, origin: "https://console.example.test", rpId: "console.example.test", cursorSecret: CURSOR_SECRET, securitySecret: SECURITY_SECRET }), /provisioned together/iu);
 });
 
 test("fails closed when the shared Human-auth limiter dependency is missing", () => {
   const configured = postgres();
   delete configured.sharedControlRepository;
-  assert.throws(() => createHumanAuthRuntime({ postgresRuntime: configured, tokenRecords: [], origin: "https://console.example.test", rpId: "console.example.test", cursorSecret: CURSOR_SECRET }), /sharedControlRepository/iu);
+  assert.throws(() => createHumanAuthRuntime({ postgresRuntime: configured, tokenRecords: [], origin: "https://console.example.test", rpId: "console.example.test", cursorSecret: CURSOR_SECRET, securitySecret: SECURITY_SECRET }), /sharedControlRepository/iu);
+  const missingAnonymous = postgres();
+  delete missingAnonymous.sharedControlRepository.acquireAnonymousRateLimit;
+  assert.throws(() => createHumanAuthRuntime({ postgresRuntime: missingAnonymous, tokenRecords: [], origin: "https://console.example.test", rpId: "console.example.test", cursorSecret: CURSOR_SECRET, securitySecret: SECURITY_SECRET }), /sharedControlRepository/iu);
 });
 
 test("composes the Agent Session Human API only with the dedicated signer and issuance authority", () => {
@@ -149,9 +160,9 @@ test("composes the Agent Session Human API only with the dedicated signer and is
   configured.agentSessionIssuanceRepository = { async issueAgentSessionGrant() { throw new Error("not invoked"); } };
   const signer = { key_id: "agent-session-2026-08", algorithm: "ed25519", async signAgentSessionGrant() { throw new Error("not invoked"); } };
   const tokenRecords = [createApiTokenRecord({ token: generateApiToken(), organizationId: ids.org, memberId: ids.member, role: "owner" })];
-  const runtime = createHumanAuthRuntime({ postgresRuntime: configured, tokenRecords, origin: "https://console.example.test", rpId: "console.example.test", cursorSecret: CURSOR_SECRET, agentSessionSigner: signer });
+  const runtime = createHumanAuthRuntime({ postgresRuntime: configured, tokenRecords, origin: "https://console.example.test", rpId: "console.example.test", cursorSecret: CURSOR_SECRET, securitySecret: SECURITY_SECRET, agentSessionSigner: signer });
   assert.equal(typeof runtime.agentSessionGrantApi?.handle, "function");
-  assert.throws(() => createHumanAuthRuntime({ postgresRuntime: postgres(), tokenRecords, origin: "https://console.example.test", rpId: "console.example.test", cursorSecret: CURSOR_SECRET, agentSessionSigner: signer }), /issuance repository/iu);
+  assert.throws(() => createHumanAuthRuntime({ postgresRuntime: postgres(), tokenRecords, origin: "https://console.example.test", rpId: "console.example.test", cursorSecret: CURSOR_SECRET, securitySecret: SECURITY_SECRET, agentSessionSigner: signer }), /issuance repository/iu);
 });
 
 test("composes qualification batch authorization only with both purpose-separated signers and repositories", () => {
@@ -164,11 +175,11 @@ test("composes qualification batch authorization only with both purpose-separate
     async signQualificationGrantBatchManifest() { throw new Error("not invoked"); }
   };
   const tokenRecords = [createApiTokenRecord({ token: generateApiToken(), organizationId: ids.org, memberId: ids.member, role: "owner" })];
-  const runtime = createHumanAuthRuntime({ postgresRuntime: configured, tokenRecords, origin: "https://console.example.test", rpId: "console.example.test", cursorSecret: CURSOR_SECRET, agentSessionSigner, qualificationManifestSigner });
+  const runtime = createHumanAuthRuntime({ postgresRuntime: configured, tokenRecords, origin: "https://console.example.test", rpId: "console.example.test", cursorSecret: CURSOR_SECRET, securitySecret: SECURITY_SECRET, agentSessionSigner, qualificationManifestSigner });
   assert.equal(typeof runtime.qualificationGrantBatchApi?.handle, "function");
-  assert.throws(() => createHumanAuthRuntime({ postgresRuntime: configured, tokenRecords, origin: "https://console.example.test", rpId: "console.example.test", cursorSecret: CURSOR_SECRET, qualificationManifestSigner }), /Agent Session signer/iu);
+  assert.throws(() => createHumanAuthRuntime({ postgresRuntime: configured, tokenRecords, origin: "https://console.example.test", rpId: "console.example.test", cursorSecret: CURSOR_SECRET, securitySecret: SECURITY_SECRET, qualificationManifestSigner }), /Agent Session signer/iu);
   delete configured.qualificationGrantBatchRepository;
-  assert.throws(() => createHumanAuthRuntime({ postgresRuntime: configured, tokenRecords, origin: "https://console.example.test", rpId: "console.example.test", cursorSecret: CURSOR_SECRET, agentSessionSigner, qualificationManifestSigner }), /qualification Grant batch repository/iu);
+  assert.throws(() => createHumanAuthRuntime({ postgresRuntime: configured, tokenRecords, origin: "https://console.example.test", rpId: "console.example.test", cursorSecret: CURSOR_SECRET, securitySecret: SECURITY_SECRET, agentSessionSigner, qualificationManifestSigner }), /qualification Grant batch repository/iu);
 });
 
 test("composes the signed-console identity adapter without a browser identity header", async () => {
@@ -189,6 +200,7 @@ test("composes the signed-console identity adapter without a browser identity he
     origin: "https://console.example.test",
     rpId: "console.example.test",
     cursorSecret: CURSOR_SECRET,
+    securitySecret: SECURITY_SECRET,
     signedConsoleIdentity: { issuer, audience, keyId: "console-2026-08", publicKey: pair.publicKey },
     now: () => now
   });

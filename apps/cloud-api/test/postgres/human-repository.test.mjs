@@ -40,6 +40,47 @@ test("atomically enforces the cross-replica session ceiling before insertion", a
   assert.match(reduction.text, /m\.session_epoch=s\.membership_session_epoch/);
 });
 
+test("consumes signed identity replay state inside the session transaction before authority reduction", async () => {
+  const calls = [];
+  const session = {session_id:ids.session,member_id:ids.member,membership_id:ids.membership,organization_id:ids.org,role:"owner",token_hash:"a".repeat(64),csrf_token_hash:"b".repeat(64),created_at:"2026-08-12T00:00:00.000Z",expires_at:"2026-08-12T01:00:00.000Z",last_seen_at:"2026-08-12T00:00:00.000Z",idle_expires_at:"2026-08-12T00:30:00.000Z"};
+  const client = { async query(text, params = []) {
+    calls.push({ text, params });
+    if (["BEGIN", "COMMIT", "ROLLBACK"].includes(text)) return { rows: [], rowCount: 0 };
+    if (text.includes("pg_advisory_xact_lock")) return { rows: [{ locked: true }], rowCount: 1 };
+    if (text.includes("agentpass_consume_human_identity_assertion")) return { rows: [{ consumed: true }], rowCount: 1 };
+    if (text.startsWith("WITH ranked AS")) return { rows: [], rowCount: 0 };
+    if (text.startsWith("INSERT INTO human_sessions")) return { rows: [{ id: ids.session, member_id: ids.member, organization_id: ids.org, role: "owner", token_hash_hex: "a".repeat(64), csrf_token_hash_hex: "b".repeat(64) }], rowCount: 1 };
+    throw new Error(`unexpected query: ${text}`);
+  } };
+  const repo = createPostgresHumanRepository({ client });
+  await repo.createSessionWithLimit({ session, max_concurrent_sessions: 3, identity_replay: { jti_digest: "c".repeat(64), expires_at: "2026-08-12T00:01:00.000Z" } });
+  const sequence = calls.map(({ text }) => ["BEGIN", "COMMIT"].includes(text) ? text : text.includes("pg_advisory_xact_lock") ? "LOCK" : text.includes("agentpass_consume_human_identity_assertion") ? "REPLAY" : text.startsWith("WITH ranked AS") ? "REDUCE" : "INSERT");
+  assert.deepEqual(sequence, ["BEGIN", "LOCK", "REPLAY", "REDUCE", "INSERT", "COMMIT"]);
+  const replay = calls.find(({ text }) => text.includes("agentpass_consume_human_identity_assertion"));
+  assert.equal(Buffer.isBuffer(replay.params[0]), true);
+  assert.equal(replay.params[0].toString("hex"), "c".repeat(64));
+});
+
+test("rolls back without reducing sessions when a signed identity assertion is replayed", async () => {
+  const calls = [];
+  const session = {session_id:ids.session,member_id:ids.member,membership_id:ids.membership,organization_id:ids.org,role:"owner",token_hash:"a".repeat(64),csrf_token_hash:"b".repeat(64),created_at:"2026-08-12T00:00:00.000Z",expires_at:"2026-08-12T01:00:00.000Z",last_seen_at:"2026-08-12T00:00:00.000Z",idle_expires_at:"2026-08-12T00:30:00.000Z"};
+  const client = { async query(text) {
+    calls.push(text);
+    if (["BEGIN", "ROLLBACK"].includes(text)) return { rows: [], rowCount: 0 };
+    if (text.includes("pg_advisory_xact_lock")) return { rows: [{ locked: true }], rowCount: 1 };
+    if (text.includes("agentpass_consume_human_identity_assertion")) return { rows: [{ consumed: false }], rowCount: 1 };
+    throw new Error(`unexpected query: ${text}`);
+  } };
+  const repo = createPostgresHumanRepository({ client });
+  await assert.rejects(
+    () => repo.createSessionWithLimit({ session, max_concurrent_sessions: 3, identity_replay: { jti_digest: "d".repeat(64), expires_at: "2026-08-12T00:01:00.000Z" } }),
+    (error) => error.code === "human_identity_assertion_replay"
+  );
+  assert.equal(calls.at(-1), "ROLLBACK");
+  assert.equal(calls.some((text) => text.startsWith("WITH ranked AS")), false);
+  assert.equal(calls.some((text) => text.startsWith("INSERT INTO human_sessions")), false);
+});
+
 test("rolls back session-limit revocations when session insertion loses membership authority", async () => {
   const calls = [];
   const session = {session_id:ids.session,member_id:ids.member,membership_id:ids.membership,organization_id:ids.org,role:"owner",token_hash:"a".repeat(64),csrf_token_hash:"b".repeat(64),created_at:"2026-08-12T00:00:00.000Z",expires_at:"2026-08-12T01:00:00.000Z",last_seen_at:"2026-08-12T00:00:00.000Z",idle_expires_at:"2026-08-12T00:30:00.000Z"};

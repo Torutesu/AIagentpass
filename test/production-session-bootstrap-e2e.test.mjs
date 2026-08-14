@@ -21,6 +21,7 @@ const MAIN_MEMBERSHIP = "33333333-3333-4333-8333-333333333333";
 const TRUSTED_SUBJECT = "siwc-subject-1";
 const INACTIVE_SUBJECT = "siwc-inactive-1";
 const CURSOR_SECRET = Buffer.alloc(32, 0x42).toString("base64url");
+const HUMAN_AUTH_SECRET = Buffer.alloc(32, 0x43).toString("base64url");
 
 const keyPair = crypto.generateKeyPairSync("ed25519");
 const privateKeyPem = keyPair.privateKey.export({ type: "pkcs8", format: "pem" });
@@ -39,6 +40,7 @@ test("production Console BFF to Cloud Human Auth boundary rejects adversarial bo
     origin: ORIGIN,
     rpId: "console.example.test",
     cursorSecret: CURSOR_SECRET,
+    securitySecret: HUMAN_AUTH_SECRET,
     identityProvider: PROVIDER,
     signedConsoleIdentity: {
       issuer: ISSUER,
@@ -379,6 +381,19 @@ function createMemoryPostgresState() {
       sessions.set(record.session_id, { ...record });
       return { ...record };
     },
+    async createSessionWithLimit({ session, identity_replay }) {
+      if (identity_replay !== undefined) {
+        replayAttempts.push(identity_replay.jti_digest);
+        if (consumedJtis.has(identity_replay.jti_digest)) {
+          const error = new Error("identity assertion replay");
+          error.code = "human_identity_assertion_replay";
+          throw error;
+        }
+        consumedJtis.add(identity_replay.jti_digest);
+      }
+      sessions.set(session.session_id, { ...session });
+      return { ...session };
+    },
     async findSessionByTokenHash(input) {
       const hash = input.token_hash ?? input.tokenHash;
       return [...sessions.values()].find((record) => record.token_hash === hash) ?? null;
@@ -462,6 +477,9 @@ function createMemoryPostgresState() {
       organizationRepository,
       sharedControlRepository: {
         async acquireRateLimit() {
+          return { allowed: true, limit: 100, remaining: 99, retryAfterMs: 0 };
+        },
+        async acquireAnonymousRateLimit() {
           return { allowed: true, limit: 100, remaining: 99, retryAfterMs: 0 };
         }
       }

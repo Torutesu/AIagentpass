@@ -52,12 +52,12 @@ export class SignedConsoleIdentityError extends Error {
  *
  * It is deliberately not a generic JWT/OIDC parser. The key, schema, issuer,
  * audience, origin, and identity provider are all pinned by the
- * caller. A valid assertion consumes its namespaced jti in PostgreSQL before
- * the immutable provider/subject mapping is queried.
+ * caller. The keyed replay digest remains attached only to the in-process
+ * opaque assertion and is consumed atomically with durable session creation.
  */
 export function createSignedConsoleIdentityAdapter({
   identityResolver,
-  replayRepository,
+  replaySecret,
   issuer,
   audience,
   provider,
@@ -68,27 +68,14 @@ export function createSignedConsoleIdentityAdapter({
   clockSkewSeconds = DEFAULT_CLOCK_SKEW_SECONDS
 } = {}) {
   if (!identityResolver || typeof identityResolver.resolveIdentity !== "function" || !identityResolver.identityAdapter || typeof identityResolver.identityAdapter.verify !== "function") throw new TypeError("identityResolver is required");
-  if (!replayRepository || typeof replayRepository.consumeConsoleIdentityJti !== "function") throw new TypeError("replayRepository is required");
+  const secret = normalizeReplaySecret(replaySecret);
   const config = normalizeConfig({ issuer, audience, provider, origin, keyId, publicKey, now, clockSkewSeconds });
+  const pendingReplay = new WeakMap();
 
   async function verifyIdentityRequest(request) {
     try {
       const compact = readAssertionHeader(request?.headers);
       const claims = verifyCompactAssertion(compact, config);
-      const digest = consoleIdentityJtiDigest(claims);
-      let consumed;
-      try {
-        consumed = await replayRepository.consumeConsoleIdentityJti({
-          jti_digest: digest,
-          expires_at: new Date(claims.exp * 1000).toISOString()
-        });
-      } catch (error) {
-        throw new SignedConsoleIdentityError(error?.status === 401
-          ? SIGNED_CONSOLE_IDENTITY_ERROR_CODES.INVALID_ASSERTION
-          : SIGNED_CONSOLE_IDENTITY_ERROR_CODES.UNAVAILABLE);
-      }
-      if (consumed !== true) throw new SignedConsoleIdentityError(SIGNED_CONSOLE_IDENTITY_ERROR_CODES.REPLAY);
-
       try {
         // Only cryptographically verified claims reach this resolver. The
         // resolver itself reads member/role/membership from PostgreSQL.
@@ -98,6 +85,10 @@ export function createSignedConsoleIdentityAdapter({
           organization_id: claims.org
         });
         if (!isOpaqueResolverAssertion(resolved)) throw new Error("resolver output is invalid");
+        pendingReplay.set(resolved, Object.freeze({
+          jti_digest: consoleIdentityJtiDigest(claims, secret),
+          expires_at: new Date(claims.exp * 1000).toISOString()
+        }));
         return resolved;
       } catch (error) {
         throw new SignedConsoleIdentityError(error?.status === 401
@@ -110,11 +101,21 @@ export function createSignedConsoleIdentityAdapter({
     }
   }
 
+  async function verifyOpaqueIdentity(assertion, context) {
+    const replay = pendingReplay.get(assertion);
+    if (!replay) throw new SignedConsoleIdentityError();
+    pendingReplay.delete(assertion);
+    let principal;
+    try { principal = await identityResolver.identityAdapter.verify(assertion, context); }
+    catch { throw new SignedConsoleIdentityError(); }
+    return Object.freeze({ principal, identity_replay: replay });
+  }
+
   return Object.freeze({
     verifyIdentityRequest,
     // HumanSession consumes the resolver's opaque one-use assertion. It never
     // receives the signed envelope or any provider credential.
-    identityAdapter: identityResolver.identityAdapter,
+    identityAdapter: Object.freeze({ verify: verifyOpaqueIdentity }),
     provider,
     keyId,
     assertionHeader: ASSERTION_HEADER,
@@ -124,9 +125,23 @@ export function createSignedConsoleIdentityAdapter({
 }
 
 /** Namespaced digest used by the PostgreSQL replay ledger. */
-export function consoleIdentityJtiDigest({ iss, aud, jti } = {}) {
+export function consoleIdentityJtiDigest({ iss, aud, jti } = {}, replaySecret) {
   if (!exactText(iss, 256) || !exactText(aud, 256) || !boundedJti(jti)) throw new TypeError("identity jti is invalid");
-  return crypto.createHash("sha256").update(`${iss}\u0000${aud}\u0000${jti}`, "utf8").digest("hex");
+  const secret = normalizeReplaySecret(replaySecret);
+  return crypto.createHmac("sha256", secret)
+    .update("agentpass:console-identity-replay:v2\0", "utf8")
+    .update(iss, "utf8").update("\0", "utf8")
+    .update(aud, "utf8").update("\0", "utf8")
+    .update(jti, "utf8").digest("hex");
+}
+
+function normalizeReplaySecret(value) {
+  let bytes = value;
+  if (typeof value === "string" && /^[A-Za-z0-9_-]{43}$/u.test(value)) bytes = Buffer.from(value, "base64url");
+  if (!Buffer.isBuffer(bytes) && !(bytes instanceof Uint8Array)) throw new TypeError("identity replay secret is invalid");
+  const result = Buffer.from(bytes);
+  if (result.length !== 32) throw new TypeError("identity replay secret is invalid");
+  return result;
 }
 
 function verifyCompactAssertion(compact, config) {

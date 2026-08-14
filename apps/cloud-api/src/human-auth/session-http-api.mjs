@@ -2,6 +2,11 @@ import {
   HUMAN_SESSION_ERROR_CODES,
   isOpaqueToken,
 } from "../human-session.mjs";
+import {
+  HUMAN_AUTH_ABUSE_ERROR_CODES,
+  HUMAN_AUTH_RATE_LIMIT_OPERATIONS,
+  HumanAuthAbuseControlError
+} from "./rate-limit.mjs";
 
 const SESSION_PATH = "/session";
 const DEFAULT_MAX_BODY_BYTES = 16 * 1024;
@@ -67,6 +72,7 @@ export class HumanSessionHttpError extends Error {
 export function createHumanSessionHttpApi({
   humanSession,
   verifyIdentityRequest,
+  abuseControls,
   origin,
   maxBodyBytes = DEFAULT_MAX_BODY_BYTES
 } = {}) {
@@ -75,6 +81,9 @@ export function createHumanSessionHttpApi({
   }
   if (typeof verifyIdentityRequest !== "function") {
     throw new TypeError("verifyIdentityRequest must be a function");
+  }
+  if (!abuseControls || typeof abuseControls.checkAnonymousGlobal !== "function") {
+    throw new TypeError("abuseControls must expose checkAnonymousGlobal()");
   }
 
   const expectedOrigin = origin ?? humanSession.expectedOrigin;
@@ -110,6 +119,13 @@ export function createHumanSessionHttpApi({
 
       const body = await readJsonBody(request, maxBodyBytes);
       assertEmptyJsonObject(body);
+
+      try {
+        await abuseControls.checkAnonymousGlobal({ operation: HUMAN_AUTH_RATE_LIMIT_OPERATIONS.sessionBootstrap });
+      } catch (error) {
+        if (error instanceof HumanAuthAbuseControlError) throw error;
+        throw new HumanAuthAbuseControlError(HUMAN_AUTH_ABUSE_ERROR_CODES.CONTROL_UNAVAILABLE);
+      }
 
       let identityAssertion;
       try {
@@ -171,12 +187,16 @@ function sessionResponse(issued) {
 }
 
 function mapSessionError(error) {
+  if (error instanceof HumanAuthAbuseControlError) return error;
   if (error instanceof HumanSessionHttpError) return error;
   if (error?.code === HUMAN_SESSION_ERROR_CODES.INVALID_ORIGIN) {
     return new HumanSessionHttpError(HUMAN_SESSION_HTTP_ERROR_CODES.ORIGIN_NOT_ALLOWED, { status: 403, cause: error });
   }
   if (error?.code === HUMAN_SESSION_ERROR_CODES.IDENTITY_VERIFICATION_FAILED) {
     return new HumanSessionHttpError(HUMAN_SESSION_HTTP_ERROR_CODES.IDENTITY_VERIFICATION_FAILED, { status: 401, cause: error });
+  }
+  if (error?.code === HUMAN_SESSION_ERROR_CODES.IDENTITY_REPLAY) {
+    return new HumanSessionHttpError(HUMAN_SESSION_HTTP_ERROR_CODES.IDENTITY_REPLAY, { status: 409, cause: error });
   }
   if (error?.code === HUMAN_SESSION_ERROR_CODES.INVALID_INPUT) {
     return new HumanSessionHttpError(HUMAN_SESSION_HTTP_ERROR_CODES.INVALID_REQUEST, { status: 400, cause: error });
@@ -188,6 +208,13 @@ function mapSessionError(error) {
 }
 
 function mapError(error) {
+  if (error instanceof HumanAuthAbuseControlError) {
+    const code = error.code === HUMAN_AUTH_ABUSE_ERROR_CODES.RATE_LIMITED
+      ? HUMAN_AUTH_ABUSE_ERROR_CODES.RATE_LIMITED
+      : HUMAN_AUTH_ABUSE_ERROR_CODES.CONTROL_UNAVAILABLE;
+    const status = code === HUMAN_AUTH_ABUSE_ERROR_CODES.RATE_LIMITED ? 429 : 503;
+    return response(status, { error: { code, message: error.message } }, error.headers);
+  }
   if (error instanceof HumanSessionHttpError) {
     return response(error.status, {
       error: {

@@ -10,6 +10,7 @@ const MAX_RETRY_AFTER_MS = 60_000;
 const MAX_RETRY_AFTER_SECONDS = Math.ceil(MAX_RETRY_AFTER_MS / 1_000);
 const DEFAULT_IDLE_TTL_MS = 15 * 60_000;
 const ANONYMOUS_GLOBAL_CAPACITY_MULTIPLIER = 64;
+const ANONYMOUS_SUBJECT_SLOTS = 16_384;
 
 export const HUMAN_AUTH_ABUSE_ERROR_CODES = Object.freeze({
   RATE_LIMITED: "human_auth_rate_limited",
@@ -24,6 +25,7 @@ export const HUMAN_AUTH_ABUSE_METRIC_KEYS = Object.freeze({
 });
 
 export const HUMAN_AUTH_RATE_LIMIT_OPERATIONS = Object.freeze({
+  sessionBootstrap: "human.session.bootstrap",
   webauthnBegin: "human.webauthn.begin",
   webauthnVerify: "human.webauthn.verify",
   registrationBegin: "human.webauthn.registration.begin",
@@ -51,6 +53,7 @@ export const HUMAN_AUTH_RATE_LIMIT_OPERATIONS = Object.freeze({
 });
 
 const DEFAULT_POLICIES = Object.freeze({
+  [HUMAN_AUTH_RATE_LIMIT_OPERATIONS.sessionBootstrap]: Object.freeze({ capacity: 12, refillPerSecond: 0.2 }),
   [HUMAN_AUTH_RATE_LIMIT_OPERATIONS.webauthnBegin]: Object.freeze({ capacity: 24, refillPerSecond: 0.4 }),
   [HUMAN_AUTH_RATE_LIMIT_OPERATIONS.webauthnVerify]: Object.freeze({ capacity: 36, refillPerSecond: 0.6 }),
   [HUMAN_AUTH_RATE_LIMIT_OPERATIONS.registrationBegin]: Object.freeze({ capacity: 12, refillPerSecond: 0.2 }),
@@ -110,11 +113,12 @@ export class HumanAuthAbuseControlError extends Error {
  * for different endpoints cannot overwrite one another in the generic
  * rate_limit_buckets table.
  */
-export function createHumanAuthAbuseControls({ repository, metrics, policies = {}, idleTtlMs = DEFAULT_IDLE_TTL_MS } = {}) {
+export function createHumanAuthAbuseControls({ repository, bucketSecret, metrics, policies = {}, idleTtlMs = DEFAULT_IDLE_TTL_MS } = {}) {
   if (!repository || typeof repository.acquireRateLimit !== "function") {
     throw new TypeError("shared PostgreSQL rate-limit repository is required");
   }
   if (!Number.isSafeInteger(idleTtlMs) || idleTtlMs < 1_000 || idleTtlMs > 24 * 60 * 60 * 1000) throw new TypeError("idleTtlMs is invalid");
+  const secret = normalizeBucketSecret(bucketSecret);
   const mergedPolicies = Object.freeze(Object.fromEntries([...OPERATION_SET].map((operation) => [operation, normalizePolicy(policies[operation] ?? DEFAULT_POLICIES[operation])] )));
 
   async function check({ operation, session, organizationId = undefined, cost = 1 } = {}) {
@@ -140,7 +144,7 @@ export function createHumanAuthAbuseControls({ repository, metrics, policies = {
         const decision = await repository.acquireRateLimit({
           organizationId: ids.organizationId,
           principalType: "human",
-          principalId: deriveBucketId(scope, id, operation),
+          principalId: deriveBucketId(secret, scope, id, operation),
           capacity: policy.capacity,
           refillPerSecond: policy.refillPerSecond,
           cost,
@@ -177,7 +181,7 @@ export function createHumanAuthAbuseControls({ repository, metrics, policies = {
       // attacker-controlled exchange digests from creating unbounded rows.
       const global = normalizeDecision(await repository.acquireAnonymousRateLimit({
         operation,
-        principalId: deriveBucketId("anonymous-global", "global", operation),
+        principalId: deriveHumanAuthGlobalBucketId(secret, operation),
         capacity: globalCapacity,
         refillPerSecond: globalRefill,
         cost,
@@ -186,7 +190,7 @@ export function createHumanAuthAbuseControls({ repository, metrics, policies = {
       if (!global.allowed) return deny(global);
       const principal = normalizeDecision(await repository.acquireAnonymousRateLimit({
         operation,
-        principalId: normalizedPrincipalId,
+        principalId: deriveAnonymousSubjectSlotId(secret, normalizedPrincipalId, operation),
         capacity: policy.capacity,
         refillPerSecond: policy.refillPerSecond,
         cost,
@@ -206,9 +210,74 @@ export function createHumanAuthAbuseControls({ repository, metrics, policies = {
     }
   }
 
+  async function checkAnonymousGlobal({ operation, cost = 1 } = {}) {
+    if (operation !== HUMAN_AUTH_RATE_LIMIT_OPERATIONS.sessionBootstrap) throw new TypeError("Anonymous global rate-limit operation is invalid");
+    const policy = mergedPolicies[operation];
+    if (typeof repository.acquireAnonymousRateLimit !== "function") {
+      recordHumanAuthMetric(metrics, HUMAN_AUTH_ABUSE_METRIC_KEYS.controlUnavailable);
+      throw new HumanAuthAbuseControlError(HUMAN_AUTH_ABUSE_ERROR_CODES.CONTROL_UNAVAILABLE);
+    }
+    if (!Number.isSafeInteger(cost) || cost < 1 || cost > policy.capacity) throw new TypeError("rate-limit cost is invalid");
+    const globalCapacity = Math.min(1_000_000, policy.capacity * ANONYMOUS_GLOBAL_CAPACITY_MULTIPLIER);
+    const globalRefill = Math.min(1_000_000, policy.refillPerSecond * ANONYMOUS_GLOBAL_CAPACITY_MULTIPLIER);
+    try {
+      const decision = normalizeDecision(await repository.acquireAnonymousRateLimit({
+        operation,
+        principalId: deriveHumanAuthGlobalBucketId(secret, operation),
+        capacity: globalCapacity,
+        refillPerSecond: globalRefill,
+        cost,
+        idleTtlMs
+      }), globalCapacity);
+      if (!decision.allowed) deny(decision);
+    } catch (error) {
+      if (error instanceof HumanAuthAbuseControlError) throw error;
+      recordHumanAuthMetric(metrics, HUMAN_AUTH_ABUSE_METRIC_KEYS.controlUnavailable);
+      throw new HumanAuthAbuseControlError(HUMAN_AUTH_ABUSE_ERROR_CODES.CONTROL_UNAVAILABLE, { cause: error });
+    }
+    return Object.freeze({ allowed: true, operation, limit: globalCapacity });
+
+    function deny(decision) {
+      recordHumanAuthMetric(metrics, HUMAN_AUTH_ABUSE_METRIC_KEYS.rateLimitDenial);
+      throw new HumanAuthAbuseControlError(HUMAN_AUTH_ABUSE_ERROR_CODES.RATE_LIMITED, { retryAfterSeconds: decision.retryAfterSeconds });
+    }
+  }
+
+  async function checkIdentity({ operation, identity, cost = 1 } = {}) {
+    if (operation !== HUMAN_AUTH_RATE_LIMIT_OPERATIONS.sessionBootstrap) throw new TypeError("Identity rate-limit operation is invalid");
+    const ids = normalizeIdentityScope(identity);
+    const policy = mergedPolicies[operation];
+    if (!Number.isSafeInteger(cost) || cost < 1 || cost > policy.capacity) throw new TypeError("rate-limit cost is invalid");
+    let mostRestrictive;
+    try {
+      for (const [scope, id] of [["subject", ids.subjectBucketId], ["member", ids.memberId], ["organization", ids.organizationId]]) {
+        const decision = normalizeDecision(await repository.acquireRateLimit({
+          organizationId: ids.organizationId,
+          principalType: "human",
+          principalId: deriveBucketId(secret, scope, id, operation),
+          capacity: policy.capacity,
+          refillPerSecond: policy.refillPerSecond,
+          cost,
+          idleTtlMs
+        }), policy.capacity);
+        if (!decision.allowed) mostRestrictive = mostRestrictive === undefined ? decision : moreRestrictive(mostRestrictive, decision);
+      }
+    } catch (error) {
+      recordHumanAuthMetric(metrics, HUMAN_AUTH_ABUSE_METRIC_KEYS.controlUnavailable);
+      throw new HumanAuthAbuseControlError(HUMAN_AUTH_ABUSE_ERROR_CODES.CONTROL_UNAVAILABLE, { cause: error });
+    }
+    if (mostRestrictive !== undefined) {
+      recordHumanAuthMetric(metrics, HUMAN_AUTH_ABUSE_METRIC_KEYS.rateLimitDenial);
+      throw new HumanAuthAbuseControlError(HUMAN_AUTH_ABUSE_ERROR_CODES.RATE_LIMITED, { retryAfterSeconds: mostRestrictive.retryAfterSeconds });
+    }
+    return Object.freeze({ allowed: true, operation, limit: policy.capacity });
+  }
+
   return Object.freeze({
     check,
     checkAnonymous,
+    checkAnonymousGlobal,
+    checkIdentity,
     // `authorize` is the existing public name. Keep it as a strict alias so
     // old human-auth routes and new recovery routes share identical fail-
     // closed semantics and bucket derivation.
@@ -277,13 +346,62 @@ function normalizeSession(value) {
   });
 }
 
+function normalizeIdentityScope(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) throw new TypeError("verified Human identity is invalid");
+  return Object.freeze({
+    subjectBucketId: normalizeUuid(value.subject_bucket_id ?? value.subjectBucketId, "subject_bucket_id"),
+    memberId: normalizeUuid(value.member_id ?? value.memberId, "member_id"),
+    organizationId: normalizeUuid(value.organization_id ?? value.organizationId, "organization_id")
+  });
+}
+
+export function deriveHumanAuthSubjectBucketId(bucketSecret, { provider, subject } = {}) {
+  const secret = normalizeBucketSecret(bucketSecret);
+  if (typeof provider !== "string" || !/^[a-z][a-z0-9._-]{0,63}$/u.test(provider)) throw new TypeError("identity provider is invalid");
+  if (typeof subject !== "string" || subject.length < 1 || Buffer.byteLength(subject, "utf8") > 512 || /[\u0000-\u001f\u007f]/u.test(subject)) throw new TypeError("identity subject is invalid");
+  return deriveBucketId(secret, "provider-subject", `${provider}\0${subject}`, HUMAN_AUTH_RATE_LIMIT_OPERATIONS.sessionBootstrap);
+}
+
+export function deriveHumanAuthGlobalBucketId(bucketSecret, operation) {
+  const secret = normalizeBucketSecret(bucketSecret);
+  if (!OPERATION_SET.has(operation)) throw new TypeError("Human auth rate-limit operation is invalid");
+  return deriveBucketId(secret, "anonymous-global", "global", operation);
+}
+
 function normalizeUuid(value, name) {
   if (typeof value !== "string" || !UUID.test(value)) throw new TypeError(`${name} is invalid`);
   return value.toLowerCase();
 }
 
-function deriveBucketId(scope, id, operation) {
-  const digest = crypto.createHash("sha256").update(`agentpass:human-auth:rate-limit:v1:${scope}:${id}:${operation}`, "utf8").digest();
+function normalizeBucketSecret(value) {
+  let bytes = value;
+  if (typeof value === "string" && /^[A-Za-z0-9_-]{43}$/u.test(value)) bytes = Buffer.from(value, "base64url");
+  if (!Buffer.isBuffer(bytes) && !(bytes instanceof Uint8Array)) throw new TypeError("Human auth bucket secret is invalid");
+  const result = Buffer.from(bytes);
+  if (result.length !== 32) throw new TypeError("Human auth bucket secret is invalid");
+  return result;
+}
+
+function deriveAnonymousSubjectSlotId(secret, principalId, operation) {
+  const digest = crypto.createHmac("sha256", secret)
+    .update("agentpass:human-auth:anonymous-slot:v1\0", "utf8")
+    .update(operation, "utf8")
+    .update("\0", "utf8")
+    .update(principalId, "utf8")
+    .digest();
+  const slot = digest.readUInt32BE(0) % ANONYMOUS_SUBJECT_SLOTS;
+  return deriveBucketId(secret, "anonymous-subject-slot", String(slot), operation);
+}
+
+function deriveBucketId(secret, scope, id, operation) {
+  const digest = crypto.createHmac("sha256", secret)
+    .update("agentpass:human-auth:rate-limit:v2\0", "utf8")
+    .update(scope, "utf8")
+    .update("\0", "utf8")
+    .update(id, "utf8")
+    .update("\0", "utf8")
+    .update(operation, "utf8")
+    .digest();
   digest[6] = (digest[6] & 0x0f) | 0x40;
   digest[8] = (digest[8] & 0x3f) | 0x80;
   const hex = digest.subarray(0, 16).toString("hex");

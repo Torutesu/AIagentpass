@@ -6,6 +6,10 @@ import {
   HUMAN_SESSION_HTTP_ERROR_CODES,
   HUMAN_SESSION_HTTP_PATHS
 } from "../src/human-auth/session-http-api.mjs";
+import {
+  HUMAN_AUTH_ABUSE_ERROR_CODES,
+  HumanAuthAbuseControlError
+} from "../src/human-auth/rate-limit.mjs";
 
 const ORIGIN = "https://console.agentpass.test";
 const CSRF_TOKEN = "c".repeat(43);
@@ -26,7 +30,7 @@ function session() {
 }
 
 function fixture(overrides = {}) {
-  const calls = { verify: [], issue: [] };
+  const calls = { global: [], verify: [], issue: [] };
   const humanSession = {
     expectedOrigin: ORIGIN,
     async issueSession(input) {
@@ -37,6 +41,13 @@ function fixture(overrides = {}) {
   };
   const api = createHumanSessionHttpApi({
     humanSession,
+    abuseControls: {
+      async checkAnonymousGlobal(input) {
+        calls.global.push(input);
+        if (overrides.globalError) throw overrides.globalError;
+        return { allowed: true };
+      }
+    },
     verifyIdentityRequest: async (request) => {
       calls.verify.push(request);
       if (overrides.verifyError) throw overrides.verifyError;
@@ -74,8 +85,39 @@ test("issues a session from an opaque adapter assertion with an exact response c
   assert.equal(result.headers["Set-Cookie"], SESSION_COOKIE);
   assertNoStore(result);
   assert.equal(calls.verify[0], input);
+  assert.deepEqual(calls.global, [{ operation: "human.session.bootstrap" }]);
   assert.deepEqual(calls.issue[0], { identityAssertion: IDENTITY_ASSERTION, origin: ORIGIN });
   assert.equal(Object.hasOwn(result.body, "setCookie"), false);
+});
+
+test("shared global admission runs before identity verification and fails closed", async () => {
+  const denied = fixture({ globalError: new HumanAuthAbuseControlError(HUMAN_AUTH_ABUSE_ERROR_CODES.RATE_LIMITED, { retryAfterSeconds: 7 }) });
+  const deniedResult = await denied.api.handle(request());
+  assert.equal(deniedResult.status, 429);
+  assert.deepEqual(deniedResult.body, { error: { code: HUMAN_AUTH_ABUSE_ERROR_CODES.RATE_LIMITED, message: "Human authentication rate limit exceeded" } });
+  assert.equal(deniedResult.headers["Retry-After"], "7");
+  assert.equal(denied.calls.global.length, 1);
+  assert.equal(denied.calls.verify.length, 0);
+  assert.equal(denied.calls.issue.length, 0);
+
+  const unavailable = fixture({ globalError: new Error("database password=secret") });
+  const unavailableResult = await unavailable.api.handle(request());
+  assert.equal(unavailableResult.status, 503);
+  assert.equal(unavailableResult.body.error.code, HUMAN_AUTH_ABUSE_ERROR_CODES.CONTROL_UNAVAILABLE);
+  assert.equal(JSON.stringify(unavailableResult.body).includes("secret"), false);
+  assert.equal(unavailable.calls.verify.length, 0);
+});
+
+test("verified-identity limiter denial is returned without issuing credentials or leaking a cause", async () => {
+  const denied = fixture({ issueError: new HumanAuthAbuseControlError(HUMAN_AUTH_ABUSE_ERROR_CODES.RATE_LIMITED, { retryAfterSeconds: 5, cause: new Error("member-secret") }) });
+  const result = await denied.api.handle(request());
+  assert.equal(result.status, 429);
+  assert.equal(result.body.error.code, HUMAN_AUTH_ABUSE_ERROR_CODES.RATE_LIMITED);
+  assert.equal(result.headers["Retry-After"], "5");
+  assert.equal(JSON.stringify(result.body).includes("member-secret"), false);
+  assert.equal(denied.calls.verify.length, 1);
+  assert.equal(denied.calls.issue.length, 1);
+  assert.equal(Object.hasOwn(result.headers, "Set-Cookie"), false);
 });
 
 test("requires an exact empty JSON object and never uses identity fields from the body", async () => {

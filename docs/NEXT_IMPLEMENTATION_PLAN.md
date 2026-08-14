@@ -93,13 +93,22 @@ member advisory lock encloses active-session reduction and insertion, and a
 real two-pool race holds 12 concurrent issuances to exactly three active
 sessions. Fixed label-free metrics now cover suppression, redrive outcomes,
 pruning, and recovery latency aggregates. Remaining W1 closure work is the
-login/session-bootstrap shared throttle, wiring state-latency observations at
-each recovery transition, and the complete two-instance fault matrix at every
+final shared-control SQL hardening, wiring state-latency observations at each
+recovery transition, and the complete two-instance fault matrix at every
 provider/commit/response-loss boundary.
+
+W1.4a application boundary is implemented: session bootstrap first consumes
+one fixed anonymous PostgreSQL bucket before identity-provider work, then
+consumes HMAC-derived provider-subject, member, and organization buckets after
+immutable identity resolution. Signed Console JTI values are converted to a
+keyed digest and consumed in the same PostgreSQL transaction as session
+insertion and the cross-replica session ceiling. A denied limiter decision does
+not consume replay state; a replay cannot revoke an existing session; and a
+failed insert rolls the replay marker back.
 
 Current verification baseline:
 
-- the root suite passes 1,708 tests: 1,671 pass, 37 explicitly skipped, 0 fail;
+- the root suite passes 1,716 tests: 1,678 pass, 38 explicitly skipped, 0 fail;
 - the frozen catalog validates 113 entries: 29 schemas, 52 OpenAPI operations,
   and 32 migrations;
 - lint and whitespace/error checks pass;
@@ -115,6 +124,19 @@ W1 closure execution order:
 | W1.4b recovery state latency | Observe database timestamps only after committed recovery transitions and report fixed-key count/total aggregates through `recordOwnerRecoveryStateLatency`. Do not label by organization, member, request, state, or error. Metrics failures remain post-commit and non-authoritative. | Clock-boundary, malformed timestamp, rollback, retry, and metric-sink failure tests; exact retries must not double-observe a transition. | Every committed forward transition has one bounded observation and no recovery identity appears in health output. |
 | W1.5 delivery fault matrix | Run two independent workers and inject loss after lease claim, before/after provider acceptance, before terminal commit, after commit, and before HTTP response receipt. Reuse one deterministic provider idempotency key and inspect authoritative rows after restart. | Kill/restart, lease expiry, duplicate acknowledgement, stale lease, poison row, provider timeout, response truncation, and concurrent prune/redrive cases against real PostgreSQL. | Every case converges to one logical delivery or an explicit uncertain/dead-letter state; no event is silently lost, widened, or delivered with substituted content. |
 | W1.6 operational closure | Add fixed-key alerts/runbook thresholds for queue age, uncertain outcomes, dead letters, redrive failure, prune failure, limiter denial/unavailability, and recovery latency. Update threat model and evidence index. | Snapshot tests must reject new labels/fields; runbook drill covers provider outage, worker restart, limiter outage, and dead-letter recovery. | W1 exit gate is reproducible from one documented command sequence and produces no secret-bearing artifact. |
+
+#### W1.4a remaining merge sequence
+
+| Commit | Exact scope | Verification required before merge |
+| --- | --- | --- |
+| A — bootstrap admission and atomic replay | Two-stage shared admission, purpose-separated `AGENTPASS_HUMAN_AUTH_SECRET`, HMAC subject/global IDs, bounded anonymous subject slots, and replay consumption in `createSessionWithLimit`. | Unit ordering tests; two-pool global/identity/session-ceiling race; same-JTI concurrency gives one `201` and one `409`; limiter denial/outage creates neither replay row nor session; insert failure rolls both replay and ceiling changes back. |
+| B — migration `0033` shared-control hardening | Replace token-bucket functions so the clock is sampled after row lock and cannot move `updated_at` backward. Change bounded pruning to `FOR UPDATE SKIP LOCKED`; add bounded replay-ledger pruning. | Migration checksum/order tests; real PostgreSQL contention with delayed lockers and clock assertions; two maintenance workers prune disjoint bounded sets; migration 1–33 on an empty database and upgrade from 32. |
+| C — hosted transport admission | Remove the process-local hosted fallback. Invalid or unauthenticated transport scope maps to fixed HMAC global buckets; authenticated Device traffic keeps tenant/device buckets. | Restart and two-instance tests prove the allowance cannot reset locally; malformed identifiers cannot create rows; repository outage returns stable `503`; Device tenant isolation remains intact. |
+| D — maintenance and observability | Start a dedicated shared-control maintenance worker independent of recovery delivery. Prune generic, anonymous, and replay rows with one total work budget and fixed label-free metrics. | Start/close/readiness tests, repeated-worker contention, sink failure, database outage/recovery, bounded transaction size, and health snapshots with no principal-derived labels. |
+
+After W1.4a, execute W1.4b recovery latency, then W1.5 delivery fault
+qualification. W2 Console work may continue in parallel only for read-only
+screens; authority-changing UI remains gated on these W1 guarantees.
 
 Merge slices:
 

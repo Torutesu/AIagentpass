@@ -7,6 +7,8 @@ import { createHumanAuthRuntime } from "../../src/human-auth/runtime.mjs";
 import { createMigrationRunner } from "../../src/postgres/migration-runner.mjs";
 import { createPostgresHumanRepository } from "../../src/postgres/human-repository.mjs";
 import { createPostgresOrganizationRepository } from "../../src/postgres/organization-repository.mjs";
+import { createSharedControlRepository } from "../../src/postgres/shared-control-repository.mjs";
+import { HUMAN_AUTH_RATE_LIMIT_OPERATIONS, deriveHumanAuthGlobalBucketId } from "../../src/human-auth/rate-limit.mjs";
 
 const databaseUrl = process.env.AGENTPASS_TEST_DATABASE_URL;
 const ORIGIN = "https://console.example.test";
@@ -18,7 +20,6 @@ const CURSOR_SECRET = Buffer.alloc(32, 0x42).toString("base64url");
 
 test("G1 signed session bootstrap is bound to active PostgreSQL membership and rejects replay/inactive/cross-org identities", { skip: !databaseUrl }, async (t) => {
   const pool = new Pool({ connectionString: databaseUrl, max: 8 });
-  t.after(() => pool.end());
 
   const migrationClient = await pool.connect();
   try {
@@ -26,14 +27,14 @@ test("G1 signed session bootstrap is bound to active PostgreSQL membership and r
       client: migrationClient,
       applicationVersion: "signed-session-bootstrap-integration"
     }).run();
-    assert.equal(migration.currentVersion, 16);
+    assert.equal(migration.currentVersion, 32);
   } finally {
     migrationClient.release();
   }
 
   const migrationState = await pool.query("SELECT count(*)::int AS count, max(version)::int AS version FROM schema_migrations");
-  assert.equal(migrationState.rows[0].count, 16);
-  assert.equal(migrationState.rows[0].version, 16);
+  assert.equal(migrationState.rows[0].count, 32);
+  assert.equal(migrationState.rows[0].version, 32);
 
   const ids = {
     organization: crypto.randomUUID(),
@@ -50,6 +51,35 @@ test("G1 signed session bootstrap is bound to active PostgreSQL membership and r
     other: `siwc-other-${crypto.randomUUID()}`,
     inactive: `siwc-inactive-${crypto.randomUUID()}`
   };
+  const securitySecret = crypto.randomBytes(32);
+  const globalBucketId = deriveHumanAuthGlobalBucketId(securitySecret, HUMAN_AUTH_RATE_LIMIT_OPERATIONS.sessionBootstrap);
+  t.after(async () => {
+    try {
+      await pool.query("DELETE FROM human_sessions WHERE member_id IN ($1,$2,$3)", [ids.activeMember, ids.otherMember, ids.inactiveMember]);
+      await pool.query("DELETE FROM rate_limit_buckets WHERE organization_id IN ($1,$2)", [ids.organization, ids.otherOrganization]);
+      await pool.query("DELETE FROM anonymous_rate_limit_buckets WHERE operation=$1 AND principal_id=$2", [HUMAN_AUTH_RATE_LIMIT_OPERATIONS.sessionBootstrap, globalBucketId]);
+      await pool.query("DELETE FROM upstream_identities WHERE provider=$1 AND subject IN ($2,$3,$4)", [PROVIDER, subjects.active, subjects.other, subjects.inactive]);
+      await pool.query("DELETE FROM outbox_events WHERE organization_id IN ($1,$2)", [ids.organization, ids.otherOrganization]);
+      await pool.query("DELETE FROM control_plane_authority_generations WHERE organization_id IN ($1,$2)", [ids.organization, ids.otherOrganization]);
+      await pool.query("DELETE FROM admin_audit_heads WHERE organization_id IN ($1,$2)", [ids.organization, ids.otherOrganization]);
+      const cleanupClient = await pool.connect();
+      try {
+        await cleanupClient.query("BEGIN");
+        await cleanupClient.query("SET LOCAL session_replication_role = replica");
+        await cleanupClient.query("DELETE FROM memberships WHERE organization_id IN ($1,$2)", [ids.organization, ids.otherOrganization]);
+        await cleanupClient.query("COMMIT");
+      } catch (error) {
+        await cleanupClient.query("ROLLBACK");
+        throw error;
+      } finally {
+        cleanupClient.release();
+      }
+      await pool.query("DELETE FROM organizations WHERE id IN ($1,$2)", [ids.organization, ids.otherOrganization]);
+      await pool.query("DELETE FROM members WHERE id IN ($1,$2,$3)", [ids.activeMember, ids.otherMember, ids.inactiveMember]);
+    } finally {
+      await pool.end();
+    }
+  });
 
   await pool.query(
     `INSERT INTO organizations (id,name) VALUES ($1,$2),($3,$4)`,
@@ -90,11 +120,13 @@ test("G1 signed session bootstrap is bound to active PostgreSQL membership and r
     postgresRuntime: {
       pool,
       humanRepository: createPostgresHumanRepository({ client: pool }),
-      organizationRepository: createPostgresOrganizationRepository({ client: pool })
+      organizationRepository: createPostgresOrganizationRepository({ client: pool }),
+      sharedControlRepository: createSharedControlRepository({ client: pool })
     },
     origin: ORIGIN,
     rpId: "console.example.test",
     cursorSecret: CURSOR_SECRET,
+    securitySecret,
     signedConsoleIdentity: {
       issuer: ISSUER,
       audience: AUDIENCE,

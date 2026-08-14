@@ -16,7 +16,7 @@ import { createPostgresWebAuthnCeremony } from "./webauthn/postgres-ceremony.mjs
 import { createPostgresWebAuthnRegistrationCeremony } from "./webauthn/postgres-registration-ceremony.mjs";
 import { createSimpleWebAuthnRegistrationVerifier, createWebAuthnRegistrationService, WEBAUTHN_REGISTRATION_OPERATION, WEBAUTHN_REGISTRATION_RECENT_AUTH_OPERATION } from "./webauthn/registration.mjs";
 import { createSimpleWebAuthnAssertionVerifier } from "./webauthn/simplewebauthn-adapter.mjs";
-import { createHumanAuthAbuseControls } from "./rate-limit.mjs";
+import { HUMAN_AUTH_RATE_LIMIT_OPERATIONS, createHumanAuthAbuseControls, deriveHumanAuthSubjectBucketId } from "./rate-limit.mjs";
 import { createHumanAgentSessionGrantHttpApi } from "./agent-sessions/http-api.mjs";
 import { createAgentSessionGrantIssuanceService } from "./agent-sessions/issuance-service.mjs";
 import { createHumanQualificationGrantBatchHttpApi } from "./agent-sessions/qualification-batch-http-api.mjs";
@@ -41,12 +41,12 @@ const ALLOWED_RECENT_AUTH_OPERATIONS = Object.freeze([
   ...recentAuthOperationValues(HUMAN_ORGANIZATIONS_RECENT_AUTH_OPERATIONS)
 ]);
 
-export function createHumanAuthRuntime({ postgresRuntime, tokenRecords, origin, rpId, cursorSecret, identityProvider = "chatgpt", signedConsoleIdentity = undefined, agentSessionSigner = undefined, qualificationManifestSigner = undefined, now = () => Date.now() } = {}) {
+export function createHumanAuthRuntime({ postgresRuntime, tokenRecords, origin, rpId, cursorSecret, securitySecret, identityProvider = "chatgpt", signedConsoleIdentity = undefined, agentSessionSigner = undefined, qualificationManifestSigner = undefined, now = () => Date.now() } = {}) {
   const repository = postgresRuntime?.humanRepository;
   const organizationRepository = postgresRuntime?.organizationRepository;
   const pool = postgresRuntime?.pool;
   const sharedControlRepository = postgresRuntime?.sharedControlRepository;
-  if (!repository || !organizationRepository || !pool || !sharedControlRepository || typeof sharedControlRepository.acquireRateLimit !== "function") throw new TypeError("postgresRuntime with pool, humanRepository, organizationRepository, and sharedControlRepository is required");
+  if (!repository || !organizationRepository || !pool || !sharedControlRepository || typeof sharedControlRepository.acquireRateLimit !== "function" || typeof sharedControlRepository.acquireAnonymousRateLimit !== "function") throw new TypeError("postgresRuntime with pool, humanRepository, organizationRepository, and sharedControlRepository is required");
   const cursorCodec = createHumanCursorCodec({ secret: requireCursorSecret(cursorSecret) });
 
   const identityResolver = createPostgresIdentityResolver({ client: pool, now });
@@ -54,14 +54,35 @@ export function createHumanAuthRuntime({ postgresRuntime, tokenRecords, origin, 
     ? createSignedConsoleIdentityAdapter({
       ...signedConsoleIdentity,
       identityResolver,
-      replayRepository: signedConsoleIdentity.replayRepository ?? repository,
+      replaySecret: securitySecret,
       provider: signedConsoleIdentity.provider ?? identityProvider,
       origin,
       now
     })
     : createConsoleIdentityAdapter({ tokenRecords, identityResolver, provider: identityProvider });
-  const humanSession = createHumanSessionService({ repository, identityAdapter: consoleIdentity.identityAdapter, origin, now });
-  const abuseControls = createHumanAuthAbuseControls({ repository: sharedControlRepository, metrics: postgresRuntime.operationalMetrics });
+  const abuseControls = createHumanAuthAbuseControls({ repository: sharedControlRepository, bucketSecret: securitySecret, metrics: postgresRuntime.operationalMetrics });
+  const rateLimitedIdentityAdapter = Object.freeze({
+    async verify(assertion, context) {
+      const verified = await consoleIdentity.identityAdapter.verify(assertion, context);
+      const principal = verified?.principal ?? verified;
+      const subjectBucketId = deriveHumanAuthSubjectBucketId(securitySecret, {
+        provider: principal?.provider,
+        subject: principal?.subject
+      });
+      return Object.freeze({
+        principal,
+        subject_bucket_id: subjectBucketId,
+        ...(verified?.identity_replay === undefined ? {} : { identity_replay: verified.identity_replay })
+      });
+    }
+  });
+  const humanSession = createHumanSessionService({
+    repository,
+    identityAdapter: rateLimitedIdentityAdapter,
+    authorizeIdentity: (identity) => abuseControls.checkIdentity({ operation: HUMAN_AUTH_RATE_LIMIT_OPERATIONS.sessionBootstrap, identity }),
+    origin,
+    now
+  });
   const verifyAssertion = createSimpleWebAuthnAssertionVerifier({ credentialRepository: repository });
   const ceremony = createPostgresWebAuthnCeremony({ client: pool, verifyAssertion, metrics: postgresRuntime.operationalMetrics, now });
   const recentAuthService = createRecentAuthService({ ceremony, sessionRepository: repository });
@@ -103,7 +124,7 @@ export function createHumanAuthRuntime({ postgresRuntime, tokenRecords, origin, 
       now
     });
   }
-  const sessionApi = createHumanSessionHttpApi({ humanSession, verifyIdentityRequest: consoleIdentity.verifyIdentityRequest, origin });
+  const sessionApi = createHumanSessionHttpApi({ humanSession, verifyIdentityRequest: consoleIdentity.verifyIdentityRequest, abuseControls, origin });
   const webauthnApi = createHumanAuthHttpApi({
     humanSession,
     recentAuthService,
