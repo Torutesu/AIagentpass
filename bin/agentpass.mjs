@@ -216,8 +216,30 @@ function readEnrollmentInvitationStdin() {
   const parsed = parseControlBundleJson(Buffer.concat(chunks), { maxBytes: 16 * 1024, maxDepth: 8 });
   const value = parsed?.enrollment ?? parsed;
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("Enrollment invitation is invalid");
-  const invitation = { enrollment_id: value.enrollment_id, organization_id: value.organization_id, device_id: value.device_id, label: value.label, credential: value.credential };
-  if (Object.values(invitation).some((item) => typeof item !== "string" || item.length === 0)) throw new Error("Enrollment invitation is missing a required field");
+  const allowed = new Set(["proof_version", "enrollment_id", "organization_id", "device_id", "label", "platform", "candidate_binding", "challenge_id", "nonce", "expires_at", "challenge", "credential", "endpoint", "possession_receipt_verification"]);
+  if (Object.keys(value).length !== allowed.size || Object.keys(value).some((key) => !allowed.has(key))) throw new Error("Enrollment invitation contains unknown or missing fields");
+  const invitation = {
+    proof_version: value.proof_version,
+    enrollment_id: value.enrollment_id,
+    organization_id: value.organization_id,
+    device_id: value.device_id,
+    label: value.label,
+    platform: value.platform,
+    candidate_binding: value.candidate_binding,
+    challenge_id: value.challenge_id,
+    nonce: value.nonce,
+    expires_at: value.expires_at,
+    challenge: value.challenge,
+    credential: value.credential,
+    endpoint: value.endpoint,
+    possession_receipt_verification: value.possession_receipt_verification
+  };
+  if (invitation.proof_version !== 2 || [invitation.enrollment_id, invitation.organization_id, invitation.device_id, invitation.label, invitation.platform, invitation.challenge_id, invitation.nonce, invitation.expires_at, invitation.credential, invitation.endpoint].some((item) => typeof item !== "string" || item.length === 0)
+    || !invitation.candidate_binding || typeof invitation.candidate_binding !== "object" || Array.isArray(invitation.candidate_binding)
+    || !invitation.challenge || typeof invitation.challenge !== "object" || Array.isArray(invitation.challenge)
+    || !invitation.possession_receipt_verification || typeof invitation.possession_receipt_verification !== "object" || Array.isArray(invitation.possession_receipt_verification)) {
+    throw new Error("Enrollment invitation is missing a required v2 field");
+  }
   return invitation;
 }
 

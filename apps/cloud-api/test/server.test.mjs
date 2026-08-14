@@ -47,7 +47,7 @@ function auditListEvent(eventId, requestId, previousHash, deviceTimestamp) {
   return { ...event, event_hash: computeAuditEventHash(event) };
 }
 
-async function v2Fixture(t) {
+async function v2Fixture(t, apiOptions = {}) {
   const completionKeys = crypto.generateKeyPairSync("ec", { namedCurve: "prime256v1" });
   const device = { device_id: deviceId, organization_id: org, status: "active", key_epoch: 1, device_public_key: completionKeys.publicKey.export({ type: "spki", format: "pem" }).toString() };
   const candidate = { candidate_id: "release-2026-08-13-01", source_commit: "a".repeat(40), artifact_sha256: "b".repeat(64), manifest_sha256: "c".repeat(64), team_id: "TEAM123456", status: "active" };
@@ -83,7 +83,8 @@ async function v2Fixture(t) {
     possessionReceiptSigner: receiptSigner,
     enrollmentCredentialSecret: Buffer.alloc(32, 0x42),
     now: () => now,
-    verifyRecentWebAuthn: async ({ principal, organization_id, operation }) => ({ verified: true, consumed: true, challenge_id: "99999999-9999-4999-8999-999999999999", member_id: principal.member_id, organization_id, operation, authenticated_at: now })
+    verifyRecentWebAuthn: async ({ principal, organization_id, operation }) => ({ verified: true, consumed: true, challenge_id: "99999999-9999-4999-8999-999999999999", member_id: principal.member_id, organization_id, operation, authenticated_at: now }),
+    ...apiOptions
   });
   await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
   const base = `http://127.0.0.1:${server.address().port}`;
@@ -239,6 +240,11 @@ test("v2 enrollment is candidate-bound end to end and receipt reads are exact-de
   assert.equal(issued.candidate_binding.artifact_sha256, f.candidate.artifact_sha256);
   assert.equal(issued.candidate_binding.source_commit, f.candidate.source_commit);
   assert.equal(issued.candidate_binding.team_id, f.candidate.team_id);
+  assert.deepEqual(Object.keys(issued.possession_receipt_verification).sort(), ["algorithm", "key_id", "public_key"]);
+  assert.equal(issued.possession_receipt_verification.key_id, "possession-v1");
+  assert.equal(issued.possession_receipt_verification.algorithm, "ed25519");
+  assert.equal(issued.possession_receipt_verification.public_key, f.receiptKeys.publicKey.export({ type: "spki", format: "pem" }).toString());
+  assert.doesNotMatch(JSON.stringify(issued.possession_receipt_verification), /PRIVATE KEY|secret|credential/i);
 
   const binding = { ...issued.candidate_binding, device_key_fingerprint: fingerprint };
   const body = { version: 2, proof_version: 2, enrollment_id: issued.enrollment_id, organization_id: org, device_id: deviceId, label: issueBody.label, platform: "macos", device_key: { algorithm: "p256-sha256", spki_pem: publicKey }, candidate_id: f.candidate.candidate_id, device_key_fingerprint: fingerprint, challenge: { challenge_id: issued.challenge_id, nonce: issued.nonce, expires_at: issued.expires_at, candidate_id: f.candidate.candidate_id, device_key_fingerprint: fingerprint } };
@@ -279,6 +285,33 @@ test("v2 enrollment is candidate-bound end to end and receipt reads are exact-de
   const wrongTenantHeaders = signDeviceRequest({ method: "GET", path: wrongTenantPath, body: Buffer.alloc(0), device_id: deviceId, timestamp: now, nonce: "receipt-v2-wrong-tenant-abcdefghijklmnopqrstuvwxyz" }, f.completionKeys.privateKey);
   const wrongTenant = await fetch(`${f.base}${wrongTenantPath}`, { headers: wrongTenantHeaders });
   assert.ok([401, 403, 404].includes(wrongTenant.status));
+});
+
+test("v2 enrollment issuance fails closed when the possession receipt signer or metadata is unavailable", async (t) => {
+  for (const possessionReceiptSigner of [
+    { async signPossessionReceipt() { throw new Error("must not sign"); } },
+    {
+      async publicKeyMetadata() { return { key_id: "possession-v1", algorithm: "ed25519", public_key: "-----BEGIN PRIVATE KEY-----\nnot-returnable\n-----END PRIVATE KEY-----\n" }; },
+      async signPossessionReceipt() { throw new Error("must not sign"); }
+    },
+    {
+      async publicKeyMetadata() { return { key_id: "possession-v1", algorithm: "ed25519", public_key: "-----BEGIN PUBLIC KEY-----\nmalformed\n-----END PUBLIC KEY-----\n", secret: "must-not-escape" }; },
+      async signPossessionReceipt() { throw new Error("must not sign"); }
+    }
+  ]) {
+    const f = await v2Fixture(t, { possessionReceiptSigner });
+    const fingerprint = `SHA256:${crypto.createHash("sha256").update(f.completionKeys.publicKey.export({ type: "spki", format: "der" })).digest("base64url")}`;
+    const response = await fetch(`${f.base}/v1/organizations/${org}/device-enrollments`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${f.token}`, "content-type": "application/json", "idempotency-key": `issue-v2-invalid-${Math.random()}`, "AgentPass-Recent-Auth": "webauthn-proof-abcdefghijklmnopqrstuvwxyz" },
+      body: JSON.stringify({ proof_version: 2, candidate_id: f.candidate.candidate_id, device_key_fingerprint: fingerprint, enrollment_id: crypto.randomUUID(), device_id: crypto.randomUUID(), label: "Build Mac v2", platform: "macos", ttl_ms: 600_000 })
+    });
+    assert.equal(response.status, 503);
+    const body = await response.json();
+    assert.equal(body.error.code, "possession_receipt_signer_unavailable");
+    assert.doesNotMatch(JSON.stringify(body), /PRIVATE KEY|must-not-escape|secret/i);
+    assert.equal(f.state.enrollment, undefined);
+  }
 });
 
 test("recent WebAuthn authorization is exact-operation bound and must be atomically consumed", async (t) => {

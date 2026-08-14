@@ -526,7 +526,7 @@
         "security": [{ "humanSession": [], "recentWebAuthn": [] }],
         "parameters": [{ "$ref": "#/components/parameters/OrganizationId" }, { "$ref": "#/components/parameters/CsrfToken" }, { "$ref": "#/components/parameters/IdempotencyKey" }],
         "requestBody": { "$ref": "#/components/requestBodies/DeviceEnrollmentIssue" },
-        "responses": { "201": { "$ref": "#/components/responses/Json" }, "400": { "$ref": "#/components/responses/BadRequest" }, "401": { "$ref": "#/components/responses/Unauthorized" }, "403": { "$ref": "#/components/responses/Forbidden" }, "404": { "$ref": "#/components/responses/NotFound" }, "409": { "$ref": "#/components/responses/IdempotencyConflict" } },
+        "responses": { "201": { "$ref": "#/components/responses/DeviceEnrollmentIssued" }, "400": { "$ref": "#/components/responses/BadRequest" }, "401": { "$ref": "#/components/responses/Unauthorized" }, "403": { "$ref": "#/components/responses/Forbidden" }, "404": { "$ref": "#/components/responses/NotFound" }, "409": { "$ref": "#/components/responses/IdempotencyConflict" } },
         "x-agentpass-tenant-scope": { "kind": "organization", "source": "path.organization_id", "cross-tenant-disclosure": false },
         "x-agentpass-minimum-role": "admin",
         "x-agentpass-enrollment-v2": {
@@ -1107,6 +1107,19 @@
         "description": "JSON response",
         "content": { "application/json": { "schema": { "type": "object", "additionalProperties": true } } }
       },
+      "DeviceEnrollmentIssued": {
+        "description": "Legacy v1 enrollment response or the strict v2 invitation. v2 includes only public possession-receipt verification metadata; private keys and signing secrets are never returned.",
+        "content": {
+          "application/json": {
+            "schema": {
+              "anyOf": [
+                { "$ref": "#/components/schemas/DeviceEnrollmentIssueResponseV1" },
+                { "$ref": "#/components/schemas/DeviceEnrollmentIssueResponseV2" }
+              ]
+            }
+          }
+        }
+      },
       "OrganizationList": { "description": "Organizations visible to the session", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/OrganizationListResponse" } } } },
       "OrganizationCreated": { "description": "Organization created", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/OrganizationResponse" } } } },
       "OrganizationResponse": { "description": "Organization response", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/OrganizationResponse" } } } },
@@ -1234,6 +1247,77 @@
           "label": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[^\\u0000-\\u001f\\u007f]{1,128}$" },
           "platform": { "const": "macos" },
           "ttl_ms": { "type": "integer", "minimum": 60000, "maximum": 86400000 }
+        }
+      },
+      "PossessionReceiptVerificationV1": { "$ref": "../schemas/device-possession-receipt-verification-v1.schema.json" },
+      "DeviceEnrollmentIssueResponseV1": {
+        "type": "object",
+        "required": ["enrollment", "request_id"],
+        "properties": {
+          "enrollment": { "type": "object", "additionalProperties": true },
+          "request_id": { "$ref": "#/components/schemas/RequestId" }
+        },
+        "additionalProperties": true
+      },
+      "DeviceEnrollmentIssueResponseV2": {
+        "type": "object",
+        "additionalProperties": false,
+        "maxProperties": 2,
+        "required": ["enrollment", "request_id"],
+        "properties": {
+          "request_id": { "$ref": "#/components/schemas/RequestId" },
+          "enrollment": {
+            "type": "object",
+            "additionalProperties": false,
+            "maxProperties": 15,
+            "required": ["version", "proof_version", "enrollment_id", "organization_id", "device_id", "label", "platform", "candidate_binding", "challenge_id", "nonce", "expires_at", "challenge", "credential", "possession_receipt_verification", "endpoint"],
+            "properties": {
+              "version": { "const": 2 },
+              "proof_version": { "const": 2 },
+              "enrollment_id": { "type": "string", "format": "uuid" },
+              "organization_id": { "type": "string", "format": "uuid" },
+              "device_id": { "type": "string", "format": "uuid" },
+              "label": { "type": "string", "minLength": 1, "maxLength": 128 },
+              "platform": { "const": "macos" },
+              "candidate_binding": {
+                "type": "object",
+                "additionalProperties": false,
+                "maxProperties": 10,
+                "required": ["version", "enrollment_id", "organization_id", "device_id", "candidate_id", "artifact_sha256", "source_commit", "team_id", "device_key_fingerprint", "expires_at"],
+                "properties": {
+                  "version": { "const": 1 },
+                  "enrollment_id": { "type": "string", "format": "uuid" },
+                  "organization_id": { "type": "string", "format": "uuid" },
+                  "device_id": { "type": "string", "format": "uuid" },
+                  "candidate_id": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$" },
+                  "artifact_sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+                  "source_commit": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+                  "team_id": { "type": "string", "pattern": "^[A-Z0-9]{10}$" },
+                  "device_key_fingerprint": { "type": "string", "pattern": "^SHA256:[A-Za-z0-9_-]{43}$" },
+                  "expires_at": { "type": "string", "format": "date-time" }
+                }
+              },
+              "challenge_id": { "type": "string", "format": "uuid" },
+              "nonce": { "type": "string", "minLength": 43, "maxLength": 43, "pattern": "^[A-Za-z0-9_-]{43}$" },
+              "expires_at": { "type": "string", "format": "date-time" },
+              "challenge": {
+                "type": "object",
+                "additionalProperties": false,
+                "maxProperties": 5,
+                "required": ["challenge_id", "nonce", "expires_at", "candidate_id", "device_key_fingerprint"],
+                "properties": {
+                  "challenge_id": { "type": "string", "format": "uuid" },
+                  "nonce": { "type": "string", "minLength": 43, "maxLength": 43, "pattern": "^[A-Za-z0-9_-]{43}$" },
+                  "expires_at": { "type": "string", "format": "date-time" },
+                  "candidate_id": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$" },
+                  "device_key_fingerprint": { "type": "string", "pattern": "^SHA256:[A-Za-z0-9_-]{43}$" }
+                }
+              },
+              "credential": { "type": "string", "minLength": 43, "maxLength": 43, "pattern": "^[A-Za-z0-9_-]{43}$" },
+              "possession_receipt_verification": { "$ref": "#/components/schemas/PossessionReceiptVerificationV1" },
+              "endpoint": { "type": "string", "pattern": "^/v1/enrollments/[0-9a-f-]+$" }
+            }
+          }
         }
       },
       "AgentSessionGrantV1": { "$ref": "../schemas/agent-session-grant-v1.schema.json" },

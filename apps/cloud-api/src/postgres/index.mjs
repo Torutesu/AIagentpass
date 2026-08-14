@@ -89,3 +89,9 @@ export {
   sha256Hex
 } from "./organization-repository.mjs";
 export { createPostgresRuntime, loadPostgresConfig } from "./runtime.mjs";
+export {
+  MANAGED_SIGNER_KEY_LIFECYCLE_REPOSITORY_ERROR_CODES,
+  ManagedSignerKeyLifecycleRepositoryError,
+  canonicalManagedSignerRequestDigest,
+  createPostgresManagedSignerKeyLifecycleRepository
+} from "./managed-signer-key-lifecycle-repository.mjs";

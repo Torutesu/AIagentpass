@@ -77,13 +77,17 @@ const AUTHORITY_TABLES = Object.freeze([
   ["device_bundle_acknowledgements", "t.organization_id = ANY($1::uuid[])", "security"],
   ["device_manual_wake_events", "t.organization_id = ANY($1::uuid[])", "outbox"],
   ["device_manual_wake_requests", "t.organization_id = ANY($1::uuid[])", "security"],
+  ["managed_signer_key_lifecycles", "$1::uuid[] IS NOT NULL", "security"],
+  ["managed_signer_keys", "$1::uuid[] IS NOT NULL", "security"],
+  ["managed_signer_key_lifecycle_operations", "$1::uuid[] IS NOT NULL", "security"],
+  ["managed_signer_signing_idempotency", "$1::uuid[] IS NOT NULL", "security"],
   ["schema_migration_attempts", "$1::uuid[] IS NOT NULL", "migration"]
 ]);
 const AUTHORITY_TABLE_NAMES = Object.freeze(AUTHORITY_TABLES.map(([name]) => name));
 const TENANT_TABLE_NAMES = new Set(AUTHORITY_TABLES.filter(([, , kind]) => ["tenant", "audit", "outbox", "security"].includes(kind)).map(([name]) => name));
 
 export const AUTHORITY_MANIFEST_SCHEMA_VERSION = 2;
-export const REQUIRED_MIGRATION_VERSION = "36";
+export const REQUIRED_MIGRATION_VERSION = "37";
 export const MANIFEST_KIND = "agentpass.authority-manifest";
 
 export const DIAGNOSTICS = Object.freeze({

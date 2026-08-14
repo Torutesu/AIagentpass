@@ -12,13 +12,14 @@ The primary macOS delivery is not a required menu-bar application. The release a
 
 ## 2. Current implemented boundary
 
-The current branch has the versioned Core/OpenAPI/JSON Schema catalog, 36 forward-only PostgreSQL migrations, tenant-qualified hosted repositories, Human sessions and organization roles, WebAuthn registration/authentication and operation-bound recent authorization, Device API foundations, signed control bundles and ACK state, audit ingestion, emergency revocation, threshold-owner recovery, and a secret-free recovery-notification outbox with dead-letter management, durable uncertain-delivery quarantine, and bounded retention.
+The current branch has the versioned Core/OpenAPI/JSON Schema catalog, 37 forward-only PostgreSQL migrations, tenant-qualified hosted repositories, Human sessions and organization roles, WebAuthn registration/authentication and operation-bound recent authorization, Device API foundations, signed control bundles and ACK state, audit ingestion, emergency revocation, threshold-owner recovery, and a secret-free recovery-notification outbox with dead-letter management, durable uncertain-delivery quarantine, and bounded retention.
 
 At the current checkpoint, recovery dead-letter redrive and suppression require
 an exact resource-bound WebAuthn context. The repository recomputes that
 context and consumes the proof in the same organization-locked transaction.
-All 36 migrations apply, the root suite passes 1,848 tests (1,800 pass and 48
-intentionally skipped), and the frozen catalog validates 120 entries. The
+All 37 migrations apply against local PostgreSQL 16. The root suite now passes
+1,860 tests (1,811 pass and 49 intentionally skipped), and the frozen catalog
+validates 122 entries. The
 authenticated P0-B Cloud/Console/PostgreSQL/browser journey also passes all 12
 role, WebAuthn, wake, tenant-substitution, and revocation scenarios locally and
 in the source-bound CI qualification.
@@ -38,20 +39,21 @@ IAM/non-exportability evidence, all-purpose key provisioning, and protected
 browser/PostgreSQL qualification remain open, so neither W2.2 nor W3.2 is yet
 declared complete.
 
-W3.3 now has a source-level key lifecycle foundation for active, retiring,
-revoked, and emergency-disabled keys. It binds purpose, algorithm, fingerprint,
-and monotonic version; retains bounded historical verification keys; and returns
-the exact in-process signed bytes for an idempotent response-loss retry. AWS/GCP
-signing is gated by this lifecycle and the existing reliability boundary. This
-is not yet durable qualification: PostgreSQL lifecycle/idempotency persistence,
-multi-replica concurrency, provider-side response-loss lookup, every hosted
-purpose, and real KMS IAM/non-exportability evidence remain open.
+W3.3 now also has migration `0037` and a purpose-global PostgreSQL repository
+for lifecycle transitions and signing idempotency. It serializes transitions,
+stores only public key metadata, replays exact committed signature bytes across
+replicas, and quarantines pending/uncertain provider outcomes against blind
+re-signing. Runtime/KMS composition, real-PostgreSQL race qualification,
+provider-side response-loss lookup, every hosted purpose, and real KMS
+IAM/non-exportability evidence remain open.
 
-W4.1 now shares a fail-closed durable onboarding journal across setup status,
-setup continuation, and doctor. Machine-readable success/failure output is
-redacted and excludes operation evidence and identifiers. The initial browser
-enrollment, real Device API completion, interrupted physical-Mac journey, and
-signed package installation remain open, so W4.1 is still in progress.
+W4.1 now requires the complete v2 candidate/challenge invitation, P-256 native
+key binding, and a Cloud-published purpose-separated receipt verification key.
+The client signs the Device receipt read, verifies the receipt before persisting
+control trust, never replays a response-loss POST, and persists neither the
+credential nor private material. Hosted possession-receipt signer composition,
+interrupted physical-Mac qualification, and signed package installation remain
+open, so W4.1 is still in progress.
 
 The branch CI run `31791531512` passes all four jobs: PostgreSQL 16/W1.5,
 browser E2E, P0-B live process, and the complete test/release gate. It retains
@@ -461,8 +463,8 @@ or release boundary still has one owner and one ordered merge queue.
 | 7 | W2.5 browser hardening | CSP/HSTS/cookies/CSRF/origin/cache policy, keyboard/focus/live-region/zoom/reduced-motion, forbidden-material scan | Chromium + WebKit; Firefox where authenticator support permits | W2 exit |
 | 8 | W3.1 signer contract freeze — parallel with 3–7 | One provider-neutral purpose map, immutable key metadata, fixed algorithms/domains, no caller key selection | Catalog/OpenAPI/schema compatibility and cross-purpose negative tests | Managed KMS qualification |
 | 9 | W3.2 managed signer qualification | Separate AWS/GCP workload identities and keys for every purpose; provider timeout/throttle/circuit behavior | IAM denial, non-exportability, outage, malformed response, and no-file-fallback evidence | Hosted signer activation |
-| 10 | W3.3 rotation and recovery — source foundation complete, durability pending | Active/retiring/revoked/emergency-disabled state machine, verification overlap, in-process byte-exact response-loss retry, compromise disable | PostgreSQL-backed multi-replica rotation/rollback/restore and restart-safe historical verification | W3 exit |
-| 11 | W4.1 headless setup state machine — shared journal/redaction complete, real enrollment pending | Resumable `install/setup/doctor/status` state shared by CLI and optional UI; browser enrollment handoff | Interrupt/restart at every durable state, real Device API handoff, physical-Mac journey, machine-readable output redaction | Claude Code adapter |
+| 10 | W3.3 rotation and recovery — PostgreSQL foundation complete, runtime integration pending | Migration 0037, durable lifecycle operations, exact signature replay, pending/uncertain quarantine | Wire repositories into every hosted KMS purpose; real PostgreSQL multi-replica rotation/signing/restore and restart-safe verification | W3 exit |
+| 11 | W4.1 headless setup state machine — v2 Device handoff implemented, hosted signer pending | Strict v2 invitation, signed receipt recovery/read, verified receipt before trust persistence, no response-loss POST replay | Compose hosted possession signer; interrupt/restart physical-Mac journey and machine-readable secret scan | Claude Code adapter |
 | 12 | W4.2 Claude Code adapter | Identity/ancestry/repository/worktree/branch/TTL/generation/budget binding and Git signing self-test | Two unattended verified commits plus substitution, expiry, death, PID-reuse, and budget races | Primary native journey |
 | 13 | W4.3 Cursor parity and lifecycle | Thin Cursor adapter plus revoke, close, uninstall-preserve, reinstall-recover, and explicit purge | Same authority matrix as Claude Code; no adapter-specific authority path | W4 exit |
 | 14 | W5 release candidate | Universal hardened-runtime PKG, nested signatures, notarization/stapling, SBOM, provenance, release manifest, Homebrew bootstrap | Independent artifact verification and clean-machine journeys | Physical qualification |
@@ -536,10 +538,11 @@ Add real PostgreSQL, two-instance, Playwright, KMS/IAM, packaging/notarization, 
 9. `test: close the production console browser matrix` (W2; organization journey and fail-closed self-logout/expiry source paths implemented, protected browser/PostgreSQL matrix pending)
 10. `feat: qualify purpose-separated managed signer providers` (W3; AWS/GCP adapters and isolated timeout/throttle/integrity circuit behavior implemented, all-purpose IAM/non-exportability/outage/rotation evidence pending)
 11. `feat: add signer lifecycle and resumable onboarding` (W3.3/W4.1; source lifecycle, shared durable setup reader, redacted output, and Console role enforcement implemented; external durability/enrollment evidence pending)
-12. `feat: complete claude code headless onboarding` (W4)
-13. `feat: add cursor adapter parity` (W4)
-14. `build: produce signed notarized immutable pkg` (W5)
-15. `ops: qualify and promote hosted production release` (W6)
+12. `feat: persist signer lifecycle and require v2 device receipts` (W3.3/W4.1; migration/repositories and strict client/Cloud contract implemented; runtime composition and physical evidence pending)
+13. `feat: complete claude code headless onboarding` (W4)
+14. `feat: add cursor adapter parity` (W4)
+15. `build: produce signed notarized immutable pkg` (W5)
+16. `ops: qualify and promote hosted production release` (W6)
 
 Items 10, 11, 14, and 15 remain externally gated until the required Apple, cloud,
 hardware, deployment, and independent-review resources are available.

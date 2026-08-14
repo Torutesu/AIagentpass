@@ -11,7 +11,12 @@ import {
 import { RateLimiterCapacityError, createRateLimiter } from "./rate-limit.mjs";
 import { OPERATIONAL_GAUGE_KEYS, OPERATIONAL_METRIC_KEYS } from "./postgres/operational-health.mjs";
 import { normalizeDeviceReadModels } from "./device-read-model.mjs";
-import { normalizePossessionReceiptStatement } from "./possession-receipt-signer.mjs";
+import {
+  normalizePossessionReceiptStatement,
+  POSSESSION_RECEIPT_PURPOSE,
+  POSSESSION_RECEIPT_SIGNATURE_ALGORITHMS,
+  POSSESSION_RECEIPT_VERSION
+} from "./possession-receipt-signer.mjs";
 
 const MAX_BODY_BYTES = 1024 * 1024;
 const HUMAN_AUTH_MAX_BODY_BYTES = 64 * 1024;
@@ -295,6 +300,7 @@ export function createCloudApi({ store, tokenRecords = [], bundleSigner, refresh
           const createdAt = new Date(now()).toISOString();
           const expiresAt = new Date(now() + ttlMs).toISOString();
           const candidate = await resolveActiveReleaseCandidate(store, body.candidate_id);
+          const possessionReceiptVerification = await loadPossessionReceiptVerification(possessionReceiptSigner);
           const candidateBinding = makeCandidateBinding({
             enrollmentId,
             organizationId,
@@ -369,6 +375,7 @@ export function createCloudApi({ store, tokenRecords = [], bundleSigner, refresh
                   device_key_fingerprint: candidateBinding.device_key_fingerprint
                 },
                 credential,
+                possession_receipt_verification: possessionReceiptVerification,
                 endpoint: `/v1/enrollments/${enrollmentId}`
               }
             }
@@ -979,6 +986,34 @@ async function completeV2EnrollmentInStore(store, input) {
   const method = typeof store.completeDeviceEnrollment === "function" ? store.completeDeviceEnrollment : store.completeDeviceEnrollmentV2;
   if (typeof method !== "function") throw apiError("enrollment_unavailable", 503, "Device enrollment is unavailable");
   return method.call(store, input);
+}
+
+async function loadPossessionReceiptVerification(signer) {
+  if (!signer || typeof signer.publicKeyMetadata !== "function") {
+    throw apiError("possession_receipt_signer_unavailable", 503, "Possession receipt signer is unavailable");
+  }
+  let metadata;
+  try {
+    metadata = await signer.publicKeyMetadata();
+    if (!metadata || typeof metadata !== "object" || Array.isArray(metadata)) throw new Error("metadata is not an object");
+    const keys = Object.keys(metadata).sort().join(",");
+    const minimalKeys = ["algorithm", "key_id", "public_key"].join(",");
+    const signerKeys = ["algorithm", "key_id", "public_key", "purpose", "version"].join(",");
+    if (keys !== minimalKeys && keys !== signerKeys) throw new Error("metadata fields are invalid");
+    if (keys === signerKeys && (metadata.version !== POSSESSION_RECEIPT_VERSION || metadata.purpose !== POSSESSION_RECEIPT_PURPOSE)) throw new Error("metadata purpose is invalid");
+    if (typeof metadata.key_id !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$/u.test(metadata.key_id)) throw new Error("metadata key id is invalid");
+    if (!POSSESSION_RECEIPT_SIGNATURE_ALGORITHMS.includes(metadata.algorithm)) throw new Error("metadata algorithm is invalid");
+    if (typeof metadata.public_key !== "string" || Buffer.byteLength(metadata.public_key, "utf8") > 8192 || /PRIVATE KEY/i.test(metadata.public_key)) throw new Error("metadata public key is invalid");
+    const publicKey = crypto.createPublicKey(metadata.public_key);
+    if (publicKey.type !== "public") throw new Error("metadata key is not public");
+    if (metadata.algorithm === "ed25519" && publicKey.asymmetricKeyType !== "ed25519") throw new Error("metadata algorithm does not match key");
+    if (metadata.algorithm === "p256-sha256" && (publicKey.asymmetricKeyType !== "ec" || publicKey.asymmetricKeyDetails?.namedCurve !== "prime256v1")) throw new Error("metadata algorithm does not match key");
+    const canonicalPublicKey = publicKey.export({ type: "spki", format: "pem" }).toString();
+    if (canonicalPublicKey !== metadata.public_key) throw new Error("metadata public key is not canonical");
+    return Object.freeze({ key_id: metadata.key_id, algorithm: metadata.algorithm, public_key: canonicalPublicKey });
+  } catch {
+    throw apiError("possession_receipt_signer_unavailable", 503, "Possession receipt signer is unavailable");
+  }
 }
 
 async function signAndValidatePossessionReceipt(signer, statement) {

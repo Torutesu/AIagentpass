@@ -21,7 +21,7 @@ const DEVICE = "33333333-3333-4333-8333-333333333333";
 const BASE_URL = "https://api.example.test/v1";
 const CREDENTIAL = "Abcdefghijklmnopqrstuvwxyz0123456789-_ABCDE";
 const CHALLENGE_NONCE = "A".repeat(43);
-const CHALLENGE_ID = "44444444-4444-4444-8444-444444444444";
+const CHALLENGE_ID = ENROLLMENT;
 
 function keys(algorithm = "p256-sha256") {
   const pair = algorithm === "ed25519"
@@ -40,6 +40,7 @@ function fingerprint(pair) {
 function input(pair, overrides = {}) {
   return {
     baseUrl: BASE_URL,
+    proofVersion: 1,
     enrollmentId: ENROLLMENT,
     organizationId: ORGANIZATION,
     deviceId: DEVICE,
@@ -105,6 +106,31 @@ function candidate(pair, overrides = {}) {
   };
 }
 
+function possessionReceipt(devicePair, receiptPair, overrides = {}) {
+  const { expires_at: _expiresAt, ...candidateStatement } = candidate(devicePair);
+  const statement = {
+    ...candidateStatement,
+    device_key_epoch: 3,
+    challenge_nonce_digest: crypto.createHash("sha256").update(CHALLENGE_NONCE).digest("hex"),
+    issued_at: "2099-01-02T03:04:05.000Z",
+    ...overrides
+  };
+  const statementBytes = Buffer.from(JSON.stringify(Object.fromEntries(Object.entries(statement).sort(([a], [b]) => a.localeCompare(b)))), "utf8");
+  const statementHash = crypto.createHash("sha256").update(statementBytes).digest("hex");
+  const signed = Buffer.from(`AgentPass-Cloud-Possession-Receipt-v1\0${statementBytes.toString("utf8")}`);
+  return {
+    version: 1,
+    purpose: "device-enrollment-possession-receipt",
+    key_id: "receipt-key-v1",
+    algorithm: receiptPair.publicKey.asymmetricKeyType === "ed25519" ? "ed25519" : "p256-sha256",
+    statement,
+    statement_hash: statementHash,
+    signature: receiptPair.publicKey.asymmetricKeyType === "ed25519"
+      ? crypto.sign(null, signed, receiptPair.privateKey).toString("base64url")
+      : crypto.sign("sha256", signed, { key: receiptPair.privateKey, dsaEncoding: "ieee-p1363" }).toString("base64url")
+  };
+}
+
 test("builds the exact schema body canonically and never includes credentials", () => {
   const pair = keys();
   const request = buildDeviceEnrollmentRequest({ enrollmentId: ENROLLMENT, organizationId: ORGANIZATION, deviceId: DEVICE, label: "build-mac-01", deviceKey: { algorithm: "p256-sha256", spkiPem: pair.publicPem } });
@@ -151,6 +177,15 @@ test("rejects private keys, unknown fields, malformed IDs, unsafe labels, and ov
   assert.throws(() => buildDeviceEnrollmentRequest({ ...body, label: "\u0000bad" }), (error) => error.code === DEVICE_ENROLLMENT_ERRORS.INVALID_REQUEST);
   assert.throws(() => buildDeviceEnrollmentRequest({ ...body, label: "x".repeat(129) }), (error) => error.code === DEVICE_ENROLLMENT_ERRORS.INVALID_REQUEST);
   assert.throws(() => buildDeviceEnrollmentRequest({ ...body, deviceKey: { algorithm: "p256-sha256", spkiPem: `${pair.publicPem}${"x".repeat(8192)}` } }), (error) => error.code === DEVICE_ENROLLMENT_ERRORS.INVALID_KEY);
+});
+
+test("production mode rejects legacy v1 instead of silently falling back", () => {
+  const pair = keys();
+  assert.throws(() => createDeviceEnrollmentClient({ ...input(pair), requireV2: true }), (error) => {
+    assert.equal(error.code, DEVICE_ENROLLMENT_ERRORS.INVALID_CONFIG);
+    assert.match(error.message, /proofVersion 2/);
+    return true;
+  });
 });
 
 test("signs proof-of-possession over the exact endpoint and body without a bearer header", async () => {
@@ -366,7 +401,10 @@ test("v2 proof is domain-separated, exact-path, nonce-bound, and candidate-bound
 
 test("v2 client pins the pathname, sends candidate and nonce, and enforces P-256 qualification", async () => {
   const pair = keys();
+  const receiptPair = keys("ed25519");
+  const receipt = possessionReceipt(pair, receiptPair);
   let captured;
+  let receiptReads = 0;
   const client = createDeviceEnrollmentClient({
     ...input(pair),
     proofVersion: 2,
@@ -374,8 +412,19 @@ test("v2 client pins the pathname, sends candidate and nonce, and enforces P-256
     challengeId: CHALLENGE_ID,
     challengeNonce: CHALLENGE_NONCE,
     candidateBinding: candidate(pair),
+    possessionReceiptPublicKey: receiptPair.publicPem,
+    possessionReceiptKeyId: receipt.key_id,
     signer: signWith(pair),
-    fetchImpl: async (url, init) => { captured = { url, init }; return jsonResponse(enrolledResponse(pair)); }
+    fetchImpl: async (url, init) => {
+      if (init.method === "GET") {
+        receiptReads += 1;
+        return receiptReads === 1
+          ? new Response("", { status: 401 })
+          : jsonResponse({ request_id: "receipt-request-1", receipt }, 200);
+      }
+      captured = { url, init };
+      return jsonResponse(enrolledResponse(pair));
+    }
   });
   assert.equal((await client.enroll()).status, "enrolled");
   assert.equal(captured.url, `https://api.example.test/v1/enrollments/${ENROLLMENT}`);
@@ -385,8 +434,128 @@ test("v2 client pins the pathname, sends candidate and nonce, and enforces P-256
   assert.equal(v2Body.version, 2);
   assert.equal(v2Body.challenge.challenge_id, CHALLENGE_ID);
   assert.equal(client.config.proof_version, 2);
+  assert.equal(receiptReads, 2);
   const ed = keys("ed25519");
   assert.throws(() => createDeviceEnrollmentClient({ ...input(ed, { deviceKey: { algorithm: "ed25519", spkiPem: ed.publicPem }, keyFingerprint: fingerprint(ed) }), proofVersion: 2, qualification: "p256-sha256", challengeId: CHALLENGE_ID, challengeNonce: CHALLENGE_NONCE, candidateBinding: candidate(ed), signer: signWith(ed, "ed25519"), fetchImpl: async () => jsonResponse(enrolledResponse(ed)) }), (error) => error.code === DEVICE_ENROLLMENT_ERRORS.INVALID_CONFIG);
+});
+
+test("does not retry a response-loss POST and recovers only through a bound receipt", async () => {
+  const pair = keys();
+  const receiptPair = keys("ed25519");
+  const receipt = possessionReceipt(pair, receiptPair);
+  let preflight = true;
+  let postCalls = 0;
+  let getCalls = 0;
+  const client = createDeviceEnrollmentClient({
+    ...input(pair),
+    proofVersion: 2,
+    qualification: "p256-sha256",
+    challengeId: CHALLENGE_ID,
+    challengeNonce: CHALLENGE_NONCE,
+    candidateBinding: candidate(pair),
+    possessionReceiptPublicKey: receiptPair.publicPem,
+    possessionReceiptKeyId: receipt.key_id,
+    signer: signWith(pair),
+    fetchImpl: async (_url, init) => {
+      if (init.method === "GET") {
+        getCalls += 1;
+        assert.equal(init.headers["AgentPass-Enrollment-Credential"], undefined);
+        if (preflight) { preflight = false; return new Response("", { status: 401 }); }
+        return jsonResponse({ request_id: "receipt-request-2", receipt }, 200);
+      }
+      postCalls += 1;
+      assert.equal(init.headers["AgentPass-Enrollment-Credential"], CREDENTIAL);
+      throw new TypeError("connection closed after Cloud committed the request");
+    }
+  });
+  await assert.rejects(() => client.enroll(), (error) => {
+    assert.equal(error.code, DEVICE_ENROLLMENT_ERRORS.RECOVERY_PROVEN);
+    assert.equal(error.details.receipt_statement_hash, receipt.statement_hash);
+    assert.equal(JSON.stringify(error).includes(CREDENTIAL), false);
+    return true;
+  });
+  await assert.rejects(() => client.enroll(), (error) => error.code === DEVICE_ENROLLMENT_ERRORS.RECOVERY_PROVEN);
+  assert.equal(postCalls, 1);
+  assert.equal(getCalls, 2);
+  assert.equal(client.status(), "failed");
+});
+
+test("a restarted v2 client checks the receipt before submitting a one-time credential", async () => {
+  const pair = keys();
+  const receiptPair = keys("ed25519");
+  const receipt = possessionReceipt(pair, receiptPair);
+  let posts = 0;
+  const client = createDeviceEnrollmentClient({
+    ...input(pair),
+    proofVersion: 2,
+    qualification: "p256-sha256",
+    challengeId: CHALLENGE_ID,
+    challengeNonce: CHALLENGE_NONCE,
+    candidateBinding: candidate(pair),
+    possessionReceiptPublicKey: receiptPair.publicPem,
+    possessionReceiptKeyId: receipt.key_id,
+    signer: signWith(pair),
+    fetchImpl: async (_url, init) => {
+      assert.equal(init.method, "GET");
+      return jsonResponse({ request_id: "receipt-request-restart", receipt }, 200);
+    }
+  });
+  await assert.rejects(() => client.enroll(), (error) => error.code === DEVICE_ENROLLMENT_ERRORS.RECOVERY_PROVEN);
+  assert.equal(posts, 0);
+});
+
+test("stops honestly when the receipt endpoint cannot prove response-loss recovery", async () => {
+  const pair = keys();
+  const receiptPair = keys("ed25519");
+  let gets = 0;
+  let posts = 0;
+  const client = createDeviceEnrollmentClient({
+    ...input(pair),
+    proofVersion: 2,
+    qualification: "p256-sha256",
+    challengeId: CHALLENGE_ID,
+    challengeNonce: CHALLENGE_NONCE,
+    candidateBinding: candidate(pair),
+    possessionReceiptPublicKey: receiptPair.publicPem,
+    possessionReceiptKeyId: "receipt-key-v1",
+    signer: signWith(pair),
+    fetchImpl: async (_url, init) => {
+      if (init.method === "GET") { gets += 1; return new Response("", { status: gets === 1 ? 401 : 404 }); }
+      posts += 1;
+      throw new Error("response lost");
+    }
+  });
+  await assert.rejects(() => client.enroll(), (error) => {
+    assert.equal(error.code, DEVICE_ENROLLMENT_ERRORS.RECOVERY_UNPROVEN);
+    assert.equal(error.details.observed_status, 404);
+    return true;
+  });
+  await assert.rejects(() => client.enroll(), (error) => error.code === DEVICE_ENROLLMENT_ERRORS.RECOVERY_UNPROVEN);
+  assert.equal(posts, 1);
+  assert.equal(gets, 2);
+});
+
+test("rejects a receipt signed by the pinned key when its tenant or device binding is substituted", async () => {
+  const pair = keys();
+  const receiptPair = keys("ed25519");
+  const substituted = possessionReceipt(pair, receiptPair, { organization_id: DEVICE });
+  let posts = 0;
+  const client = createDeviceEnrollmentClient({
+    ...input(pair),
+    proofVersion: 2,
+    qualification: "p256-sha256",
+    challengeId: CHALLENGE_ID,
+    challengeNonce: CHALLENGE_NONCE,
+    candidateBinding: candidate(pair),
+    possessionReceiptPublicKey: receiptPair.publicPem,
+    possessionReceiptKeyId: substituted.key_id,
+    signer: signWith(pair),
+    fetchImpl: async (_url, init) => init.method === "GET"
+      ? jsonResponse({ request_id: "receipt-request-substituted", receipt: substituted }, 200)
+      : (posts += 1, jsonResponse(enrolledResponse(pair)))
+  });
+  await assert.rejects(() => client.enroll(), (error) => error.code === DEVICE_ENROLLMENT_ERRORS.RECOVERY_UNPROVEN);
+  assert.equal(posts, 0);
 });
 
 test("verifies a purpose-separated possession receipt and rejects receipt substitution", () => {

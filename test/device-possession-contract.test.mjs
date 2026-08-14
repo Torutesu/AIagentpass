@@ -63,12 +63,13 @@ function assertSchemaValue(schema, value, rootSchema, label) {
 const issueV2 = readJson("contracts/schemas/device-enrollment-issue-v2.schema.json");
 const completionV2 = readJson("contracts/schemas/device-enrollment-completion-v2.schema.json");
 const receiptV1 = readJson("contracts/schemas/device-possession-receipt-v1.schema.json");
+const receiptVerificationV1 = readJson("contracts/schemas/device-possession-receipt-verification-v1.schema.json");
 
-const ids = [issueV2, completionV2, receiptV1].map((schema) => schema.$id);
+const ids = [issueV2, completionV2, receiptV1, receiptVerificationV1].map((schema) => schema.$id);
 
 test("Cloud possession schemas are strict, bounded, and uniquely identified", () => {
   assert.equal(new Set(ids).size, ids.length);
-  for (const schema of [issueV2, completionV2, receiptV1]) {
+  for (const schema of [issueV2, completionV2, receiptV1, receiptVerificationV1]) {
     assert.equal(schema.$schema, "https://json-schema.org/draft/2020-12/schema");
     assert.equal(schema.type, "object");
     assert.equal(schema.additionalProperties, false);
@@ -79,6 +80,27 @@ test("Cloud possession schemas are strict, bounded, and uniquely identified", ()
   assert.equal(receiptV1.$defs.receiptStatement.additionalProperties, false);
   assert.equal(completionV2.properties.device_key.additionalProperties, false);
   assert.equal(completionV2.properties.challenge.additionalProperties, false);
+  assert.equal(receiptVerificationV1.maxProperties, 3);
+  assert.deepEqual(receiptVerificationV1.required, ["key_id", "algorithm", "public_key"]);
+});
+
+test("v2 issue response exposes only closed public possession receipt verification metadata", () => {
+  const metadata = {
+    key_id: "possession-receipt-v1",
+    algorithm: "ed25519",
+    public_key: "-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEA6tOzXpegx8uirXcRscbgSA9jsm/JG0Odtv7b56m0pxw=\n-----END PUBLIC KEY-----\n"
+  };
+  assertSchemaValue(receiptVerificationV1, metadata, receiptVerificationV1, "possession_receipt_verification");
+  for (const extra of [
+    { ...metadata, purpose: "other-purpose" },
+    { ...metadata, private_key: "must-not-cross-boundary" },
+    { ...metadata, secret: "must-not-cross-boundary" }
+  ]) assert.throws(() => assertSchemaValue(receiptVerificationV1, extra, receiptVerificationV1, "possession_receipt_verification"), /unknown|maxProperties/);
+  const openapi = readJson("contracts/openapi/human-v1.json");
+  const operation = openapi.paths["/organizations/{organization_id}/device-enrollments"].post;
+  assert.equal(operation.responses["201"].$ref, "#/components/responses/DeviceEnrollmentIssued");
+  assert.equal(openapi.components.schemas.PossessionReceiptVerificationV1.$ref, "../schemas/device-possession-receipt-verification-v1.schema.json");
+  assert.equal(openapi.components.schemas.DeviceEnrollmentIssueResponseV2.properties.enrollment.properties.possession_receipt_verification.$ref, "#/components/schemas/PossessionReceiptVerificationV1");
 });
 
 test("v2 issue request accepts only candidate and public-key bindings", () => {
@@ -191,12 +213,14 @@ test("all possession contract files are JSON and OpenAPI external refs exist", (
     "contracts/schemas/device-enrollment-issue-v2.schema.json",
     "contracts/schemas/device-enrollment-completion-v2.schema.json",
     "contracts/schemas/device-possession-receipt-v1.schema.json",
+    "contracts/schemas/device-possession-receipt-verification-v1.schema.json",
     "contracts/openapi/human-v1.json",
     "contracts/openapi/device-v1.json"
   ]) assert.doesNotThrow(() => readJson(relative));
   for (const relative of [
     "contracts/schemas/device-enrollment-issue-v2.schema.json",
     "contracts/schemas/device-enrollment-completion-v2.schema.json",
-    "contracts/schemas/device-possession-receipt-v1.schema.json"
+    "contracts/schemas/device-possession-receipt-v1.schema.json",
+    "contracts/schemas/device-possession-receipt-verification-v1.schema.json"
   ]) assert.equal(fs.statSync(path.join(root, relative)).isFile(), true);
 });

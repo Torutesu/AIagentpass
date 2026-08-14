@@ -1,0 +1,29 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agentpass.dev/contracts/device-possession-receipt-verification-v1.schema.json",
+  "title": "Device enrollment possession receipt verification metadata v1",
+  "description": "Closed public verification metadata for the purpose-separated Cloud possession receipt signer. It never contains a private key, credential, secret, or signing material.",
+  "type": "object",
+  "additionalProperties": false,
+  "maxProperties": 3,
+  "required": ["key_id", "algorithm", "public_key"],
+  "properties": {
+    "key_id": { "$ref": "#/$defs/keyId" },
+    "algorithm": { "enum": ["ed25519", "p256-sha256"] },
+    "public_key": {
+      "type": "string",
+      "minLength": 80,
+      "maxLength": 8192,
+      "pattern": "^-----BEGIN PUBLIC KEY-----[\\s\\S]+-----END PUBLIC KEY-----\\n?$",
+      "not": { "pattern": "PRIVATE KEY|SECRET|secret" }
+    }
+  },
+  "$defs": {
+    "keyId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 64,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$"
+    }
+  }
+}
