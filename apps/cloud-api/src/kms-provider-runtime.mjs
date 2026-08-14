@@ -57,7 +57,6 @@ export const KMS_PROVIDER_RUNTIME_ERROR_CODES = Object.freeze({
 const KMS_ENV_PREFIX = "AGENTPASS_KMS_";
 const ALLOWED_KMS_ENV = new Set(Object.values(KMS_PROVIDER_RUNTIME_ENV));
 const PROVIDERS = new Set(["aws", "gcp"]);
-const AWS_RESOURCE = /^[A-Za-z0-9][A-Za-z0-9:/._-]{0,2047}$/u;
 const AWS_KEY_RESOURCE = /^arn:aws:kms:[a-z0-9-]+:[0-9]{12}:key\/[A-Za-z0-9][A-Za-z0-9:/._-]{0,2047}$/u;
 const GCP_RESOURCE = /^projects\/[A-Za-z0-9._-]+\/locations\/[A-Za-z0-9._-]+\/keyRings\/[A-Za-z0-9._-]+\/cryptoKeys\/[A-Za-z0-9._-]+\/cryptoKeyVersions\/[A-Za-z0-9._-]+$/u;
 const KEY_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$/u;
@@ -73,11 +72,6 @@ const PURPOSE_DEFINITIONS = Object.freeze([
   { name: "auditAnchor", registryName: "audit_anchor", providerName: "auditAnchorSignerProvider", resource: "auditAnchorResource", keyIdEnv: "AGENTPASS_CLOUD_AUDIT_ANCHOR_KEY_ID", publicKeyEnv: "AGENTPASS_CLOUD_AUDIT_ANCHOR_PUBLIC_KEY", timeoutEnv: "AGENTPASS_CLOUD_AUDIT_ANCHOR_TIMEOUT_MS", purpose: SIGNER_PURPOSE_REGISTRY.audit_anchor.purpose, version: SIGNER_PURPOSE_REGISTRY.audit_anchor.protocol_version },
   { name: "promotionEvidence", registryName: "promotion_evidence", providerName: "promotionEvidenceSignerProvider", resource: "promotionEvidenceResource", keyIdEnv: "AGENTPASS_CLOUD_PROMOTION_EVIDENCE_KEY_ID", publicKeyEnv: "AGENTPASS_CLOUD_PROMOTION_EVIDENCE_PUBLIC_KEY", timeoutEnv: "AGENTPASS_CLOUD_PROMOTION_EVIDENCE_TIMEOUT_MS", purpose: SIGNER_PURPOSE_REGISTRY.promotion_evidence.purpose, version: SIGNER_PURPOSE_REGISTRY.promotion_evidence.protocol_version }
 ]);
-const LEGACY_PURPOSE_DEFINITIONS = PURPOSE_DEFINITIONS.slice(0, 4);
-const EXTENDED_PURPOSE_DEFINITIONS = PURPOSE_DEFINITIONS.slice(4);
-const EXTENDED_CONFIG_ENV = Object.freeze(EXTENDED_PURPOSE_DEFINITIONS.flatMap(({ resource, keyIdEnv, publicKeyEnv, timeoutEnv }) => [
-  KMS_PROVIDER_RUNTIME_ENV[resource], keyIdEnv, publicKeyEnv, timeoutEnv
-]));
 
 const ERROR_MESSAGES = Object.freeze({
   [KMS_PROVIDER_RUNTIME_ERROR_CODES.CONFIG]: "hosted KMS provider configuration is invalid",
@@ -136,31 +130,24 @@ export function parseKmsProviderRuntimeConfig(env = process.env) {
     if (name.startsWith(KMS_ENV_PREFIX) && !ALLOWED_KMS_ENV.has(name)) fail(KMS_PROVIDER_RUNTIME_ERROR_CODES.CONFIG);
   }
   const provider = env[KMS_PROVIDER_RUNTIME_ENV.provider];
-  const agentSessionResource = env[KMS_PROVIDER_RUNTIME_ENV.agentSessionResource];
-  const qualificationManifestResource = env[KMS_PROVIDER_RUNTIME_ENV.qualificationManifestResource];
-  const possessionReceiptResource = env[KMS_PROVIDER_RUNTIME_ENV.possessionReceiptResource];
-  const refreshHintResource = env[KMS_PROVIDER_RUNTIME_ENV.refreshHintResource];
-  const extended = EXTENDED_CONFIG_ENV.some((name) => Object.hasOwn(env, name));
-  const definitions = extended ? PURPOSE_DEFINITIONS : LEGACY_PURPOSE_DEFINITIONS;
-  const resources = Object.fromEntries(definitions.map((definition) => [definition.name, env[KMS_PROVIDER_RUNTIME_ENV[definition.resource]] ?? env[definition.resource]]));
-  if (!PROVIDERS.has(provider) || typeof agentSessionResource !== "string" || typeof qualificationManifestResource !== "string"
-    || typeof possessionReceiptResource !== "string" || typeof refreshHintResource !== "string"
-    || agentSessionResource.length < 1 || qualificationManifestResource.length < 1
-    || possessionReceiptResource.length < 1 || refreshHintResource.length < 1
-    || new Set([agentSessionResource, qualificationManifestResource, possessionReceiptResource, refreshHintResource, ...definitions.slice(4).map((definition) => resources[definition.name])]).size !== definitions.length) {
+  const resources = Object.fromEntries(PURPOSE_DEFINITIONS.map((definition) => [
+    definition.name,
+    env[KMS_PROVIDER_RUNTIME_ENV[definition.resource]]
+  ]));
+  const resourceValues = PURPOSE_DEFINITIONS.map(({ name }) => resources[name]);
+  if (!PROVIDERS.has(provider)
+    || resourceValues.some((resource) => typeof resource !== "string" || resource.length < 1)
+    || new Set(resourceValues).size !== PURPOSE_DEFINITIONS.length) {
     fail(KMS_PROVIDER_RUNTIME_ERROR_CODES.CONFIG);
   }
-  const resourcePattern = provider === "aws" ? AWS_RESOURCE : GCP_RESOURCE;
-  const extendedResourcePattern = provider === "aws" ? AWS_KEY_RESOURCE : GCP_RESOURCE;
-  if (!resourcePattern.test(agentSessionResource) || !resourcePattern.test(qualificationManifestResource)
-    || !resourcePattern.test(possessionReceiptResource) || !resourcePattern.test(refreshHintResource)
-    || definitions.slice(4).some((definition) => !extendedResourcePattern.test(resources[definition.name] ?? ""))) {
+  const resourcePattern = provider === "aws" ? AWS_KEY_RESOURCE : GCP_RESOURCE;
+  if (resourceValues.some((resource) => !resourcePattern.test(resource))) {
     fail(KMS_PROVIDER_RUNTIME_ERROR_CODES.CONFIG);
   }
 
   const parsed = {};
   try {
-    for (const definition of definitions) {
+    for (const definition of PURPOSE_DEFINITIONS) {
       parsed[definition.name] = definition.parse
         ? definition.parse(env)
         : parseGenericSignerConfig(env, definition);
@@ -168,11 +155,11 @@ export function parseKmsProviderRuntimeConfig(env = process.env) {
   } catch {
     fail(KMS_PROVIDER_RUNTIME_ERROR_CODES.CONFIG);
   }
-  if (new Set(definitions.map(({ name }) => parsed[name].keyId)).size !== definitions.length
-    || new Set(definitions.map(({ name }) => parsed[name].publicKeyFingerprint)).size !== definitions.length) {
+  if (new Set(PURPOSE_DEFINITIONS.map(({ name }) => parsed[name].keyId)).size !== PURPOSE_DEFINITIONS.length
+    || new Set(PURPOSE_DEFINITIONS.map(({ name }) => parsed[name].publicKeyFingerprint)).size !== PURPOSE_DEFINITIONS.length) {
     fail(KMS_PROVIDER_RUNTIME_ERROR_CODES.CONFIG);
   }
-  const purposes = definitions.map((definition) => Object.freeze({
+  const purposes = PURPOSE_DEFINITIONS.map((definition) => Object.freeze({
     ...definition,
     resourceId: resources[definition.name],
     keyId: parsed[definition.name].keyId,
@@ -182,17 +169,14 @@ export function parseKmsProviderRuntimeConfig(env = process.env) {
   }));
   return deepFreeze({
     provider,
-    agentSessionResource,
-    qualificationManifestResource,
-    possessionReceiptResource,
-    refreshHintResource,
+    ...Object.fromEntries(PURPOSE_DEFINITIONS.map(({ name, resource }) => [resource, resources[name]])),
     ...Object.fromEntries(purposes.map((purpose) => [purpose.name, Object.freeze({
       keyId: purpose.keyId,
       publicKey: purpose.publicKey,
       timeoutMs: purpose.timeoutMs
     })])),
     purposes,
-    allPurposes: extended
+    allPurposes: true
   });
 }
 

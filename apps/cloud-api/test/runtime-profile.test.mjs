@@ -44,6 +44,18 @@ function hostedEnv(overrides = {}) {
     AGENTPASS_CLOUD_QUALIFICATION_MANIFEST_PUBLIC_KEY: "hosted-qualification-public-key-pin",
     AGENTPASS_CLOUD_POSSESSION_RECEIPT_KEY_ID: "possession-receipt-2026-08",
     AGENTPASS_CLOUD_POSSESSION_RECEIPT_PUBLIC_KEY: "hosted-possession-receipt-public-key-pin",
+    AGENTPASS_CLOUD_CONTROL_BUNDLE_KEY_ID: "control-bundle-2026-08",
+    AGENTPASS_CLOUD_CONTROL_BUNDLE_PUBLIC_KEY: "hosted-control-bundle-public-key-pin",
+    AGENTPASS_CLOUD_CONTROL_BUNDLE_TIMEOUT_MS: "5000",
+    AGENTPASS_CLOUD_CAPABILITY_KEY_ID: "capability-2026-08",
+    AGENTPASS_CLOUD_CAPABILITY_PUBLIC_KEY: "hosted-capability-public-key-pin",
+    AGENTPASS_CLOUD_CAPABILITY_TIMEOUT_MS: "5000",
+    AGENTPASS_CLOUD_AUDIT_ANCHOR_KEY_ID: "audit-anchor-2026-08",
+    AGENTPASS_CLOUD_AUDIT_ANCHOR_PUBLIC_KEY: "hosted-audit-anchor-public-key-pin",
+    AGENTPASS_CLOUD_AUDIT_ANCHOR_TIMEOUT_MS: "5000",
+    AGENTPASS_CLOUD_PROMOTION_EVIDENCE_KEY_ID: "promotion-evidence-2026-08",
+    AGENTPASS_CLOUD_PROMOTION_EVIDENCE_PUBLIC_KEY: "hosted-promotion-evidence-public-key-pin",
+    AGENTPASS_CLOUD_PROMOTION_EVIDENCE_TIMEOUT_MS: "5000",
     AGENTPASS_OWNER_RECOVERY_NOTIFICATION_WEBHOOK_URL: "https://notifications.example.test/owner-recovery",
     AGENTPASS_OWNER_RECOVERY_NOTIFICATION_CONFIRMATION_URL: "https://notifications.example.test/owner-recovery/acceptance",
     AGENTPASS_OWNER_RECOVERY_NOTIFICATION_AUTHORIZATION_PATH: "/srv/agentpass/hosted/notification-authorization.txt",
@@ -129,6 +141,18 @@ test("accepts hosted only with complete PostgreSQL and Human Auth prerequisites"
     "AGENTPASS_CLOUD_QUALIFICATION_MANIFEST_PUBLIC_KEY",
     "AGENTPASS_CLOUD_POSSESSION_RECEIPT_KEY_ID",
     "AGENTPASS_CLOUD_POSSESSION_RECEIPT_PUBLIC_KEY",
+    "AGENTPASS_CLOUD_CONTROL_BUNDLE_KEY_ID",
+    "AGENTPASS_CLOUD_CONTROL_BUNDLE_PUBLIC_KEY",
+    "AGENTPASS_CLOUD_CONTROL_BUNDLE_TIMEOUT_MS",
+    "AGENTPASS_CLOUD_CAPABILITY_KEY_ID",
+    "AGENTPASS_CLOUD_CAPABILITY_PUBLIC_KEY",
+    "AGENTPASS_CLOUD_CAPABILITY_TIMEOUT_MS",
+    "AGENTPASS_CLOUD_AUDIT_ANCHOR_KEY_ID",
+    "AGENTPASS_CLOUD_AUDIT_ANCHOR_PUBLIC_KEY",
+    "AGENTPASS_CLOUD_AUDIT_ANCHOR_TIMEOUT_MS",
+    "AGENTPASS_CLOUD_PROMOTION_EVIDENCE_KEY_ID",
+    "AGENTPASS_CLOUD_PROMOTION_EVIDENCE_PUBLIC_KEY",
+    "AGENTPASS_CLOUD_PROMOTION_EVIDENCE_TIMEOUT_MS",
     "AGENTPASS_OWNER_RECOVERY_NOTIFICATION_BINDING_ID",
     "AGENTPASS_OWNER_RECOVERY_NOTIFICATION_BINDING_KEY_VERSION",
     "AGENTPASS_OWNER_RECOVERY_NOTIFICATION_BINDING_DIGEST"
@@ -145,7 +169,11 @@ test("recognizes hosted KMS routing variables and rejects KMS typos or evaluatio
     AGENTPASS_KMS_AGENT_SESSION_KEY_RESOURCE: "arn:aws:kms:us-east-1:123456789012:key/agent-session",
     AGENTPASS_KMS_QUALIFICATION_MANIFEST_KEY_RESOURCE: "arn:aws:kms:us-east-1:123456789012:key/qualification-manifest",
     AGENTPASS_KMS_POSSESSION_RECEIPT_KEY_RESOURCE: "arn:aws:kms:us-east-1:123456789012:key/possession-receipt",
-    AGENTPASS_KMS_REFRESH_HINT_KEY_RESOURCE: "arn:aws:kms:us-east-1:123456789012:key/refresh-hint"
+    AGENTPASS_KMS_REFRESH_HINT_KEY_RESOURCE: "arn:aws:kms:us-east-1:123456789012:key/refresh-hint",
+    AGENTPASS_KMS_CONTROL_BUNDLE_KEY_RESOURCE: "arn:aws:kms:us-east-1:123456789012:key/control-bundle",
+    AGENTPASS_KMS_CAPABILITY_KEY_RESOURCE: "arn:aws:kms:us-east-1:123456789012:key/capability",
+    AGENTPASS_KMS_AUDIT_ANCHOR_KEY_RESOURCE: "arn:aws:kms:us-east-1:123456789012:key/audit-anchor",
+    AGENTPASS_KMS_PROMOTION_EVIDENCE_KEY_RESOURCE: "arn:aws:kms:us-east-1:123456789012:key/promotion-evidence"
   };
   assert.equal(parseCloudRuntimeProfile(hostedEnv(kms)).isHosted, true);
   assertProfileError(
@@ -186,6 +214,10 @@ test("rejects hosted file-store compatibility inputs and evaluation auth inputs"
   );
   assertProfileError(
     () => parseCloudRuntimeProfile(hostedEnv({ AGENTPASS_CLOUD_TOKEN_RECORDS_PATH: "/srv/agentpass/tokens.json" })),
+    CLOUD_RUNTIME_PROFILE_ERROR_CODES.HOSTED_FILE_STORE_FORBIDDEN
+  );
+  assertProfileError(
+    () => parseCloudRuntimeProfile(hostedEnv({ AGENTPASS_CLOUD_BUNDLE_PRIVATE_KEY_PATH: "/srv/agentpass/bundle-private.pem" })),
     CLOUD_RUNTIME_PROFILE_ERROR_CODES.HOSTED_FILE_STORE_FORBIDDEN
   );
   assertProfileError(

@@ -493,6 +493,47 @@ test("admin issues a signed short-lived capability bound to an active agent and 
   assert.equal(unknown.status, 400);
 });
 
+test("admin capability issuance uses the managed purpose signer and never falls back to the bundle key", async (t) => {
+  const keys = crypto.generateKeyPairSync("ed25519");
+  const publicKey = keys.publicKey.export({ type: "spki", format: "pem" }).toString();
+  const calls = [];
+  const capabilitySigner = {
+    purpose: "agentpass.capability",
+    algorithm: "ed25519",
+    key_id: "capability-managed-2026-08",
+    issuer: "agentpass-cloud",
+    async publicKeyMetadata() {
+      return { purpose: "agentpass.capability", algorithm: "ed25519", key_id: "capability-managed-2026-08", public_key: publicKey };
+    },
+    async signCapability(statement) {
+      calls.push(structuredClone(statement));
+      return { ...statement, signature: crypto.sign(null, Buffer.from(canonicalJson(statement), "utf8"), keys.privateKey).toString("base64") };
+    }
+  };
+  const f = await fixture(t, { capabilitySigner });
+  const response = await fetch(`${f.base}/v1/organizations/${org}/capabilities`, {
+    method: "POST",
+    headers: { authorization: `Bearer ${f.token}`, "content-type": "application/json", "idempotency-key": "capability-managed-request-0001" },
+    body: JSON.stringify({ agent_id: agentId, device_id: deviceId, scope: f.scope, ttl_ms: 60_000, sequence: 1 })
+  });
+  assert.equal(response.status, 201, JSON.stringify(await response.clone().json()));
+  const capability = (await response.json()).capability;
+  assert.equal(calls.length, 1);
+  assert.equal(capability.key_id, "capability-managed-2026-08");
+  assert.equal(verifyCapability(capability, { public_key: publicKey, issuer: "agentpass-cloud", key_id: "capability-managed-2026-08" }, { now, audience: { agent_id: agentId, device_id: deviceId } }).capability_id, capability.capability_id);
+  assert.throws(() => verifyCapability(capability, { public_key: f.bundleKeys.publicKey, issuer: "agentpass-cloud", key_id: "capability-managed-2026-08" }, { now }), /signature/i);
+  assert.equal(JSON.stringify(capability).includes("PRIVATE KEY"), false);
+
+  const partial = await fixture(t, { capabilitySigner: { ...capabilitySigner, signCapability: undefined } });
+  const denied = await fetch(`${partial.base}/v1/organizations/${org}/capabilities`, {
+    method: "POST",
+    headers: { authorization: `Bearer ${partial.token}`, "content-type": "application/json", "idempotency-key": "capability-managed-partial-0001" },
+    body: JSON.stringify({ agent_id: agentId, device_id: deviceId, scope: partial.scope, ttl_ms: 60_000, sequence: 1 })
+  });
+  assert.equal(denied.status, 503);
+  assert.equal((await denied.json()).error.code, "capability_signer_unavailable");
+});
+
 test("operator routes expose metadata and persist device, policy, and capability controls", async (t) => {
   const f = await fixture(t);
   const auth = { authorization: `Bearer ${f.token}` };

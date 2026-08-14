@@ -24,11 +24,13 @@ import { QUALIFICATION_GRANT_BATCH_MANIFEST_PURPOSE, QUALIFICATION_GRANT_BATCH_M
 import { createHostedKmsProviders } from "./kms-provider-runtime.mjs";
 import { createHostedPossessionReceiptSigner, parsePossessionReceiptSignerConfig } from "./possession-receipt-signer-config.mjs";
 import { POSSESSION_RECEIPT_PURPOSE, POSSESSION_RECEIPT_VERSION } from "./possession-receipt-signer.mjs";
+import { createHostedCapabilitySigner, CAPABILITY_SIGNER_PURPOSE, CAPABILITY_SIGNER_PROTOCOL_VERSION } from "./capability-signer.mjs";
+import { createHostedControlBundleSigner, CONTROL_BUNDLE_MANAGED_SIGNER_PURPOSE, CONTROL_BUNDLE_MANAGED_SIGNER_PROTOCOL_VERSION } from "./control-bundle-managed-signer.mjs";
 import { PROTOCOL_VERSION, REFRESH_HINT_SIGNATURE_ALGORITHM, REFRESH_HINT_TYPE } from "../../../packages/protocol/src/index.mjs";
 
 const IDENTIFIER = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 
-export async function createCloudRuntime({ env = process.env, logger = console, postgresFactory = createPostgresRuntime, humanAuthFactory = createHumanAuthRuntime, kmsProviderFactory = createHostedKmsProviders, agentSessionSignerProvider, agentSessionSignerFactory = createHostedAgentSessionGrantSigner, qualificationManifestSignerProvider, qualificationManifestSignerFactory = createHostedQualificationManifestSigner, possessionReceiptSignerProvider, possessionReceiptSignerFactory = createHostedPossessionReceiptSigner, refreshHintSignerProvider, ownerRecoveryPublisher } = {}) {
+export async function createCloudRuntime({ env = process.env, logger = console, postgresFactory = createPostgresRuntime, humanAuthFactory = createHumanAuthRuntime, kmsProviderFactory = createHostedKmsProviders, agentSessionSignerProvider, agentSessionSignerFactory = createHostedAgentSessionGrantSigner, qualificationManifestSignerProvider, qualificationManifestSignerFactory = createHostedQualificationManifestSigner, possessionReceiptSignerProvider, possessionReceiptSignerFactory = createHostedPossessionReceiptSigner, refreshHintSignerProvider, capabilitySignerProvider, controlBundleSignerProvider, auditAnchorSignerProvider, promotionEvidenceSignerProvider, ownerRecoveryPublisher } = {}) {
   const profile = parseCloudRuntimeProfile(env);
   const config = loadRuntimeConfig(env);
   const configuredOwnerRecoveryPublisher = profile.isHosted
@@ -36,24 +38,30 @@ export async function createCloudRuntime({ env = process.env, logger = console, 
     : undefined;
   const tokenRecords = profile.isHosted ? [] : readProtectedJson(config.tokenRecordsPath, "token records", 1024 * 1024);
   if (!Array.isArray(tokenRecords) || tokenRecords.length > 256 || (!config.humanAuth && tokenRecords.length < 1)) throw new Error("Cloud token records are invalid");
-  const privateKeyPEM = readProtectedFile(config.bundlePrivateKeyPath, "bundle private key", 16 * 1024).toString("utf8");
   let privateKey;
-  try { privateKey = crypto.createPrivateKey(privateKeyPEM); } catch { throw new Error("Cloud bundle private key is invalid"); }
-  if (privateKey.asymmetricKeyType !== "ed25519") throw new Error("Cloud bundle private key must be Ed25519");
+  if (profile.isEvaluation) {
+    const privateKeyPEM = readProtectedFile(config.bundlePrivateKeyPath, "bundle private key", 16 * 1024).toString("utf8");
+    try { privateKey = crypto.createPrivateKey(privateKeyPEM); } catch { throw new Error("Cloud bundle private key is invalid"); }
+    if (privateKey.asymmetricKeyType !== "ed25519") throw new Error("Cloud bundle private key must be Ed25519");
+  }
   let refreshHintSigner;
   let refreshNonceCodec;
   let refreshPublicKey;
   let agentSessionSigner;
   let qualificationManifestSigner;
   let possessionReceiptSigner;
+  let capabilitySigner;
+  let controlBundleSigner;
   let ownedKmsProviders;
   let processBindingPolicies;
   if (profile.isHosted) {
     try { refreshPublicKey = crypto.createPublicKey(config.refreshPublicKey); } catch { throw new Error("Cloud refresh public key is invalid"); }
     if (refreshPublicKey.asymmetricKeyType !== "ed25519") throw new Error("Cloud refresh public key must be Ed25519");
-    const bundlePublic = crypto.createPublicKey(privateKey).export({ type: "spki", format: "der" });
+    const bundlePublic = crypto.createPublicKey(config.controlBundlePublicKey).export({ type: "spki", format: "der" });
     const refreshPublic = refreshPublicKey.export({ type: "spki", format: "der" });
     if (bundlePublic.equals(refreshPublic)) throw new Error("Cloud refresh key must be purpose-separated from the bundle key");
+    const capabilityPublic = crypto.createPublicKey(config.capabilityPublicKey).export({ type: "spki", format: "der" });
+    if (bundlePublic.equals(capabilityPublic) || refreshPublic.equals(capabilityPublic)) throw new Error("Cloud capability key must be purpose-separated");
     refreshNonceCodec = loadRefreshNonceCodec(config.refreshNonceKeyringPath);
     processBindingPolicies = createProcessBindingPolicyRegistry(readProtectedJson(config.agentSessionProcessPoliciesPath, "Agent Session process policies", 256 * 1024));
   }
@@ -83,16 +91,58 @@ export async function createCloudRuntime({ env = process.env, logger = console, 
       store = postgresRuntime.controlPlaneStore;
       if (typeof store.pollDeviceRefresh !== "function" || typeof store.markDeviceRefreshDelivered !== "function") throw new Error("PostgreSQL refresh polling is unavailable");
       if (!postgresRuntime.refreshHintNotifier || typeof postgresRuntime.refreshHintNotifier.waitForRefresh !== "function") throw new Error("PostgreSQL refresh notification is unavailable");
-      const injectedProviderCount = [agentSessionSignerProvider, qualificationManifestSignerProvider, possessionReceiptSignerProvider, refreshHintSignerProvider]
+      const injectedProviderCount = [agentSessionSignerProvider, qualificationManifestSignerProvider, possessionReceiptSignerProvider, refreshHintSignerProvider, capabilitySignerProvider, controlBundleSignerProvider, auditAnchorSignerProvider, promotionEvidenceSignerProvider]
         .filter((value) => value !== undefined).length;
-      if (injectedProviderCount !== 0 && injectedProviderCount !== 4) throw new Error("Cloud managed signer provider set is incomplete");
+      if (injectedProviderCount !== 0 && injectedProviderCount !== 8) throw new Error("Cloud managed signer provider set is incomplete");
       if (injectedProviderCount === 0) {
         ownedKmsProviders = await kmsProviderFactory({ env });
         agentSessionSignerProvider = ownedKmsProviders?.agentSessionSignerProvider;
         qualificationManifestSignerProvider = ownedKmsProviders?.qualificationManifestSignerProvider;
         possessionReceiptSignerProvider = ownedKmsProviders?.possessionReceiptSignerProvider;
         refreshHintSignerProvider = ownedKmsProviders?.refreshHintSignerProvider;
+        capabilitySignerProvider = ownedKmsProviders?.capabilitySignerProvider;
+        controlBundleSignerProvider = ownedKmsProviders?.controlBundleSignerProvider;
+        auditAnchorSignerProvider = ownedKmsProviders?.auditAnchorSignerProvider;
+        promotionEvidenceSignerProvider = ownedKmsProviders?.promotionEvidenceSignerProvider;
       }
+      if ([agentSessionSignerProvider, qualificationManifestSignerProvider, possessionReceiptSignerProvider, refreshHintSignerProvider, capabilitySignerProvider, controlBundleSignerProvider, auditAnchorSignerProvider, promotionEvidenceSignerProvider]
+        .some((provider) => provider === undefined)) throw new Error("Cloud managed signer provider set is incomplete");
+
+      const controlBundleFingerprint = publicKeyFingerprint(config.controlBundlePublicKey);
+      const durableControlBundle = await bindHostedManagedSignerProvider({
+        postgresRuntime,
+        provider: controlBundleSignerProvider,
+        purpose: CONTROL_BUNDLE_MANAGED_SIGNER_PURPOSE,
+        keyId: config.keyId,
+        version: CONTROL_BUNDLE_MANAGED_SIGNER_PROTOCOL_VERSION,
+        algorithm: "ed25519",
+        publicKey: config.controlBundlePublicKey,
+        publicKeyFingerprint: controlBundleFingerprint
+      });
+      controlBundleSigner = createHostedControlBundleSigner({
+        provider: durableControlBundle.provider,
+        keyId: config.keyId,
+        publicKey: config.controlBundlePublicKey,
+        maxTtlMs: config.ttlMs,
+        maxOfflineTtlMs: config.offlineTtlMs
+      });
+
+      const capabilityFingerprint = publicKeyFingerprint(config.capabilityPublicKey);
+      const durableCapability = await bindHostedManagedSignerProvider({
+        postgresRuntime,
+        provider: capabilitySignerProvider,
+        purpose: CAPABILITY_SIGNER_PURPOSE,
+        keyId: config.capabilityKeyId,
+        version: CAPABILITY_SIGNER_PROTOCOL_VERSION,
+        algorithm: "ed25519",
+        publicKey: config.capabilityPublicKey,
+        publicKeyFingerprint: capabilityFingerprint
+      });
+      capabilitySigner = createHostedCapabilitySigner({
+        provider: durableCapability.provider,
+        keyId: config.capabilityKeyId,
+        publicKey: config.capabilityPublicKey
+      });
       const refreshFingerprint = crypto.createHash("sha256").update(refreshPublicKey.export({ type: "spki", format: "der" })).digest("hex");
       const durableRefreshHint = await bindHostedManagedSignerProvider({
         postgresRuntime,
@@ -112,7 +162,7 @@ export async function createCloudRuntime({ env = process.env, logger = console, 
       // this boundary can therefore bind every provider call to schema-backed
       // lifecycle and idempotency state before Human or Device APIs exist.
       const agentSessionReferences = {
-        bundle: { keyId: config.keyId, publicKey: privateKey },
+        bundle: { keyId: config.keyId, publicKey: config.controlBundlePublicKey },
         refresh: { keyId: config.refreshKeyId, publicKey: refreshPublicKey }
       };
       const agentSessionSignerConfig = parseAgentSessionSignerConfig(env, agentSessionReferences);
@@ -139,7 +189,7 @@ export async function createCloudRuntime({ env = process.env, logger = console, 
       if (signerHealth?.ready !== true || signerHealth.key_id !== agentSessionSigner.key_id) throw new Error("Cloud Agent Session signer is unavailable");
       const agentSessionVerificationKeys = await agentSessionSigner.verificationKeyMetadata();
       const qualificationManifestReferences = {
-        bundle: { keyId: config.keyId, publicKey: privateKey },
+        bundle: { keyId: config.keyId, publicKey: config.controlBundlePublicKey },
         refresh: { keyId: config.refreshKeyId, publicKey: refreshPublicKey },
         agentSession: agentSessionVerificationKeys.keys.map((key) => ({ keyId: key.key_id, publicKey: key.public_key }))
       };
@@ -167,7 +217,7 @@ export async function createCloudRuntime({ env = process.env, logger = console, 
       const qualificationSignerHealth = await qualificationManifestSigner.health();
       if (qualificationSignerHealth?.ready !== true || qualificationSignerHealth.key_id !== qualificationManifestSigner.key_id) throw new Error("Cloud qualification manifest signer is unavailable");
       const possessionReceiptReferences = {
-        bundle: { keyId: config.keyId, publicKey: privateKey },
+        bundle: { keyId: config.keyId, publicKey: config.controlBundlePublicKey },
         refresh: { keyId: config.refreshKeyId, publicKey: refreshPublicKey },
         agentSession: agentSessionVerificationKeys.keys.map((key) => ({ keyId: key.key_id, publicKey: key.public_key })),
         qualificationManifest: (await qualificationManifestSigner.verificationKeyMetadata()).keys
@@ -269,7 +319,10 @@ export async function createCloudRuntime({ env = process.env, logger = console, 
         operationalProbeSecret: exactRuntimeSecret(env.AGENTPASS_OPERATIONAL_PROBE_SECRET, "AGENTPASS_OPERATIONAL_PROBE_SECRET")
       } : { rateLimiter: createRateLimiter({ persistencePath: path.join(config.dataDir, "principal-rate-limits.json") }) }),
       admissionRateLimiter: profile.isHosted ? undefined : createRateLimiter({ persistencePath: path.join(config.dataDir, "admission-rate-limits.json"), human: { capacity: 30, refillPerSecond: 1 }, device: { capacity: 60, refillPerSecond: 2 } }),
-      bundleSigner: { privateKey, issuer: config.issuer, keyId: config.keyId, ttlMs: config.ttlMs, offlineTtlMs: config.offlineTtlMs },
+      bundleSigner: profile.isHosted
+        ? { ...controlBundleSigner, issuer: config.issuer, keyId: config.keyId, ttlMs: config.ttlMs, offlineTtlMs: config.offlineTtlMs }
+        : { privateKey, issuer: config.issuer, keyId: config.keyId, ttlMs: config.ttlMs, offlineTtlMs: config.offlineTtlMs },
+      ...(profile.isHosted ? { capabilitySigner: { ...capabilitySigner, issuer: config.issuer, keyId: config.capabilityKeyId } } : {}),
       ...(profile.isHosted ? { refreshHintService: createRefreshHintService({ source: store, nonceDeriver: refreshNonceCodec, signer: refreshHintSigner, notifier: postgresRuntime.refreshHintNotifier, metrics: postgresRuntime.operationalMetrics }) } : {}),
       ...(humanAuthRuntime ? { humanAuthApi: humanAuthRuntime.api, humanSession: humanAuthRuntime.humanSession, recentAuthService: humanAuthRuntime.recentAuthService } : {}),
       ...(agentSessionDeviceApi ? { agentSessionDeviceApi } : {}),
@@ -320,9 +373,9 @@ export async function createCloudRuntime({ env = process.env, logger = console, 
 export function loadRuntimeConfig(env = {}) {
   const profile = parseCloudRuntimeProfile(env);
   const dataDir = profile.isEvaluation ? absolute(env.AGENTPASS_CLOUD_DATA_DIR, "AGENTPASS_CLOUD_DATA_DIR") : null;
-  const bundlePrivateKeyPath = absolute(env.AGENTPASS_CLOUD_BUNDLE_PRIVATE_KEY_PATH, "AGENTPASS_CLOUD_BUNDLE_PRIVATE_KEY_PATH");
+  const bundlePrivateKeyPath = profile.isEvaluation ? absolute(env.AGENTPASS_CLOUD_BUNDLE_PRIVATE_KEY_PATH, "AGENTPASS_CLOUD_BUNDLE_PRIVATE_KEY_PATH") : null;
   const issuer = env.AGENTPASS_CLOUD_ISSUER ?? "agentpass-cloud";
-  const keyId = env.AGENTPASS_CLOUD_KEY_ID ?? "control-v2";
+  const keyId = profile.isHosted ? env.AGENTPASS_CLOUD_CONTROL_BUNDLE_KEY_ID : env.AGENTPASS_CLOUD_KEY_ID ?? "control-v2";
   if (!IDENTIFIER.test(issuer) || !IDENTIFIER.test(keyId)) throw new Error("Cloud signer identifiers are invalid");
   const host = env.AGENTPASS_CLOUD_HOST ?? "127.0.0.1";
   if (!new Set(["127.0.0.1", "::1", "localhost", "0.0.0.0", "::"]).has(host)) throw new Error("Cloud listen host is invalid");
@@ -330,16 +383,20 @@ export function loadRuntimeConfig(env = {}) {
   const ttlMs = integer(env.AGENTPASS_CLOUD_BUNDLE_TTL_MS ?? "3600000", 1_000, 7 * 24 * 60 * 60 * 1000, "Bundle TTL");
   const offlineTtlMs = integer(env.AGENTPASS_CLOUD_OFFLINE_TTL_MS ?? "3600000", 0, 7 * 24 * 60 * 60 * 1000, "Offline TTL");
   const humanAuth = profile.isHosted ? humanAuthConfig(env) : null;
-  const refreshPublicKey = profile.isHosted ? env.AGENTPASS_CLOUD_REFRESH_PUBLIC_KEY : null;
+  const refreshPublicKey = profile.isHosted ? requireHostedPublicKey(env.AGENTPASS_CLOUD_REFRESH_PUBLIC_KEY, "Cloud refresh public key") : null;
   const refreshNonceKeyringPath = profile.isHosted ? absolute(env.AGENTPASS_CLOUD_REFRESH_NONCE_KEYRING_PATH, "AGENTPASS_CLOUD_REFRESH_NONCE_KEYRING_PATH") : null;
   const refreshKeyId = profile.isHosted ? env.AGENTPASS_CLOUD_REFRESH_KEY_ID : null;
   if (profile.isHosted && !IDENTIFIER.test(refreshKeyId ?? "")) throw new Error("Cloud refresh signer identifier is invalid");
+  const controlBundlePublicKey = profile.isHosted ? requireHostedPublicKey(env.AGENTPASS_CLOUD_CONTROL_BUNDLE_PUBLIC_KEY, "Cloud ControlBundle public key") : null;
+  const capabilityKeyId = profile.isHosted ? env.AGENTPASS_CLOUD_CAPABILITY_KEY_ID : null;
+  if (profile.isHosted && !IDENTIFIER.test(capabilityKeyId ?? "")) throw new Error("Cloud capability signer identifier is invalid");
+  const capabilityPublicKey = profile.isHosted ? requireHostedPublicKey(env.AGENTPASS_CLOUD_CAPABILITY_PUBLIC_KEY, "Cloud capability public key") : null;
   const agentSessionProcessPoliciesPath = profile.isHosted ? absolute(env.AGENTPASS_CLOUD_AGENT_SESSION_PROCESS_POLICIES_PATH, "AGENTPASS_CLOUD_AGENT_SESSION_PROCESS_POLICIES_PATH") : null;
   const ownerRecoveryNotification = profile.isHosted ? ownerRecoveryNotificationConfig(env) : null;
   // Hosted Human Auth never loads the legacy operator bearer database. The
   // token-record file exists only for the explicit evaluation profile.
   const tokenRecordsPath = profile.isHosted ? null : absolute(env.AGENTPASS_CLOUD_TOKEN_RECORDS_PATH, "AGENTPASS_CLOUD_TOKEN_RECORDS_PATH");
-  return Object.freeze({ dataDir, tokenRecordsPath, bundlePrivateKeyPath, issuer, keyId, host, port, ttlMs, offlineTtlMs, humanAuth, refreshPublicKey, refreshNonceKeyringPath, refreshKeyId, agentSessionProcessPoliciesPath, ownerRecoveryNotification });
+  return Object.freeze({ dataDir, tokenRecordsPath, bundlePrivateKeyPath, issuer, keyId, controlBundlePublicKey, capabilityKeyId, capabilityPublicKey, host, port, ttlMs, offlineTtlMs, humanAuth, refreshPublicKey, refreshNonceKeyringPath, refreshKeyId, agentSessionProcessPoliciesPath, ownerRecoveryNotification });
 }
 
 function ownerRecoveryNotificationConfig(env) {
@@ -444,6 +501,21 @@ function exactRuntimeSecret(value, name) {
   const bytes = Buffer.from(value, "base64url");
   if (bytes.length !== 32 || bytes.toString("base64url") !== value) throw new Error(`${name} must be an exact 32-byte base64url secret`);
   return bytes;
+}
+
+function requireHostedPublicKey(value, label) {
+  let key;
+  try {
+    if (typeof value !== "string" || /PRIVATE\s+KEY/iu.test(value)) throw new Error("invalid key");
+    key = crypto.createPublicKey(value);
+  } catch { throw new Error(`${label} is invalid`); }
+  if (key.type !== "public" || key.asymmetricKeyType !== "ed25519") throw new Error(`${label} must be Ed25519`);
+  return key.export({ type: "spki", format: "pem" }).toString();
+}
+
+function publicKeyFingerprint(value) {
+  const key = crypto.createPublicKey(value);
+  return crypto.createHash("sha256").update(key.export({ type: "spki", format: "der" })).digest("hex");
 }
 
 function readProtectedJson(file, label, maxBytes) {

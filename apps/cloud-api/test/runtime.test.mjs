@@ -30,6 +30,10 @@ function files() {
   const agentSessionKeys = crypto.generateKeyPairSync("ed25519");
   const qualificationManifestKeys = crypto.generateKeyPairSync("ed25519");
   const possessionReceiptKeys = crypto.generateKeyPairSync("ed25519");
+  const controlBundleKeys = crypto.generateKeyPairSync("ed25519");
+  const capabilityKeys = crypto.generateKeyPairSync("ed25519");
+  const auditAnchorKeys = crypto.generateKeyPairSync("ed25519");
+  const promotionEvidenceKeys = crypto.generateKeyPairSync("ed25519");
   fs.writeFileSync(tokenRecordsPath, JSON.stringify(records), { mode: 0o600 });
   fs.writeFileSync(bundlePrivateKeyPath, keys.privateKey.export({ type: "pkcs8", format: "pem" }), { mode: 0o600 });
   fs.writeFileSync(identityPublicKeyPath, keys.publicKey.export({ type: "spki", format: "pem" }), { mode: 0o600 });
@@ -37,7 +41,7 @@ function files() {
   fs.writeFileSync(refreshNonceKeyringPath, JSON.stringify({ version: 1, active_key_id: "refresh-nonce-v1", keys: { "refresh-nonce-v1": Buffer.alloc(32, 0x35).toString("base64url") } }), { mode: 0o600 });
   fs.writeFileSync(agentSessionProcessPoliciesPath, JSON.stringify({ version: 1, policies: [{ policy_id: "claude-code-v1", release_id: "agentpass-0.18.0", agent_kind: "claude-code", adapter_id: "11111111-1111-4111-8111-111111111111", adapter_versions: ["1.0.0"], status: "enabled" }] }), { mode: 0o600 });
   fs.writeFileSync(ownerRecoveryNotificationAuthorizationPath, "notification-authorization-test-value", { mode: 0o600 });
-  return { root, identityPublicKeyPath, refreshPrivateKeyPath, refreshNonceKeyringPath, agentSessionProcessPoliciesPath, ownerRecoveryNotificationAuthorizationPath, refreshKeys, agentSessionKeys, qualificationManifestKeys, possessionReceiptKeys, env: { AGENTPASS_CLOUD_PROFILE: "evaluation", AGENTPASS_CLOUD_DATA_DIR: dataDir, AGENTPASS_CLOUD_TOKEN_RECORDS_PATH: tokenRecordsPath, AGENTPASS_CLOUD_BUNDLE_PRIVATE_KEY_PATH: bundlePrivateKeyPath, AGENTPASS_CLOUD_PORT: "0" } };
+  return { root, identityPublicKeyPath, refreshPrivateKeyPath, refreshNonceKeyringPath, agentSessionProcessPoliciesPath, ownerRecoveryNotificationAuthorizationPath, refreshKeys, agentSessionKeys, qualificationManifestKeys, possessionReceiptKeys, controlBundleKeys, capabilityKeys, auditAnchorKeys, promotionEvidenceKeys, env: { AGENTPASS_CLOUD_PROFILE: "evaluation", AGENTPASS_CLOUD_DATA_DIR: dataDir, AGENTPASS_CLOUD_TOKEN_RECORDS_PATH: tokenRecordsPath, AGENTPASS_CLOUD_BUNDLE_PRIVATE_KEY_PATH: bundlePrivateKeyPath, AGENTPASS_CLOUD_PORT: "0" } };
 }
 
 test("production runtime starts from protected files and closes idempotently", async (t) => {
@@ -126,7 +130,7 @@ test("production human auth is composed from PostgreSQL and closed with the runt
     if (!refreshSignerHealthy) throw new Error("simulated refresh provider outage");
     return refreshPublicKeyMetadata(input);
   };
-  const runtime = await createCloudRuntime({ env, logger: { info() {} }, kmsProviderFactory: async () => { calls.push("kms"); return { agentSessionSignerProvider: provider, qualificationManifestSignerProvider: qualificationProvider, possessionReceiptSignerProvider: possessionProvider, refreshHintSignerProvider: refreshProvider, async close() { calls.push("kms-close"); } }; }, ownerRecoveryPublisher, postgresFactory: async (input) => { calls.push(["postgres", input.applicationVersion, typeof input.refreshNonceCodec?.derive, typeof input.resolveProcessBindingPolicy, input.ownerRecoveryPublisher]); return postgresRuntime; }, humanAuthFactory: (input) => { calls.push(["human", input.origin, input.rpId, input.cursorSecret, input.securitySecret, input.signedConsoleIdentity, input.agentSessionSigner, input.qualificationManifestSigner]); return { api: { async handle() { return { status: 404, body: { error: { code: "not_found", message: "Resource not found" } }, headers: {} }; } }, humanSession, recentAuthService }; } });
+  const runtime = await createCloudRuntime({ env, logger: { info() {} }, kmsProviderFactory: async () => { calls.push("kms"); return { agentSessionSignerProvider: provider, qualificationManifestSignerProvider: qualificationProvider, possessionReceiptSignerProvider: possessionProvider, refreshHintSignerProvider: refreshProvider, controlBundleSignerProvider: purposeProvider(value.controlBundleKeys), capabilitySignerProvider: purposeProvider(value.capabilityKeys), auditAnchorSignerProvider: purposeProvider(value.auditAnchorKeys), promotionEvidenceSignerProvider: purposeProvider(value.promotionEvidenceKeys), async close() { calls.push("kms-close"); } }; }, ownerRecoveryPublisher, postgresFactory: async (input) => { calls.push(["postgres", input.applicationVersion, typeof input.refreshNonceCodec?.derive, typeof input.resolveProcessBindingPolicy, input.ownerRecoveryPublisher]); return postgresRuntime; }, humanAuthFactory: (input) => { calls.push(["human", input.origin, input.rpId, input.cursorSecret, input.securitySecret, input.signedConsoleIdentity, input.agentSessionSigner, input.qualificationManifestSigner]); return { api: { async handle() { return { status: 404, body: { error: { code: "not_found", message: "Resource not found" } }, headers: {} }; } }, humanSession, recentAuthService }; } });
   assert.equal(runtime.postgresRuntime, postgresRuntime);
   assert.equal(runtime.humanAuthRuntime.recentAuthService, recentAuthService);
   assert.deepEqual(calls[0], ["postgres", "0.18.0", "function", "function", ownerRecoveryPublisher]);
@@ -257,6 +261,7 @@ function hostedEnv(value) {
     AGENTPASS_CLOUD_PROFILE: "hosted",
     AGENTPASS_CLOUD_DATA_DIR: undefined,
     AGENTPASS_CLOUD_TOKEN_RECORDS_PATH: undefined,
+    AGENTPASS_CLOUD_BUNDLE_PRIVATE_KEY_PATH: undefined,
     AGENTPASS_DATABASE_URL: "postgresql://agent:secret@db.example.test/agentpass?sslmode=verify-full",
     AGENTPASS_CONSOLE_ORIGIN: "https://console.example.test",
     AGENTPASS_WEBAUTHN_RP_ID: "example.test",
@@ -279,6 +284,18 @@ function hostedEnv(value) {
     AGENTPASS_CLOUD_QUALIFICATION_MANIFEST_PUBLIC_KEY: value.qualificationManifestKeys.publicKey.export({ type: "spki", format: "pem" }).toString(),
     AGENTPASS_CLOUD_POSSESSION_RECEIPT_KEY_ID: "possession-receipt-2026-08",
     AGENTPASS_CLOUD_POSSESSION_RECEIPT_PUBLIC_KEY: value.possessionReceiptKeys.publicKey.export({ type: "spki", format: "pem" }).toString(),
+    AGENTPASS_CLOUD_CONTROL_BUNDLE_KEY_ID: "control-bundle-2026-08",
+    AGENTPASS_CLOUD_CONTROL_BUNDLE_PUBLIC_KEY: value.controlBundleKeys.publicKey.export({ type: "spki", format: "pem" }).toString(),
+    AGENTPASS_CLOUD_CONTROL_BUNDLE_TIMEOUT_MS: "5000",
+    AGENTPASS_CLOUD_CAPABILITY_KEY_ID: "capability-2026-08",
+    AGENTPASS_CLOUD_CAPABILITY_PUBLIC_KEY: value.capabilityKeys.publicKey.export({ type: "spki", format: "pem" }).toString(),
+    AGENTPASS_CLOUD_CAPABILITY_TIMEOUT_MS: "5000",
+    AGENTPASS_CLOUD_AUDIT_ANCHOR_KEY_ID: "audit-anchor-2026-08",
+    AGENTPASS_CLOUD_AUDIT_ANCHOR_PUBLIC_KEY: value.auditAnchorKeys.publicKey.export({ type: "spki", format: "pem" }).toString(),
+    AGENTPASS_CLOUD_AUDIT_ANCHOR_TIMEOUT_MS: "5000",
+    AGENTPASS_CLOUD_PROMOTION_EVIDENCE_KEY_ID: "promotion-evidence-2026-08",
+    AGENTPASS_CLOUD_PROMOTION_EVIDENCE_PUBLIC_KEY: value.promotionEvidenceKeys.publicKey.export({ type: "spki", format: "pem" }).toString(),
+    AGENTPASS_CLOUD_PROMOTION_EVIDENCE_TIMEOUT_MS: "5000",
     AGENTPASS_OWNER_RECOVERY_NOTIFICATION_WEBHOOK_URL: "https://notifications.example.test/owner-recovery",
     AGENTPASS_OWNER_RECOVERY_NOTIFICATION_CONFIRMATION_URL: "https://notifications.example.test/owner-recovery/acceptance",
     AGENTPASS_OWNER_RECOVERY_NOTIFICATION_AUTHORIZATION_PATH: value.ownerRecoveryNotificationAuthorizationPath,
@@ -317,6 +334,14 @@ function refreshSignerProvider(value) {
   return {
     async publicKeyMetadata(input) { return { key_id: input.key_id, algorithm: "ed25519", public_key: publicKey }; },
     async sign({ bytes }) { return crypto.sign(null, bytes, value.refreshKeys.privateKey); }
+  };
+}
+
+function purposeProvider(keys) {
+  const publicKey = keys.publicKey.export({ type: "spki", format: "pem" }).toString();
+  return {
+    async publicKeyMetadata(input) { return { key_id: input.key_id, algorithm: "ed25519", public_key: publicKey }; },
+    async sign({ bytes }) { return crypto.sign(null, bytes, keys.privateKey); }
   };
 }
 

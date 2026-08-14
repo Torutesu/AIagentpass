@@ -147,6 +147,15 @@ is no hosted private-key fallback.
 
 #### Q2B integration checkpoints
 
+Implementation checkpoint (2026-08-15): Q2B-1 and the ControlBundle/capability
+portion of Q2B-2 are implemented. Hosted configuration now requires all eight
+purpose mappings, rejects the legacy four-purpose set, and forbids the bundle
+private-key path. ControlBundle and capability issuance use distinct
+purpose-specific asynchronous signers bound through the PostgreSQL durable
+signer repository; the evaluation profile retains its explicit local adapter.
+Audit-anchor and promotion-evidence producers, eight-purpose readiness, and
+real-provider qualification remain open, so Q2B as a whole is not complete.
+
 | Checkpoint | Code outcome | Required test/evidence | Merge gate |
 | --- | --- | --- | --- |
 | Q2B-1 complete provider set | Runtime constructs exactly eight purpose-bound providers from a closed public configuration. | Unit tests reject missing, duplicated, shared-resource, shared-fingerprint, alias, unversioned, local, file, and private-material configurations. | Hosted startup cannot construct a partial provider set. |
@@ -287,25 +296,143 @@ Exit gate: no unresolved critical/high issue remains; restore and rollback have
 measured evidence; production, staging, package, SBOM, and release manifest all
 bind the same source and artifact identities.
 
-## 8. Near-term merge queue
+## 8. Executable implementation backlog
 
-The next merge-sized checkpoints are intentionally narrow:
+The merge queue below is ordered by authority and evidence dependencies. Every
+item is independently reviewable and must leave the hosted runtime fail-closed.
+Q2B-1 and the ControlBundle/capability portion of Q2B-2 are complete at this
+planning checkpoint; the next commit starts at M1.
 
-1. Integrate migrations 0038–0039 and role separation into real PostgreSQL CI.
-2. Wire the reconciliation contract and durable provider receipts into one
-   currently composed signing purpose; pass the two-instance response-loss
-   matrix.
-3. Generalize that coordinator to ControlBundle and capability with real KMS
-   readiness and negative configuration tests.
-4. Add Human assertion and audit/promotion keys; complete the eight-purpose IAM
-   and non-exportability evidence manifest.
-5. Finish Console organization/device/session/policy/audit surfaces and their
-   WebAuthn-bound authority mutations.
-6. Build and qualify the immutable notarized PKG, then run Claude Code and
-   Cursor physical E2E.
-7. Deploy the exact candidate to staging, execute drills, commission the
-   independent review, close findings, and promote unchanged artifacts.
+### M1. Audit-anchor and promotion-evidence authorities (Q2B-3)
 
-Each checkpoint must update contracts, threat-model claims, runbooks, tests,
-and the evidence index together. A checkpoint is not complete merely because
-its implementation compiles or its mocked tests pass.
+Deliverables:
+
+1. Define canonical, domain-separated statements for audit anchors and
+   promotion evidence, including organization/environment, sequence or
+   candidate identity, payload digest, purpose, protocol/signing/lifecycle/key
+   versions, issuance time, and expiry where applicable.
+2. Add purpose-specific asynchronous signer and verifier modules. The HTTP and
+   release layers receive only narrow `sign`/`verify` interfaces and never a
+   provider client, private PEM, or generic cross-purpose signing primitive.
+3. Bind both producers through the durable managed-signer repository, exact
+   provider receipt reconciliation, lifecycle fencing, and emergency disable.
+4. Catalog schemas and fixtures, wire the producers to authoritative audit and
+   release-promotion flows, and reject unsigned, locally signed, stale, or
+   cross-purpose production evidence.
+
+Verification:
+
+- canonical-vector and round-trip tests for both schemas;
+- cross-purpose/key/version/environment/candidate substitution tests;
+- timeout, accepted-but-response-lost, restart, idempotent replay, rotation,
+  stale lifecycle, and emergency-disable tests;
+- contract catalog validation and compatibility tests for existing evidence
+  readers.
+
+Exit gate: production audit export and promotion cannot complete without the
+correct managed authority and a durably committed provider receipt. Evaluation
+adapters remain explicitly profile-scoped and cannot be selected in hosted
+mode.
+
+### M2. Eight-purpose readiness and shutdown closure (Q2B-4)
+
+Deliverables:
+
+1. Probe all eight fixed purposes at startup and during operation using bounded
+   provider metadata and pinned public-key fingerprints.
+2. Expose only fixed-cardinality health states: configured, reachable,
+   algorithm/version valid, lifecycle active, draining, disabled, or failed.
+3. Require all mandatory purposes before traffic readiness; liveness remains
+   separate so a failed signer does not create a restart storm.
+4. Drain in-flight reservations and provider calls on shutdown, then close the
+   database/provider resources in deterministic order.
+5. Add a configuration/image scan proving that hosted artifacts contain no
+   private key, private-key path, local signer selector, or shared-purpose key.
+
+Exit gate: partial, duplicated, unhealthy, stale, or private-material-backed
+provider sets cannot become ready, and logs/metrics expose no tenant, signing
+bytes, key material, or raw provider diagnostics.
+
+### M3. Real-provider and two-instance qualification (Q2C)
+
+Run AWS KMS and Google Cloud KMS lanes against immutable versioned resources and
+their production-shaped IAM principals. Execute the complete concurrency and
+fault matrix from Q2C against two API instances and PostgreSQL 16. Persist a
+machine-verifiable evidence bundle containing configuration fingerprints,
+provider/key versions, scenario outcomes, committed operation IDs, redacted
+receipts, timings, and tool/image/source digests.
+
+Exit gate: all scenarios converge to exactly one verified result or one durable
+operator-actionable uncertain/rejected state. Direct provider APIs that cannot
+reconcile accepted-but-lost requests are not claimed as exactly-once; they must
+use a provider operation service/ledger or remain blocked from production.
+
+### M4. PostgreSQL production authority (Q2A)
+
+Merge role-separated PostgreSQL CI first, followed by backup/PITR evidence and
+cutover hardening. The CI lane creates the migrator, app, and backup roles from
+scratch, applies all 39 migrations, executes repository smoke tests as the app,
+and proves the negative privilege matrix. The protected-environment lane then
+records encrypted backup, point-in-time restore, row/checksum/authority
+comparison, RPO, RTO, and rollback rehearsal.
+
+Exit gate: runtime credentials cannot perform DDL, role changes, arbitrary
+function execution, backup administration, or migration; restore evidence is
+complete enough for an independent operator to repeat.
+
+### M5. Console production slices (Q2D)
+
+Implement the Console through one BFF and ship vertical slices in this order:
+
+1. organization switcher, members, invitations, and role changes;
+2. device enrollment, inventory, trust state, revoke, and re-enroll;
+3. policy, Agent Session Grant, capability, expiry, and revocation inspection;
+4. signer health, rotation, drain, and emergency stop;
+5. bounded audit search/export and security-event timeline;
+6. recovery, dead-letter, and uncertain-signing adjudication.
+
+Every mutation is specified as UI state plus API preconditions: required role,
+resource-bound recent WebAuthn context, CSRF, `If-Match`, idempotency key,
+confirmation requirement, stable error mapping, audit event, and post-commit
+refresh. Each slice includes loading/empty/error/stale/offline states, keyboard
+and screen-reader behavior, tenant-substitution tests, response-loss recovery,
+and proof that browser storage and URLs contain no reusable authority.
+
+Exit gate: Owner/Admin/Auditor/Viewer matrices pass in Playwright against the
+real BFF and PostgreSQL repositories; destructive actions are recoverable or
+explicitly irreversible and never report success before authoritative commit.
+
+### M6. Immutable macOS candidate and physical qualification (Q3)
+
+Produce one universal Developer ID-signed, notarized, stapled PKG. Direct
+download and Homebrew install that exact digest. Run the Q3B lifecycle matrix on
+physical Apple silicon/Secure Enclave and Intel/T2 machines and bind every
+result to source, SBOM, package, signing identity, notarization, and hardware
+inventory.
+
+Exit gate: both hardware lanes accept the same immutable candidate; install,
+upgrade, rollback, uninstall-preserve, purge, reboot, sleep/wake, key loss, and
+rotation have signed evidence and documented operator recovery.
+
+### M7. Agent E2E, staging, review, and promotion (Q4-Q5)
+
+Qualify Claude Code first and Cursor second through the same adapter contract,
+including unattended signed commits, hostile sibling/process/path tests,
+revocation, contention, restart, and response loss. Deploy the unchanged API,
+Console, worker, schema, and PKG candidates to staging; execute operational
+drills; commission an independent security review; close and retest findings;
+then promote the exact qualified digests without rebuilding.
+
+Exit gate: `git verify-commit` succeeds for supported unattended journeys, the
+next operation is denied within the measured revocation bound, restore and
+rollback meet recorded objectives, and no critical/high security finding is
+open.
+
+### Cross-cutting definition of done
+
+Each merge checkpoint must include implementation, negative and failure tests,
+contract/schema changes, threat-model delta, operator runbook, migration or
+rollback notes, telemetry/privacy review, and evidence-index update. CI success
+on mocks is implementation evidence only. Real KMS, protected PostgreSQL,
+physical Mac, notarization, browser E2E, staging drills, and independent review
+must be labeled separately and cannot be inferred from unit-test success.

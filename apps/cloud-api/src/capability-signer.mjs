@@ -1,12 +1,14 @@
 import crypto from "node:crypto";
 
 import {
+  CAPABILITY_REASONS,
   CAPABILITY_VERSION,
   DEFAULT_CLOCK_SKEW_MS,
   DEFAULT_MAX_TTL_MS,
+  MIN_NONCE_BYTES,
   CapabilityError,
   canonicalCapability,
-  issueCapability
+  validateCapability
 } from "../../../packages/capability/src/index.mjs";
 import { SIGNER_PURPOSE_REGISTRY } from "./signer-purpose-registry.mjs";
 
@@ -33,6 +35,12 @@ const KEY_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/u;
 const PUBLIC_KEY_PEM = /^-----BEGIN PUBLIC KEY-----\n[\s\S]+\n-----END PUBLIC KEY-----\n$/u;
 const MAX_PUBLIC_KEY_BYTES = 8 * 1024;
 const MAX_SIGNATURE_BYTES = 64;
+const DEFAULT_ISSUE_TTL_MS = 60 * 1000;
+const ISSUE_INPUT_KEYS = new Set([
+  "version", "capability_id", "nonce", "issuer", "key_id", "audience",
+  "scope", "not_before", "expires_at", "sequence", "signature",
+  "private_key", "signing_key", "ttl_ms", "ttlMs", "notBefore", "expiresAt", "keyId", "now"
+]);
 
 const MESSAGES = Object.freeze({
   [CAPABILITY_SIGNER_ERROR_CODES.CONFIG]: "capability signer configuration is invalid",
@@ -239,19 +247,76 @@ function normalizeStatement(input, config, now) {
     throw new CapabilitySignerError(CAPABILITY_SIGNER_ERROR_CODES.INPUT);
   }
   try {
-    const ephemeral = crypto.generateKeyPairSync(CAPABILITY_SIGNER_ALGORITHM).privateKey;
-    const issued = issueCapability(input, ephemeral, {
-      now: exactNow(now()),
+    rejectUnknownInput(input);
+    rejectAliases(input);
+
+    const current = exactNow(now());
+    const statement = {
+      version: input.version ?? CAPABILITY_VERSION,
+      capability_id: input.capability_id ?? crypto.randomUUID(),
+      nonce: input.nonce ?? randomNonce(),
+      issuer: input.issuer,
+      key_id: input.key_id ?? input.keyId,
+      audience: input.audience,
+      scope: input.scope,
+      not_before: input.not_before ?? input.notBefore,
+      expires_at: input.expires_at ?? input.expiresAt,
+      sequence: input.sequence
+    };
+    if (statement.not_before === undefined) statement.not_before = new Date(current).toISOString();
+    else statement.not_before = issueTimestamp(statement.not_before);
+    if (statement.expires_at === undefined) {
+      const ttlMs = input.ttl_ms ?? input.ttlMs ?? DEFAULT_ISSUE_TTL_MS;
+      if (!Number.isFinite(ttlMs) || ttlMs <= 0) throw new CapabilityError(CAPABILITY_REASONS.TTL_EXCEEDED);
+      statement.expires_at = new Date(parseTimestamp(statement.not_before) + ttlMs).toISOString();
+    } else statement.expires_at = issueTimestamp(statement.expires_at);
+
+    const normalized = validateCapability(statement, {
+      now: current,
       maxTtlMs: config.maxTtlMs,
       clockSkewMs: config.clockSkewMs
     });
-    const { signature: _discardedSignature, ...statement } = issued;
-    if (statement.key_id !== config.keyId) throw new CapabilitySignerError(CAPABILITY_SIGNER_ERROR_CODES.INPUT);
-    return deepFreeze(statement);
+    const { signature: _discardedSignature, ...normalizedStatement } = normalized;
+    const finalStatement = normalizedStatement;
+    if (finalStatement.key_id !== config.keyId) throw new CapabilitySignerError(CAPABILITY_SIGNER_ERROR_CODES.INPUT);
+    return deepFreeze(finalStatement);
   } catch (error) {
     if (error instanceof CapabilitySignerError || error instanceof CapabilityError) throw error;
     throw new CapabilitySignerError(CAPABILITY_SIGNER_ERROR_CODES.INPUT);
   }
+}
+
+function rejectUnknownInput(input) {
+  for (const key of Object.keys(input)) {
+    if (!ISSUE_INPUT_KEYS.has(key)) throw new CapabilityError(CAPABILITY_REASONS.UNKNOWN_FIELD);
+  }
+}
+
+function rejectAliases(input) {
+  for (const [left, right] of [["key_id", "keyId"], ["not_before", "notBefore"], ["expires_at", "expiresAt"], ["ttl_ms", "ttlMs"], ["private_key", "signing_key"]]) {
+    if (Object.hasOwn(input, left) && Object.hasOwn(input, right)) throw new CapabilityError(CAPABILITY_REASONS.UNKNOWN_FIELD);
+  }
+}
+
+function parseTimestamp(value) {
+  if (typeof value === "number" && Number.isFinite(value)) return value;
+  if (value instanceof Date && Number.isFinite(value.getTime())) return value.getTime();
+  if (typeof value === "string") {
+    const parsed = Date.parse(value);
+    if (Number.isFinite(parsed) && new Date(parsed).toISOString() === value) return parsed;
+  }
+  throw new CapabilityError(CAPABILITY_REASONS.INVALID_TIMESTAMP);
+}
+
+function issueTimestamp(value) {
+  const timestamp = parseTimestamp(value);
+  if (!Number.isSafeInteger(timestamp)) throw new CapabilityError(CAPABILITY_REASONS.INVALID_TIMESTAMP);
+  return new Date(timestamp).toISOString();
+}
+
+function randomNonce() {
+  const nonce = crypto.randomBytes(MIN_NONCE_BYTES).toString("base64url");
+  return /^[A-Za-z0-9]/u.test(nonce) ? nonce : `A${nonce.slice(1)}`;
 }
 
 function validateProviderMetadata(value, config) {

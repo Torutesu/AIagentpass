@@ -13,12 +13,20 @@ const RESOURCE = "arn:aws:kms:us-east-1:123456789012:key/agent-session";
 const MANIFEST_RESOURCE = "arn:aws:kms:us-east-1:123456789012:key/manifest";
 const POSSESSION_RESOURCE = "arn:aws:kms:us-east-1:123456789012:key/possession";
 const REFRESH_RESOURCE = "arn:aws:kms:us-east-1:123456789012:key/refresh";
+const CAPABILITY_RESOURCE = "arn:aws:kms:us-east-1:123456789012:key/capability";
+const CONTROL_BUNDLE_RESOURCE = "arn:aws:kms:us-east-1:123456789012:key/control-bundle";
+const AUDIT_ANCHOR_RESOURCE = "arn:aws:kms:us-east-1:123456789012:key/audit-anchor";
+const PROMOTION_EVIDENCE_RESOURCE = "arn:aws:kms:us-east-1:123456789012:key/promotion-evidence";
 
 function fixture() {
   const agent = crypto.generateKeyPairSync("ed25519");
   const manifest = crypto.generateKeyPairSync("ed25519");
   const possession = crypto.generateKeyPairSync("ed25519");
   const refresh = crypto.generateKeyPairSync("ed25519");
+  const capability = crypto.generateKeyPairSync("ed25519");
+  const controlBundle = crypto.generateKeyPairSync("ed25519");
+  const auditAnchor = crypto.generateKeyPairSync("ed25519");
+  const promotionEvidence = crypto.generateKeyPairSync("ed25519");
   const env = {
     AGENTPASS_CLOUD_PROFILE: "hosted",
     AGENTPASS_CLOUD_AGENT_SESSION_KEY_ID: "agent-session-2026-08",
@@ -29,13 +37,25 @@ function fixture() {
     AGENTPASS_CLOUD_POSSESSION_RECEIPT_PUBLIC_KEY: possession.publicKey.export({ type: "spki", format: "pem" }).toString(),
     AGENTPASS_CLOUD_REFRESH_KEY_ID: "refresh-2026-08",
     AGENTPASS_CLOUD_REFRESH_PUBLIC_KEY: refresh.publicKey.export({ type: "spki", format: "pem" }).toString(),
+    AGENTPASS_CLOUD_CAPABILITY_KEY_ID: "capability-2026-08",
+    AGENTPASS_CLOUD_CAPABILITY_PUBLIC_KEY: capability.publicKey.export({ type: "spki", format: "pem" }).toString(),
+    AGENTPASS_CLOUD_CONTROL_BUNDLE_KEY_ID: "control-bundle-2026-08",
+    AGENTPASS_CLOUD_CONTROL_BUNDLE_PUBLIC_KEY: controlBundle.publicKey.export({ type: "spki", format: "pem" }).toString(),
+    AGENTPASS_CLOUD_AUDIT_ANCHOR_KEY_ID: "audit-anchor-2026-08",
+    AGENTPASS_CLOUD_AUDIT_ANCHOR_PUBLIC_KEY: auditAnchor.publicKey.export({ type: "spki", format: "pem" }).toString(),
+    AGENTPASS_CLOUD_PROMOTION_EVIDENCE_KEY_ID: "promotion-evidence-2026-08",
+    AGENTPASS_CLOUD_PROMOTION_EVIDENCE_PUBLIC_KEY: promotionEvidence.publicKey.export({ type: "spki", format: "pem" }).toString(),
     AGENTPASS_KMS_PROVIDER: "aws",
     AGENTPASS_KMS_AGENT_SESSION_KEY_RESOURCE: RESOURCE,
     AGENTPASS_KMS_QUALIFICATION_MANIFEST_KEY_RESOURCE: MANIFEST_RESOURCE,
     AGENTPASS_KMS_POSSESSION_RECEIPT_KEY_RESOURCE: POSSESSION_RESOURCE,
-    AGENTPASS_KMS_REFRESH_HINT_KEY_RESOURCE: REFRESH_RESOURCE
+    AGENTPASS_KMS_REFRESH_HINT_KEY_RESOURCE: REFRESH_RESOURCE,
+    AGENTPASS_KMS_CAPABILITY_KEY_RESOURCE: CAPABILITY_RESOURCE,
+    AGENTPASS_KMS_CONTROL_BUNDLE_KEY_RESOURCE: CONTROL_BUNDLE_RESOURCE,
+    AGENTPASS_KMS_AUDIT_ANCHOR_KEY_RESOURCE: AUDIT_ANCHOR_RESOURCE,
+    AGENTPASS_KMS_PROMOTION_EVIDENCE_KEY_RESOURCE: PROMOTION_EVIDENCE_RESOURCE
   };
-  return { agent, manifest, possession, refresh, env };
+  return { agent, manifest, possession, refresh, capability, controlBundle, auditAnchor, promotionEvidence, env };
 }
 
 function fingerprint(pair) {
@@ -51,7 +71,11 @@ test("hosted AWS composition enforces lifecycle state independently per purpose"
     destroy() {}
     async send(command) {
       calls += 1;
-      const pair = command.input.KeyId === RESOURCE ? value.agent : command.input.KeyId === MANIFEST_RESOURCE ? value.manifest : command.input.KeyId === POSSESSION_RESOURCE ? value.possession : value.refresh;
+      const pair = new Map([
+        [RESOURCE, value.agent], [MANIFEST_RESOURCE, value.manifest], [POSSESSION_RESOURCE, value.possession], [REFRESH_RESOURCE, value.refresh],
+        [CAPABILITY_RESOURCE, value.capability], [CONTROL_BUNDLE_RESOURCE, value.controlBundle], [AUDIT_ANCHOR_RESOURCE, value.auditAnchor], [PROMOTION_EVIDENCE_RESOURCE, value.promotionEvidence]
+      ]).get(command.input.KeyId);
+      if (!pair) throw new Error("unknown test KMS resource");
       if (command.kind === "get") {
         return {
           KeyId: command.input.KeyId,
@@ -109,11 +133,23 @@ test("hosted GCP composition applies the same active-key boundary", async () => 
   const manifestResource = "projects/demo/locations/global/keyRings/agentpass/cryptoKeys/manifest/cryptoKeyVersions/1";
   const possessionResource = "projects/demo/locations/global/keyRings/agentpass/cryptoKeys/possession/cryptoKeyVersions/1";
   const refreshResource = "projects/demo/locations/global/keyRings/agentpass/cryptoKeys/refresh/cryptoKeyVersions/1";
+  const capabilityResource = "projects/demo/locations/global/keyRings/agentpass/cryptoKeys/capability/cryptoKeyVersions/1";
+  const controlBundleResource = "projects/demo/locations/global/keyRings/agentpass/cryptoKeys/control-bundle/cryptoKeyVersions/1";
+  const auditAnchorResource = "projects/demo/locations/global/keyRings/agentpass/cryptoKeys/audit-anchor/cryptoKeyVersions/1";
+  const promotionEvidenceResource = "projects/demo/locations/global/keyRings/agentpass/cryptoKeys/promotion-evidence/cryptoKeyVersions/1";
   value.env.AGENTPASS_KMS_PROVIDER = "gcp";
   value.env.AGENTPASS_KMS_AGENT_SESSION_KEY_RESOURCE = agentResource;
   value.env.AGENTPASS_KMS_QUALIFICATION_MANIFEST_KEY_RESOURCE = manifestResource;
   value.env.AGENTPASS_KMS_POSSESSION_RECEIPT_KEY_RESOURCE = possessionResource;
   value.env.AGENTPASS_KMS_REFRESH_HINT_KEY_RESOURCE = refreshResource;
+  value.env.AGENTPASS_KMS_CAPABILITY_KEY_RESOURCE = capabilityResource;
+  value.env.AGENTPASS_KMS_CONTROL_BUNDLE_KEY_RESOURCE = controlBundleResource;
+  value.env.AGENTPASS_KMS_AUDIT_ANCHOR_KEY_RESOURCE = auditAnchorResource;
+  value.env.AGENTPASS_KMS_PROMOTION_EVIDENCE_KEY_RESOURCE = promotionEvidenceResource;
+  const pairs = new Map([
+    [agentResource, value.agent], [manifestResource, value.manifest], [possessionResource, value.possession], [refreshResource, value.refresh],
+    [capabilityResource, value.capability], [controlBundleResource, value.controlBundle], [auditAnchorResource, value.auditAnchor], [promotionEvidenceResource, value.promotionEvidence]
+  ]);
   const lifecycle = createManagedSignerKeyLifecycle({
     purpose: PURPOSE,
     snapshot: {
@@ -134,11 +170,13 @@ test("hosted GCP composition applies the same active-key boundary", async () => 
   class KeyManagementServiceClient {
     async close() {}
     async getPublicKey({ name }) {
-      const pair = name === agentResource ? value.agent : name === manifestResource ? value.manifest : name === possessionResource ? value.possession : value.refresh;
+      const pair = pairs.get(name);
+      if (!pair) throw new Error("unknown test KMS resource");
       return [{ name, algorithm: "EC_SIGN_ED25519", protectionLevel: "HSM", pem: pair.publicKey.export({ type: "spki", format: "pem" }).toString() }];
     }
     async asymmetricSign({ name, data }) {
-      const pair = name === agentResource ? value.agent : name === manifestResource ? value.manifest : name === possessionResource ? value.possession : value.refresh;
+      const pair = pairs.get(name);
+      if (!pair) throw new Error("unknown test KMS resource");
       return [{ name, protectionLevel: "HSM", signature: crypto.sign(null, data, pair.privateKey).toString("base64") }];
     }
   }

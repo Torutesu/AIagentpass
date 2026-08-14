@@ -108,6 +108,51 @@ test("signs the exact existing canonical capability statement and verifies it be
   assert.equal(Object.isFrozen(result), true);
 });
 
+test("hosted normalization does not generate a key pair or sign before the managed provider call", async () => {
+  const originalGenerateKeyPairSync = crypto.generateKeyPairSync;
+  const originalSign = crypto.sign;
+  const statementBytes = Buffer.from(canonicalCapability(input()), "utf8");
+  const providerSignature = originalSign(null, statementBytes, providerKeys.privateKey);
+  let generateKeyPairCalls = 0;
+  let signCalls = 0;
+  let providerSignCalls = 0;
+  const service = {
+    async publicKeyMetadata(request) {
+      return { key_id: request.key_id, algorithm: request.algorithm, public_key: publicKeyPem };
+    },
+    async sign(request) {
+      providerSignCalls += 1;
+      assert.deepEqual(request.bytes, statementBytes);
+      return providerSignature;
+    }
+  };
+
+  crypto.generateKeyPairSync = (...args) => {
+    generateKeyPairCalls += 1;
+    return originalGenerateKeyPairSync(...args);
+  };
+  crypto.sign = (...args) => {
+    signCalls += 1;
+    throw new Error("hosted normalization must not sign locally");
+  };
+  try {
+    const value = createHostedCapabilitySigner({
+      provider: service,
+      keyId: "capability-2026-08",
+      publicKey: publicKeyPem,
+      now: () => NOW
+    });
+    const result = await value.signCapability(input());
+    assert.equal(result.signature, providerSignature.toString("base64"));
+  } finally {
+    crypto.generateKeyPairSync = originalGenerateKeyPairSync;
+    crypto.sign = originalSign;
+  }
+  assert.equal(generateKeyPairCalls, 0);
+  assert.equal(signCalls, 0);
+  assert.equal(providerSignCalls, 1);
+});
+
 test("supports the existing issue and sign aliases without changing statement semantics", async () => {
   const { signer: value } = signer();
   const first = await value.issueCapability(input());

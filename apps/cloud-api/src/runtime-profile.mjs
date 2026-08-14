@@ -49,12 +49,36 @@ const HOSTED_POSSESSION_RECEIPT_ENV = Object.freeze([
   "AGENTPASS_CLOUD_POSSESSION_RECEIPT_TIMEOUT_MS",
   "AGENTPASS_CLOUD_POSSESSION_RECEIPT_VERIFICATION_KEYS_JSON"
 ]);
+const HOSTED_CONTROL_BUNDLE_ENV = Object.freeze([
+  "AGENTPASS_CLOUD_CONTROL_BUNDLE_KEY_ID",
+  "AGENTPASS_CLOUD_CONTROL_BUNDLE_PUBLIC_KEY",
+  "AGENTPASS_CLOUD_CONTROL_BUNDLE_TIMEOUT_MS"
+]);
+const HOSTED_CAPABILITY_ENV = Object.freeze([
+  "AGENTPASS_CLOUD_CAPABILITY_KEY_ID",
+  "AGENTPASS_CLOUD_CAPABILITY_PUBLIC_KEY",
+  "AGENTPASS_CLOUD_CAPABILITY_TIMEOUT_MS"
+]);
+const HOSTED_AUDIT_ANCHOR_ENV = Object.freeze([
+  "AGENTPASS_CLOUD_AUDIT_ANCHOR_KEY_ID",
+  "AGENTPASS_CLOUD_AUDIT_ANCHOR_PUBLIC_KEY",
+  "AGENTPASS_CLOUD_AUDIT_ANCHOR_TIMEOUT_MS"
+]);
+const HOSTED_PROMOTION_EVIDENCE_ENV = Object.freeze([
+  "AGENTPASS_CLOUD_PROMOTION_EVIDENCE_KEY_ID",
+  "AGENTPASS_CLOUD_PROMOTION_EVIDENCE_PUBLIC_KEY",
+  "AGENTPASS_CLOUD_PROMOTION_EVIDENCE_TIMEOUT_MS"
+]);
 const HOSTED_KMS_ENV = Object.freeze([
   "AGENTPASS_KMS_PROVIDER",
   "AGENTPASS_KMS_AGENT_SESSION_KEY_RESOURCE",
   "AGENTPASS_KMS_QUALIFICATION_MANIFEST_KEY_RESOURCE",
   "AGENTPASS_KMS_POSSESSION_RECEIPT_KEY_RESOURCE",
-  "AGENTPASS_KMS_REFRESH_HINT_KEY_RESOURCE"
+  "AGENTPASS_KMS_REFRESH_HINT_KEY_RESOURCE",
+  "AGENTPASS_KMS_CONTROL_BUNDLE_KEY_RESOURCE",
+  "AGENTPASS_KMS_CAPABILITY_KEY_RESOURCE",
+  "AGENTPASS_KMS_AUDIT_ANCHOR_KEY_RESOURCE",
+  "AGENTPASS_KMS_PROMOTION_EVIDENCE_KEY_RESOURCE"
 ]);
 const DATABASE_ENV = Object.freeze([
   "AGENTPASS_DATABASE_URL",
@@ -97,6 +121,10 @@ const PROFILE_RELATED_ENV = new Set([
   ...HOSTED_AGENT_SESSION_ENV,
   ...HOSTED_QUALIFICATION_MANIFEST_ENV,
   ...HOSTED_POSSESSION_RECEIPT_ENV,
+  ...HOSTED_CONTROL_BUNDLE_ENV,
+  ...HOSTED_CAPABILITY_ENV,
+  ...HOSTED_AUDIT_ANCHOR_ENV,
+  ...HOSTED_PROMOTION_EVIDENCE_ENV,
   ...HOSTED_KMS_ENV,
   ...FILE_STORE_ENV,
   ...DATABASE_ENV,
@@ -172,11 +200,17 @@ export function parseCloudRuntimeProfile(env = process.env) {
   const hostedAgentSession = parseHostedAgentSession(env);
   const hostedQualificationManifest = parseHostedQualificationManifest(env);
   const hostedPossessionReceipt = parseHostedPossessionReceipt(env);
+  const hostedControlBundle = parseHostedPurposeSigner(env, HOSTED_CONTROL_BUNDLE_ENV);
+  const hostedCapability = parseHostedPurposeSigner(env, HOSTED_CAPABILITY_ENV);
+  const hostedAuditAnchor = parseHostedPurposeSigner(env, HOSTED_AUDIT_ANCHOR_ENV);
+  const hostedPromotionEvidence = parseHostedPurposeSigner(env, HOSTED_PROMOTION_EVIDENCE_ENV);
   const ownerRecoveryNotification = parseOwnerRecoveryNotification(env);
   if (profile === CLOUD_RUNTIME_PROFILES.HOSTED) {
-    if (fileStore.present) fail(CLOUD_RUNTIME_PROFILE_ERROR_CODES.HOSTED_FILE_STORE_FORBIDDEN);
+    if (fileStore.present || configured(env, "AGENTPASS_CLOUD_BUNDLE_PRIVATE_KEY_PATH")) fail(CLOUD_RUNTIME_PROFILE_ERROR_CODES.HOSTED_FILE_STORE_FORBIDDEN);
     const humanAuth = parseHumanAuth(env);
-    if (!humanAuth.complete || !hostedRefresh.complete || !hostedAgentSession.complete || !hostedQualificationManifest.complete || !hostedPossessionReceipt.complete || !ownerRecoveryNotification.complete || !configured(env, CAPABILITY_NONCE_SECRET_ENV)) fail(CLOUD_RUNTIME_PROFILE_ERROR_CODES.HOSTED_AUTH_INCOMPLETE);
+    if (!humanAuth.complete || !hostedRefresh.complete || !hostedAgentSession.complete || !hostedQualificationManifest.complete || !hostedPossessionReceipt.complete
+      || !hostedControlBundle.complete || !hostedCapability.complete || !hostedAuditAnchor.complete || !hostedPromotionEvidence.complete
+      || !ownerRecoveryNotification.complete || !configured(env, CAPABILITY_NONCE_SECRET_ENV)) fail(CLOUD_RUNTIME_PROFILE_ERROR_CODES.HOSTED_AUTH_INCOMPLETE);
     if (!validCursorSecret(env[CAPABILITY_NONCE_SECRET_ENV])) fail(CLOUD_RUNTIME_PROFILE_ERROR_CODES.HUMAN_AUTH_INVALID);
     return Object.freeze({
       profile,
@@ -196,6 +230,10 @@ export function parseCloudRuntimeProfile(env = process.env) {
     || hostedRefresh.present || HOSTED_AGENT_SESSION_ENV.some((name) => configured(env, name))
     || HOSTED_QUALIFICATION_MANIFEST_ENV.some((name) => configured(env, name))
     || HOSTED_POSSESSION_RECEIPT_ENV.some((name) => configured(env, name))
+    || HOSTED_CONTROL_BUNDLE_ENV.some((name) => configured(env, name))
+    || HOSTED_CAPABILITY_ENV.some((name) => configured(env, name))
+    || HOSTED_AUDIT_ANCHOR_ENV.some((name) => configured(env, name))
+    || HOSTED_PROMOTION_EVIDENCE_ENV.some((name) => configured(env, name))
     || HOSTED_KMS_ENV.some((name) => configured(env, name))
     || ownerRecoveryNotification.present
     || configured(env, CAPABILITY_NONCE_SECRET_ENV)) {
@@ -298,6 +336,17 @@ function parseHostedPossessionReceipt(env) {
   const complete = hasKeyId && hasPublicKey
     && IDENTIFIER.test(env.AGENTPASS_CLOUD_POSSESSION_RECEIPT_KEY_ID)
     && nonEmptyString(env.AGENTPASS_CLOUD_POSSESSION_RECEIPT_PUBLIC_KEY);
+  return { present: true, complete };
+}
+
+function parseHostedPurposeSigner(env, fields) {
+  const present = fields.some((name) => configured(env, name));
+  if (!present) return { present: false, complete: false };
+  const [keyIdName, publicKeyName, timeoutName] = fields;
+  const complete = fields.every((name) => configured(env, name))
+    && IDENTIFIER.test(env[keyIdName])
+    && nonEmptyString(env[publicKeyName])
+    && positiveIntegerText(env[timeoutName]);
   return { present: true, complete };
 }
 

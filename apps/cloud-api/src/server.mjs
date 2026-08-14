@@ -1,8 +1,8 @@
 import crypto from "node:crypto";
 import http from "node:http";
 import { authenticateApiToken, createReplayCache, requireOrganizationRole, verifyDeviceRequest } from "./auth.mjs";
-import { MAX_REVOCATIONS, controlBundleStatementHash, issueControlBundle, parseControlBundleJson } from "../../../lib/control-bundle-v2.mjs";
-import { canonicalJson, intersectScopes } from "../../../packages/capability/src/index.mjs";
+import { MAX_REVOCATIONS, controlBundleStatementHash, issueControlBundle, parseControlBundleJson, verifyControlBundle } from "../../../lib/control-bundle-v2.mjs";
+import { canonicalJson, intersectScopes, verifyCapability } from "../../../packages/capability/src/index.mjs";
 import {
   bundleAcknowledgementSigningData,
   normalizeRefreshHint,
@@ -50,7 +50,7 @@ const V2_CANDIDATE_BINDING_KEYS = Object.freeze([
 const V2_COMPLETION_KEYS = new Set(["version", "proof_version", "enrollment_id", "organization_id", "device_id", "label", "platform", "device_key", "candidate_id", "device_key_fingerprint", "challenge"]);
 const V2_CHALLENGE_KEYS = new Set(["challenge_id", "nonce", "expires_at", "candidate_id", "device_key_fingerprint"]);
 const V2_PROOF_DOMAIN = "AgentPass-Enrollment-Proof-v2\0";
-export function createCloudApi({ store, tokenRecords = [], bundleSigner, refreshHintService, now = () => Date.now(), monotonicNow, replayCache = createReplayCache(), deviceReplayConsumer, agentSessionDeviceApi, qualificationGrantBatchDeviceApi, rateLimiter, admissionRateLimiter, verifyRecentWebAuthn, recentAuthService, humanAuthApi, humanSession, capabilityAuthorityRepository, capabilityRevocationSource, auditRepository, enrollmentCredentialSecret, possessionReceiptSigner, trackInFlight, readiness, operationalMetrics, operationalProbeSecret } = {}) {
+export function createCloudApi({ store, tokenRecords = [], bundleSigner, capabilitySigner, refreshHintService, now = () => Date.now(), monotonicNow, replayCache = createReplayCache(), deviceReplayConsumer, agentSessionDeviceApi, qualificationGrantBatchDeviceApi, rateLimiter, admissionRateLimiter, verifyRecentWebAuthn, recentAuthService, humanAuthApi, humanSession, capabilityAuthorityRepository, capabilityRevocationSource, auditRepository, enrollmentCredentialSecret, possessionReceiptSigner, trackInFlight, readiness, operationalMetrics, operationalProbeSecret } = {}) {
   if (!store) throw new TypeError("store is required");
   if (verifyRecentWebAuthn !== undefined && recentAuthService !== undefined) throw new TypeError("configure verifyRecentWebAuthn or recentAuthService, not both");
   if (humanAuthApi !== undefined && (!humanAuthApi || typeof humanAuthApi.handle !== "function")) throw new TypeError("humanAuthApi must expose handle()");
@@ -69,9 +69,12 @@ export function createCloudApi({ store, tokenRecords = [], bundleSigner, refresh
   if (operationalMetrics !== undefined && (!operationalMetrics || typeof operationalMetrics.snapshot !== "function")) throw new TypeError("operationalMetrics must expose snapshot()");
   if (operationalProbeSecret !== undefined && (!Buffer.isBuffer(operationalProbeSecret) || operationalProbeSecret.length !== 32)) throw new TypeError("operationalProbeSecret must be an exact 32-byte Buffer");
   if ((readiness !== undefined || operationalMetrics !== undefined) && operationalProbeSecret === undefined) throw new TypeError("operationalProbeSecret is required for operational endpoints");
+  const controlBundleSigner = createControlBundleSigner(bundleSigner, now);
+  const capabilityAuthoritySigner = createCapabilityAuthoritySigner(capabilitySigner, bundleSigner);
+  if (bundleSigner && !bundleSigner.privateKey && enrollmentCredentialSecret === undefined) throw new TypeError("enrollmentCredentialSecret is required with a managed ControlBundle signer");
   const effectiveEnrollmentCredentialSecret = enrollmentCredentialSecret ?? (bundleSigner?.privateKey
     ? crypto.createHash("sha256").update("AgentPass-Evaluation-Enrollment-Root-v1\0").update(bundleSigner.privateKey.export({ type: "pkcs8", format: "der" })).digest()
-    : crypto.randomBytes(32));
+    : undefined);
   const recentAuthVerifier = recentAuthService === undefined ? verifyRecentWebAuthn : recentAuthService?.authorize?.bind(recentAuthService);
   if (recentAuthService !== undefined && typeof recentAuthVerifier !== "function") throw new TypeError("recentAuthService must expose authorize()");
   const limiter = rateLimiter ?? createRateLimiter({ now, ...(monotonicNow ? { monotonicNow } : {}) });
@@ -423,7 +426,8 @@ export function createCloudApi({ store, tokenRecords = [], bundleSigner, refresh
           const actualFingerprint = publicKeyFingerprint(body.device_key.spki_pem);
           if (actualFingerprint !== body.device_key_fingerprint) throw apiError("invalid_enrollment_proof", 401, "Device enrollment proof is invalid");
           validateEnrollmentProofV2(url.pathname, bodyBytes, credentialDigest, body.challenge.nonce, candidateBinding, body.device_key.spki_pem, request.headers["agentpass-enrollment-signature"]);
-          if (!bundleSigner?.privateKey || !bundleSigner?.issuer || !bundleSigner?.keyId) throw apiError("bundle_signer_unavailable", 503, "Control bundle signer is unavailable");
+          if (!controlBundleSigner) throw apiError("bundle_signer_unavailable", 503, "Control bundle signer is unavailable");
+          const controlMetadata = await loadControlBundlePublicMetadata(controlBundleSigner);
           if (!possessionReceiptSigner) throw apiError("possession_receipt_signer_unavailable", 503, "Possession receipt signer is unavailable");
           const pendingDevice = typeof store.getDevice === "function" ? await store.getDevice({ organizationId: body.organization_id, deviceId: body.device_id }) : undefined;
           const deviceKeyEpoch = nextEnrollmentDeviceKeyEpoch(pendingDevice);
@@ -462,8 +466,7 @@ export function createCloudApi({ store, tokenRecords = [], bundleSigner, refresh
           if (typeof store.getDeviceEnrollmentPossessionReceipt !== "function" && typeof store.appendDevicePossessionReceipt === "function") {
             await store.appendDevicePossessionReceipt({ organizationId: body.organization_id, deviceId: body.device_id, receipt: possessionReceipt });
           }
-          const controlPublicKey = crypto.createPublicKey(bundleSigner.privateKey).export({ type: "spki", format: "pem" }).toString();
-          const refreshHintTrust = await enrollmentRefreshHintTrustMetadata(refreshHintService, controlPublicKey);
+          const refreshHintTrust = await enrollmentRefreshHintTrustMetadata(refreshHintService, controlMetadata.public_key);
           const completedEpoch = positiveDeviceKeyEpoch(device);
           return {
             status: 201,
@@ -478,9 +481,9 @@ export function createCloudApi({ store, tokenRecords = [], bundleSigner, refresh
                 device_key_epoch: completedEpoch,
                 control: {
                   format_epoch: 2,
-                  issuer: bundleSigner.issuer,
-                  key_id: bundleSigner.keyId,
-                  public_key: controlPublicKey,
+                  issuer: controlBundleSigner.issuer,
+                  key_id: controlBundleSigner.key_id,
+                  public_key: controlMetadata.public_key,
                   bundle_path: `/v1/organizations/${device.organization_id}/bundles/${device.device_id}`,
                   refresh_hint: refreshHintTrust
                 }
@@ -495,12 +498,12 @@ export function createCloudApi({ store, tokenRecords = [], bundleSigner, refresh
         if (typeof credential !== "string" || !/^[A-Za-z0-9_-]{43}$/.test(credential)) throw apiError("invalid_enrollment_credential", 401, "Device enrollment credential is invalid");
         validateEnrollmentPublicKey(body.device_key.algorithm, body.device_key.spki_pem);
         validateEnrollmentProof(request.url, bodyBytes, body.device_key.algorithm, body.device_key.spki_pem, credential, request.headers["agentpass-enrollment-signature"]);
-        if (!bundleSigner?.privateKey || !bundleSigner?.issuer || !bundleSigner?.keyId) throw apiError("bundle_signer_unavailable", 503, "Control bundle signer is unavailable");
-        const controlPublicKey = crypto.createPublicKey(bundleSigner.privateKey).export({ type: "spki", format: "pem" }).toString();
-        const refreshHintTrust = await enrollmentRefreshHintTrustMetadata(refreshHintService, controlPublicKey);
+        if (!controlBundleSigner) throw apiError("bundle_signer_unavailable", 503, "Control bundle signer is unavailable");
+        const controlMetadata = await loadControlBundlePublicMetadata(controlBundleSigner);
+        const refreshHintTrust = await enrollmentRefreshHintTrustMetadata(refreshHintService, controlMetadata.public_key);
         const device = await store.completeDeviceEnrollment({ enrollmentId: match.enrollmentId, organizationId: body.organization_id, deviceId: body.device_id, label: body.label, platform: body.platform, algorithm: body.device_key.algorithm, publicKey: body.device_key.spki_pem, credentialDigest: crypto.createHash("sha256").update(credential).digest("hex"), completedAt: new Date(now()).toISOString() });
         const deviceKeyEpoch = positiveDeviceKeyEpoch(device);
-        return { status: 201, body: { enrollment: { version: 1, enrollment_id: match.enrollmentId, organization_id: device.organization_id, device_id: device.device_id, status: device.status, key_algorithm: device.key_algorithm, device_key_epoch: deviceKeyEpoch, control: { format_epoch: 2, issuer: bundleSigner.issuer, key_id: bundleSigner.keyId, public_key: controlPublicKey, bundle_path: `/v1/organizations/${device.organization_id}/bundles/${device.device_id}`, refresh_hint: refreshHintTrust } } } };
+        return { status: 201, body: { enrollment: { version: 1, enrollment_id: match.enrollmentId, organization_id: device.organization_id, device_id: device.device_id, status: device.status, key_algorithm: device.key_algorithm, device_key_epoch: deviceKeyEpoch, control: { format_epoch: 2, issuer: controlBundleSigner.issuer, key_id: controlBundleSigner.key_id, public_key: controlMetadata.public_key, bundle_path: `/v1/organizations/${device.organization_id}/bundles/${device.device_id}`, refresh_hint: refreshHintTrust } } } };
       }, false, true),
       route("GET", new RegExp(`^/v1/organizations/(?<organizationId>${UUID})/agents$`), "viewer", async ({ organizationId }) => ({ body: { agents: await store.listAgents({ organizationId }) } })),
       route("POST", new RegExp(`^/v1/organizations/(?<organizationId>${UUID})/agents$`), "admin", async ({ organizationId, body, idempotencyKey, principal }) => ({ status: 201, body: { agent: await mutateAndAudit(organizationId, (target) => target.createAgent({ ...body, organizationId, createdBy: principal.member_id, principalId: principal.member_id, idempotencyKey }), ({ mutation }) => ({ organizationId, eventType: "agent.created", actorId: principal.member_id, targetType: "agent", targetId: mutation.agent_id, idempotencyKey: `${idempotencyKey}:audit` })) } })),
@@ -529,7 +532,7 @@ export function createCloudApi({ store, tokenRecords = [], bundleSigner, refresh
       }),
       route("GET", new RegExp(`^/v1/organizations/(?<organizationId>${UUID})/capabilities$`), "viewer", async ({ organizationId, url }) => ({ body: { capabilities: (await store.listCapabilities({ organizationId })).slice(-optionalLimit(url)).map(publicCapability) } })),
       route("POST", new RegExp(`^/v1/organizations/(?<organizationId>${UUID})/capabilities$`), "admin", async ({ organizationId, body, idempotencyKey, principal }) => {
-        if (!bundleSigner?.privateKey || !bundleSigner?.issuer || !bundleSigner?.keyId) throw apiError("capability_signer_unavailable", 503, "Capability signer is unavailable");
+        if (!capabilityAuthoritySigner) throw apiError("capability_signer_unavailable", 503, "Capability signer is unavailable");
         rejectUnknown(body, new Set(["capability_id", "agent_id", "device_id", "scope", "ttl_ms", "sequence"]), "capability");
         const ttlMs = body.ttl_ms ?? 15 * 60 * 1000;
         if (!Number.isSafeInteger(ttlMs) || ttlMs < 1_000 || ttlMs > 15 * 60 * 1000) throw apiError("invalid_capability_ttl", 400, "Capability TTL must be between 1 second and 15 minutes");
@@ -547,11 +550,11 @@ export function createCloudApi({ store, tokenRecords = [], bundleSigner, refresh
         const issuedAt = new Date(now()).toISOString();
         let signed;
         try { signed = await mutateAndAudit(organizationId, async (target) => {
-          const reserved = await target.reserveCapability({ organizationId, ...(body.capability_id ? { capabilityId: body.capability_id } : {}), issuer: bundleSigner.issuer, keyId: bundleSigner.keyId, agentId: agent.agent_id, deviceId: device.device_id, scope: effectiveScope, sequence: body.sequence, ttlMs, issuedAt, createdBy: principal.member_id, principalId: principal.member_id, idempotencyKey });
+          const reserved = await target.reserveCapability({ organizationId, ...(body.capability_id ? { capabilityId: body.capability_id } : {}), issuer: capabilityAuthoritySigner.issuer, keyId: capabilityAuthoritySigner.key_id, agentId: agent.agent_id, deviceId: device.device_id, scope: effectiveScope, sequence: body.sequence, ttlMs, issuedAt, createdBy: principal.member_id, principalId: principal.member_id, idempotencyKey });
           const statement = { version: 1, capability_id: reserved.capability_id, nonce: reserved.nonce, issuer: reserved.issuer, key_id: reserved.key_id, audience: { agent_id: reserved.agent_id, device_id: reserved.device_id }, scope: reserved.scope, not_before: reserved.not_before, expires_at: reserved.expires_at, sequence: reserved.sequence };
           const metadataTarget = typeof target.issueCapabilityMetadata === "function" ? target : capabilityAuthorityRepository;
           if (metadataTarget !== undefined) await metadataTarget.issueCapabilityMetadata({ organization_id: organizationId, capability_id: statement.capability_id, agent_id: statement.audience.agent_id, device_id: statement.audience.device_id, sequence: statement.sequence, statement_hash: crypto.createHash("sha256").update(canonicalJson(statement)).digest("hex"), expires_at: statement.expires_at, issued_by_member_id: principal.member_id });
-          return { ...statement, signature: crypto.sign(null, Buffer.from(canonicalJson(statement)), bundleSigner.privateKey).toString("base64") };
+          return signAndValidateCapability(capabilityAuthoritySigner, statement);
         }, ({ mutation }) => ({ organizationId, eventType: "capability.issued", actorId: principal.member_id, targetType: "capability", targetId: mutation.capability_id, details: { agent_id: agent.agent_id, device_id: device.device_id, expires_at: mutation.expires_at, sequence: mutation.sequence }, idempotencyKey: `${idempotencyKey}:audit` })); }
         catch (error) {
           if (error?.code === "ERR_MEMBER_NOT_ACTIVE" || error?.code === "ERR_MEMBERSHIP_VERSION") throw apiError("capability_issuer_not_active", 403, "Capability issuer membership is not active");
@@ -613,9 +616,9 @@ export function createCloudApi({ store, tokenRecords = [], bundleSigner, refresh
       }, true),
       route("GET", new RegExp(`^/v1/organizations/(?<organizationId>${UUID})/bundles/(?<deviceId>${UUID})$`), null, async ({ organizationId, principal, match }) => {
         if (principal.device_id !== match.deviceId) throw apiError("audience_mismatch", 403, "Device cannot fetch another device's bundle");
-        if (!bundleSigner?.privateKey || !bundleSigner?.issuer || !bundleSigner?.keyId) throw apiError("bundle_signer_unavailable", 503, "Bundle signer is unavailable");
+        if (!controlBundleSigner) throw apiError("bundle_signer_unavailable", 503, "Bundle signer is unavailable");
         const issuedMs = now();
-        const ttlMs = bundleSigner.ttlMs ?? 3_600_000;
+        const ttlMs = controlBundleSigner.ttlMs ?? 3_600_000;
         if (typeof store.snapshotAndAssignBundleHead === "function") {
           let preparedStatement;
           const authority = await store.snapshotAndAssignBundleHead({
@@ -626,19 +629,24 @@ export function createCloudApi({ store, tokenRecords = [], bundleSigner, refresh
             expiresAt: new Date(issuedMs + ttlMs).toISOString(),
             statementHashFactory: ({ snapshot, head }) => {
               preparedStatement = {
-                format_epoch: 2, issuer: bundleSigner.issuer, organization_id: organizationId, device_id: match.deviceId,
+                format_epoch: 2, issuer: controlBundleSigner.issuer, organization_id: organizationId, device_id: match.deviceId,
                 audience: { organization_id: organizationId, device_id: match.deviceId }, issued_at: head.issued_at,
                 expires_at: head.expires_at, sequence: head.sequence, policy_scope: snapshot.policy_scope,
                 global_revoked: snapshot.global_revoked, revoked_devices: snapshot.revoked_devices,
                 revoked_agents: snapshot.revoked_agents, revoked_capabilities: snapshot.revoked_capabilities,
-                offline_ttl_ms: bundleSigner.offlineTtlMs ?? 3_600_000, key_id: bundleSigner.keyId
+                offline_ttl_ms: controlBundleSigner.offlineTtlMs ?? 3_600_000, key_id: controlBundleSigner.key_id
               };
               return controlBundleStatementHash(preparedStatement);
             }
           });
           const { head } = authority;
           if (!preparedStatement || preparedStatement.sequence !== head.sequence) throw apiError("bundle_statement_unavailable", 503, "Bundle statement is unavailable");
-          const bundle = issueControlBundle(preparedStatement, bundleSigner.privateKey, { now: issuedMs, maxTtlMs: ttlMs, maxOfflineTtlMs: bundleSigner.offlineTtlMs ?? 3_600_000 });
+          const bundle = await signAndValidateControlBundle(controlBundleSigner, preparedStatement, {
+            now: issuedMs,
+            maxTtlMs: ttlMs,
+            maxOfflineTtlMs: controlBundleSigner.offlineTtlMs ?? 3_600_000,
+            audience: { organization_id: organizationId, device_id: match.deviceId }
+          });
           if (controlBundleStatementHash(bundle) !== head.state_fingerprint) throw apiError("bundle_statement_mismatch", 503, "Bundle statement is unavailable");
           return { body: { bundle, desired_generation: positiveGeneration(authority.desired_generation ?? head.sequence) } };
         }
@@ -662,9 +670,9 @@ export function createCloudApi({ store, tokenRecords = [], bundleSigner, refresh
         if (revokedCapabilities.length > MAX_REVOCATIONS) throw apiError("capability_revocations_overflow", 503, "Capability revocation state exceeds the ControlBundle limit");
         const stateFingerprint = crypto.createHash("sha256").update(JSON.stringify({ device_id: match.deviceId, policy_id: active.policy_id, policy_sequence: active.sequence, policy_scope: active.scope, revocations: revocations.filter((item) => item.target_type !== "capability").map((item) => [item.revocation_id, item.target_type, item.target_id, item.status]).sort(), revoked_capabilities: revokedCapabilities })).digest("hex");
         const head = await store.assignBundleHead({ organizationId, deviceId: match.deviceId, stateFingerprint, minimumSequence: active.sequence, issuedAt: new Date(issuedMs).toISOString(), expiresAt: new Date(issuedMs + ttlMs).toISOString() });
-        const bundle = issueControlBundle({
+        const statement = {
             format_epoch: 2,
-            issuer: bundleSigner.issuer,
+            issuer: controlBundleSigner.issuer,
             organization_id: organizationId,
             device_id: match.deviceId,
             audience: { organization_id: organizationId, device_id: match.deviceId },
@@ -676,9 +684,15 @@ export function createCloudApi({ store, tokenRecords = [], bundleSigner, refresh
             revoked_devices: revocations.filter((item) => item.target_type === "device" && item.status === "active").map((item) => item.target_id).sort(),
             revoked_agents: revocations.filter((item) => item.target_type === "agent" && item.status === "active").map((item) => item.target_id).sort(),
             revoked_capabilities: revokedCapabilities,
-            offline_ttl_ms: bundleSigner.offlineTtlMs ?? 3_600_000,
-            key_id: bundleSigner.keyId
-          }, bundleSigner.privateKey, { now: issuedMs, maxTtlMs: ttlMs, maxOfflineTtlMs: bundleSigner.offlineTtlMs ?? 3_600_000 });
+            offline_ttl_ms: controlBundleSigner.offlineTtlMs ?? 3_600_000,
+            key_id: controlBundleSigner.key_id
+          };
+        const bundle = await signAndValidateControlBundle(controlBundleSigner, statement, {
+          now: issuedMs,
+          maxTtlMs: ttlMs,
+          maxOfflineTtlMs: controlBundleSigner.offlineTtlMs ?? 3_600_000,
+          audience: { organization_id: organizationId, device_id: match.deviceId }
+        });
         return { body: { bundle, desired_generation: positiveGeneration(head.desired_generation ?? head.sequence) } };
       }, true),
       route("POST", new RegExp(`^/v1/organizations/(?<organizationId>${UUID})/bundles/(?<deviceId>${UUID})/acknowledgements$`), null, async ({ organizationId, principal, match, bodyBytes }) => {
@@ -948,6 +962,183 @@ function makeCandidateBinding({ enrollmentId, organizationId, deviceId, candidat
     device_key_fingerprint: deviceKeyFingerprint,
     expires_at: expiresAt
   });
+}
+
+const CONTROL_BUNDLE_KEY_ID = /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,255}$/u;
+const CONTROL_BUNDLE_PURPOSE = "agentpass.control-bundle";
+
+/*
+ * ControlBundle has a purpose-specific asynchronous boundary. The legacy
+ * private-key adapter is retained solely for the explicit evaluation/test
+ * shape used by the reference file store; a partially configured managed
+ * signer never falls back to that adapter.
+ */
+function createControlBundleSigner(value, now) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+  const managedShape = typeof value.signControlBundle === "function"
+    || typeof value.publicKeyMetadata === "function"
+    || Object.hasOwn(value, "key_id");
+  if (managedShape) {
+    return Object.freeze({
+      signControlBundle: value.signControlBundle,
+      publicKeyMetadata: value.publicKeyMetadata,
+      purpose: value.purpose,
+      algorithm: value.algorithm,
+      key_id: value.key_id,
+      issuer: value.issuer,
+      ttlMs: value.ttlMs,
+      offlineTtlMs: value.offlineTtlMs
+    });
+  }
+  if (!Object.hasOwn(value, "privateKey")) return undefined;
+  const privateKey = value.privateKey;
+  return Object.freeze({
+    purpose: CONTROL_BUNDLE_PURPOSE,
+    algorithm: "ed25519",
+    key_id: value.keyId,
+    issuer: value.issuer,
+    ttlMs: value.ttlMs,
+    offlineTtlMs: value.offlineTtlMs,
+    async publicKeyMetadata() {
+      const key = legacyControlBundlePrivateKey(privateKey);
+      return { purpose: CONTROL_BUNDLE_PURPOSE, key_id: value.keyId, algorithm: "ed25519", public_key: crypto.createPublicKey(key).export({ type: "spki", format: "pem" }).toString() };
+    },
+    async signControlBundle(statement) {
+      const key = legacyControlBundlePrivateKey(privateKey);
+      return issueControlBundle(statement, key, {
+        now: typeof now === "function" ? now() : Date.now(),
+        maxTtlMs: value.ttlMs ?? 3_600_000,
+        maxOfflineTtlMs: value.offlineTtlMs ?? 3_600_000
+      });
+    }
+  });
+}
+
+function legacyControlBundlePrivateKey(value) {
+  let key;
+  try { key = value?.type === "private" ? value : crypto.createPrivateKey(value); }
+  catch { throw new Error("legacy ControlBundle signer is invalid"); }
+  if (key.type !== "private" || key.asymmetricKeyType !== "ed25519") throw new Error("legacy ControlBundle signer is invalid");
+  return key;
+}
+
+async function loadControlBundlePublicMetadata(signer) {
+  if (!signer || typeof signer.publicKeyMetadata !== "function" || typeof signer.signControlBundle !== "function"
+    || signer.purpose !== CONTROL_BUNDLE_PURPOSE || signer.algorithm !== "ed25519"
+    || typeof signer.key_id !== "string" || !CONTROL_BUNDLE_KEY_ID.test(signer.key_id)
+    || typeof signer.issuer !== "string" || !CONTROL_BUNDLE_KEY_ID.test(signer.issuer)) {
+    throw apiError("bundle_signer_unavailable", 503, "Control bundle signer is unavailable");
+  }
+  let metadata;
+  try { metadata = await signer.publicKeyMetadata(); }
+  catch { throw apiError("bundle_signer_unavailable", 503, "Control bundle signer is unavailable"); }
+  try {
+    if (!metadata || typeof metadata !== "object" || Array.isArray(metadata)
+      || metadata.key_id !== signer.key_id || metadata.algorithm !== "ed25519") throw new Error("invalid metadata");
+    if (metadata.purpose !== undefined && metadata.purpose !== CONTROL_BUNDLE_PURPOSE) throw new Error("invalid metadata purpose");
+    if (typeof metadata.public_key === "string" && /PRIVATE\s+KEY/iu.test(metadata.public_key)) throw new Error("private metadata");
+    const key = metadata.public_key?.type === "public" ? metadata.public_key : crypto.createPublicKey(metadata.public_key);
+    if (key.type !== "public" || key.asymmetricKeyType !== "ed25519") throw new Error("invalid public key");
+    const publicKey = key.export({ type: "spki", format: "pem" }).toString();
+    if (metadata.public_key !== publicKey) throw new Error("non-canonical public key");
+    return Object.freeze({ key_id: signer.key_id, algorithm: "ed25519", public_key: publicKey });
+  } catch { throw apiError("bundle_signer_unavailable", 503, "Control bundle signer is unavailable"); }
+}
+
+async function signAndValidateControlBundle(signer, statement, { now, maxTtlMs, maxOfflineTtlMs, audience }) {
+  const metadata = await loadControlBundlePublicMetadata(signer);
+  if (!signer || typeof signer.signControlBundle !== "function") throw apiError("bundle_signer_unavailable", 503, "Control bundle signer is unavailable");
+  let bundle;
+  try { bundle = await signer.signControlBundle(statement); }
+  catch { throw apiError("bundle_signer_unavailable", 503, "Control bundle signing is unavailable"); }
+  try {
+    if (controlBundleStatementHash(bundle) !== controlBundleStatementHash(statement)) throw new Error("statement hash mismatch");
+    verifyControlBundle(bundle, {
+      public_key: metadata.public_key,
+      issuer: signer.issuer,
+      key_id: signer.key_id
+    }, { now, maxTtlMs, maxOfflineTtlMs, audience });
+    return bundle;
+  } catch { throw apiError("bundle_signer_unavailable", 503, "Control bundle signing is unavailable"); }
+}
+
+const CAPABILITY_SIGNER_PURPOSE = "agentpass.capability";
+
+function createCapabilityAuthoritySigner(value, legacyBundleSigner) {
+  if (value !== undefined) {
+    if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+    return Object.freeze({
+      signCapability: value.signCapability,
+      publicKeyMetadata: value.publicKeyMetadata,
+      purpose: value.purpose,
+      algorithm: value.algorithm,
+      key_id: value.key_id,
+      issuer: value.issuer
+    });
+  }
+  if (!legacyBundleSigner?.privateKey) return undefined;
+  const privateKey = legacyControlBundlePrivateKey(legacyBundleSigner.privateKey);
+  return Object.freeze({
+    purpose: CAPABILITY_SIGNER_PURPOSE,
+    algorithm: "ed25519",
+    key_id: legacyBundleSigner.keyId,
+    issuer: legacyBundleSigner.issuer,
+    async publicKeyMetadata() {
+      return {
+        purpose: CAPABILITY_SIGNER_PURPOSE,
+        key_id: legacyBundleSigner.keyId,
+        algorithm: "ed25519",
+        public_key: crypto.createPublicKey(privateKey).export({ type: "spki", format: "pem" }).toString()
+      };
+    },
+    async signCapability(statement) {
+      return {
+        ...statement,
+        signature: crypto.sign(null, Buffer.from(canonicalJson(statement), "utf8"), privateKey).toString("base64")
+      };
+    }
+  });
+}
+
+async function loadCapabilityPublicMetadata(signer) {
+  if (!signer || typeof signer.publicKeyMetadata !== "function" || typeof signer.signCapability !== "function"
+    || signer.purpose !== CAPABILITY_SIGNER_PURPOSE || signer.algorithm !== "ed25519"
+    || typeof signer.key_id !== "string" || !CONTROL_BUNDLE_KEY_ID.test(signer.key_id)
+    || typeof signer.issuer !== "string" || !CONTROL_BUNDLE_KEY_ID.test(signer.issuer)) {
+    throw apiError("capability_signer_unavailable", 503, "Capability signer is unavailable");
+  }
+  let metadata;
+  try { metadata = await signer.publicKeyMetadata(); }
+  catch { throw apiError("capability_signer_unavailable", 503, "Capability signer is unavailable"); }
+  try {
+    if (!metadata || typeof metadata !== "object" || Array.isArray(metadata)
+      || metadata.key_id !== signer.key_id || metadata.algorithm !== "ed25519"
+      || (metadata.purpose !== undefined && metadata.purpose !== CAPABILITY_SIGNER_PURPOSE)
+      || (typeof metadata.public_key === "string" && /PRIVATE\s+KEY/iu.test(metadata.public_key))) throw new Error("invalid metadata");
+    const key = metadata.public_key?.type === "public" ? metadata.public_key : crypto.createPublicKey(metadata.public_key);
+    if (key.type !== "public" || key.asymmetricKeyType !== "ed25519") throw new Error("invalid public key");
+    return key.export({ type: "spki", format: "pem" }).toString();
+  } catch { throw apiError("capability_signer_unavailable", 503, "Capability signer is unavailable"); }
+}
+
+async function signAndValidateCapability(signer, statement) {
+  const publicKey = await loadCapabilityPublicMetadata(signer);
+  let capability;
+  try { capability = await signer.signCapability(statement); }
+  catch { throw apiError("capability_signer_unavailable", 503, "Capability signing is unavailable"); }
+  try {
+    const { signature, ...returnedStatement } = capability ?? {};
+    if (canonicalJson(returnedStatement) !== canonicalJson(statement)) throw new Error("statement mismatch");
+    verifyCapability({ ...returnedStatement, signature }, {
+      public_key: publicKey,
+      issuer: signer.issuer,
+      key_id: signer.key_id
+    }, {
+      now: Date.parse(statement.not_before),
+      audience: statement.audience
+    });
+    return capability;
+  } catch { throw apiError("capability_signer_unavailable", 503, "Capability signing is unavailable"); }
 }
 
 function assertV2CandidateBinding(actual, expected) {
