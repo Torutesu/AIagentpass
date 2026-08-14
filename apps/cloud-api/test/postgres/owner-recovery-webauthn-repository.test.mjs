@@ -109,6 +109,17 @@ test("returns the same public result after response loss without invoking anothe
   assert.equal(client.calls.some(({ text }) => text.includes("SET status='consuming'")), false);
 });
 
+test("burn is claim-owner bound so a stale verifier cannot burn a reclaimed challenge", async () => {
+  const client = new ScriptedClient((text) => text.startsWith("UPDATE owner_recovery_webauthn_challenges")
+    ? { rows: [], rowCount: 0 }
+    : { rows: [], rowCount: 0 });
+  const repository = createPostgresOwnerRecoveryWebAuthnRepository({ client, now: () => NOW + 20_001 });
+  const burned = await repository.burn({ organization_id: ORG, challenge_id: CHALLENGE_ID, claim_started_at: new Date(NOW).toISOString() });
+  assert.equal(burned, false);
+  assert.match(client.calls[0].text, /consume_started_at=\$4/u);
+  assert.deepEqual(client.calls[0].params, [ORG, CHALLENGE_ID, new Date(NOW + 20_001).toISOString(), new Date(NOW).toISOString()]);
+});
+
 test("authentication consumes its activation authorization only after the authority mutation", async () => {
   const authentication = (overrides = {}) => registration({ ceremony: "authentication", operation: OWNER_RECOVERY_WEBAUTHN_OPERATIONS.authentication, credential_id: CREDENTIAL, ...overrides });
   const client = new ScriptedClient((text) => {

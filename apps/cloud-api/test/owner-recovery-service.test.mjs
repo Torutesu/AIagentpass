@@ -105,6 +105,14 @@ test("tenant substitution and repository outage fail closed without carrying pro
   await assert.rejects(() => outage.service.create({ actor: actor(), organization_id: ORG, subject_member_id: SUBJECT, idempotency_key: "create-1" }), (error) => error.code === OWNER_RECOVERY_ERROR_CODES.UNAVAILABLE && error.cause === undefined && !error.message.includes("password"));
 });
 
+test("idempotency key reuse is a distinct stable conflict", async () => {
+  const conflict = fixtures({ repository: { async createRecoveryRequest() { throw Object.assign(new Error("request payload secret"), { code: "idempotency_conflict" }); } } });
+  await assert.rejects(
+    () => conflict.service.create({ actor: actor(), organization_id: ORG, subject_member_id: SUBJECT, idempotency_key: "create-conflict" }),
+    (error) => error instanceof OwnerRecoveryError && error.code === OWNER_RECOVERY_ERROR_CODES.IDEMPOTENCY_CONFLICT && error.cause === undefined && !error.message.includes("secret")
+  );
+});
+
 test("exchange replay is stable and recovery sessions are digest-backed", async () => {
   const replay = fixtures({ repository: { async consumeRecoveryExchange() { throw Object.assign(new Error("raw exchange A"), { code: "exchange_replayed" }); } } });
   await assert.rejects(() => replay.service.exchange({ exchange_value: EXCHANGE }), (error) => error.code === OWNER_RECOVERY_ERROR_CODES.EXCHANGE_REPLAYED && error.cause === undefined && !error.message.includes(EXCHANGE));

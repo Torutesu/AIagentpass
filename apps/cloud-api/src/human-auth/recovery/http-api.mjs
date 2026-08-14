@@ -60,6 +60,7 @@ export const OWNER_RECOVERY_HTTP_ERROR_CODES = Object.freeze({
   FORBIDDEN: "owner_recovery_http_forbidden",
   NOT_FOUND: "owner_recovery_http_not_found",
   STALE_VERSION: "owner_recovery_http_stale_version",
+  IDEMPOTENCY_CONFLICT: "idempotency_key_reused",
   APPROVAL_REPLAYED: "owner_recovery_http_approval_replayed",
   THRESHOLD_UNAVAILABLE: "owner_recovery_http_threshold_unavailable",
   DELAY_NOT_ELAPSED: "owner_recovery_http_delay_not_elapsed",
@@ -88,6 +89,7 @@ const MESSAGES = Object.freeze({
   [HCODE.FORBIDDEN]: "The recovery operation is not allowed",
   [HCODE.NOT_FOUND]: "The recovery request was not found",
   [HCODE.STALE_VERSION]: "The recovery request was changed by another request",
+  [HCODE.IDEMPOTENCY_CONFLICT]: "The idempotency key was already used for another request",
   [HCODE.APPROVAL_REPLAYED]: "The recovery approval is no longer valid",
   [HCODE.THRESHOLD_UNAVAILABLE]: "The organization cannot satisfy the recovery threshold",
   [HCODE.DELAY_NOT_ELAPSED]: "The recovery delay has not elapsed",
@@ -109,6 +111,7 @@ const STATUS = Object.freeze({
   [HCODE.INVALID_REQUEST]: 400, [HCODE.METHOD_NOT_ALLOWED]: 405, [HCODE.ORIGIN_NOT_ALLOWED]: 403,
   [HCODE.SESSION_REQUIRED]: 401, [HCODE.CSRF_FAILED]: 403, [HCODE.RECOVERY_SESSION_REQUIRED]: 401,
   [HCODE.FORBIDDEN]: 403, [HCODE.NOT_FOUND]: 404, [HCODE.STALE_VERSION]: 409,
+  [HCODE.IDEMPOTENCY_CONFLICT]: 409,
   [HCODE.APPROVAL_REPLAYED]: 409, [HCODE.THRESHOLD_UNAVAILABLE]: 409, [HCODE.DELAY_NOT_ELAPSED]: 409,
   [HCODE.EXCHANGE_INVALID]: 401, [HCODE.EXCHANGE_REPLAYED]: 409, [HCODE.REGISTRATION_INVALID]: 422,
   [HCODE.CREDENTIAL_EXISTS]: 409, [HCODE.ACTIVATION_INVALID]: 422, [HCODE.ACTIVATION_REPLAYED]: 409,
@@ -148,7 +151,7 @@ export function createOwnerRecoveryHttpApi({
   if (!recentAuthService || typeof recentAuthService.authorize !== "function") throw new TypeError("recentAuthService must expose authorize()");
   const injected = recoveryService ?? service;
   assertService(injected);
-  if (abuseControls !== undefined && typeof abuseControls?.check !== "function") throw new TypeError("abuseControls must expose check()");
+  if (abuseControls !== undefined && (typeof abuseControls?.check !== "function" || typeof abuseControls?.checkAnonymous !== "function")) throw new TypeError("abuseControls must expose check() and checkAnonymous()");
   const expectedOrigin = origin ?? humanSession.expectedOrigin;
   assertOrigin(expectedOrigin);
   if (typeof now !== "function") throw new TypeError("now must be a function");
@@ -193,8 +196,7 @@ export function createOwnerRecoveryHttpApi({
       if (route.name === "exchange") {
         const body = await readJsonBody(request, maxBodyBytes);
         const exchange = parseExchangeBody(body);
-        const principal = anonymousExchangePrincipal(exchange.exchange);
-        await checkAbuse(route.operation, principal, principal.organization_id);
+        await checkAnonymousAbuse(route.operation, anonymousExchangePrincipal(exchange.exchange));
         const exchanged = await callService(injected, "exchange", exchange);
         const token = exchanged?.recovery_session_token;
         if (typeof token !== "string" || !OPAQUE.test(token) || !plainObject(exchanged?.recovery_session)) throw new OwnerRecoveryHttpError(HCODE.EXCHANGE_INVALID);
@@ -275,21 +277,28 @@ export function createOwnerRecoveryHttpApi({
     }
   }
 
+  async function checkAnonymousAbuse(operation, principalId, cost = 1) {
+    if (abuseControls === undefined) return;
+    try {
+      await abuseControls.checkAnonymous({ operation, principalId, cost });
+    } catch (error) {
+      if (error instanceof HumanAuthAbuseControlError) throw error;
+      throw new HumanAuthAbuseControlError(HUMAN_AUTH_ABUSE_ERROR_CODES.CONTROL_UNAVAILABLE, { cause: error });
+    }
+  }
+
   return Object.freeze({ handle, paths: OWNER_RECOVERY_HTTP_PATHS, expectedOrigin, basePath: normalizedBasePath });
 }
 
 function anonymousExchangePrincipal(exchange) {
   // Exchange values have 256 bits of entropy. Derive unlinkable UUID-shaped
-  // bucket IDs so an unauthenticated caller cannot exhaust one process-wide
-  // recovery bucket, while the raw exchange value never leaves this boundary.
-  const derive = (scope) => {
-    const bytes = crypto.createHash("sha256").update(`agentpass:recovery-exchange:v1:${scope}:`, "utf8").update(exchange, "utf8").digest().subarray(0, 16);
-    bytes[6] = (bytes[6] & 0x0f) | 0x40;
-    bytes[8] = (bytes[8] & 0x3f) | 0x80;
-    const hex = bytes.toString("hex");
-    return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
-  };
-  return Object.freeze({ session_id: derive("session"), member_id: derive("member"), organization_id: derive("organization"), role: "anonymous" });
+  // bucket ID. Admission control combines it with a global bucket while the
+  // raw exchange value never leaves this boundary.
+  const bytes = crypto.createHash("sha256").update("agentpass:recovery-exchange:v2:", "utf8").update(exchange, "utf8").digest().subarray(0, 16);
+  bytes[6] = (bytes[6] & 0x0f) | 0x40;
+  bytes[8] = (bytes[8] & 0x3f) | 0x80;
+  const hex = bytes.toString("hex");
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
 }
 
 function assertService(service) {
@@ -306,13 +315,14 @@ function mapServiceError(error) {
   const code = String(error?.code ?? error?.reason ?? error?.name ?? "").toLowerCase();
   const mappings = new Map([
     [OWNER_RECOVERY_ERROR_CODES.INVALID_REQUEST, HCODE.INVALID_REQUEST], [OWNER_RECOVERY_ERROR_CODES.FORBIDDEN, HCODE.FORBIDDEN], [OWNER_RECOVERY_ERROR_CODES.NOT_FOUND, HCODE.NOT_FOUND],
-    [OWNER_RECOVERY_ERROR_CODES.VERSION_CONFLICT, HCODE.STALE_VERSION], [OWNER_RECOVERY_ERROR_CODES.APPROVAL_REPLAYED, HCODE.APPROVAL_REPLAYED], [OWNER_RECOVERY_ERROR_CODES.THRESHOLD_UNAVAILABLE, HCODE.THRESHOLD_UNAVAILABLE],
+    [OWNER_RECOVERY_ERROR_CODES.VERSION_CONFLICT, HCODE.STALE_VERSION], [OWNER_RECOVERY_ERROR_CODES.IDEMPOTENCY_CONFLICT, HCODE.IDEMPOTENCY_CONFLICT], [OWNER_RECOVERY_ERROR_CODES.APPROVAL_REPLAYED, HCODE.APPROVAL_REPLAYED], [OWNER_RECOVERY_ERROR_CODES.THRESHOLD_UNAVAILABLE, HCODE.THRESHOLD_UNAVAILABLE],
     [OWNER_RECOVERY_ERROR_CODES.DELAY_NOT_ELAPSED, HCODE.DELAY_NOT_ELAPSED], [OWNER_RECOVERY_ERROR_CODES.EXCHANGE_INVALID, HCODE.EXCHANGE_INVALID], [OWNER_RECOVERY_ERROR_CODES.EXCHANGE_REPLAYED, HCODE.EXCHANGE_REPLAYED],
     [OWNER_RECOVERY_ERROR_CODES.SESSION_REQUIRED, HCODE.RECOVERY_SESSION_REQUIRED], [OWNER_RECOVERY_ERROR_CODES.SESSION_REPLAYED, HCODE.RECOVERY_SESSION_REQUIRED], [OWNER_RECOVERY_ERROR_CODES.REGISTRATION_INVALID, HCODE.REGISTRATION_INVALID],
     [OWNER_RECOVERY_ERROR_CODES.CREDENTIAL_EXISTS, HCODE.CREDENTIAL_EXISTS], [OWNER_RECOVERY_ERROR_CODES.ACTIVATION_INVALID, HCODE.ACTIVATION_INVALID], [OWNER_RECOVERY_ERROR_CODES.ACTIVATION_REPLAYED, HCODE.ACTIVATION_REPLAYED],
     [OWNER_RECOVERY_ERROR_CODES.UNAVAILABLE, HCODE.RECOVERY_UNAVAILABLE]
   ]);
   if (mappings.has(code)) return new OwnerRecoveryHttpError(mappings.get(code), { cause: error });
+  if ([OWNER_RECOVERY_ERROR_CODES.IDEMPOTENCY_CONFLICT, "idempotency_conflict", "idempotency_key_reused", "err_idempotency_conflict"].includes(code)) return new OwnerRecoveryHttpError(HCODE.IDEMPOTENCY_CONFLICT, { cause: error });
   if (["stale_version", "version_conflict", "expected_version_mismatch"].includes(code)) return new OwnerRecoveryHttpError(HCODE.STALE_VERSION, { cause: error });
   if (["not_found", "request_not_found", "tenant_not_found"].includes(code)) return new OwnerRecoveryHttpError(HCODE.NOT_FOUND, { cause: error });
   if (["forbidden", "owner_required", "wrong_member", "wrong_organization"].includes(code)) return new OwnerRecoveryHttpError(HCODE.FORBIDDEN, { cause: error });

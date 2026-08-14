@@ -1,6 +1,7 @@
 import crypto from "node:crypto";
 
 import { createPostgresAdminAuditRepository } from "./admin-audit-repository.mjs";
+import { createPostgresOwnerRecoveryIdempotencyRepository, sha256Digest } from "./owner-recovery-idempotency-repository.mjs";
 import { withTransaction } from "./repository.mjs";
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu;
@@ -67,6 +68,7 @@ export const OWNER_RECOVERY_ERROR_CODES = Object.freeze({
   NOT_READY: "not_ready",
   INELIGIBLE: "ineligible",
   AUTHORIZATION_REQUIRED: "authorization_required",
+  IDEMPOTENCY_CONFLICT: "idempotency_conflict",
   EXCHANGE_REPLAYED: "exchange_replayed",
   AUDIT_UNAVAILABLE: "audit_unavailable",
   UNAVAILABLE: "unavailable"
@@ -83,6 +85,7 @@ const PUBLIC_MESSAGES = Object.freeze({
   not_ready: "Owner recovery request is not ready",
   ineligible: "Owner recovery owner threshold is not satisfied",
   authorization_required: "Owner recovery authorization is unavailable",
+  idempotency_conflict: "Owner recovery idempotency key conflicts with another request",
   exchange_replayed: "Owner recovery exchange is no longer valid",
   audit_unavailable: "Owner recovery audit durability is unavailable",
   unavailable: "Owner recovery storage is unavailable"
@@ -127,6 +130,7 @@ export function createPostgresOwnerRecoveryRepository({
   idleTtlMs = DEFAULTS.idleTtlMs,
   authorizationWindowMs = DEFAULTS.authorizationWindowMs,
   auditRepository = undefined,
+  idempotencyRepository = undefined,
   appendActivationAudit = undefined,
   verifyActivationAuthorization = undefined
 } = {}) {
@@ -141,8 +145,12 @@ export function createPostgresOwnerRecoveryRepository({
     idleTtlMs: duration(idleTtlMs, "idleTtlMs"),
     authorizationWindowMs: duration(authorizationWindowMs, "authorizationWindowMs")
   });
+  function nowDate() { return date(clock(), "clock"); }
+  function nowIso() { return nowDate().toISOString(); }
 
   const audit = auditRepository ?? createPostgresAdminAuditRepository({ client, now: () => nowIso() });
+  const idempotency = idempotencyRepository ?? createPostgresOwnerRecoveryIdempotencyRepository({ client, now: () => nowDate(), randomBytes });
+  if (!idempotency || typeof idempotency.claimInTransaction !== "function" || typeof idempotency.completeInTransaction !== "function") throw new TypeError("owner recovery idempotency repository is invalid");
   const auditAppender = appendActivationAudit ?? (typeof audit?.appendAdminAuditEventInTransaction === "function"
     ? (input) => audit.appendAdminAuditEventInTransaction(input)
     : undefined);
@@ -184,7 +192,8 @@ export function createPostgresOwnerRecoveryRepository({
       creator_session_id: input.creator_session_id ?? input.actor?.session_id,
       threshold: input.threshold,
       created_at: input.created_at,
-      expires_at: input.expires_at
+      expires_at: input.expires_at,
+      idempotency_key: input.idempotency_key
     });
   }
 
@@ -201,7 +210,8 @@ export function createPostgresOwnerRecoveryRepository({
       owner_session_id: input.owner_session_id ?? input.actor?.session_id,
       authorization_id: authorization?.authorization_id,
       authorized_at: authorization?.authenticated_at,
-      expected_version: input.expected_version
+      expected_version: input.expected_version,
+      idempotency_key: input.idempotency_key
     });
   }
 
@@ -212,7 +222,8 @@ export function createPostgresOwnerRecoveryRepository({
       actor_member_id: input.owner_member_id ?? input.actor?.member_id,
       actor_session_id: input.owner_session_id ?? input.actor?.session_id,
       expected_version: input.expected_version,
-      reason: "cancelled_by_owner"
+      reason: "cancelled_by_owner",
+      idempotency_key: input.idempotency_key
     });
   }
 
@@ -220,6 +231,20 @@ export function createPostgresOwnerRecoveryRepository({
     const values = normalizeCreateInput(input);
     return mutate("create_request", async (tx) => {
       await lockOrganization(tx, values.organizationId);
+      const replay = await claimIdempotency(tx, {
+        organizationId: values.organizationId,
+        operation: "human.recovery.create",
+        principalId: values.creatorMemberId,
+        idempotencyKey: values.idempotencyKey,
+        identity: {
+          organization_id: values.organizationId,
+          subject_member_id: values.subjectMemberId,
+          creator_member_id: values.creatorMemberId,
+          creator_session_id: values.creatorSessionId,
+          threshold: values.threshold
+        }
+      });
+      if (replay.replayed) return replay.response;
       const membershipIds = uniqueSorted([values.subjectMemberId, values.creatorMemberId]);
       const memberships = await lockMemberships(tx, values.organizationId, membershipIds);
       const subject = membershipFor(memberships, values.subjectMemberId);
@@ -251,7 +276,9 @@ export function createPostgresOwnerRecoveryRepository({
         subjectMemberId: values.subjectMemberId,
         eventType: "recovery.request.created"
       });
-      return Object.freeze({ request: publicRequest(request), replayed: false });
+      const response = Object.freeze({ request: publicRequest(request), replayed: false });
+      await completeIdempotency(tx, replay, 201, response);
+      return response;
     });
   }
 
@@ -276,6 +303,21 @@ export function createPostgresOwnerRecoveryRepository({
     const values = normalizeApproveInput(input);
     return mutate("approve_owner", async (tx) => {
       await lockOrganization(tx, values.organizationId);
+      const replay = await claimIdempotency(tx, {
+        organizationId: values.organizationId,
+        operation: "human.recovery.approve",
+        principalId: values.ownerMemberId,
+        idempotencyKey: values.idempotencyKey,
+        identity: {
+          organization_id: values.organizationId,
+          request_id: values.requestId,
+          owner_member_id: values.ownerMemberId,
+          owner_session_id: values.ownerSessionId,
+          authorization_id: values.authorizationId,
+          expected_version: values.expectedVersion
+        }
+      });
+      if (replay.replayed) return replay.response;
       const request = await lockRequest(tx, values.organizationId, values.requestId);
       const approvalIds = await approvalOwnerIds(tx, values.organizationId, values.requestId);
       const membershipIds = uniqueSorted([request.subject_member_id, values.ownerMemberId, ...approvalIds]);
@@ -290,7 +332,9 @@ export function createPostgresOwnerRecoveryRepository({
       const approvals = await lockApprovals(tx, values.organizationId, values.requestId);
       const prior = approvals.find((approval) => approval.owner_member_id === values.ownerMemberId);
       if (prior && prior.invalidated_at === null && prior.authorization_id === values.authorizationId) {
-        return Object.freeze({ request: publicRequest(request), approval: publicApproval(prior), replayed: true });
+        const response = Object.freeze({ request: publicRequest(request), approval: publicApproval(prior), replayed: true });
+        await completeIdempotency(tx, replay, 200, response);
+        return response;
       }
       if (prior) throw failure("conflict");
       if (!LIVE_REQUEST_STATES.has(request.state) || request.state !== "pending") throw failure(request.state === "expired" ? "expired" : "conflict");
@@ -370,7 +414,9 @@ export function createPostgresOwnerRecoveryRepository({
         eventType: "recovery.delay.started",
         eventKey: String(next.version)
       });
-      return Object.freeze({ request: publicRequest(next), approval: publicApproval(approval), replayed: false });
+      const response = Object.freeze({ request: publicRequest(next), approval: publicApproval(approval), replayed: false });
+      await completeIdempotency(tx, replay, 200, response);
+      return response;
     });
   }
 
@@ -378,8 +424,27 @@ export function createPostgresOwnerRecoveryRepository({
     const values = normalizeCancelInput(input);
     return mutate("cancel_request", async (tx) => {
       await lockOrganization(tx, values.organizationId);
+      const replay = await claimIdempotency(tx, {
+        organizationId: values.organizationId,
+        operation: "human.recovery.cancel",
+        principalId: values.actorMemberId,
+        idempotencyKey: values.idempotencyKey,
+        identity: {
+          organization_id: values.organizationId,
+          request_id: values.requestId,
+          actor_member_id: values.actorMemberId,
+          actor_session_id: values.actorSessionId,
+          expected_version: values.expectedVersion,
+          reason: values.reason
+        }
+      });
+      if (replay.replayed) return replay.response;
       const request = await lockRequest(tx, values.organizationId, values.requestId);
-      if (request.state === "cancelled") return Object.freeze({ request: publicRequest(request), replayed: true });
+      if (request.state === "cancelled") {
+        const response = Object.freeze({ request: publicRequest(request), replayed: true });
+        await completeIdempotency(tx, replay, 200, response);
+        return response;
+      }
       if (!LIVE_REQUEST_STATES.has(request.state)) throw failure(request.state === "expired" ? "expired" : "conflict");
       requireExpectedVersion(request, values.expectedVersion);
       if (request.expires_at <= values.now) throw failure("expired");
@@ -410,7 +475,9 @@ export function createPostgresOwnerRecoveryRepository({
         subjectMemberId: request.subject_member_id,
         eventType: "recovery.cancelled"
       });
-      return Object.freeze({ request: publicRequest(next), replayed: false });
+      const response = Object.freeze({ request: publicRequest(next), replayed: false });
+      await completeIdempotency(tx, replay, 200, response);
+      return response;
     });
   }
 
@@ -998,7 +1065,7 @@ export function createPostgresOwnerRecoveryRepository({
 
   function normalizeCreateInput(input) {
     assertObject(input);
-    assertKeys(input, ["organization_id", "organizationId", "request_id", "requestId", "subject_member_id", "subjectMemberId", "creator_member_id", "creatorMemberId", "creator_session_id", "creatorSessionId", "threshold", "expires_at", "expiresAt", "created_at", "createdAt"]);
+    assertKeys(input, ["organization_id", "organizationId", "request_id", "requestId", "subject_member_id", "subjectMemberId", "creator_member_id", "creatorMemberId", "creator_session_id", "creatorSessionId", "threshold", "expires_at", "expiresAt", "created_at", "createdAt", "idempotency_key", "idempotencyKey"]);
     const organizationId = uuid(input.organization_id ?? input.organizationId, "organization_id");
     const requestId = optionalUuid(input.request_id ?? input.requestId, "request_id") ?? newUuid(randomUUID);
     const subjectMemberId = uuid(input.subject_member_id ?? input.subjectMemberId, "subject_member_id");
@@ -1008,7 +1075,7 @@ export function createPostgresOwnerRecoveryRepository({
     const createdAt = input.created_at === undefined && input.createdAt === undefined ? nowDate() : date(input.created_at ?? input.createdAt, "created_at");
     const expiresAt = input.expires_at === undefined && input.expiresAt === undefined ? new Date(createdAt.getTime() + limits.requestTtlMs) : date(input.expires_at ?? input.expiresAt, "expires_at");
     if (expiresAt <= createdAt) throw failure("invalid_input");
-    return Object.freeze({ organizationId, requestId, subjectMemberId, creatorMemberId, creatorSessionId, threshold, createdAt, expiresAt });
+    return Object.freeze({ organizationId, requestId, subjectMemberId, creatorMemberId, creatorSessionId, threshold, createdAt, expiresAt, idempotencyKey: requiredIdempotencyKey(input.idempotency_key ?? input.idempotencyKey) });
   }
 
   function normalizeRequestLookup(input) {
@@ -1028,7 +1095,7 @@ export function createPostgresOwnerRecoveryRepository({
 
   function normalizeApproveInput(input) {
     assertObject(input);
-    assertKeys(input, ["organization_id", "organizationId", "request_id", "requestId", "owner_member_id", "ownerMemberId", "owner_session_id", "ownerSessionId", "authorization_id", "authorizationId", "authorized_at", "authorizedAt", "expected_version", "expectedVersion"]);
+    assertKeys(input, ["organization_id", "organizationId", "request_id", "requestId", "owner_member_id", "ownerMemberId", "owner_session_id", "ownerSessionId", "authorization_id", "authorizationId", "authorized_at", "authorizedAt", "expected_version", "expectedVersion", "idempotency_key", "idempotencyKey"]);
     return Object.freeze({
       organizationId: uuid(input.organization_id ?? input.organizationId, "organization_id"),
       requestId: uuid(input.request_id ?? input.requestId, "request_id"),
@@ -1037,13 +1104,14 @@ export function createPostgresOwnerRecoveryRepository({
       authorizationId: uuid(input.authorization_id ?? input.authorizationId, "authorization_id"),
       authorizedAt: input.authorized_at === undefined && input.authorizedAt === undefined ? undefined : date(input.authorized_at ?? input.authorizedAt, "authorized_at"),
       expectedVersion: positiveInteger(input.expected_version ?? input.expectedVersion),
-      now: nowDate()
+      now: nowDate(),
+      idempotencyKey: requiredIdempotencyKey(input.idempotency_key ?? input.idempotencyKey)
     });
   }
 
   function normalizeCancelInput(input) {
     assertObject(input);
-    assertKeys(input, ["organization_id", "organizationId", "request_id", "requestId", "actor_member_id", "actorMemberId", "actor_session_id", "actorSessionId", "reason", "expected_version", "expectedVersion"]);
+    assertKeys(input, ["organization_id", "organizationId", "request_id", "requestId", "actor_member_id", "actorMemberId", "actor_session_id", "actorSessionId", "reason", "expected_version", "expectedVersion", "idempotency_key", "idempotencyKey"]);
     return Object.freeze({
       organizationId: uuid(input.organization_id ?? input.organizationId, "organization_id"),
       requestId: uuid(input.request_id ?? input.requestId, "request_id"),
@@ -1051,7 +1119,8 @@ export function createPostgresOwnerRecoveryRepository({
       actorSessionId: uuid(input.actor_session_id ?? input.actorSessionId, "actor_session_id"),
       reason: safeText(input.reason ?? "cancelled_by_owner", "reason", 128),
       expectedVersion: positiveInteger(input.expected_version ?? input.expectedVersion),
-      now: nowDate()
+      now: nowDate(),
+      idempotencyKey: requiredIdempotencyKey(input.idempotency_key ?? input.idempotencyKey)
     });
   }
 
@@ -1100,6 +1169,42 @@ export function createPostgresOwnerRecoveryRepository({
     assertObject(input);
     assertKeys(input, ["organization_id", "organizationId", "limit"]);
     return Object.freeze({ organizationId: uuid(input.organization_id ?? input.organizationId, "organization_id"), limit: boundedInteger(input.limit ?? 100, 1, 1000), now: nowDate() });
+  }
+
+  async function claimIdempotency(tx, { organizationId, operation, principalId, idempotencyKey, identity }) {
+    const requestDigest = sha256Digest(stableCanonicalize({ version: 1, operation, identity }));
+    const result = await idempotency.claimInTransaction({
+      tx,
+      organization_id: organizationId,
+      operation,
+      principal_id: principalId,
+      idempotency_key: idempotencyKey,
+      request_digest: requestDigest
+    });
+    if (result?.state === "conflict") throw failure("idempotency_conflict");
+    if (result?.state === "in_progress") throw failure("unavailable");
+    if (result?.state === "replay") {
+      if (!result.response_body || typeof result.response_body !== "object" || Array.isArray(result.response_body)) throw failure("unavailable");
+      return Object.freeze({ replayed: true, response: Object.freeze({ ...result.response_body, replayed: true }) });
+    }
+    if (result?.state !== "claimed" || typeof result.owner_token !== "string") throw failure("unavailable");
+    return Object.freeze({ replayed: false, organizationId, operation, principalId, idempotencyKey, requestDigest, ownerToken: result.owner_token });
+  }
+
+  async function completeIdempotency(tx, claim, responseStatus, response) {
+    if (claim.replayed) throw failure("unavailable");
+    const completed = await idempotency.completeInTransaction({
+      tx,
+      organization_id: claim.organizationId,
+      operation: claim.operation,
+      principal_id: claim.principalId,
+      idempotency_key: claim.idempotencyKey,
+      request_digest: claim.requestDigest,
+      owner_token: claim.ownerToken,
+      response_status: responseStatus,
+      response_body: response
+    });
+    if (completed?.state !== "completed") throw failure("unavailable");
   }
 
   async function mutate(operation, callback) {
@@ -1376,8 +1481,6 @@ function date(value, label) { const parsed = value instanceof Date ? new Date(va
 function optionalDate(value) { return value === undefined || value === null ? null : date(value, "timestamp"); }
 function timestamp(value) { return date(value, "timestamp").toISOString(); }
 function optionalTimestamp(value) { return value === null || value === undefined ? null : timestamp(value); }
-function nowDate() { return date(clock(), "clock"); }
-function nowIso() { return nowDate().toISOString(); }
 function safeText(value, label, max) { if (typeof value !== "string" || value.length < 1 || value.length > max || CONTROL.test(value)) throw failure("invalid_input"); return value; }
 function assertObject(value) { if (!value || typeof value !== "object" || Array.isArray(value) || Object.getPrototypeOf(value) !== Object.prototype) throw failure("invalid_input"); }
 function assertKeys(input, keys) { const allowed = new Set(keys); if (Object.keys(input).some((key) => !allowed.has(key))) throw failure("invalid_input"); }
@@ -1394,6 +1497,16 @@ function randomToken(generator) { const value = generator(TOKEN_BYTES); if (!Buf
 function sha256(value) { return crypto.createHash("sha256").update(value).digest(); }
 function bytes(value, length) { const result = Buffer.isBuffer(value) ? Buffer.from(value) : typeof value === "string" && HEX.test(value) ? Buffer.from(value, "hex") : null; if (!result || result.length !== length) throw failure("unavailable"); return result; }
 function deterministicUuid(...parts) { const value = crypto.createHash("sha256").update("AgentPass-Owner-Recovery-v1\0").update(parts.join("\0"), "utf8").digest().subarray(0, 16); value[6] = (value[6] & 0x0f) | 0x50; value[8] = (value[8] & 0x3f) | 0x80; const hex = value.toString("hex"); return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`; }
+function stableCanonicalize(value) {
+  if (value === null || typeof value === "string" || typeof value === "boolean") return JSON.stringify(value);
+  if (typeof value === "number" && Number.isFinite(value)) return JSON.stringify(value);
+  if (Array.isArray(value)) return `[${value.map(stableCanonicalize).join(",")}]`;
+  if (!value || typeof value !== "object" || Object.getPrototypeOf(value) !== Object.prototype) throw failure("invalid_input");
+  const keys = Object.keys(value).sort();
+  if (keys.some((key) => value[key] === undefined)) throw failure("invalid_input");
+  return `{${keys.map((key) => `${JSON.stringify(key)}:${stableCanonicalize(value[key])}`).join(",")}}`;
+}
+function requiredIdempotencyKey(value) { if (typeof value !== "string" || !/^[A-Za-z0-9._~-]{8,255}$/u.test(value)) throw failure("invalid_input"); return value; }
 function failure(code, cause = undefined) { return new OwnerRecoveryRepositoryError(code, cause); }
 function assertClient(client) { if (!client || typeof client.query !== "function") throw new TypeError("database client must provide query(text, params)"); }
 

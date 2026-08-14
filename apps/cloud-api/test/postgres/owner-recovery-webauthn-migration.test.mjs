@@ -8,8 +8,7 @@ const migrationUrl = new URL("../../../../contracts/postgres/0026_owner_recovery
 
 test("0026 is contiguous and binds WebAuthn only to restricted recovery sessions", async () => {
   const migrations = await loadSqlMigrations(defaultContractDirectory());
-  assert.equal(migrations.at(-1)?.version, 26);
-  assert.equal(migrations.at(-1)?.name, "0026_owner_recovery_webauthn.sql");
+  assert.equal(migrations.find((migration) => migration.version === 26)?.name, "0026_owner_recovery_webauthn.sql");
   const sql = await readFile(migrationUrl, "utf8");
   assert.match(sql.trim(), /^BEGIN;[\s\S]*COMMIT;$/u);
   assert.match(sql, /FOREIGN KEY \(organization_id, recovery_session_id\)[\s\S]*REFERENCES owner_recovery_sessions/u);

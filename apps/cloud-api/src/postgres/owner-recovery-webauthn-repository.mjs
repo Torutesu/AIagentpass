@@ -165,11 +165,13 @@ export function createPostgresOwnerRecoveryWebAuthnRepository({
   async function burn(input = {}) {
     const organizationId = uuid(input.organization_id ?? input.organizationId, "organization_id");
     const challengeId = uuid(input.challenge_id ?? input.challengeId, "challenge_id");
+    const claimStartedAt = timestamp(input.claim_started_at ?? input.claimStartedAt, "claim_started_at");
     const failedAt = clock(now);
     const result = await client.query(`UPDATE owner_recovery_webauthn_challenges
       SET status='failed',consumed_at=$3,failed_at=$3
       WHERE organization_id=$1 AND challenge_id=$2 AND status='consuming'
-      RETURNING challenge_id`, [organizationId, challengeId, iso(failedAt)]);
+        AND consume_started_at=$4
+      RETURNING challenge_id`, [organizationId, challengeId, iso(failedAt), iso(claimStartedAt)]);
     return rowCount(result) === 1;
   }
 

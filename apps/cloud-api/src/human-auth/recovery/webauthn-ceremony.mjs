@@ -79,7 +79,7 @@ export function createOwnerRecoveryWebAuthnCeremony({
       });
       return Object.freeze({ ...completion, mutation: completion.mutation?.mutation ?? completion.mutation });
     } catch (error) {
-      if (claim?.claim_started_at) await safeBurn(coordinator, context.organization_id, challengeId);
+      if (claim?.claim_started_at) await safeBurn(coordinator, context.organization_id, challengeId, claim.claim_started_at);
       throw stable(error);
     }
   }
@@ -148,7 +148,7 @@ export function createOwnerRecoveryWebAuthnCeremony({
         mutation: completion.mutation?.mutation ?? completion.mutation
       });
     } catch (error) {
-      if (claim?.claim_started_at) await safeBurn(coordinator, context.organization_id, challengeId);
+      if (claim?.claim_started_at) await safeBurn(coordinator, context.organization_id, challengeId, claim.claim_started_at);
       throw stable(error);
     }
   }
@@ -198,6 +198,6 @@ function uuid(value,label) { if(typeof value!=="string"||!/^[0-9a-f]{8}-[0-9a-f]
 function exactOrigin(value) { let parsed; try { parsed=new URL(value); } catch { throw failure("owner_recovery_webauthn_invalid_origin"); } if(parsed.protocol!=="https:"||parsed.origin!==value||parsed.pathname!=="/"||parsed.username||parsed.password) throw failure("owner_recovery_webauthn_invalid_origin"); return value; }
 function requiredText(value,max,label) { if(typeof value!=="string"||value.length<1||value.length>max||/[\u0000-\u001f\u007f]/u.test(value)) throw failure(`owner_recovery_webauthn_invalid_${label}`); return value; }
 function requireMethods(value,names,label) { if(!value||names.some(name=>typeof value[name]!=="function")) throw new TypeError(`${label} is invalid`); }
-async function safeBurn(coordinator,organizationId,challengeId) { try { await coordinator.burn({ organization_id: organizationId, challenge_id: challengeId }); } catch { /* Preserve stable ceremony error. */ } }
+async function safeBurn(coordinator,organizationId,challengeId,claimStartedAt) { try { await coordinator.burn({ organization_id: organizationId, challenge_id: challengeId, claim_started_at: claimStartedAt }); } catch { /* Preserve stable ceremony error. */ } }
 function failure(code) { return new OwnerRecoveryWebAuthnCeremonyError(code); }
 function stable(error) { return error instanceof OwnerRecoveryWebAuthnCeremonyError ? error : failure(typeof error?.code==="string" ? error.code : "owner_recovery_webauthn_unavailable"); }

@@ -9,6 +9,7 @@ const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-
 const MAX_RETRY_AFTER_MS = 60_000;
 const MAX_RETRY_AFTER_SECONDS = Math.ceil(MAX_RETRY_AFTER_MS / 1_000);
 const DEFAULT_IDLE_TTL_MS = 15 * 60_000;
+const ANONYMOUS_GLOBAL_CAPACITY_MULTIPLIER = 64;
 
 export const HUMAN_AUTH_ABUSE_ERROR_CODES = Object.freeze({
   RATE_LIMITED: "human_auth_rate_limited",
@@ -153,8 +154,55 @@ export function createHumanAuthAbuseControls({ repository, metrics, policies = {
     return Object.freeze({ allowed: true, operation, limit: policy.capacity });
   }
 
+  async function checkAnonymous({ operation, principalId, cost = 1 } = {}) {
+    if (operation !== HUMAN_AUTH_RATE_LIMIT_OPERATIONS.recoveryExchange) throw new TypeError("Anonymous rate-limit operation is invalid");
+    recordRecoveryOperation(metrics, operation);
+    const normalizedPrincipalId = normalizeUuid(principalId, "principalId");
+    const policy = mergedPolicies[operation];
+    if (typeof repository.acquireAnonymousRateLimit !== "function") {
+      recordHumanAuthMetric(metrics, HUMAN_AUTH_ABUSE_METRIC_KEYS.controlUnavailable);
+      throw new HumanAuthAbuseControlError(HUMAN_AUTH_ABUSE_ERROR_CODES.CONTROL_UNAVAILABLE);
+    }
+    if (!Number.isSafeInteger(cost) || cost < 1 || cost > policy.capacity) throw new TypeError("rate-limit cost is invalid");
+    const globalCapacity = Math.min(1_000_000, policy.capacity * ANONYMOUS_GLOBAL_CAPACITY_MULTIPLIER);
+    const globalRefill = Math.min(1_000_000, policy.refillPerSecond * ANONYMOUS_GLOBAL_CAPACITY_MULTIPLIER);
+    try {
+      // The global gate is intentionally first. During a spray it prevents
+      // attacker-controlled exchange digests from creating unbounded rows.
+      const global = normalizeDecision(await repository.acquireAnonymousRateLimit({
+        operation,
+        principalId: deriveBucketId("anonymous-global", "global", operation),
+        capacity: globalCapacity,
+        refillPerSecond: globalRefill,
+        cost,
+        idleTtlMs
+      }), globalCapacity);
+      if (!global.allowed) return deny(global);
+      const principal = normalizeDecision(await repository.acquireAnonymousRateLimit({
+        operation,
+        principalId: normalizedPrincipalId,
+        capacity: policy.capacity,
+        refillPerSecond: policy.refillPerSecond,
+        cost,
+        idleTtlMs
+      }), policy.capacity);
+      if (!principal.allowed) return deny(principal);
+    } catch (error) {
+      if (error instanceof HumanAuthAbuseControlError) throw error;
+      recordHumanAuthMetric(metrics, HUMAN_AUTH_ABUSE_METRIC_KEYS.controlUnavailable);
+      throw new HumanAuthAbuseControlError(HUMAN_AUTH_ABUSE_ERROR_CODES.CONTROL_UNAVAILABLE, { cause: error });
+    }
+    return Object.freeze({ allowed: true, operation, limit: policy.capacity });
+
+    function deny(decision) {
+      recordHumanAuthMetric(metrics, HUMAN_AUTH_ABUSE_METRIC_KEYS.rateLimitDenial);
+      throw new HumanAuthAbuseControlError(HUMAN_AUTH_ABUSE_ERROR_CODES.RATE_LIMITED, { retryAfterSeconds: decision.retryAfterSeconds });
+    }
+  }
+
   return Object.freeze({
     check,
+    checkAnonymous,
     // `authorize` is the existing public name. Keep it as a strict alias so
     // old human-auth routes and new recovery routes share identical fail-
     // closed semantics and bucket derivation.

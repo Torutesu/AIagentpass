@@ -149,3 +149,41 @@ test("recovery operation counters are fixed-key and limiter outages remain fail-
   ]);
   await assert.rejects(() => controls.check({ operation: "human.recovery.activate?organization_id=secret", session }), TypeError);
 });
+
+test("anonymous recovery exchange uses global then digest buckets without a tenant identifier", async () => {
+  const calls = [];
+  const controls = createHumanAuthAbuseControls({
+    repository: {
+      async acquireRateLimit() { throw new Error("tenant limiter must not be used"); },
+      async acquireAnonymousRateLimit(input) {
+        calls.push(input);
+        return { allowed: true, limit: input.capacity, remaining: input.capacity - 1, retryAfterMs: 0 };
+      }
+    }
+  });
+  const principalId = "44444444-4444-4444-8444-444444444444";
+  const result = await controls.checkAnonymous({ operation: HUMAN_AUTH_RATE_LIMIT_OPERATIONS.recoveryExchange, principalId });
+  assert.equal(result.allowed, true);
+  assert.equal(calls.length, 2);
+  assert.equal(calls[1].principalId, principalId);
+  assert.equal(calls.every((call) => !Object.hasOwn(call, "organizationId")), true);
+  assert.equal(calls[0].capacity > calls[1].capacity, true);
+});
+
+test("anonymous global denial stops attacker-controlled bucket creation", async () => {
+  const calls = [];
+  const controls = createHumanAuthAbuseControls({
+    repository: {
+      async acquireRateLimit() { throw new Error("tenant limiter must not be used"); },
+      async acquireAnonymousRateLimit(input) {
+        calls.push(input);
+        return { allowed: false, limit: input.capacity, remaining: 0, retryAfterMs: 1_000 };
+      }
+    }
+  });
+  await assert.rejects(
+    () => controls.checkAnonymous({ operation: HUMAN_AUTH_RATE_LIMIT_OPERATIONS.recoveryExchange, principalId: "44444444-4444-4444-8444-444444444444" }),
+    (error) => error.code === HUMAN_AUTH_ABUSE_ERROR_CODES.RATE_LIMITED
+  );
+  assert.equal(calls.length, 1);
+});

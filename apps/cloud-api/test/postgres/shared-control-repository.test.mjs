@@ -24,21 +24,26 @@ test("shared control repository exposes a stable, tenant-scoped wiring contract"
     "abandonIdempotency",
     "consumeDeviceRequestNonce",
     "acquireRateLimit",
+    "acquireAnonymousRateLimit",
     "pruneExpired"
   ]);
   assert.deepEqual(SHARED_CONTROL_SCHEMA.tables, {
     idempotency: "idempotency_records",
     deviceRequestNonces: "device_request_nonces",
-    rateLimitBuckets: "rate_limit_buckets"
+    rateLimitBuckets: "rate_limit_buckets",
+    anonymousRateLimitBuckets: "anonymous_rate_limit_buckets"
   });
   assert.deepEqual(SHARED_CONTROL_SCHEMA.indexes, {
     idempotencyExpiry: "idempotency_records_expiry",
     deviceRequestNoncesExpiry: "device_request_nonces_expiry",
-    rateLimitBucketsExpiry: "rate_limit_buckets_expiry"
+    rateLimitBucketsExpiry: "rate_limit_buckets_expiry",
+    anonymousRateLimitBucketsExpiry: "anonymous_rate_limit_buckets_expiry"
   });
   assert.deepEqual(SHARED_CONTROL_SCHEMA.functions, {
     consumeDeviceRequestNonce: "agentpass_consume_device_request_nonce",
     acquireRateLimit: "agentpass_acquire_rate_limit",
+    acquireAnonymousRateLimit: "agentpass_acquire_anonymous_rate_limit",
+    pruneAnonymousRateLimits: "agentpass_prune_anonymous_rate_limits",
     pruneExpired: "agentpass_prune_shared_control_expired"
   });
 });
@@ -168,6 +173,19 @@ test("rate-limit acquisition is a distributed DB decision with stable response m
   assert.deepEqual(client.calls[0].params, [organizationId, "human", memberId, 120, 2, 1, 900_000]);
 });
 
+test("anonymous rate-limit acquisition has no tenant FK or raw exchange input", async () => {
+  const resetAt = "2026-08-13T00:00:01.250Z";
+  const client = new ScriptedClient((text) => {
+    assert.match(text, /agentpass_acquire_anonymous_rate_limit/);
+    return { rowCount: 1, rows: [{ allowed: true, rate_limit: 8, remaining: 7, retry_after_ms: 0, reset_at: resetAt }] };
+  });
+  const repository = createSharedControlRepository({ client });
+  const result = await repository.acquireAnonymousRateLimit({ operation: "human.recovery.exchange", principalId: memberId, capacity: 8, refillPerSecond: 0.1, cost: 1, idleTtlMs: 900_000 });
+  assert.equal(result.allowed, true);
+  assert.deepEqual(client.calls[0].params, ["human.recovery.exchange", memberId, 8, 0.1, 1, 900_000]);
+  assert.equal(client.calls[0].params.includes(organizationId), false);
+});
+
 test("expiry pruning is bounded and delegated to one shared maintenance function", async () => {
   const client = new ScriptedClient((text) => {
     assert.match(text, /agentpass_prune_shared_control_expired/);
@@ -176,6 +194,18 @@ test("expiry pruning is bounded and delegated to one shared maintenance function
   const repository = createSharedControlRepository({ client });
   assert.deepEqual(await repository.pruneExpired({ limit: 17 }), { removed: 17 });
   assert.deepEqual(client.calls[0].params, [17]);
+});
+
+test("expiry pruning spends the remaining bound on anonymous buckets", async () => {
+  const client = new ScriptedClient((text, params) => {
+    if (text.includes("agentpass_prune_shared_control_expired")) return { rowCount: 1, rows: [{ removed: "3" }] };
+    assert.match(text, /agentpass_prune_anonymous_rate_limits/);
+    assert.deepEqual(params, [2]);
+    return { rowCount: 1, rows: [{ removed: "2" }] };
+  });
+  const repository = createSharedControlRepository({ client });
+  assert.deepEqual(await repository.pruneExpired({ limit: 5 }), { removed: 5 });
+  assert.equal(client.calls.length, 2);
 });
 
 test("database failures become constant public failures and never expose driver details", async () => {

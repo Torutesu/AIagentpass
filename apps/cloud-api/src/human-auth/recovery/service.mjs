@@ -42,6 +42,7 @@ export const OWNER_RECOVERY_ERROR_CODES = Object.freeze({
   FORBIDDEN: "owner_recovery_forbidden",
   NOT_FOUND: "owner_recovery_not_found",
   VERSION_CONFLICT: "owner_recovery_stale_version",
+  IDEMPOTENCY_CONFLICT: "owner_recovery_idempotency_conflict",
   APPROVAL_REPLAYED: "owner_recovery_approval_replayed",
   APPROVAL_INVALID: "owner_recovery_approval_invalid",
   THRESHOLD_UNAVAILABLE: "owner_recovery_threshold_unavailable",
@@ -64,6 +65,7 @@ const ERROR_MESSAGES = Object.freeze({
   [CODE.FORBIDDEN]: "The recovery operation is not allowed",
   [CODE.NOT_FOUND]: "The recovery request was not found",
   [CODE.VERSION_CONFLICT]: "The recovery request was changed by another request",
+  [CODE.IDEMPOTENCY_CONFLICT]: "The idempotency key was already used for another recovery request",
   [CODE.APPROVAL_REPLAYED]: "The recovery approval is no longer valid",
   [CODE.APPROVAL_INVALID]: "The recovery approval is invalid",
   [CODE.THRESHOLD_UNAVAILABLE]: "The organization cannot satisfy the recovery threshold",
@@ -537,6 +539,7 @@ function mapRepositoryError(error, fallback = CODE.UNAVAILABLE) {
   if (["not_found", "request_not_found", "recovery_not_found", "tenant_not_found"].includes(code)) return new OwnerRecoveryError(CODE.NOT_FOUND, { cause: error });
   if (["forbidden", "owner_required", "subject_self_approval", "non_owner", "wrong_member", "wrong_organization", "tenant_scope_error"].includes(code)) return new OwnerRecoveryError(CODE.FORBIDDEN, { cause: error });
   if (["stale_version", "version_conflict", "expected_version_mismatch"].includes(code)) return new OwnerRecoveryError(CODE.VERSION_CONFLICT, { cause: error });
+  if (["idempotency_conflict", "idempotency_key_reused", "err_idempotency_conflict"].includes(code)) return new OwnerRecoveryError(CODE.IDEMPOTENCY_CONFLICT, { cause: error });
   if (["approval_replayed", "duplicate_approval", "approval_exists"].includes(code)) return new OwnerRecoveryError(CODE.APPROVAL_REPLAYED, { cause: error });
   if (["insufficient_owners", "threshold_unavailable", "owner_threshold_unavailable"].includes(code)) return new OwnerRecoveryError(CODE.THRESHOLD_UNAVAILABLE, { cause: error });
   if (["delay_not_elapsed", "recovery_delay_not_elapsed"].includes(code)) return new OwnerRecoveryError(CODE.DELAY_NOT_ELAPSED, { cause: error });

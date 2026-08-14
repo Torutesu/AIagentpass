@@ -42,16 +42,20 @@ export const SHARED_CONTROL_SCHEMA = Object.freeze({
   tables: Object.freeze({
     idempotency: "idempotency_records",
     deviceRequestNonces: "device_request_nonces",
-    rateLimitBuckets: "rate_limit_buckets"
+    rateLimitBuckets: "rate_limit_buckets",
+    anonymousRateLimitBuckets: "anonymous_rate_limit_buckets"
   }),
   indexes: Object.freeze({
     idempotencyExpiry: "idempotency_records_expiry",
     deviceRequestNoncesExpiry: "device_request_nonces_expiry",
-    rateLimitBucketsExpiry: "rate_limit_buckets_expiry"
+    rateLimitBucketsExpiry: "rate_limit_buckets_expiry",
+    anonymousRateLimitBucketsExpiry: "anonymous_rate_limit_buckets_expiry"
   }),
   functions: Object.freeze({
     consumeDeviceRequestNonce: "agentpass_consume_device_request_nonce",
     acquireRateLimit: "agentpass_acquire_rate_limit",
+    acquireAnonymousRateLimit: "agentpass_acquire_anonymous_rate_limit",
+    pruneAnonymousRateLimits: "agentpass_prune_anonymous_rate_limits",
     pruneExpired: "agentpass_prune_shared_control_expired"
   })
 });
@@ -64,6 +68,7 @@ export const SHARED_CONTROL_REPOSITORY_METHODS = Object.freeze([
   "abandonIdempotency",
   "consumeDeviceRequestNonce",
   "acquireRateLimit",
+  "acquireAnonymousRateLimit",
   "pruneExpired"
 ]);
 
@@ -234,13 +239,35 @@ export function createSharedControlRepository({ client, limits = {}, hash = sha2
     }
   }
 
+  async function acquireAnonymousRateLimit({ operation, principalId, capacity, refillPerSecond, cost = 1, idleTtlMs } = {}) {
+    const input = normalizeAnonymousRateLimit({ operation, principalId, capacity, refillPerSecond, cost, idleTtlMs: idleTtlMs ?? configured.rateLimitIdleTtlMs });
+    try {
+      const result = await client.query(`SELECT allowed,rate_limit,remaining,retry_after_ms,reset_at
+        FROM agentpass_acquire_anonymous_rate_limit($1::text,$2::uuid,$3::integer,$4::numeric,$5::integer,$6::integer)`, [
+        input.operation, input.principalId, input.capacity, input.refillPerSecond, input.cost, input.idleTtlMs
+      ]);
+      if (rowCount(result) !== 1) throw unavailable();
+      return normalizeRateDecision(result.rows[0]);
+    } catch (error) {
+      if (error instanceof SharedControlRepositoryError) throw error;
+      throw unavailable(error);
+    }
+  }
+
   async function pruneExpired({ limit = SHARED_CONTROL_LIMITS.pruneLimit.default } = {}) {
     const boundedLimit = boundedInteger(limit, SHARED_CONTROL_LIMITS.pruneLimit, "limit");
     try {
       const result = await client.query(`SELECT removed
         FROM agentpass_prune_shared_control_expired($1::integer)`, [boundedLimit]);
       if (rowCount(result) !== 1 || !Number.isSafeInteger(Number(result.rows[0]?.removed)) || Number(result.rows[0].removed) < 0) throw unavailable();
-      return { removed: Number(result.rows[0].removed) };
+      const sharedRemoved = Number(result.rows[0].removed);
+      if (sharedRemoved > boundedLimit) throw unavailable();
+      const remaining = boundedLimit - sharedRemoved;
+      if (remaining === 0) return { removed: sharedRemoved };
+      const anonymous = await client.query(`SELECT removed
+        FROM agentpass_prune_anonymous_rate_limits($1::integer)`, [remaining]);
+      if (rowCount(anonymous) !== 1 || !Number.isSafeInteger(Number(anonymous.rows[0]?.removed)) || Number(anonymous.rows[0].removed) < 0 || Number(anonymous.rows[0].removed) > remaining) throw unavailable();
+      return { removed: sharedRemoved + Number(anonymous.rows[0].removed) };
     } catch (error) {
       if (error instanceof SharedControlRepositoryError) throw error;
       throw unavailable(error);
@@ -256,6 +283,7 @@ export function createSharedControlRepository({ client, limits = {}, hash = sha2
     abandonIdempotency,
     consumeDeviceRequestNonce,
     acquireRateLimit,
+    acquireAnonymousRateLimit,
     pruneExpired
   });
 }
@@ -293,6 +321,15 @@ function normalizeRateLimit({ organizationId, principalType, principalId, capaci
   if (typeof refillPerSecond !== "number" || !Number.isFinite(refillPerSecond) || refillPerSecond < SHARED_CONTROL_LIMITS.rateLimitRefillPerSecond.min || refillPerSecond > SHARED_CONTROL_LIMITS.rateLimitRefillPerSecond.max) throw invalidRequest();
   if (!Number.isSafeInteger(cost) || cost < SHARED_CONTROL_LIMITS.rateLimitCost.min || cost > Math.min(capacity, SHARED_CONTROL_LIMITS.rateLimitCost.max)) throw invalidRequest();
   return { organizationId, principalType, principalId, capacity, refillPerSecond, cost, idleTtlMs: boundedInteger(idleTtlMs, SHARED_CONTROL_LIMITS.rateLimitIdleTtlMs, "idleTtlMs") };
+}
+
+function normalizeAnonymousRateLimit({ operation, principalId, capacity, refillPerSecond, cost, idleTtlMs }) {
+  assertIdentifier(operation);
+  assertUuid(principalId);
+  if (!Number.isSafeInteger(capacity) || capacity < SHARED_CONTROL_LIMITS.rateLimitCapacity.min || capacity > SHARED_CONTROL_LIMITS.rateLimitCapacity.max) throw invalidRequest();
+  if (typeof refillPerSecond !== "number" || !Number.isFinite(refillPerSecond) || refillPerSecond < SHARED_CONTROL_LIMITS.rateLimitRefillPerSecond.min || refillPerSecond > SHARED_CONTROL_LIMITS.rateLimitRefillPerSecond.max) throw invalidRequest();
+  if (!Number.isSafeInteger(cost) || cost < SHARED_CONTROL_LIMITS.rateLimitCost.min || cost > Math.min(capacity, SHARED_CONTROL_LIMITS.rateLimitCost.max)) throw invalidRequest();
+  return { operation, principalId, capacity, refillPerSecond, cost, idleTtlMs: boundedInteger(idleTtlMs, SHARED_CONTROL_LIMITS.rateLimitIdleTtlMs, "idleTtlMs") };
 }
 
 function normalizeResponseStatus(value) {
