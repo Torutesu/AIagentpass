@@ -74,7 +74,14 @@ export AGENTPASS_IDENTITY_ASSERTION_PUBLIC_KEY_PATH=/absolute/protected/agentpas
 # Owner-recovery notifications are delivered to this HTTPS-only provider.
 # Store the bearer value in an owner-only regular file, not in the environment:
 export AGENTPASS_OWNER_RECOVERY_NOTIFICATION_WEBHOOK_URL='https://notifications.example.com/v1/agentpass/owner-recovery'
+export AGENTPASS_OWNER_RECOVERY_NOTIFICATION_CONFIRMATION_URL='https://notifications.example.com/v1/agentpass/owner-recovery/acceptance'
 export AGENTPASS_OWNER_RECOVERY_NOTIFICATION_AUTHORIZATION_PATH=/absolute/protected/agentpass-cloud/notification-authorization.txt
+# This non-secret tuple is immutable for queued events. Generate the digest
+# once, keep it stable across replicas, and rotate the key version/digest when
+# the provider account, destination, or authorization authority changes.
+export AGENTPASS_OWNER_RECOVERY_NOTIFICATION_BINDING_ID='owner-recovery-primary'
+export AGENTPASS_OWNER_RECOVERY_NOTIFICATION_BINDING_KEY_VERSION='1'
+export AGENTPASS_OWNER_RECOVERY_NOTIFICATION_BINDING_DIGEST="$(openssl rand -hex 32)"
 # Generate once, store in the deployment secret manager, and reuse on every instance:
 export AGENTPASS_HUMAN_CURSOR_SECRET="$(openssl rand -base64 32 | tr '+/' '-_' | tr -d '=\n')"
 export AGENTPASS_HUMAN_AUTH_SECRET="$(openssl rand -base64 32 | tr '+/' '-_' | tr -d '=\n')"
@@ -83,11 +90,17 @@ export AGENTPASS_OPERATIONAL_PROBE_SECRET="$(openssl rand -base64 32 | tr '+/' '
 npm start
 ```
 
-The notification authorization file must be a non-empty owner-only regular file (`0600`), with no symlink or hardlink and no trailing newline. The provider receives only the secret-free version-1 public event and an `Idempotency-Key` header equal to `event_id`. It must persistently deduplicate that key and return exactly one of these JSON objects with a 2xx status and `application/json`: `{"accepted":true,"duplicate":false}`, `{"accepted":true,"duplicate":true}`, or `{"accepted":false,"duplicate":false}`. Redirects, ambiguous responses, oversized responses, and transport failures are rejected. A timeout or lost acknowledgement is an unknown outcome: AgentPass retains the lease and retries only after expiry, so provider-side idempotency remains mandatory.
+The notification authorization file must be a non-empty owner-only regular file (`0600`), with no symlink or hardlink and no trailing newline. The binding tuple is non-secret deployment identity, not a hash of the webhook URL: persist its random digest in the deployment secret/configuration manager, keep it identical across replicas, and rotate both key version and digest before changing provider account, destination, or authorization authority. Events already queued under an old tuple are never silently rebound. The delivery endpoint receives only the secret-free version-1 public event and an `Idempotency-Key` header equal to `event_id`. It must persistently deduplicate that key and return exactly one of these JSON objects with a 2xx status and `application/json`: `{"accepted":true,"duplicate":false}`, `{"accepted":true,"duplicate":true}`, or `{"accepted":false,"duplicate":false}`. Redirects, ambiguous responses, oversized responses, and transport failures are rejected.
+
+The confirmation endpoint must provide a linearizable lookup over that same durable acceptance ledger. AgentPass sends `{"schema_version":1,"kind":"owner-recovery-notification-acceptance-lookup","provider_binding":{"binding_id":"…","key_version":1,"binding_digest":"…"},"idempotency_key":"…"}` and accepts only an exact `200`/`404` JSON response echoing `accepted`, `provider_binding`, and `idempotency_key`. A timeout or lost delivery acknowledgement moves the event to durable `uncertain`; AgentPass then performs bounded confirmation lookups and marks it published only after an exact positive proof. It never blindly resends notification content. A negative or unavailable lookup leaves the row uncertain for later lookup or explicit Owner/Admin retry/suppression.
 
 The refresh signing key must be a separate Ed25519 key from the ControlBundle key. The nonce keyring file is owner-only JSON in this exact form: `{"version":1,"active_key_id":"refresh-nonce-v1","keys":{"refresh-nonce-v1":"<canonical 32-byte base64url secret>"}}`. Every Cloud instance must receive the same active and retained nonce keys. Rotation is dual-read/single-write: add the new key, switch `active_key_id`, retain old keys until every matching outbox/ACK has expired, then remove them. PostgreSQL stores only the key ID and SHA-256 digest, never the raw derived nonce.
 
 Hosted exposes secret-free response contracts at `GET /health/ready` and `GET /health/metrics`, but both endpoints require the `AgentPass-Operational-Token` header. Readiness verifies database access, exact migration version/checksums, pool saturation, drain state, worker availability, dead letters, and bounded notification backlog/lag. It exposes aggregate counts only—never organization, request, event, destination, provider URL, or provider diagnostics. Shutdown marks readiness false, stops new worker cycles, waits for tracked requests and deliveries under the same bound, and only then closes PostgreSQL. Use [the cutover runbook](../../docs/POSTGRES_CUTOVER_RUNBOOK.md) and [backup/restore manifest procedure](../../docs/POSTGRES_BACKUP_RESTORE.md); committed migrations are forward-only and rollback changes application traffic, never authority history.
+
+For provider outages, uncertain delivery, binding rotation, alert thresholds,
+and reproducible PostgreSQL 16 qualification, use the
+[owner-recovery delivery runbook](../../docs/OWNER_RECOVERY_DELIVERY_RUNBOOK.md).
 
 `AGENTPASS_CLOUD_DATA_DIR` and `AGENTPASS_CLOUD_TOKEN_RECORDS_PATH` are required only with `AGENTPASS_CLOUD_PROFILE=evaluation`, where Human Auth is disabled. `AGENTPASS_CLOUD_PROFILE=hosted` rejects both variables, neither loads the file store nor accepts its bearer credentials, and fails startup on incomplete PostgreSQL, Human Auth, shared-control, or control-plane-store composition.
 

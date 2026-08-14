@@ -79,6 +79,63 @@ test("repository and publisher binding configuration must match", () => {
   }), /configuration is invalid/u);
 });
 
+test("automatically confirms exact-binding uncertain deliveries from provider lookup proof", async () => {
+  const secondEvent = "55555555-5555-4555-8555-555555555555";
+  const confirmed = [];
+  const repository = {
+    binding: DELIVERY_BINDING,
+    async claimBatch() { return { claim_token: CLAIM, events: [] }; },
+    async markPublished() {},
+    async markFailed() {},
+    async markUncertain() {},
+    async claimConfirmationBatch() {
+      return [EVENT.event_id, secondEvent].map((eventId, index) => ({
+        organization_id: EVENT.organization_id,
+        event_id: eventId,
+        expected_management_version: 1,
+        provider_confirmation_attempt: index + 1,
+        provider_binding: DELIVERY_BINDING
+      }));
+    },
+    async markProviderConfirmed(input) { confirmed.push(input); return { published: true }; }
+  };
+  const publisher = {
+    binding: DELIVERY_BINDING,
+    async publish() { throw new Error("no pending delivery expected"); },
+    async lookupAcceptance({ idempotency_key }) { return { accepted: idempotency_key === EVENT.event_id, idempotency_key }; }
+  };
+  const metrics = createOperationalMetrics();
+  const result = await createOwnerRecoveryOutboxWorker({ repository, publisher, metrics, now: () => NOW }).runOnce();
+  assert.deepEqual(result, {
+    claimed: 0,
+    published: 0,
+    retried: 0,
+    dead_lettered: 0,
+    claim_lost: 0,
+    uncertain: 0,
+    confirmation_checked: 2,
+    confirmed: 1
+  });
+  assert.deepEqual(confirmed, [{
+    organization_id: EVENT.organization_id,
+    event_id: EVENT.event_id,
+    expected_management_version: 1,
+    provider_confirmation_attempt: 1
+  }]);
+  assert.equal(metrics.snapshot().counters.owner_recovery_outbox_confirmation_lookup_total, 2);
+  assert.equal(metrics.snapshot().counters.owner_recovery_outbox_confirmation_success_total, 1);
+  assert.equal(metrics.snapshot().counters.owner_recovery_outbox_confirmation_miss_total, 1);
+  assert.equal(metrics.snapshot().counters.owner_recovery_outbox_confirmation_failure_total, 0);
+});
+
+test("rejects partial confirmation capability wiring", () => {
+  const repository = { ...fixtureRepository([], { binding: DELIVERY_BINDING }), async claimConfirmationBatch() { return []; } };
+  assert.throws(() => createOwnerRecoveryOutboxWorker({
+    repository,
+    publisher: { binding: DELIVERY_BINDING, async publish() {} }
+  }), /configuration is invalid/u);
+});
+
 test("a malformed claimed event is isolated while valid events publish", async () => {
   const calls = [];
   const valid = { ...EVENT, event_id: "55555555-5555-4555-8555-555555555555" };

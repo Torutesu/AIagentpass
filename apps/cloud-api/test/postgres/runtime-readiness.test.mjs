@@ -41,7 +41,7 @@ class FakePool {
       return { rows: [] };
     }
     if (text === "SELECT set_config('statement_timeout', $1, false)" || text === "SELECT set_config('lock_timeout', $1, false)") return { rows: [{ set_config: params[0] }] };
-    if (text.includes("count(*) FILTER (WHERE status='pending')")) return { rowCount: 1, rows: [{ pending: "0", uncertain: "0", dead_letter: "0", oldest_pending_at: null }] };
+    if (text.includes("count(*) FILTER (WHERE status='pending')")) return { rowCount: 1, rows: [{ pending: "0", uncertain: "0", dead_letter: "0", oldest_pending_at: null, oldest_uncertain_at: null }] };
     if (text === "BEGIN" || text === "COMMIT" || text === "ROLLBACK" || text.includes("pg_advisory_xact_lock")) return { rows: [] };
     return { rows: [] };
   }
@@ -63,7 +63,7 @@ test("PostgreSQL runtime exposes exact-schema readiness, tracked work, and bound
   const migrations = await loadSqlMigrations();
   const runtime = await createPostgresRuntime({ env: env(), PoolClass: FakePool, applicationVersion: "runtime-readiness-test", resolveProcessBindingPolicy: () => true });
   assert.equal(runtime.pool.applied.length, migrations.length);
-  assert.equal(migrations.length, 35);
+  assert.equal(migrations.length, 36);
   assert.equal((await runtime.readiness()).code, "ready");
   assert.equal(typeof runtime.agentSessionIssuanceRepository?.issueAgentSessionGrant, "function");
   assert.equal(typeof runtime.agentSessionConsumptionRepository?.consumeAgentSessionGrant, "function");
@@ -101,7 +101,7 @@ test("PostgreSQL runtime exposes exact-schema readiness, tracked work, and bound
 });
 
 test("PostgreSQL runtime wires an injected owner recovery publisher without starting it when disabled", async () => {
-  const publisher = { binding: DELIVERY_BINDING, async publish() { return { accepted: true, duplicate: false }; } };
+  const publisher = { binding: DELIVERY_BINDING, async publish() { return { accepted: true, duplicate: false }; }, async lookupAcceptance() { return { accepted: false, idempotency_key: "22222222-2222-4222-8222-222222222222" }; } };
   const runtime = await createPostgresRuntime({
     env: env(),
     PoolClass: FakePool,

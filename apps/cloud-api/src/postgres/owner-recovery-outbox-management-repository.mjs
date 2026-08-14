@@ -229,6 +229,7 @@ export function createPostgresOwnerRecoveryOutboxManagementRepository({
       sql: `UPDATE owner_recovery_outbox
         SET status='pending',available_at=clock_timestamp(),
             uncertain_at=NULL,uncertain_reason=NULL,last_error_code=NULL,
+            provider_confirmation_next_at=NULL,
             redrive_count=redrive_count+1,
             management_version=management_version+1,updated_at=clock_timestamp(),
             claim_token_digest=NULL,claim_expires_at=NULL
@@ -251,6 +252,7 @@ export function createPostgresOwnerRecoveryOutboxManagementRepository({
       sql: `UPDATE owner_recovery_outbox
         SET status='suppressed',suppressed_at=clock_timestamp(),suppression_reason=$4,
             uncertain_at=NULL,uncertain_reason=NULL,
+            provider_confirmation_next_at=NULL,
             management_version=management_version+1,updated_at=clock_timestamp(),
             claim_token_digest=NULL,claim_expires_at=NULL
         WHERE organization_id=$1 AND event_id=$2 AND status='uncertain'

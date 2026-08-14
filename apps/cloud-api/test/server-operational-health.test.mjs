@@ -70,7 +70,7 @@ test("readiness exposes only aggregate owner recovery outbox state", async (t) =
       schema: { ok: true, expected_version: 30, applied_version: 30, migration_count: 30, pending_count: 0, checksum_status: "verified", drift: false },
       pool: { ok: true, max_connections: 10, total_connections: 1, idle_connections: 1, waiting_connections: 0, utilization_percent: 10, saturated: false },
       drain: { state: "running", accepting: true, in_flight: 0 },
-      owner_recovery_outbox: { ok: false, code: "dead_letter_present", worker_state: "running", pending_count: 2, uncertain_count: 0, dead_letter_count: 1, oldest_pending_age_ms: 500, organization_id: "must-not-leak" }
+      owner_recovery_outbox: { ok: false, code: "dead_letter_present", worker_state: "running", pending_count: 2, uncertain_count: 0, dead_letter_count: 1, oldest_pending_age_ms: 500, oldest_uncertain_age_ms: null, organization_id: "must-not-leak" }
     }
   };
   const server = createCloudApi({ store: {}, readiness: async () => report, operationalMetrics: createOperationalMetrics(), operationalProbeSecret: PROBE_SECRET });
@@ -79,6 +79,6 @@ test("readiness exposes only aggregate owner recovery outbox state", async (t) =
   const response = await fetch(`http://127.0.0.1:${server.address().port}/health/ready`, { headers: PROBE_HEADERS });
   assert.equal(response.status, 503);
   const body = await response.json();
-  assert.deepEqual(body.checks.owner_recovery_outbox, { ok: false, code: "dead_letter_present", worker_state: "running", pending_count: 2, uncertain_count: 0, dead_letter_count: 1, oldest_pending_age_ms: 500 });
+  assert.deepEqual(body.checks.owner_recovery_outbox, { ok: false, code: "dead_letter_present", worker_state: "running", pending_count: 2, uncertain_count: 0, dead_letter_count: 1, oldest_pending_age_ms: 500, oldest_uncertain_age_ms: null });
   assert.equal(JSON.stringify(body).includes("must-not-leak"), false);
 });

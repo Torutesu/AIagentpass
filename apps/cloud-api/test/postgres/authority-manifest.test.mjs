@@ -73,7 +73,7 @@ async function emptyManifest(artifact_digest = undefined) {
   return sealAuthorityManifest({
     schema_version: AUTHORITY_MANIFEST_SCHEMA_VERSION,
     kind: MANIFEST_KIND,
-    migration_version: "35",
+    migration_version: "36",
     migrations: migrations.map(({ version, name, checksum }) => ({ version: String(version), name, checksum })),
     tenant_ids: [ORG],
     tenants: [{ organization_id: ORG }],

@@ -128,7 +128,9 @@ test('service config rejects mode, service, closed-pair, digest, and expiry subs
     { qualification_controller_cdhash: cdhash('A') },
     { qualification_controller_cdhash: '0'.repeat(40) },
     { qualification_controller_cdhash: undefined },
-    { qualification_expires_at_epoch_seconds: Math.ceil(Date.now() / 1000) + 901 }
+    // Keep the invalid expiry well outside the 900-second window even when
+    // the full parallel suite delays this assertion by several seconds.
+    { qualification_expires_at_epoch_seconds: Math.ceil(Date.now() / 1000) + 3_600 }
   ]) {
     const value = fixture();
     writeService(value, changes);

@@ -23,6 +23,17 @@ jobs:
           --health-interval 5s
           --health-timeout 5s
           --health-retries 10
+      postgres16:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: agentpass-w15-integration
+        ports:
+          - 5433:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
@@ -49,6 +60,36 @@ jobs:
         env:
           AGENTPASS_TEST_DATABASE_URL: postgresql://postgres:agentpass-integration@127.0.0.1:5432/postgres
         run: npm run test:postgres:g4
+      - name: Prepare isolated PostgreSQL 16 owner-recovery upgrade database
+        env:
+          PGPASSWORD: agentpass-w15-integration
+        run: createdb --host=127.0.0.1 --port=5433 --username=postgres agentpass_w15_upgrade
+      - name: Prepare W1.5 evidence directory
+        run: |
+          mkdir -p "$GITHUB_WORKSPACE/w15-evidence"
+          chmod 0700 "$GITHUB_WORKSPACE/w15-evidence"
+      - name: Qualify W1.5 delivery convergence and races on PostgreSQL 16
+        env:
+          AGENTPASS_TEST_DATABASE_URL: postgresql://postgres:agentpass-w15-integration@127.0.0.1:5433/postgres
+          AGENTPASS_W15_EVIDENCE_OUTPUT: ${{ github.workspace }}/w15-evidence/owner-recovery-race-matrix.json
+        run: >-
+          node --test --test-concurrency=1
+          apps/cloud-api/test/postgres/owner-recovery-provider-acceptance.integration.test.mjs
+          apps/cloud-api/test/postgres/owner-recovery-provider-confirmation.integration.test.mjs
+          apps/cloud-api/test/postgres/owner-recovery-outbox-race-matrix.integration.test.mjs
+          apps/cloud-api/test/postgres/owner-recovery-process-loss-qualification.integration.test.mjs
+      - name: Qualify schema 34 to 35 delivery-binding upgrade on PostgreSQL 16
+        env:
+          AGENTPASS_TEST_DATABASE_URL: postgresql://postgres:agentpass-w15-integration@127.0.0.1:5433/agentpass_w15_upgrade
+        run: node --test apps/cloud-api/test/postgres/owner-recovery-delivery-binding-upgrade.integration.test.mjs
+      - name: Retain verified secret-free W1.5 evidence
+        if: success()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: w15-owner-recovery-${{ github.sha }}
+          path: w15-evidence/owner-recovery-race-matrix.json
+          if-no-files-found: error
+          retention-days: 30
 
   browser-e2e:
     runs-on: ubuntu-latest

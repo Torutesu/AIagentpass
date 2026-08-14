@@ -34,6 +34,9 @@ export async function createPostgresRuntime({ env = process.env, PoolClass = Poo
   if (typeof ownerRecoveryOutboxAutoStart !== "boolean" || !ownerRecoveryOutboxWorkerOptions || typeof ownerRecoveryOutboxWorkerOptions !== "object" || Array.isArray(ownerRecoveryOutboxWorkerOptions)) throw new TypeError("owner recovery outbox runtime configuration is invalid");
   if (typeof sharedControlMaintenanceAutoStart !== "boolean" || !sharedControlMaintenanceWorkerOptions || typeof sharedControlMaintenanceWorkerOptions !== "object" || Array.isArray(sharedControlMaintenanceWorkerOptions)) throw new TypeError("shared-control maintenance runtime configuration is invalid");
   let ownerRecoveryDeliveryBinding;
+  if (ownerRecoveryPublisher !== undefined
+    && (!ownerRecoveryPublisher || typeof ownerRecoveryPublisher.publish !== "function"
+      || typeof ownerRecoveryPublisher.lookupAcceptance !== "function")) throw new TypeError("owner recovery publisher is invalid");
   try { ownerRecoveryDeliveryBinding = ownerRecoveryPublisher === undefined ? undefined : normalizeOwnerRecoveryDeliveryBinding(ownerRecoveryPublisher.binding); }
   catch { throw new TypeError("owner recovery publisher binding is invalid"); }
   const config = loadPostgresConfig(env);

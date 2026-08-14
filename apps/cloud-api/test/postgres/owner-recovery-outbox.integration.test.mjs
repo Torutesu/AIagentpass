@@ -69,11 +69,13 @@ test("outbox claims are exclusive, process loss is quarantined, and attempt 100 
     claimBatch: (input) => repositoryA.claimBatch(input),
     async markPublished() { throw Object.assign(new Error("simulated process loss"), { code: "owner_recovery_outbox_unavailable" }); },
     async markFailed() { throw Object.assign(new Error("simulated process loss"), { code: "owner_recovery_outbox_unavailable" }); },
-    markUncertain: (input) => repositoryA.markUncertain(input)
+    markUncertain: (input) => repositoryA.markUncertain(input),
+    claimConfirmationBatch: (input) => repositoryA.claimConfirmationBatch(input),
+    markProviderConfirmed: (input) => repositoryA.markProviderConfirmed(input)
   };
   const firstWorker = createOwnerRecoveryOutboxWorker({
     repository: processLossRepository,
-    publisher: { binding: DELIVERY_BINDING, async publish(input) { providerCalls.push(input.idempotency_key); return { accepted: true, duplicate: false, idempotency_key: input.idempotency_key }; } },
+    publisher: { binding: DELIVERY_BINDING, async publish(input) { providerCalls.push(input.idempotency_key); return { accepted: true, duplicate: false, idempotency_key: input.idempotency_key }; }, async lookupAcceptance(input) { return { accepted: false, idempotency_key: input.idempotency_key }; } },
     publishTimeoutMs: 100,
     leaseMs: 1_000
   });
@@ -89,7 +91,7 @@ test("outbox claims are exclusive, process loss is quarantined, and attempt 100 
     VALUES ($1,$2,$3,$4,'recovery.failed','pending',99,clock_timestamp(),clock_timestamp(),clock_timestamp(),'bound',$5,$6,decode($7,'hex'))`, [ORG, DEAD_EVENT, REQUEST, MEMBER, DELIVERY_BINDING.binding_id, DELIVERY_BINDING.key_version, DELIVERY_BINDING.binding_digest]);
   const deadWorker = createOwnerRecoveryOutboxWorker({
     repository: repositoryB,
-    publisher: { binding: DELIVERY_BINDING, async publish(input) { return { accepted: false, duplicate: false, idempotency_key: input.idempotency_key }; } },
+    publisher: { binding: DELIVERY_BINDING, async publish(input) { return { accepted: false, duplicate: false, idempotency_key: input.idempotency_key }; }, async lookupAcceptance(input) { return { accepted: false, idempotency_key: input.idempotency_key }; } },
     publishTimeoutMs: 100,
     leaseMs: 1_000
   });

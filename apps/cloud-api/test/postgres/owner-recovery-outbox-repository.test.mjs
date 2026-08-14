@@ -83,6 +83,59 @@ test("persists a fixed uncertain category and releases the live lease", async ()
   assert.equal(client.calls[0].params.some((value) => typeof value === "string" && value.includes("provider")), false);
 });
 
+test("claims due provider confirmations by exact binding and confirms with a fenced CAS", async () => {
+  const client = new ScriptedClient((text, params) => {
+    if (text.includes("provider_confirmation_attempts=outbox.provider_confirmation_attempts+1")) {
+      assert.match(text, /FOR UPDATE SKIP LOCKED/u);
+      assert.match(text, /provider_confirmation_attempts<2147483647/u);
+      assert.deepEqual(params.slice(1, 4), [DELIVERY_BINDING.binding_id, DELIVERY_BINDING.key_version, DELIVERY_BINDING.binding_digest]);
+      return { rowCount: 1, rows: [{
+        organization_id: ORG,
+        event_id: EVENT,
+        management_version: 3,
+        provider_confirmation_attempts: 2,
+        provider_binding_id: DELIVERY_BINDING.binding_id,
+        provider_key_version: DELIVERY_BINDING.key_version,
+        provider_binding_digest: DELIVERY_BINDING.binding_digest
+      }] };
+    }
+    assert.match(text, /status='uncertain'/u);
+    assert.match(text, /provider_confirmation_attempts=\$4/u);
+    assert.match(text, /provider_binding_digest=decode\(\$7,'hex'\)/u);
+    return { rowCount: 1, rows: [{ published_at: new Date(NOW) }] };
+  });
+  const repository = createPostgresOwnerRecoveryOutboxRepository({ client, deliveryBinding: DELIVERY_BINDING, now: () => NOW });
+  assert.deepEqual(await repository.claimConfirmationBatch({ limit: 4 }), [{
+    organization_id: ORG,
+    event_id: EVENT,
+    expected_management_version: 3,
+    provider_confirmation_attempt: 2,
+    provider_binding: DELIVERY_BINDING
+  }]);
+  assert.deepEqual(await repository.markProviderConfirmed({
+    organization_id: ORG,
+    event_id: EVENT,
+    expected_management_version: 3,
+    provider_confirmation_attempt: 2
+  }), { published: true, published_at: new Date(NOW).toISOString() });
+});
+
+test("provider confirmation is unavailable without a binding and loses stale schedules", async () => {
+  const unbound = createPostgresOwnerRecoveryOutboxRepository({ client: new ScriptedClient(() => ({ rows: [] })) });
+  assert.equal(unbound.claimConfirmationBatch, undefined);
+  assert.equal(unbound.markProviderConfirmed, undefined);
+  const stale = createPostgresOwnerRecoveryOutboxRepository({
+    client: new ScriptedClient(() => ({ rowCount: 0, rows: [] })),
+    deliveryBinding: DELIVERY_BINDING
+  });
+  await assert.rejects(() => stale.markProviderConfirmed({
+    organization_id: ORG,
+    event_id: EVENT,
+    expected_management_version: 1,
+    provider_confirmation_attempt: 1
+  }), (error) => error.code === OWNER_RECOVERY_OUTBOX_ERROR_CODES.CLAIM_LOST);
+});
+
 test("attempt 100 transitions to dead-letter without accepting a retry timestamp", async () => {
   const client = new ScriptedClient(() => ({ rowCount: 1, rows: [{ status: "dead_letter", available_at: new Date(NOW) }] }));
   const repository = createPostgresOwnerRecoveryOutboxRepository({ client, now: () => NOW });
@@ -98,9 +151,9 @@ test("stale claims and database diagnostics become stable secret-free errors", a
 });
 
 test("health returns aggregate backlog only", async () => {
-  const client = new ScriptedClient(() => ({ rowCount: 1, rows: [{ pending: "3", uncertain: "2", dead_letter: "1", oldest_pending_at: new Date(NOW) }] }));
+  const client = new ScriptedClient(() => ({ rowCount: 1, rows: [{ pending: "3", uncertain: "2", dead_letter: "1", oldest_pending_at: new Date(NOW), oldest_uncertain_at: new Date(NOW - 1_000) }] }));
   const repository = createPostgresOwnerRecoveryOutboxRepository({ client, now: () => NOW });
-  assert.deepEqual(await repository.health(), { pending: 3, uncertain: 2, dead_letter: 1, oldest_pending_at: new Date(NOW).toISOString() });
+  assert.deepEqual(await repository.health(), { pending: 3, uncertain: 2, dead_letter: 1, oldest_pending_at: new Date(NOW).toISOString(), oldest_uncertain_at: new Date(NOW - 1_000).toISOString() });
 });
 
 function row() { return { organization_id: ORG, event_id: EVENT, request_id: REQUEST, subject_member_id: MEMBER, event_type: "recovery.request.created", attempts: 1, claim_expires_at: new Date(NOW + 30_000), created_at: new Date(NOW) }; }

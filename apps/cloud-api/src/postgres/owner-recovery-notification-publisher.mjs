@@ -1,6 +1,6 @@
 import https from "node:https";
 
-import { createOwnerRecoveryDeliveryBinding, normalizeOwnerRecoveryDeliveryBinding } from "./owner-recovery-delivery-binding.mjs";
+import { normalizeOwnerRecoveryDeliveryBinding, sameOwnerRecoveryDeliveryBinding } from "./owner-recovery-delivery-binding.mjs";
 
 export const OWNER_RECOVERY_NOTIFICATION_PUBLISHER_DEFAULT_MAX_RESPONSE_BYTES = 64 * 1024;
 export const OWNER_RECOVERY_NOTIFICATION_PUBLISHER_MAX_RESPONSE_BYTES = 1024 * 1024;
@@ -28,6 +28,7 @@ const MESSAGES = Object.freeze({
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu;
 const EVENT_TYPE = /^[a-z0-9][a-z0-9._:-]{0,127}$/u;
 const SECRET = /^[\x21-\x7e]+$/u;
+const ACCEPTANCE_LOOKUP_KIND = "owner-recovery-notification-acceptance-lookup";
 const PUBLIC_EVENT_KEYS = Object.freeze([
   "created_at",
   "event_id",
@@ -56,22 +57,21 @@ export function createOwnerRecoveryNotificationPublisher({
   webhookUrl,
   authorizationSecret,
   resolveWebhookUrl,
+  confirmationUrl,
+  resolveConfirmationUrl,
   resolveAuthorizationSecret,
-  bindingId = "hosted-owner-recovery-webhook",
-  bindingKeyVersion = 1,
+  bindingId,
+  bindingKeyVersion,
   bindingDigest,
   requestFn = https.request,
   maxResponseBytes = OWNER_RECOVERY_NOTIFICATION_PUBLISHER_DEFAULT_MAX_RESPONSE_BYTES
 } = {}) {
   const fixedUrl = fixedValue(webhookUrl, resolveWebhookUrl, normalizeWebhookUrl);
+  const fixedConfirmationUrl = fixedValue(confirmationUrl, resolveConfirmationUrl, normalizeWebhookUrl);
   const fixedSecret = fixedValue(authorizationSecret, resolveAuthorizationSecret, normalizeAuthorizationSecret);
   let binding;
-  try {
-    binding = bindingDigest === undefined
-      ? createOwnerRecoveryDeliveryBinding({ binding_id: bindingId, key_version: bindingKeyVersion, namespace: fixedUrl })
-      : normalizeOwnerRecoveryDeliveryBinding({ binding_id: bindingId, key_version: bindingKeyVersion, binding_digest: bindingDigest });
-  } catch { throw invalidConfig(); }
-  if (fixedUrl === undefined && bindingDigest === undefined) throw invalidConfig();
+  try { binding = normalizeOwnerRecoveryDeliveryBinding({ binding_id: bindingId, key_version: bindingKeyVersion, binding_digest: bindingDigest }); }
+  catch { throw invalidConfig(); }
   if (typeof requestFn !== "function" || !Number.isSafeInteger(maxResponseBytes)
     || maxResponseBytes < 1 || maxResponseBytes > OWNER_RECOVERY_NOTIFICATION_PUBLISHER_MAX_RESPONSE_BYTES) {
     throw invalidConfig();
@@ -101,7 +101,36 @@ export function createOwnerRecoveryNotificationPublisher({
     return validateAcceptedResponse(response, request.idempotency_key);
   }
 
-  return Object.freeze({ publish, binding });
+  async function lookupAcceptance(input) {
+    const request = normalizeLookupInput(input);
+    if (request.signal?.aborted) throw aborted();
+
+    const resolverInput = Object.freeze({ idempotency_key: request.idempotency_key, signal: request.signal });
+    const url = await resolveConfigured(fixedConfirmationUrl, resolveConfirmationUrl, resolverInput, normalizeWebhookUrl);
+    if (request.signal?.aborted) throw aborted();
+    const secret = await resolveConfigured(fixedSecret, resolveAuthorizationSecret, resolverInput, normalizeAuthorizationSecret);
+    if (request.signal?.aborted) throw aborted();
+
+    const body = Buffer.from(JSON.stringify({
+      schema_version: 1,
+      kind: ACCEPTANCE_LOOKUP_KIND,
+      provider_binding: binding,
+      idempotency_key: request.idempotency_key
+    }), "utf8");
+    const response = await requestHttps({
+      requestFn,
+      url,
+      secret,
+      idempotencyKey: request.idempotency_key,
+      body,
+      signal: request.signal,
+      maxResponseBytes
+    });
+    if (request.signal?.aborted) throw aborted();
+    return validateAcceptanceLookupResponse(response, request.idempotency_key, binding);
+  }
+
+  return Object.freeze({ publish, lookupAcceptance, binding });
 }
 
 function fixedValue(value, resolver, normalize) {
@@ -130,6 +159,13 @@ function normalizePublishInput(input) {
   const event = normalizePublicEvent(input.event);
   if (event.event_id !== input.idempotency_key) throw invalidInput();
   return Object.freeze({ event, idempotency_key: input.idempotency_key, signal: input.signal });
+}
+
+function normalizeLookupInput(input) {
+  if (!plainObject(input) || !onlyKeys(input, ["idempotency_key", "signal"])
+    || typeof input.idempotency_key !== "string" || !UUID.test(input.idempotency_key)
+    || (input.signal !== undefined && !(input.signal instanceof AbortSignal))) throw invalidInput();
+  return Object.freeze({ idempotency_key: input.idempotency_key, signal: input.signal });
 }
 
 function normalizePublicEvent(value) {
@@ -226,6 +262,10 @@ function requestHttps({ requestFn, url, secret, idempotencyKey, body, signal, ma
         };
         const onEnd = () => {
           try {
+            if (declaredLength >= 0 && total !== declaredLength) {
+              fail(rejected());
+              return;
+            }
             finish(resolve, Object.freeze({
               statusCode: response.statusCode,
               headers,
@@ -269,10 +309,15 @@ function requestHttps({ requestFn, url, secret, idempotencyKey, body, signal, ma
 function responseLength(headers) {
   try {
     const values = headerValues(headers, "content-length");
-    if (values.length === 0) return -1;
+    const transferEncodings = headerValues(headers, "transfer-encoding");
+    if (transferEncodings.length > 1 || transferEncodings.some((value) => typeof value !== "string" || value.trim() === "")) throw rejected();
+    if (values.length === 0) {
+      if (transferEncodings.length === 1 && transferEncodings[0].trim().toLowerCase() !== "chunked") throw rejected();
+      return -1;
+    }
     if (values.length !== 1) throw rejected();
     const [value] = values;
-    if (headerValues(headers, "transfer-encoding").length > 0 || typeof value !== "string" || !/^\d+$/u.test(value)) throw rejected();
+    if (transferEncodings.length > 0 || typeof value !== "string" || !/^\d+$/u.test(value)) throw rejected();
     const length = Number(value);
     if (!Number.isSafeInteger(length)) throw rejected();
     return length;
@@ -295,6 +340,26 @@ function validateAcceptedResponse(response, idempotencyKey) {
       || typeof parsed.idempotency_key !== "string" || parsed.idempotency_key !== idempotencyKey
       || (parsed.accepted === false && parsed.duplicate !== false)) throw rejected();
     return Object.freeze({ accepted: parsed.accepted, duplicate: parsed.duplicate, idempotency_key: parsed.idempotency_key });
+  } catch (error) {
+    if (error instanceof OwnerRecoveryNotificationPublisherError) throw error;
+    throw rejected();
+  }
+}
+
+function validateAcceptanceLookupResponse(response, idempotencyKey, binding) {
+  try {
+    if (!Number.isSafeInteger(response?.statusCode) || (response.statusCode !== 200 && response.statusCode !== 404)
+      || contentType(response?.headers) !== "application/json" || !Buffer.isBuffer(response?.body)) throw rejected();
+    let body;
+    try { body = new TextDecoder("utf-8", { fatal: true }).decode(response.body); }
+    catch { throw rejected(); }
+    const parsed = parseResponseJson(body);
+    if (!plainObject(parsed) || !sameKeys(parsed, ["accepted", "idempotency_key", "provider_binding"])
+      || typeof parsed.accepted !== "boolean" || typeof parsed.idempotency_key !== "string"
+      || parsed.idempotency_key !== idempotencyKey
+      || !sameOwnerRecoveryDeliveryBinding(parsed.provider_binding, binding)
+      || (response.statusCode === 404 && parsed.accepted !== false)) throw rejected();
+    return Object.freeze({ accepted: parsed.accepted, idempotency_key: parsed.idempotency_key });
   } catch (error) {
     if (error instanceof OwnerRecoveryNotificationPublisherError) throw error;
     throw rejected();

@@ -1,5 +1,5 @@
 export const OPERATIONAL_HEALTH_VERSION = 1;
-export const EXPECTED_POSTGRES_SCHEMA_VERSION = 35;
+export const EXPECTED_POSTGRES_SCHEMA_VERSION = 36;
 
 // Recovery operations are deliberately a closed set.  These names are also
 // the admission-control names used by human-auth/rate-limit.mjs; keeping the
@@ -83,6 +83,10 @@ export const OPERATIONAL_METRIC_KEYS = Object.freeze([
   "owner_recovery_outbox_redrive_success_total",
   "owner_recovery_outbox_redrive_failure_total",
   "owner_recovery_outbox_prune_total",
+  "owner_recovery_outbox_confirmation_lookup_total",
+  "owner_recovery_outbox_confirmation_success_total",
+  "owner_recovery_outbox_confirmation_miss_total",
+  "owner_recovery_outbox_confirmation_failure_total",
   "owner_recovery_state_latency_count",
   "owner_recovery_state_latency_total_ms",
   ...Object.values(HUMAN_RECOVERY_METRIC_KEYS)
@@ -216,6 +220,10 @@ export function createOperationalMetrics({ initial = {} } = {}) {
     recordOwnerRecoveryOutboxRedriveSuccess: (amount = 1) => increment("owner_recovery_outbox_redrive_success_total", amount),
     recordOwnerRecoveryOutboxRedriveFailure: (amount = 1) => increment("owner_recovery_outbox_redrive_failure_total", amount),
     recordOwnerRecoveryOutboxPrune: (amount = 1) => increment("owner_recovery_outbox_prune_total", amount),
+    recordOwnerRecoveryOutboxConfirmationLookup: (amount = 1) => increment("owner_recovery_outbox_confirmation_lookup_total", amount),
+    recordOwnerRecoveryOutboxConfirmationSuccess: (amount = 1) => increment("owner_recovery_outbox_confirmation_success_total", amount),
+    recordOwnerRecoveryOutboxConfirmationMiss: (amount = 1) => increment("owner_recovery_outbox_confirmation_miss_total", amount),
+    recordOwnerRecoveryOutboxConfirmationFailure: (amount = 1) => increment("owner_recovery_outbox_confirmation_failure_total", amount),
     recordOwnerRecoveryStateLatency,
     recordHumanRecoveryOperation: (operation, amount = 1) => {
       const key = HUMAN_RECOVERY_METRIC_KEYS[operation];
@@ -462,6 +470,12 @@ function normalizeOutboxResult(result, { outboxMaxPending, outboxMaxLagMs, now }
     if (!Number.isFinite(oldest) || oldest > current) return skippedOutbox("unavailable");
     oldestPendingAgeMs = Math.min(Number.MAX_SAFE_INTEGER, current - oldest);
   } else if (pending !== 0) return skippedOutbox("unavailable");
+  let oldestUncertainAgeMs = null;
+  if (value.oldest_uncertain_at !== null) {
+    const oldest = Date.parse(String(value.oldest_uncertain_at));
+    if (!Number.isFinite(oldest) || oldest > current) return skippedOutbox("unavailable");
+    oldestUncertainAgeMs = Math.min(Number.MAX_SAFE_INTEGER, current - oldest);
+  } else if (uncertain !== 0) return skippedOutbox("unavailable");
   const code = workerState !== "running"
     ? "worker_unavailable"
     : uncertain > 0
@@ -473,11 +487,11 @@ function normalizeOutboxResult(result, { outboxMaxPending, outboxMaxLagMs, now }
         : oldestPendingAgeMs !== null && oldestPendingAgeMs > outboxMaxLagMs
           ? "lag_exceeded"
           : "ok";
-  return Object.freeze({ ok: code === "ok", code, worker_state: workerState, pending_count: pending, uncertain_count: uncertain, dead_letter_count: deadLetter, oldest_pending_age_ms: oldestPendingAgeMs });
+  return Object.freeze({ ok: code === "ok", code, worker_state: workerState, pending_count: pending, uncertain_count: uncertain, dead_letter_count: deadLetter, oldest_pending_age_ms: oldestPendingAgeMs, oldest_uncertain_age_ms: oldestUncertainAgeMs });
 }
 
 function skippedOutbox(code) {
-  return Object.freeze({ ok: false, code, worker_state: code === "draining" ? "draining" : "unavailable", pending_count: null, uncertain_count: null, dead_letter_count: null, oldest_pending_age_ms: null });
+  return Object.freeze({ ok: false, code, worker_state: code === "draining" ? "draining" : "unavailable", pending_count: null, uncertain_count: null, dead_letter_count: null, oldest_pending_age_ms: null, oldest_uncertain_age_ms: null });
 }
 
 async function defaultProbe(pool) {

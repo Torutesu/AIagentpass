@@ -59,6 +59,9 @@ export function createOwnerRecoveryOutboxWorker({
   try { deliveryBinding = publisher.binding === undefined ? undefined : normalizeOwnerRecoveryDeliveryBinding(publisher.binding); }
   catch { throw invalid(); }
   if (repository.binding !== undefined && (deliveryBinding === undefined || !sameOwnerRecoveryDeliveryBinding(repository.binding, deliveryBinding))) throw invalid();
+  const confirmationMethods = [repository.claimConfirmationBatch, repository.markProviderConfirmed, publisher.lookupAcceptance];
+  const confirmationEnabled = confirmationMethods.every((method) => typeof method === "function");
+  if (!confirmationEnabled && confirmationMethods.some((method) => method !== undefined)) throw invalid();
   if (retentionRepository !== undefined && (!retentionRepository || typeof retentionRepository.prune !== "function")) throw invalid();
   const config = Object.freeze({
     batchSize: integer(batchSize, 1, 100),
@@ -111,8 +114,60 @@ export function createOwnerRecoveryOutboxWorker({
       if (settled.status === "fulfilled" && OUTCOMES.has(settled.value)) result[settled.value] += 1;
       else { result.uncertain += 1; uncertain(metrics); }
     }
+    if (confirmationEnabled) Object.assign(result, await reconcileProviderConfirmations());
     await maybePruneRetention();
     return Object.freeze(result);
+  }
+
+  async function reconcileProviderConfirmations() {
+    let candidates;
+    try { candidates = await repository.claimConfirmationBatch({ limit: config.batchSize }); }
+    catch { metric(metrics, "recordOwnerRecoveryOutboxFailure"); return { confirmation_checked: 0, confirmed: 0 }; }
+    if (!Array.isArray(candidates)) {
+      metric(metrics, "recordOwnerRecoveryOutboxFailure");
+      return { confirmation_checked: 0, confirmed: 0 };
+    }
+    if (candidates.length > 0) metric(metrics, "recordOwnerRecoveryOutboxConfirmationLookup", candidates.length);
+    const settled = await Promise.all(candidates.map(confirmOne));
+    return {
+      confirmation_checked: candidates.length,
+      confirmed: settled.filter(Boolean).length
+    };
+  }
+
+  async function confirmOne(candidate) {
+    try {
+      validateConfirmationCandidate(candidate);
+      if (!sameOwnerRecoveryDeliveryBinding(candidate.provider_binding, deliveryBinding)) return false;
+      const response = await withTimeout(
+        (signal) => publisher.lookupAcceptance(Object.freeze({ idempotency_key: candidate.event_id, signal })),
+        config.publishTimeoutMs,
+        setTimeoutFn,
+        clearTimeoutFn
+      );
+      if (!response || typeof response.accepted !== "boolean" || response.idempotency_key !== candidate.event_id) {
+        metric(metrics, "recordOwnerRecoveryOutboxConfirmationFailure");
+        return false;
+      }
+      if (!response.accepted) {
+        metric(metrics, "recordOwnerRecoveryOutboxConfirmationMiss");
+        return false;
+      }
+      await repository.markProviderConfirmed({
+        organization_id: candidate.organization_id,
+        event_id: candidate.event_id,
+        expected_management_version: candidate.expected_management_version,
+        provider_confirmation_attempt: candidate.provider_confirmation_attempt
+      });
+      metric(metrics, "recordOwnerRecoveryOutboxPublish");
+      metric(metrics, "recordOwnerRecoveryOutboxConfirmationSuccess");
+      return true;
+    } catch (error) {
+      if (isClaimLost(error)) metric(metrics, "recordOwnerRecoveryOutboxClaimLost");
+      else metric(metrics, "recordOwnerRecoveryOutboxFailure");
+      metric(metrics, "recordOwnerRecoveryOutboxConfirmationFailure");
+      return false;
+    }
   }
 
   async function maybePruneRetention() {
@@ -272,6 +327,15 @@ function validateEvent(value) {
   timestamp(value.created_at);
   timestamp(value.claim_expires_at);
 }
+function validateConfirmationCandidate(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)
+    || Object.keys(value).sort().join(",") !== "event_id,expected_management_version,organization_id,provider_binding,provider_confirmation_attempt") throw invalid();
+  uuid(value.organization_id);
+  uuid(value.event_id);
+  integer(value.expected_management_version, 1, 2_147_483_647);
+  integer(value.provider_confirmation_attempt, 1, 2_147_483_647);
+  normalizeOwnerRecoveryDeliveryBinding(value.provider_binding);
+}
 function retryDelay(attempt, config, random) {
   const exponent = Math.min(20, Math.max(0, integer(attempt, 1, MAX_ATTEMPTS) - 1));
   const base = Math.min(config.maxRetryMs, config.baseRetryMs * (2 ** exponent));
@@ -291,6 +355,7 @@ function uncertain(metrics) { metric(metrics, "recordOwnerRecoveryOutboxUncertai
 function clock(now) { const value = Number(now()); if (!Number.isSafeInteger(value) || value < 0) throw invalid(); return value; }
 function integer(value, min, max) { if (!Number.isSafeInteger(value) || value < min || value > max) throw invalid(); return value; }
 function timestamp(value) { const parsed = new Date(value).getTime(); if (!Number.isFinite(parsed)) throw invalid(); return parsed; }
+function uuid(value) { if (typeof value !== "string" || !UUID.test(value)) throw invalid(); return value; }
 function invalid() { return new OwnerRecoveryOutboxWorkerError(OWNER_RECOVERY_OUTBOX_WORKER_ERROR_CODES.INVALID_CONFIGURATION); }
 
 async function withTimeout(operation, timeoutMs, setTimeoutFn, clearTimeoutFn) {

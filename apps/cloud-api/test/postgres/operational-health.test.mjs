@@ -127,6 +127,10 @@ test("metrics are fixed-key, monotonic, and free of caller labels", () => {
     owner_recovery_outbox_redrive_success_total: 0,
     owner_recovery_outbox_redrive_failure_total: 0,
     owner_recovery_outbox_prune_total: 0,
+    owner_recovery_outbox_confirmation_lookup_total: 0,
+    owner_recovery_outbox_confirmation_success_total: 0,
+    owner_recovery_outbox_confirmation_miss_total: 0,
+    owner_recovery_outbox_confirmation_failure_total: 0,
     owner_recovery_state_latency_count: 0,
     owner_recovery_state_latency_total_ms: 0,
     human_recovery_create_total: 1,
@@ -317,7 +321,7 @@ test("schema drift, DB failure, and malformed pool state fail closed without err
 
 test("owner recovery outbox readiness is aggregate-only and fails closed on dead letters, hard lag, or a stopped worker", async () => {
   const now = Date.parse("2026-08-14T00:15:00.000Z");
-  let outbox = { pending: 0, uncertain: 0, dead_letter: 0, oldest_pending_at: null, worker_state: "running" };
+  let outbox = { pending: 0, uncertain: 0, dead_letter: 0, oldest_pending_at: null, oldest_uncertain_at: null, worker_state: "running" };
   const health = createOperationalHealth({
     pool: pool(),
     maxConnections: 4,
@@ -332,22 +336,23 @@ test("owner recovery outbox readiness is aggregate-only and fails closed on dead
   });
   let report = await health.readiness();
   assert.equal(report.ready, true);
-  assert.deepEqual(report.checks.owner_recovery_outbox, { ok: true, code: "ok", worker_state: "running", pending_count: 0, uncertain_count: 0, dead_letter_count: 0, oldest_pending_age_ms: null });
+  assert.deepEqual(report.checks.owner_recovery_outbox, { ok: true, code: "ok", worker_state: "running", pending_count: 0, uncertain_count: 0, dead_letter_count: 0, oldest_pending_age_ms: null, oldest_uncertain_age_ms: null });
 
-  outbox = { pending: 1, uncertain: 0, dead_letter: 1, oldest_pending_at: new Date(now - 1_000).toISOString(), worker_state: "running", organization_id: "must-not-leak" };
+  outbox = { pending: 1, uncertain: 0, dead_letter: 1, oldest_pending_at: new Date(now - 1_000).toISOString(), oldest_uncertain_at: null, worker_state: "running", organization_id: "must-not-leak" };
   report = await health.readiness();
   assert.equal(report.code, "owner_recovery_outbox_dead_letter_present");
   assert.equal(JSON.stringify(report).includes("must-not-leak"), false);
 
-  outbox = { pending: 0, uncertain: 1, dead_letter: 0, oldest_pending_at: null, worker_state: "running" };
+  outbox = { pending: 0, uncertain: 1, dead_letter: 0, oldest_pending_at: null, oldest_uncertain_at: new Date(now - 5_000).toISOString(), worker_state: "running" };
   report = await health.readiness();
   assert.equal(report.ready, false);
   assert.equal(report.code, "owner_recovery_outbox_uncertain_delivery_present");
   assert.equal(report.checks.owner_recovery_outbox.uncertain_count, 1);
+  assert.equal(report.checks.owner_recovery_outbox.oldest_uncertain_age_ms, 5_000);
 
-  outbox = { pending: 1, uncertain: 0, dead_letter: 0, oldest_pending_at: new Date(now - 60_001).toISOString(), worker_state: "running" };
+  outbox = { pending: 1, uncertain: 0, dead_letter: 0, oldest_pending_at: new Date(now - 60_001).toISOString(), oldest_uncertain_at: null, worker_state: "running" };
   assert.equal((await health.readiness()).code, "owner_recovery_outbox_lag_exceeded");
-  outbox = { pending: 0, uncertain: 0, dead_letter: 0, oldest_pending_at: null, worker_state: "idle" };
+  outbox = { pending: 0, uncertain: 0, dead_letter: 0, oldest_pending_at: null, oldest_uncertain_at: null, worker_state: "idle" };
   assert.equal((await health.readiness()).code, "owner_recovery_outbox_worker_unavailable");
   outbox = null;
   assert.equal((await health.readiness()).code, "owner_recovery_outbox_unavailable");

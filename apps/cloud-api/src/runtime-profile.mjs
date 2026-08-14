@@ -69,7 +69,11 @@ const HUMAN_AUTH_ENV = Object.freeze([
 ]);
 const OWNER_RECOVERY_NOTIFICATION_ENV = Object.freeze([
   "AGENTPASS_OWNER_RECOVERY_NOTIFICATION_WEBHOOK_URL",
-  "AGENTPASS_OWNER_RECOVERY_NOTIFICATION_AUTHORIZATION_PATH"
+  "AGENTPASS_OWNER_RECOVERY_NOTIFICATION_CONFIRMATION_URL",
+  "AGENTPASS_OWNER_RECOVERY_NOTIFICATION_AUTHORIZATION_PATH",
+  "AGENTPASS_OWNER_RECOVERY_NOTIFICATION_BINDING_ID",
+  "AGENTPASS_OWNER_RECOVERY_NOTIFICATION_BINDING_KEY_VERSION",
+  "AGENTPASS_OWNER_RECOVERY_NOTIFICATION_BINDING_DIGEST"
 ]);
 const PROFILE_RELATED_ENV = new Set([
   PROFILE_ENV,
@@ -99,6 +103,7 @@ const PROFILE_RELATED_ENV = new Set([
   CAPABILITY_NONCE_SECRET_ENV
 ]);
 const IDENTIFIER = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/u;
+const OWNER_RECOVERY_BINDING_IDENTIFIER = /^[a-z0-9][a-z0-9._:-]{0,127}$/u;
 const RP_ID = /^[A-Za-z0-9](?:[A-Za-z0-9.-]*[A-Za-z0-9])?$/u;
 const IDENTITY_PROVIDER = /^[a-z][a-z0-9._-]{0,63}$/u;
 const BASE64URL_32_BYTES = /^[A-Za-z0-9_-]{43}$/u;
@@ -207,15 +212,33 @@ function parseOwnerRecoveryNotification(env) {
     return { present: true, complete: false };
   }
   let webhook;
+  let confirmation;
   try { webhook = new URL(env.AGENTPASS_OWNER_RECOVERY_NOTIFICATION_WEBHOOK_URL); }
+  catch { return { present: true, complete: false }; }
+  try { confirmation = new URL(env.AGENTPASS_OWNER_RECOVERY_NOTIFICATION_CONFIRMATION_URL); }
   catch { return { present: true, complete: false }; }
   const complete = webhook.protocol === "https:"
     && webhook.username === ""
     && webhook.password === ""
     && webhook.hash === ""
     && webhook.hostname.length > 0
-    && env.AGENTPASS_OWNER_RECOVERY_NOTIFICATION_WEBHOOK_URL.length <= 2_048;
+    && env.AGENTPASS_OWNER_RECOVERY_NOTIFICATION_WEBHOOK_URL.length <= 2_048
+    && confirmation.protocol === "https:"
+    && confirmation.username === ""
+    && confirmation.password === ""
+    && confirmation.hash === ""
+    && confirmation.hostname.length > 0
+    && env.AGENTPASS_OWNER_RECOVERY_NOTIFICATION_CONFIRMATION_URL.length <= 2_048
+    && OWNER_RECOVERY_BINDING_IDENTIFIER.test(env.AGENTPASS_OWNER_RECOVERY_NOTIFICATION_BINDING_ID)
+    && positiveIntegerText(env.AGENTPASS_OWNER_RECOVERY_NOTIFICATION_BINDING_KEY_VERSION)
+    && /^[0-9a-f]{64}$/u.test(env.AGENTPASS_OWNER_RECOVERY_NOTIFICATION_BINDING_DIGEST);
   return { present: true, complete };
+}
+
+function positiveIntegerText(value) {
+  if (typeof value !== "string" || !/^[1-9][0-9]*$/u.test(value)) return false;
+  const parsed = Number(value);
+  return Number.isSafeInteger(parsed) && parsed <= 2_147_483_647;
 }
 
 function parseHostedRefresh(env) {

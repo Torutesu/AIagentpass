@@ -11,6 +11,8 @@ const MAX_LEASE_MS = 5 * 60_000;
 const MAX_BATCH = 100;
 const MAX_ATTEMPTS = 100;
 const MAX_RETRY_MS = 24 * 60 * 60 * 1000;
+const MAX_CONFIRMATION_BATCH = 100;
+const CONFIRMATION_RETRY_MS = 60_000;
 
 export const OWNER_RECOVERY_OUTBOX_ERROR_CODES = Object.freeze({
   INVALID_REQUEST: "owner_recovery_outbox_invalid_request",
@@ -60,6 +62,7 @@ export function createPostgresOwnerRecoveryOutboxRepository({ client, randomByte
           UPDATE owner_recovery_outbox outbox
           SET status='uncertain',uncertain_at=clock_timestamp(),
               uncertain_reason='process_interrupted',last_error_code='delivery_uncertain',
+              provider_confirmation_next_at=CASE WHEN outbox.provider_binding_state='bound' THEN clock_timestamp() ELSE NULL END,
               claim_token_digest=NULL,claim_expires_at=NULL,updated_at=clock_timestamp()
           FROM expired
           WHERE outbox.organization_id=expired.organization_id
@@ -145,6 +148,7 @@ export function createPostgresOwnerRecoveryOutboxRepository({ client, randomByte
       const result = await client.query(`UPDATE owner_recovery_outbox
         SET status='uncertain',uncertain_at=clock_timestamp(),
             uncertain_reason='delivery_unknown',last_error_code='delivery_uncertain',
+            provider_confirmation_next_at=CASE WHEN provider_binding_state='bound' THEN clock_timestamp() ELSE NULL END,
             claim_token_digest=NULL,claim_expires_at=NULL,updated_at=clock_timestamp()
         WHERE organization_id=$1 AND event_id=$2 AND status='pending'
           AND attempts=$3 AND claim_token_digest=$4
@@ -158,20 +162,84 @@ export function createPostgresOwnerRecoveryOutboxRepository({ client, randomByte
     }
   }
 
+  async function claimConfirmationBatch({ limit = 10 } = {}) {
+    if (delivery === undefined) throw invalid();
+    const boundedLimit = integer(limit, 1, MAX_CONFIRMATION_BATCH);
+    try {
+      const result = await client.query(`WITH candidates AS (
+          SELECT organization_id,event_id
+          FROM owner_recovery_outbox
+          WHERE status='uncertain' AND provider_binding_state='bound'
+            AND provider_binding_id=$2 AND provider_key_version=$3
+            AND provider_binding_digest=decode($4,'hex')
+            AND provider_confirmation_attempts<2147483647
+            AND provider_confirmation_next_at<=clock_timestamp()
+          ORDER BY provider_confirmation_next_at,organization_id,event_id
+          FOR UPDATE SKIP LOCKED
+          LIMIT $1
+        )
+        UPDATE owner_recovery_outbox outbox
+        SET provider_confirmation_attempts=outbox.provider_confirmation_attempts+1,
+            provider_confirmation_next_at=clock_timestamp()+($5 * interval '1 millisecond'),
+            updated_at=clock_timestamp()
+        FROM candidates
+        WHERE outbox.organization_id=candidates.organization_id
+          AND outbox.event_id=candidates.event_id
+        RETURNING outbox.organization_id,outbox.event_id,outbox.management_version,
+          outbox.provider_confirmation_attempts,outbox.provider_binding_id,
+          outbox.provider_key_version,encode(outbox.provider_binding_digest,'hex') AS provider_binding_digest`, [
+        boundedLimit, delivery.binding_id, delivery.key_version, delivery.binding_digest, CONFIRMATION_RETRY_MS
+      ]);
+      return Object.freeze((result?.rows ?? []).map(publicConfirmationClaim));
+    } catch (error) {
+      if (error instanceof OwnerRecoveryOutboxRepositoryError) throw error;
+      throw unavailable();
+    }
+  }
+
+  async function markProviderConfirmed(input = {}) {
+    if (delivery === undefined) throw invalid();
+    if (!input || typeof input !== "object" || Array.isArray(input)
+      || Object.keys(input).sort().join(",") !== "event_id,expected_management_version,organization_id,provider_confirmation_attempt") throw invalid();
+    const organizationId = uuid(input.organization_id);
+    const eventId = uuid(input.event_id);
+    const managementVersion = integer(input.expected_management_version, 1, 2_147_483_647);
+    const confirmationAttempt = integer(input.provider_confirmation_attempt, 1, 2_147_483_647);
+    try {
+      const result = await client.query(`UPDATE owner_recovery_outbox
+        SET status='published',published_at=clock_timestamp(),updated_at=clock_timestamp(),
+            uncertain_at=NULL,uncertain_reason=NULL,last_error_code=NULL,
+            provider_confirmation_next_at=NULL
+        WHERE organization_id=$1 AND event_id=$2 AND status='uncertain'
+          AND management_version=$3 AND provider_confirmation_attempts=$4
+          AND provider_binding_state='bound' AND provider_binding_id=$5
+          AND provider_key_version=$6 AND provider_binding_digest=decode($7,'hex')
+        RETURNING published_at`, [organizationId, eventId, managementVersion, confirmationAttempt,
+        delivery.binding_id, delivery.key_version, delivery.binding_digest]);
+      if (rowCount(result) !== 1) throw confirmationLost();
+      return Object.freeze({ published: true, published_at: timestamp(result.rows[0].published_at) });
+    } catch (error) {
+      if (error instanceof OwnerRecoveryOutboxRepositoryError) throw error;
+      throw unavailable();
+    }
+  }
+
   async function health() {
     try {
       const result = await client.query(`SELECT
           count(*) FILTER (WHERE status='pending')::text AS pending,
           count(*) FILTER (WHERE status='uncertain')::text AS uncertain,
           count(*) FILTER (WHERE status='dead_letter')::text AS dead_letter,
-          min(created_at) FILTER (WHERE status='pending') AS oldest_pending_at
+          min(created_at) FILTER (WHERE status='pending') AS oldest_pending_at,
+          min(uncertain_at) FILTER (WHERE status='uncertain') AS oldest_uncertain_at
         FROM owner_recovery_outbox`, []);
       if (rowCount(result) !== 1) throw unavailable();
       return Object.freeze({
         pending: count(result.rows[0].pending),
         uncertain: count(result.rows[0].uncertain),
         dead_letter: count(result.rows[0].dead_letter),
-        oldest_pending_at: result.rows[0].oldest_pending_at == null ? null : timestamp(result.rows[0].oldest_pending_at)
+        oldest_pending_at: result.rows[0].oldest_pending_at == null ? null : timestamp(result.rows[0].oldest_pending_at),
+        oldest_uncertain_at: result.rows[0].oldest_uncertain_at == null ? null : timestamp(result.rows[0].oldest_uncertain_at)
       });
     } catch (error) {
       if (error instanceof OwnerRecoveryOutboxRepositoryError) throw error;
@@ -179,7 +247,28 @@ export function createPostgresOwnerRecoveryOutboxRepository({ client, randomByte
     }
   }
 
-  return Object.freeze({ claimBatch, markPublished, markFailed, markUncertain, health, ...(delivery === undefined ? {} : { binding: delivery }) });
+  return Object.freeze({
+    claimBatch, markPublished, markFailed, markUncertain, health,
+    ...(delivery === undefined ? {} : {
+      binding: delivery,
+      claimConfirmationBatch,
+      markProviderConfirmed
+    })
+  });
+}
+
+function publicConfirmationClaim(row) {
+  return Object.freeze({
+    organization_id: uuid(row.organization_id),
+    event_id: uuid(row.event_id),
+    expected_management_version: integer(Number(row.management_version), 1, 2_147_483_647),
+    provider_confirmation_attempt: integer(Number(row.provider_confirmation_attempts), 1, 2_147_483_647),
+    provider_binding: normalizeOwnerRecoveryDeliveryBinding({
+      binding_id: row.provider_binding_id,
+      key_version: Number(row.provider_key_version),
+      binding_digest: row.provider_binding_digest
+    })
+  });
 }
 
 function normalizeClaimMutation(input) {
@@ -232,6 +321,7 @@ function count(value) { const number = Number(value); if (!Number.isSafeInteger(
 function rowCount(result) { return Number(result?.rowCount ?? result?.rows?.length ?? 0); }
 function invalid() { return new OwnerRecoveryOutboxRepositoryError(OWNER_RECOVERY_OUTBOX_ERROR_CODES.INVALID_REQUEST); }
 function claimLost() { return new OwnerRecoveryOutboxRepositoryError(OWNER_RECOVERY_OUTBOX_ERROR_CODES.CLAIM_LOST); }
+function confirmationLost() { return new OwnerRecoveryOutboxRepositoryError(OWNER_RECOVERY_OUTBOX_ERROR_CODES.CLAIM_LOST); }
 function unavailable() { return new OwnerRecoveryOutboxRepositoryError(OWNER_RECOVERY_OUTBOX_ERROR_CODES.UNAVAILABLE); }
 function assertClient(client) { if (!client || typeof client.query !== "function") throw new TypeError("database client must provide query(text, params)"); }
 

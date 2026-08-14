@@ -42,7 +42,11 @@ function hostedEnv(overrides = {}) {
     AGENTPASS_CLOUD_QUALIFICATION_MANIFEST_KEY_ID: "qualification-manifest-2026-08",
     AGENTPASS_CLOUD_QUALIFICATION_MANIFEST_PUBLIC_KEY: "hosted-qualification-public-key-pin",
     AGENTPASS_OWNER_RECOVERY_NOTIFICATION_WEBHOOK_URL: "https://notifications.example.test/owner-recovery",
+    AGENTPASS_OWNER_RECOVERY_NOTIFICATION_CONFIRMATION_URL: "https://notifications.example.test/owner-recovery/acceptance",
     AGENTPASS_OWNER_RECOVERY_NOTIFICATION_AUTHORIZATION_PATH: "/srv/agentpass/hosted/notification-authorization.txt",
+    AGENTPASS_OWNER_RECOVERY_NOTIFICATION_BINDING_ID: "owner-recovery-primary",
+    AGENTPASS_OWNER_RECOVERY_NOTIFICATION_BINDING_KEY_VERSION: "1",
+    AGENTPASS_OWNER_RECOVERY_NOTIFICATION_BINDING_DIGEST: "a".repeat(64),
     ...overrides
   };
 }
@@ -118,7 +122,10 @@ test("accepts hosted only with complete PostgreSQL and Human Auth prerequisites"
     "AGENTPASS_CLOUD_AGENT_SESSION_PUBLIC_KEY",
     "AGENTPASS_CLOUD_AGENT_SESSION_PROCESS_POLICIES_PATH",
     "AGENTPASS_CLOUD_QUALIFICATION_MANIFEST_KEY_ID",
-    "AGENTPASS_CLOUD_QUALIFICATION_MANIFEST_PUBLIC_KEY"
+    "AGENTPASS_CLOUD_QUALIFICATION_MANIFEST_PUBLIC_KEY",
+    "AGENTPASS_OWNER_RECOVERY_NOTIFICATION_BINDING_ID",
+    "AGENTPASS_OWNER_RECOVERY_NOTIFICATION_BINDING_KEY_VERSION",
+    "AGENTPASS_OWNER_RECOVERY_NOTIFICATION_BINDING_DIGEST"
   ]) {
     const env = hostedEnv();
     delete env[name];
@@ -212,6 +219,19 @@ test("fails closed for partial, malformed, stale, unsafe, and unknown configurat
     () => parseCloudRuntimeProfile(hostedEnv({ AGENTPASS_HUMAN_CURSOR_SECRET: "cursor-secret-that-must-not-appear-in-errors" })),
     CLOUD_RUNTIME_PROFILE_ERROR_CODES.HUMAN_AUTH_INVALID
   );
+  for (const override of [
+    { AGENTPASS_OWNER_RECOVERY_NOTIFICATION_BINDING_ID: "Uppercase-Is-Not-Canonical" },
+    { AGENTPASS_OWNER_RECOVERY_NOTIFICATION_BINDING_KEY_VERSION: "0" },
+    { AGENTPASS_OWNER_RECOVERY_NOTIFICATION_BINDING_KEY_VERSION: "01" },
+    { AGENTPASS_OWNER_RECOVERY_NOTIFICATION_BINDING_KEY_VERSION: "2147483648" },
+    { AGENTPASS_OWNER_RECOVERY_NOTIFICATION_BINDING_DIGEST: "A".repeat(64) },
+    { AGENTPASS_OWNER_RECOVERY_NOTIFICATION_BINDING_DIGEST: "a".repeat(63) }
+  ]) {
+    assertProfileError(
+      () => parseCloudRuntimeProfile(hostedEnv(override)),
+      CLOUD_RUNTIME_PROFILE_ERROR_CODES.HOSTED_AUTH_INCOMPLETE
+    );
+  }
   assertProfileError(
     () => parseCloudRuntimeProfile({ ...evaluationEnv(), AGENTPASS_CLOUD_UNSUPPORTED_SETTING: "unknown-value" }),
     CLOUD_RUNTIME_PROFILE_ERROR_CODES.UNKNOWN_CONFIGURATION

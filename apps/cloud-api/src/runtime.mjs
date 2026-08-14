@@ -253,19 +253,46 @@ export function loadRuntimeConfig(env = {}) {
 
 function ownerRecoveryNotificationConfig(env) {
   const webhookUrl = env.AGENTPASS_OWNER_RECOVERY_NOTIFICATION_WEBHOOK_URL;
+  const confirmationUrl = env.AGENTPASS_OWNER_RECOVERY_NOTIFICATION_CONFIRMATION_URL;
   const authorizationSecretPath = env.AGENTPASS_OWNER_RECOVERY_NOTIFICATION_AUTHORIZATION_PATH;
-  if (webhookUrl === undefined && authorizationSecretPath === undefined) return null;
-  if (typeof webhookUrl !== "string" || typeof authorizationSecretPath !== "string") throw new Error("Owner recovery notification configuration is incomplete");
+  const bindingId = env.AGENTPASS_OWNER_RECOVERY_NOTIFICATION_BINDING_ID;
+  const bindingKeyVersion = env.AGENTPASS_OWNER_RECOVERY_NOTIFICATION_BINDING_KEY_VERSION;
+  const bindingDigest = env.AGENTPASS_OWNER_RECOVERY_NOTIFICATION_BINDING_DIGEST;
+  if ([webhookUrl, confirmationUrl, authorizationSecretPath, bindingId, bindingKeyVersion, bindingDigest].every((value) => value === undefined)) return null;
+  if ([webhookUrl, confirmationUrl, authorizationSecretPath, bindingId, bindingKeyVersion, bindingDigest].some((value) => typeof value !== "string")) throw new Error("Owner recovery notification configuration is incomplete");
   let parsed;
+  let parsedConfirmation;
   try { parsed = new URL(webhookUrl); } catch { throw new Error("Owner recovery notification webhook URL is invalid"); }
   if (parsed.protocol !== "https:" || parsed.username || parsed.password || parsed.hash || !parsed.hostname || webhookUrl.length > 2_048) throw new Error("Owner recovery notification webhook URL is invalid");
-  return Object.freeze({ webhookUrl: parsed.href, authorizationSecretPath: absolute(authorizationSecretPath, "AGENTPASS_OWNER_RECOVERY_NOTIFICATION_AUTHORIZATION_PATH") });
+  try { parsedConfirmation = new URL(confirmationUrl); } catch { throw new Error("Owner recovery notification confirmation URL is invalid"); }
+  if (parsedConfirmation.protocol !== "https:" || parsedConfirmation.username || parsedConfirmation.password || parsedConfirmation.hash || !parsedConfirmation.hostname || confirmationUrl.length > 2_048) throw new Error("Owner recovery notification confirmation URL is invalid");
+  if (!/^[a-z0-9][a-z0-9._:-]{0,127}$/u.test(bindingId)
+    || !/^[1-9][0-9]*$/u.test(bindingKeyVersion)
+    || !Number.isSafeInteger(Number(bindingKeyVersion)) || Number(bindingKeyVersion) > 2_147_483_647
+    || !/^[0-9a-f]{64}$/u.test(bindingDigest)) throw new Error("Owner recovery notification binding is invalid");
+  return Object.freeze({
+    webhookUrl: parsed.href,
+    confirmationUrl: parsedConfirmation.href,
+    authorizationSecretPath: absolute(authorizationSecretPath, "AGENTPASS_OWNER_RECOVERY_NOTIFICATION_AUTHORIZATION_PATH"),
+    bindingId,
+    bindingKeyVersion: Number(bindingKeyVersion),
+    bindingDigest
+  });
 }
 
 function createConfiguredOwnerRecoveryPublisher(config) {
   if (!config) throw new Error("Hosted owner recovery notification publisher is required");
   const authorizationSecret = readProtectedFile(config.authorizationSecretPath, "owner recovery notification authorization", 4_096).toString("utf8");
-  try { return createOwnerRecoveryNotificationPublisher({ webhookUrl: config.webhookUrl, authorizationSecret }); }
+  try {
+    return createOwnerRecoveryNotificationPublisher({
+      webhookUrl: config.webhookUrl,
+      confirmationUrl: config.confirmationUrl,
+      authorizationSecret,
+      bindingId: config.bindingId,
+      bindingKeyVersion: config.bindingKeyVersion,
+      bindingDigest: config.bindingDigest
+    });
+  }
   catch { throw new Error("Hosted owner recovery notification publisher is invalid"); }
 }
 
