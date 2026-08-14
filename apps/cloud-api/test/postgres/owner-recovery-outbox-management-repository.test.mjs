@@ -176,6 +176,7 @@ test("suppressUncertain requires a bounded reason, clears uncertain metadata, an
     if (text.startsWith("UPDATE owner_recovery_outbox")) {
       assert.match(text, /status='suppressed'/u);
       assert.match(text, /uncertain_at=NULL,uncertain_reason=NULL/u);
+      assert.match(text, /last_error_code=NULL/u);
       assert.deepEqual(params, [ORG, EVENT, 8, "operator-reviewed"]);
       return { rowCount: 1, rows: [uncertainMutation("suppressed")] };
     }

@@ -2,7 +2,7 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    branches: [main, codex/agent-platform]
   pull_request:
 
 permissions:
@@ -78,10 +78,16 @@ jobs:
           apps/cloud-api/test/postgres/owner-recovery-provider-confirmation.integration.test.mjs
           apps/cloud-api/test/postgres/owner-recovery-outbox-race-matrix.integration.test.mjs
           apps/cloud-api/test/postgres/owner-recovery-process-loss-qualification.integration.test.mjs
+      - name: Qualify composed HTTPS provider and retention-confirmation races on PostgreSQL 16
+        env:
+          AGENTPASS_TEST_DATABASE_URL: postgresql://postgres:agentpass-w15-integration@127.0.0.1:5433/postgres
+        run: npm run test:postgres:w15:composed
       - name: Qualify schema 34 to 35 delivery-binding upgrade on PostgreSQL 16
         env:
           AGENTPASS_TEST_DATABASE_URL: postgresql://postgres:agentpass-w15-integration@127.0.0.1:5433/agentpass_w15_upgrade
         run: node --test apps/cloud-api/test/postgres/owner-recovery-delivery-binding-upgrade.integration.test.mjs
+      - name: Independently verify W1.5 evidence before upload
+        run: node scripts/owner-recovery/verify-w15-evidence.mjs "$GITHUB_WORKSPACE/w15-evidence/owner-recovery-race-matrix.json"
       - name: Retain verified secret-free W1.5 evidence
         if: success()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2

@@ -12,7 +12,7 @@ The primary macOS delivery is not a required menu-bar application. The release a
 
 ## 2. Current implemented boundary
 
-The current branch has the versioned Core/OpenAPI/JSON Schema catalog, 34 forward-only PostgreSQL migrations, tenant-qualified hosted repositories, Human sessions and organization roles, WebAuthn registration/authentication and operation-bound recent authorization, Device API foundations, signed control bundles and ACK state, audit ingestion, emergency revocation, threshold-owner recovery, and a secret-free recovery-notification outbox with dead-letter management, durable uncertain-delivery quarantine, and bounded retention.
+The current branch has the versioned Core/OpenAPI/JSON Schema catalog, 36 forward-only PostgreSQL migrations, tenant-qualified hosted repositories, Human sessions and organization roles, WebAuthn registration/authentication and operation-bound recent authorization, Device API foundations, signed control bundles and ACK state, audit ingestion, emergency revocation, threshold-owner recovery, and a secret-free recovery-notification outbox with dead-letter management, durable uncertain-delivery quarantine, and bounded retention.
 
 At the `5a5842c` checkpoint, recovery dead-letter redrive and suppression require an exact resource-bound WebAuthn context. The repository recomputes that context and consumes the proof in the same organization-locked transaction. The full suite passes with 1,682 tests (1,648 pass and 34 intentionally skipped), lint and contract validation pass, and all 31 migrations apply to PostgreSQL 16.
 
@@ -129,7 +129,7 @@ PostgreSQL state/outbox rather than the health counter.
 
 Current verification baseline:
 
-- the root suite passes 1,788 tests: 1,742 pass, 46 explicitly skipped, 0 fail;
+- the root suite passes 1,792 tests: 1,744 pass, 48 explicitly skipped, 0 fail;
 - the frozen catalog validates 120 entries: 29 schemas, 55 OpenAPI operations,
   and 36 migrations;
 - lint and whitespace/error checks pass;
@@ -143,7 +143,7 @@ W1 closure execution order:
 | --- | --- | --- | --- |
 | W1.4a session bootstrap admission | Add fixed `human.session.bootstrap` policies to the shared PostgreSQL limiter; apply anonymous/global admission before identity-provider work, then subject/member/organization admission after verified identity resolution and before session insertion. Keep identifiers HMAC-derived and never persist the assertion or provider subject as a label. | Two API instances must share each bucket; unknown-subject floods must not create unbounded buckets; provider and limiter outages fail closed; identity replay and denied requests create no session. | The bootstrap route has no process-local allowance path, returns bounded `Retry-After`, and its atomic session ceiling still holds under concurrent accepted requests. |
 | W1.4b recovery state latency — complete | Observe database timestamps only after confirmed committed recovery transitions and report fixed-key count/total aggregates through `recordOwnerRecoveryStateLatency`. Do not label by organization, member, request, state, or error. Metrics failures remain post-commit and non-authoritative. | Fixed source-state CAS, negative/malformed timestamp, rollback, WebAuthn caller-owned commit, exact-once flush, and sync/async metric-sink failure tests; real PostgreSQL proves commit and rollback outcomes. | Confirmed commits emit one bounded observation per forward transition in normal operation; retries do not observe another transition and no recovery identity appears in health output. |
-| W1.5 delivery fault matrix — implementation complete, CI confirmation pending | Durable `uncertain` quarantine, immutable provider binding, append-only transition ledger, Owner/Admin retry/suppress API, independent-process `SIGKILL`, durable provider acceptance, automatic exact-binding confirmation, 34→35 upgrade, prune/redrive CAS, secret-free evidence, and the two-worker race matrix run on PostgreSQL 16. | Provider timeout/response loss, stale publish/fail/uncertain/confirmation CAS, retry/suppress/prune races, duplicate-acceptance convergence, and bounded lookup scheduling against real PostgreSQL. | The pushed commit passes the PostgreSQL 16 CI lane and retains the verified bounded evidence artifact; every case converges to one logical delivery or an explicit uncertain/dead-letter state. |
+| W1.5 delivery fault matrix — implementation and local PostgreSQL 16 qualification complete; CI pending | Durable `uncertain` quarantine, immutable provider binding, append-only transition ledger, Owner/Admin retry/suppress API, independent-process `SIGKILL`, durable provider acceptance, automatic exact-binding confirmation, 34→35 upgrade, prune/redrive CAS, secret-free evidence, the two-worker race matrix, authenticated HTTPS-provider/worker/PostgreSQL faults, and retention/confirmation races. | Provider timeout/response loss, malformed/oversized/truncated/delayed lookup responses, binding/key substitution, stale publish/fail/uncertain/confirmation CAS, retry/suppress/prune races, duplicate-acceptance convergence, and bounded lookup scheduling against real PostgreSQL. | The pushed PostgreSQL 16 CI lane, including the composed qualification, passes and retains the independently verified bounded evidence artifact; every case converges to one logical delivery or an explicit uncertain/dead-letter state. External CI remains unverified until its artifact exists. |
 | W1.6 operational closure | Add fixed-key alerts/runbook thresholds for queue age, uncertain outcomes, dead letters, redrive failure, prune failure, limiter denial/unavailability, and recovery latency. Update threat model and evidence index. | Snapshot tests must reject new labels/fields; runbook drill covers provider outage, worker restart, limiter outage, and dead-letter recovery. | W1 exit gate is reproducible from one documented command sequence and produces no secret-bearing artifact. |
 
 #### W1.4a completed merge sequence
@@ -155,7 +155,7 @@ W1 closure execution order:
 | C — hosted transport admission | Remove the process-local hosted fallback. Invalid or unauthenticated transport scope maps to fixed HMAC global buckets; authenticated Device traffic keeps tenant/device buckets. | Restart and two-instance tests prove the allowance cannot reset locally; malformed identifiers cannot create rows; repository outage returns stable `503`; Device tenant isolation remains intact. |
 | D — maintenance and observability | Start a dedicated shared-control maintenance worker independent of recovery delivery. Prune generic, anonymous, and replay rows with one total work budget and fixed label-free metrics. | Start/close/readiness tests, repeated-worker contention, sink failure, database outage/recovery, bounded transaction size, and health snapshots with no principal-derived labels. |
 
-W1.4a and W1.4b are complete. Finish the final W1.5 operational evidence gates next.
+W1.4a and W1.4b are complete. W1.5 implementation is complete; its PostgreSQL 16 CI and staging evidence gates remain pending.
 W2 Console work may continue in parallel only for read-only
 screens; authority-changing UI remains gated on these W1 guarantees.
 
@@ -239,25 +239,27 @@ Implemented W1.5 provider-convergence slice in migration `0036`:
   member, event, destination, or provider-response labels, and fixed-key
   lookup/success/miss/failure counters expose confirmation behavior.
 
-Remaining W1.5 release gate:
+Remaining W1.5 release gates:
 
-1. Confirm the pushed PostgreSQL 16 CI lane passes and retains the bounded
-   race-matrix evidence artifact. The test rejects tenant/member IDs, DSNs,
-   provider diagnostics, message content, credentials, and tokens before the
-   artifact can be uploaded.
+1. Confirm the PostgreSQL 16 CI lane runs both `test:postgres:w15` and
+   `test:postgres:w15:composed`, and retains the bounded race-matrix evidence
+   artifact. An independent verifier requires a protected regular file and the
+   exact fixed schema, public digests, zero pending claims, and zero active
+   leases before upload. Tenant/member IDs, DSNs, provider diagnostics, message
+   content, credentials, tokens, links, and broadly readable files are rejected.
 2. Execute the operator drill in `OWNER_RECOVERY_DELIVERY_RUNBOOK.md` against a
    staging provider with a linearizable acceptance endpoint. This is an
    environment qualification, not an additional authority path in the product.
 
 Post-W1.5 hardening, in order:
 
-1. Add one composed HTTPS-provider/worker/PostgreSQL qualification that drives
-   malformed, oversized, truncated, delayed, and binding/key-substituted lookup
-   responses through the real adapter and durable state machine in one process
-   topology.
-2. Add explicit retention assertions for suppress and automatic-confirmation
-   overlap. `uncertain` is non-terminal and therefore non-prunable by schema;
-   the tests should preserve that invariant while the competing CAS completes.
+1. Composed authenticated-HTTPS-provider/worker/PostgreSQL qualification is implemented in
+   `owner-recovery-https-provider-composed.integration.test.mjs` and is wired
+   into the deterministic PostgreSQL 16 command; CI verification is pending.
+2. Retention/automatic-confirmation race coverage is implemented in
+   `owner-recovery-retention-confirmation-races.integration.test.mjs` and is
+   wired into the same command; CI verification is pending. `uncertain` is
+   non-terminal and therefore non-prunable by schema.
 3. Wire the fixed metrics in the deployment platform to the documented warning
    and critical thresholds, then retain a staging drill report with the same
    secret-free artifact policy.
@@ -419,8 +421,8 @@ Add real PostgreSQL, two-instance, Playwright, KMS/IAM, packaging/notarization, 
 2. `feat: observe committed recovery transition latency` (W1.4b, complete)
 3. `feat: bind recovery delivery and operator quarantine controls` (W1.5, merged)
 4. `feat: confirm provider acceptance and qualify delivery races` (W1.5, complete in this change)
-5. `test: compose https provider faults with worker and postgres` (W1.5 hardening, next)
-6. `ops: wire recovery alerts and execute the staging outage drill` (W1.6)
+5. `test: compose https provider faults with worker and postgres` (W1.5 hardening, implemented; PostgreSQL 16 CI verification pending)
+6. `ops: wire recovery alerts and execute the staging outage drill` (W1.6, pending)
 7. `test: close the production console browser matrix` (W2)
 8. `feat: add purpose-separated managed signer providers` (W3)
 9. `feat: complete claude code headless onboarding` (W4)

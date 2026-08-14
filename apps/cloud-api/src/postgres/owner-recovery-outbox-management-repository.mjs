@@ -251,7 +251,7 @@ export function createPostgresOwnerRecoveryOutboxManagementRepository({
       uncertain: true,
       sql: `UPDATE owner_recovery_outbox
         SET status='suppressed',suppressed_at=clock_timestamp(),suppression_reason=$4,
-            uncertain_at=NULL,uncertain_reason=NULL,
+            uncertain_at=NULL,uncertain_reason=NULL,last_error_code=NULL,
             provider_confirmation_next_at=NULL,
             management_version=management_version+1,updated_at=clock_timestamp(),
             claim_token_digest=NULL,claim_expires_at=NULL

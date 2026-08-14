@@ -72,6 +72,8 @@ whose migration history has not already advanced past 34.
 export AGENTPASS_TEST_DATABASE_URL='postgresql://postgres:…@127.0.0.1:5432/agentpass_w15'
 export AGENTPASS_W15_EVIDENCE_OUTPUT="$PWD/w15-evidence.json"
 npm run test:postgres:w15
+npm run test:postgres:w15:composed
+node scripts/owner-recovery/verify-w15-evidence.mjs "$AGENTPASS_W15_EVIDENCE_OUTPUT"
 
 export AGENTPASS_TEST_DATABASE_URL='postgresql://postgres:…@127.0.0.1:5432/agentpass_w15_upgrade'
 node --test apps/cloud-api/test/postgres/owner-recovery-delivery-binding-upgrade.integration.test.mjs
@@ -83,6 +85,9 @@ limited to fixed scenario names, final state classes,
 bounded counts/timings, public event digests, and non-secret binding IDs. Reject
 the artifact if it contains a DSN, UUID identity, claim/authorization token,
 notification content, URL, credential, provider body, or free-form diagnostic.
+The independent verifier also rejects symlinks, hard links, files accessible to
+group/other users, oversized JSON, unknown fields, non-public identifiers,
+pending claims, and active leases before CI upload.
 
 ## Closure checks
 
@@ -91,6 +96,13 @@ notification content, URL, credential, provider body, or free-form diagnostic.
 - automatic confirmation performs no notification publish call;
 - stale delivery, management, and confirmation CAS operations fail;
 - retry/suppress and prune/redrive races have one authoritative winner;
+- the composed authenticated HTTPS qualification drives malformed, oversized, truncated,
+  delayed, and binding/key-substituted lookup responses through the real
+  adapter, worker, and PostgreSQL state machine;
+- retention/automatic-confirmation races preserve `uncertain` as non-terminal
+  and leave no stale confirmation claim able to publish a different row;
 - no active lease remains and terminal retention never deletes `uncertain`;
 - `npm run lint`, `npm run contracts:validate`, the full Node suite, and the
-  PostgreSQL 16 W1.5 lane pass from the same commit.
+  PostgreSQL 16 W1.5 and composed lanes pass from the same commit. These are
+  verification checks; this runbook does not claim external CI or staging
+  completion until their evidence is attached.
