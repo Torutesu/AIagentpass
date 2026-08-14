@@ -20,6 +20,7 @@ const context = Object.freeze({
   origin: "https://console.example.test",
   user_verification: "required"
 });
+const contextHash = "a".repeat(64);
 
 function clock(start = 1_900_000_000_000) {
   let value = start;
@@ -52,7 +53,7 @@ function assertion(challenge, overrides = {}) {
 }
 
 function rowFromParams(params) {
-  const [id, session_id, organization_id, operation, challengeHash, createdAt, expiresAt, rp_id, origin, user_verification] = params;
+  const [id, session_id, organization_id, operation, contextHash, challengeHash, createdAt, expiresAt, rp_id, origin, user_verification] = params;
   return {
     id,
     session_id,
@@ -60,6 +61,7 @@ function rowFromParams(params) {
     organization_id,
     ceremony: "authentication",
     operation,
+    context_hash_hex: contextHash === null ? null : Buffer.from(contextHash).toString("hex"),
     challenge_hash_hex: Buffer.from(challengeHash).toString("hex"),
     created_at: new Date(createdAt),
     expires_at: new Date(expiresAt),
@@ -225,6 +227,23 @@ test("persists only the challenge digest and binds the issued row to the exact c
   assert.equal(client.calls.some(({ params }) => params.some((value) => value === issued.challenge)), false);
   assert.match(client.calls.find(({ sql }) => sql.startsWith("INSERT INTO webauthn_challenges")).text, /rp_id, origin, user_verification, status/);
   assert.equal(issued.challenge_expires_at, new Date(Date.parse([...client.rows.values()][0].created_at) + 60_000).toISOString());
+});
+
+test("persists and claims the optional resource context hash exactly", async () => {
+  const { client, coordinator } = create({});
+  const issued = await coordinator.begin({ ...context, context_hash: contextHash });
+  const persisted = [...client.rows.values()][0];
+  assert.equal(persisted.context_hash_hex, contextHash);
+  await assert.rejects(
+    () => coordinator.consume({ ...assertion(issued.challenge, { context_hash: "b".repeat(64) }), challenge_id: issued.challenge_id }),
+    (error) => error.code === WEBAUTHN_ERROR_CODES.BINDING_MISMATCH
+  );
+  const result = await coordinator.consume({ ...assertion(issued.challenge, { context_hash: contextHash }), challenge_id: issued.challenge_id });
+  assert.equal(result.verified, true);
+  assert.equal(result.context_hash, contextHash);
+  const claim = client.calls.find(({ sql }) => sql.startsWith("UPDATE webauthn_challenges SET status = 'consuming'"));
+  assert.equal(Buffer.isBuffer(claim.params[2]), true);
+  assert.equal(claim.params[2].toString("hex"), contextHash);
 });
 
 test("consumes through an atomic pending-to-consuming CAS and returns the same public result", async () => {

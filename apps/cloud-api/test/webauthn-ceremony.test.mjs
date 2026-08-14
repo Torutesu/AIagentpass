@@ -4,6 +4,7 @@ import test from "node:test";
 import { createWebAuthnCeremony, WebAuthnCeremonyError, WEBAUTHN_ERROR_CODES } from "../src/human-auth/webauthn/ceremony.mjs";
 
 const context = Object.freeze({ session_id: "session-01", organization_id: "org-01", operation: "device.enrollment.issue", rp_id: "console.example.test", origin: "https://console.example.test", user_verification: "required" });
+const contextHash = "a".repeat(64);
 
 function clock(start = 1_900_000_000_000) {
   let value = start;
@@ -82,6 +83,21 @@ test("binds a challenge to session, organization, and operation", async () => {
   }
   const valid = response(issued.challenge, { challenge_id: issued.challenge_id });
   await coordinator.consume(valid);
+});
+
+test("binds a resource context hash at challenge issue and consume", async () => {
+  const time = clock();
+  const { verifyAssertion, calls } = verifier();
+  const coordinator = createWebAuthnCeremony({ verifyAssertion, now: time.now });
+  const issued = issue(coordinator, { context_hash: contextHash });
+  assert.equal(coordinator.snapshot()[0].context_hash, contextHash);
+  await assert.rejects(() => coordinator.consume(response(issued.challenge, { challenge_id: issued.challenge_id, context_hash: "b".repeat(64) })), (error) => error.code === WEBAUTHN_ERROR_CODES.BINDING_MISMATCH);
+  const result = await coordinator.consume(response(issued.challenge, { challenge_id: issued.challenge_id, context_hash: contextHash }));
+  assert.equal(result.verified, true);
+  assert.equal(calls[0].ceremony.context_hash, contextHash);
+  const legacy = createWebAuthnCeremony({ verifyAssertion, now: time.now });
+  const legacyIssued = issue(legacy);
+  await assert.rejects(() => legacy.consume(response(legacyIssued.challenge, { challenge_id: legacyIssued.challenge_id, context_hash: contextHash })), (error) => error.code === WEBAUTHN_ERROR_CODES.BINDING_MISMATCH);
 });
 
 test("rejects replay and atomically permits only one concurrent consume", async () => {

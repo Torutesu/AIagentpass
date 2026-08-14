@@ -89,10 +89,24 @@ test("composes the production human-auth boundary and bootstraps a hash-only ses
   assert.equal(runtime.allowedOperations.includes("human.management.session.revoke"), true);
   assert.equal(runtime.allowedOperations.includes("human.organizations.member.role.update"), true);
   assert.equal(runtime.allowedOperations.includes("human.organizations.member.remove"), true);
+  assert.equal(runtime.allowedOperations.includes("human.recovery.outbox.redrive"), true);
+  assert.equal(runtime.allowedOperations.includes("human.recovery.outbox.suppress"), true);
   assert.equal(typeof runtime.organizationRepository.listMembers, "function");
   assert.equal(typeof runtime.organizationService.listMembers, "function");
   assert.equal(typeof runtime.organizationApi.handle, "function");
   assert.equal(Object.isFrozen(runtime), true);
+});
+
+test("composes recovery dead-letter management only from its durable repository", () => {
+  const configured = postgres();
+  configured.ownerRecoveryOutboxManagementRepository = {
+    async listDeadLetters() { return { items: [], next_cursor: null }; },
+    async redriveDeadLetter() { throw new Error("not invoked"); },
+    async suppressDeadLetter() { throw new Error("not invoked"); }
+  };
+  const tokenRecords = [createApiTokenRecord({ token: generateApiToken(), organizationId: ids.org, memberId: ids.member, role: "owner" })];
+  const runtime = createHumanAuthRuntime({ postgresRuntime: configured, tokenRecords, origin: "https://console.example.test", rpId: "console.example.test", cursorSecret: CURSOR_SECRET });
+  assert.equal(typeof runtime.recoveryDeadLetterApi?.handle, "function");
 });
 
 test("requires PostgreSQL and rejects unsupported recent-auth operations", async () => {

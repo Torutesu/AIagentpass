@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { createHumanAuthRouter } from "../src/human-auth/router.mjs";
 
-function fixture({ recoveryApi = undefined, agentSessionGrantApi = undefined, qualificationGrantBatchApi = undefined } = {}) {
+function fixture({ recoveryApi = undefined, recoveryDeadLetterApi = undefined, agentSessionGrantApi = undefined, qualificationGrantBatchApi = undefined } = {}) {
   const calls = [];
   const result = { status: 200, headers: {}, body: { ok: true } };
   const router = createHumanAuthRouter({
@@ -12,6 +12,7 @@ function fixture({ recoveryApi = undefined, agentSessionGrantApi = undefined, qu
     managementApi: { async handle(input) { calls.push(["management", input]); return result; } },
     organizationApi: { async handle(input) { calls.push(["organization", input]); return result; } },
     ...(recoveryApi === undefined ? {} : { recoveryApi }),
+    ...(recoveryDeadLetterApi === undefined ? {} : { recoveryDeadLetterApi }),
     ...(agentSessionGrantApi === undefined ? {} : { agentSessionGrantApi }),
     ...(qualificationGrantBatchApi === undefined ? {} : { qualificationGrantBatchApi }),
   });
@@ -94,6 +95,25 @@ test("routes only the owner recovery paths to the dedicated recovery API", async
   }
 });
 
+test("routes exact recovery dead-letter paths and preserves list queries", async () => {
+  const delegated = [];
+  const recoveryDeadLetterApi = { async handle(input) { delegated.push(input); return { status: 200, headers: {}, body: {} }; } };
+  const { router, calls } = fixture({ recoveryDeadLetterApi });
+  const organization = "11111111-1111-4111-8111-111111111111";
+  const event = "33333333-3333-4333-8333-333333333333";
+  const exact = [
+    `/api/auth/organizations/${organization}/recovery-outbox/dead-letters?limit=25&cursor=next`,
+    `/api/auth/organizations/${organization}/recovery-outbox/dead-letters/${event}/redrive`,
+    `/api/auth/organizations/${organization}/recovery-outbox/dead-letters/${event}/suppress`
+  ];
+  for (const url of exact) assert.equal((await router.handle({ method: "GET", url, headers: {}, body: undefined })).status, 200);
+  assert.deepEqual(delegated.map(({ url }) => url), exact);
+  assert.equal(calls.length, 0);
+  for (const url of [`${exact[1]}/`, `${exact[0]}#fragment`, `/api/auth/organizations/${organization}/recovery-outbox/dead-letters/not-a-uuid/redrive`]) {
+    assert.equal((await router.handle({ method: "GET", url, headers: {}, body: undefined })).status, 404);
+  }
+});
+
 test("forwards organization queries only for list routes and rejects malformed paths", async () => {
   const { router, calls } = fixture();
   const organization = "/api/auth/organizations/11111111-1111-4111-8111-111111111111";
@@ -157,4 +177,5 @@ test("rejects an invalid optional Agent Session Grant adapter", () => {
   assert.throws(() => fixture({ agentSessionGrantApi: {} }), /agentSessionGrantApi must expose handle/);
   assert.throws(() => fixture({ qualificationGrantBatchApi: {} }), /qualificationGrantBatchApi must expose handle/);
   assert.throws(() => fixture({ recoveryApi: {} }), /recoveryApi must expose handle/);
+  assert.throws(() => fixture({ recoveryDeadLetterApi: {} }), /recoveryDeadLetterApi must expose handle/);
 });

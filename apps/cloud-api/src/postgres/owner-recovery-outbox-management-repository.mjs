@@ -123,7 +123,7 @@ export function createPostgresOwnerRecoveryOutboxManagementRepository({
   }
 
   async function redriveDeadLetter(input = {}) {
-    const values = normalizeMutation(input, { reasonRequired: false });
+    const values = normalizeMutation(input, { reasonRequired: false, action: "redrive" });
     return mutate(values, {
       operation: "redrive",
       eventType: "owner_recovery.outbox.redriven",
@@ -142,7 +142,7 @@ export function createPostgresOwnerRecoveryOutboxManagementRepository({
   }
 
   async function suppressDeadLetter(input = {}) {
-    const values = normalizeMutation(input, { reasonRequired: true });
+    const values = normalizeMutation(input, { reasonRequired: true, action: "suppress" });
     return mutate(values, {
       operation: "suppress",
       eventType: "owner_recovery.outbox.suppressed",
@@ -167,8 +167,7 @@ export function createPostgresOwnerRecoveryOutboxManagementRepository({
       operation,
       organization_id: values.actor.organizationId,
       actor_member_id: values.actor.memberId,
-      actor_session_id: values.actor.sessionId,
-      authorization_id: values.authorization.challengeId,
+      context_hash: values.contextHash,
       event_id: values.eventId,
       expected_management_version: values.expectedManagementVersion,
       ...(reason === undefined ? {} : { reason })
@@ -253,33 +252,48 @@ function normalizeActor(value) {
   });
 }
 
-function normalizeMutation(input, { reasonRequired }) {
+function normalizeMutation(input, { reasonRequired, action }) {
   if (!isObject(input)) throw invalidInput();
-  const allowed = new Set(["actor", "event_id", "expected_management_version", "idempotency_key", "reason", "recent_authorization"]);
+  const allowed = new Set(["actor", "event_id", "expected_management_version", "idempotency_key", "reason", "recent_authorization", "context_hash"]);
   if (Object.keys(input).some((key) => !allowed.has(key))) throw invalidInput();
   const actor = normalizeActor(input.actor);
   const reasonValue = input.reason;
   if (reasonRequired && reasonValue === undefined) throw invalidInput();
   const reason = reasonValue === undefined ? undefined : safeReason(reasonValue);
+  const eventId = uuid(input.event_id);
+  const expectedManagementVersion = positiveInteger(input.expected_management_version);
+  const contextHash = contextHashValue(input.context_hash);
+  const expectedContextHash = crypto.createHash("sha256").update(canonicalJson({
+    version: 1,
+    organization_id: actor.organizationId,
+    event_id: eventId,
+    action,
+    expected_management_version: expectedManagementVersion
+  })).digest("hex");
+  if (!constantTimeHexEqual(contextHash, expectedContextHash)) throw forbidden();
+  const authorization = normalizeAuthorization(input.recent_authorization, actor);
+  if (!constantTimeHexEqual(authorization.contextHash, expectedContextHash)) throw forbidden();
   return Object.freeze({
     actor,
-    eventId: uuid(input.event_id),
-    expectedManagementVersion: positiveInteger(input.expected_management_version),
+    eventId,
+    expectedManagementVersion,
     idempotencyKey: idempotency(input.idempotency_key),
-    authorization: normalizeAuthorization(input.recent_authorization, actor),
+    authorization,
+    contextHash,
     ...(reason === undefined ? {} : { reason })
   });
 }
 
 function normalizeAuthorization(value, actor) {
-  if (!isObject(value) || Object.keys(value).sort().join(",") !== "authenticated_at,challenge_id,operation,session_id"
+  if (!isObject(value) || Object.keys(value).sort().join(",") !== "authenticated_at,challenge_id,context_hash,operation,session_id"
     || uuid(value.session_id) !== actor.sessionId || !Number.isSafeInteger(value.authenticated_at) || value.authenticated_at < 0
     || typeof value.operation !== "string" || !Object.values(OWNER_RECOVERY_OUTBOX_MANAGEMENT_OPERATIONS).includes(value.operation)) throw forbidden();
   return Object.freeze({
     sessionId: actor.sessionId,
     challengeId: uuid(value.challenge_id),
     operation: value.operation,
-    authenticatedAt: value.authenticated_at
+    authenticatedAt: value.authenticated_at,
+    contextHash: contextHashValue(value.context_hash)
   });
 }
 
@@ -300,8 +314,9 @@ async function requireCurrentAuthorization(tx, values, expectedOperation) {
       AND s.recent_auth_challenge_id=$5 AND s.recent_auth_organization_id=$3
       AND s.recent_auth_operation=$6 AND s.recent_auth_consumed_at IS NOT NULL
       AND s.recent_auth_at=$7::timestamptz
+      AND s.recent_auth_context_hash=$8::bytea
       AND s.recent_auth_at>clock_timestamp()-INTERVAL '5 minutes'
-    FOR UPDATE OF s,m,o`, [values.actor.sessionId, values.actor.memberId, values.actor.organizationId, values.actor.role, values.authorization.challengeId, expectedOperation, authenticatedAt.toISOString()]);
+    FOR UPDATE OF s,m,o`, [values.actor.sessionId, values.actor.memberId, values.actor.organizationId, values.actor.role, values.authorization.challengeId, expectedOperation, authenticatedAt.toISOString(), Buffer.from(values.contextHash, "hex")]);
   if (rowCount(result) !== 1) throw forbidden();
 }
 
@@ -389,6 +404,8 @@ function auditIdempotencyKey({ values, operation }) {
 
 function boundedLimit(value) { if (value === undefined) return DEFAULT_LIMIT; if (!Number.isSafeInteger(value) || value < 1 || value > MAX_LIMIT) throw invalidInput(); return value; }
 function idempotency(value) { if (typeof value !== "string" || !IDEMPOTENCY_KEY.test(value)) throw invalidInput(); return value; }
+function contextHashValue(value) { if (typeof value !== "string" || !/^[0-9a-f]{64}$/u.test(value)) throw forbidden(); return value; }
+function constantTimeHexEqual(left, right) { const a = Buffer.from(left, "hex"); const b = Buffer.from(right, "hex"); return a.length === b.length && crypto.timingSafeEqual(a, b); }
 function safeReason(value) { if (typeof value !== "string" || value.length < 1 || CONTROL.test(value) || Buffer.byteLength(value, "utf8") > MAX_REASON_BYTES) throw invalidInput(); return value; }
 function nullableReason(value) { return value === null || value === undefined ? null : safeReason(value); }
 function errorCode(value) { if (typeof value !== "string" || !/^[a-z][a-z0-9_]{0,127}$/u.test(value)) throw database(); return value; }

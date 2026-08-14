@@ -21,6 +21,7 @@ const MAX_USER_HANDLE_BYTES = 64;
 const UUID_V4 = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const BASE64URL = /^[A-Za-z0-9_-]+$/;
 const IDENTIFIER = /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$/;
+const CONTEXT_HASH = /^[0-9a-f]{64}$/;
 const RP_ID = /^[A-Za-z0-9](?:[A-Za-z0-9.-]*[A-Za-z0-9])?$/;
 const ALLOWED_TRANSPORTS = new Set(["ble", "cable", "hybrid", "internal", "nfc", "smart-card", "usb"]);
 const ALLOWED_CREDENTIAL_KEYS = new Set(["id", "rawId", "response", "type", "clientExtensionResults", "authenticatorAttachment"]);
@@ -201,6 +202,7 @@ export function createHumanAuthHttpApi({
         session,
         organization_id: input.organization_id,
         operation: input.operation,
+        ...(input.context_hash === undefined ? {} : { context_hash: input.context_hash }),
         rp_id: expectedRpId,
         origin: expectedOrigin
       });
@@ -239,6 +241,7 @@ export function createHumanAuthHttpApi({
         session,
         organization_id: input.organization_id,
         operation: input.operation,
+        ...(input.context_hash === undefined ? {} : { context_hash: input.context_hash }),
         assertion: {
           challenge_id: input.challenge_id,
           challenge: input.challenge,
@@ -255,7 +258,8 @@ export function createHumanAuthHttpApi({
     } catch (error) {
       throw mapServiceError(error, "verify");
     }
-    if (!isObject(verified) || !isUuid(verified.authorization_id) || verified.operation !== input.operation || !Number.isSafeInteger(verified.authenticated_at)) {
+    if (!isObject(verified) || !isUuid(verified.authorization_id) || verified.operation !== input.operation || !Number.isSafeInteger(verified.authenticated_at)
+      || (verified.context_hash ?? undefined) !== input.context_hash) {
       throw new HumanAuthHttpError(HUMAN_AUTH_HTTP_ERROR_CODES.WEBAUTHN_UNAVAILABLE);
     }
     return response(200, { authorization_id: verified.authorization_id });
@@ -322,16 +326,17 @@ function normalizeTransports(value) {
 }
 
 function parseOptionsBody(body, session, expectedRpId, expectedOrigin, operationSet) {
-  assertObjectBody(body, new Set(["organization_id", "operation"]));
+  assertObjectBody(body, new Set(["organization_id", "operation", "context_hash"]));
   const organization_id = requiredUuid(body.organization_id, "organization_id");
   const operation = requiredOperation(body.operation, operationSet);
   void expectedRpId;
   void expectedOrigin;
-  return { organization_id, operation };
+  const context_hash = optionalContextHash(body.context_hash);
+  return { organization_id, operation, ...(context_hash === undefined ? {} : { context_hash }) };
 }
 
 function parseVerifyBody(body, session, expectedRpId, expectedOrigin, operationSet) {
-  assertObjectBody(body, new Set(["organization_id", "operation", "challenge_id", "credential"]));
+  assertObjectBody(body, new Set(["organization_id", "operation", "context_hash", "challenge_id", "credential"]));
   const organization_id = requiredUuid(body.organization_id, "organization_id");
   const operation = requiredOperation(body.operation, operationSet);
   const challenge_id = requiredUuid(body.challenge_id, "challenge_id");
@@ -339,7 +344,14 @@ function parseVerifyBody(body, session, expectedRpId, expectedOrigin, operationS
   const challenge = extractChallenge(assertion.client_data_json, expectedOrigin);
   if (!isBase64Url(challenge, 1, MAX_CHALLENGE_BYTES)) throw new HumanAuthHttpError(HUMAN_AUTH_HTTP_ERROR_CODES.CHALLENGE_INVALID);
   void expectedRpId;
-  return { organization_id, operation, challenge_id, challenge, assertion };
+  const context_hash = optionalContextHash(body.context_hash);
+  return { organization_id, operation, ...(context_hash === undefined ? {} : { context_hash }), challenge_id, challenge, assertion };
+}
+
+function optionalContextHash(value) {
+  if (value === undefined) return undefined;
+  if (typeof value !== "string" || !CONTEXT_HASH.test(value)) throw new HumanAuthHttpError(HUMAN_AUTH_HTTP_ERROR_CODES.INVALID_REQUEST);
+  return value;
 }
 
 function parseBrowserCredential(value) {

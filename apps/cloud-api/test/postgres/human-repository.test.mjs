@@ -26,6 +26,20 @@ test("recent authorization consumption is one atomic exact-binding update", asyn
   assert.match(calls[1].text,/s\.id=\$1/); assert.match(calls[1].text,/recent_auth_consumed_at IS NULL/); assert.match(calls[1].text,/INTERVAL '5 minutes'/); assert.deepEqual(calls[1].params.slice(0,5),[ids.session,ids.member,ids.org,"device.enrollment.issue",ids.challenge]);
 });
 
+test("compares a resource context hash when binding and consuming recent authorization", async () => {
+  const contextHash = "c".repeat(64);
+  const calls = [];
+  const client = { async query(text, params) { calls.push({ text, params }); return { rows: [{ authenticated_at: "2026-08-12T00:00:00.000Z", context_hash: contextHash }], rowCount: 1 }; } };
+  const repo = createPostgresHumanRepository({ client });
+  assert.equal(await repo.bindRecentAuth({ session_id: ids.session, member_id: ids.member, organization_id: ids.org, operation: "device.enrollment.issue", challenge_id: ids.challenge, context_hash: contextHash, authenticated_at: "2026-08-12T00:00:00.000Z" }), true);
+  assert.deepEqual(await repo.consumeRecentAuth({ session_id: ids.session, member_id: ids.member, organization_id: ids.org, operation: "device.enrollment.issue", challenge_id: ids.challenge, context_hash: contextHash, consumed_at: "2026-08-12T00:01:00.000Z" }), { authenticated_at: "2026-08-12T00:00:00.000Z", context_hash: contextHash });
+  assert.equal(calls[0].params[5].toString("hex"), contextHash);
+  assert.equal(calls[1].params[5].toString("hex"), contextHash);
+  assert.match(calls[0].text, /c\.context_hash IS NOT DISTINCT FROM \$6::bytea/);
+  assert.match(calls[0].text, /context_hash=\$6/);
+  assert.match(calls[1].text, /s\.recent_auth_context_hash IS NOT DISTINCT FROM \$6::bytea/);
+});
+
 test("credential lookup and counter update are session and organization scoped", async () => {
   const credential=Buffer.alloc(16,7).toString("base64url"); const calls=[]; const client={async query(text,params){calls.push({text,params});return {rows:[],rowCount:0};}};
   const repo=createPostgresHumanRepository({client});

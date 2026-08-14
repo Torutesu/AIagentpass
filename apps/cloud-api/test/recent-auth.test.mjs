@@ -5,6 +5,7 @@ import { createRecentAuthService } from "../src/human-auth/recent-auth.mjs";
 const session = { session_id: "11111111-1111-4111-8111-111111111111", member_id: "22222222-2222-4222-8222-222222222222", organization_id: "33333333-3333-4333-8333-333333333333" };
 const challengeId = "44444444-4444-4444-8444-444444444444";
 const operation = "device.enrollment.issue";
+const contextHash = "a".repeat(64);
 const authenticatedAt = Date.parse("2026-08-12T00:00:00.000Z");
 
 test("binds a verified ceremony to the session and consumes one exact operation authorization", async () => {
@@ -59,4 +60,30 @@ test("rejects cross-tenant, cross-operation, and malformed authorizations withou
     assert.equal(result.verified, false);
     assert.equal(result.consumed, false);
   }
+});
+
+test("binds an optional resource context through begin, verify, and authorize", async () => {
+  const calls = [];
+  const ceremony = {
+    begin(input) { calls.push(["begin", input]); return { challenge_id: challengeId, ...input }; },
+    async consume(input) { calls.push(["consume", input]); return { assertion_id: challengeId, authenticated_at: authenticatedAt, context_hash: contextHash }; }
+  };
+  let grant;
+  const repository = {
+    async bindRecentAuth(input) { calls.push(["bind", input]); grant = { ...input, authenticated_at: new Date(authenticatedAt).toISOString(), context_hash: input.context_hash }; return true; },
+    async consumeRecentAuth(input) { calls.push(["consumeRecentAuth", input]); return input.context_hash === contextHash ? { authenticated_at: new Date(authenticatedAt).toISOString(), context_hash: input.context_hash } : null; }
+  };
+  const service = createRecentAuthService({ ceremony, sessionRepository: repository });
+  const beginResult = service.begin({ session, organization_id: session.organization_id, operation, context_hash: contextHash, rp_id: "console.example.test", origin: "https://console.example.test" });
+  assert.equal(beginResult.context_hash, contextHash);
+  const verified = await service.verify({ session, organization_id: session.organization_id, operation, context_hash: contextHash, assertion: {} });
+  assert.equal(verified.context_hash, contextHash);
+  assert.equal(grant.context_hash, contextHash);
+  const authorized = await service.authorize({ proof: challengeId, principal: { session_id: session.session_id, member_id: session.member_id }, organization_id: session.organization_id, operation, context_hash: contextHash, now: authenticatedAt });
+  assert.equal(authorized.context_hash, contextHash);
+  assert.equal(calls[0][1].context_hash, contextHash);
+  assert.equal(calls[1][1].context_hash, contextHash);
+  assert.equal(calls.at(-1)[1].context_hash, contextHash);
+  await assert.rejects(() => service.verify({ session, organization_id: session.organization_id, operation, context_hash: "b".repeat(64), assertion: {} }), /context binding/);
+  await assert.rejects(() => service.verify({ session, organization_id: session.organization_id, operation, context_hash: "A".repeat(64), assertion: {} }), /context_hash is invalid/);
 });

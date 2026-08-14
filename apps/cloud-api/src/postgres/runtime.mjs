@@ -12,6 +12,7 @@ import { createPostgresAdminAuditRepository } from "./admin-audit-repository.mjs
 import { createPostgresOwnerRecoveryRepository } from "./owner-recovery-repository.mjs";
 import { createPostgresOwnerRecoveryWebAuthnRepository } from "./owner-recovery-webauthn-repository.mjs";
 import { createPostgresOwnerRecoveryOutboxRepository } from "./owner-recovery-outbox-repository.mjs";
+import { createPostgresOwnerRecoveryOutboxManagementRepository } from "./owner-recovery-outbox-management-repository.mjs";
 import { createOwnerRecoveryOutboxWorker } from "./owner-recovery-outbox-worker.mjs";
 import { createAgentSessionAuthorityRepository } from "./agent-session-authority-repository.mjs";
 import { createPostgresAgentSessionConsumptionRepository } from "./agent-session-consumption-repository.mjs";
@@ -99,6 +100,11 @@ export async function createPostgresRuntime({ env = process.env, PoolClass = Poo
   });
   const ownerRecoveryWebAuthnRepository = createPostgresOwnerRecoveryWebAuthnRepository({ client: pool });
   ownerRecoveryOutboxRepository = createPostgresOwnerRecoveryOutboxRepository({ client: pool });
+  const ownerRecoveryOutboxManagementRepository = createPostgresOwnerRecoveryOutboxManagementRepository({
+    client: pool,
+    cursorSecret: auditCursorSecret,
+    auditRepository: adminAuditRepository
+  });
   if (ownerRecoveryPublisher !== undefined) {
     ownerRecoveryOutboxWorker = createOwnerRecoveryOutboxWorker({
       ...ownerRecoveryOutboxWorkerOptions,
@@ -188,6 +194,7 @@ export async function createPostgresRuntime({ env = process.env, PoolClass = Poo
     ownerRecoveryRepository,
     ownerRecoveryWebAuthnRepository,
     ownerRecoveryOutboxRepository,
+    ownerRecoveryOutboxManagementRepository,
     ...(ownerRecoveryOutboxWorker ? { ownerRecoveryOutboxWorker } : {}),
     sharedControlRepository,
     controlPlaneStore,

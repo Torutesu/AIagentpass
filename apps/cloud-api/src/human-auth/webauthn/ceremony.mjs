@@ -16,6 +16,7 @@ const IDENTIFIER = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/;
 const OPERATION = /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,255}$/;
 const ORIGIN_SCHEMES = new Set(["https:", "http:"]);
 const CLIENT_DATA_KEYS = new Set(["type", "challenge", "origin", "crossOrigin", "tokenBinding"]);
+const CONTEXT_HASH = /^[0-9a-f]{64}$/;
 
 export const WEBAUTHN_ERROR_CODES = Object.freeze({
   INVALID_REQUEST: "webauthn_invalid_request",
@@ -96,6 +97,7 @@ export function createWebAuthnCeremony({
       session_id: context.session_id,
       organization_id: context.organization_id,
       operation: context.operation,
+      ...(context.context_hash === undefined ? {} : { context_hash: context.context_hash }),
       rp_id: context.rp_id,
       origin: context.origin,
       user_verification: context.user_verification,
@@ -161,6 +163,7 @@ export function createWebAuthnCeremony({
       session_id: record.session_id,
       organization_id: record.organization_id,
       operation: record.operation,
+      ...(record.context_hash === undefined ? {} : { context_hash: record.context_hash }),
       authenticated_at: authenticatedAt,
       credential_id_digest: sha256(request.credential_id)
     });
@@ -183,6 +186,7 @@ function buildVerifierInput(record, request) {
       session_id: record.session_id,
       organization_id: record.organization_id,
       operation: record.operation,
+      ...(record.context_hash === undefined ? {} : { context_hash: record.context_hash }),
       rp_id: record.rp_id,
       origin: record.origin,
       user_verification: record.user_verification,
@@ -207,11 +211,12 @@ function normalizeContext(input) {
   const session_id = requiredIdentifier(input.session_id ?? input.sessionId, "session_id");
   const organization_id = requiredIdentifier(input.organization_id ?? input.organizationId, "organization_id");
   const operation = requiredOperation(input.operation);
+  const context_hash = optionalContextHash(input.context_hash);
   const rp_id = requiredRpId(input.rp_id ?? input.rpId);
   const origin = requiredOrigin(input.origin);
   const user_verification = input.user_verification ?? input.userVerification ?? "required";
   if (user_verification !== "required") fail(WEBAUTHN_ERROR_CODES.INVALID_CONTEXT);
-  return Object.freeze({ session_id, organization_id, operation, rp_id, origin, user_verification });
+  return Object.freeze({ session_id, organization_id, operation, rp_id, origin, user_verification, ...(context_hash === undefined ? {} : { context_hash }) });
 }
 
 function normalizeConsumeInput(input) {
@@ -258,11 +263,11 @@ function validateVerifierResult(result, request, now) {
 }
 
 function sameBinding(record, request) {
-  return record.session_id === request.session_id && record.organization_id === request.organization_id && record.operation === request.operation && record.rp_id === request.rp_id && record.origin === request.origin && record.user_verification === request.user_verification;
+  return record.session_id === request.session_id && record.organization_id === request.organization_id && record.operation === request.operation && record.rp_id === request.rp_id && record.origin === request.origin && record.user_verification === request.user_verification && record.context_hash === request.context_hash;
 }
 
 function publicRecord(record) {
-  return { session_id: record.session_id, organization_id: record.organization_id, operation: record.operation, rp_id: record.rp_id, origin: record.origin, user_verification: record.user_verification, issued_at: record.issued_at, expires_at: record.expires_at, status: record.status, ...(record.consume_started_at === undefined ? {} : { consume_started_at: record.consume_started_at }), ...(record.consumed_at === undefined ? {} : { consumed_at: record.consumed_at }), ...(record.failed_at === undefined ? {} : { failed_at: record.failed_at }) };
+  return { session_id: record.session_id, organization_id: record.organization_id, operation: record.operation, rp_id: record.rp_id, origin: record.origin, user_verification: record.user_verification, issued_at: record.issued_at, expires_at: record.expires_at, status: record.status, ...(record.context_hash === undefined ? {} : { context_hash: record.context_hash }), ...(record.consume_started_at === undefined ? {} : { consume_started_at: record.consume_started_at }), ...(record.consumed_at === undefined ? {} : { consumed_at: record.consumed_at }), ...(record.failed_at === undefined ? {} : { failed_at: record.failed_at }) };
 }
 
 function purge(records, now) {
@@ -280,6 +285,7 @@ function assertClock(value) { if (!Number.isSafeInteger(value) || value < 0) thr
 function requiredUuid(value, field) { if (typeof value !== "string" || !/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value)) fail(WEBAUTHN_ERROR_CODES.INVALID_REQUEST, field); return value.toLowerCase(); }
 function requiredIdentifier(value, field) { if (typeof value !== "string" || !IDENTIFIER.test(value) || /[\u0000-\u001f\u007f]/.test(value)) fail(WEBAUTHN_ERROR_CODES.INVALID_CONTEXT, field); return value; }
 function requiredOperation(value) { if (typeof value !== "string" || !OPERATION.test(value) || /[\u0000-\u001f\u007f]/.test(value)) fail(WEBAUTHN_ERROR_CODES.INVALID_CONTEXT, "operation"); return value; }
+function optionalContextHash(value) { if (value === undefined) return undefined; if (typeof value !== "string" || !CONTEXT_HASH.test(value)) fail(WEBAUTHN_ERROR_CODES.INVALID_CONTEXT, "context_hash"); return value; }
 function requiredRpId(value) { if (typeof value !== "string" || value.length < 1 || value.length > 253 || !/^[A-Za-z0-9](?:[A-Za-z0-9.-]*[A-Za-z0-9])?$/.test(value) || value.includes("..")) fail(WEBAUTHN_ERROR_CODES.INVALID_CONTEXT, "rp_id"); return value.toLowerCase(); }
 function requiredOrigin(value) { if (typeof value !== "string" || value.length > 512 || /[\u0000-\u001f\u007f]/.test(value)) fail(WEBAUTHN_ERROR_CODES.INVALID_CONTEXT, "origin"); let url; try { url = new URL(value); } catch { fail(WEBAUTHN_ERROR_CODES.INVALID_CONTEXT, "origin"); } if (!ORIGIN_SCHEMES.has(url.protocol) || url.username || url.password || url.pathname !== "/" || url.search || url.hash || (url.protocol === "http:" && url.hostname !== "localhost" && url.hostname !== "127.0.0.1" && url.hostname !== "[::1]")) fail(WEBAUTHN_ERROR_CODES.INVALID_CONTEXT, "origin"); return url.origin; }
 function requiredBase64Url(value, length, field) { if (typeof value !== "string" || !BASE64URL.test(value)) fail(WEBAUTHN_ERROR_CODES.INVALID_REQUEST, field); decodeBase64Url(value, length, field); return value; }

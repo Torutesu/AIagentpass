@@ -20,6 +20,7 @@ const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-
 const UUID_V4 = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const IDENTIFIER = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/;
 const OPERATION = /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,255}$/;
+const CONTEXT_HASH = /^[0-9a-f]{64}$/;
 const ORIGIN_SCHEMES = new Set(["https:", "http:"]);
 const VERIFIER_RESULT_KEYS = new Set(["verified", "credential_id", "sign_count", "authenticated_at"]);
 const CEREMONY = "authentication";
@@ -29,18 +30,19 @@ const VERIFIER_TIMEOUT_CODE = "ERR_WEBAUTHN_VERIFIER_TIMEOUT";
 const BEGIN_SQL = `
 INSERT INTO webauthn_challenges (
   id, session_id, member_id, organization_id, ceremony, operation,
-  challenge_hash, created_at, expires_at, rp_id, origin, user_verification, status
+  context_hash, challenge_hash, created_at, expires_at, rp_id, origin, user_verification, status
 )
-SELECT $1, s.id, s.member_id, $3, 'authentication', $4, $5, $6, $7, $8, $9, $10, 'pending'
+SELECT $1, s.id, s.member_id, $3, 'authentication', $4, $5, $6, $7, $8, $9, $10, $11, 'pending'
 FROM human_sessions s
 JOIN memberships m ON m.organization_id = s.organization_id AND m.member_id = s.member_id
 WHERE s.id = $2
   AND s.organization_id = $3
   AND s.revoked_at IS NULL
-  AND s.expires_at > $6
+  AND s.expires_at > $7
   AND m.status = 'active'
   AND m.role = s.role
 RETURNING id, session_id, member_id, organization_id, ceremony, operation,
+  encode(context_hash, 'hex') AS context_hash_hex,
   encode(challenge_hash, 'hex') AS challenge_hash_hex,
   created_at, expires_at, rp_id, origin, user_verification, status`;
 
@@ -74,6 +76,7 @@ WHERE id = $3
   AND rp_id = $7
   AND origin = $8
   AND user_verification = $9
+  AND context_hash IS NOT DISTINCT FROM $10::bytea
   AND status = 'consuming'
   AND consumed_at IS NULL
   AND consume_started_at IS NOT NULL
@@ -89,6 +92,7 @@ WHERE status IN ('pending', 'consuming') AND consumed_at IS NULL AND expires_at 
 
 const LOAD_SQL = `
 SELECT id, session_id, member_id, organization_id, ceremony, operation,
+  encode(context_hash, 'hex') AS context_hash_hex,
   encode(challenge_hash, 'hex') AS challenge_hash_hex,
   created_at, expires_at, rp_id, origin, user_verification, status,
   consume_started_at, consumed_at, failed_at
@@ -99,10 +103,12 @@ const CLAIM_SQL = `
 UPDATE webauthn_challenges
 SET status = 'consuming', consume_started_at = $2
 WHERE id = $1
+  AND context_hash IS NOT DISTINCT FROM $3::bytea
   AND status = 'pending'
   AND consumed_at IS NULL
   AND expires_at > $2
 RETURNING id, session_id, member_id, organization_id, ceremony, operation,
+  encode(context_hash, 'hex') AS context_hash_hex,
   encode(challenge_hash, 'hex') AS challenge_hash_hex,
   created_at, expires_at, rp_id, origin, user_verification, status,
   consume_started_at, consumed_at, failed_at`;
@@ -214,6 +220,7 @@ export function createPostgresWebAuthnCeremony({
           context.session_id,
           context.organization_id,
           context.operation,
+          contextHashBytes(context.context_hash),
           sha256Bytes(challenge),
           createdAt,
           expiresAtIso,
@@ -242,7 +249,7 @@ export function createPostgresWebAuthnCeremony({
     const request = normalizeConsumeInput(input);
     const currentTime = assertClock(now());
     const currentIso = new Date(currentTime).toISOString();
-    const reaped = await dbQuery(REAP_ONE_SQL, [currentIso, new Date(Math.max(0, currentTime - CLAIM_LEASE_MS)).toISOString(), request.challenge_id, request.session_id, request.organization_id, request.operation, request.rp_id, request.origin, request.user_verification]);
+    const reaped = await dbQuery(REAP_ONE_SQL, [currentIso, new Date(Math.max(0, currentTime - CLAIM_LEASE_MS)).toISOString(), request.challenge_id, request.session_id, request.organization_id, request.operation, request.rp_id, request.origin, request.user_verification, contextHashBytes(request.context_hash)]);
     recordMetric(metrics, "recordHumanAuthStaleClaimRecovery", reaped.rows?.length ?? reaped.rowCount ?? 0);
     let record = await loadRecord(request.challenge_id);
     assertRecord(record);
@@ -257,7 +264,7 @@ export function createPostgresWebAuthnCeremony({
     if (!constantTimeBufferEqual(record.challenge_hash, sha256Bytes(request.challenge))) fail(WEBAUTHN_ERROR_CODES.CHALLENGE_MISMATCH);
 
     const verifierInput = buildVerifierInput(record, request);
-    const claimed = await dbQuery(CLAIM_SQL, [request.challenge_id, currentIso]);
+    const claimed = await dbQuery(CLAIM_SQL, [request.challenge_id, currentIso, contextHashBytes(request.context_hash)]);
     if (claimed.rows.length > 1) throw new PostgresWebAuthnCeremonyError("ERR_WEBAUTHN_STORAGE_RESULT", "WebAuthn challenge claim returned multiple rows");
     if (claimed.rows.length === 0) {
       record = await loadRecord(request.challenge_id);
@@ -303,6 +310,7 @@ export function createPostgresWebAuthnCeremony({
       session_id: record.session_id,
       organization_id: record.organization_id,
       operation: record.operation,
+      ...(record.context_hash === undefined ? {} : { context_hash: record.context_hash }),
       authenticated_at: authenticatedAt,
       credential_id_digest: sha256Hex(request.credential_id)
     });
@@ -317,6 +325,7 @@ export function createPostgresWebAuthnCeremony({
         session_id: record.session_id,
         organization_id: record.organization_id,
         operation: record.operation,
+        ...(record.context_hash === undefined ? {} : { context_hash: record.context_hash }),
         rp_id: record.rp_id,
         origin: record.origin,
         user_verification: record.user_verification,
@@ -411,11 +420,12 @@ function normalizeContext(input) {
   const session_id = requiredUuidContext(input.session_id ?? input.sessionId, "session_id");
   const organization_id = requiredUuidContext(input.organization_id ?? input.organizationId, "organization_id");
   const operation = requiredOperation(input.operation);
+  const context_hash = optionalContextHash(input.context_hash);
   const rp_id = requiredRpId(input.rp_id ?? input.rpId);
   const origin = requiredOrigin(input.origin);
   const user_verification = input.user_verification ?? input.userVerification ?? "required";
   if (user_verification !== "required") fail(WEBAUTHN_ERROR_CODES.INVALID_CONTEXT, "user_verification");
-  return Object.freeze({ session_id, organization_id, operation, rp_id, origin, user_verification });
+  return Object.freeze({ session_id, organization_id, operation, rp_id, origin, user_verification, ...(context_hash === undefined ? {} : { context_hash }) });
 }
 
 function normalizeConsumeInput(input) {
@@ -447,6 +457,7 @@ function normalizeRecord(row) {
   const expires_at = storageTime(row.expires_at, "expires_at");
   if (expires_at <= created_at) throw new PostgresWebAuthnCeremonyError("ERR_WEBAUTHN_STORAGE_RESULT", "WebAuthn challenge expiry is invalid");
   const challenge_hash = storageDigest(row.challenge_hash_hex ?? row.challenge_hash, "challenge_hash");
+  const context_hash = optionalStorageContextHash(row.context_hash_hex ?? row.context_hash);
   const consume_started_at = optionalStorageTime(row.consume_started_at, "consume_started_at");
   const consumed_at = optionalStorageTime(row.consumed_at, "consumed_at");
   const failed_at = optionalStorageTime(row.failed_at, "failed_at");
@@ -454,7 +465,7 @@ function normalizeRecord(row) {
   if (row.status === "consuming" && (consume_started_at === undefined || consumed_at !== undefined || failed_at !== undefined)) throw new PostgresWebAuthnCeremonyError("ERR_WEBAUTHN_STORAGE_RESULT", "consuming WebAuthn challenge timestamps are invalid");
   if (row.status === "consumed" && consumed_at === undefined) throw new PostgresWebAuthnCeremonyError("ERR_WEBAUTHN_STORAGE_RESULT", "consumed WebAuthn challenge has no consumed_at");
   if (row.status === "failed" && (failed_at === undefined || consumed_at === undefined)) throw new PostgresWebAuthnCeremonyError("ERR_WEBAUTHN_STORAGE_RESULT", "failed WebAuthn challenge has no burn timestamps");
-  return Object.freeze({ id, session_id, member_id, organization_id, ceremony: row.ceremony, operation, rp_id, origin, user_verification: row.user_verification, challenge_hash, created_at, expires_at, status: row.status, ...(consume_started_at === undefined ? {} : { consume_started_at }), ...(consumed_at === undefined ? {} : { consumed_at }), ...(failed_at === undefined ? {} : { failed_at }) });
+  return Object.freeze({ id, session_id, member_id, organization_id, ceremony: row.ceremony, operation, rp_id, origin, user_verification: row.user_verification, challenge_hash, created_at, expires_at, status: row.status, ...(context_hash === undefined ? {} : { context_hash }), ...(consume_started_at === undefined ? {} : { consume_started_at }), ...(consumed_at === undefined ? {} : { consumed_at }), ...(failed_at === undefined ? {} : { failed_at }) });
 }
 
 function assertRecord(record, expectedId = undefined) {
@@ -464,12 +475,12 @@ function assertRecord(record, expectedId = undefined) {
 
 function assertBeginRow(row, challengeId, context, issuedAt, expiresAt) {
   const record = normalizeRecord(row);
-  if (record.id !== challengeId || record.session_id !== context.session_id || record.organization_id !== context.organization_id || record.operation !== context.operation || record.rp_id !== context.rp_id || record.origin !== context.origin || record.user_verification !== context.user_verification || record.status !== "pending" || record.created_at !== issuedAt || record.expires_at !== expiresAt) throw new PostgresWebAuthnCeremonyError("ERR_WEBAUTHN_STORAGE_RESULT", "inserted WebAuthn challenge row does not match request");
+  if (record.id !== challengeId || record.session_id !== context.session_id || record.organization_id !== context.organization_id || record.operation !== context.operation || record.rp_id !== context.rp_id || record.origin !== context.origin || record.user_verification !== context.user_verification || record.context_hash !== context.context_hash || record.status !== "pending" || record.created_at !== issuedAt || record.expires_at !== expiresAt) throw new PostgresWebAuthnCeremonyError("ERR_WEBAUTHN_STORAGE_RESULT", "inserted WebAuthn challenge row does not match request");
 }
 
 function assertClaimRow(row, challengeId, previous) {
   const record = normalizeRecord(row);
-  if (record.id !== challengeId || record.status !== "consuming" || record.session_id !== previous.session_id || record.organization_id !== previous.organization_id || record.operation !== previous.operation || record.rp_id !== previous.rp_id || record.origin !== previous.origin || record.user_verification !== previous.user_verification || !constantTimeBufferEqual(record.challenge_hash, previous.challenge_hash)) throw new PostgresWebAuthnCeremonyError("ERR_WEBAUTHN_STORAGE_RESULT", "claimed WebAuthn challenge row does not match lookup");
+  if (record.id !== challengeId || record.status !== "consuming" || record.session_id !== previous.session_id || record.organization_id !== previous.organization_id || record.operation !== previous.operation || record.rp_id !== previous.rp_id || record.origin !== previous.origin || record.user_verification !== previous.user_verification || record.context_hash !== previous.context_hash || !constantTimeBufferEqual(record.challenge_hash, previous.challenge_hash)) throw new PostgresWebAuthnCeremonyError("ERR_WEBAUTHN_STORAGE_RESULT", "claimed WebAuthn challenge row does not match lookup");
 }
 
 function assertTerminalRow(row, challengeId, status) {
@@ -489,7 +500,7 @@ function buildVerifierInput(record, request) {
   const clientData = decodeClientData(request.client_data_json, request.challenge, record.origin);
   const authenticatorData = decodeAuthenticatorData(request.authenticator_data, record.rp_id, record.user_verification);
   return Object.freeze({
-    ceremony: Object.freeze({ challenge_id: request.challenge_id, session_id: record.session_id, organization_id: record.organization_id, operation: record.operation, rp_id: record.rp_id, origin: record.origin, user_verification: record.user_verification, expected_challenge: request.challenge }),
+    ceremony: Object.freeze({ challenge_id: request.challenge_id, session_id: record.session_id, organization_id: record.organization_id, operation: record.operation, rp_id: record.rp_id, origin: record.origin, user_verification: record.user_verification, expected_challenge: request.challenge, ...(record.context_hash === undefined ? {} : { context_hash: record.context_hash }) }),
     assertion: Object.freeze({ credential_id: request.credential_id, client_data_json: request.client_data_json, authenticator_data: request.authenticator_data, signature: request.signature, ...(request.user_handle === undefined ? {} : { user_handle: request.user_handle }) }),
     parsed: Object.freeze({ client_data: Object.freeze(clientData), authenticator_data: Object.freeze(authenticatorData) })
   });
@@ -522,7 +533,7 @@ function validateVerifierResult(result, request, currentTime) {
   if (result.authenticated_at !== undefined && (!Number.isSafeInteger(result.authenticated_at) || result.authenticated_at > currentTime + MAX_CLOCK_SKEW_MS || result.authenticated_at < 0)) fail(WEBAUTHN_ERROR_CODES.INVALID_VERIFIER_RESULT);
 }
 
-function sameBinding(record, request) { return record.session_id === request.session_id && record.organization_id === request.organization_id && record.operation === request.operation && record.rp_id === request.rp_id && record.origin === request.origin && record.user_verification === request.user_verification; }
+function sameBinding(record, request) { return record.session_id === request.session_id && record.organization_id === request.organization_id && record.operation === request.operation && record.rp_id === request.rp_id && record.origin === request.origin && record.user_verification === request.user_verification && record.context_hash === request.context_hash; }
 function sha256Bytes(value) { return crypto.createHash("sha256").update(value, "utf8").digest(); }
 function sha256Hex(value) { return sha256Bytes(value).toString("hex"); }
 function constantTimeBufferEqual(left, right) { return Buffer.isBuffer(left) && Buffer.isBuffer(right) && left.length === right.length && crypto.timingSafeEqual(left, right); }
@@ -542,6 +553,9 @@ function storageOrigin(value) { try { return requiredOrigin(value); } catch { th
 function requiredBase64Url(value, length, field) { if (typeof value !== "string" || !BASE64URL.test(value)) fail(WEBAUTHN_ERROR_CODES.INVALID_REQUEST, field); decodeBase64Url(value, length, field); return value; }
 function decodeBase64Url(value, length, field) { if (typeof value !== "string" || !BASE64URL.test(value)) fail(WEBAUTHN_ERROR_CODES.INVALID_RESPONSE, field); let bytes; try { bytes = Buffer.from(value, "base64url"); } catch { fail(WEBAUTHN_ERROR_CODES.INVALID_RESPONSE, field); } const [minimum, maximum] = Array.isArray(length) ? length : [length, length]; if (bytes.length < minimum || bytes.length > maximum || bytes.toString("base64url") !== value) fail(WEBAUTHN_ERROR_CODES.INVALID_RESPONSE, field); return bytes; }
 function storageDigest(value, field) { let bytes; if (Buffer.isBuffer(value)) bytes = value; else if (typeof value === "string" && /^[0-9a-f]{64}$/i.test(value)) bytes = Buffer.from(value, "hex"); else throw new PostgresWebAuthnCeremonyError("ERR_WEBAUTHN_STORAGE_RESULT", `${field} is invalid`); if (bytes.length !== 32) throw new PostgresWebAuthnCeremonyError("ERR_WEBAUTHN_STORAGE_RESULT", `${field} is invalid`); return Buffer.from(bytes); }
+function contextHashBytes(value) { return value === undefined ? null : Buffer.from(optionalContextHash(value), "hex"); }
+function optionalContextHash(value) { if (value === undefined) return undefined; if (typeof value !== "string" || !CONTEXT_HASH.test(value)) fail(WEBAUTHN_ERROR_CODES.INVALID_CONTEXT, "context_hash"); return value; }
+function optionalStorageContextHash(value) { if (value === null || value === undefined) return undefined; if (Buffer.isBuffer(value) || value instanceof Uint8Array) { if (value.length !== 32) throw new PostgresWebAuthnCeremonyError("ERR_WEBAUTHN_STORAGE_RESULT", "context_hash is invalid"); return Buffer.from(value).toString("hex"); } if (typeof value === "string" && CONTEXT_HASH.test(value)) return value; throw new PostgresWebAuthnCeremonyError("ERR_WEBAUTHN_STORAGE_RESULT", "context_hash is invalid"); }
 function storageTime(value, field) { const time = optionalStorageTime(value, field); if (time === undefined) throw new PostgresWebAuthnCeremonyError("ERR_WEBAUTHN_STORAGE_RESULT", `${field} is invalid`); return time; }
 function optionalStorageTime(value, field) { if (value === null || value === undefined) return undefined; const time = value instanceof Date ? value.getTime() : typeof value === "string" ? Date.parse(value) : Number.NaN; if (!Number.isSafeInteger(time) || time < 0) throw new PostgresWebAuthnCeremonyError("ERR_WEBAUTHN_STORAGE_RESULT", `${field} is invalid`); return time; }
 function parseCount(value) { if (typeof value !== "string" && typeof value !== "number") throw new PostgresWebAuthnCeremonyError("ERR_WEBAUTHN_STORAGE_RESULT", "pending count is invalid"); const count = Number(value); if (!Number.isSafeInteger(count) || count < 0) throw new PostgresWebAuthnCeremonyError("ERR_WEBAUTHN_STORAGE_RESULT", "pending count is invalid"); return count; }

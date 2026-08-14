@@ -455,7 +455,7 @@ export function createPostgresOrganizationRepository({ client, now = () => new D
       SET revoked_at=$3,revoke_reason=$4,version=version+1,
         recent_auth_at=NULL,recent_auth_challenge_id=NULL,
         recent_auth_organization_id=NULL,recent_auth_operation=NULL,
-        recent_auth_consumed_at=NULL
+        recent_auth_context_hash=NULL,recent_auth_consumed_at=NULL
       WHERE organization_id=$1 AND member_id=$2 AND revoked_at IS NULL`, [organizationId, memberId, revokedAt, reason]);
     await tx.query(`UPDATE capabilities
       SET revoked_at=$3

@@ -22,6 +22,7 @@ import { createAgentSessionGrantIssuanceService } from "./agent-sessions/issuanc
 import { createHumanQualificationGrantBatchHttpApi } from "./agent-sessions/qualification-batch-http-api.mjs";
 import { createQualificationGrantBatchService } from "./agent-sessions/qualification-batch-service.mjs";
 import { createOwnerRecoveryHttpApi } from "./recovery/http-api.mjs";
+import { createOwnerRecoveryDeadLetterHttpApi, OWNER_RECOVERY_DEAD_LETTER_RECENT_AUTH_OPERATIONS } from "./recovery/dead-letter-http-api.mjs";
 import { createOwnerRecoveryService } from "./recovery/service.mjs";
 import { createOwnerRecoveryWebAuthnCeremony } from "./recovery/webauthn-ceremony.mjs";
 
@@ -36,6 +37,7 @@ const ALLOWED_RECENT_AUTH_OPERATIONS = Object.freeze([
   WEBAUTHN_REGISTRATION_RECENT_AUTH_OPERATION,
   HUMAN_MANAGEMENT_RECENT_AUTH_OPERATIONS.revokeCredential,
   HUMAN_MANAGEMENT_RECENT_AUTH_OPERATIONS.revokeCurrentSession,
+  ...recentAuthOperationValues(OWNER_RECOVERY_DEAD_LETTER_RECENT_AUTH_OPERATIONS),
   ...recentAuthOperationValues(HUMAN_ORGANIZATIONS_RECENT_AUTH_OPERATIONS)
 ]);
 
@@ -74,6 +76,7 @@ export function createHumanAuthRuntime({ postgresRuntime, tokenRecords, origin, 
   let recoveryCeremony;
   let recoveryService;
   let recoveryApi;
+  let recoveryDeadLetterApi;
   if (ownerRecoveryRepository !== undefined) {
     recoveryCeremony = createOwnerRecoveryWebAuthnCeremony({
       coordinator: ownerRecoveryWebAuthnRepository,
@@ -87,6 +90,16 @@ export function createHumanAuthRuntime({ postgresRuntime, tokenRecords, origin, 
       recoveryService,
       origin,
       abuseControls,
+      now
+    });
+  }
+  if (postgresRuntime.ownerRecoveryOutboxManagementRepository !== undefined) {
+    recoveryDeadLetterApi = createOwnerRecoveryDeadLetterHttpApi({
+      humanSession,
+      recentAuthService,
+      repository: postgresRuntime.ownerRecoveryOutboxManagementRepository,
+      abuseControls,
+      origin,
       now
     });
   }
@@ -145,8 +158,8 @@ export function createHumanAuthRuntime({ postgresRuntime, tokenRecords, origin, 
   } else if (qualificationManifestSigner !== undefined) {
     throw new TypeError("Agent Session signer is required for qualification Grant batches");
   }
-  const api = createHumanAuthRouter({ sessionApi, webauthnApi, registrationApi, managementApi, organizationApi, ...(recoveryApi ? { recoveryApi } : {}), ...(agentSessionGrantApi ? { agentSessionGrantApi } : {}), ...(qualificationGrantBatchApi ? { qualificationGrantBatchApi } : {}) });
-  return Object.freeze({ api, humanSession, recentAuthService, abuseControls, ceremony, registrationCeremony, registrationService, identityResolver, consoleIdentity, managementRepository, organizationRepository, organizationService, sessionApi, webauthnApi, registrationApi, managementApi, organizationApi, ...(recoveryCeremony ? { recoveryCeremony } : {}), ...(recoveryService ? { recoveryService } : {}), ...(recoveryApi ? { recoveryApi } : {}), ...(agentSessionGrantApi ? { agentSessionGrantApi } : {}), ...(qualificationGrantBatchApi ? { qualificationGrantBatchApi } : {}), allowedOperations: ALLOWED_RECENT_AUTH_OPERATIONS });
+  const api = createHumanAuthRouter({ sessionApi, webauthnApi, registrationApi, managementApi, organizationApi, ...(recoveryApi ? { recoveryApi } : {}), ...(recoveryDeadLetterApi ? { recoveryDeadLetterApi } : {}), ...(agentSessionGrantApi ? { agentSessionGrantApi } : {}), ...(qualificationGrantBatchApi ? { qualificationGrantBatchApi } : {}) });
+  return Object.freeze({ api, humanSession, recentAuthService, abuseControls, ceremony, registrationCeremony, registrationService, identityResolver, consoleIdentity, managementRepository, organizationRepository, organizationService, sessionApi, webauthnApi, registrationApi, managementApi, organizationApi, ...(recoveryCeremony ? { recoveryCeremony } : {}), ...(recoveryService ? { recoveryService } : {}), ...(recoveryApi ? { recoveryApi } : {}), ...(recoveryDeadLetterApi ? { recoveryDeadLetterApi } : {}), ...(agentSessionGrantApi ? { agentSessionGrantApi } : {}), ...(qualificationGrantBatchApi ? { qualificationGrantBatchApi } : {}), allowedOperations: ALLOWED_RECENT_AUTH_OPERATIONS });
 }
 
 function requireCursorSecret(value) {

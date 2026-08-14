@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
+import crypto from "node:crypto";
 import test from "node:test";
 
+import { canonicalJson } from "../../../../packages/protocol/src/index.mjs";
 import { createHumanCursorCodec } from "../../src/human-auth/pagination/cursor-codec.mjs";
 import {
   OWNER_RECOVERY_OUTBOX_MANAGEMENT_ERROR_CODES,
@@ -68,7 +70,7 @@ test("redrive performs a management-version CAS and appends the admin audit in t
   });
   const audit = new FakeAudit();
   const repository = createRepository(client, { auditRepository: audit });
-  const result = await repository.redriveDeadLetter({ actor: ACTOR, event_id: EVENT, expected_management_version: 4, idempotency_key: "redrive-dead-letter-1", recent_authorization: recent("redrive") });
+  const result = await repository.redriveDeadLetter(mutationInput("redrive", 4, { idempotency_key: "redrive-dead-letter-1" }));
   assert.deepEqual(result, { organization_id: ORG, event_id: EVENT, status: "pending", attempts: 0, total_attempts: 100, management_version: 5, redrive_count: 1, suppressed_at: null, suppression_reason: null });
   assert.equal(client.calls[0].text, "BEGIN");
   assert.ok(client.calls.some(({ text }) => text.startsWith("UPDATE owner_recovery_outbox")));
@@ -90,11 +92,11 @@ test("suppress requires a safe reason and CASes the expected version", async () 
   });
   const audit = new FakeAudit();
   const repository = createRepository(client, { auditRepository: audit });
-  const result = await repository.suppressDeadLetter({ actor: ACTOR, event_id: EVENT, expected_management_version: 9, reason: "operator-confirmed-noise", idempotency_key: "suppress-dead-letter-1", recent_authorization: recent("suppress") });
+  const result = await repository.suppressDeadLetter(mutationInput("suppress", 9, { reason: "operator-confirmed-noise", idempotency_key: "suppress-dead-letter-1" }));
   assert.equal(result.status, "suppressed");
   assert.equal(result.suppression_reason, "operator-confirmed-noise");
   await assert.rejects(
-    () => repository.suppressDeadLetter({ actor: ACTOR, event_id: EVENT, expected_management_version: 9, reason: "bad\nreason", idempotency_key: "suppress-dead-letter-2", recent_authorization: recent("suppress") }),
+    () => repository.suppressDeadLetter(mutationInput("suppress", 9, { reason: "bad\nreason", idempotency_key: "suppress-dead-letter-2" })),
     { code: OWNER_RECOVERY_OUTBOX_MANAGEMENT_ERROR_CODES.INVALID_INPUT }
   );
 });
@@ -106,7 +108,7 @@ test("a stale CAS is stable, rolls back, and does not expose database diagnostic
   });
   const repository = createRepository(client, { auditRepository: new FakeAudit() });
   await assert.rejects(
-    () => repository.redriveDeadLetter({ actor: ACTOR, event_id: EVENT, expected_management_version: 3, idempotency_key: "redrive-stale-version", recent_authorization: recent("redrive") }),
+    () => repository.redriveDeadLetter(mutationInput("redrive", 3, { idempotency_key: "redrive-stale-version" })),
     (error) => error.code === OWNER_RECOVERY_OUTBOX_MANAGEMENT_ERROR_CODES.VERSION_CONFLICT && !error.message.includes("postgres")
   );
   assert.equal(client.calls.at(-1).text, "ROLLBACK");
@@ -119,7 +121,7 @@ test("an audit failure rolls back the outbox mutation and stays secret-free", as
   });
   const repository = createRepository(client, { auditRepository: { async appendAdminAuditEventInTransaction() { throw new Error("destination secret must not escape"); } } });
   await assert.rejects(
-    () => repository.redriveDeadLetter({ actor: ACTOR, event_id: EVENT, expected_management_version: 4, idempotency_key: "redrive-audit-failure", recent_authorization: recent("redrive") }),
+    () => repository.redriveDeadLetter(mutationInput("redrive", 4, { idempotency_key: "redrive-audit-failure" })),
     (error) => error.code === OWNER_RECOVERY_OUTBOX_MANAGEMENT_ERROR_CODES.AUDIT && !error.message.includes("destination")
   );
   assert.equal(client.calls.at(-1).text, "ROLLBACK");
@@ -130,6 +132,21 @@ test("rejects non-admin server scopes before touching PostgreSQL", async () => {
   const repository = createRepository(client);
   await assert.rejects(
     () => repository.listDeadLetters({ actor: { ...ACTOR, role: "auditor" } }),
+    { code: OWNER_RECOVERY_OUTBOX_MANAGEMENT_ERROR_CODES.FORBIDDEN }
+  );
+  assert.equal(client.calls.length, 0);
+});
+
+test("rejects a substituted resource-bound authorization before PostgreSQL", async () => {
+  const client = new ScriptedClient(() => { throw new Error("must not query"); });
+  const repository = createRepository(client);
+  const input = mutationInput("redrive", 4, { idempotency_key: "redrive-context-substitution" });
+  await assert.rejects(
+    () => repository.redriveDeadLetter({ ...input, context_hash: "0".repeat(64) }),
+    { code: OWNER_RECOVERY_OUTBOX_MANAGEMENT_ERROR_CODES.FORBIDDEN }
+  );
+  await assert.rejects(
+    () => repository.redriveDeadLetter({ ...input, recent_authorization: { ...input.recent_authorization, context_hash: "f".repeat(64) } }),
     { code: OWNER_RECOVERY_OUTBOX_MANAGEMENT_ERROR_CODES.FORBIDDEN }
   );
   assert.equal(client.calls.length, 0);
@@ -148,7 +165,7 @@ test("revalidates the current session, role, epochs, and consumed recent auth be
   });
   const repository = createRepository(client, { auditRepository: new FakeAudit() });
   await assert.rejects(
-    () => repository.redriveDeadLetter({ actor: ACTOR, event_id: EVENT, expected_management_version: 4, idempotency_key: "redrive-stale-authority", recent_authorization: recent("redrive") }),
+    () => repository.redriveDeadLetter(mutationInput("redrive", 4, { idempotency_key: "redrive-stale-authority" })),
     { code: OWNER_RECOVERY_OUTBOX_MANAGEMENT_ERROR_CODES.FORBIDDEN }
   );
   assert.equal(client.calls.some(({ text }) => text.startsWith("INSERT INTO idempotency_records")), false);
@@ -210,12 +227,22 @@ function auditResult(text, params, client) {
   throw new Error(`unexpected query: ${text}`);
 }
 
-function recent(operation) {
+function contextHash(operation, expectedManagementVersion) {
+  return crypto.createHash("sha256").update(canonicalJson({ version: 1, organization_id: ORG, event_id: EVENT, action: operation, expected_management_version: expectedManagementVersion })).digest("hex");
+}
+
+function mutationInput(operation, expectedManagementVersion, overrides = {}) {
+  const context_hash = contextHash(operation, expectedManagementVersion);
+  return { actor: ACTOR, event_id: EVENT, expected_management_version: expectedManagementVersion, context_hash, recent_authorization: recent(operation, context_hash), ...overrides };
+}
+
+function recent(operation, context_hash) {
   return {
     session_id: SESSION,
     challenge_id: AUTHORIZATION,
     operation: OWNER_RECOVERY_OUTBOX_MANAGEMENT_OPERATIONS[operation],
-    authenticated_at: Date.parse(NOW)
+    authenticated_at: Date.parse(NOW),
+    context_hash
   };
 }
 

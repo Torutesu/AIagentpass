@@ -40,6 +40,9 @@ export const HUMAN_AUTH_RATE_LIMIT_OPERATIONS = Object.freeze({
   recoveryRegistrationOptions: HUMAN_RECOVERY_OPERATIONS.registrationOptions,
   recoveryRegistrationVerify: HUMAN_RECOVERY_OPERATIONS.registrationVerify,
   recoveryActivate: HUMAN_RECOVERY_OPERATIONS.activate,
+  recoveryOutboxList: "human.recovery.outbox.list",
+  recoveryOutboxRedrive: "human.recovery.outbox.redrive",
+  recoveryOutboxSuppress: "human.recovery.outbox.suppress",
   // Retain the original names for callers compiled against the first
   // recovery limiter contract. New recovery HTTP routes must use the
   // operation names above so each route has its own bounded bucket.
@@ -64,6 +67,9 @@ const DEFAULT_POLICIES = Object.freeze({
   [HUMAN_AUTH_RATE_LIMIT_OPERATIONS.recoveryRegistrationOptions]: Object.freeze({ capacity: 8, refillPerSecond: 0.1 }),
   [HUMAN_AUTH_RATE_LIMIT_OPERATIONS.recoveryRegistrationVerify]: Object.freeze({ capacity: 6, refillPerSecond: 0.05 }),
   [HUMAN_AUTH_RATE_LIMIT_OPERATIONS.recoveryActivate]: Object.freeze({ capacity: 6, refillPerSecond: 0.05 }),
+  [HUMAN_AUTH_RATE_LIMIT_OPERATIONS.recoveryOutboxList]: Object.freeze({ capacity: 60, refillPerSecond: 1 }),
+  [HUMAN_AUTH_RATE_LIMIT_OPERATIONS.recoveryOutboxRedrive]: Object.freeze({ capacity: 12, refillPerSecond: 0.1 }),
+  [HUMAN_AUTH_RATE_LIMIT_OPERATIONS.recoveryOutboxSuppress]: Object.freeze({ capacity: 12, refillPerSecond: 0.1 }),
   [HUMAN_AUTH_RATE_LIMIT_OPERATIONS.recoveryBegin]: Object.freeze({ capacity: 6, refillPerSecond: 0.05 }),
   [HUMAN_AUTH_RATE_LIMIT_OPERATIONS.recoveryVerify]: Object.freeze({ capacity: 8, refillPerSecond: 0.1 })
 });
