@@ -104,8 +104,8 @@ function summary() {
     organization: {
       organization_id: ORGANIZATION_ID,
       name: "P0-B E2E Organization",
-      slug: "p0-b-e2e",
       created_at: "2026-08-12T00:00:00.000Z",
+      updated_at: "2026-08-12T00:00:00.000Z",
       version: 1,
     },
     devices: devices(),

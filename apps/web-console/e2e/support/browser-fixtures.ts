@@ -47,8 +47,8 @@ export function consoleSummary() {
     organization: {
       organization_id: ORGANIZATION_ID,
       name: "Browser E2E Organization",
-      slug: "browser-e2e",
       created_at: "2026-08-12T00:00:00.000Z",
+      updated_at: "2026-08-12T00:00:00.000Z",
       version: 1,
     },
     devices: [{

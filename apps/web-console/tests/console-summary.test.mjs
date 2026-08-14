@@ -22,7 +22,7 @@ function scope() {
 
 function summary(overrides = {}) {
   return {
-    organization: { organization_id: ORGANIZATION_ID, name: "Acme", slug: "acme", created_at: DATE, version: 1 },
+    organization: { organization_id: ORGANIZATION_ID, name: "Acme", version: 1, created_at: DATE, updated_at: DATE },
     devices: [{
       device_id: DEVICE_ID,
       name: "Build Mac",
@@ -107,7 +107,7 @@ function assertParseError(fn, path) {
 
 test("parses the current summary response into a safe immutable view model", () => {
   const result = parse(summary(), { organizationId: ORGANIZATION_ID });
-  assert.deepEqual(result.organization, { id: ORGANIZATION_ID, name: "Acme", slug: "acme", createdAt: DATE, version: 1 });
+  assert.deepEqual(result.organization, { id: ORGANIZATION_ID, name: "Acme", createdAt: DATE, updatedAt: DATE, version: 1 });
   assert.deepEqual(result.devices[0], {
     id: DEVICE_ID, name: "Build Mac", status: "active", tone: "green", createdAt: DATE, lastSeenAt: DATE,
     version: 1, desiredGeneration: 2, observedGeneration: 2, refreshState: "applied", bundleSequence: 4,

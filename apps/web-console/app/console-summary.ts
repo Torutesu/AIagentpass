@@ -16,8 +16,8 @@ export type ConsoleSummaryViewModel = Readonly<{
   organization: Readonly<{
     id: string;
     name: string;
-    slug: string;
     createdAt: string;
+    updatedAt: string;
     version: number;
   }>;
   devices: ReadonlyArray<Readonly<{
@@ -166,12 +166,12 @@ export function parseConsoleSummary(input: unknown, options: ConsoleSummaryParse
 }
 
 function parseOrganization(value: unknown, path: string): ConsoleSummaryViewModel["organization"] {
-  const object = record(value, path, ["organization_id", "name", "slug", "created_at", "version"]);
+  const object = record(value, path, ["organization_id", "name", "version", "created_at", "updated_at"]);
   return {
     id: id(required(object.organization_id, `${path}.organization_id`), `${path}.organization_id`),
     name: text(required(object.name, `${path}.name`), `${path}.name`, MAX_NAME),
-    slug: text(required(object.slug, `${path}.slug`), `${path}.slug`, MAX_NAME),
     createdAt: timestamp(required(object.created_at, `${path}.created_at`), `${path}.created_at`),
+    updatedAt: timestamp(required(object.updated_at, `${path}.updated_at`), `${path}.updated_at`),
     version: positiveInteger(required(object.version, `${path}.version`), `${path}.version`),
   };
 }
