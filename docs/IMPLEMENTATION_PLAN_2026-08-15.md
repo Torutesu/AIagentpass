@@ -2,8 +2,8 @@
 
 Status: active
 
-Planning baseline: `codex/agent-platform` after the C1.4 provider-operation
-maintenance and adjudication-contract checkpoint
+Planning baseline: `codex/agent-platform` at `b75c4f5`, after authoritative
+audit-export snapshot composition
 
 Planning date: 2026-08-15
 
@@ -34,7 +34,7 @@ Production completion means:
 Implemented in the branch baseline; C1 is closed by the retained, independently
 verified source-bound CI artifact described below:
 
-- frozen Core/OpenAPI/JSON Schema contracts and 42 forward-only migrations;
+- frozen Core/OpenAPI/JSON Schema contracts and 45 forward-only migrations;
 - organization roles, Human sessions, WebAuthn, Device APIs, control state,
   audit, emergency revocation, owner recovery, and browser-assisted enrollment;
 - managed signer registry for eight distinct signing purposes;
@@ -574,6 +574,69 @@ also run in parallel. C4 waits for both producer authorities; C5 waits for
 their runtime bindings; protected real-KMS qualification C8 waits for C5 and
 C6. External IAM, notarization, physical Mac, staging, and independent-review
 evidence remain explicit release gates and cannot be satisfied by local tests.
+
+#### Executable backlog after `b75c4f5`
+
+The following backlog is the authoritative order after the snapshot-reader
+checkpoint. A work package is complete only when its code, negative tests,
+failure tests, contract/catalog changes, operator documentation, and relevant
+real-system qualification land together. External credentials or hardware may
+block qualification, but they must not block implementation of the verifier,
+evidence schema, or fail-closed gate.
+
+| Package | Deliverable | Dependencies | Required verification | Exit condition |
+| --- | --- | --- | --- | --- |
+| P0 — C2 immutable export payload | Migration 0046 stores canonical payload bytes, parsed JSON, digest, and issuance identity in the same transaction as the immutable reservation. Repository retrieval recomputes SHA-256, requires byte-for-byte canonical JSON, rejects private/accessor/prototype data, and returns payload only for a committed issuance. | `b75c4f5`; serialized migration/catalog lock | Fresh PostgreSQL 17 migration; two-pool reserve/reclaim/replay; missing, oversized, altered-byte, altered-JSON, wrong-digest, uncommitted, cross-tenant, and concurrent insertion tests | A committed export is independently retrievable after restart without re-reading mutable source rows. |
+| P1 — C2 canonical source verification | Admin audit writer v2 hashes canonical JSON; the snapshot reader recomputes v2 hashes. Legacy v1 remains explicitly linkage-only and is never represented as independently recomputed. | P0 can run in parallel; admin writer and reader format are serialized | Nested-key-order vectors, mixed v1/v2 chain, tampered v2 preimage, boundary linkage, old-row compatibility, and root-stability tests | Every newly written admin event has a recoverable canonical preimage; the API states the verification level honestly. |
+| P2 — C2 Human BFF and Console | Add create, get, download, and verify operations backed by immutable retrieval. Owner/Admin may create; Owner/Admin/Auditor may read and verify; Viewer is denied. Creation requires recent resource-bound WebAuthn, CSRF, idempotency, and optimistic state where applicable. Downloads use attachment headers, no-store caching, bounded bytes, and no browser persistence. | P0 and frozen DTO/schema; P1 before claiming full source verification | Role matrix, organization hiding, CSRF, stale/absent WebAuthn, response loss, duplicate request, digest mismatch, range gap, expiry, loading/empty/error/offline/a11y, URL/storage/log/trace secret scans | A non-engineer can create and verify an export in the Console, while replay returns the exact original bytes and never signs twice. |
+| P3 — C3 promotion authority | Add deployment-scoped promotion reservation and exact candidate ledger. Resolve immutable platform approval quorum; bind source tree, image, PKG, SBOM, manifest, qualification set, migration set, signer lifecycle, and environment; sign v3 only; atomically commit evidence and deployment transition. | C1 provider ledger; contract/catalog and migration locks must serialize with P0/P2 | Candidate/environment/evidence substitution, expired approval, quorum race, concurrent promotion, signer timeout/ambiguity, emergency disable, rotation, restart, response loss, and rebuild-on-promotion tests | One exact candidate is either durably promoted with verifiable v3 evidence or remains in a bounded operator-actionable state. |
+| P4 — reconciliation, readiness, and DB authority | Add producer-specific uncertain-operation list/detail/verify/adjudication BFF surfaces; probe all eight purpose/lifecycle pairs; drain deterministically; revoke runtime direct DML/TRUNCATE and public-schema/TEMP privileges; expose reviewed purpose procedures/views; add TLS/deadline/pool checks. | P2/P3 producer identity; database hardening can start earlier on disjoint SQL | Human role/WebAuthn/CSRF/If-Match matrix; eight-purpose missing/shared/stale/disabled/wrong-key tests; negative database privilege matrix; interrupted migration and shutdown race tests | No generic signing authority crosses the BFF, partial signer configuration cannot become ready, and runtime credentials cannot bypass authority repositories. |
+| P5 — protected cloud qualification | Provision all eight non-exportable managed keys with production-shaped IAM; run two API instances and workers against protected PostgreSQL; perform encrypted backup/PITR restore, rotation/drain/disable, provider outage/throttling, and response-loss drills. | P3/P4; external AWS/GCP/PostgreSQL authority | Source/image/config-bound evidence, key metadata/non-exportability proof, exact committed operation IDs, authority-state restore comparison, measured RPO/RTO, secret scan | Every scenario converges to one verified result or one durable bounded state; no private/local fallback, cross-purpose IAM, or unverifiable success exists. |
+| P6 — immutable macOS release candidate | Build one universal PKG containing broker, XPC services, launchd jobs, CLI, Git integration, and adapters; sign nested code and installer with Developer ID; notarize and staple; generate SBOM/provenance/manifest. Direct download, Homebrew, and CLI bootstrap must fetch and verify the same PKG digest. | Frozen client protocol; can run beside P2-P5 until final candidate binding | `codesign`, designated requirement, entitlements, `spctl`, `pkgutil`, stapler, ownership/permissions, install/upgrade/rollback/uninstall-preserve/purge/reinstall/reboot/sleep-wake | One immutable candidate is accepted on physical Apple silicon/Secure Enclave and Intel/T2; a browser or Homebrew process never replaces the privileged native boundary. |
+| P7 — agent E2E and production promotion | Qualify Claude Code first, Cursor second. Deploy unchanged Cloud/Console/worker/schema/PKG candidates to staging, execute revoke/failover/restore/rollback/recovery drills, close independent-review findings, and issue one v3 promotion record over exact digests. | P2-P6 and two physical Mac lanes | Two unattended verified commits per adapter; hostile sibling/path/ancestry tests; measured revocation; canary and rollback; independent review with retest; no skipped production gate | Exact qualified artifacts are promoted without rebuilding; no open critical/high or P0/P1 finding remains; tenant enablement is explicit and reversible. |
+
+##### Planned merge sequence
+
+1. `C2-payload-ledger`: migration 0046, immutable payload repository, service
+   retrieval, catalog/manifest updates, and real PostgreSQL qualification.
+2. `C2-canonical-admin-v2`: canonical writer and mixed-version reader with an
+   explicit legacy verification label.
+3. `C2-human-api`: create/get/download/verify schemas, OpenAPI operations,
+   Human BFF authorization, privacy headers, and audit events.
+4. `C2-console`: export workflow, verification result, download, recovery from
+   response loss, and Playwright/browser-secret qualification.
+5. `C3-promotion-ledger`: platform approval consumption, promotion reservation,
+   atomic deployment transition, historical verifier, and PostgreSQL races.
+6. `C3-operator-api`: platform-only approval/promotion/reconciliation surface;
+   Organization membership never grants promotion authority.
+7. `C5-C6-runtime-db`: all-eight readiness/drain plus least-privilege,
+   TLS/deadline, cutover, backup/PITR, and authority-comparison tooling.
+8. `C8-protected-qualification`: real KMS, two-instance PostgreSQL, retained
+   evidence, and independent verification.
+9. `C9-release-candidate`: exact universal signed/notarized PKG, direct and
+   Homebrew delivery, two physical hardware reports.
+10. `C10-C11-release`: Claude Code/Cursor E2E, staging drills, security review,
+    exact-digest promotion, canary, and production rollback gate.
+
+The critical path is P0 -> P2 -> P4 -> P5 -> P7. P1 runs beside P0. P3 starts
+as soon as its migration/catalog lock is free and joins the critical path at
+P4. P6 can proceed beside hosted work once the client protocol is frozen, but
+its final manifest cannot close before Cloud/Console image and migration
+digests are fixed. Console UI work never invents state ahead of its BFF; real
+KMS, notarization, protected restore, physical Mac, and independent-review
+claims remain blocked until their corresponding evidence exists.
+
+##### Checkpoint policy
+
+Every merge sequence item receives a separate reviewable commit and is pushed
+only from a clean tree after focused tests. Contract or migration changes also
+require catalog validation and a fresh-database run. Runtime changes require
+the root suite, Console tests/lint when browser-visible, and a secret scan.
+Before tagging a candidate, CI must bind source SHA, catalog digest, migration
+digest, image digests, package digest, SBOM/provenance, signer lifecycle/key
+versions, test command set, scenario outcomes, and skip count. A skipped,
+mocked, simulated, ad-hoc-signed, or locally asserted result is never promoted
+to protected, physical, or production evidence.
 
 ### M1. Audit-anchor and promotion-evidence authorities (Q2B-3)
 
