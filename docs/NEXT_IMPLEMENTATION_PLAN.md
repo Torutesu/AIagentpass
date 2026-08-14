@@ -17,11 +17,22 @@ The current branch has the versioned Core/OpenAPI/JSON Schema catalog, 36 forwar
 At the current checkpoint, recovery dead-letter redrive and suppression require
 an exact resource-bound WebAuthn context. The repository recomputes that
 context and consumes the proof in the same organization-locked transaction.
-All 36 migrations apply, the root suite passes 1,813 tests (1,765 pass and 48
+All 36 migrations apply, the root suite passes 1,833 tests (1,785 pass and 48
 intentionally skipped), and the frozen catalog validates 120 entries. The
 authenticated P0-B Cloud/Console/PostgreSQL/browser journey also passes all 12
 role, WebAuthn, wake, tenant-substitution, and revocation scenarios locally and
 in the source-bound CI qualification.
+
+Cycle B source work now includes a fail-closed `DELETE /api/auth/session`
+journey from the Console through the Human BFF to the existing logout
+authority, exact clear-cookie enforcement, a global Console sign-out action,
+and an operation-blocking reauthentication surface for expired sessions. The
+managed AWS/GCP signer composition now classifies throttling opaquely and wraps
+each purpose in an isolated bounded closed/open/half-open circuit with no
+queue or local fallback. Local Console qualification passes 136 tests. Cloud
+IAM/non-exportability evidence, all-purpose key provisioning, and protected
+browser/PostgreSQL qualification remain open, so neither W2.2 nor W3.2 is yet
+declared complete.
 
 The branch CI run `31791531512` passes all four jobs: PostgreSQL 16/W1.5,
 browser E2E, P0-B live process, and the complete test/release gate. It retains
@@ -503,8 +514,8 @@ Add real PostgreSQL, two-instance, Playwright, KMS/IAM, packaging/notarization, 
 6. `ci: repair full qualification prerequisites` (W1.5 CI repair, complete)
 7. `test: restore hosted p0b runtime composition` (W1.5 CI repair and source-bound external qualification complete)
 8. `ops: implement the recovery operational gate` (W1.6 source implementation complete; exact-image staging execution pending)
-9. `test: close the production console browser matrix` (W2)
-10. `feat: qualify purpose-separated managed signer providers` (W3; AWS/GCP adapters implemented, IAM/outage/rotation evidence pending)
+9. `test: close the production console browser matrix` (W2; organization journey and fail-closed self-logout/expiry source paths implemented, protected browser/PostgreSQL matrix pending)
+10. `feat: qualify purpose-separated managed signer providers` (W3; AWS/GCP adapters and isolated timeout/throttle/integrity circuit behavior implemented, all-purpose IAM/non-exportability/outage/rotation evidence pending)
 11. `feat: complete claude code headless onboarding` (W4)
 12. `feat: add cursor adapter parity` (W4)
 13. `build: produce signed notarized immutable pkg` (W5)

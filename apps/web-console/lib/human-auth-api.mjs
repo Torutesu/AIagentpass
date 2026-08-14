@@ -9,7 +9,7 @@ const SESSION_COOKIE_NAME = "__Host-agentpass_session";
 const SESSION_KEYS = Object.freeze(["version", "session_id", "member_id", "organization_id", "role", "created_at", "expires_at", "recent_auth_at"]);
 const SESSION_ROLES = new Set(["owner", "admin", "auditor", "viewer"]);
 const ROUTES = new Map([
-  ["/api/auth/session", Object.freeze({ cloudPath: "/api/auth/session", session: "bootstrap", body: "session-bootstrap", requireSetCookie: true })],
+  ["/api/auth/session", Object.freeze({ cloudPath: "/api/auth/session", methods: ["POST", "DELETE"], session: "bootstrap", bodies: { POST: "session-bootstrap", DELETE: "none" }, requireSetCookie: true, delete: Object.freeze({ session: "human", requireCookie: true, requireCsrf: true, allowSetCookie: true, clearCookieOnly: true, requireClearedSessionBody: true }) })],
   ["/api/auth/webauthn/options", Object.freeze({ cloudPath: "/api/auth/webauthn/options", session: "human", requireCookie: true, requireCsrf: true })],
   ["/api/auth/webauthn/verify", Object.freeze({ cloudPath: "/api/auth/webauthn/verify", session: "human", requireCookie: true, requireCsrf: true })],
   ["/api/auth/webauthn/registration/options", Object.freeze({ cloudPath: "/api/auth/webauthn/registration/options", session: "human", requireCookie: true, requireCsrf: true })],
@@ -36,9 +36,12 @@ export async function handleHumanAuthRequest(request, options = {}) {
     const url = new URL(request.url);
     let route = resolveRoute(url.pathname);
     if (!route || url.hash) fail(404, "not_found", "Resource not found");
-    if (!(route.methods ?? ["POST"]).includes(request.method)) fail(405, "method_not_allowed", "Method not allowed");
+    if (!(route.methods ?? ["POST"]).includes(request.method)) {
+      return json(405, { error: { code: "method_not_allowed", message: "Method not allowed" } }, { allow: (route.methods ?? ["POST"]).join(", ") });
+    }
     if (url.search && !(route.queryMethods ?? []).includes(request.method)) fail(400, "invalid_request", "The request query is invalid");
     const query = (route.queryMethods ?? []).includes(request.method) ? normalizeListQuery(url.searchParams) : "";
+    if (route.delete && request.method === "DELETE") route = { ...route, ...route.delete };
     route = { ...route, session: route.session ?? "human", cloudPath: `${route.cloudPath}${query}`, body: route.bodies?.[request.method] ?? route.body, requireIdempotency: route.requireIdempotency === true || (route.idempotencyMethods ?? []).includes(request.method) };
     const origin = request.headers.get("origin");
     if (origin !== url.origin || origin === "null") fail(403, "origin_not_allowed", "The request origin is not allowed");
@@ -120,7 +123,7 @@ export async function handleHumanAuthRequest(request, options = {}) {
     } finally {
       clearTimeout(timeout);
     }
-    return await relayResponse(upstream, { allowSetCookie: route.session === "bootstrap" || route.allowSetCookie === true, clearCookieOnly: route.clearCookieOnly === true, requireSetCookie: route.requireSetCookie === true, bootstrap: route.session === "bootstrap" });
+    return await relayResponse(upstream, { allowSetCookie: route.session === "bootstrap" || route.allowSetCookie === true, clearCookieOnly: route.clearCookieOnly === true, requireSetCookie: route.requireSetCookie === true, requireClearedSessionBody: route.requireClearedSessionBody === true, bootstrap: route.session === "bootstrap" });
   } catch (error) {
     const mapped = error instanceof HumanAuthBridgeError
       ? error
@@ -210,7 +213,7 @@ function validateBody(value, shape) {
   fail(500, "human_auth_bridge_failed", "Authentication is unavailable");
 }
 
-async function relayResponse(response, { allowSetCookie = false, clearCookieOnly = false, requireSetCookie = false, bootstrap = false } = {}) {
+async function relayResponse(response, { allowSetCookie = false, clearCookieOnly = false, requireSetCookie = false, requireClearedSessionBody = false, bootstrap = false } = {}) {
   if (!response || typeof response.status !== "number" || response.status < 200 || response.status > 599 || (response.status >= 300 && response.status < 400)) fail(502, "cloud_api_invalid_response", "Cloud API response was invalid");
   const type = response.headers?.get("content-type") ?? "";
   if (!/^application\/json(?:\s*;|\s*$)/i.test(type)) fail(502, "cloud_api_invalid_response", "Cloud API response was invalid");
@@ -221,6 +224,7 @@ async function relayResponse(response, { allowSetCookie = false, clearCookieOnly
   let value;
   try { value = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes)); } catch { fail(502, "cloud_api_invalid_response", "Cloud API response was invalid"); }
   if (bootstrap) value = normalizeBootstrapResponse(value, response.status >= 200 && response.status < 300);
+  if (requireClearedSessionBody && (response.status < 200 || response.status >= 300 || !isExactObject(value, ["session"]) || value.session !== null)) fail(502, "cloud_api_invalid_response", "Cloud API response was invalid");
   const headers = new Headers({ "content-type": "application/json; charset=utf-8", "cache-control": "no-store, max-age=0", pragma: "no-cache", expires: "0", "x-content-type-options": "nosniff", "referrer-policy": "no-referrer" });
   const setCookie = response.headers.get("set-cookie");
   if (setCookie !== null && !allowSetCookie) fail(502, "cloud_api_invalid_response", "Cloud API response was invalid");

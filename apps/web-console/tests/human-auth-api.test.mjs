@@ -88,6 +88,59 @@ test("does not reuse a stale browser session cookie during bootstrap", async () 
   assert.equal(response.headers.get("set-cookie"), `${replacement}; Path=/; HttpOnly; Secure; SameSite=Strict; Max-Age=3600`);
 });
 
+test("self-logout forwards only the session cookie and CSRF, then relays the exact clear cookie", async () => {
+  const calls = [];
+  const api = bridge(async (url, init) => {
+    calls.push({ url: String(url), init });
+    return new Response(JSON.stringify({ session: null }), {
+      status: 200,
+      headers: {
+        "content-type": "application/json",
+        "set-cookie": "__Host-agentpass_session=; Path=/; HttpOnly; Secure; SameSite=Strict; Max-Age=0"
+      }
+    });
+  });
+  const response = await api.handle(request("/api/auth/session", { method: "DELETE", headers: { cookie: sessionCookie, "agentpass-csrf": csrf } }));
+
+  assert.equal(response.status, 200);
+  assert.deepEqual(await response.json(), { session: null });
+  assert.equal(response.headers.get("set-cookie"), "__Host-agentpass_session=; Path=/; HttpOnly; Secure; SameSite=Strict; Max-Age=0");
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].url, "https://cloud.example.test/api/auth/session");
+  assert.equal(calls[0].init.method, "DELETE");
+  assert.equal(calls[0].init.headers.get("cookie"), sessionCookie);
+  assert.equal(calls[0].init.headers.get("agentpass-csrf"), csrf);
+  assert.equal(calls[0].init.headers.has("authorization"), false);
+  assert.equal(calls[0].init.body, undefined);
+  assert.equal(calls[0].init.cache, "no-store");
+});
+
+test("self-logout fails closed before Cloud when cookie, CSRF, origin, or clear cookie is invalid", async () => {
+  let calls = 0;
+  const api = bridge(async () => { calls += 1; return new Response(JSON.stringify({ session: null }), { headers: { "content-type": "application/json" } }); });
+  assert.equal((await api.handle(request("/api/auth/session", { method: "DELETE", headers: { "agentpass-csrf": csrf } }))).status, 401);
+  assert.equal((await api.handle(request("/api/auth/session", { method: "DELETE", headers: { cookie: sessionCookie } }))).status, 403);
+  assert.equal((await api.handle(request("/api/auth/session", { method: "DELETE", headers: { cookie: sessionCookie, "agentpass-csrf": "short" } }))).status, 403);
+  assert.equal((await api.handle(request("/api/auth/session", { method: "DELETE", headers: { cookie: "__Host-agentpass_session=short", "agentpass-csrf": csrf } }))).status, 400);
+  assert.equal((await api.handle(request("/api/auth/session", { method: "DELETE", headers: { cookie: sessionCookie, "agentpass-csrf": csrf, origin: "https://evil.test" } }))).status, 403);
+  const nonEmptyBody = new Request("https://console.example.test/api/auth/session", { method: "DELETE", headers: { origin: "https://console.example.test", "content-type": "application/json", cookie: sessionCookie, "agentpass-csrf": csrf }, body: "{}" });
+  assert.equal((await api.handle(nonEmptyBody)).status, 400);
+  const wrongMethod = new Request("https://console.example.test/api/auth/session", { method: "PUT", headers: { origin: "https://console.example.test" } });
+  const wrongMethodResponse = await api.handle(wrongMethod);
+  assert.equal(wrongMethodResponse.status, 405);
+  assert.equal(wrongMethodResponse.headers.get("allow"), "POST, DELETE");
+  assert.equal(calls, 0);
+
+  const malformedClear = await bridge(async () => new Response(JSON.stringify({ session: null }), {
+    headers: { "content-type": "application/json", "set-cookie": "other=value" }
+  })).handle(request("/api/auth/session", { method: "DELETE", headers: { cookie: sessionCookie, "agentpass-csrf": csrf } }));
+  assert.equal(malformedClear.status, 502);
+  const malformedBody = await bridge(async () => new Response(JSON.stringify({ session: {} }), {
+    headers: { "content-type": "application/json", "set-cookie": "__Host-agentpass_session=; Path=/; HttpOnly; Secure; SameSite=Strict; Max-Age=0" }
+  })).handle(request("/api/auth/session", { method: "DELETE", headers: { cookie: sessionCookie, "agentpass-csrf": csrf } }));
+  assert.equal(malformedBody.status, 502);
+});
+
 test("production bootstrap sends only the compact server identity header and exact empty JSON body", async () => {
   assert.equal(Object.hasOwn(productionEnv, "AGENTPASS_CLOUD_TOKEN"), false);
   assert.equal(Object.hasOwn(productionEnv, "AGENTPASS_OPERATOR_USER_IDS"), false);

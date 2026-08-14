@@ -13,6 +13,7 @@ export const REMOTE_KMS_ERROR_CODES = Object.freeze({
   PURPOSE: "ERR_REMOTE_KMS_PURPOSE",
   METADATA: "ERR_REMOTE_KMS_METADATA",
   PROVIDER: "ERR_REMOTE_KMS_PROVIDER",
+  THROTTLED: "ERR_REMOTE_KMS_THROTTLED",
   TIMEOUT: "ERR_REMOTE_KMS_TIMEOUT",
   ABORTED: "ERR_REMOTE_KMS_ABORTED",
   OUTPUT: "ERR_REMOTE_KMS_OUTPUT",
@@ -30,6 +31,7 @@ const MESSAGES = Object.freeze({
   [REMOTE_KMS_ERROR_CODES.PURPOSE]: "remote KMS provider request is not purpose bound",
   [REMOTE_KMS_ERROR_CODES.METADATA]: "remote KMS provider metadata is invalid",
   [REMOTE_KMS_ERROR_CODES.PROVIDER]: "remote KMS provider is unavailable",
+  [REMOTE_KMS_ERROR_CODES.THROTTLED]: "remote KMS provider request was throttled",
   [REMOTE_KMS_ERROR_CODES.TIMEOUT]: "remote KMS provider timed out",
   [REMOTE_KMS_ERROR_CODES.ABORTED]: "remote KMS provider request was aborted",
   [REMOTE_KMS_ERROR_CODES.OUTPUT]: "remote KMS provider output is invalid",
@@ -219,7 +221,17 @@ function withDeadline(operation, externalSignal, timeoutMs) {
 
 function mapRemoteError(error) {
   if (error instanceof RemoteKmsProviderError) return error;
+  if (isThrottleError(error)) return new RemoteKmsProviderError(REMOTE_KMS_ERROR_CODES.THROTTLED);
   return new RemoteKmsProviderError(REMOTE_KMS_ERROR_CODES.PROVIDER);
+}
+
+function isThrottleError(error) {
+  const values = [error?.code, error?.name].filter((value) => typeof value === "string").map((value) => value.toUpperCase());
+  const status = error?.statusCode ?? error?.status ?? error?.$metadata?.httpStatusCode;
+  return status === 429 || values.some((value) => [
+    "429", "RATE_LIMITED", "RESOURCE_EXHAUSTED", "THROTTLED", "THROTTLINGEXCEPTION", "TOO_MANY_REQUESTS",
+    "ERR_TOO_MANY_REQUESTS"
+  ].includes(value));
 }
 
 function publicKeyFingerprint(key) { return crypto.createHash("sha256").update(key.export({ type: "spki", format: "der" })).digest("hex"); }

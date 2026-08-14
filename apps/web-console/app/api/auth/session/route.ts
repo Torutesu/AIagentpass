@@ -5,3 +5,7 @@ export const dynamic = "force-dynamic";
 export async function POST(request: Request) {
   return handleHumanAuthRequest(request, { getSiwcUser: getChatGPTUser });
 }
+
+export async function DELETE(request: Request) {
+  return handleHumanAuthRequest(request);
+}

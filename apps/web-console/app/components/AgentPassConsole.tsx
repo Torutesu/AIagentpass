@@ -419,6 +419,26 @@ async function fetchConsole(path: string, init: RequestInit = {}): Promise<Respo
   return response;
 }
 
+async function logoutConsoleSession(): Promise<void> {
+  const session = await consoleSessionContext.get();
+  const response = await fetch(SESSION_BOOTSTRAP_PATH, {
+    method: "DELETE",
+    headers: { accept: "application/json", [CSRF_HEADER]: session.csrfToken },
+    cache: "no-store",
+    credentials: "same-origin",
+    redirect: "error",
+  });
+  if (!response.ok || !/^application\/json(?:\s*;|\s*$)/i.test(response.headers.get("content-type") ?? "")) {
+    if (response.status === 401 || response.status === 403) consoleSessionContext.clear(session);
+    throw new ConsoleSessionError("サインアウトを完了できませんでした。", response.status);
+  }
+  const payload: unknown = await response.json();
+  if (!isPlainRecord(payload) || !hasExactKeys(payload, ["session"]) || payload.session !== null) {
+    throw new ConsoleSessionError("サインアウトを完了できませんでした。", response.status);
+  }
+  consoleSessionContext.clear(session);
+}
+
 function supportsWebAuthn(): boolean {
   return typeof window !== "undefined" && typeof window.PublicKeyCredential !== "undefined" && typeof navigator.credentials?.get === "function";
 }
@@ -663,6 +683,11 @@ function ActivityList({ activities }: { activities: AgentPassInitialData["activi
 
 function SurfaceHeader({ eyebrow, title, copy }: { eyebrow: string; title: string; copy: string }) {
   return <header className="surface-header"><div><p className="eyebrow">{eyebrow}</p><h1 className="page-heading">{title}</h1><p className="page-intro">{copy}</p></div></header>;
+}
+
+function SessionEndedSurface({ reason }: { reason: "expired" | "signed-out" }) {
+  const signedOut = reason === "signed-out";
+  return <><SurfaceHeader eyebrow={signedOut ? "SESSION / SIGNED OUT" : "SESSION / EXPIRED"} title={signedOut ? "サインアウトしました" : "セッションの有効期限が切れました"} copy={signedOut ? "このブラウザのAgentPassセッションを安全に終了しました。" : "安全のため、Consoleのデータと操作を停止しました。再認証してから続けてください。"} /><div className="surface-content"><article className="surface-card" role="alert"><span className="section-kicker">REAUTHENTICATION REQUIRED</span><h2 className="surface-card-title">もう一度サインインしてください</h2><p className="surface-card-copy">この画面に残っている情報は権限判断には使われません。ページを再読み込みすると、現在の認証状態から新しいセッションを開始します。</p><button className="primary-button" type="button" onClick={() => window.location.reload()}>再認証する</button></article></div></>;
 }
 
 function SetupSurface({ data, goTo, operate, online }: { data: AgentPassInitialData; goTo: (view: ConsoleView) => void; operate: (operation: string, body: Record<string, unknown>, success: string) => Promise<void>; online: boolean }) {
@@ -935,6 +960,8 @@ export function AgentPassConsole() {
   const [stopPending, setStopPending] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
   const [summaryState, setSummaryState] = useState<"loading" | "ready" | "error">("loading");
+  const [sessionState, setSessionState] = useState<"active" | "expired" | "signed-out">("active");
+  const [signOutPending, setSignOutPending] = useState(false);
   const [lastSynced, setLastSynced] = useState("未同期");
   const modalRef = useRef<HTMLElement | null>(null);
   const summaryEpoch = useRef(0);
@@ -954,17 +981,23 @@ export function AgentPassConsole() {
     try {
       const { organizationId } = await consoleSessionContext.get(signal);
       const response = await fetchConsole("/api/console?resource=summary", { signal });
+      if (response.status === 401 || response.status === 403) throw new ConsoleSessionError("セッションの有効期限が切れました。", response.status);
       if (!response.ok) throw new Error("summary unavailable");
       const next = summaryViewData(parseConsoleSummary(await response.json(), { organizationId }));
       if (epoch !== summaryEpoch.current) return;
       organizationIdRef.current = organizationId;
       setData(next);
+      setSessionState("active");
       setSummaryState("ready");
       setLastSynced("たった今");
     } catch (error) {
       if (error instanceof DOMException && error.name === "AbortError") return;
       if (epoch !== summaryEpoch.current) return;
       organizationIdRef.current = null;
+      if (error instanceof ConsoleSessionError && (error.status === 401 || error.status === 403)) {
+        consoleSessionContext.clear();
+        setSessionState("expired");
+      }
       setSummaryState("error");
       setData(emptyConsoleData());
     } finally {
@@ -1048,6 +1081,28 @@ export function AgentPassConsole() {
     setMobileOpen(false);
     setWorkspaceOpen(false);
     window.scrollTo({ top: 0, behavior: "smooth" });
+  };
+
+  const signOut = async () => {
+    if (signOutPending) return;
+    setSignOutPending(true);
+    try {
+      await logoutConsoleSession();
+      organizationIdRef.current = null;
+      setData(emptyConsoleData());
+      setSessionState("signed-out");
+      setSummaryState("error");
+    } catch (error) {
+      if (error instanceof ConsoleSessionError && (error.status === 401 || error.status === 403)) {
+        setData(emptyConsoleData());
+        setSessionState("expired");
+        setSummaryState("error");
+      } else {
+        showToast("サインアウトを完了できませんでした。もう一度お試しください", "error");
+      }
+    } finally {
+      setSignOutPending(false);
+    }
   };
 
   const triggerStop = async () => {
@@ -1140,7 +1195,7 @@ export function AgentPassConsole() {
             {navItems.map((item) => <li key={item.id}><button className={`nav-item${activeView === item.id ? " active" : ""}${item.id === "emergency" ? " danger" : ""}`} type="button" onClick={() => goTo(item.id)} aria-current={activeView === item.id ? "page" : undefined}><span className="nav-icon" aria-hidden="true">{item.icon}</span><span className="nav-copy">{item.label}</span>{item.badge ? <span className="nav-badge">{item.badge}</span> : null}</button></li>)}
           </ul>
         </nav>
-        <div className="sidebar-footer"><div className="operator"><span className="avatar" aria-hidden="true">{data.operator.initials}</span><div><p className="operator-name">{data.operator.name}</p><p className="operator-role">{data.operator.role}</p></div></div></div>
+        <div className="sidebar-footer"><div className="operator"><span className="avatar" aria-hidden="true">{data.operator.initials}</span><div><p className="operator-name">{data.operator.name}</p><p className="operator-role">{data.operator.role}</p></div></div>{sessionState === "active" ? <button className="text-button" type="button" disabled={signOutPending} onClick={() => void signOut()}>{signOutPending ? "終了中…" : "サインアウト"}</button> : null}</div>
       </aside>
 
       <div className="main-column" id="top">
@@ -1149,15 +1204,16 @@ export function AgentPassConsole() {
           <div className="topbar-actions"><span className={`connection-status${summaryState === "error" ? " is-error" : ""}`}><span className="status-dot" aria-hidden="true" />{summaryState === "error" ? "同期エラー" : refreshing || summaryState === "loading" ? "同期中…" : "応答検証済み"}</span><button className="refresh-button" type="button" onClick={() => void refreshSummary()} disabled={refreshing}>{refreshing ? "同期中" : `最終同期 ${lastSynced}`}</button><button className="help-button" type="button" aria-label="ヘルプを開く" aria-expanded={helpOpen} onClick={() => setHelpOpen(true)}>?</button><button className="icon-button" type="button" aria-label="アクティビティを見る" onClick={() => goTo("activity")}>◌</button></div>
         </div>
         <div className={`content${activeView === "organizations" || activeView === "recovery" ? " organization-content" : ""}`} role={activeView === "organizations" || activeView === "recovery" ? undefined : "main"}>
-          {activeView === "overview" ? <Overview data={data} goTo={goTo} onRequestRefresh={requestDeviceRefresh} summaryState={summaryState} /> : null}
-          {activeView === "setup" ? <SetupSurface data={data} goTo={goTo} operate={operate} online={summaryState === "ready"} /> : null}
-          {activeView === "agents" ? <AgentsSurface data={data} operate={operate} /> : null}
-          {activeView === "policies" ? <PoliciesSurface data={data} operate={operate} /> : null}
-          {activeView === "activity" ? <ActivitySurface data={data} /> : null}
-          {activeView === "security" ? <SecuritySurface /> : null}
-          {activeView === "organizations" ? <OrganizationPanel /> : null}
-          {activeView === "recovery" ? <OwnerRecoveryPanel /> : null}
-          {activeView === "emergency" ? <EmergencySurface data={data} onOpenConfirm={() => setConfirmOpen(true)} stopped={stopped} /> : null}
+          {sessionState !== "active" ? <SessionEndedSurface reason={sessionState} /> : null}
+          {sessionState === "active" && activeView === "overview" ? <Overview data={data} goTo={goTo} onRequestRefresh={requestDeviceRefresh} summaryState={summaryState} /> : null}
+          {sessionState === "active" && activeView === "setup" ? <SetupSurface data={data} goTo={goTo} operate={operate} online={summaryState === "ready"} /> : null}
+          {sessionState === "active" && activeView === "agents" ? <AgentsSurface data={data} operate={operate} /> : null}
+          {sessionState === "active" && activeView === "policies" ? <PoliciesSurface data={data} operate={operate} /> : null}
+          {sessionState === "active" && activeView === "activity" ? <ActivitySurface data={data} /> : null}
+          {sessionState === "active" && activeView === "security" ? <SecuritySurface /> : null}
+          {sessionState === "active" && activeView === "organizations" ? <OrganizationPanel /> : null}
+          {sessionState === "active" && activeView === "recovery" ? <OwnerRecoveryPanel /> : null}
+          {sessionState === "active" && activeView === "emergency" ? <EmergencySurface data={data} onOpenConfirm={() => setConfirmOpen(true)} stopped={stopped} /> : null}
         </div>
       </div>
 

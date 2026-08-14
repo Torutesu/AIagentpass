@@ -82,3 +82,27 @@ test("abort and unauthorized responses clear safely and permit a later retry", a
   assert.match(source, /const controller = new AbortController\(\)/);
   assert.match(source, /return \(\) => controller\.abort\(\)/);
 });
+
+test("expired sessions replace every operational surface with a reauthentication gate", async () => {
+  const source = await componentSource();
+
+  assert.match(source, /const \[sessionState, setSessionState\] = useState<"active" \| "expired" \| "signed-out">\("active"\)/);
+  assert.match(source, /setSessionState\("expired"\)/);
+  assert.match(source, /sessionState !== "active" \? <SessionEndedSurface reason=\{sessionState\} \/>/);
+  assert.match(source, /REAUTHENTICATION REQUIRED/);
+  assert.match(source, /window\.location\.reload\(\)/);
+  assert.match(source, /sessionState === "active" && activeView === "emergency"/);
+});
+
+test("global sign-out uses the same-origin DELETE contract and clears operational state", async () => {
+  const source = await componentSource();
+  const logout = functionBody(source, "logoutConsoleSession", "supportsWebAuthn");
+
+  assert.match(logout, /method: "DELETE"/);
+  assert.match(logout, /\[CSRF_HEADER\]: session\.csrfToken/);
+  assert.match(logout, /credentials: "same-origin"/);
+  assert.match(logout, /payload\.session !== null/);
+  assert.match(logout, /consoleSessionContext\.clear\(session\)/);
+  assert.match(source, /setSessionState\("signed-out"\)/);
+  assert.match(source, /signOutPending \? "終了中…" : "サインアウト"/);
+});

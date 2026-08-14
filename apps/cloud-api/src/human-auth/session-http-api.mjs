@@ -1,6 +1,7 @@
 import {
   HUMAN_SESSION_ERROR_CODES,
   isOpaqueToken,
+  parseSessionCookie,
 } from "../human-session.mjs";
 import {
   HUMAN_AUTH_ABUSE_ERROR_CODES,
@@ -14,6 +15,7 @@ const MAX_HEADER_BYTES = 8 * 1024;
 const MAX_URL_LENGTH = 8 * 1024;
 const CONTROL_CHARACTERS = /[\u0000-\u001f\u007f]/;
 const TOKEN_HEADER = /^[^\r\n]+$/;
+const CLEAR_SESSION_COOKIE = "__Host-agentpass_session=; Path=/; HttpOnly; Secure; SameSite=Strict; Max-Age=0";
 
 export const HUMAN_SESSION_HTTP_PATHS = Object.freeze({
   session: SESSION_PATH
@@ -23,6 +25,8 @@ export const HUMAN_SESSION_HTTP_ERROR_CODES = Object.freeze({
   INVALID_REQUEST: "human_session_invalid_request",
   METHOD_NOT_ALLOWED: "human_session_method_not_allowed",
   ORIGIN_NOT_ALLOWED: "human_session_origin_not_allowed",
+  SESSION_REQUIRED: "human_session_session_required",
+  CSRF_FAILED: "human_session_csrf_failed",
   IDENTITY_VERIFICATION_FAILED: "human_session_identity_verification_failed",
   IDENTITY_REPLAY: "human_session_identity_replay",
   SESSION_UNAVAILABLE: "human_session_unavailable",
@@ -31,8 +35,10 @@ export const HUMAN_SESSION_HTTP_ERROR_CODES = Object.freeze({
 
 const ERROR_MESSAGES = Object.freeze({
   [HUMAN_SESSION_HTTP_ERROR_CODES.INVALID_REQUEST]: "The session request is invalid",
-  [HUMAN_SESSION_HTTP_ERROR_CODES.METHOD_NOT_ALLOWED]: "Only POST is allowed",
+  [HUMAN_SESSION_HTTP_ERROR_CODES.METHOD_NOT_ALLOWED]: "Only POST or DELETE is allowed",
   [HUMAN_SESSION_HTTP_ERROR_CODES.ORIGIN_NOT_ALLOWED]: "The request origin is not allowed",
+  [HUMAN_SESSION_HTTP_ERROR_CODES.SESSION_REQUIRED]: "A valid human session is required",
+  [HUMAN_SESSION_HTTP_ERROR_CODES.CSRF_FAILED]: "The CSRF token is invalid",
   [HUMAN_SESSION_HTTP_ERROR_CODES.IDENTITY_VERIFICATION_FAILED]: "The identity request could not be verified",
   [HUMAN_SESSION_HTTP_ERROR_CODES.IDENTITY_REPLAY]: "The identity request was already consumed",
   [HUMAN_SESSION_HTTP_ERROR_CODES.SESSION_UNAVAILABLE]: "The session service is unavailable",
@@ -43,6 +49,8 @@ const ERROR_STATUS = Object.freeze({
   [HUMAN_SESSION_HTTP_ERROR_CODES.INVALID_REQUEST]: 400,
   [HUMAN_SESSION_HTTP_ERROR_CODES.METHOD_NOT_ALLOWED]: 405,
   [HUMAN_SESSION_HTTP_ERROR_CODES.ORIGIN_NOT_ALLOWED]: 403,
+  [HUMAN_SESSION_HTTP_ERROR_CODES.SESSION_REQUIRED]: 401,
+  [HUMAN_SESSION_HTTP_ERROR_CODES.CSRF_FAILED]: 403,
   [HUMAN_SESSION_HTTP_ERROR_CODES.IDENTITY_VERIFICATION_FAILED]: 401,
   [HUMAN_SESSION_HTTP_ERROR_CODES.IDENTITY_REPLAY]: 409,
   [HUMAN_SESSION_HTTP_ERROR_CODES.SESSION_UNAVAILABLE]: 503,
@@ -101,21 +109,24 @@ export function createHumanSessionHttpApi({
   async function dispatch(input) {
     try {
       const request = normalizeRequest(input);
-      const route = resolveRoute(request.url);
-      if (!route) return response(404, { error: { code: "not_found", message: "Resource not found" } });
-      if (request.method !== "POST") {
+      const resolvedRoute = resolveRoute(request.url);
+      if (!resolvedRoute) return response(404, { error: { code: "not_found", message: "Resource not found" } });
+      const route = { ...resolvedRoute, kind: request.method === "DELETE" ? "logout" : "bootstrap" };
+      if (request.method !== (route.kind === "logout" ? "DELETE" : "POST")) {
         return response(405, {
           error: {
             code: HUMAN_SESSION_HTTP_ERROR_CODES.METHOD_NOT_ALLOWED,
             message: ERROR_MESSAGES[HUMAN_SESSION_HTTP_ERROR_CODES.METHOD_NOT_ALLOWED]
           }
-        }, { Allow: "POST" });
+        }, { Allow: "POST, DELETE" });
       }
 
       const requestOrigin = header(request.headers, "origin");
       if (requestOrigin === undefined || requestOrigin !== expectedOrigin) {
         throw new HumanSessionHttpError(HUMAN_SESSION_HTTP_ERROR_CODES.ORIGIN_NOT_ALLOWED, { status: 403 });
       }
+
+      if (route.kind === "logout") return await dispatchLogout(request, requestOrigin);
 
       const body = await readJsonBody(request, maxBodyBytes);
       assertEmptyJsonObject(body);
@@ -156,6 +167,32 @@ export function createHumanSessionHttpApi({
     } catch (error) {
       return mapError(error);
     }
+  }
+
+  async function dispatchLogout(request, requestOrigin) {
+    const cookie = header(request.headers, "cookie");
+    if (cookie === undefined) throw new HumanSessionHttpError(HUMAN_SESSION_HTTP_ERROR_CODES.SESSION_REQUIRED, { status: 401 });
+    try {
+      // Do not turn an absent or malformed cookie into an idempotent local
+      // clear. The authenticated logout authority must see a valid session.
+      parseSessionCookie(cookie);
+    } catch (error) {
+      throw mapLogoutError(error);
+    }
+    const csrfToken = header(request.headers, "agentpass-csrf");
+    if (!isOpaqueToken(csrfToken)) throw new HumanSessionHttpError(HUMAN_SESSION_HTTP_ERROR_CODES.CSRF_FAILED, { status: 403 });
+    await readNoBody(request);
+
+    let loggedOut;
+    try {
+      loggedOut = await humanSession.logout({ cookie, origin: requestOrigin, csrfToken });
+    } catch (error) {
+      throw mapLogoutError(error);
+    }
+    if (!isObject(loggedOut) || loggedOut.setCookie !== CLEAR_SESSION_COOKIE || loggedOut.clearCookie !== CLEAR_SESSION_COOKIE) {
+      throw new HumanSessionHttpError(HUMAN_SESSION_HTTP_ERROR_CODES.SESSION_UNAVAILABLE, { status: 503 });
+    }
+    return response(200, { session: null }, { "Set-Cookie": CLEAR_SESSION_COOKIE });
   }
 
   return Object.freeze({
@@ -207,6 +244,28 @@ function mapSessionError(error) {
   return new HumanSessionHttpError(HUMAN_SESSION_HTTP_ERROR_CODES.INTERNAL_ERROR, { status: 500, cause: error });
 }
 
+function mapLogoutError(error) {
+  if (error instanceof HumanSessionHttpError) return error;
+  if (error?.code === HUMAN_SESSION_ERROR_CODES.INVALID_ORIGIN) {
+    return new HumanSessionHttpError(HUMAN_SESSION_HTTP_ERROR_CODES.ORIGIN_NOT_ALLOWED, { status: 403, cause: error });
+  }
+  if ([
+    HUMAN_SESSION_ERROR_CODES.INVALID_COOKIE,
+    HUMAN_SESSION_ERROR_CODES.SESSION_NOT_FOUND,
+    HUMAN_SESSION_ERROR_CODES.SESSION_REVOKED,
+    HUMAN_SESSION_ERROR_CODES.SESSION_EXPIRED
+  ].includes(error?.code)) {
+    return new HumanSessionHttpError(HUMAN_SESSION_HTTP_ERROR_CODES.SESSION_REQUIRED, { status: 401, cause: error });
+  }
+  if ([HUMAN_SESSION_ERROR_CODES.CSRF_REQUIRED, HUMAN_SESSION_ERROR_CODES.CSRF_INVALID].includes(error?.code)) {
+    return new HumanSessionHttpError(HUMAN_SESSION_HTTP_ERROR_CODES.CSRF_FAILED, { status: 403, cause: error });
+  }
+  if ([HUMAN_SESSION_ERROR_CODES.INVALID_CONFIGURATION, HUMAN_SESSION_ERROR_CODES.REPOSITORY_INVALID].includes(error?.code)) {
+    return new HumanSessionHttpError(HUMAN_SESSION_HTTP_ERROR_CODES.SESSION_UNAVAILABLE, { status: 503, cause: error });
+  }
+  return new HumanSessionHttpError(HUMAN_SESSION_HTTP_ERROR_CODES.INTERNAL_ERROR, { status: 500, cause: error });
+}
+
 function mapError(error) {
   if (error instanceof HumanAuthAbuseControlError) {
     const code = error.code === HUMAN_AUTH_ABUSE_ERROR_CODES.RATE_LIMITED
@@ -221,7 +280,7 @@ function mapError(error) {
         code: error.code,
         message: ERROR_MESSAGES[error.code] ?? ERROR_MESSAGES[HUMAN_SESSION_HTTP_ERROR_CODES.INTERNAL_ERROR]
       }
-    }, error.status === 405 ? { Allow: "POST" } : undefined);
+    }, error.status === 405 ? { Allow: "POST, DELETE" } : undefined);
   }
   return response(500, {
     error: {
@@ -289,7 +348,7 @@ function resolveRoute(rawUrl) {
     return undefined;
   }
   if (url.search || url.hash || url.pathname !== SESSION_PATH) return undefined;
-  return "session";
+  return { kind: "bootstrap" };
 }
 
 async function readJsonBody(request, maxBytes) {
@@ -372,7 +431,7 @@ async function readStream(stream, maxBytes) {
 function normalizeHeaders(input) {
   const result = {};
   if (input && typeof input.get === "function") {
-    for (const name of ["origin", "content-type", "content-length"]) {
+    for (const name of ["origin", "content-type", "content-length", "cookie", "agentpass-csrf"]) {
       const value = input.get(name);
       if (value !== null) setHeader(result, name, value);
     }
@@ -409,6 +468,23 @@ function assertEmptyJsonObject(value) {
   if (!isObject(value) || Object.keys(value).length !== 0) {
     throw new HumanSessionHttpError(HUMAN_SESSION_HTTP_ERROR_CODES.INVALID_REQUEST, { status: 400 });
   }
+}
+
+async function readNoBody(request) {
+  const input = request.input;
+  const contentLength = header(request.headers, "content-length");
+  if (contentLength !== undefined && (!/^\d+$/.test(contentLength) || Number(contentLength) !== 0)) {
+    throw new HumanSessionHttpError(HUMAN_SESSION_HTTP_ERROR_CODES.INVALID_REQUEST, { status: 400 });
+  }
+  let raw;
+  if (typeof input.arrayBuffer === "function") raw = Buffer.from(await input.arrayBuffer());
+  else if (input.body !== undefined && !isReadable(input.body)) raw = input.body;
+  else if (typeof input.text === "function") raw = await input.text();
+  else if (isReadable(input)) raw = await readStream(input, 0);
+  else if (isReadable(input.body)) raw = await readStream(input.body, 0);
+  else raw = undefined;
+  if (raw === undefined) return;
+  if (toBytes(raw).length !== 0) throw new HumanSessionHttpError(HUMAN_SESSION_HTTP_ERROR_CODES.INVALID_REQUEST, { status: 400 });
 }
 
 function isValidOpaqueAssertion(value) {

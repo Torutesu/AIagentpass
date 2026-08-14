@@ -125,6 +125,55 @@ test("GCP composition instantiates official-shaped clients and maps cryptoKeyVer
   assert.equal(closed, 1);
 });
 
+test("hosted runtime applies an isolated fail-closed circuit at each managed signer boundary", async () => {
+  const env = baseEnv();
+  let now = 1_900_000_000_000;
+  let calls = 0;
+  class GetPublicKeyCommand { constructor(input) { this.input = input; this.kind = "get"; } }
+  class SignCommand { constructor(input) { this.input = input; this.kind = "sign"; } }
+  class KMSClient {
+    destroy() {}
+    async send(command) {
+      calls += 1;
+      if (command.kind === "get" && command.input.KeyId === awsAgentResource) {
+        const error = new Error("provider quota detail");
+        error.name = "ThrottlingException";
+        throw error;
+      }
+      if (command.kind === "get") {
+        return {
+          KeyId: command.input.KeyId,
+          KeyUsage: "SIGN_VERIFY",
+          KeySpec: "ECC_NIST_EDWARDS25519",
+          SigningAlgorithms: ["ED25519_SHA_512"],
+          PublicKey: publicDer(env.__keys.manifest)
+        };
+      }
+      return {
+        KeyId: command.input.KeyId,
+        SigningAlgorithm: "ED25519_SHA_512",
+        Signature: crypto.sign(null, command.input.Message, env.__keys.manifest.privateKey)
+      };
+    }
+  }
+  const providers = await createHostedKmsProviders({
+    env,
+    clock: () => now,
+    reliability: { clock: () => { throw new Error("reliability clock must not override top-level clock"); }, failureThreshold: 1, cooldownMs: 100, maxInFlight: 1 },
+    sdkLoader: async () => ({ KMSClient, GetPublicKeyCommand, SignCommand })
+  });
+  const agentRequest = { algorithm: "ed25519", bytes: Buffer.from("agent"), key_id: "agent-session-2026-08", purpose: AGENT_PURPOSE, version: 1 };
+  await assert.rejects(providers.agentSessionSignerProvider.sign(agentRequest), (error) => error.code === "ERR_MANAGED_SIGNER_THROTTLED");
+  await assert.rejects(providers.agentSessionSignerProvider.sign(agentRequest), (error) => error.code === "ERR_MANAGED_SIGNER_CIRCUIT_OPEN");
+  const callsWhenOpen = calls;
+  const manifestRequest = { algorithm: "ed25519", bytes: Buffer.from("manifest"), key_id: "qualification-manifest-2026-08", purpose: MANIFEST_PURPOSE, version: 2 };
+  await assert.doesNotReject(providers.qualificationManifestSignerProvider.sign(manifestRequest));
+  assert.equal(calls, callsWhenOpen + 2);
+  now += 100;
+  await assert.rejects(providers.agentSessionSignerProvider.sign(agentRequest), (error) => error.code === "ERR_MANAGED_SIGNER_THROTTLED");
+  await providers.close();
+});
+
 test("SDK and constructor failures are opaque and fail closed", async () => {
   const env = baseEnv();
   await assert.rejects(

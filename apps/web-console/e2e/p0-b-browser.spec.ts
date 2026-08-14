@@ -15,6 +15,8 @@ type E2EOptions = {
 
 type RouteState = {
   sessionRole: Role;
+  sessionExpired: boolean;
+  logoutCalls: number;
   wakeCalls: number;
   revokeCalls: number;
   recentAuthVerificationCalls: number;
@@ -118,6 +120,8 @@ function summary() {
 async function installRoutes(page: Page, options: E2EOptions): Promise<RouteState> {
   const state: RouteState = {
     sessionRole: options.role,
+    sessionExpired: false,
+    logoutCalls: 0,
     wakeCalls: 0,
     revokeCalls: 0,
     recentAuthVerificationCalls: 0,
@@ -127,7 +131,16 @@ async function installRoutes(page: Page, options: E2EOptions): Promise<RouteStat
 
   await page.route("**/api/auth/**", async (route) => {
     const url = new URL(route.request().url());
-    if (url.pathname === "/api/auth/session") return json(route, session(options.role));
+    if (url.pathname === "/api/auth/session") {
+      const request = route.request();
+      if (request.method() === "DELETE") {
+        if (request.headers()["agentpass-csrf"] !== CSRF_TOKEN || request.postData() !== null) state.protocolViolations.push("logout-contract");
+        state.logoutCalls += 1;
+        return json(route, { session: null });
+      }
+      if (state.sessionExpired) return json(route, { error: { code: "session_expired", message: "Session expired" } }, 401);
+      return json(route, session(options.role));
+    }
     if (url.pathname === "/api/auth/webauthn/options") {
       if (!options.recentAuth) return json(route, { error: { code: "recent_auth_required", message: "Recent authentication required" } }, 401);
       state.recentAuthOperations.push(`begin:${requestOperation(route)}`);
@@ -152,6 +165,7 @@ async function installRoutes(page: Page, options: E2EOptions): Promise<RouteStat
   await page.route("**/api/console**", async (route) => {
     const request = route.request();
     const url = new URL(request.url());
+    if (state.sessionExpired) return json(route, { error: { code: "session_expired", message: "Session expired" } }, 401);
     if (request.method() === "GET" && url.searchParams.get("resource") === "summary") return json(route, summary());
     if (request.method() === "GET") return json(route, { capabilities: [], revocations: [], events: [] });
     if (request.method() !== "POST") return json(route, { error: { code: "forbidden", message: "Forbidden" } }, 403);
@@ -264,6 +278,28 @@ test("proves accepted, coalesced, and no-pending-refresh UI outcomes", async ({ 
     await card.getByRole("button", { name: "Wake requestを依頼" }).click();
     await expect(card.getByRole("status")).toContainText(messages[index]);
   }
+});
+
+test("self-logout clears the Console and exposes only the reauthentication surface", async ({ page }) => {
+  const state = routeStates.get(page)!;
+  await page.getByRole("button", { name: "サインアウト", exact: true }).click();
+
+  await expect(page.getByRole("heading", { name: "サインアウトしました" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "再認証する" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "同期済み Mac" })).toHaveCount(0);
+  expect(state.logoutCalls).toBe(1);
+  expect(state.protocolViolations).toEqual([]);
+});
+
+test("an expired session replaces every operational view with a fail-closed gate", async ({ page }) => {
+  const state = routeStates.get(page)!;
+  state.sessionExpired = true;
+  await page.getByRole("button", { name: /最終同期/u }).click();
+
+  await expect(page.getByRole("heading", { name: "セッションの有効期限が切れました" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "再認証する" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "緊急停止を開始する" })).toHaveCount(0);
+  await expect(page.getByRole("heading", { name: "同期済み Mac" })).toHaveCount(0);
 });
 
 test.describe("role and recent-auth matrix", () => {

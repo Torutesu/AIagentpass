@@ -84,6 +84,18 @@ test("maps provider errors opaquely and aborts on deadline or caller AbortSignal
   assert.equal(new RemoteKmsProviderError(REMOTE_KMS_ERROR_CODES.PROVIDER).message.includes("internal"), false);
 });
 
+test("maps provider throttling to a fixed, sanitized classification", async () => {
+  const throttled = provider({ transport: {
+    async getPublicKey() {
+      const error = new Error("cloud quota secret");
+      error.name = "ThrottlingException";
+      throw error;
+    }
+  } }).provider;
+  await assert.rejects(throttled.publicKeyMetadata(metadataInput()), (error) => error.code === REMOTE_KMS_ERROR_CODES.THROTTLED
+    && !error.message.includes("quota") && !("cause" in error));
+});
+
 test("requires an injected transport and public Ed25519 key", () => {
   assert.throws(() => createRemoteEd25519KmsProvider({ ...binding, publicKey, transport: null }), (error) => error.code === REMOTE_KMS_ERROR_CODES.CONFIG);
   assert.throws(() => createRemoteEd25519KmsProvider({ ...binding, publicKey: keys.privateKey, transport: {} }), (error) => error.code === REMOTE_KMS_ERROR_CODES.CONFIG);
