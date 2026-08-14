@@ -17,7 +17,7 @@ test("human session epochs invalidate stale authority and serialize concurrent r
   const migrationClient = await pool.connect();
   try {
     const migration = await createMigrationRunner({ client: migrationClient, applicationVersion: "human-session-epochs-integration" }).run();
-    assert.equal(migration.currentVersion, 39);
+    assert.equal(migration.currentVersion, 40);
   } finally {
     migrationClient.release();
   }

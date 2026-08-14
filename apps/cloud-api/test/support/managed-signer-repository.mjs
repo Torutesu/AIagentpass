@@ -27,3 +27,21 @@ export function createManagedSignerRepositoryFactory() {
     });
   };
 }
+
+/** Shape-only provider-operation boundary for runtime composition tests. */
+export function createProviderOperationRepositoryFactory() {
+  return function createProviderOperationRepository() {
+    const outsideScope = async () => { throw new Error("provider operation is outside this runtime composition test"); };
+    return Object.freeze({
+      reserveOperation: outsideScope,
+      claimOperation: outsideScope,
+      startOperation: outsideScope,
+      recordAccepted: outsideScope,
+      commitOperation: outsideScope,
+      reconcileOperation: outsideScope,
+      markUncertain: outsideScope,
+      getOperation: outsideScope,
+      waitForOperation: outsideScope
+    });
+  };
+}

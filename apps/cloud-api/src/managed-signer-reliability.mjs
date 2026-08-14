@@ -147,6 +147,7 @@ export function createManagedSignerReliabilityProvider({
     algorithm: provider.algorithm,
     version: provider.version,
     public_key_fingerprint: provider.public_key_fingerprint,
+    ...(provider.provider_id === undefined ? {} : { provider_id: provider.provider_id }),
     key_lifecycle_state: provider.lifecycleState,
     publicKeyMetadata,
     sign,

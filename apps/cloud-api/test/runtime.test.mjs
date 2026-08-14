@@ -8,7 +8,7 @@ import test from "node:test";
 import { createApiTokenRecord, generateApiToken } from "../src/auth.mjs";
 import { createCloudRuntime, createHostedRateLimiter, loadRuntimeConfig } from "../src/runtime.mjs";
 import { createCloudStore } from "../src/store.mjs";
-import { createManagedSignerRepositoryFactory } from "./support/managed-signer-repository.mjs";
+import { createManagedSignerRepositoryFactory, createProviderOperationRepositoryFactory } from "./support/managed-signer-repository.mjs";
 
 const CURSOR_SECRET = Buffer.alloc(32, 0x42).toString("base64url");
 
@@ -98,7 +98,7 @@ test("production human auth is composed from PostgreSQL and closed with the runt
   const calls = [];
   const controlPlaneStore = await createCloudStore({ dataDir: path.join(value.root, "hosted-test-store"), auditCursorSecret: Buffer.from(CURSOR_SECRET, "base64url") });
   const hostedControlPlaneStore = new Proxy(controlPlaneStore, { get(target, property, receiver) { if (property === "pollDeviceRefresh") return async () => null; if (property === "markDeviceRefreshDelivered") return async () => {}; return Reflect.get(target, property, receiver); } });
-  const postgresRuntime = { pool: {}, humanRepository: {}, controlPlaneStore: hostedControlPlaneStore, refreshHintNotifier: { async waitForRefresh() { return false; } }, sharedControlRepository: { async consumeDeviceRequestNonce() { return { accepted: true }; }, async acquireRateLimit() { return { allowed: true, limit: 120, remaining: 119, retryAfterMs: 0, retryAfterSeconds: 0, resetAt: Date.now() }; }, async acquireAnonymousRateLimit() { return { allowed: true, limit: 120, remaining: 119, retryAfterMs: 0, retryAfterSeconds: 0, resetAt: Date.now() }; } }, capabilityAuthorityRepository: { async issueCapabilityMetadata() {}, async listRevokedCapabilityIds() { return []; } }, agentSessionIssuanceRepository: { async issueAgentSessionGrant() {} }, agentSessionAuthorityRepository: { async consumeAgentSessionGrant() {} }, qualificationGrantBatchRepository: { async claimQualificationGrantBatch() {} }, createManagedSignerKeyLifecycleRepository: createManagedSignerRepositoryFactory(), async readiness() { return readyDatabaseReport(); }, async close() { calls.push("postgres-close"); await controlPlaneStore.close(); } };
+  const postgresRuntime = { pool: {}, humanRepository: {}, controlPlaneStore: hostedControlPlaneStore, refreshHintNotifier: { async waitForRefresh() { return false; } }, sharedControlRepository: { async consumeDeviceRequestNonce() { return { accepted: true }; }, async acquireRateLimit() { return { allowed: true, limit: 120, remaining: 119, retryAfterMs: 0, retryAfterSeconds: 0, resetAt: Date.now() }; }, async acquireAnonymousRateLimit() { return { allowed: true, limit: 120, remaining: 119, retryAfterMs: 0, retryAfterSeconds: 0, resetAt: Date.now() }; } }, capabilityAuthorityRepository: { async issueCapabilityMetadata() {}, async listRevokedCapabilityIds() { return []; } }, agentSessionIssuanceRepository: { async issueAgentSessionGrant() {} }, agentSessionAuthorityRepository: { async consumeAgentSessionGrant() {} }, qualificationGrantBatchRepository: { async claimQualificationGrantBatch() {} }, createManagedSignerKeyLifecycleRepository: createManagedSignerRepositoryFactory(), createProviderOperationRepository: createProviderOperationRepositoryFactory(), async readiness() { return readyDatabaseReport(); }, async close() { calls.push("postgres-close"); await controlPlaneStore.close(); } };
   const recentAuthService = { async authorize() { return { verified: false }; } };
   const humanSession = { async authenticateRequest() { return { session: {} }; } };
   let signerHealthy = true;
@@ -130,7 +130,7 @@ test("production human auth is composed from PostgreSQL and closed with the runt
     if (!refreshSignerHealthy) throw new Error("simulated refresh provider outage");
     return refreshPublicKeyMetadata(input);
   };
-  const runtime = await createCloudRuntime({ env, logger: { info() {} }, kmsProviderFactory: async () => { calls.push("kms"); return { agentSessionSignerProvider: provider, qualificationManifestSignerProvider: qualificationProvider, possessionReceiptSignerProvider: possessionProvider, refreshHintSignerProvider: refreshProvider, controlBundleSignerProvider: purposeProvider(value.controlBundleKeys), capabilitySignerProvider: purposeProvider(value.capabilityKeys), auditAnchorSignerProvider: purposeProvider(value.auditAnchorKeys), promotionEvidenceSignerProvider: purposeProvider(value.promotionEvidenceKeys), async close() { calls.push("kms-close"); } }; }, ownerRecoveryPublisher, postgresFactory: async (input) => { calls.push(["postgres", input.applicationVersion, typeof input.refreshNonceCodec?.derive, typeof input.resolveProcessBindingPolicy, input.ownerRecoveryPublisher]); return postgresRuntime; }, humanAuthFactory: (input) => { calls.push(["human", input.origin, input.rpId, input.cursorSecret, input.securitySecret, input.signedConsoleIdentity, input.agentSessionSigner, input.qualificationManifestSigner]); return { api: { async handle() { return { status: 404, body: { error: { code: "not_found", message: "Resource not found" } }, headers: {} }; } }, humanSession, recentAuthService }; } });
+  const runtime = await createCloudRuntime({ env, logger: { info() {} }, kmsProviderFactory: async () => { calls.push("kms"); return { agentSessionSignerProvider: provider, qualificationManifestSignerProvider: qualificationProvider, possessionReceiptSignerProvider: possessionProvider, refreshHintSignerProvider: refreshProvider, controlBundleSignerProvider: purposeProvider(value.controlBundleKeys, 2), capabilitySignerProvider: purposeProvider(value.capabilityKeys, 1), auditAnchorSignerProvider: purposeProvider(value.auditAnchorKeys, 1), promotionEvidenceSignerProvider: purposeProvider(value.promotionEvidenceKeys, 2), async close() { calls.push("kms-close"); } }; }, ownerRecoveryPublisher, postgresFactory: async (input) => { calls.push(["postgres", input.applicationVersion, typeof input.refreshNonceCodec?.derive, typeof input.resolveProcessBindingPolicy, input.ownerRecoveryPublisher]); return postgresRuntime; }, humanAuthFactory: (input) => { calls.push(["human", input.origin, input.rpId, input.cursorSecret, input.securitySecret, input.signedConsoleIdentity, input.agentSessionSigner, input.qualificationManifestSigner]); return { api: { async handle() { return { status: 404, body: { error: { code: "not_found", message: "Resource not found" } }, headers: {} }; } }, humanSession, recentAuthService }; } });
   assert.equal(runtime.postgresRuntime, postgresRuntime);
   assert.equal(runtime.humanAuthRuntime.recentAuthService, recentAuthService);
   assert.deepEqual(calls[0], ["postgres", "0.18.0", "function", "function", ownerRecoveryPublisher]);
@@ -314,6 +314,8 @@ function hostedEnv(value) {
 function signerProvider(value) {
   const publicKey = value.agentSessionKeys.publicKey.export({ type: "spki", format: "pem" }).toString();
   return {
+    provider_id: "test-kms-ledger-v1",
+    version: 1,
     async publicKeyMetadata(input) { return { key_id: input.key_id, algorithm: "ed25519", public_key: publicKey }; },
     async sign({ bytes }) { return crypto.sign(null, bytes, value.agentSessionKeys.privateKey); }
   };
@@ -322,6 +324,8 @@ function signerProvider(value) {
 function qualificationSignerProvider(value) {
   const publicKey = value.qualificationManifestKeys.publicKey.export({ type: "spki", format: "pem" }).toString();
   return {
+    provider_id: "test-kms-ledger-v1",
+    version: 2,
     async publicKeyMetadata(input) { return { key_id: input.key_id, algorithm: "ed25519", public_key: publicKey }; },
     async sign({ bytes }) { return crypto.sign(null, bytes, value.qualificationManifestKeys.privateKey); }
   };
@@ -330,6 +334,8 @@ function qualificationSignerProvider(value) {
 function possessionSignerProvider(value) {
   const publicKey = value.possessionReceiptKeys.publicKey.export({ type: "spki", format: "pem" }).toString();
   return {
+    provider_id: "test-kms-ledger-v1",
+    version: 1,
     async publicKeyMetadata(input) { return { key_id: input.key_id, algorithm: "ed25519", public_key: publicKey }; },
     async sign({ bytes }) { return crypto.sign(null, bytes, value.possessionReceiptKeys.privateKey); }
   };
@@ -338,14 +344,18 @@ function possessionSignerProvider(value) {
 function refreshSignerProvider(value) {
   const publicKey = value.refreshKeys.publicKey.export({ type: "spki", format: "pem" }).toString();
   return {
+    provider_id: "test-kms-ledger-v1",
+    version: 1,
     async publicKeyMetadata(input) { return { key_id: input.key_id, algorithm: "ed25519", public_key: publicKey }; },
     async sign({ bytes }) { return crypto.sign(null, bytes, value.refreshKeys.privateKey); }
   };
 }
 
-function purposeProvider(keys) {
+function purposeProvider(keys, version = 1) {
   const publicKey = keys.publicKey.export({ type: "spki", format: "pem" }).toString();
   return {
+    provider_id: "test-kms-ledger-v1",
+    version,
     async publicKeyMetadata(input) { return { key_id: input.key_id, algorithm: "ed25519", public_key: publicKey }; },
     async sign({ bytes }) { return crypto.sign(null, bytes, keys.privateKey); }
   };

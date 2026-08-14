@@ -196,7 +196,7 @@ function createAwsProviders({ config, sdk, reliability, keyLifecycles }) {
   }
   try {
     const providers = Object.fromEntries(config.purposes.map((definition) => {
-      const provider = createAwsKmsEd25519Provider({
+      const provider = identifyProvider(createAwsKmsEd25519Provider({
         publicKey: definition.publicKey,
         timeoutMs: definition.timeoutMs,
         client: bindAwsClient({ baseClient, sdk, logicalKeyId: definition.keyId, resourceId: definition.resourceId }),
@@ -204,7 +204,7 @@ function createAwsProviders({ config, sdk, reliability, keyLifecycles }) {
         keyId: definition.keyId,
         purpose: definition.purpose,
         version: definition.version
-      });
+      }), "agentpass-aws-kms-ledger-v1");
       return [definition.providerName, managedSigner(provider, definition.purpose, reliability, keyLifecycles[definition.name])];
     }));
     return ownedProviders(providers, () => baseClient.destroy?.());
@@ -248,14 +248,14 @@ function createGcpProviders({ config, sdk, reliability, keyLifecycles }) {
   }
   try {
     const providers = Object.fromEntries(config.purposes.map((definition) => {
-      const provider = createGcpCloudKmsEd25519Provider({
+      const provider = identifyProvider(createGcpCloudKmsEd25519Provider({
         publicKey: definition.publicKey,
         timeoutMs: definition.timeoutMs,
         client: bindGcpClient({ baseClient, logicalKeyName: definition.keyId, resourceName: definition.resourceId }),
         keyName: definition.keyId,
         purpose: definition.purpose,
         version: definition.version
-      });
+      }), "agentpass-gcp-kms-ledger-v1");
       return [definition.providerName, managedSigner(provider, definition.purpose, reliability, keyLifecycles[definition.name])];
     }));
     return ownedProviders(providers, () => baseClient.close?.());
@@ -291,6 +291,10 @@ function managedSigner(provider, purpose, reliability, lifecycle) {
   const keyLifecycle = lifecycle ?? createInitialKeyLifecycle(provider, purpose);
   const lifecycleBoundProvider = createManagedSignerLifecycleProvider({ provider, lifecycle: keyLifecycle });
   return createManagedSignerReliabilityProvider({ provider: lifecycleBoundProvider, purpose, ...reliability });
+}
+
+function identifyProvider(provider, providerId) {
+  return Object.freeze({ ...provider, provider_id: providerId });
 }
 
 function createInitialKeyLifecycle(provider, purpose) {

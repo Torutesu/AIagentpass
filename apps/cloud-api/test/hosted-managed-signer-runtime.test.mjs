@@ -7,6 +7,7 @@ import {
   HOSTED_MANAGED_SIGNER_RUNTIME_ERROR_CODES as CODES
 } from "../src/hosted-managed-signer-runtime.mjs";
 import { MANAGED_SIGNER_KEY_LIFECYCLE_REPOSITORY_ERROR_CODES as REPOSITORY_CODES } from "../src/postgres/managed-signer-key-lifecycle-repository.mjs";
+import { createProviderOperationRepositoryFactory } from "./support/managed-signer-repository.mjs";
 
 const PURPOSE = "agentpass.agent-session-grant";
 
@@ -30,10 +31,16 @@ function fixture({ existing, metadataKeyId = "agent-key-1" } = {}) {
     async reconcileSignature() { throw new Error("not used"); }
   };
   const provider = {
+    provider_id: "test-kms-ledger-v1",
+    version: 1,
     async publicKeyMetadata() { calls.push("metadata"); return { key_id: metadataKeyId, algorithm: "ed25519", public_key: publicKey }; },
     async sign({ bytes }) { return crypto.sign(null, bytes, keys.privateKey); }
   };
-  const postgresRuntime = { createManagedSignerKeyLifecycleRepository(input) { calls.push(["repository", input]); return repository; } };
+  const operationRepositoryFactory = createProviderOperationRepositoryFactory();
+  const postgresRuntime = {
+    createManagedSignerKeyLifecycleRepository(input) { calls.push(["repository", input]); return repository; },
+    createProviderOperationRepository(input) { calls.push(["operation-repository", input]); return operationRepositoryFactory(input); }
+  };
   return { calls, keys, provider, postgresRuntime, publicKey, publicKeyFingerprint, repository, get snapshot() { return snapshot; } };
 }
 
@@ -101,6 +108,19 @@ test("requires an explicit provider-start boundary before accepting a durable re
     publicKey: value.publicKey,
     publicKeyFingerprint: value.publicKeyFingerprint
   }), { code: CODES.DATABASE });
+});
+
+test("requires the durable provider-operation ledger for every direct hosted signer", async () => {
+  const value = fixture();
+  delete value.postgresRuntime.createProviderOperationRepository;
+  await assert.rejects(bindHostedManagedSignerProvider({
+    postgresRuntime: value.postgresRuntime,
+    provider: value.provider,
+    purpose: PURPOSE,
+    keyId: "agent-key-1",
+    publicKey: value.publicKey,
+    publicKeyFingerprint: value.publicKeyFingerprint
+  }), { code: CODES.CONFIG });
 });
 
 test("accepts a closed signOnce and lookup cloud-signer provider without a direct Sign fallback", async () => {

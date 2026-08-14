@@ -432,6 +432,7 @@ export function createManagedSignerLifecycleProvider({ provider, lifecycle, maxI
     algorithm: provider.algorithm,
     version: provider.version,
     public_key_fingerprint: provider.public_key_fingerprint,
+    ...(provider.provider_id === undefined ? {} : { provider_id: provider.provider_id }),
     lifecycleState: () => lifecycle.snapshot(),
     publicKeyMetadata,
     sign

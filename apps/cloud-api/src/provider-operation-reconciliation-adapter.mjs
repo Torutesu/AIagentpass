@@ -432,7 +432,7 @@ function validateDirectProvider(provider, expected) {
   if (!isPlainObject(provider) || typeof provider.publicKeyMetadata !== "function" || typeof provider.sign !== "function") {
     fail(CONFIG, "direct provider must expose publicKeyMetadata and sign");
   }
-  if (Object.hasOwn(provider, "privateKey") || Object.hasOwn(provider, "private_key")) {
+  if (["privateKey", "private_key", "private_key_pem", "secret"].some((field) => Object.hasOwn(provider, field))) {
     fail(CONFIG, "private key material is not accepted");
   }
   for (const [field, expectedValue] of [
@@ -498,6 +498,9 @@ export function createProviderOperationReconciliationAdapter(options = {}) {
   string(keyId, KEY_ID, CONFIG);
   string(keyVersion, KEY_VERSION, CONFIG);
   string(providerId, PROVIDER_ID, CONFIG);
+  if (/(?:private|secret|credential|diagnostic|debug|trace|token|pem)/iu.test(providerId)) {
+    fail(CONFIG, "provider identifier contains forbidden material");
+  }
   positiveInteger(maxRequestBytes, CONFIG);
   if (maxRequestBytes > 1024 * 1024) fail(CONFIG, "maximum request bytes is too large");
   positiveInteger(waitTimeoutMs, CONFIG);
@@ -653,6 +656,19 @@ export function createProviderOperationReconciliationAdapter(options = {}) {
     return committedResult(committedRecord, operation, metadata.key, signingBytes, providerId);
   }
 
+  async function reconcilePersistedResult(operation, signingBytes) {
+    let committed;
+    try {
+      committed = await repository.reconcileOperation(operation);
+    } catch {
+      throw mapRepositoryError();
+    }
+    const record = normalizeRepositoryRecord(committed, operation, maxRequestBytes, { allowClaimToken: false });
+    if (!record || record.state !== "committed") fail(REPOSITORY, "repository did not reconcile the persisted provider result");
+    const metadata = await loadPublicKey();
+    return committedResult(record, operation, metadata.key, signingBytes, providerId);
+  }
+
   async function performInitialSign(operation, claimToken, signingBytes) {
     const started = await readRecord("startOperation", operationInput(operation, claimToken));
     if (!started || (started.state !== "pending" && started.state !== "started")) {
@@ -707,6 +723,10 @@ export function createProviderOperationReconciliationAdapter(options = {}) {
       if (record === null) fail(REPOSITORY, "reserveOperation returned no operation");
       if (record.state === "committed") return committedResult(record, operation, (await loadPublicKey()).key, signingBytes, providerId);
       if (record.state === "rejected" || record.state === "failed") fail(TERMINAL, `operation is terminal: ${record.state}`);
+      if ((record.state === "accepted" || record.state === "uncertain")
+        && record.signature !== undefined && record.provider_receipt !== undefined) {
+        return reconcilePersistedResult(operation, signingBytes);
+      }
       if (record.state === "pending") {
         if (Object.hasOwn(record, "claim_token")) return performInitialSign(operation, record.claim_token, signingBytes);
       } else if (record.state === "started" || record.state === "uncertain" || record.state === "accepted") {
@@ -730,6 +750,10 @@ export function createProviderOperationReconciliationAdapter(options = {}) {
       }
       if (record.state === "rejected" || record.state === "failed") return Object.freeze({ state: record.state });
       if (record.state === "pending") fail(PENDING, "operation has not crossed the provider boundary");
+      if ((record.state === "accepted" || record.state === "uncertain")
+        && record.signature !== undefined && record.provider_receipt !== undefined) {
+        return Object.freeze({ state: "committed", ...await reconcilePersistedResult(operation, signingBytes) });
+      }
       if (record.state === "accepted" || record.state === "uncertain" || record.state === "started") {
         const recovered = await claimAndRecover(operation, record, signingBytes, true);
         if (recovered) return Object.freeze({ state: "committed", ...recovered });
@@ -767,7 +791,7 @@ export function createProviderOperationReconciliationAdapter(options = {}) {
     const operation = executeSign(request.operation, request.signingBytes);
     inFlight.set(request.operation.operation_id, operation);
     operation.finally(() => {
-      if (inFlight.get(request.operation.operation_id) === operation) inFlight.delete(request.operation.operation.operation_id);
+      if (inFlight.get(request.operation.operation_id) === operation) inFlight.delete(request.operation.operation_id);
     }).catch(() => {});
     return operation.then((result) => Object.freeze(result));
   }

@@ -65,6 +65,7 @@ function cloneValue(value) {
 function createRepository({
   failReserve = false,
   failRecordAcceptedOnce = false,
+  failAfterRecordAccepted = false,
   failAfterCommit = false,
 } = {}) {
   const rows = new Map();
@@ -72,6 +73,7 @@ function createRepository({
   const waiters = new Map();
   let claimSequence = 0;
   let recordAcceptedFailures = failRecordAcceptedOnce;
+  let acceptedResponseFailure = failAfterRecordAccepted;
   let commitFailure = failAfterCommit;
 
   function assertIdentity(row, input) {
@@ -168,6 +170,10 @@ function createRepository({
       row.signature = cloneValue(input.signature);
       row.provider_receipt = cloneValue(input.provider_receipt);
       notify(row);
+      if (acceptedResponseFailure) {
+        acceptedResponseFailure = false;
+        failRepository("response lost after provider result persistence");
+      }
       return publicRecord(row, true);
     },
 
@@ -194,6 +200,7 @@ function createRepository({
       const row = rows.get(input.operation_id);
       if (!row) failRepository("missing operation");
       assertIdentity(row, input);
+      if (row.state === "committed") return publicRecord(row);
       if (!["accepted", "uncertain"].includes(row.state) || row.signature === undefined || row.provider_receipt === undefined) {
         failRepository("not recoverable");
       }
@@ -346,6 +353,31 @@ test("converges response loss after commit without invoking the direct provider 
   assert.equal(recovered.state, "committed");
   assert.equal(fixture.calls.sign.length, 1);
   assert.equal(fixture.rows.get(fixture.binding.operation_id).state, "committed");
+});
+
+test("reconciles a persisted accepted result without calling the direct provider twice", async () => {
+  const fixture = createAdapterFixture({ failAfterRecordAccepted: true });
+  await assert.rejects(fixture.adapter.signOnce(fixture.binding, PAYLOAD), { code: CODES.REPOSITORY });
+  assert.equal(fixture.rows.get(fixture.binding.operation_id).state, "uncertain");
+  assert.equal(fixture.calls.sign.length, 1);
+  const recovered = await fixture.adapter.lookup(fixture.binding, PAYLOAD);
+  assert.equal(recovered.state, "committed");
+  assert.equal(fixture.calls.sign.length, 1);
+  assert.ok(fixture.events.includes("reconcile"));
+});
+
+test("releases the in-process entry after completion and rechecks durable terminal state", async () => {
+  const fixture = createAdapterFixture();
+  await fixture.adapter.signOnce(fixture.binding, PAYLOAD);
+  await new Promise((resolve) => setImmediate(resolve));
+  const row = fixture.rows.get(fixture.binding.operation_id);
+  row.state = "rejected";
+  row.lease = false;
+  delete row.claim_token;
+  delete row.signature;
+  delete row.provider_receipt;
+  await assert.rejects(fixture.adapter.signOnce(fixture.binding, PAYLOAD), { code: CODES.TERMINAL });
+  assert.equal(fixture.events.filter((event) => event === "reserve").length, 2);
 });
 
 test("recovers a crash after the provider boundary through deterministic retry on a second adapter instance", async () => {

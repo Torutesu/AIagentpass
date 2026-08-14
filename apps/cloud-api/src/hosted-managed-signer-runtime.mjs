@@ -1,6 +1,7 @@
 import crypto from "node:crypto";
 
 import { createDurableManagedSignerProvider } from "./durable-managed-signer-provider.mjs";
+import { createProviderOperationReconciliationAdapter } from "./provider-operation-reconciliation-adapter.mjs";
 import {
   MANAGED_SIGNER_KEY_LIFECYCLE_REPOSITORY_ERROR_CODES
 } from "./postgres/managed-signer-key-lifecycle-repository.mjs";
@@ -96,10 +97,36 @@ export async function bindHostedManagedSignerProvider({
   }
 
   const active = validateAuthoritativeSnapshot(snapshot, { purpose, algorithm, keyId, publicKeyFingerprint: pinnedFingerprint });
+  let managedSignerAdapter;
+  let operationRepository;
+  const hasReconciliationAdapter = typeof provider.signOnce === "function" && typeof provider.lookup === "function";
+  if (hasReconciliationAdapter) {
+    managedSignerAdapter = provider;
+  } else {
+    try {
+      operationRepository = postgresRuntime.createProviderOperationRepository({
+        purpose,
+        algorithm,
+        keyId,
+        keyVersion: String(active.key_version)
+      });
+      managedSignerAdapter = createProviderOperationReconciliationAdapter({
+        provider,
+        providerId: provider.provider_id,
+        repository: operationRepository,
+        purpose,
+        keyId,
+        keyVersion: String(active.key_version)
+      });
+    } catch {
+      fail(HOSTED_MANAGED_SIGNER_RUNTIME_ERROR_CODES.DATABASE);
+    }
+  }
   let durableProvider;
   try {
     durableProvider = createDurableManagedSignerProvider({
       provider,
+      managedSignerAdapter,
       repository,
       purpose,
       keyId,
@@ -110,7 +137,7 @@ export async function bindHostedManagedSignerProvider({
   } catch {
     fail(HOSTED_MANAGED_SIGNER_RUNTIME_ERROR_CODES.CONFIG);
   }
-  return Object.freeze({ provider: durableProvider, repository, lifecycle: snapshot, key_version: active.key_version });
+  return Object.freeze({ provider: durableProvider, repository, operationRepository, lifecycle: snapshot, key_version: active.key_version });
 }
 
 async function loadProviderMetadata(provider, binding) {
@@ -155,12 +182,16 @@ function validateInput(value) {
   const hasDirectSign = typeof value.provider?.sign === "function";
   const hasReconciliationAdapter = typeof value.provider?.signOnce === "function" && typeof value.provider?.lookup === "function";
   if (!value.postgresRuntime || typeof value.postgresRuntime.createManagedSignerKeyLifecycleRepository !== "function"
+    || (hasDirectSign && typeof value.postgresRuntime.createProviderOperationRepository !== "function")
     || !value.provider || typeof value.provider.publicKeyMetadata !== "function" || (!hasDirectSign && !hasReconciliationAdapter)
     || (typeof value.provider.signOnce === "function") !== (typeof value.provider.lookup === "function")
     || typeof value.purpose !== "string" || !PURPOSE.test(value.purpose)
     || typeof value.keyId !== "string" || !KEY_ID.test(value.keyId)
     || !Number.isSafeInteger(value.version) || value.version < 1
-    || value.algorithm !== "ed25519" || typeof value.publicKeyFingerprint !== "string" || !SHA256.test(value.publicKeyFingerprint)) {
+    || value.algorithm !== "ed25519" || typeof value.publicKeyFingerprint !== "string" || !SHA256.test(value.publicKeyFingerprint)
+    || (hasDirectSign && (typeof value.provider.provider_id !== "string"
+      || !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$/u.test(value.provider.provider_id)
+      || /(?:private|secret|credential|diagnostic|debug|trace|token|pem)/iu.test(value.provider.provider_id)))) {
     fail(HOSTED_MANAGED_SIGNER_RUNTIME_ERROR_CODES.CONFIG);
   }
 }

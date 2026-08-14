@@ -63,7 +63,7 @@ test("PostgreSQL runtime exposes exact-schema readiness, tracked work, and bound
   const migrations = await loadSqlMigrations();
   const runtime = await createPostgresRuntime({ env: env(), PoolClass: FakePool, applicationVersion: "runtime-readiness-test", resolveProcessBindingPolicy: () => true });
   assert.equal(runtime.pool.applied.length, migrations.length);
-  assert.equal(migrations.length, 39);
+  assert.equal(migrations.length, 40);
   assert.equal((await runtime.readiness()).code, "ready");
   assert.equal(typeof runtime.agentSessionIssuanceRepository?.issueAgentSessionGrant, "function");
   assert.equal(typeof runtime.agentSessionConsumptionRepository?.consumeAgentSessionGrant, "function");
@@ -73,6 +73,7 @@ test("PostgreSQL runtime exposes exact-schema readiness, tracked work, and bound
   assert.equal(typeof runtime.qualificationGrantBatchRepository?.claimQualificationGrantBatch, "function");
   assert.equal(typeof runtime.createManagedSignerKeyLifecycleRepository, "function");
   assert.equal(runtime.createManagedSignerKeyLifecycleRepository({ purpose: "agentpass.agent-session-grant" }).purpose, "agentpass.agent-session-grant");
+  assert.equal(runtime.createProviderOperationRepository({ purpose: "agentpass.agent-session-grant", keyId: "agent-key-1", keyVersion: "1" }).purpose, "agentpass.agent-session-grant");
   assert.equal(typeof runtime.ownerRecoveryRepository?.createRecoveryRequest, "function");
   assert.equal(typeof runtime.ownerRecoveryRepository?.activateRecoveryInTransaction, "function");
   assert.equal(typeof runtime.ownerRecoveryWebAuthnRepository?.begin, "function");

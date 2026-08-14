@@ -7,7 +7,7 @@ import test from "node:test";
 
 import { createApiTokenRecord, generateApiToken } from "../src/auth.mjs";
 import { createCloudRuntime, loadRuntimeConfig } from "../src/runtime.mjs";
-import { createManagedSignerRepositoryFactory } from "./support/managed-signer-repository.mjs";
+import { createManagedSignerRepositoryFactory, createProviderOperationRepositoryFactory } from "./support/managed-signer-repository.mjs";
 
 const CURSOR_SECRET = Buffer.alloc(32, 0x5a).toString("base64url");
 const DATABASE_URL = "postgresql://agent:database-secret@db.example.test/agentpass?sslmode=verify-full";
@@ -62,25 +62,29 @@ function createFixture({ identityPublicKey, controlBundlePublicKey } = {}) {
     bundlePEM: String(bundlePEM),
     identityPEM: String(identityPEM),
     agentSessionSignerProvider: {
+      provider_id: "test-kms-ledger-v1", version: 1,
       async publicKeyMetadata(input) { return { key_id: input.key_id, algorithm: "ed25519", public_key: agentSessionPublicKey }; },
       async sign({ bytes }) { return crypto.sign(null, bytes, agentSessionPair.privateKey); }
     },
     qualificationManifestSignerProvider: {
+      provider_id: "test-kms-ledger-v1", version: 2,
       async publicKeyMetadata(input) { return { key_id: input.key_id, algorithm: "ed25519", public_key: qualificationManifestPair.publicKey.export({ type: "spki", format: "pem" }).toString() }; },
       async sign({ bytes }) { return crypto.sign(null, bytes, qualificationManifestPair.privateKey); }
     },
     possessionReceiptSignerProvider: {
+      provider_id: "test-kms-ledger-v1", version: 1,
       async publicKeyMetadata(input) { return { key_id: input.key_id, algorithm: "ed25519", public_key: possessionReceiptPair.publicKey.export({ type: "spki", format: "pem" }).toString() }; },
       async sign({ bytes }) { return crypto.sign(null, bytes, possessionReceiptPair.privateKey); }
     },
     refreshHintSignerProvider: {
+      provider_id: "test-kms-ledger-v1", version: 1,
       async publicKeyMetadata(input) { return { key_id: input.key_id, algorithm: "ed25519", public_key: refreshPair.publicKey.export({ type: "spki", format: "pem" }).toString() }; },
       async sign({ bytes }) { return crypto.sign(null, bytes, refreshPair.privateKey); }
     },
-    controlBundleSignerProvider: purposeProvider(controlBundlePair),
-    capabilitySignerProvider: purposeProvider(capabilityPair),
-    auditAnchorSignerProvider: purposeProvider(auditAnchorPair),
-    promotionEvidenceSignerProvider: purposeProvider(promotionEvidencePair),
+    controlBundleSignerProvider: purposeProvider(controlBundlePair, 2),
+    capabilitySignerProvider: purposeProvider(capabilityPair, 1),
+    auditAnchorSignerProvider: purposeProvider(auditAnchorPair, 1),
+    promotionEvidenceSignerProvider: purposeProvider(promotionEvidencePair, 2),
     env: {
       AGENTPASS_CLOUD_PROFILE: "hosted",
       AGENTPASS_CLOUD_REFRESH_PUBLIC_KEY: refreshPair.publicKey.export({ type: "spki", format: "pem" }).toString(),
@@ -133,9 +137,11 @@ function removeFixture(fixture) {
   fs.rmSync(fixture.root, { recursive: true, force: true });
 }
 
-function purposeProvider(pair) {
+function purposeProvider(pair, version) {
   const publicKey = pair.publicKey.export({ type: "spki", format: "pem" }).toString();
   return {
+    provider_id: "test-kms-ledger-v1",
+    version,
     async publicKeyMetadata(input) { return { key_id: input.key_id, algorithm: "ed25519", public_key: publicKey }; },
     async sign({ bytes }) { return crypto.sign(null, bytes, pair.privateKey); }
   };
@@ -201,6 +207,7 @@ function fakePostgresRuntime() {
     agentSessionAuthorityRepository: { async consumeAgentSessionGrant() { return null; } },
     qualificationGrantBatchRepository: { async claimQualificationGrantBatch() { return null; } },
     createManagedSignerKeyLifecycleRepository: createManagedSignerRepositoryFactory(),
+    createProviderOperationRepository: createProviderOperationRepositoryFactory(),
     controlPlaneStore: { async pollDeviceRefresh() { return null; }, async markDeviceRefreshDelivered() {} },
     refreshHintNotifier: { async waitForRefresh() { return false; } },
     sharedControlRepository: {

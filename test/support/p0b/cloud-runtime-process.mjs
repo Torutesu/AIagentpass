@@ -12,7 +12,8 @@ if (process.env.P0B_LIVE_BROWSER !== "1" || process.env.AGENTPASS_CLOUD_PROFILE 
 
 const controlBundleSignerProvider = loadProvider({
   privateKeyPath: process.env.P0B_CONTROL_BUNDLE_PRIVATE_KEY_PATH,
-  publicKeyPem: process.env.AGENTPASS_CLOUD_CONTROL_BUNDLE_PUBLIC_KEY
+  publicKeyPem: process.env.AGENTPASS_CLOUD_CONTROL_BUNDLE_PUBLIC_KEY,
+  version: 2
 });
 const capabilitySignerProvider = loadProvider({
   privateKeyPath: process.env.P0B_CAPABILITY_PRIVATE_KEY_PATH,
@@ -24,7 +25,8 @@ const auditAnchorSignerProvider = loadProvider({
 });
 const promotionEvidenceSignerProvider = loadProvider({
   privateKeyPath: process.env.P0B_PROMOTION_EVIDENCE_PRIVATE_KEY_PATH,
-  publicKeyPem: process.env.AGENTPASS_CLOUD_PROMOTION_EVIDENCE_PUBLIC_KEY
+  publicKeyPem: process.env.AGENTPASS_CLOUD_PROMOTION_EVIDENCE_PUBLIC_KEY,
+  version: 2
 });
 const agentSessionSignerProvider = loadProvider({
   privateKeyPath: process.env.P0B_AGENT_SESSION_PRIVATE_KEY_PATH,
@@ -32,7 +34,8 @@ const agentSessionSignerProvider = loadProvider({
 });
 const qualificationManifestSignerProvider = loadProvider({
   privateKeyPath: process.env.P0B_QUALIFICATION_MANIFEST_PRIVATE_KEY_PATH,
-  publicKeyPem: process.env.AGENTPASS_CLOUD_QUALIFICATION_MANIFEST_PUBLIC_KEY
+  publicKeyPem: process.env.AGENTPASS_CLOUD_QUALIFICATION_MANIFEST_PUBLIC_KEY,
+  version: 2
 });
 const possessionReceiptSignerProvider = loadProvider({
   privateKeyPath: process.env.P0B_POSSESSION_RECEIPT_PRIVATE_KEY_PATH,
@@ -71,7 +74,7 @@ async function stop() {
 process.once("SIGINT", () => void stop());
 process.once("SIGTERM", () => void stop());
 
-function loadProvider({ privateKeyPath, publicKeyPem }) {
+function loadProvider({ privateKeyPath, publicKeyPem, version = 1 }) {
   const privateKey = readPrivateKey(privateKeyPath);
   let publicKey;
   try { publicKey = crypto.createPublicKey(publicKeyPem); }
@@ -82,6 +85,8 @@ function loadProvider({ privateKeyPath, publicKeyPem }) {
   }
   const normalizedPublicKey = publicKey.export({ type: "spki", format: "pem" }).toString();
   return Object.freeze({
+    provider_id: "p0b-kms-ledger-v1",
+    version,
     async publicKeyMetadata(input) {
       return Object.freeze({ key_id: input.key_id, algorithm: "ed25519", public_key: normalizedPublicKey });
     },

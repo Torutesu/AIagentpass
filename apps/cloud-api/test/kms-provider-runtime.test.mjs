@@ -287,6 +287,7 @@ test("AWS composition instantiates official-shaped clients and signs all purpose
   }
   const providers = await createHostedKmsProviders({ env, sdkLoader: async () => ({ KMSClient, GetPublicKeyCommand, SignCommand }) });
   assert.equal(providers.agentSessionSignerProvider.key_id, "agent-session-2026-08");
+  assert.equal(providers.agentSessionSignerProvider.provider_id, "agentpass-aws-kms-ledger-v1");
   assert.equal(providers.qualificationManifestSignerProvider.key_id, "qualification-manifest-2026-08");
   const data = Buffer.from("aws runtime composition");
   const signature = await providers.agentSessionSignerProvider.sign({
@@ -331,6 +332,7 @@ test("GCP composition instantiates official-shaped clients and maps cryptoKeyVer
     }
   }
   const providers = await createHostedKmsProviders({ env, sdkLoader: async () => ({ KeyManagementServiceClient }) });
+  assert.equal(providers.qualificationManifestSignerProvider.provider_id, "agentpass-gcp-kms-ledger-v1");
   const data = Buffer.from("gcp runtime composition");
   const signature = await providers.qualificationManifestSignerProvider.sign({
     algorithm: "ed25519", bytes: data, key_id: "qualification-manifest-2026-08", purpose: MANIFEST_PURPOSE, version: 2

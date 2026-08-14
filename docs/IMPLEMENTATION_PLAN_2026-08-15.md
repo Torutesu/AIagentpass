@@ -32,7 +32,7 @@ Production completion means:
 
 Implemented locally and covered by source-bound CI:
 
-- frozen Core/OpenAPI/JSON Schema contracts and 39 forward-only migrations;
+- frozen Core/OpenAPI/JSON Schema contracts and 40 forward-only migrations;
 - organization roles, Human sessions, WebAuthn, Device APIs, control state,
   audit, emergency revocation, owner recovery, and browser-assisted enrollment;
 - managed signer registry for eight distinct signing purposes;
@@ -45,6 +45,9 @@ Implemented locally and covered by source-bound CI:
 - provider-neutral `signOnce`/`lookup` reconciliation contract that binds exact
   signing bytes, request digest, purpose, protocol version, provider receipt,
   key version, and pinned public key;
+- migration `0040` and a purpose/key-version-scoped PostgreSQL provider-operation
+  ledger with database-clock leases, hashed fencing claims, restart recovery,
+  exact output verification, and immutable terminal rows;
 - PostgreSQL app/migrator/backup role contract and an opaque privilege checker;
 - Console role boundaries, logout/reauthentication, recovery operations, and
   local browser qualification.
@@ -81,7 +84,7 @@ as physical or production evidence.
 
 Merge slices:
 
-1. Catalog migrations 0038–0039, integrate the three-role SQL contract into cutover,
+1. Catalog migrations 0038–0040, integrate the three-role SQL contract into cutover,
    and require the privilege checker before switching traffic.
 2. Add a disposable PostgreSQL 16 integration test that creates the roles,
    applies migrations as `agentpass_migrator`, executes application repository
@@ -154,8 +157,12 @@ purpose mappings, rejects the legacy four-purpose set, and forbids the bundle
 private-key path. Audit-anchor v1 and promotion-evidence v2 now have closed
 canonical statements, schemas, purpose-specific signer/verifier boundaries,
 and hosted runtime composition through the PostgreSQL managed-signer lifecycle
-repository. The authoritative audit-export and release-promotion producers,
-durable issuance ledgers, provider-operation reconciliation integration,
+repository. The provider-operation reconciliation adapter is now wired into the
+hosted runtime through migration `0040`; focused tests and a disposable real
+PostgreSQL two-instance test prove contention convergence and restart recovery.
+This is AgentPass ledger evidence, not an AWS/GCP acceptance receipt and not an
+exactly-once KMS-call claim. The authoritative audit-export and
+release-promotion producers, complete lifecycle/commit fault qualification,
 eight-purpose readiness, and real-provider qualification remain open. Q2B-3
 and Q2B as a whole are therefore not complete.
 
@@ -316,27 +323,54 @@ and source-bound CI is green.
 | --- | --- | --- | --- | --- |
 | M1a evidence contracts | implemented locally | Q2B-1 | Audit-anchor v1 and promotion-evidence v2 canonical statements, schemas, fixtures, signers, and verifiers. | Canonical round trips and binding/substitution tests; catalog validation. |
 | M1b managed runtime binding | implemented locally | M1a, Q2B-2 | Both evidence signers bind to distinct managed lifecycle repositories and pinned public keys. | Hosted startup rejects a missing, stale, shared, substituted, or local authority. |
-| M1c provider-operation convergence | in progress | M1b | A durable operation adapter and PostgreSQL operation ledger for deterministic Ed25519 retry/reconciliation. | Accepted-but-response-lost, restart, contention, receipt conflict, rotation, and disable tests converge without ambiguous success. |
+| M1c provider-operation convergence | implemented locally; qualification expansion in progress | M1b | A durable operation adapter and PostgreSQL operation ledger for deterministic Ed25519 retry/reconciliation. | Accepted-but-response-lost, restart, contention, receipt conflict, rotation, disable, and lost-commit tests converge without ambiguous success. |
 | M1d authoritative producers | queued | M1c | Audit-export anchor issuance and release-promotion evidence issuance in the real transaction flows. | Neither production flow can finish unsigned, locally signed, or without a committed receipt. |
 | M1e operator/API surfaces | queued | M1d | Read-only retrieval, verification, bounded export, and adjudication APIs plus audit events. | Tenant/role/recent-auth/replay/stale-state negative matrix passes. |
 | M2 eight-purpose runtime closure | queued | M1d | Fixed-cardinality readiness, metrics, drain, and secret/image scan for all eight purposes. | Any unhealthy purpose blocks readiness; shutdown leaves no unfenced operation. |
 | M3 two-instance real KMS | blocked on protected infrastructure | M2 | AWS and GCP two-instance fault-matrix evidence bundle. | Every operation reaches one verified result or an explicit durable terminal/operator state. |
-| M4 PostgreSQL production authority | can run parallel with M1–M2 | migrations 0038–0039 | Role-separated CI, TLS/deadline hardening, backup, PITR, restore, and rollback evidence. | App cannot administer/migrate; measured protected-environment RPO/RTO. |
+| M4 PostgreSQL production authority | can run parallel with M1–M2 | migrations 0038–0040 | Role-separated CI, TLS/deadline hardening, backup, PITR, restore, and rollback evidence. | App cannot administer/migrate; measured protected-environment RPO/RTO. |
 | M5 Console production slices | can begin after each backing API | M1e, M2, M4 per slice | Organization, device, policy, signer, audit, and recovery vertical slices. | Real-BFF Playwright role/reauth/stale/replay/a11y matrix passes. |
 | M6 immutable macOS candidate | can run parallel after contract freeze | release manifest v4 | Universal signed/notarized/stapled PKG and digest-identical Homebrew/direct delivery. | Gatekeeper and lifecycle matrix pass on Apple silicon and Intel/T2. |
 | M7 agent E2E and promotion | queued | M3–M6 | Claude Code/Cursor physical E2E, staging drills, independent review, exact-digest promotion. | No open critical/high issue; qualified digests are promoted without rebuild. |
 
-Immediate merge order is M1a/M1b, M1c, M1d, M1e, then M2. M4 and M6 may
+Immediate merge order is M1c qualification, M1d, M1e, then M2. M4 and M6 may
 proceed in parallel because they do not change the frozen signer statement
 contracts. M5 may consume only merged authoritative APIs; it must not invent
 browser-side authority or duplicate signing logic.
 
+### Immediate commit queue
+
+The following queue is the detailed implementation order from this checkpoint.
+Each row is intended to be one reviewable commit unless its protected or
+physical evidence must be attached separately.
+
+| ID | Scope and concrete output | Required proof before merge | Depends on |
+| --- | --- | --- | --- |
+| C1 | Finish provider-operation qualification: combine the low-level `0040` ledger with the existing lifecycle/idempotency ledger; add retention and aggregate health; document the at-least-once provider-call boundary. | Real PostgreSQL two-pool tests for 100-request contention, accepted-response loss, stale claim, process restart, lost DB commit response, rotation, emergency disable, and operation substitution. No test may infer a provider receipt that the provider did not issue. | current checkpoint |
+| C2 | Implement authoritative audit-export issuance. Reserve an export sequence and payload digest transactionally, sign the frozen audit-anchor statement, commit the receipt, and expose immutable retrieval/verification. | Cross-tenant, range/digest substitution, duplicate request, signer timeout, response loss, restart, stale lifecycle, unsigned export, and local-signer-in-hosted-mode tests. | C1 |
+| C3 | Implement authoritative release-promotion issuance. Bind source commit, candidate/image/PKG/SBOM digests, environment, qualification report digests, signer lifecycle, and approval state; prohibit rebuild-on-promotion. | Candidate/environment/evidence substitution, partial evidence, replay, concurrent promotion, signer failure, emergency disable, and exact-digest verifier compatibility tests. | C1 |
+| C4 | Add operator reconciliation surfaces for uncertain signer operations and evidence. Provide bounded list/detail/verify and explicit retry/reject controls through the Human BFF. | Owner/Admin/Auditor/Viewer matrix; recent WebAuthn, CSRF, `If-Match`, idempotency, tenant hiding, stale-state, concurrent adjudication, and audit-event tests. | C2, C3 |
+| C5 | Close all-eight-purpose runtime health and shutdown. Add fixed-cardinality readiness, provider/lifecycle probes, drain ordering, operation backlog metrics, and a hosted image/configuration secret scan. | Missing/shared/stale/disabled/wrong-key providers fail readiness; shutdown leaves no unfenced call; logs and metrics contain no request bytes, tenant IDs, claims, raw receipts, or private material. | C2, C3 |
+| C6 | Harden PostgreSQL production authority. Run migrations as migrator, runtime smoke tests as app, backup as backup role; add TLS/deadline/pool/cutover checks. | Negative privilege matrix, concurrent/interrupted migration, checksum drift, read-only DB, wrong TLS identity, encrypted backup, isolated PITR restore, authority comparison, and measured RPO/RTO. | C1; parallel with C2-C5 |
+| C7 | Ship Console vertical slices in API dependency order: organization, device, policy/session, signer, audit/export, recovery/reconciliation. | Real-BFF Playwright success/error/loading/empty/offline/a11y tests plus role denial, stale version, replay, response loss, tenant substitution, and browser-secret scans. | corresponding C2-C6 APIs |
+| C8 | Run protected AWS/GCP signer qualification with versioned non-exportable Ed25519 keys and production-shaped IAM. | Two API instances, real PostgreSQL, provider throttling/outage, public-key substitution, signature failure, rotation, disabled key, and image/IAM/non-exportability evidence for all eight purposes. | C5, C6 |
+| C9 | Produce one immutable macOS candidate: universal broker/XPC/CLI/adapters PKG, Developer ID signatures, notarization/stapling, SBOM, manifest v4, direct download, and Homebrew verification of the same digest. | Gatekeeper, entitlement, ownership/permission, install/upgrade/rollback/uninstall/reinstall/reboot/sleep-wake tests on Apple silicon and Intel/T2. | frozen client protocol; parallel after C1 |
+| C10 | Qualify Claude Code, then Cursor, through the same adapter contract. | Two unattended verified commits, hostile sibling/executable/path/repository substitution, contention, expiry, revocation, restart, network loss, and credential-leak scans. | C7-C9 |
+| C11 | Deploy immutable staging candidates, run operational drills, commission independent security review, close findings, and promote exact qualified digests. | Canary/drain/rollback, failover, PITR, signer outage/rotation, emergency stop, recovery, reconciliation, no open critical/high finding, and signed promotion evidence. | C8-C10 |
+
+Parallel execution lanes are deliberately limited: C6 and C9 may run beside
+C2-C5; Console work in C7 may start only after its backing authoritative API is
+merged; C8 cannot start until readiness and PostgreSQL authority are closed;
+C11 cannot waive or replace protected, physical, or independent evidence.
+
 ### M1. Audit-anchor and promotion-evidence authorities (Q2B-3)
 
-Current state: items 1 and 2 are implemented locally, and runtime lifecycle
-binding from item 3 is implemented. Exact provider-operation reconciliation,
-the durable issuance ledger, authoritative producer integration, and the
-failure matrix are still required before this milestone may be marked complete.
+Current state: items 1 and 2 are implemented locally. Runtime lifecycle binding
+and the PostgreSQL provider-operation portion of item 3 are implemented and
+verified against a disposable real PostgreSQL instance. The combined
+lifecycle/commit failure matrix, authoritative producer integration, and each
+producer's durable issuance ledger are still required before this milestone
+may be marked complete.
 
 Deliverables:
 
@@ -404,7 +438,7 @@ use a provider operation service/ledger or remain blocked from production.
 
 Merge role-separated PostgreSQL CI first, followed by backup/PITR evidence and
 cutover hardening. The CI lane creates the migrator, app, and backup roles from
-scratch, applies all 39 migrations, executes repository smoke tests as the app,
+scratch, applies all 40 migrations, executes repository smoke tests as the app,
 and proves the negative privilege matrix. The protected-environment lane then
 records encrypted backup, point-in-time restore, row/checksum/authority
 comparison, RPO, RTO, and rollback rehearsal.

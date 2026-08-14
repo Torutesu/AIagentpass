@@ -24,6 +24,7 @@ import { createPostgresAgentSessionIssuanceRepository } from "./agent-session-is
 import { createQualificationGrantBatchRepository } from "./qualification-grant-batch-repository.mjs";
 import { createAuthorityReductionAuditAppender } from "./authority-reduction-audit.mjs";
 import { createPostgresManagedSignerKeyLifecycleRepository } from "./managed-signer-key-lifecycle-repository.mjs";
+import { createPostgresProviderOperationRepository } from "./provider-operation-repository.mjs";
 import {
   createDrainController,
   createOperationalHealth,
@@ -221,6 +222,7 @@ export async function createPostgresRuntime({ env = process.env, PoolClass = Poo
     ...(agentSessionIssuanceRepository ? { agentSessionIssuanceRepository } : {}),
     qualificationGrantBatchRepository,
     createManagedSignerKeyLifecycleRepository: (options = {}) => createPostgresManagedSignerKeyLifecycleRepository({ ...options, client: pool }),
+    createProviderOperationRepository: (options = {}) => createPostgresProviderOperationRepository({ ...options, client: pool }),
     ownerRecoveryRepository,
     ownerRecoveryWebAuthnRepository,
     ownerRecoveryOutboxRepository,
