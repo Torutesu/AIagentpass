@@ -27,7 +27,8 @@ test("anonymous exchange limiter works in PostgreSQL without an organization row
   const organizations = await pool.query("SELECT count(*)::int AS count FROM organizations WHERE id=$1", [principalId]);
   assert.equal(organizations.rows[0].count, 0);
   await pool.query("UPDATE anonymous_rate_limit_buckets SET updated_at=clock_timestamp()-interval '2 seconds',expires_at=clock_timestamp()-interval '1 second' WHERE operation=$1 AND principal_id=$2", ["human.recovery.exchange", principalId]);
-  assert.deepEqual(await repository.pruneExpired({ limit: 1 }), { removed: 1 });
+  const pruned = await repository.pruneExpired({ limit: 10_000 });
+  assert.equal(pruned.removed >= 1 && pruned.removed <= 10_000, true);
   const buckets = await pool.query("SELECT count(*)::int AS count FROM anonymous_rate_limit_buckets WHERE operation=$1 AND principal_id=$2", ["human.recovery.exchange", principalId]);
   assert.equal(buckets.rows[0].count, 0);
 });

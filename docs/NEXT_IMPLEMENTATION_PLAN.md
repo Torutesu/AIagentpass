@@ -12,7 +12,7 @@ The primary macOS delivery is not a required menu-bar application. The release a
 
 ## 2. Current implemented boundary
 
-The current branch has the versioned Core/OpenAPI/JSON Schema catalog, 32 forward-only PostgreSQL migrations, tenant-qualified hosted repositories, Human sessions and organization roles, WebAuthn registration/authentication and operation-bound recent authorization, Device API foundations, signed control bundles and ACK state, audit ingestion, emergency revocation, threshold-owner recovery, and a secret-free recovery-notification outbox with dead-letter management and bounded retention.
+The current branch has the versioned Core/OpenAPI/JSON Schema catalog, 33 forward-only PostgreSQL migrations, tenant-qualified hosted repositories, Human sessions and organization roles, WebAuthn registration/authentication and operation-bound recent authorization, Device API foundations, signed control bundles and ACK state, audit ingestion, emergency revocation, threshold-owner recovery, and a secret-free recovery-notification outbox with dead-letter management and bounded retention.
 
 At the `5a5842c` checkpoint, recovery dead-letter redrive and suppression require an exact resource-bound WebAuthn context. The repository recomputes that context and consumes the proof in the same organization-locked transaction. The full suite passes with 1,682 tests (1,648 pass and 34 intentionally skipped), lint and contract validation pass, and all 31 migrations apply to PostgreSQL 16.
 
@@ -106,11 +106,20 @@ insertion and the cross-replica session ceiling. A denied limiter decision does
 not consume replay state; a replay cannot revoke an existing session; and a
 failed insert rolls the replay marker back.
 
+W1.4a infrastructure closure is also implemented in migration `0033`: both
+token-bucket functions sample time after their row lock and prevent timestamp
+regression; all retention functions use bounded cooperative row locking; the
+hosted transport limiter has no process-local allowance path; and an
+independent maintenance worker prunes all shared-control classes under one
+budget with fixed label-free metrics. Real PostgreSQL qualification covers a
+delayed bucket locker, backward-clock protection, locked-row pruning, upgrade
+to 33, and migrations 1–33 in an empty schema.
+
 Current verification baseline:
 
-- the root suite passes 1,716 tests: 1,678 pass, 38 explicitly skipped, 0 fail;
-- the frozen catalog validates 113 entries: 29 schemas, 52 OpenAPI operations,
-  and 32 migrations;
+- the root suite passes 1,731 tests: 1,691 pass, 40 explicitly skipped, 0 fail;
+- the frozen catalog validates 114 entries: 29 schemas, 52 OpenAPI operations,
+  and 33 migrations;
 - lint and whitespace/error checks pass;
 - real PostgreSQL qualification passes for the cross-replica session ceiling,
   resource-bound recovery management, terminal-row retention, and outbox
@@ -125,7 +134,7 @@ W1 closure execution order:
 | W1.5 delivery fault matrix | Run two independent workers and inject loss after lease claim, before/after provider acceptance, before terminal commit, after commit, and before HTTP response receipt. Reuse one deterministic provider idempotency key and inspect authoritative rows after restart. | Kill/restart, lease expiry, duplicate acknowledgement, stale lease, poison row, provider timeout, response truncation, and concurrent prune/redrive cases against real PostgreSQL. | Every case converges to one logical delivery or an explicit uncertain/dead-letter state; no event is silently lost, widened, or delivered with substituted content. |
 | W1.6 operational closure | Add fixed-key alerts/runbook thresholds for queue age, uncertain outcomes, dead letters, redrive failure, prune failure, limiter denial/unavailability, and recovery latency. Update threat model and evidence index. | Snapshot tests must reject new labels/fields; runbook drill covers provider outage, worker restart, limiter outage, and dead-letter recovery. | W1 exit gate is reproducible from one documented command sequence and produces no secret-bearing artifact. |
 
-#### W1.4a remaining merge sequence
+#### W1.4a completed merge sequence
 
 | Commit | Exact scope | Verification required before merge |
 | --- | --- | --- |

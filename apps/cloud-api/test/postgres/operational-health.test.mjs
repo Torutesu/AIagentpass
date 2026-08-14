@@ -61,6 +61,10 @@ test("metrics are fixed-key, monotonic, and free of caller labels", () => {
   metrics.recordHumanAuthReplayDenial(4);
   metrics.recordHumanAuthVerifierTimeout();
   metrics.recordHumanAuthStaleClaimRecovery(5);
+  metrics.recordSharedControlMaintenanceCycle(2);
+  metrics.recordSharedControlMaintenanceSuccess();
+  metrics.recordSharedControlMaintenanceFailure(3);
+  metrics.recordSharedControlMaintenanceRemoved(7);
   for (const operation of Object.values(HUMAN_RECOVERY_OPERATIONS)) metrics.recordHumanRecoveryOperation(operation);
   const snapshot = metrics.snapshot();
   assert.deepEqual(Object.keys(snapshot), ["version", "counters", "valid"]);
@@ -106,6 +110,10 @@ test("metrics are fixed-key, monotonic, and free of caller labels", () => {
     human_auth_replay_denial_total: 4,
     human_auth_verifier_timeout_total: 1,
     human_auth_stale_claim_recovery_total: 5,
+    shared_control_maintenance_cycle_total: 2,
+    shared_control_maintenance_success_total: 1,
+    shared_control_maintenance_failure_total: 3,
+    shared_control_maintenance_removed_total: 7,
     owner_recovery_outbox_claim_total: 0,
     owner_recovery_outbox_publish_total: 0,
     owner_recovery_outbox_retry_total: 0,

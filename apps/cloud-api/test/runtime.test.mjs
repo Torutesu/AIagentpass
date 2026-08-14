@@ -6,7 +6,7 @@ import path from "node:path";
 import test from "node:test";
 
 import { createApiTokenRecord, generateApiToken } from "../src/auth.mjs";
-import { createCloudRuntime, loadRuntimeConfig } from "../src/runtime.mjs";
+import { createCloudRuntime, createHostedRateLimiter, loadRuntimeConfig } from "../src/runtime.mjs";
 import { createCloudStore } from "../src/store.mjs";
 
 const CURSOR_SECRET = Buffer.alloc(32, 0x42).toString("base64url");
@@ -74,7 +74,7 @@ test("production human auth is composed from PostgreSQL and closed with the runt
   const calls = [];
   const controlPlaneStore = await createCloudStore({ dataDir: path.join(value.root, "hosted-test-store"), auditCursorSecret: Buffer.from(CURSOR_SECRET, "base64url") });
   const hostedControlPlaneStore = new Proxy(controlPlaneStore, { get(target, property, receiver) { if (property === "pollDeviceRefresh") return async () => null; if (property === "markDeviceRefreshDelivered") return async () => {}; return Reflect.get(target, property, receiver); } });
-  const postgresRuntime = { pool: {}, humanRepository: {}, controlPlaneStore: hostedControlPlaneStore, refreshHintNotifier: { async waitForRefresh() { return false; } }, sharedControlRepository: { async consumeDeviceRequestNonce() { return { accepted: true }; }, async acquireRateLimit() { return { allowed: true, limit: 120, remaining: 119, retryAfterMs: 0, retryAfterSeconds: 0, resetAt: Date.now() }; } }, capabilityAuthorityRepository: { async issueCapabilityMetadata() {}, async listRevokedCapabilityIds() { return []; } }, agentSessionIssuanceRepository: { async issueAgentSessionGrant() {} }, agentSessionAuthorityRepository: { async consumeAgentSessionGrant() {} }, qualificationGrantBatchRepository: { async claimQualificationGrantBatch() {} }, async readiness() { return readyDatabaseReport(); }, async close() { calls.push("postgres-close"); await controlPlaneStore.close(); } };
+  const postgresRuntime = { pool: {}, humanRepository: {}, controlPlaneStore: hostedControlPlaneStore, refreshHintNotifier: { async waitForRefresh() { return false; } }, sharedControlRepository: { async consumeDeviceRequestNonce() { return { accepted: true }; }, async acquireRateLimit() { return { allowed: true, limit: 120, remaining: 119, retryAfterMs: 0, retryAfterSeconds: 0, resetAt: Date.now() }; }, async acquireAnonymousRateLimit() { return { allowed: true, limit: 120, remaining: 119, retryAfterMs: 0, retryAfterSeconds: 0, resetAt: Date.now() }; } }, capabilityAuthorityRepository: { async issueCapabilityMetadata() {}, async listRevokedCapabilityIds() { return []; } }, agentSessionIssuanceRepository: { async issueAgentSessionGrant() {} }, agentSessionAuthorityRepository: { async consumeAgentSessionGrant() {} }, qualificationGrantBatchRepository: { async claimQualificationGrantBatch() {} }, async readiness() { return readyDatabaseReport(); }, async close() { calls.push("postgres-close"); await controlPlaneStore.close(); } };
   const recentAuthService = { async authorize() { return { verified: false }; } };
   const humanSession = { async authenticateRequest() { return { session: {} }; } };
   let signerHealthy = true;
@@ -144,6 +144,61 @@ test("production human auth fails closed without PostgreSQL capability authority
     humanAuthFactory: () => { throw new Error("human auth must not be constructed"); }
   }), /capability authority is unavailable/);
   assert.equal(closed, true);
+});
+
+test("hosted rate limiter uses shared tenant buckets only for authenticated UUID pairs", async () => {
+  const calls = [];
+  const repository = {
+    async acquireRateLimit(input) { calls.push({ kind: "tenant", input }); return { allowed: true, limit: input.capacity, remaining: input.capacity - 1, retryAfterSeconds: 0, resetAt: Date.now() }; },
+    async acquireAnonymousRateLimit(input) { calls.push({ kind: "anonymous", input }); return { allowed: true, limit: input.capacity, remaining: input.capacity - 1, retryAfterSeconds: 0, resetAt: Date.now() }; }
+  };
+  const limiter = createHostedRateLimiter(repository, { secret: Buffer.alloc(32, 0x43) });
+  const organizationId = "11111111-1111-4111-8111-111111111111";
+  const memberId = "22222222-2222-4222-8222-222222222222";
+  await limiter.acquire({ tenantId: organizationId, principalType: "human", principalId: memberId });
+  assert.equal(calls[0].kind, "tenant");
+  assert.deepEqual(calls[0].input, { organizationId, principalType: "human", principalId: memberId, capacity: 120, refillPerSecond: 2, cost: 1 });
+});
+
+test("hosted rate limiter maps malformed transport scopes to fixed HMAC anonymous buckets", async () => {
+  const calls = [];
+  const anonymousAttempts = new Map();
+  const repository = {
+    async acquireRateLimit(input) { calls.push({ kind: "tenant", input }); return { allowed: true, limit: input.capacity, remaining: input.capacity - 1, retryAfterSeconds: 0, resetAt: Date.now() }; },
+    async acquireAnonymousRateLimit(input) {
+      calls.push({ kind: "anonymous", input });
+      const attempt = (anonymousAttempts.get(input.principalId) ?? 0) + 1;
+      anonymousAttempts.set(input.principalId, attempt);
+      return { allowed: attempt === 1, limit: input.capacity, remaining: attempt === 1 ? input.capacity - 1 : 0, retryAfterSeconds: attempt === 1 ? 0 : 1, resetAt: Date.now() };
+    }
+  };
+  const secret = Buffer.alloc(32, 0x43);
+  const first = createHostedRateLimiter(repository, { secret });
+  const second = createHostedRateLimiter(repository, { secret: Buffer.from(secret) });
+  await first.acquire({ tenantId: "attacker-controlled-tenant", principalType: "human", principalId: "attacker-controlled-principal" });
+  const restartedDecision = await second.acquire({ tenantId: "another-tenant", principalType: "human", principalId: "another-principal" });
+  await first.acquire({ tenantId: "attacker-controlled-tenant", principalType: "device", principalId: "attacker-controlled-principal" });
+  assert.equal(calls.length, 3);
+  assert.equal(calls.every(({ kind }) => kind === "anonymous"), true);
+  assert.equal(calls[0].input.operation, "cloud.transport.human");
+  assert.equal(calls[1].input.operation, "cloud.transport.human");
+  assert.equal(calls[2].input.operation, "cloud.transport.device");
+  assert.equal(restartedDecision.allowed, false, "a new process must observe the shared bucket state");
+  assert.equal(calls[0].input.principalId, calls[1].input.principalId);
+  assert.notEqual(calls[0].input.principalId, calls[2].input.principalId);
+  assert.match(calls[0].input.principalId, /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u);
+  assert.notEqual(calls[0].input.principalId, "attacker-controlled-principal");
+  const differentSecretCalls = [];
+  const differentSecretRepository = { async acquireRateLimit() {}, async acquireAnonymousRateLimit(input) { differentSecretCalls.push(input); return { allowed: true, limit: 120, remaining: 119, retryAfterSeconds: 0, resetAt: Date.now() }; } };
+  await createHostedRateLimiter(differentSecretRepository, { secret: Buffer.alloc(32, 0x44) }).acquire({ tenantId: "bad", principalType: "human", principalId: "bad" });
+  assert.notEqual(calls[0].input.principalId, differentSecretCalls[0].principalId);
+});
+
+test("hosted rate limiter requires shared anonymous controls and propagates outage", async () => {
+  assert.throws(() => createHostedRateLimiter({ async acquireRateLimit() {} }, { secret: Buffer.alloc(32) }), /PostgreSQL shared rate limiter is unavailable/);
+  const outage = new Error("database unavailable");
+  const limiter = createHostedRateLimiter({ async acquireRateLimit() {}, async acquireAnonymousRateLimit() { throw outage; } }, { secret: Buffer.alloc(32, 0x43) });
+  await assert.rejects(limiter.acquire({ tenantId: "bad", principalType: "human", principalId: "bad" }), (error) => error === outage);
 });
 
 function hostedEnv(value) {

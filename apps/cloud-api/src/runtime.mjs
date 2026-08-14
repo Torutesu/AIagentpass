@@ -102,7 +102,7 @@ export async function createCloudRuntime({ env = process.env, logger = console, 
       }
       if (!postgresRuntime?.controlPlaneStore) throw new Error("PostgreSQL control-plane store is unavailable");
       if (!postgresRuntime?.agentSessionIssuanceRepository || !postgresRuntime?.agentSessionAuthorityRepository) throw new Error("PostgreSQL Agent Session authority is unavailable");
-      if (!postgresRuntime?.sharedControlRepository || typeof postgresRuntime.sharedControlRepository.consumeDeviceRequestNonce !== "function" || typeof postgresRuntime.sharedControlRepository.acquireRateLimit !== "function") throw new Error("PostgreSQL shared controls are unavailable");
+      if (!postgresRuntime?.sharedControlRepository || typeof postgresRuntime.sharedControlRepository.consumeDeviceRequestNonce !== "function" || typeof postgresRuntime.sharedControlRepository.acquireRateLimit !== "function" || typeof postgresRuntime.sharedControlRepository.acquireAnonymousRateLimit !== "function") throw new Error("PostgreSQL shared controls are unavailable");
       store = postgresRuntime.controlPlaneStore;
       if (typeof store.pollDeviceRefresh !== "function" || typeof store.markDeviceRefreshDelivered !== "function") throw new Error("PostgreSQL refresh polling is unavailable");
       if (!postgresRuntime.refreshHintNotifier || typeof postgresRuntime.refreshHintNotifier.waitForRefresh !== "function") throw new Error("PostgreSQL refresh notification is unavailable");
@@ -124,7 +124,7 @@ export async function createCloudRuntime({ env = process.env, logger = console, 
         qualificationManifestSigner
       });
     } else store = await createCloudStore({ dataDir: config.dataDir });
-    const hostedRateLimiter = profile.isHosted ? createHostedRateLimiter(postgresRuntime.sharedControlRepository) : undefined;
+    const hostedRateLimiter = profile.isHosted ? createHostedRateLimiter(postgresRuntime.sharedControlRepository, { secret: humanAuthSecret }) : undefined;
     let agentSessionDeviceApi;
     let qualificationGrantBatchDeviceApi;
     if (profile.isHosted) {
@@ -363,23 +363,43 @@ function runtimeTimeout(promise, timeoutMs) {
   ]).finally(() => clearTimeout(timer));
 }
 
-function createHostedRateLimiter(repository, { now = () => Date.now() } = {}) {
-  if (!repository || typeof repository.acquireRateLimit !== "function") throw new Error("PostgreSQL shared rate limiter is unavailable");
-  const fallback = createRateLimiter({ now });
+export function createHostedRateLimiter(repository, { secret } = {}) {
+  if (!repository || typeof repository.acquireRateLimit !== "function" || typeof repository.acquireAnonymousRateLimit !== "function") throw new Error("PostgreSQL shared rate limiter is unavailable");
+  if (!Buffer.isBuffer(secret) || secret.length !== 32) throw new Error("PostgreSQL shared rate limiter is unavailable");
   const policies = Object.freeze({ human: Object.freeze({ capacity: 120, refillPerSecond: 2 }), device: Object.freeze({ capacity: 240, refillPerSecond: 4 }) });
+  const anonymousBuckets = Object.freeze({
+    human: Object.freeze({ operation: "cloud.transport.human", principalId: deriveHostedAnonymousBucketId(secret, "human") }),
+    device: Object.freeze({ operation: "cloud.transport.device", principalId: deriveHostedAnonymousBucketId(secret, "device") })
+  });
   return Object.freeze({
     policies,
     async acquire({ tenantId, principalType, principalId } = {}) {
-      // Pre-authentication traffic has no trustworthy organization UUID yet;
-      // it remains bounded by the transport-scoped admission limiter. Every
-      // authenticated tenant request uses the shared PostgreSQL bucket.
-      if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu.test(tenantId ?? "")
-        || !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu.test(principalId ?? "")) return fallback.acquire({ tenantId, principalType, principalId });
       const policy = policies[principalType];
       if (!policy) throw new Error("rate limiter principal type is invalid");
+      // Pre-authentication traffic has no trustworthy organization UUID yet;
+      // it remains bounded by one shared, purpose-specific PostgreSQL bucket.
+      // Never persist attacker-controlled transport values as anonymous row
+      // identifiers: the HMAC-derived UUIDs are stable across instances and
+      // restarts, while the domain separator keeps this namespace isolated.
+      if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu.test(tenantId ?? "")
+        || !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu.test(principalId ?? "")) {
+        const bucket = anonymousBuckets[principalType];
+        return repository.acquireAnonymousRateLimit({ operation: bucket.operation, principalId: bucket.principalId, capacity: policy.capacity, refillPerSecond: policy.refillPerSecond, cost: 1 });
+      }
       return repository.acquireRateLimit({ organizationId: tenantId, principalType, principalId, capacity: policy.capacity, refillPerSecond: policy.refillPerSecond, cost: 1 });
     }
   });
+}
+
+function deriveHostedAnonymousBucketId(secret, purpose) {
+  const digest = crypto.createHmac("sha256", secret)
+    .update("AgentPass-Hosted-Transport-Rate-Limit-v1\0", "utf8")
+    .update(purpose, "utf8")
+    .digest();
+  const bytes = Buffer.from(digest.subarray(0, 16));
+  bytes[6] = (bytes[6] & 0x0f) | 0x40;
+  bytes[8] = (bytes[8] & 0x3f) | 0x80;
+  return `${bytes.subarray(0, 4).toString("hex")}-${bytes.subarray(4, 6).toString("hex")}-${bytes.subarray(6, 8).toString("hex")}-${bytes.subarray(8, 10).toString("hex")}-${bytes.subarray(10, 16).toString("hex")}`;
 }
 
 function createHostedReadiness(databaseReadiness, signers) {

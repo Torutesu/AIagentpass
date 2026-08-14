@@ -61,6 +61,10 @@ The implementation decision and Apple signing prerequisites are recorded in [doc
 
 ## Cloud synchronization contract boundary
 
+Hosted admission and replay controls are authoritative PostgreSQL state shared by every API replica. Authenticated traffic is scoped by organization and principal; pre-authentication or malformed scopes are collapsed into fixed, domain-separated HMAC UUID buckets so an attacker cannot create an unbounded row namespace. There is no hosted process-local allowance fallback, and database failure therefore denies admission. Bucket refill time is sampled only after the row lock and cannot move backward under clock adjustment or lock contention.
+
+Replay, nonce, idempotency, and rate-limit retention is availability maintenance, not an authorization bypass. Concurrent workers select bounded expired batches with `FOR UPDATE SKIP LOCKED`, share one per-cycle deletion budget, and emit only fixed aggregate counters. A failed prune can retain denial/replay evidence longer; it cannot make an expired or replayed request valid. The reverse proxy remains responsible for independent connection-level and volumetric denial-of-service controls before application admission.
+
 A refresh hint is untrusted delivery input even when its Cloud signature is valid. It carries no policy, capability, revocation list, signing permission, or expiry extension. Its only permitted effect is to ask the enrolled device to fetch the current ControlBundle through the independently authenticated Device API. Substitution, replay, reordering, duplicate delivery, expiry, or total notification outage therefore cannot widen authority; the installed signed ControlBundle and its expiry remain canonical.
 
 Refresh-hint signatures are Ed25519 over a versioned, domain-separated canonical statement bound to one organization, device, authority generation, short validity window, nonce, algorithm, and key ID. The device rejects unknown fields, invalid encodings, cross-device audience, generation rollback, expired/future-invalid windows, untrusted keys, and signatures over any other byte sequence.

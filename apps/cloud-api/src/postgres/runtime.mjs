@@ -15,6 +15,7 @@ import { createPostgresOwnerRecoveryOutboxRepository } from "./owner-recovery-ou
 import { createPostgresOwnerRecoveryOutboxManagementRepository } from "./owner-recovery-outbox-management-repository.mjs";
 import { createPostgresOwnerRecoveryOutboxRetentionRepository } from "./owner-recovery-outbox-retention-repository.mjs";
 import { createOwnerRecoveryOutboxWorker } from "./owner-recovery-outbox-worker.mjs";
+import { createSharedControlMaintenanceWorker } from "./shared-control-maintenance-worker.mjs";
 import { createAgentSessionAuthorityRepository } from "./agent-session-authority-repository.mjs";
 import { createPostgresAgentSessionConsumptionRepository } from "./agent-session-consumption-repository.mjs";
 import { createPostgresAgentSessionLifecycleRepository } from "./agent-session-lifecycle-repository.mjs";
@@ -27,9 +28,10 @@ import {
   createOperationalMetrics
 } from "./operational-health.mjs";
 
-export async function createPostgresRuntime({ env = process.env, PoolClass = Pool, applicationVersion = "unknown", refreshNonceCodec, resolveProcessBindingPolicy, ownerRecoveryPublisher, ownerRecoveryOutboxAutoStart = true, ownerRecoveryOutboxWorkerOptions = {} } = {}) {
+export async function createPostgresRuntime({ env = process.env, PoolClass = Pool, applicationVersion = "unknown", refreshNonceCodec, resolveProcessBindingPolicy, ownerRecoveryPublisher, ownerRecoveryOutboxAutoStart = true, ownerRecoveryOutboxWorkerOptions = {}, sharedControlMaintenanceAutoStart = true, sharedControlMaintenanceWorkerOptions = {} } = {}) {
   if (resolveProcessBindingPolicy !== undefined && typeof resolveProcessBindingPolicy !== "function") throw new TypeError("resolveProcessBindingPolicy must be a function");
   if (typeof ownerRecoveryOutboxAutoStart !== "boolean" || !ownerRecoveryOutboxWorkerOptions || typeof ownerRecoveryOutboxWorkerOptions !== "object" || Array.isArray(ownerRecoveryOutboxWorkerOptions)) throw new TypeError("owner recovery outbox runtime configuration is invalid");
+  if (typeof sharedControlMaintenanceAutoStart !== "boolean" || !sharedControlMaintenanceWorkerOptions || typeof sharedControlMaintenanceWorkerOptions !== "object" || Array.isArray(sharedControlMaintenanceWorkerOptions)) throw new TypeError("shared-control maintenance runtime configuration is invalid");
   const config = loadPostgresConfig(env);
   const pool = new PoolClass({ connectionString: config.connectionString, ssl: { rejectUnauthorized: true }, max: config.maxConnections, connectionTimeoutMillis: config.connectionTimeoutMs, idleTimeoutMillis: config.idleTimeoutMs, statement_timeout: config.statementTimeoutMs, lock_timeout: config.lockTimeoutMs, query_timeout: config.statementTimeoutMs + 1_000, allowExitOnIdle: false });
   const migrationRunner = createMigrationRunner({ client: pool, applicationVersion });
@@ -49,6 +51,7 @@ export async function createPostgresRuntime({ env = process.env, PoolClass = Poo
   let closePoolPromise;
   let ownerRecoveryOutboxWorker;
   let ownerRecoveryOutboxRepository;
+  let sharedControlMaintenanceWorker;
   const drainController = createDrainController();
   const operationalMetrics = createOperationalMetrics();
   const refreshHintNotifier = createPostgresRefreshHintNotifier({ pool, metrics: operationalMetrics });
@@ -82,12 +85,15 @@ export async function createPostgresRuntime({ env = process.env, PoolClass = Poo
     const timeoutMs = options.timeoutMs ?? 10_000;
     if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 0 || timeoutMs > 60_000) throw new TypeError("runtime drain timeout is invalid");
     const workerDrain = ownerRecoveryOutboxWorker?.drain({ timeout_ms: timeoutMs });
+    const maintenanceDrain = sharedControlMaintenanceWorker?.close({ timeoutMs });
     return drainController.drain({
       ...options,
       timeoutMs,
       close: async () => {
         const workerResult = await workerDrain;
         if (workerResult && workerResult.drained !== true) throw Object.assign(new Error("Owner recovery outbox worker drain timed out"), { code: "owner_recovery_outbox_worker_drain_timeout" });
+        const maintenanceResult = await maintenanceDrain;
+        if (maintenanceResult && maintenanceResult.drained !== true) throw Object.assign(new Error("Shared-control maintenance worker drain timed out"), { code: "shared_control_maintenance_worker_drain_timeout" });
         await closePool();
       }
     });
@@ -123,6 +129,12 @@ export async function createPostgresRuntime({ env = process.env, PoolClass = Poo
   }
   const agentSessionAuthorityRepository = createAgentSessionAuthorityRepository({ client: pool });
   const sharedControlRepository = createSharedControlRepository({ client: pool });
+  sharedControlMaintenanceWorker = createSharedControlMaintenanceWorker({
+    ...sharedControlMaintenanceWorkerOptions,
+    repository: sharedControlRepository,
+    metrics: operationalMetrics
+  });
+  if (sharedControlMaintenanceAutoStart) sharedControlMaintenanceWorker.start();
   const agentSessionConsumptionRepository = createPostgresAgentSessionConsumptionRepository({
     client: pool,
     authorityRepository: agentSessionAuthorityRepository,
@@ -205,6 +217,7 @@ export async function createPostgresRuntime({ env = process.env, PoolClass = Poo
     ownerRecoveryOutboxRetentionRepository,
     ...(ownerRecoveryOutboxWorker ? { ownerRecoveryOutboxWorker } : {}),
     sharedControlRepository,
+    sharedControlMaintenanceWorker,
     controlPlaneStore,
     refreshHintNotifier,
     tenants: createTenantRepositoryFactory({ client: pool }),

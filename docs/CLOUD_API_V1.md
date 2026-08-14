@@ -11,6 +11,7 @@ All endpoints are under `/v1`, accept and return JSON, reject unknown request fi
 - Mutating human requests require `Idempotency-Key`. Device audit events are intrinsically idempotent by `(device_id, event_id)`.
 - The Web Console bridge requires an authenticated SIWC user on every read and mutation. Same-origin checks are an additional CSRF control, not authentication.
 - The bridge connects to the Cloud API only over HTTPS. Plain HTTP is accepted solely for loopback development when explicitly enabled.
+- Hosted transport admission is shared across replicas. Authenticated UUID scopes consume tenant/principal PostgreSQL buckets; unauthenticated or malformed scopes consume fixed purpose-separated HMAC UUID buckets and can never create attacker-selected rows. PostgreSQL unavailability denies the request instead of falling back to a process-local allowance.
 
 ## Resources and minimum roles
 
@@ -35,6 +36,8 @@ All endpoints are under `/v1`, accept and return JSON, reject unknown request fi
 ## Tenant and concurrency rules
 
 Resource IDs are globally opaque but every lookup also requires the organization ID; cross-tenant existence is never disclosed. Updates carry an integer `version`, and stale `If-Match` values return `version_conflict`. Mutations are serialized per organization. Deletion is represented as a tombstone where auditability is required.
+
+Token-bucket functions lock the selected row before sampling wall-clock time and never move `updated_at` backward. Expired shared-control and signed-identity replay records are deleted with bounded `FOR UPDATE SKIP LOCKED` batches. A dedicated maintenance worker uses one total deletion budget, never overlaps its own cycles, contains database/metric-sink failures, and is drained before PostgreSQL shutdown.
 
 ## Bundle behavior
 

@@ -72,6 +72,11 @@ export const SHARED_CONTROL_REPOSITORY_METHODS = Object.freeze([
   "pruneExpired"
 ]);
 
+// Kept separate from SHARED_CONTROL_REPOSITORY_METHODS so the legacy
+// repository contract remains byte-for-byte compatible for existing callers.
+// The maintenance worker uses this method when migration 0033 is available.
+export const SHARED_CONTROL_MAINTENANCE_METHOD = "pruneSharedControlMaintenance";
+
 export class SharedControlRepositoryError extends Error {
   constructor(code, cause = undefined) {
     super(PUBLIC_MESSAGES[code] ?? PUBLIC_MESSAGES[SHARED_CONTROL_ERROR_CODES.CONTROL_UNAVAILABLE], cause === undefined ? undefined : { cause });
@@ -274,6 +279,49 @@ export function createSharedControlRepository({ client, limits = {}, hash = sha2
     }
   }
 
+  /**
+   * Prune every shared-control store under one caller-provided budget.  The
+   * budget is consumed in a deterministic order and the remaining amount is
+   * passed to each subsequent PostgreSQL function, so concurrent workers can
+   * never make this call delete more than `limit` rows in total.
+   *
+   * This is intentionally a separate method from pruneExpired(): older
+   * deployments use the latter's two-function contract until migration 0033
+   * is installed.  The maintenance worker is the only caller of this
+   * migration-0033 contract.
+   */
+  async function pruneSharedControlMaintenance({ limit = SHARED_CONTROL_LIMITS.pruneLimit.default } = {}) {
+    const boundedLimit = boundedInteger(limit, SHARED_CONTROL_LIMITS.pruneLimit, "limit");
+    try {
+      const shared = await pruneCount("agentpass_prune_shared_control_expired", boundedLimit);
+      let remaining = boundedLimit - shared;
+      let anonymous = 0;
+      let replay = 0;
+      if (remaining > 0) {
+        anonymous = await pruneCount("agentpass_prune_anonymous_rate_limits", remaining);
+        remaining -= anonymous;
+      }
+      if (remaining > 0) replay = await pruneCount("agentpass_prune_human_identity_assertion_replays", remaining);
+      return Object.freeze({
+        removed: shared + anonymous + replay,
+        sharedRemoved: shared,
+        anonymousRemoved: anonymous,
+        replayRemoved: replay
+      });
+    } catch (error) {
+      if (error instanceof SharedControlRepositoryError) throw error;
+      throw unavailable(error);
+    }
+  }
+
+  async function pruneCount(functionName, limit) {
+    const result = await client.query(`SELECT removed FROM ${functionName}($1::integer)`, [limit]);
+    if (rowCount(result) !== 1) throw unavailable();
+    const removed = safeInteger(result.rows[0]?.removed, 0, limit);
+    if (removed > limit) throw unavailable();
+    return removed;
+  }
+
   return Object.freeze({
     limits: configured,
     withTransaction,
@@ -284,7 +332,8 @@ export function createSharedControlRepository({ client, limits = {}, hash = sha2
     consumeDeviceRequestNonce,
     acquireRateLimit,
     acquireAnonymousRateLimit,
-    pruneExpired
+    pruneExpired,
+    [SHARED_CONTROL_MAINTENANCE_METHOD]: pruneSharedControlMaintenance
   });
 }
 

@@ -62,7 +62,7 @@ test("PostgreSQL runtime exposes exact-schema readiness, tracked work, and bound
   const migrations = await loadSqlMigrations();
   const runtime = await createPostgresRuntime({ env: env(), PoolClass: FakePool, applicationVersion: "runtime-readiness-test", resolveProcessBindingPolicy: () => true });
   assert.equal(runtime.pool.applied.length, migrations.length);
-  assert.equal(migrations.length, 32);
+  assert.equal(migrations.length, 33);
   assert.equal((await runtime.readiness()).code, "ready");
   assert.equal(typeof runtime.agentSessionIssuanceRepository?.issueAgentSessionGrant, "function");
   assert.equal(typeof runtime.agentSessionConsumptionRepository?.consumeAgentSessionGrant, "function");
@@ -77,6 +77,8 @@ test("PostgreSQL runtime exposes exact-schema readiness, tracked work, and bound
   assert.equal(typeof runtime.ownerRecoveryOutboxRepository?.claimBatch, "function");
   assert.equal(typeof runtime.ownerRecoveryOutboxManagementRepository?.redriveDeadLetter, "function");
   assert.equal(typeof runtime.ownerRecoveryOutboxRetentionRepository?.prune, "function");
+  assert.equal(runtime.sharedControlMaintenanceWorker.snapshot().state, "running");
+  assert.equal(typeof runtime.sharedControlMaintenanceWorker.runOnce, "function");
 
   let finish;
   const inFlight = runtime.trackInFlight(() => new Promise((resolve) => { finish = resolve; }));
@@ -92,6 +94,7 @@ test("PostgreSQL runtime exposes exact-schema readiness, tracked work, and bound
   const drained = await close;
   assert.equal(drained.drained, true);
   assert.equal(runtime.pool.ended, true);
+  assert.equal(runtime.sharedControlMaintenanceWorker.snapshot().state, "closed");
   assert.equal((await runtime.readiness()).code, "closed");
   await runtime.close();
 });
@@ -124,4 +127,15 @@ test("direct runtime close waits for tracked work before closing PostgreSQL", as
   const result = await closing;
   assert.equal(result.drained, true);
   assert.equal(runtime.pool.ended, true);
+});
+
+test("PostgreSQL runtime can leave shared-control maintenance idle for qualification", async () => {
+  const runtime = await createPostgresRuntime({
+    env: env(),
+    PoolClass: FakePool,
+    sharedControlMaintenanceAutoStart: false
+  });
+  assert.equal(runtime.sharedControlMaintenanceWorker.snapshot().state, "idle");
+  await runtime.close();
+  assert.equal(runtime.sharedControlMaintenanceWorker.snapshot().state, "closed");
 });

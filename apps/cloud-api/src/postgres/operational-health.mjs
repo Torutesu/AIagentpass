@@ -1,5 +1,5 @@
 export const OPERATIONAL_HEALTH_VERSION = 1;
-export const EXPECTED_POSTGRES_SCHEMA_VERSION = 32;
+export const EXPECTED_POSTGRES_SCHEMA_VERSION = 33;
 
 // Recovery operations are deliberately a closed set.  These names are also
 // the admission-control names used by human-auth/rate-limit.mjs; keeping the
@@ -66,6 +66,10 @@ export const OPERATIONAL_METRIC_KEYS = Object.freeze([
   "human_auth_replay_denial_total",
   "human_auth_verifier_timeout_total",
   "human_auth_stale_claim_recovery_total",
+  "shared_control_maintenance_cycle_total",
+  "shared_control_maintenance_success_total",
+  "shared_control_maintenance_failure_total",
+  "shared_control_maintenance_removed_total",
   "owner_recovery_outbox_claim_total",
   "owner_recovery_outbox_publish_total",
   "owner_recovery_outbox_retry_total",
@@ -196,6 +200,10 @@ export function createOperationalMetrics({ initial = {} } = {}) {
     recordHumanAuthReplayDenial: (amount = 1) => increment("human_auth_replay_denial_total", amount),
     recordHumanAuthVerifierTimeout: (amount = 1) => increment("human_auth_verifier_timeout_total", amount),
     recordHumanAuthStaleClaimRecovery: (amount = 1) => increment("human_auth_stale_claim_recovery_total", amount),
+    recordSharedControlMaintenanceCycle: (amount = 1) => increment("shared_control_maintenance_cycle_total", amount),
+    recordSharedControlMaintenanceSuccess: (amount = 1) => increment("shared_control_maintenance_success_total", amount),
+    recordSharedControlMaintenanceFailure: (amount = 1) => increment("shared_control_maintenance_failure_total", amount),
+    recordSharedControlMaintenanceRemoved: (amount = 1) => increment("shared_control_maintenance_removed_total", amount),
     recordOwnerRecoveryOutboxClaim: (amount = 1) => increment("owner_recovery_outbox_claim_total", amount),
     recordOwnerRecoveryOutboxPublish: (amount = 1) => increment("owner_recovery_outbox_publish_total", amount),
     recordOwnerRecoveryOutboxRetry: (amount = 1) => increment("owner_recovery_outbox_retry_total", amount),
