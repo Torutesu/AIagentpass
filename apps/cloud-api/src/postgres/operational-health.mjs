@@ -70,6 +70,12 @@ export const OPERATIONAL_METRIC_KEYS = Object.freeze([
   "shared_control_maintenance_success_total",
   "shared_control_maintenance_failure_total",
   "shared_control_maintenance_removed_total",
+  "managed_signer_provider_operation_maintenance_cycle_total",
+  "managed_signer_provider_operation_maintenance_success_total",
+  "managed_signer_provider_operation_maintenance_failure_total",
+  "managed_signer_provider_operation_maintenance_quarantined_total",
+  "managed_signer_provider_operation_maintenance_reconciled_total",
+  "managed_signer_provider_operation_maintenance_pruned_total",
   "owner_recovery_outbox_claim_total",
   "owner_recovery_outbox_publish_total",
   "owner_recovery_outbox_retry_total",
@@ -217,6 +223,12 @@ export function createOperationalMetrics({ initial = {} } = {}) {
     recordSharedControlMaintenanceSuccess: (amount = 1) => increment("shared_control_maintenance_success_total", amount),
     recordSharedControlMaintenanceFailure: (amount = 1) => increment("shared_control_maintenance_failure_total", amount),
     recordSharedControlMaintenanceRemoved: (amount = 1) => increment("shared_control_maintenance_removed_total", amount),
+    recordManagedSignerProviderOperationMaintenanceCycle: (amount = 1) => increment("managed_signer_provider_operation_maintenance_cycle_total", amount),
+    recordManagedSignerProviderOperationMaintenanceSuccess: (amount = 1) => increment("managed_signer_provider_operation_maintenance_success_total", amount),
+    recordManagedSignerProviderOperationMaintenanceFailure: (amount = 1) => increment("managed_signer_provider_operation_maintenance_failure_total", amount),
+    recordManagedSignerProviderOperationMaintenanceQuarantined: (amount = 1) => increment("managed_signer_provider_operation_maintenance_quarantined_total", amount),
+    recordManagedSignerProviderOperationMaintenanceReconciled: (amount = 1) => increment("managed_signer_provider_operation_maintenance_reconciled_total", amount),
+    recordManagedSignerProviderOperationMaintenancePruned: (amount = 1) => increment("managed_signer_provider_operation_maintenance_pruned_total", amount),
     recordOwnerRecoveryOutboxClaim: (amount = 1) => increment("owner_recovery_outbox_claim_total", amount),
     recordOwnerRecoveryOutboxPublish: (amount = 1) => increment("owner_recovery_outbox_publish_total", amount),
     recordOwnerRecoveryOutboxRetry: (amount = 1) => increment("owner_recovery_outbox_retry_total", amount),
@@ -394,6 +406,10 @@ export function createOperationalHealth({
   outboxStatus,
   outboxMaxPending = 10_000,
   outboxMaxLagMs = 15 * 60_000,
+  providerOperationStatus,
+  providerOperationMaxBacklog = 10_000,
+  providerOperationMaxLagMs = 15 * 60_000,
+  providerOperationMaxMaintenanceAgeMs = 2 * 60_000,
   readinessTimeoutMs = 5_000,
   now = () => Date.now()
 } = {}) {
@@ -403,7 +419,8 @@ export function createOperationalHealth({
   if (!metrics || typeof metrics.snapshot !== "function") throw invalidOperationalInput();
   if (!drainController || typeof drainController.snapshot !== "function") throw invalidOperationalInput();
   if (outboxStatus !== undefined && typeof outboxStatus !== "function") throw invalidOperationalInput();
-  if (!Number.isSafeInteger(outboxMaxPending) || outboxMaxPending < 0 || outboxMaxPending > 1_000_000 || !Number.isSafeInteger(outboxMaxLagMs) || outboxMaxLagMs < 1_000 || outboxMaxLagMs > 24 * 60 * 60_000 || !Number.isSafeInteger(readinessTimeoutMs) || readinessTimeoutMs < 10 || readinessTimeoutMs > 30_000 || typeof now !== "function") throw invalidOperationalInput();
+  if (providerOperationStatus !== undefined && typeof providerOperationStatus !== "function") throw invalidOperationalInput();
+  if (!Number.isSafeInteger(outboxMaxPending) || outboxMaxPending < 0 || outboxMaxPending > 1_000_000 || !Number.isSafeInteger(outboxMaxLagMs) || outboxMaxLagMs < 1_000 || outboxMaxLagMs > 24 * 60 * 60_000 || !Number.isSafeInteger(providerOperationMaxBacklog) || providerOperationMaxBacklog < 0 || providerOperationMaxBacklog > 1_000_000 || !Number.isSafeInteger(providerOperationMaxLagMs) || providerOperationMaxLagMs < 1_000 || providerOperationMaxLagMs > 24 * 60 * 60_000 || !Number.isSafeInteger(providerOperationMaxMaintenanceAgeMs) || providerOperationMaxMaintenanceAgeMs < 1_000 || providerOperationMaxMaintenanceAgeMs > 24 * 60 * 60_000 || !Number.isSafeInteger(readinessTimeoutMs) || readinessTimeoutMs < 10 || readinessTimeoutMs > 30_000 || typeof now !== "function") throw invalidOperationalInput();
   const configuredMax = positiveInteger(maxConnections ?? pool.options?.max);
 
   async function readiness() {
@@ -420,23 +437,26 @@ export function createOperationalHealth({
         pool: poolCheck,
         drain,
         ...(outboxStatus === undefined ? {} : { outbox: skippedOutbox("draining") }),
+        ...(providerOperationStatus === undefined ? {} : { providerOperations: skippedProviderOperations("draining") }),
         metrics: metricSnapshot
       });
     }
 
-    const [databaseResult, migrationResult, outboxResult] = await Promise.allSettled([
+    const [databaseResult, migrationResult, outboxResult, providerOperationResult] = await Promise.allSettled([
       withTimeout(Promise.resolve().then(() => probe(pool)), readinessTimeoutMs),
       withTimeout(Promise.resolve().then(() => migrationStatus()), readinessTimeoutMs),
-      outboxStatus === undefined ? Promise.resolve(undefined) : withTimeout(Promise.resolve().then(() => outboxStatus()), readinessTimeoutMs)
+      outboxStatus === undefined ? Promise.resolve(undefined) : withTimeout(Promise.resolve().then(() => outboxStatus()), readinessTimeoutMs),
+      providerOperationStatus === undefined ? Promise.resolve(undefined) : withTimeout(Promise.resolve().then(() => providerOperationStatus()), readinessTimeoutMs)
     ]);
     recordObservedLockWaits(metrics, databaseResult);
     const database = normalizeProbeResult(databaseResult);
     const schema = normalizeSchemaResult(migrationResult, expectedSchemaVersion);
     const outbox = outboxStatus === undefined ? undefined : normalizeOutboxResult(outboxResult, { outboxMaxPending, outboxMaxLagMs, now });
+    const providerOperations = providerOperationStatus === undefined ? undefined : normalizeProviderOperationResult(providerOperationResult, { providerOperationMaxBacklog, providerOperationMaxLagMs, providerOperationMaxMaintenanceAgeMs, now });
     const poolReady = poolCheck.ok;
     const metricsReady = metricSnapshot.valid !== false;
-    const ready = database.ok && schema.ok && poolReady && metricsReady && (outbox === undefined || outbox.ok);
-    const code = ready ? "ready" : firstFailureCode({ database, schema, pool: poolCheck, metricsReady, outbox });
+    const ready = database.ok && schema.ok && poolReady && metricsReady && (outbox === undefined || outbox.ok) && (providerOperations === undefined || providerOperations.ok);
+    const code = ready ? "ready" : firstFailureCode({ database, schema, pool: poolCheck, metricsReady, outbox, providerOperations });
     return contract({
       ready,
       status: ready ? "ready" : "not_ready",
@@ -446,6 +466,7 @@ export function createOperationalHealth({
       pool: poolCheck,
       drain,
       ...(outbox === undefined ? {} : { outbox }),
+      ...(providerOperations === undefined ? {} : { providerOperations }),
       metrics: metricSnapshot
     });
   }
@@ -465,13 +486,13 @@ export function createOperationalHealth({
   return Object.freeze({ readiness, health: readiness, operationalSnapshot });
 }
 
-function contract({ ready, status, code, database, schema, pool, drain, outbox, metrics }) {
+function contract({ ready, status, code, database, schema, pool, drain, outbox, providerOperations, metrics }) {
   return Object.freeze({
     version: OPERATIONAL_HEALTH_VERSION,
     ready: Boolean(ready),
     status,
     code,
-    checks: Object.freeze({ database, schema, pool, drain, ...(outbox === undefined ? {} : { owner_recovery_outbox: outbox }) }),
+    checks: Object.freeze({ database, schema, pool, drain, ...(outbox === undefined ? {} : { owner_recovery_outbox: outbox }), ...(providerOperations === undefined ? {} : { managed_signer_provider_operations: providerOperations }) }),
     metrics
   });
 }
@@ -530,6 +551,88 @@ function outboxGauges(outbox) {
     owner_recovery_outbox_oldest_pending_age_ms: pendingAge,
     owner_recovery_outbox_oldest_uncertain_age_ms: uncertainAge
   });
+}
+
+function normalizeProviderOperationResult(result, { providerOperationMaxBacklog, providerOperationMaxLagMs, providerOperationMaxMaintenanceAgeMs, now }) {
+  if (result.status !== "fulfilled" || !plainHealthObject(result.value)) return skippedProviderOperations("unavailable");
+  const value = result.value;
+  const states = value.states;
+  const stateNames = ["pending", "started", "accepted", "uncertain", "committed", "rejected", "failed"];
+  const rootNames = ["version", "states", "stale_started", "oldest_nonterminal_at", "worker_state", "worker_cycles", "consecutive_failures", "last_success_at"];
+  if (Reflect.ownKeys(value).length !== rootNames.length || !rootNames.every((field) => Object.hasOwn(value, field))
+    || value.version !== 1 || !plainHealthObject(states) || Reflect.ownKeys(states).length !== stateNames.length
+    || !stateNames.every((state) => Object.hasOwn(states, state) && Number.isSafeInteger(states[state]) && states[state] >= 0)
+    || !Number.isSafeInteger(value.stale_started) || value.stale_started < 0
+    || !["running", "idle", "closing", "closed"].includes(value.worker_state)
+    || !Number.isSafeInteger(value.worker_cycles) || value.worker_cycles < 0
+    || !Number.isSafeInteger(value.consecutive_failures) || value.consecutive_failures < 0) return skippedProviderOperations("unavailable");
+  let current;
+  try { current = Number(now()); } catch { return skippedProviderOperations("unavailable"); }
+  if (!Number.isSafeInteger(current) || current < 0) return skippedProviderOperations("unavailable");
+  const nonterminal = states.pending + states.started + states.accepted + states.uncertain;
+  if (!Number.isSafeInteger(nonterminal)) return skippedProviderOperations("unavailable");
+  const oldestNonterminalAgeMs = ageFromTimestamp(value.oldest_nonterminal_at, nonterminal, current);
+  const lastSuccessAgeMs = ageFromEpoch(value.last_success_at, current);
+  if (oldestNonterminalAgeMs === undefined || lastSuccessAgeMs === undefined) return skippedProviderOperations("unavailable");
+  const code = value.worker_state !== "running"
+    ? "worker_unavailable"
+    : value.consecutive_failures > 0
+      ? "maintenance_failed"
+      : states.uncertain > 0
+        ? "uncertain_present"
+        : value.stale_started > 0
+          ? "stale_started"
+          : nonterminal > providerOperationMaxBacklog
+            ? "backlog_exceeded"
+            : oldestNonterminalAgeMs !== null && oldestNonterminalAgeMs > providerOperationMaxLagMs
+              ? "lag_exceeded"
+              : lastSuccessAgeMs === null || lastSuccessAgeMs > providerOperationMaxMaintenanceAgeMs
+                ? "maintenance_stale"
+                : "ok";
+  return Object.freeze({
+    ok: code === "ok",
+    code,
+    worker_state: value.worker_state,
+    pending_count: states.pending,
+    started_count: states.started,
+    accepted_count: states.accepted,
+    uncertain_count: states.uncertain,
+    stale_started_count: value.stale_started,
+    oldest_nonterminal_age_ms: oldestNonterminalAgeMs,
+    last_success_age_ms: lastSuccessAgeMs
+  });
+}
+
+function skippedProviderOperations(code) {
+  return Object.freeze({
+    ok: false,
+    code,
+    worker_state: code === "draining" ? "closing" : "unavailable",
+    pending_count: null,
+    started_count: null,
+    accepted_count: null,
+    uncertain_count: null,
+    stale_started_count: null,
+    oldest_nonterminal_age_ms: null,
+    last_success_age_ms: null
+  });
+}
+
+function ageFromTimestamp(value, count, current) {
+  if (value === null) return count === 0 ? null : undefined;
+  const timestamp = Date.parse(String(value));
+  if (!Number.isFinite(timestamp) || timestamp > current) return undefined;
+  return Math.min(Number.MAX_SAFE_INTEGER, current - timestamp);
+}
+
+function ageFromEpoch(value, current) {
+  if (value === null) return null;
+  if (!Number.isSafeInteger(value) || value < 0 || value > current) return undefined;
+  return current - value;
+}
+
+function plainHealthObject(value) {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
 }
 
 async function defaultProbe(pool) {
@@ -669,7 +772,7 @@ function safeMetricSnapshot(metrics) {
   }
 }
 
-function firstFailureCode({ database, schema, pool, metricsReady, outbox }) {
+function firstFailureCode({ database, schema, pool, metricsReady, outbox, providerOperations }) {
   if (!database.ok) return "database_unavailable";
   if (!schema.ok) {
     if (schema.checksum_status === "drift") return "migration_drift";
@@ -679,6 +782,7 @@ function firstFailureCode({ database, schema, pool, metricsReady, outbox }) {
   if (!pool.ok) return "pool_saturated";
   if (!metricsReady) return "metrics_unavailable";
   if (outbox && !outbox.ok) return `owner_recovery_outbox_${outbox.code}`;
+  if (providerOperations && !providerOperations.ok) return `managed_signer_provider_operations_${providerOperations.code}`;
   return "health_check_failed";
 }
 

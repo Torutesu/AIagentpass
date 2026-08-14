@@ -25,22 +25,31 @@ import { createQualificationGrantBatchRepository } from "./qualification-grant-b
 import { createAuthorityReductionAuditAppender } from "./authority-reduction-audit.mjs";
 import { createPostgresManagedSignerKeyLifecycleRepository } from "./managed-signer-key-lifecycle-repository.mjs";
 import { createPostgresProviderOperationRepository } from "./provider-operation-repository.mjs";
+import { createPostgresProviderOperationMaintenanceRepository } from "./provider-operation-maintenance-repository.mjs";
+import { createManagedSignerProviderOperationMaintenanceWorker } from "./managed-signer-provider-operation-maintenance-worker.mjs";
 import {
   createDrainController,
   createOperationalHealth,
   createOperationalMetrics
 } from "./operational-health.mjs";
 
-export async function createPostgresRuntime({ env = process.env, PoolClass = Pool, applicationVersion = "unknown", refreshNonceCodec, resolveProcessBindingPolicy, ownerRecoveryPublisher, ownerRecoveryOutboxAutoStart = true, ownerRecoveryOutboxWorkerOptions = {}, sharedControlMaintenanceAutoStart = true, sharedControlMaintenanceWorkerOptions = {} } = {}) {
+export async function createPostgresRuntime({ env = process.env, PoolClass = Pool, applicationVersion = "unknown", refreshNonceCodec, resolveProcessBindingPolicy, ownerRecoveryPublisher, ownerRecoveryOutboxAutoStart = true, ownerRecoveryOutboxWorkerOptions = {}, sharedControlMaintenanceAutoStart = true, sharedControlMaintenanceWorkerOptions = {}, managedSignerProviderOperationMaintenanceAutoStart = true, managedSignerProviderOperationMaintenanceWorkerOptions = {} } = {}) {
   if (resolveProcessBindingPolicy !== undefined && typeof resolveProcessBindingPolicy !== "function") throw new TypeError("resolveProcessBindingPolicy must be a function");
   if (typeof ownerRecoveryOutboxAutoStart !== "boolean" || !ownerRecoveryOutboxWorkerOptions || typeof ownerRecoveryOutboxWorkerOptions !== "object" || Array.isArray(ownerRecoveryOutboxWorkerOptions)) throw new TypeError("owner recovery outbox runtime configuration is invalid");
   if (typeof sharedControlMaintenanceAutoStart !== "boolean" || !sharedControlMaintenanceWorkerOptions || typeof sharedControlMaintenanceWorkerOptions !== "object" || Array.isArray(sharedControlMaintenanceWorkerOptions)) throw new TypeError("shared-control maintenance runtime configuration is invalid");
+  if (typeof managedSignerProviderOperationMaintenanceAutoStart !== "boolean" || !managedSignerProviderOperationMaintenanceWorkerOptions || typeof managedSignerProviderOperationMaintenanceWorkerOptions !== "object" || Array.isArray(managedSignerProviderOperationMaintenanceWorkerOptions)) throw new TypeError("managed signer provider-operation maintenance runtime configuration is invalid");
+  createManagedSignerProviderOperationMaintenanceWorker({
+    ...managedSignerProviderOperationMaintenanceWorkerOptions,
+    repository: { async maintainProviderOperations() { return { quarantined: 0, reconciled: 0, pruned: 0, total: 0 }; } }
+  });
   let ownerRecoveryDeliveryBinding;
   if (ownerRecoveryPublisher !== undefined
     && (!ownerRecoveryPublisher || typeof ownerRecoveryPublisher.publish !== "function"
       || typeof ownerRecoveryPublisher.lookupAcceptance !== "function")) throw new TypeError("owner recovery publisher is invalid");
   try { ownerRecoveryDeliveryBinding = ownerRecoveryPublisher === undefined ? undefined : normalizeOwnerRecoveryDeliveryBinding(ownerRecoveryPublisher.binding); }
   catch { throw new TypeError("owner recovery publisher binding is invalid"); }
+  const auditCursorSecret = exactSecret(env.AGENTPASS_HUMAN_CURSOR_SECRET, "AGENTPASS_HUMAN_CURSOR_SECRET");
+  const capabilityNonceSecret = exactSecret(env.AGENTPASS_CAPABILITY_NONCE_SECRET, "AGENTPASS_CAPABILITY_NONCE_SECRET");
   const config = loadPostgresConfig(env);
   const pool = new PoolClass({ connectionString: config.connectionString, ssl: { rejectUnauthorized: true }, max: config.maxConnections, connectionTimeoutMillis: config.connectionTimeoutMs, idleTimeoutMillis: config.idleTimeoutMs, statement_timeout: config.statementTimeoutMs, lock_timeout: config.lockTimeoutMs, query_timeout: config.statementTimeoutMs + 1_000, allowExitOnIdle: false });
   const migrationRunner = createMigrationRunner({ client: pool, applicationVersion });
@@ -61,8 +70,19 @@ export async function createPostgresRuntime({ env = process.env, PoolClass = Poo
   let ownerRecoveryOutboxWorker;
   let ownerRecoveryOutboxRepository;
   let sharedControlMaintenanceWorker;
+  let providerOperationMaintenanceWorker;
   const drainController = createDrainController();
   const operationalMetrics = createOperationalMetrics();
+  const providerOperationMaintenanceRepository = createPostgresProviderOperationMaintenanceRepository({ client: pool });
+  providerOperationMaintenanceWorker = createManagedSignerProviderOperationMaintenanceWorker({
+    firstCycleDelayMs: 5_000,
+    intervalMs: 30_000,
+    maintenanceLimit: 1_000,
+    closeTimeoutMs: 10_000,
+    ...managedSignerProviderOperationMaintenanceWorkerOptions,
+    repository: providerOperationMaintenanceRepository,
+    metrics: operationalMetrics
+  });
   const refreshHintNotifier = createPostgresRefreshHintNotifier({ pool, metrics: operationalMetrics });
   const operationalHealth = createOperationalHealth({
     pool,
@@ -70,6 +90,17 @@ export async function createPostgresRuntime({ env = process.env, PoolClass = Poo
     migrationStatus: () => migrationRunner.status(),
     metrics: operationalMetrics,
     drainController,
+    providerOperationStatus: async () => {
+      const health = await providerOperationMaintenanceRepository.health();
+      const worker = providerOperationMaintenanceWorker.snapshot();
+      return Object.freeze({
+        ...health,
+        worker_state: worker.state,
+        worker_cycles: worker.cycles,
+        consecutive_failures: worker.consecutive_failures,
+        last_success_at: worker.last_success_at
+      });
+    },
     ...(ownerRecoveryPublisher === undefined ? {} : {
       outboxStatus: async () => ({
         ...(await ownerRecoveryOutboxRepository.health()),
@@ -93,8 +124,10 @@ export async function createPostgresRuntime({ env = process.env, PoolClass = Poo
   async function drain(options = {}) {
     const timeoutMs = options.timeoutMs ?? 10_000;
     if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 0 || timeoutMs > 60_000) throw new TypeError("runtime drain timeout is invalid");
+    drainController.beginDrain();
     const workerDrain = ownerRecoveryOutboxWorker?.drain({ timeout_ms: timeoutMs });
     const maintenanceDrain = sharedControlMaintenanceWorker?.close({ timeoutMs });
+    const providerOperationMaintenanceDrain = providerOperationMaintenanceWorker?.close({ timeoutMs });
     return drainController.drain({
       ...options,
       timeoutMs,
@@ -103,12 +136,12 @@ export async function createPostgresRuntime({ env = process.env, PoolClass = Poo
         if (workerResult && workerResult.drained !== true) throw Object.assign(new Error("Owner recovery outbox worker drain timed out"), { code: "owner_recovery_outbox_worker_drain_timeout" });
         const maintenanceResult = await maintenanceDrain;
         if (maintenanceResult && maintenanceResult.drained !== true) throw Object.assign(new Error("Shared-control maintenance worker drain timed out"), { code: "shared_control_maintenance_worker_drain_timeout" });
+        const providerOperationMaintenanceResult = await providerOperationMaintenanceDrain;
+        if (providerOperationMaintenanceResult && providerOperationMaintenanceResult.drained !== true) throw Object.assign(new Error("Managed signer provider-operation maintenance worker drain timed out"), { code: "managed_signer_provider_operation_maintenance_worker_drain_timeout" });
         await closePool();
       }
     });
   }
-  const auditCursorSecret = exactSecret(env.AGENTPASS_HUMAN_CURSOR_SECRET, "AGENTPASS_HUMAN_CURSOR_SECRET");
-  const capabilityNonceSecret = exactSecret(env.AGENTPASS_CAPABILITY_NONCE_SECRET, "AGENTPASS_CAPABILITY_NONCE_SECRET");
   const adminAuditRepository = createPostgresAdminAuditRepository({ client: pool });
   const ownerRecoveryRepository = createPostgresOwnerRecoveryRepository({
     client: pool,
@@ -211,6 +244,10 @@ export async function createPostgresRuntime({ env = process.env, PoolClass = Poo
     },
     onAuthorityReduction
   });
+  if (managedSignerProviderOperationMaintenanceAutoStart) {
+    await providerOperationMaintenanceWorker.runOnce();
+    providerOperationMaintenanceWorker.start();
+  }
   return Object.freeze({
     pool,
     humanRepository: createPostgresHumanRepository({ client: pool, onAuthorityReduction }),
@@ -223,6 +260,8 @@ export async function createPostgresRuntime({ env = process.env, PoolClass = Poo
     qualificationGrantBatchRepository,
     createManagedSignerKeyLifecycleRepository: (options = {}) => createPostgresManagedSignerKeyLifecycleRepository({ ...options, client: pool }),
     createProviderOperationRepository: (options = {}) => createPostgresProviderOperationRepository({ ...options, client: pool }),
+    providerOperationMaintenanceRepository,
+    providerOperationMaintenanceWorker,
     ownerRecoveryRepository,
     ownerRecoveryWebAuthnRepository,
     ownerRecoveryOutboxRepository,

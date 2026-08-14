@@ -83,6 +83,30 @@ test("readiness exposes only aggregate owner recovery outbox state", async (t) =
   assert.equal(JSON.stringify(body).includes("must-not-leak"), false);
 });
 
+test("readiness exposes only fixed aggregate managed signer provider-operation state", async (t) => {
+  const report = {
+    version: 1,
+    ready: false,
+    status: "not_ready",
+    code: "managed_signer_provider_operations_uncertain_present",
+    checks: {
+      database: { ok: true, probe: "ok" },
+      schema: { ok: true, expected_version: 41, applied_version: 41, migration_count: 41, pending_count: 0, checksum_status: "verified", drift: false },
+      pool: { ok: true, max_connections: 10, total_connections: 1, idle_connections: 1, waiting_connections: 0, utilization_percent: 10, saturated: false },
+      drain: { state: "running", accepting: true, in_flight: 0 },
+      managed_signer_provider_operations: { ok: false, code: "uncertain_present", worker_state: "running", pending_count: 0, started_count: 0, accepted_count: 0, uncertain_count: 1, stale_started_count: 0, oldest_nonterminal_age_ms: 500, last_success_age_ms: 100, operation_id: "must-not-leak", receipt_id: "must-not-leak" }
+    }
+  };
+  const server = createCloudApi({ store: {}, readiness: async () => report, operationalMetrics: createOperationalMetrics(), operationalProbeSecret: PROBE_SECRET });
+  await new Promise((resolve, reject) => { server.once("error", reject); server.listen(0, "127.0.0.1", resolve); });
+  t.after(() => new Promise((resolve) => server.close(resolve)));
+  const response = await fetch(`http://127.0.0.1:${server.address().port}/health/ready`, { headers: PROBE_HEADERS });
+  assert.equal(response.status, 503);
+  const body = await response.json();
+  assert.deepEqual(body.checks.managed_signer_provider_operations, { ok: false, code: "uncertain_present", worker_state: "running", pending_count: 0, started_count: 0, accepted_count: 0, uncertain_count: 1, stale_started_count: 0, oldest_nonterminal_age_ms: 500, last_success_age_ms: 100 });
+  assert.doesNotMatch(JSON.stringify(body), /must-not-leak|operation_id|receipt_id/u);
+});
+
 test("metrics exposes the fixed owner recovery gauges required by the alert policy", async (t) => {
   const counters = createOperationalMetrics().snapshot().counters;
   const gauges = {

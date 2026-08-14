@@ -1436,9 +1436,10 @@ function publicReadinessReport(value) {
 
 function publicReadinessChecks(value) {
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("invalid readiness checks");
-  const { database, schema, pool, drain, owner_recovery_outbox: ownerRecoveryOutbox, agent_session_signer: agentSessionSigner, qualification_manifest_signer: qualificationManifestSigner, possession_receipt_signer: possessionReceiptSigner } = value;
+  const { database, schema, pool, drain, owner_recovery_outbox: ownerRecoveryOutbox, managed_signer_provider_operations: managedSignerProviderOperations, agent_session_signer: agentSessionSigner, qualification_manifest_signer: qualificationManifestSigner, possession_receipt_signer: possessionReceiptSigner } = value;
   if (!database || typeof database.ok !== "boolean" || typeof database.probe !== "string") throw new Error("invalid readiness checks");
   const integerOrNull = (item) => item === null || Number.isSafeInteger(item);
+  const nonNegativeIntegerOrNull = (item) => item === null || (Number.isSafeInteger(item) && item >= 0);
   if (!schema || typeof schema.ok !== "boolean" || !integerOrNull(schema.expected_version) || !integerOrNull(schema.applied_version) || !integerOrNull(schema.migration_count) || !integerOrNull(schema.pending_count) || typeof schema.checksum_status !== "string" || (schema.drift !== null && typeof schema.drift !== "boolean")) throw new Error("invalid readiness checks");
   if (!pool || typeof pool.ok !== "boolean" || !integerOrNull(pool.max_connections) || !integerOrNull(pool.total_connections) || !integerOrNull(pool.idle_connections) || !integerOrNull(pool.waiting_connections) || !integerOrNull(pool.utilization_percent) || (pool.saturated !== null && typeof pool.saturated !== "boolean")) throw new Error("invalid readiness checks");
   if (!drain || !["running", "draining", "closed"].includes(drain.state) || typeof drain.accepting !== "boolean" || !Number.isSafeInteger(drain.in_flight) || drain.in_flight < 0) throw new Error("invalid readiness checks");
@@ -1446,6 +1447,13 @@ function publicReadinessChecks(value) {
     || !["running", "idle", "draining", "closed", "unavailable"].includes(ownerRecoveryOutbox.worker_state)
     || !integerOrNull(ownerRecoveryOutbox.pending_count) || !integerOrNull(ownerRecoveryOutbox.uncertain_count) || !integerOrNull(ownerRecoveryOutbox.dead_letter_count)
     || !integerOrNull(ownerRecoveryOutbox.oldest_pending_age_ms) || !integerOrNull(ownerRecoveryOutbox.oldest_uncertain_age_ms))) throw new Error("invalid readiness checks");
+  if (managedSignerProviderOperations !== undefined && (!managedSignerProviderOperations || typeof managedSignerProviderOperations.ok !== "boolean"
+    || typeof managedSignerProviderOperations.code !== "string"
+    || !["running", "idle", "closing", "closed", "unavailable"].includes(managedSignerProviderOperations.worker_state)
+    || !nonNegativeIntegerOrNull(managedSignerProviderOperations.pending_count) || !nonNegativeIntegerOrNull(managedSignerProviderOperations.started_count)
+    || !nonNegativeIntegerOrNull(managedSignerProviderOperations.accepted_count) || !nonNegativeIntegerOrNull(managedSignerProviderOperations.uncertain_count)
+    || !nonNegativeIntegerOrNull(managedSignerProviderOperations.stale_started_count) || !nonNegativeIntegerOrNull(managedSignerProviderOperations.oldest_nonterminal_age_ms)
+    || !nonNegativeIntegerOrNull(managedSignerProviderOperations.last_success_age_ms))) throw new Error("invalid readiness checks");
   if (agentSessionSigner !== undefined && (!agentSessionSigner || typeof agentSessionSigner.ok !== "boolean"
     || typeof agentSessionSigner.purpose !== "string" || agentSessionSigner.algorithm !== "ed25519"
     || (agentSessionSigner.key_id !== null && typeof agentSessionSigner.key_id !== "string")
@@ -1464,6 +1472,7 @@ function publicReadinessChecks(value) {
     pool: Object.freeze({ ok: pool.ok, max_connections: pool.max_connections, total_connections: pool.total_connections, idle_connections: pool.idle_connections, waiting_connections: pool.waiting_connections, utilization_percent: pool.utilization_percent, saturated: pool.saturated }),
     drain: Object.freeze({ state: drain.state, accepting: drain.accepting, in_flight: drain.in_flight }),
     ...(ownerRecoveryOutbox === undefined ? {} : { owner_recovery_outbox: Object.freeze({ ok: ownerRecoveryOutbox.ok, code: ownerRecoveryOutbox.code, worker_state: ownerRecoveryOutbox.worker_state, pending_count: ownerRecoveryOutbox.pending_count, uncertain_count: ownerRecoveryOutbox.uncertain_count, dead_letter_count: ownerRecoveryOutbox.dead_letter_count, oldest_pending_age_ms: ownerRecoveryOutbox.oldest_pending_age_ms, oldest_uncertain_age_ms: ownerRecoveryOutbox.oldest_uncertain_age_ms }) }),
+    ...(managedSignerProviderOperations === undefined ? {} : { managed_signer_provider_operations: Object.freeze({ ok: managedSignerProviderOperations.ok, code: managedSignerProviderOperations.code, worker_state: managedSignerProviderOperations.worker_state, pending_count: managedSignerProviderOperations.pending_count, started_count: managedSignerProviderOperations.started_count, accepted_count: managedSignerProviderOperations.accepted_count, uncertain_count: managedSignerProviderOperations.uncertain_count, stale_started_count: managedSignerProviderOperations.stale_started_count, oldest_nonterminal_age_ms: managedSignerProviderOperations.oldest_nonterminal_age_ms, last_success_age_ms: managedSignerProviderOperations.last_success_age_ms }) }),
     ...(agentSessionSigner === undefined ? {} : { agent_session_signer: Object.freeze({ ok: agentSessionSigner.ok, purpose: agentSessionSigner.purpose, algorithm: agentSessionSigner.algorithm, key_id: agentSessionSigner.key_id, public_key_fingerprint: agentSessionSigner.public_key_fingerprint }) }),
     ...(qualificationManifestSigner === undefined ? {} : { qualification_manifest_signer: Object.freeze({ ok: qualificationManifestSigner.ok, purpose: qualificationManifestSigner.purpose, algorithm: qualificationManifestSigner.algorithm, key_id: qualificationManifestSigner.key_id, public_key_fingerprint: qualificationManifestSigner.public_key_fingerprint }) }),
     ...(possessionReceiptSigner === undefined ? {} : { possession_receipt_signer: Object.freeze({ ok: possessionReceiptSigner.ok, purpose: possessionReceiptSigner.purpose, algorithm: possessionReceiptSigner.algorithm, key_id: possessionReceiptSigner.key_id, public_key_fingerprint: possessionReceiptSigner.public_key_fingerprint }) })

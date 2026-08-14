@@ -42,6 +42,10 @@ class FakePool {
     }
     if (text === "SELECT set_config('statement_timeout', $1, false)" || text === "SELECT set_config('lock_timeout', $1, false)") return { rows: [{ set_config: params[0] }] };
     if (text.includes("count(*) FILTER (WHERE status='pending')")) return { rowCount: 1, rows: [{ pending: "0", uncertain: "0", dead_letter: "0", oldest_pending_at: null, oldest_uncertain_at: null }] };
+    if (text.startsWith("SELECT agentpass_quarantine_expired_managed_signer_provider_operations")) return { rowCount: 1, rows: [{ quarantined: 0 }] };
+    if (text.startsWith("WITH candidates") && text.includes("UPDATE managed_signer_provider_operations")) return { rowCount: 1, rows: [{ reconciled: 0 }] };
+    if (text.startsWith("WITH candidates") && text.includes("DELETE FROM managed_signer_signing_idempotency")) return { rowCount: 1, rows: [{ pruned: 0 }] };
+    if (text.startsWith("SELECT\n        (SELECT count(*) FROM (\n          SELECT 1 FROM managed_signer_provider_operations")) return { rowCount: 1, rows: [{ pending: "0", started: "0", accepted: "0", uncertain: "0", committed: "0", rejected: "0", failed: "0", stale_started: "0", oldest_nonterminal_at: null }] };
     if (text === "BEGIN" || text === "COMMIT" || text === "ROLLBACK" || text.includes("pg_advisory_xact_lock")) return { rows: [] };
     return { rows: [] };
   }
@@ -83,6 +87,12 @@ test("PostgreSQL runtime exposes exact-schema readiness, tracked work, and bound
   assert.equal(typeof runtime.ownerRecoveryOutboxRetentionRepository?.prune, "function");
   assert.equal(runtime.sharedControlMaintenanceWorker.snapshot().state, "running");
   assert.equal(typeof runtime.sharedControlMaintenanceWorker.runOnce, "function");
+  assert.equal(runtime.providerOperationMaintenanceWorker.snapshot().state, "running");
+  assert.equal(runtime.providerOperationMaintenanceWorker.snapshot().cycles, 1);
+  assert.equal(runtime.providerOperationMaintenanceWorker.snapshot().consecutive_failures, 0);
+  assert.equal(typeof runtime.providerOperationMaintenanceRepository.maintainProviderOperations, "function");
+  assert.equal(typeof runtime.providerOperationMaintenanceRepository.health, "function");
+  assert.equal((await runtime.readiness()).checks.managed_signer_provider_operations.code, "ok");
 
   let finish;
   const inFlight = runtime.trackInFlight(() => new Promise((resolve) => { finish = resolve; }));
@@ -99,6 +109,7 @@ test("PostgreSQL runtime exposes exact-schema readiness, tracked work, and bound
   assert.equal(drained.drained, true);
   assert.equal(runtime.pool.ended, true);
   assert.equal(runtime.sharedControlMaintenanceWorker.snapshot().state, "closed");
+  assert.equal(runtime.providerOperationMaintenanceWorker.snapshot().state, "closed");
   assert.equal((await runtime.readiness()).code, "closed");
   await runtime.close();
 });
@@ -142,4 +153,18 @@ test("PostgreSQL runtime can leave shared-control maintenance idle for qualifica
   assert.equal(runtime.sharedControlMaintenanceWorker.snapshot().state, "idle");
   await runtime.close();
   assert.equal(runtime.sharedControlMaintenanceWorker.snapshot().state, "closed");
+});
+
+test("PostgreSQL runtime can leave provider-operation maintenance idle and fails readiness closed", async () => {
+  const runtime = await createPostgresRuntime({
+    env: env(),
+    PoolClass: FakePool,
+    managedSignerProviderOperationMaintenanceAutoStart: false
+  });
+  assert.equal(runtime.providerOperationMaintenanceWorker.snapshot().state, "idle");
+  const readiness = await runtime.readiness();
+  assert.equal(readiness.ready, false);
+  assert.equal(readiness.code, "managed_signer_provider_operations_worker_unavailable");
+  await runtime.close();
+  assert.equal(runtime.providerOperationMaintenanceWorker.snapshot().state, "closed");
 });

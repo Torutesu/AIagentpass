@@ -54,6 +54,38 @@ test("contains malformed repository results and never exposes their fields", asy
   }
 });
 
+test("snapshot exposes only aggregate cycle freshness and failure state", async () => {
+  const times = [100, 200];
+  let fail = true;
+  const worker = createManagedSignerProviderOperationMaintenanceWorker({
+    repository: {
+      async maintainProviderOperations() {
+        if (fail) throw new Error("database detail must stay private");
+        return { quarantined: 0, reconciled: 0, pruned: 0, total: 0 };
+      }
+    },
+    now: () => times.shift()
+  });
+  assert.deepEqual(await worker.runOnce(), { ok: false, failed: true, quarantined: 0, reconciled: 0, pruned: 0, total: 0 });
+  assert.deepEqual(worker.snapshot(), {
+    state: "idle",
+    active: 0,
+    scheduled: false,
+    cycles: 1,
+    consecutive_failures: 1,
+    last_cycle_at: 100,
+    last_success_at: null,
+    config: worker.snapshot().config
+  });
+  fail = false;
+  assert.equal((await worker.runOnce()).ok, true);
+  assert.equal(worker.snapshot().cycles, 2);
+  assert.equal(worker.snapshot().consecutive_failures, 0);
+  assert.equal(worker.snapshot().last_cycle_at, 200);
+  assert.equal(worker.snapshot().last_success_at, 200);
+  assert.doesNotMatch(JSON.stringify(worker.snapshot()), /database|operation_id|receipt|request_bytes/u);
+});
+
 test("metric sink failures cannot affect maintenance or leak non-aggregate data", async () => {
   const calls = [];
   const metrics = Object.fromEntries(Object.values(MANAGED_SIGNER_PROVIDER_OPERATION_MAINTENANCE_METRIC_HOOKS).map((hook) => [

@@ -57,10 +57,11 @@ export function createManagedSignerProviderOperationMaintenanceWorker({
   maintenanceLimit = DEFAULTS.maintenanceLimit,
   closeTimeoutMs = DEFAULTS.closeTimeoutMs,
   setTimeoutFn = setTimeout,
-  clearTimeoutFn = clearTimeout
+  clearTimeoutFn = clearTimeout,
+  now = () => Date.now()
 } = {}) {
   if (!repository || typeof repository[MANAGED_SIGNER_PROVIDER_OPERATION_MAINTENANCE_METHOD] !== "function") throw invalidConfiguration();
-  if (typeof setTimeoutFn !== "function" || typeof clearTimeoutFn !== "function") throw invalidConfiguration();
+  if (typeof setTimeoutFn !== "function" || typeof clearTimeoutFn !== "function" || typeof now !== "function") throw invalidConfiguration();
   const config = Object.freeze({
     firstCycleDelayMs: boundedInteger(firstCycleDelayMs, LIMITS.firstCycleDelayMs),
     intervalMs: boundedInteger(intervalMs, LIMITS.intervalMs),
@@ -73,12 +74,20 @@ export function createManagedSignerProviderOperationMaintenanceWorker({
   let activeCycle;
   let closePromise;
   let closeResult;
+  let cycles = 0;
+  let consecutiveFailures = 0;
+  let lastCycleAt = null;
+  let lastSuccessAt = null;
 
   function snapshot() {
     return Object.freeze({
       state,
       active: activeCycle === undefined ? 0 : 1,
       scheduled: timer !== undefined,
+      cycles,
+      consecutive_failures: consecutiveFailures,
+      last_cycle_at: lastCycleAt,
+      last_success_at: lastSuccessAt,
       config
     });
   }
@@ -110,11 +119,18 @@ export function createManagedSignerProviderOperationMaintenanceWorker({
       emitCount(metrics, MANAGED_SIGNER_PROVIDER_OPERATION_MAINTENANCE_METRIC_HOOKS.quarantined, result.quarantined);
       emitCount(metrics, MANAGED_SIGNER_PROVIDER_OPERATION_MAINTENANCE_METRIC_HOOKS.reconciled, result.reconciled);
       emitCount(metrics, MANAGED_SIGNER_PROVIDER_OPERATION_MAINTENANCE_METRIC_HOOKS.pruned, result.pruned);
+      cycles = incrementBounded(cycles);
+      consecutiveFailures = 0;
+      lastCycleAt = safeNow(now);
+      lastSuccessAt = lastCycleAt;
       return Object.freeze({ ok: true, ...result });
     } catch {
       // Maintenance is auxiliary work.  Database errors and malformed adapter
       // results are observable through the fixed failure counter only.
       emit(metrics, MANAGED_SIGNER_PROVIDER_OPERATION_MAINTENANCE_METRIC_HOOKS.failure, 1);
+      cycles = incrementBounded(cycles);
+      consecutiveFailures = incrementBounded(consecutiveFailures);
+      lastCycleAt = safeNow(now);
       return finishedResult(true);
     }
   }
@@ -222,6 +238,19 @@ function invalidConfiguration() {
 
 function invalidResult() {
   return new TypeError("managed signer provider operation maintenance result is invalid");
+}
+
+function incrementBounded(value) {
+  return value >= Number.MAX_SAFE_INTEGER ? Number.MAX_SAFE_INTEGER : value + 1;
+}
+
+function safeNow(now) {
+  try {
+    const value = Number(now());
+    return Number.isSafeInteger(value) && value >= 0 ? value : null;
+  } catch {
+    return null;
+  }
 }
 
 async function waitBounded(promise, timeoutMs, setTimeoutFn, clearTimeoutFn) {

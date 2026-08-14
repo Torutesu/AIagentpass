@@ -66,6 +66,12 @@ test("metrics are fixed-key, monotonic, and free of caller labels", () => {
   metrics.recordSharedControlMaintenanceSuccess();
   metrics.recordSharedControlMaintenanceFailure(3);
   metrics.recordSharedControlMaintenanceRemoved(7);
+  metrics.recordManagedSignerProviderOperationMaintenanceCycle(2);
+  metrics.recordManagedSignerProviderOperationMaintenanceSuccess();
+  metrics.recordManagedSignerProviderOperationMaintenanceFailure(3);
+  metrics.recordManagedSignerProviderOperationMaintenanceQuarantined(5);
+  metrics.recordManagedSignerProviderOperationMaintenanceReconciled(4);
+  metrics.recordManagedSignerProviderOperationMaintenancePruned(6);
   for (const operation of Object.values(HUMAN_RECOVERY_OPERATIONS)) metrics.recordHumanRecoveryOperation(operation);
   const snapshot = metrics.snapshot();
   assert.deepEqual(Object.keys(snapshot), ["version", "counters", "valid"]);
@@ -115,6 +121,12 @@ test("metrics are fixed-key, monotonic, and free of caller labels", () => {
     shared_control_maintenance_success_total: 1,
     shared_control_maintenance_failure_total: 3,
     shared_control_maintenance_removed_total: 7,
+    managed_signer_provider_operation_maintenance_cycle_total: 2,
+    managed_signer_provider_operation_maintenance_success_total: 1,
+    managed_signer_provider_operation_maintenance_failure_total: 3,
+    managed_signer_provider_operation_maintenance_quarantined_total: 5,
+    managed_signer_provider_operation_maintenance_reconciled_total: 4,
+    managed_signer_provider_operation_maintenance_pruned_total: 6,
     owner_recovery_outbox_claim_total: 0,
     owner_recovery_outbox_publish_total: 0,
     owner_recovery_outbox_retry_total: 0,
@@ -149,6 +161,7 @@ test("metrics are fixed-key, monotonic, and free of caller labels", () => {
   assert.throws(() => metrics.recordAuditGap(-1), { code: "invalid_input" });
   assert.throws(() => metrics.recordAgentSessionIssueSuccess({ tenant_id: "tenant-a" }), { code: "invalid_input" });
   assert.throws(() => metrics.recordAgentSessionSignerLatency(1, { request_id: "request-a" }), { code: "invalid_input" });
+  assert.throws(() => metrics.recordManagedSignerProviderOperationMaintenanceQuarantined({ operation_id: "operation-a" }), { code: "invalid_input" });
   assert.throws(() => metrics.recordHumanRecoveryOperation("human.recovery.unknown"), { code: "invalid_input" });
 });
 
@@ -379,6 +392,63 @@ test("owner recovery outbox readiness is aggregate-only and fails closed on dead
   outbox = null;
   assert.equal((await health.readiness()).code, "owner_recovery_outbox_unavailable");
   assert.equal((await health.operationalSnapshot()).valid, false);
+});
+
+test("managed signer provider-operation readiness is deployment-wide, aggregate-only, and fail-closed", async () => {
+  const current = Date.parse("2026-08-15T00:10:00.000Z");
+  const base = {
+    version: 1,
+    states: { pending: 0, started: 0, accepted: 0, uncertain: 0, committed: 7, rejected: 0, failed: 0 },
+    stale_started: 0,
+    oldest_nonterminal_at: null,
+    worker_state: "running",
+    worker_cycles: 2,
+    consecutive_failures: 0,
+    last_success_at: current - 1_000
+  };
+  let status = base;
+  const health = createOperationalHealth({
+    pool: pool(),
+    drainController: createDrainController(),
+    migrationStatus: async () => APPLIED,
+    probe: async () => true,
+    providerOperationStatus: async () => status,
+    now: () => current
+  });
+
+  let report = await health.readiness();
+  assert.equal(report.ready, true);
+  assert.deepEqual(report.checks.managed_signer_provider_operations, {
+    ok: true,
+    code: "ok",
+    worker_state: "running",
+    pending_count: 0,
+    started_count: 0,
+    accepted_count: 0,
+    uncertain_count: 0,
+    stale_started_count: 0,
+    oldest_nonterminal_age_ms: null,
+    last_success_age_ms: 1_000
+  });
+
+  status = { ...base, states: { ...base.states, uncertain: 1 }, oldest_nonterminal_at: new Date(current - 5_000).toISOString() };
+  assert.equal((await health.readiness()).code, "managed_signer_provider_operations_uncertain_present");
+  status = { ...base, states: { ...base.states, started: 1 }, stale_started: 1, oldest_nonterminal_at: new Date(current - 5_000).toISOString() };
+  assert.equal((await health.readiness()).code, "managed_signer_provider_operations_stale_started");
+  status = { ...base, states: { ...base.states, pending: 10_001 }, oldest_nonterminal_at: new Date(current - 5_000).toISOString() };
+  assert.equal((await health.readiness()).code, "managed_signer_provider_operations_backlog_exceeded");
+  status = { ...base, states: { ...base.states, pending: 1 }, oldest_nonterminal_at: new Date(current - 15 * 60_000 - 1).toISOString() };
+  assert.equal((await health.readiness()).code, "managed_signer_provider_operations_lag_exceeded");
+  status = { ...base, consecutive_failures: 1, last_success_at: null };
+  assert.equal((await health.readiness()).code, "managed_signer_provider_operations_maintenance_failed");
+  status = { ...base, last_success_at: current - 2 * 60_000 - 1 };
+  assert.equal((await health.readiness()).code, "managed_signer_provider_operations_maintenance_stale");
+  status = { ...base, worker_state: "idle", worker_cycles: 0, last_success_at: null };
+  assert.equal((await health.readiness()).code, "managed_signer_provider_operations_worker_unavailable");
+  status = { ...base, operation_id: "must-not-escape" };
+  report = await health.readiness();
+  assert.equal(report.code, "managed_signer_provider_operations_unavailable");
+  assert.doesNotMatch(JSON.stringify(report), /must-not-escape|receipt|request_bytes|provider_diagnostic/u);
 });
 
 test("readiness returns a fixed failure within its application deadline when a provider never settles", async () => {

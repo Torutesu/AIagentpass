@@ -32,7 +32,7 @@ Production completion means:
 
 Implemented locally and covered by source-bound CI:
 
-- frozen Core/OpenAPI/JSON Schema contracts and 40 forward-only migrations;
+- frozen Core/OpenAPI/JSON Schema contracts and 41 forward-only migrations;
 - organization roles, Human sessions, WebAuthn, Device APIs, control state,
   audit, emergency revocation, owner recovery, and browser-assisted enrollment;
 - managed signer registry for eight distinct signing purposes;
@@ -386,15 +386,22 @@ call after an ambiguous response. Its deterministic receipt is an AgentPass
 ledger receipt, not provider-issued acceptance evidence. The safety claim is
 one exact verified result committed and returned, not exactly-once KMS use.
 
-C1 remains open. A lifecycle change can leave a low-level verified result
-`committed` while the authoritative high-level operation is `uncertain`; this
-is fail-closed and no signature is returned, but it needs bounded maintenance,
-fixed-cardinality readiness/metrics, and operator adjudication. The next schema
-slice is migration `0041`: closed uncertainty reasons, bounded stale-operation
-maintenance, deployment-wide all-key-version health, and runtime worker
-start/drain wiring. The subsequent qualification must run 100 concurrent
-requests across two pools and prove the public health surface contains no
-operation ID, receipt, signing bytes, tenant identifier, or provider diagnostic.
+C1 remains open, but its automatic maintenance and local contention boundary is
+now implemented. Migration `0041` records closed uncertainty reasons and
+provides bounded stale-operation quarantine. One deployment-wide repository
+maintains every purpose and historical key version under a single budget, and
+one runtime worker publishes aggregate-only readiness and fixed counters. The
+worker starts only after migration, cannot overlap itself, stops scheduling on
+drain, and finishes before PostgreSQL closes. Two independent pools converge
+100 identical requests, and the real PostgreSQL 17 matrix passes three
+consecutive runs. Public health contains no operation ID, receipt, signing
+bytes, tenant identifier, purpose, key version, or provider diagnostic.
+
+The remaining C1 boundary is retention/reconciliation race qualification,
+constructor-failure cleanup, a bounded index for the deployment-wide oldest
+nonterminal lookup, the frozen operator-adjudication contract, and source-bound
+CI evidence. A lifecycle-fenced result remains explicitly uncertain and is
+never automatically converted into success.
 
 #### C1 completion sequence after migration 0041
 
@@ -408,11 +415,44 @@ The remaining work is split into reviewable commits with explicit gates:
 
 | Step | Implementation | Required verification | Completion signal |
 | --- | --- | --- | --- |
-| C1.1 deployment-wide repository | Add `maintainProviderOperations({limit})` and aggregate health over every purpose and key version. Quarantine expired started rows, reconcile only records with sufficient persisted verified output, and prune only correlated terminal low/high-level pairs under one total budget. | Unit tests for exact result shape and total-budget accounting; SQL tests for pending exclusion, terminal immutability, `SKIP LOCKED`, rotated versions, malformed rows, and DB failure. | Repository returns only `{quarantined,reconciled,pruned,total}` and fixed state counts; no identifier, receipt, bytes, tenant, or diagnostic can escape. |
-| C1.2 runtime and observability | Construct one deployment-wide worker after migration, start it only after readiness dependencies exist, add fixed metric counters and aggregate readiness, stop scheduling during drain, wait boundedly for the active cycle, then close providers and PostgreSQL. | Startup-disabled/enabled, timer overlap, worker crash containment, metric-sink failure, DB outage/recovery, readiness timeout, shutdown timeout, and resource-order tests. | A stopped, overdue, or failed maintenance authority is visible without labels; shutdown cannot start new maintenance or close storage beneath active work. |
-| C1.3 two-pool PostgreSQL qualification | Run 100 identical concurrent requests through two independent pools/adapters. Inject accepted-response loss, stale started claim, restart, low/high-level commit-response loss, rotation, emergency disable, and operation substitution. | Non-skipped PostgreSQL 17 tests, repeated at least three times; exactly one verified committed/returned result or explicit fail-closed uncertain state; bounded row count and no blind high-level replay. | Contention converges deterministically and both ledgers retain one correlated authoritative history. |
+| C1.1 deployment-wide repository — implemented | `maintainProviderOperations({limit})` and aggregate health cover every purpose and key version. Expired started rows are quarantined, exact persisted output may be reconciled, and only correlated terminal low/high-level pairs are pruned under one total budget. | Exact-shape, budget, pending exclusion, terminal immutability, `SKIP LOCKED`, malformed-row, and opaque DB-failure tests pass. | Implemented in `9092bad`; repository exports aggregate counts only. |
+| C1.2 runtime and observability — implemented locally | One deployment-wide worker is constructed after migration, performs an initial cycle, exposes aggregate readiness and six fixed counters, and drains before PostgreSQL closes. | Startup enabled/disabled, non-overlap, sink failure, readiness timeout/failure/privacy, shutdown timeout, and resource-order tests pass. | Included in the next runtime-maintenance checkpoint commit. |
+| C1.3 two-pool PostgreSQL qualification — implemented locally | 100 identical requests run through two independent pools; stale started and pending separation, bounded cooperative quarantine, closed reasons, and terminal immutability are exercised. | PostgreSQL 17 integration passes three consecutive runs; one exact result converges without blind high-level replay. | Included in the next runtime-maintenance checkpoint commit. |
 | C1.4 retention and operator boundary | Prove retention under two workers and locked rows; define bounded read-only uncertainty summaries and an adjudication command contract, without adding the Human API yet. Document that direct KMS invocation may be at-least-once after ambiguity. | Retention/reconciliation races, stale lifecycle, unsupported reason, recovery exhaustion, and privacy snapshots; threat-model and runbook review. | Automatic maintenance never invents provider acceptance and never converts lifecycle-fenced work into success; manual action has a frozen follow-up contract. |
 | C1.5 closure gate | Run lint, contract validation, complete root suite, real-PostgreSQL matrix, and source-bound CI; archive exact command/environment results. | Zero unexpected skips/failures, schema version 41 everywhere, catalog count 128, clean worktree, pushed commit. | C1 may be marked complete; C2/C3 authoritative producers can then depend on the ledger. |
+
+Local checkpoint evidence for C1.1-C1.3:
+
+- contract catalog: 128 entries, 32 schemas, 55 OpenAPI operations, 41 migrations;
+- focused maintenance/readiness suite: 37 passed, 0 failed;
+- PostgreSQL 17 provider-operation matrix: four scenarios, three consecutive
+  complete passes;
+- root suite: 2,061 tests, 2,007 passed, 54 intentionally skipped, 0 failed;
+- lint, syntax checks, and whitespace checks pass.
+
+#### Next implementation order
+
+The next work is deliberately split into small commits so database authority,
+operator authority, and product UI do not change in one review boundary.
+
+| Order | Commit boundary | Concrete implementation | Verification and exit gate |
+| --- | --- | --- | --- |
+| 1 | C1.4a maintenance query hardening | Add forward-only migration `0042` with a partial index for deployment-wide nonterminal age and any exact reconciliation/prune selector proven necessary by `EXPLAIN (ANALYZE, BUFFERS)`. Keep every maintenance selection bounded and cooperative. | Seed at least 100k mixed rows; prove index-backed oldest-age, quarantine, reconcile, and prune plans; two workers skip locked rows and never exceed the shared per-cycle budget. |
+| 2 | C1.4b lifecycle/retention race matrix | Extend real PostgreSQL qualification for accepted-response loss, low/high-level lost commit response, rotation, emergency disable, locked-row retention, concurrent reconcile/prune, restart, and operation substitution. | Three repeat runs produce one committed verified history or a durable closed-reason uncertain state; pending rows and lifecycle-fenced rows are never auto-promoted or pruned. |
+| 3 | C1.4c runtime construction safety | Wrap post-pool runtime construction in deterministic cleanup: stop constructed workers/notifiers, preserve the original opaque error, and close the pool exactly once. | Inject failure after migration and after each resource constructor; assert no timer, listener, active query, or pool survives and no secret/driver diagnostic escapes. |
+| 4 | C1.4d operator contract | Freeze bounded uncertainty list/detail/verify/adjudication schemas and audit events. Separate `confirm`, `reject`, and provider-specific recovery; never expose raw signing bytes or receipts to the browser. | Role matrix, tenant hiding, pagination bounds, recent WebAuthn, CSRF, `If-Match`, idempotency, replay, stale state, and concurrent adjudication contract tests. No Console UI in this commit. |
+| 5 | C1.5 closure | Update threat model/runbook/evidence index, run all local gates, then run source-bound PostgreSQL CI on the exact pushed commit. | Clean worktree; catalog/schema consistency; root and real-DB suites green; retained CI artifact identifies source commit, PostgreSQL version, commands, and scenario outcomes. This alone closes C1. |
+| 6 | C2 and C3 in parallel | Build authoritative audit-export and release-promotion issuance on the closed ledger, each with its own schema, sequence/idempotency repository, signer purpose, retrieval, and verifier. | Cross-purpose/tenant/digest/environment substitution, response loss, restart, rotation, emergency stop, concurrent issuance, and hosted-local-fallback rejection. |
+| 7 | C4 and C7 vertical slice | Add Human BFF uncertainty/reconciliation APIs, then the Console queue/detail/adjudication UI. UI consumes only frozen BFF DTOs and authoritative post-commit state. | Playwright role/a11y/loading/empty/error/stale/offline/response-loss tests; browser storage, URL, logs, traces, and rendered-output secret scan. |
+| 8 | C5 and C6 infrastructure closure | Complete eight-purpose provider/lifecycle readiness and deterministic shutdown; add PostgreSQL migrator/app/backup role CI, TLS/deadlines, backup/PITR restore, and cutover checks. | Partial/shared/stale/disabled signer sets fail readiness; negative DB privilege matrix passes; protected restore records measured RPO/RTO and authority comparison. |
+| 9 | C8 protected managed-key qualification | Provision versioned non-exportable AWS/GCP keys with production-shaped IAM and run two API instances against real PostgreSQL. | All eight purposes pass throttling/outage/rotation/disable/signature/public-key tests; IAM, non-exportability, image, and redacted evidence are independently reviewable. |
+| 10 | C9 immutable macOS candidate | Build one universal Developer ID-signed, notarized, stapled PKG; direct download and Homebrew install the same digest. | Gatekeeper, entitlement, SBOM/manifest, ownership, install/upgrade/rollback/uninstall/reboot/sleep-wake tests on Apple silicon and Intel/T2. |
+| 11 | C10-C11 release qualification | Qualify Claude Code then Cursor, deploy unchanged candidates to staging, run drills, close independent security review findings, and promote exact digests. | Two unattended `git verify-commit` successes per agent; measured revocation; canary/rollback/failover/PITR/recovery drills; no open critical/high finding; no rebuild during promotion. |
+
+Parallelization rule: after C1, C2 and C3 may run in parallel; C6 database work
+and C9 packaging may run beside them. C4 waits for the producer contracts, C7
+waits for each matching BFF authority, C8 waits for C5 and C6, and production
+promotion waits for every protected, physical, staging, and review gate.
 
 After C1, C2 and C3 can proceed in parallel because their schemas and signer
 purposes are disjoint. C6 PostgreSQL role/TLS/backup work and C9 packaging may
