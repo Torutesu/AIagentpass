@@ -1,4 +1,5 @@
 import { REMOTE_KMS_ALGORITHM, REMOTE_KMS_ERROR_CODES } from "./remote-kms-provider.mjs";
+import { MANAGED_SIGNER_KEY_LIFECYCLE_ERROR_CODES } from "./managed-signer-key-lifecycle.mjs";
 
 export const MANAGED_SIGNER_RELIABILITY_ERROR_CODES = Object.freeze({
   CONFIG: "ERR_MANAGED_SIGNER_RELIABILITY_CONFIG",
@@ -146,6 +147,7 @@ export function createManagedSignerReliabilityProvider({
     algorithm: provider.algorithm,
     version: provider.version,
     public_key_fingerprint: provider.public_key_fingerprint,
+    key_lifecycle_state: provider.lifecycleState,
     publicKeyMetadata,
     sign,
     reliabilityState: snapshot
@@ -156,6 +158,9 @@ export function classifyManagedSignerFailure(error) {
   const code = typeof error?.code === "string" ? error.code.toUpperCase() : "";
   const name = typeof error?.name === "string" ? error.name.toUpperCase() : "";
   const status = error?.statusCode ?? error?.status ?? error?.$metadata?.httpStatusCode;
+  if (Object.values(MANAGED_SIGNER_KEY_LIFECYCLE_ERROR_CODES).includes(error?.code)) {
+    return Object.freeze({ category: "permanent", transient: false, code: error.code });
+  }
   if (error?.code === REMOTE_KMS_ERROR_CODES.TIMEOUT || code === MANAGED_SIGNER_RELIABILITY_ERROR_CODES.TIMEOUT) {
     return Object.freeze({ category: "timeout", transient: true, code: MANAGED_SIGNER_RELIABILITY_ERROR_CODES.TIMEOUT });
   }

@@ -24,6 +24,7 @@ import { createDeviceEnrollmentSetupHandler } from "../lib/device-enrollment-set
 import { parseControlBundleJson } from "../lib/control-bundle-v2.mjs";
 import { executeProductionUninstall, planProductionUninstall } from "../lib/platform-uninstall.mjs";
 import { runUserStatePurge } from "../lib/platform-user-purge.mjs";
+import { publicSetupFailure, publicSetupResult, readHeadlessOnboarding } from "../lib/headless-onboarding.mjs";
 import { createSetupOrchestrator } from "../lib/setup-orchestrator.mjs";
 import { TEST_COMMIT_VERIFICATION_MARKER, createCompleteSetupHandler, createEditorConnectedHandler, createTestCommitVerifiedHandler } from "../lib/setup-finalization-handlers.mjs";
 import { SETUP_STATES, SetupJournalError, createSetupJournal, loadSetupJournal } from "../lib/setup-journal.mjs";
@@ -224,7 +225,7 @@ async function continueNativeSetup() {
   const flags = setupContinueFlags();
   const journal = loadSetupJournal();
   if (!flags.execute) {
-    console.log(JSON.stringify(createSetupOrchestrator({ journal }).preview(), null, 2));
+    console.log(JSON.stringify(publicSetupResult(await createSetupOrchestrator({ journal }).preview()), null, 2));
     return;
   }
   if (process.platform !== "darwin") throw new Error("Native AgentPass setup is supported only on macOS");
@@ -302,18 +303,15 @@ async function continueNativeSetup() {
     });
   }
   const result = await createSetupOrchestrator({ journal, handlers }).execute();
-  console.log(JSON.stringify(result, null, 2));
+  console.log(JSON.stringify(publicSetupResult(result), null, 2));
 }
 
-async function setupNativeBridge() {
+async function setupNativeBridgeUnsafe() {
   if (args[0] === "status") {
     if (args.length !== 1) throw new Error("Usage: agentpass setup status");
-    try {
-      console.log(JSON.stringify({ initialized: true, ...loadSetupJournal().status() }, null, 2));
-    } catch (error) {
-      if (!(error instanceof SetupJournalError) || error.code !== "NOT_INITIALIZED") throw error;
-      console.log(JSON.stringify({ version: 1, initialized: false, state: "not_started", setup_complete: false, next_actions: [{ id: "verify_app", command: "agentpass setup --client claude-code --project DIR --team-id TEAMID --execute" }] }, null, 2));
-    }
+    const result = readHeadlessOnboarding();
+    console.log(JSON.stringify(result.ok ? result.status : result.error, null, 2));
+    if (!result.ok) process.exitCode = 1;
     return;
   }
   if (args[0] === "continue") return continueNativeSetup();
@@ -361,6 +359,17 @@ async function setupNativeBridge() {
   } catch (error) {
     saveConfig(config);
     throw error;
+  }
+}
+
+async function setupNativeBridge() {
+  try {
+    return await setupNativeBridgeUnsafe();
+  } catch (error) {
+    const current = readHeadlessOnboarding();
+    const status = current.ok && current.status.initialized ? current.status : undefined;
+    console.log(JSON.stringify(publicSetupFailure(error, status), null, 2));
+    process.exitCode = 1;
   }
 }
 

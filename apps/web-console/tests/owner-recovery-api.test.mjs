@@ -46,6 +46,7 @@ function recovery(state = "pending") {
 function sessionResponse() {
   return {
     session: {
+      version: 1,
       session_id: SESSION_ID,
       member_id: MEMBER_ID,
       organization_id: ORGANIZATION_ID,

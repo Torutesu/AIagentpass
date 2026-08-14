@@ -342,11 +342,10 @@ test.describe("role and recent-auth matrix", () => {
   for (const role of ["auditor", "viewer"] as const) {
     test.describe(role, () => {
       test.use({ role, recentAuth: true, wakeStatuses: ["accepted"] });
-      test("is denied even after a valid recent-auth ceremony", async ({ page }) => {
+      test("does not expose a wake mutation control", async ({ page }) => {
         const card = page.getByRole("article").filter({ has: page.getByRole("heading", { name: "反映待ち Mac" }) });
-        await card.getByRole("button", { name: "Wake requestを依頼" }).click();
-        await expect(card.getByRole("alert")).toContainText("Wake requestを送信できませんでした");
-        expect(routeStates.get(page)).toMatchObject({ wakeCalls: 0, recentAuthVerificationCalls: 1, protocolViolations: [] });
+        await expect(card.getByRole("button", { name: "Wake requestを依頼" })).toHaveCount(0);
+        expect(routeStates.get(page)).toMatchObject({ wakeCalls: 0, recentAuthVerificationCalls: 0, protocolViolations: [] });
       });
     });
   }

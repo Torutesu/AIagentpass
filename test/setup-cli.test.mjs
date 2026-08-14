@@ -20,3 +20,15 @@ test("setup status is read-only before journal initialization", () => {
   assert.equal(status.next_actions[0].command.includes("|"), false);
   assert.equal(fs.existsSync(path.join(home, ".agentpass")), false);
 });
+
+test("setup continuation failures are machine-readable and do not echo diagnostics", () => {
+  const home = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "agentpass-setup-cli-failure-")));
+  const result = spawnSync(process.execPath, [cli, "setup", "continue", "--execute"], { encoding: "utf8", env: { ...process.env, HOME: home } });
+  assert.equal(result.status, 1);
+  assert.equal(result.stderr, "");
+  const document = JSON.parse(result.stdout);
+  assert.equal(document.ok, false);
+  assert.equal(document.error.code, "NOT_INITIALIZED");
+  assert.equal(JSON.stringify(document).includes(home), false);
+  assert.equal(JSON.stringify(document).includes("secret"), false);
+});

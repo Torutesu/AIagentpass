@@ -7,7 +7,7 @@ const componentPath = new URL("../app/components/AgentPassConsole.tsx", import.m
 test("Console exposes a Japanese Security surface with bounded loading, empty, error, rename, and revoke states", async () => {
   const source = await readFile(componentPath, "utf8");
   assert.match(source, /id: "security", label: "セキュリティ"/);
-  assert.match(source, /function SecuritySurface\(\)/);
+  assert.match(source, /function SecuritySurface\(\{ onSessionEnded \}/);
   assert.match(source, /REGISTERED PASSKEYS/);
   assert.match(source, /ACTIVE SESSIONS/);
   assert.match(source, /読み込み中/);

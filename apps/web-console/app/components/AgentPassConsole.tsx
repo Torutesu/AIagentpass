@@ -79,10 +79,19 @@ function emptyConsoleData(): AgentPassInitialData {
   };
 }
 
-function summaryViewData(summary: ConsoleSummaryViewModel): AgentPassInitialData {
+function summaryViewData(summary: ConsoleSummaryViewModel, session: ConsoleSession): AgentPassInitialData {
+  const roleLabel = { owner: "Owner", admin: "Admin", auditor: "Auditor", viewer: "Viewer" }[session.role];
+  const remainingMs = Math.max(0, Date.parse(session.expiresAt) - Date.now());
+  const remainingMinutes = Math.ceil(remainingMs / 60_000);
   return {
     ...emptyConsoleData(),
     workspace: summary.organization.name,
+    operator: { name: "認証済みメンバー", role: roleLabel, initials: roleLabel.slice(0, 1) },
+    session: {
+      expires: deviceDate(session.expiresAt),
+      remaining: remainingMinutes > 0 ? `残り約${remainingMinutes}分` : "期限切れ",
+      lastVerified: session.recentAuthAt ? deviceDate(session.recentAuthAt) : "追加認証なし",
+    },
     devices: summary.devices.map((device) => ({
       deviceId: device.id,
       name: device.name,
@@ -137,10 +146,13 @@ const DEVICE_REFRESH_REQUEST_RECENT_AUTH_OPERATION = "device.refresh.request";
 const EMERGENCY_STOP_RECENT_AUTH_OPERATION = "organization.emergency_stop";
 const SESSION_BOOTSTRAP_PATH = "/api/auth/session";
 const CSRF_HEADER = "agentpass-csrf";
+const CONSOLE_SESSION_ENDED_EVENT = "agentpass:session-ended";
+const MAX_ERROR_BODY_BYTES = 16_384;
 
 type DeviceRefreshRequestStatus = "accepted" | "coalesced" | "no_pending_refresh";
 
-type ConsoleSession = Readonly<{ organizationId: string; csrfToken: string }>;
+type ConsoleRole = "owner" | "admin" | "auditor" | "viewer";
+type ConsoleSession = Readonly<{ organizationId: string; role: ConsoleRole; expiresAt: string; recentAuthAt: string | null; csrfToken: string }>;
 
 class ConsoleSessionError extends Error {
   readonly status?: number;
@@ -273,10 +285,18 @@ function parseSessionBootstrap(value: unknown): ConsoleSession {
   if (!isPlainRecord(value) || !hasExactKeys(value, ["session", "csrf_token"])) throw new ConsoleSessionError("セッションを確認できませんでした。ページを再読み込みして、もう一度お試しください。");
   const session = value.session;
   const csrfToken = value.csrf_token;
-  if (!isPlainRecord(session) || typeof session.organization_id !== "string" || !UUID.test(session.organization_id) || typeof csrfToken !== "string" || !BASE64URL_CSRF.test(csrfToken)) {
+  if (!isPlainRecord(session) || !hasExactKeys(session, ["version", "session_id", "member_id", "organization_id", "role", "created_at", "expires_at", "recent_auth_at"])
+    || session.version !== 1 || typeof session.session_id !== "string" || !UUID.test(session.session_id)
+    || typeof session.member_id !== "string" || !UUID.test(session.member_id)
+    || typeof session.organization_id !== "string" || !UUID.test(session.organization_id)
+    || !new Set<ConsoleRole>(["owner", "admin", "auditor", "viewer"]).has(session.role as ConsoleRole)
+    || typeof session.created_at !== "string" || !validTimestamp(session.created_at)
+    || typeof session.expires_at !== "string" || !validTimestamp(session.expires_at)
+    || (session.recent_auth_at !== null && (typeof session.recent_auth_at !== "string" || !validTimestamp(session.recent_auth_at)))
+    || typeof csrfToken !== "string" || !BASE64URL_CSRF.test(csrfToken)) {
     throw new ConsoleSessionError("セッションを確認できませんでした。ページを再読み込みして、もう一度お試しください。");
   }
-  return { organizationId: session.organization_id, csrfToken };
+  return { organizationId: session.organization_id, role: session.role as ConsoleRole, expiresAt: session.expires_at, recentAuthAt: session.recent_auth_at as string | null, csrfToken };
 }
 
 function abortError(): DOMException {
@@ -395,6 +415,24 @@ function isMutationMethod(method: string): boolean {
   return method !== "GET" && method !== "HEAD" && method !== "OPTIONS";
 }
 
+async function responseEndsConsoleSession(response: Response): Promise<boolean> {
+  if (response.status !== 401 && response.status !== 403) return false;
+  let code = "";
+  try {
+    const text = await response.clone().text();
+    if (text.length <= MAX_ERROR_BODY_BYTES) {
+      const payload: unknown = JSON.parse(text);
+      if (isPlainRecord(payload) && isPlainRecord(payload.error) && typeof payload.error.code === "string") code = payload.error.code;
+    }
+  } catch {
+    // An unparseable 401 is still an authentication failure. A 403 is an
+    // operation denial unless the server explicitly identifies the session.
+  }
+  if (/recent[_-]?auth/u.test(code)) return false;
+  if (response.status === 401) return true;
+  return ["authentication_required", "human_session_invalid", "session_expired", "session_revoked", "session_not_found", "invalid_session_cookie"].includes(code);
+}
+
 async function fetchConsole(path: string, init: RequestInit = {}): Promise<Response> {
   const session = await consoleSessionContext.get(init.signal ?? undefined);
   const method = String(init.method ?? "GET").toUpperCase();
@@ -415,7 +453,10 @@ async function fetchConsole(path: string, init: RequestInit = {}): Promise<Respo
     if (init.signal?.aborted || isAbortError(error)) throw abortError();
     throw error;
   }
-  if (response.status === 401 || response.status === 403) consoleSessionContext.clear(session);
+  if (await responseEndsConsoleSession(response)) {
+    consoleSessionContext.clear(session);
+    if (typeof window !== "undefined") window.dispatchEvent(new Event(CONSOLE_SESSION_ENDED_EVENT));
+  }
   return response;
 }
 
@@ -474,10 +515,10 @@ function passkeyErrorMessage(error: unknown): string {
   return "パスキーを登録できませんでした。接続と権限を確認して、もう一度お試しください。";
 }
 
-const navItems: Array<{ id: ConsoleView; label: string; icon: string; badge?: string }> = [
+const navItems: Array<{ id: ConsoleView; label: string; icon: string }> = [
   { id: "overview", label: "概要", icon: "⌂" },
   { id: "setup", label: "セットアップ", icon: "＋" },
-  { id: "agents", label: "Agents", icon: "◈", badge: "3" },
+  { id: "agents", label: "Agents", icon: "◈" },
   { id: "policies", label: "ポリシー", icon: "▤" },
   { id: "activity", label: "アクティビティ", icon: "◷" },
   { id: "security", label: "セキュリティ", icon: "◇" },
@@ -526,7 +567,7 @@ function deviceDate(value?: string): string {
   return new Intl.DateTimeFormat("ja-JP", { dateStyle: "medium", timeStyle: "short", timeZone: "Asia/Tokyo" }).format(parsed);
 }
 
-function DeviceStateCard({ device, onRequestRefresh }: { device: AgentPassInitialData["devices"][number]; onRequestRefresh: (deviceId: string) => Promise<DeviceRefreshRequestStatus> }) {
+function DeviceStateCard({ device, onRequestRefresh, canManage }: { device: AgentPassInitialData["devices"][number]; onRequestRefresh: (deviceId: string) => Promise<DeviceRefreshRequestStatus>; canManage: boolean }) {
   const state = deviceState(device);
   const label = deviceStateLabel(state);
   const desired = device.desiredGeneration;
@@ -534,12 +575,13 @@ function DeviceStateCard({ device, onRequestRefresh }: { device: AgentPassInitia
   const hasProgress = typeof desired === "number" && typeof observed === "number";
   const progress = hasProgress ? Math.max(0, Math.min(100, desired === 0 ? 100 : Math.round((Math.min(observed, desired) / desired) * 100))) : 0;
   const canRequestRefresh = Boolean(device.deviceId && ["pending", "blocked", "stale", "offline"].includes(state));
+  const canRequestRefreshForRole = canManage && canRequestRefresh;
   const [wakePending, setWakePending] = useState(false);
   const [wakeError, setWakeError] = useState("");
   const [wakeOutcome, setWakeOutcome] = useState("");
   const wakeInFlight = useRef(false);
   const requestWake = async () => {
-    if (!canRequestRefresh || !device.deviceId || wakeInFlight.current) return;
+    if (!canRequestRefreshForRole || !device.deviceId || wakeInFlight.current) return;
     wakeInFlight.current = true;
     setWakePending(true);
     setWakeError("");
@@ -561,7 +603,7 @@ function DeviceStateCard({ device, onRequestRefresh }: { device: AgentPassInitia
         <span className="device-state-badge" data-state={state} aria-label={`同期状態: ${label}`}><span className="status-dot" aria-hidden="true" />{label}</span>
       </div>
       <p className="device-state-description">{deviceStateDescription(state)}</p>
-      {canRequestRefresh ? <div className="device-wake-action">
+      {canRequestRefreshForRole ? <div className="device-wake-action">
         <button className="secondary-button device-wake-button" type="button" disabled={wakePending} onClick={() => void requestWake()}>{wakePending ? "Wake requestを送信中…" : "Wake requestを依頼"}</button>
         <p className="device-wake-copy">端末への配信は未確認です。適用・同期の完了を示す操作ではありません。</p>
         {wakeOutcome ? <p className="device-wake-outcome" role="status" aria-live="polite">{wakeOutcome}</p> : null}
@@ -585,7 +627,7 @@ function DeviceStateCard({ device, onRequestRefresh }: { device: AgentPassInitia
   );
 }
 
-function Overview({ data, goTo, onRequestRefresh, summaryState }: { data: AgentPassInitialData; goTo: (view: ConsoleView) => void; onRequestRefresh: (deviceId: string) => Promise<DeviceRefreshRequestStatus>; summaryState: "loading" | "ready" | "error" }) {
+function Overview({ data, goTo, onRequestRefresh, summaryState, canManage }: { data: AgentPassInitialData; goTo: (view: ConsoleView) => void; onRequestRefresh: (deviceId: string) => Promise<DeviceRefreshRequestStatus>; summaryState: "loading" | "ready" | "error"; canManage: boolean }) {
   const activeAgents = data.agents.filter((agent) => agent.state !== "停止").length;
   const connectedDevices = data.devices.filter((device) => device.status !== "停止").length;
   const protectedOperations = data.policies.length + data.capabilities.length;
@@ -614,13 +656,13 @@ function Overview({ data, goTo, onRequestRefresh, summaryState }: { data: AgentP
         <div className="hero-meta">
           <div>
             <span className="meta-label">SESSION EXPIRES</span>
-            <strong className="meta-value">情報未提供</strong>
-            <p className="meta-detail">Summary APIはセッション権限を返しません</p>
+            <strong className="meta-value">{data.session.remaining}</strong>
+            <p className="meta-detail">{data.session.expires}</p>
           </div>
           <div>
             <span className="meta-label">CAPABILITIES</span>
-            <strong className="meta-value">情報未提供</strong>
-            <p className="meta-detail">Capability APIで個別に確認します</p>
+            <strong className="meta-value">{data.capabilityRecords?.length ?? 0}件</strong>
+            <p className="meta-detail">短期権限のライフサイクル情報のみ表示</p>
           </div>
         </div>
       </section>
@@ -648,7 +690,7 @@ function Overview({ data, goTo, onRequestRefresh, summaryState }: { data: AgentP
         <p className="section-note">自動更新：30秒ごと</p>
       </div>
       <div className="health-grid">
-        {data.devices.map((device) => <DeviceStateCard device={device} onRequestRefresh={onRequestRefresh} key={device.deviceId ?? device.name} />)}
+        {data.devices.map((device) => <DeviceStateCard device={device} onRequestRefresh={onRequestRefresh} canManage={canManage} key={device.deviceId ?? device.name} />)}
       </div>
 
       <div className="section-heading-row">
@@ -690,7 +732,7 @@ function SessionEndedSurface({ reason }: { reason: "expired" | "signed-out" }) {
   return <><SurfaceHeader eyebrow={signedOut ? "SESSION / SIGNED OUT" : "SESSION / EXPIRED"} title={signedOut ? "サインアウトしました" : "セッションの有効期限が切れました"} copy={signedOut ? "このブラウザのAgentPassセッションを安全に終了しました。" : "安全のため、Consoleのデータと操作を停止しました。再認証してから続けてください。"} /><div className="surface-content"><article className="surface-card" role="alert"><span className="section-kicker">REAUTHENTICATION REQUIRED</span><h2 className="surface-card-title">もう一度サインインしてください</h2><p className="surface-card-copy">この画面に残っている情報は権限判断には使われません。ページを再読み込みすると、現在の認証状態から新しいセッションを開始します。</p><button className="primary-button" type="button" onClick={() => window.location.reload()}>再認証する</button></article></div></>;
 }
 
-function SetupSurface({ data, goTo, operate, online }: { data: AgentPassInitialData; goTo: (view: ConsoleView) => void; operate: (operation: string, body: Record<string, unknown>, success: string) => Promise<void>; online: boolean }) {
+function SetupSurface({ data, goTo, operate, online, canManage }: { data: AgentPassInitialData; goTo: (view: ConsoleView) => void; operate: (operation: string, body: Record<string, unknown>, success: string) => Promise<void>; online: boolean; canManage: boolean }) {
   const [deviceLabel, setDeviceLabel] = useState("");
   const [enrollmentStoreId] = useState(allocateEnrollmentStoreId);
   const [enrollmentVisible, setEnrollmentVisible] = useState(false);
@@ -782,6 +824,7 @@ function SetupSurface({ data, goTo, operate, online }: { data: AgentPassInitialD
     <>
       <SurfaceHeader eyebrow="SETUP / 01" title={<>まずは、<br />この3つだけ。</>} copy="難しい設定はAgentPassが保護します。いまの環境は、Agentが安全に作業できるところまで準備できています。" />
       <div className="surface-content">
+        {!canManage ? <article className="surface-card" role="status"><span className="section-kicker">READ ONLY</span><h2 className="surface-card-title">閲覧権限で表示しています</h2><p className="surface-card-copy">このロールでは端末・Agent・Capabilityを変更できません。変更が必要な場合はOwnerまたはAdminへ依頼してください。</p></article> : null}
         <article className="surface-card">
           <span className="section-kicker">CURRENT SESSION</span>
           <h2 className="surface-card-title">このセッションでできること</h2>
@@ -791,13 +834,13 @@ function SetupSurface({ data, goTo, operate, online }: { data: AgentPassInitialD
           </ul>
           <div className="stop-action-row"><span className="section-note">有効期限：{data.session.expires}</span><button type="button" className="secondary-button" onClick={() => goTo("policies")}>権限を見直す</button></div>
         </article>
-        <article className="surface-card">
+        {canManage ? <article className="surface-card">
           <span className="section-kicker">OPERATE SAFELY</span><h2 className="surface-card-title">安全な操作</h2>
           <p className="surface-card-copy">Capabilityは現在のPolicyの範囲に自動で絞られ、15分以内で失効します。</p>
           <button className="primary-button" type="button" disabled={capabilityPending || !data.agents.some((item) => item.agentId) || !data.devices.some((item) => item.deviceId)} onClick={issueCapability}>{capabilityPending ? "発行中…" : "短期Capabilityを発行"}</button>
           {data.capabilityRecords?.length ? <ul className="row-list">{data.capabilityRecords.map((capability) => <li className="row-list-item" key={capability.capabilityId}><div><p className="row-title">{capability.capabilityId}</p><p className="row-description">Agent {capability.agentId} · 端末 {capability.deviceId} · sequence {capability.sequence}</p></div><StatusTag tone="green">{capability.expiresAt.slice(0, 16).replace("T", " ")}まで</StatusTag></li>)}</ul> : <p className="row-description">発行済みの短期Capabilityはありません。</p>}
-        </article>
-        <article className="surface-card"><span className="section-kicker">DEVICES</span><h2 className="surface-card-title">登録済み端末</h2><ul className="row-list">{data.devices.map((device) => <li className="row-list-item" key={device.deviceId ?? device.name}><div><p className="row-title">{device.name}</p><p className="row-description">{device.deviceId ?? "ID未同期"} · {device.location}</p></div><span><StatusTag tone={device.status === "停止" ? "red" : "green"}>{device.status}</StatusTag>{device.deviceId && device.status !== "停止" ? <button className="text-button" type="button" onClick={() => operate("revoke-device", { target_id: device.deviceId, reason: "web-console-operator" }, `${device.name}を停止しました`)}>停止</button> : null}</span></li>)}</ul></article>
+        </article> : null}
+        <article className="surface-card"><span className="section-kicker">DEVICES</span><h2 className="surface-card-title">登録済み端末</h2><ul className="row-list">{data.devices.map((device) => <li className="row-list-item" key={device.deviceId ?? device.name}><div><p className="row-title">{device.name}</p><p className="row-description">{device.deviceId ?? "ID未同期"} · {device.location}</p></div><span><StatusTag tone={device.status === "停止" ? "red" : "green"}>{device.status}</StatusTag>{canManage && device.deviceId && device.status !== "停止" ? <button className="text-button" type="button" onClick={() => operate("revoke-device", { target_id: device.deviceId, reason: "web-console-operator" }, `${device.name}を停止しました`)}>停止</button> : null}</span></li>)}</ul></article>
         <article className="surface-card">
           <span className="section-kicker">ACCOUNT SECURITY</span>
           <h2 className="surface-card-title">パスキーを登録</h2>
@@ -806,20 +849,20 @@ function SetupSurface({ data, goTo, operate, online }: { data: AgentPassInitialD
           {passkeyRegistered ? <p className="section-note" role="status">パスキーを登録しました。この端末から重要操作を確認できます。</p> : null}
           {passkeyError ? <p className="form-error" role="alert">{passkeyError}</p> : null}
         </article>
-        <article className="surface-card">
+        {canManage ? <article className="surface-card">
           <span className="section-kicker">ENROLL A MAC</span><h2 className="surface-card-title">Macを安全に追加</h2>
           <p className="surface-card-copy">10分だけ有効なワンタイム登録情報を発行します。秘密鍵はMacのSecure Enclave内で生成され、外へ出ません。</p>
           <div className="form-grid"><label>端末名<input required maxLength={128} autoComplete="off" value={deviceLabel} onChange={(event) => setDeviceLabel(event.target.value)} /></label></div>
           <button className="secondary-button" type="button" disabled={!online || enrollmentPending || !deviceLabel.trim()} onClick={issueEnrollment}>{enrollmentPending ? "認証・発行中…" : "Touch ID/パスキー確認"}</button>
           {enrollmentError ? <p className="form-error" role="alert">{enrollmentError}</p> : null}
           {enrollmentVisible ? <div className="enrollment-result" aria-live="polite"><p className="row-title">一度だけ表示しています</p><p className="surface-card-copy">下のJSONをMacへ安全に渡し、標準入力からセットアップしてください。5分後または再読込で消え、コピー内容も60秒後に消去を試みます。</p><pre className="secret-output">{enrollmentJson}</pre><div className="stop-action-row"><button className="primary-button" type="button" onClick={() => void copyEnrollment()}>JSONをコピー</button><button className="text-button" type="button" onClick={() => { clearEnrollmentStore(enrollmentStoreId); setEnrollmentVisible(false); }}>表示を消す</button></div><code className="command-hint">agentpass setup continue --execute --enrollment-url &lt;Cloud API URL&gt; --enrollment-stdin</code></div> : null}
-        </article>
-        <article className="surface-card">
+        </article> : null}
+        {canManage ? <article className="surface-card">
           <span className="section-kicker">REGISTER</span><h2 className="surface-card-title">Agentを追加</h2>
           <p className="surface-card-copy">Agentの表示名・種類・公開鍵を登録し、端末に紐付けます。</p>
           <div className="form-grid"><label>Agent名<input value={agent.name} onChange={(event) => setAgent({ ...agent, name: event.target.value })} /></label><label>種類<input value={agent.kind} onChange={(event) => setAgent({ ...agent, kind: event.target.value })} /></label><label>公開鍵<textarea value={agent.public_key} onChange={(event) => setAgent({ ...agent, public_key: event.target.value })} /></label><label>端末ID<input value={agent.device_id} onChange={(event) => setAgent({ ...agent, device_id: event.target.value })} /></label></div>
           <button className="secondary-button" type="button" disabled={!agent.name || !agent.kind || !agent.public_key || !agent.device_id} onClick={async () => { await operate("create-agent", agent, "Agentを登録しました"); setAgent({ ...agent, name: "", public_key: "" }); }}>Agentを登録</button>
-        </article>
+        </article> : null}
         <div className="setup-steps">
           <article className="setup-step"><span className="setup-step-number">01</span><h3 className="setup-step-title">端末をつなぐ</h3><p className="setup-step-copy">Claude Code / Cursorの拡張機能を確認します。</p></article>
           <article className="setup-step"><span className="setup-step-number">02</span><h3 className="setup-step-title">できることを選ぶ</h3><p className="setup-step-copy">Agentに任せてよい操作だけを許可します。</p></article>
@@ -830,15 +873,15 @@ function SetupSurface({ data, goTo, operate, online }: { data: AgentPassInitialD
   );
 }
 
-function AgentsSurface({ data, operate }: { data: AgentPassInitialData; operate: (operation: string, body: Record<string, unknown>, success: string) => Promise<void> }) {
-  return <><SurfaceHeader eyebrow="AGENTS / 03" title="つながっているAgent" copy="Claude Code と Cursor の作業状態を、プロジェクト単位で確認できます。停止したAgentは新しい作業を開始できません。" /><div className="surface-content"><article className="surface-card"><span className="section-kicker">CONNECTED CLIENTS</span><h2 className="surface-card-title">現在の作業</h2>{data.agents.length ? <ul className="row-list">{data.agents.map((agent) => <li className="row-list-item" key={agent.agentId ?? agent.name}><div className="row-main"><span className="row-icon" aria-hidden="true">{agent.client === "Cursor" ? "C" : "A"}</span><div><p className="row-title">{agent.name}</p><p className="row-description">{agent.client} · {agent.detail}</p></div></div><span><StatusTag tone={agent.stateTone}>{agent.state}</StatusTag>{agent.agentId && agent.state !== "停止" ? <button className="text-button" type="button" onClick={() => operate("revoke-agent", { target_id: agent.agentId, reason: "web-console-operator" }, `${agent.name}を停止しました`)}>停止</button> : null}</span></li>)}</ul> : <EmptyState title="接続されたAgentはありません" copy="Claude CodeまたはCursorを端末から接続すると、ここに表示されます。" />}</article><article className="surface-card"><span className="section-kicker">DEVICE COVERAGE</span><h2 className="surface-card-title">端末のカバレッジ</h2><p className="surface-card-copy">確認済み端末からAgentを操作できます。端末を失った場合は、ここではなく端末の停止操作で即時に認証を止めてください。</p>{data.devices.length ? data.devices.map((device) => <p className="row-description" key={device.deviceId ?? device.name}>{device.name} · {device.deviceId ?? "ID未同期"}</p>) : <EmptyState title="登録済み端末はありません" copy="セットアップから端末を追加してください。" />}</article></div></>;
+function AgentsSurface({ data, operate, canManage }: { data: AgentPassInitialData; operate: (operation: string, body: Record<string, unknown>, success: string) => Promise<void>; canManage: boolean }) {
+  return <><SurfaceHeader eyebrow="AGENTS / 03" title="つながっているAgent" copy="Claude Code と Cursor の作業状態を、プロジェクト単位で確認できます。停止したAgentは新しい作業を開始できません。" /><div className="surface-content"><article className="surface-card"><span className="section-kicker">CONNECTED CLIENTS</span><h2 className="surface-card-title">現在の作業</h2>{data.agents.length ? <ul className="row-list">{data.agents.map((agent) => <li className="row-list-item" key={agent.agentId ?? agent.name}><div className="row-main"><span className="row-icon" aria-hidden="true">{agent.client === "Cursor" ? "C" : "A"}</span><div><p className="row-title">{agent.name}</p><p className="row-description">{agent.client} · {agent.detail}</p></div></div><span><StatusTag tone={agent.stateTone}>{agent.state}</StatusTag>{canManage && agent.agentId && agent.state !== "停止" ? <button className="text-button" type="button" onClick={() => operate("revoke-agent", { target_id: agent.agentId, reason: "web-console-operator" }, `${agent.name}を停止しました`)}>停止</button> : null}</span></li>)}</ul> : <EmptyState title="接続されたAgentはありません" copy="Claude CodeまたはCursorを端末から接続すると、ここに表示されます。" />}</article><article className="surface-card"><span className="section-kicker">DEVICE COVERAGE</span><h2 className="surface-card-title">端末のカバレッジ</h2><p className="surface-card-copy">確認済み端末からAgentを操作できます。端末を失った場合は、ここではなく端末の停止操作で即時に認証を止めてください。</p>{data.devices.length ? data.devices.map((device) => <p className="row-description" key={device.deviceId ?? device.name}>{device.name} · {device.deviceId ?? "ID未同期"}</p>) : <EmptyState title="登録済み端末はありません" copy="セットアップから端末を追加してください。" />}</article></div></>;
 }
 
-function PoliciesSurface({ data, operate }: { data: AgentPassInitialData; operate: (operation: string, body: Record<string, unknown>, success: string) => Promise<void> }) {
+function PoliciesSurface({ data, operate, canManage }: { data: AgentPassInitialData; operate: (operation: string, body: Record<string, unknown>, success: string) => Promise<void>; canManage: boolean }) {
   const [name, setName] = useState("");
-  const [repository, setRepository] = useState("/work/repo");
+  const [repository, setRepository] = useState("");
   const scope = { operations: ["git.commit.sign"], repositories: [repository], branches: { allow: ["*"], deny: ["main"] }, remotes: { allow: ["*"], deny: [] } };
-  return <><SurfaceHeader eyebrow="POLICIES / 04" title="守られているルール" copy="Agentができること・できないことを、読みやすい言葉で表示しています。無効化したPolicyは新しいBundleに入りません。" /><div className="surface-content"><article className="surface-card"><span className="section-kicker">ACTIVE POLICIES</span><h2 className="surface-card-title">現在のポリシー</h2>{data.policies.length ? <ul className="row-list">{data.policies.map((policy) => <li className="row-list-item" key={policy.policyId ?? policy.name}><div className="row-main"><span className="row-icon" aria-hidden="true">◆</span><div><p className="row-title">{policy.name}</p><p className="row-description">{policy.detail}</p></div></div><span><StatusTag tone={policy.tone}>{policy.state}</StatusTag>{policy.policyId && policy.state === "保護中" ? <button className="text-button" type="button" onClick={() => operate("disable-policy", { policy_id: policy.policyId, expected_version: policy.version ?? 1, reason: "web-console-operator" }, `${policy.name}を無効化しました`)}>無効化</button> : null}</span></li>)}</ul> : <EmptyState title="ポリシーはまだありません" copy="最小限の権限から新しいルールを追加してください。" />}</article><article className="surface-card"><span className="section-kicker">CREATE POLICY</span><h2 className="surface-card-title">新しいルールを追加</h2><p className="surface-card-copy">許可範囲は狭く始め、必要なRepositoryだけを登録してください。</p><div className="form-grid"><label>ルール名<input required value={name} onChange={(event) => setName(event.target.value)} /></label><label>Repositoryの絶対パス<input required value={repository} onChange={(event) => setRepository(event.target.value)} /></label></div><button className="secondary-button" type="button" disabled={!name.trim() || !repository.trim()} onClick={async () => { await operate("create-policy", { name: name.trim(), scope }, "Policyを追加しました"); setName(""); }}>Policyを追加</button></article></div></>;
+  return <><SurfaceHeader eyebrow="POLICIES / 04" title="守られているルール" copy="Agentができること・できないことを、読みやすい言葉で表示しています。無効化したPolicyは新しいBundleに入りません。" /><div className="surface-content"><article className="surface-card"><span className="section-kicker">ACTIVE POLICIES</span><h2 className="surface-card-title">現在のポリシー</h2>{data.policies.length ? <ul className="row-list">{data.policies.map((policy) => <li className="row-list-item" key={policy.policyId ?? policy.name}><div className="row-main"><span className="row-icon" aria-hidden="true">◆</span><div><p className="row-title">{policy.name}</p><p className="row-description">{policy.detail}</p></div></div><span><StatusTag tone={policy.tone}>{policy.state}</StatusTag>{canManage && policy.policyId && policy.state === "保護中" ? <button className="text-button" type="button" onClick={() => operate("disable-policy", { policy_id: policy.policyId, expected_version: policy.version ?? 1, reason: "web-console-operator" }, `${policy.name}を無効化しました`)}>無効化</button> : null}</span></li>)}</ul> : <EmptyState title="ポリシーはまだありません" copy="最小限の権限から新しいルールを追加してください。" />}</article>{canManage ? <article className="surface-card"><span className="section-kicker">CREATE POLICY</span><h2 className="surface-card-title">新しいルールを追加</h2><p className="surface-card-copy">許可範囲は狭く始め、必要なRepositoryだけを登録してください。</p><div className="form-grid"><label>ルール名<input required value={name} onChange={(event) => setName(event.target.value)} /></label><label>Repositoryの絶対パス<input required placeholder="/absolute/path/to/repository" value={repository} onChange={(event) => setRepository(event.target.value)} /></label></div><button className="secondary-button" type="button" disabled={!name.trim() || !repository.trim()} onClick={async () => { await operate("create-policy", { name: name.trim(), scope }, "Policyを追加しました"); setName(""); setRepository(""); }}>Policyを追加</button></article> : <article className="surface-card" role="status"><span className="section-kicker">READ ONLY</span><p className="surface-card-copy">このロールではPolicyを変更できません。</p></article>}</div></>;
 }
 
 function ActivitySurface({ data }: { data: AgentPassInitialData }) {
@@ -871,7 +914,7 @@ function SessionRow({ session, actionKey, confirmKey, onRevoke, onCancelRevoke, 
   return <li className="row-list-item"><div className="row-main"><span className="row-icon" aria-hidden="true">◌</span><div><p className="row-title">{session.label}{session.current ? "（この端末）" : ""}</p><p className="row-description">{session.platform} · 最終確認：{securityDate(session.lastSeenAt)} · 有効期限：{securityDate(session.expiresAt)}</p></div></div><span>{confirming ? <><button className="text-button" type="button" disabled={busy} onClick={onConfirmRevoke}>{session.current ? "サインアウト" : "取り消す"}</button><button className="text-button" type="button" disabled={busy} onClick={onCancelRevoke}>キャンセル</button></> : <>{session.current ? <StatusTag tone="green">現在のセッション</StatusTag> : null}<button className="text-button" type="button" disabled={busy} onClick={onRevoke}>{session.current ? "サインアウト" : "無効化"}</button></>}</span></li>;
 }
 
-function SecuritySurface() {
+function SecuritySurface({ onSessionEnded }: { onSessionEnded: () => void }) {
   const securityClientRef = useRef<SecurityClient | null>(null);
   if (securityClientRef.current === null) securityClientRef.current = createSecurityClient();
   const securityClient = securityClientRef.current;
@@ -893,10 +936,11 @@ function SecuritySurface() {
       setLoadState("ready");
     } catch (caught) {
       if (caught instanceof DOMException && caught.name === "AbortError") return;
+      if (caught instanceof SecurityClientError && (caught.status === 401 || caught.status === 403)) onSessionEnded();
       setLoadState("error");
       setError(securityErrorMessage(caught));
     }
-  }, [securityClient]);
+  }, [securityClient, onSessionEnded]);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -922,6 +966,7 @@ function SecuritySurface() {
         setLoadState("ready");
       }
     } catch (caught) {
+      if (caught instanceof SecurityClientError && (caught.status === 401 || caught.status === 403)) onSessionEnded();
       setError(securityErrorMessage(caught));
     } finally {
       setActionKey("");
@@ -961,6 +1006,7 @@ export function AgentPassConsole() {
   const [refreshing, setRefreshing] = useState(false);
   const [summaryState, setSummaryState] = useState<"loading" | "ready" | "error">("loading");
   const [sessionState, setSessionState] = useState<"active" | "expired" | "signed-out">("active");
+  const [sessionRole, setSessionRole] = useState<ConsoleRole | null>(null);
   const [signOutPending, setSignOutPending] = useState(false);
   const [lastSynced, setLastSynced] = useState("未同期");
   const modalRef = useRef<HTMLElement | null>(null);
@@ -968,6 +1014,20 @@ export function AgentPassConsole() {
   const capabilityEpoch = useRef(0);
   const adminAuditEpoch = useRef(0);
   const organizationIdRef = useRef<string | null>(null);
+
+  const expireSession = useCallback(() => {
+    summaryEpoch.current += 1;
+    capabilityEpoch.current += 1;
+    adminAuditEpoch.current += 1;
+    consoleSessionContext.clear();
+    organizationIdRef.current = null;
+    setSessionRole(null);
+    setData(emptyConsoleData());
+    setSessionState("expired");
+    setSummaryState("error");
+    setConfirmOpen(false);
+    setConfirmChecked(false);
+  }, []);
 
   const showToast = (message: string, tone: ToastTone = "success") => {
     setToast(message);
@@ -979,13 +1039,15 @@ export function AgentPassConsole() {
     const epoch = ++summaryEpoch.current;
     setRefreshing(true);
     try {
-      const { organizationId } = await consoleSessionContext.get(signal);
+      const session = await consoleSessionContext.get(signal);
+      const { organizationId } = session;
       const response = await fetchConsole("/api/console?resource=summary", { signal });
       if (response.status === 401 || response.status === 403) throw new ConsoleSessionError("セッションの有効期限が切れました。", response.status);
       if (!response.ok) throw new Error("summary unavailable");
-      const next = summaryViewData(parseConsoleSummary(await response.json(), { organizationId }));
+      const next = summaryViewData(parseConsoleSummary(await response.json(), { organizationId }), session);
       if (epoch !== summaryEpoch.current) return;
       organizationIdRef.current = organizationId;
+      setSessionRole(session.role);
       setData(next);
       setSessionState("active");
       setSummaryState("ready");
@@ -994,6 +1056,7 @@ export function AgentPassConsole() {
       if (error instanceof DOMException && error.name === "AbortError") return;
       if (epoch !== summaryEpoch.current) return;
       organizationIdRef.current = null;
+      setSessionRole(null);
       if (error instanceof ConsoleSessionError && (error.status === 401 || error.status === 403)) {
         consoleSessionContext.clear();
         setSessionState("expired");
@@ -1004,6 +1067,11 @@ export function AgentPassConsole() {
       if (!signal?.aborted && epoch === summaryEpoch.current) setRefreshing(false);
     }
   }, []);
+
+  useEffect(() => {
+    window.addEventListener(CONSOLE_SESSION_ENDED_EVENT, expireSession);
+    return () => window.removeEventListener(CONSOLE_SESSION_ENDED_EVENT, expireSession);
+  }, [expireSession]);
 
   useEffect(() => {
     if (!confirmOpen) return;
@@ -1089,6 +1157,7 @@ export function AgentPassConsole() {
     try {
       await logoutConsoleSession();
       organizationIdRef.current = null;
+      setSessionRole(null);
       setData(emptyConsoleData());
       setSessionState("signed-out");
       setSummaryState("error");
@@ -1106,6 +1175,10 @@ export function AgentPassConsole() {
   };
 
   const triggerStop = async () => {
+    if (sessionRole !== "owner") {
+      showToast("Owner権限が必要です", "error");
+      return;
+    }
     setStopPending(true);
     try {
       const { organizationId, csrfToken } = await consoleSessionContext.get();
@@ -1130,6 +1203,7 @@ export function AgentPassConsole() {
 
   const operate = async (operation: string, body: Record<string, unknown>, success: string) => {
     try {
+      if (sessionRole !== "owner" && sessionRole !== "admin") throw new Error("role denied");
       let recentAuthHeader: Record<string, string> = {};
       if (operation === "revoke-device") {
         const { organizationId, csrfToken } = await consoleSessionContext.get();
@@ -1145,12 +1219,6 @@ export function AgentPassConsole() {
       if (!response.ok) throw new Error("operation rejected");
       showToast(success);
       await refreshSummary();
-      const capabilityResponse = await fetchConsole("/api/console?resource=capabilities&limit=100");
-      if (capabilityResponse.ok) {
-        const payload = await capabilityResponse.json();
-        const records = Array.isArray(payload.capabilities) ? payload.capabilities as Array<Record<string, unknown>> : [];
-        setData((current) => ({ ...current, capabilityRecords: records.map((item) => ({ capabilityId: String(item.capability_id ?? ""), agentId: String(item.agent_id ?? ""), deviceId: String(item.device_id ?? ""), expiresAt: String(item.expires_at ?? ""), sequence: Number(item.sequence ?? 0) })) }));
-      }
       return true;
     } catch {
       showToast("操作を確認できませんでした。権限と接続を確認してください", "error");
@@ -1159,6 +1227,7 @@ export function AgentPassConsole() {
   };
 
   const requestDeviceRefresh = async (deviceId: string): Promise<DeviceRefreshRequestStatus> => {
+    if (sessionRole !== "owner" && sessionRole !== "admin") throw new Error("role denied");
     const { organizationId, csrfToken } = await consoleSessionContext.get();
     if (!supportsWebAuthn()) throw new Error("WebAuthn unavailable");
     const { authorization_id } = await authenticateRecentAuth({ operation: DEVICE_REFRESH_REQUEST_RECENT_AUTH_OPERATION, organizationId, csrfToken });
@@ -1179,6 +1248,9 @@ export function AgentPassConsole() {
 
   const currentLabel = navItems.find((item) => item.id === activeView)?.label ?? "概要";
   const activeAgents = data.agents.filter((agent) => agent.state !== "停止").length;
+  const canManage = sessionRole === "owner" || sessionRole === "admin";
+  const canEmergencyStop = sessionRole === "owner";
+  const visibleNavItems = navItems.filter((item) => item.id !== "emergency" || sessionRole === null || canEmergencyStop);
 
   return (
     <div className="console-shell">
@@ -1192,7 +1264,7 @@ export function AgentPassConsole() {
         <p className="nav-label">MANAGE</p>
         <nav>
           <ul className="nav-list">
-            {navItems.map((item) => <li key={item.id}><button className={`nav-item${activeView === item.id ? " active" : ""}${item.id === "emergency" ? " danger" : ""}`} type="button" onClick={() => goTo(item.id)} aria-current={activeView === item.id ? "page" : undefined}><span className="nav-icon" aria-hidden="true">{item.icon}</span><span className="nav-copy">{item.label}</span>{item.badge ? <span className="nav-badge">{item.badge}</span> : null}</button></li>)}
+            {visibleNavItems.map((item) => <li key={item.id}><button className={`nav-item${activeView === item.id ? " active" : ""}${item.id === "emergency" ? " danger" : ""}`} type="button" onClick={() => goTo(item.id)} aria-current={activeView === item.id ? "page" : undefined}><span className="nav-icon" aria-hidden="true">{item.icon}</span><span className="nav-copy">{item.label}</span>{item.id === "agents" && data.agents.length > 0 ? <span className="nav-badge">{data.agents.length}</span> : null}</button></li>)}
           </ul>
         </nav>
         <div className="sidebar-footer"><div className="operator"><span className="avatar" aria-hidden="true">{data.operator.initials}</span><div><p className="operator-name">{data.operator.name}</p><p className="operator-role">{data.operator.role}</p></div></div>{sessionState === "active" ? <button className="text-button" type="button" disabled={signOutPending} onClick={() => void signOut()}>{signOutPending ? "終了中…" : "サインアウト"}</button> : null}</div>
@@ -1205,15 +1277,15 @@ export function AgentPassConsole() {
         </div>
         <div className={`content${activeView === "organizations" || activeView === "recovery" ? " organization-content" : ""}`} role={activeView === "organizations" || activeView === "recovery" ? undefined : "main"}>
           {sessionState !== "active" ? <SessionEndedSurface reason={sessionState} /> : null}
-          {sessionState === "active" && activeView === "overview" ? <Overview data={data} goTo={goTo} onRequestRefresh={requestDeviceRefresh} summaryState={summaryState} /> : null}
-          {sessionState === "active" && activeView === "setup" ? <SetupSurface data={data} goTo={goTo} operate={operate} online={summaryState === "ready"} /> : null}
-          {sessionState === "active" && activeView === "agents" ? <AgentsSurface data={data} operate={operate} /> : null}
-          {sessionState === "active" && activeView === "policies" ? <PoliciesSurface data={data} operate={operate} /> : null}
+          {sessionState === "active" && activeView === "overview" ? <Overview data={data} goTo={goTo} onRequestRefresh={requestDeviceRefresh} summaryState={summaryState} canManage={canManage} /> : null}
+          {sessionState === "active" && activeView === "setup" ? <SetupSurface data={data} goTo={goTo} operate={operate} online={summaryState === "ready"} canManage={canManage} /> : null}
+          {sessionState === "active" && activeView === "agents" ? <AgentsSurface data={data} operate={operate} canManage={canManage} /> : null}
+          {sessionState === "active" && activeView === "policies" ? <PoliciesSurface data={data} operate={operate} canManage={canManage} /> : null}
           {sessionState === "active" && activeView === "activity" ? <ActivitySurface data={data} /> : null}
-          {sessionState === "active" && activeView === "security" ? <SecuritySurface /> : null}
+          {sessionState === "active" && activeView === "security" ? <SecuritySurface onSessionEnded={expireSession} /> : null}
           {sessionState === "active" && activeView === "organizations" ? <OrganizationPanel /> : null}
           {sessionState === "active" && activeView === "recovery" ? <OwnerRecoveryPanel /> : null}
-          {sessionState === "active" && activeView === "emergency" ? <EmergencySurface data={data} onOpenConfirm={() => setConfirmOpen(true)} stopped={stopped} /> : null}
+          {sessionState === "active" && activeView === "emergency" && canEmergencyStop ? <EmergencySurface data={data} onOpenConfirm={() => setConfirmOpen(true)} stopped={stopped} /> : null}
         </div>
       </div>
 

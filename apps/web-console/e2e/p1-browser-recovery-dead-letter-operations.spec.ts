@@ -115,9 +115,7 @@ function webAuthnEvidence(route: Route): Record<string, unknown> {
 }
 
 function recoverySession(role: BrowserRole) {
-  const current = session(role);
-  const deadLetterSession = Object.fromEntries(Object.entries(current.session).filter(([key]) => key !== "version"));
-  return { ...current, session: deadLetterSession };
+  return session(role);
 }
 
 function headers(route: Route): Record<string, string> {

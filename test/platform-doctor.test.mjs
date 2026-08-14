@@ -6,6 +6,7 @@ import path from "node:path";
 import test from "node:test";
 import { saveConfig } from "../lib/config.mjs";
 import { DOCTOR_SCHEMA_VERSION, runProductionDoctor } from "../lib/platform-doctor.mjs";
+import { SETUP_STATES, createSetupJournal } from "../lib/setup-journal.mjs";
 
 const FIXED_CLIENT = "/Applications/AgentPass.app/Contents/Library/HelperTools/AgentPassNativeClient.app/Contents/MacOS/agentpass-native-client";
 const FIXED_MANAGER = "/Applications/AgentPass.app/Contents/MacOS/agentpass-native-manager";
@@ -38,6 +39,8 @@ function fixture() {
     session: { required: true, ttl_seconds: 3600 },
     native_broker: { enabled: true, mach_service: "dev.agentpass.native-service", client: FIXED_CLIENT, manager: FIXED_MANAGER, team_id: "ABCDE12345" }
   }, configDir);
+  const journal = createSetupJournal({ directory: configDir, clock: () => "2030-01-01T00:00:00.000Z" });
+  for (const state of SETUP_STATES.slice(1)) journal.transition(state);
   fs.writeFileSync(path.join(project, ".mcp.json"), `${JSON.stringify({ mcpServers: { agentpass: { command: process.execPath, args: ["/agentpass-mcp.mjs"], env: { AGENTPASS_PROJECT_DIR: project } } } })}\n`, { mode: 0o600 });
   return { root, configDir, project, application };
 }

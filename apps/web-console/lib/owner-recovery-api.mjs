@@ -68,7 +68,8 @@ function parseEnvelope(value, { allowExchange = false } = {}) {
 }
 
 function parseSession(value) {
-  if (!exact(value, ["session", "csrf_token"]) || !isRecord(value.session) || !uuid(value.session.session_id) || !uuid(value.session.member_id) || !uuid(value.session.organization_id) || !ROLES.has(value.session.role) || !timestamp(value.session.created_at) || !timestamp(value.session.expires_at) || (value.session.recent_auth_at !== null && !timestamp(value.session.recent_auth_at)) || typeof value.csrf_token !== "string" || !CSRF.test(value.csrf_token)) throw invalidResponse();
+  const sessionKeys = ["version", "session_id", "member_id", "organization_id", "role", "created_at", "expires_at", "recent_auth_at"];
+  if (!exact(value, ["session", "csrf_token"]) || !isRecord(value.session) || !exact(value.session, sessionKeys) || value.session.version !== 1 || !uuid(value.session.session_id) || !uuid(value.session.member_id) || !uuid(value.session.organization_id) || !ROLES.has(value.session.role) || !timestamp(value.session.created_at) || !timestamp(value.session.expires_at) || (value.session.recent_auth_at !== null && !timestamp(value.session.recent_auth_at)) || typeof value.csrf_token !== "string" || !CSRF.test(value.csrf_token)) throw invalidResponse();
   return Object.freeze({ organizationId: value.session.organization_id, memberId: value.session.member_id, role: value.session.role, csrfToken: value.csrf_token });
 }
 

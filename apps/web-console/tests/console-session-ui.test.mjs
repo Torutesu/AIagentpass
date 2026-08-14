@@ -92,6 +92,13 @@ test("expired sessions replace every operational surface with a reauthentication
   assert.match(source, /REAUTHENTICATION REQUIRED/);
   assert.match(source, /window\.location\.reload\(\)/);
   assert.match(source, /sessionState === "active" && activeView === "emergency"/);
+  assert.match(source, /CONSOLE_SESSION_ENDED_EVENT = "agentpass:session-ended"/);
+  assert.match(source, /window\.dispatchEvent\(new Event\(CONSOLE_SESSION_ENDED_EVENT\)\)/);
+  assert.match(source, /window\.addEventListener\(CONSOLE_SESSION_ENDED_EVENT, expireSession\)/);
+  assert.match(source, /summaryEpoch\.current \+= 1/);
+  assert.match(source, /capabilityEpoch\.current \+= 1/);
+  assert.match(source, /adminAuditEpoch\.current \+= 1/);
+  assert.match(source, /<SecuritySurface onSessionEnded=\{expireSession\} \/>/);
 });
 
 test("global sign-out uses the same-origin DELETE contract and clears operational state", async () => {
@@ -105,4 +112,20 @@ test("global sign-out uses the same-origin DELETE contract and clears operationa
   assert.match(logout, /consoleSessionContext\.clear\(session\)/);
   assert.match(source, /setSessionState\("signed-out"\)/);
   assert.match(source, /signOutPending \? "終了中…" : "サインアウト"/);
+});
+
+test("session role is strictly parsed and authority-changing controls are least-privilege", async () => {
+  const source = await componentSource();
+
+  assert.match(source, /type ConsoleRole = "owner" \| "admin" \| "auditor" \| "viewer"/);
+  assert.match(source, /hasExactKeys\(session, \["version", "session_id", "member_id", "organization_id", "role", "created_at", "expires_at", "recent_auth_at"\]\)/);
+  assert.match(source, /const canManage = sessionRole === "owner" \|\| sessionRole === "admin"/);
+  assert.match(source, /const canEmergencyStop = sessionRole === "owner"/);
+  assert.match(source, /if \(sessionRole !== "owner" && sessionRole !== "admin"\) throw new Error\("role denied"\)/);
+  assert.match(source, /item\.id !== "emergency" \|\| sessionRole === null \|\| canEmergencyStop/);
+  assert.match(source, /canManage && agent\.agentId/);
+  assert.match(source, /canManage && policy\.policyId/);
+  assert.match(source, /canManage && device\.deviceId/);
+  assert.doesNotMatch(source, /badge: "3"/);
+  assert.doesNotMatch(source, /useState\("\/work\/repo"\)/);
 });

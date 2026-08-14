@@ -18,6 +18,10 @@ import {
   createManagedSignerReliabilityProvider,
   MANAGED_SIGNER_RELIABILITY_DEFAULTS
 } from "./managed-signer-reliability.mjs";
+import {
+  createManagedSignerKeyLifecycle,
+  createManagedSignerLifecycleProvider
+} from "./managed-signer-key-lifecycle.mjs";
 
 export const KMS_PROVIDER_RUNTIME_ENV = Object.freeze({
   provider: "AGENTPASS_KMS_PROVIDER",
@@ -62,9 +66,13 @@ export async function createHostedKmsProviders({
   env = process.env,
   sdkLoader = loadOfficialSdk,
   clock = () => Date.now(),
-  reliability = MANAGED_SIGNER_RELIABILITY_DEFAULTS
+  reliability = MANAGED_SIGNER_RELIABILITY_DEFAULTS,
+  keyLifecycles = {}
 } = {}) {
   const config = parseKmsProviderRuntimeConfig(env);
+  if (!plainObject(keyLifecycles) || Object.keys(keyLifecycles).some((key) => !["agentSession", "qualificationManifest"].includes(key))) {
+    throw new KmsProviderRuntimeError(KMS_PROVIDER_RUNTIME_ERROR_CODES.CONFIG);
+  }
   let sdk;
   try {
     sdk = await sdkLoader(config.provider);
@@ -75,8 +83,8 @@ export async function createHostedKmsProviders({
 
   try {
     const options = { ...reliability, clock };
-    if (config.provider === "aws") return createAwsProviders({ config, sdk, reliability: options });
-    return createGcpProviders({ config, sdk, reliability: options });
+    if (config.provider === "aws") return createAwsProviders({ config, sdk, reliability: options, keyLifecycles });
+    return createGcpProviders({ config, sdk, reliability: options, keyLifecycles });
   } catch (error) {
     if (error instanceof KmsProviderRuntimeError) throw error;
     throw new KmsProviderRuntimeError(KMS_PROVIDER_RUNTIME_ERROR_CODES.UNAVAILABLE);
@@ -136,7 +144,7 @@ async function loadOfficialSdk(provider) {
   throw new KmsProviderRuntimeError(KMS_PROVIDER_RUNTIME_ERROR_CODES.CONFIG);
 }
 
-function createAwsProviders({ config, sdk, reliability }) {
+function createAwsProviders({ config, sdk, reliability, keyLifecycles }) {
   if (typeof sdk.KMSClient !== "function" || typeof sdk.GetPublicKeyCommand !== "function" || typeof sdk.SignCommand !== "function") {
     throw new KmsProviderRuntimeError(KMS_PROVIDER_RUNTIME_ERROR_CODES.SDK);
   }
@@ -162,8 +170,8 @@ function createAwsProviders({ config, sdk, reliability }) {
       version: QUALIFICATION_GRANT_BATCH_MANIFEST_VERSION
     });
     return ownedProviders({
-      agentSessionSignerProvider: managedSigner(agent, AGENT_SESSION_GRANT_TYPE, reliability),
-      qualificationManifestSignerProvider: managedSigner(qualification, QUALIFICATION_GRANT_BATCH_MANIFEST_PURPOSE, reliability)
+      agentSessionSignerProvider: managedSigner(agent, AGENT_SESSION_GRANT_TYPE, reliability, keyLifecycles.agentSession),
+      qualificationManifestSignerProvider: managedSigner(qualification, QUALIFICATION_GRANT_BATCH_MANIFEST_PURPOSE, reliability, keyLifecycles.qualificationManifest)
     }, () => baseClient.destroy?.());
   } catch (error) {
     baseClient.destroy?.();
@@ -195,7 +203,7 @@ function bindAwsClient({ baseClient, sdk, logicalKeyId, resourceId }) {
   });
 }
 
-function createGcpProviders({ config, sdk, reliability }) {
+function createGcpProviders({ config, sdk, reliability, keyLifecycles }) {
   if (typeof sdk.KeyManagementServiceClient !== "function") {
     throw new KmsProviderRuntimeError(KMS_PROVIDER_RUNTIME_ERROR_CODES.SDK);
   }
@@ -219,8 +227,8 @@ function createGcpProviders({ config, sdk, reliability }) {
       version: QUALIFICATION_GRANT_BATCH_MANIFEST_VERSION
     });
     return ownedProviders({
-      agentSessionSignerProvider: managedSigner(agent, AGENT_SESSION_GRANT_TYPE, reliability),
-      qualificationManifestSignerProvider: managedSigner(qualification, QUALIFICATION_GRANT_BATCH_MANIFEST_PURPOSE, reliability)
+      agentSessionSignerProvider: managedSigner(agent, AGENT_SESSION_GRANT_TYPE, reliability, keyLifecycles.agentSession),
+      qualificationManifestSignerProvider: managedSigner(qualification, QUALIFICATION_GRANT_BATCH_MANIFEST_PURPOSE, reliability, keyLifecycles.qualificationManifest)
     }, () => baseClient.close?.());
   } catch (error) {
     void baseClient.close?.();
@@ -250,8 +258,31 @@ function ownedProviders(providers, destroy) {
   });
 }
 
-function managedSigner(provider, purpose, reliability) {
-  return createManagedSignerReliabilityProvider({ provider, purpose, ...reliability });
+function managedSigner(provider, purpose, reliability, lifecycle) {
+  const keyLifecycle = lifecycle ?? createInitialKeyLifecycle(provider, purpose);
+  const lifecycleBoundProvider = createManagedSignerLifecycleProvider({ provider, lifecycle: keyLifecycle });
+  return createManagedSignerReliabilityProvider({ provider: lifecycleBoundProvider, purpose, ...reliability });
+}
+
+function createInitialKeyLifecycle(provider, purpose) {
+  return createManagedSignerKeyLifecycle({
+    purpose,
+    algorithm: provider.algorithm,
+    snapshot: {
+      version: 1,
+      purpose,
+      algorithm: provider.algorithm,
+      keys: [{
+        key_id: provider.key_id,
+        key_version: 1,
+        purpose,
+        algorithm: provider.algorithm,
+        public_key_fingerprint: provider.public_key_fingerprint,
+        state: "active",
+        state_version: 1
+      }]
+    }
+  });
 }
 
 function bindGcpClient({ baseClient, logicalKeyName, resourceName }) {

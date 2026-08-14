@@ -85,8 +85,8 @@ function parseMutation(value, organizationId, eventId) {
 }
 function parseSession(value) {
   if (!exact(value, ["session", "csrf_token"]) || !isRecord(value.session)) throw invalidResponse();
-  const keys = ["session_id", "member_id", "organization_id", "role", "created_at", "expires_at", "recent_auth_at"];
-  if (!exact(value.session, keys) || !uuid(value.session.session_id) || !uuid(value.session.member_id) || !uuid(value.session.organization_id) || !["owner", "admin", "auditor", "viewer"].includes(value.session.role) || !timestamp(value.session.created_at) || !timestamp(value.session.expires_at) || (value.session.recent_auth_at !== null && !timestamp(value.session.recent_auth_at)) || !CSRF.test(value.csrf_token)) throw invalidResponse();
+  const keys = ["version", "session_id", "member_id", "organization_id", "role", "created_at", "expires_at", "recent_auth_at"];
+  if (!exact(value.session, keys) || value.session.version !== 1 || !uuid(value.session.session_id) || !uuid(value.session.member_id) || !uuid(value.session.organization_id) || !["owner", "admin", "auditor", "viewer"].includes(value.session.role) || !timestamp(value.session.created_at) || !timestamp(value.session.expires_at) || (value.session.recent_auth_at !== null && !timestamp(value.session.recent_auth_at)) || !CSRF.test(value.csrf_token)) throw invalidResponse();
   return Object.freeze({ csrfToken: value.csrf_token, organizationId: value.session.organization_id.toLowerCase() });
 }
 

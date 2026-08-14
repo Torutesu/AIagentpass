@@ -113,6 +113,7 @@ function deadLetterSession(role: BrowserRole) {
   // owner-recovery client. Keeping this response exact exercises that boundary.
   return {
     session: {
+      version: 1,
       session_id: "55555555-5555-4555-8555-555555555555",
       member_id: MEMBER_ID,
       organization_id: ORGANIZATION_ID,

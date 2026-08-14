@@ -39,6 +39,7 @@ test("resource context hash matches the Cloud canonical binding", async () => {
 function session() {
   return {
     session: {
+      version: 1,
       session_id: SESSION_ID,
       member_id: MEMBER_ID,
       organization_id: ORGANIZATION_ID,

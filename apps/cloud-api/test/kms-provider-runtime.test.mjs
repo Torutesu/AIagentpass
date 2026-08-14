@@ -197,3 +197,13 @@ test("evaluation profile rejects hosted KMS composition before loading any SDK",
   );
   assert.equal(loaded, false);
 });
+
+test("hosted composition rejects unknown lifecycle injection slots before loading an SDK", async () => {
+  let loaded = false;
+  await assert.rejects(createHostedKmsProviders({
+    env: baseEnv(),
+    keyLifecycles: { arbitraryPurpose: {} },
+    sdkLoader: async () => { loaded = true; return {}; }
+  }), { code: KMS_PROVIDER_RUNTIME_ERROR_CODES.CONFIG });
+  assert.equal(loaded, false);
+});
