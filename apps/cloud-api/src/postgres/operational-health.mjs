@@ -83,6 +83,7 @@ export const OPERATIONAL_METRIC_KEYS = Object.freeze([
   "owner_recovery_outbox_redrive_success_total",
   "owner_recovery_outbox_redrive_failure_total",
   "owner_recovery_outbox_prune_total",
+  "owner_recovery_outbox_prune_failure_total",
   "owner_recovery_outbox_confirmation_lookup_total",
   "owner_recovery_outbox_confirmation_success_total",
   "owner_recovery_outbox_confirmation_miss_total",
@@ -90,6 +91,14 @@ export const OPERATIONAL_METRIC_KEYS = Object.freeze([
   "owner_recovery_state_latency_count",
   "owner_recovery_state_latency_total_ms",
   ...Object.values(HUMAN_RECOVERY_METRIC_KEYS)
+]);
+
+export const OPERATIONAL_GAUGE_KEYS = Object.freeze([
+  "owner_recovery_outbox_pending_count",
+  "owner_recovery_outbox_uncertain_count",
+  "owner_recovery_outbox_dead_letter_count",
+  "owner_recovery_outbox_oldest_pending_age_ms",
+  "owner_recovery_outbox_oldest_uncertain_age_ms"
 ]);
 
 const METRIC_KEY_SET = new Set(OPERATIONAL_METRIC_KEYS);
@@ -220,6 +229,7 @@ export function createOperationalMetrics({ initial = {} } = {}) {
     recordOwnerRecoveryOutboxRedriveSuccess: (amount = 1) => increment("owner_recovery_outbox_redrive_success_total", amount),
     recordOwnerRecoveryOutboxRedriveFailure: (amount = 1) => increment("owner_recovery_outbox_redrive_failure_total", amount),
     recordOwnerRecoveryOutboxPrune: (amount = 1) => increment("owner_recovery_outbox_prune_total", amount),
+    recordOwnerRecoveryOutboxPruneFailure: (amount = 1) => increment("owner_recovery_outbox_prune_failure_total", amount),
     recordOwnerRecoveryOutboxConfirmationLookup: (amount = 1) => increment("owner_recovery_outbox_confirmation_lookup_total", amount),
     recordOwnerRecoveryOutboxConfirmationSuccess: (amount = 1) => increment("owner_recovery_outbox_confirmation_success_total", amount),
     recordOwnerRecoveryOutboxConfirmationMiss: (amount = 1) => increment("owner_recovery_outbox_confirmation_miss_total", amount),
@@ -440,7 +450,19 @@ export function createOperationalHealth({
     });
   }
 
-  return Object.freeze({ readiness, health: readiness });
+  async function operationalSnapshot() {
+    const counterSnapshot = safeMetricSnapshot(metrics);
+    if (outboxStatus === undefined) return counterSnapshot;
+    const result = await Promise.allSettled([
+      withTimeout(Promise.resolve().then(() => outboxStatus()), readinessTimeoutMs)
+    ]);
+    const outbox = normalizeOutboxResult(result[0], { outboxMaxPending, outboxMaxLagMs, now });
+    const gauges = outboxGauges(outbox);
+    if (gauges === null) return Object.freeze({ ...counterSnapshot, valid: false });
+    return Object.freeze({ ...counterSnapshot, gauges });
+  }
+
+  return Object.freeze({ readiness, health: readiness, operationalSnapshot });
 }
 
 function contract({ ready, status, code, database, schema, pool, drain, outbox, metrics }) {
@@ -492,6 +514,22 @@ function normalizeOutboxResult(result, { outboxMaxPending, outboxMaxLagMs, now }
 
 function skippedOutbox(code) {
   return Object.freeze({ ok: false, code, worker_state: code === "draining" ? "draining" : "unavailable", pending_count: null, uncertain_count: null, dead_letter_count: null, oldest_pending_age_ms: null, oldest_uncertain_age_ms: null });
+}
+
+function outboxGauges(outbox) {
+  if (!outbox || !Number.isSafeInteger(outbox.pending_count) || outbox.pending_count < 0
+    || !Number.isSafeInteger(outbox.uncertain_count) || outbox.uncertain_count < 0
+    || !Number.isSafeInteger(outbox.dead_letter_count) || outbox.dead_letter_count < 0) return null;
+  const pendingAge = outbox.oldest_pending_age_ms === null && outbox.pending_count === 0 ? 0 : outbox.oldest_pending_age_ms;
+  const uncertainAge = outbox.oldest_uncertain_age_ms === null && outbox.uncertain_count === 0 ? 0 : outbox.oldest_uncertain_age_ms;
+  if (!Number.isSafeInteger(pendingAge) || pendingAge < 0 || !Number.isSafeInteger(uncertainAge) || uncertainAge < 0) return null;
+  return Object.freeze({
+    owner_recovery_outbox_pending_count: outbox.pending_count,
+    owner_recovery_outbox_uncertain_count: outbox.uncertain_count,
+    owner_recovery_outbox_dead_letter_count: outbox.dead_letter_count,
+    owner_recovery_outbox_oldest_pending_age_ms: pendingAge,
+    owner_recovery_outbox_oldest_uncertain_age_ms: uncertainAge
+  });
 }
 
 async function defaultProbe(pool) {

@@ -232,6 +232,7 @@ export async function createPostgresRuntime({ env = process.env, PoolClass = Poo
     tenants: createTenantRepositoryFactory({ client: pool }),
     operationalHealth,
     operationalMetrics,
+    operationalReport: Object.freeze({ snapshot: operationalHealth.operationalSnapshot }),
     metrics: operationalMetrics,
     readiness: operationalHealth.readiness,
     health: operationalHealth.health,

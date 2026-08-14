@@ -9,7 +9,7 @@ import {
   parseBundleAcknowledgementJson
 } from "../../../packages/protocol/src/index.mjs";
 import { RateLimiterCapacityError, createRateLimiter } from "./rate-limit.mjs";
-import { OPERATIONAL_METRIC_KEYS } from "./postgres/operational-health.mjs";
+import { OPERATIONAL_GAUGE_KEYS, OPERATIONAL_METRIC_KEYS } from "./postgres/operational-health.mjs";
 import { normalizeDeviceReadModels } from "./device-read-model.mjs";
 import { normalizePossessionReceiptStatement } from "./possession-receipt-signer.mjs";
 
@@ -95,7 +95,7 @@ export function createCloudApi({ store, tokenRecords = [], bundleSigner, refresh
       }
       if (request.method === "GET" && healthPath === "/health/metrics" && operationalMetrics) {
         if (!authorizedOperationalProbe(request, operationalProbeSecret)) return send(response, 404, { error: { code: "not_found", message: "Resource not found" } });
-        const report = (() => { try { return publicMetricsReport(operationalMetrics.snapshot()); } catch { return null; } })();
+        const report = await Promise.resolve().then(() => operationalMetrics.snapshot()).then(publicMetricsReport).catch(() => null);
         return report ? send(response, 200, report) : send(response, 503, { version: 1, valid: false, code: "metrics_unavailable" });
       }
       return handleRequest(request, response);
@@ -1244,7 +1244,18 @@ function publicMetricsReport(value) {
   if (Object.keys(value.counters).sort().join(",") !== [...OPERATIONAL_METRIC_KEYS].sort().join(",")) throw new Error("invalid metrics report");
   const counters = {};
   for (const key of OPERATIONAL_METRIC_KEYS) { const count = value.counters[key]; if (!Number.isSafeInteger(count) || count < 0) throw new Error("invalid metrics report"); counters[key] = count; }
-  return Object.freeze({ version: 1, counters: Object.freeze(counters), valid: true });
+  let gauges;
+  if (value.gauges !== undefined) {
+    if (!value.gauges || typeof value.gauges !== "object" || Array.isArray(value.gauges)
+      || Object.keys(value.gauges).sort().join(",") !== [...OPERATIONAL_GAUGE_KEYS].sort().join(",")) throw new Error("invalid metrics report");
+    gauges = {};
+    for (const key of OPERATIONAL_GAUGE_KEYS) {
+      const amount = value.gauges[key];
+      if (!Number.isSafeInteger(amount) || amount < 0) throw new Error("invalid metrics report");
+      gauges[key] = amount;
+    }
+  }
+  return Object.freeze({ version: 1, counters: Object.freeze(counters), ...(gauges === undefined ? {} : { gauges: Object.freeze(gauges) }), valid: true });
 }
 
 function send(response, status, value, headers = {}) {

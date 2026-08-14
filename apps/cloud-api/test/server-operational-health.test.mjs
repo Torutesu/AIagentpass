@@ -82,3 +82,24 @@ test("readiness exposes only aggregate owner recovery outbox state", async (t) =
   assert.deepEqual(body.checks.owner_recovery_outbox, { ok: false, code: "dead_letter_present", worker_state: "running", pending_count: 2, uncertain_count: 0, dead_letter_count: 1, oldest_pending_age_ms: 500, oldest_uncertain_age_ms: null });
   assert.equal(JSON.stringify(body).includes("must-not-leak"), false);
 });
+
+test("metrics exposes the fixed owner recovery gauges required by the alert policy", async (t) => {
+  const counters = createOperationalMetrics().snapshot().counters;
+  const gauges = {
+    owner_recovery_outbox_pending_count: 2,
+    owner_recovery_outbox_uncertain_count: 1,
+    owner_recovery_outbox_dead_letter_count: 0,
+    owner_recovery_outbox_oldest_pending_age_ms: 500,
+    owner_recovery_outbox_oldest_uncertain_age_ms: 250
+  };
+  const server = createCloudApi({
+    store: {},
+    operationalMetrics: { async snapshot() { return { version: 1, valid: true, counters, gauges }; } },
+    operationalProbeSecret: PROBE_SECRET
+  });
+  await new Promise((resolve, reject) => { server.once("error", reject); server.listen(0, "127.0.0.1", resolve); });
+  t.after(() => new Promise((resolve) => server.close(resolve)));
+  const response = await fetch(`http://127.0.0.1:${server.address().port}/health/metrics`, { headers: PROBE_HEADERS });
+  assert.equal(response.status, 200);
+  assert.deepEqual((await response.json()).gauges, gauges);
+});

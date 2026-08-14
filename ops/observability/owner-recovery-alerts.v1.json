@@ -1,0 +1,121 @@
+{
+  "schema_version": 1,
+  "kind": "agentpass.owner_recovery_alert_policy",
+  "metric_namespace": "agentpass",
+  "label_policy": {
+    "mode": "none",
+    "labels": []
+  },
+  "alerts": [
+    {
+      "name": "owner_recovery_pending_queue_age",
+      "metric": "owner_recovery_outbox_oldest_pending_age_ms",
+      "aggregation": "max",
+      "sample_count_metric": null,
+      "unit": "milliseconds",
+      "thresholds": [
+        { "severity": "warning", "value": 300000, "unit": "milliseconds", "window_seconds": 300, "comparison": ">=" },
+        { "severity": "critical", "value": 900000, "unit": "milliseconds", "window_seconds": 300, "comparison": ">=" }
+      ]
+    },
+    {
+      "name": "owner_recovery_pending_queue_count",
+      "metric": "owner_recovery_outbox_pending_count",
+      "aggregation": "max",
+      "sample_count_metric": null,
+      "unit": "events",
+      "thresholds": [
+        { "severity": "warning", "value": 10, "unit": "events", "window_seconds": 300, "comparison": ">=" },
+        { "severity": "critical", "value": 100, "unit": "events", "window_seconds": 300, "comparison": ">=" }
+      ]
+    },
+    {
+      "name": "owner_recovery_uncertain_delivery_count",
+      "metric": "owner_recovery_outbox_uncertain_count",
+      "aggregation": "max",
+      "sample_count_metric": null,
+      "unit": "events",
+      "thresholds": [
+        { "severity": "warning", "value": 1, "unit": "events", "window_seconds": 300, "comparison": ">=" },
+        { "severity": "critical", "value": 10, "unit": "events", "window_seconds": 300, "comparison": ">=" }
+      ]
+    },
+    {
+      "name": "owner_recovery_uncertain_delivery_age",
+      "metric": "owner_recovery_outbox_oldest_uncertain_age_ms",
+      "aggregation": "max",
+      "sample_count_metric": null,
+      "unit": "milliseconds",
+      "thresholds": [
+        { "severity": "warning", "value": 300000, "unit": "milliseconds", "window_seconds": 300, "comparison": ">=" },
+        { "severity": "critical", "value": 1800000, "unit": "milliseconds", "window_seconds": 300, "comparison": ">=" }
+      ]
+    },
+    {
+      "name": "owner_recovery_dead_letters",
+      "metric": "owner_recovery_outbox_dead_letter_count",
+      "aggregation": "max",
+      "sample_count_metric": null,
+      "unit": "events",
+      "thresholds": [
+        { "severity": "warning", "value": 1, "unit": "events", "window_seconds": 300, "comparison": ">=" },
+        { "severity": "critical", "value": 10, "unit": "events", "window_seconds": 300, "comparison": ">=" }
+      ]
+    },
+    {
+      "name": "owner_recovery_redrive_failures",
+      "metric": "owner_recovery_outbox_redrive_failure_total",
+      "aggregation": "increase",
+      "sample_count_metric": null,
+      "unit": "events",
+      "thresholds": [
+        { "severity": "warning", "value": 1, "unit": "events", "window_seconds": 900, "comparison": ">=" },
+        { "severity": "critical", "value": 5, "unit": "events", "window_seconds": 900, "comparison": ">=" }
+      ]
+    },
+    {
+      "name": "owner_recovery_prune_failures",
+      "metric": "owner_recovery_outbox_prune_failure_total",
+      "aggregation": "increase",
+      "sample_count_metric": null,
+      "unit": "events",
+      "thresholds": [
+        { "severity": "warning", "value": 1, "unit": "events", "window_seconds": 900, "comparison": ">=" },
+        { "severity": "critical", "value": 3, "unit": "events", "window_seconds": 900, "comparison": ">=" }
+      ]
+    },
+    {
+      "name": "human_auth_rate_limit_denials",
+      "metric": "human_auth_rate_limit_denial_total",
+      "aggregation": "increase",
+      "sample_count_metric": null,
+      "unit": "events",
+      "thresholds": [
+        { "severity": "warning", "value": 20, "unit": "events", "window_seconds": 300, "comparison": ">=" },
+        { "severity": "critical", "value": 100, "unit": "events", "window_seconds": 300, "comparison": ">=" }
+      ]
+    },
+    {
+      "name": "human_auth_rate_limit_unavailability",
+      "metric": "human_auth_rate_limit_unavailable_total",
+      "aggregation": "increase",
+      "sample_count_metric": null,
+      "unit": "events",
+      "thresholds": [
+        { "severity": "warning", "value": 1, "unit": "events", "window_seconds": 300, "comparison": ">=" },
+        { "severity": "critical", "value": 3, "unit": "events", "window_seconds": 300, "comparison": ">=" }
+      ]
+    },
+    {
+      "name": "owner_recovery_state_latency",
+      "metric": "owner_recovery_state_latency_total_ms",
+      "aggregation": "mean",
+      "sample_count_metric": "owner_recovery_state_latency_count",
+      "unit": "milliseconds",
+      "thresholds": [
+        { "severity": "warning", "value": 1000, "unit": "milliseconds", "window_seconds": 900, "comparison": ">=" },
+        { "severity": "critical", "value": 5000, "unit": "milliseconds", "window_seconds": 900, "comparison": ">=" }
+      ]
+    }
+  ]
+}

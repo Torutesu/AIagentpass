@@ -180,7 +180,10 @@ export function createOwnerRecoveryOutboxWorker({
     // scheduled cycles cannot start duplicate maintenance batches.
     lastRetentionPruneAt = current;
     try { await retentionRepository.prune({ limit: config.retentionPruneLimit }); }
-    catch { metric(metrics, "recordOwnerRecoveryOutboxFailure"); }
+    catch {
+      metric(metrics, "recordOwnerRecoveryOutboxFailure");
+      metric(metrics, "recordOwnerRecoveryOutboxPruneFailure");
+    }
   }
 
   async function settleDelivery(event, claimToken) {

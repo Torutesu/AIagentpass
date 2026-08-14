@@ -15,14 +15,21 @@ function job(name) {
   return workflow.slice(start, next === -1 ? workflow.length : start + 1 + next);
 }
 
+test("published package retains the W1.6 operational policy and evidence gates", () => {
+  assert.ok(packageManifest.files.includes("ops"));
+  assert.ok(packageManifest.files.includes("scripts/owner-recovery"));
+});
+
 test("main CI validates the machine-readable contract inventory before product tests", () => {
   const section = job("test");
   const install = section.indexOf("- run: npm ci");
   const consoleInstall = section.indexOf("- run: npm ci --prefix apps/web-console");
   const contracts = section.indexOf("- run: npm run contracts:validate");
+  const w16 = section.indexOf("- run: npm run test:w16");
   const nodeTests = section.indexOf("- run: npm test");
-  assert.ok(install >= 0 && consoleInstall > install && contracts > consoleInstall && nodeTests > contracts);
+  assert.ok(install >= 0 && consoleInstall > install && contracts > consoleInstall && w16 > contracts && nodeTests > w16);
   assert.equal(section.match(/npm run contracts:validate/g)?.length, 1);
+  assert.equal(section.match(/npm run test:w16/g)?.length, 1);
 });
 
 test("native qualification is serialized at the top level", () => {

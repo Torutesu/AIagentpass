@@ -3,6 +3,7 @@ import test from "node:test";
 
 import {
   EXPECTED_POSTGRES_SCHEMA_VERSION,
+  OPERATIONAL_GAUGE_KEYS,
   OPERATIONAL_METRIC_KEYS,
   createDrainController,
   createOperationalHealth,
@@ -127,6 +128,7 @@ test("metrics are fixed-key, monotonic, and free of caller labels", () => {
     owner_recovery_outbox_redrive_success_total: 0,
     owner_recovery_outbox_redrive_failure_total: 0,
     owner_recovery_outbox_prune_total: 0,
+    owner_recovery_outbox_prune_failure_total: 0,
     owner_recovery_outbox_confirmation_lookup_total: 0,
     owner_recovery_outbox_confirmation_success_total: 0,
     owner_recovery_outbox_confirmation_miss_total: 0,
@@ -197,6 +199,7 @@ test("W1 recovery operations are fixed-key counters and state latency is an aggr
       owner_recovery_outbox_redrive_success_total: Number.MAX_SAFE_INTEGER - 2,
       owner_recovery_outbox_redrive_failure_total: Number.MAX_SAFE_INTEGER - 3,
       owner_recovery_outbox_prune_total: Number.MAX_SAFE_INTEGER - 4,
+      owner_recovery_outbox_prune_failure_total: Number.MAX_SAFE_INTEGER - 5,
       owner_recovery_state_latency_count: Number.MAX_SAFE_INTEGER - 1,
       owner_recovery_state_latency_total_ms: Number.MAX_SAFE_INTEGER - 2
     }
@@ -206,6 +209,7 @@ test("W1 recovery operations are fixed-key counters and state latency is an aggr
   assert.equal(metrics.recordOwnerRecoveryOutboxRedriveSuccess(10), Number.MAX_SAFE_INTEGER);
   assert.equal(metrics.recordOwnerRecoveryOutboxRedriveFailure(10), Number.MAX_SAFE_INTEGER);
   assert.equal(metrics.recordOwnerRecoveryOutboxPrune(10), Number.MAX_SAFE_INTEGER);
+  assert.equal(metrics.recordOwnerRecoveryOutboxPruneFailure(10), Number.MAX_SAFE_INTEGER);
   assert.equal(metrics.recordOwnerRecoveryStateLatency(Number.MAX_SAFE_INTEGER), Number.MAX_SAFE_INTEGER);
   assert.equal(metrics.snapshot().counters.owner_recovery_state_latency_count, Number.MAX_SAFE_INTEGER);
   assert.equal(metrics.snapshot().counters.owner_recovery_state_latency_total_ms, Number.MAX_SAFE_INTEGER);
@@ -337,11 +341,29 @@ test("owner recovery outbox readiness is aggregate-only and fails closed on dead
   let report = await health.readiness();
   assert.equal(report.ready, true);
   assert.deepEqual(report.checks.owner_recovery_outbox, { ok: true, code: "ok", worker_state: "running", pending_count: 0, uncertain_count: 0, dead_letter_count: 0, oldest_pending_age_ms: null, oldest_uncertain_age_ms: null });
+  let operational = await health.operationalSnapshot();
+  assert.equal(operational.valid, true);
+  assert.deepEqual(Object.keys(operational.gauges), OPERATIONAL_GAUGE_KEYS);
+  assert.deepEqual(operational.gauges, {
+    owner_recovery_outbox_pending_count: 0,
+    owner_recovery_outbox_uncertain_count: 0,
+    owner_recovery_outbox_dead_letter_count: 0,
+    owner_recovery_outbox_oldest_pending_age_ms: 0,
+    owner_recovery_outbox_oldest_uncertain_age_ms: 0
+  });
 
   outbox = { pending: 1, uncertain: 0, dead_letter: 1, oldest_pending_at: new Date(now - 1_000).toISOString(), oldest_uncertain_at: null, worker_state: "running", organization_id: "must-not-leak" };
   report = await health.readiness();
   assert.equal(report.code, "owner_recovery_outbox_dead_letter_present");
   assert.equal(JSON.stringify(report).includes("must-not-leak"), false);
+  operational = await health.operationalSnapshot();
+  assert.deepEqual(operational.gauges, {
+    owner_recovery_outbox_pending_count: 1,
+    owner_recovery_outbox_uncertain_count: 0,
+    owner_recovery_outbox_dead_letter_count: 1,
+    owner_recovery_outbox_oldest_pending_age_ms: 1_000,
+    owner_recovery_outbox_oldest_uncertain_age_ms: 0
+  });
 
   outbox = { pending: 0, uncertain: 1, dead_letter: 0, oldest_pending_at: null, oldest_uncertain_at: new Date(now - 5_000).toISOString(), worker_state: "running" };
   report = await health.readiness();
@@ -356,6 +378,7 @@ test("owner recovery outbox readiness is aggregate-only and fails closed on dead
   assert.equal((await health.readiness()).code, "owner_recovery_outbox_worker_unavailable");
   outbox = null;
   assert.equal((await health.readiness()).code, "owner_recovery_outbox_unavailable");
+  assert.equal((await health.operationalSnapshot()).valid, false);
 });
 
 test("readiness returns a fixed failure within its application deadline when a provider never settles", async () => {

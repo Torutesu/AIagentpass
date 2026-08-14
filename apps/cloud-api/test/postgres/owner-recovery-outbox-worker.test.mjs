@@ -334,14 +334,19 @@ test("runs bounded retention maintenance once per interval without blocking deli
   await worker.runOnce();
   assert.deepEqual(pruneCalls, [{ limit: 7 }, { limit: 7 }]);
 
+  const failingMetrics = createOperationalMetrics();
   const failing = createOwnerRecoveryOutboxWorker({
     repository: fixtureRepository([]),
     publisher: { async publish(input) { return accepted(input.idempotency_key); } },
     retentionRepository: { async prune() { throw new Error("database detail must not escape"); } },
+    metrics: failingMetrics,
     now: () => NOW,
     random: () => 0
   });
   assert.equal((await failing.runOnce()).published, 1);
+  assert.equal(failing.snapshot().state, "idle");
+  assert.equal(failingMetrics.snapshot().counters.owner_recovery_outbox_failure_total, 1);
+  assert.equal(failingMetrics.snapshot().counters.owner_recovery_outbox_prune_failure_total, 1);
 });
 
 function fixtureRepository(calls, overrides = {}) {

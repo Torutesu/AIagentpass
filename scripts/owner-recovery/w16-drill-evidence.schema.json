@@ -1,0 +1,148 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agentpass.dev/schemas/w16-drill-evidence-v1.schema.json",
+  "title": "AgentPass W1.6 staging drill evidence",
+  "description": "A secret-free, source-bound result for the closed W1.6 staging operator drill.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "source_commit",
+    "image_digest",
+    "alert_policy_digest",
+    "started_at",
+    "completed_at",
+    "duration_ms",
+    "outcome",
+    "scenarios",
+    "aggregate_observations"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": 36,
+      "description": "The PostgreSQL/application schema version used by the drill."
+    },
+    "source_commit": {
+      "type": "string",
+      "pattern": "^(?!(?:0{40}|0{64})$)(?:[0-9a-f]{40}|[0-9a-f]{64})$",
+      "description": "The exact lower-case Git commit SHA used to run the drill."
+    },
+    "image_digest": {
+      "type": "string",
+      "pattern": "^sha256:(?!0{64}$)[0-9a-f]{64}$",
+      "description": "The immutable sha256 digest of the deployed staging image."
+    },
+    "alert_policy_digest": {
+      "type": "string",
+      "pattern": "^sha256:(?!0{64}$)[0-9a-f]{64}$",
+      "description": "The sha256 digest of the exact alert policy evaluated by the drill."
+    },
+    "started_at": {
+      "type": "string",
+      "format": "date-time",
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\\.[0-9]{3})?Z$",
+      "description": "UTC drill start timestamp."
+    },
+    "completed_at": {
+      "type": "string",
+      "format": "date-time",
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\\.[0-9]{3})?Z$",
+      "description": "UTC drill completion timestamp."
+    },
+    "duration_ms": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 1800000,
+      "description": "The completed_at - started_at wall-clock duration, bounded to 30 minutes. JSON Schema bounds the value; the authoritative verifier enforces cross-field equality."
+    },
+    "outcome": {
+      "const": "passed",
+      "description": "W1.6 has one successful outcome; partial or failed evidence is not a closure artifact."
+    },
+    "scenarios": {
+      "type": "array",
+      "minItems": 6,
+      "maxItems": 6,
+      "uniqueItems": true,
+      "prefixItems": [
+        { "$ref": "#/$defs/provider_outage" },
+        { "$ref": "#/$defs/worker_restart" },
+        { "$ref": "#/$defs/limiter_outage" },
+        { "$ref": "#/$defs/uncertain_adjudication" },
+        { "$ref": "#/$defs/dead_letter_redrive" },
+        { "$ref": "#/$defs/prune_failure" }
+      ],
+      "items": false,
+      "description": "The six closed scenarios, each exactly once and in canonical order."
+    },
+    "aggregate_observations": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "scenario_count",
+        "passed_count",
+        "failed_count",
+        "alert_policy_rule_count",
+        "warning_alerts_observed",
+        "critical_alerts_observed",
+        "unauthorized_mutations",
+        "duplicate_provider_acceptances",
+        "forbidden_material_findings",
+        "active_claims",
+        "active_leases"
+      ],
+      "properties": {
+        "scenario_count": {
+          "const": 6
+        },
+        "passed_count": {
+          "const": 6
+        },
+        "failed_count": {
+          "const": 0
+        },
+        "alert_policy_rule_count": {
+          "const": 10
+        },
+        "warning_alerts_observed": {
+          "const": 10
+        },
+        "critical_alerts_observed": {
+          "const": 10
+        },
+        "unauthorized_mutations": {
+          "const": 0
+        },
+        "duplicate_provider_acceptances": {
+          "const": 0
+        },
+        "forbidden_material_findings": {
+          "const": 0
+        },
+        "active_claims": {
+          "const": 0,
+          "description": "No active claims at completion."
+        },
+        "active_leases": {
+          "const": 0,
+          "description": "No active leases at completion."
+        }
+      },
+      "description": "A fixed, aggregate-only observation set; no tenant, member, event, notification, or secret data is permitted."
+    }
+  },
+  "$defs": {
+    "scenario_base": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "outcome"],
+      "properties": { "name": { "type": "string" }, "outcome": { "const": "passed" } }
+    },
+    "provider_outage": { "allOf": [{ "$ref": "#/$defs/scenario_base" }, { "type": "object", "properties": { "name": { "const": "provider_outage" } } }] },
+    "worker_restart": { "allOf": [{ "$ref": "#/$defs/scenario_base" }, { "type": "object", "properties": { "name": { "const": "worker_restart" } } }] },
+    "limiter_outage": { "allOf": [{ "$ref": "#/$defs/scenario_base" }, { "type": "object", "properties": { "name": { "const": "limiter_outage" } } }] },
+    "uncertain_adjudication": { "allOf": [{ "$ref": "#/$defs/scenario_base" }, { "type": "object", "properties": { "name": { "const": "uncertain_adjudication" } } }] },
+    "dead_letter_redrive": { "allOf": [{ "$ref": "#/$defs/scenario_base" }, { "type": "object", "properties": { "name": { "const": "dead_letter_redrive" } } }] },
+    "prune_failure": { "allOf": [{ "$ref": "#/$defs/scenario_base" }, { "type": "object", "properties": { "name": { "const": "prune_failure" } } }] }
+  }
+}
