@@ -506,23 +506,34 @@ adds the organization-wide export ordering required to export device audit
 events whose source chains remain per-device. All three migrations are in the
 frozen catalog as versions 43-45.
 
-This checkpoint is not C2 or C3 completion. The audit repository still receives
-an injected snapshot reader; production code must derive every range, event,
-root, and key lifecycle binding from authoritative PostgreSQL rows in the same
-transaction. C3 has an approval authority but does not yet have the promotion
-issuance ledger, managed-signer transaction, or atomic deployment transition.
+The C2 snapshot-reader checkpoint is now implemented locally. Production code
+derives the admin, cloud-agent, and organization-global device ranges inside
+the reservation transaction, verifies source identity/sequence/linkage, folds
+a domain-separated cumulative export root, binds the active audit-anchor
+lifecycle, and exposes bounded public gap evidence for discontinuous per-device
+chains. Two real PostgreSQL 17 pools prove all three sources, RLS isolation,
+chunk-independent roots, gap disclosure, expired-claim authority reuse, replay,
+and concurrent reservation exclusion. PostgreSQL and hosted Cloud runtimes now
+compose the repository, audit signer, and a durable historical public-key
+resolver. C2 is still not complete: immutable payload bytes/retrieval and the
+Human BFF/API are intentionally not exposed yet. Admin v1 source hashes also
+remain linkage-only because the legacy writer hashed `JSON.stringify` before
+JSONB persistence; a versioned canonical writer/backfill is required before
+claiming independent source-preimage recomputation. C3 has an approval authority
+but does not yet have the promotion issuance ledger, managed-signer transaction,
+or atomic deployment transition.
 
 The next implementation commits, in dependency order, are:
 
-1. `C2-snapshot-reader`: read admin and cloud-agent organization sequences and
+1. `C2-snapshot-reader` — implemented locally: read admin and cloud-agent organization sequences and
    the migration-45 device export sequence in the reservation transaction;
    require a contiguous range and exact previous boundary; build one bounded,
    canonical payload; and return only repository-derived key/lifecycle data.
-2. `C2-postgres-qualification`: exercise reserve, expired-claim reclaim,
+2. `C2-postgres-qualification` — implemented locally for the current ledger/reader: exercise reserve, expired-claim reclaim,
    concurrent range exclusion, exact replay, commit-response loss, RLS, and
    restart across two real PostgreSQL pools. The test must prove that a reader
    cannot re-snapshot frozen authority during reclaim.
-3. `C2-runtime`: compose the ledger with the audit-purpose managed signer,
+3. `C2-runtime` — signer/repository/historical resolver composed locally; retrieval remains open: compose the ledger with the audit-purpose managed signer,
    exact output self-verification, historical key resolution, retrieval, and
    verification. Signer acceptance with an unknown commit outcome must become
    a durable uncertain state; no automatic second signature is allowed.

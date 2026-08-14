@@ -28,6 +28,8 @@ import { createHostedCapabilitySigner, CAPABILITY_SIGNER_PURPOSE, CAPABILITY_SIG
 import { createHostedControlBundleSigner, CONTROL_BUNDLE_MANAGED_SIGNER_PURPOSE, CONTROL_BUNDLE_MANAGED_SIGNER_PROTOCOL_VERSION } from "./control-bundle-managed-signer.mjs";
 import { createHostedAuditAnchorSigner } from "./audit-anchor-signer.mjs";
 import { AUDIT_ANCHOR_ALGORITHM, AUDIT_ANCHOR_PROTOCOL_VERSION, AUDIT_ANCHOR_PURPOSE } from "./audit-anchor-statement.mjs";
+import { createAuditAnchorPublicKeyResolver } from "./audit-anchor-public-key-resolver.mjs";
+import { createAuditExportIssuanceService } from "./audit-export-issuance.mjs";
 import { createHostedPromotionEvidenceSigner } from "./promotion-evidence-signer.mjs";
 import { PROMOTION_EVIDENCE_ALGORITHM, PROMOTION_EVIDENCE_PROTOCOL_VERSION, PROMOTION_EVIDENCE_PURPOSE } from "./promotion-evidence-statement.mjs";
 import { PROTOCOL_VERSION, REFRESH_HINT_SIGNATURE_ALGORITHM, REFRESH_HINT_TYPE } from "../../../packages/protocol/src/index.mjs";
@@ -57,6 +59,7 @@ export async function createCloudRuntime({ env = process.env, logger = console, 
   let capabilitySigner;
   let controlBundleSigner;
   let auditAnchorSigner;
+  let auditExportIssuanceService;
   let promotionEvidenceSigner;
   let ownedKmsProviders;
   let processBindingPolicies;
@@ -93,6 +96,7 @@ export async function createCloudRuntime({ env = process.env, logger = console, 
       }
       if (!postgresRuntime?.controlPlaneStore) throw new Error("PostgreSQL control-plane store is unavailable");
       if (!postgresRuntime?.agentSessionIssuanceRepository || !postgresRuntime?.agentSessionAuthorityRepository) throw new Error("PostgreSQL Agent Session authority is unavailable");
+      if (!postgresRuntime?.auditExportIssuanceRepository) throw new Error("PostgreSQL audit export authority is unavailable");
       if (!postgresRuntime?.sharedControlRepository || typeof postgresRuntime.sharedControlRepository.consumeDeviceRequestNonce !== "function" || typeof postgresRuntime.sharedControlRepository.acquireRateLimit !== "function" || typeof postgresRuntime.sharedControlRepository.acquireAnonymousRateLimit !== "function") throw new Error("PostgreSQL shared controls are unavailable");
       store = postgresRuntime.controlPlaneStore;
       if (typeof store.pollDeviceRefresh !== "function" || typeof store.markDeviceRefreshDelivered !== "function") throw new Error("PostgreSQL refresh polling is unavailable");
@@ -168,6 +172,12 @@ export async function createCloudRuntime({ env = process.env, logger = console, 
         lifecycleVersion: durableAuditAnchor.lifecycle.version,
         publicKey: config.auditAnchorPublicKey,
         timeoutMs: config.auditAnchorTimeoutMs
+      });
+      auditExportIssuanceService = createAuditExportIssuanceService({
+        repository: postgresRuntime.auditExportIssuanceRepository,
+        signer: auditAnchorSigner,
+        publicKeyResolver: createAuditAnchorPublicKeyResolver({ repository: durableAuditAnchor.repository }),
+        deploymentMode: "hosted"
       });
 
       const promotionEvidenceFingerprint = publicKeyFingerprint(config.promotionEvidencePublicKey);
@@ -387,6 +397,7 @@ export async function createCloudRuntime({ env = process.env, logger = console, 
     postgresRuntime,
     humanAuthRuntime,
     auditAnchorSigner,
+    auditExportIssuanceService,
     promotionEvidenceSigner,
     async listen() {
       if (server.listening) return server.address();

@@ -27,6 +27,8 @@ import { createPostgresManagedSignerKeyLifecycleRepository } from "./managed-sig
 import { createPostgresProviderOperationRepository } from "./provider-operation-repository.mjs";
 import { createPostgresProviderOperationMaintenanceRepository } from "./provider-operation-maintenance-repository.mjs";
 import { createManagedSignerProviderOperationMaintenanceWorker } from "./managed-signer-provider-operation-maintenance-worker.mjs";
+import { createPostgresAuditExportSnapshotReader } from "./audit-export-snapshot-reader.mjs";
+import { createPostgresAuditExportIssuanceRepository } from "./audit-export-issuance-repository.mjs";
 import {
   createDrainController,
   createOperationalHealth,
@@ -256,6 +258,11 @@ export async function createPostgresRuntime({ env = process.env, PoolClass = Poo
   };
   const organizationRepository = createPostgresOrganizationRepository({ client: pool, onAuthorityReduction });
   const capabilityAuthorityRepository = createCapabilityAuthorityRepository({ client: pool, onAuthorityReduction });
+  const auditExportSnapshotReader = createPostgresAuditExportSnapshotReader();
+  const auditExportIssuanceRepository = createPostgresAuditExportIssuanceRepository({
+    client: pool,
+    snapshotReader: auditExportSnapshotReader
+  });
   const controlPlaneStore = createPostgresControlPlaneStore({
     client: pool,
     organizationRepository,
@@ -291,6 +298,7 @@ export async function createPostgresRuntime({ env = process.env, PoolClass = Poo
     agentSessionLifecycleRepository,
     ...(agentSessionIssuanceRepository ? { agentSessionIssuanceRepository } : {}),
     qualificationGrantBatchRepository,
+    auditExportIssuanceRepository,
     createManagedSignerKeyLifecycleRepository: (options = {}) => createPostgresManagedSignerKeyLifecycleRepository({ ...options, client: pool }),
     createProviderOperationRepository: (options = {}) => createPostgresProviderOperationRepository({ ...options, client: pool }),
     providerOperationMaintenanceRepository,

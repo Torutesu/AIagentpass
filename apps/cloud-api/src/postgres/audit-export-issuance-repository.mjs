@@ -550,6 +550,16 @@ function assertPlainDataTree(value, seen = new Set(), depth = 0, allowClaimToken
   }
   if (depth > MAX_TREE_DEPTH || seen.has(value) || (!isObject(value) && !Array.isArray(value))) throw new Error("data tree");
   seen.add(value);
+  if (Array.isArray(value)) {
+    if (value.length > MAX_TREE_ITEMS || Reflect.ownKeys(value).length !== value.length + 1) throw new Error("tree size");
+    for (let index = 0; index < value.length; index += 1) {
+      const descriptor = Object.getOwnPropertyDescriptor(value, String(index));
+      if (!descriptor || !("value" in descriptor) || descriptor.enumerable !== true) throw new Error("tree descriptor");
+      assertPlainDataTree(descriptor.value, seen, depth + 1, false);
+    }
+    seen.delete(value);
+    return;
+  }
   const keys = Reflect.ownKeys(value);
   if (keys.length > MAX_TREE_ITEMS) throw new Error("tree size");
   for (const key of keys) {
