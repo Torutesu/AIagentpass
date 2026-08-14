@@ -107,6 +107,7 @@ test("GET summary aggregates tenant resources and bounded audit activity", async
   assert.equal(result.status, 200);
   assert.equal(result.headers.get("cache-control"), "no-store");
   const body = await result.json();
+  assert.equal(body.organization.organization_id, env.AGENTPASS_ORGANIZATION_ID);
   assert.equal(body.organization.name, "Acme");
   assert.equal(body.devices.length, 1);
   assert.equal(body.agents.length, 1);

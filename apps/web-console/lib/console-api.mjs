@@ -1287,12 +1287,17 @@ async function readConfig(injected) {
     cursorSecret,
     timeoutMs,
     allowInsecureLoopback,
-    secrets: [url, organizationId, cursorSecret, ...(legacy ? [token] : [])],
+    // The organization ID is a public tenant-binding field in every control
+    // plane read model. Redacting it breaks the browser's cross-tenant check.
+    secrets: [url, cursorSecret, ...(legacy ? [token] : [])],
   };
 }
 
 function sanitizeValue(value, secrets, key = "", seen = new WeakSet()) {
   if (SENSITIVE_KEY.test(key)) return "[redacted]";
+  // organization_id is an authenticated public tenant binding. Preserve a
+  // valid identifier even if an opaque session value happens to contain it.
+  if (key === "organization_id" && typeof value === "string" && UUID_OR_OPAQUE_ID.test(value)) return value;
   if (typeof value === "string") {
     return secrets.reduce((result, secret) => secret ? result.split(secret).join("[redacted]") : result, value);
   }
