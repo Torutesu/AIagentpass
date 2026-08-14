@@ -87,6 +87,7 @@ function devices() {
     bundle_sequence: 10,
     bundle_expires_at: ACTIVE_BUNDLE_EXPIRES_AT,
     last_ack_at: "2026-08-12T00:30:00.000Z",
+    blocked_reason: null,
   };
   return [
     { ...common, device_id: DEVICE_IDS[0], name: "同期済み Mac", status: "active", desired_generation: 1, observed_generation: 1, refresh_state: "applied" },
@@ -100,11 +101,17 @@ function devices() {
 
 function summary() {
   return {
-    organization: { name: "P0-B E2E Organization" },
+    organization: {
+      organization_id: ORGANIZATION_ID,
+      name: "P0-B E2E Organization",
+      slug: "p0-b-e2e",
+      created_at: "2026-08-12T00:00:00.000Z",
+      version: 1,
+    },
     devices: devices(),
     agents: [],
     policies: [],
-    audit: { activity: [] },
+    audit: { health: [], activity: [], next_cursor: null },
   };
 }
 
@@ -233,7 +240,7 @@ test.beforeEach(async ({ page, role, recentAuth, wakeStatuses, authorizationFail
   await installVirtualAuthenticator(page);
   await installRoutes(page, { role, recentAuth, wakeStatuses, authorizationFailure });
   await page.goto("/");
-  await expect(page.getByRole("heading", { name: "Agentは、" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: /Agentの状態を、\s*確認できました。/u })).toBeVisible();
   await expect(page.getByRole("heading", { name: "同期済み Mac" })).toBeVisible();
 });
 

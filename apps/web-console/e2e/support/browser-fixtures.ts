@@ -44,7 +44,13 @@ export function session(role: BrowserRole) {
 
 export function consoleSummary() {
   return {
-    organization: { name: "Browser E2E Organization" },
+    organization: {
+      organization_id: ORGANIZATION_ID,
+      name: "Browser E2E Organization",
+      slug: "browser-e2e",
+      created_at: "2026-08-12T00:00:00.000Z",
+      version: 1,
+    },
     devices: [{
       device_id: "41111111-1111-4111-8111-111111111111",
       name: "E2E Mac",
@@ -58,10 +64,11 @@ export function consoleSummary() {
       desired_generation: 1,
       observed_generation: 1,
       refresh_state: "applied",
+      blocked_reason: null,
     }],
     agents: [],
     policies: [],
-    audit: { activity: [] },
+    audit: { health: [], activity: [], next_cursor: null },
   };
 }
 

@@ -141,7 +141,7 @@ async function installSecurityRoutes(page: Page, mode: SecurityMode): Promise<Br
 
 async function openSetup(page: Page): Promise<void> {
   await page.goto("/");
-  await expect(page.getByRole("heading", { name: "Agentは、" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: /Agentの状態を、\s*確認できました。/u })).toBeVisible();
   await expect(page.getByRole("heading", { name: "E2E Mac" })).toBeVisible();
   await page.getByRole("button", { name: "セットアップ", exact: true }).click();
   await expect(page.getByRole("heading", { name: "パスキーを登録" })).toBeVisible();

@@ -105,7 +105,7 @@ async function installOrganizationRoutes(page: Page, role: BrowserRole): Promise
 
 async function openOrganizationAdmin(page: Page): Promise<void> {
   await page.goto("/");
-  await expect(page.getByRole("heading", { name: "Agentは、" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: /Agentの状態を、\s*確認できました。/u })).toBeVisible();
   await expect(page.getByRole("heading", { name: "E2E Mac" })).toBeVisible();
   await page.getByRole("button", { name: "Organizations", exact: true }).click();
   await expect(page.getByRole("heading", { name: "組織を安全に管理する" })).toBeVisible();
