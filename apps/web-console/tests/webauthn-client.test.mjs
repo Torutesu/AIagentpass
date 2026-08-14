@@ -107,6 +107,33 @@ test("posts options, runs startAuthentication, verifies, and returns only author
   assert.equal(calls[1].url.includes(challenge), false);
 });
 
+test("binds the same resource context hash to options and verification", async () => {
+  const calls = [];
+  const contextHash = "ab".repeat(32);
+  await authenticateRecentAuth({
+    operation: "human.recovery.outbox.redrive",
+    organizationId,
+    csrfToken,
+    contextHash,
+    fetchImpl: successfulTransport(calls),
+    startAuthenticationImpl: async () => assertion,
+  });
+  assert.deepEqual(JSON.parse(calls[0].init.body), {
+    organization_id: organizationId,
+    operation: "human.recovery.outbox.redrive",
+    context_hash: contextHash,
+  });
+  assert.equal(JSON.parse(calls[1].init.body).context_hash, contextHash);
+  await assert.rejects(() => authenticateRecentAuth({
+    operation: "human.recovery.outbox.redrive",
+    organizationId,
+    csrfToken,
+    contextHash: "not-a-context-hash",
+    fetchImpl: successfulTransport([]),
+    startAuthenticationImpl: async () => assertion,
+  }), (error) => error instanceof WebAuthnClientError && error.code === "invalid_input");
+});
+
 test("posts strict registration options, runs startRegistration, and returns only completion state", async () => {
   const calls = [];
   const registrationCalls = [];

@@ -9,6 +9,8 @@ const RECOVERY_STATES = new Set(["pending", "approved", "delayed", "session_issu
 const RECOVERY_STAGES = new Set(["session_issued", "credential_enrolled", "activated", "revoked", "expired"]);
 const ROLES = new Set(["owner", "admin", "auditor", "viewer"]);
 
+export { createOwnerRecoveryDeadLetterClient, ownerRecoveryDeadLetterContextHash, OwnerRecoveryDeadLetterApiError, OWNER_RECOVERY_DEAD_LETTER_PATHS } from "./owner-recovery-dead-letter-api.mjs";
+
 export class OwnerRecoveryApiError extends Error {
   constructor(code, message, status, serverCode) {
     super(message);

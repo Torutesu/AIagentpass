@@ -52,7 +52,7 @@ export function createRecentAuthService({ ceremony, sessionRepository } = {}) {
     });
     if (!consumed) return failure(principal, organization_id, operation, now);
     if ((consumed.context_hash ?? undefined) !== context_hash) return failure(principal, organization_id, operation, now);
-    const authenticatedAt = Date.parse(consumed.authenticated_at);
+    const authenticatedAt = timestampMillis(consumed.authenticated_at);
     if (!Number.isSafeInteger(authenticatedAt)) return failure(principal, organization_id, operation, now);
     return Object.freeze({ verified: true, consumed: true, challenge_id: proof.toLowerCase(), member_id: principal.member_id, organization_id, operation, authenticated_at: authenticatedAt, ...(context_hash === undefined ? {} : { context_hash }) });
   };
@@ -68,6 +68,11 @@ function optionalContextHash(value) {
   if (value === undefined) return undefined;
   if (typeof value !== "string" || !CONTEXT_HASH.test(value)) throw new TypeError("context_hash is invalid");
   return value;
+}
+
+function timestampMillis(value) {
+  const parsed = value instanceof Date ? value.getTime() : typeof value === "number" ? value : Date.parse(value);
+  return Number.isSafeInteger(parsed) && parsed >= 0 ? parsed : NaN;
 }
 
 function failure(principal, organizationId, operation, now) {

@@ -3,7 +3,8 @@
 import { startAuthentication, startRegistration } from "@simplewebauthn/browser";
 import { useEffect, useMemo, useState } from "react";
 import { authenticateRecentAuth } from "../webauthn-client";
-import { createOwnerRecoveryClient, getOwnerRecoveryVisibility, OwnerRecoveryApiError } from "../../lib/owner-recovery-api.mjs";
+import { createOwnerRecoveryClient, createOwnerRecoveryDeadLetterClient, getOwnerRecoveryVisibility, ownerRecoveryDeadLetterContextHash, OwnerRecoveryApiError } from "../../lib/owner-recovery-api.mjs";
+import { OwnerRecoveryDeadLetterPanel, type OwnerRecoveryDeadLetterApi, type RequestRecoveryRecentAuth } from "./OwnerRecoveryDeadLetterPanel";
 
 type RecoveryRecord = Readonly<Record<string, unknown>>;
 type RecoveryClient = ReturnType<typeof createOwnerRecoveryClient>;
@@ -47,8 +48,14 @@ function stateLabel(state: unknown): string {
   return ({ pending: "承認待ち", approved: "承認完了", delayed: "固定待機中", session_issued: "復旧セッション発行済み", credential_enrolled: "新しいパスキー登録済み", activated: "復旧完了", cancelled: "キャンセル済み", expired: "期限切れ", failed: "失敗" } as Record<string, string>)[String(state)] ?? "状態不明";
 }
 
-export function OwnerRecoveryPanel() {
+type OwnerRecoveryPanelProps = Readonly<{
+  deadLetterApi?: OwnerRecoveryDeadLetterApi;
+  requestRecentAuth?: RequestRecoveryRecentAuth;
+}>;
+
+export function OwnerRecoveryPanel({ deadLetterApi, requestRecentAuth }: OwnerRecoveryPanelProps = {}) {
   const client = useMemo<RecoveryClient>(() => createOwnerRecoveryClient(), []);
+  const deadLetterClient = useMemo(() => createOwnerRecoveryDeadLetterClient(), []);
   const [role, setRole] = useState<string | null>(null);
   const [organizationId, setOrganizationId] = useState("");
   const [requestId, setRequestId] = useState("");
@@ -62,6 +69,17 @@ export function OwnerRecoveryPanel() {
   const [error, setError] = useState("");
 
   const visibility = getOwnerRecoveryVisibility(role ?? "");
+  const effectiveDeadLetterApi = useMemo<OwnerRecoveryDeadLetterApi>(() => deadLetterApi ?? Object.freeze({
+    listDeadLetters: ({ organizationId: targetOrganizationId, limit, cursor, signal }) => deadLetterClient.listDeadLetters(targetOrganizationId, { limit, cursor, signal }),
+    redriveDeadLetter: async ({ organizationId: targetOrganizationId, eventId, expectedManagementVersion, authorizationId, idempotencyKey, signal }) => (await deadLetterClient.redriveDeadLetter(targetOrganizationId, eventId, expectedManagementVersion, authorizationId, { idempotencyKey, signal })).deadLetter,
+    suppressDeadLetter: async ({ organizationId: targetOrganizationId, eventId, expectedManagementVersion, reason, authorizationId, idempotencyKey, signal }) => (await deadLetterClient.suppressDeadLetter(targetOrganizationId, eventId, expectedManagementVersion, reason, authorizationId, { idempotencyKey, signal })).deadLetter,
+  }), [deadLetterApi, deadLetterClient]);
+  const effectiveRecentAuth = useMemo<RequestRecoveryRecentAuth>(() => requestRecentAuth ?? (async ({ organizationId: targetOrganizationId, eventId, action, expectedManagementVersion, operation, signal }) => {
+    const session = await deadLetterClient.getSession({ signal });
+    if (session.organizationId !== targetOrganizationId) throw new Error("organization session mismatch");
+    const contextHash = await ownerRecoveryDeadLetterContextHash({ organizationId: targetOrganizationId, eventId, action, expectedManagementVersion });
+    return authenticateRecentAuth({ operation, organizationId: targetOrganizationId, csrfToken: session.csrfToken, contextHash, signal });
+  }), [deadLetterClient, requestRecentAuth]);
 
   useEffect(() => {
     let active = true;
@@ -135,7 +153,12 @@ export function OwnerRecoveryPanel() {
     } catch (reason) { setError(errorMessage(reason)); } finally { setPending(""); }
   };
 
-  if (loading || !visibility.canView) return null;
+  if (loading) return null;
+  if (!visibility.canView) {
+    return role === "admin" ? <main className="owner-recovery-panel" style={styles.shell} aria-label="復旧通知の失敗管理">
+      <OwnerRecoveryDeadLetterPanel organizationId={organizationId} role={role} api={effectiveDeadLetterApi} requestRecentAuth={effectiveRecentAuth} />
+    </main> : null;
+  }
   const state = String(recovery?.state ?? "");
   const threshold = Number(eligibility?.threshold ?? recovery?.threshold ?? 2);
   const ownerCount = Number(eligibility?.eligible_owner_count ?? 0);
@@ -164,5 +187,6 @@ export function OwnerRecoveryPanel() {
     </section>
     {recovery ? <section style={styles.card} aria-labelledby="owner-recovery-action-title"><h2 id="owner-recovery-action-title" style={styles.title}>3. 承認と復旧セッション</h2><p style={styles.muted}>承認はOwner本人の新しいPasskey確認が必要です。承認後は固定待機を経て、一度だけ交換値を使えます。</p><div style={styles.actions}>{["pending", "approved"].includes(state) ? <button type="button" style={styles.button} onClick={() => void approve()} disabled={pending !== ""}>{pending === "approve" ? "確認中…" : "Ownerとして承認する"}</button> : null}{exchange ? <button type="button" style={styles.button} onClick={() => void exchangeOnce()} disabled={pending !== ""}>{pending === "exchange" ? "交換中…" : "一度だけ表示された交換値を使う"}</button> : null}{["pending", "approved", "delayed", "session_issued", "credential_enrolled"].includes(state) ? <button type="button" style={styles.danger} onClick={() => void cancel()} disabled={pending !== ""}>{pending === "cancel" ? "キャンセル中…" : "復旧をキャンセル"}</button> : null}</div>{exchange ? <div><p style={styles.muted}>交換値（一度だけ表示・保存しません）</p><code style={styles.secret} data-testid="recovery-exchange-value">{exchange}</code><p style={styles.muted}>この値はブラウザの保存領域、URL、ログには保存しません。使うか、この画面を閉じると消えます。</p></div> : null}</section> : null}
     {activation ? <section style={styles.card} aria-labelledby="owner-recovery-activate-title"><h2 id="owner-recovery-activate-title" style={styles.title}>4. 新しいパスキーを有効化</h2><p style={styles.muted}>登録直後に、このパスキーでWebAuthn確認を行います。成功すると復旧セッションと以前の通常セッションが無効になります。</p><button type="button" style={styles.button} onClick={() => void activate()} disabled={pending !== ""}>{pending === "activate" ? "有効化中…" : "新しいパスキーを有効化"}</button></section> : null}
+    <OwnerRecoveryDeadLetterPanel organizationId={organizationId} role={role} api={effectiveDeadLetterApi} requestRecentAuth={effectiveRecentAuth} />
   </main>;
 }

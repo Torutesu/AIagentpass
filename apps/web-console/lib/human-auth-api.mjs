@@ -203,6 +203,10 @@ function validateBody(value, shape) {
     if (!isExactObject(value, ["one_time_token"]) || !isOpaqueInvitationToken(value.one_time_token)) fail(400, "invalid_request", "The invitation request is invalid");
     return;
   }
+  if (shape === "recovery-outbox-suppress") {
+    if (!isExactObject(value, ["reason"]) || !isSafeReason(value.reason)) fail(400, "invalid_request", "The recovery outbox request is invalid");
+    return;
+  }
   fail(500, "human_auth_bridge_failed", "Authentication is unavailable");
 }
 
@@ -347,6 +351,11 @@ function resolveOrganizationRoute(pathname) {
   if (segments.length < 5 || segments[1] !== "api" || segments[2] !== "auth" || segments[3] !== "organizations" || !isUuid(segments[4])) return undefined;
   const organizationId = segments[4].toLowerCase();
   if (segments.length === 5) return { cloudPath: `/api/auth/organizations/${organizationId}`, methods: ["PATCH"], body: "organization-rename", requireCookie: true, requireCsrf: true, requireIdempotency: true, requireIfMatch: true };
+  if (segments[5] === "recovery-outbox" && segments[6] === "dead-letters") {
+    if (segments.length === 7) return { cloudPath: `/api/auth/organizations/${organizationId}/recovery-outbox/dead-letters`, methods: ["GET"], queryMethods: ["GET"], body: "none", requireCookie: true, requireCsrf: true };
+    if (segments.length === 9 && isUuid(segments[7]) && (segments[8] === "redrive" || segments[8] === "suppress")) return { cloudPath: `/api/auth/organizations/${organizationId}/recovery-outbox/dead-letters/${segments[7].toLowerCase()}/${segments[8]}`, methods: ["POST"], body: segments[8] === "suppress" ? "recovery-outbox-suppress" : "empty", requireCookie: true, requireCsrf: true, requireIdempotency: true, requireRecentAuth: true, requireIfMatch: true };
+    return undefined;
+  }
   if (segments[5] === "members") {
     if (segments.length === 6) return { cloudPath: `/api/auth/organizations/${organizationId}/members`, methods: ["GET"], queryMethods: ["GET"], body: "none", requireCookie: true, requireCsrf: true };
     if (segments.length === 8 && isUuid(segments[6]) && segments[7] === "role") return { cloudPath: `/api/auth/organizations/${organizationId}/members/${segments[6].toLowerCase()}/role`, methods: ["PATCH"], body: "member-role", requireCookie: true, requireCsrf: true, requireIdempotency: true, requireRecentAuth: true, requireIfMatch: true };
@@ -383,6 +392,7 @@ function isCredentialId(value) { return typeof value === "string" && /^[A-Za-z0-
 function isUuid(value) { return typeof value === "string" && /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value); }
 function isSafeLabel(value) { return typeof value === "string" && value.length >= 1 && value.length <= 80 && value.trim() === value && !hasControl(value); }
 function isSafeName(value) { return typeof value === "string" && value.length >= 1 && value.length <= 128 && value.trim() === value && !hasControl(value); }
+function isSafeReason(value) { return typeof value === "string" && value.length >= 1 && value.length <= 128 && value.trim() === value && new TextEncoder().encode(value).byteLength <= 128 && !hasControl(value); }
 function isRfc3339(value) { return typeof value === "string" && /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?(?:Z|[+-]\d{2}:\d{2})$/.test(value) && Number.isFinite(Date.parse(value)); }
 function isOpaqueInvitationToken(value) { return typeof value === "string" && /^[A-Za-z0-9_-]{43,512}$/.test(value); }
 function isIdempotencyKey(value) { return typeof value === "string" && /^[A-Za-z0-9._~-]{8,255}$/.test(value); }

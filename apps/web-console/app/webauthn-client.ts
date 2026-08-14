@@ -22,6 +22,7 @@ const MAX_PUB_KEY_CRED_PARAMS = 32;
 const MAX_ATTESTATION_FORMATS = 16;
 const MAX_OPERATION_LENGTH = 128;
 const MAX_ORGANIZATION_ID_LENGTH = 64;
+const CONTEXT_HASH = /^[0-9a-f]{64}$/;
 
 const OPTION_KEYS = new Set([
   "challenge",
@@ -71,6 +72,7 @@ export type WebAuthnClientInput = Readonly<{
   operation: string;
   organizationId: string;
   csrfToken: string;
+  contextHash?: string;
   signal?: AbortSignal;
   optionsPath?: string;
   verifyPath?: string;
@@ -115,6 +117,7 @@ export async function authenticateRecentAuth(input: WebAuthnClientInput): Promis
   const operation = requiredBoundedString(input?.operation, MAX_OPERATION_LENGTH, "operation");
   const organizationId = requiredBoundedString(input?.organizationId, MAX_ORGANIZATION_ID_LENGTH, "organizationId");
   const csrfToken = requiredBoundedString(input?.csrfToken, 512, "csrfToken");
+  const contextHash = optionalContextHash(input?.contextHash);
   const signal = input?.signal;
   assertAbortSignal(signal);
   throwIfAborted(signal);
@@ -130,6 +133,7 @@ export async function authenticateRecentAuth(input: WebAuthnClientInput): Promis
   const optionsResponse = await postJson(fetchImpl, optionsPath, {
     organization_id: organizationId,
     operation,
+    ...(contextHash === undefined ? {} : { context_hash: contextHash }),
   }, csrfToken, signal);
   const challenge = validateOptionsResponse(optionsResponse);
   throwIfAborted(signal);
@@ -139,6 +143,7 @@ export async function authenticateRecentAuth(input: WebAuthnClientInput): Promis
   const verified = await postJson(fetchImpl, verifyPath, {
     organization_id: organizationId,
     operation,
+    ...(contextHash === undefined ? {} : { context_hash: contextHash }),
     challenge_id: challenge.challenge_id,
     credential: validateAssertion(assertion),
   }, csrfToken, signal);
@@ -209,6 +214,12 @@ function assertAbortSignal(signal: AbortSignal | undefined): void {
   if (!signal || typeof signal !== "object" || typeof signal.aborted !== "boolean" || typeof signal.addEventListener !== "function" || typeof signal.removeEventListener !== "function") {
     throw new TypeError("signal must be an AbortSignal");
   }
+}
+
+function optionalContextHash(value: string | undefined): string | undefined {
+  if (value === undefined) return undefined;
+  if (!CONTEXT_HASH.test(value)) throw new WebAuthnClientError("invalid_input", "contextHash is invalid");
+  return value;
 }
 
 function throwIfAborted(signal: AbortSignal | undefined): void {

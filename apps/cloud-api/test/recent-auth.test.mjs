@@ -87,3 +87,22 @@ test("binds an optional resource context through begin, verify, and authorize", 
   await assert.rejects(() => service.verify({ session, organization_id: session.organization_id, operation, context_hash: "b".repeat(64), assertion: {} }), /context binding/);
   await assert.rejects(() => service.verify({ session, organization_id: session.organization_id, operation, context_hash: "A".repeat(64), assertion: {} }), /context_hash is invalid/);
 });
+
+test("preserves PostgreSQL Date millisecond precision in an authorization", async () => {
+  const precise = new Date("2026-08-12T00:00:00.137Z");
+  const service = createRecentAuthService({
+    ceremony: { begin() {}, async consume() {} },
+    sessionRepository: {
+      async bindRecentAuth() { return true; },
+      async consumeRecentAuth() { return { authenticated_at: precise }; },
+    },
+  });
+  const result = await service.authorize({
+    proof: challengeId,
+    principal: { session_id: session.session_id, member_id: session.member_id },
+    organization_id: session.organization_id,
+    operation,
+    now: precise.getTime() + 1,
+  });
+  assert.equal(result.authenticated_at, precise.getTime());
+});

@@ -32,7 +32,12 @@ This is not yet a production release. Browser qualification, complete Console op
 
 ### W0 — close recovery dead-letter operations
 
-State: in progress.
+State: in progress. Slices 1–3 are implemented and locally verified on
+2026-08-14, including the real-PostgreSQL race matrix, strict BFF/client, and
+Owner/Admin UI. The implementation also fixed millisecond precision loss when
+PostgreSQL returns `recent_auth_at` as a JavaScript `Date`; without that fix,
+the repository's exact authorization revalidation could reject a valid proof.
+Slice 4's full Playwright virtual-WebAuthn browser journey remains open.
 
 Merge slices:
 
