@@ -1,0 +1,102 @@
+import assert from "node:assert/strict";
+import test from "node:test";
+
+import { createOperationalMetrics } from "../../src/postgres/operational-health.mjs";
+import { createOwnerRecoveryOutboxWorker } from "../../src/postgres/owner-recovery-outbox-worker.mjs";
+
+const NOW = Date.parse("2026-08-14T00:00:00.000Z");
+const CLAIM = "C".repeat(43);
+const EVENT = Object.freeze({
+  organization_id: "11111111-1111-4111-8111-111111111111",
+  event_id: "22222222-2222-4222-8222-222222222222",
+  request_id: "33333333-3333-4333-8333-333333333333",
+  subject_member_id: "44444444-4444-4444-8444-444444444444",
+  event_type: "recovery.request.created",
+  attempt: 1,
+  claim_expires_at: new Date(NOW + 30_000).toISOString(),
+  created_at: new Date(NOW - 500).toISOString()
+});
+
+test("publishes only the public event with event_id idempotency and marks exact claim", async () => {
+  const calls = [];
+  const metrics = createOperationalMetrics();
+  const repository = fixtureRepository(calls);
+  const publisher = { async publish(input) { calls.push(["publish", input]); return { accepted: true }; } };
+  const worker = createOwnerRecoveryOutboxWorker({ repository, publisher, metrics, now: () => NOW, random: () => 0 });
+  const result = await worker.runOnce();
+  assert.deepEqual(result, { claimed: 1, published: 1, retried: 0, dead_lettered: 0, claim_lost: 0 });
+  const publish = calls.find(([name]) => name === "publish")[1];
+  assert.equal(publish.idempotency_key, EVENT.event_id);
+  assert.deepEqual(Object.keys(publish.event).sort(), ["created_at", "event_id", "event_type", "kind", "organization_id", "request_id", "schema_version", "subject_member_id"]);
+  assert.equal(JSON.stringify(publish).includes(CLAIM), false);
+  assert.deepEqual(calls.find(([name]) => name === "published")[1], { organization_id: EVENT.organization_id, event_id: EVENT.event_id, attempt: 1, claim_token: CLAIM });
+  const counters = metrics.snapshot().counters;
+  assert.equal(counters.owner_recovery_outbox_claim_total, 1);
+  assert.equal(counters.owner_recovery_outbox_publish_total, 1);
+  assert.equal(counters.owner_recovery_outbox_lag_count, 1);
+  assert.equal(counters.owner_recovery_outbox_lag_total_ms, 500);
+});
+
+test("provider failures schedule bounded exponential retry without retaining diagnostics", async () => {
+  const calls = [];
+  const repository = fixtureRepository(calls);
+  const worker = createOwnerRecoveryOutboxWorker({
+    repository,
+    publisher: { async publish() { throw new Error("provider diagnostic must-not-persist"); } },
+    now: () => NOW,
+    random: () => 0,
+    baseRetryMs: 1_000
+  });
+  const result = await worker.runOnce();
+  assert.equal(result.retried, 1);
+  const failure = calls.find(([name]) => name === "failed")[1];
+  assert.equal(failure.error_code, "publisher_unavailable");
+  assert.equal(failure.retry_at, new Date(NOW + 1_000).toISOString());
+  assert.equal(JSON.stringify(failure).includes("must-not-persist"), false);
+});
+
+test("attempt 100 is dead-lettered and claim loss cannot acknowledge another worker", async () => {
+  const calls = [];
+  const repository = fixtureRepository(calls, { event: { ...EVENT, attempt: 100 }, failed: { dead_letter: true, retry_at: null } });
+  const metrics = createOperationalMetrics();
+  const worker = createOwnerRecoveryOutboxWorker({ repository, publisher: { async publish() { return { accepted: false }; } }, metrics, now: () => NOW, random: () => 0 });
+  const result = await worker.runOnce();
+  assert.equal(result.dead_lettered, 1);
+  assert.equal(metrics.snapshot().counters.owner_recovery_outbox_dead_letter_total, 1);
+
+  const lost = fixtureRepository([], { publishError: Object.assign(new Error("stale"), { code: "owner_recovery_outbox_claim_lost" }), failedError: Object.assign(new Error("stale"), { code: "owner_recovery_outbox_claim_lost" }) });
+  const lostWorker = createOwnerRecoveryOutboxWorker({ repository: lost, publisher: { async publish() { return { accepted: true }; } }, now: () => NOW, random: () => 0 });
+  assert.equal((await lostWorker.runOnce()).claim_lost, 1);
+});
+
+test("drain is bounded, prevents new work, and closes after active delivery settles", async () => {
+  let resolvePublish;
+  const pendingPublish = new Promise((resolve) => { resolvePublish = resolve; });
+  const repository = fixtureRepository([]);
+  const worker = createOwnerRecoveryOutboxWorker({ repository, publisher: { publish: () => pendingPublish }, now: () => NOW, random: () => 0 });
+  const running = worker.runOnce();
+  await new Promise((resolve) => setImmediate(resolve));
+  const first = await worker.drain({ timeout_ms: 0 });
+  assert.equal(first.drained, false);
+  assert.equal(first.state, "draining");
+  await assert.rejects(() => worker.runOnce(), (error) => error.code === "owner_recovery_outbox_worker_closed");
+  resolvePublish({ accepted: true });
+  await running;
+  const second = await worker.drain({ timeout_ms: 100 });
+  assert.equal(second.drained, true);
+  assert.equal(second.state, "closed");
+});
+
+function fixtureRepository(calls, overrides = {}) {
+  let claimed = false;
+  return {
+    async claimBatch(input) {
+      calls.push(["claim", input]);
+      if (claimed) return { claim_token: CLAIM, events: [] };
+      claimed = true;
+      return { claim_token: CLAIM, events: [overrides.event ?? EVENT] };
+    },
+    async markPublished(input) { calls.push(["published", input]); if (overrides.publishError) throw overrides.publishError; return { published: true }; },
+    async markFailed(input) { calls.push(["failed", input]); if (overrides.failedError) throw overrides.failedError; return overrides.failed ?? { dead_letter: false, retry_at: input.retry_at }; }
+  };
+}

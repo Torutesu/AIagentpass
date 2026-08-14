@@ -61,7 +61,7 @@ test("PostgreSQL runtime exposes exact-schema readiness, tracked work, and bound
   const migrations = await loadSqlMigrations();
   const runtime = await createPostgresRuntime({ env: env(), PoolClass: FakePool, applicationVersion: "runtime-readiness-test", resolveProcessBindingPolicy: () => true });
   assert.equal(runtime.pool.applied.length, migrations.length);
-  assert.equal(migrations.length, 28);
+  assert.equal(migrations.length, 29);
   assert.equal((await runtime.readiness()).code, "ready");
   assert.equal(typeof runtime.agentSessionIssuanceRepository?.issueAgentSessionGrant, "function");
   assert.equal(typeof runtime.agentSessionConsumptionRepository?.consumeAgentSessionGrant, "function");
@@ -73,6 +73,7 @@ test("PostgreSQL runtime exposes exact-schema readiness, tracked work, and bound
   assert.equal(typeof runtime.ownerRecoveryRepository?.activateRecoveryInTransaction, "function");
   assert.equal(typeof runtime.ownerRecoveryWebAuthnRepository?.begin, "function");
   assert.equal(typeof runtime.ownerRecoveryWebAuthnRepository?.complete, "function");
+  assert.equal(typeof runtime.ownerRecoveryOutboxRepository?.claimBatch, "function");
 
   let finish;
   const inFlight = runtime.trackInFlight(() => new Promise((resolve) => { finish = resolve; }));
@@ -90,4 +91,19 @@ test("PostgreSQL runtime exposes exact-schema readiness, tracked work, and bound
   assert.equal(runtime.pool.ended, true);
   assert.equal((await runtime.readiness()).code, "closed");
   await runtime.close();
+});
+
+test("PostgreSQL runtime wires an injected owner recovery publisher without starting it when disabled", async () => {
+  const publisher = { async publish() { return { accepted: true }; } };
+  const runtime = await createPostgresRuntime({
+    env: env(),
+    PoolClass: FakePool,
+    ownerRecoveryPublisher: publisher,
+    ownerRecoveryOutboxAutoStart: false
+  });
+  assert.equal(runtime.ownerRecoveryOutboxWorker.snapshot().state, "idle");
+  assert.equal(typeof runtime.ownerRecoveryOutboxWorker.runOnce, "function");
+  await runtime.close();
+  assert.equal(runtime.ownerRecoveryOutboxWorker.snapshot().state, "closed");
+  assert.equal(runtime.pool.ended, true);
 });

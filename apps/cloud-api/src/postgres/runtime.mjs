@@ -11,6 +11,8 @@ import { createPostgresRefreshHintNotifier } from "./refresh-hint-notifier.mjs";
 import { createPostgresAdminAuditRepository } from "./admin-audit-repository.mjs";
 import { createPostgresOwnerRecoveryRepository } from "./owner-recovery-repository.mjs";
 import { createPostgresOwnerRecoveryWebAuthnRepository } from "./owner-recovery-webauthn-repository.mjs";
+import { createPostgresOwnerRecoveryOutboxRepository } from "./owner-recovery-outbox-repository.mjs";
+import { createOwnerRecoveryOutboxWorker } from "./owner-recovery-outbox-worker.mjs";
 import { createAgentSessionAuthorityRepository } from "./agent-session-authority-repository.mjs";
 import { createPostgresAgentSessionConsumptionRepository } from "./agent-session-consumption-repository.mjs";
 import { createPostgresAgentSessionLifecycleRepository } from "./agent-session-lifecycle-repository.mjs";
@@ -23,8 +25,9 @@ import {
   createOperationalMetrics
 } from "./operational-health.mjs";
 
-export async function createPostgresRuntime({ env = process.env, PoolClass = Pool, applicationVersion = "unknown", refreshNonceCodec, resolveProcessBindingPolicy } = {}) {
+export async function createPostgresRuntime({ env = process.env, PoolClass = Pool, applicationVersion = "unknown", refreshNonceCodec, resolveProcessBindingPolicy, ownerRecoveryPublisher, ownerRecoveryOutboxAutoStart = true, ownerRecoveryOutboxWorkerOptions = {} } = {}) {
   if (resolveProcessBindingPolicy !== undefined && typeof resolveProcessBindingPolicy !== "function") throw new TypeError("resolveProcessBindingPolicy must be a function");
+  if (typeof ownerRecoveryOutboxAutoStart !== "boolean" || !ownerRecoveryOutboxWorkerOptions || typeof ownerRecoveryOutboxWorkerOptions !== "object" || Array.isArray(ownerRecoveryOutboxWorkerOptions)) throw new TypeError("owner recovery outbox runtime configuration is invalid");
   const config = loadPostgresConfig(env);
   const pool = new PoolClass({ connectionString: config.connectionString, ssl: { rejectUnauthorized: true }, max: config.maxConnections, connectionTimeoutMillis: config.connectionTimeoutMs, idleTimeoutMillis: config.idleTimeoutMs, statement_timeout: config.statementTimeoutMs, lock_timeout: config.lockTimeoutMs, query_timeout: config.statementTimeoutMs + 1_000, allowExitOnIdle: false });
   const migrationRunner = createMigrationRunner({ client: pool, applicationVersion });
@@ -41,6 +44,8 @@ export async function createPostgresRuntime({ env = process.env, PoolClass = Poo
   }
   client.release();
   let closed = false;
+  let closePoolPromise;
+  let ownerRecoveryOutboxWorker;
   const drainController = createDrainController();
   const operationalMetrics = createOperationalMetrics();
   const refreshHintNotifier = createPostgresRefreshHintNotifier({ pool, metrics: operationalMetrics });
@@ -53,9 +58,17 @@ export async function createPostgresRuntime({ env = process.env, PoolClass = Poo
   });
   async function closePool() {
     if (closed) return;
-    closed = true;
-    await refreshHintNotifier.close();
-    await pool.end();
+    if (closePoolPromise) return closePoolPromise;
+    closePoolPromise = (async () => {
+      if (ownerRecoveryOutboxWorker) {
+        const result = await ownerRecoveryOutboxWorker.drain();
+        if (result.drained !== true) throw Object.assign(new Error("Owner recovery outbox worker drain timed out"), { code: "owner_recovery_outbox_worker_drain_timeout" });
+      }
+      await refreshHintNotifier.close();
+      await pool.end();
+      closed = true;
+    })();
+    try { await closePoolPromise; } catch (error) { closePoolPromise = undefined; throw error; }
   }
   async function close() {
     return drainController.close(closePool);
@@ -71,6 +84,16 @@ export async function createPostgresRuntime({ env = process.env, PoolClass = Poo
     auditRepository: adminAuditRepository
   });
   const ownerRecoveryWebAuthnRepository = createPostgresOwnerRecoveryWebAuthnRepository({ client: pool });
+  const ownerRecoveryOutboxRepository = createPostgresOwnerRecoveryOutboxRepository({ client: pool });
+  if (ownerRecoveryPublisher !== undefined) {
+    ownerRecoveryOutboxWorker = createOwnerRecoveryOutboxWorker({
+      ...ownerRecoveryOutboxWorkerOptions,
+      repository: ownerRecoveryOutboxRepository,
+      publisher: ownerRecoveryPublisher,
+      metrics: operationalMetrics
+    });
+    if (ownerRecoveryOutboxAutoStart) ownerRecoveryOutboxWorker.start();
+  }
   const agentSessionAuthorityRepository = createAgentSessionAuthorityRepository({ client: pool });
   const sharedControlRepository = createSharedControlRepository({ client: pool });
   const agentSessionConsumptionRepository = createPostgresAgentSessionConsumptionRepository({
@@ -150,6 +173,8 @@ export async function createPostgresRuntime({ env = process.env, PoolClass = Poo
     qualificationGrantBatchRepository,
     ownerRecoveryRepository,
     ownerRecoveryWebAuthnRepository,
+    ownerRecoveryOutboxRepository,
+    ...(ownerRecoveryOutboxWorker ? { ownerRecoveryOutboxWorker } : {}),
     sharedControlRepository,
     controlPlaneStore,
     refreshHintNotifier,

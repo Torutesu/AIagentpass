@@ -1,5 +1,5 @@
 export const OPERATIONAL_HEALTH_VERSION = 1;
-export const EXPECTED_POSTGRES_SCHEMA_VERSION = 28;
+export const EXPECTED_POSTGRES_SCHEMA_VERSION = 29;
 
 // Recovery operations are deliberately a closed set.  These names are also
 // the admission-control names used by human-auth/rate-limit.mjs; keeping the
@@ -66,6 +66,14 @@ export const OPERATIONAL_METRIC_KEYS = Object.freeze([
   "human_auth_replay_denial_total",
   "human_auth_verifier_timeout_total",
   "human_auth_stale_claim_recovery_total",
+  "owner_recovery_outbox_claim_total",
+  "owner_recovery_outbox_publish_total",
+  "owner_recovery_outbox_retry_total",
+  "owner_recovery_outbox_dead_letter_total",
+  "owner_recovery_outbox_claim_lost_total",
+  "owner_recovery_outbox_failure_total",
+  "owner_recovery_outbox_lag_count",
+  "owner_recovery_outbox_lag_total_ms",
   ...Object.values(HUMAN_RECOVERY_METRIC_KEYS)
 ]);
 
@@ -118,6 +126,13 @@ export function createOperationalMetrics({ initial = {} } = {}) {
     return counters.agent_session_signer_latency_total_ms;
   }
 
+  function recordOwnerRecoveryOutboxLag(milliseconds) {
+    if (arguments.length !== 1 || !Number.isSafeInteger(milliseconds) || milliseconds < 0) throw invalidOperationalInput();
+    counters.owner_recovery_outbox_lag_count = boundedAdd(counters.owner_recovery_outbox_lag_count, 1);
+    counters.owner_recovery_outbox_lag_total_ms = boundedAdd(counters.owner_recovery_outbox_lag_total_ms, milliseconds);
+    return counters.owner_recovery_outbox_lag_total_ms;
+  }
+
   function snapshot() {
     const output = {};
     for (const key of OPERATIONAL_METRIC_KEYS) output[key] = counters[key];
@@ -167,6 +182,13 @@ export function createOperationalMetrics({ initial = {} } = {}) {
     recordHumanAuthReplayDenial: (amount = 1) => increment("human_auth_replay_denial_total", amount),
     recordHumanAuthVerifierTimeout: (amount = 1) => increment("human_auth_verifier_timeout_total", amount),
     recordHumanAuthStaleClaimRecovery: (amount = 1) => increment("human_auth_stale_claim_recovery_total", amount),
+    recordOwnerRecoveryOutboxClaim: (amount = 1) => increment("owner_recovery_outbox_claim_total", amount),
+    recordOwnerRecoveryOutboxPublish: (amount = 1) => increment("owner_recovery_outbox_publish_total", amount),
+    recordOwnerRecoveryOutboxRetry: (amount = 1) => increment("owner_recovery_outbox_retry_total", amount),
+    recordOwnerRecoveryOutboxDeadLetter: (amount = 1) => increment("owner_recovery_outbox_dead_letter_total", amount),
+    recordOwnerRecoveryOutboxClaimLost: (amount = 1) => increment("owner_recovery_outbox_claim_lost_total", amount),
+    recordOwnerRecoveryOutboxFailure: (amount = 1) => increment("owner_recovery_outbox_failure_total", amount),
+    recordOwnerRecoveryOutboxLag,
     recordHumanRecoveryOperation: (operation, amount = 1) => {
       const key = HUMAN_RECOVERY_METRIC_KEYS[operation];
       if (!key) throw invalidOperationalInput();

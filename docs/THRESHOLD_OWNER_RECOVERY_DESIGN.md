@@ -35,6 +35,14 @@ The PostgreSQL model contains:
 
 Raw exchange values, raw session tokens, WebAuthn challenges, assertions, attestation objects, private keys, and notification destinations are prohibited from these tables.
 
+### Outbox delivery contract
+
+Recovery notifications use at-least-once delivery. Workers atomically claim rows with `FOR UPDATE SKIP LOCKED`; PostgreSQL stores only the SHA-256 digest of a random process-local claim token and a bounded lease expiry. Publish acknowledgement and failure transitions compare the organization, event, attempt, and claim digest, so a stale worker cannot acknowledge another worker's lease.
+
+The public `event_id` is the provider idempotency key. A provider response can be lost after acceptance, so the same event may be sent again after lease expiry and providers must return the same accepted result for that key. Attempts use bounded exponential backoff with jitter. Attempt 100 remains reclaimable after process loss and transitions to `dead_letter` only after an explicit delivery failure; successful delivery can still publish it. Stored diagnostics are stable error codes only—provider messages, response bodies, credentials, and destination data are never persisted.
+
+Runtime shutdown first stops scheduling, waits a bounded time for active deliveries, then closes notification listeners and PostgreSQL. A worker that cannot drain keeps storage open and makes shutdown fail closed. Operators observe aggregate pending/dead-letter counts plus label-free claim, publish, retry, dead-letter, claim-loss, failure, and lag counters.
+
 ## Transaction and lock order
 
 Every mutation uses the same order:
