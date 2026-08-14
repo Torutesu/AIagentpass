@@ -22,7 +22,7 @@ At the current checkpoint, recovery dead-letter redrive and suppression require
 an exact resource-bound WebAuthn context. The repository recomputes that
 context and consumes the proof in the same organization-locked transaction.
 All 40 migrations apply against local PostgreSQL. The root suite now passes
-2,034 tests (1,983 pass and 51 intentionally skipped), and the frozen catalog
+2,039 tests (1,987 pass and 52 intentionally skipped), and the frozen catalog
 validates 127 entries. The
 authenticated P0-B Cloud/Console/PostgreSQL/browser journey also passes all 12
 role, WebAuthn, wake, tenant-substitution, and revocation scenarios locally and

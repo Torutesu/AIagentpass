@@ -18,6 +18,7 @@ const MAX_LEASE_MS = 5 * 60 * 1_000;
 const MAX_RETENTION_MS = 365 * 24 * 60 * 60 * 1_000;
 const MAX_WAIT_MS = 30_000;
 const MAX_BYTES = 1024 * 1024;
+const MAX_PRUNE = 1_000;
 const POLL_MS = 25;
 
 const OPERATION_FIELDS = Object.freeze([
@@ -222,6 +223,65 @@ export function createPostgresProviderOperationRepository({
     }
   }
 
+  async function health() {
+    return runDatabase(async () => {
+      const result = await client.query(`SELECT
+        count(*) FILTER (WHERE state='pending') AS pending,
+        count(*) FILTER (WHERE state='started') AS started,
+        count(*) FILTER (WHERE state='accepted') AS accepted,
+        count(*) FILTER (WHERE state='uncertain') AS uncertain,
+        count(*) FILTER (WHERE state='committed') AS committed,
+        count(*) FILTER (WHERE state='rejected') AS rejected,
+        count(*) FILTER (WHERE state='failed') AS failed,
+        count(*) FILTER (WHERE state IN ('pending','started','accepted','uncertain')
+          AND claim_expires_at IS NOT NULL AND claim_expires_at<=clock_timestamp()) AS stale_claims,
+        min(created_at) FILTER (WHERE state IN ('pending','started','accepted','uncertain')) AS oldest_nonterminal_at
+        FROM managed_signer_provider_operations
+        WHERE purpose=$1 AND key_id=$2 AND key_version=$3`, [binding.purpose, binding.keyId, binding.keyVersion]);
+      if (rowCount(result) !== 1) fail(PROVIDER_OPERATION_REPOSITORY_ERROR_CODES.DATABASE);
+      const row = result.rows[0];
+      const states = Object.freeze(Object.fromEntries(PROVIDER_OPERATION_STATES_FOR_HEALTH.map((state) => [state, count(row[state])])));
+      return Object.freeze({
+        version: 1,
+        purpose: binding.purpose,
+        algorithm: binding.algorithm,
+        key_id: binding.keyId,
+        key_version: binding.keyVersion,
+        states,
+        stale_claims: count(row.stale_claims),
+        oldest_nonterminal_at: timestampOrNull(row.oldest_nonterminal_at),
+      });
+    });
+  }
+
+  async function pruneOperations(input) {
+    exactObject(input, ["before", "limit"]);
+    const before = timestamp(input.before);
+    if (!Number.isSafeInteger(input.limit) || input.limit < 1 || input.limit > MAX_PRUNE) {
+      fail(PROVIDER_OPERATION_REPOSITORY_ERROR_CODES.INPUT);
+    }
+    return runDatabase(() => withTransaction(client, async (tx) => {
+      const result = await tx.query(`WITH doomed AS (
+          SELECT provider.purpose,provider.operation_id
+          FROM managed_signer_provider_operations provider
+          JOIN managed_signer_signing_idempotency signing
+            ON signing.purpose=provider.purpose AND signing.operation_id=provider.operation_id
+          WHERE provider.purpose=$1 AND provider.key_id=$2 AND provider.key_version=$3
+            AND provider.state='committed' AND signing.status='committed'
+            AND provider.expires_at<=$4::timestamptz AND provider.expires_at<=clock_timestamp()
+            AND signing.expires_at<=$4::timestamptz AND signing.expires_at<=clock_timestamp()
+          ORDER BY provider.expires_at ASC,provider.operation_id ASC
+          FOR UPDATE OF provider SKIP LOCKED
+          LIMIT $5
+        )
+        DELETE FROM managed_signer_provider_operations provider
+        USING doomed
+        WHERE provider.purpose=doomed.purpose AND provider.operation_id=doomed.operation_id
+        RETURNING provider.operation_id`, [binding.purpose, binding.keyId, binding.keyVersion, before, input.limit]);
+      return Object.freeze({ pruned: rowCount(result) });
+    }));
+  }
+
   async function claimedUpdate(operation, claimToken, states, assignment) {
     return runDatabase(() => withTransaction(client, async (tx) => {
       const row = await selectOperation(tx, operation, true);
@@ -239,8 +299,12 @@ export function createPostgresProviderOperationRepository({
 
   return Object.freeze({ purpose, algorithm, key_id: keyId, key_version: String(keyVersion),
     reserveOperation, claimOperation, startOperation, recordAccepted, commitOperation,
-    reconcileOperation, markUncertain, getOperation, waitForOperation });
+    reconcileOperation, markUncertain, getOperation, waitForOperation, health, pruneOperations });
 }
+
+const PROVIDER_OPERATION_STATES_FOR_HEALTH = Object.freeze([
+  "pending", "started", "accepted", "uncertain", "committed", "rejected", "failed",
+]);
 
 function normalizeOperation(input, binding) {
   exactObject(input, OPERATION_FIELDS);
@@ -389,6 +453,23 @@ function makeToken(randomBytes) {
 function sha256(value) { return crypto.createHash("sha256").update(value).digest("hex"); }
 function safeEqual(left, right) { return left.length === right.length && crypto.timingSafeEqual(left, right); }
 function rowCount(result) { return Number.isSafeInteger(result?.rowCount) ? result.rowCount : Array.isArray(result?.rows) ? result.rows.length : 0; }
+function count(value) {
+  const normalized = Number(value);
+  if (!Number.isSafeInteger(normalized) || normalized < 0) fail(PROVIDER_OPERATION_REPOSITORY_ERROR_CODES.DATABASE);
+  return normalized;
+}
+function timestamp(value) {
+  if (typeof value !== "string" || value.length < 20 || value.length > 35) fail(PROVIDER_OPERATION_REPOSITORY_ERROR_CODES.INPUT);
+  const parsed = Date.parse(value);
+  if (!Number.isFinite(parsed)) fail(PROVIDER_OPERATION_REPOSITORY_ERROR_CODES.INPUT);
+  return new Date(parsed).toISOString();
+}
+function timestampOrNull(value) {
+  if (value === null) return null;
+  const parsed = value instanceof Date ? value.getTime() : Date.parse(String(value));
+  if (!Number.isFinite(parsed)) fail(PROVIDER_OPERATION_REPOSITORY_ERROR_CODES.DATABASE);
+  return new Date(parsed).toISOString();
+}
 function plainObject(value) { return value !== null && typeof value === "object" && !Array.isArray(value) && (Object.getPrototypeOf(value) === Object.prototype || Object.getPrototypeOf(value) === null); }
 function delay(ms) { return new Promise((resolve) => setTimeout(resolve, ms)); }
 function fail(code) { throw new ProviderOperationRepositoryError(code); }

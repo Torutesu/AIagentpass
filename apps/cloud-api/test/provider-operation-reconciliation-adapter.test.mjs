@@ -445,6 +445,27 @@ test("rejects a wrong provider signature and fences the operation as uncertain",
   assert.equal(fixture.rows.get(fixture.binding.operation_id).signature, undefined);
 });
 
+test("verifies every provider result against the startup-pinned public key", async () => {
+  const expected = crypto.generateKeyPairSync("ed25519");
+  const substituted = crypto.generateKeyPairSync("ed25519");
+  const repo = createRepository();
+  const providerFixture = createProvider({ pair: substituted });
+  const adapter = createProviderOperationReconciliationAdapter({
+    provider: providerFixture.provider,
+    providerId: PROVIDER_ID,
+    repository: repo.repository,
+    purpose: PURPOSE,
+    keyId: KEY_ID,
+    keyVersion: KEY_VERSION,
+    publicKey: expected.publicKey,
+    waitTimeoutMs: 50,
+  });
+  await assert.rejects(adapter.signOnce(bindingFor(), PAYLOAD), { code: CODES.OUTPUT });
+  assert.equal(providerFixture.calls.metadata.length, 0, "runtime metadata cannot replace the startup pin");
+  assert.equal(providerFixture.calls.sign.length, 1);
+  assert.equal(repo.rows.get(bindingFor().operation_id).state, "uncertain");
+});
+
 test("rejects changed bytes, key binding, and cross-purpose substitution before repository or provider use", async () => {
   const fixture = createAdapterFixture();
   await assert.rejects(fixture.adapter.signOnce(fixture.binding, Buffer.from("changed")), { code: CODES.BINDING });

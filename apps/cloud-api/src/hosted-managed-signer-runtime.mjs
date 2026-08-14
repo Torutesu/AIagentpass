@@ -116,7 +116,8 @@ export async function bindHostedManagedSignerProvider({
         repository: operationRepository,
         purpose,
         keyId,
-        keyVersion: String(active.key_version)
+        keyVersion: String(active.key_version),
+        publicKey: normalizedPublicKey
       });
     } catch {
       fail(HOSTED_MANAGED_SIGNER_RUNTIME_ERROR_CODES.DATABASE);
@@ -131,6 +132,7 @@ export async function bindHostedManagedSignerProvider({
       purpose,
       keyId,
       keyVersion: active.key_version,
+      publicKey: normalizedPublicKey,
       version,
       algorithm
     });

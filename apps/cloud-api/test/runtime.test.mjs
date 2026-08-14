@@ -186,6 +186,7 @@ test("production human auth is composed from PostgreSQL and closed with the runt
   await runtime.close();
   assert.equal(calls.includes("postgres-close"), true);
   assert.equal(calls.includes("kms-close"), true);
+  assert.equal(calls.indexOf("postgres-close") < calls.indexOf("kms-close"), true, "KMS clients close only after tracked PostgreSQL work drains");
 });
 
 test("production human auth fails closed without PostgreSQL capability authority", async (t) => {

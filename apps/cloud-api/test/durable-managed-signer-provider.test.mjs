@@ -16,7 +16,7 @@ const KEY_ID = "test-key-2026-08";
 const KEY_VERSION = 7;
 const SIGNING_VERSION = 3;
 
-function makeFixture({ reserveState = undefined, sign = undefined, metadata = undefined, repository = {} } = {}) {
+function makeFixture({ reserveState = undefined, sign = undefined, metadata = undefined, publicKey = undefined, repository = {} } = {}) {
   const pair = crypto.generateKeyPairSync("ed25519");
   const calls = {
     metadata: [],
@@ -90,6 +90,7 @@ function makeFixture({ reserveState = undefined, sign = undefined, metadata = un
       purpose: PURPOSE,
       keyId: KEY_ID,
       keyVersion: KEY_VERSION,
+      ...(publicKey === undefined ? {} : { publicKey }),
       version: SIGNING_VERSION
     })
   };
@@ -437,6 +438,17 @@ test("rejects metadata key substitution, extra fields, and private key material"
     await rejectsWithCode(() => value.signer.publicKeyMetadata(), CODES.METADATA);
     assert.equal(value.calls.reserve.length, 0);
   }
+});
+
+test("never replaces the startup-pinned verification key with later provider metadata", async () => {
+  const expected = crypto.generateKeyPairSync("ed25519");
+  const substituted = crypto.generateKeyPairSync("ed25519");
+  const fixture = makeFixture({
+    publicKey: expected.publicKey,
+    metadata: { key_id: KEY_ID, algorithm: "ed25519", public_key: substituted.publicKey }
+  });
+  await rejectsWithCode(() => fixture.signer.publicKeyMetadata(), CODES.METADATA);
+  assert.equal(fixture.calls.reserve.length, 0);
 });
 
 test("does not expose provider or repository error details", async () => {

@@ -288,11 +288,21 @@ The externally returned reason is stable but less detailed than the internal aud
 Authorization and hardware use cannot be one database transaction, so the audit protocol is explicitly two-phase:
 
 1. Append and sync an `authorized_intent` event containing the request ID, trusted context digest, policy/capability sequence, and payload digest.
-2. Invoke the hardware signer exactly once for that request ID.
+2. Invoke the hardware signer through a durable operation ledger. A provider
+   with authoritative operation lookup may prove one accepted operation; a
+   direct deterministic Ed25519 API may be called at least once after an
+   ambiguous response, but every attempt is pinned to the same key and bytes.
 3. Append and sync `allow`, `deny`, or `error` as a result event referencing the intent.
 4. Return the signature only after the `allow` result is durable.
 
-If step 1 fails, the key is not used. If step 3 fails, the signature is withheld and the unresolved intent remains visible for recovery; retrying the same request ID must not invoke the hardware signer again unless the service can prove that no signature was produced. On startup, unresolved intents are surfaced as `outcome_unknown` incidents and do not disappear through log rotation.
+If step 1 fails, the key is not used. If step 3 fails, the signature is withheld
+and the unresolved intent remains visible for recovery. Retrying the same
+request ID first reconciles any persisted verified result. Where the provider
+has no authoritative lookup, a retry may invoke deterministic Ed25519 signing
+again only with the exact pinned key, purpose, key version, request digest, and
+bytes; AgentPass still commits and returns only one verified result. On startup,
+unresolved intents are surfaced as `outcome_unknown` incidents and do not
+disappear through log rotation.
 
 This protocol proves that key use was authorized or that its outcome is unknown. It cannot make an external hardware operation atomically roll back, so documentation must not claim stronger transactional semantics.
 

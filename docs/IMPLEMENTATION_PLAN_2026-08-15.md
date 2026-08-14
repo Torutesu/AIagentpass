@@ -346,7 +346,7 @@ physical evidence must be attached separately.
 
 | ID | Scope and concrete output | Required proof before merge | Depends on |
 | --- | --- | --- | --- |
-| C1 | Finish provider-operation qualification: combine the low-level `0040` ledger with the existing lifecycle/idempotency ledger; add retention and aggregate health; document the at-least-once provider-call boundary. | Real PostgreSQL two-pool tests for 100-request contention, accepted-response loss, stale claim, process restart, lost DB commit response, rotation, emergency disable, and operation substitution. No test may infer a provider receipt that the provider did not issue. | current checkpoint |
+| C1 | Finish provider-operation qualification: combine the low-level `0040` ledger with the existing lifecycle/idempotency ledger; add retention and aggregate health; document the at-least-once provider-call boundary. | Real PostgreSQL two-pool tests for 100-request contention, accepted-response loss, stale claim, process restart, lost DB commit response, rotation, emergency disable, and operation substitution. No test may infer a provider receipt that the provider did not issue. | in progress: lost-commit, pinning, rotation/disable fencing, and shutdown order are implemented |
 | C2 | Implement authoritative audit-export issuance. Reserve an export sequence and payload digest transactionally, sign the frozen audit-anchor statement, commit the receipt, and expose immutable retrieval/verification. | Cross-tenant, range/digest substitution, duplicate request, signer timeout, response loss, restart, stale lifecycle, unsigned export, and local-signer-in-hosted-mode tests. | C1 |
 | C3 | Implement authoritative release-promotion issuance. Bind source commit, candidate/image/PKG/SBOM digests, environment, qualification report digests, signer lifecycle, and approval state; prohibit rebuild-on-promotion. | Candidate/environment/evidence substitution, partial evidence, replay, concurrent promotion, signer failure, emergency disable, and exact-digest verifier compatibility tests. | C1 |
 | C4 | Add operator reconciliation surfaces for uncertain signer operations and evidence. Provide bounded list/detail/verify and explicit retry/reject controls through the Human BFF. | Owner/Admin/Auditor/Viewer matrix; recent WebAuthn, CSRF, `If-Match`, idempotency, tenant hiding, stale-state, concurrent adjudication, and audit-event tests. | C2, C3 |
@@ -362,6 +362,39 @@ Parallel execution lanes are deliberately limited: C6 and C9 may run beside
 C2-C5; Console work in C7 may start only after its backing authoritative API is
 merged; C8 cannot start until readiness and PostgreSQL authority are closed;
 C11 cannot waive or replace protected, physical, or independent evidence.
+
+#### C1 security checkpoint — 2026-08-15
+
+Implemented and verified in this checkpoint:
+
+- both the provider-operation and lifecycle/idempotency ledgers converge after
+  a lost low-level or high-level PostgreSQL `COMMIT` response without another
+  provider call;
+- rotation and emergency disable between provider acceptance and the
+  authoritative lifecycle commit return no signature and leave the high-level
+  operation explicitly `uncertain`;
+- the public key verified during hosted startup is now pinned into both the
+  reconciliation adapter and durable signer, so later provider metadata cannot
+  replace the verification authority for sign or reconcile;
+- shutdown now drains HTTP/PostgreSQL-tracked signing work before closing AWS
+  or GCP KMS clients;
+- provider-operation health is fixed-shape and retention deletes only a
+  correlated pair whose low-level and high-level rows are both committed.
+
+The direct AWS/GCP path still intentionally permits an at-least-once provider
+call after an ambiguous response. Its deterministic receipt is an AgentPass
+ledger receipt, not provider-issued acceptance evidence. The safety claim is
+one exact verified result committed and returned, not exactly-once KMS use.
+
+C1 remains open. A lifecycle change can leave a low-level verified result
+`committed` while the authoritative high-level operation is `uncertain`; this
+is fail-closed and no signature is returned, but it needs bounded maintenance,
+fixed-cardinality readiness/metrics, and operator adjudication. The next schema
+slice is migration `0041`: closed uncertainty reasons, bounded stale-operation
+maintenance, deployment-wide all-key-version health, and runtime worker
+start/drain wiring. The subsequent qualification must run 100 concurrent
+requests across two pools and prove the public health surface contains no
+operation ID, receipt, signing bytes, tenant identifier, or provider diagnostic.
 
 ### M1. Audit-anchor and promotion-evidence authorities (Q2B-3)
 

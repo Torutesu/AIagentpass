@@ -56,6 +56,20 @@ class FakePg {
   async query(text, params = []) {
     this.calls.push({ text, params });
     if (["BEGIN", "COMMIT", "ROLLBACK"].includes(text)) return { rows: [], rowCount: 0 };
+    if (text.startsWith("SELECT\n        count(*) FILTER")) {
+      const rows = [...this.rows.values()].filter((row) => row.purpose === params[0]
+        && row.key_id === params[1] && row.key_version === String(params[2]));
+      const aggregate = Object.fromEntries(["pending", "started", "accepted", "uncertain", "committed", "rejected", "failed"]
+        .map((state) => [state, String(rows.filter((row) => row.state === state).length)]));
+      return { rows: [{ ...aggregate, stale_claims: "0", oldest_nonterminal_at: null }], rowCount: 1 };
+    }
+    if (text.startsWith("WITH doomed AS")) {
+      const eligible = [...this.rows.entries()].filter(([, row]) => row.purpose === params[0]
+        && row.key_id === params[1] && row.key_version === String(params[2]) && row.state === "committed")
+        .slice(0, Number(params[4]));
+      for (const [entry] of eligible) this.rows.delete(entry);
+      return { rows: eligible.map(([, row]) => ({ operation_id: row.operation_id })), rowCount: eligible.length };
+    }
     const key = `${params[0]}\0${params[1]}`;
     if (text.startsWith("SELECT purpose,operation_id")) return this.result(this.rows.get(key));
     if (text.startsWith("INSERT INTO managed_signer_provider_operations")) {
@@ -170,4 +184,30 @@ test("waits only within the configured bound and observes a durable transition",
   const result = await repo.waitForOperation({ operation: operation(), timeout_ms: 100 });
   assert.equal(result.state, "uncertain");
   await assert.rejects(repo.waitForOperation({ operation: operation(), timeout_ms: 30_001 }), { code: CODES.INPUT });
+});
+
+test("reports fixed-cardinality aggregate health and prunes only correlated committed records", async () => {
+  const { client, repo } = repository();
+  const reserved = await repo.reserveOperation(operation());
+  await repo.startOperation({ ...operation(), claim_token: reserved.claim_token });
+  await repo.recordAccepted({ ...operation(), claim_token: reserved.claim_token, ...providerOutput() });
+  await repo.commitOperation({ ...operation(), claim_token: reserved.claim_token });
+
+  assert.deepEqual(await repo.health(), {
+    version: 1,
+    purpose: PURPOSE,
+    algorithm: "ed25519",
+    key_id: KEY_ID,
+    key_version: KEY_VERSION,
+    states: { pending: 0, started: 0, accepted: 0, uncertain: 0, committed: 1, rejected: 0, failed: 0 },
+    stale_claims: 0,
+    oldest_nonterminal_at: null,
+  });
+  assert.deepEqual(await repo.pruneOperations({ before: "2027-08-15T00:00:00.000Z", limit: 10 }), { pruned: 1 });
+  const pruneSql = client.calls.find(({ text }) => text.startsWith("WITH doomed AS"))?.text ?? "";
+  assert.match(pruneSql, /JOIN managed_signer_signing_idempotency/u);
+  assert.match(pruneSql, /provider\.state='committed' AND signing\.status='committed'/u);
+  assert.match(pruneSql, /FOR UPDATE OF provider SKIP LOCKED/u);
+  await assert.rejects(repo.pruneOperations({ before: "not-a-time", limit: 1 }), { code: CODES.INPUT });
+  await assert.rejects(repo.pruneOperations({ before: "2027-08-15T00:00:00.000Z", limit: 1_001 }), { code: CODES.INPUT });
 });

@@ -478,6 +478,7 @@ export function createProviderOperationReconciliationAdapter(options = {}) {
     "purpose",
     "keyId",
     "keyVersion",
+    "publicKey",
     "maxRequestBytes",
     "waitTimeoutMs",
     "maxRecoveryAttempts",
@@ -490,6 +491,7 @@ export function createProviderOperationReconciliationAdapter(options = {}) {
     purpose,
     keyId,
     keyVersion,
+    publicKey: configuredPublicKey,
     maxRequestBytes = DEFAULT_PROVIDER_OPERATION_MAX_REQUEST_BYTES,
     waitTimeoutMs = DEFAULT_PROVIDER_OPERATION_WAIT_TIMEOUT_MS,
     maxRecoveryAttempts = DEFAULT_PROVIDER_OPERATION_MAX_RECOVERY_ATTEMPTS,
@@ -512,7 +514,10 @@ export function createProviderOperationReconciliationAdapter(options = {}) {
   validateDirectProvider(provider, { purpose, key_id: keyId, key_version: keyVersion });
   validateRepository(repository);
 
-  let pinnedMetadata;
+  let pinnedMetadata = configuredPublicKey === undefined ? undefined : (() => {
+    const key = publicKey(configuredPublicKey, CONFIG);
+    return Object.freeze({ key, shape: publicKeyShape(key) });
+  })();
   const inFlight = new Map();
 
   async function loadPublicKey() {

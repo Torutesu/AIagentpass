@@ -398,6 +398,8 @@ export async function createCloudRuntime({ env = process.env, logger = console, 
       if (closed) return;
       if (closePromise) return closePromise;
       closePromise = (async () => {
+        const shutdownStartedAt = Date.now();
+        const shutdownTimeoutMs = 15_000;
         postgresRuntime?.beginDrain?.();
         const serverClose = server.listening
           ? new Promise((resolve, reject) => {
@@ -406,9 +408,11 @@ export async function createCloudRuntime({ env = process.env, logger = console, 
             })
           : Promise.resolve();
         const databaseClose = postgresRuntime?.drain ? postgresRuntime.drain() : postgresRuntime?.close?.();
-        const results = await runtimeTimeout(Promise.all([serverClose, databaseClose, ownedKmsProviders?.close?.()]), 15_000);
+        const results = await runtimeTimeout(Promise.all([serverClose, databaseClose]), shutdownTimeoutMs);
         const drainResult = results?.[1];
         if (drainResult?.drained === false) throw new Error("Cloud runtime drain timed out");
+        const remainingMs = Math.max(1, shutdownTimeoutMs - Math.max(0, Date.now() - shutdownStartedAt));
+        await runtimeTimeout(Promise.resolve(ownedKmsProviders?.close?.()), remainingMs);
         await store.close?.();
         closed = true;
       })();

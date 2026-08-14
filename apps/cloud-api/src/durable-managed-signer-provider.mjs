@@ -57,8 +57,10 @@ export class DurableManagedSignerError extends Error {
 }
 
 /**
- * Add durable, exactly-once-at-the-provider-boundary semantics to a managed
- * signer. The repository contains only public request bindings and signatures;
+ * Add durable lifecycle fencing and verified-result convergence to a managed
+ * signer. Direct KMS calls can be at-least-once after an ambiguous provider
+ * response; only one exact, verified result may become durably committed.
+ * The repository contains only public request bindings and signatures;
  * private key material remains behind the injected provider.
  */
 export function createDurableManagedSignerProvider({
@@ -68,15 +70,16 @@ export function createDurableManagedSignerProvider({
   purpose,
   keyId,
   keyVersion,
+  publicKey,
   version = 1,
   algorithm = ALGORITHM,
   protocolVersion = SIGNER_PROTOCOL_VERSIONS[purpose]
 } = {}) {
   const adapter = managedSignerAdapter ?? (typeof provider?.signOnce === "function" && typeof provider?.lookup === "function" ? provider : undefined);
-  validateConfiguration({ provider, managedSignerAdapter: adapter, repository, purpose, keyId, keyVersion, version, protocolVersion, algorithm });
+  validateConfiguration({ provider, managedSignerAdapter: adapter, repository, purpose, keyId, keyVersion, publicKey, version, protocolVersion, algorithm });
   const binding = Object.freeze({ purpose, keyId, keyVersion, version, algorithm });
   const inFlight = new Map();
-  let verificationKey;
+  let verificationKey = publicKey === undefined ? undefined : parsePinnedConfigurationKey(publicKey);
 
   async function publicKeyMetadata(input = undefined) {
     const request = normalizeMetadataRequest(input, binding);
@@ -88,7 +91,11 @@ export function createDurableManagedSignerProvider({
       throw durableError(DURABLE_MANAGED_SIGNER_ERROR_CODES.PROVIDER);
     }
     const normalized = validatePublicKeyMetadata(metadata, binding);
-    verificationKey = parsePublicEd25519Key(normalized.public_key);
+    const candidate = parsePublicEd25519Key(normalized.public_key);
+    if (verificationKey && !samePublicKey(verificationKey, candidate)) {
+      throw durableError(DURABLE_MANAGED_SIGNER_ERROR_CODES.METADATA);
+    }
+    verificationKey ??= candidate;
     return normalized;
   }
 
@@ -424,6 +431,12 @@ function sameBytes(left, right) {
   return left.length === right.length && crypto.timingSafeEqual(left, right);
 }
 
+function samePublicKey(left, right) {
+  const leftDer = Buffer.from(left.export({ type: "spki", format: "der" }));
+  const rightDer = Buffer.from(right.export({ type: "spki", format: "der" }));
+  return sameBytes(leftDer, rightDer);
+}
+
 async function markUncertainBestEffort(repository, input) {
   try { await repository.markSignatureUncertain(input); }
   catch { /* The operation remains closed even if the quarantine write is unavailable. */ }
@@ -478,7 +491,7 @@ function normalizeSignal(value) {
   return value;
 }
 
-function validateConfiguration({ provider, managedSignerAdapter, repository, purpose, keyId, keyVersion, version, protocolVersion, algorithm }) {
+function validateConfiguration({ provider, managedSignerAdapter, repository, purpose, keyId, keyVersion, publicKey, version, protocolVersion, algorithm }) {
   if (!provider || typeof provider.publicKeyMetadata !== "function"
     || (managedSignerAdapter === undefined && typeof provider.sign !== "function")
     || (managedSignerAdapter !== undefined && (typeof managedSignerAdapter.signOnce !== "function" || typeof managedSignerAdapter.lookup !== "function"))
@@ -491,6 +504,12 @@ function validateConfiguration({ provider, managedSignerAdapter, repository, pur
     || !Number.isSafeInteger(version) || version < 1
     || (managedSignerAdapter !== undefined && (!Number.isSafeInteger(protocolVersion) || protocolVersion < 1))
     || algorithm !== ALGORITHM) throw durableError(DURABLE_MANAGED_SIGNER_ERROR_CODES.CONFIG);
+  if (publicKey !== undefined) parsePinnedConfigurationKey(publicKey);
+}
+
+function parsePinnedConfigurationKey(value) {
+  try { return parsePublicEd25519Key(value); }
+  catch { throw durableError(DURABLE_MANAGED_SIGNER_ERROR_CODES.CONFIG); }
 }
 
 async function assertActiveLifecycle(repository, binding) {
