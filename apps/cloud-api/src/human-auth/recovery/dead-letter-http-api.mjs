@@ -11,6 +11,7 @@ import { HumanAuthAbuseControlError, HUMAN_AUTH_ABUSE_ERROR_CODES } from "../rat
 
 const ROOT = "/api/auth/organizations";
 const DEAD_LETTER_ROOT = "recovery-outbox/dead-letters";
+const UNCERTAIN_ROOT = "recovery-outbox/uncertain";
 const MAX_BODY_BYTES = 16 * 1024;
 const MAX_HEADER_BYTES = 8 * 1024;
 const MAX_URL_LENGTH = 8 * 1024;
@@ -54,18 +55,26 @@ const CSRF_FAILURES = new Set([
 export const OWNER_RECOVERY_DEAD_LETTER_HTTP_PATHS = Object.freeze({
   list: (organizationId) => `${ROOT}/${encodeURIComponent(organizationId)}/${DEAD_LETTER_ROOT}`,
   redrive: (organizationId, eventId) => `${ROOT}/${encodeURIComponent(organizationId)}/${DEAD_LETTER_ROOT}/${encodeURIComponent(eventId)}/redrive`,
-  suppress: (organizationId, eventId) => `${ROOT}/${encodeURIComponent(organizationId)}/${DEAD_LETTER_ROOT}/${encodeURIComponent(eventId)}/suppress`
+  suppress: (organizationId, eventId) => `${ROOT}/${encodeURIComponent(organizationId)}/${DEAD_LETTER_ROOT}/${encodeURIComponent(eventId)}/suppress`,
+  listUncertain: (organizationId) => `${ROOT}/${encodeURIComponent(organizationId)}/${UNCERTAIN_ROOT}`,
+  retryUncertain: (organizationId, eventId) => `${ROOT}/${encodeURIComponent(organizationId)}/${UNCERTAIN_ROOT}/${encodeURIComponent(eventId)}/retry`,
+  suppressUncertain: (organizationId, eventId) => `${ROOT}/${encodeURIComponent(organizationId)}/${UNCERTAIN_ROOT}/${encodeURIComponent(eventId)}/suppress`
 });
 
 export const OWNER_RECOVERY_DEAD_LETTER_OPERATIONS = Object.freeze({
   list: "human.recovery.outbox.list",
   redrive: "human.recovery.outbox.redrive",
-  suppress: "human.recovery.outbox.suppress"
+  suppress: "human.recovery.outbox.suppress",
+  listUncertain: "human.recovery.outbox.list_uncertain",
+  retryUncertain: "human.recovery.outbox.retry_uncertain",
+  suppressUncertain: "human.recovery.outbox.suppress_uncertain"
 });
 
 export const OWNER_RECOVERY_DEAD_LETTER_RECENT_AUTH_OPERATIONS = Object.freeze({
   redrive: OWNER_RECOVERY_DEAD_LETTER_OPERATIONS.redrive,
-  suppress: OWNER_RECOVERY_DEAD_LETTER_OPERATIONS.suppress
+  suppress: OWNER_RECOVERY_DEAD_LETTER_OPERATIONS.suppress,
+  retryUncertain: OWNER_RECOVERY_DEAD_LETTER_OPERATIONS.retryUncertain,
+  suppressUncertain: OWNER_RECOVERY_DEAD_LETTER_OPERATIONS.suppressUncertain
 });
 
 export const OWNER_RECOVERY_DEAD_LETTER_HTTP_ERROR_CODES = Object.freeze({
@@ -180,7 +189,7 @@ export function createOwnerRecoveryDeadLetterHttpApi({
       const request = normalizeRequest(input);
       const route = resolveRoute(request.url, normalizedBasePath);
       if (!route) return response(404, errorBody(HCODE.NOT_FOUND));
-      if (route.name !== "list" && route.url.search) throw invalidRequest();
+      if (!route.list && route.url.search) throw invalidRequest();
 
       assertRequestOrigin(request, expectedOrigin);
       const actor = await authenticateSession(request);
@@ -191,14 +200,14 @@ export function createOwnerRecoveryDeadLetterHttpApi({
       requireManagementRole(actor);
 
       if (request.method !== route.method) throw methodNotAllowed(route.allow);
-      if (route.name === "list") {
+      if (route.list) {
         if (hasBody(request)) throw invalidRequest();
         const page = parseListQuery(route.url);
         assertRouteHeaders(request, route);
         await authorizeRateLimitRequest(authorizeRateLimit, { operation: route.operation, session: actor, organizationId: route.organizationId });
-        const result = await callRepository(() => injectedRepository.listDeadLetters({ actor, ...page }));
+        const result = await callRepository(() => injectedRepository[route.repositoryMethod]({ actor, ...page }));
         return response(200, {
-          dead_letters: normalizeList(result, route.organizationId, page.limit),
+          [route.responseKey]: normalizeList(result, route.organizationId, page.limit, route.kind),
           next_cursor: normalizeNextCursor(result)
         });
       }
@@ -208,13 +217,13 @@ export function createOwnerRecoveryDeadLetterHttpApi({
       const body = await readJsonBody(request, maxBodyBytes);
       const expectedManagementVersion = requiredExpectedVersion(request);
       const idempotencyKey = requiredIdempotencyKey(request);
-      if (route.name === "suppress") parseSuppressionBody(body);
+      if (route.suppression) parseSuppressionBody(body);
       else assertExactKeys(body, []);
       await authorizeRateLimitRequest(authorizeRateLimit, { operation: route.operation, session: actor, organizationId: route.organizationId });
       const contextHash = ownerRecoveryDeadLetterContextHash({
         organization_id: route.organizationId,
         event_id: route.eventId,
-        action: route.name,
+        action: route.action,
         expected_management_version: expectedManagementVersion
       });
       const recentAuthorization = await authorizeRecentAuth({ request, actor, route, contextHash });
@@ -226,10 +235,10 @@ export function createOwnerRecoveryDeadLetterHttpApi({
         recent_authorization: recentAuthorization,
         context_hash: contextHash
       };
-      if (route.name === "suppress") repositoryInput.reason = body.reason;
+      if (route.suppression) repositoryInput.reason = body.reason;
 
-      const result = await callRepository(() => injectedRepository[route.name === "redrive" ? "redriveDeadLetter" : "suppressDeadLetter"](repositoryInput));
-      return response(200, { dead_letter: normalizeMutation(result, route.organizationId, route.eventId) });
+      const result = await callRepository(() => injectedRepository[route.repositoryMethod](repositoryInput));
+      return response(200, { [route.responseKey]: normalizeMutation(result, route.organizationId, route.eventId, route.kind) });
     } catch (error) {
       return mapError(error);
     }
@@ -294,7 +303,8 @@ export function createOwnerRecoveryDeadLetterHttpApi({
       session_id: actor.session_id,
       challenge_id: authorization.challenge_id.toLowerCase(),
       operation: authorization.operation,
-      authenticated_at: authorization.authenticated_at
+      authenticated_at: authorization.authenticated_at,
+      context_hash: contextHash
     });
   }
 
@@ -309,7 +319,7 @@ export function createOwnerRecoveryDeadLetterHttpApi({
 export function ownerRecoveryDeadLetterContextHash({ organization_id, event_id, action, expected_management_version } = {}) {
   const organizationId = requiredUuid(organization_id);
   const eventId = requiredUuid(event_id);
-  if (action !== "redrive" && action !== "suppress") throw new TypeError("action is invalid");
+  if (!["redrive", "suppress", "retry_uncertain", "suppress_uncertain"].includes(action)) throw new TypeError("action is invalid");
   if (!Number.isSafeInteger(expected_management_version) || expected_management_version < 1) throw new TypeError("expected_management_version is invalid");
   return crypto.createHash("sha256").update(canonicalJson({
     version: 1,
@@ -321,7 +331,7 @@ export function ownerRecoveryDeadLetterContextHash({ organization_id, event_id, 
 }
 
 function assertRepository(value) {
-  if (!value || typeof value.listDeadLetters !== "function" || typeof value.redriveDeadLetter !== "function" || typeof value.suppressDeadLetter !== "function") throw new TypeError("management repository is incomplete");
+  if (!value || ["listDeadLetters", "redriveDeadLetter", "suppressDeadLetter", "listUncertain", "retryUncertain", "suppressUncertain"].some((method) => typeof value[method] !== "function")) throw new TypeError("management repository is incomplete");
 }
 
 function resolveRoute(rawUrl, basePath) {
@@ -334,19 +344,30 @@ function resolveRoute(rawUrl, basePath) {
   if (parts.length !== 3 && parts.length !== 5) return undefined;
   const organizationId = decodeUuid(parts[0]);
   if (organizationId === undefined) return undefined;
-  if (parts[1] !== "recovery-outbox" || parts[2] !== "dead-letters") return undefined;
+  if (parts[1] !== "recovery-outbox" || (parts[2] !== "dead-letters" && parts[2] !== "uncertain")) return undefined;
+  const kind = parts[2] === "uncertain" ? "uncertain" : "dead_letter";
   if (parts.length === 3) {
-    return { name: "list", method: "GET", allow: "GET", operation: OWNER_RECOVERY_DEAD_LETTER_OPERATIONS.list, organizationId, url };
+    return kind === "uncertain"
+      ? { name: "listUncertain", list: true, kind, repositoryMethod: "listUncertain", responseKey: "uncertain_deliveries", method: "GET", allow: "GET", operation: OWNER_RECOVERY_DEAD_LETTER_OPERATIONS.listUncertain, organizationId, url }
+      : { name: "list", list: true, kind, repositoryMethod: "listDeadLetters", responseKey: "dead_letters", method: "GET", allow: "GET", operation: OWNER_RECOVERY_DEAD_LETTER_OPERATIONS.list, organizationId, url };
   }
   const eventId = decodeUuid(parts[3]);
   if (eventId === undefined) return undefined;
-  if (parts[4] !== "redrive" && parts[4] !== "suppress") return undefined;
+  const action = parts[4];
+  if (kind === "dead_letter" && action !== "redrive" && action !== "suppress") return undefined;
+  if (kind === "uncertain" && action !== "retry" && action !== "suppress") return undefined;
+  const name = kind === "uncertain" ? (action === "retry" ? "retryUncertain" : "suppressUncertain") : action;
   return {
-    name: parts[4],
+    name,
+    action: kind === "uncertain" ? `${action}_uncertain` : action,
+    kind,
+    suppression: action === "suppress",
+    repositoryMethod: kind === "uncertain" ? (action === "retry" ? "retryUncertain" : "suppressUncertain") : (action === "redrive" ? "redriveDeadLetter" : "suppressDeadLetter"),
+    responseKey: kind === "uncertain" ? "uncertain_delivery" : "dead_letter",
     method: "POST",
     allow: "POST",
-    operation: OWNER_RECOVERY_DEAD_LETTER_OPERATIONS[parts[4]],
-    recentAuthOperation: OWNER_RECOVERY_DEAD_LETTER_RECENT_AUTH_OPERATIONS[parts[4]],
+    operation: OWNER_RECOVERY_DEAD_LETTER_OPERATIONS[name],
+    recentAuthOperation: OWNER_RECOVERY_DEAD_LETTER_RECENT_AUTH_OPERATIONS[name],
     organizationId,
     eventId,
     url
@@ -399,9 +420,9 @@ function assertRequestOrigin(request, expectedOrigin) {
 
 function assertRouteHeaders(request, route) {
   for (const name of MUTATION_ONLY_HEADERS) {
-    if (route.name === "list" && request.headers[name] !== undefined) throw invalidRequest();
+    if (route.list && request.headers[name] !== undefined) throw invalidRequest();
   }
-  if (route.name !== "list") {
+  if (!route.list) {
     const contentType = header(request.headers, "content-type");
     if (contentType === undefined || !/^application\/json(?:\s*;\s*charset=utf-8)?$/iu.test(contentType)) throw invalidRequest();
   }
@@ -468,9 +489,9 @@ function validAuthorization(value, actor, route, proof, contextHash) {
     && value.context_hash === contextHash;
 }
 
-function normalizeList(result, organizationId, limit) {
+function normalizeList(result, organizationId, limit, kind = "dead_letter") {
   if (!result || typeof result !== "object" || Array.isArray(result) || !Array.isArray(result.items) || result.items.length > limit) throw unavailable();
-  return Object.freeze(result.items.map((item) => normalizeDeadLetter(item, organizationId)));
+  return Object.freeze(result.items.map((item) => kind === "uncertain" ? normalizeUncertain(item, organizationId) : normalizeDeadLetter(item, organizationId)));
 }
 
 function normalizeNextCursor(result) {
@@ -501,7 +522,30 @@ function normalizeDeadLetter(value, organizationId) {
   return Object.freeze(output);
 }
 
-function normalizeMutation(value, organizationId, eventId) {
+function normalizeUncertain(value, organizationId) {
+  if (!value || typeof value !== "object" || Array.isArray(value) || value.status !== "uncertain") throw unavailable();
+  return Object.freeze({
+    organization_id: boundUuid(value.organization_id, organizationId),
+    event_id: requiredUuid(value.event_id),
+    request_id: requiredUuid(value.request_id),
+    subject_member_id: requiredUuid(value.subject_member_id),
+    event_type: safeEventType(value.event_type),
+    status: "uncertain",
+    attempts: nonNegativeInteger(value.attempts),
+    total_attempts: nonNegativeInteger(value.total_attempts),
+    management_version: positiveInteger(value.management_version),
+    redrive_count: nonNegativeInteger(value.redrive_count),
+    last_error_code: safeErrorCode(value.last_error_code),
+    uncertain_at: timestamp(value.uncertain_at),
+    uncertain_reason: safeErrorCode(value.uncertain_reason),
+    created_at: timestamp(value.created_at),
+    updated_at: timestamp(value.updated_at),
+    suppressed_at: nullableTimestamp(value.suppressed_at),
+    suppression_reason: nullableReason(value.suppression_reason)
+  });
+}
+
+function normalizeMutation(value, organizationId, eventId, kind = "dead_letter") {
   if (!value || typeof value !== "object" || Array.isArray(value) || (value.status !== "pending" && value.status !== "suppressed")) throw unavailable();
   return Object.freeze({
     organization_id: boundUuid(value.organization_id, organizationId),
@@ -512,7 +556,11 @@ function normalizeMutation(value, organizationId, eventId) {
     management_version: positiveInteger(value.management_version),
     redrive_count: nonNegativeInteger(value.redrive_count),
     suppressed_at: nullableTimestamp(value.suppressed_at),
-    suppression_reason: nullableReason(value.suppression_reason)
+    suppression_reason: nullableReason(value.suppression_reason),
+    ...(kind === "uncertain" ? {
+      uncertain_at: nullableTimestamp(value.uncertain_at),
+      uncertain_reason: value.uncertain_reason === null || value.uncertain_reason === undefined ? null : safeErrorCode(value.uncertain_reason)
+    } : {})
   });
 }
 

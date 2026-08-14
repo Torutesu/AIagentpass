@@ -20,6 +20,7 @@ const MEMBERSHIP_TWO = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
 const CREDENTIAL = Buffer.alloc(32, 0x42);
 const PUBLIC_KEY = Buffer.alloc(64, 0x43);
 const NOW = new Date("2026-08-14T12:00:00.000Z");
+const DELIVERY_BINDING = Object.freeze({ binding_id: "test-owner-recovery", key_version: 3, binding_digest: "a".repeat(64) });
 
 class ScriptedClient {
   constructor(handler) {
@@ -164,6 +165,7 @@ test("activation composes inside the coordinator transaction while proof is cons
   const auditCalls = [];
   const repository = createPostgresOwnerRecoveryRepository({
     client,
+    deliveryBinding: DELIVERY_BINDING,
     clock: () => NOW,
     appendActivationAudit: async (input) => {
       auditCalls.push(input);
@@ -212,6 +214,9 @@ test("activation composes inside the coordinator transaction while proof is cons
   assert.match(transitionCall.text, /SET state=\$5/u);
   assert.match(transitionCall.text, /AND state=\$4 RETURNING/u);
   assert.deepEqual(transitionCall.params.slice(0, 5), [ORG, REQUEST, 4, "credential_enrolled", "activated"]);
+  const outboxCall = client.calls.find(({ text }) => text.startsWith("INSERT INTO owner_recovery_outbox"));
+  assert.match(outboxCall.text, /provider_binding_state,provider_binding_id,provider_key_version,provider_binding_digest/u);
+  assert.deepEqual(outboxCall.params.slice(-3), [DELIVERY_BINDING.binding_id, DELIVERY_BINDING.key_version, DELIVERY_BINDING.binding_digest]);
 });
 
 test("counter update is exact-CAS, transaction-composable, and confirms committed", async () => {

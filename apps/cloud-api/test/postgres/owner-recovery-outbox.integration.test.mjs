@@ -15,6 +15,7 @@ const REQUEST = "50000000-0000-4000-8000-000000000029";
 const EVENT = "60000000-0000-4000-8000-000000000029";
 const DEAD_EVENT = "60000000-0000-4000-8000-000000000030";
 const DELIVERY_EVENT = "60000000-0000-4000-8000-000000000031";
+const DELIVERY_BINDING = Object.freeze({ binding_id: "test-owner-recovery", key_version: 1, binding_digest: "a".repeat(64) });
 
 test("outbox claims are exclusive, process loss is quarantined, and attempt 100 dead-letters", { skip: !databaseUrl }, async (t) => {
   const pool = new Pool({ connectionString: databaseUrl, max: 8 });
@@ -25,8 +26,8 @@ test("outbox claims are exclusive, process loss is quarantined, and attempt 100 
 
   await cleanup(pool);
   await seed(pool);
-  const repositoryA = createPostgresOwnerRecoveryOutboxRepository({ client: pool, randomBytes: () => Buffer.alloc(32, 0x41) });
-  const repositoryB = createPostgresOwnerRecoveryOutboxRepository({ client: pool, randomBytes: () => Buffer.alloc(32, 0x42) });
+  const repositoryA = createPostgresOwnerRecoveryOutboxRepository({ client: pool, deliveryBinding: DELIVERY_BINDING, randomBytes: () => Buffer.alloc(32, 0x41) });
+  const repositoryB = createPostgresOwnerRecoveryOutboxRepository({ client: pool, deliveryBinding: DELIVERY_BINDING, randomBytes: () => Buffer.alloc(32, 0x42) });
   const [claimA, claimB] = await Promise.all([
     repositoryA.claimBatch({ limit: 1, lease_ms: 1_000 }),
     repositoryB.claimBatch({ limit: 1, lease_ms: 1_000 })
@@ -59,10 +60,12 @@ test("outbox claims are exclusive, process loss is quarantined, and attempt 100 
   assert.equal((await first.repository.claimBatch({ limit: 1, lease_ms: 1_000 })).events.length, 0);
 
   await pool.query(`INSERT INTO owner_recovery_outbox
-    (organization_id,event_id,request_id,subject_member_id,event_type,status,attempts,available_at,created_at,updated_at)
-    VALUES ($1,$2,$3,$4,'recovery.request.created','pending',0,clock_timestamp(),clock_timestamp(),clock_timestamp())`, [ORG, DELIVERY_EVENT, REQUEST, MEMBER]);
+    (organization_id,event_id,request_id,subject_member_id,event_type,status,attempts,available_at,created_at,updated_at,
+     provider_binding_state,provider_binding_id,provider_key_version,provider_binding_digest)
+    VALUES ($1,$2,$3,$4,'recovery.request.created','pending',0,clock_timestamp(),clock_timestamp(),clock_timestamp(),'bound',$5,$6,decode($7,'hex'))`, [ORG, DELIVERY_EVENT, REQUEST, MEMBER, DELIVERY_BINDING.binding_id, DELIVERY_BINDING.key_version, DELIVERY_BINDING.binding_digest]);
   const providerCalls = [];
   const processLossRepository = {
+    binding: DELIVERY_BINDING,
     claimBatch: (input) => repositoryA.claimBatch(input),
     async markPublished() { throw Object.assign(new Error("simulated process loss"), { code: "owner_recovery_outbox_unavailable" }); },
     async markFailed() { throw Object.assign(new Error("simulated process loss"), { code: "owner_recovery_outbox_unavailable" }); },
@@ -70,7 +73,7 @@ test("outbox claims are exclusive, process loss is quarantined, and attempt 100 
   };
   const firstWorker = createOwnerRecoveryOutboxWorker({
     repository: processLossRepository,
-    publisher: { async publish(input) { providerCalls.push(input.idempotency_key); return { accepted: true, duplicate: false, idempotency_key: input.idempotency_key }; } },
+    publisher: { binding: DELIVERY_BINDING, async publish(input) { providerCalls.push(input.idempotency_key); return { accepted: true, duplicate: false, idempotency_key: input.idempotency_key }; } },
     publishTimeoutMs: 100,
     leaseMs: 1_000
   });
@@ -81,11 +84,12 @@ test("outbox claims are exclusive, process loss is quarantined, and attempt 100 
   assert.equal((await repositoryB.claimBatch({ limit: 1, lease_ms: 1_000 })).events.length, 0);
 
   await pool.query(`INSERT INTO owner_recovery_outbox
-    (organization_id,event_id,request_id,subject_member_id,event_type,status,attempts,available_at,created_at,updated_at)
-    VALUES ($1,$2,$3,$4,'recovery.failed','pending',99,clock_timestamp(),clock_timestamp(),clock_timestamp())`, [ORG, DEAD_EVENT, REQUEST, MEMBER]);
+    (organization_id,event_id,request_id,subject_member_id,event_type,status,attempts,available_at,created_at,updated_at,
+     provider_binding_state,provider_binding_id,provider_key_version,provider_binding_digest)
+    VALUES ($1,$2,$3,$4,'recovery.failed','pending',99,clock_timestamp(),clock_timestamp(),clock_timestamp(),'bound',$5,$6,decode($7,'hex'))`, [ORG, DEAD_EVENT, REQUEST, MEMBER, DELIVERY_BINDING.binding_id, DELIVERY_BINDING.key_version, DELIVERY_BINDING.binding_digest]);
   const deadWorker = createOwnerRecoveryOutboxWorker({
     repository: repositoryB,
-    publisher: { async publish(input) { return { accepted: false, duplicate: false, idempotency_key: input.idempotency_key }; } },
+    publisher: { binding: DELIVERY_BINDING, async publish(input) { return { accepted: false, duplicate: false, idempotency_key: input.idempotency_key }; } },
     publishTimeoutMs: 100,
     leaseMs: 1_000
   });
@@ -95,7 +99,7 @@ test("outbox claims are exclusive, process loss is quarantined, and attempt 100 
   assert.deepEqual(final.rows[0], { status: "dead_letter", attempts: 100, claim_token_digest: null, claim_expires_at: null, last_error_code: "publisher_rejected" });
 
   const columns = await pool.query("SELECT column_name FROM information_schema.columns WHERE table_schema='public' AND table_name='owner_recovery_outbox'");
-  assert.equal(columns.rows.some(({ column_name }) => /claim_token$|provider|payload|body|secret/u.test(column_name)), false);
+  assert.equal(columns.rows.some(({ column_name }) => /claim_token$|provider_url|destination|payload|body|secret/u.test(column_name)), false);
 
 });
 
@@ -112,8 +116,9 @@ async function seed(pool) {
     (organization_id,request_id,schema_version,kind,subject_member_id,creator_member_id,creator_session_id,threshold,expires_at,created_at,updated_at)
     VALUES ($1,$2,1,'threshold-owner-recovery',$3,$3,$4,2,$5,$6,$6)`, [ORG, REQUEST, MEMBER, SESSION, expiresAt, createdAt]);
   await pool.query(`INSERT INTO owner_recovery_outbox
-    (organization_id,event_id,request_id,subject_member_id,event_type,available_at,created_at,updated_at)
-    VALUES ($1,$2,$3,$4,'recovery.request.created',$5,$5,$5)`, [ORG, EVENT, REQUEST, MEMBER, createdAt]);
+    (organization_id,event_id,request_id,subject_member_id,event_type,available_at,created_at,updated_at,
+     provider_binding_state,provider_binding_id,provider_key_version,provider_binding_digest)
+    VALUES ($1,$2,$3,$4,'recovery.request.created',$5,$5,$5,'bound',$6,$7,decode($8,'hex'))`, [ORG, EVENT, REQUEST, MEMBER, createdAt, DELIVERY_BINDING.binding_id, DELIVERY_BINDING.key_version, DELIVERY_BINDING.binding_digest]);
 }
 
 async function expireClaim(pool, eventId) {
@@ -130,7 +135,7 @@ async function cleanup(pool) {
     await client.query("BEGIN");
     await client.query("SET LOCAL session_replication_role = replica");
     for (const table of [
-      "owner_recovery_outbox_retention_ledger", "owner_recovery_outbox", "owner_recovery_webauthn_challenges",
+      "owner_recovery_outbox_transition_ledger", "owner_recovery_outbox_transition_heads", "owner_recovery_outbox_retention_ledger", "owner_recovery_outbox", "owner_recovery_webauthn_challenges",
       "owner_recovery_approvals", "owner_recovery_exchanges", "owner_recovery_sessions", "owner_recovery_idempotency_records",
       "owner_recovery_requests", "human_sessions", "memberships", "outbox_events", "admin_audit_events",
       "admin_audit_heads", "control_plane_authority_generations"

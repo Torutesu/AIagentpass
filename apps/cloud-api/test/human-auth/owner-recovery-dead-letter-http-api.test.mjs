@@ -125,7 +125,8 @@ test("binds recent WebAuthn to the dead-letter context hash and passes only vali
     session_id: SESSION,
     challenge_id: PROOF,
     operation: OPERATIONS.suppress,
-    authenticated_at: NOW
+    authenticated_at: NOW,
+    context_hash: expectedHash
   });
   assert.equal(Object.hasOwn(fixture.calls[3][1], "proof"), false);
   assert.equal(Object.hasOwn(fixture.calls[3][1], "csrf_token"), false);
@@ -142,6 +143,36 @@ test("uses the exact canonical context hash preimage", () => {
     expected_management_version: 4
   }), "utf8").digest("hex");
   assert.equal(ownerRecoveryDeadLetterContextHash({ organization_id: ORG, event_id: EVENT, action: "redrive", expected_management_version: 4 }), expected);
+});
+
+test("lists and manages uncertain deliveries with distinct bounded operations", async () => {
+  const fixture = createFixture();
+  const listed = await fixture.api.handle({ method: "GET", url: PATHS.listUncertain(ORG), headers: fixture.headers() });
+  assert.equal(listed.status, 200);
+  assert.equal(listed.body.uncertain_deliveries[0].status, "uncertain");
+  assert.equal(fixture.calls.at(-2)[1].operation, OPERATIONS.listUncertain);
+
+  const retried = await fixture.api.handle({
+    method: "POST",
+    url: PATHS.retryUncertain(ORG, EVENT),
+    headers: fixture.headers({ "content-type": "application/json", "if-match": '"4"', "idempotency-key": "retry-uncertain-event-1", "agentpass-recent-auth": PROOF }),
+    body: {}
+  });
+  assert.equal(retried.status, 200);
+  assert.equal(retried.body.uncertain_delivery.status, "pending");
+  const retryCall = fixture.calls.find((call) => call[0] === "retryUncertain");
+  assert.equal(retryCall[1].recent_authorization.operation, OPERATIONS.retryUncertain);
+  assert.equal(retryCall[1].context_hash, ownerRecoveryDeadLetterContextHash({ organization_id: ORG, event_id: EVENT, action: "retry_uncertain", expected_management_version: 4 }));
+
+  const suppressed = await fixture.api.handle({
+    method: "POST",
+    url: PATHS.suppressUncertain(ORG, EVENT),
+    headers: fixture.headers({ "content-type": "application/json", "if-match": '"4"', "idempotency-key": "suppress-uncertain-1", "agentpass-recent-auth": PROOF }),
+    body: { reason: "operator-quarantine" }
+  });
+  assert.equal(suppressed.status, 200);
+  assert.equal(suppressed.body.uncertain_delivery.status, "suppressed");
+  assert.equal(fixture.calls.find((call) => call[0] === "suppressUncertain")[1].reason, "operator-quarantine");
 });
 
 test("requires strict mutation headers and bodies", async () => {
@@ -259,6 +290,21 @@ function createFixture({ role = "admin", organizationId = ORG, authorization = u
       calls.push(["suppress", input]);
       if (repositoryError) throw repositoryError;
       return mutation("suppressed", input.event_id);
+    },
+    async listUncertain(input) {
+      calls.push(["listUncertain", input]);
+      if (repositoryError) throw repositoryError;
+      return { items: [uncertainDelivery()], next_cursor: null };
+    },
+    async retryUncertain(input) {
+      calls.push(["retryUncertain", input]);
+      if (repositoryError) throw repositoryError;
+      return mutation("pending", input.event_id);
+    },
+    async suppressUncertain(input) {
+      calls.push(["suppressUncertain", input]);
+      if (repositoryError) throw repositoryError;
+      return mutation("suppressed", input.event_id);
     }
   };
   const humanSession = {
@@ -338,5 +384,16 @@ function mutation(status, eventId) {
     suppressed_at: status === "suppressed" ? "2026-08-14T00:00:02.000Z" : null,
     suppression_reason: status === "suppressed" ? "operator-confirmed-noise" : null,
     provider_response: "must not escape"
+  };
+}
+
+function uncertainDelivery() {
+  return {
+    ...deadLetter(),
+    status: "uncertain",
+    attempts: 0,
+    last_error_code: "delivery_uncertain",
+    uncertain_at: "2026-08-14T00:00:01.000Z",
+    uncertain_reason: "legacy_unbound"
   };
 }

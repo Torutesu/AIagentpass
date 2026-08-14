@@ -4,6 +4,7 @@ import { createPostgresAdminAuditRepository } from "./admin-audit-repository.mjs
 import { createPostgresOwnerRecoveryIdempotencyRepository, sha256Digest } from "./owner-recovery-idempotency-repository.mjs";
 import { discardOwnerRecoveryStateTransitions, flushOwnerRecoveryStateTransitions, observeOwnerRecoveryStateTransition } from "./owner-recovery-transition-observer.mjs";
 import { withTransaction } from "./repository.mjs";
+import { normalizeOwnerRecoveryDeliveryBinding, sameOwnerRecoveryDeliveryBinding } from "./owner-recovery-delivery-binding.mjs";
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu;
 const DIGEST = /^[0-9a-f]{64}$/iu;
@@ -134,11 +135,13 @@ export function createPostgresOwnerRecoveryRepository({
   idempotencyRepository = undefined,
   appendActivationAudit = undefined,
   verifyActivationAuthorization = undefined,
-  metrics = undefined
+  metrics = undefined,
+  deliveryBinding = undefined
 } = {}) {
   assertClient(client);
   if (typeof clock !== "function" || typeof randomBytes !== "function" || typeof randomUUID !== "function") throw new TypeError("owner recovery crypto and clock dependencies are invalid");
   if (verifyActivationAuthorization !== undefined && typeof verifyActivationAuthorization !== "function") throw new TypeError("verifyActivationAuthorization must be a function");
+  const delivery = deliveryBinding === undefined ? undefined : normalizeOwnerRecoveryDeliveryBinding(deliveryBinding);
   const limits = Object.freeze({
     requestTtlMs: duration(requestTtlMs, "requestTtlMs"),
     delayMs: duration(delayMs, "delayMs"),
@@ -1418,14 +1421,31 @@ export function createPostgresOwnerRecoveryRepository({
   async function insertOutbox(tx, { organizationId, requestId, subjectMemberId, eventType, eventKey = "" }) {
     if (!OUTBOX_EVENTS.has(eventType)) throw failure("unavailable");
     const eventId = deterministicUuid(organizationId, requestId, `outbox:${eventType}:${eventKey}`);
-    const inserted = await tx.query(`INSERT INTO owner_recovery_outbox
-      (organization_id,event_id,request_id,subject_member_id,event_type,status,attempts,available_at,created_at,updated_at)
-      VALUES ($1,$2,$3,$4,$5,'pending',0,clock_timestamp(),clock_timestamp(),clock_timestamp())
-      ON CONFLICT (organization_id,event_id) DO NOTHING RETURNING event_id,event_type,request_id,subject_member_id`, [organizationId, eventId, requestId, subjectMemberId, eventType]);
+    const inserted = delivery === undefined
+      ? await tx.query(`INSERT INTO owner_recovery_outbox
+          (organization_id,event_id,request_id,subject_member_id,event_type,status,attempts,available_at,created_at,updated_at,
+            uncertain_at,uncertain_reason,last_error_code)
+          VALUES ($1,$2,$3,$4,$5,'uncertain',0,clock_timestamp(),clock_timestamp(),clock_timestamp(),
+            clock_timestamp(),'provider_unconfigured','delivery_uncertain')
+          ON CONFLICT (organization_id,event_id) DO NOTHING RETURNING event_id,event_type,request_id,subject_member_id`, [organizationId, eventId, requestId, subjectMemberId, eventType])
+      : await tx.query(`INSERT INTO owner_recovery_outbox
+          (organization_id,event_id,request_id,subject_member_id,event_type,status,attempts,available_at,created_at,updated_at,
+            provider_binding_state,provider_binding_id,provider_key_version,provider_binding_digest)
+          VALUES ($1,$2,$3,$4,$5,'pending',0,clock_timestamp(),clock_timestamp(),clock_timestamp(),'bound',$6,$7,decode($8,'hex'))
+          ON CONFLICT (organization_id,event_id) DO NOTHING
+          RETURNING event_id,event_type,request_id,subject_member_id,provider_binding_id,provider_key_version,encode(provider_binding_digest,'hex') AS provider_binding_digest`,
+        [organizationId, eventId, requestId, subjectMemberId, eventType, delivery.binding_id, delivery.key_version, delivery.binding_digest]);
     if (rowCount(inserted) === 1) return eventId;
-    const existing = await tx.query(`SELECT event_id,event_type,request_id,subject_member_id FROM owner_recovery_outbox
+    const existing = await tx.query(`SELECT event_id,event_type,request_id,subject_member_id,
+        provider_binding_id,provider_key_version,encode(provider_binding_digest,'hex') AS provider_binding_digest
+      FROM owner_recovery_outbox
       WHERE organization_id=$1 AND event_id=$2 FOR UPDATE`, [organizationId, eventId]);
-    if (rowCount(existing) !== 1 || existing.rows[0].event_type !== eventType || existing.rows[0].request_id !== requestId || existing.rows[0].subject_member_id !== subjectMemberId) throw failure("unavailable");
+    if (rowCount(existing) !== 1 || existing.rows[0].event_type !== eventType || existing.rows[0].request_id !== requestId || existing.rows[0].subject_member_id !== subjectMemberId
+      || (delivery !== undefined && !sameOwnerRecoveryDeliveryBinding(delivery, {
+        binding_id: existing.rows[0].provider_binding_id,
+        key_version: Number(existing.rows[0].provider_key_version),
+        binding_digest: existing.rows[0].provider_binding_digest
+      }))) throw failure("unavailable");
     return eventId;
   }
 }

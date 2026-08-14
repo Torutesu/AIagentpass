@@ -15,6 +15,7 @@ import { createPostgresOwnerRecoveryOutboxRepository } from "./owner-recovery-ou
 import { createPostgresOwnerRecoveryOutboxManagementRepository } from "./owner-recovery-outbox-management-repository.mjs";
 import { createPostgresOwnerRecoveryOutboxRetentionRepository } from "./owner-recovery-outbox-retention-repository.mjs";
 import { createOwnerRecoveryOutboxWorker } from "./owner-recovery-outbox-worker.mjs";
+import { normalizeOwnerRecoveryDeliveryBinding } from "./owner-recovery-delivery-binding.mjs";
 import { createSharedControlMaintenanceWorker } from "./shared-control-maintenance-worker.mjs";
 import { createAgentSessionAuthorityRepository } from "./agent-session-authority-repository.mjs";
 import { createPostgresAgentSessionConsumptionRepository } from "./agent-session-consumption-repository.mjs";
@@ -32,6 +33,9 @@ export async function createPostgresRuntime({ env = process.env, PoolClass = Poo
   if (resolveProcessBindingPolicy !== undefined && typeof resolveProcessBindingPolicy !== "function") throw new TypeError("resolveProcessBindingPolicy must be a function");
   if (typeof ownerRecoveryOutboxAutoStart !== "boolean" || !ownerRecoveryOutboxWorkerOptions || typeof ownerRecoveryOutboxWorkerOptions !== "object" || Array.isArray(ownerRecoveryOutboxWorkerOptions)) throw new TypeError("owner recovery outbox runtime configuration is invalid");
   if (typeof sharedControlMaintenanceAutoStart !== "boolean" || !sharedControlMaintenanceWorkerOptions || typeof sharedControlMaintenanceWorkerOptions !== "object" || Array.isArray(sharedControlMaintenanceWorkerOptions)) throw new TypeError("shared-control maintenance runtime configuration is invalid");
+  let ownerRecoveryDeliveryBinding;
+  try { ownerRecoveryDeliveryBinding = ownerRecoveryPublisher === undefined ? undefined : normalizeOwnerRecoveryDeliveryBinding(ownerRecoveryPublisher.binding); }
+  catch { throw new TypeError("owner recovery publisher binding is invalid"); }
   const config = loadPostgresConfig(env);
   const pool = new PoolClass({ connectionString: config.connectionString, ssl: { rejectUnauthorized: true }, max: config.maxConnections, connectionTimeoutMillis: config.connectionTimeoutMs, idleTimeoutMillis: config.idleTimeoutMs, statement_timeout: config.statementTimeoutMs, lock_timeout: config.lockTimeoutMs, query_timeout: config.statementTimeoutMs + 1_000, allowExitOnIdle: false });
   const migrationRunner = createMigrationRunner({ client: pool, applicationVersion });
@@ -104,10 +108,11 @@ export async function createPostgresRuntime({ env = process.env, PoolClass = Poo
   const ownerRecoveryRepository = createPostgresOwnerRecoveryRepository({
     client: pool,
     auditRepository: adminAuditRepository,
-    metrics: operationalMetrics
+    metrics: operationalMetrics,
+    deliveryBinding: ownerRecoveryDeliveryBinding
   });
   const ownerRecoveryWebAuthnRepository = createPostgresOwnerRecoveryWebAuthnRepository({ client: pool });
-  ownerRecoveryOutboxRepository = createPostgresOwnerRecoveryOutboxRepository({ client: pool });
+  ownerRecoveryOutboxRepository = createPostgresOwnerRecoveryOutboxRepository({ client: pool, deliveryBinding: ownerRecoveryDeliveryBinding });
   const ownerRecoveryOutboxManagementRepository = createPostgresOwnerRecoveryOutboxManagementRepository({
     client: pool,
     cursorSecret: auditCursorSecret,

@@ -11,7 +11,7 @@ const ORGANIZATION_ROUTE = new RegExp(`^${ORGANIZATIONS_PATH}(?:/${UUID}(?:/memb
 const AGENT_SESSION_GRANT_ROUTE = new RegExp(`^${AGENT_SESSION_GRANTS_PATH}/${UUID}/agents/${UUID}/session-grants$`);
 const QUALIFICATION_GRANT_BATCH_ROUTE = new RegExp(`^${AGENT_SESSION_GRANTS_PATH}/${UUID}/agents/${UUID}/qualification-grant-batches$`);
 const OWNER_RECOVERY_ROUTE = new RegExp(`^/api/auth/(?:recovery/(?:exchange|webauthn/registration/(?:options|verify)|activate)|organizations/${UUID}/recovery-requests(?:/${UUID}(?:/(?:approve|cancel))?)?)$`);
-const OWNER_RECOVERY_DEAD_LETTER_ROUTE = new RegExp(`^/api/auth/organizations/${UUID}/recovery-outbox/dead-letters(?:/${UUID}/(?:redrive|suppress))?$`);
+const OWNER_RECOVERY_DEAD_LETTER_ROUTE = new RegExp(`^/api/auth/organizations/${UUID}/recovery-outbox/(?:dead-letters(?:/${UUID}/(?:redrive|suppress))?|uncertain(?:/${UUID}/(?:retry|suppress))?)$`);
 
 export function createHumanAuthRouter({ sessionApi, webauthnApi, registrationApi, managementApi, organizationApi, recoveryApi, recoveryDeadLetterApi, agentSessionGrantApi, qualificationGrantBatchApi } = {}) {
   if (!sessionApi || typeof sessionApi.handle !== "function") throw new TypeError("sessionApi must expose handle()");

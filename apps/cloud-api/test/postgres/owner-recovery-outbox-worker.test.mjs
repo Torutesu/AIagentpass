@@ -6,6 +6,7 @@ import { createOwnerRecoveryOutboxWorker } from "../../src/postgres/owner-recove
 
 const NOW = Date.parse("2026-08-14T00:00:00.000Z");
 const CLAIM = "C".repeat(43);
+const DELIVERY_BINDING = Object.freeze({ binding_id: "test-owner-recovery", key_version: 1, binding_digest: "a".repeat(64) });
 const EVENT = Object.freeze({
   organization_id: "11111111-1111-4111-8111-111111111111",
   event_id: "22222222-2222-4222-8222-222222222222",
@@ -52,6 +53,30 @@ test("unknown provider outcomes become durable uncertain state and never persist
   assert.equal(calls.some(([name]) => name === "failed"), false);
   assert.deepEqual(calls.find(([name]) => name === "uncertain")[1], { organization_id: EVENT.organization_id, event_id: EVENT.event_id, attempt: 1, claim_token: CLAIM });
   assert.equal(JSON.stringify(calls).includes("must-not-persist"), false);
+});
+
+test("provider binding mismatch is quarantined before any provider call", async () => {
+  const calls = [];
+  const repository = fixtureRepository(calls, { event: { ...EVENT, provider_binding: { ...DELIVERY_BINDING, binding_digest: "b".repeat(64) } }, binding: DELIVERY_BINDING });
+  let providerCalls = 0;
+  const worker = createOwnerRecoveryOutboxWorker({
+    repository,
+    publisher: { binding: DELIVERY_BINDING, async publish() { providerCalls += 1; return accepted(EVENT.event_id); } },
+    now: () => NOW,
+    random: () => 0
+  });
+  const result = await worker.runOnce();
+  assert.equal(result.uncertain, 1);
+  assert.equal(providerCalls, 0);
+  assert.equal(calls.some(([name]) => name === "uncertain"), true);
+});
+
+test("repository and publisher binding configuration must match", () => {
+  const repository = fixtureRepository([], { binding: DELIVERY_BINDING });
+  assert.throws(() => createOwnerRecoveryOutboxWorker({
+    repository,
+    publisher: { binding: { ...DELIVERY_BINDING, key_version: 2 }, async publish() {} }
+  }), /configuration is invalid/u);
 });
 
 test("a malformed claimed event is isolated while valid events publish", async () => {
@@ -265,6 +290,7 @@ test("runs bounded retention maintenance once per interval without blocking deli
 function fixtureRepository(calls, overrides = {}) {
   let claimed = false;
   return {
+    ...(overrides.binding === undefined ? {} : { binding: overrides.binding }),
     async claimBatch(input) {
       calls.push(["claim", input]);
       if (claimed) return { claim_token: CLAIM, events: [] };

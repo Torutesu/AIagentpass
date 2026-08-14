@@ -13,6 +13,7 @@ const REQUEST = "33333333-3333-4333-8333-333333333333";
 const MEMBER = "44444444-4444-4444-8444-444444444444";
 const NOW = Date.parse("2026-08-14T00:00:00.000Z");
 const CLAIM = Buffer.alloc(32, 7).toString("base64url");
+const DELIVERY_BINDING = Object.freeze({ binding_id: "test-owner-recovery", key_version: 7, binding_digest: "a".repeat(64) });
 
 test("claim uses SKIP LOCKED and sends only a claim digest to PostgreSQL", async () => {
   const client = new ScriptedClient((text) => {
@@ -39,6 +40,19 @@ test("an expired attempt-100 lease is quarantined after process loss", async () 
   const result = await repository.claimBatch({ limit: 1, lease_ms: 1_000 });
   assert.equal(result.events[0].attempt, 100);
   assert.match(client.calls[0].text, /LEAST\(outbox\.attempts\+1,\$1\)/);
+});
+
+test("claim filters and returns only the exact immutable provider binding", async () => {
+  const client = new ScriptedClient((text, params) => {
+    assert.match(text, /provider_binding_state='bound'/u);
+    assert.match(text, /provider_binding_id=\$5/u);
+    assert.deepEqual(params.slice(4), [DELIVERY_BINDING.binding_id, DELIVERY_BINDING.key_version, DELIVERY_BINDING.binding_digest]);
+    return { rowCount: 1, rows: [{ ...row(), provider_binding_id: DELIVERY_BINDING.binding_id, provider_key_version: DELIVERY_BINDING.key_version, provider_binding_digest: DELIVERY_BINDING.binding_digest }] };
+  });
+  const repository = createPostgresOwnerRecoveryOutboxRepository({ client, deliveryBinding: DELIVERY_BINDING, randomBytes: () => Buffer.alloc(32, 7), now: () => NOW });
+  const result = await repository.claimBatch({ limit: 1, lease_ms: 1_000 });
+  assert.deepEqual(repository.binding, DELIVERY_BINDING);
+  assert.deepEqual(result.events[0].provider_binding, DELIVERY_BINDING);
 });
 
 test("publish and retry are exact attempt plus claim-digest CAS operations", async () => {

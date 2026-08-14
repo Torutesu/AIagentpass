@@ -183,7 +183,7 @@ async function seedDatabase(pool, organizationId, { refreshNonceKeyId, refreshNo
   const migrationClient = await pool.connect();
   try {
     const migration = await createMigrationRunner({ client: migrationClient, applicationVersion: "p0b-live-process" }).run();
-    assert.equal(migration.currentVersion, 34);
+    assert.equal(migration.currentVersion, 35);
   } finally {
     migrationClient.release();
   }

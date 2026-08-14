@@ -23,7 +23,7 @@ test("real PostgreSQL prunes bounded terminal recovery rows into an immutable se
   const migrationClient = await pool.connect();
   try {
     const result = await createMigrationRunner({ client: migrationClient, applicationVersion: "owner-recovery-retention-qualification" }).run();
-    assert.equal(result.currentVersion, 34);
+    assert.equal(result.currentVersion, 35);
   } finally {
     migrationClient.release();
   }
@@ -120,8 +120,9 @@ async function seed(pool, fixture) {
     const terminalAt = row.index < 3 ? old : recent;
     await pool.query(`INSERT INTO owner_recovery_outbox
       (organization_id,event_id,request_id,subject_member_id,event_type,status,attempts,available_at,published_at,created_at,updated_at,
-       claim_token_digest,claim_expires_at,last_error_code,management_version,redrive_count,total_attempts,suppressed_at,suppression_reason)
-      VALUES ($1,$2,$3,$4,'recovery.failed',$5,$6,$7,$8,$7,$7,NULL,NULL,$9,1,0,$6,$10,$11)`, [
+       claim_token_digest,claim_expires_at,last_error_code,management_version,redrive_count,total_attempts,suppressed_at,suppression_reason,
+       provider_binding_state,provider_binding_id,provider_key_version,provider_binding_digest)
+      VALUES ($1,$2,$3,$4,'recovery.failed',$5,$6,$7,$8,$7,$7,NULL,NULL,$9,1,0,$6,$10,$11,'bound','test-owner-recovery',1,decode(repeat('a',64),'hex'))`, [
       fixture.organization, row.event, row.request, fixture.member, status,
       status === "published" ? 1 : 100, terminalAt,
       status === "published" ? terminalAt : null,
@@ -133,13 +134,20 @@ async function seed(pool, fixture) {
 }
 
 async function cleanup(pool, fixture) {
-  await pool.query("DELETE FROM owner_recovery_outbox WHERE organization_id=$1", [fixture.organization]);
-  await pool.query("DELETE FROM owner_recovery_requests WHERE organization_id=$1", [fixture.organization]);
-  await pool.query("DELETE FROM human_sessions WHERE organization_id=$1", [fixture.organization]);
-  await pool.query("DELETE FROM memberships WHERE organization_id=$1", [fixture.organization]);
-  await pool.query("DELETE FROM outbox_events WHERE organization_id=$1", [fixture.organization]);
-  await pool.query("DELETE FROM control_plane_authority_generations WHERE organization_id=$1", [fixture.organization]);
-  await pool.query("DELETE FROM admin_audit_heads WHERE organization_id=$1", [fixture.organization]);
-  await pool.query("DELETE FROM organizations WHERE id=$1", [fixture.organization]);
-  await pool.query("DELETE FROM members WHERE id=$1", [fixture.member]);
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    await client.query("SET LOCAL session_replication_role = replica");
+    for (const table of ["owner_recovery_outbox_transition_ledger", "owner_recovery_outbox_transition_heads", "owner_recovery_outbox_retention_ledger", "owner_recovery_outbox", "owner_recovery_requests", "human_sessions", "memberships", "outbox_events", "control_plane_authority_generations", "admin_audit_events", "admin_audit_heads"]) {
+      await client.query(`DELETE FROM ${table} WHERE organization_id=$1`, [fixture.organization]);
+    }
+    await client.query("DELETE FROM organizations WHERE id=$1", [fixture.organization]);
+    await client.query("DELETE FROM members WHERE id=$1", [fixture.member]);
+    await client.query("COMMIT");
+  } catch (error) {
+    await client.query("ROLLBACK");
+    throw error;
+  } finally {
+    client.release();
+  }
 }

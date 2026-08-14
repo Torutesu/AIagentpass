@@ -8,6 +8,7 @@ import { OwnerRecoveryRepositoryError, createPostgresOwnerRecoveryRepository } f
 
 const databaseUrl = process.env.AGENTPASS_TEST_DATABASE_URL;
 const NOW = new Date("2026-08-14T12:00:00.000Z");
+const DELIVERY_BINDING = Object.freeze({ binding_id: "test-owner-recovery", key_version: 1, binding_digest: "c".repeat(64) });
 
 test("owner recovery forward-state CAS commits on fromState and rolls back with later failure", { skip: !databaseUrl }, async (t) => {
   const pool = new Pool({ connectionString: databaseUrl, max: 4 });
@@ -20,14 +21,15 @@ test("owner recovery forward-state CAS commits on fromState and rolls back with 
     rolledBackRequest: crypto.randomUUID()
   };
   t.after(async () => {
-    await pool.query("DELETE FROM owner_recovery_outbox WHERE organization_id=$1", [ids.organization]);
-    await pool.query("DELETE FROM owner_recovery_requests WHERE organization_id=$1", [ids.organization]);
-    await pool.query("DELETE FROM human_sessions WHERE organization_id=$1", [ids.organization]);
     const cleanup = await pool.connect();
     try {
       await cleanup.query("BEGIN");
       await cleanup.query("SET LOCAL session_replication_role = replica");
-      await cleanup.query("DELETE FROM memberships WHERE organization_id=$1", [ids.organization]);
+      for (const table of ["owner_recovery_outbox_transition_ledger", "owner_recovery_outbox_transition_heads", "owner_recovery_outbox_retention_ledger", "owner_recovery_outbox", "owner_recovery_requests", "human_sessions", "memberships", "admin_audit_events", "admin_audit_heads", "outbox_events", "control_plane_authority_generations"]) {
+        await cleanup.query(`DELETE FROM ${table} WHERE organization_id=$1`, [ids.organization]);
+      }
+      await cleanup.query("DELETE FROM organizations WHERE id=$1", [ids.organization]);
+      await cleanup.query("DELETE FROM members WHERE id=$1", [ids.member]);
       await cleanup.query("COMMIT");
     } catch (error) {
       await cleanup.query("ROLLBACK");
@@ -35,19 +37,13 @@ test("owner recovery forward-state CAS commits on fromState and rolls back with 
     } finally {
       cleanup.release();
     }
-    await pool.query("DELETE FROM admin_audit_events WHERE organization_id=$1", [ids.organization]);
-    await pool.query("DELETE FROM admin_audit_heads WHERE organization_id=$1", [ids.organization]);
-    await pool.query("DELETE FROM outbox_events WHERE organization_id=$1", [ids.organization]);
-    await pool.query("DELETE FROM control_plane_authority_generations WHERE organization_id=$1", [ids.organization]);
-    await pool.query("DELETE FROM organizations WHERE id=$1", [ids.organization]);
-    await pool.query("DELETE FROM members WHERE id=$1", [ids.member]);
     await pool.end();
   });
 
   const migrationClient = await pool.connect();
   try {
     const migration = await createMigrationRunner({ client: migrationClient, applicationVersion: "owner-recovery-transition-integration" }).run();
-    assert.equal(migration.currentVersion, 34);
+    assert.equal(migration.currentVersion, 35);
   } finally {
     migrationClient.release();
   }
@@ -62,7 +58,7 @@ test("owner recovery forward-state CAS commits on fromState and rolls back with 
 
   const recorded = [];
   const metrics = { recordOwnerRecoveryStateLatency(value) { recorded.push(value); } };
-  const repository = createPostgresOwnerRecoveryRepository({ client: pool, clock: () => NOW, metrics });
+  const repository = createPostgresOwnerRecoveryRepository({ client: pool, deliveryBinding: DELIVERY_BINDING, clock: () => NOW, metrics });
   const committed = await repository.expireRequest({ organization_id: ids.organization, request_id: ids.committedRequest, expected_version: 1 });
   assert.equal(committed.request.state, "expired");
   assert.equal(committed.request.version, 2);
@@ -85,7 +81,7 @@ test("owner recovery forward-state CAS commits on fromState and rolls back with 
       };
     }
   };
-  const failing = createPostgresOwnerRecoveryRepository({ client: failingClient, clock: () => NOW, metrics });
+  const failing = createPostgresOwnerRecoveryRepository({ client: failingClient, deliveryBinding: DELIVERY_BINDING, clock: () => NOW, metrics });
   await assert.rejects(
     failing.expireRequest({ organization_id: ids.organization, request_id: ids.rolledBackRequest, expected_version: 1 }),
     (error) => error instanceof OwnerRecoveryRepositoryError && error.code === "unavailable"

@@ -6,6 +6,7 @@ import { createPostgresAdminAuditRepository } from "./admin-audit-repository.mjs
 import { createSharedControlRepository, SharedControlRepositoryError } from "./shared-control-repository.mjs";
 
 const RESOURCE = "owner_recovery_dead_letters";
+const UNCERTAIN_RESOURCE = "owner_recovery_outbox_uncertain";
 const DIRECTION = "asc";
 const DEFAULT_LIMIT = 25;
 const MAX_LIMIT = 100;
@@ -17,11 +18,25 @@ const IDEMPOTENCY_KEY = /^[A-Za-z0-9][A-Za-z0-9._:~-]{7,254}$/u;
 const EVENT_TYPE = /^recovery\.[a-z]+(?:\.[a-z]+)*$/u;
 const CONTROL = /[\u0000-\u001f\u007f]/u;
 const MANAGEMENT_ROLES = new Set(["owner", "admin"]);
+const UNCERTAIN_REASONS = new Set([
+  "provider_timeout",
+  "provider_transport_error",
+  "provider_response_invalid",
+  "terminal_commit_unknown",
+  "process_interrupted",
+  "delivery_unknown",
+  "provider_unconfigured",
+  "legacy_unbound"
+]);
 
 export const OWNER_RECOVERY_OUTBOX_MANAGEMENT_OPERATIONS = Object.freeze({
   redrive: "human.recovery.outbox.redrive",
-  suppress: "human.recovery.outbox.suppress"
+  suppress: "human.recovery.outbox.suppress",
+  retryUncertain: "human.recovery.outbox.retry_uncertain",
+  suppressUncertain: "human.recovery.outbox.suppress_uncertain"
 });
+
+export const OWNER_RECOVERY_OUTBOX_UNCERTAIN_REASONS = Object.freeze([...UNCERTAIN_REASONS]);
 
 export const OWNER_RECOVERY_OUTBOX_MANAGEMENT_ERROR_CODES = Object.freeze({
   INVALID_INPUT: "owner_recovery_outbox_management_invalid_input",
@@ -58,9 +73,10 @@ export class OwnerRecoveryOutboxManagementRepositoryError extends Error {
  *
  * The caller must pass an actor produced by the authenticated server session
  * boundary. This repository deliberately does not accept a member, role, or
- * session separately from that scope. Redrive and suppress use shared-control
- * idempotency and append the admin audit event before the same transaction is
- * committed.
+ * session separately from that scope. Dead-letter redrive/suppress and
+ * uncertain retry/suppress use shared-control idempotency and append the admin
+ * audit event before the same transaction is committed. Uncertain rows have no
+ * confirmation operation.
  *
  * The SQL targets the expected 0030 contract. It does not require the
  * migration to be present while unit tests exercise the repository boundary.
@@ -123,6 +139,49 @@ export function createPostgresOwnerRecoveryOutboxManagementRepository({
     }
   }
 
+  async function listUncertain(input = {}) {
+    if (!isObject(input)) throw invalidInput();
+    const actor = normalizeActor(input.actor);
+    const limit = boundedLimit(input.limit);
+    const position = decodeUncertainCursor(input.cursor, actor, codec);
+    const params = [actor.organizationId, actor.sessionId, actor.memberId, actor.role];
+    const clauses = ["organization_id=$1", "status='uncertain'", `EXISTS (
+      SELECT 1 FROM human_sessions s
+      JOIN memberships m ON m.organization_id=s.organization_id AND m.id=s.membership_id AND m.member_id=s.member_id
+      JOIN organizations o ON o.id=s.organization_id
+      WHERE s.id=$2 AND s.member_id=$3 AND s.organization_id=$1 AND s.role=$4
+        AND s.revoked_at IS NULL AND s.expires_at>clock_timestamp()
+        AND (s.idle_expires_at IS NULL OR s.idle_expires_at>clock_timestamp())
+        AND m.status='active' AND m.role=s.role AND m.role IN ('owner','admin')
+        AND s.organization_authority_epoch=o.authority_epoch
+        AND s.membership_session_epoch=m.session_epoch
+    )`];
+    if (position !== undefined) {
+      params.push(position.uncertain_at, position.id);
+      clauses.push(`(uncertain_at,event_id) > ($${params.length - 1}::timestamptz,$${params.length}::uuid)`);
+    }
+    params.push(limit + 1);
+    try {
+      const result = await client.query(`SELECT organization_id,event_id,request_id,subject_member_id,event_type,status,
+          attempts,total_attempts,management_version,redrive_count,last_error_code,
+          uncertain_at,uncertain_reason,created_at,updated_at,
+          suppressed_at,suppression_reason
+        FROM owner_recovery_outbox
+        WHERE ${clauses.join(" AND ")}
+        ORDER BY uncertain_at ASC,event_id ASC
+        LIMIT $${params.length}`, params);
+      const rows = (result.rows ?? []).map(publicUncertain);
+      const hasNext = rows.length > limit;
+      const items = rows.slice(0, limit);
+      const last = items.at(-1);
+      const next_cursor = hasNext ? encodeUncertainCursor(actor, last, codec) : null;
+      return Object.freeze({ items: Object.freeze(items), next_cursor });
+    } catch (error) {
+      if (error instanceof OwnerRecoveryOutboxManagementRepositoryError) throw error;
+      throw database(error);
+    }
+  }
+
   async function redriveDeadLetter(input = {}) {
     const values = normalizeMutation(input, { reasonRequired: false, action: "redrive" });
     return mutate(values, {
@@ -137,6 +196,7 @@ export function createPostgresOwnerRecoveryOutboxManagementRepository({
             suppressed_at=NULL,suppression_reason=NULL
         WHERE organization_id=$1 AND event_id=$2 AND status='dead_letter'
           AND management_version=$3 AND redrive_count<3
+          AND provider_binding_state='bound'
         RETURNING organization_id,event_id,status,attempts,total_attempts,
           management_version,redrive_count,suppressed_at,suppression_reason`
     });
@@ -159,9 +219,51 @@ export function createPostgresOwnerRecoveryOutboxManagementRepository({
     });
   }
 
-  return Object.freeze({ listDeadLetters, redriveDeadLetter, suppressDeadLetter });
+  async function retryUncertain(input = {}) {
+    const values = normalizeMutation(input, { reasonRequired: false, action: "retry_uncertain" });
+    return mutate(values, {
+      operation: "retryUncertain",
+      eventType: "owner_recovery.outbox.uncertain_retried",
+      reason: values.reason,
+      uncertain: true,
+      sql: `UPDATE owner_recovery_outbox
+        SET status='pending',available_at=clock_timestamp(),
+            uncertain_at=NULL,uncertain_reason=NULL,last_error_code=NULL,
+            redrive_count=redrive_count+1,
+            management_version=management_version+1,updated_at=clock_timestamp(),
+            claim_token_digest=NULL,claim_expires_at=NULL
+        WHERE organization_id=$1 AND event_id=$2 AND status='uncertain'
+          AND management_version=$3 AND redrive_count<3
+          AND provider_binding_state='bound'
+        RETURNING organization_id,event_id,status,attempts,total_attempts,
+          management_version,redrive_count,uncertain_at,uncertain_reason,
+          suppressed_at,suppression_reason`
+    });
+  }
 
-  async function mutate(values, { operation, eventType, reason, sql }) {
+  async function suppressUncertain(input = {}) {
+    const values = normalizeMutation(input, { reasonRequired: true, action: "suppress_uncertain" });
+    return mutate(values, {
+      operation: "suppressUncertain",
+      eventType: "owner_recovery.outbox.uncertain_suppressed",
+      reason: values.reason,
+      uncertain: true,
+      sql: `UPDATE owner_recovery_outbox
+        SET status='suppressed',suppressed_at=clock_timestamp(),suppression_reason=$4,
+            uncertain_at=NULL,uncertain_reason=NULL,
+            management_version=management_version+1,updated_at=clock_timestamp(),
+            claim_token_digest=NULL,claim_expires_at=NULL
+        WHERE organization_id=$1 AND event_id=$2 AND status='uncertain'
+          AND management_version=$3
+        RETURNING organization_id,event_id,status,attempts,total_attempts,
+          management_version,redrive_count,uncertain_at,uncertain_reason,
+          suppressed_at,suppression_reason`
+    });
+  }
+
+  return Object.freeze({ listDeadLetters, redriveDeadLetter, suppressDeadLetter, listUncertain, retryUncertain, suppressUncertain });
+
+  async function mutate(values, { operation, eventType, reason, uncertain = false, sql }) {
     const expectedOperation = OWNER_RECOVERY_OUTBOX_MANAGEMENT_OPERATIONS[operation];
     const requestHash = crypto.createHash("sha256").update(canonicalJson({
       version: 1,
@@ -186,12 +288,15 @@ export function createPostgresOwnerRecoveryOutboxManagementRepository({
           });
           if (acquired.state === "replay") return acquired;
           if (acquired.state === "conflict" || acquired.state === "in_progress") return { state: acquired.state };
-          const params = operation === "suppress"
+          await tx.query(`SELECT
+            set_config('agentpass.owner_recovery_actor_type','operator',true),
+            set_config('agentpass.owner_recovery_actor_member_id',$1,true)`, [values.actor.memberId]);
+          const params = operation === "suppress" || operation === "suppressUncertain"
             ? [values.actor.organizationId, values.eventId, values.expectedManagementVersion, reason]
             : [values.actor.organizationId, values.eventId, values.expectedManagementVersion];
           const changed = await tx.query(sql, params);
           if (rowCount(changed) !== 1) throw versionConflict();
-          const row = publicMutation(changed.rows[0]);
+          const row = uncertain ? publicUncertainMutation(changed.rows[0]) : publicMutation(changed.rows[0]);
           try {
             await audit.appendAdminAuditEventInTransaction({
               tx,
@@ -225,7 +330,7 @@ export function createPostgresOwnerRecoveryOutboxManagementRepository({
           return { state: "committed", responseStatus: 200, response: row };
       });
       if (outcome.state === "committed") {
-        metric(metrics, operation === "redrive" ? "recordOwnerRecoveryOutboxRedriveSuccess" : "recordOwnerRecoveryOutboxSuppression");
+        metric(metrics, operation === "redrive" ? "recordOwnerRecoveryOutboxRedriveSuccess" : operation === "suppress" ? "recordOwnerRecoveryOutboxSuppression" : undefined);
         return outcome.response;
       }
       if (outcome.state === "replay") return outcome.response;
@@ -331,12 +436,12 @@ async function requireCurrentAuthorization(tx, values, expectedOperation) {
   if (rowCount(result) !== 1) throw forbidden();
 }
 
-function decodeCursor(value, actor, codec) {
+function decodeCursor(value, actor, codec, resource = RESOURCE) {
   if (value === undefined) return undefined;
   if (typeof value !== "string" || value.length < 1 || value.length > MAX_CURSOR_LENGTH || !BASE64URL.test(value)) throw invalidCursor();
   try {
-    const decoded = codec.decode(value, { resource: RESOURCE, tenant_id: actor.organizationId, member_id: actor.memberId, direction: DIRECTION });
-    if (!decoded || decoded.resource !== RESOURCE || decoded.direction !== DIRECTION) throw invalidCursor();
+    const decoded = codec.decode(value, { resource, tenant_id: actor.organizationId, member_id: actor.memberId, direction: DIRECTION });
+    if (!decoded || decoded.resource !== resource || decoded.direction !== DIRECTION) throw invalidCursor();
     return Object.freeze({ created_at: timestamp(decoded.created_at), id: uuid(decoded.id) });
   } catch (error) {
     if (error instanceof OwnerRecoveryOutboxManagementRepositoryError) throw error;
@@ -344,10 +449,10 @@ function decodeCursor(value, actor, codec) {
   }
 }
 
-function encodeCursor(actor, row, codec) {
+function encodeCursor(actor, row, codec, resource = RESOURCE) {
   try {
     const cursor = codec.encode({
-      resource: RESOURCE,
+      resource,
       tenant_id: actor.organizationId,
       member_id: actor.memberId,
       created_at: row.created_at,
@@ -360,6 +465,15 @@ function encodeCursor(actor, row, codec) {
     if (error instanceof OwnerRecoveryOutboxManagementRepositoryError) throw error;
     throw invalidCursor();
   }
+}
+
+function decodeUncertainCursor(value, actor, codec) {
+  const decoded = decodeCursor(value, actor, codec, UNCERTAIN_RESOURCE);
+  return decoded === undefined ? undefined : Object.freeze({ uncertain_at: decoded.created_at, id: decoded.id });
+}
+
+function encodeUncertainCursor(actor, row, codec) {
+  return encodeCursor(actor, { ...row, created_at: row.uncertain_at }, codec, UNCERTAIN_RESOURCE);
 }
 
 function publicDeadLetter(row = {}) {
@@ -384,6 +498,30 @@ function publicDeadLetter(row = {}) {
   });
 }
 
+function publicUncertain(row = {}) {
+  if (!row || typeof row !== "object" || Array.isArray(row)) throw database();
+  if (row.status !== "uncertain") throw database();
+  return Object.freeze({
+    organization_id: uuid(row.organization_id),
+    event_id: uuid(row.event_id),
+    request_id: uuid(row.request_id),
+    subject_member_id: uuid(row.subject_member_id),
+    event_type: eventType(row.event_type),
+    status: "uncertain",
+    attempts: nonNegativeInteger(row.attempts),
+    total_attempts: nonNegativeInteger(row.total_attempts),
+    management_version: positiveInteger(row.management_version),
+    redrive_count: nonNegativeInteger(row.redrive_count),
+    last_error_code: fixedUncertainErrorCode(row.last_error_code),
+    uncertain_at: timestamp(row.uncertain_at),
+    uncertain_reason: uncertainReason(row.uncertain_reason),
+    created_at: timestamp(row.created_at),
+    updated_at: timestamp(row.updated_at),
+    suppressed_at: nullableTimestamp(row.suppressed_at),
+    suppression_reason: nullableReason(row.suppression_reason)
+  });
+}
+
 function publicMutation(row = {}) {
   if (!row || typeof row !== "object" || Array.isArray(row)) throw database();
   const status = row.status;
@@ -396,6 +534,25 @@ function publicMutation(row = {}) {
     total_attempts: nonNegativeInteger(row.total_attempts),
     management_version: positiveInteger(row.management_version),
     redrive_count: nonNegativeInteger(row.redrive_count),
+    suppressed_at: nullableTimestamp(row.suppressed_at),
+    suppression_reason: nullableReason(row.suppression_reason)
+  });
+}
+
+function publicUncertainMutation(row = {}) {
+  if (!row || typeof row !== "object" || Array.isArray(row)) throw database();
+  const status = row.status;
+  if (status !== "pending" && status !== "suppressed") throw database();
+  return Object.freeze({
+    organization_id: uuid(row.organization_id),
+    event_id: uuid(row.event_id),
+    status,
+    attempts: nonNegativeInteger(row.attempts),
+    total_attempts: nonNegativeInteger(row.total_attempts),
+    management_version: positiveInteger(row.management_version),
+    redrive_count: nonNegativeInteger(row.redrive_count),
+    uncertain_at: nullableTimestamp(row.uncertain_at),
+    uncertain_reason: nullableUncertainReason(row.uncertain_reason),
     suppressed_at: nullableTimestamp(row.suppressed_at),
     suppression_reason: nullableReason(row.suppression_reason)
   });
@@ -419,6 +576,9 @@ function contextHashValue(value) { if (typeof value !== "string" || !/^[0-9a-f]{
 function constantTimeHexEqual(left, right) { const a = Buffer.from(left, "hex"); const b = Buffer.from(right, "hex"); return a.length === b.length && crypto.timingSafeEqual(a, b); }
 function safeReason(value) { if (typeof value !== "string" || value.length < 1 || CONTROL.test(value) || Buffer.byteLength(value, "utf8") > MAX_REASON_BYTES) throw invalidInput(); return value; }
 function nullableReason(value) { return value === null || value === undefined ? null : safeReason(value); }
+function uncertainReason(value) { if (typeof value !== "string" || !UNCERTAIN_REASONS.has(value)) throw database(); return value; }
+function nullableUncertainReason(value) { return value === null || value === undefined ? null : uncertainReason(value); }
+function fixedUncertainErrorCode(value) { if (value !== "delivery_uncertain") throw database(); return value; }
 function errorCode(value) { if (typeof value !== "string" || !/^[a-z][a-z0-9_]{0,127}$/u.test(value)) throw database(); return value; }
 function eventType(value) { if (typeof value !== "string" || !EVENT_TYPE.test(value)) throw database(); return value; }
 function timestamp(value) { const date = value instanceof Date ? value : new Date(value); if (!Number.isFinite(date.getTime())) throw database(); return date.toISOString(); }

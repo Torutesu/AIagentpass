@@ -1,5 +1,7 @@
 import crypto from "node:crypto";
 
+import { normalizeOwnerRecoveryDeliveryBinding } from "./owner-recovery-delivery-binding.mjs";
+
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu;
 const TOKEN = /^[A-Za-z0-9_-]{43}$/u;
 const ERROR_CODE = /^[a-z][a-z0-9_]{0,127}$/u;
@@ -30,9 +32,10 @@ export class OwnerRecoveryOutboxRepositoryError extends Error {
   }
 }
 
-export function createPostgresOwnerRecoveryOutboxRepository({ client, randomBytes = crypto.randomBytes, now = () => Date.now() } = {}) {
+export function createPostgresOwnerRecoveryOutboxRepository({ client, randomBytes = crypto.randomBytes, now = () => Date.now(), deliveryBinding = undefined } = {}) {
   assertClient(client);
   if (typeof randomBytes !== "function" || typeof now !== "function") throw new TypeError("outbox clock and randomness sources are invalid");
+  const delivery = deliveryBinding === undefined ? undefined : normalizeOwnerRecoveryDeliveryBinding(deliveryBinding);
 
   async function claimBatch({ limit = 10, lease_ms = DEFAULT_LEASE_MS } = {}) {
     const boundedLimit = integer(limit, 1, MAX_BATCH);
@@ -40,6 +43,11 @@ export function createPostgresOwnerRecoveryOutboxRepository({ client, randomByte
     const claimToken = token(randomBytes);
     const claimDigest = sha256(claimToken);
     try {
+      const bindingClause = delivery === undefined ? "" : `
+            AND provider_binding_state='bound' AND provider_binding_id=$5
+            AND provider_key_version=$6 AND provider_binding_digest=decode($7,'hex')`;
+      const params = [MAX_ATTEMPTS, boundedLimit, claimDigest, leaseMs,
+        ...(delivery === undefined ? [] : [delivery.binding_id, delivery.key_version, delivery.binding_digest])];
       const result = await client.query(`WITH expired AS MATERIALIZED (
           SELECT organization_id,event_id
           FROM owner_recovery_outbox
@@ -63,6 +71,7 @@ export function createPostgresOwnerRecoveryOutboxRepository({ client, randomByte
           WHERE status='pending' AND attempts<=$1
             AND available_at<=clock_timestamp()
             AND claim_token_digest IS NULL AND claim_expires_at IS NULL
+            ${bindingClause}
           ORDER BY available_at ASC,created_at ASC,organization_id ASC,event_id ASC
           FOR UPDATE SKIP LOCKED
           LIMIT GREATEST($2-(SELECT count(*) FROM quarantined),0)
@@ -78,7 +87,8 @@ export function createPostgresOwnerRecoveryOutboxRepository({ client, randomByte
           AND outbox.event_id=candidates.event_id
         RETURNING outbox.organization_id,outbox.event_id,outbox.request_id,
           outbox.subject_member_id,outbox.event_type,outbox.attempts,
-          outbox.claim_expires_at,outbox.created_at`, [MAX_ATTEMPTS, boundedLimit, claimDigest, leaseMs]);
+          outbox.claim_expires_at,outbox.created_at,outbox.provider_binding_id,
+          outbox.provider_key_version,encode(outbox.provider_binding_digest,'hex') AS provider_binding_digest`, params);
       const events = Object.freeze((result?.rows ?? []).map(publicClaim));
       return Object.freeze({ claim_token: claimToken, events });
     } catch (error) {
@@ -169,7 +179,7 @@ export function createPostgresOwnerRecoveryOutboxRepository({ client, randomByte
     }
   }
 
-  return Object.freeze({ claimBatch, markPublished, markFailed, markUncertain, health });
+  return Object.freeze({ claimBatch, markPublished, markFailed, markUncertain, health, ...(delivery === undefined ? {} : { binding: delivery }) });
 }
 
 function normalizeClaimMutation(input) {
@@ -187,6 +197,11 @@ function normalizeClaimMutation(input) {
 function publicClaim(row) {
   const eventType = String(row?.event_type ?? "");
   if (!EVENT_TYPE.test(eventType)) throw unavailable();
+  const providerBinding = row.provider_binding_id == null ? undefined : normalizeOwnerRecoveryDeliveryBinding({
+    binding_id: row.provider_binding_id,
+    key_version: Number(row.provider_key_version),
+    binding_digest: row.provider_binding_digest
+  });
   return Object.freeze({
     organization_id: uuid(row.organization_id),
     event_id: uuid(row.event_id),
@@ -195,7 +210,8 @@ function publicClaim(row) {
     event_type: eventType,
     attempt: integer(Number(row.attempts), 1, MAX_ATTEMPTS),
     claim_expires_at: timestamp(row.claim_expires_at),
-    created_at: timestamp(row.created_at)
+    created_at: timestamp(row.created_at),
+    ...(providerBinding === undefined ? {} : { provider_binding: providerBinding })
   });
 }
 

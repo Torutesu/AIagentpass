@@ -104,7 +104,10 @@ test("routes exact recovery dead-letter paths and preserves list queries", async
   const exact = [
     `/api/auth/organizations/${organization}/recovery-outbox/dead-letters?limit=25&cursor=next`,
     `/api/auth/organizations/${organization}/recovery-outbox/dead-letters/${event}/redrive`,
-    `/api/auth/organizations/${organization}/recovery-outbox/dead-letters/${event}/suppress`
+    `/api/auth/organizations/${organization}/recovery-outbox/dead-letters/${event}/suppress`,
+    `/api/auth/organizations/${organization}/recovery-outbox/uncertain?limit=25&cursor=next`,
+    `/api/auth/organizations/${organization}/recovery-outbox/uncertain/${event}/retry`,
+    `/api/auth/organizations/${organization}/recovery-outbox/uncertain/${event}/suppress`
   ];
   for (const url of exact) assert.equal((await router.handle({ method: "GET", url, headers: {}, body: undefined })).status, 200);
   assert.deepEqual(delegated.map(({ url }) => url), exact);

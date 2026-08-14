@@ -18,14 +18,16 @@ const SESSION = "40000000-0000-4000-8000-000000000001";
 const REQUEST_A = "50000000-0000-4000-8000-000000000001";
 const REQUEST_B = "50000000-0000-4000-8000-000000000002";
 const NOW = new Date("2026-08-14T00:00:00.000Z");
+const DELIVERY_BINDING = Object.freeze({ binding_id: "test-owner-recovery", key_version: 1, binding_digest: "b".repeat(64) });
 
 test("owner recovery create is concurrently replay-safe and rolls idempotency back with its outbox", { skip: !databaseUrl }, async (t) => {
   const pool = new Pool({ connectionString: databaseUrl, max: 8 });
-  t.after(() => pool.end());
+  t.after(async () => { await cleanup(pool); await pool.end(); });
   const migrationClient = await pool.connect();
   try { await createMigrationRunner({ client: migrationClient, applicationVersion: "owner-recovery-idempotency-integration" }).run(); }
   finally { migrationClient.release(); }
 
+  await cleanup(pool);
   await pool.query("INSERT INTO organizations (id,name) VALUES ($1,'Recovery integration')", [ORG]);
   await pool.query(`INSERT INTO members (id,github_subject,display_name) VALUES
     ($1,'recovery-subject','Subject'),($2,'recovery-owner-a','Owner A'),($3,'recovery-owner-b','Owner B')`, [SUBJECT, OWNER_A, OWNER_B]);
@@ -37,7 +39,7 @@ test("owner recovery create is concurrently replay-safe and rolls idempotency ba
     (id,member_id,organization_id,membership_id,role,token_hash,csrf_token_hash,created_at,expires_at,idle_expires_at,last_seen_at)
     VALUES ($1,$2,$3,$4,'owner',$5,$6,$7,$8,$8,$7)`, [SESSION, SUBJECT, ORG, MEMBERSHIP, Buffer.alloc(32, 1), Buffer.alloc(32, 2), NOW, new Date("2026-08-15T00:00:00.000Z")]);
 
-  const repository = createPostgresOwnerRecoveryRepository({ client: pool, clock: () => NOW });
+  const repository = createPostgresOwnerRecoveryRepository({ client: pool, deliveryBinding: DELIVERY_BINDING, clock: () => NOW });
   const base = {
     organization_id: ORG,
     subject_member_id: SUBJECT,
@@ -79,7 +81,7 @@ test("owner recovery create is concurrently replay-safe and rolls idempotency ba
       };
     }
   };
-  const failing = createPostgresOwnerRecoveryRepository({ client: failingClient, clock: () => NOW });
+  const failing = createPostgresOwnerRecoveryRepository({ client: failingClient, deliveryBinding: DELIVERY_BINDING, clock: () => NOW });
   await assert.rejects(
     failing.createRecoveryRequest({ ...base, request_id: REQUEST_A, idempotency_key: "rollback-owner-recovery-create" }),
     (error) => error instanceof OwnerRecoveryRepositoryError && error.code === "unavailable"
@@ -89,3 +91,20 @@ test("owner recovery create is concurrently replay-safe and rolls idempotency ba
     (SELECT count(*)::int FROM owner_recovery_idempotency_records WHERE organization_id=$1) AS idempotency`, [ORG]);
   assert.deepEqual(rolledBack.rows[0], { requests: 0, idempotency: 0 });
 });
+
+async function cleanup(pool) {
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    await client.query("SET LOCAL session_replication_role = replica");
+    for (const table of ["owner_recovery_outbox_transition_ledger", "owner_recovery_outbox_transition_heads", "owner_recovery_outbox_retention_ledger", "owner_recovery_outbox", "owner_recovery_idempotency_records", "owner_recovery_requests", "human_sessions", "memberships", "outbox_events", "admin_audit_events", "admin_audit_heads", "control_plane_authority_generations"]) {
+      await client.query(`DELETE FROM ${table} WHERE organization_id=$1`, [ORG]);
+    }
+    await client.query("DELETE FROM organizations WHERE id=$1", [ORG]);
+    await client.query("DELETE FROM members WHERE id=ANY($1::uuid[])", [[SUBJECT, OWNER_A, OWNER_B]]);
+    await client.query("COMMIT");
+  } catch (error) {
+    await client.query("ROLLBACK");
+    throw error;
+  } finally { client.release(); }
+}

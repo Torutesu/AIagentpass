@@ -45,7 +45,7 @@ test("real PostgreSQL 0031 qualification protects resource-bound recovery manage
       client: migrationClient,
       applicationVersion: "owner-recovery-management-qualification"
     }).run();
-    assert.equal(migration.currentVersion, 34);
+    assert.equal(migration.currentVersion, 35);
   } finally {
     migrationClient.release();
   }
@@ -392,8 +392,9 @@ async function seedRecoveryEvent(pool, { organizationId, requestId, eventId, sub
   );
   await pool.query(
     `INSERT INTO owner_recovery_outbox
-      (organization_id,event_id,request_id,subject_member_id,event_type,status,attempts,available_at,created_at,updated_at,last_error_code)
-      VALUES ($1,$2,$3,$4,'recovery.request.created','dead_letter',100,$5,$5,$5,'publisher_unavailable')`,
+      (organization_id,event_id,request_id,subject_member_id,event_type,status,attempts,available_at,created_at,updated_at,last_error_code,
+       provider_binding_state,provider_binding_id,provider_key_version,provider_binding_digest)
+      VALUES ($1,$2,$3,$4,'recovery.request.created','dead_letter',100,$5,$5,$5,'publisher_unavailable','bound','test-owner-recovery',1,decode(repeat('d',64),'hex'))`,
     [organizationId, eventId, requestId, subjectMemberId, createdAt]
   );
 }
@@ -581,18 +582,20 @@ async function assertCurrentAuthorizationState(pool, session, authorization, exp
 async function cleanup(pool, fixture) {
   const organizations = [fixture.organizationA, fixture.organizationB];
   const members = Object.values(fixture.members).map((member) => member.id);
-  await pool.query("DELETE FROM owner_recovery_outbox WHERE organization_id=ANY($1::uuid[])", [organizations]);
-  await pool.query("DELETE FROM owner_recovery_requests WHERE organization_id=ANY($1::uuid[])", [organizations]);
-  await pool.query("DELETE FROM idempotency_records WHERE organization_id=ANY($1::uuid[])", [organizations]);
-  await pool.query("DELETE FROM outbox_events WHERE organization_id=ANY($1::uuid[])", [organizations]);
-  await pool.query("DELETE FROM control_plane_authority_generations WHERE organization_id=ANY($1::uuid[])", [organizations]);
-  await pool.query("DELETE FROM admin_audit_events WHERE organization_id=ANY($1::uuid[])", [organizations]);
-  await pool.query("DELETE FROM admin_audit_heads WHERE organization_id=ANY($1::uuid[])", [organizations]);
-  await pool.query("DELETE FROM human_sessions WHERE organization_id=ANY($1::uuid[])", [organizations]);
-  await pool.query("DELETE FROM webauthn_challenges WHERE organization_id=ANY($1::uuid[])", [organizations]);
-  await pool.query("DELETE FROM memberships WHERE organization_id=ANY($1::uuid[])", [organizations]);
-  await pool.query("DELETE FROM organizations WHERE id=ANY($1::uuid[])", [organizations]);
-  await pool.query("DELETE FROM members WHERE id=ANY($1::uuid[])", [members]);
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    await client.query("SET LOCAL session_replication_role = replica");
+    for (const table of ["owner_recovery_outbox_transition_ledger", "owner_recovery_outbox_transition_heads", "owner_recovery_outbox_retention_ledger", "owner_recovery_outbox", "owner_recovery_requests", "idempotency_records", "outbox_events", "control_plane_authority_generations", "admin_audit_events", "admin_audit_heads", "human_sessions", "webauthn_challenges", "memberships"]) {
+      await client.query(`DELETE FROM ${table} WHERE organization_id=ANY($1::uuid[])`, [organizations]);
+    }
+    await client.query("DELETE FROM organizations WHERE id=ANY($1::uuid[])", [organizations]);
+    await client.query("DELETE FROM members WHERE id=ANY($1::uuid[])", [members]);
+    await client.query("COMMIT");
+  } catch (error) {
+    await client.query("ROLLBACK");
+    throw error;
+  } finally { client.release(); }
 }
 
 function digest(value) {

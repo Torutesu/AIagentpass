@@ -35,7 +35,7 @@ export async function migrateAgentSessionHumanHttpFixture({
   assertMethod(client, "query");
   try {
     const migration = await createMigrationRunner({ client, applicationVersion }).run();
-    if (migration.currentVersion !== 34) throw fixtureError("unsupported_schema");
+    if (migration.currentVersion !== 35) throw fixtureError("unsupported_schema");
     return Object.freeze(migration);
   } catch (error) {
     if (error?.message === "agent session human HTTP fixture unsupported_schema") throw error;

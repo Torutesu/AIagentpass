@@ -6,6 +6,7 @@ import { createPostgresRuntime } from "../../src/postgres/runtime.mjs";
 
 const DATABASE_URL = "postgresql://agent:secret@db.example.test/agentpass?sslmode=verify-full";
 const SECRET = Buffer.alloc(32, 0x31).toString("base64url");
+const DELIVERY_BINDING = Object.freeze({ binding_id: "test-owner-recovery", key_version: 1, binding_digest: "a".repeat(64) });
 
 class FakePool {
   constructor(options) {
@@ -62,7 +63,7 @@ test("PostgreSQL runtime exposes exact-schema readiness, tracked work, and bound
   const migrations = await loadSqlMigrations();
   const runtime = await createPostgresRuntime({ env: env(), PoolClass: FakePool, applicationVersion: "runtime-readiness-test", resolveProcessBindingPolicy: () => true });
   assert.equal(runtime.pool.applied.length, migrations.length);
-  assert.equal(migrations.length, 34);
+  assert.equal(migrations.length, 35);
   assert.equal((await runtime.readiness()).code, "ready");
   assert.equal(typeof runtime.agentSessionIssuanceRepository?.issueAgentSessionGrant, "function");
   assert.equal(typeof runtime.agentSessionConsumptionRepository?.consumeAgentSessionGrant, "function");
@@ -100,7 +101,7 @@ test("PostgreSQL runtime exposes exact-schema readiness, tracked work, and bound
 });
 
 test("PostgreSQL runtime wires an injected owner recovery publisher without starting it when disabled", async () => {
-  const publisher = { async publish() { return { accepted: true, duplicate: false }; } };
+  const publisher = { binding: DELIVERY_BINDING, async publish() { return { accepted: true, duplicate: false }; } };
   const runtime = await createPostgresRuntime({
     env: env(),
     PoolClass: FakePool,

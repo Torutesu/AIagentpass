@@ -143,7 +143,7 @@ W1 closure execution order:
 | --- | --- | --- | --- |
 | W1.4a session bootstrap admission | Add fixed `human.session.bootstrap` policies to the shared PostgreSQL limiter; apply anonymous/global admission before identity-provider work, then subject/member/organization admission after verified identity resolution and before session insertion. Keep identifiers HMAC-derived and never persist the assertion or provider subject as a label. | Two API instances must share each bucket; unknown-subject floods must not create unbounded buckets; provider and limiter outages fail closed; identity replay and denied requests create no session. | The bootstrap route has no process-local allowance path, returns bounded `Retry-After`, and its atomic session ceiling still holds under concurrent accepted requests. |
 | W1.4b recovery state latency — complete | Observe database timestamps only after confirmed committed recovery transitions and report fixed-key count/total aggregates through `recordOwnerRecoveryStateLatency`. Do not label by organization, member, request, state, or error. Metrics failures remain post-commit and non-authoritative. | Fixed source-state CAS, negative/malformed timestamp, rollback, WebAuthn caller-owned commit, exact-once flush, and sync/async metric-sink failure tests; real PostgreSQL proves commit and rollback outcomes. | Confirmed commits emit one bounded observation per forward transition in normal operation; retries do not observe another transition and no recovery identity appears in health output. |
-| W1.5 delivery fault matrix — partial | Durable `uncertain` quarantine, lease-expiry quarantine, exact provider acknowledgement/idempotency binding, stale terminal CAS, aggregate health failure, and a test-only closed six-boundary controller are implemented. Complete the independent-process harness, provider binding, and operator resolution path. | Hard `SIGKILL`/restart, two pools, durable provider ledger, provider timeout/response loss, stale publish/fail/uncertain CAS, and explicit retry/suppress races against real PostgreSQL. | Every case converges to one logical delivery or an explicit uncertain/dead-letter state; no event is silently lost, widened, or delivered with substituted content. |
+| W1.5 delivery fault matrix — partial | Durable `uncertain` quarantine, immutable provider binding, append-only transition ledger, Owner/Admin retry/suppress API, and the independent-process six-boundary `SIGKILL` harness are implemented and pass PostgreSQL 16. Complete provider-side durable acceptance and the remaining two-worker management/race matrix. | Durable provider ledger, provider timeout/response loss, stale publish/fail/uncertain CAS, retry/suppress/prune races, and duplicate-acceptance convergence against real PostgreSQL. | Every case converges to one logical delivery or an explicit uncertain/dead-letter state; no event is silently lost, widened, rebound, or delivered with substituted content. |
 | W1.6 operational closure | Add fixed-key alerts/runbook thresholds for queue age, uncertain outcomes, dead letters, redrive failure, prune failure, limiter denial/unavailability, and recovery latency. Update threat model and evidence index. | Snapshot tests must reject new labels/fields; runbook drill covers provider outage, worker restart, limiter outage, and dead-letter recovery. | W1 exit gate is reproducible from one documented command sequence and produces no secret-bearing artifact. |
 
 #### W1.4a completed merge sequence
@@ -186,7 +186,7 @@ screens; authority-changing UI remains gated on these W1 guarantees.
    consume an unbounded batch.
 6. Add a machine-readable evidence summary containing only fixed scenario names,
    public event digests, final state classes, attempt counts, and timing bounds.
-   Run it from CI against PostgreSQL 16 after migrations 1–34 and document a
+   Run it from CI against PostgreSQL 16 after migrations 1–35 and document a
    single reproduction command in the recovery operations runbook.
 
 Implemented W1.5 foundation in migration `0034`:
@@ -202,30 +202,40 @@ Implemented W1.5 foundation in migration `0034`:
   uncertain delivery awaits an operator decision;
 - uncertain rows are intentionally excluded from terminal retention.
 
+Implemented W1.5 binding and operator-control slice in migration `0035`:
+
+- every deliverable pending row carries an immutable secret-free provider tuple
+  (`binding_id`, key version, namespace digest); existing unbound pending rows
+  are quarantined and cannot be silently rebound;
+- runtime workers claim only their exact provider binding and quarantine a
+  mismatched event before any provider call;
+- every durable outbox state transition is appended to a separate immutable,
+  per-event hash chain while operator audit remains a distinct authority log;
+- `listUncertain`, bounded `retryUncertain`, and `suppressUncertain` are wired
+  through the Human API with tenant scope, Owner/Admin authorization, CSRF,
+  operation/context-bound recent WebAuthn, idempotency, and `If-Match` CAS;
+- legacy-unbound and provider-unconfigured rows cannot return to pending;
+- the test-only child-process harness uses independent PostgreSQL pools and
+  proves all six closed hard-`SIGKILL` boundaries converge after restart.
+
 Remaining W1.5 merge sequence, in order:
 
-1. Add migration `0035` for immutable delivery transitions and provider
-   binding (`binding_id`, key version, and digest only). Existing unbound rows
-   remain quarantined; URLs, credentials, response bodies, and destinations are
-   forbidden. Add DB triggers that reject ledger update/delete.
-2. Add `listUncertain`, `retryUncertain`, and `suppressUncertain` as separate
-   repository and OpenAPI operations. Mutations require Owner/Admin,
-   operation-bound recent WebAuthn, idempotency, `If-Match` management-version
-   CAS, and audit insertion in the same transaction. Do not expose a manual
-   “mark delivered” operation.
-3. Add provider confirmation only after a provider lookup contract can prove
+1. Add provider confirmation only after a provider lookup contract can prove
    acceptance using the stored binding and event idempotency key. Without that
    proof, the row remains uncertain and only explicit retry or suppression is
    available.
-4. Build a child-process qualification driver: parent and child use independent
-   PostgreSQL pools; the provider writes acceptance to a durable test ledger;
-   the parent sends `SIGKILL` at each closed boundary and restarts a distinct
-   worker. Assert automatic claims never consume uncertain rows.
-5. Complete the two-worker matrix for stale `markPublished`, `markFailed`, and
+2. Extend the child-process driver with a separate durable fake-provider
+   acceptance ledger keyed by provider binding and event idempotency key. Prove
+   retries return the original acceptance and never create a second logical
+   provider delivery after response loss or process death.
+3. Complete the two-worker matrix for stale `markPublished`, `markFailed`, and
    `markUncertain`; pending-provider-call lease expiry; duplicate and mismatched
    acknowledgement; response truncation; retry/suppress/retention races; and
    shutdown drain.
-6. Add fixed-key oldest-uncertain-age telemetry, alerts, a secret-free evidence
+4. Add migration upgrade qualification from schema 34 with pending, leased,
+   dead-letter, published, and suppressed legacy rows; verify baseline-chain
+   hashes, immutable provider identity, and retention survival.
+5. Add fixed-key oldest-uncertain-age telemetry, alerts, a secret-free evidence
    summary, and an operator runbook. CI must run the PostgreSQL 16 lane and
    reject evidence containing tenant/member IDs, DSNs, provider diagnostics,
    message content, credentials, or tokens.
@@ -385,14 +395,15 @@ Add real PostgreSQL, two-instance, Playwright, KMS/IAM, packaging/notarization, 
 
 1. `feat: throttle session bootstrap across api replicas` (W1.4a)
 2. `feat: observe committed recovery transition latency` (W1.4b, complete)
-3. `test: qualify recovery delivery fault boundaries` (W1.5, next)
-4. `docs: close recovery operations and alert runbooks` (W1.6)
-5. `test: close the production console browser matrix` (W2)
-6. `feat: add purpose-separated managed signer providers` (W3)
-7. `feat: complete claude code headless onboarding` (W4)
-8. `feat: add cursor adapter parity` (W4)
-9. `build: produce signed notarized immutable pkg` (W5)
-10. `ops: qualify and promote hosted production release` (W6)
+3. `feat: bind recovery delivery and operator quarantine controls` (W1.5, implemented locally)
+4. `test: prove provider acceptance convergence and management races` (W1.5, next)
+5. `docs: close recovery operations and alert runbooks` (W1.6)
+6. `test: close the production console browser matrix` (W2)
+7. `feat: add purpose-separated managed signer providers` (W3)
+8. `feat: complete claude code headless onboarding` (W4)
+9. `feat: add cursor adapter parity` (W4)
+10. `build: produce signed notarized immutable pkg` (W5)
+11. `ops: qualify and promote hosted production release` (W6)
 
 Items 9 and 10 remain externally gated until the required Apple, cloud,
 hardware, deployment, and independent-review resources are available.

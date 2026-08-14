@@ -79,7 +79,7 @@ async function migrate(pool) {
   const client = await pool.connect();
   try {
     const result = await createMigrationRunner({ client, applicationVersion: "shared-abuse-control-hardening-integration" }).run();
-    assert.equal(result.currentVersion, 34);
+    assert.equal(result.currentVersion, 35);
   } finally {
     client.release();
   }

@@ -57,11 +57,47 @@ test("lists tenant-scoped dead letters with bounded keyset pagination and an aut
   );
 });
 
+test("lists tenant-scoped uncertain deliveries with an authority-bound keyset cursor and fixed reasons", async () => {
+  const client = new ScriptedClient((text, params) => {
+    assert.match(text, /status='uncertain'/u);
+    assert.match(text, /ORDER BY uncertain_at ASC,event_id ASC/u);
+    assert.match(text, /EXISTS[\s\S]*human_sessions/u);
+    assert.match(text, /LIMIT \$5/u);
+    assert.deepEqual(params, [ORG, SESSION, MEMBER, "admin", 3]);
+    return { rowCount: 2, rows: [uncertain(1), uncertain(2)] };
+  });
+  const repository = createRepository(client);
+  const page = await repository.listUncertain({ actor: ACTOR, limit: 2 });
+  assert.equal(page.items.length, 2);
+  assert.equal(page.items[0].event_id, EVENT);
+  assert.equal(page.items[0].uncertain_reason, "delivery_unknown");
+  assert.equal(page.items[0].last_error_code, "delivery_uncertain");
+  assert.equal(Object.prototype.hasOwnProperty.call(page.items[0], "claim_token_digest"), false);
+  assert.equal(Object.prototype.hasOwnProperty.call(page.items[0], "destination"), false);
+
+  const pagedClient = new ScriptedClient((text, params) => {
+    assert.match(text, /\(uncertain_at,event_id\) > \(\$5::timestamptz,\$6::uuid\)/u);
+    assert.deepEqual(params, [ORG, SESSION, MEMBER, "admin", "2026-08-14T00:00:01.000Z", EVENT, 3]);
+    return { rowCount: 1, rows: [] };
+  });
+  const pagedRepository = createRepository(pagedClient);
+  const cursorCodec = createHumanCursorCodec({ secret: CURSOR_SECRET });
+  const cursor = cursorCodec.encode({ resource: "owner_recovery_outbox_uncertain", tenant_id: ORG, member_id: MEMBER, created_at: "2026-08-14T00:00:01.000Z", id: EVENT, direction: "asc" });
+  const next = await pagedRepository.listUncertain({ actor: ACTOR, cursor, limit: 2 });
+  assert.deepEqual(next, { items: [], next_cursor: null });
+
+  await assert.rejects(
+    () => pagedRepository.listUncertain({ actor: { ...ACTOR, organization_id: OTHER_ORG }, cursor }),
+    { code: OWNER_RECOVERY_OUTBOX_MANAGEMENT_ERROR_CODES.INVALID_CURSOR }
+  );
+});
+
 test("redrive performs a management-version CAS and appends the admin audit in the same transaction", async () => {
   const client = new ScriptedClient((text, params, scriptedClient) => {
     if (text.startsWith("UPDATE owner_recovery_outbox")) {
       assert.match(text, /status='pending'/u);
       assert.match(text, /management_version=management_version\+1/u);
+      assert.match(text, /provider_binding_state='bound'/u);
       assert.doesNotMatch(text, /total_attempts=/u);
       assert.deepEqual(params, [ORG, EVENT, 4]);
       return { rowCount: 1, rows: [mutation("pending")] };
@@ -103,6 +139,69 @@ test("suppress requires a safe reason and CASes the expected version", async () 
     () => repository.suppressDeadLetter(mutationInput("suppress", 9, { reason: "bad\nreason", idempotency_key: "suppress-dead-letter-2" })),
     { code: OWNER_RECOVERY_OUTBOX_MANAGEMENT_ERROR_CODES.INVALID_INPUT }
   );
+});
+
+test("retryUncertain clears quarantine metadata, preserves attempts, and audits the exact CAS", async () => {
+  const client = new ScriptedClient((text, params, scriptedClient) => {
+    if (text.startsWith("SELECT s.id")) {
+      assert.deepEqual(params.slice(0, 6), [SESSION, MEMBER, ORG, "admin", AUTHORIZATION, OWNER_RECOVERY_OUTBOX_MANAGEMENT_OPERATIONS.retryUncertain]);
+    }
+    if (text.startsWith("UPDATE owner_recovery_outbox")) {
+      assert.match(text, /status='pending'/u);
+      assert.match(text, /uncertain_at=NULL,uncertain_reason=NULL,last_error_code=NULL/u);
+      assert.match(text, /redrive_count=redrive_count\+1/u);
+      assert.match(text, /redrive_count<3/u);
+      assert.match(text, /provider_binding_state='bound'/u);
+      assert.match(text, /management_version=management_version\+1/u);
+      assert.deepEqual(params, [ORG, EVENT, 7]);
+      return { rowCount: 1, rows: [uncertainMutation("pending")] };
+    }
+    return auditResult(text, params, scriptedClient);
+  });
+  const audit = new FakeAudit();
+  const repository = createRepository(client, { auditRepository: audit });
+  const result = await repository.retryUncertain(uncertainMutationInput("retry_uncertain", "retryUncertain", 7, { idempotency_key: "retry-uncertain-1" }));
+  assert.deepEqual(result, { organization_id: ORG, event_id: EVENT, status: "pending", attempts: 1, total_attempts: 1, management_version: 8, redrive_count: 1, uncertain_at: null, uncertain_reason: null, suppressed_at: null, suppression_reason: null });
+  assert.equal(audit.calls.length, 1);
+  assert.equal(audit.calls[0].tx, client);
+  assert.equal(client.calls[0].text, "BEGIN");
+  assert.equal(client.calls.at(-1).text, "COMMIT");
+});
+
+test("suppressUncertain requires a bounded reason, clears uncertain metadata, and audits in the same transaction", async () => {
+  const client = new ScriptedClient((text, params, scriptedClient) => {
+    if (text.startsWith("SELECT s.id")) {
+      assert.deepEqual(params.slice(0, 6), [SESSION, MEMBER, ORG, "admin", AUTHORIZATION, OWNER_RECOVERY_OUTBOX_MANAGEMENT_OPERATIONS.suppressUncertain]);
+    }
+    if (text.startsWith("UPDATE owner_recovery_outbox")) {
+      assert.match(text, /status='suppressed'/u);
+      assert.match(text, /uncertain_at=NULL,uncertain_reason=NULL/u);
+      assert.deepEqual(params, [ORG, EVENT, 8, "operator-reviewed"]);
+      return { rowCount: 1, rows: [uncertainMutation("suppressed")] };
+    }
+    return auditResult(text, params, scriptedClient);
+  });
+  const audit = new FakeAudit();
+  const repository = createRepository(client, { auditRepository: audit });
+  const result = await repository.suppressUncertain(uncertainMutationInput("suppress_uncertain", "suppressUncertain", 8, { reason: "operator-reviewed", idempotency_key: "suppress-uncertain-1" }));
+  assert.equal(result.status, "suppressed");
+  assert.equal(result.uncertain_at, null);
+  assert.equal(result.uncertain_reason, null);
+  assert.equal(result.suppression_reason, "operator-reviewed");
+  assert.equal(audit.calls[0].tx, client);
+  await assert.rejects(
+    () => repository.suppressUncertain(uncertainMutationInput("suppress_uncertain", "suppressUncertain", 8, { reason: "bad\nreason", idempotency_key: "suppress-uncertain-2" })),
+    { code: OWNER_RECOVERY_OUTBOX_MANAGEMENT_ERROR_CODES.INVALID_INPUT }
+  );
+});
+
+test("uncertain management exposes retry and suppression only, never confirmation", async () => {
+  const repository = createRepository(new ScriptedClient(() => ({ rowCount: 0, rows: [] })));
+  assert.equal(typeof repository.listUncertain, "function");
+  assert.equal(typeof repository.retryUncertain, "function");
+  assert.equal(typeof repository.suppressUncertain, "function");
+  assert.equal("confirmUncertain" in repository, false);
+  assert.equal(Object.values(OWNER_RECOVERY_OUTBOX_MANAGEMENT_OPERATIONS).some((operation) => operation.includes("confirm")), false);
 });
 
 test("a stale CAS is stable, rolls back, and does not expose database diagnostics", async () => {
@@ -208,6 +307,28 @@ function deadLetter(second) {
   };
 }
 
+function uncertain(second) {
+  return {
+    organization_id: ORG,
+    event_id: EVENT,
+    request_id: REQUEST,
+    subject_member_id: SUBJECT,
+    event_type: "recovery.request.created",
+    status: "uncertain",
+    attempts: 1,
+    total_attempts: 1,
+    management_version: 4,
+    redrive_count: 0,
+    last_error_code: "delivery_uncertain",
+    uncertain_at: new Date(Date.parse(NOW) + second * 1_000),
+    uncertain_reason: "delivery_unknown",
+    created_at: new Date(NOW),
+    updated_at: new Date(NOW),
+    suppressed_at: null,
+    suppression_reason: null
+  };
+}
+
 function mutation(status) {
   return {
     organization_id: ORG,
@@ -222,10 +343,27 @@ function mutation(status) {
   };
 }
 
+function uncertainMutation(status) {
+  return {
+    organization_id: ORG,
+    event_id: EVENT,
+    status,
+    attempts: 1,
+    total_attempts: 1,
+    management_version: status === "pending" ? 8 : 9,
+    redrive_count: status === "pending" ? 1 : 0,
+    uncertain_at: null,
+    uncertain_reason: null,
+    suppressed_at: status === "suppressed" ? NOW : null,
+    suppression_reason: status === "suppressed" ? "operator-reviewed" : null
+  };
+}
+
 function auditResult(text, params, client) {
   if (text === "BEGIN" || text === "COMMIT" || text === "ROLLBACK") return { rowCount: 0, rows: [] };
   if (text.startsWith("SELECT pg_advisory_xact_lock")) return { rowCount: 1, rows: [{}] };
   if (text.startsWith("SELECT s.id")) return { rowCount: 1, rows: [{ id: SESSION }] };
+  if (text.includes("set_config('agentpass.owner_recovery_actor_type'")) return { rowCount: 1, rows: [{}] };
   if (text.startsWith("DELETE FROM idempotency_records")) return { rowCount: 0, rows: [] };
   if (text.startsWith("INSERT INTO idempotency_records")) { client.requestHash = params[3]; return { rowCount: 1, rows: [] }; }
   if (text.startsWith("SELECT request_hash,response_status,response_json")) return { rowCount: 1, rows: [{ request_hash: client.requestHash, response_status: 102, response_json: {} }] };
@@ -239,6 +377,11 @@ function contextHash(operation, expectedManagementVersion) {
 
 function mutationInput(operation, expectedManagementVersion, overrides = {}) {
   const context_hash = contextHash(operation, expectedManagementVersion);
+  return { actor: ACTOR, event_id: EVENT, expected_management_version: expectedManagementVersion, context_hash, recent_authorization: recent(operation, context_hash), ...overrides };
+}
+
+function uncertainMutationInput(action, operation, expectedManagementVersion, overrides = {}) {
+  const context_hash = contextHash(action, expectedManagementVersion);
   return { actor: ACTOR, event_id: EVENT, expected_management_version: expectedManagementVersion, context_hash, recent_authorization: recent(operation, context_hash), ...overrides };
 }
 

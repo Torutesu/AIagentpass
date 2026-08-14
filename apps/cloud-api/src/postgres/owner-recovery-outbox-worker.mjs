@@ -1,3 +1,5 @@
+import { normalizeOwnerRecoveryDeliveryBinding, sameOwnerRecoveryDeliveryBinding } from "./owner-recovery-delivery-binding.mjs";
+
 const DEFAULTS = Object.freeze({
   batchSize: 10,
   leaseMs: 30_000,
@@ -53,6 +55,10 @@ export function createOwnerRecoveryOutboxWorker({
 } = {}) {
   if (!repository || typeof repository.claimBatch !== "function" || typeof repository.markPublished !== "function" || typeof repository.markFailed !== "function" || typeof repository.markUncertain !== "function") throw invalid();
   if (!publisher || typeof publisher.publish !== "function" || typeof now !== "function" || typeof random !== "function" || typeof setTimeoutFn !== "function" || typeof clearTimeoutFn !== "function") throw invalid();
+  let deliveryBinding;
+  try { deliveryBinding = publisher.binding === undefined ? undefined : normalizeOwnerRecoveryDeliveryBinding(publisher.binding); }
+  catch { throw invalid(); }
+  if (repository.binding !== undefined && (deliveryBinding === undefined || !sameOwnerRecoveryDeliveryBinding(repository.binding, deliveryBinding))) throw invalid();
   if (retentionRepository !== undefined && (!retentionRepository || typeof retentionRepository.prune !== "function")) throw invalid();
   const config = Object.freeze({
     batchSize: integer(batchSize, 1, 100),
@@ -137,6 +143,11 @@ export function createOwnerRecoveryOutboxWorker({
   }
 
   async function deliver(event, claimToken) {
+    if (deliveryBinding !== undefined && !sameOwnerRecoveryDeliveryBinding(event.provider_binding, deliveryBinding)) {
+      await persistUncertain(event, claimToken);
+      metric(metrics, "recordOwnerRecoveryOutboxUncertain");
+      return "uncertain";
+    }
     let response;
     try {
       response = await withTimeout(

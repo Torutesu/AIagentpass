@@ -22,6 +22,7 @@ const EVENT = Object.freeze({
 });
 const SECRET = "webhook-secret-do-not-leak";
 const URL = "https://notify.example.test/owner-recovery";
+const RESOLVER_BINDING_DIGEST = "a".repeat(64);
 
 test("sends only the public event over HTTPS with event_id as Idempotency-Key", async () => {
   const transport = fakeTransport({ statusCode: 202, body: { accepted: true, duplicate: false, idempotency_key: EVENT.event_id } });
@@ -38,6 +39,8 @@ test("sends only the public event over HTTPS with event_id as Idempotency-Key", 
   assert.equal(request.options.headers["content-type"], "application/json");
   assert.deepEqual(JSON.parse(request.body.toString("utf8")), EVENT);
   assert.equal(request.body.toString("utf8").includes(SECRET), false);
+  assert.deepEqual(Object.keys(publisher.binding).sort(), ["binding_digest", "binding_id", "key_version"]);
+  assert.match(publisher.binding.binding_digest, /^[0-9a-f]{64}$/u);
 });
 
 test("supports fixed or resolver-supplied endpoint and secret without putting either in resolver event data", async () => {
@@ -46,6 +49,7 @@ test("supports fixed or resolver-supplied endpoint and secret without putting ei
   const publisher = createOwnerRecoveryNotificationPublisher({
     resolveWebhookUrl: async (input) => { calls.push(["url", input]); return URL; },
     resolveAuthorizationSecret: async (input) => { calls.push(["secret", input]); return SECRET; },
+    bindingDigest: RESOLVER_BINDING_DIGEST,
     requestFn: transport.requestFn
   });
   await publisher.publish({ idempotency_key: EVENT.event_id, event: EVENT });
@@ -170,6 +174,7 @@ test("maps resolver failures and invalid resolver outputs without exposing detai
   const failed = createOwnerRecoveryNotificationPublisher({
     resolveWebhookUrl: async () => { throw new Error(`url secret=${SECRET}`); },
     resolveAuthorizationSecret: () => SECRET,
+    bindingDigest: RESOLVER_BINDING_DIGEST,
     requestFn: fakeTransport({ statusCode: 200, body: { accepted: true, duplicate: false, idempotency_key: EVENT.event_id } }).requestFn
   });
   await assert.rejects(failed.publish({ idempotency_key: EVENT.event_id, event: EVENT }), (error) => error.code === OWNER_RECOVERY_NOTIFICATION_PUBLISHER_ERROR_CODES.RESOLVER && !error.message.includes(SECRET));
@@ -177,6 +182,7 @@ test("maps resolver failures and invalid resolver outputs without exposing detai
   const invalid = createOwnerRecoveryNotificationPublisher({
     resolveWebhookUrl: () => "http://not-https.example.test/hook",
     resolveAuthorizationSecret: () => SECRET,
+    bindingDigest: RESOLVER_BINDING_DIGEST,
     requestFn: fakeTransport({ statusCode: 200, body: { accepted: true, duplicate: false, idempotency_key: EVENT.event_id } }).requestFn
   });
   await assert.rejects(invalid.publish({ idempotency_key: EVENT.event_id, event: EVENT }), { code: OWNER_RECOVERY_NOTIFICATION_PUBLISHER_ERROR_CODES.RESOLVER });

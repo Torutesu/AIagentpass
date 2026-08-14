@@ -1,5 +1,7 @@
 import https from "node:https";
 
+import { createOwnerRecoveryDeliveryBinding, normalizeOwnerRecoveryDeliveryBinding } from "./owner-recovery-delivery-binding.mjs";
+
 export const OWNER_RECOVERY_NOTIFICATION_PUBLISHER_DEFAULT_MAX_RESPONSE_BYTES = 64 * 1024;
 export const OWNER_RECOVERY_NOTIFICATION_PUBLISHER_MAX_RESPONSE_BYTES = 1024 * 1024;
 
@@ -55,11 +57,21 @@ export function createOwnerRecoveryNotificationPublisher({
   authorizationSecret,
   resolveWebhookUrl,
   resolveAuthorizationSecret,
+  bindingId = "hosted-owner-recovery-webhook",
+  bindingKeyVersion = 1,
+  bindingDigest,
   requestFn = https.request,
   maxResponseBytes = OWNER_RECOVERY_NOTIFICATION_PUBLISHER_DEFAULT_MAX_RESPONSE_BYTES
 } = {}) {
   const fixedUrl = fixedValue(webhookUrl, resolveWebhookUrl, normalizeWebhookUrl);
   const fixedSecret = fixedValue(authorizationSecret, resolveAuthorizationSecret, normalizeAuthorizationSecret);
+  let binding;
+  try {
+    binding = bindingDigest === undefined
+      ? createOwnerRecoveryDeliveryBinding({ binding_id: bindingId, key_version: bindingKeyVersion, namespace: fixedUrl })
+      : normalizeOwnerRecoveryDeliveryBinding({ binding_id: bindingId, key_version: bindingKeyVersion, binding_digest: bindingDigest });
+  } catch { throw invalidConfig(); }
+  if (fixedUrl === undefined && bindingDigest === undefined) throw invalidConfig();
   if (typeof requestFn !== "function" || !Number.isSafeInteger(maxResponseBytes)
     || maxResponseBytes < 1 || maxResponseBytes > OWNER_RECOVERY_NOTIFICATION_PUBLISHER_MAX_RESPONSE_BYTES) {
     throw invalidConfig();
@@ -89,7 +101,7 @@ export function createOwnerRecoveryNotificationPublisher({
     return validateAcceptedResponse(response, request.idempotency_key);
   }
 
-  return Object.freeze({ publish });
+  return Object.freeze({ publish, binding });
 }
 
 function fixedValue(value, resolver, normalize) {
