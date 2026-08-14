@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { authenticateRecentAuth, registerPasskey, WebAuthnClientError } from "../webauthn-client";
 import { createSecurityClient, SecurityClientError, type SecurityClient, type SecurityPasskey, type SecuritySession, type SecuritySnapshot } from "../security-client";
+import { parseConsoleSummary, type ConsoleSummaryViewModel } from "../console-summary";
 import { OrganizationPanel } from "./OrganizationPanel";
 import { OwnerRecoveryPanel } from "./OwnerRecoveryPanel";
 
@@ -64,113 +65,65 @@ export type AgentPassInitialData = {
   }>;
 };
 
-export const defaultInitialData: AgentPassInitialData = {
-  workspace: "プロダクトチーム",
-  operator: { name: "佐藤さん", role: "運用管理者", initials: "ST" },
-  session: {
-    expires: "2026年8月12日 18:30",
-    remaining: "あと 42分",
-    lastVerified: "たった今確認済み",
-  },
-  capabilities: ["プロジェクトを読む", "ファイルを編集", "テストを実行"],
-  capabilityRecords: [],
-  devices: [
-    {
-      deviceId: "11111111-1111-4111-8111-111111111111",
-      name: "Hiroko の MacBook Pro",
-      detail: "Claude Code · v1.0.58",
-      status: "接続中",
-      location: "東京 / ローカル",
-      checked: "たった今",
-      desiredGeneration: 12,
-      observedGeneration: 12,
-      refreshState: "synced",
-      bundleSequence: 42,
-      bundleExpiresAt: "2026-08-12T18:30:00.000Z",
-      lastAckAt: "2026-08-12T17:48:00.000Z",
-    },
-    {
-      name: "AgentPass Cloud",
-      detail: "ポリシー・監査ログ",
-      status: "正常",
-      location: "ap-northeast-1",
-      checked: "14秒前",
-    },
-  ],
-  agents: [
-    {
-      name: "営業資料リライト",
-      client: "Claude Code",
-      detail: "/projects/sales-deck · 12分前に活動",
-      state: "作業中",
-      stateTone: "green",
-    },
-    {
-      name: "ランディングページ調整",
-      client: "Cursor",
-      detail: "/projects/website · 1時間前に活動",
-      state: "待機中",
-      stateTone: "amber",
-    },
-    {
-      name: "週次テスト確認",
-      client: "Claude Code",
-      detail: "/projects/checkout · きょう 09:18 に完了",
-      state: "完了",
-      stateTone: "green",
-    },
-  ],
-  policies: [
-    {
-      name: "変更の反映",
-      detail: "本番反映は人の確認後にのみ許可",
-      state: "保護中",
-      tone: "green",
-    },
-    {
-      name: "外部サービスへの接続",
-      detail: "登録済みのサービスだけ利用可能",
-      state: "3サービス",
-      tone: "amber",
-    },
-    {
-      name: "危険なコマンド",
-      detail: "削除・権限変更・外部公開をブロック",
-      state: "ブロック中",
-      tone: "red",
-    },
-  ],
-  activities: [
-    {
-      symbol: "✓",
-      title: "ポリシーの確認が完了しました",
-      description: "AgentPass Cloud · すべて正常",
-      time: "たった今",
-    },
-    {
-      symbol: "↗",
-      title: "営業資料リライトが作業を開始",
-      description: "Claude Code · sales-deck",
-      time: "12分前",
-    },
-    {
-      symbol: "⌁",
-      title: "セッションを更新しました",
-      description: "Hiroko の MacBook Pro · 佐藤さん",
-      time: "27分前",
-    },
-    {
-      symbol: "□",
-      title: "危険な操作を1件ブロックしました",
-      description: "本番データベースへの直接削除",
-      time: "きょう 09:42",
-    },
-  ],
-};
+function emptyConsoleData(): AgentPassInitialData {
+  return {
+    workspace: "ワークスペース未取得",
+    operator: { name: "ユーザー情報未取得", role: "セッション確認中", initials: "—" },
+    session: { expires: "未取得", remaining: "未取得", lastVerified: "未同期" },
+    capabilities: [],
+    capabilityRecords: [],
+    devices: [],
+    agents: [],
+    policies: [],
+    activities: [],
+  };
+}
 
-type AgentPassConsoleProps = {
-  initialData?: AgentPassInitialData;
-};
+function summaryViewData(summary: ConsoleSummaryViewModel): AgentPassInitialData {
+  return {
+    ...emptyConsoleData(),
+    workspace: summary.organization.name,
+    devices: summary.devices.map((device) => ({
+      deviceId: device.id,
+      name: device.name,
+      detail: device.refreshState ?? device.status,
+      status: device.status === "revoked" ? "停止" : device.status === "pending" ? "登録待ち" : "正常",
+      location: "Cloud管理",
+      checked: device.lastSeenAt ?? "未確認",
+      desiredGeneration: device.desiredGeneration ?? undefined,
+      observedGeneration: device.observedGeneration ?? undefined,
+      refreshState: device.refreshState ?? undefined,
+      bundleSequence: device.bundleSequence ?? undefined,
+      bundleExpiresAt: device.bundleExpiresAt ?? undefined,
+      lastAckAt: device.lastAckAt ?? undefined,
+      blockedReason: device.blockedReason ?? undefined,
+    })),
+    agents: summary.agents.map((agent) => ({
+      agentId: agent.id,
+      deviceId: agent.deviceId ?? undefined,
+      name: agent.name,
+      client: agent.kind === "claude-code" ? "Claude Code" : agent.kind === "cursor" ? "Cursor" : agent.kind,
+      detail: agent.deviceId ?? "端末未割り当て",
+      state: agent.status === "revoked" ? "停止" : "待機中",
+      stateTone: agent.tone,
+    })),
+    policies: summary.policies.map((policy) => ({
+      policyId: policy.id,
+      version: policy.version,
+      scope: policy.scope as Record<string, unknown>,
+      name: policy.name,
+      detail: `sequence ${policy.sequence} · Cloud署名対象`,
+      state: policy.status === "active" ? "保護中" : "停止",
+      tone: policy.tone,
+    })),
+    activities: summary.audit.activity.slice(-20).reverse().map((event) => ({
+      symbol: event.decision === "allow" ? "✓" : "□",
+      title: event.decision === "allow" ? "操作を許可しました" : event.decision === "deny" ? "操作をブロックしました" : "操作を記録しました",
+      description: `${event.operation ?? "agent operation"} · ${event.reason ?? "recorded"}`,
+      time: event.deviceTimestamp,
+    })),
+  };
+}
 
 type ToastTone = "success" | "error";
 
@@ -245,6 +198,75 @@ function deviceRefreshOutcome(status: DeviceRefreshRequestStatus): string {
     coalesced: "既存の依頼へ統合し、再通知しました。端末への配信は未確認です。",
     no_pending_refresh: "反映待ちの更新はなく、通知は送信していません。",
   }[status];
+}
+
+function parseCapabilityRecords(value: unknown, agentIds: ReadonlySet<string>, deviceIds: ReadonlySet<string>): NonNullable<AgentPassInitialData["capabilityRecords"]> {
+  if (!isPlainRecord(value) || !Object.keys(value).every((key) => key === "capabilities" || key === "request_id") || !Array.isArray(value.capabilities)) throw new Error("invalid capability response");
+  if (value.request_id !== undefined && (typeof value.request_id !== "string" || !OPAQUE_ID.test(value.request_id))) throw new Error("invalid capability response");
+  if (value.capabilities.length > 100) throw new Error("invalid capability response");
+  return value.capabilities.map((item) => {
+    if (!isPlainRecord(item) || !hasExactKeys(item, ["version", "capability_id", "agent_id", "device_id", "expires_at", "sequence"])
+      || item.version !== 1 || typeof item.capability_id !== "string" || !OPAQUE_ID.test(item.capability_id)
+      || typeof item.agent_id !== "string" || !agentIds.has(item.agent_id)
+      || typeof item.device_id !== "string" || !deviceIds.has(item.device_id)
+      || typeof item.expires_at !== "string" || !validTimestamp(item.expires_at)
+      || !Number.isSafeInteger(item.sequence) || (item.sequence as number) < 1) throw new Error("invalid capability response");
+    return { capabilityId: item.capability_id, agentId: item.agent_id, deviceId: item.device_id, expiresAt: item.expires_at, sequence: item.sequence as number };
+  });
+}
+
+function parseAdminActivities(value: unknown, organizationId: string): AgentPassInitialData["activities"] {
+  if (!isPlainRecord(value) || !hasExactKeys(value, ["events"]) || !Array.isArray(value.events) || value.events.length > 100) throw new Error("invalid admin audit response");
+  return value.events.slice().reverse().map((item) => {
+    if (!isPlainRecord(item) || !Object.keys(item).every((key) => ["audit_event_id", "organization_id", "event_type", "actor_id", "target_type", "target_id", "details", "event_hash", "recorded_at"].includes(key))
+      || !["audit_event_id", "organization_id", "event_type", "actor_id", "target_type", "details", "event_hash", "recorded_at"].every((key) => Object.hasOwn(item, key))
+      || typeof item.audit_event_id !== "string" || !OPAQUE_ID.test(item.audit_event_id)
+      || item.organization_id !== organizationId || typeof item.actor_id !== "string" || !OPAQUE_ID.test(item.actor_id)
+      || typeof item.event_type !== "string" || !safeDisplayText(item.event_type, 128)
+      || typeof item.target_type !== "string" || !safeDisplayText(item.target_type, 64)
+      || (item.target_id !== undefined && (typeof item.target_id !== "string" || !OPAQUE_ID.test(item.target_id)))
+      || !isPlainRecord(item.details) || containsSensitiveField(item.details)
+      || typeof item.event_hash !== "string" || !/^[0-9a-f]{64}$/u.test(item.event_hash)
+      || typeof item.recorded_at !== "string" || !validTimestamp(item.recorded_at)) throw new Error("invalid admin audit response");
+    return { symbol: "⌁", title: item.event_type, description: `${item.target_type} · ${item.actor_id}`, time: item.recorded_at };
+  });
+}
+
+function parseOrganizationStopped(value: unknown, organizationId: string): boolean {
+  if (!isPlainRecord(value) || !Object.keys(value).every((key) => key === "revocations" || key === "request_id") || !Array.isArray(value.revocations) || value.revocations.length > 100) throw new Error("invalid revocation response");
+  if (value.request_id !== undefined && (typeof value.request_id !== "string" || !OPAQUE_ID.test(value.request_id))) throw new Error("invalid revocation response");
+  return value.revocations.some((item) => {
+    const allowed = ["revocation_id", "organization_id", "target_type", "target_id", "reason", "status", "sequence", "created_at", "revoked_at", "version"];
+    if (!isPlainRecord(item) || !Object.keys(item).every((key) => allowed.includes(key))
+      || item.organization_id !== organizationId || typeof item.target_type !== "string" || !safeDisplayText(item.target_type, 64)
+      || typeof item.status !== "string" || !["active", "revoked"].includes(item.status)) throw new Error("invalid revocation response");
+    return item.target_type === "organization" && item.status === "active";
+  });
+}
+
+function validTimestamp(value: string): boolean {
+  if (!RFC3339_UTC.test(value) || !Number.isFinite(Date.parse(value))) return false;
+  return new Date(value).toISOString().slice(0, 19) === value.slice(0, 19);
+}
+
+function safeDisplayText(value: string, maximum: number): boolean {
+  return value.length > 0 && value.length <= maximum && ![...value].some((character) => (character.codePointAt(0) ?? 0) < 0x20 || character.codePointAt(0) === 0x7f);
+}
+
+function containsSensitiveField(value: Record<string, unknown>): boolean {
+  const pending: unknown[] = [value];
+  let visited = 0;
+  while (pending.length) {
+    const current = pending.pop();
+    if (++visited > 256) return true;
+    if (Array.isArray(current)) { pending.push(...current); continue; }
+    if (!isPlainRecord(current)) continue;
+    for (const [key, child] of Object.entries(current)) {
+      if (/(?:authorization|cookie|credential|password|private[_-]?key|secret|token)/iu.test(key)) return true;
+      pending.push(child);
+    }
+  }
+  return false;
 }
 
 function parseSessionBootstrap(value: unknown): ConsoleSession {
@@ -543,26 +565,26 @@ function DeviceStateCard({ device, onRequestRefresh }: { device: AgentPassInitia
   );
 }
 
-function Overview({ data, goTo, onRequestRefresh }: { data: AgentPassInitialData; goTo: (view: ConsoleView) => void; onRequestRefresh: (deviceId: string) => Promise<DeviceRefreshRequestStatus> }) {
+function Overview({ data, goTo, onRequestRefresh, summaryState }: { data: AgentPassInitialData; goTo: (view: ConsoleView) => void; onRequestRefresh: (deviceId: string) => Promise<DeviceRefreshRequestStatus>; summaryState: "loading" | "ready" | "error" }) {
   const activeAgents = data.agents.filter((agent) => agent.state !== "停止").length;
   const connectedDevices = data.devices.filter((device) => device.status !== "停止").length;
   const protectedOperations = data.policies.length + data.capabilities.length;
   return (
     <>
       <header>
-        <p className="eyebrow">運用コンソール / 2026.08.12</p>
-        <h1 className="page-heading">Agentは、<br />安全に作業できます。</h1>
+        <p className="eyebrow">運用コンソール / LIVE STATUS</p>
+        <h1 className="page-heading">{summaryState === "ready" ? <>Agentの状態を、<br />確認できました。</> : <>Agentの状態を、<br />確認しています。</>}</h1>
         <p className="page-intro">
-          接続された端末、権限、セッションの状態をまとめて確認。いま何ができるかが、すぐにわかります。
+          Cloudから取得した端末、権限、監査状態だけを表示します。未検証の情報を安全状態として扱いません。
         </p>
       </header>
 
       <section className="hero-status" aria-labelledby="safe-status-heading">
         <div className="hero-message">
-          <div className="status-kicker"><span className="status-check" aria-hidden="true">✓</span> ALL SYSTEMS READY</div>
-          <h2 id="safe-status-heading" className="hero-title">Agent can safely work now</h2>
+          <div className="status-kicker"><span className="status-check" aria-hidden="true">{summaryState === "ready" ? "✓" : "!"}</span> {summaryState === "ready" ? "SUMMARY VERIFIED" : summaryState === "loading" ? "SUMMARY LOADING" : "SUMMARY UNAVAILABLE"}</div>
+          <h2 id="safe-status-heading" className="hero-title">{summaryState === "ready" ? "Agent status is available" : summaryState === "loading" ? "Cloudの状態を確認中です" : "安全状態を確認できません"}</h2>
           <p className="hero-copy">
-            端末とCloudの接続、今日のポリシー、操作セッションを確認しました。いまの設定なら、Agentに作業を任せられます。
+            {summaryState === "ready" ? "Cloudが返した端末・Agent・ポリシー・監査情報を検証して表示しています。" : summaryState === "loading" ? "確認が完了するまで、表示上の情報を権限判断に使用しないでください。" : "Cloudの応答を検証できなかったため、運用データを消去しました。再同期してください。"}
           </p>
           <div className="hero-action">
             <button className="primary-button" type="button" onClick={() => goTo("setup")}>セットアップを確認する&nbsp; →</button>
@@ -572,22 +594,22 @@ function Overview({ data, goTo, onRequestRefresh }: { data: AgentPassInitialData
         <div className="hero-meta">
           <div>
             <span className="meta-label">SESSION EXPIRES</span>
-            <strong className="meta-value">{data.session.remaining}</strong>
-            <p className="meta-detail">今日 {data.session.expires.split(" ").slice(-1)[0]} まで</p>
+            <strong className="meta-value">情報未提供</strong>
+            <p className="meta-detail">Summary APIはセッション権限を返しません</p>
           </div>
           <div>
             <span className="meta-label">CAPABILITIES</span>
-            <strong className="meta-value">{data.capabilities.length}つ許可</strong>
-            <p className="meta-detail">読み取り / 編集 / テスト</p>
+            <strong className="meta-value">情報未提供</strong>
+            <p className="meta-detail">Capability APIで個別に確認します</p>
           </div>
         </div>
       </section>
 
       <div className="metric-grid" aria-label="システム概要">
         <article className="metric-card">
-          <div className="metric-topline"><span className="metric-title">接続中のAgent</span><span className="metric-icon" aria-hidden="true">◈</span></div>
+          <div className="metric-topline"><span className="metric-title">有効なAgent登録</span><span className="metric-icon" aria-hidden="true">◈</span></div>
           <p className="metric-value">{activeAgents} / {data.agents.length}</p>
-          <p className="metric-detail">接続済みのCoding Agent</p>
+          <p className="metric-detail">Cloud上で有効な登録（接続状態ではありません）</p>
         </article>
         <article className="metric-card">
           <div className="metric-topline"><span className="metric-title">保護されている操作</span><span className="metric-icon" aria-hidden="true">◆</span></div>
@@ -896,11 +918,11 @@ function SecuritySurface() {
 
 function EmergencySurface({ data, onOpenConfirm, stopped }: { data: AgentPassInitialData; onOpenConfirm: () => void; stopped: boolean }) {
   const activeCount = data.agents.filter((agent) => agent.state !== "停止").length;
-  return <><SurfaceHeader eyebrow="EMERGENCY STOP / 06" title={<>いつでも、<br />止められます。</>} copy="Agentが予想外の動きをしたときは、すべての作業をただちに一時停止できます。" /><div className="surface-content"><article className="surface-card stop-card"><div className="stop-title-row"><div><span className="section-kicker">CONTROL ROOM</span><h2 className="surface-card-title">すべてのAgentを緊急停止</h2><p className="surface-card-copy">停止すると、つながっている端末の作業・セッション・キューがすべて一時停止します。ファイルは削除されません。</p></div><span className="stop-mark" aria-hidden="true">■</span></div><div className="stop-action-row">{stopped ? <><StatusTag tone="red">停止済み</StatusTag><span className="section-note">すべてのAgentを停止しました。再開はセットアップから行えます。</span></> : <><span className="section-note">現在 {activeCount}つのAgentが接続中</span><button type="button" className="danger-button" onClick={onOpenConfirm}>緊急停止を開始する</button></>}</div></article><article className="surface-card"><span className="section-kicker">WHEN TO USE</span><h2 className="surface-card-title">こんなときに使います</h2><ul className="row-list"><li className="row-list-item"><div className="row-main"><span className="row-icon" aria-hidden="true">!</span><div><p className="row-title">意図しないファイル変更が続いている</p><p className="row-description">作業を止めてから、アクティビティで操作を確認します。</p></div></div></li><li className="row-list-item"><div className="row-main"><span className="row-icon" aria-hidden="true">!</span><div><p className="row-title">不明なサービスへの接続が見つかった</p><p className="row-description">接続を止め、ポリシーと端末を確認します。</p></div></div></li></ul></article></div></>;
+  return <><SurfaceHeader eyebrow="EMERGENCY STOP / 06" title={<>いつでも、<br />止められます。</>} copy="Agentが予想外の動きをしたときは、すべての作業をただちに一時停止できます。" /><div className="surface-content"><article className="surface-card stop-card"><div className="stop-title-row"><div><span className="section-kicker">CONTROL ROOM</span><h2 className="surface-card-title">すべてのAgentを緊急停止</h2><p className="surface-card-copy">停止すると、有効なAgent登録に対する作業・セッション・キューを一時停止します。ファイルは削除されません。</p></div><span className="stop-mark" aria-hidden="true">■</span></div><div className="stop-action-row">{stopped ? <><StatusTag tone="red">停止済み</StatusTag><span className="section-note">すべてのAgentを停止しました。再開はセットアップから行えます。</span></> : <><span className="section-note">現在 {activeCount}件の有効なAgent登録があります</span><button type="button" className="danger-button" onClick={onOpenConfirm}>緊急停止を開始する</button></>}</div></article><article className="surface-card"><span className="section-kicker">WHEN TO USE</span><h2 className="surface-card-title">こんなときに使います</h2><ul className="row-list"><li className="row-list-item"><div className="row-main"><span className="row-icon" aria-hidden="true">!</span><div><p className="row-title">意図しないファイル変更が続いている</p><p className="row-description">作業を止めてから、アクティビティで操作を確認します。</p></div></div></li><li className="row-list-item"><div className="row-main"><span className="row-icon" aria-hidden="true">!</span><div><p className="row-title">不明なサービスへの接続が見つかった</p><p className="row-description">接続を止め、ポリシーと端末を確認します。</p></div></div></li></ul></article></div></>;
 }
 
-export function AgentPassConsole({ initialData = defaultInitialData }: AgentPassConsoleProps) {
-  const [data, setData] = useState(initialData);
+export function AgentPassConsole() {
+  const [data, setData] = useState(emptyConsoleData);
   const [activeView, setActiveView] = useState<ConsoleView>("overview");
   const [mobileOpen, setMobileOpen] = useState(false);
   const [workspaceOpen, setWorkspaceOpen] = useState(false);
@@ -912,9 +934,13 @@ export function AgentPassConsole({ initialData = defaultInitialData }: AgentPass
   const [toastTone, setToastTone] = useState<ToastTone>("success");
   const [stopPending, setStopPending] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
-  const [syncError, setSyncError] = useState(false);
+  const [summaryState, setSummaryState] = useState<"loading" | "ready" | "error">("loading");
   const [lastSynced, setLastSynced] = useState("未同期");
   const modalRef = useRef<HTMLElement | null>(null);
+  const summaryEpoch = useRef(0);
+  const capabilityEpoch = useRef(0);
+  const adminAuditEpoch = useRef(0);
+  const organizationIdRef = useRef<string | null>(null);
 
   const showToast = (message: string, tone: ToastTone = "success") => {
     setToast(message);
@@ -923,21 +949,28 @@ export function AgentPassConsole({ initialData = defaultInitialData }: AgentPass
   };
 
   const refreshSummary = useCallback(async (signal?: AbortSignal) => {
+    const epoch = ++summaryEpoch.current;
     setRefreshing(true);
     try {
+      const { organizationId } = await consoleSessionContext.get(signal);
       const response = await fetchConsole("/api/console?resource=summary", { signal });
       if (!response.ok) throw new Error("summary unavailable");
-      setData(mergeCloudSummary(initialData, await response.json()));
-      setSyncError(false);
+      const next = summaryViewData(parseConsoleSummary(await response.json(), { organizationId }));
+      if (epoch !== summaryEpoch.current) return;
+      organizationIdRef.current = organizationId;
+      setData(next);
+      setSummaryState("ready");
       setLastSynced("たった今");
     } catch (error) {
       if (error instanceof DOMException && error.name === "AbortError") return;
-      setSyncError(true);
-      setData((current) => ({ ...current, devices: [], agents: [], policies: [], activities: [], capabilityRecords: [] }));
+      if (epoch !== summaryEpoch.current) return;
+      organizationIdRef.current = null;
+      setSummaryState("error");
+      setData(emptyConsoleData());
     } finally {
-      if (!signal?.aborted) setRefreshing(false);
+      if (!signal?.aborted && epoch === summaryEpoch.current) setRefreshing(false);
     }
-  }, [initialData]);
+  }, []);
 
   useEffect(() => {
     if (!confirmOpen) return;
@@ -974,34 +1007,41 @@ export function AgentPassConsole({ initialData = defaultInitialData }: AgentPass
   }, [refreshSummary]);
 
   useEffect(() => {
+    if (summaryState !== "ready") return;
+    const epoch = ++capabilityEpoch.current;
     const controller = new AbortController();
+    const agentIds = new Set(data.agents.flatMap((agent) => agent.agentId ? [agent.agentId] : []));
+    const deviceIds = new Set(data.devices.flatMap((device) => device.deviceId ? [device.deviceId] : []));
     Promise.all([
+      consoleSessionContext.get(controller.signal),
       fetchConsole("/api/console?resource=capabilities&limit=100", { signal: controller.signal }),
       fetchConsole("/api/console?resource=revocations&limit=100", { signal: controller.signal }),
-    ]).then(async ([capabilityResponse, revocationResponse]) => {
-      const capabilityPayload = capabilityResponse.ok ? await capabilityResponse.json() : {};
-      const revocationPayload = revocationResponse.ok ? await revocationResponse.json() : {};
-      const raw = Array.isArray(capabilityPayload.capabilities) ? capabilityPayload.capabilities as Array<Record<string, unknown>> : [];
-      setData((current) => ({ ...current, capabilityRecords: raw.map((item) => ({ capabilityId: String(item.capability_id ?? ""), agentId: String(item.agent_id ?? ""), deviceId: String(item.device_id ?? ""), expiresAt: String(item.expires_at ?? ""), sequence: Number(item.sequence ?? 0) })) }));
-      const revoked = Array.isArray(revocationPayload.revocations) && revocationPayload.revocations.some((item: Record<string, unknown>) => item.target_type === "organization" && item.status === "active");
-      if (revoked) setStopped(true);
-    }).catch(() => {});
+    ]).then(async ([session, capabilityResponse, revocationResponse]) => {
+        if (!capabilityResponse.ok || !revocationResponse.ok) throw new Error("authority metadata unavailable");
+        const records = parseCapabilityRecords(await capabilityResponse.json(), agentIds, deviceIds);
+        const stopped = parseOrganizationStopped(await revocationResponse.json(), session.organizationId);
+        if (controller.signal.aborted || epoch !== capabilityEpoch.current || session.organizationId !== organizationIdRef.current) return;
+        setData((current) => ({ ...current, capabilityRecords: records }));
+        setStopped(stopped);
+      })
+      .catch(() => { if (epoch === capabilityEpoch.current && !controller.signal.aborted) setData((current) => ({ ...current, capabilityRecords: [] })); });
     return () => controller.abort();
-  }, [activeView]);
+  }, [summaryState, data.agents, data.devices]);
 
   useEffect(() => {
-    if (activeView !== "activity") return;
+    if (activeView !== "activity" || summaryState !== "ready") return;
+    const epoch = ++adminAuditEpoch.current;
     const controller = new AbortController();
-    fetchConsole("/api/console?resource=admin-audit&limit=100", { signal: controller.signal })
-      .then(async (response) => response.ok ? response.json() : Promise.reject(new Error("audit unavailable")))
-      .then((payload) => {
-        const events = Array.isArray(payload.events) ? payload.events as Array<Record<string, unknown>> : [];
-        if (!events.length) return;
-        setData((current) => ({ ...current, activities: events.slice().reverse().map((event) => ({ symbol: "⌁", title: String(event.event_type ?? "管理操作"), description: `${String(event.target_type ?? "組織")} · ${String(event.actor_id ?? "運用者")}`, time: String(event.recorded_at ?? "同期済み") })) }));
+    Promise.all([consoleSessionContext.get(controller.signal), fetchConsole("/api/console?resource=admin-audit&limit=100", { signal: controller.signal })])
+      .then(async ([session, response]) => {
+        if (!response.ok) throw new Error("audit unavailable");
+        const activities = parseAdminActivities(await response.json(), session.organizationId);
+        if (controller.signal.aborted || epoch !== adminAuditEpoch.current || session.organizationId !== organizationIdRef.current) return;
+        setData((current) => ({ ...current, activities }));
       })
-      .catch(() => {});
+      .catch(() => { if (epoch === adminAuditEpoch.current && !controller.signal.aborted) setData((current) => ({ ...current, activities: [] })); });
     return () => controller.abort();
-  }, [activeView]);
+  }, [activeView, summaryState]);
 
   const goTo = (view: ConsoleView) => {
     setActiveView(view);
@@ -1106,11 +1146,11 @@ export function AgentPassConsole({ initialData = defaultInitialData }: AgentPass
       <div className="main-column" id="top">
         <div className="topbar">
           <div className="breadcrumbs"><button className="mobile-menu" type="button" aria-label="メニューを開く" aria-expanded={mobileOpen} onClick={() => setMobileOpen((open) => !open)}>☰</button><span className="breadcrumb-root">AgentPass</span><span aria-hidden="true">/</span><span className="breadcrumb-current">{currentLabel}</span></div>
-          <div className="topbar-actions"><span className={`connection-status${syncError ? " is-error" : ""}`}><span className="status-dot" aria-hidden="true" />{syncError ? "同期を確認" : refreshing ? "同期中…" : "システム正常"}</span><button className="refresh-button" type="button" onClick={() => void refreshSummary()} disabled={refreshing}>{refreshing ? "同期中" : `最終同期 ${lastSynced}`}</button><button className="help-button" type="button" aria-label="ヘルプを開く" aria-expanded={helpOpen} onClick={() => setHelpOpen(true)}>?</button><button className="icon-button" type="button" aria-label="アクティビティを見る" onClick={() => goTo("activity")}>◌</button></div>
+          <div className="topbar-actions"><span className={`connection-status${summaryState === "error" ? " is-error" : ""}`}><span className="status-dot" aria-hidden="true" />{summaryState === "error" ? "同期エラー" : refreshing || summaryState === "loading" ? "同期中…" : "応答検証済み"}</span><button className="refresh-button" type="button" onClick={() => void refreshSummary()} disabled={refreshing}>{refreshing ? "同期中" : `最終同期 ${lastSynced}`}</button><button className="help-button" type="button" aria-label="ヘルプを開く" aria-expanded={helpOpen} onClick={() => setHelpOpen(true)}>?</button><button className="icon-button" type="button" aria-label="アクティビティを見る" onClick={() => goTo("activity")}>◌</button></div>
         </div>
         <div className={`content${activeView === "organizations" || activeView === "recovery" ? " organization-content" : ""}`} role={activeView === "organizations" || activeView === "recovery" ? undefined : "main"}>
-          {activeView === "overview" ? <Overview data={data} goTo={goTo} onRequestRefresh={requestDeviceRefresh} /> : null}
-          {activeView === "setup" ? <SetupSurface data={data} goTo={goTo} operate={operate} online={!syncError} /> : null}
+          {activeView === "overview" ? <Overview data={data} goTo={goTo} onRequestRefresh={requestDeviceRefresh} summaryState={summaryState} /> : null}
+          {activeView === "setup" ? <SetupSurface data={data} goTo={goTo} operate={operate} online={summaryState === "ready"} /> : null}
           {activeView === "agents" ? <AgentsSurface data={data} operate={operate} /> : null}
           {activeView === "policies" ? <PoliciesSurface data={data} operate={operate} /> : null}
           {activeView === "activity" ? <ActivitySurface data={data} /> : null}
@@ -1123,39 +1163,8 @@ export function AgentPassConsole({ initialData = defaultInitialData }: AgentPass
 
       {mobileOpen ? <button className="mobile-scrim" type="button" aria-label="メニューを閉じる" onClick={() => setMobileOpen(false)} /> : null}
       {helpOpen ? <div className="modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.currentTarget === event.target) setHelpOpen(false); }}><section className="help-modal" role="dialog" aria-modal="true" aria-labelledby="help-title"><div className="modal-header"><span className="modal-label">HELP / QUICK GUIDE</span><button className="modal-close" type="button" aria-label="ヘルプを閉じる" onClick={() => setHelpOpen(false)}>×</button></div><h2 className="modal-title" id="help-title">AgentPassの見方</h2><p className="modal-copy">Agentが作業を開始する前に、概要で「システム正常」と表示されていることを確認してください。</p><ul className="help-list"><li><strong>セットアップ</strong><span>端末・Agent・短期Capabilityを管理します。</span></li><li><strong>ポリシー</strong><span>Agentに許可する操作とRepositoryを絞ります。</span></li><li><strong>緊急停止</strong><span>不審な動きがあれば、すべてのAgentを即時停止できます。</span></li></ul><button className="secondary-button" type="button" onClick={() => { setHelpOpen(false); goTo("activity"); }}>監査ログを見る</button></section></div> : null}
-      {confirmOpen ? <div className="modal-backdrop" role="presentation" onMouseDown={(event) => { if (!stopPending && event.currentTarget === event.target) setConfirmOpen(false); }}><section className="confirm-modal" ref={modalRef} role="dialog" aria-modal="true" aria-labelledby="confirm-title" aria-describedby="confirm-copy"><span className="modal-label">EMERGENCY STOP</span><h2 className="modal-title" id="confirm-title">Agentをすべて停止しますか？</h2><p className="modal-copy" id="confirm-copy">接続中の{activeAgents}つのAgentがただちに一時停止します。進行中の作業は再開するまで待機します。</p><label className="confirm-check"><input type="checkbox" checked={confirmChecked} disabled={stopPending} onChange={(event) => setConfirmChecked(event.target.checked)} /><span>影響を理解しました。すべてのAgentを停止します。</span></label><div className="modal-actions"><button className="secondary-button" type="button" disabled={stopPending} onClick={() => setConfirmOpen(false)}>キャンセル</button><button className="danger-button" type="button" disabled={!confirmChecked || stopPending} onClick={triggerStop}>{stopPending ? "停止を配信中…" : "停止を確認する"}</button></div></section></div> : null}
+      {confirmOpen ? <div className="modal-backdrop" role="presentation" onMouseDown={(event) => { if (!stopPending && event.currentTarget === event.target) setConfirmOpen(false); }}><section className="confirm-modal" ref={modalRef} role="dialog" aria-modal="true" aria-labelledby="confirm-title" aria-describedby="confirm-copy"><span className="modal-label">EMERGENCY STOP</span><h2 className="modal-title" id="confirm-title">Agentをすべて停止しますか？</h2><p className="modal-copy" id="confirm-copy">Cloud上で有効な{activeAgents}件のAgent登録を停止対象にします。現在の接続数を示すものではありません。</p><label className="confirm-check"><input type="checkbox" checked={confirmChecked} disabled={stopPending} onChange={(event) => setConfirmChecked(event.target.checked)} /><span>影響を理解しました。すべてのAgentを停止します。</span></label><div className="modal-actions"><button className="secondary-button" type="button" disabled={stopPending} onClick={() => setConfirmOpen(false)}>キャンセル</button><button className="danger-button" type="button" disabled={!confirmChecked || stopPending} onClick={triggerStop}>{stopPending ? "停止を配信中…" : "停止を確認する"}</button></div></section></div> : null}
       {toast ? <div className={`toast ${toastTone}`} role="status" aria-live="polite">{toastTone === "success" ? "✓" : "!"} {toast}</div> : null}
     </div>
   );
-}
-
-function mergeCloudSummary(fallback: AgentPassInitialData, summary: Record<string, unknown>): AgentPassInitialData {
-  const organization = summary.organization && typeof summary.organization === "object" ? summary.organization as Record<string, unknown> : {};
-  const rawDevices = Array.isArray(summary.devices) ? summary.devices as Array<Record<string, unknown>> : [];
-  const rawAgents = Array.isArray(summary.agents) ? summary.agents as Array<Record<string, unknown>> : [];
-  const rawPolicies = Array.isArray(summary.policies) ? summary.policies as Array<Record<string, unknown>> : [];
-  const audit = summary.audit && typeof summary.audit === "object" ? summary.audit as Record<string, unknown> : {};
-  const rawActivity = Array.isArray(audit.activity) ? audit.activity as Array<Record<string, unknown>> : [];
-  return {
-    ...fallback,
-    workspace: typeof organization.name === "string" ? organization.name : fallback.workspace,
-    devices: rawDevices.map((device) => ({
-      deviceId: typeof device.device_id === "string" ? device.device_id : undefined,
-      name: String(device.name ?? "確認済み端末"),
-      detail: String(device.status ?? "active"),
-      status: device.status === "revoked" ? "停止" : "正常",
-      location: "ローカル / Cloud管理",
-      checked: "同期済み",
-      desiredGeneration: typeof device.desired_generation === "number" && Number.isSafeInteger(device.desired_generation) ? device.desired_generation : undefined,
-      observedGeneration: typeof device.observed_generation === "number" && Number.isSafeInteger(device.observed_generation) ? device.observed_generation : undefined,
-      refreshState: typeof device.refresh_state === "string" ? device.refresh_state : undefined,
-      bundleSequence: typeof device.bundle_sequence === "number" && Number.isSafeInteger(device.bundle_sequence) ? device.bundle_sequence : undefined,
-      bundleExpiresAt: typeof device.bundle_expires_at === "string" ? device.bundle_expires_at : undefined,
-      lastAckAt: typeof device.last_ack_at === "string" ? device.last_ack_at : undefined,
-      blockedReason: typeof device.blocked_reason === "string" ? device.blocked_reason : undefined,
-    })),
-    agents: rawAgents.map((agent) => ({ agentId: String(agent.agent_id ?? ""), deviceId: typeof agent.device_id === "string" ? agent.device_id : undefined, name: String(agent.name ?? "Coding Agent"), client: agent.kind === "cursor" ? "Cursor" : "Claude Code", detail: String(agent.device_id ?? "登録済み端末"), state: agent.status === "revoked" ? "停止" : "待機中", stateTone: agent.status === "revoked" ? "red" : "green" as "red" | "green" })),
-    policies: rawPolicies.map((policy) => ({ policyId: String(policy.policy_id ?? ""), version: typeof policy.version === "number" ? policy.version : 1, scope: policy.scope as Record<string, unknown> | undefined, name: String(policy.name ?? "Policy"), detail: `sequence ${String(policy.sequence ?? 0)} · Cloud署名対象`, state: policy.status === "active" ? "保護中" : "停止", tone: policy.status === "active" ? "green" : "amber" as "green" | "amber" })),
-    activities: rawActivity.slice(-20).reverse().map((event) => ({ symbol: event.decision === "allow" ? "✓" : "□", title: event.decision === "allow" ? "操作を許可しました" : "操作をブロックしました", description: `${String(event.operation ?? "agent operation")} · ${String(event.reason ?? "recorded")}`, time: String(event.device_timestamp ?? "同期済み") })),
-  };
 }

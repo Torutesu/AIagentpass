@@ -32,8 +32,9 @@ test("server-renders the AgentPass Console", async () => {
 
   const html = await response.text();
   assert.match(html, /<title>AgentPass Console/);
-  assert.match(html, /Agentは、/);
-  assert.match(html, /Agent can safely work now/);
+  assert.match(html, /Agentの状態を、/);
+  assert.match(html, /Cloudの状態を確認中です/);
+  assert.match(html, /表示上の情報を権限判断に使用しないでください/);
   assert.match(html, /緊急停止/);
   assert.doesNotMatch(html, /codex-preview|react-loading-skeleton|Your site is taking shape/);
 });

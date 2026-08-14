@@ -3,10 +3,12 @@ import { readFile } from "node:fs/promises";
 import test from "node:test";
 
 const componentPath = new URL("../app/components/AgentPassConsole.tsx", import.meta.url);
+const summaryParserPath = new URL("../app/console-summary.ts", import.meta.url);
 const stylesPath = new URL("../app/globals.css", import.meta.url);
 
 test("Console maps the safe device control-plane shape without exposing raw payloads", async () => {
   const source = await readFile(componentPath, "utf8");
+  const parserSource = await readFile(summaryParserPath, "utf8");
   for (const field of [
     "desired_generation",
     "observed_generation",
@@ -15,9 +17,11 @@ test("Console maps the safe device control-plane shape without exposing raw payl
     "bundle_expires_at",
     "last_ack_at",
     "blocked_reason",
-  ]) assert.match(source, new RegExp(field));
-  assert.match(source, /Number\.isSafeInteger\(device\.desired_generation\)/);
-  assert.match(source, /Number\.isSafeInteger\(device\.observed_generation\)/);
+  ]) assert.match(parserSource, new RegExp(field));
+  assert.match(parserSource, /nullablePositiveInteger\(object\.desired_generation/);
+  assert.match(parserSource, /nullablePositiveInteger\(object\.observed_generation/);
+  assert.match(source, /device\.desiredGeneration/);
+  assert.match(source, /device\.observedGeneration/);
   assert.doesNotMatch(source, /device\.private_key|device\.secret|device\.credential/);
   assert.doesNotMatch(source, /localStorage|sessionStorage|console\.(?:log|info|warn|error)/);
 });
