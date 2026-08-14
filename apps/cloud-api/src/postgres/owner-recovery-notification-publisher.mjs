@@ -86,7 +86,7 @@ export function createOwnerRecoveryNotificationPublisher({
       maxResponseBytes
     });
     if (request.signal?.aborted) throw aborted();
-    return validateAcceptedResponse(response);
+    return validateAcceptedResponse(response, request.idempotency_key);
   }
 
   return Object.freeze({ publish });
@@ -270,7 +270,7 @@ function responseLength(headers) {
   }
 }
 
-function validateAcceptedResponse(response) {
+function validateAcceptedResponse(response, idempotencyKey) {
   try {
     if (!Number.isSafeInteger(response?.statusCode) || response.statusCode < 200 || response.statusCode >= 300
       || contentType(response?.headers) !== "application/json" || !Buffer.isBuffer(response?.body)) throw rejected();
@@ -278,8 +278,11 @@ function validateAcceptedResponse(response) {
     try { body = new TextDecoder("utf-8", { fatal: true }).decode(response.body); }
     catch { throw rejected(); }
     const parsed = parseResponseJson(body);
-    if (!plainObject(parsed) || !sameKeys(parsed, ["accepted", "duplicate"]) || typeof parsed.accepted !== "boolean" || typeof parsed.duplicate !== "boolean" || (parsed.accepted === false && parsed.duplicate !== false)) throw rejected();
-    return Object.freeze({ accepted: parsed.accepted, duplicate: parsed.duplicate });
+    if (!plainObject(parsed) || !sameKeys(parsed, ["accepted", "duplicate", "idempotency_key"])
+      || typeof parsed.accepted !== "boolean" || typeof parsed.duplicate !== "boolean"
+      || typeof parsed.idempotency_key !== "string" || parsed.idempotency_key !== idempotencyKey
+      || (parsed.accepted === false && parsed.duplicate !== false)) throw rejected();
+    return Object.freeze({ accepted: parsed.accepted, duplicate: parsed.duplicate, idempotency_key: parsed.idempotency_key });
   } catch (error) {
     if (error instanceof OwnerRecoveryNotificationPublisherError) throw error;
     throw rejected();

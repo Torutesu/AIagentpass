@@ -51,7 +51,7 @@ export function createOwnerRecoveryOutboxWorker({
   retentionPruneIntervalMs = DEFAULTS.retentionPruneIntervalMs,
   retentionPruneLimit = DEFAULTS.retentionPruneLimit
 } = {}) {
-  if (!repository || typeof repository.claimBatch !== "function" || typeof repository.markPublished !== "function" || typeof repository.markFailed !== "function") throw invalid();
+  if (!repository || typeof repository.claimBatch !== "function" || typeof repository.markPublished !== "function" || typeof repository.markFailed !== "function" || typeof repository.markUncertain !== "function") throw invalid();
   if (!publisher || typeof publisher.publish !== "function" || typeof now !== "function" || typeof random !== "function" || typeof setTimeoutFn !== "function" || typeof clearTimeoutFn !== "function") throw invalid();
   if (retentionRepository !== undefined && (!retentionRepository || typeof retentionRepository.prune !== "function")) throw invalid();
   const config = Object.freeze({
@@ -131,7 +131,7 @@ export function createOwnerRecoveryOutboxWorker({
     } catch {
       // A single poison row must not reject the batch. Validation, clock,
       // retry-jitter, and synchronous publisher failures have no safe
-      // acknowledgement path, so retain the lease as an unknown outcome.
+      // acknowledgement path, so isolate the delivery as an unknown outcome.
       return uncertain(metrics);
     }
   }
@@ -152,15 +152,19 @@ export function createOwnerRecoveryOutboxWorker({
     } catch {
       // Timeout and transport exceptions are an unknown delivery outcome: the
       // provider may have accepted the idempotency key before the response was
-      // lost. Keep the lease instead of making the row immediately retryable.
+      // lost. Persist only a fixed category and remove the row from automatic
+      // claiming instead of making it immediately retryable.
+      await persistUncertain(event, claimToken);
       metric(metrics, "recordOwnerRecoveryOutboxUncertain");
       return "uncertain";
     }
-    if (!response || typeof response.duplicate !== "boolean" || response.accepted !== true) {
-      if (response?.accepted !== false || response?.duplicate !== false) {
-        metric(metrics, "recordOwnerRecoveryOutboxUncertain");
-        return "uncertain";
-      }
+    if (!response || typeof response.accepted !== "boolean" || typeof response.duplicate !== "boolean"
+      || response.idempotency_key !== event.event_id || (response.accepted === false && response.duplicate !== false)) {
+      await persistUncertain(event, claimToken);
+      metric(metrics, "recordOwnerRecoveryOutboxUncertain");
+      return "uncertain";
+    }
+    if (response.accepted === false) {
       const retryAt = new Date(clock(now) + retryDelay(event.attempt, config, random)).toISOString();
       try {
         const failed = await repository.markFailed({ organization_id: event.organization_id, event_id: event.event_id, attempt: event.attempt, claim_token: claimToken, error_code: "publisher_rejected", retry_at: retryAt });
@@ -177,11 +181,21 @@ export function createOwnerRecoveryOutboxWorker({
       await repository.markPublished({ organization_id: event.organization_id, event_id: event.event_id, attempt: event.attempt, claim_token: claimToken });
     } catch (error) {
       if (isClaimLost(error)) { metric(metrics, "recordOwnerRecoveryOutboxClaimLost"); return "claim_lost"; }
+      await persistUncertain(event, claimToken);
       metric(metrics, "recordOwnerRecoveryOutboxUncertain");
       return "uncertain";
     }
     metric(metrics, "recordOwnerRecoveryOutboxPublish");
     return "published";
+  }
+
+  async function persistUncertain(event, claimToken) {
+    try {
+      await repository.markUncertain({ organization_id: event.organization_id, event_id: event.event_id, attempt: event.attempt, claim_token: claimToken });
+    } catch (error) {
+      if (isClaimLost(error)) metric(metrics, "recordOwnerRecoveryOutboxClaimLost");
+      else metric(metrics, "recordOwnerRecoveryOutboxFailure");
+    }
   }
 
   function start() {

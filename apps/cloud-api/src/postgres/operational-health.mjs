@@ -1,5 +1,5 @@
 export const OPERATIONAL_HEALTH_VERSION = 1;
-export const EXPECTED_POSTGRES_SCHEMA_VERSION = 33;
+export const EXPECTED_POSTGRES_SCHEMA_VERSION = 34;
 
 // Recovery operations are deliberately a closed set.  These names are also
 // the admission-control names used by human-auth/rate-limit.mjs; keeping the
@@ -450,11 +450,12 @@ function normalizeOutboxResult(result, { outboxMaxPending, outboxMaxLagMs, now }
   if (result.status !== "fulfilled" || !result.value || typeof result.value !== "object" || Array.isArray(result.value)) return skippedOutbox("unavailable");
   const value = result.value;
   const pending = Number(value.pending);
+  const uncertain = Number(value.uncertain);
   const deadLetter = Number(value.dead_letter);
   const workerState = value.worker_state;
   let current;
   try { current = Number(now()); } catch { return skippedOutbox("unavailable"); }
-  if (!Number.isSafeInteger(pending) || pending < 0 || !Number.isSafeInteger(deadLetter) || deadLetter < 0 || !["running", "idle", "draining", "closed"].includes(workerState) || !Number.isSafeInteger(current) || current < 0) return skippedOutbox("unavailable");
+  if (!Number.isSafeInteger(pending) || pending < 0 || !Number.isSafeInteger(uncertain) || uncertain < 0 || !Number.isSafeInteger(deadLetter) || deadLetter < 0 || !["running", "idle", "draining", "closed"].includes(workerState) || !Number.isSafeInteger(current) || current < 0) return skippedOutbox("unavailable");
   let oldestPendingAgeMs = null;
   if (value.oldest_pending_at !== null) {
     const oldest = Date.parse(String(value.oldest_pending_at));
@@ -463,18 +464,20 @@ function normalizeOutboxResult(result, { outboxMaxPending, outboxMaxLagMs, now }
   } else if (pending !== 0) return skippedOutbox("unavailable");
   const code = workerState !== "running"
     ? "worker_unavailable"
-    : deadLetter > 0
+    : uncertain > 0
+      ? "uncertain_delivery_present"
+      : deadLetter > 0
       ? "dead_letter_present"
       : pending > outboxMaxPending
         ? "backlog_exceeded"
         : oldestPendingAgeMs !== null && oldestPendingAgeMs > outboxMaxLagMs
           ? "lag_exceeded"
           : "ok";
-  return Object.freeze({ ok: code === "ok", code, worker_state: workerState, pending_count: pending, dead_letter_count: deadLetter, oldest_pending_age_ms: oldestPendingAgeMs });
+  return Object.freeze({ ok: code === "ok", code, worker_state: workerState, pending_count: pending, uncertain_count: uncertain, dead_letter_count: deadLetter, oldest_pending_age_ms: oldestPendingAgeMs });
 }
 
 function skippedOutbox(code) {
-  return Object.freeze({ ok: false, code, worker_state: code === "draining" ? "draining" : "unavailable", pending_count: null, dead_letter_count: null, oldest_pending_age_ms: null });
+  return Object.freeze({ ok: false, code, worker_state: code === "draining" ? "draining" : "unavailable", pending_count: null, uncertain_count: null, dead_letter_count: null, oldest_pending_age_ms: null });
 }
 
 async function defaultProbe(pool) {

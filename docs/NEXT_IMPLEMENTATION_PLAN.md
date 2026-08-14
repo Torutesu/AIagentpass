@@ -12,7 +12,7 @@ The primary macOS delivery is not a required menu-bar application. The release a
 
 ## 2. Current implemented boundary
 
-The current branch has the versioned Core/OpenAPI/JSON Schema catalog, 33 forward-only PostgreSQL migrations, tenant-qualified hosted repositories, Human sessions and organization roles, WebAuthn registration/authentication and operation-bound recent authorization, Device API foundations, signed control bundles and ACK state, audit ingestion, emergency revocation, threshold-owner recovery, and a secret-free recovery-notification outbox with dead-letter management and bounded retention.
+The current branch has the versioned Core/OpenAPI/JSON Schema catalog, 34 forward-only PostgreSQL migrations, tenant-qualified hosted repositories, Human sessions and organization roles, WebAuthn registration/authentication and operation-bound recent authorization, Device API foundations, signed control bundles and ACK state, audit ingestion, emergency revocation, threshold-owner recovery, and a secret-free recovery-notification outbox with dead-letter management, durable uncertain-delivery quarantine, and bounded retention.
 
 At the `5a5842c` checkpoint, recovery dead-letter redrive and suppression require an exact resource-bound WebAuthn context. The repository recomputes that context and consumes the proof in the same organization-locked transaction. The full suite passes with 1,682 tests (1,648 pass and 34 intentionally skipped), lint and contract validation pass, and all 31 migrations apply to PostgreSQL 16.
 
@@ -81,7 +81,8 @@ Depends on W0.
 
 State: in progress. Delivery/provider/retention slices 1–3 are implemented and
 locally verified on 2026-08-14. The worker now isolates poison rows per event,
-retains leases for unknown outcomes, and runs bounded retention maintenance.
+moves unknown outcomes into a durable non-claimable `uncertain` state, and runs
+bounded retention maintenance.
 The HTTPS provider accepts only the exact secret-free acknowledgement DTO and
 rejects ambiguous framing, duplicate JSON keys, response-field echoes, and
 oversized bodies. Migration `0032` enforces fixed 30-day published, 90-day
@@ -128,9 +129,9 @@ PostgreSQL state/outbox rather than the health counter.
 
 Current verification baseline:
 
-- the root suite passes 1,737 tests: 1,696 pass, 41 explicitly skipped, 0 fail;
-- the frozen catalog validates 114 entries: 29 schemas, 52 OpenAPI operations,
-  and 33 migrations;
+- the root suite passes 1,752 tests: 1,711 pass, 41 explicitly skipped, 0 fail;
+- the frozen catalog validates 115 entries: 29 schemas, 52 OpenAPI operations,
+  and 34 migrations;
 - lint and whitespace/error checks pass;
 - real PostgreSQL qualification passes for the cross-replica session ceiling,
   resource-bound recovery management, terminal-row retention, and outbox
@@ -142,7 +143,7 @@ W1 closure execution order:
 | --- | --- | --- | --- |
 | W1.4a session bootstrap admission | Add fixed `human.session.bootstrap` policies to the shared PostgreSQL limiter; apply anonymous/global admission before identity-provider work, then subject/member/organization admission after verified identity resolution and before session insertion. Keep identifiers HMAC-derived and never persist the assertion or provider subject as a label. | Two API instances must share each bucket; unknown-subject floods must not create unbounded buckets; provider and limiter outages fail closed; identity replay and denied requests create no session. | The bootstrap route has no process-local allowance path, returns bounded `Retry-After`, and its atomic session ceiling still holds under concurrent accepted requests. |
 | W1.4b recovery state latency — complete | Observe database timestamps only after confirmed committed recovery transitions and report fixed-key count/total aggregates through `recordOwnerRecoveryStateLatency`. Do not label by organization, member, request, state, or error. Metrics failures remain post-commit and non-authoritative. | Fixed source-state CAS, negative/malformed timestamp, rollback, WebAuthn caller-owned commit, exact-once flush, and sync/async metric-sink failure tests; real PostgreSQL proves commit and rollback outcomes. | Confirmed commits emit one bounded observation per forward transition in normal operation; retries do not observe another transition and no recovery identity appears in health output. |
-| W1.5 delivery fault matrix | Run two independent workers and inject loss after lease claim, before/after provider acceptance, before terminal commit, after commit, and before HTTP response receipt. Reuse one deterministic provider idempotency key and inspect authoritative rows after restart. | Kill/restart, lease expiry, duplicate acknowledgement, stale lease, poison row, provider timeout, response truncation, and concurrent prune/redrive cases against real PostgreSQL. | Every case converges to one logical delivery or an explicit uncertain/dead-letter state; no event is silently lost, widened, or delivered with substituted content. |
+| W1.5 delivery fault matrix — partial | Durable `uncertain` quarantine, lease-expiry quarantine, exact provider acknowledgement/idempotency binding, stale terminal CAS, aggregate health failure, and a test-only closed six-boundary controller are implemented. Complete the independent-process harness, provider binding, and operator resolution path. | Hard `SIGKILL`/restart, two pools, durable provider ledger, provider timeout/response loss, stale publish/fail/uncertain CAS, and explicit retry/suppress races against real PostgreSQL. | Every case converges to one logical delivery or an explicit uncertain/dead-letter state; no event is silently lost, widened, or delivered with substituted content. |
 | W1.6 operational closure | Add fixed-key alerts/runbook thresholds for queue age, uncertain outcomes, dead letters, redrive failure, prune failure, limiter denial/unavailability, and recovery latency. Update threat model and evidence index. | Snapshot tests must reject new labels/fields; runbook drill covers provider outage, worker restart, limiter outage, and dead-letter recovery. | W1 exit gate is reproducible from one documented command sequence and produces no secret-bearing artifact. |
 
 #### W1.4a completed merge sequence
@@ -160,13 +161,12 @@ screens; authority-changing UI remains gated on these W1 guarantees.
 
 #### W1.5 detailed implementation sequence
 
-1. Add a test-only, closed fault controller around
-   `owner-recovery-outbox-worker.mjs` and
-   `owner-recovery-outbox-repository.mjs`. It may interrupt only at six named
+1. Keep the closed fault controller entirely under test support. It may
+   interrupt only at six named
    boundaries: after claim, before provider call, after provider acceptance,
    before terminal commit, after terminal commit, and after response encoding.
-   Production constructors must receive the no-op implementation and expose no
-   HTTP, environment-variable, or payload-controlled fault switch.
+   Production constructors and runtime wiring expose no fault dependency, no
+   no-op switch, and no HTTP, environment-variable, or payload-controlled arm.
 2. Build a real-PostgreSQL two-worker harness with independent pools and worker
    identities. Seed one canonical outbox row, use one deterministic provider
    idempotency key, persist provider acceptance in a separate test ledger, and
@@ -186,8 +186,49 @@ screens; authority-changing UI remains gated on these W1 guarantees.
    consume an unbounded batch.
 6. Add a machine-readable evidence summary containing only fixed scenario names,
    public event digests, final state classes, attempt counts, and timing bounds.
-   Run it from CI against PostgreSQL 16 after migrations 1–33 and document a
+   Run it from CI against PostgreSQL 16 after migrations 1–34 and document a
    single reproduction command in the recovery operations runbook.
+
+Implemented W1.5 foundation in migration `0034`:
+
+- `uncertain` is a first-class durable state with a closed reason vocabulary,
+  no lease, and no automatic claim path;
+- expired claimed rows are quarantined as `process_interrupted` before any new
+  pending row is claimed, including expired rows present during upgrade;
+- provider responses must contain exactly the requested idempotency key;
+- publish, retry, and uncertain acknowledgements are fenced by tenant, event,
+  attempt, claim digest, pending state, and an unexpired database-clock lease;
+- readiness reports only aggregate uncertain counts and fails closed while any
+  uncertain delivery awaits an operator decision;
+- uncertain rows are intentionally excluded from terminal retention.
+
+Remaining W1.5 merge sequence, in order:
+
+1. Add migration `0035` for immutable delivery transitions and provider
+   binding (`binding_id`, key version, and digest only). Existing unbound rows
+   remain quarantined; URLs, credentials, response bodies, and destinations are
+   forbidden. Add DB triggers that reject ledger update/delete.
+2. Add `listUncertain`, `retryUncertain`, and `suppressUncertain` as separate
+   repository and OpenAPI operations. Mutations require Owner/Admin,
+   operation-bound recent WebAuthn, idempotency, `If-Match` management-version
+   CAS, and audit insertion in the same transaction. Do not expose a manual
+   “mark delivered” operation.
+3. Add provider confirmation only after a provider lookup contract can prove
+   acceptance using the stored binding and event idempotency key. Without that
+   proof, the row remains uncertain and only explicit retry or suppression is
+   available.
+4. Build a child-process qualification driver: parent and child use independent
+   PostgreSQL pools; the provider writes acceptance to a durable test ledger;
+   the parent sends `SIGKILL` at each closed boundary and restarts a distinct
+   worker. Assert automatic claims never consume uncertain rows.
+5. Complete the two-worker matrix for stale `markPublished`, `markFailed`, and
+   `markUncertain`; pending-provider-call lease expiry; duplicate and mismatched
+   acknowledgement; response truncation; retry/suppress/retention races; and
+   shutdown drain.
+6. Add fixed-key oldest-uncertain-age telemetry, alerts, a secret-free evidence
+   summary, and an operator runbook. CI must run the PostgreSQL 16 lane and
+   reject evidence containing tenant/member IDs, DSNs, provider diagnostics,
+   message content, credentials, or tokens.
 
 W1.5 exits only when every scenario is repeatable, two workers cannot create two
 logical provider deliveries, accepted-but-unconfirmed delivery is represented

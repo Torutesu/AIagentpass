@@ -47,7 +47,7 @@ test("owner recovery forward-state CAS commits on fromState and rolls back with 
   const migrationClient = await pool.connect();
   try {
     const migration = await createMigrationRunner({ client: migrationClient, applicationVersion: "owner-recovery-transition-integration" }).run();
-    assert.equal(migration.currentVersion, 33);
+    assert.equal(migration.currentVersion, 34);
   } finally {
     migrationClient.release();
   }

@@ -14,14 +14,16 @@ const SESSION = "40000000-0000-4000-8000-000000000029";
 const REQUEST = "50000000-0000-4000-8000-000000000029";
 const EVENT = "60000000-0000-4000-8000-000000000029";
 const DEAD_EVENT = "60000000-0000-4000-8000-000000000030";
+const DELIVERY_EVENT = "60000000-0000-4000-8000-000000000031";
 
-test("outbox claims are exclusive, process-loss retries preserve idempotency, and attempt 100 dead-letters", { skip: !databaseUrl }, async (t) => {
+test("outbox claims are exclusive, process loss is quarantined, and attempt 100 dead-letters", { skip: !databaseUrl }, async (t) => {
   const pool = new Pool({ connectionString: databaseUrl, max: 8 });
-  t.after(() => pool.end());
+  t.after(async () => { await cleanup(pool); await pool.end(); });
   const migrationClient = await pool.connect();
   try { await createMigrationRunner({ client: migrationClient, applicationVersion: "owner-recovery-outbox-integration" }).run(); }
   finally { migrationClient.release(); }
 
+  await cleanup(pool);
   await seed(pool);
   const repositoryA = createPostgresOwnerRecoveryOutboxRepository({ client: pool, randomBytes: () => Buffer.alloc(32, 0x41) });
   const repositoryB = createPostgresOwnerRecoveryOutboxRepository({ client: pool, randomBytes: () => Buffer.alloc(32, 0x42) });
@@ -38,54 +40,52 @@ test("outbox claims are exclusive, process-loss retries preserve idempotency, an
   assert.notEqual(storedClaim.rows[0].claim_token_digest.toString("utf8"), first.claim.claim_token);
 
   await expireClaim(pool, EVENT);
-  const providerCalls = [];
-  const processLossRepository = {
-    claimBatch: (input) => secondRepository.claimBatch(input),
-    async markPublished() { throw Object.assign(new Error("simulated process loss"), { code: "owner_recovery_outbox_unavailable" }); },
-    async markFailed() { throw Object.assign(new Error("simulated process loss"), { code: "owner_recovery_outbox_unavailable" }); }
-  };
-  const firstWorker = createOwnerRecoveryOutboxWorker({
-    repository: processLossRepository,
-    publisher: { async publish(input) { providerCalls.push(input.idempotency_key); return { accepted: true, duplicate: false }; } },
-    publishTimeoutMs: 100,
-    leaseMs: 1_000
-  });
-  assert.equal((await firstWorker.runOnce()).uncertain, 1);
-
-  await expireClaim(pool, EVENT);
-  const secondWorker = createOwnerRecoveryOutboxWorker({
-    repository: first.repository,
-    publisher: { async publish(input) { providerCalls.push(input.idempotency_key); return { accepted: true, duplicate: true }; } },
-    publishTimeoutMs: 100,
-    leaseMs: 1_000
-  });
-  assert.equal((await secondWorker.runOnce()).published, 1);
-  assert.deepEqual(providerCalls, [EVENT, EVENT]);
-  assert.equal(new Set(providerCalls).size, 1);
   await assert.rejects(
     first.repository.markPublished({ organization_id: ORG, event_id: EVENT, attempt: 1, claim_token: first.claim.claim_token }),
     (error) => error.code === "owner_recovery_outbox_claim_lost"
   );
+  await assert.rejects(
+    first.repository.markFailed({ organization_id: ORG, event_id: EVENT, attempt: 1, claim_token: first.claim.claim_token, error_code: "publisher_rejected", retry_at: new Date(Date.now() + 60_000).toISOString() }),
+    (error) => error.code === "owner_recovery_outbox_claim_lost"
+  );
+  await assert.rejects(
+    first.repository.markUncertain({ organization_id: ORG, event_id: EVENT, attempt: 1, claim_token: first.claim.claim_token }),
+    (error) => error.code === "owner_recovery_outbox_claim_lost"
+  );
+  const reclaimed = await secondRepository.claimBatch({ limit: 1, lease_ms: 1_000 });
+  assert.equal(reclaimed.events.length, 0);
+  const processLoss = await pool.query("SELECT status,attempts,uncertain_reason,claim_token_digest,claim_expires_at FROM owner_recovery_outbox WHERE organization_id=$1 AND event_id=$2", [ORG, EVENT]);
+  assert.deepEqual(processLoss.rows[0], { status: "uncertain", attempts: 1, uncertain_reason: "process_interrupted", claim_token_digest: null, claim_expires_at: null });
+  assert.equal((await first.repository.claimBatch({ limit: 1, lease_ms: 1_000 })).events.length, 0);
+
+  await pool.query(`INSERT INTO owner_recovery_outbox
+    (organization_id,event_id,request_id,subject_member_id,event_type,status,attempts,available_at,created_at,updated_at)
+    VALUES ($1,$2,$3,$4,'recovery.request.created','pending',0,clock_timestamp(),clock_timestamp(),clock_timestamp())`, [ORG, DELIVERY_EVENT, REQUEST, MEMBER]);
+  const providerCalls = [];
+  const processLossRepository = {
+    claimBatch: (input) => repositoryA.claimBatch(input),
+    async markPublished() { throw Object.assign(new Error("simulated process loss"), { code: "owner_recovery_outbox_unavailable" }); },
+    async markFailed() { throw Object.assign(new Error("simulated process loss"), { code: "owner_recovery_outbox_unavailable" }); },
+    markUncertain: (input) => repositoryA.markUncertain(input)
+  };
+  const firstWorker = createOwnerRecoveryOutboxWorker({
+    repository: processLossRepository,
+    publisher: { async publish(input) { providerCalls.push(input.idempotency_key); return { accepted: true, duplicate: false, idempotency_key: input.idempotency_key }; } },
+    publishTimeoutMs: 100,
+    leaseMs: 1_000
+  });
+  assert.equal((await firstWorker.runOnce()).uncertain, 1);
+  const uncertain = await pool.query("SELECT status,attempts,last_error_code,uncertain_reason,claim_token_digest,claim_expires_at FROM owner_recovery_outbox WHERE organization_id=$1 AND event_id=$2", [ORG, DELIVERY_EVENT]);
+  assert.deepEqual(uncertain.rows[0], { status: "uncertain", attempts: 1, last_error_code: "delivery_uncertain", uncertain_reason: "delivery_unknown", claim_token_digest: null, claim_expires_at: null });
+  assert.deepEqual(providerCalls, [DELIVERY_EVENT]);
+  assert.equal((await repositoryB.claimBatch({ limit: 1, lease_ms: 1_000 })).events.length, 0);
 
   await pool.query(`INSERT INTO owner_recovery_outbox
     (organization_id,event_id,request_id,subject_member_id,event_type,status,attempts,available_at,created_at,updated_at)
     VALUES ($1,$2,$3,$4,'recovery.failed','pending',99,clock_timestamp(),clock_timestamp(),clock_timestamp())`, [ORG, DEAD_EVENT, REQUEST, MEMBER]);
-  const maxAttemptProcessLoss = {
-    claimBatch: (input) => repositoryA.claimBatch(input),
-    async markPublished() { throw Object.assign(new Error("simulated process loss"), { code: "owner_recovery_outbox_unavailable" }); },
-    async markFailed() { throw Object.assign(new Error("simulated process loss"), { code: "owner_recovery_outbox_unavailable" }); }
-  };
-  const crashingDeadWorker = createOwnerRecoveryOutboxWorker({
-    repository: maxAttemptProcessLoss,
-    publisher: { async publish() { return { accepted: false, duplicate: false }; } },
-    publishTimeoutMs: 100,
-    leaseMs: 1_000
-  });
-  assert.equal((await crashingDeadWorker.runOnce()).uncertain, 1);
-  await expireClaim(pool, DEAD_EVENT);
   const deadWorker = createOwnerRecoveryOutboxWorker({
     repository: repositoryB,
-    publisher: { async publish() { return { accepted: false, duplicate: false }; } },
+    publisher: { async publish(input) { return { accepted: false, duplicate: false, idempotency_key: input.idempotency_key }; } },
     publishTimeoutMs: 100,
     leaseMs: 1_000
   });
@@ -96,6 +96,7 @@ test("outbox claims are exclusive, process-loss retries preserve idempotency, an
 
   const columns = await pool.query("SELECT column_name FROM information_schema.columns WHERE table_schema='public' AND table_name='owner_recovery_outbox'");
   assert.equal(columns.rows.some(({ column_name }) => /claim_token$|provider|payload|body|secret/u.test(column_name)), false);
+
 });
 
 async function seed(pool) {
@@ -121,4 +122,26 @@ async function expireClaim(pool, eventId) {
         claim_expires_at=clock_timestamp()-interval '1 second',
         updated_at=clock_timestamp()-interval '2 seconds'
     WHERE organization_id=$1 AND event_id=$2`, [ORG, eventId]);
+}
+
+async function cleanup(pool) {
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    await client.query("SET LOCAL session_replication_role = replica");
+    for (const table of [
+      "owner_recovery_outbox_retention_ledger", "owner_recovery_outbox", "owner_recovery_webauthn_challenges",
+      "owner_recovery_approvals", "owner_recovery_exchanges", "owner_recovery_sessions", "owner_recovery_idempotency_records",
+      "owner_recovery_requests", "human_sessions", "memberships", "outbox_events", "admin_audit_events",
+      "admin_audit_heads", "control_plane_authority_generations"
+    ]) await client.query(`DELETE FROM ${table} WHERE organization_id=$1`, [ORG]);
+    await client.query("DELETE FROM organizations WHERE id=$1", [ORG]);
+    await client.query("DELETE FROM members WHERE id=$1", [MEMBER]);
+    await client.query("COMMIT");
+  } catch (error) {
+    await client.query("ROLLBACK");
+    throw error;
+  } finally {
+    client.release();
+  }
 }

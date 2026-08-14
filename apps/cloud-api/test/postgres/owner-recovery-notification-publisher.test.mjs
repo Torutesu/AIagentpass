@@ -24,10 +24,10 @@ const SECRET = "webhook-secret-do-not-leak";
 const URL = "https://notify.example.test/owner-recovery";
 
 test("sends only the public event over HTTPS with event_id as Idempotency-Key", async () => {
-  const transport = fakeTransport({ statusCode: 202, body: { accepted: true, duplicate: false } });
+  const transport = fakeTransport({ statusCode: 202, body: { accepted: true, duplicate: false, idempotency_key: EVENT.event_id } });
   const publisher = createOwnerRecoveryNotificationPublisher({ webhookUrl: URL, authorizationSecret: SECRET, requestFn: transport.requestFn });
   const result = await publisher.publish({ idempotency_key: EVENT.event_id, event: EVENT, signal: new AbortController().signal });
-  assert.deepEqual(result, { accepted: true, duplicate: false });
+  assert.deepEqual(result, { accepted: true, duplicate: false, idempotency_key: EVENT.event_id });
   assert.equal(transport.requests.length, 1);
   const request = transport.requests[0];
   assert.equal(request.url.protocol, "https:");
@@ -41,7 +41,7 @@ test("sends only the public event over HTTPS with event_id as Idempotency-Key", 
 });
 
 test("supports fixed or resolver-supplied endpoint and secret without putting either in resolver event data", async () => {
-  const transport = fakeTransport({ statusCode: 200, body: { accepted: true, duplicate: true } });
+  const transport = fakeTransport({ statusCode: 200, body: { accepted: true, duplicate: true, idempotency_key: EVENT.event_id } });
   const calls = [];
   const publisher = createOwnerRecoveryNotificationPublisher({
     resolveWebhookUrl: async (input) => { calls.push(["url", input]); return URL; },
@@ -67,7 +67,7 @@ test("rejects insecure or ambiguous configuration and malformed public input", a
     { webhookUrl: URL, authorizationSecret: "line\nbreak" }
   ]) assert.throws(() => createOwnerRecoveryNotificationPublisher(options), (error) => error.code === OWNER_RECOVERY_NOTIFICATION_PUBLISHER_ERROR_CODES.CONFIG);
 
-  const transport = fakeTransport({ statusCode: 200, body: { accepted: true, duplicate: false } });
+  const transport = fakeTransport({ statusCode: 200, body: { accepted: true, duplicate: false, idempotency_key: EVENT.event_id } });
   const publisher = createOwnerRecoveryNotificationPublisher({ webhookUrl: URL, authorizationSecret: SECRET, requestFn: transport.requestFn });
   await assert.rejects(publisher.publish({ idempotency_key: EVENT.event_id, event: { ...EVENT, provider_secret: SECRET } }), (error) => error.code === OWNER_RECOVERY_NOTIFICATION_PUBLISHER_ERROR_CODES.INPUT);
   await assert.rejects(publisher.publish({ idempotency_key: IDS.request_id, event: EVENT }), (error) => error.code === OWNER_RECOVERY_NOTIFICATION_PUBLISHER_ERROR_CODES.INPUT);
@@ -76,17 +76,17 @@ test("rejects insecure or ambiguous configuration and malformed public input", a
 test("requires an exact accepted JSON response and never follows redirects", async () => {
   for (const response of [
     { statusCode: 204, body: null },
-    { statusCode: 302, body: { accepted: true, duplicate: false } },
-    { statusCode: 200, headers: { "content-type": "text/plain" }, body: { accepted: true, duplicate: false } },
-    { statusCode: 200, headers: { "content-type": ["application/json", "application/json"] }, body: { accepted: true, duplicate: false } },
-    { statusCode: 200, headers: { "content-type": "application/json, text/plain" }, body: { accepted: true, duplicate: false } },
-    { statusCode: 200, body: { accepted: true } },
-    { statusCode: 200, body: { accepted: false, duplicate: true } },
-    { statusCode: 200, body: { accepted: true, duplicate: false, provider_secret: SECRET } },
-    { statusCode: 200, body: { accepted: true, duplicate: false, credential: SECRET } },
-    { statusCode: 200, body: { accepted: true, duplicate: false, secret: SECRET } },
-    { statusCode: 200, body: { accepted: true, duplicate: false, authorization: `Bearer ${SECRET}` } },
-    { statusCode: 200, rawBody: '{"accepted":true,"accepted":true,"duplicate":false}' },
+    { statusCode: 302, body: { accepted: true, duplicate: false, idempotency_key: EVENT.event_id } },
+    { statusCode: 200, headers: { "content-type": "text/plain" }, body: { accepted: true, duplicate: false, idempotency_key: EVENT.event_id } },
+    { statusCode: 200, headers: { "content-type": ["application/json", "application/json"] }, body: { accepted: true, duplicate: false, idempotency_key: EVENT.event_id } },
+    { statusCode: 200, headers: { "content-type": "application/json, text/plain" }, body: { accepted: true, duplicate: false, idempotency_key: EVENT.event_id } },
+    { statusCode: 200, body: { accepted: true, duplicate: false } },
+    { statusCode: 200, body: { accepted: true, duplicate: false, idempotency_key: IDS.request_id } },
+    { statusCode: 200, body: { accepted: true, duplicate: false, idempotency_key: EVENT.event_id, provider_secret: SECRET } },
+    { statusCode: 200, body: { accepted: true, duplicate: false, idempotency_key: EVENT.event_id, credential: SECRET } },
+    { statusCode: 200, body: { accepted: true, duplicate: false, idempotency_key: EVENT.event_id, secret: SECRET } },
+    { statusCode: 200, body: { accepted: true, duplicate: false, idempotency_key: EVENT.event_id, authorization: `Bearer ${SECRET}` } },
+    { statusCode: 200, rawBody: `{"accepted":true,"duplicate":false,"idempotency_key":"${EVENT.event_id}","idempotency_key":"${EVENT.event_id}"}` },
     { statusCode: 200, rawBody: "not-json" }
   ]) {
     const transport = fakeTransport(response);
@@ -121,15 +121,15 @@ test("rejects ambiguous response framing before accepting a provider DTO", async
 });
 
 test("returns an explicit provider rejection only from the strict 2xx response contract", async () => {
-  const transport = fakeTransport({ statusCode: 200, body: { accepted: false, duplicate: false } });
+  const transport = fakeTransport({ statusCode: 200, body: { accepted: false, duplicate: false, idempotency_key: EVENT.event_id } });
   const publisher = createOwnerRecoveryNotificationPublisher({ webhookUrl: URL, authorizationSecret: SECRET, requestFn: transport.requestFn });
-  assert.deepEqual(await publisher.publish({ idempotency_key: EVENT.event_id, event: EVENT }), { accepted: false, duplicate: false });
+  assert.deepEqual(await publisher.publish({ idempotency_key: EVENT.event_id, event: EVENT }), { accepted: false, duplicate: false, idempotency_key: EVENT.event_id });
 });
 
 test("bounds provider response bytes before and during streaming", async () => {
   for (const response of [
     { statusCode: 200, headers: { "content-length": "100" }, rawBody: "x" },
-    { statusCode: 200, chunks: ["x".repeat(6), "y"], body: { accepted: true, duplicate: false } }
+    { statusCode: 200, chunks: ["x".repeat(6), "y"], body: { accepted: true, duplicate: false, idempotency_key: EVENT.event_id } }
   ]) {
     const transport = fakeTransport(response);
     const publisher = createOwnerRecoveryNotificationPublisher({ webhookUrl: URL, authorizationSecret: SECRET, requestFn: transport.requestFn, maxResponseBytes: 6 });
@@ -170,14 +170,14 @@ test("maps resolver failures and invalid resolver outputs without exposing detai
   const failed = createOwnerRecoveryNotificationPublisher({
     resolveWebhookUrl: async () => { throw new Error(`url secret=${SECRET}`); },
     resolveAuthorizationSecret: () => SECRET,
-    requestFn: fakeTransport({ statusCode: 200, body: { accepted: true, duplicate: false } }).requestFn
+    requestFn: fakeTransport({ statusCode: 200, body: { accepted: true, duplicate: false, idempotency_key: EVENT.event_id } }).requestFn
   });
   await assert.rejects(failed.publish({ idempotency_key: EVENT.event_id, event: EVENT }), (error) => error.code === OWNER_RECOVERY_NOTIFICATION_PUBLISHER_ERROR_CODES.RESOLVER && !error.message.includes(SECRET));
 
   const invalid = createOwnerRecoveryNotificationPublisher({
     resolveWebhookUrl: () => "http://not-https.example.test/hook",
     resolveAuthorizationSecret: () => SECRET,
-    requestFn: fakeTransport({ statusCode: 200, body: { accepted: true, duplicate: false } }).requestFn
+    requestFn: fakeTransport({ statusCode: 200, body: { accepted: true, duplicate: false, idempotency_key: EVENT.event_id } }).requestFn
   });
   await assert.rejects(invalid.publish({ idempotency_key: EVENT.event_id, event: EVENT }), { code: OWNER_RECOVERY_NOTIFICATION_PUBLISHER_ERROR_CODES.RESOLVER });
 });

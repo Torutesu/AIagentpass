@@ -40,15 +40,32 @@ export function createPostgresOwnerRecoveryOutboxRepository({ client, randomByte
     const claimToken = token(randomBytes);
     const claimDigest = sha256(claimToken);
     try {
-      const result = await client.query(`WITH candidates AS (
+      const result = await client.query(`WITH expired AS MATERIALIZED (
+          SELECT organization_id,event_id
+          FROM owner_recovery_outbox
+          WHERE status='pending' AND claim_token_digest IS NOT NULL
+            AND claim_expires_at<=clock_timestamp()
+          ORDER BY claim_expires_at ASC,organization_id ASC,event_id ASC
+          FOR UPDATE SKIP LOCKED
+          LIMIT $2
+        ), quarantined AS (
+          UPDATE owner_recovery_outbox outbox
+          SET status='uncertain',uncertain_at=clock_timestamp(),
+              uncertain_reason='process_interrupted',last_error_code='delivery_uncertain',
+              claim_token_digest=NULL,claim_expires_at=NULL,updated_at=clock_timestamp()
+          FROM expired
+          WHERE outbox.organization_id=expired.organization_id
+            AND outbox.event_id=expired.event_id
+          RETURNING outbox.organization_id
+        ), candidates AS (
           SELECT organization_id,event_id
           FROM owner_recovery_outbox
           WHERE status='pending' AND attempts<=$1
             AND available_at<=clock_timestamp()
-            AND (claim_expires_at IS NULL OR claim_expires_at<=clock_timestamp())
+            AND claim_token_digest IS NULL AND claim_expires_at IS NULL
           ORDER BY available_at ASC,created_at ASC,organization_id ASC,event_id ASC
           FOR UPDATE SKIP LOCKED
-          LIMIT $2
+          LIMIT GREATEST($2-(SELECT count(*) FROM quarantined),0)
         )
         UPDATE owner_recovery_outbox outbox
         SET attempts=LEAST(outbox.attempts+1,$1),
@@ -78,6 +95,7 @@ export function createPostgresOwnerRecoveryOutboxRepository({ client, randomByte
             claim_token_digest=NULL,claim_expires_at=NULL,last_error_code=NULL
         WHERE organization_id=$1 AND event_id=$2 AND status='pending'
           AND attempts=$3 AND claim_token_digest=$4
+          AND claim_expires_at>clock_timestamp()
         RETURNING published_at`, [value.organizationId, value.eventId, value.attempt, value.claimDigest]);
       if (rowCount(result) !== 1) throw claimLost();
       return Object.freeze({ published: true, published_at: timestamp(result.rows[0].published_at) });
@@ -99,6 +117,7 @@ export function createPostgresOwnerRecoveryOutboxRepository({ client, randomByte
             last_error_code=$7
         WHERE organization_id=$1 AND event_id=$2 AND status='pending'
           AND attempts=$3 AND claim_token_digest=$4
+          AND claim_expires_at>clock_timestamp()
         RETURNING status,available_at`, [value.organizationId, value.eventId, value.attempt, value.claimDigest, MAX_ATTEMPTS, retryAt, errorCode]);
       if (rowCount(result) !== 1) throw claimLost();
       const status = result.rows[0].status;
@@ -110,16 +129,37 @@ export function createPostgresOwnerRecoveryOutboxRepository({ client, randomByte
     }
   }
 
+  async function markUncertain(input = {}) {
+    const value = normalizeClaimMutation(input);
+    try {
+      const result = await client.query(`UPDATE owner_recovery_outbox
+        SET status='uncertain',uncertain_at=clock_timestamp(),
+            uncertain_reason='delivery_unknown',last_error_code='delivery_uncertain',
+            claim_token_digest=NULL,claim_expires_at=NULL,updated_at=clock_timestamp()
+        WHERE organization_id=$1 AND event_id=$2 AND status='pending'
+          AND attempts=$3 AND claim_token_digest=$4
+          AND claim_expires_at>clock_timestamp()
+        RETURNING uncertain_at`, [value.organizationId, value.eventId, value.attempt, value.claimDigest]);
+      if (rowCount(result) !== 1) throw claimLost();
+      return Object.freeze({ uncertain: true, uncertain_at: timestamp(result.rows[0].uncertain_at) });
+    } catch (error) {
+      if (error instanceof OwnerRecoveryOutboxRepositoryError) throw error;
+      throw unavailable();
+    }
+  }
+
   async function health() {
     try {
       const result = await client.query(`SELECT
           count(*) FILTER (WHERE status='pending')::text AS pending,
+          count(*) FILTER (WHERE status='uncertain')::text AS uncertain,
           count(*) FILTER (WHERE status='dead_letter')::text AS dead_letter,
           min(created_at) FILTER (WHERE status='pending') AS oldest_pending_at
         FROM owner_recovery_outbox`, []);
       if (rowCount(result) !== 1) throw unavailable();
       return Object.freeze({
         pending: count(result.rows[0].pending),
+        uncertain: count(result.rows[0].uncertain),
         dead_letter: count(result.rows[0].dead_letter),
         oldest_pending_at: result.rows[0].oldest_pending_at == null ? null : timestamp(result.rows[0].oldest_pending_at)
       });
@@ -129,7 +169,7 @@ export function createPostgresOwnerRecoveryOutboxRepository({ client, randomByte
     }
   }
 
-  return Object.freeze({ claimBatch, markPublished, markFailed, health });
+  return Object.freeze({ claimBatch, markPublished, markFailed, markUncertain, health });
 }
 
 function normalizeClaimMutation(input) {

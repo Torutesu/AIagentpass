@@ -21,7 +21,7 @@ test("publishes only the public event with event_id idempotency and marks exact 
   const calls = [];
   const metrics = createOperationalMetrics();
   const repository = fixtureRepository(calls);
-  const publisher = { async publish(input) { calls.push(["publish", input]); return { accepted: true, duplicate: false }; } };
+  const publisher = { async publish(input) { calls.push(["publish", input]); return accepted(input.idempotency_key); } };
   const worker = createOwnerRecoveryOutboxWorker({ repository, publisher, metrics, now: () => NOW, random: () => 0 });
   const result = await worker.runOnce();
   assert.deepEqual(result, { claimed: 1, published: 1, retried: 0, dead_lettered: 0, claim_lost: 0, uncertain: 0 });
@@ -37,7 +37,7 @@ test("publishes only the public event with event_id idempotency and marks exact 
   assert.equal(counters.owner_recovery_outbox_lag_total_ms, 500);
 });
 
-test("unknown provider outcomes retain the lease and never persist diagnostics", async () => {
+test("unknown provider outcomes become durable uncertain state and never persist diagnostics", async () => {
   const calls = [];
   const repository = fixtureRepository(calls);
   const worker = createOwnerRecoveryOutboxWorker({
@@ -50,6 +50,7 @@ test("unknown provider outcomes retain the lease and never persist diagnostics",
   const result = await worker.runOnce();
   assert.equal(result.uncertain, 1);
   assert.equal(calls.some(([name]) => name === "failed"), false);
+  assert.deepEqual(calls.find(([name]) => name === "uncertain")[1], { organization_id: EVENT.organization_id, event_id: EVENT.event_id, attempt: 1, claim_token: CLAIM });
   assert.equal(JSON.stringify(calls).includes("must-not-persist"), false);
 });
 
@@ -61,7 +62,7 @@ test("a malformed claimed event is isolated while valid events publish", async (
   const published = [];
   const worker = createOwnerRecoveryOutboxWorker({
     repository,
-    publisher: { publish(input) { published.push(input.idempotency_key); return { accepted: true, duplicate: false }; } },
+    publisher: { publish(input) { published.push(input.idempotency_key); return accepted(input.idempotency_key); } },
     metrics: createOperationalMetrics(),
     now: () => NOW,
     random: () => 0
@@ -83,7 +84,7 @@ test("invalid attempts and timestamps do not poison neighboring events", async (
   const repository = fixtureRepository(calls, { events: [invalidAttempt, invalidTimestamp, valid] });
   const worker = createOwnerRecoveryOutboxWorker({
     repository,
-    publisher: { publish() { return { accepted: true, duplicate: false }; } },
+    publisher: { publish(input) { return accepted(input.idempotency_key); } },
     now: () => NOW,
     random: () => 0
   });
@@ -95,14 +96,14 @@ test("invalid attempts and timestamps do not poison neighboring events", async (
   assert.deepEqual(calls.filter(([name]) => name === "published").map(([, input]) => input.event_id), [valid.event_id]);
 });
 
-test("bad retry jitter is isolated from valid events and retains the lease", async () => {
+test("bad retry jitter is isolated from valid events", async () => {
   const calls = [];
   const rejected = { ...EVENT, event_id: "99999999-9999-4999-8999-999999999999" };
   const valid = { ...EVENT, event_id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa" };
   const repository = fixtureRepository(calls, { events: [rejected, valid] });
   const worker = createOwnerRecoveryOutboxWorker({
     repository,
-    publisher: { publish(input) { return input.idempotency_key === rejected.event_id ? { accepted: false, duplicate: false } : { accepted: true, duplicate: false }; } },
+    publisher: { publish(input) { return input.idempotency_key === rejected.event_id ? rejectedResponse(input.idempotency_key) : accepted(input.idempotency_key); } },
     now: () => NOW,
     random: () => Number.NaN
   });
@@ -122,7 +123,7 @@ test("a synchronous publisher throw is isolated and does not expose its diagnost
   const repository = fixtureRepository(calls, { events: [poison, valid] });
   const worker = createOwnerRecoveryOutboxWorker({
     repository,
-    publisher: { publish(input) { if (input.idempotency_key === poison.event_id) throw new Error("secret publisher diagnostic"); return { accepted: true, duplicate: false }; } },
+    publisher: { publish(input) { if (input.idempotency_key === poison.event_id) throw new Error("secret publisher diagnostic"); return accepted(input.idempotency_key); } },
     now: () => NOW,
     random: () => 0
   });
@@ -138,7 +139,7 @@ test("a synchronous publisher throw is isolated and does not expose its diagnost
 test("an explicit provider rejection schedules bounded exponential retry", async () => {
   const calls = [];
   const repository = fixtureRepository(calls);
-  const worker = createOwnerRecoveryOutboxWorker({ repository, publisher: { async publish() { return { accepted: false, duplicate: false }; } }, now: () => NOW, random: () => 0, baseRetryMs: 1_000 });
+  const worker = createOwnerRecoveryOutboxWorker({ repository, publisher: { async publish(input) { return rejectedResponse(input.idempotency_key); } }, now: () => NOW, random: () => 0, baseRetryMs: 1_000 });
   const result = await worker.runOnce();
   assert.equal(result.retried, 1);
   const failure = calls.find(([name]) => name === "failed")[1];
@@ -146,17 +147,35 @@ test("an explicit provider rejection schedules bounded exponential retry", async
   assert.equal(failure.retry_at, new Date(NOW + 1_000).toISOString());
 });
 
+test("a provider rejection for another idempotency key is quarantined instead of retried", async () => {
+  const calls = [];
+  const repository = fixtureRepository(calls);
+  const worker = createOwnerRecoveryOutboxWorker({
+    repository,
+    publisher: { async publish() { return rejectedResponse("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"); } },
+    now: () => NOW,
+    random: () => 0
+  });
+
+  const result = await worker.runOnce();
+
+  assert.equal(result.uncertain, 1);
+  assert.equal(result.retried, 0);
+  assert.equal(calls.some(([name]) => name === "failed"), false);
+  assert.equal(calls.some(([name]) => name === "uncertain"), true);
+});
+
 test("attempt 100 is dead-lettered and claim loss cannot acknowledge another worker", async () => {
   const calls = [];
   const repository = fixtureRepository(calls, { event: { ...EVENT, attempt: 100 }, failed: { dead_letter: true, retry_at: null } });
   const metrics = createOperationalMetrics();
-  const worker = createOwnerRecoveryOutboxWorker({ repository, publisher: { async publish() { return { accepted: false, duplicate: false }; } }, metrics, now: () => NOW, random: () => 0 });
+  const worker = createOwnerRecoveryOutboxWorker({ repository, publisher: { async publish(input) { return rejectedResponse(input.idempotency_key); } }, metrics, now: () => NOW, random: () => 0 });
   const result = await worker.runOnce();
   assert.equal(result.dead_lettered, 1);
   assert.equal(metrics.snapshot().counters.owner_recovery_outbox_dead_letter_total, 1);
 
   const lost = fixtureRepository([], { publishError: Object.assign(new Error("stale"), { code: "owner_recovery_outbox_claim_lost" }), failedError: Object.assign(new Error("stale"), { code: "owner_recovery_outbox_claim_lost" }) });
-  const lostWorker = createOwnerRecoveryOutboxWorker({ repository: lost, publisher: { async publish() { return { accepted: true, duplicate: false }; } }, now: () => NOW, random: () => 0 });
+  const lostWorker = createOwnerRecoveryOutboxWorker({ repository: lost, publisher: { async publish(input) { return accepted(input.idempotency_key); } }, now: () => NOW, random: () => 0 });
   assert.equal((await lostWorker.runOnce()).claim_lost, 1);
 });
 
@@ -171,7 +190,7 @@ test("drain is bounded, prevents new work, and closes after active delivery sett
   assert.equal(first.drained, false);
   assert.equal(first.state, "draining");
   await assert.rejects(() => worker.runOnce(), (error) => error.code === "owner_recovery_outbox_worker_closed");
-  resolvePublish({ accepted: true, duplicate: false });
+  resolvePublish(accepted(EVENT.event_id));
   await running;
   const second = await worker.drain({ timeout_ms: 100 });
   assert.equal(second.drained, true);
@@ -192,7 +211,7 @@ test("a claimed batch publishes concurrently so later leases cannot expire behin
   const running = worker.runOnce();
   await new Promise((resolve) => setImmediate(resolve));
   assert.deepEqual(started, events.map((event) => event.event_id));
-  for (const resolve of resolvers) resolve({ accepted: true, duplicate: false });
+  for (const [index, resolve] of resolvers.entries()) resolve(accepted(events[index].event_id));
   const result = await running;
   assert.equal(result.published, 3);
   assert.equal(result.uncertain, 0);
@@ -206,7 +225,7 @@ test("concurrent drain callers share one bounded outcome and never recreate the 
   await new Promise((resolve) => setImmediate(resolve));
   const first = worker.drain({ timeout_ms: 100 });
   const second = worker.drain({ timeout_ms: 1 });
-  resolvePublish({ accepted: true, duplicate: false });
+  resolvePublish(accepted(EVENT.event_id));
   await running;
   assert.deepEqual(await first, await second);
   assert.equal(worker.snapshot().state, "closed");
@@ -219,7 +238,7 @@ test("runs bounded retention maintenance once per interval without blocking deli
   const repository = fixtureRepository([]);
   const worker = createOwnerRecoveryOutboxWorker({
     repository,
-    publisher: { async publish() { return { accepted: true, duplicate: false }; } },
+    publisher: { async publish(input) { return accepted(input.idempotency_key); } },
     retentionRepository: { async prune(input) { pruneCalls.push(input); } },
     now: () => current,
     random: () => 0,
@@ -235,7 +254,7 @@ test("runs bounded retention maintenance once per interval without blocking deli
 
   const failing = createOwnerRecoveryOutboxWorker({
     repository: fixtureRepository([]),
-    publisher: { async publish() { return { accepted: true, duplicate: false }; } },
+    publisher: { async publish(input) { return accepted(input.idempotency_key); } },
     retentionRepository: { async prune() { throw new Error("database detail must not escape"); } },
     now: () => NOW,
     random: () => 0
@@ -253,6 +272,10 @@ function fixtureRepository(calls, overrides = {}) {
       return { claim_token: CLAIM, events: overrides.events ?? [overrides.event ?? EVENT] };
     },
     async markPublished(input) { calls.push(["published", input]); if (overrides.publishError) throw overrides.publishError; return { published: true }; },
-    async markFailed(input) { calls.push(["failed", input]); if (overrides.failedError) throw overrides.failedError; return overrides.failed ?? { dead_letter: false, retry_at: input.retry_at }; }
+    async markFailed(input) { calls.push(["failed", input]); if (overrides.failedError) throw overrides.failedError; return overrides.failed ?? { dead_letter: false, retry_at: input.retry_at }; },
+    async markUncertain(input) { calls.push(["uncertain", input]); if (overrides.uncertainError) throw overrides.uncertainError; return { uncertain: true, uncertain_at: new Date(NOW).toISOString() }; }
   };
 }
+
+function accepted(idempotencyKey, duplicate = false) { return { accepted: true, duplicate, idempotency_key: idempotencyKey }; }
+function rejectedResponse(idempotencyKey) { return { accepted: false, duplicate: false, idempotency_key: idempotencyKey }; }

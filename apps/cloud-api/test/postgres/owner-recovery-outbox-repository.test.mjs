@@ -17,6 +17,8 @@ const CLAIM = Buffer.alloc(32, 7).toString("base64url");
 test("claim uses SKIP LOCKED and sends only a claim digest to PostgreSQL", async () => {
   const client = new ScriptedClient((text) => {
     assert.match(text, /FOR UPDATE SKIP LOCKED/);
+    assert.match(text, /SET status='uncertain'/);
+    assert.match(text, /uncertain_reason='process_interrupted'/);
     assert.match(text, /attempts<=\$1/);
     assert.match(text, /attempts=LEAST\(outbox\.attempts\+1,\$1\)/);
     return { rowCount: 1, rows: [row()] };
@@ -31,7 +33,7 @@ test("claim uses SKIP LOCKED and sends only a claim digest to PostgreSQL", async
   assert.equal(client.calls[0].params.includes(CLAIM), false);
 });
 
-test("an expired attempt-100 lease remains reclaimable after process loss", async () => {
+test("an expired attempt-100 lease is quarantined after process loss", async () => {
   const client = new ScriptedClient(() => ({ rowCount: 1, rows: [{ ...row(), attempts: 100 }] }));
   const repository = createPostgresOwnerRecoveryOutboxRepository({ client, randomBytes: () => Buffer.alloc(32, 7), now: () => NOW });
   const result = await repository.claimBatch({ limit: 1, lease_ms: 1_000 });
@@ -48,9 +50,23 @@ test("publish and retry are exact attempt plus claim-digest CAS operations", asy
   const published = await repository.markPublished({ organization_id: ORG, event_id: EVENT, attempt: 1, claim_token: CLAIM });
   assert.equal(published.published, true);
   assert.match(client.calls[0].text, /attempts=\$3 AND claim_token_digest=\$4/);
+  assert.match(client.calls[0].text, /claim_expires_at>clock_timestamp\(\)/);
   const failed = await repository.markFailed({ organization_id: ORG, event_id: EVENT, attempt: 2, claim_token: CLAIM, error_code: "publish_timeout", retry_at: new Date(NOW + 2_000).toISOString() });
   assert.deepEqual(failed, { dead_letter: false, retry_at: new Date(NOW + 2_000).toISOString() });
   assert.equal(client.calls[1].params.includes("publish timeout secret"), false);
+  assert.match(client.calls[1].text, /claim_expires_at>clock_timestamp\(\)/);
+});
+
+test("persists a fixed uncertain category and releases the live lease", async () => {
+  const client = new ScriptedClient(() => ({ rowCount: 1, rows: [{ uncertain_at: new Date(NOW) }] }));
+  const repository = createPostgresOwnerRecoveryOutboxRepository({ client, now: () => NOW });
+  const result = await repository.markUncertain({ organization_id: ORG, event_id: EVENT, attempt: 1, claim_token: CLAIM });
+  assert.deepEqual(result, { uncertain: true, uncertain_at: new Date(NOW).toISOString() });
+  assert.match(client.calls[0].text, /SET status='uncertain'/);
+  assert.match(client.calls[0].text, /uncertain_reason='delivery_unknown'/);
+  assert.match(client.calls[0].text, /claim_token_digest=NULL,claim_expires_at=NULL/);
+  assert.match(client.calls[0].text, /claim_expires_at>clock_timestamp\(\)/);
+  assert.equal(client.calls[0].params.some((value) => typeof value === "string" && value.includes("provider")), false);
 });
 
 test("attempt 100 transitions to dead-letter without accepting a retry timestamp", async () => {
@@ -68,9 +84,9 @@ test("stale claims and database diagnostics become stable secret-free errors", a
 });
 
 test("health returns aggregate backlog only", async () => {
-  const client = new ScriptedClient(() => ({ rowCount: 1, rows: [{ pending: "3", dead_letter: "1", oldest_pending_at: new Date(NOW) }] }));
+  const client = new ScriptedClient(() => ({ rowCount: 1, rows: [{ pending: "3", uncertain: "2", dead_letter: "1", oldest_pending_at: new Date(NOW) }] }));
   const repository = createPostgresOwnerRecoveryOutboxRepository({ client, now: () => NOW });
-  assert.deepEqual(await repository.health(), { pending: 3, dead_letter: 1, oldest_pending_at: new Date(NOW).toISOString() });
+  assert.deepEqual(await repository.health(), { pending: 3, uncertain: 2, dead_letter: 1, oldest_pending_at: new Date(NOW).toISOString() });
 });
 
 function row() { return { organization_id: ORG, event_id: EVENT, request_id: REQUEST, subject_member_id: MEMBER, event_type: "recovery.request.created", attempts: 1, claim_expires_at: new Date(NOW + 30_000), created_at: new Date(NOW) }; }
