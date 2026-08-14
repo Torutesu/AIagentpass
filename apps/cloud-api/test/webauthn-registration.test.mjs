@@ -8,7 +8,8 @@ import {
   createWebAuthnRegistrationService,
   WebAuthnRegistrationError,
   WEBAUTHN_REGISTRATION_ERROR_CODES,
-  WEBAUTHN_REGISTRATION_OPERATION
+  WEBAUTHN_REGISTRATION_OPERATION,
+  WEBAUTHN_REGISTRATION_RECENT_AUTH_OPERATION
 } from "../src/human-auth/webauthn/registration.mjs";
 
 const ORIGIN = "https://console.agentpass.test";
@@ -237,7 +238,7 @@ test("registration requires operation-bound recent auth for an existing credenti
   assert.equal(calls.atomic.length, 1);
   assert.deepEqual(calls.atomic[0].recent_auth, {
     authorization_id: RECENT_AUTH_ID,
-    operation: WEBAUTHN_REGISTRATION_OPERATION,
+    operation: WEBAUTHN_REGISTRATION_RECENT_AUTH_OPERATION,
     session_id: SESSION_ID,
     member_id: MEMBER_ID,
     organization_id: ORGANIZATION_ID

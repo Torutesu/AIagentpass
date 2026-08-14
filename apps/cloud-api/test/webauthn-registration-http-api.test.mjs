@@ -165,7 +165,7 @@ test("registration HTTP maps challenge replay and credential conflicts without e
 test("registration HTTP maps step-up failures to stable authentication responses", async () => {
   const required = fixture({ beginError: new WebAuthnRegistrationError(WEBAUTHN_REGISTRATION_ERROR_CODES.RECENT_AUTH_REQUIRED) });
   const requiredResult = await required.api.handle(request("/api/auth/webauthn/registration/options", { organization_id: ORGANIZATION_ID }));
-  assert.equal(requiredResult.status, 401);
+  assert.equal(requiredResult.status, 428);
   assert.equal(requiredResult.body.error.code, WEBAUTHN_REGISTRATION_HTTP_ERROR_CODES.RECENT_AUTH_REQUIRED);
 
   const unavailable = fixture({ verifyError: new WebAuthnRegistrationError(WEBAUTHN_REGISTRATION_ERROR_CODES.RECENT_AUTH_UNAVAILABLE) });

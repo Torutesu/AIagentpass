@@ -14,7 +14,7 @@ import { createHumanAuthRouter } from "./router.mjs";
 import { createHumanSessionHttpApi } from "./session-http-api.mjs";
 import { createPostgresWebAuthnCeremony } from "./webauthn/postgres-ceremony.mjs";
 import { createPostgresWebAuthnRegistrationCeremony } from "./webauthn/postgres-registration-ceremony.mjs";
-import { createSimpleWebAuthnRegistrationVerifier, createWebAuthnRegistrationService, WEBAUTHN_REGISTRATION_OPERATION } from "./webauthn/registration.mjs";
+import { createSimpleWebAuthnRegistrationVerifier, createWebAuthnRegistrationService, WEBAUTHN_REGISTRATION_OPERATION, WEBAUTHN_REGISTRATION_RECENT_AUTH_OPERATION } from "./webauthn/registration.mjs";
 import { createSimpleWebAuthnAssertionVerifier } from "./webauthn/simplewebauthn-adapter.mjs";
 import { createHumanAgentSessionGrantHttpApi } from "./agent-sessions/http-api.mjs";
 import { createAgentSessionGrantIssuanceService } from "./agent-sessions/issuance-service.mjs";
@@ -29,6 +29,7 @@ const ALLOWED_RECENT_AUTH_OPERATIONS = Object.freeze([
   "agent.session_grant.issue",
   "qualification.grant_batch.issue",
   WEBAUTHN_REGISTRATION_OPERATION,
+  WEBAUTHN_REGISTRATION_RECENT_AUTH_OPERATION,
   HUMAN_MANAGEMENT_RECENT_AUTH_OPERATIONS.revokeCredential,
   HUMAN_MANAGEMENT_RECENT_AUTH_OPERATIONS.revokeCurrentSession,
   ...recentAuthOperationValues(HUMAN_ORGANIZATIONS_RECENT_AUTH_OPERATIONS)

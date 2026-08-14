@@ -29,8 +29,10 @@ const ORIGIN_SCHEMES = new Set(["https:", "http:"]);
 const STATUS = new Set(["pending", "consuming", "consumed", "failed", "expired"]);
 const TRANSPORTS = new Set(["ble", "cable", "hybrid", "internal", "nfc", "smart-card", "usb"]);
 const REGISTRATION_OPERATION = "human.webauthn.registration";
+const REGISTRATION_RECENT_AUTH_OPERATION = "human.webauthn.credential.register";
 
 export const WEBAUTHN_REGISTRATION_OPERATION = REGISTRATION_OPERATION;
+export const WEBAUTHN_REGISTRATION_RECENT_AUTH_OPERATION = REGISTRATION_RECENT_AUTH_OPERATION;
 
 export const WEBAUTHN_REGISTRATION_ERROR_CODES = Object.freeze({
   INVALID_REQUEST: "webauthn_registration_invalid_request",
@@ -417,18 +419,23 @@ export function createWebAuthnRegistrationService({
         ...(verified.credential_backed_up === undefined ? {} : { credential_backed_up: verified.credential_backed_up })
     };
     try {
-      const stored = recentAuth === undefined
-        ? await credentialRepository.createCredential(storageInput)
-        : await credentialRepository.createCredentialWithRecentAuth({
+      let stored;
+      if (typeof credentialRepository.createCredentialWithRecentAuth === "function") {
+        stored = await credentialRepository.createCredentialWithRecentAuth({
           ...storageInput,
-          recent_auth: Object.freeze({
+          ...(recentAuth === undefined ? {} : { recent_auth: Object.freeze({
             authorization_id: recentAuth,
-            operation: expectedOperation,
+            operation: REGISTRATION_RECENT_AUTH_OPERATION,
             session_id: context.session_id,
             member_id: context.member_id,
             organization_id: context.organization_id
-          })
+          }) })
         });
+      } else if (recentAuth === undefined) {
+        stored = await credentialRepository.createCredential(storageInput);
+      } else {
+        throw new WebAuthnRegistrationError(WEBAUTHN_REGISTRATION_ERROR_CODES.RECENT_AUTH_UNAVAILABLE);
+      }
       if (stored === false || stored === null || stored?.authorized === false) throw new WebAuthnRegistrationError(WEBAUTHN_REGISTRATION_ERROR_CODES.RECENT_AUTH_REQUIRED);
       if (stored !== true && stored?.created !== true) throw new Error("credential repository did not confirm creation");
     } catch (error) {
