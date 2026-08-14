@@ -1,5 +1,7 @@
 import crypto from "node:crypto";
 
+import { discardOwnerRecoveryStateTransitions, flushOwnerRecoveryStateTransitions } from "./owner-recovery-transition-observer.mjs";
+
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu;
 const RP_ID = /^[A-Za-z0-9](?:[A-Za-z0-9.-]*[A-Za-z0-9])?$/u;
 const OPERATIONS = Object.freeze({
@@ -184,8 +186,10 @@ async function transaction(client, callback) {
     await tx.query("BEGIN");
     const result = await callback(tx);
     await tx.query("COMMIT");
+    flushOwnerRecoveryStateTransitions(tx);
     return result;
   } catch (error) {
+    discardOwnerRecoveryStateTransitions(tx);
     try { await tx.query("ROLLBACK"); } catch { /* Preserve the original stable error. */ }
     if (error instanceof OwnerRecoveryWebAuthnRepositoryError) throw error;
     throw unavailable("recovery WebAuthn storage is unavailable");

@@ -103,7 +103,8 @@ export async function createPostgresRuntime({ env = process.env, PoolClass = Poo
   const adminAuditRepository = createPostgresAdminAuditRepository({ client: pool });
   const ownerRecoveryRepository = createPostgresOwnerRecoveryRepository({
     client: pool,
-    auditRepository: adminAuditRepository
+    auditRepository: adminAuditRepository,
+    metrics: operationalMetrics
   });
   const ownerRecoveryWebAuthnRepository = createPostgresOwnerRecoveryWebAuthnRepository({ client: pool });
   ownerRecoveryOutboxRepository = createPostgresOwnerRecoveryOutboxRepository({ client: pool });

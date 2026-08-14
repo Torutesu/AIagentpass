@@ -2,6 +2,7 @@ import crypto from "node:crypto";
 
 import { createPostgresAdminAuditRepository } from "./admin-audit-repository.mjs";
 import { createPostgresOwnerRecoveryIdempotencyRepository, sha256Digest } from "./owner-recovery-idempotency-repository.mjs";
+import { discardOwnerRecoveryStateTransitions, flushOwnerRecoveryStateTransitions, observeOwnerRecoveryStateTransition } from "./owner-recovery-transition-observer.mjs";
 import { withTransaction } from "./repository.mjs";
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu;
@@ -132,7 +133,8 @@ export function createPostgresOwnerRecoveryRepository({
   auditRepository = undefined,
   idempotencyRepository = undefined,
   appendActivationAudit = undefined,
-  verifyActivationAuthorization = undefined
+  verifyActivationAuthorization = undefined,
+  metrics = undefined
 } = {}) {
   assertClient(client);
   if (typeof clock !== "function" || typeof randomBytes !== "function" || typeof randomUUID !== "function") throw new TypeError("owner recovery crypto and clock dependencies are invalid");
@@ -385,6 +387,7 @@ export function createPostgresOwnerRecoveryRepository({
           expectedVersion: next.version,
           fromState: "pending",
           toState: "approved",
+          previousUpdatedAt: next.updated_at,
           approvedAt: values.now,
           approvedOwnerCount: validApprovals.length
         });
@@ -394,6 +397,7 @@ export function createPostgresOwnerRecoveryRepository({
           expectedVersion: next.version,
           fromState: "approved",
           toState: "delayed",
+          previousUpdatedAt: next.updated_at,
           delayUntil: new Date(values.now.getTime() + limits.delayMs),
           approvedAt: values.now,
           approvedOwnerCount: validApprovals.length
@@ -466,6 +470,7 @@ export function createPostgresOwnerRecoveryRepository({
         expectedVersion: request.version,
         fromState: request.state,
         toState: "cancelled",
+        previousUpdatedAt: request.updated_at,
         terminalReason: values.reason
       });
       await revokeRecoverySessions(tx, values.organizationId, request.subject_member_id, values.now, "recovery_cancelled");
@@ -559,6 +564,7 @@ export function createPostgresOwnerRecoveryRepository({
         expectedVersion: request.version,
         fromState: "delayed",
         toState: "session_issued",
+        previousUpdatedAt: request.updated_at,
         sessionIssuedAt: issuedAt,
         approvedOwnerCount: validApprovals.length
       });
@@ -603,6 +609,7 @@ export function createPostgresOwnerRecoveryRepository({
         expectedVersion: request.version,
         fromState: "session_issued",
         toState: "credential_enrolled",
+        previousUpdatedAt: request.updated_at,
         credentialEnrolledAt: values.enrolledAt,
         approvedOwnerCount: validApprovals.length
       });
@@ -686,6 +693,7 @@ export function createPostgresOwnerRecoveryRepository({
         expectedVersion: request.version,
         fromState: "credential_enrolled",
         toState: "activated",
+        previousUpdatedAt: request.updated_at,
         activatedAt: values.activatedAt,
         approvedOwnerCount: validApprovals.length
       });
@@ -734,6 +742,7 @@ export function createPostgresOwnerRecoveryRepository({
         expectedVersion: request.version,
         fromState: request.state,
         toState: "expired",
+        previousUpdatedAt: request.updated_at,
         terminalReason: "recovery_request_expired"
       });
       await tx.query(`UPDATE owner_recovery_sessions
@@ -758,7 +767,7 @@ export function createPostgresOwnerRecoveryRepository({
         const approvalIds = await approvalOwnerIds(tx, values.organizationId, row.request_id);
         await lockMemberships(tx, values.organizationId, uniqueSorted([row.subject_member_id, ...approvalIds]));
         await lockRecoverySessions(tx, values.organizationId, row.subject_member_id, row.request_id);
-        const next = await transitionRequest(tx, { organizationId: values.organizationId, requestId: row.request_id, expectedVersion: positiveInteger(row.version), fromState: row.state, toState: "expired", terminalReason: "recovery_request_expired" });
+        const next = await transitionRequest(tx, { organizationId: values.organizationId, requestId: row.request_id, expectedVersion: positiveInteger(row.version), fromState: row.state, toState: "expired", previousUpdatedAt: row.updated_at, terminalReason: "recovery_request_expired" });
         await tx.query(`UPDATE owner_recovery_sessions SET stage='expired',revoked_at=$3,revoke_reason='recovery_request_expired'
           WHERE organization_id=$1 AND request_id=$2 AND stage IN ('session_issued','credential_enrolled')`, [values.organizationId, row.request_id, values.now]);
         await insertOutbox(tx, { organizationId: values.organizationId, requestId: row.request_id, subjectMemberId: row.subject_member_id, eventType: "recovery.expired" });
@@ -824,6 +833,7 @@ export function createPostgresOwnerRecoveryRepository({
         expectedVersion: request.version,
         fromState: "session_issued",
         toState: "credential_enrolled",
+        previousUpdatedAt: request.updated_at,
         credentialEnrolledAt: values.completedAt,
         approvedOwnerCount: validApprovals.length
       });
@@ -1024,7 +1034,7 @@ export function createPostgresOwnerRecoveryRepository({
         (organization_id,recovery_session_id,request_id,member_id,session_digest,stage,issued_at,expires_at,idle_expires_at,last_seen_at)
         VALUES ($1,$2,$3,$4,$5,'session_issued',$6,$7,$8,$6)
         RETURNING recovery_session_id,request_id,member_id,stage,issued_at,expires_at,idle_expires_at,last_seen_at,credential_id,credential_enrolled_at,activation_authorization_id,activation_authorized_at,activated_at,revoked_at,revoke_reason`, [values.organizationId, sessionId, values.requestId, request.subject_member_id, values.sessionDigest, values.now, expiresAt, idleExpiresAt]);
-      const next = await transitionRequest(tx, { organizationId: values.organizationId, requestId: values.requestId, expectedVersion: request.version, fromState: "delayed", toState: "session_issued", sessionIssuedAt: values.now, approvedOwnerCount: validApprovals.length });
+      const next = await transitionRequest(tx, { organizationId: values.organizationId, requestId: values.requestId, expectedVersion: request.version, fromState: "delayed", toState: "session_issued", previousUpdatedAt: request.updated_at, sessionIssuedAt: values.now, approvedOwnerCount: validApprovals.length });
       await insertOutbox(tx, { organizationId: values.organizationId, requestId: values.requestId, subjectMemberId: request.subject_member_id, eventType: "recovery.session.issued" });
       return Object.freeze({ request_id: request.request_id, replayed: false, recovery_session: publicRecoverySession({ ...inserted.rows[0], organization_id: values.organizationId, session_digest: Buffer.alloc(32) }), mutation: Object.freeze({ request: publicRequest(next) }) });
     });
@@ -1046,7 +1056,7 @@ export function createPostgresOwnerRecoveryRepository({
       WHERE organization_id=$1 AND recovery_session_id=$2 AND request_id=$3 AND member_id=$4
         AND stage='credential_enrolled' AND activation_authorization_id IS NULL RETURNING recovery_session_id`, [organizationId, recoverySessionId, request.request_id, memberId, authorizationId, completedAt]);
     if (rowCount(activated) !== 1) throw failure("conflict");
-    const next = await transitionRequest(tx, { organizationId, requestId: request.request_id, expectedVersion: request.version, fromState: "credential_enrolled", toState: "activated", activatedAt: completedAt, approvedOwnerCount: validApprovals.length });
+    const next = await transitionRequest(tx, { organizationId, requestId: request.request_id, expectedVersion: request.version, fromState: "credential_enrolled", toState: "activated", previousUpdatedAt: request.updated_at, activatedAt: completedAt, approvedOwnerCount: validApprovals.length });
     const auditEvent = await auditAppender({
       tx,
       organization_id: organizationId,
@@ -1208,9 +1218,16 @@ export function createPostgresOwnerRecoveryRepository({
   }
 
   async function mutate(operation, callback) {
+    let transactionClient;
     try {
-      return await withTransaction(client, callback);
+      const result = await withTransaction(client, async (tx) => {
+        transactionClient = tx;
+        return callback(tx);
+      });
+      flushOwnerRecoveryStateTransitions(transactionClient);
+      return result;
     } catch (error) {
+      discardOwnerRecoveryStateTransitions(transactionClient);
       if (error instanceof OwnerRecoveryRepositoryError) throw error;
       throw failure("unavailable", error);
     }
@@ -1375,9 +1392,9 @@ export function createPostgresOwnerRecoveryRepository({
     return storedRequest(result.rows[0]);
   }
 
-  async function transitionRequest(tx, { organizationId, requestId, expectedVersion, fromState, toState, approvedAt = undefined, delayUntil = undefined, sessionIssuedAt = undefined, credentialEnrolledAt = undefined, activatedAt = undefined, terminalReason = undefined, approvedOwnerCount = undefined }) {
-    const assignments = ["state=$4", "version=version+1", "updated_at=clock_timestamp()"];
-    const params = [organizationId, requestId, expectedVersion, toState];
+  async function transitionRequest(tx, { organizationId, requestId, expectedVersion, fromState, toState, previousUpdatedAt, approvedAt = undefined, delayUntil = undefined, sessionIssuedAt = undefined, credentialEnrolledAt = undefined, activatedAt = undefined, terminalReason = undefined, approvedOwnerCount = undefined }) {
+    const assignments = ["state=$5", "version=version+1", "updated_at=clock_timestamp()"];
+    const params = [organizationId, requestId, expectedVersion, fromState, toState];
     if (approvedAt !== undefined) { params.push(approvedAt); assignments.push(`approved_at=$${params.length}`); }
     if (delayUntil !== undefined) { params.push(delayUntil); assignments.push(`delay_until=$${params.length}`); }
     if (sessionIssuedAt !== undefined) { params.push(sessionIssuedAt); assignments.push(`session_issued_at=$${params.length}`); }
@@ -1386,9 +1403,11 @@ export function createPostgresOwnerRecoveryRepository({
     if (terminalReason !== undefined) { params.push(terminalReason); assignments.push(`terminal_reason=$${params.length}`); }
     if (approvedOwnerCount !== undefined) { params.push(approvedOwnerCount); assignments.push(`approved_owner_count=$${params.length}`); }
     const result = await tx.query(`UPDATE owner_recovery_requests SET ${assignments.join(",")}
-      WHERE organization_id=$1 AND request_id=$2 AND version=$3 AND state=$${4} RETURNING ${REQUEST_COLUMNS}`, params);
+      WHERE organization_id=$1 AND request_id=$2 AND version=$3 AND state=$4 RETURNING ${REQUEST_COLUMNS}`, params);
     if (rowCount(result) !== 1) throw failure("stale_version");
-    return storedRequest(result.rows[0]);
+    const next = storedRequest(result.rows[0]);
+    observeOwnerRecoveryStateTransition({ tx, metrics, previousUpdatedAt, nextUpdatedAt: next.updated_at });
+    return next;
   }
 
   async function revokeRecoverySessions(tx, organizationId, memberId, at, reason) {

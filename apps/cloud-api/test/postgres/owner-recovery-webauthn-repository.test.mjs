@@ -7,6 +7,7 @@ import {
   OwnerRecoveryWebAuthnRepositoryError,
   createPostgresOwnerRecoveryWebAuthnRepository
 } from "../../src/postgres/owner-recovery-webauthn-repository.mjs";
+import { observeOwnerRecoveryStateTransition } from "../../src/postgres/owner-recovery-transition-observer.mjs";
 
 const ORG = "11111111-1111-4111-8111-111111111111";
 const SESSION = "22222222-2222-4222-8222-222222222222";
@@ -97,6 +98,39 @@ test("claims and completes registration with the credential mutation in one tran
   const mutationIndex = texts.indexOf("SELECT mutation");
   const consumeIndex = texts.findIndex((text) => text.startsWith("UPDATE owner_recovery_webauthn_challenges\n        SET status='consumed'"));
   assert.ok(mutationIndex > -1 && consumeIndex > mutationIndex);
+});
+
+test("flushes recovery transition observations only after coordinator COMMIT", async () => {
+  const recorded = [];
+  const metrics = { recordOwnerRecoveryStateLatency(value) { recorded.push(value); } };
+  const client = new ScriptedClient((text) => {
+    if (text.startsWith("SELECT status,expires_at")) return { rows: [{ status: "consuming", expires_at: new Date(NOW + 60_000), consume_started_at: new Date(NOW) }] };
+    if (text.startsWith("UPDATE owner_recovery_webauthn_challenges\n        SET status='consumed'")) return { rows: [{ consumed_at: new Date(NOW + 1) }] };
+    return { rows: [] };
+  });
+  const repository = createPostgresOwnerRecoveryWebAuthnRepository({ client, now: () => NOW + 1 });
+  await repository.complete({ ...registration(), challenge_id: CHALLENGE_ID, credential_id: CREDENTIAL, claim_started_at: new Date(NOW).toISOString(), async mutate(tx) {
+    observeOwnerRecoveryStateTransition({ tx, metrics, previousUpdatedAt: new Date(NOW - 125), nextUpdatedAt: new Date(NOW) });
+    assert.deepEqual(recorded, []);
+    return { committed: true };
+  } });
+  assert.deepEqual(recorded, [125]);
+  assert.ok(client.calls.findIndex(({ text }) => text === "COMMIT") > -1);
+});
+
+test("discards recovery transition observations on coordinator rollback", async () => {
+  const recorded = [];
+  const metrics = { recordOwnerRecoveryStateLatency(value) { recorded.push(value); } };
+  const client = new ScriptedClient((text) => {
+    if (text.startsWith("SELECT status,expires_at")) return { rows: [{ status: "consuming", expires_at: new Date(NOW + 60_000), consume_started_at: new Date(NOW) }] };
+    return { rows: [] };
+  });
+  const repository = createPostgresOwnerRecoveryWebAuthnRepository({ client, now: () => NOW + 1 });
+  await assert.rejects(repository.complete({ ...registration(), challenge_id: CHALLENGE_ID, credential_id: CREDENTIAL, claim_started_at: new Date(NOW).toISOString(), async mutate(tx) {
+    observeOwnerRecoveryStateTransition({ tx, metrics, previousUpdatedAt: new Date(NOW - 125), nextUpdatedAt: new Date(NOW) });
+    return { committed: false };
+  } }), (error) => error.code === "owner_recovery_webauthn_unavailable");
+  assert.deepEqual(recorded, []);
 });
 
 test("returns the same public result after response loss without invoking another mutation", async () => {

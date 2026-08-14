@@ -207,7 +207,11 @@ test("activation composes inside the coordinator transaction while proof is cons
   assert.deepEqual(counterCall.params.slice(2), [3, 4, NOW, false, false, false, false]);
   assert.ok(client.calls.findIndex(({ text }) => text.startsWith("SELECT pg_advisory_xact_lock")) < client.calls.findIndex(({ text }) => text.startsWith("UPDATE webauthn_credentials")));
   assert.ok(client.calls.findIndex(({ text }) => text.startsWith("UPDATE webauthn_credentials")) < client.calls.findIndex(({ text }) => text.startsWith("UPDATE memberships SET session_epoch")));
-  assert.ok(client.calls.findIndex(({ text }) => text.startsWith("UPDATE owner_recovery_requests SET")) > client.calls.findIndex(({ text }) => text.startsWith("UPDATE memberships SET session_epoch")));
+  const transitionCall = client.calls.find(({ text }) => text.startsWith("UPDATE owner_recovery_requests SET"));
+  assert.ok(client.calls.indexOf(transitionCall) > client.calls.findIndex(({ text }) => text.startsWith("UPDATE memberships SET session_epoch")));
+  assert.match(transitionCall.text, /SET state=\$5/u);
+  assert.match(transitionCall.text, /AND state=\$4 RETURNING/u);
+  assert.deepEqual(transitionCall.params.slice(0, 5), [ORG, REQUEST, 4, "credential_enrolled", "activated"]);
 });
 
 test("counter update is exact-CAS, transaction-composable, and confirms committed", async () => {

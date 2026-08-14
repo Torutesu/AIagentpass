@@ -29,7 +29,7 @@ test("real PostgreSQL WebAuthn qualification enforces binding, replay, tenancy, 
       client: migrationClient,
       applicationVersion: "webauthn-qualification"
     }).run();
-    assert.equal(migration.currentVersion, 30);
+    assert.equal(migration.currentVersion, 33);
   } finally {
     migrationClient.release();
   }

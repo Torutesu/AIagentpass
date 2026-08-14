@@ -92,10 +92,10 @@ The shared PostgreSQL session ceiling is now atomic across API replicas: one
 member advisory lock encloses active-session reduction and insertion, and a
 real two-pool race holds 12 concurrent issuances to exactly three active
 sessions. Fixed label-free metrics now cover suppression, redrive outcomes,
-pruning, and recovery latency aggregates. Remaining W1 closure work is the
-final shared-control SQL hardening, wiring state-latency observations at each
-recovery transition, and the complete two-instance fault matrix at every
-provider/commit/response-loss boundary.
+pruning, and recovery latency aggregates. Shared-control SQL hardening and
+committed recovery state-latency wiring are complete. Remaining W1 closure work
+is the complete two-instance fault matrix at every provider/commit/response-loss
+boundary and the corresponding operational alerts/runbooks.
 
 W1.4a application boundary is implemented: session bootstrap first consumes
 one fixed anonymous PostgreSQL bucket before identity-provider work, then
@@ -115,9 +115,20 @@ budget with fixed label-free metrics. Real PostgreSQL qualification covers a
 delayed bucket locker, backward-clock protection, locked-row pruning, upgrade
 to 33, and migrations 1–33 in an empty schema.
 
+W1.4b is implemented. Every forward owner-recovery state update now compares
+the source state at a fixed SQL parameter and queues a database-timestamp delta
+on the transaction client. The queue is emitted only after confirmed `COMMIT`,
+is discarded on rollback, and is also flushed by the caller-owned WebAuthn
+transaction coordinator. Replays and same-state version updates do not create
+observations; negative or malformed deltas are ignored; synchronous and
+asynchronous metric sink failures cannot alter committed authority. A lost
+`COMMIT` response or process death immediately after commit may omit this
+non-authoritative in-memory metric, so authoritative recovery truth remains the
+PostgreSQL state/outbox rather than the health counter.
+
 Current verification baseline:
 
-- the root suite passes 1,731 tests: 1,691 pass, 40 explicitly skipped, 0 fail;
+- the root suite passes 1,737 tests: 1,696 pass, 41 explicitly skipped, 0 fail;
 - the frozen catalog validates 114 entries: 29 schemas, 52 OpenAPI operations,
   and 33 migrations;
 - lint and whitespace/error checks pass;
@@ -130,7 +141,7 @@ W1 closure execution order:
 | Slice | Implementation boundary | Required negative/concurrency evidence | Exit condition |
 | --- | --- | --- | --- |
 | W1.4a session bootstrap admission | Add fixed `human.session.bootstrap` policies to the shared PostgreSQL limiter; apply anonymous/global admission before identity-provider work, then subject/member/organization admission after verified identity resolution and before session insertion. Keep identifiers HMAC-derived and never persist the assertion or provider subject as a label. | Two API instances must share each bucket; unknown-subject floods must not create unbounded buckets; provider and limiter outages fail closed; identity replay and denied requests create no session. | The bootstrap route has no process-local allowance path, returns bounded `Retry-After`, and its atomic session ceiling still holds under concurrent accepted requests. |
-| W1.4b recovery state latency | Observe database timestamps only after committed recovery transitions and report fixed-key count/total aggregates through `recordOwnerRecoveryStateLatency`. Do not label by organization, member, request, state, or error. Metrics failures remain post-commit and non-authoritative. | Clock-boundary, malformed timestamp, rollback, retry, and metric-sink failure tests; exact retries must not double-observe a transition. | Every committed forward transition has one bounded observation and no recovery identity appears in health output. |
+| W1.4b recovery state latency — complete | Observe database timestamps only after confirmed committed recovery transitions and report fixed-key count/total aggregates through `recordOwnerRecoveryStateLatency`. Do not label by organization, member, request, state, or error. Metrics failures remain post-commit and non-authoritative. | Fixed source-state CAS, negative/malformed timestamp, rollback, WebAuthn caller-owned commit, exact-once flush, and sync/async metric-sink failure tests; real PostgreSQL proves commit and rollback outcomes. | Confirmed commits emit one bounded observation per forward transition in normal operation; retries do not observe another transition and no recovery identity appears in health output. |
 | W1.5 delivery fault matrix | Run two independent workers and inject loss after lease claim, before/after provider acceptance, before terminal commit, after commit, and before HTTP response receipt. Reuse one deterministic provider idempotency key and inspect authoritative rows after restart. | Kill/restart, lease expiry, duplicate acknowledgement, stale lease, poison row, provider timeout, response truncation, and concurrent prune/redrive cases against real PostgreSQL. | Every case converges to one logical delivery or an explicit uncertain/dead-letter state; no event is silently lost, widened, or delivered with substituted content. |
 | W1.6 operational closure | Add fixed-key alerts/runbook thresholds for queue age, uncertain outcomes, dead letters, redrive failure, prune failure, limiter denial/unavailability, and recovery latency. Update threat model and evidence index. | Snapshot tests must reject new labels/fields; runbook drill covers provider outage, worker restart, limiter outage, and dead-letter recovery. | W1 exit gate is reproducible from one documented command sequence and produces no secret-bearing artifact. |
 
@@ -143,9 +154,46 @@ W1 closure execution order:
 | C — hosted transport admission | Remove the process-local hosted fallback. Invalid or unauthenticated transport scope maps to fixed HMAC global buckets; authenticated Device traffic keeps tenant/device buckets. | Restart and two-instance tests prove the allowance cannot reset locally; malformed identifiers cannot create rows; repository outage returns stable `503`; Device tenant isolation remains intact. |
 | D — maintenance and observability | Start a dedicated shared-control maintenance worker independent of recovery delivery. Prune generic, anonymous, and replay rows with one total work budget and fixed label-free metrics. | Start/close/readiness tests, repeated-worker contention, sink failure, database outage/recovery, bounded transaction size, and health snapshots with no principal-derived labels. |
 
-After W1.4a, execute W1.4b recovery latency, then W1.5 delivery fault
-qualification. W2 Console work may continue in parallel only for read-only
+W1.4a and W1.4b are complete. Execute W1.5 delivery fault qualification next.
+W2 Console work may continue in parallel only for read-only
 screens; authority-changing UI remains gated on these W1 guarantees.
+
+#### W1.5 detailed implementation sequence
+
+1. Add a test-only, closed fault controller around
+   `owner-recovery-outbox-worker.mjs` and
+   `owner-recovery-outbox-repository.mjs`. It may interrupt only at six named
+   boundaries: after claim, before provider call, after provider acceptance,
+   before terminal commit, after terminal commit, and after response encoding.
+   Production constructors must receive the no-op implementation and expose no
+   HTTP, environment-variable, or payload-controlled fault switch.
+2. Build a real-PostgreSQL two-worker harness with independent pools and worker
+   identities. Seed one canonical outbox row, use one deterministic provider
+   idempotency key, persist provider acceptance in a separate test ledger, and
+   restart with a new worker identity after each injected loss.
+3. Qualify claim/lease ownership: process loss after claim, lease expiry,
+   concurrent reclaim, stale acknowledgement, duplicate acknowledgement, and a
+   worker whose lease expires while the provider call is pending. Every terminal
+   write must compare tenant, event, worker, lease token, state, and deadline.
+4. Qualify provider ambiguity: timeout before acceptance, timeout after durable
+   acceptance, duplicate provider response, malformed/oversized response,
+   response truncation, and provider idempotency-key substitution. The result
+   must converge to `published`, retryable pending, explicit uncertain, or
+   dead-letter without fabricating acceptance.
+5. Qualify management races: poison-row isolation, redrive ceiling, suppression,
+   terminal retention, concurrent prune/redrive, and shutdown drain while a
+   publish is in flight. One poisoned event must not starve unrelated tenants or
+   consume an unbounded batch.
+6. Add a machine-readable evidence summary containing only fixed scenario names,
+   public event digests, final state classes, attempt counts, and timing bounds.
+   Run it from CI against PostgreSQL 16 after migrations 1–33 and document a
+   single reproduction command in the recovery operations runbook.
+
+W1.5 exits only when every scenario is repeatable, two workers cannot create two
+logical provider deliveries, accepted-but-unconfirmed delivery is represented
+explicitly rather than retried blindly, all leases converge after restart, and
+the evidence artifact contains no notification content, member identifier,
+token, DSN, or provider diagnostic.
 
 Merge slices:
 
@@ -295,8 +343,8 @@ Add real PostgreSQL, two-instance, Playwright, KMS/IAM, packaging/notarization, 
 ## 7. Immediate commit queue
 
 1. `feat: throttle session bootstrap across api replicas` (W1.4a)
-2. `feat: observe committed recovery transition latency` (W1.4b)
-3. `test: qualify recovery delivery fault boundaries` (W1.5)
+2. `feat: observe committed recovery transition latency` (W1.4b, complete)
+3. `test: qualify recovery delivery fault boundaries` (W1.5, next)
 4. `docs: close recovery operations and alert runbooks` (W1.6)
 5. `test: close the production console browser matrix` (W2)
 6. `feat: add purpose-separated managed signer providers` (W3)
