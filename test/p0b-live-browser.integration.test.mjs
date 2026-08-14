@@ -110,7 +110,7 @@ async function scenario(parent, name, callback) {
         await fixture.bootstrap(page, role);
         if (register) await fixture.registerWebAuthn(page);
         await page.reload({ waitUntil: "domcontentloaded" });
-        await page.getByRole("heading", { name: "Agentは、" }).waitFor();
+        await page.getByRole("heading", { name: /Agentの状態を、\s*確認できました。/u }).waitFor();
         await deviceCard(page, "反映待ち Mac").getByRole("heading", { name: "反映待ち Mac" }).waitFor();
         return page;
       };
