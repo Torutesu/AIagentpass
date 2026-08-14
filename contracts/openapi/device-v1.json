@@ -302,29 +302,7 @@
           "device_id": { "type": "string", "format": "uuid" }
         }
       },
-      "ControlBundleV2": {
-        "type": "object",
-        "additionalProperties": false,
-        "required": ["format_epoch", "issuer", "organization_id", "device_id", "audience", "issued_at", "expires_at", "sequence", "policy_scope", "global_revoked", "revoked_devices", "revoked_agents", "revoked_capabilities", "offline_ttl_ms", "key_id", "signature"],
-        "properties": {
-          "format_epoch": { "const": 2 },
-          "issuer": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$" },
-          "organization_id": { "type": "string", "format": "uuid" },
-          "device_id": { "type": "string", "format": "uuid" },
-          "audience": { "$ref": "#/components/schemas/ControlBundleAudience" },
-          "issued_at": { "type": "string", "format": "date-time", "minLength": 24, "maxLength": 24, "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$" },
-          "expires_at": { "type": "string", "format": "date-time", "minLength": 24, "maxLength": 24, "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$" },
-          "sequence": { "type": "integer", "minimum": 1, "maximum": 9007199254740991 },
-          "policy_scope": { "$ref": "#/components/schemas/ScopeV1" },
-          "global_revoked": { "type": "boolean" },
-          "revoked_devices": { "type": "array", "description": "Canonical ascending lexical order is required by the runtime validator.", "maxItems": 256, "uniqueItems": true, "items": { "type": "string", "format": "uuid", "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$" } },
-          "revoked_agents": { "type": "array", "description": "Canonical ascending lexical order is required by the runtime validator.", "maxItems": 256, "uniqueItems": true, "items": { "type": "string", "format": "uuid", "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$" } },
-          "revoked_capabilities": { "type": "array", "description": "Canonical ascending lexical order is required by the runtime validator.", "maxItems": 256, "uniqueItems": true, "items": { "type": "string", "format": "uuid", "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$" } },
-          "offline_ttl_ms": { "type": "integer", "minimum": 1, "maximum": 604800000 },
-          "key_id": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$" },
-          "signature": { "type": "string", "minLength": 88, "maxLength": 88, "pattern": "^[A-Za-z0-9+/]{86}==$" }
-        }
-      },
+      "ControlBundleV2": { "$ref": "../schemas/control-bundle-v2.schema.json" },
       "RequestId": { "type": "string", "format": "uuid", "description": "Server-generated correlation identifier added to every non-204 response." },
       "DeviceEnrollmentControlTrust": {
         "type": "object",

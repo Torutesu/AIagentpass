@@ -1,0 +1,77 @@
+{
+  "schema_version": 1,
+  "type": "agentpass.promotion-evidence",
+  "promotion_id": "ffffffff-ffff-4fff-8fff-ffffffffffff",
+  "source": {
+    "commit": "0123456789abcdef0123456789abcdef01234567",
+    "tree": "89abcdef0123456789abcdef0123456789abcdef",
+    "tag": "v0.18.0",
+    "version": "0.18.0"
+  },
+  "artifact": {
+    "name": "AgentPass-0.18.0-macos-universal.pkg",
+    "role": "product",
+    "media_type": "application/vnd.apple.installer+xml",
+    "bytes": 1048576,
+    "sha256": "1111111111111111111111111111111111111111111111111111111111111111"
+  },
+  "release_manifest": {
+    "schema_version": 3,
+    "name": "release-manifest.json",
+    "sha256": "2222222222222222222222222222222222222222222222222222222222222222",
+    "signature_sha256": "3333333333333333333333333333333333333333333333333333333333333333",
+    "signer_key_fingerprint": "SHA256:CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC"
+  },
+  "notarization": {
+    "product": {
+      "status": "accepted_stapled",
+      "submission_ids": ["12345678-1234-4234-8234-123456789abc"],
+      "evidence": [
+        { "kind": "notarytool_result", "name": "product-notary.json", "bytes": 512, "sha256": "4444444444444444444444444444444444444444444444444444444444444444" },
+        { "kind": "stapler_result", "name": "product-stapler.txt", "bytes": 64, "sha256": "5555555555555555555555555555555555555555555555555555555555555555" }
+      ]
+    },
+    "external_controller": {
+      "status": "accepted_stapled",
+      "submission_ids": ["87654321-4321-4234-8234-cba987654321"],
+      "evidence": [
+        { "kind": "notarytool_result", "name": "controller-notary.json", "bytes": 512, "sha256": "6666666666666666666666666666666666666666666666666666666666666666" },
+        { "kind": "stapler_result", "name": "controller-stapler.txt", "bytes": 64, "sha256": "7777777777777777777777777777777777777777777777777777777777777777" }
+      ]
+    }
+  },
+  "two_lane_qualification": {
+    "schema_version": 1,
+    "status": "qualified",
+    "summary": { "name": "p0c-hardware-qualification-summary.json", "bytes": 2048, "sha256": "8888888888888888888888888888888888888888888888888888888888888888" },
+    "operator_policy": { "name": "p0c-approved-operator-policy.json", "bytes": 1024, "sha256": "9999999999999999999999999999999999999999999999999999999999999999" },
+    "release_manifest_sha256": "2222222222222222222222222222222222222222222222222222222222222222",
+    "artifact_sha256": "1111111111111111111111111111111111111111111111111111111111111111",
+    "source_commit": "0123456789abcdef0123456789abcdef01234567",
+    "lanes": [
+      {
+        "hardware_class": "apple_silicon",
+        "architecture": "arm64",
+        "report": { "schema_version": 2, "name": "p0c-apple-silicon-report.json", "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" },
+        "report_signature": { "name": "p0c-apple-silicon-report.sig", "bytes": 96, "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" },
+        "operator": { "name": "operator-apple", "key_fingerprint": "SHA256:DDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD" },
+        "evidence_archive": { "name": "p0c-apple-silicon-evidence.tar.gz", "bytes": 4096, "sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc" },
+        "release_manifest_sha256": "2222222222222222222222222222222222222222222222222222222222222222"
+      },
+      {
+        "hardware_class": "intel_t2",
+        "architecture": "x86_64",
+        "report": { "schema_version": 2, "name": "p0c-intel-t2-report.json", "sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd" },
+        "report_signature": { "name": "p0c-intel-t2-report.sig", "bytes": 96, "sha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee" },
+        "operator": { "name": "operator-intel", "key_fingerprint": "SHA256:EEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEE" },
+        "evidence_archive": { "name": "p0c-intel-t2-evidence.tar.gz", "bytes": 4096, "sha256": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff" },
+        "release_manifest_sha256": "2222222222222222222222222222222222222222222222222222222222222222"
+      }
+    ]
+  },
+  "generated_at": "2026-08-14T00:05:00.000Z",
+  "signing_purpose": "AgentPass-Promotion-Evidence-v1\u0000",
+  "signature_algorithm": "ed25519",
+  "signer_key_fingerprint": "SHA256:FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF",
+  "signature": "IiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIg"
+}

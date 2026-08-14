@@ -1,6 +1,8 @@
 import fs from "node:fs";
 import path from "node:path";
 import process from "node:process";
+import Ajv2020 from "ajv/dist/2020.js";
+import addFormats from "ajv-formats";
 
 const repositoryRoot = path.resolve(import.meta.dirname, "..");
 const root = path.resolve(process.env.AGENTPASS_REPOSITORY_ROOT ?? repositoryRoot);
@@ -25,6 +27,28 @@ const REASON_CODES = new Set([
   "emergency_stop",
   "internal_error"
 ]);
+const PROMOTED_SCHEMA_FIXTURES = Object.freeze({
+  "organization-v1.schema.json": "organization.valid.json",
+  "membership-v1.schema.json": "membership.valid.json",
+  "invitation-v1.schema.json": "invitation.valid.json",
+  "webauthn-credential-v1.schema.json": "webauthn-credential.valid.json",
+  "webauthn-ceremony-v1.schema.json": "webauthn-ceremony.valid.json",
+  "recent-authorization-v1.schema.json": "recent-authorization.valid.json",
+  "policy-v1.schema.json": "policy.valid.json",
+  "capability-v1.schema.json": "capability.valid.json",
+  "control-bundle-v2.schema.json": "control-bundle.valid.json",
+  "purge-authorization-v1.schema.json": "purge-authorization.valid.json",
+  "purge-receipt-v1.schema.json": "purge-receipt.valid.json",
+  "promotion-evidence-v1.schema.json": "promotion-evidence.valid.json"
+});
+const BASELINE_SCHEMA_FIXTURES = Object.freeze({
+  "bundle-ack-v1.schema.json": "bundle-ack.valid.json",
+  "device-audit-list-v1.schema.json": "device-audit-list.valid.json",
+  "device-enrollment-v1.schema.json": "device-enrollment.valid.json",
+  "doctor-report-v1.schema.json": "doctor-report.valid.json",
+  "refresh-hint-v1.schema.json": "refresh-hint.valid.json"
+});
+const SCHEMA_FIXTURES = Object.freeze({ ...BASELINE_SCHEMA_FIXTURES, ...PROMOTED_SCHEMA_FIXTURES });
 
 function fail(message) {
   process.stderr.write(`contract validation failed: ${message}\n`);
@@ -75,18 +99,41 @@ function assertSignedEnvelopeBasics(value, label) {
 
 const schemaFiles = fs.readdirSync(path.join(contracts, "schemas")).filter((name) => name.endsWith(".schema.json")).sort();
 const schemaIds = new Set();
+const schemas = new Map();
 for (const name of schemaFiles) {
   const schema = readJson(path.join("schemas", name));
   if (schema.$schema !== "https://json-schema.org/draft/2020-12/schema") fail(`${name} must use JSON Schema 2020-12`);
   if (typeof schema.$id !== "string" || schemaIds.has(schema.$id)) fail(`${name} has a missing or duplicate $id`);
   schemaIds.add(schema.$id);
   if (schema.type !== "object" || schema.additionalProperties !== false) fail(`${name} must reject unknown top-level fields`);
+  schemas.set(name, schema);
 }
 
+const schemaValidator = new Ajv2020({ allErrors: true, strict: true, strictRequired: false });
+addFormats(schemaValidator);
+schemaValidator.addKeyword({ keyword: "x-agentpass-binding", schemaType: "object", valid: true });
+for (const schema of schemas.values()) schemaValidator.addSchema(schema);
+
 const fixtureFiles = fs.readdirSync(path.join(contracts, "fixtures")).filter((name) => name.endsWith(".valid.json")).sort();
-if (fixtureFiles.length !== 5) fail(`expected 5 positive fixtures, found ${fixtureFiles.length}`);
-for (const name of ["bundle-ack.valid.json", "device-audit-list.valid.json", "device-enrollment.valid.json", "doctor-report.valid.json", "refresh-hint.valid.json"]) {
+const baselineFixtureNames = Object.values(BASELINE_SCHEMA_FIXTURES);
+const expectedFixtureNames = Object.values(SCHEMA_FIXTURES).sort();
+if (JSON.stringify(fixtureFiles) !== JSON.stringify(expectedFixtureNames)) fail(`positive fixture inventory is out of contract: expected ${expectedFixtureNames.length}, found ${fixtureFiles.length}`);
+for (const name of baselineFixtureNames) {
   if (!fixtureFiles.includes(name)) fail(`missing required positive fixture ${name}`);
+}
+for (const [schemaName, fixtureName] of Object.entries(SCHEMA_FIXTURES)) {
+  if (!schemaFiles.includes(schemaName)) fail(`missing promoted schema ${schemaName}`);
+  if (!fixtureFiles.includes(fixtureName)) fail(`missing promoted fixture ${fixtureName}`);
+  if (!schemaFiles.includes(schemaName) || !fixtureFiles.includes(fixtureName)) continue;
+  const schema = schemas.get(schemaName);
+  const fixture = readJson(path.join("fixtures", fixtureName));
+  const allowed = new Set(Object.keys(schema.properties ?? {}));
+  const required = new Set(schema.required ?? []);
+  if (Object.keys(fixture).some((key) => !allowed.has(key))) fail(`${fixtureName} contains a field outside ${schemaName}`);
+  if ([...required].some((key) => !Object.hasOwn(fixture, key))) fail(`${fixtureName} is missing a required field from ${schemaName}`);
+  if (hasSecretMaterial(fixture)) fail(`${fixtureName} contains secret material`);
+  const validate = schemaValidator.getSchema(schema.$id);
+  if (!validate || !validate(fixture)) fail(`${fixtureName} does not satisfy ${schemaName}: ${schemaValidator.errorsText(validate?.errors, { separator: "; " })}`);
 }
 
 for (const name of ["human-v1.json", "device-v1.json"]) {
@@ -273,7 +320,7 @@ function validateContractCatalog() {
       fail("catalog contains a non-object entry");
       continue;
     }
-    const allowedKeys = ["id", "kind", "source", "method", "path", "operation_id", "version", "profile", "purpose", "authority_owner", "tenant_binding", "actor_binding", "signature", "idempotency", "expiry", "implementation_refs", "compatibility_fixtures"];
+    const allowedKeys = ["id", "kind", "source", "method", "path", "operation_id", "version", "profile", "purpose", "implementation_status", "authority_owner", "tenant_binding", "actor_binding", "signature", "idempotency", "expiry", "implementation_refs", "compatibility_fixtures"];
     if (JSON.stringify(Object.keys(entry).sort()) !== JSON.stringify([...allowedKeys].filter((key) => Object.hasOwn(entry, key)).sort())) fail(`catalog entry ${entry.id ?? "<unknown>"} has an unexpected field set`);
     if (typeof entry.id !== "string" || entry.id.length === 0) fail("catalog entry id is missing");
     else if (ids.has(entry.id)) fail(`catalog contains a duplicate id: ${entry.id}`);
@@ -288,6 +335,7 @@ function validateContractCatalog() {
     if (entry.version !== expectedEntry.version) fail(`${entry.id} has version ${entry.version}, expected ${expectedEntry.version}`);
     if (typeof entry.profile !== "string" || !catalog.profiles[entry.profile]) fail(`${entry.id} references an unknown profile`);
     if (typeof entry.purpose !== "string" || entry.purpose.length === 0) fail(`${entry.id} must declare a purpose`);
+    if (entry.implementation_status !== undefined && !["implemented", "specified"].includes(entry.implementation_status)) fail(`${entry.id} has an invalid implementation status`);
     if (purposes.has(entry.purpose)) fail(`catalog contains a duplicate purpose: ${entry.purpose}`);
     purposes.add(entry.purpose);
     const profile = catalog.profiles[entry.profile] ?? {};

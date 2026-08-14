@@ -68,5 +68,9 @@
     "@google-cloud/kms": "6.0.0",
     "@simplewebauthn/server": "13.3.2",
     "pg": "8.23.0"
+  },
+  "devDependencies": {
+    "ajv": "^8.18.0",
+    "ajv-formats": "^3.0.1"
   }
 }

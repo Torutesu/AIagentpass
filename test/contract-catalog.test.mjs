@@ -38,6 +38,23 @@ function runValidatorWithCatalog(mutator = () => {}) {
   return result;
 }
 
+function runValidatorWithFixture(name, mutator) {
+  const temporaryRoot = fs.mkdtempSync(path.join(os.tmpdir(), "agentpass-contract-fixture-"));
+  const temporaryContracts = path.join(temporaryRoot, "contracts");
+  fs.cpSync(path.join(repositoryRoot, "contracts"), temporaryContracts, { recursive: true });
+  const fixturePath = path.join(temporaryContracts, "fixtures", name);
+  const fixture = JSON.parse(fs.readFileSync(fixturePath, "utf8"));
+  mutator(fixture);
+  fs.writeFileSync(fixturePath, `${JSON.stringify(fixture, null, 2)}\n`);
+  const result = spawnSync(process.execPath, [validatorPath], {
+    cwd: repositoryRoot,
+    env: { ...process.env, AGENTPASS_CONTRACTS_DIR: temporaryContracts },
+    encoding: "utf8"
+  });
+  fs.rmSync(temporaryRoot, { recursive: true, force: true });
+  return result;
+}
+
 test("catalog signed domains exactly match implementation constants", () => {
   const catalog = readCatalog();
   const expected = new Map([
@@ -62,9 +79,9 @@ test("catalog freezes the complete current contract inventory", () => {
   assert.equal(catalog.catalog_id, "agentpass.contract-catalog");
   assert.equal(catalog.catalog_version, 1);
   assert.equal(catalog.status, "frozen");
-  assert.equal(catalog.entries.length, 80);
+  assert.equal(catalog.entries.length, 92);
   const counts = catalog.entries.reduce((result, entry) => ({ ...result, [entry.kind]: (result[entry.kind] ?? 0) + 1 }), {});
-  assert.deepEqual(counts, { "json-schema": 16, "openapi-operation": 41, "postgres-migration": 23 });
+  assert.deepEqual(counts, { "json-schema": 28, "openapi-operation": 41, "postgres-migration": 23 });
   assert.equal(new Set(catalog.entries.map((entry) => entry.purpose)).size, catalog.entries.length);
   for (const entry of catalog.entries) {
     assert.ok(catalog.profiles[entry.profile], `${entry.id} profile`);
@@ -73,7 +90,55 @@ test("catalog freezes the complete current contract inventory", () => {
   }
   const result = runValidatorWithCatalog();
   assert.equal(result.status, 0, result.stderr);
-  assert.match(result.stdout, /validated frozen contract catalog: 80 entries/);
+  assert.match(result.stdout, /validated frozen contract catalog: 92 entries/);
+});
+
+test("catalog includes every promoted Phase 1 schema and fixture", () => {
+  const catalog = readCatalog();
+  const promoted = [
+    "organization-v1",
+    "membership-v1",
+    "invitation-v1",
+    "webauthn-credential-v1",
+    "webauthn-ceremony-v1",
+    "recent-authorization-v1",
+    "policy-v1",
+    "capability-v1",
+    "control-bundle-v2",
+    "purge-authorization-v1",
+    "purge-receipt-v1",
+    "promotion-evidence-v1"
+  ];
+  for (const name of promoted) {
+    const entry = catalog.entries.find((item) => item.id === `schema.${name}`);
+    assert.ok(entry, `${name} catalog entry`);
+    assert.equal(entry.source, `schemas/${name}.schema.json`);
+    assert.deepEqual(entry.compatibility_fixtures, [`contracts/fixtures/${name.replace(/-v\d+$/, "")}.valid.json`]);
+  }
+});
+
+test("catalog distinguishes implemented contracts from future specified envelopes", () => {
+  const catalog = readCatalog();
+  for (const id of ["schema.purge-authorization-v1", "schema.purge-receipt-v1", "schema.promotion-evidence-v1"]) {
+    assert.equal(catalog.entries.find((entry) => entry.id === id)?.implementation_status, "specified", `${id} is not represented as implemented`);
+  }
+  for (const id of ["schema.capability-v1", "schema.control-bundle-v2"]) {
+    assert.equal(catalog.entries.find((entry) => entry.id === id)?.signature.domain, "none:raw-canonical-json-statement", `${id} records its legacy preimage truthfully`);
+  }
+});
+
+test("promoted fixtures are validated against their complete JSON Schema", () => {
+  const nestedUnknown = runValidatorWithFixture("capability.valid.json", (fixture) => {
+    fixture.audience.unreviewed = true;
+  });
+  assert.notEqual(nestedUnknown.status, 0);
+  assert.match(nestedUnknown.stderr, /does not satisfy capability-v1\.schema\.json/);
+
+  const invalidUnion = runValidatorWithFixture("webauthn-ceremony.valid.json", (fixture) => {
+    fixture.status = "consumed";
+  });
+  assert.notEqual(invalidUnion.status, 0);
+  assert.match(invalidUnion.stderr, /does not satisfy webauthn-ceremony-v1\.schema\.json/);
 });
 
 test("catalog validation fails closed when an entry is missing", () => {

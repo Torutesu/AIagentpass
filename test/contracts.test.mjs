@@ -9,10 +9,11 @@ const root = path.resolve(import.meta.dirname, "..");
 test("machine-readable platform contracts pass the offline validator", () => {
   const result = spawnSync(process.execPath, [path.join(root, "scripts", "validate-contracts.mjs")], { cwd: root, encoding: "utf8" });
   assert.equal(result.status, 0, result.stderr);
-  assert.match(result.stdout, /validated 16 schemas, 2 OpenAPI documents, 5 fixtures, and 23 PostgreSQL migrations/);
+  assert.match(result.stdout, /validated 28 schemas, 2 OpenAPI documents, 17 fixtures, and 23 PostgreSQL migrations/);
 });
 
 const humanOpenapi = () => JSON.parse(fs.readFileSync(path.join(root, "contracts", "openapi", "human-v1.json"), "utf8"));
+const contractSchema = (name) => JSON.parse(fs.readFileSync(path.join(root, "contracts", "schemas", name), "utf8"));
 
 function operationFor(document, operationId) {
   for (const [route, methods] of Object.entries(document.paths)) {
@@ -116,6 +117,12 @@ function assertHumanP1Semantics(document) {
 test("Human P1 organization, member, and invitation operations declare security and tenant semantics", () => {
   const openapi = humanOpenapi();
   assertHumanP1Semantics(openapi);
+
+  assert.equal(openapi.components.schemas.Organization.$ref, "../schemas/organization-v1.schema.json");
+  assert.equal(openapi.components.schemas.Membership.$ref, "../schemas/membership-v1.schema.json");
+  assert.equal(openapi.components.schemas.Invitation.$ref, "../schemas/invitation-v1.schema.json");
+  assert.deepEqual(contractSchema("membership-v1.schema.json").properties.role.enum, ["owner", "admin", "auditor", "viewer"]);
+  assert.deepEqual(contractSchema("invitation-v1.schema.json").properties.role.enum, ["admin", "auditor", "viewer"]);
 
   const invitationRole = openapi.components.schemas.InviteRole;
   assert.deepEqual(invitationRole.enum, ["admin", "auditor", "viewer"]);
@@ -229,8 +236,10 @@ test("Human session bootstrap freezes the BFF-only SIWC signed assertion contrac
   assert.equal(openapi.components.schemas.SessionBootstrapRequest.maxProperties, 0);
   assert.equal(openapi.components.schemas.SessionBootstrapRequest.additionalProperties, false);
   assert.deepEqual(openapi.components.schemas.SessionBootstrapResponse.required, ["session", "csrf_token"]);
-  assert.deepEqual(openapi.components.schemas.HumanSession.required, ["version", "session_id", "member_id", "organization_id", "role", "created_at", "expires_at", "recent_auth_at"]);
-  assert.equal(openapi.components.schemas.HumanSession.additionalProperties, false);
+  assert.equal(openapi.components.schemas.HumanSession.$ref, "../schemas/human-session-v1.schema.json");
+  const humanSession = contractSchema("human-session-v1.schema.json");
+  assert.deepEqual(humanSession.required, ["version", "session_id", "member_id", "organization_id", "role", "created_at", "expires_at", "recent_auth_at"]);
+  assert.equal(humanSession.additionalProperties, false);
   assert.equal(openapi.components.responses.SessionBootstrapCreated.headers["Set-Cookie"].required, true);
   assert.equal(openapi.components.responses.SessionBootstrapCreated.headers["Cache-Control"].required, true);
 });
@@ -264,8 +273,10 @@ test("G4.2 device sync contract matches the implemented Cloud refresh lane", () 
   assert.equal(openapi.components.schemas.RefreshHintV1.$ref, "../schemas/refresh-hint-v1.schema.json");
   assert.equal(openapi.components.schemas.BundleAckV1.$ref, "../schemas/bundle-ack-v1.schema.json");
   assert.deepEqual(openapi.components.schemas.DeviceRefreshState.enum, ["pending", "fetching", "applied", "blocked", "stale", "offline", "revoked"]);
-  assert.equal(openapi.components.schemas.ControlBundleV2.properties.signature.pattern, "^[A-Za-z0-9+/]{86}==$" );
-  assert.equal(openapi.components.schemas.ControlBundleV2.properties.issued_at.maxLength, 24);
+  assert.equal(openapi.components.schemas.ControlBundleV2.$ref, "../schemas/control-bundle-v2.schema.json");
+  const controlBundle = contractSchema("control-bundle-v2.schema.json");
+  assert.equal(controlBundle.$defs.signature.pattern, "^[A-Za-z0-9+/]{86}==$" );
+  assert.equal(controlBundle.$defs.canonicalTimestamp.maxLength, 24);
   assert.deepEqual(openapi.paths["/enrollments/{enrollment_id}"].post.requestBody.content["application/json"].schema.oneOf, [
     { $ref: "../schemas/device-enrollment-v1.schema.json" },
     { $ref: "../schemas/device-enrollment-completion-v2.schema.json" }

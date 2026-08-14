@@ -882,21 +882,7 @@
           "csrf_token": { "type": "string", "pattern": "^[A-Za-z0-9_-]{43}$" }
         }
       },
-      "HumanSession": {
-        "type": "object",
-        "additionalProperties": false,
-        "required": ["version", "session_id", "member_id", "organization_id", "role", "created_at", "expires_at", "recent_auth_at"],
-        "properties": {
-          "version": { "const": 1 },
-          "session_id": { "type": "string", "format": "uuid" },
-          "member_id": { "type": "string", "format": "uuid" },
-          "organization_id": { "type": "string", "format": "uuid" },
-          "role": { "$ref": "#/components/schemas/MemberRole" },
-          "created_at": { "type": "string", "format": "date-time" },
-          "expires_at": { "type": "string", "format": "date-time" },
-          "recent_auth_at": { "type": ["string", "null"], "format": "date-time" }
-        }
-      },
+      "HumanSession": { "$ref": "../schemas/human-session-v1.schema.json" },
       "RequestId": { "type": "string", "format": "uuid", "description": "Stable request correlation identifier." },
       "DeviceRefreshRequestBody": {
         "type": "object",
@@ -1021,52 +1007,11 @@
         "type": "object", "additionalProperties": false, "required": ["request_id", "devices"],
         "properties": { "request_id": { "$ref": "#/components/schemas/RequestId" }, "devices": { "type": "array", "items": { "$ref": "#/components/schemas/DeviceConsoleState" } } }
       },
-      "Organization": {
-        "type": "object",
-        "additionalProperties": false,
-        "required": ["organization_id", "name", "version", "created_at", "updated_at"],
-        "properties": {
-          "organization_id": { "type": "string", "format": "uuid" },
-          "name": { "type": "string", "minLength": 1, "maxLength": 128 },
-          "version": { "type": "integer", "minimum": 1 },
-          "created_at": { "type": "string", "format": "date-time" },
-          "updated_at": { "type": "string", "format": "date-time" }
-        }
-      },
-      "Membership": {
-        "type": "object",
-        "additionalProperties": false,
-        "required": ["membership_id", "organization_id", "member_id", "role", "status", "version", "created_at", "updated_at"],
-        "properties": {
-          "membership_id": { "type": "string", "format": "uuid" },
-          "organization_id": { "type": "string", "format": "uuid" },
-          "member_id": { "type": "string", "format": "uuid" },
-          "display_name": { "type": ["string", "null"], "maxLength": 128 },
-          "role": { "$ref": "#/components/schemas/MemberRole" },
-          "status": { "type": "string", "enum": ["active", "revoked"] },
-          "version": { "type": "integer", "minimum": 1 },
-          "created_at": { "type": "string", "format": "date-time" },
-          "updated_at": { "type": "string", "format": "date-time" }
-        }
-      },
+      "Organization": { "$ref": "../schemas/organization-v1.schema.json" },
+      "Membership": { "$ref": "../schemas/membership-v1.schema.json" },
       "MemberRole": { "type": "string", "enum": ["owner", "admin", "auditor", "viewer"] },
       "InviteRole": { "type": "string", "enum": ["admin", "auditor", "viewer"], "description": "Owner is intentionally excluded from invitation roles." },
-      "Invitation": {
-        "type": "object",
-        "additionalProperties": false,
-        "required": ["invitation_id", "organization_id", "role", "status", "version", "created_at", "expires_at"],
-        "properties": {
-          "invitation_id": { "type": "string", "format": "uuid" },
-          "organization_id": { "type": "string", "format": "uuid" },
-          "role": { "$ref": "#/components/schemas/InviteRole" },
-          "status": { "type": "string", "enum": ["pending", "accepted", "revoked", "expired"] },
-          "version": { "type": "integer", "minimum": 1 },
-          "created_at": { "type": "string", "format": "date-time" },
-          "expires_at": { "type": "string", "format": "date-time" },
-          "accepted_at": { "type": ["string", "null"], "format": "date-time" },
-          "accepted_member_id": { "type": ["string", "null"], "format": "uuid" }
-        }
-      },
+      "Invitation": { "$ref": "../schemas/invitation-v1.schema.json" },
       "CreateOrganizationRequest": {
         "type": "object", "additionalProperties": false, "required": ["name"],
         "properties": { "name": { "type": "string", "minLength": 1, "maxLength": 128 } }

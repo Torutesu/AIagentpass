@@ -1,0 +1,97 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agentpass.dev/contracts/purge-authorization-v1.schema.json",
+  "title": "AgentPass human purge authorization v1",
+  "description": "A short-lived, human-approved authorization for purging one macOS AgentPass user-state target. It contains public identifiers and digests only; filesystem paths, credentials, and private key material are outside this contract.",
+  "type": "object",
+  "additionalProperties": false,
+  "maxProperties": 13,
+  "required": [
+    "version",
+    "type",
+    "authorization_id",
+    "intent",
+    "target",
+    "human_actor",
+    "issued_at",
+    "expires_at",
+    "nonce",
+    "signing_purpose",
+    "signature_algorithm",
+    "signer_key_fingerprint",
+    "signature"
+  ],
+  "properties": {
+    "version": { "const": 1 },
+    "type": { "const": "agentpass.purge-authorization" },
+    "authorization_id": { "$ref": "#/$defs/uuid" },
+    "intent": { "const": "purge-user-state" },
+    "target": { "$ref": "#/$defs/target" },
+    "human_actor": { "$ref": "#/$defs/human_actor" },
+    "issued_at": { "$ref": "#/$defs/canonical_timestamp" },
+    "expires_at": { "$ref": "#/$defs/canonical_timestamp" },
+    "nonce": { "$ref": "#/$defs/nonce" },
+    "signing_purpose": { "const": "AgentPass-Purge-Authorization-v1\u0000" },
+    "signature_algorithm": { "enum": ["webauthn-es256", "p256-sha256"] },
+    "signer_key_fingerprint": { "$ref": "#/$defs/key_fingerprint" },
+    "signature": { "$ref": "#/$defs/signature" }
+  },
+  "$defs": {
+    "uuid": {
+      "type": "string",
+      "minLength": 36,
+      "maxLength": 36,
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+    },
+    "canonical_timestamp": {
+      "type": "string",
+      "minLength": 24,
+      "maxLength": 24,
+      "format": "date-time",
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$"
+    },
+    "nonce": {
+      "type": "string",
+      "minLength": 22,
+      "maxLength": 22,
+      "pattern": "^[A-Za-z0-9_-]{22}$"
+    },
+    "key_fingerprint": {
+      "type": "string",
+      "minLength": 50,
+      "maxLength": 50,
+      "pattern": "^SHA256:[A-Za-z0-9_-]{43}$"
+    },
+    "signature": {
+      "type": "string",
+      "minLength": 86,
+      "maxLength": 86,
+      "pattern": "^[A-Za-z0-9_-]{86}$"
+    },
+    "target": {
+      "type": "object",
+      "additionalProperties": false,
+      "maxProperties": 5,
+      "required": ["organization_id", "device_id", "agent_id", "platform", "scope"],
+      "properties": {
+        "organization_id": { "$ref": "#/$defs/uuid" },
+        "device_id": { "$ref": "#/$defs/uuid" },
+        "agent_id": { "$ref": "#/$defs/uuid" },
+        "platform": { "const": "macos" },
+        "scope": { "const": "current-user-agent-state" }
+      }
+    },
+    "human_actor": {
+      "type": "object",
+      "additionalProperties": false,
+      "maxProperties": 4,
+      "required": ["organization_id", "member_id", "role", "authentication"],
+      "properties": {
+        "organization_id": { "$ref": "#/$defs/uuid" },
+        "member_id": { "$ref": "#/$defs/uuid" },
+        "role": { "enum": ["owner", "admin"] },
+        "authentication": { "const": "webauthn" }
+      }
+    }
+  }
+}

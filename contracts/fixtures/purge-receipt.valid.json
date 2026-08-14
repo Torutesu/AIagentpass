@@ -1,0 +1,29 @@
+{
+  "version": 1,
+  "type": "agentpass.purge-receipt",
+  "receipt_id": "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
+  "authorization_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+  "target": {
+    "organization_id": "22222222-2222-4222-8222-222222222222",
+    "device_id": "33333333-3333-4333-8333-333333333333",
+    "agent_id": "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+    "platform": "macos",
+    "scope": "current-user-agent-state"
+  },
+  "result": {
+    "status": "complete",
+    "removed": true,
+    "entry_count": 3,
+    "byte_count": 42
+  },
+  "digests": {
+    "authorization_sha256": "1111111111111111111111111111111111111111111111111111111111111111",
+    "target_sha256": "2222222222222222222222222222222222222222222222222222222222222222",
+    "result_sha256": "3333333333333333333333333333333333333333333333333333333333333333"
+  },
+  "completed_at": "2026-08-14T00:00:02.000Z",
+  "signing_purpose": "AgentPass-Purge-Receipt-v1\u0000",
+  "signature_algorithm": "p256-sha256",
+  "signer_key_fingerprint": "SHA256:BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB",
+  "signature": "IiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIg"
+}

@@ -1,0 +1,17 @@
+{
+  "operations": ["git.commit.sign"],
+  "repositories": ["/work/project"],
+  "branches": {
+    "allow": ["feature/*"],
+    "deny": ["main"]
+  },
+  "remotes": {
+    "allow": ["git@github.com:example/project.git"],
+    "deny": []
+  },
+  "session": {
+    "required": true,
+    "valid": true,
+    "ttl_seconds": 300
+  }
+}

@@ -1,0 +1,83 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agentpass.dev/contracts/policy-v1.schema.json",
+  "title": "AgentPass local authorization policy v1",
+  "description": "The closed policy shape consumed by lib/policy.mjs. It is a local policy intersection, not a bearer token or a signing envelope.",
+  "type": "object",
+  "additionalProperties": false,
+  "maxProperties": 6,
+  "required": ["operations", "repositories", "branches", "remotes"],
+  "properties": {
+    "operations": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 64,
+      "uniqueItems": true,
+      "items": { "$ref": "#/$defs/operation" }
+    },
+    "repositories": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 64,
+      "uniqueItems": true,
+      "items": { "$ref": "#/$defs/repositoryPattern" }
+    },
+    "branches": { "$ref": "#/$defs/patternSet" },
+    "remotes": { "$ref": "#/$defs/patternSet" },
+    "tags": { "$ref": "#/$defs/patternSet" },
+    "session": { "$ref": "#/$defs/session" }
+  },
+  "$defs": {
+    "operation": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:*+-]{0,127}$"
+    },
+    "repositoryPattern": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 2048,
+      "pattern": "^/(?!/)(?!.*(?:^|/)\\.{1,2}(?:/|$))[^\\u0000\\r\\n]*$"
+    },
+    "patternSet": {
+      "type": "object",
+      "additionalProperties": false,
+      "maxProperties": 2,
+      "required": ["allow"],
+      "properties": {
+        "allow": { "$ref": "#/$defs/patternList" },
+        "deny": {
+          "type": "array",
+          "maxItems": 256,
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/pattern" }
+        }
+      }
+    },
+    "patternList": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 256,
+      "uniqueItems": true,
+      "items": { "$ref": "#/$defs/pattern" }
+    },
+    "pattern": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 2048,
+      "pattern": "^[^\\u0000\\r\\n]+$"
+    },
+    "session": {
+      "type": "object",
+      "additionalProperties": false,
+      "maxProperties": 3,
+      "required": ["required"],
+      "properties": {
+        "required": { "type": "boolean" },
+        "valid": { "type": "boolean" },
+        "ttl_seconds": { "type": "integer", "minimum": 60, "maximum": 86400 }
+      }
+    }
+  }
+}

@@ -1,0 +1,124 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agentpass.dev/contracts/purge-receipt-v1.schema.json",
+  "title": "AgentPass public purge receipt v1",
+  "description": "A signed, path-free receipt for one exact user-state purge authorization. Counts and digests are public evidence; secret contents and filesystem paths are never serialized.",
+  "type": "object",
+  "additionalProperties": false,
+  "maxProperties": 13,
+  "required": [
+    "version",
+    "type",
+    "receipt_id",
+    "authorization_id",
+    "target",
+    "result",
+    "digests",
+    "completed_at",
+    "signing_purpose",
+    "signature_algorithm",
+    "signer_key_fingerprint",
+    "signature"
+  ],
+  "properties": {
+    "version": { "const": 1 },
+    "type": { "const": "agentpass.purge-receipt" },
+    "receipt_id": { "$ref": "#/$defs/uuid" },
+    "authorization_id": { "$ref": "#/$defs/uuid" },
+    "target": { "$ref": "#/$defs/target" },
+    "result": { "$ref": "#/$defs/result" },
+    "digests": { "$ref": "#/$defs/digests" },
+    "completed_at": { "$ref": "#/$defs/canonical_timestamp" },
+    "signing_purpose": { "const": "AgentPass-Purge-Receipt-v1\u0000" },
+    "signature_algorithm": { "const": "p256-sha256" },
+    "signer_key_fingerprint": { "$ref": "#/$defs/key_fingerprint" },
+    "signature": { "$ref": "#/$defs/signature" }
+  },
+  "$defs": {
+    "uuid": {
+      "type": "string",
+      "minLength": 36,
+      "maxLength": 36,
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+    },
+    "canonical_timestamp": {
+      "type": "string",
+      "minLength": 24,
+      "maxLength": 24,
+      "format": "date-time",
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$"
+    },
+    "digest": {
+      "type": "string",
+      "minLength": 64,
+      "maxLength": 64,
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "key_fingerprint": {
+      "type": "string",
+      "minLength": 50,
+      "maxLength": 50,
+      "pattern": "^SHA256:[A-Za-z0-9_-]{43}$"
+    },
+    "signature": {
+      "type": "string",
+      "minLength": 86,
+      "maxLength": 86,
+      "pattern": "^[A-Za-z0-9_-]{86}$"
+    },
+    "target": {
+      "type": "object",
+      "additionalProperties": false,
+      "maxProperties": 5,
+      "required": ["organization_id", "device_id", "agent_id", "platform", "scope"],
+      "properties": {
+        "organization_id": { "$ref": "#/$defs/uuid" },
+        "device_id": { "$ref": "#/$defs/uuid" },
+        "agent_id": { "$ref": "#/$defs/uuid" },
+        "platform": { "const": "macos" },
+        "scope": { "const": "current-user-agent-state" }
+      }
+    },
+    "result": {
+      "oneOf": [
+        { "$ref": "#/$defs/complete_result" },
+        { "$ref": "#/$defs/noop_result" }
+      ]
+    },
+    "complete_result": {
+      "type": "object",
+      "additionalProperties": false,
+      "maxProperties": 4,
+      "required": ["status", "removed", "entry_count", "byte_count"],
+      "properties": {
+        "status": { "const": "complete" },
+        "removed": { "const": true },
+        "entry_count": { "type": "integer", "minimum": 1, "maximum": 10000 },
+        "byte_count": { "type": "integer", "minimum": 1, "maximum": 1073741824 }
+      }
+    },
+    "noop_result": {
+      "type": "object",
+      "additionalProperties": false,
+      "maxProperties": 4,
+      "required": ["status", "removed", "entry_count", "byte_count"],
+      "properties": {
+        "status": { "const": "noop" },
+        "removed": { "const": false },
+        "entry_count": { "const": 0 },
+        "byte_count": { "const": 0 }
+      }
+    },
+    "digests": {
+      "type": "object",
+      "additionalProperties": false,
+      "maxProperties": 3,
+      "required": ["authorization_sha256", "target_sha256", "result_sha256"],
+      "properties": {
+        "authorization_sha256": { "$ref": "#/$defs/digest" },
+        "target_sha256": { "$ref": "#/$defs/digest" },
+        "result_sha256": { "$ref": "#/$defs/digest" }
+      }
+    }
+  }
+}

@@ -263,7 +263,7 @@ This is the implementation sequence after the 16/16 software-procedure checkpoin
 
 The authority split and compatibility rules are fixed by [`ADR-003-contract-authority-and-versioning.md`](./ADR-003-contract-authority-and-versioning.md). CI must validate the machine-readable catalog before running product tests so missing or ambiguous contracts cannot merge behind unrelated green tests.
 
-Implementation status (2026-08-14): the current 16 JSON Schemas, 41 OpenAPI operations, and 23 forward-only PostgreSQL migrations are inventoried in a frozen machine-readable catalog with tenant/actor, idempotency, expiry, signature-domain, implementation, and fixture metadata. The public Node protocol exposes a closed immutable parser manifest; the macOS management and Agent XPC surfaces have a runtime-verified selector/DTO/type-encoding fingerprint; raw PostgreSQL tenant queries reserve `$1` for the repository tenant; and Console capability responses are reduced to tenant- and audience-bound lifecycle metadata. CI and release-candidate workflows validate the catalog before product or signing steps. Phase 1 remains open until the still-embedded organization, membership, WebAuthn, policy, purge, and promotion structures are promoted to explicit versioned schemas and added to cross-language compatibility evidence.
+Implementation status (2026-08-14): Phase 1 has a 28-schema, 41-operation, 23-migration, 17-fixture inventory, but remains open. Organization, membership, invitation, WebAuthn credential/ceremony/recent authorization, policy, capability, and ControlBundle now have explicit closed schemas aligned to current runtime projections; duplicated Human and Device OpenAPI components reference those schema files. Purge authorization/receipt and promotion evidence are frozen as `specified`, not implemented: the current local purge and release-attestation code must not be represented as conforming to those future authority envelopes. The machine-readable catalog records this distinction for all 92 entries. Device identity remains represented by enrollment, possession, Device API, and Console read-model contracts; Agent identity remains represented by Agent Session Grant/Lease and sign-request contracts rather than an unused parallel identity envelope. The public Node protocol exposes a closed immutable parser manifest; the macOS management and Agent XPC surfaces have a runtime-verified selector/DTO/type-encoding fingerprint; raw PostgreSQL tenant queries reserve `$1` for the repository tenant; and Console capability responses are reduced to tenant- and audience-bound lifecycle metadata. CI and release-candidate workflows validate the catalog before product or signing steps. Phase 1 closes only when purge and promotion producers/verifiers implement their specified envelopes, compatibility tests exercise those exact bytes, and the two legacy raw-canonical-JSON signature preimages are either explicitly accepted as legacy or migrated through a versioned domain-separated contract.
 
 Deliverables:
 
@@ -455,3 +455,132 @@ Merge cadence:
 4. update the operator/user documentation and compatibility notes;
 5. record modeled, integration, physical, and production evidence as different evidence classes;
 6. promote only a clean commit that passes every gate required by the affected boundary.
+
+## 14. Executable backlog from the frozen-contract baseline
+
+This backlog turns the phases above into merge-sized increments. A batch is complete only when its code, negative tests, operator documentation, and evidence classification land together. Batches that change OpenAPI, canonical signing bytes, SQL migration numbers, XPC selectors, entitlements, installer paths, or release identities require integration-owner review before parallel work resumes.
+
+### Batch 0 — close the Phase 1 contract inventory
+
+Scope:
+
+1. promote organization, membership, invitation, WebAuthn credential/ceremony/recent authorization, policy, capability, ControlBundle, purge authorization/receipt, and promotion evidence into closed versioned JSON Schemas;
+2. replace duplicated inline OpenAPI components with external schema references;
+3. pair every promoted schema with a public, secret-free positive fixture and fail validation on missing required or unknown top-level fields;
+4. add each schema to the frozen catalog with its actual authority, tenant source, actor source, idempotency, expiry, signing domain, implementation references, and compatibility fixture;
+5. preserve separate schema versions and mutable resource revisions, and explicitly reject mixed-version downgrade paths.
+
+Done when `npm run contracts:validate`, the catalog tests, the full Node suite, the Swift suite, Console build/tests/lint, package checks, and secret scans pass from one clean commit. Phase 1 may then close only after a final inventory confirms that device and agent identity read models are either already represented by existing enrollment/session schemas or receive explicit standalone schemas.
+
+### Batch 1 — organization and human-session authority
+
+Merge slices:
+
+1. PostgreSQL repositories for organization creation, invitations, acceptance, membership role/status changes, and organization/member session epochs, always reserving the first SQL parameter for `organization_id`;
+2. transactionally enforced Owner/Admin/Developer/Viewer permissions, last-owner protection, invitation expiry/one-time consumption, and role-downgrade session invalidation;
+3. rotating opaque server-side sessions with hashed tokens, CSRF binding, absolute and idle expiry, device/session inventory, revoke-one, revoke-all, and enumeration-safe errors;
+4. Human API handlers generated from the frozen DTOs without leaking passwordless ceremony state or reusable bearer material;
+5. audit records for every authority change, including denied attempts, with stable reason codes and no secrets.
+
+Required tests:
+
+- two-organization read/write isolation for every repository and route;
+- concurrent invitation acceptance, last-owner demotion, session rotation, revoke, and epoch-change races against real PostgreSQL;
+- process-kill tests at transaction commit/response-loss boundaries proving exact retry behavior;
+- property tests for unknown fields, stale versions, tenant substitution, and actor substitution.
+
+### Batch 2 — production WebAuthn and recovery
+
+Merge slices:
+
+1. registration options, attestation verification, credential metadata storage, list/rename/revoke, and authentication options/assertion verification using exact production RP ID and allow-listed HTTPS origins;
+2. durable one-time ceremonies storing only challenge digests, bounded attempts, short expiry, consuming state, exact retry semantics, and cleanup;
+3. sign-counter handling that distinguishes reliable counters, zero/non-incrementing authenticators, backup eligibility/state changes, and cloned-credential risk without accidental lockout;
+4. operation-bound recent authorization for role changes, emergency stop, device revoke, recovery changes, and purge, consumed atomically with the protected mutation;
+5. versioned threshold-owner recovery with hashed one-time material, restricted recovery sessions, passkey re-enrollment, delay/notification controls, and a fresh recent authorization before authority is restored.
+
+Required tests:
+
+- Playwright virtual-authenticator coverage for registration, login, step-up, credential loss, revoke, and recovery;
+- negative origin, RP ID, challenge replay, counter rollback, cross-session, cross-member, cross-organization, expiry, and concurrent-consumption cases;
+- recovery tests proving that neither one support operator nor one lost owner can silently take over an organization.
+
+### Batch 3 — authoritative Device API and PostgreSQL operations
+
+Merge slices:
+
+1. production route composition for enrollment, possession challenge/receipt, bundle refresh, signed ACK, audit ingest, Agent Session Grant consumption, revoke, emergency stop, and qualification Grant batches;
+2. transactional repositories for generations, replay ledgers, nonce rotation, exact retries, outbox/ACK state, audit chain heads, recovery journals, and bounded retention;
+3. one forward-only migration job per deployment, startup schema compatibility checks, TLS-required least-privilege roles, RLS defense in depth, backup/PITR, and restore verification;
+4. PostgreSQL-backed shared rate limits and concurrent-session ceilings that remain effective across API replicas;
+5. metrics and alerts for signer failures, stale bundles, replay denial, tenant-binding denial, outbox lag, audit-chain gaps, migration drift, and restore health.
+
+Required tests:
+
+- real PostgreSQL contention and process-kill matrices for every one-shot or exact-retry transition;
+- tenant SQL static review plus dynamic cross-tenant tests under both application roles and RLS;
+- restore tests proving consumed grants remain consumed and authoritative generation/audit heads are unchanged.
+
+### Batch 4 — managed signer separation
+
+Merge slices:
+
+1. move capability, ControlBundle, refresh hint, possession receipt, Agent Session Grant, qualification manifest, and promotion evidence signing behind distinct KMS/HSM keys and workload identities;
+2. pin algorithm, purpose, key ID, and key version into the signed contract and public evidence; never accept caller-selected signing purpose;
+3. implement rotation with explicit active/retiring/revoked states, bounded verification overlap, drain checks, rollback refusal, and emergency disable;
+4. make response-loss retries return the exact previously committed signed bytes rather than producing a second authority object;
+5. document IAM, rotation, outage, compromise, restore, and audit procedures.
+
+Required tests:
+
+- IAM tests proving each service can invoke only its assigned signing purpose and cannot export key material;
+- cross-purpose, cross-key, old-version, algorithm, malformed-response, timeout, outage, and response-loss tests;
+- rotation and restore drills preserving verification of required historical audit/evidence while denying new authority from retired keys.
+
+### Batch 5 — Console product journey
+
+Implement the production-built Console as a thin, secret-free control surface over authoritative Human API state. The screen order is: sign in/passkey → organization selection/create → invite and roles → device enrollment → repository policy → Claude Code/Cursor launch instructions → active sessions → audit → revoke/emergency stop → purge. Every optimistic action must reconcile to PostgreSQL state or a signed device ACK before displaying success.
+
+Acceptance includes Owner/Admin/Developer/Viewer Playwright matrices, keyboard and screen-reader flows, mobile-safe recovery, localization-ready copy, expired/conflict/offline states, CSP/CSRF/cookie checks, and proof that credentials, challenges, capabilities, private evidence, and reusable tokens never enter browser storage or telemetry.
+
+### Batch 6 — native onboarding and agent adapters
+
+Merge slices:
+
+1. resumable `verify → initialize → enroll → bind organization/device → install policy → connect agent → test signed commit` state machine shared by the app and CLI;
+2. `agentpass install`, `setup`, `doctor`, `launch`, `status`, `close`, `revoke`, and lifecycle-safe uninstall/purge commands with actionable, secret-free diagnostics;
+3. pinned Claude Code adapter first, then Cursor parity, both launched by the signed Agent Host with verified process/ancestry identity and fixed-FD activation transfer;
+4. preserve existing Git configuration, deny repository/worktree/branch/operation/TTL/generation substitutions, and keep all private keys inside Secure Enclave/Keychain/XPC boundaries;
+5. upgrade, rollback-refusal, uninstall-preserve, reinstall-recover, and explicit purge journals that converge safely after interruption.
+
+Acceptance is two unattended verified commits per adapter, plus negative executable/PID-reuse/ancestry/scope/replay tests and clean-machine lifecycle tests with no secrets in argv, environment, shell history, repository files, logs, crash reports, or browser storage.
+
+### Batch 7 — signed distribution and qualification
+
+1. create one universal hardened-runtime PKG containing the app, XPC services, launchd jobs, helper, CLI, and signer;
+2. generate SBOM, provenance, nested code-identity manifest, checksums, notarization evidence, and an independently verifiable promotion record;
+3. publish direct download and Homebrew bootstrap paths that both fetch and verify the exact same immutable PKG; provide offline verification;
+4. deploy immutable Console/API/worker images with a separate migration role, canary, rollback, observability, paging, backups, and incident runbooks;
+5. run browser-to-Cloud-to-device-to-Secure-Enclave E2E and all 16 physical gates on Apple Silicon and Intel T2 against the same commit and PKG;
+6. complete independent security review, fix every critical/high finding, and attach accepted lower findings to an owner and deadline.
+
+Promotion is allowed only when one signed record binds the commit, image and PKG digests, nested identities, Team ID, notarization ticket, migration set, signer key versions, browser/E2E evidence, security review, restore drill, and both untouched physical-Mac reports.
+
+### Recommended merge order and parallelism
+
+The next critical path is Batch 0 → Batch 1 session/organization core → Batch 2 WebAuthn step-up → Batch 3 authoritative Device API → Batch 6 Claude Code vertical slice. In parallel, Console presentation can follow frozen Human DTOs, managed-signer adapters can follow frozen signing domains, and packaging automation can follow frozen native identities. Cursor parity, recovery, broad UI polish, and production promotion follow the first Claude Code end-to-end path so they reuse a proven authority lifecycle instead of creating a second one.
+
+At each merge boundary run, at minimum:
+
+```text
+npm run contracts:validate
+npm run lint
+npm test
+npm run test:native
+npm run test:native-app
+npm run test:native-installer-preservation
+npm test --prefix apps/web-console
+npm run lint --prefix apps/web-console
+```
+
+Add real PostgreSQL, Playwright, packaging/notarization, KMS/IAM, restore, and physical-lane gates whenever the changed boundary requires them. A modeled or skipped test is never reported as production or physical evidence.

@@ -1,0 +1,156 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agentpass.dev/contracts/control-bundle-v2.schema.json",
+  "title": "AgentPass ControlBundle v2",
+  "description": "The closed device-targeted Ed25519-signed ControlBundle v2 accepted by the Cloud bundle issuer, Node verifier, native codec, and Device API.",
+  "type": "object",
+  "additionalProperties": false,
+  "maxProperties": 16,
+  "$comment": "Runtime invariants not expressible in standard JSON Schema: audience.organization_id must equal organization_id; audience.device_id must equal device_id; expires_at must be after issued_at and within the seven-day TTL; each revocation list is lexically sorted; signature covers the canonical object without signature and is purpose-separated; offline use is bounded by offline_ttl_ms.",
+  "required": [
+    "format_epoch",
+    "issuer",
+    "organization_id",
+    "device_id",
+    "audience",
+    "issued_at",
+    "expires_at",
+    "sequence",
+    "policy_scope",
+    "global_revoked",
+    "revoked_devices",
+    "revoked_agents",
+    "revoked_capabilities",
+    "offline_ttl_ms",
+    "key_id",
+    "signature"
+  ],
+  "properties": {
+    "format_epoch": { "const": 2 },
+    "issuer": { "$ref": "#/$defs/identifier" },
+    "organization_id": { "$ref": "#/$defs/uuid" },
+    "device_id": { "$ref": "#/$defs/uuid" },
+    "audience": { "$ref": "#/$defs/audience" },
+    "issued_at": { "$ref": "#/$defs/canonicalTimestamp" },
+    "expires_at": { "$ref": "#/$defs/canonicalTimestamp" },
+    "sequence": { "$ref": "#/$defs/positiveSafeInteger" },
+    "policy_scope": { "$ref": "#/$defs/policyScope" },
+    "global_revoked": { "type": "boolean" },
+    "revoked_devices": { "$ref": "#/$defs/revocationList" },
+    "revoked_agents": { "$ref": "#/$defs/revocationList" },
+    "revoked_capabilities": { "$ref": "#/$defs/revocationList" },
+    "offline_ttl_ms": { "type": "integer", "minimum": 1, "maximum": 604800000 },
+    "key_id": { "$ref": "#/$defs/identifier" },
+    "signature": { "$ref": "#/$defs/signature" }
+  },
+  "$defs": {
+    "uuid": {
+      "type": "string",
+      "format": "uuid",
+      "minLength": 36,
+      "maxLength": 36,
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+    },
+    "identifier": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+    },
+    "canonicalTimestamp": {
+      "type": "string",
+      "minLength": 24,
+      "maxLength": 24,
+      "format": "date-time",
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$"
+    },
+    "positiveSafeInteger": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 9007199254740991
+    },
+    "signature": {
+      "description": "Canonical padded base64 Ed25519 signature for exactly 64 bytes.",
+      "type": "string",
+      "minLength": 88,
+      "maxLength": 88,
+      "pattern": "^[A-Za-z0-9+/]{86}==$"
+    },
+    "audience": {
+      "type": "object",
+      "additionalProperties": false,
+      "maxProperties": 2,
+      "required": ["organization_id", "device_id"],
+      "properties": {
+        "organization_id": { "$ref": "#/$defs/uuid" },
+        "device_id": { "$ref": "#/$defs/uuid" }
+      }
+    },
+    "policyScope": {
+      "type": "object",
+      "additionalProperties": false,
+      "maxProperties": 5,
+      "required": ["operations", "repositories", "branches", "remotes"],
+      "properties": {
+        "operations": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 256,
+          "uniqueItems": true,
+          "items": { "const": "git.commit.sign" }
+        },
+        "repositories": { "$ref": "#/$defs/repositoryList" },
+        "branches": { "$ref": "#/$defs/patternSet" },
+        "remotes": { "$ref": "#/$defs/patternSet" },
+        "tags": { "$ref": "#/$defs/patternSet" }
+      }
+    },
+    "repositoryList": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 256,
+      "uniqueItems": true,
+      "items": { "$ref": "#/$defs/repositoryPattern" }
+    },
+    "repositoryPattern": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 2048,
+      "pattern": "^/(?!/)(?!.*(?:^|/)\\.{1,2}(?:/|$))[^\\u0000\\r\\n]*$"
+    },
+    "patternSet": {
+      "type": "object",
+      "additionalProperties": false,
+      "maxProperties": 2,
+      "required": ["allow"],
+      "properties": {
+        "allow": { "$ref": "#/$defs/patternList" },
+        "deny": {
+          "type": "array",
+          "maxItems": 256,
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/pattern" }
+        }
+      }
+    },
+    "patternList": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 256,
+      "uniqueItems": true,
+      "items": { "$ref": "#/$defs/pattern" }
+    },
+    "pattern": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 2048,
+      "pattern": "^[^\\u0000\\r\\n]+$"
+    },
+    "revocationList": {
+      "type": "array",
+      "maxItems": 256,
+      "uniqueItems": true,
+      "items": { "$ref": "#/$defs/uuid" }
+    }
+  }
+}
