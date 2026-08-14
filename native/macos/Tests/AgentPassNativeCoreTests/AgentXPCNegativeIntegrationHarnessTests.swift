@@ -7,9 +7,8 @@ private let harnessSessionID = "33333333-3333-4333-8333-333333333333"
 private let harnessRequestID = "55555555-5555-4555-8555-555555555555"
 private let harnessCapabilityID = "66666666-6666-4666-8666-666666666666"
 private let harnessErrorDomain = "dev.agentpass.agent.xpc.harness"
-// The full native suite deliberately runs hundreds of filesystem and crypto
-// tests in parallel. Give the real XPC daemon enough scheduling headroom while
-// retaining a finite failure bound for this integration harness.
+// The timeout runs on Dispatch rather than blocking a Swift cooperative-executor
+// thread, so the full parallel native suite cannot starve XPC and URLSession work.
 private let harnessReplyTimeout: DispatchTimeInterval = .seconds(15)
 
 private final class HarnessResultBox<Value>: @unchecked Sendable {
@@ -17,6 +16,29 @@ private final class HarnessResultBox<Value>: @unchecked Sendable {
     private var value: Value?
     func set(_ value: Value) { lock.withLock { self.value = value } }
     func get() -> Value? { lock.withLock { value } }
+}
+
+private final class HarnessContinuation: @unchecked Sendable {
+    private let lock = NSLock()
+    private var continuation: CheckedContinuation<Void, Never>?
+
+    init(_ continuation: CheckedContinuation<Void, Never>) {
+        self.continuation = continuation
+    }
+
+    func resume() {
+        let pending = lock.withLock { () -> CheckedContinuation<Void, Never>? in
+            defer { continuation = nil }
+            return continuation
+        }
+        pending?.resume()
+    }
+}
+
+private func enforceHarnessReplyTimeout(_ reply: HarnessContinuation) {
+    DispatchQueue.global(qos: .userInitiated).asyncAfter(deadline: .now() + harnessReplyTimeout) {
+        reply.resume()
+    }
 }
 
 private final class DummyAgentEndpoint: NSObject, AgentPassAgentXPCProtocol, @unchecked Sendable {
@@ -92,23 +114,27 @@ private func protocolSelectors(_ proto: Protocol) -> Set<String> {
     return Set((0..<Int(count)).compactMap { descriptions[$0].name.map(NSStringFromSelector) })
 }
 
-@Test func agentAnonymousXPCInvokesOnlyTheExactAgentStatusSelector() throws {
+@Test func agentAnonymousXPCInvokesOnlyTheExactAgentStatusSelector() async throws {
     let harness = AgentNegativeHarness()
     let connection = harness.connection(interface: AgentPassAgentXPCInterface.make())
-    let proxy = connection.remoteObjectProxyWithErrorHandler { _ in } as! AgentPassAgentXPCProtocol
     let request = try #require(AgentPassAgentSessionStatusRequest(sessionID: harnessSessionID))
     let result = HarnessResultBox<AgentPassAgentSessionStatusResponse>()
-    let done = DispatchSemaphore(value: 0)
-    proxy.agentSessionStatus(request) { response, _ in
-        if let response { result.set(response) }
-        done.signal()
+    await withCheckedContinuation { continuation in
+        let reply = HarnessContinuation(continuation)
+        enforceHarnessReplyTimeout(reply)
+        let proxy = connection.remoteObjectProxyWithErrorHandler { _ in
+            reply.resume()
+        } as! AgentPassAgentXPCProtocol
+        proxy.agentSessionStatus(request) { response, _ in
+            if let response { result.set(response) }
+            reply.resume()
+        }
     }
-    #expect(done.wait(timeout: .now() + harnessReplyTimeout) == .success)
     #expect(result.get()?.status == "active")
     #expect(harness.endpoint.invoked == ["agentSessionStatus:withReply:"])
 }
 
-@Test func agentInterfaceHasNoManagementSelectorAndManagementProxyCannotDispatch() {
+@Test func agentInterfaceHasNoManagementSelectorAndManagementProxyCannotDispatch() async {
     let interface = AgentPassAgentXPCInterface.make()
     let agentSelectors = protocolSelectors(AgentPassAgentXPCProtocol.self)
     let managementSelectors = protocolSelectors(AgentPassNativeServiceProtocol.self)
@@ -119,26 +145,41 @@ private func protocolSelectors(_ proto: Protocol) -> Set<String> {
     let harness = AgentNegativeHarness()
     let connection = harness.connection(interface: NSXPCInterface(with: AgentPassNativeServiceProtocol.self))
     let result = HarnessResultBox<NSError>()
-    let done = DispatchSemaphore(value: 0)
-    let proxy = connection.remoteObjectProxyWithErrorHandler { error in result.set(error as NSError); done.signal() } as! AgentPassNativeServiceProtocol
-    proxy.sign(request: Data("management-probe".utf8) as NSData) { _, error in
-        result.set(error ?? NSError(domain: harnessErrorDomain, code: 1999)); done.signal()
+    await withCheckedContinuation { continuation in
+        let reply = HarnessContinuation(continuation)
+        enforceHarnessReplyTimeout(reply)
+        let proxy = connection.remoteObjectProxyWithErrorHandler { error in
+            result.set(error as NSError)
+            reply.resume()
+        } as! AgentPassNativeServiceProtocol
+        proxy.sign(request: Data("management-probe".utf8) as NSData) { _, error in
+            result.set(error ?? NSError(domain: harnessErrorDomain, code: 1999))
+            reply.resume()
+        }
     }
-    #expect(done.wait(timeout: .now() + harnessReplyTimeout) == .success)
-    #expect(result.get() != nil)
-    #expect(result.get()?.code != 1999)
+    let error = result.get()
+    #expect(error != nil)
+    #expect(error?.code != 1999)
     #expect(harness.endpoint.invoked.isEmpty)
 }
 
-@Test func agentDeniedSignReturnsAStableFailClosedNSError() throws {
+@Test func agentDeniedSignReturnsAStableFailClosedNSError() async throws {
     let harness = AgentNegativeHarness(endpoint: DummyAgentEndpoint(denySigning: true))
     let connection = harness.connection(interface: AgentPassAgentXPCInterface.make())
-    let proxy = connection.remoteObjectProxyWithErrorHandler { _ in } as! AgentPassAgentXPCProtocol
     let request = try #require(AgentPassAgentSignRequest(sessionID: harnessSessionID, requestID: harnessRequestID, capabilityID: harnessCapabilityID, commitPayload: Data("tree abc\n\nmessage\n".utf8), requestNonce: Data(repeating: 1, count: 32), createdAtMilliseconds: 4_000_000_000_000))
     let result = HarnessResultBox<NSError>()
-    let done = DispatchSemaphore(value: 0)
-    proxy.signGitCommit(request) { _, error in if let error { result.set(error) }; done.signal() }
-    #expect(done.wait(timeout: .now() + harnessReplyTimeout) == .success)
+    await withCheckedContinuation { continuation in
+        let reply = HarnessContinuation(continuation)
+        enforceHarnessReplyTimeout(reply)
+        let proxy = connection.remoteObjectProxyWithErrorHandler { error in
+            result.set(error as NSError)
+            reply.resume()
+        } as! AgentPassAgentXPCProtocol
+        proxy.signGitCommit(request) { _, error in
+            if let error { result.set(error) }
+            reply.resume()
+        }
+    }
     let error = try #require(result.get())
     #expect(error.domain == harnessErrorDomain)
     #expect(error.code == 1001)
