@@ -1,3 +1,5 @@
+import crypto from "node:crypto";
+
 import {
   createAwsKmsEd25519Provider
 } from "./aws-kms-provider.mjs";
@@ -27,6 +29,7 @@ import {
   POSSESSION_RECEIPT_VERSION
 } from "./possession-receipt-signer.mjs";
 import { parsePossessionReceiptSignerConfig } from "./possession-receipt-signer-config.mjs";
+import { SIGNER_PURPOSE_REGISTRY } from "./signer-purpose-registry.mjs";
 import {
   PROTOCOL_VERSION,
   REFRESH_HINT_SIGNATURE_ALGORITHM,
@@ -38,7 +41,11 @@ export const KMS_PROVIDER_RUNTIME_ENV = Object.freeze({
   agentSessionResource: "AGENTPASS_KMS_AGENT_SESSION_KEY_RESOURCE",
   qualificationManifestResource: "AGENTPASS_KMS_QUALIFICATION_MANIFEST_KEY_RESOURCE",
   possessionReceiptResource: "AGENTPASS_KMS_POSSESSION_RECEIPT_KEY_RESOURCE",
-  refreshHintResource: "AGENTPASS_KMS_REFRESH_HINT_KEY_RESOURCE"
+  refreshHintResource: "AGENTPASS_KMS_REFRESH_HINT_KEY_RESOURCE",
+  capabilityResource: "AGENTPASS_KMS_CAPABILITY_KEY_RESOURCE",
+  controlBundleResource: "AGENTPASS_KMS_CONTROL_BUNDLE_KEY_RESOURCE",
+  auditAnchorResource: "AGENTPASS_KMS_AUDIT_ANCHOR_KEY_RESOURCE",
+  promotionEvidenceResource: "AGENTPASS_KMS_PROMOTION_EVIDENCE_KEY_RESOURCE"
 });
 
 export const KMS_PROVIDER_RUNTIME_ERROR_CODES = Object.freeze({
@@ -51,7 +58,26 @@ const KMS_ENV_PREFIX = "AGENTPASS_KMS_";
 const ALLOWED_KMS_ENV = new Set(Object.values(KMS_PROVIDER_RUNTIME_ENV));
 const PROVIDERS = new Set(["aws", "gcp"]);
 const AWS_RESOURCE = /^[A-Za-z0-9][A-Za-z0-9:/._-]{0,2047}$/u;
+const AWS_KEY_RESOURCE = /^arn:aws:kms:[a-z0-9-]+:[0-9]{12}:key\/[A-Za-z0-9][A-Za-z0-9:/._-]{0,2047}$/u;
 const GCP_RESOURCE = /^projects\/[A-Za-z0-9._-]+\/locations\/[A-Za-z0-9._-]+\/keyRings\/[A-Za-z0-9._-]+\/cryptoKeys\/[A-Za-z0-9._-]+\/cryptoKeyVersions\/[A-Za-z0-9._-]+$/u;
+const KEY_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$/u;
+const MAX_PUBLIC_KEY_BYTES = 8 * 1024;
+
+const PURPOSE_DEFINITIONS = Object.freeze([
+  { name: "agentSession", registryName: "agent_session_grant", providerName: "agentSessionSignerProvider", resource: "agentSessionResource", keyIdEnv: "AGENTPASS_CLOUD_AGENT_SESSION_KEY_ID", publicKeyEnv: "AGENTPASS_CLOUD_AGENT_SESSION_PUBLIC_KEY", timeoutEnv: "AGENTPASS_CLOUD_AGENT_SESSION_TIMEOUT_MS", purpose: AGENT_SESSION_GRANT_TYPE, version: AGENT_SESSION_GRANT_VERSION, parse: parseAgentSessionSignerConfig },
+  { name: "qualificationManifest", registryName: "qualification_manifest", providerName: "qualificationManifestSignerProvider", resource: "qualificationManifestResource", keyIdEnv: "AGENTPASS_CLOUD_QUALIFICATION_MANIFEST_KEY_ID", publicKeyEnv: "AGENTPASS_CLOUD_QUALIFICATION_MANIFEST_PUBLIC_KEY", timeoutEnv: "AGENTPASS_CLOUD_QUALIFICATION_MANIFEST_TIMEOUT_MS", purpose: QUALIFICATION_GRANT_BATCH_MANIFEST_PURPOSE, version: QUALIFICATION_GRANT_BATCH_MANIFEST_VERSION, parse: parseQualificationManifestSignerConfig },
+  { name: "possessionReceipt", registryName: "possession_receipt", providerName: "possessionReceiptSignerProvider", resource: "possessionReceiptResource", keyIdEnv: "AGENTPASS_CLOUD_POSSESSION_RECEIPT_KEY_ID", publicKeyEnv: "AGENTPASS_CLOUD_POSSESSION_RECEIPT_PUBLIC_KEY", timeoutEnv: "AGENTPASS_CLOUD_POSSESSION_RECEIPT_TIMEOUT_MS", purpose: POSSESSION_RECEIPT_PURPOSE, version: POSSESSION_RECEIPT_VERSION, parse: parsePossessionReceiptSignerConfig },
+  { name: "refreshHint", registryName: "refresh_hint", providerName: "refreshHintSignerProvider", resource: "refreshHintResource", keyIdEnv: "AGENTPASS_CLOUD_REFRESH_KEY_ID", publicKeyEnv: "AGENTPASS_CLOUD_REFRESH_PUBLIC_KEY", timeoutEnv: "AGENTPASS_CLOUD_REFRESH_TIMEOUT_MS", purpose: REFRESH_HINT_TYPE, version: PROTOCOL_VERSION, parse: parseRefreshHintSignerConfig },
+  { name: "capability", registryName: "capability", providerName: "capabilitySignerProvider", resource: "capabilityResource", keyIdEnv: "AGENTPASS_CLOUD_CAPABILITY_KEY_ID", publicKeyEnv: "AGENTPASS_CLOUD_CAPABILITY_PUBLIC_KEY", timeoutEnv: "AGENTPASS_CLOUD_CAPABILITY_TIMEOUT_MS", purpose: SIGNER_PURPOSE_REGISTRY.capability.purpose, version: SIGNER_PURPOSE_REGISTRY.capability.protocol_version },
+  { name: "controlBundle", registryName: "control_bundle", providerName: "controlBundleSignerProvider", resource: "controlBundleResource", keyIdEnv: "AGENTPASS_CLOUD_CONTROL_BUNDLE_KEY_ID", publicKeyEnv: "AGENTPASS_CLOUD_CONTROL_BUNDLE_PUBLIC_KEY", timeoutEnv: "AGENTPASS_CLOUD_CONTROL_BUNDLE_TIMEOUT_MS", purpose: SIGNER_PURPOSE_REGISTRY.control_bundle.purpose, version: SIGNER_PURPOSE_REGISTRY.control_bundle.protocol_version },
+  { name: "auditAnchor", registryName: "audit_anchor", providerName: "auditAnchorSignerProvider", resource: "auditAnchorResource", keyIdEnv: "AGENTPASS_CLOUD_AUDIT_ANCHOR_KEY_ID", publicKeyEnv: "AGENTPASS_CLOUD_AUDIT_ANCHOR_PUBLIC_KEY", timeoutEnv: "AGENTPASS_CLOUD_AUDIT_ANCHOR_TIMEOUT_MS", purpose: SIGNER_PURPOSE_REGISTRY.audit_anchor.purpose, version: SIGNER_PURPOSE_REGISTRY.audit_anchor.protocol_version },
+  { name: "promotionEvidence", registryName: "promotion_evidence", providerName: "promotionEvidenceSignerProvider", resource: "promotionEvidenceResource", keyIdEnv: "AGENTPASS_CLOUD_PROMOTION_EVIDENCE_KEY_ID", publicKeyEnv: "AGENTPASS_CLOUD_PROMOTION_EVIDENCE_PUBLIC_KEY", timeoutEnv: "AGENTPASS_CLOUD_PROMOTION_EVIDENCE_TIMEOUT_MS", purpose: SIGNER_PURPOSE_REGISTRY.promotion_evidence.purpose, version: SIGNER_PURPOSE_REGISTRY.promotion_evidence.protocol_version }
+]);
+const LEGACY_PURPOSE_DEFINITIONS = PURPOSE_DEFINITIONS.slice(0, 4);
+const EXTENDED_PURPOSE_DEFINITIONS = PURPOSE_DEFINITIONS.slice(4);
+const EXTENDED_CONFIG_ENV = Object.freeze(EXTENDED_PURPOSE_DEFINITIONS.flatMap(({ resource, keyIdEnv, publicKeyEnv, timeoutEnv }) => [
+  KMS_PROVIDER_RUNTIME_ENV[resource], keyIdEnv, publicKeyEnv, timeoutEnv
+]));
 
 const ERROR_MESSAGES = Object.freeze({
   [KMS_PROVIDER_RUNTIME_ERROR_CODES.CONFIG]: "hosted KMS provider configuration is invalid",
@@ -82,7 +108,8 @@ export async function createHostedKmsProviders({
   keyLifecycles = {}
 } = {}) {
   const config = parseKmsProviderRuntimeConfig(env);
-  if (!plainObject(keyLifecycles) || Object.keys(keyLifecycles).some((key) => !["agentSession", "qualificationManifest", "possessionReceipt", "refreshHint"].includes(key))) {
+  const allowedLifecycleKeys = new Set(config.purposes.map(({ name }) => name));
+  if (!plainObject(keyLifecycles) || Object.keys(keyLifecycles).some((key) => !allowedLifecycleKeys.has(key))) {
     throw new KmsProviderRuntimeError(KMS_PROVIDER_RUNTIME_ERROR_CODES.CONFIG);
   }
   let sdk;
@@ -113,71 +140,59 @@ export function parseKmsProviderRuntimeConfig(env = process.env) {
   const qualificationManifestResource = env[KMS_PROVIDER_RUNTIME_ENV.qualificationManifestResource];
   const possessionReceiptResource = env[KMS_PROVIDER_RUNTIME_ENV.possessionReceiptResource];
   const refreshHintResource = env[KMS_PROVIDER_RUNTIME_ENV.refreshHintResource];
+  const extended = EXTENDED_CONFIG_ENV.some((name) => Object.hasOwn(env, name));
+  const definitions = extended ? PURPOSE_DEFINITIONS : LEGACY_PURPOSE_DEFINITIONS;
+  const resources = Object.fromEntries(definitions.map((definition) => [definition.name, env[KMS_PROVIDER_RUNTIME_ENV[definition.resource]] ?? env[definition.resource]]));
   if (!PROVIDERS.has(provider) || typeof agentSessionResource !== "string" || typeof qualificationManifestResource !== "string"
     || typeof possessionReceiptResource !== "string" || typeof refreshHintResource !== "string"
     || agentSessionResource.length < 1 || qualificationManifestResource.length < 1
     || possessionReceiptResource.length < 1 || refreshHintResource.length < 1
-    || new Set([agentSessionResource, qualificationManifestResource, possessionReceiptResource, refreshHintResource]).size !== 4) {
+    || new Set([agentSessionResource, qualificationManifestResource, possessionReceiptResource, refreshHintResource, ...definitions.slice(4).map((definition) => resources[definition.name])]).size !== definitions.length) {
     fail(KMS_PROVIDER_RUNTIME_ERROR_CODES.CONFIG);
   }
   const resourcePattern = provider === "aws" ? AWS_RESOURCE : GCP_RESOURCE;
+  const extendedResourcePattern = provider === "aws" ? AWS_KEY_RESOURCE : GCP_RESOURCE;
   if (!resourcePattern.test(agentSessionResource) || !resourcePattern.test(qualificationManifestResource)
-    || !resourcePattern.test(possessionReceiptResource) || !resourcePattern.test(refreshHintResource)) {
+    || !resourcePattern.test(possessionReceiptResource) || !resourcePattern.test(refreshHintResource)
+    || definitions.slice(4).some((definition) => !extendedResourcePattern.test(resources[definition.name] ?? ""))) {
     fail(KMS_PROVIDER_RUNTIME_ERROR_CODES.CONFIG);
   }
 
-  let agentSession;
-  let qualificationManifest;
-  let possessionReceipt;
-  let refreshHint;
+  const parsed = {};
   try {
-    agentSession = parseAgentSessionSignerConfig(env);
-    qualificationManifest = parseQualificationManifestSignerConfig(env);
-    possessionReceipt = parsePossessionReceiptSignerConfig(env);
-    refreshHint = parseRefreshHintSignerConfig(env);
+    for (const definition of definitions) {
+      parsed[definition.name] = definition.parse
+        ? definition.parse(env)
+        : parseGenericSignerConfig(env, definition);
+    }
   } catch {
     fail(KMS_PROVIDER_RUNTIME_ERROR_CODES.CONFIG);
   }
-  if (agentSession.keyId === qualificationManifest.keyId
-    || agentSession.keyId === possessionReceipt.keyId
-    || qualificationManifest.keyId === possessionReceipt.keyId
-    || agentSession.keyId === refreshHint.keyId
-    || qualificationManifest.keyId === refreshHint.keyId
-    || possessionReceipt.keyId === refreshHint.keyId
-    || agentSession.publicKeyFingerprint === qualificationManifest.publicKeyFingerprint
-    || agentSession.publicKeyFingerprint === possessionReceipt.publicKeyFingerprint
-    || qualificationManifest.publicKeyFingerprint === possessionReceipt.publicKeyFingerprint
-    || agentSession.publicKeyFingerprint === refreshHint.publicKeyFingerprint
-    || qualificationManifest.publicKeyFingerprint === refreshHint.publicKeyFingerprint
-    || possessionReceipt.publicKeyFingerprint === refreshHint.publicKeyFingerprint) {
+  if (new Set(definitions.map(({ name }) => parsed[name].keyId)).size !== definitions.length
+    || new Set(definitions.map(({ name }) => parsed[name].publicKeyFingerprint)).size !== definitions.length) {
     fail(KMS_PROVIDER_RUNTIME_ERROR_CODES.CONFIG);
   }
-  return Object.freeze({
+  const purposes = definitions.map((definition) => Object.freeze({
+    ...definition,
+    resourceId: resources[definition.name],
+    keyId: parsed[definition.name].keyId,
+    publicKey: parsed[definition.name].publicKeyPem ?? env[definition.publicKeyEnv],
+    publicKeyFingerprint: parsed[definition.name].publicKeyFingerprint,
+    timeoutMs: parsed[definition.name].timeoutMs
+  }));
+  return deepFreeze({
     provider,
     agentSessionResource,
     qualificationManifestResource,
     possessionReceiptResource,
     refreshHintResource,
-    agentSession: Object.freeze({
-      keyId: agentSession.keyId,
-      publicKey: agentSession.publicKeyPem,
-      timeoutMs: agentSession.timeoutMs
-    }),
-    qualificationManifest: Object.freeze({
-      keyId: qualificationManifest.keyId,
-      publicKey: env.AGENTPASS_CLOUD_QUALIFICATION_MANIFEST_PUBLIC_KEY,
-      timeoutMs: qualificationManifest.timeoutMs
-    }),
-    possessionReceipt: Object.freeze({
-      keyId: possessionReceipt.keyId,
-      publicKey: possessionReceipt.publicKeyPem,
-      timeoutMs: possessionReceipt.timeoutMs
-    }),
-    refreshHint: Object.freeze({
-      keyId: refreshHint.keyId,
-      publicKey: refreshHint.publicKeyPem,
-      timeoutMs: refreshHint.timeoutMs
-    })
+    ...Object.fromEntries(purposes.map((purpose) => [purpose.name, Object.freeze({
+      keyId: purpose.keyId,
+      publicKey: purpose.publicKey,
+      timeoutMs: purpose.timeoutMs
+    })])),
+    purposes,
+    allPurposes: extended
   });
 }
 
@@ -196,45 +211,19 @@ function createAwsProviders({ config, sdk, reliability, keyLifecycles }) {
     throw new KmsProviderRuntimeError(KMS_PROVIDER_RUNTIME_ERROR_CODES.SDK);
   }
   try {
-    const agent = createAwsKmsEd25519Provider({
-      ...config.agentSession,
-      client: bindAwsClient({ baseClient, sdk, logicalKeyId: config.agentSession.keyId, resourceId: config.agentSessionResource }),
-      commands: bindAwsCommands({ sdk, resourceId: config.agentSessionResource }),
-      keyId: config.agentSession.keyId,
-      purpose: AGENT_SESSION_GRANT_TYPE,
-      version: AGENT_SESSION_GRANT_VERSION
-    });
-    const qualification = createAwsKmsEd25519Provider({
-      ...config.qualificationManifest,
-      client: bindAwsClient({ baseClient, sdk, logicalKeyId: config.qualificationManifest.keyId, resourceId: config.qualificationManifestResource }),
-      commands: bindAwsCommands({ sdk, resourceId: config.qualificationManifestResource }),
-      keyId: config.qualificationManifest.keyId,
-      purpose: QUALIFICATION_GRANT_BATCH_MANIFEST_PURPOSE,
-      version: QUALIFICATION_GRANT_BATCH_MANIFEST_VERSION
-    });
-    const possessionReceipt = createAwsKmsEd25519Provider({
-      ...config.possessionReceipt,
-      client: bindAwsClient({ baseClient, sdk, logicalKeyId: config.possessionReceipt.keyId, resourceId: config.possessionReceiptResource }),
-      commands: bindAwsCommands({ sdk, resourceId: config.possessionReceiptResource }),
-      keyId: config.possessionReceipt.keyId,
-      purpose: POSSESSION_RECEIPT_PURPOSE,
-      version: POSSESSION_RECEIPT_VERSION
-    });
-    const refreshHint = createAwsKmsEd25519Provider({
-      ...config.refreshHint,
-      client: bindAwsClient({ baseClient, sdk, logicalKeyId: config.refreshHint.keyId, resourceId: config.refreshHintResource }),
-      commands: bindAwsCommands({ sdk, resourceId: config.refreshHintResource }),
-      keyId: config.refreshHint.keyId,
-      purpose: REFRESH_HINT_TYPE,
-      version: PROTOCOL_VERSION
-    });
-    const managedPossessionReceipt = managedSigner(possessionReceipt, POSSESSION_RECEIPT_PURPOSE, reliability, keyLifecycles.possessionReceipt);
-    return ownedProviders({
-      agentSessionSignerProvider: managedSigner(agent, AGENT_SESSION_GRANT_TYPE, reliability, keyLifecycles.agentSession),
-      qualificationManifestSignerProvider: managedSigner(qualification, QUALIFICATION_GRANT_BATCH_MANIFEST_PURPOSE, reliability, keyLifecycles.qualificationManifest),
-      possessionReceiptSignerProvider: managedPossessionReceipt,
-      refreshHintSignerProvider: managedSigner(refreshHint, REFRESH_HINT_TYPE, reliability, keyLifecycles.refreshHint)
-    }, () => baseClient.destroy?.());
+    const providers = Object.fromEntries(config.purposes.map((definition) => {
+      const provider = createAwsKmsEd25519Provider({
+        publicKey: definition.publicKey,
+        timeoutMs: definition.timeoutMs,
+        client: bindAwsClient({ baseClient, sdk, logicalKeyId: definition.keyId, resourceId: definition.resourceId }),
+        commands: bindAwsCommands({ sdk, resourceId: definition.resourceId }),
+        keyId: definition.keyId,
+        purpose: definition.purpose,
+        version: definition.version
+      });
+      return [definition.providerName, managedSigner(provider, definition.purpose, reliability, keyLifecycles[definition.name])];
+    }));
+    return ownedProviders(providers, () => baseClient.destroy?.());
   } catch (error) {
     baseClient.destroy?.();
     throw error;
@@ -274,41 +263,18 @@ function createGcpProviders({ config, sdk, reliability, keyLifecycles }) {
     throw new KmsProviderRuntimeError(KMS_PROVIDER_RUNTIME_ERROR_CODES.SDK);
   }
   try {
-    const agent = createGcpCloudKmsEd25519Provider({
-      ...config.agentSession,
-      client: bindGcpClient({ baseClient, logicalKeyName: config.agentSession.keyId, resourceName: config.agentSessionResource }),
-      keyName: config.agentSession.keyId,
-      purpose: AGENT_SESSION_GRANT_TYPE,
-      version: AGENT_SESSION_GRANT_VERSION
-    });
-    const qualification = createGcpCloudKmsEd25519Provider({
-      ...config.qualificationManifest,
-      client: bindGcpClient({ baseClient, logicalKeyName: config.qualificationManifest.keyId, resourceName: config.qualificationManifestResource }),
-      keyName: config.qualificationManifest.keyId,
-      purpose: QUALIFICATION_GRANT_BATCH_MANIFEST_PURPOSE,
-      version: QUALIFICATION_GRANT_BATCH_MANIFEST_VERSION
-    });
-    const possessionReceipt = createGcpCloudKmsEd25519Provider({
-      ...config.possessionReceipt,
-      client: bindGcpClient({ baseClient, logicalKeyName: config.possessionReceipt.keyId, resourceName: config.possessionReceiptResource }),
-      keyName: config.possessionReceipt.keyId,
-      purpose: POSSESSION_RECEIPT_PURPOSE,
-      version: POSSESSION_RECEIPT_VERSION
-    });
-    const refreshHint = createGcpCloudKmsEd25519Provider({
-      ...config.refreshHint,
-      client: bindGcpClient({ baseClient, logicalKeyName: config.refreshHint.keyId, resourceName: config.refreshHintResource }),
-      keyName: config.refreshHint.keyId,
-      purpose: REFRESH_HINT_TYPE,
-      version: PROTOCOL_VERSION
-    });
-    const managedPossessionReceipt = managedSigner(possessionReceipt, POSSESSION_RECEIPT_PURPOSE, reliability, keyLifecycles.possessionReceipt);
-    return ownedProviders({
-      agentSessionSignerProvider: managedSigner(agent, AGENT_SESSION_GRANT_TYPE, reliability, keyLifecycles.agentSession),
-      qualificationManifestSignerProvider: managedSigner(qualification, QUALIFICATION_GRANT_BATCH_MANIFEST_PURPOSE, reliability, keyLifecycles.qualificationManifest),
-      possessionReceiptSignerProvider: managedPossessionReceipt,
-      refreshHintSignerProvider: managedSigner(refreshHint, REFRESH_HINT_TYPE, reliability, keyLifecycles.refreshHint)
-    }, () => baseClient.close?.());
+    const providers = Object.fromEntries(config.purposes.map((definition) => {
+      const provider = createGcpCloudKmsEd25519Provider({
+        publicKey: definition.publicKey,
+        timeoutMs: definition.timeoutMs,
+        client: bindGcpClient({ baseClient, logicalKeyName: definition.keyId, resourceName: definition.resourceId }),
+        keyName: definition.keyId,
+        purpose: definition.purpose,
+        version: definition.version
+      });
+      return [definition.providerName, managedSigner(provider, definition.purpose, reliability, keyLifecycles[definition.name])];
+    }));
+    return ownedProviders(providers, () => baseClient.close?.());
   } catch (error) {
     void baseClient.close?.();
     throw error;
@@ -392,6 +358,31 @@ function plainObject(value) {
     && (Object.getPrototypeOf(value) === Object.prototype || Object.getPrototypeOf(value) === null);
 }
 
+function parseGenericSignerConfig(env, definition) {
+  const keyId = env[definition.keyIdEnv];
+  const publicKeyPem = env[definition.publicKeyEnv];
+  const timeoutText = env[definition.timeoutEnv];
+  if (!KEY_ID.test(keyId ?? "") || typeof publicKeyPem !== "string"
+    || publicKeyPem.length < 1 || Buffer.byteLength(publicKeyPem, "utf8") > MAX_PUBLIC_KEY_BYTES
+    || /PRIVATE\s+KEY/iu.test(publicKeyPem)) {
+    fail(KMS_PROVIDER_RUNTIME_ERROR_CODES.CONFIG);
+  }
+  let publicKey;
+  try { publicKey = crypto.createPublicKey(publicKeyPem); } catch { fail(KMS_PROVIDER_RUNTIME_ERROR_CODES.CONFIG); }
+  if (publicKey.type !== "public" || publicKey.asymmetricKeyType !== "ed25519") fail(KMS_PROVIDER_RUNTIME_ERROR_CODES.CONFIG);
+  const timeoutMs = timeoutText === undefined ? 5_000 : Number(timeoutText);
+  if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 30_000
+    || String(timeoutMs) !== String(timeoutText ?? 5_000)) fail(KMS_PROVIDER_RUNTIME_ERROR_CODES.CONFIG);
+  const canonicalPem = publicKey.export({ type: "spki", format: "pem" }).toString();
+  const fingerprint = crypto.createHash("sha256").update(publicKey.export({ type: "spki", format: "der" })).digest("hex");
+  const registry = SIGNER_PURPOSE_REGISTRY[definition.registryName];
+  if (!registry || registry.purpose !== definition.purpose || registry.protocol_version !== definition.version
+    || registry.signing_version < 1 || registry.managed_algorithm !== "ed25519") {
+    fail(KMS_PROVIDER_RUNTIME_ERROR_CODES.CONFIG);
+  }
+  return Object.freeze({ keyId, publicKeyPem: canonicalPem, publicKeyFingerprint: fingerprint, timeoutMs });
+}
+
 function parseRefreshHintSignerConfig(env) {
   const keyId = env.AGENTPASS_CLOUD_REFRESH_KEY_ID;
   const publicKeyPem = env.AGENTPASS_CLOUD_REFRESH_PUBLIC_KEY;
@@ -414,5 +405,12 @@ function parseRefreshHintSignerConfig(env) {
   });
 }
 
+function deepFreeze(value) {
+  if (value !== null && typeof value === "object" && !Object.isFrozen(value)) {
+    for (const child of Object.values(value)) deepFreeze(child);
+    Object.freeze(value);
+  }
+  return value;
+}
+
 function fail(code) { throw new KmsProviderRuntimeError(code); }
-import crypto from "node:crypto";

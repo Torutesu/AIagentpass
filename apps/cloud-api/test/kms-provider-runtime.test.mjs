@@ -13,6 +13,7 @@ import {
   possessionReceiptSigningData
 } from "../src/possession-receipt-signer.mjs";
 import { createManagedSignerKeyLifecycle } from "../src/managed-signer-key-lifecycle.mjs";
+import { SIGNER_PURPOSE_REGISTRY } from "../src/signer-purpose-registry.mjs";
 
 const AGENT_PURPOSE = "agentpass.agent-session-grant";
 const MANIFEST_PURPOSE = "agentpass.qualification-grant-batch-manifest";
@@ -24,6 +25,12 @@ const gcpAgentResource = "projects/demo/locations/global/keyRings/agentpass/cryp
 const gcpManifestResource = "projects/demo/locations/global/keyRings/agentpass/cryptoKeys/qualification-manifest/cryptoKeyVersions/1";
 const gcpPossessionResource = "projects/demo/locations/global/keyRings/agentpass/cryptoKeys/possession-receipt/cryptoKeyVersions/1";
 const gcpRefreshResource = "projects/demo/locations/global/keyRings/agentpass/cryptoKeys/refresh-hint/cryptoKeyVersions/1";
+const EXTENDED_FIXTURE_DEFINITIONS = [
+  { name: "capability", envName: "CAPABILITY", resource: "arn:aws:kms:us-east-1:123456789012:key/capability", purpose: "agentpass.capability", version: 1 },
+  { name: "controlBundle", envName: "CONTROL_BUNDLE", resource: "arn:aws:kms:us-east-1:123456789012:key/control-bundle", purpose: "agentpass.control-bundle", version: 2 },
+  { name: "auditAnchor", envName: "AUDIT_ANCHOR", resource: "arn:aws:kms:us-east-1:123456789012:key/audit-anchor", purpose: "agentpass.audit-anchor", version: 1 },
+  { name: "promotionEvidence", envName: "PROMOTION_EVIDENCE", resource: "arn:aws:kms:us-east-1:123456789012:key/promotion-evidence", purpose: "agentpass.promotion-evidence", version: 1 }
+];
 
 function baseEnv({ provider = "aws", agentResource = awsAgentResource, manifestResource = awsManifestResource, possessionResource } = {}) {
   const agent = crypto.generateKeyPairSync("ed25519");
@@ -52,6 +59,19 @@ function baseEnv({ provider = "aws", agentResource = awsAgentResource, manifestR
 }
 
 function publicDer(keyPair) { return keyPair.publicKey.export({ type: "spki", format: "der" }); }
+
+function allPurposeEnv() {
+  const env = baseEnv();
+  for (const definition of EXTENDED_FIXTURE_DEFINITIONS) {
+    const pair = crypto.generateKeyPairSync("ed25519");
+    env[`AGENTPASS_CLOUD_${definition.envName}_KEY_ID`] = `${definition.name}-2026-08`;
+    env[`AGENTPASS_CLOUD_${definition.envName}_PUBLIC_KEY`] = pair.publicKey.export({ type: "spki", format: "pem" }).toString();
+    env[`AGENTPASS_CLOUD_${definition.envName}_TIMEOUT_MS`] = "5000";
+    env[`AGENTPASS_KMS_${definition.envName}_KEY_RESOURCE`] = definition.resource;
+    env.__keys[definition.name] = pair;
+  }
+  return env;
+}
 
 function possessionStatement() {
   return {
@@ -101,6 +121,113 @@ test("hosted KMS config is explicit, closed, and keeps logical IDs separate from
     const invalid = { ...env, ...value };
     assert.throws(() => parseKmsProviderRuntimeConfig(invalid), (error) => error.code === KMS_PROVIDER_RUNTIME_ERROR_CODES.CONFIG);
   }
+});
+
+test("extended hosted KMS config binds every signer-purpose-registry purpose with unique pinned public keys", () => {
+  const env = allPurposeEnv();
+  const config = parseKmsProviderRuntimeConfig(env);
+  assert.equal(config.allPurposes, true);
+  assert.equal(config.purposes.length, 8);
+  assert.deepEqual(new Set(config.purposes.map(({ purpose }) => purpose)), new Set(Object.values(SIGNER_PURPOSE_REGISTRY).map(({ purpose }) => purpose)));
+  assert.equal(Object.isFrozen(config), true);
+  assert.equal(Object.isFrozen(config.purposes), true);
+  assert.equal(new Set(config.purposes.map(({ resourceId }) => resourceId)).size, 8);
+  assert.equal(new Set(config.purposes.map(({ publicKeyFingerprint }) => publicKeyFingerprint)).size, 8);
+  for (const definition of EXTENDED_FIXTURE_DEFINITIONS) {
+    const signer = config[definition.name];
+    assert.equal(signer.keyId, `${definition.name}-2026-08`);
+    assert.equal(config.purposes.find(({ name }) => name === definition.name).version, definition.version);
+  }
+});
+
+test("extended hosted KMS config rejects missing and partial purpose configuration", () => {
+  for (const definition of EXTENDED_FIXTURE_DEFINITIONS) {
+    for (const suffix of ["KEY_RESOURCE", "KEY_ID", "PUBLIC_KEY"]) {
+      const env = allPurposeEnv();
+      delete env[`AGENTPASS_${suffix === "KEY_RESOURCE" ? "KMS" : "CLOUD"}_${definition.envName}_${suffix}`];
+      assert.throws(() => parseKmsProviderRuntimeConfig(env), (error) => error.code === KMS_PROVIDER_RUNTIME_ERROR_CODES.CONFIG);
+    }
+  }
+  const timeoutEnv = allPurposeEnv();
+  timeoutEnv.AGENTPASS_CLOUD_CAPABILITY_TIMEOUT_MS = "0";
+  assert.throws(() => parseKmsProviderRuntimeConfig(timeoutEnv), (error) => error.code === KMS_PROVIDER_RUNTIME_ERROR_CODES.CONFIG);
+});
+
+test("extended hosted KMS config rejects shared resources, shared pins, and private key material", () => {
+  const sharedResource = allPurposeEnv();
+  sharedResource.AGENTPASS_KMS_CAPABILITY_KEY_RESOURCE = awsAgentResource;
+  assert.throws(() => parseKmsProviderRuntimeConfig(sharedResource), (error) => error.code === KMS_PROVIDER_RUNTIME_ERROR_CODES.CONFIG);
+
+  const aliasedResource = allPurposeEnv();
+  aliasedResource.AGENTPASS_KMS_CAPABILITY_KEY_RESOURCE = "arn:aws:kms:us-east-1:123456789012:alias/agentpass-capability";
+  assert.throws(() => parseKmsProviderRuntimeConfig(aliasedResource), (error) => error.code === KMS_PROVIDER_RUNTIME_ERROR_CODES.CONFIG);
+
+  const sharedKeyId = allPurposeEnv();
+  sharedKeyId.AGENTPASS_CLOUD_CAPABILITY_KEY_ID = sharedKeyId.AGENTPASS_CLOUD_AGENT_SESSION_KEY_ID;
+  assert.throws(() => parseKmsProviderRuntimeConfig(sharedKeyId), (error) => error.code === KMS_PROVIDER_RUNTIME_ERROR_CODES.CONFIG);
+
+  const sharedPublicKey = allPurposeEnv();
+  sharedPublicKey.AGENTPASS_CLOUD_CAPABILITY_PUBLIC_KEY = sharedPublicKey.AGENTPASS_CLOUD_AGENT_SESSION_PUBLIC_KEY;
+  assert.throws(() => parseKmsProviderRuntimeConfig(sharedPublicKey), (error) => error.code === KMS_PROVIDER_RUNTIME_ERROR_CODES.CONFIG);
+
+  const privateKey = allPurposeEnv();
+  privateKey.AGENTPASS_CLOUD_CAPABILITY_PUBLIC_KEY = privateKey.__keys.capability.privateKey.export({ type: "pkcs8", format: "pem" }).toString();
+  assert.throws(() => parseKmsProviderRuntimeConfig(privateKey), (error) => error.code === KMS_PROVIDER_RUNTIME_ERROR_CODES.CONFIG);
+});
+
+test("AWS composition constructs and purpose-binds all eight hosted KMS providers", async () => {
+  const env = allPurposeEnv();
+  const observed = [];
+  const resourceToKey = new Map([
+    [awsAgentResource, env.__keys.agent],
+    [awsManifestResource, env.__keys.manifest],
+    [awsPossessionResource, env.__keys.possession],
+    [awsRefreshResource, env.__keys.refresh],
+    ...EXTENDED_FIXTURE_DEFINITIONS.map(({ name, resource }) => [resource, env.__keys[name]])
+  ]);
+  class GetPublicKeyCommand { constructor(input) { this.input = input; this.kind = "get"; } }
+  class SignCommand { constructor(input) { this.input = input; this.kind = "sign"; } }
+  class KMSClient {
+    destroy() {}
+    async send(command) {
+      observed.push(command);
+      const pair = resourceToKey.get(command.input.KeyId);
+      assert.ok(pair);
+      if (command.kind === "get") return { KeyId: command.input.KeyId, KeyUsage: "SIGN_VERIFY", KeySpec: "ECC_NIST_EDWARDS25519", SigningAlgorithms: ["ED25519_SHA_512"], PublicKey: publicDer(pair) };
+      return { KeyId: command.input.KeyId, SigningAlgorithm: "ED25519_SHA_512", Signature: crypto.sign(null, command.input.Message, pair.privateKey) };
+    }
+  }
+  const providers = await createHostedKmsProviders({ env, sdkLoader: async () => ({ KMSClient, GetPublicKeyCommand, SignCommand }) });
+  const expectedProviders = [
+    "agentSessionSignerProvider", "qualificationManifestSignerProvider", "possessionReceiptSignerProvider", "refreshHintSignerProvider",
+    "capabilitySignerProvider", "controlBundleSignerProvider", "auditAnchorSignerProvider", "promotionEvidenceSignerProvider"
+  ];
+  assert.deepEqual(expectedProviders.every((name) => providers[name] && typeof providers[name].sign === "function"), true);
+  for (const definition of [
+    { provider: "agentSessionSignerProvider", name: "agent", purpose: AGENT_PURPOSE, keyId: "agent-session-2026-08", version: 1 },
+    { provider: "qualificationManifestSignerProvider", name: "manifest", purpose: MANIFEST_PURPOSE, keyId: "qualification-manifest-2026-08", version: 2 },
+    { provider: "possessionReceiptSignerProvider", name: "possession", purpose: POSSESSION_RECEIPT_PURPOSE, keyId: "possession-receipt-2026-08", version: POSSESSION_RECEIPT_VERSION },
+    { provider: "refreshHintSignerProvider", name: "refresh", purpose: "agentpass.refresh-hint", keyId: "refresh-hint-2026-08", version: 1 }
+  ]) {
+    const bytes = Buffer.from(`all-purpose:${definition.name}`);
+    const signature = await providers[definition.provider].sign({ algorithm: "ed25519", bytes, key_id: definition.keyId, purpose: definition.purpose, version: definition.version });
+    assert.equal(crypto.verify(null, bytes, env.__keys[definition.name].publicKey, signature), true);
+  }
+  for (const definition of [
+    { provider: "capabilitySignerProvider", name: "capability", purpose: "agentpass.capability", keyId: "capability-2026-08", version: 1 },
+    { provider: "controlBundleSignerProvider", name: "controlBundle", purpose: "agentpass.control-bundle", keyId: "controlBundle-2026-08", version: 2 },
+    { provider: "auditAnchorSignerProvider", name: "auditAnchor", purpose: "agentpass.audit-anchor", keyId: "auditAnchor-2026-08", version: 1 },
+    { provider: "promotionEvidenceSignerProvider", name: "promotionEvidence", purpose: "agentpass.promotion-evidence", keyId: "promotionEvidence-2026-08", version: 1 }
+  ]) {
+    const bytes = Buffer.from(`all-purpose:${definition.name}`);
+    const signature = await providers[definition.provider].sign({ algorithm: "ed25519", bytes, key_id: definition.keyId, purpose: definition.purpose, version: definition.version });
+    assert.equal(crypto.verify(null, bytes, env.__keys[definition.name].publicKey, signature), true);
+  }
+  assert.deepEqual(new Set(observed.map((command) => command.input.KeyId)), new Set([
+    awsAgentResource, awsManifestResource, awsPossessionResource, awsRefreshResource,
+    ...EXTENDED_FIXTURE_DEFINITIONS.map(({ resource }) => resource)
+  ]));
+  await providers.close();
 });
 
 test("AWS composition instantiates official-shaped clients and signs all purpose-separated providers with mapped remote resources", async () => {

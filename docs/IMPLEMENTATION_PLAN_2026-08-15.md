@@ -109,14 +109,20 @@ credentials cannot migrate or administer the database.
 
 Provision one non-exportable Ed25519 authority for each frozen purpose:
 
-1. ControlBundle.
-2. capability.
-3. Human assertion.
-4. enrollment/possession receipt.
-5. Agent Session Grant.
-6. qualification manifest.
-7. refresh hint.
-8. audit/promotion evidence.
+1. `agentpass.capability`.
+2. `agentpass.control-bundle`.
+3. `agentpass.refresh-hint`.
+4. `agentpass.possession-receipt`.
+5. `agent-session-grant`.
+6. `agentpass.qualification-grant-batch-manifest`.
+7. `agentpass.audit-anchor`.
+8. `agentpass.promotion-evidence`.
+
+Console identity assertions and WebAuthn assertions are separate identity
+boundaries. They must not reuse any of these eight keys or be silently modeled
+as a ninth signer-registry purpose. If a future hosted Console assertion needs
+a managed key, it receives a separately versioned identity contract before
+implementation.
 
 For each purpose, pin provider, project/account, region, key resource, public
 key fingerprint, algorithm, protocol version, signing version, lifecycle
@@ -138,6 +144,19 @@ Merge slices:
 Exit gate: all eight purposes sign and verify against real managed keys under
 their production IAM principals, and an image/configuration scan proves there
 is no hosted private-key fallback.
+
+#### Q2B integration checkpoints
+
+| Checkpoint | Code outcome | Required test/evidence | Merge gate |
+| --- | --- | --- | --- |
+| Q2B-1 complete provider set | Runtime constructs exactly eight purpose-bound providers from a closed public configuration. | Unit tests reject missing, duplicated, shared-resource, shared-fingerprint, alias, unversioned, local, file, and private-material configurations. | Hosted startup cannot construct a partial provider set. |
+| Q2B-2 ControlBundle/capability | Both authorities use asynchronous durable managed signers; the HTTP layer receives only purpose-specific signer methods. | Exact canonical-byte, domain, purpose, version, forged-result, timeout, response-loss, restart, and idempotency tests. | Hosted code and configuration no longer read a bundle/capability private-key file. |
+| Q2B-3 audit/promotion | Audit anchors and promotion evidence use separate providers and schemas; unsigned or locally signed production evidence is rejected. | Cross-purpose substitution, stale lifecycle, emergency-disable, and verifier compatibility tests. | Registry status and contract catalog reflect implemented producers and verifiers. |
+| Q2B-4 runtime closure | Readiness reports every purpose with fixed-cardinality redacted metadata; shutdown drains all providers. | Two-instance real-provider qualification plus configuration/image secret scan. | Eight healthy providers are required before traffic readiness. |
+
+Each checkpoint is one reviewable commit and push. A checkpoint may preserve a
+local signer only in the explicit evaluation profile; hosted selection of that
+path is a startup error and is covered by a negative test.
 
 ### Q2C. Durable signing and reconciliation qualification
 
