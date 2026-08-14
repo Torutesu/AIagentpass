@@ -282,7 +282,9 @@ export function createHumanSessionService(options = {}) {
         role: oldRecord.role,
         created_at: createdAt,
         expires_at: absoluteExpiresAt,
-        recent_auth_at: oldRecord.recent_auth_at ?? null,
+        // Rotation never carries a step-up WebAuthn authorization forward.
+        // A fresh session must complete its own recent-auth ceremony.
+        recent_auth_at: null,
         last_seen_at: createdAt,
         idle_expires_at: new Date(Math.min(now + idleTtlMs, Date.parse(absoluteExpiresAt))).toISOString(),
         token_hash: hashOpaqueToken(token),
@@ -291,7 +293,8 @@ export function createHumanSessionService(options = {}) {
         revoke_reason: null
       };
       if (typeof repository.rotateSession === "function") {
-        await repository.rotateSession({ old_session_id: oldRecord.session_id, old_token_hash: oldRecord.token_hash, session: stripForRepository(newRecord), reason: "session_rotation", rotated_at: createdAt });
+        const committed = await repository.rotateSession({ old_session_id: oldRecord.session_id, old_token_hash: oldRecord.token_hash, session: stripForRepository(newRecord), reason: "session_rotation", rotated_at: createdAt });
+        if (!committed) fail(HUMAN_SESSION_ERROR_CODES.SESSION_REVOKED);
       } else {
         await repository.createSession(stripForRepository(newRecord));
         await repository.revokeSession({ sessionId: oldRecord.session_id, session_id: oldRecord.session_id, revokedAt: createdAt, revoked_at: createdAt, reason: "session_rotation", revoke_reason: "session_rotation" });
@@ -385,7 +388,10 @@ export function createHumanSessionService(options = {}) {
     const patch = { sessionId: record.session_id, session_id: record.session_id, lastSeenAt: new Date(now).toISOString(), last_seen_at: new Date(now).toISOString(), idleExpiresAt: new Date(nextIdleMs).toISOString(), idle_expires_at: new Date(nextIdleMs).toISOString() };
     if (typeof repository.updateSessionActivity === "function") {
       const updated = await repository.updateSessionActivity(patch);
-      return updated ?? { ...record, last_seen_at: patch.last_seen_at, idle_expires_at: patch.idle_expires_at };
+      // A concurrent role/revocation/epoch change makes the conditional
+      // activity update miss. Never continue with the stale pre-change row.
+      if (!updated) fail(HUMAN_SESSION_ERROR_CODES.SESSION_REVOKED);
+      return updated;
     }
     return record;
   }

@@ -8,7 +8,10 @@ const IDEMPOTENCY_KEY = /^[A-Za-z0-9._~-]{8,255}$/u;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu;
 const CURSOR = /^[A-Za-z0-9_-]+$/u;
 const RFC3339 = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?(?:Z|[+-]\d{2}:\d{2})$/u;
+const ROLES = new Set(["owner", "admin", "auditor", "viewer"]);
+const INVITABLE_ROLES = new Set(["admin", "auditor", "viewer"]);
 const SECRET_FIELDS = new Set(["token_hash", "raw_token", "one_time_token", "invitation_token"]);
+const SECRET_FIELD_NAMES = new Set(["assertion", "bearer", "credentialkey", "csrftoken", "invitationtoken", "onetimetoken", "password", "privatekey", "publickey", "rawtoken", "secret", "sessiontoken", "token", "tokenhash"]);
 
 export const ORGANIZATION_SERVICE_ERROR_CODES = Object.freeze({
   INVALID_INPUT: "invalid_input",
@@ -35,10 +38,11 @@ const ERROR_MESSAGES = Object.freeze({
 });
 
 export class OrganizationServiceError extends Error {
-  constructor(code) {
+  constructor(code, reason = undefined) {
     super(ERROR_MESSAGES[code] ?? ERROR_MESSAGES[ORGANIZATION_SERVICE_ERROR_CODES.UNAVAILABLE]);
     this.name = "OrganizationServiceError";
     this.code = ERROR_MESSAGES[code] === undefined ? ORGANIZATION_SERVICE_ERROR_CODES.UNAVAILABLE : code;
+    if (reason !== undefined) this.reason = reason;
   }
 }
 
@@ -104,11 +108,12 @@ export function createPostgresOrganizationService({
   async function renameOrganization(input = {}) {
     const actor = requiredActor(input);
     const idempotency_key = idempotencyKey(input.idempotency_key);
+    const expected_version = requiredVersion(input.expected_version);
     const result = await invoke("renameOrganization", {
       organization_id: requiredOrganizationId(input.organization_id),
       actor_member_id: actor.member_id,
       name: input.name,
-      expected_version: input.expected_version,
+      expected_version,
       idempotency_key
     }, ORGANIZATION_SERVICE_ERROR_CODES.NOT_FOUND);
     return sanitize(result);
@@ -132,12 +137,14 @@ export function createPostgresOrganizationService({
   async function updateMemberRole(input = {}) {
     const actor = requiredActor(input);
     const idempotency_key = idempotencyKey(input.idempotency_key);
+    const role = requiredRole(input.role);
+    const expected_version = requiredVersion(input.expected_version);
     const result = await invoke("updateMemberRole", {
       organization_id: requiredOrganizationId(input.organization_id),
       actor_member_id: actor.member_id,
       member_id: requiredMemberId(input.member_id),
-      role: input.role,
-      expected_version: input.expected_version,
+      role,
+      expected_version,
       revoked_at: currentTimestamp(),
       idempotency_key
     }, ORGANIZATION_SERVICE_ERROR_CODES.MEMBER_NOT_FOUND);
@@ -147,11 +154,12 @@ export function createPostgresOrganizationService({
   async function removeMember(input = {}) {
     const actor = requiredActor(input);
     const idempotency_key = idempotencyKey(input.idempotency_key);
+    const expected_version = requiredVersion(input.expected_version);
     const result = await invoke("removeMember", {
       organization_id: requiredOrganizationId(input.organization_id),
       actor_member_id: actor.member_id,
       member_id: requiredMemberId(input.member_id),
-      expected_version: input.expected_version,
+      expected_version,
       removed_at: currentTimestamp(),
       idempotency_key
     }, ORGANIZATION_SERVICE_ERROR_CODES.MEMBER_NOT_FOUND);
@@ -176,12 +184,13 @@ export function createPostgresOrganizationService({
   async function createInvitation(input = {}) {
     const actor = requiredActor(input);
     const idempotency_key = idempotencyKey(input.idempotency_key);
+    const role = requiredInvitableRole(input.role);
     const raw_token = generateToken(randomBytes);
     const result = await invoke("createInvitation", {
       organization_id: requiredOrganizationId(input.organization_id),
       actor_member_id: actor.member_id,
       invitation_id: generatedUuid(randomUUID),
-      role: input.role,
+      role,
       token_hash: hashToken(raw_token),
       expires_at: input.expires_at,
       created_at: currentTimestamp(),
@@ -195,11 +204,12 @@ export function createPostgresOrganizationService({
   async function revokeInvitation(input = {}) {
     const actor = requiredActor(input);
     const idempotency_key = idempotencyKey(input.idempotency_key);
+    const expected_version = requiredVersion(input.expected_version);
     const result = await invoke("revokeInvitation", {
       organization_id: requiredOrganizationId(input.organization_id),
       actor_member_id: actor.member_id,
       invitation_id: requiredInvitationId(input.invitation_id),
-      expected_version: input.expected_version,
+      expected_version,
       revoked_at: currentTimestamp(),
       idempotency_key
     }, ORGANIZATION_SERVICE_ERROR_CODES.INVITATION_NOT_FOUND);
@@ -334,7 +344,7 @@ function pagination(input) {
 
 function requiredActor(input) {
   const actor = input?.actor;
-  if (!actor || typeof actor !== "object" || Array.isArray(actor) || typeof actor.member_id !== "string" || typeof actor.organization_id !== "string" || !UUID.test(actor.member_id) || !UUID.test(actor.organization_id)) {
+  if (!actor || typeof actor !== "object" || Array.isArray(actor) || typeof actor.member_id !== "string" || typeof actor.organization_id !== "string" || !UUID.test(actor.member_id) || !UUID.test(actor.organization_id) || !ROLES.has(actor.role)) {
     throw serviceError(ORGANIZATION_SERVICE_ERROR_CODES.INVALID_INPUT);
   }
   return actor;
@@ -346,6 +356,21 @@ function requiredInvitationId(value) { return requiredUuid(value, "invitation_id
 function requiredUuid(value, field) {
   if (typeof value !== "string" || !UUID.test(value)) throw serviceError(ORGANIZATION_SERVICE_ERROR_CODES.INVALID_INPUT);
   return value.toLowerCase();
+}
+
+function requiredVersion(value) {
+  if (!Number.isSafeInteger(value) || value < 1) throw serviceError(ORGANIZATION_SERVICE_ERROR_CODES.INVALID_INPUT);
+  return value;
+}
+
+function requiredRole(value) {
+  if (typeof value !== "string" || !ROLES.has(value)) throw serviceError(ORGANIZATION_SERVICE_ERROR_CODES.INVALID_INPUT);
+  return value;
+}
+
+function requiredInvitableRole(value) {
+  if (typeof value !== "string" || !INVITABLE_ROLES.has(value)) throw serviceError(ORGANIZATION_SERVICE_ERROR_CODES.INVALID_INPUT);
+  return value;
 }
 
 function idempotencyKey(value) {
@@ -399,16 +424,25 @@ function sanitize(value) {
   if (!value || typeof value !== "object") return value;
   const result = {};
   for (const [key, item] of Object.entries(value)) {
-    if (!SECRET_FIELDS.has(key)) result[key] = sanitize(item);
+    const normalizedKey = key.replace(/[-_]/gu, "").toLowerCase();
+    if (!SECRET_FIELDS.has(key) && !isSecretFieldName(normalizedKey)) result[key] = sanitize(item);
   }
   return result;
+}
+
+function isSecretFieldName(normalizedKey) {
+  return SECRET_FIELD_NAMES.has(normalizedKey)
+    || /(?:token|secret|password|credential|privatekey|publickey|apikey|accesskey)$/u.test(normalizedKey)
+    || /^(?:secret|password)/u.test(normalizedKey);
 }
 
 function mapRepositoryError(error) {
   if (error instanceof OrganizationServiceError) return error;
   const code = String(error?.code ?? error?.name ?? "").toLowerCase();
   if (["invalid_input", "invalid_scope", "tenant_scope_error"].includes(code) || error instanceof TypeError) return serviceError(ORGANIZATION_SERVICE_ERROR_CODES.INVALID_INPUT);
-  if (["forbidden", "err_forbidden", "not_authorized", "owner_required", "cannot_remove_owner", "last_owner", "err_last_owner", "owner_constraint", "err_actor"].includes(code)) return serviceError(ORGANIZATION_SERVICE_ERROR_CODES.FORBIDDEN);
+  if (["last_owner", "err_last_owner", "owner_constraint", "cannot_remove_owner"].includes(code)) return serviceError(ORGANIZATION_SERVICE_ERROR_CODES.FORBIDDEN, "last_owner");
+  if (["role_not_allowed", "err_role_not_allowed", "role_downgrade_forbidden"].includes(code)) return serviceError(ORGANIZATION_SERVICE_ERROR_CODES.FORBIDDEN, "role_not_allowed");
+  if (["forbidden", "err_forbidden", "not_authorized", "owner_required", "err_actor"].includes(code)) return serviceError(ORGANIZATION_SERVICE_ERROR_CODES.FORBIDDEN);
   if (["version_conflict", "err_version_conflict", "expected_version_mismatch", "stale_version"].includes(code)) return serviceError(ORGANIZATION_SERVICE_ERROR_CODES.VERSION_CONFLICT);
   if (["idempotency_conflict", "err_idempotency_conflict", "idempotency_key_reused"].includes(code)) return serviceError(ORGANIZATION_SERVICE_ERROR_CODES.IDEMPOTENCY_CONFLICT);
   if (["invitation_replayed", "invitation_token_replayed", "token_replayed", "already_used", "invitation_expired"].includes(code)) return serviceError(ORGANIZATION_SERVICE_ERROR_CODES.INVITATION_REPLAYED);
@@ -418,6 +452,6 @@ function mapRepositoryError(error) {
   return serviceError(ORGANIZATION_SERVICE_ERROR_CODES.UNAVAILABLE);
 }
 
-function serviceError(code) { return new OrganizationServiceError(code); }
+function serviceError(code, reason = undefined) { return new OrganizationServiceError(code, reason); }
 
 export default createPostgresOrganizationService;

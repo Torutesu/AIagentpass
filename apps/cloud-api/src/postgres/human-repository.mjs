@@ -13,6 +13,7 @@ export function createPostgresHumanRepository({ client, onAuthorityReduction } =
   if (onAuthorityReduction !== undefined && typeof onAuthorityReduction !== "function") throw new TypeError("onAuthorityReduction must be a function");
   return Object.freeze({
     createSession,
+    rotateSession,
     findSessionByTokenHash,
     updateSessionActivity,
     revokeSession,
@@ -42,29 +43,57 @@ export function createPostgresHumanRepository({ client, onAuthorityReduction } =
 
   async function createSession(record) {
     validateSession(record);
-    const result = await client.query(`INSERT INTO human_sessions (id,member_id,organization_id,membership_id,role,token_hash,csrf_token_hash,created_at,expires_at,last_seen_at,idle_expires_at,recent_auth_at,revoked_at,revoke_reason) SELECT $1,m.member_id,m.organization_id,m.id,m.role,$5,$6,$7,$8,$9,$10,NULL,NULL,NULL FROM memberships m WHERE m.id=$4 AND m.member_id=$2 AND m.organization_id=$3 AND m.role=$11 AND m.status='active' RETURNING *,encode(token_hash,'hex') AS token_hash_hex,encode(csrf_token_hash,'hex') AS csrf_token_hash_hex`, [record.session_id, record.member_id, record.organization_id, record.membership_id, bytes32(record.token_hash), bytes32(record.csrf_token_hash), record.created_at, record.expires_at, record.last_seen_at, record.idle_expires_at, record.role]);
+    const result = await client.query(`INSERT INTO human_sessions (id,member_id,organization_id,membership_id,role,organization_authority_epoch,membership_session_epoch,token_hash,csrf_token_hash,created_at,expires_at,last_seen_at,idle_expires_at,recent_auth_at,revoked_at,revoke_reason) SELECT $1,m.member_id,m.organization_id,m.id,m.role,o.authority_epoch,m.session_epoch,$5,$6,$7,$8,$9,$10,NULL,NULL,NULL FROM memberships m JOIN organizations o ON o.id=m.organization_id WHERE m.id=$4 AND m.member_id=$2 AND m.organization_id=$3 AND m.role=$11 AND m.status='active' RETURNING *,encode(token_hash,'hex') AS token_hash_hex,encode(csrf_token_hash,'hex') AS csrf_token_hash_hex`, [record.session_id, record.member_id, record.organization_id, record.membership_id, bytes32(record.token_hash), bytes32(record.csrf_token_hash), record.created_at, record.expires_at, record.last_seen_at, record.idle_expires_at, record.role]);
     const created = sessionRow(result.rows?.[0]);
     if (!created) throw new TypeError("active session membership is unavailable");
     return created;
   }
 
+  async function rotateSession(input) {
+    const oldSessionId = uuid(input?.old_session_id ?? input?.oldSessionId);
+    const oldTokenHash = bytes32(input?.old_token_hash ?? input?.oldTokenHash);
+    const record = input?.session;
+    validateSession(record);
+    const rotatedAt = timestamp(input?.rotated_at ?? input?.rotatedAt);
+    const reason = bounded(input?.reason ?? "session_rotation", 128);
+
+    return inTransaction(async (transactionClient) => {
+      // The organization lock serializes this operation with authority changes;
+      // the member lock serializes retries and concurrent session rotations.
+      await lockOrganization(transactionClient, record.organization_id);
+      await lockSessionSet(transactionClient, record.member_id);
+
+      const old = await transactionClient.query(`SELECT s.id FROM human_sessions s JOIN memberships m ON m.organization_id=s.organization_id AND m.member_id=s.member_id AND m.id=s.membership_id JOIN organizations o ON o.id=s.organization_id WHERE s.id=$1 AND s.token_hash=$2 AND s.member_id=$3 AND s.organization_id=$4 AND s.membership_id=$5 AND s.role=$6 AND s.revoked_at IS NULL AND s.expires_at>$7 AND (s.idle_expires_at IS NULL OR s.idle_expires_at>$7) AND m.status='active' AND m.role=s.role AND o.authority_epoch=s.organization_authority_epoch AND m.session_epoch=s.membership_session_epoch FOR UPDATE`, [oldSessionId, oldTokenHash, record.member_id, record.organization_id, record.membership_id, record.role, rotatedAt]);
+      // A retry sees the already-revoked exact old session and must not create
+      // another active replacement.
+      if (old.rowCount !== 1) return null;
+
+      const created = await transactionClient.query(`INSERT INTO human_sessions (id,member_id,organization_id,membership_id,role,organization_authority_epoch,membership_session_epoch,token_hash,csrf_token_hash,created_at,expires_at,last_seen_at,idle_expires_at,recent_auth_at,revoked_at,revoke_reason) SELECT $1,m.member_id,m.organization_id,m.id,m.role,o.authority_epoch,m.session_epoch,$5,$6,$7,$8,$9,$10,NULL,NULL,NULL FROM memberships m JOIN organizations o ON o.id=m.organization_id WHERE m.id=$4 AND m.member_id=$2 AND m.organization_id=$3 AND m.role=$11 AND m.status='active' RETURNING *,encode(token_hash,'hex') AS token_hash_hex,encode(csrf_token_hash,'hex') AS csrf_token_hash_hex`, [record.session_id, record.member_id, record.organization_id, record.membership_id, bytes32(record.token_hash), bytes32(record.csrf_token_hash), record.created_at, record.expires_at, record.last_seen_at, record.idle_expires_at, record.role]);
+      if (created.rowCount !== 1) throw new TypeError("active session membership is unavailable");
+
+      const revoked = await transactionClient.query("UPDATE human_sessions s SET revoked_at=COALESCE(s.revoked_at,$2),revoke_reason=COALESCE(s.revoke_reason,$3) FROM memberships m JOIN organizations o ON o.id=m.organization_id WHERE s.id=$1 AND s.token_hash=$4 AND s.organization_id=m.organization_id AND s.member_id=m.member_id AND s.membership_id=m.id AND s.revoked_at IS NULL AND o.authority_epoch=s.organization_authority_epoch AND m.session_epoch=s.membership_session_epoch RETURNING s.id", [oldSessionId, rotatedAt, reason, oldTokenHash]);
+      if (revoked.rowCount !== 1) throw new Error("session rotation lost its old session lock");
+      return sessionRow(created.rows[0]);
+    });
+  }
+
   async function findSessionByTokenHash(input) {
-    const result = await client.query(`SELECT s.*,encode(s.token_hash,'hex') AS token_hash_hex,encode(s.csrf_token_hash,'hex') AS csrf_token_hash_hex FROM human_sessions s JOIN memberships m ON m.organization_id=s.organization_id AND m.member_id=s.member_id WHERE s.token_hash=$1 AND m.status='active' AND m.role=s.role LIMIT 1`, [bytes32(input.token_hash ?? input.tokenHash)]);
+    const result = await client.query(`SELECT s.*,encode(s.token_hash,'hex') AS token_hash_hex,encode(s.csrf_token_hash,'hex') AS csrf_token_hash_hex FROM human_sessions s JOIN memberships m ON m.organization_id=s.organization_id AND m.member_id=s.member_id AND m.id=s.membership_id JOIN organizations o ON o.id=s.organization_id WHERE s.token_hash=$1 AND m.status='active' AND m.role=s.role AND o.authority_epoch=s.organization_authority_epoch AND m.session_epoch=s.membership_session_epoch LIMIT 1`, [bytes32(input.token_hash ?? input.tokenHash)]);
     return sessionRow(result.rows?.[0]);
   }
 
   async function updateSessionActivity(input) {
-    const result = await client.query(`UPDATE human_sessions SET last_seen_at=$2,idle_expires_at=$3 WHERE id=$1 AND revoked_at IS NULL RETURNING *,encode(token_hash,'hex') AS token_hash_hex,encode(csrf_token_hash,'hex') AS csrf_token_hash_hex`, [uuid(input.session_id ?? input.sessionId), input.last_seen_at ?? input.lastSeenAt, input.idle_expires_at ?? input.idleExpiresAt]);
+    const result = await client.query(`UPDATE human_sessions s SET last_seen_at=$2,idle_expires_at=$3 FROM memberships m JOIN organizations o ON o.id=m.organization_id WHERE s.id=$1 AND s.organization_id=m.organization_id AND s.member_id=m.member_id AND s.membership_id=m.id AND s.revoked_at IS NULL AND o.authority_epoch=s.organization_authority_epoch AND m.session_epoch=s.membership_session_epoch RETURNING s.*,encode(s.token_hash,'hex') AS token_hash_hex,encode(s.csrf_token_hash,'hex') AS csrf_token_hash_hex`, [uuid(input.session_id ?? input.sessionId), input.last_seen_at ?? input.lastSeenAt, input.idle_expires_at ?? input.idleExpiresAt]);
     return sessionRow(result.rows?.[0]);
   }
 
   async function revokeSession(input) {
-    const result = await client.query(`UPDATE human_sessions SET revoked_at=COALESCE(revoked_at,$2),revoke_reason=COALESCE(revoke_reason,$3) WHERE id=$1 RETURNING *,encode(token_hash,'hex') AS token_hash_hex,encode(csrf_token_hash,'hex') AS csrf_token_hash_hex`, [uuid(input.session_id ?? input.sessionId), input.revoked_at ?? input.revokedAt, bounded(input.revoke_reason ?? input.reason, 128)]);
+    const result = await client.query(`UPDATE human_sessions s SET revoked_at=COALESCE(s.revoked_at,$2),revoke_reason=COALESCE(s.revoke_reason,$3) FROM memberships m JOIN organizations o ON o.id=m.organization_id WHERE s.id=$1 AND s.organization_id=m.organization_id AND s.member_id=m.member_id AND s.membership_id=m.id AND o.authority_epoch=s.organization_authority_epoch AND m.session_epoch=s.membership_session_epoch RETURNING s.*,encode(s.token_hash,'hex') AS token_hash_hex,encode(s.csrf_token_hash,'hex') AS csrf_token_hash_hex`, [uuid(input.session_id ?? input.sessionId), input.revoked_at ?? input.revokedAt, bounded(input.revoke_reason ?? input.reason, 128)]);
     return sessionRow(result.rows?.[0]);
   }
 
   async function listSessions(input) {
-    const result = await client.query(`SELECT *,encode(token_hash,'hex') AS token_hash_hex,encode(csrf_token_hash,'hex') AS csrf_token_hash_hex FROM human_sessions WHERE member_id=$1 ORDER BY created_at ASC,id ASC LIMIT 100`, [uuid(input.member_id ?? input.memberId)]);
+    const result = await client.query(`SELECT s.*,encode(s.token_hash,'hex') AS token_hash_hex,encode(s.csrf_token_hash,'hex') AS csrf_token_hash_hex FROM human_sessions s JOIN memberships m ON m.organization_id=s.organization_id AND m.member_id=s.member_id AND m.id=s.membership_id JOIN organizations o ON o.id=s.organization_id WHERE s.member_id=$1 AND o.authority_epoch=s.organization_authority_epoch AND m.session_epoch=s.membership_session_epoch ORDER BY s.created_at ASC,s.id ASC LIMIT 100`, [uuid(input.member_id ?? input.memberId)]);
     return (result.rows ?? []).map(sessionRow);
   }
 
@@ -80,7 +109,10 @@ export function createPostgresHumanRepository({ client, onAuthorityReduction } =
       "m.member_id=s.member_id",
       "m.id=s.membership_id",
       "m.status='active'",
-      "m.role=s.role"
+      "m.role=s.role",
+      "o.id=s.organization_id",
+      "o.authority_epoch=s.organization_authority_epoch",
+      "m.session_epoch=s.membership_session_epoch"
     ];
     if (organizationId !== undefined) {
       params.push(organizationId);
@@ -91,17 +123,17 @@ export function createPostgresHumanRepository({ client, onAuthorityReduction } =
       : "";
     if (paging.after) params.push(paging.after.createdAt, paging.after.id);
     params.push(paging.limit + 1);
-    const result = await client.query(`SELECT s.id AS session_id,s.member_id,s.organization_id,s.role,s.version,s.created_at,s.expires_at,s.last_seen_at,s.idle_expires_at,s.recent_auth_at,s.revoked_at,s.revoke_reason FROM human_sessions s JOIN memberships m ON ${predicates.slice(1).join(" AND ")} WHERE ${predicates[0]}${after} ORDER BY date_trunc('milliseconds',s.created_at) ASC,s.id ASC LIMIT $${params.length}`, params);
+    const result = await client.query(`SELECT s.id AS session_id,s.member_id,s.organization_id,s.role,s.version,s.created_at,s.expires_at,s.last_seen_at,s.idle_expires_at,s.recent_auth_at,s.revoked_at,s.revoke_reason FROM human_sessions s JOIN memberships m ON ${predicates.slice(1, 6).join(" AND ")} JOIN organizations o ON ${predicates.slice(6).join(" AND ")} WHERE ${predicates[0]}${after} ORDER BY date_trunc('milliseconds',s.created_at) ASC,s.id ASC LIMIT $${params.length}`, params);
     return (result.rows ?? []).map(safeSessionRow);
   }
 
   async function bindRecentAuth(input) {
-    const result = await client.query(`UPDATE human_sessions SET recent_auth_at=$6,recent_auth_challenge_id=$5,recent_auth_organization_id=$3,recent_auth_operation=$4,recent_auth_consumed_at=NULL WHERE id=$1 AND member_id=$2 AND organization_id=$3 AND revoked_at IS NULL AND expires_at>$6 RETURNING id`, [uuid(input.session_id), uuid(input.member_id), uuid(input.organization_id), bounded(input.operation, 128), uuid(input.challenge_id), input.authenticated_at]);
+    const result = await client.query(`UPDATE human_sessions s SET recent_auth_at=$6,recent_auth_challenge_id=$5,recent_auth_organization_id=$3,recent_auth_operation=$4,recent_auth_consumed_at=NULL FROM memberships m JOIN organizations o ON o.id=m.organization_id WHERE s.id=$1 AND s.member_id=$2 AND s.organization_id=$3 AND s.membership_id=m.id AND m.member_id=s.member_id AND m.organization_id=s.organization_id AND s.revoked_at IS NULL AND s.expires_at>$6 AND o.authority_epoch=s.organization_authority_epoch AND m.session_epoch=s.membership_session_epoch RETURNING s.id`, [uuid(input.session_id), uuid(input.member_id), uuid(input.organization_id), bounded(input.operation, 128), uuid(input.challenge_id), input.authenticated_at]);
     return result.rowCount === 1;
   }
 
   async function consumeRecentAuth(input) {
-    const result = await client.query(`UPDATE human_sessions SET recent_auth_consumed_at=$5 WHERE member_id=$1 AND recent_auth_organization_id=$2 AND recent_auth_operation=$3 AND recent_auth_challenge_id=$4 AND recent_auth_consumed_at IS NULL AND revoked_at IS NULL AND expires_at>$5 AND recent_auth_at>$5-INTERVAL '5 minutes' RETURNING recent_auth_at AS authenticated_at`, [uuid(input.member_id), uuid(input.organization_id), bounded(input.operation, 128), uuid(input.challenge_id), input.consumed_at]);
+    const result = await client.query(`UPDATE human_sessions s SET recent_auth_consumed_at=$5 FROM memberships m JOIN organizations o ON o.id=m.organization_id WHERE s.member_id=$1 AND s.recent_auth_organization_id=$2 AND s.organization_id=$2 AND s.recent_auth_operation=$3 AND s.recent_auth_challenge_id=$4 AND s.recent_auth_consumed_at IS NULL AND s.revoked_at IS NULL AND s.expires_at>$5 AND s.recent_auth_at>$5-INTERVAL '5 minutes' AND s.membership_id=m.id AND m.member_id=s.member_id AND m.organization_id=s.organization_id AND o.authority_epoch=s.organization_authority_epoch AND m.session_epoch=s.membership_session_epoch RETURNING s.recent_auth_at AS authenticated_at`, [uuid(input.member_id), uuid(input.organization_id), bounded(input.operation, 128), uuid(input.challenge_id), input.consumed_at]);
     return result.rowCount === 1 ? result.rows[0] : null;
   }
 
@@ -165,7 +197,7 @@ export function createPostgresHumanRepository({ client, onAuthorityReduction } =
   }
 
   async function getRegistrationUser(input) {
-    const result = await client.query(`SELECT s.member_id,m.display_name FROM human_sessions s JOIN members m ON m.id=s.member_id JOIN memberships ms ON ms.organization_id=s.organization_id AND ms.member_id=s.member_id WHERE s.id=$1 AND s.member_id=$2 AND s.organization_id=$3 AND s.revoked_at IS NULL AND s.expires_at>clock_timestamp() AND ms.status='active' AND ms.role=s.role LIMIT 1`, [uuid(input?.session_id ?? input?.sessionId), uuid(input?.member_id ?? input?.memberId), uuid(input?.organization_id ?? input?.organizationId)]);
+    const result = await client.query(`SELECT s.member_id,m.display_name FROM human_sessions s JOIN members m ON m.id=s.member_id JOIN memberships ms ON ms.organization_id=s.organization_id AND ms.member_id=s.member_id AND ms.id=s.membership_id JOIN organizations o ON o.id=s.organization_id WHERE s.id=$1 AND s.member_id=$2 AND s.organization_id=$3 AND s.revoked_at IS NULL AND s.expires_at>clock_timestamp() AND ms.status='active' AND ms.role=s.role AND o.authority_epoch=s.organization_authority_epoch AND ms.session_epoch=s.membership_session_epoch LIMIT 1`, [uuid(input?.session_id ?? input?.sessionId), uuid(input?.member_id ?? input?.memberId), uuid(input?.organization_id ?? input?.organizationId)]);
     const row = result.rows?.[0];
     if (!row) return null;
     const memberId = uuid(String(row.member_id));
@@ -173,12 +205,12 @@ export function createPostgresHumanRepository({ client, onAuthorityReduction } =
   }
 
   async function listCredentialsForSession(input) {
-    const result = await client.query(`SELECT c.id,c.transports FROM webauthn_credentials c JOIN human_sessions s ON s.member_id=c.member_id JOIN memberships m ON m.organization_id=s.organization_id AND m.member_id=s.member_id WHERE s.id=$1 AND s.organization_id=$2 AND s.revoked_at IS NULL AND s.expires_at>clock_timestamp() AND c.revoked_at IS NULL AND m.status='active' ORDER BY c.created_at ASC,c.id ASC LIMIT 64`, [uuid(input.session_id), uuid(input.organization_id)]);
+    const result = await client.query(`SELECT c.id,c.transports FROM webauthn_credentials c JOIN human_sessions s ON s.member_id=c.member_id JOIN memberships m ON m.organization_id=s.organization_id AND m.member_id=s.member_id AND m.id=s.membership_id JOIN organizations o ON o.id=s.organization_id WHERE s.id=$1 AND s.organization_id=$2 AND s.revoked_at IS NULL AND s.expires_at>clock_timestamp() AND c.revoked_at IS NULL AND m.status='active' AND m.role=s.role AND o.authority_epoch=s.organization_authority_epoch AND m.session_epoch=s.membership_session_epoch ORDER BY c.created_at ASC,c.id ASC LIMIT 64`, [uuid(input.session_id), uuid(input.organization_id)]);
     return (result.rows ?? []).map((row) => ({ id: credentialId(row.id), type: "public-key", transports: credentialTransports(row.transports) }));
   }
 
   async function findCredentialForSession(input) {
-    const result = await client.query(`SELECT c.id,c.public_key,c.sign_count,c.transports,c.revoked_at FROM webauthn_credentials c JOIN human_sessions s ON s.member_id=c.member_id JOIN memberships m ON m.organization_id=s.organization_id AND m.member_id=s.member_id WHERE s.id=$1 AND s.organization_id=$2 AND c.id=$3 AND s.revoked_at IS NULL AND c.revoked_at IS NULL AND m.status='active' LIMIT 1`, [uuid(input.session_id), uuid(input.organization_id), base64Bytes(input.credential_id, 16, 1024)]);
+    const result = await client.query(`SELECT c.id,c.public_key,c.sign_count,c.transports,c.revoked_at FROM webauthn_credentials c JOIN human_sessions s ON s.member_id=c.member_id JOIN memberships m ON m.organization_id=s.organization_id AND m.member_id=s.member_id AND m.id=s.membership_id JOIN organizations o ON o.id=s.organization_id WHERE s.id=$1 AND s.organization_id=$2 AND c.id=$3 AND s.revoked_at IS NULL AND c.revoked_at IS NULL AND m.status='active' AND m.role=s.role AND o.authority_epoch=s.organization_authority_epoch AND m.session_epoch=s.membership_session_epoch LIMIT 1`, [uuid(input.session_id), uuid(input.organization_id), base64Bytes(input.credential_id, 16, 1024)]);
     const row = result.rows?.[0];
     return row ? { ...row, id: Buffer.from(row.id).toString("base64url"), sign_count: storedCounter(row.sign_count) } : null;
   }
@@ -193,7 +225,7 @@ export function createPostgresHumanRepository({ client, onAuthorityReduction } =
       : "";
     if (paging.after) params.push(paging.after.createdAt, paging.after.id);
     params.push(paging.limit + 1);
-    const result = await client.query(`SELECT c.id,c.member_id,c.label,c.transports,c.backup_eligible,c.backup_state,c.created_at,c.last_used_at,c.revoked_at,c.version FROM webauthn_credentials c JOIN human_sessions s ON s.member_id=c.member_id JOIN memberships m ON m.organization_id=s.organization_id AND m.member_id=s.member_id AND m.id=s.membership_id WHERE s.id=$1 AND s.member_id=$2 AND s.organization_id=$3 AND s.revoked_at IS NULL AND s.expires_at>clock_timestamp() AND (s.idle_expires_at IS NULL OR s.idle_expires_at>clock_timestamp()) AND m.status='active' AND m.role=s.role${after} ORDER BY date_trunc('milliseconds',c.created_at) ASC,c.id ASC LIMIT $${params.length}`, params);
+    const result = await client.query(`SELECT c.id,c.member_id,c.label,c.transports,c.backup_eligible,c.backup_state,c.created_at,c.last_used_at,c.revoked_at,c.version FROM webauthn_credentials c JOIN human_sessions s ON s.member_id=c.member_id JOIN memberships m ON m.organization_id=s.organization_id AND m.member_id=s.member_id AND m.id=s.membership_id JOIN organizations o ON o.id=s.organization_id WHERE s.id=$1 AND s.member_id=$2 AND s.organization_id=$3 AND s.revoked_at IS NULL AND s.expires_at>clock_timestamp() AND (s.idle_expires_at IS NULL OR s.idle_expires_at>clock_timestamp()) AND m.status='active' AND m.role=s.role AND o.authority_epoch=s.organization_authority_epoch AND m.session_epoch=s.membership_session_epoch${after} ORDER BY date_trunc('milliseconds',c.created_at) ASC,c.id ASC LIMIT $${params.length}`, params);
     return (result.rows ?? []).map(safeCredentialRow);
   }
 
@@ -209,7 +241,7 @@ export function createPostgresHumanRepository({ client, onAuthorityReduction } =
     const backupEligible = strictBoolean(input?.backup_eligible ?? input?.backupEligible, "backup_eligible");
     const backupState = strictBoolean(input?.backup_state ?? input?.backupState, "backup_state");
     if (backupState && !backupEligible) throw new TypeError("backup_state requires backup_eligible");
-    const result = await client.query(`INSERT INTO webauthn_credentials (id,member_id,public_key,sign_count,transports,label,backup_eligible,backup_state) SELECT $3,$2,$4,$5,$6,$7,$8,$9 FROM human_sessions s JOIN memberships m ON m.organization_id=s.organization_id AND m.member_id=s.member_id WHERE s.id=$1 AND s.member_id=$2 AND s.organization_id=$10 AND s.revoked_at IS NULL AND s.expires_at>clock_timestamp() AND m.status='active' AND m.role=s.role ON CONFLICT (id) DO NOTHING RETURNING id,member_id,public_key,sign_count,transports,label,backup_eligible,backup_state,created_at,last_used_at,revoked_at`, [sessionId, memberId, credentialId, publicKey, signCount, transports, label, backupEligible, backupState, organizationId]);
+    const result = await client.query(`INSERT INTO webauthn_credentials (id,member_id,public_key,sign_count,transports,label,backup_eligible,backup_state) SELECT $3,$2,$4,$5,$6,$7,$8,$9 FROM human_sessions s JOIN memberships m ON m.organization_id=s.organization_id AND m.member_id=s.member_id AND m.id=s.membership_id JOIN organizations o ON o.id=s.organization_id WHERE s.id=$1 AND s.member_id=$2 AND s.organization_id=$10 AND s.revoked_at IS NULL AND s.expires_at>clock_timestamp() AND m.status='active' AND m.role=s.role AND o.authority_epoch=s.organization_authority_epoch AND m.session_epoch=s.membership_session_epoch ON CONFLICT (id) DO NOTHING RETURNING id,member_id,public_key,sign_count,transports,label,backup_eligible,backup_state,created_at,last_used_at,revoked_at`, [sessionId, memberId, credentialId, publicKey, signCount, transports, label, backupEligible, backupState, organizationId]);
     return result.rows?.[0] ? credentialRow(result.rows[0]) : null;
   }
 
@@ -235,13 +267,13 @@ export function createPostgresHumanRepository({ client, onAuthorityReduction } =
     // `INSERT ... ON CONFLICT DO NOTHING` keeps duplicate registration
     // harmless. Distinguish that case for the registration service without
     // exposing the existing credential record or public key.
-    const duplicate = await client.query(`SELECT 1 FROM webauthn_credentials c WHERE c.id=$1 AND EXISTS (SELECT 1 FROM human_sessions s JOIN memberships m ON m.organization_id=s.organization_id AND m.member_id=s.member_id WHERE s.id=$2 AND s.member_id=$3 AND s.organization_id=$4 AND s.revoked_at IS NULL AND s.expires_at>clock_timestamp() AND m.status='active' AND m.role=s.role) LIMIT 1`, [base64Bytes(credentialId, 16, 1024), sessionId, memberId, organizationId]);
+    const duplicate = await client.query(`SELECT 1 FROM webauthn_credentials c WHERE c.id=$1 AND EXISTS (SELECT 1 FROM human_sessions s JOIN memberships m ON m.organization_id=s.organization_id AND m.member_id=s.member_id AND m.id=s.membership_id JOIN organizations o ON o.id=s.organization_id WHERE s.id=$2 AND s.member_id=$3 AND s.organization_id=$4 AND s.revoked_at IS NULL AND s.expires_at>clock_timestamp() AND m.status='active' AND m.role=s.role AND o.authority_epoch=s.organization_authority_epoch AND m.session_epoch=s.membership_session_epoch) LIMIT 1`, [base64Bytes(credentialId, 16, 1024), sessionId, memberId, organizationId]);
     if (duplicate.rows?.length === 1) throw credentialExists();
     throw new Error("credential registration could not be stored");
   }
 
   async function updateCredentialCounter(input) {
-    const result = await client.query(`UPDATE webauthn_credentials c SET sign_count=$4,last_used_at=clock_timestamp() FROM human_sessions s WHERE s.id=$1 AND s.organization_id=$2 AND c.id=$3 AND c.member_id=s.member_id AND c.sign_count=$5 AND c.revoked_at IS NULL RETURNING c.id`, [uuid(input.session_id), uuid(input.organization_id), base64Bytes(input.credential_id, 16, 1024), counter(input.sign_count), counter(input.expected_sign_count)]);
+    const result = await client.query(`UPDATE webauthn_credentials c SET sign_count=$4,last_used_at=clock_timestamp() FROM human_sessions s JOIN memberships m ON m.organization_id=s.organization_id AND m.member_id=s.member_id AND m.id=s.membership_id JOIN organizations o ON o.id=s.organization_id WHERE s.id=$1 AND s.organization_id=$2 AND c.id=$3 AND c.member_id=s.member_id AND c.sign_count=$5 AND c.revoked_at IS NULL AND s.revoked_at IS NULL AND s.expires_at>clock_timestamp() AND m.status='active' AND m.role=s.role AND o.authority_epoch=s.organization_authority_epoch AND m.session_epoch=s.membership_session_epoch RETURNING c.id`, [uuid(input.session_id), uuid(input.organization_id), base64Bytes(input.credential_id, 16, 1024), counter(input.sign_count), counter(input.expected_sign_count)]);
     return result.rowCount === 1;
   }
 
@@ -253,7 +285,7 @@ export function createPostgresHumanRepository({ client, onAuthorityReduction } =
       return await inTransaction(async (transactionClient) => {
         await lockOrganization(transactionClient, scope.organizationId);
         await lockCredentialSet(transactionClient, scope.memberId);
-        const result = await transactionClient.query(`UPDATE webauthn_credentials c SET label=$4,version=c.version+1 FROM human_sessions s JOIN memberships m ON m.organization_id=s.organization_id AND m.member_id=s.member_id AND m.id=s.membership_id WHERE s.id=$1 AND s.member_id=$2 AND s.organization_id=$3 AND s.revoked_at IS NULL AND s.expires_at>clock_timestamp() AND (s.idle_expires_at IS NULL OR s.idle_expires_at>clock_timestamp()) AND m.status='active' AND m.role=s.role AND c.id=$5 AND c.member_id=s.member_id AND c.revoked_at IS NULL AND c.version=$6 RETURNING c.id,c.member_id,c.label,c.transports,c.backup_eligible,c.backup_state,c.created_at,c.last_used_at,c.revoked_at,c.version`, [scope.sessionId, scope.memberId, scope.organizationId, label, base64Bytes(input?.credential_id ?? input?.credentialId, 16, 1024), expectedVersion]);
+        const result = await transactionClient.query(`UPDATE webauthn_credentials c SET label=$4,version=c.version+1 FROM human_sessions s JOIN memberships m ON m.organization_id=s.organization_id AND m.member_id=s.member_id AND m.id=s.membership_id JOIN organizations o ON o.id=s.organization_id WHERE s.id=$1 AND s.member_id=$2 AND s.organization_id=$3 AND s.revoked_at IS NULL AND s.expires_at>clock_timestamp() AND (s.idle_expires_at IS NULL OR s.idle_expires_at>clock_timestamp()) AND m.status='active' AND m.role=s.role AND o.authority_epoch=s.organization_authority_epoch AND m.session_epoch=s.membership_session_epoch AND c.id=$5 AND c.member_id=s.member_id AND c.revoked_at IS NULL AND c.version=$6 RETURNING c.id,c.member_id,c.label,c.transports,c.backup_eligible,c.backup_state,c.created_at,c.last_used_at,c.revoked_at,c.version`, [scope.sessionId, scope.memberId, scope.organizationId, label, base64Bytes(input?.credential_id ?? input?.credentialId, 16, 1024), expectedVersion]);
         if (result.rowCount === 0 && await credentialExistsInScope(transactionClient, scope, input?.credential_id ?? input?.credentialId)) throw versionConflict();
         return result.rows?.[0] ? safeCredentialRow(result.rows[0]) : null;
       });
@@ -274,7 +306,7 @@ export function createPostgresHumanRepository({ client, onAuthorityReduction } =
       return await inTransaction(async (transactionClient) => {
         await lockOrganization(transactionClient, scope.organizationId);
         await lockCredentialSet(transactionClient, scope.memberId);
-        const candidate = await transactionClient.query(`SELECT c.id FROM webauthn_credentials c JOIN human_sessions s ON s.member_id=c.member_id JOIN memberships m ON m.organization_id=s.organization_id AND m.member_id=s.member_id AND m.id=s.membership_id WHERE s.id=$1 AND s.member_id=$2 AND s.organization_id=$3 AND s.revoked_at IS NULL AND s.expires_at>clock_timestamp() AND (s.idle_expires_at IS NULL OR s.idle_expires_at>clock_timestamp()) AND m.status='active' AND m.role=s.role AND c.id=$4 AND c.member_id=s.member_id AND c.revoked_at IS NULL AND c.version=$5 LIMIT 1`, [scope.sessionId, scope.memberId, scope.organizationId, credentialId, expectedVersion]);
+        const candidate = await transactionClient.query(`SELECT c.id FROM webauthn_credentials c JOIN human_sessions s ON s.member_id=c.member_id JOIN memberships m ON m.organization_id=s.organization_id AND m.member_id=s.member_id AND m.id=s.membership_id JOIN organizations o ON o.id=s.organization_id WHERE s.id=$1 AND s.member_id=$2 AND s.organization_id=$3 AND s.revoked_at IS NULL AND s.expires_at>clock_timestamp() AND (s.idle_expires_at IS NULL OR s.idle_expires_at>clock_timestamp()) AND m.status='active' AND m.role=s.role AND o.authority_epoch=s.organization_authority_epoch AND m.session_epoch=s.membership_session_epoch AND c.id=$4 AND c.member_id=s.member_id AND c.revoked_at IS NULL AND c.version=$5 LIMIT 1`, [scope.sessionId, scope.memberId, scope.organizationId, credentialId, expectedVersion]);
         if (candidate.rowCount !== 1) {
           if (await credentialExistsInScope(transactionClient, scope, input?.credential_id ?? input?.credentialId)) throw versionConflict();
           return null;
@@ -283,7 +315,7 @@ export function createPostgresHumanRepository({ client, onAuthorityReduction } =
         const activeCount = Number(count.rows?.[0]?.active_count);
         if (!Number.isSafeInteger(activeCount) || activeCount < 1) throw lastCredentialError();
         if (activeCount === 1) throw lastCredentialError();
-        const result = await transactionClient.query(`UPDATE webauthn_credentials c SET revoked_at=$7,revoke_reason=COALESCE($6,c.revoke_reason),version=c.version+1 FROM human_sessions s JOIN memberships m ON m.organization_id=s.organization_id AND m.member_id=s.member_id AND m.id=s.membership_id WHERE s.id=$1 AND s.member_id=$2 AND s.organization_id=$3 AND s.revoked_at IS NULL AND s.expires_at>clock_timestamp() AND (s.idle_expires_at IS NULL OR s.idle_expires_at>clock_timestamp()) AND m.status='active' AND m.role=s.role AND c.id=$4 AND c.member_id=s.member_id AND c.revoked_at IS NULL AND c.version=$5 RETURNING c.id,c.member_id,c.label,c.transports,c.backup_eligible,c.backup_state,c.created_at,c.last_used_at,c.revoked_at,c.version`, [scope.sessionId, scope.memberId, scope.organizationId, credentialId, expectedVersion, reason ?? null, revokedAt]);
+        const result = await transactionClient.query(`UPDATE webauthn_credentials c SET revoked_at=$7,revoke_reason=COALESCE($6,c.revoke_reason),version=c.version+1 FROM human_sessions s JOIN memberships m ON m.organization_id=s.organization_id AND m.member_id=s.member_id AND m.id=s.membership_id JOIN organizations o ON o.id=s.organization_id WHERE s.id=$1 AND s.member_id=$2 AND s.organization_id=$3 AND s.revoked_at IS NULL AND s.expires_at>clock_timestamp() AND (s.idle_expires_at IS NULL OR s.idle_expires_at>clock_timestamp()) AND m.status='active' AND m.role=s.role AND o.authority_epoch=s.organization_authority_epoch AND m.session_epoch=s.membership_session_epoch AND c.id=$4 AND c.member_id=s.member_id AND c.revoked_at IS NULL AND c.version=$5 RETURNING c.id,c.member_id,c.label,c.transports,c.backup_eligible,c.backup_state,c.created_at,c.last_used_at,c.revoked_at,c.version`, [scope.sessionId, scope.memberId, scope.organizationId, credentialId, expectedVersion, reason ?? null, revokedAt]);
         const record = result.rows?.[0] ? safeCredentialRow(result.rows[0]) : null;
         if (record && input?.authority_reduction === true) await notifyAuthorityReduction(transactionClient, { ...scope, memberId: scope.memberId, actorSessionId: input?.actor_session_id ?? input?.actorSessionId ?? scope.sessionId, targetId: record.id, resource: "credential", reason, occurredAt: revokedAt });
         return record;
@@ -303,7 +335,7 @@ export function createPostgresHumanRepository({ client, onAuthorityReduction } =
     return inTransaction(async (transactionClient) => {
       await lockOrganization(transactionClient, organizationId);
       await lockSessionSet(transactionClient, memberId);
-      const result = await transactionClient.query(`UPDATE human_sessions target SET revoked_at=COALESCE(target.revoked_at,$4),revoke_reason=COALESCE(target.revoke_reason,$5) WHERE target.member_id=$2 AND target.id<>$1 AND target.revoked_at IS NULL AND EXISTS (SELECT 1 FROM human_sessions actor JOIN memberships m ON m.organization_id=actor.organization_id AND m.member_id=actor.member_id AND m.id=actor.membership_id WHERE actor.id=$1 AND actor.member_id=$2 AND actor.organization_id=$3 AND actor.revoked_at IS NULL AND actor.expires_at>clock_timestamp() AND (actor.idle_expires_at IS NULL OR actor.idle_expires_at>clock_timestamp()) AND m.status='active' AND m.role=actor.role) RETURNING target.id AS session_id,target.member_id,target.organization_id,target.role,target.created_at,target.expires_at,target.last_seen_at,target.idle_expires_at,target.recent_auth_at,target.revoked_at,target.revoke_reason`, [sessionId, memberId, organizationId, revokedAt, reason]);
+      const result = await transactionClient.query(`UPDATE human_sessions target SET revoked_at=COALESCE(target.revoked_at,$4),revoke_reason=COALESCE(target.revoke_reason,$5) WHERE target.member_id=$2 AND target.organization_id=$3 AND target.id<>$1 AND target.revoked_at IS NULL AND EXISTS (SELECT 1 FROM human_sessions actor JOIN memberships m ON m.organization_id=actor.organization_id AND m.member_id=actor.member_id AND m.id=actor.membership_id JOIN organizations o ON o.id=actor.organization_id WHERE actor.id=$1 AND actor.member_id=$2 AND actor.organization_id=$3 AND actor.revoked_at IS NULL AND actor.expires_at>clock_timestamp() AND (actor.idle_expires_at IS NULL OR actor.idle_expires_at>clock_timestamp()) AND m.status='active' AND m.role=actor.role AND o.authority_epoch=actor.organization_authority_epoch AND m.session_epoch=actor.membership_session_epoch) AND EXISTS (SELECT 1 FROM memberships target_m JOIN organizations target_o ON target_o.id=target.organization_id WHERE target_m.id=target.membership_id AND target_m.organization_id=target.organization_id AND target_m.member_id=target.member_id AND target_m.status='active' AND target_m.role=target.role AND target_o.authority_epoch=target.organization_authority_epoch AND target_m.session_epoch=target.membership_session_epoch) RETURNING target.id AS session_id,target.member_id,target.organization_id,target.role,target.created_at,target.expires_at,target.last_seen_at,target.idle_expires_at,target.recent_auth_at,target.revoked_at,target.revoke_reason`, [sessionId, memberId, organizationId, revokedAt, reason]);
       return (result.rows ?? []).map(safeSessionRow);
     });
   }
@@ -320,9 +352,9 @@ export function createPostgresHumanRepository({ client, onAuthorityReduction } =
     return inTransaction(async (transactionClient) => {
       await lockOrganization(transactionClient, organizationId);
       await lockSessionSet(transactionClient, memberId);
-      const result = await transactionClient.query(`UPDATE human_sessions target SET revoked_at=$6,revoke_reason=$7,version=target.version+1 WHERE target.id=$4 AND target.member_id=$2 AND target.organization_id=$3 AND target.revoked_at IS NULL AND target.version=$5 AND EXISTS (SELECT 1 FROM human_sessions actor JOIN memberships m ON m.organization_id=actor.organization_id AND m.member_id=actor.member_id AND m.id=actor.membership_id WHERE actor.id=$1 AND actor.member_id=$2 AND actor.organization_id=$3 AND actor.revoked_at IS NULL AND actor.expires_at>clock_timestamp() AND (actor.idle_expires_at IS NULL OR actor.idle_expires_at>clock_timestamp()) AND m.status='active' AND m.role=actor.role) RETURNING target.id AS session_id,target.member_id,target.organization_id,target.role,target.version,target.created_at,target.expires_at,target.last_seen_at,target.idle_expires_at,target.recent_auth_at,target.revoked_at,target.revoke_reason`, [actorSessionId, memberId, organizationId, targetSessionId, expectedVersion, revokedAt, reason]);
+      const result = await transactionClient.query(`UPDATE human_sessions target SET revoked_at=$6,revoke_reason=$7,version=target.version+1 WHERE target.id=$4 AND target.member_id=$2 AND target.organization_id=$3 AND target.revoked_at IS NULL AND target.version=$5 AND EXISTS (SELECT 1 FROM human_sessions actor JOIN memberships m ON m.organization_id=actor.organization_id AND m.member_id=actor.member_id AND m.id=actor.membership_id JOIN organizations o ON o.id=actor.organization_id WHERE actor.id=$1 AND actor.member_id=$2 AND actor.organization_id=$3 AND actor.revoked_at IS NULL AND actor.expires_at>clock_timestamp() AND (actor.idle_expires_at IS NULL OR actor.idle_expires_at>clock_timestamp()) AND m.status='active' AND m.role=actor.role AND o.authority_epoch=actor.organization_authority_epoch AND m.session_epoch=actor.membership_session_epoch) AND EXISTS (SELECT 1 FROM memberships target_m JOIN organizations target_o ON target_o.id=target.organization_id WHERE target_m.id=target.membership_id AND target_m.organization_id=target.organization_id AND target_m.member_id=target.member_id AND target_m.status='active' AND target_m.role=target.role AND target_o.authority_epoch=target.organization_authority_epoch AND target_m.session_epoch=target.membership_session_epoch) RETURNING target.id AS session_id,target.member_id,target.organization_id,target.role,target.version,target.created_at,target.expires_at,target.last_seen_at,target.idle_expires_at,target.recent_auth_at,target.revoked_at,target.revoke_reason`, [actorSessionId, memberId, organizationId, targetSessionId, expectedVersion, revokedAt, reason]);
       if (result.rowCount === 0) {
-        const exists = await transactionClient.query("SELECT 1 FROM human_sessions WHERE id=$1 AND member_id=$2 AND organization_id=$3 AND revoked_at IS NULL LIMIT 1", [targetSessionId, memberId, organizationId]);
+        const exists = await transactionClient.query("SELECT 1 FROM human_sessions s JOIN memberships m ON m.organization_id=s.organization_id AND m.member_id=s.member_id AND m.id=s.membership_id JOIN organizations o ON o.id=s.organization_id WHERE s.id=$1 AND s.member_id=$2 AND s.organization_id=$3 AND s.revoked_at IS NULL AND o.authority_epoch=s.organization_authority_epoch AND m.session_epoch=s.membership_session_epoch LIMIT 1", [targetSessionId, memberId, organizationId]);
         if (exists.rowCount === 1) throw versionConflict();
       }
       const record = result.rows?.[0] ? safeSessionRow(result.rows[0]) : null;
@@ -377,7 +409,7 @@ export function createPostgresHumanRepository({ client, onAuthorityReduction } =
   }
 
   async function credentialExistsInScope(transactionClient, scope, credentialValue) {
-    const result = await transactionClient.query(`SELECT 1 FROM webauthn_credentials c JOIN human_sessions s ON s.member_id=c.member_id JOIN memberships m ON m.organization_id=s.organization_id AND m.member_id=s.member_id AND m.id=s.membership_id WHERE s.id=$1 AND s.member_id=$2 AND s.organization_id=$3 AND s.revoked_at IS NULL AND s.expires_at>clock_timestamp() AND m.status='active' AND m.role=s.role AND c.id=$4 AND c.revoked_at IS NULL LIMIT 1`, [scope.sessionId, scope.memberId, scope.organizationId, base64Bytes(credentialValue, 16, 1024)]);
+    const result = await transactionClient.query(`SELECT 1 FROM webauthn_credentials c JOIN human_sessions s ON s.member_id=c.member_id JOIN memberships m ON m.organization_id=s.organization_id AND m.member_id=s.member_id AND m.id=s.membership_id JOIN organizations o ON o.id=s.organization_id WHERE s.id=$1 AND s.member_id=$2 AND s.organization_id=$3 AND s.revoked_at IS NULL AND s.expires_at>clock_timestamp() AND m.status='active' AND m.role=s.role AND o.authority_epoch=s.organization_authority_epoch AND m.session_epoch=s.membership_session_epoch AND c.id=$4 AND c.revoked_at IS NULL LIMIT 1`, [scope.sessionId, scope.memberId, scope.organizationId, base64Bytes(credentialValue, 16, 1024)]);
     return result.rowCount === 1;
   }
 }

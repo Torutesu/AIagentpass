@@ -161,14 +161,41 @@ test("enforces idle and absolute expiry", async () => {
 test("rotates the session and invalidates the old bearer to prevent fixation", async () => {
   const f = fixture();
   const first = await issue(f);
+  f.repository.records.get(first.session.session_id).recent_auth_at = "2026-08-12T00:00:00.000Z";
   const rotated = await f.service.rotateSession({ cookie: first.cookie, origin: ORIGIN, csrfToken: first.csrfToken });
 
   assert.notEqual(rotated.cookie, first.cookie);
   assert.notEqual(rotated.session.session_id, first.session.session_id);
   assert.equal(rotated.session.expires_at, first.session.expires_at);
+  assert.equal(rotated.session.recent_auth_at, null);
   await assert.rejects(() => f.service.authenticateRequest({ cookie: first.cookie, method: "GET", origin: ORIGIN }), (error) => error.code === HUMAN_SESSION_ERROR_CODES.SESSION_REVOKED);
   const current = await f.service.authenticateRequest({ cookie: rotated.cookie, method: "GET", origin: ORIGIN });
   assert.equal(current.session.session_id, rotated.session.session_id);
+});
+
+test("fails closed when authority changes between session lookup and activity update", async () => {
+  const repository = new MemorySessionRepository();
+  const f = fixture({ repository });
+  const issued = await issue(f);
+  repository.updateSessionActivity = async () => null;
+
+  await assert.rejects(
+    () => f.service.authenticateRequest({ cookie: issued.cookie, method: "GET", origin: ORIGIN }),
+    (error) => error.code === HUMAN_SESSION_ERROR_CODES.SESSION_REVOKED
+  );
+});
+
+test("does not return a replacement cookie when atomic rotation loses the old session", async () => {
+  const repository = new MemorySessionRepository();
+  repository.rotateSession = async () => null;
+  const f = fixture({ repository });
+  const issued = await issue(f);
+
+  await assert.rejects(
+    () => f.service.rotateSession({ cookie: issued.cookie, origin: ORIGIN, csrfToken: issued.csrfToken }),
+    (error) => error.code === HUMAN_SESSION_ERROR_CODES.SESSION_REVOKED
+  );
+  assert.equal(repository.records.size, 1);
 });
 
 test("logout and explicit revocation invalidate sessions and clear the cookie", async () => {

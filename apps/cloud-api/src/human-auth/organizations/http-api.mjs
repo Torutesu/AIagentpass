@@ -71,6 +71,8 @@ export const HUMAN_ORGANIZATIONS_HTTP_ERROR_CODES = Object.freeze({
   SESSION_REQUIRED: "human_organizations_session_required",
   CSRF_FAILED: "human_organizations_csrf_failed",
   FORBIDDEN: "human_organizations_forbidden",
+  ROLE_NOT_ALLOWED: "human_organizations_role_not_allowed",
+  LAST_OWNER_PROTECTED: "human_organizations_last_owner_protected",
   ORGANIZATION_NOT_FOUND: "human_organizations_organization_not_found",
   MEMBER_NOT_FOUND: "human_organizations_member_not_found",
   INVITATION_NOT_FOUND: "human_organizations_invitation_not_found",
@@ -93,6 +95,8 @@ const ERROR_MESSAGES = Object.freeze({
   [HUMAN_ORGANIZATIONS_HTTP_ERROR_CODES.SESSION_REQUIRED]: "A valid human session is required",
   [HUMAN_ORGANIZATIONS_HTTP_ERROR_CODES.CSRF_FAILED]: "The CSRF token is invalid",
   [HUMAN_ORGANIZATIONS_HTTP_ERROR_CODES.FORBIDDEN]: "The operation is not allowed",
+  [HUMAN_ORGANIZATIONS_HTTP_ERROR_CODES.ROLE_NOT_ALLOWED]: "The requested role transition is not allowed",
+  [HUMAN_ORGANIZATIONS_HTTP_ERROR_CODES.LAST_OWNER_PROTECTED]: "The organization must retain an active owner",
   [HUMAN_ORGANIZATIONS_HTTP_ERROR_CODES.ORGANIZATION_NOT_FOUND]: "The organization was not found",
   [HUMAN_ORGANIZATIONS_HTTP_ERROR_CODES.MEMBER_NOT_FOUND]: "The member was not found",
   [HUMAN_ORGANIZATIONS_HTTP_ERROR_CODES.INVITATION_NOT_FOUND]: "The invitation was not found",
@@ -115,6 +119,8 @@ const ERROR_STATUS = Object.freeze({
   [HUMAN_ORGANIZATIONS_HTTP_ERROR_CODES.SESSION_REQUIRED]: 401,
   [HUMAN_ORGANIZATIONS_HTTP_ERROR_CODES.CSRF_FAILED]: 403,
   [HUMAN_ORGANIZATIONS_HTTP_ERROR_CODES.FORBIDDEN]: 403,
+  [HUMAN_ORGANIZATIONS_HTTP_ERROR_CODES.ROLE_NOT_ALLOWED]: 403,
+  [HUMAN_ORGANIZATIONS_HTTP_ERROR_CODES.LAST_OWNER_PROTECTED]: 409,
   [HUMAN_ORGANIZATIONS_HTTP_ERROR_CODES.ORGANIZATION_NOT_FOUND]: 404,
   [HUMAN_ORGANIZATIONS_HTTP_ERROR_CODES.MEMBER_NOT_FOUND]: 404,
   [HUMAN_ORGANIZATIONS_HTTP_ERROR_CODES.INVITATION_NOT_FOUND]: 404,
@@ -300,6 +306,7 @@ export function createHumanOrganizationsHttpApi({
     requireRole(actor, ADMIN_OR_OWNER);
     const input = parseBody(body, new Set(["role"]));
     if (typeof input.role !== "string" || !ROLES.has(input.role)) throw invalidRequest();
+    if (input.role === "owner" && actor.role !== "owner") throw roleNotAllowed();
     const expectedVersion = requiredExpectedVersion(request);
     await requireRecentAuth(actor, route.organizationId, request, HUMAN_ORGANIZATIONS_RECENT_AUTH_OPERATIONS.updateMemberRole);
     try {
@@ -628,8 +635,10 @@ function mapServiceError(error, resource) {
   if (["not_found", "organization_not_found", "resource_not_found", "tenant_not_found"].includes(code)) return new HumanOrganizationsHttpError(resourceCode(resource), { status: 404, cause: error });
   if (["member_not_found", "membership_not_found"].includes(code)) return new HumanOrganizationsHttpError(HUMAN_ORGANIZATIONS_HTTP_ERROR_CODES.MEMBER_NOT_FOUND, { status: 404, cause: error });
   if (["invitation_not_found"].includes(code)) return new HumanOrganizationsHttpError(HUMAN_ORGANIZATIONS_HTTP_ERROR_CODES.INVITATION_NOT_FOUND, { status: 404, cause: error });
-  if (["forbidden", "not_authorized", "owner_required", "cannot_remove_owner", "last_owner", "owner_constraint"].includes(code)) return new HumanOrganizationsHttpError(HUMAN_ORGANIZATIONS_HTTP_ERROR_CODES.FORBIDDEN, { status: 403, cause: error });
-  if (["version_conflict", "err_version_conflict", "expected_version_mismatch", "stale_version"].includes(code)) return new HumanOrganizationsHttpError(HUMAN_ORGANIZATIONS_HTTP_ERROR_CODES.VERSION_CONFLICT, { status: 409, cause: error });
+  if (error?.reason === "last_owner" || ["last_owner", "err_last_owner", "owner_constraint", "cannot_remove_owner"].includes(code)) return new HumanOrganizationsHttpError(HUMAN_ORGANIZATIONS_HTTP_ERROR_CODES.LAST_OWNER_PROTECTED, { status: 409, cause: error });
+  if (error?.reason === "role_not_allowed" || ["role_not_allowed", "err_role_not_allowed", "role_downgrade_forbidden"].includes(code)) return new HumanOrganizationsHttpError(HUMAN_ORGANIZATIONS_HTTP_ERROR_CODES.ROLE_NOT_ALLOWED, { status: 403, cause: error });
+  if (["forbidden", "err_forbidden", "not_authorized", "owner_required", "err_actor"].includes(code)) return new HumanOrganizationsHttpError(HUMAN_ORGANIZATIONS_HTTP_ERROR_CODES.FORBIDDEN, { status: 403, cause: error });
+  if (["version_conflict", "err_version_conflict", "expected_version_mismatch", "err_expected_version_mismatch", "stale_version"].includes(code)) return new HumanOrganizationsHttpError(HUMAN_ORGANIZATIONS_HTTP_ERROR_CODES.VERSION_CONFLICT, { status: 409, cause: error });
   if (["idempotency_conflict", "err_idempotency_conflict", "idempotency_key_reused"].includes(code)) return new HumanOrganizationsHttpError(HUMAN_ORGANIZATIONS_HTTP_ERROR_CODES.IDEMPOTENCY_CONFLICT, { status: 409, cause: error });
   if (["invitation_replayed", "invitation_token_replayed", "token_replayed", "already_used", "invitation_expired"].includes(code)) return new HumanOrganizationsHttpError(HUMAN_ORGANIZATIONS_HTTP_ERROR_CODES.INVITATION_REPLAYED, { status: 409, cause: error });
   if (["invalid_input", "invalid_scope", "tenant_scope_error"].includes(code)) return invalidRequest();
@@ -642,6 +651,10 @@ function resourceCode(resource) {
 
 function invalidRequest() {
   return new HumanOrganizationsHttpError(HUMAN_ORGANIZATIONS_HTTP_ERROR_CODES.INVALID_REQUEST, { status: 400 });
+}
+
+function roleNotAllowed() {
+  return new HumanOrganizationsHttpError(HUMAN_ORGANIZATIONS_HTTP_ERROR_CODES.ROLE_NOT_ALLOWED, { status: 403 });
 }
 
 function mapError(error) {
