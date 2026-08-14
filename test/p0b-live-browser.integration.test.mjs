@@ -37,11 +37,10 @@ test("P0-B live browser role, WebAuthn, and recent-auth matrix", { skip: !enable
   });
 
   for (const role of ["auditor", "viewer"]) {
-    await scenario(t, `${role} remains read-only after valid real WebAuthn`, async ({ open }) => {
+    await scenario(t, `${role} receives no wake mutation control`, async ({ open }) => {
       const page = await open(role);
       const card = deviceCard(page, "反映待ち Mac");
-      await card.getByRole("button", { name: "Wake requestを依頼" }).click();
-      await card.getByRole("alert").waitFor();
+      assert.equal(await card.getByRole("button", { name: "Wake requestを依頼" }).count(), 0);
     });
   }
 
