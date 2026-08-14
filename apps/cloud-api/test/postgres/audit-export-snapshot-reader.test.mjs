@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
+import crypto from "node:crypto";
 import test from "node:test";
 
+import { canonicalJson } from "../../../../packages/protocol/src/index.mjs";
 import { AUDIT_ANCHOR_ZERO_DIGEST } from "../../src/audit-anchor-statement.mjs";
 import {
   AUDIT_EXPORT_MAX_PAYLOAD_BYTES,
@@ -46,6 +48,14 @@ function adminEvent(details = { safe: true }) {
     previous_hash: ZERO,
     sequence: 1
   };
+}
+
+function adminV2Event(details = { safe: true }, overrides = {}) {
+  return { ...adminEvent(details), version: 2, ...overrides };
+}
+
+function adminEventHash(event) {
+  return crypto.createHash("sha256").update(canonicalJson(event), "utf8").digest("hex");
 }
 
 function adminRow(details) {
@@ -96,6 +106,7 @@ test("derives a closed frozen admin payload and binds the active lifecycle in th
   });
   assert.notEqual(result.range.root_digest, EVENT_HASH);
   assert.equal(result.payload.entries[0].source_hash, EVENT_HASH);
+  assert.equal(result.payload.entries[0].event.version, 1);
   assert.equal(result.payload.entries[0].source_gap, null);
   assert.equal(result.key_id, "audit-anchor-2026-08");
   assert.equal(result.key_version, 3);
@@ -105,6 +116,63 @@ test("derives a closed frozen admin payload and binds the active lifecycle in th
   assert.equal(value.queries.length, 2);
   assert.match(value.queries[0].sql, /LIMIT \$3[\s\S]*FOR SHARE OF e/u);
   assert.match(value.queries[1].sql, /k\.state='active' AND k\.state_version=l\.version/u);
+});
+
+test("verifies v2 admin hashes while preserving v1 linkage-only compatibility in a mixed chain", async () => {
+  const secondId = "55555555-5555-4555-8555-555555555555";
+  const secondEvent = adminV2Event({ nested: { zulu: "last", alpha: "first" } }, {
+    audit_event_id: secondId,
+    previous_hash: EVENT_HASH,
+    sequence: 2
+  });
+  const value = fixture({ rows: [adminRow({ legacy_v1: true }), {
+    organization_id: ORGANIZATION_ID,
+    sequence: "2",
+    id: secondId,
+    actor_id: ACTOR_ID,
+    action: "member.role.changed",
+    target_type: "member",
+    target_id: null,
+    previous_hash: EVENT_HASH,
+    event_hash: adminEventHash(secondEvent),
+    event_json: secondEvent,
+    created_at: new Date("2026-08-15T00:00:01.000Z")
+  }] });
+
+  const result = await createPostgresAuditExportSnapshotReader()(value.tx, identity(), boundary());
+  assert.deepEqual(result.payload.entries.map((entry) => entry.event.version), [1, 2]);
+  assert.equal(result.payload.entries[0].source_hash, EVENT_HASH);
+  assert.equal(result.payload.entries[1].source_hash, adminEventHash(secondEvent));
+});
+
+test("accepts v2 hashes after JSONB-style nested key reordering", async () => {
+  const original = adminV2Event({ nested: { zulu: "last", alpha: "first" } });
+  const roundTripped = {
+    ...original,
+    details: { nested: { alpha: "first", zulu: "last" } }
+  };
+  const value = fixture({ rows: [{
+    ...adminRow(),
+    event_hash: adminEventHash(original),
+    event_json: roundTripped
+  }] });
+
+  const result = await createPostgresAuditExportSnapshotReader()(value.tx, identity(), boundary());
+  assert.equal(result.payload.entries[0].event.version, 2);
+  assert.equal(result.payload.entries[0].source_hash, adminEventHash(original));
+});
+
+test("rejects a tampered v2 admin event preimage", async () => {
+  const original = adminV2Event({ decision: "allow" });
+  const tampered = { ...original, details: { decision: "deny" } };
+  const value = fixture({ rows: [{
+    ...adminRow(),
+    event_hash: adminEventHash(original),
+    event_json: tampered
+  }] });
+
+  await assert.rejects(createPostgresAuditExportSnapshotReader()(value.tx, identity(), boundary()),
+    (error) => error instanceof AuditExportSnapshotReaderError && error.code === "ERR_AUDIT_EXPORT_SNAPSHOT_HASH");
 });
 
 test("exports a stable domain-separated root fold for independent verification", () => {

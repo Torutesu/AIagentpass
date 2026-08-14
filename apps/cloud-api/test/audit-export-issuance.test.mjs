@@ -20,6 +20,7 @@ import {
   AUDIT_EXPORT_ISSUANCE_ERROR_CODES,
   createAuditExportIssuanceService
 } from "../src/audit-export-issuance.mjs";
+import { foldAuditExportRoot } from "../src/postgres/audit-export-snapshot-reader.mjs";
 
 const NOW = Date.parse("2026-08-15T00:00:00.000Z");
 const ORGANIZATION_ID = "11111111-1111-4111-8111-111111111111";
@@ -29,14 +30,105 @@ const OTHER_EXPORT_ID = "88888888-8888-4888-8888-888888888888";
 const KEY_ID = "audit-anchor-production-v1";
 const KEY_VERSION = 7;
 const LIFECYCLE_VERSION = 3;
+const ENTRIES = [
+    {
+      version: 1,
+      organization_id: ORGANIZATION_ID,
+      environment: "production",
+      chain: "admin",
+      export_position: 1,
+      source_id: "33333333-3333-4333-8333-333333333333",
+      source_device_id: null,
+      source_previous_hash: AUDIT_ANCHOR_ZERO_DIGEST,
+      source_hash: "b".repeat(64),
+      source_gap: null,
+      event: {
+        version: 1,
+        audit_event_id: "33333333-3333-4333-8333-333333333333",
+        organization_id: ORGANIZATION_ID,
+        actor_id: "44444444-4444-4444-8444-444444444444",
+        action: "member.role.changed",
+        target_type: "member",
+        target_id: "55555555-5555-4555-8555-555555555555",
+        details: { from: "viewer", to: "auditor", reason: "audit_access" },
+        previous_hash: AUDIT_ANCHOR_ZERO_DIGEST,
+        sequence: 1,
+        event_hash: "b".repeat(64),
+        recorded_at: "2026-08-14T23:59:58.000Z"
+      }
+    },
+    {
+      version: 1,
+      organization_id: ORGANIZATION_ID,
+      environment: "production",
+      chain: "admin",
+      export_position: 2,
+      source_id: "66666666-6666-4666-8666-666666666666",
+      source_device_id: null,
+      source_previous_hash: "b".repeat(64),
+      source_hash: "c".repeat(64),
+      source_gap: null,
+      event: {
+        version: 1,
+        audit_event_id: "66666666-6666-4666-8666-666666666666",
+        organization_id: ORGANIZATION_ID,
+        actor_id: "44444444-4444-4444-8444-444444444444",
+        action: "policy.created",
+        target_type: "policy",
+        target_id: "77777777-7777-4777-8777-777777777777",
+        details: { policy_sequence: 4 },
+        previous_hash: "b".repeat(64),
+        sequence: 2,
+        event_hash: "c".repeat(64),
+        recorded_at: "2026-08-14T23:59:59.000Z"
+      }
+    },
+    {
+      version: 1,
+      organization_id: ORGANIZATION_ID,
+      environment: "production",
+      chain: "admin",
+      export_position: 3,
+      source_id: "88888888-8888-4888-8888-888888888888",
+      source_device_id: null,
+      source_previous_hash: "c".repeat(64),
+      source_hash: "d".repeat(64),
+      source_gap: null,
+      event: {
+        version: 1,
+        audit_event_id: "88888888-8888-4888-8888-888888888888",
+        organization_id: ORGANIZATION_ID,
+        actor_id: "44444444-4444-4444-8444-444444444444",
+        action: "audit.export.requested",
+        target_type: "audit_export",
+        target_id: EXPORT_ID,
+        details: { chain: "admin", record_count: 3 },
+        previous_hash: "c".repeat(64),
+        sequence: 3,
+        event_hash: "d".repeat(64),
+        recorded_at: "2026-08-15T00:00:00.000Z"
+      }
+    }
+  ];
+let rootDigest = AUDIT_ANCHOR_ZERO_DIGEST;
+for (const entry of ENTRIES) rootDigest = foldAuditExportRoot(rootDigest, entry);
 const RANGE = Object.freeze({
   from_audit_position: 1,
   to_audit_position: 3,
   previous_root_digest: AUDIT_ANCHOR_ZERO_DIGEST,
-  root_digest: "a".repeat(64),
-  record_count: 3
+  root_digest: rootDigest,
+  record_count: ENTRIES.length
 });
-const PAYLOAD_DIGEST = "c".repeat(64);
+const PAYLOAD = deepFreeze({
+  version: 1,
+  type: "agentpass.audit-export",
+  organization_id: ORGANIZATION_ID,
+  environment: "production",
+  chain: "admin",
+  range: RANGE,
+  entries: ENTRIES
+});
+const PAYLOAD_DIGEST = sha256(canonicalJson(PAYLOAD));
 const INPUT = Object.freeze({
   organization_id: ORGANIZATION_ID,
   export_id: EXPORT_ID,
@@ -47,6 +139,14 @@ const INPUT = Object.freeze({
 
 function sha256(value) {
   return crypto.createHash("sha256").update(value, "utf8").digest("hex");
+}
+
+function deepFreeze(value, seen = new Set()) {
+  if (!value || typeof value !== "object" || seen.has(value)) return value;
+  seen.add(value);
+  Object.freeze(value);
+  for (const child of Object.values(value)) deepFreeze(child, seen);
+  return value;
 }
 
 function requestDigest(input, range = RANGE, payloadDigest = PAYLOAD_DIGEST) {
@@ -161,8 +261,8 @@ function committedRecord(input, overrides = {}) {
   };
 }
 
-function createRepository({ reserve = undefined, commit = undefined, replay = undefined } = {}) {
-  const calls = { reserve: [], commit: [], replay: [], uncertain: [] };
+function createRepository({ reserve = undefined, commit = undefined, replay = undefined, getPayload = undefined } = {}) {
+  const calls = { reserve: [], commit: [], replay: [], payload: [], uncertain: [], snapshot: 0 };
   let committed;
   const repository = {
     async reserveAuditExport(input) {
@@ -170,6 +270,7 @@ function createRepository({ reserve = undefined, commit = undefined, replay = un
       if (typeof reserve === "function") return reserve(input, calls, setCommitted);
       if (reserve !== undefined) return structuredClone(reserve);
       if (committed) return structuredClone(committed);
+      calls.snapshot += 1;
       return reservation(input);
     },
     async commitAuditExport(input) {
@@ -182,6 +283,12 @@ function createRepository({ reserve = undefined, commit = undefined, replay = un
       calls.replay.push(structuredClone(input));
       if (typeof replay === "function") return replay(input, calls);
       return committed ? structuredClone(committed) : { state: "absent" };
+    },
+    async getAuditExportPayload(input) {
+      calls.payload.push(structuredClone(input));
+      if (typeof getPayload === "function") return getPayload(input, calls);
+      if (getPayload !== undefined) return structuredClone(getPayload);
+      return structuredClone(PAYLOAD);
     },
     async markAuditExportUncertain(input) {
       calls.uncertain.push(structuredClone(input));
@@ -247,12 +354,15 @@ test("uses only caller identity and signs the repository-frozen authoritative de
 
   assert.deepEqual(Object.keys(INPUT).sort(), ["chain", "environment", "export_id", "idempotency_key", "organization_id"].sort());
   assert.deepEqual(Object.keys(value.repoFixture.calls.reserve[0]).sort(), Object.keys(INPUT).sort());
+  assert.deepEqual(value.repoFixture.calls.payload[0], INPUT);
+  assert.equal(PAYLOAD_DIGEST, sha256(canonicalJson(PAYLOAD)));
   assert.deepEqual(result.range, RANGE);
   assert.equal(result.payload_digest, PAYLOAD_DIGEST);
+  assert.deepEqual(result.payload, PAYLOAD);
   assert.equal(result.validity, "active");
   assert.equal(result.replayed, false);
   assert.deepEqual(Object.keys(result).sort(), [
-    "audit_anchor", "chain", "environment", "export_id", "organization_id", "payload_digest", "range", "replayed", "validity"
+    "audit_anchor", "chain", "environment", "export_id", "organization_id", "payload", "payload_digest", "range", "replayed", "validity"
   ].sort());
   assert.deepEqual(Object.keys(value.repoFixture.calls.commit[0]).sort(), [
     "audit_anchor", "chain", "claim_token", "environment", "expires_at", "export_id", "idempotency_key",
@@ -261,6 +371,11 @@ test("uses only caller identity and signs the repository-frozen authoritative de
   assert.equal(Object.hasOwn(value.repoFixture.calls.commit[0], "signing_bytes"), false);
   assert.equal(Object.hasOwn(value.repoFixture.calls.commit[0], "provider_diagnostics"), false);
   assert.equal(Object.isFrozen(result), true);
+  assert.equal(Object.isFrozen(result.payload), true);
+  assert.equal(Object.isFrozen(result.payload.entries), true);
+  assert.equal(Object.isFrozen(result.payload.entries[0]), true);
+  assert.equal(Object.isFrozen(result.payload.entries[0].event), true);
+  assert.equal(Object.isFrozen(result.payload.entries[0].event.details), true);
   assert.equal(Object.isFrozen(result.range), true);
   assert.equal(Object.isFrozen(result.audit_anchor), true);
   assert.equal(Object.keys(result.audit_anchor.statement).filter((key) => key === "protocol_version").length, 1);
@@ -317,9 +432,14 @@ test("replays a committed response-loss record without a second signer call", as
   const signCount = fixture.calls.sign.length;
   const replayed = await service.issueAuditExport(INPUT);
   assert.equal(replayed.replayed, true);
+  assert.deepEqual(replayed.payload, PAYLOAD);
+  assert.equal(Object.isFrozen(replayed.payload), true);
+  assert.equal(Object.isFrozen(replayed.payload.entries[2].event.details), true);
   assert.equal(replayed.validity, "active");
   assert.equal(fixture.calls.sign.length, signCount);
   assert.equal(resolverCalls.length, 1);
+  assert.equal(repoFixture.calls.payload.length, 1);
+  assert.equal(repoFixture.calls.snapshot, 1);
   assert.equal(repoFixture.calls.uncertain.length, 1);
   assert.equal(JSON.stringify(replayed).includes("provider_diagnostics"), false);
 });
@@ -336,6 +456,46 @@ test("represents in-progress, uncertain, and conflict repository outcomes withou
       await assert.rejects(value.service.issueAuditExport(INPUT), { code });
       assert.equal(value.fixture.calls.sign.length, 0);
       assert.equal(value.repoFixture.calls.commit.length, 0);
+    });
+  }
+});
+
+test("fails closed for missing, tampered, noncanonical, and private committed payloads without re-signing or re-snapshotting", async (t) => {
+  const cases = [
+    ["missing", () => undefined],
+    ["tampered", () => {
+      const payload = structuredClone(PAYLOAD);
+      payload.entries[0].event.details.reason = "tampered";
+      return payload;
+    }],
+    ["noncanonical", () => canonicalJson(PAYLOAD)],
+    ["private", () => {
+      const payload = structuredClone(PAYLOAD);
+      payload.entries[0].event.details = { private_key: "-----BEGIN PRIVATE KEY-----" };
+      return payload;
+    }]
+  ];
+
+  for (const [name, payloadFactory] of cases) {
+    await t.test(name, async () => {
+      let storedPayload = PAYLOAD;
+      const value = validService({ repositoryOptions: { getPayload: () => storedPayload } });
+      await value.service.issueAuditExport(INPUT);
+      const signCount = value.fixture.calls.sign.length;
+      storedPayload = payloadFactory();
+
+      const rotated = unavailableRotatedSigner();
+      const service = createService({
+        repository: value.repoFixture.repository,
+        signer: rotated.signer,
+        resolver: async () => value.fixture.metadata
+      });
+      await assert.rejects(service.issueAuditExport(INPUT), { code: AUDIT_EXPORT_ISSUANCE_ERROR_CODES.OUTPUT });
+      assert.equal(value.fixture.calls.sign.length, signCount);
+      assert.equal(rotated.calls.metadata, 0);
+      assert.equal(rotated.calls.sign, 0);
+      assert.equal(value.repoFixture.calls.snapshot, 1);
+      assert.equal(value.repoFixture.calls.payload.length, 2);
     });
   }
 });
@@ -423,6 +583,7 @@ test("committed replay survives current signer rotation through the historical r
   });
   const replayed = await service.issueAuditExport(INPUT);
   assert.equal(replayed.replayed, true);
+  assert.deepEqual(replayed.payload, PAYLOAD);
   assert.equal(replayed.validity, "active");
   assert.equal(rotated.calls.metadata, 0);
   assert.equal(rotated.calls.sign, 0);
@@ -445,6 +606,8 @@ test("replays an expired committed envelope by verifying at issued_at and redact
   });
   const replayed = await service.replayAuditExport(INPUT);
   assert.equal(replayed.replayed, true);
+  assert.deepEqual(replayed.payload, PAYLOAD);
+  assert.equal(Object.isFrozen(replayed.payload.entries[1].event.details), true);
   assert.equal(replayed.validity, "expired");
   assert.equal(rotated.calls.metadata, 0);
   assert.equal(rotated.calls.sign, 0);

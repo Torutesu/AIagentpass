@@ -105,6 +105,7 @@ function rowFromInsert(params) {
 
 function harness({ reader = descriptor, raceInsert = false, commitResponseLost = false } = {}) {
   const rows = new Map();
+  const payloads = new Map();
   const queries = [];
   const readerCalls = [];
   let now = NOW;
@@ -118,6 +119,15 @@ function harness({ reader = descriptor, raceInsert = false, commitResponseLost =
       if (/current_setting\('agentpass\.organization_id'/u.test(sql)) return result([{ organization_id: ORGANIZATION_ID }]);
       if (/pg_advisory_xact_lock/u.test(sql)) return result([{ locked: null }]);
       if (/SELECT clock_timestamp\(\)/u.test(sql)) return result([{ now }]);
+      if (/FROM audit_export_committed_payloads/u.test(sql)) {
+        const identityKey = params.join("|");
+        const issuance = rows.get(identityKey);
+        return result(issuance?.state === "committed" && payloads.has(identityKey) ? [payloads.get(identityKey)] : []);
+      }
+      if (/FROM audit_export_payloads/u.test(sql)) {
+        const identityKey = params.join("|");
+        return result(payloads.has(identityKey) ? [payloads.get(identityKey)] : []);
+      }
       if (/FROM audit_export_issuances/u.test(sql) && /state='committed'/u.test(sql) && /ORDER BY to_audit_position/u.test(sql)) {
         const committed = [...rows.values()].filter((row) => row.state === "committed" && row.organization_id === params[0] && row.environment === params[1] && row.chain === params[2]).sort((a, b) => b.to_audit_position - a.to_audit_position);
         return result(committed.slice(0, 1));
@@ -135,10 +145,26 @@ function harness({ reader = descriptor, raceInsert = false, commitResponseLost =
           const racedRow = rowFromInsert(params);
           racedRow.claim_token_digest = digest("another-racer-token");
           rows.set(identityKey, racedRow);
+          const payloadText = canonicalJson(PAYLOAD);
+          payloads.set(identityKey, {
+            payload_bytes: Buffer.from(payloadText, "utf8"),
+            payload_json: structuredClone(PAYLOAD),
+            payload_digest: Buffer.from(params[10])
+          });
           return result([]);
         }
-        if (!rows.has(identityKey)) rows.set(identityKey, rowFromInsert(params));
-        return result([]);
+        if (rows.has(identityKey)) return result([]);
+        rows.set(identityKey, rowFromInsert(params));
+        return { rowCount: 1, rows: [] };
+      }
+      if (/^INSERT INTO audit_export_payloads/u.test(sql)) {
+        const identityKey = params.slice(0, 5).join("|");
+        payloads.set(identityKey, {
+          payload_bytes: Buffer.from(params[5]),
+          payload_json: JSON.parse(params[6]),
+          payload_digest: Buffer.from(params[7])
+        });
+        return { rowCount: 1, rows: [] };
       }
       if (/SET claim_token_digest=\$6/u.test(sql)) {
         const row = rows.get(params.slice(0, 5).join("|"));
@@ -178,7 +204,7 @@ function harness({ reader = descriptor, raceInsert = false, commitResponseLost =
       return reader === descriptor ? reader() : reader(identity, previousBoundary);
     }
   });
-  return { repository, rows, queries, readerCalls, setNow(value) { now = value; } };
+  return { repository, rows, payloads, queries, readerCalls, setNow(value) { now = value; } };
 }
 
 function result(rows) { return { rowCount: rows.length, rows }; }
@@ -190,6 +216,9 @@ test("reserves from a strict reader, sets tenant context, locks the chain, and s
   assert.match(reserved.claim_token, /^[A-Za-z0-9_-]{43}$/u);
   assert.notEqual(fixture.rows.values().next().value.claim_token_digest, reserved.claim_token);
   assert.equal(fixture.readerCalls.length, 1);
+  assert.equal(fixture.payloads.size, 1);
+  assert.deepEqual(fixture.payloads.values().next().value.payload_json, PAYLOAD);
+  assert.equal(Buffer.from(fixture.payloads.values().next().value.payload_digest).toString("hex"), digest(canonicalJson(PAYLOAD)));
   assert.deepEqual(fixture.readerCalls[0].previousBoundary, { to_audit_position: 0, root_digest: AUDIT_ANCHOR_ZERO_DIGEST });
   assert.match(fixture.queries.find(({ sql }) => /INSERT INTO audit_export_issuances/u.test(sql)).sql, /ON CONFLICT \(organization_id,export_id,environment,chain,idempotency_key\) DO NOTHING/u);
   assert.match(fixture.queries[1].sql, /SELECT set_config\('agentpass\.organization_id'/u);
@@ -220,6 +249,44 @@ test("enforces previous committed boundary and exact commit binding", async () =
   const committed = await fixture.repository.commitAuditExport({ ...authority, claim_token: reserved.claim_token, audit_anchor: anchor });
   assert.equal(committed.state, "committed");
   assert.equal(Object.hasOwn(committed, "claim_token"), false);
+  assert.deepEqual(await fixture.repository.getAuditExportPayload(IDENTITY), PAYLOAD);
+  assert.equal(Object.isFrozen(await fixture.repository.getAuditExportPayload(IDENTITY)), true);
+});
+
+test("retrieves only committed canonical payload bytes and rejects durable corruption", async (t) => {
+  async function committedFixture() {
+    const fixture = harness();
+    const reserved = await fixture.repository.reserveAuditExport(IDENTITY);
+    const authority = { ...reserved };
+    delete authority.state;
+    delete authority.claim_token;
+    await fixture.repository.commitAuditExport({ ...authority, claim_token: reserved.claim_token, audit_anchor: makeAnchor(authority) });
+    return fixture;
+  }
+
+  await t.test("reserved payload is not retrievable", async () => {
+    const fixture = harness();
+    await fixture.repository.reserveAuditExport(IDENTITY);
+    await assert.rejects(fixture.repository.getAuditExportPayload(IDENTITY), (error) => error.code.includes("NOT_FOUND"));
+  });
+
+  await t.test("missing payload fails closed", async () => {
+    const fixture = await committedFixture();
+    fixture.payloads.clear();
+    await assert.rejects(fixture.repository.getAuditExportPayload(IDENTITY), (error) => error.code.includes("NOT_FOUND"));
+  });
+
+  await t.test("noncanonical bytes fail closed", async () => {
+    const fixture = await committedFixture();
+    fixture.payloads.values().next().value.payload_bytes = Buffer.from(JSON.stringify(PAYLOAD, null, 1), "utf8");
+    await assert.rejects(fixture.repository.getAuditExportPayload(IDENTITY), (error) => error.code.includes("DATABASE"));
+  });
+
+  await t.test("digest substitution fails closed", async () => {
+    const fixture = await committedFixture();
+    fixture.payloads.values().next().value.payload_digest = Buffer.from("d".repeat(64), "hex");
+    await assert.rejects(fixture.repository.getAuditExportPayload(IDENTITY), (error) => error.code.includes("DATABASE"));
+  });
 });
 
 test("claim loss and lease expiry are fenced without exposing token material", async () => {

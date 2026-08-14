@@ -493,7 +493,7 @@ Planned commit sequence:
 7. `C2/C3-qualification`: real PostgreSQL two-instance matrix, full regression,
    threat-model/runbook updates, and source-bound retained evidence.
 
-#### Persistence checkpoint after migrations 43-45
+#### Persistence checkpoint after migrations 43-46
 
 The contract checkpoint and the first persistence checkpoint are now
 implemented. Migration 43 stores tenant-qualified audit-export reservations,
@@ -503,8 +503,10 @@ response-loss replay without persisting a clear claim token. Migration 44
 stores immutable deployment-scoped platform approvals and derives a canonical
 record digest that is byte-identical to the JavaScript contract. Migration 45
 adds the organization-wide export ordering required to export device audit
-events whose source chains remain per-device. All three migrations are in the
-frozen catalog as versions 43-45.
+events whose source chains remain per-device. Migration 46 adds immutable
+canonical payload bytes, structural JSON, digest binding, committed-only
+retrieval, RLS, and reservation-time completeness. All four migrations are in
+the frozen catalog as versions 43-46.
 
 The C2 snapshot-reader checkpoint is now implemented locally. Production code
 derives the admin, cloud-agent, and organization-global device ranges inside
@@ -515,13 +517,15 @@ chains. Two real PostgreSQL 17 pools prove all three sources, RLS isolation,
 chunk-independent roots, gap disclosure, expired-claim authority reuse, replay,
 and concurrent reservation exclusion. PostgreSQL and hosted Cloud runtimes now
 compose the repository, audit signer, and a durable historical public-key
-resolver. C2 is still not complete: immutable payload bytes/retrieval and the
-Human BFF/API are intentionally not exposed yet. Admin v1 source hashes also
-remain linkage-only because the legacy writer hashed `JSON.stringify` before
-JSONB persistence; a versioned canonical writer/backfill is required before
-claiming independent source-preimage recomputation. C3 has an approval authority
-but does not yet have the promotion issuance ledger, managed-signer transaction,
-or atomic deployment transition.
+resolver. Immutable canonical payload bytes are captured in the reservation
+transaction and, after commit, are retrieved without re-snapshotting, checked
+against their stored SHA-256, rebound to the exact identity/range, root-folded,
+and returned with the historical-key-verified anchor. New admin events use the
+canonical v2 writer and are independently recomputed; legacy v1 remains
+explicitly linkage-only. C2's remaining product surface is the Human BFF/API
+and Console workflow. C3 has an approval authority but does not yet have the
+promotion issuance ledger, managed-signer transaction, or atomic deployment
+transition.
 
 The next implementation commits, in dependency order, are:
 
@@ -533,10 +537,12 @@ The next implementation commits, in dependency order, are:
    concurrent range exclusion, exact replay, commit-response loss, RLS, and
    restart across two real PostgreSQL pools. The test must prove that a reader
    cannot re-snapshot frozen authority during reclaim.
-3. `C2-runtime` — signer/repository/historical resolver composed locally; retrieval remains open: compose the ledger with the audit-purpose managed signer,
-   exact output self-verification, historical key resolution, retrieval, and
-   verification. Signer acceptance with an unknown commit outcome must become
-   a durable uncertain state; no automatic second signature is allowed.
+3. `C2-runtime` — implemented locally: the signer/repository/historical resolver
+   composition retrieves the immutable payload only after commit, verifies its
+   canonical digest, identity, range, cumulative root and historical anchor,
+   and returns a deeply frozen public result. Signer acceptance with an unknown
+   commit outcome becomes a durable uncertain state; replay never re-signs or
+   re-snapshots.
 4. `C3-promotion-ledger`: persist candidate identity, artifact/manifest/SBOM
    digests, the exact qualification-report set, approval digest, signer
    lifecycle, opaque claim lease, provider operation, and deployment transition.
@@ -564,9 +570,10 @@ estimated WAL/lock duration), a maintenance window or staged online backfill,
 and an abort threshold before it is applied to a populated deployment.
 
 Each commit exits only when focused unit tests, contract validation, lint, real
-PostgreSQL tests, and the root regression suite pass. Steps 1-3 close C2; steps
-4-5 close C3; step 6 depends on the matching producer; step 7 is the production
-gate and cannot be replaced by mocks or a local successful demo.
+PostgreSQL tests, and the root regression suite pass. Steps 1-3 close the C2
+producer/runtime boundary; the Human API and Console portion closes in step 6.
+Steps 4-5 close C3; step 6 depends on the matching producer; step 7 is the
+production gate and cannot be replaced by mocks or a local successful demo.
 
 After C1, C2 and C3 can proceed in parallel because their schemas and signer
 purposes are disjoint. C6 PostgreSQL role/TLS/backup work and C9 packaging may
@@ -713,7 +720,7 @@ use a provider operation service/ledger or remain blocked from production.
 
 Merge role-separated PostgreSQL CI first, followed by backup/PITR evidence and
 cutover hardening. The CI lane creates the migrator, app, and backup roles from
-scratch, applies all 45 current migrations, executes repository smoke tests as the app,
+scratch, applies all 46 current migrations, executes repository smoke tests as the app,
 and proves the negative privilege matrix. The protected-environment lane then
 records encrypted backup, point-in-time restore, row/checksum/authority
 comparison, RPO, RTO, and rollback rehearsal.

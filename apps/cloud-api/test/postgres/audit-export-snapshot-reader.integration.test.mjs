@@ -53,7 +53,7 @@ test("C2 PostgreSQL snapshot reader derives bounded roots and reservations from 
   const migrationClient = await poolA.connect();
   try {
     const migration = await createMigrationRunner({ client: migrationClient, applicationVersion: "audit-export-snapshot-reader-integration" }).run();
-    assert.equal(migration.currentVersion, 45);
+    assert.equal(migration.currentVersion, 46);
   } finally {
     migrationClient.release();
   }
@@ -181,6 +181,11 @@ test("C2 PostgreSQL snapshot reader derives bounded roots and reservations from 
   assert.equal(replay.state, "committed");
   assert.deepEqual(replay.range, committed.range);
   assert.equal(replay.payload_digest, committed.payload_digest);
+  const persistedPayload = await repositoryA.getAuditExportPayload(identity);
+  assert.equal(sha256(canonicalJson(persistedPayload)), committed.payload_digest);
+  assert.deepEqual(persistedPayload.range, committed.range);
+  assert.equal(Object.isFrozen(persistedPayload), true);
+  assert.equal(Object.isFrozen(persistedPayload.entries), true);
 
   const raceIdentity = {
     organization_id: ORGANIZATION_ID,
@@ -279,7 +284,7 @@ async function seedAdminEvents(tx, organizationId, actorId, eventIds, now) {
       audit_event_id: eventIds[index],
       organization_id: organizationId,
       actor_id: actorId,
-      action: "c2.snapshot.seed",
+      action: index === 0 ? "webauthn.credential.deleted" : "c2.snapshot.seed",
       target_type: "organization",
       target_id: null,
       details: { sequence, source: "integration-test" },

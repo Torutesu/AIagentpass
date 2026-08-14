@@ -23,6 +23,7 @@ const MAX_TREE_DEPTH = 16;
 const MAX_TREE_ITEMS = 4096;
 const MAX_TREE_STRING_BYTES = 16 * 1024;
 const PRIVATE_MATERIAL = /(?:-----BEGIN [^-]*PRIVATE KEY-----|private[_ -]?key|secret|credential|provider[_ -]?diagnostic|claim[_ -]?token|signing[_ -]?bytes)/iu;
+const PRIVATE_VALUE = /(?:-----BEGIN [^-]*PRIVATE KEY-----|(?:^|\s)Bearer\s+[A-Za-z0-9._~+/-]+=*(?:\s|$))/iu;
 
 const IDENTITY_KEYS = Object.freeze([
   "organization_id", "export_id", "environment", "chain", "idempotency_key"
@@ -51,6 +52,7 @@ const ROW_SELECT = `organization_id,export_id,environment,chain,idempotency_key,
   encode(request_digest,'hex') AS request_digest,issued_at,expires_at,claim_expires_at,key_id,key_version,
   lifecycle_version,encode(claim_token_digest,'hex') AS claim_token_digest,audit_anchor,uncertain_reason`;
 const PK_WHERE = "organization_id=$1 AND export_id=$2 AND environment=$3 AND chain=$4 AND idempotency_key=$5";
+const PAYLOAD_SELECT = `payload_bytes,payload_json,encode(payload_digest,'hex') AS payload_digest`;
 
 const MESSAGES = Object.freeze({
   ERR_INPUT: "audit export issuance input is invalid",
@@ -111,6 +113,7 @@ export function createPostgresAuditExportIssuanceRepository({
         if (open !== undefined) return open.state === "uncertain" ? { state: "uncertain" } : { state: "in_progress" };
 
         if (existingRow?.state === "reserved") {
+          await selectAndVerifyPayload(tx, identity, existingRow.payload_digest, false);
           const token = newClaimToken();
           const reissued = await tx.query(`UPDATE audit_export_issuances
             SET claim_token_digest=$6, claim_expires_at=clock_timestamp()+($7 * interval '1 millisecond')
@@ -145,6 +148,15 @@ export function createPostgresAuditExportIssuanceRepository({
           evidenceTtlMs, claimLeaseMs, authority.key_id, authority.key_version, authority.lifecycle_version, digestBytes(token)
         ]);
         if (rowCount(inserted) > 1) throw repoError("ERR_DATABASE");
+        if (rowCount(inserted) === 1) {
+          const payloadInserted = await tx.query(`INSERT INTO audit_export_payloads
+            (organization_id,export_id,environment,chain,idempotency_key,payload_bytes,payload_json,payload_digest)
+            VALUES ($1,$2,$3,$4,$5,$6,$7::jsonb,$8)`, [
+            identity.organization_id, identity.export_id, identity.environment, identity.chain, identity.idempotency_key,
+            authority.payload_bytes, authority.payload_json, hexBytes(authority.payload_digest)
+          ]);
+          if (rowCount(payloadInserted) !== 1) throw repoError("ERR_DATABASE");
+        }
 
         const locked = await selectIssuance(tx, identity, true);
         if (locked === undefined) throw repoError("ERR_DATABASE");
@@ -153,6 +165,7 @@ export function createPostgresAuditExportIssuanceRepository({
         if (row.state === "committed") return committedOutcome(row);
         if (row.state === "uncertain") return { state: "uncertain" };
         if (row.state !== "reserved") throw repoError("ERR_DATABASE");
+        await selectAndVerifyPayload(tx, identity, row.payload_digest, false);
         if (row.claim_token_digest !== tokenDigest) return { state: "in_progress" };
         return reservedOutcome(row, token);
       });
@@ -250,7 +263,19 @@ export function createPostgresAuditExportIssuanceRepository({
     }
   }
 
-  return Object.freeze({ reserveAuditExport, commitAuditExport, replayAuditExport, markAuditExportUncertain });
+  async function getAuditExportPayload(input = {}) {
+    const identity = normalizeIdentity(input);
+    try {
+      return await withTransaction(client, async (tx) => {
+        await establishTenantContext(tx, identity.organization_id);
+        return selectAndVerifyPayload(tx, identity, undefined, true);
+      });
+    } catch (error) {
+      throw publicError(error);
+    }
+  }
+
+  return Object.freeze({ reserveAuditExport, commitAuditExport, replayAuditExport, markAuditExportUncertain, getAuditExportPayload });
 }
 
 export const createAuditExportIssuanceRepository = createPostgresAuditExportIssuanceRepository;
@@ -323,7 +348,8 @@ async function readSnapshot(tx, identity, previousBoundary, snapshotReader) {
 }
 
 function authorityFromSnapshot(identity, descriptor) {
-  const payloadDigest = digest(canonicalJson(descriptor.payload));
+  const payloadJson = canonicalJson(descriptor.payload);
+  const payloadDigest = digest(payloadJson);
   if (payloadDigest === AUDIT_ANCHOR_ZERO_DIGEST) throw repoError("ERR_SNAPSHOT");
   const range = descriptor.range;
   const requestDigest = digest(canonicalJson({
@@ -337,7 +363,40 @@ function authorityFromSnapshot(identity, descriptor) {
     payload_digest: payloadDigest
   }));
   return Object.freeze({ ...identity, range, payload_digest: payloadDigest, request_digest: requestDigest,
+    payload_bytes: Buffer.from(payloadJson, "utf8"), payload_json: payloadJson,
     key_id: descriptor.key_id, key_version: descriptor.key_version, lifecycle_version: descriptor.lifecycle_version });
+}
+
+async function selectAndVerifyPayload(tx, identity, expectedDigest, committedOnly) {
+  const source = committedOnly ? "audit_export_committed_payloads" : "audit_export_payloads";
+  const result = await tx.query(`SELECT ${PAYLOAD_SELECT}
+    FROM ${source}
+    WHERE ${PK_WHERE}`, [
+    identity.organization_id, identity.export_id, identity.environment, identity.chain, identity.idempotency_key
+  ]);
+  if (rowCount(result) === 0) throw repoError(committedOnly ? "ERR_NOT_FOUND" : "ERR_DATABASE");
+  if (rowCount(result) !== 1) throw repoError("ERR_DATABASE");
+  return normalizeStoredPayload(result.rows[0], expectedDigest);
+}
+
+function normalizeStoredPayload(row, expectedDigest) {
+  try {
+    if (!row || typeof row !== "object" || Array.isArray(row)) throw new Error("payload row");
+    const bytes = row.payload_bytes;
+    if (!Buffer.isBuffer(bytes) && !(bytes instanceof Uint8Array)) throw new Error("payload bytes");
+    const payloadBytes = Buffer.from(bytes);
+    if (payloadBytes.length < 1 || payloadBytes.length > MAX_DESCRIPTOR_BYTES) throw new Error("payload size");
+    const storedDigest = requiredDigest(row.payload_digest, false);
+    if (expectedDigest !== undefined && storedDigest !== expectedDigest) throw new Error("payload authority");
+    const payload = row.payload_json;
+    assertPlainDataTree(payload);
+    const canonical = canonicalJson(payload);
+    if (!payloadBytes.equals(Buffer.from(canonical, "utf8")) || digest(canonical) !== storedDigest) throw new Error("payload binding");
+    return deepFreeze(structuredClone(payload));
+  } catch (error) {
+    if (error instanceof AuditExportIssuanceRepositoryError) throw error;
+    throw repoError("ERR_DATABASE");
+  }
 }
 
 function normalizeDescriptor(value, previousBoundary) {
@@ -545,7 +604,7 @@ function normalizeRange(value) {
 
 function assertPlainDataTree(value, seen = new Set(), depth = 0, allowClaimTokenKey = false) {
   if (value === null || typeof value !== "object") {
-    if (typeof value === "string" && (Buffer.byteLength(value, "utf8") > MAX_TREE_STRING_BYTES || PRIVATE_MATERIAL.test(value))) throw new Error("sensitive tree");
+    if (typeof value === "string" && (Buffer.byteLength(value, "utf8") > MAX_TREE_STRING_BYTES || PRIVATE_VALUE.test(value))) throw new Error("sensitive tree");
     return;
   }
   if (depth > MAX_TREE_DEPTH || seen.has(value) || (!isObject(value) && !Array.isArray(value))) throw new Error("data tree");

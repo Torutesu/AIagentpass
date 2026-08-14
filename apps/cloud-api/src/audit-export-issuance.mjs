@@ -19,6 +19,12 @@ import {
   parseAuditAnchorPublicKey
 } from "./audit-anchor-statement.mjs";
 import { verifyAuditAnchor } from "./audit-anchor-verifier.mjs";
+import {
+  AUDIT_EXPORT_SNAPSHOT_TYPE,
+  AUDIT_EXPORT_SNAPSHOT_VERSION,
+  canonicalAuditExportEntry,
+  foldAuditExportRoot
+} from "./postgres/audit-export-snapshot-reader.mjs";
 
 export const AUDIT_EXPORT_ISSUANCE_VERSION = 1;
 
@@ -136,6 +142,9 @@ const METADATA_KEYS = Object.freeze([
   "lifecycle_version",
   "public_key",
   "public_key_fingerprint"
+]);
+const PAYLOAD_KEYS = Object.freeze([
+  "version", "type", "organization_id", "environment", "chain", "range", "entries"
 ]);
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu;
@@ -274,7 +283,8 @@ export function createAuditExportIssuanceService(options = {}) {
       await markUncertainBestEffort(values, reservation, "commit_failure");
       throw issuanceError(AUDIT_EXPORT_ISSUANCE_ERROR_CODES.COMMIT);
     }
-    return publicResult(committed, false, currentNow());
+    const payload = await readCommittedPayload(values, committed);
+    return publicResult(committed, payload, false, currentNow());
   }
 
   async function replayAuditExport(input = {}, operationOptions = {}) {
@@ -309,7 +319,8 @@ export function createAuditExportIssuanceService(options = {}) {
       const issuedAtMs = Date.parse(record.issued_at);
       const expectedStatement = buildStatement(values, reservation, issuedAtMs, maxTtlMs);
       const anchor = verifySignedAnchor(record.audit_anchor, expectedStatement, values, reservation, metadata, issuedAtMs, maxTtlMs, AUDIT_EXPORT_ISSUANCE_ERROR_CODES.HISTORICAL_KEY);
-      return publicResult({ ...record, audit_anchor: anchor }, replayed, currentNowMs);
+      const payload = await readCommittedPayload(values, record);
+      return publicResult({ ...record, audit_anchor: anchor }, payload, replayed, currentNowMs);
     } catch (error) {
       if (error instanceof AuditExportIssuanceError) throw error;
       throw issuanceError(AUDIT_EXPORT_ISSUANCE_ERROR_CODES.OUTPUT);
@@ -349,6 +360,17 @@ export function createAuditExportIssuanceService(options = {}) {
     }
     return metadata;
   }
+
+  async function readCommittedPayload(values, record) {
+    let value;
+    try {
+      value = await repository.getAuditExportPayload(toReserveInput(values));
+      return normalizeExportPayload(value, record);
+    } catch (error) {
+      if (error instanceof AuditExportIssuanceError) throw error;
+      throw issuanceError(AUDIT_EXPORT_ISSUANCE_ERROR_CODES.OUTPUT);
+    }
+  }
 }
 
 export const createAuthoritativeAuditExportIssuer = createAuditExportIssuanceService;
@@ -358,7 +380,8 @@ function validateConfiguration({ repository, signer, publicKeyResolver, now, max
     || typeof repository.reserveAuditExport !== "function"
     || typeof repository.commitAuditExport !== "function"
     || typeof repository.replayAuditExport !== "function"
-    || typeof repository.markAuditExportUncertain !== "function") {
+    || typeof repository.markAuditExportUncertain !== "function"
+    || typeof repository.getAuditExportPayload !== "function") {
     throw issuanceError(AUDIT_EXPORT_ISSUANCE_ERROR_CODES.CONFIG);
   }
   if (!isObject(signer)
@@ -689,7 +712,7 @@ function assertSameSignerMetadata(left, right) {
   }
 }
 
-function publicResult(record, replayed, nowMs) {
+function publicResult(record, payload, replayed, nowMs) {
   return deepFreeze({
     organization_id: record.organization_id,
     export_id: record.export_id,
@@ -697,10 +720,39 @@ function publicResult(record, replayed, nowMs) {
     chain: record.chain,
     range: record.range,
     payload_digest: record.payload_digest,
+    payload,
     audit_anchor: record.audit_anchor,
     replayed: replayed === true,
     validity: validityFor(record, nowMs)
   });
+}
+
+function normalizeExportPayload(value, record) {
+  try {
+    assertPlainDataTree(value);
+    assertExactKeys(value, PAYLOAD_KEYS);
+    if (value.version !== AUDIT_EXPORT_SNAPSHOT_VERSION || value.type !== AUDIT_EXPORT_SNAPSHOT_TYPE
+      || value.organization_id !== record.organization_id || value.environment !== record.environment
+      || value.chain !== record.chain || canonicalJson(value.range) !== canonicalJson(record.range)
+      || !Array.isArray(value.entries) || value.entries.length !== record.range.record_count) {
+      throw new Error("payload identity");
+    }
+    let root = record.range.previous_root_digest;
+    for (let index = 0; index < value.entries.length; index += 1) {
+      const entry = canonicalAuditExportEntry(value.entries[index]);
+      if (entry.organization_id !== record.organization_id || entry.environment !== record.environment
+        || entry.chain !== record.chain || entry.export_position !== record.range.from_audit_position + index) {
+        throw new Error("payload entry");
+      }
+      root = foldAuditExportRoot(root, entry);
+    }
+    if (root !== record.range.root_digest || sha256(canonicalJson(value)) !== record.payload_digest) {
+      throw new Error("payload digest");
+    }
+    return deepFreeze(structuredClone(value));
+  } catch {
+    throw issuanceError(AUDIT_EXPORT_ISSUANCE_ERROR_CODES.OUTPUT);
+  }
 }
 
 function validityFor(record, nowMs) {
@@ -851,6 +903,16 @@ function assertPlainDataTree(value, seen = new Set()) {
   if (value === null || typeof value !== "object") return;
   if (seen.has(value) || (!isObject(value) && !Array.isArray(value))) throw new Error("data tree");
   seen.add(value);
+  if (Array.isArray(value)) {
+    if (Reflect.ownKeys(value).length !== value.length + 1) throw new Error("array descriptor");
+    for (let index = 0; index < value.length; index += 1) {
+      const descriptor = Object.getOwnPropertyDescriptor(value, String(index));
+      if (!descriptor || !("value" in descriptor) || descriptor.enumerable !== true) throw new Error("descriptor");
+      assertPlainDataTree(descriptor.value, seen);
+    }
+    seen.delete(value);
+    return;
+  }
   for (const key of Reflect.ownKeys(value)) {
     if (typeof key !== "string") throw new Error("symbol");
     const descriptor = Object.getOwnPropertyDescriptor(value, key);

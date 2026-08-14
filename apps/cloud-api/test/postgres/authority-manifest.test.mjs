@@ -25,12 +25,14 @@ import {
 } from "../../../../scripts/postgres/authority-manifest.mjs";
 
 const ORG = "11111111-1111-4111-8111-111111111111";
+const PAYLOAD_MIGRATION_URL = new URL("../../../../contracts/postgres/0046_audit_export_payloads.sql", import.meta.url);
+const AUTHORITY_MANIFEST_CONTRACT_URL = new URL("../../../../scripts/postgres/authority-manifest.v1.json", import.meta.url);
 const TABLES = [
   "organizations", "members", "memberships", "human_sessions", "webauthn_credentials", "webauthn_challenges", "upstream_identities",
   "devices", "device_enrollments", "release_candidates", "device_enrollment_possession_receipts", "agents", "agent_session_grants", "agent_sessions", "qualification_grant_control_heads", "qualification_grant_batches", "qualification_grant_batch_steps", "policies", "revocations", "capabilities", "bundle_heads", "bundle_acknowledgements",
   "cloud_agent_audit_heads", "cloud_agent_audit_events",
   "admin_audit_heads", "admin_audit_events", "outbox_events", "organization_invitations", "device_audit_events", "device_audit_heads",
-  "device_audit_gaps", "device_audit_export_heads", "device_audit_export_entries", "audit_export_issuances", "idempotency_records", "device_request_nonces", "rate_limit_buckets", "anonymous_rate_limit_buckets", "human_identity_assertion_replays", "owner_recovery_requests", "owner_recovery_approvals", "owner_recovery_exchanges", "owner_recovery_sessions", "owner_recovery_outbox", "owner_recovery_outbox_transition_heads", "owner_recovery_outbox_transition_ledger", "owner_recovery_outbox_retention_ledger", "owner_recovery_webauthn_challenges", "owner_recovery_idempotency_records", "control_plane_authority_generations", "device_key_epochs", "device_control_plane_state", "control_bundle_statements", "device_refresh_outbox", "device_refresh_delivery_attempts", "device_bundle_acknowledgements", "device_manual_wake_events", "device_manual_wake_requests", "managed_signer_key_lifecycles", "managed_signer_keys", "managed_signer_key_lifecycle_operations", "managed_signer_signing_idempotency", "platform_promotion_approvals", "schema_migration_attempts"
+  "device_audit_gaps", "device_audit_export_heads", "device_audit_export_entries", "audit_export_issuances", "audit_export_payloads", "idempotency_records", "device_request_nonces", "rate_limit_buckets", "anonymous_rate_limit_buckets", "human_identity_assertion_replays", "owner_recovery_requests", "owner_recovery_approvals", "owner_recovery_exchanges", "owner_recovery_sessions", "owner_recovery_outbox", "owner_recovery_outbox_transition_heads", "owner_recovery_outbox_transition_ledger", "owner_recovery_outbox_retention_ledger", "owner_recovery_webauthn_challenges", "owner_recovery_idempotency_records", "control_plane_authority_generations", "device_key_epochs", "device_control_plane_state", "control_bundle_statements", "device_refresh_outbox", "device_refresh_delivery_attempts", "device_bundle_acknowledgements", "device_manual_wake_events", "device_manual_wake_requests", "managed_signer_key_lifecycles", "managed_signer_keys", "managed_signer_key_lifecycle_operations", "managed_signer_signing_idempotency", "platform_promotion_approvals", "schema_migration_attempts"
 ];
 
 const hash = (value) => crypto.createHash("sha256").update(canonicalJson(value), "utf8").digest("hex");
@@ -73,7 +75,7 @@ async function emptyManifest(artifact_digest = undefined) {
   return sealAuthorityManifest({
     schema_version: AUTHORITY_MANIFEST_SCHEMA_VERSION,
     kind: MANIFEST_KIND,
-    migration_version: "45",
+    migration_version: "46",
     migrations: migrations.map(({ version, name, checksum }) => ({ version: String(version), name, checksum })),
     tenant_ids: [ORG],
     tenants: [{ organization_id: ORG }],
@@ -104,6 +106,20 @@ test("rejects correlated count drift, invalid constraints, and tenant-integrity 
     return FakeManifestClient.prototype.query.call(this, text, params);
   };
   await assert.rejects(createAuthorityManifest({ client }), (error) => error.code === DIAGNOSTICS.CROSS_TENANT.code);
+});
+
+test("tracks migration 0046 authority objects exactly", async () => {
+  const contract = JSON.parse(await readFile(AUTHORITY_MANIFEST_CONTRACT_URL, "utf8"));
+  const sql = await readFile(PAYLOAD_MIGRATION_URL, "utf8");
+  assert.equal(contract.migration_version, 46);
+  assert.deepEqual(contract.tables, ["audit_export_payloads"]);
+  assert.deepEqual(contract.functions, ["agentpass_bind_audit_export_payload", "agentpass_require_audit_export_payload"]);
+  assert.deepEqual(contract.triggers, ["audit_export_payloads_immutable", "audit_export_issuances_payload_required"]);
+  assert.deepEqual(contract.policies, ["audit_export_payloads_tenant_select", "audit_export_payloads_tenant_insert"]);
+  assert.deepEqual(contract.views, ["audit_export_committed_payloads"]);
+  for (const objectName of [...contract.functions, ...contract.triggers, ...contract.policies, ...contract.views]) assert.match(sql, new RegExp(`\\b${objectName}\\b`, "u"));
+  assert.deepEqual(contract.table_contracts.audit_export_payloads.primary_key, ["organization_id", "export_id", "environment", "chain", "idempotency_key"]);
+  assert.equal(contract.view_contracts.audit_export_committed_payloads.requires_issuance_state, "committed");
 });
 
 test("normalizes before comparison and rejects unknown or secret-like nested fields", async () => {

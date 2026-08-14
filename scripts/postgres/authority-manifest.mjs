@@ -56,6 +56,7 @@ const AUTHORITY_TABLES = Object.freeze([
   ["device_audit_export_heads", "t.organization_id = ANY($1::uuid[])", "audit"],
   ["device_audit_export_entries", "t.organization_id = ANY($1::uuid[])", "audit"],
   ["audit_export_issuances", "t.organization_id = ANY($1::uuid[])", "audit"],
+  ["audit_export_payloads", "t.organization_id = ANY($1::uuid[])", "audit"],
   ["idempotency_records", "t.organization_id = ANY($1::uuid[])", "security"],
   ["device_request_nonces", "t.organization_id = ANY($1::uuid[])", "security"],
   ["rate_limit_buckets", "t.organization_id = ANY($1::uuid[])", "security"],
@@ -91,7 +92,7 @@ const AUTHORITY_TABLE_NAMES = Object.freeze(AUTHORITY_TABLES.map(([name]) => nam
 const TENANT_TABLE_NAMES = new Set(AUTHORITY_TABLES.filter(([, , kind]) => ["tenant", "audit", "outbox", "security"].includes(kind)).map(([name]) => name));
 
 export const AUTHORITY_MANIFEST_SCHEMA_VERSION = 2;
-export const REQUIRED_MIGRATION_VERSION = "45";
+export const REQUIRED_MIGRATION_VERSION = "46";
 export const MANIFEST_KIND = "agentpass.authority-manifest";
 
 export const DIAGNOSTICS = Object.freeze({
@@ -207,6 +208,16 @@ WITH tenants AS (SELECT unnest($1::uuid[]) AS organization_id), violations AS (
   UNION ALL SELECT count(*) FROM device_audit_gaps g JOIN tenants t ON t.organization_id=g.organization_id
     WHERE NOT EXISTS (SELECT 1 FROM devices d WHERE d.organization_id=g.organization_id AND d.id=g.device_id)
        OR NOT EXISTS (SELECT 1 FROM device_audit_events e WHERE e.organization_id=g.organization_id AND e.device_id=g.device_id AND e.event_id=g.event_id)
+  UNION ALL SELECT count(*) FROM audit_export_payloads p JOIN tenants t ON t.organization_id=p.organization_id
+    WHERE NOT EXISTS (
+      SELECT 1 FROM audit_export_issuances i
+      WHERE i.organization_id=p.organization_id
+        AND i.export_id=p.export_id
+        AND i.environment=p.environment
+        AND i.chain=p.chain
+        AND i.idempotency_key=p.idempotency_key
+        AND i.payload_digest=p.payload_digest
+    )
   UNION ALL SELECT count(*) FROM idempotency_records i JOIN tenants t ON t.organization_id=i.organization_id
     WHERE NOT EXISTS (SELECT 1 FROM organizations o WHERE o.id=i.organization_id)
   UNION ALL SELECT count(*) FROM device_request_nonces n JOIN tenants t ON t.organization_id=n.organization_id

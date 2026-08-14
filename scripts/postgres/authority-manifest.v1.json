@@ -1,0 +1,38 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agentpass.dev/scripts/postgres/authority-manifest.v1.json",
+  "title": "AgentPass migration 0046 authority object inventory",
+  "schema_version": 1,
+  "migration_version": 46,
+  "migration": "0046_audit_export_payloads.sql",
+  "tables": ["audit_export_payloads"],
+  "functions": [
+    "agentpass_bind_audit_export_payload",
+    "agentpass_require_audit_export_payload"
+  ],
+  "triggers": [
+    "audit_export_payloads_immutable",
+    "audit_export_issuances_payload_required"
+  ],
+  "policies": [
+    "audit_export_payloads_tenant_select",
+    "audit_export_payloads_tenant_insert"
+  ],
+  "views": ["audit_export_committed_payloads"],
+  "table_contracts": {
+    "audit_export_payloads": {
+      "primary_key": ["organization_id", "export_id", "environment", "chain", "idempotency_key"],
+      "columns": ["organization_id", "export_id", "environment", "chain", "idempotency_key", "payload_bytes", "payload_json", "payload_digest", "created_at"],
+      "tenant_column": "organization_id",
+      "rls": "force",
+      "append_only": true
+    }
+  },
+  "view_contracts": {
+    "audit_export_committed_payloads": {
+      "security_invoker": true,
+      "requires_issuance_state": "committed",
+      "joins": ["audit_export_payloads", "audit_export_issuances"]
+    }
+  }
+}

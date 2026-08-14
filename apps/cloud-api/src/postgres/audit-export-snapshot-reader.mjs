@@ -340,10 +340,10 @@ function normalizeAdminRow(row, identity, expectedPosition) {
     fail("ERR_AUDIT_EXPORT_SNAPSHOT_ROW");
   }
   // Admin v1 was hashed before JSONB persistence with JSON.stringify. JSONB
-  // does not preserve nested object key order, so the original preimage cannot
-  // be reconstructed reliably. Column/event identity and every chain link are
-  // still checked here; new admin events should move to canonicalJson in a
-  // versioned writer before claiming independently recomputed source hashes.
+  // does not preserve nested object key order, so v1 remains linkage-only.
+  // Version 2 hashes the normalized event canonically, making recomputation
+  // independent of JSONB object key order.
+  if (eventJson.version === 2 && eventHash !== sha256Text(canonicalJson(eventJson))) fail("ERR_AUDIT_EXPORT_SNAPSHOT_HASH");
   const recordedAt = timestamp(row.created_at);
   const publicEvent = { ...eventJson, event_hash: eventHash, recorded_at: recordedAt };
   assertPublicTree(publicEvent);
@@ -356,9 +356,9 @@ function normalizeAdminRow(row, identity, expectedPosition) {
 function normalizeAdminEvent(value) {
   assertPlainObject(value);
   assertExactKeys(value, ADMIN_EVENT_KEYS);
-  if (value.version !== 1) fail("ERR_AUDIT_EXPORT_SNAPSHOT_ROW");
+  if (value.version !== 1 && value.version !== 2) fail("ERR_AUDIT_EXPORT_SNAPSHOT_ROW");
   const event = {
-    version: 1,
+    version: value.version,
     audit_event_id: uuid(value.audit_event_id),
     organization_id: uuid(value.organization_id),
     actor_id: uuid(value.actor_id),

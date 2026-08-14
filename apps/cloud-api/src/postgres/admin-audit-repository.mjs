@@ -93,7 +93,7 @@ export function createPostgresAdminAuditRepository({ client, now = () => new Dat
     const organizationId = uuid(input.organizationId ?? input.organization_id, "organization_id");
     const limit = boundedLimit(input.limit);
     try {
-      const result = await client.query(`SELECT id,organization_id,actor_id,action,target_type,target_id,event_hash,event_json,created_at
+      const result = await client.query(`SELECT id,organization_id,actor_id,action,target_type,target_id,sequence,event_hash,event_json,created_at
         FROM admin_audit_events WHERE organization_id=$1
         ORDER BY sequence DESC,id DESC LIMIT $2`, [organizationId, limit]);
       return Object.freeze((result.rows ?? []).reverse().map(publicStoredEvent));
@@ -116,6 +116,7 @@ export function createPostgresAdminAuditRepository({ client, now = () => new Dat
     const sequence = positiveInteger(headResult.rows[0].sequence, true) + 1;
     const previousHash = digest(headResult.rows[0].event_hash ?? ZERO_HASH);
     const event = canonicalAdminEvent({
+      version: 2,
       audit_event_id: values.auditEventId,
       organization_id: values.organizationId,
       actor_id: values.actorId,
@@ -126,7 +127,7 @@ export function createPostgresAdminAuditRepository({ client, now = () => new Dat
       previous_hash: previousHash,
       sequence
     });
-    const eventHash = crypto.createHash("sha256").update(JSON.stringify(event)).digest("hex");
+    const eventHash = crypto.createHash("sha256").update(canonicalJson(event), "utf8").digest("hex");
     const recordedAt = timestamp(now(), "recorded_at");
     const inserted = await tx.query(`INSERT INTO admin_audit_events
       (organization_id,id,actor_id,action,target_type,target_id,previous_hash,event_hash,sequence,event_json,created_at)
@@ -159,10 +160,15 @@ function publicStoredEvent(row) {
     throw new AdminAuditRepositoryError("ERR_DATABASE", "stored admin audit event is invalid");
   }
   return publicEvent({
-    event: canonicalAdminEvent(row.event_json),
+    event: storedAdminEvent(row),
     eventHash: digest(row.event_hash),
     recordedAt: timestamp(row.created_at, "recorded_at")
   });
+}
+
+function storedAdminEvent(row) {
+  if (row.event_json.version === 0) return legacyAdminEvent(row.event_json, row.sequence);
+  return canonicalAdminEvent(row.event_json);
 }
 
 function normalizeAppendInput(input) {
@@ -191,9 +197,10 @@ function normalizeAppendInput(input) {
 
 function canonicalAdminEvent(input) {
   if (!input || typeof input !== "object" || Array.isArray(input)) throw new AdminAuditRepositoryError("ERR_DATABASE", "stored admin audit event is invalid");
+  if (input.version !== 1 && input.version !== 2) throw new AdminAuditRepositoryError("ERR_DATABASE", "stored admin audit event is invalid");
   const sequence = positiveInteger(input.sequence);
   return Object.freeze({
-    version: 1,
+    version: input.version,
     audit_event_id: uuid(input.audit_event_id, "audit_event_id"),
     organization_id: uuid(input.organization_id, "organization_id"),
     actor_id: uuid(input.actor_id, "actor_id"),
@@ -203,6 +210,22 @@ function canonicalAdminEvent(input) {
     details: safeDetails(input.details),
     previous_hash: digest(input.previous_hash),
     sequence
+  });
+}
+
+function legacyAdminEvent(input, storedSequence) {
+  if (!input || input.version !== 0 || input.legacy !== true) throw new AdminAuditRepositoryError("ERR_DATABASE", "stored admin audit event is invalid");
+  return Object.freeze({
+    version: 0,
+    audit_event_id: uuid(input.audit_event_id, "audit_event_id"),
+    organization_id: uuid(input.organization_id, "organization_id"),
+    actor_id: uuid(input.actor_id, "actor_id"),
+    action: text(input.action, "action", 128),
+    target_type: text(input.target_type, "target_type", 64),
+    target_id: input.target_id === null ? null : uuid(input.target_id, "target_id"),
+    details: {},
+    previous_hash: digest(input.previous_hash),
+    sequence: positiveInteger(storedSequence)
   });
 }
 
