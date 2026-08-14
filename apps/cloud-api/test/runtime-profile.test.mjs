@@ -40,6 +40,8 @@ function hostedEnv(overrides = {}) {
     AGENTPASS_CLOUD_AGENT_SESSION_PROCESS_POLICIES_PATH: "/srv/agentpass/hosted/process-policies.json",
     AGENTPASS_CLOUD_QUALIFICATION_MANIFEST_KEY_ID: "qualification-manifest-2026-08",
     AGENTPASS_CLOUD_QUALIFICATION_MANIFEST_PUBLIC_KEY: "hosted-qualification-public-key-pin",
+    AGENTPASS_OWNER_RECOVERY_NOTIFICATION_WEBHOOK_URL: "https://notifications.example.test/owner-recovery",
+    AGENTPASS_OWNER_RECOVERY_NOTIFICATION_AUTHORIZATION_PATH: "/srv/agentpass/hosted/notification-authorization.txt",
     ...overrides
   };
 }
@@ -79,6 +81,7 @@ test("accepts evaluation only with the complete reference file-store boundary", 
   assertProfileError(() => parseCloudRuntimeProfile({ AGENTPASS_CLOUD_PROFILE: "evaluation" }), CLOUD_RUNTIME_PROFILE_ERROR_CODES.EVALUATION_FILE_STORE_INCOMPLETE);
   assertProfileError(() => parseCloudRuntimeProfile(evaluationEnv({ AGENTPASS_CLOUD_TOKEN_RECORDS_PATH: undefined })), CLOUD_RUNTIME_PROFILE_ERROR_CODES.EVALUATION_FILE_STORE_INCOMPLETE);
   assertProfileError(() => parseCloudRuntimeProfile(evaluationEnv({ AGENTPASS_CLOUD_DATA_DIR: "relative/data" })), CLOUD_RUNTIME_PROFILE_ERROR_CODES.EVALUATION_FILE_STORE_INCOMPLETE);
+  assertProfileError(() => parseCloudRuntimeProfile(evaluationEnv({ AGENTPASS_OWNER_RECOVERY_NOTIFICATION_WEBHOOK_URL: "https://notifications.example.test/recovery" })), CLOUD_RUNTIME_PROFILE_ERROR_CODES.EVALUATION_AUTH_FORBIDDEN);
 });
 
 test("accepts hosted only with complete PostgreSQL and Human Auth prerequisites", () => {

@@ -46,16 +46,16 @@ test("outbox claims are exclusive, process-loss retries preserve idempotency, an
   };
   const firstWorker = createOwnerRecoveryOutboxWorker({
     repository: processLossRepository,
-    publisher: { async publish(input) { providerCalls.push(input.idempotency_key); return { accepted: true }; } },
+    publisher: { async publish(input) { providerCalls.push(input.idempotency_key); return { accepted: true, duplicate: false }; } },
     publishTimeoutMs: 100,
     leaseMs: 1_000
   });
-  assert.equal((await firstWorker.runOnce()).claim_lost, 1);
+  assert.equal((await firstWorker.runOnce()).uncertain, 1);
 
   await expireClaim(pool, EVENT);
   const secondWorker = createOwnerRecoveryOutboxWorker({
     repository: first.repository,
-    publisher: { async publish(input) { providerCalls.push(input.idempotency_key); return { accepted: true }; } },
+    publisher: { async publish(input) { providerCalls.push(input.idempotency_key); return { accepted: true, duplicate: true }; } },
     publishTimeoutMs: 100,
     leaseMs: 1_000
   });
@@ -77,15 +77,15 @@ test("outbox claims are exclusive, process-loss retries preserve idempotency, an
   };
   const crashingDeadWorker = createOwnerRecoveryOutboxWorker({
     repository: maxAttemptProcessLoss,
-    publisher: { async publish() { return { accepted: false }; } },
+    publisher: { async publish() { return { accepted: false, duplicate: false }; } },
     publishTimeoutMs: 100,
     leaseMs: 1_000
   });
-  assert.equal((await crashingDeadWorker.runOnce()).claim_lost, 1);
+  assert.equal((await crashingDeadWorker.runOnce()).uncertain, 1);
   await expireClaim(pool, DEAD_EVENT);
   const deadWorker = createOwnerRecoveryOutboxWorker({
     repository: repositoryB,
-    publisher: { async publish() { return { accepted: false }; } },
+    publisher: { async publish() { return { accepted: false, duplicate: false }; } },
     publishTimeoutMs: 100,
     leaseMs: 1_000
   });

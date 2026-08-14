@@ -17,12 +17,16 @@ import { createProcessBindingPolicyRegistry } from "./process-binding-policy-reg
 import { createAgentSessionDeviceApi } from "./agent-session-device-api.mjs";
 import { createQualificationGrantBatchDeviceApi } from "./qualification-grant-batch-device-api.mjs";
 import { createHostedQualificationManifestSigner } from "./qualification-manifest-signer-config.mjs";
+import { createOwnerRecoveryNotificationPublisher } from "./postgres/owner-recovery-notification-publisher.mjs";
 
 const IDENTIFIER = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 
-export async function createCloudRuntime({ env = process.env, logger = console, postgresFactory = createPostgresRuntime, humanAuthFactory = createHumanAuthRuntime, agentSessionSignerProvider, agentSessionSignerFactory = createHostedAgentSessionGrantSigner, qualificationManifestSignerProvider, qualificationManifestSignerFactory = createHostedQualificationManifestSigner } = {}) {
+export async function createCloudRuntime({ env = process.env, logger = console, postgresFactory = createPostgresRuntime, humanAuthFactory = createHumanAuthRuntime, agentSessionSignerProvider, agentSessionSignerFactory = createHostedAgentSessionGrantSigner, qualificationManifestSignerProvider, qualificationManifestSignerFactory = createHostedQualificationManifestSigner, ownerRecoveryPublisher } = {}) {
   const profile = parseCloudRuntimeProfile(env);
   const config = loadRuntimeConfig(env);
+  const configuredOwnerRecoveryPublisher = profile.isHosted
+    ? ownerRecoveryPublisher ?? createConfiguredOwnerRecoveryPublisher(config.ownerRecoveryNotification)
+    : undefined;
   const tokenRecords = profile.isHosted ? [] : readProtectedJson(config.tokenRecordsPath, "token records", 1024 * 1024);
   if (!Array.isArray(tokenRecords) || tokenRecords.length > 256 || (!config.humanAuth && tokenRecords.length < 1)) throw new Error("Cloud token records are invalid");
   const privateKeyPEM = readProtectedFile(config.bundlePrivateKeyPath, "bundle private key", 16 * 1024).toString("utf8");
@@ -89,7 +93,7 @@ export async function createCloudRuntime({ env = process.env, logger = console, 
   let server;
   try {
     if (profile.isHosted) {
-      postgresRuntime = await postgresFactory({ env, applicationVersion: "0.18.0", refreshNonceCodec, resolveProcessBindingPolicy: processBindingPolicies.resolve });
+      postgresRuntime = await postgresFactory({ env, applicationVersion: "0.18.0", refreshNonceCodec, resolveProcessBindingPolicy: processBindingPolicies.resolve, ownerRecoveryPublisher: configuredOwnerRecoveryPublisher });
       if (!postgresRuntime?.capabilityAuthorityRepository
         || typeof postgresRuntime.capabilityAuthorityRepository.issueCapabilityMetadata !== "function"
         || typeof postgresRuntime.capabilityAuthorityRepository.listRevokedCapabilityIds !== "function") {
@@ -238,10 +242,29 @@ export function loadRuntimeConfig(env = {}) {
   const refreshKeyId = profile.isHosted ? env.AGENTPASS_CLOUD_REFRESH_KEY_ID : null;
   if (profile.isHosted && !IDENTIFIER.test(refreshKeyId ?? "")) throw new Error("Cloud refresh signer identifier is invalid");
   const agentSessionProcessPoliciesPath = profile.isHosted ? absolute(env.AGENTPASS_CLOUD_AGENT_SESSION_PROCESS_POLICIES_PATH, "AGENTPASS_CLOUD_AGENT_SESSION_PROCESS_POLICIES_PATH") : null;
+  const ownerRecoveryNotification = profile.isHosted ? ownerRecoveryNotificationConfig(env) : null;
   // Hosted Human Auth never loads the legacy operator bearer database. The
   // token-record file exists only for the explicit evaluation profile.
   const tokenRecordsPath = profile.isHosted ? null : absolute(env.AGENTPASS_CLOUD_TOKEN_RECORDS_PATH, "AGENTPASS_CLOUD_TOKEN_RECORDS_PATH");
-  return Object.freeze({ dataDir, tokenRecordsPath, bundlePrivateKeyPath, issuer, keyId, host, port, ttlMs, offlineTtlMs, humanAuth, refreshPrivateKeyPath, refreshNonceKeyringPath, refreshKeyId, agentSessionProcessPoliciesPath });
+  return Object.freeze({ dataDir, tokenRecordsPath, bundlePrivateKeyPath, issuer, keyId, host, port, ttlMs, offlineTtlMs, humanAuth, refreshPrivateKeyPath, refreshNonceKeyringPath, refreshKeyId, agentSessionProcessPoliciesPath, ownerRecoveryNotification });
+}
+
+function ownerRecoveryNotificationConfig(env) {
+  const webhookUrl = env.AGENTPASS_OWNER_RECOVERY_NOTIFICATION_WEBHOOK_URL;
+  const authorizationSecretPath = env.AGENTPASS_OWNER_RECOVERY_NOTIFICATION_AUTHORIZATION_PATH;
+  if (webhookUrl === undefined && authorizationSecretPath === undefined) return null;
+  if (typeof webhookUrl !== "string" || typeof authorizationSecretPath !== "string") throw new Error("Owner recovery notification configuration is incomplete");
+  let parsed;
+  try { parsed = new URL(webhookUrl); } catch { throw new Error("Owner recovery notification webhook URL is invalid"); }
+  if (parsed.protocol !== "https:" || parsed.username || parsed.password || parsed.hash || !parsed.hostname || webhookUrl.length > 2_048) throw new Error("Owner recovery notification webhook URL is invalid");
+  return Object.freeze({ webhookUrl: parsed.href, authorizationSecretPath: absolute(authorizationSecretPath, "AGENTPASS_OWNER_RECOVERY_NOTIFICATION_AUTHORIZATION_PATH") });
+}
+
+function createConfiguredOwnerRecoveryPublisher(config) {
+  if (!config) throw new Error("Hosted owner recovery notification publisher is required");
+  const authorizationSecret = readProtectedFile(config.authorizationSecretPath, "owner recovery notification authorization", 4_096).toString("utf8");
+  try { return createOwnerRecoveryNotificationPublisher({ webhookUrl: config.webhookUrl, authorizationSecret }); }
+  catch { throw new Error("Hosted owner recovery notification publisher is invalid"); }
 }
 
 function loadRefreshNonceCodec(file) {

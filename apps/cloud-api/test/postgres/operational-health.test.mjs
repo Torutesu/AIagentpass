@@ -111,6 +111,7 @@ test("metrics are fixed-key, monotonic, and free of caller labels", () => {
     owner_recovery_outbox_retry_total: 0,
     owner_recovery_outbox_dead_letter_total: 0,
     owner_recovery_outbox_claim_lost_total: 0,
+    owner_recovery_outbox_uncertain_total: 0,
     owner_recovery_outbox_failure_total: 0,
     owner_recovery_outbox_lag_count: 0,
     owner_recovery_outbox_lag_total_ms: 0,
@@ -261,6 +262,38 @@ test("schema drift, DB failure, and malformed pool state fail closed without err
   assert.equal(throwingResult.code, "database_unavailable");
   assert.equal(throwingResult.checks.schema.schema_version_status, "unknown");
   assert.equal(JSON.stringify(throwingResult).includes("private"), false);
+});
+
+test("owner recovery outbox readiness is aggregate-only and fails closed on dead letters, hard lag, or a stopped worker", async () => {
+  const now = Date.parse("2026-08-14T00:15:00.000Z");
+  let outbox = { pending: 0, dead_letter: 0, oldest_pending_at: null, worker_state: "running" };
+  const health = createOperationalHealth({
+    pool: pool(),
+    maxConnections: 4,
+    migrationStatus: async () => APPLIED,
+    metrics: createOperationalMetrics(),
+    drainController: createDrainController(),
+    probe: async () => true,
+    outboxStatus: async () => outbox,
+    outboxMaxPending: 10,
+    outboxMaxLagMs: 60_000,
+    now: () => now
+  });
+  let report = await health.readiness();
+  assert.equal(report.ready, true);
+  assert.deepEqual(report.checks.owner_recovery_outbox, { ok: true, code: "ok", worker_state: "running", pending_count: 0, dead_letter_count: 0, oldest_pending_age_ms: null });
+
+  outbox = { pending: 1, dead_letter: 1, oldest_pending_at: new Date(now - 1_000).toISOString(), worker_state: "running", organization_id: "must-not-leak" };
+  report = await health.readiness();
+  assert.equal(report.code, "owner_recovery_outbox_dead_letter_present");
+  assert.equal(JSON.stringify(report).includes("must-not-leak"), false);
+
+  outbox = { pending: 1, dead_letter: 0, oldest_pending_at: new Date(now - 60_001).toISOString(), worker_state: "running" };
+  assert.equal((await health.readiness()).code, "owner_recovery_outbox_lag_exceeded");
+  outbox = { pending: 0, dead_letter: 0, oldest_pending_at: null, worker_state: "idle" };
+  assert.equal((await health.readiness()).code, "owner_recovery_outbox_worker_unavailable");
+  outbox = null;
+  assert.equal((await health.readiness()).code, "owner_recovery_outbox_unavailable");
 });
 
 test("drain rejects readiness immediately and waits for tracked work within the bound", async () => {

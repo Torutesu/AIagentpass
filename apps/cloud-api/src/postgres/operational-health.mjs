@@ -71,6 +71,7 @@ export const OPERATIONAL_METRIC_KEYS = Object.freeze([
   "owner_recovery_outbox_retry_total",
   "owner_recovery_outbox_dead_letter_total",
   "owner_recovery_outbox_claim_lost_total",
+  "owner_recovery_outbox_uncertain_total",
   "owner_recovery_outbox_failure_total",
   "owner_recovery_outbox_lag_count",
   "owner_recovery_outbox_lag_total_ms",
@@ -187,6 +188,7 @@ export function createOperationalMetrics({ initial = {} } = {}) {
     recordOwnerRecoveryOutboxRetry: (amount = 1) => increment("owner_recovery_outbox_retry_total", amount),
     recordOwnerRecoveryOutboxDeadLetter: (amount = 1) => increment("owner_recovery_outbox_dead_letter_total", amount),
     recordOwnerRecoveryOutboxClaimLost: (amount = 1) => increment("owner_recovery_outbox_claim_lost_total", amount),
+    recordOwnerRecoveryOutboxUncertain: (amount = 1) => increment("owner_recovery_outbox_uncertain_total", amount),
     recordOwnerRecoveryOutboxFailure: (amount = 1) => increment("owner_recovery_outbox_failure_total", amount),
     recordOwnerRecoveryOutboxLag,
     recordHumanRecoveryOperation: (operation, amount = 1) => {
@@ -344,13 +346,19 @@ export function createOperationalHealth({
   maxConnections,
   metrics = createOperationalMetrics(),
   drainController,
-  probe = defaultProbe
+  probe = defaultProbe,
+  outboxStatus,
+  outboxMaxPending = 10_000,
+  outboxMaxLagMs = 15 * 60_000,
+  now = () => Date.now()
 } = {}) {
   if (!pool || typeof pool !== "object") throw invalidOperationalInput();
   if (typeof migrationStatus !== "function" || typeof probe !== "function") throw invalidOperationalInput();
   if (!Number.isSafeInteger(expectedSchemaVersion) || expectedSchemaVersion < 1) throw invalidOperationalInput();
   if (!metrics || typeof metrics.snapshot !== "function") throw invalidOperationalInput();
   if (!drainController || typeof drainController.snapshot !== "function") throw invalidOperationalInput();
+  if (outboxStatus !== undefined && typeof outboxStatus !== "function") throw invalidOperationalInput();
+  if (!Number.isSafeInteger(outboxMaxPending) || outboxMaxPending < 0 || outboxMaxPending > 1_000_000 || !Number.isSafeInteger(outboxMaxLagMs) || outboxMaxLagMs < 1_000 || outboxMaxLagMs > 24 * 60 * 60_000 || typeof now !== "function") throw invalidOperationalInput();
   const configuredMax = positiveInteger(maxConnections ?? pool.options?.max);
 
   async function readiness() {
@@ -366,21 +374,24 @@ export function createOperationalHealth({
         schema: skippedSchema(expectedSchemaVersion),
         pool: poolCheck,
         drain,
+        ...(outboxStatus === undefined ? {} : { outbox: skippedOutbox("draining") }),
         metrics: metricSnapshot
       });
     }
 
-    const [databaseResult, migrationResult] = await Promise.allSettled([
+    const [databaseResult, migrationResult, outboxResult] = await Promise.allSettled([
       Promise.resolve().then(() => probe(pool)),
-      Promise.resolve().then(() => migrationStatus())
+      Promise.resolve().then(() => migrationStatus()),
+      outboxStatus === undefined ? Promise.resolve(undefined) : Promise.resolve().then(() => outboxStatus())
     ]);
     recordObservedLockWaits(metrics, databaseResult);
     const database = normalizeProbeResult(databaseResult);
     const schema = normalizeSchemaResult(migrationResult, expectedSchemaVersion);
+    const outbox = outboxStatus === undefined ? undefined : normalizeOutboxResult(outboxResult, { outboxMaxPending, outboxMaxLagMs, now });
     const poolReady = poolCheck.ok;
     const metricsReady = metricSnapshot.valid !== false;
-    const ready = database.ok && schema.ok && poolReady && metricsReady;
-    const code = ready ? "ready" : firstFailureCode({ database, schema, pool: poolCheck, metricsReady });
+    const ready = database.ok && schema.ok && poolReady && metricsReady && (outbox === undefined || outbox.ok);
+    const code = ready ? "ready" : firstFailureCode({ database, schema, pool: poolCheck, metricsReady, outbox });
     return contract({
       ready,
       status: ready ? "ready" : "not_ready",
@@ -389,6 +400,7 @@ export function createOperationalHealth({
       schema,
       pool: poolCheck,
       drain,
+      ...(outbox === undefined ? {} : { outbox }),
       metrics: metricSnapshot
     });
   }
@@ -396,15 +408,46 @@ export function createOperationalHealth({
   return Object.freeze({ readiness, health: readiness });
 }
 
-function contract({ ready, status, code, database, schema, pool, drain, metrics }) {
+function contract({ ready, status, code, database, schema, pool, drain, outbox, metrics }) {
   return Object.freeze({
     version: OPERATIONAL_HEALTH_VERSION,
     ready: Boolean(ready),
     status,
     code,
-    checks: Object.freeze({ database, schema, pool, drain }),
+    checks: Object.freeze({ database, schema, pool, drain, ...(outbox === undefined ? {} : { owner_recovery_outbox: outbox }) }),
     metrics
   });
+}
+
+function normalizeOutboxResult(result, { outboxMaxPending, outboxMaxLagMs, now }) {
+  if (result.status !== "fulfilled" || !result.value || typeof result.value !== "object" || Array.isArray(result.value)) return skippedOutbox("unavailable");
+  const value = result.value;
+  const pending = Number(value.pending);
+  const deadLetter = Number(value.dead_letter);
+  const workerState = value.worker_state;
+  let current;
+  try { current = Number(now()); } catch { return skippedOutbox("unavailable"); }
+  if (!Number.isSafeInteger(pending) || pending < 0 || !Number.isSafeInteger(deadLetter) || deadLetter < 0 || !["running", "idle", "draining", "closed"].includes(workerState) || !Number.isSafeInteger(current) || current < 0) return skippedOutbox("unavailable");
+  let oldestPendingAgeMs = null;
+  if (value.oldest_pending_at !== null) {
+    const oldest = Date.parse(String(value.oldest_pending_at));
+    if (!Number.isFinite(oldest) || oldest > current) return skippedOutbox("unavailable");
+    oldestPendingAgeMs = Math.min(Number.MAX_SAFE_INTEGER, current - oldest);
+  } else if (pending !== 0) return skippedOutbox("unavailable");
+  const code = workerState !== "running"
+    ? "worker_unavailable"
+    : deadLetter > 0
+      ? "dead_letter_present"
+      : pending > outboxMaxPending
+        ? "backlog_exceeded"
+        : oldestPendingAgeMs !== null && oldestPendingAgeMs > outboxMaxLagMs
+          ? "lag_exceeded"
+          : "ok";
+  return Object.freeze({ ok: code === "ok", code, worker_state: workerState, pending_count: pending, dead_letter_count: deadLetter, oldest_pending_age_ms: oldestPendingAgeMs });
+}
+
+function skippedOutbox(code) {
+  return Object.freeze({ ok: false, code, worker_state: code === "draining" ? "draining" : "unavailable", pending_count: null, dead_letter_count: null, oldest_pending_age_ms: null });
 }
 
 async function defaultProbe(pool) {
@@ -544,7 +587,7 @@ function safeMetricSnapshot(metrics) {
   }
 }
 
-function firstFailureCode({ database, schema, pool, metricsReady }) {
+function firstFailureCode({ database, schema, pool, metricsReady, outbox }) {
   if (!database.ok) return "database_unavailable";
   if (!schema.ok) {
     if (schema.checksum_status === "drift") return "migration_drift";
@@ -553,6 +596,7 @@ function firstFailureCode({ database, schema, pool, metricsReady }) {
   }
   if (!pool.ok) return "pool_saturated";
   if (!metricsReady) return "metrics_unavailable";
+  if (outbox && !outbox.ok) return `owner_recovery_outbox_${outbox.code}`;
   return "health_check_failed";
 }
 

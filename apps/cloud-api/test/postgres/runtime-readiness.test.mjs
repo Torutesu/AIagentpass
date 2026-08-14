@@ -40,6 +40,7 @@ class FakePool {
       return { rows: [] };
     }
     if (text === "SELECT set_config('statement_timeout', $1, false)" || text === "SELECT set_config('lock_timeout', $1, false)") return { rows: [{ set_config: params[0] }] };
+    if (text.includes("count(*) FILTER (WHERE status='pending')")) return { rowCount: 1, rows: [{ pending: "0", dead_letter: "0", oldest_pending_at: null }] };
     if (text === "BEGIN" || text === "COMMIT" || text === "ROLLBACK" || text.includes("pg_advisory_xact_lock")) return { rows: [] };
     return { rows: [] };
   }
@@ -94,7 +95,7 @@ test("PostgreSQL runtime exposes exact-schema readiness, tracked work, and bound
 });
 
 test("PostgreSQL runtime wires an injected owner recovery publisher without starting it when disabled", async () => {
-  const publisher = { async publish() { return { accepted: true }; } };
+  const publisher = { async publish() { return { accepted: true, duplicate: false }; } };
   const runtime = await createPostgresRuntime({
     env: env(),
     PoolClass: FakePool,
@@ -102,8 +103,23 @@ test("PostgreSQL runtime wires an injected owner recovery publisher without star
     ownerRecoveryOutboxAutoStart: false
   });
   assert.equal(runtime.ownerRecoveryOutboxWorker.snapshot().state, "idle");
+  assert.equal((await runtime.readiness()).code, "owner_recovery_outbox_worker_unavailable");
   assert.equal(typeof runtime.ownerRecoveryOutboxWorker.runOnce, "function");
   await runtime.close();
   assert.equal(runtime.ownerRecoveryOutboxWorker.snapshot().state, "closed");
+  assert.equal(runtime.pool.ended, true);
+});
+
+test("direct runtime close waits for tracked work before closing PostgreSQL", async () => {
+  const runtime = await createPostgresRuntime({ env: env(), PoolClass: FakePool });
+  let finish;
+  const active = runtime.trackInFlight(() => new Promise((resolve) => { finish = resolve; }));
+  const closing = runtime.close();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(runtime.pool.ended, false);
+  finish();
+  await active;
+  const result = await closing;
+  assert.equal(result.drained, true);
   assert.equal(runtime.pool.ended, true);
 });

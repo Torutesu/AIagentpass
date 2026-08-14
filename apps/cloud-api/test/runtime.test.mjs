@@ -21,6 +21,7 @@ function files() {
   const refreshPrivateKeyPath = path.join(root, "refresh-private.pem");
   const refreshNonceKeyringPath = path.join(root, "refresh-nonce-keyring.json");
   const agentSessionProcessPoliciesPath = path.join(root, "agent-session-process-policies.json");
+  const ownerRecoveryNotificationAuthorizationPath = path.join(root, "owner-recovery-notification-authorization");
   const token = generateApiToken();
   const records = [createApiTokenRecord({ token, organizationId: crypto.randomUUID(), memberId: crypto.randomUUID(), role: "owner" })];
   const keys = crypto.generateKeyPairSync("ed25519");
@@ -33,7 +34,8 @@ function files() {
   fs.writeFileSync(refreshPrivateKeyPath, refreshKeys.privateKey.export({ type: "pkcs8", format: "pem" }), { mode: 0o600 });
   fs.writeFileSync(refreshNonceKeyringPath, JSON.stringify({ version: 1, active_key_id: "refresh-nonce-v1", keys: { "refresh-nonce-v1": Buffer.alloc(32, 0x35).toString("base64url") } }), { mode: 0o600 });
   fs.writeFileSync(agentSessionProcessPoliciesPath, JSON.stringify({ version: 1, policies: [{ policy_id: "claude-code-v1", release_id: "agentpass-0.18.0", agent_kind: "claude-code", adapter_id: "11111111-1111-4111-8111-111111111111", adapter_versions: ["1.0.0"], status: "enabled" }] }), { mode: 0o600 });
-  return { root, identityPublicKeyPath, refreshPrivateKeyPath, refreshNonceKeyringPath, agentSessionProcessPoliciesPath, agentSessionKeys, qualificationManifestKeys, env: { AGENTPASS_CLOUD_PROFILE: "evaluation", AGENTPASS_CLOUD_DATA_DIR: dataDir, AGENTPASS_CLOUD_TOKEN_RECORDS_PATH: tokenRecordsPath, AGENTPASS_CLOUD_BUNDLE_PRIVATE_KEY_PATH: bundlePrivateKeyPath, AGENTPASS_CLOUD_PORT: "0" } };
+  fs.writeFileSync(ownerRecoveryNotificationAuthorizationPath, "notification-authorization-test-value", { mode: 0o600 });
+  return { root, identityPublicKeyPath, refreshPrivateKeyPath, refreshNonceKeyringPath, agentSessionProcessPoliciesPath, ownerRecoveryNotificationAuthorizationPath, agentSessionKeys, qualificationManifestKeys, env: { AGENTPASS_CLOUD_PROFILE: "evaluation", AGENTPASS_CLOUD_DATA_DIR: dataDir, AGENTPASS_CLOUD_TOKEN_RECORDS_PATH: tokenRecordsPath, AGENTPASS_CLOUD_BUNDLE_PRIVATE_KEY_PATH: bundlePrivateKeyPath, AGENTPASS_CLOUD_PORT: "0" } };
 }
 
 test("production runtime starts from protected files and closes idempotently", async (t) => {
@@ -58,6 +60,9 @@ test("runtime rejects unsafe secrets, key algorithms, and configuration", async 
   assert.throws(() => loadRuntimeConfig({ ...humanEnv, AGENTPASS_WEBAUTHN_RP_ID: "other.test" }), /Human Auth configuration is invalid/);
   assert.throws(() => loadRuntimeConfig({ ...humanEnv, AGENTPASS_HUMAN_CURSOR_SECRET: undefined }), /requires complete PostgreSQL/);
   assert.throws(() => loadRuntimeConfig({ ...humanEnv, AGENTPASS_HUMAN_CURSOR_SECRET: "A".repeat(42) }), /Human Auth configuration is invalid/);
+  assert.throws(() => loadRuntimeConfig({ ...humanEnv, AGENTPASS_OWNER_RECOVERY_NOTIFICATION_AUTHORIZATION_PATH: undefined }), /requires complete PostgreSQL/);
+  const withoutNotifications = { ...humanEnv, AGENTPASS_OWNER_RECOVERY_NOTIFICATION_WEBHOOK_URL: undefined, AGENTPASS_OWNER_RECOVERY_NOTIFICATION_AUTHORIZATION_PATH: undefined };
+  await assert.rejects(createCloudRuntime({ env: withoutNotifications, agentSessionSignerProvider: signerProvider(value), qualificationManifestSignerProvider: qualificationSignerProvider(value) }), /requires complete PostgreSQL/);
 });
 
 test("production human auth is composed from PostgreSQL and closed with the runtime", async (t) => {
@@ -79,15 +84,16 @@ test("production human auth is composed from PostgreSQL and closed with the runt
     return publicKeyMetadata(input);
   };
   const qualificationProvider = qualificationSignerProvider(value);
+  const ownerRecoveryPublisher = { async publish() { return { accepted: true, duplicate: false }; } };
   const qualificationPublicKeyMetadata = qualificationProvider.publicKeyMetadata;
   qualificationProvider.publicKeyMetadata = async (input) => {
     if (!qualificationSignerHealthy) throw new Error("simulated qualification provider outage");
     return qualificationPublicKeyMetadata(input);
   };
-  const runtime = await createCloudRuntime({ env, logger: { info() {} }, agentSessionSignerProvider: provider, qualificationManifestSignerProvider: qualificationProvider, postgresFactory: async (input) => { calls.push(["postgres", input.applicationVersion, typeof input.refreshNonceCodec?.derive, typeof input.resolveProcessBindingPolicy]); return postgresRuntime; }, humanAuthFactory: (input) => { calls.push(["human", input.origin, input.rpId, input.cursorSecret, input.signedConsoleIdentity, input.agentSessionSigner, input.qualificationManifestSigner]); return { api: { async handle() { return { status: 404, body: { error: { code: "not_found", message: "Resource not found" } }, headers: {} }; } }, humanSession, recentAuthService }; } });
+  const runtime = await createCloudRuntime({ env, logger: { info() {} }, agentSessionSignerProvider: provider, qualificationManifestSignerProvider: qualificationProvider, ownerRecoveryPublisher, postgresFactory: async (input) => { calls.push(["postgres", input.applicationVersion, typeof input.refreshNonceCodec?.derive, typeof input.resolveProcessBindingPolicy, input.ownerRecoveryPublisher]); return postgresRuntime; }, humanAuthFactory: (input) => { calls.push(["human", input.origin, input.rpId, input.cursorSecret, input.signedConsoleIdentity, input.agentSessionSigner, input.qualificationManifestSigner]); return { api: { async handle() { return { status: 404, body: { error: { code: "not_found", message: "Resource not found" } }, headers: {} }; } }, humanSession, recentAuthService }; } });
   assert.equal(runtime.postgresRuntime, postgresRuntime);
   assert.equal(runtime.humanAuthRuntime.recentAuthService, recentAuthService);
-  assert.deepEqual(calls[0], ["postgres", "0.18.0", "function", "function"]);
+  assert.deepEqual(calls[0], ["postgres", "0.18.0", "function", "function", ownerRecoveryPublisher]);
   assert.deepEqual(calls[1].slice(0, 4), ["human", "https://console.example.test", "example.test", CURSOR_SECRET]);
   assert.equal(calls[1][4].issuer, "agentpass-console");
   assert.equal(calls[1][4].audience, "agentpass-cloud-session");
@@ -127,6 +133,7 @@ test("production human auth fails closed without PostgreSQL capability authority
   let closed = false;
   await assert.rejects(createCloudRuntime({
     env,
+    ownerRecoveryPublisher: { async publish() { return { accepted: true, duplicate: false }; } },
     agentSessionSignerProvider: signerProvider(value),
     qualificationManifestSignerProvider: qualificationSignerProvider(value),
     postgresFactory: async () => ({ pool: {}, humanRepository: {}, async close() { closed = true; } }),
@@ -136,7 +143,7 @@ test("production human auth fails closed without PostgreSQL capability authority
 });
 
 function hostedEnv(value) {
-  return { ...value.env, AGENTPASS_CLOUD_PROFILE: "hosted", AGENTPASS_CLOUD_DATA_DIR: undefined, AGENTPASS_CLOUD_TOKEN_RECORDS_PATH: undefined, AGENTPASS_DATABASE_URL: "postgresql://agent:secret@db.example.test/agentpass?sslmode=verify-full", AGENTPASS_CONSOLE_ORIGIN: "https://console.example.test", AGENTPASS_WEBAUTHN_RP_ID: "example.test", AGENTPASS_HUMAN_CURSOR_SECRET: CURSOR_SECRET, AGENTPASS_CAPABILITY_NONCE_SECRET: Buffer.alloc(32, 0x33).toString("base64url"), AGENTPASS_OPERATIONAL_PROBE_SECRET: Buffer.alloc(32, 0x34).toString("base64url"), AGENTPASS_IDENTITY_ASSERTION_ISSUER: "agentpass-console", AGENTPASS_IDENTITY_ASSERTION_AUDIENCE: "agentpass-cloud-session", AGENTPASS_IDENTITY_ASSERTION_KID: "console-2026-08", AGENTPASS_IDENTITY_ASSERTION_PUBLIC_KEY_PATH: value.identityPublicKeyPath, AGENTPASS_CLOUD_REFRESH_PRIVATE_KEY_PATH: value.refreshPrivateKeyPath, AGENTPASS_CLOUD_REFRESH_KEY_ID: "refresh-2026-08", AGENTPASS_CLOUD_REFRESH_NONCE_KEYRING_PATH: value.refreshNonceKeyringPath, AGENTPASS_CLOUD_AGENT_SESSION_KEY_ID: "agent-session-2026-08", AGENTPASS_CLOUD_AGENT_SESSION_PUBLIC_KEY: value.agentSessionKeys.publicKey.export({ type: "spki", format: "pem" }).toString(), AGENTPASS_CLOUD_AGENT_SESSION_PROCESS_POLICIES_PATH: value.agentSessionProcessPoliciesPath, AGENTPASS_CLOUD_QUALIFICATION_MANIFEST_KEY_ID: "qualification-manifest-2026-08", AGENTPASS_CLOUD_QUALIFICATION_MANIFEST_PUBLIC_KEY: value.qualificationManifestKeys.publicKey.export({ type: "spki", format: "pem" }).toString() };
+  return { ...value.env, AGENTPASS_CLOUD_PROFILE: "hosted", AGENTPASS_CLOUD_DATA_DIR: undefined, AGENTPASS_CLOUD_TOKEN_RECORDS_PATH: undefined, AGENTPASS_DATABASE_URL: "postgresql://agent:secret@db.example.test/agentpass?sslmode=verify-full", AGENTPASS_CONSOLE_ORIGIN: "https://console.example.test", AGENTPASS_WEBAUTHN_RP_ID: "example.test", AGENTPASS_HUMAN_CURSOR_SECRET: CURSOR_SECRET, AGENTPASS_CAPABILITY_NONCE_SECRET: Buffer.alloc(32, 0x33).toString("base64url"), AGENTPASS_OPERATIONAL_PROBE_SECRET: Buffer.alloc(32, 0x34).toString("base64url"), AGENTPASS_IDENTITY_ASSERTION_ISSUER: "agentpass-console", AGENTPASS_IDENTITY_ASSERTION_AUDIENCE: "agentpass-cloud-session", AGENTPASS_IDENTITY_ASSERTION_KID: "console-2026-08", AGENTPASS_IDENTITY_ASSERTION_PUBLIC_KEY_PATH: value.identityPublicKeyPath, AGENTPASS_CLOUD_REFRESH_PRIVATE_KEY_PATH: value.refreshPrivateKeyPath, AGENTPASS_CLOUD_REFRESH_KEY_ID: "refresh-2026-08", AGENTPASS_CLOUD_REFRESH_NONCE_KEYRING_PATH: value.refreshNonceKeyringPath, AGENTPASS_CLOUD_AGENT_SESSION_KEY_ID: "agent-session-2026-08", AGENTPASS_CLOUD_AGENT_SESSION_PUBLIC_KEY: value.agentSessionKeys.publicKey.export({ type: "spki", format: "pem" }).toString(), AGENTPASS_CLOUD_AGENT_SESSION_PROCESS_POLICIES_PATH: value.agentSessionProcessPoliciesPath, AGENTPASS_CLOUD_QUALIFICATION_MANIFEST_KEY_ID: "qualification-manifest-2026-08", AGENTPASS_CLOUD_QUALIFICATION_MANIFEST_PUBLIC_KEY: value.qualificationManifestKeys.publicKey.export({ type: "spki", format: "pem" }).toString(), AGENTPASS_OWNER_RECOVERY_NOTIFICATION_WEBHOOK_URL: "https://notifications.example.test/owner-recovery", AGENTPASS_OWNER_RECOVERY_NOTIFICATION_AUTHORIZATION_PATH: value.ownerRecoveryNotificationAuthorizationPath };
 }
 
 function signerProvider(value) {

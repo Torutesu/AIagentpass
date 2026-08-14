@@ -46,6 +46,7 @@ export async function createPostgresRuntime({ env = process.env, PoolClass = Poo
   let closed = false;
   let closePoolPromise;
   let ownerRecoveryOutboxWorker;
+  let ownerRecoveryOutboxRepository;
   const drainController = createDrainController();
   const operationalMetrics = createOperationalMetrics();
   const refreshHintNotifier = createPostgresRefreshHintNotifier({ pool, metrics: operationalMetrics });
@@ -54,16 +55,18 @@ export async function createPostgresRuntime({ env = process.env, PoolClass = Poo
     maxConnections: config.maxConnections,
     migrationStatus: () => migrationRunner.status(),
     metrics: operationalMetrics,
-    drainController
+    drainController,
+    ...(ownerRecoveryPublisher === undefined ? {} : {
+      outboxStatus: async () => ({
+        ...(await ownerRecoveryOutboxRepository.health()),
+        worker_state: ownerRecoveryOutboxWorker?.snapshot().state ?? "unavailable"
+      })
+    })
   });
   async function closePool() {
     if (closed) return;
     if (closePoolPromise) return closePoolPromise;
     closePoolPromise = (async () => {
-      if (ownerRecoveryOutboxWorker) {
-        const result = await ownerRecoveryOutboxWorker.drain();
-        if (result.drained !== true) throw Object.assign(new Error("Owner recovery outbox worker drain timed out"), { code: "owner_recovery_outbox_worker_drain_timeout" });
-      }
       await refreshHintNotifier.close();
       await pool.end();
       closed = true;
@@ -71,10 +74,21 @@ export async function createPostgresRuntime({ env = process.env, PoolClass = Poo
     try { await closePoolPromise; } catch (error) { closePoolPromise = undefined; throw error; }
   }
   async function close() {
-    return drainController.close(closePool);
+    return drain();
   }
   async function drain(options = {}) {
-    return drainController.drain({ ...options, close: closePool });
+    const timeoutMs = options.timeoutMs ?? 10_000;
+    if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 0 || timeoutMs > 60_000) throw new TypeError("runtime drain timeout is invalid");
+    const workerDrain = ownerRecoveryOutboxWorker?.drain({ timeout_ms: timeoutMs });
+    return drainController.drain({
+      ...options,
+      timeoutMs,
+      close: async () => {
+        const workerResult = await workerDrain;
+        if (workerResult && workerResult.drained !== true) throw Object.assign(new Error("Owner recovery outbox worker drain timed out"), { code: "owner_recovery_outbox_worker_drain_timeout" });
+        await closePool();
+      }
+    });
   }
   const auditCursorSecret = exactSecret(env.AGENTPASS_HUMAN_CURSOR_SECRET, "AGENTPASS_HUMAN_CURSOR_SECRET");
   const capabilityNonceSecret = exactSecret(env.AGENTPASS_CAPABILITY_NONCE_SECRET, "AGENTPASS_CAPABILITY_NONCE_SECRET");
@@ -84,7 +98,7 @@ export async function createPostgresRuntime({ env = process.env, PoolClass = Poo
     auditRepository: adminAuditRepository
   });
   const ownerRecoveryWebAuthnRepository = createPostgresOwnerRecoveryWebAuthnRepository({ client: pool });
-  const ownerRecoveryOutboxRepository = createPostgresOwnerRecoveryOutboxRepository({ client: pool });
+  ownerRecoveryOutboxRepository = createPostgresOwnerRecoveryOutboxRepository({ client: pool });
   if (ownerRecoveryPublisher !== undefined) {
     ownerRecoveryOutboxWorker = createOwnerRecoveryOutboxWorker({
       ...ownerRecoveryOutboxWorkerOptions,

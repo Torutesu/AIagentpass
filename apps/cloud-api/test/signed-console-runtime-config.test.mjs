@@ -24,6 +24,7 @@ function createFixture({ identityPublicKey, bundlePrivateKey } = {}) {
   const refreshPrivateKeyPath = path.join(root, "refresh-private.pem");
   const refreshNonceKeyringPath = path.join(root, "refresh-nonce-keyring.json");
   const agentSessionProcessPoliciesPath = path.join(root, "agent-session-process-policies.json");
+  const ownerRecoveryNotificationAuthorizationPath = path.join(root, "owner-recovery-notification-authorization");
   const bundlePair = crypto.generateKeyPairSync("ed25519");
   const refreshPair = crypto.generateKeyPairSync("ed25519");
   const identityPair = crypto.generateKeyPairSync("ed25519");
@@ -44,6 +45,7 @@ function createFixture({ identityPublicKey, bundlePrivateKey } = {}) {
   fs.writeFileSync(refreshPrivateKeyPath, refreshPair.privateKey.export({ type: "pkcs8", format: "pem" }), { mode: 0o600 });
   fs.writeFileSync(refreshNonceKeyringPath, JSON.stringify({ version: 1, active_key_id: "refresh-nonce-v1", keys: { "refresh-nonce-v1": Buffer.alloc(32, 0x71).toString("base64url") } }), { mode: 0o600 });
   fs.writeFileSync(agentSessionProcessPoliciesPath, JSON.stringify({ version: 1, policies: [{ policy_id: "claude-code-v1", release_id: "agentpass-0.18.0", agent_kind: "claude-code", adapter_id: "33333333-3333-4333-8333-333333333333", adapter_versions: ["1.0.0"], status: "enabled" }] }), { mode: 0o600 });
+  fs.writeFileSync(ownerRecoveryNotificationAuthorizationPath, "notification-authorization-test-value", { mode: 0o600 });
   const agentSessionPublicKey = agentSessionPair.publicKey.export({ type: "spki", format: "pem" }).toString();
   return {
     root,
@@ -71,6 +73,8 @@ function createFixture({ identityPublicKey, bundlePrivateKey } = {}) {
       AGENTPASS_CLOUD_QUALIFICATION_MANIFEST_KEY_ID: "qualification-manifest-2026-08",
       AGENTPASS_CLOUD_QUALIFICATION_MANIFEST_PUBLIC_KEY: qualificationManifestPair.publicKey.export({ type: "spki", format: "pem" }).toString(),
       AGENTPASS_CLOUD_AGENT_SESSION_PROCESS_POLICIES_PATH: agentSessionProcessPoliciesPath,
+      AGENTPASS_OWNER_RECOVERY_NOTIFICATION_WEBHOOK_URL: "https://notifications.example.test/owner-recovery",
+      AGENTPASS_OWNER_RECOVERY_NOTIFICATION_AUTHORIZATION_PATH: ownerRecoveryNotificationAuthorizationPath,
       AGENTPASS_CLOUD_PORT: "0",
       AGENTPASS_DATABASE_URL: DATABASE_URL,
       AGENTPASS_CONSOLE_ORIGIN: "https://console.example.test",

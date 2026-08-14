@@ -66,6 +66,10 @@ const HUMAN_AUTH_ENV = Object.freeze([
   "AGENTPASS_IDENTITY_ASSERTION_PUBLIC_KEY_PATH",
   "AGENTPASS_HUMAN_CURSOR_SECRET"
 ]);
+const OWNER_RECOVERY_NOTIFICATION_ENV = Object.freeze([
+  "AGENTPASS_OWNER_RECOVERY_NOTIFICATION_WEBHOOK_URL",
+  "AGENTPASS_OWNER_RECOVERY_NOTIFICATION_AUTHORIZATION_PATH"
+]);
 const PROFILE_RELATED_ENV = new Set([
   PROFILE_ENV,
   "AGENTPASS_CLOUD_BUNDLE_PRIVATE_KEY_PATH",
@@ -89,6 +93,7 @@ const PROFILE_RELATED_ENV = new Set([
   "AGENTPASS_IDENTITY_ASSERTION_KID",
   "AGENTPASS_IDENTITY_ASSERTION_PUBLIC_KEY_PATH",
   "AGENTPASS_HUMAN_CURSOR_SECRET",
+  ...OWNER_RECOVERY_NOTIFICATION_ENV,
   CAPABILITY_NONCE_SECRET_ENV
 ]);
 const IDENTIFIER = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/u;
@@ -102,6 +107,7 @@ const PROFILE_PREFIXES = Object.freeze([
   "AGENTPASS_WEBAUTHN_",
   "AGENTPASS_IDENTITY_",
   "AGENTPASS_HUMAN_",
+  "AGENTPASS_OWNER_RECOVERY_",
   "AGENTPASS_CAPABILITY_",
   "AGENTPASS_KMS_"
 ]);
@@ -148,10 +154,11 @@ export function parseCloudRuntimeProfile(env = process.env) {
   const hostedRefresh = parseHostedRefresh(env);
   const hostedAgentSession = parseHostedAgentSession(env);
   const hostedQualificationManifest = parseHostedQualificationManifest(env);
+  const ownerRecoveryNotification = parseOwnerRecoveryNotification(env);
   if (profile === CLOUD_RUNTIME_PROFILES.HOSTED) {
     if (fileStore.present) fail(CLOUD_RUNTIME_PROFILE_ERROR_CODES.HOSTED_FILE_STORE_FORBIDDEN);
     const humanAuth = parseHumanAuth(env);
-    if (!humanAuth.complete || !hostedRefresh.complete || !hostedAgentSession.complete || !hostedQualificationManifest.complete || !configured(env, CAPABILITY_NONCE_SECRET_ENV)) fail(CLOUD_RUNTIME_PROFILE_ERROR_CODES.HOSTED_AUTH_INCOMPLETE);
+    if (!humanAuth.complete || !hostedRefresh.complete || !hostedAgentSession.complete || !hostedQualificationManifest.complete || !ownerRecoveryNotification.complete || !configured(env, CAPABILITY_NONCE_SECRET_ENV)) fail(CLOUD_RUNTIME_PROFILE_ERROR_CODES.HOSTED_AUTH_INCOMPLETE);
     if (!validCursorSecret(env[CAPABILITY_NONCE_SECRET_ENV])) fail(CLOUD_RUNTIME_PROFILE_ERROR_CODES.HUMAN_AUTH_INVALID);
     return Object.freeze({
       profile,
@@ -171,6 +178,7 @@ export function parseCloudRuntimeProfile(env = process.env) {
     || hostedRefresh.present || HOSTED_AGENT_SESSION_ENV.some((name) => configured(env, name))
     || HOSTED_QUALIFICATION_MANIFEST_ENV.some((name) => configured(env, name))
     || HOSTED_KMS_ENV.some((name) => configured(env, name))
+    || ownerRecoveryNotification.present
     || configured(env, CAPABILITY_NONCE_SECRET_ENV)) {
     fail(CLOUD_RUNTIME_PROFILE_ERROR_CODES.EVALUATION_AUTH_FORBIDDEN);
   }
@@ -187,6 +195,25 @@ export function parseCloudRuntimeProfile(env = process.env) {
     humanAuth: null,
     fileStore: Object.freeze({ dataDir: fileStore.dataDir, tokenRecordsPath: fileStore.tokenRecordsPath })
   });
+}
+
+function parseOwnerRecoveryNotification(env) {
+  const present = OWNER_RECOVERY_NOTIFICATION_ENV.some((name) => configured(env, name));
+  if (!present) return { present: false, complete: false };
+  if (!OWNER_RECOVERY_NOTIFICATION_ENV.every((name) => configured(env, name))
+    || !absolutePath(env.AGENTPASS_OWNER_RECOVERY_NOTIFICATION_AUTHORIZATION_PATH)) {
+    return { present: true, complete: false };
+  }
+  let webhook;
+  try { webhook = new URL(env.AGENTPASS_OWNER_RECOVERY_NOTIFICATION_WEBHOOK_URL); }
+  catch { return { present: true, complete: false }; }
+  const complete = webhook.protocol === "https:"
+    && webhook.username === ""
+    && webhook.password === ""
+    && webhook.hash === ""
+    && webhook.hostname.length > 0
+    && env.AGENTPASS_OWNER_RECOVERY_NOTIFICATION_WEBHOOK_URL.length <= 2_048;
+  return { present: true, complete };
 }
 
 function parseHostedRefresh(env) {

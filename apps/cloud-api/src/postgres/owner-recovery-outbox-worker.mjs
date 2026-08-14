@@ -58,11 +58,19 @@ export function createOwnerRecoveryOutboxWorker({
 
   let state = "idle";
   let timer;
-  let cyclePromise;
+  let drainPromise;
+  const cycles = new Set();
   const active = new Set();
 
   async function runOnce() {
     if (state === "draining" || state === "closed") throw new OwnerRecoveryOutboxWorkerError(OWNER_RECOVERY_OUTBOX_WORKER_ERROR_CODES.CLOSED);
+    const cycle = executeCycle();
+    cycles.add(cycle);
+    cycle.then(() => cycles.delete(cycle), () => cycles.delete(cycle));
+    return cycle;
+  }
+
+  async function executeCycle() {
     let batch;
     try {
       batch = await repository.claimBatch({ limit: config.batchSize, lease_ms: config.leaseMs });
@@ -74,25 +82,26 @@ export function createOwnerRecoveryOutboxWorker({
       metric(metrics, "recordOwnerRecoveryOutboxFailure");
       throw new OwnerRecoveryOutboxWorkerError(OWNER_RECOVERY_OUTBOX_WORKER_ERROR_CODES.STORAGE_UNAVAILABLE);
     }
-    const result = { claimed: batch.events.length, published: 0, retried: 0, dead_lettered: 0, claim_lost: 0 };
+    const result = { claimed: batch.events.length, published: 0, retried: 0, dead_lettered: 0, claim_lost: 0, uncertain: 0 };
     if (batch.events.length > 0) metric(metrics, "recordOwnerRecoveryOutboxClaim", batch.events.length);
-    for (const event of batch.events) {
+    const deliveries = batch.events.map(async (event) => {
       observeLag(metrics, event.created_at, now);
       const delivery = deliver(event, batch.claim_token);
       active.add(delivery);
       try {
-        const outcome = await delivery;
-        result[outcome] += 1;
+        return await delivery;
       } finally {
         active.delete(delivery);
       }
-    }
+    });
+    for (const outcome of await Promise.all(deliveries)) result[outcome] += 1;
     return Object.freeze(result);
   }
 
   async function deliver(event, claimToken) {
+    let response;
     try {
-      const response = await withTimeout(
+      response = await withTimeout(
         (signal) => publisher.publish(Object.freeze({
           idempotency_key: event.event_id,
           event: publicEvent(event),
@@ -102,29 +111,39 @@ export function createOwnerRecoveryOutboxWorker({
         setTimeoutFn,
         clearTimeoutFn
       );
-      if (!response || response.accepted !== true) throw Object.assign(new Error("publisher rejected event"), { deliveryCode: "publisher_rejected" });
-      try {
-        await repository.markPublished({ organization_id: event.organization_id, event_id: event.event_id, attempt: event.attempt, claim_token: claimToken });
-      } catch (error) {
-        if (isClaimLost(error)) { metric(metrics, "recordOwnerRecoveryOutboxClaimLost"); return "claim_lost"; }
-        throw Object.assign(new Error("publish acknowledgement storage failed"), { deliveryCode: "storage_unavailable" });
+    } catch {
+      // Timeout and transport exceptions are an unknown delivery outcome: the
+      // provider may have accepted the idempotency key before the response was
+      // lost. Keep the lease instead of making the row immediately retryable.
+      metric(metrics, "recordOwnerRecoveryOutboxUncertain");
+      return "uncertain";
+    }
+    if (!response || typeof response.duplicate !== "boolean" || response.accepted !== true) {
+      if (response?.accepted !== false || response?.duplicate !== false) {
+        metric(metrics, "recordOwnerRecoveryOutboxUncertain");
+        return "uncertain";
       }
-      metric(metrics, "recordOwnerRecoveryOutboxPublish");
-      return "published";
-    } catch (error) {
-      const code = deliveryCode(error);
       const retryAt = new Date(clock(now) + retryDelay(event.attempt, config, random)).toISOString();
       try {
-        const failed = await repository.markFailed({ organization_id: event.organization_id, event_id: event.event_id, attempt: event.attempt, claim_token: claimToken, error_code: code, retry_at: retryAt });
+        const failed = await repository.markFailed({ organization_id: event.organization_id, event_id: event.event_id, attempt: event.attempt, claim_token: claimToken, error_code: "publisher_rejected", retry_at: retryAt });
         if (failed.dead_letter) { metric(metrics, "recordOwnerRecoveryOutboxDeadLetter"); return "dead_lettered"; }
         metric(metrics, "recordOwnerRecoveryOutboxRetry");
         return "retried";
       } catch (markError) {
         if (isClaimLost(markError)) { metric(metrics, "recordOwnerRecoveryOutboxClaimLost"); return "claim_lost"; }
-        metric(metrics, "recordOwnerRecoveryOutboxFailure");
-        return "claim_lost";
+        metric(metrics, "recordOwnerRecoveryOutboxUncertain");
+        return "uncertain";
       }
     }
+    try {
+      await repository.markPublished({ organization_id: event.organization_id, event_id: event.event_id, attempt: event.attempt, claim_token: claimToken });
+    } catch (error) {
+      if (isClaimLost(error)) { metric(metrics, "recordOwnerRecoveryOutboxClaimLost"); return "claim_lost"; }
+      metric(metrics, "recordOwnerRecoveryOutboxUncertain");
+      return "uncertain";
+    }
+    metric(metrics, "recordOwnerRecoveryOutboxPublish");
+    return "published";
   }
 
   function start() {
@@ -139,10 +158,9 @@ export function createOwnerRecoveryOutboxWorker({
     if (state !== "running" || timer !== undefined) return;
     timer = setTimeoutFn(() => {
       timer = undefined;
-      cyclePromise = runOnce()
+      runOnce()
         .catch(() => Object.freeze({ claimed: 0 }))
-        .then((result) => schedule(result.claimed >= config.batchSize ? 0 : config.pollIntervalMs))
-        .finally(() => { cyclePromise = undefined; });
+        .then((result) => schedule(result.claimed >= config.batchSize ? 0 : config.pollIntervalMs));
     }, delay);
     timer?.unref?.();
   }
@@ -150,16 +168,21 @@ export function createOwnerRecoveryOutboxWorker({
   async function drain({ timeout_ms = config.drainTimeoutMs } = {}) {
     const timeoutMs = integer(timeout_ms, 0, 60_000);
     if (state === "closed") return snapshot();
+    if (drainPromise) return drainPromise;
     state = "draining";
     if (timer !== undefined) { clearTimeoutFn(timer); timer = undefined; }
-    const pending = [...active];
-    if (cyclePromise) pending.push(cyclePromise);
-    const drained = pending.length === 0 ? true : await waitBounded(Promise.allSettled(pending), timeoutMs, setTimeoutFn, clearTimeoutFn);
-    state = drained ? "closed" : "draining";
-    return Object.freeze({ ...snapshot(), drained });
+    const pending = [...cycles];
+    const current = (async () => {
+      const drained = pending.length === 0 ? true : await waitBounded(Promise.allSettled(pending), timeoutMs, setTimeoutFn, clearTimeoutFn);
+      state = drained ? "closed" : "draining";
+      return Object.freeze({ ...snapshot(), drained });
+    })();
+    drainPromise = current;
+    try { return await current; }
+    finally { if (drainPromise === current) drainPromise = undefined; }
   }
 
-  function snapshot() { return Object.freeze({ state, active: active.size, scheduled: timer !== undefined, config }); }
+  function snapshot() { return Object.freeze({ state, active: active.size, cycles: cycles.size, scheduled: timer !== undefined, config }); }
 
   return Object.freeze({ start, runOnce, drain, close: drain, snapshot });
 }
@@ -182,12 +205,6 @@ function retryDelay(attempt, config, random) {
   const sample = Number(random());
   if (!Number.isFinite(sample) || sample < 0 || sample >= 1) throw invalid();
   return Math.min(config.maxRetryMs, Math.ceil(base + base * 0.2 * sample));
-}
-function deliveryCode(error) {
-  if (error?.deliveryCode === "publish_timeout") return "publish_timeout";
-  if (error?.deliveryCode === "publisher_rejected") return "publisher_rejected";
-  if (error?.deliveryCode === "storage_unavailable") return "storage_unavailable";
-  return "publisher_unavailable";
 }
 function isClaimLost(error) { return String(error?.code ?? "").includes("claim_lost"); }
 function observeLag(metrics, createdAt, now) {
