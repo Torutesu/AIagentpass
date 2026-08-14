@@ -221,8 +221,8 @@ async function seedFixture(pool, options = {}) {
   );
   await pool.query(
     `INSERT INTO memberships (organization_id,id,member_id,role,status) VALUES
-      ($1,$2,$3,'owner','active'),($1,$4,$5,'admin',$6)`,
-    [organizationId, operatorMembershipId, operatorMemberId, actorMembershipId, actorMemberId, actorMembershipStatus]
+      ($1,$2,$3,'owner','active'),($1,$4,$5,'admin','active')`,
+    [organizationId, operatorMembershipId, operatorMemberId, actorMembershipId, actorMemberId]
   );
   await pool.query(
     `INSERT INTO human_sessions
@@ -244,6 +244,12 @@ async function seedFixture(pool, options = {}) {
       WHERE id=$1`,
     [sessionId, issuedAt, recentAuthId, organizationId, "agent.session_grant.issue"]
   );
+  if (actorMembershipStatus !== "active") {
+    await pool.query(
+      "UPDATE memberships SET status=$3 WHERE organization_id=$1 AND id=$2",
+      [organizationId, actorMembershipId, actorMembershipStatus]
+    );
+  }
   await pool.query(
     `INSERT INTO devices (organization_id,id,label,key_algorithm,public_key_pem,status)
       VALUES ($1,$2,'issuance device','ed25519',$3,$4)`,

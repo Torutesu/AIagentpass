@@ -17,8 +17,9 @@ function job(name) {
 test("main CI validates the machine-readable contract inventory before product tests", () => {
   const section = job("test");
   const install = section.indexOf("- run: npm ci");
+  const consoleInstall = section.indexOf("- run: npm ci --prefix apps/web-console");
   const contracts = section.indexOf("- run: npm run contracts:validate");
   const nodeTests = section.indexOf("- run: npm test");
-  assert.ok(install >= 0 && contracts > install && nodeTests > contracts);
+  assert.ok(install >= 0 && consoleInstall > install && contracts > consoleInstall && nodeTests > contracts);
   assert.equal(section.match(/npm run contracts:validate/g)?.length, 1);
 });
