@@ -29,6 +29,7 @@ export type AgentPassInitialData = {
     name: string;
     detail: string;
     status: string;
+    lifecycleStatus?: "pending" | "active" | "revoked";
     location: string;
     checked: string;
     desiredGeneration?: number;
@@ -97,6 +98,7 @@ function summaryViewData(summary: ConsoleSummaryViewModel, session: ConsoleSessi
       name: device.name,
       detail: device.refreshState ?? device.status,
       status: device.status === "revoked" ? "停止" : device.status === "pending" ? "登録待ち" : "正常",
+      lifecycleStatus: device.status,
       location: "Cloud管理",
       checked: device.lastSeenAt ?? "未確認",
       desiredGeneration: device.desiredGeneration ?? undefined,
@@ -141,6 +143,14 @@ const OPAQUE_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 const RFC3339_UTC = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?Z$/;
 const BASE64URL_CSRF = /^[A-Za-z0-9_-]{43}$/;
 const RECENT_AUTH_OPERATION = "device.enrollment.issue";
+const ENROLLMENT_CANDIDATE_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
+const ENROLLMENT_DEVICE_FINGERPRINT = /^SHA256:[A-Za-z0-9_-]{43}$/;
+const ENROLLMENT_BASE64URL_32 = /^[A-Za-z0-9_-]{43}$/;
+const ENROLLMENT_UUID_V4 = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+const ENROLLMENT_V2_KEYS = ["version", "proof_version", "enrollment_id", "organization_id", "device_id", "label", "platform", "candidate_binding", "challenge_id", "nonce", "expires_at", "challenge", "credential", "possession_receipt_verification", "endpoint"] as const;
+const ENROLLMENT_BINDING_KEYS = ["version", "enrollment_id", "organization_id", "device_id", "candidate_id", "artifact_sha256", "source_commit", "team_id", "device_key_fingerprint", "expires_at"] as const;
+const ENROLLMENT_CHALLENGE_KEYS = ["challenge_id", "nonce", "expires_at", "candidate_id", "device_key_fingerprint"] as const;
+const ENROLLMENT_RECEIPT_KEYS = ["key_id", "algorithm", "public_key"] as const;
 const DEVICE_REVOKE_RECENT_AUTH_OPERATION = "device.revoke";
 const DEVICE_REFRESH_REQUEST_RECENT_AUTH_OPERATION = "device.refresh.request";
 const EMERGENCY_STOP_RECENT_AUTH_OPERATION = "organization.emergency_stop";
@@ -176,6 +186,46 @@ class EnrollmentFlowError extends Error {
 
 function isPlainRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === "object" && !Array.isArray(value) && Object.getPrototypeOf(value) === Object.prototype;
+}
+
+function hasExactV2Keys(value: Record<string, unknown>, keys: readonly string[]): boolean {
+  return Object.keys(value).length === keys.length && keys.every((key) => Object.hasOwn(value, key));
+}
+
+function parseV2EnrollmentInvitation(payload: unknown, organizationId: string): Record<string, unknown> {
+  if (!isPlainRecord(payload) || !isPlainRecord(payload.enrollment)) throw new EnrollmentFlowError("enrollment", "登録情報の形式を検証できませんでした。もう一度発行してください。");
+  const enrollment = payload.enrollment;
+  if (!hasExactV2Keys(enrollment, ENROLLMENT_V2_KEYS) || enrollment.version !== 2 || enrollment.proof_version !== 2
+    || enrollment.organization_id !== organizationId || enrollment.platform !== "macos"
+    || typeof enrollment.label !== "string" || !ENROLLMENT_UUID_V4.test(String(enrollment.enrollment_id))
+    || !ENROLLMENT_UUID_V4.test(String(enrollment.device_id)) || enrollment.challenge_id !== enrollment.enrollment_id
+    || typeof enrollment.nonce !== "string" || !ENROLLMENT_BASE64URL_32.test(enrollment.nonce)
+    || typeof enrollment.credential !== "string" || !ENROLLMENT_BASE64URL_32.test(enrollment.credential)
+    || typeof enrollment.expires_at !== "string" || Date.parse(enrollment.expires_at) <= Date.now()
+    || enrollment.endpoint !== `/v1/enrollments/${enrollment.enrollment_id}`) {
+    throw new EnrollmentFlowError("enrollment", "登録情報の形式を検証できませんでした。もう一度発行してください。");
+  }
+  if (!isPlainRecord(enrollment.candidate_binding) || !hasExactV2Keys(enrollment.candidate_binding, ENROLLMENT_BINDING_KEYS)
+    || enrollment.candidate_binding.enrollment_id !== enrollment.enrollment_id || enrollment.candidate_binding.organization_id !== organizationId
+    || enrollment.candidate_binding.device_id !== enrollment.device_id || enrollment.candidate_binding.expires_at !== enrollment.expires_at
+    || !ENROLLMENT_CANDIDATE_ID.test(String(enrollment.candidate_binding.candidate_id))
+    || !ENROLLMENT_DEVICE_FINGERPRINT.test(String(enrollment.candidate_binding.device_key_fingerprint))) {
+    throw new EnrollmentFlowError("enrollment", "登録対象のリリースまたは端末キーを検証できませんでした。");
+  }
+  if (!isPlainRecord(enrollment.challenge) || !hasExactV2Keys(enrollment.challenge, ENROLLMENT_CHALLENGE_KEYS)
+    || enrollment.challenge.challenge_id !== enrollment.enrollment_id || enrollment.challenge.nonce !== enrollment.nonce
+    || enrollment.challenge.expires_at !== enrollment.expires_at || enrollment.challenge.candidate_id !== enrollment.candidate_binding.candidate_id
+    || enrollment.challenge.device_key_fingerprint !== enrollment.candidate_binding.device_key_fingerprint) {
+    throw new EnrollmentFlowError("enrollment", "登録チャレンジの束縛を検証できませんでした。");
+  }
+  if (!isPlainRecord(enrollment.possession_receipt_verification) || !hasExactV2Keys(enrollment.possession_receipt_verification, ENROLLMENT_RECEIPT_KEYS)
+    || !["ed25519", "p256-sha256"].includes(String(enrollment.possession_receipt_verification.algorithm))
+    || typeof enrollment.possession_receipt_verification.key_id !== "string"
+    || typeof enrollment.possession_receipt_verification.public_key !== "string"
+    || /PRIVATE\s+KEY/i.test(enrollment.possession_receipt_verification.public_key)) {
+    throw new EnrollmentFlowError("enrollment", "署名レシートの検証情報を確認できませんでした。");
+  }
+  return enrollment;
 }
 
 function hasExactKeys(value: Record<string, unknown>, expected: string[]): boolean {
@@ -732,10 +782,27 @@ function SessionEndedSurface({ reason }: { reason: "expired" | "signed-out" }) {
   return <><SurfaceHeader eyebrow={signedOut ? "SESSION / SIGNED OUT" : "SESSION / EXPIRED"} title={signedOut ? "サインアウトしました" : "セッションの有効期限が切れました"} copy={signedOut ? "このブラウザのAgentPassセッションを安全に終了しました。" : "安全のため、Consoleのデータと操作を停止しました。再認証してから続けてください。"} /><div className="surface-content"><article className="surface-card" role="alert"><span className="section-kicker">REAUTHENTICATION REQUIRED</span><h2 className="surface-card-title">もう一度サインインしてください</h2><p className="surface-card-copy">この画面に残っている情報は権限判断には使われません。ページを再読み込みすると、現在の認証状態から新しいセッションを開始します。</p><button className="primary-button" type="button" onClick={() => window.location.reload()}>再認証する</button></article></div></>;
 }
 
-function SetupSurface({ data, goTo, operate, online, canManage }: { data: AgentPassInitialData; goTo: (view: ConsoleView) => void; operate: (operation: string, body: Record<string, unknown>, success: string) => Promise<void>; online: boolean; canManage: boolean }) {
+type IssuedEnrollmentSummary = Readonly<{ enrollmentId: string; deviceId: string; label: string; candidateId: string; deviceKeyFingerprint: string; expiresAt: string }>;
+
+function enrollmentProgress(device: AgentPassInitialData["devices"][number] | undefined): "pending" | "enrolled" | "recovery-proven" {
+  if (!device || device.lifecycleStatus === "pending") return "pending";
+  // A signed device ACK proves that the enrolled device observed control state,
+  // but it is not the v2 possession receipt. The Console must not promote this
+  // observation to recovery-proven without the native receipt verification.
+  return device.lifecycleStatus === "active" && device.lastAckAt ? "enrolled" : "enrolled";
+}
+
+function enrollmentProgressLabel(progress: "pending" | "enrolled" | "recovery-proven"): string {
+  return progress === "pending" ? "登録待ち" : progress === "enrolled" ? "enrollment proven" : "recovery-proven";
+}
+
+function SetupSurface({ data, goTo, operate, online, canManage, refresh }: { data: AgentPassInitialData; goTo: (view: ConsoleView) => void; operate: (operation: string, body: Record<string, unknown>, success: string) => Promise<void>; online: boolean; canManage: boolean; refresh: () => Promise<void> }) {
   const [deviceLabel, setDeviceLabel] = useState("");
+  const [candidateId, setCandidateId] = useState("");
+  const [deviceKeyFingerprint, setDeviceKeyFingerprint] = useState("");
   const [enrollmentStoreId] = useState(allocateEnrollmentStoreId);
   const [enrollmentVisible, setEnrollmentVisible] = useState(false);
+  const [issuedEnrollment, setIssuedEnrollment] = useState<IssuedEnrollmentSummary | null>(null);
   const [enrollmentPending, setEnrollmentPending] = useState(false);
   const [enrollmentError, setEnrollmentError] = useState("");
   const enrollmentInFlight = useRef(false);
@@ -762,6 +829,11 @@ function SetupSurface({ data, goTo, operate, online, canManage }: { data: AgentP
     setEnrollmentError("");
     try {
       const { organizationId, csrfToken } = await consoleSessionContext.get();
+      const normalizedCandidateId = candidateId.trim();
+      const normalizedFingerprint = deviceKeyFingerprint.trim();
+      if (!ENROLLMENT_CANDIDATE_ID.test(normalizedCandidateId) || !ENROLLMENT_DEVICE_FINGERPRINT.test(normalizedFingerprint)) {
+        throw new EnrollmentFlowError("enrollment", "リリース候補IDとP-256端末キーのフィンガープリントを正しく入力してください。");
+      }
       if (!supportsWebAuthn()) throw new EnrollmentFlowError("unsupported", "このブラウザはTouch ID/パスキーに対応していません。対応ブラウザでお試しください。");
       const { authorization_id } = await authenticateRecentAuth({
         operation: RECENT_AUTH_OPERATION,
@@ -771,12 +843,21 @@ function SetupSurface({ data, goTo, operate, online, canManage }: { data: AgentP
       const response = await fetchConsole("/api/console?operation=issue-device-enrollment", {
         method: "POST",
         headers: { "content-type": "application/json", "idempotency-key": crypto.randomUUID(), "agentpass-recent-auth": authorization_id },
-        body: JSON.stringify({ label: deviceLabel.trim(), platform: "macos", ttl_ms: 10 * 60 * 1000 }),
+        body: JSON.stringify({ proof_version: 2, candidate_id: normalizedCandidateId, device_key_fingerprint: normalizedFingerprint, label: deviceLabel.trim(), platform: "macos", ttl_ms: 10 * 60 * 1000 }),
       });
       let payload: unknown;
       try { payload = await response.json(); } catch { throw new EnrollmentFlowError("enrollment", "登録情報を発行できませんでした。接続と権限を確認して、もう一度お試しください。"); }
-      if (!response.ok || !isPlainRecord(payload) || !isPlainRecord(payload.enrollment)) throw new EnrollmentFlowError("enrollment", "登録情報を発行できませんでした。接続と権限を確認して、もう一度お試しください。");
-      writeEnrollmentStore(enrollmentStoreId, payload.enrollment as Record<string, string>);
+      if (!response.ok) throw new EnrollmentFlowError("enrollment", "登録情報を発行できませんでした。接続と権限を確認して、もう一度お試しください。");
+      const invitation = parseV2EnrollmentInvitation(payload, organizationId);
+      writeEnrollmentStore(enrollmentStoreId, invitation as Record<string, string>);
+      setIssuedEnrollment({
+        enrollmentId: String(invitation.enrollment_id),
+        deviceId: String(invitation.device_id),
+        label: String(invitation.label),
+        candidateId: String(invitation.candidate_binding && (invitation.candidate_binding as Record<string, unknown>).candidate_id),
+        deviceKeyFingerprint: String(invitation.candidate_binding && (invitation.candidate_binding as Record<string, unknown>).device_key_fingerprint),
+        expiresAt: String(invitation.expires_at),
+      });
       setEnrollmentVisible(true);
     } catch (error) {
       clearConsoleSessionOnUnauthorized(error);
@@ -807,6 +888,9 @@ function SetupSurface({ data, goTo, operate, online, canManage }: { data: AgentP
   };
   const enrollmentPayload = readEnrollmentStore(enrollmentStoreId);
   const enrollmentJson = enrollmentPayload ? JSON.stringify({ enrollment: enrollmentPayload }, null, 2) : "";
+  const issuedDevice = issuedEnrollment ? data.devices.find((device) => device.deviceId === issuedEnrollment.deviceId) : undefined;
+  const progress = enrollmentProgress(issuedDevice);
+  const progressLabel = enrollmentProgressLabel(progress);
   useEffect(() => () => clearEnrollmentStore(enrollmentStoreId), [enrollmentStoreId]);
   useEffect(() => {
     if (!enrollmentVisible) return;
@@ -850,12 +934,13 @@ function SetupSurface({ data, goTo, operate, online, canManage }: { data: AgentP
           {passkeyError ? <p className="form-error" role="alert">{passkeyError}</p> : null}
         </article>
         {canManage ? <article className="surface-card">
-          <span className="section-kicker">ENROLL A MAC</span><h2 className="surface-card-title">Macを安全に追加</h2>
-          <p className="surface-card-copy">10分だけ有効なワンタイム登録情報を発行します。秘密鍵はMacのSecure Enclave内で生成され、外へ出ません。</p>
-          <div className="form-grid"><label>端末名<input required maxLength={128} autoComplete="off" value={deviceLabel} onChange={(event) => setDeviceLabel(event.target.value)} /></label></div>
+          <span className="section-kicker">ENROLL A MAC · V2</span><h2 className="surface-card-title">Macを安全に追加</h2>
+          <p className="surface-card-copy">P-256キーとリリース候補に束縛した、10分だけ有効なワンタイム招待を発行します。秘密鍵はMacのSecure Enclave内で生成され、ブラウザには入りません。</p>
+          <div className="form-grid"><label>端末名<input required maxLength={128} autoComplete="off" value={deviceLabel} onChange={(event) => setDeviceLabel(event.target.value)} /></label><label>リリース候補ID<input required maxLength={128} autoComplete="off" placeholder="candidate-2026-08" value={candidateId} onChange={(event) => setCandidateId(event.target.value)} /><span className="field-help">インストールする署名済みPKGの候補ID。</span></label><label>端末キーのフィンガープリント<input required maxLength={51} autoComplete="off" placeholder="SHA256:…" value={deviceKeyFingerprint} onChange={(event) => setDeviceKeyFingerprint(event.target.value)} /><span className="field-help">Mac側で準備したP-256公開キーの識別子。秘密鍵ではありません。</span></label></div>
           <button className="secondary-button" type="button" disabled={!online || enrollmentPending || !deviceLabel.trim()} onClick={issueEnrollment}>{enrollmentPending ? "認証・発行中…" : "Touch ID/パスキー確認"}</button>
           {enrollmentError ? <p className="form-error" role="alert">{enrollmentError}</p> : null}
-          {enrollmentVisible ? <div className="enrollment-result" aria-live="polite"><p className="row-title">一度だけ表示しています</p><p className="surface-card-copy">下のJSONをMacへ安全に渡し、標準入力からセットアップしてください。5分後または再読込で消え、コピー内容も60秒後に消去を試みます。</p><pre className="secret-output">{enrollmentJson}</pre><div className="stop-action-row"><button className="primary-button" type="button" onClick={() => void copyEnrollment()}>JSONをコピー</button><button className="text-button" type="button" onClick={() => { clearEnrollmentStore(enrollmentStoreId); setEnrollmentVisible(false); }}>表示を消す</button></div><code className="command-hint">agentpass setup continue --execute --enrollment-url &lt;Cloud API URL&gt; --enrollment-stdin</code></div> : null}
+          {issuedEnrollment ? <div className="enrollment-progress" aria-live="polite" data-enrollment-state={progress}><div className="stop-title-row"><div><p className="row-title">{issuedEnrollment.label}</p><p className="row-description">有効期限 {deviceDate(issuedEnrollment.expiresAt)} · 候補 {issuedEnrollment.candidateId} · {issuedEnrollment.deviceKeyFingerprint}</p></div><StatusTag tone={progress === "pending" ? "amber" : "green"}>{progressLabel}</StatusTag></div><ol className="enrollment-steps"><li data-state="pending"><strong>pending</strong><span>招待を発行済み。Macからの受け入れを待っています。</span></li><li data-state="enrolled"><strong>enrolled</strong><span>{progress === "pending" ? "Cloudが端末の登録完了を確認するまで待機します。" : "Cloudが端末の登録完了を確認しました。"}</span></li><li data-state="recovery-proven"><strong>recovery-proven</strong><span>署名済みpossession receiptの検証はMac側で完了します。Consoleはreceiptを受け取って成功扱いにしません。</span></li></ol><button className="text-button" type="button" disabled={enrollmentPending} onClick={() => void refresh()}>状態を再確認</button></div> : null}
+          {enrollmentVisible ? <div className="enrollment-result" aria-live="polite"><p className="row-title">一度だけ表示しています</p><p className="surface-card-copy">下のJSONをMacへ安全に渡し、標準入力からセットアップしてください。5分後または再読込で消え、コピー内容も60秒後に消去を試みます。</p><pre className="secret-output">{enrollmentJson}</pre><div className="stop-action-row"><button className="primary-button" type="button" onClick={() => void copyEnrollment()}>JSONをコピー</button><button className="text-button" type="button" onClick={() => { clearEnrollmentStore(enrollmentStoreId); setEnrollmentVisible(false); }}>表示を消す</button></div><code className="command-hint">agentpass setup continue --execute --enrollment-url &lt;Cloud API URL&gt;/v1 --enrollment-stdin</code></div> : null}
         </article> : null}
         {canManage ? <article className="surface-card">
           <span className="section-kicker">REGISTER</span><h2 className="surface-card-title">Agentを追加</h2>
@@ -1278,7 +1363,7 @@ export function AgentPassConsole() {
         <div className={`content${activeView === "organizations" || activeView === "recovery" ? " organization-content" : ""}`} role={activeView === "organizations" || activeView === "recovery" ? undefined : "main"}>
           {sessionState !== "active" ? <SessionEndedSurface reason={sessionState} /> : null}
           {sessionState === "active" && activeView === "overview" ? <Overview data={data} goTo={goTo} onRequestRefresh={requestDeviceRefresh} summaryState={summaryState} canManage={canManage} /> : null}
-          {sessionState === "active" && activeView === "setup" ? <SetupSurface data={data} goTo={goTo} operate={operate} online={summaryState === "ready"} canManage={canManage} /> : null}
+          {sessionState === "active" && activeView === "setup" ? <SetupSurface data={data} goTo={goTo} operate={operate} online={summaryState === "ready"} canManage={canManage} refresh={() => refreshSummary()} /> : null}
           {sessionState === "active" && activeView === "agents" ? <AgentsSurface data={data} operate={operate} canManage={canManage} /> : null}
           {sessionState === "active" && activeView === "policies" ? <PoliciesSurface data={data} operate={operate} canManage={canManage} /> : null}
           {sessionState === "active" && activeView === "activity" ? <ActivitySurface data={data} /> : null}

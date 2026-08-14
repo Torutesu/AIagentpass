@@ -33,7 +33,9 @@ type BrowserSecurityState = {
   enrollmentBodies: Array<Record<string, unknown>>;
 };
 
-const ENROLLMENT_SECRET = "enrollment-secret-must-not-leak";
+const ENROLLMENT_SECRET = "a".repeat(43);
+const ENROLLMENT_CANDIDATE = "candidate-e2e-2026-08";
+const ENROLLMENT_FINGERPRINT = `SHA256:${"f".repeat(43)}`;
 const activeAuthenticators = new WeakMap<Page, VirtualAuthenticator>();
 
 function registrationOptions() {
@@ -123,15 +125,22 @@ async function installSecurityRoutes(page: Page, mode: SecurityMode): Promise<Br
     state.enrollmentBodies.push(parseRequestBody(route));
     if (mode === "replay" && state.enrollmentCalls > 1) return json(route, { error: { code: "replayed", message: "Recent authentication has already been consumed" } }, 403);
     return json(route, {
-      request_id: "69999999-9999-4999-8999-999999999999",
       enrollment: {
+        version: 2,
+        proof_version: 2,
         enrollment_id: "78888888-8888-4888-8888-888888888888",
         device_id: "41111111-1111-4111-8111-111111111111",
         label: String(state.enrollmentBodies.at(-1)?.label ?? "E2E Mac"),
         platform: "macos",
         organization_id: ORGANIZATION_ID,
         expires_at: ACTIVE_EXPIRES_AT,
+        challenge_id: "78888888-8888-4888-8888-888888888888",
+        nonce: CHALLENGE,
+        challenge: { challenge_id: "78888888-8888-4888-8888-888888888888", nonce: CHALLENGE, expires_at: ACTIVE_EXPIRES_AT, candidate_id: ENROLLMENT_CANDIDATE, device_key_fingerprint: ENROLLMENT_FINGERPRINT },
+        candidate_binding: { version: 1, enrollment_id: "78888888-8888-4888-8888-888888888888", organization_id: ORGANIZATION_ID, device_id: "41111111-1111-4111-8111-111111111111", candidate_id: ENROLLMENT_CANDIDATE, artifact_sha256: "c".repeat(64), source_commit: "d".repeat(40), team_id: "APPLETEAM1", device_key_fingerprint: ENROLLMENT_FINGERPRINT, expires_at: ACTIVE_EXPIRES_AT },
         credential: ENROLLMENT_SECRET,
+        possession_receipt_verification: { key_id: "possession-e2e", algorithm: "ed25519", public_key: "-----BEGIN PUBLIC KEY-----\ne2e\n-----END PUBLIC KEY-----" },
+        endpoint: "/v1/enrollments/78888888-8888-4888-8888-888888888888",
       },
     }, 201);
   });
@@ -198,6 +207,8 @@ test("fails closed when the server replays the same recent-auth proof", async ({
   await openSetup(page);
   const label = page.getByLabel("端末名");
   await label.fill("Replay E2E Mac");
+  await page.getByLabel("リリース候補ID").fill(ENROLLMENT_CANDIDATE);
+  await page.getByLabel("端末キーのフィンガープリント").fill(ENROLLMENT_FINGERPRINT);
   const issue = page.getByRole("button", { name: "Touch ID/パスキー確認", exact: true });
 
   await issue.click();
@@ -209,7 +220,7 @@ test("fails closed when the server replays the same recent-auth proof", async ({
   await expect(page.getByRole("alert")).toContainText("登録情報を発行できませんでした");
   expect(state.enrollmentCalls).toBe(2);
   expect(state.enrollmentRecentAuth).toEqual([AUTHORIZATION_ID, AUTHORIZATION_ID]);
-  expect(state.enrollmentBodies).toEqual([{ label: "Replay E2E Mac", platform: "macos", ttl_ms: 600000 }, { label: "Replay E2E Mac", platform: "macos", ttl_ms: 600000 }]);
+  expect(state.enrollmentBodies).toEqual([{ proof_version: 2, candidate_id: ENROLLMENT_CANDIDATE, device_key_fingerprint: ENROLLMENT_FINGERPRINT, label: "Replay E2E Mac", platform: "macos", ttl_ms: 600000 }, { proof_version: 2, candidate_id: ENROLLMENT_CANDIDATE, device_key_fingerprint: ENROLLMENT_FINGERPRINT, label: "Replay E2E Mac", platform: "macos", ttl_ms: 600000 }]);
   await assertNoBrowserStorageSecret(page, ENROLLMENT_SECRET);
   await assertNoBrowserStorageSecret(page, AUTHORIZATION_ID);
 });
@@ -221,6 +232,8 @@ test("fails closed when the virtual authenticator has lost the credential", asyn
   await removeCredential(authenticator);
   await openSetup(page);
   await page.getByLabel("端末名").fill("Lost Credential E2E Mac");
+  await page.getByLabel("リリース候補ID").fill(ENROLLMENT_CANDIDATE);
+  await page.getByLabel("端末キーのフィンガープリント").fill(ENROLLMENT_FINGERPRINT);
   await page.getByRole("button", { name: "Touch ID/パスキー確認", exact: true }).click();
   await expect(page.getByRole("alert")).toContainText("Touch ID/パスキー確認を完了できませんでした");
   expect(state.authenticationOptionsCalls).toBe(1);

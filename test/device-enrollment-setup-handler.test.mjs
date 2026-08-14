@@ -54,6 +54,7 @@ function possessionReceipt(key, receiptSigner, binding) {
 function invitation(key, credential, receiptSigner) {
   const binding = candidateBinding(key);
   return {
+    version: 2,
     proof_version: 2,
     enrollment_id: enrollmentId,
     organization_id: organizationId,
@@ -196,6 +197,10 @@ test("rejects legacy invitations and unsafe enrollment bases before mutation", a
   const common = commonOptions({ device, receiptSigner, credential, fetchImpl: async () => new Response("", { status: 401 }) });
   const legacy = { enrollment_id: enrollmentId, organization_id: organizationId, device_id: deviceId, label: "Build Mac", credential };
   assert.throws(() => createDeviceEnrollmentSetupHandler({ ...common, invitation: legacy }), (error) => error.code === "INVALID_ENROLLMENT_INVITATION");
+  const canonical = invitation(device, credential, receiptSigner);
+  const { version: _missingVersion, ...missingVersion } = canonical;
+  assert.throws(() => createDeviceEnrollmentSetupHandler({ ...common, invitation: missingVersion }), (error) => error.code === "INVALID_ENROLLMENT_INVITATION");
+  assert.throws(() => createDeviceEnrollmentSetupHandler({ ...common, invitation: { ...canonical, version: 1 } }), (error) => error.code === "INVALID_ENROLLMENT_INVITATION");
   const credentialed = createDeviceEnrollmentSetupHandler({ ...common, baseUrl: "https://user:pass@api.example.test/v1" });
   await assert.rejects(() => credentialed(context()), (error) => error.code === "INVALID_ENROLLMENT_INVITATION" || error.code === "ERR_DEVICE_ENROLLMENT_URL");
   const wrongPath = createDeviceEnrollmentSetupHandler({ ...common, baseUrl: "https://api.example.test/api" });

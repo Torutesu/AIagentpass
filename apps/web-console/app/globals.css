@@ -1517,6 +1517,14 @@ a:focus-visible {
   }
 }
 .enrollment-result { margin-top: 1.25rem; padding: 1rem; border: 1px solid var(--line, #d8ddd9); border-radius: 12px; background: #f7faf8; }
+.enrollment-progress { margin-top: 1.25rem; padding: 1rem; border: 1px solid var(--line, #d8ddd9); border-radius: 12px; background: #fbfcfb; }
+.enrollment-steps { display: grid; gap: .65rem; margin: 1rem 0; padding: 0; list-style: none; }
+.enrollment-steps li { display: grid; gap: .15rem; grid-template-columns: 10rem 1fr; padding: .65rem .75rem; border-left: 3px solid var(--line-strong, #b8c0ba); background: #fff; color: var(--ink-soft, #59645e); }
+.enrollment-steps li[data-state="pending"] { border-left-color: #b98228; }
+.enrollment-steps li[data-state="enrolled"] { border-left-color: #4d8b62; }
+.enrollment-steps li[data-state="recovery-proven"] { border-left-color: var(--line-strong, #b8c0ba); }
+.enrollment-steps strong { color: var(--ink, #172019); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+.field-help { display: block; margin-top: .35rem; color: var(--ink-soft, #59645e); font-size: .82rem; }
 .secret-output { max-height: 18rem; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; padding: 1rem; border-radius: 8px; background: #132019; color: #e8fff0; font-size: .78rem; line-height: 1.55; }
 .command-hint { display: block; margin-top: .8rem; overflow-wrap: anywhere; color: #46534a; }
 .form-error { margin-top: .8rem; color: #a52222; font-weight: 650; }

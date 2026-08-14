@@ -1,6 +1,6 @@
 # AgentPass
 
-The agent platform's implementation-level security and product design is documented in [docs/DETAILED_DESIGN.md](docs/DETAILED_DESIGN.md); the concise component contract is in [docs/AGENT_PLATFORM_ARCHITECTURE.md](docs/AGENT_PLATFORM_ARCHITECTURE.md). The active process-bound implementation sequence is in [docs/PROCESS_BOUND_AGENT_IMPLEMENTATION_PLAN.md](docs/PROCESS_BOUND_AGENT_IMPLEMENTATION_PLAN.md), and the signed-macOS qualification status/runbook is in [docs/AGENT_SESSION_N3E_PHYSICAL_QUALIFICATION.md](docs/AGENT_SESSION_N3E_PHYSICAL_QUALIFICATION.md).
+The current production execution order and exit gates are in [docs/V1_EXECUTION_PLAN.md](docs/V1_EXECUTION_PLAN.md). The implementation-level security and product design is documented in [docs/DETAILED_DESIGN.md](docs/DETAILED_DESIGN.md); the concise component contract is in [docs/AGENT_PLATFORM_ARCHITECTURE.md](docs/AGENT_PLATFORM_ARCHITECTURE.md). The active process-bound implementation sequence is in [docs/PROCESS_BOUND_AGENT_IMPLEMENTATION_PLAN.md](docs/PROCESS_BOUND_AGENT_IMPLEMENTATION_PLAN.md), and the signed-macOS qualification status/runbook is in [docs/AGENT_SESSION_N3E_PHYSICAL_QUALIFICATION.md](docs/AGENT_SESSION_N3E_PHYSICAL_QUALIFICATION.md).
 
 AgentPass is an OSS policy broker for coding-agent operations. It keeps signing keys in the platform security boundary and gives an agent permission to perform a narrowly scoped operation, rather than handing the agent a secret.
 
@@ -63,7 +63,7 @@ agentpass doctor --client claude-code --project "$PWD" --team-id 'APPLETEAM1'
 
 `setup status` reads the crash-resumable setup journal and reports the next durable action; the macOS onboarding window renders this same fail-closed status contract. `setup continue --execute` advances exactly one verified journal state. It registers the Service Management daemon and then uses the signed, root-only native bootstrap primitives to stage and activate the generation-1 approval, Git-signing, and audit keys. At device enrollment, the short-lived credential is accepted only through bounded stdin; a fixed Secure Enclave P-256 key signs the exact enrollment request and credential digest. The credential is never written to config, logs, results, or journal evidence.
 
-`enrollment.json` may be the exact canonical response returned by `POST /v1/organizations/{organization_id}/device-enrollments`, or its nested `enrollment` object. It must contain `enrollment_id`, `organization_id`, `device_id`, `label`, and the one-time `credential`; do not paste the credential into argv, an environment variable, a repository, or shell history. Enrollment issuance requires an admin/owner session plus a recent WebAuthn assertion.
+`enrollment.json` may be the exact canonical response returned by `POST /v1/organizations/{organization_id}/device-enrollments`, or its nested `enrollment` object. Setup accepts only the complete v2 document: it binds the protocol version, tenant, enrollment/device IDs, release candidate, Secure Enclave P-256 key fingerprint, challenge, expiry, endpoint, and public possession-receipt verification key. Do not paste its one-time credential into argv, an environment variable, URL, repository, or shell history. Enrollment issuance requires an Owner/Admin session plus operation-bound recent WebAuthn authorization.
 
 Native bootstrap requires the root-owned `/Library/Application Support/AgentPass/native-service.json` and policy from the release configuration. Device enrollment atomically provisions the pinned ControlBundle v2 trust into that root-owned configuration, restarts the service, and requires an authenticated first refresh before its journal state advances. The final editor check is read-only and setup completes only after `git verify-commit` accepts the current full commit hash. A hosted Control Plane and physical-Mac release qualification remain separate work.
 
@@ -292,7 +292,7 @@ Protected native sessions require human presence only when `agentpass session st
 
 See [THREAT_MODEL.md](THREAT_MODEL.md) for the exact security boundary and remaining same-user limitations.
 
-The detailed delivery order, acceptance gates, external blockers, and production definition of done are maintained in [docs/IMPLEMENTATION_ROADMAP.md](docs/IMPLEMENTATION_ROADMAP.md).
+The authoritative delivery order, acceptance gates, external blockers, and production definition of done are maintained in [docs/V1_EXECUTION_PLAN.md](docs/V1_EXECUTION_PLAN.md). [docs/IMPLEMENTATION_ROADMAP.md](docs/IMPLEMENTATION_ROADMAP.md) retains the earlier milestone breakdown.
 
 ## License
 

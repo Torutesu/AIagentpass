@@ -35,7 +35,7 @@ test("main CI validates the machine-readable contract inventory before product t
 test("native qualification is serialized at the top level", () => {
   assert.equal(
     packageManifest.scripts["test:native"],
-    "swift test --package-path native/macos --no-parallel",
+    "node scripts/ci/run-native-tests.mjs -- swift test --package-path native/macos --no-parallel",
   );
-  assert.match(job("test"), /- run: npm run test:native(?:\n|$)/u);
+  assert.match(job("test"), /run: npm run test:native(?:\n|$)/u);
 });

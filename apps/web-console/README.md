@@ -27,7 +27,7 @@ Deploy this console only on a hosting path that injects SIWC identity headers af
 - Platform-verified SIWC establishes the upstream identity; Cloud resolves the immutable provider/subject membership.
 - Production session bootstrap uses a server-only Ed25519 assertion header; the browser never receives the assertion or a Cloud bearer token.
 - The bridge enforces same-origin requests, strict request schemas, bounded responses, no redirects, and `no-store` caching.
-- Device enrollment requires a recent WebAuthn proof, forwards it only to the enrollment endpoint, and returns the one-time credential through a separately validated `no-store` response. The UI keeps that response only in React memory; reload or “表示を消す” removes it.
+- Device enrollment requires a recent WebAuthn proof, forwards it only to the enrollment endpoint, and returns the strict v2 invitation through a separately validated `no-store` response. The invitation is bound to a release candidate and P-256 device-key fingerprint; the UI keeps it only in ephemeral component memory. Reload or “表示を消す” removes the credential-bearing handoff.
 - Emergency stop, revocation, policy, device, agent, capability, and audit operations all persist in the Cloud API; the UI has no shadow state.
 
 ### Activity pagination limits
@@ -38,7 +38,7 @@ To bound the resulting repeated-head work and protect availability from a hostil
 
 ## Enroll a Mac
 
-Open **セットアップ → Macを安全に追加**, enter a device label and the recent-auth proof issued by the configured identity layer, then issue the ten-minute enrollment. Copy the displayed JSON once and pass it to the CLI through stdin; never put it in argv, an environment variable, a repository, or shell history.
+Open **セットアップ → Macを安全に追加**, enter the device label, release candidate ID, and the P-256 device-key fingerprint prepared by the Mac setup flow. Complete the browser-native step-up, issue the ten-minute v2 invitation, and copy the displayed JSON once. Pass it to the CLI through stdin; never put it in argv, an environment variable, a repository, URL query, or shell history.
 
 ```bash
 agentpass setup continue --execute \

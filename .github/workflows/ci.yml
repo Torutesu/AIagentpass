@@ -179,7 +179,10 @@ jobs:
       - run: npm test --prefix apps/web-console
       - run: npm run lint --prefix apps/web-console
       - run: npm audit --prefix apps/web-console --audit-level=high
-      - run: npm run test:native
+      - name: Run bounded native unit tests
+        env:
+          NATIVE_TEST_TIMEOUT_MS: 900000
+        run: npm run test:native
       - run: npm run test:native-app
       - run: npm run test:native-installer-preservation
       - run: npm run test:native-durability-model

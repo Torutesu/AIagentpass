@@ -439,6 +439,63 @@ test("v2 client pins the pathname, sends candidate and nonce, and enforces P-256
   assert.throws(() => createDeviceEnrollmentClient({ ...input(ed, { deviceKey: { algorithm: "ed25519", spkiPem: ed.publicPem }, keyFingerprint: fingerprint(ed) }), proofVersion: 2, qualification: "p256-sha256", challengeId: CHALLENGE_ID, challengeNonce: CHALLENGE_NONCE, candidateBinding: candidate(ed), signer: signWith(ed, "ed25519"), fetchImpl: async () => jsonResponse(enrolledResponse(ed)) }), (error) => error.code === DEVICE_ENROLLMENT_ERRORS.INVALID_CONFIG);
 });
 
+test("does not turn a received HTTP failure into response-loss recovery", async () => {
+  const pair = keys();
+  const receiptPair = keys("ed25519");
+  let gets = 0;
+  let posts = 0;
+  const client = createDeviceEnrollmentClient({
+    ...input(pair),
+    proofVersion: 2,
+    qualification: "p256-sha256",
+    challengeId: CHALLENGE_ID,
+    challengeNonce: CHALLENGE_NONCE,
+    candidateBinding: candidate(pair),
+    possessionReceiptPublicKey: receiptPair.publicPem,
+    possessionReceiptKeyId: "receipt-key-v1",
+    signer: signWith(pair),
+    fetchImpl: async (_url, init) => {
+      if (init.method === "GET") { gets += 1; return new Response("", { status: 401 }); }
+      posts += 1;
+      return new Response("{}", { status: 400 });
+    }
+  });
+  await assert.rejects(() => client.enroll(), (error) => error.code === DEVICE_ENROLLMENT_ERRORS.HTTP);
+  assert.equal(gets, 1);
+  assert.equal(posts, 1);
+  assert.equal(client.status(), "failed");
+});
+
+test("reconciles an unusable 201 response without replaying the POST", async () => {
+  const pair = keys();
+  const receiptPair = keys("ed25519");
+  const receipt = possessionReceipt(pair, receiptPair);
+  let posts = 0;
+  let gets = 0;
+  const client = createDeviceEnrollmentClient({
+    ...input(pair),
+    proofVersion: 2,
+    qualification: "p256-sha256",
+    challengeId: CHALLENGE_ID,
+    challengeNonce: CHALLENGE_NONCE,
+    candidateBinding: candidate(pair),
+    possessionReceiptPublicKey: receiptPair.publicPem,
+    possessionReceiptKeyId: receipt.key_id,
+    signer: signWith(pair),
+    fetchImpl: async (_url, init) => {
+      if (init.method === "GET") {
+        gets += 1;
+        return gets === 1 ? new Response("", { status: 401 }) : jsonResponse({ request_id: "receipt-malformed-201", receipt }, 200);
+      }
+      posts += 1;
+      return new Response("not-json", { status: 201 });
+    }
+  });
+  await assert.rejects(() => client.enroll(), (error) => error.code === DEVICE_ENROLLMENT_ERRORS.RECOVERY_PROVEN);
+  assert.equal(posts, 1);
+  assert.equal(gets, 2);
+});
+
 test("does not retry a response-loss POST and recovers only through a bound receipt", async () => {
   const pair = keys();
   const receiptPair = keys("ed25519");

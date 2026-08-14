@@ -24,7 +24,7 @@ import { createDeviceEnrollmentSetupHandler } from "../lib/device-enrollment-set
 import { parseControlBundleJson } from "../lib/control-bundle-v2.mjs";
 import { executeProductionUninstall, planProductionUninstall } from "../lib/platform-uninstall.mjs";
 import { runUserStatePurge } from "../lib/platform-user-purge.mjs";
-import { publicSetupFailure, publicSetupResult, readHeadlessOnboarding } from "../lib/headless-onboarding.mjs";
+import { parseEnrollmentInvitation, publicSetupFailure, publicSetupResult, readHeadlessOnboarding, validateHeadlessEnrollmentBaseUrl } from "../lib/headless-onboarding.mjs";
 import { createSetupOrchestrator } from "../lib/setup-orchestrator.mjs";
 import { TEST_COMMIT_VERIFICATION_MARKER, createCompleteSetupHandler, createEditorConnectedHandler, createTestCommitVerifiedHandler } from "../lib/setup-finalization-handlers.mjs";
 import { SETUP_STATES, SetupJournalError, createSetupJournal, loadSetupJournal } from "../lib/setup-journal.mjs";
@@ -214,33 +214,7 @@ function readEnrollmentInvitationStdin() {
     chunks.push(chunk.subarray(0, count));
   }
   const parsed = parseControlBundleJson(Buffer.concat(chunks), { maxBytes: 16 * 1024, maxDepth: 8 });
-  const value = parsed?.enrollment ?? parsed;
-  if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("Enrollment invitation is invalid");
-  const allowed = new Set(["proof_version", "enrollment_id", "organization_id", "device_id", "label", "platform", "candidate_binding", "challenge_id", "nonce", "expires_at", "challenge", "credential", "endpoint", "possession_receipt_verification"]);
-  if (Object.keys(value).length !== allowed.size || Object.keys(value).some((key) => !allowed.has(key))) throw new Error("Enrollment invitation contains unknown or missing fields");
-  const invitation = {
-    proof_version: value.proof_version,
-    enrollment_id: value.enrollment_id,
-    organization_id: value.organization_id,
-    device_id: value.device_id,
-    label: value.label,
-    platform: value.platform,
-    candidate_binding: value.candidate_binding,
-    challenge_id: value.challenge_id,
-    nonce: value.nonce,
-    expires_at: value.expires_at,
-    challenge: value.challenge,
-    credential: value.credential,
-    endpoint: value.endpoint,
-    possession_receipt_verification: value.possession_receipt_verification
-  };
-  if (invitation.proof_version !== 2 || [invitation.enrollment_id, invitation.organization_id, invitation.device_id, invitation.label, invitation.platform, invitation.challenge_id, invitation.nonce, invitation.expires_at, invitation.credential, invitation.endpoint].some((item) => typeof item !== "string" || item.length === 0)
-    || !invitation.candidate_binding || typeof invitation.candidate_binding !== "object" || Array.isArray(invitation.candidate_binding)
-    || !invitation.challenge || typeof invitation.challenge !== "object" || Array.isArray(invitation.challenge)
-    || !invitation.possession_receipt_verification || typeof invitation.possession_receipt_verification !== "object" || Array.isArray(invitation.possession_receipt_verification)) {
-    throw new Error("Enrollment invitation is missing a required v2 field");
-  }
-  return invitation;
+  return parseEnrollmentInvitation(parsed);
 }
 
 async function continueNativeSetup() {
@@ -254,6 +228,7 @@ async function continueNativeSetup() {
   if (process.getuid?.() === 0) throw new Error("Run setup as the interactive user, not root");
   const config = loadConfig();
   const enrollmentInvitation = flags.enrollmentStdin ? readEnrollmentInvitationStdin() : undefined;
+  const enrollmentBaseUrl = flags.enrollmentUrl === undefined ? undefined : validateHeadlessEnrollmentBaseUrl(flags.enrollmentUrl);
   if ((journal.status().state === "service_keys_activated") !== Boolean(enrollmentInvitation)) throw new Error("At service_keys_activated, pipe the canonical enrollment invitation with --enrollment-url URL --enrollment-stdin");
   const teamId = config.native_broker?.team_id;
   if (typeof teamId !== "string") throw new Error("Native bridge configuration has no pinned Apple Team ID; rerun agentpass setup --team-id TEAMID");
@@ -319,7 +294,7 @@ async function continueNativeSetup() {
         return { status: "enabled", control_refreshed: true };
       },
       invitation: enrollmentInvitation,
-      baseUrl: flags.enrollmentUrl,
+      baseUrl: enrollmentBaseUrl,
       loadConfig,
       saveConfig
     });

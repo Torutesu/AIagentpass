@@ -539,6 +539,120 @@ test("device enrollment requires and forwards recent auth while returning the cr
   assert.match(payload.enrollment.device_id, /^[0-9a-f-]{36}$/);
 });
 
+test("v2 device enrollment forwards the exact candidate/key binding and returns a strict one-time invitation", async () => {
+  const enrollmentId = "78888888-8888-4888-8888-888888888888";
+  const deviceId = "41111111-1111-4111-8111-111111111111";
+  const candidateId = "candidate-2026-08";
+  const fingerprint = `SHA256:${"f".repeat(43)}`;
+  const nonce = "b".repeat(43);
+  const credential = "a".repeat(43);
+  const candidateBinding = {
+    version: 1,
+    enrollment_id: enrollmentId,
+    organization_id: env.AGENTPASS_ORGANIZATION_ID,
+    device_id: deviceId,
+    candidate_id: candidateId,
+    artifact_sha256: "c".repeat(64),
+    source_commit: "d".repeat(40),
+    team_id: "APPLETEAM1",
+    device_key_fingerprint: fingerprint,
+    expires_at: "2099-01-01T00:10:00.000Z",
+  };
+  const challenge = { challenge_id: enrollmentId, nonce, expires_at: candidateBinding.expires_at, candidate_id: candidateId, device_key_fingerprint: fingerprint };
+  const invitation = {
+    version: 2,
+    proof_version: 2,
+    enrollment_id: enrollmentId,
+    organization_id: env.AGENTPASS_ORGANIZATION_ID,
+    device_id: deviceId,
+    label: "Build Mac v2",
+    platform: "macos",
+    candidate_binding: candidateBinding,
+    challenge_id: enrollmentId,
+    nonce,
+    expires_at: candidateBinding.expires_at,
+    challenge,
+    credential,
+    possession_receipt_verification: {
+      key_id: "possession-v1",
+      algorithm: "ed25519",
+      public_key: "-----BEGIN PUBLIC KEY-----\npublic\n-----END PUBLIC KEY-----",
+    },
+    endpoint: `/v1/enrollments/${enrollmentId}`,
+  };
+  let forwarded;
+  const api = authenticatedApi({ fetchImpl: async (url, init) => {
+    forwarded = { url: String(url), init };
+    return response({ enrollment: invitation }, 201);
+  } });
+  const body = { proof_version: 2, candidate_id: candidateId, device_key_fingerprint: fingerprint, label: "Build Mac v2", platform: "macos", ttl_ms: 600_000 };
+  const result = await api.handle(request("/api/console?operation=device.enrollment.issue", {
+    method: "POST",
+    headers: { "content-type": "application/json", "cookie": sessionCookie, "agentpass-csrf": "c".repeat(43), "idempotency-key": "device-enrollment-v2-01", "agentpass-recent-auth": "webauthn-proof-abcdefghijklmnopqrstuvwxyz" },
+    body: JSON.stringify(body),
+  }));
+  assert.equal(result.status, 201);
+  assert.equal(result.headers.get("cache-control"), "no-store, max-age=0");
+  assert.equal(forwarded.url, `https://cloud.example.test/v1/organizations/${env.AGENTPASS_ORGANIZATION_ID}/device-enrollments`);
+  assert.deepEqual(JSON.parse(forwarded.init.body), body);
+  assert.equal(forwarded.init.headers.get("agentpass-recent-auth"), "webauthn-proof-abcdefghijklmnopqrstuvwxyz");
+  assert.deepEqual(await result.json(), { enrollment: invitation });
+});
+
+test("v2 device enrollment rejects tenant drift, unknown receipt fields, and replay without forwarding secrets", async () => {
+  const credential = "a".repeat(43);
+  const fingerprint = `SHA256:${"f".repeat(43)}`;
+  const base = {
+    version: 2,
+    proof_version: 2,
+    enrollment_id: "78888888-8888-4888-8888-888888888888",
+    organization_id: env.AGENTPASS_ORGANIZATION_ID,
+    device_id: "41111111-1111-4111-8111-111111111111",
+    label: "Build Mac v2",
+    platform: "macos",
+    candidate_binding: {
+      version: 1,
+      enrollment_id: "78888888-8888-4888-8888-888888888888",
+      organization_id: env.AGENTPASS_ORGANIZATION_ID,
+      device_id: "41111111-1111-4111-8111-111111111111",
+      candidate_id: "candidate-2026-08",
+      artifact_sha256: "c".repeat(64),
+      source_commit: "d".repeat(40),
+      team_id: "APPLETEAM1",
+      device_key_fingerprint: fingerprint,
+      expires_at: "2099-01-01T00:10:00.000Z",
+    },
+    challenge_id: "78888888-8888-4888-8888-888888888888",
+    nonce: "b".repeat(43),
+    expires_at: "2099-01-01T00:10:00.000Z",
+    challenge: { challenge_id: "78888888-8888-4888-8888-888888888888", nonce: "b".repeat(43), expires_at: "2099-01-01T00:10:00.000Z", candidate_id: "candidate-2026-08", device_key_fingerprint: fingerprint },
+    credential,
+    possession_receipt_verification: { key_id: "possession-v1", algorithm: "ed25519", public_key: "-----BEGIN PUBLIC KEY-----\npublic\n-----END PUBLIC KEY-----" },
+    endpoint: "/v1/enrollments/78888888-8888-4888-8888-888888888888",
+  };
+  for (const mutate of [
+    (value) => ({ ...value, organization_id: "99999999-9999-4999-8999-999999999999" }),
+    (value) => ({ ...value, possession_receipt_verification: { ...value.possession_receipt_verification, secret: "must-not-leak" } }),
+    (value) => ({ ...value, candidate_binding: { ...value.candidate_binding, device_key_fingerprint: `SHA256:${"x".repeat(43)}` } }),
+    (value) => ({
+      ...value,
+      candidate_binding: { ...value.candidate_binding, candidate_id: "attacker-release", device_key_fingerprint: `SHA256:${"x".repeat(43)}` },
+      challenge: { ...value.challenge, candidate_id: "attacker-release", device_key_fingerprint: `SHA256:${"x".repeat(43)}` },
+    }),
+  ]) {
+    const api = authenticatedApi({ fetchImpl: async () => response({ enrollment: mutate(base) }, 201) });
+    const result = await api.handle(request("/api/console?operation=device.enrollment.issue", {
+      method: "POST",
+      headers: { "content-type": "application/json", "cookie": sessionCookie, "agentpass-csrf": "c".repeat(43), "idempotency-key": "device-enrollment-v2-invalid", "agentpass-recent-auth": "webauthn-proof-abcdefghijklmnopqrstuvwxyz" },
+      body: JSON.stringify({ proof_version: 2, candidate_id: "candidate-2026-08", device_key_fingerprint: fingerprint, label: "Build Mac v2", platform: "macos", ttl_ms: 600_000 }),
+    }));
+    assert.equal(result.status, 502);
+    const text = await result.text();
+    assert.match(text, /cloud_api_invalid_response/);
+    assert.doesNotMatch(text, /must-not-leak|credential|nonce/);
+  }
+});
+
 test("capability reads expose only tenant-bound lifecycle metadata, never signed authority", async () => {
   const capability = {
     version: 1,

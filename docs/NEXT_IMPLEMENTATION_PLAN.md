@@ -1,5 +1,9 @@
 # AgentPass next implementation plan
 
+> Current execution order and release gates are maintained in
+> [`V1_EXECUTION_PLAN.md`](./V1_EXECUTION_PLAN.md). This document retains the
+> deeper historical work-package record.
+
 Status: active  
 Baseline: `codex/agent-platform`
 Planning date: 2026-08-14

@@ -18,6 +18,21 @@ const SAFE_ERROR_CODE = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$/;
 const SENSITIVE_KEY = /(?:authorization|bearer|cookie|credential|password|private[_-]?key|refresh[_-]?token|secret|session[_-]?token|access[_-]?token|api[_-]?token)/i;
 const RFC3339_UTC = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?Z$/;
 const STABLE_REASON = /^[a-z][a-z0-9._-]{0,127}$/;
+const ENROLLMENT_CANDIDATE_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
+const ENROLLMENT_DEVICE_FINGERPRINT = /^SHA256:[A-Za-z0-9_-]{43}$/;
+const ENROLLMENT_BASE64URL_32 = /^[A-Za-z0-9_-]{43}$/;
+const UUID_V4 = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+const V2_CANDIDATE_BINDING_FIELDS = [
+  "version", "enrollment_id", "organization_id", "device_id", "candidate_id",
+  "artifact_sha256", "source_commit", "team_id", "device_key_fingerprint", "expires_at",
+];
+const V2_CHALLENGE_FIELDS = ["challenge_id", "nonce", "expires_at", "candidate_id", "device_key_fingerprint"];
+const V2_RECEIPT_VERIFICATION_FIELDS = ["key_id", "algorithm", "public_key"];
+const V2_ENROLLMENT_FIELDS = [
+  "version", "proof_version", "enrollment_id", "organization_id", "device_id", "label", "platform",
+  "candidate_binding", "challenge_id", "nonce", "expires_at", "challenge", "credential",
+  "possession_receipt_verification", "endpoint",
+];
 const DEVICE_REFRESH_STATES = new Set(["pending", "fetching", "applied", "blocked", "stale", "offline", "revoked"]);
 const DEVICE_REFRESH_REQUEST_STATUSES = new Set(["accepted", "coalesced", "no_pending_refresh"]);
 const DEVICE_RESPONSE_FIELDS = new Set([
@@ -895,14 +910,28 @@ async function postOperation(query, body, idempotencyKey, config, fetchImpl, opt
     }
     const enrollmentId = crypto.randomUUID();
     const deviceId = crypto.randomUUID();
-    const result = await cloudRequest("POST", "/device-enrollments", {
-      enrollment_id: enrollmentId,
-      device_id: deviceId,
-      label: input.label,
-      platform: input.platform,
-      ttl_ms: input.ttl_ms,
-    }, config, fetchImpl, options, idempotencyKey, true, { "agentpass-recent-auth": recentAuth }, true);
-    return { status: result.status, body: allowOneTimeEnrollment(result.body, input, config), oneTimeEnrollment: true };
+    const issueBody = input.proof_version === 2
+      ? {
+        proof_version: 2,
+        candidate_id: input.candidate_id,
+        device_key_fingerprint: input.device_key_fingerprint,
+        label: input.label,
+        platform: input.platform,
+        ttl_ms: input.ttl_ms,
+      }
+      : {
+        enrollment_id: enrollmentId,
+        device_id: deviceId,
+        label: input.label,
+        platform: input.platform,
+        ttl_ms: input.ttl_ms,
+      };
+    const result = await cloudRequest("POST", "/device-enrollments", issueBody, config, fetchImpl, options, idempotencyKey, true, { "agentpass-recent-auth": recentAuth }, true);
+    return {
+      status: result.status,
+      body: input.proof_version === 2 ? allowOneTimeEnrollmentV2(result.body, input, config) : allowOneTimeEnrollment(result.body, input, config),
+      oneTimeEnrollment: true,
+    };
   }
   if (operation === "create-agent") {
     const agent = validateAgentBody(body);
@@ -1034,12 +1063,24 @@ function validateDeviceBody(value) {
 
 function validateDeviceEnrollmentBody(value) {
   const body = plainObject(value);
-  exactKeys(body, ["label", "platform", "ttl_ms"], "device_enrollment");
+  if (body.proof_version === 2) {
+    exactKeys(body, ["proof_version", "candidate_id", "device_key_fingerprint", "label", "platform", "ttl_ms"], "device_enrollment_v2");
+    if (!ENROLLMENT_CANDIDATE_ID.test(body.candidate_id ?? "") || !ENROLLMENT_DEVICE_FINGERPRINT.test(body.device_key_fingerprint ?? "")) {
+      throw new ConsoleApiError(400, "invalid_json_schema", "Request JSON does not match the schema");
+    }
+  } else {
+    exactKeys(body, ["label", "platform", "ttl_ms"], "device_enrollment");
+  }
   const platform = body.platform === undefined ? "macos" : boundedString(body.platform, "device_enrollment.platform", 32, true);
   if (platform !== "macos" || !Number.isSafeInteger(body.ttl_ms) || body.ttl_ms < 60_000 || body.ttl_ms > 24 * 60 * 60 * 1000) {
     throw new ConsoleApiError(400, "invalid_json_schema", "Request JSON does not match the schema");
   }
-  return { label: boundedString(body.label, "device_enrollment.label", 128, true), platform, ttl_ms: body.ttl_ms };
+  return {
+    ...(body.proof_version === 2 ? { proof_version: 2, candidate_id: body.candidate_id, device_key_fingerprint: body.device_key_fingerprint } : {}),
+    label: boundedString(body.label, "device_enrollment.label", 128, true),
+    platform,
+    ttl_ms: body.ttl_ms,
+  };
 }
 
 function validateAgentBody(value) {
@@ -1339,6 +1380,60 @@ function allowOneTimeEnrollment(body, input, config) {
     throw new ConsoleApiError(502, "cloud_api_invalid_response", "Cloud API response was invalid");
   }
   return { enrollment: Object.fromEntries(allowed.filter((key) => enrollment[key] !== undefined).map((key) => [key, enrollment[key]])) };
+}
+
+function allowOneTimeEnrollmentV2(body, input, config) {
+  if (!isPlainRecord(body)) throw invalidCloudResponse();
+  const source = body;
+  if (Object.keys(source).length !== 1 || !Object.hasOwn(source, "enrollment")) throw invalidCloudResponse();
+  if (!isPlainRecord(source.enrollment)) throw invalidCloudResponse();
+  const enrollment = source.enrollment;
+  if (Object.keys(enrollment).length !== V2_ENROLLMENT_FIELDS.length || Object.keys(enrollment).some((key) => !V2_ENROLLMENT_FIELDS.includes(key))) throw invalidCloudResponse();
+  if (enrollment.version !== 2 || enrollment.proof_version !== 2 || enrollment.organization_id !== config.organizationId
+    || enrollment.label !== input.label || enrollment.platform !== "macos"
+    || !UUID_V4.test(enrollment.enrollment_id) || !UUID_V4.test(enrollment.device_id)
+    || enrollment.challenge_id !== enrollment.enrollment_id || enrollment.nonce !== enrollment.challenge?.nonce
+    || enrollment.expires_at !== enrollment.challenge?.expires_at
+    || enrollment.endpoint !== `/v1/enrollments/${enrollment.enrollment_id}`
+    || !ENROLLMENT_BASE64URL_32.test(enrollment.credential)
+    || !RFC3339_UTC.test(enrollment.expires_at) || Date.parse(enrollment.expires_at) <= Date.now()) throw invalidCloudResponse();
+  validateV2CandidateBinding(enrollment.candidate_binding, enrollment, input, config);
+  validateV2Challenge(enrollment.challenge, enrollment);
+  if (!isPlainRecord(enrollment.possession_receipt_verification)) throw invalidCloudResponse();
+  const verification = enrollment.possession_receipt_verification;
+  if (Object.keys(verification).length !== V2_RECEIPT_VERIFICATION_FIELDS.length || Object.keys(verification).some((key) => !V2_RECEIPT_VERIFICATION_FIELDS.includes(key))
+    || !["ed25519", "p256-sha256"].includes(verification.algorithm)
+    || typeof verification.key_id !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$/.test(verification.key_id)
+    || typeof verification.public_key !== "string" || verification.public_key.length < 1 || verification.public_key.length > 8192
+    || hasControlCharacters(verification.public_key, true) || /PRIVATE\s+KEY/i.test(verification.public_key)
+    || !verification.public_key.startsWith("-----BEGIN PUBLIC KEY-----")) throw invalidCloudResponse();
+  return { enrollment: enrollmentFromFields(enrollment, V2_ENROLLMENT_FIELDS) };
+}
+
+function validateV2CandidateBinding(value, enrollment, input, config) {
+  if (!isPlainRecord(value)) throw invalidCloudResponse();
+  const binding = value;
+  if (Object.keys(binding).length !== V2_CANDIDATE_BINDING_FIELDS.length || Object.keys(binding).some((key) => !V2_CANDIDATE_BINDING_FIELDS.includes(key))
+    || binding.version !== 1 || binding.enrollment_id !== enrollment.enrollment_id || binding.organization_id !== config.organizationId
+    || binding.device_id !== enrollment.device_id || binding.candidate_id !== input.candidate_id || binding.device_key_fingerprint !== input.device_key_fingerprint
+    || !ENROLLMENT_CANDIDATE_ID.test(binding.candidate_id ?? "")
+    || !/^[0-9a-f]{64}$/.test(binding.artifact_sha256 ?? "") || !/^[0-9a-f]{40}$/.test(binding.source_commit ?? "")
+    || !/^[A-Z0-9]{10}$/.test(binding.team_id ?? "") || !ENROLLMENT_DEVICE_FINGERPRINT.test(binding.device_key_fingerprint ?? "")
+    || binding.expires_at !== enrollment.expires_at || !RFC3339_UTC.test(binding.expires_at)) throw invalidCloudResponse();
+}
+
+function validateV2Challenge(value, enrollment) {
+  if (!isPlainRecord(value)) throw invalidCloudResponse();
+  const challenge = value;
+  if (Object.keys(challenge).length !== V2_CHALLENGE_FIELDS.length || Object.keys(challenge).some((key) => !V2_CHALLENGE_FIELDS.includes(key))
+    || challenge.challenge_id !== enrollment.enrollment_id || challenge.nonce !== enrollment.nonce || challenge.expires_at !== enrollment.expires_at
+    || challenge.candidate_id !== enrollment.candidate_binding.candidate_id
+    || challenge.device_key_fingerprint !== enrollment.candidate_binding.device_key_fingerprint
+    || !ENROLLMENT_BASE64URL_32.test(challenge.nonce)) throw invalidCloudResponse();
+}
+
+function enrollmentFromFields(value, fields) {
+  return Object.fromEntries(fields.map((key) => [key, value[key]]));
 }
 
 function makeOneTimeEnrollmentResponse(status, body) {
