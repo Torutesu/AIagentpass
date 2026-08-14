@@ -231,7 +231,14 @@ export async function startP0BHarness({ env = process.env, repoRoot = REPOSITORY
       AGENTPASS_CLOUD_PROFILE: "hosted",
       AGENTPASS_CLOUD_HOST: LOOPBACK,
       AGENTPASS_CLOUD_PORT: cloudPort,
-      AGENTPASS_CLOUD_BUNDLE_PRIVATE_KEY_PATH: files.bundlePrivateKey,
+      AGENTPASS_CLOUD_CONTROL_BUNDLE_KEY_ID: "p0b-control-bundle-v1",
+      AGENTPASS_CLOUD_CONTROL_BUNDLE_PUBLIC_KEY: files.controlBundlePublicKeyPem,
+      AGENTPASS_CLOUD_CAPABILITY_KEY_ID: "p0b-capability-v1",
+      AGENTPASS_CLOUD_CAPABILITY_PUBLIC_KEY: files.capabilityPublicKeyPem,
+      AGENTPASS_CLOUD_AUDIT_ANCHOR_KEY_ID: "p0b-audit-anchor-v1",
+      AGENTPASS_CLOUD_AUDIT_ANCHOR_PUBLIC_KEY: files.auditAnchorPublicKeyPem,
+      AGENTPASS_CLOUD_PROMOTION_EVIDENCE_KEY_ID: "p0b-promotion-evidence-v1",
+      AGENTPASS_CLOUD_PROMOTION_EVIDENCE_PUBLIC_KEY: files.promotionEvidencePublicKeyPem,
       AGENTPASS_CLOUD_REFRESH_PUBLIC_KEY: files.refreshPublicKeyPem,
       AGENTPASS_CLOUD_REFRESH_TIMEOUT_MS: "5000",
       AGENTPASS_CLOUD_REFRESH_KEY_ID: "p0b-refresh-v1",
@@ -259,6 +266,10 @@ export async function startP0BHarness({ env = process.env, repoRoot = REPOSITORY
       AGENTPASS_KMS_QUALIFICATION_MANIFEST_KEY_RESOURCE: "arn:aws:kms:us-east-1:000000000000:key/p0b-qualification-manifest",
       AGENTPASS_KMS_POSSESSION_RECEIPT_KEY_RESOURCE: "arn:aws:kms:us-east-1:000000000000:key/p0b-possession-receipt",
       AGENTPASS_KMS_REFRESH_HINT_KEY_RESOURCE: "arn:aws:kms:us-east-1:000000000000:key/p0b-refresh-hint",
+      AGENTPASS_KMS_CONTROL_BUNDLE_KEY_RESOURCE: "arn:aws:kms:us-east-1:000000000000:key/p0b-control-bundle",
+      AGENTPASS_KMS_CAPABILITY_KEY_RESOURCE: "arn:aws:kms:us-east-1:000000000000:key/p0b-capability",
+      AGENTPASS_KMS_AUDIT_ANCHOR_KEY_RESOURCE: "arn:aws:kms:us-east-1:000000000000:key/p0b-audit-anchor",
+      AGENTPASS_KMS_PROMOTION_EVIDENCE_KEY_RESOURCE: "arn:aws:kms:us-east-1:000000000000:key/p0b-promotion-evidence",
       AGENTPASS_OWNER_RECOVERY_NOTIFICATION_WEBHOOK_URL: "https://notifications.example.test/owner-recovery",
       AGENTPASS_OWNER_RECOVERY_NOTIFICATION_CONFIRMATION_URL: "https://notifications.example.test/owner-recovery/acceptance",
       AGENTPASS_OWNER_RECOVERY_NOTIFICATION_AUTHORIZATION_PATH: files.ownerRecoveryAuthorization,
@@ -266,6 +277,10 @@ export async function startP0BHarness({ env = process.env, repoRoot = REPOSITORY
       AGENTPASS_OWNER_RECOVERY_NOTIFICATION_BINDING_KEY_VERSION: "1",
       AGENTPASS_OWNER_RECOVERY_NOTIFICATION_BINDING_DIGEST: "a".repeat(64),
       P0B_LIVE_BROWSER: "1",
+      P0B_CONTROL_BUNDLE_PRIVATE_KEY_PATH: files.controlBundlePrivateKey,
+      P0B_CAPABILITY_PRIVATE_KEY_PATH: files.capabilityPrivateKey,
+      P0B_AUDIT_ANCHOR_PRIVATE_KEY_PATH: files.auditAnchorPrivateKey,
+      P0B_PROMOTION_EVIDENCE_PRIVATE_KEY_PATH: files.promotionEvidencePrivateKey,
       P0B_AGENT_SESSION_PRIVATE_KEY_PATH: files.agentSessionPrivateKey,
       P0B_QUALIFICATION_MANIFEST_PRIVATE_KEY_PATH: files.qualificationManifestPrivateKey,
       P0B_POSSESSION_RECEIPT_PRIVATE_KEY_PATH: files.possessionReceiptPrivateKey,
@@ -351,12 +366,18 @@ async function dropDisposableDatabase(baseOptions, databaseName) {
 
 async function createRuntimeFiles(directory) {
   const bundle = crypto.generateKeyPairSync("ed25519");
+  const capability = crypto.generateKeyPairSync("ed25519");
+  const auditAnchor = crypto.generateKeyPairSync("ed25519");
+  const promotionEvidence = crypto.generateKeyPairSync("ed25519");
   const refresh = crypto.generateKeyPairSync("ed25519");
   const identity = crypto.generateKeyPairSync("ed25519");
   const agentSession = crypto.generateKeyPairSync("ed25519");
   const qualificationManifest = crypto.generateKeyPairSync("ed25519");
   const possessionReceipt = crypto.generateKeyPairSync("ed25519");
-  const bundlePrivateKey = path.join(directory, "bundle-private.pem");
+  const controlBundlePrivateKey = path.join(directory, "control-bundle-private.pem");
+  const capabilityPrivateKey = path.join(directory, "capability-private.pem");
+  const auditAnchorPrivateKey = path.join(directory, "audit-anchor-private.pem");
+  const promotionEvidencePrivateKey = path.join(directory, "promotion-evidence-private.pem");
   const refreshPrivateKey = path.join(directory, "refresh-private.pem");
   const identityPublicKey = path.join(directory, "identity-public.pem");
   const agentSessionPrivateKey = path.join(directory, "agent-session-private.pem");
@@ -364,7 +385,10 @@ async function createRuntimeFiles(directory) {
   const possessionReceiptPrivateKey = path.join(directory, "possession-receipt-private.pem");
   const processPolicies = path.join(directory, "agent-session-process-policies.json");
   const ownerRecoveryAuthorization = path.join(directory, "owner-recovery-notification-authorization");
-  await writePrivate(bundlePrivateKey, bundle.privateKey.export({ type: "pkcs8", format: "pem" }));
+  await writePrivate(controlBundlePrivateKey, bundle.privateKey.export({ type: "pkcs8", format: "pem" }));
+  await writePrivate(capabilityPrivateKey, capability.privateKey.export({ type: "pkcs8", format: "pem" }));
+  await writePrivate(auditAnchorPrivateKey, auditAnchor.privateKey.export({ type: "pkcs8", format: "pem" }));
+  await writePrivate(promotionEvidencePrivateKey, promotionEvidence.privateKey.export({ type: "pkcs8", format: "pem" }));
   await writePrivate(refreshPrivateKey, refresh.privateKey.export({ type: "pkcs8", format: "pem" }));
   await fsp.writeFile(identityPublicKey, identity.publicKey.export({ type: "spki", format: "pem" }), { mode: 0o600, flag: "wx" });
   await writePrivate(agentSessionPrivateKey, agentSession.privateKey.export({ type: "pkcs8", format: "pem" }));
@@ -377,8 +401,13 @@ async function createRuntimeFiles(directory) {
   const refreshNonceKey = crypto.randomBytes(32);
   await writePrivate(nonceKeyring, `${JSON.stringify({ version: 1, active_key_id: refreshNonceKeyId, keys: { [refreshNonceKeyId]: refreshNonceKey.toString("base64url") } })}\n`);
   return Object.freeze({
-    bundlePrivateKey, refreshPrivateKey, identityPublicKey, nonceKeyring,
+    controlBundlePrivateKey, capabilityPrivateKey, auditAnchorPrivateKey, promotionEvidencePrivateKey,
+    refreshPrivateKey, identityPublicKey, nonceKeyring,
     agentSessionPrivateKey, qualificationManifestPrivateKey, possessionReceiptPrivateKey, processPolicies, ownerRecoveryAuthorization,
+    controlBundlePublicKeyPem: bundle.publicKey.export({ type: "spki", format: "pem" }).toString(),
+    capabilityPublicKeyPem: capability.publicKey.export({ type: "spki", format: "pem" }).toString(),
+    auditAnchorPublicKeyPem: auditAnchor.publicKey.export({ type: "spki", format: "pem" }).toString(),
+    promotionEvidencePublicKeyPem: promotionEvidence.publicKey.export({ type: "spki", format: "pem" }).toString(),
     agentSessionPublicKeyPem: agentSession.publicKey.export({ type: "spki", format: "pem" }).toString(),
     qualificationManifestPublicKeyPem: qualificationManifest.publicKey.export({ type: "spki", format: "pem" }).toString(),
     possessionReceiptPublicKeyPem: possessionReceipt.publicKey.export({ type: "spki", format: "pem" }).toString(),

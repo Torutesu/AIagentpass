@@ -10,6 +10,22 @@ if (process.env.P0B_LIVE_BROWSER !== "1" || process.env.AGENTPASS_CLOUD_PROFILE 
   throw new Error("P0-B Cloud process is not enabled");
 }
 
+const controlBundleSignerProvider = loadProvider({
+  privateKeyPath: process.env.P0B_CONTROL_BUNDLE_PRIVATE_KEY_PATH,
+  publicKeyPem: process.env.AGENTPASS_CLOUD_CONTROL_BUNDLE_PUBLIC_KEY
+});
+const capabilitySignerProvider = loadProvider({
+  privateKeyPath: process.env.P0B_CAPABILITY_PRIVATE_KEY_PATH,
+  publicKeyPem: process.env.AGENTPASS_CLOUD_CAPABILITY_PUBLIC_KEY
+});
+const auditAnchorSignerProvider = loadProvider({
+  privateKeyPath: process.env.P0B_AUDIT_ANCHOR_PRIVATE_KEY_PATH,
+  publicKeyPem: process.env.AGENTPASS_CLOUD_AUDIT_ANCHOR_PUBLIC_KEY
+});
+const promotionEvidenceSignerProvider = loadProvider({
+  privateKeyPath: process.env.P0B_PROMOTION_EVIDENCE_PRIVATE_KEY_PATH,
+  publicKeyPem: process.env.AGENTPASS_CLOUD_PROMOTION_EVIDENCE_PUBLIC_KEY
+});
 const agentSessionSignerProvider = loadProvider({
   privateKeyPath: process.env.P0B_AGENT_SESSION_PRIVATE_KEY_PATH,
   publicKeyPem: process.env.AGENTPASS_CLOUD_AGENT_SESSION_PUBLIC_KEY
@@ -33,7 +49,11 @@ const runtime = await createCloudRuntime({
   agentSessionSignerProvider,
   qualificationManifestSignerProvider,
   possessionReceiptSignerProvider,
-  refreshHintSignerProvider
+  refreshHintSignerProvider,
+  controlBundleSignerProvider,
+  capabilitySignerProvider,
+  auditAnchorSignerProvider,
+  promotionEvidenceSignerProvider
 });
 await runtime.listen();
 
