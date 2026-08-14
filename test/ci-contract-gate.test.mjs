@@ -5,6 +5,7 @@ import test from "node:test";
 
 const root = path.resolve(import.meta.dirname, "..");
 const workflow = fs.readFileSync(path.join(root, ".github", "workflows", "ci.yml"), "utf8");
+const packageManifest = JSON.parse(fs.readFileSync(path.join(root, "package.json"), "utf8"));
 
 function job(name) {
   const start = workflow.indexOf(`  ${name}:`);
@@ -22,4 +23,12 @@ test("main CI validates the machine-readable contract inventory before product t
   const nodeTests = section.indexOf("- run: npm test");
   assert.ok(install >= 0 && consoleInstall > install && contracts > consoleInstall && nodeTests > contracts);
   assert.equal(section.match(/npm run contracts:validate/g)?.length, 1);
+});
+
+test("native qualification is serialized at the top level", () => {
+  assert.equal(
+    packageManifest.scripts["test:native"],
+    "swift test --package-path native/macos --no-parallel",
+  );
+  assert.match(job("test"), /- run: npm run test:native(?:\n|$)/u);
 });
