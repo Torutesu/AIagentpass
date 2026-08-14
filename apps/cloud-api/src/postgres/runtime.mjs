@@ -1,5 +1,5 @@
 import { Pool } from "pg";
-import { createMigrationRunner } from "./migration-runner.mjs";
+import { createMigrationRunner, loadSqlMigrations } from "./migration-runner.mjs";
 import { createCapabilityAuthorityRepository } from "./capability-authority-repository.mjs";
 import { createPostgresControlPlaneStore } from "./control-plane-store.mjs";
 import { createControlPlaneAuthorityRepository } from "./control-plane-authority-repository.mjs";
@@ -52,25 +52,63 @@ export async function createPostgresRuntime({ env = process.env, PoolClass = Poo
   const capabilityNonceSecret = exactSecret(env.AGENTPASS_CAPABILITY_NONCE_SECRET, "AGENTPASS_CAPABILITY_NONCE_SECRET");
   const config = loadPostgresConfig(env);
   const pool = new PoolClass({ connectionString: config.connectionString, ssl: { rejectUnauthorized: true }, max: config.maxConnections, connectionTimeoutMillis: config.connectionTimeoutMs, idleTimeoutMillis: config.idleTimeoutMs, statement_timeout: config.statementTimeoutMs, lock_timeout: config.lockTimeoutMs, query_timeout: config.statementTimeoutMs + 1_000, allowExitOnIdle: false });
-  const migrationRunner = createMigrationRunner({ client: pool, applicationVersion });
+  let migrationRunner;
+  let migrations;
   let client;
-  try {
-    client = await pool.connect();
-    await client.query("SELECT set_config('statement_timeout', $1, false)", [`${config.statementTimeoutMs}ms`]);
-    await client.query("SELECT set_config('lock_timeout', $1, false)", [`${config.lockTimeoutMs}ms`]);
-    await createMigrationRunner({ client, applicationVersion }).run();
-  } catch (error) {
-    client?.release?.(true);
-    await pool.end().catch(() => {});
-    throw error;
-  }
-  client.release();
-  let closed = false;
-  let closePoolPromise;
+  let migrationClientReleased = false;
+  let poolEndPromise;
   let ownerRecoveryOutboxWorker;
   let ownerRecoveryOutboxRepository;
   let sharedControlMaintenanceWorker;
   let providerOperationMaintenanceWorker;
+  let refreshHintNotifier;
+
+  function releaseMigrationClient(destroy = false) {
+    if (migrationClientReleased) return;
+    migrationClientReleased = true;
+    client?.release?.(destroy);
+  }
+
+  function endPoolOnce() {
+    if (poolEndPromise === undefined) {
+      poolEndPromise = Promise.resolve().then(() => pool.end());
+    }
+    return poolEndPromise;
+  }
+
+  async function cleanupConstructionFailure() {
+    // Cleanup is deliberately best effort: the construction error is the
+    // stable public failure and must never be replaced by a close error.
+    const closers = [
+      [sharedControlMaintenanceWorker, (worker) => worker.close({ timeoutMs: 0 })],
+      [ownerRecoveryOutboxWorker, (worker) => worker.close({ timeout_ms: 0 })],
+      [refreshHintNotifier, (notifier) => notifier.close()],
+      [providerOperationMaintenanceWorker, (worker) => worker.close({ timeoutMs: 0 })]
+    ];
+    for (const [resource, close] of closers) {
+      if (!resource) continue;
+      try { await close(resource); } catch { /* preserve the original construction error */ }
+    }
+    try { releaseMigrationClient(true); } catch { /* preserve the original construction error */ }
+    try { await endPoolOnce(); } catch { /* preserve the original construction error */ }
+  }
+
+  try {
+    migrations = await loadSqlMigrations();
+    migrationRunner = createMigrationRunner({ client: pool, applicationVersion, migrations });
+    client = await pool.connect();
+    await client.query("SELECT set_config('statement_timeout', $1, false)", [`${config.statementTimeoutMs}ms`]);
+    await client.query("SELECT set_config('lock_timeout', $1, false)", [`${config.lockTimeoutMs}ms`]);
+    await createMigrationRunner({ client, applicationVersion, migrations }).run();
+  } catch (error) {
+    await cleanupConstructionFailure();
+    throw error;
+  }
+
+  try {
+    releaseMigrationClient();
+  let closed = false;
+  let closePoolPromise;
   const drainController = createDrainController();
   const operationalMetrics = createOperationalMetrics();
   const providerOperationMaintenanceRepository = createPostgresProviderOperationMaintenanceRepository({ client: pool });
@@ -83,10 +121,11 @@ export async function createPostgresRuntime({ env = process.env, PoolClass = Poo
     repository: providerOperationMaintenanceRepository,
     metrics: operationalMetrics
   });
-  const refreshHintNotifier = createPostgresRefreshHintNotifier({ pool, metrics: operationalMetrics });
+  refreshHintNotifier = createPostgresRefreshHintNotifier({ pool, metrics: operationalMetrics });
   const operationalHealth = createOperationalHealth({
     pool,
     maxConnections: config.maxConnections,
+    expectedSchemaVersion: migrations.at(-1).version,
     migrationStatus: () => migrationRunner.status(),
     metrics: operationalMetrics,
     drainController,
@@ -169,7 +208,6 @@ export async function createPostgresRuntime({ env = process.env, PoolClass = Poo
       publisher: ownerRecoveryPublisher,
       metrics: operationalMetrics
     });
-    if (ownerRecoveryOutboxAutoStart) ownerRecoveryOutboxWorker.start();
   }
   const agentSessionAuthorityRepository = createAgentSessionAuthorityRepository({ client: pool });
   const sharedControlRepository = createSharedControlRepository({ client: pool });
@@ -178,7 +216,6 @@ export async function createPostgresRuntime({ env = process.env, PoolClass = Poo
     repository: sharedControlRepository,
     metrics: operationalMetrics
   });
-  if (sharedControlMaintenanceAutoStart) sharedControlMaintenanceWorker.start();
   const agentSessionConsumptionRepository = createPostgresAgentSessionConsumptionRepository({
     client: pool,
     authorityRepository: agentSessionAuthorityRepository,
@@ -244,11 +281,7 @@ export async function createPostgresRuntime({ env = process.env, PoolClass = Poo
     },
     onAuthorityReduction
   });
-  if (managedSignerProviderOperationMaintenanceAutoStart) {
-    await providerOperationMaintenanceWorker.runOnce();
-    providerOperationMaintenanceWorker.start();
-  }
-  return Object.freeze({
+  const runtime = Object.freeze({
     pool,
     humanRepository: createPostgresHumanRepository({ client: pool, onAuthorityReduction }),
     organizationRepository,
@@ -284,6 +317,17 @@ export async function createPostgresRuntime({ env = process.env, PoolClass = Poo
     drain,
     close
   });
+  if (ownerRecoveryOutboxAutoStart) ownerRecoveryOutboxWorker?.start();
+  if (sharedControlMaintenanceAutoStart) sharedControlMaintenanceWorker.start();
+  if (managedSignerProviderOperationMaintenanceAutoStart) {
+    await providerOperationMaintenanceWorker.runOnce();
+    providerOperationMaintenanceWorker.start();
+  }
+  return runtime;
+  } catch (error) {
+    await cleanupConstructionFailure();
+    throw error;
+  }
 }
 
 function authorityReductionAudit({ organization_id, resource, member_id, actor_member_id, capabilities, reduction, occurred_at }) {

@@ -1,11 +1,20 @@
 # Hosted KMS signer rotation runbook
 
-This runbook applies to the three currently composed hosted Ed25519 signing
-purposes:
+This runbook applies to the closed hosted Ed25519 signing-purpose registry:
 
+- `agentpass.capability`
+- `agentpass.control-bundle`
+- `agentpass.refresh-hint`
+- `device-enrollment-possession-receipt`
 - `agent-session-grant`
 - `qualification-grant-batch-manifest`
-- `device-enrollment-possession-receipt`
+- `agentpass.audit-anchor`
+- `agentpass.promotion-evidence`
+
+Not every authoritative producer is production-enabled merely because its
+purpose is present in the registry. Startup still requires a complete,
+purpose-separated provider configuration, while producer enablement remains
+gated by its own durable issuance ledger and qualification evidence.
 
 The signing private key remains in the remote KMS/HSM. AgentPass receives only a
 pinned public key and a 64-byte signature. The provider boundary must be
@@ -31,20 +40,21 @@ that bound is a release-blocking schema change, never an adapter fallback.
 
 ## Preconditions
 
-Hosted startup requires `AGENTPASS_KMS_PROVIDER=aws|gcp` plus distinct
-`AGENTPASS_KMS_AGENT_SESSION_KEY_RESOURCE` and
-`AGENTPASS_KMS_QUALIFICATION_MANIFEST_KEY_RESOURCE`, and
-`AGENTPASS_KMS_POSSESSION_RECEIPT_KEY_RESOURCE` values. These are remote KMS
-resource identifiers; they are intentionally separate from the logical
-`AGENTPASS_CLOUD_*_KEY_ID` values and their pinned public keys. All three
-resources, logical key IDs, and public-key fingerprints must be distinct. AWS
-uses the standard SDK credential chain; GCP uses Application Default
-Credentials.
+Hosted startup requires `AGENTPASS_KMS_PROVIDER=aws|gcp` and one closed
+configuration entry for every registry purpose. Each entry pins the remote key
+resource/version, logical key ID/version, algorithm, protocol version, and SPKI
+public-key fingerprint. Resources, logical key IDs, and fingerprints must be
+distinct across purposes. These are remote KMS resource identifiers; they are
+never private-key paths. AWS uses the standard SDK credential chain; GCP uses
+Application Default Credentials.
 
-Hosted startup verifies PostgreSQL migration 0037 before constructing any KMS
+Hosted startup verifies the exact PostgreSQL schema before constructing any KMS
 provider. The database lifecycle row is authoritative: an existing key state is
 never overwritten from environment configuration, and a retired, revoked, or
-emergency-disabled active binding keeps readiness closed.
+emergency-disabled active binding keeps readiness closed. Provider-operation
+maintenance also has to be running and fresh; uncertainty, expired started
+claims, excessive backlog, or an overdue maintenance cycle keeps readiness
+closed without exposing operation identifiers or provider diagnostics.
 
 1. Create a new Ed25519 KMS key/version in the same purpose-specific namespace.
 2. Record the key identifier, canonical SPKI public-key fingerprint, algorithm,
@@ -87,6 +97,44 @@ signature -> reply`. A committed retry returns the stored 64-byte signature. A
 pending or uncertain operation must never be blindly re-signed; reconcile it
 only from provider-confirmed exact signature bytes or resolve it through the
 documented operator procedure. A request digest conflict is an integrity event.
+
+## Ambiguous provider outcomes
+
+The AgentPass ledger guarantees one exact verified result is committed and
+returned for a bound operation. It does not claim that direct AWS KMS or Google
+Cloud KMS calls execute exactly once. If the provider accepted a request but its
+response was lost, a later direct call can cause another provider invocation.
+The cryptographic output may be deterministic for Ed25519, but that does not
+turn the remote invocation into an exactly-once operation or create provider
+acceptance evidence.
+
+When readiness reports uncertain provider operations:
+
+1. Stop rotation and configuration changes for the affected purpose. Do not
+   disable an unrelated purpose and do not broaden a workload identity.
+2. Inspect only the bounded deployment-internal summary: state class, closed
+   uncertainty reason, age, purpose, key version, and an opaque case reference.
+   Do not copy request bytes, signature bytes, raw receipts, credentials, or
+   provider error bodies into logs, tickets, metrics, or the browser.
+3. Allow automatic reconciliation only when the low-level stored output exactly
+   matches an already committed high-level result: request digest, key ID,
+   key version, signature, and bounded provider receipt must all agree.
+4. Use provider verification only through a server-side, purpose-bound adapter
+   that can return exact authenticated acceptance evidence. Caller-supplied
+   signatures, receipts, key metadata, or diagnostics are never proof.
+5. A lifecycle-fenced, emergency-disabled, invalid-output, or conflicting
+   operation must not be converted to success. Preserve it as uncertain until
+   the producer-specific authority can reject or adjudicate it atomically.
+6. Never expose the deployment-global provider ledger directly through the
+   organization Console. It is tenant-neutral by design. A Human BFF may expose
+   a case only after an authoritative producer ledger correlates it to exactly
+   one organization and applies role, recent-WebAuthn, CSRF, version, and
+   idempotency checks.
+
+There is intentionally no generic “retry signing” operator action. Providers
+without exact lookup/acceptance proof remain uncertain or require a
+producer-specific terminal decision; operational pressure is not evidence that
+a second signing call is safe.
 
 ## Emergency revoke
 

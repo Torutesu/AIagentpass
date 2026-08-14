@@ -111,6 +111,7 @@ const DIGEST = /^[0-9a-f]{64}$/u;
 const PROVIDER_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$/u;
 const RECEIPT_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/u;
 const BASE64URL = /^[A-Za-z0-9_-]+$/u;
+const CLAIM_TOKEN = /^[A-Za-z0-9._:-]{1,256}$/u;
 const MAX_SIGNATURE_BYTES = 64;
 const OPERATION_FIELDS = Object.freeze([
   "algorithm",
@@ -358,7 +359,7 @@ function normalizeRepositoryRecord(value, operation, maxRequestBytes, { allowCla
     fail(REPOSITORY, "repository operation identity is invalid");
   }
 
-  if (Object.hasOwn(value, "claim_token")) string(value.claim_token, /^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/u, REPOSITORY);
+  if (Object.hasOwn(value, "claim_token")) string(value.claim_token, CLAIM_TOKEN, REPOSITORY);
   const hasSignature = Object.hasOwn(value, "signature");
   const hasReceipt = Object.hasOwn(value, "provider_receipt");
   if (hasSignature !== hasReceipt) fail(REPOSITORY, "repository stored only part of a provider result");
@@ -386,7 +387,7 @@ function normalizeRepositoryRecord(value, operation, maxRequestBytes, { allowCla
 
 function operationInput(operation, claimToken = undefined) {
   if (claimToken === undefined) return operation;
-  string(claimToken, /^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/u, INPUT);
+  string(claimToken, CLAIM_TOKEN, INPUT);
   return Object.freeze({ ...operation, claim_token: claimToken });
 }
 

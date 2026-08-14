@@ -109,6 +109,7 @@ export function createPostgresProviderOperationRepository({
          provider_receipt_provider,provider_receipt_id,expires_at)
         VALUES ($1,$2,$3,$4,$5,$6,$7,'pending',$8,clock_timestamp()+($9 * interval '1 millisecond'),
           NULL,NULL,NULL,NULL,NULL,NULL,clock_timestamp()+($10 * interval '1 millisecond'))
+        ON CONFLICT (purpose,operation_id) DO NOTHING
         RETURNING purpose,operation_id,algorithm,bytes_length,encode(request_digest,'hex') AS request_digest,
           key_id,key_version::text AS key_version,state,claim_token_digest,claim_expires_at,
           claim_expires_at > clock_timestamp() AS claim_active,
@@ -117,8 +118,23 @@ export function createPostgresProviderOperationRepository({
         Buffer.from(operation.request_digest, "hex"), operation.key_id, operation.key_version,
         Buffer.from(sha256(token), "hex"), claimLeaseMs, retentionMs,
       ]);
-      if (rowCount(result) !== 1) fail(PROVIDER_OPERATION_REPOSITORY_ERROR_CODES.DATABASE);
-      return publicRecord(result.rows[0], token);
+      if (rowCount(result) === 1) return publicRecord(result.rows[0], token);
+      if (rowCount(result) !== 0) fail(PROVIDER_OPERATION_REPOSITORY_ERROR_CODES.DATABASE);
+
+      // SELECT-then-INSERT cannot by itself serialize two first reservations:
+      // both transactions may observe absence before either inserts.  The
+      // unique key and ON CONFLICT are the linearization point.  After the
+      // winning transaction commits, lock and validate its exact immutable
+      // binding rather than surfacing a transient database error.
+      row = await selectOperation(tx, operation, true);
+      if (!row) fail(PROVIDER_OPERATION_REPOSITORY_ERROR_CODES.DATABASE);
+      assertIdentity(row, operation);
+      if (row.state === "pending" && claimExpired(row)) {
+        const replacementToken = makeToken(randomBytes);
+        row = await setClaim(tx, operation, replacementToken, "pending", claimLeaseMs);
+        return publicRecord(row, replacementToken);
+      }
+      return publicRecord(row);
     }));
   }
 

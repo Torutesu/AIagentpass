@@ -11,6 +11,7 @@ import {
   canonicalManagedSignerRequestDigest,
   createPostgresManagedSignerKeyLifecycleRepository,
 } from "../../src/postgres/managed-signer-key-lifecycle-repository.mjs";
+import { createPostgresProviderOperationMaintenanceRepository } from "../../src/postgres/provider-operation-maintenance-repository.mjs";
 import { createPostgresProviderOperationRepository } from "../../src/postgres/provider-operation-repository.mjs";
 
 const DATABASE_URL = process.env.AGENTPASS_TEST_DATABASE_URL ?? process.env.AGENTPASS_TEST_POSTGRES_URL;
@@ -33,7 +34,7 @@ test("0041 converges two PostgreSQL-backed adapter instances and recovers a star
   const migrationClient = await firstPool.connect();
   try {
     const migrated = await createMigrationRunner({ client: migrationClient, applicationVersion: "provider-operation-integration" }).run();
-    assert.equal(migrated.currentVersion, 41);
+    assert.equal(migrated.currentVersion, 42);
   } finally {
     migrationClient.release();
   }
@@ -122,7 +123,7 @@ test("0041 quarantines only expired started operations with bounded two-pool mai
   const migrationClient = await firstPool.connect();
   try {
     const migrated = await createMigrationRunner({ client: migrationClient, applicationVersion: "provider-operation-maintenance-integration" }).run();
-    assert.equal(migrated.currentVersion, 41);
+    assert.equal(migrated.currentVersion, 42);
   } finally {
     migrationClient.release();
   }
@@ -233,6 +234,242 @@ test("0041 quarantines only expired started operations with bounded two-pool mai
   assert.deepEqual(terminalAfter, terminalBefore, "maintenance must not mutate terminal rows");
 });
 
+test("0042 runs bounded deployment-wide reconciliation and retention across two locked workers", {
+  skip: !DATABASE_URL,
+  timeout: 120_000,
+}, async (t) => {
+  const firstPool = new Pool({ connectionString: DATABASE_URL, max: 8 });
+  const secondPool = new Pool({ connectionString: DATABASE_URL, max: 8 });
+  const suffix = `${process.pid}-${crypto.randomBytes(8).toString("hex")}`;
+  const purpose = "agentpass.capability";
+  const keyId = `lane-c-key-${suffix}`;
+  const keyVersion = "1";
+  const providerId = `lane-c-kms-${suffix}`;
+  const keys = crypto.generateKeyPairSync("ed25519");
+  const publicKey = keys.publicKey.export({ type: "spki", format: "pem" }).toString();
+  const publicKeyFingerprint = crypto.createHash("sha256")
+    .update(keys.publicKey.export({ type: "spki", format: "der" }))
+    .digest("hex");
+  let lockClient;
+
+  t.after(async () => {
+    if (lockClient) {
+      try { await lockClient.query("ROLLBACK"); } catch { /* best effort cleanup */ }
+      lockClient.release();
+    }
+    await firstPool.query(
+      "DELETE FROM managed_signer_signing_idempotency WHERE purpose=$1 AND key_id=$2",
+      [purpose, keyId],
+    );
+    await firstPool.query(
+      "DELETE FROM managed_signer_key_lifecycle_operations WHERE purpose=$1 AND operation_id LIKE $2",
+      [purpose, `%${suffix}`],
+    );
+    await firstPool.query(
+      "DELETE FROM managed_signer_provider_operations WHERE purpose=$1 AND key_id=$2",
+      [purpose, keyId],
+    );
+    await firstPool.query("DELETE FROM managed_signer_keys WHERE purpose=$1 AND key_id=$2", [purpose, keyId]);
+    await firstPool.query(
+      `DELETE FROM managed_signer_key_lifecycles lifecycle
+       WHERE lifecycle.purpose=$1
+         AND NOT EXISTS (SELECT 1 FROM managed_signer_keys key WHERE key.purpose=lifecycle.purpose)`,
+      [purpose],
+    );
+    await Promise.all([firstPool.end(), secondPool.end()]);
+  });
+
+  const migrationClient = await firstPool.connect();
+  try {
+    const migrated = await createMigrationRunner({ client: migrationClient, applicationVersion: "provider-operation-race-matrix" }).run();
+    assert.equal(migrated.currentVersion, 42);
+  } finally {
+    migrationClient.release();
+  }
+
+  const lifecycleOne = createPostgresManagedSignerKeyLifecycleRepository({ client: firstPool, purpose });
+  const lifecycleTwo = createPostgresManagedSignerKeyLifecycleRepository({ client: secondPool, purpose });
+  const lifecycleShort = createPostgresManagedSignerKeyLifecycleRepository({
+    client: firstPool,
+    purpose,
+    signingClaimLeaseMs: 2_000,
+    signingRetentionMs: 2_001,
+  });
+  await lifecycleOne.initialize({ snapshot: {
+    version: 1,
+    purpose,
+    algorithm: "ed25519",
+    keys: [{
+      key_id: keyId,
+      key_version: 1,
+      purpose,
+      algorithm: "ed25519",
+      public_key_fingerprint: publicKeyFingerprint,
+      public_key: publicKey,
+      state: "active",
+      state_version: 1,
+    }],
+  } });
+  assert.equal((await lifecycleTwo.snapshot()).keys[0].key_id, keyId);
+
+  const provider = {
+    provider_id: providerId,
+    purpose,
+    key_id: keyId,
+    key_version: keyVersion,
+    algorithm: "ed25519",
+    version: SIGNER_PROTOCOL_VERSIONS[purpose],
+    publicKey: keys.publicKey,
+    async publicKeyMetadata() {
+      return { key_id: keyId, algorithm: "ed25519", public_key: keys.publicKey };
+    },
+    async sign({ bytes }) {
+      return crypto.sign(null, bytes, keys.privateKey);
+    },
+  };
+  const firstWorker = createPostgresProviderOperationMaintenanceRepository({ client: firstPool });
+  const secondWorker = createPostgresProviderOperationMaintenanceRepository({ client: secondPool });
+
+  const reconciliations = [];
+  for (const [index, pool] of [firstPool, secondPool, firstPool].entries()) {
+    const operationId = `lane-c-reconcile-${suffix}-${index}`;
+    const fixture = await createAcceptedProviderOperationFixture({
+      pool, purpose, keyId, keyVersion, provider, providerId, operationId,
+      bytes: Buffer.from(`lane-c-reconcile:${suffix}:${index}`),
+    });
+    await commitLifecycleFixture({ lifecycle: lifecycleOne, fixture });
+    reconciliations.push(fixture);
+  }
+
+  lockClient = await firstPool.connect();
+  await lockClient.query("BEGIN");
+  await lockClient.query(
+    "SELECT operation_id FROM managed_signer_provider_operations WHERE purpose=$1 AND operation_id=$2 FOR UPDATE",
+    [purpose, reconciliations[0].operation.operation_id],
+  );
+  const lockedReconcile = await withTimeout(
+    secondWorker.maintainProviderOperations({ limit: 2 }),
+    5_000,
+    "SKIP LOCKED reconciliation waited on a row held by the other worker",
+  );
+  assert.deepEqual(lockedReconcile, { quarantined: 0, reconciled: 2, pruned: 0, total: 2 });
+  assert.equal((await getProviderOperationState(firstPool, purpose, reconciliations[0].operation.operation_id)).state, "accepted");
+  for (const fixture of reconciliations.slice(1)) {
+    assert.equal((await getProviderOperationState(firstPool, purpose, fixture.operation.operation_id)).state, "committed");
+  }
+  await lockClient.query("ROLLBACK");
+  lockClient.release();
+  lockClient = undefined;
+
+  const releasedReconcile = await firstWorker.maintainProviderOperations({ limit: 1 });
+  assert.deepEqual(releasedReconcile, { quarantined: 0, reconciled: 1, pruned: 0, total: 1 });
+  assert.equal((await getProviderOperationState(secondPool, purpose, reconciliations[0].operation.operation_id)).state, "committed");
+
+  const pendingOperationId = `lane-c-pending-${suffix}`;
+  const pendingRepository = createPostgresProviderOperationRepository({
+    client: firstPool, purpose, keyId, keyVersion,
+  });
+  const pendingOperation = operationFrom(
+    bindingForOperation({
+      purpose, keyId, keyVersion, operationId: pendingOperationId,
+      signingBytes: Buffer.from(`lane-c-pending:${suffix}`),
+    }),
+    Buffer.from(`lane-c-pending:${suffix}`),
+  );
+  const pendingReserved = await pendingRepository.reserveOperation(pendingOperation);
+  assert.equal((await firstWorker.maintainProviderOperations({ limit: 10 })).total, 0);
+  const pendingAfterMaintenance = await getProviderOperationState(firstPool, purpose, pendingOperationId);
+  assert.equal(pendingAfterMaintenance.state, "pending");
+  assert.ok(pendingAfterMaintenance.claim_token_digest);
+  assert.ok(pendingAfterMaintenance.claim_expires_at);
+  assert.equal(pendingReserved.state, "pending");
+
+  const staleLifecycleId = `lane-c-stale-lifecycle-${suffix}`;
+  const staleFixture = await createAcceptedProviderOperationFixture({
+    pool: firstPool, purpose, keyId, keyVersion, provider, providerId,
+    operationId: staleLifecycleId, bytes: Buffer.from(`lane-c-stale:${suffix}`),
+  });
+  const staleLifecycleInput = lifecycleInputFor(staleFixture);
+  const staleReserved = await lifecycleOne.reserveSignature(staleLifecycleInput);
+  await firstPool.query(
+    `UPDATE managed_signer_signing_idempotency
+     SET claim_expires_at=clock_timestamp()-interval '1 second'
+     WHERE purpose=$1 AND operation_id=$2`,
+    [purpose, staleLifecycleId],
+  );
+  assert.equal(staleReserved.state, "pending");
+
+  const disabledLifecycleId = `lane-c-disabled-lifecycle-${suffix}`;
+  const disabledFixture = await createAcceptedProviderOperationFixture({
+    pool: secondPool, purpose, keyId, keyVersion, provider, providerId,
+    operationId: disabledLifecycleId, bytes: Buffer.from(`lane-c-disabled:${suffix}`),
+  });
+  const disabledLifecycleInput = lifecycleInputFor(disabledFixture);
+  const disabledReserved = await lifecycleOne.reserveSignature(disabledLifecycleInput);
+  const disabledStarted = await lifecycleOne.startSignature({
+    ...disabledLifecycleInput,
+    claim_token: disabledReserved.claim_token,
+  });
+  const disabledUncertain = await lifecycleOne.markSignatureUncertain({
+    ...disabledLifecycleInput,
+    claim_token: disabledStarted.claim_token,
+  });
+  assert.equal(disabledUncertain.state, "uncertain");
+
+  const prunable = [];
+  for (const [index, pool] of [firstPool, secondPool].entries()) {
+    const operationId = `lane-c-prune-${suffix}-${index}`;
+    const fixture = await createCommittedProviderOperationFixture({
+      pool, purpose, keyId, keyVersion, provider, providerId, operationId,
+      bytes: Buffer.from(`lane-c-prune:${suffix}:${index}`),
+      repositoryOptions: { claimLeaseMs: 2_000, retentionMs: 2_001 },
+    });
+    await commitLifecycleFixture({ lifecycle: lifecycleShort, fixture });
+    prunable.push(fixture);
+  }
+  await delay(2_200);
+
+  lockClient = await firstPool.connect();
+  await lockClient.query("BEGIN");
+  await lockClient.query(
+    "SELECT operation_id FROM managed_signer_provider_operations WHERE purpose=$1 AND operation_id=$2 FOR UPDATE",
+    [purpose, prunable[0].operation.operation_id],
+  );
+  const lockedPruneResults = await Promise.all([
+    firstWorker.maintainProviderOperations({ limit: 1 }),
+    secondWorker.maintainProviderOperations({ limit: 1 }),
+  ]);
+  assert.equal(lockedPruneResults[0].total + lockedPruneResults[1].total, 1);
+  assert.equal(lockedPruneResults[0].pruned + lockedPruneResults[1].pruned, 1);
+  assert.equal(await providerOperationExists(firstPool, purpose, prunable[0].operation.operation_id), true);
+  assert.equal(await providerOperationExists(firstPool, purpose, prunable[1].operation.operation_id), false);
+  assert.equal(await signingOperationExists(firstPool, purpose, prunable[0].operation.operation_id), true);
+  assert.equal(await signingOperationExists(firstPool, purpose, prunable[1].operation.operation_id), false);
+  await lockClient.query("ROLLBACK");
+  lockClient.release();
+  lockClient = undefined;
+
+  const releasedPruneResults = await Promise.all([
+    firstWorker.maintainProviderOperations({ limit: 1 }),
+    secondWorker.maintainProviderOperations({ limit: 1 }),
+  ]);
+  assert.equal(releasedPruneResults[0].pruned + releasedPruneResults[1].pruned, 1);
+  assert.equal(await providerOperationExists(firstPool, purpose, prunable[0].operation.operation_id), false);
+  assert.equal(await signingOperationExists(firstPool, purpose, prunable[0].operation.operation_id), false);
+
+  assert.equal((await lifecycleTwo.lookupSignature(staleLifecycleInput)).state, "pending");
+  assert.equal((await lifecycleTwo.lookupSignature(disabledLifecycleInput)).state, "uncertain");
+  await lifecycleOne.emergencyDisable({ expected_version: 1, operation_id: `lane-c-disable-${suffix}` });
+  assert.equal((await lifecycleTwo.snapshot()).keys[0].state, "emergency-disabled");
+  const finalMaintenance = await firstWorker.maintainProviderOperations({ limit: 10 });
+  assert.equal(finalMaintenance.total, 0, "non-committed high-level rows must not be auto-promoted or pruned");
+  assert.equal((await getProviderOperationState(firstPool, purpose, staleLifecycleId)).state, "accepted");
+  assert.equal((await getProviderOperationState(secondPool, purpose, disabledLifecycleId)).state, "accepted");
+  const pendingAfterFinalMaintenance = await getProviderOperationState(firstPool, purpose, pendingOperationId);
+  assert.equal(pendingAfterFinalMaintenance.state, "pending");
+  assert.ok(pendingAfterFinalMaintenance.claim_token_digest);
+});
+
 test("0041 converges 100 identical requests across two PostgreSQL pools", {
   skip: !DATABASE_URL,
   timeout: 60_000,
@@ -276,7 +513,7 @@ test("0041 converges 100 identical requests across two PostgreSQL pools", {
   const migrationClient = await firstPool.connect();
   try {
     const migrated = await createMigrationRunner({ client: migrationClient, applicationVersion: "provider-operation-convergence-integration" }).run();
-    assert.equal(migrated.currentVersion, 41);
+    assert.equal(migrated.currentVersion, 42);
   } finally {
     migrationClient.release();
   }
@@ -296,7 +533,7 @@ test("0041 converges 100 identical requests across two PostgreSQL pools", {
     purpose,
     keyId,
     keyVersion,
-    publicKey: keys.publicKey,
+    publicKey: provider.publicKey,
     waitTimeoutMs: 1_000,
     maxRecoveryAttempts: 2,
   }));
@@ -347,7 +584,7 @@ test("0041 composes with lifecycle fencing across lost commits and emergency dis
   const migrationClient = await firstPool.connect();
   try {
     const migrated = await createMigrationRunner({ client: migrationClient, applicationVersion: "provider-operation-composed-integration" }).run();
-    assert.equal(migrated.currentVersion, 41);
+    assert.equal(migrated.currentVersion, 42);
   } finally {
     migrationClient.release();
   }
@@ -459,8 +696,18 @@ test("0041 composes with lifecycle fencing across lost commits and emergency dis
 });
 
 function bindingFor({ purpose, keyId, keyVersion, suffix, signingBytes, prefix }) {
+  return bindingForOperation({
+    purpose,
+    keyId,
+    keyVersion,
+    operationId: `managed-signer-v1-${prefix}-${suffix}`,
+    signingBytes,
+  });
+}
+
+function bindingForOperation({ purpose, keyId, keyVersion, operationId, signingBytes }) {
   return {
-    operation_id: `managed-signer-v1-${prefix}-${suffix}`,
+    operation_id: operationId,
     purpose,
     key_id: keyId,
     key_version: keyVersion,
@@ -468,6 +715,166 @@ function bindingFor({ purpose, keyId, keyVersion, suffix, signingBytes, prefix }
     protocol_version: SIGNER_PROTOCOL_VERSIONS[purpose],
     request_digest: { algorithm: "SHA-256", value: crypto.createHash("sha256").update(signingBytes).digest("hex") },
   };
+}
+
+async function createAcceptedProviderOperationFixture({
+  pool,
+  purpose,
+  keyId,
+  keyVersion,
+  provider,
+  providerId,
+  operationId,
+  bytes,
+  repositoryOptions = {},
+}) {
+  const repository = createPostgresProviderOperationRepository({
+    client: pool, purpose, keyId, keyVersion, ...repositoryOptions,
+  });
+  const binding = bindingForOperation({ purpose, keyId, keyVersion, operationId, signingBytes: bytes });
+  const operation = operationFrom(binding, bytes);
+  let acceptedInput;
+  const interceptedRepository = delegateProviderRepository(repository, {
+    recordAccepted: async (input) => {
+      acceptedInput = {
+        ...input,
+        signature: { ...input.signature, public_key: { ...input.signature.public_key } },
+        provider_receipt: { ...input.provider_receipt },
+      };
+      return repository.recordAccepted(input);
+    },
+    commitOperation: async () => { throw new Error("keep provider operation accepted for reconciliation"); },
+    markUncertain: async () => { throw new Error("keep provider operation accepted for reconciliation"); },
+  });
+  const adapter = createProviderOperationReconciliationAdapter({
+    provider,
+    providerId,
+    repository: interceptedRepository,
+    purpose,
+    keyId,
+    keyVersion,
+    publicKey: provider.publicKey,
+    waitTimeoutMs: 1_000,
+    maxRecoveryAttempts: 1,
+  });
+  const rejected = await adapter.signOnce(binding, bytes).then(() => undefined, (error) => error);
+  assert.ok(rejected, "the intercepted commit must reject after the provider result is persisted");
+  assert.ok(acceptedInput, `the test provider must produce a persisted accepted result (${rejected.code ?? rejected.message})`);
+  const persisted = await repository.getOperation(operation);
+  assert.equal(persisted.state, "accepted");
+  return Object.freeze({
+    operation,
+    bytes,
+    signature: acceptedInput.signature,
+    providerReceipt: acceptedInput.provider_receipt,
+  });
+}
+
+async function createCommittedProviderOperationFixture({
+  pool,
+  purpose,
+  keyId,
+  keyVersion,
+  provider,
+  providerId,
+  operationId,
+  bytes,
+  repositoryOptions = {},
+}) {
+  const repository = createPostgresProviderOperationRepository({
+    client: pool, purpose, keyId, keyVersion, ...repositoryOptions,
+  });
+  const binding = bindingForOperation({ purpose, keyId, keyVersion, operationId, signingBytes: bytes });
+  const operation = operationFrom(binding, bytes);
+  const adapter = createProviderOperationReconciliationAdapter({
+    provider,
+    providerId,
+    repository,
+    purpose,
+    keyId,
+    keyVersion,
+    publicKey: provider.publicKey,
+    waitTimeoutMs: 1_000,
+    maxRecoveryAttempts: 1,
+  });
+  const result = await adapter.signOnce(binding, bytes);
+  const persisted = await repository.getOperation(operation);
+  assert.equal(persisted.state, "committed");
+  return Object.freeze({
+    operation,
+    bytes,
+    signature: result.signature,
+    providerReceipt: result.provider_receipt,
+  });
+}
+
+async function commitLifecycleFixture({ lifecycle, fixture }) {
+  const input = lifecycleInputFor(fixture);
+  const reserved = await lifecycle.reserveSignature(input);
+  const started = await lifecycle.startSignature({ ...input, claim_token: reserved.claim_token });
+  const committed = await lifecycle.commitSignature({
+    ...input,
+    claim_token: started.claim_token,
+    signature: Buffer.from(fixture.signature.value, "base64url"),
+    provider_receipt: fixture.providerReceipt,
+  });
+  assert.equal(committed.state, "committed");
+  return committed;
+}
+
+function lifecycleInputFor(fixture) {
+  return {
+    purpose: fixture.operation.purpose,
+    operation_id: fixture.operation.operation_id,
+    request_digest: fixture.operation.request_digest,
+    key_id: fixture.operation.key_id,
+    key_version: Number(fixture.operation.key_version),
+  };
+}
+
+async function getProviderOperationState(pool, purpose, operationId) {
+  const result = await pool.query(
+    `SELECT state,claim_token_digest,claim_expires_at,uncertain_reason
+     FROM managed_signer_provider_operations
+     WHERE purpose=$1 AND operation_id=$2`,
+    [purpose, operationId],
+  );
+  assert.equal(result.rowCount, 1);
+  return result.rows[0];
+}
+
+async function providerOperationExists(pool, purpose, operationId) {
+  const result = await pool.query(
+    "SELECT 1 FROM managed_signer_provider_operations WHERE purpose=$1 AND operation_id=$2",
+    [purpose, operationId],
+  );
+  return result.rowCount === 1;
+}
+
+async function signingOperationExists(pool, purpose, operationId) {
+  const result = await pool.query(
+    "SELECT 1 FROM managed_signer_signing_idempotency WHERE purpose=$1 AND operation_id=$2",
+    [purpose, operationId],
+  );
+  return result.rowCount === 1;
+}
+
+async function withTimeout(promise, timeoutMs, message) {
+  let timer;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise((_, reject) => {
+        timer = setTimeout(() => reject(new Error(message)), timeoutMs);
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
+async function delay(milliseconds) {
+  await new Promise((resolve) => setTimeout(resolve, milliseconds));
 }
 
 async function quarantineExpiredProviderOperations(pool, limit) {

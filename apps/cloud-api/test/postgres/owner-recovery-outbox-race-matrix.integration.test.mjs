@@ -46,7 +46,7 @@ test("W1.5 real-PostgreSQL two-worker owner-recovery outbox race matrix converge
       client: migrationClient,
       applicationVersion: "owner-recovery-outbox-race-matrix"
     }).run();
-    assert.equal(migration.currentVersion, 41);
+    assert.equal(migration.currentVersion, 42);
   } finally {
     migrationClient.release();
   }

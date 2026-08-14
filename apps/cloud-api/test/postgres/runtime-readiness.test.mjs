@@ -16,6 +16,8 @@ class FakePool {
     this.waitingCount = 0;
     this.applied = [];
     this.ended = false;
+    this.endCalls = 0;
+    this.releaseCalls = [];
   }
 
   async connect() {
@@ -25,7 +27,7 @@ class FakePool {
   client() {
     return {
       query: (text, params) => this.query(text, params),
-      release: () => {}
+      release: (destroy = false) => { this.releaseCalls.push(destroy); }
     };
   }
 
@@ -51,6 +53,7 @@ class FakePool {
   }
 
   async end() {
+    this.endCalls += 1;
     this.ended = true;
   }
 }
@@ -67,7 +70,6 @@ test("PostgreSQL runtime exposes exact-schema readiness, tracked work, and bound
   const migrations = await loadSqlMigrations();
   const runtime = await createPostgresRuntime({ env: env(), PoolClass: FakePool, applicationVersion: "runtime-readiness-test", resolveProcessBindingPolicy: () => true });
   assert.equal(runtime.pool.applied.length, migrations.length);
-  assert.equal(migrations.length, 41);
   assert.equal((await runtime.readiness()).code, "ready");
   assert.equal(typeof runtime.agentSessionIssuanceRepository?.issueAgentSessionGrant, "function");
   assert.equal(typeof runtime.agentSessionConsumptionRepository?.consumeAgentSessionGrant, "function");
@@ -167,4 +169,112 @@ test("PostgreSQL runtime can leave provider-operation maintenance idle and fails
   assert.equal(readiness.code, "managed_signer_provider_operations_worker_unavailable");
   await runtime.close();
   assert.equal(runtime.providerOperationMaintenanceWorker.snapshot().state, "closed");
+});
+
+test("PostgreSQL runtime preserves migration failure and closes the pool exactly once", async () => {
+  const expected = new Error("migration failure injection");
+  let pool;
+  class MigrationFailurePool extends FakePool {
+    constructor(options) {
+      super(options);
+      pool = this;
+    }
+
+    async query(text, params = []) {
+      if (text === "SELECT set_config('statement_timeout', $1, false)") throw expected;
+      return super.query(text, params);
+    }
+  }
+
+  await assert.rejects(
+    createPostgresRuntime({ env: env(), PoolClass: MigrationFailurePool }),
+    (error) => error === expected
+  );
+  assert.equal(pool.endCalls, 1);
+  assert.deepEqual(pool.releaseCalls, [true]);
+  assert.equal(pool.ended, true);
+});
+
+test("PostgreSQL runtime cleans started workers and pool after late construction failure", async () => {
+  let pool;
+  const scheduled = [];
+  const cleared = [];
+  const setTimeoutFn = (callback, delay) => {
+    const handle = Object.freeze({ callback, delay, unref() {} });
+    scheduled.push(handle);
+    return handle;
+  };
+  const clearTimeoutFn = (handle) => { cleared.push(handle); };
+  class LateFailurePool extends FakePool {
+    constructor(options) {
+      super(options);
+      pool = this;
+    }
+  }
+  const ownerRecoveryPublisher = {
+    binding: DELIVERY_BINDING,
+    async publish() { return { accepted: false, duplicate: false }; },
+    async lookupAcceptance() { return { accepted: false, idempotency_key: "unused" }; }
+  };
+
+  await assert.rejects(
+    createPostgresRuntime({
+      env: env(),
+      PoolClass: LateFailurePool,
+      ownerRecoveryPublisher,
+      ownerRecoveryOutboxWorkerOptions: { setTimeoutFn, clearTimeoutFn },
+      sharedControlMaintenanceWorkerOptions: { setTimeoutFn, clearTimeoutFn },
+      refreshNonceCodec: {}
+    }),
+    (error) => error?.code === "ERR_REFRESH_NONCE_CODEC"
+  );
+
+  assert.equal(scheduled.length, 0);
+  assert.equal(cleared.length, 0);
+  assert.equal(pool.endCalls, 1);
+  assert.deepEqual(pool.releaseCalls, [false]);
+  assert.equal(pool.ended, true);
+});
+
+test("PostgreSQL runtime preserves start failure identity and drains already-started workers", async () => {
+  const expected = new Error("worker start failure injection");
+  let pool;
+  const ownerScheduled = [];
+  const ownerCleared = [];
+  const ownerSetTimeoutFn = (callback, delay) => {
+    const handle = Object.freeze({ callback, delay, unref() {} });
+    ownerScheduled.push(handle);
+    return handle;
+  };
+  const ownerClearTimeoutFn = (handle) => { ownerCleared.push(handle); };
+  const sharedSetTimeoutFn = () => { throw expected; };
+  class StartFailurePool extends FakePool {
+    constructor(options) {
+      super(options);
+      pool = this;
+    }
+  }
+  const ownerRecoveryPublisher = {
+    binding: DELIVERY_BINDING,
+    async publish() { return { accepted: false, duplicate: false }; },
+    async lookupAcceptance() { return { accepted: false, idempotency_key: "unused" }; }
+  };
+
+  await assert.rejects(
+    createPostgresRuntime({
+      env: env(),
+      PoolClass: StartFailurePool,
+      ownerRecoveryPublisher,
+      ownerRecoveryOutboxWorkerOptions: { setTimeoutFn: ownerSetTimeoutFn, clearTimeoutFn: ownerClearTimeoutFn },
+      sharedControlMaintenanceWorkerOptions: { setTimeoutFn: sharedSetTimeoutFn, clearTimeoutFn: () => {} }
+    }),
+    (error) => error === expected
+  );
+
+  assert.equal(ownerScheduled.length, 1);
+  assert.equal(ownerCleared.length, 1);
+  assert.equal(ownerCleared[0], ownerScheduled[0]);
+  assert.equal(pool.endCalls, 1);
+  assert.deepEqual(pool.releaseCalls, [false]);
+  assert.equal(pool.ended, true);
 });

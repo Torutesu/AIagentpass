@@ -67,6 +67,7 @@ function createRepository({
   failRecordAcceptedOnce = false,
   failAfterRecordAccepted = false,
   failAfterCommit = false,
+  claimTokenFactory = (sequence) => `claim-${sequence}`,
 } = {}) {
   const rows = new Map();
   const events = [];
@@ -124,7 +125,7 @@ function createRepository({
         ...operationFromInput(input),
         state: "pending",
         lease: true,
-        claim_token: `claim-${++claimSequence}`,
+        claim_token: claimTokenFactory(++claimSequence),
       };
       rows.set(row.operation_id, row);
       return publicRecord(row, true);
@@ -139,7 +140,7 @@ function createRepository({
         return publicRecord(row, false);
       }
       row.lease = true;
-      row.claim_token = `claim-${++claimSequence}`;
+      row.claim_token = claimTokenFactory(++claimSequence);
       return publicRecord(row, true);
     },
 
@@ -349,6 +350,17 @@ test("wraps a direct Ed25519 KMS provider in the exact managed-signer adapter sh
     provider_receipt: result.provider_receipt,
     signature: result.signature,
   });
+});
+
+test("accepts opaque base64url claims whose first character is underscore or hyphen", async () => {
+  for (const prefix of ["_", "-"]) {
+    const fixture = createAdapterFixture({
+      claimTokenFactory: () => `${prefix}${"A".repeat(42)}`,
+    });
+    const result = await fixture.adapter.signOnce(fixture.binding, PAYLOAD);
+    assert.equal(result.signature.value, crypto.sign(null, PAYLOAD, fixture.pair.privateKey).toString("base64url"));
+    assert.equal(fixture.rows.get(fixture.binding.operation_id).state, "committed");
+  }
 });
 
 test("converges response loss after commit without invoking the direct provider twice", async () => {

@@ -27,7 +27,7 @@ test("G1 signed session bootstrap is bound to active PostgreSQL membership and r
       client: migrationClient,
       applicationVersion: "signed-session-bootstrap-integration"
     }).run();
-    assert.equal(migration.currentVersion, 41);
+    assert.equal(migration.currentVersion, 42);
   } finally {
     migrationClient.release();
   }

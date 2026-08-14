@@ -2,7 +2,8 @@
 
 Status: active
 
-Planning baseline: `codex/agent-platform` after the managed-signer fencing checkpoint
+Planning baseline: `codex/agent-platform` after the C1.4 provider-operation
+maintenance and adjudication-contract checkpoint
 
 Planning date: 2026-08-15
 
@@ -30,9 +31,10 @@ Production completion means:
 
 ## 2. Current trusted baseline
 
-Implemented locally and covered by source-bound CI:
+Implemented in the branch baseline; C1.4 has complete local evidence and still
+requires the C1.5 source-bound CI artifact before C1 is closed:
 
-- frozen Core/OpenAPI/JSON Schema contracts and 41 forward-only migrations;
+- frozen Core/OpenAPI/JSON Schema contracts and 42 forward-only migrations;
 - organization roles, Human sessions, WebAuthn, Device APIs, control state,
   audit, emergency revocation, owner recovery, and browser-assisted enrollment;
 - managed signer registry for eight distinct signing purposes;
@@ -418,16 +420,19 @@ The remaining work is split into reviewable commits with explicit gates:
 | C1.1 deployment-wide repository — implemented | `maintainProviderOperations({limit})` and aggregate health cover every purpose and key version. Expired started rows are quarantined, exact persisted output may be reconciled, and only correlated terminal low/high-level pairs are pruned under one total budget. | Exact-shape, budget, pending exclusion, terminal immutability, `SKIP LOCKED`, malformed-row, and opaque DB-failure tests pass. | Implemented in `9092bad`; repository exports aggregate counts only. |
 | C1.2 runtime and observability — implemented locally | One deployment-wide worker is constructed after migration, performs an initial cycle, exposes aggregate readiness and six fixed counters, and drains before PostgreSQL closes. | Startup enabled/disabled, non-overlap, sink failure, readiness timeout/failure/privacy, shutdown timeout, and resource-order tests pass. | Included in the next runtime-maintenance checkpoint commit. |
 | C1.3 two-pool PostgreSQL qualification — implemented locally | 100 identical requests run through two independent pools; stale started and pending separation, bounded cooperative quarantine, closed reasons, and terminal immutability are exercised. | PostgreSQL 17 integration passes three consecutive runs; one exact result converges without blind high-level replay. | Included in the next runtime-maintenance checkpoint commit. |
-| C1.4 retention and operator boundary | Prove retention under two workers and locked rows; define bounded read-only uncertainty summaries and an adjudication command contract, without adding the Human API yet. Document that direct KMS invocation may be at-least-once after ambiguity. | Retention/reconciliation races, stale lifecycle, unsupported reason, recovery exhaustion, and privacy snapshots; threat-model and runbook review. | Automatic maintenance never invents provider acceptance and never converts lifecycle-fenced work into success; manual action has a frozen follow-up contract. |
-| C1.5 closure gate | Run lint, contract validation, complete root suite, real-PostgreSQL matrix, and source-bound CI; archive exact command/environment results. | Zero unexpected skips/failures, schema version 41 everywhere, catalog count 128, clean worktree, pushed commit. | C1 may be marked complete; C2/C3 authoritative producers can then depend on the ledger. |
+| C1.4 retention and operator boundary — Lane D contract implemented | Prove retention under two workers and locked rows; define bounded read-only uncertainty summaries and a purpose-bound, deployment-internal adjudication command contract, without adding the Human API yet. Document that direct KMS invocation may be at-least-once after ambiguity. | Retention/reconciliation races, stale lifecycle, unsupported reason, recovery exhaustion, privacy snapshots, purpose-crossing verification denial, PostgreSQL bigint key bounds, and threat-model/runbook review. | Automatic maintenance never invents provider acceptance and never converts lifecycle-fenced work into success; the frozen follow-up contract is documented in `docs/MANAGED_SIGNER_PROVIDER_OPERATION_ADJUDICATION.md` and exposed to no Human/tenant route. |
+| C1.5 closure gate | Run lint, contract validation, complete root suite, real-PostgreSQL matrix, and source-bound CI; archive exact command/environment results. | Zero unexpected skips/failures, schema version 42 everywhere, catalog count 129, clean worktree, pushed commit. | C1 may be marked complete; C2/C3 authoritative producers can then depend on the ledger. |
 
-Local checkpoint evidence for C1.1-C1.3:
+Local checkpoint evidence for C1.1-C1.4:
 
-- contract catalog: 128 entries, 32 schemas, 55 OpenAPI operations, 41 migrations;
-- focused maintenance/readiness suite: 37 passed, 0 failed;
-- PostgreSQL 17 provider-operation matrix: four scenarios, three consecutive
-  complete passes;
-- root suite: 2,061 tests, 2,007 passed, 54 intentionally skipped, 0 failed;
+- contract catalog: 129 entries, 32 schemas, 55 OpenAPI operations, 42 migrations;
+- focused contract, maintenance, repository, readiness, runtime, and migration
+  suite: 102 passed, 0 failed;
+- PostgreSQL 17 qualification: six scenarios passed, including a 120k-row
+  index-plan check and the complete two-pool provider-operation matrix; the
+  race matrix also passed ten consecutive runs while stabilizing C1.4;
+- root suite: 2,081 tests, 2,025 passed, 56 intentionally skipped because their
+  declared external dependencies were absent, 0 failed;
 - lint, syntax checks, and whitespace checks pass.
 
 #### Next implementation order
@@ -437,11 +442,11 @@ operator authority, and product UI do not change in one review boundary.
 
 | Order | Commit boundary | Concrete implementation | Verification and exit gate |
 | --- | --- | --- | --- |
-| 1 | C1.4a maintenance query hardening | Add forward-only migration `0042` with a partial index for deployment-wide nonterminal age and any exact reconciliation/prune selector proven necessary by `EXPLAIN (ANALYZE, BUFFERS)`. Keep every maintenance selection bounded and cooperative. | Seed at least 100k mixed rows; prove index-backed oldest-age, quarantine, reconcile, and prune plans; two workers skip locked rows and never exceed the shared per-cycle budget. |
-| 2 | C1.4b lifecycle/retention race matrix | Extend real PostgreSQL qualification for accepted-response loss, low/high-level lost commit response, rotation, emergency disable, locked-row retention, concurrent reconcile/prune, restart, and operation substitution. | Three repeat runs produce one committed verified history or a durable closed-reason uncertain state; pending rows and lifecycle-fenced rows are never auto-promoted or pruned. |
-| 3 | C1.4c runtime construction safety | Wrap post-pool runtime construction in deterministic cleanup: stop constructed workers/notifiers, preserve the original opaque error, and close the pool exactly once. | Inject failure after migration and after each resource constructor; assert no timer, listener, active query, or pool survives and no secret/driver diagnostic escapes. |
-| 4 | C1.4d operator contract | Freeze bounded uncertainty list/detail/verify/adjudication schemas and audit events. Separate `confirm`, `reject`, and provider-specific recovery; never expose raw signing bytes or receipts to the browser. | Role matrix, tenant hiding, pagination bounds, recent WebAuthn, CSRF, `If-Match`, idempotency, replay, stale state, and concurrent adjudication contract tests. No Console UI in this commit. |
-| 5 | C1.5 closure | Update threat model/runbook/evidence index, run all local gates, then run source-bound PostgreSQL CI on the exact pushed commit. | Clean worktree; catalog/schema consistency; root and real-DB suites green; retained CI artifact identifies source commit, PostgreSQL version, commands, and scenario outcomes. This alone closes C1. |
+| 1 | C1.4a maintenance query hardening — implemented locally | Migration `0042` adds partial indexes for deployment-wide nonterminal age, reconciliation, and committed expiry. Every maintenance selection remains bounded and cooperative. | PostgreSQL 17 `EXPLAIN (ANALYZE, BUFFERS)` uses the intended indexes over 120k mixed provider rows plus 20k correlated high-level rows with real matching reconcile/prune candidates. |
+| 2 | C1.4b lifecycle/retention race matrix — implemented locally | Real PostgreSQL qualification now covers bounded two-worker reconcile/prune, locked-row `SKIP LOCKED`, pending preservation, stale/disabled lifecycle non-promotion, and correlated pair deletion. First-reservation insert races converge through `ON CONFLICT`; opaque base64url claim tokens accept every valid leading character. | The complete five-scenario provider-operation matrix passes ten consecutive runs; one exact history converges without duplicate maintenance or blind signing. |
+| 3 | C1.4c runtime construction safety — implemented locally | Post-pool construction uses deterministic best-effort cleanup, preserves the original error, releases the migration client once, closes each constructed worker/notifier, and ends the pool once. All workers start only after every constructor succeeds. | Migration, late-constructor, and worker-start failure injections pass; no scheduled timer survives and runtime regressions remain green. |
+| 4 | C1.4d operator contract — implemented locally | The tenant-neutral internal contract permits exact SQL reconciliation, exact-purpose provider verification when explicitly allow-listed, and non-terminal producer handoff. Generic retry, confirm/reject invention, caller output, and direct Human/Console exposure are forbidden. | Bounded/privacy/purpose-crossing/bigint/result-state tests and the adjudication/runbook documents pass. Human role/WebAuthn/CSRF tests intentionally wait for C2/C3 producer-ledger organization correlation. |
+| 5 | C1.5 closure — local gates passed | Update threat model/runbook/evidence index, push the C1.4 commit, then run source-bound PostgreSQL CI on that exact commit. | Catalog/schema consistency, lint, 2,081-test root suite, and six-scenario real-DB qualification are green locally. A retained CI artifact must still identify source commit, PostgreSQL version, commands, and scenario outcomes; that artifact alone closes C1. |
 | 6 | C2 and C3 in parallel | Build authoritative audit-export and release-promotion issuance on the closed ledger, each with its own schema, sequence/idempotency repository, signer purpose, retrieval, and verifier. | Cross-purpose/tenant/digest/environment substitution, response loss, restart, rotation, emergency stop, concurrent issuance, and hosted-local-fallback rejection. |
 | 7 | C4 and C7 vertical slice | Add Human BFF uncertainty/reconciliation APIs, then the Console queue/detail/adjudication UI. UI consumes only frozen BFF DTOs and authoritative post-commit state. | Playwright role/a11y/loading/empty/error/stale/offline/response-loss tests; browser storage, URL, logs, traces, and rendered-output secret scan. |
 | 8 | C5 and C6 infrastructure closure | Complete eight-purpose provider/lifecycle readiness and deterministic shutdown; add PostgreSQL migrator/app/backup role CI, TLS/deadlines, backup/PITR restore, and cutover checks. | Partial/shared/stale/disabled signer sets fail readiness; negative DB privilege matrix passes; protected restore records measured RPO/RTO and authority comparison. |
@@ -536,7 +541,7 @@ use a provider operation service/ledger or remain blocked from production.
 
 Merge role-separated PostgreSQL CI first, followed by backup/PITR evidence and
 cutover hardening. The CI lane creates the migrator, app, and backup roles from
-scratch, applies all 41 migrations, executes repository smoke tests as the app,
+scratch, applies all 42 migrations, executes repository smoke tests as the app,
 and proves the negative privilege matrix. The protected-environment lane then
 records encrypted backup, point-in-time restore, row/checksum/authority
 comparison, RPO, RTO, and rollback rehearsal.

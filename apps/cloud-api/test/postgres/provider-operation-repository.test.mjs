@@ -51,7 +51,7 @@ function providerOutput() {
 }
 
 class FakePg {
-  constructor() { this.rows = new Map(); this.calls = []; }
+  constructor() { this.rows = new Map(); this.calls = []; this.conflictOnInsert = false; }
 
   async query(text, params = []) {
     this.calls.push({ text, params });
@@ -74,12 +74,20 @@ class FakePg {
     if (text.startsWith("SELECT purpose,operation_id")) return this.result(this.rows.get(key));
     if (text.startsWith("INSERT INTO managed_signer_provider_operations")) {
       const [purpose, operationId, algorithm, bytesLength, requestDigest, keyId, keyVersion, claimDigest] = params;
-      if (this.rows.has(key)) throw new Error("duplicate");
       const row = { purpose, operation_id: operationId, algorithm, bytes_length: bytesLength,
         request_digest: Buffer.from(requestDigest).toString("hex"), key_id: keyId, key_version: String(keyVersion),
         state: "pending", claim_token_digest: claimDigest, claim_expires_at: new Date(Date.now() + 30_000),
         claim_active: true, provider_started_at: null, uncertain_reason: null, signature: null, public_key_der: null,
         provider_receipt_provider: null, provider_receipt_id: null };
+      if (this.conflictOnInsert) {
+        this.conflictOnInsert = false;
+        this.rows.set(key, row);
+        return { rows: [], rowCount: 0 };
+      }
+      if (this.rows.has(key)) {
+        if (text.includes("ON CONFLICT (purpose,operation_id) DO NOTHING")) return { rows: [], rowCount: 0 };
+        throw new Error("duplicate");
+      }
       this.rows.set(key, row);
       return this.result(row);
     }
@@ -160,6 +168,19 @@ test("reserves, starts, accepts, and commits one closed provider operation", asy
   assert.equal(Object.hasOwn(committed, "claim_token"), false);
   assert.deepEqual(await repo.getOperation(operation()), committed);
   assert.deepEqual(await repo.reserveOperation(operation()), committed);
+});
+
+test("first-reservation races converge through the unique operation binding", async () => {
+  const client = new FakePg();
+  client.conflictOnInsert = true;
+  const { repo } = repository(client);
+
+  const reserved = await repo.reserveOperation(operation());
+  assert.equal(reserved.state, "pending");
+  assert.equal(Object.hasOwn(reserved, "claim_token"), false, "the losing reserver must not receive the winner's claim");
+  const insert = client.calls.find(({ text }) => text.startsWith("INSERT INTO managed_signer_provider_operations"));
+  assert.match(insert?.text ?? "", /ON CONFLICT \(purpose,operation_id\) DO NOTHING/u);
+  assert.equal(client.calls.filter(({ text }) => text.startsWith("SELECT purpose,operation_id")).length, 2);
 });
 
 test("persists accepted output across uncertainty and reconciles without a new provider result", async () => {
