@@ -251,9 +251,12 @@ export async function startP0BHarness({ env = process.env, repoRoot = REPOSITORY
       AGENTPASS_CLOUD_AGENT_SESSION_PROCESS_POLICIES_PATH: files.processPolicies,
       AGENTPASS_CLOUD_QUALIFICATION_MANIFEST_KEY_ID: "p0b-qualification-manifest-v1",
       AGENTPASS_CLOUD_QUALIFICATION_MANIFEST_PUBLIC_KEY: files.qualificationManifestPublicKeyPem,
+      AGENTPASS_CLOUD_POSSESSION_RECEIPT_KEY_ID: "p0b-possession-receipt-v1",
+      AGENTPASS_CLOUD_POSSESSION_RECEIPT_PUBLIC_KEY: files.possessionReceiptPublicKeyPem,
       AGENTPASS_KMS_PROVIDER: "aws",
       AGENTPASS_KMS_AGENT_SESSION_KEY_RESOURCE: "arn:aws:kms:us-east-1:000000000000:key/p0b-agent-session",
       AGENTPASS_KMS_QUALIFICATION_MANIFEST_KEY_RESOURCE: "arn:aws:kms:us-east-1:000000000000:key/p0b-qualification-manifest",
+      AGENTPASS_KMS_POSSESSION_RECEIPT_KEY_RESOURCE: "arn:aws:kms:us-east-1:000000000000:key/p0b-possession-receipt",
       AGENTPASS_OWNER_RECOVERY_NOTIFICATION_WEBHOOK_URL: "https://notifications.example.test/owner-recovery",
       AGENTPASS_OWNER_RECOVERY_NOTIFICATION_CONFIRMATION_URL: "https://notifications.example.test/owner-recovery/acceptance",
       AGENTPASS_OWNER_RECOVERY_NOTIFICATION_AUTHORIZATION_PATH: files.ownerRecoveryAuthorization,
@@ -263,6 +266,7 @@ export async function startP0BHarness({ env = process.env, repoRoot = REPOSITORY
       P0B_LIVE_BROWSER: "1",
       P0B_AGENT_SESSION_PRIVATE_KEY_PATH: files.agentSessionPrivateKey,
       P0B_QUALIFICATION_MANIFEST_PRIVATE_KEY_PATH: files.qualificationManifestPrivateKey,
+      P0B_POSSESSION_RECEIPT_PRIVATE_KEY_PATH: files.possessionReceiptPrivateKey,
       NODE_EXTRA_CA_CERTS: trustedCaBundle
     };
     cloudProcess = spawnProcess(process.execPath, [P0B_CLOUD_PROCESS], repoRoot, p0bEnvironment(env, common));
@@ -348,11 +352,13 @@ async function createRuntimeFiles(directory) {
   const identity = crypto.generateKeyPairSync("ed25519");
   const agentSession = crypto.generateKeyPairSync("ed25519");
   const qualificationManifest = crypto.generateKeyPairSync("ed25519");
+  const possessionReceipt = crypto.generateKeyPairSync("ed25519");
   const bundlePrivateKey = path.join(directory, "bundle-private.pem");
   const refreshPrivateKey = path.join(directory, "refresh-private.pem");
   const identityPublicKey = path.join(directory, "identity-public.pem");
   const agentSessionPrivateKey = path.join(directory, "agent-session-private.pem");
   const qualificationManifestPrivateKey = path.join(directory, "qualification-manifest-private.pem");
+  const possessionReceiptPrivateKey = path.join(directory, "possession-receipt-private.pem");
   const processPolicies = path.join(directory, "agent-session-process-policies.json");
   const ownerRecoveryAuthorization = path.join(directory, "owner-recovery-notification-authorization");
   await writePrivate(bundlePrivateKey, bundle.privateKey.export({ type: "pkcs8", format: "pem" }));
@@ -360,6 +366,7 @@ async function createRuntimeFiles(directory) {
   await fsp.writeFile(identityPublicKey, identity.publicKey.export({ type: "spki", format: "pem" }), { mode: 0o600, flag: "wx" });
   await writePrivate(agentSessionPrivateKey, agentSession.privateKey.export({ type: "pkcs8", format: "pem" }));
   await writePrivate(qualificationManifestPrivateKey, qualificationManifest.privateKey.export({ type: "pkcs8", format: "pem" }));
+  await writePrivate(possessionReceiptPrivateKey, possessionReceipt.privateKey.export({ type: "pkcs8", format: "pem" }));
   await writePrivate(processPolicies, `${JSON.stringify({ version: 1, policies: [{ policy_id: "claude-code-v1", release_id: "agentpass-0.18.0", agent_kind: "claude-code", adapter_id: "33333333-3333-4333-8333-333333333333", adapter_versions: ["1.0.0"], status: "enabled" }] })}\n`);
   await writePrivate(ownerRecoveryAuthorization, "p0b-owner-recovery-authorization");
   const nonceKeyring = path.join(directory, "refresh-nonce-keyring.json");
@@ -368,9 +375,10 @@ async function createRuntimeFiles(directory) {
   await writePrivate(nonceKeyring, `${JSON.stringify({ version: 1, active_key_id: refreshNonceKeyId, keys: { [refreshNonceKeyId]: refreshNonceKey.toString("base64url") } })}\n`);
   return Object.freeze({
     bundlePrivateKey, refreshPrivateKey, identityPublicKey, nonceKeyring,
-    agentSessionPrivateKey, qualificationManifestPrivateKey, processPolicies, ownerRecoveryAuthorization,
+    agentSessionPrivateKey, qualificationManifestPrivateKey, possessionReceiptPrivateKey, processPolicies, ownerRecoveryAuthorization,
     agentSessionPublicKeyPem: agentSession.publicKey.export({ type: "spki", format: "pem" }).toString(),
     qualificationManifestPublicKeyPem: qualificationManifest.publicKey.export({ type: "spki", format: "pem" }).toString(),
+    possessionReceiptPublicKeyPem: possessionReceipt.publicKey.export({ type: "spki", format: "pem" }).toString(),
     refreshNonceKeyId, refreshNonceKey,
     identityPrivateKeyPem: identity.privateKey.export({ type: "pkcs8", format: "pem" }),
     capabilitySecret: crypto.randomBytes(32).toString("base64url"), cursorSecret: crypto.randomBytes(32).toString("base64url"),

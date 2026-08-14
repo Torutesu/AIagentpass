@@ -11,21 +11,26 @@ import {
 const PURPOSE = "agentpass.agent-session-grant";
 const RESOURCE = "arn:aws:kms:us-east-1:123456789012:key/agent-session";
 const MANIFEST_RESOURCE = "arn:aws:kms:us-east-1:123456789012:key/manifest";
+const POSSESSION_RESOURCE = "arn:aws:kms:us-east-1:123456789012:key/possession";
 
 function fixture() {
   const agent = crypto.generateKeyPairSync("ed25519");
   const manifest = crypto.generateKeyPairSync("ed25519");
+  const possession = crypto.generateKeyPairSync("ed25519");
   const env = {
     AGENTPASS_CLOUD_PROFILE: "hosted",
     AGENTPASS_CLOUD_AGENT_SESSION_KEY_ID: "agent-session-2026-08",
     AGENTPASS_CLOUD_AGENT_SESSION_PUBLIC_KEY: agent.publicKey.export({ type: "spki", format: "pem" }).toString(),
     AGENTPASS_CLOUD_QUALIFICATION_MANIFEST_KEY_ID: "manifest-2026-08",
     AGENTPASS_CLOUD_QUALIFICATION_MANIFEST_PUBLIC_KEY: manifest.publicKey.export({ type: "spki", format: "pem" }).toString(),
+    AGENTPASS_CLOUD_POSSESSION_RECEIPT_KEY_ID: "possession-2026-08",
+    AGENTPASS_CLOUD_POSSESSION_RECEIPT_PUBLIC_KEY: possession.publicKey.export({ type: "spki", format: "pem" }).toString(),
     AGENTPASS_KMS_PROVIDER: "aws",
     AGENTPASS_KMS_AGENT_SESSION_KEY_RESOURCE: RESOURCE,
-    AGENTPASS_KMS_QUALIFICATION_MANIFEST_KEY_RESOURCE: MANIFEST_RESOURCE
+    AGENTPASS_KMS_QUALIFICATION_MANIFEST_KEY_RESOURCE: MANIFEST_RESOURCE,
+    AGENTPASS_KMS_POSSESSION_RECEIPT_KEY_RESOURCE: POSSESSION_RESOURCE
   };
-  return { agent, manifest, env };
+  return { agent, manifest, possession, env };
 }
 
 function fingerprint(pair) {
@@ -41,7 +46,7 @@ test("hosted AWS composition enforces lifecycle state independently per purpose"
     destroy() {}
     async send(command) {
       calls += 1;
-      const pair = command.input.KeyId === RESOURCE ? value.agent : value.manifest;
+      const pair = command.input.KeyId === RESOURCE ? value.agent : command.input.KeyId === MANIFEST_RESOURCE ? value.manifest : value.possession;
       if (command.kind === "get") {
         return {
           KeyId: command.input.KeyId,
@@ -97,9 +102,11 @@ test("hosted GCP composition applies the same active-key boundary", async () => 
   const value = fixture();
   const agentResource = "projects/demo/locations/global/keyRings/agentpass/cryptoKeys/agent/cryptoKeyVersions/1";
   const manifestResource = "projects/demo/locations/global/keyRings/agentpass/cryptoKeys/manifest/cryptoKeyVersions/1";
+  const possessionResource = "projects/demo/locations/global/keyRings/agentpass/cryptoKeys/possession/cryptoKeyVersions/1";
   value.env.AGENTPASS_KMS_PROVIDER = "gcp";
   value.env.AGENTPASS_KMS_AGENT_SESSION_KEY_RESOURCE = agentResource;
   value.env.AGENTPASS_KMS_QUALIFICATION_MANIFEST_KEY_RESOURCE = manifestResource;
+  value.env.AGENTPASS_KMS_POSSESSION_RECEIPT_KEY_RESOURCE = possessionResource;
   const lifecycle = createManagedSignerKeyLifecycle({
     purpose: PURPOSE,
     snapshot: {
@@ -120,11 +127,11 @@ test("hosted GCP composition applies the same active-key boundary", async () => 
   class KeyManagementServiceClient {
     async close() {}
     async getPublicKey({ name }) {
-      const pair = name === agentResource ? value.agent : value.manifest;
+      const pair = name === agentResource ? value.agent : name === manifestResource ? value.manifest : value.possession;
       return [{ name, algorithm: "EC_SIGN_ED25519", protectionLevel: "HSM", pem: pair.publicKey.export({ type: "spki", format: "pem" }).toString() }];
     }
     async asymmetricSign({ name, data }) {
-      const pair = name === agentResource ? value.agent : value.manifest;
+      const pair = name === agentResource ? value.agent : name === manifestResource ? value.manifest : value.possession;
       return [{ name, protectionLevel: "HSM", signature: crypto.sign(null, data, pair.privateKey).toString("base64") }];
     }
   }

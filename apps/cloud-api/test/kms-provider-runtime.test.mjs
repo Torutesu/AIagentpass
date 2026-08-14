@@ -7,31 +7,62 @@ import {
   KMS_PROVIDER_RUNTIME_ERROR_CODES,
   parseKmsProviderRuntimeConfig
 } from "../src/kms-provider-runtime.mjs";
+import {
+  POSSESSION_RECEIPT_PURPOSE,
+  POSSESSION_RECEIPT_VERSION,
+  possessionReceiptSigningData
+} from "../src/possession-receipt-signer.mjs";
+import { createManagedSignerKeyLifecycle } from "../src/managed-signer-key-lifecycle.mjs";
 
 const AGENT_PURPOSE = "agentpass.agent-session-grant";
 const MANIFEST_PURPOSE = "agentpass.qualification-grant-batch-manifest";
 const awsAgentResource = "arn:aws:kms:us-east-1:123456789012:key/agent-session";
 const awsManifestResource = "arn:aws:kms:us-east-1:123456789012:key/qualification-manifest";
+const awsPossessionResource = "arn:aws:kms:us-east-1:123456789012:key/possession-receipt";
 const gcpAgentResource = "projects/demo/locations/global/keyRings/agentpass/cryptoKeys/agent-session/cryptoKeyVersions/1";
 const gcpManifestResource = "projects/demo/locations/global/keyRings/agentpass/cryptoKeys/qualification-manifest/cryptoKeyVersions/1";
+const gcpPossessionResource = "projects/demo/locations/global/keyRings/agentpass/cryptoKeys/possession-receipt/cryptoKeyVersions/1";
 
-function baseEnv({ provider = "aws", agentResource = awsAgentResource, manifestResource = awsManifestResource } = {}) {
+function baseEnv({ provider = "aws", agentResource = awsAgentResource, manifestResource = awsManifestResource, possessionResource } = {}) {
   const agent = crypto.generateKeyPairSync("ed25519");
   const manifest = crypto.generateKeyPairSync("ed25519");
+  const possession = crypto.generateKeyPairSync("ed25519");
+  const resolvedPossessionResource = possessionResource ?? (provider === "gcp" ? gcpPossessionResource : awsPossessionResource);
   return {
     AGENTPASS_CLOUD_PROFILE: "hosted",
     AGENTPASS_CLOUD_AGENT_SESSION_KEY_ID: "agent-session-2026-08",
     AGENTPASS_CLOUD_AGENT_SESSION_PUBLIC_KEY: agent.publicKey.export({ type: "spki", format: "pem" }).toString(),
     AGENTPASS_CLOUD_QUALIFICATION_MANIFEST_KEY_ID: "qualification-manifest-2026-08",
     AGENTPASS_CLOUD_QUALIFICATION_MANIFEST_PUBLIC_KEY: manifest.publicKey.export({ type: "spki", format: "pem" }).toString(),
+    AGENTPASS_CLOUD_POSSESSION_RECEIPT_KEY_ID: "possession-receipt-2026-08",
+    AGENTPASS_CLOUD_POSSESSION_RECEIPT_PUBLIC_KEY: possession.publicKey.export({ type: "spki", format: "pem" }).toString(),
+    AGENTPASS_CLOUD_POSSESSION_RECEIPT_TIMEOUT_MS: "5000",
     AGENTPASS_KMS_PROVIDER: provider,
     AGENTPASS_KMS_AGENT_SESSION_KEY_RESOURCE: agentResource,
     AGENTPASS_KMS_QUALIFICATION_MANIFEST_KEY_RESOURCE: manifestResource,
-    __keys: { agent, manifest }
+    AGENTPASS_KMS_POSSESSION_RECEIPT_KEY_RESOURCE: resolvedPossessionResource,
+    __keys: { agent, manifest, possession }
   };
 }
 
 function publicDer(keyPair) { return keyPair.publicKey.export({ type: "spki", format: "der" }); }
+
+function possessionStatement() {
+  return {
+    version: 1,
+    enrollment_id: "11111111-1111-4111-8111-111111111111",
+    organization_id: "22222222-2222-4222-8222-222222222222",
+    device_id: "33333333-3333-4333-8333-333333333333",
+    candidate_id: "candidate-2026-08",
+    artifact_sha256: "a".repeat(64),
+    source_commit: "b".repeat(40),
+    team_id: "ABCDE12345",
+    device_key_fingerprint: `SHA256:${"C".repeat(43)}`,
+    device_key_epoch: 1,
+    challenge_nonce_digest: "d".repeat(64),
+    issued_at: "2026-08-14T00:00:00.000Z"
+  };
+}
 
 test("hosted KMS config is explicit, closed, and keeps logical IDs separate from resources", () => {
   const env = baseEnv();
@@ -39,14 +70,21 @@ test("hosted KMS config is explicit, closed, and keeps logical IDs separate from
   assert.equal(config.provider, "aws");
   assert.equal(config.agentSession.keyId, "agent-session-2026-08");
   assert.equal(config.agentSessionResource, awsAgentResource);
+  assert.equal(config.possessionReceipt.keyId, "possession-receipt-2026-08");
+  assert.equal(config.possessionReceiptResource, awsPossessionResource);
   assert.notEqual(config.agentSession.keyId, config.agentSessionResource);
 
   for (const value of [
     { AGENTPASS_KMS_PROVIDER: undefined },
     { AGENTPASS_KMS_AGENT_SESSION_KEY_RESOURCE: undefined },
     { AGENTPASS_KMS_QUALIFICATION_MANIFEST_KEY_RESOURCE: undefined },
+    { AGENTPASS_KMS_POSSESSION_RECEIPT_KEY_RESOURCE: undefined },
     { AGENTPASS_KMS_PROVIDER: "local" },
     { AGENTPASS_KMS_AGENT_SESSION_KEY_RESOURCE: awsManifestResource },
+    { AGENTPASS_KMS_POSSESSION_RECEIPT_KEY_RESOURCE: awsManifestResource },
+    { AGENTPASS_CLOUD_POSSESSION_RECEIPT_KEY_ID: "agent-session-2026-08" },
+    { AGENTPASS_CLOUD_POSSESSION_RECEIPT_PUBLIC_KEY: env.AGENTPASS_CLOUD_AGENT_SESSION_PUBLIC_KEY },
+    { AGENTPASS_CLOUD_POSSESSION_RECEIPT_TIMEOUT_MS: "30001" },
     { AGENTPASS_KMS_PRIVATE_KEY_PATH: "/tmp/key" },
     { AGENTPASS_CLOUD_PROFILE: "evaluation" }
   ]) {
@@ -55,7 +93,7 @@ test("hosted KMS config is explicit, closed, and keeps logical IDs separate from
   }
 });
 
-test("AWS composition instantiates official-shaped clients and signs with mapped remote resources", async () => {
+test("AWS composition instantiates official-shaped clients and signs all purpose-separated providers with mapped remote resources", async () => {
   const env = baseEnv();
   const observed = [];
   let destroyed = 0;
@@ -65,20 +103,22 @@ test("AWS composition instantiates official-shaped clients and signs with mapped
     destroy() { destroyed += 1; }
     async send(command) {
       observed.push(command);
+      const keyPair = command.input.KeyId === awsAgentResource
+        ? env.__keys.agent
+        : command.input.KeyId === awsManifestResource ? env.__keys.manifest : env.__keys.possession;
       if (command.kind === "get") {
         return {
           KeyId: command.input.KeyId,
           KeyUsage: "SIGN_VERIFY",
           KeySpec: "ECC_NIST_EDWARDS25519",
           SigningAlgorithms: ["ED25519_SHA_512"],
-          PublicKey: publicDer(command.input.KeyId === awsAgentResource ? env.__keys.agent : env.__keys.manifest)
+          PublicKey: publicDer(keyPair)
         };
       }
-      const pair = command.input.KeyId === awsAgentResource ? env.__keys.agent : env.__keys.manifest;
       return {
         KeyId: command.input.KeyId,
         SigningAlgorithm: "ED25519_SHA_512",
-        Signature: crypto.sign(null, command.input.Message, pair.privateKey)
+        Signature: crypto.sign(null, command.input.Message, keyPair.privateKey)
       };
     }
   }
@@ -90,7 +130,12 @@ test("AWS composition instantiates official-shaped clients and signs with mapped
     algorithm: "ed25519", bytes: data, key_id: "agent-session-2026-08", purpose: AGENT_PURPOSE, version: 1
   });
   assert.equal(crypto.verify(null, data, env.__keys.agent.publicKey, signature), true);
-  assert.equal(observed.every((command) => command.input.KeyId === awsAgentResource), true);
+  const possessionBytes = possessionReceiptSigningData(possessionStatement());
+  const possessionSignature = await providers.possessionReceiptSignerProvider.sign({ algorithm: "ed25519", bytes: possessionBytes, key_id: "possession-receipt-2026-08", purpose: POSSESSION_RECEIPT_PURPOSE, version: POSSESSION_RECEIPT_VERSION });
+  assert.equal(crypto.verify(null, possessionBytes, env.__keys.possession.publicKey, possessionSignature), true);
+  assert.equal(observed.some((command) => command.input.KeyId === awsPossessionResource), true);
+  assert.equal(observed.filter((command) => command.input.KeyId === awsAgentResource).length > 0, true);
+  assert.equal(observed.every((command) => [awsAgentResource, awsManifestResource, awsPossessionResource].includes(command.input.KeyId)), true);
   assert.equal(providers.agentSessionSignerProvider.close, undefined);
   await Promise.all([providers.close(), providers.close(), providers.close()]);
   assert.equal(destroyed, 1);
@@ -104,12 +149,16 @@ test("GCP composition instantiates official-shaped clients and maps cryptoKeyVer
     async close() { closed += 1; }
     async getPublicKey(input) {
       observed.push({ operation: "getPublicKey", input });
-      const pair = input.name === gcpAgentResource ? env.__keys.agent : env.__keys.manifest;
+      const pair = input.name === gcpAgentResource
+        ? env.__keys.agent
+        : input.name === gcpManifestResource ? env.__keys.manifest : env.__keys.possession;
       return [{ name: input.name, algorithm: "EC_SIGN_ED25519", protectionLevel: "HSM", pem: pair.publicKey.export({ type: "spki", format: "pem" }).toString() }];
     }
     async asymmetricSign(input) {
       observed.push({ operation: "asymmetricSign", input });
-      const pair = input.name === gcpAgentResource ? env.__keys.agent : env.__keys.manifest;
+      const pair = input.name === gcpAgentResource
+        ? env.__keys.agent
+        : input.name === gcpManifestResource ? env.__keys.manifest : env.__keys.possession;
       return [{ name: input.name, protectionLevel: "HSM", signature: crypto.sign(null, input.data, pair.privateKey).toString("base64") }];
     }
   }
@@ -119,10 +168,125 @@ test("GCP composition instantiates official-shaped clients and maps cryptoKeyVer
     algorithm: "ed25519", bytes: data, key_id: "qualification-manifest-2026-08", purpose: MANIFEST_PURPOSE, version: 2
   });
   assert.equal(crypto.verify(null, data, env.__keys.manifest.publicKey, signature), true);
-  assert.equal(observed.every(({ input }) => input.name === gcpManifestResource), true);
+  const possessionBytes = possessionReceiptSigningData(possessionStatement());
+  const possessionSignature = await providers.possessionReceiptSignerProvider.sign({ algorithm: "ed25519", bytes: possessionBytes, key_id: "possession-receipt-2026-08", purpose: POSSESSION_RECEIPT_PURPOSE, version: POSSESSION_RECEIPT_VERSION });
+  assert.equal(crypto.verify(null, possessionBytes, env.__keys.possession.publicKey, possessionSignature), true);
+  assert.equal(observed.some(({ input }) => input.name === gcpPossessionResource), true);
+  assert.equal(observed.every(({ input }) => [gcpAgentResource, gcpManifestResource, gcpPossessionResource].includes(input.name)), true);
   assert.equal(providers.qualificationManifestSignerProvider.close, undefined);
   await Promise.all([providers.close(), providers.close()]);
   assert.equal(closed, 1);
+});
+
+test("AWS possession receipt binding rejects a substituted KMS resource", async () => {
+  const env = baseEnv();
+  let signCalls = 0;
+  let destroyed = 0;
+  class GetPublicKeyCommand { constructor(input) { this.input = input; this.kind = "get"; } }
+  class SignCommand { constructor(input) { this.input = input; this.kind = "sign"; } }
+  class KMSClient {
+    destroy() { destroyed += 1; }
+    async send(command) {
+      if (command.kind === "get") return {
+        KeyId: awsManifestResource,
+        KeyUsage: "SIGN_VERIFY",
+        KeySpec: "ECC_NIST_EDWARDS25519",
+        SigningAlgorithms: ["ED25519_SHA_512"],
+        PublicKey: publicDer(env.__keys.possession)
+      };
+      signCalls += 1;
+      return { KeyId: awsManifestResource, SigningAlgorithm: "ED25519_SHA_512", Signature: Buffer.alloc(64) };
+    }
+  }
+  const providers = await createHostedKmsProviders({ env, sdkLoader: async () => ({ KMSClient, GetPublicKeyCommand, SignCommand }) });
+  await assert.rejects(
+    providers.possessionReceiptSignerProvider.publicKeyMetadata({ algorithm: "ed25519", key_id: "possession-receipt-2026-08", purpose: POSSESSION_RECEIPT_PURPOSE, version: POSSESSION_RECEIPT_VERSION })
+  );
+  assert.equal(signCalls, 0);
+  await providers.close();
+  assert.equal(destroyed, 1);
+});
+
+test("GCP possession receipt binding rejects a substituted cryptoKeyVersion", async () => {
+  const env = baseEnv({ provider: "gcp", agentResource: gcpAgentResource, manifestResource: gcpManifestResource });
+  let signCalls = 0;
+  let closed = 0;
+  class KeyManagementServiceClient {
+    async close() { closed += 1; }
+    async getPublicKey(input) {
+      return [{ name: gcpManifestResource, algorithm: "EC_SIGN_ED25519", protectionLevel: "HSM", pem: env.__keys.possession.publicKey.export({ type: "spki", format: "pem" }).toString() }];
+    }
+    async asymmetricSign() { signCalls += 1; return [{ name: gcpManifestResource, protectionLevel: "HSM", signature: Buffer.alloc(64).toString("base64") }]; }
+  }
+  const providers = await createHostedKmsProviders({ env, sdkLoader: async () => ({ KeyManagementServiceClient }) });
+  await assert.rejects(
+    providers.possessionReceiptSignerProvider.publicKeyMetadata({ algorithm: "ed25519", key_id: "possession-receipt-2026-08", purpose: POSSESSION_RECEIPT_PURPOSE, version: POSSESSION_RECEIPT_VERSION })
+  );
+  assert.equal(signCalls, 0);
+  await providers.close();
+  assert.equal(closed, 1);
+});
+
+test("possession receipt lifecycle injection is purpose-bound and can disable only that provider", async () => {
+  const env = baseEnv();
+  const fingerprint = crypto.createHash("sha256").update(publicDer(env.__keys.possession)).digest("hex");
+  const lifecycle = createManagedSignerKeyLifecycle({
+    purpose: POSSESSION_RECEIPT_PURPOSE,
+    snapshot: {
+      version: 1,
+      purpose: POSSESSION_RECEIPT_PURPOSE,
+      algorithm: "ed25519",
+      keys: [{
+        key_id: env.AGENTPASS_CLOUD_POSSESSION_RECEIPT_KEY_ID,
+        key_version: 1,
+        purpose: POSSESSION_RECEIPT_PURPOSE,
+        algorithm: "ed25519",
+        public_key_fingerprint: fingerprint,
+        state: "active",
+        state_version: 1
+      }]
+    }
+  });
+  class GetPublicKeyCommand { constructor(input) { this.input = input; this.kind = "get"; } }
+  class SignCommand { constructor(input) { this.input = input; this.kind = "sign"; } }
+  class KMSClient {
+    destroy() {}
+    async send(command) {
+      const pair = command.input.KeyId === awsPossessionResource ? env.__keys.possession : env.__keys.agent;
+      if (command.kind === "get") return { KeyId: command.input.KeyId, KeyUsage: "SIGN_VERIFY", KeySpec: "ECC_NIST_EDWARDS25519", SigningAlgorithms: ["ED25519_SHA_512"], PublicKey: publicDer(pair) };
+      return { KeyId: command.input.KeyId, SigningAlgorithm: "ED25519_SHA_512", Signature: crypto.sign(null, command.input.Message, pair.privateKey) };
+    }
+  }
+  const providers = await createHostedKmsProviders({
+    env,
+    keyLifecycles: { possessionReceipt: lifecycle },
+    sdkLoader: async () => ({ KMSClient, GetPublicKeyCommand, SignCommand })
+  });
+  lifecycle.emergencyDisable({ expected_version: 1, operation_id: "disable-possession-receipt" });
+  await assert.rejects(
+    providers.possessionReceiptSignerProvider.sign({ algorithm: "ed25519", bytes: possessionReceiptSigningData(possessionStatement()), key_id: "possession-receipt-2026-08", purpose: POSSESSION_RECEIPT_PURPOSE, version: POSSESSION_RECEIPT_VERSION })
+  );
+  await providers.close();
+});
+
+test("third-purpose construction failure closes the owned cloud client", async () => {
+  const env = baseEnv();
+  let destroyed = 0;
+  class GetPublicKeyCommand { constructor(input) { this.input = input; } }
+  class SignCommand { constructor(input) { this.input = input; } }
+  class KMSClient {
+    destroy() { destroyed += 1; }
+    async send() { throw new Error("not reached"); }
+  }
+  await assert.rejects(
+    createHostedKmsProviders({
+      env,
+      keyLifecycles: { possessionReceipt: {} },
+      sdkLoader: async () => ({ KMSClient, GetPublicKeyCommand, SignCommand })
+    }),
+    { code: KMS_PROVIDER_RUNTIME_ERROR_CODES.UNAVAILABLE }
+  );
+  assert.equal(destroyed, 1);
 });
 
 test("hosted runtime applies an isolated fail-closed circuit at each managed signer boundary", async () => {

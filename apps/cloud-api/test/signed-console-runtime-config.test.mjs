@@ -7,6 +7,7 @@ import test from "node:test";
 
 import { createApiTokenRecord, generateApiToken } from "../src/auth.mjs";
 import { createCloudRuntime, loadRuntimeConfig } from "../src/runtime.mjs";
+import { createManagedSignerRepositoryFactory } from "./support/managed-signer-repository.mjs";
 
 const CURSOR_SECRET = Buffer.alloc(32, 0x5a).toString("base64url");
 const DATABASE_URL = "postgresql://agent:database-secret@db.example.test/agentpass?sslmode=verify-full";
@@ -30,6 +31,7 @@ function createFixture({ identityPublicKey, bundlePrivateKey } = {}) {
   const identityPair = crypto.generateKeyPairSync("ed25519");
   const agentSessionPair = crypto.generateKeyPairSync("ed25519");
   const qualificationManifestPair = crypto.generateKeyPairSync("ed25519");
+  const possessionReceiptPair = crypto.generateKeyPairSync("ed25519");
   const token = generateApiToken();
   const records = [createApiTokenRecord({
     token,
@@ -62,6 +64,10 @@ function createFixture({ identityPublicKey, bundlePrivateKey } = {}) {
       async publicKeyMetadata(input) { return { key_id: input.key_id, algorithm: "ed25519", public_key: qualificationManifestPair.publicKey.export({ type: "spki", format: "pem" }).toString() }; },
       async sign({ bytes }) { return crypto.sign(null, bytes, qualificationManifestPair.privateKey); }
     },
+    possessionReceiptSignerProvider: {
+      async publicKeyMetadata(input) { return { key_id: input.key_id, algorithm: "ed25519", public_key: possessionReceiptPair.publicKey.export({ type: "spki", format: "pem" }).toString() }; },
+      async sign({ bytes }) { return crypto.sign(null, bytes, possessionReceiptPair.privateKey); }
+    },
     env: {
       AGENTPASS_CLOUD_PROFILE: "hosted",
       AGENTPASS_CLOUD_BUNDLE_PRIVATE_KEY_PATH: bundlePrivateKeyPath,
@@ -72,6 +78,8 @@ function createFixture({ identityPublicKey, bundlePrivateKey } = {}) {
       AGENTPASS_CLOUD_AGENT_SESSION_PUBLIC_KEY: agentSessionPublicKey,
       AGENTPASS_CLOUD_QUALIFICATION_MANIFEST_KEY_ID: "qualification-manifest-2026-08",
       AGENTPASS_CLOUD_QUALIFICATION_MANIFEST_PUBLIC_KEY: qualificationManifestPair.publicKey.export({ type: "spki", format: "pem" }).toString(),
+      AGENTPASS_CLOUD_POSSESSION_RECEIPT_KEY_ID: "possession-receipt-2026-08",
+      AGENTPASS_CLOUD_POSSESSION_RECEIPT_PUBLIC_KEY: possessionReceiptPair.publicKey.export({ type: "spki", format: "pem" }).toString(),
       AGENTPASS_CLOUD_AGENT_SESSION_PROCESS_POLICIES_PATH: agentSessionProcessPoliciesPath,
       AGENTPASS_OWNER_RECOVERY_NOTIFICATION_WEBHOOK_URL: "https://notifications.example.test/owner-recovery",
       AGENTPASS_OWNER_RECOVERY_NOTIFICATION_CONFIRMATION_URL: "https://notifications.example.test/owner-recovery/acceptance",
@@ -146,6 +154,7 @@ function fakePostgresRuntime() {
     agentSessionIssuanceRepository: { async issueAgentSessionGrant() { return null; } },
     agentSessionAuthorityRepository: { async consumeAgentSessionGrant() { return null; } },
     qualificationGrantBatchRepository: { async claimQualificationGrantBatch() { return null; } },
+    createManagedSignerKeyLifecycleRepository: createManagedSignerRepositoryFactory(),
     controlPlaneStore: { async pollDeviceRefresh() { return null; }, async markDeviceRefreshDelivered() {} },
     refreshHintNotifier: { async waitForRefresh() { return false; } },
     sharedControlRepository: {
@@ -187,7 +196,7 @@ test("createCloudRuntime rejects an identity public-key file with unsafe mode", 
   try {
     fs.chmodSync(fixture.identityPublicKeyPath, 0o640);
     await assert.rejects(
-      createCloudRuntime({ env: fixture.env, agentSessionSignerProvider: fixture.agentSessionSignerProvider, qualificationManifestSignerProvider: fixture.qualificationManifestSignerProvider }),
+      createCloudRuntime({ env: fixture.env, agentSessionSignerProvider: fixture.agentSessionSignerProvider, qualificationManifestSignerProvider: fixture.qualificationManifestSignerProvider, possessionReceiptSignerProvider: fixture.possessionReceiptSignerProvider }),
       /Cloud console identity public key permissions are unsafe/
     );
   } finally {
@@ -202,7 +211,7 @@ test("createCloudRuntime rejects a symlink at the identity public-key path", asy
     fs.renameSync(fixture.identityPublicKeyPath, target);
     fs.symlinkSync(target, fixture.identityPublicKeyPath);
     await assert.rejects(
-      createCloudRuntime({ env: fixture.env, agentSessionSignerProvider: fixture.agentSessionSignerProvider, qualificationManifestSignerProvider: fixture.qualificationManifestSignerProvider }),
+      createCloudRuntime({ env: fixture.env, agentSessionSignerProvider: fixture.agentSessionSignerProvider, qualificationManifestSignerProvider: fixture.qualificationManifestSignerProvider, possessionReceiptSignerProvider: fixture.possessionReceiptSignerProvider }),
       /ELOOP|unsafe|symbolic link|too many levels/i
     );
   } finally {
@@ -217,7 +226,7 @@ test("createCloudRuntime rejects a hardlink at the identity public-key path", as
     fs.renameSync(fixture.identityPublicKeyPath, target);
     fs.linkSync(target, fixture.identityPublicKeyPath);
     await assert.rejects(
-      createCloudRuntime({ env: fixture.env, agentSessionSignerProvider: fixture.agentSessionSignerProvider, qualificationManifestSignerProvider: fixture.qualificationManifestSignerProvider }),
+      createCloudRuntime({ env: fixture.env, agentSessionSignerProvider: fixture.agentSessionSignerProvider, qualificationManifestSignerProvider: fixture.qualificationManifestSignerProvider, possessionReceiptSignerProvider: fixture.possessionReceiptSignerProvider }),
       /Cloud console identity public key permissions are unsafe/
     );
   } finally {
@@ -245,7 +254,7 @@ test("createCloudRuntime rejects a foreign-owner equivalent at the identity publ
       return foreignOwnerStat;
     };
     await assert.rejects(
-      createCloudRuntime({ env: fixture.env, agentSessionSignerProvider: fixture.agentSessionSignerProvider, qualificationManifestSignerProvider: fixture.qualificationManifestSignerProvider }),
+      createCloudRuntime({ env: fixture.env, agentSessionSignerProvider: fixture.agentSessionSignerProvider, qualificationManifestSignerProvider: fixture.qualificationManifestSignerProvider, possessionReceiptSignerProvider: fixture.possessionReceiptSignerProvider }),
       /Cloud console identity public key permissions are unsafe/
     );
   } finally {
@@ -274,7 +283,7 @@ test("createCloudRuntime rejects non-Ed25519 bundle and console identity keys", 
       const postgres = fakePostgresRuntime();
       try {
         await assert.rejects(
-          createCloudRuntime({ env: value.fixture.env, agentSessionSignerProvider: value.fixture.agentSessionSignerProvider, qualificationManifestSignerProvider: value.fixture.qualificationManifestSignerProvider, postgresFactory: async () => postgres }),
+          createCloudRuntime({ env: value.fixture.env, agentSessionSignerProvider: value.fixture.agentSessionSignerProvider, qualificationManifestSignerProvider: value.fixture.qualificationManifestSignerProvider, possessionReceiptSignerProvider: value.fixture.possessionReceiptSignerProvider, postgresFactory: async () => postgres }),
           value.expected
         );
         assert.equal(postgres.wasClosed(), value.name === "console identity public key");
@@ -303,7 +312,7 @@ test("createCloudRuntime rejects broken bundle and console identity PEM", async 
       const postgres = fakePostgresRuntime();
       try {
         await assert.rejects(
-          createCloudRuntime({ env: value.fixture.env, agentSessionSignerProvider: value.fixture.agentSessionSignerProvider, qualificationManifestSignerProvider: value.fixture.qualificationManifestSignerProvider, postgresFactory: async () => postgres }),
+          createCloudRuntime({ env: value.fixture.env, agentSessionSignerProvider: value.fixture.agentSessionSignerProvider, qualificationManifestSignerProvider: value.fixture.qualificationManifestSignerProvider, possessionReceiptSignerProvider: value.fixture.possessionReceiptSignerProvider, postgresFactory: async () => postgres }),
           value.expected
         );
         assert.equal(postgres.wasClosed(), value.name === "console identity public key");
@@ -332,6 +341,7 @@ test("complete production configuration wires only the pinned signedConsoleIdent
       env: fixture.env,
       agentSessionSignerProvider: fixture.agentSessionSignerProvider,
       qualificationManifestSignerProvider: fixture.qualificationManifestSignerProvider,
+      possessionReceiptSignerProvider: fixture.possessionReceiptSignerProvider,
       logger,
       postgresFactory: async () => postgres,
       humanAuthFactory: (input) => {

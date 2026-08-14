@@ -1,9 +1,11 @@
 # Hosted KMS signer rotation runbook
 
-This runbook applies to the two hosted Ed25519 signing purposes:
+This runbook applies to the three currently composed hosted Ed25519 signing
+purposes:
 
 - `agent-session-grant`
 - `qualification-grant-batch-manifest`
+- `device-enrollment-possession-receipt`
 
 The signing private key remains in the remote KMS/HSM. AgentPass receives only a
 pinned public key and a 64-byte signature. The provider boundary must be
@@ -31,10 +33,18 @@ that bound is a release-blocking schema change, never an adapter fallback.
 
 Hosted startup requires `AGENTPASS_KMS_PROVIDER=aws|gcp` plus distinct
 `AGENTPASS_KMS_AGENT_SESSION_KEY_RESOURCE` and
-`AGENTPASS_KMS_QUALIFICATION_MANIFEST_KEY_RESOURCE` values. These are remote
-KMS resource identifiers; they are intentionally separate from the logical
-`AGENTPASS_CLOUD_*_KEY_ID` values and their pinned public keys. AWS uses the
-standard SDK credential chain; GCP uses Application Default Credentials.
+`AGENTPASS_KMS_QUALIFICATION_MANIFEST_KEY_RESOURCE`, and
+`AGENTPASS_KMS_POSSESSION_RECEIPT_KEY_RESOURCE` values. These are remote KMS
+resource identifiers; they are intentionally separate from the logical
+`AGENTPASS_CLOUD_*_KEY_ID` values and their pinned public keys. All three
+resources, logical key IDs, and public-key fingerprints must be distinct. AWS
+uses the standard SDK credential chain; GCP uses Application Default
+Credentials.
+
+Hosted startup verifies PostgreSQL migration 0037 before constructing any KMS
+provider. The database lifecycle row is authoritative: an existing key state is
+never overwritten from environment configuration, and a retired, revoked, or
+emergency-disabled active binding keeps readiness closed.
 
 1. Create a new Ed25519 KMS key/version in the same purpose-specific namespace.
 2. Record the key identifier, canonical SPKI public-key fingerprint, algorithm,
@@ -72,10 +82,17 @@ Never write with both keys, and never accept a public-key response that differs
 from the pinned fingerprint. A provider metadata substitution is an outage,
 not a reason to update the pin during the same incident.
 
+Every signing operation follows `reserve -> provider sign once -> commit exact
+signature -> reply`. A committed retry returns the stored 64-byte signature. A
+pending or uncertain operation must never be blindly re-signed; reconcile it
+only from provider-confirmed exact signature bytes or resolve it through the
+documented operator procedure. A request digest conflict is an integrity event.
+
 ## Emergency revoke
 
 1. Declare the affected purpose and key ID. If the scope is uncertain, revoke
-   both purposes independently rather than sharing a key or broadening trust.
+   each affected purpose independently rather than sharing a key or broadening
+   trust.
 2. Disable the KMS key/version immediately. Remove it from the active and
    retiring verification rings, and deploy the configuration with readiness
    expected to fail closed until a replacement key is ready.

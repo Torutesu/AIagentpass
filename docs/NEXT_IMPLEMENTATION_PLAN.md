@@ -463,8 +463,8 @@ or release boundary still has one owner and one ordered merge queue.
 | 7 | W2.5 browser hardening | CSP/HSTS/cookies/CSRF/origin/cache policy, keyboard/focus/live-region/zoom/reduced-motion, forbidden-material scan | Chromium + WebKit; Firefox where authenticator support permits | W2 exit |
 | 8 | W3.1 signer contract freeze — parallel with 3–7 | One provider-neutral purpose map, immutable key metadata, fixed algorithms/domains, no caller key selection | Catalog/OpenAPI/schema compatibility and cross-purpose negative tests | Managed KMS qualification |
 | 9 | W3.2 managed signer qualification | Separate AWS/GCP workload identities and keys for every purpose; provider timeout/throttle/circuit behavior | IAM denial, non-exportability, outage, malformed response, and no-file-fallback evidence | Hosted signer activation |
-| 10 | W3.3 rotation and recovery — PostgreSQL foundation complete, runtime integration pending | Migration 0037, durable lifecycle operations, exact signature replay, pending/uncertain quarantine | Wire repositories into every hosted KMS purpose; real PostgreSQL multi-replica rotation/signing/restore and restart-safe verification | W3 exit |
-| 11 | W4.1 headless setup state machine — v2 Device handoff implemented, hosted signer pending | Strict v2 invitation, signed receipt recovery/read, verified receipt before trust persistence, no response-loss POST replay | Compose hosted possession signer; interrupt/restart physical-Mac journey and machine-readable secret scan | Claude Code adapter |
+| 10 | W3.3 rotation and recovery — three-purpose runtime source complete, external qualification pending | Migration 0037, durable lifecycle operations, exact signature replay, pending/uncertain quarantine, PostgreSQL-first startup, and Agent Session/qualification/possession KMS composition | Attach AWS/GCP IAM and non-exportability evidence; complete forced-termination, rotation/restore, and restart-safe verification in protected staging | W3 exit |
+| 11 | W4.1 headless setup state machine — v2 Device handoff and hosted possession signer composed | Strict v2 invitation, signed receipt recovery/read, verified receipt before trust persistence, no response-loss POST replay | Complete Console enrollment and interrupt/restart physical-Mac journey with machine-readable secret scan | Claude Code adapter |
 | 12 | W4.2 Claude Code adapter | Identity/ancestry/repository/worktree/branch/TTL/generation/budget binding and Git signing self-test | Two unattended verified commits plus substitution, expiry, death, PID-reuse, and budget races | Primary native journey |
 | 13 | W4.3 Cursor parity and lifecycle | Thin Cursor adapter plus revoke, close, uninstall-preserve, reinstall-recover, and explicit purge | Same authority matrix as Claude Code; no adapter-specific authority path | W4 exit |
 | 14 | W5 release candidate | Universal hardened-runtime PKG, nested signatures, notarization/stapling, SBOM, provenance, release manifest, Homebrew bootstrap | Independent artifact verification and clean-machine journeys | Physical qualification |
@@ -480,10 +480,11 @@ at the final gated stages.
 ### Next three implementation cycles from migration 0037
 
 Migration 0037 and strict Device enrollment v2 are now the source baseline.
-The immediate critical path is to compose the durable lifecycle with hosted
-KMS signing without creating a retry path that can issue two signatures for one
-authority mutation. Work remains feature-gated until every exit condition below
-passes.
+The durable lifecycle is now composed with the first three hosted KMS purposes
+without a retry path that can issue two signatures for one authority mutation.
+The immediate critical path moves to external KMS/IAM qualification and the
+signed device-enrollment vertical slice. Work remains feature-gated until every
+exit condition below passes.
 
 #### Cycle C — hosted signer runtime composition
 
@@ -589,7 +590,7 @@ Add real PostgreSQL, two-instance, Playwright, KMS/IAM, packaging/notarization, 
 10. `feat: qualify purpose-separated managed signer providers` (W3; AWS/GCP adapters and isolated timeout/throttle/integrity circuit behavior implemented, all-purpose IAM/non-exportability/outage/rotation evidence pending)
 11. `feat: add signer lifecycle and resumable onboarding` (W3.3/W4.1; source lifecycle, shared durable setup reader, redacted output, and Console role enforcement implemented; external durability/enrollment evidence pending)
 12. `feat: persist signer lifecycle and require v2 device receipts` (W3.3/W4.1; migration/repositories and strict client/Cloud contract implemented; runtime composition and physical evidence pending)
-13. `feat: compose durable hosted signer runtime` (W3.3/W3.4; immediate next merge, production activation remains disabled)
+13. `feat: compose durable hosted signer runtime` (W3.3/W3.4; source implementation complete for Agent Session, qualification, and possession receipt; protected AWS/GCP qualification pending)
 14. `feat: complete signed device enrollment journey` (W4.1; Console plus resumable headless setup)
 15. `feat: complete claude code headless onboarding` (W4.2)
 16. `feat: add cursor adapter parity` (W4.3)

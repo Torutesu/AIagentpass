@@ -12,16 +12,22 @@ import { parseCloudRuntimeProfile } from "./runtime-profile.mjs";
 import { createRefreshHintService } from "./refresh-hint-service.mjs";
 import { createEd25519RefreshHintSigner } from "./refresh-hint-signer.mjs";
 import { createRefreshNonceCodec } from "./postgres/refresh-nonce-codec.mjs";
-import { createHostedAgentSessionGrantSigner } from "./agent-session-signer-config.mjs";
+import { createHostedAgentSessionGrantSigner, parseAgentSessionSignerConfig } from "./agent-session-signer-config.mjs";
 import { createProcessBindingPolicyRegistry } from "./process-binding-policy-registry.mjs";
 import { createAgentSessionDeviceApi } from "./agent-session-device-api.mjs";
 import { createQualificationGrantBatchDeviceApi } from "./qualification-grant-batch-device-api.mjs";
-import { createHostedQualificationManifestSigner } from "./qualification-manifest-signer-config.mjs";
+import { createHostedQualificationManifestSigner, parseQualificationManifestSignerConfig } from "./qualification-manifest-signer-config.mjs";
 import { createOwnerRecoveryNotificationPublisher } from "./postgres/owner-recovery-notification-publisher.mjs";
+import { bindHostedManagedSignerProvider } from "./hosted-managed-signer-runtime.mjs";
+import { AGENT_SESSION_GRANT_VERSION } from "./agent-session-grant.mjs";
+import { QUALIFICATION_GRANT_BATCH_MANIFEST_PURPOSE, QUALIFICATION_GRANT_BATCH_MANIFEST_VERSION } from "./qualification-grant-batch-manifest.mjs";
+import { createHostedKmsProviders } from "./kms-provider-runtime.mjs";
+import { createHostedPossessionReceiptSigner, parsePossessionReceiptSignerConfig } from "./possession-receipt-signer-config.mjs";
+import { POSSESSION_RECEIPT_PURPOSE, POSSESSION_RECEIPT_VERSION } from "./possession-receipt-signer.mjs";
 
 const IDENTIFIER = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 
-export async function createCloudRuntime({ env = process.env, logger = console, postgresFactory = createPostgresRuntime, humanAuthFactory = createHumanAuthRuntime, agentSessionSignerProvider, agentSessionSignerFactory = createHostedAgentSessionGrantSigner, qualificationManifestSignerProvider, qualificationManifestSignerFactory = createHostedQualificationManifestSigner, ownerRecoveryPublisher } = {}) {
+export async function createCloudRuntime({ env = process.env, logger = console, postgresFactory = createPostgresRuntime, humanAuthFactory = createHumanAuthRuntime, kmsProviderFactory = createHostedKmsProviders, agentSessionSignerProvider, agentSessionSignerFactory = createHostedAgentSessionGrantSigner, qualificationManifestSignerProvider, qualificationManifestSignerFactory = createHostedQualificationManifestSigner, possessionReceiptSignerProvider, possessionReceiptSignerFactory = createHostedPossessionReceiptSigner, ownerRecoveryPublisher } = {}) {
   const profile = parseCloudRuntimeProfile(env);
   const config = loadRuntimeConfig(env);
   const configuredOwnerRecoveryPublisher = profile.isHosted
@@ -35,12 +41,14 @@ export async function createCloudRuntime({ env = process.env, logger = console, 
   if (privateKey.asymmetricKeyType !== "ed25519") throw new Error("Cloud bundle private key must be Ed25519");
   let refreshHintSigner;
   let refreshNonceCodec;
+  let refreshPrivateKey;
   let agentSessionSigner;
   let qualificationManifestSigner;
+  let possessionReceiptSigner;
+  let ownedKmsProviders;
   let processBindingPolicies;
   if (profile.isHosted) {
     const refreshPrivateKeyPEM = readProtectedFile(config.refreshPrivateKeyPath, "refresh private key", 16 * 1024).toString("utf8");
-    let refreshPrivateKey;
     try { refreshPrivateKey = crypto.createPrivateKey(refreshPrivateKeyPEM); } catch { throw new Error("Cloud refresh private key is invalid"); }
     if (refreshPrivateKey.asymmetricKeyType !== "ed25519") throw new Error("Cloud refresh private key must be Ed25519");
     const bundlePublic = crypto.createPublicKey(privateKey).export({ type: "spki", format: "der" });
@@ -49,36 +57,6 @@ export async function createCloudRuntime({ env = process.env, logger = console, 
     refreshHintSigner = createEd25519RefreshHintSigner({ privateKey: refreshPrivateKey, keyId: config.refreshKeyId });
     refreshNonceCodec = loadRefreshNonceCodec(config.refreshNonceKeyringPath);
     processBindingPolicies = createProcessBindingPolicyRegistry(readProtectedJson(config.agentSessionProcessPoliciesPath, "Agent Session process policies", 256 * 1024));
-    agentSessionSigner = await agentSessionSignerFactory({
-      provider: agentSessionSignerProvider,
-      env,
-      references: {
-        bundle: { keyId: config.keyId, publicKey: privateKey },
-        refresh: { keyId: config.refreshKeyId, publicKey: refreshPrivateKey }
-      }
-    });
-    if (!agentSessionSigner || typeof agentSessionSigner.signAgentSessionGrant !== "function"
-      || typeof agentSessionSigner.verifyAgentSessionGrant !== "function"
-      || typeof agentSessionSigner.verificationKeyMetadata !== "function"
-      || typeof agentSessionSigner.health !== "function" || typeof agentSessionSigner.key_id !== "string") throw new Error("Cloud Agent Session signer is unavailable");
-    const signerHealth = await agentSessionSigner.health();
-    if (signerHealth?.ready !== true || signerHealth.key_id !== agentSessionSigner.key_id) throw new Error("Cloud Agent Session signer is unavailable");
-    const agentSessionVerificationKeys = await agentSessionSigner.verificationKeyMetadata();
-    qualificationManifestSigner = await qualificationManifestSignerFactory({
-      provider: qualificationManifestSignerProvider,
-      env,
-      references: {
-        bundle: { keyId: config.keyId, publicKey: privateKey },
-        refresh: { keyId: config.refreshKeyId, publicKey: refreshPrivateKey },
-        agentSession: agentSessionVerificationKeys.keys.map((key) => ({ keyId: key.key_id, publicKey: key.public_key }))
-      }
-    });
-    if (!qualificationManifestSigner || typeof qualificationManifestSigner.signQualificationGrantBatchManifest !== "function"
-      || typeof qualificationManifestSigner.verifyQualificationGrantBatchManifest !== "function"
-      || typeof qualificationManifestSigner.verificationKeyMetadata !== "function"
-      || typeof qualificationManifestSigner.health !== "function" || typeof qualificationManifestSigner.key_id !== "string") throw new Error("Cloud qualification manifest signer is unavailable");
-    const qualificationSignerHealth = await qualificationManifestSigner.health();
-    if (qualificationSignerHealth?.ready !== true || qualificationSignerHealth.key_id !== qualificationManifestSigner.key_id) throw new Error("Cloud qualification manifest signer is unavailable");
   }
   const cursorSecret = config.humanAuth ? requireHumanCursorSecret(env.AGENTPASS_HUMAN_CURSOR_SECRET) : undefined;
   const humanAuthSecret = config.humanAuth ? exactRuntimeSecret(env.AGENTPASS_HUMAN_AUTH_SECRET, "AGENTPASS_HUMAN_AUTH_SECRET") : undefined;
@@ -106,6 +84,102 @@ export async function createCloudRuntime({ env = process.env, logger = console, 
       store = postgresRuntime.controlPlaneStore;
       if (typeof store.pollDeviceRefresh !== "function" || typeof store.markDeviceRefreshDelivered !== "function") throw new Error("PostgreSQL refresh polling is unavailable");
       if (!postgresRuntime.refreshHintNotifier || typeof postgresRuntime.refreshHintNotifier.waitForRefresh !== "function") throw new Error("PostgreSQL refresh notification is unavailable");
+      const injectedProviderCount = [agentSessionSignerProvider, qualificationManifestSignerProvider, possessionReceiptSignerProvider]
+        .filter((value) => value !== undefined).length;
+      if (injectedProviderCount !== 0 && injectedProviderCount !== 3) throw new Error("Cloud managed signer provider set is incomplete");
+      if (injectedProviderCount === 0) {
+        ownedKmsProviders = await kmsProviderFactory({ env });
+        agentSessionSignerProvider = ownedKmsProviders?.agentSessionSignerProvider;
+        qualificationManifestSignerProvider = ownedKmsProviders?.qualificationManifestSignerProvider;
+        possessionReceiptSignerProvider = ownedKmsProviders?.possessionReceiptSignerProvider;
+      }
+      // Managed signers are intentionally composed only after PostgreSQL has
+      // completed migration/readiness setup. The durable signer layer added at
+      // this boundary can therefore bind every provider call to schema-backed
+      // lifecycle and idempotency state before Human or Device APIs exist.
+      const agentSessionReferences = {
+        bundle: { keyId: config.keyId, publicKey: privateKey },
+        refresh: { keyId: config.refreshKeyId, publicKey: refreshPrivateKey }
+      };
+      const agentSessionSignerConfig = parseAgentSessionSignerConfig(env, agentSessionReferences);
+      const durableAgentSession = await bindHostedManagedSignerProvider({
+        postgresRuntime,
+        provider: agentSessionSignerProvider,
+        purpose: agentSessionSignerConfig.purpose,
+        keyId: agentSessionSignerConfig.keyId,
+        version: AGENT_SESSION_GRANT_VERSION,
+        algorithm: agentSessionSignerConfig.algorithm,
+        publicKey: agentSessionSignerConfig.publicKeyPem,
+        publicKeyFingerprint: agentSessionSignerConfig.publicKeyFingerprint
+      });
+      agentSessionSigner = await agentSessionSignerFactory({
+        provider: durableAgentSession.provider,
+        env,
+        references: agentSessionReferences
+      });
+      if (!agentSessionSigner || typeof agentSessionSigner.signAgentSessionGrant !== "function"
+        || typeof agentSessionSigner.verifyAgentSessionGrant !== "function"
+        || typeof agentSessionSigner.verificationKeyMetadata !== "function"
+        || typeof agentSessionSigner.health !== "function" || typeof agentSessionSigner.key_id !== "string") throw new Error("Cloud Agent Session signer is unavailable");
+      const signerHealth = await agentSessionSigner.health();
+      if (signerHealth?.ready !== true || signerHealth.key_id !== agentSessionSigner.key_id) throw new Error("Cloud Agent Session signer is unavailable");
+      const agentSessionVerificationKeys = await agentSessionSigner.verificationKeyMetadata();
+      const qualificationManifestReferences = {
+        bundle: { keyId: config.keyId, publicKey: privateKey },
+        refresh: { keyId: config.refreshKeyId, publicKey: refreshPrivateKey },
+        agentSession: agentSessionVerificationKeys.keys.map((key) => ({ keyId: key.key_id, publicKey: key.public_key }))
+      };
+      const qualificationSignerConfig = parseQualificationManifestSignerConfig(env, qualificationManifestReferences);
+      const activeQualificationKey = qualificationSignerConfig.keys.find((key) => key.status === "active");
+      const durableQualificationManifest = await bindHostedManagedSignerProvider({
+        postgresRuntime,
+        provider: qualificationManifestSignerProvider,
+        purpose: QUALIFICATION_GRANT_BATCH_MANIFEST_PURPOSE,
+        keyId: qualificationSignerConfig.keyId,
+        version: QUALIFICATION_GRANT_BATCH_MANIFEST_VERSION,
+        algorithm: "ed25519",
+        publicKey: activeQualificationKey?.public_key,
+        publicKeyFingerprint: qualificationSignerConfig.publicKeyFingerprint
+      });
+      qualificationManifestSigner = await qualificationManifestSignerFactory({
+        provider: durableQualificationManifest.provider,
+        env,
+        references: qualificationManifestReferences
+      });
+      if (!qualificationManifestSigner || typeof qualificationManifestSigner.signQualificationGrantBatchManifest !== "function"
+        || typeof qualificationManifestSigner.verifyQualificationGrantBatchManifest !== "function"
+        || typeof qualificationManifestSigner.verificationKeyMetadata !== "function"
+        || typeof qualificationManifestSigner.health !== "function" || typeof qualificationManifestSigner.key_id !== "string") throw new Error("Cloud qualification manifest signer is unavailable");
+      const qualificationSignerHealth = await qualificationManifestSigner.health();
+      if (qualificationSignerHealth?.ready !== true || qualificationSignerHealth.key_id !== qualificationManifestSigner.key_id) throw new Error("Cloud qualification manifest signer is unavailable");
+      const possessionReceiptReferences = {
+        bundle: { keyId: config.keyId, publicKey: privateKey },
+        refresh: { keyId: config.refreshKeyId, publicKey: refreshPrivateKey },
+        agentSession: agentSessionVerificationKeys.keys.map((key) => ({ keyId: key.key_id, publicKey: key.public_key })),
+        qualificationManifest: (await qualificationManifestSigner.verificationKeyMetadata()).keys
+          .map((key) => ({ keyId: key.key_id, publicKey: key.public_key }))
+      };
+      const possessionSignerConfig = parsePossessionReceiptSignerConfig(env, possessionReceiptReferences);
+      const durablePossessionReceipt = await bindHostedManagedSignerProvider({
+        postgresRuntime,
+        provider: possessionReceiptSignerProvider,
+        purpose: possessionSignerConfig.purpose,
+        keyId: possessionSignerConfig.keyId,
+        version: POSSESSION_RECEIPT_VERSION,
+        algorithm: possessionSignerConfig.algorithm,
+        publicKey: possessionSignerConfig.publicKeyPem,
+        publicKeyFingerprint: possessionSignerConfig.publicKeyFingerprint
+      });
+      possessionReceiptSigner = await possessionReceiptSignerFactory({
+        provider: durablePossessionReceipt.provider,
+        env,
+        references: possessionReceiptReferences
+      });
+      if (!possessionReceiptSigner || typeof possessionReceiptSigner.signPossessionReceipt !== "function"
+        || typeof possessionReceiptSigner.verificationKeyMetadata !== "function"
+        || typeof possessionReceiptSigner.health !== "function" || typeof possessionReceiptSigner.key_id !== "string") throw new Error("Cloud possession receipt signer is unavailable");
+      const possessionSignerHealth = await possessionReceiptSigner.health();
+      if (possessionSignerHealth?.ready !== true || possessionSignerHealth.key_id !== possessionReceiptSigner.key_id) throw new Error("Cloud possession receipt signer is unavailable");
       humanAuthRuntime = humanAuthFactory({
         postgresRuntime,
         tokenRecords,
@@ -173,7 +247,8 @@ export async function createCloudRuntime({ env = process.env, logger = console, 
         trackInFlight: postgresRuntime.trackInFlight,
         readiness: createHostedReadiness(postgresRuntime.readiness, [
           { name: "agent_session_signer", purpose: "agent-session-grant", unavailableCode: "agent_session_signer_unavailable", signer: agentSessionSigner },
-          { name: "qualification_manifest_signer", purpose: "agentpass.qualification-grant-batch-manifest", unavailableCode: "qualification_manifest_signer_unavailable", signer: qualificationManifestSigner }
+          { name: "qualification_manifest_signer", purpose: "agentpass.qualification-grant-batch-manifest", unavailableCode: "qualification_manifest_signer_unavailable", signer: qualificationManifestSigner },
+          { name: "possession_receipt_signer", purpose: POSSESSION_RECEIPT_PURPOSE, unavailableCode: "possession_receipt_signer_unavailable", signer: possessionReceiptSigner }
         ]),
         operationalMetrics: postgresRuntime.operationalReport,
         operationalProbeSecret: exactRuntimeSecret(env.AGENTPASS_OPERATIONAL_PROBE_SECRET, "AGENTPASS_OPERATIONAL_PROBE_SECRET")
@@ -184,10 +259,11 @@ export async function createCloudRuntime({ env = process.env, logger = console, 
       ...(humanAuthRuntime ? { humanAuthApi: humanAuthRuntime.api, humanSession: humanAuthRuntime.humanSession, recentAuthService: humanAuthRuntime.recentAuthService } : {}),
       ...(agentSessionDeviceApi ? { agentSessionDeviceApi } : {}),
       ...(qualificationGrantBatchDeviceApi ? { qualificationGrantBatchDeviceApi } : {}),
+      ...(possessionReceiptSigner ? { possessionReceiptSigner } : {}),
       ...(postgresRuntime?.capabilityAuthorityRepository ? { capabilityAuthorityRepository: postgresRuntime.capabilityAuthorityRepository } : {}),
       ...(postgresRuntime?.capabilityAuthorityRepository ? { capabilityRevocationSource: postgresRuntime.capabilityAuthorityRepository } : {})
     });
-  } catch (error) { await postgresRuntime?.close?.().catch(() => {}); await store?.close?.(); throw error; }
+  } catch (error) { await ownedKmsProviders?.close?.().catch(() => {}); await postgresRuntime?.close?.().catch(() => {}); await store?.close?.(); throw error; }
   let closed = false;
   let closePromise;
   return Object.freeze({
@@ -214,7 +290,7 @@ export async function createCloudRuntime({ env = process.env, logger = console, 
             })
           : Promise.resolve();
         const databaseClose = postgresRuntime?.drain ? postgresRuntime.drain() : postgresRuntime?.close?.();
-        const results = await runtimeTimeout(Promise.all([serverClose, databaseClose]), 15_000);
+        const results = await runtimeTimeout(Promise.all([serverClose, databaseClose, ownedKmsProviders?.close?.()]), 15_000);
         const drainResult = results?.[1];
         if (drainResult?.drained === false) throw new Error("Cloud runtime drain timed out");
         await store.close?.();

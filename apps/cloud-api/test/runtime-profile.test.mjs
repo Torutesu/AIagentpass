@@ -41,6 +41,8 @@ function hostedEnv(overrides = {}) {
     AGENTPASS_CLOUD_AGENT_SESSION_PROCESS_POLICIES_PATH: "/srv/agentpass/hosted/process-policies.json",
     AGENTPASS_CLOUD_QUALIFICATION_MANIFEST_KEY_ID: "qualification-manifest-2026-08",
     AGENTPASS_CLOUD_QUALIFICATION_MANIFEST_PUBLIC_KEY: "hosted-qualification-public-key-pin",
+    AGENTPASS_CLOUD_POSSESSION_RECEIPT_KEY_ID: "possession-receipt-2026-08",
+    AGENTPASS_CLOUD_POSSESSION_RECEIPT_PUBLIC_KEY: "hosted-possession-receipt-public-key-pin",
     AGENTPASS_OWNER_RECOVERY_NOTIFICATION_WEBHOOK_URL: "https://notifications.example.test/owner-recovery",
     AGENTPASS_OWNER_RECOVERY_NOTIFICATION_CONFIRMATION_URL: "https://notifications.example.test/owner-recovery/acceptance",
     AGENTPASS_OWNER_RECOVERY_NOTIFICATION_AUTHORIZATION_PATH: "/srv/agentpass/hosted/notification-authorization.txt",
@@ -123,6 +125,8 @@ test("accepts hosted only with complete PostgreSQL and Human Auth prerequisites"
     "AGENTPASS_CLOUD_AGENT_SESSION_PROCESS_POLICIES_PATH",
     "AGENTPASS_CLOUD_QUALIFICATION_MANIFEST_KEY_ID",
     "AGENTPASS_CLOUD_QUALIFICATION_MANIFEST_PUBLIC_KEY",
+    "AGENTPASS_CLOUD_POSSESSION_RECEIPT_KEY_ID",
+    "AGENTPASS_CLOUD_POSSESSION_RECEIPT_PUBLIC_KEY",
     "AGENTPASS_OWNER_RECOVERY_NOTIFICATION_BINDING_ID",
     "AGENTPASS_OWNER_RECOVERY_NOTIFICATION_BINDING_KEY_VERSION",
     "AGENTPASS_OWNER_RECOVERY_NOTIFICATION_BINDING_DIGEST"
@@ -137,7 +141,8 @@ test("recognizes hosted KMS routing variables and rejects KMS typos or evaluatio
   const kms = {
     AGENTPASS_KMS_PROVIDER: "aws",
     AGENTPASS_KMS_AGENT_SESSION_KEY_RESOURCE: "arn:aws:kms:us-east-1:123456789012:key/agent-session",
-    AGENTPASS_KMS_QUALIFICATION_MANIFEST_KEY_RESOURCE: "arn:aws:kms:us-east-1:123456789012:key/qualification-manifest"
+    AGENTPASS_KMS_QUALIFICATION_MANIFEST_KEY_RESOURCE: "arn:aws:kms:us-east-1:123456789012:key/qualification-manifest",
+    AGENTPASS_KMS_POSSESSION_RECEIPT_KEY_RESOURCE: "arn:aws:kms:us-east-1:123456789012:key/possession-receipt"
   };
   assert.equal(parseCloudRuntimeProfile(hostedEnv(kms)).isHosted, true);
   assertProfileError(

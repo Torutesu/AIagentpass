@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import crypto from "node:crypto";
 import test from "node:test";
 import { Pool } from "pg";
 
@@ -7,6 +8,7 @@ import {
   canonicalManagedSignerRequestDigest,
   createPostgresManagedSignerKeyLifecycleRepository
 } from "../../src/postgres/managed-signer-key-lifecycle-repository.mjs";
+import { createDurableManagedSignerProvider } from "../../src/durable-managed-signer-provider.mjs";
 
 const DATABASE_URL = process.env.AGENTPASS_TEST_DATABASE_URL ?? process.env.AGENTPASS_TEST_POSTGRES_URL;
 
@@ -36,6 +38,9 @@ test("0037 serializes lifecycle changes and replays exact signatures across Post
   const options = { purpose, now: () => Date.parse("2026-08-14T12:00:00.000Z") };
   const first = createPostgresManagedSignerKeyLifecycleRepository({ client: firstPool, ...options });
   const second = createPostgresManagedSignerKeyLifecycleRepository({ client: secondPool, ...options });
+  const keyPair = crypto.generateKeyPairSync("ed25519");
+  const publicKey = keyPair.publicKey.export({ type: "spki", format: "pem" }).toString();
+  const publicKeyFingerprint = crypto.createHash("sha256").update(keyPair.publicKey.export({ type: "spki", format: "der" })).digest("hex");
   const initial = {
     version: 1,
     purpose,
@@ -45,7 +50,8 @@ test("0037 serializes lifecycle changes and replays exact signatures across Post
       key_version: 1,
       purpose,
       algorithm: "ed25519",
-      public_key_fingerprint: "a".repeat(64),
+      public_key_fingerprint: publicKeyFingerprint,
+      public_key: publicKey,
       state: "active",
       state_version: 1
     }]
@@ -59,6 +65,34 @@ test("0037 serializes lifecycle changes and replays exact signatures across Post
   const signature = Buffer.alloc(64, 0x5a);
   assert.deepEqual((await first.commitSignature({ ...signing, signature })).signature, signature);
   assert.deepEqual((await second.reserveSignature(signing)).signature, signature);
+
+  let providerSignCalls = 0;
+  let releaseConcurrent;
+  let concurrent = false;
+  const provider = {
+    async publicKeyMetadata() { return { key_id: "managed-key-1", algorithm: "ed25519", public_key: publicKey }; },
+    async sign({ bytes }) {
+      providerSignCalls += 1;
+      if (concurrent) await new Promise((resolve) => { releaseConcurrent = resolve; });
+      return crypto.sign(null, bytes, keyPair.privateKey);
+    }
+  };
+  const firstDurable = createDurableManagedSignerProvider({ provider, repository: first, purpose, keyId: "managed-key-1", keyVersion: 1, version: 1 });
+  const secondDurable = createDurableManagedSignerProvider({ provider, repository: second, purpose, keyId: "managed-key-1", keyVersion: 1, version: 1 });
+  const durableRequest = { algorithm: "ed25519", bytes: Buffer.from("durable-replay"), key_id: "managed-key-1", purpose, version: 1 };
+  const durableSignature = await firstDurable.sign(durableRequest);
+  assert.deepEqual(await secondDurable.sign(durableRequest), durableSignature);
+  assert.equal(providerSignCalls, 1, "a second replica must replay committed bytes without another KMS call");
+
+  concurrent = true;
+  const concurrentRequest = { ...durableRequest, bytes: Buffer.from("two-replica-race") };
+  const firstRace = firstDurable.sign(concurrentRequest);
+  while (!releaseConcurrent) await new Promise((resolve) => setImmediate(resolve));
+  const secondRace = secondDurable.sign(concurrentRequest);
+  await assert.rejects(secondRace, { code: "ERR_DURABLE_MANAGED_SIGNER_PENDING" });
+  releaseConcurrent();
+  await assert.doesNotReject(firstRace);
+  assert.equal(providerSignCalls, 2, "the two-replica race must invoke KMS only once for the new payload");
 
   const nextKey = {
     key_id: "managed-key-2",

@@ -42,10 +42,17 @@ const HOSTED_QUALIFICATION_MANIFEST_ENV = Object.freeze([
   "AGENTPASS_CLOUD_QUALIFICATION_MANIFEST_TIMEOUT_MS",
   "AGENTPASS_CLOUD_QUALIFICATION_MANIFEST_VERIFICATION_KEYS_JSON"
 ]);
+const HOSTED_POSSESSION_RECEIPT_ENV = Object.freeze([
+  "AGENTPASS_CLOUD_POSSESSION_RECEIPT_KEY_ID",
+  "AGENTPASS_CLOUD_POSSESSION_RECEIPT_PUBLIC_KEY",
+  "AGENTPASS_CLOUD_POSSESSION_RECEIPT_TIMEOUT_MS",
+  "AGENTPASS_CLOUD_POSSESSION_RECEIPT_VERIFICATION_KEYS_JSON"
+]);
 const HOSTED_KMS_ENV = Object.freeze([
   "AGENTPASS_KMS_PROVIDER",
   "AGENTPASS_KMS_AGENT_SESSION_KEY_RESOURCE",
-  "AGENTPASS_KMS_QUALIFICATION_MANIFEST_KEY_RESOURCE"
+  "AGENTPASS_KMS_QUALIFICATION_MANIFEST_KEY_RESOURCE",
+  "AGENTPASS_KMS_POSSESSION_RECEIPT_KEY_RESOURCE"
 ]);
 const DATABASE_ENV = Object.freeze([
   "AGENTPASS_DATABASE_URL",
@@ -87,6 +94,7 @@ const PROFILE_RELATED_ENV = new Set([
   ...HOSTED_REFRESH_ENV,
   ...HOSTED_AGENT_SESSION_ENV,
   ...HOSTED_QUALIFICATION_MANIFEST_ENV,
+  ...HOSTED_POSSESSION_RECEIPT_ENV,
   ...HOSTED_KMS_ENV,
   ...FILE_STORE_ENV,
   ...DATABASE_ENV,
@@ -161,11 +169,12 @@ export function parseCloudRuntimeProfile(env = process.env) {
   const hostedRefresh = parseHostedRefresh(env);
   const hostedAgentSession = parseHostedAgentSession(env);
   const hostedQualificationManifest = parseHostedQualificationManifest(env);
+  const hostedPossessionReceipt = parseHostedPossessionReceipt(env);
   const ownerRecoveryNotification = parseOwnerRecoveryNotification(env);
   if (profile === CLOUD_RUNTIME_PROFILES.HOSTED) {
     if (fileStore.present) fail(CLOUD_RUNTIME_PROFILE_ERROR_CODES.HOSTED_FILE_STORE_FORBIDDEN);
     const humanAuth = parseHumanAuth(env);
-    if (!humanAuth.complete || !hostedRefresh.complete || !hostedAgentSession.complete || !hostedQualificationManifest.complete || !ownerRecoveryNotification.complete || !configured(env, CAPABILITY_NONCE_SECRET_ENV)) fail(CLOUD_RUNTIME_PROFILE_ERROR_CODES.HOSTED_AUTH_INCOMPLETE);
+    if (!humanAuth.complete || !hostedRefresh.complete || !hostedAgentSession.complete || !hostedQualificationManifest.complete || !hostedPossessionReceipt.complete || !ownerRecoveryNotification.complete || !configured(env, CAPABILITY_NONCE_SECRET_ENV)) fail(CLOUD_RUNTIME_PROFILE_ERROR_CODES.HOSTED_AUTH_INCOMPLETE);
     if (!validCursorSecret(env[CAPABILITY_NONCE_SECRET_ENV])) fail(CLOUD_RUNTIME_PROFILE_ERROR_CODES.HUMAN_AUTH_INVALID);
     return Object.freeze({
       profile,
@@ -184,6 +193,7 @@ export function parseCloudRuntimeProfile(env = process.env) {
   if (HUMAN_AUTH_ENV.some((name) => configured(env, name)) || DATABASE_ENV.some((name) => configured(env, name))
     || hostedRefresh.present || HOSTED_AGENT_SESSION_ENV.some((name) => configured(env, name))
     || HOSTED_QUALIFICATION_MANIFEST_ENV.some((name) => configured(env, name))
+    || HOSTED_POSSESSION_RECEIPT_ENV.some((name) => configured(env, name))
     || HOSTED_KMS_ENV.some((name) => configured(env, name))
     || ownerRecoveryNotification.present
     || configured(env, CAPABILITY_NONCE_SECRET_ENV)) {
@@ -274,6 +284,17 @@ function parseHostedQualificationManifest(env) {
   const complete = hasKeyId && hasPublicKey
     && IDENTIFIER.test(env.AGENTPASS_CLOUD_QUALIFICATION_MANIFEST_KEY_ID)
     && nonEmptyString(env.AGENTPASS_CLOUD_QUALIFICATION_MANIFEST_PUBLIC_KEY);
+  return { present: true, complete };
+}
+
+function parseHostedPossessionReceipt(env) {
+  const present = HOSTED_POSSESSION_RECEIPT_ENV.some((name) => configured(env, name));
+  if (!present) return { present: false, complete: false };
+  const hasKeyId = configured(env, "AGENTPASS_CLOUD_POSSESSION_RECEIPT_KEY_ID");
+  const hasPublicKey = configured(env, "AGENTPASS_CLOUD_POSSESSION_RECEIPT_PUBLIC_KEY");
+  const complete = hasKeyId && hasPublicKey
+    && IDENTIFIER.test(env.AGENTPASS_CLOUD_POSSESSION_RECEIPT_KEY_ID)
+    && nonEmptyString(env.AGENTPASS_CLOUD_POSSESSION_RECEIPT_PUBLIC_KEY);
   return { present: true, complete };
 }
 
