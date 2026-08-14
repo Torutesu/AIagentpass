@@ -277,7 +277,7 @@ Exit gate: contract validation and cross-language fixtures pass; no open schema 
 
 ### Phase 2 — production Console identity and organization control
 
-Implementation status (2026-08-14): the first authority slice is implemented. Organization/member/invitation mutations now validate the fixed role and optimistic-version boundary, protect the last owner, use stable redacted errors, and revoke reduced member authority transactionally. Migration 0024 adds organization-wide and per-membership session epochs; session issuance snapshots both, every authority-bearing PostgreSQL path requires exact current epochs, session rotation is atomic and concurrency-safe, and role/status transitions invalidate only the affected member unless an explicit organization-wide epoch bump is requested. Real PostgreSQL tests cover migration application, immutable issuance bindings, concurrent rotation, and both epoch invalidation scopes. Remaining Phase 2 work is the complete production WebAuthn ceremony/recovery composition, organization-role browser E2E, and the Console screens and telemetry listed below.
+Implementation status (2026-08-14): the organization/session and production WebAuthn authority slices are implemented. Organization/member/invitation mutations validate the fixed role and optimistic-version boundary, protect the last owner, revalidate and lock the exact current session/organization/membership epochs inside the mutation transaction, use stable redacted errors, and revoke reduced authority transactionally. Migration 0024 provides organization-wide and per-membership session epochs; session issuance snapshots both and rotation is atomic. Authentication and registration now enforce exact RP/origin/UV bindings, durable one-time consuming claims with bounded verifier deadlines and stale-claim recovery, counter/backup-state CAS, session-bound recent authorization, and atomic step-up consumption when an existing account adds another passkey. The Console includes accessible organization administration, conflict/expiry/retry states, and automatic existing-passkey step-up without persisting ceremony or proof material. Real PostgreSQL qualification covers replay, tenancy, expiry, concurrent consumption, epoch invalidation, and atomic passkey addition. Remaining Phase 2 work is threshold-owner recovery, production-browser Playwright role/WebAuthn matrices, and production telemetry/abuse controls.
 
 Deliverables:
 
@@ -492,6 +492,8 @@ Required tests:
 - property tests for unknown fields, stale versions, tenant substitution, and actor substitution.
 
 ### Batch 2 — production WebAuthn and recovery
+
+Implementation checkpoint (2026-08-14): slices 1–4 are implemented and covered by focused, full-suite, Console, and real-PostgreSQL qualification tests. Registration of a second credential fails closed without an operation-bound proof and consumes that proof in the same credential-set transaction; first-credential bootstrap is serialized under the same credential lock. Both authentication and registration claims have bounded verifier deadlines and stale-consuming recovery. Slice 5 and the recovery portions of the browser matrix remain open; the current implementation must not be represented as threshold-owner recovery capable.
 
 Merge slices:
 

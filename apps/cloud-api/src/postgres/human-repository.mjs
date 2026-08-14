@@ -295,9 +295,21 @@ export function createPostgresHumanRepository({ client, onAuthorityReduction } =
       const active = await transactionClient.query("SELECT COUNT(*) AS active_count FROM webauthn_credentials WHERE member_id=$1 AND revoked_at IS NULL", [memberId]);
       const activeCount = parseDatabaseCount(active.rows?.[0]?.active_count, "active credential count");
       if (activeCount > 0) {
-        const authorizationId = uuid(recentAuth?.authorization_id);
-        const operation = bounded(recentAuth?.operation, 128);
-        if (operation !== "human.webauthn.credential.register" || uuid(recentAuth?.session_id) !== sessionId || uuid(recentAuth?.member_id) !== memberId || uuid(recentAuth?.organization_id) !== organizationId) throw recentAuthRequired();
+        let authorizationId;
+        let operation;
+        let proofSessionId;
+        let proofMemberId;
+        let proofOrganizationId;
+        try {
+          authorizationId = uuid(recentAuth?.authorization_id);
+          operation = bounded(recentAuth?.operation, 128);
+          proofSessionId = uuid(recentAuth?.session_id);
+          proofMemberId = uuid(recentAuth?.member_id);
+          proofOrganizationId = uuid(recentAuth?.organization_id);
+        } catch {
+          throw recentAuthRequired();
+        }
+        if (operation !== "human.webauthn.credential.register" || proofSessionId !== sessionId || proofMemberId !== memberId || proofOrganizationId !== organizationId) throw recentAuthRequired();
         const consumed = await transactionClient.query(`UPDATE human_sessions s SET recent_auth_consumed_at=clock_timestamp() FROM memberships m JOIN organizations o ON o.id=m.organization_id WHERE s.id=$1 AND s.member_id=$2 AND s.organization_id=$3 AND s.recent_auth_operation=$4 AND s.recent_auth_challenge_id=$5 AND s.recent_auth_consumed_at IS NULL AND s.recent_auth_at>clock_timestamp()-INTERVAL '5 minutes' AND s.revoked_at IS NULL AND s.expires_at>clock_timestamp() AND (s.idle_expires_at IS NULL OR s.idle_expires_at>clock_timestamp()) AND s.membership_id=m.id AND m.member_id=s.member_id AND m.organization_id=s.organization_id AND m.status='active' AND m.role=s.role AND o.authority_epoch=s.organization_authority_epoch AND m.session_epoch=s.membership_session_epoch RETURNING s.id`, [sessionId, memberId, organizationId, operation, authorizationId]);
         if (consumed.rowCount !== 1) throw recentAuthRequired();
       }

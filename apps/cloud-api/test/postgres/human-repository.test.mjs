@@ -181,6 +181,37 @@ test("registration adapter maps backup metadata and reports duplicate credential
   assert.match(duplicateSql, /EXISTS \(SELECT 1 FROM human_sessions/);
 });
 
+test("credential registration atomically locks, consumes step-up for existing credentials, and permits only the first bootstrap without it", async () => {
+  const credentialId = Buffer.alloc(16, 9).toString("base64url");
+  const base = { session_id: ids.session, member_id: ids.member, organization_id: ids.org, credential_id: credentialId, public_key: Buffer.alloc(32, 3), sign_count: 0, transports: ["internal"], credential_device_type: "singleDevice", credential_backed_up: false };
+  const calls = [];
+  let activeCount = "0";
+  const client = { async query(text, params) {
+    calls.push({ text, params });
+    if (text.startsWith("SELECT COUNT(*)")) return { rows: [{ active_count: activeCount }], rowCount: 1 };
+    if (text.startsWith("UPDATE human_sessions")) return { rows: [{ id: ids.session }], rowCount: 1 };
+    if (text.startsWith("INSERT INTO webauthn_credentials")) return { rows: [{ id: Buffer.from(credentialId, "base64url") }], rowCount: 1 };
+    return { rows: [], rowCount: 0 };
+  } };
+  const repo = createPostgresHumanRepository({ client });
+  assert.equal((await repo.createCredentialWithRecentAuth(base)).created, true);
+  assert.equal(calls.some(({ text }) => text.includes("pg_advisory_xact_lock")), true);
+  assert.equal(calls.some(({ text }) => text.startsWith("UPDATE human_sessions")), false);
+
+  calls.length = 0;
+  activeCount = "1";
+  await assert.rejects(() => repo.createCredentialWithRecentAuth(base), (error) => error.code === "recent_auth_required");
+  assert.equal(calls.at(-1).text, "ROLLBACK");
+
+  calls.length = 0;
+  const created = await repo.createCredentialWithRecentAuth({ ...base, recent_auth: { authorization_id: ids.challenge, operation: "human.webauthn.credential.register", session_id: ids.session, member_id: ids.member, organization_id: ids.org } });
+  assert.equal(created.authorized, true);
+  const consumed = calls.find(({ text }) => text.startsWith("UPDATE human_sessions"));
+  assert.match(consumed.text, /recent_auth_consumed_at=clock_timestamp\(\)/);
+  assert.match(consumed.text, /m\.session_epoch=s\.membership_session_epoch/);
+  assert.equal(calls.at(-1).text, "COMMIT");
+});
+
 test("safe session listings never select or return bearer digests", async () => {
   const calls = [];
   const row = {

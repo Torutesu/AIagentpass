@@ -77,6 +77,24 @@ test("human session epochs invalidate stale authority and serialize concurrent r
 
   const otherSessionId = randomUUID();
   await repository.createSession(session(otherSessionId, "6".repeat(64), "admin"));
+  const firstCredentialId = Buffer.from(randomUUID().replaceAll("-", ""), "hex").toString("base64url");
+  const secondCredentialId = Buffer.from(randomUUID().replaceAll("-", ""), "hex").toString("base64url");
+  const credentialInput = { session_id: currentSessionId, member_id: memberId, organization_id: organizationId, public_key: Buffer.alloc(32, 0x51), sign_count: 0, transports: ["internal"], credential_device_type: "singleDevice", credential_backed_up: false };
+  assert.equal((await repository.createCredentialWithRecentAuth({ ...credentialInput, credential_id: firstCredentialId })).created, true);
+  const registrationChallengeId = randomUUID();
+  const registrationOperation = "human.webauthn.credential.register";
+  const registrationAuthenticatedAt = new Date().toISOString();
+  await pool.query(`INSERT INTO webauthn_challenges
+    (id,session_id,member_id,organization_id,ceremony,operation,challenge_hash,created_at,expires_at,consumed_at,rp_id,origin,user_verification,status)
+    VALUES ($1,$2,$3,$4,'authentication',$5,$6,$7,$8,$7,'console.agentpass.test','https://console.agentpass.test','required','consumed')`,
+  [registrationChallengeId, currentSessionId, memberId, organizationId, registrationOperation, Buffer.alloc(32, 0x70), registrationAuthenticatedAt, EXPIRES_AT]);
+  assert.equal(await repository.bindRecentAuth({ session_id: currentSessionId, member_id: memberId, organization_id: organizationId, operation: registrationOperation, challenge_id: registrationChallengeId, authenticated_at: registrationAuthenticatedAt }), true);
+  await assert.rejects(() => repository.createCredentialWithRecentAuth({ ...credentialInput, session_id: otherSessionId, credential_id: secondCredentialId, recent_auth: { authorization_id: registrationChallengeId, operation: registrationOperation, session_id: otherSessionId, member_id: memberId, organization_id: organizationId } }), (error) => error.code === "recent_auth_required");
+  assert.equal((await repository.createCredentialWithRecentAuth({ ...credentialInput, credential_id: secondCredentialId, recent_auth: { authorization_id: registrationChallengeId, operation: registrationOperation, session_id: currentSessionId, member_id: memberId, organization_id: organizationId } })).authorized, true);
+  const registrationState = await pool.query("SELECT recent_auth_consumed_at IS NOT NULL AS consumed FROM human_sessions WHERE id=$1", [currentSessionId]);
+  assert.deepEqual(registrationState.rows, [{ consumed: true }]);
+  const credentialCount = await pool.query("SELECT COUNT(*)::int AS count FROM webauthn_credentials WHERE member_id=$1 AND revoked_at IS NULL", [memberId]);
+  assert.deepEqual(credentialCount.rows, [{ count: 2 }]);
   const challengeId = randomUUID();
   const otherSessionChallengeId = randomUUID();
   const operation = "organization.emergency_stop";

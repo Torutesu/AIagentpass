@@ -160,6 +160,42 @@ test("posts strict registration options, runs startRegistration, and returns onl
   assert.equal(calls[1].url.includes(challenge), false);
 });
 
+test("steps up with the existing passkey before adding another credential and forwards only the opaque authorization id", async () => {
+  const calls = [];
+  let registrationOptionsCalls = 0;
+  const result = await registerPasskey({
+    organizationId,
+    csrfToken,
+    fetchImpl: async (url, init) => {
+      calls.push({ url: String(url), init });
+      const path = new URL(url, "https://console.example.test").pathname;
+      if (path === "/api/auth/webauthn/registration/options") {
+        registrationOptionsCalls += 1;
+        if (registrationOptionsCalls === 1) return jsonResponse({ error: { code: "webauthn_registration_http_recent_auth_required", message: "Recent authentication required" } }, 428);
+        return jsonResponse({ challenge_id: challengeId, options: registrationOptions });
+      }
+      if (path === "/api/auth/webauthn/options") return jsonResponse({ challenge_id: challengeId, options });
+      if (path === "/api/auth/webauthn/verify") return jsonResponse({ authorization_id: authorizationId });
+      if (path === "/api/auth/webauthn/registration/verify") return jsonResponse({ credential_id: registrationCredential.id, registered_at: "2026-08-12T10:00:00.000Z" }, 201);
+      throw new Error(`unexpected path: ${path}`);
+    },
+    startAuthenticationImpl: async () => assertion,
+    startRegistrationImpl: async () => registrationCredential,
+  });
+
+  assert.deepEqual(result, { registered: true });
+  assert.deepEqual(calls.map(({ url }) => url), [
+    "/api/auth/webauthn/registration/options",
+    "/api/auth/webauthn/options",
+    "/api/auth/webauthn/verify",
+    "/api/auth/webauthn/registration/options",
+    "/api/auth/webauthn/registration/verify",
+  ]);
+  for (const call of calls.slice(0, 3)) assert.equal(call.init.headers.has("agentpass-recent-auth"), false);
+  assert.equal(calls[3].init.headers.get("agentpass-recent-auth"), authorizationId);
+  assert.equal(calls[4].init.headers.get("agentpass-recent-auth"), authorizationId);
+});
+
 test("rejects malformed registration options without invoking the authenticator", async () => {
   let registrationCalls = 0;
   await assert.rejects(

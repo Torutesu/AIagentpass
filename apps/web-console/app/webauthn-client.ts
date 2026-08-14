@@ -12,6 +12,7 @@ const DEFAULT_OPTIONS_PATH = "/api/auth/webauthn/options";
 const DEFAULT_VERIFY_PATH = "/api/auth/webauthn/verify";
 const DEFAULT_REGISTRATION_OPTIONS_PATH = "/api/auth/webauthn/registration/options";
 const DEFAULT_REGISTRATION_VERIFY_PATH = "/api/auth/webauthn/registration/verify";
+const REGISTRATION_RECENT_AUTH_OPERATION = "human.webauthn.credential.register";
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const BASE64URL = /^[A-Za-z0-9_-]+$/;
 const MAX_JSON_BYTES = 128 * 1024;
@@ -88,6 +89,7 @@ export type WebAuthnRegistrationInput = Readonly<{
   verifyPath?: string;
   fetchImpl?: typeof fetch;
   startRegistrationImpl?: typeof startRegistration;
+  startAuthenticationImpl?: typeof startAuthentication;
 }>;
 
 export class WebAuthnClientError extends Error {
@@ -165,9 +167,23 @@ export async function registerPasskey(input: WebAuthnRegistrationInput): Promise
 
   const optionsPath = validateRelativePath(input?.optionsPath ?? DEFAULT_REGISTRATION_OPTIONS_PATH, "registrationOptionsPath");
   const verifyPath = validateRelativePath(input?.verifyPath ?? DEFAULT_REGISTRATION_VERIFY_PATH, "registrationVerifyPath");
-  const optionsResponse = await postJson(fetchImpl, optionsPath, {
-    organization_id: organizationId,
-  }, csrfToken, signal);
+  let recentAuth: string | undefined;
+  let optionsResponse: unknown;
+  try {
+    optionsResponse = await postJson(fetchImpl, optionsPath, { organization_id: organizationId }, csrfToken, signal);
+  } catch (error) {
+    if (!(error instanceof WebAuthnClientError) || error.code !== "http_failed" || error.status !== 428) throw error;
+    const authorization = await authenticateRecentAuth({
+      operation: REGISTRATION_RECENT_AUTH_OPERATION,
+      organizationId,
+      csrfToken,
+      signal,
+      fetchImpl,
+      startAuthenticationImpl: input?.startAuthenticationImpl
+    });
+    recentAuth = authorization.authorization_id;
+    optionsResponse = await postJson(fetchImpl, optionsPath, { organization_id: organizationId }, csrfToken, signal, recentAuth);
+  }
   const challenge = validateRegistrationOptionsResponse(optionsResponse);
   throwIfAborted(signal);
 
@@ -177,7 +193,7 @@ export async function registerPasskey(input: WebAuthnRegistrationInput): Promise
     organization_id: organizationId,
     challenge_id: challenge.challenge_id,
     credential: validateRegistrationCredential(credential),
-  }, csrfToken, signal);
+  }, csrfToken, signal, recentAuth);
 
   return Object.freeze({ registered: validateRegistrationResponse(verified).registered });
 }
@@ -199,18 +215,20 @@ function throwIfAborted(signal: AbortSignal | undefined): void {
   if (signal?.aborted) throw abortError();
 }
 
-async function postJson(fetchImpl: typeof fetch, path: string, body: Record<string, unknown>, csrfToken: string, signal: AbortSignal | undefined): Promise<unknown> {
+async function postJson(fetchImpl: typeof fetch, path: string, body: Record<string, unknown>, csrfToken: string, signal: AbortSignal | undefined, recentAuth?: string): Promise<unknown> {
   let response: Response;
   try {
+    const headers = new Headers({
+      accept: "application/json",
+      "cache-control": "no-store",
+      "content-type": "application/json",
+      "agentpass-csrf": csrfToken,
+      pragma: "no-cache",
+    });
+    if (recentAuth !== undefined) headers.set("agentpass-recent-auth", recentAuth);
     response = await fetchImpl(path, {
       method: "POST",
-      headers: new Headers({
-        accept: "application/json",
-        "cache-control": "no-store",
-        "content-type": "application/json",
-        "agentpass-csrf": csrfToken,
-        pragma: "no-cache",
-      }),
+      headers,
       body: JSON.stringify(body),
       cache: "no-store",
       credentials: "same-origin",
