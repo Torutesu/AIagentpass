@@ -1,5 +1,6 @@
 import { generateKeyPairSync } from "node:crypto";
 import { test as base, expect, type Page, type Route } from "@playwright/test";
+import { disposeVirtualAuthenticator } from "./support/browser-fixtures";
 
 type Role = "owner" | "admin" | "auditor" | "viewer";
 type WakeStatus = "accepted" | "coalesced" | "no_pending_refresh";
@@ -46,6 +47,13 @@ const CHALLENGE_ID = "57777777-7777-4777-8777-777777777777";
 const AUTHORIZATION_ID = "58888888-8888-4888-8888-888888888888";
 const CHALLENGE = Buffer.alloc(32, 0x43).toString("base64url");
 const CREDENTIAL_ID_BYTES = Buffer.from("agentpass-p0b-credential");
+const ACTIVE_SESSION_EXPIRES_AT = "2099-01-01T00:00:00.000Z";
+const ACTIVE_BUNDLE_EXPIRES_AT = "2099-01-01T00:00:00.000Z";
+type VirtualAuthenticatorHandle = {
+  cdp: Awaited<ReturnType<ReturnType<Page["context"]>["newCDPSession"]>>;
+  authenticatorId: string;
+};
+const activeAuthenticators = new WeakMap<Page, VirtualAuthenticatorHandle>();
 
 function json(route: Route, body: unknown, status = 200): Promise<void> {
   return route.fulfill({
@@ -64,7 +72,7 @@ function session(role: Role) {
       organization_id: ORGANIZATION_ID,
       role,
       created_at: "2026-08-12T00:00:00.000Z",
-      expires_at: "2026-08-14T01:00:00.000Z",
+      expires_at: ACTIVE_SESSION_EXPIRES_AT,
       recent_auth_at: null,
     },
     csrf_token: CSRF_TOKEN,
@@ -77,7 +85,7 @@ function devices() {
     last_seen_at: "2026-08-12T00:30:00.000Z",
     version: 1,
     bundle_sequence: 10,
-    bundle_expires_at: "2026-08-13T00:00:00.000Z",
+    bundle_expires_at: ACTIVE_BUNDLE_EXPIRES_AT,
     last_ack_at: "2026-08-12T00:30:00.000Z",
   };
   return [
@@ -218,6 +226,7 @@ async function installVirtualAuthenticator(page: Page): Promise<void> {
       signCount: 0,
     },
   });
+  activeAuthenticators.set(page, { cdp, authenticatorId });
 }
 
 test.beforeEach(async ({ page, role, recentAuth, wakeStatuses, authorizationFailure }) => {
@@ -323,5 +332,7 @@ test.describe("role and recent-auth matrix", () => {
 });
 
 test.afterEach(async ({ page }) => {
+  const authenticator = activeAuthenticators.get(page);
+  if (authenticator) await disposeVirtualAuthenticator(authenticator);
   await page.unrouteAll({ behavior: "ignoreErrors" });
 });

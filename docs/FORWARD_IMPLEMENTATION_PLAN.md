@@ -493,7 +493,7 @@ Required tests:
 
 ### Batch 2 — production WebAuthn and recovery
 
-Implementation checkpoint (2026-08-14): slices 1–4 are implemented and covered by focused, full-suite, Console, and real-PostgreSQL qualification tests. Registration of a second credential fails closed without an operation-bound proof and consumes that proof in the same credential-set transaction; first-credential bootstrap is serialized under the same credential lock. Both authentication and registration claims have bounded verifier deadlines and stale-consuming recovery. Slice 5 and the recovery portions of the browser matrix remain open; the current implementation must not be represented as threshold-owner recovery capable.
+Implementation checkpoint (2026-08-14): slices 1–4 are implemented and covered by focused, full-suite, Console, and real-PostgreSQL qualification tests. Registration of a second credential fails closed without an operation-bound proof and consumes that proof in the same credential-set transaction; first-credential bootstrap is serialized under the same credential lock. Both authentication and registration claims have bounded verifier deadlines and stale-consuming recovery. Slice 5 and the recovery portions of the browser matrix remain open; the current implementation must not be represented as threshold-owner recovery capable. The required slice-5 state machine and negative evidence are fixed in [THRESHOLD_OWNER_RECOVERY_DESIGN.md](./THRESHOLD_OWNER_RECOVERY_DESIGN.md).
 
 Merge slices:
 

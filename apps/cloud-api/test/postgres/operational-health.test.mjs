@@ -53,6 +53,12 @@ test("metrics are fixed-key, monotonic, and free of caller labels", () => {
   metrics.recordAgentSessionLifecycleRevoked();
   metrics.recordCloudAuditAppend(2);
   metrics.recordCloudAuditFailure();
+  metrics.recordHumanAuthRateLimitDenial(2);
+  metrics.recordHumanAuthRateLimitUnavailable();
+  metrics.recordHumanAuthTenantDenial(3);
+  metrics.recordHumanAuthReplayDenial(4);
+  metrics.recordHumanAuthVerifierTimeout();
+  metrics.recordHumanAuthStaleClaimRecovery(5);
   const snapshot = metrics.snapshot();
   assert.deepEqual(Object.keys(snapshot), ["version", "counters", "valid"]);
   assert.deepEqual(Object.keys(snapshot.counters), OPERATIONAL_METRIC_KEYS);
@@ -90,9 +96,15 @@ test("metrics are fixed-key, monotonic, and free of caller labels", () => {
     agent_session_lifecycle_expired_total: 3,
     agent_session_lifecycle_revoked_total: 1,
     cloud_audit_append_total: 2,
-    cloud_audit_failure_total: 1
+    cloud_audit_failure_total: 1,
+    human_auth_rate_limit_denial_total: 2,
+    human_auth_rate_limit_unavailable_total: 1,
+    human_auth_tenant_denial_total: 3,
+    human_auth_replay_denial_total: 4,
+    human_auth_verifier_timeout_total: 1,
+    human_auth_stale_claim_recovery_total: 5
   });
-  assert.equal(JSON.stringify(snapshot).includes("tenant"), false);
+  assert.doesNotMatch(JSON.stringify(snapshot), /tenant_id|organization_id|member_id|session_id|request_id/);
   assert.throws(() => metrics.increment("tenant_id", 1), { code: "invalid_input" });
   assert.throws(() => metrics.recordAuditGap(-1), { code: "invalid_input" });
   assert.throws(() => metrics.recordAgentSessionIssueSuccess({ tenant_id: "tenant-a" }), { code: "invalid_input" });

@@ -41,7 +41,7 @@ function postgres() {
     async revokeInvitation() { return null; },
     async acceptInvitation() { return null; }
   };
-  return { pool: { async query(sql) { if (String(sql).includes("FROM upstream_identities")) return { rows: [{ provider: "chatgpt", subject: "siwc-user-1", member_id: ids.member, membership_id: "33333333-3333-4333-8333-333333333333", organization_id: ids.org, role: "owner" }], rowCount: 1 }; return { rows: [], rowCount: 0 }; }, async connect() { throw new Error("not used by session bootstrap"); } }, humanRepository, organizationRepository };
+  return { pool: { async query(sql) { if (String(sql).includes("FROM upstream_identities")) return { rows: [{ provider: "chatgpt", subject: "siwc-user-1", member_id: ids.member, membership_id: "33333333-3333-4333-8333-333333333333", organization_id: ids.org, role: "owner" }], rowCount: 1 }; return { rows: [], rowCount: 0 }; }, async connect() { throw new Error("not used by session bootstrap"); } }, humanRepository, organizationRepository, sharedControlRepository: { async acquireRateLimit({ capacity }) { return { allowed: true, limit: capacity, remaining: capacity - 1, retryAfterMs: 0, resetAt: Date.now() }; } } };
 }
 
 test("composes the production human-auth boundary and bootstraps a hash-only session", async () => {
@@ -81,6 +81,12 @@ test("requires PostgreSQL and rejects unsupported recent-auth operations", async
   const rejected = await runtime.api.handle({ method: "POST", url: "/api/auth/webauthn/options", headers: { cookie, origin: "https://console.example.test", "agentpass-csrf": session.body.csrf_token, "content-type": "application/json" }, body: JSON.stringify({ organization_id: ids.org, operation: "policy.delete" }) });
   assert.equal(rejected.status, 400);
   assert.equal(rejected.body.error.code, "human_auth_invalid_request");
+});
+
+test("fails closed when the shared Human-auth limiter dependency is missing", () => {
+  const configured = postgres();
+  delete configured.sharedControlRepository;
+  assert.throws(() => createHumanAuthRuntime({ postgresRuntime: configured, tokenRecords: [], origin: "https://console.example.test", rpId: "console.example.test", cursorSecret: CURSOR_SECRET }), /sharedControlRepository/iu);
 });
 
 test("composes the Agent Session Human API only with the dedicated signer and issuance authority", () => {

@@ -188,14 +188,15 @@ class FakePgPool {
   }
 }
 
-function create({ verifyAttestation, time = clock(), random = randomSource(), maxPending, client = new FakePgClient({ now: time.now }) } = {}) {
+function create({ verifyAttestation, time = clock(), random = randomSource(), maxPending, client = new FakePgClient({ now: time.now }), metrics } = {}) {
   const ceremony = createPostgresWebAuthnRegistrationCeremony({
     client,
     verifyAttestation: verifyAttestation ?? (async (input) => ({ verified: true, credential_id: input.attestation.credential_id, public_key: Buffer.alloc(65, 8), sign_count: 0, transports: ["internal"], user_verified: true })),
     now: time.now,
     ttlMs: 60_000,
     random,
-    maxPending
+    maxPending,
+    metrics
   });
   return { client, ceremony, time };
 }
@@ -346,7 +347,8 @@ test("returns canonical credential metadata and rejects impossible backup flags"
 
 test("reaps a crashed consuming claim before reporting replay", async () => {
   const time = clock();
-  const { client, ceremony } = create({ time });
+  const metrics = { stale: 0, replay: 0, recordHumanAuthStaleClaimRecovery(amount = 1) { this.stale += amount; }, recordHumanAuthReplayDenial(amount = 1) { this.replay += amount; } };
+  const { client, ceremony } = create({ time, metrics });
   const issued = await ceremony.begin(context);
   const row = [...client.rows.values()][0];
   row.status = "consuming";
@@ -354,6 +356,8 @@ test("reaps a crashed consuming claim before reporting replay", async () => {
   await assert.rejects(() => ceremony.consume(registration(issued.challenge)), (error) => error.code === WEBAUTHN_REGISTRATION_ERROR_CODES.CHALLENGE_REPLAYED);
   assert.equal(row.status, "failed");
   assert.equal(row.consumed_at instanceof Date, true);
+  assert.equal(metrics.stale, 1);
+  assert.equal(metrics.replay, 1);
 });
 
 test("burns a claim when completion loses its storage result", async () => {

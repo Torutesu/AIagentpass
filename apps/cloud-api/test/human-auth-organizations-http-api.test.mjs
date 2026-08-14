@@ -22,6 +22,7 @@ const INVITATION_ID = "55555555-5555-4555-8555-555555555555";
 const RECENT_AUTH_PROOF = "77777777-7777-4777-8777-777777777777";
 const CREATED_AT = "2026-08-12T00:00:00.000Z";
 const NOW = 1_800_000_000_000;
+const abuseControls = Object.freeze({ async authorize() { return { allowed: true }; } });
 
 function actor(overrides = {}) {
   return {
@@ -85,7 +86,7 @@ function fixture({ role = "owner", sessionError = undefined, serviceOverrides = 
   };
   return {
     calls: { ...calls, ...serviceCalls },
-    api: createHumanOrganizationsHttpApi({ humanSession, organizationService, origin: ORIGIN, ...api, ...(recentAuthService === undefined ? {} : { recentAuthService }) })
+    api: createHumanOrganizationsHttpApi({ humanSession, organizationService, abuseControls, origin: ORIGIN, ...api, ...(recentAuthService === undefined ? {} : { recentAuthService }) })
   };
 }
 

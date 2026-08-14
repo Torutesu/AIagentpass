@@ -85,7 +85,7 @@ function makeHttp({ role = "owner", serviceOverrides = {}, recent = true } = {})
   } : undefined;
   return {
     calls,
-    api: createHumanOrganizationsHttpApi({ humanSession, organizationService: service, recentAuthService, origin: ORIGIN, now: () => NOW })
+    api: createHumanOrganizationsHttpApi({ humanSession, organizationService: service, recentAuthService, abuseControls: { async authorize() { return { allowed: true }; } }, origin: ORIGIN, now: () => NOW })
   };
 }
 
@@ -190,6 +190,7 @@ test("recent-auth operations remain distinct for role changes and removals", asy
   const api = createHumanOrganizationsHttpApi({
     humanSession: { expectedOrigin: ORIGIN, async authenticateRequest() { return { session: actor("owner") }; } },
     organizationService: service,
+    abuseControls: { async authorize() { return { allowed: true }; } },
     recentAuthService: { async authorize(input) { seen.push(input.operation); return { authenticated_at: NOW, challenge_id: input.proof, consumed: true, member_id: MEMBER_ID, operation: input.operation, organization_id: ORGANIZATION_ID, verified: true }; } },
     origin: ORIGIN,
     now: () => NOW

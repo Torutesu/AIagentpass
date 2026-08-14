@@ -456,7 +456,16 @@ function createMemoryPostgresState() {
     sessions,
     replayAttempts,
     identityQueries,
-    postgresRuntime: { pool, humanRepository, organizationRepository },
+    postgresRuntime: {
+      pool,
+      humanRepository,
+      organizationRepository,
+      sharedControlRepository: {
+        async acquireRateLimit() {
+          return { allowed: true, limit: 100, remaining: 99, retryAfterMs: 0 };
+        }
+      }
+    },
   };
 }
 

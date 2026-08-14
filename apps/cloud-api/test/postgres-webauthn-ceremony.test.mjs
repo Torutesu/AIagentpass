@@ -209,9 +209,9 @@ class FakePgPool {
   }
 }
 
-function create({ verifyAssertion, time = clock(), random = randomSource(), maxPending, verifierTimeoutMs, client: providedClient } = {}) {
+function create({ verifyAssertion, time = clock(), random = randomSource(), maxPending, verifierTimeoutMs, client: providedClient, metrics } = {}) {
   const client = providedClient ?? new FakePgClient({ now: time.now });
-  const coordinator = createPostgresWebAuthnCeremony({ client, verifyAssertion: verifyAssertion ?? (async (input) => ({ verified: true, credential_id: input.assertion.credential_id })), now: time.now, ttlMs: 60_000, random, maxPending, verifierTimeoutMs });
+  const coordinator = createPostgresWebAuthnCeremony({ client, verifyAssertion: verifyAssertion ?? (async (input) => ({ verified: true, credential_id: input.assertion.credential_id })), now: time.now, ttlMs: 60_000, random, maxPending, verifierTimeoutMs, metrics });
   return { client, coordinator, time };
 }
 
@@ -332,7 +332,8 @@ test("fails closed on malformed PostgreSQL rows", async () => {
 
 test("reaps a crashed consuming claim before reporting replay", async () => {
   const time = clock();
-  const { client, coordinator } = create({ time });
+  const metrics = { stale: 0, replay: 0, recordHumanAuthStaleClaimRecovery(amount = 1) { this.stale += amount; }, recordHumanAuthReplayDenial(amount = 1) { this.replay += amount; } };
+  const { client, coordinator } = create({ time, metrics });
   const issued = await coordinator.begin(context);
   const row = [...client.rows.values()][0];
   row.status = "consuming";
@@ -340,12 +341,16 @@ test("reaps a crashed consuming claim before reporting replay", async () => {
   await assert.rejects(() => coordinator.consume({ ...assertion(issued.challenge), challenge_id: issued.challenge_id }), (error) => error.code === WEBAUTHN_ERROR_CODES.CHALLENGE_REPLAYED);
   assert.equal(row.status, "failed");
   assert.equal(row.consumed_at instanceof Date, true);
+  assert.equal(metrics.stale, 1);
+  assert.equal(metrics.replay, 1);
 });
 
 test("times out a stuck verifier, burns the claim, and keeps the error secret-free", async () => {
+  const metrics = { timeouts: 0, recordHumanAuthVerifierTimeout(amount = 1) { this.timeouts += amount; } };
   const { client, coordinator } = create({
     verifierTimeoutMs: 1_000,
-    verifyAssertion: async () => new Promise(() => {})
+    verifyAssertion: async () => new Promise(() => {}),
+    metrics
   });
   const issued = await coordinator.begin(context);
   await assert.rejects(() => coordinator.consume({ ...assertion(issued.challenge), challenge_id: issued.challenge_id }), (error) => {
@@ -353,6 +358,7 @@ test("times out a stuck verifier, burns the claim, and keeps the error secret-fr
     return error instanceof WebAuthnCeremonyError && error.code === WEBAUTHN_ERROR_CODES.VERIFICATION_FAILED;
   });
   assert.equal([...client.rows.values()][0].status, "failed");
+  assert.equal(metrics.timeouts, 1);
 });
 
 test("burns a claim when completion loses its storage result", async () => {

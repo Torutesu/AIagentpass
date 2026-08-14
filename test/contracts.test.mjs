@@ -9,7 +9,7 @@ const root = path.resolve(import.meta.dirname, "..");
 test("machine-readable platform contracts pass the offline validator", () => {
   const result = spawnSync(process.execPath, [path.join(root, "scripts", "validate-contracts.mjs")], { cwd: root, encoding: "utf8" });
   assert.equal(result.status, 0, result.stderr);
-  assert.match(result.stdout, /validated 28 schemas, 2 OpenAPI documents, 17 fixtures, and 24 PostgreSQL migrations/);
+  assert.match(result.stdout, /validated 29 schemas, 2 OpenAPI documents, 17 fixtures, and 25 PostgreSQL migrations/);
 });
 
 const humanOpenapi = () => JSON.parse(fs.readFileSync(path.join(root, "contracts", "openapi", "human-v1.json"), "utf8"));

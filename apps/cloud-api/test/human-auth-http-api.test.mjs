@@ -8,6 +8,7 @@ import {
   HUMAN_AUTH_HTTP_PATHS
 } from "../src/human-auth/http-api.mjs";
 import { WebAuthnCeremonyError, WEBAUTHN_ERROR_CODES } from "../src/human-auth/webauthn/ceremony.mjs";
+import { HumanAuthAbuseControlError, HUMAN_AUTH_ABUSE_ERROR_CODES } from "../src/human-auth/rate-limit.mjs";
 
 const ORIGIN = "https://console.agentpass.test";
 const RP_ID = "console.agentpass.test";
@@ -18,6 +19,7 @@ const CHALLENGE_ID = "44444444-4444-4444-8444-444444444444";
 const CREDENTIAL_ID = Buffer.from("credential-01").toString("base64url");
 const CHALLENGE = Buffer.alloc(32, 9).toString("base64url");
 const NOW = Date.parse("2026-08-12T00:00:00.000Z");
+const abuseControls = Object.freeze({ async authorize() { return { allowed: true }; } });
 
 function session() {
   return {
@@ -76,7 +78,7 @@ function fixture(overrides = {}) {
   };
   return {
     calls,
-    api: createHumanAuthHttpApi({ ...services, rpId: RP_ID, now: () => NOW, ...(overrides.api ?? {}) })
+    api: createHumanAuthHttpApi({ ...services, abuseControls: overrides.abuseControls ?? abuseControls, rpId: RP_ID, now: () => NOW, ...(overrides.api ?? {}) })
   };
 }
 
@@ -143,6 +145,17 @@ test("creates authentication options from the session-bound server allow list", 
   assert.equal(calls.begin[0].session.session_id, SESSION_ID);
   assert.equal(calls.begin[0].organization_id, ORGANIZATION_ID);
   assert.equal(calls.allowList[0].operation, "device.enrollment.issue");
+});
+
+test("maps shared limiter denial to a bounded, secret-free HTTP response", async () => {
+  const { api } = fixture({
+    abuseControls: { async authorize() { throw new HumanAuthAbuseControlError(HUMAN_AUTH_ABUSE_ERROR_CODES.RATE_LIMITED, { retryAfterSeconds: 60 }); } }
+  });
+  const result = await api.handle(request(HUMAN_AUTH_HTTP_PATHS.authenticationOptions, optionsBody()));
+  assert.equal(result.status, 429);
+  assert.equal(result.headers["Retry-After"], "60");
+  assert.deepEqual(result.body.error, { code: HUMAN_AUTH_ABUSE_ERROR_CODES.RATE_LIMITED, message: "Human authentication rate limit exceeded" });
+  assert.equal(JSON.stringify(result.body).includes("password"), false);
 });
 
 test("requires an exact browser origin and session-bound CSRF authentication", async () => {

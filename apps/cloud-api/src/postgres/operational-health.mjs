@@ -1,5 +1,5 @@
 export const OPERATIONAL_HEALTH_VERSION = 1;
-export const EXPECTED_POSTGRES_SCHEMA_VERSION = 24;
+export const EXPECTED_POSTGRES_SCHEMA_VERSION = 25;
 
 export const OPERATIONAL_METRIC_KEYS = Object.freeze([
   "lock_timeout_total",
@@ -33,7 +33,13 @@ export const OPERATIONAL_METRIC_KEYS = Object.freeze([
   "agent_session_lifecycle_expired_total",
   "agent_session_lifecycle_revoked_total",
   "cloud_audit_append_total",
-  "cloud_audit_failure_total"
+  "cloud_audit_failure_total",
+  "human_auth_rate_limit_denial_total",
+  "human_auth_rate_limit_unavailable_total",
+  "human_auth_tenant_denial_total",
+  "human_auth_replay_denial_total",
+  "human_auth_verifier_timeout_total",
+  "human_auth_stale_claim_recovery_total"
 ]);
 
 const METRIC_KEY_SET = new Set(OPERATIONAL_METRIC_KEYS);
@@ -128,6 +134,12 @@ export function createOperationalMetrics({ initial = {} } = {}) {
     recordAgentSessionLifecycleRevoked: (amount = 1) => increment("agent_session_lifecycle_revoked_total", amount),
     recordCloudAuditAppend: (amount = 1) => increment("cloud_audit_append_total", amount),
     recordCloudAuditFailure: (amount = 1) => increment("cloud_audit_failure_total", amount),
+    recordHumanAuthRateLimitDenial: (amount = 1) => increment("human_auth_rate_limit_denial_total", amount),
+    recordHumanAuthRateLimitUnavailable: (amount = 1) => increment("human_auth_rate_limit_unavailable_total", amount),
+    recordHumanAuthTenantDenial: (amount = 1) => increment("human_auth_tenant_denial_total", amount),
+    recordHumanAuthReplayDenial: (amount = 1) => increment("human_auth_replay_denial_total", amount),
+    recordHumanAuthVerifierTimeout: (amount = 1) => increment("human_auth_verifier_timeout_total", amount),
+    recordHumanAuthStaleClaimRecovery: (amount = 1) => increment("human_auth_stale_claim_recovery_total", amount),
     snapshot
   });
 }

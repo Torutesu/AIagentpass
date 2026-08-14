@@ -1,5 +1,10 @@
 import { defineConfig, devices } from "@playwright/test";
 
+const configuredPort = Number.parseInt(process.env.PLAYWRIGHT_PORT ?? "", 10);
+const e2ePort = Number.isInteger(configuredPort) && configuredPort >= 1024 && configuredPort <= 65_535
+  ? configuredPort
+  : 4_173;
+
 export default defineConfig({
   testDir: "./e2e",
   testMatch: "**/*.spec.ts",
@@ -12,7 +17,7 @@ export default defineConfig({
   reporter: process.env.CI ? "line" : "list",
   outputDir: "./e2e/test-results",
   use: {
-    baseURL: "http://localhost:4173",
+    baseURL: `http://localhost:${e2ePort}`,
     ...devices["Desktop Chrome"],
     browserName: "chromium",
     headless: true,
@@ -21,11 +26,12 @@ export default defineConfig({
     screenshot: "off",
   },
   webServer: {
-    command: "npm run dev -- --hostname localhost --port 4173",
+    command: `npm run dev -- --hostname localhost --port ${e2ePort}`,
     cwd: ".",
-    url: "http://localhost:4173/",
+    url: `http://localhost:${e2ePort}/`,
     timeout: 60_000,
-    reuseExistingServer: !process.env.CI,
+    reuseExistingServer: false,
+    gracefulShutdown: { signal: "SIGTERM", timeout: 5_000 },
     stdout: "ignore",
     stderr: "pipe",
   },

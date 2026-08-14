@@ -16,6 +16,7 @@ import { createPostgresWebAuthnCeremony } from "./webauthn/postgres-ceremony.mjs
 import { createPostgresWebAuthnRegistrationCeremony } from "./webauthn/postgres-registration-ceremony.mjs";
 import { createSimpleWebAuthnRegistrationVerifier, createWebAuthnRegistrationService, WEBAUTHN_REGISTRATION_OPERATION, WEBAUTHN_REGISTRATION_RECENT_AUTH_OPERATION } from "./webauthn/registration.mjs";
 import { createSimpleWebAuthnAssertionVerifier } from "./webauthn/simplewebauthn-adapter.mjs";
+import { createHumanAuthAbuseControls } from "./rate-limit.mjs";
 import { createHumanAgentSessionGrantHttpApi } from "./agent-sessions/http-api.mjs";
 import { createAgentSessionGrantIssuanceService } from "./agent-sessions/issuance-service.mjs";
 import { createHumanQualificationGrantBatchHttpApi } from "./agent-sessions/qualification-batch-http-api.mjs";
@@ -39,7 +40,8 @@ export function createHumanAuthRuntime({ postgresRuntime, tokenRecords, origin, 
   const repository = postgresRuntime?.humanRepository;
   const organizationRepository = postgresRuntime?.organizationRepository;
   const pool = postgresRuntime?.pool;
-  if (!repository || !organizationRepository || !pool) throw new TypeError("postgresRuntime with pool, humanRepository, and organizationRepository is required");
+  const sharedControlRepository = postgresRuntime?.sharedControlRepository;
+  if (!repository || !organizationRepository || !pool || !sharedControlRepository || typeof sharedControlRepository.acquireRateLimit !== "function") throw new TypeError("postgresRuntime with pool, humanRepository, organizationRepository, and sharedControlRepository is required");
   const cursorCodec = createHumanCursorCodec({ secret: requireCursorSecret(cursorSecret) });
 
   const identityResolver = createPostgresIdentityResolver({ client: pool, now });
@@ -54,11 +56,12 @@ export function createHumanAuthRuntime({ postgresRuntime, tokenRecords, origin, 
     })
     : createConsoleIdentityAdapter({ tokenRecords, identityResolver, provider: identityProvider });
   const humanSession = createHumanSessionService({ repository, identityAdapter: consoleIdentity.identityAdapter, origin, now });
+  const abuseControls = createHumanAuthAbuseControls({ repository: sharedControlRepository, metrics: postgresRuntime.operationalMetrics });
   const verifyAssertion = createSimpleWebAuthnAssertionVerifier({ credentialRepository: repository });
-  const ceremony = createPostgresWebAuthnCeremony({ client: pool, verifyAssertion, now });
+  const ceremony = createPostgresWebAuthnCeremony({ client: pool, verifyAssertion, metrics: postgresRuntime.operationalMetrics, now });
   const recentAuthService = createRecentAuthService({ ceremony, sessionRepository: repository });
   const registrationVerifier = createSimpleWebAuthnRegistrationVerifier();
-  const registrationCeremony = createPostgresWebAuthnRegistrationCeremony({ client: pool, verifyAttestation: registrationVerifier.verifyAttestation, now });
+  const registrationCeremony = createPostgresWebAuthnRegistrationCeremony({ client: pool, verifyAttestation: registrationVerifier.verifyAttestation, metrics: postgresRuntime.operationalMetrics, now });
   const registrationService = createWebAuthnRegistrationService({ ceremony: registrationCeremony, credentialRepository: repository, registrationVerifier, rpId, origin, now });
   const sessionApi = createHumanSessionHttpApi({ humanSession, verifyIdentityRequest: consoleIdentity.verifyIdentityRequest, origin });
   const webauthnApi = createHumanAuthHttpApi({
@@ -71,13 +74,14 @@ export function createHumanAuthRuntime({ postgresRuntime, tokenRecords, origin, 
     origin,
     basePath: "/api/auth",
     allowedOperations: ALLOWED_RECENT_AUTH_OPERATIONS,
+    abuseControls,
     now
   });
-  const registrationApi = createWebAuthnRegistrationHttpApi({ humanSession, registrationService, origin, basePath: "/api/auth" });
+  const registrationApi = createWebAuthnRegistrationHttpApi({ humanSession, registrationService, abuseControls, origin, basePath: "/api/auth" });
   const managementRepository = createPostgresHumanManagementRepository({ repository, cursorCodec, now });
   const managementApi = createHumanManagementHttpApi({ humanSession, recentAuthService, repository: managementRepository, origin, now });
   const organizationService = createPostgresOrganizationService({ repository: organizationRepository, cursorCodec, now });
-  const organizationApi = createHumanOrganizationsHttpApi({ humanSession, recentAuthService, organizationService, origin, now });
+  const organizationApi = createHumanOrganizationsHttpApi({ humanSession, recentAuthService, organizationService, abuseControls, origin, now });
   let agentSessionGrantApi;
   let qualificationGrantBatchApi;
   if (agentSessionSigner !== undefined) {
@@ -115,7 +119,7 @@ export function createHumanAuthRuntime({ postgresRuntime, tokenRecords, origin, 
     throw new TypeError("Agent Session signer is required for qualification Grant batches");
   }
   const api = createHumanAuthRouter({ sessionApi, webauthnApi, registrationApi, managementApi, organizationApi, ...(agentSessionGrantApi ? { agentSessionGrantApi } : {}), ...(qualificationGrantBatchApi ? { qualificationGrantBatchApi } : {}) });
-  return Object.freeze({ api, humanSession, recentAuthService, ceremony, registrationCeremony, registrationService, identityResolver, consoleIdentity, managementRepository, organizationRepository, organizationService, sessionApi, webauthnApi, registrationApi, managementApi, organizationApi, ...(agentSessionGrantApi ? { agentSessionGrantApi } : {}), ...(qualificationGrantBatchApi ? { qualificationGrantBatchApi } : {}), allowedOperations: ALLOWED_RECENT_AUTH_OPERATIONS });
+  return Object.freeze({ api, humanSession, recentAuthService, abuseControls, ceremony, registrationCeremony, registrationService, identityResolver, consoleIdentity, managementRepository, organizationRepository, organizationService, sessionApi, webauthnApi, registrationApi, managementApi, organizationApi, ...(agentSessionGrantApi ? { agentSessionGrantApi } : {}), ...(qualificationGrantBatchApi ? { qualificationGrantBatchApi } : {}), allowedOperations: ALLOWED_RECENT_AUTH_OPERATIONS });
 }
 
 function requireCursorSecret(value) {

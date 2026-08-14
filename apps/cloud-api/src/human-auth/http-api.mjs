@@ -5,6 +5,7 @@ import {
   HUMAN_SESSION_CSRF_HEADER,
 } from "../human-session.mjs";
 import { WebAuthnCeremonyError, WEBAUTHN_ERROR_CODES } from "./webauthn/ceremony.mjs";
+import { HumanAuthAbuseControlError, HUMAN_AUTH_RATE_LIMIT_OPERATIONS } from "./rate-limit.mjs";
 
 const AUTHENTICATION_OPTIONS_PATH = "/webauthn/options";
 const AUTHENTICATION_VERIFY_PATH = "/webauthn/verify";
@@ -127,6 +128,7 @@ export function createHumanAuthHttpApi({
   origin,
   basePath = "",
   allowedOperations,
+  abuseControls,
   maxBodyBytes = DEFAULT_MAX_BODY_BYTES,
   now = () => Date.now()
 } = {}) {
@@ -138,6 +140,7 @@ export function createHumanAuthHttpApi({
   const operationSet = normalizeOperations(allowedOperations);
   if (typeof now !== "function") throw new TypeError("now must be a function");
   if (!Number.isSafeInteger(maxBodyBytes) || maxBodyBytes < 1_024 || maxBodyBytes > 1_024 * 1_024) throw new TypeError("maxBodyBytes is invalid");
+  if (!abuseControls || typeof abuseControls.authorize !== "function") throw new TypeError("abuseControls must expose authorize()");
 
   async function handle(input, nodeResponse = undefined) {
     const result = await dispatch(input);
@@ -173,7 +176,7 @@ export function createHumanAuthHttpApi({
         csrfToken: header(request.headers, HUMAN_SESSION_CSRF_HEADER)
       });
       if (!authenticated?.session || typeof authenticated.session !== "object") throw new Error("session result is invalid");
-      if (authenticated.session.organization_id === undefined || authenticated.session.session_id === undefined) throw new Error("session result is incomplete");
+      if (authenticated.session.organization_id === undefined || authenticated.session.member_id === undefined || authenticated.session.session_id === undefined) throw new Error("session result is incomplete");
       return authenticated.session;
     } catch (error) {
       if (error instanceof HumanAuthHttpError) throw error;
@@ -187,6 +190,8 @@ export function createHumanAuthHttpApi({
 
   async function createOptions({ request, session, body }) {
     const input = parseOptionsBody(body, session, expectedRpId, expectedOrigin, operationSet);
+    await abuseControls.authorize({ operation: HUMAN_AUTH_RATE_LIMIT_OPERATIONS.webauthnBegin, session, organizationId: input.organization_id });
+    if (input.organization_id !== session.organization_id) throw new HumanAuthHttpError(HUMAN_AUTH_HTTP_ERROR_CODES.INVALID_REQUEST);
     const credentials = await loadAllowList({ session, organization_id: input.organization_id, operation: input.operation });
     if (credentials.length === 0) throw new HumanAuthHttpError(HUMAN_AUTH_HTTP_ERROR_CODES.CREDENTIAL_ALLOW_LIST_EMPTY, { status: 409 });
 
@@ -220,6 +225,8 @@ export function createHumanAuthHttpApi({
 
   async function verifyAuthentication({ session, body }) {
     const input = parseVerifyBody(body, session, expectedRpId, expectedOrigin, operationSet);
+    await abuseControls.authorize({ operation: HUMAN_AUTH_RATE_LIMIT_OPERATIONS.webauthnVerify, session, organizationId: input.organization_id });
+    if (input.organization_id !== session.organization_id) throw new HumanAuthHttpError(HUMAN_AUTH_HTTP_ERROR_CODES.INVALID_REQUEST);
     const credentials = await loadAllowList({ session, organization_id: input.organization_id, operation: input.operation });
     if (credentials.length === 0) throw new HumanAuthHttpError(HUMAN_AUTH_HTTP_ERROR_CODES.CREDENTIAL_ALLOW_LIST_EMPTY, { status: 409 });
     if (!credentials.some((credential) => sameCredentialId(credential.id, input.assertion.credential_id))) {
@@ -317,7 +324,6 @@ function normalizeTransports(value) {
 function parseOptionsBody(body, session, expectedRpId, expectedOrigin, operationSet) {
   assertObjectBody(body, new Set(["organization_id", "operation"]));
   const organization_id = requiredUuid(body.organization_id, "organization_id");
-  if (organization_id !== session.organization_id) throw new HumanAuthHttpError(HUMAN_AUTH_HTTP_ERROR_CODES.INVALID_REQUEST);
   const operation = requiredOperation(body.operation, operationSet);
   void expectedRpId;
   void expectedOrigin;
@@ -327,7 +333,6 @@ function parseOptionsBody(body, session, expectedRpId, expectedOrigin, operation
 function parseVerifyBody(body, session, expectedRpId, expectedOrigin, operationSet) {
   assertObjectBody(body, new Set(["organization_id", "operation", "challenge_id", "credential"]));
   const organization_id = requiredUuid(body.organization_id, "organization_id");
-  if (organization_id !== session.organization_id) throw new HumanAuthHttpError(HUMAN_AUTH_HTTP_ERROR_CODES.INVALID_REQUEST);
   const operation = requiredOperation(body.operation, operationSet);
   const challenge_id = requiredUuid(body.challenge_id, "challenge_id");
   const assertion = parseBrowserCredential(body.credential);
@@ -376,6 +381,7 @@ function mapServiceError(error, phase) {
 }
 
 function mapError(error) {
+  if (error instanceof HumanAuthAbuseControlError) return response(error.status, { error: { code: error.code, message: error.message } }, error.headers);
   if (error instanceof HumanAuthHttpError) return response(error.status, { error: { code: error.code, message: ERROR_MESSAGES[error.code] ?? ERROR_MESSAGES[HUMAN_AUTH_HTTP_ERROR_CODES.INTERNAL_ERROR] } }, error.headers);
   if (error?.code === HUMAN_AUTH_HTTP_ERROR_CODES.INVALID_REQUEST) return response(400, { error: { code: HUMAN_AUTH_HTTP_ERROR_CODES.INVALID_REQUEST, message: ERROR_MESSAGES[HUMAN_AUTH_HTTP_ERROR_CODES.INVALID_REQUEST] } });
   return response(500, { error: { code: HUMAN_AUTH_HTTP_ERROR_CODES.INTERNAL_ERROR, message: ERROR_MESSAGES[HUMAN_AUTH_HTTP_ERROR_CODES.INTERNAL_ERROR] } });

@@ -4,6 +4,7 @@ import {
   isOpaqueToken,
   parseSessionCookie
 } from "../../human-session.mjs";
+import { HumanAuthAbuseControlError, HUMAN_AUTH_RATE_LIMIT_OPERATIONS } from "../rate-limit.mjs";
 
 const ORGANIZATIONS_PATH = "/api/auth/organizations";
 const ACCEPT_INVITATION_PATH = "/api/auth/invitations/accept";
@@ -170,6 +171,7 @@ export function createHumanOrganizationsHttpApi({
   humanSession,
   recentAuthService,
   organizationService,
+  abuseControls,
   origin,
   basePath = "",
   maxBodyBytes = MAX_BODY_BYTES,
@@ -183,6 +185,7 @@ export function createHumanOrganizationsHttpApi({
   const normalizedBasePath = normalizeBasePath(basePath);
   if (!Number.isSafeInteger(maxBodyBytes) || maxBodyBytes < 1_024 || maxBodyBytes > 1_024 * 1_024) throw new TypeError("maxBodyBytes is invalid");
   if (typeof now !== "function") throw new TypeError("now must be a function");
+  if (!abuseControls || typeof abuseControls.authorize !== "function") throw new TypeError("abuseControls must expose authorize()");
 
   async function handle(input, nodeResponse = undefined) {
     const result = await dispatch(input);
@@ -332,6 +335,7 @@ export function createHumanOrganizationsHttpApi({
   }
 
   async function listInvitations(actor, route, request) {
+    await abuseControls.authorize({ operation: HUMAN_AUTH_RATE_LIMIT_OPERATIONS.invitationList, session: actor, organizationId: route.organizationId });
     requireOrganization(actor, route.organizationId);
     requireRole(actor, AUDITOR_OR_ABOVE);
     const page = parsePagination(request.url);
@@ -344,6 +348,7 @@ export function createHumanOrganizationsHttpApi({
   }
 
   async function createInvitation(actor, route, body, idempotencyKey) {
+    await abuseControls.authorize({ operation: HUMAN_AUTH_RATE_LIMIT_OPERATIONS.invitationCreate, session: actor, organizationId: route.organizationId });
     requireOrganization(actor, route.organizationId);
     requireRole(actor, ADMIN_OR_OWNER);
     const input = parseBody(body, new Set(["role", "expires_at"]));
@@ -361,6 +366,7 @@ export function createHumanOrganizationsHttpApi({
   }
 
   async function revokeInvitation(actor, route, body, idempotencyKey, request) {
+    await abuseControls.authorize({ operation: HUMAN_AUTH_RATE_LIMIT_OPERATIONS.invitationRevoke, session: actor, organizationId: route.organizationId });
     requireOrganization(actor, route.organizationId);
     requireRole(actor, ADMIN_OR_OWNER);
     parseBody(body, new Set());
@@ -374,6 +380,7 @@ export function createHumanOrganizationsHttpApi({
   }
 
   async function acceptInvitation(actor, body, idempotencyKey) {
+    await abuseControls.authorize({ operation: HUMAN_AUTH_RATE_LIMIT_OPERATIONS.invitationAccept, session: actor, organizationId: actor.organization_id });
     const input = parseBody(body, new Set(["one_time_token"]));
     if (!isOpaqueToken(input.one_time_token)) throw invalidRequest();
     try {
@@ -665,6 +672,7 @@ function roleNotAllowed() {
 }
 
 function mapError(error) {
+  if (error instanceof HumanAuthAbuseControlError) return response(error.status, { error: { code: error.code, message: error.message } }, error.headers);
   if (error instanceof HumanOrganizationsHttpError) {
     const headers = error.status === 405 ? { Allow: error.allow ?? "GET, POST, PATCH" } : undefined;
     return response(error.status, { error: { code: error.code, message: ERROR_MESSAGES[error.code] ?? ERROR_MESSAGES[HUMAN_ORGANIZATIONS_HTTP_ERROR_CODES.INTERNAL_ERROR] } }, headers);

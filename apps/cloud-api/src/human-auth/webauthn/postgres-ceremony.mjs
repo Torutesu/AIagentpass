@@ -24,6 +24,7 @@ const ORIGIN_SCHEMES = new Set(["https:", "http:"]);
 const VERIFIER_RESULT_KEYS = new Set(["verified", "credential_id", "sign_count", "authenticated_at"]);
 const CEREMONY = "authentication";
 const STATUS = new Set(["pending", "consuming", "consumed", "failed", "expired"]);
+const VERIFIER_TIMEOUT_CODE = "ERR_WEBAUTHN_VERIFIER_TIMEOUT";
 
 const BEGIN_SQL = `
 INSERT INTO webauthn_challenges (
@@ -166,6 +167,7 @@ export function createPostgresWebAuthnCeremony({
   ttlMs = DEFAULT_TTL_MS,
   maxPending = MAX_PENDING,
   verifierTimeoutMs = DEFAULT_VERIFIER_TIMEOUT_MS,
+  metrics,
   randomUUID = crypto.randomUUID,
   randomBytes = crypto.randomBytes,
   random
@@ -202,7 +204,8 @@ export function createPostgresWebAuthnCeremony({
         // lock is transaction-scoped and is released by COMMIT/ROLLBACK.
         await transactionQuery(CAPACITY_LOCK_SQL, []);
         await transactionQuery(EXPIRE_SQL, [createdAt]);
-        await transactionQuery(REAP_STALE_SQL, [createdAt, new Date(Math.max(0, issuedAt - CLAIM_LEASE_MS)).toISOString()]);
+        const reaped = await transactionQuery(REAP_STALE_SQL, [createdAt, new Date(Math.max(0, issuedAt - CLAIM_LEASE_MS)).toISOString()]);
+        recordMetric(metrics, "recordHumanAuthStaleClaimRecovery", reaped.rows?.length ?? reaped.rowCount ?? 0);
         const capacity = await transactionQuery(CAPACITY_SQL, [createdAt]);
         const pendingCount = parseCount(capacity.rows[0]?.pending_count);
         if (pendingCount >= maxPending) fail(WEBAUTHN_ERROR_CODES.CAPACITY_EXCEEDED);
@@ -239,12 +242,16 @@ export function createPostgresWebAuthnCeremony({
     const request = normalizeConsumeInput(input);
     const currentTime = assertClock(now());
     const currentIso = new Date(currentTime).toISOString();
-    await dbQuery(REAP_ONE_SQL, [currentIso, new Date(Math.max(0, currentTime - CLAIM_LEASE_MS)).toISOString(), request.challenge_id, request.session_id, request.organization_id, request.operation, request.rp_id, request.origin, request.user_verification]);
+    const reaped = await dbQuery(REAP_ONE_SQL, [currentIso, new Date(Math.max(0, currentTime - CLAIM_LEASE_MS)).toISOString(), request.challenge_id, request.session_id, request.organization_id, request.operation, request.rp_id, request.origin, request.user_verification]);
+    recordMetric(metrics, "recordHumanAuthStaleClaimRecovery", reaped.rows?.length ?? reaped.rowCount ?? 0);
     let record = await loadRecord(request.challenge_id);
     assertRecord(record);
     if (!sameBinding(record, request)) fail(WEBAUTHN_ERROR_CODES.BINDING_MISMATCH);
     if (record.status === "consuming") fail(WEBAUTHN_ERROR_CODES.CHALLENGE_BUSY);
-    if (record.status === "consumed" || record.status === "failed") fail(WEBAUTHN_ERROR_CODES.CHALLENGE_REPLAYED);
+    if (record.status === "consumed" || record.status === "failed") {
+      recordMetric(metrics, "recordHumanAuthReplayDenial");
+      fail(WEBAUTHN_ERROR_CODES.CHALLENGE_REPLAYED);
+    }
     if (record.status === "expired" || currentTime >= record.expires_at) fail(WEBAUTHN_ERROR_CODES.CHALLENGE_EXPIRED);
     if (!sameBinding(record, request)) fail(WEBAUTHN_ERROR_CODES.BINDING_MISMATCH);
     if (!constantTimeBufferEqual(record.challenge_hash, sha256Bytes(request.challenge))) fail(WEBAUTHN_ERROR_CODES.CHALLENGE_MISMATCH);
@@ -270,6 +277,7 @@ export function createPostgresWebAuthnCeremony({
         currentTime
       );
     } catch (error) {
+      if (error?.code === VERIFIER_TIMEOUT_CODE) recordMetric(metrics, "recordHumanAuthVerifierTimeout");
       await burn(request.challenge_id, new Date(assertClock(now())).toISOString());
       if (error instanceof WebAuthnCeremonyError && error.code === WEBAUTHN_ERROR_CODES.INVALID_VERIFIER_RESULT) throw error;
       fail(WEBAUTHN_ERROR_CODES.VERIFICATION_FAILED);
@@ -542,7 +550,16 @@ function fail(code, details) { throw new WebAuthnCeremonyError(code, details); }
 function withTimeout(callback, timeoutMs) {
   let timer;
   const timeout = new Promise((_, reject) => {
-    timer = setTimeout(() => reject(new Error("WebAuthn verifier timed out")), timeoutMs);
+    timer = setTimeout(() => {
+      const error = new Error("WebAuthn verifier timed out");
+      error.code = VERIFIER_TIMEOUT_CODE;
+      reject(error);
+    }, timeoutMs);
   });
   return Promise.race([Promise.resolve().then(callback), timeout]).finally(() => clearTimeout(timer));
+}
+
+function recordMetric(metrics, method, amount = 1) {
+  if (!Number.isSafeInteger(amount) || amount < 1) return;
+  try { metrics?.[method]?.(amount); } catch { /* Metrics cannot affect auth. */ }
 }

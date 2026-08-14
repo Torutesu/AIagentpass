@@ -7,6 +7,7 @@ import {
   WEBAUTHN_REGISTRATION_ERROR_CODES,
   normalizeBrowserRegistrationCredential
 } from "./webauthn/registration.mjs";
+import { HumanAuthAbuseControlError, HUMAN_AUTH_RATE_LIMIT_OPERATIONS } from "./rate-limit.mjs";
 
 const OPTIONS_PATH = "/webauthn/registration/options";
 const VERIFY_PATH = "/webauthn/registration/verify";
@@ -105,6 +106,7 @@ export class WebAuthnRegistrationHttpError extends Error {
 export function createWebAuthnRegistrationHttpApi({
   humanSession,
   registrationService,
+  abuseControls,
   origin,
   basePath = "",
   maxBodyBytes = DEFAULT_MAX_BODY_BYTES
@@ -115,6 +117,7 @@ export function createWebAuthnRegistrationHttpApi({
   assertOrigin(expectedOrigin);
   const normalizedBasePath = normalizeBasePath(basePath);
   if (!Number.isSafeInteger(maxBodyBytes) || maxBodyBytes < 1_024 || maxBodyBytes > 1_024 * 1_024) throw new TypeError("maxBodyBytes is invalid");
+  if (!abuseControls || typeof abuseControls.authorize !== "function") throw new TypeError("abuseControls must expose authorize()");
 
   async function handle(input, nodeResponse = undefined) {
     const result = await dispatch(input);
@@ -161,6 +164,8 @@ export function createWebAuthnRegistrationHttpApi({
   }
 
   async function issueOptions(session, input, recentAuth) {
+    await abuseControls.authorize({ operation: HUMAN_AUTH_RATE_LIMIT_OPERATIONS.registrationBegin, session, organizationId: input.organization_id });
+    if (input.organization_id !== session.organization_id.toLowerCase()) throw new WebAuthnRegistrationHttpError(WEBAUTHN_REGISTRATION_HTTP_ERROR_CODES.INVALID_REQUEST, { status: 400 });
     try {
       return response(200, await registrationService.begin({ session, organization_id: input.organization_id, ...(recentAuth === undefined ? {} : { recent_auth: recentAuth }) }));
     } catch (error) {
@@ -169,6 +174,8 @@ export function createWebAuthnRegistrationHttpApi({
   }
 
   async function verifyCredential(session, input, recentAuth) {
+    await abuseControls.authorize({ operation: HUMAN_AUTH_RATE_LIMIT_OPERATIONS.registrationVerify, session, organizationId: input.organization_id });
+    if (input.organization_id !== session.organization_id.toLowerCase()) throw new WebAuthnRegistrationHttpError(WEBAUTHN_REGISTRATION_HTTP_ERROR_CODES.INVALID_REQUEST, { status: 400 });
     try {
       return response(201, await registrationService.verify({ session, organization_id: input.organization_id, challenge_id: input.challenge_id, credential: input.credential, ...(recentAuth === undefined ? {} : { recent_auth: recentAuth }) }));
     } catch (error) {
@@ -182,14 +189,14 @@ export function createWebAuthnRegistrationHttpApi({
 function parseOptionsBody(body, session) {
   assertObjectBody(body, new Set(["organization_id"]));
   const organization_id = requiredUuid(body.organization_id);
-  if (organization_id !== session.organization_id.toLowerCase()) throw new WebAuthnRegistrationHttpError(WEBAUTHN_REGISTRATION_HTTP_ERROR_CODES.INVALID_REQUEST, { status: 400 });
+  void session;
   return Object.freeze({ organization_id });
 }
 
 function parseVerifyBody(body, session) {
   assertObjectBody(body, new Set(["organization_id", "challenge_id", "credential"]));
   const organization_id = requiredUuid(body.organization_id);
-  if (organization_id !== session.organization_id.toLowerCase()) throw new WebAuthnRegistrationHttpError(WEBAUTHN_REGISTRATION_HTTP_ERROR_CODES.INVALID_REQUEST, { status: 400 });
+  void session;
   const challenge_id = requiredUuid(body.challenge_id);
   return Object.freeze({ organization_id, challenge_id, credential: normalizeBrowserCredential(body.credential) });
 }
@@ -219,7 +226,8 @@ function mapServiceError(error, phase) {
 }
 
 function mapError(error) {
-  if (error instanceof WebAuthnRegistrationHttpError) return response(error.status, { error: { code: error.code, message: ERROR_MESSAGES[error.code] ?? ERROR_MESSAGES[WEBAUTHN_REGISTRATION_HTTP_ERROR_CODES.INTERNAL_ERROR] } });
+  if (error instanceof HumanAuthAbuseControlError) return response(error.status, { error: { code: error.code, message: error.message } }, error.headers);
+  if (error instanceof WebAuthnRegistrationHttpError) return response(error.status, { error: { code: error.code, message: ERROR_MESSAGES[error.code] ?? ERROR_MESSAGES[WEBAUTHN_REGISTRATION_HTTP_ERROR_CODES.INTERNAL_ERROR] } }, error.headers);
   return response(500, { error: { code: WEBAUTHN_REGISTRATION_HTTP_ERROR_CODES.INTERNAL_ERROR, message: ERROR_MESSAGES[WEBAUTHN_REGISTRATION_HTTP_ERROR_CODES.INTERNAL_ERROR] } });
 }
 

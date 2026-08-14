@@ -16,6 +16,7 @@ const CHALLENGE_ID = "44444444-4444-4444-8444-444444444444";
 const CREDENTIAL_ID = Buffer.alloc(16, 1).toString("base64url");
 const CHALLENGE = Buffer.alloc(32, 9).toString("base64url");
 const RECENT_AUTH_ID = "55555555-5555-4555-8555-555555555555";
+const abuseControls = Object.freeze({ async authorize() { return { allowed: true }; } });
 
 function session() {
   return { version: 1, session_id: SESSION_ID, member_id: MEMBER_ID, organization_id: ORGANIZATION_ID, role: "owner", created_at: "2026-08-12T00:00:00.000Z", expires_at: "2026-08-12T08:00:00.000Z", recent_auth_at: null };
@@ -34,6 +35,7 @@ function fixture(overrides = {}) {
       async authenticateRequest(input) { calls.authenticate.push(input); if (overrides.sessionError) throw overrides.sessionError; return { session: session() }; }
     },
     registrationService: service,
+    abuseControls,
     basePath: "/api/auth"
   });
   return { api, calls };
