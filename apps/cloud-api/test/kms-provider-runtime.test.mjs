@@ -19,14 +19,17 @@ const MANIFEST_PURPOSE = "agentpass.qualification-grant-batch-manifest";
 const awsAgentResource = "arn:aws:kms:us-east-1:123456789012:key/agent-session";
 const awsManifestResource = "arn:aws:kms:us-east-1:123456789012:key/qualification-manifest";
 const awsPossessionResource = "arn:aws:kms:us-east-1:123456789012:key/possession-receipt";
+const awsRefreshResource = "arn:aws:kms:us-east-1:123456789012:key/refresh-hint";
 const gcpAgentResource = "projects/demo/locations/global/keyRings/agentpass/cryptoKeys/agent-session/cryptoKeyVersions/1";
 const gcpManifestResource = "projects/demo/locations/global/keyRings/agentpass/cryptoKeys/qualification-manifest/cryptoKeyVersions/1";
 const gcpPossessionResource = "projects/demo/locations/global/keyRings/agentpass/cryptoKeys/possession-receipt/cryptoKeyVersions/1";
+const gcpRefreshResource = "projects/demo/locations/global/keyRings/agentpass/cryptoKeys/refresh-hint/cryptoKeyVersions/1";
 
 function baseEnv({ provider = "aws", agentResource = awsAgentResource, manifestResource = awsManifestResource, possessionResource } = {}) {
   const agent = crypto.generateKeyPairSync("ed25519");
   const manifest = crypto.generateKeyPairSync("ed25519");
   const possession = crypto.generateKeyPairSync("ed25519");
+  const refresh = crypto.generateKeyPairSync("ed25519");
   const resolvedPossessionResource = possessionResource ?? (provider === "gcp" ? gcpPossessionResource : awsPossessionResource);
   return {
     AGENTPASS_CLOUD_PROFILE: "hosted",
@@ -37,11 +40,14 @@ function baseEnv({ provider = "aws", agentResource = awsAgentResource, manifestR
     AGENTPASS_CLOUD_POSSESSION_RECEIPT_KEY_ID: "possession-receipt-2026-08",
     AGENTPASS_CLOUD_POSSESSION_RECEIPT_PUBLIC_KEY: possession.publicKey.export({ type: "spki", format: "pem" }).toString(),
     AGENTPASS_CLOUD_POSSESSION_RECEIPT_TIMEOUT_MS: "5000",
+    AGENTPASS_CLOUD_REFRESH_KEY_ID: "refresh-hint-2026-08",
+    AGENTPASS_CLOUD_REFRESH_PUBLIC_KEY: refresh.publicKey.export({ type: "spki", format: "pem" }).toString(),
     AGENTPASS_KMS_PROVIDER: provider,
     AGENTPASS_KMS_AGENT_SESSION_KEY_RESOURCE: agentResource,
     AGENTPASS_KMS_QUALIFICATION_MANIFEST_KEY_RESOURCE: manifestResource,
     AGENTPASS_KMS_POSSESSION_RECEIPT_KEY_RESOURCE: resolvedPossessionResource,
-    __keys: { agent, manifest, possession }
+    AGENTPASS_KMS_REFRESH_HINT_KEY_RESOURCE: provider === "gcp" ? gcpRefreshResource : awsRefreshResource,
+    __keys: { agent, manifest, possession, refresh }
   };
 }
 
@@ -79,11 +85,15 @@ test("hosted KMS config is explicit, closed, and keeps logical IDs separate from
     { AGENTPASS_KMS_AGENT_SESSION_KEY_RESOURCE: undefined },
     { AGENTPASS_KMS_QUALIFICATION_MANIFEST_KEY_RESOURCE: undefined },
     { AGENTPASS_KMS_POSSESSION_RECEIPT_KEY_RESOURCE: undefined },
+    { AGENTPASS_KMS_REFRESH_HINT_KEY_RESOURCE: undefined },
     { AGENTPASS_KMS_PROVIDER: "local" },
     { AGENTPASS_KMS_AGENT_SESSION_KEY_RESOURCE: awsManifestResource },
     { AGENTPASS_KMS_POSSESSION_RECEIPT_KEY_RESOURCE: awsManifestResource },
+    { AGENTPASS_KMS_REFRESH_HINT_KEY_RESOURCE: awsManifestResource },
     { AGENTPASS_CLOUD_POSSESSION_RECEIPT_KEY_ID: "agent-session-2026-08" },
     { AGENTPASS_CLOUD_POSSESSION_RECEIPT_PUBLIC_KEY: env.AGENTPASS_CLOUD_AGENT_SESSION_PUBLIC_KEY },
+    { AGENTPASS_CLOUD_REFRESH_KEY_ID: "agent-session-2026-08" },
+    { AGENTPASS_CLOUD_REFRESH_PUBLIC_KEY: env.AGENTPASS_CLOUD_AGENT_SESSION_PUBLIC_KEY },
     { AGENTPASS_CLOUD_POSSESSION_RECEIPT_TIMEOUT_MS: "30001" },
     { AGENTPASS_KMS_PRIVATE_KEY_PATH: "/tmp/key" },
     { AGENTPASS_CLOUD_PROFILE: "evaluation" }
@@ -105,7 +115,8 @@ test("AWS composition instantiates official-shaped clients and signs all purpose
       observed.push(command);
       const keyPair = command.input.KeyId === awsAgentResource
         ? env.__keys.agent
-        : command.input.KeyId === awsManifestResource ? env.__keys.manifest : env.__keys.possession;
+        : command.input.KeyId === awsManifestResource ? env.__keys.manifest
+          : command.input.KeyId === awsPossessionResource ? env.__keys.possession : env.__keys.refresh;
       if (command.kind === "get") {
         return {
           KeyId: command.input.KeyId,
@@ -134,8 +145,11 @@ test("AWS composition instantiates official-shaped clients and signs all purpose
   const possessionSignature = await providers.possessionReceiptSignerProvider.sign({ algorithm: "ed25519", bytes: possessionBytes, key_id: "possession-receipt-2026-08", purpose: POSSESSION_RECEIPT_PURPOSE, version: POSSESSION_RECEIPT_VERSION });
   assert.equal(crypto.verify(null, possessionBytes, env.__keys.possession.publicKey, possessionSignature), true);
   assert.equal(observed.some((command) => command.input.KeyId === awsPossessionResource), true);
+  const refreshBytes = Buffer.from("agentpass.refresh-hint.v1\0aws runtime refresh");
+  const refreshSignature = await providers.refreshHintSignerProvider.sign({ algorithm: "ed25519", bytes: refreshBytes, key_id: "refresh-hint-2026-08", purpose: "agentpass.refresh-hint", version: 1 });
+  assert.equal(crypto.verify(null, refreshBytes, env.__keys.refresh.publicKey, refreshSignature), true);
   assert.equal(observed.filter((command) => command.input.KeyId === awsAgentResource).length > 0, true);
-  assert.equal(observed.every((command) => [awsAgentResource, awsManifestResource, awsPossessionResource].includes(command.input.KeyId)), true);
+  assert.equal(observed.every((command) => [awsAgentResource, awsManifestResource, awsPossessionResource, awsRefreshResource].includes(command.input.KeyId)), true);
   assert.equal(providers.agentSessionSignerProvider.close, undefined);
   await Promise.all([providers.close(), providers.close(), providers.close()]);
   assert.equal(destroyed, 1);
@@ -151,14 +165,16 @@ test("GCP composition instantiates official-shaped clients and maps cryptoKeyVer
       observed.push({ operation: "getPublicKey", input });
       const pair = input.name === gcpAgentResource
         ? env.__keys.agent
-        : input.name === gcpManifestResource ? env.__keys.manifest : env.__keys.possession;
+        : input.name === gcpManifestResource ? env.__keys.manifest
+          : input.name === gcpPossessionResource ? env.__keys.possession : env.__keys.refresh;
       return [{ name: input.name, algorithm: "EC_SIGN_ED25519", protectionLevel: "HSM", pem: pair.publicKey.export({ type: "spki", format: "pem" }).toString() }];
     }
     async asymmetricSign(input) {
       observed.push({ operation: "asymmetricSign", input });
       const pair = input.name === gcpAgentResource
         ? env.__keys.agent
-        : input.name === gcpManifestResource ? env.__keys.manifest : env.__keys.possession;
+        : input.name === gcpManifestResource ? env.__keys.manifest
+          : input.name === gcpPossessionResource ? env.__keys.possession : env.__keys.refresh;
       return [{ name: input.name, protectionLevel: "HSM", signature: crypto.sign(null, input.data, pair.privateKey).toString("base64") }];
     }
   }
@@ -172,7 +188,10 @@ test("GCP composition instantiates official-shaped clients and maps cryptoKeyVer
   const possessionSignature = await providers.possessionReceiptSignerProvider.sign({ algorithm: "ed25519", bytes: possessionBytes, key_id: "possession-receipt-2026-08", purpose: POSSESSION_RECEIPT_PURPOSE, version: POSSESSION_RECEIPT_VERSION });
   assert.equal(crypto.verify(null, possessionBytes, env.__keys.possession.publicKey, possessionSignature), true);
   assert.equal(observed.some(({ input }) => input.name === gcpPossessionResource), true);
-  assert.equal(observed.every(({ input }) => [gcpAgentResource, gcpManifestResource, gcpPossessionResource].includes(input.name)), true);
+  const refreshBytes = Buffer.from("agentpass.refresh-hint.v1\0gcp runtime refresh");
+  const refreshSignature = await providers.refreshHintSignerProvider.sign({ algorithm: "ed25519", bytes: refreshBytes, key_id: "refresh-hint-2026-08", purpose: "agentpass.refresh-hint", version: 1 });
+  assert.equal(crypto.verify(null, refreshBytes, env.__keys.refresh.publicKey, refreshSignature), true);
+  assert.equal(observed.every(({ input }) => [gcpAgentResource, gcpManifestResource, gcpPossessionResource, gcpRefreshResource].includes(input.name)), true);
   assert.equal(providers.qualificationManifestSignerProvider.close, undefined);
   await Promise.all([providers.close(), providers.close()]);
   assert.equal(closed, 1);

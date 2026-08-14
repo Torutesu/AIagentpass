@@ -376,7 +376,14 @@ definitive enrollment response that must never be replayed.
 
 ### Q2 — production data and signing authority
 
-State: ready to start in parallel after Q1 API contracts freeze.
+State: in progress. Agent Session Grant, qualification manifest, possession
+receipt, and refresh hint now use purpose-bound AWS/GCP provider adapters,
+PostgreSQL-backed lifecycle/idempotency, signature verification before durable
+commit, and hosted readiness checks. Hosted refresh signing accepts public
+metadata only and no longer accepts a refresh private-key path. ControlBundle,
+capability, Human assertion, audit anchor, and promotion evidence remain open;
+provider reconciliation, signer fencing/leases, least-privilege database roles,
+and real two-instance/KMS qualification are not yet exit-qualified.
 
 Work breakdown:
 

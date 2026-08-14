@@ -33,7 +33,8 @@ function hostedEnv(overrides = {}) {
     AGENTPASS_HUMAN_CURSOR_SECRET: SECRET,
     AGENTPASS_HUMAN_AUTH_SECRET: Buffer.alloc(32, 0x5b).toString("base64url"),
     AGENTPASS_CAPABILITY_NONCE_SECRET: Buffer.alloc(32, 0x33).toString("base64url"),
-    AGENTPASS_CLOUD_REFRESH_PRIVATE_KEY_PATH: "/srv/agentpass/hosted/refresh-private.pem",
+    AGENTPASS_CLOUD_REFRESH_PUBLIC_KEY: "hosted-refresh-public-key-pin",
+    AGENTPASS_CLOUD_REFRESH_TIMEOUT_MS: "5000",
     AGENTPASS_CLOUD_REFRESH_KEY_ID: "refresh-2026-08",
     AGENTPASS_CLOUD_REFRESH_NONCE_KEYRING_PATH: "/srv/agentpass/hosted/refresh-nonce-keyring.json",
     AGENTPASS_CLOUD_AGENT_SESSION_KEY_ID: "agent-session-2026-08",
@@ -117,7 +118,8 @@ test("accepts hosted only with complete PostgreSQL and Human Auth prerequisites"
     "AGENTPASS_HUMAN_CURSOR_SECRET",
     "AGENTPASS_HUMAN_AUTH_SECRET",
     "AGENTPASS_CAPABILITY_NONCE_SECRET",
-    "AGENTPASS_CLOUD_REFRESH_PRIVATE_KEY_PATH",
+    "AGENTPASS_CLOUD_REFRESH_PUBLIC_KEY",
+    "AGENTPASS_CLOUD_REFRESH_TIMEOUT_MS",
     "AGENTPASS_CLOUD_REFRESH_KEY_ID",
     "AGENTPASS_CLOUD_REFRESH_NONCE_KEYRING_PATH",
     "AGENTPASS_CLOUD_AGENT_SESSION_KEY_ID",
@@ -142,7 +144,8 @@ test("recognizes hosted KMS routing variables and rejects KMS typos or evaluatio
     AGENTPASS_KMS_PROVIDER: "aws",
     AGENTPASS_KMS_AGENT_SESSION_KEY_RESOURCE: "arn:aws:kms:us-east-1:123456789012:key/agent-session",
     AGENTPASS_KMS_QUALIFICATION_MANIFEST_KEY_RESOURCE: "arn:aws:kms:us-east-1:123456789012:key/qualification-manifest",
-    AGENTPASS_KMS_POSSESSION_RECEIPT_KEY_RESOURCE: "arn:aws:kms:us-east-1:123456789012:key/possession-receipt"
+    AGENTPASS_KMS_POSSESSION_RECEIPT_KEY_RESOURCE: "arn:aws:kms:us-east-1:123456789012:key/possession-receipt",
+    AGENTPASS_KMS_REFRESH_HINT_KEY_RESOURCE: "arn:aws:kms:us-east-1:123456789012:key/refresh-hint"
   };
   assert.equal(parseCloudRuntimeProfile(hostedEnv(kms)).isHosted, true);
   assertProfileError(

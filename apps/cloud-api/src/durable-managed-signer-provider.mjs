@@ -68,6 +68,7 @@ export function createDurableManagedSignerProvider({
   validateConfiguration({ provider, repository, purpose, keyId, keyVersion, version, algorithm });
   const binding = Object.freeze({ purpose, keyId, keyVersion, version, algorithm });
   const inFlight = new Map();
+  let verificationKey;
 
   async function publicKeyMetadata(input = undefined) {
     const request = normalizeMetadataRequest(input, binding);
@@ -78,7 +79,28 @@ export function createDurableManagedSignerProvider({
     } catch {
       throw durableError(DURABLE_MANAGED_SIGNER_ERROR_CODES.PROVIDER);
     }
-    return validatePublicKeyMetadata(metadata, binding);
+    const normalized = validatePublicKeyMetadata(metadata, binding);
+    verificationKey = parsePublicEd25519Key(normalized.public_key);
+    return normalized;
+  }
+
+  async function loadVerificationKey(signal = undefined) {
+    if (verificationKey) return verificationKey;
+    let metadata;
+    try {
+      metadata = await provider.publicKeyMetadata({
+        algorithm: binding.algorithm,
+        key_id: binding.keyId,
+        purpose: binding.purpose,
+        version: binding.version,
+        ...(signal === undefined ? {} : { signal })
+      });
+    } catch {
+      throw durableError(DURABLE_MANAGED_SIGNER_ERROR_CODES.PROVIDER);
+    }
+    const normalized = validatePublicKeyMetadata(metadata, binding);
+    verificationKey = parsePublicEd25519Key(normalized.public_key);
+    return verificationKey;
   }
 
   function sign(input) {
@@ -86,7 +108,7 @@ export function createDurableManagedSignerProvider({
     const existing = inFlight.get(request.operationId);
     if (existing) return existing;
 
-    const operation = executeSign(request, binding, provider, repository);
+    const operation = executeSign(request, binding, provider, repository, loadVerificationKey);
     inFlight.set(request.operationId, operation);
     operation.then(
       () => { if (inFlight.get(request.operationId) === operation) inFlight.delete(request.operationId); },
@@ -106,7 +128,7 @@ export function createDurableManagedSignerProvider({
   });
 }
 
-async function executeSign(request, binding, provider, repository) {
+async function executeSign(request, binding, provider, repository, loadVerificationKey) {
   const durableInput = {
     purpose: binding.purpose,
     operation_id: request.operationId,
@@ -123,20 +145,24 @@ async function executeSign(request, binding, provider, repository) {
   }
 
   if (reservation?.state === "committed") {
-    return normalizeStoredSignature(reservation.signature);
+    const verificationKey = await loadVerificationKey(request.signal);
+    return verifySignature(reservation.signature, request.bytes, verificationKey);
   }
-  if (reservation?.state === "pending") return signReserved(request, binding, provider, repository, durableInput);
+  if (reservation?.state === "pending") {
+    return signReserved(request, binding, provider, repository, durableInput, loadVerificationKey);
+  }
   if (reservation?.state === "uncertain") {
     throw durableError(DURABLE_MANAGED_SIGNER_ERROR_CODES.UNCERTAIN);
   }
   throw durableError(DURABLE_MANAGED_SIGNER_ERROR_CODES.REPOSITORY);
 }
 
-async function signReserved(request, binding, provider, repository, durableInput) {
+async function signReserved(request, binding, provider, repository, durableInput, loadVerificationKey) {
   let signature;
   try {
+    const verificationKey = await loadVerificationKey(request.signal);
     const output = await provider.sign(toProviderSignRequest(request));
-    signature = normalizeSignature(output);
+    signature = verifySignature(output, request.bytes, verificationKey);
   } catch (error) {
     await markUncertainBestEffort(repository, durableInput);
     if (error instanceof DurableManagedSignerError && error.code === DURABLE_MANAGED_SIGNER_ERROR_CODES.OUTPUT) throw error;
@@ -158,7 +184,8 @@ async function signReserved(request, binding, provider, repository, durableInput
 
   let committedSignature;
   try {
-    committedSignature = normalizeSignature(committed.signature);
+    const verificationKey = await loadVerificationKey(request.signal);
+    committedSignature = verifySignature(committed.signature, request.bytes, verificationKey);
   } catch {
     await markUncertainBestEffort(repository, durableInput);
     throw durableError(DURABLE_MANAGED_SIGNER_ERROR_CODES.COMMIT);
@@ -265,9 +292,13 @@ function normalizeSignature(value) {
   return Buffer.from(value);
 }
 
-function normalizeStoredSignature(value) {
-  try { return normalizeSignature(value); }
-  catch { throw durableError(DURABLE_MANAGED_SIGNER_ERROR_CODES.OUTPUT); }
+function verifySignature(value, bytes, publicKey) {
+  const signature = normalizeSignature(value);
+  let valid = false;
+  try { valid = crypto.verify(null, bytes, publicKey, signature); }
+  catch { valid = false; }
+  if (!valid) throw durableError(DURABLE_MANAGED_SIGNER_ERROR_CODES.OUTPUT);
+  return Buffer.from(signature);
 }
 
 function sameBytes(left, right) {

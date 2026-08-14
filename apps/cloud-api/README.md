@@ -56,9 +56,13 @@ Start the API behind a TLS reverse proxy:
 ```bash
 export AGENTPASS_CLOUD_PROFILE=hosted
 export AGENTPASS_CLOUD_BUNDLE_PRIVATE_KEY_PATH=/absolute/protected/agentpass-cloud/bundle-private.pem
-export AGENTPASS_CLOUD_REFRESH_PRIVATE_KEY_PATH=/absolute/protected/agentpass-cloud/refresh-private.pem
+export AGENTPASS_CLOUD_REFRESH_PUBLIC_KEY="$(cat /absolute/protected/agentpass-cloud/refresh-public.pem)"
+export AGENTPASS_CLOUD_REFRESH_TIMEOUT_MS=5000
 export AGENTPASS_CLOUD_REFRESH_KEY_ID=refresh-2026-08
 export AGENTPASS_CLOUD_REFRESH_NONCE_KEYRING_PATH=/absolute/protected/agentpass-cloud/refresh-nonce-keyring.json
+# Hosted refresh signing is remote-only; no refresh private-key path is accepted.
+export AGENTPASS_KMS_PROVIDER=aws
+export AGENTPASS_KMS_REFRESH_HINT_KEY_RESOURCE='arn:aws:kms:REGION:ACCOUNT:key/KEY_ID'
 export AGENTPASS_CLOUD_HOST=127.0.0.1
 export AGENTPASS_CLOUD_PORT=8080
 # Enable the production Human Auth path as one all-or-nothing group:

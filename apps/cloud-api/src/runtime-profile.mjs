@@ -25,7 +25,8 @@ const FILE_STORE_ENV = Object.freeze([
   "AGENTPASS_CLOUD_TOKEN_RECORDS_PATH"
 ]);
 const HOSTED_REFRESH_ENV = Object.freeze([
-  "AGENTPASS_CLOUD_REFRESH_PRIVATE_KEY_PATH",
+  "AGENTPASS_CLOUD_REFRESH_PUBLIC_KEY",
+  "AGENTPASS_CLOUD_REFRESH_TIMEOUT_MS",
   "AGENTPASS_CLOUD_REFRESH_KEY_ID",
   "AGENTPASS_CLOUD_REFRESH_NONCE_KEYRING_PATH"
 ]);
@@ -52,7 +53,8 @@ const HOSTED_KMS_ENV = Object.freeze([
   "AGENTPASS_KMS_PROVIDER",
   "AGENTPASS_KMS_AGENT_SESSION_KEY_RESOURCE",
   "AGENTPASS_KMS_QUALIFICATION_MANIFEST_KEY_RESOURCE",
-  "AGENTPASS_KMS_POSSESSION_RECEIPT_KEY_RESOURCE"
+  "AGENTPASS_KMS_POSSESSION_RECEIPT_KEY_RESOURCE",
+  "AGENTPASS_KMS_REFRESH_HINT_KEY_RESOURCE"
 ]);
 const DATABASE_ENV = Object.freeze([
   "AGENTPASS_DATABASE_URL",
@@ -255,7 +257,8 @@ function parseHostedRefresh(env) {
   const present = HOSTED_REFRESH_ENV.some((name) => configured(env, name));
   if (!present) return { present: false, complete: false };
   const complete = HOSTED_REFRESH_ENV.every((name) => configured(env, name))
-    && absolutePath(env.AGENTPASS_CLOUD_REFRESH_PRIVATE_KEY_PATH)
+    && nonEmptyString(env.AGENTPASS_CLOUD_REFRESH_PUBLIC_KEY)
+    && positiveIntegerText(env.AGENTPASS_CLOUD_REFRESH_TIMEOUT_MS)
     && absolutePath(env.AGENTPASS_CLOUD_REFRESH_NONCE_KEYRING_PATH)
     && IDENTIFIER.test(env.AGENTPASS_CLOUD_REFRESH_KEY_ID);
   return { present: true, complete };

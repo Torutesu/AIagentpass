@@ -22,13 +22,18 @@ const possessionReceiptSignerProvider = loadProvider({
   privateKeyPath: process.env.P0B_POSSESSION_RECEIPT_PRIVATE_KEY_PATH,
   publicKeyPem: process.env.AGENTPASS_CLOUD_POSSESSION_RECEIPT_PUBLIC_KEY
 });
+const refreshHintSignerProvider = loadProvider({
+  privateKeyPath: process.env.P0B_REFRESH_HINT_PRIVATE_KEY_PATH,
+  publicKeyPem: process.env.AGENTPASS_CLOUD_REFRESH_PUBLIC_KEY
+});
 const env = Object.freeze({ ...process.env });
 
 const runtime = await createCloudRuntime({
   env,
   agentSessionSignerProvider,
   qualificationManifestSignerProvider,
-  possessionReceiptSignerProvider
+  possessionReceiptSignerProvider,
+  refreshHintSignerProvider
 });
 await runtime.listen();
 

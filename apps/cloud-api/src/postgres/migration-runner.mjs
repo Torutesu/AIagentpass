@@ -113,16 +113,35 @@ export async function runMigrations({ client, migrations, lockNamespace = DEFAUL
   const normalized = normalizeMigrations(migrations);
   const lockKey = advisoryLockKey(lockNamespace);
   const applied = [];
+  let migrationAttempts = [];
   let began = false;
+  let migrationCommitted = false;
   try {
     await query(client, "BEGIN", []);
     began = true;
     await query(client, "SELECT pg_advisory_xact_lock($1::bigint) AS locked", [lockKey]);
     const appliedRows = await readAppliedMigrations(client);
-    const dirtyRows = await readDirtyMigrations(client);
+    const attemptsRelationExists = await relationExists(client, "schema_migration_attempts");
+    const dirtyRows = await readDirtyMigrations(client, { relationExists: attemptsRelationExists });
     if (dirtyRows.length > 0) throw new MigrationDirtyError(dirtyRows);
     validateAppliedHistory(appliedRows, normalized);
     const appliedByVersion = new Map(appliedRows.map((row) => [row.version, row]));
+    const pending = normalized.filter((migration) => !appliedByVersion.has(migration.version));
+
+    // The attempt row must be committed before any migration SQL begins. The
+    // first transaction is therefore only the coordination/ledger transaction;
+    // after it commits, the migration transaction starts from a clean boundary.
+    // Bootstrap migrations cannot use this ledger until migration 0002 creates
+    // the table; all subsequent migrations are covered fail-closed.
+    if (attemptsRelationExists && pending.length > 0) {
+      migrationAttempts = await insertMigrationAttempts(client, pending, applicationVersion);
+      await query(client, "COMMIT", []);
+      began = false;
+      await query(client, "BEGIN", []);
+      began = true;
+      await query(client, "SELECT pg_advisory_xact_lock($1::bigint) AS locked", [lockKey]);
+    }
+
     for (const migration of normalized) {
       const previous = appliedByVersion.get(migration.version);
       if (previous) {
@@ -136,11 +155,19 @@ export async function runMigrations({ client, migrations, lockNamespace = DEFAUL
     }
     await query(client, "COMMIT", []);
     began = false;
+    migrationCommitted = true;
+    await completeMigrationAttempts(client, migrationAttempts);
     return Object.freeze({ applied: Object.freeze(applied), currentVersion: normalized.at(-1).version, applicationVersion });
   } catch (error) {
     if (began) {
       try { await query(client, "ROLLBACK", []); }
       catch (rollbackError) { throw new MigrationRunnerError("ERR_MIGRATION_ROLLBACK", "migration failed and rollback failed", { rollbackError: rollbackError.message }, error); }
+    }
+    if (!migrationCommitted && migrationAttempts.length > 0) {
+      try { await failMigrationAttempts(client, migrationAttempts, error); }
+      catch (attemptError) {
+        throw new MigrationRunnerError("ERR_MIGRATION_ATTEMPT_RECORD", "migration failed and its attempt could not be durably recorded", undefined, attemptError);
+      }
     }
     if (error instanceof MigrationRunnerError) throw error;
     throw new MigrationRunnerError("ERR_MIGRATION_FAILED", "migration transaction failed", undefined, error);
@@ -176,9 +203,51 @@ async function readAppliedMigrations(client) {
 }
 
 async function readDirtyMigrations(client) {
-  if (!(await relationExists(client, "schema_migration_attempts"))) return [];
+  const hasKnownRelation = arguments.length > 1;
+  const relationAlreadyExists = hasKnownRelation ? arguments[1]?.relationExists === true : await relationExists(client, "schema_migration_attempts");
+  if (!relationAlreadyExists) return [];
   const result = await query(client, "SELECT version, checksum, status, finished_at FROM schema_migration_attempts WHERE status IN ('running', 'failed') ORDER BY version ASC", []);
   return result.rows.map((row) => ({ version: Number(row.version), checksum: row.checksum, status: row.status, finished_at: row.finished_at ?? null }));
+}
+
+async function insertMigrationAttempts(client, migrations, applicationVersion) {
+  const attempts = [];
+  for (const migration of migrations) {
+    const id = crypto.randomUUID();
+    await query(client, `INSERT INTO schema_migration_attempts
+        (id,version,checksum,application_version,status,started_at,finished_at,error_code)
+        VALUES ($1,$2,$3,$4,'running',clock_timestamp(),NULL,NULL)`, [
+      id, migration.version, migration.checksum, applicationVersion
+    ]);
+    attempts.push(Object.freeze({ id, version: migration.version, checksum: migration.checksum }));
+  }
+  return Object.freeze(attempts);
+}
+
+async function completeMigrationAttempts(client, attempts) {
+  for (const attempt of attempts) {
+    const result = await query(client, `UPDATE schema_migration_attempts
+        SET status='applied',finished_at=clock_timestamp(),error_code=NULL
+        WHERE id=$1 AND status='running'`, [attempt.id]);
+    if (result.rowCount !== 1) throw new MigrationRunnerError("ERR_MIGRATION_ATTEMPT_RECORD", "migration attempt completion was not durable", { version: attempt.version });
+  }
+}
+
+async function failMigrationAttempts(client, attempts, error) {
+  const errorCode = migrationAttemptErrorCode(error);
+  for (const attempt of attempts) {
+    const result = await query(client, `UPDATE schema_migration_attempts
+        SET status='failed',finished_at=clock_timestamp(),error_code=$2
+        WHERE id=$1 AND status='running'`, [attempt.id, errorCode]);
+    if (result.rowCount !== 1) throw new MigrationRunnerError("ERR_MIGRATION_ATTEMPT_RECORD", "migration failure attempt was not durable", { version: attempt.version });
+  }
+}
+
+function migrationAttemptErrorCode(error) {
+  const code = error?.code;
+  return error instanceof MigrationRunnerError && typeof code === "string" && /^[A-Za-z0-9_.:-]{1,64}$/u.test(code)
+    ? code
+    : "ERR_MIGRATION_FAILED";
 }
 
 async function relationExists(client, relation) {

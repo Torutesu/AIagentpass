@@ -15,7 +15,6 @@ const PURPOSE = "agentpass.test-signing";
 const KEY_ID = "test-key-2026-08";
 const KEY_VERSION = 7;
 const SIGNING_VERSION = 3;
-const SIGNATURE = Buffer.alloc(64, 0x5a);
 
 function makeFixture({ reserveState = undefined, sign = undefined, metadata = undefined, repository = {} } = {}) {
   const pair = crypto.generateKeyPairSync("ed25519");
@@ -39,8 +38,8 @@ function makeFixture({ reserveState = undefined, sign = undefined, metadata = un
     },
     async sign(request) {
       calls.sign.push(request);
-      if (sign) return sign(request, calls);
-      return Buffer.from(SIGNATURE);
+      if (sign) return sign(request, calls, pair);
+      return crypto.sign(null, request.bytes, pair.privateKey);
     }
   };
   const durableRepository = {
@@ -109,9 +108,10 @@ test("commits once and replays the exact durable signature without calling the p
   const fixture = makeFixture();
   const first = await fixture.signer.sign(request());
   const second = await fixture.signer.sign(request(Buffer.from("commit payload")));
+  const expected = crypto.sign(null, Buffer.from("commit payload"), fixture.pair.privateKey);
 
-  assert.deepEqual(first, SIGNATURE);
-  assert.deepEqual(second, SIGNATURE);
+  assert.deepEqual(first, expected);
+  assert.deepEqual(second, expected);
   assert.equal(fixture.calls.sign.length, 1);
   assert.equal(fixture.calls.reserve.length, 2);
   assert.equal(fixture.calls.commit.length, 1);
@@ -134,9 +134,9 @@ test("collapses same-process concurrent identical requests into one provider cal
   let release;
   const gate = new Promise((resolve) => { release = resolve; });
   const fixture = makeFixture({
-    sign: async () => {
+    sign: async ({ bytes }, calls, pair) => {
       await gate;
-      return SIGNATURE;
+      return crypto.sign(null, bytes, pair.privateKey);
     }
   });
   const first = fixture.signer.sign(request());
@@ -226,6 +226,47 @@ test("quarantines malformed provider signatures and rejects non-64-byte storage 
   replay.state.signature = Buffer.alloc(63);
   await rejectsWithCode(() => replay.signer.sign(request()), CODES.OUTPUT);
   assert.equal(replay.calls.sign.length, 0);
+});
+
+test("rejects a provider signature made by a different Ed25519 key before commit", async () => {
+  const wrongPair = crypto.generateKeyPairSync("ed25519");
+  const fixture = makeFixture({
+    sign: ({ bytes }) => crypto.sign(null, bytes, wrongPair.privateKey)
+  });
+
+  await rejectsWithCode(() => fixture.signer.sign(request()), CODES.OUTPUT);
+  assert.equal(fixture.calls.sign.length, 1);
+  assert.equal(fixture.calls.commit.length, 0);
+  assert.equal(fixture.calls.uncertain.length, 1);
+  await rejectsWithCode(() => fixture.signer.sign(request()), CODES.UNCERTAIN);
+  assert.equal(fixture.calls.sign.length, 1);
+});
+
+test("rejects a random 64-byte provider result before commit", async () => {
+  const fixture = makeFixture({
+    sign: () => crypto.randomBytes(64)
+  });
+
+  await rejectsWithCode(() => fixture.signer.sign(request()), CODES.OUTPUT);
+  assert.equal(fixture.calls.sign.length, 1);
+  assert.equal(fixture.calls.commit.length, 0);
+  assert.equal(fixture.calls.uncertain.length, 1);
+});
+
+test("rejects poisoned committed replay signatures without calling the provider", async () => {
+  const wrongPair = crypto.generateKeyPairSync("ed25519");
+  for (const poisoned of [
+    crypto.randomBytes(64),
+    crypto.sign(null, Buffer.from("commit payload"), wrongPair.privateKey)
+  ]) {
+    const fixture = makeFixture({ reserveState: "committed" });
+    fixture.state.signature = poisoned;
+
+    await rejectsWithCode(() => fixture.signer.sign(request()), CODES.OUTPUT);
+    assert.equal(fixture.calls.sign.length, 0);
+    assert.equal(fixture.calls.commit.length, 0);
+    assert.equal(fixture.calls.uncertain.length, 0);
+  }
 });
 
 test("validates metadata binding and canonicalizes only a public Ed25519 key", async () => {

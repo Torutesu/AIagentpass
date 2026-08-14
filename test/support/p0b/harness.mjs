@@ -232,7 +232,8 @@ export async function startP0BHarness({ env = process.env, repoRoot = REPOSITORY
       AGENTPASS_CLOUD_HOST: LOOPBACK,
       AGENTPASS_CLOUD_PORT: cloudPort,
       AGENTPASS_CLOUD_BUNDLE_PRIVATE_KEY_PATH: files.bundlePrivateKey,
-      AGENTPASS_CLOUD_REFRESH_PRIVATE_KEY_PATH: files.refreshPrivateKey,
+      AGENTPASS_CLOUD_REFRESH_PUBLIC_KEY: files.refreshPublicKeyPem,
+      AGENTPASS_CLOUD_REFRESH_TIMEOUT_MS: "5000",
       AGENTPASS_CLOUD_REFRESH_KEY_ID: "p0b-refresh-v1",
       AGENTPASS_CLOUD_REFRESH_NONCE_KEYRING_PATH: files.nonceKeyring,
       AGENTPASS_CAPABILITY_NONCE_SECRET: files.capabilitySecret,
@@ -257,6 +258,7 @@ export async function startP0BHarness({ env = process.env, repoRoot = REPOSITORY
       AGENTPASS_KMS_AGENT_SESSION_KEY_RESOURCE: "arn:aws:kms:us-east-1:000000000000:key/p0b-agent-session",
       AGENTPASS_KMS_QUALIFICATION_MANIFEST_KEY_RESOURCE: "arn:aws:kms:us-east-1:000000000000:key/p0b-qualification-manifest",
       AGENTPASS_KMS_POSSESSION_RECEIPT_KEY_RESOURCE: "arn:aws:kms:us-east-1:000000000000:key/p0b-possession-receipt",
+      AGENTPASS_KMS_REFRESH_HINT_KEY_RESOURCE: "arn:aws:kms:us-east-1:000000000000:key/p0b-refresh-hint",
       AGENTPASS_OWNER_RECOVERY_NOTIFICATION_WEBHOOK_URL: "https://notifications.example.test/owner-recovery",
       AGENTPASS_OWNER_RECOVERY_NOTIFICATION_CONFIRMATION_URL: "https://notifications.example.test/owner-recovery/acceptance",
       AGENTPASS_OWNER_RECOVERY_NOTIFICATION_AUTHORIZATION_PATH: files.ownerRecoveryAuthorization,
@@ -267,6 +269,7 @@ export async function startP0BHarness({ env = process.env, repoRoot = REPOSITORY
       P0B_AGENT_SESSION_PRIVATE_KEY_PATH: files.agentSessionPrivateKey,
       P0B_QUALIFICATION_MANIFEST_PRIVATE_KEY_PATH: files.qualificationManifestPrivateKey,
       P0B_POSSESSION_RECEIPT_PRIVATE_KEY_PATH: files.possessionReceiptPrivateKey,
+      P0B_REFRESH_HINT_PRIVATE_KEY_PATH: files.refreshPrivateKey,
       NODE_EXTRA_CA_CERTS: trustedCaBundle
     };
     cloudProcess = spawnProcess(process.execPath, [P0B_CLOUD_PROCESS], repoRoot, p0bEnvironment(env, common));
@@ -379,6 +382,7 @@ async function createRuntimeFiles(directory) {
     agentSessionPublicKeyPem: agentSession.publicKey.export({ type: "spki", format: "pem" }).toString(),
     qualificationManifestPublicKeyPem: qualificationManifest.publicKey.export({ type: "spki", format: "pem" }).toString(),
     possessionReceiptPublicKeyPem: possessionReceipt.publicKey.export({ type: "spki", format: "pem" }).toString(),
+    refreshPublicKeyPem: refresh.publicKey.export({ type: "spki", format: "pem" }).toString(),
     refreshNonceKeyId, refreshNonceKey,
     identityPrivateKeyPem: identity.privateKey.export({ type: "pkcs8", format: "pem" }),
     capabilitySecret: crypto.randomBytes(32).toString("base64url"), cursorSecret: crypto.randomBytes(32).toString("base64url"),
