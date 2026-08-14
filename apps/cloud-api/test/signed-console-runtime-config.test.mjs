@@ -206,7 +206,7 @@ function fakePostgresRuntime() {
     agentSessionIssuanceRepository: { async issueAgentSessionGrant() { return null; } },
     agentSessionAuthorityRepository: { async consumeAgentSessionGrant() { return null; } },
     qualificationGrantBatchRepository: { async claimQualificationGrantBatch() { return null; } },
-    auditExportIssuanceRepository: { async reserveAuditExport() {}, async commitAuditExport() {}, async replayAuditExport() {}, async markAuditExportUncertain() {}, async getAuditExportPayload() {} },
+    auditExportIssuanceRepository: { async reserveAuditExport() {}, async commitAuditExport() {}, async replayAuditExport() {}, async markAuditExportUncertain() {}, async getAuditExportPayload() {}, async getCommittedAuditExport() {} },
     createManagedSignerKeyLifecycleRepository: createManagedSignerRepositoryFactory(),
     createProviderOperationRepository: createProviderOperationRepositoryFactory(),
     controlPlaneStore: { async pollDeviceRefresh() { return null; }, async markDeviceRefreshDelivered() {} },

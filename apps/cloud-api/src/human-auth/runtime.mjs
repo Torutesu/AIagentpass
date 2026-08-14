@@ -33,6 +33,8 @@ const ALLOWED_RECENT_AUTH_OPERATIONS = Object.freeze([
   "organization.emergency_stop",
   "agent.session_grant.issue",
   "qualification.grant_batch.issue",
+  "audit.export.create",
+  "audit.export.retrieve",
   WEBAUTHN_REGISTRATION_OPERATION,
   WEBAUTHN_REGISTRATION_RECENT_AUTH_OPERATION,
   HUMAN_MANAGEMENT_RECENT_AUTH_OPERATIONS.revokeCredential,

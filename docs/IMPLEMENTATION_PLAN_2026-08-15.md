@@ -604,6 +604,21 @@ evidence schema, or fail-closed gate.
 
 ##### Planned merge sequence
 
+Current checkpoint on 2026-08-15:
+
+- Items 1 and 2 are implemented and pushed in `11063f6`.
+- Item 3 now has frozen create/get contracts, exact four-field committed
+  retrieval, historical-key and payload re-verification, runtime composition,
+  Owner/Admin/Auditor role enforcement, resource-bound recent WebAuthn,
+  same-origin/CSRF/idempotency controls, opaque tenant-safe retrieval failure,
+  and a strict 256 KiB Console BFF. It remains open until download/verify
+  operations, audit events, fresh-PostgreSQL API integration, and the complete
+  browser role/reauthentication matrix land.
+- Item 4 has the server-only BFF slice but no end-user export screen yet. UI
+  state, accessible verification results, safe download, response-loss
+  recovery, and browser storage/log/URL scans are the next implementation
+  wave.
+
 1. `C2-payload-ledger`: migration 0046, immutable payload repository, service
    retrieval, catalog/manifest updates, and real PostgreSQL qualification.
 2. `C2-canonical-admin-v2`: canonical writer and mixed-version reader with an
@@ -624,6 +639,51 @@ evidence schema, or fail-closed gate.
    Homebrew delivery, two physical hardware reports.
 10. `C10-C11-release`: Claude Code/Cursor E2E, staging drills, security review,
     exact-digest promotion, canary, and production rollback gate.
+
+##### Next execution waves and acceptance gates
+
+1. **C2 API closure.** Add explicit download and offline-verify operations over
+   the same immutable committed payload. Download is an attachment with a
+   deterministic filename, exact canonical bytes, `nosniff`, no-store, no
+   redirect, and no browser cache persistence. Verify recomputes the payload
+   digest, cumulative range root, anchor statement binding, signature, and
+   historical signer lifecycle without issuing a new signature. Add creation,
+   retrieval, download, verification, denial, and failure audit events. Exit:
+   real PostgreSQL 17 plus the production Cloud process passes owner/admin/
+   auditor/viewer, duplicate, response-loss, restart, corruption, expiry,
+   cross-tenant, CSRF, stale/replayed/cross-operation WebAuthn, and 256 KiB
+   boundary cases.
+2. **C2 Console workflow.** Build an Audit Exports page with chain/environment
+   selection, create confirmation, passkey reauthentication, progress,
+   committed range and validity, local verification result, and safe download.
+   Do not store payloads in localStorage, sessionStorage, IndexedDB, URLs,
+   analytics, logs, or error traces. Exit: production-built BFF Playwright tests
+   cover loading, empty, success, expired, corrupt, response-loss, offline,
+   retry, keyboard-only, screen-reader, reduced-motion, and all four roles.
+3. **C3 promotion authority.** Add forward-only PostgreSQL ledgers for exact
+   candidate reservation, approval consumption, provider operation, uncertain
+   outcome, committed promotion, and deployment generation. Promotion evidence
+   v3 binds source tree, images, schema/migrations, PKG, SBOM/provenance,
+   qualification reports, environment, approval quorum, and signer lifecycle.
+   Exit: concurrency, quorum race, substitution, signer timeout/response-loss,
+   restart, rotation/disable, and rebuild-on-promotion tests converge to one
+   committed result or one bounded operator-actionable state.
+4. **Reconciliation and production authority.** Expose producer-specific
+   list/detail/verify/adjudicate operations with platform-only authority,
+   recent WebAuthn, CSRF, idempotency, and `If-Match`. Remove runtime direct
+   table mutation privileges, probe all eight purpose/lifecycle pairs, and
+   prove deterministic drain. Exit: negative privilege tests, wrong/shared/
+   stale key tests, interrupted migration, shutdown races, and secret-free
+   metrics/logs all pass.
+5. **Protected qualification and release.** Run two Cloud instances and workers
+   against protected PostgreSQL and non-exportable KMS/HSM keys; prove encrypted
+   backup/PITR, outage, throttling, rotation, disable, canary, and rollback.
+   Build one universal Developer-ID-signed, notarized, stapled PKG and distribute
+   that exact digest through direct download, Homebrew, and CLI bootstrap. Exit:
+   Apple silicon/Secure Enclave and Intel/T2 lanes plus Claude Code then Cursor
+   each complete two unattended verified commits and immediate revocation from
+   one immutable candidate; independent review has no unresolved critical/high
+   or P0/P1 finding.
 
 The critical path is P0 -> P2 -> P4 -> P5 -> P7. P1 runs beside P0. P3 starts
 as soon as its migration/catalog lock is free and joins the critical path at

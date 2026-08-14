@@ -186,6 +186,22 @@ test("C2 PostgreSQL snapshot reader derives bounded roots and reservations from 
   assert.deepEqual(persistedPayload.range, committed.range);
   assert.equal(Object.isFrozen(persistedPayload), true);
   assert.equal(Object.isFrozen(persistedPayload.entries), true);
+  const retrieved = await repositoryA.getCommittedAuditExport({
+    organization_id: identity.organization_id,
+    export_id: identity.export_id,
+    environment: identity.environment,
+    chain: identity.chain
+  });
+  assert.equal(retrieved.state, "committed");
+  assert.equal(retrieved.idempotency_key, identity.idempotency_key);
+  assert.deepEqual(retrieved.payload, persistedPayload);
+  assert.equal(Object.isFrozen(retrieved), true);
+  await assert.rejects(repositoryA.getCommittedAuditExport({
+    organization_id: identity.organization_id,
+    export_id: identity.export_id,
+    environment: "staging",
+    chain: identity.chain
+  }), (error) => error.code === "ERR_AUDIT_EXPORT_ISSUANCE_NOT_FOUND");
 
   const raceIdentity = {
     organization_id: ORGANIZATION_ID,

@@ -79,6 +79,12 @@ const ISSUE_INPUT_KEYS = Object.freeze([
   "chain",
   "idempotency_key"
 ]);
+const RETRIEVE_INPUT_KEYS = Object.freeze([
+  "organization_id",
+  "export_id",
+  "environment",
+  "chain"
+]);
 const RANGE_KEYS = Object.freeze([
   "from_audit_position",
   "to_audit_position",
@@ -128,6 +134,7 @@ const COMMITTED_KEYS = Object.freeze([
   ...AUTHORITY_KEYS,
   "audit_anchor"
 ]);
+const COMMITTED_WITH_PAYLOAD_KEYS = Object.freeze([...COMMITTED_KEYS, "payload"]);
 const STATE_ONLY_KEYS = Object.freeze(["state"]);
 const METADATA_KEYS = Object.freeze([
   "version",
@@ -308,9 +315,34 @@ export function createAuditExportIssuanceService(options = {}) {
     return materializeCommitted(values, outcome, true, signal);
   }
 
-  return Object.freeze({ issueAuditExport, replayAuditExport });
+  async function retrieveAuditExport(input = {}, operationOptions = {}) {
+    const retrieval = normalizeRetrieveInput(input);
+    const signal = normalizeOperationOptions(operationOptions);
+    let result;
+    try {
+      result = await repository.getCommittedAuditExport(toRetrieveInput(retrieval));
+    } catch (error) {
+      throw mapRepositoryError(error, "retrieve");
+    }
+    try {
+      assertPlainDataTree(result);
+      assertExactKeys(result, COMMITTED_WITH_PAYLOAD_KEYS);
+      const { payload, ...authority } = result;
+      const values = deepFreeze({
+        ...retrieval,
+        idempotency_key: requiredIdempotencyKey(authority.idempotency_key)
+      });
+      const committed = normalizeCommittedOutcome(authority, values, maxTtlMs);
+      return materializeCommitted(values, committed, true, signal, payload);
+    } catch (error) {
+      if (error instanceof AuditExportIssuanceError) throw error;
+      throw issuanceError(AUDIT_EXPORT_ISSUANCE_ERROR_CODES.REPOSITORY);
+    }
+  }
 
-  async function materializeCommitted(values, record, replayed, signal) {
+  return Object.freeze({ issueAuditExport, replayAuditExport, retrieveAuditExport });
+
+  async function materializeCommitted(values, record, replayed, signal, suppliedPayload = undefined) {
     let metadata;
     try {
       const currentNowMs = currentNow();
@@ -319,7 +351,9 @@ export function createAuditExportIssuanceService(options = {}) {
       const issuedAtMs = Date.parse(record.issued_at);
       const expectedStatement = buildStatement(values, reservation, issuedAtMs, maxTtlMs);
       const anchor = verifySignedAnchor(record.audit_anchor, expectedStatement, values, reservation, metadata, issuedAtMs, maxTtlMs, AUDIT_EXPORT_ISSUANCE_ERROR_CODES.HISTORICAL_KEY);
-      const payload = await readCommittedPayload(values, record);
+      const payload = suppliedPayload === undefined
+        ? await readCommittedPayload(values, record)
+        : normalizeExportPayload(suppliedPayload, record);
       return publicResult({ ...record, audit_anchor: anchor }, payload, replayed, currentNowMs);
     } catch (error) {
       if (error instanceof AuditExportIssuanceError) throw error;
@@ -381,7 +415,8 @@ function validateConfiguration({ repository, signer, publicKeyResolver, now, max
     || typeof repository.commitAuditExport !== "function"
     || typeof repository.replayAuditExport !== "function"
     || typeof repository.markAuditExportUncertain !== "function"
-    || typeof repository.getAuditExportPayload !== "function") {
+    || typeof repository.getAuditExportPayload !== "function"
+    || typeof repository.getCommittedAuditExport !== "function") {
     throw issuanceError(AUDIT_EXPORT_ISSUANCE_ERROR_CODES.CONFIG);
   }
   if (!isObject(signer)
@@ -459,6 +494,22 @@ function normalizeIssueInput(input) {
       environment,
       chain,
       idempotency_key: idempotencyKey
+    });
+  } catch (error) {
+    if (error instanceof AuditExportIssuanceError) throw error;
+    throw issuanceError(AUDIT_EXPORT_ISSUANCE_ERROR_CODES.INPUT);
+  }
+}
+
+function normalizeRetrieveInput(input) {
+  try {
+    assertPlainDataTree(input);
+    assertExactKeys(input, RETRIEVE_INPUT_KEYS);
+    return deepFreeze({
+      organization_id: requiredUuid(input.organization_id),
+      export_id: requiredUuid(input.export_id),
+      environment: exactEnumeration(input.environment, ["staging", "production"]),
+      chain: exactEnumeration(input.chain, AUDIT_ANCHOR_CHAINS)
     });
   } catch (error) {
     if (error instanceof AuditExportIssuanceError) throw error;
@@ -770,6 +821,15 @@ function toReserveInput(values) {
     chain: values.chain,
     idempotency_key: values.idempotency_key
   }, RESERVE_INPUT_KEYS);
+}
+
+function toRetrieveInput(values) {
+  return exactObject({
+    organization_id: values.organization_id,
+    export_id: values.export_id,
+    environment: values.environment,
+    chain: values.chain
+  }, RETRIEVE_INPUT_KEYS);
 }
 
 function toCommitInput(values, reservation, anchor) {

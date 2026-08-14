@@ -28,6 +28,9 @@ const PRIVATE_VALUE = /(?:-----BEGIN [^-]*PRIVATE KEY-----|(?:^|\s)Bearer\s+[A-Z
 const IDENTITY_KEYS = Object.freeze([
   "organization_id", "export_id", "environment", "chain", "idempotency_key"
 ]);
+const RETRIEVAL_KEYS = Object.freeze([
+  "organization_id", "export_id", "environment", "chain"
+]);
 const RANGE_KEYS = Object.freeze([
   "from_audit_position", "to_audit_position", "previous_root_digest", "root_digest", "record_count"
 ]);
@@ -275,7 +278,29 @@ export function createPostgresAuditExportIssuanceRepository({
     }
   }
 
-  return Object.freeze({ reserveAuditExport, commitAuditExport, replayAuditExport, markAuditExportUncertain, getAuditExportPayload });
+  async function getCommittedAuditExport(input = {}) {
+    const retrieval = normalizeRetrieval(input);
+    try {
+      return await withTransaction(client, async (tx) => {
+        await establishTenantContext(tx, retrieval.organization_id);
+        const result = await tx.query(`SELECT ${ROW_SELECT}
+          FROM audit_export_issuances
+          WHERE organization_id=$1 AND export_id=$2 AND environment=$3 AND chain=$4 AND state='committed'`, [
+          retrieval.organization_id, retrieval.export_id, retrieval.environment, retrieval.chain
+        ]);
+        if (rowCount(result) === 0) throw repoError("ERR_NOT_FOUND");
+        if (rowCount(result) !== 1) throw repoError("ERR_DATABASE");
+        const row = normalizeStoredRow(result.rows[0]);
+        if (row.state !== "committed") throw repoError("ERR_NOT_FOUND");
+        const payload = await selectAndVerifyPayload(tx, row, row.payload_digest, true);
+        return deepFreeze({ ...committedOutcome(row), payload });
+      });
+    } catch (error) {
+      throw publicError(error);
+    }
+  }
+
+  return Object.freeze({ reserveAuditExport, commitAuditExport, replayAuditExport, markAuditExportUncertain, getAuditExportPayload, getCommittedAuditExport });
 }
 
 export const createAuditExportIssuanceRepository = createPostgresAuditExportIssuanceRepository;
@@ -427,6 +452,20 @@ function normalizeIdentity(value) {
       organization_id: uuid(value.organization_id), export_id: uuid(value.export_id),
       environment: enumeration(value.environment, ENVIRONMENTS), chain: enumeration(value.chain, CHAINS),
       idempotency_key: idempotency(value.idempotency_key)
+    });
+  } catch (error) {
+    if (error instanceof AuditExportIssuanceRepositoryError) throw error;
+    throw repoError("ERR_INPUT");
+  }
+}
+
+function normalizeRetrieval(value) {
+  try {
+    assertPlainDataTree(value);
+    assertExactKeys(value, RETRIEVAL_KEYS);
+    return deepFreeze({
+      organization_id: uuid(value.organization_id), export_id: uuid(value.export_id),
+      environment: enumeration(value.environment, ENVIRONMENTS), chain: enumeration(value.chain, CHAINS)
     });
   } catch (error) {
     if (error instanceof AuditExportIssuanceRepositoryError) throw error;

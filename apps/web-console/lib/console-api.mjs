@@ -100,6 +100,7 @@ export function createConsoleApi(options = {}) {
 
 export async function handleConsoleRequest(request, options = {}) {
   try {
+    if (new URL(request.url).pathname !== "/api/console") throw new ConsoleApiError(404, "not_found", "Resource not found");
     ensureSameOrigin(request);
     let config = await readConfig(options.env);
     if (config.authMode === "human-session") {
@@ -118,6 +119,10 @@ export async function handleConsoleRequest(request, options = {}) {
 
     if (request.method === "GET") {
       const query = parseQuery(new URL(request.url).searchParams, "GET");
+      if (query.resource === "audit-export") {
+        if (request.headers.has("idempotency-key")) throw new ConsoleApiError(400, "invalid_idempotency", "Idempotency-Key is not allowed");
+        query.recentAuth = requireRecentAuth(request.headers.get("agentpass-recent-auth"));
+      }
       const result = await getResource(query, config, fetchImpl, options);
       const status = result?.__consoleStatus ?? 200;
       const payload = result?.__consoleBody ?? result;
@@ -226,7 +231,7 @@ function ensureSameOrigin(request) {
 }
 
 function parseQuery(params, method) {
-  const allowed = new Set(["resource", "operation", "device_id", "limit", "cursor"]);
+  const allowed = new Set(["resource", "operation", "device_id", "limit", "cursor", "export_id", "environment", "chain", "organization_id"]);
   const seen = new Set();
   for (const [key] of params) {
     if (!allowed.has(key) || seen.has(key)) {
@@ -263,11 +268,18 @@ function parseQuery(params, method) {
     throw new ConsoleApiError(400, "invalid_query", "Query parameters are invalid");
   }
 
-  return { resource, operation, deviceId, limit, cursor };
+  const exportId = params.get("export_id");
+  const environment = params.get("environment");
+  const chain = params.get("chain");
+  const organizationId = params.get("organization_id");
+  return { resource, operation, deviceId, limit, cursor, exportId, environment, chain, organizationId };
 }
 
 async function getResource(query, config, fetchImpl, options) {
   const resource = normalizeResource(query.resource);
+  if (resource !== "audit-export" && [query.exportId, query.environment, query.chain, query.organizationId].some((value) => value !== null)) {
+    throw new ConsoleApiError(400, "invalid_query", "Query parameters are invalid");
+  }
   if (query.cursor !== null && !["summary", "audit", "activity"].includes(resource)) {
     throw new ConsoleApiError(400, "invalid_query", "Query parameters are invalid");
   }
@@ -280,6 +292,7 @@ async function getResource(query, config, fetchImpl, options) {
   if (resource === "revocations") return getSimple(query, "revocations", config, fetchImpl, options);
   if (resource === "admin-audit") return getSimple(query, "admin-audit", config, fetchImpl, options);
   if (resource === "audit-health") return getSimple(query, "audit-health", config, fetchImpl, options);
+  if (resource === "audit-export") return getAuditExport(query, config, fetchImpl, options);
 
   if (resource === "audit" || resource === "activity" || resource === "health") {
     if (resource === "health" && query.cursor !== null) {
@@ -292,6 +305,25 @@ async function getResource(query, config, fetchImpl, options) {
   }
 
   throw new ConsoleApiError(400, "invalid_resource", "Resource is invalid");
+}
+
+async function getAuditExport(query, config, fetchImpl, options) {
+  if (query.organizationId !== null || query.deviceId !== null || query.cursor !== null || query.limit !== 100
+    || !UUID_V4.test(query.exportId ?? "") || !["staging", "production"].includes(query.environment)
+    || !["admin", "device", "cloud_agent"].includes(query.chain)) {
+    throw new ConsoleApiError(400, "invalid_query", "Query parameters are invalid");
+  }
+  const suffix = `/audit/exports/${encodeURIComponent(query.exportId)}?environment=${encodeURIComponent(query.environment)}&chain=${encodeURIComponent(query.chain)}`;
+  const result = await cloudRequest("GET", suffix, undefined, config, fetchImpl, options, undefined, true, {
+    "agentpass-recent-auth": query.recentAuth,
+  }, true);
+  if (result.status !== 200) throw invalidCloudResponse();
+  return normalizeAuditExportEnvelope(result.body, {
+    organizationId: config.organizationId,
+    exportId: query.exportId,
+    environment: query.environment,
+    chain: query.chain,
+  });
 }
 
 async function getSummary(query, config, fetchImpl, options) {
@@ -862,6 +894,29 @@ function base64UrlDecode(value) {
 
 async function postOperation(query, body, idempotencyKey, config, fetchImpl, options, recentAuth) {
   const operation = normalizeOperation(query.operation ?? query.resource);
+  if (operation !== "audit-export" && [query.exportId, query.environment, query.chain, query.organizationId].some((value) => value !== null)) {
+    throw new ConsoleApiError(400, "invalid_query", "Query parameters are invalid");
+  }
+  if (operation === "audit-export") {
+    if (query.resource !== null || query.deviceId !== null || query.cursor !== null || query.limit !== 100
+      || query.exportId !== null || query.environment !== null || query.chain !== null || query.organizationId !== null) {
+      throw new ConsoleApiError(400, "invalid_query", "Query parameters are invalid");
+    }
+    const input = validateAuditExportBody(body);
+    const result = await cloudRequest("POST", "/audit/exports", input, config, fetchImpl, options, idempotencyKey, true, {
+      "agentpass-recent-auth": requireRecentAuth(recentAuth),
+    }, true);
+    if (result.status !== 201) throw invalidCloudResponse();
+    return {
+      status: 201,
+      body: normalizeAuditExportEnvelope(result.body, {
+        organizationId: config.organizationId,
+        exportId: input.export_id,
+        environment: input.environment,
+        chain: input.chain,
+      }),
+    };
+  }
   if (operation === "request-refresh") {
     const input = validateDeviceRefreshRequestBody(body);
     const recentAuthHeader = requireRecentAuth(recentAuth);
@@ -967,7 +1022,7 @@ async function postOperation(query, body, idempotencyKey, config, fetchImpl, opt
 
 function normalizeResource(value) {
   if (value === null || value === "" || value === "summary") return "summary";
-  const aliases = { org: "organization", organization: "organization", devices: "devices", agents: "agents", policies: "policies", capabilities: "capabilities", revocations: "revocations", "admin-audit": "admin-audit", "audit-health": "audit-health", audit: "audit", activity: "activity", health: "health" };
+  const aliases = { org: "organization", organization: "organization", devices: "devices", agents: "agents", policies: "policies", capabilities: "capabilities", revocations: "revocations", "admin-audit": "admin-audit", "audit-health": "audit-health", "audit-export": "audit-export", audit: "audit", activity: "activity", health: "health" };
   if (aliases[value]) return aliases[value];
   throw new ConsoleApiError(400, "invalid_resource", "Resource is invalid");
 }
@@ -1004,9 +1059,60 @@ function normalizeOperation(value) {
     "emergency-stop": "emergency-stop",
     emergency_stop: "emergency-stop",
     "emergency.stop": "emergency-stop",
+    "audit-export": "audit-export",
+    "audit.export.create": "audit-export",
   };
   if (typeof value === "string" && aliases[value]) return aliases[value];
   throw new ConsoleApiError(400, "invalid_operation", "Operation is invalid");
+}
+
+function validateAuditExportBody(value) {
+  const body = plainObject(value);
+  exactKeys(body, ["export_id", "environment", "chain"], "audit_export");
+  if (Object.keys(body).length !== 3 || !UUID_V4.test(body.export_id ?? "")
+    || !["staging", "production"].includes(body.environment)
+    || !["admin", "device", "cloud_agent"].includes(body.chain)) {
+    throw new ConsoleApiError(400, "invalid_json_schema", "Request JSON does not match the schema");
+  }
+  return { export_id: body.export_id, environment: body.environment, chain: body.chain };
+}
+
+function normalizeAuditExportEnvelope(value, expected) {
+  if (!isPlainRecord(value) || Object.keys(value).length !== 2
+    || !Object.hasOwn(value, "audit_export") || !Object.hasOwn(value, "request_id")
+    || typeof value.request_id !== "string" || !UUID_OR_OPAQUE_ID.test(value.request_id)) throw invalidCloudResponse();
+  const auditExport = value.audit_export;
+  const keys = ["organization_id", "export_id", "environment", "chain", "range", "payload_digest", "payload", "audit_anchor", "validity"];
+  if (!isPlainRecord(auditExport) || Object.keys(auditExport).length !== keys.length
+    || Object.keys(auditExport).some((key) => !keys.includes(key))
+    || auditExport.organization_id !== expected.organizationId || auditExport.export_id !== expected.exportId
+    || auditExport.environment !== expected.environment || auditExport.chain !== expected.chain
+    || typeof auditExport.payload_digest !== "string" || !/^[0-9a-f]{64}$/.test(auditExport.payload_digest)
+    || !["active", "expired"].includes(auditExport.validity)) throw invalidCloudResponse();
+  assertAuditExportTree(auditExport);
+  return structuredClone(auditExport);
+}
+
+function assertAuditExportTree(value, seen = new Set(), depth = 0) {
+  if (depth > 32) throw invalidCloudResponse();
+  if (value === null || ["string", "boolean"].includes(typeof value)) return;
+  if (typeof value === "number") {
+    if (!Number.isSafeInteger(value)) throw invalidCloudResponse();
+    return;
+  }
+  if (!value || typeof value !== "object" || seen.has(value)) throw invalidCloudResponse();
+  seen.add(value);
+  if (Array.isArray(value)) {
+    for (const item of value) assertAuditExportTree(item, seen, depth + 1);
+    seen.delete(value);
+    return;
+  }
+  if (!isPlainRecord(value)) throw invalidCloudResponse();
+  for (const [key, child] of Object.entries(value)) {
+    if (/(?:private[_-]?key|claim[_-]?token|provider[_-]?diagnostic|signing[_-]?bytes|raw[_-]?signature|password)/i.test(key)) throw invalidCloudResponse();
+    assertAuditExportTree(child, seen, depth + 1);
+  }
+  seen.delete(value);
 }
 
 function validatePolicyBody(value) {
@@ -1247,6 +1353,11 @@ async function cloudRequest(method, suffix, body, config, fetchImpl, options, id
   }
   clearTimeout(timeoutId);
 
+  if (!response || typeof response.status !== "number" || (response.status >= 300 && response.status < 400)
+    || response.headers?.get("set-cookie") !== null) {
+    throw new ConsoleApiError(502, "cloud_api_invalid_response", "Cloud API response was invalid");
+  }
+
   const raw = await readCloudResponse(response);
   let parsed;
   try {
@@ -1278,11 +1389,11 @@ function buildCloudUrl(baseValue, organizationId, suffix, allowInsecureLoopback 
 async function readCloudResponse(response) {
   const contentLength = response.headers?.get("content-length");
   if (contentLength !== null && contentLength !== undefined && /^\d+$/.test(contentLength) && Number(contentLength) > MAX_BYTES) {
-    throw new ConsoleApiError(502, "cloud_api_response_too_large", "Cloud API response is too large");
+    throw new ConsoleApiError(502, "response_too_large", "Response is too large");
   }
   const bytes = new Uint8Array(await response.arrayBuffer());
   if (bytes.byteLength > MAX_BYTES) {
-    throw new ConsoleApiError(502, "cloud_api_response_too_large", "Cloud API response is too large");
+    throw new ConsoleApiError(502, "response_too_large", "Response is too large");
   }
   return new TextDecoder().decode(bytes);
 }

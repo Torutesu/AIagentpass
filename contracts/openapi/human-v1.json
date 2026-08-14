@@ -519,6 +519,56 @@
         }
       }
     },
+    "/organizations/{organization_id}/audit/exports": {
+      "post": {
+        "operationId": "createAuditExport",
+        "summary": "Create an immutable organization audit export",
+        "description": "Creates or returns the exact committed immutable audit export for the organization, environment, and chain. The JSON body accepts only export_id, environment, and chain; range, digest, timestamps, signer state, claims, provider fields, idempotency material, and private material are server-derived or transport-only. Owner and admin roles require a recent operation-bound WebAuthn authorization.",
+        "security": [{ "humanSession": [], "recentWebAuthn": [] }],
+        "parameters": [{ "$ref": "#/components/parameters/OrganizationId" }, { "$ref": "#/components/parameters/CsrfToken" }, { "$ref": "#/components/parameters/IdempotencyKey" }],
+        "requestBody": { "$ref": "#/components/requestBodies/CreateAuditExport" },
+        "responses": {
+          "201": { "$ref": "#/components/responses/AuditExportCreated" },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "409": { "$ref": "#/components/responses/IdempotencyConflict" },
+          "422": { "$ref": "#/components/responses/ValidationError" },
+          "429": { "$ref": "#/components/responses/TooManyRequests" },
+          "500": { "$ref": "#/components/responses/InternalError" }
+        },
+        "x-agentpass-contract-status": "frozen-c2",
+        "x-agentpass-tenant-scope": { "kind": "organization", "source": "path.organization_id", "cross-tenant-disclosure": false },
+        "x-agentpass-minimum-role": "admin",
+        "x-agentpass-recent-auth-operation": "audit.export.create",
+        "x-agentpass-idempotency": { "same-key-same-canonical-request": "return-original-committed-result", "same-key-different-canonical-request": "idempotency_key_reused", "additionalProperties": false },
+        "x-agentpass-authority": { "range": "server-derived contiguous committed range", "payload": "immutable committed payload", "anchor": "managed audit anchor", "private-material": "never-returned", "additionalProperties": false }
+      }
+    },
+    "/organizations/{organization_id}/audit/exports/{export_id}": {
+      "get": {
+        "operationId": "getAuditExport",
+        "summary": "Retrieve an immutable organization audit export",
+        "description": "Returns the exact committed immutable payload, payload_digest, audit_anchor, range, and validity for the requested export. The response has no idempotency, request, claim, provider, or private material fields. Owner, admin, and auditor roles may retrieve the export after recent resource-bound WebAuthn authentication.",
+        "security": [{ "humanSession": [], "recentWebAuthn": [] }],
+        "parameters": [{ "$ref": "#/components/parameters/OrganizationId" }, { "$ref": "#/components/parameters/AuditExportId" }, { "$ref": "#/components/parameters/AuditExportEnvironment" }, { "$ref": "#/components/parameters/AuditExportChain" }],
+        "responses": {
+          "200": { "$ref": "#/components/responses/AuditExportRetrieved" },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "429": { "$ref": "#/components/responses/TooManyRequests" },
+          "500": { "$ref": "#/components/responses/InternalError" }
+        },
+        "x-agentpass-contract-status": "frozen-c2",
+        "x-agentpass-tenant-scope": { "kind": "organization", "source": "path.organization_id", "cross-tenant-disclosure": false },
+        "x-agentpass-minimum-role": "auditor",
+        "x-agentpass-recent-auth-operation": "audit.export.retrieve",
+        "x-agentpass-authority": { "immutable": true, "response": "exact committed export only", "private-material": "never-returned", "additionalProperties": false }
+      }
+    },
     "/organizations/{organization_id}/device-enrollments": {
       "post": {
         "operationId": "issueDeviceEnrollment",
@@ -943,6 +993,13 @@
         "description": "Invitation identifier, interpreted only together with organization_id.",
         "schema": { "type": "string", "format": "uuid" }
       },
+      "AuditExportId": {
+        "name": "export_id",
+        "in": "path",
+        "required": true,
+        "description": "Immutable audit export identifier, interpreted only together with organization_id, environment, and chain.",
+        "schema": { "type": "string", "format": "uuid" }
+      },
       "CsrfToken": {
         "name": "X-CSRF-Token",
         "in": "header",
@@ -976,6 +1033,20 @@
         "in": "query",
         "required": false,
         "schema": { "type": "integer", "minimum": 1, "maximum": 100, "default": 50 }
+      },
+      "AuditExportEnvironment": {
+        "name": "environment",
+        "in": "query",
+        "required": true,
+        "description": "Audit environment bound to the immutable export.",
+        "schema": { "type": "string", "enum": ["staging", "production"] }
+      },
+      "AuditExportChain": {
+        "name": "chain",
+        "in": "query",
+        "required": true,
+        "description": "Audit chain bound to the immutable export.",
+        "schema": { "type": "string", "enum": ["admin", "cloud_agent", "device"] }
       }
     },
     "requestBodies": {
@@ -1041,6 +1112,11 @@
         "required": true,
         "description": "Exactly {}. The request carries no generation, bundle, ACK, notification, or policy input; those values are resolved from the authenticated organization and device state.",
         "content": { "application/json": { "schema": { "$ref": "#/components/schemas/DeviceRefreshRequestBody" } } }
+      },
+      "CreateAuditExport": {
+        "required": true,
+        "description": "Exactly export_id, environment, and chain. Organization, range, digest, timestamps, anchor, claims, provider fields, idempotency material, and private material are not accepted in the JSON body.",
+        "content": { "application/json": { "schema": { "$ref": "#/components/schemas/AuditExportCreateRequest" } } }
       },
       "DeviceEnrollmentIssue": {
         "required": true,
@@ -1119,6 +1195,16 @@
             }
           }
         }
+      },
+      "AuditExportCreated": {
+        "description": "The exact committed immutable audit export created or returned for the idempotent retry. No request, claim, provider, idempotency, or private material is returned.",
+        "headers": { "Cache-Control": { "required": true, "schema": { "type": "string", "const": "no-store, max-age=0" } } },
+        "content": { "application/json": { "schema": { "$ref": "#/components/schemas/AuditExportResponse" } } }
+      },
+      "AuditExportRetrieved": {
+        "description": "The exact committed immutable audit export. No request, claim, provider, idempotency, or private material is returned.",
+        "headers": { "Cache-Control": { "required": true, "schema": { "type": "string", "const": "no-store, max-age=0" } } },
+        "content": { "application/json": { "schema": { "$ref": "#/components/schemas/AuditExportResponse" } } }
       },
       "OrganizationList": { "description": "Organizations visible to the session", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/OrganizationListResponse" } } } },
       "OrganizationCreated": { "description": "Organization created", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/OrganizationResponse" } } } },
@@ -1234,6 +1320,18 @@
         "minProperties": 0,
         "maxProperties": 0,
         "description": "Exactly {}. No caller-supplied generation, bundle, ACK, notification, or policy field is accepted."
+      },
+      "AuditExportCreateRequest": { "$ref": "../schemas/audit-export-create-v1.schema.json" },
+      "AuditExportPayloadV1": { "$ref": "../schemas/audit-export-payload-v1.schema.json" },
+      "AuditExport": { "$ref": "../schemas/audit-export-response-v1.schema.json" },
+      "AuditExportResponse": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["request_id", "audit_export"],
+        "properties": {
+          "request_id": { "$ref": "#/components/schemas/RequestId" },
+          "audit_export": { "$ref": "#/components/schemas/AuditExport" }
+        }
       },
       "DeviceEnrollmentIssueRequestV1": {
         "type": "object",

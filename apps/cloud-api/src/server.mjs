@@ -30,6 +30,8 @@ const HUMAN_AUTH_ACCEPT_INVITATION_PATH = "/api/auth/invitations/accept";
 const HUMAN_AUTH_UUID = "[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89a-fA-F][0-9a-fA-F]{3}-[0-9a-fA-F]{12}";
 const HUMAN_AGENT_SESSION_GRANT_PATH = new RegExp(`^/api/v1/organizations/${HUMAN_AUTH_UUID}/agents/${HUMAN_AUTH_UUID}/session-grants$`);
 const HUMAN_QUALIFICATION_GRANT_BATCH_PATH = new RegExp(`^/api/v1/organizations/${HUMAN_AUTH_UUID}/agents/${HUMAN_AUTH_UUID}/qualification-grant-batches$`);
+const HUMAN_AUDIT_EXPORT_CREATE_PATH = new RegExp(`^/v1/organizations/(?<organizationId>${HUMAN_AUTH_UUID})/audit/exports$`);
+const HUMAN_AUDIT_EXPORT_GET_PATH = new RegExp(`^/v1/organizations/(?<organizationId>${HUMAN_AUTH_UUID})/audit/exports/(?<exportId>${HUMAN_AUTH_UUID})$`);
 const UUID = "([0-9a-fA-F-]{36})";
 const UUID_VALUE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu;
 const AGENT_SESSION_DEVICE_CONSUME_PATH = /^\/v1\/organizations\/(?<organizationId>[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})\/devices\/(?<deviceId>[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})\/agent-session-grants\/(?<grantId>[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})\/consume$/u;
@@ -50,11 +52,21 @@ const V2_CANDIDATE_BINDING_KEYS = Object.freeze([
 const V2_COMPLETION_KEYS = new Set(["version", "proof_version", "enrollment_id", "organization_id", "device_id", "label", "platform", "device_key", "candidate_id", "device_key_fingerprint", "challenge"]);
 const V2_CHALLENGE_KEYS = new Set(["challenge_id", "nonce", "expires_at", "candidate_id", "device_key_fingerprint"]);
 const V2_PROOF_DOMAIN = "AgentPass-Enrollment-Proof-v2\0";
-export function createCloudApi({ store, tokenRecords = [], bundleSigner, capabilitySigner, refreshHintService, now = () => Date.now(), monotonicNow, replayCache = createReplayCache(), deviceReplayConsumer, agentSessionDeviceApi, qualificationGrantBatchDeviceApi, rateLimiter, admissionRateLimiter, verifyRecentWebAuthn, recentAuthService, humanAuthApi, humanSession, capabilityAuthorityRepository, capabilityRevocationSource, auditRepository, enrollmentCredentialSecret, possessionReceiptSigner, trackInFlight, readiness, operationalMetrics, operationalProbeSecret } = {}) {
+export function createCloudApi({ store, tokenRecords = [], bundleSigner, capabilitySigner, refreshHintService, now = () => Date.now(), monotonicNow, replayCache = createReplayCache(), deviceReplayConsumer, agentSessionDeviceApi, qualificationGrantBatchDeviceApi, rateLimiter, admissionRateLimiter, verifyRecentWebAuthn, recentAuthService, humanAuthApi, humanSession, humanAuthOrigin, auditExportIssuanceService, capabilityAuthorityRepository, capabilityRevocationSource, auditRepository, enrollmentCredentialSecret, possessionReceiptSigner, trackInFlight, readiness, operationalMetrics, operationalProbeSecret } = {}) {
   if (!store) throw new TypeError("store is required");
   if (verifyRecentWebAuthn !== undefined && recentAuthService !== undefined) throw new TypeError("configure verifyRecentWebAuthn or recentAuthService, not both");
   if (humanAuthApi !== undefined && (!humanAuthApi || typeof humanAuthApi.handle !== "function")) throw new TypeError("humanAuthApi must expose handle()");
   if (humanSession !== undefined && (!humanSession || typeof humanSession.authenticateRequest !== "function")) throw new TypeError("humanSession must expose authenticateRequest()");
+  if (auditExportIssuanceService !== undefined && (!auditExportIssuanceService
+    || typeof auditExportIssuanceService.issueAuditExport !== "function"
+    || typeof auditExportIssuanceService.retrieveAuditExport !== "function")) {
+    throw new TypeError("auditExportIssuanceService must expose issueAuditExport() and retrieveAuditExport()");
+  }
+  const effectiveHumanAuthOrigin = humanAuthOrigin ?? humanSession?.expectedOrigin;
+  if (auditExportIssuanceService !== undefined && (humanSession === undefined || recentAuthService === undefined
+    || typeof effectiveHumanAuthOrigin !== "string" || !effectiveHumanAuthOrigin)) {
+    throw new TypeError("audit export Human API requires humanSession, recentAuthService, and expectedOrigin");
+  }
   if (agentSessionDeviceApi !== undefined && (!agentSessionDeviceApi || typeof agentSessionDeviceApi.handle !== "function")) throw new TypeError("agentSessionDeviceApi must expose handle()");
   if (qualificationGrantBatchDeviceApi !== undefined && (!qualificationGrantBatchDeviceApi || typeof qualificationGrantBatchDeviceApi.handle !== "function")) throw new TypeError("qualificationGrantBatchDeviceApi must expose handle()");
   if (capabilityRevocationSource !== undefined && (!capabilityRevocationSource || typeof capabilityRevocationSource.listRevokedCapabilityIds !== "function")) throw new TypeError("capabilityRevocationSource must expose listRevokedCapabilityIds()");
@@ -148,6 +160,9 @@ export function createCloudApi({ store, tokenRecords = [], bundleSigner, capabil
         return sendRawJson(response, normalized.status, normalized.encoded, normalized.headers);
       }
       const url = new URL(request.url, "http://agentpass.invalid");
+      if (auditExportIssuanceService && (HUMAN_AUDIT_EXPORT_CREATE_PATH.test(url.pathname) || HUMAN_AUDIT_EXPORT_GET_PATH.test(url.pathname))) {
+        return await handleHumanAuditExport(request, response, url, requestId);
+      }
       if (humanAuthApi && isExactHumanAuthPath(url, request.method)) return await handleHumanAuth(request, response, url, requestId);
       const route = routes.find((candidate) => candidate.method === request.method && candidate.pattern.test(url.pathname));
       if (!route) return send(response, 404, { error: { code: "not_found", message: "Resource not found" }, request_id: requestId });
@@ -207,6 +222,125 @@ export function createCloudApi({ store, tokenRecords = [], bundleSigner, capabil
       if (hasErrorCode(error, "55P03")) recordOperationalMetric(operationalMetrics, "recordLockTimeout");
       const mapped = mapError(error);
       send(response, mapped.status, { error: { code: mapped.code, message: mapped.message }, request_id: requestId }, mapped.headers);
+    }
+  }
+
+  async function handleHumanAuditExport(request, response, url, requestId) {
+    const createMatch = HUMAN_AUDIT_EXPORT_CREATE_PATH.exec(url.pathname);
+    const getMatch = HUMAN_AUDIT_EXPORT_GET_PATH.exec(url.pathname);
+    let responseRateHeaders = {};
+    try {
+      const organizationId = (createMatch ?? getMatch).groups.organizationId.toLowerCase();
+      const admitted = await acquireRateLimit(admission, {
+        tenantId: organizationId,
+        principalType: "human",
+        principalId: transportPrincipalId(request)
+      });
+      if (!admitted.allowed) throw apiError("rate_limited", 429, "Pre-authentication rate limit exceeded", rateLimitHeaders(admitted, true));
+      if (request.headers.authorization !== undefined) throw apiError("human_session_invalid", 401, "Authentication failed");
+      const expectedOrigin = effectiveHumanAuthOrigin;
+      const origin = request.headers.origin;
+      if (origin !== expectedOrigin || origin === "null") throw apiError("human_session_request_denied", 403, "Authentication failed");
+      const isCreate = createMatch !== null;
+      if ((isCreate && request.method !== "POST") || (!isCreate && request.method !== "GET")) {
+        throw apiError("method_not_allowed", 405, "Method not allowed", { Allow: isCreate ? "POST" : "GET" });
+      }
+      const bodyBytes = await readBody(request, HUMAN_AUTH_MAX_BODY_BYTES);
+      if (!isCreate && bodyBytes.length !== 0) throw apiError("invalid_audit_export_request", 400, "Audit export request is invalid");
+      const csrfToken = isCreate ? request.headers["agentpass-csrf"] : undefined;
+      const authenticated = await humanSession.authenticateRequest({
+        method: request.method,
+        headers: request.headers,
+        origin,
+        cookie: request.headers.cookie,
+        ...(isCreate ? { csrfToken } : {})
+      });
+      const principal = authenticated?.session;
+      if (!principal || typeof principal !== "object" || Array.isArray(principal)) throw apiError("human_session_invalid", 401, "Authentication failed");
+      if (principal.organization_id !== organizationId) throw apiError("not_found", 404, "Resource not found");
+      const allowedRoles = isCreate ? new Set(["owner", "admin"]) : new Set(["owner", "admin", "auditor"]);
+      if (!allowedRoles.has(principal.role)) throw apiError("role_denied", 403, "Authorization denied");
+      const rateLimit = await acquireRateLimit(limiter, {
+        tenantId: organizationId,
+        principalType: "human",
+        principalId: principal.member_id
+      });
+      if (!rateLimit.allowed) throw apiError("rate_limited", 429, "Rate limit exceeded", rateLimitHeaders(rateLimit, true));
+      responseRateHeaders = rateLimitHeaders(rateLimit);
+
+      let exportId;
+      let environment;
+      let chain;
+      let idempotency;
+      if (isCreate) {
+        if (url.search || url.hash) throw apiError("invalid_audit_export_request", 400, "Audit export request is invalid");
+        const body = parseBody(bodyBytes);
+        rejectUnknown(body, new Set(["export_id", "environment", "chain"]), "audit_export");
+        if (Object.keys(body).length !== 3 || !canonicalUuid(body.export_id)
+          || !["staging", "production"].includes(body.environment)
+          || !["admin", "device", "cloud_agent"].includes(body.chain)) {
+          throw apiError("invalid_audit_export_request", 400, "Audit export request is invalid");
+        }
+        exportId = body.export_id;
+        environment = body.environment;
+        chain = body.chain;
+        idempotency = request.headers["idempotency-key"];
+        if (typeof idempotency !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._~:-]{7,255}$/u.test(idempotency)) {
+          throw apiError("idempotency_key_required", 400, "A valid Idempotency-Key is required");
+        }
+      } else {
+        if (request.headers["idempotency-key"] !== undefined || url.hash) throw apiError("invalid_audit_export_request", 400, "Audit export request is invalid");
+        requireExactQueryKeys(url, new Set(["environment", "chain"]));
+        const environmentValues = url.searchParams.getAll("environment");
+        const chainValues = url.searchParams.getAll("chain");
+        if (environmentValues.length !== 1 || chainValues.length !== 1
+          || !["staging", "production"].includes(environmentValues[0])
+          || !["admin", "device", "cloud_agent"].includes(chainValues[0])) {
+          throw apiError("invalid_audit_export_request", 400, "Audit export request is invalid");
+        }
+        exportId = getMatch.groups.exportId.toLowerCase();
+        environment = environmentValues[0];
+        chain = chainValues[0];
+      }
+
+      const contextHash = crypto.createHash("sha256").update(canonicalJson({
+        version: 1,
+        organization_id: organizationId,
+        export_id: exportId,
+        environment,
+        chain
+      }), "utf8").digest("hex");
+      await requireAuditExportRecentAuth({
+        verifier: recentAuthVerifier,
+        principal,
+        proof: request.headers["agentpass-recent-auth"],
+        organizationId,
+        operation: isCreate ? "audit.export.create" : "audit.export.retrieve",
+        contextHash,
+        now: now()
+      });
+      let auditExport;
+      try {
+        auditExport = isCreate
+          ? await auditExportIssuanceService.issueAuditExport({ organization_id: organizationId, export_id: exportId, environment, chain, idempotency_key: idempotency })
+          : await auditExportIssuanceService.retrieveAuditExport({ organization_id: organizationId, export_id: exportId, environment, chain });
+      } catch (error) {
+        throw mapAuditExportServiceError(error, isCreate);
+      }
+      const normalized = normalizeAuditExportPublicResult(auditExport, { organizationId, exportId, environment, chain });
+      return send(response, isCreate ? 201 : 200, { audit_export: normalized, request_id: requestId }, {
+        "cache-control": "no-store, max-age=0",
+        Pragma: "no-cache",
+        "X-Content-Type-Options": "nosniff",
+        ...responseRateHeaders
+      });
+    } catch (error) {
+      const mapped = mapError(error);
+      return send(response, mapped.status, { error: { code: mapped.code, message: mapped.message }, request_id: requestId }, {
+        Pragma: "no-cache",
+        "X-Content-Type-Options": "nosniff",
+        ...(mapped.headers ?? {})
+      });
     }
   }
   server.requestTimeout = 15_000;
@@ -850,6 +984,84 @@ async function requireRecentWebAuthn({ verifier, principal, proof, organizationI
   }
   const authenticatedAt = typeof result.authenticated_at === "string" ? Date.parse(result.authenticated_at) : result.authenticated_at;
   if (!Number.isSafeInteger(authenticatedAt) || authenticatedAt > now + 30_000 || now - authenticatedAt > 5 * 60_000) throw apiError("recent_auth_stale", 401, "Recent WebAuthn authentication is stale");
+}
+
+async function requireAuditExportRecentAuth({ verifier, principal, proof, organizationId, operation, contextHash, now }) {
+  if (typeof verifier !== "function") throw apiError("recent_auth_unavailable", 503, "Recent WebAuthn verification is unavailable");
+  if (typeof proof !== "string" || !UUID_VALUE.test(proof)) throw apiError("recent_auth_required", 401, "Recent WebAuthn authentication is required");
+  let result;
+  try {
+    result = await verifier({ proof, principal: { ...principal }, organization_id: organizationId, operation, context_hash: contextHash, now });
+  } catch {
+    throw apiError("recent_auth_failed", 401, "Recent WebAuthn authentication failed");
+  }
+  const expectedKeys = ["authenticated_at", "challenge_id", "consumed", "context_hash", "member_id", "operation", "organization_id", "verified"];
+  if (!result || typeof result !== "object" || Array.isArray(result)
+    || Object.keys(result).sort().join(",") !== expectedKeys.sort().join(",")
+    || result.verified !== true || result.consumed !== true || result.challenge_id !== proof.toLowerCase()
+    || result.member_id !== principal.member_id || result.organization_id !== organizationId
+    || result.operation !== operation || result.context_hash !== contextHash) {
+    throw apiError("recent_auth_failed", 401, "Recent WebAuthn authentication failed");
+  }
+  const authenticatedAt = typeof result.authenticated_at === "string" ? Date.parse(result.authenticated_at) : result.authenticated_at;
+  if (!Number.isSafeInteger(authenticatedAt) || authenticatedAt > now + 30_000 || now - authenticatedAt > 5 * 60_000) {
+    throw apiError("recent_auth_stale", 401, "Recent WebAuthn authentication is stale");
+  }
+}
+
+function mapAuditExportServiceError(error, create) {
+  const code = String(error?.code ?? "").toLowerCase();
+  if (!create && ["not_found", "absent", "in_progress", "uncertain", "organization_mismatch"].some((value) => code.includes(value))) {
+    return apiError("not_found", 404, "Resource not found");
+  }
+  if (create && code.includes("conflict")) return apiError("idempotency_conflict", 409, "Mutation conflict");
+  if (create && code.includes("in_progress")) return apiError("audit_export_in_progress", 409, "Audit export is in progress");
+  if (create && code.includes("uncertain")) return apiError("audit_export_uncertain", 503, "Audit export outcome is uncertain");
+  if (code.includes("input") || code.includes("binding")) return apiError("invalid_audit_export_request", 400, "Audit export request is invalid");
+  return apiError("audit_export_unavailable", 503, "Audit export is unavailable");
+}
+
+function normalizeAuditExportPublicResult(value, expected) {
+  try {
+    const keys = ["organization_id", "export_id", "environment", "chain", "range", "payload_digest", "payload", "audit_anchor", "replayed", "validity"];
+    if (!value || typeof value !== "object" || Array.isArray(value)
+      || Object.keys(value).sort().join(",") !== keys.sort().join(",")
+      || value.organization_id !== expected.organizationId || value.export_id !== expected.exportId
+      || value.environment !== expected.environment || value.chain !== expected.chain
+      || typeof value.payload_digest !== "string" || !SHA256_HEX.test(value.payload_digest)
+      || typeof value.replayed !== "boolean" || !["active", "expired"].includes(value.validity)) throw new Error("identity");
+    assertSafeAuditExportTree(value);
+    const cloned = structuredClone(value);
+    if (Buffer.byteLength(canonicalJson(cloned), "utf8") > 256 * 1024) throw new Error("size");
+    const { replayed: _replayed, ...publicValue } = cloned;
+    return publicValue;
+  } catch {
+    throw apiError("audit_export_unavailable", 503, "Audit export is unavailable");
+  }
+}
+
+function assertSafeAuditExportTree(value, seen = new Set(), depth = 0) {
+  if (depth > 32 || value === null || !["object", "string", "number", "boolean"].includes(typeof value)) {
+    if (value === null || ["string", "number", "boolean"].includes(typeof value)) return;
+    throw new Error("tree");
+  }
+  if (typeof value !== "object") return;
+  if (seen.has(value)) throw new Error("cycle");
+  seen.add(value);
+  const prototype = Object.getPrototypeOf(value);
+  if (!Array.isArray(value) && prototype !== Object.prototype && prototype !== null) throw new Error("prototype");
+  if (Array.isArray(value)) {
+    for (const item of value) assertSafeAuditExportTree(item, seen, depth + 1);
+    seen.delete(value);
+    return;
+  }
+  for (const key of Reflect.ownKeys(value)) {
+    if (typeof key !== "string" || /(?:private[_-]?key|claim[_-]?token|provider[_-]?diagnostic|signing[_-]?bytes|raw[_-]?signature|password)/iu.test(key)) throw new Error("private");
+    const descriptor = Object.getOwnPropertyDescriptor(value, key);
+    if (!descriptor || !("value" in descriptor) || !descriptor.enumerable) throw new Error("descriptor");
+    assertSafeAuditExportTree(descriptor.value, seen, depth + 1);
+  }
+  seen.delete(value);
 }
 
 function validateEnrollmentPublicKey(algorithm, pem) {

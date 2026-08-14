@@ -132,6 +132,12 @@ function harness({ reader = descriptor, raceInsert = false, commitResponseLost =
         const committed = [...rows.values()].filter((row) => row.state === "committed" && row.organization_id === params[0] && row.environment === params[1] && row.chain === params[2]).sort((a, b) => b.to_audit_position - a.to_audit_position);
         return result(committed.slice(0, 1));
       }
+      if (/FROM audit_export_issuances/u.test(sql) && /export_id=\$2/u.test(sql) && /state='committed'/u.test(sql)) {
+        const committed = [...rows.values()].filter((row) => row.state === "committed"
+          && row.organization_id === params[0] && row.export_id === params[1]
+          && row.environment === params[2] && row.chain === params[3]);
+        return result(committed);
+      }
       if (/FROM audit_export_issuances/u.test(sql) && /environment=\$2 AND chain=\$3/u.test(sql)) {
         const open = [...rows.values()].filter((row) => row.organization_id === params[0] && row.environment === params[1] && row.chain === params[2]
           && (row.state === "uncertain" || (row.state === "reserved" && Date.parse(row.claim_expires_at) > now.getTime())));
@@ -268,6 +274,39 @@ test("retrieves only committed canonical payload bytes and rejects durable corru
     const fixture = harness();
     await fixture.repository.reserveAuditExport(IDENTITY);
     await assert.rejects(fixture.repository.getAuditExportPayload(IDENTITY), (error) => error.code.includes("NOT_FOUND"));
+  });
+
+  await t.test("four-field retrieval returns one committed authority and payload", async () => {
+    const fixture = await committedFixture();
+    const retrieved = await fixture.repository.getCommittedAuditExport({
+      organization_id: IDENTITY.organization_id,
+      export_id: IDENTITY.export_id,
+      environment: IDENTITY.environment,
+      chain: IDENTITY.chain
+    });
+    assert.equal(retrieved.state, "committed");
+    assert.equal(retrieved.idempotency_key, IDENTITY.idempotency_key);
+    assert.deepEqual(retrieved.payload, PAYLOAD);
+    assert.equal(Object.isFrozen(retrieved), true);
+    assert.equal(Object.isFrozen(retrieved.payload), true);
+  });
+
+  await t.test("four-field retrieval hides wrong scope and uncommitted rows", async () => {
+    const reserved = harness();
+    await reserved.repository.reserveAuditExport(IDENTITY);
+    await assert.rejects(reserved.repository.getCommittedAuditExport({
+      organization_id: IDENTITY.organization_id,
+      export_id: IDENTITY.export_id,
+      environment: IDENTITY.environment,
+      chain: IDENTITY.chain
+    }), (error) => error.code.includes("NOT_FOUND"));
+    const fixture = await committedFixture();
+    await assert.rejects(fixture.repository.getCommittedAuditExport({
+      organization_id: IDENTITY.organization_id,
+      export_id: IDENTITY.export_id,
+      environment: "staging",
+      chain: IDENTITY.chain
+    }), (error) => error.code.includes("NOT_FOUND"));
   });
 
   await t.test("missing payload fails closed", async () => {

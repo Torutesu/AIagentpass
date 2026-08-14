@@ -1,0 +1,162 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agentpass.dev/contracts/audit-export-payload-v1.schema.json",
+  "title": "AgentPass immutable audit export payload v1",
+  "description": "The exact bounded payload selected from the committed audit chain. It contains no request, claim, idempotency, provider, or private material.",
+  "type": "object",
+  "additionalProperties": false,
+  "maxProperties": 7,
+  "required": ["version", "type", "organization_id", "environment", "chain", "range", "entries"],
+  "properties": {
+    "version": { "const": 1 },
+    "type": { "const": "agentpass.audit-export" },
+    "organization_id": { "$ref": "#/$defs/uuid" },
+    "environment": { "enum": ["staging", "production"] },
+    "chain": { "enum": ["admin", "cloud_agent", "device"] },
+    "range": { "$ref": "#/$defs/range" },
+    "entries": { "type": "array", "minItems": 1, "maxItems": 100, "items": { "$ref": "#/$defs/entry" } }
+  },
+  "$defs": {
+    "uuid": { "type": "string", "format": "uuid", "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$" },
+    "sha256": { "type": "string", "minLength": 64, "maxLength": 64, "pattern": "^[0-9a-f]{64}$" },
+    "timestamp": { "type": "string", "format": "date-time", "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$" },
+    "range": {
+      "type": "object",
+      "additionalProperties": false,
+      "maxProperties": 5,
+      "required": ["from_audit_position", "to_audit_position", "previous_root_digest", "root_digest", "record_count"],
+      "properties": {
+        "from_audit_position": { "type": "integer", "minimum": 1, "maximum": 9007199254740991 },
+        "to_audit_position": { "type": "integer", "minimum": 1, "maximum": 9007199254740991 },
+        "previous_root_digest": { "$ref": "#/$defs/sha256" },
+        "root_digest": { "$ref": "#/$defs/sha256" },
+        "record_count": { "type": "integer", "minimum": 1, "maximum": 100 }
+      }
+    },
+    "safeDetail": {
+      "anyOf": [
+        { "type": "string", "maxLength": 4096, "pattern": "^[^\\u0000-\\u001f\\u007f]*$" },
+        { "type": "boolean" },
+        { "type": "number" },
+        { "type": "null" },
+        {
+          "type": "array",
+          "maxItems": 4096,
+          "items": { "$ref": "#/$defs/safeDetail" }
+        },
+        {
+          "type": "object",
+          "propertyNames": { "pattern": "^(?!(?:^|_)(?:authorization|bearer|cookie|credential|csrf|nonce|password|private|recovery|refresh|secret|session|signature|token)(?:_|$))" },
+          "additionalProperties": { "$ref": "#/$defs/safeDetail" }
+        }
+      ]
+    },
+    "details": {
+      "type": "object",
+      "propertyNames": { "pattern": "^(?!(?:^|_)(?:authorization|bearer|cookie|credential|csrf|nonce|password|private|recovery|refresh|secret|session|signature|token)(?:_|$))" },
+      "additionalProperties": { "$ref": "#/$defs/safeDetail" }
+    },
+    "adminEvent": {
+      "type": "object",
+      "additionalProperties": false,
+      "maxProperties": 10,
+      "required": ["version", "audit_event_id", "organization_id", "actor_id", "action", "target_type", "target_id", "details", "previous_hash", "sequence"],
+      "properties": {
+        "version": { "enum": [1, 2] },
+        "audit_event_id": { "$ref": "#/$defs/uuid" },
+        "organization_id": { "$ref": "#/$defs/uuid" },
+        "actor_id": { "$ref": "#/$defs/uuid" },
+        "action": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[^\\u0000-\\u001f\\u007f]+$" },
+        "target_type": { "type": "string", "minLength": 1, "maxLength": 64, "pattern": "^[^\\u0000-\\u001f\\u007f]+$" },
+        "target_id": { "anyOf": [{ "$ref": "#/$defs/uuid" }, { "type": "null" }] },
+        "details": { "$ref": "#/$defs/details" },
+        "previous_hash": { "$ref": "#/$defs/sha256" },
+        "sequence": { "type": "integer", "minimum": 1, "maximum": 9007199254740991 }
+      }
+    },
+    "cloudEvent": {
+      "type": "object",
+      "additionalProperties": false,
+      "maxProperties": 20,
+      "required": ["organization_id", "sequence", "event_id", "event_type", "grant_id", "session_id", "device_id", "agent_id", "grant_hash", "statement_hash", "signer_key_id", "process_binding_sha256", "ancestry_binding_sha256", "worktree_binding_sha256", "control_sequence", "authority_generation", "consumed_at", "recorded_at", "previous_hash", "event_hash"],
+      "properties": {
+        "organization_id": { "$ref": "#/$defs/uuid" },
+        "sequence": { "type": "integer", "minimum": 1, "maximum": 9007199254740991 },
+        "event_id": { "$ref": "#/$defs/uuid" },
+        "event_type": { "const": "agent_session_grant.consumed" },
+        "grant_id": { "$ref": "#/$defs/uuid" },
+        "session_id": { "$ref": "#/$defs/uuid" },
+        "device_id": { "$ref": "#/$defs/uuid" },
+        "agent_id": { "$ref": "#/$defs/uuid" },
+        "grant_hash": { "$ref": "#/$defs/sha256" },
+        "statement_hash": { "$ref": "#/$defs/sha256" },
+        "signer_key_id": { "type": "string", "minLength": 1, "maxLength": 64, "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$" },
+        "process_binding_sha256": { "$ref": "#/$defs/sha256" },
+        "ancestry_binding_sha256": { "$ref": "#/$defs/sha256" },
+        "worktree_binding_sha256": { "$ref": "#/$defs/sha256" },
+        "control_sequence": { "type": "integer", "minimum": 1, "maximum": 9007199254740991 },
+        "authority_generation": { "type": "integer", "minimum": 1, "maximum": 9007199254740991 },
+        "consumed_at": { "$ref": "#/$defs/timestamp" },
+        "recorded_at": { "$ref": "#/$defs/timestamp" },
+        "previous_hash": { "$ref": "#/$defs/sha256" },
+        "event_hash": { "$ref": "#/$defs/sha256" }
+      }
+    },
+    "deviceEvent": {
+      "type": "object",
+      "additionalProperties": false,
+      "maxProperties": 17,
+      "required": ["version", "event_id", "request_id", "agent_id", "operation", "decision", "reason", "policy_sequence", "capability_sequence", "repository", "branch", "remote", "payload_digest", "device_timestamp", "previous_hash", "event_hash", "received_at"],
+      "properties": {
+        "version": { "const": 1 },
+        "event_id": { "$ref": "#/$defs/uuid" },
+        "request_id": { "$ref": "#/$defs/uuid" },
+        "agent_id": { "$ref": "#/$defs/uuid" },
+        "operation": { "const": "git.commit.sign" },
+        "decision": { "enum": ["allow", "deny", "error"] },
+        "reason": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[A-Za-z0-9._:-]+$" },
+        "policy_sequence": { "type": "integer", "minimum": 0, "maximum": 9007199254740991 },
+        "capability_sequence": { "type": "integer", "minimum": 0, "maximum": 9007199254740991 },
+        "repository": { "type": "string", "minLength": 1, "maxLength": 4096 },
+        "branch": { "type": "string", "minLength": 1, "maxLength": 2048 },
+        "remote": { "type": "string", "minLength": 1, "maxLength": 2048 },
+        "payload_digest": { "$ref": "#/$defs/sha256" },
+        "device_timestamp": { "$ref": "#/$defs/timestamp" },
+        "previous_hash": { "$ref": "#/$defs/sha256" },
+        "event_hash": { "$ref": "#/$defs/sha256" },
+        "received_at": { "$ref": "#/$defs/timestamp" }
+      }
+    },
+    "gap": {
+      "type": "object",
+      "additionalProperties": false,
+      "maxProperties": 4,
+      "required": ["expected_previous_hash", "received_previous_hash", "recorded_at", "resolved_at"],
+      "properties": {
+        "expected_previous_hash": { "$ref": "#/$defs/sha256" },
+        "received_previous_hash": { "$ref": "#/$defs/sha256" },
+        "recorded_at": { "$ref": "#/$defs/timestamp" },
+        "resolved_at": { "anyOf": [{ "$ref": "#/$defs/timestamp" }, { "type": "null" }] }
+      }
+    },
+    "entry": {
+      "type": "object",
+      "additionalProperties": false,
+      "maxProperties": 11,
+      "required": ["version", "organization_id", "environment", "chain", "export_position", "source_id", "source_device_id", "source_previous_hash", "source_hash", "source_gap", "event"],
+      "properties": {
+        "version": { "const": 1 },
+        "organization_id": { "$ref": "#/$defs/uuid" },
+        "environment": { "enum": ["staging", "production"] },
+        "chain": { "enum": ["admin", "cloud_agent", "device"] },
+        "export_position": { "type": "integer", "minimum": 1, "maximum": 9007199254740991 },
+        "source_id": { "anyOf": [{ "$ref": "#/$defs/uuid" }, { "type": "null" }] },
+        "source_device_id": { "anyOf": [{ "$ref": "#/$defs/uuid" }, { "type": "null" }] },
+        "source_previous_hash": { "$ref": "#/$defs/sha256" },
+        "source_hash": { "$ref": "#/$defs/sha256" },
+        "source_gap": { "anyOf": [{ "$ref": "#/$defs/gap" }, { "type": "null" }] },
+        "event": { "oneOf": [{ "$ref": "#/$defs/adminEvent" }, { "$ref": "#/$defs/cloudEvent" }, { "$ref": "#/$defs/deviceEvent" }] }
+      }
+    }
+  }
+}

@@ -261,8 +261,8 @@ function committedRecord(input, overrides = {}) {
   };
 }
 
-function createRepository({ reserve = undefined, commit = undefined, replay = undefined, getPayload = undefined } = {}) {
-  const calls = { reserve: [], commit: [], replay: [], payload: [], uncertain: [], snapshot: 0 };
+function createRepository({ reserve = undefined, commit = undefined, replay = undefined, getPayload = undefined, retrieve = undefined } = {}) {
+  const calls = { reserve: [], commit: [], replay: [], payload: [], retrieve: [], uncertain: [], snapshot: 0 };
   let committed;
   const repository = {
     async reserveAuditExport(input) {
@@ -289,6 +289,17 @@ function createRepository({ reserve = undefined, commit = undefined, replay = un
       if (typeof getPayload === "function") return getPayload(input, calls);
       if (getPayload !== undefined) return structuredClone(getPayload);
       return structuredClone(PAYLOAD);
+    },
+    async getCommittedAuditExport(input) {
+      calls.retrieve.push(structuredClone(input));
+      if (typeof retrieve === "function") return retrieve(input, calls);
+      if (retrieve !== undefined) return structuredClone(retrieve);
+      if (!committed) {
+        const error = new Error("not found");
+        error.code = "ERR_AUDIT_EXPORT_ISSUANCE_NOT_FOUND";
+        throw error;
+      }
+      return { ...structuredClone(committed), payload: structuredClone(PAYLOAD) };
     },
     async markAuditExportUncertain(input) {
       calls.uncertain.push(structuredClone(input));
@@ -379,6 +390,43 @@ test("uses only caller identity and signs the repository-frozen authoritative de
   assert.equal(Object.isFrozen(result.range), true);
   assert.equal(Object.isFrozen(result.audit_anchor), true);
   assert.equal(Object.keys(result.audit_anchor.statement).filter((key) => key === "protocol_version").length, 1);
+});
+
+test("retrieves a committed export by four-field public identity and re-verifies its authority", async () => {
+  const value = await createCommittedFixture();
+  const input = {
+    organization_id: INPUT.organization_id,
+    export_id: INPUT.export_id,
+    environment: INPUT.environment,
+    chain: INPUT.chain
+  };
+  const result = await value.service.retrieveAuditExport(input);
+  assert.deepEqual(value.repoFixture.calls.retrieve, [input]);
+  assert.equal(value.repoFixture.calls.payload.length, 1);
+  assert.deepEqual(result.payload, PAYLOAD);
+  assert.equal(result.payload_digest, PAYLOAD_DIGEST);
+  assert.equal(result.replayed, true);
+  assert.equal(result.validity, "active");
+  assert.equal(Object.hasOwn(result, "idempotency_key"), false);
+  assert.equal(Object.hasOwn(result, "request_digest"), false);
+  assert.equal(Object.isFrozen(result), true);
+  assert.equal(Object.isFrozen(result.payload), true);
+});
+
+test("four-field retrieval rejects extra identity and maps opaque absence", async () => {
+  const value = validService();
+  const input = {
+    organization_id: INPUT.organization_id,
+    export_id: INPUT.export_id,
+    environment: INPUT.environment,
+    chain: INPUT.chain
+  };
+  await assert.rejects(value.service.retrieveAuditExport({ ...input, idempotency_key: INPUT.idempotency_key }), {
+    code: AUDIT_EXPORT_ISSUANCE_ERROR_CODES.INPUT
+  });
+  await assert.rejects(value.service.retrieveAuditExport(input), {
+    code: AUDIT_EXPORT_ISSUANCE_ERROR_CODES.NOT_FOUND
+  });
 });
 
 test("rejects caller-supplied range and payload fields before repository access", async (t) => {
