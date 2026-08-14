@@ -477,35 +477,85 @@ The integration order is `1 → 2`, `3 → 4 → 5 → 6 → 7`,
 earlier, but production credentials and promotion authority are introduced only
 at the final gated stages.
 
-### Next two implementation cycles
+### Next three implementation cycles from migration 0037
 
-Cycle A starts after this W1.6 source commit is green in branch CI. It uses two
-parallel, disjoint lanes and one integration owner:
+Migration 0037 and strict Device enrollment v2 are now the source baseline.
+The immediate critical path is to compose the durable lifecycle with hosted
+KMS signing without creating a retry path that can issue two signatures for one
+authority mutation. Work remains feature-gated until every exit condition below
+passes.
 
-| Lane | Owned scope | First merge output | Negative evidence required |
+#### Cycle C — hosted signer runtime composition
+
+Three disjoint lanes may proceed in parallel, followed by one ordered integration
+merge:
+
+| Lane | Owned scope | Deliverable | Required negative evidence |
 | --- | --- | --- | --- |
-| Console W2.1 | `apps/web-console/app/components/AgentPassConsole.tsx`, the summary BFF, and Console-only tests | Replace `defaultInitialData` and permissive `mergeCloudSummary` fallback behavior with an explicit loading/signed-out/empty/error state and one closed, immutable summary DTO parser. Production rendering must have no sample operator, device, agent, policy, capability, or activity record. | Missing/unknown/wrong-type fields, malformed timestamps and IDs, oversized pages/text, cross-organization records, stale response versions, non-JSON/oversized responses, and BFF outage must fail to an empty/error state without retaining sample or previous-tenant data. A static test rejects sample literals and production fallback imports. |
-| Signer W3.1 | `apps/cloud-api/src/*signer*`, hosted composition, signer contract tests, and frozen contract metadata | Publish one closed purpose registry covering capability, ControlBundle, refresh hint, possession receipt, Agent Session Grant, qualification manifest, audit anchor, and promotion evidence. Each hosted constructor receives its key from configuration by purpose; request input cannot select purpose, key, algorithm, or domain. | Duplicate/missing purpose, shared key/version across forbidden purposes, algorithm/domain substitution, caller key selection, malformed provider metadata/signature, file-backed hosted fallback, and partial startup must all fail closed before serving traffic. |
-| Integration owner | catalog/OpenAPI/package/CI boundaries and shared files | Review serialized DTO and signer contracts, update the 120-entry catalog only when a public contract truly changes, then run root, Console, PostgreSQL, and hosted-composition gates. | No lane may merge a migration, widen a response, or enable a hosted feature flag independently. |
+| Runtime composition | Cloud startup/composition, signer factory, readiness, configuration tests | Start PostgreSQL and verify schema 37 first; load immutable provider metadata; bind each purpose to exactly one lifecycle repository and KMS provider; publish readiness per purpose only after metadata and active-key agreement. | Missing/duplicate purpose, shared forbidden key, wrong algorithm/domain, database unavailability, metadata mismatch, file-backed hosted fallback, and partial initialization prevent the listener from becoming ready. |
+| Durable signing | Managed signer wrapper and PostgreSQL integration tests | Implement `reserve -> provider sign once -> commit exact bytes -> reply`. A committed operation replays identical bytes; an ambiguous provider or commit result becomes `uncertain`; concurrent same-operation calls share one in-process promise. | Provider timeout before/after acceptance, process loss at every boundary, commit loss, two replicas racing, conflicting payload reuse, retired/emergency-disabled key, and malformed signature never trigger a blind re-sign. |
+| Purpose wiring | Purpose-specific configuration and signer consumers | Wire Agent Session Grant and qualification first, then possession receipt, capability, ControlBundle, refresh hint, audit anchor, and promotion evidence. The caller supplies payload only and cannot select purpose, key, algorithm, version, or signing domain. | Cross-purpose substitution, key/version downgrade, caller-selected key, unknown provider metadata, and incomplete environment mapping fail closed. |
+| Integration owner | Shared startup, contracts, catalog, CI, and release notes | Merge in the order runtime foundation, durable wrapper, then purpose consumers; keep production activation disabled; run root, real PostgreSQL, two-instance, and hosted-composition gates. | No public schema is widened and no purpose is activated until its durable and provider-failure matrices pass. |
 
-Cycle A exits when the Console can boot with zero embedded operational state and
-the signer purpose registry is frozen but still disabled for production. W2.2
-and W3.2 then begin as Cycle B:
+Cycle C acceptance criteria:
 
-1. Console identity lane implements passkey sign-in, organization
-   create/select/switch, invitation acceptance, role mutation, session expiry,
-   logout, and tenant-data clearing. Its gate is the real PostgreSQL plus
-   virtual-WebAuthn Owner/Admin/Auditor/Viewer matrix.
-2. Managed-signer lane provisions test-only AWS KMS and GCP Cloud KMS
-   identities/keys per purpose and records non-exportability, cross-purpose IAM
-   denial, timeout/throttle, malformed-response, circuit-open, and no-file-
-   fallback evidence. Production credentials remain absent.
-3. The integration owner runs the W1.6 staging drill when the staging image and
-   provider acceptance endpoint exist. Only the protected report bound to the
-   exact commit, image digest, and alert-policy digest closes W1.
-4. Cycle B exits only when browser tenant isolation and managed-signer IAM
-   isolation pass independently. Console authority-changing work and signer
-   activation remain feature-gated until both sides are green.
+1. Production mode has no in-memory or file-backed signer fallback.
+2. Every enabled purpose reports provider key ID, immutable key version,
+   fingerprint, algorithm, signing domain, lifecycle state, and readiness without
+   exposing private material.
+3. A repeated operation ID with the same canonical payload returns byte-identical
+   output; a different payload is rejected as a conflict.
+4. `uncertain` operations are quarantined. They may be reconciled only from
+   provider-confirmed exact signature bytes; otherwise operator resolution is
+   required.
+5. Real PostgreSQL 16 tests pass with two API replicas and forced termination at
+   reserve, provider acceptance, database commit, and response boundaries.
+
+#### Cycle D — complete enrollment and Claude Code vertical slice
+
+Cycle D starts when the possession-receipt purpose passes Cycle C. Console work
+may begin earlier against the frozen v2 contract, but end-to-end enablement waits
+for the hosted signer.
+
+| Lane | Owned scope | Deliverable | Required verification |
+| --- | --- | --- | --- |
+| Console enrollment | Human BFF, browser enrollment views, strict invitation DTO | Owner/Admin creates a one-time invitation, sees expiry and target device constraints, copies or launches a redacted setup command, and observes pending/enrolled/recovery-proven states. | Virtual-WebAuthn role matrix, tenant isolation, expiry/replay, stale version, CSRF/origin, malformed receipt, response-loss, and forbidden browser-storage scan. |
+| Headless setup | Shared onboarding state machine, CLI commands, local durable journal | `agentpass setup` verifies the invitation, creates a P-256 device key in the protected native boundary, performs v2 enrollment, verifies the signed receipt, resumes safely after interruption, installs trust atomically, and prints secret-free JSON status. | Interrupt before/after each durable transition, no POST replay after ambiguity, invitation substitution, endpoint downgrade, signer-key mismatch, receipt mismatch, and private-material scan of argv/env/stdin/logs/files. |
+| Claude Code adapter | Adapter identity binding, capability request, Git signing path, doctor/self-test | Bind executable identity/version, parent ancestry, repository/worktree, branch/ref, operation, TTL, policy generation, and budget; route signing through the broker; add `doctor` and a signed-commit self-test. | Two unattended `git verify-commit` successes followed by revocation, expiry, process death, PID reuse, executable/ancestry/repository/worktree substitution, stale generation, and concurrent budget exhaustion failures. |
+| Integration owner | Cloud/Console/native protocol boundary and E2E | Run one clean-machine-like journey: invitation -> setup -> session -> two commits -> activity -> revoke -> denied third commit. Preserve only redacted evidence bound to commit and schema version. | Any unverified trust persistence, reusable browser/operator token, private-key export, or adapter-specific privileged signing path fails the gate. |
+
+Cycle D acceptance criteria:
+
+1. A non-engineer can complete enrollment from the Console with one documented
+   terminal command and actionable repair output.
+2. An agent can make two unattended, policy-bound commits after setup without a
+   biometric prompt, while revocation and expiry stop subsequent signing.
+3. Response-loss recovery distinguishes `enrollment proven` from `control trust
+   installed`; a receipt alone never fabricates missing control roots.
+4. CLI and future native UI consume the same state machine and protocol types.
+
+#### Cycle E — qualification, Cursor parity, and release candidate
+
+1. Add the thin Cursor adapter only after the Claude Code authority matrix is
+   green; it must reuse the broker transaction and all policy bindings.
+2. Complete close, revoke, uninstall-preserve, reinstall-recover, and explicit
+   purge journeys, including interruption and rollback-refusal tests.
+3. Produce one universal hardened-runtime PKG, sign every nested binary, notarize,
+   staple, generate SBOM/provenance/checksums, and make direct download and
+   Homebrew consume the same immutable artifact.
+4. Qualify that exact digest on Apple silicon/Secure Enclave and Intel/T2. Mocked
+   CI remains useful but cannot close the hardware gate.
+5. In parallel, provision isolated staging infrastructure and test-only AWS/GCP
+   identities for all signer purposes. Record key non-exportability,
+   cross-purpose IAM denial, outage/circuit behavior, rotation, restore, and
+   emergency-disable evidence.
+6. Promote only after restore/failover drills, independent security review, and a
+   signed promotion record show zero unresolved critical/high findings.
+
+Cycle E external dependencies are explicit: Apple Developer credentials,
+physical qualification Macs, cloud KMS accounts, protected staging, and an
+independent reviewer. Source work may continue without them, but AgentPass v1
+must not be described as production-complete until these evidence gates close.
 
 ## 6. Commit and verification cadence
 
@@ -539,10 +589,12 @@ Add real PostgreSQL, two-instance, Playwright, KMS/IAM, packaging/notarization, 
 10. `feat: qualify purpose-separated managed signer providers` (W3; AWS/GCP adapters and isolated timeout/throttle/integrity circuit behavior implemented, all-purpose IAM/non-exportability/outage/rotation evidence pending)
 11. `feat: add signer lifecycle and resumable onboarding` (W3.3/W4.1; source lifecycle, shared durable setup reader, redacted output, and Console role enforcement implemented; external durability/enrollment evidence pending)
 12. `feat: persist signer lifecycle and require v2 device receipts` (W3.3/W4.1; migration/repositories and strict client/Cloud contract implemented; runtime composition and physical evidence pending)
-13. `feat: complete claude code headless onboarding` (W4)
-14. `feat: add cursor adapter parity` (W4)
-15. `build: produce signed notarized immutable pkg` (W5)
-16. `ops: qualify and promote hosted production release` (W6)
+13. `feat: compose durable hosted signer runtime` (W3.3/W3.4; immediate next merge, production activation remains disabled)
+14. `feat: complete signed device enrollment journey` (W4.1; Console plus resumable headless setup)
+15. `feat: complete claude code headless onboarding` (W4.2)
+16. `feat: add cursor adapter parity` (W4.3)
+17. `build: produce signed notarized immutable pkg` (W5)
+18. `ops: qualify and promote hosted production release` (W6)
 
 Items 10, 11, 14, and 15 remain externally gated until the required Apple, cloud,
 hardware, deployment, and independent-review resources are available.
