@@ -79,9 +79,9 @@ test("catalog freezes the complete current contract inventory", () => {
   assert.equal(catalog.catalog_id, "agentpass.contract-catalog");
   assert.equal(catalog.catalog_version, 1);
   assert.equal(catalog.status, "frozen");
-  assert.equal(catalog.entries.length, 124);
+  assert.equal(catalog.entries.length, 126);
   const counts = catalog.entries.reduce((result, entry) => ({ ...result, [entry.kind]: (result[entry.kind] ?? 0) + 1 }), {});
-  assert.deepEqual(counts, { "json-schema": 30, "openapi-operation": 55, "postgres-migration": 39 });
+  assert.deepEqual(counts, { "json-schema": 32, "openapi-operation": 55, "postgres-migration": 39 });
   assert.equal(new Set(catalog.entries.map((entry) => entry.purpose)).size, catalog.entries.length);
   for (const entry of catalog.entries) {
     assert.ok(catalog.profiles[entry.profile], `${entry.id} profile`);
@@ -90,7 +90,7 @@ test("catalog freezes the complete current contract inventory", () => {
   }
   const result = runValidatorWithCatalog();
   assert.equal(result.status, 0, result.stderr);
-  assert.match(result.stdout, /validated frozen contract catalog: 124 entries/);
+  assert.match(result.stdout, /validated frozen contract catalog: 126 entries/);
 });
 
 test("catalog includes every promoted Phase 1 schema and fixture", () => {
@@ -105,21 +105,26 @@ test("catalog includes every promoted Phase 1 schema and fixture", () => {
     "policy-v1",
     "capability-v1",
     "control-bundle-v2",
+    "audit-anchor-v1",
     "purge-authorization-v1",
     "purge-receipt-v1",
-    "promotion-evidence-v1"
+    "promotion-evidence-v1",
+    "promotion-evidence-v2"
   ];
   for (const name of promoted) {
     const entry = catalog.entries.find((item) => item.id === `schema.${name}`);
     assert.ok(entry, `${name} catalog entry`);
     assert.equal(entry.source, `schemas/${name}.schema.json`);
-    assert.deepEqual(entry.compatibility_fixtures, [`contracts/fixtures/${name.replace(/-v\d+$/, "")}.valid.json`]);
+    const fixture = name === "promotion-evidence-v2"
+      ? "promotion-evidence-v2.valid.json"
+      : name.replace(/-v\d+$/, "") + ".valid.json";
+    assert.deepEqual(entry.compatibility_fixtures, [`contracts/fixtures/${fixture}`]);
   }
 });
 
 test("catalog distinguishes implemented contracts from future specified envelopes", () => {
   const catalog = readCatalog();
-  for (const id of ["schema.purge-authorization-v1", "schema.purge-receipt-v1", "schema.promotion-evidence-v1"]) {
+  for (const id of ["schema.purge-authorization-v1", "schema.purge-receipt-v1", "schema.promotion-evidence-v1", "schema.promotion-evidence-v2", "schema.audit-anchor-v1"]) {
     assert.equal(catalog.entries.find((entry) => entry.id === id)?.implementation_status, "specified", `${id} is not represented as implemented`);
   }
   for (const id of ["schema.capability-v1", "schema.control-bundle-v2"]) {

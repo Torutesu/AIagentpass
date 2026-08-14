@@ -36,8 +36,9 @@ Implemented locally and covered by source-bound CI:
 - organization roles, Human sessions, WebAuthn, Device APIs, control state,
   audit, emergency revocation, owner recovery, and browser-assisted enrollment;
 - managed signer registry for eight distinct signing purposes;
-- AWS KMS and Google Cloud KMS adapters for the four currently composed hosted
-  purposes, with no local fallback in hosted mode;
+- AWS KMS and Google Cloud KMS adapters plus purpose-specific runtime signer
+  boundaries for all eight hosted purposes, with no local fallback in hosted
+  mode;
 - PostgreSQL lifecycle/idempotency, signature verification before commit,
   response-loss quarantine, bounded signer leases, fencing tokens, lifecycle
   epoch checks, and emergency-disable commit fencing;
@@ -148,13 +149,15 @@ is no hosted private-key fallback.
 #### Q2B integration checkpoints
 
 Implementation checkpoint (2026-08-15): Q2B-1 and the ControlBundle/capability
-portion of Q2B-2 are implemented. Hosted configuration now requires all eight
+portion of Q2B-2 are implemented. Hosted configuration requires all eight
 purpose mappings, rejects the legacy four-purpose set, and forbids the bundle
-private-key path. ControlBundle and capability issuance use distinct
-purpose-specific asynchronous signers bound through the PostgreSQL durable
-signer repository; the evaluation profile retains its explicit local adapter.
-Audit-anchor and promotion-evidence producers, eight-purpose readiness, and
-real-provider qualification remain open, so Q2B as a whole is not complete.
+private-key path. Audit-anchor v1 and promotion-evidence v2 now have closed
+canonical statements, schemas, purpose-specific signer/verifier boundaries,
+and hosted runtime composition through the PostgreSQL managed-signer lifecycle
+repository. The authoritative audit-export and release-promotion producers,
+durable issuance ledgers, provider-operation reconciliation integration,
+eight-purpose readiness, and real-provider qualification remain open. Q2B-3
+and Q2B as a whole are therefore not complete.
 
 | Checkpoint | Code outcome | Required test/evidence | Merge gate |
 | --- | --- | --- | --- |
@@ -303,7 +306,37 @@ item is independently reviewable and must leave the hosted runtime fail-closed.
 Q2B-1 and the ControlBundle/capability portion of Q2B-2 are complete at this
 planning checkpoint; the next commit starts at M1.
 
+### Current execution board
+
+The order below is the implementation sequence, not a claim of production
+evidence. A work package advances only when its listed exit proof is checked in
+and source-bound CI is green.
+
+| Work package | State | Depends on | Concrete output | Exit proof |
+| --- | --- | --- | --- | --- |
+| M1a evidence contracts | implemented locally | Q2B-1 | Audit-anchor v1 and promotion-evidence v2 canonical statements, schemas, fixtures, signers, and verifiers. | Canonical round trips and binding/substitution tests; catalog validation. |
+| M1b managed runtime binding | implemented locally | M1a, Q2B-2 | Both evidence signers bind to distinct managed lifecycle repositories and pinned public keys. | Hosted startup rejects a missing, stale, shared, substituted, or local authority. |
+| M1c provider-operation convergence | in progress | M1b | A durable operation adapter and PostgreSQL operation ledger for deterministic Ed25519 retry/reconciliation. | Accepted-but-response-lost, restart, contention, receipt conflict, rotation, and disable tests converge without ambiguous success. |
+| M1d authoritative producers | queued | M1c | Audit-export anchor issuance and release-promotion evidence issuance in the real transaction flows. | Neither production flow can finish unsigned, locally signed, or without a committed receipt. |
+| M1e operator/API surfaces | queued | M1d | Read-only retrieval, verification, bounded export, and adjudication APIs plus audit events. | Tenant/role/recent-auth/replay/stale-state negative matrix passes. |
+| M2 eight-purpose runtime closure | queued | M1d | Fixed-cardinality readiness, metrics, drain, and secret/image scan for all eight purposes. | Any unhealthy purpose blocks readiness; shutdown leaves no unfenced operation. |
+| M3 two-instance real KMS | blocked on protected infrastructure | M2 | AWS and GCP two-instance fault-matrix evidence bundle. | Every operation reaches one verified result or an explicit durable terminal/operator state. |
+| M4 PostgreSQL production authority | can run parallel with M1–M2 | migrations 0038–0039 | Role-separated CI, TLS/deadline hardening, backup, PITR, restore, and rollback evidence. | App cannot administer/migrate; measured protected-environment RPO/RTO. |
+| M5 Console production slices | can begin after each backing API | M1e, M2, M4 per slice | Organization, device, policy, signer, audit, and recovery vertical slices. | Real-BFF Playwright role/reauth/stale/replay/a11y matrix passes. |
+| M6 immutable macOS candidate | can run parallel after contract freeze | release manifest v4 | Universal signed/notarized/stapled PKG and digest-identical Homebrew/direct delivery. | Gatekeeper and lifecycle matrix pass on Apple silicon and Intel/T2. |
+| M7 agent E2E and promotion | queued | M3–M6 | Claude Code/Cursor physical E2E, staging drills, independent review, exact-digest promotion. | No open critical/high issue; qualified digests are promoted without rebuild. |
+
+Immediate merge order is M1a/M1b, M1c, M1d, M1e, then M2. M4 and M6 may
+proceed in parallel because they do not change the frozen signer statement
+contracts. M5 may consume only merged authoritative APIs; it must not invent
+browser-side authority or duplicate signing logic.
+
 ### M1. Audit-anchor and promotion-evidence authorities (Q2B-3)
+
+Current state: items 1 and 2 are implemented locally, and runtime lifecycle
+binding from item 3 is implemented. Exact provider-operation reconciliation,
+the durable issuance ledger, authoritative producer integration, and the
+failure matrix are still required before this milestone may be marked complete.
 
 Deliverables:
 

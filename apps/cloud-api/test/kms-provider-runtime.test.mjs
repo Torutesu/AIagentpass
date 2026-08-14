@@ -29,7 +29,7 @@ const EXTENDED_FIXTURE_DEFINITIONS = [
   { name: "capability", envName: "CAPABILITY", resource: "arn:aws:kms:us-east-1:123456789012:key/capability", gcpResource: "projects/demo/locations/global/keyRings/agentpass/cryptoKeys/capability/cryptoKeyVersions/1", purpose: "agentpass.capability", version: 1 },
   { name: "controlBundle", envName: "CONTROL_BUNDLE", resource: "arn:aws:kms:us-east-1:123456789012:key/control-bundle", gcpResource: "projects/demo/locations/global/keyRings/agentpass/cryptoKeys/control-bundle/cryptoKeyVersions/1", purpose: "agentpass.control-bundle", version: 2 },
   { name: "auditAnchor", envName: "AUDIT_ANCHOR", resource: "arn:aws:kms:us-east-1:123456789012:key/audit-anchor", gcpResource: "projects/demo/locations/global/keyRings/agentpass/cryptoKeys/audit-anchor/cryptoKeyVersions/1", purpose: "agentpass.audit-anchor", version: 1 },
-  { name: "promotionEvidence", envName: "PROMOTION_EVIDENCE", resource: "arn:aws:kms:us-east-1:123456789012:key/promotion-evidence", gcpResource: "projects/demo/locations/global/keyRings/agentpass/cryptoKeys/promotion-evidence/cryptoKeyVersions/1", purpose: "agentpass.promotion-evidence", version: 1 }
+  { name: "promotionEvidence", envName: "PROMOTION_EVIDENCE", resource: "arn:aws:kms:us-east-1:123456789012:key/promotion-evidence", gcpResource: "projects/demo/locations/global/keyRings/agentpass/cryptoKeys/promotion-evidence/cryptoKeyVersions/1", purpose: "agentpass.promotion-evidence", version: 2 }
 ];
 
 function baseEnv({ provider = "aws", agentResource = awsAgentResource, manifestResource = awsManifestResource, possessionResource } = {}) {
@@ -242,7 +242,7 @@ test("AWS composition constructs and purpose-binds all eight hosted KMS provider
     { provider: "capabilitySignerProvider", name: "capability", purpose: "agentpass.capability", keyId: "capability-2026-08", version: 1 },
     { provider: "controlBundleSignerProvider", name: "controlBundle", purpose: "agentpass.control-bundle", keyId: "controlBundle-2026-08", version: 2 },
     { provider: "auditAnchorSignerProvider", name: "auditAnchor", purpose: "agentpass.audit-anchor", keyId: "auditAnchor-2026-08", version: 1 },
-    { provider: "promotionEvidenceSignerProvider", name: "promotionEvidence", purpose: "agentpass.promotion-evidence", keyId: "promotionEvidence-2026-08", version: 1 }
+    { provider: "promotionEvidenceSignerProvider", name: "promotionEvidence", purpose: "agentpass.promotion-evidence", keyId: "promotionEvidence-2026-08", version: 2 }
   ]) {
     const bytes = Buffer.from(`all-purpose:${definition.name}`);
     const signature = await providers[definition.provider].sign({ algorithm: "ed25519", bytes, key_id: definition.keyId, purpose: definition.purpose, version: definition.version });

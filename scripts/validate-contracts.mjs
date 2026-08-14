@@ -37,9 +37,11 @@ const PROMOTED_SCHEMA_FIXTURES = Object.freeze({
   "policy-v1.schema.json": "policy.valid.json",
   "capability-v1.schema.json": "capability.valid.json",
   "control-bundle-v2.schema.json": "control-bundle.valid.json",
+  "audit-anchor-v1.schema.json": "audit-anchor.valid.json",
   "purge-authorization-v1.schema.json": "purge-authorization.valid.json",
   "purge-receipt-v1.schema.json": "purge-receipt.valid.json",
-  "promotion-evidence-v1.schema.json": "promotion-evidence.valid.json"
+  "promotion-evidence-v1.schema.json": "promotion-evidence.valid.json",
+  "promotion-evidence-v2.schema.json": "promotion-evidence-v2.valid.json"
 });
 const BASELINE_SCHEMA_FIXTURES = Object.freeze({
   "bundle-ack-v1.schema.json": "bundle-ack.valid.json",

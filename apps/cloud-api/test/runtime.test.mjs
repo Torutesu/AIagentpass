@@ -143,6 +143,12 @@ test("production human auth is composed from PostgreSQL and closed with the runt
   assert.match(calls[2][5].publicKey, /BEGIN PUBLIC KEY/);
   assert.equal(typeof calls[2][6].signAgentSessionGrant, "function");
   assert.equal(typeof calls[2][7].signQualificationGrantBatchManifest, "function");
+  assert.equal(typeof runtime.auditAnchorSigner.signAuditAnchor, "function");
+  assert.equal(runtime.auditAnchorSigner.key_id, env.AGENTPASS_CLOUD_AUDIT_ANCHOR_KEY_ID);
+  assert.equal(typeof runtime.promotionEvidenceSigner.signPromotionEvidence, "function");
+  assert.equal(runtime.promotionEvidenceSigner.key_id, env.AGENTPASS_CLOUD_PROMOTION_EVIDENCE_KEY_ID);
+  assert.equal(runtime.config.auditAnchorTimeoutMs, 5_000);
+  assert.equal(runtime.config.promotionEvidenceTimeoutMs, 5_000);
   assert.equal(Object.hasOwn(runtime.config.humanAuth, "cursorSecret"), false);
   assert.equal(runtime.config.tokenRecordsPath, null);
   assert.equal(JSON.stringify(runtime.config).includes(CURSOR_SECRET), false);

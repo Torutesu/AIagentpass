@@ -26,6 +26,10 @@ import { createHostedPossessionReceiptSigner, parsePossessionReceiptSignerConfig
 import { POSSESSION_RECEIPT_PURPOSE, POSSESSION_RECEIPT_VERSION } from "./possession-receipt-signer.mjs";
 import { createHostedCapabilitySigner, CAPABILITY_SIGNER_PURPOSE, CAPABILITY_SIGNER_PROTOCOL_VERSION } from "./capability-signer.mjs";
 import { createHostedControlBundleSigner, CONTROL_BUNDLE_MANAGED_SIGNER_PURPOSE, CONTROL_BUNDLE_MANAGED_SIGNER_PROTOCOL_VERSION } from "./control-bundle-managed-signer.mjs";
+import { createHostedAuditAnchorSigner } from "./audit-anchor-signer.mjs";
+import { AUDIT_ANCHOR_ALGORITHM, AUDIT_ANCHOR_PROTOCOL_VERSION, AUDIT_ANCHOR_PURPOSE } from "./audit-anchor-statement.mjs";
+import { createHostedPromotionEvidenceSigner } from "./promotion-evidence-signer.mjs";
+import { PROMOTION_EVIDENCE_ALGORITHM, PROMOTION_EVIDENCE_PROTOCOL_VERSION, PROMOTION_EVIDENCE_PURPOSE } from "./promotion-evidence-statement.mjs";
 import { PROTOCOL_VERSION, REFRESH_HINT_SIGNATURE_ALGORITHM, REFRESH_HINT_TYPE } from "../../../packages/protocol/src/index.mjs";
 
 const IDENTIFIER = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
@@ -52,6 +56,8 @@ export async function createCloudRuntime({ env = process.env, logger = console, 
   let possessionReceiptSigner;
   let capabilitySigner;
   let controlBundleSigner;
+  let auditAnchorSigner;
+  let promotionEvidenceSigner;
   let ownedKmsProviders;
   let processBindingPolicies;
   if (profile.isHosted) {
@@ -142,6 +148,46 @@ export async function createCloudRuntime({ env = process.env, logger = console, 
         provider: durableCapability.provider,
         keyId: config.capabilityKeyId,
         publicKey: config.capabilityPublicKey
+      });
+
+      const auditAnchorFingerprint = publicKeyFingerprint(config.auditAnchorPublicKey);
+      const durableAuditAnchor = await bindHostedManagedSignerProvider({
+        postgresRuntime,
+        provider: auditAnchorSignerProvider,
+        purpose: AUDIT_ANCHOR_PURPOSE,
+        keyId: config.auditAnchorKeyId,
+        version: AUDIT_ANCHOR_PROTOCOL_VERSION,
+        algorithm: AUDIT_ANCHOR_ALGORITHM,
+        publicKey: config.auditAnchorPublicKey,
+        publicKeyFingerprint: auditAnchorFingerprint
+      });
+      auditAnchorSigner = createHostedAuditAnchorSigner({
+        provider: durableAuditAnchor.provider,
+        keyId: config.auditAnchorKeyId,
+        keyVersion: durableAuditAnchor.key_version,
+        lifecycleVersion: durableAuditAnchor.lifecycle.version,
+        publicKey: config.auditAnchorPublicKey,
+        timeoutMs: config.auditAnchorTimeoutMs
+      });
+
+      const promotionEvidenceFingerprint = publicKeyFingerprint(config.promotionEvidencePublicKey);
+      const durablePromotionEvidence = await bindHostedManagedSignerProvider({
+        postgresRuntime,
+        provider: promotionEvidenceSignerProvider,
+        purpose: PROMOTION_EVIDENCE_PURPOSE,
+        keyId: config.promotionEvidenceKeyId,
+        version: PROMOTION_EVIDENCE_PROTOCOL_VERSION,
+        algorithm: PROMOTION_EVIDENCE_ALGORITHM,
+        publicKey: config.promotionEvidencePublicKey,
+        publicKeyFingerprint: promotionEvidenceFingerprint
+      });
+      promotionEvidenceSigner = createHostedPromotionEvidenceSigner({
+        provider: durablePromotionEvidence.provider,
+        keyId: config.promotionEvidenceKeyId,
+        keyVersion: durablePromotionEvidence.key_version,
+        lifecycleVersion: durablePromotionEvidence.lifecycle.version,
+        publicKey: config.promotionEvidencePublicKey,
+        timeoutMs: config.promotionEvidenceTimeoutMs
       });
       const refreshFingerprint = crypto.createHash("sha256").update(refreshPublicKey.export({ type: "spki", format: "der" })).digest("hex");
       const durableRefreshHint = await bindHostedManagedSignerProvider({
@@ -340,6 +386,8 @@ export async function createCloudRuntime({ env = process.env, logger = console, 
     store,
     postgresRuntime,
     humanAuthRuntime,
+    auditAnchorSigner,
+    promotionEvidenceSigner,
     async listen() {
       if (server.listening) return server.address();
       await new Promise((resolve, reject) => { server.once("error", reject); server.listen(config.port, config.host, () => { server.off("error", reject); resolve(); }); });
@@ -391,12 +439,20 @@ export function loadRuntimeConfig(env = {}) {
   const capabilityKeyId = profile.isHosted ? env.AGENTPASS_CLOUD_CAPABILITY_KEY_ID : null;
   if (profile.isHosted && !IDENTIFIER.test(capabilityKeyId ?? "")) throw new Error("Cloud capability signer identifier is invalid");
   const capabilityPublicKey = profile.isHosted ? requireHostedPublicKey(env.AGENTPASS_CLOUD_CAPABILITY_PUBLIC_KEY, "Cloud capability public key") : null;
+  const auditAnchorKeyId = profile.isHosted ? env.AGENTPASS_CLOUD_AUDIT_ANCHOR_KEY_ID : null;
+  if (profile.isHosted && !IDENTIFIER.test(auditAnchorKeyId ?? "")) throw new Error("Cloud audit anchor signer identifier is invalid");
+  const auditAnchorPublicKey = profile.isHosted ? requireHostedPublicKey(env.AGENTPASS_CLOUD_AUDIT_ANCHOR_PUBLIC_KEY, "Cloud audit anchor public key") : null;
+  const auditAnchorTimeoutMs = profile.isHosted ? integer(env.AGENTPASS_CLOUD_AUDIT_ANCHOR_TIMEOUT_MS, 1, 30_000, "Cloud audit anchor timeout") : null;
+  const promotionEvidenceKeyId = profile.isHosted ? env.AGENTPASS_CLOUD_PROMOTION_EVIDENCE_KEY_ID : null;
+  if (profile.isHosted && !IDENTIFIER.test(promotionEvidenceKeyId ?? "")) throw new Error("Cloud promotion evidence signer identifier is invalid");
+  const promotionEvidencePublicKey = profile.isHosted ? requireHostedPublicKey(env.AGENTPASS_CLOUD_PROMOTION_EVIDENCE_PUBLIC_KEY, "Cloud promotion evidence public key") : null;
+  const promotionEvidenceTimeoutMs = profile.isHosted ? integer(env.AGENTPASS_CLOUD_PROMOTION_EVIDENCE_TIMEOUT_MS, 1, 30_000, "Cloud promotion evidence timeout") : null;
   const agentSessionProcessPoliciesPath = profile.isHosted ? absolute(env.AGENTPASS_CLOUD_AGENT_SESSION_PROCESS_POLICIES_PATH, "AGENTPASS_CLOUD_AGENT_SESSION_PROCESS_POLICIES_PATH") : null;
   const ownerRecoveryNotification = profile.isHosted ? ownerRecoveryNotificationConfig(env) : null;
   // Hosted Human Auth never loads the legacy operator bearer database. The
   // token-record file exists only for the explicit evaluation profile.
   const tokenRecordsPath = profile.isHosted ? null : absolute(env.AGENTPASS_CLOUD_TOKEN_RECORDS_PATH, "AGENTPASS_CLOUD_TOKEN_RECORDS_PATH");
-  return Object.freeze({ dataDir, tokenRecordsPath, bundlePrivateKeyPath, issuer, keyId, controlBundlePublicKey, capabilityKeyId, capabilityPublicKey, host, port, ttlMs, offlineTtlMs, humanAuth, refreshPublicKey, refreshNonceKeyringPath, refreshKeyId, agentSessionProcessPoliciesPath, ownerRecoveryNotification });
+  return Object.freeze({ dataDir, tokenRecordsPath, bundlePrivateKeyPath, issuer, keyId, controlBundlePublicKey, capabilityKeyId, capabilityPublicKey, auditAnchorKeyId, auditAnchorPublicKey, auditAnchorTimeoutMs, promotionEvidenceKeyId, promotionEvidencePublicKey, promotionEvidenceTimeoutMs, host, port, ttlMs, offlineTtlMs, humanAuth, refreshPublicKey, refreshNonceKeyringPath, refreshKeyId, agentSessionProcessPoliciesPath, ownerRecoveryNotification });
 }
 
 function ownerRecoveryNotificationConfig(env) {

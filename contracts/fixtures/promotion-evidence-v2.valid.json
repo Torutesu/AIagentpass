@@ -1,0 +1,27 @@
+{
+  "version": 2,
+  "type": "agentpass.promotion-evidence",
+  "statement": {
+    "version": 2,
+    "type": "agentpass.promotion-evidence",
+    "environment": "production",
+    "candidate_id": "release-pkg-sha256-v1-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "source_commit": "1111111111111111111111111111111111111111",
+    "source_tree": "2222222222222222222222222222222222222222",
+    "artifact_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "release_manifest_schema_version": 4,
+    "release_manifest_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "purpose": "agentpass.promotion-evidence",
+    "protocol_version": 2,
+    "signing_version": 2,
+    "lifecycle_version": 3,
+    "key_id": "promotion-evidence-production-v2",
+    "key_version": 7,
+    "issued_at": "2026-08-14T23:30:00.000Z",
+    "expires_at": "2026-08-15T00:30:00.000Z"
+  },
+  "statement_hash": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+  "signature_algorithm": "ed25519",
+  "signer_key_fingerprint": "SHA256:BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB",
+  "signature": "IiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIg"
+}

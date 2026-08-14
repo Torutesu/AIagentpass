@@ -1,0 +1,52 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agentpass.dev/contracts/audit-anchor-v1.schema.json",
+  "title": "AgentPass managed audit anchor v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["version", "type", "statement", "statement_hash", "signature_algorithm", "signer_key_fingerprint", "signature"],
+  "properties": {
+    "version": { "const": 1 },
+    "type": { "const": "agentpass.audit-anchor" },
+    "statement": { "$ref": "#/$defs/statement" },
+    "statement_hash": { "$ref": "#/$defs/digest" },
+    "signature_algorithm": { "const": "ed25519" },
+    "signer_key_fingerprint": { "$ref": "#/$defs/fingerprint" },
+    "signature": { "$ref": "#/$defs/signature" }
+  },
+  "$defs": {
+    "uuid": { "type": "string", "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$" },
+    "digest": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "timestamp": { "type": "string", "format": "date-time", "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$" },
+    "identifier": { "type": "string", "minLength": 1, "maxLength": 256, "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]{0,255}$" },
+    "fingerprint": { "type": "string", "pattern": "^SHA256:[A-Za-z0-9_-]{43}$" },
+    "signature": { "type": "string", "pattern": "^[A-Za-z0-9_-]{86}$" },
+    "statement": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["version", "type", "organization_id", "environment", "chain", "export_id", "audit_position", "previous_audit_position", "root_digest", "previous_root_digest", "export_digest", "record_count", "purpose", "protocol_version", "signing_version", "lifecycle_version", "key_id", "key_version", "issued_at", "expires_at"],
+      "properties": {
+        "version": { "const": 1 },
+        "type": { "const": "agentpass.audit-anchor" },
+        "organization_id": { "$ref": "#/$defs/uuid" },
+        "environment": { "enum": ["staging", "production"] },
+        "chain": { "enum": ["admin", "device", "cloud_agent"] },
+        "export_id": { "$ref": "#/$defs/uuid" },
+        "audit_position": { "type": "integer", "minimum": 1, "maximum": 9007199254740991 },
+        "previous_audit_position": { "type": "integer", "minimum": 0, "maximum": 9007199254740991 },
+        "root_digest": { "$ref": "#/$defs/digest" },
+        "previous_root_digest": { "$ref": "#/$defs/digest" },
+        "export_digest": { "$ref": "#/$defs/digest" },
+        "record_count": { "type": "integer", "minimum": 1, "maximum": 9007199254740991 },
+        "purpose": { "const": "agentpass.audit-anchor" },
+        "protocol_version": { "const": 1 },
+        "signing_version": { "const": 1 },
+        "lifecycle_version": { "type": "integer", "minimum": 1, "maximum": 9007199254740991 },
+        "key_id": { "$ref": "#/$defs/identifier" },
+        "key_version": { "type": "integer", "minimum": 1, "maximum": 9007199254740991 },
+        "issued_at": { "$ref": "#/$defs/timestamp" },
+        "expires_at": { "$ref": "#/$defs/timestamp" }
+      }
+    }
+  }
+}

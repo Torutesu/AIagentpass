@@ -15,7 +15,7 @@ const definitions = [
   { name: "agent_session_grant", purpose: AGENT_SESSION_GRANT_TYPE, domain: AGENT_SESSION_GRANT_SIGNATURE_DOMAIN, allowedAlgorithms: ["ed25519"], protocolVersion: 1, signingVersion: 1, hostedStatus: "managed_kms_integrated" },
   { name: "qualification_manifest", purpose: QUALIFICATION_GRANT_BATCH_MANIFEST_PURPOSE, domain: QUALIFICATION_GRANT_BATCH_MANIFEST_SIGNATURE_DOMAIN, allowedAlgorithms: ["ed25519"], protocolVersion: 2, signingVersion: 2, hostedStatus: "managed_kms_integrated" },
   { name: "audit_anchor", purpose: "agentpass.audit-anchor", domain: "AgentPass-Audit-Anchor-v1\0", allowedAlgorithms: ["ed25519"], protocolVersion: 1, signingVersion: 1, hostedStatus: "migration_required" },
-  { name: "promotion_evidence", purpose: "agentpass.promotion-evidence", domain: "AgentPass-Promotion-Evidence-v1\0", allowedAlgorithms: ["ed25519"], protocolVersion: 1, signingVersion: 1, hostedStatus: "schema_only" },
+  { name: "promotion_evidence", purpose: "agentpass.promotion-evidence", domain: "AgentPass-Promotion-Evidence-v2\0", allowedAlgorithms: ["ed25519"], protocolVersion: 2, signingVersion: 2, hostedStatus: "migration_required" },
 ];
 
 const HOSTED_STATUSES = new Set(["file_backed_hosted", "managed_kms_integrated", "migration_required", "primitive_only", "schema_only"]);
