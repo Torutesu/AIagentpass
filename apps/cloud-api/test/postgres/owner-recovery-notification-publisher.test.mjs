@@ -78,9 +78,15 @@ test("requires an exact accepted JSON response and never follows redirects", asy
     { statusCode: 204, body: null },
     { statusCode: 302, body: { accepted: true, duplicate: false } },
     { statusCode: 200, headers: { "content-type": "text/plain" }, body: { accepted: true, duplicate: false } },
+    { statusCode: 200, headers: { "content-type": ["application/json", "application/json"] }, body: { accepted: true, duplicate: false } },
+    { statusCode: 200, headers: { "content-type": "application/json, text/plain" }, body: { accepted: true, duplicate: false } },
     { statusCode: 200, body: { accepted: true } },
     { statusCode: 200, body: { accepted: false, duplicate: true } },
     { statusCode: 200, body: { accepted: true, duplicate: false, provider_secret: SECRET } },
+    { statusCode: 200, body: { accepted: true, duplicate: false, credential: SECRET } },
+    { statusCode: 200, body: { accepted: true, duplicate: false, secret: SECRET } },
+    { statusCode: 200, body: { accepted: true, duplicate: false, authorization: `Bearer ${SECRET}` } },
+    { statusCode: 200, rawBody: '{"accepted":true,"accepted":true,"duplicate":false}' },
     { statusCode: 200, rawBody: "not-json" }
   ]) {
     const transport = fakeTransport(response);
@@ -92,6 +98,25 @@ test("requires an exact accepted JSON response and never follows redirects", asy
       return true;
     });
     assert.equal(transport.requests.length, 1);
+  }
+});
+
+test("rejects ambiguous response framing before accepting a provider DTO", async () => {
+  for (const headers of [
+    { "content-length": "35", "Content-Length": "35" },
+    { "content-length": ["35", "35"] },
+    { "content-length": "35", "transfer-encoding": "chunked" }
+  ]) {
+    const transport = fakeTransport({ statusCode: 200, headers, body: { accepted: true, duplicate: false } });
+    const publisher = createOwnerRecoveryNotificationPublisher({ webhookUrl: URL, authorizationSecret: SECRET, requestFn: transport.requestFn });
+    await assert.rejects(publisher.publish({ idempotency_key: EVENT.event_id, event: EVENT }), (error) => {
+      assert.equal(error.code, OWNER_RECOVERY_NOTIFICATION_PUBLISHER_ERROR_CODES.REJECTED);
+      assert.equal(error.message.includes(SECRET), false);
+      assert.equal("cause" in error, false);
+      return true;
+    });
+    assert.equal(transport.requests.length, 1);
+    assert.equal(transport.requests[0].response.destroyed, true);
   }
 });
 
@@ -130,6 +155,15 @@ test("follows the caller AbortSignal and maps provider diagnostics to a stable o
     assert.equal("cause" in error, false);
     return true;
   });
+
+  const responseFailure = fakeTransport({ responseError: new Error(`response body credential=${SECRET}`) });
+  const responseFailedPublisher = createOwnerRecoveryNotificationPublisher({ webhookUrl: URL, authorizationSecret: SECRET, requestFn: responseFailure.requestFn });
+  await assert.rejects(responseFailedPublisher.publish({ idempotency_key: EVENT.event_id, event: EVENT }), (error) => {
+    assert.equal(error.code, OWNER_RECOVERY_NOTIFICATION_PUBLISHER_ERROR_CODES.UNAVAILABLE);
+    assert.equal(error.message.includes(SECRET), false);
+    assert.equal("cause" in error, false);
+    return true;
+  });
 });
 
 test("maps resolver failures and invalid resolver outputs without exposing details", async () => {
@@ -152,13 +186,15 @@ function fakeTransport(spec = {}) {
   const requests = [];
   const requestFn = (url, options, onResponse) => {
     const request = new FakeRequest();
-    requests.push({ url, options, request, get body() { return request.body; }, get destroyed() { return request.destroyed; } });
+    const record = { url, options, request, get body() { return request.body; }, get destroyed() { return request.destroyed; } };
+    requests.push(record);
     request.onEnd = (body) => {
       request.body = Buffer.from(body);
       if (spec.hang) return;
       queueMicrotask(() => {
         if (spec.requestError) { request.emit("error", spec.requestError); return; }
         const response = new FakeResponse(spec);
+        record.response = response;
         onResponse(response);
         queueMicrotask(() => response.emitChunks());
       });
@@ -178,6 +214,8 @@ class FakeRequest extends EventEmitter {
 }
 
 class FakeResponse extends EventEmitter {
+  destroyed = false;
+
   constructor(spec) {
     super();
     this.statusCode = spec.statusCode ?? 200;
@@ -188,7 +226,9 @@ class FakeResponse extends EventEmitter {
   destroy() { this.destroyed = true; }
 
   emitChunks() {
-    if (this.spec.rawBody !== undefined) this.emit("data", Buffer.from(this.spec.rawBody));
+    if (this.spec.responseError) { this.emit("error", this.spec.responseError); return; }
+    if (this.spec.rawBytes !== undefined) this.emit("data", Buffer.from(this.spec.rawBytes));
+    else if (this.spec.rawBody !== undefined) this.emit("data", Buffer.from(this.spec.rawBody));
     else if (this.spec.chunks) for (const chunk of this.spec.chunks) this.emit("data", Buffer.from(chunk));
     else if (this.spec.body !== null) this.emit("data", Buffer.from(JSON.stringify(this.spec.body)));
     this.emit("end");

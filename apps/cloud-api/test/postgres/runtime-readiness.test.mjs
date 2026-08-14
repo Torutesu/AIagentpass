@@ -62,7 +62,7 @@ test("PostgreSQL runtime exposes exact-schema readiness, tracked work, and bound
   const migrations = await loadSqlMigrations();
   const runtime = await createPostgresRuntime({ env: env(), PoolClass: FakePool, applicationVersion: "runtime-readiness-test", resolveProcessBindingPolicy: () => true });
   assert.equal(runtime.pool.applied.length, migrations.length);
-  assert.equal(migrations.length, 31);
+  assert.equal(migrations.length, 32);
   assert.equal((await runtime.readiness()).code, "ready");
   assert.equal(typeof runtime.agentSessionIssuanceRepository?.issueAgentSessionGrant, "function");
   assert.equal(typeof runtime.agentSessionConsumptionRepository?.consumeAgentSessionGrant, "function");
@@ -75,6 +75,8 @@ test("PostgreSQL runtime exposes exact-schema readiness, tracked work, and bound
   assert.equal(typeof runtime.ownerRecoveryWebAuthnRepository?.begin, "function");
   assert.equal(typeof runtime.ownerRecoveryWebAuthnRepository?.complete, "function");
   assert.equal(typeof runtime.ownerRecoveryOutboxRepository?.claimBatch, "function");
+  assert.equal(typeof runtime.ownerRecoveryOutboxManagementRepository?.redriveDeadLetter, "function");
+  assert.equal(typeof runtime.ownerRecoveryOutboxRetentionRepository?.prune, "function");
 
   let finish;
   const inFlight = runtime.trackInFlight(() => new Promise((resolve) => { finish = resolve; }));

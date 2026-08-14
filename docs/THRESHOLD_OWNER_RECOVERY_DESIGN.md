@@ -45,6 +45,18 @@ Claimed events in one batch are delivered concurrently so the configured publish
 
 Dead-letter management is tenant-scoped and never edits the immutable event identity. Migration 0030 binds each event to the recovery request's exact subject, tracks a monotonic management version, at most three redrives, cumulative delivery attempts, and a terminal suppression state. Migration 0031 adds an optional 32-byte recent-authorization context to the WebAuthn challenge and human session while preserving legacy operation-only authorizations. Redrive and suppression require a current owner/admin session and consumed recent WebAuthn bound to the canonical SHA-256 context `{version, organization_id, event_id, action, expected_management_version}`. The HTTP boundary and PostgreSQL repository independently validate that context; the repository revalidates the current session, role, authority epochs, consumed proof, and context inside the same organization-locked transaction before idempotency claim, CAS mutation, audit append, and commit. The Human API exposes tenant-scoped list, redrive, and suppress routes with exact Origin, CSRF (including GET), bounded pagination, rate limiting, optimistic concurrency, stable secret-free errors, and an OpenAPI contract.
 
+Migration 0032 fixes terminal delivery retention in the database rather than in
+worker configuration: published rows remain for at least 30 days, dead letters
+for 90 days, and suppressions for 365 days. A prune transaction locks at most
+1,000 eligible rows with `SKIP LOCKED`, copies their immutable identity,
+terminal status, timestamps, bounded counters, and stable error category into
+an append-only secret-free retention ledger, and only then deletes the bulky
+outbox rows. The ledger rejects update and delete; it contains no destination,
+provider body, claim token, credential material, or free-form suppression
+reason. Runtime maintenance runs through the delivery worker's bounded drain
+lifecycle and a pruning failure cannot block authority transactions or widen
+authority.
+
 ## Transaction and lock order
 
 Every mutation uses the same order:

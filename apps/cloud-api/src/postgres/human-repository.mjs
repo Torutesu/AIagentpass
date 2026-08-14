@@ -13,6 +13,7 @@ export function createPostgresHumanRepository({ client, onAuthorityReduction } =
   if (onAuthorityReduction !== undefined && typeof onAuthorityReduction !== "function") throw new TypeError("onAuthorityReduction must be a function");
   return Object.freeze({
     createSession,
+    createSessionWithLimit,
     rotateSession,
     findSessionByTokenHash,
     updateSessionActivity,
@@ -48,6 +49,45 @@ export function createPostgresHumanRepository({ client, onAuthorityReduction } =
     const created = sessionRow(result.rows?.[0]);
     if (!created) throw new TypeError("active session membership is unavailable");
     return created;
+  }
+
+  async function createSessionWithLimit(input) {
+    const record = input?.session;
+    validateSession(record);
+    const limit = positiveInteger(input?.max_concurrent_sessions ?? input?.maxConcurrentSessions);
+    if (limit > 10_000) throw new TypeError("max concurrent sessions is invalid");
+    const issuedAt = timestamp(input?.issued_at ?? input?.issuedAt ?? record.created_at);
+    const reason = bounded(input?.revoke_reason ?? input?.revokeReason ?? "concurrent_session_limit", 128);
+
+    return inTransaction(async (transactionClient) => {
+      // The global member lock, rather than a process-local mutex, makes the
+      // ceiling authoritative across every API replica and organization.
+      await lockSessionSet(transactionClient, record.member_id);
+      const reduced = await transactionClient.query(`WITH ranked AS (
+          SELECT s.id,row_number() OVER (ORDER BY s.created_at DESC,s.id DESC) AS position
+          FROM human_sessions s
+          JOIN memberships m ON m.organization_id=s.organization_id AND m.member_id=s.member_id AND m.id=s.membership_id
+          JOIN organizations o ON o.id=s.organization_id
+          WHERE s.member_id=$1 AND s.revoked_at IS NULL AND s.expires_at>$2::timestamptz
+            AND (s.idle_expires_at IS NULL OR s.idle_expires_at>$2::timestamptz)
+            AND m.status='active' AND m.role=s.role
+            AND o.authority_epoch=s.organization_authority_epoch
+            AND m.session_epoch=s.membership_session_epoch
+        ), excess AS (
+          SELECT id FROM ranked WHERE position >= $3
+        )
+        UPDATE human_sessions target
+        SET revoked_at=$2::timestamptz,revoke_reason=COALESCE(target.revoke_reason,$4)
+        FROM excess
+        WHERE target.id=excess.id AND target.revoked_at IS NULL
+        RETURNING target.id`, [record.member_id, issuedAt, limit, reason]);
+      if (!Number.isSafeInteger(Number(reduced?.rowCount ?? reduced?.rows?.length ?? 0))) throw new TypeError("session limit reduction failed");
+
+      const result = await transactionClient.query(`INSERT INTO human_sessions (id,member_id,organization_id,membership_id,role,organization_authority_epoch,membership_session_epoch,token_hash,csrf_token_hash,created_at,expires_at,last_seen_at,idle_expires_at,recent_auth_at,revoked_at,revoke_reason) SELECT $1,m.member_id,m.organization_id,m.id,m.role,o.authority_epoch,m.session_epoch,$5,$6,$7,$8,$9,$10,NULL,NULL,NULL FROM memberships m JOIN organizations o ON o.id=m.organization_id WHERE m.id=$4 AND m.member_id=$2 AND m.organization_id=$3 AND m.role=$11 AND m.status='active' RETURNING *,encode(token_hash,'hex') AS token_hash_hex,encode(csrf_token_hash,'hex') AS csrf_token_hash_hex`, [record.session_id, record.member_id, record.organization_id, record.membership_id, bytes32(record.token_hash), bytes32(record.csrf_token_hash), record.created_at, record.expires_at, record.last_seen_at, record.idle_expires_at, record.role]);
+      const created = sessionRow(result.rows?.[0]);
+      if (!created) throw new TypeError("active session membership is unavailable");
+      return created;
+    });
   }
 
   async function rotateSession(input) {

@@ -118,6 +118,27 @@ test("issues a 256-bit opaque cookie and stores only hashes", async () => {
   assert.equal(Object.hasOwn(issued.session, "csrf_token_hash"), false);
 });
 
+test("uses the repository atomic session ceiling when production storage exposes it", async () => {
+  const repository = new MemorySessionRepository();
+  const calls = [];
+  repository.createSession = async () => { throw new Error("non-atomic issuance must not run"); };
+  repository.listSessions = async () => { throw new Error("process-local limit must not run"); };
+  repository.createSessionWithLimit = async (input) => {
+    calls.push(structuredClone(input));
+    repository.records.set(input.session.session_id, structuredClone(input.session));
+    return structuredClone(input.session);
+  };
+  const f = fixture({ repository, maxConcurrentSessions: 2 });
+  const issued = await issue(f);
+  assert.equal(issued.session.member_id, MEMBER_ID);
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].max_concurrent_sessions, 2);
+  assert.equal(calls[0].revoke_reason, "concurrent_session_limit");
+  assert.equal(calls[0].issued_at, calls[0].session.created_at);
+  assert.match(calls[0].session.token_hash, /^[0-9a-f]{64}$/);
+  assert.equal(Object.hasOwn(calls[0].session, "token"), false);
+});
+
 test("requires a verified upstream assertion and exact Origin", async () => {
   const f = fixture();
   await assert.rejects(() => f.service.issueSession({ identityAssertion: "bad", origin: ORIGIN }), (error) => error.code === HUMAN_SESSION_ERROR_CODES.IDENTITY_VERIFICATION_FAILED);

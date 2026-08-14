@@ -178,37 +178,57 @@ function requestHttps({ requestFn, url, secret, idempotencyKey, body, signal, ma
 
     const onRequestError = () => fail(signal?.aborted ? aborted() : unavailable());
     const onResponse = (response) => {
-      if (!response || typeof response.on !== "function") { fail(unavailable()); return; }
-      let declaredLength;
-      try { declaredLength = responseLength(response.headers); }
-      catch (error) { safeDestroy(response); fail(error); return; }
-      if (declaredLength > maxResponseBytes) {
-        safeDestroy(response);
-        fail(responseTooLarge());
-        return;
-      }
-      const chunks = [];
-      let total = 0;
-      const onData = (chunk) => {
-        if (settled) return;
-        const bytes = Buffer.isBuffer(chunk) || chunk instanceof Uint8Array ? Buffer.from(chunk) : Buffer.from(String(chunk), "utf8");
-        total += bytes.length;
-        if (total > maxResponseBytes) {
+      try {
+        if (!response || typeof response.on !== "function" || typeof response.once !== "function") { fail(unavailable()); return; }
+        const headers = response.headers;
+        const onResponseError = () => fail(signal?.aborted ? aborted() : unavailable());
+        response.once("error", onResponseError);
+        response.once("aborted", onResponseError);
+        const declaredLength = responseLength(headers);
+        if (declaredLength > maxResponseBytes) {
           safeDestroy(response);
           fail(responseTooLarge());
           return;
         }
-        chunks.push(bytes);
-      };
-      const onEnd = () => finish(resolve, Object.freeze({
-        statusCode: response.statusCode,
-        headers: response.headers,
-        body: Buffer.concat(chunks)
-      }));
-      const onResponseError = () => fail(signal?.aborted ? aborted() : unavailable());
-      response.on("data", onData);
-      response.once("end", onEnd);
-      response.once("error", onResponseError);
+        const chunks = [];
+        let total = 0;
+        const onData = (chunk) => {
+          if (settled) return;
+          let bytes;
+          try {
+            bytes = Buffer.isBuffer(chunk) || chunk instanceof Uint8Array
+              ? Buffer.from(chunk)
+              : Buffer.from(String(chunk), "utf8");
+          } catch {
+            safeDestroy(response);
+            fail(rejected());
+            return;
+          }
+          total += bytes.length;
+          if (total > maxResponseBytes) {
+            safeDestroy(response);
+            fail(responseTooLarge());
+            return;
+          }
+          chunks.push(bytes);
+        };
+        const onEnd = () => {
+          try {
+            finish(resolve, Object.freeze({
+              statusCode: response.statusCode,
+              headers,
+              body: Buffer.concat(chunks)
+            }));
+          } catch {
+            fail(rejected());
+          }
+        };
+        response.on("data", onData);
+        response.once("end", onEnd);
+      } catch {
+        safeDestroy(response);
+        fail(signal?.aborted ? aborted() : rejected());
+      }
     };
 
     signal?.addEventListener("abort", abortListener, { once: true });
@@ -235,32 +255,129 @@ function requestHttps({ requestFn, url, secret, idempotencyKey, body, signal, ma
 }
 
 function responseLength(headers) {
-  const value = headers?.["content-length"] ?? headers?.["Content-Length"];
-  if (value === undefined) return -1;
-  const normalized = Array.isArray(value) ? value.length === 1 ? value[0] : null : value;
-  if (typeof normalized !== "string" || !/^\d+$/u.test(normalized)) throw rejected();
-  const length = Number(normalized);
-  if (!Number.isSafeInteger(length)) throw rejected();
-  return length;
+  try {
+    const values = headerValues(headers, "content-length");
+    if (values.length === 0) return -1;
+    if (values.length !== 1) throw rejected();
+    const [value] = values;
+    if (headerValues(headers, "transfer-encoding").length > 0 || typeof value !== "string" || !/^\d+$/u.test(value)) throw rejected();
+    const length = Number(value);
+    if (!Number.isSafeInteger(length)) throw rejected();
+    return length;
+  } catch (error) {
+    if (error instanceof OwnerRecoveryNotificationPublisherError) throw error;
+    throw rejected();
+  }
 }
 
 function validateAcceptedResponse(response) {
-  if (!Number.isSafeInteger(response?.statusCode) || response.statusCode < 200 || response.statusCode >= 300
-    || contentType(response.headers) !== "application/json" || !Buffer.isBuffer(response.body)) throw rejected();
-  let body;
-  try { body = new TextDecoder("utf-8", { fatal: true }).decode(response.body); }
-  catch { throw rejected(); }
-  let parsed;
-  try { parsed = JSON.parse(body); }
-  catch { throw rejected(); }
-  if (!plainObject(parsed) || !sameKeys(parsed, ["accepted", "duplicate"]) || typeof parsed.accepted !== "boolean" || typeof parsed.duplicate !== "boolean" || (parsed.accepted === false && parsed.duplicate !== false)) throw rejected();
-  return Object.freeze({ accepted: parsed.accepted, duplicate: parsed.duplicate });
+  try {
+    if (!Number.isSafeInteger(response?.statusCode) || response.statusCode < 200 || response.statusCode >= 300
+      || contentType(response?.headers) !== "application/json" || !Buffer.isBuffer(response?.body)) throw rejected();
+    let body;
+    try { body = new TextDecoder("utf-8", { fatal: true }).decode(response.body); }
+    catch { throw rejected(); }
+    const parsed = parseResponseJson(body);
+    if (!plainObject(parsed) || !sameKeys(parsed, ["accepted", "duplicate"]) || typeof parsed.accepted !== "boolean" || typeof parsed.duplicate !== "boolean" || (parsed.accepted === false && parsed.duplicate !== false)) throw rejected();
+    return Object.freeze({ accepted: parsed.accepted, duplicate: parsed.duplicate });
+  } catch (error) {
+    if (error instanceof OwnerRecoveryNotificationPublisherError) throw error;
+    throw rejected();
+  }
 }
 
 function contentType(headers) {
-  const value = headers?.["content-type"] ?? headers?.["Content-Type"];
-  if (Array.isArray(value) || typeof value !== "string") return undefined;
-  return value.split(";", 1)[0].trim().toLowerCase();
+  try {
+    const values = headerValues(headers, "content-type");
+    if (values.length !== 1 || typeof values[0] !== "string") return undefined;
+    return values[0].split(";", 1)[0].trim().toLowerCase();
+  } catch {
+    return undefined;
+  }
+}
+
+function headerValues(headers, name) {
+  if (headers === undefined || headers === null) return [];
+  if (typeof headers !== "object") throw rejected();
+  const values = [];
+  for (const key of Reflect.ownKeys(headers)) {
+    if (typeof key !== "string" || key.toLowerCase() !== name) continue;
+    const descriptor = Object.getOwnPropertyDescriptor(headers, key);
+    if (!descriptor || !("value" in descriptor)) throw rejected();
+    if (Array.isArray(descriptor.value)) values.push(...descriptor.value);
+    else values.push(descriptor.value);
+  }
+  return values;
+}
+
+function parseResponseJson(body) {
+  let parsed;
+  try { parsed = JSON.parse(body); }
+  catch { throw rejected(); }
+  if (hasDuplicateJsonObjectKeys(body)) throw rejected();
+  return parsed;
+}
+
+function hasDuplicateJsonObjectKeys(source) {
+  let index = 0;
+  const skipWhitespace = () => {
+    while (/\s/u.test(source[index] ?? "")) index += 1;
+  };
+  const skipString = () => {
+    if (source[index] !== '"') return false;
+    index += 1;
+    while (index < source.length) {
+      if (source[index] === "\\") { index += 2; continue; }
+      if (source[index] === '"') { index += 1; return true; }
+      index += 1;
+    }
+    return false;
+  };
+  const scanValue = () => {
+    skipWhitespace();
+    if (source[index] === '"') { skipString(); return false; }
+    if (source[index] === "{") {
+      index += 1;
+      skipWhitespace();
+      const keys = new Set();
+      if (source[index] === "}") { index += 1; return false; }
+      while (index < source.length) {
+        skipWhitespace();
+        const keyStart = index;
+        if (!skipString()) return false;
+        const key = JSON.parse(source.slice(keyStart, index));
+        if (keys.has(key)) return true;
+        keys.add(key);
+        skipWhitespace();
+        if (source[index] !== ":") return false;
+        index += 1;
+        if (scanValue()) return true;
+        skipWhitespace();
+        if (source[index] === "}") { index += 1; return false; }
+        if (source[index] !== ",") return false;
+        index += 1;
+      }
+      return false;
+    }
+    if (source[index] === "[") {
+      index += 1;
+      skipWhitespace();
+      if (source[index] === "]") { index += 1; return false; }
+      while (index < source.length) {
+        if (scanValue()) return true;
+        skipWhitespace();
+        if (source[index] === "]") { index += 1; return false; }
+        if (source[index] !== ",") return false;
+        index += 1;
+      }
+      return false;
+    }
+    while (index < source.length && !/[\s,\]}]/u.test(source[index])) index += 1;
+    return false;
+  };
+  const duplicate = scanValue();
+  skipWhitespace();
+  return duplicate || index !== source.length;
 }
 
 function publisherError(code) { return new OwnerRecoveryNotificationPublisherError(code); }

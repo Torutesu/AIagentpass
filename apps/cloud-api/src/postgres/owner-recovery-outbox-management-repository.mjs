@@ -70,6 +70,7 @@ export function createPostgresOwnerRecoveryOutboxManagementRepository({
   cursorCodec,
   cursorSecret,
   auditRepository,
+  metrics,
   now = () => new Date().toISOString()
 } = {}) {
   assertClient(client);
@@ -223,11 +224,16 @@ export function createPostgresOwnerRecoveryOutboxManagementRepository({
           });
           return { state: "committed", responseStatus: 200, response: row };
       });
-      if (outcome.state === "committed" || outcome.state === "replay") return outcome.response;
+      if (outcome.state === "committed") {
+        metric(metrics, operation === "redrive" ? "recordOwnerRecoveryOutboxRedriveSuccess" : "recordOwnerRecoveryOutboxSuppression");
+        return outcome.response;
+      }
+      if (outcome.state === "replay") return outcome.response;
       if (outcome.state === "conflict") throw new OwnerRecoveryOutboxManagementRepositoryError(OWNER_RECOVERY_OUTBOX_MANAGEMENT_ERROR_CODES.IDEMPOTENCY_CONFLICT);
       if (outcome.state === "in_progress") throw new OwnerRecoveryOutboxManagementRepositoryError(OWNER_RECOVERY_OUTBOX_MANAGEMENT_ERROR_CODES.IDEMPOTENCY_IN_PROGRESS);
       throw database();
     } catch (error) {
+      if (operation === "redrive") metric(metrics, "recordOwnerRecoveryOutboxRedriveFailure");
       if (error instanceof OwnerRecoveryOutboxManagementRepositoryError) throw error;
       if (error instanceof SharedControlRepositoryError) {
         if (error.code === "idempotency_conflict") throw new OwnerRecoveryOutboxManagementRepositoryError(OWNER_RECOVERY_OUTBOX_MANAGEMENT_ERROR_CODES.IDEMPOTENCY_CONFLICT);
@@ -236,6 +242,11 @@ export function createPostgresOwnerRecoveryOutboxManagementRepository({
       throw database(error);
     }
   }
+}
+
+function metric(metrics, method, amount = 1) {
+  try { metrics?.[method]?.(amount); }
+  catch { /* Operational telemetry cannot affect authority mutations. */ }
 }
 
 function normalizeActor(value) {

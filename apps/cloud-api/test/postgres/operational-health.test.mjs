@@ -115,6 +115,12 @@ test("metrics are fixed-key, monotonic, and free of caller labels", () => {
     owner_recovery_outbox_failure_total: 0,
     owner_recovery_outbox_lag_count: 0,
     owner_recovery_outbox_lag_total_ms: 0,
+    owner_recovery_outbox_suppression_total: 0,
+    owner_recovery_outbox_redrive_success_total: 0,
+    owner_recovery_outbox_redrive_failure_total: 0,
+    owner_recovery_outbox_prune_total: 0,
+    owner_recovery_state_latency_count: 0,
+    owner_recovery_state_latency_total_ms: 0,
     human_recovery_create_total: 1,
     human_recovery_status_total: 1,
     human_recovery_approve_total: 1,
@@ -165,6 +171,43 @@ test("M2 signer latency is a bounded count and total without caller labels", () 
   }
   assert.deepEqual(Object.keys(metrics.snapshot().counters), OPERATIONAL_METRIC_KEYS);
   assert.equal(JSON.stringify(metrics.snapshot()).includes("request_id"), false);
+});
+
+test("W1 recovery operations are fixed-key counters and state latency is an aggregate", () => {
+  const zeroLatency = createOperationalMetrics();
+  assert.equal(zeroLatency.recordOwnerRecoveryStateLatency(0), 0);
+  assert.equal(zeroLatency.snapshot().counters.owner_recovery_state_latency_count, 1);
+  assert.equal(zeroLatency.snapshot().counters.owner_recovery_state_latency_total_ms, 0);
+
+  const metrics = createOperationalMetrics({
+    initial: {
+      owner_recovery_outbox_suppression_total: Number.MAX_SAFE_INTEGER - 1,
+      owner_recovery_outbox_redrive_success_total: Number.MAX_SAFE_INTEGER - 2,
+      owner_recovery_outbox_redrive_failure_total: Number.MAX_SAFE_INTEGER - 3,
+      owner_recovery_outbox_prune_total: Number.MAX_SAFE_INTEGER - 4,
+      owner_recovery_state_latency_count: Number.MAX_SAFE_INTEGER - 1,
+      owner_recovery_state_latency_total_ms: Number.MAX_SAFE_INTEGER - 2
+    }
+  });
+
+  assert.equal(metrics.recordOwnerRecoveryOutboxSuppression(10), Number.MAX_SAFE_INTEGER);
+  assert.equal(metrics.recordOwnerRecoveryOutboxRedriveSuccess(10), Number.MAX_SAFE_INTEGER);
+  assert.equal(metrics.recordOwnerRecoveryOutboxRedriveFailure(10), Number.MAX_SAFE_INTEGER);
+  assert.equal(metrics.recordOwnerRecoveryOutboxPrune(10), Number.MAX_SAFE_INTEGER);
+  assert.equal(metrics.recordOwnerRecoveryStateLatency(Number.MAX_SAFE_INTEGER), Number.MAX_SAFE_INTEGER);
+  assert.equal(metrics.snapshot().counters.owner_recovery_state_latency_count, Number.MAX_SAFE_INTEGER);
+  assert.equal(metrics.snapshot().counters.owner_recovery_state_latency_total_ms, Number.MAX_SAFE_INTEGER);
+
+  for (const latency of [undefined, -1, 1.5, Number.NaN, Number.POSITIVE_INFINITY, "5", { milliseconds: 5 }]) {
+    assert.throws(() => metrics.recordOwnerRecoveryStateLatency(latency), { code: "invalid_input" });
+  }
+  for (const value of [0, -1, 1.5, Number.NaN, Number.POSITIVE_INFINITY, "1", { tenant_id: "tenant-a" }]) {
+    assert.throws(() => metrics.recordOwnerRecoveryOutboxPrune(value), { code: "invalid_input" });
+  }
+  assert.equal(metrics.increment("owner_recovery_state_latency_total_ms", 1), Number.MAX_SAFE_INTEGER);
+  assert.throws(() => metrics.increment("caller_defined_label_total", 1), { code: "invalid_input" });
+  assert.doesNotMatch(JSON.stringify(metrics.snapshot()), /tenant_id|organization_id|member_id|request_id/);
+  assert.deepEqual(Object.keys(metrics.snapshot().counters), OPERATIONAL_METRIC_KEYS);
 });
 
 test("readiness requires the exact schema version, verified checksums, a DB probe, and a non-waiting pool", async () => {

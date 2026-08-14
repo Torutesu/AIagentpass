@@ -64,6 +64,8 @@ export class HumanSessionError extends Error {
  * material. A production adapter should implement the same operations in a
  * transaction (and lock the member's active-session set when issuing or
  * rotating) so the concurrent-session limit also holds across instances.
+ * PostgreSQL exposes this stronger optional seam as createSessionWithLimit;
+ * reference stores retain the process-local fallback below.
  */
 export function assertHumanSessionRepository(repository) {
   if (!repository || typeof repository !== "object") fail(HUMAN_SESSION_ERROR_CODES.REPOSITORY_INVALID);
@@ -227,8 +229,18 @@ export function createHumanSessionService(options = {}) {
         revoked_at: null,
         revoke_reason: null
       };
-      await enforceSessionLimit(principal.member_id, now, maxConcurrentSessions);
-      await repository.createSession(stripForRepository(record));
+      const storedRecord = stripForRepository(record);
+      if (typeof repository.createSessionWithLimit === "function") {
+        await repository.createSessionWithLimit({
+          session: storedRecord,
+          max_concurrent_sessions: maxConcurrentSessions,
+          issued_at: createdAt,
+          revoke_reason: "concurrent_session_limit"
+        });
+      } else {
+        await enforceSessionLimit(principal.member_id, now, maxConcurrentSessions);
+        await repository.createSession(storedRecord);
+      }
       const maxAgeSeconds = Math.max(0, Math.floor((Date.parse(record.expires_at) - now) / 1000));
       return {
         session: publicSession(record),

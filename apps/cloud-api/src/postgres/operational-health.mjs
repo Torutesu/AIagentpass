@@ -1,5 +1,5 @@
 export const OPERATIONAL_HEALTH_VERSION = 1;
-export const EXPECTED_POSTGRES_SCHEMA_VERSION = 31;
+export const EXPECTED_POSTGRES_SCHEMA_VERSION = 32;
 
 // Recovery operations are deliberately a closed set.  These names are also
 // the admission-control names used by human-auth/rate-limit.mjs; keeping the
@@ -75,6 +75,12 @@ export const OPERATIONAL_METRIC_KEYS = Object.freeze([
   "owner_recovery_outbox_failure_total",
   "owner_recovery_outbox_lag_count",
   "owner_recovery_outbox_lag_total_ms",
+  "owner_recovery_outbox_suppression_total",
+  "owner_recovery_outbox_redrive_success_total",
+  "owner_recovery_outbox_redrive_failure_total",
+  "owner_recovery_outbox_prune_total",
+  "owner_recovery_state_latency_count",
+  "owner_recovery_state_latency_total_ms",
   ...Object.values(HUMAN_RECOVERY_METRIC_KEYS)
 ]);
 
@@ -134,6 +140,13 @@ export function createOperationalMetrics({ initial = {} } = {}) {
     return counters.owner_recovery_outbox_lag_total_ms;
   }
 
+  function recordOwnerRecoveryStateLatency(milliseconds) {
+    if (arguments.length !== 1 || !Number.isSafeInteger(milliseconds) || milliseconds < 0) throw invalidOperationalInput();
+    counters.owner_recovery_state_latency_count = boundedAdd(counters.owner_recovery_state_latency_count, 1);
+    counters.owner_recovery_state_latency_total_ms = boundedAdd(counters.owner_recovery_state_latency_total_ms, milliseconds);
+    return counters.owner_recovery_state_latency_total_ms;
+  }
+
   function snapshot() {
     const output = {};
     for (const key of OPERATIONAL_METRIC_KEYS) output[key] = counters[key];
@@ -191,6 +204,11 @@ export function createOperationalMetrics({ initial = {} } = {}) {
     recordOwnerRecoveryOutboxUncertain: (amount = 1) => increment("owner_recovery_outbox_uncertain_total", amount),
     recordOwnerRecoveryOutboxFailure: (amount = 1) => increment("owner_recovery_outbox_failure_total", amount),
     recordOwnerRecoveryOutboxLag,
+    recordOwnerRecoveryOutboxSuppression: (amount = 1) => increment("owner_recovery_outbox_suppression_total", amount),
+    recordOwnerRecoveryOutboxRedriveSuccess: (amount = 1) => increment("owner_recovery_outbox_redrive_success_total", amount),
+    recordOwnerRecoveryOutboxRedriveFailure: (amount = 1) => increment("owner_recovery_outbox_redrive_failure_total", amount),
+    recordOwnerRecoveryOutboxPrune: (amount = 1) => increment("owner_recovery_outbox_prune_total", amount),
+    recordOwnerRecoveryStateLatency,
     recordHumanRecoveryOperation: (operation, amount = 1) => {
       const key = HUMAN_RECOVERY_METRIC_KEYS[operation];
       if (!key) throw invalidOperationalInput();

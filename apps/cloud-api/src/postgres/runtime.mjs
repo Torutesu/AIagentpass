@@ -13,6 +13,7 @@ import { createPostgresOwnerRecoveryRepository } from "./owner-recovery-reposito
 import { createPostgresOwnerRecoveryWebAuthnRepository } from "./owner-recovery-webauthn-repository.mjs";
 import { createPostgresOwnerRecoveryOutboxRepository } from "./owner-recovery-outbox-repository.mjs";
 import { createPostgresOwnerRecoveryOutboxManagementRepository } from "./owner-recovery-outbox-management-repository.mjs";
+import { createPostgresOwnerRecoveryOutboxRetentionRepository } from "./owner-recovery-outbox-retention-repository.mjs";
 import { createOwnerRecoveryOutboxWorker } from "./owner-recovery-outbox-worker.mjs";
 import { createAgentSessionAuthorityRepository } from "./agent-session-authority-repository.mjs";
 import { createPostgresAgentSessionConsumptionRepository } from "./agent-session-consumption-repository.mjs";
@@ -103,12 +104,18 @@ export async function createPostgresRuntime({ env = process.env, PoolClass = Poo
   const ownerRecoveryOutboxManagementRepository = createPostgresOwnerRecoveryOutboxManagementRepository({
     client: pool,
     cursorSecret: auditCursorSecret,
-    auditRepository: adminAuditRepository
+    auditRepository: adminAuditRepository,
+    metrics: operationalMetrics
+  });
+  const ownerRecoveryOutboxRetentionRepository = createPostgresOwnerRecoveryOutboxRetentionRepository({
+    client: pool,
+    metrics: operationalMetrics
   });
   if (ownerRecoveryPublisher !== undefined) {
     ownerRecoveryOutboxWorker = createOwnerRecoveryOutboxWorker({
       ...ownerRecoveryOutboxWorkerOptions,
       repository: ownerRecoveryOutboxRepository,
+      retentionRepository: ownerRecoveryOutboxRetentionRepository,
       publisher: ownerRecoveryPublisher,
       metrics: operationalMetrics
     });
@@ -195,6 +202,7 @@ export async function createPostgresRuntime({ env = process.env, PoolClass = Poo
     ownerRecoveryWebAuthnRepository,
     ownerRecoveryOutboxRepository,
     ownerRecoveryOutboxManagementRepository,
+    ownerRecoveryOutboxRetentionRepository,
     ...(ownerRecoveryOutboxWorker ? { ownerRecoveryOutboxWorker } : {}),
     sharedControlRepository,
     controlPlaneStore,

@@ -5,9 +5,14 @@ const DEFAULTS = Object.freeze({
   publishTimeoutMs: 10_000,
   baseRetryMs: 1_000,
   maxRetryMs: 15 * 60_000,
-  drainTimeoutMs: 30_000
+  drainTimeoutMs: 30_000,
+  retentionPruneIntervalMs: 60 * 60_000,
+  retentionPruneLimit: 100
 });
 const MAX_ATTEMPTS = 100;
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu;
+const EVENT_TYPE = /^recovery\.[a-z]+(?:\.[a-z]+)*$/u;
+const OUTCOMES = new Set(["published", "retried", "dead_lettered", "claim_lost", "uncertain"]);
 
 export const OWNER_RECOVERY_OUTBOX_WORKER_ERROR_CODES = Object.freeze({
   INVALID_CONFIGURATION: "owner_recovery_outbox_worker_invalid_configuration",
@@ -30,6 +35,7 @@ export class OwnerRecoveryOutboxWorkerError extends Error {
 export function createOwnerRecoveryOutboxWorker({
   repository,
   publisher,
+  retentionRepository,
   metrics,
   now = () => Date.now(),
   random = Math.random,
@@ -41,10 +47,13 @@ export function createOwnerRecoveryOutboxWorker({
   publishTimeoutMs = DEFAULTS.publishTimeoutMs,
   baseRetryMs = DEFAULTS.baseRetryMs,
   maxRetryMs = DEFAULTS.maxRetryMs,
-  drainTimeoutMs = DEFAULTS.drainTimeoutMs
+  drainTimeoutMs = DEFAULTS.drainTimeoutMs,
+  retentionPruneIntervalMs = DEFAULTS.retentionPruneIntervalMs,
+  retentionPruneLimit = DEFAULTS.retentionPruneLimit
 } = {}) {
   if (!repository || typeof repository.claimBatch !== "function" || typeof repository.markPublished !== "function" || typeof repository.markFailed !== "function") throw invalid();
   if (!publisher || typeof publisher.publish !== "function" || typeof now !== "function" || typeof random !== "function" || typeof setTimeoutFn !== "function" || typeof clearTimeoutFn !== "function") throw invalid();
+  if (retentionRepository !== undefined && (!retentionRepository || typeof retentionRepository.prune !== "function")) throw invalid();
   const config = Object.freeze({
     batchSize: integer(batchSize, 1, 100),
     leaseMs: integer(leaseMs, 1_000, 5 * 60_000),
@@ -52,7 +61,9 @@ export function createOwnerRecoveryOutboxWorker({
     publishTimeoutMs: integer(publishTimeoutMs, 100, 60_000),
     baseRetryMs: integer(baseRetryMs, 100, 60_000),
     maxRetryMs: integer(maxRetryMs, 1_000, 24 * 60 * 60_000),
-    drainTimeoutMs: integer(drainTimeoutMs, 0, 60_000)
+    drainTimeoutMs: integer(drainTimeoutMs, 0, 60_000),
+    retentionPruneIntervalMs: integer(retentionPruneIntervalMs, 1_000, 24 * 60 * 60_000),
+    retentionPruneLimit: integer(retentionPruneLimit, 1, 1_000)
   });
   if (config.baseRetryMs > config.maxRetryMs || config.publishTimeoutMs >= config.leaseMs) throw invalid();
 
@@ -61,6 +72,7 @@ export function createOwnerRecoveryOutboxWorker({
   let drainPromise;
   const cycles = new Set();
   const active = new Set();
+  let lastRetentionPruneAt;
 
   async function runOnce() {
     if (state === "draining" || state === "closed") throw new OwnerRecoveryOutboxWorkerError(OWNER_RECOVERY_OUTBOX_WORKER_ERROR_CODES.CLOSED);
@@ -84,18 +96,44 @@ export function createOwnerRecoveryOutboxWorker({
     }
     const result = { claimed: batch.events.length, published: 0, retried: 0, dead_lettered: 0, claim_lost: 0, uncertain: 0 };
     if (batch.events.length > 0) metric(metrics, "recordOwnerRecoveryOutboxClaim", batch.events.length);
-    const deliveries = batch.events.map(async (event) => {
-      observeLag(metrics, event.created_at, now);
-      const delivery = deliver(event, batch.claim_token);
+    const deliveries = Array.from(batch.events, (event) => {
+      const delivery = settleDelivery(event, batch.claim_token);
       active.add(delivery);
-      try {
-        return await delivery;
-      } finally {
-        active.delete(delivery);
-      }
+      return delivery.finally(() => active.delete(delivery));
     });
-    for (const outcome of await Promise.all(deliveries)) result[outcome] += 1;
+    for (const settled of await Promise.allSettled(deliveries)) {
+      if (settled.status === "fulfilled" && OUTCOMES.has(settled.value)) result[settled.value] += 1;
+      else { result.uncertain += 1; uncertain(metrics); }
+    }
+    await maybePruneRetention();
     return Object.freeze(result);
+  }
+
+  async function maybePruneRetention() {
+    if (retentionRepository === undefined) return;
+    let current;
+    try { current = clock(now); }
+    catch { metric(metrics, "recordOwnerRecoveryOutboxFailure"); return; }
+    if (lastRetentionPruneAt !== undefined && current - lastRetentionPruneAt < config.retentionPruneIntervalMs) return;
+    // Reserve the interval before awaiting PostgreSQL so concurrent manual and
+    // scheduled cycles cannot start duplicate maintenance batches.
+    lastRetentionPruneAt = current;
+    try { await retentionRepository.prune({ limit: config.retentionPruneLimit }); }
+    catch { metric(metrics, "recordOwnerRecoveryOutboxFailure"); }
+  }
+
+  async function settleDelivery(event, claimToken) {
+    try {
+      validateEvent(event);
+      observeLag(metrics, event.created_at, now);
+      const outcome = await deliver(event, claimToken);
+      return OUTCOMES.has(outcome) ? outcome : uncertain(metrics);
+    } catch {
+      // A single poison row must not reject the batch. Validation, clock,
+      // retry-jitter, and synchronous publisher failures have no safe
+      // acknowledgement path, so retain the lease as an unknown outcome.
+      return uncertain(metrics);
+    }
   }
 
   async function deliver(event, claimToken) {
@@ -199,6 +237,16 @@ function publicEvent(value) {
     created_at: value.created_at
   });
 }
+function validateEvent(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) throw invalid();
+  for (const key of ["organization_id", "event_id", "request_id", "subject_member_id"]) {
+    if (typeof value[key] !== "string" || !UUID.test(value[key])) throw invalid();
+  }
+  if (typeof value.event_type !== "string" || !EVENT_TYPE.test(value.event_type)) throw invalid();
+  integer(value.attempt, 1, MAX_ATTEMPTS);
+  timestamp(value.created_at);
+  timestamp(value.claim_expires_at);
+}
 function retryDelay(attempt, config, random) {
   const exponent = Math.min(20, Math.max(0, integer(attempt, 1, MAX_ATTEMPTS) - 1));
   const base = Math.min(config.maxRetryMs, config.baseRetryMs * (2 ** exponent));
@@ -214,8 +262,10 @@ function observeLag(metrics, createdAt, now) {
   metric(metrics, "recordOwnerRecoveryOutboxLag", Math.min(Number.MAX_SAFE_INTEGER, current - created));
 }
 function metric(metrics, method, amount = 1) { try { metrics?.[method]?.(amount); } catch { /* Metrics cannot affect delivery. */ } }
+function uncertain(metrics) { metric(metrics, "recordOwnerRecoveryOutboxUncertain"); return "uncertain"; }
 function clock(now) { const value = Number(now()); if (!Number.isSafeInteger(value) || value < 0) throw invalid(); return value; }
 function integer(value, min, max) { if (!Number.isSafeInteger(value) || value < min || value > max) throw invalid(); return value; }
+function timestamp(value) { const parsed = new Date(value).getTime(); if (!Number.isFinite(parsed)) throw invalid(); return parsed; }
 function invalid() { return new OwnerRecoveryOutboxWorkerError(OWNER_RECOVERY_OUTBOX_WORKER_ERROR_CODES.INVALID_CONFIGURATION); }
 
 async function withTimeout(operation, timeoutMs, setTimeoutFn, clearTimeoutFn) {

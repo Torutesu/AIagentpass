@@ -69,7 +69,8 @@ test("redrive performs a management-version CAS and appends the admin audit in t
     return auditResult(text, params, scriptedClient);
   });
   const audit = new FakeAudit();
-  const repository = createRepository(client, { auditRepository: audit });
+  const metricCalls = [];
+  const repository = createRepository(client, { auditRepository: audit, metrics: metricRecorder(metricCalls) });
   const result = await repository.redriveDeadLetter(mutationInput("redrive", 4, { idempotency_key: "redrive-dead-letter-1" }));
   assert.deepEqual(result, { organization_id: ORG, event_id: EVENT, status: "pending", attempts: 0, total_attempts: 100, management_version: 5, redrive_count: 1, suppressed_at: null, suppression_reason: null });
   assert.equal(client.calls[0].text, "BEGIN");
@@ -78,6 +79,7 @@ test("redrive performs a management-version CAS and appends the admin audit in t
   assert.equal(audit.calls.length, 1);
   assert.equal(audit.calls[0].tx, client);
   assert.equal(audit.calls[0].details.claim_token_digest, undefined);
+  assert.deepEqual(metricCalls, ["redrive_success"]);
 });
 
 test("suppress requires a safe reason and CASes the expected version", async () => {
@@ -91,10 +93,12 @@ test("suppress requires a safe reason and CASes the expected version", async () 
     return auditResult(text, params, scriptedClient);
   });
   const audit = new FakeAudit();
-  const repository = createRepository(client, { auditRepository: audit });
+  const metricCalls = [];
+  const repository = createRepository(client, { auditRepository: audit, metrics: metricRecorder(metricCalls) });
   const result = await repository.suppressDeadLetter(mutationInput("suppress", 9, { reason: "operator-confirmed-noise", idempotency_key: "suppress-dead-letter-1" }));
   assert.equal(result.status, "suppressed");
   assert.equal(result.suppression_reason, "operator-confirmed-noise");
+  assert.deepEqual(metricCalls, ["suppression"]);
   await assert.rejects(
     () => repository.suppressDeadLetter(mutationInput("suppress", 9, { reason: "bad\nreason", idempotency_key: "suppress-dead-letter-2" })),
     { code: OWNER_RECOVERY_OUTBOX_MANAGEMENT_ERROR_CODES.INVALID_INPUT }
@@ -106,12 +110,14 @@ test("a stale CAS is stable, rolls back, and does not expose database diagnostic
     if (text.startsWith("UPDATE owner_recovery_outbox")) return { rowCount: 0, rows: [] };
     return auditResult(text, params, scriptedClient);
   });
-  const repository = createRepository(client, { auditRepository: new FakeAudit() });
+  const metricCalls = [];
+  const repository = createRepository(client, { auditRepository: new FakeAudit(), metrics: metricRecorder(metricCalls) });
   await assert.rejects(
     () => repository.redriveDeadLetter(mutationInput("redrive", 3, { idempotency_key: "redrive-stale-version" })),
     (error) => error.code === OWNER_RECOVERY_OUTBOX_MANAGEMENT_ERROR_CODES.VERSION_CONFLICT && !error.message.includes("postgres")
   );
   assert.equal(client.calls.at(-1).text, "ROLLBACK");
+  assert.deepEqual(metricCalls, ["redrive_failure"]);
 });
 
 test("an audit failure rolls back the outbox mutation and stays secret-free", async () => {
@@ -249,6 +255,14 @@ function recent(operation, context_hash) {
 class FakeAudit {
   constructor() { this.calls = []; }
   async appendAdminAuditEventInTransaction(input) { this.calls.push(input); return { audit_event_id: "88888888-8888-4888-8888-888888888888" }; }
+}
+
+function metricRecorder(calls) {
+  return {
+    recordOwnerRecoveryOutboxRedriveSuccess() { calls.push("redrive_success"); },
+    recordOwnerRecoveryOutboxRedriveFailure() { calls.push("redrive_failure"); },
+    recordOwnerRecoveryOutboxSuppression() { calls.push("suppression"); }
+  };
 }
 
 class ScriptedClient {

@@ -1,7 +1,7 @@
 # AgentPass next implementation plan
 
 Status: active  
-Baseline: `5a5842c` (`codex/agent-platform`)  
+Baseline: `codex/agent-platform`
 Planning date: 2026-08-14
 
 ## 1. Target release
@@ -12,7 +12,7 @@ The primary macOS delivery is not a required menu-bar application. The release a
 
 ## 2. Current implemented boundary
 
-The current branch has the versioned Core/OpenAPI/JSON Schema catalog, 31 forward-only PostgreSQL migrations, tenant-qualified hosted repositories, Human sessions and organization roles, WebAuthn registration/authentication and operation-bound recent authorization, Device API foundations, signed control bundles and ACK state, audit ingestion, emergency revocation, threshold-owner recovery, and a secret-free recovery-notification outbox with dead-letter management primitives.
+The current branch has the versioned Core/OpenAPI/JSON Schema catalog, 32 forward-only PostgreSQL migrations, tenant-qualified hosted repositories, Human sessions and organization roles, WebAuthn registration/authentication and operation-bound recent authorization, Device API foundations, signed control bundles and ACK state, audit ingestion, emergency revocation, threshold-owner recovery, and a secret-free recovery-notification outbox with dead-letter management and bounded retention.
 
 At the `5a5842c` checkpoint, recovery dead-letter redrive and suppression require an exact resource-bound WebAuthn context. The repository recomputes that context and consumes the proof in the same organization-locked transaction. The full suite passes with 1,682 tests (1,648 pass and 34 intentionally skipped), lint and contract validation pass, and all 31 migrations apply to PostgreSQL 16.
 
@@ -78,6 +78,43 @@ Exit gate:
 ### W1 — finish recovery delivery and abuse resistance
 
 Depends on W0.
+
+State: in progress. Delivery/provider/retention slices 1–3 are implemented and
+locally verified on 2026-08-14. The worker now isolates poison rows per event,
+retains leases for unknown outcomes, and runs bounded retention maintenance.
+The HTTPS provider accepts only the exact secret-free acknowledgement DTO and
+rejects ambiguous framing, duplicate JSON keys, response-field echoes, and
+oversized bodies. Migration `0032` enforces fixed 30-day published, 90-day
+dead-letter, and 365-day suppression retention, archives each removed event in
+an immutable secret-free ledger, and prunes at most 1,000 rows per transaction.
+
+The shared PostgreSQL session ceiling is now atomic across API replicas: one
+member advisory lock encloses active-session reduction and insertion, and a
+real two-pool race holds 12 concurrent issuances to exactly three active
+sessions. Fixed label-free metrics now cover suppression, redrive outcomes,
+pruning, and recovery latency aggregates. Remaining W1 closure work is the
+login/session-bootstrap shared throttle, wiring state-latency observations at
+each recovery transition, and the complete two-instance fault matrix at every
+provider/commit/response-loss boundary.
+
+Current verification baseline:
+
+- the root suite passes 1,708 tests: 1,671 pass, 37 explicitly skipped, 0 fail;
+- the frozen catalog validates 113 entries: 29 schemas, 52 OpenAPI operations,
+  and 32 migrations;
+- lint and whitespace/error checks pass;
+- real PostgreSQL qualification passes for the cross-replica session ceiling,
+  resource-bound recovery management, terminal-row retention, and outbox
+  process-loss recovery.
+
+W1 closure execution order:
+
+| Slice | Implementation boundary | Required negative/concurrency evidence | Exit condition |
+| --- | --- | --- | --- |
+| W1.4a session bootstrap admission | Add fixed `human.session.bootstrap` policies to the shared PostgreSQL limiter; apply anonymous/global admission before identity-provider work, then subject/member/organization admission after verified identity resolution and before session insertion. Keep identifiers HMAC-derived and never persist the assertion or provider subject as a label. | Two API instances must share each bucket; unknown-subject floods must not create unbounded buckets; provider and limiter outages fail closed; identity replay and denied requests create no session. | The bootstrap route has no process-local allowance path, returns bounded `Retry-After`, and its atomic session ceiling still holds under concurrent accepted requests. |
+| W1.4b recovery state latency | Observe database timestamps only after committed recovery transitions and report fixed-key count/total aggregates through `recordOwnerRecoveryStateLatency`. Do not label by organization, member, request, state, or error. Metrics failures remain post-commit and non-authoritative. | Clock-boundary, malformed timestamp, rollback, retry, and metric-sink failure tests; exact retries must not double-observe a transition. | Every committed forward transition has one bounded observation and no recovery identity appears in health output. |
+| W1.5 delivery fault matrix | Run two independent workers and inject loss after lease claim, before/after provider acceptance, before terminal commit, after commit, and before HTTP response receipt. Reuse one deterministic provider idempotency key and inspect authoritative rows after restart. | Kill/restart, lease expiry, duplicate acknowledgement, stale lease, poison row, provider timeout, response truncation, and concurrent prune/redrive cases against real PostgreSQL. | Every case converges to one logical delivery or an explicit uncertain/dead-letter state; no event is silently lost, widened, or delivered with substituted content. |
+| W1.6 operational closure | Add fixed-key alerts/runbook thresholds for queue age, uncertain outcomes, dead letters, redrive failure, prune failure, limiter denial/unavailability, and recovery latency. Update threat model and evidence index. | Snapshot tests must reject new labels/fields; runbook drill covers provider outage, worker restart, limiter outage, and dead-letter recovery. | W1 exit gate is reproducible from one documented command sequence and produces no secret-bearing artifact. |
 
 Merge slices:
 
@@ -226,20 +263,19 @@ Add real PostgreSQL, two-instance, Playwright, KMS/IAM, packaging/notarization, 
 
 ## 7. Immediate commit queue
 
-1. `test: qualify recovery dead-letter authorization in postgres`
-2. `feat: add strict recovery dead-letter console client`
-3. `feat: add recovery dead-letter operations surface`
-4. `test: qualify recovery operations with virtual webauthn`
-5. `feat: run crash-safe recovery notification workers`
-6. `feat: enforce shared recovery abuse limits and retention`
-7. `test: close the production console browser matrix`
-8. `feat: add purpose-separated managed signer providers`
-9. `feat: complete claude code headless onboarding`
-10. `feat: add cursor adapter parity`
-11. `build: produce signed notarized immutable pkg`
-12. `ops: qualify and promote hosted production release`
+1. `feat: throttle session bootstrap across api replicas` (W1.4a)
+2. `feat: observe committed recovery transition latency` (W1.4b)
+3. `test: qualify recovery delivery fault boundaries` (W1.5)
+4. `docs: close recovery operations and alert runbooks` (W1.6)
+5. `test: close the production console browser matrix` (W2)
+6. `feat: add purpose-separated managed signer providers` (W3)
+7. `feat: complete claude code headless onboarding` (W4)
+8. `feat: add cursor adapter parity` (W4)
+9. `build: produce signed notarized immutable pkg` (W5)
+10. `ops: qualify and promote hosted production release` (W6)
 
-Items 11 and 12 remain externally gated until the required Apple, cloud, hardware, and review resources are available.
+Items 9 and 10 remain externally gated until the required Apple, cloud,
+hardware, deployment, and independent-review resources are available.
 
 ## 8. Final definition of done
 

@@ -53,6 +53,88 @@ test("unknown provider outcomes retain the lease and never persist diagnostics",
   assert.equal(JSON.stringify(calls).includes("must-not-persist"), false);
 });
 
+test("a malformed claimed event is isolated while valid events publish", async () => {
+  const calls = [];
+  const valid = { ...EVENT, event_id: "55555555-5555-4555-8555-555555555555" };
+  const poison = { ...EVENT, event_id: "poison-event-with-secret", created_at: "not-a-timestamp" };
+  const repository = fixtureRepository(calls, { events: [poison, valid] });
+  const published = [];
+  const worker = createOwnerRecoveryOutboxWorker({
+    repository,
+    publisher: { publish(input) { published.push(input.idempotency_key); return { accepted: true, duplicate: false }; } },
+    metrics: createOperationalMetrics(),
+    now: () => NOW,
+    random: () => 0
+  });
+
+  const result = await worker.runOnce();
+
+  assert.deepEqual(result, { claimed: 2, published: 1, retried: 0, dead_lettered: 0, claim_lost: 0, uncertain: 1 });
+  assert.deepEqual(published, [valid.event_id]);
+  assert.deepEqual(calls.filter(([name]) => name === "published").map(([, input]) => input.event_id), [valid.event_id]);
+  assert.equal(JSON.stringify(calls).includes("poison-event-with-secret"), false);
+});
+
+test("invalid attempts and timestamps do not poison neighboring events", async () => {
+  const calls = [];
+  const valid = { ...EVENT, event_id: "66666666-6666-4666-8666-666666666666" };
+  const invalidAttempt = { ...EVENT, event_id: "77777777-7777-4777-8777-777777777777", attempt: 0 };
+  const invalidTimestamp = { ...EVENT, event_id: "88888888-8888-4888-8888-888888888888", created_at: "invalid" };
+  const repository = fixtureRepository(calls, { events: [invalidAttempt, invalidTimestamp, valid] });
+  const worker = createOwnerRecoveryOutboxWorker({
+    repository,
+    publisher: { publish() { return { accepted: true, duplicate: false }; } },
+    now: () => NOW,
+    random: () => 0
+  });
+
+  const result = await worker.runOnce();
+
+  assert.equal(result.uncertain, 2);
+  assert.equal(result.published, 1);
+  assert.deepEqual(calls.filter(([name]) => name === "published").map(([, input]) => input.event_id), [valid.event_id]);
+});
+
+test("bad retry jitter is isolated from valid events and retains the lease", async () => {
+  const calls = [];
+  const rejected = { ...EVENT, event_id: "99999999-9999-4999-8999-999999999999" };
+  const valid = { ...EVENT, event_id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa" };
+  const repository = fixtureRepository(calls, { events: [rejected, valid] });
+  const worker = createOwnerRecoveryOutboxWorker({
+    repository,
+    publisher: { publish(input) { return input.idempotency_key === rejected.event_id ? { accepted: false, duplicate: false } : { accepted: true, duplicate: false }; } },
+    now: () => NOW,
+    random: () => Number.NaN
+  });
+
+  const result = await worker.runOnce();
+
+  assert.equal(result.uncertain, 1);
+  assert.equal(result.published, 1);
+  assert.equal(calls.some(([name, input]) => name === "failed" && input.event_id === rejected.event_id), false);
+  assert.equal(calls.some(([name, input]) => name === "published" && input.event_id === valid.event_id), true);
+});
+
+test("a synchronous publisher throw is isolated and does not expose its diagnostic", async () => {
+  const calls = [];
+  const poison = { ...EVENT, event_id: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb" };
+  const valid = { ...EVENT, event_id: "cccccccc-cccc-4ccc-8ccc-cccccccccccc" };
+  const repository = fixtureRepository(calls, { events: [poison, valid] });
+  const worker = createOwnerRecoveryOutboxWorker({
+    repository,
+    publisher: { publish(input) { if (input.idempotency_key === poison.event_id) throw new Error("secret publisher diagnostic"); return { accepted: true, duplicate: false }; } },
+    now: () => NOW,
+    random: () => 0
+  });
+
+  const result = await worker.runOnce();
+
+  assert.equal(result.uncertain, 1);
+  assert.equal(result.published, 1);
+  assert.equal(JSON.stringify(calls).includes("secret publisher diagnostic"), false);
+  assert.equal(calls.some(([name, input]) => name === "published" && input.event_id === valid.event_id), true);
+});
+
 test("an explicit provider rejection schedules bounded exponential retry", async () => {
   const calls = [];
   const repository = fixtureRepository(calls);
@@ -129,6 +211,36 @@ test("concurrent drain callers share one bounded outcome and never recreate the 
   assert.deepEqual(await first, await second);
   assert.equal(worker.snapshot().state, "closed");
   assert.equal(worker.snapshot().scheduled, false);
+});
+
+test("runs bounded retention maintenance once per interval without blocking delivery on failure", async () => {
+  let current = NOW;
+  const pruneCalls = [];
+  const repository = fixtureRepository([]);
+  const worker = createOwnerRecoveryOutboxWorker({
+    repository,
+    publisher: { async publish() { return { accepted: true, duplicate: false }; } },
+    retentionRepository: { async prune(input) { pruneCalls.push(input); } },
+    now: () => current,
+    random: () => 0,
+    retentionPruneIntervalMs: 1_000,
+    retentionPruneLimit: 7
+  });
+  await worker.runOnce();
+  await worker.runOnce();
+  assert.deepEqual(pruneCalls, [{ limit: 7 }]);
+  current += 1_000;
+  await worker.runOnce();
+  assert.deepEqual(pruneCalls, [{ limit: 7 }, { limit: 7 }]);
+
+  const failing = createOwnerRecoveryOutboxWorker({
+    repository: fixtureRepository([]),
+    publisher: { async publish() { return { accepted: true, duplicate: false }; } },
+    retentionRepository: { async prune() { throw new Error("database detail must not escape"); } },
+    now: () => NOW,
+    random: () => 0
+  });
+  assert.equal((await failing.runOnce()).published, 1);
 });
 
 function fixtureRepository(calls, overrides = {}) {

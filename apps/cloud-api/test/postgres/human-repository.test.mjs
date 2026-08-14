@@ -17,6 +17,46 @@ test("refuses session issuance when the exact active membership no longer exists
   await assert.rejects(() => repo.createSession({session_id:ids.session,member_id:ids.member,membership_id:ids.membership,organization_id:ids.org,role:"owner",token_hash:"a".repeat(64),csrf_token_hash:"b".repeat(64),created_at:"2026-08-12T00:00:00.000Z",expires_at:"2026-08-12T01:00:00.000Z",last_seen_at:"2026-08-12T00:00:00.000Z",idle_expires_at:"2026-08-12T00:30:00.000Z"}), /active session membership is unavailable/);
 });
 
+test("atomically enforces the cross-replica session ceiling before insertion", async () => {
+  const calls = [];
+  const session = {session_id:ids.session,member_id:ids.member,membership_id:ids.membership,organization_id:ids.org,role:"owner",token_hash:"a".repeat(64),csrf_token_hash:"b".repeat(64),created_at:"2026-08-12T00:00:00.000Z",expires_at:"2026-08-12T01:00:00.000Z",last_seen_at:"2026-08-12T00:00:00.000Z",idle_expires_at:"2026-08-12T00:30:00.000Z"};
+  const client = { async query(text, params = []) {
+    calls.push({ text, params });
+    if (text === "BEGIN" || text === "COMMIT" || text === "ROLLBACK") return { rows: [], rowCount: 0 };
+    if (text.includes("pg_advisory_xact_lock") && text.includes("agentpass:human:sessions")) return { rows: [{ locked: true }], rowCount: 1 };
+    if (text.startsWith("WITH ranked AS")) return { rows: [{ id: "66666666-6666-4666-8666-666666666666" }], rowCount: 1 };
+    if (text.startsWith("INSERT INTO human_sessions")) return { rows: [{ id: ids.session, member_id: ids.member, organization_id: ids.org, role: "owner", token_hash_hex: "a".repeat(64), csrf_token_hash_hex: "b".repeat(64) }], rowCount: 1 };
+    throw new Error(`unexpected query: ${text}`);
+  } };
+  const repo = createPostgresHumanRepository({ client });
+  const created = await repo.createSessionWithLimit({ session, max_concurrent_sessions: 3, issued_at: session.created_at });
+  assert.equal(created.session_id, ids.session);
+  assert.deepEqual(calls.map((call) => call.text === "BEGIN" || call.text === "COMMIT" ? call.text : call.text.includes("pg_advisory_xact_lock") ? "LOCK" : call.text.startsWith("WITH ranked AS") ? "REDUCE" : "INSERT"), ["BEGIN", "LOCK", "REDUCE", "INSERT", "COMMIT"]);
+  const reduction = calls.find((call) => call.text.startsWith("WITH ranked AS"));
+  assert.deepEqual(reduction.params, [ids.member, session.created_at, 3, "concurrent_session_limit"]);
+  assert.match(reduction.text, /row_number\(\) OVER \(ORDER BY s\.created_at DESC,s\.id DESC\)/);
+  assert.match(reduction.text, /position >= \$3/);
+  assert.match(reduction.text, /o\.authority_epoch=s\.organization_authority_epoch/);
+  assert.match(reduction.text, /m\.session_epoch=s\.membership_session_epoch/);
+});
+
+test("rolls back session-limit revocations when session insertion loses membership authority", async () => {
+  const calls = [];
+  const session = {session_id:ids.session,member_id:ids.member,membership_id:ids.membership,organization_id:ids.org,role:"owner",token_hash:"a".repeat(64),csrf_token_hash:"b".repeat(64),created_at:"2026-08-12T00:00:00.000Z",expires_at:"2026-08-12T01:00:00.000Z",last_seen_at:"2026-08-12T00:00:00.000Z",idle_expires_at:"2026-08-12T00:30:00.000Z"};
+  const client = { async query(text) {
+    calls.push(text);
+    if (text === "BEGIN" || text === "COMMIT" || text === "ROLLBACK") return { rows: [], rowCount: 0 };
+    if (text.includes("pg_advisory_xact_lock")) return { rows: [{ locked: true }], rowCount: 1 };
+    if (text.startsWith("WITH ranked AS")) return { rows: [{ id: "66666666-6666-4666-8666-666666666666" }], rowCount: 1 };
+    if (text.startsWith("INSERT INTO human_sessions")) return { rows: [], rowCount: 0 };
+    throw new Error(`unexpected query: ${text}`);
+  } };
+  const repo = createPostgresHumanRepository({ client });
+  await assert.rejects(() => repo.createSessionWithLimit({ session, max_concurrent_sessions: 3 }), /active session membership is unavailable/);
+  assert.equal(calls.at(-1), "ROLLBACK");
+  assert.equal(calls.includes("COMMIT"), false);
+});
+
 test("recent authorization consumption is one atomic exact-binding update", async () => {
   const calls=[]; const client={async query(text,params){calls.push({text,params});return {rows:[{authenticated_at:"2026-08-12T00:00:00.000Z"}],rowCount:1};}};
   const repo=createPostgresHumanRepository({client});
