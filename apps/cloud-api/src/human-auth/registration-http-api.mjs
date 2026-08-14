@@ -30,6 +30,8 @@ export const WEBAUTHN_REGISTRATION_HTTP_ERROR_CODES = Object.freeze({
   REGISTRATION_UNAVAILABLE: "webauthn_registration_http_unavailable",
   CHALLENGE_INVALID: "webauthn_registration_http_challenge_invalid",
   ATTESTATION_INVALID: "webauthn_registration_http_attestation_invalid",
+  RECENT_AUTH_REQUIRED: "webauthn_registration_http_recent_auth_required",
+  RECENT_AUTH_UNAVAILABLE: "webauthn_registration_http_recent_auth_unavailable",
   CREDENTIAL_EXISTS: "webauthn_registration_http_credential_exists",
   CREDENTIAL_STORAGE_UNAVAILABLE: "webauthn_registration_http_credential_storage_unavailable",
   INTERNAL_ERROR: "webauthn_registration_http_internal_error"
@@ -45,6 +47,8 @@ const ERROR_MESSAGES = Object.freeze({
   [WEBAUTHN_REGISTRATION_HTTP_ERROR_CODES.REGISTRATION_UNAVAILABLE]: "WebAuthn registration is unavailable",
   [WEBAUTHN_REGISTRATION_HTTP_ERROR_CODES.CHALLENGE_INVALID]: "The WebAuthn registration challenge is invalid",
   [WEBAUTHN_REGISTRATION_HTTP_ERROR_CODES.ATTESTATION_INVALID]: "The WebAuthn registration response is invalid",
+  [WEBAUTHN_REGISTRATION_HTTP_ERROR_CODES.RECENT_AUTH_REQUIRED]: "Recent WebAuthn authentication is required",
+  [WEBAUTHN_REGISTRATION_HTTP_ERROR_CODES.RECENT_AUTH_UNAVAILABLE]: "Recent WebAuthn authorization is unavailable",
   [WEBAUTHN_REGISTRATION_HTTP_ERROR_CODES.CREDENTIAL_EXISTS]: "The WebAuthn credential is already registered",
   [WEBAUTHN_REGISTRATION_HTTP_ERROR_CODES.CREDENTIAL_STORAGE_UNAVAILABLE]: "The WebAuthn credential could not be stored",
   [WEBAUTHN_REGISTRATION_HTTP_ERROR_CODES.INTERNAL_ERROR]: "The request could not be completed"
@@ -60,6 +64,8 @@ const ERROR_STATUS = Object.freeze({
   [WEBAUTHN_REGISTRATION_HTTP_ERROR_CODES.REGISTRATION_UNAVAILABLE]: 503,
   [WEBAUTHN_REGISTRATION_HTTP_ERROR_CODES.CHALLENGE_INVALID]: 409,
   [WEBAUTHN_REGISTRATION_HTTP_ERROR_CODES.ATTESTATION_INVALID]: 422,
+  [WEBAUTHN_REGISTRATION_HTTP_ERROR_CODES.RECENT_AUTH_REQUIRED]: 401,
+  [WEBAUTHN_REGISTRATION_HTTP_ERROR_CODES.RECENT_AUTH_UNAVAILABLE]: 503,
   [WEBAUTHN_REGISTRATION_HTTP_ERROR_CODES.CREDENTIAL_EXISTS]: 409,
   [WEBAUTHN_REGISTRATION_HTTP_ERROR_CODES.CREDENTIAL_STORAGE_UNAVAILABLE]: 503,
   [WEBAUTHN_REGISTRATION_HTTP_ERROR_CODES.INTERNAL_ERROR]: 500
@@ -124,8 +130,9 @@ export function createWebAuthnRegistrationHttpApi({
       if (request.method !== "POST") throw new WebAuthnRegistrationHttpError(WEBAUTHN_REGISTRATION_HTTP_ERROR_CODES.METHOD_NOT_ALLOWED, { status: 405 });
       const session = await authenticateSession(request);
       const body = await readJsonBody(request, maxBodyBytes);
-      if (route === "options") return await issueOptions(session, parseOptionsBody(body, session));
-      return await verifyCredential(session, parseVerifyBody(body, session));
+      const recentAuth = header(request.headers, "agentpass-recent-auth");
+      if (route === "options") return await issueOptions(session, parseOptionsBody(body, session), recentAuth);
+      return await verifyCredential(session, parseVerifyBody(body, session), recentAuth);
     } catch (error) {
       return mapError(error);
     }
@@ -153,17 +160,17 @@ export function createWebAuthnRegistrationHttpApi({
     }
   }
 
-  async function issueOptions(session, input) {
+  async function issueOptions(session, input, recentAuth) {
     try {
-      return response(200, await registrationService.begin({ session, organization_id: input.organization_id }));
+      return response(200, await registrationService.begin({ session, organization_id: input.organization_id, ...(recentAuth === undefined ? {} : { recent_auth: recentAuth }) }));
     } catch (error) {
       throw mapServiceError(error, "begin");
     }
   }
 
-  async function verifyCredential(session, input) {
+  async function verifyCredential(session, input, recentAuth) {
     try {
-      return response(201, await registrationService.verify({ session, organization_id: input.organization_id, challenge_id: input.challenge_id, credential: input.credential }));
+      return response(201, await registrationService.verify({ session, organization_id: input.organization_id, challenge_id: input.challenge_id, credential: input.credential, ...(recentAuth === undefined ? {} : { recent_auth: recentAuth }) }));
     } catch (error) {
       throw mapServiceError(error, "verify");
     }
@@ -202,6 +209,8 @@ function mapServiceError(error, phase) {
     if (CHALLENGE_FAILURES.has(error.code)) return new WebAuthnRegistrationHttpError(WEBAUTHN_REGISTRATION_HTTP_ERROR_CODES.CHALLENGE_INVALID, { status: 409, cause: error });
     if (error.code === WEBAUTHN_REGISTRATION_ERROR_CODES.INVALID_REQUEST || error.code === WEBAUTHN_REGISTRATION_ERROR_CODES.INVALID_CONTEXT || error.code === WEBAUTHN_REGISTRATION_ERROR_CODES.INVALID_RESPONSE) return new WebAuthnRegistrationHttpError(WEBAUTHN_REGISTRATION_HTTP_ERROR_CODES.INVALID_REQUEST, { status: 400, cause: error });
     if (error.code === WEBAUTHN_REGISTRATION_ERROR_CODES.CREDENTIAL_EXISTS) return new WebAuthnRegistrationHttpError(WEBAUTHN_REGISTRATION_HTTP_ERROR_CODES.CREDENTIAL_EXISTS, { status: 409, cause: error });
+    if (error.code === WEBAUTHN_REGISTRATION_ERROR_CODES.RECENT_AUTH_REQUIRED) return new WebAuthnRegistrationHttpError(WEBAUTHN_REGISTRATION_HTTP_ERROR_CODES.RECENT_AUTH_REQUIRED, { status: 401, cause: error });
+    if (error.code === WEBAUTHN_REGISTRATION_ERROR_CODES.RECENT_AUTH_UNAVAILABLE) return new WebAuthnRegistrationHttpError(WEBAUTHN_REGISTRATION_HTTP_ERROR_CODES.RECENT_AUTH_UNAVAILABLE, { status: 503, cause: error });
     if (error.code === WEBAUTHN_REGISTRATION_ERROR_CODES.CREDENTIAL_STORAGE_UNAVAILABLE) return new WebAuthnRegistrationHttpError(WEBAUTHN_REGISTRATION_HTTP_ERROR_CODES.CREDENTIAL_STORAGE_UNAVAILABLE, { status: 503, cause: error });
     if (error.code === WEBAUTHN_REGISTRATION_ERROR_CODES.VERIFICATION_FAILED || error.code === WEBAUTHN_REGISTRATION_ERROR_CODES.INVALID_VERIFIER_RESULT) return new WebAuthnRegistrationHttpError(WEBAUTHN_REGISTRATION_HTTP_ERROR_CODES.ATTESTATION_INVALID, { status: 422, cause: error });
     return new WebAuthnRegistrationHttpError(WEBAUTHN_REGISTRATION_HTTP_ERROR_CODES.REGISTRATION_UNAVAILABLE, { status: phase === "begin" ? 503 : 422, cause: error });
@@ -278,7 +287,7 @@ function assertSerializedSize(value, maxBytes) {
 function normalizeHeaders(input) {
   const result = {};
   if (input && typeof input.get === "function") {
-    for (const name of ["origin", "cookie", "content-type", "content-length", HUMAN_SESSION_CSRF_HEADER]) {
+    for (const name of ["origin", "cookie", "content-type", "content-length", HUMAN_SESSION_CSRF_HEADER, "agentpass-recent-auth"]) {
       const value = input.get(name);
       if (value !== null) result[name] = value;
     }

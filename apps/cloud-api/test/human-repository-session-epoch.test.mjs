@@ -55,7 +55,7 @@ test("all authority-bearing session and credential paths require exact current e
   assert.deepEqual(await repository.listSessions({ member_id: ids.member }), []);
   assert.deepEqual(await repository.listSafeSessions({ member_id: ids.member, organization_id: ids.organization }), []);
   assert.equal(await repository.bindRecentAuth({ session_id: ids.session, member_id: ids.member, organization_id: ids.organization, operation: "device.enrollment.issue", challenge_id: ids.challenge, authenticated_at: sessionInput.created_at }), false);
-  assert.equal(await repository.consumeRecentAuth({ member_id: ids.member, organization_id: ids.organization, operation: "device.enrollment.issue", challenge_id: ids.challenge, consumed_at: sessionInput.created_at }), null);
+  assert.equal(await repository.consumeRecentAuth({ session_id: ids.session, member_id: ids.member, organization_id: ids.organization, operation: "device.enrollment.issue", challenge_id: ids.challenge, consumed_at: sessionInput.created_at }), null);
   assert.deepEqual(await repository.listCredentialsForSession({ session_id: ids.session, organization_id: ids.organization }), []);
   assert.equal(await repository.findCredentialForSession({ session_id: ids.session, organization_id: ids.organization, credential_id: credentialId }), null);
   assert.deepEqual(await repository.listCredentialMetadataForSession({ session_id: ids.session, member_id: ids.member, organization_id: ids.organization }), []);

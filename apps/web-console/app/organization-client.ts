@@ -75,6 +75,8 @@ export type OrganizationClientErrorCode =
   | "transport_failed"
   | "aborted"
   | "conflict"
+  | "expired"
+  | "recent_auth_required"
   | "forbidden"
   | "unauthorized"
   | "validation_failed";
@@ -183,14 +185,14 @@ export function createOrganizationClient(options: OrganizationClientOptions = {}
   const listOrganizations = async (requestOptions: RequestOptions & Readonly<{ limit?: number; cursor?: string }> = {}): Promise<OrganizationPage> => {
     const context = await getRequestContext(requestOptions);
     const query = buildPageQuery(requestOptions);
-    const payload = await requestJson(fetchImpl, `${ORGANIZATIONS_PATH}${query}`, "GET", undefined, context, requestOptions);
+    const payload = await requestOrganizationJson(fetchImpl, `${ORGANIZATIONS_PATH}${query}`, "GET", undefined, context, requestOptions);
     return parsePage(payload, "organizations", parseOrganization);
   };
 
   const createOrganization = async (input: Readonly<{ name: string }> & MutationOptions): Promise<Readonly<{ requestId: string; organization: Organization }>> => {
     const name = requiredName(input?.name);
     const context = await getRequestContext(input);
-    const payload = await requestJson(fetchImpl, ORGANIZATIONS_PATH, "POST", { name }, context, input, { idempotencyKey: input.idempotencyKey });
+    const payload = await requestOrganizationJson(fetchImpl, ORGANIZATIONS_PATH, "POST", { name }, context, input, { idempotencyKey: input.idempotencyKey });
     return parseOrganizationEnvelope(payload);
   };
 
@@ -199,14 +201,14 @@ export function createOrganizationClient(options: OrganizationClientOptions = {}
     const name = requiredName(input?.name);
     const expectedVersion = requiredVersion(input?.expectedVersion);
     const context = await getRequestContext(input);
-    const payload = await requestJson(fetchImpl, `${ORGANIZATIONS_PATH}/${organizationId}`, "PATCH", { name }, context, input, { idempotencyKey: input.idempotencyKey, expectedVersion });
+    const payload = await requestOrganizationJson(fetchImpl, `${ORGANIZATIONS_PATH}/${organizationId}`, "PATCH", { name }, context, input, { idempotencyKey: input.idempotencyKey, expectedVersion });
     return parseOrganizationEnvelope(payload, organizationId);
   };
 
   const listMembers = async (organizationId: string, requestOptions: RequestOptions & Readonly<{ limit?: number; cursor?: string }> = {}): Promise<MemberPage> => {
     const id = requiredUuid(organizationId, "organizationId");
     const context = await getRequestContext(requestOptions);
-    const payload = await requestJson(fetchImpl, `${ORGANIZATIONS_PATH}/${id}/members${buildPageQuery(requestOptions)}`, "GET", undefined, context, requestOptions);
+    const payload = await requestOrganizationJson(fetchImpl, `${ORGANIZATIONS_PATH}/${id}/members${buildPageQuery(requestOptions)}`, "GET", undefined, context, requestOptions);
     return parsePage(payload, "members", (value) => parseMember(value, id));
   };
 
@@ -217,7 +219,7 @@ export function createOrganizationClient(options: OrganizationClientOptions = {}
     const expectedVersion = requiredVersion(input?.expectedVersion);
     const context = await getRequestContext(input);
     const recentAuth = await resolveRecentAuth(context, organizationId, input?.recentAuth, "human.organizations.member.role.update", input?.signal);
-    const payload = await requestJson(fetchImpl, `${ORGANIZATIONS_PATH}/${organizationId}/members/${memberId}/role`, "PATCH", { role }, context, input, { idempotencyKey: input.idempotencyKey, expectedVersion, recentAuth });
+    const payload = await requestOrganizationJson(fetchImpl, `${ORGANIZATIONS_PATH}/${organizationId}/members/${memberId}/role`, "PATCH", { role }, context, input, { idempotencyKey: input.idempotencyKey, expectedVersion, recentAuth });
     return parseMemberEnvelope(payload, organizationId, memberId);
   };
 
@@ -227,14 +229,14 @@ export function createOrganizationClient(options: OrganizationClientOptions = {}
     const expectedVersion = requiredVersion(input?.expectedVersion);
     const context = await getRequestContext(input);
     const recentAuth = await resolveRecentAuth(context, organizationId, input?.recentAuth, "human.organizations.member.remove", input?.signal);
-    const payload = await requestJson(fetchImpl, `${ORGANIZATIONS_PATH}/${organizationId}/members/${memberId}/remove`, "POST", undefined, context, input, { idempotencyKey: input.idempotencyKey, expectedVersion, recentAuth });
+    const payload = await requestOrganizationJson(fetchImpl, `${ORGANIZATIONS_PATH}/${organizationId}/members/${memberId}/remove`, "POST", undefined, context, input, { idempotencyKey: input.idempotencyKey, expectedVersion, recentAuth });
     return parseMemberEnvelope(payload, organizationId, memberId);
   };
 
   const listInvitations = async (organizationId: string, requestOptions: RequestOptions & Readonly<{ limit?: number; cursor?: string }> = {}): Promise<InvitationPage> => {
     const id = requiredUuid(organizationId, "organizationId");
     const context = await getRequestContext(requestOptions);
-    const payload = await requestJson(fetchImpl, `${ORGANIZATIONS_PATH}/${id}/invitations${buildPageQuery(requestOptions)}`, "GET", undefined, context, requestOptions);
+    const payload = await requestOrganizationJson(fetchImpl, `${ORGANIZATIONS_PATH}/${id}/invitations${buildPageQuery(requestOptions)}`, "GET", undefined, context, requestOptions);
     return parsePage(payload, "invitations", (value) => parseInvitation(value, id));
   };
 
@@ -243,7 +245,7 @@ export function createOrganizationClient(options: OrganizationClientOptions = {}
     const role = requiredInviteRole(input?.role);
     const expiresAt = requiredDate(input?.expiresAt, "expiresAt");
     const context = await getRequestContext(input);
-    const payload = await requestJson(fetchImpl, `${ORGANIZATIONS_PATH}/${organizationId}/invitations`, "POST", { role, expires_at: expiresAt }, context, input, { idempotencyKey: input.idempotencyKey });
+    const payload = await requestOrganizationJson(fetchImpl, `${ORGANIZATIONS_PATH}/${organizationId}/invitations`, "POST", { role, expires_at: expiresAt }, context, input, { idempotencyKey: input.idempotencyKey });
     return parseInvitationCreated(payload, organizationId);
   };
 
@@ -252,14 +254,14 @@ export function createOrganizationClient(options: OrganizationClientOptions = {}
     const invitationId = requiredUuid(input?.invitationId, "invitationId");
     const expectedVersion = requiredVersion(input?.expectedVersion);
     const context = await getRequestContext(input);
-    const payload = await requestJson(fetchImpl, `${ORGANIZATIONS_PATH}/${organizationId}/invitations/${invitationId}/revoke`, "POST", undefined, context, input, { idempotencyKey: input.idempotencyKey, expectedVersion });
+    const payload = await requestOrganizationJson(fetchImpl, `${ORGANIZATIONS_PATH}/${organizationId}/invitations/${invitationId}/revoke`, "POST", undefined, context, input, { idempotencyKey: input.idempotencyKey, expectedVersion });
     return parseInvitationEnvelope(payload, organizationId, invitationId);
   };
 
   const acceptInvitation = async (input: Readonly<{ oneTimeToken: string }> & MutationOptions): Promise<Readonly<{ requestId: string; invitation: OrganizationInvitation; member: OrganizationMember }>> => {
     const oneTimeToken = requiredToken(input?.oneTimeToken);
     const context = await getRequestContext(input);
-    const payload = await requestJson(fetchImpl, ACCEPT_INVITATION_PATH, "POST", { one_time_token: oneTimeToken }, context, input, { idempotencyKey: input.idempotencyKey });
+    const payload = await requestOrganizationJson(fetchImpl, ACCEPT_INVITATION_PATH, "POST", { one_time_token: oneTimeToken }, context, input, { idempotencyKey: input.idempotencyKey });
     return parseInvitationAccepted(payload);
   };
 
@@ -271,10 +273,23 @@ export function createOrganizationClient(options: OrganizationClientOptions = {}
       result = await authorize({ operation, organizationId, csrfToken: context.csrfToken, signal, fetchImpl });
     } catch (error) {
       if (signal?.aborted || error instanceof DOMException && error.name === "AbortError") throw new OrganizationClientError("aborted", "Recent authentication was cancelled");
-      throw error;
+      if (error instanceof OrganizationClientError && (error.code === "unauthorized" || error.code === "forbidden" || error.code === "expired")) throw error;
+      throw new OrganizationClientError("recent_auth_required", "Recent authentication is required to complete this action");
     }
     const authorizationId = typeof result === "string" ? result : result?.authorization_id;
     return requiredUuid(authorizationId, "recentAuth");
+  }
+
+  async function requestOrganizationJson(requestFetch: typeof fetch, path: string, method: "GET" | "POST" | "PATCH", body: Record<string, unknown> | undefined, context: OrganizationSession, requestOptions: RequestOptions, controls: Readonly<{ idempotencyKey?: string; expectedVersion?: number; recentAuth?: string }> = {}): Promise<unknown> {
+    try {
+      return await requestJson(requestFetch, path, method, body, context, requestOptions, controls);
+    } catch (error) {
+      if (error instanceof OrganizationClientError && error.code === "unauthorized") {
+        session = undefined;
+        pendingSession = undefined;
+      }
+      throw error;
+    }
   }
 
   return Object.freeze({ getSession, listOrganizations, createOrganization, renameOrganization, listMembers, updateMemberRole, removeMember, listInvitations, createInvitation, revokeInvitation, acceptInvitation });
@@ -341,9 +356,12 @@ async function requestRawJson(fetchImpl: typeof fetch, path: string, method: "GE
 function parseHttpError(status: number, payload: unknown): OrganizationClientError {
   if (!isRecord(payload) || !hasAllowedKeys(payload, ["error"]) || !isRecord(payload.error) || !hasAllowedKeys(payload.error, ["code", "message", "details"]) || typeof payload.error.code !== "string" || !/^[A-Za-z0-9_.-]{1,128}$/.test(payload.error.code) || typeof payload.error.message !== "string" || payload.error.message.length < 1 || payload.error.message.length > 512 || payload.error.details !== undefined && !isRecord(payload.error.details)) return invalidResponse("Organization error response is invalid", status);
   const code = payload.error.code;
-  if (status === 409 || code.includes("conflict") || code.includes("version") || code.includes("reused") || code.includes("last_owner")) return new OrganizationClientError("conflict", payload.error.message, status, code);
   if (status === 401) return new OrganizationClientError("unauthorized", payload.error.message, status, code);
   if (status === 403) return new OrganizationClientError("forbidden", payload.error.message, status, code);
+  if (status === 428 || /recent[_-]?auth|reauth|webauthn/i.test(code)) return new OrganizationClientError("recent_auth_required", payload.error.message, status, code);
+  if (/(?:^|[._-])session(?:[._-]|$)/i.test(code)) return new OrganizationClientError("unauthorized", payload.error.message, status, code);
+  if (status === 410 || /expired|expiration/i.test(code)) return new OrganizationClientError("expired", payload.error.message, status, code);
+  if (status === 409 || code.includes("conflict") || code.includes("version") || code.includes("reused") || code.includes("last_owner")) return new OrganizationClientError("conflict", payload.error.message, status, code);
   if (status === 400 || status === 422) return new OrganizationClientError("validation_failed", payload.error.message, status, code);
   return new OrganizationClientError("http_failed", payload.error.message, status, code);
 }

@@ -6,6 +6,7 @@ import { getOrganizationVisibility } from "../app/organization-client.ts";
 
 const componentPath = new URL("../app/components/OrganizationPanel.tsx", import.meta.url);
 const consolePath = new URL("../app/components/AgentPassConsole.tsx", import.meta.url);
+const cssPath = new URL("../app/globals.css", import.meta.url);
 
 test("OrganizationPanel is standalone and covers the administration flow", async () => {
   const source = await readFile(componentPath, "utf8");
@@ -15,8 +16,25 @@ test("OrganizationPanel is standalone and covers the administration flow", async
   for (const state of ["loading", "empty", "error", "conflict"]) assert.match(source, new RegExp(state));
   assert.match(source, /oneTimeToken/);
   assert.match(source, /一度だけ表示/);
+  assert.match(source, /optimistic/);
+  assert.match(source, /setMembers\(previousMembers\)/);
+  assert.match(source, /data-state=\{status\}/);
+  assert.match(source, /recent_auth_required/);
+  assert.match(source, /aria-busy/);
+  assert.match(source, /role="alert" aria-live="assertive"/);
+  assert.match(source, /削除を確定/);
   assert.doesNotMatch(source, /AgentPassConsole/);
   assert.doesNotMatch(source, /localStorage|sessionStorage|console\.(?:log|info|warn|error)/);
+});
+
+test("organization styling keeps pending, expired, revoked, and keyboard-visible states in the existing visual system", async () => {
+  const source = await readFile(cssPath, "utf8");
+  assert.match(source, /\.organization-panel/);
+  assert.match(source, /organization-list-row\[data-state="pending"\]/);
+  assert.match(source, /organization-list-row\[data-state="expired"\]/);
+  assert.match(source, /organization-list-row\[data-state="revoked"\]/);
+  assert.match(source, /organization-confirmation/);
+  assert.match(source, /\.sr-only/);
 });
 
 test("panel visibility matches owner/admin/auditor/viewer policy", () => {

@@ -21,8 +21,9 @@ test("recent authorization consumption is one atomic exact-binding update", asyn
   const calls=[]; const client={async query(text,params){calls.push({text,params});return {rows:[{authenticated_at:"2026-08-12T00:00:00.000Z"}],rowCount:1};}};
   const repo=createPostgresHumanRepository({client});
   assert.equal(await repo.bindRecentAuth({session_id:ids.session,member_id:ids.member,organization_id:ids.org,operation:"device.enrollment.issue",challenge_id:ids.challenge,authenticated_at:"2026-08-12T00:00:00.000Z"}),true);
-  assert.deepEqual(await repo.consumeRecentAuth({member_id:ids.member,organization_id:ids.org,operation:"device.enrollment.issue",challenge_id:ids.challenge,consumed_at:"2026-08-12T00:01:00.000Z"}),{authenticated_at:"2026-08-12T00:00:00.000Z"});
-  assert.match(calls[1].text,/recent_auth_consumed_at IS NULL/); assert.match(calls[1].text,/INTERVAL '5 minutes'/); assert.deepEqual(calls[1].params.slice(0,4),[ids.member,ids.org,"device.enrollment.issue",ids.challenge]);
+  assert.deepEqual(await repo.consumeRecentAuth({session_id:ids.session,member_id:ids.member,organization_id:ids.org,operation:"device.enrollment.issue",challenge_id:ids.challenge,consumed_at:"2026-08-12T00:01:00.000Z"}),{authenticated_at:"2026-08-12T00:00:00.000Z"});
+  assert.match(calls[0].text,/c\.session_id=s\.id/); assert.match(calls[0].text,/c\.member_id=s\.member_id/); assert.match(calls[0].text,/c\.organization_id=s\.organization_id/); assert.match(calls[0].text,/c\.ceremony='authentication'/); assert.match(calls[0].text,/c\.status='consumed'/);
+  assert.match(calls[1].text,/s\.id=\$1/); assert.match(calls[1].text,/recent_auth_consumed_at IS NULL/); assert.match(calls[1].text,/INTERVAL '5 minutes'/); assert.deepEqual(calls[1].params.slice(0,5),[ids.session,ids.member,ids.org,"device.enrollment.issue",ids.challenge]);
 });
 
 test("credential lookup and counter update are session and organization scoped", async () => {
@@ -31,13 +32,14 @@ test("credential lookup and counter update are session and organization scoped",
   assert.equal(await repo.findCredentialForSession({session_id:ids.session,organization_id:ids.org,credential_id:credential}),null);
   assert.equal(await repo.updateCredentialCounter({session_id:ids.session,organization_id:ids.org,credential_id:credential,sign_count:2,expected_sign_count:1}),false);
   assert.match(calls[0].text,/m\.status='active'/); assert.match(calls[1].text,/c\.sign_count=\$5/);
-  assert.match(calls[1].text,/SET sign_count=\$4,last_used_at=clock_timestamp\(\)/);
+  assert.match(calls[1].text,/SET sign_count=\$4,backup_eligible=COALESCE\(\$6,c\.backup_eligible\),backup_state=COALESCE\(\$7,c\.backup_state\),last_used_at=clock_timestamp\(\)/);
+  assert.deepEqual(calls[1].params.slice(5), [null, null, null, null]);
   assert.doesNotMatch(calls[1].text,/\bversion\s*=/);
 });
 
 test("bounds PostgreSQL bigint WebAuthn counters and rejects malformed or overflowing values", async () => {
   const credential=Buffer.alloc(16,7); let signCount=String(Number.MAX_SAFE_INTEGER); let calls=0;
-  const repo=createPostgresHumanRepository({client:{async query(){calls += 1; return {rows:[{id:credential,sign_count:signCount}],rowCount:1};}}});
+  const repo=createPostgresHumanRepository({client:{async query(){calls += 1; return {rows:[{id:credential,sign_count:signCount,backup_eligible:false,backup_state:false}],rowCount:1};}}});
   const input={session_id:ids.session,organization_id:ids.org,credential_id:credential.toString("base64url")};
   assert.equal((await repo.findCredentialForSession(input)).sign_count,Number.MAX_SAFE_INTEGER);
   for (const invalid of ["01","1.5","-1","1e3",String(Number.MAX_SAFE_INTEGER + 1),"9223372036854775807"]) {

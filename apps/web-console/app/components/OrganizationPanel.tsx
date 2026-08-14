@@ -8,6 +8,7 @@ import {
   type InvitationRole,
   type Organization,
   type OrganizationClient,
+  type OrganizationClientErrorCode,
   type OrganizationInvitation,
   type OrganizationMember,
   type OrganizationRole,
@@ -21,7 +22,10 @@ export type OrganizationPanelProps = Readonly<{
 }>;
 
 type LoadStatus = "idle" | "loading" | "ready" | "empty" | "error";
-type ResourceState = Readonly<{ status: LoadStatus; error?: string }>;
+type ResourceState = Readonly<{ status: LoadStatus; error?: string; code?: OrganizationClientErrorCode }>;
+type Rollback = () => void;
+type MutationOptions = Readonly<{ optimistic?: () => Rollback; retry?: () => Promise<void>; retryLabel?: string }>;
+type RetryAction = Readonly<{ label: string; run: () => Promise<void> }>;
 
 const INITIAL_RESOURCE: ResourceState = Object.freeze({ status: "idle" });
 const ROLES: readonly OrganizationRole[] = ["owner", "admin", "auditor", "viewer"];
@@ -73,6 +77,7 @@ export function OrganizationPanel({ client: suppliedClient, initialOrganizationI
   const [invitationState, setInvitationState] = useState<ResourceState>(INITIAL_RESOURCE);
   const [mutationError, setMutationError] = useState<ResourceState>(INITIAL_RESOURCE);
   const [pendingAction, setPendingAction] = useState<string | null>(null);
+  const [retryAction, setRetryAction] = useState<RetryAction | null>(null);
   const [refreshNonce, setRefreshNonce] = useState(0);
   const [createName, setCreateName] = useState("");
   const [renameName, setRenameName] = useState("");
@@ -81,6 +86,8 @@ export function OrganizationPanel({ client: suppliedClient, initialOrganizationI
   const [acceptToken, setAcceptToken] = useState("");
   const [oneTimeToken, setOneTimeToken] = useState<string | null>(null);
   const [roleDrafts, setRoleDrafts] = useState<Readonly<Record<string, OrganizationRole>>>({});
+  const [removalConfirmationId, setRemovalConfirmationId] = useState<string | null>(null);
+  const [nowMs, setNowMs] = useState(0);
   const loadSequence = useRef(0);
   const selectedOrganizationRef = useRef(initialOrganizationId ?? "");
 
@@ -99,7 +106,7 @@ export function OrganizationPanel({ client: suppliedClient, initialOrganizationI
       setSessionRole(session.role);
       setSessionOrganizationId(session.organizationId);
       setSessionMemberId(session.memberId);
-      setRoleOverrides((current) => ({ ...current, [session.organizationId]: session.role }));
+      setRoleOverrides((current) => current[session.organizationId] === undefined ? { ...current, [session.organizationId]: session.role } : current);
       const nextId = chooseOrganization(page.items, initialOrganizationId ?? selectedOrganizationRef.current, session.organizationId);
       selectedOrganizationRef.current = nextId;
       setSelectedOrganizationId(nextId);
@@ -174,24 +181,46 @@ export function OrganizationPanel({ client: suppliedClient, initialOrganizationI
     return () => controller.abort();
   }, [client, roleOverrides, selectedOrganizationId, sessionMemberId, sessionOrganizationId]);
 
+  useEffect(() => {
+    const initialTimer = window.setTimeout(() => setNowMs(Date.now()), 0);
+    const interval = window.setInterval(() => setNowMs(Date.now()), 30_000);
+    return () => {
+      window.clearTimeout(initialTimer);
+      window.clearInterval(interval);
+    };
+  }, []);
+
   const selectOrganization = (id: string) => {
     const next = organizations.find((item) => item.id === id);
     selectedOrganizationRef.current = id;
     setSelectedOrganizationId(id);
     setSelectedOrganization(next);
     setRenameName(next?.name ?? "");
+    setMembers([]);
+    setInvitations([]);
+    setMemberState(INITIAL_RESOURCE);
+    setInvitationState(INITIAL_RESOURCE);
+    setRoleDrafts({});
+    setRemovalConfirmationId(null);
     setMutationError(INITIAL_RESOURCE);
   };
 
-  const runMutation = async (action: string, operation: () => Promise<void>) => {
+  const runMutation = async (action: string, operation: () => Promise<void>, options: MutationOptions = {}): Promise<void> => {
     if (pendingAction !== null) return;
     setPendingAction(action);
     setMutationError(INITIAL_RESOURCE);
+    setRetryAction(null);
+    const rollback = options.optimistic?.() ?? (() => undefined);
     try {
       await operation();
       setRefreshNonce((value) => value + 1);
     } catch (error) {
-      setMutationError(resourceError(error));
+      rollback();
+      const nextError = resourceError(error);
+      setMutationError(nextError);
+      if ((nextError.code === "recent_auth_required" || nextError.code === "aborted") && options.retry !== undefined) {
+        setRetryAction({ label: options.retryLabel ?? "本人確認をやり直す", run: options.retry });
+      }
     } finally {
       setPendingAction(null);
     }
@@ -215,9 +244,23 @@ export function OrganizationPanel({ client: suppliedClient, initialOrganizationI
     if (!selectedOrganization || !visibility.canManageOrganization) return;
     const name = renameName.trim();
     if (name === "") return setMutationError({ status: "error", error: "組織名を入力してください。" });
+    const previousOrganization = selectedOrganization;
+    const previousOrganizations = organizations;
+    const previousRenameName = renameName;
     await runMutation("rename-organization", async () => {
       const result = await client.renameOrganization({ organizationId: selectedOrganization.id, name, expectedVersion: selectedOrganization.version });
       setSelectedOrganization(result.organization);
+    }, {
+      optimistic: () => {
+        const optimisticOrganization = { ...selectedOrganization, name };
+        setSelectedOrganization(optimisticOrganization);
+        setOrganizations((current) => current.map((item) => item.id === selectedOrganization.id ? optimisticOrganization : item));
+        return () => {
+          setSelectedOrganization(previousOrganization);
+          setOrganizations(previousOrganizations);
+          setRenameName(previousRenameName);
+        };
+      },
     });
   };
 
@@ -226,10 +269,65 @@ export function OrganizationPanel({ client: suppliedClient, initialOrganizationI
     if (!selectedOrganization || !visibility.canInvite) return;
     const expiresAt = parseDateTimeLocal(inviteExpiresAt);
     if (expiresAt === undefined) return setMutationError({ status: "error", error: "有効期限を入力してください。" });
+    if (Date.parse(expiresAt) <= Date.now()) return setMutationError({ status: "error", code: "expired", error: "有効期限は現在より後に設定してください。" });
     await runMutation("create-invitation", async () => {
       const result = await client.createInvitation({ organizationId: selectedOrganization.id, role: inviteRole, expiresAt });
       setOneTimeToken(result.oneTimeToken);
       setInviteExpiresAt("");
+    });
+  };
+
+  const changeMemberRole = (member: OrganizationMember, role: OrganizationRole): Promise<void> => {
+    if (!visibility.canManageMembers || (role === "owner" && !visibility.canAssignOwner) || role === member.role || member.status !== "active") return Promise.resolve();
+    const previousMembers = members;
+    return runMutation(`member-role-${member.memberId}`, async () => {
+      const result = await client.updateMemberRole({ organizationId: member.organizationId, memberId: member.memberId, role, expectedVersion: member.version });
+      setMembers((current) => current.map((item) => item.memberId === member.memberId ? result.member : item));
+      setRoleDrafts((current) => ({ ...current, [member.memberId]: result.member.role }));
+      if (member.memberId === sessionMemberId) {
+        setSessionRole(result.member.role);
+        setRoleOverrides((current) => ({ ...current, [member.organizationId]: result.member.role }));
+      }
+    }, {
+      optimistic: () => {
+        setMembers((current) => current.map((item) => item.memberId === member.memberId ? { ...item, role, version: item.version + 1 } : item));
+        return () => setMembers(previousMembers);
+      },
+      retry: () => changeMemberRole(member, role),
+    });
+  };
+
+  const removeMember = (member: OrganizationMember): Promise<void> => {
+    if (!visibility.canManageMembers || (member.role === "owner" && !visibility.canAssignOwner) || member.status !== "active") return Promise.resolve();
+    const previousMembers = members;
+    setRemovalConfirmationId(null);
+    return runMutation(`member-remove-${member.memberId}`, async () => {
+      const result = await client.removeMember({ organizationId: member.organizationId, memberId: member.memberId, expectedVersion: member.version });
+      setMembers((current) => current.map((item) => item.memberId === member.memberId ? result.member : item));
+      if (member.memberId === sessionMemberId) {
+        setSessionRole("viewer");
+        setRoleOverrides((current) => ({ ...current, [member.organizationId]: "viewer" }));
+      }
+    }, {
+      optimistic: () => {
+        setMembers((current) => current.map((item) => item.memberId === member.memberId ? { ...item, status: "revoked", version: item.version + 1 } : item));
+        return () => setMembers(previousMembers);
+      },
+      retry: () => removeMember(member),
+    });
+  };
+
+  const revokeInvitation = (invitation: OrganizationInvitation): Promise<void> => {
+    if (!visibility.canRevokeInvitations || invitation.status !== "pending" || isInvitationExpired(invitation, nowMs)) return Promise.resolve();
+    const previousInvitations = invitations;
+    return runMutation(`invitation-revoke-${invitation.id}`, async () => {
+      const result = await client.revokeInvitation({ organizationId: invitation.organizationId, invitationId: invitation.id, expectedVersion: invitation.version });
+      setInvitations((current) => current.map((item) => item.id === invitation.id ? result.invitation : item));
+    }, {
+      optimistic: () => {
+        setInvitations((current) => current.map((item) => item.id === invitation.id ? { ...item, status: "revoked", version: item.version + 1 } : item));
+        return () => setInvitations(previousInvitations);
+      },
     });
   };
 
@@ -243,18 +341,23 @@ export function OrganizationPanel({ client: suppliedClient, initialOrganizationI
     });
   };
 
-  const refresh = () => setRefreshNonce((value) => value + 1);
+  const refresh = () => {
+    setMutationError(INITIAL_RESOURCE);
+    setRetryAction(null);
+    setOneTimeToken(null);
+    setRefreshNonce((value) => value + 1);
+  };
   const roleLabel = { owner: "Owner", admin: "Admin", auditor: "Auditor", viewer: "Viewer" }[effectiveRole];
 
   return (
-    <main style={panelStyle.shell} aria-labelledby="organization-panel-title">
+    <main className="organization-panel" style={panelStyle.shell} aria-labelledby="organization-panel-title" aria-busy={pendingAction !== null}>
       <header style={panelStyle.header}>
         <div>
           <p style={panelStyle.eyebrow}>ORGANIZATION ADMINISTRATION</p>
           <h1 id="organization-panel-title" style={panelStyle.heading}>組織を安全に管理する</h1>
           <p style={panelStyle.copy}>Agentの利用単位となる組織、メンバー、招待を管理します。変更にはバージョン競合検知と監査可能な操作境界が適用されます。</p>
         </div>
-        <button type="button" style={panelStyle.secondaryButton} onClick={refresh} disabled={pendingAction !== null}>再読み込み</button>
+        <button type="button" style={panelStyle.secondaryButton} onClick={refresh} disabled={pendingAction !== null} aria-label="組織情報を再読み込み">再読み込み</button>
       </header>
 
       {organizationState.status === "loading" && <p style={panelStyle.state} data-state="loading" role="status">組織を読み込み中です…</p>}
@@ -279,13 +382,14 @@ export function OrganizationPanel({ client: suppliedClient, initialOrganizationI
         </section>
       )}
 
-      {mutationError.status === "error" && <p style={mutationError.error?.includes("競合") ? panelStyle.conflict : panelStyle.error} data-state={mutationError.error?.includes("競合") ? "conflict" : "error"} role="alert">{mutationError.error}</p>}
+      {pendingAction !== null && <p className="organization-status" style={panelStyle.state} data-state="pending" role="status" aria-live="polite">{pendingActionLabel(pendingAction)}</p>}
+      {mutationError.status === "error" && <MutationNotice state={mutationError} retryAction={retryAction} onRefresh={refresh} />}
 
       {selectedOrganization && visibility.canViewMembers && (
         <section style={panelStyle.card} aria-labelledby="organization-members-title">
           <div style={panelStyle.row}><div><h2 id="organization-members-title" style={panelStyle.cardTitle}>メンバー</h2><p style={panelStyle.muted}>Owner / Admin / Auditorはメンバー情報を閲覧できます。</p></div><span style={panelStyle.muted}>{members.length}人</span></div>
           <ResourceStateView state={memberState} empty="メンバーはいません。" error="メンバー情報を取得できませんでした。" />
-          {memberState.status === "ready" && <ul style={panelStyle.list}>{members.map((member) => <MemberRow key={member.membershipId} member={member} canManage={visibility.canManageMembers && (member.role !== "owner" || visibility.canAssignOwner)} canAssignOwner={visibility.canAssignOwner} draft={roleDrafts[member.memberId] ?? member.role} setDraft={(role) => setRoleDrafts((current) => ({ ...current, [member.memberId]: role }))} pendingAction={pendingAction} onRoleChange={() => void runMutation(`member-role-${member.memberId}`, async () => { await client.updateMemberRole({ organizationId: member.organizationId, memberId: member.memberId, role: roleDrafts[member.memberId] ?? member.role, expectedVersion: member.version }); })} onRemove={() => void runMutation(`member-remove-${member.memberId}`, async () => { await client.removeMember({ organizationId: member.organizationId, memberId: member.memberId, expectedVersion: member.version }); })} />)}</ul>}
+          {memberState.status === "ready" && <ul style={panelStyle.list}>{members.map((member) => <MemberRow key={member.membershipId} member={member} canManage={visibility.canManageMembers && (member.role !== "owner" || visibility.canAssignOwner)} canAssignOwner={visibility.canAssignOwner} draft={roleDrafts[member.memberId] ?? member.role} setDraft={(role) => setRoleDrafts((current) => ({ ...current, [member.memberId]: role }))} pendingAction={pendingAction} actionKey={`member-role-${member.memberId}`} confirmRemoval={removalConfirmationId === member.memberId} onConfirmRemoval={() => setRemovalConfirmationId(member.memberId)} onCancelRemoval={() => setRemovalConfirmationId(null)} onRoleChange={(role) => void changeMemberRole(member, role)} onRemove={() => void removeMember(member)} />)}</ul>}
         </section>
       )}
 
@@ -294,7 +398,7 @@ export function OrganizationPanel({ client: suppliedClient, initialOrganizationI
           <section style={panelStyle.card} aria-labelledby="organization-invitations-title">
             <div style={panelStyle.row}><div><h2 id="organization-invitations-title" style={panelStyle.cardTitle}>招待</h2><p style={panelStyle.muted}>招待トークンは発行時のコンポーネントメモリにのみ保持します。</p></div><span style={panelStyle.muted}>{invitations.length}件</span></div>
             <ResourceStateView state={invitationState} empty="招待はありません。" error="招待情報を取得できませんでした。" />
-            {invitationState.status === "ready" && <ul style={panelStyle.list}>{invitations.map((invitation) => <InvitationRow key={invitation.id} invitation={invitation} canRevoke={visibility.canRevokeInvitations} pendingAction={pendingAction} onRevoke={() => void runMutation(`invitation-revoke-${invitation.id}`, async () => { await client.revokeInvitation({ organizationId: invitation.organizationId, invitationId: invitation.id, expectedVersion: invitation.version }); })} />)}</ul>}
+            {invitationState.status === "ready" && <ul style={panelStyle.list}>{invitations.map((invitation) => <InvitationRow key={invitation.id} invitation={invitation} canRevoke={visibility.canRevokeInvitations} expired={isInvitationExpired(invitation, nowMs)} pendingAction={pendingAction} actionKey={`invitation-revoke-${invitation.id}`} onRevoke={() => void revokeInvitation(invitation)} />)}</ul>}
           </section>
           {visibility.canInvite && <InviteForm role={inviteRole} setRole={setInviteRole} expiresAt={inviteExpiresAt} setExpiresAt={setInviteExpiresAt} onSubmit={createInvitation} pending={pendingAction === "create-invitation"} />}
         </section>
@@ -306,33 +410,45 @@ export function OrganizationPanel({ client: suppliedClient, initialOrganizationI
         <form onSubmit={acceptInvitation} style={panelStyle.actionRow}><label style={{ ...panelStyle.label, flex: "1 1 460px" }}><span>招待トークン</span><input value={acceptToken} onChange={(event) => setAcceptToken(event.target.value)} autoComplete="off" inputMode="text" style={panelStyle.input} /></label><button type="submit" style={panelStyle.button} disabled={pendingAction !== null}>{pendingAction === "accept-invitation" ? "受け入れ中…" : "招待を受け入れる"}</button></form>
       </section>
 
-      {oneTimeToken !== null && <section style={panelStyle.card} aria-live="polite" aria-labelledby="one-time-token-title"><div style={panelStyle.row}><h2 id="one-time-token-title" style={panelStyle.cardTitle}>招待トークン（一度だけ表示）</h2><button type="button" style={panelStyle.secondaryButton} onClick={() => setOneTimeToken(null)}>閉じる</button></div><p style={panelStyle.muted}>安全な経路で招待相手へ渡してください。ページを離れる、再読み込みする、または閉じると再取得できません。</p><code style={panelStyle.token}>{oneTimeToken}</code></section>}
+      {oneTimeToken !== null && <section className="organization-one-time-secret" style={panelStyle.card} aria-labelledby="one-time-token-title"><div style={panelStyle.row}><h2 id="one-time-token-title" style={panelStyle.cardTitle}>招待トークン（一度だけ表示）</h2><button type="button" style={panelStyle.secondaryButton} onClick={() => setOneTimeToken(null)} aria-label="招待トークンを閉じる">閉じる</button></div><p style={panelStyle.muted} role="status" aria-live="polite">招待トークンを一度だけ表示しています。安全な経路で招待相手へ渡してください。ページを離れる、再読み込みする、または閉じると再取得できません。</p><code className="organization-token" style={panelStyle.token}>{oneTimeToken}</code></section>}
     </main>
   );
 }
 
 function CreateOrganizationForm({ name, setName, onSubmit, pending }: { name: string; setName: (value: string) => void; onSubmit: (event: FormEvent<HTMLFormElement>) => void; pending: boolean }) {
-  return <form onSubmit={onSubmit} style={panelStyle.actionRow}><label style={{ ...panelStyle.label, flex: "1 1 320px" }}><span>組織名</span><input value={name} onChange={(event) => setName(event.target.value)} maxLength={128} required style={panelStyle.input} /></label><button type="submit" style={panelStyle.button} disabled={pending}>{pending ? "作成中…" : "組織を作成"}</button></form>;
+  return <form onSubmit={onSubmit} style={panelStyle.actionRow} aria-busy={pending}><label style={{ ...panelStyle.label, flex: "1 1 320px" }}><span>組織名</span><input value={name} onChange={(event) => setName(event.target.value)} maxLength={128} required style={panelStyle.input} /></label><button type="submit" style={panelStyle.button} disabled={pending}>{pending ? "作成中…" : "組織を作成"}</button></form>;
 }
 
 function InviteForm({ role, setRole, expiresAt, setExpiresAt, onSubmit, pending }: { role: InvitationRole; setRole: (value: InvitationRole) => void; expiresAt: string; setExpiresAt: (value: string) => void; onSubmit: (event: FormEvent<HTMLFormElement>) => void; pending: boolean }) {
-  return <section style={panelStyle.card} aria-labelledby="create-invitation-title"><h2 id="create-invitation-title" style={panelStyle.cardTitle}>招待を作成</h2><form onSubmit={onSubmit} style={{ display: "grid", gap: 12 }}><label style={panelStyle.label}><span>付与するロール</span><select value={role} onChange={(event) => setRole(event.target.value as InvitationRole)} style={panelStyle.select}>{INVITE_ROLES.map((value) => <option key={value} value={value}>{value}</option>)}</select></label><label style={panelStyle.label}><span>有効期限</span><input type="datetime-local" value={expiresAt} onChange={(event) => setExpiresAt(event.target.value)} required style={panelStyle.input} /></label><button type="submit" style={panelStyle.button} disabled={pending}>{pending ? "発行中…" : "招待を発行"}</button></form></section>;
+  return <section style={panelStyle.card} aria-labelledby="create-invitation-title"><h2 id="create-invitation-title" style={panelStyle.cardTitle}>招待を作成</h2><p style={panelStyle.muted}>有効期限を過ぎた招待は自動的に受け入れできません。</p><form onSubmit={onSubmit} style={{ display: "grid", gap: 12 }} aria-busy={pending}><label style={panelStyle.label}><span>付与するロール</span><select value={role} onChange={(event) => setRole(event.target.value as InvitationRole)} style={panelStyle.select}>{INVITE_ROLES.map((value) => <option key={value} value={value}>{roleLabel(value)}</option>)}</select></label><label style={panelStyle.label}><span>有効期限</span><input type="datetime-local" value={expiresAt} onChange={(event) => setExpiresAt(event.target.value)} min={minimumDateTimeLocal()} required style={panelStyle.input} /></label><button type="submit" style={panelStyle.button} disabled={pending}>{pending ? "発行中…" : "招待を発行"}</button></form></section>;
 }
 
-function MemberRow({ member, canManage, canAssignOwner, draft, setDraft, pendingAction, onRoleChange, onRemove }: { member: OrganizationMember; canManage: boolean; canAssignOwner: boolean; draft: OrganizationRole; setDraft: (role: OrganizationRole) => void; pendingAction: string | null; onRoleChange: () => void; onRemove: () => void }) {
+function MemberRow({ member, canManage, canAssignOwner, draft, setDraft, pendingAction, actionKey, confirmRemoval, onConfirmRemoval, onCancelRemoval, onRoleChange, onRemove }: { member: OrganizationMember; canManage: boolean; canAssignOwner: boolean; draft: OrganizationRole; setDraft: (role: OrganizationRole) => void; pendingAction: string | null; actionKey: string; confirmRemoval: boolean; onConfirmRemoval: () => void; onCancelRemoval: () => void; onRoleChange: (role: OrganizationRole) => void; onRemove: () => void }) {
   const editableRoles = canAssignOwner ? ROLES : ROLES.filter((role) => role !== "owner");
-  return <li style={panelStyle.listRow}><div style={panelStyle.row}><div><strong>{member.displayName ?? "名前未設定"}</strong><p style={panelStyle.muted}>{member.role} · {member.status === "active" ? "有効" : "失効"} · v{member.version}</p></div>{canManage && member.status === "active" && <div style={panelStyle.actionRow}><select aria-label={`${member.memberId}のロール`} value={draft} onChange={(event) => setDraft(event.target.value as OrganizationRole)} style={panelStyle.select}>{editableRoles.map((role) => <option key={role} value={role}>{role}</option>)}</select><button type="button" style={panelStyle.secondaryButton} disabled={pendingAction !== null} onClick={onRoleChange}>変更</button><button type="button" style={panelStyle.dangerButton} disabled={pendingAction !== null} onClick={onRemove}>削除</button></div>}</div></li>;
+  const name = member.displayName ?? "名前未設定";
+  const detailsId = `member-details-${member.memberId}`;
+  const busy = pendingAction !== null;
+  return <li className="organization-list-row" style={panelStyle.listRow} data-state={member.status === "revoked" ? "revoked" : pendingAction === actionKey ? "pending" : "active"} aria-busy={pendingAction === actionKey}><div style={panelStyle.row}><div><strong>{name}</strong><p id={detailsId} style={panelStyle.muted}>{roleLabel(member.role)} · {member.status === "active" ? "有効" : "失効"} · v{member.version}</p></div>{canManage && member.status === "active" ? <div style={panelStyle.actionRow}><label style={panelStyle.label}><span className="sr-only">{name}のロール</span><select id={`member-role-${member.memberId}`} aria-label={`${name}のロール`} aria-describedby={detailsId} value={draft} onChange={(event) => setDraft(event.target.value as OrganizationRole)} style={panelStyle.select} disabled={busy}>{editableRoles.map((role) => <option key={role} value={role}>{roleLabel(role)}</option>)}</select></label><button type="button" style={panelStyle.secondaryButton} disabled={busy || draft === member.role} onClick={() => onRoleChange(draft)} aria-label={`${name}を${roleLabel(draft)}に変更`}>{pendingAction === actionKey ? "変更中…" : "変更"}</button>{confirmRemoval ? <div className="organization-confirmation" role="alert"><span>このメンバーを失効させますか？</span><button type="button" style={panelStyle.dangerButton} disabled={busy} onClick={onRemove}>削除を確定</button><button type="button" style={panelStyle.secondaryButton} disabled={busy} onClick={onCancelRemoval}>キャンセル</button></div> : <button type="button" style={panelStyle.dangerButton} disabled={busy} onClick={onConfirmRemoval} aria-label={`${name}を削除`}>削除</button>}</div> : member.status === "revoked" ? <span style={panelStyle.muted}>このメンバーは失効しています</span> : null}</div></li>;
 }
 
-function InvitationRow({ invitation, canRevoke, pendingAction, onRevoke }: { invitation: OrganizationInvitation; canRevoke: boolean; pendingAction: string | null; onRevoke: () => void }) {
-  return <li style={panelStyle.listRow}><div style={panelStyle.row}><div><strong>{invitation.role} 招待</strong><p style={panelStyle.muted}>{invitation.status} · {formatDate(invitation.expiresAt)} · v{invitation.version}</p></div>{canRevoke && invitation.status === "pending" && <button type="button" style={panelStyle.dangerButton} disabled={pendingAction !== null} onClick={onRevoke}>取り消す</button>}</div></li>;
+function InvitationRow({ invitation, canRevoke, expired, pendingAction, actionKey, onRevoke }: { invitation: OrganizationInvitation; canRevoke: boolean; expired: boolean; pendingAction: string | null; actionKey: string; onRevoke: () => void }) {
+  const status = expired ? "expired" : invitation.status;
+  const statusLabel = status === "pending" ? "有効" : status === "expired" ? "期限切れ" : status === "accepted" ? "受け入れ済み" : "取り消し済み";
+  const busy = pendingAction !== null;
+  return <li className="organization-list-row" style={panelStyle.listRow} data-state={status} aria-busy={pendingAction === actionKey}><div style={panelStyle.row}><div><strong>{roleLabel(invitation.role)} 招待</strong><p style={panelStyle.muted}>{statusLabel} · 有効期限 {formatDate(invitation.expiresAt)} · v{invitation.version}</p></div>{canRevoke && status === "pending" && <button type="button" style={panelStyle.dangerButton} disabled={busy} onClick={onRevoke} aria-label={`${roleLabel(invitation.role)}招待を取り消す`}>{pendingAction === actionKey ? "取り消し中…" : "取り消す"}</button>}</div></li>;
 }
 
 function ResourceStateView({ state, empty, error }: { state: ResourceState; empty: string; error: string }) {
-  if (state.status === "loading") return <p style={panelStyle.state} data-state="loading" role="status">読み込み中です…</p>;
+  if (state.status === "loading") return <p className="organization-status" style={panelStyle.state} data-state="loading" role="status" aria-live="polite">読み込み中です…</p>;
   if (state.status === "empty") return <p style={panelStyle.state} data-state="empty">{empty}</p>;
-  if (state.status === "error") return <p style={state.error?.includes("競合") ? panelStyle.conflict : panelStyle.error} data-state={state.error?.includes("競合") ? "conflict" : "error"} role="alert">{state.error ?? error}</p>;
+  if (state.status === "error") return <p className="organization-status" style={state.code === "conflict" ? panelStyle.conflict : panelStyle.error} data-state={state.code ?? "error"} role="alert" aria-live="assertive">{state.error ?? error}</p>;
   return null;
+}
+
+function MutationNotice({ state, retryAction, onRefresh }: { state: ResourceState; retryAction: RetryAction | null; onRefresh: () => void }) {
+  const refreshLabel = state.code === "unauthorized" ? "セッションを更新" : "最新情報を読み込む";
+  const canRefresh = state.code === "conflict" || state.code === "unauthorized";
+  return <div className="organization-status" style={state.code === "conflict" ? panelStyle.conflict : panelStyle.error} data-state={state.code ?? "error"} role="alert" aria-live="assertive"><span>{state.error}</span>{retryAction !== null && (state.code === "recent_auth_required" || state.code === "aborted") ? <button type="button" style={panelStyle.secondaryButton} onClick={() => void retryAction.run()}>{retryAction.label}</button> : canRefresh ? <button type="button" style={panelStyle.secondaryButton} onClick={onRefresh}>{refreshLabel}</button> : null}</div>;
 }
 
 function chooseOrganization(items: readonly Organization[], requested: string, sessionOrganizationId: string): string {
@@ -342,11 +458,39 @@ function chooseOrganization(items: readonly Organization[], requested: string, s
 }
 
 function resourceError(error: unknown): ResourceState {
-  if (error instanceof OrganizationClientError && error.code === "conflict") return { status: "error", error: "競合が発生しました。最新情報を読み込んでから、もう一度お試しください。" };
-  if (error instanceof OrganizationClientError && error.code === "forbidden") return { status: "error", error: "この操作を実行する権限がありません。" };
-  if (error instanceof OrganizationClientError && error.code === "unauthorized") return { status: "error", error: "セッションの有効期限が切れています。再読み込みしてください。" };
-  if (error instanceof OrganizationClientError && error.code === "validation_failed") return { status: "error", error: "入力内容を確認してください。" };
+  if (error instanceof OrganizationClientError && error.code === "conflict") return { status: "error", code: "conflict", error: "他の管理者が先に変更しました。最新情報を読み込んでから、もう一度お試しください。" };
+  if (error instanceof OrganizationClientError && error.code === "expired") return { status: "error", code: "expired", error: "この招待または操作の有効期限が切れています。最新情報を確認してください。" };
+  if (error instanceof OrganizationClientError && error.code === "recent_auth_required") return { status: "error", code: "recent_auth_required", error: "安全な本人確認が必要です。もう一度実行してPasskey認証を完了してください。" };
+  if (error instanceof OrganizationClientError && error.code === "aborted") return { status: "error", code: "aborted", error: "本人確認がキャンセルされました。必要であれば、もう一度実行してください。" };
+  if (error instanceof OrganizationClientError && error.code === "forbidden") return { status: "error", code: "forbidden", error: "この操作を実行する権限がありません。" };
+  if (error instanceof OrganizationClientError && error.code === "unauthorized") return { status: "error", code: "unauthorized", error: "セッションの有効期限が切れています。セッションを更新してください。" };
+  if (error instanceof OrganizationClientError && error.code === "validation_failed") return { status: "error", code: "validation_failed", error: "入力内容を確認してください。" };
   return { status: "error", error: "組織情報を取得できませんでした。接続を確認して、もう一度お試しください。" };
+}
+
+function pendingActionLabel(action: string): string {
+  if (action === "rename-organization") return "組織名を変更しています…";
+  if (action === "create-invitation") return "招待を発行しています…";
+  if (action === "accept-invitation") return "招待を受け入れています…";
+  if (action.startsWith("member-role-")) return "メンバーのロールを変更しています…";
+  if (action.startsWith("member-remove-")) return "メンバーを失効しています…";
+  if (action.startsWith("invitation-revoke-")) return "招待を取り消しています…";
+  return "変更を反映しています…";
+}
+
+function isInvitationExpired(invitation: OrganizationInvitation, nowMs: number): boolean {
+  return invitation.status === "expired" || nowMs > 0 && Date.parse(invitation.expiresAt) <= nowMs;
+}
+
+function minimumDateTimeLocal(): string {
+  const date = new Date(Date.now() + 5 * 60_000);
+  date.setSeconds(0, 0);
+  const offset = date.getTimezoneOffset();
+  return new Date(date.getTime() - offset * 60_000).toISOString().slice(0, 16);
+}
+
+function roleLabel(role: OrganizationRole | InvitationRole): string {
+  return { owner: "Owner", admin: "Admin", auditor: "Auditor", viewer: "Viewer" }[role];
 }
 
 function parseDateTimeLocal(value: string): string | undefined {

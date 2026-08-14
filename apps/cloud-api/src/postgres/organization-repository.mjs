@@ -176,7 +176,7 @@ export function createPostgresOrganizationRepository({ client, now = () => new D
       const row = safeOrganizationRow(result.rows[0]);
       await appendMutationEvents(tx, { organizationId, actorId, action: "organization.renamed", targetType: "organization", targetId: organizationId, details: { name, version: row.version } });
       return row;
-    }, 200);
+    }, 200, mutationAuthorization(input));
   }
 
   async function updateMemberRole(input = {}) {
@@ -211,7 +211,7 @@ export function createPostgresOrganizationRepository({ client, now = () => new D
       }
       await appendMutationEvents(tx, { organizationId, actorId, action: "membership.role_updated", targetType: "membership", targetId: row.membership_id, details: { member_id: row.member_id, role, version: row.version } });
       return row;
-    }, 200);
+    }, 200, mutationAuthorization(input));
   }
 
   async function removeMember(input = {}) {
@@ -239,7 +239,7 @@ export function createPostgresOrganizationRepository({ client, now = () => new D
       await notifyAuthorityReduction(tx, { organizationId, actorId, memberId, eventType: "membership.removed", occurredAt: removedAt });
       await appendMutationEvents(tx, { organizationId, actorId, action: "membership.removed", targetType: "membership", targetId: row.membership_id, details: { member_id: row.member_id, version: row.version, removed_at: removedAt } });
       return row;
-    }, 200);
+    }, 200, mutationAuthorization(input));
   }
 
   async function createInvitation(input = {}) {
@@ -263,7 +263,7 @@ export function createPostgresOrganizationRepository({ client, now = () => new D
       const row = safeInvitationRow(result.rows[0], evaluatedAt);
       await appendMutationEvents(tx, { organizationId, actorId, action: "invitation.created", targetType: "invitation", targetId: invitationId, details: { role, expires_at: expiresAt, version: row.version } });
       return row;
-    }, 201);
+    }, 201, mutationAuthorization(input));
   }
 
   async function listInvitations(input = {}) {
@@ -303,7 +303,7 @@ export function createPostgresOrganizationRepository({ client, now = () => new D
       const row = safeInvitationRow(result.rows[0], revokedAt);
       await appendMutationEvents(tx, { organizationId, actorId, action: "invitation.revoked", targetType: "invitation", targetId: invitationId, details: { version: row.version, revoked_at: revokedAt } });
       return row;
-    }, 200);
+    }, 200, mutationAuthorization(input));
   }
 
   async function acceptInvitation(input = {}) {
@@ -362,12 +362,13 @@ export function createPostgresOrganizationRepository({ client, now = () => new D
     });
   }
 
-  async function mutate(organizationId, input, operationName, request, operation, responseStatus) {
+  async function mutate(organizationId, input, operationName, request, operation, responseStatus, authorization = undefined) {
     const idempotencyKey = requireIdempotencyKey(input);
     const actorPrincipal = principalId(input, request.actor_id);
     const requestHash = organizationMutationRequestHash(operationName, { ...request, actor_principal: actorPrincipal });
     return transaction(async (tx) => {
       await lockOrganization(tx, organizationId);
+      if (authorization) await requireMutationAuthorization(tx, { organizationId, actorId: request.actor_id, authorization });
       const idempotency = await acquireIdempotency(tx, {
         organizationId, actorPrincipal, idempotencyKey, requestHash
       });
@@ -384,6 +385,38 @@ export function createPostgresOrganizationRepository({ client, now = () => new D
 
   async function lockOrganization(tx, organizationId) {
     await tx.query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", [`agentpass:organization:${organizationId}`]);
+  }
+
+  async function requireMutationAuthorization(tx, { organizationId, actorId, authorization }) {
+    const params = [authorization.session_id, actorId, organizationId];
+    let recentAuthPredicate = "";
+    if (authorization.challenge_id !== undefined) {
+      params.push(authorization.challenge_id, authorization.operation);
+      recentAuthPredicate = `
+        AND s.recent_auth_challenge_id=$4
+        AND s.recent_auth_operation=$5
+        AND s.recent_auth_consumed_at IS NOT NULL`;
+    }
+    const result = await tx.query(`SELECT s.id AS session_id,s.member_id,s.organization_id,s.membership_id,s.role,
+        s.organization_authority_epoch,s.membership_session_epoch,o.authority_epoch,m.session_epoch
+      FROM human_sessions s
+      JOIN memberships m
+        ON m.organization_id=s.organization_id AND m.id=s.membership_id AND m.member_id=s.member_id
+      JOIN organizations o ON o.id=s.organization_id
+      WHERE s.id=$1 AND s.member_id=$2 AND s.organization_id=$3
+        AND s.revoked_at IS NULL
+        AND s.expires_at>clock_timestamp()
+        AND (s.idle_expires_at IS NULL OR s.idle_expires_at>clock_timestamp())
+        AND m.status='active'
+        AND m.role=s.role
+        AND m.role IN ('owner','admin')
+        AND s.organization_authority_epoch=o.authority_epoch
+        AND s.membership_session_epoch=m.session_epoch${recentAuthPredicate}
+      FOR UPDATE OF s,m,o`, params);
+    if ((result.rowCount ?? result.rows?.length ?? 0) !== 1) {
+      throw new OrganizationRepositoryError("ERR_STALE_SESSION", "the actor session is no longer current");
+    }
+    return result.rows[0];
   }
 
   async function requireMembershipMutationActor(tx, organizationId, actorId) {
@@ -681,6 +714,22 @@ function deterministicOrganizationId(actorPrincipal, idempotencyKey) {
 }
 function assertClient(client) { if (!client || typeof client.query !== "function") throw new TypeError("database client is invalid"); }
 function actorMemberId(input) { return uuid(input.actor_member_id ?? input.actorMemberId ?? input.actor?.member_id ?? input.member_id ?? input.memberId); }
+function mutationAuthorization(input) {
+  const sessionValue = input.actor_session_id ?? input.actorSessionId ?? input.actor?.session_id;
+  if (sessionValue === undefined) return undefined;
+  const sessionId = uuid(sessionValue);
+  const challengeValue = input.recent_auth_challenge_id ?? input.recentAuthChallengeId;
+  const operationValue = input.recent_auth_operation ?? input.recentAuthOperation;
+  if (challengeValue === undefined && operationValue === undefined) return Object.freeze({ session_id: sessionId });
+  if (challengeValue === undefined || operationValue === undefined) {
+    throw new OrganizationRepositoryError("ERR_RECENT_AUTH_BINDING", "recent authorization binding is incomplete");
+  }
+  return Object.freeze({
+    session_id: sessionId,
+    challenge_id: uuid(challengeValue),
+    operation: text(operationValue, 128, "recent_auth_operation")
+  });
+}
 function principalId(input, fallback) {
   const value = input.principal_id ?? input.principalId ?? input.actor?.principal_id ?? input.actor?.principalId ?? fallback;
   return text(value, 256, "principal_id");

@@ -31,6 +31,7 @@ export function createPostgresHumanRepository({ client, onAuthorityReduction } =
     findCredentialForSession,
     insertCredential,
     createCredential,
+    createCredentialWithRecentAuth,
     insertCredentialForSession: insertCredential,
     updateCredentialCounter,
     updateCredentialLabel,
@@ -128,12 +129,12 @@ export function createPostgresHumanRepository({ client, onAuthorityReduction } =
   }
 
   async function bindRecentAuth(input) {
-    const result = await client.query(`UPDATE human_sessions s SET recent_auth_at=$6,recent_auth_challenge_id=$5,recent_auth_organization_id=$3,recent_auth_operation=$4,recent_auth_consumed_at=NULL FROM memberships m JOIN organizations o ON o.id=m.organization_id WHERE s.id=$1 AND s.member_id=$2 AND s.organization_id=$3 AND s.membership_id=m.id AND m.member_id=s.member_id AND m.organization_id=s.organization_id AND s.revoked_at IS NULL AND s.expires_at>$6 AND o.authority_epoch=s.organization_authority_epoch AND m.session_epoch=s.membership_session_epoch RETURNING s.id`, [uuid(input.session_id), uuid(input.member_id), uuid(input.organization_id), bounded(input.operation, 128), uuid(input.challenge_id), input.authenticated_at]);
+    const result = await client.query(`UPDATE human_sessions s SET recent_auth_at=$6,recent_auth_challenge_id=$5,recent_auth_organization_id=$3,recent_auth_operation=$4,recent_auth_consumed_at=NULL FROM memberships m JOIN organizations o ON o.id=m.organization_id WHERE s.id=$1 AND s.member_id=$2 AND s.organization_id=$3 AND s.membership_id=m.id AND m.member_id=s.member_id AND m.organization_id=s.organization_id AND s.revoked_at IS NULL AND s.expires_at>$6 AND (s.idle_expires_at IS NULL OR s.idle_expires_at>$6) AND m.status='active' AND m.role=s.role AND o.authority_epoch=s.organization_authority_epoch AND m.session_epoch=s.membership_session_epoch AND EXISTS (SELECT 1 FROM webauthn_challenges c WHERE c.id=$5 AND c.session_id=s.id AND c.member_id=s.member_id AND c.organization_id=s.organization_id AND c.operation=$4 AND c.ceremony='authentication' AND c.status='consumed' AND c.consumed_at=$6) RETURNING s.id`, [uuid(input.session_id), uuid(input.member_id), uuid(input.organization_id), bounded(input.operation, 128), uuid(input.challenge_id), input.authenticated_at]);
     return result.rowCount === 1;
   }
 
   async function consumeRecentAuth(input) {
-    const result = await client.query(`UPDATE human_sessions s SET recent_auth_consumed_at=$5 FROM memberships m JOIN organizations o ON o.id=m.organization_id WHERE s.member_id=$1 AND s.recent_auth_organization_id=$2 AND s.organization_id=$2 AND s.recent_auth_operation=$3 AND s.recent_auth_challenge_id=$4 AND s.recent_auth_consumed_at IS NULL AND s.revoked_at IS NULL AND s.expires_at>$5 AND s.recent_auth_at>$5-INTERVAL '5 minutes' AND s.membership_id=m.id AND m.member_id=s.member_id AND m.organization_id=s.organization_id AND o.authority_epoch=s.organization_authority_epoch AND m.session_epoch=s.membership_session_epoch RETURNING s.recent_auth_at AS authenticated_at`, [uuid(input.member_id), uuid(input.organization_id), bounded(input.operation, 128), uuid(input.challenge_id), input.consumed_at]);
+    const result = await client.query(`UPDATE human_sessions s SET recent_auth_consumed_at=$6 FROM memberships m JOIN organizations o ON o.id=m.organization_id WHERE s.id=$1 AND s.member_id=$2 AND s.recent_auth_organization_id=$3 AND s.organization_id=$3 AND s.recent_auth_operation=$4 AND s.recent_auth_challenge_id=$5 AND s.recent_auth_consumed_at IS NULL AND s.revoked_at IS NULL AND s.expires_at>$6 AND s.recent_auth_at>$6-INTERVAL '5 minutes' AND s.membership_id=m.id AND m.member_id=s.member_id AND m.organization_id=s.organization_id AND o.authority_epoch=s.organization_authority_epoch AND m.session_epoch=s.membership_session_epoch RETURNING s.recent_auth_at AS authenticated_at`, [uuid(input.session_id), uuid(input.member_id), uuid(input.organization_id), bounded(input.operation, 128), uuid(input.challenge_id), input.consumed_at]);
     return result.rowCount === 1 ? result.rows[0] : null;
   }
 
@@ -210,9 +211,9 @@ export function createPostgresHumanRepository({ client, onAuthorityReduction } =
   }
 
   async function findCredentialForSession(input) {
-    const result = await client.query(`SELECT c.id,c.public_key,c.sign_count,c.transports,c.revoked_at FROM webauthn_credentials c JOIN human_sessions s ON s.member_id=c.member_id JOIN memberships m ON m.organization_id=s.organization_id AND m.member_id=s.member_id AND m.id=s.membership_id JOIN organizations o ON o.id=s.organization_id WHERE s.id=$1 AND s.organization_id=$2 AND c.id=$3 AND s.revoked_at IS NULL AND c.revoked_at IS NULL AND m.status='active' AND m.role=s.role AND o.authority_epoch=s.organization_authority_epoch AND m.session_epoch=s.membership_session_epoch LIMIT 1`, [uuid(input.session_id), uuid(input.organization_id), base64Bytes(input.credential_id, 16, 1024)]);
+    const result = await client.query(`SELECT c.id,c.public_key,c.sign_count,c.transports,c.backup_eligible,c.backup_state,c.revoked_at FROM webauthn_credentials c JOIN human_sessions s ON s.member_id=c.member_id JOIN memberships m ON m.organization_id=s.organization_id AND m.member_id=s.member_id AND m.id=s.membership_id JOIN organizations o ON o.id=s.organization_id WHERE s.id=$1 AND s.organization_id=$2 AND c.id=$3 AND s.revoked_at IS NULL AND s.expires_at>clock_timestamp() AND (s.idle_expires_at IS NULL OR s.idle_expires_at>clock_timestamp()) AND c.revoked_at IS NULL AND m.status='active' AND m.role=s.role AND o.authority_epoch=s.organization_authority_epoch AND m.session_epoch=s.membership_session_epoch LIMIT 1`, [uuid(input.session_id), uuid(input.organization_id), base64Bytes(input.credential_id, 16, 1024)]);
     const row = result.rows?.[0];
-    return row ? { ...row, id: Buffer.from(row.id).toString("base64url"), sign_count: storedCounter(row.sign_count) } : null;
+    return row ? { ...row, id: Buffer.from(row.id).toString("base64url"), sign_count: storedCounter(row.sign_count), backup_eligible: strictBoolean(row.backup_eligible, "backup_eligible"), backup_state: strictBoolean(row.backup_state, "backup_state") } : null;
   }
 
   async function listCredentialMetadataForSession(input) {
@@ -272,8 +273,51 @@ export function createPostgresHumanRepository({ client, onAuthorityReduction } =
     throw new Error("credential registration could not be stored");
   }
 
+  async function createCredentialWithRecentAuth(input) {
+    const sessionId = uuid(input?.session_id ?? input?.sessionId);
+    const memberId = uuid(input?.member_id ?? input?.memberId);
+    const organizationId = uuid(input?.organization_id ?? input?.organizationId);
+    const credentialId = base64Bytes(input?.credential_id ?? input?.credentialId, 16, 1024);
+    const publicKey = publicKeyBytes(input?.public_key ?? input?.publicKey);
+    const signCount = counter(input?.sign_count ?? input?.signCount);
+    const transports = credentialTransports(input?.transports);
+    const label = credentialLabel(input?.label ?? "Unnamed credential");
+    const backupState = strictBoolean(input?.backup_state ?? input?.backupState ?? input?.credential_backed_up ?? false, "backup_state");
+    const deviceType = input?.credential_device_type;
+    if (deviceType !== undefined && deviceType !== "singleDevice" && deviceType !== "multiDevice") throw new TypeError("credential device type is invalid");
+    if (deviceType === "singleDevice" && backupState) throw new TypeError("single-device credential cannot be backed up");
+    const backupEligible = strictBoolean(input?.backup_eligible ?? input?.backupEligible ?? (backupState || deviceType === "multiDevice"), "backup_eligible");
+    if (backupState && !backupEligible) throw new TypeError("backup_state requires backup_eligible");
+    const recentAuth = input?.recent_auth;
+
+    return inTransaction(async (transactionClient) => {
+      await lockCredentialSet(transactionClient, memberId);
+      const active = await transactionClient.query("SELECT COUNT(*) AS active_count FROM webauthn_credentials WHERE member_id=$1 AND revoked_at IS NULL", [memberId]);
+      const activeCount = parseDatabaseCount(active.rows?.[0]?.active_count, "active credential count");
+      if (activeCount > 0) {
+        const authorizationId = uuid(recentAuth?.authorization_id);
+        const operation = bounded(recentAuth?.operation, 128);
+        if (operation !== "human.webauthn.credential.register" || uuid(recentAuth?.session_id) !== sessionId || uuid(recentAuth?.member_id) !== memberId || uuid(recentAuth?.organization_id) !== organizationId) throw recentAuthRequired();
+        const consumed = await transactionClient.query(`UPDATE human_sessions s SET recent_auth_consumed_at=clock_timestamp() FROM memberships m JOIN organizations o ON o.id=m.organization_id WHERE s.id=$1 AND s.member_id=$2 AND s.organization_id=$3 AND s.recent_auth_operation=$4 AND s.recent_auth_challenge_id=$5 AND s.recent_auth_consumed_at IS NULL AND s.recent_auth_at>clock_timestamp()-INTERVAL '5 minutes' AND s.revoked_at IS NULL AND s.expires_at>clock_timestamp() AND (s.idle_expires_at IS NULL OR s.idle_expires_at>clock_timestamp()) AND s.membership_id=m.id AND m.member_id=s.member_id AND m.organization_id=s.organization_id AND m.status='active' AND m.role=s.role AND o.authority_epoch=s.organization_authority_epoch AND m.session_epoch=s.membership_session_epoch RETURNING s.id`, [sessionId, memberId, organizationId, operation, authorizationId]);
+        if (consumed.rowCount !== 1) throw recentAuthRequired();
+      }
+
+      const inserted = await transactionClient.query(`INSERT INTO webauthn_credentials (id,member_id,public_key,sign_count,transports,label,backup_eligible,backup_state) SELECT $3,$2,$4,$5,$6,$7,$8,$9 FROM human_sessions s JOIN memberships m ON m.organization_id=s.organization_id AND m.member_id=s.member_id AND m.id=s.membership_id JOIN organizations o ON o.id=s.organization_id WHERE s.id=$1 AND s.member_id=$2 AND s.organization_id=$10 AND s.revoked_at IS NULL AND s.expires_at>clock_timestamp() AND (s.idle_expires_at IS NULL OR s.idle_expires_at>clock_timestamp()) AND m.status='active' AND m.role=s.role AND o.authority_epoch=s.organization_authority_epoch AND m.session_epoch=s.membership_session_epoch ON CONFLICT (id) DO NOTHING RETURNING id`, [sessionId, memberId, credentialId, publicKey, signCount, transports, label, backupEligible, backupState, organizationId]);
+      if (inserted.rowCount === 1) return Object.freeze({ created: true, credential_id: credentialId.toString("base64url"), authorized: true });
+      const duplicate = await transactionClient.query("SELECT 1 FROM webauthn_credentials WHERE id=$1 LIMIT 1", [credentialId]);
+      if (duplicate.rowCount === 1) throw credentialExists();
+      throw new Error("credential registration could not be stored");
+    });
+  }
+
   async function updateCredentialCounter(input) {
-    const result = await client.query(`UPDATE webauthn_credentials c SET sign_count=$4,last_used_at=clock_timestamp() FROM human_sessions s JOIN memberships m ON m.organization_id=s.organization_id AND m.member_id=s.member_id AND m.id=s.membership_id JOIN organizations o ON o.id=s.organization_id WHERE s.id=$1 AND s.organization_id=$2 AND c.id=$3 AND c.member_id=s.member_id AND c.sign_count=$5 AND c.revoked_at IS NULL AND s.revoked_at IS NULL AND s.expires_at>clock_timestamp() AND m.status='active' AND m.role=s.role AND o.authority_epoch=s.organization_authority_epoch AND m.session_epoch=s.membership_session_epoch RETURNING c.id`, [uuid(input.session_id), uuid(input.organization_id), base64Bytes(input.credential_id, 16, 1024), counter(input.sign_count), counter(input.expected_sign_count)]);
+    const hasBackupState = input?.backup_eligible !== undefined || input?.backup_state !== undefined || input?.expected_backup_eligible !== undefined || input?.expected_backup_state !== undefined;
+    const backupEligible = hasBackupState ? strictBoolean(input?.backup_eligible, "backup_eligible") : null;
+    const backupState = hasBackupState ? strictBoolean(input?.backup_state, "backup_state") : null;
+    const expectedBackupEligible = hasBackupState ? strictBoolean(input?.expected_backup_eligible, "expected_backup_eligible") : null;
+    const expectedBackupState = hasBackupState ? strictBoolean(input?.expected_backup_state, "expected_backup_state") : null;
+    if (hasBackupState && ((backupState && !backupEligible) || (expectedBackupState && !expectedBackupEligible))) throw new TypeError("backup_state requires backup_eligible");
+    const result = await client.query(`UPDATE webauthn_credentials c SET sign_count=$4,backup_eligible=COALESCE($6,c.backup_eligible),backup_state=COALESCE($7,c.backup_state),last_used_at=clock_timestamp() FROM human_sessions s JOIN memberships m ON m.organization_id=s.organization_id AND m.member_id=s.member_id AND m.id=s.membership_id JOIN organizations o ON o.id=s.organization_id WHERE s.id=$1 AND s.organization_id=$2 AND c.id=$3 AND c.member_id=s.member_id AND c.sign_count=$5 AND ($8::boolean IS NULL OR c.backup_eligible=$8) AND ($9::boolean IS NULL OR c.backup_state=$9) AND c.revoked_at IS NULL AND s.revoked_at IS NULL AND s.expires_at>clock_timestamp() AND (s.idle_expires_at IS NULL OR s.idle_expires_at>clock_timestamp()) AND m.status='active' AND m.role=s.role AND o.authority_epoch=s.organization_authority_epoch AND m.session_epoch=s.membership_session_epoch RETURNING c.id`, [uuid(input.session_id), uuid(input.organization_id), base64Bytes(input.credential_id, 16, 1024), counter(input.sign_count), counter(input.expected_sign_count), backupEligible, backupState, expectedBackupEligible, expectedBackupState]);
     return result.rowCount === 1;
   }
 
@@ -470,3 +514,5 @@ function versionConflict() { const error = new Error("resource version conflict"
 function normalizeLastCredentialError(error) { return error?.code === "23514" && (error.constraint === "webauthn_credentials_last_active" || /last active WebAuthn credential/i.test(error.message ?? "")) ? lastCredentialError() : error; }
 function upstreamIdentityConflict() { const error = new Error("upstream identity mapping conflict"); error.code = "ERR_UPSTREAM_IDENTITY_CONFLICT"; return error; }
 function credentialExists() { const error = new Error("credential already exists"); error.code = "credential_exists"; return error; }
+function recentAuthRequired() { const error = new Error("recent authentication is required"); error.code = "recent_auth_required"; return error; }
+function parseDatabaseCount(value, label) { const count = typeof value === "string" && /^\d+$/.test(value) ? Number(value) : value; if (!Number.isSafeInteger(count) || count < 0) throw new TypeError(`${label} is invalid`); return count; }

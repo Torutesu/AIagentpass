@@ -74,8 +74,10 @@ function rowFromParams(params) {
 }
 
 class FakePgClient {
-  constructor({ now = () => Date.now(), store = undefined } = {}) {
+  constructor({ now = () => Date.now(), store = undefined, failQuery = undefined, failComplete = false } = {}) {
     this.now = now;
+    this.failQuery = failQuery;
+    this.failComplete = failComplete;
     this.calls = [];
     this.store = store ?? {
       rows: new Map(),
@@ -88,12 +90,28 @@ class FakePgClient {
   async query(text, params = []) {
     const sql = String(text).trim().replace(/\s+/g, " ");
     this.calls.push({ text: String(text), sql, params });
+    if (this.failQuery && sql.includes(this.failQuery)) throw new Error(this.failQuery);
     if (sql === "BEGIN" || sql === "COMMIT" || sql === "ROLLBACK") return { rows: [], rowCount: 0 };
     if (sql.startsWith("SELECT pg_advisory_xact_lock")) return { rows: [{ pg_advisory_xact_lock: null }], rowCount: 1 };
     if (sql.startsWith("UPDATE webauthn_challenges SET status = 'expired'")) {
       const cutoff = new Date(params[0]).getTime();
       for (const row of this.rows.values()) if (row.status === "pending" && row.consumed_at === null && row.expires_at.getTime() <= cutoff) row.status = "expired";
       return { rows: [], rowCount: 0 };
+    }
+    if (sql.startsWith("UPDATE webauthn_challenges SET status = 'failed'") && sql.includes("consume_started_at <= $2")) {
+      const failedAt = new Date(params[0]);
+      const cutoff = new Date(params[1]).getTime();
+      const onlyId = sql.includes("WHERE id = $3") ? params[2] : undefined;
+      const reaped = [];
+      for (const row of this.rows.values()) {
+        if (onlyId !== undefined && row.id !== onlyId) continue;
+        if (row.ceremony !== "authentication" || row.status !== "consuming" || row.consumed_at !== null || row.consume_started_at === null || row.consume_started_at.getTime() > cutoff) continue;
+        row.status = "failed";
+        row.failed_at = failedAt;
+        row.consumed_at = failedAt;
+        reaped.push({ id: row.id });
+      }
+      return { rows: reaped, rowCount: reaped.length };
     }
     if (sql.startsWith("SELECT count(*)::text AS pending_count")) {
       const cutoff = new Date(params[0]).getTime();
@@ -137,6 +155,7 @@ class FakePgClient {
       return { rows: [{ id: row.id, status: row.status, failed_at: row.failed_at, consumed_at: row.consumed_at }], rowCount: 1 };
     }
     if (sql.startsWith("UPDATE webauthn_challenges SET status = 'consumed'")) {
+      if (this.failComplete) return { rows: [], rowCount: 0 };
       const row = this.rows.get(params[0]);
       const at = new Date(params[1]);
       if (!row || row.status !== "consuming" || row.consumed_at !== null) return { rows: [], rowCount: 0 };
@@ -190,9 +209,9 @@ class FakePgPool {
   }
 }
 
-function create({ verifyAssertion, time = clock(), random = randomSource(), maxPending } = {}) {
-  const client = new FakePgClient({ now: time.now });
-  const coordinator = createPostgresWebAuthnCeremony({ client, verifyAssertion: verifyAssertion ?? (async (input) => ({ verified: true, credential_id: input.assertion.credential_id })), now: time.now, ttlMs: 60_000, random, maxPending });
+function create({ verifyAssertion, time = clock(), random = randomSource(), maxPending, verifierTimeoutMs, client: providedClient } = {}) {
+  const client = providedClient ?? new FakePgClient({ now: time.now });
+  const coordinator = createPostgresWebAuthnCeremony({ client, verifyAssertion: verifyAssertion ?? (async (input) => ({ verified: true, credential_id: input.assertion.credential_id })), now: time.now, ttlMs: 60_000, random, maxPending, verifierTimeoutMs });
   return { client, coordinator, time };
 }
 
@@ -309,6 +328,72 @@ test("fails closed on malformed PostgreSQL rows", async () => {
   const issued = await coordinator.begin(context);
   [...client.rows.values()][0].origin = null;
   await assert.rejects(() => coordinator.consume({ ...assertion(issued.challenge), challenge_id: issued.challenge_id }), (error) => error instanceof PostgresWebAuthnCeremonyError && error.code === "ERR_WEBAUTHN_STORAGE_RESULT");
+});
+
+test("reaps a crashed consuming claim before reporting replay", async () => {
+  const time = clock();
+  const { client, coordinator } = create({ time });
+  const issued = await coordinator.begin(context);
+  const row = [...client.rows.values()][0];
+  row.status = "consuming";
+  row.consume_started_at = new Date(time.now() - 40_000);
+  await assert.rejects(() => coordinator.consume({ ...assertion(issued.challenge), challenge_id: issued.challenge_id }), (error) => error.code === WEBAUTHN_ERROR_CODES.CHALLENGE_REPLAYED);
+  assert.equal(row.status, "failed");
+  assert.equal(row.consumed_at instanceof Date, true);
+});
+
+test("times out a stuck verifier, burns the claim, and keeps the error secret-free", async () => {
+  const { client, coordinator } = create({
+    verifierTimeoutMs: 1_000,
+    verifyAssertion: async () => new Promise(() => {})
+  });
+  const issued = await coordinator.begin(context);
+  await assert.rejects(() => coordinator.consume({ ...assertion(issued.challenge), challenge_id: issued.challenge_id }), (error) => {
+    assert.equal(error.cause, undefined);
+    return error instanceof WebAuthnCeremonyError && error.code === WEBAUTHN_ERROR_CODES.VERIFICATION_FAILED;
+  });
+  assert.equal([...client.rows.values()][0].status, "failed");
+});
+
+test("burns a claim when completion loses its storage result", async () => {
+  const time = clock();
+  const client = new FakePgClient({ now: time.now, failComplete: true });
+  const { coordinator } = create({ client, time });
+  const issued = await coordinator.begin(context);
+  await assert.rejects(() => coordinator.consume({ ...assertion(issued.challenge), challenge_id: issued.challenge_id }), (error) => {
+    assert.equal(error.cause, undefined);
+    return error instanceof PostgresWebAuthnCeremonyError && error.code === "ERR_WEBAUTHN_CLAIM_LOST";
+  });
+  assert.equal([...client.rows.values()][0].status, "failed");
+  await assert.rejects(() => coordinator.consume({ ...assertion(issued.challenge), challenge_id: issued.challenge_id }), (error) => error.code === WEBAUTHN_ERROR_CODES.CHALLENGE_REPLAYED);
+});
+
+test("database errors remain secret-free", async () => {
+  const secret = "postgres-assertion-secret";
+  const time = clock();
+  const client = new FakePgClient({ now: time.now, failQuery: "SELECT id, session_id, member_id" });
+  const { coordinator } = create({ client, time });
+  const issued = await coordinator.begin(context);
+  await assert.rejects(() => coordinator.consume({ ...assertion(issued.challenge), challenge_id: issued.challenge_id }), (error) => {
+    assert.equal(error.cause, undefined);
+    assert.doesNotMatch(error.message, new RegExp(secret, "u"));
+    assert.doesNotMatch(JSON.stringify(error), new RegExp(secret, "u"));
+    return error instanceof PostgresWebAuthnCeremonyError && error.code === "ERR_WEBAUTHN_STORAGE";
+  });
+});
+
+test("does not complete a claim after the challenge expires during verification", async () => {
+  const time = clock();
+  const { client, coordinator } = create({
+    time,
+    verifyAssertion: async (input) => {
+      time.advance(60_001);
+      return { verified: true, credential_id: input.assertion.credential_id };
+    }
+  });
+  const issued = await coordinator.begin(context);
+  await assert.rejects(() => coordinator.consume({ ...assertion(issued.challenge), challenge_id: issued.challenge_id }), (error) => error.code === WEBAUTHN_ERROR_CODES.CHALLENGE_EXPIRED);
+  assert.equal([...client.rows.values()][0].status, "failed");
 });
 
 test("binds the coordinator requirements to the reviewed 0003 migration", async () => {

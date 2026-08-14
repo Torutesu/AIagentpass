@@ -15,6 +15,7 @@ const ORGANIZATION_ID = "33333333-3333-4333-8333-333333333333";
 const CHALLENGE_ID = "44444444-4444-4444-8444-444444444444";
 const CREDENTIAL_ID = Buffer.alloc(16, 1).toString("base64url");
 const CHALLENGE = Buffer.alloc(32, 9).toString("base64url");
+const RECENT_AUTH_ID = "55555555-5555-4555-8555-555555555555";
 
 function session() {
   return { version: 1, session_id: SESSION_ID, member_id: MEMBER_ID, organization_id: ORGANIZATION_ID, role: "owner", created_at: "2026-08-12T00:00:00.000Z", expires_at: "2026-08-12T08:00:00.000Z", recent_auth_at: null };
@@ -69,6 +70,18 @@ test("registration options enforce exact origin/session CSRF and return no-store
   assert.equal(calls.authenticate[0].csrfToken, "b".repeat(43));
   assert.equal(calls.begin[0].session.session_id, SESSION_ID);
   assert.equal(calls.begin[0].organization_id, ORGANIZATION_ID);
+});
+
+test("registration forwards the recent-auth header only as a service authorization input", async () => {
+  const { api, calls } = fixture();
+  const optionsResult = await api.handle(request("/api/auth/webauthn/registration/options", { organization_id: ORGANIZATION_ID }, { "agentpass-recent-auth": RECENT_AUTH_ID }));
+  assert.equal(optionsResult.status, 200);
+  assert.equal(calls.begin[0].recent_auth, RECENT_AUTH_ID);
+
+  const verifyResult = await api.handle(request("/api/auth/webauthn/registration/verify", { organization_id: ORGANIZATION_ID, challenge_id: CHALLENGE_ID, credential: browserCredential() }, { "agentpass-recent-auth": RECENT_AUTH_ID }));
+  assert.equal(verifyResult.status, 201);
+  assert.equal(calls.verify[0].recent_auth, RECENT_AUTH_ID);
+  assert.equal(Object.hasOwn(calls.verify[0].credential, "recent_auth"), false);
 });
 
 test("registration parses Buffer and Uint8Array JSON bodies from the real Node server adapter", async () => {
@@ -147,4 +160,16 @@ test("registration HTTP maps challenge replay and credential conflicts without e
   const conflictResult = await conflict.api.handle(request("/api/auth/webauthn/registration/verify", { organization_id: ORGANIZATION_ID, challenge_id: CHALLENGE_ID, credential: browserCredential() }));
   assert.equal(conflictResult.status, 409);
   assert.equal(conflictResult.body.error.code, WEBAUTHN_REGISTRATION_HTTP_ERROR_CODES.CREDENTIAL_EXISTS);
+});
+
+test("registration HTTP maps step-up failures to stable authentication responses", async () => {
+  const required = fixture({ beginError: new WebAuthnRegistrationError(WEBAUTHN_REGISTRATION_ERROR_CODES.RECENT_AUTH_REQUIRED) });
+  const requiredResult = await required.api.handle(request("/api/auth/webauthn/registration/options", { organization_id: ORGANIZATION_ID }));
+  assert.equal(requiredResult.status, 401);
+  assert.equal(requiredResult.body.error.code, WEBAUTHN_REGISTRATION_HTTP_ERROR_CODES.RECENT_AUTH_REQUIRED);
+
+  const unavailable = fixture({ verifyError: new WebAuthnRegistrationError(WEBAUTHN_REGISTRATION_ERROR_CODES.RECENT_AUTH_UNAVAILABLE) });
+  const unavailableResult = await unavailable.api.handle(request("/api/auth/webauthn/registration/verify", { organization_id: ORGANIZATION_ID, challenge_id: CHALLENGE_ID, credential: browserCredential() }));
+  assert.equal(unavailableResult.status, 503);
+  assert.equal(unavailableResult.body.error.code, WEBAUTHN_REGISTRATION_HTTP_ERROR_CODES.RECENT_AUTH_UNAVAILABLE);
 });

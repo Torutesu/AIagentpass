@@ -20,6 +20,7 @@ export const ORGANIZATION_SERVICE_ERROR_CODES = Object.freeze({
   INVITATION_NOT_FOUND: "invitation_not_found",
   FORBIDDEN: "forbidden",
   VERSION_CONFLICT: "version_conflict",
+  STALE_SESSION: "stale_session",
   IDEMPOTENCY_CONFLICT: "idempotency_conflict",
   INVITATION_REPLAYED: "invitation_replayed",
   UNAVAILABLE: "organization_service_unavailable"
@@ -139,13 +140,20 @@ export function createPostgresOrganizationService({
     const idempotency_key = idempotencyKey(input.idempotency_key);
     const role = requiredRole(input.role);
     const expected_version = requiredVersion(input.expected_version);
+    const recentAuthorization = optionalRecentAuthorization(input.recent_authorization, actor);
     const result = await invoke("updateMemberRole", {
       organization_id: requiredOrganizationId(input.organization_id),
       actor_member_id: actor.member_id,
+      actor_session_id: actor.session_id,
       member_id: requiredMemberId(input.member_id),
       role,
       expected_version,
       revoked_at: currentTimestamp(),
+      ...(recentAuthorization ? {
+        recent_auth_challenge_id: recentAuthorization.challenge_id,
+        recent_auth_operation: recentAuthorization.operation,
+        recent_auth_authenticated_at: recentAuthorization.authenticated_at
+      } : {}),
       idempotency_key
     }, ORGANIZATION_SERVICE_ERROR_CODES.MEMBER_NOT_FOUND);
     return sanitize(result);
@@ -155,12 +163,19 @@ export function createPostgresOrganizationService({
     const actor = requiredActor(input);
     const idempotency_key = idempotencyKey(input.idempotency_key);
     const expected_version = requiredVersion(input.expected_version);
+    const recentAuthorization = optionalRecentAuthorization(input.recent_authorization, actor);
     const result = await invoke("removeMember", {
       organization_id: requiredOrganizationId(input.organization_id),
       actor_member_id: actor.member_id,
+      actor_session_id: actor.session_id,
       member_id: requiredMemberId(input.member_id),
       expected_version,
       removed_at: currentTimestamp(),
+      ...(recentAuthorization ? {
+        recent_auth_challenge_id: recentAuthorization.challenge_id,
+        recent_auth_operation: recentAuthorization.operation,
+        recent_auth_authenticated_at: recentAuthorization.authenticated_at
+      } : {}),
       idempotency_key
     }, ORGANIZATION_SERVICE_ERROR_CODES.MEMBER_NOT_FOUND);
     return sanitize(result);
@@ -344,7 +359,7 @@ function pagination(input) {
 
 function requiredActor(input) {
   const actor = input?.actor;
-  if (!actor || typeof actor !== "object" || Array.isArray(actor) || typeof actor.member_id !== "string" || typeof actor.organization_id !== "string" || !UUID.test(actor.member_id) || !UUID.test(actor.organization_id) || !ROLES.has(actor.role)) {
+  if (!actor || typeof actor !== "object" || Array.isArray(actor) || typeof actor.session_id !== "string" || typeof actor.member_id !== "string" || typeof actor.organization_id !== "string" || !UUID.test(actor.session_id) || !UUID.test(actor.member_id) || !UUID.test(actor.organization_id) || !ROLES.has(actor.role)) {
     throw serviceError(ORGANIZATION_SERVICE_ERROR_CODES.INVALID_INPUT);
   }
   return actor;
@@ -366,6 +381,23 @@ function requiredVersion(value) {
 function requiredRole(value) {
   if (typeof value !== "string" || !ROLES.has(value)) throw serviceError(ORGANIZATION_SERVICE_ERROR_CODES.INVALID_INPUT);
   return value;
+}
+
+function optionalRecentAuthorization(value, actor) {
+  if (value === undefined) return undefined;
+  if (!value || typeof value !== "object" || Array.isArray(value)
+    || value.session_id !== actor.session_id
+    || typeof value.challenge_id !== "string" || !UUID.test(value.challenge_id)
+    || typeof value.operation !== "string" || value.operation.length < 1 || value.operation.length > 128
+    || !Number.isSafeInteger(value.authenticated_at) || value.authenticated_at < 0) {
+    throw serviceError(ORGANIZATION_SERVICE_ERROR_CODES.INVALID_INPUT);
+  }
+  return Object.freeze({
+    session_id: value.session_id.toLowerCase(),
+    challenge_id: value.challenge_id.toLowerCase(),
+    operation: value.operation,
+    authenticated_at: value.authenticated_at
+  });
 }
 
 function requiredInvitableRole(value) {
@@ -443,6 +475,7 @@ function mapRepositoryError(error) {
   if (["last_owner", "err_last_owner", "owner_constraint", "cannot_remove_owner"].includes(code)) return serviceError(ORGANIZATION_SERVICE_ERROR_CODES.FORBIDDEN, "last_owner");
   if (["role_not_allowed", "err_role_not_allowed", "role_downgrade_forbidden"].includes(code)) return serviceError(ORGANIZATION_SERVICE_ERROR_CODES.FORBIDDEN, "role_not_allowed");
   if (["forbidden", "err_forbidden", "not_authorized", "owner_required", "err_actor"].includes(code)) return serviceError(ORGANIZATION_SERVICE_ERROR_CODES.FORBIDDEN);
+  if (["stale_session", "err_stale_session", "actor_session_required", "err_actor_session_required"].includes(code)) return serviceError(ORGANIZATION_SERVICE_ERROR_CODES.STALE_SESSION, "stale_session");
   if (["version_conflict", "err_version_conflict", "expected_version_mismatch", "stale_version"].includes(code)) return serviceError(ORGANIZATION_SERVICE_ERROR_CODES.VERSION_CONFLICT);
   if (["idempotency_conflict", "err_idempotency_conflict", "idempotency_key_reused"].includes(code)) return serviceError(ORGANIZATION_SERVICE_ERROR_CODES.IDEMPOTENCY_CONFLICT);
   if (["invitation_replayed", "invitation_token_replayed", "token_replayed", "already_used", "invitation_expired"].includes(code)) return serviceError(ORGANIZATION_SERVICE_ERROR_CODES.INVITATION_REPLAYED);

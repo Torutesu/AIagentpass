@@ -1,4 +1,5 @@
 import crypto from "node:crypto";
+import { isIP } from "node:net";
 
 import {
   WebAuthnRegistrationError,
@@ -8,6 +9,9 @@ import {
 const DEFAULT_TTL_MS = 120_000;
 const MAX_TTL_MS = 300_000;
 const MAX_PENDING = 10_000;
+const DEFAULT_VERIFIER_TIMEOUT_MS = 15_000;
+const MAX_VERIFIER_TIMEOUT_MS = 30_000;
+const CLAIM_LEASE_MS = MAX_VERIFIER_TIMEOUT_MS + 5_000;
 const CHALLENGE_BYTES = 32;
 const MAX_CLIENT_DATA_BYTES = 16 * 1024;
 const MAX_ATTESTATION_OBJECT_BYTES = 64 * 1024;
@@ -51,7 +55,36 @@ SET status = 'expired'
 WHERE ceremony = 'registration'
   AND status = 'pending'
   AND consumed_at IS NULL
-  AND expires_at <= $1`;
+  AND expires_at <= $1
+RETURNING id`;
+
+const REAP_STALE_SQL = `
+UPDATE webauthn_challenges
+SET status = 'failed', failed_at = $1, consumed_at = $1
+WHERE ceremony = 'registration'
+  AND status = 'consuming'
+  AND consumed_at IS NULL
+  AND consume_started_at IS NOT NULL
+  AND consume_started_at <= $2
+RETURNING id`;
+
+const REAP_ONE_SQL = `
+UPDATE webauthn_challenges
+SET status = 'failed', failed_at = $1, consumed_at = $1
+WHERE id = $3
+  AND ceremony = 'registration'
+  AND session_id = $4
+  AND member_id = $5
+  AND organization_id = $6
+  AND operation = $7
+  AND rp_id = $8
+  AND origin = $9
+  AND user_verification = $10
+  AND status = 'consuming'
+  AND consumed_at IS NULL
+  AND consume_started_at IS NOT NULL
+  AND consume_started_at <= $2
+RETURNING id`;
 
 const CAPACITY_LOCK_SQL = "SELECT pg_advisory_xact_lock(hashtextextended('agentpass:webauthn:capacity', 0))";
 
@@ -137,10 +170,12 @@ export const POSTGRES_WEBAUTHN_REGISTRATION_SCHEMA_REQUIREMENTS = Object.freeze(
 
 export class PostgresWebAuthnRegistrationCeremonyError extends Error {
   constructor(code, message = "PostgreSQL WebAuthn registration ceremony failed", cause = undefined) {
-    super(message, cause === undefined ? undefined : { cause });
+    // Database/provider diagnostics can contain query fragments or caller
+    // material. Keep the public error contract deliberately secret-free.
+    super(message);
+    void cause;
     this.name = "PostgresWebAuthnRegistrationCeremonyError";
     this.code = code;
-    if (cause !== undefined) this.cause = cause;
   }
 }
 
@@ -157,6 +192,7 @@ export function createPostgresWebAuthnRegistrationCeremony({
   now = () => Date.now(),
   ttlMs = DEFAULT_TTL_MS,
   maxPending = MAX_PENDING,
+  verifierTimeoutMs = DEFAULT_VERIFIER_TIMEOUT_MS,
   randomUUID = crypto.randomUUID,
   randomBytes = crypto.randomBytes,
   random
@@ -167,6 +203,7 @@ export function createPostgresWebAuthnRegistrationCeremony({
   assertClock(now());
   assertDuration(ttlMs, "ttlMs", 1_000, MAX_TTL_MS);
   if (!Number.isSafeInteger(maxPending) || maxPending < 1 || maxPending > MAX_PENDING) throw new TypeError("maxPending is invalid");
+  assertDuration(verifierTimeoutMs, "verifierTimeoutMs", 1_000, MAX_VERIFIER_TIMEOUT_MS);
   const makeUuid = random?.uuid ?? randomUUID;
   const makeBytes = random?.bytes ?? randomBytes;
   if (typeof makeUuid !== "function" || typeof makeBytes !== "function") throw new TypeError("random source is invalid");
@@ -192,6 +229,7 @@ export function createPostgresWebAuthnRegistrationCeremony({
       const inserted = await withTransaction(transaction.client, async () => {
         await transactionQuery(CAPACITY_LOCK_SQL, []);
         await transactionQuery(EXPIRE_SQL, [createdAtIso]);
+        await transactionQuery(REAP_STALE_SQL, [createdAtIso, new Date(Math.max(0, issuedAt - CLAIM_LEASE_MS)).toISOString()]);
         const capacity = await transactionQuery(CAPACITY_SQL, [createdAtIso]);
         if (parseCount(capacity.rows[0]?.pending_count) >= maxPending) fail(WEBAUTHN_REGISTRATION_ERROR_CODES.CAPACITY_EXCEEDED);
         return transactionQuery(BEGIN_SQL, [
@@ -228,12 +266,13 @@ export function createPostgresWebAuthnRegistrationCeremony({
     const request = normalizeConsumeInput(input);
     const currentTime = assertClock(now());
     const currentIso = new Date(currentTime).toISOString();
+    await dbQuery(REAP_ONE_SQL, [currentIso, new Date(Math.max(0, currentTime - CLAIM_LEASE_MS)).toISOString(), request.challenge_id, request.session_id, request.member_id, request.organization_id, request.operation, request.rp_id, request.origin, request.user_verification]);
     let record = await loadRecord(request.challenge_id);
     assertRecord(record, request.challenge_id);
+    if (!sameBinding(record, request)) fail(WEBAUTHN_REGISTRATION_ERROR_CODES.BINDING_MISMATCH);
     if (record.status === "consuming") fail(WEBAUTHN_REGISTRATION_ERROR_CODES.CHALLENGE_BUSY);
     if (record.status === "consumed" || record.status === "failed") fail(WEBAUTHN_REGISTRATION_ERROR_CODES.CHALLENGE_REPLAYED);
     if (record.status === "expired" || currentTime >= record.expires_at) fail(WEBAUTHN_REGISTRATION_ERROR_CODES.CHALLENGE_EXPIRED);
-    if (!sameBinding(record, request)) fail(WEBAUTHN_REGISTRATION_ERROR_CODES.BINDING_MISMATCH);
     if (!constantTimeBufferEqual(record.challenge_hash, sha256Bytes(request.challenge))) fail(WEBAUTHN_REGISTRATION_ERROR_CODES.CHALLENGE_MISMATCH);
 
     const verifierInput = buildVerifierInput(record, request);
@@ -248,8 +287,13 @@ export function createPostgresWebAuthnRegistrationCeremony({
 
     let verification;
     try {
-      verification = await verifyAttestation(verifierInput);
-      verification = validateVerifierResult(verification, request);
+      verification = validateVerifierResult(
+        await withTimeout(
+          () => verifyAttestation(verifierInput),
+          Math.max(1, Math.min(verifierTimeoutMs, record.expires_at - currentTime))
+        ),
+        request
+      );
     } catch (error) {
       await burn(request.challenge_id, new Date(assertClock(now())).toISOString());
       if (error instanceof WebAuthnRegistrationError && error.code === WEBAUTHN_REGISTRATION_ERROR_CODES.INVALID_VERIFIER_RESULT) throw error;
@@ -257,9 +301,19 @@ export function createPostgresWebAuthnRegistrationCeremony({
     }
 
     const authenticatedAt = assertClock(now());
-    const completed = await dbQuery(COMPLETE_SQL, [request.challenge_id, new Date(authenticatedAt).toISOString()]);
-    if (completed.rows.length !== 1) throw storageError("ERR_WEBAUTHN_REGISTRATION_CLAIM_LOST", "registration challenge could not be completed");
-    assertTerminalRow(completed.rows[0], request.challenge_id, "consumed");
+    if (authenticatedAt >= record.expires_at) {
+      await burn(request.challenge_id, new Date(authenticatedAt).toISOString());
+      fail(WEBAUTHN_REGISTRATION_ERROR_CODES.CHALLENGE_EXPIRED);
+    }
+    let completed;
+    try {
+      completed = await dbQuery(COMPLETE_SQL, [request.challenge_id, new Date(authenticatedAt).toISOString()]);
+      if (completed.rows.length !== 1) throw storageError("ERR_WEBAUTHN_REGISTRATION_CLAIM_LOST", "registration challenge could not be completed");
+      assertTerminalRow(completed.rows[0], request.challenge_id, "consumed");
+    } catch (error) {
+      await burnBestEffort(request.challenge_id, new Date(authenticatedAt).toISOString());
+      throw error;
+    }
     return Object.freeze({
       verified: true,
       registration_id: request.challenge_id,
@@ -314,6 +368,16 @@ export function createPostgresWebAuthnRegistrationCeremony({
     const result = await dbQuery(BURN_SQL, [id, timestamp]);
     if (result.rows.length !== 1) throw storageError("ERR_WEBAUTHN_REGISTRATION_BURN_FAILED", "registration challenge could not be burned");
     assertTerminalRow(result.rows[0], id, "failed");
+  }
+
+  async function burnBestEffort(id, timestamp) {
+    try {
+      const result = await dbQuery(BURN_SQL, [id, timestamp]);
+      if (result.rows.length === 1) assertTerminalRow(result.rows[0], id, "failed");
+    } catch {
+      // The original completion error is safer and more actionable for the
+      // caller. A best-effort burn never turns it into a raw DB error.
+    }
   }
 }
 
@@ -371,6 +435,7 @@ function normalizeContext(input) {
   const operation = requiredOperation(input.operation);
   const rp_id = requiredRpId(input.rp_id ?? input.rpId);
   const origin = requiredOrigin(input.origin);
+  if (!rpIdMatchesOrigin(rp_id, origin)) fail(WEBAUTHN_REGISTRATION_ERROR_CODES.INVALID_CONTEXT, "rp_id");
   if ((input.user_verification ?? input.userVerification ?? "required") !== "required") fail(WEBAUTHN_REGISTRATION_ERROR_CODES.INVALID_CONTEXT, "user_verification");
   return Object.freeze({ session_id, member_id, organization_id, operation, rp_id, origin, user_verification: "required" });
 }
@@ -397,6 +462,7 @@ function normalizeRecord(row) {
   const operation = storageOperation(row.operation);
   const rp_id = storageRpId(row.rp_id);
   const origin = storageOrigin(row.origin);
+  if (!rpIdMatchesOrigin(rp_id, origin)) throw storageError("ERR_WEBAUTHN_REGISTRATION_STORAGE_RESULT", "rp_id is not valid for origin");
   if (row.user_verification !== "required" || !STATUS.has(row.status)) throw storageError("ERR_WEBAUTHN_REGISTRATION_STORAGE_RESULT", "WebAuthn challenge binding or status is invalid");
   const created_at = storageTime(row.created_at, "created_at");
   const expires_at = storageTime(row.expires_at, "expires_at");
@@ -467,6 +533,7 @@ function validateVerifierResult(result, request) {
   const transports = result.transports === undefined ? request.transports : normalizeTransports(result.transports);
   if (result.credential_device_type !== undefined && !["singleDevice", "multiDevice"].includes(result.credential_device_type)) fail(WEBAUTHN_REGISTRATION_ERROR_CODES.INVALID_VERIFIER_RESULT);
   if (result.credential_backed_up !== undefined && typeof result.credential_backed_up !== "boolean") fail(WEBAUTHN_REGISTRATION_ERROR_CODES.INVALID_VERIFIER_RESULT);
+  validateCredentialMetadata(result.credential_device_type, result.credential_backed_up);
   return Object.freeze({ credential_id, public_key, sign_count: result.sign_count, transports, ...(result.credential_device_type === undefined ? {} : { credential_device_type: result.credential_device_type }), ...(result.credential_backed_up === undefined ? {} : { credential_backed_up: result.credential_backed_up }) });
 }
 
@@ -489,6 +556,7 @@ function requiredRpId(value) { if (typeof value !== "string" || value.length < 1
 function storageRpId(value) { try { return requiredRpId(value); } catch { throw storageError("ERR_WEBAUTHN_REGISTRATION_STORAGE_RESULT", "rp_id is invalid"); } }
 function requiredOrigin(value) { if (typeof value !== "string" || value.length > 512 || /[\u0000-\u001f\u007f]/.test(value)) throw new TypeError("origin is invalid"); let url; try { url = new URL(value); } catch { throw new TypeError("origin is invalid"); } if (!ORIGIN_SCHEMES.has(url.protocol) || url.username || url.password || url.pathname !== "/" || url.search || url.hash || (url.protocol === "http:" && !["localhost", "127.0.0.1", "[::1]"].includes(url.hostname)) || url.origin !== value) throw new TypeError("origin is invalid"); return url.origin; }
 function storageOrigin(value) { try { return requiredOrigin(value); } catch { throw storageError("ERR_WEBAUTHN_REGISTRATION_STORAGE_RESULT", "origin is invalid"); } }
+function rpIdMatchesOrigin(rpId, origin) { const host = new URL(origin).hostname.toLowerCase(); const normalizedHost = host.startsWith("[") && host.endsWith("]") ? host.slice(1, -1) : host; if (isIP(normalizedHost) !== 0 || isIP(rpId) !== 0) return normalizedHost === rpId; return normalizedHost === rpId || normalizedHost.endsWith(`.${rpId}`); }
 function requiredBase64Url(value, min, max, field) { if (!isBase64Url(value, min, max)) fail(WEBAUTHN_REGISTRATION_ERROR_CODES.INVALID_REQUEST, field); return value; }
 function isBase64Url(value, min, max) { if (typeof value !== "string" || !BASE64URL.test(value)) return false; let bytes; try { bytes = Buffer.from(value, "base64url"); } catch { return false; } return bytes.length >= min && bytes.length <= max && bytes.toString("base64url") === value; }
 function decodeBase64Url(value, min, max, errorCode) { if (!isBase64Url(value, min, max)) fail(errorCode); return Buffer.from(value, "base64url"); }
@@ -498,3 +566,17 @@ function optionalStorageTime(value, field) { if (value === null || value === und
 function parseCount(value) { const count = typeof value === "string" && /^\d+$/.test(value) ? Number(value) : value; if (!Number.isSafeInteger(count) || count < 0) throw storageError("ERR_WEBAUTHN_REGISTRATION_STORAGE_RESULT", "pending count is invalid"); return count; }
 function fail(code, details = undefined) { throw new WebAuthnRegistrationError(code, details); }
 function storageError(code, message, cause = undefined) { return new PostgresWebAuthnRegistrationCeremonyError(code, message, cause); }
+
+function withTimeout(callback, timeoutMs) {
+  let timer;
+  const timeout = new Promise((_, reject) => {
+    timer = setTimeout(() => reject(new Error("WebAuthn verifier timed out")), timeoutMs);
+    timer.unref?.();
+  });
+  return Promise.race([Promise.resolve().then(callback), timeout]).finally(() => clearTimeout(timer));
+}
+
+function validateCredentialMetadata(deviceType, backedUp) {
+  if (deviceType === "singleDevice" && backedUp === true) fail(WEBAUTHN_REGISTRATION_ERROR_CODES.INVALID_VERIFIER_RESULT);
+  if (backedUp === true && deviceType !== "multiDevice") fail(WEBAUTHN_REGISTRATION_ERROR_CODES.INVALID_VERIFIER_RESULT);
+}

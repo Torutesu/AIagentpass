@@ -152,6 +152,43 @@ test("rejects malformed data, maps conflicts, and does not persist invitation to
   assert.doesNotMatch(source, /localStorage|sessionStorage|console\.(?:log|info|warn|error)/);
 });
 
+test("classifies expired and recent-auth failures for actionable organization UI states", async () => {
+  const expired = createOrganizationClient({ fetchImpl: async (url) => {
+    if (url === "/api/auth/session") return sessionResponse();
+    return json({ error: { code: "invitation_expired", message: "Invitation expired" } }, 410);
+  } });
+  await assert.rejects(() => expired.revokeInvitation({ organizationId, invitationId, expectedVersion: 1, idempotencyKey: "expired-invite-1" }), (error) => error instanceof OrganizationClientError && error.code === "expired" && error.status === 410);
+
+  const recentAuth = createOrganizationClient({
+    fetchImpl: async (url) => {
+      if (url === "/api/auth/session") return sessionResponse();
+      throw new Error("request should not reach Cloud when authentication is cancelled");
+    },
+    authorizeRecentAuthImpl: async () => { throw new Error("passkey cancelled"); },
+  });
+  await assert.rejects(() => recentAuth.updateMemberRole({ organizationId, memberId, role: "admin", expectedVersion: 3, idempotencyKey: "recent-auth-1" }), (error) => error instanceof OrganizationClientError && error.code === "recent_auth_required");
+});
+
+test("drops the cached human session after an unauthorized organization response", async () => {
+  let sessionCalls = 0;
+  let organizationCalls = 0;
+  const client = createOrganizationClient({ fetchImpl: async (url) => {
+    if (url === "/api/auth/session") {
+      sessionCalls += 1;
+      return sessionResponse();
+    }
+    organizationCalls += 1;
+    if (organizationCalls === 1) return json({ error: { code: "session_expired", message: "Session expired" } }, 401);
+    return json({ request_id: requestId, organizations: [organization()], next_cursor: null });
+  } });
+
+  await assert.rejects(() => client.listOrganizations(), (error) => error instanceof OrganizationClientError && error.code === "unauthorized");
+  const page = await client.listOrganizations();
+  assert.equal(page.items[0].id, organizationId);
+  assert.equal(sessionCalls, 2);
+  assert.equal(organizationCalls, 2);
+});
+
 test("exposes least-privilege visibility for every organization role", () => {
   assert.deepEqual(getOrganizationVisibility("owner"), { canViewOrganization: true, canViewMembers: true, canViewInvitations: true, canManageOrganization: true, canManageMembers: true, canAssignOwner: true, canInvite: true, canRevokeInvitations: true });
   assert.deepEqual(getOrganizationVisibility("admin"), { canViewOrganization: true, canViewMembers: true, canViewInvitations: true, canManageOrganization: true, canManageMembers: true, canAssignOwner: false, canInvite: true, canRevokeInvitations: true });

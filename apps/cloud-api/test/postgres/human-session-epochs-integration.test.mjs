@@ -71,8 +71,28 @@ test("human session epochs invalidate stale authority and serialize concurrent r
   assert.equal(await repository.findSessionByTokenHash({ token_hash: (rotations[0] ? "3" : "4").repeat(64) }), null);
 
   const currentToken = "5".repeat(64);
-  await repository.createSession(session(randomUUID(), currentToken, "admin"));
+  const currentSessionId = randomUUID();
+  await repository.createSession(session(currentSessionId, currentToken, "admin"));
   assert.ok(await repository.findSessionByTokenHash({ token_hash: currentToken }));
+
+  const otherSessionId = randomUUID();
+  await repository.createSession(session(otherSessionId, "6".repeat(64), "admin"));
+  const challengeId = randomUUID();
+  const otherSessionChallengeId = randomUUID();
+  const operation = "organization.emergency_stop";
+  await pool.query(`INSERT INTO webauthn_challenges
+    (id,session_id,member_id,organization_id,ceremony,operation,challenge_hash,created_at,expires_at,consumed_at,rp_id,origin,user_verification,status)
+    VALUES ($1,$2,$3,$4,'authentication',$5,$6,$7,$8,$7,'console.agentpass.test','https://console.agentpass.test','required','consumed')`,
+  [challengeId, currentSessionId, memberId, organizationId, operation, Buffer.alloc(32, 0x71), ROTATED_AT, EXPIRES_AT]);
+  await pool.query(`INSERT INTO webauthn_challenges
+    (id,session_id,member_id,organization_id,ceremony,operation,challenge_hash,created_at,expires_at,consumed_at,rp_id,origin,user_verification,status)
+    VALUES ($1,$2,$3,$4,'authentication',$5,$6,$7,$8,$7,'console.agentpass.test','https://console.agentpass.test','required','consumed')`,
+  [otherSessionChallengeId, otherSessionId, memberId, organizationId, operation, Buffer.alloc(32, 0x72), ROTATED_AT, EXPIRES_AT]);
+  assert.equal(await repository.bindRecentAuth({ session_id: currentSessionId, member_id: memberId, organization_id: organizationId, operation, challenge_id: otherSessionChallengeId, authenticated_at: ROTATED_AT }), false);
+  assert.equal(await repository.bindRecentAuth({ session_id: currentSessionId, member_id: memberId, organization_id: organizationId, operation, challenge_id: challengeId, authenticated_at: ROTATED_AT }), true);
+  assert.equal(await repository.consumeRecentAuth({ session_id: otherSessionId, member_id: memberId, organization_id: organizationId, operation, challenge_id: challengeId, consumed_at: ROTATED_AT }), null);
+  assert.ok(await repository.consumeRecentAuth({ session_id: currentSessionId, member_id: memberId, organization_id: organizationId, operation, challenge_id: challengeId, consumed_at: ROTATED_AT }));
+
   await pool.query("SELECT agentpass_bump_organization_authority_epoch($1)", [organizationId]);
   assert.equal(await repository.findSessionByTokenHash({ token_hash: currentToken }), null);
 });

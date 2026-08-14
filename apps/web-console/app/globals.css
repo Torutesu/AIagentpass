@@ -404,6 +404,88 @@ a:focus-visible {
   width: 100%;
 }
 
+.organization-panel {
+  container-type: inline-size;
+}
+
+.organization-panel .organization-status {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.organization-panel [aria-busy="true"] {
+  cursor: progress;
+}
+
+.organization-panel button:disabled,
+.organization-panel select:disabled,
+.organization-panel input:disabled {
+  cursor: not-allowed;
+  opacity: 0.62;
+}
+
+.organization-panel .organization-list-row[data-state="pending"] {
+  border-color: var(--amber);
+  background: color-mix(in srgb, var(--amber-soft) 42%, transparent);
+}
+
+.organization-panel .organization-list-row[data-state="expired"],
+.organization-panel .organization-list-row[data-state="revoked"] {
+  color: var(--ink-soft);
+  background: color-mix(in srgb, var(--canvas-deep) 46%, transparent);
+}
+
+.organization-panel .organization-list-row[data-state="expired"] strong,
+.organization-panel .organization-list-row[data-state="revoked"] strong {
+  color: var(--ink-soft);
+}
+
+.organization-panel .organization-confirmation {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  padding: 8px 10px;
+  border: 1px solid #e4b8b1;
+  border-radius: 7px;
+  background: var(--red-soft);
+  color: var(--red);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.organization-panel .organization-token {
+  user-select: all;
+}
+
+.organization-panel .sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+@media (max-width: 620px) {
+  .organization-panel .organization-status {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .organization-panel .organization-status button {
+    width: 100%;
+  }
+
+  .organization-panel .organization-confirmation {
+    width: 100%;
+  }
+}
+
 .eyebrow {
   margin: 0 0 12px;
   color: var(--forest);

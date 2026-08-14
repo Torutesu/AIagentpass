@@ -308,9 +308,9 @@ export function createHumanOrganizationsHttpApi({
     if (typeof input.role !== "string" || !ROLES.has(input.role)) throw invalidRequest();
     if (input.role === "owner" && actor.role !== "owner") throw roleNotAllowed();
     const expectedVersion = requiredExpectedVersion(request);
-    await requireRecentAuth(actor, route.organizationId, request, HUMAN_ORGANIZATIONS_RECENT_AUTH_OPERATIONS.updateMemberRole);
+    const recentAuthorization = await requireRecentAuth(actor, route.organizationId, request, HUMAN_ORGANIZATIONS_RECENT_AUTH_OPERATIONS.updateMemberRole);
     try {
-      const result = await organizationService.updateMemberRole({ actor, organization_id: route.organizationId, member_id: route.memberId, role: input.role, expected_version: expectedVersion, idempotency_key: idempotencyKey });
+      const result = await organizationService.updateMemberRole({ actor, organization_id: route.organizationId, member_id: route.memberId, role: input.role, expected_version: expectedVersion, idempotency_key: idempotencyKey, recent_authorization: recentAuthorization });
       return response(200, { member: normalizeMember(result?.member ?? result, route.organizationId, route.memberId) });
     } catch (error) {
       throw mapServiceError(error, "member");
@@ -322,9 +322,9 @@ export function createHumanOrganizationsHttpApi({
     requireRole(actor, ADMIN_OR_OWNER);
     parseBody(body, new Set());
     const expectedVersion = requiredExpectedVersion(request);
-    await requireRecentAuth(actor, route.organizationId, request, HUMAN_ORGANIZATIONS_RECENT_AUTH_OPERATIONS.removeMember);
+    const recentAuthorization = await requireRecentAuth(actor, route.organizationId, request, HUMAN_ORGANIZATIONS_RECENT_AUTH_OPERATIONS.removeMember);
     try {
-      const result = await organizationService.removeMember({ actor, organization_id: route.organizationId, member_id: route.memberId, expected_version: expectedVersion, idempotency_key: idempotencyKey });
+      const result = await organizationService.removeMember({ actor, organization_id: route.organizationId, member_id: route.memberId, expected_version: expectedVersion, idempotency_key: idempotencyKey, recent_authorization: recentAuthorization });
       return response(200, { member: normalizeMember(result?.member ?? result, route.organizationId, route.memberId) });
     } catch (error) {
       throw mapServiceError(error, "member");
@@ -440,6 +440,12 @@ export function createHumanOrganizationsHttpApi({
     if (authorization.authenticated_at > authenticatedAt + 30_000 || authenticatedAt - authorization.authenticated_at > 5 * 60_000) {
       throw new HumanOrganizationsHttpError(HUMAN_ORGANIZATIONS_HTTP_ERROR_CODES.RECENT_AUTH_STALE, { status: 401 });
     }
+    return Object.freeze({
+      session_id: actor.session_id,
+      challenge_id: authorization.challenge_id,
+      operation: authorization.operation,
+      authenticated_at: authorization.authenticated_at
+    });
   }
 }
 
@@ -637,6 +643,7 @@ function mapServiceError(error, resource) {
   if (["invitation_not_found"].includes(code)) return new HumanOrganizationsHttpError(HUMAN_ORGANIZATIONS_HTTP_ERROR_CODES.INVITATION_NOT_FOUND, { status: 404, cause: error });
   if (error?.reason === "last_owner" || ["last_owner", "err_last_owner", "owner_constraint", "cannot_remove_owner"].includes(code)) return new HumanOrganizationsHttpError(HUMAN_ORGANIZATIONS_HTTP_ERROR_CODES.LAST_OWNER_PROTECTED, { status: 409, cause: error });
   if (error?.reason === "role_not_allowed" || ["role_not_allowed", "err_role_not_allowed", "role_downgrade_forbidden"].includes(code)) return new HumanOrganizationsHttpError(HUMAN_ORGANIZATIONS_HTTP_ERROR_CODES.ROLE_NOT_ALLOWED, { status: 403, cause: error });
+  if (error?.reason === "stale_session" || ["stale_session", "err_stale_session", "actor_session_required", "err_actor_session_required"].includes(code)) return new HumanOrganizationsHttpError(HUMAN_ORGANIZATIONS_HTTP_ERROR_CODES.RECENT_AUTH_STALE, { status: 401, cause: error });
   if (["forbidden", "err_forbidden", "not_authorized", "owner_required", "err_actor"].includes(code)) return new HumanOrganizationsHttpError(HUMAN_ORGANIZATIONS_HTTP_ERROR_CODES.FORBIDDEN, { status: 403, cause: error });
   if (["version_conflict", "err_version_conflict", "expected_version_mismatch", "err_expected_version_mismatch", "stale_version"].includes(code)) return new HumanOrganizationsHttpError(HUMAN_ORGANIZATIONS_HTTP_ERROR_CODES.VERSION_CONFLICT, { status: 409, cause: error });
   if (["idempotency_conflict", "err_idempotency_conflict", "idempotency_key_reused"].includes(code)) return new HumanOrganizationsHttpError(HUMAN_ORGANIZATIONS_HTTP_ERROR_CODES.IDEMPOTENCY_CONFLICT, { status: 409, cause: error });

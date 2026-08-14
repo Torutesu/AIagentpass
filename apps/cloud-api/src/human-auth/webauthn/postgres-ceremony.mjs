@@ -5,6 +5,9 @@ import { WebAuthnCeremonyError, WEBAUTHN_ERROR_CODES } from "./ceremony.mjs";
 const DEFAULT_TTL_MS = 120_000;
 const MAX_TTL_MS = 300_000;
 const MAX_PENDING = 10_000;
+const DEFAULT_VERIFIER_TIMEOUT_MS = 15_000;
+const MAX_VERIFIER_TIMEOUT_MS = 30_000;
+const CLAIM_LEASE_MS = MAX_VERIFIER_TIMEOUT_MS + 5_000;
 const CHALLENGE_BYTES = 32;
 const MAX_CLIENT_DATA_BYTES = 16 * 1024;
 const MAX_AUTHENTICATOR_DATA_BYTES = 4 * 1024;
@@ -43,7 +46,38 @@ RETURNING id, session_id, member_id, organization_id, ceremony, operation,
 const EXPIRE_SQL = `
 UPDATE webauthn_challenges
 SET status = 'expired'
-WHERE status = 'pending' AND consumed_at IS NULL AND expires_at <= $1`;
+WHERE ceremony = 'authentication'
+  AND status = 'pending'
+  AND consumed_at IS NULL
+  AND expires_at <= $1
+RETURNING id`;
+
+const REAP_STALE_SQL = `
+UPDATE webauthn_challenges
+SET status = 'failed', failed_at = $1, consumed_at = $1
+WHERE ceremony = 'authentication'
+  AND status = 'consuming'
+  AND consumed_at IS NULL
+  AND consume_started_at IS NOT NULL
+  AND consume_started_at <= $2
+RETURNING id`;
+
+const REAP_ONE_SQL = `
+UPDATE webauthn_challenges
+SET status = 'failed', failed_at = $1, consumed_at = $1
+WHERE id = $3
+  AND ceremony = 'authentication'
+  AND session_id = $4
+  AND organization_id = $5
+  AND operation = $6
+  AND rp_id = $7
+  AND origin = $8
+  AND user_verification = $9
+  AND status = 'consuming'
+  AND consumed_at IS NULL
+  AND consume_started_at IS NOT NULL
+  AND consume_started_at <= $2
+RETURNING id`;
 
 const CAPACITY_LOCK_SQL = "SELECT pg_advisory_xact_lock(hashtextextended('agentpass:webauthn:capacity', 0))";
 
@@ -106,10 +140,12 @@ export const POSTGRES_WEBAUTHN_SCHEMA_REQUIREMENTS = Object.freeze({
 
 export class PostgresWebAuthnCeremonyError extends Error {
   constructor(code, message = "PostgreSQL WebAuthn ceremony failed", cause = undefined) {
-    super(message, cause === undefined ? undefined : { cause });
+    // Database/provider diagnostics can contain query fragments or caller
+    // material. Keep the public error contract deliberately secret-free.
+    super(message);
+    void cause;
     this.name = "PostgresWebAuthnCeremonyError";
     this.code = code;
-    if (cause !== undefined) this.cause = cause;
   }
 }
 
@@ -129,6 +165,7 @@ export function createPostgresWebAuthnCeremony({
   now = () => Date.now(),
   ttlMs = DEFAULT_TTL_MS,
   maxPending = MAX_PENDING,
+  verifierTimeoutMs = DEFAULT_VERIFIER_TIMEOUT_MS,
   randomUUID = crypto.randomUUID,
   randomBytes = crypto.randomBytes,
   random
@@ -142,6 +179,7 @@ export function createPostgresWebAuthnCeremony({
   assertClock(now());
   assertDuration(ttlMs, "ttlMs", 1_000, MAX_TTL_MS);
   if (!Number.isSafeInteger(maxPending) || maxPending < 1 || maxPending > MAX_PENDING) throw new TypeError("maxPending is invalid");
+  assertDuration(verifierTimeoutMs, "verifierTimeoutMs", 1_000, MAX_VERIFIER_TIMEOUT_MS);
 
   async function begin(input = {}) {
     const context = normalizeContext(input);
@@ -164,6 +202,7 @@ export function createPostgresWebAuthnCeremony({
         // lock is transaction-scoped and is released by COMMIT/ROLLBACK.
         await transactionQuery(CAPACITY_LOCK_SQL, []);
         await transactionQuery(EXPIRE_SQL, [createdAt]);
+        await transactionQuery(REAP_STALE_SQL, [createdAt, new Date(Math.max(0, issuedAt - CLAIM_LEASE_MS)).toISOString()]);
         const capacity = await transactionQuery(CAPACITY_SQL, [createdAt]);
         const pendingCount = parseCount(capacity.rows[0]?.pending_count);
         if (pendingCount >= maxPending) fail(WEBAUTHN_ERROR_CODES.CAPACITY_EXCEEDED);
@@ -200,8 +239,10 @@ export function createPostgresWebAuthnCeremony({
     const request = normalizeConsumeInput(input);
     const currentTime = assertClock(now());
     const currentIso = new Date(currentTime).toISOString();
+    await dbQuery(REAP_ONE_SQL, [currentIso, new Date(Math.max(0, currentTime - CLAIM_LEASE_MS)).toISOString(), request.challenge_id, request.session_id, request.organization_id, request.operation, request.rp_id, request.origin, request.user_verification]);
     let record = await loadRecord(request.challenge_id);
     assertRecord(record);
+    if (!sameBinding(record, request)) fail(WEBAUTHN_ERROR_CODES.BINDING_MISMATCH);
     if (record.status === "consuming") fail(WEBAUTHN_ERROR_CODES.CHALLENGE_BUSY);
     if (record.status === "consumed" || record.status === "failed") fail(WEBAUTHN_ERROR_CODES.CHALLENGE_REPLAYED);
     if (record.status === "expired" || currentTime >= record.expires_at) fail(WEBAUTHN_ERROR_CODES.CHALLENGE_EXPIRED);
@@ -220,8 +261,14 @@ export function createPostgresWebAuthnCeremony({
 
     let verification;
     try {
-      verification = await verifyAssertion(verifierInput);
-      validateVerifierResult(verification, request, currentTime);
+      verification = validateVerifierResult(
+        await withTimeout(
+          () => verifyAssertion(verifierInput),
+          Math.max(1, Math.min(verifierTimeoutMs, record.expires_at - currentTime))
+        ),
+        request,
+        currentTime
+      );
     } catch (error) {
       await burn(request.challenge_id, new Date(assertClock(now())).toISOString());
       if (error instanceof WebAuthnCeremonyError && error.code === WEBAUTHN_ERROR_CODES.INVALID_VERIFIER_RESULT) throw error;
@@ -229,9 +276,19 @@ export function createPostgresWebAuthnCeremony({
     }
 
     const authenticatedAt = assertClock(now());
-    const completed = await dbQuery(COMPLETE_SQL, [request.challenge_id, new Date(authenticatedAt).toISOString()]);
-    if (completed.rows.length !== 1) throw new PostgresWebAuthnCeremonyError("ERR_WEBAUTHN_CLAIM_LOST", "WebAuthn claim could not be completed");
-    assertTerminalRow(completed.rows[0], request.challenge_id, "consumed");
+    if (authenticatedAt >= record.expires_at) {
+      await burn(request.challenge_id, new Date(authenticatedAt).toISOString());
+      fail(WEBAUTHN_ERROR_CODES.CHALLENGE_EXPIRED);
+    }
+    let completed;
+    try {
+      completed = await dbQuery(COMPLETE_SQL, [request.challenge_id, new Date(authenticatedAt).toISOString()]);
+      if (completed.rows.length !== 1) throw new PostgresWebAuthnCeremonyError("ERR_WEBAUTHN_CLAIM_LOST", "WebAuthn claim could not be completed");
+      assertTerminalRow(completed.rows[0], request.challenge_id, "consumed");
+    } catch (error) {
+      await burnBestEffort(request.challenge_id, new Date(authenticatedAt).toISOString());
+      throw error;
+    }
     return Object.freeze({
       verified: true,
       assertion_id: request.challenge_id,
@@ -278,6 +335,16 @@ export function createPostgresWebAuthnCeremony({
     const result = await dbQuery(BURN_SQL, [id, timestamp]);
     if (result.rows.length !== 1) throw new PostgresWebAuthnCeremonyError("ERR_WEBAUTHN_BURN_FAILED", "WebAuthn challenge could not be burned");
     assertTerminalRow(result.rows[0], id, "failed");
+  }
+
+  async function burnBestEffort(id, timestamp) {
+    try {
+      const result = await dbQuery(BURN_SQL, [id, timestamp]);
+      if (result.rows.length === 1) assertTerminalRow(result.rows[0], id, "failed");
+    } catch {
+      // Preserve the original completion error and never expose raw storage
+      // diagnostics to the caller.
+    }
   }
 }
 
@@ -471,3 +538,11 @@ function storageTime(value, field) { const time = optionalStorageTime(value, fie
 function optionalStorageTime(value, field) { if (value === null || value === undefined) return undefined; const time = value instanceof Date ? value.getTime() : typeof value === "string" ? Date.parse(value) : Number.NaN; if (!Number.isSafeInteger(time) || time < 0) throw new PostgresWebAuthnCeremonyError("ERR_WEBAUTHN_STORAGE_RESULT", `${field} is invalid`); return time; }
 function parseCount(value) { if (typeof value !== "string" && typeof value !== "number") throw new PostgresWebAuthnCeremonyError("ERR_WEBAUTHN_STORAGE_RESULT", "pending count is invalid"); const count = Number(value); if (!Number.isSafeInteger(count) || count < 0) throw new PostgresWebAuthnCeremonyError("ERR_WEBAUTHN_STORAGE_RESULT", "pending count is invalid"); return count; }
 function fail(code, details) { throw new WebAuthnCeremonyError(code, details); }
+
+function withTimeout(callback, timeoutMs) {
+  let timer;
+  const timeout = new Promise((_, reject) => {
+    timer = setTimeout(() => reject(new Error("WebAuthn verifier timed out")), timeoutMs);
+  });
+  return Promise.race([Promise.resolve().then(callback), timeout]).finally(() => clearTimeout(timer));
+}

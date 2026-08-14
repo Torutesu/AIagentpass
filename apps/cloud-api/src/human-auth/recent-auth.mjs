@@ -33,8 +33,9 @@ export function createRecentAuthService({ ceremony, sessionRepository } = {}) {
   };
 
   const authorize = async ({ proof, principal, organization_id, operation, now } = {}) => {
-    if (typeof proof !== "string" || !UUID.test(proof) || !principal || typeof principal.member_id !== "string") return failure(principal, organization_id, operation, now);
+    if (typeof proof !== "string" || !UUID.test(proof) || !principal || !UUID.test(principal.session_id) || !UUID.test(principal.member_id)) return failure(principal, organization_id, operation, now);
     const consumed = await sessionRepository.consumeRecentAuth({
+      session_id: principal.session_id,
       challenge_id: proof,
       member_id: principal.member_id,
       organization_id,

@@ -479,7 +479,7 @@ Done when `npm run contracts:validate`, the catalog tests, the full Node suite, 
 Merge slices:
 
 1. PostgreSQL repositories for organization creation, invitations, acceptance, membership role/status changes, and organization/member session epochs, always reserving the first SQL parameter for `organization_id`;
-2. transactionally enforced Owner/Admin/Developer/Viewer permissions, last-owner protection, invitation expiry/one-time consumption, and role-downgrade session invalidation;
+2. transactionally enforced Owner/Admin/Auditor/Viewer permissions, last-owner protection, invitation expiry/one-time consumption, and role-downgrade session invalidation;
 3. rotating opaque server-side sessions with hashed tokens, CSRF binding, absolute and idle expiry, device/session inventory, revoke-one, revoke-all, and enumeration-safe errors;
 4. Human API handlers generated from the frozen DTOs without leaking passwordless ceremony state or reusable bearer material;
 5. audit records for every authority change, including denied attempts, with stable reason codes and no secrets.
@@ -543,7 +543,7 @@ Required tests:
 
 Implement the production-built Console as a thin, secret-free control surface over authoritative Human API state. The screen order is: sign in/passkey → organization selection/create → invite and roles → device enrollment → repository policy → Claude Code/Cursor launch instructions → active sessions → audit → revoke/emergency stop → purge. Every optimistic action must reconcile to PostgreSQL state or a signed device ACK before displaying success.
 
-Acceptance includes Owner/Admin/Developer/Viewer Playwright matrices, keyboard and screen-reader flows, mobile-safe recovery, localization-ready copy, expired/conflict/offline states, CSP/CSRF/cookie checks, and proof that credentials, challenges, capabilities, private evidence, and reusable tokens never enter browser storage or telemetry.
+Acceptance includes Owner/Admin/Auditor/Viewer Playwright matrices, keyboard and screen-reader flows, mobile-safe recovery, localization-ready copy, expired/conflict/offline states, CSP/CSRF/cookie checks, and proof that credentials, challenges, capabilities, private evidence, and reusable tokens never enter browser storage or telemetry.
 
 ### Batch 6 — native onboarding and agent adapters
 

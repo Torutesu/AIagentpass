@@ -1,4 +1,5 @@
 import crypto from "node:crypto";
+import { isIP } from "node:net";
 
 import { generateRegistrationOptions, verifyRegistrationResponse } from "@simplewebauthn/server";
 
@@ -15,6 +16,9 @@ const MAX_USER_NAME_LENGTH = 320;
 const MAX_DISPLAY_NAME_LENGTH = 128;
 const MAX_RP_NAME_LENGTH = 128;
 const MAX_CLOCK_SKEW_MS = 30_000;
+const DEFAULT_VERIFIER_TIMEOUT_MS = 15_000;
+const MAX_VERIFIER_TIMEOUT_MS = 30_000;
+const CLAIM_LEASE_MS = MAX_VERIFIER_TIMEOUT_MS + 5_000;
 const BASE64URL = /^[A-Za-z0-9_-]+$/;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const UUID_V4 = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
@@ -42,6 +46,8 @@ export const WEBAUTHN_REGISTRATION_ERROR_CODES = Object.freeze({
   VERIFIER_UNAVAILABLE: "webauthn_registration_verifier_unavailable",
   INVALID_VERIFIER_RESULT: "webauthn_registration_invalid_verifier_result",
   CAPACITY_EXCEEDED: "webauthn_registration_capacity_exceeded",
+  RECENT_AUTH_REQUIRED: "webauthn_registration_recent_auth_required",
+  RECENT_AUTH_UNAVAILABLE: "webauthn_registration_recent_auth_unavailable",
   CREDENTIAL_EXISTS: "webauthn_registration_credential_exists",
   CREDENTIAL_STORAGE_UNAVAILABLE: "webauthn_registration_credential_storage_unavailable"
 });
@@ -60,6 +66,8 @@ const ERROR_MESSAGES = Object.freeze({
   [WEBAUTHN_REGISTRATION_ERROR_CODES.VERIFIER_UNAVAILABLE]: "WebAuthn registration verifier is unavailable",
   [WEBAUTHN_REGISTRATION_ERROR_CODES.INVALID_VERIFIER_RESULT]: "WebAuthn registration verifier result is invalid",
   [WEBAUTHN_REGISTRATION_ERROR_CODES.CAPACITY_EXCEEDED]: "WebAuthn registration capacity is exhausted",
+  [WEBAUTHN_REGISTRATION_ERROR_CODES.RECENT_AUTH_REQUIRED]: "Recent WebAuthn authentication is required",
+  [WEBAUTHN_REGISTRATION_ERROR_CODES.RECENT_AUTH_UNAVAILABLE]: "Recent WebAuthn authorization is unavailable",
   [WEBAUTHN_REGISTRATION_ERROR_CODES.CREDENTIAL_EXISTS]: "The WebAuthn credential is already registered",
   [WEBAUTHN_REGISTRATION_ERROR_CODES.CREDENTIAL_STORAGE_UNAVAILABLE]: "The WebAuthn credential could not be stored"
 });
@@ -71,7 +79,11 @@ const VERIFIER_RESULT_KEYS = new Set([
 
 export class WebAuthnRegistrationError extends Error {
   constructor(code, details = undefined, { cause = undefined } = {}) {
-    super(ERROR_MESSAGES[code] ?? "WebAuthn registration failed", { cause });
+    // Keep provider/database failures out of the public error object. The
+    // caller may safely serialize this error without exposing attestation,
+    // challenge, or credential material from an implementation error.
+    super(ERROR_MESSAGES[code] ?? "WebAuthn registration failed");
+    void cause;
     this.name = "WebAuthnRegistrationError";
     this.code = code;
     if (details !== undefined) this.details = details;
@@ -91,6 +103,7 @@ export function createWebAuthnRegistrationCeremony({
   now = () => Date.now(),
   ttlMs = DEFAULT_TTL_MS,
   maxPending = MAX_PENDING,
+  verifierTimeoutMs = DEFAULT_VERIFIER_TIMEOUT_MS,
   randomBytes = crypto.randomBytes,
   randomUUID = crypto.randomUUID
 } = {}) {
@@ -98,6 +111,7 @@ export function createWebAuthnRegistrationCeremony({
   if (typeof now !== "function" || !Number.isSafeInteger(now()) || now() < 0) throw new TypeError("now must be a clock function");
   if (!Number.isSafeInteger(ttlMs) || ttlMs < 1_000 || ttlMs > MAX_TTL_MS) throw new TypeError("ttlMs is invalid");
   if (!Number.isSafeInteger(maxPending) || maxPending < 1 || maxPending > MAX_PENDING) throw new TypeError("maxPending is invalid");
+  if (!Number.isSafeInteger(verifierTimeoutMs) || verifierTimeoutMs < 1_000 || verifierTimeoutMs > MAX_VERIFIER_TIMEOUT_MS) throw new TypeError("verifierTimeoutMs is invalid");
   if (typeof randomBytes !== "function" || typeof randomUUID !== "function") throw new TypeError("random source is invalid");
 
   const records = new Map();
@@ -142,15 +156,16 @@ export function createWebAuthnRegistrationCeremony({
     const request = normalizeConsumeInput(input);
     const currentTime = clock(now);
     purge(records, currentTime);
+    reapStaleClaims(records, currentTime);
     const record = records.get(request.challenge_id);
     if (!record) fail(WEBAUTHN_REGISTRATION_ERROR_CODES.CHALLENGE_NOT_FOUND);
+    if (!sameBinding(record, request)) fail(WEBAUTHN_REGISTRATION_ERROR_CODES.BINDING_MISMATCH);
     if (record.status === "consuming") fail(WEBAUTHN_REGISTRATION_ERROR_CODES.CHALLENGE_BUSY);
     if (record.status === "consumed" || record.status === "failed") fail(WEBAUTHN_REGISTRATION_ERROR_CODES.CHALLENGE_REPLAYED);
     if (record.status === "expired" || currentTime >= record.expires_at) {
       record.status = "expired";
       fail(WEBAUTHN_REGISTRATION_ERROR_CODES.CHALLENGE_EXPIRED);
     }
-    if (!sameBinding(record, request)) fail(WEBAUTHN_REGISTRATION_ERROR_CODES.BINDING_MISMATCH);
     if (!constantTimeHexEqual(record.challenge_digest, sha256(request.challenge))) fail(WEBAUTHN_REGISTRATION_ERROR_CODES.CHALLENGE_MISMATCH);
 
     const verifierInput = buildVerifierInput(record, request);
@@ -159,8 +174,14 @@ export function createWebAuthnRegistrationCeremony({
 
     let verification;
     try {
-      verification = await verifyAttestation(verifierInput);
-      validateVerifierResult(verification, request, currentTime);
+      verification = validateVerifierResult(
+        await withTimeout(
+          () => verifyAttestation(verifierInput),
+          Math.max(1, Math.min(verifierTimeoutMs, record.expires_at - currentTime))
+        ),
+        request,
+        currentTime
+      );
     } catch (error) {
       record.status = "failed";
       record.failed_at = clock(now);
@@ -168,8 +189,17 @@ export function createWebAuthnRegistrationCeremony({
       fail(WEBAUTHN_REGISTRATION_ERROR_CODES.VERIFICATION_FAILED);
     }
 
+    // A stale-claim reaper may have won while the verifier was running. Never
+    // allow a late verifier result to resurrect or complete that challenge.
+    if (record.status !== "consuming") fail(WEBAUTHN_REGISTRATION_ERROR_CODES.CHALLENGE_REPLAYED);
+
+    const completedAt = clock(now);
+    if (completedAt >= record.expires_at) {
+      record.status = "expired";
+      fail(WEBAUTHN_REGISTRATION_ERROR_CODES.CHALLENGE_EXPIRED);
+    }
     record.status = "consumed";
-    record.consumed_at = clock(now);
+    record.consumed_at = completedAt;
     return Object.freeze({
       verified: true,
       registration_id: request.challenge_id,
@@ -210,19 +240,23 @@ export function createSimpleWebAuthnRegistrationVerifier({
   return Object.freeze({
     async generateOptions(input) {
       if (!input?.rp || !input?.user || typeof input.challenge !== "string") throw new TypeError("registration options input is invalid");
-      return generateOptions({
-        rpName: input.rp.name,
-        rpID: input.rp.id,
-        userName: input.user.name,
-        userID: Buffer.from(input.user.id, "base64url"),
-        userDisplayName: input.user.displayName,
-        challenge: Buffer.from(input.challenge, "base64url"),
-        excludeCredentials: input.excludeCredentials,
-        timeout: input.timeout,
-        attestationType: "none",
-        authenticatorSelection: { residentKey: "preferred", userVerification: "required" },
-        supportedAlgorithmIDs: [-8, -7, -257]
-      });
+      try {
+        return await generateOptions({
+          rpName: input.rp.name,
+          rpID: input.rp.id,
+          userName: input.user.name,
+          userID: Buffer.from(input.user.id, "base64url"),
+          userDisplayName: input.user.displayName,
+          challenge: Buffer.from(input.challenge, "base64url"),
+          excludeCredentials: input.excludeCredentials,
+          timeout: input.timeout,
+          attestationType: "none",
+          authenticatorSelection: { residentKey: "preferred", userVerification: "required" },
+          supportedAlgorithmIDs: [-8, -7, -257]
+        });
+      } catch {
+        throw new WebAuthnRegistrationError(WEBAUTHN_REGISTRATION_ERROR_CODES.VERIFIER_UNAVAILABLE);
+      }
     },
 
     async verifyAttestation(input) {
@@ -237,19 +271,25 @@ export function createSimpleWebAuthnRegistrationVerifier({
         },
         clientExtensionResults: {}
       };
-      const result = await verify({
-        response,
-        expectedChallenge: input.ceremony.expected_challenge,
-        expectedOrigin: input.ceremony.origin,
-        expectedRPID: input.ceremony.rp_id,
-        expectedType: "webauthn.create",
-        requireUserPresence: true,
-        requireUserVerification: true,
-        supportedAlgorithmIDs: [-8, -7, -257]
-      });
+      let result;
+      try {
+        result = await verify({
+          response,
+          expectedChallenge: input.ceremony.expected_challenge,
+          expectedOrigin: input.ceremony.origin,
+          expectedRPID: input.ceremony.rp_id,
+          expectedType: "webauthn.create",
+          requireUserPresence: true,
+          requireUserVerification: true,
+          supportedAlgorithmIDs: [-8, -7, -257]
+        });
+      } catch {
+        throw new WebAuthnRegistrationError(WEBAUTHN_REGISTRATION_ERROR_CODES.VERIFICATION_FAILED);
+      }
       const info = result?.registrationInfo;
       if (!result?.verified || !info) return { verified: false };
       if (info.userVerified !== true || info.origin !== input.ceremony.origin || info.rpID !== input.ceremony.rp_id) return { verified: false };
+      validateCredentialMetadata(info.credentialDeviceType, info.credentialBackedUp);
       return {
         verified: true,
         credential_id: info.credential?.id ?? info.credentialID,
@@ -267,7 +307,12 @@ export function createSimpleWebAuthnRegistrationVerifier({
 /**
  * Service layer for session-bound credential registration. The repository
  * contract is intentionally small and receives no browser assertion, raw
- * challenge, or client data.
+ * challenge, or client data. When an active credential already exists,
+ * `createCredentialWithRecentAuth(input)` is required; that repository
+ * method must atomically validate and consume `input.recent_auth` for the
+ * exact session/member/organization/operation while inserting the new
+ * credential. The service deliberately fails closed until that method is
+ * available, while the no-credential path remains explicit bootstrap.
  */
 export function createWebAuthnRegistrationService({
   ceremony,
@@ -285,10 +330,11 @@ export function createWebAuthnRegistrationService({
   if (typeof rpName !== "string" || rpName.length < 1 || rpName.length > MAX_RP_NAME_LENGTH || hasControl(rpName)) throw new TypeError("rpName is invalid");
   const expectedRpId = requiredRpId(rpId);
   const expectedOrigin = requiredOrigin(origin);
+  if (!rpIdMatchesOrigin(expectedRpId, expectedOrigin)) throw new TypeError("rpId is not valid for origin");
   const expectedOperation = requiredOperation(operation);
   if (typeof now !== "function") throw new TypeError("now must be a function");
 
-  async function begin({ session, organization_id } = {}) {
+  async function begin({ session, organization_id, recent_auth } = {}) {
     const context = assertSession(session, organization_id);
     let user;
     let credentials;
@@ -299,6 +345,8 @@ export function createWebAuthnRegistrationService({
       if (error instanceof WebAuthnRegistrationError) throw error;
       throw new WebAuthnRegistrationError(WEBAUTHN_REGISTRATION_ERROR_CODES.CREDENTIAL_STORAGE_UNAVAILABLE, undefined, { cause: error });
     }
+    const recentAuth = requireRecentAuthForExistingCredentials(credentials, recent_auth);
+    if (recentAuth !== undefined && typeof credentialRepository.createCredentialWithRecentAuth !== "function") throw new WebAuthnRegistrationError(WEBAUTHN_REGISTRATION_ERROR_CODES.RECENT_AUTH_UNAVAILABLE);
     let issued;
     try {
       issued = await ceremony.begin({ ...context, rp_id: expectedRpId, origin: expectedOrigin, operation: expectedOperation, user_verification: "required" });
@@ -324,10 +372,19 @@ export function createWebAuthnRegistrationService({
     });
   }
 
-  async function verify({ session, organization_id, challenge_id, credential } = {}) {
+  async function verify({ session, organization_id, challenge_id, credential, recent_auth } = {}) {
     const context = assertSession(session, organization_id);
     const normalizedCredential = normalizeAttestation(credential);
     const challengeId = requiredUuidV4(challenge_id, "challenge_id");
+    let credentials;
+    try {
+      credentials = normalizeCredentialDescriptors(await credentialRepository.listCredentialsForSession(context));
+    } catch (error) {
+      if (error instanceof WebAuthnRegistrationError) throw error;
+      throw new WebAuthnRegistrationError(WEBAUTHN_REGISTRATION_ERROR_CODES.CREDENTIAL_STORAGE_UNAVAILABLE, undefined, { cause: error });
+    }
+    const recentAuth = requireRecentAuthForExistingCredentials(credentials, recent_auth);
+    if (recentAuth !== undefined && typeof credentialRepository.createCredentialWithRecentAuth !== "function") throw new WebAuthnRegistrationError(WEBAUTHN_REGISTRATION_ERROR_CODES.RECENT_AUTH_UNAVAILABLE);
     const challenge = extractRegistrationChallenge(normalizedCredential.client_data_json, expectedOrigin);
     let result;
     try {
@@ -348,8 +405,7 @@ export function createWebAuthnRegistrationService({
       throw mapCeremonyError(error, "verify");
     }
     const verified = normalizeConsumedResult(result, context, expectedOperation, challengeId);
-    try {
-      const stored = await credentialRepository.createCredential({
+    const storageInput = {
         session_id: context.session_id,
         member_id: context.member_id,
         organization_id: context.organization_id,
@@ -359,9 +415,26 @@ export function createWebAuthnRegistrationService({
         transports: verified.transports,
         ...(verified.credential_device_type === undefined ? {} : { credential_device_type: verified.credential_device_type }),
         ...(verified.credential_backed_up === undefined ? {} : { credential_backed_up: verified.credential_backed_up })
-      });
+    };
+    try {
+      const stored = recentAuth === undefined
+        ? await credentialRepository.createCredential(storageInput)
+        : await credentialRepository.createCredentialWithRecentAuth({
+          ...storageInput,
+          recent_auth: Object.freeze({
+            authorization_id: recentAuth,
+            operation: expectedOperation,
+            session_id: context.session_id,
+            member_id: context.member_id,
+            organization_id: context.organization_id
+          })
+        });
+      if (stored === false || stored === null || stored?.authorized === false) throw new WebAuthnRegistrationError(WEBAUTHN_REGISTRATION_ERROR_CODES.RECENT_AUTH_REQUIRED);
       if (stored !== true && stored?.created !== true) throw new Error("credential repository did not confirm creation");
     } catch (error) {
+      if (error instanceof WebAuthnRegistrationError) throw error;
+      if (recentAuth !== undefined && (error?.code === "recent_auth_required" || error?.code === "recent_auth_invalid" || error?.code === "recent_auth_conflict")) throw new WebAuthnRegistrationError(WEBAUTHN_REGISTRATION_ERROR_CODES.RECENT_AUTH_REQUIRED);
+      if (recentAuth !== undefined && typeof credentialRepository.createCredentialWithRecentAuth !== "function") throw new WebAuthnRegistrationError(WEBAUTHN_REGISTRATION_ERROR_CODES.RECENT_AUTH_UNAVAILABLE);
       if (error?.code === WEBAUTHN_REGISTRATION_ERROR_CODES.CREDENTIAL_EXISTS || error?.code === "23505" || error?.code === "credential_exists") throw new WebAuthnRegistrationError(WEBAUTHN_REGISTRATION_ERROR_CODES.CREDENTIAL_EXISTS);
       throw new WebAuthnRegistrationError(WEBAUTHN_REGISTRATION_ERROR_CODES.CREDENTIAL_STORAGE_UNAVAILABLE, undefined, { cause: error });
     }
@@ -371,15 +444,24 @@ export function createWebAuthnRegistrationService({
   return Object.freeze({ begin, verify, rpId: expectedRpId, origin: expectedOrigin, operation: expectedOperation, rpName });
 }
 
+function requireRecentAuthForExistingCredentials(credentials, proof) {
+  if (credentials.length === 0) return undefined;
+  if (typeof proof !== "string" || !isUuidV4(proof)) throw new WebAuthnRegistrationError(WEBAUTHN_REGISTRATION_ERROR_CODES.RECENT_AUTH_REQUIRED);
+  return proof.toLowerCase();
+}
+
 function normalizeContext(input) {
   if (!isObject(input)) fail(WEBAUTHN_REGISTRATION_ERROR_CODES.INVALID_CONTEXT);
+  const rp_id = requiredRpId(input.rp_id ?? input.rpId);
+  const origin = requiredOrigin(input.origin);
+  if (!rpIdMatchesOrigin(rp_id, origin)) fail(WEBAUTHN_REGISTRATION_ERROR_CODES.INVALID_CONTEXT, "rp_id");
   return Object.freeze({
     session_id: requiredUuid(input.session_id ?? input.sessionId, "session_id"),
     member_id: requiredUuid(input.member_id ?? input.memberId, "member_id"),
     organization_id: requiredUuid(input.organization_id ?? input.organizationId, "organization_id"),
     operation: requiredOperation(input.operation),
-    rp_id: requiredRpId(input.rp_id ?? input.rpId),
-    origin: requiredOrigin(input.origin),
+    rp_id,
+    origin,
     user_verification: requiredUserVerification(input.user_verification ?? input.userVerification)
   });
 }
@@ -427,7 +509,8 @@ function validateVerifierResult(result, request, currentTime) {
   const transports = result.transports === undefined ? request.transports : normalizeTransports(result.transports);
   if (result.credential_device_type !== undefined && !["singleDevice", "multiDevice"].includes(result.credential_device_type)) fail(WEBAUTHN_REGISTRATION_ERROR_CODES.INVALID_VERIFIER_RESULT);
   if (result.credential_backed_up !== undefined && typeof result.credential_backed_up !== "boolean") fail(WEBAUTHN_REGISTRATION_ERROR_CODES.INVALID_VERIFIER_RESULT);
-  return Object.freeze({ credential_id: credentialId, public_key: publicKey, sign_count: result.sign_count, transports, ...(result.credential_device_type === undefined ? {} : { credential_device_type: result.credential_device_type }), ...(result.credential_backed_up === undefined ? {} : { credential_backed_up: result.credential_backed_up }) });
+  validateCredentialMetadata(result.credential_device_type, result.credential_backed_up);
+  return Object.freeze({ credential_id: credentialId, public_key: publicKey, sign_count: result.sign_count, transports, ...(result.credential_device_type === undefined ? {} : { credential_device_type: result.credential_device_type }), ...(result.credential_backed_up === undefined ? {} : { credential_backed_up: result.credential_backed_up }), user_verified: true });
 }
 
 function normalizeConsumedResult(result, context, operation, registrationId) {
@@ -571,6 +654,30 @@ function purge(records, now) {
   }
 }
 
+function reapStaleClaims(records, now) {
+  for (const record of records.values()) {
+    if (record.status !== "consuming" || !Number.isSafeInteger(record.consume_started_at)) continue;
+    if (now - record.consume_started_at < CLAIM_LEASE_MS) continue;
+    record.status = "failed";
+    record.failed_at = now;
+    record.consumed_at = now;
+  }
+}
+
+function withTimeout(callback, timeoutMs) {
+  let timer;
+  const timeout = new Promise((_, reject) => {
+    timer = setTimeout(() => reject(new Error("WebAuthn verifier timed out")), timeoutMs);
+    timer.unref?.();
+  });
+  return Promise.race([Promise.resolve().then(callback), timeout]).finally(() => clearTimeout(timer));
+}
+
+function validateCredentialMetadata(deviceType, backedUp) {
+  if (deviceType === "singleDevice" && backedUp === true) fail(WEBAUTHN_REGISTRATION_ERROR_CODES.INVALID_VERIFIER_RESULT);
+  if (backedUp === true && deviceType !== "multiDevice") fail(WEBAUTHN_REGISTRATION_ERROR_CODES.INVALID_VERIFIER_RESULT);
+}
+
 function pendingCount(records) { return [...records.values()].filter((record) => record.status === "pending" || record.status === "consuming").length; }
 function sha256(value) { return crypto.createHash("sha256").update(value, "utf8").digest("hex"); }
 function constantTimeHexEqual(left, right) { const a = Buffer.from(left, "hex"); const b = Buffer.from(right, "hex"); return a.length === b.length && crypto.timingSafeEqual(a, b); }
@@ -588,6 +695,7 @@ function requiredOperation(value) { if (typeof value !== "string" || !OPERATION.
 function requiredUserVerification(value) { if (value !== "required") fail(WEBAUTHN_REGISTRATION_ERROR_CODES.INVALID_CONTEXT, "user_verification"); return value; }
 function requiredRpId(value) { if (typeof value !== "string" || value.length < 1 || value.length > 253 || !RP_ID.test(value) || value.includes("..")) throw new TypeError("rpId is invalid"); return value.toLowerCase(); }
 function requiredOrigin(value) { if (typeof value !== "string" || value.length > 512 || hasControl(value)) throw new TypeError("origin is invalid"); let url; try { url = new URL(value); } catch { throw new TypeError("origin is invalid"); } if (!ORIGIN_SCHEMES.has(url.protocol) || url.username || url.password || url.pathname !== "/" || url.search || url.hash || (url.protocol === "http:" && !["localhost", "127.0.0.1", "[::1]"].includes(url.hostname)) || url.origin !== value) throw new TypeError("origin is invalid"); return url.origin; }
+function rpIdMatchesOrigin(rpId, origin) { const host = new URL(origin).hostname.toLowerCase(); const normalizedHost = host.startsWith("[") && host.endsWith("]") ? host.slice(1, -1) : host; if (isIP(normalizedHost) !== 0 || isIP(rpId) !== 0) return normalizedHost === rpId; return normalizedHost === rpId || normalizedHost.endsWith(`.${rpId}`); }
 function requiredBase64Url(value, min, max, field) { if (!isBase64Url(value, min, max)) fail(WEBAUTHN_REGISTRATION_ERROR_CODES.INVALID_REQUEST, field); return value; }
 function isBase64Url(value, min, max) { if (typeof value !== "string" || !BASE64URL.test(value)) return false; let bytes; try { bytes = Buffer.from(value, "base64url"); } catch { return false; } return bytes.length >= min && bytes.length <= max && bytes.toString("base64url") === value; }
 function decodeBase64Url(value, min, max) { if (!isBase64Url(value, min, max)) fail(WEBAUTHN_REGISTRATION_ERROR_CODES.INVALID_RESPONSE); return Buffer.from(value, "base64url"); }

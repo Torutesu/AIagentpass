@@ -28,10 +28,11 @@ const TOKEN = "ab".repeat(32);
 const ZERO_HASH = "0".repeat(64);
 
 class QueueClient {
-  constructor(responses = [], { failOn = undefined, idempotency = "inserted" } = {}) {
+  constructor(responses = [], { failOn = undefined, idempotency = "inserted", sessionAuthority = undefined } = {}) {
     this.responses = [...responses];
     this.failOn = failOn;
     this.idempotency = idempotency;
+    this.sessionAuthority = sessionAuthority;
     this.lastRequestHash = null;
     this.calls = [];
   }
@@ -52,6 +53,9 @@ class QueueClient {
     if (text.startsWith("DELETE FROM idempotency_records") && text.includes("expires_at<=")) return response([], 0);
     if (text.startsWith("DELETE FROM idempotency_records")) return response([], 1);
     if (text.startsWith("UPDATE idempotency_records")) return response([], 1);
+    if (text.startsWith("SELECT s.id AS session_id")) {
+      return this.sessionAuthority === undefined ? response([], 0) : response(this.sessionAuthority === null ? [] : [this.sessionAuthority]);
+    }
     if (this.responses.length > 0) return this.responses.shift();
     if (text.startsWith("SELECT role,status")) return response([{ role: "owner", status: "active" }]);
     if (text.startsWith("SELECT organization_id,id AS membership_id")) return response([membershipRow({ member_id: ids.viewer, role: "viewer" })]);

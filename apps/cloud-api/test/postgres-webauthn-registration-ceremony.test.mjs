@@ -74,8 +74,10 @@ function rowFromParams(params) {
 }
 
 class FakePgClient {
-  constructor({ store, now = () => Date.now() } = {}) {
+  constructor({ store, now = () => Date.now(), failQuery = undefined, failComplete = false } = {}) {
     this.now = now;
+    this.failQuery = failQuery;
+    this.failComplete = failComplete;
     this.calls = [];
     this.store = store ?? { rows: new Map(), sessions: new Map([[ids.session, { member_id: ids.member, organization_id: ids.organization, revoked_at: null, expires_at: new Date(2_000_000_000_000), role: "owner" }]]) };
     this.rows = this.store.rows;
@@ -85,12 +87,29 @@ class FakePgClient {
   async query(text, params = []) {
     const sql = String(text).trim().replace(/\s+/g, " ");
     this.calls.push({ text: String(text), sql, params });
+    if (this.failQuery && sql.includes(this.failQuery)) throw new Error(this.failQuery);
     if (["BEGIN", "COMMIT", "ROLLBACK"].includes(sql)) return { rows: [], rowCount: 0 };
     if (sql.startsWith("SELECT pg_advisory_xact_lock")) return { rows: [{ pg_advisory_xact_lock: null }], rowCount: 1 };
     if (sql.startsWith("UPDATE webauthn_challenges SET status = 'expired'")) {
       const cutoff = new Date(params[0]).getTime();
-      for (const row of this.rows.values()) if (row.ceremony === "registration" && row.status === "pending" && row.consumed_at === null && row.expires_at.getTime() <= cutoff) row.status = "expired";
-      return { rows: [], rowCount: 0 };
+      const expired = [];
+      for (const row of this.rows.values()) if (row.ceremony === "registration" && row.status === "pending" && row.consumed_at === null && row.expires_at.getTime() <= cutoff) { row.status = "expired"; expired.push({ id: row.id }); }
+      return { rows: expired, rowCount: expired.length };
+    }
+    if (sql.startsWith("UPDATE webauthn_challenges SET status = 'failed'") && sql.includes("consume_started_at <= $2")) {
+      const failedAt = new Date(params[0]);
+      const cutoff = new Date(params[1]).getTime();
+      const onlyId = sql.includes("WHERE id = $3") ? params[2] : undefined;
+      const reaped = [];
+      for (const row of this.rows.values()) {
+        if (onlyId !== undefined && row.id !== onlyId) continue;
+        if (row.ceremony !== "registration" || row.status !== "consuming" || row.consumed_at !== null || row.consume_started_at === null || row.consume_started_at.getTime() > cutoff) continue;
+        row.status = "failed";
+        row.failed_at = failedAt;
+        row.consumed_at = failedAt;
+        reaped.push({ id: row.id });
+      }
+      return { rows: reaped, rowCount: reaped.length };
     }
     if (sql.startsWith("SELECT count(*)::text AS pending_count")) {
       const cutoff = new Date(params[0]).getTime();
@@ -131,6 +150,7 @@ class FakePgClient {
       return { rows: [{ id: row.id, status: row.status, failed_at: row.failed_at, consumed_at: row.consumed_at }], rowCount: 1 };
     }
     if (sql.startsWith("UPDATE webauthn_challenges SET status = 'consumed'")) {
+      if (this.failComplete) return { rows: [], rowCount: 0 };
       const row = this.rows.get(params[0]);
       const at = new Date(params[1]);
       if (!row || row.ceremony !== "registration" || row.status !== "consuming" || row.consumed_at !== null) return { rows: [], rowCount: 0 };
@@ -269,6 +289,11 @@ test("checks member and every binding before claiming", async () => {
   assert.equal(client.calls.some(({ sql }) => sql.startsWith("UPDATE webauthn_challenges SET status = 'consuming'")), false);
 });
 
+test("requires the RP ID to belong to the exact origin host", async () => {
+  const { ceremony } = create();
+  await assert.rejects(() => ceremony.begin({ ...context, rp_id: "other.example.test" }), (error) => error.code === WEBAUTHN_REGISTRATION_ERROR_CODES.INVALID_CONTEXT);
+});
+
 test("fails closed on malformed storage and malformed verifier output", async () => {
   const { client, ceremony } = create({ verifyAttestation: async (input) => ({ verified: true, credential_id: input.attestation.credential_id, public_key: Buffer.alloc(65), sign_count: -1, user_verified: true }) });
   const issued = await ceremony.begin(context);
@@ -285,4 +310,89 @@ test("documents the no-attestation persistence boundary", () => {
   assert.equal(POSTGRES_WEBAUTHN_REGISTRATION_SCHEMA_REQUIREMENTS.ceremony, "registration");
   assert.ok(POSTGRES_WEBAUTHN_REGISTRATION_SCHEMA_REQUIREMENTS.forbidden_persisted_fields.includes("attestation_object"));
   assert.ok(POSTGRES_WEBAUTHN_REGISTRATION_SCHEMA_REQUIREMENTS.forbidden_persisted_fields.includes("public_key"));
+});
+
+test("returns canonical credential metadata and rejects impossible backup flags", async () => {
+  const publicKey = Buffer.alloc(65, 0xab).toString("base64url");
+  const { ceremony } = create({ verifyAttestation: async (input) => ({
+    verified: true,
+    credential_id: input.attestation.credential_id,
+    public_key: publicKey,
+    sign_count: 2,
+    transports: ["usb", "internal"],
+    credential_device_type: "multiDevice",
+    credential_backed_up: true,
+    user_verified: true
+  }) });
+  const issued = await ceremony.begin(context);
+  const result = await ceremony.consume(registration(issued.challenge));
+  assert.deepEqual(result.public_key, Buffer.alloc(65, 0xab));
+  assert.deepEqual(result.transports, ["usb", "internal"]);
+  assert.equal(result.credential_device_type, "multiDevice");
+  assert.equal(result.credential_backed_up, true);
+
+  const invalid = create({ verifyAttestation: async (input) => ({
+    verified: true,
+    credential_id: input.attestation.credential_id,
+    public_key: Buffer.alloc(65, 8),
+    sign_count: 0,
+    credential_device_type: "singleDevice",
+    credential_backed_up: true,
+    user_verified: true
+  }) });
+  const invalidIssued = await invalid.ceremony.begin(context);
+  await assert.rejects(() => invalid.ceremony.consume(registration(invalidIssued.challenge)), (error) => error.code === WEBAUTHN_REGISTRATION_ERROR_CODES.INVALID_VERIFIER_RESULT);
+});
+
+test("reaps a crashed consuming claim before reporting replay", async () => {
+  const time = clock();
+  const { client, ceremony } = create({ time });
+  const issued = await ceremony.begin(context);
+  const row = [...client.rows.values()][0];
+  row.status = "consuming";
+  row.consume_started_at = new Date(time.now() - 40_000);
+  await assert.rejects(() => ceremony.consume(registration(issued.challenge)), (error) => error.code === WEBAUTHN_REGISTRATION_ERROR_CODES.CHALLENGE_REPLAYED);
+  assert.equal(row.status, "failed");
+  assert.equal(row.consumed_at instanceof Date, true);
+});
+
+test("burns a claim when completion loses its storage result", async () => {
+  const time = clock();
+  const client = new FakePgClient({ now: time.now, failComplete: true });
+  const { ceremony } = create({ client, time });
+  const issued = await ceremony.begin(context);
+  await assert.rejects(() => ceremony.consume(registration(issued.challenge)), (error) => {
+    assert.equal(error.cause, undefined);
+    return error instanceof PostgresWebAuthnRegistrationCeremonyError && error.code === "ERR_WEBAUTHN_REGISTRATION_CLAIM_LOST";
+  });
+  assert.equal([...client.rows.values()][0].status, "failed");
+  await assert.rejects(() => ceremony.consume(registration(issued.challenge)), (error) => error.code === WEBAUTHN_REGISTRATION_ERROR_CODES.CHALLENGE_REPLAYED);
+});
+
+test("database errors remain secret-free", async () => {
+  const secret = "postgres-attestation-secret";
+  const time = clock();
+  const client = new FakePgClient({ now: time.now, failQuery: "SELECT id, session_id, member_id" });
+  const { ceremony } = create({ client, time });
+  const issued = await ceremony.begin(context);
+  await assert.rejects(() => ceremony.consume(registration(issued.challenge)), (error) => {
+    assert.equal(error.cause, undefined);
+    assert.doesNotMatch(error.message, new RegExp(secret, "u"));
+    assert.doesNotMatch(JSON.stringify(error), new RegExp(secret, "u"));
+    return error instanceof PostgresWebAuthnRegistrationCeremonyError && error.code === "ERR_WEBAUTHN_REGISTRATION_STORAGE";
+  });
+});
+
+test("does not complete a claim after the challenge expires during verification", async () => {
+  const time = clock();
+  const { client, ceremony } = create({
+    time,
+    verifyAttestation: async (input) => {
+      time.advance(60_001);
+      return { verified: true, credential_id: input.attestation.credential_id, public_key: Buffer.alloc(65, 8), sign_count: 0, user_verified: true };
+    }
+  });
+  const issued = await ceremony.begin(context);
+  await assert.rejects(() => ceremony.consume(registration(issued.challenge)), (error) => error.code === WEBAUTHN_REGISTRATION_ERROR_CODES.CHALLENGE_EXPIRED);
+  assert.equal([...client.rows.values()][0].status, "failed");
 });

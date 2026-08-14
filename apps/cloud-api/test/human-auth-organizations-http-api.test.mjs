@@ -287,7 +287,7 @@ test("requires operation-bound recent auth before role updates and member remova
   const { api, calls } = fixture({ recentAuthService, api: { now: () => NOW } });
   const roleResult = await api.handle(request(HUMAN_ORGANIZATIONS_HTTP_PATHS.memberRole(ORGANIZATION_ID, MEMBER_ID), { method: "PATCH", body: { role: "auditor", expected_version: 4 }, headers: { "agentpass-recent-auth": RECENT_AUTH_PROOF } }));
   assert.equal(roleResult.status, 200);
-  assert.deepEqual(calls.updateMemberRole[0], { actor: actor(), organization_id: ORGANIZATION_ID, member_id: MEMBER_ID, role: "auditor", expected_version: 4, idempotency_key: "test-key-1" });
+  assert.deepEqual(calls.updateMemberRole[0], { actor: actor(), organization_id: ORGANIZATION_ID, member_id: MEMBER_ID, role: "auditor", expected_version: 4, idempotency_key: "test-key-1", recent_authorization: { session_id: actor().session_id, challenge_id: RECENT_AUTH_PROOF, operation: HUMAN_ORGANIZATIONS_RECENT_AUTH_OPERATIONS.updateMemberRole, authenticated_at: NOW } });
   const removeResult = await api.handle(request(HUMAN_ORGANIZATIONS_HTTP_PATHS.memberRemove(ORGANIZATION_ID, MEMBER_ID), { method: "POST", body: { expected_version: 5 }, headers: { "agentpass-recent-auth": RECENT_AUTH_PROOF } }));
   assert.equal(removeResult.status, 200);
   assert.equal(calls.removeMember[0].member_id, MEMBER_ID);
