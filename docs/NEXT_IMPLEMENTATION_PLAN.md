@@ -17,15 +17,19 @@ The current branch has the versioned Core/OpenAPI/JSON Schema catalog, 36 forwar
 At the current checkpoint, recovery dead-letter redrive and suppression require
 an exact resource-bound WebAuthn context. The repository recomputes that
 context and consumes the proof in the same organization-locked transaction.
-All 36 migrations apply, the root suite passes 1,792 tests (1,744 pass and 48
+All 36 migrations apply, the root suite passes 1,793 tests (1,745 pass and 48
 intentionally skipped), and the frozen catalog validates 120 entries. The
 authenticated P0-B Cloud/Console/PostgreSQL/browser journey also passes all 12
-role, WebAuthn, wake, tenant-substitution, and revocation scenarios locally.
+role, WebAuthn, wake, tenant-substitution, and revocation scenarios locally and
+in the source-bound CI qualification.
 
-This is not yet a production release. The pushed GitHub CI rerun and retained
-W1.5 evidence, complete Console operations, cloud IAM qualification for managed
-signers, physical Mac qualification, signed/notarized artifacts, deployment
-infrastructure, restore drills, and independent security review remain open.
+The branch CI run `31791531512` passes all four jobs: PostgreSQL 16/W1.5,
+browser E2E, P0-B live process, and the complete test/release gate. It retains
+independently verified secret-free W1.5 and P0-B evidence. This is not yet a
+production release: the staging W1.6 drill, complete Console operations, cloud
+IAM qualification for managed signers, physical Mac qualification,
+signed/notarized artifacts, deployment infrastructure, restore drills, and
+independent security review remain open.
 
 ## 3. Delivery rules
 
@@ -152,7 +156,7 @@ W1 closure execution order:
 | --- | --- | --- | --- |
 | W1.4a session bootstrap admission | Add fixed `human.session.bootstrap` policies to the shared PostgreSQL limiter; apply anonymous/global admission before identity-provider work, then subject/member/organization admission after verified identity resolution and before session insertion. Keep identifiers HMAC-derived and never persist the assertion or provider subject as a label. | Two API instances must share each bucket; unknown-subject floods must not create unbounded buckets; provider and limiter outages fail closed; identity replay and denied requests create no session. | The bootstrap route has no process-local allowance path, returns bounded `Retry-After`, and its atomic session ceiling still holds under concurrent accepted requests. |
 | W1.4b recovery state latency — complete | Observe database timestamps only after confirmed committed recovery transitions and report fixed-key count/total aggregates through `recordOwnerRecoveryStateLatency`. Do not label by organization, member, request, state, or error. Metrics failures remain post-commit and non-authoritative. | Fixed source-state CAS, negative/malformed timestamp, rollback, WebAuthn caller-owned commit, exact-once flush, and sync/async metric-sink failure tests; real PostgreSQL proves commit and rollback outcomes. | Confirmed commits emit one bounded observation per forward transition in normal operation; retries do not observe another transition and no recovery identity appears in health output. |
-| W1.5 delivery fault matrix — implementation and local PostgreSQL 16 qualification complete; CI rerun pending | Durable `uncertain` quarantine, immutable provider binding, append-only transition ledger, Owner/Admin retry/suppress API, independent-process `SIGKILL`, durable provider acceptance, automatic exact-binding confirmation, 34→35 upgrade, prune/redrive CAS, secret-free evidence, the two-worker race matrix, authenticated HTTPS-provider/worker/PostgreSQL faults, and retention/confirmation races. The first branch CI run exposed and locally closed stale schema fixtures, invalid inactive-session seeding, dependency ordering, and P0-B hosted-composition drift. | Provider timeout/response loss, malformed/oversized/truncated/delayed lookup responses, binding/key substitution, stale publish/fail/uncertain/confirmation CAS, retry/suppress/prune races, duplicate-acceptance convergence, bounded lookup scheduling, and the complete P0-B browser journey against real PostgreSQL. | The next pushed PostgreSQL 16 CI lane, including the composed qualification, passes and retains the independently verified bounded evidence artifact; P0-B retains its source-bound report; every case converges to one logical delivery or an explicit uncertain/dead-letter state. External CI remains unverified until those artifacts exist. |
+| W1.5 delivery fault matrix — implementation and CI qualification complete | Durable `uncertain` quarantine, immutable provider binding, append-only transition ledger, Owner/Admin retry/suppress API, independent-process `SIGKILL`, durable provider acceptance, automatic exact-binding confirmation, 34→35 upgrade, prune/redrive CAS, secret-free evidence, the two-worker race matrix, authenticated HTTPS-provider/worker/PostgreSQL faults, and retention/confirmation races. Branch CI repairs also close stale schema fixtures, invalid inactive-session seeding, dependency ordering, P0-B hosted-composition drift, output-limit nondeterminism, and native-runner executor starvation. | Provider timeout/response loss, malformed/oversized/truncated/delayed lookup responses, binding/key substitution, stale publish/fail/uncertain/confirmation CAS, retry/suppress/prune races, duplicate-acceptance convergence, bounded lookup scheduling, and the complete P0-B browser journey against real PostgreSQL. | CI run `31791531512` passes the composed PostgreSQL 16 qualification and independently verifies/retains bounded W1.5 evidence; P0-B retains its source-bound report; every case converges to one logical delivery or an explicit uncertain/dead-letter state. |
 | W1.6 operational closure | Add fixed-key alerts/runbook thresholds for queue age, uncertain outcomes, dead letters, redrive failure, prune failure, limiter denial/unavailability, and recovery latency. Update threat model and evidence index. | Snapshot tests must reject new labels/fields; runbook drill covers provider outage, worker restart, limiter outage, and dead-letter recovery. | W1 exit gate is reproducible from one documented command sequence and produces no secret-bearing artifact. |
 
 #### W1.4a completed merge sequence
@@ -164,7 +168,8 @@ W1 closure execution order:
 | C — hosted transport admission | Remove the process-local hosted fallback. Invalid or unauthenticated transport scope maps to fixed HMAC global buckets; authenticated Device traffic keeps tenant/device buckets. | Restart and two-instance tests prove the allowance cannot reset locally; malformed identifiers cannot create rows; repository outage returns stable `503`; Device tenant isolation remains intact. |
 | D — maintenance and observability | Start a dedicated shared-control maintenance worker independent of recovery delivery. Prune generic, anonymous, and replay rows with one total work budget and fixed label-free metrics. | Start/close/readiness tests, repeated-worker contention, sink failure, database outage/recovery, bounded transaction size, and health snapshots with no principal-derived labels. |
 
-W1.4a and W1.4b are complete. W1.5 implementation is complete; its PostgreSQL 16 CI and staging evidence gates remain pending.
+W1.4a, W1.4b, and the W1.5 implementation/CI evidence gate are complete. The
+staging operator drill remains and is tracked as W1.6.
 W2 Console work may continue in parallel only for read-only
 screens; authority-changing UI remains gated on these W1 guarantees.
 
@@ -248,15 +253,16 @@ Implemented W1.5 provider-convergence slice in migration `0036`:
   member, event, destination, or provider-response labels, and fixed-key
   lookup/success/miss/failure counters expose confirmation behavior.
 
-Remaining W1.5 release gates:
+W1.5 release-gate status:
 
-1. Confirm the PostgreSQL 16 CI lane runs both `test:postgres:w15` and
+1. Complete: PostgreSQL 16 CI runs both `test:postgres:w15` and
    `test:postgres:w15:composed`, and retains the bounded race-matrix evidence
    artifact. An independent verifier requires a protected regular file and the
    exact fixed schema, public digests, zero pending claims, and zero active
    leases before upload. Tenant/member IDs, DSNs, provider diagnostics, message
    content, credentials, tokens, links, and broadly readable files are rejected.
-2. Execute the operator drill in `OWNER_RECOVERY_DELIVERY_RUNBOOK.md` against a
+2. Pending under W1.6: execute the operator drill in
+   `OWNER_RECOVERY_DELIVERY_RUNBOOK.md` against a
    staging provider with a linearizable acceptance endpoint. This is an
    environment qualification, not an additional authority path in the product.
 
@@ -264,10 +270,10 @@ Post-W1.5 hardening, in order:
 
 1. Composed authenticated-HTTPS-provider/worker/PostgreSQL qualification is implemented in
    `owner-recovery-https-provider-composed.integration.test.mjs` and is wired
-   into the deterministic PostgreSQL 16 command; CI verification is pending.
+   into the deterministic PostgreSQL 16 command; CI verification passes.
 2. Retention/automatic-confirmation race coverage is implemented in
    `owner-recovery-retention-confirmation-races.integration.test.mjs` and is
-   wired into the same command; CI verification is pending. `uncertain` is
+   wired into the same command; CI verification passes. `uncertain` is
    non-terminal and therefore non-prunable by schema.
 3. Wire the fixed metrics in the deployment platform to the documented warning
    and critical thresholds, then retain a staging drill report with the same
@@ -406,6 +412,37 @@ Exit gate:
 
 The integration owner reviews every serialized boundary before dependent lanes resume. Parallel agents use disjoint file ownership and return changes for central review; they do not merge, migrate, or widen a security contract independently.
 
+### Ordered execution from the current checkpoint
+
+The next implementation cycle is organized as small merge units. “Parallel”
+below means implementation may proceed concurrently, but the listed authority
+or release boundary still has one owner and one ordered merge queue.
+
+| Order | Merge unit | Concrete output | Required verification | Unblocks |
+| --- | --- | --- | --- | --- |
+| 1 | W1.6 observability contract | Fixed-name recovery/limiter metrics, alert thresholds, dashboards, and secret/PII label deny-list | Metric snapshot tests, sink-failure tests, alert-rule validation | Operational drill |
+| 2 | W1.6 outage drills | Provider outage, worker restart, limiter outage, uncertain-delivery adjudication, dead-letter redrive, and prune-failure runbooks | Staging drill report bound to commit/image/schema and scrubbed by the evidence verifier | W1 exit |
+| 3 | W2.1 Console data inventory | Delete remaining sample state; map every screen to a strict Human BFF DTO and authoritative version | Static fixture-fallback detector, DTO negative tests, no-store/header tests | Full Console work |
+| 4 | W2.2 identity and organization journey | Passkey sign-in, organization create/select/switch, invitations, role changes, session expiry, and logout | PostgreSQL + virtual-WebAuthn role/tenant/replay matrix | Device enrollment UI |
+| 5 | W2.3 device and policy journey | Enrollment, device list/detail, repository policy editor, agent connection instructions, wake/ACK status | Stale-version races, signed ACK proof, cross-tenant and malformed-response tests | Agent onboarding |
+| 6 | W2.4 operations journey | Sessions, activity, revoke, emergency stop, recovery, dead-letter operations, and purge confirmations | Owner/Admin/Auditor/Viewer browser matrix and exact recent-auth context tests | Console release candidate |
+| 7 | W2.5 browser hardening | CSP/HSTS/cookies/CSRF/origin/cache policy, keyboard/focus/live-region/zoom/reduced-motion, forbidden-material scan | Chromium + WebKit; Firefox where authenticator support permits | W2 exit |
+| 8 | W3.1 signer contract freeze — parallel with 3–7 | One provider-neutral purpose map, immutable key metadata, fixed algorithms/domains, no caller key selection | Catalog/OpenAPI/schema compatibility and cross-purpose negative tests | Managed KMS qualification |
+| 9 | W3.2 managed signer qualification | Separate AWS/GCP workload identities and keys for every purpose; provider timeout/throttle/circuit behavior | IAM denial, non-exportability, outage, malformed response, and no-file-fallback evidence | Hosted signer activation |
+| 10 | W3.3 rotation and recovery | Active/retiring/revoked state machine, verification overlap, byte-exact response-loss retry, compromise disable | Rotation/rollback/restore matrix with historical verification | W3 exit |
+| 11 | W4.1 headless setup state machine | Resumable `install/setup/doctor/status` flow shared by CLI and optional UI; browser enrollment handoff | Interrupt/restart at every durable state; machine-readable output redaction | Claude Code adapter |
+| 12 | W4.2 Claude Code adapter | Identity/ancestry/repository/worktree/branch/TTL/generation/budget binding and Git signing self-test | Two unattended verified commits plus substitution, expiry, death, PID-reuse, and budget races | Primary native journey |
+| 13 | W4.3 Cursor parity and lifecycle | Thin Cursor adapter plus revoke, close, uninstall-preserve, reinstall-recover, and explicit purge | Same authority matrix as Claude Code; no adapter-specific authority path | W4 exit |
+| 14 | W5 release candidate | Universal hardened-runtime PKG, nested signatures, notarization/stapling, SBOM, provenance, release manifest, Homebrew bootstrap | Independent artifact verification and clean-machine journeys | Physical qualification |
+| 15 | W5 hardware qualification | Exact-digest Apple silicon/Secure Enclave and Intel/T2 qualification reports | Protected P0-C gates, teardown proof, aggregate report verifier | W5 exit |
+| 16 | W6 hosted promotion | IaC, immutable images, migration stage, backups/PITR, SLOs, restore/failover drills, independent review | Signed promotion record with zero open critical/high findings | AgentPass v1 |
+
+The integration order is `1 → 2`, `3 → 4 → 5 → 6 → 7`,
+`8 → 9 → 10`, `7 + 10 → 11 → 12 → 13`, and
+`13 → 14 → 15 → 16`. Infrastructure preparation for unit 16 may proceed
+earlier, but production credentials and promotion authority are introduced only
+at the final gated stages.
+
 ## 6. Commit and verification cadence
 
 Each slice should be one reviewable commit or a short, ordered commit series. The minimum local gate is:
@@ -430,9 +467,9 @@ Add real PostgreSQL, two-instance, Playwright, KMS/IAM, packaging/notarization, 
 2. `feat: observe committed recovery transition latency` (W1.4b, complete)
 3. `feat: bind recovery delivery and operator quarantine controls` (W1.5, merged)
 4. `feat: confirm provider acceptance and qualify delivery races` (W1.5, complete in this change)
-5. `test: compose https provider faults with worker and postgres` (W1.5 hardening, implemented; PostgreSQL 16 CI verification pending)
+5. `test: compose https provider faults with worker and postgres` (W1.5 hardening and PostgreSQL 16 CI verification complete)
 6. `ci: repair full qualification prerequisites` (W1.5 CI repair, complete)
-7. `test: restore hosted p0b runtime composition` (W1.5 CI repair, locally complete; external rerun pending)
+7. `test: restore hosted p0b runtime composition` (W1.5 CI repair and source-bound external qualification complete)
 8. `ops: wire recovery alerts and execute the staging outage drill` (W1.6, pending)
 9. `test: close the production console browser matrix` (W2)
 10. `feat: qualify purpose-separated managed signer providers` (W3; AWS/GCP adapters implemented, IAM/outage/rotation evidence pending)
