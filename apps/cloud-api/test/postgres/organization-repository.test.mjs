@@ -26,6 +26,9 @@ const NOW = "2026-08-12T00:00:00.000Z";
 const LATER = "2999-08-13T00:00:00.000Z";
 const TOKEN = "ab".repeat(32);
 const ZERO_HASH = "0".repeat(64);
+const ACTOR_SESSION_ID = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+const RECENT_AUTH_CHALLENGE_ID = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+const RECENT_AUTH_OPERATION = "human.organizations.member.role.update";
 
 class QueueClient {
   constructor(responses = [], { failOn = undefined, idempotency = "inserted", sessionAuthority = undefined } = {}) {
@@ -227,6 +230,52 @@ test("rename and role mutations use optimistic versions and return null out of s
   const roleCapabilityRevoke = roleClient.calls.find((call) => call.text.startsWith("UPDATE capabilities"));
   assert.match(roleCapabilityRevoke.text, /issued_by_member_id=\$2/);
   assert.deepEqual(roleCapabilityRevoke.params, [ids.organization, ids.viewer, NOW]);
+});
+
+test("revalidates the exact actor session, consumed proof, and authority epochs inside the mutation transaction", async () => {
+  const protectedInput = {
+    organization_id: ids.organization,
+    actor_member_id: ids.owner,
+    actor_session_id: ACTOR_SESSION_ID,
+    member_id: ids.viewer,
+    role: "admin",
+    expected_version: 1,
+    recent_auth_challenge_id: RECENT_AUTH_CHALLENGE_ID,
+    recent_auth_operation: RECENT_AUTH_OPERATION,
+    idempotency_key: "role-session-bound-1"
+  };
+  const activeClient = new QueueClient([
+    response(), response(), response([{ role: "owner", status: "active" }]),
+    response([membershipRow({ member_id: ids.viewer, role: "viewer" })]),
+    response([membershipRow({ member_id: ids.viewer, role: "admin", version: 2 })]),
+    response(), response(), response([{ sequence: 0, event_hash: ZERO_HASH }]), response(), response(), response(), response()
+  ], { sessionAuthority: {} });
+  await repo(activeClient).updateMemberRole(protectedInput);
+  const authorization = activeClient.calls.find((call) => call.text.startsWith("SELECT s.id AS session_id"));
+  assert.deepEqual(authorization.params, [ACTOR_SESSION_ID, ids.owner, ids.organization, RECENT_AUTH_CHALLENGE_ID, RECENT_AUTH_OPERATION]);
+  assert.match(authorization.text, /s\.revoked_at IS NULL/);
+  assert.match(authorization.text, /s\.organization_authority_epoch=o\.authority_epoch/);
+  assert.match(authorization.text, /s\.membership_session_epoch=m\.session_epoch/);
+  assert.match(authorization.text, /s\.recent_auth_consumed_at IS NOT NULL/);
+  assert.match(authorization.text, /FOR UPDATE OF s,m,o/);
+  const lockIndex = activeClient.calls.findIndex((call) => call.text.includes("pg_advisory_xact_lock"));
+  const authorizationIndex = activeClient.calls.indexOf(authorization);
+  const idempotencyIndex = activeClient.calls.findIndex((call) => call.text.startsWith("INSERT INTO idempotency_records"));
+  assert.ok(lockIndex < authorizationIndex && authorizationIndex < idempotencyIndex);
+
+  for (const [label, method, overrides] of [
+    ["revoked session", "updateMemberRole", {}],
+    ["stale authority epoch", "removeMember", { recent_auth_operation: "human.organizations.member.remove", idempotency_key: "remove-session-bound-1" }]
+  ]) {
+    const staleClient = new QueueClient([], { sessionAuthority: null });
+    await assert.rejects(
+      repo(staleClient)[method]({ ...protectedInput, ...overrides }),
+      (error) => error instanceof OrganizationRepositoryError && error.code === "ERR_STALE_SESSION",
+      label
+    );
+    assert.equal(staleClient.calls.some((call) => call.text.startsWith("INSERT INTO idempotency_records")), false, label);
+    assert.equal(staleClient.calls.at(-1).text, "ROLLBACK", label);
+  }
 });
 
 test("classifies stale, absent, and out-of-scope member mutations without cross-tenant disclosure", async () => {
