@@ -54,14 +54,20 @@ agentpass setup status
 # Repeat one durable step at a time. Preview is read-only.
 agentpass setup continue
 agentpass setup continue --execute
-# At service_keys_activated, consume the one-time canonical invitation through stdin.
-agentpass setup continue --execute \
-  --enrollment-url 'https://api.example.com/v1' \
-  --enrollment-stdin < enrollment.json
+# Recommended browser-assisted command.
+agentpass setup continue --execute --browser --console-url https://console.example --enrollment-url https://api.example/v1
+# Current explicit recovery path: copy once, then pipe the invitation through stdin.
+pbpaste | agentpass setup continue --execute \
+  --enrollment-url 'https://api.example/v1' \
+  --enrollment-stdin
 agentpass doctor --client claude-code --project "$PWD" --team-id 'APPLETEAM1'
 ```
 
-`setup status` reads the crash-resumable setup journal and reports the next durable action; the macOS onboarding window renders this same fail-closed status contract. `setup continue --execute` advances exactly one verified journal state. It registers the Service Management daemon and then uses the signed, root-only native bootstrap primitives to stage and activate the generation-1 approval, Git-signing, and audit keys. At device enrollment, the short-lived credential is accepted only through bounded stdin; a fixed Secure Enclave P-256 key signs the exact enrollment request and credential digest. The credential is never written to config, logs, results, or journal evidence.
+`setup status` reads the crash-resumable setup journal and reports the next durable action; the macOS onboarding window renders this same fail-closed status contract. `setup continue --execute` advances exactly one verified journal state. It registers the Service Management daemon and then uses the signed, root-only native bootstrap primitives to stage and activate the generation-1 approval, Git-signing, and audit keys. At device enrollment, the recommended browser path accepts the short-lived credential through a one-consume in-memory handoff; the recovery path accepts it only through bounded stdin. A fixed Secure Enclave P-256 key signs the exact enrollment request and credential digest. The credential is never written to config, logs, results, or journal evidence.
+
+The browser-assisted command above is the recommended non-engineer path. `--console-url` and `--enrollment-url` are independently pinned: the first is the exact HTTPS Console origin that opens in the browser, and the second is the exact Cloud API `/v1` origin used for enrollment. Neither URL is inferred from the other. The URL fragment contains only a short-lived loopback correlation URL. The handoff nonce remains ephemeral in process memory and Console memory, and the invitation remains memory-only on both sides. No nonce or invitation is placed in a URL, browser storage, argv, environment variable, log, or setup journal.
+
+For a non-engineer, the intended flow is: install the signed PKG, run the browser-assisted command with the two organization-approved URLs, sign in to Console, choose the device name, approve the WebAuthn prompt, and wait for the CLI to finish. If local browser delivery fails, copy the displayed invitation once and use the explicit `pbpaste`/stdin recovery fallback; do not save it in a file, shell history, argv, or an environment variable. If the browser does not open, the handoff expires, or the Console origin is rejected, verify the separately pinned URLs and start a fresh command. Never reuse an expired fragment, nonce, or invitation.
 
 `enrollment.json` may be the exact canonical response returned by `POST /v1/organizations/{organization_id}/device-enrollments`, or its nested `enrollment` object. Setup accepts only the complete v2 document: it binds the protocol version, tenant, enrollment/device IDs, release candidate, Secure Enclave P-256 key fingerprint, challenge, expiry, endpoint, and public possession-receipt verification key. Do not paste its one-time credential into argv, an environment variable, URL, repository, or shell history. Enrollment issuance requires an Owner/Admin session plus operation-bound recent WebAuthn authorization.
 

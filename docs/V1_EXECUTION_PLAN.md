@@ -232,8 +232,9 @@ Required scenarios:
 - revocation during signing, daemon restart, network loss, Cloud response loss,
   audit fsync failure, reply loss, repository substitution, and malicious
   sibling process all fail or converge to one auditable result;
-- no reusable secret appears in argv, environment, stdin, repository files,
-  browser stores, retained traces, logs, crash reports, or support bundles.
+- no reusable secret is retained in argv, environment, repository files,
+  browser stores, retained traces, logs, crash reports, or support bundles;
+  the explicit recovery path accepts a bounded, one-shot stdin stream only.
 
 Exit condition: Claude Code and Cursor can work unattended within policy, and
 Console revocation prevents the next operation within the documented bound.
@@ -314,36 +315,43 @@ may start in parallel only after every contract named in its entry is frozen.
 
 ### Q1 — finish the one-command onboarding seam
 
-State: next.
+State: in progress — the security primitives, Console consumer, and CLI browser-connect command are implemented; physical-Mac and interruption qualification remain.
 
-Inputs already implemented:
+User-facing command:
+
+```sh
+agentpass setup continue --execute --browser --console-url https://console.example --enrollment-url https://api.example/v1
+```
+
+The Console origin and Cloud API origin are independently pinned; neither may
+be inferred from the other. The browser fragment contains only the short-lived loopback
+correlation URL. The nonce stays ephemeral in CLI/Console memory, and the
+credential-bearing invitation stays memory-only. An explicit stdin handoff is
+the recovery path when local browser delivery fails.
+
+Implemented journey and primitives:
 
 - release manifest v4 candidate identity derived from the exact PKG SHA-256;
 - root-owned public installed-release receipt and installed app Team ID/path
   reinspection;
 - `setup prepare --json` with an exact four-field public DTO;
-- Console guided preflight import and a one-consume loopback transport
-  primitive.
+- Console guided preflight import, WebAuthn issuance, launch-fragment consumer,
+  and one-consume loopback transport primitive;
+- strict nonce, Origin, candidate, fingerprint, request-boundary, ACK, replay,
+  expiry, and teardown validation for the loopback primitive;
+- CLI browser mode with independently validated Console/API URLs, fixed
+  `/usr/bin/open`, bounded listener/opener deadlines, abort teardown, and direct
+  memory-only delivery into the existing enrollment handler.
 
-Remaining implementation:
+Pending qualification and recovery hardening:
 
-1. Add a CLI browser-connect mode to `setup continue` that creates the loopback
-   listener, opens an allow-listed HTTPS Console origin with only the opaque
-   loopback URL in the fragment, and waits under a fixed deadline.
-2. Feed the received invitation directly from memory into the existing
-   enrollment state handler. Never print it, persist it, put it in argv or an
-   environment variable, or copy it through a temporary file.
-3. Bind the configured Cloud API `/v1` origin independently from the Console
-   origin; neither origin may be inferred from the other.
-4. Add browser Private Network Access preflight handling only for the exact
-   approved HTTPS origin, with no wildcard CORS and no reflection of rejected
-   origins.
-5. Resume after browser closure, listener expiry, Cloud timeout, lost enrollment
+1. Qualify browser Private Network Access behavior against supported production
+   browsers and the exact approved HTTPS Console origin.
+2. Resume after browser closure, listener expiry, Cloud timeout, lost enrollment
    response, native restart, and CLI interruption without reusing an invitation
    or repeating a definitive enrollment POST.
-6. Finish `setup status` and `doctor` remediation for missing/invalid receipt,
-   wrong Team ID, unsupported candidate, expired handoff, unavailable native
-   key, stale control, and editor drift.
+3. Finish Japanese localization for unsupported candidates, expired handoffs,
+   unavailable native keys, stale control state, and editor drift.
 
 Required evidence:
 
@@ -358,6 +366,13 @@ Required evidence:
 Exit condition: one command opens Console and returns to a verified, resumable
 native setup state with no reusable authority in process listings, shell
 history, browser history/storage, logs, crash reports, or durable setup state.
+
+The supported recovery procedure is to issue the invitation in Console once
+and pass it explicitly through bounded stdin;
+this is a fallback, not the target non-engineer journey. Troubleshooting must
+cover a rejected Console origin, a mismatched Cloud API origin, an expired or
+already-consumed loopback handoff, failed local delivery after issuance, and a
+definitive enrollment response that must never be replayed.
 
 ### Q2 — production data and signing authority
 

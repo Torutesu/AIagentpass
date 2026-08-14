@@ -38,6 +38,22 @@ To bound the resulting repeated-head work and protect availability from a hostil
 
 ## Enroll a Mac
 
+### Browser-assisted setup
+
+The recommended non-engineer command is:
+
+```bash
+agentpass setup continue --execute --browser --console-url https://console.example --enrollment-url https://api.example/v1
+```
+
+The CLI creates the bounded loopback listener, opens this exact Console URL, waits for one valid response, and feeds the invitation directly from memory into the existing enrollment state handler. The Console-side guided preflight, WebAuthn issuance, and one-consume handoff enforce the same candidate and device-key binding.
+
+The two URLs are independently pinned. `--console-url` is the exact approved HTTPS origin for the browser and must not be derived from the Cloud endpoint. `--enrollment-url` is the exact Cloud API `/v1` origin and must not be derived from the Console origin. The launch fragment carries only the short-lived loopback correlation URL. The nonce is returned by the no-store loopback preflight and remains ephemeral in memory; it is never placed in the fragment or browser storage. The issued invitation is held only in Console/CLI memory and is never put in a URL, argv, environment variable, analytics event, log, or durable setup state.
+
+For a non-engineer: install the signed PKG, run the command supplied by the administrator, sign in, enter only a friendly device name, approve Touch ID/passkey, and wait for the terminal to report completion. The browser-assisted flow does not require manually locating a candidate ID, device fingerprint, API path, or invitation JSON.
+
+### Public preflight and explicit recovery fallback
+
 Open **セットアップ → Macを安全に追加** and paste the one public preflight JSON emitted by the Mac setup flow. The guided form accepts exactly these four fields:
 
 ```json
@@ -53,15 +69,22 @@ Open **セットアップ → Macを安全に追加** and paste the one public p
 
 After the preflight preview, enter only a friendly device name and complete the browser-native step-up. The existing canonical v2 invitation is then issued for ten minutes. The imported preflight and invitation handoff are held only in ephemeral React memory; they are never written to local/session storage, a URL, analytics, or logs. The invitation is displayed once. Reload, dismissal, or expiry removes it. If an older setup flow cannot produce the DTO, use the clearly marked **上級者向け** fallback; it validates the same candidate and P-256 fingerprint rules without adding a correlation field to the base contract.
 
-Copy the displayed invitation once and pass it to the CLI through stdin; never put it in argv, an environment variable, a repository, URL query, or shell history.
+If browser-assisted delivery is unavailable or fails, copying the displayed invitation once and passing it through stdin is the explicit recovery fallback. Never put it in argv, an environment variable, a repository, URL query, browser storage, or shell history.
 
 ```bash
-agentpass setup continue --execute \
-  --enrollment-url 'https://api.example.com/v1' \
-  --enrollment-stdin < enrollment.json
+pbpaste | agentpass setup continue --execute \
+  --enrollment-url 'https://api.example/v1' \
+  --enrollment-stdin
 ```
 
 The Console bootstraps a durable Human session first, then performs browser-native WebAuthn registration and operation-bound recent-auth ceremonies through the same-origin BFF. The enrollment credential is displayed once in memory and is never written to browser storage. A full Playwright virtual-authenticator suite and physical-Mac qualification remain release gates.
+
+### Troubleshooting
+
+- **The browser does not open or the origin is rejected:** confirm that the administrator supplied an exact allow-listed HTTPS `--console-url`. Do not substitute the Cloud API URL.
+- **The Console cannot connect to the Mac:** restart the command to create a fresh loopback correlation URL. A handoff is one-consume and short-lived; do not reuse its fragment or nonce.
+- **Automatic delivery fails after issuance:** copy the displayed invitation once and use the explicit `pbpaste`/`--enrollment-stdin` fallback. If it has expired or was dismissed, restart enrollment and issue a new invitation.
+- **The CLI reports an API/enrollment error:** check the independently pinned `--enrollment-url` ends at the approved `/v1` Cloud API origin. It is configured separately from `--console-url`.
 
 ## Useful Commands
 

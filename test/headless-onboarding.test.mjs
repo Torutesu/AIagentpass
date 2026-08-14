@@ -127,7 +127,7 @@ test("public setup output drops evidence and redacts diagnostics", () => {
       from_state: "service_keys_activated",
       target_state: "device_enrolled",
       operation_id: "setup:secret-journal:8:enroll_device",
-      command: "agentpass setup continue"
+      command: "agentpass setup continue --execute --browser --console-url HTTPS_CONSOLE --enrollment-url HTTPS_API/v1"
     },
     evidence: { proof: { credential: "reusable-secret" } },
     journal: {

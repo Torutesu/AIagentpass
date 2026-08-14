@@ -21,6 +21,8 @@ import { createNativeBootstrapRunner } from "../lib/native-bootstrap-runner.mjs"
 import { createNativeDeviceEnrollmentRunner } from "../lib/native-device-enrollment-runner.mjs";
 import { createNativeSetupHandlers } from "../lib/native-setup-handlers.mjs";
 import { createDeviceEnrollmentSetupHandler } from "../lib/device-enrollment-setup-handler.mjs";
+import { connectSetupInBrowser, normalizeConsoleBaseUrl } from "../lib/setup-browser-connect.mjs";
+import { parseSetupContinueOptions } from "../lib/setup-continue-options.mjs";
 import { parseControlBundleJson } from "../lib/control-bundle-v2.mjs";
 import { executeProductionUninstall, planProductionUninstall } from "../lib/platform-uninstall.mjs";
 import { runUserStatePurge } from "../lib/platform-user-purge.mjs";
@@ -50,7 +52,9 @@ Commands:
   setup status
   setup prepare --json
                     emit a public, candidate-bound local setup handoff
-  setup continue [--execute] [--enrollment-url HTTPS_URL --enrollment-stdin]
+  setup continue [--execute]
+  setup continue --execute --browser --console-url HTTPS_URL --enrollment-url HTTPS_URL
+  setup continue --execute --enrollment-url HTTPS_URL --enrollment-stdin
                     advance exactly one verified, crash-resumable setup state
   setup --client claude-code|cursor --team-id TEAMID [--project DIR] [--execute]
                     configure the native bridge and project MCP integration
@@ -192,21 +196,6 @@ function installProduction() {
   }
 }
 
-function setupContinueFlags() {
-  let execute = false;
-  let enrollmentStdin = false;
-  let enrollmentUrl;
-  for (let index = 1; index < args.length; index += 1) {
-    const argument = args[index];
-    if (argument === "--execute" && !execute) { execute = true; continue; }
-    if (argument === "--enrollment-stdin" && !enrollmentStdin) { enrollmentStdin = true; continue; }
-    if (argument === "--enrollment-url" && enrollmentUrl === undefined && index + 1 < args.length && !args[index + 1].startsWith("--")) { enrollmentUrl = args[++index]; continue; }
-    throw new Error("Usage: agentpass setup continue [--execute] [--enrollment-url HTTPS_URL --enrollment-stdin]");
-  }
-  if ((enrollmentStdin || enrollmentUrl !== undefined) && (!execute || !enrollmentStdin || enrollmentUrl === undefined)) throw new Error("Enrollment requires --execute, --enrollment-url, and --enrollment-stdin together");
-  return { execute, enrollmentStdin, enrollmentUrl };
-}
-
 function readEnrollmentInvitationStdin() {
   const chunks = []; let total = 0;
   while (true) {
@@ -222,7 +211,7 @@ function readEnrollmentInvitationStdin() {
 }
 
 async function continueNativeSetup() {
-  const flags = setupContinueFlags();
+  const flags = parseSetupContinueOptions(args.slice(1));
   const journal = loadSetupJournal();
   if (!flags.execute) {
     console.log(JSON.stringify(publicSetupResult(await createSetupOrchestrator({ journal }).preview()), null, 2));
@@ -231,13 +220,45 @@ async function continueNativeSetup() {
   if (process.platform !== "darwin") throw new Error("Native AgentPass setup is supported only on macOS");
   if (process.getuid?.() === 0) throw new Error("Run setup as the interactive user, not root");
   const config = loadConfig();
-  const enrollmentInvitation = flags.enrollmentStdin ? readEnrollmentInvitationStdin() : undefined;
+  const state = journal.status().state;
+  const enrollmentMode = flags.browser || flags.enrollmentStdin;
+  if ((state === "service_keys_activated") !== enrollmentMode) {
+    throw new Error(state === "service_keys_activated"
+      ? "At service_keys_activated, use the browser-assisted command or the explicit stdin recovery path"
+      : "Browser and stdin enrollment options are accepted only at service_keys_activated");
+  }
   const enrollmentBaseUrl = flags.enrollmentUrl === undefined ? undefined : validateHeadlessEnrollmentBaseUrl(flags.enrollmentUrl);
-  if ((journal.status().state === "service_keys_activated") !== Boolean(enrollmentInvitation)) throw new Error("At service_keys_activated, pipe the canonical enrollment invitation with --enrollment-url URL --enrollment-stdin");
+  const consoleBaseUrl = flags.consoleUrl === undefined ? undefined : normalizeConsoleBaseUrl(flags.consoleUrl);
   const teamId = config.native_broker?.team_id;
   if (typeof teamId !== "string") throw new Error("Native bridge configuration has no pinned Apple Team ID; rerun agentpass setup --team-id TEAMID");
   const application = inspectNativeApplication(undefined, { expectedTeamId: teamId });
   if (config.native_broker?.client !== application.client || config.native_broker?.manager !== application.manager || config.native_broker?.mach_service !== "dev.agentpass.native-service") throw new Error("Native bridge configuration does not match the verified AgentPass application");
+  const enrollmentRunner = enrollmentMode ? createNativeDeviceEnrollmentRunner({ servicePath: application.service }) : undefined;
+  let enrollmentInvitation;
+  if (flags.enrollmentStdin) enrollmentInvitation = readEnrollmentInvitationStdin();
+  if (flags.browser) {
+    const receipt = readInstalledReleaseReceipt();
+    const preflight = await prepareSetupPreflight({
+      readInstalledReleaseReceipt: () => receipt,
+      verifyInstalledRelease: () => verifyInstalledReleaseReceipt(),
+      nativeRunner: enrollmentRunner
+    });
+    const controller = new AbortController();
+    const abort = () => controller.abort();
+    process.once("SIGINT", abort);
+    process.once("SIGTERM", abort);
+    try {
+      enrollmentInvitation = await connectSetupInBrowser({
+        consoleBaseUrl,
+        cloudBaseUrl: enrollmentBaseUrl,
+        preflight,
+        signal: controller.signal
+      });
+    } finally {
+      process.removeListener("SIGINT", abort);
+      process.removeListener("SIGTERM", abort);
+    }
+  }
   const registerService = (context) => {
     let inspected = inspectNativeApplication(undefined, { expectedTeamId: teamId });
     if (inspected.serviceStatus !== "enabled") {
@@ -282,7 +303,6 @@ async function continueNativeSetup() {
   if (journal.status().state === "test_commit_verified") handlers.complete_setup = createCompleteSetupHandler({ priorVerificationProof: verifyCurrentCommit() });
   if (enrollmentInvitation) {
     nativeHandlers();
-    const enrollmentRunner = createNativeDeviceEnrollmentRunner({ servicePath: application.service });
     handlers.enroll_device = createDeviceEnrollmentSetupHandler({
       runner: enrollmentRunner,
       provisionControl: (input) => runner.provisionControl(input),

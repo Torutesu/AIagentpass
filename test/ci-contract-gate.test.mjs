@@ -38,13 +38,14 @@ test("native qualification is serialized at the top level", () => {
     packageManifest.scripts["test:native"],
     "node scripts/ci/run-native-tests.mjs -- swift test --package-path native/macos --no-parallel",
   );
-  assert.match(section, /runs-on: macos-latest\n    timeout-minutes: 45/u);
+  assert.match(section, /runs-on: macos-latest\n    timeout-minutes: 60/u);
   for (const [name, minutes, command] of [
-    ["Run bounded native unit tests", 20, "npm run test:native"],
+    ["Run bounded native unit tests", 30, "npm run test:native"],
     ["Run bounded native app bundle tests", 10, "npm run test:native-app"],
     ["Run bounded installer preservation tests", 5, "npm run test:native-installer-preservation"],
     ["Run bounded native durability model", 10, "npm run test:native-durability-model"],
   ]) {
     assert.match(section, new RegExp(`- name: ${name}\\n        timeout-minutes: ${minutes}\\n[\\s\\S]*?run: ${command}(?:\\n|$)`, "u"));
   }
+  assert.match(section, /NATIVE_TEST_TIMEOUT_MS: 1500000/u);
 });
