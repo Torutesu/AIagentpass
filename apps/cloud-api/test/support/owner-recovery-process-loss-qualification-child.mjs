@@ -39,7 +39,7 @@ input.once("close", () => {
 try {
   if (options.mode === "contract_noisy") {
     process.stdout.write("x".repeat(64 * 1024));
-    process.exit(0);
+    await new Promise(() => { setInterval(() => {}, 1_000); });
   }
   if (options.mode === "contract") await runContract();
   else if (options.mode === "delivery") await runDelivery();
