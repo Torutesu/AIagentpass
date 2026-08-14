@@ -32,7 +32,7 @@ Production completion means:
 
 Implemented locally and covered by source-bound CI:
 
-- frozen Core/OpenAPI/JSON Schema contracts and 38 forward-only migrations;
+- frozen Core/OpenAPI/JSON Schema contracts and 39 forward-only migrations;
 - organization roles, Human sessions, WebAuthn, Device APIs, control state,
   audit, emergency revocation, owner recovery, and browser-assisted enrollment;
 - managed signer registry for eight distinct signing purposes;
@@ -80,7 +80,7 @@ as physical or production evidence.
 
 Merge slices:
 
-1. Catalog migration 0038, integrate the three-role SQL contract into cutover,
+1. Catalog migrations 0038–0039, integrate the three-role SQL contract into cutover,
    and require the privilege checker before switching traffic.
 2. Add a disposable PostgreSQL 16 integration test that creates the roles,
    applies migrations as `agentpass_migrator`, executes application repository
@@ -272,7 +272,7 @@ bind the same source and artifact identities.
 
 The next merge-sized checkpoints are intentionally narrow:
 
-1. Integrate migration 0038 and role separation into real PostgreSQL CI.
+1. Integrate migrations 0038–0039 and role separation into real PostgreSQL CI.
 2. Wire the reconciliation contract and durable provider receipts into one
    currently composed signing purpose; pass the two-instance response-loss
    matrix.

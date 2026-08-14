@@ -18,6 +18,8 @@ test('role SQL is idempotent, credential-free, and PUBLIC is revoked', async () 
   assert.match(sql, /REVOKE ALL PRIVILEGES ON ALL TABLES IN SCHEMA public FROM PUBLIC/);
   assert.match(sql, /REVOKE ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA public FROM PUBLIC/);
   assert.match(sql, /REVOKE ALL PRIVILEGES ON ALL FUNCTIONS IN SCHEMA public FROM PUBLIC/);
+  assert.match(sql, /schema_migrations/);
+  assert.match(sql, /schema_migration_attempts/);
   assert.match(sql, /ALTER DEFAULT PRIVILEGES FOR ROLE agentpass_migrator IN SCHEMA public/);
   assert.match(sql, /ON TABLES/);
   assert.match(sql, /ON SEQUENCES/);
@@ -54,6 +56,17 @@ test('checker reads the URL from the environment, enforces verify-full, and meas
   for (const variable of ['PGHOST', 'PGPORT', 'PGUSER', 'PGPASSWORD', 'PGDATABASE', 'PGSSLMODE']) assert.match(checker, new RegExp(variable));
 });
 
+test('real role qualification removes database URLs before spawning psql', async () => {
+  const integration = await read('apps/cloud-api/test/postgres/least-privilege-role.integration.test.mjs');
+
+  assert.match(integration, /AGENTPASS_TEST_DATABASE_URL:\s*_testDatabaseUrl/);
+  assert.match(integration, /AGENTPASS_TEST_POSTGRES_URL:\s*_testPostgresUrl/);
+  assert.match(integration, /AGENTPASS_DATABASE_URL:\s*_databaseUrl/);
+  assert.match(integration, /DATABASE_URL:\s*_genericDatabaseUrl/);
+  assert.match(integration, /spawnSync\(\s*"psql"/);
+  assert.doesNotMatch(integration, /env:\s*process\.env/);
+});
+
 test('existing operational docs contain the role boundary', async () => {
   const [cutover, backup] = await Promise.all([
     read('docs/POSTGRES_CUTOVER_RUNBOOK.md'),
@@ -76,6 +89,7 @@ test('all requested artifacts exist in the allowed paths', async () => {
     'scripts/postgres/roles.sql',
     'scripts/postgres/role-privilege-check.mjs',
     'apps/cloud-api/test/postgres/least-privilege-role-contract.test.mjs',
+    'apps/cloud-api/test/postgres/least-privilege-role.integration.test.mjs',
     'docs/POSTGRES_CUTOVER_RUNBOOK.md',
     'docs/POSTGRES_BACKUP_RESTORE.md',
   ].map((relativePath) => access(new URL(relativePath, root))));

@@ -27,14 +27,14 @@ test("G1 signed session bootstrap is bound to active PostgreSQL membership and r
       client: migrationClient,
       applicationVersion: "signed-session-bootstrap-integration"
     }).run();
-    assert.equal(migration.currentVersion, 38);
+    assert.equal(migration.currentVersion, 39);
   } finally {
     migrationClient.release();
   }
 
   const migrationState = await pool.query("SELECT count(*)::int AS count, max(version)::int AS version FROM schema_migrations");
-  assert.equal(migrationState.rows[0].count, 38);
-  assert.equal(migrationState.rows[0].version, 38);
+  assert.equal(migrationState.rows[0].count, 39);
+  assert.equal(migrationState.rows[0].version, 39);
 
   const ids = {
     organization: crypto.randomUUID(),

@@ -152,8 +152,11 @@ function validateAuthoritativeSnapshot(snapshot, expected) {
 }
 
 function validateInput(value) {
+  const hasDirectSign = typeof value.provider?.sign === "function";
+  const hasReconciliationAdapter = typeof value.provider?.signOnce === "function" && typeof value.provider?.lookup === "function";
   if (!value.postgresRuntime || typeof value.postgresRuntime.createManagedSignerKeyLifecycleRepository !== "function"
-    || !value.provider || typeof value.provider.publicKeyMetadata !== "function" || typeof value.provider.sign !== "function"
+    || !value.provider || typeof value.provider.publicKeyMetadata !== "function" || (!hasDirectSign && !hasReconciliationAdapter)
+    || (typeof value.provider.signOnce === "function") !== (typeof value.provider.lookup === "function")
     || typeof value.purpose !== "string" || !PURPOSE.test(value.purpose)
     || typeof value.keyId !== "string" || !KEY_ID.test(value.keyId)
     || !Number.isSafeInteger(value.version) || value.version < 1
@@ -163,7 +166,7 @@ function validateInput(value) {
 }
 
 function validateRepository(value) {
-  for (const method of ["snapshot", "initialize", "reserveSignature", "commitSignature", "markSignatureUncertain"]) {
+  for (const method of ["snapshot", "initialize", "reserveSignature", "startSignature", "commitSignature", "markSignatureUncertain", "reconcileSignature"]) {
     if (typeof value?.[method] !== "function") fail(HOSTED_MANAGED_SIGNER_RUNTIME_ERROR_CODES.DATABASE);
   }
 }

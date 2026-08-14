@@ -26,7 +26,8 @@ function fixture({ existing, metadataKeyId = "agent-key-1" } = {}) {
     async reserveSignature() { throw new Error("not used"); },
     async startSignature() { throw new Error("not used"); },
     async commitSignature() { throw new Error("not used"); },
-    async markSignatureUncertain() { throw new Error("not used"); }
+    async markSignatureUncertain() { throw new Error("not used"); },
+    async reconcileSignature() { throw new Error("not used"); }
   };
   const provider = {
     async publicKeyMetadata() { calls.push("metadata"); return { key_id: metadataKeyId, algorithm: "ed25519", public_key: publicKey }; },
@@ -87,4 +88,47 @@ test("redacts provider and database failures", async () => {
   const unavailable = fixture();
   unavailable.postgresRuntime.createManagedSignerKeyLifecycleRepository = () => { throw new Error("database-secret"); };
   await assert.rejects(bindHostedManagedSignerProvider({ postgresRuntime: unavailable.postgresRuntime, provider: unavailable.provider, purpose: PURPOSE, keyId: "agent-key-1", publicKey: unavailable.publicKey, publicKeyFingerprint: unavailable.publicKeyFingerprint }), (error) => error.code === CODES.DATABASE && !error.message.includes("database-secret"));
+});
+
+test("requires an explicit provider-start boundary before accepting a durable repository", async () => {
+  const value = fixture();
+  delete value.repository.startSignature;
+  await assert.rejects(bindHostedManagedSignerProvider({
+    postgresRuntime: value.postgresRuntime,
+    provider: value.provider,
+    purpose: PURPOSE,
+    keyId: "agent-key-1",
+    publicKey: value.publicKey,
+    publicKeyFingerprint: value.publicKeyFingerprint
+  }), { code: CODES.DATABASE });
+});
+
+test("accepts a closed signOnce and lookup cloud-signer provider without a direct Sign fallback", async () => {
+  const value = fixture();
+  delete value.provider.sign;
+  value.provider.signOnce = async () => { throw new Error("not used"); };
+  value.provider.lookup = async () => ({ state: "unknown" });
+  const result = await bindHostedManagedSignerProvider({
+    postgresRuntime: value.postgresRuntime,
+    provider: value.provider,
+    purpose: PURPOSE,
+    keyId: "agent-key-1",
+    publicKey: value.publicKey,
+    publicKeyFingerprint: value.publicKeyFingerprint
+  });
+  assert.equal(typeof result.provider.sign, "function");
+});
+
+test("rejects a partial reconciliation adapter", async () => {
+  const value = fixture();
+  delete value.provider.sign;
+  value.provider.signOnce = async () => { throw new Error("not used"); };
+  await assert.rejects(bindHostedManagedSignerProvider({
+    postgresRuntime: value.postgresRuntime,
+    provider: value.provider,
+    purpose: PURPOSE,
+    keyId: "agent-key-1",
+    publicKey: value.publicKey,
+    publicKeyFingerprint: value.publicKeyFingerprint
+  }), { code: CODES.CONFIG });
 });

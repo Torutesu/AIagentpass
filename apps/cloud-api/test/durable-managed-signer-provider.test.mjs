@@ -106,6 +106,112 @@ function request(bytes = Buffer.from("commit payload"), overrides = {}) {
   };
 }
 
+function makeContractFixture({ signOnce, lookup, initialState = undefined } = {}) {
+  const purpose = "agentpass.agent-session-grant";
+  const keyId = "contract-test-key";
+  const keyVersion = 1;
+  const pair = crypto.generateKeyPairSync("ed25519");
+  const state = { status: initialState, signature: undefined, provider_receipt: undefined };
+  const calls = [];
+  const provider = {
+    async publicKeyMetadata() {
+      calls.push("metadata");
+      return { key_id: keyId, algorithm: "ed25519", public_key: pair.publicKey };
+    }
+  };
+  const adapter = {
+    async signOnce(binding, bytes) {
+      calls.push("signOnce");
+      if (signOnce) return signOnce(binding, bytes, pair);
+      return {
+        provider_receipt: {
+          provider: "fixture-kms",
+          receipt_id: "receipt-1",
+          operation_id: binding.operation_id,
+          key_id: binding.key_id,
+          key_version: binding.key_version
+        },
+        signature: {
+          algorithm: "ed25519",
+          encoding: "base64url",
+          value: crypto.sign(null, bytes, pair.privateKey).toString("base64url"),
+          public_key: {
+            algorithm: "ed25519",
+            encoding: "base64url",
+            value: pair.publicKey.export({ type: "spki", format: "der" }).toString("base64url")
+          }
+        }
+      };
+    },
+    async lookup(binding, bytes) {
+      calls.push("lookup");
+      if (lookup) return lookup(binding, bytes, pair);
+      return {
+        state: "committed",
+        provider_receipt: {
+          provider: "fixture-kms",
+          receipt_id: "receipt-1",
+          operation_id: binding.operation_id,
+          key_id: binding.key_id,
+          key_version: binding.key_version
+        },
+        signature: {
+          algorithm: "ed25519",
+          encoding: "base64url",
+          value: crypto.sign(null, bytes, pair.privateKey).toString("base64url"),
+          public_key: {
+            algorithm: "ed25519",
+            encoding: "base64url",
+            value: pair.publicKey.export({ type: "spki", format: "der" }).toString("base64url")
+          }
+        }
+      };
+    }
+  };
+  function repository() {
+    return {
+      async snapshot() {
+        return { version: 1, purpose, algorithm: "ed25519", keys: [{ key_id: keyId, key_version: keyVersion, purpose, algorithm: "ed25519", state: "active", state_version: 1 }] };
+      },
+      async reserveSignature(input) {
+        if (state.status === "committed") return { state: "committed", signature: Buffer.from(state.signature), ...(state.provider_receipt === undefined ? {} : { provider_receipt: { ...state.provider_receipt } }) };
+        if (state.status === "uncertain") throw Object.assign(new Error("uncertain"), { code: REPOSITORY_CODES.SIGNING_UNCERTAIN });
+        if (state.status === "pending") throw Object.assign(new Error("pending"), { code: REPOSITORY_CODES.SIGNING_PENDING });
+        state.status = "pending";
+        state.input = input;
+        return { state: "pending", claim_token: "contract-claim-token" };
+      },
+      async startSignature(input) {
+        if (state.status !== "pending" || input.claim_token !== "contract-claim-token") throw Object.assign(new Error("claim lost"), { code: REPOSITORY_CODES.SIGNING_CLAIM_LOST });
+        calls.push("start");
+        return { state: "pending", provider_started_at: "2026-08-15T00:00:00.000Z" };
+      },
+      async commitSignature(input) {
+        state.status = "committed";
+        state.signature = Buffer.from(input.signature);
+        state.provider_receipt = { ...input.provider_receipt };
+        calls.push("commit");
+        return { state: "committed", signature: Buffer.from(state.signature), provider_receipt: { ...state.provider_receipt } };
+      },
+      async reconcileSignature(input) {
+        if (state.status !== "uncertain") throw Object.assign(new Error("not uncertain"), { code: REPOSITORY_CODES.SIGNING_CONFLICT });
+        state.status = "committed";
+        state.signature = Buffer.from(input.signature);
+        state.provider_receipt = { ...input.provider_receipt };
+        calls.push("reconcile");
+        return { state: "committed", signature: Buffer.from(state.signature), provider_receipt: { ...state.provider_receipt } };
+      },
+      async markSignatureUncertain() {
+        state.status = "uncertain";
+        calls.push("uncertain");
+        return { state: "uncertain" };
+      }
+    };
+  }
+  const makeSigner = () => createDurableManagedSignerProvider({ provider, managedSignerAdapter: adapter, repository: repository(), purpose, keyId, keyVersion, version: 1 });
+  return { adapter, calls, makeSigner, pair, state, request: { algorithm: "ed25519", bytes: Buffer.from("contract payload"), key_id: keyId, purpose, version: 1 } };
+}
+
 async function rejectsWithCode(action, code) {
   await assert.rejects(action, (error) => error?.code === code);
 }
@@ -351,4 +457,94 @@ test("does not expose provider or repository error details", async () => {
     assert.doesNotMatch(error.stack, /postgres-secret-value/u);
     return true;
   });
+});
+
+test("commits and replays a validated provider receipt without a second signOnce", async () => {
+  const fixture = makeContractFixture();
+  const signer = fixture.makeSigner();
+  const first = await signer.sign(fixture.request);
+  const second = await signer.sign({ ...fixture.request, bytes: Buffer.from(fixture.request.bytes) });
+
+  assert.deepEqual(second, first);
+  assert.equal(fixture.calls.filter((call) => call === "signOnce").length, 1);
+  assert.equal(fixture.calls.filter((call) => call === "commit").length, 1);
+  assert.equal(fixture.state.provider_receipt.provider, "fixture-kms");
+  assert.equal(fixture.state.provider_receipt.receipt_id, "receipt-1");
+});
+
+test("records the boundary before signOnce and reconciles response loss through lookup on a second repository instance", async () => {
+  const fixture = makeContractFixture({
+    signOnce: async () => { throw new Error("response lost after provider acceptance"); }
+  });
+  const first = fixture.makeSigner();
+  const second = fixture.makeSigner();
+
+  await rejectsWithCode(() => first.sign(fixture.request), CODES.PROVIDER);
+  assert.equal(fixture.calls.indexOf("start") < fixture.calls.indexOf("signOnce"), true);
+  assert.equal(fixture.state.status, "uncertain");
+  const reconciled = await second.sign(fixture.request);
+  assert.deepEqual(reconciled, crypto.sign(null, fixture.request.bytes, fixture.pair.privateKey));
+  assert.equal(fixture.calls.filter((call) => call === "signOnce").length, 1);
+  assert.equal(fixture.calls.filter((call) => call === "lookup").length, 1);
+  assert.equal(fixture.calls.filter((call) => call === "reconcile").length, 1);
+});
+
+test("keeps accepted, unknown, and rejected lookups uncertain without a blind re-sign", async () => {
+  for (const state of ["accepted", "unknown", "rejected"]) {
+    const fixture = makeContractFixture({
+      signOnce: async () => { throw new Error("provider response lost"); },
+      lookup: async (binding) => state === "accepted"
+        ? { state, provider_receipt: { provider: "fixture-kms", receipt_id: "receipt-1", operation_id: binding.operation_id, key_id: binding.key_id, key_version: binding.key_version } }
+        : { state }
+    });
+    await rejectsWithCode(() => fixture.makeSigner().sign(fixture.request), CODES.PROVIDER);
+    await rejectsWithCode(() => fixture.makeSigner().sign(fixture.request), CODES.UNCERTAIN);
+    assert.equal(fixture.calls.filter((call) => call === "signOnce").length, 1);
+    assert.equal(fixture.calls.filter((call) => call === "lookup").length, 1);
+    assert.equal(fixture.calls.includes("reconcile"), false);
+  }
+});
+
+test("rejects forged lookup signatures and wrong receipt bindings before reconciliation", async () => {
+  const wrongPair = crypto.generateKeyPairSync("ed25519");
+  const forged = makeContractFixture({
+    signOnce: async () => { throw new Error("response lost"); },
+    lookup: async (binding, bytes) => ({
+      state: "committed",
+      provider_receipt: { provider: "fixture-kms", receipt_id: "receipt-1", operation_id: binding.operation_id, key_id: binding.key_id, key_version: binding.key_version },
+      signature: {
+        algorithm: "ed25519", encoding: "base64url",
+        value: crypto.sign(null, bytes, wrongPair.privateKey).toString("base64url"),
+        public_key: { algorithm: "ed25519", encoding: "base64url", value: wrongPair.publicKey.export({ type: "spki", format: "der" }).toString("base64url") }
+      }
+    })
+  });
+  await rejectsWithCode(() => forged.makeSigner().sign(forged.request), CODES.PROVIDER);
+  await rejectsWithCode(() => forged.makeSigner().sign(forged.request), CODES.OUTPUT);
+  assert.equal(forged.calls.includes("reconcile"), false);
+
+  const wrongReceipt = makeContractFixture({
+    signOnce: async () => { throw new Error("response lost"); },
+    lookup: async (binding, bytes, pair) => ({
+      state: "committed",
+      provider_receipt: { provider: "fixture-kms", receipt_id: "receipt-1", operation_id: "other-operation", key_id: binding.key_id, key_version: binding.key_version },
+      signature: {
+        algorithm: "ed25519", encoding: "base64url",
+        value: crypto.sign(null, bytes, pair.privateKey).toString("base64url"),
+        public_key: { algorithm: "ed25519", encoding: "base64url", value: pair.publicKey.export({ type: "spki", format: "der" }).toString("base64url") }
+      }
+    })
+  });
+  await rejectsWithCode(() => wrongReceipt.makeSigner().sign(wrongReceipt.request), CODES.PROVIDER);
+  await rejectsWithCode(() => wrongReceipt.makeSigner().sign(wrongReceipt.request), CODES.OUTPUT);
+  assert.equal(wrongReceipt.calls.includes("reconcile"), false);
+});
+
+test("fails closed for a committed row that has no provider receipt", async () => {
+  const fixture = makeContractFixture({ initialState: "committed" });
+  fixture.state.signature = crypto.sign(null, fixture.request.bytes, fixture.pair.privateKey);
+  fixture.state.provider_receipt = undefined;
+  await rejectsWithCode(() => fixture.makeSigner().sign(fixture.request), CODES.COMMIT);
+  assert.equal(fixture.calls.includes("signOnce"), false);
+  assert.equal(fixture.calls.includes("lookup"), false);
 });

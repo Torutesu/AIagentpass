@@ -61,6 +61,14 @@ jobs:
         env:
           AGENTPASS_TEST_DATABASE_URL: postgresql://postgres:agentpass-integration@127.0.0.1:5432/postgres
         run: npm run test:postgres:g4
+      - name: Prepare isolated PostgreSQL 16 least-privilege database
+        env:
+          PGPASSWORD: agentpass-w15-integration
+        run: createdb --host=127.0.0.1 --port=5433 --username=postgres agentpass_roles
+      - name: Qualify PostgreSQL 16 least-privilege roles and migration boundary
+        env:
+          AGENTPASS_TEST_DATABASE_URL: postgresql://postgres:agentpass-w15-integration@127.0.0.1:5433/agentpass_roles
+        run: node --test apps/cloud-api/test/postgres/least-privilege-role.integration.test.mjs
       - name: Prepare isolated PostgreSQL 16 owner-recovery upgrade database
         env:
           PGPASSWORD: agentpass-w15-integration

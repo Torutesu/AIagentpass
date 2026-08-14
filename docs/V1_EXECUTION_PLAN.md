@@ -384,9 +384,12 @@ metadata only and no longer accepts a refresh private-key path. ControlBundle,
 capability, Human assertion, audit anchor, and promotion evidence remain open.
 The source now contains a closed provider-reconciliation contract, bounded
 signer leases/fencing with lifecycle-epoch commit checks, migration `0038`, and
-least-privilege app/migrator/backup role artifacts. Runtime reconciliation
-wiring, protected role cutover, and real two-instance/KMS qualification are not
-yet exit-qualified. The detailed continuation is maintained in
+least-privilege app/migrator/backup role artifacts. The durable coordinator now
+has a provider-neutral reconciliation adapter path and migration `0039` stores only
+closed committed receipt identity; direct AWS/GCP Sign remains intentionally
+non-reconcilable because those APIs expose no lookup operation. Protected role
+Hosted composition of that adapter, protected role cutover, and real two-instance/cloud-signer qualification are not yet
+exit-qualified. The detailed continuation is maintained in
 [`IMPLEMENTATION_PLAN_2026-08-15.md`](./IMPLEMENTATION_PLAN_2026-08-15.md).
 
 Work breakdown:

@@ -127,6 +127,25 @@ GRANT ALL PRIVILEGES ON ALL TABLES IN SCHEMA public TO agentpass_migrator;
 GRANT ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA public TO agentpass_migrator;
 GRANT ALL PRIVILEGES ON ALL FUNCTIONS IN SCHEMA public TO agentpass_migrator;
 
+-- Migration bookkeeping is control-plane metadata, not application data.
+-- Keep its SELECT visibility for the read-only backup identity, but never let
+-- app or backup mutate the migration history or attempt ledger. These tables
+-- may not exist on the bootstrap invocation, so this is conditional.
+DO $$
+DECLARE
+  relation_name text;
+BEGIN
+  FOREACH relation_name IN ARRAY ARRAY['schema_migrations', 'schema_migration_attempts'] LOOP
+    IF to_regclass(format('public.%I', relation_name)) IS NOT NULL THEN
+      EXECUTE format(
+        'REVOKE INSERT, UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER ON TABLE public.%I FROM agentpass_app, agentpass_backup',
+        relation_name
+      );
+    END IF;
+  END LOOP;
+END
+$$;
+
 -- Future objects created by the migration identity preserve the same boundary.
 ALTER DEFAULT PRIVILEGES FOR ROLE agentpass_migrator IN SCHEMA public
   REVOKE ALL PRIVILEGES ON TABLES FROM PUBLIC, agentpass_app, agentpass_backup;

@@ -50,7 +50,7 @@ role_ids AS (
   WHERE rolname IN ('${ROLES.join("', '")}')
 ),
 tables AS (
-  SELECT c.oid, c.relowner
+  SELECT c.oid, c.relname, c.relowner
   FROM pg_class AS c
   JOIN target_schema AS s ON s.oid = c.relnamespace
   WHERE c.relkind IN ('r', 'p', 'v', 'm', 'f')
@@ -112,9 +112,15 @@ database_privileges_ok AS (
 table_privileges_ok AS (
   SELECT COALESCE((SELECT bool_and(
       has_table_privilege('agentpass_app', oid, 'SELECT')
-      AND has_table_privilege('agentpass_app', oid, 'INSERT')
-      AND has_table_privilege('agentpass_app', oid, 'UPDATE')
-      AND has_table_privilege('agentpass_app', oid, 'DELETE')
+      AND CASE WHEN relname IN ('schema_migrations', 'schema_migration_attempts') THEN
+        NOT has_table_privilege('agentpass_app', oid, 'INSERT')
+        AND NOT has_table_privilege('agentpass_app', oid, 'UPDATE')
+        AND NOT has_table_privilege('agentpass_app', oid, 'DELETE')
+      ELSE
+        has_table_privilege('agentpass_app', oid, 'INSERT')
+        AND has_table_privilege('agentpass_app', oid, 'UPDATE')
+        AND has_table_privilege('agentpass_app', oid, 'DELETE')
+      END
       AND NOT has_table_privilege('agentpass_app', oid, 'TRUNCATE')
       AND NOT has_table_privilege('agentpass_app', oid, 'REFERENCES')
       AND NOT has_table_privilege('agentpass_app', oid, 'TRIGGER')

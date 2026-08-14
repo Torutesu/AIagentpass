@@ -145,7 +145,7 @@ class FakePgPool {
 
     if (text.startsWith("INSERT INTO managed_signer_signing_idempotency")) {
       const [purpose, operationId, requestDigest, keyId, keyVersion, expiresAt, claimDigest, leaseMs, reservedVersion] = params;
-      const row = { purpose, operation_id: operationId, request_digest: requestDigest, key_id: keyId, key_version: Number(keyVersion), status: "pending", signature: null, created_at: NOW_ISO, updated_at: NOW_ISO, expires_at: expiresAt, claim_expires_at: new Date(NOW + Number(leaseMs)).toISOString(), provider_started_at: null, reserved_lifecycle_version: Number(reservedVersion), claim_token_digest: claimDigest };
+      const row = { purpose, operation_id: operationId, request_digest: requestDigest, key_id: keyId, key_version: Number(keyVersion), status: "pending", signature: null, created_at: NOW_ISO, updated_at: NOW_ISO, expires_at: expiresAt, claim_expires_at: new Date(NOW + Number(leaseMs)).toISOString(), provider_started_at: null, reserved_lifecycle_version: Number(reservedVersion), claim_token_digest: claimDigest, provider_receipt_provider: null, provider_receipt_id: null };
       this.state.signing.set(`${purpose}\u0000${operationId}`, row);
       return { rows: [{ ...row, request_digest: requestDigest.toString("hex"), key_version: String(row.key_version) }], rowCount: 1 };
     }
@@ -161,7 +161,15 @@ class FakePgPool {
         row.claim_expires_at = null;
       } else if (text.includes("provider_started_at=COALESCE")) row.provider_started_at = NOW_ISO;
       else if (text.includes("status='uncertain'")) { row.status = "uncertain"; row.claim_token_digest = null; row.claim_expires_at = null; }
-      else if (text.includes("status='committed'")) { row.status = "committed"; row.signature = params[2]; row.claim_token_digest = null; row.claim_expires_at = null; }
+      else if (text.includes("status='committed'")) {
+        row.status = "committed";
+        row.signature = params[2];
+        const receiptOffset = text.includes("claim_token_digest=$5") ? 6 : 5;
+        row.provider_receipt_provider = params[receiptOffset] ?? null;
+        row.provider_receipt_id = params[receiptOffset + 1] ?? null;
+        row.claim_token_digest = null;
+        row.claim_expires_at = null;
+      }
       else if (text.includes("status='pending'")) { row.status = "pending"; row.claim_token_digest = params[2]; row.claim_expires_at = NOW_ISO; }
       row.updated_at = NOW_ISO;
       return { rows: [{ ...row, request_digest: row.request_digest.toString("hex"), key_version: String(row.key_version) }], rowCount: 1 };
@@ -217,8 +225,18 @@ test("0038 catalogs the forward-only fencing contract", async () => {
   assert.match(sql, /CREATE INDEX managed_signer_signing_claim_expiry/u);
   const { loadSqlMigrations, defaultContractDirectory } = await import("../../src/postgres/migration-runner.mjs");
   const migrations = await loadSqlMigrations(defaultContractDirectory());
-  assert.equal(migrations.at(-1).version, 38);
-  assert.equal(migrations.at(-1).name, "0038_managed_signer_fencing.sql");
+  assert.equal(migrations.find(({ name }) => name === "0038_managed_signer_fencing.sql")?.version, 38);
+  assert.equal(migrations.find(({ name }) => name === "0039_managed_signer_provider_receipts.sql")?.version, 39);
+});
+
+test("0039 stores only closed provider receipt columns", async () => {
+  const sql = await readFile(new URL("../../../../contracts/postgres/0039_managed_signer_provider_receipts.sql", import.meta.url), "utf8");
+  assert.match(sql, /provider_receipt_provider/u);
+  assert.match(sql, /provider_receipt_id/u);
+  assert.match(sql, /managed_signer_provider_receipt_shape/u);
+  assert.match(sql, /status = 'committed'/u);
+  assert.doesNotMatch(sql, /provider_receipt\s+jsonb/iu);
+  assert.doesNotMatch(sql, /private_key|raw_provider_response|credential_payload/iu);
 });
 
 test("persists compatible snapshots, serializes lifecycle operations, and replays exact responses", async () => {
@@ -258,11 +276,13 @@ test("durably replays public signatures across repository instances and fails cl
 
   const uncertainDigest = canonicalManagedSignerRequestDigest({ purpose: PURPOSE, algorithm: "ed25519", key_id: "agent-key-1", version: 1, bytes: Buffer.from("uncertain") });
   const uncertain = { operation_id: "sign-uncertain", request_digest: uncertainDigest, key_id: "agent-key-1", key_version: 1 };
+  const receipt = { provider: "fixture-kms", receipt_id: "receipt-uncertain", operation_id: uncertain.operation_id, key_id: uncertain.key_id, key_version: uncertain.key_version };
   await second.reserveSignature(uncertain);
   assert.equal((await second.markSignatureUncertain(uncertain)).state, "uncertain");
   await assert.rejects(first.reserveSignature(uncertain), { code: CODES.SIGNING_UNCERTAIN });
   await assert.rejects(first.commitSignature({ ...uncertain, signature: SIGNATURE }), { code: CODES.SIGNING_UNCERTAIN });
-  assert.equal((await first.reconcileSignature({ ...uncertain, signature: SIGNATURE })).state, "committed");
+  assert.equal((await first.reconcileSignature({ ...uncertain, signature: SIGNATURE, provider_receipt: receipt })).state, "committed");
+  assert.deepEqual((await second.lookupSignature(uncertain)).provider_receipt, receipt);
 });
 
 test("reclaims an unstarted expired lease but fences started work after emergency disable", async () => {
