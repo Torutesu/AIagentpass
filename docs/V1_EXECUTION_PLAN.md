@@ -381,9 +381,13 @@ receipt, and refresh hint now use purpose-bound AWS/GCP provider adapters,
 PostgreSQL-backed lifecycle/idempotency, signature verification before durable
 commit, and hosted readiness checks. Hosted refresh signing accepts public
 metadata only and no longer accepts a refresh private-key path. ControlBundle,
-capability, Human assertion, audit anchor, and promotion evidence remain open;
-provider reconciliation, signer fencing/leases, least-privilege database roles,
-and real two-instance/KMS qualification are not yet exit-qualified.
+capability, Human assertion, audit anchor, and promotion evidence remain open.
+The source now contains a closed provider-reconciliation contract, bounded
+signer leases/fencing with lifecycle-epoch commit checks, migration `0038`, and
+least-privilege app/migrator/backup role artifacts. Runtime reconciliation
+wiring, protected role cutover, and real two-instance/KMS qualification are not
+yet exit-qualified. The detailed continuation is maintained in
+[`IMPLEMENTATION_PLAN_2026-08-15.md`](./IMPLEMENTATION_PLAN_2026-08-15.md).
 
 Work breakdown:
 

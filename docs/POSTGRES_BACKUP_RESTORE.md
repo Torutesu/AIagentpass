@@ -113,3 +113,23 @@ manifestにはID、hash、sequence、状態が含まれるため一般公開し�
 - 時点の違うmanifestは期限・失効・sessionなどが変化する。PITRの復旧境界を元manifestと一致させる。
 - artifact digestはファイルの内容をbindするが、DB接続先やバックアップサービスのidentityを代替しない。
 - detached signatureの鍵管理をこのmanifest toolやmanifest fileへ追加してはならない。
+
+## PostgreSQL role boundary
+
+`agentpass_backup` is the read-only identity for backup reads and restore
+verification. It may read tables and sequence state, but it cannot write,
+execute application functions, use sequence values, or perform schema DDL.
+Restore DDL and migration application must use the separately controlled
+`agentpass_migrator`/admin workflow; application traffic uses only
+`agentpass_app`, whose access is DML-only.
+
+Apply `scripts/postgres/roles.sql` idempotently before a cutover or restore
+rehearsal. It contains no credential. Keep the three role credentials outside
+the repository in the deployment secret manager and use
+`AGENTPASS_DATABASE_URL` with `sslmode=verify-full`; do not put a URL or
+credential in a script, log, or ticket. After applying the role boundary, run
+the fixed checker and record only its opaque evidence digest:
+
+```sh
+node scripts/postgres/role-privilege-check.mjs
+```

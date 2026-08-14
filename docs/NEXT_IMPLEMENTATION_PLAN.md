@@ -16,12 +16,12 @@ The primary macOS delivery is not a required menu-bar application. The release a
 
 ## 2. Current implemented boundary
 
-The current branch has the versioned Core/OpenAPI/JSON Schema catalog, 37 forward-only PostgreSQL migrations, tenant-qualified hosted repositories, Human sessions and organization roles, WebAuthn registration/authentication and operation-bound recent authorization, Device API foundations, signed control bundles and ACK state, audit ingestion, emergency revocation, threshold-owner recovery, and a secret-free recovery-notification outbox with dead-letter management, durable uncertain-delivery quarantine, and bounded retention.
+The current branch has the versioned Core/OpenAPI/JSON Schema catalog, 38 forward-only PostgreSQL migrations, tenant-qualified hosted repositories, Human sessions and organization roles, WebAuthn registration/authentication and operation-bound recent authorization, Device API foundations, signed control bundles and ACK state, audit ingestion, emergency revocation, threshold-owner recovery, and a secret-free recovery-notification outbox with dead-letter management, durable uncertain-delivery quarantine, and bounded retention.
 
 At the current checkpoint, recovery dead-letter redrive and suppression require
 an exact resource-bound WebAuthn context. The repository recomputes that
 context and consumes the proof in the same organization-locked transaction.
-All 37 migrations apply against local PostgreSQL 16. The root suite now passes
+All 38 migrations apply against local PostgreSQL 16. The root suite now passes
 1,860 tests (1,811 pass and 49 intentionally skipped), and the frozen catalog
 validates 122 entries. The
 authenticated P0-B Cloud/Console/PostgreSQL/browser journey also passes all 12

@@ -14,11 +14,14 @@ const PURPOSE = /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$/u;
 const KEY_ID = /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,255}$/u;
 const OPERATION_ID = /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,255}$/u;
 const DIGEST = /^[0-9a-f]{64}$/iu;
+const TOKEN = /^[A-Za-z0-9_-]{43}$/u;
 const ALGORITHM = "ed25519";
 const SIGNATURE_BYTES = 64;
 const DEFAULT_RETENTION_MS = 30 * 24 * 60 * 60 * 1000;
 const MAX_RETENTION_MS = 365 * 24 * 60 * 60 * 1000;
 const MAX_PRUNE = 1000;
+const DEFAULT_CLAIM_LEASE_MS = 30_000;
+const MAX_CLAIM_LEASE_MS = 5 * 60_000;
 
 export const MANAGED_SIGNER_KEY_LIFECYCLE_REPOSITORY_ERROR_CODES = Object.freeze({
   DATABASE: "ERR_MANAGED_SIGNER_KEY_LIFECYCLE_REPOSITORY_DATABASE",
@@ -66,10 +69,18 @@ export function createPostgresManagedSignerKeyLifecycleRepository({
   maxVerificationOverlapMs = MANAGED_SIGNER_KEY_LIFECYCLE_DEFAULTS.maxVerificationOverlapMs,
   lifecycleOperationRetentionMs = DEFAULT_RETENTION_MS,
   signingRetentionMs = DEFAULT_RETENTION_MS,
+  signingClaimLeaseMs = DEFAULT_CLAIM_LEASE_MS,
+  randomBytes = crypto.randomBytes,
   now = () => Date.now()
 } = {}) {
   assertClient(client);
-  const config = normalizeConfig({ purpose, algorithm, maxKeys, maxVerificationOverlapMs, lifecycleOperationRetentionMs, signingRetentionMs, now });
+  const config = normalizeConfig({ purpose, algorithm, maxKeys, maxVerificationOverlapMs, lifecycleOperationRetentionMs, signingRetentionMs, signingClaimLeaseMs, randomBytes, now });
+  const localClaimTokens = new Map();
+
+  function rememberClaimToken(operationId, token) {
+    localClaimTokens.set(operationId, token);
+    while (localClaimTokens.size > MAX_PRUNE) localClaimTokens.delete(localClaimTokens.keys().next().value);
+  }
 
   async function snapshot() {
     return runDatabase(() => readSnapshot(client, { lock: false }, config));
@@ -122,17 +133,22 @@ export function createPostgresManagedSignerKeyLifecycleRepository({
 
   async function reserveSignature(input = {}) {
     const values = normalizeSigningInput(input, { requireBinding: true }, config);
-    return runDatabase((tx) => reserveSignatureInTransaction(tx, values));
+    return runDatabase((tx) => reserveSignatureInTransaction(tx, values, makeToken(config.randomBytes)));
+  }
+
+  async function startSignature(input = {}) {
+    const values = normalizeSigningInput(input, { requireBinding: true, requireClaimToken: true }, config);
+    return runDatabase((tx) => startSignatureInTransaction(tx, values));
   }
 
   async function commitSignature(input = {}) {
     const values = normalizeSigningInput(input, { requireBinding: true, requireSignature: true }, config);
-    return runDatabase((tx) => commitSignatureInTransaction(tx, values, false));
+    return runDatabase((tx) => commitSignatureInTransaction(tx, { ...values, claimToken: values.claimToken ?? localClaimTokens.get(values.operationId) }, false));
   }
 
   async function markSignatureUncertain(input = {}) {
     const values = normalizeSigningInput(input, { requireBinding: true }, config);
-    return runDatabase((tx) => markSignatureUncertainInTransaction(tx, values));
+    return runDatabase((tx) => markSignatureUncertainInTransaction(tx, { ...values, claimToken: values.claimToken ?? localClaimTokens.get(values.operationId) }));
   }
 
   async function reconcileSignature(input = {}) {
@@ -233,31 +249,77 @@ export function createPostgresManagedSignerKeyLifecycleRepository({
     return current;
   }
 
-  async function reserveSignatureInTransaction(tx, values) {
-    await selectLifecycle(tx, { lock: true }, config);
-    const existing = await selectSigningRecord(tx, values.operationId, true, config);
+  async function reserveSignatureInTransaction(tx, values, claimToken) {
+    const lifecycle = await selectLifecycle(tx, { lock: true }, config);
+    let existing = await selectSigningRecord(tx, values.operationId, true, config);
     if (existing) {
       assertSigningIdentity(existing, values);
       if (existing.status === "committed") return publicSigningRecord(existing, config);
+      if (existing.status === "pending") {
+        const expired = await expireSigningClaim(tx, values.operationId, config);
+        if (expired) existing = expired;
+      }
       if (existing.status === "pending") throw repositoryError(MANAGED_SIGNER_KEY_LIFECYCLE_REPOSITORY_ERROR_CODES.SIGNING_PENDING, safeSigningDetails(existing));
-      throw repositoryError(MANAGED_SIGNER_KEY_LIFECYCLE_REPOSITORY_ERROR_CODES.SIGNING_UNCERTAIN, safeSigningDetails(existing));
+      if (existing.status === "uncertain") throw repositoryError(MANAGED_SIGNER_KEY_LIFECYCLE_REPOSITORY_ERROR_CODES.SIGNING_UNCERTAIN, safeSigningDetails(existing));
+      if (existing.status === "aborted") {
+        const key = await selectKeyForSigning(tx, values.keyId, true, config);
+        if (!key || key.key_version !== values.keyVersion || key.state !== "active" || key.state_version !== lifecycle.version) {
+          throw lifecycleError(key?.state === "active" ? MANAGED_SIGNER_KEY_LIFECYCLE_ERROR_CODES.CONFIG : MANAGED_SIGNER_KEY_LIFECYCLE_ERROR_CODES.NOT_ACTIVE);
+        }
+        const claimToken = makeToken(config.randomBytes);
+        const reclaimed = await reclaimSignatureInTransaction(tx, values, claimToken, lifecycle.version, config);
+        rememberClaimToken(values.operationId, claimToken);
+        return reclaimed;
+      }
     }
     const key = await selectKeyForSigning(tx, values.keyId, true, config);
     if (!key || key.key_version !== values.keyVersion) throw lifecycleError(MANAGED_SIGNER_KEY_LIFECYCLE_ERROR_CODES.CONFIG);
     if (key.state !== "active") throw lifecycleError(MANAGED_SIGNER_KEY_LIFECYCLE_ERROR_CODES.NOT_ACTIVE);
+    if (key.state_version !== undefined && key.state_version !== lifecycle.version) throw repositoryError(MANAGED_SIGNER_KEY_LIFECYCLE_REPOSITORY_ERROR_CODES.SIGNING_CLAIM_LOST);
     const result = await tx.query(`INSERT INTO managed_signer_signing_idempotency
-        (purpose,operation_id,request_digest,key_id,key_version,status,signature,created_at,updated_at,expires_at)
-        VALUES ($1,$2,$3,$4,$5,'pending',NULL,$6::timestamptz,$6::timestamptz,$7::timestamptz)
-        RETURNING purpose,operation_id,encode(request_digest,'hex') AS request_digest,key_id,key_version::text AS key_version,status,signature,created_at,updated_at,expires_at`, [
+        (purpose,operation_id,request_digest,key_id,key_version,status,signature,created_at,updated_at,expires_at,
+         claim_token_digest,claim_expires_at,provider_started_at,reserved_lifecycle_version)
+        VALUES ($1,$2,$3,$4,$5,'pending',NULL,clock_timestamp(),clock_timestamp(),$6::timestamptz,
+                $7,clock_timestamp()+($8 * interval '1 millisecond'),NULL,$9)
+        RETURNING purpose,operation_id,encode(request_digest,'hex') AS request_digest,key_id,key_version::text AS key_version,
+          status,signature,created_at,updated_at,expires_at,claim_expires_at,provider_started_at,
+          reserved_lifecycle_version::text AS reserved_lifecycle_version`, [
       config.purpose, values.operationId, Buffer.from(values.requestDigest, "hex"), values.keyId, values.keyVersion,
-      new Date(values.nowMs).toISOString(), new Date(values.nowMs + config.signingRetentionMs).toISOString()
+      new Date(values.nowMs + config.signingRetentionMs).toISOString(), Buffer.from(sha256(claimToken), "hex"), config.signingClaimLeaseMs, lifecycle.version
     ]);
     if (rowCount(result) !== 1) throw repositoryError(MANAGED_SIGNER_KEY_LIFECYCLE_REPOSITORY_ERROR_CODES.SIGNING_CLAIM_LOST);
-    return publicSigningRecord(result.rows[0], config);
+    rememberClaimToken(values.operationId, claimToken);
+    return publicSigningRecord(result.rows[0], config, claimToken);
+  }
+
+  async function startSignatureInTransaction(tx, values) {
+    const lifecycle = await selectLifecycle(tx, { lock: true }, config);
+    const existing = await selectSigningRecord(tx, values.operationId, true, config);
+    if (!existing) throw repositoryError(MANAGED_SIGNER_KEY_LIFECYCLE_REPOSITORY_ERROR_CODES.SIGNING_CLAIM_LOST);
+    assertSigningIdentity(existing, values);
+    if (existing.status === "committed") return publicSigningRecord(existing, config);
+    if (existing.status !== "pending") throw repositoryError(MANAGED_SIGNER_KEY_LIFECYCLE_REPOSITORY_ERROR_CODES.SIGNING_UNCERTAIN, safeSigningDetails(existing));
+    const result = await tx.query(`UPDATE managed_signer_signing_idempotency signing
+        SET provider_started_at=COALESCE(signing.provider_started_at,clock_timestamp()),updated_at=clock_timestamp()
+        FROM managed_signer_keys key
+        WHERE signing.purpose=$1 AND signing.operation_id=$2 AND signing.status='pending'
+          AND signing.claim_token_digest=$3 AND signing.claim_expires_at>clock_timestamp()
+          AND signing.reserved_lifecycle_version=$4 AND key.purpose=signing.purpose AND key.key_id=signing.key_id
+          AND key.key_version=signing.key_version AND key.state='active' AND key.state_version=$4
+          AND $4=$5
+        RETURNING signing.purpose,signing.operation_id,encode(signing.request_digest,'hex') AS request_digest,
+          signing.key_id,signing.key_version::text AS key_version,signing.status,signing.signature,
+          signing.created_at,signing.updated_at,signing.expires_at,signing.claim_expires_at,
+          signing.provider_started_at,signing.reserved_lifecycle_version::text AS reserved_lifecycle_version`, [
+      config.purpose, values.operationId, Buffer.from(sha256(values.claimToken), "hex"), lifecycle.version, lifecycle.version
+    ]);
+    if (rowCount(result) !== 1) throw repositoryError(MANAGED_SIGNER_KEY_LIFECYCLE_REPOSITORY_ERROR_CODES.SIGNING_CLAIM_LOST);
+    rememberClaimToken(values.operationId, values.claimToken);
+    return publicSigningRecord(result.rows[0], config, values.claimToken);
   }
 
   async function commitSignatureInTransaction(tx, values, reconcile) {
-    await selectLifecycle(tx, { lock: true }, config);
+    const lifecycle = await selectLifecycle(tx, { lock: true }, config);
     const existing = await selectSigningRecord(tx, values.operationId, true, config);
     if (!existing) throw repositoryError(MANAGED_SIGNER_KEY_LIFECYCLE_REPOSITORY_ERROR_CODES.SIGNING_CLAIM_LOST);
     assertSigningIdentity(existing, values);
@@ -267,13 +329,30 @@ export function createPostgresManagedSignerKeyLifecycleRepository({
     }
     if (existing.status === "uncertain" && !reconcile) throw repositoryError(MANAGED_SIGNER_KEY_LIFECYCLE_REPOSITORY_ERROR_CODES.SIGNING_UNCERTAIN, safeSigningDetails(existing));
     if (existing.status === "pending" && reconcile) throw repositoryError(MANAGED_SIGNER_KEY_LIFECYCLE_REPOSITORY_ERROR_CODES.SIGNING_PENDING, safeSigningDetails(existing));
-    const result = await tx.query(`UPDATE managed_signer_signing_idempotency
-        SET status='committed',signature=$3,updated_at=clock_timestamp()
-        WHERE purpose=$1 AND operation_id=$2 AND status=$4
-        RETURNING purpose,operation_id,encode(request_digest,'hex') AS request_digest,key_id,key_version::text AS key_version,status,signature,created_at,updated_at,expires_at`, [
-      config.purpose, values.operationId, values.signature, existing.status
-    ]);
+    if (existing.status === "pending") {
+      if (!values.claimToken) throw repositoryError(MANAGED_SIGNER_KEY_LIFECYCLE_REPOSITORY_ERROR_CODES.SIGNING_CLAIM_LOST);
+      if (!existing.provider_started_at) await startSignatureInTransaction(tx, { ...values, claimToken: values.claimToken });
+    }
+    const claimDigest = values.claimToken ? Buffer.from(sha256(values.claimToken), "hex") : null;
+    const claimClause = reconcile ? "" : "AND signing.claim_token_digest=$5 AND signing.claim_expires_at>clock_timestamp()";
+    const params = reconcile
+      ? [config.purpose, values.operationId, values.signature, existing.status, lifecycle.version]
+      : [config.purpose, values.operationId, values.signature, existing.status, claimDigest, lifecycle.version];
+    const result = await tx.query(`UPDATE managed_signer_signing_idempotency signing
+        SET status='committed',signature=$3,claim_token_digest=NULL,claim_expires_at=NULL,updated_at=clock_timestamp()
+        FROM managed_signer_key_lifecycles lifecycle, managed_signer_keys key
+        WHERE signing.purpose=$1 AND signing.operation_id=$2 AND signing.status=$4
+          AND lifecycle.purpose=signing.purpose AND lifecycle.version=signing.reserved_lifecycle_version
+          AND key.purpose=lifecycle.purpose AND key.key_id=signing.key_id AND key.key_version=signing.key_version
+          AND signing.reserved_lifecycle_version=$${reconcile ? 5 : 6}
+          AND key.state='active' AND key.state_version=signing.reserved_lifecycle_version
+          AND signing.provider_started_at IS NOT NULL ${claimClause}
+        RETURNING signing.purpose,signing.operation_id,encode(signing.request_digest,'hex') AS request_digest,
+          signing.key_id,signing.key_version::text AS key_version,signing.status,signing.signature,
+          signing.created_at,signing.updated_at,signing.expires_at,signing.claim_expires_at,
+          signing.provider_started_at,signing.reserved_lifecycle_version::text AS reserved_lifecycle_version`, params);
     if (rowCount(result) !== 1) throw repositoryError(MANAGED_SIGNER_KEY_LIFECYCLE_REPOSITORY_ERROR_CODES.SIGNING_CLAIM_LOST);
+    localClaimTokens.delete(values.operationId);
     return publicSigningRecord(result.rows[0], config);
   }
 
@@ -284,11 +363,17 @@ export function createPostgresManagedSignerKeyLifecycleRepository({
     assertSigningIdentity(existing, values);
     if (existing.status === "committed") return publicSigningRecord(existing, config);
     if (existing.status === "uncertain") return publicSigningRecord(existing, config);
+    if (!values.claimToken) throw repositoryError(MANAGED_SIGNER_KEY_LIFECYCLE_REPOSITORY_ERROR_CODES.SIGNING_CLAIM_LOST);
+    if (!existing.provider_started_at) await startSignatureInTransaction(tx, { ...values, claimToken: values.claimToken });
     const result = await tx.query(`UPDATE managed_signer_signing_idempotency
-        SET status='uncertain',updated_at=clock_timestamp()
+        SET status='uncertain',claim_token_digest=NULL,claim_expires_at=NULL,updated_at=clock_timestamp()
         WHERE purpose=$1 AND operation_id=$2 AND status='pending'
-        RETURNING purpose,operation_id,encode(request_digest,'hex') AS request_digest,key_id,key_version::text AS key_version,status,signature,created_at,updated_at,expires_at`, [config.purpose, values.operationId]);
+          AND claim_token_digest=$3 AND provider_started_at IS NOT NULL
+        RETURNING purpose,operation_id,encode(request_digest,'hex') AS request_digest,key_id,key_version::text AS key_version,
+          status,signature,created_at,updated_at,expires_at,claim_expires_at,provider_started_at,
+          reserved_lifecycle_version::text AS reserved_lifecycle_version`, [config.purpose, values.operationId, Buffer.from(sha256(values.claimToken), "hex")]);
     if (rowCount(result) !== 1) throw repositoryError(MANAGED_SIGNER_KEY_LIFECYCLE_REPOSITORY_ERROR_CODES.SIGNING_CLAIM_LOST);
+    localClaimTokens.delete(values.operationId);
     return publicSigningRecord(result.rows[0], config);
   }
 
@@ -313,6 +398,8 @@ export function createPostgresManagedSignerKeyLifecycleRepository({
     restore,
     reserveSignature,
     beginSigning: reserveSignature,
+    startSignature,
+    markSignatureProviderStarted: startSignature,
     commitSignature,
     commitSigning: commitSignature,
     markSignatureUncertain,
@@ -426,20 +513,49 @@ async function selectLifecycleOperation(client, operationId, lock, config) {
 
 async function selectSigningRecord(client, operationId, lock, config) {
   const result = await client.query(`SELECT purpose,operation_id,encode(request_digest,'hex') AS request_digest,
-      key_id,key_version::text AS key_version,status,signature,created_at,updated_at,expires_at
+      key_id,key_version::text AS key_version,status,signature,created_at,updated_at,expires_at,
+      claim_expires_at,provider_started_at,reserved_lifecycle_version::text AS reserved_lifecycle_version
     FROM managed_signer_signing_idempotency
     WHERE purpose=$1 AND operation_id=$2
     ${lock ? "FOR UPDATE" : "FOR SHARE"}`, [config.purpose, operationId]);
   return rowCount(result) === 1 ? result.rows[0] : undefined;
 }
 
+async function expireSigningClaim(client, operationId, config) {
+  const result = await client.query(`UPDATE managed_signer_signing_idempotency
+      SET status=CASE WHEN provider_started_at IS NULL THEN 'aborted' ELSE 'uncertain' END,
+          claim_token_digest=NULL,claim_expires_at=NULL,updated_at=clock_timestamp()
+      WHERE purpose=$1 AND operation_id=$2 AND status='pending'
+        AND claim_expires_at<=clock_timestamp()
+      RETURNING purpose,operation_id,encode(request_digest,'hex') AS request_digest,key_id,
+        key_version::text AS key_version,status,signature,created_at,updated_at,expires_at,
+        claim_expires_at,provider_started_at,reserved_lifecycle_version::text AS reserved_lifecycle_version`, [config.purpose, operationId]);
+  return rowCount(result) === 1 ? result.rows[0] : undefined;
+}
+
+async function reclaimSignatureInTransaction(client, values, claimToken, lifecycleVersion, config) {
+  const result = await client.query(`UPDATE managed_signer_signing_idempotency
+      SET status='pending',claim_token_digest=$3,
+          claim_expires_at=clock_timestamp()+($4 * interval '1 millisecond'),provider_started_at=NULL,
+          updated_at=clock_timestamp()
+      WHERE purpose=$1 AND operation_id=$2 AND status='aborted'
+        AND reserved_lifecycle_version=$5
+      RETURNING purpose,operation_id,encode(request_digest,'hex') AS request_digest,key_id,
+        key_version::text AS key_version,status,signature,created_at,updated_at,expires_at,
+        claim_expires_at,provider_started_at,reserved_lifecycle_version::text AS reserved_lifecycle_version`, [
+    values.purpose, values.operationId, Buffer.from(sha256(claimToken), "hex"), config.signingClaimLeaseMs, lifecycleVersion
+  ]);
+  if (rowCount(result) !== 1) throw repositoryError(MANAGED_SIGNER_KEY_LIFECYCLE_REPOSITORY_ERROR_CODES.SIGNING_CLAIM_LOST);
+  return publicSigningRecord(result.rows[0], config, claimToken);
+}
+
 async function selectKeyForSigning(client, keyId, lock, config) {
-  const result = await client.query(`SELECT key_id,key_version::text AS key_version,state
+  const result = await client.query(`SELECT key_id,key_version::text AS key_version,state,state_version::text AS state_version
     FROM managed_signer_keys
     WHERE purpose=$1 AND key_id=$2
     ${lock ? "FOR SHARE" : ""}`, [config.purpose, keyId]);
   if (rowCount(result) !== 1) return undefined;
-  return { key_id: result.rows[0].key_id, key_version: databaseInteger(result.rows[0].key_version, "key_version"), state: result.rows[0].state };
+  return { key_id: result.rows[0].key_id, key_version: databaseInteger(result.rows[0].key_version, "key_version"), state: result.rows[0].state, state_version: databaseInteger(result.rows[0].state_version, "state_version") };
 }
 
 async function insertLifecycleOperation(client, operationId, requestDigest, response, nowMs, config) {
@@ -483,7 +599,7 @@ function publicKeyRecord(row) {
   return value;
 }
 
-function publicSigningRecord(row, config) {
+function publicSigningRecord(row, config, claimToken = undefined) {
   const result = {
     state: row.status,
     purpose: config.purpose,
@@ -491,9 +607,13 @@ function publicSigningRecord(row, config) {
     request_digest: hex(row.request_digest, "request_digest"),
     key_id: text(row.key_id, KEY_ID, "key_id"),
     key_version: databaseInteger(row.key_version, "key_version"),
+    ...(row.reserved_lifecycle_version === undefined ? {} : { reserved_lifecycle_version: databaseInteger(row.reserved_lifecycle_version, "reserved_lifecycle_version") }),
     ...(row.created_at === undefined ? {} : { created_at: timestamp(row.created_at) }),
     ...(row.updated_at === undefined ? {} : { updated_at: timestamp(row.updated_at) }),
     ...(row.expires_at === undefined ? {} : { expires_at: timestamp(row.expires_at) }),
+    ...(row.claim_expires_at === null || row.claim_expires_at === undefined ? {} : { claim_expires_at: timestamp(row.claim_expires_at) }),
+    ...(row.provider_started_at === null || row.provider_started_at === undefined ? {} : { provider_started_at: timestamp(row.provider_started_at) }),
+    ...(claimToken === undefined ? {} : { claim_token: claimToken }),
     ...(row.signature === null || row.signature === undefined ? {} : { signature: cloneSignature(row.signature) })
   };
   return Object.freeze(result);
@@ -512,11 +632,12 @@ function safeSigningDetails(row) {
 }
 
 function normalizeConfig(value) {
-  if (typeof value.purpose !== "string" || !PURPOSE.test(value.purpose) || value.algorithm !== ALGORITHM || typeof value.now !== "function") throw new TypeError("managed signer lifecycle configuration is invalid");
+  if (typeof value.purpose !== "string" || !PURPOSE.test(value.purpose) || value.algorithm !== ALGORITHM || typeof value.now !== "function" || typeof value.randomBytes !== "function") throw new TypeError("managed signer lifecycle configuration is invalid");
   positive(value.maxKeys, "maxKeys", 1, 32);
   positive(value.maxVerificationOverlapMs, "maxVerificationOverlapMs", 1, 365 * 24 * 60 * 60 * 1000);
   retention(value.lifecycleOperationRetentionMs, "lifecycleOperationRetentionMs");
   retention(value.signingRetentionMs, "signingRetentionMs");
+  positive(value.signingClaimLeaseMs, "signingClaimLeaseMs", 1_000, MAX_CLAIM_LEASE_MS);
   return Object.freeze({
     purpose: value.purpose,
     algorithm: value.algorithm,
@@ -524,6 +645,8 @@ function normalizeConfig(value) {
     maxVerificationOverlapMs: value.maxVerificationOverlapMs,
     lifecycleOperationRetentionMs: value.lifecycleOperationRetentionMs,
     signingRetentionMs: value.signingRetentionMs,
+    signingClaimLeaseMs: value.signingClaimLeaseMs,
+    randomBytes: value.randomBytes,
     now: value.now
   });
 }
@@ -599,9 +722,9 @@ function mutationBase(input, kind, config) {
   return { kind, expectedVersion, operationId, nowMs: nowMs(config.now) };
 }
 
-function normalizeSigningInput(input, { requireBinding, requireSignature = false } = {}, config) {
+function normalizeSigningInput(input, { requireBinding, requireSignature = false, requireClaimToken = false } = {}, config) {
   assertObject(input);
-  const allowed = ["purpose", "operation_id", "operationId", "request_id", "requestId", "request_digest", "requestDigest", "key_id", "keyId", "key_version", "keyVersion", "signature"];
+  const allowed = ["purpose", "operation_id", "operationId", "request_id", "requestId", "request_digest", "requestDigest", "key_id", "keyId", "key_version", "keyVersion", "signature", "claim_token", "claimToken"];
   assertAllowedKeys(input, allowed);
   if (input.purpose !== undefined && input.purpose !== config.purpose) throw repositoryError(MANAGED_SIGNER_KEY_LIFECYCLE_REPOSITORY_ERROR_CODES.SIGNING_CONFLICT);
   const operationId = operation(input);
@@ -613,7 +736,10 @@ function normalizeSigningInput(input, { requireBinding, requireSignature = false
   if (keyVersion !== undefined) positive(keyVersion, "key_version", 1, Number.MAX_SAFE_INTEGER);
   const signature = input.signature === undefined ? undefined : normalizeSignature(input.signature);
   if (requireSignature && signature === undefined) throw new TypeError("signature is required");
-  return Object.freeze({ purpose: config.purpose, operationId, requestDigest, keyId, keyVersion, signature, nowMs: nowMs(config.now) });
+  const claimToken = alias(input, "claim_token", "claimToken");
+  if (claimToken !== undefined && (typeof claimToken !== "string" || !TOKEN.test(claimToken))) throw new TypeError("claim_token is invalid");
+  if (requireClaimToken && claimToken === undefined) throw new TypeError("claim_token is required");
+  return Object.freeze({ purpose: config.purpose, operationId, requestDigest, keyId, keyVersion, signature, claimToken, nowMs: nowMs(config.now) });
 }
 
 function normalizePruneInput(input, config) {
@@ -667,6 +793,16 @@ function canonicalBytes(value) {
 
 function digestHex(value) {
   return crypto.createHash("sha256").update(canonicalJson(value), "utf8").digest("hex");
+}
+
+function sha256(value) {
+  return crypto.createHash("sha256").update(value, "utf8").digest("hex");
+}
+
+function makeToken(randomBytes) {
+  const value = randomBytes(32);
+  if (!Buffer.isBuffer(value) && !(value instanceof Uint8Array) || value.length !== 32) throw new TypeError("managed signer randomness is invalid");
+  return Buffer.from(value).toString("base64url");
 }
 
 function nowMs(clock) {

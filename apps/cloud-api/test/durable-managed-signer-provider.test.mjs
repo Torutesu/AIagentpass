@@ -22,6 +22,7 @@ function makeFixture({ reserveState = undefined, sign = undefined, metadata = un
     metadata: [],
     sign: [],
     reserve: [],
+    start: [],
     commit: [],
     uncertain: []
   };
@@ -56,7 +57,12 @@ function makeFixture({ reserveState = undefined, sign = undefined, metadata = un
       }
       if (state.status === "committed") return { state: "committed", signature: Buffer.from(state.signature) };
       state.status = "pending";
-      return { state: "pending" };
+      return { state: "pending", claim_token: "test-claim-token" };
+    },
+    async startSignature(input) {
+      calls.start.push(input);
+      if (repository.startSignature) return repository.startSignature(input, calls);
+      return { state: "pending", provider_started_at: "2026-08-15T00:00:00.000Z" };
     },
     async commitSignature(input) {
       calls.commit.push(input);
@@ -115,6 +121,7 @@ test("commits once and replays the exact durable signature without calling the p
   assert.equal(fixture.calls.sign.length, 1);
   assert.equal(fixture.calls.reserve.length, 2);
   assert.equal(fixture.calls.commit.length, 1);
+  assert.equal(fixture.calls.start.length, 1);
   assert.equal(fixture.calls.reserve[0].operation_id, fixture.calls.reserve[1].operation_id);
   assert.equal(fixture.calls.reserve[0].request_digest, fixture.calls.reserve[1].request_digest);
   const expectedDigest = canonicalManagedSignerRequestDigest({
@@ -147,6 +154,7 @@ test("collapses same-process concurrent identical requests into one provider cal
   assert.equal(fixture.calls.reserve.length, 1);
   assert.equal(fixture.calls.sign.length, 1);
   assert.equal(fixture.calls.commit.length, 1);
+  assert.equal(fixture.calls.start.length, 1);
 });
 
 test("rejects payload substitution and unknown fields before durable or provider calls", async () => {
@@ -171,6 +179,8 @@ test("passes AbortSignal only to the provider and keeps it out of the durable bi
   await fixture.signer.sign(request(Buffer.from("signal payload"), { signal: controller.signal }));
   assert.strictEqual(fixture.calls.sign[0].signal, controller.signal);
   assert.equal(Object.hasOwn(fixture.calls.reserve[0], "signal"), false);
+  assert.equal(fixture.calls.start[0].claim_token, "test-claim-token");
+  assert.equal(fixture.calls.commit[0].claim_token, "test-claim-token");
   assert.equal(Object.hasOwn(fixture.calls.commit[0], "signal"), false);
   assert.deepEqual(Object.keys(fixture.calls.sign[0]).sort(), ["algorithm", "bytes", "key_id", "purpose", "signal", "version"]);
 });

@@ -20,6 +20,7 @@ export function createManagedSignerRepositoryFactory() {
         return snapshot;
       },
       async reserveSignature() { throw new Error("signing is outside this runtime composition test"); },
+      async startSignature() { throw new Error("signing is outside this runtime composition test"); },
       async commitSignature() { throw new Error("signing is outside this runtime composition test"); },
       async markSignatureUncertain() { throw new Error("signing is outside this runtime composition test"); }
     });

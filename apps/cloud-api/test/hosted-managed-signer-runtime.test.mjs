@@ -24,6 +24,7 @@ function fixture({ existing, metadataKeyId = "agent-key-1" } = {}) {
     },
     async initialize(input) { calls.push("initialize"); snapshot = input.snapshot; return snapshot; },
     async reserveSignature() { throw new Error("not used"); },
+    async startSignature() { throw new Error("not used"); },
     async commitSignature() { throw new Error("not used"); },
     async markSignatureUncertain() { throw new Error("not used"); }
   };

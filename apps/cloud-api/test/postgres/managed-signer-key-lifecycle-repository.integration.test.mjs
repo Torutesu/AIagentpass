@@ -12,7 +12,7 @@ import { createDurableManagedSignerProvider } from "../../src/durable-managed-si
 
 const DATABASE_URL = process.env.AGENTPASS_TEST_DATABASE_URL ?? process.env.AGENTPASS_TEST_POSTGRES_URL;
 
-test("0037 serializes lifecycle changes and replays exact signatures across PostgreSQL pools", {
+test("0038 fences signing leases across PostgreSQL pools and lifecycle races", {
   skip: !DATABASE_URL,
   timeout: 60_000
 }, async (t) => {
@@ -30,7 +30,7 @@ test("0037 serializes lifecycle changes and replays exact signatures across Post
   const migrationClient = await firstPool.connect();
   try {
     const migrated = await createMigrationRunner({ client: migrationClient, applicationVersion: "managed-signer-lifecycle-integration" }).run();
-    assert.equal(migrated.currentVersion, 37);
+    assert.equal(migrated.currentVersion, 38);
   } finally {
     migrationClient.release();
   }
@@ -103,6 +103,12 @@ test("0037 serializes lifecycle changes and replays exact signatures across Post
     state: "active",
     state_version: 1
   };
+  const fencedDigest = canonicalManagedSignerRequestDigest({ purpose, key_id: "managed-key-1", bytes: "ZmVuY2Vk" });
+  const fenced = { operation_id: "sign-fenced", request_digest: fencedDigest, key_id: "managed-key-1", key_version: 1 };
+  const reserved = await first.reserveSignature(fenced);
+  assert.match(reserved.claim_token, /^[A-Za-z0-9_-]{43}$/u);
+  assert.equal((await firstPool.query("SELECT octet_length(claim_token_digest) AS bytes, reserved_lifecycle_version FROM managed_signer_signing_idempotency WHERE purpose=$1 AND operation_id=$2", [purpose, fenced.operation_id])).rows[0].bytes, 32);
+  await first.startSignature({ ...fenced, claim_token: reserved.claim_token });
   const raced = await Promise.allSettled([
     first.rotate({ expected_version: 1, operation_id: "rotate", new_key: nextKey, verification_until: "2026-08-14T13:00:00.000Z" }),
     second.emergencyDisable({ expected_version: 1, operation_id: "disable" })
@@ -110,4 +116,5 @@ test("0037 serializes lifecycle changes and replays exact signatures across Post
   assert.equal(raced.filter(({ status }) => status === "fulfilled").length, 1);
   assert.equal(raced.filter(({ status }) => status === "rejected").length, 1);
   assert.equal((await first.snapshot()).version, 2);
+  await assert.rejects(first.commitSignature({ ...fenced, claim_token: reserved.claim_token, signature: Buffer.alloc(64, 0x5a) }), { code: "ERR_MANAGED_SIGNER_KEY_LIFECYCLE_REPOSITORY_SIGNING_CLAIM_LOST" });
 });

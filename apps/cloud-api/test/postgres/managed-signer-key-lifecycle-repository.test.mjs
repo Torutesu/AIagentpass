@@ -15,6 +15,7 @@ const NOW_ISO = new Date(NOW).toISOString();
 const FINGERPRINT_1 = "a".repeat(64);
 const FINGERPRINT_2 = "b".repeat(64);
 const SIGNATURE = Buffer.alloc(64, 0x41);
+const TOKEN = /^[A-Za-z0-9_-]{43}$/u;
 
 function snapshot(purpose = PURPOSE, fingerprint = FINGERPRINT_1) {
   return {
@@ -73,7 +74,7 @@ class FakePgPool {
     if (text === "COMMIT") { this.release(owner); return { rows: [], rowCount: 0 }; }
     if (text === "ROLLBACK") { this.release(owner); return { rows: [], rowCount: 0 }; }
 
-    if (text.includes("FROM managed_signer_key_lifecycles")) {
+    if (text.includes("SELECT purpose,algorithm,version") && text.includes("FROM managed_signer_key_lifecycles")) {
       const purpose = params[0];
       if (text.includes("FOR UPDATE")) await this.acquire(owner, purpose);
       const row = this.state.lifecycles.get(purpose);
@@ -106,7 +107,7 @@ class FakePgPool {
 
     if (text.startsWith("SELECT key_id,key_version::text AS key_version,state")) {
       const row = this.state.keys.get(`${params[0]}\u0000${params[1]}`);
-      return row ? { rows: [{ key_id: row.key_id, key_version: String(row.key_version), state: row.state }], rowCount: 1 } : { rows: [], rowCount: 0 };
+      return row ? { rows: [{ key_id: row.key_id, key_version: String(row.key_version), state: row.state, state_version: String(row.state_version) }], rowCount: 1 } : { rows: [], rowCount: 0 };
     }
 
     if (text.startsWith("INSERT INTO managed_signer_keys")) {
@@ -137,23 +138,31 @@ class FakePgPool {
       return { rows: [], rowCount: 1 };
     }
 
-    if (text.includes("FROM managed_signer_signing_idempotency")) {
+    if (text.includes("FROM managed_signer_signing_idempotency") && text.includes("SELECT")) {
       const row = this.state.signing.get(`${params[0]}\u0000${params[1]}`);
-      return row ? { rows: [{ ...row, key_version: String(row.key_version) }], rowCount: 1 } : { rows: [], rowCount: 0 };
+      return row ? { rows: [{ ...row, key_version: String(row.key_version), reserved_lifecycle_version: String(row.reserved_lifecycle_version) }], rowCount: 1 } : { rows: [], rowCount: 0 };
     }
 
     if (text.startsWith("INSERT INTO managed_signer_signing_idempotency")) {
-      const [purpose, operationId, requestDigest, keyId, keyVersion, createdAt, expiresAt] = params;
-      const row = { purpose, operation_id: operationId, request_digest: requestDigest, key_id: keyId, key_version: Number(keyVersion), status: "pending", signature: null, created_at: createdAt, updated_at: createdAt, expires_at: expiresAt };
+      const [purpose, operationId, requestDigest, keyId, keyVersion, expiresAt, claimDigest, leaseMs, reservedVersion] = params;
+      const row = { purpose, operation_id: operationId, request_digest: requestDigest, key_id: keyId, key_version: Number(keyVersion), status: "pending", signature: null, created_at: NOW_ISO, updated_at: NOW_ISO, expires_at: expiresAt, claim_expires_at: new Date(NOW + Number(leaseMs)).toISOString(), provider_started_at: null, reserved_lifecycle_version: Number(reservedVersion), claim_token_digest: claimDigest };
       this.state.signing.set(`${purpose}\u0000${operationId}`, row);
       return { rows: [{ ...row, request_digest: requestDigest.toString("hex"), key_version: String(row.key_version) }], rowCount: 1 };
     }
 
     if (text.startsWith("UPDATE managed_signer_signing_idempotency")) {
       const row = this.state.signing.get(`${params[0]}\u0000${params[1]}`);
-      if (!row || row.status !== params.at(-1) && text.includes("status=$4") || !row || (text.includes("status='pending'") && row.status !== "pending")) return { rows: [], rowCount: 0 };
-      if (text.includes("status='committed'")) { row.status = "committed"; row.signature = params[2]; }
-      else row.status = "uncertain";
+      if (!row) return { rows: [], rowCount: 0 };
+      if (text.includes("claim_expires_at<=clock_timestamp()") && row.claim_expires_at > NOW_ISO) return { rows: [], rowCount: 0 };
+      if (text.includes("status='committed'") && (Number(this.state.lifecycles.get(row.purpose)?.version) !== Number(row.reserved_lifecycle_version) || this.state.keys.get(`${row.purpose}\u0000${row.key_id}`)?.state !== "active")) return { rows: [], rowCount: 0 };
+      if (text.includes("SET status=CASE")) {
+        row.status = row.provider_started_at === null ? "aborted" : "uncertain";
+        row.claim_token_digest = null;
+        row.claim_expires_at = null;
+      } else if (text.includes("provider_started_at=COALESCE")) row.provider_started_at = NOW_ISO;
+      else if (text.includes("status='uncertain'")) { row.status = "uncertain"; row.claim_token_digest = null; row.claim_expires_at = null; }
+      else if (text.includes("status='committed'")) { row.status = "committed"; row.signature = params[2]; row.claim_token_digest = null; row.claim_expires_at = null; }
+      else if (text.includes("status='pending'")) { row.status = "pending"; row.claim_token_digest = params[2]; row.claim_expires_at = NOW_ISO; }
       row.updated_at = NOW_ISO;
       return { rows: [{ ...row, request_digest: row.request_digest.toString("hex"), key_version: String(row.key_version) }], rowCount: 1 };
     }
@@ -194,6 +203,22 @@ test("0037 creates purpose-scoped public lifecycle and signing ledgers", async (
   assert.match(sql, /octet_length\(signature\) = 64/u);
   assert.doesNotMatch(sql, /organization_id/u);
   assert.doesNotMatch(sql, /private_key/u);
+});
+
+test("0038 catalogs the forward-only fencing contract", async () => {
+  const sql = await readFile(new URL("../../../../contracts/postgres/0038_managed_signer_fencing.sql", import.meta.url), "utf8");
+  assert.match(sql, /ALTER TABLE managed_signer_signing_idempotency/u);
+  assert.match(sql, /claim_token_digest/u);
+  assert.match(sql, /claim_expires_at/u);
+  assert.match(sql, /provider_started_at/u);
+  assert.match(sql, /reserved_lifecycle_version/u);
+  assert.match(sql, /status IN \('pending', 'uncertain', 'committed', 'aborted'\)/u);
+  assert.match(sql, /clock_timestamp\(\)/u);
+  assert.match(sql, /CREATE INDEX managed_signer_signing_claim_expiry/u);
+  const { loadSqlMigrations, defaultContractDirectory } = await import("../../src/postgres/migration-runner.mjs");
+  const migrations = await loadSqlMigrations(defaultContractDirectory());
+  assert.equal(migrations.at(-1).version, 38);
+  assert.equal(migrations.at(-1).name, "0038_managed_signer_fencing.sql");
 });
 
 test("persists compatible snapshots, serializes lifecycle operations, and replays exact responses", async () => {
@@ -238,6 +263,33 @@ test("durably replays public signatures across repository instances and fails cl
   await assert.rejects(first.reserveSignature(uncertain), { code: CODES.SIGNING_UNCERTAIN });
   await assert.rejects(first.commitSignature({ ...uncertain, signature: SIGNATURE }), { code: CODES.SIGNING_UNCERTAIN });
   assert.equal((await first.reconcileSignature({ ...uncertain, signature: SIGNATURE })).state, "committed");
+});
+
+test("reclaims an unstarted expired lease but fences started work after emergency disable", async () => {
+  const pool = new FakePgPool();
+  const repo = repository(pool);
+  await repo.initialize({ snapshot: snapshot() });
+  const requestDigest = canonicalManagedSignerRequestDigest({ purpose: PURPOSE, key_id: "agent-key-1", bytes: Buffer.from("fenced") });
+  const input = { operation_id: "sign-fenced", request_digest: requestDigest, key_id: "agent-key-1", key_version: 1 };
+  const first = await repo.reserveSignature(input);
+  assert.match(first.claim_token, TOKEN);
+  assert.equal(first.reserved_lifecycle_version, 1);
+
+  pool.state.signing.get(`${PURPOSE}\u0000${input.operation_id}`).claim_expires_at = "2026-08-14T11:59:59.000Z";
+  const reclaimed = await repo.reserveSignature(input);
+  assert.equal(reclaimed.state, "pending");
+  assert.notEqual(reclaimed.claim_token, first.claim_token);
+
+  const started = await repo.startSignature({ ...input, claim_token: reclaimed.claim_token });
+  assert.equal(typeof started.provider_started_at, "string");
+  pool.state.signing.get(`${PURPOSE}\u0000${input.operation_id}`).claim_expires_at = "2026-08-14T11:59:59.000Z";
+  await assert.rejects(repo.reserveSignature(input), { code: CODES.SIGNING_UNCERTAIN });
+
+  const second = await repo.reserveSignature({ ...input, operation_id: "sign-disabled", request_digest: canonicalManagedSignerRequestDigest({ purpose: PURPOSE, key_id: "agent-key-1", bytes: Buffer.from("disabled") }) });
+  await repo.startSignature({ operation_id: "sign-disabled", request_digest: second.request_digest, key_id: "agent-key-1", key_version: 1, claim_token: second.claim_token });
+  await repo.emergencyDisable({ expected_version: 1, operation_id: "disable-after-reserve" });
+  await assert.rejects(repo.commitSignature({ operation_id: "sign-disabled", request_digest: second.request_digest, key_id: "agent-key-1", key_version: 1, claim_token: second.claim_token, signature: SIGNATURE }), { code: CODES.SIGNING_CLAIM_LOST });
+  assert.match(pool.calls.findLast(({ text }) => text.startsWith("UPDATE managed_signer_signing_idempotency"))?.text ?? "", /reserved_lifecycle_version/u);
 });
 
 test("purpose isolation and row-lock serialization hold across two repository instances", async () => {

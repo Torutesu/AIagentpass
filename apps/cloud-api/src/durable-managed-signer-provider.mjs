@@ -149,7 +149,13 @@ async function executeSign(request, binding, provider, repository, loadVerificat
     return verifySignature(reservation.signature, request.bytes, verificationKey);
   }
   if (reservation?.state === "pending") {
-    return signReserved(request, binding, provider, repository, durableInput, loadVerificationKey);
+    if (typeof reservation.claim_token !== "string" || reservation.claim_token.length === 0) {
+      throw durableError(DURABLE_MANAGED_SIGNER_ERROR_CODES.REPOSITORY);
+    }
+    return signReserved(request, binding, provider, repository, {
+      ...durableInput,
+      claim_token: reservation.claim_token
+    }, loadVerificationKey);
   }
   if (reservation?.state === "uncertain") {
     throw durableError(DURABLE_MANAGED_SIGNER_ERROR_CODES.UNCERTAIN);
@@ -158,6 +164,16 @@ async function executeSign(request, binding, provider, repository, loadVerificat
 }
 
 async function signReserved(request, binding, provider, repository, durableInput, loadVerificationKey) {
+  try {
+    const started = await repository.startSignature(durableInput);
+    if (started?.state !== "pending" || typeof started.provider_started_at !== "string") {
+      throw durableError(DURABLE_MANAGED_SIGNER_ERROR_CODES.COMMIT);
+    }
+  } catch (error) {
+    if (error instanceof DurableManagedSignerError) throw error;
+    throw mapCommitError(error);
+  }
+
   let signature;
   try {
     const verificationKey = await loadVerificationKey(request.signal);
@@ -361,7 +377,8 @@ function normalizeSignal(value) {
 
 function validateConfiguration({ provider, repository, purpose, keyId, keyVersion, version, algorithm }) {
   if (!provider || typeof provider.publicKeyMetadata !== "function" || typeof provider.sign !== "function"
-    || !repository || typeof repository.reserveSignature !== "function" || typeof repository.commitSignature !== "function"
+    || !repository || typeof repository.reserveSignature !== "function" || typeof repository.startSignature !== "function"
+    || typeof repository.commitSignature !== "function"
     || typeof repository.markSignatureUncertain !== "function" || typeof repository.snapshot !== "function"
     || typeof purpose !== "string" || !PURPOSE.test(purpose)
     || typeof keyId !== "string" || !KEY_ID.test(keyId) || !Number.isSafeInteger(keyVersion) || keyVersion < 1

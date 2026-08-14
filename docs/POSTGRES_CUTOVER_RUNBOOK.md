@@ -182,3 +182,36 @@ Use the JSON `code` as the automation key. Never parse human messages or print t
 3. do not down-migrate;
 4. preserve the JSON result and deployment identifier without secrets;
 5. ask the database/deployment owner to investigate and rerun the read-only checks.
+
+## 9. Least-privilege PostgreSQL roles
+
+Before hosted cutover, apply `scripts/postgres/roles.sql` from the approved
+database-admin workflow. It is idempotent and contains no password, token, or
+other credential. The migration set uses the `public` schema:
+
+- `agentpass_app` has `SELECT`/`INSERT`/`UPDATE`/`DELETE` on tables and
+  sequence `USAGE`/`SELECT` only. It has no schema `CREATE`, database
+  `CREATE`/`TEMP`, object ownership, or migration authority.
+- `agentpass_migrator` owns migration objects and has schema `CREATE`; it is
+  not a superuser, createdb role, createrole role, replication role, or RLS
+  bypass role.
+- `agentpass_backup` has table and sequence-state `SELECT` only. It cannot
+  write, execute functions, alter schema, or consume sequences.
+
+After applying the script, switch `AGENTPASS_DATABASE_URL` to the
+`agentpass_migrator` identity and run the fixed checker using the deployment
+environment only:
+
+```sh
+node scripts/postgres/role-privilege-check.mjs
+```
+
+The checker reads `AGENTPASS_DATABASE_URL`, requires exactly one URL parameter
+(`sslmode=verify-full`), rejects all command-line arguments, measures
+`current_user` and the effective schema/table/sequence/function privileges,
+and emits only an opaque evidence digest. Run the contract test before the
+cutover approval:
+
+```sh
+node --test apps/cloud-api/test/postgres/least-privilege-role-contract.test.mjs
+```

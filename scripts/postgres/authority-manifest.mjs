@@ -87,7 +87,7 @@ const AUTHORITY_TABLE_NAMES = Object.freeze(AUTHORITY_TABLES.map(([name]) => nam
 const TENANT_TABLE_NAMES = new Set(AUTHORITY_TABLES.filter(([, , kind]) => ["tenant", "audit", "outbox", "security"].includes(kind)).map(([name]) => name));
 
 export const AUTHORITY_MANIFEST_SCHEMA_VERSION = 2;
-export const REQUIRED_MIGRATION_VERSION = "37";
+export const REQUIRED_MIGRATION_VERSION = "38";
 export const MANIFEST_KIND = "agentpass.authority-manifest";
 
 export const DIAGNOSTICS = Object.freeze({
