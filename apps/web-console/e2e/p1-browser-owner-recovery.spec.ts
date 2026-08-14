@@ -45,6 +45,9 @@ async function installRecoveryRoutes(page: Page, role: BrowserRole) {
     const request = route.request();
     const url = new URL(request.url());
     if (url.pathname === "/api/auth/session") return json(route, session(role));
+    if (url.pathname === `/api/auth/organizations/${ORGANIZATION_ID}/recovery-outbox/dead-letters` && request.method() === "GET") {
+      return json(route, { dead_letters: [], next_cursor: null });
+    }
     if (url.pathname === "/api/auth/organizations/" + ORGANIZATION_ID + "/recovery-requests" && request.method() === "POST") {
       bodies.push(parseRequestBody(route));
       return json(route, { request_id: REQUEST_ID, recovery: recovery("pending"), eligibility: { eligible_owner_count: 2, threshold: 2, recoverable: true } }, 201);
@@ -100,7 +103,7 @@ test("keeps one-time exchange material out of storage and handles replay in a re
   expect(page.url()).not.toContain(ONE_TIME_EXCHANGE);
 
   await page.getByRole("button", { name: "一度だけ表示された交換値を使う" }).click();
-  await expect(page.getByRole("alert")).toContainText("すでに使われています");
+  await expect(page.getByText("この操作はすでに使われています。新しい状態を確認してください。", { exact: true })).toBeVisible();
   await expect(page.getByTestId("recovery-exchange-value")).toHaveCount(0);
   expect((await browserStorageSnapshot(page)).local).toEqual({});
   expect((await browserStorageSnapshot(page)).session).toEqual({});

@@ -32,12 +32,33 @@ This is not yet a production release. Browser qualification, complete Console op
 
 ### W0 — close recovery dead-letter operations
 
-State: in progress. Slices 1–3 are implemented and locally verified on
-2026-08-14, including the real-PostgreSQL race matrix, strict BFF/client, and
-Owner/Admin UI. The implementation also fixed millisecond precision loss when
-PostgreSQL returns `recent_auth_at` as a JavaScript `Date`; without that fix,
-the repository's exact authorization revalidation could reject a valid proof.
-Slice 4's full Playwright virtual-WebAuthn browser journey remains open.
+State: completed locally on 2026-08-14. All four slices are implemented and
+verified, including the real-PostgreSQL race matrix, strict BFF/client,
+Owner/Admin UI, and the full Playwright virtual-WebAuthn browser journey. The
+implementation also fixed millisecond precision loss when PostgreSQL returns
+`recent_auth_at` as a JavaScript `Date`; without that fix, the repository's
+exact authorization revalidation could reject a valid proof.
+
+Qualification evidence:
+
+- 38 Chromium Playwright tests pass, including 12 recovery dead-letter tests
+  covering list/loading/empty states, keyboard confirmation, redrive,
+  suppression, stale-version refresh, one-use recent-auth, malformed and stale
+  authorization, role denial, tenant substitution, unknown-event enumeration,
+  CSRF rejection, and replay.
+- The mutation journey uses a CDP virtual authenticator and verifies the exact
+  canonical context hash for organization, event, action, and authoritative
+  management version across WebAuthn options and verification.
+- Browser checks cover DOM, local/session storage, IndexedDB, Cache Storage,
+  console output, and bounded network metadata. Playwright traces are disabled
+  for this sensitive suite because a retained trace can persist transient
+  WebAuthn assertions or request bodies.
+- Console unit tests and lint pass (122 tests), the frozen contract catalog
+  validates (112 entries), and migration `0031` passes against real PostgreSQL.
+
+This closes the local W0 browser qualification. A deployed Console + Cloud API
++ PostgreSQL end-to-end run remains a production/staging promotion gate under
+W6; it is not represented as local W0 evidence.
 
 Merge slices:
 

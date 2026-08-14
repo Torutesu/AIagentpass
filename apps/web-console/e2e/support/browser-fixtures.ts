@@ -1,6 +1,8 @@
 import { generateKeyPairSync } from "node:crypto";
 import type { Page, Route } from "@playwright/test";
 
+const CDP_CLEANUP_TIMEOUT_MS = 2_000;
+
 export type BrowserRole = "owner" | "admin" | "auditor" | "viewer";
 
 export const ORGANIZATION_ID = "11111111-1111-4111-8111-111111111111";
@@ -69,31 +71,55 @@ export type VirtualAuthenticator = Readonly<{
   credentialId: string;
 }>;
 
+async function boundedCleanup<T>(operation: Promise<T>, fallback: T): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      operation,
+      new Promise<T>((resolve) => {
+        timer = setTimeout(() => resolve(fallback), CDP_CLEANUP_TIMEOUT_MS);
+        timer.unref?.();
+      }),
+    ]);
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+  }
+}
+
 export async function installVirtualAuthenticator(page: Page): Promise<VirtualAuthenticator> {
   const cdp = await page.context().newCDPSession(page);
-  await cdp.send("WebAuthn.enable");
-  const { authenticatorId } = await cdp.send("WebAuthn.addVirtualAuthenticator", {
-    options: {
-      protocol: "ctap2",
-      transport: "internal",
-      hasResidentKey: true,
-      hasUserVerification: true,
-      automaticPresenceSimulation: true,
-      isUserVerified: true,
-    },
-  });
-  const { privateKey } = generateKeyPairSync("ec", { namedCurve: "prime256v1" });
-  await cdp.send("WebAuthn.addCredential", {
-    authenticatorId,
-    credential: {
-      credentialId: CREDENTIAL_ID_BYTES.toString("base64"),
-      isResidentCredential: false,
-      rpId: "localhost",
-      privateKey: privateKey.export({ type: "pkcs8", format: "der" }).toString("base64"),
-      signCount: 0,
-    },
-  });
-  return Object.freeze({ cdp, authenticatorId, credentialId: CREDENTIAL_ID });
+  let authenticatorId: string | undefined;
+  try {
+    await cdp.send("WebAuthn.enable");
+    ({ authenticatorId } = await cdp.send("WebAuthn.addVirtualAuthenticator", {
+      options: {
+        protocol: "ctap2",
+        transport: "internal",
+        hasResidentKey: true,
+        hasUserVerification: true,
+        automaticPresenceSimulation: true,
+        isUserVerified: true,
+      },
+    }));
+    const { privateKey } = generateKeyPairSync("ec", { namedCurve: "prime256v1" });
+    await cdp.send("WebAuthn.addCredential", {
+      authenticatorId,
+      credential: {
+        credentialId: CREDENTIAL_ID_BYTES.toString("base64"),
+        isResidentCredential: false,
+        rpId: "localhost",
+        privateKey: privateKey.export({ type: "pkcs8", format: "der" }).toString("base64"),
+        signCount: 0,
+      },
+    });
+    return Object.freeze({ cdp, authenticatorId, credentialId: CREDENTIAL_ID });
+  } catch (error) {
+    if (authenticatorId !== undefined) {
+      await boundedCleanup(cdp.send("WebAuthn.removeVirtualAuthenticator", { authenticatorId }), undefined);
+    }
+    await boundedCleanup(cdp.detach(), undefined);
+    throw error;
+  }
 }
 
 export async function removeVirtualCredential(authenticator: VirtualAuthenticator): Promise<void> {
@@ -105,9 +131,9 @@ export async function removeVirtualCredential(authenticator: VirtualAuthenticato
 
 export async function disposeVirtualAuthenticator(authenticator: Pick<VirtualAuthenticator, "cdp" | "authenticatorId">): Promise<void> {
   try {
-    await authenticator.cdp.send("WebAuthn.removeVirtualAuthenticator", { authenticatorId: authenticator.authenticatorId });
+    await boundedCleanup(authenticator.cdp.send("WebAuthn.removeVirtualAuthenticator", { authenticatorId: authenticator.authenticatorId }), undefined);
   } finally {
-    await authenticator.cdp.detach().catch(() => undefined);
+    await boundedCleanup(authenticator.cdp.detach().catch(() => undefined), undefined);
   }
 }
 
