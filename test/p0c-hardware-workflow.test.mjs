@@ -32,6 +32,12 @@ test('P0-C workflow is manually dispatched only, canonical-repository only, and 
   }
   assert.doesNotMatch(workflow, /@[vV][0-9]/, 'floating action tag found');
   assert.doesNotMatch(workflow, /\bgh\s+release\b|^\s{2}publish:/m, 'publication is outside this workflow');
+  assert.doesNotMatch(workflow, /^\s{6}(?:CANDIDATE_DIR|OUTPUT_DIR|APPLE_DIR|INTEL_DIR): \$\{\{ runner\.temp \}\}/mu,
+    'runner context is not available in job-level env');
+  assert.equal([...workflow.matchAll(/CANDIDATE_DIR="\$RUNNER_TEMP\/agentpass-p0c-/gu)].length, 3,
+    'each hardware/aggregate job must derive its candidate directory from RUNNER_TEMP at runtime');
+  assert.equal([...workflow.matchAll(/OUTPUT_DIR="\$RUNNER_TEMP\/agentpass-p0c-/gu)].length, 3,
+    'each hardware/aggregate job must derive its output directory from RUNNER_TEMP at runtime');
 });
 
 test('preflight accepts only a successful same-repository main-branch Release candidate run', () => {

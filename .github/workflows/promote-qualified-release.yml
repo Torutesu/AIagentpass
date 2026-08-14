@@ -48,9 +48,19 @@ jobs:
       APPLE_OPERATOR_FINGERPRINT: ${{ vars.AGENTPASS_P0C_APPLE_SILICON_OPERATOR_FINGERPRINT }}
       INTEL_OPERATOR_FINGERPRINT: ${{ vars.AGENTPASS_P0C_INTEL_T2_OPERATOR_FINGERPRINT }}
       APPROVED_OPERATOR_POLICY_JSON: ${{ vars.AGENTPASS_P0C_APPROVED_OPERATOR_POLICY_JSON }}
-      PROMOTION_ROOT: ${{ runner.temp }}/agentpass-qualified-promotion-${{ github.run_id }}-${{ github.run_attempt }}
 
     steps:
+      - id: paths
+        name: Create protected promotion root
+        shell: bash
+        run: |
+          set -euo pipefail
+          PROMOTION_ROOT="$RUNNER_TEMP/agentpass-qualified-promotion-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          [[ ! -e "$PROMOTION_ROOT" ]] || { echo "promotion temporary path already exists" >&2; exit 1; }
+          /bin/mkdir -m 0700 "$PROMOTION_ROOT"
+          printf 'promotion_root=%s\n' "$PROMOTION_ROOT" >> "$GITHUB_OUTPUT"
+          printf 'PROMOTION_ROOT=%s\n' "$PROMOTION_ROOT" >> "$GITHUB_ENV"
+
       - id: preflight
         name: Validate exact successful source and qualification runs through the GitHub API
         shell: bash
@@ -163,7 +173,7 @@ jobs:
           repository: Torutesu/AIagentpass
           run-id: ${{ steps.preflight.outputs.release_run_id }}
           github-token: ${{ github.token }}
-          path: ${{ runner.temp }}/agentpass-qualified-promotion-${{ github.run_id }}-${{ github.run_attempt }}/candidate
+          path: ${{ steps.paths.outputs.promotion_root }}/candidate
 
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
@@ -171,7 +181,7 @@ jobs:
           repository: Torutesu/AIagentpass
           run-id: ${{ steps.preflight.outputs.qualification_run_id }}
           github-token: ${{ github.token }}
-          path: ${{ runner.temp }}/agentpass-qualified-promotion-${{ github.run_id }}-${{ github.run_attempt }}/apple
+          path: ${{ steps.paths.outputs.promotion_root }}/apple
 
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
@@ -179,7 +189,7 @@ jobs:
           repository: Torutesu/AIagentpass
           run-id: ${{ steps.preflight.outputs.qualification_run_id }}
           github-token: ${{ github.token }}
-          path: ${{ runner.temp }}/agentpass-qualified-promotion-${{ github.run_id }}-${{ github.run_attempt }}/intel
+          path: ${{ steps.paths.outputs.promotion_root }}/intel
 
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
@@ -187,16 +197,16 @@ jobs:
           repository: Torutesu/AIagentpass
           run-id: ${{ steps.preflight.outputs.qualification_run_id }}
           github-token: ${{ github.token }}
-          path: ${{ runner.temp }}/agentpass-qualified-promotion-${{ github.run_id }}-${{ github.run_attempt }}/summary
+          path: ${{ steps.paths.outputs.promotion_root }}/summary
 
       - id: catalog
         name: Catalog only the exact downloaded candidate and qualification evidence
         shell: bash
         env:
-          CANDIDATE_DIR: ${{ env.PROMOTION_ROOT }}/candidate
-          APPLE_DIR: ${{ env.PROMOTION_ROOT }}/apple
-          INTEL_DIR: ${{ env.PROMOTION_ROOT }}/intel
-          SUMMARY_DIR: ${{ env.PROMOTION_ROOT }}/summary
+          CANDIDATE_DIR: ${{ steps.paths.outputs.promotion_root }}/candidate
+          APPLE_DIR: ${{ steps.paths.outputs.promotion_root }}/apple
+          INTEL_DIR: ${{ steps.paths.outputs.promotion_root }}/intel
+          SUMMARY_DIR: ${{ steps.paths.outputs.promotion_root }}/summary
         run: |
           set -euo pipefail
           node --input-type=module <<'NODE'
@@ -363,7 +373,7 @@ jobs:
 
       - name: Materialize the externally pinned operator policy
         env:
-          POLICY_PATH: ${{ env.PROMOTION_ROOT }}/output/approved-operator-policy.json
+          POLICY_PATH: ${{ steps.paths.outputs.promotion_root }}/output/approved-operator-policy.json
         shell: bash
         run: |
           set -euo pipefail
@@ -395,10 +405,10 @@ jobs:
           INTEL_SIGNATURE: ${{ steps.catalog.outputs.intel_signature }}
           INTEL_PUBLIC_KEY: ${{ steps.catalog.outputs.intel_public_key }}
           INTEL_EVIDENCE: ${{ steps.catalog.outputs.intel_evidence }}
-          POLICY: ${{ env.PROMOTION_ROOT }}/output/approved-operator-policy.json
+          POLICY: ${{ steps.paths.outputs.promotion_root }}/output/approved-operator-policy.json
           RETAINED_SUMMARY: ${{ steps.catalog.outputs.retained_summary }}
           DISPATCH_BINDING: ${{ steps.catalog.outputs.dispatch_binding }}
-          GENERATED_SUMMARY: ${{ env.PROMOTION_ROOT }}/output/qualification-summary.generated.json
+          GENERATED_SUMMARY: ${{ steps.paths.outputs.promotion_root }}/output/qualification-summary.generated.json
         shell: bash
         run: |
           set -euo pipefail
@@ -456,7 +466,7 @@ jobs:
           RELEASE_TAG: ${{ steps.release.outputs.release_tag }}
           MANIFEST: ${{ steps.catalog.outputs.manifest }}
           MANIFEST_SIGNATURE: ${{ steps.catalog.outputs.signature }}
-          CANDIDATE_DIR: ${{ env.PROMOTION_ROOT }}/candidate
+          CANDIDATE_DIR: ${{ steps.paths.outputs.promotion_root }}/candidate
         shell: bash
         run: |
           set -euo pipefail
@@ -498,8 +508,8 @@ jobs:
           INTEL_PUBLIC_KEY: ${{ steps.catalog.outputs.intel_public_key }}
           INTEL_EVIDENCE: ${{ steps.catalog.outputs.intel_evidence }}
           QUALIFICATION_SUMMARY: ${{ steps.catalog.outputs.retained_summary }}
-          OPERATOR_POLICY: ${{ env.PROMOTION_ROOT }}/output/approved-operator-policy.json
-          QUALIFICATION_ASSETS: ${{ env.PROMOTION_ROOT }}/qualification-release-assets
+          OPERATOR_POLICY: ${{ steps.paths.outputs.promotion_root }}/output/approved-operator-policy.json
+          QUALIFICATION_ASSETS: ${{ steps.paths.outputs.promotion_root }}/qualification-release-assets
         shell: bash
         run: |
           set -euo pipefail

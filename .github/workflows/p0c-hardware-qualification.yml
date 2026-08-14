@@ -78,8 +78,6 @@ jobs:
     env:
       CANDIDATE_RUN_ID: ${{ needs.validate-candidate.outputs.run_id }}
       CANDIDATE_ARTIFACT_NAME: ${{ needs.validate-candidate.outputs.artifact_name }}
-      CANDIDATE_DIR: ${{ runner.temp }}/agentpass-p0c-candidate-${{ github.run_id }}-${{ github.run_attempt }}-apple-silicon
-      OUTPUT_DIR: ${{ runner.temp }}/agentpass-p0c-output-${{ github.run_id }}-${{ github.run_attempt }}-apple-silicon
       RELEASE_MANIFEST_FINGERPRINT: ${{ vars.AGENTPASS_RELEASE_MANIFEST_KEY_FINGERPRINT }}
       EXPECTED_TEAM_ID: ${{ vars.AGENTPASS_RELEASE_TEAM_ID }}
       AGENTPASS_APP_IDENTIFIER_PREFIX: ${{ vars.AGENTPASS_RELEASE_APP_IDENTIFIER_PREFIX }}
@@ -105,12 +103,17 @@ jobs:
         with:
           node-version: 20
 
-      - name: Create clean candidate and qualification directories
+      - id: paths
+        name: Create clean candidate and qualification directories
         shell: bash
         run: |
           set -euo pipefail
+          CANDIDATE_DIR="$RUNNER_TEMP/agentpass-p0c-candidate-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-apple-silicon"
+          OUTPUT_DIR="$RUNNER_TEMP/agentpass-p0c-output-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-apple-silicon"
           [[ ! -e "$CANDIDATE_DIR" && ! -e "$OUTPUT_DIR" ]] || { echo "runner temporary paths already exist" >&2; exit 1; }
           /bin/mkdir -m 0700 "$CANDIDATE_DIR" "$OUTPUT_DIR"
+          printf 'candidate_dir=%s\noutput_dir=%s\n' "$CANDIDATE_DIR" "$OUTPUT_DIR" >> "$GITHUB_OUTPUT"
+          printf 'CANDIDATE_DIR=%s\nOUTPUT_DIR=%s\n' "$CANDIDATE_DIR" "$OUTPUT_DIR" >> "$GITHUB_ENV"
 
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
@@ -118,12 +121,12 @@ jobs:
           repository: ${{ github.repository }}
           run-id: ${{ needs.validate-candidate.outputs.run_id }}
           github-token: ${{ github.token }}
-          path: ${{ runner.temp }}/agentpass-p0c-candidate-${{ github.run_id }}-${{ github.run_attempt }}-apple-silicon
+          path: ${{ steps.paths.outputs.candidate_dir }}
 
       - id: candidate
         name: Catalog exact candidate files without executing candidate content
         env:
-          CANDIDATE_DIR: ${{ env.CANDIDATE_DIR }}
+          CANDIDATE_DIR: ${{ steps.paths.outputs.candidate_dir }}
           EXPECTED_TEAM_ID: ${{ env.EXPECTED_TEAM_ID }}
         shell: bash
         run: |
@@ -281,8 +284,8 @@ jobs:
 
       - name: Generate immutable hardware report template from signed release evidence
         env:
-          TEMPLATE_OUT: ${{ env.OUTPUT_DIR }}/template.json
-          BROWSER_VERSIONS_PATH: ${{ env.OUTPUT_DIR }}/browser-versions.json
+          TEMPLATE_OUT: ${{ steps.paths.outputs.output_dir }}/template.json
+          BROWSER_VERSIONS_PATH: ${{ steps.paths.outputs.output_dir }}/browser-versions.json
           MANIFEST: ${{ steps.candidate.outputs.manifest }}
           MANIFEST_SIGNATURE: ${{ steps.candidate.outputs.signature }}
           MANIFEST_PUBLIC_KEY: ${{ steps.candidate.outputs.public_key }}
@@ -307,8 +310,8 @@ jobs:
 
       - name: Materialize lane operator key in private temporary storage
         env:
-          PRIVATE_KEY_PATH: ${{ env.OUTPUT_DIR }}/operator-private.pem
-          PUBLIC_KEY_PATH: ${{ env.OUTPUT_DIR }}/operator-public.pem
+          PRIVATE_KEY_PATH: ${{ steps.paths.outputs.output_dir }}/operator-private.pem
+          PUBLIC_KEY_PATH: ${{ steps.paths.outputs.output_dir }}/operator-public.pem
         shell: bash
         run: |
           set -euo pipefail
@@ -325,9 +328,9 @@ jobs:
 
       - name: Run fixed root-owned P0-C gate drivers
         env:
-          TEMPLATE: ${{ env.OUTPUT_DIR }}/template.json
-          REPORT: ${{ env.OUTPUT_DIR }}/report.json
-          EVIDENCE_DIR: ${{ env.OUTPUT_DIR }}/evidence
+          TEMPLATE: ${{ steps.paths.outputs.output_dir }}/template.json
+          REPORT: ${{ steps.paths.outputs.output_dir }}/report.json
+          EVIDENCE_DIR: ${{ steps.paths.outputs.output_dir }}/evidence
           PRODUCT_PKG: ${{ steps.candidate.outputs.artifact }}
         shell: bash
         run: |
@@ -400,15 +403,15 @@ jobs:
 
       - name: Sign and independently verify lane report
         env:
-          REPORT: ${{ env.OUTPUT_DIR }}/report.json
-          SIGNATURE: ${{ env.OUTPUT_DIR }}/report.sig
-          PUBLIC_KEY: ${{ env.OUTPUT_DIR }}/operator-public.pem
-          PRIVATE_KEY: ${{ env.OUTPUT_DIR }}/operator-private.pem
+          REPORT: ${{ steps.paths.outputs.output_dir }}/report.json
+          SIGNATURE: ${{ steps.paths.outputs.output_dir }}/report.sig
+          PUBLIC_KEY: ${{ steps.paths.outputs.output_dir }}/operator-public.pem
+          PRIVATE_KEY: ${{ steps.paths.outputs.output_dir }}/operator-private.pem
           MANIFEST: ${{ steps.candidate.outputs.manifest }}
           MANIFEST_SIGNATURE: ${{ steps.candidate.outputs.signature }}
           MANIFEST_PUBLIC_KEY: ${{ steps.candidate.outputs.public_key }}
           PRODUCT_PKG: ${{ steps.candidate.outputs.artifact }}
-          EVIDENCE_DIR: ${{ env.OUTPUT_DIR }}/evidence
+          EVIDENCE_DIR: ${{ steps.paths.outputs.output_dir }}/evidence
         shell: bash
         run: |
           set -euo pipefail
@@ -423,20 +426,21 @@ jobs:
         with:
           name: p0c-hardware-apple-silicon
           path: |
-            ${{ runner.temp }}/agentpass-p0c-output-${{ github.run_id }}-${{ github.run_attempt }}-apple-silicon/report.json
-            ${{ runner.temp }}/agentpass-p0c-output-${{ github.run_id }}-${{ github.run_attempt }}-apple-silicon/report.sig
-            ${{ runner.temp }}/agentpass-p0c-output-${{ github.run_id }}-${{ github.run_attempt }}-apple-silicon/operator-public.pem
-            ${{ runner.temp }}/agentpass-p0c-output-${{ github.run_id }}-${{ github.run_attempt }}-apple-silicon/evidence/**
+            ${{ steps.paths.outputs.output_dir }}/report.json
+            ${{ steps.paths.outputs.output_dir }}/report.sig
+            ${{ steps.paths.outputs.output_dir }}/operator-public.pem
+            ${{ steps.paths.outputs.output_dir }}/evidence/**
           if-no-files-found: error
           retention-days: 14
 
       - name: Remove private operator key
         if: ${{ always() }}
         env:
-          PRIVATE_KEY_PATH: ${{ env.OUTPUT_DIR }}/operator-private.pem
+          PRIVATE_KEY_PATH: ${{ steps.paths.outputs.output_dir }}/operator-private.pem
         shell: bash
         run: |
           set +e
+          [[ -n "$PRIVATE_KEY_PATH" && "$PRIVATE_KEY_PATH" == "$RUNNER_TEMP"/agentpass-p0c-output-*/operator-private.pem ]] || exit 0
           chmod 000 "$PRIVATE_KEY_PATH" 2>/dev/null
           rm -f -- "$PRIVATE_KEY_PATH"
 
@@ -452,8 +456,6 @@ jobs:
     env:
       CANDIDATE_RUN_ID: ${{ needs.validate-candidate.outputs.run_id }}
       CANDIDATE_ARTIFACT_NAME: ${{ needs.validate-candidate.outputs.artifact_name }}
-      CANDIDATE_DIR: ${{ runner.temp }}/agentpass-p0c-candidate-${{ github.run_id }}-${{ github.run_attempt }}-intel-t2
-      OUTPUT_DIR: ${{ runner.temp }}/agentpass-p0c-output-${{ github.run_id }}-${{ github.run_attempt }}-intel-t2
       RELEASE_MANIFEST_FINGERPRINT: ${{ vars.AGENTPASS_RELEASE_MANIFEST_KEY_FINGERPRINT }}
       EXPECTED_TEAM_ID: ${{ vars.AGENTPASS_RELEASE_TEAM_ID }}
       AGENTPASS_APP_IDENTIFIER_PREFIX: ${{ vars.AGENTPASS_RELEASE_APP_IDENTIFIER_PREFIX }}
@@ -479,12 +481,17 @@ jobs:
         with:
           node-version: 20
 
-      - name: Create clean candidate and qualification directories
+      - id: paths
+        name: Create clean candidate and qualification directories
         shell: bash
         run: |
           set -euo pipefail
+          CANDIDATE_DIR="$RUNNER_TEMP/agentpass-p0c-candidate-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-intel-t2"
+          OUTPUT_DIR="$RUNNER_TEMP/agentpass-p0c-output-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-intel-t2"
           [[ ! -e "$CANDIDATE_DIR" && ! -e "$OUTPUT_DIR" ]] || { echo "runner temporary paths already exist" >&2; exit 1; }
           /bin/mkdir -m 0700 "$CANDIDATE_DIR" "$OUTPUT_DIR"
+          printf 'candidate_dir=%s\noutput_dir=%s\n' "$CANDIDATE_DIR" "$OUTPUT_DIR" >> "$GITHUB_OUTPUT"
+          printf 'CANDIDATE_DIR=%s\nOUTPUT_DIR=%s\n' "$CANDIDATE_DIR" "$OUTPUT_DIR" >> "$GITHUB_ENV"
 
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
@@ -492,12 +499,12 @@ jobs:
           repository: ${{ github.repository }}
           run-id: ${{ needs.validate-candidate.outputs.run_id }}
           github-token: ${{ github.token }}
-          path: ${{ runner.temp }}/agentpass-p0c-candidate-${{ github.run_id }}-${{ github.run_attempt }}-intel-t2
+          path: ${{ steps.paths.outputs.candidate_dir }}
 
       - id: candidate
         name: Catalog exact candidate files without executing candidate content
         env:
-          CANDIDATE_DIR: ${{ env.CANDIDATE_DIR }}
+          CANDIDATE_DIR: ${{ steps.paths.outputs.candidate_dir }}
           EXPECTED_TEAM_ID: ${{ env.EXPECTED_TEAM_ID }}
         shell: bash
         run: |
@@ -648,8 +655,8 @@ jobs:
 
       - name: Generate immutable hardware report template from signed release evidence
         env:
-          TEMPLATE_OUT: ${{ env.OUTPUT_DIR }}/template.json
-          BROWSER_VERSIONS_PATH: ${{ env.OUTPUT_DIR }}/browser-versions.json
+          TEMPLATE_OUT: ${{ steps.paths.outputs.output_dir }}/template.json
+          BROWSER_VERSIONS_PATH: ${{ steps.paths.outputs.output_dir }}/browser-versions.json
           MANIFEST: ${{ steps.candidate.outputs.manifest }}
           MANIFEST_SIGNATURE: ${{ steps.candidate.outputs.signature }}
           MANIFEST_PUBLIC_KEY: ${{ steps.candidate.outputs.public_key }}
@@ -674,8 +681,8 @@ jobs:
 
       - name: Materialize lane operator key in private temporary storage
         env:
-          PRIVATE_KEY_PATH: ${{ env.OUTPUT_DIR }}/operator-private.pem
-          PUBLIC_KEY_PATH: ${{ env.OUTPUT_DIR }}/operator-public.pem
+          PRIVATE_KEY_PATH: ${{ steps.paths.outputs.output_dir }}/operator-private.pem
+          PUBLIC_KEY_PATH: ${{ steps.paths.outputs.output_dir }}/operator-public.pem
         shell: bash
         run: |
           set -euo pipefail
@@ -692,9 +699,9 @@ jobs:
 
       - name: Run fixed root-owned P0-C gate drivers
         env:
-          TEMPLATE: ${{ env.OUTPUT_DIR }}/template.json
-          REPORT: ${{ env.OUTPUT_DIR }}/report.json
-          EVIDENCE_DIR: ${{ env.OUTPUT_DIR }}/evidence
+          TEMPLATE: ${{ steps.paths.outputs.output_dir }}/template.json
+          REPORT: ${{ steps.paths.outputs.output_dir }}/report.json
+          EVIDENCE_DIR: ${{ steps.paths.outputs.output_dir }}/evidence
           PRODUCT_PKG: ${{ steps.candidate.outputs.artifact }}
         shell: bash
         run: |
@@ -761,15 +768,15 @@ jobs:
 
       - name: Sign and independently verify lane report
         env:
-          REPORT: ${{ env.OUTPUT_DIR }}/report.json
-          SIGNATURE: ${{ env.OUTPUT_DIR }}/report.sig
-          PUBLIC_KEY: ${{ env.OUTPUT_DIR }}/operator-public.pem
-          PRIVATE_KEY: ${{ env.OUTPUT_DIR }}/operator-private.pem
+          REPORT: ${{ steps.paths.outputs.output_dir }}/report.json
+          SIGNATURE: ${{ steps.paths.outputs.output_dir }}/report.sig
+          PUBLIC_KEY: ${{ steps.paths.outputs.output_dir }}/operator-public.pem
+          PRIVATE_KEY: ${{ steps.paths.outputs.output_dir }}/operator-private.pem
           MANIFEST: ${{ steps.candidate.outputs.manifest }}
           MANIFEST_SIGNATURE: ${{ steps.candidate.outputs.signature }}
           MANIFEST_PUBLIC_KEY: ${{ steps.candidate.outputs.public_key }}
           PRODUCT_PKG: ${{ steps.candidate.outputs.artifact }}
-          EVIDENCE_DIR: ${{ env.OUTPUT_DIR }}/evidence
+          EVIDENCE_DIR: ${{ steps.paths.outputs.output_dir }}/evidence
         shell: bash
         run: |
           set -euo pipefail
@@ -780,20 +787,21 @@ jobs:
         with:
           name: p0c-hardware-intel-t2
           path: |
-            ${{ runner.temp }}/agentpass-p0c-output-${{ github.run_id }}-${{ github.run_attempt }}-intel-t2/report.json
-            ${{ runner.temp }}/agentpass-p0c-output-${{ github.run_id }}-${{ github.run_attempt }}-intel-t2/report.sig
-            ${{ runner.temp }}/agentpass-p0c-output-${{ github.run_id }}-${{ github.run_attempt }}-intel-t2/operator-public.pem
-            ${{ runner.temp }}/agentpass-p0c-output-${{ github.run_id }}-${{ github.run_attempt }}-intel-t2/evidence/**
+            ${{ steps.paths.outputs.output_dir }}/report.json
+            ${{ steps.paths.outputs.output_dir }}/report.sig
+            ${{ steps.paths.outputs.output_dir }}/operator-public.pem
+            ${{ steps.paths.outputs.output_dir }}/evidence/**
           if-no-files-found: error
           retention-days: 14
 
       - name: Remove private operator key
         if: ${{ always() }}
         env:
-          PRIVATE_KEY_PATH: ${{ env.OUTPUT_DIR }}/operator-private.pem
+          PRIVATE_KEY_PATH: ${{ steps.paths.outputs.output_dir }}/operator-private.pem
         shell: bash
         run: |
           set +e
+          [[ -n "$PRIVATE_KEY_PATH" && "$PRIVATE_KEY_PATH" == "$RUNNER_TEMP"/agentpass-p0c-output-*/operator-private.pem ]] || exit 0
           chmod 000 "$PRIVATE_KEY_PATH" 2>/dev/null
           rm -f -- "$PRIVATE_KEY_PATH"
 
@@ -808,10 +816,6 @@ jobs:
     env:
       CANDIDATE_RUN_ID: ${{ needs.validate-candidate.outputs.run_id }}
       CANDIDATE_ARTIFACT_NAME: ${{ needs.validate-candidate.outputs.artifact_name }}
-      CANDIDATE_DIR: ${{ runner.temp }}/agentpass-p0c-aggregate-candidate-${{ github.run_id }}-${{ github.run_attempt }}
-      APPLE_DIR: ${{ runner.temp }}/agentpass-p0c-aggregate-apple-${{ github.run_id }}-${{ github.run_attempt }}
-      INTEL_DIR: ${{ runner.temp }}/agentpass-p0c-aggregate-intel-${{ github.run_id }}-${{ github.run_attempt }}
-      OUTPUT_DIR: ${{ runner.temp }}/agentpass-p0c-aggregate-output-${{ github.run_id }}-${{ github.run_attempt }}
       RELEASE_MANIFEST_FINGERPRINT: ${{ vars.AGENTPASS_RELEASE_MANIFEST_KEY_FINGERPRINT }}
       APPLE_OPERATOR_FINGERPRINT: ${{ vars.AGENTPASS_P0C_APPLE_SILICON_OPERATOR_FINGERPRINT }}
       INTEL_OPERATOR_FINGERPRINT: ${{ vars.AGENTPASS_P0C_INTEL_T2_OPERATOR_FINGERPRINT }}
@@ -828,12 +832,19 @@ jobs:
         with:
           node-version: 20
 
-      - name: Create clean aggregate directories
+      - id: paths
+        name: Create clean aggregate directories
         shell: bash
         run: |
           set -euo pipefail
+          CANDIDATE_DIR="$RUNNER_TEMP/agentpass-p0c-aggregate-candidate-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          APPLE_DIR="$RUNNER_TEMP/agentpass-p0c-aggregate-apple-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          INTEL_DIR="$RUNNER_TEMP/agentpass-p0c-aggregate-intel-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          OUTPUT_DIR="$RUNNER_TEMP/agentpass-p0c-aggregate-output-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
           [[ ! -e "$CANDIDATE_DIR" && ! -e "$APPLE_DIR" && ! -e "$INTEL_DIR" && ! -e "$OUTPUT_DIR" ]] || { echo "aggregate temporary paths already exist" >&2; exit 1; }
           /bin/mkdir -m 0700 "$CANDIDATE_DIR" "$APPLE_DIR" "$INTEL_DIR" "$OUTPUT_DIR"
+          printf 'candidate_dir=%s\napple_dir=%s\nintel_dir=%s\noutput_dir=%s\n' "$CANDIDATE_DIR" "$APPLE_DIR" "$INTEL_DIR" "$OUTPUT_DIR" >> "$GITHUB_OUTPUT"
+          printf 'CANDIDATE_DIR=%s\nAPPLE_DIR=%s\nINTEL_DIR=%s\nOUTPUT_DIR=%s\n' "$CANDIDATE_DIR" "$APPLE_DIR" "$INTEL_DIR" "$OUTPUT_DIR" >> "$GITHUB_ENV"
 
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
@@ -841,22 +852,22 @@ jobs:
           repository: ${{ github.repository }}
           run-id: ${{ needs.validate-candidate.outputs.run_id }}
           github-token: ${{ github.token }}
-          path: ${{ runner.temp }}/agentpass-p0c-aggregate-candidate-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ steps.paths.outputs.candidate_dir }}
 
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: p0c-hardware-apple-silicon
-          path: ${{ runner.temp }}/agentpass-p0c-aggregate-apple-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ steps.paths.outputs.apple_dir }}
 
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: p0c-hardware-intel-t2
-          path: ${{ runner.temp }}/agentpass-p0c-aggregate-intel-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ steps.paths.outputs.intel_dir }}
 
       - id: candidate
         name: Re-catalog candidate before aggregate verification
         env:
-          CANDIDATE_DIR: ${{ env.CANDIDATE_DIR }}
+          CANDIDATE_DIR: ${{ steps.paths.outputs.candidate_dir }}
           EXPECTED_TEAM_ID: ${{ vars.AGENTPASS_RELEASE_TEAM_ID }}
         shell: bash
         run: |
@@ -895,7 +906,7 @@ jobs:
 
       - name: Write externally supplied approved operator policy
         env:
-          POLICY_PATH: ${{ env.OUTPUT_DIR }}/approved-operator-policy.json
+          POLICY_PATH: ${{ steps.paths.outputs.output_dir }}/approved-operator-policy.json
         shell: bash
         run: |
           set -euo pipefail
@@ -915,10 +926,10 @@ jobs:
           MANIFEST_SIGNATURE: ${{ steps.candidate.outputs.signature }}
           MANIFEST_PUBLIC_KEY: ${{ steps.candidate.outputs.public_key }}
           PRODUCT_PKG: ${{ steps.candidate.outputs.artifact }}
-          POLICY_PATH: ${{ env.OUTPUT_DIR }}/approved-operator-policy.json
-          APPLE_DIR: ${{ env.APPLE_DIR }}
-          INTEL_DIR: ${{ env.INTEL_DIR }}
-          SUMMARY_PATH: ${{ env.OUTPUT_DIR }}/qualification-summary.json
+          POLICY_PATH: ${{ steps.paths.outputs.output_dir }}/approved-operator-policy.json
+          APPLE_DIR: ${{ steps.paths.outputs.apple_dir }}
+          INTEL_DIR: ${{ steps.paths.outputs.intel_dir }}
+          SUMMARY_PATH: ${{ steps.paths.outputs.output_dir }}/qualification-summary.json
         shell: bash
         run: |
           set -euo pipefail
@@ -948,7 +959,7 @@ jobs:
         with:
           name: p0c-hardware-qualification-summary
           path: |
-            ${{ runner.temp }}/agentpass-p0c-aggregate-output-${{ github.run_id }}-${{ github.run_attempt }}/qualification-summary.json
-            ${{ runner.temp }}/agentpass-p0c-aggregate-output-${{ github.run_id }}-${{ github.run_attempt }}/qualification-dispatch-binding.json
+            ${{ steps.paths.outputs.output_dir }}/qualification-summary.json
+            ${{ steps.paths.outputs.output_dir }}/qualification-dispatch-binding.json
           if-no-files-found: error
           retention-days: 30

@@ -35,6 +35,10 @@ test('promotion is manual-dispatch only, canonical-main only, and protected with
   assert.match(promote, /permissions:\n      contents: write\n      actions: read/);
   assert.doesNotMatch(workflow, /secrets\./, 'promotion must not consume signing, notary, or operator private secrets');
   assert.doesNotMatch(workflow, /pull_request(?:_target)?:/);
+  assert.doesNotMatch(workflow, /^\s{6}PROMOTION_ROOT: \$\{\{ runner\.temp \}\}/mu,
+    'runner context is not available in job-level env');
+  assert.match(workflow, /PROMOTION_ROOT="\$RUNNER_TEMP\/agentpass-qualified-promotion-\$\{GITHUB_RUN_ID\}-\$\{GITHUB_RUN_ATTEMPT\}"/u,
+    'promotion material must be rooted in the runtime-provided protected temporary directory');
 });
 
 test('all actions are immutable SHAs and only trusted built-in actions are used', () => {
