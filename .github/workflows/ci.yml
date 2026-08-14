@@ -162,6 +162,7 @@ jobs:
 
   test:
     runs-on: macos-latest
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
@@ -180,11 +181,18 @@ jobs:
       - run: npm run lint --prefix apps/web-console
       - run: npm audit --prefix apps/web-console --audit-level=high
       - name: Run bounded native unit tests
+        timeout-minutes: 20
         env:
           NATIVE_TEST_TIMEOUT_MS: 900000
         run: npm run test:native
-      - run: npm run test:native-app
-      - run: npm run test:native-installer-preservation
-      - run: npm run test:native-durability-model
+      - name: Run bounded native app bundle tests
+        timeout-minutes: 10
+        run: npm run test:native-app
+      - name: Run bounded installer preservation tests
+        timeout-minutes: 5
+        run: npm run test:native-installer-preservation
+      - name: Run bounded native durability model
+        timeout-minutes: 10
+        run: npm run test:native-durability-model
       - run: npm run release:validate
       - run: npm run lint

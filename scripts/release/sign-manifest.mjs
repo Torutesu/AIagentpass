@@ -2,6 +2,7 @@
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import { basename, dirname, join, resolve } from 'node:path';
+import { assertReleaseCandidateIdMatchesProduct, RELEASE_MANIFEST_SCHEMA_VERSION } from '../../lib/release-candidate-identity.mjs';
 import { parseCanonicalExternalQualificationControllerIdentity, validateExternalQualificationControllerIdentity } from './n3e/controller-identity-contract.mjs';
 
 const [manifestArg, privateKeyArg, signatureArg] = process.argv.slice(2);
@@ -24,12 +25,15 @@ const readRegular = (value, maximum, requirePrivate) => {
 const manifest = readRegular(manifestArg, 16 * 1024 * 1024, false);
 let parsedManifest;
 try { parsedManifest = JSON.parse(manifest.toString('utf8')); } catch { throw new Error('release manifest is not valid UTF-8 JSON'); }
-const expectedTopLevel = ['artifacts', 'evidence', 'external_qualification_controller', 'generated_at', 'product', 'schema_version', 'source', 'version'];
-if (JSON.stringify(Object.keys(parsedManifest).sort()) !== JSON.stringify(expectedTopLevel) || parsedManifest.schema_version !== 3 || parsedManifest.product !== 'AgentPass' || !manifest.equals(Buffer.from(`${JSON.stringify(parsedManifest, null, 2)}\n`, 'utf8'))) throw new Error('refusing to sign a noncanonical or unsupported release manifest');
+const expectedTopLevel = ['artifacts', 'candidate_id', 'evidence', 'external_qualification_controller', 'generated_at', 'product', 'schema_version', 'source', 'version'];
+if (JSON.stringify(Object.keys(parsedManifest).sort()) !== JSON.stringify(expectedTopLevel) || parsedManifest.schema_version !== RELEASE_MANIFEST_SCHEMA_VERSION || parsedManifest.product !== 'AgentPass' || !manifest.equals(Buffer.from(`${JSON.stringify(parsedManifest, null, 2)}\n`, 'utf8'))) throw new Error('refusing to sign a noncanonical or unsupported release manifest');
 const exactKeys = (value, keys, label) => {
   if (!value || typeof value !== 'object' || Array.isArray(value) || JSON.stringify(Object.keys(value).sort()) !== JSON.stringify([...keys].sort())) throw new Error(`${label} has missing or unknown fields`);
 };
 const external = parsedManifest.external_qualification_controller;
+const productArtifacts = Array.isArray(parsedManifest.artifacts) ? parsedManifest.artifacts.filter((item) => item?.role === 'product') : [];
+if (productArtifacts.length !== 1 || typeof productArtifacts[0].name !== 'string' || !productArtifacts[0].name.endsWith('.pkg') || !/^[0-9a-f]{64}$/.test(productArtifacts[0].sha256)) throw new Error('release manifest requires exactly one product PKG artifact');
+assertReleaseCandidateIdMatchesProduct(parsedManifest.candidate_id, productArtifacts[0].sha256);
 exactKeys(external, ['identity_document', 'identity', 'notarization'], 'external qualification controller');
 exactKeys(external.identity_document, ['name', 'bytes', 'sha256'], 'controller identity document');
 exactKeys(external.notarization, ['status', 'submission_ids', 'evidence'], 'controller notarization');

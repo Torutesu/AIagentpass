@@ -25,6 +25,8 @@ import { parseControlBundleJson } from "../lib/control-bundle-v2.mjs";
 import { executeProductionUninstall, planProductionUninstall } from "../lib/platform-uninstall.mjs";
 import { runUserStatePurge } from "../lib/platform-user-purge.mjs";
 import { parseEnrollmentInvitation, publicSetupFailure, publicSetupResult, readHeadlessOnboarding, validateHeadlessEnrollmentBaseUrl } from "../lib/headless-onboarding.mjs";
+import { prepareSetupPreflight, publicSetupPreflightFailure, serializeSetupPreflightHandoff } from "../lib/setup-preflight.mjs";
+import { readInstalledReleaseReceipt, verifyInstalledReleaseReceipt } from "../lib/installed-release-receipt.mjs";
 import { createSetupOrchestrator } from "../lib/setup-orchestrator.mjs";
 import { TEST_COMMIT_VERIFICATION_MARKER, createCompleteSetupHandler, createEditorConnectedHandler, createTestCommitVerifiedHandler } from "../lib/setup-finalization-handlers.mjs";
 import { SETUP_STATES, SetupJournalError, createSetupJournal, loadSetupJournal } from "../lib/setup-journal.mjs";
@@ -46,6 +48,8 @@ Commands:
           --fingerprint SHA256:PIN --team-id TEAMID [--execute]
                     verify and optionally install the production macOS package
   setup status
+  setup prepare --json
+                    emit a public, candidate-bound local setup handoff
   setup continue [--execute] [--enrollment-url HTTPS_URL --enrollment-stdin]
                     advance exactly one verified, crash-resumable setup state
   setup --client claude-code|cursor --team-id TEAMID [--project DIR] [--execute]
@@ -360,12 +364,37 @@ async function setupNativeBridgeUnsafe() {
 }
 
 async function setupNativeBridge() {
+  if (args[0] === "prepare") return setupPrepare();
   try {
     return await setupNativeBridgeUnsafe();
   } catch (error) {
     const current = readHeadlessOnboarding();
     const status = current.ok && current.status.initialized ? current.status : undefined;
     console.log(JSON.stringify(publicSetupFailure(error, status), null, 2));
+    process.exitCode = 1;
+  }
+}
+
+async function setupPrepare() {
+  if (args.length !== 2 || args[0] !== "prepare" || args[1] !== "--json") {
+    throw new Error("Usage: agentpass setup prepare --json");
+  }
+  try {
+    // The receipt is the only durable public release identity retained after
+    // the signed installer has completed. Re-read it through the protected
+    // root on both sides of preflight, and independently inspect the current
+    // app bundle before asking the native service for its public P-256 key.
+    const receipt = readInstalledReleaseReceipt();
+    const application = inspectNativeApplication(undefined, { expectedTeamId: receipt.team_id });
+    const nativeRunner = createNativeDeviceEnrollmentRunner({ servicePath: application.service });
+    const handoff = await prepareSetupPreflight({
+      readInstalledReleaseReceipt: () => receipt,
+      verifyInstalledRelease: () => verifyInstalledReleaseReceipt(),
+      nativeRunner
+    });
+    process.stdout.write(serializeSetupPreflightHandoff(handoff));
+  } catch (error) {
+    process.stdout.write(`${JSON.stringify(publicSetupPreflightFailure(error))}\n`);
     process.exitCode = 1;
   }
 }

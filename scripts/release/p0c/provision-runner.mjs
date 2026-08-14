@@ -12,6 +12,7 @@ export const QUALIFICATION_CLIENT_INSTALL_PATH = join(PRODUCTION_ROOT, QUALIFICA
 const MAX_SOURCE_BYTES = 16 * 1024 * 1024;
 export const QUALIFICATION_TOOL_FILES = Object.freeze([
   Object.freeze({ source: 'generate-release-attestation.mjs', installed: 'generate-release-attestation.mjs' }),
+  Object.freeze({ source: '../../lib/release-candidate-identity.mjs', installed: 'release-candidate-identity.mjs' }),
   Object.freeze({ source: 'n3e/controller-candidate-contract.mjs', installed: 'n3e/controller-candidate-contract.mjs' }),
   Object.freeze({ source: 'n3e/controller-identity-contract.mjs', installed: 'n3e/controller-identity-contract.mjs' }),
   Object.freeze({ source: 'n3e/materialize-controller-candidate.mjs', installed: 'n3e/materialize-controller-candidate.mjs' }),
@@ -142,7 +143,7 @@ export const verifyInstalledTree = (root, expected, uid, gid = uid) => {
   protectedDirectory(join(root, 'scenarios'), 'installed scenario directory', { ownerUid: uid, exactEntries: REQUIRED_GATES });
   const qualificationToolDirectory = protectedDirectory(join(root, 'qualification-tool'), 'installed qualification tool directory', { ownerUid: uid });
   const qualificationToolEntries = fs.readdirSync(qualificationToolDirectory, { withFileTypes: true }).sort((left, right) => left.name.localeCompare(right.name));
-  if (qualificationToolEntries.length !== 4 || qualificationToolEntries[0]?.name !== 'generate-release-attestation.mjs' || !qualificationToolEntries[0].isFile() || qualificationToolEntries[1]?.name !== 'manifest.json' || !qualificationToolEntries[1].isFile() || qualificationToolEntries[2]?.name !== 'n3e' || !qualificationToolEntries[2].isDirectory() || qualificationToolEntries[3]?.name !== 'p0c' || !qualificationToolEntries[3].isDirectory() || qualificationToolEntries.some((entry) => entry.isSymbolicLink())) throw new Error('installed qualification tool inventory is invalid');
+  if (qualificationToolEntries.length !== 5 || qualificationToolEntries[0]?.name !== 'generate-release-attestation.mjs' || !qualificationToolEntries[0].isFile() || qualificationToolEntries[1]?.name !== 'manifest.json' || !qualificationToolEntries[1].isFile() || qualificationToolEntries[2]?.name !== 'n3e' || !qualificationToolEntries[2].isDirectory() || qualificationToolEntries[3]?.name !== 'p0c' || !qualificationToolEntries[3].isDirectory() || qualificationToolEntries[4]?.name !== 'release-candidate-identity.mjs' || !qualificationToolEntries[4].isFile() || qualificationToolEntries.some((entry) => entry.isSymbolicLink())) throw new Error('installed qualification tool inventory is invalid');
   protectedDirectory(join(root, 'qualification-tool', 'n3e'), 'installed qualification tool module directory', { ownerUid: uid, exactEntries: QUALIFICATION_TOOL_FILES.filter(({ installed }) => installed.startsWith('n3e/')).map(({ installed }) => installed.slice('n3e/'.length)) });
   protectedDirectory(join(root, 'qualification-tool', 'p0c'), 'installed qualification P0-C directory', { ownerUid: uid });
   protectedDirectory(join(root, 'qualification-tool', 'p0c', 'lib'), 'installed qualification P0-C library directory', { ownerUid: uid, exactEntries: ['candidate-checkpoint.mjs'] });

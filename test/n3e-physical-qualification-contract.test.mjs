@@ -201,7 +201,7 @@ test("N3-E physical evidence is candidate-bound and secret-free by construction"
 test("N3-E release binding keeps the controller identity separate from the v2 physical report", () => {
   const workflow = read(".github/workflows/p0c-hardware-qualification.yml");
   const qualification = read("scripts/release/run-p0c-qualification.mjs");
-  assert.match(workflow, /schema_version !== 3/u);
+  assert.match(workflow, /schema_version !== 4/u);
   assert.match(workflow, /external_qualification_controller/u);
   assert.match(workflow, /identity_document/u);
   assert.match(workflow, /role === 'external_qualification_controller'/u);

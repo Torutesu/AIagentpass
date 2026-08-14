@@ -2,7 +2,7 @@
 
 Status: active
 
-Baseline: `codex/agent-platform` at `ead8f90`
+Baseline: `codex/agent-platform` after `d7a1dcd`
 
 Updated: 2026-08-15
 
@@ -38,7 +38,7 @@ signed control bundles and ACKs, audit ingestion, emergency revocation,
 threshold-owner recovery, resumable setup, v2 device-possession enrollment, and
 durable hosted-signer lifecycle/idempotency composition.
 
-The current integration slice closes three concrete gaps:
+The current integration slice closes five concrete gaps:
 
 1. bound native Swift tests in CI with process-group teardown and stable,
    secret-free timeout diagnostics;
@@ -47,6 +47,12 @@ The current integration slice closes three concrete gaps:
    credential-free HTTPS `/v1` endpoint, verify the possession receipt before
    installing control trust, and recover an ambiguous completion without
    replaying the enrollment POST.
+4. derive a deterministic candidate identity from the exact product PKG digest,
+   bind it into release manifest v4, and retain a root-owned, user-readable,
+   immutable public installation receipt after signed release verification;
+5. import the exact public setup preflight in Console and carry an issued
+   invitation over a short-lived, origin-pinned, nonce-bound IPv4 loopback
+   channel without browser persistence.
 
 This checkpoint is not a production release. Real managed-key evidence,
 physical-Mac qualification, signed/notarized distribution, deployed staging,
@@ -300,3 +306,149 @@ AgentPass v1 is complete only when all of the following are true:
 
 Local mocks, skipped tests, simulator runs, an unsigned package, or a green unit
 suite alone never satisfy these completion conditions.
+
+## 7. Detailed implementation queue
+
+This queue is ordered by production dependency, not by UI visibility. A package
+may start in parallel only after every contract named in its entry is frozen.
+
+### Q1 — finish the one-command onboarding seam
+
+State: next.
+
+Inputs already implemented:
+
+- release manifest v4 candidate identity derived from the exact PKG SHA-256;
+- root-owned public installed-release receipt and installed app Team ID/path
+  reinspection;
+- `setup prepare --json` with an exact four-field public DTO;
+- Console guided preflight import and a one-consume loopback transport
+  primitive.
+
+Remaining implementation:
+
+1. Add a CLI browser-connect mode to `setup continue` that creates the loopback
+   listener, opens an allow-listed HTTPS Console origin with only the opaque
+   loopback URL in the fragment, and waits under a fixed deadline.
+2. Feed the received invitation directly from memory into the existing
+   enrollment state handler. Never print it, persist it, put it in argv or an
+   environment variable, or copy it through a temporary file.
+3. Bind the configured Cloud API `/v1` origin independently from the Console
+   origin; neither origin may be inferred from the other.
+4. Add browser Private Network Access preflight handling only for the exact
+   approved HTTPS origin, with no wildcard CORS and no reflection of rejected
+   origins.
+5. Resume after browser closure, listener expiry, Cloud timeout, lost enrollment
+   response, native restart, and CLI interruption without reusing an invitation
+   or repeating a definitive enrollment POST.
+6. Finish `setup status` and `doctor` remediation for missing/invalid receipt,
+   wrong Team ID, unsupported candidate, expired handoff, unavailable native
+   key, stale control, and editor drift.
+
+Required evidence:
+
+- unit attacks for fragment/query/Origin/Host/nonce/candidate/fingerprint and
+  ACK substitution, duplicate JSON keys, request smuggling bounds, concurrent
+  consume, replay, expiry, abort, and listener teardown;
+- Playwright coverage from launch fragment removal through WebAuthn issuance,
+  successful POST/ACK, and manual stdin fallback after local delivery failure;
+- a clean physical-Mac run where no candidate ID, fingerprint, endpoint, or
+  invitation JSON is manually entered.
+
+Exit condition: one command opens Console and returns to a verified, resumable
+native setup state with no reusable authority in process listings, shell
+history, browser history/storage, logs, crash reports, or durable setup state.
+
+### Q2 — production data and signing authority
+
+State: ready to start in parallel after Q1 API contracts freeze.
+
+Work breakdown:
+
+1. PostgreSQL: run every forward-only migration in staging; enforce
+   organization-qualified primary/foreign keys, transaction isolation,
+   idempotency uniqueness, row-count bounds, statement deadlines, TLS, backup,
+   restore, and least-privilege runtime roles.
+2. Managed keys: allocate separate provider keys for control, capability, Human
+   assertion, enrollment receipt, audit checkpoint, and release/evidence
+   signing. Pin provider, region, key resource, algorithm, and version.
+3. Provider adapters: make AWS KMS/Cloud KMS-class adapters implement one closed
+   interface, reject local/file fallback in hosted mode, and expose only public
+   key metadata through readiness.
+4. Durable signer operations: reserve idempotency in PostgreSQL before provider
+   calls, reconcile timeout/response-loss outcomes, and prohibit blind
+   re-signing when provider outcome is ambiguous.
+5. Rotation and revocation: support overlap windows, stale-version rejection,
+   emergency disablement, process drain, and independently verifiable audit
+   records.
+
+Exit condition: two Cloud instances under contention produce one committed
+result per idempotency key, and every production signing purpose is backed by a
+managed non-exportable key with no fallback path in image or configuration.
+
+### Q3 — immutable macOS distribution
+
+State: pipeline scaffolding exists; real credentials and physical runners are
+external gates.
+
+Work breakdown:
+
+1. Build one immutable universal PKG and verify all nested identities,
+   entitlements, ownership, permissions, launchd definitions, CLI, adapters,
+   receipt root, and protected-state exclusions.
+2. Sign Application and Installer artifacts with pinned Developer ID identities,
+   notarize, staple, verify Gatekeeper offline, and attach provenance to manifest
+   v4 without rebuilding the product.
+3. Publish direct-download SHA-256 and a Homebrew cask/bootstrap that installs
+   that exact PKG digest.
+4. Qualify clean install, upgrade, rollback, uninstall-preserve, reinstall, and
+   explicit purge on Apple silicon/Secure Enclave and Intel/T2 lanes.
+5. Sign lane evidence and aggregate only reports that bind the same source,
+   package digest, candidate ID, Team ID, notarization ticket, hardware, OS, and
+   teardown proof.
+
+Exit condition: both physical lanes accept one immutable candidate and the
+download, Homebrew, evidence, and installed receipt all resolve to its exact PKG
+digest.
+
+### Q4 — Claude Code and Cursor production E2E
+
+State: depends on Q1–Q3.
+
+Work breakdown:
+
+1. Finalize process-bound adapter launch and editor install/repair/remove
+   commands for Claude Code, then Cursor against the same frozen contract.
+2. Bind repository, worktree, branch, remote, operation, device, agent process,
+   policy sequence, budget, expiry, and request id into each signing decision.
+3. Make authorization consumption, Secure Enclave signing, audit durability,
+   and reply-loss recovery converge to one result.
+4. Exercise malicious sibling process, repository substitution, 100-request
+   contention, budget exhaustion, revocation during signing, daemon restart,
+   network loss, Cloud response loss, and audit fsync failure.
+
+Exit condition: each supported agent makes two unattended commits that pass
+`git verify-commit`, while revocation blocks the next operation within the
+documented bound and every failure remains auditable.
+
+### Q5 — staging, security review, and production promotion
+
+State: final gate.
+
+Work breakdown:
+
+1. Reproducibly deploy Console, API, workers, PostgreSQL, managed signers, TLS,
+   DNS, rate limits, fixed-cardinality telemetry, alerts, and immutable images.
+2. Rehearse canary, drain, rollback, forward-only migration, encrypted backup,
+   point-in-time restore, signer rotation, provider/database outage, emergency
+   stop, owner recovery, and dead-letter adjudication.
+3. Independently review local privilege boundaries, loopback handoff, WebAuthn,
+   tenant isolation, replay/idempotency, managed keys, package/update supply
+   chain, audit integrity, and recovery.
+4. Close all critical/high findings, retest security-relevant medium findings,
+   publish supported-version and disclosure policies, then promote the exact
+   staging candidate without rebuilding.
+
+Exit condition: production go/no-go evidence is complete, restore RPO/RTO is
+measured, rollback is rehearsed, and no unresolved critical/high security issue
+remains.

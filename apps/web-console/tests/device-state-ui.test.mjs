@@ -68,7 +68,8 @@ test("device state cards expose wake only for actionable non-synced states and u
   assert.match(source, /parseDeviceRefreshResponse\(payload, deviceId\)/);
   const requestRefreshSource = source.slice(source.indexOf("const requestDeviceRefresh"), source.indexOf("const currentLabel"));
   assert.doesNotMatch(requestRefreshSource, /refreshSummary\(\)|capabilit(?:y|ies)/i);
-  assert.doesNotMatch(source, /generation:|outbox:|nonce:|bundle:|policy:|secret:/);
+  const deviceStateSource = source.slice(source.indexOf("function deviceState"), source.indexOf("function SetupSurface"));
+  assert.doesNotMatch(deviceStateSource, /generation:|outbox:|nonce:|bundle:|policy:|secret:/);
 });
 
 test("state-specific styling preserves a text/status hook in the stylesheet", async () => {

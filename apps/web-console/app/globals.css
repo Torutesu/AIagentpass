@@ -1525,6 +1525,19 @@ a:focus-visible {
 .enrollment-steps li[data-state="recovery-proven"] { border-left-color: var(--line-strong, #b8c0ba); }
 .enrollment-steps strong { color: var(--ink, #172019); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
 .field-help { display: block; margin-top: .35rem; color: var(--ink-soft, #59645e); font-size: .82rem; }
+.guided-enrollment-steps { display: grid; gap: 1rem; margin-top: 1.25rem; }
+.guided-enrollment-step { display: grid; grid-template-columns: 2rem minmax(0, 1fr); gap: .85rem; padding: 1rem; border: 1px solid var(--line); border-radius: 10px; background: rgba(255, 255, 255, .48); }
+.guided-enrollment-step .setup-step-title { margin-top: 0; }
+.guided-enrollment-step label { display: grid; gap: 6px; margin: .8rem 0; color: var(--ink-soft); font-size: 11px; font-weight: 700; }
+.guided-enrollment-step input { width: 100%; box-sizing: border-box; border: 1px solid var(--line); border-radius: 6px; padding: 9px 10px; background: #fffef9; color: var(--ink); font: inherit; }
+.preflight-input { display: block; width: 100%; min-height: 7rem; margin: .75rem 0; resize: vertical; border: 1px solid var(--line-strong); border-radius: 8px; background: var(--paper); color: var(--ink); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .78rem; line-height: 1.5; }
+.preflight-preview { padding: .85rem 1rem; border: 1px solid #b9d3bf; border-radius: 10px; background: var(--forest-soft); }
+.handoff-notice { margin-bottom: 1rem; padding: .85rem 1rem; border: 1px solid var(--line-strong); border-radius: 10px; background: rgba(255, 255, 255, .62); color: var(--ink-soft); font-size: .88rem; line-height: 1.5; }
+.handoff-ready { border-color: #b9d3bf; background: var(--forest-soft); color: var(--ink); }
+.handoff-delivered { border-color: #b9d3bf; background: var(--forest-soft); color: var(--ink); }
+.handoff-failed { border-color: #d7a9a9; background: #fff5f3; color: #7d2525; }
+.advanced-enrollment { margin-top: 1rem; padding-top: .9rem; border-top: 1px solid var(--line); }
+.advanced-enrollment summary { color: var(--ink-soft); cursor: pointer; font-size: .78rem; font-weight: 800; }
 .secret-output { max-height: 18rem; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; padding: 1rem; border-radius: 8px; background: #132019; color: #e8fff0; font-size: .78rem; line-height: 1.55; }
 .command-hint { display: block; margin-top: .8rem; overflow-wrap: anywhere; color: #46534a; }
 .form-error { margin-top: .8rem; color: #a52222; font-weight: 650; }

@@ -131,11 +131,11 @@ test('each lane checks out only the trusted workflow commit, verifies the candid
   }
 });
 
-test('each lane binds the v3 external controller and exports only its architecture CDHash for later root provisioning', () => {
+test('each lane binds the v4 external controller and exports only its architecture CDHash for later root provisioning', () => {
   for (const [name, architecture] of [['apple-silicon-qualification', 'arm64'], ['intel-t2-qualification', 'x86_64']]) {
     const section = job(name);
     assert.match(section, new RegExp(`CONTROLLER_ARCHITECTURE: ${architecture}`));
-    assert.match(section, /schema_version !== 3/);
+    assert.match(section, /schema_version !== 4/);
     assert.match(section, /external_qualification_controller/);
     assert.match(section, /identity_document/);
     assert.match(section, /identity/);

@@ -33,9 +33,18 @@ test("main CI validates the machine-readable contract inventory before product t
 });
 
 test("native qualification is serialized at the top level", () => {
+  const section = job("test");
   assert.equal(
     packageManifest.scripts["test:native"],
     "node scripts/ci/run-native-tests.mjs -- swift test --package-path native/macos --no-parallel",
   );
-  assert.match(job("test"), /run: npm run test:native(?:\n|$)/u);
+  assert.match(section, /runs-on: macos-latest\n    timeout-minutes: 45/u);
+  for (const [name, minutes, command] of [
+    ["Run bounded native unit tests", 20, "npm run test:native"],
+    ["Run bounded native app bundle tests", 10, "npm run test:native-app"],
+    ["Run bounded installer preservation tests", 5, "npm run test:native-installer-preservation"],
+    ["Run bounded native durability model", 10, "npm run test:native-durability-model"],
+  ]) {
+    assert.match(section, new RegExp(`- name: ${name}\\n        timeout-minutes: ${minutes}\\n[\\s\\S]*?run: ${command}(?:\\n|$)`, "u"));
+  }
 });

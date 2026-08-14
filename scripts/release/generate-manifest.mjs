@@ -3,6 +3,7 @@ import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import fs from 'node:fs';
 import { basename, resolve } from 'node:path';
+import { deriveReleaseCandidateId, RELEASE_MANIFEST_SCHEMA_VERSION } from '../../lib/release-candidate-identity.mjs';
 import { parseCanonicalExternalQualificationControllerIdentity } from './n3e/controller-identity-contract.mjs';
 
 const [output, sumsOutput, ...remaining] = process.argv.slice(2);
@@ -104,6 +105,9 @@ const artifacts = inputs.map((input) => {
 
 const controllerArtifacts = artifacts.filter((item) => item.role === 'external_qualification_controller');
 if (controllerArtifacts.length !== 1) throw new Error('release manifest requires exactly one external qualification controller archive');
+const productArtifacts = artifacts.filter((item) => item.role === 'product');
+if (productArtifacts.length !== 1 || !productArtifacts[0].name.endsWith('.pkg')) throw new Error('release manifest requires exactly one product PKG artifact');
+const productArtifact = productArtifacts[0];
 
 const controllerIdentitySnapshot = snapshotFile(controllerIdentityInputs[0], { maximum: 1024 * 1024, capture: true });
 if (!safeName(controllerIdentitySnapshot.name) || seen.has(controllerIdentitySnapshot.name)) throw new Error('unsafe or duplicate controller identity basename');
@@ -186,11 +190,12 @@ const manifestName = basename(resolve(output));
 if (!safeName(manifestName) || seen.has(manifestName) || manifestName === checksumsName || resolve(output) === resolve(sumsOutput)) throw new Error('unsafe or colliding release manifest basename');
 
 const manifest = {
-  schema_version: 3,
+  schema_version: RELEASE_MANIFEST_SCHEMA_VERSION,
   product: 'AgentPass',
   version: pkg.version,
   source: { commit, tree, tag: sourceTag },
   generated_at: new Date().toISOString(),
+  candidate_id: deriveReleaseCandidateId(productArtifact.sha256),
   artifacts: publicArtifacts,
   external_qualification_controller: {
     identity_document: controllerIdentityDocument,

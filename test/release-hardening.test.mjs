@@ -5,6 +5,7 @@ import { chmodSync, linkSync, mkdirSync, mkdtempSync, readFileSync, statSync, sy
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import test from 'node:test';
+import { deriveReleaseCandidateId, parseReleaseCandidateId } from '../lib/release-candidate-identity.mjs';
 
 const root = resolve(import.meta.dirname, '..');
 const scriptPath = (script) => resolve(root, 'scripts/release', script);
@@ -63,7 +64,7 @@ const resignManifest = (release, mutate) => {
 
 const makeRelease = (prefix = 'agentpass-release-', options = {}) => {
   const dir = mkdtempSync(join(tmpdir(), prefix));
-  const artifact = join(dir, `AgentPass-v0.17.0-macos-universal.${options.packageArtifact ? 'pkg' : 'zip'}`);
+  const artifact = join(dir, 'AgentPass-v0.17.0-macos-universal.pkg');
   const controllerArchive = join(dir, CONTROLLER_ARCHIVE_NAME);
   const controllerIdentity = join(dir, 'AgentPassQualificationController.identity.json');
   const sbom = join(dir, 'AgentPass-v0.17.0.spdx.json');
@@ -125,7 +126,14 @@ test('SPDX SBOM binds Git source, Swift inputs, compiler metadata, and documentD
 test('signed manifest strictly binds artifacts, SHA256SUMS, SPDX SBOM, and source identity', () => {
   const release = makeRelease();
   const manifest = JSON.parse(readFileSync(release.manifest));
-  assert.equal(manifest.schema_version, 3);
+  assert.equal(manifest.schema_version, 4);
+  assert.equal(manifest.candidate_id, deriveReleaseCandidateId(crypto.createHash('sha256').update(readFileSync(release.artifact)).digest('hex')));
+  assert.deepEqual(parseReleaseCandidateId(manifest.candidate_id), {
+    candidate_id: manifest.candidate_id,
+    version: 1,
+    product: 'pkg',
+    sha256: manifest.candidate_id.slice('release-pkg-sha256-v1-'.length)
+  });
   assert.equal(manifest.artifacts.filter((item) => item.role === 'external_qualification_controller').length, 1);
   assert.equal(manifest.external_qualification_controller.identity_document.name, 'AgentPassQualificationController.identity.json');
   assert.equal(manifest.external_qualification_controller.notarization.status, 'accepted_stapled');
@@ -153,7 +161,45 @@ test('signed manifest recognizes the production installer as the product artifac
   assert.equal(JSON.parse(run('verify-release.mjs', [release.manifest, release.signature, release.publicKeyFile, release.fingerprint])).notarization, 'accepted_stapled');
 });
 
-test('manifest v3 rejects unknown and missing external controller fields under a valid signature', () => {
+test('release candidate identity is required and must match the exact product PKG digest', () => {
+  const missing = makeRelease('agentpass-candidate-missing-');
+  resignManifest(missing, (value) => { delete value.candidate_id; });
+  const missingFailure = spawn('verify-release.mjs', [missing.manifest, missing.signature, missing.publicKeyFile, missing.fingerprint]);
+  assert.notEqual(missingFailure.status, 0);
+  assert.match(missingFailure.stderr, /missing or unknown fields|candidate_id/iu);
+
+  const substituted = makeRelease('agentpass-candidate-substituted-');
+  resignManifest(substituted, (value) => { value.candidate_id = deriveReleaseCandidateId('f'.repeat(64)); });
+  const substitutedFailure = spawn('verify-release.mjs', [substituted.manifest, substituted.signature, substituted.publicKeyFile, substituted.fingerprint]);
+  assert.notEqual(substitutedFailure.status, 0);
+  assert.match(substitutedFailure.stderr, /candidate|PKG|SHA-256|match/iu);
+
+  const arbitrary = makeRelease('agentpass-candidate-arbitrary-');
+  resignManifest(arbitrary, (value) => { value.candidate_id = 'release-2026-08-13-01'; });
+  const arbitraryFailure = spawn('verify-release.mjs', [arbitrary.manifest, arbitrary.signature, arbitrary.publicKeyFile, arbitrary.fingerprint]);
+  assert.notEqual(arbitraryFailure.status, 0);
+  assert.match(arbitraryFailure.stderr, /candidate|identity/iu);
+});
+
+test('manifest generation requires one and only one product PKG', () => {
+  const release = makeRelease('agentpass-candidate-product-shape-');
+  const extraZip = join(release.dir, 'AgentPass-extra.zip');
+  writeFileSync(extraZip, 'alternate product archive');
+  const multipleProducts = spawn('generate-manifest.mjs', [
+    ...controllerManifestArgs(release, join(release.dir, 'multiple.manifest.json'), join(release.dir, 'multiple.SHA256SUMS')),
+    extraZip
+  ]);
+  assert.notEqual(multipleProducts.status, 0);
+  assert.match(multipleProducts.stderr, /exactly one product PKG/iu);
+
+  const zipOnly = join(release.dir, 'AgentPass-v0.17.0-macos-universal.zip');
+  writeFileSync(zipOnly, 'zip product only');
+  const noPkg = spawn('generate-manifest.mjs', controllerManifestArgs(release, join(release.dir, 'no-pkg.manifest.json'), join(release.dir, 'no-pkg.SHA256SUMS'), { product: zipOnly }));
+  assert.notEqual(noPkg.status, 0);
+  assert.match(noPkg.stderr, /exactly one product PKG/iu);
+});
+
+test('manifest v4 rejects unknown and missing external controller fields under a valid signature', () => {
   const unknown = makeRelease('agentpass-controller-schema-unknown-');
   resignManifest(unknown, (value) => { value.external_qualification_controller.untrusted = true; });
   const unknownSigner = spawn('sign-manifest.mjs', [unknown.manifest, unknown.privateKeyFile, join(unknown.dir, 'unknown-controller.sig')]);
@@ -271,10 +317,10 @@ test('SHA256SUMS and notarization evidence are signed-manifest-bound and fail cl
 test('release file inputs reject symlinks and hard links', () => {
   const release = makeRelease('agentpass-release-links-');
   const dir = release.dir;
-  const target = join(dir, 'target.zip'); const symlink = join(dir, 'symlink.zip'); const hardlink = join(dir, 'hardlink.zip');
+  const target = join(dir, 'target.pkg'); const symlink = join(dir, 'symlink.pkg'); const hardlink = join(dir, 'hardlink.pkg');
   writeFileSync(target, 'x'); symlinkSync(target, symlink); linkSync(target, hardlink);
   for (const candidate of [symlink, hardlink]) {
-    const failed = spawn('generate-manifest.mjs', controllerManifestArgs(release, join(dir, `${candidate.endsWith('symlink.zip') ? 's' : 'h'}.json`), join(dir, `${candidate.endsWith('symlink.zip') ? 's' : 'h'}.sums`), { product: candidate }));
+    const failed = spawn('generate-manifest.mjs', controllerManifestArgs(release, join(dir, `${candidate.endsWith('symlink.pkg') ? 's' : 'h'}.json`), join(dir, `${candidate.endsWith('symlink.pkg') ? 's' : 'h'}.sums`), { product: candidate }));
     assert.notEqual(failed.status, 0);
     assert.match(failed.stderr, /ELOOP|single-link|regular file/);
   }
@@ -322,7 +368,7 @@ test('private staging freezes every manifest-declared byte before verification',
   assert.equal(statSync(result.manifest).mode & 0o777, 0o400);
   assert.equal(result.declared_files, 7);
   for (const name of [
-    'AgentPass-v0.17.0-macos-universal.zip',
+    'AgentPass-v0.17.0-macos-universal.pkg',
     'AgentPassQualificationController-0.18.0-macos-universal.tar',
     'AgentPass-v0.17.0.spdx.json',
     'AgentPassQualificationController.identity.json',

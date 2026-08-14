@@ -18,6 +18,7 @@ import {
   parseCanonicalExternalQualificationControllerIdentity,
   validateExternalQualificationControllerIdentity
 } from './n3e/controller-identity-contract.mjs';
+import { assertReleaseCandidateIdMatchesProduct, RELEASE_MANIFEST_SCHEMA_VERSION } from '../../lib/release-candidate-identity.mjs';
 
 const MAX_MANIFEST_BYTES = 16 * 1024 * 1024;
 const MAX_ARTIFACT_BYTES = 16 * 1024 * 1024 * 1024;
@@ -328,8 +329,8 @@ const validateSBOM = (value, manifest, sbomBytes) => {
 const validateManifestAndBindings = ({ manifestSnapshot, signaturePath, publicKeyPath, fingerprint, artifactPath }) => {
   const manifest = parseCanonicalJSON(manifestSnapshot, 'release manifest');
   verifyDetachedSignature(manifestSnapshot.content, signaturePath, publicKeyPath, fingerprint, 'release manifest');
-  exactKeys(manifest, ['schema_version', 'product', 'version', 'source', 'generated_at', 'artifacts', 'external_qualification_controller', 'evidence'], 'release manifest');
-  if (manifest.schema_version !== 3 || manifest.product !== 'AgentPass' || !VERSION_STRING.test(manifest.version) || !CANONICAL_DATE(manifest.generated_at)) throw new Error('release manifest identity is invalid');
+  exactKeys(manifest, ['schema_version', 'product', 'version', 'source', 'generated_at', 'candidate_id', 'artifacts', 'external_qualification_controller', 'evidence'], 'release manifest');
+  if (manifest.schema_version !== RELEASE_MANIFEST_SCHEMA_VERSION || manifest.product !== 'AgentPass' || !VERSION_STRING.test(manifest.version) || !CANONICAL_DATE(manifest.generated_at)) throw new Error('release manifest identity is invalid');
   exactKeys(manifest.source, ['commit', 'tree', 'tag'], 'release manifest source');
   if (!COMMIT.test(manifest.source.commit) || manifest.source.commit === ZERO_40 || !COMMIT.test(manifest.source.tree) || manifest.source.tree === ZERO_40
     || (manifest.source.tag !== null && manifest.source.tag !== `v${manifest.version}`)) throw new Error('release manifest source identity is invalid');
@@ -356,6 +357,7 @@ const validateManifestAndBindings = ({ manifestSnapshot, signaturePath, publicKe
   const expectedProductName = `AgentPass-v${manifest.version}-macos-universal.pkg`;
   if (products.length !== 1 || products[0].name !== expectedProductName || products[0].media_type !== 'application/vnd.apple.installer+xml') throw new Error('release manifest must contain exactly one canonical macOS product artifact');
   const product = products[0];
+  assertReleaseCandidateIdMatchesProduct(manifest.candidate_id, product.sha256);
   const artifact = readStableFile(artifactPath, { maximum: MAX_ARTIFACT_BYTES, label: 'product artifact', capture: false });
   if (artifact.name !== product.name || artifact.bytes !== product.bytes || artifact.sha256 !== product.sha256) throw new Error('product artifact does not match the signed release manifest');
   const attestationArtifact = artifacts.filter((item) => item.name === 'release-attestation.json' && item.role === 'auxiliary' && item.media_type === 'application/json');

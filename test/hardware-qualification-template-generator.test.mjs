@@ -20,6 +20,7 @@ import {
   designatedRequirementForTeam,
   canonicalJSON as canonicalControllerIdentityJSON
 } from '../scripts/release/n3e/controller-identity-contract.mjs';
+import { deriveReleaseCandidateId } from '../lib/release-candidate-identity.mjs';
 
 const ROOT = new URL('..', import.meta.url).pathname.replace(/\/$/u, '');
 const GENERATOR = join(ROOT, 'scripts/release/generate-hardware-qualification-template.mjs');
@@ -147,11 +148,12 @@ const makeFixture = () => {
   const checksumsBytes = Buffer.from(`${checksumEntries.map((item) => `${item.sha256}  ${item.name}`).join('\n')}\n`, 'utf8');
   fs.writeFileSync(join(releaseDirectory, 'SHA256SUMS'), checksumsBytes, { mode: 0o644 });
   const manifest = {
-    schema_version: 3,
+    schema_version: 4,
     product: 'AgentPass',
     version: '0.18.0',
     source: { commit: sourceCommit, tree: sourceTree, tag: 'v0.18.0' },
     generated_at: '2026-08-13T00:00:00.000Z',
+    candidate_id: deriveReleaseCandidateId(digest(productBytes)),
     artifacts,
     external_qualification_controller: {
       identity_document: identityDocument,
@@ -253,7 +255,7 @@ const rewriteIdentityBinding = (fixture, identity, { canonicalBytes = canonicalC
   writeSignature(fixture.signaturePath, manifestBytes, fixture.releaseKeys.privateKey);
 };
 
-test('creates a canonical, unqualified v2 template bound to the signed v3 release', () => {
+test('creates a canonical, unqualified v2 template bound to the signed v4 release', () => {
   const fixture = makeFixture();
   const output = join(fixture.directory, 'hardware-qualification-template.json');
   const template = generateHardwareQualificationTemplate(generateArgs(fixture, output));
@@ -272,7 +274,7 @@ test('creates a canonical, unqualified v2 template bound to the signed v3 releas
   assert.equal(template.operator, fixture.operator);
   assert.equal(template.operator_key_fingerprint, fixture.operatorFingerprint);
   assert.equal(Object.keys(template).some((key) => key.includes('controller')), false);
-  assert.equal(fixture.manifest.schema_version, 3);
+  assert.equal(fixture.manifest.schema_version, 4);
   assert.equal(fixture.manifest.artifacts.filter((item) => item.role === 'external_qualification_controller').length, 1);
   assert.equal(fixture.manifest.artifacts.filter((item) => item.role === 'product').length, 1);
   assert.equal(fixture.manifest.external_qualification_controller.identity_document.bytes, fixture.identityBytes.length);
@@ -311,7 +313,7 @@ test('accepts only canonical, sorted external browser pins and rejects unknown f
   assert.throws(() => readPinnedBrowserVersions(unsorted), /unsorted/u);
 });
 
-test('attacks v3 controller bindings and release-manifest boundaries', () => {
+test('attacks v4 controller bindings and release-manifest boundaries', () => {
   const missingController = makeFixture();
   rewriteSignedManifest(missingController, (manifest) => { delete manifest.external_qualification_controller; });
   assert.throws(() => generateHardwareQualificationTemplate(generateArgs(missingController, join(missingController.directory, 'missing.json'))), /release manifest has missing or unknown fields/u);

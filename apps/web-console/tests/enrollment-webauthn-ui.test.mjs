@@ -16,7 +16,7 @@ test("enrollment UI uses a session-bound WebAuthn ceremony instead of manual pro
   assert.match(source, /authenticateRecentAuth\(\{[\s\S]*?operation: RECENT_AUTH_OPERATION[\s\S]*?organizationId[\s\S]*?csrfToken/);
   assert.match(source, /"agentpass-recent-auth": authorization_id/);
   assert.match(source, /enrollmentInFlight\.current/);
-  assert.match(source, /Touch ID\/パスキー確認/);
+  assert.match(source, /Touch ID\/パスキー確認して発行/);
   assert.match(source, /registerPasskey\(\{ organizationId, csrfToken \}\)/);
   assert.match(source, /Touch ID \/ パスキーを登録/);
 
@@ -25,6 +25,22 @@ test("enrollment UI uses a session-bound WebAuthn ceremony instead of manual pro
   assert.doesNotMatch(source, /直近のWebAuthn証明/);
   assert.doesNotMatch(source, /本番のWebAuthnダイアログ接続までは/);
   assert.doesNotMatch(source, /autoComplete="off" value=\{recentAuth\}/);
+});
+
+test("guided enrollment imports one strict public preflight and keeps the advanced fallback explicit", async () => {
+  const source = await readFile(componentPath, "utf8");
+
+  assert.match(source, /parsePublicEnrollmentPreflight\(preflightText\)/);
+  assert.match(source, /version: 1,[\s\S]*platform: "macos"/);
+  assert.match(source, /publicEnrollmentPreflight as publicBrowserCliEnrollmentPreflight/);
+  assert.match(source, /liveHandoffRef/);
+  assert.match(source, /PUBLIC ONLY/);
+  assert.match(source, /上級者向け：preflight JSONを使えない場合の手入力/);
+  assert.match(source, /candidate_binding\.candidate_id !== expectedPreflight\.candidate_id/);
+  assert.match(source, /candidate_binding\.device_key_fingerprint !== expectedPreflight\.device_key_fingerprint/);
+  assert.doesNotMatch(source, /localStorage|sessionStorage|window\.location\.search|console\.(?:log|info|warn|error)/);
+  assert.match(source, /enrollmentStores|allocateEnrollmentStoreId/);
+  assert.doesNotMatch(source, /useState<Record<string, unknown> \| null>/);
 });
 
 test("enrollment ceremony material is not placed in React state or browser storage", async () => {

@@ -238,7 +238,7 @@ jobs:
           const packageName = exactly(candidateNames, (name) => name.endsWith('-macos-universal.pkg'), 'universal package');
           const migrationName = exactly(candidateNames, (name) => name.endsWith('.database-migration-manifest.json'), 'migration manifest');
           const manifest = JSON.parse(fs.readFileSync(path.join(candidate, manifestName), 'utf8'));
-          if (manifest.schema_version !== 3) throw new Error('candidate release manifest must be v3');
+          if (manifest.schema_version !== 4) throw new Error('candidate release manifest must be v4');
           const controller = manifest.external_qualification_controller;
           if (!controller || JSON.stringify(Object.keys(controller).sort()) !== JSON.stringify(['identity', 'identity_document', 'notarization'])) throw new Error('candidate external controller binding is not exact');
           const identityDocument = controller.identity_document;
@@ -259,6 +259,7 @@ jobs:
           if (candidateNames.length !== fixed.size || candidateNames.some((name) => !fixed.has(name))) throw new Error('candidate artifact contains unexpected or missing files');
           const product = manifest.artifacts?.filter((item) => item.role === 'product');
           if (product?.length !== 1 || product[0].name !== packageName || product[0].name === controllerArchive.name) throw new Error('candidate product is not manifest-bound');
+          if (!/^[0-9a-f]{64}$/.test(product[0].sha256) || manifest.candidate_id !== `release-pkg-sha256-v1-${product[0].sha256}`) throw new Error('candidate_id is not bound to the product PKG digest');
 
           const lane = (directory, label) => {
             const root = path.resolve(directory);
@@ -322,7 +323,7 @@ jobs:
           import path from 'node:path';
           const [manifestPath, packagePath, fingerprint] = process.argv.slice(2);
           const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
-          if (manifest.schema_version !== 3) throw new Error('release manifest must be v3');
+          if (manifest.schema_version !== 4) throw new Error('release manifest must be v4');
           const controller = manifest.external_qualification_controller;
           if (!controller || JSON.stringify(Object.keys(controller).sort()) !== JSON.stringify(['identity', 'identity_document', 'notarization'])) throw new Error('release manifest external controller binding is not exact');
           const controllerArtifacts = manifest.artifacts.filter((item) => item.role === 'external_qualification_controller');
@@ -334,6 +335,7 @@ jobs:
           const product = manifest.artifacts.find((item) => item.role === 'product');
           const bytes = fs.readFileSync(packagePath);
           if (!product || product.name !== path.basename(packagePath) || product.bytes !== bytes.length || product.sha256 !== crypto.createHash('sha256').update(bytes).digest('hex')) throw new Error('product package is not exactly manifest-bound');
+          if (manifest.candidate_id !== `release-pkg-sha256-v1-${product.sha256}`) throw new Error('candidate_id is not bound to the product PKG digest');
           fs.appendFileSync(process.env.GITHUB_OUTPUT, `release_tag=${manifest.source.tag}\nsource_commit=${manifest.source.commit}\nsource_tree=${manifest.source.tree}\n`);
           NODE
 

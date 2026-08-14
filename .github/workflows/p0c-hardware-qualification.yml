@@ -162,7 +162,7 @@ jobs:
           const artifact = exactlyOne((name) => name.endsWith('-macos-universal.pkg'), 'universal PKG');
           const migration = exactlyOne((name) => name.endsWith('.database-migration-manifest.json'), 'database migration manifest');
           const manifestValue = JSON.parse(fs.readFileSync(manifest, 'utf8'));
-          if (manifestValue.schema_version !== 3) throw new Error('candidate release manifest must be v3');
+          if (manifestValue.schema_version !== 4) throw new Error('candidate release manifest must be v4');
           const controller = manifestValue.external_qualification_controller;
           if (!controller || JSON.stringify(Object.keys(controller).sort()) !== JSON.stringify(['identity', 'identity_document', 'notarization'])) throw new Error('candidate external controller binding is not exact');
           const identityDocument = controller.identity_document;
@@ -193,6 +193,7 @@ jobs:
           if (manifestValue.artifacts?.every((item) => item.name !== 'release-attestation.json')) throw new Error('signed candidate must include release-attestation.json');
           const artifactHash = crypto.createHash('sha256').update(fs.readFileSync(artifact)).digest('hex');
           if (product[0].sha256 !== artifactHash) throw new Error('candidate product hash does not match its signed manifest');
+          if (manifestValue.candidate_id !== `release-pkg-sha256-v1-${product[0].sha256}`) throw new Error('candidate_id is not bound to the product PKG digest');
           const output = process.env.GITHUB_OUTPUT;
           for (const [key, value] of Object.entries({ manifest, signature, public_key: path.join(dir, 'release-manifest.public.pem'), artifact, qualification_client: '/Applications/AgentPass.app/Contents/Library/HelperTools/agentpass-qualification-grant-client', sbom, attestation: path.join(dir, 'release-attestation.json'), controller_archive: path.join(dir, controllerArchive.name), controller_identity: path.join(dir, identityDocument.name) })) fs.appendFileSync(output, `${key}=${value}\n`);
           NODE
@@ -534,7 +535,7 @@ jobs:
           const artifact = exactlyOne((name) => name.endsWith('-macos-universal.pkg'), 'universal PKG');
           const migration = exactlyOne((name) => name.endsWith('.database-migration-manifest.json'), 'database migration manifest');
           const manifestValue = JSON.parse(fs.readFileSync(manifest, 'utf8'));
-          if (manifestValue.schema_version !== 3) throw new Error('candidate release manifest must be v3');
+          if (manifestValue.schema_version !== 4) throw new Error('candidate release manifest must be v4');
           const controller = manifestValue.external_qualification_controller;
           if (!controller || JSON.stringify(Object.keys(controller).sort()) !== JSON.stringify(['identity', 'identity_document', 'notarization'])) throw new Error('candidate external controller binding is not exact');
           const identityDocument = controller.identity_document;
@@ -564,6 +565,7 @@ jobs:
           if (product?.length !== 1 || product[0].name !== path.basename(artifact) || product[0].name === controllerArchive.name) throw new Error('candidate product does not match its signed manifest');
           if (manifestValue.artifacts?.every((item) => item.name !== 'release-attestation.json')) throw new Error('signed candidate must include release-attestation.json');
           if (product[0].sha256 !== crypto.createHash('sha256').update(fs.readFileSync(artifact)).digest('hex')) throw new Error('candidate product hash does not match its signed manifest');
+          if (manifestValue.candidate_id !== `release-pkg-sha256-v1-${product[0].sha256}`) throw new Error('candidate_id is not bound to the product PKG digest');
           const output = process.env.GITHUB_OUTPUT;
           for (const [key, value] of Object.entries({ manifest, signature, public_key: path.join(dir, 'release-manifest.public.pem'), artifact, qualification_client: '/Applications/AgentPass.app/Contents/Library/HelperTools/agentpass-qualification-grant-client', sbom, attestation: path.join(dir, 'release-attestation.json'), controller_archive: path.join(dir, controllerArchive.name), controller_identity: path.join(dir, identityDocument.name) })) fs.appendFileSync(output, `${key}=${value}\n`);
           NODE
@@ -881,7 +883,7 @@ jobs:
           const one = (test, label) => { const found = names.filter((item) => test(item.name)); if (found.length !== 1) throw new Error(`aggregate candidate requires exactly one ${label}`); return path.join(dir, found[0].name); };
           const manifest = one((name) => name.endsWith('.release-manifest.json'), 'release manifest'); const signature = one((name) => name.endsWith('.release-manifest.sig'), 'release signature'); const pkg = one((name) => name.endsWith('-macos-universal.pkg'), 'universal PKG');
           const manifestValue = JSON.parse(fs.readFileSync(manifest, 'utf8'));
-          if (manifestValue.schema_version !== 3) throw new Error('aggregate candidate release manifest must be v3');
+          if (manifestValue.schema_version !== 4) throw new Error('aggregate candidate release manifest must be v4');
           const external = manifestValue.external_qualification_controller;
           if (!external || JSON.stringify(Object.keys(external).sort()) !== JSON.stringify(['identity', 'identity_document', 'notarization'])) throw new Error('aggregate candidate external controller binding is not exact');
           const identityDocument = external.identity_document;
@@ -899,6 +901,9 @@ jobs:
           const controllerEvidence = external.notarization?.evidence;
           if (!Array.isArray(controllerEvidence) || controllerEvidence.length !== 2 || controllerEvidence.some((item) => !fs.existsSync(path.join(dir, item.name)))) throw new Error('aggregate controller notarization evidence is incomplete');
           for (const item of controllerEvidence) { const bytes = fs.readFileSync(path.join(dir, item.name)); if (bytes.length !== item.bytes || crypto.createHash('sha256').update(bytes).digest('hex') !== item.sha256) throw new Error('aggregate controller notarization evidence digest mismatch'); }
+          const product = manifestValue.artifacts?.filter((item) => item.role === 'product');
+          const productBytes = fs.readFileSync(pkg);
+          if (product?.length !== 1 || product[0].name !== path.basename(pkg) || product[0].bytes !== productBytes.length || product[0].sha256 !== crypto.createHash('sha256').update(productBytes).digest('hex') || manifestValue.candidate_id !== `release-pkg-sha256-v1-${product[0].sha256}`) throw new Error('aggregate candidate_id is not bound to the product PKG digest');
           const expected = new Set([path.basename(manifest), path.basename(signature), path.basename(pkg), 'release-manifest.public.pem', 'SHA256SUMS', 'notarytool-result.json', 'stapler-result.txt', 'release-attestation.json', identityDocument.name, controllerArchive.name, ...controllerEvidence.map((item) => item.name), ...names.filter((item) => item.name.endsWith('.spdx.json') || item.name.endsWith('.database-migration-manifest.json')).map((item) => item.name)]);
           if (names.length !== expected.size || names.some((item) => !expected.has(item.name))) throw new Error('aggregate candidate contains unexpected or missing files');
           const output = process.env.GITHUB_OUTPUT; for (const [key, value] of Object.entries({ manifest, signature, public_key: path.join(dir, 'release-manifest.public.pem'), artifact: pkg })) fs.appendFileSync(output, `${key}=${value}\n`);

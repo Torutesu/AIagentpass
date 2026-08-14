@@ -7,6 +7,7 @@ import {
   canonicalExternalQualificationControllerIdentity,
   parseCanonicalExternalQualificationControllerIdentity
 } from './n3e/controller-identity-contract.mjs';
+import { assertReleaseCandidateIdMatchesProduct, RELEASE_MANIFEST_SCHEMA_VERSION } from '../../lib/release-candidate-identity.mjs';
 
 const args = process.argv.slice(2);
 const [input, artifactInput, manifestInput, manifestSignatureInput, manifestPublicKeyInput,
@@ -167,9 +168,8 @@ const validateManifest = (manifestSnapshot, manifestSignaturePath, manifestPubli
   if (!manifestBytes.equals(canonicalJSON(readJSON(manifestSnapshot, 'release manifest')))) throw new Error('release manifest is not canonical JSON');
   const signed = verifyDetached(manifestBytes, manifestSignaturePath, manifestPublicKeyPath, expectedFingerprint, 'release manifest');
   const manifest = readJSON(manifestSnapshot, 'release manifest');
-  if (![2, 3].includes(manifest.schema_version) || manifest.product !== 'AgentPass') throw new Error('unsupported release manifest identity');
-  const isV3 = manifest.schema_version === 3;
-  exactKeys(manifest, ['schema_version', 'product', 'version', 'source', 'generated_at', 'artifacts', ...(isV3 ? ['external_qualification_controller'] : []), 'evidence'], 'release manifest');
+  if (manifest.schema_version !== RELEASE_MANIFEST_SCHEMA_VERSION || manifest.product !== 'AgentPass') throw new Error('unsupported release manifest identity');
+  exactKeys(manifest, ['schema_version', 'product', 'version', 'source', 'generated_at', 'candidate_id', 'artifacts', 'external_qualification_controller', 'evidence'], 'release manifest');
   if (typeof manifest.version !== 'string' || !/^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/.test(manifest.version) || !canonicalDate(manifest.generated_at)) throw new Error('invalid release metadata');
   exactKeys(manifest.source, ['commit', 'tree', 'tag'], 'release manifest source');
   if (!/^[0-9a-f]{40}$/.test(manifest.source.commit) || !/^[0-9a-f]{40}$/.test(manifest.source.tree)) throw new Error('release manifest source identity is invalid');
@@ -184,15 +184,16 @@ const validateManifest = (manifestSnapshot, manifestSignaturePath, manifestPubli
   for (const artifact of manifest.artifacts) {
     exactKeys(artifact, ['name', 'role', 'media_type', 'bytes', 'sha256'], 'release artifact');
     const isControllerArchive = CONTROLLER_ARCHIVE_NAME_PATTERN.test(artifact.name);
-    if (!safeName(artifact.name) || names.has(artifact.name) || lexicalCompare(artifact.name, previousName) <= 0 || !roles.has(artifact.role) || !mediaTypes.has(artifact.media_type) || !Number.isSafeInteger(artifact.bytes) || artifact.bytes <= 0 || !validDigest(artifact.sha256) || ((artifact.role === 'sbom') !== (artifact.media_type === 'application/spdx+json')) || (isControllerArchive !== (artifact.role === 'external_qualification_controller')) || (artifact.role === 'external_qualification_controller' && artifact.media_type !== 'application/octet-stream') || (!isV3 && artifact.role === 'external_qualification_controller')) throw new Error('release manifest artifact metadata is invalid');
+    if (!safeName(artifact.name) || names.has(artifact.name) || lexicalCompare(artifact.name, previousName) <= 0 || !roles.has(artifact.role) || !mediaTypes.has(artifact.media_type) || !Number.isSafeInteger(artifact.bytes) || artifact.bytes <= 0 || !validDigest(artifact.sha256) || ((artifact.role === 'sbom') !== (artifact.media_type === 'application/spdx+json')) || (isControllerArchive !== (artifact.role === 'external_qualification_controller')) || (artifact.role === 'external_qualification_controller' && artifact.media_type !== 'application/octet-stream')) throw new Error('release manifest artifact metadata is invalid');
     snapshotFile(resolve(manifestDirectory, artifact.name), { maximum: 16 * 1024 * 1024 * 1024, expectedBytes: artifact.bytes, expectedSHA256: artifact.sha256, label: 'release artifact' });
     names.add(artifact.name); previousName = artifact.name; artifacts.push(artifact);
   }
   const products = artifacts.filter((item) => item.role === 'product');
   if (products.length !== 1 || products[0].name !== `AgentPass-v${manifest.version}-macos-universal.pkg` || products[0].media_type !== 'application/vnd.apple.installer+xml') throw new Error('release manifest must contain exactly one canonical macOS product artifact');
+  assertReleaseCandidateIdMatchesProduct(manifest.candidate_id, products[0].sha256);
   const controllerArtifacts = artifacts.filter((item) => item.role === 'external_qualification_controller');
-  if (isV3 !== (controllerArtifacts.length === 1)) throw new Error('release manifest must contain exactly one external qualification controller archive for schema v3');
-  if (isV3 && controllerArtifacts[0].name !== `AgentPassQualificationController-${manifest.version}-macos-universal.tar`) throw new Error('external qualification controller archive version does not match the release');
+  if (controllerArtifacts.length !== 1) throw new Error('release manifest must contain exactly one external qualification controller archive for schema v4');
+  if (controllerArtifacts[0].name !== `AgentPassQualificationController-${manifest.version}-macos-universal.tar`) throw new Error('external qualification controller archive version does not match the release');
   exactKeys(manifest.evidence, ['checksums', 'sbom', 'notarization'], 'release manifest evidence');
   const notarization = manifest.evidence.notarization;
   exactKeys(notarization, ['status', 'submission_ids', 'evidence'], 'release notarization');
@@ -225,7 +226,7 @@ const validateManifest = (manifestSnapshot, manifestSignaturePath, manifestPubli
   let controllerIdentity;
   let controllerNotarization;
   const controllerNotarizationEvidence = [];
-  if (isV3) {
+  {
     exactKeys(manifest.external_qualification_controller, ['identity_document', 'identity', 'notarization'], 'external qualification controller');
     const identityDocument = manifest.external_qualification_controller.identity_document;
     exactKeys(identityDocument, ['name', 'bytes', 'sha256'], 'external qualification controller identity document');
@@ -266,7 +267,7 @@ const validateManifest = (manifestSnapshot, manifestSignaturePath, manifestPubli
   }
   const checksums = manifest.evidence.checksums;
   exactKeys(checksums, ['name', 'bytes', 'sha256', 'entry_count'], 'release checksums evidence');
-  const extraChecksumEntries = isV3 ? [controllerIdentityDocument, ...controllerNotarizationEvidence] : [];
+  const extraChecksumEntries = [controllerIdentityDocument, ...controllerNotarizationEvidence];
   if (!safeName(checksums.name) || names.has(checksums.name) || !Number.isSafeInteger(checksums.bytes) || checksums.bytes <= 0 || !validDigest(checksums.sha256) || checksums.entry_count !== artifacts.length + evidence.length + extraChecksumEntries.length) throw new Error('release checksums evidence metadata is invalid');
   const checksumEntries = [...artifacts, ...evidence, ...extraChecksumEntries].sort((left, right) => lexicalCompare(left.name, right.name));
   const expectedChecksums = Buffer.from(`${checksumEntries.map((item) => `${item.sha256}  ${item.name}`).join('\n')}\n`, 'utf8');

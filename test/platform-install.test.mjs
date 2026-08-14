@@ -3,7 +3,13 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
+import crypto from "node:crypto";
+import { deriveReleaseCandidateId } from "../lib/release-candidate-identity.mjs";
 import { executeProductionInstall, prepareProductionInstall, removeStagedProductionInstall, stageProductionInstall, verifyProductionInstall } from "../lib/platform-install.mjs";
+import { readInstalledReleaseReceipt } from "../lib/installed-release-receipt.mjs";
+
+const owner = process.getuid?.();
+const signerFingerprint = `SHA256:${"d".repeat(43)}`;
 
 function fixture() {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "agentpass-install-"));
@@ -11,10 +17,18 @@ function fixture() {
   const signature = path.join(directory, "release.sig");
   const publicKey = path.join(directory, "release.pem");
   const pkg = path.join(directory, "AgentPass-0.18.0-macos-universal.pkg");
-  fs.writeFileSync(manifest, JSON.stringify({ artifacts: [{ role: "product", media_type: "application/vnd.apple.installer+xml", name: path.basename(pkg) }] }));
+  fs.writeFileSync(pkg, "package");
+  const artifactSha256 = crypto.createHash("sha256").update(fs.readFileSync(pkg)).digest("hex");
+  fs.writeFileSync(manifest, JSON.stringify({
+    schema_version: 4,
+    candidate_id: deriveReleaseCandidateId(artifactSha256),
+    source: { commit: "c".repeat(40) },
+    artifacts: [{ role: "product", media_type: "application/vnd.apple.installer+xml", name: path.basename(pkg), sha256: artifactSha256 }],
+    evidence: { notarization: { evidence: [] }, checksums: { name: "SHA256SUMS" } },
+    external_qualification_controller: { identity_document: { name: "controller-identity.json" }, notarization: { evidence: [] } }
+  }));
   fs.writeFileSync(signature, "signature");
   fs.writeFileSync(publicKey, "public key");
-  fs.writeFileSync(pkg, "package");
   const verifier = path.join(directory, "verify.sh");
   fs.writeFileSync(verifier, "#!/bin/sh\nexit 0\n", { mode: 0o700 });
   return { directory, manifest, signature, publicKey, pkg, verifier };
@@ -27,12 +41,13 @@ test("production install plan requires pinned identities and a verified package"
       manifest: value.manifest,
       signature: value.signature,
       publicKey: value.publicKey,
-      fingerprint: "SHA256:abcdefghijklmnopqrstuvwx",
+      fingerprint: signerFingerprint,
       teamId: "ABCDE12345"
     }, { platform: "darwin" });
     const plan = verifyProductionInstall(inputs, value.verifier);
     assert.equal(plan.package, value.pkg);
     assert.equal(plan.verified, true);
+    assert.deepEqual(Object.keys(plan.releaseReceipt).sort(), ["artifact_sha256", "candidate_id", "kind", "manifest_sha256", "release_signer_fingerprint", "source_commit", "team_id", "version"]);
     assert.equal(plan.preservesProtectedState, true);
     assert.throws(() => executeProductionInstall(plan, { uid: 501 }), /requires root/);
   } finally { fs.rmSync(value.directory, { recursive: true, force: true }); }
@@ -41,7 +56,7 @@ test("production install plan requires pinned identities and a verified package"
 test("production install rejects other platforms, unsafe files, and artifact paths", () => {
   const value = fixture();
   try {
-    const options = { manifest: value.manifest, signature: value.signature, publicKey: value.publicKey, fingerprint: "SHA256:abcdefghijklmnopqrstuvwx", teamId: "ABCDE12345" };
+    const options = { manifest: value.manifest, signature: value.signature, publicKey: value.publicKey, fingerprint: signerFingerprint, teamId: "ABCDE12345" };
     assert.throws(() => prepareProductionInstall(options, { platform: "linux" }), /only on macOS/);
     assert.throws(() => prepareProductionInstall({ ...options, teamId: "bad" }, { platform: "darwin" }), /Team ID/);
     const link = path.join(value.directory, "manifest-link.json");
@@ -58,7 +73,7 @@ test("production install refuses failed verification and unverified execution", 
   const value = fixture();
   try {
     fs.writeFileSync(value.verifier, "#!/bin/sh\necho rejected >&2\nexit 1\n", { mode: 0o700 });
-    const inputs = prepareProductionInstall({ manifest: value.manifest, signature: value.signature, publicKey: value.publicKey, fingerprint: "SHA256:abcdefghijklmnopqrstuvwx", teamId: "ABCDE12345" }, { platform: "darwin" });
+    const inputs = prepareProductionInstall({ manifest: value.manifest, signature: value.signature, publicKey: value.publicKey, fingerprint: signerFingerprint, teamId: "ABCDE12345" }, { platform: "darwin" });
     assert.throws(() => verifyProductionInstall(inputs, value.verifier), /rejected/);
     assert.throws(() => executeProductionInstall({ verified: false }, { uid: 0 }), /unverified/);
   } finally { fs.rmSync(value.directory, { recursive: true, force: true }); }
@@ -78,10 +93,13 @@ test("release staging snapshots inputs and only removes its private directory", 
     fs.writeFileSync(controller, "controller archive");
     fs.writeFileSync(controllerIdentity, "controller identity");
     fs.writeFileSync(controllerEvidence, "controller notarization evidence");
+    const artifactSha256 = crypto.createHash("sha256").update(fs.readFileSync(value.pkg)).digest("hex");
     fs.writeFileSync(value.manifest, JSON.stringify({
-      schema_version: 3,
+      schema_version: 4,
+      candidate_id: deriveReleaseCandidateId(artifactSha256),
+      source: { commit: "c".repeat(40) },
       artifacts: [
-        { role: "product", media_type: "application/vnd.apple.installer+xml", name: path.basename(value.pkg) },
+        { role: "product", media_type: "application/vnd.apple.installer+xml", name: path.basename(value.pkg), sha256: artifactSha256 },
         { role: "external_qualification_controller", media_type: "application/x-tar", name: path.basename(controller) }
       ],
       evidence: { checksums: { name: path.basename(checksum) }, notarization: { evidence: [{ name: path.basename(evidence) }] } },
@@ -90,7 +108,7 @@ test("release staging snapshots inputs and only removes its private directory", 
         notarization: { evidence: [{ name: path.basename(controllerEvidence) }] }
       }
     }));
-    const inputs = prepareProductionInstall({ manifest: value.manifest, signature: value.signature, publicKey: value.publicKey, fingerprint: "SHA256:abcdefghijklmnopqrstuvwx", teamId: "ABCDE12345" }, { platform: "darwin" });
+    const inputs = prepareProductionInstall({ manifest: value.manifest, signature: value.signature, publicKey: value.publicKey, fingerprint: signerFingerprint, teamId: "ABCDE12345" }, { platform: "darwin" });
     const staged = stageProductionInstall(inputs, stager);
     assert.notEqual(staged.manifest, value.manifest);
     assert.equal(fs.readFileSync(staged.manifest, "utf8"), fs.readFileSync(value.manifest, "utf8"));
@@ -98,5 +116,65 @@ test("release staging snapshots inputs and only removes its private directory", 
     removeStagedProductionInstall(staged.stagingDirectory);
     assert.equal(fs.existsSync(staged.stagingDirectory), false);
     assert.throws(() => removeStagedProductionInstall(value.directory), /unknown release staging/);
+  } finally { fs.rmSync(value.directory, { recursive: true, force: true }); }
+});
+
+test("execution verifies the installed app before atomically persisting the public receipt", () => {
+  const value = fixture();
+  const stateRoot = path.join(value.directory, "protected-state");
+  const application = path.join(value.directory, "AgentPass.app");
+  const installer = path.join(value.directory, "installer.sh");
+  fs.mkdirSync(stateRoot, { mode: 0o755 });
+  fs.mkdirSync(application, { mode: 0o700 });
+  fs.writeFileSync(installer, "#!/bin/sh\nexit 0\n", { mode: 0o700 });
+  const expected = {
+    application,
+    manager: path.join(application, "Contents/MacOS/agentpass-native-manager"),
+    client: path.join(application, "Contents/Library/HelperTools/AgentPassNativeClient.app/Contents/MacOS/agentpass-native-client"),
+    service: path.join(application, "Contents/Library/HelperTools/AgentPassNativeService.app/Contents/MacOS/agentpass-native-service")
+  };
+  try {
+    const inputs = prepareProductionInstall({ manifest: value.manifest, signature: value.signature, publicKey: value.publicKey, fingerprint: signerFingerprint, teamId: "ABCDE12345" }, { platform: "darwin" });
+    const verified = verifyProductionInstall(inputs, value.verifier);
+    const plan = { ...verified, application, protectedState: stateRoot };
+    let inspected = false;
+    const result = executeProductionInstall(plan, {
+      uid: 0,
+      receiptOwner: owner,
+      protectedStateRoot: stateRoot,
+      installer,
+      inspectApplication: (target, options) => {
+        inspected = true;
+        assert.equal(target, application);
+        assert.deepEqual(options, { expectedOwner: owner, expectedTeamId: "ABCDE12345" });
+        return { ...expected, identity: { teamId: "ABCDE12345" }, serviceStatus: "enabled" };
+      }
+    });
+    assert.equal(inspected, true);
+    assert.equal(result.installed, true);
+    assert.deepEqual(readInstalledReleaseReceipt({ root: stateRoot, owner }), verified.releaseReceipt);
+  } finally { fs.rmSync(value.directory, { recursive: true, force: true }); }
+});
+
+test("execution leaves the previous receipt untouched when app verification fails", () => {
+  const value = fixture();
+  const stateRoot = path.join(value.directory, "protected-state");
+  const application = path.join(value.directory, "AgentPass.app");
+  const installer = path.join(value.directory, "installer.sh");
+  fs.mkdirSync(stateRoot, { mode: 0o755 });
+  fs.mkdirSync(application, { mode: 0o700 });
+  fs.writeFileSync(installer, "#!/bin/sh\nexit 0\n", { mode: 0o700 });
+  try {
+    const inputs = prepareProductionInstall({ manifest: value.manifest, signature: value.signature, publicKey: value.publicKey, fingerprint: signerFingerprint, teamId: "ABCDE12345" }, { platform: "darwin" });
+    const verified = verifyProductionInstall(inputs, value.verifier);
+    const plan = { ...verified, application, protectedState: stateRoot };
+    assert.throws(() => executeProductionInstall(plan, {
+      uid: 0,
+      receiptOwner: owner,
+      protectedStateRoot: stateRoot,
+      installer,
+      inspectApplication: () => { throw new Error("verification failed"); }
+    }), /verification failed/);
+    assert.throws(() => readInstalledReleaseReceipt({ root: stateRoot, owner }), (error) => error.code === "INSTALLED_RECEIPT_MISSING");
   } finally { fs.rmSync(value.directory, { recursive: true, force: true }); }
 });

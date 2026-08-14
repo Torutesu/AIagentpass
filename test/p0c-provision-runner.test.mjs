@@ -12,6 +12,7 @@ const repository = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '.
 const sourceRoot = path.join(repository, 'scripts/release/p0c');
 const EXPECTED_QUALIFICATION_TOOL_FILES = Object.freeze([
   'generate-release-attestation.mjs',
+  'release-candidate-identity.mjs',
   'n3e/controller-candidate-contract.mjs',
   'n3e/controller-identity-contract.mjs',
   'n3e/materialize-controller-candidate.mjs',
@@ -76,7 +77,7 @@ test('non-production provisioning atomically installs the exact protected invent
   assert.equal(fs.statSync(result.qualification_client_path).nlink, 1);
   assert.match(fs.readFileSync(result.qualification_client_path, 'utf8'), /agentpass-qualification-grant-client\.app\/Contents\/MacOS\/agentpass-qualification-grant-client/u);
   assert.equal(fs.existsSync(path.join(result.qualification_client_app_path, 'Contents/embedded.provisionprofile')), true);
-  assert.deepEqual(fs.readdirSync(path.join(fixture.destination, 'qualification-tool')).sort(), ['generate-release-attestation.mjs', 'manifest.json', 'n3e', 'p0c']);
+  assert.deepEqual(fs.readdirSync(path.join(fixture.destination, 'qualification-tool')).sort(), ['generate-release-attestation.mjs', 'manifest.json', 'n3e', 'p0c', 'release-candidate-identity.mjs']);
   assert.deepEqual(fs.readdirSync(path.join(fixture.destination, 'qualification-tool/p0c/lib')).sort(), ['candidate-checkpoint.mjs']);
   assert.deepEqual(fs.readdirSync(path.join(fixture.destination, 'qualification-tool/n3e')).sort(), QUALIFICATION_TOOL_FILES.filter(({ installed }) => installed.startsWith('n3e/')).map(({ installed }) => installed.slice('n3e/'.length)));
   const toolManifest = JSON.parse(fs.readFileSync(path.join(fixture.destination, 'qualification-tool/manifest.json'), 'utf8'));

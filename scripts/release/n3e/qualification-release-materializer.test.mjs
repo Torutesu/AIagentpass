@@ -10,6 +10,7 @@ import {
   canonicalJSON as canonicalAttestationJSON
 } from '../generate-release-attestation.mjs';
 import { mintCandidateCheckpoint } from '../p0c/lib/candidate-checkpoint.mjs';
+import { deriveReleaseCandidateId } from '../../../lib/release-candidate-identity.mjs';
 import {
   FIXED_QUALIFICATION_RELEASE_DIRECTORY,
   FIXED_QUALIFICATION_RELEASE_TRUST_PATH,
@@ -87,11 +88,12 @@ const fixture = () => {
     ] }
   };
   const manifest = {
-    schema_version: 3,
+    schema_version: 4,
     product: 'AgentPass',
     version: '0.18.0',
     source: { commit: COMMIT, tree: TREE, tag: 'v0.18.0' },
     generated_at: '2026-08-14T00:00:00.000Z',
+    candidate_id: deriveReleaseCandidateId(digest(productBytes)),
     artifacts: entries,
     external_qualification_controller: externalIdentity,
     evidence: {

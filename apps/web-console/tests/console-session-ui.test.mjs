@@ -55,9 +55,11 @@ test("session material stays out of React state, browser storage, and logs", asy
   assert.match(source, /let result: ConsoleSession \| undefined/);
   assert.match(source, /let pending: Promise<ConsoleSession> \| undefined/);
   assert.match(source, /return Object\.freeze\(\{ get, clear \}\)/);
+  assert.match(source, /const \[preflight, setPreflight\] = useState<PublicEnrollmentPreflight \| null>\(null\)/);
   assert.match(source, /const \[enrollmentStoreId\] = useState\(allocateEnrollmentStoreId\)/);
-  assert.match(source, /const enrollmentStores = new Map<number, Record<string, string>>\(\)/);
+  assert.match(source, /const enrollmentStores = new Map<number, Record<string, unknown>>\(\)/);
   assert.doesNotMatch(source, /useState<Record<string, string> \| null>/);
+  assert.doesNotMatch(source, /useState<Record<string, unknown> \| null>/);
   assert.doesNotMatch(source, /set(?:Csrf|CSRF|OrganizationId|Authorization)/);
 });
 

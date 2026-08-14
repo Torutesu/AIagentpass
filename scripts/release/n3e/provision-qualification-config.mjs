@@ -5,6 +5,7 @@ import { spawnSync } from 'node:child_process';
 import { basename, dirname, isAbsolute, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { buildReleaseAttestation, canonicalJSON as canonicalReleaseAttestation } from '../generate-release-attestation.mjs';
+import { assertReleaseCandidateIdMatchesProduct, RELEASE_MANIFEST_SCHEMA_VERSION } from '../release-candidate-identity.mjs';
 import {
   parseCanonicalExternalQualificationControllerIdentity,
   validateExternalQualificationControllerIdentity
@@ -274,8 +275,8 @@ const validateRelease = ({ manifestPath, signaturePath, publicKeyPath, expectedF
   const manifest = strictJSON(manifestSnapshot.bytes, 'release manifest');
   if (!manifestSnapshot.bytes.equals(Buffer.from(`${JSON.stringify(manifest, null, 2)}\n`, 'utf8'))) fail('release manifest is not canonical JSON');
   verifyReleaseSignature(manifestSnapshot, signaturePath, publicKeyPath, expectedFingerprint);
-  exactKeys(manifest, ['schema_version', 'product', 'version', 'source', 'generated_at', 'artifacts', 'external_qualification_controller', 'evidence'], 'release manifest');
-  if (manifest.schema_version !== 3 || manifest.product !== 'AgentPass' || !VERSION.test(manifest.version)) fail('release manifest identity is invalid');
+  exactKeys(manifest, ['schema_version', 'product', 'version', 'source', 'generated_at', 'candidate_id', 'artifacts', 'external_qualification_controller', 'evidence'], 'release manifest');
+  if (manifest.schema_version !== RELEASE_MANIFEST_SCHEMA_VERSION || manifest.product !== 'AgentPass' || !VERSION.test(manifest.version)) fail('release manifest identity is invalid');
   exactKeys(manifest.source, ['commit', 'tree', 'tag'], 'release source');
   if (!COMMIT.test(manifest.source.commit) || manifest.source.commit === ZERO_40 || !COMMIT.test(manifest.source.tree) || manifest.source.tree === ZERO_40) fail('release source identity is invalid');
   if (manifest.source.tag !== null && manifest.source.tag !== `v${manifest.version}`) fail('release source tag is invalid');
@@ -288,8 +289,9 @@ const validateRelease = ({ manifestPath, signaturePath, publicKeyPath, expectedF
     artifactNames.add(artifact.name); previousArtifactName = artifact.name;
   }
   const products = manifest.artifacts.filter((item) => item?.role === 'product');
-  if (products.length !== 1) fail('release manifest must bind one product');
+  if (products.length !== 1 || !products[0].name.endsWith('.pkg')) fail('release manifest must bind one product PKG');
   const product = products[0];
+  try { assertReleaseCandidateIdMatchesProduct(manifest.candidate_id, product.sha256); } catch (error) { fail(error.message); }
   exactKeys(product, ['name', 'role', 'media_type', 'bytes', 'sha256'], 'release product');
   if (product.media_type !== 'application/vnd.apple.installer+xml' || product.name !== `AgentPass-v${manifest.version}-macos-universal.pkg`) fail('release product binding is invalid');
   const productSnapshot = readStable(productPath, { label: 'release product', maximum: MAX_ARTIFACT_BYTES, capture: false });

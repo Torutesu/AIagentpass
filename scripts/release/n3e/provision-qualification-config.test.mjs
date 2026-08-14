@@ -225,7 +225,7 @@ const expectFailure = (fixture, action, pattern = /qualification|release|manifes
   assert.equal(fs.existsSync(fixture.statePath), false);
 };
 
-test('provisions signed release-v3 data, selects arm64 CDHash, and restores exact original bytes', () => {
+test('provisions signed release-v4 data, selects arm64 CDHash, and restores exact original bytes', () => {
   const fixture = makeCase();
   const result = provision(fixture);
   const manifest = JSON.parse(readFileSync(fixture.manifestPath));

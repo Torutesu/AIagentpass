@@ -22,7 +22,7 @@ interface ExecutionContext {
 const CONTENT_SECURITY_POLICY = [
   "default-src 'self'",
   "base-uri 'self'",
-  "connect-src 'self'",
+  "connect-src 'self' http://127.0.0.1:*",
   "font-src 'self' data:",
   "form-action 'self'",
   "frame-ancestors 'none'",

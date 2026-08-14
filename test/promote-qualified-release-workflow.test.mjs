@@ -94,10 +94,10 @@ test('downloads candidate from release run and all three P0-C artifacts from qua
   assert.match(catalog, /qualification artifact has unexpected files/);
 });
 
-test('promotion catalogs the v3 external controller and keeps its archive out of the product binding', () => {
+test('promotion catalogs the v4 external controller and keeps its archive out of the product binding', () => {
   const catalog = step('Catalog only the exact downloaded candidate and qualification evidence');
   const release = step('Verify signed release candidate and derive its tag');
-  assert.match(catalog, /schema_version !== 3/);
+  assert.match(catalog, /schema_version !== 4/);
   assert.match(catalog, /external_qualification_controller/);
   assert.match(catalog, /identity_document/);
   assert.match(catalog, /identity/);
@@ -106,7 +106,7 @@ test('promotion catalogs the v3 external controller and keeps its archive out of
   assert.match(catalog, /role === 'product'/);
   assert.match(catalog, /controller_archive/);
   assert.match(catalog, /controller_identity/);
-  assert.match(release, /release manifest must be v3/);
+  assert.match(release, /release manifest must be v4/);
   assert.match(release, /controller archive role is invalid/);
 });
 

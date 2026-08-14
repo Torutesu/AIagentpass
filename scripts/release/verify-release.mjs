@@ -2,6 +2,7 @@
 import { createHash, createPublicKey, verify } from 'node:crypto';
 import fs from 'node:fs';
 import { basename, dirname, resolve } from 'node:path';
+import { assertReleaseCandidateIdMatchesProduct, parseReleaseCandidateId, RELEASE_MANIFEST_SCHEMA_VERSION } from '../../lib/release-candidate-identity.mjs';
 import { parseCanonicalExternalQualificationControllerIdentity, validateExternalQualificationControllerIdentity } from './n3e/controller-identity-contract.mjs';
 
 const [manifestPath, signaturePath, publicKeyPath, expectedFingerprint] = process.argv.slice(2);
@@ -70,9 +71,10 @@ if (!/^(?:[A-Za-z0-9+/]{4}){21}[A-Za-z0-9+/]{2}==\n$/.test(encodedSignature)) th
 const signature = Buffer.from(encodedSignature.trim(), 'base64');
 if (signature.length !== 64 || !verify(null, manifestBytes, publicKey, signature)) throw new Error('release manifest signature is invalid');
 
-exactKeys(manifest, ['schema_version', 'product', 'version', 'source', 'generated_at', 'artifacts', 'external_qualification_controller', 'evidence'], 'release manifest');
-if (manifest.schema_version !== 3 || manifest.product !== 'AgentPass') throw new Error('unsupported release manifest identity');
+exactKeys(manifest, ['schema_version', 'product', 'version', 'source', 'generated_at', 'candidate_id', 'artifacts', 'external_qualification_controller', 'evidence'], 'release manifest');
+if (manifest.schema_version !== RELEASE_MANIFEST_SCHEMA_VERSION || manifest.product !== 'AgentPass') throw new Error('unsupported release manifest identity');
 if (typeof manifest.version !== 'string' || !/^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/.test(manifest.version) || !canonicalDate(manifest.generated_at)) throw new Error('invalid release metadata');
+parseReleaseCandidateId(manifest.candidate_id);
 exactKeys(manifest.source, ['commit', 'tree', 'tag'], 'source');
 if (!/^[0-9a-f]{40}$/.test(manifest.source.commit) || !/^[0-9a-f]{40}$/.test(manifest.source.tree)) throw new Error('invalid source identity');
 if (manifest.source.tag !== null && manifest.source.tag !== `v${manifest.version}`) throw new Error('source tag and release version disagree');
@@ -96,7 +98,10 @@ for (const artifact of manifest.artifacts) {
   const snapshot = snapshotFile(resolve(manifestDirectory, artifact.name), { maximum: artifact.role === 'sbom' ? 32 * 1024 * 1024 : 16 * 1024 * 1024 * 1024, capture, expectedBytes: artifact.bytes, expectedSHA256: artifact.sha256 });
   if (capture) artifactContent.set(artifact.name, snapshot.content);
 }
-if (manifest.artifacts.filter((artifact) => artifact.role === 'product').length !== 1) throw new Error('release manifest requires exactly one product artifact');
+const productArtifacts = manifest.artifacts.filter((artifact) => artifact.role === 'product');
+if (productArtifacts.length !== 1 || !productArtifacts[0].name.endsWith('.pkg')) throw new Error('release manifest requires exactly one product PKG artifact');
+const productArtifact = productArtifacts[0];
+assertReleaseCandidateIdMatchesProduct(manifest.candidate_id, productArtifact.sha256);
 const controllerArtifacts = manifest.artifacts.filter((artifact) => artifact.role === 'external_qualification_controller');
 if (controllerArtifacts.length !== 1 || controllerArtifacts[0].media_type !== 'application/octet-stream' || !/^AgentPassQualificationController-(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)(?:-(?:0|[1-9A-Za-z-][0-9A-Za-z-]*)(?:\.(?:0|[1-9A-Za-z-][0-9A-Za-z-]*))*)?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?-macos-universal\.tar$/u.test(controllerArtifacts[0].name)) throw new Error('release manifest requires one exact external controller archive');
 if (controllerArtifacts[0].name !== `AgentPassQualificationController-${manifest.version}-macos-universal.tar`) throw new Error('controller archive version does not match the release');
@@ -199,6 +204,8 @@ for (const toolID of ['SPDXRef-BuildTool-Node', 'SPDXRef-BuildTool-Swift', 'SPDX
 console.log(JSON.stringify({
   ok: true,
   artifacts: manifest.artifacts.length,
+  candidate_id: manifest.candidate_id,
+  product_pkg_sha256: productArtifact.sha256,
   checksums_bound: true,
   sbom_bound: true,
   notarization: notarization.status,

@@ -156,6 +156,17 @@ async function openSetup(page: Page): Promise<void> {
   await expect(page.getByRole("heading", { name: "パスキーを登録" })).toBeVisible();
 }
 
+async function importPreflight(page: Page): Promise<void> {
+  await page.getByLabel("公開preflight JSON").fill(JSON.stringify({
+    version: 1,
+    platform: "macos",
+    candidate_id: ENROLLMENT_CANDIDATE,
+    device_key_fingerprint: ENROLLMENT_FINGERPRINT,
+  }));
+  await page.getByRole("button", { name: "公開preflightを確認", exact: true }).click();
+  await expect(page.getByText("公開preflightを確認しました")).toBeVisible();
+}
+
 async function assertNoBrowserStorageSecret(page: Page, secret: string): Promise<void> {
   const storage = await browserStorageSnapshot(page);
   const serialized = JSON.stringify(storage);
@@ -205,11 +216,10 @@ test("fails closed when the server replays the same recent-auth proof", async ({
   activeAuthenticators.set(page, await installVirtualAuthenticator(page));
   const state = await installSecurityRoutes(page, "replay");
   await openSetup(page);
+  await importPreflight(page);
   const label = page.getByLabel("端末名");
   await label.fill("Replay E2E Mac");
-  await page.getByLabel("リリース候補ID").fill(ENROLLMENT_CANDIDATE);
-  await page.getByLabel("端末キーのフィンガープリント").fill(ENROLLMENT_FINGERPRINT);
-  const issue = page.getByRole("button", { name: "Touch ID/パスキー確認", exact: true });
+  const issue = page.getByRole("button", { name: "Touch ID/パスキー確認して発行", exact: true });
 
   await issue.click();
   await expect(page.getByText("一度だけ表示しています")).toBeVisible();
@@ -231,16 +241,49 @@ test("fails closed when the virtual authenticator has lost the credential", asyn
   const state = await installSecurityRoutes(page, "credential_loss");
   await removeCredential(authenticator);
   await openSetup(page);
+  await importPreflight(page);
   await page.getByLabel("端末名").fill("Lost Credential E2E Mac");
-  await page.getByLabel("リリース候補ID").fill(ENROLLMENT_CANDIDATE);
-  await page.getByLabel("端末キーのフィンガープリント").fill(ENROLLMENT_FINGERPRINT);
-  await page.getByRole("button", { name: "Touch ID/パスキー確認", exact: true }).click();
+  await page.getByRole("button", { name: "Touch ID/パスキー確認して発行", exact: true }).click();
   await expect(page.getByRole("alert")).toContainText("Touch ID/パスキー確認を完了できませんでした");
   expect(state.authenticationOptionsCalls).toBe(1);
   expect(state.authenticationVerifyCalls).toBe(0);
   expect(state.enrollmentCalls).toBe(0);
   await assertNoBrowserStorageSecret(page, ENROLLMENT_SECRET);
   await assertNoBrowserStorageSecret(page, AUTHORIZATION_ID);
+});
+
+test("rejects malformed or unknown preflight fields before WebAuthn", async ({ page }) => {
+  activeAuthenticators.set(page, await installVirtualAuthenticator(page));
+  const state = await installSecurityRoutes(page, "initial_registration");
+  await openSetup(page);
+  await page.getByLabel("公開preflight JSON").fill(JSON.stringify({
+    version: 1,
+    platform: "macos",
+    candidate_id: ENROLLMENT_CANDIDATE,
+    device_key_fingerprint: ENROLLMENT_FINGERPRINT,
+    credential: "must-never-be-accepted",
+  }));
+  await page.getByRole("button", { name: "公開preflightを確認", exact: true }).click();
+  await expect(page.getByRole("alert")).toContainText("公開preflightを検証できませんでした");
+  expect(state.authenticationOptionsCalls).toBe(0);
+  expect(state.authenticationVerifyCalls).toBe(0);
+  expect(state.enrollmentCalls).toBe(0);
+  await assertNoBrowserStorageSecret(page, "must-never-be-accepted");
+});
+
+test("keeps the manual path available only as an explicit advanced fallback", async ({ page }) => {
+  activeAuthenticators.set(page, await installVirtualAuthenticator(page));
+  const state = await installSecurityRoutes(page, "initial_registration");
+  await openSetup(page);
+  await page.getByText("上級者向け：preflight JSONを使えない場合の手入力", { exact: true }).click();
+  await page.getByRole("button", { name: "手入力を使う", exact: true }).click();
+  await page.getByLabel("端末名").fill("Advanced E2E Mac");
+  await page.getByLabel("リリース候補ID").fill(ENROLLMENT_CANDIDATE);
+  await page.getByLabel("端末キーのフィンガープリント").fill(ENROLLMENT_FINGERPRINT);
+  await page.getByRole("button", { name: "Touch ID/パスキー確認して発行", exact: true }).click();
+  await expect(page.getByText("一度だけ表示しています")).toBeVisible();
+  expect(state.enrollmentCalls).toBe(1);
+  expect(state.enrollmentBodies[0]).toEqual({ proof_version: 2, candidate_id: ENROLLMENT_CANDIDATE, device_key_fingerprint: ENROLLMENT_FINGERPRINT, label: "Advanced E2E Mac", platform: "macos", ttl_ms: 600000 });
 });
 
 async function removeCredential(authenticator: VirtualAuthenticator): Promise<void> {

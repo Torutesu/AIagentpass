@@ -38,7 +38,22 @@ To bound the resulting repeated-head work and protect availability from a hostil
 
 ## Enroll a Mac
 
-Open **セットアップ → Macを安全に追加**, enter the device label, release candidate ID, and the P-256 device-key fingerprint prepared by the Mac setup flow. Complete the browser-native step-up, issue the ten-minute v2 invitation, and copy the displayed JSON once. Pass it to the CLI through stdin; never put it in argv, an environment variable, a repository, URL query, or shell history.
+Open **セットアップ → Macを安全に追加** and paste the one public preflight JSON emitted by the Mac setup flow. The guided form accepts exactly these four fields:
+
+```json
+{
+  "version": 1,
+  "platform": "macos",
+  "candidate_id": "candidate-2026-08",
+  "device_key_fingerprint": "SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+}
+```
+
+`candidate_id` is the signed release candidate selected by the setup flow and `device_key_fingerprint` is the SHA-256 fingerprint of the non-exportable P-256 public key. `platform` must be exactly `macos`. The Console rejects unknown fields, missing or malformed values, and any v2 invitation whose candidate/key binding differs from the imported DTO before it displays the invitation. A live handoff descriptor may add a separate correlation ID later; it is not part of this copy/paste preflight and is not a credential.
+
+After the preflight preview, enter only a friendly device name and complete the browser-native step-up. The existing canonical v2 invitation is then issued for ten minutes. The imported preflight and invitation handoff are held only in ephemeral React memory; they are never written to local/session storage, a URL, analytics, or logs. The invitation is displayed once. Reload, dismissal, or expiry removes it. If an older setup flow cannot produce the DTO, use the clearly marked **上級者向け** fallback; it validates the same candidate and P-256 fingerprint rules without adding a correlation field to the base contract.
+
+Copy the displayed invitation once and pass it to the CLI through stdin; never put it in argv, an environment variable, a repository, URL query, or shell history.
 
 ```bash
 agentpass setup continue --execute \

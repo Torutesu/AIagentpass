@@ -7,6 +7,8 @@ import { join } from 'node:path';
 import { mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 
+import { deriveReleaseCandidateId } from '../lib/release-candidate-identity.mjs';
+
 const root = new URL('..', import.meta.url).pathname.replace(/\/$/, '');
 const validator = join(root, 'scripts/release/validate-hardware-qualification.mjs');
 const canonical = (value) => `${JSON.stringify(value, null, 2)}\n`;
@@ -16,7 +18,7 @@ const fingerprint = (key) => `SHA256:${crypto.createHash('sha256').update(key.ex
 const writeSignature = (path, bytes, privateKey) => writeFileSync(path, `${crypto.sign(null, bytes, privateKey).toString('base64')}\n`);
 const run = (args) => spawnSync(process.execPath, [validator, ...args], { encoding: 'utf8' });
 
-const makeFixture = ({ manifestVersion = 3 } = {}) => {
+const makeFixture = ({ manifestVersion = 4 } = {}) => {
   const dir = mkdtempSync(join(tmpdir(), 'agentpass-hardware-v2-'));
   const evidenceDir = join(dir, 'qualification-evidence'); fs.mkdirSync(evidenceDir);
   const releaseDir = join(dir, 'release'); fs.mkdirSync(releaseDir);
@@ -53,7 +55,7 @@ const makeFixture = ({ manifestVersion = 3 } = {}) => {
   let controllerIdentity;
   let controllerIdentityDocument;
   let controllerNotaryEvidence = [];
-  if (manifestVersion === 3) {
+  if (manifestVersion === 4) {
     const controllerArchiveName = 'AgentPassQualificationController-0.18.0-macos-universal.tar';
     const controllerContent = Buffer.from('external qualification controller archive fixture\n');
     writeFileSync(join(releaseDir, controllerArchiveName), controllerContent);
@@ -81,12 +83,12 @@ const makeFixture = ({ manifestVersion = 3 } = {}) => {
     { kind: 'notarytool_result', name: 'notarytool-result.json', bytes: notaryResult.length, sha256: digest(notaryResult) },
     { kind: 'stapler_result', name: 'stapler-result.txt', bytes: staplerResult.length, sha256: digest(staplerResult) }
   ];
-  const checksumEntries = [...artifactMeta, ...notaryEvidence, ...(manifestVersion === 3 ? [controllerIdentityDocument, ...controllerNotaryEvidence] : [])].sort((left, right) => left.name.localeCompare(right.name));
+  const checksumEntries = [...artifactMeta, ...notaryEvidence, ...(manifestVersion === 4 ? [controllerIdentityDocument, ...controllerNotaryEvidence] : [])].sort((left, right) => left.name.localeCompare(right.name));
   const checksumContent = Buffer.from(`${checksumEntries.map((item) => `${item.sha256}  ${item.name}`).join('\n')}\n`);
   writeFileSync(join(releaseDir, 'SHA256SUMS'), checksumContent);
   const manifest = {
-    schema_version: manifestVersion, product: 'AgentPass', version: '0.18.0', source: { commit: sourceCommit, tree: sourceTree, tag: null }, generated_at: '2026-08-13T00:00:00.000Z', artifacts: artifactMeta,
-    ...(manifestVersion === 3 ? { external_qualification_controller: { identity_document: controllerIdentityDocument, identity: controllerIdentity, notarization: { status: 'accepted_stapled', submission_ids: ['22345678-1234-1234-1234-123456789abc'], evidence: controllerNotaryEvidence } } } : {}),
+    schema_version: manifestVersion, product: 'AgentPass', version: '0.18.0', source: { commit: sourceCommit, tree: sourceTree, tag: null }, generated_at: '2026-08-13T00:00:00.000Z', candidate_id: manifestVersion === 4 ? deriveReleaseCandidateId(digest(productContent)) : undefined, artifacts: artifactMeta,
+    ...(manifestVersion === 4 ? { external_qualification_controller: { identity_document: controllerIdentityDocument, identity: controllerIdentity, notarization: { status: 'accepted_stapled', submission_ids: ['22345678-1234-1234-1234-123456789abc'], evidence: controllerNotaryEvidence } } } : {}),
     evidence: {
       checksums: { name: 'SHA256SUMS', bytes: checksumContent.length, sha256: digest(checksumContent), entry_count: checksumEntries.length },
       sbom: { artifact_name: 'AgentPass-0.18.0.spdx.json', sha256: digest(sbomContent), spdx_version: 'SPDX-2.3', document_namespace: 'https://github.com/Torutesu/Agentpass/sbom/fixture', document_spdx_id: 'SPDXRef-DOCUMENT', document_describes: ['SPDXRef-AgentPass'], source_commit: sourceCommit, source_tree: sourceTree },
@@ -120,7 +122,7 @@ const makeFixture = ({ manifestVersion = 3 } = {}) => {
 
 const argsFor = (fixture) => [fixture.reportPath, fixture.artifactPath, fixture.manifestPath, fixture.manifestSignaturePath, fixture.manifestPublicKeyPath, fixture.releaseFingerprint, fixture.operatorSignaturePath, fixture.operatorPublicKeyPath, fixture.operatorFingerprint, fixture.evidenceDir];
 
-test('v2 report accepts a signed release manifest v3 with an external controller', () => {
+test('v2 report accepts a signed release manifest v4 with an external controller', () => {
   const fixture = makeFixture();
   const result = run(argsFor(fixture));
   assert.equal(result.status, 0, result.stderr);
@@ -156,11 +158,11 @@ test('independently revalidates the seven-step N3-E binding and rejects evidence
   attack((report) => { report.n3e_qualification_suite_evidence.record.steps[1].evidence_sha256 = '-----BEGIN PRIVATE KEY-----'; }, /invalid|secret/u);
 });
 
-test('v2 report remains compatible with a signed release manifest v2', () => {
+test('production rejects a historical signed release manifest v2', () => {
   const fixture = makeFixture({ manifestVersion: 2 });
   const result = run(argsFor(fixture));
-  assert.equal(result.status, 0, result.stderr);
-  assert.equal(JSON.parse(result.stdout).qualified, true);
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /unsupported release manifest identity|schema version/u);
 });
 
 test('v2 rejects artifact, manifest, provenance, signature, and evidence substitutions', () => {
@@ -178,7 +180,7 @@ test('v2 rejects artifact, manifest, provenance, signature, and evidence substit
   result = run(argsFor(fixture)); assert.notEqual(result.status, 0); assert.match(result.stderr, /evidence|ENOENT/);
 });
 
-test('v3 rejects controller identity, role, Team ID, notarization, and checksum attacks', () => {
+test('v4 rejects controller identity, role, Team ID, notarization, and checksum attacks', () => {
   const attack = (mutate, pattern) => {
     const fixture = makeFixture();
     const manifest = JSON.parse(fs.readFileSync(fixture.manifestPath, 'utf8'));

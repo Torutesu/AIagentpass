@@ -18,6 +18,7 @@ import {
 } from '../p0c/lib/candidate-checkpoint.mjs';
 import { buildReleaseAttestation, canonicalJSON as canonicalAttestationJSON } from '../generate-release-attestation.mjs';
 import { proveNoQualificationProcesses } from './qualification-scenario-driver.mjs';
+import { assertReleaseCandidateIdMatchesProduct, RELEASE_MANIFEST_SCHEMA_VERSION } from '../release-candidate-identity.mjs';
 
 export {
   FIXED_CANDIDATE_CHECKPOINT_PATH,
@@ -338,12 +339,13 @@ const collectManifestFiles = (manifest) => {
 const validateManifest = (snapshot) => {
   const manifest = strictJSON(snapshot.bytes, 'release manifest');
   if (!snapshot.bytes.equals(canonicalJSON(manifest))) fail('release manifest is not canonical JSON');
-  exactKeys(manifest, ['schema_version', 'product', 'version', 'source', 'generated_at', 'artifacts', 'external_qualification_controller', 'evidence'], 'release manifest');
-  if (manifest.schema_version !== 3 || manifest.product !== 'AgentPass' || !manifest.source || !COMMIT.test(manifest.source.commit)) fail('release manifest identity is invalid');
+  exactKeys(manifest, ['schema_version', 'product', 'version', 'source', 'generated_at', 'candidate_id', 'artifacts', 'external_qualification_controller', 'evidence'], 'release manifest');
+  if (manifest.schema_version !== RELEASE_MANIFEST_SCHEMA_VERSION || manifest.product !== 'AgentPass' || !manifest.source || !COMMIT.test(manifest.source.commit)) fail('release manifest identity is invalid');
   const files = collectManifestFiles(manifest);
   const products = manifest.artifacts.filter((item) => item.role === 'product');
-  if (products.length !== 1) fail('release manifest must bind exactly one product');
+  if (products.length !== 1 || !products[0].name.endsWith('.pkg')) fail('release manifest must bind exactly one product PKG');
   const product = products[0];
+  try { assertReleaseCandidateIdMatchesProduct(manifest.candidate_id, product.sha256); } catch (error) { fail(error.message); }
   const attestation = manifest.artifacts.find((item) => item.name === 'release-attestation.json' && item.role === 'auxiliary');
   if (!attestation) fail('release manifest attestation binding is missing');
   const attestationName = validateName(attestation.name, 'release attestation name');

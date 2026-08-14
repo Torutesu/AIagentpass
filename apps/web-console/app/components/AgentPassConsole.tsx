@@ -4,6 +4,8 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { authenticateRecentAuth, registerPasskey, WebAuthnClientError } from "../webauthn-client";
 import { createSecurityClient, SecurityClientError, type SecurityClient, type SecurityPasskey, type SecuritySession, type SecuritySnapshot } from "../security-client";
 import { parseConsoleSummary, type ConsoleSummaryViewModel } from "../console-summary";
+import { EnrollmentPreflightError, parsePublicEnrollmentPreflight } from "../../lib/enrollment-preflight.mjs";
+import { fetchBrowserCliHandoffPreflight, parseBrowserCliHandoffLaunchFragment, postBrowserCliHandoff, publicEnrollmentPreflight as publicBrowserCliEnrollmentPreflight } from "../../lib/browser-cli-handoff.mjs";
 import { OrganizationPanel } from "./OrganizationPanel";
 import { OwnerRecoveryPanel } from "./OwnerRecoveryPanel";
 
@@ -192,7 +194,31 @@ function hasExactV2Keys(value: Record<string, unknown>, keys: readonly string[])
   return Object.keys(value).length === keys.length && keys.every((key) => Object.hasOwn(value, key));
 }
 
-function parseV2EnrollmentInvitation(payload: unknown, organizationId: string): Record<string, unknown> {
+type PublicEnrollmentPreflight = Readonly<{
+  version: 1;
+  platform: "macos";
+  candidate_id: string;
+  device_key_fingerprint: string;
+}>;
+
+type LiveHandoffStatus = "none" | "loading" | "ready" | "delivered" | "failed";
+type LiveHandoffPreflight = Readonly<{
+  version: 1;
+  correlation_id: string;
+  nonce: string;
+  platform: "macos";
+  candidate_id: string;
+  device_key_fingerprint: string;
+}>;
+type LiveHandoffSession = Readonly<{
+  url: string;
+  preflight_url: string;
+  correlation_id: string;
+  preflight: LiveHandoffPreflight;
+}>;
+type LiveHandoffRef = { current: LiveHandoffSession | null };
+
+function parseV2EnrollmentInvitation(payload: unknown, organizationId: string, expectedPreflight: PublicEnrollmentPreflight): Record<string, unknown> {
   if (!isPlainRecord(payload) || !isPlainRecord(payload.enrollment)) throw new EnrollmentFlowError("enrollment", "登録情報の形式を検証できませんでした。もう一度発行してください。");
   const enrollment = payload.enrollment;
   if (!hasExactV2Keys(enrollment, ENROLLMENT_V2_KEYS) || enrollment.version !== 2 || enrollment.proof_version !== 2
@@ -209,7 +235,9 @@ function parseV2EnrollmentInvitation(payload: unknown, organizationId: string): 
     || enrollment.candidate_binding.enrollment_id !== enrollment.enrollment_id || enrollment.candidate_binding.organization_id !== organizationId
     || enrollment.candidate_binding.device_id !== enrollment.device_id || enrollment.candidate_binding.expires_at !== enrollment.expires_at
     || !ENROLLMENT_CANDIDATE_ID.test(String(enrollment.candidate_binding.candidate_id))
-    || !ENROLLMENT_DEVICE_FINGERPRINT.test(String(enrollment.candidate_binding.device_key_fingerprint))) {
+    || !ENROLLMENT_DEVICE_FINGERPRINT.test(String(enrollment.candidate_binding.device_key_fingerprint))
+    || enrollment.candidate_binding.candidate_id !== expectedPreflight.candidate_id
+    || enrollment.candidate_binding.device_key_fingerprint !== expectedPreflight.device_key_fingerprint) {
     throw new EnrollmentFlowError("enrollment", "登録対象のリリースまたは端末キーを検証できませんでした。");
   }
   if (!isPlainRecord(enrollment.challenge) || !hasExactV2Keys(enrollment.challenge, ENROLLMENT_CHALLENGE_KEYS)
@@ -442,18 +470,18 @@ function createConsoleSessionContext() {
 const consoleSessionContext = createConsoleSessionContext();
 
 let nextEnrollmentStoreId = 0;
-const enrollmentStores = new Map<number, Record<string, string>>();
+const enrollmentStores = new Map<number, Record<string, unknown>>();
 
 function allocateEnrollmentStoreId(): number {
   nextEnrollmentStoreId += 1;
   return nextEnrollmentStoreId;
 }
 
-function readEnrollmentStore(id: number): Record<string, string> | undefined {
+function readEnrollmentStore(id: number): Record<string, unknown> | undefined {
   return enrollmentStores.get(id);
 }
 
-function writeEnrollmentStore(id: number, value: Record<string, string>): void {
+function writeEnrollmentStore(id: number, value: Record<string, unknown>): void {
   enrollmentStores.set(id, value);
 }
 
@@ -796,8 +824,13 @@ function enrollmentProgressLabel(progress: "pending" | "enrolled" | "recovery-pr
   return progress === "pending" ? "登録待ち" : progress === "enrolled" ? "enrollment proven" : "recovery-proven";
 }
 
-function SetupSurface({ data, goTo, operate, online, canManage, refresh }: { data: AgentPassInitialData; goTo: (view: ConsoleView) => void; operate: (operation: string, body: Record<string, unknown>, success: string) => Promise<void>; online: boolean; canManage: boolean; refresh: () => Promise<void> }) {
+function SetupSurface({ data, goTo, operate, online, canManage, refresh, liveHandoffRef, livePreflight, liveHandoffStatus, onLiveHandoffStatus }: { data: AgentPassInitialData; goTo: (view: ConsoleView) => void; operate: (operation: string, body: Record<string, unknown>, success: string) => Promise<void>; online: boolean; canManage: boolean; refresh: () => Promise<void>; liveHandoffRef: LiveHandoffRef; livePreflight: PublicEnrollmentPreflight | null; liveHandoffStatus: LiveHandoffStatus; onLiveHandoffStatus: (status: LiveHandoffStatus) => void }) {
   const [deviceLabel, setDeviceLabel] = useState("");
+  const [preflightText, setPreflightText] = useState("");
+  const [preflight, setPreflight] = useState<PublicEnrollmentPreflight | null>(null);
+  const [preflightSource, setPreflightSource] = useState<"live" | "manual">("live");
+  const [preflightError, setPreflightError] = useState("");
+  const [advancedEnrollment, setAdvancedEnrollment] = useState(false);
   const [candidateId, setCandidateId] = useState("");
   const [deviceKeyFingerprint, setDeviceKeyFingerprint] = useState("");
   const [enrollmentStoreId] = useState(allocateEnrollmentStoreId);
@@ -813,6 +846,20 @@ function SetupSurface({ data, goTo, operate, online, canManage, refresh }: { dat
   const [agent, setAgent] = useState({ name: "", kind: "claude-code", public_key: "", device_id: data.devices[0]?.deviceId ?? "" });
   const [capabilityPending, setCapabilityPending] = useState(false);
   const defaultScope = data.policies.find((policy) => policy.scope)?.scope ?? { operations: ["git.commit.sign"], repositories: ["/"], branches: { allow: ["*"], deny: [] }, remotes: { allow: ["*"], deny: [] } };
+  const activeGuidedPreflight = preflightSource === "live" ? livePreflight : preflight;
+  const importPreflight = () => {
+    try {
+      const parsed = parsePublicEnrollmentPreflight(preflightText);
+      setPreflight(parsed);
+      setPreflightSource("manual");
+      setPreflightText("");
+      setPreflightError("");
+    } catch (error) {
+      setPreflight(null);
+      setPreflightText("");
+      setPreflightError(error instanceof EnrollmentPreflightError ? "公開preflightを検証できませんでした。version・platform・candidate_id・device_key_fingerprintだけを含むJSONを確認してください。" : "公開preflightを検証できませんでした。もう一度お試しください。");
+    }
+  };
   const issueCapability = async () => {
     const selectedAgent = data.agents.find((item) => item.agentId);
     const selectedDevice = data.devices.find((item) => item.deviceId);
@@ -829,11 +876,13 @@ function SetupSurface({ data, goTo, operate, online, canManage, refresh }: { dat
     setEnrollmentError("");
     try {
       const { organizationId, csrfToken } = await consoleSessionContext.get();
-      const normalizedCandidateId = candidateId.trim();
-      const normalizedFingerprint = deviceKeyFingerprint.trim();
-      if (!ENROLLMENT_CANDIDATE_ID.test(normalizedCandidateId) || !ENROLLMENT_DEVICE_FINGERPRINT.test(normalizedFingerprint)) {
-        throw new EnrollmentFlowError("enrollment", "リリース候補IDとP-256端末キーのフィンガープリントを正しく入力してください。");
-      }
+      const activePreflight = activeGuidedPreflight ?? parsePublicEnrollmentPreflight(JSON.stringify({
+        version: 1,
+        platform: "macos",
+        candidate_id: candidateId.trim(),
+        device_key_fingerprint: deviceKeyFingerprint.trim(),
+      }));
+      if (!deviceLabel.trim()) throw new EnrollmentFlowError("enrollment", "端末名を入力してください。");
       if (!supportsWebAuthn()) throw new EnrollmentFlowError("unsupported", "このブラウザはTouch ID/パスキーに対応していません。対応ブラウザでお試しください。");
       const { authorization_id } = await authenticateRecentAuth({
         operation: RECENT_AUTH_OPERATION,
@@ -843,13 +892,13 @@ function SetupSurface({ data, goTo, operate, online, canManage, refresh }: { dat
       const response = await fetchConsole("/api/console?operation=issue-device-enrollment", {
         method: "POST",
         headers: { "content-type": "application/json", "idempotency-key": crypto.randomUUID(), "agentpass-recent-auth": authorization_id },
-        body: JSON.stringify({ proof_version: 2, candidate_id: normalizedCandidateId, device_key_fingerprint: normalizedFingerprint, label: deviceLabel.trim(), platform: "macos", ttl_ms: 10 * 60 * 1000 }),
+        body: JSON.stringify({ proof_version: 2, candidate_id: activePreflight.candidate_id, device_key_fingerprint: activePreflight.device_key_fingerprint, label: deviceLabel.trim(), platform: "macos", ttl_ms: 10 * 60 * 1000 }),
       });
       let payload: unknown;
       try { payload = await response.json(); } catch { throw new EnrollmentFlowError("enrollment", "登録情報を発行できませんでした。接続と権限を確認して、もう一度お試しください。"); }
       if (!response.ok) throw new EnrollmentFlowError("enrollment", "登録情報を発行できませんでした。接続と権限を確認して、もう一度お試しください。");
-      const invitation = parseV2EnrollmentInvitation(payload, organizationId);
-      writeEnrollmentStore(enrollmentStoreId, invitation as Record<string, string>);
+      const invitation = parseV2EnrollmentInvitation(payload, organizationId, activePreflight);
+      writeEnrollmentStore(enrollmentStoreId, invitation);
       setIssuedEnrollment({
         enrollmentId: String(invitation.enrollment_id),
         deviceId: String(invitation.device_id),
@@ -858,10 +907,36 @@ function SetupSurface({ data, goTo, operate, online, canManage, refresh }: { dat
         deviceKeyFingerprint: String(invitation.candidate_binding && (invitation.candidate_binding as Record<string, unknown>).device_key_fingerprint),
         expiresAt: String(invitation.expires_at),
       });
-      setEnrollmentVisible(true);
+      const liveHandoff = liveHandoffRef.current;
+      if (liveHandoff) {
+        const sameBinding = liveHandoff.preflight.candidate_id === activePreflight.candidate_id
+          && liveHandoff.preflight.device_key_fingerprint === activePreflight.device_key_fingerprint;
+        liveHandoffRef.current = null;
+        if (!sameBinding) {
+          onLiveHandoffStatus("failed");
+          setEnrollmentVisible(true);
+        } else {
+          try {
+            await postBrowserCliHandoff({
+              handoff: liveHandoff,
+              correlation_id: liveHandoff.correlation_id,
+              nonce: liveHandoff.preflight.nonce,
+              invitation,
+            });
+            clearEnrollmentStore(enrollmentStoreId);
+            setEnrollmentVisible(false);
+            onLiveHandoffStatus("delivered");
+          } catch {
+            setEnrollmentVisible(true);
+            onLiveHandoffStatus("failed");
+          }
+        }
+      } else {
+        setEnrollmentVisible(true);
+      }
     } catch (error) {
       clearConsoleSessionOnUnauthorized(error);
-      setEnrollmentError(enrollmentErrorMessage(error));
+      setEnrollmentError(error instanceof EnrollmentPreflightError ? "公開preflightを検証できませんでした。4項目だけを含む、正しいJSONを貼り付けてください。" : enrollmentErrorMessage(error));
     } finally {
       enrollmentInFlight.current = false;
       setEnrollmentPending(false);
@@ -906,8 +981,14 @@ function SetupSurface({ data, goTo, operate, online, canManage, refresh }: { dat
   };
   return (
     <>
-      <SurfaceHeader eyebrow="SETUP / 01" title={<>まずは、<br />この3つだけ。</>} copy="難しい設定はAgentPassが保護します。いまの環境は、Agentが安全に作業できるところまで準備できています。" />
+      <SurfaceHeader eyebrow="SETUP / 01" title={<>まずは、<br />公開preflightから。</>} copy="Macが準備した公開情報を読み込み、内容を確認してから、Touch ID / パスキーで安全に招待を発行します。" />
       <div className="surface-content">
+        {liveHandoffStatus !== "none" ? <div className={`handoff-notice handoff-${liveHandoffStatus}`} role={liveHandoffStatus === "failed" ? "alert" : "status"} data-live-handoff-state={liveHandoffStatus}>
+          {liveHandoffStatus === "loading" ? "Macのセットアップ接続を確認しています。" : null}
+          {liveHandoffStatus === "ready" ? "公開preflightを読み込みました。招待を発行すると、Macへ自動で渡します。" : null}
+          {liveHandoffStatus === "delivered" ? "招待をMacへ安全に渡しました。Mac側のセットアップ完了を待っています。" : null}
+          {liveHandoffStatus === "failed" ? "自動受け渡しに失敗しました。発行済みの招待を下のJSONから標準入力へ渡してください。" : null}
+        </div> : null}
         {!canManage ? <article className="surface-card" role="status"><span className="section-kicker">READ ONLY</span><h2 className="surface-card-title">閲覧権限で表示しています</h2><p className="surface-card-copy">このロールでは端末・Agent・Capabilityを変更できません。変更が必要な場合はOwnerまたはAdminへ依頼してください。</p></article> : null}
         <article className="surface-card">
           <span className="section-kicker">CURRENT SESSION</span>
@@ -934,10 +1015,14 @@ function SetupSurface({ data, goTo, operate, online, canManage, refresh }: { dat
           {passkeyError ? <p className="form-error" role="alert">{passkeyError}</p> : null}
         </article>
         {canManage ? <article className="surface-card">
-          <span className="section-kicker">ENROLL A MAC · V2</span><h2 className="surface-card-title">Macを安全に追加</h2>
-          <p className="surface-card-copy">P-256キーとリリース候補に束縛した、10分だけ有効なワンタイム招待を発行します。秘密鍵はMacのSecure Enclave内で生成され、ブラウザには入りません。</p>
-          <div className="form-grid"><label>端末名<input required maxLength={128} autoComplete="off" value={deviceLabel} onChange={(event) => setDeviceLabel(event.target.value)} /></label><label>リリース候補ID<input required maxLength={128} autoComplete="off" placeholder="candidate-2026-08" value={candidateId} onChange={(event) => setCandidateId(event.target.value)} /><span className="field-help">インストールする署名済みPKGの候補ID。</span></label><label>端末キーのフィンガープリント<input required maxLength={51} autoComplete="off" placeholder="SHA256:…" value={deviceKeyFingerprint} onChange={(event) => setDeviceKeyFingerprint(event.target.value)} /><span className="field-help">Mac側で準備したP-256公開キーの識別子。秘密鍵ではありません。</span></label></div>
-          <button className="secondary-button" type="button" disabled={!online || enrollmentPending || !deviceLabel.trim()} onClick={issueEnrollment}>{enrollmentPending ? "認証・発行中…" : "Touch ID/パスキー確認"}</button>
+          <span className="section-kicker">ENROLL A MAC · GUIDED</span><h2 className="surface-card-title">Macを安全に追加</h2>
+          <p className="surface-card-copy">Macのセットアップ画面から出力した、公開情報だけのpreflight JSONを貼り付けてください。秘密鍵や招待credentialはこのブラウザに入りません。</p>
+          <div className="guided-enrollment-steps">
+            <div className="guided-enrollment-step"><span className="setup-step-number">01</span><div><h3 className="setup-step-title">公開preflightを読み込む</h3><p className="field-help">macOS用の候補IDとP-256公開キーの指紋、バージョンだけを受け付けます。</p><textarea aria-label="公開preflight JSON" className="preflight-input" rows={5} autoComplete="off" spellCheck={false} placeholder={'{"version":1,"platform":"macos","candidate_id":"…","device_key_fingerprint":"SHA256:…"}'} value={preflightText} onChange={(event) => { setPreflightText(event.target.value); setPreflight(null); setPreflightSource("manual"); setPreflightError(""); }} /><button className="secondary-button" type="button" disabled={!preflightText.trim() || enrollmentPending} onClick={importPreflight}>公開preflightを確認</button>{preflightError ? <p className="form-error" role="alert">{preflightError}</p> : null}</div></div>
+            {activeGuidedPreflight ? <div className="preflight-preview" role="status"><div className="stop-title-row"><div><p className="row-title">公開preflightを確認しました</p><p className="row-description">macOS · 候補 {activeGuidedPreflight.candidate_id} · P-256 {activeGuidedPreflight.device_key_fingerprint}</p></div><StatusTag tone="green">PUBLIC ONLY</StatusTag></div></div> : null}
+            <div className="guided-enrollment-step"><span className="setup-step-number">02</span><div><h3 className="setup-step-title">名前を付けて認証する</h3><p className="field-help">表示名だけを入力し、Touch ID / パスキーで発行を承認します。</p><label>端末名<input required maxLength={128} autoComplete="off" value={deviceLabel} onChange={(event) => setDeviceLabel(event.target.value)} /></label><button className="secondary-button" type="button" disabled={!online || enrollmentPending || (!activeGuidedPreflight && !advancedEnrollment) || !deviceLabel.trim()} onClick={() => void issueEnrollment()}>{enrollmentPending ? "認証・発行中…" : "Touch ID/パスキー確認して発行"}</button></div></div>
+          </div>
+          <details className="advanced-enrollment"><summary>上級者向け：preflight JSONを使えない場合の手入力</summary><p className="field-help">互換性のためのfallbackです。値は同じ厳格な形式で検証し、公開キー指紋以外は受け付けません。</p><div className="form-grid"><label>リリース候補ID<input maxLength={128} autoComplete="off" placeholder="candidate-2026-08" value={candidateId} onChange={(event) => setCandidateId(event.target.value)} /></label><label>端末キーのフィンガープリント<input maxLength={51} autoComplete="off" placeholder="SHA256:…" value={deviceKeyFingerprint} onChange={(event) => setDeviceKeyFingerprint(event.target.value)} /><span className="field-help">秘密鍵ではなく、P-256公開キーのSHA-256指紋。</span></label></div><button className="text-button" type="button" onClick={() => { setAdvancedEnrollment(true); setPreflight(null); setPreflightSource("manual"); setPreflightText(""); setPreflightError(""); }}>手入力を使う</button></details>
           {enrollmentError ? <p className="form-error" role="alert">{enrollmentError}</p> : null}
           {issuedEnrollment ? <div className="enrollment-progress" aria-live="polite" data-enrollment-state={progress}><div className="stop-title-row"><div><p className="row-title">{issuedEnrollment.label}</p><p className="row-description">有効期限 {deviceDate(issuedEnrollment.expiresAt)} · 候補 {issuedEnrollment.candidateId} · {issuedEnrollment.deviceKeyFingerprint}</p></div><StatusTag tone={progress === "pending" ? "amber" : "green"}>{progressLabel}</StatusTag></div><ol className="enrollment-steps"><li data-state="pending"><strong>pending</strong><span>招待を発行済み。Macからの受け入れを待っています。</span></li><li data-state="enrolled"><strong>enrolled</strong><span>{progress === "pending" ? "Cloudが端末の登録完了を確認するまで待機します。" : "Cloudが端末の登録完了を確認しました。"}</span></li><li data-state="recovery-proven"><strong>recovery-proven</strong><span>署名済みpossession receiptの検証はMac側で完了します。Consoleはreceiptを受け取って成功扱いにしません。</span></li></ol><button className="text-button" type="button" disabled={enrollmentPending} onClick={() => void refresh()}>状態を再確認</button></div> : null}
           {enrollmentVisible ? <div className="enrollment-result" aria-live="polite"><p className="row-title">一度だけ表示しています</p><p className="surface-card-copy">下のJSONをMacへ安全に渡し、標準入力からセットアップしてください。5分後または再読込で消え、コピー内容も60秒後に消去を試みます。</p><pre className="secret-output">{enrollmentJson}</pre><div className="stop-action-row"><button className="primary-button" type="button" onClick={() => void copyEnrollment()}>JSONをコピー</button><button className="text-button" type="button" onClick={() => { clearEnrollmentStore(enrollmentStoreId); setEnrollmentVisible(false); }}>表示を消す</button></div><code className="command-hint">agentpass setup continue --execute --enrollment-url &lt;Cloud API URL&gt;/v1 --enrollment-stdin</code></div> : null}
@@ -1099,6 +1184,11 @@ export function AgentPassConsole() {
   const capabilityEpoch = useRef(0);
   const adminAuditEpoch = useRef(0);
   const organizationIdRef = useRef<string | null>(null);
+  const liveHandoffRef = useRef<LiveHandoffSession | null>(null);
+  const liveHandoffReadRef = useRef(false);
+  const liveHandoffMountedRef = useRef(false);
+  const [liveHandoffStatus, setLiveHandoffStatus] = useState<LiveHandoffStatus>("none");
+  const [livePreflight, setLivePreflight] = useState<PublicEnrollmentPreflight | null>(null);
 
   const expireSession = useCallback(() => {
     summaryEpoch.current += 1;
@@ -1157,6 +1247,51 @@ export function AgentPassConsole() {
     window.addEventListener(CONSOLE_SESSION_ENDED_EVENT, expireSession);
     return () => window.removeEventListener(CONSOLE_SESSION_ENDED_EVENT, expireSession);
   }, [expireSession]);
+
+  useEffect(() => {
+    liveHandoffMountedRef.current = true;
+    return () => {
+      liveHandoffMountedRef.current = false;
+      liveHandoffRef.current = null;
+    };
+  }, []);
+
+  useEffect(() => {
+    if (liveHandoffReadRef.current) return;
+    liveHandoffReadRef.current = true;
+    const launchFragment = window.location.hash;
+    if (launchFragment === "") return;
+    const failLiveHandoff = () => window.setTimeout(() => {
+      if (liveHandoffMountedRef.current) setLiveHandoffStatus("failed");
+    }, 0);
+    try {
+      const pageUrl = new URL(window.location.href);
+      pageUrl.hash = "";
+      window.history.replaceState(window.history.state, "", `${pageUrl.pathname}${pageUrl.search}`);
+    } catch {
+      failLiveHandoff();
+      return;
+    }
+    let handoff: ReturnType<typeof parseBrowserCliHandoffLaunchFragment>;
+    try {
+      handoff = parseBrowserCliHandoffLaunchFragment(launchFragment);
+      if (!handoff) return;
+    } catch {
+      failLiveHandoff();
+      return;
+    }
+    queueMicrotask(() => {
+      if (liveHandoffMountedRef.current) setLiveHandoffStatus("loading");
+    });
+    void fetchBrowserCliHandoffPreflight({ handoff }).then((preflight) => {
+      if (!liveHandoffMountedRef.current) return;
+      liveHandoffRef.current = { ...handoff, preflight };
+      setLivePreflight(publicBrowserCliEnrollmentPreflight(preflight));
+      setLiveHandoffStatus("ready");
+    }).catch(() => {
+      failLiveHandoff();
+    });
+  }, []);
 
   useEffect(() => {
     if (!confirmOpen) return;
@@ -1331,7 +1466,8 @@ export function AgentPassConsole() {
     return parseDeviceRefreshResponse(payload, deviceId);
   };
 
-  const currentLabel = navItems.find((item) => item.id === activeView)?.label ?? "概要";
+  const liveSetupActive = activeView === "overview" && liveHandoffStatus !== "none";
+  const currentLabel = liveSetupActive ? "セットアップ" : navItems.find((item) => item.id === activeView)?.label ?? "概要";
   const activeAgents = data.agents.filter((agent) => agent.state !== "停止").length;
   const canManage = sessionRole === "owner" || sessionRole === "admin";
   const canEmergencyStop = sessionRole === "owner";
@@ -1363,7 +1499,7 @@ export function AgentPassConsole() {
         <div className={`content${activeView === "organizations" || activeView === "recovery" ? " organization-content" : ""}`} role={activeView === "organizations" || activeView === "recovery" ? undefined : "main"}>
           {sessionState !== "active" ? <SessionEndedSurface reason={sessionState} /> : null}
           {sessionState === "active" && activeView === "overview" ? <Overview data={data} goTo={goTo} onRequestRefresh={requestDeviceRefresh} summaryState={summaryState} canManage={canManage} /> : null}
-          {sessionState === "active" && activeView === "setup" ? <SetupSurface data={data} goTo={goTo} operate={operate} online={summaryState === "ready"} canManage={canManage} refresh={() => refreshSummary()} /> : null}
+          {sessionState === "active" && (activeView === "setup" || liveSetupActive) ? <SetupSurface data={data} goTo={goTo} operate={operate} online={summaryState === "ready"} canManage={canManage} refresh={() => refreshSummary()} liveHandoffRef={liveHandoffRef} livePreflight={livePreflight} liveHandoffStatus={liveHandoffStatus} onLiveHandoffStatus={setLiveHandoffStatus} /> : null}
           {sessionState === "active" && activeView === "agents" ? <AgentsSurface data={data} operate={operate} canManage={canManage} /> : null}
           {sessionState === "active" && activeView === "policies" ? <PoliciesSurface data={data} operate={operate} canManage={canManage} /> : null}
           {sessionState === "active" && activeView === "activity" ? <ActivitySurface data={data} /> : null}
