@@ -95,6 +95,7 @@ function createRepository({
       state: row.state,
     };
     if (includeClaim && row.lease) result.claim_token = row.claim_token;
+    if (row.state === "uncertain") result.uncertain_reason = row.uncertain_reason;
     if (row.signature !== undefined) result.signature = cloneValue(row.signature);
     if (row.provider_receipt !== undefined) result.provider_receipt = cloneValue(row.provider_receipt);
     return Object.freeze(result);
@@ -167,6 +168,7 @@ function createRepository({
       if (!row.lease || row.claim_token !== input.claim_token) failRepository("claim lost");
       if (!["started", "accepted", "uncertain"].includes(row.state)) failRepository("invalid state");
       row.state = "accepted";
+      delete row.uncertain_reason;
       row.signature = cloneValue(input.signature);
       row.provider_receipt = cloneValue(input.provider_receipt);
       notify(row);
@@ -185,6 +187,7 @@ function createRepository({
       if (row.state === "committed") return publicRecord(row);
       if (!row.lease || row.claim_token !== input.claim_token || row.state !== "accepted") failRepository("claim lost");
       row.state = "committed";
+      delete row.uncertain_reason;
       row.lease = false;
       delete row.claim_token;
       notify(row);
@@ -205,6 +208,7 @@ function createRepository({
         failRepository("not recoverable");
       }
       row.state = "committed";
+      delete row.uncertain_reason;
       row.lease = false;
       delete row.claim_token;
       notify(row);
@@ -219,6 +223,7 @@ function createRepository({
       if (row.state === "committed") return publicRecord(row);
       if (!row.lease || row.claim_token !== input.claim_token) return publicRecord(row);
       row.state = "uncertain";
+      row.uncertain_reason = input.uncertain_reason;
       row.lease = false;
       delete row.claim_token;
       notify(row);

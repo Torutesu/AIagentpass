@@ -190,6 +190,7 @@ function createFixture() {
       purpose: row.purpose,
       request_digest: row.request_digest,
       state: row.state,
+      ...(row.state === "uncertain" ? { uncertain_reason: row.uncertain_reason } : {}),
       ...(includeClaim ? { claim_token: row.claim_token } : {}),
       ...(row.signature === undefined ? {} : { signature: clone(row.signature) }),
       ...(row.provider_receipt === undefined ? {} : { provider_receipt: clone(row.provider_receipt) })
@@ -277,7 +278,10 @@ function createFixture() {
       const row = operationRecords.get(input.operation_id);
       if (!row) return null;
       assertOperationIdentity(row, input);
-      if (row.state !== "committed") row.state = "uncertain";
+      if (row.state !== "committed") {
+        row.state = "uncertain";
+        row.uncertain_reason = input.uncertain_reason;
+      }
       return operationRecord(row);
     },
     async getOperation(input) {

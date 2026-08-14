@@ -21,6 +21,18 @@ const MAX_BYTES = 1024 * 1024;
 const MAX_PRUNE = 1_000;
 const POLL_MS = 25;
 
+export const PROVIDER_OPERATION_UNCERTAIN_REASONS = Object.freeze([
+  "process_interrupted",
+  "provider_timeout",
+  "provider_response_lost",
+  "provider_output_invalid",
+  "commit_response_lost",
+  "claim_expired_after_start",
+  "lifecycle_fenced",
+  "recovery_exhausted",
+]);
+const UNCERTAIN_REASON_SET = new Set(PROVIDER_OPERATION_UNCERTAIN_REASONS);
+
 const OPERATION_FIELDS = Object.freeze([
   "algorithm", "bytes_length", "key_id", "key_version", "operation_id", "purpose", "request_digest"
 ]);
@@ -28,7 +40,7 @@ const OPERATION_FIELDS = Object.freeze([
 const SELECT_OPERATION = `SELECT purpose,operation_id,algorithm,bytes_length,
   encode(request_digest,'hex') AS request_digest,key_id,key_version::text AS key_version,state,
   claim_token_digest,claim_expires_at,claim_expires_at > clock_timestamp() AS claim_active,
-  provider_started_at,signature,public_key_der,
+  provider_started_at,uncertain_reason,signature,public_key_der,
   provider_receipt_provider,provider_receipt_id
   FROM managed_signer_provider_operations
   WHERE purpose=$1 AND operation_id=$2`;
@@ -93,14 +105,14 @@ export function createPostgresProviderOperationRepository({
       const token = makeToken(randomBytes);
       const result = await tx.query(`INSERT INTO managed_signer_provider_operations
         (purpose,operation_id,algorithm,bytes_length,request_digest,key_id,key_version,state,
-         claim_token_digest,claim_expires_at,provider_started_at,signature,public_key_der,
+         claim_token_digest,claim_expires_at,provider_started_at,uncertain_reason,signature,public_key_der,
          provider_receipt_provider,provider_receipt_id,expires_at)
         VALUES ($1,$2,$3,$4,$5,$6,$7,'pending',$8,clock_timestamp()+($9 * interval '1 millisecond'),
-          NULL,NULL,NULL,NULL,NULL,clock_timestamp()+($10 * interval '1 millisecond'))
+          NULL,NULL,NULL,NULL,NULL,NULL,clock_timestamp()+($10 * interval '1 millisecond'))
         RETURNING purpose,operation_id,algorithm,bytes_length,encode(request_digest,'hex') AS request_digest,
           key_id,key_version::text AS key_version,state,claim_token_digest,claim_expires_at,
           claim_expires_at > clock_timestamp() AS claim_active,
-          provider_started_at,signature,public_key_der,provider_receipt_provider,provider_receipt_id`, [
+          provider_started_at,uncertain_reason,signature,public_key_der,provider_receipt_provider,provider_receipt_id`, [
         operation.purpose, operation.operation_id, operation.algorithm, operation.bytes_length,
         Buffer.from(operation.request_digest, "hex"), operation.key_id, operation.key_version,
         Buffer.from(sha256(token), "hex"), claimLeaseMs, retentionMs,
@@ -140,12 +152,12 @@ export function createPostgresProviderOperationRepository({
         return publicRecord(row, claimToken);
       }
       const result = await tx.query(`UPDATE managed_signer_provider_operations
-        SET state='accepted',signature=$3,public_key_der=$4,provider_receipt_provider=$5,provider_receipt_id=$6
+        SET state='accepted',uncertain_reason=NULL,signature=$3,public_key_der=$4,provider_receipt_provider=$5,provider_receipt_id=$6
         WHERE purpose=$1 AND operation_id=$2
         RETURNING purpose,operation_id,algorithm,bytes_length,encode(request_digest,'hex') AS request_digest,
           key_id,key_version::text AS key_version,state,claim_token_digest,claim_expires_at,
           claim_expires_at > clock_timestamp() AS claim_active,
-          provider_started_at,signature,public_key_der,provider_receipt_provider,provider_receipt_id`, [
+          provider_started_at,uncertain_reason,signature,public_key_der,provider_receipt_provider,provider_receipt_id`, [
         operation.purpose, operation.operation_id, output.signature, output.publicKeyDer,
         output.provider, output.receiptId,
       ]);
@@ -179,7 +191,8 @@ export function createPostgresProviderOperationRepository({
   }
 
   async function markUncertain(input) {
-    const { operation, claimToken } = normalizeClaimedOperation(input, binding);
+    const { operation, claimToken } = normalizeClaimedOperation(input, binding, ["uncertain_reason"]);
+    const uncertainReason = normalizeUncertainReason(input.uncertain_reason);
     return runDatabase(() => withTransaction(client, async (tx) => {
       const row = await selectOperation(tx, operation, true);
       if (!row) return null;
@@ -187,13 +200,13 @@ export function createPostgresProviderOperationRepository({
       if (["committed", "rejected", "failed"].includes(row.state)) return publicRecord(row);
       requireClaim(row, operation, claimToken, ["pending", "started", "accepted", "uncertain"]);
       const result = await tx.query(`UPDATE managed_signer_provider_operations
-        SET state='uncertain',claim_token_digest=NULL,claim_expires_at=NULL,
+        SET state='uncertain',uncertain_reason=$3,claim_token_digest=NULL,claim_expires_at=NULL,
           provider_started_at=COALESCE(provider_started_at,clock_timestamp())
         WHERE purpose=$1 AND operation_id=$2
         RETURNING purpose,operation_id,algorithm,bytes_length,encode(request_digest,'hex') AS request_digest,
           key_id,key_version::text AS key_version,state,claim_token_digest,claim_expires_at,
           claim_expires_at > clock_timestamp() AS claim_active,
-          provider_started_at,signature,public_key_der,provider_receipt_provider,provider_receipt_id`, [operation.purpose, operation.operation_id]);
+          provider_started_at,uncertain_reason,signature,public_key_der,provider_receipt_provider,provider_receipt_id`, [operation.purpose, operation.operation_id, uncertainReason]);
       if (rowCount(result) !== 1) fail(PROVIDER_OPERATION_REPOSITORY_ERROR_CODES.STATE);
       return publicRecord(result.rows[0]);
     }));
@@ -291,7 +304,7 @@ export function createPostgresProviderOperationRepository({
         RETURNING purpose,operation_id,algorithm,bytes_length,encode(request_digest,'hex') AS request_digest,
           key_id,key_version::text AS key_version,state,claim_token_digest,claim_expires_at,
           claim_expires_at > clock_timestamp() AS claim_active,
-          provider_started_at,signature,public_key_der,provider_receipt_provider,provider_receipt_id`, [operation.purpose, operation.operation_id]);
+          provider_started_at,uncertain_reason,signature,public_key_der,provider_receipt_provider,provider_receipt_id`, [operation.purpose, operation.operation_id]);
       if (rowCount(result) !== 1) fail(PROVIDER_OPERATION_REPOSITORY_ERROR_CODES.STATE);
       return publicRecord(result.rows[0], claimToken);
     }));
@@ -355,7 +368,7 @@ async function setClaim(client, operation, token, state, leaseMs) {
     RETURNING purpose,operation_id,algorithm,bytes_length,encode(request_digest,'hex') AS request_digest,
       key_id,key_version::text AS key_version,state,claim_token_digest,claim_expires_at,
       claim_expires_at > clock_timestamp() AS claim_active,
-      provider_started_at,signature,public_key_der,provider_receipt_provider,provider_receipt_id`, [
+      provider_started_at,uncertain_reason,signature,public_key_der,provider_receipt_provider,provider_receipt_id`, [
     operation.purpose, operation.operation_id, state, Buffer.from(sha256(token), "hex"), leaseMs,
   ]);
   if (rowCount(result) !== 1) fail(PROVIDER_OPERATION_REPOSITORY_ERROR_CODES.CLAIM_LOST);
@@ -364,12 +377,12 @@ async function setClaim(client, operation, token, state, leaseMs) {
 
 async function commitRow(client, operation) {
   const result = await client.query(`UPDATE managed_signer_provider_operations
-    SET state='committed',claim_token_digest=NULL,claim_expires_at=NULL
+    SET state='committed',uncertain_reason=NULL,claim_token_digest=NULL,claim_expires_at=NULL
     WHERE purpose=$1 AND operation_id=$2
     RETURNING purpose,operation_id,algorithm,bytes_length,encode(request_digest,'hex') AS request_digest,
       key_id,key_version::text AS key_version,state,claim_token_digest,claim_expires_at,
       claim_expires_at > clock_timestamp() AS claim_active,
-      provider_started_at,signature,public_key_der,provider_receipt_provider,provider_receipt_id`, [operation.purpose, operation.operation_id]);
+      provider_started_at,uncertain_reason,signature,public_key_der,provider_receipt_provider,provider_receipt_id`, [operation.purpose, operation.operation_id]);
   if (rowCount(result) !== 1) fail(PROVIDER_OPERATION_REPOSITORY_ERROR_CODES.STATE);
   return publicRecord(result.rows[0]);
 }
@@ -410,6 +423,7 @@ function publicRecord(row, claimToken = undefined) {
     state: row.state,
   };
   if (claimToken !== undefined) record.claim_token = claimToken;
+  if (row.state === "uncertain") record.uncertain_reason = normalizeStoredUncertainReason(row.uncertain_reason);
   if (hasOutput(row)) {
     record.signature = Object.freeze({ algorithm: ALGORITHM, encoding: "base64url", value: Buffer.from(row.signature).toString("base64url"),
       public_key: Object.freeze({ algorithm: ALGORITHM, encoding: "base64url", value: Buffer.from(row.public_key_der).toString("base64url") }) });
@@ -425,6 +439,16 @@ function hasOutput(row) {
 }
 
 function claimExpired(row) { return row.claim_active !== true; }
+
+function normalizeUncertainReason(value) {
+  if (typeof value !== "string" || !UNCERTAIN_REASON_SET.has(value)) fail(PROVIDER_OPERATION_REPOSITORY_ERROR_CODES.INPUT);
+  return value;
+}
+
+function normalizeStoredUncertainReason(value) {
+  if (typeof value !== "string" || !UNCERTAIN_REASON_SET.has(value)) fail(PROVIDER_OPERATION_REPOSITORY_ERROR_CODES.DATABASE);
+  return value;
+}
 
 function exactObject(value, keys) {
   if (!plainObject(value)) fail(PROVIDER_OPERATION_REPOSITORY_ERROR_CODES.INPUT);

@@ -15,7 +15,7 @@ import { createPostgresProviderOperationRepository } from "../../src/postgres/pr
 
 const DATABASE_URL = process.env.AGENTPASS_TEST_DATABASE_URL ?? process.env.AGENTPASS_TEST_POSTGRES_URL;
 
-test("0040 converges two PostgreSQL-backed adapter instances and recovers a started operation", {
+test("0041 converges two PostgreSQL-backed adapter instances and recovers a started operation", {
   skip: !DATABASE_URL,
   timeout: 60_000,
 }, async (t) => {
@@ -33,7 +33,7 @@ test("0040 converges two PostgreSQL-backed adapter instances and recovers a star
   const migrationClient = await firstPool.connect();
   try {
     const migrated = await createMigrationRunner({ client: migrationClient, applicationVersion: "provider-operation-integration" }).run();
-    assert.equal(migrated.currentVersion, 40);
+    assert.equal(migrated.currentVersion, 41);
   } finally {
     migrationClient.release();
   }
@@ -81,14 +81,18 @@ test("0040 converges two PostgreSQL-backed adapter instances and recovers a star
   const operation = operationFrom(recoveryBinding, recoveryBytes);
   const reserved = await firstRepository.reserveOperation(operation);
   await firstRepository.startOperation({ ...operation, claim_token: reserved.claim_token });
-  await firstRepository.markUncertain({ ...operation, claim_token: reserved.claim_token });
+  await firstRepository.markUncertain({
+    ...operation,
+    claim_token: reserved.claim_token,
+    uncertain_reason: "process_interrupted",
+  });
   const recovered = await adapter(secondRepository).lookup(recoveryBinding, recoveryBytes);
   assert.equal(recovered.state, "committed");
   assert.equal(signCalls, 2);
   assert.equal((await firstRepository.getOperation(operation)).state, "committed");
 });
 
-test("0040 composes with lifecycle fencing across lost commits and emergency disable", {
+test("0041 composes with lifecycle fencing across lost commits and emergency disable", {
   skip: !DATABASE_URL,
   timeout: 60_000,
 }, async (t) => {
@@ -114,7 +118,7 @@ test("0040 composes with lifecycle fencing across lost commits and emergency dis
   const migrationClient = await firstPool.connect();
   try {
     const migrated = await createMigrationRunner({ client: migrationClient, applicationVersion: "provider-operation-composed-integration" }).run();
-    assert.equal(migrated.currentVersion, 40);
+    assert.equal(migrated.currentVersion, 41);
   } finally {
     migrationClient.release();
   }

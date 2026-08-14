@@ -396,6 +396,31 @@ start/drain wiring. The subsequent qualification must run 100 concurrent
 requests across two pools and prove the public health surface contains no
 operation ID, receipt, signing bytes, tenant identifier, or provider diagnostic.
 
+#### C1 completion sequence after migration 0041
+
+Migration `0041` now records one closed `uncertain_reason`, backfills prior
+uncertain rows conservatively, indexes bounded maintenance reads, and provides
+an aggregate-only `SKIP LOCKED` quarantine function for expired `started`
+claims. A non-overlapping, drainable worker contract is also implemented. This
+is a schema/worker checkpoint, not runtime or production completion.
+
+The remaining work is split into reviewable commits with explicit gates:
+
+| Step | Implementation | Required verification | Completion signal |
+| --- | --- | --- | --- |
+| C1.1 deployment-wide repository | Add `maintainProviderOperations({limit})` and aggregate health over every purpose and key version. Quarantine expired started rows, reconcile only records with sufficient persisted verified output, and prune only correlated terminal low/high-level pairs under one total budget. | Unit tests for exact result shape and total-budget accounting; SQL tests for pending exclusion, terminal immutability, `SKIP LOCKED`, rotated versions, malformed rows, and DB failure. | Repository returns only `{quarantined,reconciled,pruned,total}` and fixed state counts; no identifier, receipt, bytes, tenant, or diagnostic can escape. |
+| C1.2 runtime and observability | Construct one deployment-wide worker after migration, start it only after readiness dependencies exist, add fixed metric counters and aggregate readiness, stop scheduling during drain, wait boundedly for the active cycle, then close providers and PostgreSQL. | Startup-disabled/enabled, timer overlap, worker crash containment, metric-sink failure, DB outage/recovery, readiness timeout, shutdown timeout, and resource-order tests. | A stopped, overdue, or failed maintenance authority is visible without labels; shutdown cannot start new maintenance or close storage beneath active work. |
+| C1.3 two-pool PostgreSQL qualification | Run 100 identical concurrent requests through two independent pools/adapters. Inject accepted-response loss, stale started claim, restart, low/high-level commit-response loss, rotation, emergency disable, and operation substitution. | Non-skipped PostgreSQL 17 tests, repeated at least three times; exactly one verified committed/returned result or explicit fail-closed uncertain state; bounded row count and no blind high-level replay. | Contention converges deterministically and both ledgers retain one correlated authoritative history. |
+| C1.4 retention and operator boundary | Prove retention under two workers and locked rows; define bounded read-only uncertainty summaries and an adjudication command contract, without adding the Human API yet. Document that direct KMS invocation may be at-least-once after ambiguity. | Retention/reconciliation races, stale lifecycle, unsupported reason, recovery exhaustion, and privacy snapshots; threat-model and runbook review. | Automatic maintenance never invents provider acceptance and never converts lifecycle-fenced work into success; manual action has a frozen follow-up contract. |
+| C1.5 closure gate | Run lint, contract validation, complete root suite, real-PostgreSQL matrix, and source-bound CI; archive exact command/environment results. | Zero unexpected skips/failures, schema version 41 everywhere, catalog count 128, clean worktree, pushed commit. | C1 may be marked complete; C2/C3 authoritative producers can then depend on the ledger. |
+
+After C1, C2 and C3 can proceed in parallel because their schemas and signer
+purposes are disjoint. C6 PostgreSQL role/TLS/backup work and C9 packaging may
+also run in parallel. C4 waits for both producer authorities; C5 waits for
+their runtime bindings; protected real-KMS qualification C8 waits for C5 and
+C6. External IAM, notarization, physical Mac, staging, and independent-review
+evidence remain explicit release gates and cannot be satisfied by local tests.
+
 ### M1. Audit-anchor and promotion-evidence authorities (Q2B-3)
 
 Current state: items 1 and 2 are implemented locally. Runtime lifecycle binding
@@ -471,7 +496,7 @@ use a provider operation service/ledger or remain blocked from production.
 
 Merge role-separated PostgreSQL CI first, followed by backup/PITR evidence and
 cutover hardening. The CI lane creates the migrator, app, and backup roles from
-scratch, applies all 40 migrations, executes repository smoke tests as the app,
+scratch, applies all 41 migrations, executes repository smoke tests as the app,
 and proves the negative privilege matrix. The protected-environment lane then
 records encrypted backup, point-in-time restore, row/checksum/authority
 comparison, RPO, RTO, and rollback rehearsal.

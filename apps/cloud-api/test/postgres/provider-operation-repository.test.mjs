@@ -78,7 +78,7 @@ class FakePg {
       const row = { purpose, operation_id: operationId, algorithm, bytes_length: bytesLength,
         request_digest: Buffer.from(requestDigest).toString("hex"), key_id: keyId, key_version: String(keyVersion),
         state: "pending", claim_token_digest: claimDigest, claim_expires_at: new Date(Date.now() + 30_000),
-        claim_active: true, provider_started_at: null, signature: null, public_key_der: null,
+        claim_active: true, provider_started_at: null, uncertain_reason: null, signature: null, public_key_der: null,
         provider_receipt_provider: null, provider_receipt_id: null };
       this.rows.set(key, row);
       return this.result(row);
@@ -93,12 +93,14 @@ class FakePg {
       row.state = "started"; row.provider_started_at ??= new Date();
     } else if (text.includes("SET state='accepted'")) {
       row.state = "accepted"; row.signature = params[2]; row.public_key_der = params[3];
+      row.uncertain_reason = null;
       row.provider_receipt_provider = params[4]; row.provider_receipt_id = params[5];
     } else if (text.includes("SET state='uncertain'")) {
       row.state = "uncertain"; row.claim_token_digest = null; row.claim_expires_at = null;
+      row.uncertain_reason = params[2];
       row.claim_active = false; row.provider_started_at ??= new Date();
     } else if (text.includes("SET state='committed'")) {
-      row.state = "committed"; row.claim_token_digest = null; row.claim_expires_at = null; row.claim_active = false;
+      row.state = "committed"; row.uncertain_reason = null; row.claim_token_digest = null; row.claim_expires_at = null; row.claim_active = false;
     }
     return this.result(row);
   }
@@ -124,6 +126,19 @@ test("0040 defines a closed immutable provider-operation state machine", async (
   assert.match(sql, /claim_token_digest/u);
   assert.match(sql, /octet_length\(signature\) = 64/u);
   assert.doesNotMatch(sql, /organization_id|request_bytes|private_key|provider_credential/iu);
+});
+
+test("0041 adds closed uncertainty reasons and quarantines only bounded expired started claims", async () => {
+  const sql = await readFile(new URL("../../../../contracts/postgres/0041_managed_signer_provider_operation_maintenance.sql", import.meta.url), "utf8");
+  assert.match(sql, /ADD COLUMN uncertain_reason text/u);
+  assert.match(sql, /SET uncertain_reason = 'process_interrupted'\s+WHERE state = 'uncertain'/u);
+  assert.match(sql, /state = 'uncertain'[\s\S]*uncertain_reason IN/u);
+  assert.match(sql, /state <> 'uncertain' AND uncertain_reason IS NULL/u);
+  assert.match(sql, /agentpass_quarantine_expired_managed_signer_provider_operations/u);
+  assert.match(sql, /WHERE state = 'started'[\s\S]*claim_expires_at <= clock_timestamp\(\)/u);
+  assert.match(sql, /LIMIT p_limit\s+FOR UPDATE SKIP LOCKED/u);
+  assert.match(sql, /uncertain_reason = 'claim_expired_after_start'/u);
+  assert.doesNotMatch(sql, /request_bytes|private_key|provider_credential/iu);
 });
 
 test("reserves, starts, accepts, and commits one closed provider operation", async () => {
@@ -153,8 +168,9 @@ test("persists accepted output across uncertainty and reconciles without a new p
   await repo.startOperation({ ...operation(), claim_token: reserved.claim_token });
   const output = providerOutput();
   await repo.recordAccepted({ ...operation(), claim_token: reserved.claim_token, ...output });
-  const uncertain = await repo.markUncertain({ ...operation(), claim_token: reserved.claim_token });
+  const uncertain = await repo.markUncertain({ ...operation(), claim_token: reserved.claim_token, uncertain_reason: "commit_response_lost" });
   assert.equal(uncertain.state, "uncertain");
+  assert.equal(uncertain.uncertain_reason, "commit_response_lost");
   assert.deepEqual(uncertain.provider_receipt, output.provider_receipt);
   const committed = await repo.reconcileOperation(operation());
   assert.equal(committed.state, "committed");
@@ -180,7 +196,7 @@ test("rejects operation substitution, stale claims, unknown fields, and forbidde
 test("waits only within the configured bound and observes a durable transition", async () => {
   const { repo } = repository();
   const reserved = await repo.reserveOperation(operation());
-  setTimeout(() => { void repo.markUncertain({ ...operation(), claim_token: reserved.claim_token }); }, 5);
+  setTimeout(() => { void repo.markUncertain({ ...operation(), claim_token: reserved.claim_token, uncertain_reason: "process_interrupted" }); }, 5);
   const result = await repo.waitForOperation({ operation: operation(), timeout_ms: 100 });
   assert.equal(result.state, "uncertain");
   await assert.rejects(repo.waitForOperation({ operation: operation(), timeout_ms: 30_001 }), { code: CODES.INPUT });

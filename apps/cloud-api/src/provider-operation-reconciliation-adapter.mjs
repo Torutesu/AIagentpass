@@ -20,7 +20,7 @@ import {
  *   recordAccepted({ ...operation, claim_token, signature, provider_receipt })
  *   commitOperation({ ...operation, claim_token })
  *   reconcileOperation(operation)
- *   markUncertain({ ...operation, claim_token })
+ *   markUncertain({ ...operation, claim_token, uncertain_reason })
  *   getOperation(operation)
  *   waitForOperation({ operation, timeout_ms })
  *
@@ -63,6 +63,16 @@ export const PROVIDER_OPERATION_STATES = Object.freeze([
   "committed",
   "rejected",
   "failed",
+]);
+const PROVIDER_OPERATION_UNCERTAIN_REASON_SET = new Set([
+  "process_interrupted",
+  "provider_timeout",
+  "provider_response_lost",
+  "provider_output_invalid",
+  "commit_response_lost",
+  "claim_expired_after_start",
+  "lifecycle_fenced",
+  "recovery_exhausted",
 ]);
 
 export const PROVIDER_OPERATION_RECONCILIATION_ERROR_CODES = Object.freeze({
@@ -338,6 +348,7 @@ function normalizeRepositoryRecord(value, operation, maxRequestBytes, { allowCla
     ...(allowClaimToken && Object.hasOwn(value, "claim_token") ? ["claim_token"] : []),
     ...(Object.hasOwn(value, "signature") ? ["signature"] : []),
     ...(Object.hasOwn(value, "provider_receipt") ? ["provider_receipt"] : []),
+    ...(Object.hasOwn(value, "uncertain_reason") ? ["uncertain_reason"] : []),
   ], REPOSITORY);
   if (!PROVIDER_OPERATION_STATES.includes(value.state)) fail(REPOSITORY, "repository returned an invalid operation state");
   if (value.algorithm !== MANAGED_SIGNER_ALGORITHM || !OPERATION_ID.test(value.operation_id)
@@ -362,6 +373,13 @@ function normalizeRepositoryRecord(value, operation, maxRequestBytes, { allowCla
   }
   if (value.state === "committed" && Object.hasOwn(value, "claim_token")) {
     fail(REPOSITORY, "committed operation still contains a claim");
+  }
+  if (value.state === "uncertain") {
+    if (typeof value.uncertain_reason !== "string" || !PROVIDER_OPERATION_UNCERTAIN_REASON_SET.has(value.uncertain_reason)) {
+      fail(REPOSITORY, "uncertain operation is missing its closed reason");
+    }
+  } else if (Object.hasOwn(value, "uncertain_reason")) {
+    fail(REPOSITORY, "non-uncertain operation contains an uncertain reason");
   }
   return Object.freeze({ ...value });
 }
@@ -463,6 +481,12 @@ function mapRepositoryError() {
 
 function mapProviderError() {
   return new ProviderOperationReconciliationError(PROVIDER);
+}
+
+function reasonForProviderError(error) {
+  return error instanceof ProviderOperationReconciliationError && error.code === OUTPUT
+    ? "provider_output_invalid"
+    : "provider_response_lost";
 }
 
 /**
@@ -587,9 +611,12 @@ export function createProviderOperationReconciliationAdapter(options = {}) {
     return normalizeRepositoryRecord(value, operation, maxRequestBytes, { allowClaimToken: false });
   }
 
-  async function markUncertainBestEffort(operation, claimToken) {
+  async function markUncertainBestEffort(operation, claimToken, uncertainReason) {
     try {
-      const value = await repository.markUncertain(operationInput(operation, claimToken));
+      const value = await repository.markUncertain(Object.freeze({
+        ...operationInput(operation, claimToken),
+        uncertain_reason: uncertainReason,
+      }));
       return normalizeRepositoryRecord(value, operation, maxRequestBytes);
     } catch {
       return null;
@@ -614,7 +641,7 @@ export function createProviderOperationReconciliationAdapter(options = {}) {
     try {
       recovered = await callProvider(operation, signingBytes);
     } catch (error) {
-      await markUncertainBestEffort(operation, claimed.claim_token);
+      await markUncertainBestEffort(operation, claimed.claim_token, reasonForProviderError(error));
       throw error;
     }
 
@@ -622,7 +649,7 @@ export function createProviderOperationReconciliationAdapter(options = {}) {
     if (record.signature !== undefined) {
       const stored = signatureShape(record.signature, metadata.key, signingBytes);
       if (!sameBytes(Buffer.from(stored.value, "base64url"), recovered.rawSignature)) {
-        await markUncertainBestEffort(operation, claimed.claim_token);
+        await markUncertainBestEffort(operation, claimed.claim_token, "provider_output_invalid");
         fail(CONFLICT, "deterministic recovery returned a different signature");
       }
     }
@@ -636,12 +663,12 @@ export function createProviderOperationReconciliationAdapter(options = {}) {
     try {
       accepted = await repository.recordAccepted(acceptedInput);
     } catch {
-      await markUncertainBestEffort(operation, claimed.claim_token);
+      await markUncertainBestEffort(operation, claimed.claim_token, "provider_response_lost");
       throw mapRepositoryError();
     }
     const acceptedRecord = normalizeRepositoryRecord(accepted, operation, maxRequestBytes);
     if (acceptedRecord.state !== "accepted" && acceptedRecord.state !== "committed") {
-      await markUncertainBestEffort(operation, claimed.claim_token);
+      await markUncertainBestEffort(operation, claimed.claim_token, "provider_response_lost");
       fail(REPOSITORY, "repository did not persist accepted provider output");
     }
     if (acceptedRecord.state === "committed") {
@@ -653,7 +680,7 @@ export function createProviderOperationReconciliationAdapter(options = {}) {
     try {
       committed = await repository.commitOperation(operationInput(operation, claimed.claim_token));
     } catch {
-      await markUncertainBestEffort(operation, claimed.claim_token);
+      await markUncertainBestEffort(operation, claimed.claim_token, "commit_response_lost");
       throw mapRepositoryError();
     }
     const committedRecord = normalizeRepositoryRecord(committed, operation, maxRequestBytes, { allowClaimToken: false });
@@ -683,7 +710,7 @@ export function createProviderOperationReconciliationAdapter(options = {}) {
     try {
       result = await callProvider(operation, signingBytes);
     } catch (error) {
-      await markUncertainBestEffort(operation, claimToken);
+      await markUncertainBestEffort(operation, claimToken, reasonForProviderError(error));
       throw error;
     }
     const acceptedInput = Object.freeze({
@@ -696,7 +723,7 @@ export function createProviderOperationReconciliationAdapter(options = {}) {
     try {
       accepted = await repository.recordAccepted(acceptedInput);
     } catch {
-      await markUncertainBestEffort(operation, claimToken);
+      await markUncertainBestEffort(operation, claimToken, "provider_response_lost");
       throw mapRepositoryError();
     }
     const metadata = await loadPublicKey();
@@ -706,7 +733,7 @@ export function createProviderOperationReconciliationAdapter(options = {}) {
       return committedResult(acceptedRecord, operation, metadata.key, signingBytes, providerId);
     }
     if (acceptedRecord.state !== "accepted") {
-      await markUncertainBestEffort(operation, claimToken);
+      await markUncertainBestEffort(operation, claimToken, "provider_response_lost");
       fail(REPOSITORY, "repository did not persist accepted provider output");
     }
     assertPersistedProviderResult(acceptedRecord, operation, result, metadata.key, signingBytes);
@@ -714,7 +741,7 @@ export function createProviderOperationReconciliationAdapter(options = {}) {
     try {
       committed = await repository.commitOperation(operationInput(operation, claimToken));
     } catch {
-      await markUncertainBestEffort(operation, claimToken);
+      await markUncertainBestEffort(operation, claimToken, "commit_response_lost");
       throw mapRepositoryError();
     }
     const committedRecord = normalizeRepositoryRecord(committed, operation, maxRequestBytes, { allowClaimToken: false });
