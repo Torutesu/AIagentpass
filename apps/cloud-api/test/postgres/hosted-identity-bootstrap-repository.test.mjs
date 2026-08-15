@@ -1,0 +1,123 @@
+import assert from "node:assert/strict";
+import crypto from "node:crypto";
+import test from "node:test";
+
+import {
+  HOSTED_IDENTITY_BOOTSTRAP_REPOSITORY_ERROR_CODES as CODES,
+  HOSTED_IDENTITY_BOOTSTRAP_REPOSITORY_SQL as SQL,
+  HostedIdentityBootstrapRepositoryError,
+  createPostgresHostedIdentityBootstrapRepository
+} from "../../src/postgres/hosted-identity-bootstrap-repository.mjs";
+
+const IDS = Object.freeze({
+  attempt: "11111111-1111-4111-8111-111111111111",
+  oauth: "22222222-2222-4222-8222-222222222222",
+  member: "33333333-3333-4333-8333-333333333333",
+  organization: "44444444-4444-4444-8444-444444444444",
+  membership: "55555555-5555-4555-8555-555555555555",
+  challenge: "66666666-6666-4666-8666-666666666666"
+});
+const REDIRECT = "https://console.example.test/api/auth/bootstrap/github/callback";
+const ORIGIN = "https://console.example.test";
+const RP_ID = "console.example.test";
+const NOW = "2026-08-15T00:00:00.000Z";
+const LATER = "2026-08-15T00:10:00.000Z";
+const STATE = "state-secret-that-never-reaches-postgresql";
+const CODE = "oauth-code-that-never-reaches-postgresql";
+const COOKIE = "bootstrap-cookie-that-never-reaches-postgresql";
+const CSRF = "csrf-token-that-never-reaches-postgresql";
+const CHALLENGE = "webauthn-challenge-that-never-reaches-postgresql";
+
+class FakeClient {
+  constructor(handler = () => ({ rows: [{ ok: true }], rowCount: 1 })) { this.handler = handler; this.calls = []; }
+  async query(text, params) { this.calls.push({ text, params }); return this.handler(text, params, this.calls); }
+}
+
+function repo(handler) { const client = new FakeClient(handler); return { client, repository: createPostgresHostedIdentityBootstrapRepository({ client }) }; }
+function digest(value) { return crypto.createHash("sha256").update(value, "utf8").digest(); }
+function publicResponse() { return { version: 1, organization: { organization_id: IDS.organization, name: "Acme", version: 1, created_at: NOW, updated_at: NOW }, onboarding: { state: "webauthn_required" } }; }
+function startRow() { return { attempt_id: IDS.attempt, oauth_state_id: IDS.oauth, state_expires_at: NOW, attempt_expires_at: LATER }; }
+function challengeRow() { return { challenge_id: IDS.challenge, member_id: IDS.member, organization_id: IDS.organization, rp_id: RP_ID, origin: ORIGIN, expires_at: LATER }; }
+
+test("uses exact SQL signatures and hashes every raw selector before query", async () => {
+  const { client, repository } = repo((text) => {
+    if (text === SQL.start) return { rows: [startRow()], rowCount: 1 };
+    if (text === SQL.consumeOAuthState) return { rows: [{ attempt_id: IDS.attempt, pkce_challenge: "A".repeat(43), pkce_method: "S256", client_id: "github-client", redirect_uri: REDIRECT }], rowCount: 1 };
+    if (text === SQL.completeOAuthState) return { rows: [{ result: IDS.attempt }], rowCount: 1 };
+    if (text === SQL.issueCsrf) return { rows: [{ result: true }], rowCount: 1 };
+    if (text === SQL.createChallenge) return { rows: [challengeRow()], rowCount: 1 };
+    if (text === SQL.consumeChallenge) return { rows: [{ attempt_id: IDS.attempt, member_id: IDS.member, organization_id: IDS.organization, rp_id: RP_ID, origin: ORIGIN, user_verification: "required" }], rowCount: 1 };
+    if (text === SQL.completeChallenge) return { rows: [{ result: IDS.attempt }], rowCount: 1 };
+    if (text === SQL.commitOrganization) return { rows: [{ response_status: 201, response_json: publicResponse(), replayed: false }], rowCount: 1 };
+    return { rows: [{ result: null }], rowCount: 1 };
+  });
+  await repository.start({ attempt_id: IDS.attempt, oauth_state_id: IDS.oauth, state: STATE, pkce_challenge: "A".repeat(43), client_id: "github-client", redirect_uri: REDIRECT });
+  await repository.consumeOAuthState({ oauth_state_id: IDS.oauth, code: CODE, redirect_uri: REDIRECT });
+  await repository.completeOAuthState({ oauth_state_id: IDS.oauth, bootstrap_cookie: COOKIE, member_id: IDS.member, subject: "12345" });
+  await repository.issueCsrf({ bootstrap_cookie: COOKIE, csrf_token: CSRF });
+  await repository.commitOrganization({ bootstrap_cookie: COOKIE, idempotency_key: "bootstrap-0001", request_hash: digest("request"), organization_id: IDS.organization, membership_id: IDS.membership, public_response: publicResponse() });
+  await repository.createChallenge({ bootstrap_cookie: COOKIE, challenge_id: IDS.challenge, challenge: CHALLENGE, rp_id: RP_ID, origin: ORIGIN, expires_at: LATER });
+  await repository.consumeChallenge({ bootstrap_cookie: COOKIE, challenge_id: IDS.challenge, challenge: CHALLENGE });
+  await repository.completeChallenge({ bootstrap_cookie: COOKIE, challenge_id: IDS.challenge, challenge: CHALLENGE });
+  const allParams = client.calls.flatMap((call) => call.params);
+  for (const raw of [STATE, CODE, COOKIE, CSRF, CHALLENGE]) {
+    assert.equal(allParams.includes(raw), false, `${raw} must not be sent to SQL`);
+    assert.equal(allParams.some((value) => Buffer.isBuffer(value) && value.equals(digest(raw))), true, `${raw} must be hashed`);
+  }
+  assert.deepEqual(client.calls[0], { text: SQL.start, params: [IDS.attempt, IDS.oauth, digest(STATE), "A".repeat(43), "github-client", REDIRECT] });
+  const completion = client.calls.find((call) => call.text === SQL.completeOAuthState);
+  assert.deepEqual(completion.params, [IDS.oauth, digest(COOKIE), IDS.member, "12345", digest("12345")]);
+  assert.match(SQL.completeOAuthState, /\$3::uuid,\$4::text,\$5::bytea/u);
+});
+
+test("covers OAuth failure, challenge failure, and empty transition results", async () => {
+  const { client, repository } = repo((text) => text === SQL.consumeOAuthState || text === SQL.consumeChallenge ? { rows: [], rowCount: 0 } : { rows: [{ result: null }], rowCount: 1 });
+  assert.equal(await repository.consumeOAuthState({ oauth_state_id: IDS.oauth, code: CODE, redirect_uri: REDIRECT }), null);
+  assert.equal(await repository.consumeChallenge({ bootstrap_cookie: COOKIE, challenge_id: IDS.challenge, challenge: CHALLENGE }), null);
+  assert.equal(await repository.failOAuthState({ oauth_state_id: IDS.oauth, failure_code: "provider_failed" }), true);
+  assert.equal(await repository.failChallenge({ bootstrap_cookie: COOKIE, challenge_id: IDS.challenge, challenge: CHALLENGE, failure_code: "verification_failed" }), true);
+  assert.equal(client.calls.filter(({ text }) => text === SQL.failOAuthState).length, 1);
+  assert.equal(client.calls.filter(({ text }) => text === SQL.failChallenge).length, 1);
+});
+
+test("enforces closed input and output contracts before exposing durable state", async () => {
+  const { client, repository } = repo(() => ({ rows: [{ result: true, extra: "reject" }], rowCount: 1 }));
+  await assert.rejects(repository.issueCsrf({ bootstrap_cookie: COOKIE, csrf_token: CSRF, extra: true }), (error) => error.code === CODES.INPUT);
+  await assert.rejects(repository.issueCsrf({ bootstrap_cookie: COOKIE, csrf_token: CSRF }), (error) => error.code === CODES.RESULT);
+  assert.equal(client.calls.length, 1);
+  await assert.rejects(repository.createChallenge({ bootstrap_cookie: COOKIE, challenge_id: IDS.challenge, challenge: CHALLENGE, rp_id: RP_ID, origin: REDIRECT, expires_at: LATER, extra: true }), (error) => error.code === CODES.INPUT);
+  await assert.rejects(repository.failChallenge({ bootstrap_cookie: COOKIE, challenge_id: IDS.challenge, challenge: CHALLENGE, failure_code: "Bad-Code" }), (error) => error.code === CODES.INPUT);
+
+  const invalidResult = repo((text) => text === SQL.consumeOAuthState
+    ? { rows: [{ attempt_id: IDS.attempt, pkce_challenge: "short", pkce_method: "S256", client_id: "github-client", redirect_uri: REDIRECT }], rowCount: 1 }
+    : { rows: [{ result: null }], rowCount: 1 });
+  await assert.rejects(invalidResult.repository.consumeOAuthState({ oauth_state_id: IDS.oauth, code: CODE, redirect_uri: REDIRECT }), (error) => error.code === CODES.RESULT);
+  await assert.rejects(invalidResult.repository.completeChallenge({ bootstrap_cookie: COOKIE, challenge_id: IDS.challenge, challenge: CHALLENGE }), (error) => error.code === CODES.RESULT);
+});
+
+test("does not leak database messages and classifies only stable SQL states", async () => {
+  const database = new Error("raw selector=secret and password=do-not-leak");
+  database.code = "XX000";
+  const { repository } = repo(() => { throw database; });
+  await assert.rejects(repository.issueCsrf({ bootstrap_cookie: COOKIE, csrf_token: CSRF }), (error) => {
+    assert.ok(error instanceof HostedIdentityBootstrapRepositoryError);
+    assert.equal(error.code, CODES.DATABASE);
+    assert.equal(error.message, "Hosted identity bootstrap storage is unavailable");
+    assert.equal(error.message.includes("secret"), false);
+    return true;
+  });
+  const retry = repo(() => { const error = new Error("serialization details"); error.code = "40001"; throw error; });
+  await assert.rejects(retry.repository.issueCsrf({ bootstrap_cookie: COOKIE, csrf_token: CSRF }), (error) => error.code === CODES.RETRYABLE && !error.message.includes("serialization"));
+  const conflict = repo(() => { const error = new Error("duplicate selector"); error.code = "23505"; throw error; });
+  await assert.rejects(conflict.repository.issueCsrf({ bootstrap_cookie: COOKIE, csrf_token: CSRF }), (error) => error.code === CODES.CONFLICT && !error.message.includes("duplicate"));
+});
+
+test("uses DB-clock outputs and does not add client-side timestamps or expiry calculations", async () => {
+  const { client, repository } = repo((text) => text === SQL.start ? { rows: [startRow()], rowCount: 1 } : { rows: [challengeRow()], rowCount: 1 });
+  const started = await repository.start({ attempt_id: IDS.attempt, oauth_state_id: IDS.oauth, state: STATE, pkce_challenge: "A".repeat(43), client_id: "github-client", redirect_uri: REDIRECT });
+  assert.deepEqual(started, startRow());
+  await repository.createChallenge({ bootstrap_cookie: COOKIE, challenge_id: IDS.challenge, challenge: CHALLENGE, rp_id: RP_ID, origin: ORIGIN, expires_at: LATER });
+  assert.equal(client.calls[0].params.includes(NOW), false);
+  assert.equal(client.calls[0].params.includes(LATER), false);
+  assert.equal(client.calls[1].params.includes(LATER), true);
+});

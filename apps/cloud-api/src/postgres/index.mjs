@@ -151,3 +151,10 @@ export {
   PlatformSessionBootstrapRepositoryError,
   createPostgresPlatformSessionBootstrapRepository
 } from "./platform-session-bootstrap-repository.mjs";
+export {
+  HOSTED_IDENTITY_BOOTSTRAP_REPOSITORY_ERROR_CODES,
+  HOSTED_IDENTITY_BOOTSTRAP_REPOSITORY_METHODS,
+  HOSTED_IDENTITY_BOOTSTRAP_REPOSITORY_SQL,
+  HostedIdentityBootstrapRepositoryError,
+  createPostgresHostedIdentityBootstrapRepository
+} from "./hosted-identity-bootstrap-repository.mjs";

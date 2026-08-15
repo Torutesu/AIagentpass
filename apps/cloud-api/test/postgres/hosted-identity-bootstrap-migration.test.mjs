@@ -100,6 +100,8 @@ test("0057 uses owner-based trigger guards, PUBLIC-only migration revokes, and e
   assert.match(sql, /REVOKE ALL PRIVILEGES ON FUNCTION public\.agentpass_hosted_identity_bootstrap_start\([^;]+\) FROM PUBLIC;/u);
   assert.doesNotMatch(sql, /GRANT\s/iu);
   assert.doesNotMatch(sql, /FROM PUBLIC,|TO agentpass_/u);
+  assert.match(roles, /left\(c\.relname, length\('hosted_identity_'\)\) = 'hosted_identity_'/u);
+  assert.match(roles, /REVOKE INSERT, UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER ON TABLE public\.%I FROM agentpass_app, agentpass_backup/u);
   for (const signature of [
     "agentpass_hosted_identity_bootstrap_start(uuid,uuid,bytea,text,text,text)",
     "agentpass_hosted_identity_oauth_state_complete(uuid,bytea,uuid,text,bytea)",

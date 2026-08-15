@@ -70,3 +70,6 @@ node --test test/hosted-identity-bootstrap-contract.test.mjs
 ```
 
 validator は route inventory、GitHub/PostgreSQL authority、caller authority field の拒否、cookie／CSRF／Origin、idempotency、membership state、recovery、migration/version policy、既存データモデル参照を検査します。
+
+実装順序、トランザクション境界、並列レーン、テスト行列、リリース判定は
+[Hosted v1 implementation plan](./HOSTED_IMPLEMENTATION_PLAN_2026-08-15.md) を参照してください。
