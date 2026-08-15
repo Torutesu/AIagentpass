@@ -9,7 +9,10 @@ test("enrollment UI uses a session-bound WebAuthn ceremony instead of manual pro
 
   assert.match(source, /import \{ authenticateRecentAuth, registerPasskey, WebAuthnClientError \} from "\.\.\/webauthn-client"/);
   assert.match(source, /const SESSION_BOOTSTRAP_PATH = "\/api\/auth\/session"/);
-  assert.match(source, /fetch\(SESSION_BOOTSTRAP_PATH, \{[\s\S]*?method: "POST"[\s\S]*?body: "\{\}"[\s\S]*?cache: "no-store"[\s\S]*?credentials: "same-origin"/);
+  assert.match(source, /const SESSION_RESUME_PATH = "\/api\/auth\/session\/resume"/);
+  assert.match(source, /fetch\(path, \{[\s\S]*?method: "POST"[\s\S]*?body: "\{\}"[\s\S]*?cache: "no-store"[\s\S]*?credentials: "same-origin"/);
+  assert.match(source, /requestConsoleSession\(SESSION_RESUME_PATH, signal\)/);
+  assert.match(source, /requestConsoleSession\(SESSION_BOOTSTRAP_PATH, signal\)/);
   assert.match(source, /hasExactKeys\(value, \["session", "csrf_token"\]\)/);
   assert.match(source, /UUID\.test\(session\.organization_id\)/);
   assert.match(source, /BASE64URL_CSRF = \/\^\[A-Za-z0-9_-\]\{43\}\$\//);

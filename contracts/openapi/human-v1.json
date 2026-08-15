@@ -67,6 +67,72 @@
         }
       }
     },
+    "/auth/session/resume": {
+      "post": {
+        "operationId": "resumeHumanSession",
+        "summary": "Resume a human session by atomically rotating its cookie",
+        "description": "The Console sends the existing __Host-agentpass_session cookie, the exact configured Origin, and the same application/json body contract as session bootstrap: exactly {}. The request accepts no caller-supplied CSRF token. Cloud hashes the cookie value, authenticates and locks the active session, then atomically creates a replacement session and revokes the old session. The old cookie cannot be reused after a successful rotation, and no replacement cookie is returned when the atomic rotation loses the old session.",
+        "security": [{ "humanSession": [] }],
+        "requestBody": { "$ref": "#/components/requestBodies/SessionResume" },
+        "x-agentpass-runtime-path": "/api/auth/session/resume",
+        "x-agentpass-no-browser-redirect": true,
+        "x-agentpass-accepted-headers": ["Origin", "Content-Type"],
+        "x-agentpass-rejected-headers": ["Authorization", "agentpass-console-identity", "agentpass-csrf", "X-CSRF-Token", "Idempotency-Key"],
+        "x-agentpass-origin-policy": {
+          "header": "Origin",
+          "required": true,
+          "match": "exact-configured-console-origin",
+          "null_origin": "reject",
+          "additionalProperties": false
+        },
+        "x-agentpass-empty-body": {
+          "required": true,
+          "content_type": "application/json",
+          "schema_ref": "#/components/schemas/SessionBootstrapRequest",
+          "required_properties": 0,
+          "additionalProperties": false
+        },
+        "x-agentpass-cookie-binding": {
+          "cookie": "__Host-agentpass_session",
+          "lookup": "sha256(cookie_value)",
+          "raw_cookie": "transport-only",
+          "additionalProperties": false
+        },
+        "x-agentpass-atomic-rotation": {
+          "repository_method": "rotateSession",
+          "transaction": "single-database-transaction",
+          "steps": [
+            "lock organization and member session set",
+            "lock the active old session by cookie hash",
+            "insert replacement session with a new cookie hash and CSRF hash",
+            "revoke the old session with reason session_rotation",
+            "commit both session changes or return no replacement"
+          ],
+          "old_cookie_replay": "reject-without-new-cookie",
+          "additionalProperties": false
+        },
+        "x-agentpass-csrf-policy": {
+          "caller_header": null,
+          "response": "new-ephemeral-csrf-token",
+          "origin_remains_required": true,
+          "additionalProperties": false
+        },
+        "x-agentpass-secret-policy": {
+          "session_cookie": "never-json",
+          "raw_cookie": "never-log-or-durable",
+          "csrf_token": "response-only-and-never-durable",
+          "cache": "no-store",
+          "additionalProperties": false
+        },
+        "responses": {
+          "201": { "$ref": "#/components/responses/SessionResumed" },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/OriginForbidden" },
+          "503": { "$ref": "#/components/responses/SessionResumeUnavailable" }
+        }
+      }
+    },
     "/platform/promotions": {
       "post": {
         "operationId": "issuePlatformPromotion",
@@ -1178,6 +1244,15 @@
           }
         }
       },
+      "SessionResume": {
+        "required": true,
+        "description": "The request body is exactly the empty JSON object. The existing session cookie and exact Origin are transport-bound; caller identity and CSRF fields are forbidden in the body and headers.",
+        "content": {
+          "application/json": {
+            "schema": { "$ref": "#/components/schemas/SessionBootstrapRequest" }
+          }
+        }
+      },
       "CreateOrganization": {
         "required": true,
         "content": { "application/json": { "schema": { "$ref": "#/components/schemas/CreateOrganizationRequest" } } }
@@ -1288,6 +1363,21 @@
         },
         "content": { "application/json": { "schema": { "$ref": "#/components/schemas/SessionBootstrapResponse" } } }
       },
+      "SessionResumed": {
+        "description": "The existing human session was valid and was atomically replaced by a new opaque session.",
+        "headers": {
+          "Set-Cookie": {
+            "required": true,
+            "description": "Replacement __Host-agentpass_session cookie. The old cookie is revoked in the same database transaction. The value is never returned in JSON and must be Secure, HttpOnly, SameSite=Strict, Path=/, and have no Domain attribute.",
+            "schema": { "type": "string", "minLength": 1, "maxLength": 2048 }
+          },
+          "Cache-Control": {
+            "required": true,
+            "schema": { "type": "string", "const": "no-store, max-age=0" }
+          }
+        },
+        "content": { "application/json": { "schema": { "$ref": "#/components/schemas/SessionBootstrapResponse" } } }
+      },
       "IdentityAssertionUnauthorized": {
         "description": "The assertion is malformed, has an untrusted signature or binding, is expired, or does not resolve to an active membership. The response is intentionally opaque.",
         "headers": { "Cache-Control": { "required": true, "schema": { "type": "string", "const": "no-store, max-age=0" } } },
@@ -1305,6 +1395,11 @@
       },
       "SessionBootstrapUnavailable": {
         "description": "The identity replay ledger or membership store is unavailable. The service fails closed and does not issue a session.",
+        "headers": { "Cache-Control": { "required": true, "schema": { "type": "string", "const": "no-store, max-age=0" } } },
+        "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorEnvelope" } } }
+      },
+      "SessionResumeUnavailable": {
+        "description": "The session store was unavailable or the atomic rotation could not be committed. The service fails closed and does not issue a replacement cookie.",
         "headers": { "Cache-Control": { "required": true, "schema": { "type": "string", "const": "no-store, max-age=0" } } },
         "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorEnvelope" } } }
       },
@@ -1447,6 +1542,7 @@
       "SessionBootstrapRequest": {
         "type": "object",
         "additionalProperties": false,
+        "required": [],
         "minProperties": 0,
         "maxProperties": 0,
         "description": "Exactly {}. All identity and tenant context comes from the BFF-only signed assertion and server-side membership lookup."

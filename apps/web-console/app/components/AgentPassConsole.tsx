@@ -159,6 +159,7 @@ const DEVICE_REVOKE_RECENT_AUTH_OPERATION = "device.revoke";
 const DEVICE_REFRESH_REQUEST_RECENT_AUTH_OPERATION = "device.refresh.request";
 const EMERGENCY_STOP_RECENT_AUTH_OPERATION = "organization.emergency_stop";
 const SESSION_BOOTSTRAP_PATH = "/api/auth/session";
+const SESSION_RESUME_PATH = "/api/auth/session/resume";
 const CSRF_HEADER = "agentpass-csrf";
 const CONSOLE_SESSION_ENDED_EVENT = "agentpass:session-ended";
 const MAX_ERROR_BODY_BYTES = 16_384;
@@ -411,11 +412,11 @@ function withAbort<T>(promise: Promise<T>, signal?: AbortSignal): Promise<T> {
   });
 }
 
-async function bootstrapConsoleSession(signal?: AbortSignal): Promise<ConsoleSession> {
+async function requestConsoleSession(path: string, signal?: AbortSignal): Promise<{ response: Response; payload: unknown }> {
   throwIfAborted(signal);
   let response: Response;
   try {
-    response = await fetch(SESSION_BOOTSTRAP_PATH, {
+    response = await fetch(path, {
       method: "POST",
       headers: { accept: "application/json", "content-type": "application/json" },
       body: "{}",
@@ -428,7 +429,7 @@ async function bootstrapConsoleSession(signal?: AbortSignal): Promise<ConsoleSes
     if (signal?.aborted || isAbortError(error)) throw abortError();
     throw new ConsoleSessionError("セッションを確認できませんでした。ページを再読み込みして、もう一度お試しください。");
   }
-  if (!response.ok || !/^application\/json(?:\s*;|\s*$)/i.test(response.headers.get("content-type") ?? "")) {
+  if (!/^application\/json(?:\s*;|\s*$)/i.test(response.headers.get("content-type") ?? "")) {
     throw new ConsoleSessionError("セッションを確認できませんでした。ページを再読み込みして、もう一度お試しください。", response.status);
   }
   let payload: unknown;
@@ -437,7 +438,32 @@ async function bootstrapConsoleSession(signal?: AbortSignal): Promise<ConsoleSes
   } catch {
     throw new ConsoleSessionError("セッションを確認できませんでした。ページを再読み込みして、もう一度お試しください。", response.status);
   }
-  return parseSessionBootstrap(payload);
+  return { response, payload };
+}
+
+function isSessionResumeRequired(response: Response, payload: unknown): boolean {
+  return response.status === 401
+    && isPlainRecord(payload)
+    && hasExactKeys(payload, ["error"])
+    && isPlainRecord(payload.error)
+    && hasExactKeys(payload.error, ["code", "message"])
+    && payload.error.code === "human_session_session_required"
+    && typeof payload.error.message === "string";
+}
+
+async function bootstrapConsoleSession(signal?: AbortSignal): Promise<ConsoleSession> {
+  const resumed = await requestConsoleSession(SESSION_RESUME_PATH, signal);
+  if (isSessionResumeRequired(resumed.response, resumed.payload)) {
+    const bootstrapped = await requestConsoleSession(SESSION_BOOTSTRAP_PATH, signal);
+    if (!bootstrapped.response.ok) {
+      throw new ConsoleSessionError("セッションを確認できませんでした。ページを再読み込みして、もう一度お試しください。", bootstrapped.response.status);
+    }
+    return parseSessionBootstrap(bootstrapped.payload);
+  }
+  if (!resumed.response.ok) {
+    throw new ConsoleSessionError("セッションを確認できませんでした。ページを再読み込みして、もう一度お試しください。", resumed.response.status);
+  }
+  return parseSessionBootstrap(resumed.payload);
 }
 
 function createConsoleSessionContext() {

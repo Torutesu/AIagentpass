@@ -19,7 +19,7 @@ function functionBody(source, name, nextName) {
 test("all Console reads and mutations wait for one shared session bootstrap", async () => {
   const source = await componentSource();
   const wrapper = functionBody(source, "fetchConsole", "supportsWebAuthn");
-  const bootstrapPathUses = source.match(/\/api\/auth\/session/g) ?? [];
+  const bootstrapPathUses = source.match(/const SESSION_BOOTSTRAP_PATH = "\/api\/auth\/session";/g) ?? [];
   const directConsoleFetches = source.match(/\bfetch\s*\(\s*[`"]\/api\/console/g) ?? [];
   const wrappedConsoleFetches = source.match(/\bfetchConsole\s*\(\s*[`"]\/api\/console/g) ?? [];
 
@@ -32,6 +32,23 @@ test("all Console reads and mutations wait for one shared session bootstrap", as
   assert.match(source, /const current = bootstrapConsoleSession\(signal\)/);
   assert.ok(wrapper.indexOf("await consoleSessionContext.get(init.signal ?? undefined)") < wrapper.indexOf("await fetch(path"), "bootstrap must finish before the Console request");
   assert.match(source, /withAbort\(pending, signal\)/);
+});
+
+test("resumes the same-origin session before SIWC and falls back only for Cloud human_session_session_required", async () => {
+  const source = await componentSource();
+  const bootstrap = functionBody(source, "bootstrapConsoleSession", "createConsoleSessionContext");
+  const request = functionBody(source, "requestConsoleSession", "isSessionResumeRequired");
+
+  assert.match(source, /const SESSION_RESUME_PATH = "\/api\/auth\/session\/resume"/);
+  assert.match(bootstrap, /requestConsoleSession\(SESSION_RESUME_PATH, signal\)/);
+  assert.match(bootstrap, /isSessionResumeRequired\(resumed\.response, resumed\.payload\)/);
+  assert.ok(bootstrap.indexOf("requestConsoleSession(SESSION_RESUME_PATH, signal)") < bootstrap.indexOf("requestConsoleSession(SESSION_BOOTSTRAP_PATH, signal)"));
+  assert.match(bootstrap, /if \(!bootstrapped\.response\.ok\)/);
+  assert.match(source, /response\.status === 401/);
+  assert.match(source, /payload\.error\.code === "human_session_session_required"/);
+  assert.match(request, /credentials: "same-origin"/);
+  assert.match(request, /cache: "no-store"/);
+  assert.match(request, /redirect: "error"/);
 });
 
 test("every Console mutation carries the exact in-memory CSRF token and same-origin credentials", async () => {

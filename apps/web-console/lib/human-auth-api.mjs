@@ -10,6 +10,7 @@ const SESSION_KEYS = Object.freeze(["version", "session_id", "member_id", "organ
 const SESSION_ROLES = new Set(["owner", "admin", "auditor", "viewer"]);
 const ROUTES = new Map([
   ["/api/auth/session", Object.freeze({ cloudPath: "/api/auth/session", methods: ["POST", "DELETE"], session: "bootstrap", bodies: { POST: "session-bootstrap", DELETE: "none" }, requireSetCookie: true, delete: Object.freeze({ session: "human", requireCookie: true, requireCsrf: true, allowSetCookie: true, clearCookieOnly: true, requireClearedSessionBody: true }) })],
+  ["/api/auth/session/resume", Object.freeze({ cloudPath: "/api/auth/session/resume", methods: ["POST"], session: "resume", body: "session-resume", requireCookie: true, forwardSessionCookie: true, allowSetCookie: true, requireSetCookie: true, normalizeSessionResponse: true })],
   ["/api/auth/webauthn/options", Object.freeze({ cloudPath: "/api/auth/webauthn/options", session: "human", requireCookie: true, requireCsrf: true })],
   ["/api/auth/webauthn/verify", Object.freeze({ cloudPath: "/api/auth/webauthn/verify", session: "human", requireCookie: true, requireCsrf: true })],
   ["/api/auth/webauthn/registration/options", Object.freeze({ cloudPath: "/api/auth/webauthn/registration/options", session: "human", requireCookie: true, requireCsrf: true })],
@@ -61,8 +62,9 @@ export async function handleHumanAuthRequest(request, options = {}) {
       pragma: "no-cache",
     });
     const cookie = normalizeSessionCookie(request.headers.get("cookie"), { required: route.requireCookie === true });
-    if (route.session === "human" && cookie !== null) headers.set("cookie", cookie);
+    if ((route.session === "human" || route.forwardSessionCookie === true) && cookie !== null) headers.set("cookie", cookie);
     let upstreamBody = body;
+    if (route.body === "session-resume") upstreamBody = new TextEncoder().encode("{}");
     if (route.session === "bootstrap" && user !== undefined) {
       if (config.mode === "legacy") {
         headers.set("authorization", `Bearer ${config.token}`);
@@ -123,7 +125,7 @@ export async function handleHumanAuthRequest(request, options = {}) {
     } finally {
       clearTimeout(timeout);
     }
-    return await relayResponse(upstream, { allowSetCookie: route.session === "bootstrap" || route.allowSetCookie === true, clearCookieOnly: route.clearCookieOnly === true, requireSetCookie: route.requireSetCookie === true, requireClearedSessionBody: route.requireClearedSessionBody === true, bootstrap: route.session === "bootstrap" });
+    return await relayResponse(upstream, { allowSetCookie: route.session === "bootstrap" || route.allowSetCookie === true, clearCookieOnly: route.clearCookieOnly === true, requireSetCookie: route.requireSetCookie === true, requireClearedSessionBody: route.requireClearedSessionBody === true, bootstrap: route.session === "bootstrap", normalizeSessionResponse: route.normalizeSessionResponse === true });
   } catch (error) {
     const mapped = error instanceof HumanAuthBridgeError
       ? error
@@ -172,6 +174,10 @@ function validateBody(value, shape) {
     if (!isExactObject(value, [])) fail(400, "invalid_request", "The session request is invalid");
     return;
   }
+  if (shape === "session-resume") {
+    if (!isExactObject(value, [])) fail(400, "invalid_request", "The session request is invalid");
+    return;
+  }
   if (shape === "empty") {
     if (!isExactObject(value, [])) fail(400, "invalid_request", "The security request is invalid");
     return;
@@ -213,7 +219,7 @@ function validateBody(value, shape) {
   fail(500, "human_auth_bridge_failed", "Authentication is unavailable");
 }
 
-async function relayResponse(response, { allowSetCookie = false, clearCookieOnly = false, requireSetCookie = false, requireClearedSessionBody = false, bootstrap = false } = {}) {
+async function relayResponse(response, { allowSetCookie = false, clearCookieOnly = false, requireSetCookie = false, requireClearedSessionBody = false, bootstrap = false, normalizeSessionResponse = false } = {}) {
   if (!response || typeof response.status !== "number" || response.status < 200 || response.status > 599 || (response.status >= 300 && response.status < 400)) fail(502, "cloud_api_invalid_response", "Cloud API response was invalid");
   const type = response.headers?.get("content-type") ?? "";
   if (!/^application\/json(?:\s*;|\s*$)/i.test(type)) fail(502, "cloud_api_invalid_response", "Cloud API response was invalid");
@@ -223,7 +229,7 @@ async function relayResponse(response, { allowSetCookie = false, clearCookieOnly
   if (bytes.byteLength > MAX_RESPONSE_BYTES) fail(502, "cloud_api_invalid_response", "Cloud API response was invalid");
   let value;
   try { value = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes)); } catch { fail(502, "cloud_api_invalid_response", "Cloud API response was invalid"); }
-  if (bootstrap) value = normalizeBootstrapResponse(value, response.status >= 200 && response.status < 300);
+  if (bootstrap || normalizeSessionResponse) value = normalizeBootstrapResponse(value, response.status >= 200 && response.status < 300);
   if (requireClearedSessionBody && (response.status < 200 || response.status >= 300 || !isExactObject(value, ["session"]) || value.session !== null)) fail(502, "cloud_api_invalid_response", "Cloud API response was invalid");
   const headers = new Headers({ "content-type": "application/json; charset=utf-8", "cache-control": "no-store, max-age=0", pragma: "no-cache", expires: "0", "x-content-type-options": "nosniff", "referrer-policy": "no-referrer" });
   const setCookie = response.headers.get("set-cookie");

@@ -7,6 +7,7 @@ import { createHumanManagementHttpApi } from "../src/human-auth/management/http-
 const OPTIONS_PATH = "/api/auth/webauthn/options";
 const VERIFY_PATH = "/api/auth/webauthn/verify";
 const SESSION_PATH = "/api/auth/session";
+const SESSION_RESUME_PATH = "/api/auth/session/resume";
 const REGISTRATION_OPTIONS_PATH = "/api/auth/webauthn/registration/options";
 const REGISTRATION_VERIFY_PATH = "/api/auth/webauthn/registration/verify";
 const MANAGEMENT_CREDENTIALS_PATH = "/api/auth/management/credentials";
@@ -232,6 +233,28 @@ test("delegates the exact session bootstrap path and preserves Set-Cookie", asyn
   assert.equal(response.headers.get("set-cookie"), cookie);
   assert.equal(calls[0].url, SESSION_PATH);
   assert.equal(calls[0].headers.authorization, "Bearer server-only");
+});
+
+test("allows the exact session resume route through the human-auth boundary", async (t) => {
+  const calls = [];
+  const cookie = `__Host-agentpass_session=${"R".repeat(43)}; Path=/; HttpOnly; Secure; SameSite=Strict`;
+  const base = await startServer(t, { humanAuthApi: { async handle(input) { calls.push(input); return { status: 201, body: { session: { version: 1 }, csrf_token: "C".repeat(43) }, headers: { "Set-Cookie": cookie } }; } } });
+  const response = await fetch(`${base}${SESSION_RESUME_PATH}`, {
+    method: "POST",
+    headers: { origin: ORIGIN, cookie, "content-type": "application/json" },
+    body: "{}"
+  });
+  assert.equal(response.status, 201);
+  assert.equal(response.headers.get("set-cookie"), cookie);
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].url, SESSION_RESUME_PATH);
+  assert.equal(calls[0].method, "POST");
+
+  for (const suffix of ["/", "?unexpected=1"]) {
+    const rejected = await fetch(`${base}${SESSION_RESUME_PATH}${suffix}`, { method: "POST", headers: { origin: ORIGIN, cookie, "content-type": "application/json" }, body: "{}" });
+    assert.equal(rejected.status, 404, suffix);
+  }
+  assert.equal(calls.length, 1);
 });
 
 test("routes exact organization and invitation paths, forwarding queries only for lists", async (t) => {

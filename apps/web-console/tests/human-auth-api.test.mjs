@@ -88,6 +88,91 @@ test("does not reuse a stale browser session cookie during bootstrap", async () 
   assert.equal(response.headers.get("set-cookie"), `${replacement}; Path=/; HttpOnly; Secure; SameSite=Strict; Max-Age=3600`);
 });
 
+test("resumes a Hosted session with only the same-origin cookie and canonical empty body", async () => {
+  const calls = [];
+  const api = createHumanAuthBridge({
+    env,
+    fetchImpl: async (url, init) => {
+      calls.push({ url: String(url), init });
+      const result = sessionResponse();
+      return new Response(JSON.stringify({ session: result.session, csrf_token: result.csrf_token }), {
+        status: 200,
+        headers: {
+          "content-type": "application/json",
+          "set-cookie": `${sessionCookie}; Path=/; HttpOnly; Secure; SameSite=Strict; Max-Age=3600`
+        }
+      });
+    },
+    getSiwcUser: async () => { throw new Error("SIWC must not be consulted for resume"); }
+  });
+  const response = await api.handle(request("/api/auth/session/resume", {
+    body: {},
+    headers: {
+      cookie: `tracking=ignored; ${sessionCookie}`,
+      authorization: "Bearer browser-must-not-forward",
+      "agentpass-csrf": csrf,
+      "agentpass-console-user-id": "spoofed"
+    }
+  }));
+
+  assert.equal(response.status, 200);
+  assert.deepEqual(await response.json(), { session: sessionResponse().session, csrf_token: csrf });
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].url, "https://cloud.example.test/api/auth/session/resume");
+  assert.equal(calls[0].init.method, "POST");
+  assert.equal(new TextDecoder().decode(calls[0].init.body), "{}");
+  assert.equal(calls[0].init.headers.get("origin"), "https://console.example.test");
+  assert.equal(calls[0].init.headers.get("cookie"), sessionCookie);
+  assert.equal(calls[0].init.headers.has("authorization"), false);
+  assert.equal(calls[0].init.headers.has("agentpass-csrf"), false);
+  assert.equal(calls[0].init.headers.has("agentpass-console-user-id"), false);
+  assert.equal(calls[0].init.cache, "no-store");
+  assert.equal(calls[0].init.redirect, "error");
+  assert.equal(response.headers.get("set-cookie"), `${sessionCookie}; Path=/; HttpOnly; Secure; SameSite=Strict; Max-Age=3600`);
+  assert.equal(response.headers.get("cache-control"), "no-store, max-age=0");
+});
+
+test("resume requires the exact empty request, session cookie, and strict session DTO", async () => {
+  let calls = 0;
+  const api = createHumanAuthBridge({
+    env,
+    fetchImpl: async () => { calls += 1; return new Response(JSON.stringify({ session: sessionResponse().session, csrf_token: csrf }), { headers: { "content-type": "application/json" } }); }
+  });
+  assert.equal((await api.handle(request("/api/auth/session/resume", { body: { extra: true }, headers: { cookie: sessionCookie } }))).status, 400);
+  assert.equal((await api.handle(request("/api/auth/session/resume"))).status, 401);
+  assert.equal((await api.handle(request("/api/auth/session/resume", { headers: { cookie: sessionCookie, origin: "https://evil.test" } }))).status, 403);
+  assert.equal(calls, 0);
+
+  const malformedDto = await createHumanAuthBridge({
+    env,
+    fetchImpl: async () => new Response(JSON.stringify({ session: sessionResponse().session }), { status: 200, headers: { "content-type": "application/json", "set-cookie": `${sessionCookie}; Path=/; HttpOnly; Secure; SameSite=Strict` } })
+  }).handle(request("/api/auth/session/resume", { headers: { cookie: sessionCookie } }));
+  assert.equal(malformedDto.status, 502);
+
+  const malformedCookie = await createHumanAuthBridge({
+    env,
+    fetchImpl: async () => new Response(JSON.stringify({ session: sessionResponse().session, csrf_token: csrf }), { status: 200, headers: { "content-type": "application/json", "set-cookie": "other=value" } })
+  }).handle(request("/api/auth/session/resume", { headers: { cookie: sessionCookie } }));
+  assert.equal(malformedCookie.status, 502);
+});
+
+test("resume relays the Cloud human_session_session_required code without invoking SIWC", async () => {
+  let calls = 0;
+  const api = createHumanAuthBridge({
+    env,
+    fetchImpl: async (url) => {
+      calls += 1;
+      assert.equal(String(url), "https://cloud.example.test/api/auth/session/resume");
+      return new Response(JSON.stringify({ error: { code: "human_session_session_required", message: "A valid human session is required" } }), { status: 401, headers: { "content-type": "application/json" } });
+    },
+    getSiwcUser: async () => { throw new Error("SIWC must not be consulted"); }
+  });
+  const response = await api.handle(request("/api/auth/session/resume", { headers: { cookie: sessionCookie } }));
+  assert.equal(response.status, 401);
+  assert.deepEqual(await response.json(), { error: { code: "human_session_session_required", message: "A valid human session is required" } });
+  assert.equal(calls, 1);
+});
+
 test("self-logout forwards only the session cookie and CSRF, then relays the exact clear cookie", async () => {
   const calls = [];
   const api = bridge(async (url, init) => {

@@ -36,6 +36,7 @@ import { HOSTED_BOOTSTRAP_HTTP_PATHS } from "./hosted-bootstrap/http-api.mjs";
 const MAX_BODY_BYTES = 1024 * 1024;
 const HUMAN_AUTH_MAX_BODY_BYTES = 64 * 1024;
 const HUMAN_AUTH_SESSION_PATH = "/api/auth/session";
+const HUMAN_AUTH_SESSION_RESUME_PATH = "/api/auth/session/resume";
 const HUMAN_AUTH_OPTIONS_PATH = "/api/auth/webauthn/options";
 const HUMAN_AUTH_VERIFY_PATH = "/api/auth/webauthn/verify";
 const HUMAN_AUTH_REGISTRATION_OPTIONS_PATH = "/api/auth/webauthn/registration/options";
@@ -1083,7 +1084,7 @@ function isExactHumanAuthPath(url, method = undefined) {
   if (url.hash) return false;
   if (HUMAN_AGENT_SESSION_GRANT_PATH.test(url.pathname)) return true;
   if (HUMAN_QUALIFICATION_GRANT_BATCH_PATH.test(url.pathname)) return true;
-  if (!url.search && (url.pathname === HUMAN_AUTH_SESSION_PATH || url.pathname === HUMAN_AUTH_OPTIONS_PATH || url.pathname === HUMAN_AUTH_VERIFY_PATH || url.pathname === HUMAN_AUTH_REGISTRATION_OPTIONS_PATH || url.pathname === HUMAN_AUTH_REGISTRATION_VERIFY_PATH)) return true;
+  if (!url.search && (url.pathname === HUMAN_AUTH_SESSION_PATH || url.pathname === HUMAN_AUTH_SESSION_RESUME_PATH || url.pathname === HUMAN_AUTH_OPTIONS_PATH || url.pathname === HUMAN_AUTH_VERIFY_PATH || url.pathname === HUMAN_AUTH_REGISTRATION_OPTIONS_PATH || url.pathname === HUMAN_AUTH_REGISTRATION_VERIFY_PATH)) return true;
   if (isExactHumanOrganizationPath(url, method)) return true;
   return /^\/api\/auth\/management\/(?:credentials(?:\/[A-Za-z0-9_-]+(?:\/revoke)?)?|sessions(?:\/[0-9a-fA-F-]{36}\/revoke)?)$/.test(url.pathname);
 }

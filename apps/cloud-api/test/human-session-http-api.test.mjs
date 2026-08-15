@@ -30,13 +30,18 @@ function session() {
 }
 
 function fixture(overrides = {}) {
-  const calls = { global: [], verify: [], issue: [], logout: [] };
+  const calls = { global: [], verify: [], issue: [], rotate: [], logout: [] };
   const humanSession = {
     expectedOrigin: ORIGIN,
     async issueSession(input) {
       calls.issue.push(input);
       if (overrides.issueError) throw overrides.issueError;
       return overrides.issued ?? { session: session(), csrf_token: CSRF_TOKEN, setCookie: SESSION_COOKIE };
+    },
+    async rotateSession(input) {
+      calls.rotate.push(input);
+      if (overrides.rotateError) throw overrides.rotateError;
+      return overrides.rotated ?? { session: session(), csrf_token: CSRF_TOKEN, setCookie: SESSION_COOKIE };
     },
     async logout(input) {
       calls.logout.push(input);
@@ -97,6 +102,94 @@ test("issues a session from an opaque adapter assertion with an exact response c
   assert.deepEqual(calls.global, [{ operation: "human.session.bootstrap" }]);
   assert.deepEqual(calls.issue[0], { identityAssertion: IDENTITY_ASSERTION, origin: ORIGIN });
   assert.equal(Object.hasOwn(result.body, "setCookie"), false);
+});
+
+test("resumes an existing session through GET-authenticated atomic rotation", async () => {
+  const { api, calls } = fixture();
+  const result = await api.handle({
+    method: "POST",
+    url: HUMAN_SESSION_HTTP_PATHS.resume,
+    headers: { origin: ORIGIN, cookie: SESSION_COOKIE, "content-type": "application/json" },
+    body: "{}"
+  });
+
+  assert.equal(result.status, 201);
+  assert.deepEqual(result.body, { session: session(), csrf_token: CSRF_TOKEN });
+  assert.equal(result.headers["Set-Cookie"], SESSION_COOKIE);
+  assert.deepEqual(calls.rotate, [{ method: "GET", cookie: SESSION_COOKIE, origin: ORIGIN }]);
+  assert.equal(calls.verify.length, 0);
+  assert.equal(calls.issue.length, 0);
+  assert.equal(calls.logout.length, 0);
+  assert.deepEqual(calls.global, [{ operation: "human.session.bootstrap" }]);
+  assertNoStore(result);
+});
+
+test("keeps resume strictly POST, exact-origin, cookie-bound, and free of caller authority", async () => {
+  for (const input of [
+    { method: "GET", url: HUMAN_SESSION_HTTP_PATHS.resume, headers: { origin: ORIGIN, cookie: SESSION_COOKIE }, body: undefined },
+    { method: "POST", url: HUMAN_SESSION_HTTP_PATHS.resume, headers: { origin: ORIGIN, "content-type": "application/json" }, body: "{}" },
+    { method: "POST", url: HUMAN_SESSION_HTTP_PATHS.resume, headers: { origin: ORIGIN, cookie: "__Host-agentpass_session=short", "content-type": "application/json" }, body: "{}" },
+    { method: "POST", url: HUMAN_SESSION_HTTP_PATHS.resume, headers: { origin: "https://evil.test", cookie: SESSION_COOKIE }, body: "{}" }
+  ]) {
+    const { api, calls } = fixture();
+    const result = await api.handle(input);
+    assert.equal(result.status, input.method === "GET" ? 405 : input.headers.origin === ORIGIN ? 401 : 403);
+    assert.equal(calls.rotate.length, 0);
+    assertNoStore(result);
+  }
+
+  for (const headerName of [
+    "authorization",
+    "agentpass-csrf",
+    "agentpass-recent-auth",
+    "agentpass-console-identity",
+    "agentpass-member-id",
+    "agentpass-role",
+    "agentpass-organization-id",
+    "x-agentpass-identity",
+    "x-agentpass-authority-generation",
+    "x-csrf-token"
+  ]) {
+    const { api, calls } = fixture();
+    const result = await api.handle({
+      method: "POST",
+      url: HUMAN_SESSION_HTTP_PATHS.resume,
+      headers: { origin: ORIGIN, cookie: SESSION_COOKIE, "content-type": "application/json", [headerName]: "attacker-controlled" },
+      body: "{}"
+    });
+    assert.equal(result.status, 400, headerName);
+    assert.equal(result.body.error.code, HUMAN_SESSION_HTTP_ERROR_CODES.INVALID_REQUEST, headerName);
+    assert.equal(calls.rotate.length, 0, headerName);
+  }
+});
+
+test("accepts only an empty JSON object for resume and fails closed on rotation failures", async () => {
+  for (const body of ["[]", "null", "{\"member_id\":\"attacker\"}", "", "not-json"]) {
+    const { api, calls } = fixture();
+    const result = await api.handle({ method: "POST", url: HUMAN_SESSION_HTTP_PATHS.resume, headers: { origin: ORIGIN, cookie: SESSION_COOKIE, "content-type": "application/json" }, body });
+    assert.equal(result.status, 400, body);
+    assert.equal(calls.rotate.length, 0);
+  }
+
+  const unavailable = fixture({ rotateError: new Error("database password=secret") });
+  const failed = await unavailable.api.handle({ method: "POST", url: HUMAN_SESSION_HTTP_PATHS.resume, headers: { origin: ORIGIN, cookie: SESSION_COOKIE, "content-type": "application/json" }, body: "{}" });
+  assert.equal(failed.status, 500);
+  assert.equal(failed.body.error.code, HUMAN_SESSION_HTTP_ERROR_CODES.INTERNAL_ERROR);
+  assert.equal(JSON.stringify(failed.body).includes("secret"), false);
+
+  const nonStrict = fixture({ rotated: { session: session(), csrf_token: CSRF_TOKEN, setCookie: "__Host-agentpass_session=" + "s".repeat(43) + "; Path=/; Secure; SameSite=Lax" } });
+  const rejectedCookie = await nonStrict.api.handle({ method: "POST", url: HUMAN_SESSION_HTTP_PATHS.resume, headers: { origin: ORIGIN, cookie: SESSION_COOKIE, "content-type": "application/json" }, body: "{}" });
+  assert.equal(rejectedCookie.status, 503);
+  assert.equal(rejectedCookie.body.error.code, HUMAN_SESSION_HTTP_ERROR_CODES.SESSION_UNAVAILABLE);
+});
+
+test("applies the shared anonymous admission limiter to resume", async () => {
+  const denied = fixture({ globalError: new HumanAuthAbuseControlError(HUMAN_AUTH_ABUSE_ERROR_CODES.RATE_LIMITED, { retryAfterSeconds: 9 }) });
+  const result = await denied.api.handle({ method: "POST", url: HUMAN_SESSION_HTTP_PATHS.resume, headers: { origin: ORIGIN, cookie: SESSION_COOKIE, "content-type": "application/json" }, body: "{}" });
+  assert.equal(result.status, 429);
+  assert.equal(result.body.error.code, HUMAN_AUTH_ABUSE_ERROR_CODES.RATE_LIMITED);
+  assert.equal(result.headers["Retry-After"], "9");
+  assert.equal(denied.calls.rotate.length, 0);
 });
 
 test("shared global admission runs before identity verification and fails closed", async () => {

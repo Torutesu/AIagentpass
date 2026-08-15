@@ -50,6 +50,17 @@ Implemented and pushed:
 - the six-route Hosted boundary is composed from PostgreSQL, GitHub OAuth,
   strict WebAuthn, status/CSRF, and first-organization services, then dispatched
   by the real Cloud server before Human Auth with its raw request preserved;
+- the Console has a strict same-origin BFF for the six Hosted routes, preserving
+  exact OAuth redirects, callback cleanup cookies, and atomic bootstrap-to-
+  Session cookie rotation while rejecting browser-supplied authority headers;
+- `/onboarding` now implements GitHub entry, first-organization creation,
+  initial passkey registration, completed, expired, and no-membership states;
+  its typed client keeps CSRF and WebAuthn ceremony material in volatile closure
+  scope and never places reusable authority in React state or browser storage;
+- `POST /api/auth/session/resume` validates the Hosted-issued HttpOnly Session,
+  atomically rotates it, and returns a fresh CSRF value; Console attempts this
+  path before its legacy SIWC bootstrap and falls back only when no Session
+  exists;
 - the frozen catalog validates 174 entries, 49 schemas, 61 OpenAPI operations,
   and all 64 forward-only migrations. Hosted bootstrap remains a separately
   frozen six-route contract with its own validator.
@@ -62,7 +73,8 @@ Not yet implemented as a production-composable path:
   credential plus Human Session completion;
 - real-PostgreSQL qualification of leased/recoverable WebAuthn verification
   claims under process death, lease expiry, takeover, and changed responses;
-- Console pages, deployed E2E, and production evidence.
+- organization-control continuation, deployed Console E2E, and production
+  evidence.
 - a terminal green CI qualification at schema head `0064`; the previous run
   proved fresh migration and role/login boundaries, and this repair set aligns
   legacy 0048 authority, shared-integration fixtures, and live-browser budgets.

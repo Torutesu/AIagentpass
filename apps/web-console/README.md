@@ -14,6 +14,30 @@ npm run dev
 npm run build
 ```
 
+### Hosted onboarding
+
+The production first-user flow is available at `/onboarding`. It connects the
+same-origin browser routes under `/api/auth/bootstrap/*` to the Cloud API through
+a strict server-side bridge. Configure these values only in the Console server
+environment:
+
+```bash
+AGENTPASS_CLOUD_API_URL=https://api.example.com
+AGENTPASS_CONSOLE_ORIGIN=https://console.example.com
+```
+
+`AGENTPASS_CLOUD_API_URL` must be an exact HTTPS origin. Development may opt in
+to an HTTP loopback Cloud API with
+`AGENTPASS_ALLOW_INSECURE_LOOPBACK_CLOUD_API=true`; never enable that setting in
+production. GitHub OAuth callback configuration in Cloud must point to the
+Console's exact `/api/auth/bootstrap/github/callback` URL.
+
+The bridge preserves the OAuth redirects and the exact HttpOnly cookie rotation
+without exposing cookie values to JavaScript. The browser client keeps the
+bootstrap CSRF token in a private in-memory closure, validates every Cloud
+response, and discards WebAuthn ceremony values after each call. It never uses
+local storage, session storage, IndexedDB, or URL state for reusable authority.
+
 Production human-session bootstrap requires these server-only settings: `AGENTPASS_CLOUD_API_URL`, `AGENTPASS_CONSOLE_ORIGIN`, `AGENTPASS_ORGANIZATION_ID`, `AGENTPASS_IDENTITY_ASSERTION_PRIVATE_KEY` (PKCS#8 Ed25519 PEM), `AGENTPASS_IDENTITY_ASSERTION_ISSUER`, `AGENTPASS_IDENTITY_ASSERTION_AUDIENCE`, and `AGENTPASS_IDENTITY_ASSERTION_KID`. `AGENTPASS_IDENTITY_PROVIDER` defaults to `chatgpt`. The private key and all assertion configuration stay in the server environment; they are never rendered or returned to the browser. Production login does not require `AGENTPASS_CLOUD_TOKEN` or `AGENTPASS_OPERATOR_USER_IDS`.
 
 After `getChatGPTUser` has verified the platform SIWC identity, the BFF signs one compact, short-lived identity assertion and sends it to Cloud only in the `agentpass-console-identity` request header. The protected header is exactly `{alg:"EdDSA",kid,typ:"agentpass.console.identity",version:1}`. The payload is exactly `{aud,exp,iat,iss,jti,nbf,org,origin,provider,sub}`; it contains no `kid` or `redirect_uri`. The signature covers `base64url(header) + "." + base64url(payload)`. The session POST body sent upstream is always exactly `{}`. Cloud verifies and consumes `jti` once, then returns only the rotated HttpOnly session cookie and CSRF/session metadata.
@@ -91,6 +115,7 @@ The Console bootstraps a durable Human session first, then performs browser-nati
 - `npm run dev`: start local development
 - `npm run build`: verify the vinext build output
 - `npm test`: build and run the console API/render tests
+- `node --test tests/hosted-bootstrap-*.test.mjs tests/hosted-onboarding-ui.test.mjs`: run the focused Hosted onboarding contract tests
 
 ## Learn More
 
