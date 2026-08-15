@@ -55,10 +55,14 @@ test("P0-B live browser role, WebAuthn, and recent-auth matrix", { skip: !enable
   });
 
   await scenario(t, "admin completes real WebAuthn and wake mutation", async ({ open }) => {
-    const page = await open("admin");
+    let page;
+    try { page = await open("admin"); }
+    catch { assert.fail("P0B_SAFE_ADMIN_WAKE_OPEN_FAILED"); }
     const card = deviceCard(page, "反映待ち Mac");
-    await card.getByRole("button", { name: "Wake requestを依頼" }).click();
-    assert.match(await requireWakeStatus(card), /依頼を受け付けました|既存の依頼へ統合し/u);
+    try { await card.getByRole("button", { name: "Wake requestを依頼" }).click(); }
+    catch { assert.fail("P0B_SAFE_ADMIN_WAKE_CLICK_FAILED"); }
+    try { assert.match(await requireWakeStatus(card), /依頼を受け付けました|既存の依頼へ統合し/u); }
+    catch { assert.fail("P0B_SAFE_ADMIN_WAKE_OUTCOME_FAILED"); }
   });
 
   for (const role of ["auditor", "viewer"]) {
