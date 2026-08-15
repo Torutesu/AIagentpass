@@ -16,6 +16,8 @@ const MAX_SELECTOR_BYTES = 16 * 1024;
 const MAX_SUBJECT_BYTES = 512;
 const KEY_ID = /^[A-Za-z0-9._~-]{1,128}$/u;
 const GITHUB_SUBJECT = /^[1-9][0-9]{0,19}$/u;
+const OPAQUE_TOKEN = /^[A-Za-z0-9_-]{43}$/u;
+const WEBAUTHN_TRANSPORTS = new Set(["ble", "cable", "hybrid", "internal", "nfc", "smart-card", "usb"]);
 const OAUTH_COMPLETE_V2_STATES = Object.freeze(["identity_verified", "organization_required", "no_membership"]);
 
 export const HOSTED_IDENTITY_BOOTSTRAP_REPOSITORY_METHODS = Object.freeze([
@@ -31,6 +33,8 @@ export const HOSTED_IDENTITY_BOOTSTRAP_REPOSITORY_METHODS = Object.freeze([
   "commitOrganizationV2",
   "createChallenge",
   "consumeChallenge",
+  "getWebAuthnReplayContext",
+  "completeWebAuthnRegistrationV2",
   "completeChallenge",
   "failChallenge"
 ]);
@@ -48,6 +52,8 @@ export const HOSTED_IDENTITY_BOOTSTRAP_REPOSITORY_SQL = Object.freeze({
   commitOrganizationV2: "SELECT * FROM public.agentpass_hosted_identity_bootstrap_organization_commit_v2($1::bytea,$2::text,$3::bytea,$4::text,$5::uuid,$6::uuid,$7::uuid)",
   createChallenge: "SELECT * FROM public.agentpass_hosted_identity_bootstrap_challenge_create($1::bytea,$2::uuid,$3::bytea,$4::text,$5::text,$6::timestamptz)",
   consumeChallenge: "SELECT * FROM public.agentpass_hosted_identity_bootstrap_challenge_consume($1::bytea,$2::uuid,$3::bytea)",
+  getWebAuthnReplayContext: "SELECT * FROM public.agentpass_hosted_identity_bootstrap_webauthn_replay_context($1::bytea,$2::uuid,$3::bytea)",
+  completeWebAuthnRegistrationV2: "SELECT * FROM public.agentpass_hosted_identity_bootstrap_webauthn_complete_v2($1::uuid,$2::bytea,$3::uuid,$4::bytea,$5::bytea,$6::bytea,$7::bytea,$8::bigint,$9::text[],$10::text,$11::boolean,$12::boolean,$13::bytea,$14::bytea)",
   completeChallenge: "SELECT public.agentpass_hosted_identity_bootstrap_challenge_complete($1::bytea,$2::uuid,$3::bytea) AS result",
   failChallenge: "SELECT public.agentpass_hosted_identity_bootstrap_challenge_fail($1::bytea,$2::uuid,$3::bytea,$4::text) AS result"
 });
@@ -172,10 +178,37 @@ export function createPostgresHostedIdentityBootstrapRepository({ client } = {})
     return row === null ? null : normalizeChallengeConsumeResult(row);
   }
 
+  async function getWebAuthnReplayContext(input = {}) {
+    const value = normalizeChallengeProof(input);
+    const row = await optionalTableCall("getWebAuthnReplayContext", [sha256(value.bootstrap_cookie), value.challenge_id, sha256(value.challenge)]);
+    return row === null ? null : normalizeChallengeConsumeResult(row);
+  }
+
   async function completeChallenge(input = {}) {
     const value = normalizeChallengeProof(input);
     const result = await scalarCall("completeChallenge", [sha256(value.bootstrap_cookie), value.challenge_id, sha256(value.challenge)], "uuid");
     return uuid(result, "attempt_id", "RESULT");
+  }
+
+  async function completeWebAuthnRegistrationV2(input = {}) {
+    const value = normalizeWebAuthnCompleteV2(input);
+    const row = await tableCall("completeWebAuthnRegistrationV2", [
+      value.attempt_id,
+      sha256(value.bootstrap_cookie),
+      value.challenge_id,
+      sha256(value.challenge),
+      completionRequestDigest(value),
+      value.credential.id,
+      value.credential.public_key,
+      value.credential.sign_count,
+      value.credential.transports,
+      value.credential.label,
+      value.credential.backup_eligible,
+      value.credential.backup_state,
+      sha256(value.session.token),
+      sha256(value.session.csrf_token)
+    ]);
+    return normalizeWebAuthnCompleteV2Result(row, value.attempt_id);
   }
 
   async function failChallenge(input = {}) {
@@ -227,6 +260,8 @@ export function createPostgresHostedIdentityBootstrapRepository({ client } = {})
     commitOrganizationV2,
     createChallenge,
     consumeChallenge,
+    getWebAuthnReplayContext,
+    completeWebAuthnRegistrationV2,
     completeChallenge,
     failChallenge
   });
@@ -358,6 +393,34 @@ function normalizeChallengeFailure(value) {
   return Object.freeze({ ...normalizeChallengeProof({ bootstrap_cookie: value.bootstrap_cookie, challenge_id: value.challenge_id, challenge: value.challenge }), failure_code: text(value.failure_code, 64, "failure_code", FAILURE_CODE) });
 }
 
+function normalizeWebAuthnCompleteV2(value) {
+  exactObject(value, ["attempt_id", "bootstrap_cookie", "challenge_id", "challenge", "credential", "session"]);
+  exactObject(value.credential, ["id", "public_key", "sign_count", "transports", "label", "backup_eligible", "backup_state"]);
+  exactObject(value.session, ["token", "csrf_token"]);
+  const backupEligible = boolean(value.credential.backup_eligible);
+  const backupState = boolean(value.credential.backup_state);
+  if (backupState && !backupEligible) throw error("INPUT");
+  return Object.freeze({
+    attempt_id: uuid(value.attempt_id, "attempt_id"),
+    bootstrap_cookie: selector(value.bootstrap_cookie, "bootstrap_cookie"),
+    challenge_id: uuidV4(value.challenge_id, "challenge_id"),
+    challenge: selector(value.challenge, "challenge"),
+    credential: Object.freeze({
+      id: base64urlBytes(value.credential.id, 16, 1024),
+      public_key: bytes(value.credential.public_key, undefined, 32, 4096),
+      sign_count: nonNegativeInteger(value.credential.sign_count, "credential.sign_count", "INPUT"),
+      transports: transports(value.credential.transports),
+      label: text(value.credential.label, 128, "credential.label"),
+      backup_eligible: backupEligible,
+      backup_state: backupState
+    }),
+    session: Object.freeze({
+      token: text(value.session.token, 43, "session.token", OPAQUE_TOKEN),
+      csrf_token: text(value.session.csrf_token, 43, "session.csrf_token", OPAQUE_TOKEN)
+    })
+  });
+}
+
 function normalizeFailure(value, idKey) {
   exactObject(value, [idKey, "failure_code"]);
   return Object.freeze({ [idKey]: uuid(value[idKey], idKey), failure_code: text(value.failure_code, 64, "failure_code", FAILURE_CODE) });
@@ -425,6 +488,28 @@ function normalizeChallengeConsumeResult(value) {
   return Object.freeze({ attempt_id: uuid(value.attempt_id, "attempt_id", "RESULT"), member_id: uuid(value.member_id, "member_id", "RESULT"), organization_id: uuid(value.organization_id, "organization_id", "RESULT"), rp_id: text(value.rp_id, 253, "rp_id", RP_ID, "RESULT"), origin: text(value.origin, 512, "origin", ORIGIN, "RESULT"), user_verification: value.user_verification });
 }
 
+function normalizeWebAuthnCompleteV2Result(value, expectedAttemptId) {
+  exactObject(value, ["attempt_id", "session_id", "member_id", "organization_id", "membership_id", "role", "created_at", "expires_at", "replayed"], "RESULT");
+  const sessionId = uuid(value.session_id, "session_id", "RESULT");
+  const attemptId = uuid(value.attempt_id, "attempt_id", "RESULT");
+  if (attemptId !== expectedAttemptId || !["owner", "admin", "auditor", "viewer"].includes(value.role) || typeof value.replayed !== "boolean") throw error("RESULT");
+  return Object.freeze({
+    attempt_id: attemptId,
+    membership_id: uuid(value.membership_id, "membership_id", "RESULT"),
+    replayed: value.replayed,
+    session: Object.freeze({
+      version: 1,
+      session_id: sessionId,
+      member_id: uuid(value.member_id, "member_id", "RESULT"),
+      organization_id: uuid(value.organization_id, "organization_id", "RESULT"),
+      role: value.role,
+      created_at: timestamp(value.created_at, "created_at", "RESULT"),
+      expires_at: timestamp(value.expires_at, "expires_at", "RESULT"),
+      recent_auth_at: null
+    })
+  });
+}
+
 function publicResponse(value, kind = "INPUT") {
   exactObject(value, ["version", "organization", "onboarding"], kind);
   if (!Number.isSafeInteger(value.version) || value.version !== 1) throw error(kind);
@@ -459,7 +544,45 @@ function bytes(value, exact, min = exact, max = exact, kind = "INPUT") {
   if (exact !== undefined ? result.length !== exact : result.length < min || result.length > max) throw error(kind);
   return result;
 }
+function base64urlBytes(value, min, max) {
+  if (typeof value !== "string" || !/^[A-Za-z0-9_-]+$/u.test(value)) throw error("INPUT");
+  let result;
+  try { result = Buffer.from(value, "base64url"); } catch { throw error("INPUT"); }
+  if (result.length < min || result.length > max || result.toString("base64url") !== value) throw error("INPUT");
+  return result;
+}
+function boolean(value) { if (typeof value !== "boolean") throw error("INPUT"); return value; }
+function transports(value) {
+  if (!Array.isArray(value) || value.length > WEBAUTHN_TRANSPORTS.size) throw error("INPUT");
+  const normalized = [...value];
+  if (normalized.some((item) => typeof item !== "string" || !WEBAUTHN_TRANSPORTS.has(item)) || new Set(normalized).size !== normalized.length) throw error("INPUT");
+  return Object.freeze(normalized);
+}
 function sha256(value) { return crypto.createHash("sha256").update(value, "utf8").digest(); }
+function completionRequestDigest(value) {
+  const hash = crypto.createHash("sha256");
+  hash.update("agentpass.hosted-bootstrap-webauthn-completion.v1\0", "utf8");
+  for (const part of [
+    value.challenge_id,
+    sha256(value.challenge),
+    value.credential.id,
+    value.credential.public_key,
+    String(value.credential.sign_count),
+    JSON.stringify(value.credential.transports),
+    value.credential.label,
+    value.credential.backup_eligible ? "1" : "0",
+    value.credential.backup_state ? "1" : "0",
+    value.attempt_id,
+    sha256(value.session.token),
+    sha256(value.session.csrf_token)
+  ]) {
+    const encoded = Buffer.isBuffer(part) ? part : Buffer.from(part, "utf8");
+    const length = Buffer.allocUnsafe(4);
+    length.writeUInt32BE(encoded.length);
+    hash.update(length).update(encoded);
+  }
+  return hash.digest();
+}
 function text(value, max, name, pattern = undefined, kind = "INPUT") {
   if (typeof value !== "string" || value.length < 1 || value.length > max || CONTROL.test(value) || Buffer.byteLength(value, "utf8") > max * 4 || (pattern && !pattern.test(value))) throw error(kind);
   return value;

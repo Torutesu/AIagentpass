@@ -6,3 +6,4 @@ export * from "./organization-name.mjs";
 export * from "./organization-bootstrap-service.mjs";
 export * from "./pkce-verifier-codec.mjs";
 export * from "./postgres-oauth-state-store.mjs";
+export * from "./webauthn-bootstrap-service.mjs";

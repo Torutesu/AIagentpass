@@ -17,7 +17,8 @@
     "pkce_hardening_forward_migration": "0058_hosted_oauth_pkce_envelope",
     "identity_completion_forward_migration": "0059_hosted_identity_atomic_completion",
     "first_organization_forward_migration": "0060_hosted_first_organization_atomic",
-    "oauth_output_qualification_forward_migration": "0061_hosted_oauth_output_qualification"
+    "oauth_output_qualification_forward_migration": "0061_hosted_oauth_output_qualification",
+    "webauthn_session_atomic_forward_migration": "0062_hosted_webauthn_session_atomic"
   },
   "authority": {
     "identity_provider": "github",
@@ -31,7 +32,7 @@
     ],
     "server_authority": "postgresql",
     "organization_creation_authority": "agentpass_hosted_identity_bootstrap_organization_commit_v2",
-    "web_authn_authority": "existing strict WebAuthn verifier and durable challenge coordinator, with bootstrap-session binding",
+    "web_authn_authority": "existing strict WebAuthn verifier followed by agentpass_hosted_identity_bootstrap_webauthn_complete_v2, which atomically commits the credential, challenge, bootstrap attempt, Human Session, and digest-only response-loss receipt",
     "forbidden_identity_sources": [
       "ChatGPT-only ambient identity",
       "caller-supplied GitHub subject, email, member_id, organization_id, or role",
@@ -59,6 +60,7 @@
       "webauthn_challenges",
       "human_sessions"
     ],
+    "hosted_tables": ["hosted_identity_bootstrap_completions"],
     "existing_authority_methods": [
       "createOrganizationWithOwner",
       "getRegistrationUser",
@@ -248,7 +250,8 @@
       "contracts/schemas/human-session-v1.schema.json",
       "contracts/schemas/webauthn-ceremony-v1.schema.json",
       "apps/cloud-api/src/human-session.mjs",
-      "apps/cloud-api/src/human-auth/webauthn/registration.mjs"
+      "apps/cloud-api/src/human-auth/webauthn/registration.mjs",
+      "apps/cloud-api/src/hosted-identity/webauthn-bootstrap-service.mjs"
     ]
   },
   "transport": {
@@ -279,6 +282,15 @@
       "concurrent_same_intent": "one owner membership and one organization; all callers converge",
       "response_loss": "retry with the same key returns the committed public result",
       "post_success_new_key": "409 bootstrap_already_completed"
+    },
+    "webauthn_completion": {
+      "scope": "bootstrap attempt plus one-use challenge",
+      "same_verified_request": "return the committed public Human Session during a two-minute response-loss window",
+      "different_request": "409 bootstrap_already_completed",
+      "durable_material": "SHA-256 request and bearer digests only; no raw cookie, CSRF token, attestation, or public key response",
+      "application_trust_boundary": "the Hosted WebAuthn service and strict attestation verifier are trusted to submit only verified credential metadata; PostgreSQL re-derives identity, membership, epochs, session identifiers, limits, and timestamps",
+      "response_reconstruction": "session and CSRF bearer values are HMAC-SHA-256 derived from a stable 32-byte server key and the exact browser response binding, and the key must remain available for the full two-minute recovery window",
+      "post_window": "restart GitHub OAuth or use the issued ordinary session"
     }
   },
   "errors": [

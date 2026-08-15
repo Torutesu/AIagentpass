@@ -268,7 +268,8 @@ BEGIN
     'agentpass_hosted_identity_bootstrap_organization_commit_v2(bytea,text,bytea,text,uuid,uuid,uuid)',
     'agentpass_hosted_identity_bootstrap_challenge_create(bytea,uuid,bytea,text,text,timestamptz)',
     'agentpass_hosted_identity_bootstrap_challenge_consume(bytea,uuid,bytea)',
-    'agentpass_hosted_identity_bootstrap_challenge_complete(bytea,uuid,bytea)',
+    'agentpass_hosted_identity_bootstrap_webauthn_replay_context(bytea,uuid,bytea)',
+    'agentpass_hosted_identity_bootstrap_webauthn_complete_v2(uuid,bytea,uuid,bytea,bytea,bytea,bytea,bigint,text[],text,boolean,boolean,bytea,bytea)',
     'agentpass_hosted_identity_bootstrap_challenge_fail(bytea,uuid,bytea,text)'
   ] LOOP
     IF to_regprocedure('public.' || routine_signature) IS NOT NULL THEN

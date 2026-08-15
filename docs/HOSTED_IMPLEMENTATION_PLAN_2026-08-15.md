@@ -1,7 +1,7 @@
 # Hosted v1 implementation plan
 
 Status: active  
-Baseline: `codex/agent-platform` at migration `0061`
+Baseline: `codex/agent-platform` at migration `0062`
 Updated: 2026-08-15
 
 This is the implementation plan for the Hosted identity, first-organization,
@@ -36,18 +36,24 @@ Implemented and pushed:
   request binding, complete membership-history locking, one owner membership,
   immutable idempotency replay, initial audit-chain event, and transition to
   `webauthn_required`.
-- the frozen catalog validates 171 entries, 49 schemas, 61 OpenAPI operations,
-  and all 61 forward-only migrations. Hosted bootstrap remains a separately
+- migration `0062` and its Hosted WebAuthn service atomically commit the first
+  verified credential and ordinary Human Session with database-owned identity,
+  epochs, session ID, limits, and timestamps. A digest-only, one-use receipt
+  supports a two-minute response-loss retry without storing bearer values;
+- the frozen catalog validates 172 entries, 49 schemas, 61 OpenAPI operations,
+  and all 62 forward-only migrations. Hosted bootstrap remains a separately
   frozen six-route contract with its own validator.
 
 Not yet implemented as a production-composable path:
 
 - real-PostgreSQL restart/race qualification of the new PKCE/state boundary;
 - real-PostgreSQL restart/race qualification of atomic identity completion;
-- one transaction that commits WebAuthn credential, completes challenge, and
-  issues the ordinary Human Session;
+- real-PostgreSQL restart/race and rollback qualification of atomic WebAuthn
+  credential plus Human Session completion;
+- a leased/recoverable WebAuthn verification claim so a process death after
+  claim but before completion cannot strand the ceremony until expiry;
 - runtime routing, Console pages, deployed E2E, and production evidence.
-- a terminal green CI qualification at schema head `0061`; the previous run
+- a terminal green CI qualification at schema head `0062`; the previous run
   proved fresh migration and role/login boundaries, and this repair set aligns
   legacy 0048 authority, shared-integration fixtures, and live-browser budgets.
 
@@ -152,6 +158,11 @@ Exit: one verified subject maps to one immutable member; first organization
 creation converges to one organization and one owner membership.
 
 ### H3 — atomic bootstrap WebAuthn and Human Session issuance
+
+State: migration `0062`, PostgreSQL repository adapter, strict-verifier service,
+one-use response-recovery receipt, and focused tests are implemented in source.
+Real PostgreSQL 16/17, two-instance contention, process-kill, and claim-lease
+qualification remain before this package is production-composable.
 
 Deliverables:
 
@@ -348,7 +359,7 @@ of the same commit gate.
      resolution for `RETURNS TABLE` names that also exist as physical columns;
    - retain function-only deployment authority and qualify the fix on fresh and
      upgraded PostgreSQL 16/17 databases.
-6. `feat: commit bootstrap webauthn and human session atomically` (`0062`) — next authority slice
+6. `feat: commit bootstrap webauthn and human session atomically` (`0062`) — implemented in source; PostgreSQL qualification pending
    - reuse the production verifier and pass only its strict verified result to
      a transaction procedure;
    - lock attempt/challenge/membership/epochs, insert the credential and Human
@@ -356,6 +367,12 @@ of the same commit gate.
      authority before commit;
    - persist a one-use response-loss receipt so retry can recover cookies
      without re-registering or creating a second session.
+   - PostgreSQL generates the session ID and owns the eight-hour absolute,
+     30-minute idle, and five-session limits; the caller supplies no tenant,
+     role, epoch, session identifier, timestamp, or lifetime authority;
+   - derive response bearer values from an exact-response HMAC binding so the
+     same committed session can be reconstructed once during the two-minute
+     window without durably storing plaintext bearer material.
 7. `feat: compose hosted bootstrap runtime routes`
    - wire the six frozen routes to H1-H3 PostgreSQL services;
    - enforce startup configuration, trusted proxy/origin rules, deadlines,
@@ -390,8 +407,9 @@ of the same commit gate.
 
 ### Execution lanes and merge order
 
-- Critical path: schema-head qualification -> `0062` WebAuthn/session ->
-  runtime composition -> Console onboarding -> Hosted E2E.
+- Critical path: schema-head qualification -> recoverable WebAuthn claim lease
+  -> `0062` PostgreSQL race/rollback qualification -> runtime composition ->
+  Console onboarding -> Hosted E2E.
 - Parallel lane A after `0059` freezes DTOs: read-only Console states, typed BFF
   client, accessibility harness, localization, and browser secret scanner.
 - Parallel lane B now: Device API/helper correctness and physical-Mac harness.

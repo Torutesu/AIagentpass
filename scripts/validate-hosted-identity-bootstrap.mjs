@@ -22,12 +22,14 @@ const REQUIRED_FILES = [
   "contracts/postgres/0059_hosted_identity_atomic_completion.sql",
   "contracts/postgres/0060_hosted_first_organization_atomic.sql",
   "contracts/postgres/0061_hosted_oauth_output_qualification.sql",
+  "contracts/postgres/0062_hosted_webauthn_session_atomic.sql",
   "contracts/schemas/human-session-v1.schema.json",
   "contracts/schemas/webauthn-ceremony-v1.schema.json",
   "apps/cloud-api/src/human-session.mjs",
   "apps/cloud-api/src/human-auth/identity/signed-console.mjs",
   "apps/cloud-api/src/human-auth/organizations/postgres-service.mjs",
-  "apps/cloud-api/src/human-auth/webauthn/registration.mjs"
+  "apps/cloud-api/src/human-auth/webauthn/registration.mjs",
+  "apps/cloud-api/src/hosted-identity/webauthn-bootstrap-service.mjs"
 ];
 
 export const CONTRACT_PATH = "contracts/hosted-identity-bootstrap-v1.contract.json";
@@ -53,7 +55,8 @@ export function validateHostedIdentityBootstrapContract(document, { root = DEFAU
       || document.activation?.pkce_hardening_forward_migration !== "0058_hosted_oauth_pkce_envelope"
       || document.activation?.identity_completion_forward_migration !== "0059_hosted_identity_atomic_completion"
       || document.activation?.first_organization_forward_migration !== "0060_hosted_first_organization_atomic"
-      || document.activation?.oauth_output_qualification_forward_migration !== "0061_hosted_oauth_output_qualification") fail("migration ordering is not pinned after identity epoch invalidation");
+      || document.activation?.oauth_output_qualification_forward_migration !== "0061_hosted_oauth_output_qualification"
+      || document.activation?.webauthn_session_atomic_forward_migration !== "0062_hosted_webauthn_session_atomic") fail("migration ordering is not pinned after identity epoch invalidation");
 
     const authority = document.authority;
     if (!isObject(authority) || authority.identity_provider !== "github" || authority.server_authority !== "postgresql") fail("authority is not GitHub/PostgreSQL");
