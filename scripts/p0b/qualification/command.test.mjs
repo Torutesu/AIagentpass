@@ -104,6 +104,22 @@ test("reports only an allow-listed failure code without retaining matching child
   assert.equal(Object.keys(result).includes("safeFailureCode"), false);
 });
 
+test("supports the bounded live-browser failure marker registry", async () => {
+  const safeFailureMarkers = Array.from({ length: 64 }, (_, index) => ({
+    marker: `P0B_SAFE_STAGE_${index}_FAILED`,
+    code: `stage_${index}`
+  }));
+  const result = await runQualificationCommand(node, script(""), { cwd, env, timeoutMs: 2_000, safeFailureMarkers });
+  assert.equal(result.status, "passed");
+
+  assert.throws(() => runQualificationCommand(node, script(""), {
+    cwd,
+    env,
+    timeoutMs: 2_000,
+    safeFailureMarkers: Array.from({ length: 129 }, (_, index) => ({ marker: `m${index}`, code: `m_${index}` }))
+  }), TypeError);
+});
+
 test("rejects caller-defined unsafe or duplicate failure diagnostics", () => {
   assert.throws(() => runQualificationCommand(node, script(""), { cwd, env, timeoutMs: 2_000, safeFailureMarkers: [{ marker: "x", code: "contains-secret:value" }] }), TypeError);
   assert.throws(() => runQualificationCommand(node, script(""), { cwd, env, timeoutMs: 2_000, safeFailureMarkers: [{ marker: "x", code: "duplicate" }, { marker: "y", code: "duplicate" }] }), TypeError);

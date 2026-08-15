@@ -3,7 +3,10 @@ import { spawn } from "node:child_process";
 
 const SKIP_MARKER = Buffer.from("# SKIP", "utf8");
 const MARKER_TAIL_BYTES = SKIP_MARKER.byteLength - 1;
-const MAX_SAFE_FAILURE_MARKERS = 32;
+// The live browser authority matrix has one fixed, non-sensitive marker per
+// bounded failure stage. Keep enough room for the complete matrix while still
+// rejecting an unbounded caller-controlled registry.
+const MAX_SAFE_FAILURE_MARKERS = 128;
 const MAX_SAFE_FAILURE_MARKER_BYTES = 512;
 const SAFE_FAILURE_CODE = /^[a-z][a-z0-9_]{0,63}$/u;
 const TERMINATION_GRACE_MS = 250;
