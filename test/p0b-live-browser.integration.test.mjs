@@ -249,6 +249,12 @@ function safeRoleBootstrapMarker(code, prefix) {
 
 function safeRegistrationMarker(code, prefix) {
   if (prefix !== "P0B_SAFE_OWNER_OPEN") return null;
+  const detailed = new Map([
+    ["registration_options_503_human_auth_control_unavailable", "OPTIONS_503_CONTROL_UNAVAILABLE"],
+    ["registration_options_503_webauthn_registration_http_session_unavailable", "OPTIONS_503_SESSION_UNAVAILABLE"],
+    ["registration_options_503_webauthn_registration_http_unavailable", "OPTIONS_503_SERVICE_UNAVAILABLE"]
+  ]).get(code);
+  if (detailed !== undefined) return `${prefix}_REGISTRATION_${detailed}_FAILED`;
   const match = String(code ?? "").match(/^registration_(options|verify)_(400|401|403|409|413|422|428|500|503)(?:_[a-z][a-z0-9_]{0,95})?$/u);
   return match === null ? null : `${prefix}_REGISTRATION_${match[1].toUpperCase()}_${match[2]}_FAILED`;
 }
