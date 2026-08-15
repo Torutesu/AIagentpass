@@ -30,6 +30,7 @@ import { createManagedSignerProviderOperationMaintenanceWorker } from "./managed
 import { createPostgresAuditExportSnapshotReader } from "./audit-export-snapshot-reader.mjs";
 import { createPostgresAuditExportIssuanceRepository } from "./audit-export-issuance-repository.mjs";
 import { createPostgresPlatformPromotionIssuanceRepository } from "./platform-promotion-issuance-repository.mjs";
+import { createPostgresPlatformAuthorizationRepository } from "./platform-authorization-repository.mjs";
 import { createPostgresPlatformOperatorAssignmentRepository } from "./platform-operator-assignment-repository.mjs";
 import { createPostgresPlatformSessionRepository } from "./platform-session-repository.mjs";
 import { createPostgresPlatformSessionWebAuthnRepository } from "./platform-session-webauthn-repository.mjs";
@@ -40,12 +41,13 @@ import {
   createOperationalMetrics
 } from "./operational-health.mjs";
 
-export async function createPostgresRuntime({ env = process.env, PoolClass = Pool, MigrationPoolClass = PoolClass, SignerPoolClass = PoolClass, applicationVersion = "unknown", refreshNonceCodec, resolveProcessBindingPolicy, ownerRecoveryPublisher, platformPromotionVerifyEvidence, ownerRecoveryOutboxAutoStart = true, ownerRecoveryOutboxWorkerOptions = {}, sharedControlMaintenanceAutoStart = true, sharedControlMaintenanceWorkerOptions = {}, managedSignerProviderOperationMaintenanceAutoStart = true, managedSignerProviderOperationMaintenanceWorkerOptions = {} } = {}) {
+export async function createPostgresRuntime({ env = process.env, PoolClass = Pool, MigrationPoolClass = PoolClass, SignerPoolClass = PoolClass, applicationVersion = "unknown", refreshNonceCodec, resolveProcessBindingPolicy, ownerRecoveryPublisher, platformPromotionVerifyEvidence, platformPromotionLifecycle = undefined, ownerRecoveryOutboxAutoStart = true, ownerRecoveryOutboxWorkerOptions = {}, sharedControlMaintenanceAutoStart = true, sharedControlMaintenanceWorkerOptions = {}, managedSignerProviderOperationMaintenanceAutoStart = true, managedSignerProviderOperationMaintenanceWorkerOptions = {} } = {}) {
   if (resolveProcessBindingPolicy !== undefined && typeof resolveProcessBindingPolicy !== "function") throw new TypeError("resolveProcessBindingPolicy must be a function");
   if (typeof ownerRecoveryOutboxAutoStart !== "boolean" || !ownerRecoveryOutboxWorkerOptions || typeof ownerRecoveryOutboxWorkerOptions !== "object" || Array.isArray(ownerRecoveryOutboxWorkerOptions)) throw new TypeError("owner recovery outbox runtime configuration is invalid");
   if (typeof sharedControlMaintenanceAutoStart !== "boolean" || !sharedControlMaintenanceWorkerOptions || typeof sharedControlMaintenanceWorkerOptions !== "object" || Array.isArray(sharedControlMaintenanceWorkerOptions)) throw new TypeError("shared-control maintenance runtime configuration is invalid");
   if (typeof managedSignerProviderOperationMaintenanceAutoStart !== "boolean" || !managedSignerProviderOperationMaintenanceWorkerOptions || typeof managedSignerProviderOperationMaintenanceWorkerOptions !== "object" || Array.isArray(managedSignerProviderOperationMaintenanceWorkerOptions)) throw new TypeError("managed signer provider-operation maintenance runtime configuration is invalid");
   if (typeof platformPromotionVerifyEvidence !== "function") throw new TypeError("platform promotion evidence verifier is required");
+  const normalizedPlatformPromotionLifecycle = normalizePlatformPromotionLifecycle(platformPromotionLifecycle);
   createManagedSignerProviderOperationMaintenanceWorker({
     ...managedSignerProviderOperationMaintenanceWorkerOptions,
     repository: { async maintainProviderOperations() { return { quarantined: 0, reconciled: 0, pruned: 0, total: 0 }; } }
@@ -291,8 +293,17 @@ export async function createPostgresRuntime({ env = process.env, PoolClass = Poo
   });
   const platformPromotionIssuanceRepository = createPostgresPlatformPromotionIssuanceRepository({
     client: pool,
-    verifyEvidence: platformPromotionVerifyEvidence
+    verifyEvidence: platformPromotionVerifyEvidence,
+    ...(normalizedPlatformPromotionLifecycle ?? {})
   });
+  const platformAuthorizationRepository = normalizedPlatformPromotionLifecycle === undefined
+    ? undefined
+    : createPostgresPlatformAuthorizationRepository({
+      client: pool,
+      promotionRepository: platformPromotionIssuanceRepository,
+      verifyEvidence: platformPromotionVerifyEvidence,
+      ...normalizedPlatformPromotionLifecycle
+    });
   const platformOperatorAssignmentRepository = createPostgresPlatformOperatorAssignmentRepository({ client: pool });
   const platformSessionRepository = createPostgresPlatformSessionRepository({ client: pool });
   const platformSessionWebAuthnRepository = createPostgresPlatformSessionWebAuthnRepository({ client: pool });
@@ -334,6 +345,7 @@ export async function createPostgresRuntime({ env = process.env, PoolClass = Poo
     qualificationGrantBatchRepository,
     auditExportIssuanceRepository,
     platformPromotionIssuanceRepository,
+    ...(platformAuthorizationRepository ? { platformAuthorizationRepository } : {}),
     platformOperatorAssignmentRepository,
     platformSessionRepository,
     platformSessionWebAuthnRepository,
@@ -452,3 +464,26 @@ function postgresTarget(url) { return `${url.hostname.toLowerCase()}:${url.port 
 function integer(value, min, max) { if (typeof value !== "string" || !/^\d+$/.test(value)) throw new TypeError("PostgreSQL timeout/limit is invalid"); const result=Number(value); if(!Number.isSafeInteger(result)||result<min||result>max) throw new TypeError("PostgreSQL timeout/limit is invalid"); return result; }
 
 function exactSecret(value, name) { if (typeof value !== "string" || !/^[A-Za-z0-9_-]{43}$/u.test(value)) throw new TypeError(`${name} must be an exact 32-byte base64url secret`); const bytes=Buffer.from(value,"base64url"); if(bytes.length!==32||bytes.toString("base64url")!==value) throw new TypeError(`${name} must be an exact 32-byte base64url secret`); return bytes; }
+
+function normalizePlatformPromotionLifecycle(value) {
+  if (value === undefined) return undefined;
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new TypeError("platform promotion lifecycle configuration is invalid");
+  }
+  const keys = Reflect.ownKeys(value);
+  if (keys.length !== 3 || keys.some((key) => typeof key !== "string")
+    || !keys.every((key) => ["keyId", "keyVersion", "lifecycleVersion"].includes(key))) {
+    throw new TypeError("platform promotion lifecycle configuration is invalid");
+  }
+  if (keys.some((key) => {
+    const descriptor = Object.getOwnPropertyDescriptor(value, key);
+    return !descriptor || descriptor.enumerable !== true || !("value" in descriptor);
+  })) throw new TypeError("platform promotion lifecycle configuration is invalid");
+  const { keyId, keyVersion, lifecycleVersion } = value;
+  if (typeof keyId !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._:/-]{0,254}$/u.test(keyId)
+    || !Number.isSafeInteger(keyVersion) || keyVersion < 1
+    || !Number.isSafeInteger(lifecycleVersion) || lifecycleVersion < 1) {
+    throw new TypeError("platform promotion lifecycle configuration is invalid");
+  }
+  return Object.freeze({ keyId, keyVersion, lifecycleVersion });
+}
