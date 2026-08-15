@@ -41,8 +41,8 @@ function organization(id = organizationId, name = "AgentPass Team", version = 2)
   return { organization_id: id, name, version, created_at: date, updated_at: date };
 }
 
-function member(role = "viewer", version = 3) {
-  return { membership_id: membershipId, organization_id: organizationId, member_id: memberId, display_name: "佐藤", role, status: "active", version, created_at: date, updated_at: date };
+function member(role = "viewer", version = 3, status = "active") {
+  return { membership_id: membershipId, organization_id: organizationId, member_id: memberId, display_name: "佐藤", role, status, version, created_at: date, updated_at: date };
 }
 
 function invitation(status = "pending", version = 1) {
@@ -96,7 +96,7 @@ test("supports members, invitations, role/remove, revoke, and accept with operat
       return json({ request_id: requestId, invitation: invitation(), one_time_token: token }, 201);
     }
     if (url.endsWith(`/members/${memberId}/role`)) return json({ request_id: requestId, member: member("admin", 4) });
-    if (url.endsWith(`/members/${memberId}/remove`)) return json({ request_id: requestId, member: member("admin", 5) });
+    if (url.endsWith(`/members/${memberId}/remove`)) return json({ request_id: requestId, member: member("admin", 5, "revoked") });
     if (url.endsWith(`/invitations/${invitationId}/revoke`)) return json({ request_id: requestId, invitation: invitation("revoked", 2) });
     if (url === "/api/auth/invitations/accept") return json({ request_id: requestId, invitation: invitation("accepted", 2), member: member("viewer", 1) }, 201);
     throw new Error(`unexpected ${init.method} ${url}`);
@@ -136,6 +136,52 @@ test("supports members, invitations, role/remove, revoke, and accept with operat
     assert.equal(call.init.headers.get("agentpass-csrf"), csrf);
     if (call.init.method !== "GET") assert.match(call.init.headers.get("idempotency-key"), /^[A-Za-z0-9._~-]{8,255}$/);
   }
+});
+
+test("requires exact role/remove mutation results and the documented success status", async () => {
+  const roleMismatch = createOrganizationClient({ fetchImpl: async (url) => {
+    if (url === "/api/auth/session") return sessionResponse();
+    return json({ request_id: requestId, member: member("viewer", 4, "active") });
+  } });
+  await assert.rejects(
+    () => roleMismatch.updateMemberRole({ organizationId, memberId, role: "admin", expectedVersion: 3, recentAuth: recentAuthId, idempotencyKey: "role-exact-1" }),
+    (error) => error instanceof OrganizationClientError && error.code === "invalid_response",
+  );
+
+  const extraField = createOrganizationClient({ fetchImpl: async (url) => {
+    if (url === "/api/auth/session") return sessionResponse();
+    return json({ request_id: requestId, member: { ...member("admin", 4), unexpected: true } });
+  } });
+  await assert.rejects(
+    () => extraField.updateMemberRole({ organizationId, memberId, role: "admin", expectedVersion: 3, recentAuth: recentAuthId, idempotencyKey: "role-exact-2" }),
+    (error) => error instanceof OrganizationClientError && error.code === "invalid_response",
+  );
+
+  const removalMismatch = createOrganizationClient({ fetchImpl: async (url) => {
+    if (url === "/api/auth/session") return sessionResponse();
+    return json({ request_id: requestId, member: member("admin", 4, "active") });
+  } });
+  await assert.rejects(
+    () => removalMismatch.removeMember({ organizationId, memberId, expectedVersion: 3, recentAuth: recentAuthId, idempotencyKey: "remove-exact-1" }),
+    (error) => error instanceof OrganizationClientError && error.code === "invalid_response",
+  );
+
+  const statusMismatch = createOrganizationClient({ fetchImpl: async (url) => {
+    if (url === "/api/auth/session") return sessionResponse();
+    return json({ request_id: requestId, member: member("admin", 4, "active") }, 201);
+  } });
+  await assert.rejects(
+    () => statusMismatch.updateMemberRole({ organizationId, memberId, role: "admin", expectedVersion: 3, recentAuth: recentAuthId, idempotencyKey: "role-status-1" }),
+    (error) => error instanceof OrganizationClientError && error.code === "invalid_response" && error.status === 201,
+  );
+
+  const removal = createOrganizationClient({ fetchImpl: async (url) => {
+    if (url === "/api/auth/session") return sessionResponse();
+    return json({ request_id: requestId, member: member("admin", 4, "revoked") });
+  } });
+  const result = await removal.removeMember({ organizationId, memberId, expectedVersion: 3, recentAuth: recentAuthId, idempotencyKey: "remove-exact-2" });
+  assert.equal(result.member.status, "revoked");
+  assert.equal(result.member.version, 4);
 });
 
 test("reissues an invitation with operation-bound WebAuthn, quoted version, fresh idempotency, and one raw token", async () => {
@@ -316,6 +362,31 @@ test("uses an injected Console session authority without rotating the Human Sess
   await assert.rejects(() => client.listOrganizations(), (error) => error instanceof OrganizationClientError && error.code === "unauthorized");
   assert.equal(gets, 2);
   assert.deepEqual(clears, [sharedSession]);
+});
+
+test("invalidates an injected shared session authority after a current-user authority change", async () => {
+  const sharedSession = Object.freeze({
+    version: 1,
+    sessionId: "88888888-8888-4888-8888-888888888888",
+    memberId,
+    organizationId,
+    role: "owner",
+    createdAt: date,
+    expiresAt: "2026-08-12T08:00:00.000Z",
+    recentAuthAt: null,
+    csrfToken: csrf,
+  });
+  const clears = [];
+  const client = createOrganizationClient({
+    sessionProvider: {
+      get: async () => sharedSession,
+      clear: (session) => clears.push(session),
+    },
+    fetchImpl: async () => { throw new Error("shared authority should supply the session"); },
+  });
+
+  client.invalidateSession();
+  assert.deepEqual(clears, [undefined]);
 });
 
 test("exposes least-privilege visibility for every organization role", () => {

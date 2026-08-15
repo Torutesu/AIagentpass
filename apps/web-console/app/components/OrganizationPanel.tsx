@@ -31,6 +31,7 @@ type RetryAction = Readonly<{ label: string; run: () => Promise<void> }>;
 const INITIAL_RESOURCE: ResourceState = Object.freeze({ status: "idle" });
 const ROLES: readonly OrganizationRole[] = ["owner", "admin", "auditor", "viewer"];
 const INVITE_ROLES: readonly InvitationRole[] = ["admin", "auditor", "viewer"];
+const LAST_OWNER_REMEDIATION = "最後のOwnerは降格・失効できません。先に別のメンバーをOwnerに変更してから、もう一度お試しください。";
 
 const panelStyle = {
   shell: { display: "grid", gap: 24, maxWidth: 1180, margin: "0 auto", padding: "36px 24px 64px", color: "#1e2a25" },
@@ -107,7 +108,7 @@ export function OrganizationPanel({ client: suppliedClient, initialOrganizationI
   const showLastOwnerProtection = (member: OrganizationMember): void => {
     setRoleDrafts((current) => ({ ...current, [member.memberId]: member.role }));
     setRemovalConfirmationId(null);
-    setMutationError({ status: "error", code: "last_owner_protected", error: "最後のOwnerは降格・失効できません。先に別のメンバーをOwnerに変更してから、もう一度お試しください。" });
+    setMutationError({ status: "error", code: "last_owner_protected", error: LAST_OWNER_REMEDIATION });
   };
 
   const refreshOrganizationSnapshot = useCallback(async (signal?: AbortSignal): Promise<{ organizations: readonly Organization[]; session: Awaited<ReturnType<OrganizationClient["getSession"]>> }> => {
@@ -117,7 +118,10 @@ export function OrganizationPanel({ client: suppliedClient, initialOrganizationI
     setSessionRole(session.role);
     setSessionOrganizationId(session.organizationId);
     setSessionMemberId(session.memberId);
-    setRoleOverrides((current) => current[session.organizationId] === undefined ? { ...current, [session.organizationId]: session.role } : current);
+    // The session endpoint is the authority for the active tenant. Always
+    // replace a cached role here; retaining an older override would keep
+    // management controls alive after a self-downgrade or self-removal.
+    setRoleOverrides((current) => ({ ...current, [session.organizationId]: session.role }));
     const nextId = chooseOrganization(organizationItems, initialOrganizationId ?? selectedOrganizationRef.current, session.organizationId);
     selectedOrganizationRef.current = nextId;
     setSelectedOrganizationId(nextId);
@@ -343,7 +347,8 @@ export function OrganizationPanel({ client: suppliedClient, initialOrganizationI
             ? "招待の状態が別の操作で変わったため、最新の権威状態を取得しました。操作は再送していません。表示された状態を確認してください。"
             : "応答を確認できなかったため、権威状態を再取得しました。操作は再送していません。表示された状態を確認してください。")
           : "変更結果を確認できませんでした。再送せず、最新の状態をもう一度確認してください。";
-        setMutationError({ status: "error", code: "reconciliation_required", error: message });
+        const lastOwnerConflict = isLastOwnerProtectionError(error);
+        setMutationError({ status: "error", code: lastOwnerConflict ? "last_owner_protected" : "reconciliation_required", error: lastOwnerConflict ? LAST_OWNER_REMEDIATION : message });
         setRetryAction({
           label: "最新の状態を再確認",
           run: async () => {
@@ -499,11 +504,33 @@ export function OrganizationPanel({ client: suppliedClient, initialOrganizationI
       return Promise.resolve(false);
     }
     const previousMembers = members;
+    const isCurrentSessionMember = member.memberId === sessionMemberId && member.organizationId === sessionOrganizationId;
+    let sessionAuthorityInvalidated = false;
+    const invalidateCurrentSessionAuthority = (): void => {
+      if (!isCurrentSessionMember || sessionAuthorityInvalidated) return;
+      sessionAuthorityInvalidated = true;
+      client.invalidateSession();
+    };
+    const reconcileMemberMutation = async (): Promise<void> => {
+      invalidateCurrentSessionAuthority();
+      const snapshot = await refreshOrganizationSnapshot();
+      if (isCurrentSessionMember && !snapshot.organizations.some((organization) => organization.id === member.organizationId)) {
+        setMembers([]);
+        setInvitations([]);
+        setMemberState(INITIAL_RESOURCE);
+        setInvitationState(INITIAL_RESOURCE);
+        setMemberNextCursor(null);
+        setInvitationNextCursor(null);
+        return;
+      }
+      await reconcileResources(member.organizationId, { members: true });
+    };
     return runMutation(`member-role-${member.memberId}`, async () => {
       const result = await client.updateMemberRole({ organizationId: member.organizationId, memberId: member.memberId, role, expectedVersion: member.version });
       setMembers((current) => current.map((item) => item.memberId === member.memberId ? result.member : item));
       setRoleDrafts((current) => ({ ...current, [member.memberId]: result.member.role }));
-      if (member.memberId === sessionMemberId) {
+      if (isCurrentSessionMember) {
+        invalidateCurrentSessionAuthority();
         setSessionRole(result.member.role);
         setRoleOverrides((current) => ({ ...current, [member.organizationId]: result.member.role }));
       }
@@ -513,7 +540,11 @@ export function OrganizationPanel({ client: suppliedClient, initialOrganizationI
         return () => setMembers(previousMembers);
       },
       retry: () => changeMemberRole(member, role),
-      reconcile: () => reconcileResources(member.organizationId, { members: true }),
+      reconcileOnConflict: true,
+      reconciliationMessage: isCurrentSessionMember
+        ? "現在の権限変更を確認できないため、共有セッションを無効化しました。再送せず、最新の組織一覧を確認してください。"
+        : "メンバーの変更結果を確認できなかったため、最新の権威状態を取得しました。操作は再送していません。表示された状態を確認してください。",
+      reconcile: reconcileMemberMutation,
     });
   };
 
@@ -525,10 +556,32 @@ export function OrganizationPanel({ client: suppliedClient, initialOrganizationI
     }
     const previousMembers = members;
     setRemovalConfirmationId(null);
+    const isCurrentSessionMember = member.memberId === sessionMemberId && member.organizationId === sessionOrganizationId;
+    let sessionAuthorityInvalidated = false;
+    const invalidateCurrentSessionAuthority = (): void => {
+      if (!isCurrentSessionMember || sessionAuthorityInvalidated) return;
+      sessionAuthorityInvalidated = true;
+      client.invalidateSession();
+    };
+    const reconcileMemberMutation = async (): Promise<void> => {
+      invalidateCurrentSessionAuthority();
+      const snapshot = await refreshOrganizationSnapshot();
+      if (isCurrentSessionMember && !snapshot.organizations.some((organization) => organization.id === member.organizationId)) {
+        setMembers([]);
+        setInvitations([]);
+        setMemberState(INITIAL_RESOURCE);
+        setInvitationState(INITIAL_RESOURCE);
+        setMemberNextCursor(null);
+        setInvitationNextCursor(null);
+        return;
+      }
+      await reconcileResources(member.organizationId, { members: true });
+    };
     return runMutation(`member-remove-${member.memberId}`, async () => {
       const result = await client.removeMember({ organizationId: member.organizationId, memberId: member.memberId, expectedVersion: member.version });
       setMembers((current) => current.map((item) => item.memberId === member.memberId ? result.member : item));
-      if (member.memberId === sessionMemberId) {
+      if (isCurrentSessionMember) {
+        invalidateCurrentSessionAuthority();
         setSessionRole("viewer");
         setRoleOverrides((current) => ({ ...current, [member.organizationId]: "viewer" }));
       }
@@ -538,7 +591,11 @@ export function OrganizationPanel({ client: suppliedClient, initialOrganizationI
         return () => setMembers(previousMembers);
       },
       retry: () => removeMember(member),
-      reconcile: () => reconcileResources(member.organizationId, { members: true }),
+      reconcileOnConflict: true,
+      reconciliationMessage: isCurrentSessionMember
+        ? "現在のアクセス変更を確認できないため、共有セッションを無効化しました。再送せず、再認証して最新の組織一覧を確認してください。"
+        : "メンバーの失効結果を確認できなかったため、最新の権威状態を取得しました。操作は再送していません。表示された状態を確認してください。",
+      reconcile: reconcileMemberMutation,
     });
   };
 
@@ -786,7 +843,7 @@ async function findOrganizationMemberRole(client: OrganizationClient, organizati
 }
 
 function resourceError(error: unknown): ResourceState {
-  if (isLastOwnerProtectionError(error)) return { status: "error", code: "last_owner_protected", error: "最後のOwnerは降格・失効できません。先に別のメンバーをOwnerに変更してから、もう一度お試しください。" };
+  if (isLastOwnerProtectionError(error)) return { status: "error", code: "last_owner_protected", error: LAST_OWNER_REMEDIATION };
   const invitationState = invitationErrorState(error);
   if (invitationState !== undefined) return invitationState;
   if (error instanceof OrganizationClientError && error.code === "conflict") return { status: "error", code: "conflict", error: "他の管理者が先に変更しました。最新情報を読み込んでから、もう一度お試しください。" };

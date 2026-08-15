@@ -30,6 +30,9 @@ test("OrganizationPanel is standalone and covers the administration flow", async
   assert.match(source, /失効を確定/);
   assert.match(source, /アクセスを失効/);
   assert.match(source, /reconcileOnConflict: true/);
+  assert.ok((source.match(/reconcileOnConflict: true/g) ?? []).length >= 3, "invitation and both member mutations must reconcile 409 without replay");
+  assert.match(source, /client\.invalidateSession\(\)/);
+  assert.match(source, /現在の権限変更を確認できないため、共有セッションを無効化/);
   assert.match(source, /受け入れ済みです/);
   assert.match(source, /取り消し済みです/);
   assert.match(source, /期限切れです。管理者に招待の再発行/);
@@ -129,4 +132,5 @@ test("last-owner protection is visible, actionable, and reconciles server-side p
   assert.match(source, /serverCode\?\.toLowerCase\(\)/);
   assert.match(source, /aria-describedby=\{describedBy\}/);
   assert.match(source, /data-state=\{state\.code \?\? "error"\}/);
+  assert.match(source, /const LAST_OWNER_REMEDIATION/);
 });
