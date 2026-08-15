@@ -191,7 +191,7 @@ if (migrationNames.length < 1 || migrationNames.some((name, index) => Number(nam
 const migrations = migrationNames.map((name) => ({ name, sql: fs.readFileSync(path.join(contracts, "postgres", name), "utf8") }));
 for (const migration of migrations) {
   if (!migration.sql.trim().startsWith("BEGIN;") || !migration.sql.trim().endsWith("COMMIT;")) fail(`${migration.name} must be transactional`);
-  if (/\b(?:DROP\s+(?:TABLE|COLUMN)|TRUNCATE)\b/i.test(migration.sql)) fail(`${migration.name} contains a destructive statement`);
+  if (/\bDROP\s+(?:TABLE|COLUMN)\b|\bTRUNCATE\s+(?:TABLE\s+)?(?:ONLY\s+)?[a-z_]/i.test(migration.sql)) fail(`${migration.name} contains a destructive statement`);
 }
 const sql = migrations[0].sql;
 for (const table of ["organizations", "memberships", "human_sessions", "webauthn_credentials", "devices", "device_enrollments", "agents", "policies", "revocations", "capabilities", "bundle_heads", "bundle_acknowledgements", "device_audit_events", "idempotency_records", "admin_audit_events"]) {

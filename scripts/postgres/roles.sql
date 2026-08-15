@@ -140,7 +140,8 @@ BEGIN
     'release_candidates', 'platform_promotion_approvals',
     'platform_promotion_deployments', 'platform_promotion_issuances',
     'managed_signer_key_lifecycles', 'managed_signer_keys',
-    'managed_signer_key_lifecycle_operations', 'managed_signer_signing_idempotency'
+    'managed_signer_key_lifecycle_operations', 'managed_signer_signing_idempotency',
+    'managed_signer_provider_operations'
   ] LOOP
     IF to_regclass(format('public.%I', relation_name)) IS NOT NULL THEN
       EXECUTE format(
@@ -152,11 +153,26 @@ BEGIN
 END
 $$;
 
--- Promotion issuance and signer authority are not generic application DML.
--- The current repository path must run through a reviewed authority/procedure
--- role before hosted deployment; these explicit revokes keep a compromised
--- agentpass_app session from mutating the authority tables directly while
--- that SECURITY DEFINER procedure path is completed.
+-- Promotion issuance is reachable only through the reviewed SECURITY DEFINER
+-- entry points. Helpers and every unrelated function remain non-executable by
+-- the application role.
+DO $$
+DECLARE
+  routine_signature text;
+BEGIN
+  FOREACH routine_signature IN ARRAY ARRAY[
+    'agentpass_platform_promotion_issuance_reserve(uuid,text,text,text,text,bytea,integer,integer,text,bigint,bigint)',
+    'agentpass_platform_promotion_issuance_replay(uuid,text,text,text,text)',
+    'agentpass_platform_promotion_issuance_commit(uuid,text,text,text,text,bytea,bytea,bytea,bytea,bytea)',
+    'agentpass_platform_promotion_issuance_uncertain(uuid,text,text,text,text,bytea,text)',
+    'agentpass_platform_promotion_issuance_get(uuid,text,text,text,text,boolean)'
+  ] LOOP
+    IF to_regprocedure('public.' || routine_signature) IS NOT NULL THEN
+      EXECUTE format('GRANT EXECUTE ON FUNCTION public.%s TO agentpass_app', routine_signature);
+    END IF;
+  END LOOP;
+END
+$$;
 
 -- Future objects created by the migration identity preserve the same boundary.
 ALTER DEFAULT PRIVILEGES FOR ROLE agentpass_migrator IN SCHEMA public

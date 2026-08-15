@@ -25,7 +25,7 @@ test("0047 real PostgreSQL reserves, commits, and replays one exact promotion", 
   const migrationClient = await pool.connect();
   try {
     const migrated = await createMigrationRunner({ client: migrationClient, applicationVersion: "platform-promotion-issuance" }).run();
-    assert.equal(migrated.currentVersion, 47);
+    assert.equal(migrated.currentVersion, 48);
   } finally { migrationClient.release(); }
 
   const client = await pool.connect();

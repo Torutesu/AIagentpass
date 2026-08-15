@@ -1,6 +1,5 @@
 import crypto from "node:crypto";
 
-import { canonicalJson } from "../../../../packages/protocol/src/index.mjs";
 import {
   canonicalizePromotionEvidenceV3,
   PROMOTION_EVIDENCE_V3_ALGORITHM,
@@ -33,14 +32,19 @@ const UNCERTAINTY_REASONS = new Set([
 const IDENTITY_KEYS = Object.freeze(["promotion_id", "deployment_id", "environment", "candidate_id", "idempotency_key"]);
 const COMMIT_KEYS = Object.freeze([...IDENTITY_KEYS, "claim_token", "promotion_evidence"]);
 const UNCERTAIN_KEYS = Object.freeze([...IDENTITY_KEYS, "claim_token", "reason"]);
-const ROW_SELECT = `promotion_id,deployment_id,environment,candidate_id,idempotency_key,state,
-  approval_id,approval_digest,source_commit,source_tree,product_pkg_sha256,image_digest,sbom_sha256,
-  qualification_report_digests,release_manifest_schema_version,release_manifest_sha256,approval_expires_at,
-  issued_at,expires_at,purpose,protocol_version,signing_version,lifecycle_version,key_id,key_version,
-  encode(signer_key_fingerprint,'base64') AS signer_key_fingerprint,provider_operation_id,
-  request_digest,encode(claim_token_digest,'hex') AS claim_token_digest,claim_expires_at,
-  encode(evidence_digest,'hex') AS evidence_digest,evidence_bytes,deployment_generation,uncertain_reason,
-  created_at,updated_at`;
+const AUTHORITY_SQL = Object.freeze({
+  reserve: `SELECT agentpass_platform_promotion_issuance_reserve(
+    $1::uuid,$2::text,$3::text,$4::text,$5::text,$6::bytea,$7::integer,$8::integer,
+    $9::text,$10::bigint,$11::bigint) AS result`,
+  replay: `SELECT agentpass_platform_promotion_issuance_replay(
+    $1::uuid,$2::text,$3::text,$4::text,$5::text) AS result`,
+  commit: `SELECT agentpass_platform_promotion_issuance_commit(
+    $1::uuid,$2::text,$3::text,$4::text,$5::text,$6::bytea,$7::bytea,$8::bytea,$9::bytea,$10::bytea) AS result`,
+  uncertain: `SELECT agentpass_platform_promotion_issuance_uncertain(
+    $1::uuid,$2::text,$3::text,$4::text,$5::text,$6::bytea,$7::text) AS result`,
+  get: `SELECT agentpass_platform_promotion_issuance_get(
+    $1::uuid,$2::text,$3::text,$4::text,$5::text,$6::boolean) AS result`
+});
 
 export const PLATFORM_PROMOTION_ISSUANCE_ERROR_CODES = Object.freeze({
   CONFIG: "ERR_PLATFORM_PROMOTION_ISSUANCE_CONFIG",
@@ -103,96 +107,17 @@ export function createPostgresPlatformPromotionIssuanceRepository({
     const identity = normalizeIdentity(input);
     try {
       return await withTransaction(client, async (tx) => {
-        await lockDeployment(tx, identity);
-        const existing = await selectIssuance(tx, identity, true);
-        if (existing) {
-          assertIdentity(existing, identity);
-          if (existing.state === "reserved" && !(await claimStillActive(tx, existing))) {
-            await terminalizeExpiredClaim(tx, existing);
-            return { state: "uncertain" };
-          }
-          return existingOutcome(existing, identity);
-        }
-
-        await tx.query(`INSERT INTO platform_promotion_deployments
-          (deployment_id,environment,current_generation,current_candidate_id)
-          VALUES ($1,$2,0,NULL) ON CONFLICT (deployment_id,environment) DO NOTHING`, [identity.deployment_id, identity.environment]);
-        const head = await selectHead(tx, identity, true);
-        if (!head) throw repoError("DATABASE");
-        const open = await selectOpenIssuance(tx, identity);
-        if (open) return open.state === "uncertain" ? { state: "uncertain" } : { state: "in_progress" };
-
-        const authority = await selectAuthority(tx, identity, { keyId, keyVersion, lifecycleVersion });
-        if (!authority) throw repoError("AUTHORITY");
-        const issuedAt = databaseTimestamp(await databaseNow(tx));
-        const approvalExpiresAt = databaseTimestamp(authority.approval_expires_at);
-        const expiresAt = new Date(Math.min(
-          Date.parse(approvalExpiresAt),
-          Date.parse(issuedAt) + evidenceTtlMs
-        )).toISOString();
-        if (Date.parse(expiresAt) <= Date.parse(issuedAt)) throw repoError("EXPIRED");
-        const providerOperationId = deriveProviderOperationId({
-          ...identity,
-          ...authority,
-          approval_state: "approved",
-          purpose: PROMOTION_EVIDENCE_V3_PURPOSE,
-          protocol_version: PROMOTION_EVIDENCE_V3_PROTOCOL_VERSION,
-          signing_version: PROMOTION_EVIDENCE_V3_SIGNING_VERSION,
-          issued_at: issuedAt,
-          expires_at: expiresAt
-        });
         const token = makeToken(randomBytes);
-        const requestDigest = sha256(canonicalJson({
-          version: 1,
-          promotion_id: identity.promotion_id,
-          deployment_id: identity.deployment_id,
-          environment: identity.environment,
-          candidate_id: identity.candidate_id,
-          idempotency_key: identity.idempotency_key,
-          approval_id: authority.approval_id,
-          approval_digest: authority.approval_digest,
-          source_commit: authority.source_commit,
-          source_tree: authority.source_tree,
-          product_pkg_sha256: authority.product_pkg_sha256,
-          image_digest: authority.image_digest,
-          sbom_sha256: authority.sbom_sha256,
-          release_manifest_sha256: authority.release_manifest_sha256,
-          qualification_report_digests: authority.qualification_report_digests,
-          lifecycle_version: numberValue(authority.lifecycle_version),
-          key_id: authority.key_id,
-          key_version: numberValue(authority.key_version)
-        }));
-        const inserted = await tx.query(`INSERT INTO platform_promotion_issuances
-          (promotion_id,deployment_id,environment,candidate_id,idempotency_key,state,
-           approval_id,approval_digest,source_commit,source_tree,product_pkg_sha256,image_digest,sbom_sha256,
-           qualification_report_digests,release_manifest_schema_version,release_manifest_sha256,approval_expires_at,
-           issued_at,expires_at,purpose,protocol_version,signing_version,lifecycle_version,key_id,key_version,
-           signer_key_fingerprint,provider_operation_id,
-           request_digest,claim_token_digest,claim_expires_at)
-          VALUES ($1,$2,$3,$4,$5,'reserved',$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,
-           $17,$18,'agentpass.promotion-evidence',3,3,$19,$20,$21,$22,$23,$24,$25,
-           clock_timestamp()+($26 * interval '1 millisecond'))
-          ON CONFLICT DO NOTHING`, [
-          identity.promotion_id, identity.deployment_id, identity.environment, identity.candidate_id, identity.idempotency_key,
-          authority.approval_id, authority.approval_digest, authority.source_commit, authority.source_tree,
-          authority.product_pkg_sha256, authority.image_digest, authority.sbom_sha256, authority.qualification_report_digests,
-          authority.release_manifest_schema_version, authority.release_manifest_sha256, authority.approval_expires_at,
-          issuedAt, expiresAt, authority.lifecycle_version, authority.key_id, authority.key_version,
-          fingerprintBytes(authority.signer_key_fingerprint), providerOperationId,
-          Buffer.from(requestDigest, "hex"), Buffer.from(sha256(token), "hex"), claimLeaseMs
+        const value = await callAuthority(tx, AUTHORITY_SQL.reserve, [
+          identity.promotion_id, identity.deployment_id, identity.environment, identity.candidate_id,
+          identity.idempotency_key, Buffer.from(sha256(token), "hex"), claimLeaseMs, evidenceTtlMs,
+          keyId ?? null, keyVersion ?? null, lifecycleVersion ?? null
         ]);
-        if (rowCount(inserted) === 0) {
-          const raced = await selectIssuance(tx, identity, true);
-          if (!raced) throw repoError("DATABASE");
-          assertIdentity(raced, identity);
-          if (raced.state === "reserved" && !(await claimStillActive(tx, raced))) {
-            await terminalizeExpiredClaim(tx, raced);
-            return { state: "uncertain" };
-          }
-          return existingOutcome(raced, identity);
-        }
-        const row = await selectIssuance(tx, identity, true);
-        if (!row) throw repoError("DATABASE");
+        if (value?.state === "reserved" && value.claim_issued !== true) return { state: "in_progress" };
+        if (value?.state === "uncertain") return { state: "uncertain" };
+        const row = normalizeAuthorityResult(value, value?.claim_issued === true ? token : undefined);
+        if (row.state === "committed") return committedOutcome(row);
+        if (row.state !== "reserved" || value.claim_issued !== true) throw repoError("DATABASE");
         return reservedOutcome(row, token);
       });
     } catch (error) { throw publicError(error); }
@@ -202,16 +127,9 @@ export function createPostgresPlatformPromotionIssuanceRepository({
     const identity = normalizeIdentity(input);
     try {
       return await withTransaction(client, async (tx) => {
-        await lockDeployment(tx, identity);
-        const row = await selectIssuance(tx, identity, true);
-        if (!row) return { state: "absent" };
-        assertIdentity(row, identity);
-        if (row.state === "committed") return committedOutcome(row);
-        if (row.state === "uncertain") return { state: "uncertain" };
-        const active = await claimStillActive(tx, row);
-        if (active) return { state: "in_progress" };
-        await terminalizeExpiredClaim(tx, row);
-        return { state: "uncertain" };
+        const value = await callAuthority(tx, AUTHORITY_SQL.replay, identityParams(identity));
+        if (["absent", "in_progress", "uncertain"].includes(value?.state)) return { state: value.state };
+        return committedOutcome(normalizeAuthorityResult(value));
       });
     } catch (error) { throw publicError(error); }
   }
@@ -224,46 +142,24 @@ export function createPostgresPlatformPromotionIssuanceRepository({
     } catch { throw repoError("EVIDENCE"); }
     try {
       return await withTransaction(client, async (tx) => {
-        await lockDeployment(tx, values);
-        const row = await selectIssuance(tx, values, true);
-        if (!row) throw repoError("NOT_FOUND");
-        assertIdentity(row, values);
+        const current = await callAuthority(tx, AUTHORITY_SQL.get, [...identityParams(values), false]);
+        if (current === null) throw repoError("NOT_FOUND");
+        const row = normalizeAuthorityResult(current, values.claim_token);
         if (row.state === "committed") {
           assertEvidenceMatches(evidence, row);
           return committedOutcome(row);
         }
         if (row.state === "uncertain") return { state: "uncertain" };
         if (row.state !== "reserved") throw repoError("DATABASE");
-        if (!claimMatches(row, values.claim_token)) throw repoError("CLAIM");
         assertEvidenceMatches(evidence, row);
-        const lifecycle = await selectActiveLifecycle(tx, row);
-        if (!lifecycle) throw repoError("LIFECYCLE");
         if ((await verifyEvidence(evidence, verificationContext(row, evidenceTtlMs))) !== true) throw repoError("EVIDENCE");
-        const head = await selectHead(tx, values, true);
-        if (!head) throw repoError("DATABASE");
-        const nextGeneration = numberValue(head.current_generation) + 1;
         const canonical = canonicalizePromotionEvidenceV3(evidence, { allowExpired: true, allowFuture: true });
-        const updated = await tx.query(`UPDATE platform_promotion_issuances
-          SET state='committed',evidence_bytes=$3,evidence_digest=$4,deployment_generation=$5,
-              claim_token_digest=NULL,claim_expires_at=NULL,uncertain_reason=NULL
-          WHERE promotion_id=$1 AND state='reserved' AND claim_token_digest=$2
-            AND claim_expires_at>clock_timestamp() AND approval_expires_at>clock_timestamp()
-          RETURNING ${ROW_SELECT}`, [
-          values.promotion_id, Buffer.from(sha256(values.claim_token), "hex"), Buffer.from(canonical, "utf8"),
-          Buffer.from(sha256(canonical), "hex"), nextGeneration
+        const signingBytes = promotionEvidenceV3SigningData(evidence.statement, { allowExpired: true, allowFuture: true });
+        const committed = await callAuthority(tx, AUTHORITY_SQL.commit, [
+          ...identityParams(values), Buffer.from(sha256(values.claim_token), "hex"), signingBytes,
+          Buffer.from(evidence.signature, "base64url"), Buffer.from(canonical, "utf8"), Buffer.from(sha256(canonical), "hex")
         ]);
-        if (rowCount(updated) !== 1) {
-          if (Date.parse(String(row.approval_expires_at)) <= Date.now()) throw repoError("EXPIRED");
-          throw repoError("CLAIM");
-        }
-        const advanced = await tx.query(`UPDATE platform_promotion_deployments
-          SET current_generation=$3,current_candidate_id=$4
-          WHERE deployment_id=$1 AND environment=$2 AND current_generation=$5
-          RETURNING deployment_id,environment,current_generation,current_candidate_id`, [
-          values.deployment_id, values.environment, nextGeneration, row.candidate_id, numberValue(head.current_generation)
-        ]);
-        if (rowCount(advanced) !== 1) throw repoError("DATABASE");
-        return committedOutcome(normalizeStoredRow(updated.rows[0]));
+        return committedOutcome(normalizeAuthorityResult(committed));
       });
     } catch (error) { throw publicError(error); }
   }
@@ -273,18 +169,11 @@ export function createPostgresPlatformPromotionIssuanceRepository({
     if (!UNCERTAINTY_REASONS.has(values.reason)) throw repoError("INPUT");
     try {
       return await withTransaction(client, async (tx) => {
-        await lockDeployment(tx, values);
-        const row = await selectIssuance(tx, values, true);
-        if (!row) throw repoError("NOT_FOUND");
-        assertIdentity(row, values);
-        if (row.state === "committed") return committedOutcome(row);
-        if (row.state === "uncertain") return { state: "uncertain" };
-        if (!claimMatches(row, values.claim_token)) throw repoError("CLAIM");
-        const updated = await tx.query(`UPDATE platform_promotion_issuances
-          SET state='uncertain',claim_token_digest=NULL,claim_expires_at=NULL,uncertain_reason=$2
-          WHERE promotion_id=$1 AND state='reserved' AND claim_token_digest=$3
-          RETURNING ${ROW_SELECT}`, [values.promotion_id, values.reason, Buffer.from(sha256(values.claim_token), "hex")]);
-        if (rowCount(updated) !== 1) throw repoError("CLAIM");
+        const value = await callAuthority(tx, AUTHORITY_SQL.uncertain, [
+          ...identityParams(values), Buffer.from(sha256(values.claim_token), "hex"), values.reason
+        ]);
+        if (value?.state === "committed") return committedOutcome(normalizeAuthorityResult(value));
+        if (value?.state !== "uncertain") throw repoError("DATABASE");
         return { state: "uncertain" };
       });
     } catch (error) { throw publicError(error); }
@@ -294,10 +183,9 @@ export function createPostgresPlatformPromotionIssuanceRepository({
     const identity = normalizeIdentity(input);
     try {
       return await withTransaction(client, async (tx) => {
-        const row = await selectIssuance(tx, identity, false, true);
-        if (!row) throw repoError("NOT_FOUND");
-        assertIdentity(row, identity);
-        return committedOutcome(row);
+        const value = await callAuthority(tx, AUTHORITY_SQL.get, [...identityParams(identity), true]);
+        if (value === null) throw repoError("NOT_FOUND");
+        return committedOutcome(normalizeAuthorityResult(value));
       });
     } catch (error) { throw publicError(error); }
   }
@@ -308,102 +196,71 @@ export function createPostgresPlatformPromotionIssuanceRepository({
 export const createPlatformPromotionIssuanceRepository = createPostgresPlatformPromotionIssuanceRepository;
 export default createPostgresPlatformPromotionIssuanceRepository;
 
-async function selectIssuance(tx, identity, forUpdate, committedOnly = false) {
-  const result = await tx.query(`SELECT ${ROW_SELECT}
-    FROM platform_promotion_issuances
-    WHERE (promotion_id=$1 OR (deployment_id=$2 AND environment=$3 AND candidate_id=$4 AND idempotency_key=$5))${committedOnly ? " AND state='committed'" : ""}${forUpdate ? " FOR UPDATE" : ""}`,
-  [identity.promotion_id, identity.deployment_id, identity.environment, identity.candidate_id, identity.idempotency_key]);
-  if (rowCount(result) > 1) throw repoError("DATABASE");
-  return rowCount(result) === 1 ? normalizeStoredRow(result.rows[0]) : undefined;
+async function callAuthority(tx, sql, params) {
+  const result = await tx.query(sql, params);
+  if (rowCount(result) !== 1 || !Object.hasOwn(result.rows[0] ?? {}, "result")) throw repoError("DATABASE");
+  const value = result.rows[0].result;
+  if (value === null) return null;
+  if (typeof value === "string") {
+    try { return JSON.parse(value); } catch { throw repoError("DATABASE"); }
+  }
+  if (!value || typeof value !== "object" || Array.isArray(value)) throw repoError("DATABASE");
+  return value;
 }
 
-async function selectAuthority(tx, identity, signer = {}) {
-  const result = await tx.query(`SELECT approval.approval_id,approval.record_digest AS approval_digest,
-      approval.source_commit,approval.source_tree,approval.product_pkg_sha256,approval.image_digest,
-      approval.sbom_sha256,approval.qualification_report_digests,approval.release_manifest_schema_version,
-      approval.release_manifest_sha256,approval.expires_at AS approval_expires_at,
-      candidate.candidate_id,candidate.source_commit AS candidate_source_commit,
-      candidate.artifact_sha256,candidate.manifest_sha256,
-      lifecycle.version AS lifecycle_version,key.key_id,key.key_version,
-      key.public_key_fingerprint AS signer_key_fingerprint
-    FROM platform_promotion_approvals approval
-    JOIN release_candidates candidate
-      ON candidate.candidate_id=approval.candidate_id
-     AND candidate.source_commit=approval.source_commit
-     AND candidate.artifact_sha256=approval.product_pkg_sha256
-     AND candidate.manifest_sha256=approval.release_manifest_sha256
-     AND candidate.status='active'
-    JOIN managed_signer_key_lifecycles lifecycle
-      ON lifecycle.purpose='agentpass.promotion-evidence'
-     AND lifecycle.algorithm='ed25519'
-    JOIN managed_signer_keys key
-      ON key.purpose=lifecycle.purpose AND key.state='active'
-     AND key.algorithm='ed25519' AND key.key_version > 0
-    WHERE approval.deployment_id=$1 AND approval.environment=$2 AND approval.candidate_id=$3
-      AND approval.decision='approved' AND approval.quorum_satisfied IS TRUE
-      AND approval.expires_at>clock_timestamp()
-      AND ($4::text IS NULL OR key.key_id=$4)
-      AND ($5::bigint IS NULL OR key.key_version=$5)
-      AND ($6::bigint IS NULL OR lifecycle.version=$6)
-    ORDER BY approval.expires_at DESC,approval.approval_version DESC,approval.approval_id
-    LIMIT 1 FOR UPDATE OF approval,candidate,lifecycle,key`, [identity.deployment_id, identity.environment, identity.candidate_id,
-      signer.keyId ?? null, signer.keyVersion ?? null, signer.lifecycleVersion ?? null]);
-  return rowCount(result) === 1 ? result.rows[0] : undefined;
+function identityParams(value) {
+  return [value.promotion_id, value.deployment_id, value.environment, value.candidate_id, value.idempotency_key];
 }
 
-async function selectActiveLifecycle(tx, row) {
-  const result = await tx.query(`SELECT lifecycle.version AS lifecycle_version,key.key_id,key.key_version,key.state
-    FROM managed_signer_key_lifecycles lifecycle
-    JOIN managed_signer_keys key ON key.purpose=lifecycle.purpose
-      AND key.key_id=$1 AND key.key_version=$2 AND key.state='active'
-    WHERE lifecycle.purpose=$3 AND lifecycle.version=$4 AND lifecycle.algorithm='ed25519'
-    FOR SHARE OF lifecycle,key`,
-  [row.key_id, numberValue(row.key_version), row.purpose, numberValue(row.lifecycle_version)]);
-  return rowCount(result) === 1 ? result.rows[0] : undefined;
-}
-
-async function selectHead(tx, identity, forUpdate) {
-  const result = await tx.query(`SELECT deployment_id,environment,current_generation,current_candidate_id
-    FROM platform_promotion_deployments WHERE deployment_id=$1 AND environment=$2${forUpdate ? " FOR UPDATE" : ""}`,
-  [identity.deployment_id, identity.environment]);
-  return rowCount(result) === 1 ? result.rows[0] : undefined;
-}
-
-async function selectOpenIssuance(tx, identity) {
-  const result = await tx.query(`SELECT ${ROW_SELECT}
-    FROM platform_promotion_issuances
-    WHERE deployment_id=$1 AND environment=$2 AND state IN ('reserved','uncertain')
-    ORDER BY created_at ASC,promotion_id
-    LIMIT 1 FOR UPDATE`, [identity.deployment_id, identity.environment]);
-  if (rowCount(result) > 1) throw repoError("DATABASE");
-  return rowCount(result) === 1 ? normalizeStoredRow(result.rows[0]) : undefined;
-}
-
-async function lockDeployment(tx, identity) {
-  const result = await tx.query("SELECT pg_advisory_xact_lock(hashtextextended($1,0)) AS locked", [`agentpass:platform-promotion:${identity.deployment_id}:${identity.environment}`]);
-  if (rowCount(result) !== 1) throw repoError("DATABASE");
-}
-
-async function claimStillActive(tx, row) {
-  const result = await tx.query(`SELECT claim_expires_at>clock_timestamp() AS claim_active
-    FROM platform_promotion_issuances WHERE promotion_id=$1 AND state='reserved'`, [row.promotion_id]);
-  return rowCount(result) === 1 && result.rows[0].claim_active === true;
-}
-
-async function terminalizeExpiredClaim(tx, row) {
-  const result = await tx.query(`UPDATE platform_promotion_issuances
-    SET state='uncertain',claim_token_digest=NULL,claim_expires_at=NULL,uncertain_reason='stale_lifecycle'
-    WHERE promotion_id=$1 AND state='reserved' AND claim_token_digest=$2
-      AND claim_expires_at<=clock_timestamp()
-    RETURNING ${ROW_SELECT}`, [row.promotion_id, Buffer.from(String(row.claim_token_digest), "hex")]);
-  if (rowCount(result) !== 1) throw repoError("DATABASE");
-  return normalizeStoredRow(result.rows[0]);
-}
-
-async function databaseNow(tx) {
-  const result = await tx.query("SELECT clock_timestamp() AS now", []);
-  if (rowCount(result) !== 1) throw repoError("DATABASE");
-  return result.rows[0]?.now;
+function normalizeAuthorityResult(value, claimToken = undefined) {
+  try {
+    if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("result");
+    const evidenceBytes = value.evidence_bytes === null || value.evidence_bytes === undefined
+      ? null
+      : Buffer.from(String(value.evidence_bytes), "base64");
+    const row = {
+      promotion_id: value.promotion_id,
+      deployment_id: value.deployment_id,
+      environment: value.environment,
+      candidate_id: value.candidate_id,
+      idempotency_key: value.idempotency_key,
+      state: value.state,
+      approval_id: value.platform_approval_id,
+      approval_digest: value.platform_approval_digest,
+      source_commit: value.source_commit,
+      source_tree: value.source_tree,
+      product_pkg_sha256: value.product_pkg_sha256,
+      image_digest: value.image_digest,
+      sbom_sha256: value.sbom_sha256,
+      qualification_report_digests: value.qualification_report_digests,
+      release_manifest_schema_version: value.release_manifest_schema_version,
+      release_manifest_sha256: value.release_manifest_sha256,
+      approval_expires_at: value.approval_expires_at,
+      issued_at: value.issued_at,
+      expires_at: value.expires_at,
+      purpose: value.purpose,
+      protocol_version: value.protocol_version,
+      signing_version: value.signing_version,
+      lifecycle_version: value.lifecycle_version,
+      key_id: value.key_id,
+      key_version: value.key_version,
+      signer_key_fingerprint: value.signer_key_fingerprint,
+      claim_token_digest: claimToken === undefined ? null : sha256(claimToken),
+      claim_expires_at: value.claim_expires_at,
+      evidence_bytes: evidenceBytes,
+      evidence_digest: value.evidence_digest,
+      deployment_generation: value.deployment_generation,
+      uncertain_reason: value.uncertain_reason,
+      created_at: value.created_at,
+      updated_at: value.updated_at
+    };
+    row.provider_operation_id = deriveProviderOperationId(row);
+    row.request_digest = row.provider_operation_id.slice("managed-signer-v1-".length);
+    return normalizeStoredRow(row);
+  } catch (error) {
+    if (error instanceof PlatformPromotionIssuanceRepositoryError) throw error;
+    throw repoError("DATABASE");
+  }
 }
 
 function databaseTimestamp(value) {
@@ -590,7 +447,6 @@ function normalizeObject(input, keys) {
   return value;
 }
 
-function claimMatches(row, token) { return row.claim_token_digest === sha256(token); }
 function assertIdentity(row, identity) {
   for (const key of IDENTITY_KEYS) if (String(row[key]) !== String(identity[key])) throw repoError("CONFLICT");
 }
@@ -693,10 +549,6 @@ function normalizeFingerprint(value) {
   return `SHA256:${bytes.toString("base64url")}`;
 }
 
-function fingerprintBytes(value) {
-  const fingerprint = normalizeFingerprint(value);
-  return Buffer.from(fingerprint.slice("SHA256:".length), "base64url");
-}
 function rowCount(result) { return Number(result?.rowCount ?? result?.rows?.length ?? 0); }
 function repoError(name) { const code = PLATFORM_PROMOTION_ISSUANCE_ERROR_CODES[name] ?? PLATFORM_PROMOTION_ISSUANCE_ERROR_CODES.DATABASE; return new PlatformPromotionIssuanceRepositoryError(code); }
 function publicError(error) { if (error instanceof PlatformPromotionIssuanceRepositoryError) return error; return repoError("DATABASE"); }

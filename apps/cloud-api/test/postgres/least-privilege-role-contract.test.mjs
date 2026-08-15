@@ -21,7 +21,9 @@ test('role SQL is idempotent, credential-free, and PUBLIC is revoked', async () 
   assert.match(sql, /schema_migrations/);
   assert.match(sql, /schema_migration_attempts/);
   for (const relation of ['release_candidates', 'platform_promotion_approvals', 'platform_promotion_deployments', 'platform_promotion_issuances', 'managed_signer_key_lifecycles', 'managed_signer_keys']) assert.match(sql, new RegExp(`\\b${relation}\\b`));
-  assert.match(sql, /SECURITY DEFINER procedure path is completed/);
+  assert.match(sql, /Promotion issuance is reachable only through the reviewed SECURITY DEFINER/);
+  assert.match(sql, /managed_signer_provider_operations/);
+  assert.match(sql, /GRANT EXECUTE ON FUNCTION public\.%s TO agentpass_app/);
   assert.match(sql, /ALTER DEFAULT PRIVILEGES FOR ROLE agentpass_migrator IN SCHEMA public/);
   assert.match(sql, /ON TABLES/);
   assert.match(sql, /ON SEQUENCES/);

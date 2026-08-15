@@ -25,7 +25,7 @@ import {
 } from "../../../../scripts/postgres/authority-manifest.mjs";
 
 const ORG = "11111111-1111-4111-8111-111111111111";
-const PROMOTION_MIGRATION_URL = new URL("../../../../contracts/postgres/0047_platform_promotion_issuance.sql", import.meta.url);
+const PROMOTION_AUTHORITY_MIGRATION_URL = new URL("../../../../contracts/postgres/0048_platform_promotion_authority_boundary.sql", import.meta.url);
 const AUTHORITY_MANIFEST_CONTRACT_URL = new URL("../../../../scripts/postgres/authority-manifest.v1.json", import.meta.url);
 const TABLES = [
   "organizations", "members", "memberships", "human_sessions", "webauthn_credentials", "webauthn_challenges", "upstream_identities",
@@ -75,7 +75,7 @@ async function emptyManifest(artifact_digest = undefined) {
   return sealAuthorityManifest({
     schema_version: AUTHORITY_MANIFEST_SCHEMA_VERSION,
     kind: MANIFEST_KIND,
-    migration_version: "47",
+    migration_version: "48",
     migrations: migrations.map(({ version, name, checksum }) => ({ version: String(version), name, checksum })),
     tenant_ids: [ORG],
     tenants: [{ organization_id: ORG }],
@@ -108,19 +108,27 @@ test("rejects correlated count drift, invalid constraints, and tenant-integrity 
   await assert.rejects(createAuthorityManifest({ client }), (error) => error.code === DIAGNOSTICS.CROSS_TENANT.code);
 });
 
-test("tracks migration 0047 authority objects exactly", async () => {
+test("tracks migration 0048 authority boundary objects exactly", async () => {
   const contract = JSON.parse(await readFile(AUTHORITY_MANIFEST_CONTRACT_URL, "utf8"));
-  const sql = await readFile(PROMOTION_MIGRATION_URL, "utf8");
-  assert.equal(contract.migration_version, 47);
-  assert.deepEqual(contract.tables, ["platform_promotion_deployments", "platform_promotion_issuances"]);
-  assert.deepEqual(contract.functions, ["agentpass_guard_platform_promotion_deployment_head", "agentpass_guard_platform_promotion_issuance"]);
-  assert.deepEqual(contract.triggers, ["platform_promotion_deployments_forward_only", "platform_promotion_issuances_guard"]);
+  const sql = await readFile(PROMOTION_AUTHORITY_MIGRATION_URL, "utf8");
+  assert.equal(contract.migration_version, 48);
+  assert.deepEqual(contract.tables, []);
+  assert.deepEqual(contract.functions, [
+    "agentpass_platform_promotion_issuance_result",
+    "agentpass_platform_promotion_statement_canonical_json",
+    "agentpass_platform_promotion_request_digest",
+    "agentpass_platform_promotion_issuance_reserve",
+    "agentpass_platform_promotion_issuance_replay",
+    "agentpass_platform_promotion_issuance_commit",
+    "agentpass_platform_promotion_issuance_uncertain",
+    "agentpass_platform_promotion_issuance_get"
+  ]);
+  assert.deepEqual(contract.triggers, []);
   assert.deepEqual(contract.policies, []);
-  assert.deepEqual(contract.views, ["platform_promotion_issuances_public"]);
+  assert.deepEqual(contract.views, []);
   for (const objectName of [...contract.functions, ...contract.triggers, ...contract.policies, ...contract.views]) assert.match(sql, new RegExp(`\\b${objectName}\\b`, "u"));
-  assert.deepEqual(contract.table_contracts.platform_promotion_deployments.primary_key, ["deployment_id", "environment"]);
-  assert.deepEqual(contract.table_contracts.platform_promotion_issuances.primary_key, ["promotion_id"]);
-  assert.equal(contract.view_contracts.platform_promotion_issuances_public.excludes_claim_material, true);
+  assert.deepEqual(contract.table_contracts, {});
+  assert.deepEqual(contract.view_contracts, {});
 });
 
 test("normalizes before comparison and rejects unknown or secret-like nested fields", async () => {

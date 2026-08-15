@@ -3,6 +3,7 @@ import crypto from "node:crypto";
 import test from "node:test";
 
 import {
+  canonicalizePromotionEvidenceV3,
   PROMOTION_EVIDENCE_V3_ALGORITHM,
   PROMOTION_EVIDENCE_V3_MAX_TTL_MS,
   PROMOTION_EVIDENCE_V3_PURPOSE,
@@ -15,6 +16,7 @@ import { canonicalManagedSignerRequestDigest } from "../../src/postgres/managed-
 import { createPlatformPromotionIssuanceService } from "../../src/platform-promotion-issuance.mjs";
 import {
   createPostgresPlatformPromotionIssuanceRepository,
+  PlatformPromotionIssuanceRepositoryError,
   PLATFORM_PROMOTION_ISSUANCE_ERROR_CODES as CODES
 } from "../../src/postgres/platform-promotion-issuance-repository.mjs";
 
@@ -42,16 +44,19 @@ function digest(value) { return crypto.createHash("sha256").update(value, "utf8"
 function result(rows) { return { rows, rowCount: rows.length }; }
 function storedRow(values) {
   const authority = values?.authority ?? AUTHORITY;
-  return {
+  const row = {
     ...IDENTITY, state: "reserved", ...authority,
     purpose: PROMOTION_EVIDENCE_V3_PURPOSE, protocol_version: 3, signing_version: 3,
-    provider_operation_id: values?.provider_operation_id ?? "managed-signer-v1-" + "0".repeat(64),
-    request_digest: Buffer.alloc(32, 1), claim_token_digest: values?.claim_token_digest ?? digest("unused"),
-    claim_expires_at: "2026-08-15T00:00:30.000Z", evidence_digest: null, evidence_bytes: null,
+    provider_operation_id: values?.provider_operation_id,
+    request_digest: null, claim_token_digest: values?.claim_token_digest ?? digest("unused"),
+    claim_expires_at: values?.claim_expires_at ?? "2026-08-15T00:00:30.000Z", evidence_digest: null, evidence_bytes: null,
     deployment_generation: null, uncertain_reason: null,
     issued_at: values?.issued_at ?? "2026-08-15T00:00:00.000Z", expires_at: values?.expires_at ?? "2026-08-15T01:00:00.000Z",
     created_at: "2026-08-15T00:00:00.000Z", updated_at: "2026-08-15T00:00:00.000Z"
   };
+  row.provider_operation_id ??= providerOperationId(evidenceFor(row).statement);
+  row.request_digest = Buffer.from(row.provider_operation_id.slice("managed-signer-v1-".length), "hex");
+  return row;
 }
 
 function providerOperationId(statement) {
@@ -75,7 +80,8 @@ function evidenceFor(reservation) {
     image_digest: reservation.image_digest, sbom_sha256: reservation.sbom_sha256,
     qualification_report_digests: reservation.qualification_report_digests,
     release_manifest_schema_version: reservation.release_manifest_schema_version, release_manifest_sha256: reservation.release_manifest_sha256,
-    platform_approval_id: reservation.platform_approval_id, platform_approval_digest: reservation.platform_approval_digest,
+    platform_approval_id: reservation.platform_approval_id ?? reservation.approval_id,
+    platform_approval_digest: reservation.platform_approval_digest ?? reservation.approval_digest,
     approval_state: "approved", purpose: PROMOTION_EVIDENCE_V3_PURPOSE, protocol_version: 3, signing_version: 3,
     lifecycle_version: reservation.lifecycle_version, key_id: reservation.key_id, key_version: reservation.key_version,
     issued_at: reservation.issued_at, expires_at: reservation.expires_at
@@ -83,6 +89,62 @@ function evidenceFor(reservation) {
   return { version: PROMOTION_EVIDENCE_V3_VERSION, type: PROMOTION_EVIDENCE_V3_TYPE, statement,
     statement_hash: promotionEvidenceV3StatementHash(statement), signature_algorithm: PROMOTION_EVIDENCE_V3_ALGORITHM,
     signer_key_fingerprint: reservation.signer_key_fingerprint, signature: Buffer.alloc(64, 7).toString("base64url") };
+}
+
+function authorityResult(row, claimIssued = false) {
+  return {
+    state: row.state,
+    promotion_id: row.promotion_id,
+    deployment_id: row.deployment_id,
+    environment: row.environment,
+    candidate_id: row.candidate_id,
+    idempotency_key: row.idempotency_key,
+    source_commit: row.source_commit,
+    source_tree: row.source_tree,
+    product_pkg_sha256: row.product_pkg_sha256,
+    image_digest: row.image_digest,
+    sbom_sha256: row.sbom_sha256,
+    qualification_report_digests: [...row.qualification_report_digests],
+    release_manifest_schema_version: row.release_manifest_schema_version,
+    release_manifest_sha256: row.release_manifest_sha256,
+    platform_approval_id: row.approval_id,
+    platform_approval_digest: row.approval_digest,
+    approval_state: "approved",
+    purpose: row.purpose,
+    protocol_version: row.protocol_version,
+    signing_version: row.signing_version,
+    lifecycle_version: row.lifecycle_version,
+    key_id: row.key_id,
+    key_version: row.key_version,
+    signer_key_fingerprint: row.signer_key_fingerprint,
+    issued_at: row.issued_at,
+    expires_at: row.expires_at,
+    approval_expires_at: row.approval_expires_at,
+    claim_expires_at: row.claim_expires_at,
+    evidence_bytes: row.evidence_bytes === null ? null : Buffer.from(row.evidence_bytes).toString("base64"),
+    evidence_digest: row.evidence_digest,
+    deployment_generation: row.deployment_generation,
+    uncertain_reason: row.uncertain_reason,
+    created_at: row.created_at,
+    updated_at: row.updated_at,
+    claim_issued: claimIssued
+  };
+}
+
+function sameIdentity(row, params) {
+  return ["promotion_id", "deployment_id", "environment", "candidate_id", "idempotency_key"]
+    .every((key, index) => String(row[key]) === String(params[index]));
+}
+
+function repositoryError(code) {
+  return new PlatformPromotionIssuanceRepositoryError(code);
+}
+
+function assertAuthorityFunctionBoundary(client) {
+  const queryTexts = client.calls.map(({ text }) => text);
+  assert.ok(queryTexts.some((text) => /agentpass_platform_promotion_issuance_reserve/u.test(text)));
+  assert.equal(queryTexts.some((text) => /\b(?:INSERT|UPDATE|DELETE|TRUNCATE)\b/iu.test(text)), false);
+  assert.equal(queryTexts.some((text) => /\b(?:FROM|JOIN)\s+platform_promotion_|\bFOR\s+(?:UPDATE|SHARE)\b|pg_advisory_xact_lock/iu.test(text)), false);
 }
 
 class FakePg {
@@ -94,54 +156,149 @@ class FakePg {
     this.authority = { ...AUTHORITY, ...authority };
     this.dbNow = "2026-08-15T00:00:00.000Z";
     this.head = { deployment_id: IDENTITY.deployment_id, environment: IDENTITY.environment, current_generation: 0, current_candidate_id: null };
+    this.commitParams = null;
   }
   async query(text, params = []) {
-    this.calls.push({ text: String(text), params: [...params] });
-    if (["BEGIN", "COMMIT", "ROLLBACK"].includes(text)) return result([]);
-    if (/pg_advisory_xact_lock/u.test(text)) return result([{ locked: null }]);
-    if (/SELECT clock_timestamp\(\) AS now/u.test(text)) return result([{ now: this.dbNow }]);
-    if (/FROM platform_promotion_issuances/u.test(text)) {
-      if (/claim_expires_at>clock_timestamp/u.test(text)) return result(this.row ? [{ claim_active: this.row.claim_expires_at > "2026-08-15T00:00:00.000Z" }] : []);
-      if (this.row && (params[0] === this.row.promotion_id || (params[1] === this.row.deployment_id && params[2] === this.row.environment && params[3] === this.row.candidate_id && params[4] === this.row.idempotency_key))
-        && (!/state='committed'/u.test(text) || this.row.state === "committed")) return result([{ ...this.row }]);
-      return result([]);
+    const queryText = String(text);
+    this.calls.push({ text: queryText, params: params.map((value) => Buffer.isBuffer(value) ? Buffer.from(value) : value) });
+    if (["BEGIN", "COMMIT", "ROLLBACK"].includes(queryText)) return result([]);
+
+    const functionName = queryText.match(/SELECT\s+(agentpass_platform_promotion_issuance_[a-z]+)\(/u)?.[1];
+    if (!functionName) throw new Error(`unexpected SQL outside authority boundary: ${queryText.slice(0, 120)}`);
+    switch (functionName) {
+      case "agentpass_platform_promotion_issuance_reserve": return this.reserve(params);
+      case "agentpass_platform_promotion_issuance_replay": return this.replay(params);
+      case "agentpass_platform_promotion_issuance_commit": return this.commit(params);
+      case "agentpass_platform_promotion_issuance_uncertain": return this.uncertain(params);
+      case "agentpass_platform_promotion_issuance_get": return this.get(params);
+      default: throw new Error(`unexpected authority function: ${functionName}`);
     }
-    if (/INSERT INTO platform_promotion_deployments/u.test(text)) return result([]);
-    if (/FROM platform_promotion_deployments/u.test(text)) return result([{ ...this.head }]);
-    if (/FROM platform_promotion_approvals approval/u.test(text)) return result([{ ...this.authority, candidate_id: IDENTITY.candidate_id }]);
-    if (/FROM managed_signer_key_lifecycles lifecycle/u.test(text)) return this.lifecycleAvailable
-      ? result([{ lifecycle_version: 3, key_id: this.authority.key_id, key_version: this.authority.key_version, state: "active" }]) : result([]);
-    if (/INSERT INTO platform_promotion_issuances/u.test(text)) {
-      this.row = storedRow({
-        claim_token_digest: Buffer.from(params[24]).toString("hex"),
-        provider_operation_id: params[22],
-        authority: this.authority,
-        issued_at: params[16],
-        expires_at: params[17],
-        signer_key_fingerprint: `SHA256:${Buffer.from(params[21]).toString("base64url")}`
-      });
-      return { rowCount: 1, rows: [] };
+  }
+
+  reserve(params) {
+    assert.equal(params.length, 11);
+    if (this.row) {
+      const exact = sameIdentity(this.row, params);
+      const sameLookup = this.row.promotion_id === params[0]
+        || this.row.deployment_id === params[1] && this.row.environment === params[2]
+          && this.row.candidate_id === params[3] && this.row.idempotency_key === params[4];
+      if (sameLookup && !exact) throw repositoryError(CODES.CONFLICT);
+      if (exact) {
+        if (this.row.state === "reserved" && !this.claimActive()) this.expireReservation();
+        if (this.row.state === "reserved" || this.row.state === "uncertain") return result([{ result: authorityResult(this.row) }]);
+        return result([{ result: authorityResult(this.row) }]);
+      }
+      if (this.row.deployment_id === params[1] && this.row.environment === params[2]
+        && ["reserved", "uncertain"].includes(this.row.state)) return result([{ result: authorityResult(this.row) }]);
     }
-    if (/SET claim_token_digest=\$2/u.test(text)) {
-      this.row.claim_token_digest = Buffer.from(params[1]).toString("hex");
-      this.row.claim_expires_at = "2026-08-15T00:00:30.000Z";
-      return result([{ ...this.row }]);
+    if (!this.lifecycleAvailable) throw repositoryError(CODES.LIFECYCLE);
+    const issuedAt = this.dbNow;
+    const requestedExpiry = new Date(Date.parse(issuedAt) + params[7]).toISOString();
+    const expiresAt = new Date(Math.min(Date.parse(this.authority.approval_expires_at), Date.parse(requestedExpiry))).toISOString();
+    this.row = storedRow({
+      authority: this.authority,
+      issued_at: issuedAt,
+      expires_at: expiresAt,
+      claim_expires_at: new Date(Date.parse(issuedAt) + params[6]).toISOString(),
+      claim_token_digest: Buffer.from(params[5]).toString("hex"),
+      signer_key_fingerprint: this.authority.signer_key_fingerprint
+    });
+    this.row.promotion_id = params[0];
+    this.row.deployment_id = params[1];
+    this.row.environment = params[2];
+    this.row.candidate_id = params[3];
+    this.row.idempotency_key = params[4];
+    this.row.created_at = issuedAt;
+    this.row.updated_at = issuedAt;
+    this.row.provider_operation_id = providerOperationId(evidenceFor(this.row).statement);
+    this.row.request_digest = Buffer.from(this.row.provider_operation_id.slice("managed-signer-v1-".length), "hex");
+    return result([{ result: authorityResult(this.row, true) }]);
+  }
+
+  replay(params) {
+    assert.equal(params.length, 5);
+    if (!this.row) return result([{ result: { state: "absent" } }]);
+    if (!sameIdentity(this.row, params)) throw repositoryError(CODES.CONFLICT);
+    if (this.row.state === "reserved" && !this.claimActive()) this.expireReservation();
+    if (this.row.state === "reserved") return result([{ result: { state: "in_progress" } }]);
+    if (this.row.state === "uncertain") return result([{ result: { state: "uncertain" } }]);
+    return result([{ result: authorityResult(this.row) }]);
+  }
+
+  get(params) {
+    assert.equal(params.length, 6);
+    if (!this.row || params[5] === true && this.row.state !== "committed") return result([{ result: null }]);
+    if (!sameIdentity(this.row, params)) throw repositoryError(CODES.CONFLICT);
+    return result([{ result: authorityResult(this.row) }]);
+  }
+
+  commit(params) {
+    assert.equal(params.length, 10);
+    if (!this.row || !sameIdentity(this.row, params)) throw repositoryError(CODES.CONFLICT);
+    const evidenceBytes = Buffer.from(params[8]);
+    const signingBytes = Buffer.from(params[6]);
+    const signature = Buffer.from(params[7]);
+    const evidenceDigest = Buffer.from(params[9]);
+    const expectedEvidence = evidenceFor(this.row);
+    const expectedSigningBytes = promotionEvidenceV3SigningData(expectedEvidence.statement, {
+      allowExpired: true, allowFuture: true, maxTtlMs: PROMOTION_EVIDENCE_V3_MAX_TTL_MS
+    });
+    const expectedCanonicalEvidence = canonicalizePromotionEvidenceV3(expectedEvidence, {
+      allowExpired: true, allowFuture: true
+    });
+    assert.deepEqual(signingBytes, expectedSigningBytes);
+    assert.deepEqual(evidenceBytes, Buffer.from(expectedCanonicalEvidence, "utf8"));
+    assert.deepEqual(signature, Buffer.from(expectedEvidence.signature, "base64url"));
+    assert.deepEqual(evidenceDigest, Buffer.from(digest(expectedCanonicalEvidence), "hex"));
+    this.commitParams = {
+      claim_token_digest: Buffer.from(params[5]),
+      signing_bytes: signingBytes,
+      signature,
+      evidence_bytes: evidenceBytes,
+      evidence_digest: evidenceDigest
+    };
+    if (!this.lifecycleAvailable) throw repositoryError(CODES.LIFECYCLE);
+    if (Buffer.from(params[5]).toString("hex") !== this.row.claim_token_digest) throw repositoryError(CODES.CLAIM);
+    if (this.row.state === "committed") return result([{ result: authorityResult(this.row) }]);
+    if (this.row.state === "uncertain") return result([{ result: { state: "uncertain" } }]);
+    if (this.row.state !== "reserved" || !this.claimActive() || Date.parse(this.row.approval_expires_at) <= Date.parse(this.dbNow)) {
+      throw repositoryError(CODES.CLAIM);
     }
-    if (/SET state='committed'/u.test(text)) {
-      this.row.state = "committed"; this.row.claim_token_digest = null; this.row.claim_expires_at = null;
-      this.row.evidence_bytes = params[2]; this.row.evidence_digest = Buffer.from(params[3]).toString("hex"); this.row.deployment_generation = params[4];
-      if (this.commitResponseLost) throw new Error("response lost; provider_diagnostics=private");
-      return result([{ ...this.row }]);
-    }
-    if (/SET current_generation=/u.test(text)) {
-      this.head.current_generation = params[2]; this.head.current_candidate_id = params[3]; return result([{ ...this.head }]);
-    }
-    if (/SET state='uncertain'/u.test(text)) {
-      this.row.state = "uncertain"; this.row.claim_token_digest = null; this.row.claim_expires_at = null;
-      this.row.uncertain_reason = params.length === 2 ? "stale_lifecycle" : params[1];
-      return result([{ ...this.row }]);
-    }
-    throw new Error(`unexpected SQL: ${String(text).slice(0, 120)}`);
+    this.row.state = "committed";
+    this.row.claim_token_digest = null;
+    this.row.claim_expires_at = null;
+    this.row.evidence_bytes = evidenceBytes;
+    this.row.evidence_digest = evidenceDigest.toString("hex");
+    this.row.deployment_generation = this.head.current_generation + 1;
+    this.row.uncertain_reason = null;
+    this.head.current_generation = this.row.deployment_generation;
+    this.head.current_candidate_id = this.row.candidate_id;
+    if (this.commitResponseLost) throw new Error("response lost; provider_diagnostics=private");
+    return result([{ result: authorityResult(this.row) }]);
+  }
+
+  uncertain(params) {
+    assert.equal(params.length, 7);
+    if (!this.row || !sameIdentity(this.row, params)) throw repositoryError(CODES.CONFLICT);
+    if (this.row.state === "committed") return result([{ result: authorityResult(this.row) }]);
+    if (this.row.state === "uncertain") return result([{ result: { state: "uncertain" } }]);
+    if (Buffer.from(params[5]).toString("hex") !== this.row.claim_token_digest) throw repositoryError(CODES.CLAIM);
+    this.row.state = "uncertain";
+    this.row.claim_token_digest = null;
+    this.row.claim_expires_at = null;
+    this.row.uncertain_reason = params[6];
+    return result([{ result: { state: "uncertain" } }]);
+  }
+
+  claimActive() {
+    return this.row?.claim_expires_at !== null && Date.parse(String(this.row.claim_expires_at)) > Date.parse(this.dbNow);
+  }
+
+  expireReservation() {
+    this.row.state = "uncertain";
+    this.row.claim_token_digest = null;
+    this.row.claim_expires_at = null;
+    this.row.uncertain_reason = "stale_lifecycle";
   }
 }
 
@@ -168,7 +325,7 @@ test("reserves only database-derived approval/candidate authority and hides priv
   assert.equal(Object.hasOwn(reserved, "platform_principal_ids"), false);
   assert.equal(Object.hasOwn(reserved, "authorization_evidence_digests"), false);
   assert.notEqual(client.row.claim_token_digest, reserved.claim_token);
-  assert.match(client.calls.find(({ text }) => /FROM platform_promotion_approvals/u.test(text)).text, /candidate\.artifact_sha256=approval\.product_pkg_sha256/u);
+  assertAuthorityFunctionBoundary(client);
 });
 
 test("derives the durable provider operation from the exact reserved v3 statement", async () => {
@@ -219,6 +376,18 @@ test("commits exact v3 evidence with a monotonic generation and replays without 
   assert.equal(Object.hasOwn(committed, "provider_operation_id"), false);
   assert.equal(Object.hasOwn(committed, "request_digest"), false);
   assert.equal(Object.hasOwn(committed, "created_at"), false);
+  assert.deepEqual(client.commitParams.claim_token_digest, Buffer.from(digest(reserved.claim_token), "hex"));
+  assert.deepEqual(client.commitParams.signing_bytes, promotionEvidenceV3SigningData(committed.promotion_evidence.statement, {
+    allowExpired: true, allowFuture: true, maxTtlMs: PROMOTION_EVIDENCE_V3_MAX_TTL_MS
+  }));
+  assert.deepEqual(client.commitParams.evidence_bytes, Buffer.from(canonicalizePromotionEvidenceV3(committed.promotion_evidence, {
+    allowExpired: true, allowFuture: true
+  }), "utf8"));
+  assert.deepEqual(client.commitParams.signature, Buffer.from(committed.promotion_evidence.signature, "base64url"));
+  assert.deepEqual(client.commitParams.evidence_digest, Buffer.from(digest(canonicalizePromotionEvidenceV3(committed.promotion_evidence, {
+    allowExpired: true, allowFuture: true
+  })), "hex"));
+  assertAuthorityFunctionBoundary(client);
   assert.deepEqual(await repo.replayPlatformPromotion(IDENTITY), committed);
   assert.deepEqual(await repo.getCommittedPlatformPromotion(IDENTITY), committed);
   assert.equal(client.head.current_candidate_id, IDENTITY.candidate_id);

@@ -19,6 +19,7 @@ import {
   createPlatformPromotionIssuanceService,
 } from "../../src/platform-promotion-issuance.mjs";
 import { createPromotionEvidenceV3PublicKeyResolver } from "../../src/promotion-evidence-v3-public-key-resolver.mjs";
+import { canonicalManagedSignerRequestDigest } from "../../src/postgres/managed-signer-key-lifecycle-repository.mjs";
 import { createPostgresPlatformPromotionIssuanceRepository } from "../../src/postgres/platform-promotion-issuance-repository.mjs";
 
 const NOW = Date.parse("2026-08-15T00:00:00.000Z");
@@ -110,7 +111,9 @@ class DeterministicPromotionPg {
     };
     this.transactionState = undefined;
     this.calls = [];
+    this.authorityCalls = [];
     this.events = [];
+    this.providerLedger = undefined;
   }
 
   advance(ms) {
@@ -149,122 +152,259 @@ class DeterministicPromotionPg {
     }
 
     const state = this.transactionState ?? this.state;
-    if (/pg_advisory_xact_lock\(/u.test(sql)) return result([{ locked: null }]);
-    if (/SELECT clock_timestamp\(\) AS now/u.test(sql)) return result([{ now: timestamp(this.nowMs) }]);
-
-    if (/SELECT claim_expires_at>clock_timestamp\(\) AS claim_active/u.test(sql)) {
-      const active = state.row?.state === "reserved"
-        && Date.parse(state.row.claim_expires_at) > this.nowMs;
-      return state.row ? result([{ claim_active: active }]) : result([]);
+    const authorityFunction = sql.match(
+      /^SELECT agentpass_platform_promotion_issuance_(reserve|replay|commit|uncertain|get)\(/u,
+    );
+    if (authorityFunction) {
+      const name = authorityFunction[1];
+      this.authorityCalls.push({ name, params: params.map(clone) });
+      return this.callAuthorityFunction(state, name, params);
     }
 
-    if (/FROM platform_promotion_issuances/u.test(sql)) {
-      if (/state IN \('reserved','uncertain'\)/u.test(sql)) {
-        const open = state.row && ["reserved", "uncertain"].includes(state.row.state)
-          ? state.row : undefined;
-        return open ? result([clone(open)]) : result([]);
-      }
-      const matches = state.row && this.matchesIdentity(state.row, params)
-        && (!/AND state='committed'/u.test(sql) || state.row.state === "committed");
-      return matches ? result([clone(state.row)]) : result([]);
-    }
-
-    if (/INSERT INTO platform_promotion_deployments/u.test(sql)) return result([]);
-    if (/FROM platform_promotion_deployments/u.test(sql)) return result([clone(state.head)]);
-    if (/FROM platform_promotion_approvals approval/u.test(sql)) {
-      return result([clone(this.authority)]);
-    }
-    if (/FROM managed_signer_key_lifecycles lifecycle/u.test(sql)) {
-      if (this.authority.lifecycleAvailable === false) return result([]);
-      return result([{
-        lifecycle_version: AUTHORITY.lifecycle_version,
-        key_id: AUTHORITY.key_id,
-        key_version: AUTHORITY.key_version,
-        state: "active",
-      }]);
-    }
-
-    if (/INSERT INTO platform_promotion_issuances/u.test(sql)) {
-      state.row = {
-        ...INPUT,
-        state: "reserved",
-        approval_id: params[5],
-        approval_digest: params[6],
-        source_commit: params[7],
-        source_tree: params[8],
-        product_pkg_sha256: params[9],
-        image_digest: params[10],
-        sbom_sha256: params[11],
-        qualification_report_digests: clone(params[12]),
-        release_manifest_schema_version: params[13],
-        release_manifest_sha256: params[14],
-        approval_expires_at: params[15],
-        issued_at: params[16],
-        expires_at: params[17],
-        purpose: PROMOTION_EVIDENCE_V3_PURPOSE,
-        protocol_version: 3,
-        signing_version: 3,
-        lifecycle_version: params[18],
-        key_id: params[19],
-        key_version: params[20],
-        signer_key_fingerprint: clone(params[21]),
-        provider_operation_id: params[22],
-        request_digest: clone(params[23]),
-        claim_token_digest: Buffer.from(params[24]).toString("hex"),
-        claim_expires_at: timestamp(this.nowMs + params[25]),
-        evidence_digest: null,
-        evidence_bytes: null,
-        deployment_generation: null,
-        uncertain_reason: null,
-        created_at: timestamp(this.nowMs),
-        updated_at: timestamp(this.nowMs),
-      };
-      return { rows: [], rowCount: 1 };
-    }
-
-    if (/SET state='committed'/u.test(sql)) {
-      if (!state.row || state.row.state !== "reserved"
-        || state.row.claim_token_digest !== Buffer.from(params[1]).toString("hex")
-        || Date.parse(state.row.claim_expires_at) <= this.nowMs
-        || Date.parse(state.row.approval_expires_at) <= this.nowMs) return result([]);
-      state.row.state = "committed";
-      state.row.claim_token_digest = null;
-      state.row.claim_expires_at = null;
-      state.row.evidence_bytes = clone(params[2]);
-      state.row.evidence_digest = Buffer.from(params[3]).toString("hex");
-      state.row.deployment_generation = params[4];
-      state.row.uncertain_reason = null;
-      state.row.updated_at = timestamp(this.nowMs);
-      this.events.push("issuance-committed");
-      return result([clone(state.row)]);
-    }
-    if (/SET current_generation=/u.test(sql)) {
-      if (state.head.current_generation !== params[4]) return result([]);
-      state.head.current_generation = params[2];
-      state.head.current_candidate_id = params[3];
-      this.events.push("deployment-advanced");
-      return result([clone(state.head)]);
-    }
-    if (/SET state='uncertain'/u.test(sql)) {
-      const claimDigest = params.length === 2 ? params[1] : params[2];
-      if (!state.row || state.row.state !== "reserved"
-        || state.row.claim_token_digest !== Buffer.from(claimDigest).toString("hex")) return result([]);
-      state.row.state = "uncertain";
-      state.row.claim_token_digest = null;
-      state.row.claim_expires_at = null;
-      state.row.uncertain_reason = params.length === 2 ? "stale_lifecycle" : params[1];
-      state.row.updated_at = timestamp(this.nowMs);
-      this.events.push("issuance-uncertain");
-      return result([clone(state.row)]);
-    }
-
-    throw new Error(`unexpected SQL: ${sql.slice(0, 160)}`);
+    throw new Error(`unexpected SQL outside authority function boundary: ${sql.slice(0, 160)}`);
   }
 
-  matchesIdentity(row, params) {
-    return params[0] === row.promotion_id
-      || (params[1] === row.deployment_id && params[2] === row.environment
-        && params[3] === row.candidate_id && params[4] === row.idempotency_key);
+  recordProviderSignature({ bytes, signature }) {
+    const requestDigest = canonicalManagedSignerRequestDigest({
+      algorithm: PROMOTION_EVIDENCE_V3_ALGORITHM,
+      bytes,
+      key_id: AUTHORITY.key_id,
+      purpose: PROMOTION_EVIDENCE_V3_PURPOSE,
+      version: PROMOTION_EVIDENCE_V3_SIGNING_VERSION,
+      key_version: AUTHORITY.key_version,
+    });
+    this.providerLedger = {
+      algorithm: PROMOTION_EVIDENCE_V3_ALGORITHM,
+      bytes: Buffer.from(bytes),
+      bytes_length: bytes.length,
+      key_id: AUTHORITY.key_id,
+      key_version: AUTHORITY.key_version,
+      lifecycle_version: AUTHORITY.lifecycle_version,
+      operation_id: `managed-signer-v1-${requestDigest}`,
+      provider_receipt_id: `test-receipt-${requestDigest.slice(0, 16)}`,
+      provider_receipt_provider: "deterministic-test-provider",
+      request_digest: requestDigest,
+      signature: Buffer.from(signature),
+      state: "committed",
+    };
+    if (this.state.row) {
+      this.state.row.provider_operation_id = this.providerLedger.operation_id;
+      this.state.row.request_digest = requestDigest;
+    }
+  }
+
+  callAuthorityFunction(state, name, params) {
+    switch (name) {
+      case "reserve": return this.reserveAuthority(state, params);
+      case "replay": return this.replayAuthority(state, params);
+      case "commit": return this.commitAuthority(state, params);
+      case "uncertain": return this.uncertainAuthority(state, params);
+      case "get": return this.getAuthority(state, params);
+      default: throw new Error(`unexpected authority function: ${name}`);
+    }
+  }
+
+  authorityResult(row, claimIssued = false) {
+    if (!row) return result([{ result: null }]);
+    return result([{
+      result: {
+        state: row.state,
+        promotion_id: row.promotion_id,
+        deployment_id: row.deployment_id,
+        environment: row.environment,
+        candidate_id: row.candidate_id,
+        idempotency_key: row.idempotency_key,
+        source_commit: row.source_commit,
+        source_tree: row.source_tree,
+        product_pkg_sha256: row.product_pkg_sha256,
+        image_digest: row.image_digest,
+        sbom_sha256: row.sbom_sha256,
+        qualification_report_digests: clone(row.qualification_report_digests),
+        release_manifest_schema_version: row.release_manifest_schema_version,
+        release_manifest_sha256: row.release_manifest_sha256,
+        platform_approval_id: row.approval_id,
+        platform_approval_digest: row.approval_digest,
+        approval_state: "approved",
+        purpose: row.purpose,
+        protocol_version: row.protocol_version,
+        signing_version: row.signing_version,
+        lifecycle_version: row.lifecycle_version,
+        key_id: row.key_id,
+        key_version: row.key_version,
+        signer_key_fingerprint: `SHA256:${Buffer.from(row.signer_key_fingerprint).toString("base64url")}`,
+        issued_at: row.issued_at,
+        expires_at: row.expires_at,
+        approval_expires_at: row.approval_expires_at,
+        claim_expires_at: row.claim_expires_at,
+        evidence_bytes: row.evidence_bytes === null ? null : Buffer.from(row.evidence_bytes).toString("base64"),
+        evidence_digest: row.evidence_digest,
+        deployment_generation: row.deployment_generation,
+        uncertain_reason: row.uncertain_reason,
+        created_at: row.created_at,
+        updated_at: row.updated_at,
+        claim_issued: claimIssued,
+      },
+    }]);
+  }
+
+  findIdentity(state, params) {
+    const [promotionId, deploymentId, environment, candidateId, idempotencyKey] = params;
+    if (!state.row) return undefined;
+    if (state.row.promotion_id === promotionId) return state.row;
+    if (state.row.deployment_id === deploymentId && state.row.environment === environment
+      && state.row.candidate_id === candidateId && state.row.idempotency_key === idempotencyKey) return state.row;
+    return undefined;
+  }
+
+  assertIdentity(row, params) {
+    const [, deploymentId, environment, candidateId, idempotencyKey] = params;
+    if (row.deployment_id !== deploymentId || row.environment !== environment
+      || row.candidate_id !== candidateId || row.idempotency_key !== idempotencyKey) {
+      throw new Error("authority identity conflict");
+    }
+  }
+
+  reserveAuthority(state, params) {
+    const [promotionId, deploymentId, environment, candidateId, idempotencyKey,
+      claimTokenDigest, claimLeaseMs, evidenceTtlMs] = params;
+    const existing = this.findIdentity(state, params);
+    if (existing) {
+      this.assertIdentity(existing, params);
+      if (existing.state === "reserved" && Date.parse(existing.claim_expires_at) <= this.nowMs) {
+        this.transitionUncertain(existing, "stale_lifecycle");
+      }
+      return this.authorityResult(existing, false);
+    }
+    const open = state.row && state.row.deployment_id === deploymentId
+      && state.row.environment === environment
+      && ["reserved", "uncertain"].includes(state.row.state) ? state.row : undefined;
+    if (open) return this.authorityResult(open, false);
+    if (this.authority.lifecycleAvailable === false) throw new Error("authority unavailable");
+
+    const issuedAt = timestamp(this.nowMs);
+    const expiresAt = timestamp(Math.min(
+      Date.parse(this.authority.approval_expires_at),
+      this.nowMs + evidenceTtlMs,
+    ));
+    state.row = {
+      promotion_id: promotionId,
+      deployment_id: deploymentId,
+      environment,
+      candidate_id: candidateId,
+      idempotency_key: idempotencyKey,
+      state: "reserved",
+      approval_id: this.authority.approval_id,
+      approval_digest: this.authority.approval_digest,
+      source_commit: this.authority.source_commit,
+      source_tree: this.authority.source_tree,
+      product_pkg_sha256: this.authority.product_pkg_sha256,
+      image_digest: this.authority.image_digest,
+      sbom_sha256: this.authority.sbom_sha256,
+      qualification_report_digests: clone(this.authority.qualification_report_digests),
+      release_manifest_schema_version: this.authority.release_manifest_schema_version,
+      release_manifest_sha256: this.authority.release_manifest_sha256,
+      approval_expires_at: this.authority.approval_expires_at,
+      issued_at: issuedAt,
+      expires_at: expiresAt,
+      purpose: PROMOTION_EVIDENCE_V3_PURPOSE,
+      protocol_version: PROMOTION_EVIDENCE_V3_PROTOCOL_VERSION,
+      signing_version: PROMOTION_EVIDENCE_V3_SIGNING_VERSION,
+      lifecycle_version: this.authority.lifecycle_version,
+      key_id: this.authority.key_id,
+      key_version: this.authority.key_version,
+      signer_key_fingerprint: Buffer.from(this.authority.signer_key_fingerprint),
+      claim_token_digest: Buffer.from(claimTokenDigest),
+      claim_expires_at: timestamp(this.nowMs + claimLeaseMs),
+      evidence_digest: null,
+      evidence_bytes: null,
+      deployment_generation: null,
+      uncertain_reason: null,
+      created_at: issuedAt,
+      updated_at: issuedAt,
+    };
+    return this.authorityResult(state.row, true);
+  }
+
+  replayAuthority(state, params) {
+    const row = this.findIdentity(state, params);
+    if (!row) return result([{ result: { state: "absent" } }]);
+    this.assertIdentity(row, params);
+    if (row.state === "reserved" && Date.parse(row.claim_expires_at) <= this.nowMs) {
+      this.transitionUncertain(row, "stale_lifecycle");
+    }
+    if (row.state === "reserved") return result([{ result: { state: "in_progress" } }]);
+    if (row.state === "uncertain") return result([{ result: { state: "uncertain" } }]);
+    return this.authorityResult(row, false);
+  }
+
+  commitAuthority(state, params) {
+    const [promotionId, deploymentId, environment, candidateId, idempotencyKey,
+      claimTokenDigest, signingBytes, signature, evidenceBytes, evidenceDigest] = params;
+    const row = state.row;
+    if (!row || row.promotion_id !== promotionId) throw new Error("issuance not found");
+    this.assertIdentity(row, params);
+    const digest = Buffer.from(evidenceDigest).toString("hex");
+    if (digest !== sha256(evidenceBytes)) throw new Error("evidence digest");
+    const ledger = this.providerLedger;
+    if (!ledger || ledger.state !== "committed"
+      || !Buffer.from(ledger.bytes).equals(Buffer.from(signingBytes))
+      || !Buffer.from(ledger.signature).equals(Buffer.from(signature))
+      || ledger.key_id !== row.key_id || ledger.key_version !== row.key_version
+      || ledger.lifecycle_version !== row.lifecycle_version
+      || ledger.operation_id !== row.provider_operation_id) {
+      throw new Error("provider ledger binding");
+    }
+    if (row.state === "committed") {
+      if (row.evidence_digest !== digest || !Buffer.from(row.evidence_bytes).equals(Buffer.from(evidenceBytes))) {
+        throw new Error("committed evidence conflict");
+      }
+      return this.authorityResult(row, false);
+    }
+    if (row.state !== "reserved"
+      || !Buffer.from(row.claim_token_digest).equals(Buffer.from(claimTokenDigest))
+      || Date.parse(row.claim_expires_at) <= this.nowMs
+      || Date.parse(row.approval_expires_at) <= this.nowMs) throw new Error("claim expired");
+    const nextGeneration = state.head.current_generation + 1;
+    row.state = "committed";
+    row.claim_token_digest = null;
+    row.claim_expires_at = null;
+    row.evidence_bytes = Buffer.from(evidenceBytes);
+    row.evidence_digest = digest;
+    row.deployment_generation = nextGeneration;
+    row.uncertain_reason = null;
+    row.updated_at = timestamp(this.nowMs);
+    state.head.current_generation = nextGeneration;
+    state.head.current_candidate_id = row.candidate_id;
+    this.events.push("issuance-committed");
+    this.events.push("deployment-advanced");
+    return this.authorityResult(row, false);
+  }
+
+  uncertainAuthority(state, params) {
+    const row = state.row;
+    if (!row || row.promotion_id !== params[0]) throw new Error("issuance not found");
+    this.assertIdentity(row, params);
+    if (row.state === "committed") return this.authorityResult(row, false);
+    if (row.state === "uncertain") return result([{ result: { state: "uncertain" } }]);
+    if (!Buffer.from(row.claim_token_digest).equals(Buffer.from(params[5]))) throw new Error("claim invalid");
+    this.transitionUncertain(row, params[6]);
+    return result([{ result: { state: "uncertain" } }]);
+  }
+
+  getAuthority(state, params) {
+    const row = state.row && state.row.promotion_id === params[0] ? state.row : undefined;
+    if (!row || (params[5] === true && row.state !== "committed")) return result([{ result: null }]);
+    this.assertIdentity(row, params);
+    return this.authorityResult(row, false);
+  }
+
+  transitionUncertain(row, reason) {
+    row.state = "uncertain";
+    row.claim_token_digest = null;
+    row.claim_expires_at = null;
+    row.uncertain_reason = reason;
+    row.updated_at = timestamp(this.nowMs);
+    this.events.push("issuance-uncertain");
   }
 }
 
@@ -274,6 +414,7 @@ function createComposition({ forged = false, loseNextCommitResponse = false } = 
   const rawFingerprint = rawKeyFingerprint(signingKeys.publicKey);
   const signerFingerprint = promotionEvidenceV3PublicKeyFingerprint(signingKeys.publicKey);
   let signCalls = 0;
+  let client;
   const publicKeyMetadata = () => ({
     algorithm: PROMOTION_EVIDENCE_V3_ALGORITHM,
     key_id: AUTHORITY.key_id,
@@ -287,7 +428,9 @@ function createComposition({ forged = false, loseNextCommitResponse = false } = 
     publicKeyMetadata,
     sign: async ({ bytes }) => {
       signCalls += 1;
-      return crypto.sign(null, bytes, signingKeys.privateKey);
+      const signature = crypto.sign(null, bytes, signingKeys.privateKey);
+      client.recordProviderSignature({ bytes, signature });
+      return signature;
     },
     version: PROMOTION_EVIDENCE_V3_SIGNING_VERSION,
   };
@@ -343,7 +486,7 @@ function createComposition({ forged = false, loseNextCommitResponse = false } = 
       },
     }
     : signer;
-  const client = new DeterministicPromotionPg({
+  client = new DeterministicPromotionPg({
     authority: authorityResult(signingKeys.publicKey, rawFingerprint),
     loseNextCommitResponse,
   });

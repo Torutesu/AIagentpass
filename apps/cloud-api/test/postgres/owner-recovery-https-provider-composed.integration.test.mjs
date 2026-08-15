@@ -51,7 +51,7 @@ test("composed HTTPS provider, production publisher, worker, and PostgreSQL conv
       client: migrationClient,
       applicationVersion: "owner-recovery-https-provider-composed"
     }).run();
-    assert.equal(migration.currentVersion, 47);
+    assert.equal(migration.currentVersion, 48);
   } finally {
     migrationClient.release();
   }

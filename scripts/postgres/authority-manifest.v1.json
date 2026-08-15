@@ -1,43 +1,24 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://agentpass.dev/scripts/postgres/authority-manifest.v1.json",
-  "title": "AgentPass migration 0047 authority object inventory",
+  "title": "AgentPass migration 0048 authority boundary object inventory",
   "schema_version": 1,
-  "migration_version": 47,
-  "migration": "0047_platform_promotion_issuance.sql",
-  "tables": ["platform_promotion_deployments", "platform_promotion_issuances"],
+  "migration_version": 48,
+  "migration": "0048_platform_promotion_authority_boundary.sql",
+  "tables": [],
   "functions": [
-    "agentpass_guard_platform_promotion_deployment_head",
-    "agentpass_guard_platform_promotion_issuance"
+    "agentpass_platform_promotion_issuance_result",
+    "agentpass_platform_promotion_statement_canonical_json",
+    "agentpass_platform_promotion_request_digest",
+    "agentpass_platform_promotion_issuance_reserve",
+    "agentpass_platform_promotion_issuance_replay",
+    "agentpass_platform_promotion_issuance_commit",
+    "agentpass_platform_promotion_issuance_uncertain",
+    "agentpass_platform_promotion_issuance_get"
   ],
-  "triggers": [
-    "platform_promotion_deployments_forward_only",
-    "platform_promotion_issuances_guard"
-  ],
+  "triggers": [],
   "policies": [],
-  "views": ["platform_promotion_issuances_public"],
-  "table_contracts": {
-    "platform_promotion_deployments": {
-      "primary_key": ["deployment_id", "environment"],
-      "columns": ["deployment_id", "environment", "current_generation", "current_candidate_id", "created_at", "updated_at"],
-      "tenant_column": null,
-      "rls": "none",
-      "append_only": false
-    },
-    "platform_promotion_issuances": {
-      "primary_key": ["promotion_id"],
-      "columns": ["promotion_id", "deployment_id", "environment", "candidate_id", "idempotency_key", "state", "approval_id", "approval_digest", "source_commit", "source_tree", "product_pkg_sha256", "image_digest", "sbom_sha256", "qualification_report_digests", "release_manifest_schema_version", "release_manifest_sha256", "approval_expires_at", "issued_at", "expires_at", "purpose", "protocol_version", "signing_version", "lifecycle_version", "key_id", "key_version", "signer_key_fingerprint", "provider_operation_id", "request_digest", "claim_token_digest", "claim_expires_at", "evidence_bytes", "evidence_digest", "deployment_generation", "uncertain_reason", "created_at", "updated_at"],
-      "tenant_column": null,
-      "rls": "none",
-      "append_only": false
-    }
-  },
-  "view_contracts": {
-    "platform_promotion_issuances_public": {
-      "security_invoker": false,
-      "excludes_claim_material": true,
-      "excludes_evidence_bytes": true,
-      "joins": []
-    }
-  }
+  "views": [],
+  "table_contracts": {},
+  "view_contracts": {}
 }

@@ -62,7 +62,8 @@ sequences AS (
   WHERE c.relkind = 'S'
 ),
 functions AS (
-  SELECT p.oid, p.proowner
+  SELECT p.oid, p.proowner,
+    p.proname || '(' || regexp_replace(pg_get_function_identity_arguments(p.oid), '\\s+', '', 'g') || ')' AS routine_signature
   FROM pg_proc AS p
   JOIN target_schema AS s ON s.oid = p.pronamespace
 ),
@@ -150,8 +151,23 @@ sequence_privileges_ok AS (
 function_privileges_ok AS (
   SELECT COALESCE((SELECT bool_and(proowner = (SELECT oid FROM role_ids WHERE rolname = 'agentpass_migrator')) FROM functions), true)
     AND NOT EXISTS (SELECT 1 FROM functions
-      WHERE has_function_privilege('agentpass_app', oid, 'EXECUTE')
-         OR has_function_privilege('agentpass_backup', oid, 'EXECUTE')) AS value
+      WHERE has_function_privilege('agentpass_backup', oid, 'EXECUTE')
+         OR (has_function_privilege('agentpass_app', oid, 'EXECUTE')
+           AND routine_signature NOT IN (
+             'agentpass_platform_promotion_issuance_reserve(uuid,text,text,text,text,bytea,integer,integer,text,bigint,bigint)',
+             'agentpass_platform_promotion_issuance_replay(uuid,text,text,text,text)',
+             'agentpass_platform_promotion_issuance_commit(uuid,text,text,text,text,bytea,bytea,bytea,bytea,bytea)',
+             'agentpass_platform_promotion_issuance_uncertain(uuid,text,text,text,text,bytea,text)',
+             'agentpass_platform_promotion_issuance_get(uuid,text,text,text,text,boolean)'
+           ))
+         OR (NOT has_function_privilege('agentpass_app', oid, 'EXECUTE')
+           AND routine_signature IN (
+             'agentpass_platform_promotion_issuance_reserve(uuid,text,text,text,text,bytea,integer,integer,text,bigint,bigint)',
+             'agentpass_platform_promotion_issuance_replay(uuid,text,text,text,text)',
+             'agentpass_platform_promotion_issuance_commit(uuid,text,text,text,text,bytea,bytea,bytea,bytea,bytea)',
+             'agentpass_platform_promotion_issuance_uncertain(uuid,text,text,text,text,bytea,text)',
+             'agentpass_platform_promotion_issuance_get(uuid,text,text,text,text,boolean)'
+           ))) AS value
 ),
 default_privileges_ok AS (
   SELECT
