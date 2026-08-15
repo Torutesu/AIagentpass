@@ -5,7 +5,7 @@ import { createPostgresHumanRepository } from "../../src/postgres/human-reposito
 const ids = { session: "11111111-1111-4111-8111-111111111111", member: "22222222-2222-4222-8222-222222222222", org: "33333333-3333-4333-8333-333333333333", membership: "55555555-5555-4555-8555-555555555555", challenge: "44444444-4444-4444-8444-444444444444" };
 
 test("stores session digests as bytes and uses exact tenant/member binding", async () => {
-  const calls=[]; const client={async query(text,params){calls.push({text,params});return {rows:[{id:ids.session}],rowCount:1};}};
+  const calls=[]; const client={async query(text,params){calls.push({text,params});return {rows:[{id:ids.session,member_id:ids.member,membership_id:ids.membership,organization_id:ids.org,role:"owner",token_hash_hex:"a".repeat(64),csrf_token_hash_hex:"b".repeat(64),created_at:"2026-08-12T00:00:00.000Z",expires_at:"2026-08-12T01:00:00.000Z",last_seen_at:"2026-08-12T00:00:00.000Z",idle_expires_at:"2026-08-12T00:30:00.000Z",recent_auth_at:null,revoked_at:null}],rowCount:1};}};
   const repo=createPostgresHumanRepository({client});
   await repo.createSession({session_id:ids.session,member_id:ids.member,membership_id:ids.membership,organization_id:ids.org,role:"owner",token_hash:"a".repeat(64),csrf_token_hash:"b".repeat(64),created_at:"2026-08-12T00:00:00.000Z",expires_at:"2026-08-12T01:00:00.000Z",last_seen_at:"2026-08-12T00:00:00.000Z",idle_expires_at:"2026-08-12T00:30:00.000Z"});
   assert.equal(Buffer.isBuffer(calls[0].params[4]),true); assert.equal(calls[0].params[4].length,32); assert.match(calls[0].text,/m\.id=\$4/); assert.match(calls[0].text,/m\.status='active'/);
@@ -25,7 +25,7 @@ test("atomically enforces the cross-replica session ceiling before insertion", a
     if (text === "BEGIN" || text === "COMMIT" || text === "ROLLBACK") return { rows: [], rowCount: 0 };
     if (text.includes("pg_advisory_xact_lock") && text.includes("agentpass:human:sessions")) return { rows: [{ locked: true }], rowCount: 1 };
     if (text.startsWith("WITH ranked AS")) return { rows: [{ id: "66666666-6666-4666-8666-666666666666" }], rowCount: 1 };
-    if (text.startsWith("INSERT INTO human_sessions")) return { rows: [{ id: ids.session, member_id: ids.member, organization_id: ids.org, role: "owner", token_hash_hex: "a".repeat(64), csrf_token_hash_hex: "b".repeat(64) }], rowCount: 1 };
+    if (text.startsWith("INSERT INTO human_sessions")) return { rows: [{ id: ids.session, ...session, token_hash_hex: session.token_hash, csrf_token_hash_hex: session.csrf_token_hash, recent_auth_at: null, revoked_at: null }], rowCount: 1 };
     throw new Error(`unexpected query: ${text}`);
   } };
   const repo = createPostgresHumanRepository({ client });
@@ -49,7 +49,7 @@ test("consumes signed identity replay state inside the session transaction befor
     if (text.includes("pg_advisory_xact_lock")) return { rows: [{ locked: true }], rowCount: 1 };
     if (text.includes("agentpass_consume_human_identity_assertion")) return { rows: [{ consumed: true }], rowCount: 1 };
     if (text.startsWith("WITH ranked AS")) return { rows: [], rowCount: 0 };
-    if (text.startsWith("INSERT INTO human_sessions")) return { rows: [{ id: ids.session, member_id: ids.member, organization_id: ids.org, role: "owner", token_hash_hex: "a".repeat(64), csrf_token_hash_hex: "b".repeat(64) }], rowCount: 1 };
+    if (text.startsWith("INSERT INTO human_sessions")) return { rows: [{ id: ids.session, ...session, token_hash_hex: session.token_hash, csrf_token_hash_hex: session.csrf_token_hash, recent_auth_at: null, revoked_at: null }], rowCount: 1 };
     throw new Error(`unexpected query: ${text}`);
   } };
   const repo = createPostgresHumanRepository({ client });

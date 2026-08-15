@@ -448,6 +448,7 @@ function createMemoryPostgresState() {
     async listInvitations() { return []; },
     async createInvitation() { return null; },
     async revokeInvitation() { return null; },
+    async reissueInvitation() { return null; },
     async acceptInvitation() { return null; },
   };
   const pool = {
