@@ -22,10 +22,15 @@ Completed at the baseline:
 - Raw route dispatch before Human/Device authentication, with legacy hosted issue/replay composition removed and downgrade tests green.
 - Lost commit responses reconcile through the same authenticated atomic reservation function without a public replay/get surface or second signature.
 - Contract catalog, authority manifest, migration qualification, lint, and focused Platform Session tests at migration head 55.
+- Deterministic PostgreSQL 17 qualification lanes for Platform authorization
+  concurrency, rollback/failure convergence, and the app/signer least-privilege
+  boundary, plus source-bound CI evidence generation and retention.
 
 Not completed at the baseline:
 
-- A real PostgreSQL contention qualification for the complete HTTP-to-reservation flow has not been retained as release evidence.
+- The PostgreSQL 17 qualification implementation is complete, but a successful
+  external CI artifact for the current immutable candidate has not yet been
+  retained as release evidence.
 - Console onboarding, managed infrastructure, physical-Mac qualification, notarized distribution, independent review, and production deployment remain open.
 
 The immediate release blocker is now real PostgreSQL race, rollback, tenant,
@@ -195,8 +200,10 @@ Acceptance:
 
 ### W0-05 Real PostgreSQL race qualification
 
-Status: next critical-path work item. Repository-level fake/runtime coverage is
-green; real PostgreSQL contention and privilege evidence is not yet retained.
+Status: qualification implementation and CI evidence pipeline complete on
+2026-08-15. Local unit/contract coverage is green; this workstation has no
+reachable PostgreSQL server, so a successful PostgreSQL 17 CI artifact for the
+current source commit is still required to close W0.
 
 Required scenarios:
 
@@ -448,6 +455,12 @@ Platform Session/promotion suites remain green, and hosted route inventory has
 exactly one promotion mutation path.
 
 ### Slice S1 — real PostgreSQL authority qualification
+
+Status: implemented locally on 2026-08-15; external PostgreSQL 17 CI execution
+and retained source-bound evidence remain pending. The application role can
+only consume authorization and reserve through migration 0054. Promotion
+commit/uncertain finalization is routed through the signer pool and those are
+the only legacy promotion functions granted to the signer role.
 
 1. Build a deterministic fixture at migration head 55 with two organizations,
    active and stale assignments, two credentials, one revoked session, and

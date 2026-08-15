@@ -678,6 +678,44 @@ jobs:
           apps/cloud-api/test/postgres/agent-session-http-qualification.integration.test.mjs
           apps/cloud-api/test/postgres/agent-session-lifecycle-integration.test.mjs
           apps/cloud-api/test/postgres/managed-signer-key-lifecycle-repository.integration.test.mjs
+      - name: Prepare Platform authorization qualification evidence and isolated role database
+        env:
+          PGPASSWORD: agentpass-integration
+        run: |
+          mkdir -p "$GITHUB_WORKSPACE/platform-authorization-evidence"
+          chmod 0700 "$GITHUB_WORKSPACE/platform-authorization-evidence"
+          createdb --host=127.0.0.1 --port=5432 --username=postgres agentpass_platform_roles
+      - name: Qualify Platform authorization concurrency and failure convergence on PostgreSQL 17
+        env:
+          AGENTPASS_TEST_DATABASE_URL: postgresql://postgres:agentpass-integration@127.0.0.1:5432/postgres
+          AGENTPASS_TEST_POSTGRES_ADMIN_URL: postgresql://postgres:agentpass-integration@127.0.0.1:5432/postgres
+        run: >-
+          node --test --test-concurrency=1
+          apps/cloud-api/test/postgres/platform-authorization.integration.test.mjs
+          apps/cloud-api/test/postgres/platform-authorization-failure-qualification.integration.test.mjs
+      - name: Qualify Platform authority least privilege on PostgreSQL 17
+        env:
+          AGENTPASS_TEST_DATABASE_URL: postgresql://postgres:agentpass-integration@127.0.0.1:5432/agentpass_platform_roles
+        run: node --test apps/cloud-api/test/postgres/least-privilege-role.integration.test.mjs
+      - name: Create and verify source-bound Platform authorization evidence
+        env:
+          AGENTPASS_PLATFORM_AUTH_SOURCE_COMMIT: ${{ github.sha }}
+          AGENTPASS_PLATFORM_AUTH_RUN_ID: ${{ github.run_id }}
+          AGENTPASS_PLATFORM_AUTH_RUN_ATTEMPT: ${{ github.run_attempt }}
+          PGPASSWORD: agentpass-integration
+        run: |
+          AGENTPASS_PLATFORM_AUTH_POSTGRES_VERSION="$(psql --host=127.0.0.1 --port=5432 --username=postgres --dbname=postgres --tuples-only --no-align --command='SHOW server_version')"
+          export AGENTPASS_PLATFORM_AUTH_POSTGRES_VERSION
+          node scripts/postgres/platform-authorization-qualification-evidence.mjs write "$GITHUB_WORKSPACE/platform-authorization-evidence/platform-authorization.json"
+          node scripts/postgres/platform-authorization-qualification-evidence.mjs verify "$GITHUB_WORKSPACE/platform-authorization-evidence/platform-authorization.json" "$GITHUB_SHA"
+      - name: Retain verified Platform authorization evidence
+        if: success()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: platform-authorization-postgres17-${{ github.sha }}
+          path: platform-authorization-evidence/platform-authorization.json
+          if-no-files-found: error
+          retention-days: 30
       - name: Run real PostgreSQL refresh race, ACK, and nonce-rotation tests
         env:
           AGENTPASS_TEST_DATABASE_URL: postgresql://postgres:agentpass-integration@127.0.0.1:5432/postgres
