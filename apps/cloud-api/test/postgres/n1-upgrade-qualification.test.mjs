@@ -98,6 +98,7 @@ test("N1 qualification owns its write set and exposes a direct deterministic CI 
   assert.match(source, /AGENTPASS_N1_POSTGRES_ADMIN_URL/);
   assert.match(source, /AGENTPASS_N1_POSTGRES_MIGRATION_URL/);
   assert.match(source, /session_user,?current_user/);
+  assert.match(source, /managed_signer_signing_idempotency[\s\S]*reserved_lifecycle_version, expires_at\)[\s\S]*decode\(\$4, 'hex'\), 1,/u);
   assert.doesNotMatch(source, /\.github\/workflows/u);
   assert.deepEqual(N1_AUTHORITY_TABLE_SPECS.map(({ name }) => name), [
     "release_candidates",

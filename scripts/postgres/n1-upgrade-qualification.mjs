@@ -267,8 +267,10 @@ async function seedN1AuthorityRows(pool) {
     JSON.stringify({ version: 1, purpose: AUTHORITY_PURPOSE, algorithm: "ed25519", keys: [] })
   ]);
   await pool.query(`INSERT INTO managed_signer_signing_idempotency
-    (purpose, operation_id, request_digest, key_id, key_version, status, signature, expires_at)
-    VALUES ($1, 'n1-seeded-signing-operation', decode($2, 'hex'), $3, 1, 'committed', decode($4, 'hex'), clock_timestamp() + interval '1 hour')`, [
+    (purpose, operation_id, request_digest, key_id, key_version, status, signature,
+     reserved_lifecycle_version, expires_at)
+    VALUES ($1, 'n1-seeded-signing-operation', decode($2, 'hex'), $3, 1, 'committed',
+      decode($4, 'hex'), 1, clock_timestamp() + interval '1 hour')`, [
     AUTHORITY_PURPOSE,
     "22".repeat(32),
     AUTHORITY_KEY_ID,
