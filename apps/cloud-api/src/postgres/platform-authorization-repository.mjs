@@ -242,13 +242,20 @@ export function createPlatformAuthorizedPromotionService({
   function createIssuanceService(scopedRepository) {
     // The existing service accepts only the five public request keys.  The
     // scope facade strips trusted authorization fields before that boundary.
+    // Reconciliation deliberately re-enters this same bound reserve function.
+    // The 0054 SQL function is both the initial proof-consuming reservation
+    // and the only authenticated way to observe a durable commit after a
+    // lost response.  The facade itself still has no replay/get methods.
+    const scopedReservePlatformPromotion = scopedRepository.reservePlatformPromotion;
     const issueRepository = Object.freeze({
-      reservePlatformPromotion: scopedRepository.reservePlatformPromotion,
+      reservePlatformPromotion: scopedReservePlatformPromotion,
       commitPlatformPromotion: scopedRepository.commitPlatformPromotion,
       markPlatformPromotionUncertain: scopedRepository.markPlatformPromotionUncertain,
-      // The existing service requires these methods for ambiguity recovery.
-      // This seam intentionally has no authenticated replay/get SQL path.
-      replayPlatformPromotion: failClosed,
+      // The existing service requires this method for ambiguity recovery. It
+      // is internal only and points at the same scoped atomic reserve path;
+      // it is not a replay SQL API and is never exposed by this composition.
+      replayPlatformPromotion: scopedReservePlatformPromotion,
+      // There is intentionally no authenticated read/get SQL path here.
       getCommittedPlatformPromotion: failClosed
     });
     return createPlatformPromotionIssuanceService({

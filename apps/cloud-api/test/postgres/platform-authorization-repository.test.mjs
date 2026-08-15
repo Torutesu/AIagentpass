@@ -16,9 +16,12 @@ import {
   PROMOTION_EVIDENCE_V3_ALGORITHM,
   PROMOTION_EVIDENCE_V3_MAX_TTL_MS,
   PROMOTION_EVIDENCE_V3_PURPOSE,
+  PROMOTION_EVIDENCE_V3_SIGNATURE_DOMAIN,
   PROMOTION_EVIDENCE_V3_TYPE,
   PROMOTION_EVIDENCE_V3_VERSION,
   normalizePromotionEvidenceV3Statement,
+  promotionEvidenceV3PublicKeyFingerprint,
+  promotionEvidenceV3StatementHash,
   promotionEvidenceV3SigningData
 } from "../../src/promotion-evidence-v3-statement.mjs";
 import { canonicalManagedSignerRequestDigest } from "../../src/postgres/managed-signer-key-lifecycle-repository.mjs";
@@ -130,6 +133,38 @@ function atomicReservedResult(overrides = {}) {
     created_at: NOW,
     updated_at: NOW,
     claim_issued: true,
+    ...overrides
+  };
+}
+
+function issuanceReservation(overrides = {}) {
+  const authority = atomicReservedResult();
+  return {
+    state: "reserved",
+    promotion_id: authority.promotion_id,
+    deployment_id: authority.deployment_id,
+    environment: authority.environment,
+    candidate_id: authority.candidate_id,
+    idempotency_key: authority.idempotency_key,
+    source_commit: authority.source_commit,
+    source_tree: authority.source_tree,
+    product_pkg_sha256: authority.product_pkg_sha256,
+    image_digest: authority.image_digest,
+    sbom_sha256: authority.sbom_sha256,
+    qualification_report_digests: authority.qualification_report_digests,
+    release_manifest_schema_version: authority.release_manifest_schema_version,
+    release_manifest_sha256: authority.release_manifest_sha256,
+    platform_approval_id: authority.platform_approval_id,
+    platform_approval_digest: authority.platform_approval_digest,
+    approval_state: authority.approval_state,
+    lifecycle_version: authority.lifecycle_version,
+    key_id: authority.key_id,
+    key_version: authority.key_version,
+    issued_at: authority.issued_at,
+    expires_at: authority.expires_at,
+    signer_key_fingerprint: authority.signer_key_fingerprint,
+    approval_expires_at: authority.approval_expires_at,
+    claim_token: CLAIM_TOKEN,
     ...overrides
   };
 }
@@ -371,4 +406,108 @@ test("service composition binds authorization before invoking the existing issua
     (error) => error instanceof PlatformAuthorizationRepositoryError
       && error.code === PLATFORM_AUTHORIZATION_REPOSITORY_ERROR_CODES.INPUT
   );
+});
+
+test("reconciles a lost commit through the same authenticated atomic reserve scope", async () => {
+  const signingKeys = crypto.generateKeyPairSync("ed25519");
+  const publicKey = signingKeys.publicKey.export({ type: "spki", format: "pem" }).toString();
+  const signerKeyFingerprint = promotionEvidenceV3PublicKeyFingerprint(publicKey);
+  const reservation = issuanceReservation({ signer_key_fingerprint: signerKeyFingerprint });
+  const reserveInputs = [];
+  const authorizationScopes = [];
+  const commitInputs = [];
+  const uncertaintyInputs = [];
+  let durableCommit;
+  let signCalls = 0;
+
+  const scoped = {
+    async reservePlatformPromotion(input) {
+      reserveInputs.push({ ...input });
+      if (reserveInputs.length === 1) return reservation;
+      assert.ok(durableCommit, "the second atomic reserve observes the durable commit");
+      return durableCommit;
+    },
+    async commitPlatformPromotion(input) {
+      commitInputs.push(input);
+      const { state: _state, claim_token: _claimToken, ...record } = reservation;
+      durableCommit = {
+        ...record,
+        state: "committed",
+        promotion_evidence: input.promotion_evidence
+      };
+      throw new Error(`commit response lost ${CSRF_TOKEN} ${IDS.jti} ${CLAIM_TOKEN}`);
+    },
+    async markPlatformPromotionUncertain(input) { uncertaintyInputs.push(input); return { state: "uncertain" }; }
+  };
+
+  const service = createPlatformAuthorizedPromotionService({
+    repository: {
+      forAuthorization(input) {
+        authorizationScopes.push({ ...input });
+        return scoped;
+      }
+    },
+    signer: {
+      async sign(statement) {
+        signCalls += 1;
+        return {
+          version: PROMOTION_EVIDENCE_V3_VERSION,
+          type: PROMOTION_EVIDENCE_V3_TYPE,
+          statement,
+          statement_hash: promotionEvidenceV3StatementHash(statement),
+          signature_algorithm: PROMOTION_EVIDENCE_V3_ALGORITHM,
+          signer_key_fingerprint: signerKeyFingerprint,
+          signature: crypto.sign(
+            null,
+            promotionEvidenceV3SigningData(statement, {
+              allowExpired: true,
+              allowFuture: true,
+              maxTtlMs: PROMOTION_EVIDENCE_V3_MAX_TTL_MS
+            }),
+            signingKeys.privateKey
+          ).toString("base64url")
+        };
+      }
+    },
+    publicKeyResolver: async (request) => ({
+      version: PROMOTION_EVIDENCE_V3_VERSION,
+      type: PROMOTION_EVIDENCE_V3_TYPE,
+      purpose: PROMOTION_EVIDENCE_V3_PURPOSE,
+      domain: PROMOTION_EVIDENCE_V3_SIGNATURE_DOMAIN,
+      protocol_version: 3,
+      signing_version: 3,
+      algorithm: PROMOTION_EVIDENCE_V3_ALGORITHM,
+      key_id: request.key_id,
+      key_version: request.key_version,
+      lifecycle_version: request.lifecycle_version,
+      public_key: publicKey,
+      public_key_fingerprint: signerKeyFingerprint
+    }),
+    now: () => Date.parse(NOW)
+  });
+
+  const issued = await service.issuePlatformPromotion(INPUT);
+
+  assert.equal(issued.replayed, true);
+  assert.equal(signCalls, 1, "lost commit response must never cause a second signer call");
+  assert.equal(commitInputs.length, 1);
+  assert.deepEqual(reserveInputs, [REQUEST, REQUEST], "reconciliation repeats the exact public request");
+  assert.deepEqual(authorizationScopes, [{
+    ...AUTHORIZATION,
+    session_material_hash: Buffer.from(SESSION_HASH, "hex")
+  }], "the same authorization scope is bound once");
+  assert.deepEqual(commitInputs[0], {
+    ...REQUEST,
+    claim_token: CLAIM_TOKEN,
+    promotion_evidence: issued.promotion_evidence
+  });
+  assert.deepEqual(uncertaintyInputs, []);
+  assert.equal(Object.hasOwn(service, "replayPlatformPromotion"), false);
+  assert.equal(Object.hasOwn(service, "getCommittedPlatformPromotion"), false);
+  assert.equal(Object.hasOwn(scoped, "replayPlatformPromotion"), false);
+  assert.equal(Object.hasOwn(scoped, "getCommittedPlatformPromotion"), false);
+  const serialized = JSON.stringify(issued);
+  assert.equal(serialized.includes(CSRF_TOKEN), false);
+  assert.equal(serialized.includes(IDS.jti), false);
+  assert.equal(serialized.includes(CLAIM_TOKEN), false);
 });
