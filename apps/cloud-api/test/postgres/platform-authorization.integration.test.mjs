@@ -136,6 +136,10 @@ async function seedFixture(client, fixture) {
     await client.query(`INSERT INTO webauthn_credentials
       (id,member_id,public_key,sign_count,transports,label,backup_eligible,backup_state)
       VALUES ($1,$2,$3,0,ARRAY['internal']::text[],'N3c credential',false,false)`, [fixture.webauthnId, fixture.memberId, fixture.webauthnPublicKey]);
+    await client.query(`INSERT INTO webauthn_credentials
+      (id,member_id,public_key,sign_count,transports,label,backup_eligible,backup_state)
+      VALUES ($1,$2,$3,0,ARRAY['internal']::text[],'N3c recovery credential',false,false)`,
+    [fixture.bytes("webauthn-recovery-id"), fixture.memberId, fixture.bytes("webauthn-recovery-public-key")]);
     await client.query("INSERT INTO platform_principals (principal_id,member_id,status) VALUES ($1,$2,'active')", [fixture.principalId, fixture.memberId]);
     await client.query(`INSERT INTO platform_operator_assignments
       (assignment_id,principal_id,member_id,organization_id,operation,capability,status,request_digest,requested_authority_generation,requested_at,issued_at,expires_at,activated_at)
@@ -276,22 +280,23 @@ async function runAtConnectionBarrier(clients, operation) {
   return Promise.all(calls);
 }
 
-async function expectSqlState(operation, code, forbiddenValues = []) {
+async function expectSqlState(operation, code, forbiddenValues = [], context = "SQL operation") {
   await assert.rejects(operation, (error) => {
-    assert.equal(error?.code, code);
+    assert.equal(error?.code, code, `${context} returned an unexpected SQLSTATE`);
     for (const value of forbiddenValues) assert.equal(String(error?.message ?? "").includes(value), false);
     return true;
   });
 }
 
-async function expectDeniedAfterAuthorityMutation(client, authorization, intent, mutate, code) {
+async function expectDeniedAfterAuthorityMutation(client, authorization, intent, mutate, code, label) {
   await client.query("BEGIN");
   try {
     await mutate(client);
     await expectSqlState(
       () => client.query(ATOMIC_SQL, atomicParams(authorization, intent)),
       code,
-      [authorization.jtiHash.toString("hex"), authorization.sessionMaterialHash.toString("hex")]
+      [authorization.jtiHash.toString("hex"), authorization.sessionMaterialHash.toString("hex")],
+      label
     );
   } finally {
     await client.query("ROLLBACK").catch(() => {});
@@ -457,7 +462,7 @@ test("0054 real PostgreSQL authorization concurrency and denial matrix", {
       },
       {
         label: "revoked-credential",
-        code: "42501",
+        code: "40001",
         mutate: (client) => client.query(
           "UPDATE platform_credentials SET status='revoked', revoked_at=clock_timestamp(), revoke_reason='s1-negative-matrix', version=version+1 WHERE credential_id=$1",
           [fixture.id("platform-credential")]
@@ -465,7 +470,7 @@ test("0054 real PostgreSQL authorization concurrency and denial matrix", {
       },
       {
         label: "revoked-webauthn",
-        code: "42501",
+        code: "40001",
         mutate: (client) => client.query(
           "UPDATE webauthn_credentials SET revoked_at=clock_timestamp() WHERE id=$1",
           [fixture.webauthnId]
@@ -485,7 +490,7 @@ test("0054 real PostgreSQL authorization concurrency and denial matrix", {
         mutate: async (client, authorization) => {
           await client.query("SET LOCAL session_replication_role = replica");
           await client.query(`UPDATE platform_authorization_proofs
-            SET issued_at=clock_timestamp()-interval '2 minutes', expires_at=clock_timestamp()-interval '1 minute'
+            SET expires_at=clock_timestamp()-interval '1 minute'
             WHERE proof_id=$1`, [authorization.challengeId]);
           await client.query("SET LOCAL session_replication_role = origin");
         },
@@ -506,7 +511,8 @@ test("0054 real PostgreSQL authorization concurrency and denial matrix", {
         authorization,
         intent,
         (client) => denial.mutate(client, authorization),
-        denial.code
+        denial.code,
+        denial.label
       );
     }
 

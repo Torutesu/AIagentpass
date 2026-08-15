@@ -54,8 +54,8 @@ test("0065 emits canonical unwrapped base64 without widening execution authority
   assert.match(canonical, /^[A-Za-z0-9+/]+={0,2}$/u);
   assert.match(migration, /CASE WHEN p_signature IS NULL THEN NULL/u);
 
-  assert.equal(POSTGRES_SCHEMA_HEAD.version, 69);
-  assert.equal(POSTGRES_SCHEMA_HEAD.name, "0069_platform_session_database_clock.sql");
+  assert.equal(POSTGRES_SCHEMA_HEAD.version, 70);
+  assert.equal(POSTGRES_SCHEMA_HEAD.name, "0070_platform_provider_digest_binding.sql");
   const previousCatalogEntry = catalog.entries.find((entry) => entry.version === 64 && entry.kind === "postgres-migration");
   const currentCatalogEntries = catalog.entries.filter((entry) => entry.version === 65 && entry.kind === "postgres-migration");
   assert.equal(previousCatalogEntry?.version, 64);

@@ -113,11 +113,11 @@ async function seedFixture(pool, suffix = crypto.randomBytes(6).toString("hex"),
   const bindingHash = crypto.randomBytes(32);
   const claimHash = crypto.randomBytes(32);
   const deploymentId = `s1-failure-${suffix}`;
-  const candidateId = `release-pkg-sha256-v1-${"a".repeat(64)}`;
+  const packageDigest = sha256Hex(`candidate:${suffix}`);
+  const candidateId = `release-pkg-sha256-v1-${packageDigest}`;
   const idempotencyKey = `s1-request-${suffix}`;
   const sourceCommit = "b".repeat(40);
   const sourceTree = "c".repeat(40);
-  const packageDigest = "a".repeat(64);
   const imageDigest = `sha256:${"d".repeat(64)}`;
   const sbomDigest = "e".repeat(64);
   const manifestDigest = "f".repeat(64);
@@ -257,8 +257,12 @@ function createCommitLossPool(pool) {
       const inner = await pool.connect();
       return {
         async query(text, params = []) {
-          if (typeof text === "string" && text.includes("agentpass_platform_promotion_issuance_commit(")) armed = true;
+          const isCommitAuthority = typeof text === "string" && text.includes("agentpass_platform_promotion_issuance_commit(");
           const result = await inner.query(text, params);
+          if (isCommitAuthority) {
+            const value = typeof result.rows[0]?.result === "string" ? JSON.parse(result.rows[0].result) : result.rows[0]?.result;
+            armed = value?.state === "committed";
+          }
           if (text === "COMMIT" && armed && !lost) {
             armed = false;
             lost = true;
@@ -292,6 +296,7 @@ async function createPromotionSigner(pool, fixture) {
   const evidenceFingerprint = `SHA256:${Buffer.from(sha256(publicKeyDer)).toString("base64url")}`;
   const provider = {
     provider_id: "s1-qualification-provider",
+    version: PROMOTION_EVIDENCE_V3_SIGNING_VERSION,
     async publicKeyMetadata() {
       return { algorithm: PROMOTION_EVIDENCE_V3_ALGORITHM, key_id: fixture.keyId, public_key: publicKey };
     },
