@@ -28,14 +28,14 @@ test("privilege checker exposes bounded, relation-only diagnostics without secre
   assert.doesNotMatch(checker, /table_privilege_diagnostics[\s\S]{0,512}(?:password|secret|token|credential|proacl)/iu);
 });
 
-test("authority diagnostics enforce the Hosted app SELECT exception", async () => {
+test("authority diagnostics enforce function-only app reads for Hosted, Platform, and managed signer tables", async () => {
   const [roles, checker] = await Promise.all([
     read("scripts/postgres/roles.sql"),
     read("scripts/postgres/role-privilege-check.mjs"),
   ]);
   assert.match(roles, /GRANT SELECT ON TABLE public\.%I TO agentpass_app, agentpass_backup/u);
   assert.match(roles, /Hosted bootstrap is function-only[\s\S]*GRANT SELECT ON TABLE public\.%I TO agentpass_backup/u);
-  assert.match(checker, /left\(t\.relname, length\('hosted_identity_'\)\) = 'hosted_identity_'[\s\S]*NOT has_table_privilege\('agentpass_app', t\.oid, 'SELECT'\)/u);
+  assert.match(checker, /left\(t\.relname, length\('managed_signer_'\)\) = 'managed_signer_'[\s\S]*left\(t\.relname, length\('platform_'\)\) = 'platform_'[\s\S]*left\(t\.relname, length\('hosted_identity_'\)\) = 'hosted_identity_'[\s\S]*NOT has_table_privilege\('agentpass_app', t\.oid, 'SELECT'\)/u);
   assert.match(checker, /THEN 'authority'[\s\S]*AS expected_class/u);
   assert.match(checker, /app:insert/u);
   assert.match(checker, /app:update/u);

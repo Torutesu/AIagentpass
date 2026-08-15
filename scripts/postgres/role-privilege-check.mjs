@@ -228,7 +228,9 @@ table_privilege_observations AS (
         OR left(t.relname, length('hosted_identity_')) = 'hosted_identity_' THEN 'authority'
       ELSE 'application' END AS expected_class,
     array_remove(ARRAY[
-      CASE WHEN left(t.relname, length('hosted_identity_')) = 'hosted_identity_'
+      CASE WHEN left(t.relname, length('managed_signer_')) = 'managed_signer_'
+          OR left(t.relname, length('platform_')) = 'platform_'
+          OR left(t.relname, length('hosted_identity_')) = 'hosted_identity_'
         THEN CASE WHEN NOT has_table_privilege('agentpass_app', t.oid, 'SELECT') THEN NULL ELSE 'app:select' END
         ELSE CASE WHEN has_table_privilege('agentpass_app', t.oid, 'SELECT') THEN NULL ELSE 'app:select_missing' END END,
       CASE WHEN (t.relname IN ('schema_migrations', 'schema_migration_attempts', 'release_candidates')

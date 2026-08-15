@@ -238,6 +238,9 @@ BEGIN
       MESSAGE = 'Hosted bootstrap WebAuthn challenge is not consuming';
   END IF;
 
+  -- Keep the composite membership target out of a multi-item INTO list:
+  -- PL/pgSQL rejects a %ROWTYPE record combined with scalar targets. Lock the
+  -- organization first, then the tenant-qualified membership in fixed order.
   SELECT o.authority_epoch INTO organization_epoch
   FROM public.organizations AS o
   WHERE o.id = attempt_row.organization_id

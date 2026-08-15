@@ -343,7 +343,7 @@ async function stopChildren(children) {
 function assertNoSecretOutput(children, fixture) {
   const secretValues = Object.values(fixture.values);
   for (const state of children) {
-    const transcript = state.transcript();
+    const transcript = `${state.stdoutEvidence}\n${state.stderr}`;
     for (const secret of secretValues) assert.equal(transcript.includes(secret), false, "child output retained a raw WebAuthn authority value");
   }
 }
