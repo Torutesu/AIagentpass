@@ -310,7 +310,7 @@ test("prevents organization double submission while the first request is in flig
 test("renders the no-membership recovery state without exposing ceremony authority", async ({ page }) => {
   const { state, consoleMessages } = await openOnboarding(page, "no_membership");
   await expect(page.getByRole("heading", { name: "管理者の確認が必要です" })).toBeVisible();
-  await expect(page.getByText(/以前の所属履歴/u)).toBeVisible();
+  await expect(page.getByText(/過去の所属履歴/u)).toBeVisible();
   expect(state.statusCalls).toBe(1);
   expect(state.unexpectedRequests).toEqual([]);
   await assertNoReusableAuthority(page, [CSRF_TOKEN, CHALLENGE_ID, REGISTRATION_CHALLENGE, CREDENTIAL_ID]);

@@ -86,6 +86,7 @@ async function installRoutes(page: Page, mode: HandoffMode): Promise<HandoffStat
   await page.route("**/api/auth/**", async (route) => {
     const request = route.request();
     const url = new URL(request.url());
+    if (url.pathname === "/api/auth/session/resume") return json(route, session("owner"));
     if (url.pathname === "/api/auth/session") return json(route, session("owner"));
     if (url.pathname === "/api/auth/webauthn/options") return json(route, { challenge_id: "57777777-7777-4777-8777-777777777777", options: authenticationOptions() });
     if (url.pathname === "/api/auth/webauthn/verify") return json(route, { authorization_id: AUTHORIZATION_ID });

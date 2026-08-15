@@ -263,7 +263,7 @@ test("0048 qualifies fresh PostgreSQL authority functions and least-privilege ro
       identity
     );
     assert.equal(lookup.rows[0].result.state, "reserved");
-    assert.equal(lookup.rows[0].result.claim_issued, undefined);
+    assert.equal(lookup.rows[0].result.claim_issued, false);
 
     const committedOnlyLookup = await client.query(
       "SELECT public.agentpass_platform_promotion_issuance_get($1::uuid,$2::text,$3::text,$4::text,$5::text,true) AS result",

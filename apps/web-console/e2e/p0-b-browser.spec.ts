@@ -131,6 +131,10 @@ async function installRoutes(page: Page, options: E2EOptions): Promise<RouteStat
 
   await page.route("**/api/auth/**", async (route) => {
     const url = new URL(route.request().url());
+    if (url.pathname === "/api/auth/session/resume") {
+      if (state.sessionExpired) return json(route, { error: { code: "session_expired", message: "Session expired" } }, 401);
+      return json(route, session(options.role));
+    }
     if (url.pathname === "/api/auth/session") {
       const request = route.request();
       if (request.method() === "DELETE") {

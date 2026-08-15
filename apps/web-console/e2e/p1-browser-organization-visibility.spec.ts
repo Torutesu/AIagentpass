@@ -77,6 +77,7 @@ async function installOrganizationRoutes(page: Page, role: BrowserRole): Promise
   await page.route("**/api/auth/**", async (route) => {
     const request = route.request();
     const url = new URL(request.url());
+    if (url.pathname === "/api/auth/session/resume") return json(route, session(role));
     if (url.pathname === "/api/auth/session") return json(route, session(role));
     if (url.pathname === "/api/auth/organizations" && request.method() === "GET") {
       return json(route, { request_id: REQUEST_ID, organizations: [organization()], next_cursor: null });

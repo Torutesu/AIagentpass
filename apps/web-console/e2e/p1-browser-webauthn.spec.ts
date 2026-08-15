@@ -80,6 +80,7 @@ async function installSecurityRoutes(page: Page, mode: SecurityMode): Promise<Br
     const url = new URL(request.url());
     const headers = request.headers();
 
+    if (url.pathname === "/api/auth/session/resume") return json(route, session("owner"));
     if (url.pathname === "/api/auth/session") return json(route, session("owner"));
 
     if (url.pathname === "/api/auth/webauthn/registration/options") {

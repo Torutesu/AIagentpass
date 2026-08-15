@@ -44,6 +44,7 @@ async function installRecoveryRoutes(page: Page, role: BrowserRole) {
   await page.route("**/api/auth/**", async (route) => {
     const request = route.request();
     const url = new URL(request.url());
+    if (url.pathname === "/api/auth/session/resume") return json(route, session(role));
     if (url.pathname === "/api/auth/session") return json(route, session(role));
     if (url.pathname === `/api/auth/organizations/${ORGANIZATION_ID}/recovery-outbox/dead-letters` && request.method() === "GET") {
       return json(route, { dead_letters: [], next_cursor: null });

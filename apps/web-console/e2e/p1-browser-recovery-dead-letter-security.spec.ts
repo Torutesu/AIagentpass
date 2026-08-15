@@ -228,6 +228,7 @@ async function installRoutes(page: Page, role: BrowserRole, failure: FailureMode
     const url = new URL(request.url());
     const organizationId = routeOrganization(url);
 
+    if (url.pathname === "/api/auth/session/resume") return json(route, deadLetterSession(role));
     if (url.pathname === "/api/auth/session") return json(route, deadLetterSession(role));
     if (url.pathname === "/api/auth/webauthn/options" && request.method() === "POST") {
       state.webauthnOptionsCalls += 1;
