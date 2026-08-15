@@ -22,7 +22,16 @@ test("OrganizationPanel is standalone and covers the administration flow", async
   assert.match(source, /recent_auth_required/);
   assert.match(source, /aria-busy/);
   assert.match(source, /role="alert" aria-live="assertive"/);
-  assert.match(source, /削除を確定/);
+  assert.match(source, /失効を確定/);
+  assert.match(source, /アクセスを失効/);
+  assert.match(source, /limit: 100/);
+  assert.match(source, /nextCursor/);
+  assert.match(source, /LoadMoreButton/);
+  assert.match(source, /onRetry=\{refresh\}/);
+  assert.match(source, /setOrganizations\(\[\]\)/);
+  assert.match(source, /actorMembership\.status === "active"/);
+  assert.match(source, /findOrganizationMemberRole/);
+  assert.match(source, /Member pagination cursor repeated/);
   assert.doesNotMatch(source, /AgentPassConsole/);
   assert.doesNotMatch(source, /localStorage|sessionStorage|console\.(?:log|info|warn|error)/);
 });

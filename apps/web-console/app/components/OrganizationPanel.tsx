@@ -73,8 +73,11 @@ export function OrganizationPanel({ client: suppliedClient, initialOrganizationI
   const [organizationState, setOrganizationState] = useState<ResourceState>({ status: "loading" });
   const [members, setMembers] = useState<readonly OrganizationMember[]>([]);
   const [memberState, setMemberState] = useState<ResourceState>(INITIAL_RESOURCE);
+  const [memberNextCursor, setMemberNextCursor] = useState<string | null>(null);
   const [invitations, setInvitations] = useState<readonly OrganizationInvitation[]>([]);
   const [invitationState, setInvitationState] = useState<ResourceState>(INITIAL_RESOURCE);
+  const [invitationNextCursor, setInvitationNextCursor] = useState<string | null>(null);
+  const [loadingMore, setLoadingMore] = useState<"members" | "invitations" | null>(null);
   const [mutationError, setMutationError] = useState<ResourceState>(INITIAL_RESOURCE);
   const [pendingAction, setPendingAction] = useState<string | null>(null);
   const [retryAction, setRetryAction] = useState<RetryAction | null>(null);
@@ -100,46 +103,91 @@ export function OrganizationPanel({ client: suppliedClient, initialOrganizationI
     const sequence = ++loadSequence.current;
     setOrganizationState({ status: "loading" });
     try {
-      const [page, session] = await Promise.all([client.listOrganizations({ signal }), client.getSession({ signal })]);
+      const [organizationItems, session] = await Promise.all([loadAllOrganizations(client, signal), client.getSession({ signal })]);
       if (sequence !== loadSequence.current || signal?.aborted) return;
-      setOrganizations(page.items);
+      setOrganizations(organizationItems);
       setSessionRole(session.role);
       setSessionOrganizationId(session.organizationId);
       setSessionMemberId(session.memberId);
       setRoleOverrides((current) => current[session.organizationId] === undefined ? { ...current, [session.organizationId]: session.role } : current);
-      const nextId = chooseOrganization(page.items, initialOrganizationId ?? selectedOrganizationRef.current, session.organizationId);
+      const nextId = chooseOrganization(organizationItems, initialOrganizationId ?? selectedOrganizationRef.current, session.organizationId);
       selectedOrganizationRef.current = nextId;
       setSelectedOrganizationId(nextId);
-      setSelectedOrganization(nextId === "" ? undefined : page.items.find((item) => item.id === nextId));
-      setRenameName(nextId === "" ? "" : page.items.find((item) => item.id === nextId)?.name ?? "");
-      setOrganizationState({ status: page.items.length === 0 ? "empty" : "ready" });
+      setSelectedOrganization(nextId === "" ? undefined : organizationItems.find((item) => item.id === nextId));
+      setRenameName(nextId === "" ? "" : organizationItems.find((item) => item.id === nextId)?.name ?? "");
+      setOrganizationState({ status: organizationItems.length === 0 ? "empty" : "ready" });
     } catch (error) {
       if (sequence !== loadSequence.current || signal?.aborted) return;
+      setOrganizations([]);
+      setSelectedOrganizationId("");
+      setSelectedOrganization(undefined);
+      setMembers([]);
+      setInvitations([]);
+      setMemberState(INITIAL_RESOURCE);
+      setInvitationState(INITIAL_RESOURCE);
+      setMemberNextCursor(null);
+      setInvitationNextCursor(null);
       setOrganizationState(resourceError(error));
     }
   }, [client, initialOrganizationId]);
 
-  const loadMembers = useCallback(async (organizationId: string, signal?: AbortSignal) => {
-    setMemberState({ status: "loading" });
-    try {
-      const page = await client.listMembers(organizationId, { signal });
-      if (signal?.aborted) return;
-      setMembers(page.items);
-      setMemberState({ status: page.items.length === 0 ? "empty" : "ready" });
-    } catch (error) {
-      if (!signal?.aborted) setMemberState(resourceError(error));
+  const loadMembers = useCallback(async (organizationId: string, signal?: AbortSignal, cursor?: string) => {
+    const append = cursor !== undefined;
+    if (append) setLoadingMore("members");
+    else {
+      setMemberState({ status: "loading" });
+      setMemberNextCursor(null);
+      setRoleDrafts({});
     }
-  }, [client]);
-
-  const loadInvitations = useCallback(async (organizationId: string, signal?: AbortSignal) => {
-    setInvitationState({ status: "loading" });
     try {
-      const page = await client.listInvitations(organizationId, { signal });
-      if (signal?.aborted) return;
-      setInvitations(page.items);
-      setInvitationState({ status: page.items.length === 0 ? "empty" : "ready" });
+      const page = await client.listMembers(organizationId, { signal, limit: 100, ...(cursor === undefined ? {} : { cursor }) });
+      if (signal?.aborted || selectedOrganizationRef.current !== organizationId) return;
+      setMembers((current) => append ? [...current, ...page.items] : page.items);
+      setMemberNextCursor(page.nextCursor);
+      setMemberState((current) => append ? current : { status: page.items.length === 0 ? "empty" : "ready" });
+      const actorMembership = page.items.find((member) => member.memberId === sessionMemberId);
+      if (actorMembership !== undefined) {
+        setRoleOverrides((current) => ({ ...current, [organizationId]: actorMembership.status === "active" ? actorMembership.role : "viewer" }));
+      }
     } catch (error) {
-      if (!signal?.aborted) setInvitationState(resourceError(error));
+      if (signal?.aborted) return;
+      setMemberState(resourceError(error));
+      if (error instanceof OrganizationClientError && (error.code === "forbidden" || error.code === "unauthorized")) {
+        setRoleOverrides((current) => ({ ...current, [organizationId]: "viewer" }));
+        setMembers([]);
+        setInvitations([]);
+        setMemberNextCursor(null);
+        setInvitationNextCursor(null);
+        setInvitationState(INITIAL_RESOURCE);
+      }
+    } finally {
+      if (append) setLoadingMore(null);
+    }
+  }, [client, sessionMemberId]);
+
+  const loadInvitations = useCallback(async (organizationId: string, signal?: AbortSignal, cursor?: string) => {
+    const append = cursor !== undefined;
+    if (append) setLoadingMore("invitations");
+    else {
+      setInvitationState({ status: "loading" });
+      setInvitationNextCursor(null);
+    }
+    try {
+      const page = await client.listInvitations(organizationId, { signal, limit: 100, ...(cursor === undefined ? {} : { cursor }) });
+      if (signal?.aborted || selectedOrganizationRef.current !== organizationId) return;
+      setInvitations((current) => append ? [...current, ...page.items] : page.items);
+      setInvitationNextCursor(page.nextCursor);
+      setInvitationState((current) => append ? current : { status: page.items.length === 0 ? "empty" : "ready" });
+    } catch (error) {
+      if (signal?.aborted) return;
+      setInvitationState(resourceError(error));
+      if (error instanceof OrganizationClientError && (error.code === "forbidden" || error.code === "unauthorized")) {
+        setRoleOverrides((current) => ({ ...current, [organizationId]: "viewer" }));
+        setInvitations([]);
+        setInvitationNextCursor(null);
+      }
+    } finally {
+      if (append) setLoadingMore(null);
     }
   }, [client]);
 
@@ -157,6 +205,8 @@ export function OrganizationPanel({ client: suppliedClient, initialOrganizationI
         setInvitations([]);
         setMemberState(INITIAL_RESOURCE);
         setInvitationState(INITIAL_RESOURCE);
+        setMemberNextCursor(null);
+        setInvitationNextCursor(null);
         return;
       }
       void loadMembers(selectedOrganizationId, controller.signal);
@@ -168,10 +218,9 @@ export function OrganizationPanel({ client: suppliedClient, initialOrganizationI
   useEffect(() => {
     if (selectedOrganizationId === "" || sessionMemberId === undefined || selectedOrganizationId === sessionOrganizationId || roleOverrides[selectedOrganizationId] !== undefined) return;
     const controller = new AbortController();
-    void client.listMembers(selectedOrganizationId, { signal: controller.signal }).then((page) => {
+    void findOrganizationMemberRole(client, selectedOrganizationId, sessionMemberId, controller.signal).then((role) => {
       if (controller.signal.aborted) return;
-      const actorMembership = page.items.find((member) => member.memberId === sessionMemberId && member.status === "active");
-      setRoleOverrides((current) => ({ ...current, [selectedOrganizationId]: actorMembership?.role ?? "viewer" }));
+      setRoleOverrides((current) => ({ ...current, [selectedOrganizationId]: role }));
     }).catch((error) => {
       if (controller.signal.aborted) return;
       if (error instanceof OrganizationClientError && (error.code === "forbidden" || error.code === "unauthorized")) {
@@ -200,6 +249,9 @@ export function OrganizationPanel({ client: suppliedClient, initialOrganizationI
     setInvitations([]);
     setMemberState(INITIAL_RESOURCE);
     setInvitationState(INITIAL_RESOURCE);
+    setMemberNextCursor(null);
+    setInvitationNextCursor(null);
+    setLoadingMore(null);
     setRoleDrafts({});
     setRemovalConfirmationId(null);
     setMutationError(INITIAL_RESOURCE);
@@ -361,7 +413,7 @@ export function OrganizationPanel({ client: suppliedClient, initialOrganizationI
       </header>
 
       {organizationState.status === "loading" && <p style={panelStyle.state} data-state="loading" role="status">組織を読み込み中です…</p>}
-      {organizationState.status === "error" && <p style={panelStyle.error} data-state="error" role="alert">{organizationState.error}</p>}
+      {organizationState.status === "error" && <ResourceStateView state={organizationState} empty="" error="組織情報を取得できませんでした。" onRetry={refresh} retryLabel="組織情報を再試行" />}
       {organizationState.status === "empty" && (
         <section style={panelStyle.card} data-state="empty" aria-labelledby="organization-empty-title">
           <h2 id="organization-empty-title" style={panelStyle.cardTitle}>組織がまだありません</h2>
@@ -370,7 +422,7 @@ export function OrganizationPanel({ client: suppliedClient, initialOrganizationI
         </section>
       )}
 
-      {organizations.length > 0 && (
+      {organizationState.status === "ready" && organizations.length > 0 && (
         <section style={panelStyle.card} aria-labelledby="organization-selector-title">
           <div style={panelStyle.row}>
             <div><h2 id="organization-selector-title" style={panelStyle.cardTitle}>組織</h2><p style={panelStyle.muted}>現在の権限: {roleLabel}</p></div>
@@ -388,8 +440,9 @@ export function OrganizationPanel({ client: suppliedClient, initialOrganizationI
       {selectedOrganization && visibility.canViewMembers && (
         <section style={panelStyle.card} aria-labelledby="organization-members-title">
           <div style={panelStyle.row}><div><h2 id="organization-members-title" style={panelStyle.cardTitle}>メンバー</h2><p style={panelStyle.muted}>Owner / Admin / Auditorはメンバー情報を閲覧できます。</p></div><span style={panelStyle.muted}>{members.length}人</span></div>
-          <ResourceStateView state={memberState} empty="メンバーはいません。" error="メンバー情報を取得できませんでした。" />
+          <ResourceStateView state={memberState} empty="メンバーはいません。" error="メンバー情報を取得できませんでした。" onRetry={refresh} retryLabel="メンバー情報を再試行" />
           {memberState.status === "ready" && <ul style={panelStyle.list}>{members.map((member) => <MemberRow key={member.membershipId} member={member} canManage={visibility.canManageMembers && (member.role !== "owner" || visibility.canAssignOwner)} canAssignOwner={visibility.canAssignOwner} draft={roleDrafts[member.memberId] ?? member.role} setDraft={(role) => setRoleDrafts((current) => ({ ...current, [member.memberId]: role }))} pendingAction={pendingAction} actionKey={`member-role-${member.memberId}`} confirmRemoval={removalConfirmationId === member.memberId} onConfirmRemoval={() => setRemovalConfirmationId(member.memberId)} onCancelRemoval={() => setRemovalConfirmationId(null)} onRoleChange={(role) => void changeMemberRole(member, role)} onRemove={() => void removeMember(member)} />)}</ul>}
+          {memberState.status === "ready" && memberNextCursor !== null && <LoadMoreButton label="メンバーをさらに読み込む" pending={loadingMore === "members"} disabled={loadingMore !== null} onClick={() => void loadMembers(selectedOrganization.id, undefined, memberNextCursor)} />}
         </section>
       )}
 
@@ -397,8 +450,9 @@ export function OrganizationPanel({ client: suppliedClient, initialOrganizationI
         <section style={panelStyle.grid} aria-label="招待管理">
           <section style={panelStyle.card} aria-labelledby="organization-invitations-title">
             <div style={panelStyle.row}><div><h2 id="organization-invitations-title" style={panelStyle.cardTitle}>招待</h2><p style={panelStyle.muted}>招待トークンは発行時のコンポーネントメモリにのみ保持します。</p></div><span style={panelStyle.muted}>{invitations.length}件</span></div>
-            <ResourceStateView state={invitationState} empty="招待はありません。" error="招待情報を取得できませんでした。" />
+            <ResourceStateView state={invitationState} empty="招待はありません。" error="招待情報を取得できませんでした。" onRetry={refresh} retryLabel="招待情報を再試行" />
             {invitationState.status === "ready" && <ul style={panelStyle.list}>{invitations.map((invitation) => <InvitationRow key={invitation.id} invitation={invitation} canRevoke={visibility.canRevokeInvitations} expired={isInvitationExpired(invitation, nowMs)} pendingAction={pendingAction} actionKey={`invitation-revoke-${invitation.id}`} onRevoke={() => void revokeInvitation(invitation)} />)}</ul>}
+            {invitationState.status === "ready" && invitationNextCursor !== null && <LoadMoreButton label="招待をさらに読み込む" pending={loadingMore === "invitations"} disabled={loadingMore !== null} onClick={() => void loadInvitations(selectedOrganization.id, undefined, invitationNextCursor)} />}
           </section>
           {visibility.canInvite && <InviteForm role={inviteRole} setRole={setInviteRole} expiresAt={inviteExpiresAt} setExpiresAt={setInviteExpiresAt} onSubmit={createInvitation} pending={pendingAction === "create-invitation"} />}
         </section>
@@ -428,7 +482,7 @@ function MemberRow({ member, canManage, canAssignOwner, draft, setDraft, pending
   const name = member.displayName ?? "名前未設定";
   const detailsId = `member-details-${member.memberId}`;
   const busy = pendingAction !== null;
-  return <li className="organization-list-row" style={panelStyle.listRow} data-state={member.status === "revoked" ? "revoked" : pendingAction === actionKey ? "pending" : "active"} aria-busy={pendingAction === actionKey}><div style={panelStyle.row}><div><strong>{name}</strong><p id={detailsId} style={panelStyle.muted}>{roleLabel(member.role)} · {member.status === "active" ? "有効" : "失効"} · v{member.version}</p></div>{canManage && member.status === "active" ? <div style={panelStyle.actionRow}><label style={panelStyle.label}><span className="sr-only">{name}のロール</span><select id={`member-role-${member.memberId}`} aria-label={`${name}のロール`} aria-describedby={detailsId} value={draft} onChange={(event) => setDraft(event.target.value as OrganizationRole)} style={panelStyle.select} disabled={busy}>{editableRoles.map((role) => <option key={role} value={role}>{roleLabel(role)}</option>)}</select></label><button type="button" style={panelStyle.secondaryButton} disabled={busy || draft === member.role} onClick={() => onRoleChange(draft)} aria-label={`${name}を${roleLabel(draft)}に変更`}>{pendingAction === actionKey ? "変更中…" : "変更"}</button>{confirmRemoval ? <div className="organization-confirmation" role="alert"><span>このメンバーを失効させますか？</span><button type="button" style={panelStyle.dangerButton} disabled={busy} onClick={onRemove}>削除を確定</button><button type="button" style={panelStyle.secondaryButton} disabled={busy} onClick={onCancelRemoval}>キャンセル</button></div> : <button type="button" style={panelStyle.dangerButton} disabled={busy} onClick={onConfirmRemoval} aria-label={`${name}を削除`}>削除</button>}</div> : member.status === "revoked" ? <span style={panelStyle.muted}>このメンバーは失効しています</span> : null}</div></li>;
+  return <li className="organization-list-row" style={panelStyle.listRow} data-state={member.status === "revoked" ? "revoked" : pendingAction === actionKey ? "pending" : "active"} aria-busy={pendingAction === actionKey}><div style={panelStyle.row}><div><strong>{name}</strong><p id={detailsId} style={panelStyle.muted}>{roleLabel(member.role)} · {member.status === "active" ? "有効" : "失効"} · v{member.version}</p></div>{canManage && member.status === "active" ? <div style={panelStyle.actionRow}><label style={panelStyle.label}><span className="sr-only">{name}のロール</span><select id={`member-role-${member.memberId}`} aria-label={`${name}のロール`} aria-describedby={detailsId} value={draft} onChange={(event) => setDraft(event.target.value as OrganizationRole)} style={panelStyle.select} disabled={busy}>{editableRoles.map((role) => <option key={role} value={role}>{roleLabel(role)}</option>)}</select></label><button type="button" style={panelStyle.secondaryButton} disabled={busy || draft === member.role} onClick={() => onRoleChange(draft)} aria-label={`${name}を${roleLabel(draft)}に変更`}>{pendingAction === actionKey ? "変更中…" : "変更"}</button>{confirmRemoval ? <div className="organization-confirmation" role="alert"><span>このメンバーを失効させますか？</span><button type="button" style={panelStyle.dangerButton} disabled={busy} onClick={onRemove}>失効を確定</button><button type="button" style={panelStyle.secondaryButton} disabled={busy} onClick={onCancelRemoval}>キャンセル</button></div> : <button type="button" style={panelStyle.dangerButton} disabled={busy} onClick={onConfirmRemoval} aria-label={`${name}のアクセスを失効`}>アクセスを失効</button>}</div> : member.status === "revoked" ? <span style={panelStyle.muted}>このメンバーは失効しています</span> : null}</div></li>;
 }
 
 function InvitationRow({ invitation, canRevoke, expired, pendingAction, actionKey, onRevoke }: { invitation: OrganizationInvitation; canRevoke: boolean; expired: boolean; pendingAction: string | null; actionKey: string; onRevoke: () => void }) {
@@ -438,11 +492,15 @@ function InvitationRow({ invitation, canRevoke, expired, pendingAction, actionKe
   return <li className="organization-list-row" style={panelStyle.listRow} data-state={status} aria-busy={pendingAction === actionKey}><div style={panelStyle.row}><div><strong>{roleLabel(invitation.role)} 招待</strong><p style={panelStyle.muted}>{statusLabel} · 有効期限 {formatDate(invitation.expiresAt)} · v{invitation.version}</p></div>{canRevoke && status === "pending" && <button type="button" style={panelStyle.dangerButton} disabled={busy} onClick={onRevoke} aria-label={`${roleLabel(invitation.role)}招待を取り消す`}>{pendingAction === actionKey ? "取り消し中…" : "取り消す"}</button>}</div></li>;
 }
 
-function ResourceStateView({ state, empty, error }: { state: ResourceState; empty: string; error: string }) {
+function ResourceStateView({ state, empty, error, onRetry, retryLabel }: { state: ResourceState; empty: string; error: string; onRetry?: () => void; retryLabel?: string }) {
   if (state.status === "loading") return <p className="organization-status" style={panelStyle.state} data-state="loading" role="status" aria-live="polite">読み込み中です…</p>;
   if (state.status === "empty") return <p style={panelStyle.state} data-state="empty">{empty}</p>;
-  if (state.status === "error") return <p className="organization-status" style={state.code === "conflict" ? panelStyle.conflict : panelStyle.error} data-state={state.code ?? "error"} role="alert" aria-live="assertive">{state.error ?? error}</p>;
+  if (state.status === "error") return <div className="organization-status" style={state.code === "conflict" ? panelStyle.conflict : panelStyle.error} data-state={state.code ?? "error"} role="alert" aria-live="assertive"><span>{state.error ?? error}</span>{onRetry !== undefined && <button type="button" style={panelStyle.secondaryButton} onClick={onRetry}>{retryLabel ?? "再試行"}</button>}</div>;
   return null;
+}
+
+function LoadMoreButton({ label, pending, disabled, onClick }: { label: string; pending: boolean; disabled: boolean; onClick: () => void }) {
+  return <button type="button" style={panelStyle.secondaryButton} onClick={onClick} disabled={disabled} aria-busy={pending}>{pending ? "読み込み中…" : label}</button>;
 }
 
 function MutationNotice({ state, retryAction, onRefresh }: { state: ResourceState; retryAction: RetryAction | null; onRefresh: () => void }) {
@@ -455,6 +513,36 @@ function chooseOrganization(items: readonly Organization[], requested: string, s
   if (requested !== "" && items.some((item) => item.id === requested)) return requested;
   if (items.some((item) => item.id === sessionOrganizationId)) return sessionOrganizationId;
   return items[0]?.id ?? "";
+}
+
+async function loadAllOrganizations(client: OrganizationClient, signal?: AbortSignal): Promise<readonly Organization[]> {
+  const items: Organization[] = [];
+  const seenCursors = new Set<string>();
+  let cursor: string | undefined;
+  for (let pageNumber = 0; pageNumber < 100; pageNumber += 1) {
+    const page = await client.listOrganizations({ signal, limit: 100, ...(cursor === undefined ? {} : { cursor }) });
+    items.push(...page.items);
+    if (page.nextCursor === null) return items;
+    if (seenCursors.has(page.nextCursor)) throw new OrganizationClientError("invalid_response", "Organization pagination cursor repeated");
+    seenCursors.add(page.nextCursor);
+    cursor = page.nextCursor;
+  }
+  throw new OrganizationClientError("invalid_response", "Organization pagination exceeded the supported limit");
+}
+
+async function findOrganizationMemberRole(client: OrganizationClient, organizationId: string, memberId: string, signal?: AbortSignal): Promise<OrganizationRole> {
+  const seenCursors = new Set<string>();
+  let cursor: string | undefined;
+  for (let pageNumber = 0; pageNumber < 100; pageNumber += 1) {
+    const page = await client.listMembers(organizationId, { signal, limit: 100, ...(cursor === undefined ? {} : { cursor }) });
+    const actorMembership = page.items.find((member) => member.memberId === memberId);
+    if (actorMembership !== undefined) return actorMembership.status === "active" ? actorMembership.role : "viewer";
+    if (page.nextCursor === null) return "viewer";
+    if (seenCursors.has(page.nextCursor)) throw new OrganizationClientError("invalid_response", "Member pagination cursor repeated");
+    seenCursors.add(page.nextCursor);
+    cursor = page.nextCursor;
+  }
+  throw new OrganizationClientError("invalid_response", "Member pagination exceeded the supported limit");
 }
 
 function resourceError(error: unknown): ResourceState {
