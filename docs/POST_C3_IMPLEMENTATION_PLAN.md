@@ -1,7 +1,7 @@
 # AgentPass post-C3 implementation plan
 
-Status: active  
-Baseline: `c1e1171` on `codex/agent-platform`  
+Status: active — P0 database identity split implemented; protected qualification pending
+Baseline: `9436124` on `codex/agent-platform`
 Planning date: 2026-08-15
 
 ## 1. Release target
@@ -47,16 +47,28 @@ The branch now contains:
   mutation of promotion and signer authority tables;
 - repository code that uses the five reviewed database functions instead of
   direct promotion-table DML;
+- separate app, migration, and signer PostgreSQL URLs and pools; the migration
+  pool is closed before runtime composition and signer repositories cannot use
+  the application pool;
+- a fourth `agentpass_signer` login whose current direct table access is limited
+  to five managed-signer ledger tables, plus an exact privilege checker;
+- a strict PostgreSQL platform-operator assignment repository seam that issues
+  one reviewed function call and accepts no organization membership role;
+- a disposable-PostgreSQL qualification for migrations 1-48, exact promotion
+  entry functions, direct-DML/helper denial, reserve/replay/get/uncertain, and
+  backup denial;
 - 148 frozen contract-catalog entries: 39 schemas, 61 OpenAPI operations, and
   48 migrations.
 
-This is not a production-complete boundary yet. Migration `0048` has static and
-mocked repository coverage but has not been parsed or executed by a real
-PostgreSQL server in the current environment. The platform-operator assignment
-repository and Human/WebAuthn-backed platform session do not yet exist. The
-Cloud runtime therefore leaves the route disabled by default. The current
-managed-signer repositories also need a separately authenticated database
-authority instead of sharing the generic application pool.
+This is not a production-complete boundary yet. Migration `0048` now has a real
+PostgreSQL qualification test, but the current sandbox cannot open a local
+PostgreSQL socket or Docker daemon and no protected admin URL is configured, so
+that test remains unexecuted evidence until CI/staging runs it. The repository
+seam for platform assignments exists, but its database tables/function and the
+Human/WebAuthn-backed platform session do not. The Cloud runtime therefore
+leaves the route disabled by default. Finally, `agentpass_signer` still has
+temporary direct DML on five signer-ledger tables; P0 closes only after those
+grants are replaced by reviewed `SECURITY DEFINER` procedures.
 
 ## 3. Non-negotiable invariants
 
@@ -298,20 +310,105 @@ Exit gate: alerts and runbooks are exercised, restore and revocation bounds are
 measured, no critical/high or P0/P1 issue remains, and promotion is explicit,
 digest-exact, monitored, and reversible.
 
-## 6. Immediate commit queue
+## 6. Execution ledger and next implementation waves
 
-1. `test: execute promotion authority boundary on real postgres`
-2. `feat: separate signer database authority and procedures`
-3. `feat: persist platform operator assignments and generations`
-4. `feat: add platform operator sessions and bound webauthn`
-5. `feat: compose platform promotion runtime`
-6. `feat: freeze promotion verification and reconciliation api`
-7. `feat: add console platform promotion workflow`
-8. `feat: close eight-purpose readiness and drain`
-9. `test: qualify two-instance postgres and managed kms`
-10. `release: publish immutable notarized macos package`
-11. `test: qualify claude code and cursor physical journeys`
-12. `release: deploy staging and promote exact candidate`
+| Wave | State | Serial authority work | Parallel work | Required evidence |
+| --- | --- | --- | --- | --- |
+| W0 | implemented, qualification pending | three runtime DB identities; signer role; promotion DB qualification; operator repository seam | runtime/profile/docs tests | CI PostgreSQL 16/17 fresh and 47→48 upgrade, exact privilege negatives |
+| W1 | next | migration `0049` signer lifecycle/provider-operation procedures and repository conversion | procedure contract tests; role checker and runbook updates | zero direct signer table DML; concurrency/replay/uncertain tests on real PostgreSQL |
+| W2 | queued after W1 schema freeze | migration `0050` platform principals, assignments, generations, sessions, and one-use authorization consumption | repository adapters; audit event schemas; threat tests | organization-role denial and assignment/session/replay matrix on real PostgreSQL |
+| W3 | queued after W2 | runtime composition of platform authorizer and promotion service | Device API closure; OpenAPI/DTO freeze; drain/readiness tests | route absent on partial health; full HTTP auth/CSRF/idempotency/privacy matrix |
+| W4 | may start after W3 DTO freeze | no schema changes without serial review | Console vertical slices and browser tests | production build, role separation, accessibility, offline/response-loss and browser secret scan |
+| W5 | parallel with W2-W4 | signer lifecycle state changes remain serial | eight-purpose KMS adapters/readiness; immutable PKG pipeline | real AWS/GCP keys, notarized/stapled PKG, exact digest/source evidence |
+| W6 | final qualification | only forward fixes from qualification findings | two-instance fault matrix; Claude Code/Cursor physical E2E; independent review | no unresolved critical/high or P0/P1; exact qualified digests promoted |
+
+### W1 — signer procedure conversion slices
+
+W1 is split so no commit leaves a repository calling a procedure that is not in
+the same migration/catalog state:
+
+1. Inventory every SQL statement in key-lifecycle, signing-idempotency,
+   provider-operation, and maintenance repositories. Freeze input/output rows,
+   lock order, retry identity, terminal states, and stable error mapping.
+2. Add migration `0049` with purpose-specific functions for lifecycle lookup,
+   rotation reservation/commit/failure, signing reserve/replay/commit/uncertain,
+   provider-operation lookup/reconciliation, and bounded maintenance. Pin
+   `search_path`, owner, argument types, row cardinality, and database time.
+3. Convert repositories one family at a time and remove all direct table SQL.
+   Each family gets same-request replay, changed-request rejection, stale
+   generation, concurrent claim, claim expiry/reclaim, lost-response, and
+   immutable-terminal tests.
+4. Revoke all signer table and sequence privileges. Grant only the exact `0049`
+   functions, reject overloads/PUBLIC/backup/app execution, and update the
+   privilege evidence script.
+5. Run fresh 1→49 and upgrade 48→49 on PostgreSQL 16 and 17. Retain catalogs,
+   checksums, privilege matrices, and contention transcripts as CI artifacts.
+
+W1 is complete only when source scanning finds no signer repository DML and a
+real signer login can complete supported operations solely through the reviewed
+functions.
+
+### W2 — platform identity and operation-bound WebAuthn slices
+
+1. Freeze schemas for platform principal, assignment, capability, authority
+   generation, platform session, credential binding, and one-use authorization.
+2. Add migration `0050` and the single
+   `agentpass_platform_operator_assignment_find_active` function already used by
+   the repository seam. Add transactional consume/revoke functions rather than
+   multi-query authorization decisions.
+3. Implement assignment administration with dual-control policy for production
+   promotion authority, expiry, suspension, replacement, and generation bumps.
+4. Implement platform sessions separately from organization sessions. Store
+   hashes only; bind credential, auth time, assignment generation, operation,
+   deployment, environment, candidate, approval, idempotency key, and request
+   digest.
+5. Compose WebAuthn ceremonies and consume the proof in the same transaction as
+   promotion reservation. Emit privacy-bounded success/denial/replay/revocation
+   audit events.
+
+W2 is complete only when owner/admin membership without a platform assignment
+is denied and one proof cannot cross operation, candidate, environment,
+principal, session, generation, or concurrent request.
+
+### W3-W4 — API then Console vertical delivery
+
+The API ships in independently testable vertical slices: authorize/issue,
+verify, list/detail uncertain, producer-bound reconcile, and Device management.
+For each slice, freeze schema/OpenAPI first, implement service/repository and
+audit second, then add route and production BFF. The Console starts only after
+that slice's DTO is frozen and covers loading, empty, success, validation,
+forbidden, reauthentication, conflict, stale, offline, response loss, and
+recovery states before moving to the next slice.
+
+The promotion route remains physically absent when any platform assignment,
+session, WebAuthn, signer, historical resolver, database procedure, or readiness
+dependency is missing. Console code never receives a provider client, generic
+sign method, claim token, WebAuthn assertion, or reusable authority.
+
+### W5-W6 — release qualification and promotion
+
+KMS and packaging work may run in parallel, but qualification is digest-serial:
+freeze source → build API/Console/worker/PKG once → produce SBOM and manifests →
+qualify exact digests → review evidence → promote those same digests. Any code,
+migration, entitlement, dependency, image, or package change invalidates the
+affected evidence and restarts that lane.
+
+## 7. Immediate commit queue
+
+1. `[implemented; protected run pending] test: qualify platform promotion database authority`
+2. `[implemented; procedures pending] feat: isolate postgres runtime database authorities`
+3. `feat: replace signer ledger dml with database procedures`
+4. `test: qualify migrations 1-49 and signer privilege boundary`
+5. `feat: persist platform principals assignments and generations`
+6. `feat: add platform sessions and operation-bound webauthn`
+7. `feat: compose platform promotion runtime`
+8. `feat: freeze promotion verification and reconciliation api`
+9. `feat: add console platform promotion workflow`
+10. `feat: close eight-purpose readiness and drain`
+11. `test: qualify two-instance postgres and managed kms`
+12. `release: publish immutable notarized macos package`
+13. `test: qualify claude code and cursor physical journeys`
+14. `release: deploy staging and promote exact candidate`
 
 Each commit requires focused positive and negative tests, contract validation,
 lint, affected regression suites, `git diff --check`, secret scanning, updated
@@ -320,9 +417,11 @@ also require fresh and upgrade PostgreSQL runs plus privilege negatives. UI
 commits require production BFF/browser E2E and accessibility checks. Native and
 release claims require signed artifacts and physical hardware evidence.
 
-## 7. Next action
+## 8. Next action
 
-Start with commit 1. Do not add more API or Console authority until migration
-`0048` has executed on real PostgreSQL 16/17 and its negative privilege matrix
-passes. In parallel, prepare the signer/app database identity split design and
-the platform-operator schema, but merge migration numbers serially.
+Run the new `0048` qualification in CI against disposable PostgreSQL 16 and 17,
+then begin W1 with the signer SQL inventory and migration `0049`. Do not expose
+more API or Console authority until the protected `0048` run passes. W1 test and
+repository work may be delegated in parallel, but one owner must merge migration
+numbers, role grants, and catalog changes serially. If qualification finds a
+defect, fix it forward before freezing `0049`; never rewrite an applied migration.
