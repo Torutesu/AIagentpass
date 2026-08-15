@@ -76,3 +76,19 @@ test("authenticated workspace selection is BFF-backed and fail-closed", async ()
   assert.match(source, /このセッションでは組織の一覧を確認できません/);
   assert.doesNotMatch(source, /localStorage|sessionStorage|document\.cookie|console\.(?:log|info|warn|error)/);
 });
+
+test("organization mutations reconcile authoritative state after response loss without resending", async () => {
+  const source = await readFile(componentPath, "utf8");
+  assert.match(source, /reconcile\?: \(\) => Promise<void>/);
+  assert.match(source, /const reconcileResources = useCallback/);
+  assert.match(source, /loadAllMembers\(client, organizationId\)/);
+  assert.match(source, /loadAllInvitations\(client, organizationId\)/);
+  assert.match(source, /isAmbiguousMutationError\(error\)/);
+  assert.match(source, /code: "reconciliation_required"/);
+  assert.match(source, /state\.code === "reconciliation_required"/);
+  assert.match(source, /権威状態を再取得しました。操作は再送していません/);
+  assert.match(source, /再送せず、最新の状態をもう一度確認/);
+  assert.match(source, /await options\.reconcile\(\)/);
+  assert.match(source, /setPendingAction\("reconcile"\)/);
+  assert.match(source, /disabled=\{pendingAction !== null\}/);
+});

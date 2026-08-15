@@ -117,7 +117,7 @@ test("expired sessions replace every operational surface with a reauthentication
   assert.match(source, /summaryEpoch\.current \+= 1/);
   assert.match(source, /capabilityEpoch\.current \+= 1/);
   assert.match(source, /adminAuditEpoch\.current \+= 1/);
-  assert.match(source, /<SecurityPanel onSessionEnded=\{expireSession\} \/>/);
+  assert.match(source, /<SecurityPanel onSessionExpired=\{expireSession\} onSessionSignedOut=\{markSessionSignedOut\} \/>/);
 });
 
 test("global sign-out uses the same-origin DELETE contract and clears operational state", async () => {
@@ -129,7 +129,7 @@ test("global sign-out uses the same-origin DELETE contract and clears operationa
   assert.match(logout, /credentials: "same-origin"/);
   assert.match(logout, /payload\.session !== null/);
   assert.match(logout, /consoleSessionContext\.clear\(session\)/);
-  assert.match(source, /setSessionState\("signed-out"\)/);
+  assert.match(source, /endSession\("signed-out"\)/);
   assert.match(source, /signOutPending \? "終了中…" : "サインアウト"/);
 });
 

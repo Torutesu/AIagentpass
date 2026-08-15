@@ -1137,7 +1137,7 @@ export function AgentPassConsole() {
   const [liveHandoffStatus, setLiveHandoffStatus] = useState<LiveHandoffStatus>("none");
   const [livePreflight, setLivePreflight] = useState<PublicEnrollmentPreflight | null>(null);
 
-  const expireSession = useCallback(() => {
+  const endSession = useCallback((nextState: "expired" | "signed-out") => {
     summaryEpoch.current += 1;
     capabilityEpoch.current += 1;
     adminAuditEpoch.current += 1;
@@ -1151,11 +1151,14 @@ export function AgentPassConsole() {
     setSessionRole(null);
     setAuditSession(null);
     setData(emptyConsoleData());
-    setSessionState("expired");
+    setSessionState(nextState);
     setSummaryState("error");
     setConfirmOpen(false);
     setConfirmChecked(false);
   }, []);
+
+  const expireSession = useCallback(() => endSession("expired"), [endSession]);
+  const markSessionSignedOut = useCallback(() => endSession("signed-out"), [endSession]);
 
   const showToast = (message: string, tone: ToastTone = "success") => {
     setToast(message);
@@ -1381,17 +1384,7 @@ export function AgentPassConsole() {
     setSignOutPending(true);
     try {
       await logoutConsoleSession();
-      organizationIdRef.current = null;
-      organizationOptionsEpoch.current += 1;
-      setOrganizationOptions([]);
-      setSelectedOrganizationId(null);
-      setOrganizationSwitcherState("closed");
-      setOrganizationSwitcherError(null);
-      setSessionRole(null);
-      setAuditSession(null);
-      setData(emptyConsoleData());
-      setSessionState("signed-out");
-      setSummaryState("error");
+      markSessionSignedOut();
     } catch (error) {
       if (error instanceof ConsoleSessionError && (error.status === 401 || error.status === 403)) {
         setData(emptyConsoleData());
@@ -1528,7 +1521,7 @@ export function AgentPassConsole() {
           {sessionState === "active" && activeView === "policies" ? <PoliciesSurface data={data} operate={operate} canManage={canManage} /> : null}
           {sessionState === "active" && activeView === "activity" ? <ActivitySurface data={data} /> : null}
           {sessionState === "active" && activeView === "audit-exports" && auditSession ? <AuditExportPanel role={auditSession.role} organizationId={auditSession.organizationId} csrfToken={auditSession.csrfToken} /> : null}
-          {sessionState === "active" && activeView === "security" ? <SecurityPanel onSessionEnded={expireSession} /> : null}
+          {sessionState === "active" && activeView === "security" ? <SecurityPanel onSessionExpired={expireSession} onSessionSignedOut={markSessionSignedOut} /> : null}
           {sessionState === "active" && activeView === "organizations" ? <OrganizationPanel key={selectedOrganizationId ?? "session-organization"} initialOrganizationId={selectedOrganizationId ?? undefined} /> : null}
           {sessionState === "active" && activeView === "recovery" ? <OwnerRecoveryPanel /> : null}
           {sessionState === "active" && activeView === "emergency" && canEmergencyStop ? <EmergencySurface data={data} onOpenConfirm={() => setConfirmOpen(true)} stopped={stopped} /> : null}

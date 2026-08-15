@@ -9,7 +9,7 @@ test("Console exposes a Japanese Security surface with bounded loading, empty, e
   const source = await readFile(componentPath, "utf8");
   const panel = await readFile(panelPath, "utf8");
   assert.match(source, /id: "security", label: "セキュリティ"/);
-  assert.match(source, /<SecurityPanel onSessionEnded=\{expireSession\} \/>/);
+  assert.match(source, /<SecurityPanel onSessionExpired=\{expireSession\} onSessionSignedOut=\{markSessionSignedOut\} \/>/);
   assert.match(panel, /REGISTERED PASSKEYS/);
   assert.match(panel, /ACTIVE SESSIONS/);
   assert.match(panel, /読み込み中/);
@@ -34,4 +34,17 @@ test("SecurityPanel covers the Human session management flow without handling ce
   assert.match(source, /Touch IDまたはパスキー/);
   assert.doesNotMatch(source, /localStorage|sessionStorage|document\.cookie|console\.(?:log|info|warn|error)/);
   assert.doesNotMatch(source, /csrfToken|csrf_token|credentialPublicKey|clientDataJSON|attestationObject|authorization_id/);
+});
+
+test("current-session revoke reports signed-out separately from expired-session fail-closed handling", async () => {
+  const panel = await readFile(panelPath, "utf8");
+  const consoleSource = await readFile(componentPath, "utf8");
+  assert.match(panel, /onSessionExpired\?: \(\) => void/);
+  assert.match(panel, /onSessionSignedOut\?: \(\) => void/);
+  assert.match(panel, /handleSessionFailure\(caught, onSessionExpired\)/);
+  assert.match(panel, /setSignedOut\(true\); onSessionSignedOut\?\./);
+  assert.doesNotMatch(panel, /onSessionEnded/);
+  assert.match(consoleSource, /const endSession = useCallback\(\(nextState: "expired" \| "signed-out"\)/);
+  assert.match(consoleSource, /const markSessionSignedOut = useCallback\(\(\) => endSession\("signed-out"\)/);
+  assert.match(consoleSource, /<SecurityPanel onSessionExpired=\{expireSession\} onSessionSignedOut=\{markSessionSignedOut\} \/>/);
 });

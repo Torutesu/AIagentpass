@@ -22,9 +22,9 @@ export type OrganizationPanelProps = Readonly<{
 }>;
 
 type LoadStatus = "idle" | "loading" | "ready" | "empty" | "error";
-type ResourceState = Readonly<{ status: LoadStatus; error?: string; code?: OrganizationClientErrorCode }>;
+type ResourceState = Readonly<{ status: LoadStatus; error?: string; code?: OrganizationClientErrorCode | "reconciliation_required" }>;
 type Rollback = () => void;
-type MutationOptions = Readonly<{ optimistic?: () => Rollback; retry?: () => Promise<void>; retryLabel?: string }>;
+type MutationOptions = Readonly<{ optimistic?: () => Rollback; reconcile?: () => Promise<void>; retry?: () => Promise<void>; retryLabel?: string }>;
 type RetryAction = Readonly<{ label: string; run: () => Promise<void> }>;
 
 const INITIAL_RESOURCE: ResourceState = Object.freeze({ status: "idle" });
@@ -99,22 +99,28 @@ export function OrganizationPanel({ client: suppliedClient, initialOrganizationI
     : selectedOrganizationId !== "" && selectedOrganizationId === sessionOrganizationId ? sessionRole : "viewer";
   const visibility = useMemo(() => getOrganizationPanelVisibility(effectiveRole), [effectiveRole]);
 
+  const refreshOrganizationSnapshot = useCallback(async (signal?: AbortSignal): Promise<{ organizations: readonly Organization[]; session: Awaited<ReturnType<OrganizationClient["getSession"]>> }> => {
+    const [organizationItems, session] = await Promise.all([loadAllOrganizations(client, signal), client.getSession({ signal })]);
+    if (signal?.aborted) throw abortError();
+    setOrganizations(organizationItems);
+    setSessionRole(session.role);
+    setSessionOrganizationId(session.organizationId);
+    setSessionMemberId(session.memberId);
+    setRoleOverrides((current) => current[session.organizationId] === undefined ? { ...current, [session.organizationId]: session.role } : current);
+    const nextId = chooseOrganization(organizationItems, initialOrganizationId ?? selectedOrganizationRef.current, session.organizationId);
+    selectedOrganizationRef.current = nextId;
+    setSelectedOrganizationId(nextId);
+    setSelectedOrganization(nextId === "" ? undefined : organizationItems.find((item) => item.id === nextId));
+    setRenameName(nextId === "" ? "" : organizationItems.find((item) => item.id === nextId)?.name ?? "");
+    return { organizations: organizationItems, session };
+  }, [client, initialOrganizationId]);
+
   const loadOrganizations = useCallback(async (signal?: AbortSignal) => {
     const sequence = ++loadSequence.current;
     setOrganizationState({ status: "loading" });
     try {
-      const [organizationItems, session] = await Promise.all([loadAllOrganizations(client, signal), client.getSession({ signal })]);
+      const { organizations: organizationItems } = await refreshOrganizationSnapshot(signal);
       if (sequence !== loadSequence.current || signal?.aborted) return;
-      setOrganizations(organizationItems);
-      setSessionRole(session.role);
-      setSessionOrganizationId(session.organizationId);
-      setSessionMemberId(session.memberId);
-      setRoleOverrides((current) => current[session.organizationId] === undefined ? { ...current, [session.organizationId]: session.role } : current);
-      const nextId = chooseOrganization(organizationItems, initialOrganizationId ?? selectedOrganizationRef.current, session.organizationId);
-      selectedOrganizationRef.current = nextId;
-      setSelectedOrganizationId(nextId);
-      setSelectedOrganization(nextId === "" ? undefined : organizationItems.find((item) => item.id === nextId));
-      setRenameName(nextId === "" ? "" : organizationItems.find((item) => item.id === nextId)?.name ?? "");
       setOrganizationState({ status: organizationItems.length === 0 ? "empty" : "ready" });
     } catch (error) {
       if (sequence !== loadSequence.current || signal?.aborted) return;
@@ -129,7 +135,7 @@ export function OrganizationPanel({ client: suppliedClient, initialOrganizationI
       setInvitationNextCursor(null);
       setOrganizationState(resourceError(error));
     }
-  }, [client, initialOrganizationId]);
+  }, [refreshOrganizationSnapshot]);
 
   const loadMembers = useCallback(async (organizationId: string, signal?: AbortSignal, cursor?: string) => {
     const append = cursor !== undefined;
@@ -190,6 +196,30 @@ export function OrganizationPanel({ client: suppliedClient, initialOrganizationI
       if (append) setLoadingMore(null);
     }
   }, [client]);
+
+  const reconcileResources = useCallback(async (organizationId: string, resources: Readonly<{ members?: boolean; invitations?: boolean }>): Promise<void> => {
+    const snapshot = await refreshOrganizationSnapshot();
+    if (!snapshot.organizations.some((organization) => organization.id === organizationId)) {
+      throw new OrganizationClientError("invalid_response", "対象の組織を確認できませんでした。");
+    }
+    if (selectedOrganizationRef.current !== organizationId) return;
+    if (resources.members) {
+      const memberItems = await loadAllMembers(client, organizationId);
+      setMembers(memberItems);
+      setMemberNextCursor(null);
+      setMemberState({ status: memberItems.length === 0 ? "empty" : "ready" });
+      const actorMembership = memberItems.find((member) => member.memberId === snapshot.session.memberId);
+      if (actorMembership !== undefined) {
+        setRoleOverrides((current) => ({ ...current, [organizationId]: actorMembership.status === "active" ? actorMembership.role : "viewer" }));
+      }
+    }
+    if (resources.invitations) {
+      const invitationItems = await loadAllInvitations(client, organizationId);
+      setInvitations(invitationItems);
+      setInvitationNextCursor(null);
+      setInvitationState({ status: invitationItems.length === 0 ? "empty" : "ready" });
+    }
+  }, [client, refreshOrganizationSnapshot]);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -257,22 +287,56 @@ export function OrganizationPanel({ client: suppliedClient, initialOrganizationI
     setMutationError(INITIAL_RESOURCE);
   };
 
-  const runMutation = async (action: string, operation: () => Promise<void>, options: MutationOptions = {}): Promise<void> => {
-    if (pendingAction !== null) return;
+  const runMutation = async (action: string, operation: () => Promise<void>, options: MutationOptions = {}): Promise<boolean> => {
+    if (pendingAction !== null) return false;
     setPendingAction(action);
     setMutationError(INITIAL_RESOURCE);
     setRetryAction(null);
     const rollback = options.optimistic?.() ?? (() => undefined);
+    let operationCommitted = false;
     try {
       await operation();
-      setRefreshNonce((value) => value + 1);
+      operationCommitted = true;
+      if (options.reconcile !== undefined) await options.reconcile();
+      return true;
     } catch (error) {
+      const responseOutcomeIsAmbiguous = !operationCommitted && isAmbiguousMutationError(error);
+      if (options.reconcile !== undefined && (responseOutcomeIsAmbiguous || operationCommitted)) {
+        let reconciliationError: unknown = operationCommitted ? error : undefined;
+        try {
+          if (!operationCommitted) await options.reconcile();
+        } catch (caught) {
+          reconciliationError = caught;
+        }
+        const message = reconciliationError === undefined
+          ? "応答を確認できなかったため、権威状態を再取得しました。操作は再送していません。表示された状態を確認してください。"
+          : "変更結果を確認できませんでした。再送せず、最新の状態をもう一度確認してください。";
+        setMutationError({ status: "error", code: "reconciliation_required", error: message });
+        setRetryAction({
+          label: "最新の状態を再確認",
+          run: async () => {
+            if (pendingAction !== null) return;
+            setPendingAction("reconcile");
+            setMutationError(INITIAL_RESOURCE);
+            try {
+              await options.reconcile?.();
+              setMutationError({ status: "error", code: "reconciliation_required", error: "最新の権威状態を取得しました。操作は再送していません。" });
+            } catch {
+              setMutationError({ status: "error", code: "reconciliation_required", error: "変更結果を確認できませんでした。接続を確認して、再送せずにもう一度確認してください。" });
+            } finally {
+              setPendingAction(null);
+            }
+          },
+        });
+        return false;
+      }
       rollback();
       const nextError = resourceError(error);
       setMutationError(nextError);
       if ((nextError.code === "recent_auth_required" || nextError.code === "aborted") && options.retry !== undefined) {
         setRetryAction({ label: options.retryLabel ?? "本人確認をやり直す", run: options.retry });
       }
+      return false;
     } finally {
       setPendingAction(null);
     }
@@ -282,12 +346,19 @@ export function OrganizationPanel({ client: suppliedClient, initialOrganizationI
     event.preventDefault();
     const name = createName.trim();
     if (name === "") return setMutationError({ status: "error", error: "組織名を入力してください。" });
+    let createdOrganizationId: string | undefined;
     await runMutation("create-organization", async () => {
       const result = await client.createOrganization({ name });
+      createdOrganizationId = result.organization.id;
       setCreateName("");
       setRoleOverrides((current) => ({ ...current, [result.organization.id]: "owner" }));
       selectedOrganizationRef.current = result.organization.id;
       setSelectedOrganizationId(result.organization.id);
+    }, {
+      reconcile: async () => {
+        if (createdOrganizationId === undefined) await refreshOrganizationSnapshot();
+        else await reconcileResources(createdOrganizationId, {});
+      },
     });
   };
 
@@ -313,6 +384,7 @@ export function OrganizationPanel({ client: suppliedClient, initialOrganizationI
           setRenameName(previousRenameName);
         };
       },
+      reconcile: () => reconcileResources(selectedOrganization.id, {}),
     });
   };
 
@@ -322,15 +394,21 @@ export function OrganizationPanel({ client: suppliedClient, initialOrganizationI
     const expiresAt = parseDateTimeLocal(inviteExpiresAt);
     if (expiresAt === undefined) return setMutationError({ status: "error", error: "有効期限を入力してください。" });
     if (Date.parse(expiresAt) <= Date.now()) return setMutationError({ status: "error", code: "expired", error: "有効期限は現在より後に設定してください。" });
-    await runMutation("create-invitation", async () => {
+    let createdToken: string | undefined;
+    const committed = await runMutation("create-invitation", async () => {
       const result = await client.createInvitation({ organizationId: selectedOrganization.id, role: inviteRole, expiresAt });
-      setOneTimeToken(result.oneTimeToken);
-      setInviteExpiresAt("");
+      createdToken = result.oneTimeToken;
+    }, {
+      reconcile: () => reconcileResources(selectedOrganization.id, { invitations: true }),
     });
+    if (committed && createdToken !== undefined) {
+      setOneTimeToken(createdToken);
+      setInviteExpiresAt("");
+    }
   };
 
-  const changeMemberRole = (member: OrganizationMember, role: OrganizationRole): Promise<void> => {
-    if (!visibility.canManageMembers || (role === "owner" && !visibility.canAssignOwner) || role === member.role || member.status !== "active") return Promise.resolve();
+  const changeMemberRole = (member: OrganizationMember, role: OrganizationRole): Promise<boolean> => {
+    if (!visibility.canManageMembers || (role === "owner" && !visibility.canAssignOwner) || role === member.role || member.status !== "active") return Promise.resolve(false);
     const previousMembers = members;
     return runMutation(`member-role-${member.memberId}`, async () => {
       const result = await client.updateMemberRole({ organizationId: member.organizationId, memberId: member.memberId, role, expectedVersion: member.version });
@@ -346,11 +424,12 @@ export function OrganizationPanel({ client: suppliedClient, initialOrganizationI
         return () => setMembers(previousMembers);
       },
       retry: () => changeMemberRole(member, role),
+      reconcile: () => reconcileResources(member.organizationId, { members: true }),
     });
   };
 
-  const removeMember = (member: OrganizationMember): Promise<void> => {
-    if (!visibility.canManageMembers || (member.role === "owner" && !visibility.canAssignOwner) || member.status !== "active") return Promise.resolve();
+  const removeMember = (member: OrganizationMember): Promise<boolean> => {
+    if (!visibility.canManageMembers || (member.role === "owner" && !visibility.canAssignOwner) || member.status !== "active") return Promise.resolve(false);
     const previousMembers = members;
     setRemovalConfirmationId(null);
     return runMutation(`member-remove-${member.memberId}`, async () => {
@@ -366,6 +445,7 @@ export function OrganizationPanel({ client: suppliedClient, initialOrganizationI
         return () => setMembers(previousMembers);
       },
       retry: () => removeMember(member),
+      reconcile: () => reconcileResources(member.organizationId, { members: true }),
     });
   };
 
@@ -380,6 +460,7 @@ export function OrganizationPanel({ client: suppliedClient, initialOrganizationI
         setInvitations((current) => current.map((item) => item.id === invitation.id ? { ...item, status: "revoked", version: item.version + 1 } : item));
         return () => setInvitations(previousInvitations);
       },
+      reconcile: () => reconcileResources(invitation.organizationId, { invitations: true }),
     });
   };
 
@@ -390,6 +471,8 @@ export function OrganizationPanel({ client: suppliedClient, initialOrganizationI
     await runMutation("accept-invitation", async () => {
       await client.acceptInvitation({ oneTimeToken: token });
       setAcceptToken("");
+    }, {
+      reconcile: () => refreshOrganizationSnapshot().then(() => undefined),
     });
   };
 
@@ -426,7 +509,7 @@ export function OrganizationPanel({ client: suppliedClient, initialOrganizationI
         <section style={panelStyle.card} aria-labelledby="organization-selector-title">
           <div style={panelStyle.row}>
             <div><h2 id="organization-selector-title" style={panelStyle.cardTitle}>組織</h2><p style={panelStyle.muted}>現在の権限: {roleLabel}</p></div>
-            <label style={{ ...panelStyle.label, minWidth: 260 }}><span className="sr-only">組織を選択</span><select value={selectedOrganizationId} onChange={(event) => selectOrganization(event.target.value)} style={panelStyle.select} aria-label="組織を選択">{organizations.map((organization) => <option key={organization.id} value={organization.id}>{organization.name}</option>)}</select></label>
+            <label style={{ ...panelStyle.label, minWidth: 260 }}><span className="sr-only">組織を選択</span><select value={selectedOrganizationId} onChange={(event) => selectOrganization(event.target.value)} style={panelStyle.select} aria-label="組織を選択" disabled={pendingAction !== null}>{organizations.map((organization) => <option key={organization.id} value={organization.id}>{organization.name}</option>)}</select></label>
           </div>
           {selectedOrganization && <div style={panelStyle.row}><span>{selectedOrganization.name} · v{selectedOrganization.version}</span><span style={panelStyle.muted}>更新: {formatDate(selectedOrganization.updatedAt)}</span></div>}
           {visibility.canManageOrganization && selectedOrganization && <form onSubmit={renameOrganization} style={panelStyle.actionRow}><label style={{ ...panelStyle.label, flex: "1 1 280px" }}><span>組織名を変更</span><input value={renameName} onChange={(event) => setRenameName(event.target.value)} maxLength={128} style={panelStyle.input} /></label><button type="submit" style={panelStyle.button} disabled={pendingAction !== null}>{pendingAction === "rename-organization" ? "変更中…" : "名前を変更"}</button></form>}
@@ -506,7 +589,8 @@ function LoadMoreButton({ label, pending, disabled, onClick }: { label: string; 
 function MutationNotice({ state, retryAction, onRefresh }: { state: ResourceState; retryAction: RetryAction | null; onRefresh: () => void }) {
   const refreshLabel = state.code === "unauthorized" ? "セッションを更新" : "最新情報を読み込む";
   const canRefresh = state.code === "conflict" || state.code === "unauthorized";
-  return <div className="organization-status" style={state.code === "conflict" ? panelStyle.conflict : panelStyle.error} data-state={state.code ?? "error"} role="alert" aria-live="assertive"><span>{state.error}</span>{retryAction !== null && (state.code === "recent_auth_required" || state.code === "aborted") ? <button type="button" style={panelStyle.secondaryButton} onClick={() => void retryAction.run()}>{retryAction.label}</button> : canRefresh ? <button type="button" style={panelStyle.secondaryButton} onClick={onRefresh}>{refreshLabel}</button> : null}</div>;
+  const canRetry = state.code === "recent_auth_required" || state.code === "aborted" || state.code === "reconciliation_required";
+  return <div className="organization-status" style={state.code === "conflict" ? panelStyle.conflict : panelStyle.error} data-state={state.code ?? "error"} role="alert" aria-live="assertive"><span>{state.error}</span>{retryAction !== null && canRetry ? <button type="button" style={panelStyle.secondaryButton} onClick={() => void retryAction.run()}>{retryAction.label}</button> : canRefresh ? <button type="button" style={panelStyle.secondaryButton} onClick={onRefresh}>{refreshLabel}</button> : null}</div>;
 }
 
 function chooseOrganization(items: readonly Organization[], requested: string, sessionOrganizationId: string): string {
@@ -528,6 +612,36 @@ async function loadAllOrganizations(client: OrganizationClient, signal?: AbortSi
     cursor = page.nextCursor;
   }
   throw new OrganizationClientError("invalid_response", "Organization pagination exceeded the supported limit");
+}
+
+async function loadAllMembers(client: OrganizationClient, organizationId: string, signal?: AbortSignal): Promise<readonly OrganizationMember[]> {
+  const items: OrganizationMember[] = [];
+  const seenCursors = new Set<string>();
+  let cursor: string | undefined;
+  for (let pageNumber = 0; pageNumber < 100; pageNumber += 1) {
+    const page = await client.listMembers(organizationId, { signal, limit: 100, ...(cursor === undefined ? {} : { cursor }) });
+    items.push(...page.items);
+    if (page.nextCursor === null) return items;
+    if (seenCursors.has(page.nextCursor)) throw new OrganizationClientError("invalid_response", "Member pagination cursor repeated");
+    seenCursors.add(page.nextCursor);
+    cursor = page.nextCursor;
+  }
+  throw new OrganizationClientError("invalid_response", "Member pagination exceeded the supported limit");
+}
+
+async function loadAllInvitations(client: OrganizationClient, organizationId: string, signal?: AbortSignal): Promise<readonly OrganizationInvitation[]> {
+  const items: OrganizationInvitation[] = [];
+  const seenCursors = new Set<string>();
+  let cursor: string | undefined;
+  for (let pageNumber = 0; pageNumber < 100; pageNumber += 1) {
+    const page = await client.listInvitations(organizationId, { signal, limit: 100, ...(cursor === undefined ? {} : { cursor }) });
+    items.push(...page.items);
+    if (page.nextCursor === null) return items;
+    if (seenCursors.has(page.nextCursor)) throw new OrganizationClientError("invalid_response", "Invitation pagination cursor repeated");
+    seenCursors.add(page.nextCursor);
+    cursor = page.nextCursor;
+  }
+  throw new OrganizationClientError("invalid_response", "Invitation pagination exceeded the supported limit");
 }
 
 async function findOrganizationMemberRole(client: OrganizationClient, organizationId: string, memberId: string, signal?: AbortSignal): Promise<OrganizationRole> {
@@ -554,6 +668,18 @@ function resourceError(error: unknown): ResourceState {
   if (error instanceof OrganizationClientError && error.code === "unauthorized") return { status: "error", code: "unauthorized", error: "セッションの有効期限が切れています。セッションを更新してください。" };
   if (error instanceof OrganizationClientError && error.code === "validation_failed") return { status: "error", code: "validation_failed", error: "入力内容を確認してください。" };
   return { status: "error", error: "組織情報を取得できませんでした。接続を確認して、もう一度お試しください。" };
+}
+
+function isAmbiguousMutationError(error: unknown): boolean {
+  return error instanceof OrganizationClientError && (
+    error.code === "transport_failed"
+    || error.code === "invalid_response"
+    || error.code === "http_failed" && (error.status === 502 || error.status === 503 || error.status === 504)
+  );
+}
+
+function abortError(): OrganizationClientError {
+  return new OrganizationClientError("aborted", "Organization refresh was cancelled");
 }
 
 function pendingActionLabel(action: string): string {

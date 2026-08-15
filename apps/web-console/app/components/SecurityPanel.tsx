@@ -6,13 +6,14 @@ import { WebAuthnClientError } from "../webauthn-client";
 
 type LoadState = "loading" | "ready" | "error";
 type SecurityPanelProps = Readonly<{
-  onSessionEnded?: () => void;
+  onSessionExpired?: () => void;
+  onSessionSignedOut?: () => void;
   securityClient?: SecurityClient;
 }>;
 
 const SESSION_RETRY_STATUSES = new Set([401, 403]);
 
-export function SecurityPanel({ onSessionEnded, securityClient: injectedClient }: SecurityPanelProps) {
+export function SecurityPanel({ onSessionExpired, onSessionSignedOut, securityClient: injectedClient }: SecurityPanelProps) {
   const clientRef = useRef<SecurityClient | null>(null);
   if (clientRef.current === null) clientRef.current = injectedClient ?? createSecurityClient();
   const client = clientRef.current;
@@ -35,11 +36,11 @@ export function SecurityPanel({ onSessionEnded, securityClient: injectedClient }
       setLoadState("ready");
     } catch (caught) {
       if (isAbortError(caught)) return;
-      handleSessionFailure(caught, onSessionEnded);
+      handleSessionFailure(caught, onSessionExpired);
       setLoadState("error");
       setError(securityPanelError(caught));
     }
-  }, [client, onSessionEnded]);
+  }, [client, onSessionExpired]);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -64,7 +65,7 @@ export function SecurityPanel({ onSessionEnded, securityClient: injectedClient }
       setNotice(successMessage);
     } catch (caught) {
       if (isAbortError(caught)) return;
-      handleSessionFailure(caught, onSessionEnded);
+      handleSessionFailure(caught, onSessionExpired);
       setError(securityPanelError(caught));
     } finally {
       setActionKey(null);
@@ -103,7 +104,7 @@ export function SecurityPanel({ onSessionEnded, securityClient: injectedClient }
     <article className="security-panel__card">
       <div className="security-panel__title-row"><div><span className="section-kicker">ACTIVE SESSIONS</span><h2 className="surface-card-title">アクティブなセッション</h2><p className="surface-card-copy">現在のブラウザと、他の端末・ブラウザのログイン状態を確認できます。</p></div><button className="secondary-button" type="button" disabled={busy || loadState !== "ready" || otherSessions.length === 0} onClick={() => setConfirmKey("other-sessions")}>他のセッションをすべて無効化</button></div>
       {confirmKey === "other-sessions" ? <div className="security-panel__confirm" role="group" aria-label="他のセッションを無効化"><span className="section-note">{otherSessions.length}件の他セッションを無効化します。</span><button className="text-button" type="button" disabled={busy} onClick={() => void runAction("other-sessions", () => client.revokeOtherSessions(sessions).then(() => undefined), "他のセッションをすべて無効化しました。")}>確認</button><button className="text-button" type="button" disabled={busy} onClick={() => setConfirmKey(null)}>キャンセル</button></div> : null}
-      {loadState === "loading" ? <p className="section-note" role="status">セッション情報を読み込み中…</p> : loadState === "error" ? <RetryState message={error} onRetry={() => void load()} /> : sessions.length === 0 ? <EmptyState title="アクティブなセッションはありません" copy="再読み込みして、現在のログイン状態を確認してください。" /> : <ul className="row-list">{sessions.map((session) => <SessionRow key={session.id} session={session} actionKey={actionKey} confirmKey={confirmKey} onRevoke={() => setConfirmKey(`session:${session.id}`)} onCancel={() => setConfirmKey(null)} onConfirm={() => void runAction(`session:${session.id}`, async () => { if (session.current) { await client.revokeCurrentSession(session.id, session.version); setSignedOut(true); onSessionEnded?.(); } else await client.revokeSession(session.id, session.version); }, session.current ? "サインアウトしました。" : "セッションを無効化しました。", !session.current)} />)}</ul>}
+      {loadState === "loading" ? <p className="section-note" role="status">セッション情報を読み込み中…</p> : loadState === "error" ? <RetryState message={error} onRetry={() => void load()} /> : sessions.length === 0 ? <EmptyState title="アクティブなセッションはありません" copy="再読み込みして、現在のログイン状態を確認してください。" /> : <ul className="row-list">{sessions.map((session) => <SessionRow key={session.id} session={session} actionKey={actionKey} confirmKey={confirmKey} onRevoke={() => setConfirmKey(`session:${session.id}`)} onCancel={() => setConfirmKey(null)} onConfirm={() => void runAction(`session:${session.id}`, async () => { if (session.current) { await client.revokeCurrentSession(session.id, session.version); setSignedOut(true); onSessionSignedOut?.(); } else await client.revokeSession(session.id, session.version); }, session.current ? "サインアウトしました。" : "セッションを無効化しました。", !session.current)} />)}</ul>}
     </article>
     {notice ? <p className="security-panel__notice" role="status">✓ {notice}</p> : null}
     {error && loadState === "ready" ? <p className="security-panel__error" role="alert">{error}</p> : null}
@@ -151,8 +152,8 @@ function securityPanelError(error: unknown): string {
   return "セキュリティ操作を完了できませんでした。接続と権限を確認して、もう一度お試しください。";
 }
 
-function handleSessionFailure(error: unknown, onSessionEnded: (() => void) | undefined): void {
-  if (isSessionError(error)) onSessionEnded?.();
+function handleSessionFailure(error: unknown, onSessionExpired: (() => void) | undefined): void {
+  if (isSessionError(error)) onSessionExpired?.();
 }
 
 function isSessionError(error: unknown): boolean {
