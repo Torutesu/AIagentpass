@@ -35,6 +35,8 @@ test("OrganizationPanel is standalone and covers the administration flow", async
   assert.match(source, /期限切れです。管理者に招待の再発行/);
   assert.match(source, /setAcceptToken\(""\)/);
   assert.match(source, /invitationErrorState/);
+  assert.match(source, /accepted\.role !== "viewer"/);
+  assert.match(source, /A lost response does not reveal which tenant accepted the token/);
   assert.match(source, /limit: 100/);
   assert.match(source, /nextCursor/);
   assert.match(source, /LoadMoreButton/);

@@ -232,14 +232,19 @@ export function OrganizationPanel({ client: suppliedClient, initialOrganizationI
     }
   }, [client, refreshOrganizationSnapshot]);
 
-  const reconcileAcceptedInvitation = useCallback(async (acceptedOrganizationId?: string): Promise<void> => {
-    const organizationId = acceptedOrganizationId ?? selectedOrganizationRef.current;
-    if (organizationId === "") {
+  const reconcileAcceptedInvitation = useCallback(async (accepted?: Readonly<{ organizationId: string; role: OrganizationRole }>): Promise<void> => {
+    if (accepted === undefined) {
+      // A lost response does not reveal which tenant accepted the token. Only
+      // refresh the authoritative membership list; never probe a guessed org.
       await refreshOrganizationSnapshot();
       return;
     }
-    if (acceptedOrganizationId !== undefined) selectedOrganizationRef.current = acceptedOrganizationId;
-    await reconcileResources(organizationId, { members: true, invitations: true });
+    selectedOrganizationRef.current = accepted.organizationId;
+    setRoleOverrides((current) => ({ ...current, [accepted.organizationId]: accepted.role }));
+    await refreshOrganizationSnapshot();
+    if (accepted.role !== "viewer") {
+      await reconcileResources(accepted.organizationId, { members: true, invitations: true });
+    }
   }, [reconcileResources, refreshOrganizationSnapshot]);
 
   useEffect(() => {
@@ -314,11 +319,11 @@ export function OrganizationPanel({ client: suppliedClient, initialOrganizationI
   const runMutation = async (action: string, operation: () => Promise<void>, options: MutationOptions = {}): Promise<boolean> => {
     if (pendingAction !== null) return false;
     setPendingAction(action);
-      setMutationError(INITIAL_RESOURCE);
-      setRetryAction(null);
-      const rollback = options.optimistic?.() ?? (() => undefined);
-      let operationCommitted = false;
-      try {
+    setMutationError(INITIAL_RESOURCE);
+    setRetryAction(null);
+    const rollback = options.optimistic?.() ?? (() => undefined);
+    let operationCommitted = false;
+    try {
       await operation();
       operationCommitted = true;
       if (options.reconcile !== undefined) await options.reconcile();
@@ -561,14 +566,14 @@ export function OrganizationPanel({ client: suppliedClient, initialOrganizationI
     if (token === "") return setMutationError({ status: "error", error: "招待トークンを入力してください。" });
     setAcceptToken("");
     setOneTimeToken(null);
-    let acceptedOrganizationId: string | undefined;
+    let accepted: Readonly<{ organizationId: string; role: OrganizationRole }> | undefined;
     await runMutation("accept-invitation", async () => {
       const result = await client.acceptInvitation({ oneTimeToken: token });
-      acceptedOrganizationId = result.invitation.organizationId;
+      accepted = Object.freeze({ organizationId: result.invitation.organizationId, role: result.member.role });
     }, {
       reconcileOnConflict: true,
       reconciliationMessage: "招待の状態を確認できなかったため、最新の所属状態を取得しました。操作は再送していません。表示された状態を確認してください。",
-      reconcile: () => reconcileAcceptedInvitation(acceptedOrganizationId),
+      reconcile: () => reconcileAcceptedInvitation(accepted),
     });
   };
 
