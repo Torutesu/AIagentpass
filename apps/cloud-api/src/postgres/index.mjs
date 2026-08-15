@@ -100,3 +100,9 @@ export {
   PlatformPromotionIssuanceRepositoryError,
   createPostgresPlatformPromotionIssuanceRepository
 } from "./platform-promotion-issuance-repository.mjs";
+export {
+  PLATFORM_OPERATOR_ASSIGNMENT_FIND_ACTIVE_SQL,
+  PLATFORM_OPERATOR_ASSIGNMENT_REPOSITORY_ERROR_CODES,
+  PlatformOperatorAssignmentRepositoryError,
+  createPostgresPlatformOperatorAssignmentRepository
+} from "./platform-operator-assignment-repository.mjs";
