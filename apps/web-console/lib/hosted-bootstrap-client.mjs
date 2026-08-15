@@ -394,7 +394,10 @@ function normalizeRegistrationCredential(value) {
   if (!isRecord(json) || !exactKeys(json, ["id", "rawId", "response", "type", "clientExtensionResults"]) && !exactKeys(json, ["id", "rawId", "response", "type", "clientExtensionResults", "authenticatorAttachment"])) throw clientError("INVALID_INPUT", "The WebAuthn credential is invalid");
   if (json.type !== "public-key" || typeof json.id !== "string" || !base64(json.id, 16, MAX_CREDENTIAL_ID_BYTES) || json.rawId !== json.id || !isRecord(json.clientExtensionResults) || Object.keys(json.clientExtensionResults).length > 32 || !isRecord(json.response)) throw clientError("INVALID_INPUT", "The WebAuthn credential is invalid");
   if (json.authenticatorAttachment !== undefined && !["platform", "cross-platform"].includes(json.authenticatorAttachment)) throw clientError("INVALID_INPUT", "The WebAuthn credential is invalid");
-  if (!exactKeys(json.response, ["clientDataJSON", "attestationObject"]) && !exactKeys(json.response, ["clientDataJSON", "attestationObject", "transports"])) throw clientError("INVALID_INPUT", "The WebAuthn credential is invalid");
+  // SimpleWebAuthn adds derived metadata to the browser credential. Accept
+  // those known fields here, but keep the Hosted request canonical below.
+  const registrationResponseKeys = new Set(["clientDataJSON", "attestationObject", "transports", "publicKeyAlgorithm", "publicKey", "authenticatorData"]);
+  if (Object.keys(json.response).some((key) => !registrationResponseKeys.has(key))) throw clientError("INVALID_INPUT", "The WebAuthn credential is invalid");
   if (!base64(json.response.clientDataJSON, 1, MAX_CREDENTIAL_DATA_BYTES) || !base64(json.response.attestationObject, 1, MAX_CREDENTIAL_DATA_BYTES) || (json.response.transports !== undefined && !validTransports(json.response.transports))) throw clientError("INVALID_INPUT", "The WebAuthn credential is invalid");
   return Object.freeze({
     id: json.id,

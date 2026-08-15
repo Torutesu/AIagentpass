@@ -104,6 +104,37 @@ test("serializes a native WebAuthn credential's ArrayBuffers to base64url", asyn
   await client.registerPasskey();
 });
 
+test("accepts SimpleWebAuthn registration metadata but posts only the Hosted attestation fields", async () => {
+  const calls = [];
+  const simpleWebAuthnCredential = {
+    ...credential,
+    response: {
+      ...credential.response,
+      transports: ["internal"],
+      publicKeyAlgorithm: -7,
+      publicKey: "A".repeat(87),
+      authenticatorData: "A".repeat(50),
+    },
+    authenticatorAttachment: undefined,
+  };
+  const client = createHostedBootstrapClient({
+    fetchImpl: async (url, init) => {
+      calls.push({ url: String(url), init });
+      const path = new URL(String(url), "https://console.example.test").pathname;
+      if (path === HOSTED_BOOTSTRAP_CLIENT_PATHS.status) return jsonResponse(statusBody());
+      if (path === HOSTED_BOOTSTRAP_CLIENT_PATHS.webauthnOptions) return jsonResponse({ challenge_id: challengeId, options });
+      return jsonResponse(sessionBody(), 201);
+    },
+    startRegistrationImpl: async () => simpleWebAuthnCredential,
+  });
+  await client.status();
+  await client.registerPasskey();
+  assert.deepEqual(JSON.parse(calls[2].init.body).credential, {
+    ...credential,
+    response: { ...credential.response, transports: ["internal"] },
+  });
+});
+
 test("requires status before mutating and rejects strict response violations including duplicate JSON keys", async () => {
   const client = createHostedBootstrapClient({ fetchImpl: async () => jsonResponse(statusBody()) });
   await assert.rejects(() => client.createOrganization({ name: "x" }), (error) => error instanceof HostedBootstrapClientError && error.code === "csrf_required");
