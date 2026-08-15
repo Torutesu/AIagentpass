@@ -114,4 +114,6 @@ test("Hosted runtime source declares the authorized HTTP composition seam", () =
   assert.ok(source.includes("createPlatformPromotionHttpApi"), "runtime must compose createPlatformPromotionHttpApi");
   assert.ok(source.includes("platformPromotionHttpApi"), "runtime must pass the authorized HTTP API to createCloudApi");
   assert.ok(source.includes("platformAuthorizationRepository"), "Hosted runtime must use the PostgreSQL authorized promotion repository");
+  assert.equal(source.includes("createPlatformPromotionIssuanceService"), false, "Hosted runtime must not compose the legacy issuance service");
+  assert.equal(source.includes("platformPromotionIssuanceService"), false, "Hosted runtime must not inject the legacy promotion route");
 });

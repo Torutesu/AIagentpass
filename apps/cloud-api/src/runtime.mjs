@@ -3,6 +3,7 @@ import fs from "node:fs";
 import path from "node:path";
 
 import { createCloudApi } from "./server.mjs";
+import { createPlatformPromotionHttpApi } from "./platform-promotion-http-api.mjs";
 import { createPlatformSessionHttpApi } from "./platform-session-http-api.mjs";
 import { createPlatformSessionRateLimiter } from "./platform-session-rate-limit.mjs";
 import { createPlatformSessionWebAuthnService } from "./platform-session-webauthn.mjs";
@@ -44,7 +45,7 @@ import {
   PROMOTION_EVIDENCE_V3_PURPOSE,
   PROMOTION_EVIDENCE_V3_SIGNING_VERSION
 } from "./promotion-evidence-v3-statement.mjs";
-import { createPlatformPromotionIssuanceService } from "./platform-promotion-issuance.mjs";
+import { createPlatformAuthorizedPromotionService } from "./postgres/platform-authorization-repository.mjs";
 import { createPlatformOperatorAuthorizer } from "./platform-operator-authorizer.mjs";
 import { PROTOCOL_VERSION, REFRESH_HINT_SIGNATURE_ALGORITHM, REFRESH_HINT_TYPE } from "../../../packages/protocol/src/index.mjs";
 
@@ -87,8 +88,10 @@ export async function createCloudRuntime({ env = process.env, logger = console, 
   let auditExportIssuanceService;
   let auditExportVerifier;
   let promotionEvidenceSigner;
-  let platformPromotionIssuanceService;
+  let platformPromotionHttpApi;
+  let platformPromotionReadiness;
   let platformSessionHttpApi;
+  let platformSessionRateLimiter;
   let platformSessionReadiness;
   let effectivePlatformOperatorAuthorizer = platformOperatorAuthorizer;
   let verifyPlatformPromotionEvidence;
@@ -136,10 +139,10 @@ export async function createCloudRuntime({ env = process.env, logger = console, 
         throw new Error("PostgreSQL capability authority is unavailable");
       }
       if (!postgresRuntime?.controlPlaneStore) throw new Error("PostgreSQL control-plane store is unavailable");
-      effectivePlatformOperatorAuthorizer = createHostedPlatformOperatorAuthorizer(postgresRuntime);
       if (!postgresRuntime?.agentSessionIssuanceRepository || !postgresRuntime?.agentSessionAuthorityRepository) throw new Error("PostgreSQL Agent Session authority is unavailable");
       if (!postgresRuntime?.auditExportIssuanceRepository) throw new Error("PostgreSQL audit export authority is unavailable");
-      if (!postgresRuntime?.platformPromotionIssuanceRepository) throw new Error("PostgreSQL platform promotion authority is unavailable");
+      if (!postgresRuntime?.platformPromotionIssuanceRepository
+        || typeof postgresRuntime.createPlatformAuthorizationRepository !== "function") throw new Error("PostgreSQL platform promotion authority is unavailable");
       if (!postgresRuntime?.sharedControlRepository || typeof postgresRuntime.sharedControlRepository.consumeDeviceRequestNonce !== "function" || typeof postgresRuntime.sharedControlRepository.acquireRateLimit !== "function" || typeof postgresRuntime.sharedControlRepository.acquireAnonymousRateLimit !== "function") throw new Error("PostgreSQL shared controls are unavailable");
       store = postgresRuntime.controlPlaneStore;
       if (typeof store.pollDeviceRefresh !== "function" || typeof store.markDeviceRefreshDelivered !== "function") throw new Error("PostgreSQL refresh polling is unavailable");
@@ -178,15 +181,16 @@ export async function createCloudRuntime({ env = process.env, logger = console, 
           if (!resolved || resolved.rp_id !== composedPlatformSessionConfig.rpId) throw new Error("platform session RP authority is unavailable");
           return resolved;
         };
+        platformSessionRateLimiter = createPlatformSessionRateLimiter({
+          repository: postgresRuntime.sharedControlRepository,
+          bucketSecret: humanAuthSecret
+        });
         platformSessionHttpApi = createPlatformSessionHttpApi({
           platformSessionWebAuthn: ceremony,
           authenticatedBootstrap: bootstrapAuthenticator,
           trustedAuthorityResolver: resolveAuthorityContext,
           revokeService: postgresRuntime.platformSessionRepository,
-          rateLimiter: createPlatformSessionRateLimiter({
-            repository: postgresRuntime.sharedControlRepository,
-            bucketSecret: humanAuthSecret
-          }),
+          rateLimiter: platformSessionRateLimiter,
           origin: composedPlatformSessionConfig.origin
         });
       } else {
@@ -304,15 +308,37 @@ export async function createCloudRuntime({ env = process.env, logger = console, 
         resolver: promotionEvidencePublicKeyResolver,
         maxTtlMs: PROMOTION_EVIDENCE_V3_MAX_TTL_MS
       });
-      const rawPlatformPromotionIssuanceService = createPlatformPromotionIssuanceService({
-        repository: postgresRuntime.platformPromotionIssuanceRepository,
+      if (!platformSessionHttpApi || !platformSessionRateLimiter) {
+        throw new Error("Hosted Platform promotion requires Platform Session authority");
+      }
+      const platformAuthorizationRepository = postgresRuntime.createPlatformAuthorizationRepository({
+        keyId: config.promotionEvidenceKeyId,
+        keyVersion: durablePromotionEvidence.key_version,
+        lifecycleVersion: durablePromotionEvidence.lifecycle.version
+      });
+      const rawPlatformAuthorizedPromotionService = createPlatformAuthorizedPromotionService({
+        repository: platformAuthorizationRepository,
         signer: promotionEvidenceSigner,
         publicKeyResolver: promotionEvidencePublicKeyResolver
       });
-      platformPromotionIssuanceService = trackPlatformPromotionService(
-        rawPlatformPromotionIssuanceService,
+      const platformAuthorizedPromotionService = trackAuthorizedPlatformPromotionService(
+        rawPlatformAuthorizedPromotionService,
         postgresRuntime.trackInFlight
       );
+      platformPromotionHttpApi = createPlatformPromotionHttpApi({
+        promotionService: platformAuthorizedPromotionService,
+        rateLimiter: platformSessionRateLimiter,
+        origin: platformSessionHttpApi.expectedOrigin
+      });
+      platformPromotionReadiness = createPlatformPromotionCompositionReadiness({
+        httpApi: platformPromotionHttpApi,
+        repository: platformAuthorizationRepository,
+        signer: promotionEvidenceSigner,
+        lifecycleRepository: durablePromotionEvidence.repository,
+        keyId: config.promotionEvidenceKeyId,
+        keyVersion: durablePromotionEvidence.key_version,
+        lifecycleVersion: durablePromotionEvidence.lifecycle.version
+      });
       const refreshFingerprint = crypto.createHash("sha256").update(refreshPublicKey.export({ type: "spki", format: "der" })).digest("hex");
       const durableRefreshHint = await bindHostedManagedSignerProvider({
         postgresRuntime,
@@ -484,7 +510,7 @@ export async function createCloudRuntime({ env = process.env, logger = console, 
           { name: "qualification_manifest_signer", purpose: "agentpass.qualification-grant-batch-manifest", unavailableCode: "qualification_manifest_signer_unavailable", signer: qualificationManifestSigner },
           { name: "possession_receipt_signer", purpose: POSSESSION_RECEIPT_PURPOSE, unavailableCode: "possession_receipt_signer_unavailable", signer: possessionReceiptSigner },
           { name: "refresh_hint_signer", purpose: REFRESH_HINT_TYPE, unavailableCode: "refresh_hint_signer_unavailable", signer: refreshHintSigner }
-        ], platformSessionReadiness),
+        ], platformSessionReadiness, platformPromotionReadiness),
         operationalMetrics: postgresRuntime.operationalReport,
         operationalProbeSecret: exactRuntimeSecret(env.AGENTPASS_OPERATIONAL_PROBE_SECRET, "AGENTPASS_OPERATIONAL_PROBE_SECRET")
       } : { rateLimiter: createRateLimiter({ persistencePath: path.join(config.dataDir, "principal-rate-limits.json") }) }),
@@ -496,10 +522,8 @@ export async function createCloudRuntime({ env = process.env, logger = console, 
       ...(profile.isHosted ? { refreshHintService: createRefreshHintService({ source: store, nonceDeriver: refreshNonceCodec, signer: refreshHintSigner, notifier: postgresRuntime.refreshHintNotifier, metrics: postgresRuntime.operationalMetrics }) } : {}),
       ...(humanAuthRuntime ? { humanAuthApi: humanAuthRuntime.api, humanSession: humanAuthRuntime.humanSession, recentAuthService: humanAuthRuntime.recentAuthService, humanAuthOrigin: config.humanAuth.origin } : {}),
       ...(auditExportIssuanceService ? { auditExportIssuanceService, auditExportVerifier } : {}),
-      ...(platformPromotionIssuanceService && typeof effectivePlatformOperatorAuthorizer === "function"
-        ? { platformPromotionIssuanceService, platformOperatorAuthorizer: effectivePlatformOperatorAuthorizer }
-        : {}),
       ...(platformSessionHttpApi ? { platformSessionHttpApi } : {}),
+      ...(platformPromotionHttpApi ? { platformPromotionHttpApi } : {}),
       ...(agentSessionDeviceApi ? { agentSessionDeviceApi } : {}),
       ...(qualificationGrantBatchDeviceApi ? { qualificationGrantBatchDeviceApi } : {}),
       ...(possessionReceiptSigner ? { possessionReceiptSigner } : {}),
@@ -518,8 +542,9 @@ export async function createCloudRuntime({ env = process.env, logger = console, 
     auditAnchorSigner,
     auditExportIssuanceService,
     auditExportVerifier,
-    platformPromotionIssuanceService,
     platformOperatorAuthorizer: effectivePlatformOperatorAuthorizer,
+    platformPromotionHttpApi,
+    platformPromotionReadiness,
     platformSessionHttpApi,
     platformSessionReadiness,
     async listen() {
@@ -809,12 +834,11 @@ function createDynamicPromotionEvidenceVerifier({ resolver, maxTtlMs, now = () =
   };
 }
 
-function trackPlatformPromotionService(service, trackInFlight) {
+function trackAuthorizedPlatformPromotionService(service, trackInFlight) {
+  if (!service || typeof service.issuePlatformPromotion !== "function") throw new Error("Authorized Platform promotion service is unavailable");
   if (typeof trackInFlight !== "function") return service;
   return Object.freeze({
-    issuePlatformPromotion: (input) => trackInFlight(() => service.issuePlatformPromotion(input)),
-    replayPlatformPromotion: (input) => trackInFlight(() => service.replayPlatformPromotion(input)),
-    getCommittedPlatformPromotion: (input) => trackInFlight(() => service.getCommittedPlatformPromotion(input))
+    issuePlatformPromotion: (input) => trackInFlight(() => service.issuePlatformPromotion(input))
   });
 }
 
@@ -940,7 +964,37 @@ function platformSessionAuthorityContext(source, config, intent = undefined) {
   });
 }
 
-function createHostedReadiness(databaseReadiness, signers, platformSessionReadiness = undefined) {
+export function createPlatformPromotionCompositionReadiness({ httpApi, repository, signer, lifecycleRepository, keyId, keyVersion, lifecycleVersion } = {}) {
+  if (!httpApi || typeof httpApi.handle !== "function" || typeof httpApi.paths?.issue !== "string"
+    || !repository || typeof repository.forAuthorization !== "function"
+    || !signer || typeof signer.publicKeyMetadata !== "function"
+    || !lifecycleRepository || typeof lifecycleRepository.snapshot !== "function"
+    || typeof keyId !== "string" || !Number.isSafeInteger(keyVersion) || keyVersion < 1
+    || !Number.isSafeInteger(lifecycleVersion) || lifecycleVersion < 1) {
+    throw new Error("Hosted Platform promotion readiness dependencies are unavailable");
+  }
+  return async function platformPromotionCompositionReadiness() {
+    try {
+      const [metadata, lifecycle] = await Promise.all([
+        signer.publicKeyMetadata(),
+        lifecycleRepository.snapshot()
+      ]);
+      const active = Array.isArray(lifecycle?.keys)
+        ? lifecycle.keys.filter((key) => key?.state === "active")
+        : [];
+      if (!metadata || metadata.key_id !== keyId || metadata.key_version !== keyVersion
+        || metadata.lifecycle_version !== lifecycleVersion || lifecycle?.version !== lifecycleVersion
+        || active.length !== 1 || active[0].key_id !== keyId || active[0].key_version !== keyVersion) {
+        throw new Error("Platform promotion lifecycle binding is stale");
+      }
+      return Object.freeze({ enabled: true, ok: true, code: "ready" });
+    } catch {
+      return Object.freeze({ enabled: true, ok: false, code: "platform_promotion_unavailable" });
+    }
+  };
+}
+
+function createHostedReadiness(databaseReadiness, signers, platformSessionReadiness = undefined, platformPromotionReadiness = undefined) {
   if (typeof databaseReadiness !== "function" || !Array.isArray(signers) || signers.length < 1
     || signers.some(({ name, purpose, unavailableCode, signer }) => typeof name !== "string" || typeof purpose !== "string" || typeof unavailableCode !== "string"
       || typeof signer?.health !== "function" || typeof signer?.verificationKeyMetadata !== "function")) throw new Error("Hosted readiness dependencies are unavailable");
@@ -980,11 +1034,24 @@ function createHostedReadiness(databaseReadiness, signers, platformSessionReadin
     }
     if (platformReport) checks.platform_session = platformReport;
     const platformFailure = platformReport && platformReport.ok !== true ? platformReport.code : undefined;
+    let promotionReport;
+    if (platformPromotionReadiness !== undefined) {
+      if (typeof platformPromotionReadiness !== "function") throw new Error("invalid platform promotion readiness");
+      try {
+        const value = await platformPromotionReadiness();
+        if (!value || typeof value !== "object" || typeof value.ok !== "boolean" || typeof value.code !== "string") throw new Error("invalid platform promotion readiness report");
+        promotionReport = Object.freeze({ enabled: value.enabled === true, ok: value.ok, code: value.code });
+      } catch {
+        promotionReport = Object.freeze({ enabled: true, ok: false, code: "platform_promotion_unavailable" });
+      }
+    }
+    if (promotionReport) checks.platform_promotion = promotionReport;
+    const promotionFailure = promotionReport && promotionReport.ok !== true ? promotionReport.code : undefined;
     return Object.freeze({
       ...databaseReport,
-      ready: databaseReport.ready === true && signerFailure === undefined && platformFailure === undefined,
-      status: databaseReport.ready !== true ? databaseReport.status : signerFailure === undefined && platformFailure === undefined ? databaseReport.status : "not_ready",
-      code: databaseReport.ready !== true ? databaseReport.code : signerFailure ?? platformFailure ?? databaseReport.code,
+      ready: databaseReport.ready === true && signerFailure === undefined && platformFailure === undefined && promotionFailure === undefined,
+      status: databaseReport.ready !== true ? databaseReport.status : signerFailure === undefined && platformFailure === undefined && promotionFailure === undefined ? databaseReport.status : "not_ready",
+      code: databaseReport.ready !== true ? databaseReport.code : signerFailure ?? platformFailure ?? promotionFailure ?? databaseReport.code,
       checks: Object.freeze({ ...(databaseReport.checks ?? {}), ...checks })
     });
   };

@@ -101,6 +101,22 @@ test("does not expose atomic platform authorization without lifecycle binding", 
   const value = await runtime();
   assert.equal(value.platformAuthorizationRepository, undefined);
   assert.equal(typeof value.platformPromotionIssuanceRepository.reservePlatformPromotion, "function");
+  assert.equal(typeof value.createPlatformAuthorizationRepository, "function");
+  await value.close();
+});
+
+test("binds atomic authorization after managed signer lifecycle resolution", async () => {
+  const value = await runtime();
+  const repository = value.createPlatformAuthorizationRepository(PLATFORM_LIFECYCLE);
+  assert.equal(typeof repository.forAuthorization, "function");
+  await assert.rejects(
+    repository.forAuthorization(AUTHORIZATION).reservePlatformPromotion(REQUEST),
+    (error) => error.code === PLATFORM_AUTHORIZATION_REPOSITORY_ERROR_CODES.DATABASE
+  );
+  const appPoolCall = value.pool.calls.find(({ text }) => text === PLATFORM_AUTHORIZATION_RESERVE_SQL);
+  assert.equal(appPoolCall.params[13], PLATFORM_LIFECYCLE.keyId);
+  assert.equal(appPoolCall.params[14], PLATFORM_LIFECYCLE.keyVersion);
+  assert.equal(appPoolCall.params[15], PLATFORM_LIFECYCLE.lifecycleVersion);
   await value.close();
 });
 
@@ -133,6 +149,12 @@ test("rejects incomplete or extra platform lifecycle configuration before openin
     runtime({ platformPromotionLifecycle: { ...PLATFORM_LIFECYCLE, unexpected: true } }),
     /platform promotion lifecycle configuration is invalid/u
   );
+  const value = await runtime();
+  assert.throws(
+    () => value.createPlatformAuthorizationRepository({ keyId: PLATFORM_LIFECYCLE.keyId, keyVersion: 8 }),
+    /platform promotion lifecycle configuration is invalid/u
+  );
+  await value.close();
 });
 
 test("keeps the runtime contract stable when lifecycle binding is frozen", async () => {

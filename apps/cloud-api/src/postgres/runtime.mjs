@@ -296,14 +296,19 @@ export async function createPostgresRuntime({ env = process.env, PoolClass = Poo
     verifyEvidence: platformPromotionVerifyEvidence,
     ...(normalizedPlatformPromotionLifecycle ?? {})
   });
-  const platformAuthorizationRepository = normalizedPlatformPromotionLifecycle === undefined
-    ? undefined
-    : createPostgresPlatformAuthorizationRepository({
+  const createBoundPlatformAuthorizationRepository = (lifecycle) => {
+    const binding = normalizePlatformPromotionLifecycle(lifecycle);
+    if (binding === undefined) throw new TypeError("platform promotion lifecycle configuration is invalid");
+    return createPostgresPlatformAuthorizationRepository({
       client: pool,
       promotionRepository: platformPromotionIssuanceRepository,
       verifyEvidence: platformPromotionVerifyEvidence,
-      ...normalizedPlatformPromotionLifecycle
+      ...binding
     });
+  };
+  const platformAuthorizationRepository = normalizedPlatformPromotionLifecycle === undefined
+    ? undefined
+    : createBoundPlatformAuthorizationRepository(normalizedPlatformPromotionLifecycle);
   const platformOperatorAssignmentRepository = createPostgresPlatformOperatorAssignmentRepository({ client: pool });
   const platformSessionRepository = createPostgresPlatformSessionRepository({ client: pool });
   const platformSessionWebAuthnRepository = createPostgresPlatformSessionWebAuthnRepository({ client: pool });
@@ -346,6 +351,10 @@ export async function createPostgresRuntime({ env = process.env, PoolClass = Poo
     auditExportIssuanceRepository,
     platformPromotionIssuanceRepository,
     ...(platformAuthorizationRepository ? { platformAuthorizationRepository } : {}),
+    // The active managed-signer key/lifecycle is authoritative only after the
+    // hosted KMS binding has loaded PostgreSQL state. Bind the authorization
+    // adapter at that point without creating another pool or issuance path.
+    createPlatformAuthorizationRepository: createBoundPlatformAuthorizationRepository,
     platformOperatorAssignmentRepository,
     platformSessionRepository,
     platformSessionWebAuthnRepository,
