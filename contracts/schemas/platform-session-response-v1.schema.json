@@ -1,78 +1,32 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://agentpass.dev/contracts/schemas/platform-session-response-v1.schema.json",
-  "title": "AgentPass platform session issuance response v1",
-  "description": "Public result of successful platform authentication. The session bearer is delivered only through the separately specified secure HttpOnly transport; this JSON response contains no raw session token, assertion, WebAuthn bytes, private key, or reusable authority.",
+  "title": "AgentPass public platform session metadata v1",
+  "description": "Public session metadata nested in the assertion response. The bearer is delivered only through the secure HttpOnly cookie; member, organization, credential, assertion, WebAuthn bytes, private key, and reusable token material are never returned.",
   "type": "object",
   "additionalProperties": false,
-  "maxProperties": 17,
-  "required": [
-    "version",
-    "type",
-    "request_id",
-    "session_id",
-    "challenge_id",
-    "principal_id",
-    "assignment_id",
-    "authority_generation",
-    "operation",
-    "capability",
-    "request_digest_sha256",
-    "credential_id_sha256",
-    "authenticated_at",
-    "issued_at",
-    "expires_at",
-    "session_transport",
-    "replayed"
-  ],
+  "minProperties": 13,
+  "maxProperties": 13,
+  "required": ["version", "type", "session_id", "principal_id", "assignment_id", "authority_generation", "operation", "capability", "request_digest_sha256", "authenticated_at", "issued_at", "expires_at", "status"],
   "properties": {
     "version": { "const": 1 },
     "type": { "const": "agentpass.platform-session" },
-    "request_id": { "$ref": "#/$defs/uuid" },
     "session_id": { "$ref": "#/$defs/uuid" },
-    "challenge_id": { "$ref": "#/$defs/uuid" },
     "principal_id": { "$ref": "#/$defs/uuid" },
     "assignment_id": { "$ref": "#/$defs/uuid" },
     "authority_generation": { "$ref": "#/$defs/positiveSafeInteger" },
-    "operation": { "$ref": "#/$defs/operation" },
-    "capability": { "enum": ["platform.assignment.manage", "platform.promotion.issue", "platform.promotion.replay", "platform.promotion.verify", "platform.promotion.reconcile"] },
+    "operation": { "const": "platform.promotion.issue" },
+    "capability": { "const": "platform.promotion.issue" },
     "request_digest_sha256": { "$ref": "#/$defs/sha256" },
-    "credential_id_sha256": { "$ref": "#/$defs/sha256" },
     "authenticated_at": { "$ref": "#/$defs/timestamp" },
     "issued_at": { "$ref": "#/$defs/timestamp" },
     "expires_at": { "$ref": "#/$defs/timestamp" },
-    "session_transport": { "const": "secure-http-only-cookie" },
-    "replayed": { "type": "boolean" }
+    "status": { "enum": ["active", "expired", "revoked"] }
   },
   "$defs": {
-    "uuid": {
-      "type": "string",
-      "format": "uuid",
-      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
-    },
-    "operation": {
-      "type": "string",
-      "minLength": 1,
-      "maxLength": 128,
-      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$"
-    },
-    "positiveSafeInteger": {
-      "type": "integer",
-      "minimum": 1,
-      "maximum": 9007199254740991
-    },
-    "sha256": {
-      "type": "string",
-      "minLength": 64,
-      "maxLength": 64,
-      "pattern": "^[0-9a-f]{64}$"
-    },
-    "timestamp": {
-      "type": "string",
-      "minLength": 24,
-      "maxLength": 24,
-      "format": "date-time",
-      "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$"
-    }
+    "uuid": { "type": "string", "format": "uuid", "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$" },
+    "positiveSafeInteger": { "type": "integer", "minimum": 1, "maximum": 9007199254740991 },
+    "sha256": { "type": "string", "minLength": 64, "maxLength": 64, "pattern": "^[0-9a-f]{64}$" },
+    "timestamp": { "type": "string", "format": "date-time", "minLength": 24, "maxLength": 24, "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$" }
   }
 }

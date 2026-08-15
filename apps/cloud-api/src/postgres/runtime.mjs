@@ -31,6 +31,9 @@ import { createPostgresAuditExportSnapshotReader } from "./audit-export-snapshot
 import { createPostgresAuditExportIssuanceRepository } from "./audit-export-issuance-repository.mjs";
 import { createPostgresPlatformPromotionIssuanceRepository } from "./platform-promotion-issuance-repository.mjs";
 import { createPostgresPlatformOperatorAssignmentRepository } from "./platform-operator-assignment-repository.mjs";
+import { createPostgresPlatformSessionRepository } from "./platform-session-repository.mjs";
+import { createPostgresPlatformSessionWebAuthnRepository } from "./platform-session-webauthn-repository.mjs";
+import { createPostgresPlatformSessionBootstrapRepository } from "./platform-session-bootstrap-repository.mjs";
 import {
   createDrainController,
   createOperationalHealth,
@@ -291,6 +294,9 @@ export async function createPostgresRuntime({ env = process.env, PoolClass = Poo
     verifyEvidence: platformPromotionVerifyEvidence
   });
   const platformOperatorAssignmentRepository = createPostgresPlatformOperatorAssignmentRepository({ client: pool });
+  const platformSessionRepository = createPostgresPlatformSessionRepository({ client: pool });
+  const platformSessionWebAuthnRepository = createPostgresPlatformSessionWebAuthnRepository({ client: pool });
+  const platformSessionBootstrapRepository = createPostgresPlatformSessionBootstrapRepository({ client: pool });
   const controlPlaneStore = createPostgresControlPlaneStore({
     client: pool,
     organizationRepository,
@@ -329,6 +335,9 @@ export async function createPostgresRuntime({ env = process.env, PoolClass = Poo
     auditExportIssuanceRepository,
     platformPromotionIssuanceRepository,
     platformOperatorAssignmentRepository,
+    platformSessionRepository,
+    platformSessionWebAuthnRepository,
+    platformSessionBootstrapRepository,
     createManagedSignerKeyLifecycleRepository: (options = {}) => createPostgresManagedSignerKeyLifecycleRepository({ ...options, client: signerPool }),
     createProviderOperationRepository: (options = {}) => createPostgresProviderOperationRepository({ ...options, client: signerPool }),
     providerOperationMaintenanceRepository,

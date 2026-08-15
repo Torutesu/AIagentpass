@@ -62,6 +62,32 @@ export function platformPromotionContextHash(input, operation) {
   return crypto.createHash("sha256").update(canonicalJson(canonical), "utf8").digest("hex");
 }
 
+/**
+ * Canonical digest consumed by migration 0054's
+ * agentpass_platform_authorization_request_digest().  This is deliberately a
+ * different domain from the legacy recent-auth context hash above: it binds
+ * the target organization and omits presentation-only version metadata.
+ */
+export function platformPromotionAuthorizationRequestDigest(input, { organizationId, operation = PLATFORM_PROMOTION_OPERATIONS.issue } = {}) {
+  if (!isPlainObject(input) || !sameKeys(input, [...REQUEST_KEYS, "idempotency_key"])
+    || !UUID.test(organizationId ?? "") || operation !== PLATFORM_PROMOTION_OPERATIONS.issue
+    || !UUID.test(input.promotion_id ?? "") || !DEPLOYMENT_ID.test(input.deployment_id ?? "")
+    || !["staging", "production"].includes(input.environment)
+    || !CANDIDATE_ID.test(input.candidate_id ?? "") || !IDEMPOTENCY_KEY.test(input.idempotency_key ?? "")) {
+    throw platformPromotionContractError("request");
+  }
+  const canonical = {
+    candidate_id: input.candidate_id,
+    deployment_id: input.deployment_id,
+    environment: input.environment,
+    idempotency_key: input.idempotency_key,
+    operation,
+    organization_id: organizationId.toLowerCase(),
+    promotion_id: input.promotion_id.toLowerCase()
+  };
+  return crypto.createHash("sha256").update(canonicalJson(canonical), "utf8").digest("hex");
+}
+
 export function normalizePlatformPromotionResult(value, expected) {
   if (!isPlainObject(value) || !sameKeys(value, RESPONSE_KEYS) || value.replayed !== true && value.replayed !== false) {
     throw platformPromotionContractError("response");

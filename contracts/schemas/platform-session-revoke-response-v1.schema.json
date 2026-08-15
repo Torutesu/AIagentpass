@@ -1,56 +1,12 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://agentpass.dev/contracts/schemas/platform-session-revoke-response-v1.schema.json",
-  "title": "AgentPass platform session revoke response v1",
-  "description": "Public result of platform session revocation. It contains only correlation and authority-binding metadata; bearer tokens, assertions, WebAuthn bytes, private keys, and provider diagnostics are never returned.",
+  "title": "AgentPass platform session self-revoke response v1",
+  "description": "Public self-revoke response. The cookie is cleared by Set-Cookie; the JSON envelope contains no bearer, session identifier, authority identifier, credential, assertion, or provider diagnostic.",
   "type": "object",
   "additionalProperties": false,
-  "maxProperties": 12,
-  "required": [
-    "version",
-    "type",
-    "request_id",
-    "session_id",
-    "principal_id",
-    "assignment_id",
-    "authority_generation",
-    "operation",
-    "capability",
-    "status",
-    "revoked_at",
-    "replayed"
-  ],
-  "properties": {
-    "version": { "const": 1 },
-    "type": { "const": "agentpass.platform-session-revoke-response" },
-    "request_id": { "$ref": "#/$defs/uuid" },
-    "session_id": { "$ref": "#/$defs/uuid" },
-    "principal_id": { "$ref": "#/$defs/uuid" },
-    "assignment_id": { "$ref": "#/$defs/uuid" },
-    "authority_generation": { "$ref": "#/$defs/positiveSafeInteger" },
-    "operation": { "enum": ["platform.assignment.manage", "platform.promotion.issue", "platform.promotion.replay", "platform.promotion.verify", "platform.promotion.reconcile"] },
-    "capability": { "enum": ["platform.assignment.manage", "platform.promotion.issue", "platform.promotion.replay", "platform.promotion.verify", "platform.promotion.reconcile"] },
-    "status": { "enum": ["revoked", "already_revoked"] },
-    "revoked_at": { "$ref": "#/$defs/timestamp" },
-    "replayed": { "type": "boolean" }
-  },
-  "$defs": {
-    "uuid": {
-      "type": "string",
-      "format": "uuid",
-      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
-    },
-    "positiveSafeInteger": {
-      "type": "integer",
-      "minimum": 1,
-      "maximum": 9007199254740991
-    },
-    "timestamp": {
-      "type": "string",
-      "minLength": 24,
-      "maxLength": 24,
-      "format": "date-time",
-      "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$"
-    }
-  }
+  "minProperties": 1,
+  "maxProperties": 1,
+  "required": ["session"],
+  "properties": { "session": { "type": "null" } }
 }

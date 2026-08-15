@@ -43,9 +43,9 @@ test("0049-0050 expose only fixed-search-path SECURITY DEFINER signer functions"
   }
 });
 
-test("0051 is the immutable migration head and all signer authority slices are catalogued", async () => {
+test("0051 remains the reviewed signer authority slice and all signer slices are catalogued", async () => {
   const migrations = await loadSqlMigrations();
-  const migration = migrations.at(-1);
+  const migration = migrations.find(({ version }) => version === 51);
   assert.equal(migration?.version, 51);
   assert.equal(migration?.name, "0051_managed_signer_lifecycle_signing_authority.sql");
   assert.match(migration?.checksum ?? "", /^[0-9a-f]{64}$/u);

@@ -67,7 +67,7 @@ const V2_CANDIDATE_BINDING_KEYS = Object.freeze([
 const V2_COMPLETION_KEYS = new Set(["version", "proof_version", "enrollment_id", "organization_id", "device_id", "label", "platform", "device_key", "candidate_id", "device_key_fingerprint", "challenge"]);
 const V2_CHALLENGE_KEYS = new Set(["challenge_id", "nonce", "expires_at", "candidate_id", "device_key_fingerprint"]);
 const V2_PROOF_DOMAIN = "AgentPass-Enrollment-Proof-v2\0";
-export function createCloudApi({ store, tokenRecords = [], bundleSigner, capabilitySigner, refreshHintService, now = () => Date.now(), monotonicNow, replayCache = createReplayCache(), deviceReplayConsumer, agentSessionDeviceApi, qualificationGrantBatchDeviceApi, rateLimiter, admissionRateLimiter, verifyRecentWebAuthn, recentAuthService, humanAuthApi, humanSession, humanAuthOrigin, auditExportIssuanceService, auditExportVerifier, platformPromotionIssuanceService, platformOperatorAuthorizer, capabilityAuthorityRepository, capabilityRevocationSource, auditRepository, enrollmentCredentialSecret, possessionReceiptSigner, trackInFlight, readiness, operationalMetrics, operationalProbeSecret } = {}) {
+export function createCloudApi({ store, tokenRecords = [], bundleSigner, capabilitySigner, refreshHintService, now = () => Date.now(), monotonicNow, replayCache = createReplayCache(), deviceReplayConsumer, agentSessionDeviceApi, qualificationGrantBatchDeviceApi, rateLimiter, admissionRateLimiter, verifyRecentWebAuthn, recentAuthService, humanAuthApi, humanSession, humanAuthOrigin, auditExportIssuanceService, auditExportVerifier, platformPromotionIssuanceService, platformOperatorAuthorizer, capabilityAuthorityRepository, capabilityRevocationSource, auditRepository, enrollmentCredentialSecret, possessionReceiptSigner, platformSessionHttpApi, trackInFlight, readiness, operationalMetrics, operationalProbeSecret } = {}) {
   if (!store) throw new TypeError("store is required");
   if (verifyRecentWebAuthn !== undefined && recentAuthService !== undefined) throw new TypeError("configure verifyRecentWebAuthn or recentAuthService, not both");
   if (humanAuthApi !== undefined && (!humanAuthApi || typeof humanAuthApi.handle !== "function")) throw new TypeError("humanAuthApi must expose handle()");
@@ -105,6 +105,7 @@ export function createCloudApi({ store, tokenRecords = [], bundleSigner, capabil
   if (deviceReplayConsumer !== undefined && typeof deviceReplayConsumer !== "function") throw new TypeError("deviceReplayConsumer must be a function");
   if (enrollmentCredentialSecret !== undefined && (!Buffer.isBuffer(enrollmentCredentialSecret) || enrollmentCredentialSecret.length !== 32)) throw new TypeError("enrollmentCredentialSecret must be an exact 32-byte Buffer");
   if (possessionReceiptSigner !== undefined && (!possessionReceiptSigner || typeof possessionReceiptSigner.signPossessionReceipt !== "function")) throw new TypeError("possessionReceiptSigner must expose signPossessionReceipt()");
+  if (platformSessionHttpApi !== undefined && (!platformSessionHttpApi || typeof platformSessionHttpApi.handle !== "function" || !platformSessionHttpApi.paths || typeof platformSessionHttpApi.paths.challenge !== "string" || typeof platformSessionHttpApi.paths.assertion !== "string" || typeof platformSessionHttpApi.paths.revoke !== "string")) throw new TypeError("platformSessionHttpApi must expose handle() and platform paths");
   if (trackInFlight !== undefined && typeof trackInFlight !== "function") throw new TypeError("trackInFlight must be a function");
   if (readiness !== undefined && typeof readiness !== "function") throw new TypeError("readiness must be a function");
   if (operationalMetrics !== undefined && (!operationalMetrics || typeof operationalMetrics.snapshot !== "function")) throw new TypeError("operationalMetrics must expose snapshot()");
@@ -160,6 +161,12 @@ export function createCloudApi({ store, tokenRecords = [], bundleSigner, capabil
   async function handleRequest(request, response) {
     const requestId = crypto.randomUUID();
     try {
+      if (platformSessionHttpApi && isPlatformSessionHttpPath(request.url, platformSessionHttpApi.paths)) {
+        // Platform Session is its own trust boundary. Pass the untouched
+        // IncomingMessage through so its boundary owns body/header/cookie
+        // parsing and generic Cloud authentication cannot reinterpret it.
+        return await platformSessionHttpApi.handle(request, response);
+      }
       const agentSessionRoute = request.method === "POST" ? AGENT_SESSION_DEVICE_CONSUME_PATH.exec(request.url) : null;
       if (agentSessionDeviceApi && agentSessionRoute) {
         const admissionDecision = await acquireRateLimit(admission, {
@@ -1917,13 +1924,14 @@ function publicReadinessReport(value) {
 
 function publicReadinessChecks(value) {
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("invalid readiness checks");
-  const { database, schema, pool, drain, owner_recovery_outbox: ownerRecoveryOutbox, managed_signer_provider_operations: managedSignerProviderOperations, agent_session_signer: agentSessionSigner, qualification_manifest_signer: qualificationManifestSigner, possession_receipt_signer: possessionReceiptSigner } = value;
+  const { database, schema, pool, drain, platform_session: platformSession, owner_recovery_outbox: ownerRecoveryOutbox, managed_signer_provider_operations: managedSignerProviderOperations, agent_session_signer: agentSessionSigner, qualification_manifest_signer: qualificationManifestSigner, possession_receipt_signer: possessionReceiptSigner } = value;
   if (!database || typeof database.ok !== "boolean" || typeof database.probe !== "string") throw new Error("invalid readiness checks");
   const integerOrNull = (item) => item === null || Number.isSafeInteger(item);
   const nonNegativeIntegerOrNull = (item) => item === null || (Number.isSafeInteger(item) && item >= 0);
   if (!schema || typeof schema.ok !== "boolean" || !integerOrNull(schema.expected_version) || !integerOrNull(schema.applied_version) || !integerOrNull(schema.migration_count) || !integerOrNull(schema.pending_count) || typeof schema.checksum_status !== "string" || (schema.drift !== null && typeof schema.drift !== "boolean")) throw new Error("invalid readiness checks");
   if (!pool || typeof pool.ok !== "boolean" || !integerOrNull(pool.max_connections) || !integerOrNull(pool.total_connections) || !integerOrNull(pool.idle_connections) || !integerOrNull(pool.waiting_connections) || !integerOrNull(pool.utilization_percent) || (pool.saturated !== null && typeof pool.saturated !== "boolean")) throw new Error("invalid readiness checks");
   if (!drain || !["running", "draining", "closed"].includes(drain.state) || typeof drain.accepting !== "boolean" || !Number.isSafeInteger(drain.in_flight) || drain.in_flight < 0) throw new Error("invalid readiness checks");
+  if (platformSession !== undefined && (!platformSession || typeof platformSession.enabled !== "boolean" || typeof platformSession.ok !== "boolean" || typeof platformSession.code !== "string")) throw new Error("invalid readiness checks");
   if (ownerRecoveryOutbox !== undefined && (!ownerRecoveryOutbox || typeof ownerRecoveryOutbox.ok !== "boolean" || typeof ownerRecoveryOutbox.code !== "string"
     || !["running", "idle", "draining", "closed", "unavailable"].includes(ownerRecoveryOutbox.worker_state)
     || !integerOrNull(ownerRecoveryOutbox.pending_count) || !integerOrNull(ownerRecoveryOutbox.uncertain_count) || !integerOrNull(ownerRecoveryOutbox.dead_letter_count)
@@ -1952,6 +1960,7 @@ function publicReadinessChecks(value) {
     schema: Object.freeze({ ok: schema.ok, expected_version: schema.expected_version, applied_version: schema.applied_version, migration_count: schema.migration_count, pending_count: schema.pending_count, checksum_status: schema.checksum_status, drift: schema.drift }),
     pool: Object.freeze({ ok: pool.ok, max_connections: pool.max_connections, total_connections: pool.total_connections, idle_connections: pool.idle_connections, waiting_connections: pool.waiting_connections, utilization_percent: pool.utilization_percent, saturated: pool.saturated }),
     drain: Object.freeze({ state: drain.state, accepting: drain.accepting, in_flight: drain.in_flight }),
+    ...(platformSession === undefined ? {} : { platform_session: Object.freeze({ enabled: platformSession.enabled, ok: platformSession.ok, code: platformSession.code }) }),
     ...(ownerRecoveryOutbox === undefined ? {} : { owner_recovery_outbox: Object.freeze({ ok: ownerRecoveryOutbox.ok, code: ownerRecoveryOutbox.code, worker_state: ownerRecoveryOutbox.worker_state, pending_count: ownerRecoveryOutbox.pending_count, uncertain_count: ownerRecoveryOutbox.uncertain_count, dead_letter_count: ownerRecoveryOutbox.dead_letter_count, oldest_pending_age_ms: ownerRecoveryOutbox.oldest_pending_age_ms, oldest_uncertain_age_ms: ownerRecoveryOutbox.oldest_uncertain_age_ms }) }),
     ...(managedSignerProviderOperations === undefined ? {} : { managed_signer_provider_operations: Object.freeze({ ok: managedSignerProviderOperations.ok, code: managedSignerProviderOperations.code, worker_state: managedSignerProviderOperations.worker_state, pending_count: managedSignerProviderOperations.pending_count, started_count: managedSignerProviderOperations.started_count, accepted_count: managedSignerProviderOperations.accepted_count, uncertain_count: managedSignerProviderOperations.uncertain_count, stale_started_count: managedSignerProviderOperations.stale_started_count, oldest_nonterminal_age_ms: managedSignerProviderOperations.oldest_nonterminal_age_ms, last_success_age_ms: managedSignerProviderOperations.last_success_age_ms }) }),
     ...(agentSessionSigner === undefined ? {} : { agent_session_signer: Object.freeze({ ok: agentSessionSigner.ok, purpose: agentSessionSigner.purpose, algorithm: agentSessionSigner.algorithm, key_id: agentSessionSigner.key_id, public_key_fingerprint: agentSessionSigner.public_key_fingerprint }) }),
@@ -1977,6 +1986,13 @@ function publicMetricsReport(value) {
     }
   }
   return Object.freeze({ version: 1, counters: Object.freeze(counters), ...(gauges === undefined ? {} : { gauges: Object.freeze(gauges) }), valid: true });
+}
+
+function isPlatformSessionHttpPath(rawUrl, paths) {
+  let pathname;
+  try { pathname = new URL(rawUrl, "http://agentpass.invalid").pathname; }
+  catch { return false; }
+  return pathname === paths.challenge || pathname === paths.assertion || pathname === paths.revoke;
 }
 
 function send(response, status, value, headers = {}) {

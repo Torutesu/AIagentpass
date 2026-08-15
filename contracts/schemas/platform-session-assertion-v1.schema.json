@@ -2,31 +2,17 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://agentpass.dev/contracts/schemas/platform-session-assertion-v1.schema.json",
   "title": "AgentPass transient platform session WebAuthn assertion v1",
-  "description": "Transient verifier input for one platform session challenge. clientDataJSON, authenticatorData, signature, and userHandle are accepted only at the verification boundary and must not be persisted or returned in any response DTO.",
+  "description": "The only browser-to-server assertion DTO. It contains exactly the eight required public fields plus optional user_handle; no raw challenge, member, organization, assignment, principal, or authority generation is accepted.",
   "type": "object",
   "additionalProperties": false,
+  "minProperties": 8,
   "maxProperties": 9,
-  "required": [
-    "version",
-    "type",
-    "challenge_id",
-    "jti",
-    "credential_id",
-    "client_data_json",
-    "authenticator_data",
-    "signature"
-  ],
+  "required": ["version", "type", "challenge_id", "jti", "credential_id", "client_data_json", "authenticator_data", "signature"],
   "properties": {
     "version": { "const": 1 },
     "type": { "const": "agentpass.platform-session-assertion" },
     "challenge_id": { "$ref": "#/$defs/uuid" },
-    "jti": {
-      "type": "string",
-      "minLength": 22,
-      "maxLength": 256,
-      "pattern": "^[A-Za-z0-9_-]+$",
-      "description": "The challenge JTI supplied back by the client; the server compares it to the issued challenge before one-use consumption."
-    },
+    "jti": { "$ref": "#/$defs/uuid" },
     "credential_id": { "$ref": "#/$defs/credentialId" },
     "client_data_json": { "$ref": "#/$defs/clientData" },
     "authenticator_data": { "$ref": "#/$defs/authenticatorData" },
@@ -34,48 +20,11 @@
     "user_handle": { "$ref": "#/$defs/userHandle" }
   },
   "$defs": {
-    "uuid": {
-      "type": "string",
-      "format": "uuid",
-      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
-    },
-    "credentialId": {
-      "type": "string",
-      "minLength": 22,
-      "maxLength": 1366,
-      "pattern": "^(?:[A-Za-z0-9_-]{4})*(?:[A-Za-z0-9_-]{2}|[A-Za-z0-9_-]{3})?$"
-    },
-    "base64url": {
-      "type": "string",
-      "minLength": 1,
-      "pattern": "^[A-Za-z0-9_-]+$"
-    },
-    "clientData": {
-      "type": "string",
-      "minLength": 1,
-      "maxLength": 21846,
-      "pattern": "^[A-Za-z0-9_-]+$",
-      "description": "Unpadded base64url encoding of at most 16 KiB clientDataJSON; transient only."
-    },
-    "authenticatorData": {
-      "type": "string",
-      "minLength": 1,
-      "maxLength": 5462,
-      "pattern": "^[A-Za-z0-9_-]+$",
-      "description": "Unpadded base64url encoding of at most 4 KiB authenticatorData; transient only."
-    },
-    "signature": {
-      "type": "string",
-      "minLength": 1,
-      "maxLength": 1366,
-      "pattern": "^[A-Za-z0-9_-]+$",
-      "description": "Unpadded base64url encoding of at most 1 KiB WebAuthn signature; transient only."
-    },
-    "userHandle": {
-      "type": "string",
-      "minLength": 1,
-      "maxLength": 86,
-      "pattern": "^[A-Za-z0-9_-]+$"
-    }
+    "uuid": { "type": "string", "format": "uuid", "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$" },
+    "credentialId": { "type": "string", "minLength": 22, "maxLength": 1366, "pattern": "^(?:[A-Za-z0-9_-]{4})*(?:[A-Za-z0-9_-]{2}|[A-Za-z0-9_-]{3})?$" },
+    "clientData": { "type": "string", "minLength": 1, "maxLength": 21846, "pattern": "^[A-Za-z0-9_-]+$" },
+    "authenticatorData": { "type": "string", "minLength": 1, "maxLength": 5462, "pattern": "^[A-Za-z0-9_-]+$" },
+    "signature": { "type": "string", "minLength": 1, "maxLength": 1366, "pattern": "^[A-Za-z0-9_-]+$" },
+    "userHandle": { "type": "string", "minLength": 1, "maxLength": 86, "pattern": "^[A-Za-z0-9_-]+$" }
   }
 }

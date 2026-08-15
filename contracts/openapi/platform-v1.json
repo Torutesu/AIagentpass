@@ -1,0 +1,281 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "AgentPass Platform Session API",
+    "version": "1.0.0",
+    "description": "The AgentPass Platform v1 browser boundary for one WebAuthn-authenticated, short-lived agent session. The browser supplies only a public promotion intent and WebAuthn assertion bytes; server-side authority resolution derives every principal, member, assignment, generation, credential allowlist, and request digest binding. This document intentionally exposes only platform.promotion.issue."
+  },
+  "servers": [{ "url": "https://api.ai-agentpass.com" }],
+  "x-agentpass-contract-status": "frozen-platform-v1",
+  "x-agentpass-secret-policy": {
+    "session-bearer": "HttpOnly Secure __Host- cookie only",
+    "csrf-token": "JSON response then agentpass-platform-csrf header",
+    "assertion-bytes": "request-only and never persisted or returned",
+    "member-organization-credential-identifiers": "never returned in session metadata",
+    "cache-control": "no-store",
+    "additionalProperties": false
+  },
+  "paths": {
+    "/api/platform/v1/sessions/challenges": {
+      "post": {
+        "operationId": "createPlatformSessionChallenge",
+        "summary": "Create a WebAuthn challenge for one promotion intent",
+        "description": "Accepts exactly one public mutation intent. principal_id, member_id, assignment_id, authority_generation, and credential identifiers are not accepted from the browser. The server canonicalizes the six intent fields together with Idempotency-Key, computes request_digest_sha256, and asks the database authority resolver to verify the resulting binding before issuing the server-derived challenge response.",
+        "security": [{ "sameOrigin": [], "humanSessionCookie": [] }],
+        "parameters": [
+          { "$ref": "#/components/parameters/Origin" },
+          { "$ref": "#/components/parameters/IdempotencyKey" }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/PlatformSessionChallengeRequest" }
+            }
+          }
+        },
+        "x-agentpass-request-binding": {
+          "canonical-form": "canonical-json({candidate_id,deployment_id,environment,idempotency_key,operation,organization_id,promotion_id})",
+          "digest": "sha256(UTF-8 canonical-form)",
+          "authority-source": "database resolver",
+          "browser-authority-fields": [],
+          "additionalProperties": false
+        },
+        "x-agentpass-transport": {
+          "request-body": "strict six-field JSON object",
+          "bootstrap": "authenticated Human Session cookie __Host-agentpass_session",
+          "platform-session-bearer": "absent and forbidden on this endpoint",
+          "redirects": "forbidden",
+          "cache-control": "no-store",
+          "additionalProperties": false
+        },
+        "responses": {
+          "201": { "$ref": "#/components/responses/PlatformSessionChallengeCreated" },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "409": { "$ref": "#/components/responses/Conflict" },
+          "503": { "$ref": "#/components/responses/ServiceUnavailable" }
+        }
+      }
+    },
+    "/api/platform/v1/sessions": {
+      "post": {
+        "operationId": "verifyPlatformSessionAssertion",
+        "summary": "Verify one WebAuthn assertion and issue an agent session",
+        "description": "Accepts exactly the public WebAuthn assertion envelope. The assertion is authenticated by the durable challenge and WebAuthn verification; the Origin header is only a same-origin transport check. The runtime re-resolves authority from challenge_id and does not read a Human Session or Platform Session cookie during this phase. The raw session bearer is set only as a Secure HttpOnly __Host- cookie. The JSON response contains public session metadata and a separate CSRF token, never the bearer or internal credential/member/organization identifiers.",
+        "security": [{ "sameOrigin": [] }],
+        "parameters": [{ "$ref": "#/components/parameters/Origin" }],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "../schemas/platform-session-assertion-v1.schema.json" }
+            }
+          }
+        },
+        "x-agentpass-transport": {
+          "bearer-cookie": "Set-Cookie only; never JSON or Authorization header",
+          "csrf-token": "JSON body only",
+          "redirects": "forbidden",
+          "cache-control": "no-store",
+          "additionalProperties": false
+        },
+        "x-agentpass-authentication": {
+          "source": "durable challenge + WebAuthn assertion",
+          "human-session-cookie": "not read during assertion resolution",
+          "platform-session-cookie": "not read during assertion resolution",
+          "origin": "same-origin transport check only; not an identity assertion",
+          "additionalProperties": false
+        },
+        "responses": {
+          "201": { "$ref": "#/components/responses/PlatformSessionIssued" },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "409": { "$ref": "#/components/responses/Conflict" },
+          "503": { "$ref": "#/components/responses/ServiceUnavailable" }
+        }
+      }
+    },
+    "/api/platform/v1/sessions/revoke": {
+      "post": {
+        "operationId": "revokeCurrentPlatformSession",
+        "summary": "Self-revoke the current platform session",
+        "description": "Has no request body. The current session is identified only by the __Host-agentpass_platform_session cookie and the matching agentpass-platform-csrf header. The cookie is cleared in the response.",
+        "security": [{ "platformSessionCookie": [], "platformSessionCsrf": [] }],
+        "parameters": [
+          { "$ref": "#/components/parameters/Origin" },
+          { "$ref": "#/components/parameters/PlatformSessionCsrf" }
+        ],
+        "x-agentpass-transport": {
+          "request-body": "absent; Content-Length must be zero when supplied",
+          "bearer-source": "HttpOnly cookie only",
+          "csrf-source": "agentpass-platform-csrf header only",
+          "redirects": "forbidden",
+          "cache-control": "no-store",
+          "additionalProperties": false
+        },
+        "responses": {
+          "200": { "$ref": "#/components/responses/PlatformSessionRevoked" },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "503": { "$ref": "#/components/responses/ServiceUnavailable" }
+        }
+      }
+    }
+  },
+  "components": {
+    "securitySchemes": {
+      "sameOrigin": {
+        "type": "apiKey",
+        "in": "header",
+        "name": "Origin",
+        "description": "Required exact configured HTTPS Console origin. It is not an identity assertion and never supplies principal, member, organization, assignment, generation, or credential authority."
+      },
+      "humanSessionCookie": {
+        "type": "apiKey",
+        "in": "cookie",
+        "name": "__Host-agentpass_session",
+        "description": "Authenticated Human Session bootstrap selected by its opaque HttpOnly bearer. The server hashes and resolves it; browser JSON cannot substitute principal, member, assignment, generation, or credential authority."
+      },
+      "platformSessionCookie": {
+        "type": "apiKey",
+        "in": "cookie",
+        "name": "__Host-agentpass_platform_session",
+        "description": "Opaque 256-bit platform session bearer. HttpOnly, Secure, SameSite=Strict, Path=/, no Domain; never readable by browser JavaScript and never accepted in JSON or an Authorization header."
+      },
+      "platformSessionCsrf": {
+        "type": "apiKey",
+        "in": "header",
+        "name": "agentpass-platform-csrf",
+        "description": "Separate 256-bit CSRF token returned in the successful assertion JSON body and required alongside the cookie for self-revoke."
+      }
+    },
+    "parameters": {
+      "Origin": {
+        "name": "Origin",
+        "in": "header",
+        "required": true,
+        "schema": { "type": "string", "minLength": 9, "maxLength": 512, "pattern": "^https://[^/?#@]+(?::[0-9]{1,5})?$" }
+      },
+      "IdempotencyKey": {
+        "name": "Idempotency-Key",
+        "in": "header",
+        "required": true,
+        "description": "Public idempotency identity included in the server-computed canonical request digest; never accepted in the JSON body.",
+        "schema": { "type": "string", "minLength": 8, "maxLength": 128, "pattern": "^[A-Za-z0-9][A-Za-z0-9._~:-]{7,127}$" }
+      },
+      "PlatformSessionCsrf": {
+        "name": "agentpass-platform-csrf",
+        "in": "header",
+        "required": true,
+        "schema": { "type": "string", "minLength": 43, "maxLength": 43, "pattern": "^[A-Za-z0-9_-]{43}$" }
+      }
+    },
+    "schemas": {
+      "PlatformSessionChallengeRequest": {
+        "type": "object",
+        "additionalProperties": false,
+        "minProperties": 6,
+        "maxProperties": 6,
+        "required": ["operation", "organization_id", "promotion_id", "deployment_id", "environment", "candidate_id"],
+        "properties": {
+          "operation": { "const": "platform.promotion.issue" },
+          "organization_id": { "type": "string", "format": "uuid", "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$" },
+          "promotion_id": { "type": "string", "format": "uuid", "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$" },
+          "deployment_id": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$" },
+          "environment": { "type": "string", "enum": ["staging", "production"] },
+          "candidate_id": { "type": "string", "pattern": "^release-pkg-sha256-v1-[0-9a-f]{64}$" }
+        },
+        "description": "The only browser-supplied mutation intent. All authority identifiers are server-derived."
+      },
+      "PlatformSessionChallenge": { "$ref": "../schemas/platform-session-challenge-v1.schema.json" },
+      "PlatformSessionAssertion": { "$ref": "../schemas/platform-session-assertion-v1.schema.json" },
+      "PlatformSession": { "$ref": "../schemas/platform-session-response-v1.schema.json" },
+      "PlatformSessionHttpAssertionResponse": { "$ref": "../schemas/platform-session-http-assertion-response-v1.schema.json" },
+      "PlatformSessionRevokeRequest": { "$ref": "../schemas/platform-session-revoke-request-v1.schema.json" },
+      "PlatformSessionRevokeResponse": { "$ref": "../schemas/platform-session-revoke-response-v1.schema.json" },
+      "PlatformSessionError": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["error"],
+        "properties": {
+          "error": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["code", "message"],
+            "properties": {
+              "code": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-z0-9][a-z0-9_.-]{0,127}$" },
+              "message": { "type": "string", "minLength": 1, "maxLength": 256 }
+            }
+          }
+        }
+      }
+    },
+    "headers": {
+      "CacheControlNoStore": { "required": true, "schema": { "type": "string", "const": "no-store, max-age=0" } },
+      "PragmaNoCache": { "required": true, "schema": { "type": "string", "const": "no-cache" } },
+      "ExpiresZero": { "required": true, "schema": { "type": "string", "const": "0" } },
+      "ContentTypeJson": { "required": true, "schema": { "type": "string", "pattern": "^application/json(?:;\\s*charset=utf-8)?$" } },
+      "NoSniff": { "required": true, "schema": { "type": "string", "const": "nosniff" } },
+      "NoReferrer": { "required": true, "schema": { "type": "string", "const": "no-referrer" } },
+      "PlatformSessionSetCookie": {
+        "required": true,
+        "description": "The only bearer transport. Must be __Host-agentpass_platform_session, Path=/, HttpOnly, Secure, SameSite=Strict, with no Domain attribute.",
+        "schema": { "type": "string", "pattern": "^__Host-agentpass_platform_session=[A-Za-z0-9_-]{43}; Path=/; HttpOnly; Secure; SameSite=Strict(?:; Max-Age=[0-9]+)?$" }
+      },
+      "PlatformSessionClearCookie": {
+        "required": true,
+        "description": "Clears the current __Host-agentpass_platform_session bearer without a Domain attribute.",
+        "schema": { "type": "string", "const": "__Host-agentpass_platform_session=; Path=/; HttpOnly; Secure; SameSite=Strict; Max-Age=0" }
+      }
+    },
+    "responses": {
+      "PlatformSessionChallengeCreated": {
+        "description": "Server-derived one-use challenge.",
+        "headers": {
+          "Cache-Control": { "$ref": "#/components/headers/CacheControlNoStore" },
+          "Pragma": { "$ref": "#/components/headers/PragmaNoCache" },
+          "Expires": { "$ref": "#/components/headers/ExpiresZero" },
+          "Content-Type": { "$ref": "#/components/headers/ContentTypeJson" },
+          "X-Content-Type-Options": { "$ref": "#/components/headers/NoSniff" },
+          "Referrer-Policy": { "$ref": "#/components/headers/NoReferrer" }
+        },
+        "content": { "application/json": { "schema": { "$ref": "#/components/schemas/PlatformSessionChallenge" } } }
+      },
+      "PlatformSessionIssued": {
+        "description": "Public session metadata and CSRF token; bearer is only in the HttpOnly cookie.",
+        "headers": {
+          "Set-Cookie": { "$ref": "#/components/headers/PlatformSessionSetCookie" },
+          "Cache-Control": { "$ref": "#/components/headers/CacheControlNoStore" },
+          "Pragma": { "$ref": "#/components/headers/PragmaNoCache" },
+          "Expires": { "$ref": "#/components/headers/ExpiresZero" },
+          "Content-Type": { "$ref": "#/components/headers/ContentTypeJson" },
+          "X-Content-Type-Options": { "$ref": "#/components/headers/NoSniff" },
+          "Referrer-Policy": { "$ref": "#/components/headers/NoReferrer" }
+        },
+        "content": { "application/json": { "schema": { "$ref": "#/components/schemas/PlatformSessionHttpAssertionResponse" } } }
+      },
+      "PlatformSessionRevoked": {
+        "description": "Current session revoked and bearer cookie cleared.",
+        "headers": {
+          "Set-Cookie": { "$ref": "#/components/headers/PlatformSessionClearCookie" },
+          "Cache-Control": { "$ref": "#/components/headers/CacheControlNoStore" },
+          "Pragma": { "$ref": "#/components/headers/PragmaNoCache" },
+          "Expires": { "$ref": "#/components/headers/ExpiresZero" },
+          "Content-Type": { "$ref": "#/components/headers/ContentTypeJson" },
+          "X-Content-Type-Options": { "$ref": "#/components/headers/NoSniff" },
+          "Referrer-Policy": { "$ref": "#/components/headers/NoReferrer" }
+        },
+        "content": { "application/json": { "schema": { "$ref": "#/components/schemas/PlatformSessionRevokeResponse" } } }
+      },
+      "BadRequest": { "description": "Malformed, non-strict, or invalid request.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/PlatformSessionError" } } } },
+      "Unauthorized": { "description": "Authentication or session is required.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/PlatformSessionError" } } } },
+      "Forbidden": { "description": "Origin or CSRF validation failed.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/PlatformSessionError" } } } },
+      "Conflict": { "description": "Challenge is expired, busy, consumed, or the intent conflicts with its idempotency identity.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/PlatformSessionError" } } } },
+      "ServiceUnavailable": { "description": "The authority or persistence boundary is unavailable.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/PlatformSessionError" } } } }
+    }
+  }
+}

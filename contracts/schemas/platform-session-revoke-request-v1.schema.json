@@ -1,53 +1,12 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://agentpass.dev/contracts/schemas/platform-session-revoke-request-v1.schema.json",
-  "title": "AgentPass platform session revoke request v1",
-  "description": "Strict, idempotent identity for revoking one platform session. The request binds the target session to its principal, assignment, current authority generation, operation, capability, and canonical request digest; no bearer or assertion material is accepted.",
+  "title": "AgentPass platform session empty revoke request v1",
+  "description": "The self-revoke endpoint has no JSON request body. Its target is identified exclusively by the HttpOnly platform-session cookie and the matching CSRF header; bearer, session identifiers, authority identifiers, and assertion material are never accepted in JSON.",
   "type": "object",
   "additionalProperties": false,
-  "maxProperties": 12,
-  "required": [
-    "version",
-    "type",
-    "request_id",
-    "session_id",
-    "principal_id",
-    "assignment_id",
-    "authority_generation",
-    "operation",
-    "capability",
-    "request_digest_sha256",
-    "reason"
-  ],
-  "properties": {
-    "version": { "const": 1 },
-    "type": { "const": "agentpass.platform-session-revoke-request" },
-    "request_id": { "$ref": "#/$defs/uuid" },
-    "session_id": { "$ref": "#/$defs/uuid" },
-    "principal_id": { "$ref": "#/$defs/uuid" },
-    "assignment_id": { "$ref": "#/$defs/uuid" },
-    "authority_generation": { "$ref": "#/$defs/positiveSafeInteger" },
-    "operation": { "enum": ["platform.assignment.manage", "platform.promotion.issue", "platform.promotion.replay", "platform.promotion.verify", "platform.promotion.reconcile"] },
-    "capability": { "enum": ["platform.assignment.manage", "platform.promotion.issue", "platform.promotion.replay", "platform.promotion.verify", "platform.promotion.reconcile"] },
-    "request_digest_sha256": { "$ref": "#/$defs/sha256" },
-    "reason": { "enum": ["self", "security_response", "administrative"] }
-  },
-  "$defs": {
-    "uuid": {
-      "type": "string",
-      "format": "uuid",
-      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
-    },
-    "positiveSafeInteger": {
-      "type": "integer",
-      "minimum": 1,
-      "maximum": 9007199254740991
-    },
-    "sha256": {
-      "type": "string",
-      "minLength": 64,
-      "maxLength": 64,
-      "pattern": "^[0-9a-f]{64}$"
-    }
-  }
+  "minProperties": 0,
+  "maxProperties": 0,
+  "properties": {},
+  "required": []
 }

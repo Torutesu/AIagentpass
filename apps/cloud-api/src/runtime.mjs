@@ -3,6 +3,8 @@ import fs from "node:fs";
 import path from "node:path";
 
 import { createCloudApi } from "./server.mjs";
+import { createPlatformSessionHttpApi } from "./platform-session-http-api.mjs";
+import { createPlatformSessionWebAuthnService } from "./platform-session-webauthn.mjs";
 import { createCloudStore } from "./store.mjs";
 import { createPersistentReplayCache, verifyDeviceRequest } from "./auth.mjs";
 import { createRateLimiter } from "./rate-limit.mjs";
@@ -47,11 +49,19 @@ import { PROTOCOL_VERSION, REFRESH_HINT_SIGNATURE_ALGORITHM, REFRESH_HINT_TYPE }
 
 const IDENTIFIER = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 
-export async function createCloudRuntime({ env = process.env, logger = console, postgresFactory = createPostgresRuntime, humanAuthFactory = createHumanAuthRuntime, kmsProviderFactory = createHostedKmsProviders, agentSessionSignerProvider, agentSessionSignerFactory = createHostedAgentSessionGrantSigner, qualificationManifestSignerProvider, qualificationManifestSignerFactory = createHostedQualificationManifestSigner, possessionReceiptSignerProvider, possessionReceiptSignerFactory = createHostedPossessionReceiptSigner, refreshHintSignerProvider, capabilitySignerProvider, controlBundleSignerProvider, auditAnchorSignerProvider, promotionEvidenceSignerProvider, platformOperatorAuthorizer, ownerRecoveryPublisher } = {}) {
+export async function createCloudRuntime({ env = process.env, logger = console, postgresFactory = createPostgresRuntime, humanAuthFactory = createHumanAuthRuntime, kmsProviderFactory = createHostedKmsProviders, agentSessionSignerProvider, agentSessionSignerFactory = createHostedAgentSessionGrantSigner, qualificationManifestSignerProvider, qualificationManifestSignerFactory = createHostedQualificationManifestSigner, possessionReceiptSignerProvider, possessionReceiptSignerFactory = createHostedPossessionReceiptSigner, refreshHintSignerProvider, capabilitySignerProvider, controlBundleSignerProvider, auditAnchorSignerProvider, promotionEvidenceSignerProvider, platformOperatorAuthorizer, ownerRecoveryPublisher, platformSession, platformSessionBootstrapAuthenticator, platformSessionAuthorityResolver, platformSessionWebAuthnVerify, platformSessionOrigin, platformSessionRpId } = {}) {
   const profile = parseCloudRuntimeProfile(env);
   const config = loadRuntimeConfig(env);
   if (profile.isHosted && platformOperatorAuthorizer !== undefined) {
     throw new Error("Hosted platform operator authorization must be composed from PostgreSQL");
+  }
+  if (profile.isHosted && (platformSessionBootstrapAuthenticator !== undefined
+    || platformSessionAuthorityResolver !== undefined
+    || platformSessionWebAuthnVerify !== undefined
+    || typeof platformSession?.bootstrapAuthenticator === "function"
+    || typeof platformSession?.authorityResolver === "function"
+    || typeof platformSession?.webauthnVerify === "function")) {
+    throw new Error("Hosted platform session authority must be composed from PostgreSQL and the built-in WebAuthn verifier");
   }
   const configuredOwnerRecoveryPublisher = profile.isHosted
     ? ownerRecoveryPublisher ?? createConfiguredOwnerRecoveryPublisher(config.ownerRecoveryNotification)
@@ -77,6 +87,8 @@ export async function createCloudRuntime({ env = process.env, logger = console, 
   let auditExportVerifier;
   let promotionEvidenceSigner;
   let platformPromotionIssuanceService;
+  let platformSessionHttpApi;
+  let platformSessionReadiness;
   let effectivePlatformOperatorAuthorizer = platformOperatorAuthorizer;
   let verifyPlatformPromotionEvidence;
   let ownedKmsProviders;
@@ -131,6 +143,50 @@ export async function createCloudRuntime({ env = process.env, logger = console, 
       store = postgresRuntime.controlPlaneStore;
       if (typeof store.pollDeviceRefresh !== "function" || typeof store.markDeviceRefreshDelivered !== "function") throw new Error("PostgreSQL refresh polling is unavailable");
       if (!postgresRuntime.refreshHintNotifier || typeof postgresRuntime.refreshHintNotifier.waitForRefresh !== "function") throw new Error("PostgreSQL refresh notification is unavailable");
+      const platformSessionConfig = normalizePlatformSessionRuntimeConfig({
+        platformSession,
+        bootstrapAuthenticator: platformSessionBootstrapAuthenticator,
+        authorityResolver: platformSessionAuthorityResolver,
+        webauthnVerify: platformSessionWebAuthnVerify,
+        origin: platformSessionOrigin ?? env.AGENTPASS_PLATFORM_SESSION_ORIGIN ?? config.humanAuth?.origin,
+        rpId: platformSessionRpId ?? env.AGENTPASS_PLATFORM_SESSION_RP_ID ?? config.humanAuth?.rpId
+      });
+      if (platformSessionConfig.enabled) {
+        if (!postgresRuntime.platformSessionWebAuthnRepository || !postgresRuntime.platformSessionRepository
+          || !postgresRuntime.platformSessionBootstrapRepository) throw new Error("PostgreSQL platform session authority is unavailable");
+        const defaultComposition = createHostedPlatformSessionComposition({
+          bootstrapRepository: postgresRuntime.platformSessionBootstrapRepository,
+          webauthnRepository: postgresRuntime.platformSessionWebAuthnRepository,
+          origin: platformSessionConfig.origin,
+          rpId: platformSessionConfig.rpId
+        });
+        const bootstrapAuthenticator = platformSessionConfig.bootstrapAuthenticator ?? defaultComposition.bootstrapAuthenticator;
+        const authorityResolver = platformSessionConfig.authorityResolver ?? defaultComposition.authorityResolver;
+        const composedPlatformSessionConfig = Object.freeze({
+          ...platformSessionConfig,
+          bootstrapAuthenticator,
+          authorityResolver
+        });
+        platformSessionReadiness = createPlatformSessionCompositionReadiness(composedPlatformSessionConfig);
+        const ceremony = createPlatformSessionWebAuthnService({
+          repository: postgresRuntime.platformSessionWebAuthnRepository,
+          ...(platformSessionConfig.webauthnVerify === undefined ? {} : { webauthnVerify: platformSessionConfig.webauthnVerify })
+        });
+        const resolveAuthorityContext = async (input) => {
+          const resolved = await authorityResolver(input);
+          if (!resolved || resolved.rp_id !== composedPlatformSessionConfig.rpId) throw new Error("platform session RP authority is unavailable");
+          return resolved;
+        };
+        platformSessionHttpApi = createPlatformSessionHttpApi({
+          platformSessionWebAuthn: ceremony,
+          authenticatedBootstrap: bootstrapAuthenticator,
+          trustedAuthorityResolver: resolveAuthorityContext,
+          revokeService: postgresRuntime.platformSessionRepository,
+          origin: composedPlatformSessionConfig.origin
+        });
+      } else {
+        platformSessionReadiness = async () => Object.freeze({ enabled: false, ok: true, code: "disabled" });
+      }
       const injectedProviderCount = [agentSessionSignerProvider, qualificationManifestSignerProvider, possessionReceiptSignerProvider, refreshHintSignerProvider, capabilitySignerProvider, controlBundleSignerProvider, auditAnchorSignerProvider, promotionEvidenceSignerProvider]
         .filter((value) => value !== undefined).length;
       if (injectedProviderCount !== 0 && injectedProviderCount !== 8) throw new Error("Cloud managed signer provider set is incomplete");
@@ -423,7 +479,7 @@ export async function createCloudRuntime({ env = process.env, logger = console, 
           { name: "qualification_manifest_signer", purpose: "agentpass.qualification-grant-batch-manifest", unavailableCode: "qualification_manifest_signer_unavailable", signer: qualificationManifestSigner },
           { name: "possession_receipt_signer", purpose: POSSESSION_RECEIPT_PURPOSE, unavailableCode: "possession_receipt_signer_unavailable", signer: possessionReceiptSigner },
           { name: "refresh_hint_signer", purpose: REFRESH_HINT_TYPE, unavailableCode: "refresh_hint_signer_unavailable", signer: refreshHintSigner }
-        ]),
+        ], platformSessionReadiness),
         operationalMetrics: postgresRuntime.operationalReport,
         operationalProbeSecret: exactRuntimeSecret(env.AGENTPASS_OPERATIONAL_PROBE_SECRET, "AGENTPASS_OPERATIONAL_PROBE_SECRET")
       } : { rateLimiter: createRateLimiter({ persistencePath: path.join(config.dataDir, "principal-rate-limits.json") }) }),
@@ -438,6 +494,7 @@ export async function createCloudRuntime({ env = process.env, logger = console, 
       ...(platformPromotionIssuanceService && typeof effectivePlatformOperatorAuthorizer === "function"
         ? { platformPromotionIssuanceService, platformOperatorAuthorizer: effectivePlatformOperatorAuthorizer }
         : {}),
+      ...(platformSessionHttpApi ? { platformSessionHttpApi } : {}),
       ...(agentSessionDeviceApi ? { agentSessionDeviceApi } : {}),
       ...(qualificationGrantBatchDeviceApi ? { qualificationGrantBatchDeviceApi } : {}),
       ...(possessionReceiptSigner ? { possessionReceiptSigner } : {}),
@@ -458,6 +515,8 @@ export async function createCloudRuntime({ env = process.env, logger = console, 
     auditExportVerifier,
     platformPromotionIssuanceService,
     platformOperatorAuthorizer: effectivePlatformOperatorAuthorizer,
+    platformSessionHttpApi,
+    platformSessionReadiness,
     async listen() {
       if (server.listening) return server.address();
       await new Promise((resolve, reject) => { server.once("error", reject); server.listen(config.port, config.host, () => { server.off("error", reject); resolve(); }); });
@@ -793,7 +852,90 @@ function deriveHostedAnonymousBucketId(secret, purpose) {
   return `${bytes.subarray(0, 4).toString("hex")}-${bytes.subarray(4, 6).toString("hex")}-${bytes.subarray(6, 8).toString("hex")}-${bytes.subarray(8, 10).toString("hex")}-${bytes.subarray(10, 16).toString("hex")}`;
 }
 
-function createHostedReadiness(databaseReadiness, signers) {
+export function createHostedPlatformSessionComposition({ bootstrapRepository, webauthnRepository, origin, rpId } = {}) {
+  if (!bootstrapRepository || typeof bootstrapRepository.resolvePlatformSessionBootstrap !== "function"
+    || !webauthnRepository || typeof webauthnRepository.findPlatformSessionChallenge !== "function"
+    || typeof origin !== "string" || typeof rpId !== "string") {
+    throw new Error("PostgreSQL platform session bootstrap authority is unavailable");
+  }
+  const bootstrapAuthenticator = async ({ phase, intent, session_material_hash } = {}) => {
+    if (phase !== "challenge" || !intent || typeof session_material_hash !== "string") return null;
+    return bootstrapRepository.resolvePlatformSessionBootstrap({
+      session_material_hash,
+      organization_id: intent.organization_id,
+      operation: intent.operation,
+      capability: intent.operation
+    });
+  };
+  const authorityResolver = async ({ phase, challenge_id, bootstrap, intent } = {}) => {
+    const source = phase === "challenge"
+      ? bootstrap
+      : await webauthnRepository.findPlatformSessionChallenge({ challenge_id });
+    if (!source) return null;
+    return platformSessionAuthorityContext(source, { origin, rpId }, intent);
+  };
+  return Object.freeze({ bootstrapAuthenticator, authorityResolver });
+}
+
+export function normalizePlatformSessionRuntimeConfig({ platformSession, bootstrapAuthenticator, authorityResolver, webauthnVerify, origin, rpId } = {}) {
+  if (platformSession !== undefined && platformSession !== false
+    && (!platformSession || typeof platformSession !== "object" || Array.isArray(platformSession))) {
+    throw new Error("platform session runtime configuration is invalid");
+  }
+  const override = platformSession && typeof platformSession === "object" ? platformSession : {};
+  const enabled = override.enabled !== false && platformSession !== false;
+  if (!enabled) return Object.freeze({ enabled: false });
+  const effectiveOrigin = override.origin ?? origin;
+  const effectiveRpId = override.rpId ?? override.rp_id ?? rpId;
+  if (typeof effectiveOrigin !== "string" || effectiveOrigin.length < 1
+    || typeof effectiveRpId !== "string" || !/^[A-Za-z0-9](?:[A-Za-z0-9.-]*[A-Za-z0-9])?$/u.test(effectiveRpId)) {
+    return Object.freeze({ enabled: false, code: "platform_session_configuration_unavailable" });
+  }
+  return Object.freeze({
+    enabled: true,
+    origin: effectiveOrigin,
+    rpId: effectiveRpId,
+    bootstrapAuthenticator: override.bootstrapAuthenticator ?? bootstrapAuthenticator,
+    authorityResolver: override.authorityResolver ?? authorityResolver,
+    webauthnVerify: override.webauthnVerify ?? webauthnVerify
+  });
+}
+
+function createPlatformSessionCompositionReadiness(config) {
+  return async function platformSessionReadiness() {
+    const ok = Boolean(config?.enabled && typeof config.bootstrapAuthenticator === "function"
+      && typeof config.authorityResolver === "function" && typeof config.origin === "string" && typeof config.rpId === "string");
+    return Object.freeze({
+      enabled: config?.enabled === true,
+      ok,
+      code: ok ? "ready" : config?.code ?? "platform_session_composition_unavailable"
+    });
+  };
+}
+
+function platformSessionAuthorityContext(source, config, intent = undefined) {
+  const requestDigest = intent?.request_digest_sha256
+    ?? (Buffer.isBuffer(source?.request_digest_sha256) ? source.request_digest_sha256.toString("hex") : source?.request_digest_sha256);
+  const allowed = source?.allowed_webauthn_credential_ids ?? source?.allowed_credential_ids;
+  if (!source || typeof source !== "object" || !Array.isArray(allowed) || allowed.length < 1) return null;
+  const allowedCredentialIds = allowed.map((value) => Buffer.isBuffer(value) ? value.toString("base64url") : value);
+  return Object.freeze({
+    principal_id: source.principal_id,
+    member_id: source.member_id,
+    organization_id: source.organization_id,
+    assignment_id: source.assignment_id,
+    authority_generation: source.authority_generation ?? source.principal_authority_generation,
+    operation: source.operation,
+    capability: source.capability,
+    rp_id: config.rpId,
+    origin: config.origin,
+    request_digest_sha256: requestDigest,
+    allowed_credential_ids: Object.freeze(allowedCredentialIds),
+    user_verification: "required"
+  });
+}
+
+function createHostedReadiness(databaseReadiness, signers, platformSessionReadiness = undefined) {
   if (typeof databaseReadiness !== "function" || !Array.isArray(signers) || signers.length < 1
     || signers.some(({ name, purpose, unavailableCode, signer }) => typeof name !== "string" || typeof purpose !== "string" || typeof unavailableCode !== "string"
       || typeof signer?.health !== "function" || typeof signer?.verificationKeyMetadata !== "function")) throw new Error("Hosted readiness dependencies are unavailable");
@@ -820,11 +962,24 @@ function createHostedReadiness(databaseReadiness, signers) {
       checks[dependency.name] = report;
     }
     if (!databaseReport || typeof databaseReport !== "object" || Array.isArray(databaseReport)) throw new Error("invalid database readiness");
+    let platformReport;
+    if (platformSessionReadiness !== undefined) {
+      if (typeof platformSessionReadiness !== "function") throw new Error("invalid platform session readiness");
+      try {
+        const value = await platformSessionReadiness();
+        if (!value || typeof value !== "object" || typeof value.ok !== "boolean" || typeof value.code !== "string") throw new Error("invalid platform session readiness report");
+        platformReport = Object.freeze({ enabled: value.enabled === true, ok: value.ok, code: value.code });
+      } catch {
+        platformReport = Object.freeze({ enabled: true, ok: false, code: "platform_session_unavailable" });
+      }
+    }
+    if (platformReport) checks.platform_session = platformReport;
+    const platformFailure = platformReport && platformReport.ok !== true ? platformReport.code : undefined;
     return Object.freeze({
       ...databaseReport,
-      ready: databaseReport.ready === true && signerFailure === undefined,
-      status: databaseReport.ready !== true ? databaseReport.status : signerFailure === undefined ? databaseReport.status : "not_ready",
-      code: databaseReport.ready !== true ? databaseReport.code : signerFailure === undefined ? databaseReport.code : signerFailure,
+      ready: databaseReport.ready === true && signerFailure === undefined && platformFailure === undefined,
+      status: databaseReport.ready !== true ? databaseReport.status : signerFailure === undefined && platformFailure === undefined ? databaseReport.status : "not_ready",
+      code: databaseReport.ready !== true ? databaseReport.code : signerFailure ?? platformFailure ?? databaseReport.code,
       checks: Object.freeze({ ...(databaseReport.checks ?? {}), ...checks })
     });
   };

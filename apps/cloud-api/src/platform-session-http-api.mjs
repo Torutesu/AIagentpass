@@ -11,6 +11,8 @@ import {
   PLATFORM_SESSION_WEBAUTHN_ERROR_CODES,
   PlatformSessionWebAuthnError
 } from "./platform-session-webauthn.mjs";
+import { hashOpaqueToken, parseSessionCookie } from "./human-session.mjs";
+import { platformPromotionAuthorizationRequestDigest } from "./platform-promotion-http-contract.mjs";
 
 const ROOT_PATH = "/api/platform/v1/sessions";
 const DEFAULT_MAX_BODY_BYTES = 64 * 1024;
@@ -31,11 +33,19 @@ const ASSERTION_FIELDS = new Set([
   "version", "type", "challenge_id", "jti", "credential_id",
   "client_data_json", "authenticator_data", "signature", "user_handle"
 ]);
-const SESSION_RESPONSE_FIELDS = new Set([
-  "id", "session_id", "principal_id", "assignment_id", "operation", "capability",
-  "authority_generation", "principal_authority_generation", "request_digest_sha256",
-  "issued_at", "authenticated_at", "expires_at", "idle_expires_at", "created_at",
-  "last_seen_at", "status", "version"
+const PUBLIC_INTENT_FIELDS = new Set([
+  "operation", "organization_id", "promotion_id", "deployment_id", "environment", "candidate_id"
+]);
+const PUBLIC_INTENT_OPERATION = "platform.promotion.issue";
+const PUBLIC_INTENT_DEPLOYMENT_ID = /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$/u;
+const PUBLIC_INTENT_CANDIDATE_ID = /^release-pkg-sha256-v1-[0-9a-f]{64}$/u;
+const IDEMPOTENCY_KEY = /^[A-Za-z0-9][A-Za-z0-9._~:-]{7,127}$/u;
+const CHALLENGE_RESPONSE_FIELDS = new Set([
+  "version", "type", "challenge_id", "challenge", "jti", "platform_session_id",
+  "principal_id", "member_id", "organization_id", "assignment_id", "authority_generation",
+  "operation", "capability", "request_digest_sha256", "allowed_credential_ids",
+  "challenge_expires_at", "issued_at", "expires_at", "one_use", "rp_id", "origin",
+  "user_verification"
 ]);
 const FORBIDDEN_HEADERS = new Set([
   "authorization",
@@ -119,8 +129,9 @@ export class PlatformSessionHttpError extends Error {
  * Framework-free HTTP boundary for platform sessions.
  *
  * The authority resolver and bootstrap authenticator are trusted server-side
- * dependencies. The request body is deliberately never passed to either
- * dependency, so browser JSON cannot become an authority input by accident.
+ * dependencies. Browser JSON is reduced to a public, canonical intent before
+ * either dependency sees it, so caller-supplied authority cannot become an
+ * authority input by accident.
  * Revoke services must advertise `bearerBound: true` and receive only the
  * transport hash of the platform cookie.
  */
@@ -142,8 +153,8 @@ export function createPlatformSessionHttpApi({
   }
   const bootstrap = authenticatedBootstrap ?? authenticateBootstrap;
   const authority = trustedAuthorityResolver ?? resolveAuthorityContext;
-  if (typeof bootstrap !== "function" && typeof authority !== "function") {
-    throw new TypeError("an authenticated bootstrap or trusted authority resolver is required");
+  if (typeof bootstrap !== "function" || typeof authority !== "function") {
+    throw new TypeError("authenticated bootstrap and trusted authority resolver are required");
   }
   assertOrigin(origin);
   assertBodyLimit(maxBodyBytes);
@@ -166,7 +177,7 @@ export function createPlatformSessionHttpApi({
       if (request.method !== "POST") {
         throw new PlatformSessionHttpError(PLATFORM_SESSION_HTTP_ERROR_CODES.METHOD_NOT_ALLOWED, { status: 405, allow: "POST" });
       }
-      assertSecurityHeaders(request);
+      assertSecurityHeaders(request, route.kind);
       const requestOrigin = header(request.headers, "origin");
       if (requestOrigin === undefined || requestOrigin !== origin || requestOrigin === "null") {
         throw new PlatformSessionHttpError(PLATFORM_SESSION_HTTP_ERROR_CODES.ORIGIN_NOT_ALLOWED, { status: 403 });
@@ -183,8 +194,8 @@ export function createPlatformSessionHttpApi({
 
   async function dispatchChallenge(request) {
     const body = await readJsonBody(request, maxBodyBytes);
-    assertExactKeys(body, new Set());
-    const context = await resolveContext(request, "challenge");
+    const intent = normalizePublicIntent(body, header(request.headers, "idempotency-key"));
+    const context = await resolveContext(request, "challenge", { intent });
     let issued;
     try {
       issued = await ceremony.begin(context);
@@ -198,6 +209,7 @@ export function createPlatformSessionHttpApi({
   async function dispatchAssertion(request) {
     const body = await readJsonBody(request, maxBodyBytes);
     assertExactKeys(body, ASSERTION_FIELDS);
+    if (header(request.headers, "idempotency-key") !== undefined) throw invalidRequest();
     const assertion = normalizeAssertionBody(body);
     const context = await resolveContext(request, "assertion", { challenge_id: assertion.challenge_id });
     let issued;
@@ -265,10 +277,17 @@ export function createPlatformSessionHttpApi({
   }
 
   async function resolveContext(request, phase, extra = {}) {
-    let bootstrapValue;
-    if (typeof bootstrap === "function") {
+    const sessionMaterialHash = humanSessionMaterialHash(request.headers, phase);
+    const resolverInput = Object.freeze({
+      phase,
+      ...(extra.challenge_id === undefined ? {} : { challenge_id: extra.challenge_id }),
+      intent: extra.intent ?? null,
+      session_material_hash: sessionMaterialHash
+    });
+    let bootstrapValue = null;
+    if (phase === "challenge") {
       try {
-        bootstrapValue = await bootstrap({ request: request.safe, phase, ...extra });
+        bootstrapValue = await bootstrap(resolverInput);
       } catch (error) {
         throw mapBootstrapError(error);
       }
@@ -277,17 +296,13 @@ export function createPlatformSessionHttpApi({
       }
     }
     let context;
-    if (typeof authority === "function") {
-      try {
-        context = await authority({ request: request.safe, bootstrap: bootstrapValue, phase, ...extra });
-      } catch (error) {
-        throw mapAuthorityError(error);
-      }
-    } else {
-      context = bootstrapValue?.authority_context ?? bootstrapValue?.authorityContext ?? bootstrapValue?.context;
+    try {
+      context = await authority(Object.freeze({ ...resolverInput, bootstrap: bootstrapValue }));
+    } catch (error) {
+      throw mapAuthorityError(error);
     }
     try {
-      return normalizeAuthorityContext(context, origin);
+      return normalizeAuthorityContext(context, origin, extra.intent);
     } catch (error) {
       if (error instanceof PlatformSessionHttpError) throw error;
       throw new PlatformSessionHttpError(PLATFORM_SESSION_HTTP_ERROR_CODES.AUTHORITY_UNAVAILABLE, { status: 503, cause: error });
@@ -357,8 +372,10 @@ function setHeader(target, name, value) {
   target[normalized] = value;
 }
 
-function assertSecurityHeaders(request) {
+function assertSecurityHeaders(request, routeKind) {
   for (const name of Object.keys(request.headers)) if (FORBIDDEN_HEADERS.has(name)) throw invalidRequest();
+  if (routeKind !== "revoke" && Object.hasOwn(request.headers, PLATFORM_SESSION_CSRF_HEADER)) throw invalidRequest();
+  if (routeKind === "revoke" && Object.hasOwn(request.headers, "idempotency-key")) throw invalidRequest();
   if (Object.hasOwn(request.headers, "cookie")) {
     const cookie = request.headers.cookie;
     if (cookie.length > MAX_HEADER_BYTES) throw invalidRequest();
@@ -463,7 +480,7 @@ function assertContentLength(headers, maxBytes) {
   }
 }
 
-function normalizeAuthorityContext(value, expectedOrigin) {
+function normalizeAuthorityContext(value, expectedOrigin, expectedIntent = undefined) {
   if (!isObject(value)) throw new Error("authority context is unavailable");
   const keys = Object.keys(value);
   if (keys.some((key) => !AUTHORITY_FIELDS.has(key))) throw new Error("authority context contains unexpected fields");
@@ -482,7 +499,69 @@ function normalizeAuthorityContext(value, expectedOrigin) {
     user_verification: value.user_verification
   };
   if (result.origin !== expectedOrigin || result.user_verification !== "required") throw new Error("authority context is not trusted");
+  if (expectedIntent !== undefined) {
+    if (result.operation !== expectedIntent.operation
+      || result.capability !== expectedIntent.operation
+      || result.organization_id !== expectedIntent.organization_id
+      || result.request_digest_sha256 !== expectedIntent.request_digest_sha256) {
+      throw new Error("authority context does not match public intent");
+    }
+  }
   return Object.freeze(result);
+}
+
+function normalizePublicIntent(value, idempotencyKey) {
+  assertExactKeys(value, PUBLIC_INTENT_FIELDS);
+  if (value.operation !== PUBLIC_INTENT_OPERATION
+    || !UUID.test(value.organization_id ?? "")
+    || !UUID.test(value.promotion_id ?? "")
+    || typeof value.deployment_id !== "string"
+    || !PUBLIC_INTENT_DEPLOYMENT_ID.test(value.deployment_id)
+    || !["staging", "production"].includes(value.environment)
+    || typeof value.candidate_id !== "string"
+    || !PUBLIC_INTENT_CANDIDATE_ID.test(value.candidate_id)
+    || typeof idempotencyKey !== "string"
+    || !IDEMPOTENCY_KEY.test(idempotencyKey)) {
+    throw invalidRequest();
+  }
+  const intent = {
+    operation: PUBLIC_INTENT_OPERATION,
+    organization_id: value.organization_id.toLowerCase(),
+    promotion_id: value.promotion_id.toLowerCase(),
+    deployment_id: value.deployment_id,
+    environment: value.environment,
+    candidate_id: value.candidate_id,
+    idempotency_key: idempotencyKey
+  };
+  const digestInput = {
+    promotion_id: intent.promotion_id,
+    deployment_id: intent.deployment_id,
+    environment: intent.environment,
+    candidate_id: intent.candidate_id,
+    idempotency_key: intent.idempotency_key
+  };
+  return Object.freeze({
+    ...intent,
+    request_digest_sha256: platformPromotionAuthorizationRequestDigest(digestInput, { organizationId: intent.organization_id })
+  });
+}
+
+function humanSessionMaterialHash(headers, phase) {
+  // Assertion context is challenge-owned. It is resolved by the trusted
+  // authority resolver from challenge_id and must not depend on either a
+  // human or platform cookie. Revoke has its own platform-cookie path.
+  if (phase === "assertion") return null;
+  const cookie = header(headers, "cookie");
+  if (cookie === undefined) {
+    throw new PlatformSessionHttpError(PLATFORM_SESSION_HTTP_ERROR_CODES.BOOTSTRAP_REQUIRED, { status: 401 });
+  }
+  let token;
+  try {
+    token = parseSessionCookie(cookie);
+  } catch {
+    throw new PlatformSessionHttpError(PLATFORM_SESSION_HTTP_ERROR_CODES.BOOTSTRAP_REQUIRED, { status: 401 });
+  }
+  return hashOpaqueToken(token);
 }
 
 function normalizeAssertionBody(value) {
@@ -501,12 +580,15 @@ function normalizeAssertionBody(value) {
 function normalizeChallengeResponse(value) {
   if (!isObject(value)) throw new PlatformSessionHttpError(PLATFORM_SESSION_HTTP_ERROR_CODES.CHALLENGE_FAILED, { status: 503 });
   for (const key of Object.keys(value)) {
+    if (!CHALLENGE_RESPONSE_FIELDS.has(key)) {
+      throw new PlatformSessionHttpError(PLATFORM_SESSION_HTTP_ERROR_CODES.CHALLENGE_FAILED, { status: 503 });
+    }
     if (/(bearer|token|secret|assertion|signature|private|session_material_hash)/iu.test(key)) {
       throw new PlatformSessionHttpError(PLATFORM_SESSION_HTTP_ERROR_CODES.CHALLENGE_FAILED, { status: 503 });
     }
   }
   if (value.version !== 1 || value.type !== "agentpass.platform-session-challenge" || !UUID_V4.test(value.challenge_id ?? "")) throw new PlatformSessionHttpError(PLATFORM_SESSION_HTTP_ERROR_CODES.CHALLENGE_FAILED, { status: 503 });
-  if (typeof value.challenge !== "string" || !BASE64URL.test(value.challenge) || typeof value.jti !== "string" || !UUID_V4.test(value.jti) || !Array.isArray(value.allowed_credential_ids) || value.allowed_credential_ids.length < 1 || typeof value.issued_at !== "string" || typeof value.expires_at !== "string" || value.one_use !== true) throw new PlatformSessionHttpError(PLATFORM_SESSION_HTTP_ERROR_CODES.CHALLENGE_FAILED, { status: 503 });
+  if (typeof value.challenge !== "string" || !BASE64URL.test(value.challenge) || typeof value.jti !== "string" || !UUID_V4.test(value.jti) || !Array.isArray(value.allowed_credential_ids) || value.allowed_credential_ids.length < 1 || typeof value.issued_at !== "string" || typeof value.expires_at !== "string" || value.one_use !== true || typeof value.operation !== "string" || typeof value.rp_id !== "string" || typeof value.origin !== "string" || value.user_verification !== "required") throw new PlatformSessionHttpError(PLATFORM_SESSION_HTTP_ERROR_CODES.CHALLENGE_FAILED, { status: 503 });
   return Object.freeze({
     version: 1,
     type: "agentpass.platform-session-challenge",
@@ -515,11 +597,6 @@ function normalizeChallengeResponse(value) {
     challenge: value.challenge,
     allowed_credential_ids: Object.freeze([...value.allowed_credential_ids]),
     operation: value.operation,
-    capability: value.capability,
-    principal_id: value.principal_id,
-    assignment_id: value.assignment_id,
-    authority_generation: value.authority_generation,
-    request_digest_sha256: value.request_digest_sha256,
     rp_id: value.rp_id,
     origin: value.origin,
     user_verification: value.user_verification,
@@ -531,14 +608,31 @@ function normalizeChallengeResponse(value) {
 
 function projectSession(value) {
   if (!isObject(value)) throw new PlatformSessionHttpError(PLATFORM_SESSION_HTTP_ERROR_CODES.ASSERTION_FAILED, { status: 503 });
-  const result = Object.create(null);
-  for (const key of Object.keys(value)) {
-    if (!SESSION_RESPONSE_FIELDS.has(key)) continue;
-    if (/(bearer|token|secret|assertion|signature|challenge|jti)/iu.test(key)) throw new PlatformSessionHttpError(PLATFORM_SESSION_HTTP_ERROR_CODES.ASSERTION_FAILED, { status: 503 });
-    result[key] = value[key];
+  try {
+    const operation = requiredString(value.operation);
+    const capability = requiredString(value.capability);
+    const status = value.status;
+    if (operation !== PUBLIC_INTENT_OPERATION || capability !== operation
+      || !["active", "expired", "revoked"].includes(status)) throw new Error("session scope is invalid");
+    return Object.freeze({
+      version: 1,
+      type: "agentpass.platform-session",
+      session_id: requiredUuid(value.session_id ?? value.id),
+      principal_id: requiredUuid(value.principal_id),
+      assignment_id: requiredUuid(value.assignment_id),
+      authority_generation: requiredPositiveInteger(value.authority_generation ?? value.principal_authority_generation),
+      operation,
+      capability,
+      request_digest_sha256: requiredDigestHex(value.request_digest_sha256),
+      authenticated_at: requiredTimestamp(value.authenticated_at),
+      issued_at: requiredTimestamp(value.issued_at ?? value.created_at),
+      expires_at: requiredTimestamp(value.expires_at),
+      status
+    });
+  } catch (error) {
+    if (error instanceof PlatformSessionHttpError) throw error;
+    throw new PlatformSessionHttpError(PLATFORM_SESSION_HTTP_ERROR_CODES.ASSERTION_FAILED, { status: 503, cause: error });
   }
-  if (result.session_id === undefined && result.id === undefined) throw new PlatformSessionHttpError(PLATFORM_SESSION_HTTP_ERROR_CODES.ASSERTION_FAILED, { status: 503 });
-  return Object.freeze({ ...result });
 }
 
 function safeTimestamp(value) {
@@ -671,6 +765,12 @@ function requiredString(value) {
 function requiredDigestHex(value) {
   if (typeof value !== "string" || !/^[0-9a-f]{64}$/iu.test(value)) throw new Error("authority digest is invalid");
   return value.toLowerCase();
+}
+
+function requiredTimestamp(value) {
+  if (typeof value !== "string" || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/u.test(value)
+    || !Number.isFinite(Date.parse(value))) throw new Error("session timestamp is invalid");
+  return value;
 }
 
 function requiredCredentialIds(value) {

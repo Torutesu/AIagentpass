@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import crypto from "node:crypto";
 import fs from "node:fs";
 import test from "node:test";
 
@@ -6,6 +7,7 @@ import {
   normalizePlatformOperatorAuthorization,
   normalizePlatformPromotionRequest,
   normalizePlatformPromotionResult,
+  platformPromotionAuthorizationRequestDigest,
   platformPromotionContextHash,
   PLATFORM_PROMOTION_OPERATIONS
 } from "../src/platform-promotion-http-contract.mjs";
@@ -17,6 +19,7 @@ const INPUT = Object.freeze({
   candidate_id: `release-pkg-sha256-v1-${"a".repeat(64)}`
 });
 const IDEMPOTENCY_KEY = "platform-promotion-0001";
+const ORGANIZATION_ID = "99999999-9999-4999-8999-999999999999";
 const EVIDENCE = JSON.parse(fs.readFileSync(new URL("../../../contracts/fixtures/promotion-evidence-v3.valid.json", import.meta.url), "utf8"));
 
 test("normalizes the exact public request and operation-bound recent-auth context", () => {
@@ -28,6 +31,14 @@ test("normalizes the exact public request and operation-bound recent-auth contex
   assert.notEqual(issue, replay);
   assert.throws(() => normalizePlatformPromotionRequest({ ...INPUT, role: "platform_operator" }, IDEMPOTENCY_KEY));
   assert.throws(() => normalizePlatformPromotionRequest(INPUT, "short"));
+});
+
+test("matches the 0054 organization-bound authorization request digest", () => {
+  const normalized = normalizePlatformPromotionRequest(INPUT, IDEMPOTENCY_KEY);
+  const canonical = `{"candidate_id":"${INPUT.candidate_id}","deployment_id":"${INPUT.deployment_id}","environment":"${INPUT.environment}","idempotency_key":"${IDEMPOTENCY_KEY}","operation":"platform.promotion.issue","organization_id":"${ORGANIZATION_ID}","promotion_id":"${INPUT.promotion_id}"}`;
+  const expected = crypto.createHash("sha256").update(canonical, "utf8").digest("hex");
+  assert.equal(platformPromotionAuthorizationRequestDigest(normalized, { organizationId: ORGANIZATION_ID }), expected);
+  assert.throws(() => platformPromotionAuthorizationRequestDigest(normalized, { organizationId: ORGANIZATION_ID, operation: "platform.promotion.replay" }));
 });
 
 test("accepts only an exact platform role and capability decision", () => {

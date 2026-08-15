@@ -81,9 +81,9 @@ test("catalog freezes the complete current contract inventory", () => {
   assert.equal(catalog.catalog_id, "agentpass.contract-catalog");
   assert.equal(catalog.catalog_version, 1);
   assert.equal(catalog.status, "frozen");
-  assert.equal(catalog.entries.length, 159);
+  assert.equal(catalog.entries.length, 162);
   const counts = catalog.entries.reduce((result, entry) => ({ ...result, [entry.kind]: (result[entry.kind] ?? 0) + 1 }), {});
-  assert.deepEqual(counts, { "json-schema": 45, "openapi-operation": 61, "postgres-migration": 53 });
+  assert.deepEqual(counts, { "json-schema": 46, "openapi-operation": 61, "postgres-migration": 55 });
   assert.equal(new Set(catalog.entries.map((entry) => entry.purpose)).size, catalog.entries.length);
   for (const entry of catalog.entries) {
     assert.ok(catalog.profiles[entry.profile], `${entry.id} profile`);
@@ -92,7 +92,7 @@ test("catalog freezes the complete current contract inventory", () => {
   }
   const result = runValidatorWithCatalog();
   assert.equal(result.status, 0, result.stderr);
-  assert.match(result.stdout, /validated frozen contract catalog: 159 entries/);
+  assert.match(result.stdout, /validated frozen contract catalog: 162 entries/);
 });
 
 test("catalog includes every promoted Phase 1 schema and fixture", () => {

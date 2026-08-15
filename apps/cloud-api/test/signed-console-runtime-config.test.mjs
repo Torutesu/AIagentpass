@@ -216,6 +216,23 @@ function fakePostgresRuntime() {
       async markPlatformPromotionUncertain() { return { state: "uncertain" }; },
       async getCommittedPlatformPromotion() { return null; }
     },
+    platformOperatorAssignmentRepository: { async findActivePlatformOperatorAssignment() { return null; } },
+    platformSessionBootstrapRepository: { async resolvePlatformSessionBootstrap() { return null; } },
+    platformSessionRepository: {
+      bearerBound: true,
+      acceptsSessionMaterialHash: true,
+      async revokeSelf() { return { revoked: true }; }
+    },
+    platformSessionWebAuthnRepository: {
+      async createPlatformSessionChallenge() {},
+      async findPlatformSessionChallenge() { return null; },
+      async claimPlatformSessionChallenge() {},
+      async failPlatformSessionChallenge() {},
+      async completePlatformSessionChallenge() {},
+      async findPlatformCredentialForSession() {},
+      async advancePlatformCredentialCounter() {},
+      async issuePlatformSession() {}
+    },
     createManagedSignerKeyLifecycleRepository: createManagedSignerRepositoryFactory(),
     createProviderOperationRepository: createProviderOperationRepositoryFactory(),
     controlPlaneStore: { async pollDeviceRefresh() { return null; }, async markDeviceRefreshDelivered() {} },

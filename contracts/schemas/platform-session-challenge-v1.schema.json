@@ -2,61 +2,23 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://agentpass.dev/contracts/schemas/platform-session-challenge-v1.schema.json",
   "title": "AgentPass platform session WebAuthn challenge v1",
-  "description": "A short-lived challenge issued to start one platform session authentication. The raw challenge is transport material for the authenticator and must never be treated as a durable credential; the JTI is consumed exactly once.",
+  "description": "The exact public challenge response. Authority identifiers are resolved server-side and are not returned here; the raw JTI is one-use transport material and only its digest is persisted.",
   "type": "object",
   "additionalProperties": false,
-  "maxProperties": 18,
-  "required": [
-    "version",
-    "type",
-    "challenge_id",
-    "jti",
-    "challenge",
-    "allowed_credential_ids",
-    "operation",
-    "capability",
-    "principal_id",
-    "assignment_id",
-    "authority_generation",
-    "request_digest_sha256",
-    "rp_id",
-    "origin",
-    "user_verification",
-    "issued_at",
-    "expires_at",
-    "one_use"
-  ],
+  "minProperties": 13,
+  "maxProperties": 13,
+  "required": ["version", "type", "challenge_id", "challenge", "jti", "allowed_credential_ids", "operation", "rp_id", "origin", "user_verification", "issued_at", "expires_at", "one_use"],
   "properties": {
     "version": { "const": 1 },
     "type": { "const": "agentpass.platform-session-challenge" },
     "challenge_id": { "$ref": "#/$defs/uuid" },
-    "jti": {
-      "type": "string",
-      "minLength": 22,
-      "maxLength": 256,
-      "pattern": "^[A-Za-z0-9_-]+$",
-      "description": "Opaque, unpadded base64url one-use identifier. Only its digest is persisted."
-    },
-    "challenge": {
-      "type": "string",
-      "minLength": 43,
-      "maxLength": 43,
-      "pattern": "^[A-Za-z0-9_-]{43}$",
-      "description": "Exactly 32 random bytes encoded as unpadded base64url for the WebAuthn challenge ceremony."
-    },
+    "challenge": { "type": "string", "minLength": 43, "maxLength": 43, "pattern": "^[A-Za-z0-9_-]{43}$" },
+    "jti": { "$ref": "#/$defs/uuid" },
     "allowed_credential_ids": {
-      "type": "array",
-      "minItems": 1,
-      "maxItems": 16,
-      "uniqueItems": true,
+      "type": "array", "minItems": 1, "maxItems": 16, "uniqueItems": true,
       "items": { "$ref": "#/$defs/credentialId" }
     },
-    "operation": { "$ref": "#/$defs/operation" },
-    "capability": { "enum": ["platform.assignment.manage", "platform.promotion.issue", "platform.promotion.replay", "platform.promotion.verify", "platform.promotion.reconcile"] },
-    "principal_id": { "$ref": "#/$defs/uuid" },
-    "assignment_id": { "$ref": "#/$defs/uuid" },
-    "authority_generation": { "$ref": "#/$defs/positiveSafeInteger" },
-    "request_digest_sha256": { "$ref": "#/$defs/sha256" },
+    "operation": { "const": "platform.promotion.issue" },
     "rp_id": { "$ref": "#/$defs/rpId" },
     "origin": { "$ref": "#/$defs/origin" },
     "user_verification": { "const": "required" },
@@ -65,52 +27,10 @@
     "one_use": { "const": true }
   },
   "$defs": {
-    "uuid": {
-      "type": "string",
-      "format": "uuid",
-      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
-    },
-    "credentialId": {
-      "type": "string",
-      "minLength": 22,
-      "maxLength": 1366,
-      "pattern": "^(?:[A-Za-z0-9_-]{4})*(?:[A-Za-z0-9_-]{2}|[A-Za-z0-9_-]{3})?$"
-    },
-    "operation": {
-      "type": "string",
-      "minLength": 1,
-      "maxLength": 128,
-      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$"
-    },
-    "positiveSafeInteger": {
-      "type": "integer",
-      "minimum": 1,
-      "maximum": 9007199254740991
-    },
-    "sha256": {
-      "type": "string",
-      "minLength": 64,
-      "maxLength": 64,
-      "pattern": "^[0-9a-f]{64}$"
-    },
-    "rpId": {
-      "type": "string",
-      "minLength": 1,
-      "maxLength": 253,
-      "pattern": "^[A-Za-z0-9](?:[A-Za-z0-9.-]*[A-Za-z0-9])?$"
-    },
-    "origin": {
-      "type": "string",
-      "minLength": 9,
-      "maxLength": 512,
-      "pattern": "^https://[^/?#@]+(?::[0-9]{1,5})?$"
-    },
-    "timestamp": {
-      "type": "string",
-      "minLength": 24,
-      "maxLength": 24,
-      "format": "date-time",
-      "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$"
-    }
+    "uuid": { "type": "string", "format": "uuid", "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$" },
+    "credentialId": { "type": "string", "minLength": 22, "maxLength": 1366, "pattern": "^(?:[A-Za-z0-9_-]{4})*(?:[A-Za-z0-9_-]{2}|[A-Za-z0-9_-]{3})?$" },
+    "rpId": { "type": "string", "minLength": 1, "maxLength": 253, "pattern": "^[A-Za-z0-9](?:[A-Za-z0-9.-]*[A-Za-z0-9])?$" },
+    "origin": { "type": "string", "minLength": 9, "maxLength": 512, "pattern": "^https://[^/?#@]+(?::[0-9]{1,5})?$" },
+    "timestamp": { "type": "string", "format": "date-time", "minLength": 24, "maxLength": 24, "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$" }
   }
 }

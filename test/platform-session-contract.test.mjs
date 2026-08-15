@@ -7,44 +7,41 @@ import addFormats from "ajv-formats";
 
 const root = path.resolve(import.meta.dirname, "..");
 const schemaDirectory = path.join(root, "contracts", "schemas");
+const openapiPath = path.join(root, "contracts", "openapi", "platform-v1.json");
+const catalogPath = path.join(root, "contracts", "catalog-v1.json");
+const responseFixturePath = path.join(root, "contracts", "fixtures", "platform-session-http-assertion-response.contract.json");
 
-const files = Object.freeze([
-  "platform-credential-v1.schema.json",
+const schemaFiles = Object.freeze([
   "platform-session-challenge-v1.schema.json",
   "platform-session-assertion-v1.schema.json",
   "platform-session-response-v1.schema.json",
-  "platform-session-revoke-request-v1.schema.json",
-  "platform-session-revoke-response-v1.schema.json"
-]);
-
-const responseFiles = Object.freeze([
-  "platform-credential-v1.schema.json",
-  "platform-session-challenge-v1.schema.json",
-  "platform-session-response-v1.schema.json",
+  "platform-session-http-assertion-response-v1.schema.json",
   "platform-session-revoke-request-v1.schema.json",
   "platform-session-revoke-response-v1.schema.json"
 ]);
 
 const ids = Object.freeze({
-  request: "11111111-1111-4111-8111-111111111111",
-  session: "22222222-2222-4222-8222-222222222222",
-  challenge: "33333333-3333-4333-8333-333333333333",
-  principal: "44444444-4444-4444-8444-444444444444",
-  assignment: "55555555-5555-4555-8555-555555555555"
+  challenge: "55555555-5555-4555-8555-555555555555",
+  jti: "77777777-7777-4777-8777-777777777777",
+  session: "66666666-6666-4666-8666-666666666666",
+  principal: "11111111-1111-4111-8111-111111111111",
+  assignment: "44444444-4444-4444-8444-444444444444",
+  organization: "33333333-3333-4333-8333-333333333333",
+  promotion: "88888888-8888-4888-8888-888888888888"
 });
-
-const digest = "a".repeat(64);
-const credentialId = "A".repeat(43);
-const challenge = "B".repeat(43);
-const jti = "C".repeat(43);
 const timestamp = "2026-08-15T00:00:00.000Z";
-const expiresAt = "2026-08-15T00:05:00.000Z";
+const expiresAt = "2026-08-15T00:15:00.000Z";
+const digest = "ab".repeat(32);
+const credentialId = Buffer.alloc(32, 7).toString("base64url");
+const challengeBytes = Buffer.alloc(32, 3).toString("base64url");
 
-function readSchema(file) {
-  return JSON.parse(fs.readFileSync(path.join(schemaDirectory, file), "utf8"));
+function readJson(file) {
+  return JSON.parse(fs.readFileSync(file, "utf8"));
 }
 
-const schemas = Object.freeze(Object.fromEntries(files.map((file) => [file, readSchema(file)])));
+const schemas = Object.freeze(Object.fromEntries(schemaFiles.map((file) => [file, readJson(path.join(schemaDirectory, file))])));
+const openapi = readJson(openapiPath);
+const catalog = readJson(catalogPath);
 const ajv = new Ajv2020({ allErrors: true, strict: true, strictRequired: false });
 addFormats(ajv);
 for (const schema of Object.values(schemas)) ajv.addSchema(schema);
@@ -63,209 +60,208 @@ function assertInvalid(file, value) {
   assert.equal(validate(value), false, `${file} unexpectedly accepted invalid input`);
 }
 
-function propertyNames(schema) {
-  return Object.keys(schema.properties ?? {});
-}
-
-function sampleCredential() {
-  return {
-    version: 1,
-    type: "agentpass.platform-credential",
-    credential_id: credentialId,
-    principal_id: ids.principal,
-    algorithm: "es256",
-    transports: ["internal"],
-    backup_eligible: false,
-    backup_state: false,
-    status: "active",
-    created_at: timestamp,
-    last_used_at: null
-  };
-}
-
-function sampleChallenge() {
+function challengeResponse() {
   return {
     version: 1,
     type: "agentpass.platform-session-challenge",
     challenge_id: ids.challenge,
-    jti,
-    challenge,
+    challenge: challengeBytes,
+    jti: ids.jti,
     allowed_credential_ids: [credentialId],
     operation: "platform.promotion.issue",
-    capability: "platform.promotion.issue",
-    principal_id: ids.principal,
-    assignment_id: ids.assignment,
-    authority_generation: 7,
-    request_digest_sha256: digest,
-    rp_id: "console.agentpass.dev",
-    origin: "https://console.agentpass.dev",
+    rp_id: "console.agentpass.test",
+    origin: "https://console.agentpass.test",
     user_verification: "required",
     issued_at: timestamp,
-    expires_at: expiresAt,
+    expires_at: "2026-08-15T00:02:00.000Z",
     one_use: true
   };
 }
 
-function sampleAssertion() {
+function assertionBody() {
   return {
     version: 1,
     type: "agentpass.platform-session-assertion",
     challenge_id: ids.challenge,
-    jti,
+    jti: ids.jti,
     credential_id: credentialId,
-    client_data_json: "D".repeat(64),
-    authenticator_data: "E".repeat(64),
-    signature: "F".repeat(86),
-    user_handle: "G".repeat(22)
+    client_data_json: Buffer.from("client-data").toString("base64url"),
+    authenticator_data: Buffer.from("authenticator-data").toString("base64url"),
+    signature: Buffer.from("signature").toString("base64url")
   };
 }
 
-function sampleSessionResponse() {
+function sessionMetadata() {
   return {
     version: 1,
     type: "agentpass.platform-session",
-    request_id: ids.request,
     session_id: ids.session,
-    challenge_id: ids.challenge,
     principal_id: ids.principal,
     assignment_id: ids.assignment,
-    authority_generation: 7,
+    authority_generation: 4,
     operation: "platform.promotion.issue",
     capability: "platform.promotion.issue",
     request_digest_sha256: digest,
-    credential_id_sha256: digest,
     authenticated_at: timestamp,
     issued_at: timestamp,
     expires_at: expiresAt,
-    session_transport: "secure-http-only-cookie",
-    replayed: false
+    status: "active"
   };
 }
 
-function sampleRevokeRequest() {
+function challengeIntent() {
   return {
-    version: 1,
-    type: "agentpass.platform-session-revoke-request",
-    request_id: ids.request,
-    session_id: ids.session,
-    principal_id: ids.principal,
-    assignment_id: ids.assignment,
-    authority_generation: 7,
     operation: "platform.promotion.issue",
-    capability: "platform.promotion.issue",
-    request_digest_sha256: digest,
-    reason: "self"
+    organization_id: ids.organization,
+    promotion_id: ids.promotion,
+    deployment_id: "cloud-prod-2026-08",
+    environment: "production",
+    candidate_id: `release-pkg-sha256-v1-${"a".repeat(64)}`
   };
 }
 
-function sampleRevokeResponse() {
-  return {
-    version: 1,
-    type: "agentpass.platform-session-revoke-response",
-    request_id: ids.request,
-    session_id: ids.session,
-    principal_id: ids.principal,
-    assignment_id: ids.assignment,
-    authority_generation: 7,
-    operation: "platform.promotion.issue",
-    capability: "platform.promotion.issue",
-    status: "revoked",
-    revoked_at: timestamp,
-    replayed: false
-  };
-}
-
-test("N3a adds exactly the frozen platform session contract files", () => {
-  assert.deepEqual(files.map((file) => fs.existsSync(path.join(schemaDirectory, file))), files.map(() => true));
-  for (const file of files) {
-    const schema = schemas[file];
-    assert.equal(schema.$schema, "https://json-schema.org/draft/2020-12/schema", file);
-    assert.match(schema.$id, new RegExp(`/${file.replaceAll(".", "\\.")}$`), file);
-    assert.equal(schema.type, "object", file);
-    assert.equal(schema.additionalProperties, false, file);
-    assert.ok(Number.isInteger(schema.maxProperties), `${file} must bound its object size`);
+test("Platform v1 contract assets are strict and complete", () => {
+  for (const file of schemaFiles) {
+    assert.equal(schemas[file].$schema, "https://json-schema.org/draft/2020-12/schema", file);
+    assert.equal(schemas[file].type, "object", file);
+    assert.equal(schemas[file].additionalProperties, false, file);
+    assert.ok(Number.isInteger(schemas[file].maxProperties), `${file} must bound object size`);
   }
+  assertValid("platform-session-challenge-v1.schema.json", challengeResponse());
+  assertValid("platform-session-assertion-v1.schema.json", assertionBody());
+  assertValid("platform-session-response-v1.schema.json", sessionMetadata());
+  assertValid("platform-session-http-assertion-response-v1.schema.json", readJson(responseFixturePath));
+  assertValid("platform-session-revoke-request-v1.schema.json", {});
+  assertValid("platform-session-revoke-response-v1.schema.json", { session: null });
+  for (const [file, value] of [
+    ["platform-session-challenge-v1.schema.json", challengeResponse()],
+    ["platform-session-assertion-v1.schema.json", assertionBody()],
+    ["platform-session-response-v1.schema.json", sessionMetadata()],
+    ["platform-session-http-assertion-response-v1.schema.json", readJson(responseFixturePath)],
+    ["platform-session-revoke-response-v1.schema.json", { session: null }]
+  ]) assertInvalid(file, { ...value, unexpected: true });
 });
 
-test("N3a examples validate and every public object rejects unknown fields", () => {
-  const examples = {
-    "platform-credential-v1.schema.json": sampleCredential(),
-    "platform-session-challenge-v1.schema.json": sampleChallenge(),
-    "platform-session-assertion-v1.schema.json": sampleAssertion(),
-    "platform-session-response-v1.schema.json": sampleSessionResponse(),
-    "platform-session-revoke-request-v1.schema.json": sampleRevokeRequest(),
-    "platform-session-revoke-response-v1.schema.json": sampleRevokeResponse()
-  };
-  for (const [file, value] of Object.entries(examples)) {
-    assertValid(file, value);
-    assertInvalid(file, { ...value, unexpected: true });
-  }
-});
-
-test("challenge is operation-bound, generation-bound, and explicitly one-use", () => {
-  const schema = schemas["platform-session-challenge-v1.schema.json"];
-  assert.deepEqual(schema.required, [
-    "version", "type", "challenge_id", "jti", "challenge", "allowed_credential_ids",
-    "operation", "capability", "principal_id", "assignment_id", "authority_generation",
-    "request_digest_sha256", "rp_id", "origin", "user_verification", "issued_at", "expires_at", "one_use"
+test("challenge request accepts only public mutation intent and binds Idempotency-Key", () => {
+  const requestSchema = openapi.components.schemas.PlatformSessionChallengeRequest;
+  assert.deepEqual(Object.keys(requestSchema.properties).sort(), [
+    "candidate_id", "deployment_id", "environment", "operation", "organization_id", "promotion_id"
   ]);
-  assert.equal(schema.properties.one_use.const, true);
-  assert.equal(schema.properties.user_verification.const, "required");
-  assert.equal(schema.properties.challenge.minLength, 43);
-  assert.equal(schema.properties.challenge.maxLength, 43);
-  for (const field of ["operation", "capability", "principal_id", "assignment_id", "authority_generation", "request_digest_sha256"]) {
-    assert.ok(schema.required.includes(field), `${field} must bind the challenge`);
+  assert.equal(requestSchema.additionalProperties, false);
+  assert.equal(requestSchema.minProperties, 6);
+  assert.equal(requestSchema.maxProperties, 6);
+  assert.deepEqual([...requestSchema.required].sort(), Object.keys(challengeIntent()).sort());
+  assert.equal(requestSchema.properties.operation.const, "platform.promotion.issue");
+  for (const forbidden of ["principal_id", "member_id", "assignment_id", "authority_generation", "credential_id", "allowed_credential_ids"]) {
+    assert.equal(Object.hasOwn(requestSchema.properties, forbidden), false, `${forbidden} must not be browser input`);
   }
-  assertInvalid("platform-session-challenge-v1.schema.json", { ...sampleChallenge(), one_use: false });
-  assertInvalid("platform-session-challenge-v1.schema.json", { ...sampleChallenge(), jti: "short" });
-  assertInvalid("platform-session-challenge-v1.schema.json", { ...sampleChallenge(), challenge: "not-a-32-byte-challenge" });
+  const challengeOperation = openapi.paths["/api/platform/v1/sessions/challenges"].post;
+  assert.equal(challengeOperation.requestBody.required, true);
+  assert.equal(challengeOperation.requestBody.content["application/json"].schema.$ref, "#/components/schemas/PlatformSessionChallengeRequest");
+  assert.equal(challengeOperation.parameters.some((parameter) => parameter.$ref === "#/components/parameters/IdempotencyKey"), true);
+  assert.equal(openapi.components.parameters.IdempotencyKey.required, true);
+  assert.equal(openapi.components.parameters.IdempotencyKey.name, "Idempotency-Key");
+  assert.match(openapi.components.parameters.IdempotencyKey.schema.pattern, /A-Za-z0-9/);
+  assert.match(challengeOperation["x-agentpass-request-binding"]["canonical-form"], /idempotency_key/);
+  assert.deepEqual(challengeOperation["x-agentpass-request-binding"]["browser-authority-fields"], []);
 });
 
-test("assertion is the only transient DTO that contains WebAuthn assertion bytes", () => {
-  const assertion = schemas["platform-session-assertion-v1.schema.json"];
-  assert.deepEqual(new Set(propertyNames(assertion)), new Set([
-    "version", "type", "challenge_id", "jti", "credential_id", "client_data_json",
-    "authenticator_data", "signature", "user_handle"
-  ]));
-  for (const field of ["client_data_json", "authenticator_data", "signature"]) assert.ok(assertion.required.includes(field));
-  for (const file of responseFiles) {
-    const names = propertyNames(schemas[file]);
-    for (const forbidden of ["private_key", "session_token", "access_token", "assertion", "client_data_json", "authenticator_data", "signature"]) {
-      assert.equal(names.includes(forbidden), false, `${file} must not expose ${forbidden}`);
+test("challenge response is server-derived and contains no internal member/org/session identifiers", () => {
+  const schema = schemas["platform-session-challenge-v1.schema.json"];
+  assert.deepEqual(Object.keys(schema.properties).sort(), [
+    "allowed_credential_ids", "challenge", "challenge_id", "expires_at", "issued_at", "jti", "one_use", "operation", "origin", "rp_id", "type", "user_verification", "version"
+  ]);
+  for (const forbidden of ["principal_id", "member_id", "organization_id", "platform_session_id", "assignment_id", "authority_generation", "capability", "request_digest_sha256"]) {
+    assert.equal(Object.hasOwn(schema.properties, forbidden), false, `${forbidden} must not be returned`);
+  }
+  assert.equal(schema.properties.operation.const, "platform.promotion.issue");
+  assert.equal(openapi.paths["/api/platform/v1/sessions/challenges"].post.responses["201"].$ref, "#/components/responses/PlatformSessionChallengeCreated");
+  assert.deepEqual(openapi.paths["/api/platform/v1/sessions/challenges"].post.security, [{ sameOrigin: [], humanSessionCookie: [] }]);
+  assert.equal(openapi.components.securitySchemes.humanSessionCookie.name, "__Host-agentpass_session");
+  assert.equal(openapi.paths["/api/platform/v1/sessions/challenges"].post["x-agentpass-transport"]["platform-session-bearer"], "absent and forbidden on this endpoint");
+});
+
+test("assertion request is exactly the public eight/nine-field WebAuthn boundary", () => {
+  const schema = schemas["platform-session-assertion-v1.schema.json"];
+  assert.deepEqual(Object.keys(schema.properties).sort(), [
+    "authenticator_data", "challenge_id", "client_data_json", "credential_id", "jti", "signature", "type", "user_handle", "version"
+  ]);
+  assert.deepEqual([...schema.required].sort(), [
+    "authenticator_data", "challenge_id", "client_data_json", "credential_id", "jti", "signature", "type", "version"
+  ]);
+  for (const forbidden of ["challenge", "principal_id", "member_id", "organization_id", "assignment_id", "authority_generation"]) {
+    assertInvalid("platform-session-assertion-v1.schema.json", { ...assertionBody(), [forbidden]: "not-accepted" });
+  }
+  const operation = openapi.paths["/api/platform/v1/sessions"].post;
+  assert.equal(operation.requestBody.content["application/json"].schema.$ref, "../schemas/platform-session-assertion-v1.schema.json");
+});
+
+test("session and revoke HTTP envelopes keep bearer and internal identity out of JSON", () => {
+  const sessionSchema = schemas["platform-session-response-v1.schema.json"];
+  const responseSchema = schemas["platform-session-http-assertion-response-v1.schema.json"];
+  const forbidden = ["credential_id", "credential_id_sha256", "member_id", "organization_id", "session_bearer", "session_token", "access_token"];
+  for (const name of forbidden) {
+    assert.equal(Object.hasOwn(sessionSchema.properties, name), false, `${name} leaked from session metadata`);
+    assert.equal(Object.hasOwn(responseSchema.properties, name), false, `${name} leaked from HTTP envelope`);
+  }
+  assert.equal(responseSchema.properties.csrf_token.type, "string");
+  assert.equal(responseSchema.properties.csrf_token.minLength, 43);
+  assert.equal(openapi.paths["/api/platform/v1/sessions"].post.responses["201"].$ref, "#/components/responses/PlatformSessionIssued");
+  assert.equal(openapi.paths["/api/platform/v1/sessions/revoke"].post.requestBody, undefined);
+  assert.equal(openapi.paths["/api/platform/v1/sessions/revoke"].post.responses["200"].$ref, "#/components/responses/PlatformSessionRevoked");
+  assert.equal(openapi.components.schemas.PlatformSessionRevokeRequest.$ref, "../schemas/platform-session-revoke-request-v1.schema.json");
+  assert.equal(openapi.components.schemas.PlatformSessionRevokeResponse.$ref, "../schemas/platform-session-revoke-response-v1.schema.json");
+  const assertionAuthentication = openapi.paths["/api/platform/v1/sessions"].post["x-agentpass-authentication"];
+  assert.equal(assertionAuthentication["human-session-cookie"], "not read during assertion resolution");
+  assert.equal(assertionAuthentication["platform-session-cookie"], "not read during assertion resolution");
+  assert.match(assertionAuthentication.origin, /not an identity assertion/iu);
+});
+
+test("cookie, CSRF, origin, no-store, and operation surface are explicit", () => {
+  assert.deepEqual(Object.keys(openapi.paths).sort(), [
+    "/api/platform/v1/sessions",
+    "/api/platform/v1/sessions/challenges",
+    "/api/platform/v1/sessions/revoke"
+  ]);
+  assert.deepEqual(Object.keys(openapi.components.securitySchemes).sort(), ["humanSessionCookie", "platformSessionCookie", "platformSessionCsrf", "sameOrigin"]);
+  assert.equal(openapi.components.securitySchemes.platformSessionCookie.in, "cookie");
+  assert.equal(openapi.components.securitySchemes.platformSessionCookie.name, "__Host-agentpass_platform_session");
+  assert.equal(openapi.components.securitySchemes.platformSessionCsrf.in, "header");
+  assert.equal(openapi.components.securitySchemes.platformSessionCsrf.name, "agentpass-platform-csrf");
+  assert.deepEqual(openapi.paths["/api/platform/v1/sessions/revoke"].post.security, [{ platformSessionCookie: [], platformSessionCsrf: [] }]);
+  assert.equal(openapi.paths["/api/platform/v1/sessions/challenges"].post["x-agentpass-request-binding"]["canonical-form"], "canonical-json({candidate_id,deployment_id,environment,idempotency_key,operation,organization_id,promotion_id})");
+  assert.equal(openapi.paths["/api/platform/v1/sessions/challenges"].post["x-agentpass-request-binding"].digest, "sha256(UTF-8 canonical-form)");
+  assert.match(openapi.components.headers.PlatformSessionSetCookie.schema.pattern, /HttpOnly/);
+  assert.match(openapi.components.headers.PlatformSessionSetCookie.schema.pattern, /Secure/);
+  assert.match(openapi.components.headers.PlatformSessionSetCookie.schema.pattern, /SameSite=Strict/);
+  for (const operation of Object.values(openapi.paths).map((pathValue) => pathValue.post)) {
+    for (const response of Object.values(operation.responses)) {
+      if (!response.$ref?.includes("#/components/responses/")) continue;
+      const responseName = response.$ref.split("/").at(-1);
+      const responseDefinition = openapi.components.responses[responseName];
+      assert.ok(responseDefinition, responseName);
+      if (responseDefinition.headers?.["Cache-Control"]) assert.equal(responseDefinition.headers["Cache-Control"].$ref, "#/components/headers/CacheControlNoStore");
     }
   }
-  assertInvalid("platform-session-assertion-v1.schema.json", { ...sampleAssertion(), private_key: "must-not-be-accepted" });
-  assertInvalid("platform-session-assertion-v1.schema.json", { ...sampleAssertion(), session_token: "must-not-be-accepted" });
+  assert.equal(JSON.stringify(openapi).includes("platform.promotion.replay"), false);
+  assert.equal(JSON.stringify(openapi).includes("platform.promotion.verify"), false);
+  assert.equal(JSON.stringify(openapi).includes("platform.promotion.reconcile"), false);
 });
 
-test("session and revoke DTOs preserve authority bindings without bearer material", () => {
-  const session = schemas["platform-session-response-v1.schema.json"];
-  const revokeRequest = schemas["platform-session-revoke-request-v1.schema.json"];
-  const revokeResponse = schemas["platform-session-revoke-response-v1.schema.json"];
-  for (const [file, schema] of [
-    ["platform-session-response-v1.schema.json", session],
-    ["platform-session-revoke-request-v1.schema.json", revokeRequest],
-    ["platform-session-revoke-response-v1.schema.json", revokeResponse]
-  ]) {
-    for (const field of ["operation", "capability", "principal_id", "assignment_id", "authority_generation"]) {
-      assert.ok(schema.required.includes(field), `${file} must bind ${field}`);
-    }
+test("catalog records every platform-session schema and its public HTTP references", () => {
+  const expected = [
+    "platform-session-challenge-v1",
+    "platform-session-assertion-v1",
+    "platform-session-response-v1",
+    "platform-session-http-assertion-response-v1",
+    "platform-session-revoke-request-v1",
+    "platform-session-revoke-response-v1"
+  ];
+  for (const id of expected) {
+    const entry = catalog.entries.find((candidate) => candidate.id === `schema.${id}`);
+    assert.ok(entry, `catalog entry for ${id}`);
+    assert.equal(entry.source, `schemas/${id}.schema.json`);
+    assert.ok(entry.implementation_refs.includes("contracts/openapi/platform-v1.json"), `${id} is linked to platform-v1 OpenAPI`);
+    assert.ok(entry.compatibility_fixtures.includes("test/platform-session-contract.test.mjs"), `${id} has a contract test`);
   }
-  assert.equal(session.properties.session_transport.const, "secure-http-only-cookie");
-  assert.deepEqual(revokeRequest.properties.operation.enum, session.properties.capability.enum);
-  assert.deepEqual(revokeResponse.properties.operation.enum, session.properties.capability.enum);
-  assertInvalid("platform-session-response-v1.schema.json", { ...sampleSessionResponse(), session_token: "raw-token" });
-  assertInvalid("platform-session-revoke-request-v1.schema.json", { ...sampleRevokeRequest(), assertion: sampleAssertion() });
-  assertInvalid("platform-session-revoke-response-v1.schema.json", { ...sampleRevokeResponse(), client_data_json: "raw" });
-});
-
-test("credential DTO exposes only public binding metadata", () => {
-  const schema = schemas["platform-credential-v1.schema.json"];
-  for (const field of ["private_key", "public_key", "secret", "session_token", "assertion", "client_data_json", "authenticator_data", "signature"]) {
-    assert.equal(propertyNames(schema).includes(field), false, `credential must not expose ${field}`);
-  }
-  assert.ok(schema.required.includes("principal_id"));
-  for (const field of ["assignment_id", "authority_generation"]) assert.equal(schema.required.includes(field), false);
-  assertInvalid("platform-credential-v1.schema.json", { ...sampleCredential(), private_key: "must-not-be-accepted" });
-  assertInvalid("platform-credential-v1.schema.json", { ...sampleCredential(), backup_state: true, backup_eligible: false });
 });

@@ -12,6 +12,8 @@ import {
   PLATFORM_SESSION_CSRF_HEADER,
   hashPlatformSessionToken
 } from "../src/platform-session-transport.mjs";
+import { HUMAN_SESSION_COOKIE_NAME, hashOpaqueToken } from "../src/human-session.mjs";
+import { platformPromotionAuthorizationRequestDigest } from "../src/platform-promotion-http-contract.mjs";
 
 const ORIGIN = "https://console.agentpass.test";
 const IDS = Object.freeze({
@@ -26,6 +28,23 @@ const IDS = Object.freeze({
 const CREDENTIAL_ID = Buffer.alloc(32, 7).toString("base64url");
 const BEARER = Buffer.alloc(32, 1).toString("base64url");
 const CSRF = Buffer.alloc(32, 2).toString("base64url");
+const HUMAN_TOKEN = Buffer.alloc(32, 9).toString("base64url");
+const INTENT_BODY = Object.freeze({
+  operation: "platform.promotion.issue",
+  organization_id: IDS.organization,
+  promotion_id: "88888888-8888-4888-8888-888888888888",
+  deployment_id: "production-api",
+  environment: "production",
+  candidate_id: `release-pkg-sha256-v1-${"a".repeat(64)}`
+});
+const INTENT = Object.freeze({ ...INTENT_BODY, idempotency_key: "platform-intent-1" });
+const REQUEST_DIGEST = platformPromotionAuthorizationRequestDigest({
+  promotion_id: INTENT.promotion_id,
+  deployment_id: INTENT.deployment_id,
+  environment: INTENT.environment,
+  candidate_id: INTENT.candidate_id,
+  idempotency_key: INTENT.idempotency_key
+}, { organizationId: IDS.organization });
 const AUTHORITY = Object.freeze({
   principal_id: IDS.principal,
   member_id: IDS.member,
@@ -36,7 +55,7 @@ const AUTHORITY = Object.freeze({
   capability: "platform.promotion.issue",
   rp_id: "console.agentpass.test",
   origin: ORIGIN,
-  request_digest_sha256: "ab".repeat(32),
+  request_digest_sha256: REQUEST_DIGEST,
   allowed_credential_ids: [CREDENTIAL_ID],
   user_verification: "required"
 });
@@ -52,6 +71,13 @@ function jsonRequest(path, body, headers = {}) {
     },
     body: JSON.stringify(body)
   };
+}
+
+function challengeRequest(body = INTENT_BODY, headers = { "Idempotency-Key": INTENT.idempotency_key }) {
+  return jsonRequest(PLATFORM_SESSION_HTTP_PATHS.challenge, body, {
+    Cookie: `${HUMAN_SESSION_COOKIE_NAME}=${HUMAN_TOKEN}`,
+    ...headers
+  });
 }
 
 function serviceFixture(overrides = {}) {
@@ -78,7 +104,17 @@ function serviceFixture(overrides = {}) {
         session: {
           session_id: IDS.session,
           principal_id: IDS.principal,
+          member_id: IDS.member,
+          organization_id: IDS.organization,
+          assignment_id: IDS.assignment,
           credential_id: "internal-credential-id",
+          operation: AUTHORITY.operation,
+          capability: AUTHORITY.capability,
+          principal_authority_generation: AUTHORITY.authority_generation,
+          request_digest_sha256: AUTHORITY.request_digest_sha256,
+          authenticated_at: "2026-08-15T00:00:00.000Z",
+          created_at: "2026-08-15T00:00:00.000Z",
+          expires_at: "2026-08-15T00:15:00.000Z",
           status: "active"
         },
         session_bearer: BEARER,
@@ -112,20 +148,33 @@ function serviceFixture(overrides = {}) {
   return { api, calls };
 }
 
-test("challenge endpoint supplies only trusted server authority and rejects body fields", async () => {
+test("challenge endpoint accepts only public intent and derives authority server-side", async () => {
   const { api, calls } = serviceFixture();
-  const result = await api.handle(jsonRequest(PLATFORM_SESSION_HTTP_PATHS.challenge, {}));
+  const result = await api.handle(challengeRequest());
 
   assert.equal(result.status, 201);
   assert.equal(result.body.challenge_id, IDS.challenge);
   assert.equal(calls.bootstrap.length, 1);
+  assert.deepEqual(calls.bootstrap[0], {
+    phase: "challenge",
+    intent: { ...INTENT, request_digest_sha256: REQUEST_DIGEST },
+    session_material_hash: hashOpaqueToken(HUMAN_TOKEN)
+  });
   assert.deepEqual(calls.begin[0], AUTHORITY);
   assert.equal(calls.authority[0].phase, "challenge");
-  assert.equal("body" in calls.authority[0].request, false);
+  assert.deepEqual(calls.authority[0].intent, { ...INTENT, request_digest_sha256: REQUEST_DIGEST });
+  assert.equal("request" in calls.authority[0], false);
+  assert.equal(result.body.principal_id, undefined);
+  assert.equal(result.body.assignment_id, undefined);
+  assert.equal(result.body.authority_generation, undefined);
 
-  const rejected = await api.handle(jsonRequest(PLATFORM_SESSION_HTTP_PATHS.challenge, { principal_id: IDS.principal }));
+  const rejected = await api.handle(challengeRequest({ ...INTENT_BODY, principal_id: IDS.principal }));
   assert.equal(rejected.status, 400);
   assert.equal(rejected.body.error.code, PLATFORM_SESSION_HTTP_ERROR_CODES.INVALID_REQUEST);
+  assert.equal(calls.begin.length, 1);
+
+  const empty = await api.handle(challengeRequest({}));
+  assert.equal(empty.status, 400);
   assert.equal(calls.begin.length, 1);
 });
 
@@ -144,14 +193,32 @@ test("assertion endpoint keeps bearer in HttpOnly cookie and projects no interna
   const result = await api.handle(jsonRequest(PLATFORM_SESSION_HTTP_PATHS.assertion, body));
 
   assert.equal(result.status, 201);
-  assert.equal(result.body.session.session_id, IDS.session);
+  assert.deepEqual(result.body.session, {
+    version: 1,
+    type: "agentpass.platform-session",
+    session_id: IDS.session,
+    principal_id: IDS.principal,
+    assignment_id: IDS.assignment,
+    authority_generation: AUTHORITY.authority_generation,
+    operation: AUTHORITY.operation,
+    capability: AUTHORITY.capability,
+    request_digest_sha256: AUTHORITY.request_digest_sha256,
+    authenticated_at: "2026-08-15T00:00:00.000Z",
+    issued_at: "2026-08-15T00:00:00.000Z",
+    expires_at: "2026-08-15T00:15:00.000Z",
+    status: "active"
+  });
   assert.equal(result.body.session.credential_id, undefined);
+  assert.equal(result.body.session.member_id, undefined);
+  assert.equal(result.body.session.organization_id, undefined);
   assert.equal(result.body.csrf_token, CSRF);
   assert.equal(JSON.stringify(result.body).includes(BEARER), false);
   assert.match(result.headers["Set-Cookie"], new RegExp(`^${PLATFORM_SESSION_COOKIE_NAME}=${BEARER}; Path=/; HttpOnly; Secure; SameSite=Strict; Max-Age=900$`));
   assert.equal(calls.verify[0].principal_id, IDS.principal);
   assert.equal(calls.verify[0].request_digest_sha256, AUTHORITY.request_digest_sha256);
   assert.deepEqual(calls.verify[0].allowed_credential_ids, [CREDENTIAL_ID]);
+  assert.equal(calls.bootstrap.length, 0);
+  assert.equal(calls.authority[0].session_material_hash, null);
 
   const duplicate = await api.handle({
     ...jsonRequest(PLATFORM_SESSION_HTTP_PATHS.assertion, body),
@@ -163,10 +230,11 @@ test("assertion endpoint keeps bearer in HttpOnly cookie and projects no interna
 
 test("origin, forbidden identity headers, and ambiguous cookies fail closed", async () => {
   const { api } = serviceFixture();
-  const base = jsonRequest(PLATFORM_SESSION_HTTP_PATHS.challenge, {});
+  const base = challengeRequest();
   assert.equal((await api.handle({ ...base, headers: { ...base.headers, Origin: "https://evil.test" } })).status, 403);
   assert.equal((await api.handle({ ...base, headers: { "Content-Type": "application/json" } })).status, 403);
   assert.equal((await api.handle({ ...base, headers: { ...base.headers, Authorization: "Bearer nope" } })).status, 400);
+  assert.equal((await api.handle({ ...base, headers: { ...base.headers, [PLATFORM_SESSION_CSRF_HEADER]: CSRF } })).status, 400);
   assert.equal((await api.handle({ ...base, headers: { ...base.headers, Cookie: `${PLATFORM_SESSION_COOKIE_NAME}=bad` } })).status, 400);
   assert.equal((await api.handle({ ...base, headers: { ...base.headers, Cookie: `${PLATFORM_SESSION_COOKIE_NAME}=${BEARER}; ${PLATFORM_SESSION_COOKIE_NAME}=${BEARER}` } })).status, 400);
   assert.equal((await api.handle({ ...base, url: `${PLATFORM_SESSION_HTTP_PATHS.challenge}?alias=1` })).status, 400);
@@ -257,7 +325,7 @@ test("the boundary rejects unsafe cookie output from a ceremony implementation",
 test("request body and content limits are bounded before the ceremony", async () => {
   const { api, calls } = serviceFixture({ maxBodyBytes: 1_024 });
   const result = await api.handle({
-    ...jsonRequest(PLATFORM_SESSION_HTTP_PATHS.challenge, {}),
+    ...challengeRequest(),
     headers: { Origin: ORIGIN, "Content-Type": "application/json", "Content-Length": "1025" }
   });
   assert.equal(result.status, 413);

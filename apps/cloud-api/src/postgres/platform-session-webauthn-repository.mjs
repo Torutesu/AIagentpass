@@ -2,6 +2,8 @@ import {
   PLATFORM_SESSION_WEBAUTHN_REPOSITORY_METHODS
 } from "../platform-session-webauthn.mjs";
 
+export { PLATFORM_SESSION_WEBAUTHN_REPOSITORY_METHODS };
+
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu;
 const HEX_256 = /^[0-9a-f]{64}$/u;
 const BASE64URL = /^[A-Za-z0-9_-]+$/u;
