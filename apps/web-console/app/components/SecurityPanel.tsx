@@ -77,6 +77,8 @@ export function SecurityPanel({ onSessionExpired, onSessionSignedOut, securityCl
   }, "新しいパスキーを登録しました。");
 
   const passkeys = snapshot?.passkeys ?? [];
+  const passkeysComplete = snapshot?.passkeysComplete ?? false;
+  const onlyUsableActivePasskey = passkeysComplete && passkeys.length === 1;
   const sessions = snapshot?.sessions ?? [];
   const otherSessions = sessions.filter((session) => !session.current);
   const busy = actionKey !== null;
@@ -97,7 +99,11 @@ export function SecurityPanel({ onSessionExpired, onSessionSignedOut, securityCl
         <div><span className="section-kicker">REGISTERED PASSKEYS</span><h2 className="surface-card-title">登録済みのパスキー</h2><p className="surface-card-copy">登録・名前変更・無効化ができます。追加や無効化では、必要に応じてTouch IDまたはパスキーで確認します。</p></div>
         <div className="security-panel__actions"><button className="secondary-button" type="button" disabled={busy || loadState === "loading"} onClick={addPasskey}>{actionKey === "passkey:add" ? "登録中…" : "パスキーを追加"}</button><button className="secondary-button" type="button" disabled={busy || loadState === "loading"} onClick={() => void load()}>再読み込み</button></div>
       </div>
-      {loadState === "loading" ? <p className="section-note" role="status">セキュリティ情報を読み込み中…</p> : loadState === "error" ? <RetryState message={error} onRetry={() => void load()} /> : passkeys.length === 0 ? <EmptyState title="登録済みのパスキーはありません" copy="パスキーを追加すると、次回から安全に再認証できます。" /> : <ul className="row-list">{passkeys.map((passkey) => <PasskeyRow key={passkey.id} passkey={passkey} actionKey={actionKey} confirmKey={confirmKey} onRename={() => { setConfirmKey(null); setRenameTarget(passkey.id); setRenameLabel(passkey.label); setError(""); }} onRevoke={() => { setRenameTarget(null); setConfirmKey(`passkey:${passkey.id}`); }} onCancel={() => setConfirmKey(null)} onConfirm={() => void runAction(`passkey:${passkey.id}`, () => client.revokePasskey(passkey.id, passkey.version), "パスキーを無効化しました。")} />)}</ul>}
+      {loadState === "loading" ? <p className="section-note" role="status">セキュリティ情報を読み込み中…</p> : loadState === "error" ? <RetryState message={error} onRetry={() => void load()} /> : passkeys.length === 0 ? <EmptyState title="登録済みのパスキーはありません" copy="パスキーを追加すると、次回から安全に再認証できます。" /> : <>
+        {onlyUsableActivePasskey ? <p id="security-passkey-revoke-guidance" className="section-note" role="note">このパスキーは、確認できた唯一の利用可能なパスキーです。先に別のパスキーを登録してから無効化してください。</p> : null}
+        {!passkeysComplete ? <p id="security-passkey-pagination-status" className="section-note" role="status" aria-live="polite">パスキー一覧を最後まで確認できていないため、唯一のパスキーとは判定していません。</p> : null}
+        <ul className="row-list">{passkeys.map((passkey) => <PasskeyRow key={passkey.id} passkey={passkey} lastUsable={onlyUsableActivePasskey} actionKey={actionKey} confirmKey={confirmKey} onRename={() => { setConfirmKey(null); setRenameTarget(passkey.id); setRenameLabel(passkey.label); setError(""); }} onRevoke={() => { setRenameTarget(null); setConfirmKey(`passkey:${passkey.id}`); }} onCancel={() => setConfirmKey(null)} onConfirm={() => void runAction(`passkey:${passkey.id}`, () => client.revokePasskey(passkey.id, passkey.version), "パスキーを無効化しました。")} />)}</ul>
+      </>}
       {renameTarget !== null ? <RenameForm label={renameLabel} busy={busy} onChange={setRenameLabel} onCancel={() => { setRenameTarget(null); setRenameLabel(""); }} onSubmit={() => { const target = passkeys.find((passkey) => passkey.id === renameTarget); if (target === undefined) return; void runAction(`passkey:${target.id}`, () => client.renamePasskey(target.id, renameLabel, target.version), "パスキーの名前を変更しました。"); }} /> : null}
     </article>
 
@@ -111,10 +117,10 @@ export function SecurityPanel({ onSessionExpired, onSessionSignedOut, securityCl
   </section>;
 }
 
-function PasskeyRow({ passkey, actionKey, confirmKey, onRename, onRevoke, onCancel, onConfirm }: { passkey: SecurityPasskey; actionKey: string | null; confirmKey: string | null; onRename: () => void; onRevoke: () => void; onCancel: () => void; onConfirm: () => void }) {
+function PasskeyRow({ passkey, lastUsable, actionKey, confirmKey, onRename, onRevoke, onCancel, onConfirm }: { passkey: SecurityPasskey; lastUsable: boolean; actionKey: string | null; confirmKey: string | null; onRename: () => void; onRevoke: () => void; onCancel: () => void; onConfirm: () => void }) {
   const key = `passkey:${passkey.id}`;
   const busy = actionKey === key;
-  return <li className="row-list-item"><div className="row-main"><span className="row-icon" aria-hidden="true">⌁</span><div><p className="row-title">{passkey.label}</p><p className="row-description">登録：{formatSecurityDate(passkey.createdAt)} · 最終使用：{passkey.lastUsedAt ? formatSecurityDate(passkey.lastUsedAt) : "まだ使用されていません"}</p></div></div><span className="security-panel__row-actions">{confirmKey === key ? <><button className="text-button" type="button" disabled={actionKey !== null} onClick={onConfirm}>{busy ? "処理中…" : "無効化する"}</button><button className="text-button" type="button" disabled={actionKey !== null} onClick={onCancel}>キャンセル</button></> : <><button className="text-button" type="button" disabled={actionKey !== null} onClick={onRename}>名前を変更</button><button className="text-button" type="button" disabled={actionKey !== null} onClick={onRevoke}>無効化</button></>}</span></li>;
+  return <li className="row-list-item"><div className="row-main"><span className="row-icon" aria-hidden="true">⌁</span><div><p className="row-title">{passkey.label}</p><p className="row-description">登録：{formatSecurityDate(passkey.createdAt)} · 最終使用：{passkey.lastUsedAt ? formatSecurityDate(passkey.lastUsedAt) : "まだ使用されていません"}</p></div></div><span className="security-panel__row-actions">{confirmKey === key ? <><button className="text-button" type="button" disabled={actionKey !== null || lastUsable} aria-describedby={lastUsable ? "security-passkey-revoke-guidance" : undefined} onClick={onConfirm}>{busy ? "処理中…" : "無効化する"}</button><button className="text-button" type="button" disabled={actionKey !== null} onClick={onCancel}>キャンセル</button></> : <><button className="text-button" type="button" disabled={actionKey !== null} onClick={onRename}>名前を変更</button><button className="text-button" type="button" disabled={actionKey !== null || lastUsable} aria-describedby={lastUsable ? "security-passkey-revoke-guidance" : undefined} onClick={onRevoke}>無効化</button></>}</span></li>;
 }
 
 function SessionRow({ session, actionKey, confirmKey, onRevoke, onCancel, onConfirm }: { session: SecuritySession; actionKey: string | null; confirmKey: string | null; onRevoke: () => void; onCancel: () => void; onConfirm: () => void }) {
@@ -146,10 +152,24 @@ function formatSecurityDate(value: string): string {
 }
 
 function securityPanelError(error: unknown): string {
+  if (isLastActiveCredentialError(error)) return "このパスキーは最後の利用可能なパスキーのため無効化できません。先に別のパスキーを登録してください。";
   if (isSessionError(error)) return "セッションの有効期限が切れています。ページを再読み込みして、もう一度お試しください。";
   if (error instanceof SecurityClientError && error.status === 409) return "情報が更新されています。再読み込みしてから、もう一度お試しください。";
   if (error instanceof WebAuthnClientError) return "パスキーの確認を完了できませんでした。キャンセルした場合は、もう一度お試しください。";
   return "セキュリティ操作を完了できませんでした。接続と権限を確認して、もう一度お試しください。";
+}
+
+const LAST_ACTIVE_CREDENTIAL_CODES = new Set([
+  "human_management_last_active_credential",
+  "last_active_credential",
+  "sole_active_credential",
+  "last_credential",
+  "err_last_active_credential",
+  "err_sole_active_credential",
+]);
+
+function isLastActiveCredentialError(error: unknown): boolean {
+  return error instanceof SecurityClientError && error.serviceCode !== undefined && LAST_ACTIVE_CREDENTIAL_CODES.has(error.serviceCode.toLowerCase());
 }
 
 function handleSessionFailure(error: unknown, onSessionExpired: (() => void) | undefined): void {

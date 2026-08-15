@@ -48,3 +48,16 @@ test("current-session revoke reports signed-out separately from expired-session 
   assert.match(consoleSource, /const markSessionSignedOut = useCallback\(\(\) => endSession\("signed-out"\)/);
   assert.match(consoleSource, /<SecurityPanel onSessionExpired=\{expireSession\} onSessionSignedOut=\{markSessionSignedOut\} \/>/);
 });
+
+test("last active passkey protection is based on a complete inventory and is accessible", async () => {
+  const panel = await readFile(panelPath, "utf8");
+  assert.match(panel, /passkeysComplete && passkeys\.length === 1/);
+  assert.match(panel, /security-passkey-revoke-guidance/);
+  assert.match(panel, /唯一の利用可能なパスキーです/);
+  assert.match(panel, /disabled=\{actionKey !== null \|\| lastUsable\}/);
+  assert.match(panel, /role="note"/);
+  assert.match(panel, /role="status" aria-live="polite"/);
+  assert.match(panel, /human_management_last_active_credential/);
+  assert.match(panel, /err_sole_active_credential/);
+  assert.doesNotMatch(panel, /window\.location|location\.reload|setTimeout\([^)]*revoke/);
+});

@@ -24,6 +24,7 @@ export type SecuritySession = Readonly<{
 
 export type SecuritySnapshot = Readonly<{
   passkeys: readonly SecurityPasskey[];
+  passkeysComplete: boolean;
   sessions: readonly SecuritySession[];
 }>;
 
@@ -52,12 +53,14 @@ export type SecurityClient = Readonly<{
 export class SecurityClientError extends Error {
   readonly code: "http_failed" | "invalid_response" | "transport_failed";
   readonly status?: number;
+  readonly serviceCode?: string;
 
-  constructor(code: "http_failed" | "invalid_response" | "transport_failed", message: string, status?: number) {
+  constructor(code: "http_failed" | "invalid_response" | "transport_failed", message: string, status?: number, serviceCode?: string) {
     super(message);
     this.name = "SecurityClientError";
     this.code = code;
     this.status = status;
+    this.serviceCode = serviceCode;
   }
 }
 
@@ -125,7 +128,8 @@ export function createSecurityClient(options: ClientOptions = {}): SecurityClien
       requestJson("/api/auth/security/passkeys", "GET", token, undefined, request),
       requestJson("/api/auth/security/sessions", "GET", token, undefined, request),
     ]);
-    return Object.freeze({ passkeys: Object.freeze(parseCredentialPage(credentials)), sessions: Object.freeze(parseSessionPage(sessions)) });
+    const credentialPage = parseCredentialPage(credentials);
+    return Object.freeze({ passkeys: Object.freeze(credentialPage.items), passkeysComplete: credentialPage.complete, sessions: Object.freeze(parseSessionPage(sessions)) });
   };
 
   const mutatePasskey = async (path: string, method: "POST" | "PATCH", body: Record<string, unknown>, requestOptions: SecurityRequestOptions, recentAuthOperation?: string): Promise<void> => {
@@ -242,15 +246,17 @@ async function requestJson(path: string, method: "GET" | "POST" | "PATCH", csrfT
   if (!/^application\/json(?:\s*;|\s*$)/i.test(type)) throw new SecurityClientError("invalid_response", "セキュリティ応答を確認できませんでした。", response.status);
   let value: unknown;
   try { value = await response.json(); } catch { throw new SecurityClientError("invalid_response", "セキュリティ応答を確認できませんでした。", response.status); }
-  if (!response.ok) throw new SecurityClientError("http_failed", "セキュリティ操作を完了できませんでした。", response.status);
+  if (!response.ok) throw new SecurityClientError("http_failed", "セキュリティ操作を完了できませんでした。", response.status, serviceErrorCode(value));
   return value;
 }
 
-function parseCredentialPage(value: unknown): SecurityPasskey[] {
+function parseCredentialPage(value: unknown): { items: SecurityPasskey[]; complete: boolean } {
   if (!isRecord(value) || !hasExactKeys(value, ["credentials", "next_cursor"]) || !Array.isArray(value.credentials) || value.credentials.length > MAX_ITEMS || !isNullableCursor(value.next_cursor)) {
     throw new SecurityClientError("invalid_response", "セキュリティ情報を確認できませんでした。");
   }
-  return value.credentials.map(parsePasskey).filter((item) => item.status === "active").map(toPublicPasskey);
+  const items = value.credentials.map(parsePasskey).filter((item) => item.status === "active").map(toPublicPasskey);
+  if (new Set(items.map((item) => item.id)).size !== items.length) throw new SecurityClientError("invalid_response", "セキュリティ情報を確認できませんでした。");
+  return { items, complete: value.next_cursor === null };
 }
 
 function parseSessionPage(value: unknown): SecuritySession[] {
@@ -314,6 +320,10 @@ function isNullableCursor(value: unknown): value is string | null { return value
 function isInstant(value: unknown): value is string { return typeof value === "string" && ISO_INSTANT.test(value) && !Number.isNaN(Date.parse(value)); }
 function isNullableInstant(value: unknown): value is string | null { return value === null || isInstant(value); }
 function hasControl(value: string): boolean { for (const character of value) { const code = character.codePointAt(0) ?? 0; if (code <= 0x1f || code === 0x7f) return true; } return false; }
+function serviceErrorCode(value: unknown): string | undefined {
+  if (!isRecord(value) || !isRecord(value.error) || typeof value.error.code !== "string" || !/^[A-Za-z0-9_-]{1,128}$/.test(value.error.code)) return undefined;
+  return value.error.code;
+}
 function isRecord(value: unknown): value is Record<string, unknown> { return Boolean(value) && typeof value === "object" && !Array.isArray(value) && Object.getPrototypeOf(value) === Object.prototype; }
 function hasExactKeys(value: Record<string, unknown>, expected: string[]): boolean { const actual = Object.keys(value).sort(); const keys = [...expected].sort(); return actual.length === keys.length && actual.every((key, index) => key === keys[index]); }
 import { authenticateRecentAuth, registerPasskey as runPasskeyRegistration, type AuthorizationResult, type RegistrationResult, type WebAuthnClientInput, type WebAuthnRegistrationInput } from "./webauthn-client.ts";

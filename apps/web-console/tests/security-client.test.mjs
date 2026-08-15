@@ -40,6 +40,7 @@ test("loads only active safe metadata through the same-origin security paths", a
   } });
 
   assert.deepEqual(value.passkeys, [{ id: credentialId, version: 2, label: "Mac Touch ID", createdAt: date, lastUsedAt: null }]);
+  assert.equal(value.passkeysComplete, true);
   assert.deepEqual(value.sessions, [{ id: sessionId, version: 3, label: "現在のブラウザ", platform: "Web Console", createdAt: date, lastSeenAt: date, expiresAt: "2026-08-12T18:00:00.000Z", current: true }]);
   assert.deepEqual(calls.map((call) => call.url), ["/api/auth/session", "/api/auth/security/passkeys", "/api/auth/security/sessions"]);
   for (const call of calls.slice(1)) {
@@ -163,6 +164,47 @@ test("keeps AbortError identity and permits a retry after an aborted bootstrap",
   await assert.rejects(() => client.getSnapshot(), (error) => error instanceof DOMException && error.name === "AbortError");
   await client.getSnapshot();
   assert.equal(bootstraps, 2);
+});
+
+test("does not infer the final active credential from a partial page", async () => {
+  const client = createSecurityClient({ fetchImpl: async (url) => {
+    if (url === "/api/auth/session") return sessionResponse();
+    if (url === "/api/auth/security/passkeys") return json({ credentials: [credential()], next_cursor: "next-page" });
+    if (url === "/api/auth/security/sessions") return json({ sessions: [], next_cursor: null });
+    throw new Error("unexpected path");
+  }});
+
+  const snapshot = await client.getSnapshot();
+  assert.deepEqual(snapshot.passkeys, [{ id: credentialId, version: 2, label: "Mac Touch ID", createdAt: date, lastUsedAt: null }]);
+  assert.equal(snapshot.passkeysComplete, false);
+});
+
+test("preserves only an allow-listed Cloud management error code without replaying a mutation", async () => {
+  let revokeCalls = 0;
+  const client = createSecurityClient({ authenticateRecentAuthImpl: authorize, fetchImpl: async (url) => {
+    if (url === "/api/auth/session") return sessionResponse();
+    if (url === "/api/auth/security/passkeys") return json({ credentials: [credential()], next_cursor: null });
+    if (url === "/api/auth/security/sessions") return json({ sessions: [], next_cursor: null });
+    if (String(url).endsWith(`/passkeys/${credentialId}/revoke`)) {
+      revokeCalls += 1;
+      return json({ error: { code: "human_management_last_active_credential", message: "The last active credential cannot be revoked" } }, 409);
+    }
+    throw new Error("unexpected path");
+  }});
+
+  await assert.rejects(() => client.revokePasskey(credentialId, 2), (error) => error instanceof SecurityClientError && error.status === 409 && error.serviceCode === "human_management_last_active_credential");
+  assert.equal(revokeCalls, 1);
+});
+
+test("accepts the legacy last-credential error variants for UI classification", async () => {
+  for (const code of ["ERR_LAST_ACTIVE_CREDENTIAL", "err_sole_active_credential", "sole_active_credential", "last_credential"]) {
+    const client = createSecurityClient({ authenticateRecentAuthImpl: authorize, fetchImpl: async (url) => {
+      if (url === "/api/auth/session") return sessionResponse();
+      if (String(url).endsWith(`/passkeys/${credentialId}/revoke`)) return json({ error: { code } }, 409);
+      throw new Error("unexpected path");
+    }});
+    await assert.rejects(() => client.revokePasskey(credentialId, 2), (error) => error instanceof SecurityClientError && error.serviceCode === code);
+  }
 });
 
 test("rejects malformed security responses and invalid mutation input", async () => {

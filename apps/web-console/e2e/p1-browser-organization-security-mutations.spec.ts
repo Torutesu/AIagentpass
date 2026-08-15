@@ -22,6 +22,7 @@ const RENAMED_ORGANIZATION = "Renamed Mutation Organization";
 const INVITATION_TOKEN = "i".repeat(64);
 const OTHER_SESSION_ID = "23333333-3333-4333-8333-333333333333";
 const INVITATION_ID = "85555555-5555-4555-8555-555555555555";
+const SECOND_CREDENTIAL_ID = "B".repeat(22);
 const REQUEST_IDS = {
   list: "69999999-9999-4999-8999-999999999999",
   rename: "6a999999-9999-4999-8999-999999999999",
@@ -59,6 +60,9 @@ type SecurityRouteState = {
   passkeyVersion: number;
   passkeyStatus: "active" | "revoked";
   passkeyListReads: number;
+  passkeyCount: 1 | 2;
+  passkeyNextCursor: string | null;
+  revokePasskeyErrorCode?: string;
   otherSessionStatus: "active" | "revoked";
   currentSessionStatus: "active" | "revoked";
   mutations: MutationRequest[];
@@ -104,18 +108,18 @@ function invitationRecord(state: OrganizationRouteState) {
   };
 }
 
-function securityPasskey(state: SecurityRouteState) {
+function securityPasskey(state: SecurityRouteState, credentialId = CREDENTIAL_ID) {
   return {
-    credential_id: CREDENTIAL_ID,
-    version: state.passkeyVersion,
-    label: state.passkeyLabel,
+    credential_id: credentialId,
+    version: credentialId === CREDENTIAL_ID ? state.passkeyVersion : 1,
+    label: credentialId === CREDENTIAL_ID ? state.passkeyLabel : "Recovery Touch ID",
     transports: ["internal"],
     backup_eligible: false,
     backup_state: false,
-    status: state.passkeyStatus,
+    status: credentialId === CREDENTIAL_ID ? state.passkeyStatus : "active",
     created_at: DATE,
     last_used_at: null,
-    revoked_at: state.passkeyStatus === "revoked" ? FUTURE : null,
+    revoked_at: credentialId === CREDENTIAL_ID && state.passkeyStatus === "revoked" ? FUTURE : null,
   };
 }
 
@@ -312,12 +316,15 @@ async function installOrganizationRoutes(page: Page, role: "owner" | "admin"): P
   return state;
 }
 
-async function installSecurityRoutes(page: Page, failStatus?: 401 | 403): Promise<SecurityRouteState> {
+async function installSecurityRoutes(page: Page, failStatus?: 401 | 403, options: { passkeyCount?: 1 | 2; passkeyNextCursor?: string | null; revokePasskeyErrorCode?: string } = {}): Promise<SecurityRouteState> {
   const state: SecurityRouteState = {
     passkeyLabel: "Mac Touch ID",
     passkeyVersion: 1,
     passkeyStatus: "active",
     passkeyListReads: 0,
+    passkeyCount: options.passkeyCount ?? 2,
+    passkeyNextCursor: options.passkeyNextCursor ?? null,
+    revokePasskeyErrorCode: options.revokePasskeyErrorCode,
     otherSessionStatus: "active",
     currentSessionStatus: "active",
     mutations: [],
@@ -350,7 +357,9 @@ async function installSecurityRoutes(page: Page, failStatus?: 401 | 403): Promis
       state.passkeyListReads += 1;
       // The production management endpoint is active-only. A revoked credential
       // is accepted on the mutation response but must disappear from the next list.
-      return json(route, { credentials: state.passkeyStatus === "active" ? [securityPasskey(state)] : [], next_cursor: null });
+      const credentials = state.passkeyStatus === "active" ? [securityPasskey(state)] : [];
+      if (state.passkeyCount === 2) credentials.push(securityPasskey(state, SECOND_CREDENTIAL_ID));
+      return json(route, { credentials, next_cursor: state.passkeyNextCursor });
     }
     if (url.pathname === "/api/auth/security/sessions" && request.method() === "GET") {
       if (state.failStatus !== undefined) return json(route, { error: { code: "security_unavailable", message: "Security unavailable" } }, state.failStatus);
@@ -365,6 +374,7 @@ async function installSecurityRoutes(page: Page, failStatus?: 401 | 403): Promis
     }
     if (url.pathname === `/api/auth/security/passkeys/${CREDENTIAL_ID}/revoke` && request.method() === "POST") {
       state.mutations.push(requestMutation(route));
+      if (state.revokePasskeyErrorCode !== undefined) return json(route, { error: { code: state.revokePasskeyErrorCode, message: "The last active credential cannot be revoked" } }, 409);
       state.passkeyStatus = "revoked";
       state.passkeyVersion = 2;
       return json(route, { credential: securityPasskey(state) });
@@ -564,6 +574,52 @@ test("production Console SecurityPanel executes passkey and session mutations wi
     ]);
     expect(consoleMessages.join("\n")).not.toContain(AUTHORIZATION_ID);
     await assertNoReusableAuthority(page, [AUTHORIZATION_ID, CSRF_TOKEN, CREDENTIAL_ID]);
+  } finally {
+    await disposeVirtualAuthenticator(authenticator);
+  }
+});
+
+test("production Console blocks revoking the only active passkey after a complete inventory", async ({ page }) => {
+  const authenticator = await installVirtualAuthenticator(page);
+  const state = await installSecurityRoutes(page, undefined, { passkeyCount: 1 });
+  try {
+    await openSecurityPanel(page);
+    await expect(page.getByRole("note")).toContainText("唯一の利用可能なパスキーです");
+    const revoke = page.getByRole("button", { name: "無効化", exact: true });
+    await expect(revoke).toBeDisabled();
+    expect(await revoke.getAttribute("aria-describedby")).toBe("security-passkey-revoke-guidance");
+    expect(state.mutations).toHaveLength(0);
+  } finally {
+    await disposeVirtualAuthenticator(authenticator);
+  }
+});
+
+test("production Console does not infer the only passkey from a partial inventory", async ({ page }) => {
+  const authenticator = await installVirtualAuthenticator(page);
+  const state = await installSecurityRoutes(page, undefined, { passkeyCount: 1, passkeyNextCursor: "next-page" });
+  try {
+    await openSecurityPanel(page);
+    await expect(page.getByRole("status")).toContainText("最後まで確認できていない");
+    await expect(page.getByRole("button", { name: "無効化", exact: true })).toBeEnabled();
+    expect(state.mutations).toHaveLength(0);
+  } finally {
+    await disposeVirtualAuthenticator(authenticator);
+  }
+});
+
+test("production Console maps the final-passkey Cloud conflict without replaying the mutation", async ({ page }) => {
+  const consoleMessages: string[] = [];
+  page.on("console", (message) => consoleMessages.push(message.text()));
+  const authenticator = await installVirtualAuthenticator(page);
+  const state = await installSecurityRoutes(page, undefined, { passkeyCount: 2, revokePasskeyErrorCode: "ERR_LAST_ACTIVE_CREDENTIAL" });
+  try {
+    await openSecurityPanel(page);
+    await page.getByRole("button", { name: "無効化", exact: true }).first().click();
+    await page.getByRole("button", { name: "無効化する", exact: true }).click();
+    await expect(page.getByRole("alert")).toContainText("最後の利用可能なパスキーのため無効化できません");
+    expect(state.mutations).toHaveLength(1);
+    expect(state.recentAuthOperations).toEqual(["human.management.credential.revoke", "human.management.credential.revoke"]);
+    expect(consoleMessages.join("\n")).not.toContain("ERR_LAST_ACTIVE_CREDENTIAL");
   } finally {
     await disposeVirtualAuthenticator(authenticator);
   }
