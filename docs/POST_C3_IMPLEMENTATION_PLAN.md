@@ -64,11 +64,11 @@ The branch now contains:
   SHA-256 digests cross the database boundary;
 - exact signer-role grants for 23 entry functions, with no signer table or
   sequence privileges and no PUBLIC/helper execution;
-- 151 frozen contract-catalog entries: 39 schemas, 61 OpenAPI operations, and
-  51 migrations.
+- 152 frozen contract-catalog entries: 39 schemas, 61 OpenAPI operations, and
+  52 migrations.
 - a fail-closed PostgreSQL 16/17 CI matrix that uses authenticated
-  `sslmode=verify-full`, migrates a fresh database from 1→51, upgrades seeded
-  authority databases from 47→51 and 48→51, applies the exact role policy,
+  `sslmode=verify-full`, migrates a fresh database from 1→52, upgrades seeded
+  authority databases from 47→51, 48→51, and 51→52, applies the exact role policy,
   rejects unexpected skips, and emits source-SHA-bound qualification evidence;
 - an N1 upgrade runner that proves contiguous migration history and checksums
   while byte-for-byte preserving seeded rows across all nine promotion and
@@ -335,10 +335,10 @@ digest-exact, monitored, and reversible.
 
 | Wave | State | Serial authority work | Parallel work | Required evidence |
 | --- | --- | --- | --- | --- |
-| W0 | source complete, protected CI pending | three runtime DB identities; signer role; promotion DB qualification; operator repository seam | runtime/profile/docs tests | CI PostgreSQL 16/17 fresh 1→51 and seeded 47/48→51, exact privilege negatives |
+| W0 | source complete, protected CI pending | three runtime DB identities; signer role; promotion DB qualification; operator repository seam | runtime/profile/docs tests | CI PostgreSQL 16/17 fresh 1→52 and seeded 47/48→51 plus 51→52, exact privilege negatives |
 | W1a | implemented, protected qualification pending | migrations `0049`-`0050` provider-operation and maintenance procedures | repository contract tests; role checker and runbook updates | no signer provider-operation table privilege; real PostgreSQL concurrency/replay/maintenance matrix |
 | W1b | source complete; protected qualification pending | migration `0051` lifecycle/signing procedures and repository conversion | lifecycle contract tests and privilege negatives | zero direct signer table DML; lifecycle/signing concurrency/replay/uncertain tests on real PostgreSQL |
-| W2 | queued after W1 schema freeze | migration `0052` platform principals, assignments, generations, sessions, and one-use authorization consumption | repository adapters; audit event schemas; threat tests | organization-role denial and assignment/session/replay matrix on real PostgreSQL |
+| W2 | source complete locally; protected qualification pending | migration `0052` platform principals, assignments, generations, and dual-control administration | repository adapters; privilege contract; threat tests | organization-role denial, dual approval, revocation, and 51→52 matrix on real PostgreSQL |
 | W3 | queued after W2 | runtime composition of platform authorizer and promotion service | Device API closure; OpenAPI/DTO freeze; drain/readiness tests | route absent on partial health; full HTTP auth/CSRF/idempotency/privacy matrix |
 | W4 | may start after W3 DTO freeze | no schema changes without serial review | Console vertical slices and browser tests | production build, role separation, accessibility, offline/response-loss and browser secret scan |
 | W5 | parallel with W2-W4 | signer lifecycle state changes remain serial | eight-purpose KMS adapters/readiness; immutable PKG pipeline | real AWS/GCP keys, notarized/stapled PKG, exact digest/source evidence |
@@ -374,20 +374,25 @@ functions.
 ### W2 — platform identity and operation-bound WebAuthn slices
 
 1. Freeze schemas for platform principal, assignment, capability, authority
-   generation, platform session, credential binding, and one-use authorization.
+   generation, dual approval, and revocation. Platform sessions, credential
+   binding, and one-use authorization remain separate forward migrations.
 2. Add migration `0052` and the single
    `agentpass_platform_operator_assignment_find_active` function already used by
-   the repository seam. Add transactional consume/revoke functions rather than
-   multi-query authorization decisions.
+   the repository seam. Add locked dual-control mutation/revoke functions; only
+   the lookup function is executable by the application role in this slice.
 3. Implement assignment administration with dual-control policy for production
    promotion authority, expiry, suspension, replacement, and generation bumps.
-4. Implement platform sessions separately from organization sessions. Store
-   hashes only; bind credential, auth time, assignment generation, operation,
-   deployment, environment, candidate, approval, idempotency key, and request
-   digest.
-5. Compose WebAuthn ceremonies and consume the proof in the same transaction as
-   promotion reservation. Emit privacy-bounded success/denial/replay/revocation
-   audit events.
+   In `0052` these mutation procedures are offline migrator-only controls: two
+   distinct principal records are required, but independent authenticated human
+   actors are not yet established. `0053` must derive each approver principal
+   from a separate platform session and operation-bound WebAuthn assertion
+   before any online administration endpoint can expose these procedures.
+4. In migration `0053`, implement platform sessions separately from
+   organization sessions. Store hashes only and bind credential, auth time,
+   assignment generation, and revocation state.
+5. In migration `0054`, consume an operation-bound WebAuthn proof in the same
+   transaction as promotion reservation. Emit privacy-bounded
+   success/denial/replay/revocation audit events.
 
 W2 is complete only when owner/admin membership without a platform assignment
 is denied and one proof cannot cross operation, candidate, environment,
@@ -422,8 +427,8 @@ affected evidence and restarts that lane.
 2. `[implemented; procedures pending] feat: isolate postgres runtime database authorities`
 3. `[implemented; protected run pending] feat: isolate provider operation authority in database procedures`
 4. `[implemented locally; protected run pending] feat: replace lifecycle and signing ledger dml with database procedures`
-5. `[implemented locally; protected CI pending] test: qualify migrations 1-51 and signer privilege boundary`
-6. `feat: persist platform principals assignments and generations`
+5. `[implemented locally; protected CI pending] test: qualify migrations 1-52 and signer/platform privilege boundaries`
+6. `[implemented locally; protected CI pending] feat: persist platform principals assignments and generations`
 7. `feat: add platform sessions and operation-bound webauthn`
 8. `feat: compose platform promotion runtime`
 9. `feat: freeze promotion verification and reconciliation api`
@@ -443,11 +448,12 @@ release claims require signed artifacts and physical hardware evidence.
 
 ## 8. Next action
 
-Commit and push the N1 gate, then run migrations 1-51 and the complete
-`0048`-`0051` qualification in CI against disposable PostgreSQL 16 and 17. Do
-not expose more API or Console authority until that protected run passes. If
-qualification finds a defect after `0051` has reached any shared environment,
-fix it in `0052` or later; never rewrite an applied migration.
+Commit and push the N2 authority slice, then run fresh migrations 1→52, seeded
+47→51, 48→51, and 51→52 upgrades, and the complete `0048`-`0052`
+qualification in CI against disposable PostgreSQL 16 and 17. Do not expose an
+online assignment-mutation API or treat `find_active` as final promotion
+authorization. Any shared-migration defect is fixed in a new forward migration;
+never rewrite an applied migration.
 
 ## 9. Detailed next implementation plan
 
@@ -458,8 +464,9 @@ and retained GitHub evidence pending.
 
 Serial work:
 
-1. Add a CI matrix for PostgreSQL 16 and 17 with fresh 1→51, seeded 47→51, and
-   seeded 48→51 migration paths.
+1. Maintain the PostgreSQL 16 and 17 matrix with fresh 1→52 plus historical
+   seeded 47→51 and 48→51 migration paths; N2 separately qualifies seeded
+   51→52.
 2. Apply `roles.sql` as the administrative identity, reconnect as app, signer,
    backup, and migrator, and retain the exact role/function/table/sequence
    privilege matrix.
@@ -479,7 +486,7 @@ The fresh and upgrade migration runners authenticate as the real
 `agentpass_migrator` login, signer operations authenticate as the real
 `agentpass_signer` login, and app/backup negative probes use their real logins;
 `SET SESSION AUTHORIZATION` is supplemental coverage only. Evidence retains the
-exact PostgreSQL server version, container image ID, all 51 migration checksums,
+   exact PostgreSQL server version, container image ID, all 52 migration checksums,
 the complete safe privilege matrix, actual-role login transcript, seeded-upgrade
 report, and TAP output. `SKIP`, `TODO`, bail-out, empty plans, and failed test
 processes all fail the gate.
@@ -491,23 +498,50 @@ weakening TLS, privilege checks, seeded-row equality, or skip rejection.
 
 ### N2 — migration 0052 platform principals and authority generations
 
+Implementation status: migration, strict repository/authorizer seam,
+least-privilege role contract, static security tests, real-role integration
+scenario, seeded 51→52 qualification runner, and PostgreSQL 16/17 CI wiring are
+implemented locally. Execution against real PostgreSQL 16/17 and retained
+source-bound evidence remain pending until push/CI succeeds.
+
 Serial schema work:
 
-1. Freeze principal, assignment, capability, generation, session, credential,
-   and one-use authorization schemas before SQL implementation.
+1. Freeze principal, assignment, capability, generation, approval, and
+   revocation schemas before SQL implementation. Do not include platform
+   sessions, credentials, or one-use authorization in `0052`.
 2. Persist immutable principals and versioned assignments. Production promotion
    capability changes require dual control and atomically advance the authority
-   generation.
-3. Add fixed `SECURITY DEFINER` functions for active-assignment lookup,
-   assignment mutation, generation read/advance, and one-use proof consumption.
-4. Grant only exact app entry functions; revoke direct app mutation, PUBLIC,
-   backup execution, overloads, helper execution, and cross-role inheritance.
+   generation. A member may have at most one active platform principal so the
+   five-argument lookup cannot select an ambiguous identity; principal IDs and
+   member IDs remain distinct.
+3. Add fixed `SECURITY DEFINER` functions for explicit principal provisioning,
+   assignment request/approval/activation/revocation, and active-assignment
+   lookup. Every mutation uses the database clock, row locks, exact request
+   digest/version binding, and generation fencing.
+   Approval retries are idempotent only for the exact approval ID, assignment,
+   approver principal, and digest; a conflicting replay is rejected. The active
+   lookup takes no row locks and is a precheck only. Assignment request
+   generations fence activation, while unrelated active assignments survive a
+   principal generation bump; `0053` session snapshots and the atomic `0054`
+   consume procedure enforce current-principal-generation invalidation.
+4. Grant the application only the exact five-argument active lookup function.
+   Keep all authority mutation functions migrator-only until N3 exposes a
+   separately authenticated administration service; revoke direct app DML,
+   PUBLIC/backup execution, overloads, helper execution, and cross-role
+   inheritance.
+   The lookup is a fail-closed precheck for composition/readiness only; it is
+   never sufficient to authorize promotion. Migration `0054` must revalidate
+   principal, assignment, generation, session, proof, and request bindings in
+   the same transaction that reserves the promotion.
 5. Define upgrade behavior before SQL: legacy deployments receive no implicit
    platform principal or assignment; inconsistent or ambiguous seed data aborts
    migration; assignment capability changes require two distinct active
    platform approvers; self-approval and organization-role substitution are
-   rejected; the generation advances exactly once on committed authority
-   change.
+   rejected; two principals backed by the same member cannot satisfy quorum;
+   existing `0044` approval arrays are never backfilled as authority; the
+   generation advances exactly once on committed authority change. Assignment
+   rows bind principals, not human sessions; the lookup's session argument is
+   used only to verify the currently authenticated membership.
 
 Parallel work after schema freeze:
 

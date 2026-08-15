@@ -101,7 +101,8 @@ app_function_allowlist(routine_signature) AS (
     ('agentpass_platform_promotion_issuance_replay(uuid,text,text,text,text)'),
     ('agentpass_platform_promotion_issuance_commit(uuid,text,text,text,text,bytea,bytea,bytea,bytea,bytea)'),
     ('agentpass_platform_promotion_issuance_uncertain(uuid,text,text,text,text,bytea,text)'),
-    ('agentpass_platform_promotion_issuance_get(uuid,text,text,text,text,boolean)')
+    ('agentpass_platform_promotion_issuance_get(uuid,text,text,text,text,boolean)'),
+    ('agentpass_platform_operator_assignment_find_active(uuid,uuid,uuid,text,text)')
 ),
 signer_function_oids AS (
   SELECT routine_signature, to_regprocedure('public.' || routine_signature) AS routine_oid
@@ -161,14 +162,15 @@ database_privileges_ok AS (
 ),
 migration_head_ok AS (
   SELECT to_regclass('public.schema_migrations') IS NOT NULL
-    AND (SELECT count(*) = 51 AND min(version) = 1 AND max(version) = 51
+    AND (SELECT count(*) = 52 AND min(version) = 1 AND max(version) = 52
          FROM public.schema_migrations) AS value
 ),
 table_privileges_ok AS (
   SELECT COALESCE((SELECT bool_and(
       has_table_privilege('agentpass_app', oid, 'SELECT')
-      AND CASE WHEN relname IN ('schema_migrations', 'schema_migration_attempts', 'release_candidates', 'platform_promotion_approvals', 'platform_promotion_deployments', 'platform_promotion_issuances')
-          OR left(relname, length('managed_signer_')) = 'managed_signer_' THEN
+      AND CASE WHEN relname IN ('schema_migrations', 'schema_migration_attempts', 'release_candidates')
+          OR left(relname, length('managed_signer_')) = 'managed_signer_'
+          OR left(relname, length('platform_')) = 'platform_' THEN
         NOT has_table_privilege('agentpass_app', oid, 'INSERT')
         AND NOT has_table_privilege('agentpass_app', oid, 'UPDATE')
         AND NOT has_table_privilege('agentpass_app', oid, 'DELETE')
@@ -237,14 +239,10 @@ function_privileges_ok AS (
 ),
 default_privileges_ok AS (
   SELECT
-    (SELECT count(*) = 4 FROM default_acl
-      WHERE object_type = 'r' AND grantee = 'agentpass_app'
-        AND privilege_type IN ('SELECT', 'INSERT', 'UPDATE', 'DELETE'))
+    NOT EXISTS (SELECT 1 FROM default_acl
+      WHERE object_type IN ('r', 'S') AND grantee = 'agentpass_app')
     AND (SELECT count(*) = 1 FROM default_acl
       WHERE object_type = 'r' AND grantee = 'agentpass_backup' AND privilege_type = 'SELECT')
-    AND (SELECT count(*) = 2 FROM default_acl
-      WHERE object_type = 'S' AND grantee = 'agentpass_app'
-        AND privilege_type IN ('USAGE', 'SELECT'))
     AND (SELECT count(*) = 1 FROM default_acl
       WHERE object_type = 'S' AND grantee = 'agentpass_backup' AND privilege_type = 'SELECT')
     AND NOT EXISTS (SELECT 1 FROM default_acl

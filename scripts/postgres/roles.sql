@@ -149,6 +149,8 @@ BEGIN
     'schema_migrations', 'schema_migration_attempts',
     'release_candidates', 'platform_promotion_approvals',
     'platform_promotion_deployments', 'platform_promotion_issuances',
+    'platform_principals', 'platform_operator_assignments',
+    'platform_operator_assignment_approvals',
     'managed_signer_key_lifecycles', 'managed_signer_keys',
     'managed_signer_key_lifecycle_operations', 'managed_signer_signing_idempotency',
     'managed_signer_provider_operations'
@@ -171,6 +173,23 @@ BEGIN
     WHERE n.nspname = 'public'
       AND c.relkind IN ('r', 'p')
       AND left(c.relname, length('managed_signer_')) = 'managed_signer_'
+  LOOP
+    EXECUTE format(
+      'REVOKE INSERT, UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER ON TABLE public.%I FROM agentpass_app, agentpass_backup',
+      relation_name
+    );
+  END LOOP;
+
+  -- Every platform_* relation is authority/control-plane state and is
+  -- function-only. This prefix rule also protects future platform-session and
+  -- proof ledgers before their reviewed entry points are allowlisted.
+  FOR relation_name IN
+    SELECT c.relname
+    FROM pg_catalog.pg_class AS c
+    JOIN pg_catalog.pg_namespace AS n ON n.oid = c.relnamespace
+    WHERE n.nspname = 'public'
+      AND c.relkind IN ('r', 'p')
+      AND left(c.relname, length('platform_')) = 'platform_'
   LOOP
     EXECUTE format(
       'REVOKE INSERT, UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER ON TABLE public.%I FROM agentpass_app, agentpass_backup',
@@ -231,7 +250,8 @@ BEGIN
     'agentpass_platform_promotion_issuance_replay(uuid,text,text,text,text)',
     'agentpass_platform_promotion_issuance_commit(uuid,text,text,text,text,bytea,bytea,bytea,bytea,bytea)',
     'agentpass_platform_promotion_issuance_uncertain(uuid,text,text,text,text,bytea,text)',
-    'agentpass_platform_promotion_issuance_get(uuid,text,text,text,text,boolean)'
+    'agentpass_platform_promotion_issuance_get(uuid,text,text,text,text,boolean)',
+    'agentpass_platform_operator_assignment_find_active(uuid,uuid,uuid,text,text)'
   ] LOOP
     IF to_regprocedure('public.' || routine_signature) IS NOT NULL THEN
       EXECUTE format('GRANT EXECUTE ON FUNCTION public.%s TO agentpass_app', routine_signature);
@@ -244,14 +264,10 @@ $$;
 ALTER DEFAULT PRIVILEGES FOR ROLE agentpass_migrator IN SCHEMA public
   REVOKE ALL PRIVILEGES ON TABLES FROM PUBLIC, agentpass_app, agentpass_signer, agentpass_backup;
 ALTER DEFAULT PRIVILEGES FOR ROLE agentpass_migrator IN SCHEMA public
-  GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO agentpass_app;
-ALTER DEFAULT PRIVILEGES FOR ROLE agentpass_migrator IN SCHEMA public
   GRANT SELECT ON TABLES TO agentpass_backup;
 
 ALTER DEFAULT PRIVILEGES FOR ROLE agentpass_migrator IN SCHEMA public
   REVOKE ALL PRIVILEGES ON SEQUENCES FROM PUBLIC, agentpass_app, agentpass_signer, agentpass_backup;
-ALTER DEFAULT PRIVILEGES FOR ROLE agentpass_migrator IN SCHEMA public
-  GRANT USAGE, SELECT ON SEQUENCES TO agentpass_app;
 ALTER DEFAULT PRIVILEGES FOR ROLE agentpass_migrator IN SCHEMA public
   GRANT SELECT ON SEQUENCES TO agentpass_backup;
 

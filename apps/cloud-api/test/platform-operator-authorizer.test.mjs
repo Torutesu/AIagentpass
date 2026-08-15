@@ -11,6 +11,7 @@ import {
 const NOW = Date.parse("2026-08-15T12:00:00.000Z");
 const SESSION_ID = "11111111-1111-4111-8111-111111111111";
 const MEMBER_ID = "22222222-2222-4222-8222-222222222222";
+const PRINCIPAL_ID = "66666666-6666-4666-8666-666666666666";
 const ORGANIZATION_ID = "33333333-3333-4333-8333-333333333333";
 const ASSIGNMENT_ID = "44444444-4444-4444-8444-444444444444";
 const OPERATION = "platform.promotion.issue";
@@ -38,6 +39,7 @@ function assignment(overrides = {}) {
     assignment_id: ASSIGNMENT_ID,
     session_id: SESSION_ID,
     member_id: MEMBER_ID,
+    principal_id: PRINCIPAL_ID,
     organization_id: ORGANIZATION_ID,
     role: "platform_operator",
     operation: OPERATION,
@@ -45,6 +47,8 @@ function assignment(overrides = {}) {
     status: "active",
     issued_at: "2026-08-15T11:00:00.000Z",
     expires_at: "2026-08-15T13:00:00.000Z",
+    authority_generation: 7,
+    assignment_version: 3,
     ...overrides
   };
 }
@@ -138,6 +142,35 @@ test("requires exact session, member, organization, operation, and capability bi
   }
 });
 
+test("validates assignment generation and version while leaving session-generation comparison to N3", async () => {
+  const invalid = [
+    { authority_generation: 0 },
+    { authority_generation: Number.MAX_SAFE_INTEGER + 1 },
+    { authority_generation: "7" },
+    { assignment_version: 0 },
+    { assignment_version: Number.MAX_SAFE_INTEGER + 1 },
+    { assignment_version: "3" },
+    { principal_id: "not-a-uuid" }
+  ];
+  for (const overrides of invalid) {
+    const authorizer = createPlatformOperatorAuthorizer({ repository: repository(assignment(overrides)), now: () => NOW });
+    await assert.rejects(() => authorizer(input()), (error) => {
+      assert.equal(error.code, PLATFORM_OPERATOR_AUTHORIZER_ERROR_CODES.REPOSITORY_INVALID);
+      return true;
+    });
+  }
+
+  const current = createPlatformOperatorAuthorizer({
+    repository: repository(assignment({
+      principal_id: PRINCIPAL_ID,
+      authority_generation: Number.MAX_SAFE_INTEGER,
+      assignment_version: 1
+    })),
+    now: () => NOW
+  });
+  assert.deepEqual(await current(input()), { allowed: true, role: "platform_operator", capability: CAPABILITY });
+});
+
 test("requires the authenticated principal session itself to be current", async () => {
   const calls = [];
   const authorizer = createPlatformOperatorAuthorizer({ repository: repository(assignment(), calls), now: () => NOW });
@@ -176,12 +209,18 @@ test("sanitizes repository failures and malformed rows into fail-closed errors",
     return true;
   });
 
-  const malformed = createPlatformOperatorAuthorizer({ repository: repository({ ...assignment(), provider_diagnostics: secret }), now: () => NOW });
-  await assert.rejects(() => malformed(input()), (error) => {
-    assert.equal(error.code, PLATFORM_OPERATOR_AUTHORIZER_ERROR_CODES.REPOSITORY_INVALID);
-    assert.doesNotMatch(error.message, /password|credential|database/iu);
-    return true;
-  });
+  const { principal_id, ...assignmentWithoutPrincipalId } = assignment();
+  for (const value of [
+    { ...assignment(), provider_diagnostics: secret },
+    assignmentWithoutPrincipalId
+  ]) {
+    const malformed = createPlatformOperatorAuthorizer({ repository: repository(value), now: () => NOW });
+    await assert.rejects(() => malformed(input()), (error) => {
+      assert.equal(error.code, PLATFORM_OPERATOR_AUTHORIZER_ERROR_CODES.REPOSITORY_INVALID);
+      assert.doesNotMatch(error.message, /password|credential|database/iu);
+      return true;
+    });
+  }
 });
 
 test("fails closed when the injected clock is invalid and assertAuthorized rejects a denial", async () => {

@@ -183,7 +183,7 @@ async function openDatabase(t) {
       client,
       applicationVersion: "agent-session-issuance-integration"
     }).run();
-    assert.equal(migration.currentVersion, 51);
+    assert.equal(migration.currentVersion, 52);
   } finally {
     client.release();
   }

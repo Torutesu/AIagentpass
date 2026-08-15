@@ -24,11 +24,14 @@ const ASSIGNMENT_KEYS = Object.freeze([
   "expires_at",
   "issued_at",
   "member_id",
+  "principal_id",
   "operation",
   "organization_id",
   "role",
   "session_id",
-  "status"
+  "status",
+  "authority_generation",
+  "assignment_version"
 ]);
 
 export const PLATFORM_OPERATOR_AUTHORIZER_REPOSITORY_METHODS = REPOSITORY_METHODS;
@@ -192,12 +195,15 @@ function isValidAssignment(value) {
     && canonicalUuid(value.session_id) !== null
     && canonicalUuid(value.member_id) !== null
     && canonicalUuid(value.organization_id) !== null
+    && canonicalUuid(value.principal_id) !== null
     && value.role === PLATFORM_OPERATOR_ROLE
     && value.status === "active"
     && parseOperation(value.operation) !== null
     && parseOperation(value.capability) !== null
     && parseTimestamp(value.issued_at) !== null
-    && parseTimestamp(value.expires_at) !== null;
+    && parseTimestamp(value.expires_at) !== null
+    && positiveSafeInteger(value.authority_generation)
+    && positiveSafeInteger(value.assignment_version);
 }
 
 function parseOperation(value) {
@@ -216,6 +222,10 @@ function parseTimestamp(value) {
   if (typeof value !== "string" || !RFC3339.test(value)) return null;
   const parsed = Date.parse(value);
   return Number.isFinite(parsed) ? parsed : null;
+}
+
+function positiveSafeInteger(value) {
+  return Number.isSafeInteger(value) && value >= 1;
 }
 
 function readClock(clock) {

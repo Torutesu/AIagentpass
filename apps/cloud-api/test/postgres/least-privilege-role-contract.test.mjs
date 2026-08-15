@@ -20,10 +20,11 @@ test('role SQL is idempotent, credential-free, and PUBLIC is revoked', async () 
   assert.match(sql, /REVOKE ALL PRIVILEGES ON ALL FUNCTIONS IN SCHEMA public FROM PUBLIC/);
   assert.match(sql, /schema_migrations/);
   assert.match(sql, /schema_migration_attempts/);
-  for (const relation of ['release_candidates', 'platform_promotion_approvals', 'platform_promotion_deployments', 'platform_promotion_issuances', 'managed_signer_key_lifecycles', 'managed_signer_keys']) assert.match(sql, new RegExp(`\\b${relation}\\b`));
+  for (const relation of ['release_candidates', 'platform_promotion_approvals', 'platform_promotion_deployments', 'platform_promotion_issuances', 'platform_principals', 'platform_operator_assignments', 'platform_operator_assignment_approvals', 'managed_signer_key_lifecycles', 'managed_signer_keys']) assert.match(sql, new RegExp(`\\b${relation}\\b`));
   assert.match(sql, /Promotion issuance is reachable only through the reviewed SECURITY DEFINER/);
   assert.match(sql, /managed_signer_provider_operations/);
   assert.match(sql, /GRANT EXECUTE ON FUNCTION public\.%s TO agentpass_app/);
+  assert.match(sql, /agentpass_platform_operator_assignment_find_active\(uuid,uuid,uuid,text,text\)/u);
   assert.match(sql, /ALTER DEFAULT PRIVILEGES FOR ROLE agentpass_migrator IN SCHEMA public/);
   assert.match(sql, /ON TABLES/);
   assert.match(sql, /ON SEQUENCES/);
@@ -37,6 +38,7 @@ test('app is DML-only, migrator owns migration authority, and backup is read-onl
   assert.match(sql, /'agentpass_signer'/);
   assert.doesNotMatch(sql, /GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE public\.%I TO agentpass_signer/);
   assert.match(sql, /left\(c\.relname, length\('managed_signer_'\)\) = 'managed_signer_'/u);
+  assert.match(sql, /left\(c\.relname, length\('platform_'\)\) = 'platform_'/u);
   assert.match(sql, /agentpass_managed_signer_provider_operation_reserve\(text,text,text,integer,bytea,text,bigint,bytea,integer,integer\)/u);
   assert.match(sql, /agentpass_maintain_managed_signer_provider_operations\(integer\)/u);
   for (const signature of [
@@ -61,6 +63,8 @@ test('app is DML-only, migrator owns migration authority, and backup is read-onl
   assert.match(sql, /REVOKE ALL PRIVILEGES ON ALL FUNCTIONS IN SCHEMA public FROM agentpass_app, agentpass_signer, agentpass_backup/);
   assert.doesNotMatch(sql, /GRANT .* ON SCHEMA public TO agentpass_app[^\n]*CREATE/i);
   assert.doesNotMatch(sql, /GRANT .* ON SCHEMA public TO agentpass_signer[^\n]*CREATE/i);
+  assert.doesNotMatch(sql, /ALTER DEFAULT PRIVILEGES[\s\S]{0,160}GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO agentpass_app/u);
+  assert.doesNotMatch(sql, /ALTER DEFAULT PRIVILEGES[\s\S]{0,160}GRANT USAGE, SELECT ON SEQUENCES TO agentpass_app/u);
 });
 
 test('checker reads the URL from the environment, enforces verify-full, and measures opaque evidence', async () => {
@@ -76,7 +80,7 @@ test('checker reads the URL from the environment, enforces verify-full, and meas
   assert.match(checker, /agentpass_signer/);
   assert.match(checker, /managed_signer_provider_operations/);
   assert.match(checker, /migration_head_ok/u);
-  assert.match(checker, /count\(\*\) = 51 AND min\(version\) = 1 AND max\(version\) = 51/u);
+  assert.match(checker, /count\(\*\) = 52 AND min\(version\) = 1 AND max\(version\) = 52/u);
   assert.match(checker, /signer_function_allowlist/u);
   assert.match(checker, /to_regprocedure\('public\.' \|\| routine_signature\) AS routine_oid/u);
   assert.match(checker, /NOT EXISTS \(SELECT 1 FROM signer_function_oids WHERE routine_oid IS NULL\)/u);

@@ -88,8 +88,8 @@ test("audit export verify freezes exact public input, CSRF, recent WebAuthn, and
 test("catalog inventory includes the C2 download and verification contracts", () => {
   const catalog = readJson("contracts/catalog-v1.json");
   const counts = catalog.entries.reduce((result, entry) => ({ ...result, [entry.kind]: (result[entry.kind] ?? 0) + 1 }), {});
-  assert.equal(catalog.entries.length, 148);
-  assert.deepEqual(counts, { "json-schema": 39, "openapi-operation": 61, "postgres-migration": 48 });
+  assert.equal(catalog.entries.length, 152);
+  assert.deepEqual(counts, { "json-schema": 39, "openapi-operation": 61, "postgres-migration": 52 });
   for (const id of ["schema.audit-export-verification-result-v1", "api.human.downloadAuditExport", "api.human.verifyAuditExport"]) {
     assert.ok(catalog.entries.some((entry) => entry.id === id), `${id} catalog entry`);
   }

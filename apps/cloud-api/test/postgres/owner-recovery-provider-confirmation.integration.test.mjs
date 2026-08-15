@@ -30,7 +30,7 @@ test("0036 automatically confirms accepted uncertain delivery without retrying n
   const client = await poolA.connect();
   try {
     const migration = await createMigrationRunner({ client, applicationVersion: "owner-recovery-provider-confirmation" }).run();
-    assert.equal(migration.currentVersion, 51);
+    assert.equal(migration.currentVersion, 52);
   } finally { client.release(); }
   await ensureOwnerRecoveryProviderAcceptanceLedger(poolA);
 

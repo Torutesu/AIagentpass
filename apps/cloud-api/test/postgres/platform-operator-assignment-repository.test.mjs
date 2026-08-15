@@ -10,6 +10,7 @@ import {
 
 const ORGANIZATION_ID = "33333333-3333-4333-8333-333333333333";
 const MEMBER_ID = "22222222-2222-4222-8222-222222222222";
+const PRINCIPAL_ID = "66666666-6666-4666-8666-666666666666";
 const SESSION_ID = "11111111-1111-4111-8111-111111111111";
 const ASSIGNMENT_ID = "44444444-4444-4444-8444-444444444444";
 const OPERATION = "platform.promotion.issue";
@@ -35,11 +36,14 @@ function assignment(overrides = {}) {
     expires_at: "2026-08-15T13:00:00.000Z",
     issued_at: "2026-08-15T11:00:00.000Z",
     member_id: MEMBER_ID,
+    principal_id: PRINCIPAL_ID,
     operation: OPERATION,
     organization_id: ORGANIZATION_ID,
     role: "platform_operator",
     session_id: SESSION_ID,
     status: "active",
+    authority_generation: 7,
+    assignment_version: 3,
     ...overrides
   };
 }
@@ -82,8 +86,10 @@ test("uses exactly one parameterized authority function call and returns a froze
   assert.equal(Object.isFrozen(result), true);
   assert.deepEqual(client.calls, [{
     text: PLATFORM_OPERATOR_ASSIGNMENT_FIND_ACTIVE_SQL,
-    params: [ORGANIZATION_ID, MEMBER_ID, SESSION_ID, OPERATION, CAPABILITY, NOW]
+    params: [ORGANIZATION_ID, MEMBER_ID, SESSION_ID, OPERATION, CAPABILITY]
   }]);
+  assert.equal(client.calls[0].params.includes(NOW), false);
+  assert.equal(client.calls[0].params.length, 5);
   assert.match(client.calls[0].text, /^SELECT agentpass_platform_operator_assignment_find_active\(/u);
   assert.doesNotMatch(client.calls[0].text, /(?:INSERT|UPDATE|DELETE|FROM|JOIN|role)/iu);
 });
@@ -141,8 +147,16 @@ test("rejects malformed authority result shapes, role substitution, and inactive
     response({ ...assignment(), organization_id: "55555555-5555-4555-8555-555555555555" }),
     response({ ...assignment(), session_id: "55555555-5555-4555-8555-555555555555" }),
     response({ ...assignment(), operation: "platform.promotion.replay" }),
+    response({ ...assignment(), principal_id: "not-a-uuid" }),
+    response({ ...assignment(), authority_generation: 0 }),
+    response({ ...assignment(), authority_generation: Number.MAX_SAFE_INTEGER + 1 }),
+    response({ ...assignment(), authority_generation: "7" }),
+    response({ ...assignment(), assignment_version: 0 }),
+    response({ ...assignment(), assignment_version: Number.MAX_SAFE_INTEGER + 1 }),
+    response({ ...assignment(), assignment_version: "3" }),
     response({ ...assignment(), issued_at: "2026-08-15T12:00:00.001Z" }),
     response({ ...assignment(), expires_at: "2026-08-15T12:00:00.000Z" }),
+    response((({ principal_id, ...withoutPrincipalId }) => withoutPrincipalId)(assignment())),
     { rowCount: 1, rows: [{ assignment: assignment() }, { assignment: assignment() }] },
     { rowCount: 0, rows: [] },
     { rowCount: 1, rows: [{ assignment: assignment(), diagnostic: "secret" }] }
@@ -157,6 +171,22 @@ test("rejects malformed authority result shapes, role substitution, and inactive
       return true;
     });
   }
+});
+
+test("validates the database generation and version without accepting caller-controlled time", async () => {
+  const client = new FakeClient({ result: response(assignment({
+    issued_at: "2026-08-15T11:59:59.999Z",
+    expires_at: "2026-08-15T12:00:00.001Z",
+    authority_generation: 1,
+    assignment_version: Number.MAX_SAFE_INTEGER
+  })) });
+  const repository = createPostgresPlatformOperatorAssignmentRepository({ client });
+
+  const result = await repository.findActivePlatformOperatorAssignment(input({ now: NOW }));
+
+  assert.equal(result.authority_generation, 1);
+  assert.equal(result.assignment_version, Number.MAX_SAFE_INTEGER);
+  assert.deepEqual(client.calls[0].params, [ORGANIZATION_ID, MEMBER_ID, SESSION_ID, OPERATION, CAPABILITY]);
 });
 
 test("contains database failures behind one stable opaque error", async () => {

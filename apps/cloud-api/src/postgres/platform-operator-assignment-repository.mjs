@@ -9,7 +9,8 @@ const INPUT_KEYS = Object.freeze([
 ]);
 const ASSIGNMENT_KEYS = Object.freeze([
   "assignment_id", "capability", "expires_at", "issued_at", "member_id",
-  "operation", "organization_id", "role", "session_id", "status"
+  "principal_id", "operation", "organization_id", "role", "session_id", "status",
+  "authority_generation", "assignment_version"
 ]);
 
 // This is intentionally the only SQL issued by this repository. The function
@@ -17,7 +18,7 @@ const ASSIGNMENT_KEYS = Object.freeze([
 // authority joins. In particular, organization membership roles are not an
 // input to this boundary and cannot grant platform authority.
 export const PLATFORM_OPERATOR_ASSIGNMENT_FIND_ACTIVE_SQL =
-  "SELECT agentpass_platform_operator_assignment_find_active($1::uuid,$2::uuid,$3::uuid,$4::text,$5::text,$6::timestamptz) AS assignment";
+  "SELECT agentpass_platform_operator_assignment_find_active($1::uuid,$2::uuid,$3::uuid,$4::text,$5::text) AS assignment";
 
 export const PLATFORM_OPERATOR_ASSIGNMENT_REPOSITORY_ERROR_CODES = Object.freeze({
   CONFIG: "ERR_PLATFORM_OPERATOR_ASSIGNMENT_REPOSITORY_CONFIG",
@@ -70,8 +71,7 @@ export function createPostgresPlatformOperatorAssignmentRepository({ client } = 
         values.member_id,
         values.session_id,
         values.operation,
-        values.capability,
-        values.now
+        values.capability
       ]);
       try {
         return normalizeQueryResult(result, values);
@@ -123,11 +123,14 @@ function normalizeQueryResult(result, input) {
     expires_at: expiresAt,
     issued_at: issuedAt,
     member_id: uuidValue(value.member_id, PLATFORM_OPERATOR_ASSIGNMENT_REPOSITORY_ERROR_CODES.RESULT),
+    principal_id: uuidValue(value.principal_id, PLATFORM_OPERATOR_ASSIGNMENT_REPOSITORY_ERROR_CODES.RESULT),
     operation: operationValue(value.operation, PLATFORM_OPERATOR_ASSIGNMENT_REPOSITORY_ERROR_CODES.RESULT),
     organization_id: uuidValue(value.organization_id, PLATFORM_OPERATOR_ASSIGNMENT_REPOSITORY_ERROR_CODES.RESULT),
     role: exactRole(value.role),
     session_id: uuidValue(value.session_id, PLATFORM_OPERATOR_ASSIGNMENT_REPOSITORY_ERROR_CODES.RESULT),
-    status: exactStatus(value.status)
+    status: exactStatus(value.status),
+    authority_generation: positiveSafeInteger(value.authority_generation),
+    assignment_version: positiveSafeInteger(value.assignment_version)
   });
   const nowMs = Date.parse(input.now);
   if (normalized.organization_id !== input.organization_id
@@ -140,6 +143,13 @@ function normalizeQueryResult(result, input) {
     throw repositoryError(PLATFORM_OPERATOR_ASSIGNMENT_REPOSITORY_ERROR_CODES.RESULT);
   }
   return normalized;
+}
+
+function positiveSafeInteger(value) {
+  if (!Number.isSafeInteger(value) || value < 1) {
+    throw repositoryError(PLATFORM_OPERATOR_ASSIGNMENT_REPOSITORY_ERROR_CODES.RESULT);
+  }
+  return value;
 }
 
 function uuidValue(value, code = PLATFORM_OPERATOR_ASSIGNMENT_REPOSITORY_ERROR_CODES.INPUT) {
