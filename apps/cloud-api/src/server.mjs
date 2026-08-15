@@ -18,6 +18,18 @@ import {
   POSSESSION_RECEIPT_SIGNATURE_ALGORITHMS,
   POSSESSION_RECEIPT_VERSION
 } from "./possession-receipt-signer.mjs";
+import {
+  PLATFORM_PROMOTION_CAPABILITIES,
+  PLATFORM_PROMOTION_ISSUE_PATH,
+  PLATFORM_PROMOTION_OPERATIONS,
+  PLATFORM_PROMOTION_REPLAY_PATH,
+  PLATFORM_OPERATOR_ROLE,
+  isPlatformPromotionPath,
+  normalizePlatformOperatorAuthorization,
+  normalizePlatformPromotionRequest,
+  normalizePlatformPromotionResult,
+  platformPromotionContextHash
+} from "./platform-promotion-http-contract.mjs";
 
 const MAX_BODY_BYTES = 1024 * 1024;
 const HUMAN_AUTH_MAX_BODY_BYTES = 64 * 1024;
@@ -55,7 +67,7 @@ const V2_CANDIDATE_BINDING_KEYS = Object.freeze([
 const V2_COMPLETION_KEYS = new Set(["version", "proof_version", "enrollment_id", "organization_id", "device_id", "label", "platform", "device_key", "candidate_id", "device_key_fingerprint", "challenge"]);
 const V2_CHALLENGE_KEYS = new Set(["challenge_id", "nonce", "expires_at", "candidate_id", "device_key_fingerprint"]);
 const V2_PROOF_DOMAIN = "AgentPass-Enrollment-Proof-v2\0";
-export function createCloudApi({ store, tokenRecords = [], bundleSigner, capabilitySigner, refreshHintService, now = () => Date.now(), monotonicNow, replayCache = createReplayCache(), deviceReplayConsumer, agentSessionDeviceApi, qualificationGrantBatchDeviceApi, rateLimiter, admissionRateLimiter, verifyRecentWebAuthn, recentAuthService, humanAuthApi, humanSession, humanAuthOrigin, auditExportIssuanceService, auditExportVerifier, capabilityAuthorityRepository, capabilityRevocationSource, auditRepository, enrollmentCredentialSecret, possessionReceiptSigner, trackInFlight, readiness, operationalMetrics, operationalProbeSecret } = {}) {
+export function createCloudApi({ store, tokenRecords = [], bundleSigner, capabilitySigner, refreshHintService, now = () => Date.now(), monotonicNow, replayCache = createReplayCache(), deviceReplayConsumer, agentSessionDeviceApi, qualificationGrantBatchDeviceApi, rateLimiter, admissionRateLimiter, verifyRecentWebAuthn, recentAuthService, humanAuthApi, humanSession, humanAuthOrigin, auditExportIssuanceService, auditExportVerifier, platformPromotionIssuanceService, platformOperatorAuthorizer, capabilityAuthorityRepository, capabilityRevocationSource, auditRepository, enrollmentCredentialSecret, possessionReceiptSigner, trackInFlight, readiness, operationalMetrics, operationalProbeSecret } = {}) {
   if (!store) throw new TypeError("store is required");
   if (verifyRecentWebAuthn !== undefined && recentAuthService !== undefined) throw new TypeError("configure verifyRecentWebAuthn or recentAuthService, not both");
   if (humanAuthApi !== undefined && (!humanAuthApi || typeof humanAuthApi.handle !== "function")) throw new TypeError("humanAuthApi must expose handle()");
@@ -70,6 +82,14 @@ export function createCloudApi({ store, tokenRecords = [], bundleSigner, capabil
   }
   if (auditExportVerifier !== undefined && auditExportIssuanceService === undefined) {
     throw new TypeError("auditExportVerifier requires auditExportIssuanceService");
+  }
+  if (platformPromotionIssuanceService !== undefined && (!platformPromotionIssuanceService
+    || typeof platformPromotionIssuanceService.issuePlatformPromotion !== "function"
+    || typeof platformPromotionIssuanceService.replayPlatformPromotion !== "function")) {
+    throw new TypeError("platformPromotionIssuanceService must expose issuePlatformPromotion() and replayPlatformPromotion()");
+  }
+  if (platformPromotionIssuanceService !== undefined && typeof platformOperatorAuthorizer !== "function") {
+    throw new TypeError("platformOperatorAuthorizer is required with platformPromotionIssuanceService");
   }
   const effectiveHumanAuthOrigin = humanAuthOrigin ?? humanSession?.expectedOrigin;
   if (auditExportIssuanceService !== undefined && (humanSession === undefined || recentAuthService === undefined
@@ -169,6 +189,9 @@ export function createCloudApi({ store, tokenRecords = [], bundleSigner, capabil
         return sendRawJson(response, normalized.status, normalized.encoded, normalized.headers);
       }
       const url = new URL(request.url, "http://agentpass.invalid");
+      if (platformPromotionIssuanceService && isPlatformPromotionPath(url.pathname)) {
+        return await handlePlatformPromotion(request, response, url, requestId);
+      }
       if (auditExportIssuanceService && (HUMAN_AUDIT_EXPORT_CREATE_PATH.test(url.pathname)
         || HUMAN_AUDIT_EXPORT_GET_PATH.test(url.pathname)
         || HUMAN_AUDIT_EXPORT_DOWNLOAD_PATH.test(url.pathname)
@@ -446,6 +469,98 @@ export function createCloudApi({ store, tokenRecords = [], bundleSigner, capabil
     const normalized = normalizeHumanAuthResult(result);
     if (!normalized) return send(response, 503, { error: { code: "human_auth_unavailable", message: "Human authentication is temporarily unavailable" }, request_id: requestId }, rateLimitHeaders(rateLimit));
     sendRawJson(response, normalized.status, normalized.encoded, mergeResponseHeaders(normalized.headers, rateLimitHeaders(rateLimit)));
+  }
+
+  async function handlePlatformPromotion(request, response, url, requestId) {
+    let rateLimitHeadersValue = {};
+    try {
+      const operation = url.pathname === PLATFORM_PROMOTION_ISSUE_PATH
+        ? PLATFORM_PROMOTION_OPERATIONS.issue
+        : PLATFORM_PROMOTION_OPERATIONS.replay;
+      if (request.method !== "POST") throw apiError("method_not_allowed", 405, "Method not allowed", { Allow: "POST" });
+      if (url.search || url.hash) throw apiError("platform_promotion_invalid_request", 400, "Platform promotion request is invalid");
+      const admissionDecision = await acquireRateLimit(admission, {
+        tenantId: "platform-operator",
+        principalType: "human",
+        principalId: transportPrincipalId(request)
+      });
+      if (!admissionDecision.allowed) throw apiError("rate_limited", 429, "Pre-authentication rate limit exceeded", rateLimitHeaders(admissionDecision, true));
+      if (!humanSession || typeof humanSession.authenticateRequest !== "function") throw apiError("platform_operator_unavailable", 503, "Platform operator authorization is unavailable");
+      if (request.headers.authorization !== undefined) throw apiError("human_session_invalid", 401, "Authentication failed");
+      if (request.headers.origin !== effectiveHumanAuthOrigin || request.headers.origin === "null") throw apiError("human_session_request_denied", 403, "Authentication failed");
+      const bodyBytes = await readBody(request);
+      const body = parseBody(bodyBytes);
+      const input = normalizePlatformPromotionRequest(body, request.headers["idempotency-key"]);
+      const authenticated = await humanSession.authenticateRequest({
+        method: "POST",
+        headers: request.headers,
+        origin: request.headers.origin,
+        cookie: request.headers.cookie,
+        csrfToken: request.headers["agentpass-csrf"]
+      });
+      const principal = authenticated?.session;
+      if (!principal || typeof principal !== "object" || Array.isArray(principal)) throw apiError("human_session_invalid", 401, "Authentication failed");
+      let authorization;
+      try {
+        authorization = normalizePlatformOperatorAuthorization(await platformOperatorAuthorizer({
+          principal: { ...principal },
+          operation,
+          capability: PLATFORM_PROMOTION_CAPABILITIES[operation],
+          request: { method: request.method, path: url.pathname },
+          input: { ...input }
+        }), operation);
+      } catch (error) {
+        if (error?.code === "ERR_PLATFORM_PROMOTION_HTTP_AUTHORIZATION") throw apiError("platform_operator_unavailable", 503, "Platform operator authorization is unavailable");
+        throw apiError("platform_operator_unavailable", 503, "Platform operator authorization is unavailable");
+      }
+      if (authorization.allowed !== true || authorization.role !== PLATFORM_OPERATOR_ROLE) throw apiError("platform_operator_denied", 403, "Platform operator authorization denied");
+      const contextHash = platformPromotionContextHash(input, operation);
+      await requireAuditExportRecentAuth({
+        verifier: recentAuthVerifier,
+        principal,
+        proof: request.headers["agentpass-recent-auth"],
+        organizationId: principal.organization_id,
+        operation,
+        contextHash,
+        now: now()
+      });
+      const rateLimit = await acquireRateLimit(limiter, { tenantId: "platform-operator", principalType: "human", principalId: principal.member_id });
+      if (!rateLimit.allowed) throw apiError("rate_limited", 429, "Rate limit exceeded", rateLimitHeaders(rateLimit, true));
+      rateLimitHeadersValue = rateLimitHeaders(rateLimit);
+      let result;
+      try {
+        result = operation === PLATFORM_PROMOTION_OPERATIONS.issue
+          ? await platformPromotionIssuanceService.issuePlatformPromotion(input)
+          : await platformPromotionIssuanceService.replayPlatformPromotion(input);
+      } catch (error) {
+        throw mapPlatformPromotionServiceError(error);
+      }
+      if (result === null) throw apiError("platform_promotion_not_found", 404, "Platform promotion was not found");
+      let promotion;
+      try {
+        promotion = normalizePlatformPromotionResult(result, input);
+      } catch {
+        throw apiError("platform_promotion_unavailable", 503, "Platform promotion issuance is unavailable");
+      }
+      return send(response, operation === PLATFORM_PROMOTION_OPERATIONS.issue && promotion.replayed !== true ? 201 : 200, {
+        promotion,
+        request_id: requestId
+      }, {
+        ...rateLimitHeadersValue,
+        "cache-control": "no-store, max-age=0",
+        Pragma: "no-cache",
+        "X-Content-Type-Options": "nosniff"
+      });
+    } catch (error) {
+      const mapped = mapError(error);
+      return send(response, mapped.status, { error: { code: mapped.code, message: mapped.message }, request_id: requestId }, {
+        ...rateLimitHeadersValue,
+        "cache-control": "no-store, max-age=0",
+        Pragma: "no-cache",
+        "X-Content-Type-Options": "nosniff",
+        ...(mapped.headers ?? {})
+      });
+    }
   }
 
   function buildRoutes() {
@@ -1095,6 +1210,16 @@ function mapAuditExportServiceError(error, create) {
   if (create && code.includes("uncertain")) return apiError("audit_export_uncertain", 503, "Audit export outcome is uncertain");
   if (code.includes("input") || code.includes("binding")) return apiError("invalid_audit_export_request", 400, "Audit export request is invalid");
   return apiError("audit_export_unavailable", 503, "Audit export is unavailable");
+}
+
+function mapPlatformPromotionServiceError(error) {
+  const code = String(error?.code ?? "").toLowerCase();
+  if (code.includes("input") || code.includes("binding")) return apiError("platform_promotion_invalid_request", 400, "Platform promotion request is invalid");
+  if (code.includes("conflict")) return apiError("platform_promotion_idempotency_conflict", 409, "Platform promotion idempotency conflicts with prior state");
+  if (code.includes("in_progress")) return apiError("platform_promotion_in_progress", 409, "Platform promotion is already in progress");
+  if (code.includes("uncertain")) return apiError("platform_promotion_uncertain", 409, "Platform promotion outcome is uncertain");
+  if (code.includes("not_found") || code.includes("absent")) return apiError("platform_promotion_not_found", 404, "Platform promotion was not found");
+  return apiError("platform_promotion_unavailable", 503, "Platform promotion issuance is unavailable");
 }
 
 function normalizeAuditExportPublicResult(value, expected) {

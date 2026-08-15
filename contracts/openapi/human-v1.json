@@ -67,6 +67,66 @@
         }
       }
     },
+    "/platform/promotions": {
+      "post": {
+        "operationId": "issuePlatformPromotion",
+        "summary": "Issue platform promotion evidence",
+        "description": "Issues exactly one deployment-scoped Promotion Evidence v3 envelope through the hosted signer. This is a global platform-operator operation, not an organization-member operation. The platform operator role and capability are resolved server-side; organization roles, caller-supplied roles, provider fields, claim tokens, approval principal identities, and provider diagnostics are never accepted or returned.",
+        "security": [{ "humanSession": [], "recentWebAuthn": [] }],
+        "parameters": [
+          { "$ref": "#/components/parameters/CsrfToken" },
+          { "$ref": "#/components/parameters/IdempotencyKey" },
+          { "$ref": "#/components/parameters/RecentAuth" }
+        ],
+        "requestBody": { "$ref": "#/components/requestBodies/PlatformPromotionRequest" },
+        "x-agentpass-runtime-path": "/v1/platform/promotions",
+        "x-agentpass-platform-scope": { "role": "platform_operator", "capability": "platform.promotion.issue", "tenant": "global", "organization-membership-roles": "denied" },
+        "x-agentpass-recent-auth-operation": "platform.promotion.issue",
+        "x-agentpass-recent-auth-context": "sha256(canonical-json({version:1,operation,promotion_id,deployment_id,environment,candidate_id,idempotency_key}))",
+        "x-agentpass-idempotency": { "source": "Idempotency-Key", "same-key-same-request": "return-original-public-result", "same-key-different-request": "platform_promotion_idempotency_conflict", "additionalProperties": false },
+        "x-agentpass-secret-policy": { "response": "public-evidence-only", "private-approval-fields": "never", "provider-fields": "never", "claim-token": "never", "cache": "no-store", "additionalProperties": false },
+        "responses": {
+          "201": { "$ref": "#/components/responses/PlatformPromotionIssued" },
+          "200": { "$ref": "#/components/responses/PlatformPromotionIssued" },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "409": { "$ref": "#/components/responses/IdempotencyConflict" },
+          "429": { "$ref": "#/components/responses/TooManyRequests" },
+          "503": { "$ref": "#/components/responses/InternalError" }
+        }
+      }
+    },
+    "/platform/promotions/replay": {
+      "post": {
+        "operationId": "replayPlatformPromotion",
+        "summary": "Replay committed platform promotion evidence",
+        "description": "Replays only the exact committed public Promotion Evidence v3 result identified by the supplied request identity. It never signs again, never returns claim material, and does not expose uncertain or absent authority state.",
+        "security": [{ "humanSession": [], "recentWebAuthn": [] }],
+        "parameters": [
+          { "$ref": "#/components/parameters/CsrfToken" },
+          { "$ref": "#/components/parameters/IdempotencyKey" },
+          { "$ref": "#/components/parameters/RecentAuth" }
+        ],
+        "requestBody": { "$ref": "#/components/requestBodies/PlatformPromotionRequest" },
+        "x-agentpass-runtime-path": "/v1/platform/promotions/replay",
+        "x-agentpass-platform-scope": { "role": "platform_operator", "capability": "platform.promotion.replay", "tenant": "global", "organization-membership-roles": "denied" },
+        "x-agentpass-recent-auth-operation": "platform.promotion.replay",
+        "x-agentpass-recent-auth-context": "sha256(canonical-json({version:1,operation,promotion_id,deployment_id,environment,candidate_id,idempotency_key}))",
+        "x-agentpass-idempotency": { "source": "Idempotency-Key", "same-key-same-request": "return-committed-public-result", "additionalProperties": false },
+        "x-agentpass-secret-policy": { "response": "public-evidence-only", "private-approval-fields": "never", "provider-fields": "never", "claim-token": "never", "cache": "no-store", "additionalProperties": false },
+        "responses": {
+          "200": { "$ref": "#/components/responses/PlatformPromotionIssued" },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "409": { "$ref": "#/components/responses/IdempotencyConflict" },
+          "429": { "$ref": "#/components/responses/TooManyRequests" },
+          "503": { "$ref": "#/components/responses/InternalError" }
+        }
+      }
+    },
     "/auth/github/start": {
       "post": {
         "operationId": "startGithubAuthorization",
@@ -1054,6 +1114,13 @@
         "description": "Session-bound CSRF token. Same-origin/origin checks remain required; this header is not authentication.",
         "schema": { "type": "string", "minLength": 32, "maxLength": 512 }
       },
+      "RecentAuth": {
+        "name": "agentpass-recent-auth",
+        "in": "header",
+        "required": true,
+        "description": "One-use, operation- and request-bound WebAuthn authorization identifier.",
+        "schema": { "type": "string", "format": "uuid" }
+      },
       "IdempotencyKey": {
         "name": "Idempotency-Key",
         "in": "header",
@@ -1097,6 +1164,11 @@
       }
     },
     "requestBodies": {
+      "PlatformPromotionRequest": {
+        "required": true,
+        "description": "Exactly the public promotion, deployment, environment, and candidate identity. Idempotency-Key, role, approval, provider, claim, and private fields are transport- or server-bound and forbidden in the body.",
+        "content": { "application/json": { "schema": { "$ref": "../schemas/platform-promotion-issuance-request-v1.schema.json" } } }
+      },
       "SessionBootstrap": {
         "required": true,
         "description": "The request body is exactly the empty JSON object. Identity, organization, member, role, nonce, and provider fields are forbidden in the body.",
@@ -1196,6 +1268,11 @@
       }
     },
     "responses": {
+      "PlatformPromotionIssued": {
+        "description": "A public, independently verified Promotion Evidence v3 envelope. The response is never cacheable.",
+        "headers": { "Cache-Control": { "required": true, "schema": { "type": "string", "const": "no-store, max-age=0" } } },
+        "content": { "application/json": { "schema": { "$ref": "../schemas/platform-promotion-issuance-response-v1.schema.json" } } }
+      },
       "SessionBootstrapCreated": {
         "description": "A short-lived opaque human session was issued.",
         "headers": {

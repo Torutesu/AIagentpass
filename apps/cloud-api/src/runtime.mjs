@@ -46,7 +46,7 @@ import { PROTOCOL_VERSION, REFRESH_HINT_SIGNATURE_ALGORITHM, REFRESH_HINT_TYPE }
 
 const IDENTIFIER = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 
-export async function createCloudRuntime({ env = process.env, logger = console, postgresFactory = createPostgresRuntime, humanAuthFactory = createHumanAuthRuntime, kmsProviderFactory = createHostedKmsProviders, agentSessionSignerProvider, agentSessionSignerFactory = createHostedAgentSessionGrantSigner, qualificationManifestSignerProvider, qualificationManifestSignerFactory = createHostedQualificationManifestSigner, possessionReceiptSignerProvider, possessionReceiptSignerFactory = createHostedPossessionReceiptSigner, refreshHintSignerProvider, capabilitySignerProvider, controlBundleSignerProvider, auditAnchorSignerProvider, promotionEvidenceSignerProvider, ownerRecoveryPublisher } = {}) {
+export async function createCloudRuntime({ env = process.env, logger = console, postgresFactory = createPostgresRuntime, humanAuthFactory = createHumanAuthRuntime, kmsProviderFactory = createHostedKmsProviders, agentSessionSignerProvider, agentSessionSignerFactory = createHostedAgentSessionGrantSigner, qualificationManifestSignerProvider, qualificationManifestSignerFactory = createHostedQualificationManifestSigner, possessionReceiptSignerProvider, possessionReceiptSignerFactory = createHostedPossessionReceiptSigner, refreshHintSignerProvider, capabilitySignerProvider, controlBundleSignerProvider, auditAnchorSignerProvider, promotionEvidenceSignerProvider, platformOperatorAuthorizer, ownerRecoveryPublisher } = {}) {
   const profile = parseCloudRuntimeProfile(env);
   const config = loadRuntimeConfig(env);
   const configuredOwnerRecoveryPublisher = profile.isHosted
@@ -429,6 +429,7 @@ export async function createCloudRuntime({ env = process.env, logger = console, 
       ...(profile.isHosted ? { refreshHintService: createRefreshHintService({ source: store, nonceDeriver: refreshNonceCodec, signer: refreshHintSigner, notifier: postgresRuntime.refreshHintNotifier, metrics: postgresRuntime.operationalMetrics }) } : {}),
       ...(humanAuthRuntime ? { humanAuthApi: humanAuthRuntime.api, humanSession: humanAuthRuntime.humanSession, recentAuthService: humanAuthRuntime.recentAuthService, humanAuthOrigin: config.humanAuth.origin } : {}),
       ...(auditExportIssuanceService ? { auditExportIssuanceService, auditExportVerifier } : {}),
+      ...(platformPromotionIssuanceService && typeof platformOperatorAuthorizer === "function" ? { platformPromotionIssuanceService, platformOperatorAuthorizer } : {}),
       ...(agentSessionDeviceApi ? { agentSessionDeviceApi } : {}),
       ...(qualificationGrantBatchDeviceApi ? { qualificationGrantBatchDeviceApi } : {}),
       ...(possessionReceiptSigner ? { possessionReceiptSigner } : {}),
