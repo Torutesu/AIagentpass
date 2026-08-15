@@ -37,18 +37,19 @@ const PROCESS_TIMEOUT_MS = 180_000;
 // diagnostics, so assertions, URLs, credentials, SQL, and tenant data remain
 // unavailable to the orchestrator and CI log.
 const LIVE_BROWSER_SAFE_FAILURE_MARKERS = Object.freeze([
-  [1, "renders all six real PostgreSQL device states and accepts keyboard wake", "device_states_wake"],
-  [2, "shows accepted, coalesced, and no-pending outcomes from the real wake ledger", "wake_ledger_outcomes"],
-  [3, "admin completes real WebAuthn and wake mutation", "admin_webauthn_wake"],
-  [4, "auditor receives no wake mutation control", "auditor_wake_denial"],
-  [5, "viewer receives no wake mutation control", "viewer_wake_denial"],
-  [6, "owner without an available authenticator fails before wake mutation", "missing_authenticator_denial"],
-  [7, "owner stale authorization is rejected by the real Cloud boundary", "stale_authorization_denial"],
-  [8, "owner replayed authorization is rejected by the real Cloud boundary", "replayed_authorization_denial"],
-  [9, "owner cross_operation authorization is rejected by the real Cloud boundary", "cross_operation_denial"],
-  [10, "owner cross_tenant authorization is rejected by the real Cloud boundary", "cross_tenant_denial"],
-  [11, "owner completes distinct real WebAuthn device revoke", "owner_device_revoke"],
-  [12, "admin completes distinct real WebAuthn device revoke", "admin_device_revoke"]
+  [1, "renders all six real PostgreSQL device states", "device_states"],
+  [2, "accepts keyboard wake from the real pending device", "keyboard_wake"],
+  [3, "shows accepted, coalesced, and no-pending outcomes from the real wake ledger", "wake_ledger_outcomes"],
+  [4, "admin completes real WebAuthn and wake mutation", "admin_webauthn_wake"],
+  [5, "auditor receives no wake mutation control", "auditor_wake_denial"],
+  [6, "viewer receives no wake mutation control", "viewer_wake_denial"],
+  [7, "owner without an available authenticator fails before wake mutation", "missing_authenticator_denial"],
+  [8, "owner stale authorization is rejected by the real Cloud boundary", "stale_authorization_denial"],
+  [9, "owner replayed authorization is rejected by the real Cloud boundary", "replayed_authorization_denial"],
+  [10, "owner cross_operation authorization is rejected by the real Cloud boundary", "cross_operation_denial"],
+  [11, "owner cross_tenant authorization is rejected by the real Cloud boundary", "cross_tenant_denial"],
+  [12, "owner completes distinct real WebAuthn device revoke", "owner_device_revoke"],
+  [13, "admin completes distinct real WebAuthn device revoke", "admin_device_revoke"]
 ].map(([index, name, code]) => Object.freeze({ marker: `not ok ${index} - ${name}`, code })));
 const REQUIRED_ENV_KEYS = Object.freeze([
   "P0B_POSTGRES_ADMIN_URL",
