@@ -317,6 +317,16 @@ export function createDrainController({
     return snapshot();
   }
 
+  // Signing boundaries use the same deployment-wide admission state as HTTP
+  // work.  A checkpoint is intentionally synchronous so a caller can place it
+  // immediately before a durable reservation or an external provider call.
+  // The state can change while an awaited database operation is in flight;
+  // callers must checkpoint again after every such boundary.
+  function assertAccepting() {
+    if (state !== "running") throw new DrainRejectedError();
+    return snapshot();
+  }
+
   async function waitForInFlight(timeoutMs) {
     if (inFlight === 0) return true;
     const startedAt = safeClock(clock);
@@ -387,6 +397,7 @@ export function createDrainController({
     acquire,
     track,
     beginDrain,
+    assertAccepting,
     drain,
     close: closeImmediately,
     snapshot

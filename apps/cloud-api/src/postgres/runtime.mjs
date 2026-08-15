@@ -388,6 +388,10 @@ export async function createPostgresRuntime({ env = process.env, PoolClass = Poo
     metrics: operationalMetrics,
     readiness: operationalHealth.readiness,
     health: operationalHealth.health,
+    // Hosted managed signers share this exact admission controller. Keeping
+    // it at the composition boundary makes direct signer calls obey the same
+    // drain fence as HTTP requests and PostgreSQL work.
+    managedSignerOperationGate: drainController,
     trackInFlight: drainController.track,
     beginDrain: drainController.beginDrain,
     drain,

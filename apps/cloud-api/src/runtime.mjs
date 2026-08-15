@@ -145,6 +145,11 @@ export async function createCloudRuntime({ env = process.env, logger = console, 
           return verifyPlatformPromotionEvidence(envelope, context);
         }
       });
+      if (!postgresRuntime?.managedSignerOperationGate
+        || typeof postgresRuntime.managedSignerOperationGate.track !== "function"
+        || typeof postgresRuntime.managedSignerOperationGate.assertAccepting !== "function") {
+        throw new Error("PostgreSQL managed signer drain authority is unavailable");
+      }
       if (!postgresRuntime?.capabilityAuthorityRepository
         || typeof postgresRuntime.capabilityAuthorityRepository.issueCapabilityMetadata !== "function"
         || typeof postgresRuntime.capabilityAuthorityRepository.listRevokedCapabilityIds !== "function") {
@@ -228,6 +233,7 @@ export async function createCloudRuntime({ env = process.env, logger = console, 
       const controlBundleFingerprint = publicKeyFingerprint(config.controlBundlePublicKey);
       const durableControlBundle = await bindHostedManagedSignerProvider({
         postgresRuntime,
+        operationGate: postgresRuntime.managedSignerOperationGate,
         provider: controlBundleSignerProvider,
         purpose: CONTROL_BUNDLE_MANAGED_SIGNER_PURPOSE,
         keyId: config.keyId,
@@ -247,6 +253,7 @@ export async function createCloudRuntime({ env = process.env, logger = console, 
       const capabilityFingerprint = publicKeyFingerprint(config.capabilityPublicKey);
       const durableCapability = await bindHostedManagedSignerProvider({
         postgresRuntime,
+        operationGate: postgresRuntime.managedSignerOperationGate,
         provider: capabilitySignerProvider,
         purpose: CAPABILITY_SIGNER_PURPOSE,
         keyId: config.capabilityKeyId,
@@ -264,6 +271,7 @@ export async function createCloudRuntime({ env = process.env, logger = console, 
       const auditAnchorFingerprint = publicKeyFingerprint(config.auditAnchorPublicKey);
       const durableAuditAnchor = await bindHostedManagedSignerProvider({
         postgresRuntime,
+        operationGate: postgresRuntime.managedSignerOperationGate,
         provider: auditAnchorSignerProvider,
         purpose: AUDIT_ANCHOR_PURPOSE,
         keyId: config.auditAnchorKeyId,
@@ -294,6 +302,7 @@ export async function createCloudRuntime({ env = process.env, logger = console, 
       const promotionEvidenceFingerprint = publicKeyFingerprint(config.promotionEvidencePublicKey);
       const durablePromotionEvidence = await bindHostedManagedSignerProvider({
         postgresRuntime,
+        operationGate: postgresRuntime.managedSignerOperationGate,
         provider: promotionEvidenceSignerProvider,
         purpose: PROMOTION_EVIDENCE_V3_PURPOSE,
         keyId: config.promotionEvidenceKeyId,
@@ -354,6 +363,7 @@ export async function createCloudRuntime({ env = process.env, logger = console, 
       const refreshFingerprint = crypto.createHash("sha256").update(refreshPublicKey.export({ type: "spki", format: "der" })).digest("hex");
       const durableRefreshHint = await bindHostedManagedSignerProvider({
         postgresRuntime,
+        operationGate: postgresRuntime.managedSignerOperationGate,
         provider: refreshHintSignerProvider,
         purpose: REFRESH_HINT_TYPE,
         keyId: config.refreshKeyId,
@@ -376,6 +386,7 @@ export async function createCloudRuntime({ env = process.env, logger = console, 
       const agentSessionSignerConfig = parseAgentSessionSignerConfig(env, agentSessionReferences);
       const durableAgentSession = await bindHostedManagedSignerProvider({
         postgresRuntime,
+        operationGate: postgresRuntime.managedSignerOperationGate,
         provider: agentSessionSignerProvider,
         purpose: agentSessionSignerConfig.purpose,
         keyId: agentSessionSignerConfig.keyId,
@@ -405,6 +416,7 @@ export async function createCloudRuntime({ env = process.env, logger = console, 
       const activeQualificationKey = qualificationSignerConfig.keys.find((key) => key.status === "active");
       const durableQualificationManifest = await bindHostedManagedSignerProvider({
         postgresRuntime,
+        operationGate: postgresRuntime.managedSignerOperationGate,
         provider: qualificationManifestSignerProvider,
         purpose: QUALIFICATION_GRANT_BATCH_MANIFEST_PURPOSE,
         keyId: qualificationSignerConfig.keyId,
@@ -434,6 +446,7 @@ export async function createCloudRuntime({ env = process.env, logger = console, 
       const possessionSignerConfig = parsePossessionReceiptSignerConfig(env, possessionReceiptReferences);
       const durablePossessionReceipt = await bindHostedManagedSignerProvider({
         postgresRuntime,
+        operationGate: postgresRuntime.managedSignerOperationGate,
         provider: possessionReceiptSignerProvider,
         purpose: possessionSignerConfig.purpose,
         keyId: possessionSignerConfig.keyId,

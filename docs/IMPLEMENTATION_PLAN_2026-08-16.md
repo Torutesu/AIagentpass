@@ -225,6 +225,23 @@ history, repository files, logs, crash reports, or support bundles.
 Objective: replace all hosted evaluation authority with purpose-separated,
 non-exportable managed signing and operationally safe PostgreSQL state.
 
+### N5.0 Graceful drain/shutdown closure (source-complete slice)
+
+The hosted runtime now exposes the PostgreSQL drain controller as the shared
+managed-signer admission authority. Readiness is withdrawn when draining
+begins, and every hosted signer/provider-operation path checkpoints that
+authority before durable reservation, after an awaited reservation/start
+boundary, immediately before an external provider call, and during recovery.
+New work is rejected fail-closed; accepted work that loses the race is
+quarantined as durable `uncertain` rather than starting a new provider call.
+Runtime close and the underlying drain close remain bounded and idempotent.
+
+The focused unit/model tests cover a new request after drain, reservation and
+provider-start races, direct adapter fencing, readiness withdrawal, bounded
+timeout behavior, and repeated/concurrent close. Protected AWS/GCP evidence,
+multi-instance termination evidence, and provider-specific cancellation
+behavior remain qualification gates below.
+
 Implementation work:
 
 1. Provision distinct keys and workload identities for capability,
@@ -339,7 +356,7 @@ work that still needs protected infrastructure or physical hardware remains
 | --- | --- | --- | --- | --- |
 | N1 qualification closure | `in progress` | Repair the remaining Console browser journey; rerun all six CI jobs on one head; retain clean browser/P0-B artifacts. | One terminal green run: root/Console/native, browser, P0-B, PostgreSQL integration, PostgreSQL 16, and PostgreSQL 17. | N2/N5 qualification claims |
 | N2 organization and identity Console | `implemented, qualification open` | Finish real-process Owner/Admin/Auditor/Viewer journeys; cover invitation acceptance/resend, last-owner protection, current-session revoke, final-passkey guard, response loss, and accessibility. | Production-built Console and Cloud API against PostgreSQL; virtual WebAuthn; secret-free DOM/storage/network/artifact scan. | Non-engineer control plane |
-| N5 hosted signer | `readiness implemented, protected evidence open` | Add provider-operation drain/shutdown closure; provision eight isolated AWS/GCP keys and identities; run exact-byte convergence, response-loss lookup, rotation, disablement, and cross-purpose denial. | Signed, source-bound AWS/GCP reports proving immutable versions, public fingerprints, non-exportability, least privilege, no fallback, and operator-actionable uncertainty. | Hosted release candidate |
+| N5 hosted signer | `drain closure implemented, protected evidence open` | Provision eight isolated AWS/GCP keys and identities; run exact-byte convergence, response-loss lookup, rotation, disablement, cross-purpose denial, multi-instance termination, and provider-specific cancellation tests. | Signed, source-bound AWS/GCP reports proving immutable versions, public fingerprints, non-exportability, least privilege, no fallback, bounded drain behavior, and operator-actionable uncertainty. | Hosted release candidate |
 | N3 device onboarding | `foundation implemented` | Freeze preflight/handoff DTO; implement browser-to-loopback transfer plus bounded stdin recovery; add interruption/resume state machine and verified receipt/ACK reconciliation. | Clean-machine physical Mac enrollment with restart/expiry/timeout/ambiguous-response matrix and zero secret-bearing artifacts. | Agent installation journey |
 | N4 native agents and distribution | `foundation implemented` | Close durable sign-once transaction; Claude Code lifecycle and two verified commits; Cursor parity; immutable PKG/Homebrew path; Developer ID signing and notarization. | Same artifact digest passes identity, entitlement, Gatekeeper, upgrade, uninstall-preserve, reinstall, rollback-refusal, and negative policy matrix on Apple silicon and Intel/T2. | Staging candidate |
 | N6 operations and production | `design/runbooks partial` | Finish reviewed IaC, immutable image promotion, migration/canary/drain, backup/PITR restore, SLOs/alerts, incident drills, and independent security assessment. | Exact candidate passes staging SLO/RPO/RTO, restore, outage, rotation/compromise, tenant-isolation, DAST/SAST/IaC/container review, and signed promotion adjudication. | Explicit production go/no-go |
@@ -352,9 +369,9 @@ work that still needs protected infrastructure or physical hardware remains
    organization/invitation, passkey/session, then accessibility and artifact
    hygiene. Each slice must use authoritative refresh after response loss and
    must never replay an unconfirmed destructive mutation.
-3. In parallel with N2, land N5 graceful drain and provider reconciliation
-   harnesses. The protected AWS/GCP executor is configuration-only; it cannot
-   add a local signer path or private key input.
+3. In parallel with N2, retain the N5 graceful-drain and provider-reconciliation
+   harnesses as source-complete slices. The protected AWS/GCP executor is
+   configuration-only; it cannot add a local signer path or private key input.
 4. Freeze the N3 public handoff contract only after N2 session/recent-auth
    behavior and N5 possession-receipt metadata are stable. Generate validators
    from the catalog and reject every unknown field at each boundary.

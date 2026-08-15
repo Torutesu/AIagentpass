@@ -10,13 +10,14 @@ import {
   canonicalManagedSignerRequestDigest,
   MANAGED_SIGNER_KEY_LIFECYCLE_REPOSITORY_ERROR_CODES as REPOSITORY_CODES
 } from "../src/postgres/managed-signer-key-lifecycle-repository.mjs";
+import { createDrainController } from "../src/postgres/operational-health.mjs";
 
 const PURPOSE = "agentpass.test-signing";
 const KEY_ID = "test-key-2026-08";
 const KEY_VERSION = 7;
 const SIGNING_VERSION = 3;
 
-function makeFixture({ reserveState = undefined, sign = undefined, metadata = undefined, publicKey = undefined, repository = {} } = {}) {
+function makeFixture({ reserveState = undefined, sign = undefined, metadata = undefined, publicKey = undefined, repository = {}, operationGate = undefined } = {}) {
   const pair = crypto.generateKeyPairSync("ed25519");
   const calls = {
     metadata: [],
@@ -91,7 +92,8 @@ function makeFixture({ reserveState = undefined, sign = undefined, metadata = un
       keyId: KEY_ID,
       keyVersion: KEY_VERSION,
       ...(publicKey === undefined ? {} : { publicKey }),
-      version: SIGNING_VERSION
+      version: SIGNING_VERSION,
+      ...(operationGate === undefined ? {} : { operationGate })
     })
   };
 }
@@ -262,6 +264,69 @@ test("collapses same-process concurrent identical requests into one provider cal
   assert.equal(fixture.calls.sign.length, 1);
   assert.equal(fixture.calls.commit.length, 1);
   assert.equal(fixture.calls.start.length, 1);
+});
+
+test("rejects a new signing request after drain without reserving or calling the provider", async () => {
+  const operationGate = createDrainController({ defaultTimeoutMs: 100, maxTimeoutMs: 200 });
+  const fixture = makeFixture({ operationGate });
+  operationGate.beginDrain();
+
+  await rejectsWithCode(() => fixture.signer.sign(request()), CODES.DRAINING);
+  assert.equal(fixture.calls.reserve.length, 0);
+  assert.equal(fixture.calls.sign.length, 0);
+});
+
+test("fences a reservation that resolves after drain and closes it as uncertain", async () => {
+  const operationGate = createDrainController({ defaultTimeoutMs: 100, maxTimeoutMs: 200 });
+  let releaseReservation;
+  let reservationStarted;
+  const reservationReady = new Promise((resolve) => { reservationStarted = resolve; });
+  const fixture = makeFixture({
+    operationGate,
+    repository: {
+      async reserveSignature() {
+        reservationStarted();
+        await new Promise((resolve) => { releaseReservation = resolve; });
+        return { state: "pending", claim_token: "test-claim-token" };
+      }
+    }
+  });
+  const signing = fixture.signer.sign(request());
+  await reservationReady;
+  operationGate.beginDrain();
+  releaseReservation();
+
+  await rejectsWithCode(() => signing, CODES.DRAINING);
+  assert.equal(fixture.calls.reserve.length, 1);
+  assert.equal(fixture.calls.start.length, 0);
+  assert.equal(fixture.calls.sign.length, 0);
+  assert.equal(fixture.calls.uncertain.length, 1);
+});
+
+test("fences after durable start so an accepted operation cannot start a provider call during drain", async () => {
+  const operationGate = createDrainController({ defaultTimeoutMs: 100, maxTimeoutMs: 200 });
+  let releaseStart;
+  let startStarted;
+  const startReady = new Promise((resolve) => { startStarted = resolve; });
+  const fixture = makeFixture({
+    operationGate,
+    repository: {
+      async startSignature() {
+        startStarted();
+        await new Promise((resolve) => { releaseStart = resolve; });
+        return { state: "pending", provider_started_at: "2026-08-15T00:00:00.000Z" };
+      }
+    }
+  });
+  const signing = fixture.signer.sign(request());
+  await startReady;
+  operationGate.beginDrain();
+  releaseStart();
+
+  await rejectsWithCode(() => signing, CODES.DRAINING);
+  assert.equal(fixture.calls.start.length, 1);
+  assert.equal(fixture.calls.sign.length, 0);
+  assert.equal(fixture.calls.uncertain.length, 1);
 });
 
 test("rejects payload substitution and unknown fields before durable or provider calls", async () => {

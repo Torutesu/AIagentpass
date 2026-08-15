@@ -501,6 +501,22 @@ test("drain rejects readiness immediately and waits for tracked work within the 
   assert.equal(closed, true);
   assert.equal((await health.readiness()).code, "closed");
   assert.throws(() => drain.acquire(), { code: "draining" });
+  assert.throws(() => drain.assertAccepting(), { code: "draining" });
+});
+
+test("drain close is shared and idempotent across concurrent and repeated callers", async () => {
+  const drain = createDrainController({ defaultTimeoutMs: 100, maxTimeoutMs: 200 });
+  const release = drain.acquire();
+  let closeCalls = 0;
+  const close = drain.drain({ timeoutMs: 100, close: async () => { closeCalls += 1; } });
+  const concurrent = drain.drain({ timeoutMs: 100, close: async () => { closeCalls += 100; } });
+  setTimeout(release, 5);
+  const first = await close;
+  assert.deepEqual(await concurrent, first);
+  const second = await drain.drain({ timeoutMs: 100, close: async () => { closeCalls += 1000; } });
+  assert.deepEqual(second, first);
+  assert.equal(closeCalls, 1);
+  assert.throws(() => drain.assertAccepting(), { code: "draining" });
 });
 
 test("drain does not close storage when tracked work exceeds the bounded timeout", async () => {

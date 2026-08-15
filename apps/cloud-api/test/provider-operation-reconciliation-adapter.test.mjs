@@ -11,6 +11,7 @@ import {
   createProviderOperationReconciliationAdapter,
   PROVIDER_OPERATION_RECONCILIATION_ERROR_CODES as CODES,
 } from "../src/provider-operation-reconciliation-adapter.mjs";
+import { createDrainController } from "../src/postgres/operational-health.mjs";
 
 const PURPOSE = "agentpass.capability";
 const KEY_ID = "fixture-kms-key";
@@ -304,7 +305,7 @@ function createProvider({ pair = crypto.generateKeyPairSync("ed25519"), sign = u
   return { provider, pair, calls };
 }
 
-function createAdapterFixture(repositoryOptions = {}, providerOptions = {}) {
+function createAdapterFixture(repositoryOptions = {}, providerOptions = {}, operationGate = undefined) {
   const repo = createRepository(repositoryOptions);
   const providerFixture = createProvider(providerOptions);
   const adapter = createProviderOperationReconciliationAdapter({
@@ -315,6 +316,7 @@ function createAdapterFixture(repositoryOptions = {}, providerOptions = {}) {
     keyId: KEY_ID,
     keyVersion: KEY_VERSION,
     waitTimeoutMs: 50,
+    ...(operationGate === undefined ? {} : { operationGate }),
   });
   return { ...repo, ...providerFixture, adapter, binding: bindingFor() };
 }
@@ -350,6 +352,41 @@ test("wraps a direct Ed25519 KMS provider in the exact managed-signer adapter sh
     provider_receipt: result.provider_receipt,
     signature: result.signature,
   });
+});
+
+test("does not reserve a provider operation after the shared drain fence", async () => {
+  const operationGate = createDrainController({ defaultTimeoutMs: 100, maxTimeoutMs: 200 });
+  const fixture = createAdapterFixture({}, {}, operationGate);
+  operationGate.beginDrain();
+
+  await assert.rejects(fixture.adapter.signOnce(fixture.binding, PAYLOAD), { code: CODES.UNCERTAIN });
+  assert.deepEqual(fixture.events, []);
+  assert.equal(fixture.calls.sign.length, 0);
+});
+
+test("marks a started provider operation uncertain when drain wins before provider call", async () => {
+  const operationGate = createDrainController({ defaultTimeoutMs: 100, maxTimeoutMs: 200 });
+  const fixture = createAdapterFixture({}, {}, operationGate);
+  const originalStart = fixture.repository.startOperation.bind(fixture.repository);
+  let entered;
+  const startEntered = new Promise((resolve) => { entered = resolve; });
+  let release;
+  const releaseStart = new Promise((resolve) => { release = resolve; });
+  fixture.repository.startOperation = async (input) => {
+    entered();
+    await releaseStart;
+    return originalStart(input);
+  };
+
+  const signing = fixture.adapter.signOnce(fixture.binding, PAYLOAD);
+  await startEntered;
+  operationGate.beginDrain();
+  release();
+
+  await assert.rejects(signing, { code: CODES.UNCERTAIN });
+  assert.equal(fixture.calls.sign.length, 0);
+  assert.equal(fixture.rows.get(fixture.binding.operation_id).state, "uncertain");
+  assert.ok(fixture.events.includes("uncertain"));
 });
 
 test("accepts opaque base64url claims whose first character is underscore or hyphen", async () => {

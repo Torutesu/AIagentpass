@@ -260,6 +260,7 @@ function fakePostgresRuntime() {
     },
     createManagedSignerKeyLifecycleRepository: createManagedSignerRepositoryFactory(),
     createProviderOperationRepository: createProviderOperationRepositoryFactory(),
+    managedSignerOperationGate: { async track(operation) { return operation(); }, assertAccepting() {} },
     controlPlaneStore: { async pollDeviceRefresh() { return null; }, async markDeviceRefreshDelivered() {} },
     refreshHintNotifier: { async waitForRefresh() { return false; } },
     sharedControlRepository: {

@@ -28,6 +28,7 @@ export const DURABLE_MANAGED_SIGNER_ERROR_CODES = Object.freeze({
   INACTIVE: "ERR_DURABLE_MANAGED_SIGNER_INACTIVE",
   PENDING: "ERR_DURABLE_MANAGED_SIGNER_PENDING",
   UNCERTAIN: "ERR_DURABLE_MANAGED_SIGNER_UNCERTAIN",
+  DRAINING: "ERR_DURABLE_MANAGED_SIGNER_DRAINING",
   CONFLICT: "ERR_DURABLE_MANAGED_SIGNER_CONFLICT",
   COMMIT: "ERR_DURABLE_MANAGED_SIGNER_COMMIT",
   OUTPUT: "ERR_DURABLE_MANAGED_SIGNER_OUTPUT"
@@ -43,6 +44,7 @@ const MESSAGES = Object.freeze({
   [DURABLE_MANAGED_SIGNER_ERROR_CODES.INACTIVE]: "durable managed signer key is not active",
   [DURABLE_MANAGED_SIGNER_ERROR_CODES.PENDING]: "durable managed signer operation is already pending",
   [DURABLE_MANAGED_SIGNER_ERROR_CODES.UNCERTAIN]: "durable managed signer operation is uncertain",
+  [DURABLE_MANAGED_SIGNER_ERROR_CODES.DRAINING]: "durable managed signer is draining",
   [DURABLE_MANAGED_SIGNER_ERROR_CODES.CONFLICT]: "durable managed signer operation conflicts with its binding",
   [DURABLE_MANAGED_SIGNER_ERROR_CODES.COMMIT]: "durable managed signer result could not be committed",
   [DURABLE_MANAGED_SIGNER_ERROR_CODES.OUTPUT]: "durable managed signer returned an invalid result"
@@ -73,16 +75,18 @@ export function createDurableManagedSignerProvider({
   publicKey,
   version = 1,
   algorithm = ALGORITHM,
-  protocolVersion = SIGNER_PROTOCOL_VERSIONS[purpose]
+  protocolVersion = SIGNER_PROTOCOL_VERSIONS[purpose],
+  operationGate
 } = {}) {
   const adapter = managedSignerAdapter ?? (typeof provider?.signOnce === "function" && typeof provider?.lookup === "function" ? provider : undefined);
-  validateConfiguration({ provider, managedSignerAdapter: adapter, repository, purpose, keyId, keyVersion, publicKey, version, protocolVersion, algorithm });
+  validateConfiguration({ provider, managedSignerAdapter: adapter, repository, purpose, keyId, keyVersion, publicKey, version, protocolVersion, algorithm, operationGate });
   const binding = Object.freeze({ purpose, keyId, keyVersion, version, algorithm });
   const inFlight = new Map();
   let verificationKey = publicKey === undefined ? undefined : parsePinnedConfigurationKey(publicKey);
 
   async function publicKeyMetadata(input = undefined) {
     const request = normalizeMetadataRequest(input, binding);
+    assertOperationGate(operationGate);
     await assertActiveLifecycle(repository, binding);
     let metadata;
     try {
@@ -101,6 +105,7 @@ export function createDurableManagedSignerProvider({
 
   async function loadVerificationKey(signal = undefined) {
     if (verificationKey) return verificationKey;
+    assertOperationGate(operationGate);
     let metadata;
     try {
       metadata = await provider.publicKeyMetadata({
@@ -123,7 +128,9 @@ export function createDurableManagedSignerProvider({
     const existing = inFlight.get(request.operationId);
     if (existing) return existing;
 
-    const operation = executeSign(request, binding, provider, adapter, protocolVersion, repository, loadVerificationKey);
+    const operation = operationGate
+      ? trackDurableOperation(operationGate, () => executeSign(request, binding, provider, adapter, protocolVersion, repository, loadVerificationKey, operationGate))
+      : executeSign(request, binding, provider, adapter, protocolVersion, repository, loadVerificationKey, operationGate);
     inFlight.set(request.operationId, operation);
     operation.then(
       () => { if (inFlight.get(request.operationId) === operation) inFlight.delete(request.operationId); },
@@ -143,7 +150,7 @@ export function createDurableManagedSignerProvider({
   });
 }
 
-async function executeSign(request, binding, provider, adapter, protocolVersion, repository, loadVerificationKey) {
+async function executeSign(request, binding, provider, adapter, protocolVersion, repository, loadVerificationKey, operationGate) {
   const durableInput = {
     purpose: binding.purpose,
     operation_id: request.operationId,
@@ -152,12 +159,13 @@ async function executeSign(request, binding, provider, adapter, protocolVersion,
     key_version: binding.keyVersion
   };
 
+  assertOperationGate(operationGate);
   let reservation;
   try {
     reservation = await repository.reserveSignature(durableInput);
   } catch (error) {
     if (adapter && error?.code === MANAGED_SIGNER_KEY_LIFECYCLE_REPOSITORY_ERROR_CODES.SIGNING_UNCERTAIN) {
-      return reconcileUncertain(request, binding, adapter, protocolVersion, repository, loadVerificationKey, durableInput);
+      return reconcileUncertain(request, binding, adapter, protocolVersion, repository, loadVerificationKey, durableInput, operationGate);
     }
     throw mapReserveError(error);
   }
@@ -174,16 +182,17 @@ async function executeSign(request, binding, provider, adapter, protocolVersion,
     return signReserved(request, binding, provider, adapter, protocolVersion, repository, {
       ...durableInput,
       claim_token: reservation.claim_token
-    }, loadVerificationKey);
+    }, loadVerificationKey, operationGate);
   }
   if (reservation?.state === "uncertain") {
-    if (adapter) return reconcileUncertain(request, binding, adapter, protocolVersion, repository, loadVerificationKey, durableInput);
+    if (adapter) return reconcileUncertain(request, binding, adapter, protocolVersion, repository, loadVerificationKey, durableInput, operationGate);
     throw durableError(DURABLE_MANAGED_SIGNER_ERROR_CODES.UNCERTAIN);
   }
   throw durableError(DURABLE_MANAGED_SIGNER_ERROR_CODES.REPOSITORY);
 }
 
-async function signReserved(request, binding, provider, adapter, protocolVersion, repository, durableInput, loadVerificationKey) {
+async function signReserved(request, binding, provider, adapter, protocolVersion, repository, durableInput, loadVerificationKey, operationGate) {
+  await fenceBeforeProviderBoundary(operationGate, repository, durableInput);
   try {
     const started = await repository.startSignature(durableInput);
     if (started?.state !== "pending" || typeof started.provider_started_at !== "string") {
@@ -194,10 +203,14 @@ async function signReserved(request, binding, provider, adapter, protocolVersion
     throw mapCommitError(error);
   }
 
+  // A drain may begin while startSignature is awaiting PostgreSQL.  Never let
+  // that accepted lease cross into a new provider call; quarantine it instead.
+  await fenceBeforeProviderBoundary(operationGate, repository, durableInput);
   let signature;
   let providerReceipt;
   try {
     const verificationKey = await loadVerificationKey(request.signal);
+    await fenceBeforeProviderBoundary(operationGate, repository, durableInput);
     if (adapter) {
       const contract = createProviderContract(request, binding, protocolVersion, adapter, request.bytes, verificationKey);
       const output = await contract.signOnce();
@@ -249,10 +262,14 @@ async function signReserved(request, binding, provider, adapter, protocolVersion
   return Buffer.from(signature);
 }
 
-async function reconcileUncertain(request, binding, adapter, protocolVersion, repository, loadVerificationKey, durableInput) {
+async function reconcileUncertain(request, binding, adapter, protocolVersion, repository, loadVerificationKey, durableInput, operationGate) {
   let result;
   try {
+    assertOperationGate(operationGate);
     const verificationKey = await loadVerificationKey(request.signal);
+    // lookup may itself invoke the provider to converge an ambiguous result.
+    // It is a new provider boundary and must be fenced independently.
+    assertOperationGate(operationGate);
     const contract = createProviderContract(request, binding, protocolVersion, adapter, request.bytes, verificationKey);
     result = await contract.lookup();
     if (result.state !== "committed") throw durableError(DURABLE_MANAGED_SIGNER_ERROR_CODES.UNCERTAIN);
@@ -442,6 +459,33 @@ async function markUncertainBestEffort(repository, input) {
   catch { /* The operation remains closed even if the quarantine write is unavailable. */ }
 }
 
+function assertOperationGate(operationGate) {
+  if (operationGate === undefined) return;
+  try { operationGate.assertAccepting(); }
+  catch { throw durableError(DURABLE_MANAGED_SIGNER_ERROR_CODES.DRAINING); }
+}
+
+function trackDurableOperation(operationGate, operation) {
+  try {
+    return Promise.resolve(operationGate.track(operation)).catch((error) => {
+      if (error?.code === "draining") throw durableError(DURABLE_MANAGED_SIGNER_ERROR_CODES.DRAINING);
+      throw error;
+    });
+  } catch (error) {
+    if (error?.code === "draining") return Promise.reject(durableError(DURABLE_MANAGED_SIGNER_ERROR_CODES.DRAINING));
+    return Promise.reject(error);
+  }
+}
+
+async function fenceBeforeProviderBoundary(operationGate, repository, durableInput) {
+  try {
+    assertOperationGate(operationGate);
+  } catch (error) {
+    await markUncertainBestEffort(repository, durableInput);
+    throw error;
+  }
+}
+
 function mapReserveError(error) {
   const code = error?.code;
   if (code === MANAGED_SIGNER_KEY_LIFECYCLE_REPOSITORY_ERROR_CODES.SIGNING_PENDING) return durableError(DURABLE_MANAGED_SIGNER_ERROR_CODES.PENDING);
@@ -491,7 +535,7 @@ function normalizeSignal(value) {
   return value;
 }
 
-function validateConfiguration({ provider, managedSignerAdapter, repository, purpose, keyId, keyVersion, publicKey, version, protocolVersion, algorithm }) {
+function validateConfiguration({ provider, managedSignerAdapter, repository, purpose, keyId, keyVersion, publicKey, version, protocolVersion, algorithm, operationGate }) {
   if (!provider || typeof provider.publicKeyMetadata !== "function"
     || (managedSignerAdapter === undefined && typeof provider.sign !== "function")
     || (managedSignerAdapter !== undefined && (typeof managedSignerAdapter.signOnce !== "function" || typeof managedSignerAdapter.lookup !== "function"))
@@ -503,7 +547,11 @@ function validateConfiguration({ provider, managedSignerAdapter, repository, pur
     || typeof keyId !== "string" || !KEY_ID.test(keyId) || !Number.isSafeInteger(keyVersion) || keyVersion < 1
     || !Number.isSafeInteger(version) || version < 1
     || (managedSignerAdapter !== undefined && (!Number.isSafeInteger(protocolVersion) || protocolVersion < 1))
-    || algorithm !== ALGORITHM) throw durableError(DURABLE_MANAGED_SIGNER_ERROR_CODES.CONFIG);
+    || algorithm !== ALGORITHM
+    || (operationGate !== undefined && (!operationGate
+      || typeof operationGate.track !== "function" || typeof operationGate.assertAccepting !== "function"))) {
+    throw durableError(DURABLE_MANAGED_SIGNER_ERROR_CODES.CONFIG);
+  }
   if (publicKey !== undefined) parsePinnedConfigurationKey(publicKey);
 }
 
