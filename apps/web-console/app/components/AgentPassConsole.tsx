@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type RefObject } from "react";
 import { authenticateRecentAuth, registerPasskey, WebAuthnClientError } from "../webauthn-client";
 import { parseConsoleSummary, type ConsoleSummaryViewModel } from "../console-summary";
 import { EnrollmentPreflightError, parsePublicEnrollmentPreflight } from "../../lib/enrollment-preflight.mjs";
@@ -184,6 +184,57 @@ type ConsoleSession = Readonly<{
 }>;
 type OrganizationSwitcherState = "closed" | "loading" | "ready" | "error";
 
+const FOCUSABLE_SELECTOR = [
+  "a[href]",
+  "area[href]",
+  "button:not([disabled])",
+  "input:not([disabled])",
+  "select:not([disabled])",
+  "textarea:not([disabled])",
+  "[contenteditable=\"true\"]",
+  "[tabindex]:not([tabindex=\"-1\"])",
+].join(",");
+
+function getFocusableElements(container: HTMLElement | null): HTMLElement[] {
+  if (!container) return [];
+  return Array.from(container.querySelectorAll<HTMLElement>(FOCUSABLE_SELECTOR))
+    .filter((element) => !element.hasAttribute("hidden") && element.getAttribute("aria-hidden") !== "true" && !element.closest("[hidden]"));
+}
+
+function focusFirstElement(container: HTMLElement | null): void {
+  getFocusableElements(container)[0]?.focus();
+}
+
+function scrollConsoleToTop(): void {
+  const reducedMotion = window.matchMedia?.("(prefers-reduced-motion: reduce)").matches ?? false;
+  window.scrollTo({ top: 0, behavior: reducedMotion ? "auto" : "smooth" });
+}
+
+function useDeterministicDialogFocus(
+  open: boolean,
+  containerRef: RefObject<HTMLElement | null>,
+  restoreRef: RefObject<HTMLElement | null>,
+): void {
+  const previousFocusRef = useRef<HTMLElement | null>(null);
+
+  useEffect(() => {
+    if (!open) return;
+    previousFocusRef.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    const restoreTarget = restoreRef.current;
+    const timer = window.setTimeout(() => {
+      const initial = containerRef.current?.querySelector<HTMLElement>("[data-dialog-initial-focus]");
+      if (initial) initial.focus();
+      else focusFirstElement(containerRef.current);
+    }, 0);
+    return () => {
+      window.clearTimeout(timer);
+      const target = restoreTarget ?? previousFocusRef.current;
+      if (target?.isConnected) target.focus();
+      previousFocusRef.current = null;
+    };
+  }, [containerRef, open, restoreRef]);
+}
+
 class ConsoleSessionError extends Error {
   readonly status?: number;
 
@@ -195,9 +246,9 @@ class ConsoleSessionError extends Error {
 }
 
 function organizationSwitcherMessage(error: unknown): string {
-  if (error instanceof OrganizationClientError && error.code === "forbidden") return "このセッションでは組織の一覧を確認できません。";
-  if (error instanceof OrganizationClientError && error.code === "unauthorized") return "セッションの有効期限が切れています。再認証してください。";
-  return "組織の一覧を読み込めませんでした。もう一度お試しください。";
+  if (error instanceof OrganizationClientError && error.code === "forbidden") return "このセッションでは組織の一覧を確認できません。管理者にアクセス権を確認してもらってください。";
+  if (error instanceof OrganizationClientError && error.code === "unauthorized") return "セッションの有効期限が切れています。この画面の再認証から続けてください。";
+  return "組織の一覧を読み込めませんでした。下の「もう一度試す」を押して再読み込みしてください。";
 }
 
 class EnrollmentFlowError extends Error {
@@ -683,7 +734,7 @@ function DeviceStateCard({ device, onRequestRefresh, canManage }: { device: Agen
       const status = await onRequestRefresh(device.deviceId);
       setWakeOutcome(deviceRefreshOutcome(status));
     } catch {
-      setWakeError("Wake requestを送信できませんでした。接続と権限を確認して、もう一度お試しください。");
+      setWakeError("Wake requestを送信できませんでした。接続と権限を確認し、この端末カードのボタンからもう一度お試しください。");
     } finally {
       wakeInFlight.current = false;
       setWakePending(false);
@@ -728,7 +779,7 @@ function Overview({ data, goTo, onRequestRefresh, summaryState, canManage }: { d
     <>
       <header>
         <p className="eyebrow">運用コンソール / LIVE STATUS</p>
-        <h1 className="page-heading">{summaryState === "ready" ? <>Agentの状態を、<br />確認できました。</> : <>Agentの状態を、<br />確認しています。</>}</h1>
+        <h1 className="page-heading" id="console-page-heading">{summaryState === "ready" ? <>Agentの状態を、<br />確認できました。</> : <>Agentの状態を、<br />確認しています。</>}</h1>
         <p className="page-intro">
           Cloudから取得した端末、権限、監査状態だけを表示します。未検証の情報を安全状態として扱いません。
         </p>
@@ -816,8 +867,8 @@ function ActivityList({ activities }: { activities: AgentPassInitialData["activi
   );
 }
 
-function SurfaceHeader({ eyebrow, title, copy }: { eyebrow: string; title: string; copy: string }) {
-  return <header className="surface-header"><div><p className="eyebrow">{eyebrow}</p><h1 className="page-heading">{title}</h1><p className="page-intro">{copy}</p></div></header>;
+function SurfaceHeader({ eyebrow, title, copy }: { eyebrow: string; title: React.ReactNode; copy: string }) {
+  return <header className="surface-header"><div><p className="eyebrow">{eyebrow}</p><h1 className="page-heading" id="console-page-heading">{title}</h1><p className="page-intro">{copy}</p></div></header>;
 }
 
 function SessionEndedSurface({ reason }: { reason: "expired" | "signed-out" }) {
@@ -1101,6 +1152,13 @@ export function AgentPassConsole() {
   const [auditSession, setAuditSession] = useState<ConsoleSession | null>(null);
   const [signOutPending, setSignOutPending] = useState(false);
   const [lastSynced, setLastSynced] = useState("未同期");
+  const sidebarRef = useRef<HTMLElement | null>(null);
+  const workspaceTriggerRef = useRef<HTMLButtonElement | null>(null);
+  const workspaceMenuRef = useRef<HTMLElement | null>(null);
+  const mobileTriggerRef = useRef<HTMLButtonElement | null>(null);
+  const helpTriggerRef = useRef<HTMLButtonElement | null>(null);
+  const helpModalRef = useRef<HTMLElement | null>(null);
+  const confirmTriggerRef = useRef<HTMLButtonElement | null>(null);
   const modalRef = useRef<HTMLElement | null>(null);
   const summaryEpoch = useRef(0);
   const capabilityEpoch = useRef(0);
@@ -1114,6 +1172,11 @@ export function AgentPassConsole() {
   const liveHandoffMountedRef = useRef(false);
   const [liveHandoffStatus, setLiveHandoffStatus] = useState<LiveHandoffStatus>("none");
   const [livePreflight, setLivePreflight] = useState<PublicEnrollmentPreflight | null>(null);
+
+  useDeterministicDialogFocus(mobileOpen, sidebarRef, mobileTriggerRef);
+  useDeterministicDialogFocus(workspaceOpen, workspaceMenuRef, workspaceTriggerRef);
+  useDeterministicDialogFocus(helpOpen, helpModalRef, helpTriggerRef);
+  useDeterministicDialogFocus(confirmOpen, modalRef, confirmTriggerRef);
 
   const endSession = useCallback((nextState: "expired" | "signed-out") => {
     summaryEpoch.current += 1;
@@ -1191,7 +1254,7 @@ export function AgentPassConsole() {
     setWorkspaceOpen(false);
     setActiveView("organizations");
     setMobileOpen(false);
-    window.scrollTo({ top: 0, behavior: "smooth" });
+    scrollConsoleToTop();
   };
 
   const refreshSummary = useCallback(async (signal?: AbortSignal) => {
@@ -1280,29 +1343,50 @@ export function AgentPassConsole() {
   }, []);
 
   useEffect(() => {
-    if (!confirmOpen) return;
+    const activeDialog = confirmOpen ? modalRef.current : helpOpen ? helpModalRef.current : workspaceOpen ? workspaceMenuRef.current : null;
+    if (!activeDialog) return;
     const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key === "Escape") setConfirmOpen(false);
+      if (event.key === "Escape") {
+        event.preventDefault();
+        if (confirmOpen) setConfirmOpen(false);
+        else if (helpOpen) setHelpOpen(false);
+        else setWorkspaceOpen(false);
+        return;
+      }
+      if (event.key === "Tab") {
+        const focusable = getFocusableElements(activeDialog);
+        if (focusable.length === 0) {
+          event.preventDefault();
+          activeDialog.focus();
+          return;
+        }
+        const first = focusable[0];
+        const last = focusable[focusable.length - 1];
+        if (event.shiftKey && document.activeElement === first) {
+          event.preventDefault();
+          last.focus();
+        } else if (!event.shiftKey && document.activeElement === last) {
+          event.preventDefault();
+          first.focus();
+        }
+        return;
+      }
+      if (workspaceOpen && (event.key === "ArrowDown" || event.key === "ArrowUp" || event.key === "Home" || event.key === "End")) {
+        const options = Array.from(activeDialog.querySelectorAll<HTMLElement>("[role=\"option\"]"));
+        if (options.length === 0) return;
+        const currentIndex = Math.max(0, options.indexOf(document.activeElement as HTMLElement));
+        const nextIndex = event.key === "Home"
+          ? 0
+          : event.key === "End"
+            ? options.length - 1
+            : (currentIndex + (event.key === "ArrowDown" ? 1 : -1) + options.length) % options.length;
+        event.preventDefault();
+        options[nextIndex]?.focus();
+      }
     };
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [confirmOpen]);
-
-  useEffect(() => {
-    if (!helpOpen && !confirmOpen) return;
-    const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key !== "Escape") return;
-      setHelpOpen(false);
-      setConfirmOpen(false);
-    };
-    window.addEventListener("keydown", onKeyDown);
-    return () => window.removeEventListener("keydown", onKeyDown);
-  }, [helpOpen, confirmOpen]);
-
-  useEffect(() => {
-    if (!confirmOpen) return;
-    modalRef.current?.querySelector<HTMLInputElement>("input")?.focus();
-  }, [confirmOpen]);
+  }, [confirmOpen, helpOpen, workspaceOpen]);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -1354,7 +1438,7 @@ export function AgentPassConsole() {
     setActiveView(view);
     setMobileOpen(false);
     setWorkspaceOpen(false);
-    window.scrollTo({ top: 0, behavior: "smooth" });
+    scrollConsoleToTop();
   };
 
   const signOut = async () => {
@@ -1369,7 +1453,7 @@ export function AgentPassConsole() {
         setSessionState("expired");
         setSummaryState("error");
       } else {
-        showToast("サインアウトを完了できませんでした。もう一度お試しください", "error");
+        showToast("サインアウトを完了できませんでした。画面を再読み込みしてから、もう一度サインアウトしてください。", "error");
       }
     } finally {
       setSignOutPending(false);
@@ -1397,7 +1481,7 @@ export function AgentPassConsole() {
       setStopped(true);
       showToast("すべてのAgentを停止しました");
     } catch {
-      showToast("停止を確認できませんでした。接続を確認して再試行してください", "error");
+      showToast("停止を確認できませんでした。接続を確認し、緊急停止画面のボタンからもう一度お試しください。", "error");
     } finally {
       setStopPending(false);
     }
@@ -1423,7 +1507,7 @@ export function AgentPassConsole() {
       await refreshSummary();
       return true;
     } catch {
-      showToast("操作を確認できませんでした。権限と接続を確認してください", "error");
+      showToast("操作を確認できませんでした。権限と接続を確認し、この画面からもう一度お試しください。", "error");
       return false;
     }
   };
@@ -1462,14 +1546,15 @@ export function AgentPassConsole() {
 
   return (
     <div className="console-shell">
-      <aside className={`sidebar${mobileOpen ? " mobile-open" : ""}`} aria-label="メインナビゲーション">
+      <a className="skip-link" href="#main-content">メインコンテンツへ移動</a>
+      <aside className={`sidebar${mobileOpen ? " mobile-open" : ""}`} ref={sidebarRef} aria-label="AgentPass Consoleサイドバー">
         <a className="brand" href="#top" onClick={(event) => { event.preventDefault(); goTo("overview"); }}>
           <span className="brand-mark" aria-hidden="true">A</span>
           <span><span className="brand-name">AgentPass</span><span className="brand-note">CONSOLE</span></span>
         </a>
-        <button className="workspace-switcher" type="button" aria-label={`${workspaceName}ワークスペースを選択`} aria-expanded={workspaceOpen} onClick={toggleOrganizationSwitcher}><span><span className="workspace-label">WORKSPACE</span><span className="workspace-name">{workspaceName}</span></span><span className="chevron" aria-hidden="true">⌄</span></button>
-        {workspaceOpen ? <div className="workspace-menu" role="dialog" aria-label="組織を選択" aria-busy={organizationSwitcherState === "loading"}>
-          <strong>組織を選択</strong>
+        <button className="workspace-switcher" ref={workspaceTriggerRef} type="button" aria-label={`${workspaceName}ワークスペースを選択`} aria-expanded={workspaceOpen} aria-controls="workspace-menu" data-dialog-initial-focus onClick={toggleOrganizationSwitcher}><span><span className="workspace-label">WORKSPACE</span><span className="workspace-name">{workspaceName}</span></span><span className="chevron" aria-hidden="true">⌄</span></button>
+        {workspaceOpen ? <div className="workspace-menu" ref={workspaceMenuRef} id="workspace-menu" role="dialog" aria-modal="false" aria-labelledby="workspace-dialog-title" aria-busy={organizationSwitcherState === "loading"} tabIndex={-1}>
+          <strong id="workspace-dialog-title">組織を選択</strong>
           <span>アクセス可能な組織だけを表示しています</span>
           {organizationSwitcherState === "loading" ? <small role="status">組織を確認中です…</small> : null}
           {organizationSwitcherState === "error" ? <div role="alert"><small>{organizationSwitcherError}</small><button className="text-button" type="button" onClick={() => void loadOrganizationOptions()}>もう一度試す</button></div> : null}
@@ -1478,7 +1563,7 @@ export function AgentPassConsole() {
           <small>選択後も権限とテナントはCloudで再検証されます。確認できない組織の操作は実行しません。</small>
         </div> : null}
         <p className="nav-label">MANAGE</p>
-        <nav>
+        <nav id="main-navigation" aria-label="メインナビゲーション">
           <ul className="nav-list">
             {visibleNavItems.map((item) => <li key={item.id}><button className={`nav-item${activeView === item.id ? " active" : ""}${item.id === "emergency" ? " danger" : ""}`} type="button" onClick={() => goTo(item.id)} aria-current={activeView === item.id ? "page" : undefined}><span className="nav-icon" aria-hidden="true">{item.icon}</span><span className="nav-copy">{item.label}</span>{item.id === "agents" && data.agents.length > 0 ? <span className="nav-badge">{data.agents.length}</span> : null}</button></li>)}
           </ul>
@@ -1487,11 +1572,11 @@ export function AgentPassConsole() {
       </aside>
 
       <div className="main-column" id="top">
-        <div className="topbar">
-          <div className="breadcrumbs"><button className="mobile-menu" type="button" aria-label="メニューを開く" aria-expanded={mobileOpen} onClick={() => setMobileOpen((open) => !open)}>☰</button><span className="breadcrumb-root">AgentPass</span><span aria-hidden="true">/</span><span className="breadcrumb-current">{currentLabel}</span></div>
-          <div className="topbar-actions"><span className={`connection-status${summaryState === "error" ? " is-error" : ""}`}><span className="status-dot" aria-hidden="true" />{summaryState === "error" ? "同期エラー" : refreshing || summaryState === "loading" ? "同期中…" : "応答検証済み"}</span><button className="refresh-button" type="button" onClick={() => void refreshSummary()} disabled={refreshing}>{refreshing ? "同期中" : `最終同期 ${lastSynced}`}</button><button className="help-button" type="button" aria-label="ヘルプを開く" aria-expanded={helpOpen} onClick={() => setHelpOpen(true)}>?</button><button className="icon-button" type="button" aria-label="アクティビティを見る" onClick={() => goTo("activity")}>◌</button></div>
-        </div>
-        <div className={`content${activeView === "organizations" || activeView === "recovery" ? " organization-content" : ""}`} role={activeView === "organizations" || activeView === "recovery" ? undefined : "main"}>
+        <header className="topbar" aria-label="Console操作">
+          <nav className="breadcrumbs" aria-label="パンくず"><button className="mobile-menu" ref={mobileTriggerRef} type="button" aria-label={mobileOpen ? "メニューを閉じる" : "メニューを開く"} aria-expanded={mobileOpen} aria-controls="main-navigation" onClick={() => setMobileOpen((open) => !open)}>☰</button><span className="breadcrumb-root">AgentPass</span><span aria-hidden="true">/</span><span className="breadcrumb-current" aria-current="page">{currentLabel}</span></nav>
+          <div className="topbar-actions"><span className={`connection-status${summaryState === "error" ? " is-error" : ""}`} role={summaryState === "error" ? "alert" : "status"} aria-live="polite"><span className="status-dot" aria-hidden="true" />{summaryState === "error" ? "同期エラー。最終同期ボタンから再試行してください" : refreshing || summaryState === "loading" ? "同期中…" : "応答検証済み"}</span><button className="refresh-button" type="button" onClick={() => void refreshSummary()} disabled={refreshing}>{refreshing ? "同期中" : `最終同期 ${lastSynced}`}</button><button className="help-button" ref={helpTriggerRef} type="button" aria-label="ヘルプを開く" aria-expanded={helpOpen} aria-controls="help-dialog" onClick={() => setHelpOpen(true)}>?</button><button className="icon-button" type="button" aria-label="アクティビティを見る" onClick={() => goTo("activity")}>◌</button></div>
+        </header>
+        <main id="main-content" tabIndex={-1} aria-labelledby="console-page-heading" className={`content${activeView === "organizations" || activeView === "recovery" ? " organization-content" : ""}`}>
           {sessionState !== "active" ? <SessionEndedSurface reason={sessionState} /> : null}
           {sessionState === "active" && activeView === "overview" ? <Overview data={data} goTo={goTo} onRequestRefresh={requestDeviceRefresh} summaryState={summaryState} canManage={canManage} /> : null}
           {sessionState === "active" && (activeView === "setup" || liveSetupActive) ? <SetupSurface data={data} goTo={goTo} operate={operate} online={summaryState === "ready"} canManage={canManage} refresh={() => refreshSummary()} liveHandoffRef={liveHandoffRef} livePreflight={livePreflight} liveHandoffStatus={liveHandoffStatus} onLiveHandoffStatus={setLiveHandoffStatus} /> : null}
@@ -1503,13 +1588,14 @@ export function AgentPassConsole() {
           {sessionState === "active" && activeView === "organizations" ? <OrganizationPanel key={selectedOrganizationId ?? "session-organization"} client={organizationClient} initialOrganizationId={selectedOrganizationId ?? undefined} /> : null}
           {sessionState === "active" && activeView === "recovery" ? <OwnerRecoveryPanel /> : null}
           {sessionState === "active" && activeView === "emergency" && canEmergencyStop ? <EmergencySurface data={data} onOpenConfirm={() => setConfirmOpen(true)} stopped={stopped} /> : null}
-        </div>
+        </main>
       </div>
 
       {mobileOpen ? <button className="mobile-scrim" type="button" aria-label="メニューを閉じる" onClick={() => setMobileOpen(false)} /> : null}
-      {helpOpen ? <div className="modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.currentTarget === event.target) setHelpOpen(false); }}><section className="help-modal" role="dialog" aria-modal="true" aria-labelledby="help-title"><div className="modal-header"><span className="modal-label">HELP / QUICK GUIDE</span><button className="modal-close" type="button" aria-label="ヘルプを閉じる" onClick={() => setHelpOpen(false)}>×</button></div><h2 className="modal-title" id="help-title">AgentPassの見方</h2><p className="modal-copy">Agentが作業を開始する前に、概要で「システム正常」と表示されていることを確認してください。</p><ul className="help-list"><li><strong>セットアップ</strong><span>端末・Agent・短期Capabilityを管理します。</span></li><li><strong>ポリシー</strong><span>Agentに許可する操作とRepositoryを絞ります。</span></li><li><strong>緊急停止</strong><span>不審な動きがあれば、すべてのAgentを即時停止できます。</span></li></ul><button className="secondary-button" type="button" onClick={() => { setHelpOpen(false); goTo("activity"); }}>監査ログを見る</button></section></div> : null}
-      {confirmOpen ? <div className="modal-backdrop" role="presentation" onMouseDown={(event) => { if (!stopPending && event.currentTarget === event.target) setConfirmOpen(false); }}><section className="confirm-modal" ref={modalRef} role="dialog" aria-modal="true" aria-labelledby="confirm-title" aria-describedby="confirm-copy"><span className="modal-label">EMERGENCY STOP</span><h2 className="modal-title" id="confirm-title">Agentをすべて停止しますか？</h2><p className="modal-copy" id="confirm-copy">Cloud上で有効な{activeAgents}件のAgent登録を停止対象にします。現在の接続数を示すものではありません。</p><label className="confirm-check"><input type="checkbox" checked={confirmChecked} disabled={stopPending} onChange={(event) => setConfirmChecked(event.target.checked)} /><span>影響を理解しました。すべてのAgentを停止します。</span></label><div className="modal-actions"><button className="secondary-button" type="button" disabled={stopPending} onClick={() => setConfirmOpen(false)}>キャンセル</button><button className="danger-button" type="button" disabled={!confirmChecked || stopPending} onClick={triggerStop}>{stopPending ? "停止を配信中…" : "停止を確認する"}</button></div></section></div> : null}
-      {toast ? <div className={`toast ${toastTone}`} role="status" aria-live="polite">{toastTone === "success" ? "✓" : "!"} {toast}</div> : null}
+      {helpOpen ? <div className="modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.currentTarget === event.target) setHelpOpen(false); }}><section className="help-modal" ref={helpModalRef} id="help-dialog" role="dialog" aria-modal="true" aria-labelledby="help-title" aria-describedby="help-copy" tabIndex={-1}><div className="modal-header"><span className="modal-label">HELP / QUICK GUIDE</span><button className="modal-close" data-dialog-initial-focus type="button" aria-label="ヘルプを閉じる" onClick={() => setHelpOpen(false)}>×</button></div><h2 className="modal-title" id="help-title">AgentPassの見方</h2><p className="modal-copy" id="help-copy">Agentが作業を開始する前に、概要で「システム正常」と表示されていることを確認してください。</p><ul className="help-list"><li><strong>セットアップ</strong><span>端末・Agent・短期Capabilityを管理します。</span></li><li><strong>ポリシー</strong><span>Agentに許可する操作とRepositoryを絞ります。</span></li><li><strong>緊急停止</strong><span>不審な動きがあれば、すべてのAgentを即時停止できます。</span></li></ul><button className="secondary-button" type="button" onClick={() => { setHelpOpen(false); goTo("activity"); }}>監査ログを見る</button></section></div> : null}
+      {confirmOpen ? <div className="modal-backdrop" role="presentation" onMouseDown={(event) => { if (!stopPending && event.currentTarget === event.target) setConfirmOpen(false); }}><section className="confirm-modal" ref={modalRef} role="dialog" aria-modal="true" aria-labelledby="confirm-title" aria-describedby="confirm-copy" tabIndex={-1}><span className="modal-label">EMERGENCY STOP</span><h2 className="modal-title" id="confirm-title">Agentをすべて停止しますか？</h2><p className="modal-copy" id="confirm-copy">Cloud上で有効な{activeAgents}件のAgent登録を停止対象にします。現在の接続数を示すものではありません。</p><label className="confirm-check"><input data-dialog-initial-focus type="checkbox" checked={confirmChecked} disabled={stopPending} onChange={(event) => setConfirmChecked(event.target.checked)} /><span>影響を理解しました。すべてのAgentを停止します。</span></label><div className="modal-actions"><button className="secondary-button" type="button" disabled={stopPending} onClick={() => setConfirmOpen(false)}>キャンセル</button><button className="danger-button" type="button" disabled={!confirmChecked || stopPending} onClick={triggerStop}>{stopPending ? "停止を配信中…" : "停止を確認する"}</button></div></section></div> : null}
+      {toast ? <div className={`toast ${toastTone}`} role={toastTone === "error" ? "alert" : "status"} aria-live={toastTone === "error" ? "assertive" : "polite"} aria-atomic="true">{toastTone === "success" ? "✓" : "!"} {toast}</div> : null}
+      <div className="sr-only" aria-live="polite" aria-atomic="true">{summaryState === "error" ? "同期に失敗しました。最終同期ボタンから再試行してください。" : ""}</div>
     </div>
   );
 }

@@ -59,8 +59,36 @@ button:focus-visible,
 input:focus-visible,
 select:focus-visible,
 a:focus-visible {
-  outline: 3px solid rgba(168, 108, 31, 0.52);
+  outline: 3px solid var(--amber);
   outline-offset: 3px;
+}
+
+.skip-link {
+  position: fixed;
+  z-index: 20;
+  top: 10px;
+  left: 10px;
+  padding: 9px 13px;
+  border: 2px solid var(--forest-dark);
+  border-radius: 7px;
+  background: var(--paper);
+  color: var(--forest-dark);
+  font-weight: 800;
+  text-decoration: none;
+  transform: translateY(-160%);
+}
+
+.skip-link:focus-visible { transform: translateY(0); }
+
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
 }
 
 .audit-export-panel {
@@ -133,6 +161,7 @@ a:focus-visible {
   background: var(--paper);
   box-shadow: 0 12px 26px rgba(33, 46, 39, 0.1);
   font-size: 11px;
+  overflow-wrap: anywhere;
 }
 
 .workspace-menu strong { font-size: 12px; }
@@ -349,8 +378,10 @@ a:focus-visible {
 
 .topbar {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   justify-content: space-between;
+  gap: 10px 18px;
   min-height: 73px;
   padding: 0 clamp(22px, 4vw, 60px);
   border-bottom: 1px solid var(--line);
@@ -371,6 +402,8 @@ a:focus-visible {
 
 .topbar-actions {
   display: flex;
+  min-width: 0;
+  flex-wrap: wrap;
   align-items: center;
   gap: 20px;
 }
@@ -436,8 +469,10 @@ a:focus-visible {
 
 .content {
   width: min(1180px, 100%);
+  min-width: 0;
   margin: 0 auto;
   padding: 48px clamp(22px, 4vw, 60px) 64px;
+  overflow-wrap: anywhere;
 }
 
 .organization-content {
@@ -447,9 +482,7 @@ a:focus-visible {
   padding: 0;
 }
 
-.organization-content > main {
-  width: 100%;
-}
+.organization-content .organization-panel { width: 100%; }
 
 .organization-panel {
   container-type: inline-size;
@@ -1434,6 +1467,7 @@ a:focus-visible {
   z-index: 10;
   inset: 0;
   display: grid;
+  overflow-y: auto;
   place-items: center;
   padding: 22px;
   background: rgba(30, 42, 37, 0.46);
@@ -1441,6 +1475,8 @@ a:focus-visible {
 
 .confirm-modal {
   width: min(480px, 100%);
+  max-height: calc(100vh - 44px);
+  overflow-y: auto;
   padding: 26px;
   border: 1px solid #e0b8b1;
   border-radius: 11px;
@@ -1450,6 +1486,8 @@ a:focus-visible {
 
 .help-modal {
   width: min(480px, 100%);
+  max-height: calc(100vh - 44px);
+  overflow-y: auto;
   padding: 26px;
   border: 1px solid var(--line-strong);
   border-radius: 11px;
@@ -1478,6 +1516,12 @@ a:focus-visible {
   font-size: 27px;
   letter-spacing: -0.05em;
   line-height: 1.1;
+}
+
+.modal-close,
+.modal-actions button,
+.confirm-check input {
+  flex: 0 0 auto;
 }
 
 .modal-copy {
@@ -1590,6 +1634,8 @@ a:focus-visible {
     padding-inline: 18px;
   }
 
+  .topbar-actions { justify-content: flex-end; gap: 8px 12px; }
+
   .breadcrumbs {
     min-width: 0;
   }
@@ -1679,6 +1725,19 @@ a:focus-visible {
   .surface-card {
     padding: 19px;
   }
+
+  .modal-backdrop { align-items: start; padding: 12px; }
+  .confirm-modal,
+  .help-modal { max-height: calc(100vh - 24px); padding: 20px; }
+}
+
+@media (max-width: 520px) {
+  .topbar { align-items: start; padding-block: 12px; }
+  .breadcrumbs { flex: 1 1 100%; min-width: 0; }
+  .topbar-actions { width: 100%; justify-content: space-between; }
+  .connection-status { min-width: 0; max-width: 100%; overflow-wrap: anywhere; }
+  .modal-actions { flex-direction: column-reverse; align-items: stretch; }
+  .modal-actions button { width: 100%; }
 }
 
 @media (prefers-reduced-motion: reduce) {
@@ -1687,6 +1746,8 @@ a:focus-visible {
   *::after {
     scroll-behavior: auto !important;
     transition-duration: 0.01ms !important;
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
   }
 }
 
