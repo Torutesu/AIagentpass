@@ -127,6 +127,15 @@ test("Human P1 organization, member, and invitation operations declare security 
 
   const invitationRole = openapi.components.schemas.InviteRole;
   assert.deepEqual(invitationRole.enum, ["admin", "auditor", "viewer"]);
+  const invitationMutation = openapi.paths["/organizations/{organization_id}/invitations"].post;
+  assert.match(invitationMutation["x-agentpass-reissue-operation"], /reissue_invitation_id/);
+  assert.equal(invitationMutation["x-agentpass-recent-auth-operation"], "human.organizations.invitation.reissue");
+  assert.deepEqual(openapi.components.requestBodies.CreateInvitation.content["application/json"].schema.oneOf, [
+    { $ref: "#/components/schemas/CreateInvitationRequest" },
+    { $ref: "#/components/schemas/ReissueInvitationRequest" }
+  ]);
+  assert.deepEqual(openapi.components.schemas.ReissueInvitationRequest.required, ["reissue_invitation_id", "expires_at"]);
+  assert.equal(openapi.components.schemas.ReissueInvitationRequest.additionalProperties, false);
   assert.equal(openapi.components.schemas.InvitationCreatedResponse.properties.one_time_token.writeOnly, true);
   assert.match(openapi.paths["/invitations/accept"].post.description, /not bound to an email/i);
   assert.match(openapi.components.schemas.AcceptInvitationRequest.description, /no email field/i);

@@ -58,6 +58,7 @@ function service(overrides = {}) {
     async listInvitations(input) { calls.listInvitations.push(input); return { items: [invitation()], next_cursor: null }; },
     async createInvitation(input) { calls.createInvitation.push(input); return { invitation: invitation({ role: input.role, expires_at: input.expires_at }), raw_token: INVITATION_TOKEN }; },
     async revokeInvitation(input) { calls.revokeInvitation.push(input); return invitation({ status: "revoked", version: input.expected_version + 1 }); },
+    async reissueInvitation(input) { calls.reissueInvitation.push(input); return { invitation: invitation({ version: input.expected_version + 1, expires_at: input.expires_at }), raw_token: INVITATION_TOKEN }; },
     async acceptInvitation(input) { calls.acceptInvitation.push(input); return { invitation: invitation({ status: "accepted", version: 2, accepted_at: CREATED_AT, accepted_member_id: MEMBER_ID }), member: member({ role: "viewer" }) }; }
   };
   const result = {};
@@ -299,6 +300,30 @@ test("requires operation-bound recent auth before role updates and member remova
   ]);
   assert.deepEqual(recentCalls[0].principal, actor());
   assert.equal(recentCalls[0].organization_id, ORGANIZATION_ID);
+});
+
+test("reissues invitations only with operation-bound recent auth and returns the new token once", async () => {
+  const recentCalls = [];
+  const recentAuthService = {
+    async authorize(input) {
+      recentCalls.push(input);
+      return { authenticated_at: NOW, challenge_id: input.proof, consumed: true, member_id: MEMBER_ID, organization_id: ORGANIZATION_ID, operation: input.operation, verified: true };
+    }
+  };
+  const { api, calls } = fixture({ recentAuthService, api: { now: () => NOW } });
+  const path = HUMAN_ORGANIZATIONS_HTTP_PATHS.invitations(ORGANIZATION_ID);
+  const result = await api.handle(request(path, { method: "POST", body: { reissue_invitation_id: INVITATION_ID, expires_at: "2026-08-20T00:00:00.000Z" }, headers: { "agentpass-recent-auth": RECENT_AUTH_PROOF, "if-match": '"1"' } }));
+  assert.equal(result.status, 201);
+  assert.equal(result.body.one_time_token, INVITATION_TOKEN);
+  assert.equal(calls.reissueInvitation[0].invitation_id, INVITATION_ID);
+  assert.equal(calls.reissueInvitation[0].expected_version, 1);
+  assert.equal(calls.reissueInvitation[0].recent_authorization.operation, HUMAN_ORGANIZATIONS_RECENT_AUTH_OPERATIONS.reissueInvitation);
+  assert.equal(recentCalls[0].operation, HUMAN_ORGANIZATIONS_RECENT_AUTH_OPERATIONS.reissueInvitation);
+  assert.equal(JSON.stringify(result.body).split(INVITATION_TOKEN).length - 1, 1);
+
+  const missing = await fixture({ recentAuthService, api: { now: () => NOW } }).api.handle(request(path, { method: "POST", body: { reissue_invitation_id: INVITATION_ID, expires_at: "2026-08-20T00:00:00.000Z" }, headers: { "if-match": '"1"' } }));
+  assert.equal(missing.status, 401);
+  assert.equal(missing.body.error.code, HUMAN_ORGANIZATIONS_HTTP_ERROR_CODES.RECENT_AUTH_REQUIRED);
 });
 
 test("rejects missing, cross-operation, cross-tenant, replayed, failed, stale, and unavailable recent auth without mutation", async () => {

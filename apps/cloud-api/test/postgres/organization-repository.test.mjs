@@ -81,7 +81,7 @@ test("exposes exactly the frozen organization API", () => {
   assert.deepEqual(Object.keys(repository).sort(), [
     "acceptInvitation", "createInvitation", "createOrganizationWithOwner", "listInvitations",
     "getOrganization", "listMembers", "listOrganizationsForMember", "removeMember", "renameOrganization",
-    "revokeInvitation", "updateMemberRole"
+    "reissueInvitation", "revokeInvitation", "updateMemberRole"
   ].sort());
   assert.throws(() => createPostgresOrganizationRepository({ client: {} }), /database client/);
   assert.throws(() => createPostgresOrganizationRepository({ client: new QueueClient(), now: "not-a-function" }), /now must be a function/);
@@ -119,6 +119,7 @@ test("requires an idempotency key before any mutation transaction starts", async
   await assert.rejects(repository.removeMember({ ...common, member_id: ids.viewer, expected_version: 1 }), { code: "ERR_IDEMPOTENCY_KEY_REQUIRED" });
   await assert.rejects(repository.createInvitation({ ...common, role: "viewer", token_hash: TOKEN, expires_at: LATER }), { code: "ERR_IDEMPOTENCY_KEY_REQUIRED" });
   await assert.rejects(repository.revokeInvitation({ ...common, invitation_id: ids.invitation, expected_version: 1 }), { code: "ERR_IDEMPOTENCY_KEY_REQUIRED" });
+  await assert.rejects(repository.reissueInvitation({ ...common, invitation_id: ids.invitation, expected_version: 1, token_hash: TOKEN, expires_at: LATER }), { code: "ERR_IDEMPOTENCY_KEY_REQUIRED" });
   await assert.rejects(repository.acceptInvitation({ token_hash: TOKEN, actor_member_id: ids.viewer }), { code: "ERR_IDEMPOTENCY_KEY_REQUIRED" });
   assert.equal(client.calls.length, 0);
 });
@@ -449,6 +450,65 @@ test("revokeInvitation is idempotence-safe through status, version, actor, and t
   const update = client.calls.find((call) => call.text.startsWith("UPDATE organization_invitations"));
   assert.match(update.text, /i\.revoked_at IS NULL AND i\.consumed_at IS NULL/);
   assert.deepEqual(update.params, [ids.organization, ids.invitation, 1, NOW, ids.admin, "revoked_by_operator"]);
+});
+
+test("reissueInvitation rotates the digest in place and appends audit/outbox atomically", async () => {
+  const newExpiry = "2999-08-14T00:00:00.000Z";
+  const client = new QueueClient([
+    response(), response(),
+    response([{ version: 1, expires_at: NOW, consumed_at: null, revoked_at: null }]),
+    response([invitationRow({ expires_at: newExpiry, version: 2 })]),
+    response(), response([{ sequence: 0, event_hash: ZERO_HASH }]), response(), response()
+  ]);
+  const result = await repo(client).reissueInvitation({ organization_id: ids.organization, actor_member_id: ids.admin, invitation_id: ids.invitation, expected_version: 1, token_hash: TOKEN, expires_at: newExpiry, reissued_at: NOW, idempotency_key: "invite-reissue-1" });
+  assert.equal(result.invitation_id, ids.invitation);
+  assert.equal(result.status, "pending");
+  assert.equal(result.version, 2);
+  assert.equal(Object.hasOwn(result, "token_hash"), false);
+  const update = client.calls.find((call) => call.text.startsWith("UPDATE organization_invitations"));
+  assert.match(update.text, /SET token_hash=\$3,expires_at=\$4/);
+  assert.match(update.text, /i\.version=\$5/);
+  assert.match(update.text, /i\.revoked_at IS NULL AND i\.consumed_at IS NULL/);
+  assert.match(update.text, /actor\.organization_id=\$1 AND actor\.member_id=\$6/);
+  assert.deepEqual(update.params, [ids.organization, ids.invitation, Buffer.from(TOKEN, "hex"), newExpiry, 1, ids.admin]);
+  const audit = client.calls.find((call) => call.text.startsWith("INSERT INTO admin_audit_events"));
+  assert.equal(JSON.parse(audit.params.at(-1)).action, "invitation.reissued");
+  assert.doesNotMatch(JSON.stringify(audit.params), /token_hash|ab{10,}/i);
+  const outbox = client.calls.find((call) => call.text.startsWith("INSERT INTO outbox_events"));
+  assert.doesNotMatch(JSON.stringify(outbox.params), /token_hash|ab{10,}/i);
+  assert.equal(client.calls.at(-1).text, "COMMIT");
+});
+
+test("reissueInvitation replays without rotating again and keeps tenant/version predicates", async () => {
+  const input = { organization_id: ids.organization, actor_member_id: ids.admin, invitation_id: ids.invitation, expected_version: 1, token_hash: TOKEN, expires_at: LATER, reissued_at: NOW, idempotency_key: "invite-reissue-2" };
+  const hash = organizationMutationRequestHash("invitation.reissue", { organization_id: ids.organization, actor_id: ids.admin, actor_principal: ids.admin, invitation_id: ids.invitation, expected_version: 1, expires_at: LATER });
+  const replayClient = new QueueClient([response(), response()], { idempotency: { request_hash: hash, response_json: invitationRow({ version: 2, expires_at: LATER }) } });
+  const replay = await repo(replayClient).reissueInvitation(input);
+  assert.equal(replay.replayed, true);
+  assert.equal(replay.invitation_id, ids.invitation);
+  assert.equal(replayClient.calls.some((call) => call.text.startsWith("UPDATE organization_invitations")), false);
+
+  const denied = new QueueClient([response(), response(), response()]);
+  assert.equal(await repo(denied).reissueInvitation({ ...input, organization_id: ids.organization2, idempotency_key: "invite-reissue-3" }), null);
+  const target = denied.calls.find((call) => call.text.startsWith("SELECT i.version"));
+  assert.match(target.text, /i\.organization_id=\$1/);
+  assert.match(target.text, /actor\.organization_id=\$1/);
+  assert.equal(denied.calls.some((call) => call.text.startsWith("UPDATE organization_invitations")), false);
+});
+
+test("reissueInvitation permits expired pending invitations but rejects terminal invitations", async () => {
+  for (const [index, state] of [
+    { expires_at: LATER, consumed_at: NOW, revoked_at: null },
+    { expires_at: LATER, consumed_at: null, revoked_at: NOW }
+  ].entries()) {
+    const client = new QueueClient([response(), response(), response([invitationRow({ ...state })])]);
+    await assert.rejects(
+      () => repo(client).reissueInvitation({ organization_id: ids.organization, actor_member_id: ids.admin, invitation_id: ids.invitation, expected_version: 1, token_hash: TOKEN, expires_at: LATER, reissued_at: NOW, idempotency_key: `invite-reissue-terminal-${index}` }),
+      { code: "ERR_INVITATION_REPLAYED" }
+    );
+    assert.equal(client.calls.some((call) => call.text.startsWith("UPDATE organization_invitations")), false);
+    assert.equal(client.calls.at(-1).text, "ROLLBACK");
+  }
 });
 
 test("acceptInvitation consumes the exact token once and returns a sanitized invitation/member composite", async () => {

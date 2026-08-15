@@ -75,6 +75,7 @@ export function createPostgresOrganizationService({
     listInvitations,
     createInvitation,
     revokeInvitation,
+    reissueInvitation,
     acceptInvitation
   });
 
@@ -231,6 +232,33 @@ export function createPostgresOrganizationService({
     return sanitize(result);
   }
 
+  async function reissueInvitation(input = {}) {
+    const actor = requiredActor(input);
+    const idempotency_key = idempotencyKey(input.idempotency_key);
+    const expected_version = requiredVersion(input.expected_version);
+    const recentAuthorization = requiredRecentAuthorization(input.recent_authorization, actor);
+    const reissued_at = currentTimestamp();
+    const expires_at = futureTimestamp(input.expires_at, reissued_at);
+    const raw_token = generateToken(randomBytes);
+    const result = await invoke("reissueInvitation", {
+      organization_id: requiredOrganizationId(input.organization_id),
+      actor_member_id: actor.member_id,
+      actor_session_id: actor.session_id,
+      invitation_id: requiredInvitationId(input.invitation_id),
+      token_hash: hashToken(raw_token),
+      expires_at,
+      reissued_at,
+      expected_version,
+      recent_auth_challenge_id: recentAuthorization.challenge_id,
+      recent_auth_operation: recentAuthorization.operation,
+      recent_auth_authenticated_at: recentAuthorization.authenticated_at,
+      idempotency_key
+    }, ORGANIZATION_SERVICE_ERROR_CODES.INVITATION_NOT_FOUND);
+    const invitation = sanitize(unwrapInvitation(result));
+    if (isReplay(result)) return Object.freeze({ invitation, replayed: true });
+    return Object.freeze({ invitation, raw_token });
+  }
+
   async function acceptInvitation(input = {}) {
     const actor = requiredActor(input);
     const idempotency_key = idempotencyKey(input.idempotency_key);
@@ -277,7 +305,7 @@ export function createPostgresOrganizationService({
 function assertRepository(repository) {
   const methods = [
     "listOrganizationsForMember", "createOrganizationWithOwner", "renameOrganization", "listMembers",
-    "updateMemberRole", "removeMember", "listInvitations", "createInvitation", "revokeInvitation", "acceptInvitation"
+    "updateMemberRole", "removeMember", "listInvitations", "createInvitation", "revokeInvitation", "reissueInvitation", "acceptInvitation"
   ];
   if (!repository || typeof repository !== "object") throw new TypeError("PostgreSQL organization repository is invalid");
   for (const method of methods) if (typeof repository[method] !== "function") throw new TypeError(`PostgreSQL organization repository is missing ${method}()`);
@@ -400,8 +428,20 @@ function optionalRecentAuthorization(value, actor) {
   });
 }
 
+function requiredRecentAuthorization(value, actor) {
+  if (value === undefined) throw serviceError(ORGANIZATION_SERVICE_ERROR_CODES.INVALID_INPUT);
+  return optionalRecentAuthorization(value, actor);
+}
+
 function requiredInvitableRole(value) {
   if (typeof value !== "string" || !INVITABLE_ROLES.has(value)) throw serviceError(ORGANIZATION_SERVICE_ERROR_CODES.INVALID_INPUT);
+  return value;
+}
+
+function futureTimestamp(value, evaluatedAt) {
+  if (typeof value !== "string" || !RFC3339.test(value) || !Number.isFinite(Date.parse(value)) || Date.parse(value) <= Date.parse(evaluatedAt)) {
+    throw serviceError(ORGANIZATION_SERVICE_ERROR_CODES.INVALID_INPUT);
+  }
   return value;
 }
 
@@ -478,7 +518,7 @@ function mapRepositoryError(error) {
   if (["stale_session", "err_stale_session", "actor_session_required", "err_actor_session_required"].includes(code)) return serviceError(ORGANIZATION_SERVICE_ERROR_CODES.STALE_SESSION, "stale_session");
   if (["version_conflict", "err_version_conflict", "expected_version_mismatch", "stale_version"].includes(code)) return serviceError(ORGANIZATION_SERVICE_ERROR_CODES.VERSION_CONFLICT);
   if (["idempotency_conflict", "err_idempotency_conflict", "idempotency_key_reused"].includes(code)) return serviceError(ORGANIZATION_SERVICE_ERROR_CODES.IDEMPOTENCY_CONFLICT);
-  if (["invitation_replayed", "invitation_token_replayed", "token_replayed", "already_used", "invitation_expired"].includes(code)) return serviceError(ORGANIZATION_SERVICE_ERROR_CODES.INVITATION_REPLAYED);
+  if (["invitation_replayed", "err_invitation_replayed", "invitation_token_replayed", "token_replayed", "already_used", "invitation_expired"].includes(code)) return serviceError(ORGANIZATION_SERVICE_ERROR_CODES.INVITATION_REPLAYED);
   if (["member_not_found", "err_member_not_found", "membership_not_found", "err_membership_not_found"].includes(code)) return serviceError(ORGANIZATION_SERVICE_ERROR_CODES.MEMBER_NOT_FOUND);
   if (["invitation_not_found"].includes(code)) return serviceError(ORGANIZATION_SERVICE_ERROR_CODES.INVITATION_NOT_FOUND);
   if (["not_found", "organization_not_found", "resource_not_found", "tenant_not_found"].includes(code)) return serviceError(ORGANIZATION_SERVICE_ERROR_CODES.NOT_FOUND);

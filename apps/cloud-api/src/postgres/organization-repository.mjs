@@ -306,6 +306,46 @@ export function createPostgresOrganizationRepository({ client, now = () => new D
     }, 200, mutationAuthorization(input));
   }
 
+  async function reissueInvitation(input = {}) {
+    const organizationId = uuid(input.organization_id ?? input.organizationId ?? input.actor?.organization_id);
+    const actorId = actorMemberId(input);
+    const invitationId = uuid(input.invitation_id ?? input.invitationId);
+    const tokenHash = digest(input.token_hash ?? input.tokenHash);
+    const expiresAt = timestamp(input.expires_at ?? input.expiresAt, "expires_at");
+    const reissuedAt = input.reissued_at ?? input.reissuedAt ?? now();
+    timestamp(reissuedAt, "reissued_at");
+    const expectedVersion = version(input.expected_version ?? input.expectedVersion);
+    if (Date.parse(expiresAt) <= Date.parse(reissuedAt)) throw new TypeError("expires_at must be after reissued_at");
+    return mutate(organizationId, input, "invitation.reissue", { organization_id: organizationId, actor_id: actorId, invitation_id: invitationId, expected_version: expectedVersion, expires_at: expiresAt }, async (tx) => {
+      const target = await tx.query(`SELECT i.version,i.expires_at,i.consumed_at,i.revoked_at
+        FROM organization_invitations i
+        WHERE i.organization_id=$1 AND i.id=$2
+          AND EXISTS (SELECT 1 FROM memberships actor
+            WHERE actor.organization_id=$1 AND actor.member_id=$3 AND actor.status='active' AND actor.role IN ('owner','admin'))
+        FOR UPDATE OF i`, [organizationId, invitationId, actorId]);
+      if ((target.rowCount ?? target.rows?.length ?? 0) !== 1) return null;
+      const targetRow = target.rows[0];
+      if (returnedVersion(targetRow.version) !== expectedVersion) {
+        throw new OrganizationRepositoryError("ERR_VERSION_CONFLICT", "invitation version is stale");
+      }
+      if (targetRow.consumed_at !== null && targetRow.consumed_at !== undefined) {
+        throw new OrganizationRepositoryError("ERR_INVITATION_REPLAYED", "accepted invitation cannot be reissued");
+      }
+      if (targetRow.revoked_at !== null && targetRow.revoked_at !== undefined) {
+        throw new OrganizationRepositoryError("ERR_INVITATION_REPLAYED", "revoked invitation cannot be reissued");
+      }
+      const result = await tx.query(`UPDATE organization_invitations i SET token_hash=$3,expires_at=$4,version=i.version+1,updated_at=clock_timestamp()
+        WHERE i.organization_id=$1 AND i.id=$2 AND i.version=$5 AND i.revoked_at IS NULL AND i.consumed_at IS NULL
+          AND EXISTS (SELECT 1 FROM memberships actor
+            WHERE actor.organization_id=$1 AND actor.member_id=$6 AND actor.status='active' AND actor.role IN ('owner','admin'))
+        RETURNING ${SAFE_INVITATION_COLUMNS}`, [organizationId, invitationId, tokenHash, expiresAt, expectedVersion, actorId]);
+      if ((result.rowCount ?? result.rows?.length ?? 0) !== 1) return null;
+      const row = safeInvitationRow(result.rows[0], reissuedAt);
+      await appendMutationEvents(tx, { organizationId, actorId, action: "invitation.reissued", targetType: "invitation", targetId: invitationId, details: { role: row.role, expires_at: expiresAt, version: row.version } });
+      return row;
+    }, 201, mutationAuthorization(input));
+  }
+
   async function acceptInvitation(input = {}) {
     const tokenHash = digest(input.token_hash ?? input.tokenHash);
     const actorId = actorMemberId(input);
@@ -549,6 +589,7 @@ export function createPostgresOrganizationRepository({ client, now = () => new D
     createInvitation,
     listInvitations,
     revokeInvitation,
+    reissueInvitation,
     acceptInvitation
   });
 

@@ -57,12 +57,14 @@ export const HUMAN_ORGANIZATION_SERVICE_METHODS = Object.freeze([
   "listInvitations",
   "createInvitation",
   "revokeInvitation",
+  "reissueInvitation",
   "acceptInvitation"
 ]);
 
 export const HUMAN_ORGANIZATIONS_RECENT_AUTH_OPERATIONS = Object.freeze({
   updateMemberRole: "human.organizations.member.role.update",
-  removeMember: "human.organizations.member.remove"
+  removeMember: "human.organizations.member.remove",
+  reissueInvitation: "human.organizations.invitation.reissue"
 });
 
 export const HUMAN_ORGANIZATIONS_HTTP_ERROR_CODES = Object.freeze({
@@ -164,6 +166,7 @@ export class HumanOrganizationsHttpError extends Error {
  * - updateMemberRole({ actor, organization_id, member_id, role, expected_version, idempotency_key }) -> member
  * - removeMember({ actor, organization_id, member_id, expected_version, idempotency_key }) -> member
  * - createInvitation({ actor, organization_id, role, expires_at, idempotency_key }) -> { invitation, raw_token }
+ * - reissueInvitation({ actor, organization_id, invitation_id, expires_at, expected_version, recent_authorization, idempotency_key }) -> { invitation, raw_token }
  * - revokeInvitation({ actor, organization_id, invitation_id, expected_version, idempotency_key }) -> invitation
  * - acceptInvitation({ actor, one_time_token, idempotency_key }) -> { invitation, member }
  */
@@ -218,7 +221,7 @@ export function createHumanOrganizationsHttpApi({
       if (route.name === "renameOrganization") return await renameOrganization(session, route, body, idempotencyKey, request);
       if (route.name === "updateMemberRole") return await updateMemberRole(session, route, body, idempotencyKey, request);
       if (route.name === "removeMember") return await removeMember(session, route, body, idempotencyKey, request);
-      if (route.name === "createInvitation") return await createInvitation(session, route, body, idempotencyKey);
+      if (route.name === "createInvitation") return await createInvitation(session, route, body, idempotencyKey, request);
       if (route.name === "revokeInvitation") return await revokeInvitation(session, route, body, idempotencyKey, request);
       return await acceptInvitation(session, body, idempotencyKey);
     } catch (error) {
@@ -347,11 +350,13 @@ export function createHumanOrganizationsHttpApi({
     }
   }
 
-  async function createInvitation(actor, route, body, idempotencyKey) {
+  async function createInvitation(actor, route, body, idempotencyKey, request) {
     await abuseControls.authorize({ operation: HUMAN_AUTH_RATE_LIMIT_OPERATIONS.invitationCreate, session: actor, organizationId: route.organizationId });
     requireOrganization(actor, route.organizationId);
     requireRole(actor, ADMIN_OR_OWNER);
-    const input = parseBody(body, new Set(["role", "expires_at"]));
+    const isReissue = Boolean(body && typeof body === "object" && !Array.isArray(body) && Object.hasOwn(body, "reissue_invitation_id"));
+    const input = parseBody(body, isReissue ? new Set(["reissue_invitation_id", "expires_at"]) : new Set(["role", "expires_at"]));
+    if (isReissue) return await reissueInvitation(actor, route, input, idempotencyKey, request);
     if (typeof input.role !== "string" || !INVITABLE_ROLES.has(input.role)) throw invalidRequest();
     const expiresAt = requiredDate(input.expires_at, "expires_at");
     try {
@@ -374,6 +379,24 @@ export function createHumanOrganizationsHttpApi({
     try {
       const result = await organizationService.revokeInvitation({ actor, organization_id: route.organizationId, invitation_id: route.invitationId, expected_version: expectedVersion, idempotency_key: idempotencyKey });
       return response(200, { invitation: normalizeInvitation(result?.invitation ?? result, route.organizationId, route.invitationId) });
+    } catch (error) {
+      throw mapServiceError(error, "invitation");
+    }
+  }
+
+  async function reissueInvitation(actor, route, body, idempotencyKey, request) {
+    const input = parseBody(body, new Set(["reissue_invitation_id", "expires_at"]));
+    let invitationId;
+    try { invitationId = requiredUuid(input.reissue_invitation_id, "reissue_invitation_id"); } catch { throw invalidRequest(); }
+    const expiresAt = requiredDate(input.expires_at, "expires_at");
+    const expectedVersion = requiredExpectedVersion(request);
+    const recentAuthorization = await requireRecentAuth(actor, route.organizationId, request, HUMAN_ORGANIZATIONS_RECENT_AUTH_OPERATIONS.reissueInvitation);
+    try {
+      const result = await organizationService.reissueInvitation({ actor, organization_id: route.organizationId, invitation_id: invitationId, expires_at: expiresAt, expected_version: expectedVersion, idempotency_key: idempotencyKey, recent_authorization: recentAuthorization });
+      const invitation = normalizeInvitation(result?.invitation ?? result, route.organizationId, invitationId);
+      const rawToken = result?.replayed === true ? undefined : result?.raw_token ?? result?.invitation_token ?? result?.token;
+      if (result?.replayed !== true && !isOpaqueToken(rawToken)) throw new Error("invitation service did not return one raw token");
+      return response(201, { invitation, ...(rawToken === undefined ? {} : { one_time_token: rawToken }) });
     } catch (error) {
       throw mapServiceError(error, "invitation");
     }
@@ -658,7 +681,7 @@ function mapServiceError(error, resource) {
   if (["forbidden", "err_forbidden", "not_authorized", "owner_required", "err_actor"].includes(code)) return new HumanOrganizationsHttpError(HUMAN_ORGANIZATIONS_HTTP_ERROR_CODES.FORBIDDEN, { status: 403, cause: error });
   if (["version_conflict", "err_version_conflict", "expected_version_mismatch", "err_expected_version_mismatch", "stale_version"].includes(code)) return new HumanOrganizationsHttpError(HUMAN_ORGANIZATIONS_HTTP_ERROR_CODES.VERSION_CONFLICT, { status: 409, cause: error });
   if (["idempotency_conflict", "err_idempotency_conflict", "idempotency_key_reused"].includes(code)) return new HumanOrganizationsHttpError(HUMAN_ORGANIZATIONS_HTTP_ERROR_CODES.IDEMPOTENCY_CONFLICT, { status: 409, cause: error });
-  if (["invitation_replayed", "invitation_token_replayed", "token_replayed", "already_used", "invitation_expired"].includes(code)) return new HumanOrganizationsHttpError(HUMAN_ORGANIZATIONS_HTTP_ERROR_CODES.INVITATION_REPLAYED, { status: 409, cause: error });
+  if (["invitation_replayed", "err_invitation_replayed", "invitation_token_replayed", "token_replayed", "already_used", "invitation_expired"].includes(code)) return new HumanOrganizationsHttpError(HUMAN_ORGANIZATIONS_HTTP_ERROR_CODES.INVITATION_REPLAYED, { status: 409, cause: error });
   if (["invalid_input", "invalid_scope", "tenant_scope_error"].includes(code)) return invalidRequest();
   return new HumanOrganizationsHttpError(HUMAN_ORGANIZATIONS_HTTP_ERROR_CODES.ORGANIZATIONS_UNAVAILABLE, { status: 503, cause: error });
 }

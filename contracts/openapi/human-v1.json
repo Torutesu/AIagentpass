@@ -507,11 +507,13 @@
           { "$ref": "#/components/parameters/IdempotencyKey" }
         ],
         "requestBody": { "$ref": "#/components/requestBodies/CreateInvitation" },
-        "description": "Invitation roles are deliberately limited to admin, auditor, and viewer. An invitation can never grant owner. The response contains the random one-time token exactly once; the server stores only its hash. The token is not email-bound.",
+        "description": "Invitation roles are deliberately limited to admin, auditor, and viewer. An invitation can never grant owner. The response contains the random one-time token exactly once; the server stores only its hash. The token is not email-bound. The same collection POST accepts ReissueInvitationRequest to rotate the digest and expiry for an existing pending or expired invitation under If-Match and recent operation-bound WebAuthn authentication.",
         "x-agentpass-tenant-scope": { "kind": "organization", "source": "path.organization_id", "cross-tenant-disclosure": false },
         "x-agentpass-minimum-role": "admin",
         "x-agentpass-invite-roles": ["admin", "auditor", "viewer"],
         "x-agentpass-one-time-token": "Return the raw random token only in this response; never log, persist, list, or return it again.",
+        "x-agentpass-reissue-operation": "A body containing reissue_invitation_id selects reissue: the prior digest becomes invalid immediately, a pending or expired invitation may be rotated, accepted/revoked invitations remain terminal, and the same tenant-bound invitation ID receives an incremented version.",
+        "x-agentpass-recent-auth-operation": "human.organizations.invitation.reissue",
         "x-agentpass-atomic-admin-audit-outbox": "Invitation creation, token-hash persistence, immutable admin-audit event, and notification/outbox publication intent commit atomically.",
         "responses": {
           "201": { "$ref": "#/components/responses/InvitationCreated" },
@@ -1267,7 +1269,10 @@
       },
       "CreateInvitation": {
         "required": true,
-        "content": { "application/json": { "schema": { "$ref": "#/components/schemas/CreateInvitationRequest" } } }
+        "content": { "application/json": { "schema": { "oneOf": [
+          { "$ref": "#/components/schemas/CreateInvitationRequest" },
+          { "$ref": "#/components/schemas/ReissueInvitationRequest" }
+        ] } } }
       },
       "AcceptInvitation": {
         "required": true,
@@ -1923,6 +1928,14 @@
         "properties": {
           "role": { "$ref": "#/components/schemas/InviteRole" },
           "expires_at": { "type": "string", "format": "date-time", "description": "Short-lived expiry chosen by the server within its configured maximum." }
+        }
+      },
+      "ReissueInvitationRequest": {
+        "type": "object", "additionalProperties": false, "required": ["reissue_invitation_id", "expires_at"],
+        "description": "Rotates the one-time token for a pending invitation. The request must also carry If-Match with the current invitation version and a recent operation-bound WebAuthn proof. Expired, accepted, and revoked invitations are terminal.",
+        "properties": {
+          "reissue_invitation_id": { "type": "string", "format": "uuid" },
+          "expires_at": { "type": "string", "format": "date-time", "description": "New short-lived expiry; it must be later than the server evaluation time." }
         }
       },
       "AcceptInvitationRequest": {
