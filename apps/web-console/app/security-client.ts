@@ -29,11 +29,18 @@ export type SecuritySnapshot = Readonly<{
 }>;
 
 type FetchLike = typeof fetch;
+export type SecuritySessionContext = Readonly<{ csrfToken: string; organizationId: string }>;
+export type SecuritySessionProvider = Readonly<{
+  get(signal?: AbortSignal): Promise<SecuritySessionContext>;
+  clear(session?: SecuritySessionContext): void;
+}>;
+
 type ClientOptions = Readonly<{
   fetchImpl?: FetchLike;
   signal?: AbortSignal;
   authenticateRecentAuthImpl?: (input: WebAuthnClientInput) => Promise<AuthorizationResult>;
   registerPasskeyImpl?: (input: WebAuthnRegistrationInput) => Promise<RegistrationResult>;
+  sessionProvider?: SecuritySessionProvider;
 }>;
 type SecurityRequestOptions = Readonly<{ signal?: AbortSignal }>;
 
@@ -101,12 +108,14 @@ export function createSecurityClient(options: ClientOptions = {}): SecurityClien
   const fetchImpl = options.fetchImpl;
   const authenticateImpl = options.authenticateRecentAuthImpl ?? authenticateRecentAuth;
   const registerImpl = options.registerPasskeyImpl ?? runPasskeyRegistration;
-  let sessionContext: { csrfToken: string; organizationId: string } | undefined;
-  let bootstrapPromise: Promise<{ csrfToken: string; organizationId: string }> | undefined;
+  const sessionProvider = options.sessionProvider;
+  let sessionContext: SecuritySessionContext | undefined;
+  let bootstrapPromise: Promise<SecuritySessionContext> | undefined;
   let closed = false;
 
-  const ensureSession = async (requestOptions: SecurityRequestOptions = {}): Promise<{ csrfToken: string; organizationId: string }> => {
+  const ensureSession = async (requestOptions: SecurityRequestOptions = {}): Promise<SecuritySessionContext> => {
     if (closed) throw closedSessionError();
+    if (sessionProvider !== undefined) return sessionProvider.get(requestOptions.signal);
     if (sessionContext !== undefined) return sessionContext;
     if (bootstrapPromise === undefined) {
       const pending = bootstrapSession({ fetchImpl, signal: requestOptions.signal }).then((context) => {
@@ -156,8 +165,11 @@ export function createSecurityClient(options: ClientOptions = {}): SecurityClien
     const response = await requestJson(`/api/auth/security/sessions/${encodeURIComponent(id)}/revoke`, "POST", context.csrfToken, { expected_version: version }, requestOptionsFor(requestOptions), recentAuth);
     const revoked = expectSessionMutation(response);
     if (revoked.current) {
-      sessionContext = undefined;
-      bootstrapPromise = undefined;
+      if (sessionProvider !== undefined) sessionProvider.clear(context);
+      else {
+        sessionContext = undefined;
+        bootstrapPromise = undefined;
+      }
       closed = true;
     }
     return revoked.current;
@@ -205,14 +217,14 @@ export function createSecurityClient(options: ClientOptions = {}): SecurityClien
     return { fetchImpl, signal: requestOptions.signal };
   }
 
-  async function authorize(context: { csrfToken: string; organizationId: string }, operation: string, requestOptions: SecurityRequestOptions): Promise<string> {
+  async function authorize(context: SecuritySessionContext, operation: string, requestOptions: SecurityRequestOptions): Promise<string> {
     const result = await authenticateImpl({ operation, organizationId: context.organizationId, csrfToken: context.csrfToken, signal: requestOptions.signal, fetchImpl });
     if (!isUuid(result?.authorization_id)) throw new SecurityClientError("invalid_response", "再認証の結果を確認できませんでした。");
     return result.authorization_id.toLowerCase();
   }
 }
 
-async function bootstrapSession(options: ClientOptions): Promise<{ csrfToken: string; organizationId: string }> {
+async function bootstrapSession(options: ClientOptions): Promise<SecuritySessionContext> {
   const response = await requestJson("/api/auth/session", "POST", undefined, {}, options);
   if (!isRecord(response) || !hasExactKeys(response, ["session", "csrf_token"]) || !isRecord(response.session) || !isUuid(response.session.organization_id) || typeof response.csrf_token !== "string" || !CSRF.test(response.csrf_token)) {
     throw new SecurityClientError("invalid_response", "セッション応答を確認できませんでした。");

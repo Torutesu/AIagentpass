@@ -11,6 +11,8 @@ import { loadOrganizationSwitcherOrganizations } from "../organization-switcher"
 import { OwnerRecoveryPanel } from "./OwnerRecoveryPanel";
 import { AuditExportPanel } from "./AuditExportPanel";
 import { SecurityPanel } from "./SecurityPanel";
+import { createSecurityClient, type SecurityClient } from "../security-client";
+import { createSessionAuthority } from "../session-authority";
 
 export type ConsoleView =
   | "overview"
@@ -169,7 +171,17 @@ const MAX_ERROR_BODY_BYTES = 16_384;
 type DeviceRefreshRequestStatus = "accepted" | "coalesced" | "no_pending_refresh";
 
 type ConsoleRole = "owner" | "admin" | "auditor" | "viewer";
-type ConsoleSession = Readonly<{ organizationId: string; role: ConsoleRole; expiresAt: string; recentAuthAt: string | null; csrfToken: string }>;
+type ConsoleSession = Readonly<{
+  version: number;
+  sessionId: string;
+  memberId: string;
+  organizationId: string;
+  role: ConsoleRole;
+  createdAt: string;
+  expiresAt: string;
+  recentAuthAt: string | null;
+  csrfToken: string;
+}>;
 type OrganizationSwitcherState = "closed" | "loading" | "ready" | "error";
 
 class ConsoleSessionError extends Error {
@@ -386,7 +398,17 @@ function parseSessionBootstrap(value: unknown): ConsoleSession {
     || typeof csrfToken !== "string" || !BASE64URL_CSRF.test(csrfToken)) {
     throw new ConsoleSessionError("セッションを確認できませんでした。ページを再読み込みして、もう一度お試しください。");
   }
-  return { organizationId: session.organization_id, role: session.role as ConsoleRole, expiresAt: session.expires_at, recentAuthAt: session.recent_auth_at as string | null, csrfToken };
+  return {
+    version: session.version,
+    sessionId: session.session_id,
+    memberId: session.member_id,
+    organizationId: session.organization_id,
+    role: session.role as ConsoleRole,
+    createdAt: session.created_at,
+    expiresAt: session.expires_at,
+    recentAuthAt: session.recent_auth_at as string | null,
+    csrfToken,
+  };
 }
 
 function abortError(): DOMException {
@@ -403,22 +425,6 @@ function isAbortError(error: unknown): boolean {
 
 function clearConsoleSessionOnUnauthorized(error: unknown): void {
   if (error instanceof WebAuthnClientError && (error.status === 401 || error.status === 403)) consoleSessionContext.clear();
-}
-
-function withAbort<T>(promise: Promise<T>, signal?: AbortSignal): Promise<T> {
-  throwIfAborted(signal);
-  if (!signal) return promise;
-  return new Promise<T>((resolve, reject) => {
-    const onAbort = () => reject(abortError());
-    signal.addEventListener("abort", onAbort, { once: true });
-    promise.then((value) => {
-      signal.removeEventListener("abort", onAbort);
-      resolve(value);
-    }, (error: unknown) => {
-      signal.removeEventListener("abort", onAbort);
-      reject(error);
-    });
-  });
 }
 
 async function requestConsoleSession(path: string, signal?: AbortSignal): Promise<{ response: Response; payload: unknown }> {
@@ -475,36 +481,7 @@ async function bootstrapConsoleSession(signal?: AbortSignal): Promise<ConsoleSes
   return parseSessionBootstrap(resumed.payload);
 }
 
-function createConsoleSessionContext() {
-  let result: ConsoleSession | undefined;
-  let pending: Promise<ConsoleSession> | undefined;
-
-  const get = (signal?: AbortSignal): Promise<ConsoleSession> => {
-    throwIfAborted(signal);
-    if (result) return Promise.resolve(result);
-    if (!pending) {
-      const current = bootstrapConsoleSession(signal);
-      const shared = current.then((value) => {
-        result = Object.freeze(value);
-        if (pending === shared) pending = undefined;
-        return result;
-      });
-      pending = shared;
-      void shared.catch(() => {
-        if (pending === shared) pending = undefined;
-      });
-    }
-    return withAbort(pending, signal);
-  };
-
-  const clear = (session?: ConsoleSession): void => {
-    if (!session || result === session) result = undefined;
-  };
-
-  return Object.freeze({ get, clear });
-}
-
-const consoleSessionContext = createConsoleSessionContext();
+const consoleSessionContext = createSessionAuthority<ConsoleSession>(bootstrapConsoleSession);
 
 let nextEnrollmentStoreId = 0;
 const enrollmentStores = new Map<number, Record<string, unknown>>();
@@ -1130,7 +1107,8 @@ export function AgentPassConsole() {
   const adminAuditEpoch = useRef(0);
   const organizationOptionsEpoch = useRef(0);
   const organizationIdRef = useRef<string | null>(null);
-  const organizationClient = useMemo<OrganizationClient>(() => createOrganizationClient(), []);
+  const organizationClient = useMemo<OrganizationClient>(() => createOrganizationClient({ sessionProvider: consoleSessionContext }), []);
+  const securityClient = useMemo<SecurityClient>(() => createSecurityClient({ sessionProvider: consoleSessionContext }), []);
   const liveHandoffRef = useRef<LiveHandoffSession | null>(null);
   const liveHandoffReadRef = useRef(false);
   const liveHandoffMountedRef = useRef(false);
@@ -1521,8 +1499,8 @@ export function AgentPassConsole() {
           {sessionState === "active" && activeView === "policies" ? <PoliciesSurface data={data} operate={operate} canManage={canManage} /> : null}
           {sessionState === "active" && activeView === "activity" ? <ActivitySurface data={data} /> : null}
           {sessionState === "active" && activeView === "audit-exports" && auditSession ? <AuditExportPanel role={auditSession.role} organizationId={auditSession.organizationId} csrfToken={auditSession.csrfToken} /> : null}
-          {sessionState === "active" && activeView === "security" ? <SecurityPanel onSessionExpired={expireSession} onSessionSignedOut={markSessionSignedOut} /> : null}
-          {sessionState === "active" && activeView === "organizations" ? <OrganizationPanel key={selectedOrganizationId ?? "session-organization"} initialOrganizationId={selectedOrganizationId ?? undefined} /> : null}
+          {sessionState === "active" && activeView === "security" ? <SecurityPanel securityClient={securityClient} onSessionExpired={expireSession} onSessionSignedOut={markSessionSignedOut} /> : null}
+          {sessionState === "active" && activeView === "organizations" ? <OrganizationPanel key={selectedOrganizationId ?? "session-organization"} client={organizationClient} initialOrganizationId={selectedOrganizationId ?? undefined} /> : null}
           {sessionState === "active" && activeView === "recovery" ? <OwnerRecoveryPanel /> : null}
           {sessionState === "active" && activeView === "emergency" && canEmergencyStop ? <EmergencySurface data={data} onOpenConfirm={() => setConfirmOpen(true)} stopped={stopped} /> : null}
         </div>

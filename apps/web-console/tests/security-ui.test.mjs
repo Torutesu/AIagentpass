@@ -9,7 +9,7 @@ test("Console exposes a Japanese Security surface with bounded loading, empty, e
   const source = await readFile(componentPath, "utf8");
   const panel = await readFile(panelPath, "utf8");
   assert.match(source, /id: "security", label: "セキュリティ"/);
-  assert.match(source, /<SecurityPanel onSessionExpired=\{expireSession\} onSessionSignedOut=\{markSessionSignedOut\} \/>/);
+  assert.match(source, /<SecurityPanel securityClient=\{securityClient\} onSessionExpired=\{expireSession\} onSessionSignedOut=\{markSessionSignedOut\} \/>/);
   assert.match(panel, /REGISTERED PASSKEYS/);
   assert.match(panel, /ACTIVE SESSIONS/);
   assert.match(panel, /読み込み中/);
@@ -46,7 +46,7 @@ test("current-session revoke reports signed-out separately from expired-session 
   assert.doesNotMatch(panel, /onSessionEnded/);
   assert.match(consoleSource, /const endSession = useCallback\(\(nextState: "expired" \| "signed-out"\)/);
   assert.match(consoleSource, /const markSessionSignedOut = useCallback\(\(\) => endSession\("signed-out"\)/);
-  assert.match(consoleSource, /<SecurityPanel onSessionExpired=\{expireSession\} onSessionSignedOut=\{markSessionSignedOut\} \/>/);
+  assert.match(consoleSource, /<SecurityPanel securityClient=\{securityClient\} onSessionExpired=\{expireSession\} onSessionSignedOut=\{markSessionSignedOut\} \/>/);
 });
 
 test("last active passkey protection is based on a complete inventory and is accessible", async () => {

@@ -148,6 +148,34 @@ test("current-session revoke closes the lifecycle without bootstrapping a replac
   assert.equal(calls.filter((call) => call.url === "/api/auth/session").length, 1);
 });
 
+test("uses and conditionally clears the injected Console session authority", async () => {
+  const sharedSession = Object.freeze({ organizationId, csrfToken: csrf });
+  const clears = [];
+  let gets = 0;
+  const calls = [];
+  const client = createSecurityClient({
+    sessionProvider: {
+      get: async () => { gets += 1; return sharedSession; },
+      clear: (session) => clears.push(session),
+    },
+    authenticateRecentAuthImpl: authorize,
+    fetchImpl: async (url, init) => {
+      calls.push(String(url));
+      assert.notEqual(url, "/api/auth/session", "an injected client must not rotate the shared session");
+      if (url === "/api/auth/security/passkeys") return json({ credentials: [], next_cursor: null });
+      if (url === "/api/auth/security/sessions") return json({ sessions: [session()], next_cursor: null });
+      if (url === `/api/auth/security/sessions/${sessionId}/revoke`) return json({ session: session("revoked", true) });
+      throw new Error(`unexpected ${init.method} ${url}`);
+    },
+  });
+
+  const snapshot = await client.getSnapshot();
+  await client.revokeCurrentSession(snapshot.sessions[0].id, snapshot.sessions[0].version);
+  assert.equal(gets, 2);
+  assert.deepEqual(clears, [sharedSession]);
+  assert.deepEqual(calls, ["/api/auth/security/passkeys", "/api/auth/security/sessions", `/api/auth/security/sessions/${sessionId}/revoke`]);
+});
+
 test("keeps AbortError identity and permits a retry after an aborted bootstrap", async () => {
   let bootstraps = 0;
   const client = createSecurityClient({ fetchImpl: async (url) => {

@@ -232,6 +232,40 @@ test("drops the cached human session after an unauthorized organization response
   assert.equal(organizationCalls, 2);
 });
 
+test("uses an injected Console session authority without rotating the Human Session", async () => {
+  const sharedSession = Object.freeze({
+    version: 1,
+    sessionId: "88888888-8888-4888-8888-888888888888",
+    memberId,
+    organizationId,
+    role: "owner",
+    createdAt: date,
+    expiresAt: "2026-08-12T08:00:00.000Z",
+    recentAuthAt: null,
+    csrfToken: csrf,
+  });
+  const clears = [];
+  let gets = 0;
+  let organizationCalls = 0;
+  const client = createOrganizationClient({
+    sessionProvider: {
+      get: async () => { gets += 1; return sharedSession; },
+      clear: (session) => clears.push(session),
+    },
+    fetchImpl: async (url, init) => {
+      assert.notEqual(url, "/api/auth/session", "an injected client must not rotate the shared session");
+      organizationCalls += 1;
+      if (organizationCalls === 1) return json({ request_id: requestId, organizations: [organization()], next_cursor: null });
+      return json({ error: { code: "session_expired", message: "Session expired" } }, 401);
+    },
+  });
+
+  assert.equal((await client.listOrganizations()).items[0].id, organizationId);
+  await assert.rejects(() => client.listOrganizations(), (error) => error instanceof OrganizationClientError && error.code === "unauthorized");
+  assert.equal(gets, 2);
+  assert.deepEqual(clears, [sharedSession]);
+});
+
 test("exposes least-privilege visibility for every organization role", () => {
   assert.deepEqual(getOrganizationVisibility("owner"), { canViewOrganization: true, canViewMembers: true, canViewInvitations: true, canManageOrganization: true, canManageMembers: true, canAssignOwner: true, canInvite: true, canRevokeInvitations: true });
   assert.deepEqual(getOrganizationVisibility("admin"), { canViewOrganization: true, canViewMembers: true, canViewInvitations: true, canManageOrganization: true, canManageMembers: true, canAssignOwner: false, canInvite: true, canRevokeInvitations: true });

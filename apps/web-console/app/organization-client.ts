@@ -115,6 +115,12 @@ export type RecentAuthInput = Readonly<{
 export type OrganizationClientOptions = Readonly<{
   fetchImpl?: typeof fetch;
   authorizeRecentAuthImpl?: (input: RecentAuthInput) => Promise<string | AuthorizationResult>;
+  sessionProvider?: OrganizationSessionProvider;
+}>;
+
+export type OrganizationSessionProvider = Readonly<{
+  get(signal?: AbortSignal): Promise<OrganizationSession>;
+  clear(session?: OrganizationSession): void;
 }>;
 
 export type OrganizationClient = Readonly<{
@@ -173,11 +179,13 @@ export function resolveOrganizationSelection(organizations: readonly Organizatio
 export function createOrganizationClient(options: OrganizationClientOptions = {}): OrganizationClient {
   const fetchImpl = options.fetchImpl ?? globalThis.fetch;
   if (typeof fetchImpl !== "function") throw new OrganizationClientError("transport_failed", "Organization transport is unavailable");
+  const sessionProvider = options.sessionProvider;
 
   let session: OrganizationSession | undefined;
   let pendingSession: Promise<OrganizationSession> | undefined;
 
   const getSession = async (requestOptions: RequestOptions = {}): Promise<OrganizationSession> => {
+    if (sessionProvider !== undefined) return sessionProvider.get(requestOptions.signal);
     if (session !== undefined) return session;
     if (pendingSession === undefined) {
       const pending = bootstrapSession(fetchImpl, requestOptions.signal).then((value) => {
@@ -316,8 +324,11 @@ export function createOrganizationClient(options: OrganizationClientOptions = {}
       return await requestJson(requestFetch, path, method, body, context, requestOptions, controls);
     } catch (error) {
       if (error instanceof OrganizationClientError && error.code === "unauthorized") {
-        session = undefined;
-        pendingSession = undefined;
+        if (sessionProvider !== undefined) sessionProvider.clear(context);
+        else {
+          session = undefined;
+          pendingSession = undefined;
+        }
       }
       throw error;
     }
