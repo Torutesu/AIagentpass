@@ -11,8 +11,10 @@ import {
   createPostgresManagedSignerKeyLifecycleRepository,
   MANAGED_SIGNER_KEY_LIFECYCLE_REPOSITORY_ERROR_CODES,
 } from "../../src/postgres/managed-signer-key-lifecycle-repository.mjs";
+import { createPostgresProviderOperationRepository } from "../../src/postgres/provider-operation-repository.mjs";
 
 const DATABASE_URL = process.env.AGENTPASS_TEST_DATABASE_URL ?? process.env.AGENTPASS_TEST_POSTGRES_URL;
+const SIGNER_DATABASE_URL = process.env.AGENTPASS_TEST_SIGNER_DATABASE_URL;
 const REPOSITORY_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../../..");
 const ROLES_SQL_PATH = path.join(REPOSITORY_ROOT, "scripts/postgres/roles.sql");
 const SQLSTATE_PERMISSION_DENIED = new Set(["42501", "0LP01"]);
@@ -45,8 +47,14 @@ function applyRoles(rawUrl) {
 
 async function authorizeSigner(pool) {
   const client = await pool.connect();
+  if (SIGNER_DATABASE_URL) {
+    const principal = await client.query("SELECT session_user,current_user");
+    assert.equal(principal.rows[0].session_user, "agentpass_signer");
+    assert.equal(principal.rows[0].current_user, "agentpass_signer");
+    return { client, impersonated: false };
+  }
   await client.query("SET SESSION AUTHORIZATION agentpass_signer");
-  return client;
+  return { client, impersonated: true };
 }
 
 async function expectPermissionDenied(operation) {
@@ -58,17 +66,20 @@ test("0051 makes lifecycle and signing function-only for the signer role", {
   timeout: 120_000,
 }, async (t) => {
   const adminPool = new Pool({ connectionString: DATABASE_URL, max: 2 });
-  const signerPool = new Pool({ connectionString: DATABASE_URL, max: 2 });
+  const signerPool = new Pool({ connectionString: SIGNER_DATABASE_URL ?? DATABASE_URL, max: 2 });
   const purpose = `agentpass.lifecycle-authority.${process.pid}.${crypto.randomBytes(5).toString("hex")}`;
   const epochPurpose = `${purpose}.terminal-epoch`;
   const signerClients = [];
 
   t.after(async () => {
-    for (const client of signerClients) {
-      try { await client.query("RESET SESSION AUTHORIZATION"); } catch { /* connection is discarded below */ }
+    for (const { client, impersonated } of signerClients) {
+      if (impersonated) {
+        try { await client.query("RESET SESSION AUTHORIZATION"); } catch { /* connection is discarded below */ }
+      }
       client.release(true);
     }
     for (const scopedPurpose of [purpose, epochPurpose]) {
+      await adminPool.query("DELETE FROM managed_signer_provider_operations WHERE purpose=$1", [scopedPurpose]);
       await adminPool.query("DELETE FROM managed_signer_signing_idempotency WHERE purpose=$1", [scopedPurpose]);
       await adminPool.query("DELETE FROM managed_signer_key_lifecycle_operations WHERE purpose=$1", [scopedPurpose]);
       await adminPool.query("DELETE FROM managed_signer_keys WHERE purpose=$1", [scopedPurpose]);
@@ -86,9 +97,11 @@ test("0051 makes lifecycle and signing function-only for the signer role", {
   }
   applyRoles(DATABASE_URL);
 
-  const firstClient = await authorizeSigner(signerPool);
-  const secondClient = await authorizeSigner(signerPool);
-  signerClients.push(firstClient, secondClient);
+  const firstAuthorization = await authorizeSigner(signerPool);
+  const secondAuthorization = await authorizeSigner(signerPool);
+  signerClients.push(firstAuthorization, secondAuthorization);
+  const firstClient = firstAuthorization.client;
+  const secondClient = secondAuthorization.client;
   const first = createPostgresManagedSignerKeyLifecycleRepository({ client: firstClient, purpose });
   const second = createPostgresManagedSignerKeyLifecycleRepository({ client: secondClient, purpose });
   const initial = {
@@ -132,11 +145,64 @@ test("0051 makes lifecycle and signing function-only for the signer role", {
     code: MANAGED_SIGNER_KEY_LIFECYCLE_REPOSITORY_ERROR_CODES.SIGNING_CONFLICT,
   });
 
+  const providerRepository = createPostgresProviderOperationRepository({
+    client: firstClient,
+    purpose,
+    keyId: "authority-key-1",
+    keyVersion: "1",
+  });
+  const providerBytes = Buffer.from("signer-role-provider-operation");
+  const providerOperation = {
+    algorithm: "ed25519",
+    bytes_length: providerBytes.length,
+    key_id: "authority-key-1",
+    key_version: "1",
+    operation_id: "provider-authority-1",
+    purpose,
+    request_digest: crypto.createHash("sha256").update(providerBytes).digest("hex"),
+  };
+  const providerReserved = await providerRepository.reserveOperation(providerOperation);
+  assert.equal(providerReserved.state, "pending");
+  assert.match(providerReserved.claim_token, /^[A-Za-z0-9_-]{43}$/u);
+  assert.equal((await providerRepository.startOperation({
+    ...providerOperation,
+    claim_token: providerReserved.claim_token,
+  })).state, "started");
+  const providerKeys = crypto.generateKeyPairSync("ed25519");
+  const providerSignature = crypto.sign(null, providerBytes, providerKeys.privateKey);
+  const providerPublicKey = providerKeys.publicKey.export({ type: "spki", format: "der" });
+  const providerReceipt = {
+    provider: "authority-kms",
+    receipt_id: "provider-receipt-1",
+    operation_id: providerOperation.operation_id,
+    key_id: providerOperation.key_id,
+    key_version: providerOperation.key_version,
+  };
+  assert.equal((await providerRepository.recordAccepted({
+    ...providerOperation,
+    claim_token: providerReserved.claim_token,
+    signature: {
+      algorithm: "ed25519",
+      encoding: "base64url",
+      value: providerSignature.toString("base64url"),
+      public_key: { algorithm: "ed25519", encoding: "base64url", value: providerPublicKey.toString("base64url") },
+    },
+    provider_receipt: providerReceipt,
+  })).state, "accepted");
+  const providerCommitted = await providerRepository.commitOperation({
+    ...providerOperation,
+    claim_token: providerReserved.claim_token,
+  });
+  assert.equal(providerCommitted.state, "committed");
+  assert.deepEqual(providerCommitted.signature, providerSignature);
+  assert.deepEqual((await providerRepository.reserveOperation(providerOperation)).signature, providerSignature);
+
   for (const table of [
     "managed_signer_key_lifecycles",
     "managed_signer_keys",
     "managed_signer_key_lifecycle_operations",
     "managed_signer_signing_idempotency",
+    "managed_signer_provider_operations",
   ]) {
     const privilege = await firstClient.query(
       "SELECT has_table_privilege(current_user,$1,'SELECT,INSERT,UPDATE,DELETE') AS allowed",

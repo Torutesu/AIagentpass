@@ -1,6 +1,6 @@
 # AgentPass post-C3 implementation plan
 
-Status: active — P0/W1 source implementation complete; protected qualification pending
+Status: active — P0/W1 and N1 qualification source complete; protected CI run pending
 Baseline: `codex/agent-platform` at PostgreSQL migration `0051`
 Planning date: 2026-08-15
 
@@ -66,6 +66,13 @@ The branch now contains:
   sequence privileges and no PUBLIC/helper execution;
 - 151 frozen contract-catalog entries: 39 schemas, 61 OpenAPI operations, and
   51 migrations.
+- a fail-closed PostgreSQL 16/17 CI matrix that uses authenticated
+  `sslmode=verify-full`, migrates a fresh database from 1→51, upgrades seeded
+  authority databases from 47→51 and 48→51, applies the exact role policy,
+  rejects unexpected skips, and emits source-SHA-bound qualification evidence;
+- an N1 upgrade runner that proves contiguous migration history and checksums
+  while byte-for-byte preserving seeded rows across all nine promotion and
+  managed-signer authority tables.
 
 This is not a production-complete boundary yet. Migration `0048` now has a real
 PostgreSQL qualification test, but the current sandbox cannot open a local
@@ -328,7 +335,7 @@ digest-exact, monitored, and reversible.
 
 | Wave | State | Serial authority work | Parallel work | Required evidence |
 | --- | --- | --- | --- | --- |
-| W0 | implemented, qualification pending | three runtime DB identities; signer role; promotion DB qualification; operator repository seam | runtime/profile/docs tests | CI PostgreSQL 16/17 fresh and 47→48 upgrade, exact privilege negatives |
+| W0 | source complete, protected CI pending | three runtime DB identities; signer role; promotion DB qualification; operator repository seam | runtime/profile/docs tests | CI PostgreSQL 16/17 fresh 1→51 and seeded 47/48→51, exact privilege negatives |
 | W1a | implemented, protected qualification pending | migrations `0049`-`0050` provider-operation and maintenance procedures | repository contract tests; role checker and runbook updates | no signer provider-operation table privilege; real PostgreSQL concurrency/replay/maintenance matrix |
 | W1b | source complete; protected qualification pending | migration `0051` lifecycle/signing procedures and repository conversion | lifecycle contract tests and privilege negatives | zero direct signer table DML; lifecycle/signing concurrency/replay/uncertain tests on real PostgreSQL |
 | W2 | queued after W1 schema freeze | migration `0052` platform principals, assignments, generations, sessions, and one-use authorization consumption | repository adapters; audit event schemas; threat tests | organization-role denial and assignment/session/replay matrix on real PostgreSQL |
@@ -415,7 +422,7 @@ affected evidence and restarts that lane.
 2. `[implemented; procedures pending] feat: isolate postgres runtime database authorities`
 3. `[implemented; protected run pending] feat: isolate provider operation authority in database procedures`
 4. `[implemented locally; protected run pending] feat: replace lifecycle and signing ledger dml with database procedures`
-5. `test: qualify migrations 1-51 and signer privilege boundary`
+5. `[implemented locally; protected CI pending] test: qualify migrations 1-51 and signer privilege boundary`
 6. `feat: persist platform principals assignments and generations`
 7. `feat: add platform sessions and operation-bound webauthn`
 8. `feat: compose platform promotion runtime`
@@ -436,15 +443,18 @@ release claims require signed artifacts and physical hardware evidence.
 
 ## 8. Next action
 
-Run migrations 1-51 and the complete `0048`-`0051` qualification in CI against
-disposable PostgreSQL 16 and 17. Do not expose more API or Console authority
-until that protected run passes. If qualification finds a defect after `0051`
-has reached any shared environment, fix it in `0052` or later; never rewrite an
-applied migration.
+Commit and push the N1 gate, then run migrations 1-51 and the complete
+`0048`-`0051` qualification in CI against disposable PostgreSQL 16 and 17. Do
+not expose more API or Console authority until that protected run passes. If
+qualification finds a defect after `0051` has reached any shared environment,
+fix it in `0052` or later; never rewrite an applied migration.
 
 ## 9. Detailed next implementation plan
 
 ### N1 — protected PostgreSQL 16/17 qualification
+
+Implementation status: source complete locally; protected PostgreSQL execution
+and retained GitHub evidence pending.
 
 Serial work:
 
@@ -465,6 +475,19 @@ Serial work:
 
 Exit gate: both versions and all three migration paths pass with zero unexpected
 skip; signer direct table/sequence access and PUBLIC/helper execution are denied.
+The fresh and upgrade migration runners authenticate as the real
+`agentpass_migrator` login, signer operations authenticate as the real
+`agentpass_signer` login, and app/backup negative probes use their real logins;
+`SET SESSION AUTHORIZATION` is supplemental coverage only. Evidence retains the
+exact PostgreSQL server version, container image ID, all 51 migration checksums,
+the complete safe privilege matrix, actual-role login transcript, seeded-upgrade
+report, and TAP output. `SKIP`, `TODO`, bail-out, empty plans, and failed test
+processes all fail the gate.
+
+Promotion rule: N2 may be developed on a separate schema-design branch, but no
+`0052` migration may merge until both N1 matrix members have uploaded verified
+evidence for the exact N1 source SHA. A failed N1 run is fixed forward without
+weakening TLS, privilege checks, seeded-row equality, or skip rejection.
 
 ### N2 — migration 0052 platform principals and authority generations
 
@@ -479,6 +502,12 @@ Serial schema work:
    assignment mutation, generation read/advance, and one-use proof consumption.
 4. Grant only exact app entry functions; revoke direct app mutation, PUBLIC,
    backup execution, overloads, helper execution, and cross-role inheritance.
+5. Define upgrade behavior before SQL: legacy deployments receive no implicit
+   platform principal or assignment; inconsistent or ambiguous seed data aborts
+   migration; assignment capability changes require two distinct active
+   platform approvers; self-approval and organization-role substitution are
+   rejected; the generation advances exactly once on committed authority
+   change.
 
 Parallel work after schema freeze:
 
@@ -490,16 +519,24 @@ Parallel work after schema freeze:
 
 Exit gate: organization Owner/Admin alone is denied, while an active platform
 assignment with current generation is necessary but not yet sufficient without
-the N3 proof.
+the N3 proof. Fresh 1→52 and seeded 51→52 pass on PostgreSQL 16/17, including
+two-approver, self-approval denial, concurrent generation CAS, backup/PITR, and
+the complete N1 regression and privilege matrix.
 
 ### N3 — platform session and operation-bound WebAuthn
 
-1. Reuse the strict WebAuthn ceremony adapters while creating a separate
+1. Freeze migration `0053` for the separate platform-session, credential
+   binding, hash-only cookie/JTI, assignment generation, authentication time,
+   expiry, revocation, and counter state. Reuse the strict WebAuthn ceremony
+   adapters while creating a separate
    platform session namespace and cookie/JTI lifecycle.
 2. Store only hashes and bind principal, assignment generation, credential,
    authentication time, operation, deployment, environment, candidate,
    approval, idempotency key, and canonical request digest.
-3. Consume authorization once in the same transaction as promotion reserve.
+3. Freeze migration `0054` for one-use operation authorization and expose one
+   `consume_platform_authorization_and_reserve` database function that checks
+   the current assignment/session/credential generation, consumes the proof,
+   and reserves promotion in one transaction.
 4. Reject cross-operation, cross-candidate, cross-environment, cross-principal,
    stale, expired, revoked, and concurrent replay.
 5. Add virtual-WebAuthn HTTP E2E for success, cancellation, timeout, cloned
@@ -527,18 +564,41 @@ primitive in any handler.
 
 ### N5 — Console, packaging, and release qualification
 
+#### N5a — Console
+
 1. Build Console vertical slices only after each BFF DTO is frozen: sign-in,
    organization, device, policy, agent session, audit, emergency stop, recovery,
    and platform promotion/reconciliation.
 2. Cover loading, empty, validation, forbidden, recent-auth, conflict, stale,
    offline, lost-response, and recovery states with keyboard and accessibility
    tests. Browser bundles and telemetry receive no secrets or provider details.
-3. Build one Developer ID-signed, notarized, stapled PKG; direct download,
+
+Exit gate: production browser E2E proves all organization roles and the separate
+platform-operator role, accessibility, response-loss recovery, and a browser
+secret scan against the exact Console digest.
+
+#### N5b — Distribution
+
+1. Build one Developer ID-signed, notarized, stapled PKG; direct download,
    Homebrew, and CLI bootstrap install and verify the same digest. A native GUI
    remains optional and authority-free.
-4. Qualify install → enroll → Claude Code/Cursor signed commit → audit → revoke
+
+Exit gate: codesign, notarization, staple, Gatekeeper, universal-architecture,
+installer-preservation, uninstall, upgrade, and same-digest channel evidence is
+retained for the exact PKG.
+
+#### N5c — Physical agent E2E
+
+1. Qualify install → enroll → Claude Code/Cursor signed commit → audit → revoke
    on physical Apple silicon using the exact release artifact.
-5. Run independent security review, staging fault drills, backup/PITR restore,
+
+Exit gate: both agents complete two independent signed-commit journeys, then
+revocation blocks further signing within the measured bound without exporting a
+key or requiring a native GUI.
+
+#### N5d — Staging, review, and production
+
+1. Run independent security review, staging fault drills, backup/PITR restore,
    canary/rollback, then promote the already-qualified image and PKG digests.
 
 Exit gate: no unresolved critical/high or P0/P1 finding, exact source/artifact

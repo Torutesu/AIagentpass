@@ -1,7 +1,10 @@
 import { createHash } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
+import { writeFileSync } from 'node:fs';
+import path from 'node:path';
 
 const DATABASE_URL_ENV = 'AGENTPASS_DATABASE_URL';
+const EVIDENCE_OUTPUT_ENV = 'AGENTPASS_PRIVILEGE_EVIDENCE_OUTPUT';
 const SCHEMA = 'public';
 const ROLES = ['agentpass_app', 'agentpass_signer', 'agentpass_migrator', 'agentpass_backup'];
 
@@ -62,10 +65,51 @@ sequences AS (
   WHERE c.relkind = 'S'
 ),
 functions AS (
-  SELECT p.oid, p.proowner, p.proacl,
-    p.proname || '(' || regexp_replace(pg_get_function_identity_arguments(p.oid), '\\s+', '', 'g') || ')' AS routine_signature
+  SELECT p.oid, p.proowner, p.proacl
   FROM pg_proc AS p
   JOIN target_schema AS s ON s.oid = p.pronamespace
+),
+signer_function_allowlist(routine_signature) AS (
+  VALUES
+    ('agentpass_managed_signer_provider_operation_reserve(text,text,text,integer,bytea,text,bigint,bytea,integer,integer)'),
+    ('agentpass_managed_signer_provider_operation_claim(text,text,text,integer,bytea,text,bigint,bytea,integer)'),
+    ('agentpass_managed_signer_provider_operation_start(text,text,text,integer,bytea,text,bigint,bytea)'),
+    ('agentpass_managed_signer_provider_operation_accept(text,text,text,integer,bytea,text,bigint,bytea,bytea,bytea,text,text,text,text,text)'),
+    ('agentpass_managed_signer_provider_operation_commit(text,text,text,integer,bytea,text,bigint,bytea)'),
+    ('agentpass_managed_signer_provider_operation_reconcile(text,text,text,integer,bytea,text,bigint)'),
+    ('agentpass_managed_signer_provider_operation_uncertain(text,text,text,integer,bytea,text,bigint,bytea,text)'),
+    ('agentpass_managed_signer_provider_operation_get(text,text,text,integer,bytea,text,bigint)'),
+    ('agentpass_managed_signer_provider_operation_health(text,text,bigint,text)'),
+    ('agentpass_managed_signer_provider_operation_prune(text,text,bigint,text,timestamptz,integer)'),
+    ('agentpass_maintain_managed_signer_provider_operations(integer)'),
+    ('agentpass_health_managed_signer_provider_operations()'),
+    ('agentpass_managed_signer_lifecycle_snapshot(text)'),
+    ('agentpass_managed_signer_lifecycle_initialize(text,text,jsonb,integer,bigint)'),
+    ('agentpass_managed_signer_lifecycle_apply(text,text,bytea,bigint,jsonb,bigint)'),
+    ('agentpass_managed_signer_signing_reserve(text,text,bytea,text,bigint,bytea,bigint,bigint)'),
+    ('agentpass_managed_signer_signing_start(text,text,bytea,text,bigint,bytea)'),
+    ('agentpass_managed_signer_signing_commit(text,text,bytea,text,bigint,bytea,bytea,text,text)'),
+    ('agentpass_managed_signer_signing_uncertain(text,text,bytea,text,bigint,bytea)'),
+    ('agentpass_managed_signer_signing_reconcile(text,text,bytea,text,bigint,bytea,text,text)'),
+    ('agentpass_managed_signer_signing_lookup(text,text)'),
+    ('agentpass_managed_signer_signing_prune(text,timestamptz,integer)'),
+    ('agentpass_managed_signer_lifecycle_operation_prune(text,timestamptz,integer)')
+),
+app_function_allowlist(routine_signature) AS (
+  VALUES
+    ('agentpass_platform_promotion_issuance_reserve(uuid,text,text,text,text,bytea,integer,integer,text,bigint,bigint)'),
+    ('agentpass_platform_promotion_issuance_replay(uuid,text,text,text,text)'),
+    ('agentpass_platform_promotion_issuance_commit(uuid,text,text,text,text,bytea,bytea,bytea,bytea,bytea)'),
+    ('agentpass_platform_promotion_issuance_uncertain(uuid,text,text,text,text,bytea,text)'),
+    ('agentpass_platform_promotion_issuance_get(uuid,text,text,text,text,boolean)')
+),
+signer_function_oids AS (
+  SELECT routine_signature, to_regprocedure('public.' || routine_signature) AS routine_oid
+  FROM signer_function_allowlist
+),
+app_function_oids AS (
+  SELECT routine_signature, to_regprocedure('public.' || routine_signature) AS routine_oid
+  FROM app_function_allowlist
 ),
 default_acl AS (
   SELECT d.defaclobjtype AS object_type, r.rolname AS grantee,
@@ -114,6 +158,11 @@ database_privileges_ok AS (
     AND has_database_privilege('agentpass_backup', current_database(), 'CONNECT')
     AND NOT has_database_privilege('agentpass_backup', current_database(), 'CREATE')
     AND NOT has_database_privilege('agentpass_backup', current_database(), 'TEMP') AS value
+),
+migration_head_ok AS (
+  SELECT to_regclass('public.schema_migrations') IS NOT NULL
+    AND (SELECT count(*) = 51 AND min(version) = 1 AND max(version) = 51
+         FROM public.schema_migrations) AS value
 ),
 table_privileges_ok AS (
   SELECT COALESCE((SELECT bool_and(
@@ -170,79 +219,21 @@ sequence_privileges_ok AS (
 ),
 function_privileges_ok AS (
   SELECT COALESCE((SELECT bool_and(proowner = (SELECT oid FROM role_ids WHERE rolname = 'agentpass_migrator')) FROM functions), true)
+    AND NOT EXISTS (SELECT 1 FROM signer_function_oids WHERE routine_oid IS NULL)
+    AND NOT EXISTS (SELECT 1 FROM app_function_oids WHERE routine_oid IS NULL)
     AND NOT EXISTS (SELECT 1 FROM functions
       CROSS JOIN LATERAL aclexplode(COALESCE(proacl, acldefault('f', proowner))) AS acl
       WHERE acl.grantee = 0 AND acl.privilege_type = 'EXECUTE')
     AND NOT EXISTS (SELECT 1 FROM functions
       WHERE has_function_privilege('agentpass_backup', oid, 'EXECUTE')
          OR (has_function_privilege('agentpass_signer', oid, 'EXECUTE')
-           AND routine_signature NOT IN (
-             'agentpass_managed_signer_provider_operation_reserve(text,text,text,integer,bytea,text,bigint,bytea,integer,integer)',
-             'agentpass_managed_signer_provider_operation_claim(text,text,text,integer,bytea,text,bigint,bytea,integer)',
-             'agentpass_managed_signer_provider_operation_start(text,text,text,integer,bytea,text,bigint,bytea)',
-             'agentpass_managed_signer_provider_operation_accept(text,text,text,integer,bytea,text,bigint,bytea,bytea,bytea,text,text,text,text,text)',
-             'agentpass_managed_signer_provider_operation_commit(text,text,text,integer,bytea,text,bigint,bytea)',
-             'agentpass_managed_signer_provider_operation_reconcile(text,text,text,integer,bytea,text,bigint)',
-             'agentpass_managed_signer_provider_operation_uncertain(text,text,text,integer,bytea,text,bigint,bytea,text)',
-             'agentpass_managed_signer_provider_operation_get(text,text,text,integer,bytea,text,bigint)',
-             'agentpass_managed_signer_provider_operation_health(text,text,bigint,text)',
-             'agentpass_managed_signer_provider_operation_prune(text,text,bigint,text,timestamptz,integer)',
-             'agentpass_maintain_managed_signer_provider_operations(integer)',
-             'agentpass_health_managed_signer_provider_operations()',
-             'agentpass_managed_signer_lifecycle_snapshot(text)',
-             'agentpass_managed_signer_lifecycle_initialize(text,text,jsonb,integer,bigint)',
-             'agentpass_managed_signer_lifecycle_apply(text,text,bytea,bigint,jsonb,bigint)',
-             'agentpass_managed_signer_signing_reserve(text,text,bytea,text,bigint,bytea,bigint,bigint)',
-             'agentpass_managed_signer_signing_start(text,text,bytea,text,bigint,bytea)',
-             'agentpass_managed_signer_signing_commit(text,text,bytea,text,bigint,bytea,bytea,text,text)',
-             'agentpass_managed_signer_signing_uncertain(text,text,bytea,text,bigint,bytea)',
-             'agentpass_managed_signer_signing_reconcile(text,text,bytea,text,bigint,bytea,text,text)',
-             'agentpass_managed_signer_signing_lookup(text,text)',
-             'agentpass_managed_signer_signing_prune(text,timestamptz,integer)',
-             'agentpass_managed_signer_lifecycle_operation_prune(text,timestamptz,integer)'
-           ))
+           AND NOT EXISTS (SELECT 1 FROM signer_function_oids AS a WHERE a.routine_oid = functions.oid))
          OR (NOT has_function_privilege('agentpass_signer', oid, 'EXECUTE')
-           AND routine_signature IN (
-             'agentpass_managed_signer_provider_operation_reserve(text,text,text,integer,bytea,text,bigint,bytea,integer,integer)',
-             'agentpass_managed_signer_provider_operation_claim(text,text,text,integer,bytea,text,bigint,bytea,integer)',
-             'agentpass_managed_signer_provider_operation_start(text,text,text,integer,bytea,text,bigint,bytea)',
-             'agentpass_managed_signer_provider_operation_accept(text,text,text,integer,bytea,text,bigint,bytea,bytea,bytea,text,text,text,text,text)',
-             'agentpass_managed_signer_provider_operation_commit(text,text,text,integer,bytea,text,bigint,bytea)',
-             'agentpass_managed_signer_provider_operation_reconcile(text,text,text,integer,bytea,text,bigint)',
-             'agentpass_managed_signer_provider_operation_uncertain(text,text,text,integer,bytea,text,bigint,bytea,text)',
-             'agentpass_managed_signer_provider_operation_get(text,text,text,integer,bytea,text,bigint)',
-             'agentpass_managed_signer_provider_operation_health(text,text,bigint,text)',
-             'agentpass_managed_signer_provider_operation_prune(text,text,bigint,text,timestamptz,integer)',
-             'agentpass_maintain_managed_signer_provider_operations(integer)',
-             'agentpass_health_managed_signer_provider_operations()',
-             'agentpass_managed_signer_lifecycle_snapshot(text)',
-             'agentpass_managed_signer_lifecycle_initialize(text,text,jsonb,integer,bigint)',
-             'agentpass_managed_signer_lifecycle_apply(text,text,bytea,bigint,jsonb,bigint)',
-             'agentpass_managed_signer_signing_reserve(text,text,bytea,text,bigint,bytea,bigint,bigint)',
-             'agentpass_managed_signer_signing_start(text,text,bytea,text,bigint,bytea)',
-             'agentpass_managed_signer_signing_commit(text,text,bytea,text,bigint,bytea,bytea,text,text)',
-             'agentpass_managed_signer_signing_uncertain(text,text,bytea,text,bigint,bytea)',
-             'agentpass_managed_signer_signing_reconcile(text,text,bytea,text,bigint,bytea,text,text)',
-             'agentpass_managed_signer_signing_lookup(text,text)',
-             'agentpass_managed_signer_signing_prune(text,timestamptz,integer)',
-             'agentpass_managed_signer_lifecycle_operation_prune(text,timestamptz,integer)'
-           ))
+           AND EXISTS (SELECT 1 FROM signer_function_oids AS a WHERE a.routine_oid = functions.oid))
          OR (has_function_privilege('agentpass_app', oid, 'EXECUTE')
-           AND routine_signature NOT IN (
-             'agentpass_platform_promotion_issuance_reserve(uuid,text,text,text,text,bytea,integer,integer,text,bigint,bigint)',
-             'agentpass_platform_promotion_issuance_replay(uuid,text,text,text,text)',
-             'agentpass_platform_promotion_issuance_commit(uuid,text,text,text,text,bytea,bytea,bytea,bytea,bytea)',
-             'agentpass_platform_promotion_issuance_uncertain(uuid,text,text,text,text,bytea,text)',
-             'agentpass_platform_promotion_issuance_get(uuid,text,text,text,text,boolean)'
-           ))
+           AND NOT EXISTS (SELECT 1 FROM app_function_oids AS a WHERE a.routine_oid = functions.oid))
          OR (NOT has_function_privilege('agentpass_app', oid, 'EXECUTE')
-           AND routine_signature IN (
-             'agentpass_platform_promotion_issuance_reserve(uuid,text,text,text,text,bytea,integer,integer,text,bigint,bigint)',
-             'agentpass_platform_promotion_issuance_replay(uuid,text,text,text,text)',
-             'agentpass_platform_promotion_issuance_commit(uuid,text,text,text,text,bytea,bytea,bytea,bytea,bytea)',
-             'agentpass_platform_promotion_issuance_uncertain(uuid,text,text,text,text,bytea,text)',
-             'agentpass_platform_promotion_issuance_get(uuid,text,text,text,text,boolean)'
-           ))) AS value
+           AND EXISTS (SELECT 1 FROM app_function_oids AS a WHERE a.routine_oid = functions.oid))) AS value
 ),
 default_privileges_ok AS (
   SELECT
@@ -263,6 +254,7 @@ default_privileges_ok AS (
 ),
 checks AS (
   SELECT current_user = 'agentpass_migrator'
+    AND (SELECT value FROM migration_head_ok)
     AND (SELECT value FROM role_attributes_ok)
     AND (SELECT value FROM role_memberships_ok)
     AND (SELECT value FROM schema_privileges_ok)
@@ -279,6 +271,7 @@ SELECT json_build_object(
   'role_memberships_ok', (SELECT value FROM role_memberships_ok),
   'schema_privileges_ok', (SELECT value FROM schema_privileges_ok),
   'database_privileges_ok', (SELECT value FROM database_privileges_ok),
+  'migration_head_ok', (SELECT value FROM migration_head_ok),
   'table_privileges_ok', (SELECT value FROM table_privileges_ok),
   'sequence_privileges_ok', (SELECT value FROM sequence_privileges_ok),
   'function_privileges_ok', (SELECT value FROM function_privileges_ok),
@@ -327,6 +320,14 @@ SELECT json_build_object(
             if (report.ok !== true) {
               fail(`database privilege contract failed: evidence=${evidence}`);
             } else {
+              const evidenceOutput = process.env[EVIDENCE_OUTPUT_ENV];
+              if (evidenceOutput !== undefined) {
+                if (!path.isAbsolute(evidenceOutput) || evidenceOutput.length > 4096) {
+                  fail('database privilege evidence output is invalid');
+                } else {
+                  writeFileSync(evidenceOutput, `${JSON.stringify(report)}\n`, { flag: 'wx', mode: 0o600 });
+                }
+              }
               process.stdout.write(`ok evidence=${evidence}\n`);
             }
           } catch {

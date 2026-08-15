@@ -149,15 +149,17 @@ test("0048 qualifies fresh PostgreSQL authority functions and least-privilege ro
   await applyRoles(pool);
   await withSessionAuthorization(pool, ROLE_NAMES.migrator, async (client) => {
     const migrations = (await loadSqlMigrations()).filter(({ version }) => version <= 48);
-    const migrated = await createMigrationRunner({
+    const runner = createMigrationRunner({
       client,
       applicationVersion: "q2a-platform-promotion-authority-qualification",
       migrations
-    }).run();
+    });
+    const migrated = await runner.run();
+    const status = await runner.status();
     assert.equal(migrated.currentVersion, 48);
-    assert.deepEqual(migrated.pending, []);
-    assert.deepEqual(migrated.modified, []);
-    assert.equal(migrated.dirty, false);
+    assert.deepEqual(status.pending, []);
+    assert.deepEqual(status.modified, []);
+    assert.equal(status.dirty, false);
     assert.equal(migrated.applied.at(-1).version, 48);
     const history = await client.query("SELECT version,checksum FROM schema_migrations ORDER BY version");
     assert.equal(history.rowCount, 48);

@@ -75,7 +75,15 @@ test('checker reads the URL from the environment, enforces verify-full, and meas
   for (const privilegeFunction of ['has_schema_privilege', 'has_table_privilege', 'has_sequence_privilege', 'has_function_privilege']) assert.match(checker, new RegExp(privilegeFunction));
   assert.match(checker, /agentpass_signer/);
   assert.match(checker, /managed_signer_provider_operations/);
+  assert.match(checker, /migration_head_ok/u);
+  assert.match(checker, /count\(\*\) = 51 AND min\(version\) = 1 AND max\(version\) = 51/u);
+  assert.match(checker, /signer_function_allowlist/u);
+  assert.match(checker, /to_regprocedure\('public\.' \|\| routine_signature\) AS routine_oid/u);
+  assert.match(checker, /NOT EXISTS \(SELECT 1 FROM signer_function_oids WHERE routine_oid IS NULL\)/u);
+  assert.match(checker, /a\.routine_oid = functions\.oid/u);
   assert.match(checker, /createHash\('sha256'\)/);
+  assert.match(checker, /AGENTPASS_PRIVILEGE_EVIDENCE_OUTPUT/u);
+  assert.match(checker, /writeFileSync\(evidenceOutput/u);
   assert.match(checker, /spawnSync\(\s*'psql'/);
   assert.match(checker, /'--command'/);
   assert.doesNotMatch(checker, /sql,\s*databaseUrl/);
