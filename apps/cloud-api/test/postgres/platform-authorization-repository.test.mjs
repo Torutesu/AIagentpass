@@ -5,6 +5,7 @@ import test from "node:test";
 import {
   createPlatformAuthorizedPromotionService,
   createPostgresPlatformAuthorizationRepository,
+  classifyPlatformAuthorizationDatabaseError,
   platformAuthorizationRequestDigest,
   PLATFORM_AUTHORIZATION_REPOSITORY_ERROR_CODES,
   PLATFORM_AUTHORIZATION_RESERVE_SQL,
@@ -248,6 +249,94 @@ test("strict keys and opaque database errors do not expose raw authorization mat
     repository.forAuthorization(AUTHORIZATION).reservePlatformPromotion({ ...REQUEST, unexpected: true }),
     (error) => error.code === PLATFORM_AUTHORIZATION_REPOSITORY_ERROR_CODES.INPUT
   );
+});
+
+test("classifies database failures from SQLSTATE and exact constraint metadata only", () => {
+  const codes = PLATFORM_AUTHORIZATION_REPOSITORY_ERROR_CODES;
+  assert.equal(
+    classifyPlatformAuthorizationDatabaseError({
+      code: "23505",
+      constraint: "platform_promotion_issuances_deployment_id_environment_candidate_idempotency_key_key",
+      message: `duplicate ${CSRF_TOKEN} ${IDS.jti}`
+    }),
+    codes.IDEMPOTENCY_CONFLICT
+  );
+  assert.equal(
+    classifyPlatformAuthorizationDatabaseError({
+      code: "40001",
+      message: `platform authorization is stale ${CSRF_TOKEN}`
+    }),
+    codes.AUTHORIZATION_UNAVAILABLE
+  );
+  assert.equal(
+    classifyPlatformAuthorizationDatabaseError({
+      code: "23014",
+      message: `replayed ${IDS.jti}`
+    }),
+    codes.AUTHORIZATION_UNAVAILABLE
+  );
+  assert.equal(
+    classifyPlatformAuthorizationDatabaseError({ code: "42501", message: `denied ${CLAIM_TOKEN}` }),
+    codes.AUTHORIZATION_UNAVAILABLE
+  );
+  assert.equal(
+    classifyPlatformAuthorizationDatabaseError({ code: "08006", message: "connection failed" }),
+    codes.DATABASE
+  );
+  assert.equal(
+    classifyPlatformAuthorizationDatabaseError({ message: "unique_violation platform authorization stale" }),
+    codes.DATABASE
+  );
+  assert.equal(
+    classifyPlatformAuthorizationDatabaseError(Object.create({ code: "23505" })),
+    codes.DATABASE
+  );
+  assert.equal(
+    classifyPlatformAuthorizationDatabaseError({
+      code: "P0001",
+      constraint: "platform_authorization_proofs_one_use",
+      message: `replayed ${CLAIM_TOKEN}`
+    }),
+    codes.AUTHORIZATION_REPLAYED
+  );
+  assert.equal(
+    classifyPlatformAuthorizationDatabaseError({
+      code: "P0001",
+      constraint: "platform_promotion_issuances_claim_reclaim_fence",
+      message: `stale ${CSRF_TOKEN}`
+    }),
+    codes.AUTHORIZATION_STALE
+  );
+});
+
+test("consumeAndReserve returns stable classified errors without SQL message or cause", async () => {
+  const sqlError = Object.assign(new Error(`database secret ${CSRF_TOKEN} ${IDS.jti} ${CLAIM_TOKEN}`), {
+    code: "23505",
+    constraint: "platform_promotion_issuances_deployment_id_environment_candidate_idempotency_key_key"
+  });
+  const client = {
+    async query(text) {
+      if (text === "BEGIN" || text === "ROLLBACK") return { rowCount: 0, rows: [] };
+      throw sqlError;
+    }
+  };
+  const repository = createPostgresPlatformAuthorizationRepository({
+    client,
+    promotionRepository: fakeIssuanceRepository({ directReserve: 0, commit: [], replay: [], uncertain: [], get: [] }),
+    randomBytes: () => Buffer.alloc(32, 0x33),
+    keyId: "promotion-evidence-2026-08",
+    keyVersion: 8,
+    lifecycleVersion: 7
+  });
+
+  await assert.rejects(repository.forAuthorization(AUTHORIZATION).reservePlatformPromotion(REQUEST), (error) => {
+    assert.equal(error.code, PLATFORM_AUTHORIZATION_REPOSITORY_ERROR_CODES.IDEMPOTENCY_CONFLICT);
+    assert.equal(error.message.includes(CSRF_TOKEN), false);
+    assert.equal(error.message.includes(IDS.jti), false);
+    assert.equal(error.message.includes(CLAIM_TOKEN), false);
+    assert.equal(error.cause, undefined);
+    return true;
+  });
 });
 
 test("service composition binds authorization before invoking the existing issuance contract", async () => {

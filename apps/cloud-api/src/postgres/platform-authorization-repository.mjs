@@ -72,6 +72,10 @@ export const PLATFORM_AUTHORIZATION_REPOSITORY_ERROR_CODES = Object.freeze({
   CONFIG: "ERR_PLATFORM_AUTHORIZATION_REPOSITORY_CONFIG",
   INPUT: "ERR_PLATFORM_AUTHORIZATION_REPOSITORY_INPUT",
   RESULT: "ERR_PLATFORM_AUTHORIZATION_REPOSITORY_RESULT",
+  IDEMPOTENCY_CONFLICT: "ERR_PLATFORM_AUTHORIZATION_REPOSITORY_IDEMPOTENCY_CONFLICT",
+  AUTHORIZATION_UNAVAILABLE: "ERR_PLATFORM_AUTHORIZATION_REPOSITORY_AUTHORIZATION_UNAVAILABLE",
+  AUTHORIZATION_REPLAYED: "ERR_PLATFORM_AUTHORIZATION_REPOSITORY_AUTHORIZATION_REPLAYED",
+  AUTHORIZATION_STALE: "ERR_PLATFORM_AUTHORIZATION_REPOSITORY_AUTHORIZATION_STALE",
   DATABASE: "ERR_PLATFORM_AUTHORIZATION_REPOSITORY_DATABASE",
   BINDING: "ERR_PLATFORM_AUTHORIZATION_REPOSITORY_BINDING"
 });
@@ -80,9 +84,36 @@ const MESSAGES = Object.freeze({
   [PLATFORM_AUTHORIZATION_REPOSITORY_ERROR_CODES.CONFIG]: "platform authorization repository configuration is invalid",
   [PLATFORM_AUTHORIZATION_REPOSITORY_ERROR_CODES.INPUT]: "platform authorization request is invalid",
   [PLATFORM_AUTHORIZATION_REPOSITORY_ERROR_CODES.RESULT]: "platform authorization returned an invalid result",
+  [PLATFORM_AUTHORIZATION_REPOSITORY_ERROR_CODES.IDEMPOTENCY_CONFLICT]: "platform authorization idempotency conflicts with durable state",
+  [PLATFORM_AUTHORIZATION_REPOSITORY_ERROR_CODES.AUTHORIZATION_UNAVAILABLE]: "platform authorization is unavailable",
+  [PLATFORM_AUTHORIZATION_REPOSITORY_ERROR_CODES.AUTHORIZATION_REPLAYED]: "platform authorization was already consumed",
+  [PLATFORM_AUTHORIZATION_REPOSITORY_ERROR_CODES.AUTHORIZATION_STALE]: "platform authorization is stale",
   [PLATFORM_AUTHORIZATION_REPOSITORY_ERROR_CODES.DATABASE]: "platform authorization storage is unavailable",
   [PLATFORM_AUTHORIZATION_REPOSITORY_ERROR_CODES.BINDING]: "platform authorization binding is invalid"
 });
+
+const PLATFORM_AUTHORIZATION_SQLSTATES = Object.freeze({
+  INTEGRITY_CONSTRAINT_VIOLATION: "23",
+  UNIQUE_VIOLATION: "23505",
+  SERIALIZATION_FAILURE: "40001",
+  INSUFFICIENT_PRIVILEGE: "42501",
+  INSUFFICIENT_PRIVILEGE_LEGACY: "0LP01"
+});
+
+// These are the only constraint names that may refine an otherwise generic
+// authorization failure.  In particular, the SQL exception message is never
+// inspected: PostgreSQL messages can contain request material and are not a
+// stable protocol.
+const AUTHORIZATION_REPLAY_CONSTRAINTS = new Set([
+  "platform_authorization_proofs_one_use",
+  "platform_sessions_binding_replay",
+  "platform_credentials_binding_replay"
+]);
+const AUTHORIZATION_STALE_CONSTRAINTS = new Set([
+  "platform_promotion_issuances_claim_reclaim_fence",
+  "platform_promotion_issuances_transition",
+  "platform_promotion_issuances_terminal_immutable"
+]);
 
 export class PlatformAuthorizationRepositoryError extends Error {
   constructor(code) {
@@ -157,7 +188,7 @@ export function createPostgresPlatformAuthorizationRepository({
     } catch (error) {
       if (error instanceof PlatformAuthorizationRepositoryError) throw error;
       if (error instanceof PlatformPromotionIssuanceRepositoryError) throw error;
-      throw new PlatformAuthorizationRepositoryError(PLATFORM_AUTHORIZATION_REPOSITORY_ERROR_CODES.DATABASE);
+      throw new PlatformAuthorizationRepositoryError(classifyPlatformAuthorizationDatabaseError(error));
     }
   }
 
@@ -658,6 +689,45 @@ function inputError() { return new PlatformAuthorizationRepositoryError(PLATFORM
 function resultError() { return new PlatformAuthorizationRepositoryError(PLATFORM_AUTHORIZATION_REPOSITORY_ERROR_CODES.RESULT); }
 function configError() { return new PlatformAuthorizationRepositoryError(PLATFORM_AUTHORIZATION_REPOSITORY_ERROR_CODES.CONFIG); }
 function bindingError() { return new PlatformAuthorizationRepositoryError(PLATFORM_AUTHORIZATION_REPOSITORY_ERROR_CODES.BINDING); }
+
+/**
+ * Maps a trusted PostgreSQL driver error to the repository's stable, public
+ * error taxonomy.  Only the driver's SQLSTATE (`code`) and exact constraint
+ * metadata are considered.  Message/detail/hint/cause are intentionally
+ * ignored because they are neither a stable contract nor safe to propagate.
+ * Ambiguous authorization failures fail closed as unavailable.
+ */
+export function classifyPlatformAuthorizationDatabaseError(error) {
+  const sqlState = trustedSqlState(error);
+  const constraint = trustedConstraint(error);
+
+  if (sqlState === PLATFORM_AUTHORIZATION_SQLSTATES.UNIQUE_VIOLATION) {
+    return PLATFORM_AUTHORIZATION_REPOSITORY_ERROR_CODES.IDEMPOTENCY_CONFLICT;
+  }
+  if (AUTHORIZATION_REPLAY_CONSTRAINTS.has(constraint)) {
+    return PLATFORM_AUTHORIZATION_REPOSITORY_ERROR_CODES.AUTHORIZATION_REPLAYED;
+  }
+  if (AUTHORIZATION_STALE_CONSTRAINTS.has(constraint)) {
+    return PLATFORM_AUTHORIZATION_REPOSITORY_ERROR_CODES.AUTHORIZATION_STALE;
+  }
+  if (sqlState === PLATFORM_AUTHORIZATION_SQLSTATES.INSUFFICIENT_PRIVILEGE
+    || sqlState === PLATFORM_AUTHORIZATION_SQLSTATES.INSUFFICIENT_PRIVILEGE_LEGACY
+    || sqlState === PLATFORM_AUTHORIZATION_SQLSTATES.SERIALIZATION_FAILURE
+    || sqlState?.startsWith(PLATFORM_AUTHORIZATION_SQLSTATES.INTEGRITY_CONSTRAINT_VIOLATION)) {
+    return PLATFORM_AUTHORIZATION_REPOSITORY_ERROR_CODES.AUTHORIZATION_UNAVAILABLE;
+  }
+  return PLATFORM_AUTHORIZATION_REPOSITORY_ERROR_CODES.DATABASE;
+}
+
+function trustedSqlState(error) {
+  const value = error && typeof error === "object" && Object.hasOwn(error, "code") && typeof error.code === "string" ? error.code : undefined;
+  return value && /^[0-9A-Z]{5}$/u.test(value) ? value : undefined;
+}
+
+function trustedConstraint(error) {
+  const value = error && typeof error === "object" && Object.hasOwn(error, "constraint") && typeof error.constraint === "string" ? error.constraint : undefined;
+  return value && /^[a-z][a-z0-9_]{0,127}$/u.test(value) ? value : undefined;
+}
 
 // Keep the old error code available to callers that use the shared issuance
 // service's repository error taxonomy.
