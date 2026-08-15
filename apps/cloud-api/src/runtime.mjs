@@ -30,6 +30,7 @@ import { createHostedAuditAnchorSigner } from "./audit-anchor-signer.mjs";
 import { AUDIT_ANCHOR_ALGORITHM, AUDIT_ANCHOR_PROTOCOL_VERSION, AUDIT_ANCHOR_PURPOSE } from "./audit-anchor-statement.mjs";
 import { createAuditAnchorPublicKeyResolver } from "./audit-anchor-public-key-resolver.mjs";
 import { createAuditExportIssuanceService } from "./audit-export-issuance.mjs";
+import { verifyOfflineAuditExport } from "./audit-export-offline-verifier.mjs";
 import { createHostedPromotionEvidenceSigner } from "./promotion-evidence-signer.mjs";
 import { PROMOTION_EVIDENCE_ALGORITHM, PROMOTION_EVIDENCE_PROTOCOL_VERSION, PROMOTION_EVIDENCE_PURPOSE } from "./promotion-evidence-statement.mjs";
 import { PROTOCOL_VERSION, REFRESH_HINT_SIGNATURE_ALGORITHM, REFRESH_HINT_TYPE } from "../../../packages/protocol/src/index.mjs";
@@ -60,6 +61,7 @@ export async function createCloudRuntime({ env = process.env, logger = console, 
   let controlBundleSigner;
   let auditAnchorSigner;
   let auditExportIssuanceService;
+  let auditExportVerifier;
   let promotionEvidenceSigner;
   let ownedKmsProviders;
   let processBindingPolicies;
@@ -173,11 +175,15 @@ export async function createCloudRuntime({ env = process.env, logger = console, 
         publicKey: config.auditAnchorPublicKey,
         timeoutMs: config.auditAnchorTimeoutMs
       });
+      const auditAnchorPublicKeyResolver = createAuditAnchorPublicKeyResolver({ repository: durableAuditAnchor.repository });
       auditExportIssuanceService = createAuditExportIssuanceService({
         repository: postgresRuntime.auditExportIssuanceRepository,
         signer: auditAnchorSigner,
-        publicKeyResolver: createAuditAnchorPublicKeyResolver({ repository: durableAuditAnchor.repository }),
+        publicKeyResolver: auditAnchorPublicKeyResolver,
         deploymentMode: "hosted"
+      });
+      auditExportVerifier = Object.freeze({
+        verifyAuditExport: (input) => verifyOfflineAuditExport(input, { publicKeyResolver: auditAnchorPublicKeyResolver, now: Date.now() })
       });
 
       const promotionEvidenceFingerprint = publicKeyFingerprint(config.promotionEvidencePublicKey);
@@ -381,7 +387,7 @@ export async function createCloudRuntime({ env = process.env, logger = console, 
       ...(profile.isHosted ? { capabilitySigner: { ...capabilitySigner, issuer: config.issuer, keyId: config.capabilityKeyId } } : {}),
       ...(profile.isHosted ? { refreshHintService: createRefreshHintService({ source: store, nonceDeriver: refreshNonceCodec, signer: refreshHintSigner, notifier: postgresRuntime.refreshHintNotifier, metrics: postgresRuntime.operationalMetrics }) } : {}),
       ...(humanAuthRuntime ? { humanAuthApi: humanAuthRuntime.api, humanSession: humanAuthRuntime.humanSession, recentAuthService: humanAuthRuntime.recentAuthService, humanAuthOrigin: config.humanAuth.origin } : {}),
-      ...(auditExportIssuanceService ? { auditExportIssuanceService } : {}),
+      ...(auditExportIssuanceService ? { auditExportIssuanceService, auditExportVerifier } : {}),
       ...(agentSessionDeviceApi ? { agentSessionDeviceApi } : {}),
       ...(qualificationGrantBatchDeviceApi ? { qualificationGrantBatchDeviceApi } : {}),
       ...(possessionReceiptSigner ? { possessionReceiptSigner } : {}),
@@ -399,6 +405,7 @@ export async function createCloudRuntime({ env = process.env, logger = console, 
     humanAuthRuntime,
     auditAnchorSigner,
     auditExportIssuanceService,
+    auditExportVerifier,
     promotionEvidenceSigner,
     async listen() {
       if (server.listening) return server.address();

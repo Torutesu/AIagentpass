@@ -2,8 +2,8 @@
 
 Status: active
 
-Planning baseline: `codex/agent-platform` at `b75c4f5`, after authoritative
-audit-export snapshot composition
+Planning baseline: `codex/agent-platform` after the C2 immutable audit-export
+download, verification, Human BFF, and Console checkpoint
 
 Planning date: 2026-08-15
 
@@ -326,8 +326,8 @@ and source-bound CI is green.
 | M1a evidence contracts | implemented locally | Q2B-1 | Audit-anchor v1 and promotion-evidence v2 canonical statements, schemas, fixtures, signers, and verifiers. | Canonical round trips and binding/substitution tests; catalog validation. |
 | M1b managed runtime binding | implemented locally | M1a, Q2B-2 | Both evidence signers bind to distinct managed lifecycle repositories and pinned public keys. | Hosted startup rejects a missing, stale, shared, substituted, or local authority. |
 | M1c provider-operation convergence | complete (C1) | M1b | A durable operation adapter and PostgreSQL operation ledger for deterministic Ed25519 retry/reconciliation. | Source-bound PostgreSQL 17 CI evidence verifies six scenarios with zero skips. |
-| M1d authoritative producers | in progress | M1c | Audit-export anchor issuance, platform promotion approval, and promotion-evidence v3 issuance in the real transaction flows. | Neither production flow can finish unsigned, locally signed, or without a committed receipt. |
-| M1e operator/API surfaces | queued | M1d | Read-only retrieval, verification, bounded export, and adjudication APIs plus audit events. | Tenant/role/recent-auth/replay/stale-state negative matrix passes. |
+| M1d authoritative producers | C2 complete; C3 queued | M1c | Audit-export anchor issuance, platform promotion approval, and promotion-evidence v3 issuance in the real transaction flows. | Neither production flow can finish unsigned, locally signed, or without a committed receipt. |
+| M1e operator/API surfaces | C2 complete; C3/C4 queued | M1d | Read-only retrieval, verification, bounded export, and adjudication APIs plus audit events. | Tenant/role/recent-auth/replay/stale-state negative matrix passes. |
 | M2 eight-purpose runtime closure | queued | M1d | Fixed-cardinality readiness, metrics, drain, and secret/image scan for all eight purposes. | Any unhealthy purpose blocks readiness; shutdown leaves no unfenced operation. |
 | M3 two-instance real KMS | blocked on protected infrastructure | M2 | AWS and GCP two-instance fault-matrix evidence bundle. | Every operation reaches one verified result or an explicit durable terminal/operator state. |
 | M4 PostgreSQL production authority | can run parallel with M1–M2 | migrations 0038–0040 | Role-separated CI, TLS/deadline hardening, backup, PITR, restore, and rollback evidence. | App cannot administer/migrate; measured protected-environment RPO/RTO. |
@@ -364,6 +364,46 @@ Parallel execution lanes are deliberately limited: C6 and C9 may run beside
 C2-C5; Console work in C7 may start only after its backing authoritative API is
 merged; C8 cannot start until readiness and PostgreSQL authority are closed;
 C11 cannot waive or replace protected, physical, or independent evidence.
+
+### Execution plan after the C2 checkpoint
+
+C2 now has one immutable server-produced payload, canonical download bytes,
+offline and server verification, historical-key resolution, Human-session BFF
+operations, role-scoped Japanese Console controls, operation-bound WebAuthn,
+and authenticated operation audit events. The next critical path is C3 -> C4 ->
+C5/C6 -> C8 -> C10/C11. C9 packaging runs in parallel once the client protocol
+remains frozen.
+
+| Wave | Reviewable commits | Implementation detail | Mandatory verification | Completion gate |
+| --- | --- | --- | --- | --- |
+| W0 — C2 closure | `C2-download-verify-console` | Land the frozen download/verify contracts, canonical attachment, offline verifier, BFF/UI, sidebar viewport fix, README, and checkpoint evidence. | Contract/lint/root suites; fresh PostgreSQL 17 retrieval test; all Console unit/build tests; full Chromium E2E; digest/root/signature corruption matrix. | Pushed SHA has source-bound green CI; no unexpected skip or browser regression. |
+| W1 — C3 persistence | `C3-contracts`, `C3-promotion-ledger` | Freeze platform approval consumption and promotion-evidence v3. Add deployment/environment/candidate reservation, immutable artifact and qualification bindings, database-clock claim/fence, terminal uncertain/committed state, and atomic deployment generation transition. | Fresh migration; two-pool PostgreSQL races; exact replay; approval quorum/expiry; candidate/environment/digest/report substitution; RLS/privilege negatives. | A caller cannot select an authoritative digest or promote a rebuilt candidate; one exact reservation survives restart and response loss. |
+| W2 — C3 authority runtime | `C3-runtime`, `C3-historical-verifier` | Resolve the exact unexpired approval quorum, sign only v3 with `agentpass.promotion-evidence`, verify against the pinned lifecycle key, commit evidence and transition atomically, and retain historical verification across rotation. | Provider timeout/acceptance ambiguity/lookup; lost `COMMIT`; rotation and emergency disable between reserve/sign/commit; wrong purpose/key/version/fingerprint; restart and concurrency. | Every promotion ends as one verified committed result or an explicit durable uncertain/rejected state; no blind re-signing or v2 issuance. |
+| W3 — operator and reconciliation plane | `C3-platform-api`, `C4-reconciliation-api`, `C4-console` | Add platform-operator approval/promote/get/verify commands separate from organization roles. Add producer-specific uncertain list/detail/verify/adjudicate APIs with bounded DTOs, version preconditions, exact confirmations, and authoritative post-action reads. | Platform-vs-organization authority separation; Owner/Admin/Auditor/Viewer denial matrix; recent WebAuthn, CSRF, `If-Match`, idempotency, replay, tenant hiding, stale and concurrent adjudication; Playwright a11y/offline/response-loss tests. | No generic signer/provider authority reaches a browser or Human API; every action emits a secret-free immutable audit event. |
+| W4 — runtime and database closure | `C5-eight-purpose-readiness`, `C5-drain`, `C6-db-authority`, `C6-restore-tools` | Require all eight distinct purpose/lifecycle/key bindings for readiness, expose fixed-cardinality health, drain signer work before providers/DB, revoke runtime DML/DDL/TEMP/schema creation, add purpose-specific procedures/views, TLS `verify-full`, deadlines, bounded pools, backup and restore comparison. | Missing/shared/stale/disabled/wrong-algorithm providers; shutdown races; app/migrator/backup privilege attacks; concurrent/interrupted migration; checksum drift; read-only DB; wrong TLS identity; isolated PITR authority comparison. | Partial signer configuration cannot receive traffic; runtime credentials cannot bypass ledgers; protected restore has measured RPO/RTO. |
+| W5 — protected cloud qualification | `C8-aws-qualification`, `C8-gcp-qualification`, `C8-evidence-verifier` | Provision eight versioned non-exportable Ed25519 authorities under production-shaped IAM. Run two API instances/workers against protected PostgreSQL and retain canonical source/image/config-bound evidence. | 100-request contention per purpose; throttling/outage; ambiguous provider response and lookup; public-key/signature substitution; rotation/disable; database failover; backup/PITR; image, IAM, logs, metrics, and secret scans. | Independent verifier accepts all eight purpose reports with zero skips; every operation has one verified result or bounded operator state. |
+| W6 — immutable client distribution | `C9-manifest-v4`, `C9-universal-pkg`, `C9-homebrew-direct`, `C9-physical-lanes` | Build broker/XPC/CLI/adapters once; sign nested code and installer, notarize, staple, generate SBOM/provenance, and make direct download, Homebrew, and CLI bootstrap verify the same PKG digest. | Codesign/designated requirements/entitlements; Gatekeeper offline; ownership and permissions; clean install, upgrade, failed upgrade, rollback, preserve uninstall, purge, reinstall, reboot, sleep/wake, Secure Enclave loss/rotation on Apple silicon and Intel/T2. | Both hardware reports, package receipt, release manifest, SBOM, notarization ticket, and channels bind one source and PKG digest. |
+| W7 — agent product E2E | `C10-claude-code`, `C10-cursor` | Complete Claude Code first and Cursor second through the same process/repository-bound adapter. Bind executable identity, canonical worktree, repository/remote/branch, policy generation, budget, expiry, request and commit bytes. | Two unattended `git verify-commit` successes; hostile sibling/executable/path/repository substitution; symlink race; contention; expiry/budget; revoke-during-sign; daemon/editor restart; network/Cloud response loss; audit fsync failure; credential-leak scans. | Both agents pass on the exact notarized candidate and revocation blocks the next operation within the measured bound. |
+| W8 — staging and production | `C11-staging`, `C11-drills`, `C11-review-fixes`, `C11-promotion` | Deploy immutable Console/API/worker/schema/PKG candidates, rehearse canary/drain/rollback/failover/PITR/signer outage/recovery, close independent review findings, then issue v3 promotion evidence over exact qualified digests. | Reproducible deployment; alert and runbook exercises; independent retest; no secret in source/image/log/evidence; exact-candidate and no-rebuild checks. | No unresolved critical/high or P0/P1 finding; go/no-go evidence is complete and production promotion is reversible and digest exact. |
+
+Parallel lanes after W0 are intentionally narrow:
+
+- Lane A runs W1 -> W2 -> W3 and owns promotion/reconciliation contracts.
+- Lane B begins W4 database privilege/TLS/restore work immediately, but merges
+  migration/catalog edits serially with Lane A.
+- Lane C begins W6 packaging and local verification against the frozen client
+  protocol; Developer ID/notarization and physical reports remain protected
+  external gates.
+- W5 waits for W2 and W4. W7 waits for the matching W3 APIs, W5 cloud evidence,
+  and W6 candidate. W8 waits for every prior protected and physical gate.
+
+For every commit, definition of done is: closed schema/DTO boundaries, fail-
+closed negative tests, focused unit and integration tests, contract validation,
+lint, full affected regression suites, `git diff --check`, secret scan, updated
+operator documentation, clean worktree after push, and green source-bound CI.
+Mocks and local runs are development evidence only; they never satisfy KMS,
+notarization, physical hardware, restore, independent-review, or production
+promotion gates.
 
 #### C1 security checkpoint — 2026-08-15
 
@@ -607,17 +647,20 @@ evidence schema, or fail-closed gate.
 Current checkpoint on 2026-08-15:
 
 - Items 1 and 2 are implemented and pushed in `11063f6`.
-- Item 3 now has frozen create/get contracts, exact four-field committed
-  retrieval, historical-key and payload re-verification, runtime composition,
-  Owner/Admin/Auditor role enforcement, resource-bound recent WebAuthn,
-  same-origin/CSRF/idempotency controls, opaque tenant-safe retrieval failure,
-  and a strict 256 KiB Console BFF. It remains open until download/verify
-  operations, audit events, fresh-PostgreSQL API integration, and the complete
-  browser role/reauthentication matrix land.
-- Item 4 has the server-only BFF slice but no end-user export screen yet. UI
-  state, accessible verification results, safe download, response-loss
-  recovery, and browser storage/log/URL scans are the next implementation
-  wave.
+- Item 3 now has frozen create/get/download/verify contracts, exact four-field
+  committed retrieval, canonical public-DTO attachments, historical-key,
+  payload-digest, cumulative-root, anchor-binding, and signature verification,
+  runtime composition, Owner/Admin/Auditor role enforcement, resource-bound
+  recent WebAuthn, same-origin/CSRF/idempotency controls, opaque tenant-safe
+  failures, a strict 256 KiB Console BFF, and authenticated success/denial/
+  failure operation audit events. It remains open until fresh-PostgreSQL
+  production-process qualification lands.
+- Item 4 now has the end-user Japanese Audit Exports screen, role-scoped
+  create/read/verify/download controls, explicit empty/loading/expired/corrupt/
+  offline/response-loss states, accessible evidence details, and revocable
+  Blob downloads without browser persistence or telemetry. Source-level UI,
+  client, BFF, build, lint, and regression tests pass; real-browser WebAuthn
+  role and reduced-motion qualification remains open.
 
 1. `C2-payload-ledger`: migration 0046, immutable payload repository, service
    retrieval, catalog/manifest updates, and real PostgreSQL qualification.

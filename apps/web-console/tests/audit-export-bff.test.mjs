@@ -100,6 +100,80 @@ function auditExportGetPath({ id = exportId, organization = undefined, extra = "
   return `/api/console?resource=audit-export&export_id=${id}&environment=production&chain=admin${tenant}${extra}`;
 }
 
+function canonical(value) {
+  if (value === null || typeof value !== "object") return JSON.stringify(value);
+  if (Array.isArray(value)) return `[${value.map(canonical).join(",")}]`;
+  return `{${Object.keys(value).sort().map((key) => `${JSON.stringify(key)}:${canonical(value[key])}`).join(",")}}`;
+}
+
+test("forwards a canonical audit-export attachment without JSON mutation", async () => {
+  const calls = [];
+  const bytes = canonical(committedExport);
+  const result = await api(async (url, init) => {
+    calls.push({ url: String(url), init });
+    return new Response(bytes, { status: 200, headers: {
+      "content-type": "application/json",
+      "content-disposition": "attachment; filename=\"agentpass-audit-export.json\"",
+      "cache-control": "no-store, max-age=0",
+      "x-content-type-options": "nosniff",
+    } });
+  }).handle(request(`/api/console?resource=audit-export-download&export_id=${exportId}&environment=production&chain=admin`, {
+    headers: { cookie: sessionCookie, "agentpass-recent-auth": recentAuth },
+  }));
+
+  assert.equal(result.status, 200);
+  assert.equal(await result.text(), bytes);
+  assert.equal(result.headers.get("content-disposition"), "attachment; filename=\"agentpass-audit-export.json\"");
+  assert.equal(result.headers.get("cache-control"), "no-store, max-age=0");
+  assert.equal(result.headers.get("x-content-type-options"), "nosniff");
+  assert.equal(calls[0].url, `https://cloud.example.test/v1/organizations/${organizationId}/audit/exports/${exportId}/download?environment=production&chain=admin`);
+  assert.equal(calls[0].init.method, "GET");
+  assert.equal(calls[0].init.headers.has("agentpass-csrf"), false);
+  assert.equal(calls[0].init.headers.has("idempotency-key"), false);
+});
+
+test("forwards exact public audit-export verification without idempotency", async () => {
+  const calls = [];
+  const verification = { payload_digest: true, root: true, anchor: true, historical_key: true, valid: true, reason: "valid" };
+  const result = await api(async (url, init) => {
+    calls.push({ url: String(url), init });
+    return jsonResponse(verification);
+  }).handle(request("/api/console?operation=audit-export-verify", {
+    method: "POST",
+    body: committedExport,
+    headers: { cookie: sessionCookie, "agentpass-csrf": csrf, "agentpass-recent-auth": recentAuth },
+  }));
+
+  assert.equal(result.status, 200);
+  assert.deepEqual(await bodyOf(result), verification);
+  assert.equal(calls[0].url, `https://cloud.example.test/v1/organizations/${organizationId}/audit/exports/verify`);
+  assert.deepEqual(JSON.parse(calls[0].init.body), committedExport);
+  assert.equal(calls[0].init.headers.get("agentpass-csrf"), csrf);
+  assert.equal(calls[0].init.headers.get("agentpass-recent-auth"), recentAuth);
+  assert.equal(calls[0].init.headers.has("idempotency-key"), false);
+});
+
+test("fails closed on noncanonical downloads and idempotent verify requests", async () => {
+  const noncanonical = await api(async () => new Response(JSON.stringify(committedExport), { status: 200, headers: {
+    "content-type": "application/json",
+    "content-disposition": "attachment; filename=\"agentpass-audit-export.json\"",
+    "cache-control": "no-store, max-age=0",
+    "x-content-type-options": "nosniff",
+  } })).handle(request(`/api/console?resource=audit-export-download&export_id=${exportId}&environment=production&chain=admin`, {
+    headers: { cookie: sessionCookie, "agentpass-recent-auth": recentAuth },
+  }));
+  assert.equal(noncanonical.status, 502);
+
+  let calls = 0;
+  const idempotent = await api(async () => { calls += 1; return jsonResponse({}); }).handle(request("/api/console?operation=audit-export-verify", {
+    method: "POST",
+    body: committedExport,
+    headers: { cookie: sessionCookie, "agentpass-csrf": csrf, "agentpass-recent-auth": recentAuth, "idempotency-key": idempotencyKey },
+  }));
+  assert.equal(idempotent.status, 400);
+  assert.equal(calls, 0);
+});
+
 test("forwards the org-pinned audit-export POST with exact session controls and preserves the committed payload", async () => {
   const calls = [];
   const responseBody = cloudAuditExportResponse(structuredClone(committedExport));

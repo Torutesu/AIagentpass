@@ -569,6 +569,53 @@
         "x-agentpass-authority": { "immutable": true, "response": "exact committed export only", "private-material": "never-returned", "additionalProperties": false }
       }
     },
+    "/organizations/{organization_id}/audit/exports/{export_id}/download": {
+      "get": {
+        "operationId": "downloadAuditExport",
+        "summary": "Download an immutable organization audit export",
+        "description": "Downloads the exact committed public audit export object as canonical application/json attachment bytes. The response is immutable, no-store, nosniff, and contains no request, idempotency, claim, provider, or secret material. Owner, admin, and auditor roles may download after recent resource-bound WebAuthn authentication.",
+        "security": [{ "humanSession": [], "recentWebAuthn": [] }],
+        "parameters": [{ "$ref": "#/components/parameters/OrganizationId" }, { "$ref": "#/components/parameters/AuditExportId" }, { "$ref": "#/components/parameters/AuditExportEnvironment" }, { "$ref": "#/components/parameters/AuditExportChain" }],
+        "responses": {
+          "200": { "$ref": "#/components/responses/AuditExportDownload" },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "429": { "$ref": "#/components/responses/TooManyRequests" },
+          "500": { "$ref": "#/components/responses/InternalError" }
+        },
+        "x-agentpass-contract-status": "frozen-c2",
+        "x-agentpass-tenant-scope": { "kind": "organization", "source": "path.organization_id", "cross-tenant-disclosure": false },
+        "x-agentpass-minimum-role": "auditor",
+        "x-agentpass-recent-auth-operation": "audit.export.download",
+        "x-agentpass-authority": { "immutable": true, "bytes": "exact canonical application/json public export attachment", "private-material": "never-returned", "additionalProperties": false }
+      }
+    },
+    "/organizations/{organization_id}/audit/exports/verify": {
+      "post": {
+        "operationId": "verifyAuditExport",
+        "summary": "Verify a public audit export offline",
+        "description": "Verifies the exact public audit export object supplied in the JSON body without accepting idempotency material or returning secrets. The result reports payload_digest, root, anchor, and historical_key checks, overall valid, and one stable reason code.",
+        "security": [{ "humanSession": [], "recentWebAuthn": [] }],
+        "parameters": [{ "$ref": "#/components/parameters/OrganizationId" }, { "$ref": "#/components/parameters/CsrfToken" }],
+        "requestBody": { "$ref": "#/components/requestBodies/VerifyAuditExport" },
+        "responses": {
+          "200": { "$ref": "#/components/responses/AuditExportVerificationResult" },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "422": { "$ref": "#/components/responses/ValidationError" },
+          "429": { "$ref": "#/components/responses/TooManyRequests" },
+          "500": { "$ref": "#/components/responses/InternalError" }
+        },
+        "x-agentpass-contract-status": "frozen-c2",
+        "x-agentpass-tenant-scope": { "kind": "organization", "source": "path.organization_id", "cross-tenant-disclosure": false },
+        "x-agentpass-minimum-role": "auditor",
+        "x-agentpass-recent-auth-operation": "audit.export.verify",
+        "x-agentpass-authority": { "input": "exact public export object", "secrets": "never-accepted-or-returned", "additionalProperties": false }
+      }
+    },
     "/organizations/{organization_id}/device-enrollments": {
       "post": {
         "operationId": "issueDeviceEnrollment",
@@ -1118,6 +1165,11 @@
         "description": "Exactly export_id, environment, and chain. Organization, range, digest, timestamps, anchor, claims, provider fields, idempotency material, and private material are not accepted in the JSON body.",
         "content": { "application/json": { "schema": { "$ref": "#/components/schemas/AuditExportCreateRequest" } } }
       },
+      "VerifyAuditExport": {
+        "required": true,
+        "description": "Exactly the public AuditExport object. No idempotency key, request metadata, claim, provider, or secret field is accepted.",
+        "content": { "application/json": { "schema": { "$ref": "#/components/schemas/AuditExportVerifyRequest" } } }
+      },
       "DeviceEnrollmentIssue": {
         "required": true,
         "description": "The legacy request shape remains accepted. A v2 request must use proof_version=2, candidate_id, and device_key_fingerprint; release artifact metadata is resolved by Cloud and cannot be supplied by the caller.",
@@ -1205,6 +1257,25 @@
         "description": "The exact committed immutable audit export. No request, claim, provider, idempotency, or private material is returned.",
         "headers": { "Cache-Control": { "required": true, "schema": { "type": "string", "const": "no-store, max-age=0" } } },
         "content": { "application/json": { "schema": { "$ref": "#/components/schemas/AuditExportResponse" } } }
+      },
+      "AuditExportDownload": {
+        "description": "The exact public audit export object as a canonical application/json attachment. The response is no-store and nosniff.",
+        "headers": {
+          "Content-Type": { "required": true, "schema": { "type": "string", "const": "application/json" } },
+          "Content-Disposition": { "required": true, "schema": { "type": "string", "const": "attachment; filename=\"agentpass-audit-export.json\"" } },
+          "Cache-Control": { "required": true, "schema": { "type": "string", "const": "no-store, max-age=0" } },
+          "X-Content-Type-Options": { "required": true, "schema": { "type": "string", "const": "nosniff" } }
+        },
+        "content": { "application/json": { "schema": { "$ref": "#/components/schemas/AuditExport" } } }
+      },
+      "AuditExportVerificationResult": {
+        "description": "Strict secret-free offline verification result with component checks, overall validity, and a stable reason code.",
+        "headers": {
+          "Content-Type": { "required": true, "schema": { "type": "string", "const": "application/json" } },
+          "Cache-Control": { "required": true, "schema": { "type": "string", "const": "no-store, max-age=0" } },
+          "X-Content-Type-Options": { "required": true, "schema": { "type": "string", "const": "nosniff" } }
+        },
+        "content": { "application/json": { "schema": { "$ref": "#/components/schemas/AuditExportVerificationResult" } } }
       },
       "OrganizationList": { "description": "Organizations visible to the session", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/OrganizationListResponse" } } } },
       "OrganizationCreated": { "description": "Organization created", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/OrganizationResponse" } } } },
@@ -1324,6 +1395,8 @@
       "AuditExportCreateRequest": { "$ref": "../schemas/audit-export-create-v1.schema.json" },
       "AuditExportPayloadV1": { "$ref": "../schemas/audit-export-payload-v1.schema.json" },
       "AuditExport": { "$ref": "../schemas/audit-export-response-v1.schema.json" },
+      "AuditExportVerifyRequest": { "$ref": "#/components/schemas/AuditExport" },
+      "AuditExportVerificationResult": { "$ref": "../schemas/audit-export-verification-result-v1.schema.json" },
       "AuditExportResponse": {
         "type": "object",
         "additionalProperties": false,

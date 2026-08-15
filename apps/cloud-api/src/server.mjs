@@ -11,6 +11,7 @@ import {
 import { RateLimiterCapacityError, createRateLimiter } from "./rate-limit.mjs";
 import { OPERATIONAL_GAUGE_KEYS, OPERATIONAL_METRIC_KEYS } from "./postgres/operational-health.mjs";
 import { normalizeDeviceReadModels } from "./device-read-model.mjs";
+import { canonicalAuditExportEntry, foldAuditExportRoot } from "./postgres/audit-export-snapshot-reader.mjs";
 import {
   normalizePossessionReceiptStatement,
   POSSESSION_RECEIPT_PURPOSE,
@@ -32,6 +33,8 @@ const HUMAN_AGENT_SESSION_GRANT_PATH = new RegExp(`^/api/v1/organizations/${HUMA
 const HUMAN_QUALIFICATION_GRANT_BATCH_PATH = new RegExp(`^/api/v1/organizations/${HUMAN_AUTH_UUID}/agents/${HUMAN_AUTH_UUID}/qualification-grant-batches$`);
 const HUMAN_AUDIT_EXPORT_CREATE_PATH = new RegExp(`^/v1/organizations/(?<organizationId>${HUMAN_AUTH_UUID})/audit/exports$`);
 const HUMAN_AUDIT_EXPORT_GET_PATH = new RegExp(`^/v1/organizations/(?<organizationId>${HUMAN_AUTH_UUID})/audit/exports/(?<exportId>${HUMAN_AUTH_UUID})$`);
+const HUMAN_AUDIT_EXPORT_DOWNLOAD_PATH = new RegExp(`^/v1/organizations/(?<organizationId>${HUMAN_AUTH_UUID})/audit/exports/(?<exportId>${HUMAN_AUTH_UUID})/download$`);
+const HUMAN_AUDIT_EXPORT_VERIFY_PATH = new RegExp(`^/v1/organizations/(?<organizationId>${HUMAN_AUTH_UUID})/audit/exports/verify$`);
 const UUID = "([0-9a-fA-F-]{36})";
 const UUID_VALUE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu;
 const AGENT_SESSION_DEVICE_CONSUME_PATH = /^\/v1\/organizations\/(?<organizationId>[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})\/devices\/(?<deviceId>[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})\/agent-session-grants\/(?<grantId>[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})\/consume$/u;
@@ -52,7 +55,7 @@ const V2_CANDIDATE_BINDING_KEYS = Object.freeze([
 const V2_COMPLETION_KEYS = new Set(["version", "proof_version", "enrollment_id", "organization_id", "device_id", "label", "platform", "device_key", "candidate_id", "device_key_fingerprint", "challenge"]);
 const V2_CHALLENGE_KEYS = new Set(["challenge_id", "nonce", "expires_at", "candidate_id", "device_key_fingerprint"]);
 const V2_PROOF_DOMAIN = "AgentPass-Enrollment-Proof-v2\0";
-export function createCloudApi({ store, tokenRecords = [], bundleSigner, capabilitySigner, refreshHintService, now = () => Date.now(), monotonicNow, replayCache = createReplayCache(), deviceReplayConsumer, agentSessionDeviceApi, qualificationGrantBatchDeviceApi, rateLimiter, admissionRateLimiter, verifyRecentWebAuthn, recentAuthService, humanAuthApi, humanSession, humanAuthOrigin, auditExportIssuanceService, capabilityAuthorityRepository, capabilityRevocationSource, auditRepository, enrollmentCredentialSecret, possessionReceiptSigner, trackInFlight, readiness, operationalMetrics, operationalProbeSecret } = {}) {
+export function createCloudApi({ store, tokenRecords = [], bundleSigner, capabilitySigner, refreshHintService, now = () => Date.now(), monotonicNow, replayCache = createReplayCache(), deviceReplayConsumer, agentSessionDeviceApi, qualificationGrantBatchDeviceApi, rateLimiter, admissionRateLimiter, verifyRecentWebAuthn, recentAuthService, humanAuthApi, humanSession, humanAuthOrigin, auditExportIssuanceService, auditExportVerifier, capabilityAuthorityRepository, capabilityRevocationSource, auditRepository, enrollmentCredentialSecret, possessionReceiptSigner, trackInFlight, readiness, operationalMetrics, operationalProbeSecret } = {}) {
   if (!store) throw new TypeError("store is required");
   if (verifyRecentWebAuthn !== undefined && recentAuthService !== undefined) throw new TypeError("configure verifyRecentWebAuthn or recentAuthService, not both");
   if (humanAuthApi !== undefined && (!humanAuthApi || typeof humanAuthApi.handle !== "function")) throw new TypeError("humanAuthApi must expose handle()");
@@ -61,6 +64,12 @@ export function createCloudApi({ store, tokenRecords = [], bundleSigner, capabil
     || typeof auditExportIssuanceService.issueAuditExport !== "function"
     || typeof auditExportIssuanceService.retrieveAuditExport !== "function")) {
     throw new TypeError("auditExportIssuanceService must expose issueAuditExport() and retrieveAuditExport()");
+  }
+  if (auditExportVerifier !== undefined && (!auditExportVerifier || typeof auditExportVerifier.verifyAuditExport !== "function")) {
+    throw new TypeError("auditExportVerifier must expose verifyAuditExport()");
+  }
+  if (auditExportVerifier !== undefined && auditExportIssuanceService === undefined) {
+    throw new TypeError("auditExportVerifier requires auditExportIssuanceService");
   }
   const effectiveHumanAuthOrigin = humanAuthOrigin ?? humanSession?.expectedOrigin;
   if (auditExportIssuanceService !== undefined && (humanSession === undefined || recentAuthService === undefined
@@ -160,7 +169,10 @@ export function createCloudApi({ store, tokenRecords = [], bundleSigner, capabil
         return sendRawJson(response, normalized.status, normalized.encoded, normalized.headers);
       }
       const url = new URL(request.url, "http://agentpass.invalid");
-      if (auditExportIssuanceService && (HUMAN_AUDIT_EXPORT_CREATE_PATH.test(url.pathname) || HUMAN_AUDIT_EXPORT_GET_PATH.test(url.pathname))) {
+      if (auditExportIssuanceService && (HUMAN_AUDIT_EXPORT_CREATE_PATH.test(url.pathname)
+        || HUMAN_AUDIT_EXPORT_GET_PATH.test(url.pathname)
+        || HUMAN_AUDIT_EXPORT_DOWNLOAD_PATH.test(url.pathname)
+        || (auditExportVerifier && HUMAN_AUDIT_EXPORT_VERIFY_PATH.test(url.pathname)))) {
         return await handleHumanAuditExport(request, response, url, requestId);
       }
       if (humanAuthApi && isExactHumanAuthPath(url, request.method)) return await handleHumanAuth(request, response, url, requestId);
@@ -228,9 +240,21 @@ export function createCloudApi({ store, tokenRecords = [], bundleSigner, capabil
   async function handleHumanAuditExport(request, response, url, requestId) {
     const createMatch = HUMAN_AUDIT_EXPORT_CREATE_PATH.exec(url.pathname);
     const getMatch = HUMAN_AUDIT_EXPORT_GET_PATH.exec(url.pathname);
+    const downloadMatch = HUMAN_AUDIT_EXPORT_DOWNLOAD_PATH.exec(url.pathname);
+    const verifyMatch = HUMAN_AUDIT_EXPORT_VERIFY_PATH.exec(url.pathname);
     let responseRateHeaders = {};
+    let auditActor;
+    let auditAction;
+    let auditOrganizationId;
+    let auditTargetId;
     try {
-      const organizationId = (createMatch ?? getMatch).groups.organizationId.toLowerCase();
+      const matched = createMatch ?? getMatch ?? downloadMatch ?? verifyMatch;
+      if (!matched) throw apiError("not_found", 404, "Resource not found");
+      const organizationId = matched.groups.organizationId.toLowerCase();
+      const action = createMatch ? "create" : getMatch ? "retrieve" : downloadMatch ? "download" : "verify";
+      auditAction = action;
+      auditOrganizationId = organizationId;
+      const expectedMethod = action === "create" || action === "verify" ? "POST" : "GET";
       const admitted = await acquireRateLimit(admission, {
         tenantId: organizationId,
         principalType: "human",
@@ -241,24 +265,25 @@ export function createCloudApi({ store, tokenRecords = [], bundleSigner, capabil
       const expectedOrigin = effectiveHumanAuthOrigin;
       const origin = request.headers.origin;
       if (origin !== expectedOrigin || origin === "null") throw apiError("human_session_request_denied", 403, "Authentication failed");
-      const isCreate = createMatch !== null;
-      if ((isCreate && request.method !== "POST") || (!isCreate && request.method !== "GET")) {
-        throw apiError("method_not_allowed", 405, "Method not allowed", { Allow: isCreate ? "POST" : "GET" });
+      if (request.method !== expectedMethod) {
+        throw apiError("method_not_allowed", 405, "Method not allowed", { Allow: expectedMethod });
       }
       const bodyBytes = await readBody(request, HUMAN_AUTH_MAX_BODY_BYTES);
-      if (!isCreate && bodyBytes.length !== 0) throw apiError("invalid_audit_export_request", 400, "Audit export request is invalid");
-      const csrfToken = isCreate ? request.headers["agentpass-csrf"] : undefined;
+      if ((action === "retrieve" || action === "download") && bodyBytes.length !== 0) throw apiError("invalid_audit_export_request", 400, "Audit export request is invalid");
+      const mutation = action === "create" || action === "verify";
+      const csrfToken = mutation ? request.headers["agentpass-csrf"] : undefined;
       const authenticated = await humanSession.authenticateRequest({
         method: request.method,
         headers: request.headers,
         origin,
         cookie: request.headers.cookie,
-        ...(isCreate ? { csrfToken } : {})
+        ...(mutation ? { csrfToken } : {})
       });
       const principal = authenticated?.session;
       if (!principal || typeof principal !== "object" || Array.isArray(principal)) throw apiError("human_session_invalid", 401, "Authentication failed");
       if (principal.organization_id !== organizationId) throw apiError("not_found", 404, "Resource not found");
-      const allowedRoles = isCreate ? new Set(["owner", "admin"]) : new Set(["owner", "admin", "auditor"]);
+      auditActor = principal.member_id;
+      const allowedRoles = action === "create" ? new Set(["owner", "admin"]) : new Set(["owner", "admin", "auditor"]);
       if (!allowedRoles.has(principal.role)) throw apiError("role_denied", 403, "Authorization denied");
       const rateLimit = await acquireRateLimit(limiter, {
         tenantId: organizationId,
@@ -272,7 +297,8 @@ export function createCloudApi({ store, tokenRecords = [], bundleSigner, capabil
       let environment;
       let chain;
       let idempotency;
-      if (isCreate) {
+      let verifyInput;
+      if (action === "create") {
         if (url.search || url.hash) throw apiError("invalid_audit_export_request", 400, "Audit export request is invalid");
         const body = parseBody(bodyBytes);
         rejectUnknown(body, new Set(["export_id", "environment", "chain"]), "audit_export");
@@ -288,8 +314,8 @@ export function createCloudApi({ store, tokenRecords = [], bundleSigner, capabil
         if (typeof idempotency !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._~:-]{7,255}$/u.test(idempotency)) {
           throw apiError("idempotency_key_required", 400, "A valid Idempotency-Key is required");
         }
-      } else {
-        if (request.headers["idempotency-key"] !== undefined || url.hash) throw apiError("invalid_audit_export_request", 400, "Audit export request is invalid");
+      } else if (action === "retrieve" || action === "download") {
+        if (request.headers["idempotency-key"] !== undefined || (action === "download" && request.headers["agentpass-csrf"] !== undefined) || url.hash) throw apiError("invalid_audit_export_request", 400, "Audit export request is invalid");
         requireExactQueryKeys(url, new Set(["environment", "chain"]));
         const environmentValues = url.searchParams.getAll("environment");
         const chainValues = url.searchParams.getAll("chain");
@@ -298,10 +324,17 @@ export function createCloudApi({ store, tokenRecords = [], bundleSigner, capabil
           || !["admin", "device", "cloud_agent"].includes(chainValues[0])) {
           throw apiError("invalid_audit_export_request", 400, "Audit export request is invalid");
         }
-        exportId = getMatch.groups.exportId.toLowerCase();
+        exportId = (getMatch ?? downloadMatch).groups.exportId.toLowerCase();
         environment = environmentValues[0];
         chain = chainValues[0];
+      } else {
+        if (url.search || url.hash || request.headers["idempotency-key"] !== undefined) throw apiError("invalid_audit_export_request", 400, "Audit export request is invalid");
+        verifyInput = normalizeAuditExportVerifyInput(parseBody(bodyBytes), organizationId);
+        exportId = verifyInput.export_id;
+        environment = verifyInput.environment;
+        chain = verifyInput.chain;
       }
+      auditTargetId = exportId;
 
       const contextHash = crypto.createHash("sha256").update(canonicalJson({
         version: 1,
@@ -315,20 +348,47 @@ export function createCloudApi({ store, tokenRecords = [], bundleSigner, capabil
         principal,
         proof: request.headers["agentpass-recent-auth"],
         organizationId,
-        operation: isCreate ? "audit.export.create" : "audit.export.retrieve",
+        operation: `audit.export.${action}`,
         contextHash,
         now: now()
       });
+      if (action === "verify") {
+        let verification;
+        try { verification = await auditExportVerifier.verifyAuditExport(verifyInput); }
+        catch { throw apiError("not_found", 404, "Resource not found"); }
+        const publicVerification = normalizeAuditExportVerificationResult(verification);
+        await appendAuditExportOperation({ organizationId, actorId: principal.member_id, exportId, action, requestId, outcome: "succeeded", details: { environment, chain, valid: publicVerification.valid, reason: publicVerification.reason } });
+        return send(response, 200, publicVerification, {
+          "cache-control": "no-store, max-age=0",
+          Pragma: "no-cache",
+          "X-Content-Type-Options": "nosniff",
+          ...responseRateHeaders
+        });
+      }
       let auditExport;
       try {
-        auditExport = isCreate
+        auditExport = action === "create"
           ? await auditExportIssuanceService.issueAuditExport({ organization_id: organizationId, export_id: exportId, environment, chain, idempotency_key: idempotency })
           : await auditExportIssuanceService.retrieveAuditExport({ organization_id: organizationId, export_id: exportId, environment, chain });
-      } catch (error) {
-        throw mapAuditExportServiceError(error, isCreate);
-      }
+      } catch (error) { throw mapAuditExportServiceError(error, action === "create"); }
       const normalized = normalizeAuditExportPublicResult(auditExport, { organizationId, exportId, environment, chain });
-      return send(response, isCreate ? 201 : 200, { audit_export: normalized, request_id: requestId }, {
+      if (action === "download") {
+        try { assertAuditExportPublicIntegrity(normalized); }
+        catch { throw apiError("audit_export_unavailable", 503, "Audit export is unavailable"); }
+        const encoded = Buffer.from(canonicalJson(normalized), "utf8");
+        await appendAuditExportOperation({ organizationId, actorId: principal.member_id, exportId, action, requestId, outcome: "succeeded", details: { environment, chain, validity: normalized.validity, payload_digest: normalized.payload_digest } });
+        return sendRawJson(response, 200, encoded, {
+          "content-type": "application/json",
+          "content-disposition": "attachment; filename=\"agentpass-audit-export.json\"",
+          "content-length": String(encoded.length),
+          "cache-control": "no-store, max-age=0",
+          Pragma: "no-cache",
+          "X-Content-Type-Options": "nosniff",
+          ...responseRateHeaders
+        });
+      }
+      await appendAuditExportOperation({ organizationId, actorId: principal.member_id, exportId, action, requestId, outcome: "succeeded", details: { environment, chain, validity: normalized.validity, payload_digest: normalized.payload_digest } });
+      return send(response, action === "create" ? 201 : 200, { audit_export: normalized, request_id: requestId }, {
         "cache-control": "no-store, max-age=0",
         Pragma: "no-cache",
         "X-Content-Type-Options": "nosniff",
@@ -336,12 +396,28 @@ export function createCloudApi({ store, tokenRecords = [], bundleSigner, capabil
       });
     } catch (error) {
       const mapped = mapError(error);
+      if (auditActor && auditAction && auditOrganizationId) {
+        await appendAuditExportOperation({ organizationId: auditOrganizationId, actorId: auditActor, exportId: auditTargetId, action: auditAction, requestId, outcome: mapped.status === 403 ? "denied" : "failed", details: { status: mapped.status, code: mapped.code } }).catch(() => {});
+      }
       return send(response, mapped.status, { error: { code: mapped.code, message: mapped.message }, request_id: requestId }, {
         Pragma: "no-cache",
         "X-Content-Type-Options": "nosniff",
         ...(mapped.headers ?? {})
       });
     }
+  }
+
+  async function appendAuditExportOperation({ organizationId, actorId, exportId, action, requestId, outcome, details }) {
+    if (typeof store.appendAdminAuditEvent !== "function") return;
+    await store.appendAdminAuditEvent({
+      organizationId,
+      actorId,
+      eventType: `audit.export.${action}.${outcome}`,
+      targetType: "audit_export",
+      ...(exportId ? { targetId: exportId } : {}),
+      idempotencyKey: `audit-export:${requestId}:${outcome}`,
+      details
+    });
   }
   server.requestTimeout = 15_000;
   server.headersTimeout = 10_000;
@@ -1035,6 +1111,74 @@ function normalizeAuditExportPublicResult(value, expected) {
     if (Buffer.byteLength(canonicalJson(cloned), "utf8") > 256 * 1024) throw new Error("size");
     const { replayed: _replayed, ...publicValue } = cloned;
     return publicValue;
+  } catch {
+    throw apiError("audit_export_unavailable", 503, "Audit export is unavailable");
+  }
+}
+
+function normalizeAuditExportVerifyInput(value, organizationId) {
+  try {
+    const keys = ["organization_id", "export_id", "environment", "chain", "range", "payload_digest", "payload", "audit_anchor", "validity"];
+    if (!value || typeof value !== "object" || Array.isArray(value)
+      || Object.keys(value).sort().join(",") !== keys.sort().join(",")
+      || value.organization_id !== organizationId || !canonicalUuid(value.export_id)
+      || !["staging", "production"].includes(value.environment)
+      || !["admin", "device", "cloud_agent"].includes(value.chain)
+      || typeof value.payload_digest !== "string" || !SHA256_HEX.test(value.payload_digest)
+      || !["active", "expired"].includes(value.validity)) throw new Error("identity");
+    assertSafeAuditExportTree(value);
+    const cloned = structuredClone(value);
+    if (Buffer.byteLength(canonicalJson(cloned), "utf8") > 256 * 1024) throw new Error("size");
+    assertAuditExportPublicStructure(cloned);
+    return cloned;
+  } catch {
+    throw apiError("invalid_audit_export_request", 400, "Audit export request is invalid");
+  }
+}
+
+function assertAuditExportPublicStructure(value) {
+  const range = value.range;
+  const payload = value.payload;
+  if (!range || typeof range !== "object" || Array.isArray(range)
+    || Object.keys(range).sort().join(",") !== ["from_audit_position", "to_audit_position", "previous_root_digest", "root_digest", "record_count"].sort().join(",")
+    || !Number.isSafeInteger(range.from_audit_position) || range.from_audit_position < 1
+    || !Number.isSafeInteger(range.to_audit_position) || range.to_audit_position < range.from_audit_position
+    || !Number.isSafeInteger(range.record_count) || range.record_count < 1 || range.record_count > 100
+    || !SHA256_HEX.test(range.previous_root_digest) || !SHA256_HEX.test(range.root_digest)
+    || range.to_audit_position - range.from_audit_position + 1 !== range.record_count) throw new Error("range");
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)
+    || payload.organization_id !== value.organization_id || payload.environment !== value.environment || payload.chain !== value.chain
+    || canonicalJson(payload.range) !== canonicalJson(range) || !Array.isArray(payload.entries)
+    || payload.entries.length !== range.record_count) throw new Error("payload");
+  if (!value.audit_anchor || typeof value.audit_anchor !== "object" || Array.isArray(value.audit_anchor)
+    || !value.audit_anchor.statement || typeof value.audit_anchor.statement !== "object" || Array.isArray(value.audit_anchor.statement)) throw new Error("anchor");
+}
+
+function assertAuditExportPublicIntegrity(value) {
+  assertAuditExportPublicStructure(value);
+  if (crypto.createHash("sha256").update(canonicalJson(value.payload), "utf8").digest("hex") !== value.payload_digest) throw new Error("digest");
+  let root = value.range.previous_root_digest;
+  for (const entry of value.payload.entries) root = foldAuditExportRoot(root, canonicalAuditExportEntry(entry));
+  if (root !== value.range.root_digest) throw new Error("root");
+  const statement = value.audit_anchor.statement;
+  if (statement.organization_id !== value.organization_id || statement.export_id !== value.export_id
+    || statement.environment !== value.environment || statement.chain !== value.chain
+    || statement.audit_position !== value.range.to_audit_position
+    || statement.previous_audit_position !== value.range.from_audit_position - 1
+    || statement.root_digest !== value.range.root_digest || statement.previous_root_digest !== value.range.previous_root_digest
+    || statement.export_digest !== value.payload_digest || statement.record_count !== value.range.record_count) throw new Error("anchor");
+}
+
+function normalizeAuditExportVerificationResult(value) {
+  try {
+    const keys = ["payload_digest", "root", "anchor", "historical_key", "valid", "reason"];
+    if (!value || typeof value !== "object" || Array.isArray(value)
+      || Object.keys(value).sort().join(",") !== keys.sort().join(",")
+      || ["payload_digest", "root", "anchor", "historical_key", "valid"].some((key) => typeof value[key] !== "boolean")
+      || !["valid", "invalid_export", "payload_digest_mismatch", "root_mismatch", "anchor_invalid", "historical_key_unavailable"].includes(value.reason)
+      || value.valid !== (value.payload_digest && value.root && value.anchor && value.historical_key)
+      || (value.valid && value.reason !== "valid")) throw new Error("result");
+    return Object.freeze({ ...value });
   } catch {
     throw apiError("audit_export_unavailable", 503, "Audit export is unavailable");
   }

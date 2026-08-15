@@ -1,0 +1,8 @@
+{
+  "payload_digest": true,
+  "root": true,
+  "anchor": true,
+  "historical_key": true,
+  "valid": true,
+  "reason": "valid"
+}

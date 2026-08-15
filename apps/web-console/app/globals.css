@@ -57,9 +57,47 @@ button {
 
 button:focus-visible,
 input:focus-visible,
+select:focus-visible,
 a:focus-visible {
   outline: 3px solid rgba(168, 108, 31, 0.52);
   outline-offset: 3px;
+}
+
+.audit-export-panel {
+  display: grid;
+  gap: 24px;
+  max-width: 1040px;
+  margin: 0 auto;
+  padding: 42px clamp(20px, 5vw, 64px) 72px;
+}
+
+.audit-export-header h1 { margin: 5px 0 8px; font-family: Georgia, serif; font-size: clamp(30px, 4vw, 48px); line-height: 1.12; }
+.audit-export-header p { max-width: 720px; margin: 0; color: var(--ink-soft); }
+.audit-export-controls,
+.audit-export-status,
+.audit-export-details { padding: 24px; border: 1px solid var(--line); border-radius: 12px; background: var(--paper); box-shadow: var(--shadow); }
+.audit-export-controls { display: grid; grid-template-columns: minmax(120px, 180px) minmax(220px, 1fr); gap: 12px 18px; align-items: center; }
+.audit-export-controls label { font-weight: 700; }
+.audit-export-controls input,
+.audit-export-controls select { width: 100%; min-height: 42px; padding: 8px 11px; border: 1px solid var(--line-strong); border-radius: 7px; background: #fff; color: var(--ink); font: inherit; }
+.audit-export-controls #audit-export-help,
+.audit-export-controls .audit-export-actions { grid-column: 1 / -1; }
+.audit-export-actions { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; margin-top: 8px; }
+.audit-export-status { border-left: 4px solid var(--forest); }
+.audit-export-panel[data-state="expired"] .audit-export-status { border-left-color: var(--amber); background: var(--amber-soft); }
+.audit-export-panel[data-state="corrupt"] .audit-export-status,
+.audit-export-panel[data-state="offline"] .audit-export-status,
+.audit-export-panel[data-state="response-loss"] .audit-export-status { border-left-color: var(--red); background: var(--red-soft); }
+.audit-export-details dl { display: grid; gap: 0; margin: 16px 0; border-top: 1px solid var(--line); }
+.audit-export-details dl div { display: grid; grid-template-columns: minmax(140px, 220px) 1fr; gap: 18px; padding: 12px 0; border-bottom: 1px solid var(--line); }
+.audit-export-details dt { color: var(--ink-soft); font-weight: 700; }
+.audit-export-details dd { min-width: 0; margin: 0; overflow-wrap: anywhere; font-family: var(--font-mono); font-size: 12px; }
+.verification-valid { color: var(--forest); font-weight: 700; }
+.verification-invalid { color: var(--red); font-weight: 700; }
+
+@media (max-width: 680px) {
+  .audit-export-controls,
+  .audit-export-details dl div { grid-template-columns: 1fr; }
 }
 
 .console-shell {
@@ -74,6 +112,8 @@ a:focus-visible {
   display: flex;
   flex-direction: column;
   height: 100vh;
+  overflow-y: auto;
+  overscroll-behavior: contain;
   padding: 26px 18px 20px;
   border-right: 1px solid var(--line);
   background: #f2f0e8;

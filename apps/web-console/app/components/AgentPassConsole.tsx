@@ -8,6 +8,7 @@ import { EnrollmentPreflightError, parsePublicEnrollmentPreflight } from "../../
 import { fetchBrowserCliHandoffPreflight, parseBrowserCliHandoffLaunchFragment, postBrowserCliHandoff, publicEnrollmentPreflight as publicBrowserCliEnrollmentPreflight } from "../../lib/browser-cli-handoff.mjs";
 import { OrganizationPanel } from "./OrganizationPanel";
 import { OwnerRecoveryPanel } from "./OwnerRecoveryPanel";
+import { AuditExportPanel } from "./AuditExportPanel";
 
 export type ConsoleView =
   | "overview"
@@ -15,6 +16,7 @@ export type ConsoleView =
   | "agents"
   | "policies"
   | "activity"
+  | "audit-exports"
   | "security"
   | "organizations"
   | "recovery"
@@ -599,6 +601,7 @@ const navItems: Array<{ id: ConsoleView; label: string; icon: string }> = [
   { id: "agents", label: "Agents", icon: "◈" },
   { id: "policies", label: "ポリシー", icon: "▤" },
   { id: "activity", label: "アクティビティ", icon: "◷" },
+  { id: "audit-exports", label: "監査エクスポート", icon: "⇩" },
   { id: "security", label: "セキュリティ", icon: "◇" },
   { id: "organizations", label: "Organizations", icon: "◎" },
   { id: "recovery", label: "アカウント復旧", icon: "◌" },
@@ -1177,6 +1180,7 @@ export function AgentPassConsole() {
   const [summaryState, setSummaryState] = useState<"loading" | "ready" | "error">("loading");
   const [sessionState, setSessionState] = useState<"active" | "expired" | "signed-out">("active");
   const [sessionRole, setSessionRole] = useState<ConsoleRole | null>(null);
+  const [auditSession, setAuditSession] = useState<ConsoleSession | null>(null);
   const [signOutPending, setSignOutPending] = useState(false);
   const [lastSynced, setLastSynced] = useState("未同期");
   const modalRef = useRef<HTMLElement | null>(null);
@@ -1197,6 +1201,7 @@ export function AgentPassConsole() {
     consoleSessionContext.clear();
     organizationIdRef.current = null;
     setSessionRole(null);
+    setAuditSession(null);
     setData(emptyConsoleData());
     setSessionState("expired");
     setSummaryState("error");
@@ -1223,6 +1228,7 @@ export function AgentPassConsole() {
       if (epoch !== summaryEpoch.current) return;
       organizationIdRef.current = organizationId;
       setSessionRole(session.role);
+      setAuditSession(session);
       setData(next);
       setSessionState("active");
       setSummaryState("ready");
@@ -1232,6 +1238,7 @@ export function AgentPassConsole() {
       if (epoch !== summaryEpoch.current) return;
       organizationIdRef.current = null;
       setSessionRole(null);
+      setAuditSession(null);
       if (error instanceof ConsoleSessionError && (error.status === 401 || error.status === 403)) {
         consoleSessionContext.clear();
         setSessionState("expired");
@@ -1378,6 +1385,7 @@ export function AgentPassConsole() {
       await logoutConsoleSession();
       organizationIdRef.current = null;
       setSessionRole(null);
+      setAuditSession(null);
       setData(emptyConsoleData());
       setSessionState("signed-out");
       setSummaryState("error");
@@ -1503,6 +1511,7 @@ export function AgentPassConsole() {
           {sessionState === "active" && activeView === "agents" ? <AgentsSurface data={data} operate={operate} canManage={canManage} /> : null}
           {sessionState === "active" && activeView === "policies" ? <PoliciesSurface data={data} operate={operate} canManage={canManage} /> : null}
           {sessionState === "active" && activeView === "activity" ? <ActivitySurface data={data} /> : null}
+          {sessionState === "active" && activeView === "audit-exports" && auditSession ? <AuditExportPanel role={auditSession.role} organizationId={auditSession.organizationId} csrfToken={auditSession.csrfToken} /> : null}
           {sessionState === "active" && activeView === "security" ? <SecuritySurface onSessionEnded={expireSession} /> : null}
           {sessionState === "active" && activeView === "organizations" ? <OrganizationPanel /> : null}
           {sessionState === "active" && activeView === "recovery" ? <OwnerRecoveryPanel /> : null}

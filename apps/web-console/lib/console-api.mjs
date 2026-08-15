@@ -119,10 +119,11 @@ export async function handleConsoleRequest(request, options = {}) {
 
     if (request.method === "GET") {
       const query = parseQuery(new URL(request.url).searchParams, "GET");
-      if (query.resource === "audit-export") {
+      if (query.resource === "audit-export" || query.resource === "audit-export-download") {
         if (request.headers.has("idempotency-key")) throw new ConsoleApiError(400, "invalid_idempotency", "Idempotency-Key is not allowed");
         query.recentAuth = requireRecentAuth(request.headers.get("agentpass-recent-auth"));
       }
+      if (query.resource === "audit-export-download") return await getAuditExportDownload(query, config, fetchImpl);
       const result = await getResource(query, config, fetchImpl, options);
       const status = result?.__consoleStatus ?? 200;
       const payload = result?.__consoleBody ?? result;
@@ -131,6 +132,12 @@ export async function handleConsoleRequest(request, options = {}) {
 
     if (request.method === "POST") {
       const query = parseQuery(new URL(request.url).searchParams, "POST");
+      if (query.operation === "audit-export-verify") {
+        if (request.headers.has("idempotency-key")) throw new ConsoleApiError(400, "invalid_idempotency", "Idempotency-Key is not allowed");
+        const body = await readJsonBody(request);
+        const payload = await verifyAuditExport(query, body, config, fetchImpl, options, requireRecentAuth(request.headers.get("agentpass-recent-auth")));
+        return makeJsonResponse(payload.status, payload.body, config);
+      }
       const idempotencyKey = request.headers.get("idempotency-key");
       if (!idempotencyKey || !IDEMPOTENCY_KEY.test(idempotencyKey)) {
         throw new ConsoleApiError(400, "idempotency_key_required", "A valid Idempotency-Key is required");
@@ -324,6 +331,59 @@ async function getAuditExport(query, config, fetchImpl, options) {
     environment: query.environment,
     chain: query.chain,
   });
+}
+
+async function getAuditExportDownload(query, config, fetchImpl) {
+  assertAuditExportIdentityQuery(query);
+  const suffix = `/audit/exports/${encodeURIComponent(query.exportId)}/download?environment=${encodeURIComponent(query.environment)}&chain=${encodeURIComponent(query.chain)}`;
+  const url = buildCloudUrl(config.url, config.organizationId, suffix, config.allowInsecureLoopback);
+  const headers = new Headers({ accept: "application/json", cookie: config.authorization.cookie, origin: config.authorization.origin, "agentpass-recent-auth": query.recentAuth });
+  let response;
+  try { response = await fetchImpl(url, { method: "GET", headers, redirect: "error", cache: "no-store" }); }
+  catch { throw new ConsoleApiError(502, "cloud_api_unavailable", "Cloud API is unavailable"); }
+  if (!response || response.status !== 200 || response.headers?.get("set-cookie") !== null
+    || response.headers?.get("content-type") !== "application/json"
+    || response.headers?.get("content-disposition") !== "attachment; filename=\"agentpass-audit-export.json\""
+    || !/^no-store(?:, max-age=0)?$/u.test(response.headers?.get("cache-control") ?? "")
+    || response.headers?.get("x-content-type-options") !== "nosniff") throw invalidCloudResponse();
+  const raw = await readCloudResponse(response);
+  let parsed;
+  try { parsed = JSON.parse(raw); } catch { throw invalidCloudResponse(); }
+  const normalized = normalizeAuditExportEnvelope({ audit_export: parsed, request_id: "console-download" }, {
+    organizationId: config.organizationId,
+    exportId: query.exportId,
+    environment: query.environment,
+    chain: query.chain,
+  });
+  if (canonicalConsoleJson(normalized) !== raw) throw invalidCloudResponse();
+  return new Response(new TextEncoder().encode(raw), { status: 200, headers: {
+    "content-type": "application/json",
+    "content-disposition": "attachment; filename=\"agentpass-audit-export.json\"",
+    "cache-control": "no-store, max-age=0",
+    pragma: "no-cache",
+    "x-content-type-options": "nosniff",
+  } });
+}
+
+function assertAuditExportIdentityQuery(query) {
+  if (query.organizationId !== null || query.deviceId !== null || query.cursor !== null || query.limit !== 100
+    || !UUID_V4.test(query.exportId ?? "") || !["staging", "production"].includes(query.environment)
+    || !["admin", "device", "cloud_agent"].includes(query.chain)) throw new ConsoleApiError(400, "invalid_query", "Query parameters are invalid");
+}
+
+async function verifyAuditExport(query, body, config, fetchImpl, options, recentAuth) {
+  if (query.resource !== null || query.deviceId !== null || query.cursor !== null || query.limit !== 100
+    || query.exportId !== null || query.environment !== null || query.chain !== null || query.organizationId !== null) throw new ConsoleApiError(400, "invalid_query", "Query parameters are invalid");
+  if (!isPlainRecord(body) || body.organization_id !== config.organizationId) throw new ConsoleApiError(400, "invalid_json_schema", "Request JSON does not match the schema");
+  const auditExport = normalizeAuditExportEnvelope({ audit_export: body, request_id: "console-verify" }, {
+    organizationId: config.organizationId,
+    exportId: body.export_id,
+    environment: body.environment,
+    chain: body.chain,
+  });
+  const result = await cloudRequest("POST", "/audit/exports/verify", auditExport, config, fetchImpl, options, undefined, true, { "agentpass-recent-auth": recentAuth }, true);
+  if (result.status !== 200) throw invalidCloudResponse();
+  return { status: 200, body: normalizeAuditExportVerification(result.body) };
 }
 
 async function getSummary(query, config, fetchImpl, options) {
@@ -1022,7 +1082,7 @@ async function postOperation(query, body, idempotencyKey, config, fetchImpl, opt
 
 function normalizeResource(value) {
   if (value === null || value === "" || value === "summary") return "summary";
-  const aliases = { org: "organization", organization: "organization", devices: "devices", agents: "agents", policies: "policies", capabilities: "capabilities", revocations: "revocations", "admin-audit": "admin-audit", "audit-health": "audit-health", "audit-export": "audit-export", audit: "audit", activity: "activity", health: "health" };
+  const aliases = { org: "organization", organization: "organization", devices: "devices", agents: "agents", policies: "policies", capabilities: "capabilities", revocations: "revocations", "admin-audit": "admin-audit", "audit-health": "audit-health", "audit-export": "audit-export", "audit-export-download": "audit-export-download", audit: "audit", activity: "activity", health: "health" };
   if (aliases[value]) return aliases[value];
   throw new ConsoleApiError(400, "invalid_resource", "Resource is invalid");
 }
@@ -1061,6 +1121,8 @@ function normalizeOperation(value) {
     "emergency.stop": "emergency-stop",
     "audit-export": "audit-export",
     "audit.export.create": "audit-export",
+    "audit-export-verify": "audit-export-verify",
+    "audit.export.verify": "audit-export-verify",
   };
   if (typeof value === "string" && aliases[value]) return aliases[value];
   throw new ConsoleApiError(400, "invalid_operation", "Operation is invalid");
@@ -1091,6 +1153,27 @@ function normalizeAuditExportEnvelope(value, expected) {
     || !["active", "expired"].includes(auditExport.validity)) throw invalidCloudResponse();
   assertAuditExportTree(auditExport);
   return structuredClone(auditExport);
+}
+
+function normalizeAuditExportVerification(value) {
+  const keys = ["payload_digest", "root", "anchor", "historical_key", "valid", "reason"];
+  if (!isPlainRecord(value) || Object.keys(value).sort().join(",") !== keys.sort().join(",")
+    || ["payload_digest", "root", "anchor", "historical_key", "valid"].some((key) => typeof value[key] !== "boolean")
+    || !["valid", "invalid_export", "payload_digest_mismatch", "root_mismatch", "anchor_invalid", "historical_key_unavailable"].includes(value.reason)
+    || value.valid !== (value.payload_digest && value.root && value.anchor && value.historical_key)
+    || (value.valid && value.reason !== "valid")) throw invalidCloudResponse();
+  return Object.freeze({ ...value });
+}
+
+function canonicalConsoleJson(value) {
+  if (value === null || typeof value === "boolean" || typeof value === "string") return JSON.stringify(value);
+  if (typeof value === "number") {
+    if (!Number.isSafeInteger(value)) throw invalidCloudResponse();
+    return JSON.stringify(value);
+  }
+  if (Array.isArray(value)) return `[${value.map(canonicalConsoleJson).join(",")}]`;
+  if (!isPlainRecord(value)) throw invalidCloudResponse();
+  return `{${Object.keys(value).sort().map((key) => `${JSON.stringify(key)}:${canonicalConsoleJson(value[key])}`).join(",")}}`;
 }
 
 function assertAuditExportTree(value, seen = new Set(), depth = 0) {
