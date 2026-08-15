@@ -599,8 +599,9 @@ test("production Console does not infer the only passkey from a partial inventor
   const state = await installSecurityRoutes(page, undefined, { passkeyCount: 1, passkeyNextCursor: "next-page" });
   try {
     await openSecurityPanel(page);
-    await expect(page.getByRole("status")).toContainText("最後まで確認できていない");
-    await expect(page.getByRole("button", { name: "無効化", exact: true })).toBeEnabled();
+    const security = page.locator('section[aria-labelledby="security-panel-title"]');
+    await expect(security.getByRole("status").filter({ hasText: "最後まで確認できていない" })).toBeVisible();
+    await expect(security.getByRole("button", { name: "無効化", exact: true })).toBeEnabled();
     expect(state.mutations).toHaveLength(0);
   } finally {
     await disposeVirtualAuthenticator(authenticator);
