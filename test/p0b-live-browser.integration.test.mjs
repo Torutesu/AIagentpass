@@ -140,22 +140,23 @@ async function scenario(parent, name, callback) {
       browser = await chromium.launch({ headless: true, args: [`--ignore-certificate-errors-spki-list=${fixture.tlsSpkiPin}`] });
       const contexts = [];
       const open = async (role, { register = true, safeOpenPrefix = null } = {}) => {
+        const effectiveSafeOpenPrefix = safeOpenPrefix ?? (role === "owner" ? "P0B_SAFE_OWNER_OPEN" : null);
         let context;
         let page;
         try {
           context = await browser.newContext({ ignoreHTTPSErrors: false });
           contexts.push(context);
           page = await context.newPage();
-        } catch { failSafeOpen(safeOpenPrefix, "CONTEXT"); }
+        } catch { failSafeOpen(effectiveSafeOpenPrefix, "CONTEXT"); }
         if (register) {
           try { await fixture.installVirtualAuthenticator(page, role); }
-          catch { failSafeOpen(safeOpenPrefix, "AUTHENTICATOR"); }
+          catch { failSafeOpen(effectiveSafeOpenPrefix, "AUTHENTICATOR"); }
         }
         try { await fixture.bootstrap(page, role); }
         catch (error) {
           const bootstrap503Marker = safeBootstrap503Marker(error?.code);
           if (bootstrap503Marker !== null) assert.fail(bootstrap503Marker);
-          if (safeOpenPrefix === "P0B_SAFE_ADMIN_OPEN") {
+          if (effectiveSafeOpenPrefix === "P0B_SAFE_ADMIN_OPEN") {
             if (error?.code === "session_bootstrap_navigation_failed") assert.fail("P0B_SAFE_ADMIN_OPEN_BOOTSTRAP_NAVIGATION_FAILED");
             if (error?.code === "session_bootstrap_response_failed") assert.fail("P0B_SAFE_ADMIN_OPEN_BOOTSTRAP_RESPONSE_FAILED");
             if (error?.code === "session_bootstrap_http_400_failed") assert.fail("P0B_SAFE_ADMIN_OPEN_BOOTSTRAP_HTTP_400_FAILED");
@@ -177,18 +178,18 @@ async function scenario(parent, name, callback) {
             if (error?.code === "session_bootstrap_http_other_failed") assert.fail("P0B_SAFE_ADMIN_OPEN_BOOTSTRAP_HTTP_OTHER_FAILED");
             if (error?.code === "session_bootstrap_contract_failed") assert.fail("P0B_SAFE_ADMIN_OPEN_BOOTSTRAP_CONTRACT_FAILED");
           }
-          failSafeOpen(safeOpenPrefix, "BOOTSTRAP");
+          failSafeOpen(effectiveSafeOpenPrefix, "BOOTSTRAP");
         }
         if (register) {
           try { await fixture.registerWebAuthn(page); }
-          catch { failSafeOpen(safeOpenPrefix, "REGISTRATION"); }
+          catch { failSafeOpen(effectiveSafeOpenPrefix, "REGISTRATION"); }
         }
         try { await page.reload({ waitUntil: "domcontentloaded" }); }
-        catch { failSafeOpen(safeOpenPrefix, "RELOAD"); }
+        catch { failSafeOpen(effectiveSafeOpenPrefix, "RELOAD"); }
         try {
           await page.getByRole("heading", { name: /Agentの状態を、\s*確認できました。/u }).waitFor();
           await deviceCard(page, "反映待ち Mac").getByRole("heading", { name: "反映待ち Mac" }).waitFor();
-        } catch { failSafeOpen(safeOpenPrefix, "READINESS"); }
+        } catch { failSafeOpen(effectiveSafeOpenPrefix, "READINESS"); }
         return page;
       };
       await callback({ fixture, browser, open });

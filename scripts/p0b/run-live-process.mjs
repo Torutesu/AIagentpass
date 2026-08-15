@@ -39,6 +39,12 @@ const PROCESS_TIMEOUT_MS = 180_000;
 const LIVE_BROWSER_SAFE_FAILURE_MARKERS = Object.freeze([
   [null, "P0B_SAFE_WAKE_COALESCED_FAILED", "wake_ledger_coalesced"],
   [null, "P0B_SAFE_WAKE_NO_PENDING_FAILED", "wake_ledger_no_pending"],
+  [null, "P0B_SAFE_OWNER_OPEN_CONTEXT_FAILED", "owner_open_context"],
+  [null, "P0B_SAFE_OWNER_OPEN_AUTHENTICATOR_FAILED", "owner_open_authenticator"],
+  [null, "P0B_SAFE_OWNER_OPEN_BOOTSTRAP_FAILED", "owner_open_bootstrap"],
+  [null, "P0B_SAFE_OWNER_OPEN_REGISTRATION_FAILED", "owner_open_registration"],
+  [null, "P0B_SAFE_OWNER_OPEN_RELOAD_FAILED", "owner_open_reload"],
+  [null, "P0B_SAFE_OWNER_OPEN_READINESS_FAILED", "owner_open_readiness"],
   [null, "P0B_SAFE_ADMIN_OPEN_BOOTSTRAP_HTTP_500_FAILED", "admin_open_bootstrap_http_500"],
   [null, "P0B_SAFE_ADMIN_OPEN_BOOTSTRAP_HTTP_502_BFF_INVALID_RESPONSE_FAILED", "admin_open_bootstrap_http_502_bff_invalid_response"],
   [null, "P0B_SAFE_ADMIN_OPEN_BOOTSTRAP_HTTP_502_PROXY_UNAVAILABLE_FAILED", "admin_open_bootstrap_http_502_proxy_unavailable"],
