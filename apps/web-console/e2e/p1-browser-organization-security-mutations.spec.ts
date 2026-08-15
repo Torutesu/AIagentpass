@@ -584,8 +584,9 @@ test("production Console blocks revoking the only active passkey after a complet
   const state = await installSecurityRoutes(page, undefined, { passkeyCount: 1 });
   try {
     await openSecurityPanel(page);
-    await expect(page.getByRole("note")).toContainText("唯一の利用可能なパスキーです");
-    const revoke = page.getByRole("button", { name: "無効化", exact: true });
+    const passkeys = page.getByRole("article").filter({ has: page.getByRole("heading", { name: "登録済みのパスキー" }) });
+    await expect(passkeys.getByRole("note")).toContainText("唯一の利用可能なパスキーです");
+    const revoke = passkeys.getByRole("button", { name: "無効化", exact: true });
     await expect(revoke).toBeDisabled();
     expect(await revoke.getAttribute("aria-describedby")).toBe("security-passkey-revoke-guidance");
     expect(state.mutations).toHaveLength(0);
@@ -599,9 +600,9 @@ test("production Console does not infer the only passkey from a partial inventor
   const state = await installSecurityRoutes(page, undefined, { passkeyCount: 1, passkeyNextCursor: "next-page" });
   try {
     await openSecurityPanel(page);
-    const security = page.locator('section[aria-labelledby="security-panel-title"]');
-    await expect(security.getByRole("status").filter({ hasText: "最後まで確認できていない" })).toBeVisible();
-    await expect(security.getByRole("button", { name: "無効化", exact: true })).toBeEnabled();
+    const passkeys = page.getByRole("article").filter({ has: page.getByRole("heading", { name: "登録済みのパスキー" }) });
+    await expect(passkeys.getByRole("status").filter({ hasText: "最後まで確認できていない" })).toBeVisible();
+    await expect(passkeys.getByRole("button", { name: "無効化", exact: true })).toBeEnabled();
     expect(state.mutations).toHaveLength(0);
   } finally {
     await disposeVirtualAuthenticator(authenticator);
