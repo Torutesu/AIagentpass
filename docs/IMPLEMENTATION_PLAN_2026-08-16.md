@@ -2,7 +2,7 @@
 
 Status: active
 
-Planning baseline: `codex/agent-platform` after `63a09d3`
+Planning baseline: `codex/agent-platform` at `2a5700d`
 
 This document converts the v1 architecture into the remaining implementation
 and qualification gates. [`V1_EXECUTION_PLAN.md`](./V1_EXECUTION_PLAN.md)
@@ -33,6 +33,49 @@ lane pass at this checkpoint. This is not production completion. The current
 branch still needs a terminal green cross-version CI run, complete browser
 journeys, protected real-provider evidence, physical Mac evidence, a
 signed/notarized artifact, staging drills, and independent security review.
+
+### 1.1 Live execution checkpoint
+
+The exact-head CI run `31906258471` establishes the following current state:
+
+- PostgreSQL 16 authority qualification, PostgreSQL 17 authority
+  qualification, the full PostgreSQL integration lane, and the production-built
+  browser E2E lane are green;
+- organization invitation acceptance now returns the frozen
+  `{request_id, invitation, member}` contract, converges under concurrent
+  PostgreSQL acceptance, and has response-loss browser coverage;
+- Human Session bootstrap is serialized in the live browser harness and retries
+  only bounded transient `502` responses; authentication, authorization, and
+  mutation failures are never retried;
+- P0-B remains red at the Console-to-Cloud Human Session bootstrap boundary.
+  The current diagnostic safely distinguishes an exited Cloud child from a
+  running Cloud child without retaining child output or secrets;
+- the root/native lane must reach terminal success on the same final source SHA
+  after P0-B is repaired. A partial or cancelled diagnostic run is not N1
+  evidence.
+
+The next implementation batches are intentionally narrow and ordered:
+
+| Batch | Merge-sized work | Tests and evidence | Completion condition |
+| --- | --- | --- | --- |
+| Q1 | Resolve P0-B bootstrap `502`: classify Cloud child state, then distinguish proxy transport failure from BFF response-contract rejection using fixed secret-free markers; repair the first proven defect. | Focused harness/unit tests, live trusted-TLS PostgreSQL/Cloud/Console/Chromium run, artifact secret scan. | P0-B completes every Owner/Admin/Auditor/Viewer scenario and emits a verified source-bound report. |
+| Q2 | Rerun all six CI jobs without cancellation or replacement commits. Remove any newly exposed timing, lifecycle, native, or artifact-hygiene defect at its owning boundary. | Root/Console/native, browser, P0-B, PostgreSQL integration, PostgreSQL 16 and PostgreSQL 17 on one SHA. | One terminal all-green run is retained; N1 becomes `qualified`. |
+| H1 | Complete organization administration: invitation resend/revoke, role change/removal with `If-Match`, last-owner protection, authoritative response-loss reconciliation, and stable Japanese remediation. | Real PostgreSQL contention/replay/cross-tenant tests plus Owner/Admin/Auditor/Viewer Playwright matrix. | Every organization mutation converges to committed state without blind replay or fixture fallback. |
+| H2 | Complete passkey and Human Session lifecycle: add/rename/revoke, final-auth-path guard, current/other/all-other session revoke, epoch invalidation, explicit reauthentication. | Virtual WebAuthn, stale/replayed recent-auth, expiry, self-revoke, clone/sign-count, keyboard and secret-scan tests. | A non-engineer can recover from every expected conflict or expiry state without CLI/operator credentials. |
+| D1 | Freeze onboarding preflight, invitation, loopback handoff, possession receipt, and control ACK contracts across Core/OpenAPI/Console/CLI/native. | Generated-validator sync, unknown-field/duplicate-key/canonical-vector tests and threat-model review. | One versioned contract has no caller-controlled authority fields and no downgrade path. |
+| D2 | Implement browser-led loopback delivery, bounded stdin recovery, and durable resume states through `control_acknowledged`. | Interruption at every durable state, expiry/timeout/response-loss, duplicate enrollment and browser-storage scans. | Clean-machine onboarding converges with no manual identifiers and no reusable secret in argv/env/URL/storage. |
+| S1 | Finish all eight managed-signer purpose paths and provider-operation reconciliation. | Two-instance contention, timeout/outage/lookup, malformed response, lost commit response, rotation/disable/drain tests. | Source paths are complete and hosted readiness rejects every missing/shared/local/file signer configuration. |
+| S2 | Run protected AWS/GCP KMS qualification with purpose-separated workload identities and immutable key versions. | Cross-purpose IAM denial, non-exportability, fingerprint/version binding, rotation and no-fallback evidence. | Signed source-bound provider reports pass independent verification. |
+| M1 | Close the native sign-once transaction and Claude Code lifecycle, then add Cursor through the same frozen broker protocol. | Two unattended verified commits, policy/process/repository substitution, kill/restart/expiry/unknown-outcome and secret scans. | Neither adapter can select keys, widen policy, or retry ambiguous signing. |
+| R1 | Build one immutable hardened-runtime PKG, sign/notarize/staple it, and make direct download and Homebrew consume that digest. | Gatekeeper, CodeDirectory, entitlement, SBOM/provenance, upgrade/uninstall/reinstall/rollback tests on Apple silicon and Intel/T2. | Both physical reports identify the same notarized artifact digest. |
+| O1 | Deploy the immutable candidate to staging and execute migration, restore, outage, rotation/compromise, emergency-stop, tenant-isolation, and rollback drills. | Measured SLO/RPO/RTO, alert routing, DAST/SAST/IaC/container review, independent security assessment. | No critical/high finding remains and an independently verified signed promotion record supports explicit production go/no-go. |
+
+Parallel execution starts only after Q2: H1/H2 and S1 may proceed in parallel;
+D1 waits for Human Session/recent-auth and possession-receipt metadata to freeze;
+M1 may prepare internal native tests but cannot freeze its public adapter until
+D1; R1 requires M1; O1 requires the exact qualified R1 artifact. Migrations,
+public contracts, signing domains, XPC selectors, entitlements, and promotion
+authority each retain a single integration owner.
 
 ## 2. Non-negotiable product boundaries
 
