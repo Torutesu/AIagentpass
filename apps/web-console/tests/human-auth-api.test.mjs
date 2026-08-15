@@ -297,6 +297,27 @@ test("invitation reissue requires and forwards recent authorization and If-Match
   assert.equal(calls.length, 1);
 });
 
+test("bootstrap accepts the Cloud request-bound error envelope without exposing request identity", async () => {
+  const requestId = "55555555-5555-4555-8555-555555555555";
+  const api = bridge(async () => new Response(JSON.stringify({
+    error: { code: "human_session_unavailable", message: "The session service is unavailable" },
+    request_id: requestId,
+  }), { status: 503, headers: { "content-type": "application/json" } }), undefined, legacyEnv);
+
+  const response = await api.handle(request("/api/auth/session"));
+  assert.equal(response.status, 503);
+  const responseText = await response.text();
+  assert.deepEqual(JSON.parse(responseText), { error: { code: "human_session_unavailable", message: "The session service is unavailable" } });
+  assert.doesNotMatch(responseText, new RegExp(requestId));
+
+  const malformed = bridge(async () => new Response(JSON.stringify({
+    error: { code: "human_session_unavailable", message: "The session service is unavailable" },
+    request_id: "invalid",
+  }), { status: 503, headers: { "content-type": "application/json" } }), undefined, legacyEnv);
+  const rejected = await malformed.handle(request("/api/auth/session"));
+  assert.equal(rejected.status, 502);
+});
+
 test("forwards only the session cookie and CSRF token to WebAuthn", async () => {
   const calls = [];
   const api = bridge(async (url, init) => {

@@ -266,7 +266,9 @@ async function relayResponse(response, { allowSetCookie = false, clearCookieOnly
 
 function normalizeBootstrapResponse(value, success) {
   if (!success) {
-    if (!isExactObject(value, ["error"]) || !isExactObject(value.error, ["code", "message"]) || typeof value.error.code !== "string" || typeof value.error.message !== "string" || value.error.code.length > 128 || value.error.message.length > 512 || hasControl(value.error.code) || hasControl(value.error.message)) fail(502, "cloud_api_invalid_response", "Cloud API response was invalid");
+    const exactError = isExactObject(value, ["error"]);
+    const cloudError = isExactObject(value, ["error", "request_id"]) && isUuid(value.request_id);
+    if ((!exactError && !cloudError) || !isExactObject(value.error, ["code", "message"]) || typeof value.error.code !== "string" || typeof value.error.message !== "string" || value.error.code.length > 128 || value.error.message.length > 512 || hasControl(value.error.code) || hasControl(value.error.message)) fail(502, "cloud_api_invalid_response", "Cloud API response was invalid");
     return { error: { code: value.error.code, message: value.error.message } };
   }
   if (!isExactObject(value, ["session", "csrf_token"]) || !isExactObject(value.session, SESSION_KEYS)) fail(502, "cloud_api_invalid_response", "Cloud API response was invalid");
