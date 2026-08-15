@@ -211,6 +211,7 @@ DECLARE
 BEGIN
   FOREACH routine_signature IN ARRAY ARRAY[
     'agentpass_managed_signer_provider_operation_reserve(text,text,text,integer,bytea,text,bigint,bytea,integer,integer)',
+    'agentpass_managed_signer_provider_operation_reserve(text,text,text,integer,bytea,text,bigint,bytea,integer,bigint)',
     'agentpass_managed_signer_provider_operation_claim(text,text,text,integer,bytea,text,bigint,bytea,integer)',
     'agentpass_managed_signer_provider_operation_start(text,text,text,integer,bytea,text,bigint,bytea)',
     'agentpass_managed_signer_provider_operation_accept(text,text,text,integer,bytea,text,bigint,bytea,bytea,bytea,text,text,text,text,text)',

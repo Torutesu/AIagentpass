@@ -86,6 +86,7 @@ async function seed(pool, { state, expired = false, withOrganization = false }) 
   try {
     await client.query("BEGIN");
     await client.query("SET LOCAL ROLE agentpass_migrator");
+    await client.query("SET CONSTRAINTS ALL DEFERRED");
     const now = (await client.query("SELECT clock_timestamp() AS now")).rows[0].now;
     const createdAt = new Date(now.getTime() - (expired ? 20 * 60_000 : 1_000));
     const expiresAt = new Date(createdAt.getTime() + 15 * 60_000);
@@ -108,6 +109,18 @@ async function seed(pool, { state, expired = false, withOrganization = false }) 
       createdAt,
       expiresAt,
       state === "completed" ? new Date(createdAt.getTime() + 1_000) : null
+    ]);
+    await client.query(`INSERT INTO public.hosted_identity_oauth_states
+      (id,attempt_id,state_hash,code_hash,provider,client_id,redirect_uri,pkce_challenge,pkce_method,status,created_at,expires_at,consume_started_at,consumed_at)
+      VALUES ($1,$2,$3,$4,'github','agentpass-0064-status',$5,$6,'S256','consumed',$7,$8,$7,$7)`, [
+      value.oauthStateId,
+      value.attemptId,
+      digest(`state:${value.oauthStateId}`),
+      digest(`code:${value.oauthStateId}`),
+      "https://console.example.test/api/auth/bootstrap/github/callback",
+      "A".repeat(43),
+      createdAt,
+      expiresAt
     ]);
     await client.query("COMMIT");
     return value;

@@ -124,7 +124,9 @@ async function seed(pool, label) {
   const client = await pool.connect();
   try {
     await client.query("BEGIN");
-    await client.query("SET LOCAL ROLE agentpass_migrator");
+    // Explicit fault injection: simulate a database clock crossing the lease
+    // boundary without weakening the production trigger or waiting 30 seconds.
+    await client.query("SET LOCAL session_replication_role = replica");
     await client.query("SET CONSTRAINTS ALL DEFERRED");
     const clock = (await client.query("SELECT clock_timestamp() AS now")).rows[0].now;
     const createdAt = new Date(clock);

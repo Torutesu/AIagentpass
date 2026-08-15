@@ -43,7 +43,9 @@ const FUNCTION_SQL = Object.freeze(Object.fromEntries([
   ["reserve", 10], ["claim", 9], ["start", 8], ["accept", 15], ["commit", 8],
   ["reconcile", 7], ["uncertain", 9], ["get", 7], ["health", 4], ["prune", 6],
 ].map(([purpose, arity]) => [purpose,
-  `SELECT public.agentpass_managed_signer_provider_operation_${purpose}(${Array.from({ length: arity }, (_, index) => `$${index + 1}`).join(",")}) AS result`])));
+  purpose === "reserve"
+    ? "SELECT public.agentpass_managed_signer_provider_operation_reserve($1::text,$2::text,$3::text,$4::integer,$5::bytea,$6::text,$7::bigint,$8::bytea,$9::integer,$10::bigint) AS result"
+    : `SELECT public.agentpass_managed_signer_provider_operation_${purpose}(${Array.from({ length: arity }, (_, index) => `$${index + 1}`).join(",")}) AS result`])));
 
 const FUNCTION_ERROR_CODES = new Set(["INPUT", "CONFLICT", "CLAIM_LOST", "STATE", "DATABASE"]);
 

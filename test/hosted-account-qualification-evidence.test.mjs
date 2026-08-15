@@ -38,8 +38,8 @@ test("creates source- and TAP-bound Hosted account qualification evidence", asyn
     runAttempt: "2",
     tapFile: f.tapFile
   });
-  assert.equal(evidence.migration_version, 65);
-  assert.equal(evidence.catalog_entries, 176);
+  assert.equal(evidence.migration_version, 67);
+  assert.equal(evidence.catalog_entries, 178);
   assert.deepEqual(evidence.test_files, HOSTED_ACCOUNT_TEST_FILES);
   assert.deepEqual(evidence.scenarios, HOSTED_ACCOUNT_QUALIFICATION_SCENARIOS);
   assert.deepEqual(evidence.summary, { tests: 12, passed: 12, failed: 0, skipped: 0, todo: 0 });
