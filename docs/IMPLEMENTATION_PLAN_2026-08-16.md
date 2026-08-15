@@ -2,7 +2,7 @@
 
 Status: active
 
-Planning baseline: `codex/agent-platform` at `feba9f3`
+Planning baseline: `codex/agent-platform` at `4ee0a45`
 
 This document converts the v1 architecture into the remaining implementation
 and qualification gates. [`V1_EXECUTION_PLAN.md`](./V1_EXECUTION_PLAN.md)
@@ -36,7 +36,7 @@ signed/notarized artifact, staging drills, and independent security review.
 
 ### 1.1 Live execution checkpoint
 
-The latest completed diagnostic runs and the source at `feba9f3` establish the
+The latest completed diagnostic runs and the source at `4ee0a45` establish the
 following current state:
 
 - PostgreSQL 16 authority qualification, PostgreSQL 17 authority
@@ -48,12 +48,20 @@ following current state:
 - Human Session bootstrap is serialized in the live browser harness and retries
   only bounded transient `502` responses; authentication, authorization, and
   mutation failures are never retried;
-- P0-B identified the exact bootstrap failure as a Cloud-ready/BFF-contract
-  rejection. PostgreSQL `timestamptz` values were escaping the repository as
-  JavaScript `Date` objects and strict canonical JSON correctly rejected them;
-- `feba9f3` normalizes authority-bearing and management-session timestamps at
-  the PostgreSQL repository boundary and retains strict rejection of malformed
-  persisted timestamps. Focused runtime/repository/management tests pass;
+- P0-B has advanced through the earlier timestamp, rate-limit, bootstrap, and
+  signed-identity replay failures. The first remaining proven failure at
+  `e0af9f2` is `owner_reg_session_revoked_rotated`: concurrent Console/BFF
+  bootstrap paths rotate the Owner session while the first passkey ceremony is
+  still bound to it;
+- `4ee0a45` grants the application role only the missing
+  `agentpass_valid_webauthn_transports(text[])` CHECK-constraint function. The
+  allowlist, runtime role SQL, and privilege contract agree, and the focused
+  WebAuthn/role suite passes 45 tests;
+- registration dependency failures still need to preserve their storage/
+  availability classification through service and HTTP mapping; they must not
+  be flattened into a user-correctable `422` verification response;
+- the Human OpenAPI contract still needs exact registration request bodies and
+  the implemented `201` verification response;
 - invitation reissue is source-complete through PostgreSQL, Cloud HTTP,
   OpenAPI, and Console BFF at `ca19091`; the Console interaction and protected
   role/browser matrix remain open;
@@ -65,7 +73,7 @@ The next implementation batches are intentionally narrow and ordered:
 
 | Batch | Merge-sized work | Tests and evidence | Completion condition |
 | --- | --- | --- | --- |
-| Q1 | Verify the repository timestamp-boundary repair in the live P0-B process topology; if it advances, repair only the next first proven defect using fixed secret-free markers. | Focused harness/unit tests, live trusted-TLS PostgreSQL/Cloud/Console/Chromium run, artifact secret scan. | P0-B completes every Owner/Admin/Auditor/Viewer scenario and emits a verified source-bound report. |
+| Q1 | Replace the independent Console session caches with one injected, single-flight session authority shared by the shell, organization client, security client, and panels. Preserve one cookie/CSRF generation across a WebAuthn ceremony and invalidate it only on explicit auth failure or server rotation. Then repair the registration dependency error mapping and OpenAPI mismatch. | Concurrent bootstrap unit tests, session-rotation/revocation negatives, focused Human API tests, contract validation, live trusted-TLS PostgreSQL/Cloud/Console/Chromium run, artifact secret scan. | P0-B completes every Owner/Admin/Auditor/Viewer scenario and emits a verified source-bound report; registration dependency outages return stable `503`, and OpenAPI matches runtime bytes/statuses. |
 | Q2 | Rerun all six CI jobs without cancellation or replacement commits. Remove any newly exposed timing, lifecycle, native, or artifact-hygiene defect at its owning boundary. | Root/Console/native, browser, P0-B, PostgreSQL integration, PostgreSQL 16 and PostgreSQL 17 on one SHA. | One terminal all-green run is retained; N1 becomes `qualified`. |
 | H1 | Complete organization administration: invitation resend/revoke, role change/removal with `If-Match`, last-owner protection, authoritative response-loss reconciliation, and stable Japanese remediation. | Real PostgreSQL contention/replay/cross-tenant tests plus Owner/Admin/Auditor/Viewer Playwright matrix. | Every organization mutation converges to committed state without blind replay or fixture fallback. |
 | H2 | Complete passkey and Human Session lifecycle: add/rename/revoke, final-auth-path guard, current/other/all-other session revoke, epoch invalidation, explicit reauthentication. | Virtual WebAuthn, stale/replayed recent-auth, expiry, self-revoke, clone/sign-count, keyboard and secret-scan tests. | A non-engineer can recover from every expected conflict or expiry state without CLI/operator credentials. |
@@ -117,6 +125,58 @@ runbooks may be prepared concurrently, but production credentials, migration
 authority, and promotion remain serialized. Protocol/schema, migrations,
 signing domains, XPC selectors, entitlements, code identities, and evidence
 schemas each have one integration owner.
+
+### 1.2 Immediate merge queue
+
+The next changes are intentionally small enough to diagnose and revert
+independently. Do not combine a CI-diagnostic repair with a new product surface.
+
+1. **Q1.1 shared Console session authority**
+   - extract a typed session authority with `get`, single-flight `bootstrap`,
+     `invalidate`, and server-rotation adoption;
+   - inject the same instance into `AgentPassConsole`, organization and security
+     clients, `OrganizationPanel`, and `SecurityPanel`;
+   - prove concurrent consumers perform one bootstrap and that a stale response
+     cannot overwrite a newer generation;
+   - rerun P0-B and retain the first source-bound successful report.
+2. **Q1.2 registration failure semantics and contract closure**
+   - preserve PostgreSQL ceremony/storage failure types through registration
+     service and map them to stable, secret-free `503` responses;
+   - add exact OpenAPI request bodies for options/verify and document the
+     implemented `201` credential-creation response;
+   - run generated-schema, HTTP negative, replay, and real-role credential
+     insertion tests.
+3. **Q2 one-SHA qualification**
+   - stop diagnostic commits and run all six jobs on one exact head: root test,
+     browser E2E, P0-B, PostgreSQL integration, PostgreSQL 16, PostgreSQL 17;
+   - accept the baseline only when every job is terminal green and every
+     retained report identifies the same source SHA.
+4. **N2 Human/organization completion**
+   - close invitation resend/revoke, role/removal CAS, last-owner protection,
+     passkey lifecycle, session revocation, response-loss reconciliation, and
+     non-engineer remediation copy;
+   - qualify the real Owner/Admin/Auditor/Viewer browser matrix.
+5. **N3 + N5 parallel contract consumers**
+   - freeze and implement browser-led device onboarding and Device API/receipt/
+     ACK convergence in one lane;
+   - finish all eight managed-signer purposes and provider reconciliation in a
+     separate lane; merge only after contract and authority reviews.
+6. **N4 agent/native closure**
+   - complete the sign-once XPC transaction and Claude Code lifecycle first;
+     add Cursor only against the same frozen broker contract;
+   - qualify process substitution, kill/restart, policy change, expiry,
+     revocation, and ambiguous outcome handling on physical Macs.
+7. **N6 release and production**
+   - build one Developer ID-signed/notarized/stapled PKG and distribute that
+     exact digest by direct download, Homebrew bootstrap, and MDM;
+   - deploy the immutable candidate to staging, run migration/restore/outage/
+     rotation/emergency drills, complete independent security review, and
+     require an explicit signed production promotion decision.
+
+Every queue item exits with code, negative tests, operational evidence, and
+updated user/operator documentation. A local mock, simulator, skipped job, or
+unsigned artifact can demonstrate development progress but cannot close the
+corresponding production gate.
 
 ## 4. N1 — terminal qualification closure
 
