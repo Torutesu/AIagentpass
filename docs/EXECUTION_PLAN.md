@@ -1,7 +1,7 @@
 # AgentPass execution plan
 
 Status: active
-Baseline commit: `e0c6c02`
+Baseline commit: `fa8f87e`
 Branch: `codex/agent-platform`
 Updated: 2026-08-15
 
@@ -18,18 +18,19 @@ Completed at the baseline:
 - Platform promotion issue-only HTTP boundary, strict request parser, rate limiter, frozen schemas/OpenAPI/fixtures, and adversarial tests.
 - PostgreSQL runtime exposure of the authorized promotion repository when lifecycle metadata is complete.
 - Stable SQLSTATE/constraint-based authorization failure classification without propagating PostgreSQL messages or causes.
-- Hosted route/composition attack tests that fail until the new boundary is wired and the legacy hosted routes are retired.
+- Hosted runtime composition of the authorized service, issue-only HTTP API, shared Platform limiter, dynamic signer/lifecycle readiness, and in-flight drain tracking.
+- Raw route dispatch before Human/Device authentication, with legacy hosted issue/replay composition removed and downgrade tests green.
+- Lost commit responses reconcile through the same authenticated atomic reservation function without a public replay/get surface or second signature.
 - Contract catalog, authority manifest, migration qualification, lint, and focused Platform Session tests at migration head 55.
 
 Not completed at the baseline:
 
-- The hosted promotion issue HTTP route still uses the legacy Human Session, recent-auth, platform-operator authorizer, and non-atomic promotion repository.
-- The atomic authorized promotion service is not composed into the hosted server.
-- Lost-commit reconciliation still uses a fail-closed placeholder instead of authenticated re-entry through the same atomic reservation function.
 - A real PostgreSQL contention qualification for the complete HTTP-to-reservation flow has not been retained as release evidence.
 - Console onboarding, managed infrastructure, physical-Mac qualification, notarized distribution, independent review, and production deployment remain open.
 
-The immediate release blocker is therefore the hosted promotion route cutover. UI expansion must not create another authority path before this boundary is closed.
+The immediate release blocker is now real PostgreSQL race, rollback, tenant,
+and least-privilege qualification for the cut-over route. UI expansion must not
+create another authority path before that evidence closes W0.
 
 ## 2. Execution rules
 
@@ -143,9 +144,8 @@ Acceptance:
 
 ### W0-03 Compose the atomic service
 
-Status: in progress. PostgreSQL runtime repository exposure and fail-closed
-lifecycle validation landed in `e0c6c02`; service/HTTP/server/readiness composition
-remains open.
+Status: implemented and focused-validated in `fa8f87e`. Managed PostgreSQL
+contention evidence remains W0-05.
 
 Change scope:
 
@@ -169,9 +169,9 @@ Acceptance:
 
 ### W0-04 Remove the hosted legacy bypass
 
-Status: attack tests landed in `b745d99` and currently expose five expected
-failures. Production routing and hosted/evaluation profile separation remain
-open.
+Status: implemented and focused-validated in `e2f8ee5` and `fa8f87e`. The five
+previous attack-test failures are green, and runtime downgrade guards reject
+legacy hosted composition.
 
 Change scope:
 
@@ -194,6 +194,9 @@ Acceptance:
 - Legacy replay/get is not publicly exposed.
 
 ### W0-05 Real PostgreSQL race qualification
+
+Status: next critical-path work item. Repository-level fake/runtime coverage is
+green; real PostgreSQL contention and privilege evidence is not yet retained.
 
 Required scenarios:
 
@@ -375,18 +378,20 @@ Completed sequence:
 1. **PR-0: Platform Session transport hardening** — `f52dbe1`.
 2. **PR-1: Platform promotion v1 contract and HTTP boundary** — `b13145d` and `fe9d251`.
 3. **PR-2: Cutover attack tests and PostgreSQL authorization runtime seam** — `b745d99`, `a8ece5a`, and `e0c6c02`.
+4. **PR-3: Hosted atomic composition, route cutover, and commit reconciliation** — `c90301b`, `e2f8ee5`, `acf4952`, and `fa8f87e`.
 
 Next sequence:
 
-1. **PR-3: Hosted atomic composition and route cutover** — finish W0-03 and W0-04 in one atomic production boundary. It must turn the five attack-test failures green, keep evaluation-only legacy behavior explicit, and make hosted startup fail when any authorized dependency is absent.
-2. **PR-4: Commit-ambiguity reconciliation** — re-enter the same proof-consuming atomic function with the same authenticated scope after a lost commit response; prove one signature, one reservation, and no public replay/get surface.
-3. **PR-5: PostgreSQL race qualification** — W0-05 with real database contention, tenant-negative, privilege-negative, rollback, and lost-response cases retained as evidence.
-4. **PR-6: Contract/threat freeze** — W1 compatibility matrix, threat model, route inventory, and CI no-downgrade guard.
-5. **PR-7: Identity epoch and schema-head consistency** — begin W2-A/W2-B with session invalidation and one authoritative migration-head source.
-6. **PR-8: Console production-client cutover** — begin W3 only after PR-6 freezes the browser boundary.
+1. **PR-4: PostgreSQL race qualification** — W0-05 with real database contention, tenant-negative, privilege-negative, rollback, and lost-response cases retained as evidence.
+2. **PR-5: Contract/threat freeze** — W1 compatibility matrix, threat model, route inventory, and CI no-downgrade guard.
+3. **PR-6: Identity epoch and schema-head consistency** — begin W2-A/W2-B with session invalidation and one authoritative migration-head source.
+4. **PR-7: Console production-client cutover** — begin W3 only after PR-5 freezes the browser boundary.
+5. **PR-8: Device enrollment/ACK closure** — complete durable enrollment, bundle, refresh, ACK, and revoke propagation.
+6. **PR-9: Thin helper protocol and process binding** — freeze the local boundary before enabling production Git signing.
 
-PR-3 is the immediate critical path. PR-4 may be developed in parallel against
-the repository seam, but both must merge before PR-5 records the W0 evidence.
+PR-4 is the immediate critical path. Contract/threat documentation may proceed
+in parallel, but W0 does not close until the same candidate has real PostgreSQL
+evidence.
 
 ## 15. External prerequisites
 
@@ -415,13 +420,17 @@ For every implementation wave, report:
 
 Do not report the product as complete until all five release gates pass on one immutable candidate.
 
-## 17. Exact execution backlog from `e0c6c02`
+## 17. Exact execution backlog from `fa8f87e`
 
 This section is the implementation handoff order. A later item may start in
 parallel only when its write set is disjoint and it does not assume an unfrozen
 contract from an earlier item.
 
 ### Slice S0 — close the hosted promotion boundary
+
+Status: implementation and focused validation complete. The six items below
+are retained as regression requirements; S1 supplies the external database
+evidence needed to close W0.
 
 | ID | Change | Primary files | Completion evidence |
 | --- | --- | --- | --- |
