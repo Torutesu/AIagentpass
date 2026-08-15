@@ -58,7 +58,7 @@ test("AgentPassConsole exposes the Organization administration view", async () =
 test("authenticated workspace selection is BFF-backed and fail-closed", async () => {
   const source = await readFile(consolePath, "utf8");
   assert.match(source, /createOrganizationClient/);
-  assert.match(source, /organizationClient\.listOrganizations\(\{ limit: 100 \}\)/);
+  assert.match(source, /loadOrganizationSwitcherOrganizations\(organizationClient\)/);
   assert.match(source, /resolveOrganizationSelection\(organizationOptions, organization\.id\)/);
   assert.match(source, /setActiveView\("organizations"\)/);
   assert.match(source, /initialOrganizationId=\{selectedOrganizationId \?\? undefined\}/);

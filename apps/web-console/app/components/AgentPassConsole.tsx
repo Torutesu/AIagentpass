@@ -8,6 +8,7 @@ import { EnrollmentPreflightError, parsePublicEnrollmentPreflight } from "../../
 import { fetchBrowserCliHandoffPreflight, parseBrowserCliHandoffLaunchFragment, postBrowserCliHandoff, publicEnrollmentPreflight as publicBrowserCliEnrollmentPreflight } from "../../lib/browser-cli-handoff.mjs";
 import { OrganizationPanel } from "./OrganizationPanel";
 import { createOrganizationClient, OrganizationClientError, resolveOrganizationSelection, type Organization, type OrganizationClient } from "../organization-client";
+import { loadOrganizationSwitcherOrganizations } from "../organization-switcher";
 import { OwnerRecoveryPanel } from "./OwnerRecoveryPanel";
 import { AuditExportPanel } from "./AuditExportPanel";
 
@@ -1265,16 +1266,16 @@ export function AgentPassConsole() {
     setOrganizationSwitcherState("loading");
     setOrganizationSwitcherError(null);
     try {
-      const [page, session] = await Promise.all([
-        organizationClient.listOrganizations({ limit: 100 }),
+      const [organizations, session] = await Promise.all([
+        loadOrganizationSwitcherOrganizations(organizationClient),
         organizationClient.getSession(),
       ]);
       if (epoch !== organizationOptionsEpoch.current) return;
       const currentOrganizationId = organizationIdRef.current ?? session.organizationId;
-      setOrganizationOptions(page.items);
+      setOrganizationOptions(organizations);
       setSelectedOrganizationId((current) => {
-        if (current !== null && page.items.some((organization) => organization.id === current)) return current;
-        return page.items.some((organization) => organization.id === currentOrganizationId) ? currentOrganizationId : null;
+        if (current !== null && organizations.some((organization) => organization.id === current)) return current;
+        return organizations.some((organization) => organization.id === currentOrganizationId) ? currentOrganizationId : null;
       });
       setOrganizationSwitcherState("ready");
     } catch (error) {
