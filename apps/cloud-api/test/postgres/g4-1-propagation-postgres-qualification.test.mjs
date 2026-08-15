@@ -39,7 +39,10 @@ test("G4.1 PostgreSQL qualification measures 100 commit-to-hint and signed-ACK a
   const recorder = createG41PropagationLatencyRecorder();
 
   for (let attempt = 0; attempt < ATTEMPTS; attempt += 1) {
-    const issuedAt = new Date(Date.now() + attempt).toISOString();
+    // Never put refresh_requested_at in the future. Delivery is required to be
+    // at or after that timestamp, and a fast qualification loop can otherwise
+    // reach delivery before a synthetic Date.now() + attempt clock.
+    const issuedAt = new Date().toISOString();
     const reduction = await repository.advanceAuthorityGenerationAndEnqueueRefresh({
       organization_id: fixture.organizationId,
       issued_at: issuedAt,

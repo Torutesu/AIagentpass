@@ -20,6 +20,7 @@ const ids = {
 };
 const HASH = "a".repeat(64);
 const NOW = "2026-08-13T00:00:00.000Z";
+const DATABASE_NOW = "2026-08-13T00:00:00.000001Z";
 const LATER = "2026-08-13T00:15:00.000Z";
 
 class FakeClient {
@@ -45,6 +46,7 @@ class FakeClient {
     if (text.startsWith("SELECT outbox_id,desired_generation,refresh_nonce_key_id,refresh_nonce_digest,replayed")) return result([{ outbox_id: params[0], desired_generation: params[3], refresh_nonce_key_id: params[4], refresh_nonce_digest: params[5], replayed: false }]);
     if (text.startsWith("SELECT state.organization_id")) return result([{ organization_id: ids.organization, device_id: ids.device, desired_generation: 3, refresh_state: "pending", outbox_id: "88888888-8888-4888-8888-888888888888", refresh_nonce_key_id: "refresh-nonce-v3", refresh_nonce_digest: crypto.createHash("sha256").update(Buffer.alloc(16, 0x42)).digest(), published_at: NOW, expires_at: LATER }]);
     if (text.startsWith("SELECT attempt_count,status,expires_at")) return result([{ attempt_count: 0, status: "pending", expires_at: LATER }]);
+    if (text.startsWith("WITH database_clock AS MATERIALIZED")) return result([{ delivered_at: DATABASE_NOW, expired: false }]);
     if (text.startsWith("SELECT organization_id,device_id,desired_generation,observed_generation,refresh_state")) return result([this.refreshState]);
     if (text.startsWith("SELECT desired_generation,observed_generation,refresh_state")) return result([this.refreshState]);
     if (text.startsWith("UPDATE device_refresh_outbox") && text.includes("attempt_count=$5")) return result([{ outbox_id: params[2], desired_generation: params[3], status: "delivered", attempt_count: params[4] }]);
@@ -355,6 +357,11 @@ test("refresh delivery evidence and device fetching state commit atomically with
   assert.equal(client.calls[0].text, "BEGIN");
   assert.ok(client.calls.some(({ text }) => text.startsWith("INSERT INTO device_refresh_delivery_attempts")));
   assert.ok(client.calls.some(({ text }) => text.includes("refresh_state=CASE") && text.includes("'fetching'")));
+  assert.ok(client.calls.some(({ text }) => text.includes("clock_timestamp()") && text.includes("AS expired")));
+  const deliveryWrites = client.calls.filter(({ text }) => text.startsWith("UPDATE device_refresh_outbox") || text.startsWith("INSERT INTO device_refresh_delivery_attempts") || (text.startsWith("UPDATE device_control_plane_state") && text.includes("last_delivered_at")));
+  assert.equal(deliveryWrites.length, 3);
+  assert.equal(deliveryWrites.every(({ params }) => params.includes(DATABASE_NOW)), true);
+  assert.equal(deliveryWrites.some(({ params }) => params.includes(NOW)), false);
   assert.equal(client.calls.flatMap(({ params }) => params).some((value) => typeof value === "string" && /^[A-Za-z0-9_-]{22}$/u.test(value)), false);
   assert.equal(client.calls.at(-1).text, "COMMIT");
 });

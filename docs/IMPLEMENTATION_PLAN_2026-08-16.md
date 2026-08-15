@@ -12,7 +12,7 @@ the day-to-day merge order from the current source checkpoint.
 ## 1. Current source checkpoint
 
 The repository currently has 181 catalog entries, 49 JSON Schemas, 62 OpenAPI
-operations, and 70 forward-only PostgreSQL migrations. The implemented source
+operations, and 71 forward-only PostgreSQL migrations. The implemented source
 boundary includes:
 
 - organization-qualified Human identity, roles, sessions, WebAuthn credentials,
@@ -73,7 +73,7 @@ surface.
 
 Implementation work:
 
-1. Make PostgreSQL 16 and 17 apply migrations 0001–0070 from an empty database.
+1. Make PostgreSQL 16 and 17 apply migrations 0001–0071 from an empty database.
 2. Qualify app, migrator, backup, hosted-platform, and provider-operation roles;
    prove denied DDL, table access, arbitrary function execution, role switching,
    and tenant substitution.

@@ -58,7 +58,7 @@ The current integration slice closes five concrete gaps:
    channel without browser persistence.
 
 The source checkpoint now contains 181 catalog entries, 49 JSON Schemas, 62
-OpenAPI operations, and 70 forward-only PostgreSQL migrations. Platform
+OpenAPI operations, and 71 forward-only PostgreSQL migrations. Platform
 challenge and session timestamps use database authority; platform authorization
 and provider-operation commits use purpose-correct digest binding; and the
 least-privilege execution probe reaches the reviewed function's input-validation

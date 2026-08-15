@@ -484,7 +484,15 @@ export function createControlPlaneAuthorityRepository({ client, cursorCodec, cur
         FOR UPDATE`, [values.organizationId, values.deviceId, values.outboxId, values.desiredGeneration]);
       if (rowCount(selected) !== 1) throw new ControlPlaneAuthorityRepositoryError("ERR_NOT_FOUND", "device refresh delivery was not found");
       const row = selected.rows[0];
-      if (!new Set(["pending", "delivered"]).has(row.status) || Date.parse(row.expires_at) <= Date.parse(values.deliveredAt)) {
+      const clockResult = await tx.query(`WITH database_clock AS MATERIALIZED (
+          SELECT clock_timestamp() AS delivered_at
+        )
+        SELECT to_char(delivered_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS delivered_at,
+            $1::timestamptz <= delivered_at AS expired
+        FROM database_clock`, [row.expires_at]);
+      if (rowCount(clockResult) !== 1) throw new ControlPlaneAuthorityRepositoryError("ERR_DB_RESULT", "database delivery clock did not return a row");
+      const deliveredAt = databaseTimestamp(clockResult.rows[0].delivered_at, "delivered_at");
+      if (!new Set(["pending", "delivered"]).has(row.status) || clockResult.rows[0].expired === true) {
         throw new ControlPlaneAuthorityRepositoryError("ERR_REFRESH_EXPIRED", "device refresh delivery is no longer deliverable");
       }
       const attemptNo = nonNegativeInteger(row.attempt_count, "attempt_count") + 1;
@@ -495,18 +503,18 @@ export function createControlPlaneAuthorityRepository({ client, cursorCodec, cur
             last_delivered_at=$6::timestamptz
         WHERE organization_id=$1 AND device_id=$2 AND outbox_id=$3 AND desired_generation=$4
         RETURNING outbox_id,desired_generation,status,attempt_count`, [
-        values.organizationId, values.deviceId, values.outboxId, values.desiredGeneration, attemptNo, values.deliveredAt
+        values.organizationId, values.deviceId, values.outboxId, values.desiredGeneration, attemptNo, deliveredAt
       ]);
       await tx.query(`INSERT INTO device_refresh_delivery_attempts
         (attempt_id,organization_id,outbox_id,attempt_no,status,started_at,completed_at,response_status)
         VALUES ($1,$2,$3,$4,'delivered',$5::timestamptz,$5::timestamptz,200)`, [
-        crypto.randomUUID(), values.organizationId, values.outboxId, attemptNo, values.deliveredAt
+        crypto.randomUUID(), values.organizationId, values.outboxId, attemptNo, deliveredAt
       ]);
       await tx.query(`UPDATE device_control_plane_state
         SET refresh_state=CASE WHEN refresh_state='revoked' THEN 'revoked' ELSE 'fetching' END,
             last_delivered_at=$4::timestamptz,updated_at=$4::timestamptz
         WHERE organization_id=$1 AND device_id=$2 AND desired_generation=$3`, [
-        values.organizationId, values.deviceId, values.desiredGeneration, values.deliveredAt
+        values.organizationId, values.deviceId, values.desiredGeneration, deliveredAt
       ]);
       return Object.freeze({ outbox_id: uuid(updated.rows[0].outbox_id, "outbox_id"), desired_generation: positiveInteger(updated.rows[0].desired_generation, "desired_generation"), status: "delivered", attempt_count: attemptNo });
     }));
@@ -1202,6 +1210,13 @@ function timestamp(value, field) {
   const date = value instanceof Date ? value : new Date(value);
   if (!Number.isFinite(date.getTime())) throw new ControlPlaneAuthorityRepositoryError("ERR_TIMESTAMP", `${field} must be a valid timestamp`);
   return date.toISOString();
+}
+
+function databaseTimestamp(value, field) {
+  if (typeof value !== "string" || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{6}Z$/u.test(value) || !Number.isFinite(Date.parse(value))) {
+    throw new ControlPlaneAuthorityRepositoryError("ERR_DB_RESULT", `${field} database timestamp is invalid`);
+  }
+  return value;
 }
 
 function isObject(value) { return value !== null && typeof value === "object" && !Array.isArray(value); }

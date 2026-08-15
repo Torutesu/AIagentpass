@@ -277,19 +277,11 @@ test("G4 refresh generation, failover reconstruction, and signed ACK are race-sa
   assert.equal(capabilityAudit.rows[0].count, 1);
 
   const humanRepository = createPostgresHumanRepository({ client: poolA, onAuthorityReduction });
-  const credentialRevokedAt = new Date().toISOString();
-  const revokedCredential = await humanRepository.revokeCredential({ session_id: ids.sessionA, actor_session_id: ids.sessionA, member_id: ids.member, organization_id: ids.organization, credential_id: credentialA.toString("base64url"), expected_version: 1, revoked_at: credentialRevokedAt, reason: "integration_management", authority_reduction: true });
-  assert.equal(revokedCredential.version, 2);
-  const credentialGeneration = await poolA.query("SELECT generation FROM control_plane_authority_generations WHERE organization_id=$1 AND superseded_at IS NULL", [ids.organization]);
-  assert.equal(Number(credentialGeneration.rows[0].generation), 7);
-  const sessionRevokedAt = new Date().toISOString();
-  const revokedSession = await humanRepository.revokeManagedSession({ actor_session_id: ids.sessionA, target_session_id: ids.sessionB, member_id: ids.member, organization_id: ids.organization, expected_version: 1, revoked_at: sessionRevokedAt, reason: "integration_management", authority_reduction: true });
-  assert.equal(revokedSession.version, 2);
-  const sessionGeneration = await poolA.query("SELECT generation FROM control_plane_authority_generations WHERE organization_id=$1 AND superseded_at IS NULL", [ids.organization]);
-  assert.equal(Number(sessionGeneration.rows[0].generation), 8);
-  const humanAudits = await poolA.query("SELECT action,count(*)::int AS count FROM admin_audit_events WHERE organization_id=$1 AND action IN ('credential.revoked','session.revoked') GROUP BY action ORDER BY action", [ids.organization]);
-  assert.deepEqual(humanAudits.rows, [{ action: "credential.revoked", count: 1 }, { action: "session.revoked", count: 1 }]);
-
+  // A credential revocation also advances the member identity epoch and
+  // invalidates every human session for that member. Exercise the rollback
+  // boundary while the actor session is still active, then revoke the managed
+  // session before the credential so this test does not expect a mutation of
+  // an already-invalidated session.
   const failingHumanRepository = createPostgresHumanRepository({
     client: poolA,
     onAuthorityReduction: async (input) => {
@@ -305,11 +297,26 @@ test("G4 refresh generation, failover reconstruction, and signed ACK are race-sa
   assert.equal(rolledBackCredential.rows[0].revoked_at, null);
   assert.equal(Number(rolledBackCredential.rows[0].version), 1);
   const generationAfterAuditFailure = await poolA.query("SELECT generation FROM control_plane_authority_generations WHERE organization_id=$1 AND superseded_at IS NULL", [ids.organization]);
-  assert.equal(Number(generationAfterAuditFailure.rows[0].generation), 8);
-  const outboxAfterAuditFailure = await poolA.query("SELECT count(*)::int AS count FROM device_refresh_outbox WHERE organization_id=$1 AND desired_generation=9", [ids.organization]);
+  assert.equal(Number(generationAfterAuditFailure.rows[0].generation), 6);
+  const outboxAfterAuditFailure = await poolA.query("SELECT count(*)::int AS count FROM device_refresh_outbox WHERE organization_id=$1 AND desired_generation=7", [ids.organization]);
   assert.equal(outboxAfterAuditFailure.rows[0].count, 0);
   const auditsAfterFailure = await poolA.query("SELECT count(*)::int AS count FROM admin_audit_events WHERE organization_id=$1 AND action='credential.revoked'", [ids.organization]);
-  assert.equal(auditsAfterFailure.rows[0].count, 1);
+  assert.equal(auditsAfterFailure.rows[0].count, 0);
+
+  const sessionRevokedAt = new Date().toISOString();
+  const revokedSession = await humanRepository.revokeManagedSession({ actor_session_id: ids.sessionA, target_session_id: ids.sessionB, member_id: ids.member, organization_id: ids.organization, expected_version: 1, revoked_at: sessionRevokedAt, reason: "integration_management", authority_reduction: true });
+  assert.equal(revokedSession.version, 2);
+  const sessionGeneration = await poolA.query("SELECT generation FROM control_plane_authority_generations WHERE organization_id=$1 AND superseded_at IS NULL", [ids.organization]);
+  assert.equal(Number(sessionGeneration.rows[0].generation), 7);
+
+  const credentialRevokedAt = new Date().toISOString();
+  const revokedCredential = await humanRepository.revokeCredential({ session_id: ids.sessionA, actor_session_id: ids.sessionA, member_id: ids.member, organization_id: ids.organization, credential_id: credentialA.toString("base64url"), expected_version: 1, revoked_at: credentialRevokedAt, reason: "integration_management", authority_reduction: true });
+  assert.equal(revokedCredential.version, 2);
+  const credentialGeneration = await poolA.query("SELECT generation FROM control_plane_authority_generations WHERE organization_id=$1 AND superseded_at IS NULL", [ids.organization]);
+  assert.equal(Number(credentialGeneration.rows[0].generation), 8);
+  const humanAudits = await poolA.query("SELECT action,count(*)::int AS count FROM admin_audit_events WHERE organization_id=$1 AND action IN ('credential.revoked','session.revoked') GROUP BY action ORDER BY action", [ids.organization]);
+  assert.deepEqual(humanAudits.rows, [{ action: "credential.revoked", count: 1 }, { action: "session.revoked", count: 1 }]);
+
   await humanRepository.revokeSession({ session_id: ids.sessionA, revoked_at: new Date().toISOString(), reason: "logout" });
   const generationAfterLogout = await poolA.query("SELECT generation FROM control_plane_authority_generations WHERE organization_id=$1 AND superseded_at IS NULL", [ids.organization]);
   assert.equal(Number(generationAfterLogout.rows[0].generation), 8);
