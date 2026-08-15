@@ -4,6 +4,7 @@ import fs from "node:fs";
 import test from "node:test";
 
 import {
+  normalizePlatformAuthorizedPromotionRequest,
   normalizePlatformOperatorAuthorization,
   normalizePlatformPromotionRequest,
   normalizePlatformPromotionResult,
@@ -31,6 +32,26 @@ test("normalizes the exact public request and operation-bound recent-auth contex
   assert.notEqual(issue, replay);
   assert.throws(() => normalizePlatformPromotionRequest({ ...INPUT, role: "platform_operator" }, IDEMPOTENCY_KEY));
   assert.throws(() => normalizePlatformPromotionRequest(INPUT, "short"));
+});
+
+test("normalizes the exact authorized six-field public intent without carrying operation into service authority", () => {
+  const value = normalizePlatformAuthorizedPromotionRequest({
+    operation: "platform.promotion.issue",
+    organization_id: ORGANIZATION_ID,
+    ...INPUT
+  }, IDEMPOTENCY_KEY);
+  assert.deepEqual(value, {
+    operation: "platform.promotion.issue",
+    organization_id: ORGANIZATION_ID,
+    ...INPUT,
+    idempotency_key: IDEMPOTENCY_KEY
+  });
+  assert.throws(() => normalizePlatformAuthorizedPromotionRequest({
+    operation: "platform.promotion.issue",
+    organization_id: ORGANIZATION_ID,
+    ...INPUT,
+    principal_id: "11111111-1111-4111-8111-111111111111"
+  }, IDEMPOTENCY_KEY), /request contract/u);
 });
 
 test("matches the 0054 organization-bound authorization request digest", () => {

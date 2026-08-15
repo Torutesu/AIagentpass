@@ -221,11 +221,12 @@ test("session and revoke HTTP envelopes keep bearer and internal identity out of
 
 test("cookie, CSRF, origin, no-store, and operation surface are explicit", () => {
   assert.deepEqual(Object.keys(openapi.paths).sort(), [
+    "/api/platform/v1/promotions",
     "/api/platform/v1/sessions",
     "/api/platform/v1/sessions/challenges",
     "/api/platform/v1/sessions/revoke"
   ]);
-  assert.deepEqual(Object.keys(openapi.components.securitySchemes).sort(), ["humanSessionCookie", "platformSessionCookie", "platformSessionCsrf", "sameOrigin"]);
+  assert.deepEqual(Object.keys(openapi.components.securitySchemes).sort(), ["humanSessionCookie", "platformSessionCookie", "platformSessionCsrf", "platformSessionJti", "platformSessionProofId", "sameOrigin"]);
   assert.equal(openapi.components.securitySchemes.platformSessionCookie.in, "cookie");
   assert.equal(openapi.components.securitySchemes.platformSessionCookie.name, "__Host-agentpass_platform_session");
   assert.equal(openapi.components.securitySchemes.platformSessionCsrf.in, "header");

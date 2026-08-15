@@ -4,11 +4,13 @@ import fs from "node:fs";
 import test from "node:test";
 
 import { PLATFORM_SESSION_COOKIE_NAME, PLATFORM_SESSION_CSRF_HEADER } from "../src/platform-session-transport.mjs";
+import { PLATFORM_PROMOTION_ISSUANCE_ERROR_CODES, PlatformPromotionIssuanceError } from "../src/platform-promotion-issuance.mjs";
+import { PLATFORM_SESSION_RATE_LIMIT_ERROR_CODES, PlatformSessionRateLimitError } from "../src/platform-session-rate-limit.mjs";
 
 // W0-02 contract tests for the future createPlatformPromotionHttpApi.
 //
 // Expected constructor:
-//   createPlatformPromotionHttpApi({ promotionService, origin, maxBodyBytes })
+//   createPlatformPromotionHttpApi({ promotionService, rateLimiter, origin, maxBodyBytes })
 //
 // Expected request adapter:
 //   api.handle({ method, url, headers, body })
@@ -87,7 +89,7 @@ function request({ method = "POST", url = PATH, body = BODY, requestHeaders = {}
   };
 }
 
-function fixture({ result = SERVICE_RESULT, serviceError = undefined, maxBodyBytes = 64 * 1024 } = {}) {
+function fixture({ result = SERVICE_RESULT, serviceError = undefined, maxBodyBytes = 64 * 1024, rateLimiter = undefined } = {}) {
   const calls = [];
   const promotionService = {
     async issuePlatformPromotion(input) {
@@ -96,7 +98,12 @@ function fixture({ result = SERVICE_RESULT, serviceError = undefined, maxBodyByt
       return result;
     }
   };
-  const api = createPlatformPromotionHttpApi({ promotionService, origin: ORIGIN, maxBodyBytes });
+  const api = createPlatformPromotionHttpApi({
+    promotionService,
+    rateLimiter: rateLimiter ?? { async acquire() { return { allowed: true }; } },
+    origin: ORIGIN,
+    maxBodyBytes
+  });
   return { api, calls };
 }
 
@@ -119,7 +126,8 @@ test("valid issue maps the exact browser envelope to the authorized service", as
   const response = await api.handle(request());
 
   assert.equal(response.status, 201);
-  assert.deepEqual(response.body, { promotion: SERVICE_RESULT });
+  assert.match(response.body.request_id, /^[0-9a-f-]{36}$/u);
+  assert.deepEqual(response.body.promotion, SERVICE_RESULT);
   assert.equal(calls.length, 1);
   assert.deepEqual(calls[0], {
     promotion_id: BODY.promotion_id,
@@ -149,6 +157,49 @@ test("successful issue is no-store and never returns transport authorization mat
   assert.equal(JSON.stringify(response.body).includes(IDS.jti), false);
 });
 
+test("an exact durable retry returns 200 with the same safe projection", async () => {
+  const replayed = Object.freeze({ ...SERVICE_RESULT, replayed: true });
+  const { api } = fixture({ result: replayed });
+  const response = await api.handle(request());
+  assert.equal(response.status, 200);
+  assert.deepEqual(response.body.promotion, replayed);
+});
+
+test("promotion admission uses only hashed transport dimensions and fails closed", async () => {
+  const acquired = [];
+  const allowed = fixture({
+    rateLimiter: { async acquire(input) { acquired.push(input); return { allowed: true }; } }
+  });
+  assert.equal((await allowed.api.handle(request())).status, 201);
+  assert.equal(acquired.length, 1);
+  assert.equal(acquired[0].phase, "promotion");
+  assert.equal(acquired[0].sessionMaterialHash, sha256(PLATFORM_TOKEN));
+  assert.equal(acquired[0].csrfTokenHash, sha256(CSRF_TOKEN));
+  assert.equal(acquired[0].jtiHash, sha256(IDS.jti));
+  assert.equal(acquired[0].proofId, IDS.proof);
+  assert.equal(JSON.stringify(acquired).includes(PLATFORM_TOKEN), false);
+  assert.equal(JSON.stringify(acquired).includes(CSRF_TOKEN), false);
+  assert.equal(JSON.stringify(acquired).includes(IDS.jti), false);
+
+  const denied = fixture({
+    rateLimiter: {
+      async acquire() {
+        throw new PlatformSessionRateLimitError(PLATFORM_SESSION_RATE_LIMIT_ERROR_CODES.RATE_LIMITED, { retryAfterSeconds: 9 });
+      }
+    }
+  });
+  const limited = await denied.api.handle(request());
+  assertSafeError(limited, 429);
+  assert.equal(limited.headers["Retry-After"], "9");
+  assert.equal(denied.calls.length, 0);
+
+  const failed = fixture({ rateLimiter: { async acquire() { throw new Error(RAW_ERROR_SECRET); } } });
+  const unavailable = await failed.api.handle(request());
+  assertSafeError(unavailable, 503);
+  assert.equal(unavailable.headers["Retry-After"], "1");
+  assert.equal(failed.calls.length, 0);
+});
+
 test("Human Session cookies cannot authenticate the promotion endpoint", async () => {
   const { api, calls } = fixture();
   const response = await api.handle(request({
@@ -158,6 +209,17 @@ test("Human Session cookies cannot authenticate the promotion endpoint", async (
   }));
   assertSafeError(response, 401);
   assert.equal(calls.length, 0);
+});
+
+test("a co-sent Human cookie is ignored when the Platform cookie is valid", async () => {
+  const { api, calls } = fixture();
+  const response = await api.handle(request({
+    requestHeaders: {
+      Cookie: `__Host-agentpass_session=${Buffer.alloc(32, 0x33).toString("base64url")}; ${platformCookie()}`
+    }
+  }));
+  assert.equal(response.status, 201);
+  assert.equal(calls.length, 1);
 });
 
 test("Authorization and authority headers are rejected before the service", async () => {
@@ -297,7 +359,7 @@ test("missing or malformed proof transport cannot fall back to authority headers
       requestHeaders: value === undefined ? {} : { [name]: value },
       omitHeaders: value === undefined ? [name] : []
     }));
-    assertSafeError(response, 401);
+    assertSafeError(response, name === PLATFORM_SESSION_CSRF_HEADER ? 403 : 401);
     assert.equal(calls.length, 0);
   }
 });
@@ -317,6 +379,19 @@ test("service failures become safe HTTP errors without leaking internal messages
   const response = await api.handle(request());
   assertSafeError(response, 503);
   assert.equal(calls.length, 1);
+});
+
+test("stable issuance states map to conflict, in-progress, and no-blind-retry uncertainty errors", async () => {
+  for (const [code, expectedCode] of [
+    [PLATFORM_PROMOTION_ISSUANCE_ERROR_CODES.CONFLICT, "platform_promotion_http_idempotency_conflict"],
+    [PLATFORM_PROMOTION_ISSUANCE_ERROR_CODES.IN_PROGRESS, "platform_promotion_http_in_progress"],
+    [PLATFORM_PROMOTION_ISSUANCE_ERROR_CODES.UNCERTAIN, "platform_promotion_http_uncertain"]
+  ]) {
+    const { api } = fixture({ serviceError: new PlatformPromotionIssuanceError(code) });
+    const response = await api.handle(request());
+    assertSafeError(response, 409);
+    assert.equal(response.body.error.code, expectedCode);
+  }
 });
 
 test("a malformed service result is not serialized as a successful HTTP response", async () => {

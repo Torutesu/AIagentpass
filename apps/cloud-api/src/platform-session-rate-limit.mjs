@@ -23,19 +23,22 @@ export const PLATFORM_SESSION_RATE_LIMIT_KEY_SLOTS = Object.freeze({
 export const PLATFORM_SESSION_RATE_LIMIT_PHASES = Object.freeze([
   "challenge",
   "assertion",
-  "revoke"
+  "revoke",
+  "promotion"
 ]);
 
 export const PLATFORM_SESSION_RATE_LIMIT_OPERATIONS = Object.freeze({
   challenge: "platform.session.challenge",
   assertion: "platform.session.assertion",
-  revoke: "platform.session.revoke"
+  revoke: "platform.session.revoke",
+  promotion: "platform.promotion.issue"
 });
 
 export const PLATFORM_SESSION_RATE_LIMIT_POLICIES = Object.freeze({
   challenge: Object.freeze({ capacity: 24, refillPerSecond: 0.4 }),
   assertion: Object.freeze({ capacity: 36, refillPerSecond: 0.6 }),
-  revoke: Object.freeze({ capacity: 60, refillPerSecond: 1 })
+  revoke: Object.freeze({ capacity: 60, refillPerSecond: 1 }),
+  promotion: Object.freeze({ capacity: 12, refillPerSecond: 0.2 })
 });
 
 export const PLATFORM_SESSION_RATE_LIMIT_ERROR_CODES = Object.freeze({

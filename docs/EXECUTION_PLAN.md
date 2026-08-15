@@ -86,6 +86,8 @@ Acceptance:
 
 ### W0-01 Freeze promotion proof transport
 
+Status: implemented and focused-validated on 2026-08-15.
+
 Change scope:
 
 - `contracts/openapi/platform-v1.json`
@@ -111,6 +113,9 @@ Acceptance:
 - No replay/get endpoint is documented.
 
 ### W0-02 Implement the promotion HTTP boundary
+
+Status: implemented and focused-validated on 2026-08-15. Hosted runtime
+composition and legacy route retirement remain W0-03/W0-04.
 
 Change scope:
 

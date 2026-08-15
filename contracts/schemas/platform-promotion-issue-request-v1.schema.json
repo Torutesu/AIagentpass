@@ -1,0 +1,19 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agentpass.dev/contracts/schemas/platform-promotion-issue-request-v1.schema.json",
+  "title": "AgentPass Platform promotion issue request v1",
+  "description": "The exact public promotion intent. Idempotency-Key and every authentication proof are transport-bound and never accepted in this JSON object.",
+  "type": "object",
+  "additionalProperties": false,
+  "minProperties": 6,
+  "maxProperties": 6,
+  "required": ["operation", "organization_id", "promotion_id", "deployment_id", "environment", "candidate_id"],
+  "properties": {
+    "operation": { "const": "platform.promotion.issue" },
+    "organization_id": { "type": "string", "format": "uuid", "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$" },
+    "promotion_id": { "type": "string", "format": "uuid", "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$" },
+    "deployment_id": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$" },
+    "environment": { "type": "string", "enum": ["staging", "production"] },
+    "candidate_id": { "type": "string", "pattern": "^release-pkg-sha256-v1-[0-9a-f]{64}$" }
+  }
+}

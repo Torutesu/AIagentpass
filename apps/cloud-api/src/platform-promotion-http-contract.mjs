@@ -14,6 +14,7 @@ const PRIVATE_FIELD = /(?:private(?:[_ -]?key|[_ -]?material)?|secret|password|c
 
 export const PLATFORM_PROMOTION_ISSUE_PATH = "/v1/platform/promotions";
 export const PLATFORM_PROMOTION_REPLAY_PATH = "/v1/platform/promotions/replay";
+export const PLATFORM_AUTHORIZED_PROMOTION_ISSUE_PATH = "/api/platform/v1/promotions";
 export const PLATFORM_PROMOTION_OPERATIONS = Object.freeze({
   issue: "platform.promotion.issue",
   replay: "platform.promotion.replay"
@@ -25,6 +26,7 @@ export const PLATFORM_PROMOTION_CAPABILITIES = Object.freeze({
 });
 
 const REQUEST_KEYS = Object.freeze(["promotion_id", "deployment_id", "environment", "candidate_id"]);
+const AUTHORIZED_REQUEST_KEYS = Object.freeze(["operation", "organization_id", ...REQUEST_KEYS]);
 const RESPONSE_KEYS = Object.freeze(["promotion_id", "deployment_id", "environment", "candidate_id", "promotion_evidence", "replayed"]);
 const AUTHORIZATION_KEYS = Object.freeze(["allowed", "role", "capability"]);
 
@@ -43,6 +45,25 @@ export function normalizePlatformPromotionRequest(body, idempotencyKey) {
     environment: body.environment,
     candidate_id: body.candidate_id,
     idempotency_key: idempotencyKey
+  });
+}
+
+/** Normalize the browser-safe issue intent without accepting authority data. */
+export function normalizePlatformAuthorizedPromotionRequest(body, idempotencyKey) {
+  if (!isPlainObject(body) || !sameKeys(body, AUTHORIZED_REQUEST_KEYS)
+    || body.operation !== PLATFORM_PROMOTION_OPERATIONS.issue || !UUID.test(body.organization_id ?? "")) {
+    throw platformPromotionContractError("request");
+  }
+  const request = normalizePlatformPromotionRequest({
+    promotion_id: body.promotion_id,
+    deployment_id: body.deployment_id,
+    environment: body.environment,
+    candidate_id: body.candidate_id
+  }, idempotencyKey);
+  return Object.freeze({
+    operation: PLATFORM_PROMOTION_OPERATIONS.issue,
+    organization_id: body.organization_id.toLowerCase(),
+    ...request
   });
 }
 

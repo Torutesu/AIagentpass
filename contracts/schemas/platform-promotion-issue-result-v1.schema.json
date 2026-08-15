@@ -1,0 +1,17 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agentpass.dev/contracts/schemas/platform-promotion-issue-result-v1.schema.json",
+  "title": "AgentPass Platform promotion issue result v1",
+  "description": "The existing safe public promotion projection. It contains no platform-session proof, JTI, bearer cookie, CSRF token, claim token, provider diagnostic, or internal authority identifier.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["promotion_id", "deployment_id", "environment", "candidate_id", "promotion_evidence", "replayed"],
+  "properties": {
+    "promotion_id": { "type": "string", "format": "uuid", "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$" },
+    "deployment_id": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$" },
+    "environment": { "type": "string", "enum": ["staging", "production"] },
+    "candidate_id": { "type": "string", "pattern": "^release-pkg-sha256-v1-[0-9a-f]{64}$" },
+    "promotion_evidence": { "$ref": "https://agentpass.dev/contracts/promotion-evidence-v3.schema.json" },
+    "replayed": { "type": "boolean" }
+  }
+}
