@@ -39,9 +39,9 @@ const PROCESS_TIMEOUT_MS = 180_000;
 const LIVE_BROWSER_SAFE_FAILURE_MARKERS = Object.freeze([
   [null, "P0B_SAFE_WAKE_COALESCED_FAILED", "wake_ledger_coalesced"],
   [null, "P0B_SAFE_WAKE_NO_PENDING_FAILED", "wake_ledger_no_pending"],
-  [null, "P0B_SAFE_ADMIN_OPEN_BOOTSTRAP_HTTP_429_FAILED", "admin_open_bootstrap_http_429"],
   [null, "P0B_SAFE_ADMIN_OPEN_BOOTSTRAP_HTTP_500_FAILED", "admin_open_bootstrap_http_500"],
-  [null, "P0B_SAFE_ADMIN_OPEN_BOOTSTRAP_HTTP_502_CLOUD_RUNNING_FAILED", "admin_open_bootstrap_http_502_cloud_running"],
+  [null, "P0B_SAFE_ADMIN_OPEN_BOOTSTRAP_HTTP_502_BFF_INVALID_RESPONSE_FAILED", "admin_open_bootstrap_http_502_bff_invalid_response"],
+  [null, "P0B_SAFE_ADMIN_OPEN_BOOTSTRAP_HTTP_502_PROXY_UNAVAILABLE_FAILED", "admin_open_bootstrap_http_502_proxy_unavailable"],
   [null, "P0B_SAFE_ADMIN_OPEN_BOOTSTRAP_HTTP_502_CLOUD_EXITED_FAILED", "admin_open_bootstrap_http_502_cloud_exited"],
   [null, "P0B_SAFE_ADMIN_OPEN_BOOTSTRAP_HTTP_503_FAILED", "admin_open_bootstrap_http_503"],
   [null, "P0B_SAFE_ADMIN_OPEN_BOOTSTRAP_HTTP_504_FAILED", "admin_open_bootstrap_http_504"],

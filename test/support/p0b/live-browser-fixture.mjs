@@ -26,6 +26,20 @@ export class P0BLiveBrowserFixtureError extends Error {
   }
 }
 
+export function classifySessionBootstrap502(body, cloudProcessState, cloudReadinessState) {
+  if (cloudProcessState === "exited") return "cloud_exited";
+  if (cloudProcessState !== "running" || cloudReadinessState !== "ready") return "proxy_unavailable";
+  return body
+    && typeof body === "object"
+    && !Array.isArray(body)
+    && body.error
+    && typeof body.error === "object"
+    && !Array.isArray(body.error)
+    && body.error.code === "cloud_api_invalid_response"
+    ? "bff_invalid_response"
+    : "proxy_unavailable";
+}
+
 /**
  * Start the existing P0-B process harness with a real human-auth tenant.
  *
@@ -158,7 +172,7 @@ export async function startP0BLiveBrowserFixture({
         }, SESSION_PATH);
         stage = "http";
         if (!response.ok) {
-          if (response.status === 502) stage = `http_502_cloud_${harness.cloudProcessState()}`;
+          if (response.status === 502) stage = `http_502_${classifySessionBootstrap502(response.body, harness.cloudProcessState(), await harness.cloudReadinessState())}`;
           else if ([400, 401, 403, 404, 405, 409, 415, 422, 429, 500, 503, 504].includes(response.status)) stage = `http_${response.status}`;
           else if (response.status >= 400 && response.status < 500) stage = "http_4xx";
           else if (response.status >= 500 && response.status < 600) stage = "http_5xx";

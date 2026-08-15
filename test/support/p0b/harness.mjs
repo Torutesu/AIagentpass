@@ -360,6 +360,20 @@ export async function startP0BHarness({ env = process.env, repoRoot = REPOSITORY
         if (!cloudProcess) return "exited";
         return cloudProcess.p0bSpawnError || cloudProcess.exitCode !== null || cloudProcess.signalCode !== null ? "exited" : "running";
       },
+      async cloudReadinessState() {
+        if (!cloudProcess || cloudProcess.p0bSpawnError || cloudProcess.exitCode !== null || cloudProcess.signalCode !== null) return "unavailable";
+        try {
+          const ca = await fsp.readFile(certificates.caCert, "utf8");
+          const result = await httpsRequest(new URL("/health/ready", `https://localhost:${cloudTlsPort}/`), {
+            ca,
+            headers: { "AgentPass-Operational-Token": files.probeSecret },
+            timeoutMs: 1_500
+          });
+          return result.status === 200 ? "ready" : "unavailable";
+        } catch {
+          return "unavailable";
+        }
+      },
       async close() { await closeP0BHarness({ cloudProcess, consoleProcess, cloudProxy, consoleProxy, database, temp }); }
     });
   } catch (error) {

@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  classifySessionBootstrap502,
   P0BLiveBrowserFixtureError,
   startP0BLiveBrowserFixture
 } from "./live-browser-fixture.mjs";
@@ -29,4 +30,12 @@ test("fixture errors have stable, secret-free public shape", () => {
     message: "P0-B live browser fixture startup failed"
   });
   assert.equal(Object.hasOwn(error, "cause"), false);
+});
+
+test("bootstrap 502 classification exposes only fixed failure classes", () => {
+  assert.equal(classifySessionBootstrap502(null, "exited", "unavailable"), "cloud_exited");
+  assert.equal(classifySessionBootstrap502(null, "running", "unavailable"), "proxy_unavailable");
+  assert.equal(classifySessionBootstrap502({ error: { code: "cloud_api_invalid_response", message: "ignored" } }, "running", "ready"), "bff_invalid_response");
+  assert.equal(classifySessionBootstrap502({ error: { code: "some_other_code" } }, "running", "ready"), "proxy_unavailable");
+  assert.equal(classifySessionBootstrap502({ error: { code: "cloud_api_invalid_response" } }, "unknown", "ready"), "proxy_unavailable");
 });
