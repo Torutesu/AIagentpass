@@ -124,6 +124,7 @@ test("revokes all other sessions through one atomic operation-bound request", as
         { ...session("revoked", false, "55555555-5555-4555-8555-555555555555"), revoked_at: date },
       ],
       revoked_count: 2,
+      truncated: false,
     });
     throw new Error("unexpected path");
   }});
@@ -143,10 +144,11 @@ test("fails closed on malformed or current-session revoke-others results without
   const current = { id: sessionId, version: 3, label: "現在のブラウザ", platform: "Web Console", createdAt: date, lastSeenAt: date, expiresAt: "2026-08-12T18:00:00.000Z", current: true };
   const other = { ...current, id: otherSessionId, label: "別のブラウザセッション", current: false };
   for (const result of [
-    { revoked_sessions: [], revoked_count: 1 },
-    { revoked_sessions: [{ ...session("revoked", true), revoked_at: date }], revoked_count: 1 },
-    { revoked_sessions: [{ ...session("revoked", false), organization_id: "66666666-6666-4666-8666-666666666666", revoked_at: date }], revoked_count: 1 },
-    { revoked_sessions: [{ ...session("active", false), revoked_at: null }], revoked_count: 1 },
+    { revoked_sessions: [], revoked_count: 1, truncated: false },
+    { revoked_sessions: [{ ...session("revoked", true), revoked_at: date }], revoked_count: 1, truncated: false },
+    { revoked_sessions: [{ ...session("revoked", false), organization_id: "66666666-6666-4666-8666-666666666666", revoked_at: date }], revoked_count: 1, truncated: false },
+    { revoked_sessions: [{ ...session("active", false), revoked_at: null }], revoked_count: 1, truncated: false },
+    { revoked_sessions: [], revoked_count: 101, truncated: true },
   ]) {
     let mutations = 0;
     const client = createSecurityClient({ authenticateRecentAuthImpl: authorize, fetchImpl: async (url) => {
@@ -157,6 +159,19 @@ test("fails closed on malformed or current-session revoke-others results without
     await assert.rejects(() => client.revokeOtherSessions([current, other]), (error) => error instanceof SecurityClientError && error.code === "invalid_response");
     assert.equal(mutations, 1);
   }
+});
+
+test("accepts a bounded truncated revoke-others result and returns the exact total", async () => {
+  const records = Array.from({ length: 100 }, (_, index) => ({
+    ...session("revoked", false, `00000000-0000-4000-8000-${String(index + 1).padStart(12, "0")}`),
+    revoked_at: date,
+  }));
+  const client = createSecurityClient({ authenticateRecentAuthImpl: authorize, fetchImpl: async (url) => {
+    if (url === "/api/auth/session") return sessionResponse();
+    if (url === "/api/auth/security/sessions/revoke-others") return json({ revoked_sessions: records, revoked_count: 101, truncated: true });
+    throw new Error("unexpected path");
+  }});
+  assert.equal(await client.revokeOtherSessions([]), 101);
 });
 
 test("current-session revoke closes the lifecycle without bootstrapping a replacement", async () => {

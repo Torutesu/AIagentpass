@@ -33,11 +33,13 @@ test("human-v1 freezes the revoke-other-sessions route and exact empty request",
 
 test("human-v1 freezes the exact committed response envelope and catalog ownership", () => {
   const response = openapi.components.schemas.RevokeOtherSessionsResponse;
-  assert.deepEqual(response.required, ["revoked_sessions", "revoked_count"]);
+  assert.deepEqual(response.required, ["revoked_sessions", "revoked_count", "truncated"]);
   assert.equal(response.additionalProperties, false);
-  assert.deepEqual(response["x-agentpass-invariants"], ["revoked_count equals revoked_sessions.length", "every revoked_sessions item has status=revoked and is_current=false"]);
+  assert.deepEqual(response["x-agentpass-invariants"], ["revoked_count is the exact committed total", "truncated is true exactly when revoked_count exceeds revoked_sessions.length", "revoked_sessions contains at most the first 100 committed records", "every revoked_sessions item has status=revoked and is_current=false"]);
   assert.deepEqual(response.properties.revoked_sessions.items, { $ref: "#/components/schemas/ManagedHumanSession" });
+  assert.equal(response.properties.revoked_sessions.maxItems, 100);
   assert.deepEqual(response.properties.revoked_count, { type: "integer", minimum: 0 });
+  assert.deepEqual(response.properties.truncated, { type: "boolean" });
   assert.deepEqual(openapi.components.schemas.ManagedHumanSession.properties.is_current, { type: "boolean", const: false });
   assert.deepEqual(openapi.components.schemas.ManagedHumanSession.properties.status, { const: "revoked" });
 

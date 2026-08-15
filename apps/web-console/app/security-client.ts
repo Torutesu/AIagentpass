@@ -317,7 +317,7 @@ function expectSessionMutation(value: unknown): SecuritySession {
 }
 
 function expectOtherSessionsMutation(value: unknown, organizationId: string): number {
-  if (!isRecord(value) || !hasExactKeys(value, ["revoked_sessions", "revoked_count"]) || !Array.isArray(value.revoked_sessions) || value.revoked_sessions.length > MAX_ITEMS || !Number.isSafeInteger(value.revoked_count) || Number(value.revoked_count) < 0 || value.revoked_count !== value.revoked_sessions.length) {
+  if (!isRecord(value) || !hasExactKeys(value, ["revoked_sessions", "revoked_count", "truncated"]) || !Array.isArray(value.revoked_sessions) || value.revoked_sessions.length > MAX_ITEMS || !Number.isSafeInteger(value.revoked_count) || Number(value.revoked_count) < 0 || typeof value.truncated !== "boolean" || value.truncated !== (Number(value.revoked_count) > value.revoked_sessions.length) || (!value.truncated && value.revoked_count !== value.revoked_sessions.length) || (value.truncated && value.revoked_sessions.length !== MAX_ITEMS)) {
     throw new SecurityClientError("invalid_response", "セッション一括無効化の応答を確認できませんでした。");
   }
   const records = value.revoked_sessions.map((session) => {
@@ -327,7 +327,7 @@ function expectOtherSessionsMutation(value: unknown, organizationId: string): nu
     return parseSession(session);
   });
   if (new Set(records.map((session) => session.id)).size !== records.length) throw new SecurityClientError("invalid_response", "セッション一括無効化の応答を確認できませんでした。");
-  return records.length;
+  return Number(value.revoked_count);
 }
 
 function assertSessionTarget(id: string, version: number): void {

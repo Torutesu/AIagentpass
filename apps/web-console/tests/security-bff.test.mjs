@@ -96,7 +96,7 @@ test("does not treat revoke-others as a per-session UUID route", async () => {
   const calls = [];
   const api = bridge(async (url, init) => {
     calls.push({ url: String(url), init });
-    return new Response(JSON.stringify({ revoked_sessions: [], revoked_count: 0 }), { headers: { "content-type": "application/json" } });
+    return new Response(JSON.stringify({ revoked_sessions: [], revoked_count: 0, truncated: false }), { headers: { "content-type": "application/json" } });
   });
 
   const response = await api.handle(request("/api/auth/security/sessions/revoke-others", { method: "POST", body: {}, headers: { cookie, "agentpass-csrf": csrf, "agentpass-recent-auth": authorizationId } }));

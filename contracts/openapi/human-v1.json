@@ -1669,11 +1669,12 @@
       "RevokeOtherSessionsResponse": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["revoked_sessions", "revoked_count"],
-        "x-agentpass-invariants": ["revoked_count equals revoked_sessions.length", "every revoked_sessions item has status=revoked and is_current=false"],
+        "required": ["revoked_sessions", "revoked_count", "truncated"],
+        "x-agentpass-invariants": ["revoked_count is the exact committed total", "truncated is true exactly when revoked_count exceeds revoked_sessions.length", "revoked_sessions contains at most the first 100 committed records", "every revoked_sessions item has status=revoked and is_current=false"],
         "properties": {
-          "revoked_sessions": { "type": "array", "items": { "$ref": "#/components/schemas/ManagedHumanSession" } },
-          "revoked_count": { "type": "integer", "minimum": 0 }
+          "revoked_sessions": { "type": "array", "maxItems": 100, "items": { "$ref": "#/components/schemas/ManagedHumanSession" } },
+          "revoked_count": { "type": "integer", "minimum": 0 },
+          "truncated": { "type": "boolean" }
         }
       },
       "WebAuthnRegistrationOptionsRequest": {

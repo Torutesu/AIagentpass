@@ -14,6 +14,7 @@ const MAX_HEADER_BYTES = 8 * 1024;
 const MAX_URL_LENGTH = 8 * 1024;
 const MAX_CURSOR_LENGTH = 512;
 const MAX_LABEL_LENGTH = 128;
+const MAX_REVOKED_SESSION_RESPONSE_ITEMS = 100;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const CREDENTIAL_ID = /^[A-Za-z0-9_-]+$/;
 const OPAQUE_TOKEN = /^[A-Za-z0-9_-]{43}$/;
@@ -364,8 +365,9 @@ export function createHumanManagementHttpApi({
         ids.add(revoked.session_id);
       }
       return response(200, {
-        revoked_sessions: revokedSessions,
-        revoked_count: revokedSessions.length
+        revoked_sessions: revokedSessions.slice(0, MAX_REVOKED_SESSION_RESPONSE_ITEMS),
+        revoked_count: revokedSessions.length,
+        truncated: revokedSessions.length > MAX_REVOKED_SESSION_RESPONSE_ITEMS
       });
     } catch (error) {
       throw mapRepositoryError(error, "session");

@@ -399,7 +399,7 @@ async function installSecurityRoutes(page: Page, failStatus?: 401 | 403, options
     if (url.pathname === "/api/auth/security/sessions/revoke-others" && request.method() === "POST") {
       state.mutations.push(requestMutation(route));
       state.otherSessionStatus = "revoked";
-      return json(route, { revoked_sessions: [securitySession(state, false)], revoked_count: 1 });
+      return json(route, { revoked_sessions: [securitySession(state, false)], revoked_count: 1, truncated: false });
     }
     if (url.pathname === `/api/auth/security/sessions/${SESSION_ID}/revoke` && request.method() === "POST") {
       state.mutations.push(requestMutation(route));

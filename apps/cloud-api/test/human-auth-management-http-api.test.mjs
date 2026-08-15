@@ -358,7 +358,7 @@ test("revokes zero or more other sessions with an exact envelope, current exclus
   const empty = fixture({ repositoryOverrides: { revokeOtherSessions: [] } });
   const emptyResult = await empty.api.handle(request(HUMAN_MANAGEMENT_HTTP_PATHS.revokeOtherSessions, { method: "POST", body: {} }));
   assert.equal(emptyResult.status, 200);
-  assert.deepEqual(emptyResult.body, { revoked_sessions: [], revoked_count: 0 });
+  assert.deepEqual(emptyResult.body, { revoked_sessions: [], revoked_count: 0, truncated: false });
   assert.equal(empty.calls.revokeOtherSessions.length, 1);
   assert.deepEqual(empty.calls.revokeOtherSessions[0], {
     session_id: CURRENT_SESSION_ID,
@@ -408,11 +408,22 @@ test("revokes zero or more other sessions with an exact envelope, current exclus
         revoked_at: "2026-08-12T01:00:00.000Z"
       }
     ],
-    revoked_count: 2
+    revoked_count: 2,
+    truncated: false
   });
   assert.equal(result.body.revoked_sessions.some(({ session_id }) => session_id === CURRENT_SESSION_ID), false);
   assert.equal(other.calls.revokeOtherSessions.length, 1);
   assert.equal(Object.hasOwn(result.headers, "Set-Cookie"), false);
+
+  const many = fixture({ repositoryOverrides: {
+    revokeOtherSessions: Array.from({ length: 101 }, (_, index) => revokedOtherSession(`70000000-0000-4000-8000-${String(index + 1).padStart(12, "0")}`))
+  } });
+  const bounded = await many.api.handle(request(HUMAN_MANAGEMENT_HTTP_PATHS.revokeOtherSessions, { method: "POST", body: {} }));
+  assert.equal(bounded.status, 200);
+  assert.equal(bounded.body.revoked_sessions.length, 100);
+  assert.equal(bounded.body.revoked_count, 101);
+  assert.equal(bounded.body.truncated, true);
+  assert.equal(many.calls.revokeOtherSessions.length, 1);
 });
 
 test("fails closed for a malformed other-session adapter result and never retries", async () => {
