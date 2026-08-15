@@ -1,12 +1,13 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { authenticateRecentAuth, registerPasskey, WebAuthnClientError } from "../webauthn-client";
 import { createSecurityClient, SecurityClientError, type SecurityClient, type SecurityPasskey, type SecuritySession, type SecuritySnapshot } from "../security-client";
 import { parseConsoleSummary, type ConsoleSummaryViewModel } from "../console-summary";
 import { EnrollmentPreflightError, parsePublicEnrollmentPreflight } from "../../lib/enrollment-preflight.mjs";
 import { fetchBrowserCliHandoffPreflight, parseBrowserCliHandoffLaunchFragment, postBrowserCliHandoff, publicEnrollmentPreflight as publicBrowserCliEnrollmentPreflight } from "../../lib/browser-cli-handoff.mjs";
 import { OrganizationPanel } from "./OrganizationPanel";
+import { createOrganizationClient, OrganizationClientError, resolveOrganizationSelection, type Organization, type OrganizationClient } from "../organization-client";
 import { OwnerRecoveryPanel } from "./OwnerRecoveryPanel";
 import { AuditExportPanel } from "./AuditExportPanel";
 
@@ -168,6 +169,7 @@ type DeviceRefreshRequestStatus = "accepted" | "coalesced" | "no_pending_refresh
 
 type ConsoleRole = "owner" | "admin" | "auditor" | "viewer";
 type ConsoleSession = Readonly<{ organizationId: string; role: ConsoleRole; expiresAt: string; recentAuthAt: string | null; csrfToken: string }>;
+type OrganizationSwitcherState = "closed" | "loading" | "ready" | "error";
 
 class ConsoleSessionError extends Error {
   readonly status?: number;
@@ -177,6 +179,12 @@ class ConsoleSessionError extends Error {
     this.name = "ConsoleSessionError";
     this.status = status;
   }
+}
+
+function organizationSwitcherMessage(error: unknown): string {
+  if (error instanceof OrganizationClientError && error.code === "forbidden") return "このセッションでは組織の一覧を確認できません。";
+  if (error instanceof OrganizationClientError && error.code === "unauthorized") return "セッションの有効期限が切れています。再認証してください。";
+  return "組織の一覧を読み込めませんでした。もう一度お試しください。";
 }
 
 class EnrollmentFlowError extends Error {
@@ -1195,6 +1203,10 @@ export function AgentPassConsole() {
   const [activeView, setActiveView] = useState<ConsoleView>("overview");
   const [mobileOpen, setMobileOpen] = useState(false);
   const [workspaceOpen, setWorkspaceOpen] = useState(false);
+  const [organizationSwitcherState, setOrganizationSwitcherState] = useState<OrganizationSwitcherState>("closed");
+  const [organizationOptions, setOrganizationOptions] = useState<readonly Organization[]>([]);
+  const [selectedOrganizationId, setSelectedOrganizationId] = useState<string | null>(null);
+  const [organizationSwitcherError, setOrganizationSwitcherError] = useState<string | null>(null);
   const [helpOpen, setHelpOpen] = useState(false);
   const [confirmOpen, setConfirmOpen] = useState(false);
   const [confirmChecked, setConfirmChecked] = useState(false);
@@ -1213,7 +1225,9 @@ export function AgentPassConsole() {
   const summaryEpoch = useRef(0);
   const capabilityEpoch = useRef(0);
   const adminAuditEpoch = useRef(0);
+  const organizationOptionsEpoch = useRef(0);
   const organizationIdRef = useRef<string | null>(null);
+  const organizationClient = useMemo<OrganizationClient>(() => createOrganizationClient(), []);
   const liveHandoffRef = useRef<LiveHandoffSession | null>(null);
   const liveHandoffReadRef = useRef(false);
   const liveHandoffMountedRef = useRef(false);
@@ -1226,6 +1240,11 @@ export function AgentPassConsole() {
     adminAuditEpoch.current += 1;
     consoleSessionContext.clear();
     organizationIdRef.current = null;
+    organizationOptionsEpoch.current += 1;
+    setOrganizationOptions([]);
+    setSelectedOrganizationId(null);
+    setOrganizationSwitcherState("closed");
+    setOrganizationSwitcherError(null);
     setSessionRole(null);
     setAuditSession(null);
     setData(emptyConsoleData());
@@ -1239,6 +1258,56 @@ export function AgentPassConsole() {
     setToast(message);
     setToastTone(tone);
     window.setTimeout(() => setToast(""), 4200);
+  };
+
+  const loadOrganizationOptions = useCallback(async () => {
+    const epoch = ++organizationOptionsEpoch.current;
+    setOrganizationSwitcherState("loading");
+    setOrganizationSwitcherError(null);
+    try {
+      const [page, session] = await Promise.all([
+        organizationClient.listOrganizations({ limit: 100 }),
+        organizationClient.getSession(),
+      ]);
+      if (epoch !== organizationOptionsEpoch.current) return;
+      const currentOrganizationId = organizationIdRef.current ?? session.organizationId;
+      setOrganizationOptions(page.items);
+      setSelectedOrganizationId((current) => {
+        if (current !== null && page.items.some((organization) => organization.id === current)) return current;
+        return page.items.some((organization) => organization.id === currentOrganizationId) ? currentOrganizationId : null;
+      });
+      setOrganizationSwitcherState("ready");
+    } catch (error) {
+      if (epoch !== organizationOptionsEpoch.current) return;
+      if (error instanceof OrganizationClientError && error.code === "unauthorized") {
+        expireSession();
+        return;
+      }
+      setOrganizationSwitcherState("error");
+      setOrganizationSwitcherError(organizationSwitcherMessage(error));
+    }
+  }, [expireSession, organizationClient]);
+
+  const toggleOrganizationSwitcher = () => {
+    if (workspaceOpen) {
+      setWorkspaceOpen(false);
+      return;
+    }
+    setWorkspaceOpen(true);
+    if (organizationSwitcherState === "closed" || organizationSwitcherState === "error") void loadOrganizationOptions();
+  };
+
+  const selectOrganizationFromSwitcher = (organization: Organization) => {
+    if (resolveOrganizationSelection(organizationOptions, organization.id) === undefined) {
+      setOrganizationSwitcherState("error");
+      setOrganizationSwitcherError("選択した組織を確認できないため、操作を中止しました。");
+      return;
+    }
+    setSelectedOrganizationId(organization.id);
+    setWorkspaceOpen(false);
+    setActiveView("organizations");
+    setMobileOpen(false);
+    window.scrollTo({ top: 0, behavior: "smooth" });
   };
 
   const refreshSummary = useCallback(async (signal?: AbortSignal) => {
@@ -1410,6 +1479,11 @@ export function AgentPassConsole() {
     try {
       await logoutConsoleSession();
       organizationIdRef.current = null;
+      organizationOptionsEpoch.current += 1;
+      setOrganizationOptions([]);
+      setSelectedOrganizationId(null);
+      setOrganizationSwitcherState("closed");
+      setOrganizationSwitcherError(null);
       setSessionRole(null);
       setAuditSession(null);
       setData(emptyConsoleData());
@@ -1502,6 +1576,11 @@ export function AgentPassConsole() {
 
   const liveSetupActive = activeView === "overview" && liveHandoffStatus !== "none";
   const currentLabel = liveSetupActive ? "セットアップ" : navItems.find((item) => item.id === activeView)?.label ?? "概要";
+  const selectedOrganization = organizationOptions.find((organization) => organization.id === selectedOrganizationId);
+  // A Human Session is still bound to one organization. Until the Cloud
+  // exposes an atomic tenant-rotation endpoint, another organization is only
+  // an administration-panel context and must not relabel operational views.
+  const workspaceName = activeView === "organizations" ? selectedOrganization?.name ?? data.workspace : data.workspace;
   const activeAgents = data.agents.filter((agent) => agent.state !== "停止").length;
   const canManage = sessionRole === "owner" || sessionRole === "admin";
   const canEmergencyStop = sessionRole === "owner";
@@ -1514,8 +1593,16 @@ export function AgentPassConsole() {
           <span className="brand-mark" aria-hidden="true">A</span>
           <span><span className="brand-name">AgentPass</span><span className="brand-note">CONSOLE</span></span>
         </a>
-        <button className="workspace-switcher" type="button" aria-label={`${data.workspace}ワークスペースを選択`} aria-expanded={workspaceOpen} onClick={() => setWorkspaceOpen((open) => !open)}><span><span className="workspace-label">WORKSPACE</span><span className="workspace-name">{data.workspace}</span></span><span className="chevron" aria-hidden="true">⌄</span></button>
-        {workspaceOpen ? <div className="workspace-menu" role="status"><strong>{data.workspace}</strong><span>現在のワークスペース</span><small>ワークスペースの切り替えは管理者設定から行います</small></div> : null}
+        <button className="workspace-switcher" type="button" aria-label={`${workspaceName}ワークスペースを選択`} aria-expanded={workspaceOpen} onClick={toggleOrganizationSwitcher}><span><span className="workspace-label">WORKSPACE</span><span className="workspace-name">{workspaceName}</span></span><span className="chevron" aria-hidden="true">⌄</span></button>
+        {workspaceOpen ? <div className="workspace-menu" role="dialog" aria-label="組織を選択" aria-busy={organizationSwitcherState === "loading"}>
+          <strong>組織を選択</strong>
+          <span>アクセス可能な組織だけを表示しています</span>
+          {organizationSwitcherState === "loading" ? <small role="status">組織を確認中です…</small> : null}
+          {organizationSwitcherState === "error" ? <div role="alert"><small>{organizationSwitcherError}</small><button className="text-button" type="button" onClick={() => void loadOrganizationOptions()}>もう一度試す</button></div> : null}
+          {organizationSwitcherState === "ready" && organizationOptions.length === 0 ? <small role="status">利用可能な組織がありません。</small> : null}
+          {organizationSwitcherState === "ready" && organizationOptions.length > 0 ? <ul className="workspace-options" role="listbox" aria-label="利用可能な組織">{organizationOptions.map((organization) => <li key={organization.id}><button className={`workspace-option${organization.id === selectedOrganizationId ? " is-selected" : ""}`} type="button" role="option" aria-selected={organization.id === selectedOrganizationId} onClick={() => selectOrganizationFromSwitcher(organization)}><span>{organization.name}</span><small>{organization.id === selectedOrganizationId ? "選択済み" : "組織管理を開く"}</small></button></li>)}</ul> : null}
+          <small>選択後も権限とテナントはCloudで再検証されます。確認できない組織の操作は実行しません。</small>
+        </div> : null}
         <p className="nav-label">MANAGE</p>
         <nav>
           <ul className="nav-list">
@@ -1539,7 +1626,7 @@ export function AgentPassConsole() {
           {sessionState === "active" && activeView === "activity" ? <ActivitySurface data={data} /> : null}
           {sessionState === "active" && activeView === "audit-exports" && auditSession ? <AuditExportPanel role={auditSession.role} organizationId={auditSession.organizationId} csrfToken={auditSession.csrfToken} /> : null}
           {sessionState === "active" && activeView === "security" ? <SecuritySurface onSessionEnded={expireSession} /> : null}
-          {sessionState === "active" && activeView === "organizations" ? <OrganizationPanel /> : null}
+          {sessionState === "active" && activeView === "organizations" ? <OrganizationPanel key={selectedOrganizationId ?? "session-organization"} initialOrganizationId={selectedOrganizationId ?? undefined} /> : null}
           {sessionState === "active" && activeView === "recovery" ? <OwnerRecoveryPanel /> : null}
           {sessionState === "active" && activeView === "emergency" && canEmergencyStop ? <EmergencySurface data={data} onOpenConfirm={() => setConfirmOpen(true)} stopped={stopped} /> : null}
         </div>

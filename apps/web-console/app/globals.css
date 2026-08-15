@@ -138,6 +138,13 @@ a:focus-visible {
 .workspace-menu strong { font-size: 12px; }
 .workspace-menu span,
 .workspace-menu small { color: var(--ink-soft); font-size: 10px; }
+.workspace-options { display: grid; gap: 4px; margin: 5px 0; padding: 0; list-style: none; }
+.workspace-option { display: grid; width: 100%; gap: 2px; padding: 7px 8px; border: 1px solid transparent; border-radius: 6px; background: transparent; color: var(--ink); text-align: left; cursor: pointer; }
+.workspace-option:hover,
+.workspace-option:focus-visible,
+.workspace-option.is-selected { border-color: var(--line); background: #f2f0e8; }
+.workspace-option span { color: var(--ink); font-size: 11px; }
+.workspace-option small { color: var(--ink-soft); font-size: 9px; }
 
 .brand {
   display: flex;

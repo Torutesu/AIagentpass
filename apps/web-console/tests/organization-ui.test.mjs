@@ -51,6 +51,19 @@ test("AgentPassConsole exposes the Organization administration view", async () =
   assert.match(source, /import \{ OrganizationPanel \} from "\.\/OrganizationPanel"/);
   assert.match(source, /\| "organizations"/);
   assert.match(source, /label: "Organizations"/);
-  assert.match(source, /activeView === "organizations" \? <OrganizationPanel \/> : null/);
+  assert.match(source, /activeView === "organizations" \? <OrganizationPanel key=\{selectedOrganizationId \?\? "session-organization"\} initialOrganizationId=\{selectedOrganizationId \?\? undefined\} \/> : null/);
   assert.match(source, /organization-content/);
+});
+
+test("authenticated workspace selection is BFF-backed and fail-closed", async () => {
+  const source = await readFile(consolePath, "utf8");
+  assert.match(source, /createOrganizationClient/);
+  assert.match(source, /organizationClient\.listOrganizations\(\{ limit: 100 \}\)/);
+  assert.match(source, /resolveOrganizationSelection\(organizationOptions, organization\.id\)/);
+  assert.match(source, /setActiveView\("organizations"\)/);
+  assert.match(source, /initialOrganizationId=\{selectedOrganizationId \?\? undefined\}/);
+  assert.match(source, /activeView === "organizations" \? selectedOrganization\?\.name \?\? data\.workspace : data\.workspace/);
+  assert.match(source, /選択後も権限とテナントはCloudで再検証されます/);
+  assert.match(source, /このセッションでは組織の一覧を確認できません/);
+  assert.doesNotMatch(source, /localStorage|sessionStorage|document\.cookie|console\.(?:log|info|warn|error)/);
 });

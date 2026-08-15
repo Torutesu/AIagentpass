@@ -158,6 +158,17 @@ export function getOrganizationVisibility(role: OrganizationRole): OrganizationV
   });
 }
 
+/**
+ * Resolve a UI selection only against the latest server-returned organization
+ * page. A caller-supplied UUID that is not present in that page is never
+ * promoted into organization context.
+ */
+export function resolveOrganizationSelection(organizations: readonly Organization[], requestedId: unknown): Organization | undefined {
+  if (typeof requestedId !== "string" || !UUID.test(requestedId)) return undefined;
+  const normalizedId = requestedId.toLowerCase();
+  return organizations.find((organization) => organization.id === normalizedId);
+}
+
 export function createOrganizationClient(options: OrganizationClientOptions = {}): OrganizationClient {
   const fetchImpl = options.fetchImpl ?? globalThis.fetch;
   if (typeof fetchImpl !== "function") throw new OrganizationClientError("transport_failed", "Organization transport is unavailable");

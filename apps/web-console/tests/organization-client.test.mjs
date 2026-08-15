@@ -6,6 +6,7 @@ import {
   OrganizationClientError,
   createOrganizationClient,
   getOrganizationVisibility,
+  resolveOrganizationSelection,
 } from "../app/organization-client.ts";
 
 const organizationId = "11111111-1111-4111-8111-111111111111";
@@ -194,4 +195,16 @@ test("exposes least-privilege visibility for every organization role", () => {
   assert.deepEqual(getOrganizationVisibility("admin"), { canViewOrganization: true, canViewMembers: true, canViewInvitations: true, canManageOrganization: true, canManageMembers: true, canAssignOwner: false, canInvite: true, canRevokeInvitations: true });
   assert.deepEqual(getOrganizationVisibility("auditor"), { canViewOrganization: true, canViewMembers: true, canViewInvitations: true, canManageOrganization: false, canManageMembers: false, canAssignOwner: false, canInvite: false, canRevokeInvitations: false });
   assert.deepEqual(getOrganizationVisibility("viewer"), { canViewOrganization: true, canViewMembers: false, canViewInvitations: false, canManageOrganization: false, canManageMembers: false, canAssignOwner: false, canInvite: false, canRevokeInvitations: false });
+});
+
+test("resolves a workspace selection only from the server-returned tenant page", () => {
+  const organizations = [
+    { id: organizationId, name: "Current", version: 1, createdAt: date, updatedAt: date },
+    { id: secondOrganizationId, name: "Second", version: 1, createdAt: date, updatedAt: date },
+  ];
+  assert.equal(resolveOrganizationSelection(organizations, secondOrganizationId)?.name, "Second");
+  assert.equal(resolveOrganizationSelection(organizations, secondOrganizationId.toUpperCase())?.id, secondOrganizationId);
+  assert.equal(resolveOrganizationSelection(organizations, "99999999-9999-4999-8999-999999999999"), undefined);
+  assert.equal(resolveOrganizationSelection(organizations, "not-a-tenant"), undefined);
+  assert.equal(resolveOrganizationSelection(organizations, undefined), undefined);
 });

@@ -66,6 +66,7 @@ test("fails closed before Cloud for route, query, schema, idempotency, and recen
   const invalid = [
     request("/api/auth/organizations/not-a-uuid/members"),
     request("/api/auth/organizations?limit=101"),
+    request(`/api/auth/organizations?organization_id=${organizationId}`),
     request("/api/auth/organizations?cursor=a&cursor=b"),
     request(`/api/auth/organizations/${organizationId}?limit=1`, { method: "PATCH", body: { name: "x", expected_version: 1 }, headers: { "idempotency-key": idempotency } }),
     request("/api/auth/organizations", { method: "POST", body: { name: "x" } }),
