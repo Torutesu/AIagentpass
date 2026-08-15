@@ -12,6 +12,7 @@ DECLARE
 BEGIN
   FOREACH role_name IN ARRAY ARRAY[
     'agentpass_app',
+    'agentpass_signer',
     'agentpass_migrator',
     'agentpass_backup'
   ] LOOP
@@ -23,8 +24,10 @@ END
 $$;
 
 -- External authentication remains enabled, but no server-level authority is
--- inherited by any of the three service identities.
+-- inherited by any of the four service identities.
 ALTER ROLE agentpass_app
+  LOGIN NOINHERIT NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS;
+ALTER ROLE agentpass_signer
   LOGIN NOINHERIT NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS;
 ALTER ROLE agentpass_migrator
   LOGIN NOINHERIT NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS;
@@ -33,9 +36,10 @@ ALTER ROLE agentpass_backup
 
 -- Prevent an existing role membership from becoming a privilege-escalation
 -- path through SET ROLE, even though these roles are NOINHERIT.
-REVOKE agentpass_app FROM agentpass_migrator, agentpass_backup;
-REVOKE agentpass_migrator FROM agentpass_app, agentpass_backup;
-REVOKE agentpass_backup FROM agentpass_app, agentpass_migrator;
+REVOKE agentpass_app FROM agentpass_signer, agentpass_migrator, agentpass_backup;
+REVOKE agentpass_signer FROM agentpass_app, agentpass_migrator, agentpass_backup;
+REVOKE agentpass_migrator FROM agentpass_app, agentpass_signer, agentpass_backup;
+REVOKE agentpass_backup FROM agentpass_app, agentpass_signer, agentpass_migrator;
 
 -- Revoke database-wide PUBLIC access, then grant connection only to the
 -- identities that are explicitly part of this contract.
@@ -45,7 +49,7 @@ DECLARE
 BEGIN
   EXECUTE format('REVOKE ALL PRIVILEGES ON DATABASE %I FROM PUBLIC', database_name);
   EXECUTE format(
-    'GRANT CONNECT ON DATABASE %I TO agentpass_app, agentpass_migrator, agentpass_backup',
+    'GRANT CONNECT ON DATABASE %I TO agentpass_app, agentpass_signer, agentpass_migrator, agentpass_backup',
     database_name
   );
 END
@@ -54,8 +58,8 @@ $$;
 -- The existing migration set uses public. The migration role receives schema
 -- CREATE; app and backup receive USAGE only.
 REVOKE ALL PRIVILEGES ON SCHEMA public FROM PUBLIC;
-REVOKE ALL PRIVILEGES ON SCHEMA public FROM agentpass_app, agentpass_backup;
-GRANT USAGE ON SCHEMA public TO agentpass_app, agentpass_backup;
+REVOKE ALL PRIVILEGES ON SCHEMA public FROM agentpass_app, agentpass_signer, agentpass_backup;
+GRANT USAGE ON SCHEMA public TO agentpass_app, agentpass_signer, agentpass_backup;
 GRANT USAGE, CREATE ON SCHEMA public TO agentpass_migrator;
 
 -- Make the migration identity the owner of existing migration objects. This
@@ -106,15 +110,39 @@ $$;
 
 -- Clear grants on objects already present before applying the exact contract.
 REVOKE ALL PRIVILEGES ON ALL TABLES IN SCHEMA public FROM PUBLIC;
-REVOKE ALL PRIVILEGES ON ALL TABLES IN SCHEMA public FROM agentpass_app, agentpass_backup;
+REVOKE ALL PRIVILEGES ON ALL TABLES IN SCHEMA public FROM agentpass_app, agentpass_signer, agentpass_backup;
 REVOKE ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA public FROM PUBLIC;
-REVOKE ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA public FROM agentpass_app, agentpass_backup;
+REVOKE ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA public FROM agentpass_app, agentpass_signer, agentpass_backup;
 REVOKE ALL PRIVILEGES ON ALL FUNCTIONS IN SCHEMA public FROM PUBLIC;
-REVOKE ALL PRIVILEGES ON ALL FUNCTIONS IN SCHEMA public FROM agentpass_app, agentpass_backup;
+REVOKE ALL PRIVILEGES ON ALL FUNCTIONS IN SCHEMA public FROM agentpass_app, agentpass_signer, agentpass_backup;
 
 -- app: DML only, plus sequence consumption required by inserts.
 GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO agentpass_app;
 GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO agentpass_app;
+
+-- signer: temporary, purpose-limited ledger DML boundary. Runtime uses this
+-- identity exclusively for managed-signer lifecycle/provider operations. A
+-- subsequent forward migration replaces these direct grants with reviewed
+-- SECURITY DEFINER entry points; no organization, policy, session, audit, or
+-- promotion table is reachable through this role.
+DO $$
+DECLARE
+  relation_name text;
+BEGIN
+  FOREACH relation_name IN ARRAY ARRAY[
+    'managed_signer_key_lifecycles', 'managed_signer_keys',
+    'managed_signer_key_lifecycle_operations', 'managed_signer_signing_idempotency',
+    'managed_signer_provider_operations'
+  ] LOOP
+    IF to_regclass(format('public.%I', relation_name)) IS NOT NULL THEN
+      EXECUTE format(
+        'GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE public.%I TO agentpass_signer',
+        relation_name
+      );
+    END IF;
+  END LOOP;
+END
+$$;
 
 -- backup: read-only table and sequence-state access. It cannot consume or
 -- mutate sequences and cannot execute functions.
@@ -153,6 +181,16 @@ BEGIN
 END
 $$;
 
+-- The deployment-wide signer maintenance worker uses this bounded function.
+-- No other routine is executable by the signer identity.
+DO $$
+BEGIN
+  IF to_regprocedure('public.agentpass_quarantine_expired_managed_signer_provider_operations(integer)') IS NOT NULL THEN
+    GRANT EXECUTE ON FUNCTION public.agentpass_quarantine_expired_managed_signer_provider_operations(integer) TO agentpass_signer;
+  END IF;
+END
+$$;
+
 -- Promotion issuance is reachable only through the reviewed SECURITY DEFINER
 -- entry points. Helpers and every unrelated function remain non-executable by
 -- the application role.
@@ -176,21 +214,21 @@ $$;
 
 -- Future objects created by the migration identity preserve the same boundary.
 ALTER DEFAULT PRIVILEGES FOR ROLE agentpass_migrator IN SCHEMA public
-  REVOKE ALL PRIVILEGES ON TABLES FROM PUBLIC, agentpass_app, agentpass_backup;
+  REVOKE ALL PRIVILEGES ON TABLES FROM PUBLIC, agentpass_app, agentpass_signer, agentpass_backup;
 ALTER DEFAULT PRIVILEGES FOR ROLE agentpass_migrator IN SCHEMA public
   GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO agentpass_app;
 ALTER DEFAULT PRIVILEGES FOR ROLE agentpass_migrator IN SCHEMA public
   GRANT SELECT ON TABLES TO agentpass_backup;
 
 ALTER DEFAULT PRIVILEGES FOR ROLE agentpass_migrator IN SCHEMA public
-  REVOKE ALL PRIVILEGES ON SEQUENCES FROM PUBLIC, agentpass_app, agentpass_backup;
+  REVOKE ALL PRIVILEGES ON SEQUENCES FROM PUBLIC, agentpass_app, agentpass_signer, agentpass_backup;
 ALTER DEFAULT PRIVILEGES FOR ROLE agentpass_migrator IN SCHEMA public
   GRANT USAGE, SELECT ON SEQUENCES TO agentpass_app;
 ALTER DEFAULT PRIVILEGES FOR ROLE agentpass_migrator IN SCHEMA public
   GRANT SELECT ON SEQUENCES TO agentpass_backup;
 
 ALTER DEFAULT PRIVILEGES FOR ROLE agentpass_migrator IN SCHEMA public
-  REVOKE ALL PRIVILEGES ON FUNCTIONS FROM PUBLIC, agentpass_app, agentpass_backup;
+  REVOKE ALL PRIVILEGES ON FUNCTIONS FROM PUBLIC, agentpass_app, agentpass_signer, agentpass_backup;
 ALTER DEFAULT PRIVILEGES FOR ROLE agentpass_migrator IN SCHEMA public
   GRANT EXECUTE ON FUNCTIONS TO agentpass_migrator;
 

@@ -118,6 +118,8 @@ function createFixture({ identityPublicKey, controlBundlePublicKey } = {}) {
       AGENTPASS_OWNER_RECOVERY_NOTIFICATION_BINDING_DIGEST: "a".repeat(64),
       AGENTPASS_CLOUD_PORT: "0",
       AGENTPASS_DATABASE_URL: DATABASE_URL,
+      AGENTPASS_MIGRATION_DATABASE_URL: "postgresql://migrator:secret@db.example.test/agentpass?sslmode=verify-full",
+      AGENTPASS_SIGNER_DATABASE_URL: "postgresql://signer:secret@db.example.test/agentpass?sslmode=verify-full",
       AGENTPASS_CONSOLE_ORIGIN: "https://console.example.test",
       AGENTPASS_WEBAUTHN_RP_ID: "example.test",
       AGENTPASS_HUMAN_CURSOR_SECRET: CURSOR_SECRET,
@@ -207,6 +209,13 @@ function fakePostgresRuntime() {
     agentSessionAuthorityRepository: { async consumeAgentSessionGrant() { return null; } },
     qualificationGrantBatchRepository: { async claimQualificationGrantBatch() { return null; } },
     auditExportIssuanceRepository: { async reserveAuditExport() {}, async commitAuditExport() {}, async replayAuditExport() {}, async markAuditExportUncertain() {}, async getAuditExportPayload() {}, async getCommittedAuditExport() {} },
+    platformPromotionIssuanceRepository: {
+      async reservePlatformPromotion() { return { state: "in_progress" }; },
+      async commitPlatformPromotion() { return { state: "committed" }; },
+      async replayPlatformPromotion() { return { state: "absent" }; },
+      async markPlatformPromotionUncertain() { return { state: "uncertain" }; },
+      async getCommittedPlatformPromotion() { return null; }
+    },
     createManagedSignerKeyLifecycleRepository: createManagedSignerRepositoryFactory(),
     createProviderOperationRepository: createProviderOperationRepositoryFactory(),
     controlPlaneStore: { async pollDeviceRefresh() { return null; }, async markDeviceRefreshDelivered() {} },

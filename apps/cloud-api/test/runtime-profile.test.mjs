@@ -10,6 +10,8 @@ import {
 
 const SECRET = Buffer.alloc(32, 0x5a).toString("base64url");
 const DATABASE_URL = "postgresql://agent:database-password@db.example.test/agentpass?sslmode=verify-full";
+const MIGRATION_DATABASE_URL = "postgresql://migrator:database-password@db.example.test/agentpass?sslmode=verify-full";
+const SIGNER_DATABASE_URL = "postgresql://signer:database-password@db.example.test/agentpass?sslmode=verify-full";
 
 function evaluationEnv(overrides = {}) {
   return {
@@ -24,6 +26,14 @@ function hostedEnv(overrides = {}) {
   return {
     AGENTPASS_CLOUD_PROFILE: "hosted",
     AGENTPASS_DATABASE_URL: DATABASE_URL,
+    AGENTPASS_MIGRATION_DATABASE_URL: MIGRATION_DATABASE_URL,
+    AGENTPASS_SIGNER_DATABASE_URL: SIGNER_DATABASE_URL,
+    AGENTPASS_DATABASE_MAX_CONNECTIONS: "10",
+    AGENTPASS_SIGNER_DATABASE_MAX_CONNECTIONS: "4",
+    AGENTPASS_DATABASE_CONNECT_TIMEOUT_MS: "5000",
+    AGENTPASS_DATABASE_IDLE_TIMEOUT_MS: "30000",
+    AGENTPASS_DATABASE_STATEMENT_TIMEOUT_MS: "8000",
+    AGENTPASS_DATABASE_LOCK_TIMEOUT_MS: "2000",
     AGENTPASS_CONSOLE_ORIGIN: "https://console.example.test",
     AGENTPASS_WEBAUTHN_RP_ID: "example.test",
     AGENTPASS_IDENTITY_ASSERTION_ISSUER: "agentpass-console",
@@ -121,6 +131,8 @@ test("accepts hosted only with complete PostgreSQL and Human Auth prerequisites"
 
   for (const name of [
     "AGENTPASS_DATABASE_URL",
+    "AGENTPASS_MIGRATION_DATABASE_URL",
+    "AGENTPASS_SIGNER_DATABASE_URL",
     "AGENTPASS_CONSOLE_ORIGIN",
     "AGENTPASS_WEBAUTHN_RP_ID",
     "AGENTPASS_IDENTITY_ASSERTION_ISSUER",
@@ -159,7 +171,10 @@ test("accepts hosted only with complete PostgreSQL and Human Auth prerequisites"
   ]) {
     const env = hostedEnv();
     delete env[name];
-    assertProfileError(() => parseCloudRuntimeProfile(env), CLOUD_RUNTIME_PROFILE_ERROR_CODES.HOSTED_AUTH_INCOMPLETE);
+    const expected = ["AGENTPASS_MIGRATION_DATABASE_URL", "AGENTPASS_SIGNER_DATABASE_URL"].includes(name)
+      ? CLOUD_RUNTIME_PROFILE_ERROR_CODES.DATABASE_INVALID
+      : CLOUD_RUNTIME_PROFILE_ERROR_CODES.HOSTED_AUTH_INCOMPLETE;
+    assertProfileError(() => parseCloudRuntimeProfile(env), expected);
   }
 });
 
@@ -234,6 +249,18 @@ test("fails closed for partial, malformed, stale, unsafe, and unknown configurat
   assertProfileError(
     () => parseCloudRuntimeProfile(hostedEnv({ AGENTPASS_DATABASE_URL: undefined })),
     CLOUD_RUNTIME_PROFILE_ERROR_CODES.HOSTED_AUTH_INCOMPLETE
+  );
+  assertProfileError(
+    () => parseCloudRuntimeProfile(hostedEnv({ AGENTPASS_MIGRATION_DATABASE_URL: undefined })),
+    CLOUD_RUNTIME_PROFILE_ERROR_CODES.DATABASE_INVALID
+  );
+  assertProfileError(
+    () => parseCloudRuntimeProfile(hostedEnv({ AGENTPASS_SIGNER_DATABASE_URL: DATABASE_URL })),
+    CLOUD_RUNTIME_PROFILE_ERROR_CODES.DATABASE_INVALID
+  );
+  assertProfileError(
+    () => parseCloudRuntimeProfile(hostedEnv({ AGENTPASS_SIGNER_DATABASE_URL: "postgresql://signer:pw@other.example.test/agentpass?sslmode=verify-full" })),
+    CLOUD_RUNTIME_PROFILE_ERROR_CODES.DATABASE_INVALID
   );
   assertProfileError(
     () => parseCloudRuntimeProfile(hostedEnv({ AGENTPASS_DATABASE_URL: "postgresql://agent:pw@db.example.test/agentpass?sslmode=require" })),

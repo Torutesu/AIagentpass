@@ -10,7 +10,7 @@ import { Pool } from "pg";
 import { createMigrationRunner } from "../../src/postgres/migration-runner.mjs";
 
 const DATABASE_URL = process.env.AGENTPASS_TEST_DATABASE_URL ?? process.env.AGENTPASS_TEST_POSTGRES_URL;
-const ROLE_NAMES = Object.freeze({ app: "agentpass_app", migrator: "agentpass_migrator", backup: "agentpass_backup" });
+const ROLE_NAMES = Object.freeze({ app: "agentpass_app", signer: "agentpass_signer", migrator: "agentpass_migrator", backup: "agentpass_backup" });
 const SQLSTATE_PERMISSION_DENIED = new Set(["42501", "0LP01"]);
 const REPOSITORY_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../../..");
 const ROLES_SQL_PATH = path.join(REPOSITORY_ROOT, "scripts/postgres/roles.sql");
@@ -197,6 +197,27 @@ test("qualifies PostgreSQL 16 least-privilege roles against real migrations and 
     await expectPermissionDenied(() => client.query("ALTER SEQUENCE public.q2a_least_privilege_role_sequence INCREMENT BY 2"));
     await expectPermissionDenied(() => client.query("UPDATE schema_migrations SET checksum=checksum WHERE version=1"));
     await expectPermissionDenied(() => client.query("SET ROLE agentpass_migrator"));
+  });
+
+  await withSessionAuthorization(pool, ROLE_NAMES.signer, async (client) => {
+    for (const table of [
+      "managed_signer_key_lifecycles", "managed_signer_keys",
+      "managed_signer_key_lifecycle_operations", "managed_signer_signing_idempotency",
+      "managed_signer_provider_operations"
+    ]) {
+      const privileges = await client.query(
+        "SELECT has_table_privilege(current_user,$1,'SELECT,INSERT,UPDATE,DELETE') AS allowed",
+        [`public.${table}`]
+      );
+      assert.equal(privileges.rows[0].allowed, true, `signer ledger privilege missing for ${table}`);
+    }
+    await client.query("SELECT agentpass_quarantine_expired_managed_signer_provider_operations(1)");
+    await expectPermissionDenied(() => client.query("SELECT name FROM organizations LIMIT 1"));
+    await expectPermissionDenied(() => client.query(`SELECT count(*) FROM ${SMOKE_TABLE_NAME}`));
+    await expectPermissionDenied(() => client.query("SELECT nextval('public.q2a_least_privilege_role_sequence')"));
+    await expectPermissionDenied(() => client.query("SELECT agentpass_current_organization_id()"));
+    await expectPermissionDenied(() => client.query("SET ROLE agentpass_migrator"));
+    await expectPermissionDenied(() => client.query("SET ROLE agentpass_app"));
   });
 
   await withSessionAuthorization(pool, ROLE_NAMES.migrator, async (client) => {

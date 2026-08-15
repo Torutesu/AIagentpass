@@ -82,7 +82,10 @@ const HOSTED_KMS_ENV = Object.freeze([
 ]);
 const DATABASE_ENV = Object.freeze([
   "AGENTPASS_DATABASE_URL",
+  "AGENTPASS_MIGRATION_DATABASE_URL",
+  "AGENTPASS_SIGNER_DATABASE_URL",
   "AGENTPASS_DATABASE_MAX_CONNECTIONS",
+  "AGENTPASS_SIGNER_DATABASE_MAX_CONNECTIONS",
   "AGENTPASS_DATABASE_CONNECT_TIMEOUT_MS",
   "AGENTPASS_DATABASE_IDLE_TIMEOUT_MS",
   "AGENTPASS_DATABASE_STATEMENT_TIMEOUT_MS",
@@ -370,17 +373,11 @@ function parseFileStore(env) {
 function parseDatabase(env) {
   const present = DATABASE_ENV.some((name) => configured(env, name));
   if (!present) return { present: false };
-  const raw = env.AGENTPASS_DATABASE_URL;
-  if (typeof raw !== "string" || raw.length < 1) fail(CLOUD_RUNTIME_PROFILE_ERROR_CODES.DATABASE_INVALID);
-  let url;
-  try { url = new URL(raw); } catch { fail(CLOUD_RUNTIME_PROFILE_ERROR_CODES.DATABASE_INVALID); }
-  if (url.protocol !== "postgresql:" || !url.hostname || !url.username || !url.password || url.hash) {
-    fail(CLOUD_RUNTIME_PROFILE_ERROR_CODES.DATABASE_INVALID);
-  }
-  const sslModes = url.searchParams.getAll("sslmode");
-  if (sslModes.length !== 1 || sslModes[0] !== "verify-full") fail(CLOUD_RUNTIME_PROFILE_ERROR_CODES.DATABASE_INVALID);
-  for (const key of url.searchParams.keys()) if (key !== "sslmode") fail(CLOUD_RUNTIME_PROFILE_ERROR_CODES.DATABASE_INVALID);
+  const urls = [env.AGENTPASS_DATABASE_URL, env.AGENTPASS_MIGRATION_DATABASE_URL, env.AGENTPASS_SIGNER_DATABASE_URL].map(parseDatabaseRoleUrl);
+  const target = databaseTarget(urls[0]);
+  if (urls.some((url) => databaseTarget(url) !== target) || new Set(urls.map((url) => url.username)).size !== urls.length) fail(CLOUD_RUNTIME_PROFILE_ERROR_CODES.DATABASE_INVALID);
   if (!boundedInteger(env.AGENTPASS_DATABASE_MAX_CONNECTIONS, 2, 100)
+    || !boundedInteger(env.AGENTPASS_SIGNER_DATABASE_MAX_CONNECTIONS, 2, 50)
     || !boundedInteger(env.AGENTPASS_DATABASE_CONNECT_TIMEOUT_MS, 250, 30_000)
     || !boundedInteger(env.AGENTPASS_DATABASE_IDLE_TIMEOUT_MS, 1_000, 300_000)
     || !boundedInteger(env.AGENTPASS_DATABASE_STATEMENT_TIMEOUT_MS, 250, 60_000)
@@ -389,6 +386,19 @@ function parseDatabase(env) {
   }
   return { present: true };
 }
+
+function parseDatabaseRoleUrl(raw) {
+  if (typeof raw !== "string" || raw.length < 1) fail(CLOUD_RUNTIME_PROFILE_ERROR_CODES.DATABASE_INVALID);
+  let url;
+  try { url = new URL(raw); } catch { fail(CLOUD_RUNTIME_PROFILE_ERROR_CODES.DATABASE_INVALID); }
+  if (url.protocol !== "postgresql:" || !url.hostname || !url.username || !url.password || url.hash) fail(CLOUD_RUNTIME_PROFILE_ERROR_CODES.DATABASE_INVALID);
+  const sslModes = url.searchParams.getAll("sslmode");
+  if (sslModes.length !== 1 || sslModes[0] !== "verify-full") fail(CLOUD_RUNTIME_PROFILE_ERROR_CODES.DATABASE_INVALID);
+  for (const key of url.searchParams.keys()) if (key !== "sslmode") fail(CLOUD_RUNTIME_PROFILE_ERROR_CODES.DATABASE_INVALID);
+  return url;
+}
+
+function databaseTarget(url) { return `${url.hostname.toLowerCase()}:${url.port || "5432"}${url.pathname}`; }
 
 function parseHumanAuth(env) {
   const present = HUMAN_AUTH_ENV.some((name) => configured(env, name));

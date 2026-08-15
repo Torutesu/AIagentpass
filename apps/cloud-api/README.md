@@ -39,7 +39,7 @@ Output is bounded JSON metadata only. Success reports the command, stable result
 
 ## Production persistence and human authentication
 
-The production foundation lives in `src/postgres/` and uses the ordered SQL in `contracts/postgres/`. The migration runner verifies immutable SHA-256 checksums, refuses gaps/newer history/dirty attempts, takes a PostgreSQL advisory lock, and applies migrations transactionally. `AGENTPASS_CLOUD_PROFILE` is mandatory: `hosted` constructs only the PostgreSQL control-plane store, while `evaluation` is the only profile allowed to open the protected reference file store.
+The production foundation lives in `src/postgres/` and uses the ordered SQL in `contracts/postgres/`. The migration runner verifies immutable SHA-256 checksums, refuses gaps/newer history/dirty attempts, takes a PostgreSQL advisory lock, and applies migrations transactionally. Hosted runtime requires three TLS-authenticated database identities: `agentpass_app` for ordinary repositories, `agentpass_migrator` for startup migration only, and `agentpass_signer` for managed-signer lifecycle/provider-operation authority. All three URLs must target the same database, use distinct usernames, and contain only `sslmode=verify-full`. The migration pool is closed before traffic composition. `AGENTPASS_CLOUD_PROFILE` is mandatory: `hosted` constructs only the PostgreSQL control-plane store, while `evaluation` is the only profile allowed to open the protected reference file store.
 
 Hosted additionally requires `AGENTPASS_CAPABILITY_NONCE_SECRET` and `AGENTPASS_OPERATIONAL_PROBE_SECRET`, each a distinct canonical unpadded 32-byte base64url secret shared by the relevant Cloud instances/operators. The capability secret derives retry-stable nonces with a purpose-separated HMAC; PostgreSQL stores only the nonce digest and safe statement metadata. The operational secret authenticates readiness and metrics probes via the `AgentPass-Operational-Token` header. Hosted also requires the owner-recovery notification webhook settings described below; startup fails instead of silently accumulating undeliverable security notifications. Never put these values in a URL or log.
 
@@ -66,8 +66,11 @@ export AGENTPASS_KMS_REFRESH_HINT_KEY_RESOURCE='arn:aws:kms:REGION:ACCOUNT:key/K
 export AGENTPASS_CLOUD_HOST=127.0.0.1
 export AGENTPASS_CLOUD_PORT=8080
 # Enable the production Human Auth path as one all-or-nothing group:
-export AGENTPASS_DATABASE_URL='postgresql://agentpass:...@db.example/agentpass?sslmode=verify-full'
+export AGENTPASS_DATABASE_URL='postgresql://agentpass_app:...@db.example/agentpass?sslmode=verify-full'
+export AGENTPASS_MIGRATION_DATABASE_URL='postgresql://agentpass_migrator:...@db.example/agentpass?sslmode=verify-full'
+export AGENTPASS_SIGNER_DATABASE_URL='postgresql://agentpass_signer:...@db.example/agentpass?sslmode=verify-full'
 export AGENTPASS_DATABASE_MAX_CONNECTIONS=10 # minimum 2; one is reserved while LISTEN is active
+export AGENTPASS_SIGNER_DATABASE_MAX_CONNECTIONS=4
 export AGENTPASS_CONSOLE_ORIGIN='https://console.example.com'
 export AGENTPASS_WEBAUTHN_RP_ID='example.com'
 export AGENTPASS_IDENTITY_PROVIDER='chatgpt'

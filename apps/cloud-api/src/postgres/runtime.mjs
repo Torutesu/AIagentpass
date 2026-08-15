@@ -30,13 +30,14 @@ import { createManagedSignerProviderOperationMaintenanceWorker } from "./managed
 import { createPostgresAuditExportSnapshotReader } from "./audit-export-snapshot-reader.mjs";
 import { createPostgresAuditExportIssuanceRepository } from "./audit-export-issuance-repository.mjs";
 import { createPostgresPlatformPromotionIssuanceRepository } from "./platform-promotion-issuance-repository.mjs";
+import { createPostgresPlatformOperatorAssignmentRepository } from "./platform-operator-assignment-repository.mjs";
 import {
   createDrainController,
   createOperationalHealth,
   createOperationalMetrics
 } from "./operational-health.mjs";
 
-export async function createPostgresRuntime({ env = process.env, PoolClass = Pool, applicationVersion = "unknown", refreshNonceCodec, resolveProcessBindingPolicy, ownerRecoveryPublisher, platformPromotionVerifyEvidence, ownerRecoveryOutboxAutoStart = true, ownerRecoveryOutboxWorkerOptions = {}, sharedControlMaintenanceAutoStart = true, sharedControlMaintenanceWorkerOptions = {}, managedSignerProviderOperationMaintenanceAutoStart = true, managedSignerProviderOperationMaintenanceWorkerOptions = {} } = {}) {
+export async function createPostgresRuntime({ env = process.env, PoolClass = Pool, MigrationPoolClass = PoolClass, SignerPoolClass = PoolClass, applicationVersion = "unknown", refreshNonceCodec, resolveProcessBindingPolicy, ownerRecoveryPublisher, platformPromotionVerifyEvidence, ownerRecoveryOutboxAutoStart = true, ownerRecoveryOutboxWorkerOptions = {}, sharedControlMaintenanceAutoStart = true, sharedControlMaintenanceWorkerOptions = {}, managedSignerProviderOperationMaintenanceAutoStart = true, managedSignerProviderOperationMaintenanceWorkerOptions = {} } = {}) {
   if (resolveProcessBindingPolicy !== undefined && typeof resolveProcessBindingPolicy !== "function") throw new TypeError("resolveProcessBindingPolicy must be a function");
   if (typeof ownerRecoveryOutboxAutoStart !== "boolean" || !ownerRecoveryOutboxWorkerOptions || typeof ownerRecoveryOutboxWorkerOptions !== "object" || Array.isArray(ownerRecoveryOutboxWorkerOptions)) throw new TypeError("owner recovery outbox runtime configuration is invalid");
   if (typeof sharedControlMaintenanceAutoStart !== "boolean" || !sharedControlMaintenanceWorkerOptions || typeof sharedControlMaintenanceWorkerOptions !== "object" || Array.isArray(sharedControlMaintenanceWorkerOptions)) throw new TypeError("shared-control maintenance runtime configuration is invalid");
@@ -55,12 +56,17 @@ export async function createPostgresRuntime({ env = process.env, PoolClass = Poo
   const auditCursorSecret = exactSecret(env.AGENTPASS_HUMAN_CURSOR_SECRET, "AGENTPASS_HUMAN_CURSOR_SECRET");
   const capabilityNonceSecret = exactSecret(env.AGENTPASS_CAPABILITY_NONCE_SECRET, "AGENTPASS_CAPABILITY_NONCE_SECRET");
   const config = loadPostgresConfig(env);
-  const pool = new PoolClass({ connectionString: config.connectionString, ssl: { rejectUnauthorized: true }, max: config.maxConnections, connectionTimeoutMillis: config.connectionTimeoutMs, idleTimeoutMillis: config.idleTimeoutMs, statement_timeout: config.statementTimeoutMs, lock_timeout: config.lockTimeoutMs, query_timeout: config.statementTimeoutMs + 1_000, allowExitOnIdle: false });
+  const poolOptions = (connectionString, max) => ({ connectionString, ssl: { rejectUnauthorized: true }, max, connectionTimeoutMillis: config.connectionTimeoutMs, idleTimeoutMillis: config.idleTimeoutMs, statement_timeout: config.statementTimeoutMs, lock_timeout: config.lockTimeoutMs, query_timeout: config.statementTimeoutMs + 1_000, allowExitOnIdle: false });
+  const pool = new PoolClass(poolOptions(config.connectionString, config.maxConnections));
+  const migrationPool = new MigrationPoolClass(poolOptions(config.migrationConnectionString, 2));
+  const signerPool = new SignerPoolClass(poolOptions(config.signerConnectionString, config.signerMaxConnections));
   let migrationRunner;
   let migrations;
   let client;
   let migrationClientReleased = false;
   let poolEndPromise;
+  let migrationPoolEndPromise;
+  let signerPoolEndPromise;
   let ownerRecoveryOutboxWorker;
   let ownerRecoveryOutboxRepository;
   let sharedControlMaintenanceWorker;
@@ -80,6 +86,16 @@ export async function createPostgresRuntime({ env = process.env, PoolClass = Poo
     return poolEndPromise;
   }
 
+  function endMigrationPoolOnce() {
+    if (migrationPoolEndPromise === undefined) migrationPoolEndPromise = Promise.resolve().then(() => migrationPool.end());
+    return migrationPoolEndPromise;
+  }
+
+  function endSignerPoolOnce() {
+    if (signerPoolEndPromise === undefined) signerPoolEndPromise = Promise.resolve().then(() => signerPool.end());
+    return signerPoolEndPromise;
+  }
+
   async function cleanupConstructionFailure() {
     // Cleanup is deliberately best effort: the construction error is the
     // stable public failure and must never be replaced by a close error.
@@ -94,16 +110,20 @@ export async function createPostgresRuntime({ env = process.env, PoolClass = Poo
       try { await close(resource); } catch { /* preserve the original construction error */ }
     }
     try { releaseMigrationClient(true); } catch { /* preserve the original construction error */ }
+    try { await endMigrationPoolOnce(); } catch { /* preserve the original construction error */ }
+    try { await endSignerPoolOnce(); } catch { /* preserve the original construction error */ }
     try { await endPoolOnce(); } catch { /* preserve the original construction error */ }
   }
 
   try {
     migrations = await loadSqlMigrations();
     migrationRunner = createMigrationRunner({ client: pool, applicationVersion, migrations });
-    client = await pool.connect();
+    client = await migrationPool.connect();
     await client.query("SELECT set_config('statement_timeout', $1, false)", [`${config.statementTimeoutMs}ms`]);
     await client.query("SELECT set_config('lock_timeout', $1, false)", [`${config.lockTimeoutMs}ms`]);
     await createMigrationRunner({ client, applicationVersion, migrations }).run();
+    releaseMigrationClient();
+    await endMigrationPoolOnce();
   } catch (error) {
     await cleanupConstructionFailure();
     throw error;
@@ -115,7 +135,7 @@ export async function createPostgresRuntime({ env = process.env, PoolClass = Poo
   let closePoolPromise;
   const drainController = createDrainController();
   const operationalMetrics = createOperationalMetrics();
-  const providerOperationMaintenanceRepository = createPostgresProviderOperationMaintenanceRepository({ client: pool });
+  const providerOperationMaintenanceRepository = createPostgresProviderOperationMaintenanceRepository({ client: signerPool });
   providerOperationMaintenanceWorker = createManagedSignerProviderOperationMaintenanceWorker({
     firstCycleDelayMs: 5_000,
     intervalMs: 30_000,
@@ -156,7 +176,8 @@ export async function createPostgresRuntime({ env = process.env, PoolClass = Poo
     if (closePoolPromise) return closePoolPromise;
     closePoolPromise = (async () => {
       await refreshHintNotifier.close();
-      await pool.end();
+      await endSignerPoolOnce();
+      await endPoolOnce();
       closed = true;
     })();
     try { await closePoolPromise; } catch (error) { closePoolPromise = undefined; throw error; }
@@ -269,6 +290,7 @@ export async function createPostgresRuntime({ env = process.env, PoolClass = Poo
     client: pool,
     verifyEvidence: platformPromotionVerifyEvidence
   });
+  const platformOperatorAssignmentRepository = createPostgresPlatformOperatorAssignmentRepository({ client: pool });
   const controlPlaneStore = createPostgresControlPlaneStore({
     client: pool,
     organizationRepository,
@@ -306,8 +328,9 @@ export async function createPostgresRuntime({ env = process.env, PoolClass = Poo
     qualificationGrantBatchRepository,
     auditExportIssuanceRepository,
     platformPromotionIssuanceRepository,
-    createManagedSignerKeyLifecycleRepository: (options = {}) => createPostgresManagedSignerKeyLifecycleRepository({ ...options, client: pool }),
-    createProviderOperationRepository: (options = {}) => createPostgresProviderOperationRepository({ ...options, client: pool }),
+    platformOperatorAssignmentRepository,
+    createManagedSignerKeyLifecycleRepository: (options = {}) => createPostgresManagedSignerKeyLifecycleRepository({ ...options, client: signerPool }),
+    createProviderOperationRepository: (options = {}) => createPostgresProviderOperationRepository({ ...options, client: signerPool }),
     providerOperationMaintenanceRepository,
     providerOperationMaintenanceWorker,
     ownerRecoveryRepository,
@@ -385,23 +408,37 @@ function transactionBoundClient(tx) {
 }
 
 export function loadPostgresConfig(env = {}) {
-  const raw = env.AGENTPASS_DATABASE_URL;
-  let url;
-  try { url = new URL(raw); } catch { throw new TypeError("AGENTPASS_DATABASE_URL is invalid"); }
-  if (url.protocol !== "postgresql:" || !url.hostname || !url.username || !url.password || url.hash) throw new TypeError("AGENTPASS_DATABASE_URL is invalid");
-  const parameters = [...url.searchParams.entries()];
-  if (parameters.length !== 1 || parameters[0][0] !== "sslmode" || parameters[0][1] !== "verify-full") {
-    throw new TypeError("PostgreSQL sslmode=verify-full is required and must be the only connection parameter");
-  }
+  const app = postgresRoleUrl(env.AGENTPASS_DATABASE_URL, "AGENTPASS_DATABASE_URL");
+  const migration = postgresRoleUrl(env.AGENTPASS_MIGRATION_DATABASE_URL, "AGENTPASS_MIGRATION_DATABASE_URL");
+  const signer = postgresRoleUrl(env.AGENTPASS_SIGNER_DATABASE_URL, "AGENTPASS_SIGNER_DATABASE_URL");
+  const appTarget = postgresTarget(app);
+  if (postgresTarget(migration) !== appTarget || postgresTarget(signer) !== appTarget) throw new TypeError("PostgreSQL role databases must target the same authority database");
+  if (new Set([app.username, migration.username, signer.username]).size !== 3) throw new TypeError("PostgreSQL app, migration, and signer roles must be distinct");
   return Object.freeze({
-    connectionString: url.toString(),
+    connectionString: app.toString(),
+    migrationConnectionString: migration.toString(),
+    signerConnectionString: signer.toString(),
     maxConnections: integer(env.AGENTPASS_DATABASE_MAX_CONNECTIONS ?? "10", 2, 100),
+    signerMaxConnections: integer(env.AGENTPASS_SIGNER_DATABASE_MAX_CONNECTIONS ?? "4", 2, 50),
     connectionTimeoutMs: integer(env.AGENTPASS_DATABASE_CONNECT_TIMEOUT_MS ?? "5000", 250, 30_000),
     idleTimeoutMs: integer(env.AGENTPASS_DATABASE_IDLE_TIMEOUT_MS ?? "30000", 1_000, 300_000),
     statementTimeoutMs: integer(env.AGENTPASS_DATABASE_STATEMENT_TIMEOUT_MS ?? "8000", 250, 60_000),
     lockTimeoutMs: integer(env.AGENTPASS_DATABASE_LOCK_TIMEOUT_MS ?? "2000", 100, 30_000)
   });
 }
+
+function postgresRoleUrl(raw, name) {
+  let url;
+  try { url = new URL(raw); } catch { throw new TypeError(`${name} is invalid`); }
+  if (url.protocol !== "postgresql:" || !url.hostname || !url.username || !url.password || url.hash) throw new TypeError(`${name} is invalid`);
+  const parameters = [...url.searchParams.entries()];
+  if (parameters.length !== 1 || parameters[0][0] !== "sslmode" || parameters[0][1] !== "verify-full") {
+    throw new TypeError("PostgreSQL sslmode=verify-full is required and must be the only connection parameter");
+  }
+  return url;
+}
+
+function postgresTarget(url) { return `${url.hostname.toLowerCase()}:${url.port || "5432"}${url.pathname}`; }
 
 function integer(value, min, max) { if (typeof value !== "string" || !/^\d+$/.test(value)) throw new TypeError("PostgreSQL timeout/limit is invalid"); const result=Number(value); if(!Number.isSafeInteger(result)||result<min||result>max) throw new TypeError("PostgreSQL timeout/limit is invalid"); return result; }
 

@@ -10,6 +10,7 @@ import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
 import { Pool } from "pg";
+import { createMigrationRunner } from "../../../apps/cloud-api/src/postgres/migration-runner.mjs";
 
 const REPOSITORY_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../..");
 const LOOPBACK = "127.0.0.1";
@@ -22,6 +23,11 @@ const MAX_CA_BYTES = 256 * 1024;
 const TRUSTED_HTTPS_LOOPBACK_HOSTS = new Set(["localhost", "127.0.0.1", "[::1]"]);
 const POSTGRES_CA_ENV_NAMES = ["P0B_POSTGRES_CA_FILE", "AGENTPASS_TEST_POSTGRES_CA_FILE"];
 const P0B_CLOUD_PROCESS = path.join(REPOSITORY_ROOT, "test/support/p0b/cloud-runtime-process.mjs");
+const P0B_DATABASE_ROLES = Object.freeze({
+  app: "agentpass_app",
+  migration: "agentpass_migrator",
+  signer: "agentpass_signer"
+});
 
 export class P0BSkip extends Error {
   constructor(code, diagnostic) {
@@ -67,6 +73,31 @@ export function createVerifiedPostgresPoolOptions(value, { ca } = {}) {
   if (url.port) options.port = Number(url.port);
   if (ca !== undefined) options.ssl.ca = ca;
   return options;
+}
+
+async function prepareP0BDatabaseAuthorities(database) {
+  const migrationClient = await database.pool.connect();
+  try {
+    await createMigrationRunner({ client: migrationClient, applicationVersion: "p0b-authority-bootstrap" }).run();
+  } finally {
+    migrationClient.release();
+  }
+
+  const rolesSql = (await fsp.readFile(path.join(REPOSITORY_ROOT, "scripts/postgres/roles.sql"), "utf8"))
+    .replace(/^\\set\s+ON_ERROR_STOP\s+on\s*$/mu, "")
+    .trim();
+  await database.pool.query(rolesSql);
+
+  const credentials = Object.create(null);
+  for (const [authority, role] of Object.entries(P0B_DATABASE_ROLES)) {
+    const password = crypto.randomBytes(32).toString("hex");
+    await database.pool.query(`ALTER ROLE ${role} PASSWORD '${password}'`);
+    const roleUrl = new URL(database.url);
+    roleUrl.username = role;
+    roleUrl.password = password;
+    credentials[authority] = roleUrl.toString();
+  }
+  return Object.freeze(credentials);
 }
 
 export async function readPostgresCaFile(caFile, { env = process.env } = {}) {
@@ -213,6 +244,7 @@ export async function startP0BHarness({ env = process.env, repoRoot = REPOSITORY
   try {
     const certificates = await createTestCertificates(temp);
     database = await createDisposablePostgres({ env });
+    const databaseAuthorities = await prepareP0BDatabaseAuthorities(database);
     const organizationId = crypto.randomUUID();
     const files = await createRuntimeFiles(temp);
     if (prepareDatabase) await prepareDatabase(Object.freeze({
@@ -227,7 +259,9 @@ export async function startP0BHarness({ env = process.env, repoRoot = REPOSITORY
     const consolePort = await reservePort();
     const consoleTlsPort = await reservePort();
     const common = {
-      AGENTPASS_DATABASE_URL: database.url,
+      AGENTPASS_DATABASE_URL: databaseAuthorities.app,
+      AGENTPASS_MIGRATION_DATABASE_URL: databaseAuthorities.migration,
+      AGENTPASS_SIGNER_DATABASE_URL: databaseAuthorities.signer,
       AGENTPASS_CLOUD_PROFILE: "hosted",
       AGENTPASS_CLOUD_HOST: LOOPBACK,
       AGENTPASS_CLOUD_PORT: cloudPort,

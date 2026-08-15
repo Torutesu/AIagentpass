@@ -21,7 +21,11 @@ const { Pool } = pg;
 
 class QualificationPool extends Pool {
   constructor(options) {
-    const connection = new URL(options.connectionString);
+    // This process-kill test qualifies lifecycle reconstruction, not database
+    // login roles. Its injected pool uses the disposable administrator URL,
+    // while production configuration parsing still proves three distinct role
+    // identities. Least-privilege login behavior has a separate qualification.
+    const connection = new URL(process.env.AGENTPASS_TEST_POSTGRES_URL);
     connection.search = "";
     super({ ...options, connectionString: connection.toString(), ssl: false });
   }
@@ -38,7 +42,8 @@ try {
     env: runtimeEnvironment(),
     PoolClass: QualificationPool,
     applicationVersion: "g4-1-process-kill-qualification",
-    refreshNonceCodec: codec
+    refreshNonceCodec: codec,
+    platformPromotionVerifyEvidence: async () => false
   });
 
   if (role === "publisher") await runPublisher({ codec });
@@ -56,8 +61,15 @@ function runtimeEnvironment() {
   const validatedURL = new URL(databaseUrl);
   validatedURL.protocol = "postgresql:";
   validatedURL.search = "?sslmode=verify-full";
+  const roleUrl = (username) => {
+    const value = new URL(validatedURL);
+    value.username = username;
+    return value.toString();
+  };
   return {
-    AGENTPASS_DATABASE_URL: validatedURL.toString(),
+    AGENTPASS_DATABASE_URL: roleUrl("agentpass_app"),
+    AGENTPASS_MIGRATION_DATABASE_URL: roleUrl("agentpass_migrator"),
+    AGENTPASS_SIGNER_DATABASE_URL: roleUrl("agentpass_signer"),
     AGENTPASS_DATABASE_MAX_CONNECTIONS: "3",
     AGENTPASS_DATABASE_CONNECT_TIMEOUT_MS: "2000",
     AGENTPASS_DATABASE_IDLE_TIMEOUT_MS: "1000",

@@ -9,10 +9,10 @@ test('role SQL is idempotent, credential-free, and PUBLIC is revoked', async () 
   const sql = await read('scripts/postgres/roles.sql');
 
   assert.match(sql, /CREATE ROLE %I LOGIN/);
-  for (const role of ['agentpass_app', 'agentpass_migrator', 'agentpass_backup']) assert.match(sql, new RegExp(`\\b${role}\\b`));
+  for (const role of ['agentpass_app', 'agentpass_signer', 'agentpass_migrator', 'agentpass_backup']) assert.match(sql, new RegExp(`\\b${role}\\b`));
   assert.doesNotMatch(sql, /PASSWORD\s+['"]/i);
   assert.doesNotMatch(sql, /postgres(?:ql)?:\/\/[^\s]*:[^\s@]+@/i);
-  assert.match(sql, /REVOKE agentpass_migrator FROM agentpass_app, agentpass_backup/);
+  assert.match(sql, /REVOKE agentpass_migrator FROM agentpass_app, agentpass_signer, agentpass_backup/);
   assert.match(sql, /REVOKE ALL PRIVILEGES ON DATABASE/);
   assert.match(sql, /REVOKE ALL PRIVILEGES ON SCHEMA public FROM PUBLIC/);
   assert.match(sql, /REVOKE ALL PRIVILEGES ON ALL TABLES IN SCHEMA public FROM PUBLIC/);
@@ -34,13 +34,17 @@ test('app is DML-only, migrator owns migration authority, and backup is read-onl
   const sql = await read('scripts/postgres/roles.sql');
 
   assert.match(sql, /GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO agentpass_app/);
+  assert.match(sql, /'agentpass_signer'/);
+  assert.match(sql, /GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE public\.%I TO agentpass_signer/);
+  assert.match(sql, /agentpass_quarantine_expired_managed_signer_provider_operations\(integer\).*TO agentpass_signer/su);
   assert.match(sql, /GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO agentpass_app/);
   assert.match(sql, /GRANT USAGE, CREATE ON SCHEMA public TO agentpass_migrator/);
   assert.match(sql, /OWNER TO agentpass_migrator/);
   assert.match(sql, /GRANT SELECT ON ALL TABLES IN SCHEMA public TO agentpass_backup/);
   assert.match(sql, /GRANT SELECT ON ALL SEQUENCES IN SCHEMA public TO agentpass_backup/);
-  assert.match(sql, /REVOKE ALL PRIVILEGES ON ALL FUNCTIONS IN SCHEMA public FROM agentpass_app, agentpass_backup/);
+  assert.match(sql, /REVOKE ALL PRIVILEGES ON ALL FUNCTIONS IN SCHEMA public FROM agentpass_app, agentpass_signer, agentpass_backup/);
   assert.doesNotMatch(sql, /GRANT .* ON SCHEMA public TO agentpass_app[^\n]*CREATE/i);
+  assert.doesNotMatch(sql, /GRANT .* ON SCHEMA public TO agentpass_signer[^\n]*CREATE/i);
 });
 
 test('checker reads the URL from the environment, enforces verify-full, and measures opaque evidence', async () => {
@@ -53,6 +57,8 @@ test('checker reads the URL from the environment, enforces verify-full, and meas
   assert.match(checker, /current_user/);
   assert.match(checker, /current_user = 'agentpass_migrator'/);
   for (const privilegeFunction of ['has_schema_privilege', 'has_table_privilege', 'has_sequence_privilege', 'has_function_privilege']) assert.match(checker, new RegExp(privilegeFunction));
+  assert.match(checker, /agentpass_signer/);
+  assert.match(checker, /managed_signer_provider_operations/);
   assert.match(checker, /createHash\('sha256'\)/);
   assert.match(checker, /spawnSync\(\s*'psql'/);
   assert.match(checker, /'--command'/);

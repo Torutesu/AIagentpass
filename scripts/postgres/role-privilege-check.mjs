@@ -3,7 +3,7 @@ import { spawnSync } from 'node:child_process';
 
 const DATABASE_URL_ENV = 'AGENTPASS_DATABASE_URL';
 const SCHEMA = 'public';
-const ROLES = ['agentpass_app', 'agentpass_migrator', 'agentpass_backup'];
+const ROLES = ['agentpass_app', 'agentpass_signer', 'agentpass_migrator', 'agentpass_backup'];
 
 function fail(message) {
   process.stderr.write(`${message}\n`);
@@ -96,6 +96,8 @@ schema_privileges_ok AS (
   SELECT EXISTS (SELECT 1 FROM target_schema)
     AND has_schema_privilege('agentpass_app', '${SCHEMA}', 'USAGE')
     AND NOT has_schema_privilege('agentpass_app', '${SCHEMA}', 'CREATE')
+    AND has_schema_privilege('agentpass_signer', '${SCHEMA}', 'USAGE')
+    AND NOT has_schema_privilege('agentpass_signer', '${SCHEMA}', 'CREATE')
     AND has_schema_privilege('agentpass_migrator', '${SCHEMA}', 'USAGE')
     AND has_schema_privilege('agentpass_migrator', '${SCHEMA}', 'CREATE')
     AND has_schema_privilege('agentpass_backup', '${SCHEMA}', 'USAGE')
@@ -105,6 +107,9 @@ database_privileges_ok AS (
   SELECT has_database_privilege('agentpass_app', current_database(), 'CONNECT')
     AND NOT has_database_privilege('agentpass_app', current_database(), 'CREATE')
     AND NOT has_database_privilege('agentpass_app', current_database(), 'TEMP')
+    AND has_database_privilege('agentpass_signer', current_database(), 'CONNECT')
+    AND NOT has_database_privilege('agentpass_signer', current_database(), 'CREATE')
+    AND NOT has_database_privilege('agentpass_signer', current_database(), 'TEMP')
     AND has_database_privilege('agentpass_migrator', current_database(), 'CONNECT')
     AND has_database_privilege('agentpass_backup', current_database(), 'CONNECT')
     AND NOT has_database_privilege('agentpass_backup', current_database(), 'CREATE')
@@ -113,7 +118,7 @@ database_privileges_ok AS (
 table_privileges_ok AS (
   SELECT COALESCE((SELECT bool_and(
       has_table_privilege('agentpass_app', oid, 'SELECT')
-      AND CASE WHEN relname IN ('schema_migrations', 'schema_migration_attempts', 'release_candidates', 'platform_promotion_approvals', 'platform_promotion_deployments', 'platform_promotion_issuances', 'managed_signer_key_lifecycles', 'managed_signer_keys', 'managed_signer_key_lifecycle_operations', 'managed_signer_signing_idempotency') THEN
+      AND CASE WHEN relname IN ('schema_migrations', 'schema_migration_attempts', 'release_candidates', 'platform_promotion_approvals', 'platform_promotion_deployments', 'platform_promotion_issuances', 'managed_signer_key_lifecycles', 'managed_signer_keys', 'managed_signer_key_lifecycle_operations', 'managed_signer_signing_idempotency', 'managed_signer_provider_operations') THEN
         NOT has_table_privilege('agentpass_app', oid, 'INSERT')
         AND NOT has_table_privilege('agentpass_app', oid, 'UPDATE')
         AND NOT has_table_privilege('agentpass_app', oid, 'DELETE')
@@ -125,6 +130,25 @@ table_privileges_ok AS (
       AND NOT has_table_privilege('agentpass_app', oid, 'TRUNCATE')
       AND NOT has_table_privilege('agentpass_app', oid, 'REFERENCES')
       AND NOT has_table_privilege('agentpass_app', oid, 'TRIGGER')
+    ) FROM tables), true)
+    AND COALESCE((SELECT bool_and(CASE WHEN relname IN (
+      'managed_signer_key_lifecycles', 'managed_signer_keys',
+      'managed_signer_key_lifecycle_operations', 'managed_signer_signing_idempotency',
+      'managed_signer_provider_operations'
+    ) THEN
+      has_table_privilege('agentpass_signer', oid, 'SELECT')
+      AND has_table_privilege('agentpass_signer', oid, 'INSERT')
+      AND has_table_privilege('agentpass_signer', oid, 'UPDATE')
+      AND has_table_privilege('agentpass_signer', oid, 'DELETE')
+    ELSE
+      NOT has_table_privilege('agentpass_signer', oid, 'SELECT')
+      AND NOT has_table_privilege('agentpass_signer', oid, 'INSERT')
+      AND NOT has_table_privilege('agentpass_signer', oid, 'UPDATE')
+      AND NOT has_table_privilege('agentpass_signer', oid, 'DELETE')
+    END
+      AND NOT has_table_privilege('agentpass_signer', oid, 'TRUNCATE')
+      AND NOT has_table_privilege('agentpass_signer', oid, 'REFERENCES')
+      AND NOT has_table_privilege('agentpass_signer', oid, 'TRIGGER')
     ) FROM tables), true)
     AND COALESCE((SELECT bool_and(relowner = (SELECT oid FROM role_ids WHERE rolname = 'agentpass_migrator')) FROM tables), true)
     AND COALESCE((SELECT bool_and(has_table_privilege('agentpass_backup', oid, 'SELECT')
@@ -146,12 +170,21 @@ sequence_privileges_ok AS (
     AND COALESCE((SELECT bool_and(relowner = (SELECT oid FROM role_ids WHERE rolname = 'agentpass_migrator')) FROM sequences), true)
     AND COALESCE((SELECT bool_and(has_sequence_privilege('agentpass_backup', oid, 'SELECT')
       AND NOT has_sequence_privilege('agentpass_backup', oid, 'USAGE')
-      AND NOT has_sequence_privilege('agentpass_backup', oid, 'UPDATE')) FROM sequences), true) AS value
+      AND NOT has_sequence_privilege('agentpass_backup', oid, 'UPDATE')) FROM sequences), true)
+    AND COALESCE((SELECT bool_and(
+      NOT has_sequence_privilege('agentpass_signer', oid, 'USAGE')
+      AND NOT has_sequence_privilege('agentpass_signer', oid, 'SELECT')
+      AND NOT has_sequence_privilege('agentpass_signer', oid, 'UPDATE')
+    ) FROM sequences), true) AS value
 ),
 function_privileges_ok AS (
   SELECT COALESCE((SELECT bool_and(proowner = (SELECT oid FROM role_ids WHERE rolname = 'agentpass_migrator')) FROM functions), true)
     AND NOT EXISTS (SELECT 1 FROM functions
       WHERE has_function_privilege('agentpass_backup', oid, 'EXECUTE')
+         OR (has_function_privilege('agentpass_signer', oid, 'EXECUTE')
+           AND routine_signature <> 'agentpass_quarantine_expired_managed_signer_provider_operations(integer)')
+         OR (NOT has_function_privilege('agentpass_signer', oid, 'EXECUTE')
+           AND routine_signature = 'agentpass_quarantine_expired_managed_signer_provider_operations(integer)')
          OR (has_function_privilege('agentpass_app', oid, 'EXECUTE')
            AND routine_signature NOT IN (
              'agentpass_platform_promotion_issuance_reserve(uuid,text,text,text,text,bytea,integer,integer,text,bigint,bigint)',
@@ -182,7 +215,9 @@ default_privileges_ok AS (
     AND (SELECT count(*) = 1 FROM default_acl
       WHERE object_type = 'S' AND grantee = 'agentpass_backup' AND privilege_type = 'SELECT')
     AND NOT EXISTS (SELECT 1 FROM default_acl
-      WHERE object_type = 'f' AND grantee IN ('agentpass_app', 'agentpass_backup')) AS value
+      WHERE object_type = 'f' AND grantee IN ('agentpass_app', 'agentpass_signer', 'agentpass_backup'))
+    AND NOT EXISTS (SELECT 1 FROM default_acl
+      WHERE grantee = 'agentpass_signer') AS value
 ),
 checks AS (
   SELECT current_user = 'agentpass_migrator'
