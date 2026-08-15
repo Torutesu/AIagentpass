@@ -211,6 +211,7 @@ DECLARE
 BEGIN
   FOREACH routine_signature IN ARRAY ARRAY[
     'agentpass_consume_device_request_nonce(uuid,uuid,bytea,integer)',
+    'agentpass_consume_human_identity_assertion(bytea,timestamptz)',
     'agentpass_acquire_rate_limit(uuid,text,uuid,integer,numeric,integer,integer)',
     'agentpass_acquire_anonymous_rate_limit(text,uuid,integer,numeric,integer,integer)',
     'agentpass_prune_shared_control_expired(integer)',
