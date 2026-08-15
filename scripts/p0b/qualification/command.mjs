@@ -3,6 +3,9 @@ import { spawn } from "node:child_process";
 
 const SKIP_MARKER = Buffer.from("# SKIP", "utf8");
 const MARKER_TAIL_BYTES = SKIP_MARKER.byteLength - 1;
+const MAX_SAFE_FAILURE_MARKERS = 32;
+const MAX_SAFE_FAILURE_MARKER_BYTES = 512;
+const SAFE_FAILURE_CODE = /^[a-z][a-z0-9_]{0,63}$/u;
 const TERMINATION_GRACE_MS = 250;
 const DEFAULT_TIMEOUT_MS = 120_000;
 const SAFE_REASON = Object.freeze({
@@ -44,14 +47,32 @@ function normalizeOptions(options) {
     throw new TypeError("cwd is invalid");
   }
   if (options.onChild !== undefined && typeof options.onChild !== "function") throw new TypeError("onChild must be a function");
+  const safeFailureMarkers = normalizeSafeFailureMarkers(options.safeFailureMarkers);
   const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
   if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1) throw new TypeError("timeoutMs must be a positive integer");
   return {
     cwd: options.cwd,
     env: normalizeEnvironment(options.env),
     onChild: options.onChild,
+    safeFailureMarkers,
     timeoutMs
   };
+}
+
+function normalizeSafeFailureMarkers(value) {
+  if (value === undefined) return Object.freeze([]);
+  if (!Array.isArray(value) || value.length > MAX_SAFE_FAILURE_MARKERS) throw new TypeError("safeFailureMarkers must be a bounded array");
+  const codes = new Set();
+  return Object.freeze(value.map((entry) => {
+    if (entry === null || typeof entry !== "object" || Array.isArray(entry)
+      || Object.keys(entry).sort().join(",") !== "code,marker"
+      || typeof entry.marker !== "string" || entry.marker.length === 0 || entry.marker.includes("\u0000")
+      || Buffer.byteLength(entry.marker) > MAX_SAFE_FAILURE_MARKER_BYTES
+      || typeof entry.code !== "string" || !SAFE_FAILURE_CODE.test(entry.code)
+      || codes.has(entry.code)) throw new TypeError("safe failure marker is invalid");
+    codes.add(entry.code);
+    return Object.freeze({ code: entry.code, marker: Buffer.from(entry.marker, "utf8") });
+  }));
 }
 
 function asBytes(chunk) {
@@ -75,12 +96,13 @@ function includesMarker(haystack, needle) {
   return false;
 }
 
-function makeInternalFlags({ spawnError, timedOut, skipMarker, callbackFailed }) {
+function makeInternalFlags({ spawnError, timedOut, skipMarker, callbackFailed, safeFailureCode }) {
   return Object.freeze({
     spawn_error: spawnError,
     timed_out: timedOut,
     skip_marker: skipMarker,
     callback_failed: callbackFailed,
+    safe_failure_code: safeFailureCode,
     settled: true
   });
 }
@@ -93,7 +115,8 @@ function attachInternalFlags(result, flags) {
     internal: { configurable: false, enumerable: false, writable: false, value: flags },
     spawnError: { configurable: false, enumerable: false, writable: false, value: flags.spawn_error },
     timedOut: { configurable: false, enumerable: false, writable: false, value: flags.timed_out },
-    skipMarker: { configurable: false, enumerable: false, writable: false, value: flags.skip_marker }
+    skipMarker: { configurable: false, enumerable: false, writable: false, value: flags.skip_marker },
+    safeFailureCode: { configurable: false, enumerable: false, writable: false, value: flags.safe_failure_code }
   });
   return Object.freeze(result);
 }
@@ -114,7 +137,7 @@ function durationMilliseconds(startedAt) {
  */
 export function runQualificationCommand(command, args, options) {
   assertCommand(command, args);
-  const { cwd, env, onChild, timeoutMs } = normalizeOptions(options);
+  const { cwd, env, onChild, safeFailureMarkers, timeoutMs } = normalizeOptions(options);
   const startedAt = process.hrtime.bigint();
   const stdoutHash = createHash("sha256");
   const stderrHash = createHash("sha256");
@@ -123,6 +146,9 @@ export function runQualificationCommand(command, args, options) {
   let stdoutMarkerTail = Buffer.alloc(0);
   let stderrMarkerTail = Buffer.alloc(0);
   let skipMarker = false;
+  let safeFailureCode = null;
+  let safeFailureStdoutTail = Buffer.alloc(0);
+  let safeFailureStderrTail = Buffer.alloc(0);
   let spawnError = false;
   let timedOut = false;
   let callbackFailed = false;
@@ -149,6 +175,26 @@ export function runQualificationCommand(command, args, options) {
       : Buffer.from(candidate.subarray(candidate.byteLength - MARKER_TAIL_BYTES));
     if (stream === "stdout") stdoutMarkerTail = nextTail;
     else stderrMarkerTail = nextTail;
+  };
+
+  const observeSafeFailureMarker = (chunk, stream) => {
+    if (safeFailureCode !== null || safeFailureMarkers.length === 0) return;
+    const bytes = asBytes(chunk);
+    const previous = stream === "stdout" ? safeFailureStdoutTail : safeFailureStderrTail;
+    const candidate = previous.byteLength === 0 ? bytes : Buffer.concat([previous, bytes]);
+    for (const entry of safeFailureMarkers) {
+      if (includesMarker(candidate, entry.marker)) {
+        safeFailureCode = entry.code;
+        safeFailureStdoutTail = Buffer.alloc(0);
+        safeFailureStderrTail = Buffer.alloc(0);
+        return;
+      }
+    }
+    const longest = Math.max(...safeFailureMarkers.map((entry) => entry.marker.byteLength));
+    const tailBytes = Math.max(0, longest - 1);
+    const nextTail = candidate.byteLength <= tailBytes ? Buffer.from(candidate) : Buffer.from(candidate.subarray(candidate.byteLength - tailBytes));
+    if (stream === "stdout") safeFailureStdoutTail = nextTail;
+    else safeFailureStderrTail = nextTail;
   };
 
   return new Promise((resolve) => {
@@ -182,7 +228,7 @@ export function runQualificationCommand(command, args, options) {
         stderr_bytes: stderrBytes,
         reason: passed ? null : reason ?? SAFE_REASON.unknown
       };
-      resolve(attachInternalFlags(result, makeInternalFlags({ spawnError, timedOut, skipMarker, callbackFailed })));
+      resolve(attachInternalFlags(result, makeInternalFlags({ spawnError, timedOut, skipMarker, callbackFailed, safeFailureCode })));
     };
 
     const requestKill = (signal) => {
@@ -212,12 +258,14 @@ export function runQualificationCommand(command, args, options) {
       stdoutHash.update(bytes);
       stdoutBytes += bytes.byteLength;
       observeMarker(bytes, "stdout");
+      observeSafeFailureMarker(bytes, "stdout");
     });
     child.stderr?.on("data", (chunk) => {
       const bytes = asBytes(chunk);
       stderrHash.update(bytes);
       stderrBytes += bytes.byteLength;
       observeMarker(bytes, "stderr");
+      observeSafeFailureMarker(bytes, "stderr");
     });
     child.once("error", () => {
       spawnError = true;

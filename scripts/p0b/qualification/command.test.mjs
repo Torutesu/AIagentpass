@@ -81,6 +81,34 @@ test("returns a nonzero exit as a failed report-compatible result", async () => 
   assert.equal(result.internal.spawn_error, false);
 });
 
+test("reports only an allow-listed failure code without retaining matching child output", async () => {
+  const marker = "not ok 7 - owner stale authorization is rejected";
+  const secret = "credential-material-must-not-survive";
+  const result = await runQualificationCommand(node, script([
+    `process.stdout.write(${JSON.stringify(`${secret} not ok 7 - owner stale`)});`,
+    `setTimeout(() => process.stdout.write(${JSON.stringify(" authorization is rejected")}), 5);`,
+    "setTimeout(() => process.exit(9), 10);"
+  ].join("")), {
+    cwd,
+    env,
+    timeoutMs: 2_000,
+    safeFailureMarkers: [{ marker, code: "browser_stale_authorization" }]
+  });
+
+  assert.equal(result.status, "failed");
+  assert.equal(result.reason, "child_exit_nonzero");
+  assert.equal(result.internal.safe_failure_code, "browser_stale_authorization");
+  assert.equal(result.safeFailureCode, "browser_stale_authorization");
+  assert.equal(JSON.stringify(result).includes(secret), false);
+  assert.equal(JSON.stringify(result).includes(marker), false);
+  assert.equal(Object.keys(result).includes("safeFailureCode"), false);
+});
+
+test("rejects caller-defined unsafe or duplicate failure diagnostics", () => {
+  assert.throws(() => runQualificationCommand(node, script(""), { cwd, env, timeoutMs: 2_000, safeFailureMarkers: [{ marker: "x", code: "contains-secret:value" }] }), TypeError);
+  assert.throws(() => runQualificationCommand(node, script(""), { cwd, env, timeoutMs: 2_000, safeFailureMarkers: [{ marker: "x", code: "duplicate" }, { marker: "y", code: "duplicate" }] }), TypeError);
+});
+
 test("terminates a timed-out child with SIGTERM and then SIGKILL if needed", async () => {
   const result = await runQualificationCommand(node, script("process.on('SIGTERM', () => {}); setInterval(() => {}, 1000);"), { cwd, env, timeoutMs: 40 });
 

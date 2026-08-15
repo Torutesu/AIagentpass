@@ -32,6 +32,24 @@ const BUILD_TIMEOUT_MS = 180_000;
 // deadline so a single stuck interaction still fails locally.
 const BROWSER_TIMEOUT_MS = 900_000;
 const PROCESS_TIMEOUT_MS = 180_000;
+// Only these static TAP fragments may cross the child-output boundary. The
+// command runner retains the fixed code, never the matched line or adjacent
+// diagnostics, so assertions, URLs, credentials, SQL, and tenant data remain
+// unavailable to the orchestrator and CI log.
+const LIVE_BROWSER_SAFE_FAILURE_MARKERS = Object.freeze([
+  [1, "renders all six real PostgreSQL device states and accepts keyboard wake", "device_states_wake"],
+  [2, "shows accepted, coalesced, and no-pending outcomes from the real wake ledger", "wake_ledger_outcomes"],
+  [3, "admin completes real WebAuthn and wake mutation", "admin_webauthn_wake"],
+  [4, "auditor receives no wake mutation control", "auditor_wake_denial"],
+  [5, "viewer receives no wake mutation control", "viewer_wake_denial"],
+  [6, "owner without an available authenticator fails before wake mutation", "missing_authenticator_denial"],
+  [7, "owner stale authorization is rejected by the real Cloud boundary", "stale_authorization_denial"],
+  [8, "owner replayed authorization is rejected by the real Cloud boundary", "replayed_authorization_denial"],
+  [9, "owner cross_operation authorization is rejected by the real Cloud boundary", "cross_operation_denial"],
+  [10, "owner cross_tenant authorization is rejected by the real Cloud boundary", "cross_tenant_denial"],
+  [11, "owner completes distinct real WebAuthn device revoke", "owner_device_revoke"],
+  [12, "admin completes distinct real WebAuthn device revoke", "admin_device_revoke"]
+].map(([index, name, code]) => Object.freeze({ marker: `not ok ${index} - ${name}`, code })));
 const REQUIRED_ENV_KEYS = Object.freeze([
   "P0B_POSTGRES_ADMIN_URL",
   "AGENTPASS_TEST_POSTGRES_ADMIN_URL",
@@ -293,12 +311,14 @@ export async function main(argv = process.argv.slice(2)) {
           cwd: REPOSITORY_ROOT,
           env: { ...buildTestEnvironment(process.env, fixtureEnvironment), P0B_LIVE_BROWSER: "1" },
           timeoutMs: BROWSER_TIMEOUT_MS,
+          safeFailureMarkers: LIVE_BROWSER_SAFE_FAILURE_MARKERS,
           onChild: (child) => { activeChild = child; }
         });
         commands.push(commandEvidence("browser-e2e", ["node", ...childArgs], "repository", result));
         activeChild = undefined;
         if (result.status !== "passed") {
-          failure = { stage: "live-browser", error: new OrchestrationError(result.reason) };
+          const diagnostic = result.internal.safe_failure_code;
+          failure = { stage: "live-browser", error: new OrchestrationError(diagnostic === null ? result.reason : `child_exit_nonzero_${diagnostic}`) };
         } else if (interrupted) {
           failure = { stage: "live-browser", error: new OrchestrationError("interrupted") };
         }
