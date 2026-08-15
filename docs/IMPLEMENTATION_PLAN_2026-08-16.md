@@ -2,7 +2,7 @@
 
 Status: active
 
-Planning baseline: `codex/agent-platform` at `ea3a8ca`
+Planning baseline: `codex/agent-platform` at `c874bf7`
 
 This document converts the v1 architecture into the remaining implementation
 and qualification gates. [`V1_EXECUTION_PLAN.md`](./V1_EXECUTION_PLAN.md)
@@ -36,7 +36,7 @@ signed/notarized artifact, staging drills, and independent security review.
 
 ### 1.1 Live execution checkpoint
 
-The latest completed diagnostic runs and the source at `ea3a8ca` establish the
+The latest completed diagnostic runs and the source at `c874bf7` establish the
 following current state:
 
 - PostgreSQL 16 authority qualification, PostgreSQL 17 authority
@@ -74,6 +74,17 @@ following current state:
 - passkey and Human Session mutations now reconcile authoritative state after
   response loss, invalid success framing, server failure, and version conflict
   without automatically repeating a destructive operation;
+- member role update/removal now validates exact committed responses, fences a
+  shared Console session after self-authority change, and reconciles ambiguous
+  or concurrent outcomes without replay. A real-PostgreSQL contention,
+  cross-tenant, last-owner, epoch, rollback, challenge, capability, and session
+  invalidation test is wired into both PostgreSQL 16 and 17 CI; protected
+  execution remains pending;
+- all-other Human Session revocation is now one operation-bound WebAuthn action
+  and one PostgreSQL transaction rather than a browser loop. The current
+  session is excluded, authority propagation failure rolls the batch back, and
+  the response carries an exact total plus at most 100 verified records with an
+  explicit truncation marker;
 - the signer registry and hosted KMS readiness now agree that all eight
   purposes are managed-KMS integrated. Focused behavioral tests pass every
   purpose through exact-byte provider-operation reconciliation and prove that
@@ -91,8 +102,8 @@ The next implementation batches are intentionally narrow and ordered:
 | --- | --- | --- | --- |
 | Q1 | Source-complete on the current head: shared Console session authority, typed registration dependency errors, exact registration OpenAPI, P0-B rotation adoption, and behavioral rotation evidence. | Concurrent bootstrap unit tests, session-rotation/revocation negatives, focused Human API tests, contract validation, live trusted-TLS PostgreSQL/Cloud/Console/Chromium run, artifact secret scan. | P0-B completes every Owner/Admin/Auditor/Viewer scenario and emits a verified source-bound report for the exact qualified head. |
 | Q2 | Rerun all six CI jobs without cancellation or replacement commits. Remove any newly exposed timing, lifecycle, native, or artifact-hygiene defect at its owning boundary. | Root/Console/native, browser, P0-B, PostgreSQL integration, PostgreSQL 16 and PostgreSQL 17 on one SHA. | One terminal all-green run is retained; N1 becomes `qualified`. |
-| H1 | Invitation reissue/revoke/acceptance and their terminal/ambiguous-state reconciliation are source-complete. Finish role change/removal qualification and protected browser evidence. | Real PostgreSQL contention/replay/cross-tenant tests plus Owner/Admin/Auditor/Viewer Playwright matrix. | Every organization mutation converges to committed state without blind replay or fixture fallback. |
-| H2 | Complete passkey and Human Session lifecycle: add/rename/revoke, final-auth-path guard, current/other/all-other session revoke, epoch invalidation, explicit reauthentication. | Virtual WebAuthn, stale/replayed recent-auth, expiry, self-revoke, clone/sign-count, keyboard and secret-scan tests. | A non-engineer can recover from every expected conflict or expiry state without CLI/operator credentials. |
+| H1 | Invitation and member role/removal source paths are complete. Finish protected PostgreSQL and Owner/Admin/Auditor/Viewer browser evidence. | Real PostgreSQL contention/replay/cross-tenant tests plus Owner/Admin/Auditor/Viewer Playwright matrix. | Every organization mutation converges to committed state without blind replay or fixture fallback. |
+| H2 | Atomic current/other/all-other Human Session source paths are complete. Finish passkey qualification, expiry/reauthentication journeys, and protected browser evidence. | Virtual WebAuthn, stale/replayed recent-auth, expiry, self-revoke, clone/sign-count, keyboard and secret-scan tests. | A non-engineer can recover from every expected conflict or expiry state without CLI/operator credentials. |
 | D1 | Freeze onboarding preflight, invitation, loopback handoff, possession receipt, and control ACK contracts across Core/OpenAPI/Console/CLI/native. | Generated-validator sync, unknown-field/duplicate-key/canonical-vector tests and threat-model review. | One versioned contract has no caller-controlled authority fields and no downgrade path. |
 | D2 | Implement browser-led loopback delivery, bounded stdin recovery, and durable resume states through `control_acknowledged`. | Interruption at every durable state, expiry/timeout/response-loss, duplicate enrollment and browser-storage scans. | Clean-machine onboarding converges with no manual identifiers and no reusable secret in argv/env/URL/storage. |
 | S1 | Eight-purpose source inventory/readiness and exact-byte reconciliation coverage are complete. Finish lifecycle rotation/disable/drain qualification. | Two-instance contention, timeout/outage/lookup, malformed response, lost commit response, rotation/disable/drain tests. | Source paths are complete and hosted readiness rejects every missing/shared/local/file signer configuration. |
@@ -481,8 +492,8 @@ work that still needs protected infrastructure or physical hardware remains
 
 | Package | Current state | Next merge-sized deliverables | Required acceptance evidence | Unlocks |
 | --- | --- | --- | --- | --- |
-| N1 qualification closure | `Q1 source complete at ea3a8ca; protected rerun open` | Verify session-rotation adoption in P0-B; inspect CLI handoff only from a reproducible CI failure; rerun all six CI jobs on one head; retain clean browser/P0-B artifacts. | One terminal green run: root/Console/native, browser, P0-B, PostgreSQL integration, PostgreSQL 16, and PostgreSQL 17. | N2/N5 qualification claims |
-| N2 organization and identity Console | `H1.1/H1.2 and Security response-loss source closure implemented; qualification open` | Finish role/removal and passkey/session protected journeys, atomic all-other-session behavior, accessibility, and artifact hygiene. | Production-built Console and Cloud API against PostgreSQL; virtual WebAuthn; secret-free DOM/storage/network/artifact scan. | Non-engineer control plane |
+| N1 qualification closure | `Q1 source complete on the current candidate; protected rerun open` | Verify session-rotation adoption in P0-B; inspect CLI handoff only from a reproducible CI failure; rerun all six CI jobs on one head; retain clean browser/P0-B artifacts. | One terminal green run: root/Console/native, browser, P0-B, PostgreSQL integration, PostgreSQL 16, and PostgreSQL 17. | N2/N5 qualification claims |
+| N2 organization and identity Console | `H1.1-H1.3 and H2.2 source closure implemented; qualification open` | Finish passkey protected journeys, expiry/reauthentication, accessibility, role/browser matrices, and artifact hygiene. | Production-built Console and Cloud API against PostgreSQL; virtual WebAuthn; secret-free DOM/storage/network/artifact scan. | Non-engineer control plane |
 | N5 hosted signer | `S1.1/S1.2 and drain source closure implemented; protected evidence open` | Provision eight isolated AWS/GCP keys and identities; run rotation, disablement, cross-purpose denial, multi-instance termination, and provider-specific cancellation tests. | Signed, source-bound AWS/GCP reports proving immutable versions, public fingerprints, non-exportability, least privilege, no fallback, bounded drain behavior, and operator-actionable uncertainty. | Hosted release candidate |
 | N3 device onboarding | `foundation implemented` | Freeze preflight/handoff DTO; implement browser-to-loopback transfer plus bounded stdin recovery; add interruption/resume state machine and verified receipt/ACK reconciliation. | Clean-machine physical Mac enrollment with restart/expiry/timeout/ambiguous-response matrix and zero secret-bearing artifacts. | Agent installation journey |
 | N4 native agents and distribution | `foundation implemented` | Close durable sign-once transaction; Claude Code lifecycle and two verified commits; Cursor parity; immutable PKG/Homebrew path; Developer ID signing and notarization. | Same artifact digest passes identity, entitlement, Gatekeeper, upgrade, uninstall-preserve, reinstall, rollback-refusal, and negative policy matrix on Apple silicon and Intel/T2. | Staging candidate |
@@ -546,9 +557,9 @@ per-slice merge contract above.
 | Q2.1 | One-SHA six-lane qualification | Q1 | CI/workflow and evidence validators | root/native, browser, P0-B, PostgreSQL integration, PostgreSQL 16/17 | all jobs finish successfully on one unreplaced SHA |
 | H1.1 | Invitation reissue Console interaction — source complete at `a900158` | Q2, backend at `ca19091` | Console client/components/tests | Owner/Admin allow; Auditor/Viewer deny; recent-auth, stale version, response loss, a11y, token scan | raw token is shown exactly once and never reaches URL, storage, logs, traces, or blind replay |
 | H1.2 | Invitation revoke and acceptance reconciliation — source complete at `ea3a8ca` | H1.1 | Console/BFF/browser tests | expiry, accepted/revoked terminal states, concurrent acceptance, cross-tenant denial | authoritative refresh converges every ambiguous response |
-| H1.3 | Member role update/removal | H1.2 | contract, PostgreSQL, Cloud, BFF, Console | `If-Match`, idempotency, last-owner, self-change, contention, response loss | role authority changes atomically and session epochs invalidate stale authority |
+| H1.3 | Member role update/removal — source complete at `48db78a`; real-PostgreSQL evidence wired at `38592f0` | H1.2 | contract, PostgreSQL, Cloud, BFF, Console | `If-Match`, idempotency, last-owner, self-change, contention, response loss | role authority changes atomically and session epochs invalidate stale authority |
 | H2.1 | Passkey lifecycle closure | Q2 | PostgreSQL/Cloud/BFF/Console | add/rename/revoke, clone counter, final-auth-path, replayed/expired recent-auth | no user can accidentally remove the final usable authentication/recovery path |
-| H2.2 | Human Session lifecycle closure | H2.1 | PostgreSQL/Cloud/BFF/Console | current/other/all-other revoke, idle/absolute expiry, self-revoke, cross-tenant | revoked authority is unusable immediately and UI clears tenant state predictably |
+| H2.2 | Human Session lifecycle closure — atomic all-other source path complete at `c874bf7` | H2.1 | PostgreSQL/Cloud/BFF/Console | current/other/all-other revoke, idle/absolute expiry, self-revoke, cross-tenant | revoked authority is unusable immediately and UI clears tenant state predictably |
 | H2.3 | Console accessibility and remediation pass | H1, H2 | Console UI and Playwright | keyboard, focus, live regions, 200% zoom, reduced motion, Japanese/English stable errors | all expected failure states explain a safe recovery action without requiring CLI access |
 | S1.1 | Eight-purpose source-path inventory — source complete at `83b6935` | Q2 | signer registry/readiness/tests | unique resource/version/fingerprint/domain, no local/file/private-key input | hosted readiness rejects every missing, shared, aliased, stale, or fallback configuration |
 | S1.2 | Exact-byte provider reconciliation — eight-purpose behavioral coverage at `017efa4` | S1.1 | provider operation repositories/workers | two-instance contention, response loss, lookup absence, malformed response, process loss | each operation converges to one verified result or durable `uncertain` without re-signing |
