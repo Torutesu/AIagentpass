@@ -201,6 +201,7 @@ export function createPostgresOrganizationService({
     const actor = requiredActor(input);
     const idempotency_key = idempotencyKey(input.idempotency_key);
     const role = requiredInvitableRole(input.role);
+    const created_at = currentTimestamp();
     const raw_token = generateToken(randomBytes);
     const result = await invoke("createInvitation", {
       organization_id: requiredOrganizationId(input.organization_id),
@@ -209,11 +210,11 @@ export function createPostgresOrganizationService({
       role,
       token_hash: hashToken(raw_token),
       expires_at: input.expires_at,
-      created_at: currentTimestamp(),
+      created_at,
       idempotency_key
     }, ORGANIZATION_SERVICE_ERROR_CODES.NOT_FOUND);
     const invitation = sanitize(unwrapInvitation(result));
-    if (isReplay(result)) return Object.freeze({ invitation, replayed: true });
+    if (isReplay(result)) return Object.freeze({ invitation: reconcileReplayInvitation(invitation, created_at), replayed: true });
     return Object.freeze({ invitation, raw_token });
   }
 
@@ -255,7 +256,7 @@ export function createPostgresOrganizationService({
       idempotency_key
     }, ORGANIZATION_SERVICE_ERROR_CODES.INVITATION_NOT_FOUND);
     const invitation = sanitize(unwrapInvitation(result));
-    if (isReplay(result)) return Object.freeze({ invitation, replayed: true });
+    if (isReplay(result)) return Object.freeze({ invitation: reconcileReplayInvitation(invitation, reissued_at), replayed: true });
     return Object.freeze({ invitation, raw_token });
   }
 
@@ -443,6 +444,20 @@ function futureTimestamp(value, evaluatedAt) {
     throw serviceError(ORGANIZATION_SERVICE_ERROR_CODES.INVALID_INPUT);
   }
   return value;
+}
+
+function reconcileReplayInvitation(invitation, evaluatedAt) {
+  if (!invitation || typeof invitation !== "object" || Array.isArray(invitation)) {
+    throw serviceError(ORGANIZATION_SERVICE_ERROR_CODES.UNAVAILABLE);
+  }
+  if (!["pending", "expired", "accepted", "revoked"].includes(invitation.status)) {
+    throw serviceError(ORGANIZATION_SERVICE_ERROR_CODES.UNAVAILABLE);
+  }
+  if (invitation.status === "accepted" || invitation.status === "revoked") return invitation;
+  if (typeof invitation.expires_at !== "string" || !RFC3339.test(invitation.expires_at) || !Number.isFinite(Date.parse(invitation.expires_at))) {
+    throw serviceError(ORGANIZATION_SERVICE_ERROR_CODES.UNAVAILABLE);
+  }
+  return { ...invitation, status: Date.parse(invitation.expires_at) <= Date.parse(evaluatedAt) ? "expired" : "pending" };
 }
 
 function idempotencyKey(value) {

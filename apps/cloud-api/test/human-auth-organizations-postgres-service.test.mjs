@@ -229,6 +229,26 @@ test("reissues an invitation with a fresh token, future expiry, and no token on 
   await assert.rejects(() => service.reissueInvitation({ actor: ACTOR, organization_id: ids.organization, invitation_id: ids.invitation, expected_version: 1, expires_at: EXPIRES, idempotency_key: "invite-reissue-3" }), { code: "invalid_input" });
 });
 
+test("reconciles replayed create/reissue status at the current expiry boundary", async () => {
+  const recentAuthorization = { session_id: ACTOR.session_id, challenge_id: "88888888-8888-4888-8888-888888888888", operation: "human.organizations.invitation.reissue", authenticated_at: 1_800_000_000_000 };
+  for (const method of ["createInvitation", "reissueInvitation"]) {
+    const replayFixture = serviceFixture({ repository: {
+      [method]: () => ({ invitation: invitation({ status: "pending", expires_at: NOW }), replayed: true })
+    } });
+    const result = method === "createInvitation"
+      ? await replayFixture.service.createInvitation({ actor: ACTOR, organization_id: ids.organization, role: "viewer", expires_at: EXPIRES, idempotency_key: `expiry-replay-${method}` })
+      : await replayFixture.service.reissueInvitation({ actor: ACTOR, organization_id: ids.organization, invitation_id: ids.invitation, expected_version: 1, expires_at: EXPIRES, recent_authorization: recentAuthorization, idempotency_key: `expiry-replay-${method}` });
+    assert.equal(result.invitation.status, "expired");
+    assert.equal(Object.hasOwn(result, "raw_token"), false);
+  }
+
+  for (const status of ["accepted", "revoked"]) {
+    const replayFixture = serviceFixture({ repository: { createInvitation: () => ({ invitation: invitation({ status, expires_at: NOW }), replayed: true }) } });
+    const result = await replayFixture.service.createInvitation({ actor: ACTOR, organization_id: ids.organization, role: "viewer", expires_at: EXPIRES, idempotency_key: `terminal-replay-${status}` });
+    assert.equal(result.invitation.status, status);
+  }
+});
+
 test("hashes one-time tokens before acceptance and never returns token hashes", async () => {
   const { service, calls } = serviceFixture({ repository: { acceptInvitation: { invitation: invitation({ token_hash: "secret" }), member: member() } } });
   const result = await service.acceptInvitation({ actor: ACTOR, one_time_token: RAW_TOKEN, idempotency_key: "accept-1" });
