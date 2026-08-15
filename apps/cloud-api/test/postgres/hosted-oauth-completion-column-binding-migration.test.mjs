@@ -22,9 +22,9 @@ test("0067 pins PL/pgSQL column binding for atomic Hosted OAuth completion", asy
   assert.doesNotMatch(migration, /DROP FUNCTION|GRANT EXECUTE|ALTER TABLE/iu);
   assert.match(migration, /COMMIT;\s*$/u);
 
-  assert.equal(POSTGRES_SCHEMA_HEAD.version, 68);
-  assert.equal(POSTGRES_SCHEMA_HEAD.name, "0068_platform_challenge_database_clock.sql");
+  assert.equal(POSTGRES_SCHEMA_HEAD.version, 69);
+  assert.equal(POSTGRES_SCHEMA_HEAD.name, "0069_platform_session_database_clock.sql");
   const catalog = JSON.parse(catalogText);
-  assert.equal(catalog.entries.filter((entry) => entry.kind === "postgres-migration").length, 68);
+  assert.equal(catalog.entries.filter((entry) => entry.kind === "postgres-migration").length, 69);
   assert.equal(catalog.entries.find((entry) => entry.version === 67)?.id, "migration.0067_hosted_oauth_completion_column_binding");
 });
