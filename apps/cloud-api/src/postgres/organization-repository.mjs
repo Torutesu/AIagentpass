@@ -16,7 +16,7 @@ const MAX_PAGE_SIZE = 100;
 const READ_MEMBER_COLUMNS = `m.id AS member_id,m.github_subject,m.display_name,m.created_at AS member_created_at,
   ms.organization_id,ms.id AS membership_id,ms.role,ms.status,ms.version,ms.created_at,ms.updated_at`;
 const SAFE_INVITATION_COLUMNS = `i.organization_id,i.id AS invitation_id,i.role,i.created_at,i.expires_at,
-  i.consumed_at,i.revoked_at,i.version,i.created_by`;
+  i.consumed_by AS accepted_member_id,i.consumed_at,i.revoked_at,i.version,i.created_by`;
 
 export class OrganizationRepositoryError extends Error {
   constructor(code, message, details = undefined) {
@@ -356,9 +356,11 @@ export function createPostgresOrganizationRepository({ client, now = () => new D
         await abandonIdempotency(tx, { organizationId, actorPrincipal, idempotencyKey, requestHash });
         return null;
       }
+      const acceptedInvitation = safeInvitationRow(consumed.rows[0], acceptedAt);
+      const result = { invitation: acceptedInvitation, member: row };
       await appendMutationEvents(tx, { organizationId, actorId: invitedMemberId, action: "invitation.accepted", targetType: "invitation", targetId: uuid(stored.invitation_id ?? stored.id), details: { member_id: row.member_id, role: row.role, membership_id: row.membership_id, accepted_at: acceptedAt } });
-      await completeIdempotency(tx, { organizationId, actorPrincipal, idempotencyKey, requestHash, response: row, responseStatus: 200 });
-      return row;
+      await completeIdempotency(tx, { organizationId, actorPrincipal, idempotencyKey, requestHash, response: result, responseStatus: 201 });
+      return result;
     });
   }
 
@@ -674,7 +676,8 @@ function safeInvitationRow(row = {}, evaluatedAt) {
   const consumedAt = nullableReturnedTimestamp(row.consumed_at);
   const revokedAt = nullableReturnedTimestamp(row.revoked_at);
   const statusAt = timestamp(evaluatedAt, "evaluated_at");
-  return { organization_id: uuid(String(row.organization_id)), invitation_id: uuid(String(row.invitation_id ?? row.id)), role: memberRole(row.role), created_by: uuid(String(row.created_by)), created_at: returnedTimestamp(row.created_at), expires_at: expiresAt, consumed_at: consumedAt, revoked_at: revokedAt, status: invitationStatus({ expires_at: expiresAt, consumed_at: consumedAt, revoked_at: revokedAt }, statusAt), version: returnedVersion(row.version) };
+  const acceptedMemberId = row.accepted_member_id ?? row.consumed_by ?? null;
+  return { organization_id: uuid(String(row.organization_id)), invitation_id: uuid(String(row.invitation_id ?? row.id)), role: memberRole(row.role), created_by: uuid(String(row.created_by)), created_at: returnedTimestamp(row.created_at), expires_at: expiresAt, consumed_at: consumedAt, accepted_at: consumedAt, accepted_member_id: acceptedMemberId === null ? null : uuid(String(acceptedMemberId)), revoked_at: revokedAt, status: invitationStatus({ expires_at: expiresAt, consumed_at: consumedAt, revoked_at: revokedAt }, statusAt), version: returnedVersion(row.version) };
 }
 
 function membershipStatus(value) { if (value !== "active" && value !== "revoked") throw new TypeError("membership status is invalid"); return value; }

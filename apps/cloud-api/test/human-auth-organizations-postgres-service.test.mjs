@@ -32,7 +32,7 @@ function member(overrides = {}) {
 }
 
 function invitation(overrides = {}) {
-  return { organization_id: ids.organization, invitation_id: ids.invitation, role: "viewer", created_by: ids.owner, created_at: NOW, expires_at: EXPIRES, consumed_at: null, revoked_at: null, status: "pending", version: 1, token_hash: "secret", ...overrides };
+  return { organization_id: ids.organization, invitation_id: ids.invitation, role: "viewer", created_by: ids.owner, created_at: NOW, expires_at: EXPIRES, consumed_at: null, accepted_at: null, accepted_member_id: null, revoked_at: null, status: "pending", version: 1, token_hash: "secret", ...overrides };
 }
 
 function fixture(overrides = {}) {
@@ -47,7 +47,7 @@ function fixture(overrides = {}) {
     listInvitations: () => [invitation()],
     createInvitation: () => invitation(),
     revokeInvitation: () => invitation({ revoked_at: NOW, status: "revoked", version: 2 }),
-    acceptInvitation: () => member({ member_id: ids.owner, role: "viewer" })
+    acceptInvitation: () => ({ invitation: invitation({ status: "accepted", consumed_at: NOW, accepted_at: NOW, accepted_member_id: ids.owner }), member: member({ member_id: ids.owner, role: "viewer" }) })
   };
   const repository = {};
   for (const method of Object.keys(defaults)) {
@@ -198,10 +198,21 @@ test("stores only the SHA-256 hex invitation digest and returns raw token once",
 });
 
 test("hashes one-time tokens before acceptance and never returns token hashes", async () => {
-  const { service, calls } = serviceFixture({ repository: { acceptInvitation: member({ token_hash: "secret" }) } });
+  const { service, calls } = serviceFixture({ repository: { acceptInvitation: { invitation: invitation({ token_hash: "secret" }), member: member() } } });
   const result = await service.acceptInvitation({ actor: ACTOR, one_time_token: RAW_TOKEN, idempotency_key: "accept-1" });
   assert.equal(calls.acceptInvitation[0].token_hash, createHash("sha256").update(RAW_TOKEN).digest("hex"));
-  assert.equal(Object.hasOwn(result, "token_hash"), false);
+  assert.equal(Object.hasOwn(result.invitation, "token_hash"), false);
+  assert.equal(JSON.stringify(result).includes("secret"), false);
+});
+
+test("returns the sanitized invitation/member composite and preserves replay shape", async () => {
+  const acceptedInvitation = invitation({ status: "accepted", consumed_at: NOW, accepted_at: NOW, accepted_member_id: ids.member });
+  delete acceptedInvitation.token_hash;
+  const accepted = { invitation: acceptedInvitation, member: member({ member_id: ids.member }) };
+  const { service } = serviceFixture({ repository: { acceptInvitation: { ...accepted, token_hash: "secret" } } });
+  const result = await service.acceptInvitation({ actor: ACTOR, one_time_token: RAW_TOKEN, idempotency_key: "accept-composite-1" });
+  assert.deepEqual(result, accepted);
+  assert.equal(Object.hasOwn(result.invitation, "token_hash"), false);
   assert.equal(JSON.stringify(result).includes("secret"), false);
 });
 

@@ -58,7 +58,7 @@ function service(overrides = {}) {
     async listInvitations(input) { calls.listInvitations.push(input); return { items: [invitation()], next_cursor: null }; },
     async createInvitation(input) { calls.createInvitation.push(input); return { invitation: invitation({ role: input.role, expires_at: input.expires_at }), raw_token: INVITATION_TOKEN }; },
     async revokeInvitation(input) { calls.revokeInvitation.push(input); return invitation({ status: "revoked", version: input.expected_version + 1 }); },
-    async acceptInvitation(input) { calls.acceptInvitation.push(input); return member({ role: "viewer" }); }
+    async acceptInvitation(input) { calls.acceptInvitation.push(input); return { invitation: invitation({ status: "accepted", version: 2, accepted_at: CREATED_AT, accepted_member_id: MEMBER_ID }), member: member({ role: "viewer" }) }; }
   };
   const result = {};
   for (const method of HUMAN_ORGANIZATION_SERVICE_METHODS) {
@@ -387,6 +387,11 @@ test("accepts a one-time token for the authenticated member and never returns to
   const { api, calls } = fixture();
   const result = await api.handle(request(HUMAN_ORGANIZATIONS_HTTP_PATHS.acceptInvitation, { method: "POST", body: { one_time_token: INVITATION_TOKEN } }));
   assert.equal(result.status, 201);
+  assert.deepEqual(Object.keys(result.body).sort(), ["invitation", "member"]);
+  assert.equal(result.body.invitation.status, "accepted");
+  assert.equal(result.body.invitation.accepted_at, CREATED_AT);
+  assert.equal(result.body.invitation.accepted_member_id, MEMBER_ID);
+  assert.equal(result.body.member.member_id, MEMBER_ID);
   assert.deepEqual(calls.acceptInvitation[0], { actor: actor(), one_time_token: INVITATION_TOKEN, idempotency_key: "test-key-1" });
   assertNoSecret(result, INVITATION_TOKEN, "token_hash", "public_key");
 });

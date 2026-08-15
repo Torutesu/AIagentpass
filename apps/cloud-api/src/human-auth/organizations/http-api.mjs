@@ -165,7 +165,7 @@ export class HumanOrganizationsHttpError extends Error {
  * - removeMember({ actor, organization_id, member_id, expected_version, idempotency_key }) -> member
  * - createInvitation({ actor, organization_id, role, expires_at, idempotency_key }) -> { invitation, raw_token }
  * - revokeInvitation({ actor, organization_id, invitation_id, expected_version, idempotency_key }) -> invitation
- * - acceptInvitation({ actor, one_time_token, idempotency_key }) -> member
+ * - acceptInvitation({ actor, one_time_token, idempotency_key }) -> { invitation, member }
  */
 export function createHumanOrganizationsHttpApi({
   humanSession,
@@ -385,7 +385,10 @@ export function createHumanOrganizationsHttpApi({
     if (!isOpaqueToken(input.one_time_token)) throw invalidRequest();
     try {
       const result = await organizationService.acceptInvitation({ actor, one_time_token: input.one_time_token, idempotency_key: idempotencyKey });
-      return response(201, { member: normalizeMember(result) });
+      return response(201, {
+        invitation: normalizeInvitation(result?.invitation, undefined),
+        member: normalizeMember(result?.member, result?.invitation?.organization_id)
+      });
     } catch (error) {
       throw mapServiceError(error, "invitation");
     }
@@ -609,6 +612,7 @@ function normalizeInvitation(value, expectedOrganizationId = undefined, expected
   const output = { invitation_id: invitationId, organization_id: organizationId, version: outputVersion(value.version), role: value.role, status: value.status };
   for (const field of ["created_at", "expires_at"]) if (value[field] !== undefined) output[field] = requiredDate(value[field], field);
   for (const field of ["accepted_at", "consumed_at", "revoked_at"]) if (value[field] !== undefined) output[field === "consumed_at" ? "accepted_at" : field] = nullableDate(value[field], field);
+  if (value.accepted_member_id !== undefined) output.accepted_member_id = value.accepted_member_id === null ? null : requiredUuid(value.accepted_member_id, "accepted_member_id");
   return output;
 }
 

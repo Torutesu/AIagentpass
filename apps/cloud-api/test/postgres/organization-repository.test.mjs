@@ -70,7 +70,7 @@ class QueueClient {
 function response(rows = [], rowCount = rows.length) { return { rows, rowCount }; }
 function orgRow(overrides = {}) { return { organization_id: ids.organization, name: "Example", version: 1, created_at: NOW, updated_at: NOW, ...overrides }; }
 function membershipRow(overrides = {}) { return { organization_id: ids.organization, membership_id: ids.membership, member_id: ids.owner, role: "owner", status: "active", version: 1, created_at: NOW, updated_at: NOW, ...overrides }; }
-function invitationRow(overrides = {}) { return { organization_id: ids.organization, invitation_id: ids.invitation, role: "viewer", created_by: ids.admin, created_at: NOW, expires_at: LATER, consumed_at: null, revoked_at: null, version: 1, ...overrides }; }
+function invitationRow(overrides = {}) { return { organization_id: ids.organization, invitation_id: ids.invitation, role: "viewer", created_by: ids.admin, created_at: NOW, expires_at: LATER, consumed_by: null, consumed_at: null, revoked_at: null, version: 1, ...overrides }; }
 function txResponses(...responses) { return [response(), response(), ...responses, response(), response(), response(), response(), response(), response()]; }
 
 function repo(client, options = {}) { return createPostgresOrganizationRepository({ client, now: () => NOW, onAuthorityReduction: async () => ({ generation: 2 }), ...options }); }
@@ -451,14 +451,19 @@ test("revokeInvitation is idempotence-safe through status, version, actor, and t
   assert.deepEqual(update.params, [ids.organization, ids.invitation, 1, NOW, ids.admin, "revoked_by_operator"]);
 });
 
-test("acceptInvitation consumes the exact token once and uses only stored member and role", async () => {
+test("acceptInvitation consumes the exact token once and returns a sanitized invitation/member composite", async () => {
   const client = new QueueClient([
     response(), response([invitationRow({ role: "viewer" })]), response(),
-    response([membershipRow({ member_id: ids.viewer, role: "viewer", version: 2 })]), response([invitationRow({ consumed_at: NOW })]), response(), response([{ sequence: 0, event_hash: ZERO_HASH }]), response(), response(), response(), response()
+    response([membershipRow({ member_id: ids.viewer, role: "viewer", version: 2 })]), response([invitationRow({ consumed_by: ids.viewer, consumed_at: NOW })]), response(), response([{ sequence: 0, event_hash: ZERO_HASH }]), response(), response(), response(), response()
   ]);
   const result = await repo(client).acceptInvitation({ token_hash: TOKEN, actor_member_id: ids.viewer, organization_id: ids.organization, member_id: ids.admin, role: "owner", accepted_at: NOW, idempotency_key: "invite-accept-1" });
-  assert.equal(result.member_id, ids.viewer);
-  assert.equal(result.role, "viewer");
+  assert.equal(result.member.member_id, ids.viewer);
+  assert.equal(result.member.role, "viewer");
+  assert.deepEqual(result.invitation, {
+    organization_id: ids.organization, invitation_id: ids.invitation, role: "viewer", created_by: ids.admin,
+    created_at: NOW, expires_at: LATER, consumed_at: NOW, accepted_at: NOW,
+    accepted_member_id: ids.viewer, revoked_at: null, status: "accepted", version: 1
+  });
   const consume = client.calls.find((call) => call.text.startsWith("SELECT") && call.text.includes("i.token_hash=$1"));
   assert.match(consume.text, /i\.token_hash=\$1/);
   assert.match(consume.text, /FOR UPDATE/);
@@ -475,10 +480,11 @@ test("acceptInvitation consumes the exact token once and uses only stored member
     token_hash: TOKEN
   });
   const replayClient = new QueueClient([response(), response([invitationRow({ consumed_at: NOW })]), response()], {
-    idempotency: { request_hash: acceptHash, response_json: membershipRow({ member_id: ids.viewer, role: "viewer", version: 2 }) }
+    idempotency: { request_hash: acceptHash, response_json: { invitation: result.invitation, member: result.member } }
   });
   const replay = await repo(replayClient).acceptInvitation({ token_hash: TOKEN, actor_member_id: ids.viewer, accepted_at: NOW, idempotency_key: "invite-accept-1" });
   assert.equal(replay.replayed, true);
+  assert.deepEqual({ invitation: replay.invitation, member: replay.member }, { invitation: result.invitation, member: result.member });
   assert.equal(replayClient.calls.some((call) => call.text.startsWith("INSERT INTO memberships")), false);
 
   const consumedAgain = new QueueClient([response(), response()]);
