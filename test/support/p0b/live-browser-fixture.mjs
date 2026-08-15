@@ -128,53 +128,29 @@ export async function startP0BLiveBrowserFixture({
       const descriptor = roleDescriptor(safeSeed, role);
       const target = consolePath(path, harness.consoleUrl);
       await page.setExtraHTTPHeaders(identityHeaders(descriptor));
-      let releaseSummary;
-      const sessionReady = new Promise((resolve) => { releaseSummary = resolve; });
-      const summaryPattern = "**/api/console?resource=summary";
-      await page.route(summaryPattern, async (route) => {
-        await sessionReady;
-        await route.fallback();
-      });
-      const isBootstrap = (resource) => {
-        try {
-          const url = new URL(resource.url());
-          const request = typeof resource.request === "function" ? resource.request() : resource;
-          return request.method() === "POST"
-            && url.origin === new URL(harness.consoleUrl).origin
-            && url.pathname === SESSION_PATH;
-        } catch {
-          return false;
-        }
-      };
-      const requestPromise = page.waitForRequest(isBootstrap);
-      const responsePromise = page.waitForResponse(isBootstrap);
       let stage = "navigation";
       try {
-        await page.goto(target.toString(), { waitUntil: "domcontentloaded" });
+        // Establish the real BFF/Cloud session on an inert same-origin page.
+        // This avoids racing the application's own hydration/bootstrap while
+        // retaining Chromium TLS validation, identity headers, Set-Cookie,
+        // and the exact production session endpoint.
+        await page.goto(new URL("/favicon.svg", harness.consoleUrl).toString(), { waitUntil: "domcontentloaded" });
         stage = "response";
-        const applicationStartedBootstrap = await Promise.race([
-          requestPromise.then(() => true),
-          new Promise((resolve) => setTimeout(resolve, 1_000, false))
-        ]);
-        if (!applicationStartedBootstrap) {
-          // The live qualification must not depend on when the Console's first
-          // summary effect is scheduled. Start the same real BFF/Cloud
-          // bootstrap from this page only when no request has begun. The
-          // subsequent reload still proves cookie-bound resume and real UI.
-          await page.evaluate(async (path) => {
-            await fetch(path, {
-              method: "POST",
-              headers: { accept: "application/json", "content-type": "application/json" },
-              body: "{}",
-              cache: "no-store",
-              credentials: "same-origin",
-              redirect: "error"
-            });
-          }, SESSION_PATH);
-        }
-        const response = await responsePromise;
+        const response = await page.evaluate(async (sessionPath) => {
+          const result = await fetch(sessionPath, {
+            method: "POST",
+            headers: { accept: "application/json", "content-type": "application/json" },
+            body: "{}",
+            cache: "no-store",
+            credentials: "same-origin",
+            redirect: "error"
+          });
+          let body = null;
+          try { body = await result.json(); } catch {}
+          return { ok: result.ok, status: result.status, body };
+        }, SESSION_PATH);
         stage = "http";
-        if (!response.ok()) {
+        if (!response.ok) {
           if ([400, 401, 403, 404, 405, 409, 415, 422, 429, 500, 502, 503, 504].includes(response.status)) stage = `http_${response.status}`;
           else if (response.status >= 400 && response.status < 500) stage = "http_4xx";
           else if (response.status >= 500 && response.status < 600) stage = "http_5xx";
@@ -182,12 +158,11 @@ export async function startP0BLiveBrowserFixture({
           throw new Error("session bootstrap was rejected");
         }
         stage = "contract";
-        const body = await response.json();
-        const session = validateBootstrap(body, descriptor, safeSeed.organizationId);
+        const session = validateBootstrap(response.body, descriptor, safeSeed.organizationId);
         pageState.set(page, { role: descriptor, csrfToken: session.csrfToken, registered: pageState.get(page)?.registered === true });
-        releaseSummary();
+        stage = "target";
+        await page.goto(target.toString(), { waitUntil: "domcontentloaded" });
       } catch {
-        releaseSummary();
         throw new P0BLiveBrowserFixtureError(`session_bootstrap_${stage}_failed`, "P0-B live browser session bootstrap failed");
       }
       return descriptor;
