@@ -1,7 +1,7 @@
 # Hosted v1 implementation plan
 
 Status: active  
-Baseline: `codex/agent-platform` at migration `0057`  
+Baseline: `codex/agent-platform` at migration `0058`
 Updated: 2026-08-15
 
 This is the implementation plan for the Hosted identity, first-organization,
@@ -279,16 +279,107 @@ independent security review. Close all critical/high findings before promotion.
 
 ## 7. Immediate commit queue
 
-1. `feat: add restart-safe hosted oauth coordinator`
-2. `feat: atomically bind hosted identity and oauth completion`
-3. `feat: atomically create the first hosted organization`
-4. `feat: commit bootstrap webauthn and human session atomically`
-5. `feat: compose hosted bootstrap runtime routes`
-6. `feat: build hosted console onboarding`
-7. `test: qualify hosted bootstrap on two postgres instances`
-8. `test: qualify hosted bootstrap browser security matrix`
+Each item is independently reviewable and must leave `main` deployable. SQL
+authority changes are forward-only; a pushed migration is never rewritten.
+
+1. `fix: restore postgres privilege qualification`
+   - add the missing relation-kind projection used by bounded diagnostics;
+   - run the static checker tests, lint, PostgreSQL 16/17 fresh migration,
+     seeded upgrades, login-boundary checks, and P0-B live process;
+   - exit only when the same pushed SHA is green in GitHub Actions.
+2. `feat: atomically bind hosted identity and oauth completion` (`0059`)
+   - add `agentpass_hosted_identity_oauth_complete_v2` with server-generated
+     OAuth-state ID, bootstrap-cookie digest, candidate member ID, verified
+     provider/subject, and subject digest;
+   - take a transaction-scoped advisory lock derived from provider/subject,
+     lock the consuming OAuth state and attempt, resolve the immutable mapping,
+     create a member only when absent, and prevent orphan members under races;
+   - classify membership history in PostgreSQL and commit `consumed` plus
+     `organization_required`, `identity_verified`, or `no_membership` in the
+     same transaction; return only attempt ID, state, organization count, and
+     database expiry;
+   - replace caller-selected `member_id` completion in the repository and
+     callback coordinator; remove runtime EXECUTE on the legacy completion
+     function while retaining it only as non-callable migration history.
+3. `test: qualify atomic hosted identity completion`
+   - add PostgreSQL 16/17 tests for same-subject contention, different-subject
+     concurrency, mapping substitution, active/multiple/revoked memberships,
+     stale/duplicate callbacks, rollback after each write, and two-pool
+     convergence;
+   - assert no duplicate/orphan member, no reusable OAuth state, no direct
+     Hosted-table DML, and no subject/token/cookie in evidence or logs.
+4. `feat: atomically create the first hosted organization` (`0060`)
+   - normalize names server-side, lock the member and complete membership
+     history, require the exact `organization_required` attempt, and generate
+     organization/membership IDs on the server;
+   - insert organization plus active owner membership, store a secret-free
+     canonical idempotency result, emit the audit event, and advance to
+     `webauthn_required` in one transaction;
+   - make same-key replay byte-equivalent and different-key contention return a
+     stable conflict without creating a second organization.
+5. `feat: commit bootstrap webauthn and human session atomically` (`0061`)
+   - reuse the production verifier and pass only its strict verified result to
+     a transaction procedure;
+   - lock attempt/challenge/membership/epochs, insert the credential and Human
+     Session, consume the challenge, complete the attempt, and clear bootstrap
+     authority before commit;
+   - persist a one-use response-loss receipt so retry can recover cookies
+     without re-registering or creating a second session.
+6. `feat: compose hosted bootstrap runtime routes`
+   - wire the six frozen routes to H1-H3 PostgreSQL services;
+   - enforce startup configuration, trusted proxy/origin rules, deadlines,
+     rate limits, readiness, graceful drain, fixed errors, and zero fallback;
+   - add request-scoped correlation IDs and fixed-cardinality, secret-free
+     metrics/audit events.
+7. `feat: build hosted console onboarding`
+   - implement GitHub start/callback recovery, first-organization, passkey,
+     completion, expired, no-membership, and authenticated landing screens;
+   - use HttpOnly/Secure/SameSite cookies and in-memory UI state only; add
+     keyboard, screen-reader, reduced-motion, mobile, Japanese, and English
+     coverage;
+   - then add organization switcher and the role-gated member/session/device/
+     agent/activity/revocation screens against existing Human APIs.
+8. `test: qualify hosted browser and restart security matrix`
+   - exercise two API instances plus PostgreSQL under restart, callback replay,
+     response loss, concurrent tabs, stale cookies, Origin/CSRF substitution,
+     WebAuthn replay, and network/provider failure;
+   - scan URL, DOM, console, storage, traces, screenshots, metrics, and audit
+     payloads for reusable selectors and credentials.
 9. `feat: complete device helper and managed signer production paths`
+   - finish PostgreSQL Device API enrollment/control/ACK/revocation and the
+     headless signed PKG + CLI + Git/Claude Code/Cursor adapters;
+   - replace every hosted signing fallback with purpose-separated managed KMS
+     keys and qualify idempotency, fencing, rotation, outage, and response loss.
 10. `release: qualify and promote one immutable agentpass candidate`
+    - freeze one source SHA and artifact manifest; run Claude Code/Cursor E2E,
+      physical-Mac Secure Enclave/T2 tests, Developer ID signing, notarization,
+      stapling, Gatekeeper, Homebrew/direct-download digest equality, staging,
+      canary, rollback, PITR, emergency stop, and independent security review;
+    - promote only that unchanged candidate with no open critical/high finding.
+
+### Execution lanes and merge order
+
+- Critical path: CI repair -> `0059` identity completion -> `0060` first
+  organization -> `0061` WebAuthn/session -> runtime composition -> Hosted E2E.
+- Parallel lane A after `0059` freezes DTOs: read-only Console states, typed BFF
+  client, accessibility harness, localization, and browser secret scanner.
+- Parallel lane B now: Device API/helper correctness and physical-Mac harness.
+- Parallel lane C now: managed signer provisioning adapters, provider-operation
+  qualification, packaging/notarization automation, and production runbooks.
+- Integration rule: database migrations merge serially; parallel code consumes
+  frozen contracts; production evidence is accepted only when every lane names
+  the same source SHA and immutable artifact digests.
+
+### Milestone gates
+
+- M1 Identity-safe: H1/H2 green on PostgreSQL 16/17 and two instances.
+- M2 Account-ready: first organization, passkey, and Human Session are atomic.
+- M3 Console-ready: non-engineer onboarding and organization controls pass the
+  browser accessibility/security matrix.
+- M4 Agent-ready: Device API, helper, Claude Code, Cursor, and managed signers
+  pass unattended signing, contention, restart, and revocation tests.
+- M5 Production-ready: signed/notarized distribution, restore/rollback,
+  independent review, and one immutable release candidate all pass.
 
 ## 8. Production definition of done
 

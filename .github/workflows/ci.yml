@@ -128,6 +128,7 @@ jobs:
           import fs from "node:fs";
           import path from "node:path";
           import { Client } from "pg";
+          import { POSTGRES_SCHEMA_HEAD } from "./apps/cloud-api/src/postgres/schema-head.mjs";
           import { createMigrationRunner } from "./apps/cloud-api/src/postgres/migration-runner.mjs";
           import { POSTGRES_SCHEMA_HEAD } from "./apps/cloud-api/src/postgres/schema-head.mjs";
 
@@ -214,7 +215,7 @@ jobs:
               }
               if (expected === "agentpass_migrator") {
                 const head = await client.query("SELECT max(version)::int AS version FROM public.schema_migrations");
-                assert.equal(head.rows[0].version, 55);
+                assert.equal(head.rows[0].version, POSTGRES_SCHEMA_HEAD.version);
               }
               if (expected === "agentpass_signer") {
                 const allowed = await client.query(`SELECT has_function_privilege(

@@ -16,6 +16,7 @@ test("authority relation ACL reconciliation clears stale app writes and restores
 
 test("privilege checker exposes bounded, relation-only diagnostics without secret-bearing ACL data", async () => {
   const checker = await read("scripts/postgres/role-privilege-check.mjs");
+  assert.match(checker, /SELECT c\.oid, c\.relname, c\.relkind, c\.relowner/u);
   assert.match(checker, /MAX_TABLE_DIAGNOSTICS = 32/u);
   assert.match(checker, /LIMIT \$\{MAX_TABLE_DIAGNOSTICS\}/u);
   assert.match(checker, /table_privilege_diagnostics/u);

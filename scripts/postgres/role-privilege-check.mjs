@@ -87,7 +87,7 @@ role_ids AS (
   WHERE rolname IN ('${ROLES.join("', '")}')
 ),
 tables AS (
-  SELECT c.oid, c.relname, c.relowner
+  SELECT c.oid, c.relname, c.relkind, c.relowner
   FROM pg_class AS c
   JOIN target_schema AS s ON s.oid = c.relnamespace
   WHERE c.relkind IN ('r', 'p', 'v', 'm', 'f')
