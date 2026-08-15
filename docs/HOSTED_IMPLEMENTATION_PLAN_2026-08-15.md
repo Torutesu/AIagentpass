@@ -61,23 +61,30 @@ Implemented and pushed:
   atomically rotates it, and returns a fresh CSRF value; Console attempts this
   path before its legacy SIWC bootstrap and falls back only when no Session
   exists;
-- the frozen catalog validates 174 entries, 49 schemas, 61 OpenAPI operations,
+- Hosted onboarding now has six Playwright journeys covering unauthenticated,
+  first-organization, virtual-WebAuthn completion, duplicate submission,
+  expired, no-membership, and fail-closed error states, plus browser authority
+  scans across URL, DOM, console, cookies, Web Storage, IndexedDB, and Cache
+  Storage;
+- the PostgreSQL CI lane now requires session-ceiling, atomic Session rotation,
+  Hosted WebAuthn claim-lease, and Hosted status/CSRF contention suites at the
+  current schema head;
+- the frozen catalog validates 175 entries, 49 schemas, 62 OpenAPI operations,
   and all 64 forward-only migrations. Hosted bootstrap remains a separately
   frozen six-route contract with its own validator.
 
-Not yet implemented as a production-composable path:
+Not yet qualified as a production-composable path:
 
-- real-PostgreSQL restart/race qualification of the new PKCE/state boundary;
-- real-PostgreSQL restart/race qualification of atomic identity completion;
-- real-PostgreSQL restart/race and rollback qualification of atomic WebAuthn
-  credential plus Human Session completion;
-- real-PostgreSQL qualification of leased/recoverable WebAuthn verification
-  claims under process death, lease expiry, takeover, and changed responses;
-- organization-control continuation, deployed Console E2E, and production
-  evidence.
-- a terminal green CI qualification at schema head `0064`; the previous run
-  proved fresh migration and role/login boundaries, and this repair set aligns
-  legacy 0048 authority, shared-integration fixtures, and live-browser budgets.
+- a terminal green GitHub Actions run at schema head `0064`, including the four
+  newly mandatory PostgreSQL concurrency suites;
+- real process-kill qualification between claim, verification, commit, and
+  response, beyond the existing two-pool/retry/lease PostgreSQL coverage;
+- a deployed Console E2E against real Cloud API, PostgreSQL, GitHub OAuth test
+  identity, and browser WebAuthn rather than route mocks;
+- the post-onboarding organization, device, policy, agent-session, activity,
+  and revocation journeys against production-shaped data;
+- managed-cloud signer/IAM evidence, physical-Mac helper evidence, signed and
+  notarized distribution, independent security review, and production rollout.
 
 ## 2. Security invariants
 
@@ -214,6 +221,9 @@ the matching credential and completed bootstrap ceremony.
 
 ### H4 — runtime wiring and complete Hosted API
 
+State: six-route Cloud runtime and strict Console BFF are implemented; deployed
+reverse-proxy, readiness/drain, and real-provider qualification remain.
+
 Deliverables:
 
 1. Compose H1-H3 in the hosted runtime with exact startup configuration,
@@ -230,6 +240,11 @@ Exit: hosted startup fails on missing identity/database/key configuration and
 all six routes run against real PostgreSQL with least-privilege roles.
 
 ### H5 — Console onboarding and organization controls
+
+State: first-user onboarding and volatile-authority typed client are
+implemented with focused unit tests and six Playwright route-mocked journeys.
+Organization administration foundations exist; complete role/device/agent
+journeys and deployed E2E remain.
 
 Deliverables:
 
@@ -437,7 +452,7 @@ of the same commit gate.
    - request correlation, dedicated Hosted metrics/readiness, real PostgreSQL
      restart/two-instance qualification, and deployed reverse-proxy behavior
      remain mandatory before this package is production-composable.
-10. `feat: build hosted console onboarding`
+10. `feat: build hosted console onboarding` — implemented
    - implement GitHub start/callback recovery, first-organization, passkey,
      completion, expired, no-membership, and authenticated landing screens;
    - use HttpOnly/Secure/SameSite cookies and in-memory UI state only; add
@@ -445,7 +460,9 @@ of the same commit gate.
      coverage;
    - then add organization switcher and the role-gated member/session/device/
      agent/activity/revocation screens against existing Human APIs.
-11. `test: qualify hosted browser and restart security matrix`
+11. `test: qualify hosted browser and restart security matrix` — route-mocked
+    browser matrix and CI wiring implemented; deployed/process-kill evidence
+    pending
    - exercise two API instances plus PostgreSQL under restart, callback replay,
      response loss, concurrent tabs, stale cookies, Origin/CSRF substitution,
      WebAuthn replay, and network/provider failure;
@@ -465,12 +482,13 @@ of the same commit gate.
 
 ### Execution lanes and merge order
 
-- Critical path: schema-head qualification -> `0062`/`0063` PostgreSQL
-  race/rollback/lease qualification -> runtime composition ->
-  Console onboarding -> Hosted E2E.
-- Parallel lane A after `0059` freezes DTOs: read-only Console states, typed BFF
-  client, accessibility harness, localization, and browser secret scanner.
-- Parallel lane B now: Device API/helper correctness and physical-Mac harness.
+- Critical path: terminal schema-head `0064` CI -> process-loss qualification ->
+  composed/deployed Hosted E2E -> authenticated organization UX -> browser-led
+  device enrollment.
+- Parallel lane A now: role-specific organization/accessibility/localization
+  tests that consume the frozen Human/Organization contracts.
+- Parallel lane B now: Device API/helper correctness and physical-Mac harness,
+  without changing browser organization authority.
 - Parallel lane C now: managed signer provisioning adapters, provider-operation
   qualification, packaging/notarization automation, and production runbooks.
 - Integration rule: database migrations merge serially; parallel code consumes
@@ -479,16 +497,66 @@ of the same commit gate.
 
 ### Milestone gates
 
-- M1 Identity-safe: H1/H2 green on PostgreSQL 16/17 and two instances.
-- M2 Account-ready: first organization, passkey, and Human Session are atomic.
-- M3 Console-ready: non-engineer onboarding and organization controls pass the
-  browser accessibility/security matrix.
+- M1 Identity-safe — source complete, CI evidence pending: H1/H2 green on
+  PostgreSQL 16/17 and two instances.
+- M2 Account-ready — source complete, CI/E2E evidence pending: first
+  organization, passkey, and Human Session are atomic.
+- M3 Console-ready — in progress: non-engineer onboarding and organization
+  controls pass the browser accessibility/security matrix.
 - M4 Agent-ready: Device API, helper, Claude Code, Cursor, and managed signers
   pass unattended signing, contention, restart, and revocation tests.
 - M5 Production-ready: signed/notarized distribution, restore/rollback,
   independent review, and one immutable release candidate all pass.
 
-## 8. Production definition of done
+## 8. Next execution plan
+
+The next work is ordered by security authority and user-visible dependency.
+Each wave is mergeable on its own; later waves may start in parallel only when
+they consume a frozen contract and do not modify the same authority boundary.
+
+| Wave | Scope | Parallel work | Required exit evidence |
+| --- | --- | --- | --- |
+| N1 | Close Hosted account qualification | Watch the pushed PostgreSQL 17 CI lane; add deterministic process-kill harnesses for OAuth callback, WebAuthn claim/commit, and Session rotation; retain sanitized evidence by source SHA. | Fresh migration at `0064`, no unexpected skips, one winner under contention, safe retry after response loss, no usable partial Session, and green browser build/list/lint. |
+| N2 | Complete authenticated organization UX | Wire organization select/switch, invitations, member role change/removal, credential/session management, logout, and emergency revoke through the existing strict BFF. | Owner/Admin/Auditor/Viewer matrix, last-owner protection, epoch invalidation, stale `If-Match`, recent-WebAuthn binding, CSRF/origin rejection, accessibility, and authority scan pass. |
+| N3 | Complete browser-led device onboarding | Connect invitation issuance to CLI loopback handoff, possession proof, enrollment completion, device list/detail, signed bundle status, monotonic ACK, wake, revoke, and repair. | One-time invitation cannot replay or cross tenants; no credential enters URL/storage/logs; restart and response-loss converge; revoked device cannot ACK or obtain new authority. |
+| N4 | Finish local helper and agent adapters | Make signed PKG + CLI the primary delivery; complete native broker/XPC setup journal and identical Claude Code/Cursor protocol adapters. | Clean physical Mac setup, two unattended verified commits per agent, sibling/repository/worktree substitution denied, budget/TTL enforced, daemon restart safe, next request blocked after revoke. |
+| N5 | Productionize managed signers | Provision purpose-separated AWS/GCP KMS identities and exact key versions; close fencing, rotation, outage, throttle, and uncertain-result reconciliation. | Hosted readiness rejects file/local fallback and wrong purpose/version; IAM denial and provider failure tests pass; one committed result under two-instance contention; private bytes never leave KMS. |
+| N6 | Production-like full E2E and security closure | Deploy staging Console/API/PostgreSQL/KMS/helper path; run account-to-revocation journey, parser/fuzz/dependency/SBOM/secret review, tenant isolation, restore, rollback, and incident drills. | Same source SHA and immutable digests across browser, server, DB, signer, and Mac evidence; no open critical/high finding; RPO/RTO and revoke-latency targets measured. |
+| N7 | Signed release and controlled rollout | Build universal PKG, Developer ID sign, notarize/staple, verify Gatekeeper, publish identical direct/Homebrew artifact, canary, observe, and promote. | Clean install/upgrade/uninstall-preserve/reinstall/purge pass on supported Macs; migration/canary/drain/rollback/alerts pass; production approval names the unchanged candidate. |
+
+### N1 concrete commit sequence
+
+1. `test: qualify hosted postgres authority at schema head 0064`
+   - require the four newly wired integration suites in CI;
+   - make unexpected skip detection fail the job;
+   - upload a source-bound summary containing only versions, scenario names,
+     pass/fail counts, and invariant results.
+2. `test: add hosted process-loss qualification harness`
+   - fork workers at durable transition boundaries;
+   - kill before provider call, after claim, before commit, after commit, and
+     before response delivery;
+   - restart with a separate pool/process and assert either safe continuation
+     or terminal denial, never duplicate authority.
+3. `test: run hosted onboarding against composed services`
+   - start Console, Cloud API, and PostgreSQL in CI behind production-shaped
+     origins and reverse-proxy headers;
+   - keep GitHub at a deterministic OAuth test provider and WebAuthn at a
+     virtual authenticator, while leaving all AgentPass services real;
+   - assert exact cookie rotation, redirects, replay denial, and secret scans.
+4. `feat: expose bounded hosted readiness and drain evidence`
+   - distinguish database, OAuth configuration, WebAuthn, limiter, and signer
+     readiness with fixed-cardinality states;
+   - reject new ceremonies during drain while allowing bounded completion of
+     already claimed work;
+   - never emit selectors, subjects, credentials, request bodies, or tokens.
+
+N2 begins after N1 freezes Session/organization behavior. N3 API and native
+work may proceed in parallel with N2 because it consumes the existing Device
+contract, but its Console merge follows the organization role matrix. N4 and
+N5 run in parallel after N3 freezes enrollment and bundle semantics. N6 and N7
+are serial release gates against one immutable candidate.
+
+## 9. Production definition of done
 
 Hosted v1 is complete only when a non-engineer can create an account and
 organization, register a passkey, enroll a supported Mac, configure Claude Code
