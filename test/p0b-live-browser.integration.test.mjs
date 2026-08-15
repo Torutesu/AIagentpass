@@ -253,7 +253,8 @@ function safeRegistrationMarker(code, prefix) {
     ["registration_options_503_human_auth_control_unavailable", "OPTIONS_503_CONTROL_UNAVAILABLE"],
     ["registration_options_503_webauthn_registration_http_session_unavailable", "OPTIONS_503_SESSION_UNAVAILABLE"],
     ["registration_options_503_webauthn_registration_http_unavailable", "OPTIONS_503_SERVICE_UNAVAILABLE"],
-    ["registration_verify_401_webauthn_registration_http_session_required", "VERIFY_401_SESSION_REQUIRED"]
+    ["registration_verify_401_webauthn_registration_http_session_required", "VERIFY_401_SESSION_REQUIRED"],
+    ["registration_verify_401_session_required", "VERIFY_401_COOKIE_MISSING"]
   ]).get(code);
   if (detailed !== undefined) return `${prefix}_REGISTRATION_${detailed}_FAILED`;
   const match = String(code ?? "").match(/^registration_(options|verify)_(400|401|403|409|413|422|428|500|503)(?:_[a-z][a-z0-9_]{0,95})?$/u);
