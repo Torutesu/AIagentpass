@@ -10,7 +10,8 @@ const enabled = process.env.P0B_LIVE_BROWSER === "1";
 test("P0-B live browser role, WebAuthn, and recent-auth matrix", { skip: !enabled, timeout: 840_000 }, async (t) => {
   await scenario(t, "renders all six real PostgreSQL device states and accepts keyboard wake", async ({ open }) => {
     const page = await open("owner");
-    for (const label of ["同期済み", "反映待ち", "ブロック中", "古い状態", "オフライン", "失効済み"]) await page.getByLabel(`同期状態: ${label}`).waitFor();
+    await Promise.all(["同期済み", "反映待ち", "ブロック中", "古い状態", "オフライン", "失効済み"]
+      .map((label) => page.getByLabel(`同期状態: ${label}`).waitFor()));
     const card = deviceCard(page, "反映待ち Mac");
     const wake = card.getByRole("button", { name: "Wake requestを依頼" });
     await wake.focus();
@@ -90,7 +91,12 @@ test("P0-B live browser role, WebAuthn, and recent-auth matrix", { skip: !enable
 });
 
 async function scenario(parent, name, callback) {
-  await parent.test(name, { timeout: 45_000 }, async () => {
+  // Each scenario intentionally starts a fresh PostgreSQL/Cloud/Console stack.
+  // Hosted CI can spend most of the fixture's 30-second readiness budget before
+  // Chromium registration begins, so the scenario timeout must not race that
+  // bounded startup deadline. UI assertions still retain Playwright's focused
+  // per-action timeout and therefore fail promptly when a state is absent.
+  await parent.test(name, { timeout: 75_000 }, async () => {
     let fixture;
     let browser;
     try {
