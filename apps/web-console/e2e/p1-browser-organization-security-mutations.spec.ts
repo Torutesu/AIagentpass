@@ -515,7 +515,7 @@ test("production Console SecurityPanel executes passkey and session mutations wi
   try {
     await openSecurityPanel(page);
 
-    await page.getByRole("button", { name: "名前を変更", exact: true }).click();
+    await page.getByRole("button", { name: "名前を変更", exact: true }).first().click();
     await page.getByLabel("パスキーの表示名").fill("Mac Touch ID renamed");
     await page.getByRole("button", { name: "保存", exact: true }).click();
     await expect(page.getByText("Mac Touch ID renamed", { exact: true })).toBeVisible();
