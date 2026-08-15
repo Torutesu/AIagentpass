@@ -10,6 +10,7 @@ import {
   createVerifiedPostgresPoolOptions,
   createP0BTempDirectory,
   createTestCertificates,
+  p0bHostedBootstrapEnvironment,
   p0bEnvironment,
   readPostgresCaFile,
   redactP0BDiagnostic,
@@ -40,6 +41,22 @@ test("child environments remove inherited AgentPass secrets and Node injection k
   assert.equal(Object.hasOwn(env, "AGENTPASS_CLOUD_TOKEN"), false);
   assert.equal(Object.hasOwn(env, "NODE_OPTIONS"), false);
   assert.equal(Object.hasOwn(env, "NODE_EXTRA_CA_CERTS"), false);
+});
+
+test("P0-B Hosted bootstrap settings bind OAuth to the TLS Console and separate every secret purpose", () => {
+  const env = p0bHostedBootstrapEnvironment(31_337);
+  assert.equal(env.AGENTPASS_GITHUB_REDIRECT_URI, "https://localhost:31337/api/auth/bootstrap/github/callback");
+  assert.equal(env.AGENTPASS_HOSTED_CONSOLE_ONBOARDING_URL, "https://localhost:31337/onboarding");
+  assert.equal(Object.isFrozen(env), true);
+  const secrets = [
+    env.AGENTPASS_HOSTED_PKCE_KEY,
+    env.AGENTPASS_HOSTED_BOOTSTRAP_CSRF_KEY,
+    env.AGENTPASS_HOSTED_WEBAUTHN_RESPONSE_KEY,
+    Buffer.alloc(32, 0x35).toString("base64url")
+  ];
+  assert.equal(new Set(secrets).size, secrets.length);
+  for (const secret of secrets) assert.match(secret, /^[A-Za-z0-9_-]{43}$/u);
+  assert.throws(() => p0bHostedBootstrapEnvironment(0), /port is invalid/);
 });
 
 test("certificate generation is temporary and creates a localhost CA chain", async (t) => {

@@ -124,7 +124,7 @@ test("authority matrix executes the 0048-0055 qualification set and rejects unex
   assert.match(section, /\^Bail out!/u);
   assert.match(section, /unexpected incomplete qualification/u);
   assert.match(section, /if \[\[ "\$N1_POSTGRES_MAJOR" == "17" \]\]/u);
-  assert.match(section, /grep -Eq '\^1\\\.\[1-9\]\[0-9\]\*\$'/u);
+  assert.match(section, /grep -Eq '\^1\\\.\\\.\[1-9\]\[0-9\]\*\$'/u);
 });
 
 test("N1 evidence is source-SHA-bound and uploaded with a fail-closed artifact contract", () => {

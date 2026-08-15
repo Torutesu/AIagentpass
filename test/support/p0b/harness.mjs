@@ -286,6 +286,7 @@ export async function startP0BHarness({ env = process.env, repoRoot = REPOSITORY
       AGENTPASS_CAPABILITY_NONCE_SECRET: files.capabilitySecret,
       AGENTPASS_HUMAN_CURSOR_SECRET: files.cursorSecret,
       AGENTPASS_HUMAN_AUTH_SECRET: Buffer.alloc(32, 0x35).toString("base64url"),
+      ...p0bHostedBootstrapEnvironment(consoleTlsPort),
       AGENTPASS_IDENTITY_PROVIDER: "chatgpt",
       AGENTPASS_OPERATIONAL_PROBE_SECRET: files.probeSecret,
       AGENTPASS_CONSOLE_ORIGIN: `https://localhost:${consoleTlsPort}`,
@@ -364,6 +365,23 @@ export async function startP0BHarness({ env = process.env, repoRoot = REPOSITORY
     const diagnostic = redactP0BDiagnostic(error?.message ?? "unknown");
     throw new Error(`P0-B harness startup failed (${diagnostic || "unknown"})`);
   }
+}
+
+export function p0bHostedBootstrapEnvironment(consoleTlsPort) {
+  if (!Number.isSafeInteger(consoleTlsPort) || consoleTlsPort < 1 || consoleTlsPort > 65_535) {
+    throw new TypeError("P0-B Console TLS port is invalid");
+  }
+  const consoleOrigin = `https://localhost:${consoleTlsPort}`;
+  return Object.freeze({
+    AGENTPASS_GITHUB_CLIENT_ID: "agentpass-p0b-github-client",
+    AGENTPASS_GITHUB_CLIENT_SECRET: "agentpass-p0b-github-secret",
+    AGENTPASS_GITHUB_REDIRECT_URI: `${consoleOrigin}/api/auth/bootstrap/github/callback`,
+    AGENTPASS_HOSTED_CONSOLE_ONBOARDING_URL: `${consoleOrigin}/onboarding`,
+    AGENTPASS_HOSTED_PKCE_KEY_ID: "p0b-hosted-pkce-v1",
+    AGENTPASS_HOSTED_PKCE_KEY: Buffer.alloc(32, 0x36).toString("base64url"),
+    AGENTPASS_HOSTED_BOOTSTRAP_CSRF_KEY: Buffer.alloc(32, 0x37).toString("base64url"),
+    AGENTPASS_HOSTED_WEBAUTHN_RESPONSE_KEY: Buffer.alloc(32, 0x38).toString("base64url")
+  });
 }
 
 export async function closeP0BHarness({ cloudProcess, consoleProcess, cloudProxy, consoleProxy, database, temp } = {}) {

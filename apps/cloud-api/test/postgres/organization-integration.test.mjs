@@ -146,7 +146,7 @@ test("Organization P1 is atomic and replay-safe across real PostgreSQL connectio
   assert.equal(roleSession.rows[0].recent_auth_consumed_at, null);
   const roleChallenge = await pool.query("SELECT status,consumed_at FROM webauthn_challenges WHERE id=$1", [roleChallengeId]);
   assert.equal(roleChallenge.rows[0].status, "consumed");
-  assert.equal(new Date(roleChallenge.rows[0].consumed_at).toISOString(), NOW);
+  assert.ok(new Date(roleChallenge.rows[0].consumed_at).getTime() >= Date.parse(NOW), "role-change challenge consumption must use authoritative database time");
   const roleCapabilities = await pool.query("SELECT count(*)::int AS active FROM capabilities WHERE organization_id=$1 AND issued_by_member_id=$2 AND revoked_at IS NULL", [organizationId, invitedId]);
   assert.equal(roleCapabilities.rows[0].active, 0);
 
@@ -177,7 +177,7 @@ test("Organization P1 is atomic and replay-safe across real PostgreSQL connectio
   assert.equal(removedSession.rows[0].recent_auth_consumed_at, null);
   const removeChallenge = await pool.query("SELECT status,consumed_at FROM webauthn_challenges WHERE id=$1", [removeChallengeId]);
   assert.equal(removeChallenge.rows[0].status, "consumed");
-  assert.equal(new Date(removeChallenge.rows[0].consumed_at).toISOString(), NOW);
+  assert.ok(new Date(removeChallenge.rows[0].consumed_at).getTime() >= Date.parse(NOW), "member-removal challenge consumption must use authoritative database time");
   const removedCapabilities = await pool.query("SELECT count(*)::int AS active FROM capabilities WHERE organization_id=$1 AND issued_by_member_id=$2 AND revoked_at IS NULL", [organizationId, removedId]);
   assert.equal(removedCapabilities.rows[0].active, 0);
 
