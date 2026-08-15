@@ -38,16 +38,16 @@ import {
  *
  * The adapter never accepts or forwards private key material. It also never
  * treats a direct provider exception as proof that the provider did not
- * accept a request; the operation is fenced as `uncertain` before retry.
+ * accept a request; the operation is fenced as `uncertain` and is never
+ * retried without an exact provider-side result.
  *
- * Ed25519 signing is deterministic for a fixed private key and exact bytes.
- * Therefore a retry after `started`/`uncertain` is safe only if the durable
- * repository confirms the exact operation binding and the provider remains
- * pinned to the same purpose, key, key version, and public key. This adapter
- * enforces those preconditions and compares a recovered signature with any
- * signature already persisted by the repository. It does not claim exactly
- * once execution at the external KMS boundary; the guarantee is deterministic
- * convergence, not absence of duplicate provider attempts.
+ * Ed25519 signing is deterministic for a fixed private key and exact bytes,
+ * but deterministic output is not provider acceptance evidence. A direct
+ * provider without operation lookup therefore cannot be called again after
+ * `started`/`uncertain`; only a signature and receipt already persisted under
+ * the exact operation binding may be reconciled. This adapter never claims
+ * exactly-once execution at the external KMS boundary by re-signing an
+ * ambiguous operation.
  */
 
 export const PROVIDER_OPERATION_RECONCILIATION_ADAPTER_VERSION = 1;
@@ -642,64 +642,47 @@ export function createProviderOperationReconciliationAdapter(options = {}) {
     }
   }
 
-  async function claimAndRecover(operation, record, signingBytes, lookup) {
+  async function claimAndRecover(operation, signingBytes) {
     assertOperationGate(operationGate);
     const claimed = await readRecord("claimOperation", operation);
     if (!claimed) fail(REPOSITORY, "repository returned no operation while claiming recovery");
+
+    // A concurrent worker may have durably accepted or committed the exact
+    // provider result between the initial read and this claim. Reconcile that
+    // persisted result; it is the only safe recovery path after the provider
+    // boundary.
+    if (claimed.state === "committed") {
+      const metadata = await loadPublicKey();
+      return committedResult(claimed, operation, metadata.key, signingBytes, providerId);
+    }
+    if ((claimed.state === "accepted" || claimed.state === "uncertain")
+      && claimed.signature !== undefined && claimed.provider_receipt !== undefined) {
+      return reconcilePersistedResult(operation, signingBytes);
+    }
     if (!Object.hasOwn(claimed, "claim_token")) return null;
 
-    // The claim may have crossed the database boundary while shutdown began.
-    // Fence again immediately before the provider call.
-    await fenceProviderBoundary(operationGate, operation, claimed.claim_token, markUncertainBestEffort);
-    let recovered;
-    try {
-      recovered = await callProvider(operation, signingBytes);
-    } catch (error) {
-      await markUncertainBestEffort(operation, claimed.claim_token, reasonForProviderError(error));
-      throw error;
+    // A claim proves only that the durable lease is available; it does not
+    // prove that the previous direct provider call was rejected. Since this
+    // adapter has no provider-side lookup, quarantine the operation instead
+    // of issuing a second provider sign with the same canonical bytes.
+    const quarantined = await markUncertainBestEffort(
+      operation,
+      claimed.claim_token,
+      "provider_response_lost",
+    );
+    if (!quarantined) fail(REPOSITORY, "repository did not durably quarantine the ambiguous provider operation");
+    if (quarantined.state === "committed") {
+      const metadata = await loadPublicKey();
+      return committedResult(quarantined, operation, metadata.key, signingBytes, providerId);
     }
-
-    const metadata = await loadPublicKey();
-    if (record.signature !== undefined) {
-      const stored = signatureShape(record.signature, metadata.key, signingBytes);
-      if (!sameBytes(Buffer.from(stored.value, "base64url"), recovered.rawSignature)) {
-        await markUncertainBestEffort(operation, claimed.claim_token, "provider_output_invalid");
-        fail(CONFLICT, "deterministic recovery returned a different signature");
-      }
+    if ((quarantined.state === "accepted" || quarantined.state === "uncertain")
+      && quarantined.signature !== undefined && quarantined.provider_receipt !== undefined) {
+      return reconcilePersistedResult(operation, signingBytes);
     }
-    const acceptedInput = Object.freeze({
-      ...operation,
-      claim_token: claimed.claim_token,
-      signature: recovered.signature,
-      provider_receipt: recovered.provider_receipt,
-    });
-    let accepted;
-    try {
-      accepted = await repository.recordAccepted(acceptedInput);
-    } catch {
-      await markUncertainBestEffort(operation, claimed.claim_token, "provider_response_lost");
-      throw mapRepositoryError();
+    if (quarantined.state !== "uncertain") {
+      fail(REPOSITORY, "repository did not return a durable uncertain operation");
     }
-    const acceptedRecord = normalizeRepositoryRecord(accepted, operation, maxRequestBytes);
-    if (acceptedRecord.state !== "accepted" && acceptedRecord.state !== "committed") {
-      await markUncertainBestEffort(operation, claimed.claim_token, "provider_response_lost");
-      fail(REPOSITORY, "repository did not persist accepted provider output");
-    }
-    if (acceptedRecord.state === "committed") {
-      assertPersistedProviderResult(acceptedRecord, operation, recovered, metadata.key, signingBytes);
-      return committedResult(acceptedRecord, operation, metadata.key, signingBytes, providerId);
-    }
-    assertPersistedProviderResult(acceptedRecord, operation, recovered, metadata.key, signingBytes);
-    let committed;
-    try {
-      committed = await repository.commitOperation(operationInput(operation, claimed.claim_token));
-    } catch {
-      await markUncertainBestEffort(operation, claimed.claim_token, "commit_response_lost");
-      throw mapRepositoryError();
-    }
-    const committedRecord = normalizeRepositoryRecord(committed, operation, maxRequestBytes, { allowClaimToken: false });
-    assertPersistedProviderResult(committedRecord, operation, recovered, metadata.key, signingBytes);
-    return committedResult(committedRecord, operation, metadata.key, signingBytes, providerId);
+    fail(UNCERTAIN, "provider outcome is ambiguous and direct provider lookup is unavailable");
   }
 
   async function reconcilePersistedResult(operation, signingBytes) {
@@ -779,7 +762,7 @@ export function createProviderOperationReconciliationAdapter(options = {}) {
       if (record.state === "pending") {
         if (Object.hasOwn(record, "claim_token")) return performInitialSign(operation, record.claim_token, signingBytes);
       } else if (record.state === "started" || record.state === "uncertain" || record.state === "accepted") {
-        const recovered = await claimAndRecover(operation, record, signingBytes, false);
+        const recovered = await claimAndRecover(operation, signingBytes);
         if (recovered) return recovered;
       }
       if (attempt === maxRecoveryAttempts) fail(BUSY, "operation did not become claimable before the recovery bound");
@@ -805,7 +788,7 @@ export function createProviderOperationReconciliationAdapter(options = {}) {
         return Object.freeze({ state: "committed", ...await reconcilePersistedResult(operation, signingBytes) });
       }
       if (record.state === "accepted" || record.state === "uncertain" || record.state === "started") {
-        const recovered = await claimAndRecover(operation, record, signingBytes, true);
+        const recovered = await claimAndRecover(operation, signingBytes);
         if (recovered) return Object.freeze({ state: "committed", ...recovered });
       }
       if (attempt === maxRecoveryAttempts) fail(UNCERTAIN, "operation recovery did not converge");

@@ -6,7 +6,10 @@ import { Pool } from "pg";
 
 import { SIGNER_PROTOCOL_VERSIONS } from "../../src/managed-signer-provider-contract.mjs";
 import { createDurableManagedSignerProvider } from "../../src/durable-managed-signer-provider.mjs";
-import { createProviderOperationReconciliationAdapter } from "../../src/provider-operation-reconciliation-adapter.mjs";
+import {
+  PROVIDER_OPERATION_RECONCILIATION_ERROR_CODES,
+  createProviderOperationReconciliationAdapter,
+} from "../../src/provider-operation-reconciliation-adapter.mjs";
 import { createMigrationRunner } from "../../src/postgres/migration-runner.mjs";
 import {
   canonicalManagedSignerRequestDigest,
@@ -17,7 +20,7 @@ import { createPostgresProviderOperationRepository } from "../../src/postgres/pr
 
 const DATABASE_URL = process.env.AGENTPASS_TEST_DATABASE_URL ?? process.env.AGENTPASS_TEST_POSTGRES_URL;
 
-test("0041 converges two PostgreSQL-backed adapter instances and recovers a started operation", {
+test("0041 converges two PostgreSQL-backed adapters and quarantines a started operation without re-signing", {
   skip: !DATABASE_URL,
   timeout: 60_000,
 }, async (t) => {
@@ -88,10 +91,11 @@ test("0041 converges two PostgreSQL-backed adapter instances and recovers a star
     claim_token: reserved.claim_token,
     uncertain_reason: "process_interrupted",
   });
-  const recovered = await adapter(secondRepository).lookup(recoveryBinding, recoveryBytes);
-  assert.equal(recovered.state, "committed");
-  assert.equal(signCalls, 2);
-  assert.equal((await firstRepository.getOperation(operation)).state, "committed");
+  await assert.rejects(adapter(secondRepository).lookup(recoveryBinding, recoveryBytes), {
+    code: PROVIDER_OPERATION_RECONCILIATION_ERROR_CODES.UNCERTAIN,
+  });
+  assert.equal(signCalls, 1);
+  assert.equal((await firstRepository.getOperation(operation)).state, "uncertain");
 });
 
 test("0041 quarantines only expired started operations with bounded two-pool maintenance", {

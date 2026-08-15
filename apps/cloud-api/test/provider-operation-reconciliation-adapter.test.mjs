@@ -434,7 +434,7 @@ test("releases the in-process entry after completion and rechecks durable termin
   assert.equal(fixture.events.filter((event) => event === "reserve").length, 2);
 });
 
-test("recovers a crash after the provider boundary through deterministic retry on a second adapter instance", async () => {
+test("quarantines a lost provider result without a second direct provider sign", async () => {
   const fixture = createAdapterFixture({ failRecordAcceptedOnce: true });
   const first = fixture.adapter;
   await assert.rejects(first.signOnce(fixture.binding, PAYLOAD), { code: CODES.REPOSITORY });
@@ -449,13 +449,23 @@ test("recovers a crash after the provider boundary through deterministic retry o
     keyVersion: KEY_VERSION,
     waitTimeoutMs: 50,
   });
-  const result = await second.lookup(fixture.binding, PAYLOAD);
-  assert.equal(result.state, "committed");
-  assert.equal(fixture.calls.sign.length, 2);
-  assert.equal(fixture.calls.sign[0].bytes.toString("hex"), fixture.calls.sign[1].bytes.toString("hex"));
-  assert.equal(fixture.calls.sign[0].bytes.length, PAYLOAD.length);
-  assert.equal(result.signature.value, crypto.sign(null, PAYLOAD, fixture.pair.privateKey).toString("base64url"));
-  assert.equal(fixture.rows.get(fixture.binding.operation_id).state, "committed");
+  await assert.rejects(second.lookup(fixture.binding, PAYLOAD), { code: CODES.UNCERTAIN });
+  assert.equal(fixture.calls.sign.length, 1);
+  assert.equal(fixture.rows.get(fixture.binding.operation_id).state, "uncertain");
+});
+
+test("quarantines a process-lost started operation before any recovery provider call", async () => {
+  const fixture = createAdapterFixture();
+  fixture.seed({
+    ...fixture.binding,
+    algorithm: "ed25519",
+    bytes_length: PAYLOAD.length,
+    request_digest: digest(PAYLOAD),
+  }, "started");
+
+  await assert.rejects(fixture.adapter.lookup(fixture.binding, PAYLOAD), { code: CODES.UNCERTAIN });
+  assert.equal(fixture.calls.sign.length, 0);
+  assert.equal(fixture.rows.get(fixture.binding.operation_id).state, "uncertain");
 });
 
 test("deduplicates two concurrent adapter instances through the durable repository claim and wait", async () => {
