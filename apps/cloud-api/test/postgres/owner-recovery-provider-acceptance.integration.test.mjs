@@ -25,7 +25,7 @@ test("durable fake-provider acceptance converges after lost response and uncerta
   const migrationClient = await pool.connect();
   try {
     const migration = await createMigrationRunner({ client: migrationClient, applicationVersion: "owner-recovery-provider-acceptance" }).run();
-    assert.equal(migration.currentVersion, 46);
+    assert.equal(migration.currentVersion, 47);
   } finally { migrationClient.release(); }
   const fixture = await seed(pool);
   t.after(async () => { await cleanup(pool, fixture); await pool.end(); });

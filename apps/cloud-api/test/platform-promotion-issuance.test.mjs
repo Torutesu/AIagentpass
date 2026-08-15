@@ -1,13 +1,14 @@
 import assert from "node:assert/strict";
+import crypto from "node:crypto";
 import test from "node:test";
 
 import { deriveReleaseCandidateId } from "../../../lib/release-candidate-identity.mjs";
 import {
   PROMOTION_EVIDENCE_V3_ALGORITHM,
   PROMOTION_EVIDENCE_V3_PURPOSE,
-  PROMOTION_EVIDENCE_V3_SIGNING_VERSION,
   PROMOTION_EVIDENCE_V3_TYPE,
   PROMOTION_EVIDENCE_V3_VERSION,
+  promotionEvidenceV3SigningData,
   promotionEvidenceV3StatementHash,
 } from "../src/promotion-evidence-v3-statement.mjs";
 import {
@@ -15,6 +16,7 @@ import {
   PlatformPromotionIssuanceError,
   createPlatformPromotionIssuanceService,
 } from "../src/platform-promotion-issuance.mjs";
+import { createPromotionEvidenceV3PublicKeyResolver } from "../src/promotion-evidence-v3-public-key-resolver.mjs";
 
 const NOW = Date.parse("2026-08-15T00:00:00.000Z");
 const INPUT = Object.freeze({
@@ -24,7 +26,12 @@ const INPUT = Object.freeze({
   candidate_id: deriveReleaseCandidateId("a".repeat(64)),
   idempotency_key: "promotion-request-0001",
 });
-const FINGERPRINT = "SHA256:" + "B".repeat(43);
+const KEYS = crypto.generateKeyPairSync("ed25519");
+const PUBLIC_KEY = KEYS.publicKey.export({ type: "spki", format: "pem" }).toString();
+const RAW_FINGERPRINT = crypto.createHash("sha256")
+  .update(KEYS.publicKey.export({ type: "spki", format: "der" }))
+  .digest("hex");
+const FINGERPRINT = `SHA256:${Buffer.from(RAW_FINGERPRINT, "hex").toString("base64url")}`;
 
 function reservation(overrides = {}) {
   return {
@@ -52,7 +59,12 @@ function reservation(overrides = {}) {
   };
 }
 
-function envelope(statement, overrides = {}) {
+function envelope(statement, overrides = {}, privateKey = KEYS.privateKey) {
+  const signature = crypto.sign(
+    null,
+    promotionEvidenceV3SigningData(statement, { now: NOW, allowExpired: true, allowFuture: true }),
+    privateKey,
+  ).toString("base64url");
   return {
     version: PROMOTION_EVIDENCE_V3_VERSION,
     type: PROMOTION_EVIDENCE_V3_TYPE,
@@ -60,12 +72,34 @@ function envelope(statement, overrides = {}) {
     statement_hash: promotionEvidenceV3StatementHash(statement),
     signature_algorithm: PROMOTION_EVIDENCE_V3_ALGORITHM,
     signer_key_fingerprint: FINGERPRINT,
-    signature: "A".repeat(86),
+    signature,
     ...overrides,
   };
 }
 
-function fixture({ reserve = undefined, commit = undefined, replay = undefined, getCommitted = undefined, signer = undefined, now = () => NOW } = {}) {
+function historicalResolver() {
+  const snapshot = {
+    version: 3,
+    purpose: PROMOTION_EVIDENCE_V3_PURPOSE,
+    algorithm: PROMOTION_EVIDENCE_V3_ALGORITHM,
+    keys: [{
+      key_id: "promotion-evidence-production-v3",
+      key_version: 7,
+      purpose: PROMOTION_EVIDENCE_V3_PURPOSE,
+      algorithm: PROMOTION_EVIDENCE_V3_ALGORITHM,
+      public_key: PUBLIC_KEY,
+      public_key_fingerprint: RAW_FINGERPRINT,
+      state: "active",
+      state_version: 1,
+    }],
+  };
+  return createPromotionEvidenceV3PublicKeyResolver({
+    repository: { async snapshot() { return structuredClone(snapshot); } },
+    now: () => NOW,
+  });
+}
+
+function fixture({ reserve = undefined, commit = undefined, replay = undefined, getCommitted = undefined, signer = undefined, publicKeyResolver = historicalResolver(), now = () => NOW } = {}) {
   const calls = { reserve: [], commit: [], replay: [], uncertain: [], getCommitted: [], sign: [] };
   let committed;
   let uncertain = false;
@@ -79,8 +113,10 @@ function fixture({ reserve = undefined, commit = undefined, replay = undefined, 
     async commitPlatformPromotion(input) {
       calls.commit.push(structuredClone(input));
       if (typeof commit === "function") return commit(input, calls, (value) => { committed = value; });
-      const { claim_token: ignoredClaimToken, ...authority } = structuredClone(input);
-      committed = { state: "committed", ...authority };
+      const current = reservation();
+      const { claim_token: ignoredClaimToken, state: ignoredState, ...authority } = current;
+      committed = { state: "committed", ...authority, ...structuredClone(input) };
+      delete committed.claim_token;
       return structuredClone(committed);
     },
     async replayPlatformPromotion(input) {
@@ -99,15 +135,11 @@ function fixture({ reserve = undefined, commit = undefined, replay = undefined, 
       return structuredClone(committed ?? { state: "absent" });
     },
   };
-  const signing = signer ?? (async (statement) => {
+  const signing = async (statement) => {
     calls.sign.push(structuredClone(statement));
-    return envelope(statement);
-  });
-  const service = createPlatformPromotionIssuanceService({
-    repository,
-    signer: { sign: signing },
-    now,
-  });
+    return signer ? signer(statement, calls) : envelope(statement);
+  };
+  const service = createPlatformPromotionIssuanceService({ repository, signer: { sign: signing }, publicKeyResolver, now });
   return { service, repository, calls, getCommitted: () => committed };
 }
 
@@ -120,45 +152,85 @@ async function rejects(promise, expected) {
   await assert.rejects(promise, (error) => code(error) === expected);
 }
 
-test("reserves authoritative C3 data, signs exact v3 once, verifies, and atomically commits", async () => {
+test("reserves authoritative C3 data, signs exact v3 once, independently verifies, and atomically commits", async () => {
   const value = fixture();
   const result = await value.service.issuePlatformPromotion(INPUT);
-
   assert.equal(result.replayed, false);
   assert.deepEqual(Object.keys(result).sort(), ["candidate_id", "deployment_id", "environment", "promotion_evidence", "promotion_id", "replayed"]);
   assert.deepEqual(Object.keys(value.calls.reserve[0]).sort(), Object.keys(INPUT).sort());
   assert.equal(value.calls.sign.length, 1);
   assert.equal(value.calls.sign[0].version, 3);
   assert.equal(value.calls.sign[0].purpose, PROMOTION_EVIDENCE_V3_PURPOSE);
-  assert.equal(value.calls.sign[0].key_id, "promotion-evidence-production-v3");
   assert.deepEqual(Object.keys(value.calls.commit[0]).sort(), [
-    "approval_state", "candidate_id", "claim_token", "deployment_id", "environment", "expires_at", "idempotency_key",
-    "image_digest", "issued_at", "key_id", "key_version", "lifecycle_version", "platform_approval_digest",
-    "platform_approval_id", "product_pkg_sha256", "promotion_evidence", "promotion_id", "qualification_report_digests",
-    "release_manifest_schema_version", "release_manifest_sha256", "sbom_sha256", "signer_key_fingerprint", "source_commit", "source_tree",
+    "candidate_id", "claim_token", "deployment_id", "environment", "idempotency_key", "promotion_evidence", "promotion_id",
   ]);
+  assert.equal(value.calls.uncertain.length, 0);
   assert.equal(Object.isFrozen(result), true);
   assert.equal(Object.isFrozen(result.promotion_evidence), true);
   assert.equal(Object.isFrozen(result.promotion_evidence.statement), true);
   assert.equal(Object.hasOwn(result, "provider_diagnostics"), false);
 });
 
+test("independent trusted verification rejects a forged signature and durably quarantines the reservation", async () => {
+  const other = crypto.generateKeyPairSync("ed25519");
+  const value = fixture({ signer: (statement) => envelope(statement, {}, other.privateKey) });
+  await rejects(value.service.issuePlatformPromotion(INPUT), PLATFORM_PROMOTION_ISSUANCE_ERROR_CODES.VERIFIER);
+  assert.equal(value.calls.commit.length, 0);
+  assert.deepEqual(Object.keys(value.calls.uncertain[0]).sort(), [
+    "candidate_id", "claim_token", "deployment_id", "environment", "idempotency_key", "promotion_id", "reason",
+  ]);
+  assert.equal(value.calls.uncertain[0].reason, "verification_failure");
+  await rejects(value.service.issuePlatformPromotion(INPUT), PLATFORM_PROMOTION_ISSUANCE_ERROR_CODES.UNCERTAIN);
+  assert.equal(value.calls.sign.length, 1);
+});
+
 test("exact replay returns the committed envelope without signing again", async () => {
   const first = fixture();
   const issued = await first.service.issuePlatformPromotion(INPUT);
   const replayed = await first.service.issuePlatformPromotion(INPUT);
-
   assert.equal(replayed.replayed, true);
   assert.deepEqual(replayed.promotion_evidence, issued.promotion_evidence);
   assert.equal(first.calls.sign.length, 1);
   assert.equal(first.calls.reserve.length, 2);
 });
 
+test("historical replay/get verifies expired stored evidence and rejects tampering", async () => {
+  let clock = NOW;
+  const value = fixture({ now: () => clock });
+  const issued = await value.service.issuePlatformPromotion(INPUT);
+  clock = NOW + 6 * 60_000;
+
+  const replayed = await value.service.replayPlatformPromotion(INPUT);
+  const retrieved = await value.service.getCommittedPlatformPromotion(INPUT);
+  assert.equal(replayed.replayed, true);
+  assert.deepEqual(replayed.promotion_evidence, issued.promotion_evidence);
+  assert.deepEqual(retrieved.promotion_evidence, issued.promotion_evidence);
+
+  const other = crypto.generateKeyPairSync("ed25519");
+  const stored = value.getCommitted();
+  stored.promotion_evidence.signature = crypto.sign(
+    null,
+    promotionEvidenceV3SigningData(stored.promotion_evidence.statement, { now: NOW, allowExpired: true, allowFuture: true }),
+    other.privateKey,
+  ).toString("base64url");
+  await rejects(value.service.replayPlatformPromotion(INPUT), PLATFORM_PROMOTION_ISSUANCE_ERROR_CODES.OUTPUT);
+  await rejects(value.service.getCommittedPlatformPromotion(INPUT), PLATFORM_PROMOTION_ISSUANCE_ERROR_CODES.OUTPUT);
+  assert.equal(value.calls.sign.length, 1);
+});
+
 test("lost commit response reconciles through replay and does not re-sign", async () => {
+  let resolverCalls = 0;
+  const resolver = historicalResolver();
   const value = fixture({
+    publicKeyResolver: async (request) => {
+      resolverCalls += 1;
+      return resolver(request);
+    },
     commit(input, calls, save) {
-      const { claim_token: ignoredClaimToken, ...authority } = structuredClone(input);
-      save({ state: "committed", ...authority });
+      const current = reservation();
+      const { claim_token: ignoredClaimToken, state: ignoredState, ...authority } = current;
+      const { claim_token: ignoredCommitClaimToken, ...commitRecord } = structuredClone(input);
+      save({ state: "committed", ...authority, ...commitRecord });
       throw new Error("response lost");
     },
   });
@@ -168,6 +240,7 @@ test("lost commit response reconciles through replay and does not re-sign", asyn
   assert.equal(value.calls.commit.length, 1);
   assert.equal(value.calls.replay.length, 1);
   assert.equal(value.calls.uncertain.length, 0);
+  assert.equal(resolverCalls, 2, "pre-commit and historical replay both verify cryptographically");
 });
 
 test("signer/provider ambiguity is durably uncertain and never blindly retried", async () => {
@@ -177,26 +250,61 @@ test("signer/provider ambiguity is durably uncertain and never blindly retried",
   await rejects(value.service.issuePlatformPromotion(INPUT), PLATFORM_PROMOTION_ISSUANCE_ERROR_CODES.UNCERTAIN);
   assert.equal(signCalls, 1);
   assert.equal(value.calls.uncertain.length, 1);
+  assert.deepEqual(Object.keys(value.calls.uncertain[0]).sort(), [
+    "candidate_id", "claim_token", "deployment_id", "environment", "idempotency_key", "promotion_id", "reason",
+  ]);
   assert.equal(Object.hasOwn(value.calls.uncertain[0], "provider_diagnostics"), false);
 });
 
-test("malformed signer envelopes and cross-purpose/key/fingerprint substitutions fail closed", async (t) => {
+test("hosted issuance accepts only the complete exact v3 envelope, never a raw signature", async (t) => {
+  for (const [name, make] of [
+    ["raw signature", () => "A".repeat(86)],
+    ["signature-only object", () => ({ signature: "A".repeat(86) })],
+    ["v2 envelope", (statement) => envelope(statement, { version: 2 })],
+    ["diagnostic field", (statement) => ({ ...envelope(statement), provider_diagnostics: "secret" })],
+  ]) {
+    await t.test(name, async () => {
+      const value = fixture({ signer: (statement) => make(statement) });
+      await rejects(value.service.issuePlatformPromotion(INPUT), PLATFORM_PROMOTION_ISSUANCE_ERROR_CODES.SIGNER_OUTPUT);
+      assert.equal(value.calls.commit.length, 0);
+      assert.equal(value.calls.uncertain.length, 1);
+    });
+  }
+});
+
+test("rejects cross-context substitutions before commit and keeps the full reservation binding", async (t) => {
   const cases = [
-    ["v2", (statement) => envelope(statement, { version: 2 }), PLATFORM_PROMOTION_ISSUANCE_ERROR_CODES.SIGNER_OUTPUT],
     ["purpose", (statement) => ({ ...envelope(statement), statement: { ...statement, purpose: "agentpass.audit-anchor" }, statement_hash: "0".repeat(64) }), PLATFORM_PROMOTION_ISSUANCE_ERROR_CODES.SIGNER_OUTPUT],
     ["statement substitution", (statement) => envelope({ ...statement, environment: "staging" }), PLATFORM_PROMOTION_ISSUANCE_ERROR_CODES.BINDING],
     ["key substitution", (statement) => envelope({ ...statement, key_id: "other-key" }), PLATFORM_PROMOTION_ISSUANCE_ERROR_CODES.BINDING],
     ["fingerprint substitution", (statement) => envelope(statement, { signer_key_fingerprint: "SHA256:" + "C".repeat(43) }), PLATFORM_PROMOTION_ISSUANCE_ERROR_CODES.BINDING],
-    ["diagnostics", (statement) => ({ ...envelope(statement), provider_diagnostics: "secret" }), PLATFORM_PROMOTION_ISSUANCE_ERROR_CODES.SIGNER_OUTPUT],
   ];
-  for (const [name, make] of cases) {
+  for (const [name, make, expected] of cases) {
     await t.test(name, async () => {
-      const value = fixture({ signer: async (statement) => make(statement) });
-      await rejects(value.service.issuePlatformPromotion(INPUT), cases.find(([label]) => label === name)[2]);
-      assert.equal(value.calls.sign.length, 0, "fixture signer does not record direct calls");
+      const value = fixture({ signer: (statement) => make(statement) });
+      await rejects(value.service.issuePlatformPromotion(INPUT), expected);
+      assert.equal(value.calls.commit.length, 0);
       assert.equal(value.calls.uncertain.length, 1);
     });
   }
+});
+
+test("historical resolver failures are independent verification failures", async () => {
+  const value = fixture({ publicKeyResolver: async () => { throw new Error("database secret"); } });
+  await rejects(value.service.issuePlatformPromotion(INPUT), PLATFORM_PROMOTION_ISSUANCE_ERROR_CODES.VERIFIER);
+  assert.equal(value.calls.commit.length, 0);
+  assert.equal(value.calls.uncertain[0].reason, "verification_failure");
+});
+
+test("requires the purpose-specific public key resolver and rejects arbitrary verifier seams", () => {
+  const value = fixture();
+  assert.throws(() => createPlatformPromotionIssuanceService({ repository: value.repository, signer: { sign: async () => undefined } }), (error) => code(error) === PLATFORM_PROMOTION_ISSUANCE_ERROR_CODES.CONFIG);
+  assert.throws(() => createPlatformPromotionIssuanceService({
+    repository: value.repository,
+    signer: { sign: async () => undefined },
+    publicKeyResolver: () => undefined,
+    verifier: { verify: async () => true },
+  }), (error) => code(error) === PLATFORM_PROMOTION_ISSUANCE_ERROR_CODES.CONFIG);
 });
 
 test("rejects caller substitution and closed/public data attacks before signing", async (t) => {

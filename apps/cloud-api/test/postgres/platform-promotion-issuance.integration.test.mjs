@@ -77,7 +77,8 @@ test("0047 real PostgreSQL reserves, commits, and replays one exact promotion", 
 
     const repo = createPostgresPlatformPromotionIssuanceRepository({
       client, keyId: signer.key_id, keyVersion: Number(signer.key_version), lifecycleVersion: Number(signer.lifecycle_version), claimLeaseMs: 30_000,
-      randomBytes: () => Buffer.alloc(32, 4)
+      randomBytes: () => Buffer.alloc(32, 4),
+      verifyEvidence: async (_evidence, context) => typeof context?.signer_key_fingerprint === "string"
     });
     const identity = { promotion_id: promotionId, deployment_id: deploymentId, environment: "staging", candidate_id: candidateId, idempotency_key: "integration-request-0001" };
     const reserved = await repo.reservePlatformPromotion(identity);
@@ -88,17 +89,17 @@ test("0047 real PostgreSQL reserves, commits, and replays one exact promotion", 
       product_pkg_sha256: reserved.product_pkg_sha256, image_digest: reserved.image_digest, sbom_sha256: reserved.sbom_sha256,
       qualification_report_digests: reserved.qualification_report_digests,
       release_manifest_schema_version: reserved.release_manifest_schema_version, release_manifest_sha256: reserved.release_manifest_sha256,
-      platform_approval_id: reserved.approval_id, platform_approval_digest: reserved.approval_digest, approval_state: "approved",
+      platform_approval_id: reserved.platform_approval_id, platform_approval_digest: reserved.platform_approval_digest, approval_state: "approved",
       purpose: PROMOTION_EVIDENCE_V3_PURPOSE, protocol_version: 3, signing_version: 3, lifecycle_version: Number(reserved.lifecycle_version),
-      key_id: reserved.key_id, key_version: Number(reserved.key_version), issued_at: new Date().toISOString(),
-      expires_at: new Date(Date.now() + 5 * 60_000).toISOString()
+      key_id: reserved.key_id, key_version: Number(reserved.key_version), issued_at: reserved.issued_at,
+      expires_at: reserved.expires_at
     };
     const evidence = { version: PROMOTION_EVIDENCE_V3_VERSION, type: PROMOTION_EVIDENCE_V3_TYPE, statement,
       statement_hash: promotionEvidenceV3StatementHash(statement), signature_algorithm: PROMOTION_EVIDENCE_V3_ALGORITHM,
-      signer_key_fingerprint: `SHA256:${"h".repeat(43)}`, signature: Buffer.alloc(64, 5).toString("base64url") };
-    const committed = await repo.commitPlatformPromotion({ ...identity, claim_token: reserved.claim_token, evidence });
+      signer_key_fingerprint: reserved.signer_key_fingerprint, signature: Buffer.alloc(64, 5).toString("base64url") };
+    const committed = await repo.commitPlatformPromotion({ ...identity, claim_token: reserved.claim_token, promotion_evidence: evidence });
     assert.equal(committed.state, "committed");
-    assert.equal(committed.deployment_generation, 1);
+    assert.equal(Object.hasOwn(committed, "deployment_generation"), false);
     assert.deepEqual(await repo.replayPlatformPromotion(identity), committed);
     const head = await client.query(`SELECT current_generation,current_candidate_id FROM platform_promotion_deployments WHERE deployment_id=$1 AND environment='staging'`, [deploymentId]);
     assert.deepEqual(head.rows[0], { current_generation: "1", current_candidate_id: candidateId });

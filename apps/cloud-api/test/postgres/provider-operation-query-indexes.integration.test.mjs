@@ -38,7 +38,7 @@ test("0042 uses PostgreSQL 17 index-backed ordered paths for health and maintena
   const migrationClient = await pool.connect();
   try {
     const migration = await createMigrationRunner({ client: migrationClient, applicationVersion: "provider-operation-query-indexes-integration" }).run();
-    assert.equal(migration.currentVersion, 46);
+    assert.equal(migration.currentVersion, 47);
   } finally {
     migrationClient.release();
   }

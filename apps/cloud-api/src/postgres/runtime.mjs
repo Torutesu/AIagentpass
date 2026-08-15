@@ -29,17 +29,19 @@ import { createPostgresProviderOperationMaintenanceRepository } from "./provider
 import { createManagedSignerProviderOperationMaintenanceWorker } from "./managed-signer-provider-operation-maintenance-worker.mjs";
 import { createPostgresAuditExportSnapshotReader } from "./audit-export-snapshot-reader.mjs";
 import { createPostgresAuditExportIssuanceRepository } from "./audit-export-issuance-repository.mjs";
+import { createPostgresPlatformPromotionIssuanceRepository } from "./platform-promotion-issuance-repository.mjs";
 import {
   createDrainController,
   createOperationalHealth,
   createOperationalMetrics
 } from "./operational-health.mjs";
 
-export async function createPostgresRuntime({ env = process.env, PoolClass = Pool, applicationVersion = "unknown", refreshNonceCodec, resolveProcessBindingPolicy, ownerRecoveryPublisher, ownerRecoveryOutboxAutoStart = true, ownerRecoveryOutboxWorkerOptions = {}, sharedControlMaintenanceAutoStart = true, sharedControlMaintenanceWorkerOptions = {}, managedSignerProviderOperationMaintenanceAutoStart = true, managedSignerProviderOperationMaintenanceWorkerOptions = {} } = {}) {
+export async function createPostgresRuntime({ env = process.env, PoolClass = Pool, applicationVersion = "unknown", refreshNonceCodec, resolveProcessBindingPolicy, ownerRecoveryPublisher, platformPromotionVerifyEvidence, ownerRecoveryOutboxAutoStart = true, ownerRecoveryOutboxWorkerOptions = {}, sharedControlMaintenanceAutoStart = true, sharedControlMaintenanceWorkerOptions = {}, managedSignerProviderOperationMaintenanceAutoStart = true, managedSignerProviderOperationMaintenanceWorkerOptions = {} } = {}) {
   if (resolveProcessBindingPolicy !== undefined && typeof resolveProcessBindingPolicy !== "function") throw new TypeError("resolveProcessBindingPolicy must be a function");
   if (typeof ownerRecoveryOutboxAutoStart !== "boolean" || !ownerRecoveryOutboxWorkerOptions || typeof ownerRecoveryOutboxWorkerOptions !== "object" || Array.isArray(ownerRecoveryOutboxWorkerOptions)) throw new TypeError("owner recovery outbox runtime configuration is invalid");
   if (typeof sharedControlMaintenanceAutoStart !== "boolean" || !sharedControlMaintenanceWorkerOptions || typeof sharedControlMaintenanceWorkerOptions !== "object" || Array.isArray(sharedControlMaintenanceWorkerOptions)) throw new TypeError("shared-control maintenance runtime configuration is invalid");
   if (typeof managedSignerProviderOperationMaintenanceAutoStart !== "boolean" || !managedSignerProviderOperationMaintenanceWorkerOptions || typeof managedSignerProviderOperationMaintenanceWorkerOptions !== "object" || Array.isArray(managedSignerProviderOperationMaintenanceWorkerOptions)) throw new TypeError("managed signer provider-operation maintenance runtime configuration is invalid");
+  if (typeof platformPromotionVerifyEvidence !== "function") throw new TypeError("platform promotion evidence verifier is required");
   createManagedSignerProviderOperationMaintenanceWorker({
     ...managedSignerProviderOperationMaintenanceWorkerOptions,
     repository: { async maintainProviderOperations() { return { quarantined: 0, reconciled: 0, pruned: 0, total: 0 }; } }
@@ -263,6 +265,10 @@ export async function createPostgresRuntime({ env = process.env, PoolClass = Poo
     client: pool,
     snapshotReader: auditExportSnapshotReader
   });
+  const platformPromotionIssuanceRepository = createPostgresPlatformPromotionIssuanceRepository({
+    client: pool,
+    verifyEvidence: platformPromotionVerifyEvidence
+  });
   const controlPlaneStore = createPostgresControlPlaneStore({
     client: pool,
     organizationRepository,
@@ -299,6 +305,7 @@ export async function createPostgresRuntime({ env = process.env, PoolClass = Poo
     ...(agentSessionIssuanceRepository ? { agentSessionIssuanceRepository } : {}),
     qualificationGrantBatchRepository,
     auditExportIssuanceRepository,
+    platformPromotionIssuanceRepository,
     createManagedSignerKeyLifecycleRepository: (options = {}) => createPostgresManagedSignerKeyLifecycleRepository({ ...options, client: pool }),
     createProviderOperationRepository: (options = {}) => createPostgresProviderOperationRepository({ ...options, client: pool }),
     providerOperationMaintenanceRepository,

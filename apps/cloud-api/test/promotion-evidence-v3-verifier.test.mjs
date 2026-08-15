@@ -64,11 +64,23 @@ function context(overrides = {}) {
     deploymentId: "cloud-prod-2026-08",
     environment: "production",
     candidateId: CANDIDATE,
+    sourceCommit: "1".repeat(40),
+    sourceTree: "2".repeat(40),
     productPkgSha256: PRODUCT,
     imageDigest: `sha256:${"b".repeat(64)}`,
     sbomSha256: "c".repeat(64),
+    qualificationReportDigests: ["0".repeat(63) + "1", "1".repeat(64)],
+    releaseManifestSchemaVersion: 4,
+    releaseManifestSha256: "d".repeat(64),
     platformApprovalId: "22222222-2222-4222-8222-222222222222",
     platformApprovalDigest: "e".repeat(64),
+    purpose: PROMOTION_EVIDENCE_V3_PURPOSE,
+    protocolVersion: 3,
+    signingVersion: 3,
+    lifecycleVersion: LIFECYCLE_VERSION,
+    keyId: KEY_ID,
+    keyVersion: KEY_VERSION,
+    signerKeyFingerprint: overrides.signerKeyFingerprint,
     ...overrides,
   };
 }
@@ -107,7 +119,7 @@ async function signedFixture(value = fixture(), input = statement()) {
 }
 
 function options(value, overrides = {}) {
-  return { publicKeyResolver: value.resolver, now: NOW, ...context(), ...overrides };
+  return { publicKeyResolver: value.resolver, now: NOW, ...context({ signerKeyFingerprint: value.envelope.signer_key_fingerprint }), ...overrides };
 }
 
 test("resolves the exact historical v3 key identity and verifies the signature", async () => {
@@ -129,19 +141,37 @@ test("resolves the exact historical v3 key identity and verifies the signature",
   assert(Object.isFrozen(value.requests[0]));
 });
 
-test("requires exact deployment, environment, candidate, artifacts, and approval context", async () => {
+test("requires every authoritative deployment, artifact, approval, and signer context field", async () => {
   const value = await signedFixture();
   for (const [field, replacement] of [
     ["deploymentId", "cloud-staging-2026-08"],
     ["environment", "staging"],
     ["candidateId", deriveReleaseCandidateId("f".repeat(64))],
+    ["sourceCommit", "f".repeat(40)],
+    ["sourceTree", "f".repeat(40)],
     ["productPkgSha256", "f".repeat(64)],
     ["imageDigest", `sha256:${"f".repeat(64)}`],
     ["sbomSha256", "f".repeat(64)],
+    ["qualificationReportDigests", ["f".repeat(64)]],
+    ["releaseManifestSha256", "f".repeat(64)],
     ["platformApprovalId", "33333333-3333-4333-8333-333333333333"],
     ["platformApprovalDigest", "f".repeat(64)],
+    ["keyVersion", KEY_VERSION + 1],
+    ["lifecycleVersion", LIFECYCLE_VERSION + 1],
+    ["signerKeyFingerprint", `SHA256:${"A".repeat(43)}`],
   ]) {
     await assert.rejects(() => verifyPromotionEvidenceV3(value.envelope, options(value, { [field]: replacement })), { code: PROMOTION_EVIDENCE_V3_VERIFIER_ERROR_CODES.CONTEXT });
+  }
+  const complete = options(value);
+  for (const field of [
+    "deploymentId", "environment", "candidateId", "sourceCommit", "sourceTree", "productPkgSha256",
+    "imageDigest", "sbomSha256", "qualificationReportDigests", "releaseManifestSchemaVersion",
+    "releaseManifestSha256", "platformApprovalId", "platformApprovalDigest", "purpose", "protocolVersion",
+    "signingVersion", "lifecycleVersion", "keyId", "keyVersion", "signerKeyFingerprint",
+  ]) {
+    const missing = { ...complete };
+    delete missing[field];
+    await assert.rejects(() => verifyPromotionEvidenceV3(value.envelope, missing), { code: PROMOTION_EVIDENCE_V3_VERIFIER_ERROR_CODES.CONFIG });
   }
   await assert.rejects(() => verifyPromotionEvidenceV3(value.envelope, { publicKeyResolver: value.resolver, now: NOW }), { code: PROMOTION_EVIDENCE_V3_VERIFIER_ERROR_CODES.CONFIG });
 });

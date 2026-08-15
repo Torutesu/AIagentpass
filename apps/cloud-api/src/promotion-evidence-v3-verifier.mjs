@@ -86,7 +86,7 @@ async function verifyPromotionEvidenceV3WithConfig(input, config) {
     throw verifierError(PROMOTION_EVIDENCE_V3_VERIFIER_ERROR_CODES.SIGNATURE);
   }
 
-  assertContext(envelope.statement, config.context);
+  assertContext(envelope, config.context);
   const request = Object.freeze({
     purpose: PROMOTION_EVIDENCE_V3_PURPOSE,
     algorithm: PROMOTION_EVIDENCE_V3_ALGORITHM,
@@ -176,55 +176,38 @@ function normalizeContext(value) {
     deployment_id: requiredAlias(value, ["deployment_id", "deploymentId"], "deployment_id", IDENTIFIER),
     environment: requiredAlias(value, ["environment"], "environment", ENVIRONMENT),
     candidate_id: requiredAlias(value, ["candidate_id", "candidateId"], "candidate_id", /^release-pkg-sha256-v1-[0-9a-f]{64}$/u),
+    source_commit: requiredAlias(value, ["source_commit", "sourceCommit"], "source_commit", /^[0-9a-f]{40}$/u),
+    source_tree: requiredAlias(value, ["source_tree", "sourceTree"], "source_tree", /^[0-9a-f]{40}$/u),
     product_pkg_sha256: requiredAlias(value, ["product_pkg_sha256", "productPkgSha256", "artifact_sha256", "artifactSha256"], "product_pkg_sha256", DIGEST),
     image_digest: requiredAlias(value, ["image_digest", "imageDigest"], "image_digest", IMAGE_DIGEST),
     sbom_sha256: requiredAlias(value, ["sbom_sha256", "sbomSha256"], "sbom_sha256", DIGEST),
+    qualification_report_digests: requiredDigestArray(value, ["qualification_report_digests", "qualificationReportDigests"]),
+    release_manifest_schema_version: requiredIntegerAlias(value, ["release_manifest_schema_version", "releaseManifestSchemaVersion"], 4),
+    release_manifest_sha256: requiredAlias(value, ["release_manifest_sha256", "releaseManifestSha256"], "release_manifest_sha256", DIGEST),
     platform_approval_id: requiredAlias(value, ["platform_approval_id", "platformApprovalId", "approval_id", "approvalId"], "platform_approval_id", UUID),
     platform_approval_digest: requiredAlias(value, ["platform_approval_digest", "platformApprovalDigest", "approval_digest", "approvalDigest"], "platform_approval_digest", DIGEST),
+    purpose: requiredExactAlias(value, ["purpose"], PROMOTION_EVIDENCE_V3_PURPOSE),
+    protocol_version: requiredIntegerAlias(value, ["protocol_version", "protocolVersion"], PROMOTION_EVIDENCE_V3_PROTOCOL_VERSION),
+    signing_version: requiredIntegerAlias(value, ["signing_version", "signingVersion"], PROMOTION_EVIDENCE_V3_SIGNING_VERSION),
+    lifecycle_version: requiredPositiveIntegerAlias(value, ["lifecycle_version", "lifecycleVersion"]),
+    key_id: requiredAlias(value, ["key_id", "keyId"], "key_id", IDENTIFIER),
+    key_version: requiredPositiveIntegerAlias(value, ["key_version", "keyVersion"]),
+    signer_key_fingerprint: requiredAlias(value, ["signer_key_fingerprint", "signerKeyFingerprint"], "signer_key_fingerprint", FINGERPRINT),
   };
-  for (const [target, aliases, expression] of [
-    ["source_commit", ["source_commit", "sourceCommit"], /^[0-9a-f]{40}$/u],
-    ["source_tree", ["source_tree", "sourceTree"], /^[0-9a-f]{40}$/u],
-    ["release_manifest_sha256", ["release_manifest_sha256", "releaseManifestSha256"], DIGEST],
-    ["release_manifest_schema_version", ["release_manifest_schema_version", "releaseManifestSchemaVersion"], null],
-    ["purpose", ["purpose"], null],
-    ["protocol_version", ["protocol_version", "protocolVersion"], null],
-    ["signing_version", ["signing_version", "signingVersion"], null],
-    ["key_id", ["key_id", "keyId"], IDENTIFIER],
-    ["key_version", ["key_version", "keyVersion"], null],
-    ["lifecycle_version", ["lifecycle_version", "lifecycleVersion"], null],
-    ["signer_key_fingerprint", ["signer_key_fingerprint", "signerKeyFingerprint"], FINGERPRINT],
-  ]) {
-    const actual = firstAlias(value, aliases);
-    if (actual !== undefined) {
-      if (expression && (typeof actual !== "string" || !expression.test(actual))) {
-        throw verifierError(PROMOTION_EVIDENCE_V3_VERIFIER_ERROR_CODES.CONFIG);
-      }
-      if (!expression && !Number.isSafeInteger(actual) && !["purpose"].includes(target)) {
-        throw verifierError(PROMOTION_EVIDENCE_V3_VERIFIER_ERROR_CODES.CONFIG);
-      }
-      context[target] = actual;
-    }
-  }
-  const reports = firstAlias(value, ["qualification_report_digests", "qualificationReportDigests"]);
-  if (reports !== undefined) {
-    assertDataTree(reports);
-    if (!Array.isArray(reports) || reports.some((item) => typeof item !== "string" || !DIGEST.test(item))) {
-      throw verifierError(PROMOTION_EVIDENCE_V3_VERIFIER_ERROR_CODES.CONFIG);
-    }
-    context.qualification_report_digests = Object.freeze([...reports]);
-  }
   return deepFreeze(context);
 }
 
-function assertContext(statement, expected) {
+function assertContext(envelope, expected) {
   for (const [field, value] of Object.entries(expected)) {
+    const actual = field === "signer_key_fingerprint"
+      ? envelope.signer_key_fingerprint
+      : envelope.statement[field];
     if (Array.isArray(value)) {
-      if (!Array.isArray(statement[field]) || value.length !== statement[field].length
-        || value.some((item, index) => item !== statement[field][index])) {
+      if (!Array.isArray(actual) || value.length !== actual.length
+        || value.some((item, index) => item !== actual[index])) {
         throw verifierError(PROMOTION_EVIDENCE_V3_VERIFIER_ERROR_CODES.CONTEXT);
       }
-    } else if (statement[field] !== value) {
+    } else if (actual !== value) {
       throw verifierError(PROMOTION_EVIDENCE_V3_VERIFIER_ERROR_CODES.CONTEXT);
     }
   }
@@ -255,6 +238,39 @@ function requiredAlias(value, aliases, field, expression) {
   if (actual === undefined || typeof actual !== "string" || !expression.test(actual)) {
     throw verifierError(PROMOTION_EVIDENCE_V3_VERIFIER_ERROR_CODES.CONFIG);
   }
+  return actual;
+}
+
+function requiredDigestArray(value, aliases) {
+  const actual = firstAlias(value, aliases);
+  try { assertDataTree(actual); } catch { throw verifierError(PROMOTION_EVIDENCE_V3_VERIFIER_ERROR_CODES.CONFIG); }
+  if (!Array.isArray(actual) || actual.length < 1 || actual.length > 16
+    || actual.some((item) => typeof item !== "string" || !DIGEST.test(item))
+    || actual.some((item, index) => index > 0 && actual[index - 1] >= item)) {
+    throw verifierError(PROMOTION_EVIDENCE_V3_VERIFIER_ERROR_CODES.CONFIG);
+  }
+  return Object.freeze([...actual]);
+}
+
+function requiredPositiveIntegerAlias(value, aliases) {
+  const actual = firstAlias(value, aliases);
+  if (!Number.isSafeInteger(actual) || actual < 1) {
+    throw verifierError(PROMOTION_EVIDENCE_V3_VERIFIER_ERROR_CODES.CONFIG);
+  }
+  return actual;
+}
+
+function requiredIntegerAlias(value, aliases, expected) {
+  const actual = firstAlias(value, aliases);
+  if (!Number.isSafeInteger(actual) || actual !== expected) {
+    throw verifierError(PROMOTION_EVIDENCE_V3_VERIFIER_ERROR_CODES.CONFIG);
+  }
+  return actual;
+}
+
+function requiredExactAlias(value, aliases, expected) {
+  const actual = firstAlias(value, aliases);
+  if (actual !== expected) throw verifierError(PROMOTION_EVIDENCE_V3_VERIFIER_ERROR_CODES.CONFIG);
   return actual;
 }
 

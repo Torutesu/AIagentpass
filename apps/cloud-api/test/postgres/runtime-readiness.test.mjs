@@ -7,6 +7,7 @@ import { createPostgresRuntime } from "../../src/postgres/runtime.mjs";
 const DATABASE_URL = "postgresql://agent:secret@db.example.test/agentpass?sslmode=verify-full";
 const SECRET = Buffer.alloc(32, 0x31).toString("base64url");
 const DELIVERY_BINDING = Object.freeze({ binding_id: "test-owner-recovery", key_version: 1, binding_digest: "a".repeat(64) });
+const PLATFORM_PROMOTION_VERIFY = async (_evidence, context) => typeof context?.signer_key_fingerprint === "string";
 
 class FakePool {
   constructor(options) {
@@ -68,7 +69,7 @@ function env() {
 
 test("PostgreSQL runtime exposes exact-schema readiness, tracked work, and bounded drain", async () => {
   const migrations = await loadSqlMigrations();
-  const runtime = await createPostgresRuntime({ env: env(), PoolClass: FakePool, applicationVersion: "runtime-readiness-test", resolveProcessBindingPolicy: () => true });
+  const runtime = await createPostgresRuntime({ platformPromotionVerifyEvidence: PLATFORM_PROMOTION_VERIFY, env: env(), PoolClass: FakePool, applicationVersion: "runtime-readiness-test", resolveProcessBindingPolicy: () => true });
   assert.equal(runtime.pool.applied.length, migrations.length);
   assert.equal((await runtime.readiness()).code, "ready");
   assert.equal(typeof runtime.agentSessionIssuanceRepository?.issueAgentSessionGrant, "function");
@@ -119,6 +120,7 @@ test("PostgreSQL runtime exposes exact-schema readiness, tracked work, and bound
 test("PostgreSQL runtime wires an injected owner recovery publisher without starting it when disabled", async () => {
   const publisher = { binding: DELIVERY_BINDING, async publish() { return { accepted: true, duplicate: false }; }, async lookupAcceptance() { return { accepted: false, idempotency_key: "22222222-2222-4222-8222-222222222222" }; } };
   const runtime = await createPostgresRuntime({
+    platformPromotionVerifyEvidence: PLATFORM_PROMOTION_VERIFY,
     env: env(),
     PoolClass: FakePool,
     ownerRecoveryPublisher: publisher,
@@ -133,7 +135,7 @@ test("PostgreSQL runtime wires an injected owner recovery publisher without star
 });
 
 test("direct runtime close waits for tracked work before closing PostgreSQL", async () => {
-  const runtime = await createPostgresRuntime({ env: env(), PoolClass: FakePool });
+  const runtime = await createPostgresRuntime({ platformPromotionVerifyEvidence: PLATFORM_PROMOTION_VERIFY, env: env(), PoolClass: FakePool });
   let finish;
   const active = runtime.trackInFlight(() => new Promise((resolve) => { finish = resolve; }));
   const closing = runtime.close();
@@ -148,6 +150,7 @@ test("direct runtime close waits for tracked work before closing PostgreSQL", as
 
 test("PostgreSQL runtime can leave shared-control maintenance idle for qualification", async () => {
   const runtime = await createPostgresRuntime({
+    platformPromotionVerifyEvidence: PLATFORM_PROMOTION_VERIFY,
     env: env(),
     PoolClass: FakePool,
     sharedControlMaintenanceAutoStart: false
@@ -159,6 +162,7 @@ test("PostgreSQL runtime can leave shared-control maintenance idle for qualifica
 
 test("PostgreSQL runtime can leave provider-operation maintenance idle and fails readiness closed", async () => {
   const runtime = await createPostgresRuntime({
+    platformPromotionVerifyEvidence: PLATFORM_PROMOTION_VERIFY,
     env: env(),
     PoolClass: FakePool,
     managedSignerProviderOperationMaintenanceAutoStart: false
@@ -187,7 +191,7 @@ test("PostgreSQL runtime preserves migration failure and closes the pool exactly
   }
 
   await assert.rejects(
-    createPostgresRuntime({ env: env(), PoolClass: MigrationFailurePool }),
+    createPostgresRuntime({ platformPromotionVerifyEvidence: PLATFORM_PROMOTION_VERIFY, env: env(), PoolClass: MigrationFailurePool }),
     (error) => error === expected
   );
   assert.equal(pool.endCalls, 1);
@@ -219,6 +223,7 @@ test("PostgreSQL runtime cleans started workers and pool after late construction
 
   await assert.rejects(
     createPostgresRuntime({
+      platformPromotionVerifyEvidence: PLATFORM_PROMOTION_VERIFY,
       env: env(),
       PoolClass: LateFailurePool,
       ownerRecoveryPublisher,
@@ -262,6 +267,7 @@ test("PostgreSQL runtime preserves start failure identity and drains already-sta
 
   await assert.rejects(
     createPostgresRuntime({
+      platformPromotionVerifyEvidence: PLATFORM_PROMOTION_VERIFY,
       env: env(),
       PoolClass: StartFailurePool,
       ownerRecoveryPublisher,

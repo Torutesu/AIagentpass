@@ -10,6 +10,7 @@ import {
   normalizePromotionEvidenceV3Statement,
   promotionEvidenceV3StatementHash,
 } from "./promotion-evidence-v3-statement.mjs";
+import { verifyPromotionEvidenceV3 } from "./promotion-evidence-v3-verifier.mjs";
 import { canonicalJson } from "../../../packages/protocol/src/index.mjs";
 
 export const PLATFORM_PROMOTION_ISSUANCE_VERSION = 1;
@@ -24,6 +25,7 @@ export const PLATFORM_PROMOTION_ISSUANCE_ERROR_CODES = Object.freeze({
   REPOSITORY: "ERR_PLATFORM_PROMOTION_ISSUANCE_REPOSITORY",
   SIGNER: "ERR_PLATFORM_PROMOTION_ISSUANCE_SIGNER",
   SIGNER_OUTPUT: "ERR_PLATFORM_PROMOTION_ISSUANCE_SIGNER_OUTPUT",
+  VERIFIER: "ERR_PLATFORM_PROMOTION_ISSUANCE_VERIFIER",
   STALE_LIFECYCLE: "ERR_PLATFORM_PROMOTION_ISSUANCE_STALE_LIFECYCLE",
   APPROVAL: "ERR_PLATFORM_PROMOTION_ISSUANCE_APPROVAL",
   COMMIT: "ERR_PLATFORM_PROMOTION_ISSUANCE_COMMIT",
@@ -49,13 +51,14 @@ const {
   REPOSITORY,
   SIGNER,
   SIGNER_OUTPUT,
+  VERIFIER,
   STALE_LIFECYCLE,
   APPROVAL,
   COMMIT,
   OUTPUT,
 } = PLATFORM_PROMOTION_ISSUANCE_ERROR_CODES;
 
-const SERVICE_OPTION_KEYS = Object.freeze(["repository", "signer", "now", "maxTtlMs"]);
+const SERVICE_OPTION_KEYS = Object.freeze(["repository", "signer", "publicKeyResolver", "now", "maxTtlMs"]);
 const PUBLIC_INPUT_KEYS = Object.freeze([
   "promotion_id",
   "deployment_id",
@@ -105,6 +108,31 @@ const OPTIONAL_RESERVATION_KEYS = Object.freeze([
   "lifecycle_status",
   "lifecycle_enabled",
 ]);
+const VERIFICATION_CONTEXT_KEYS = Object.freeze([
+  "allowExpired",
+  "candidate_id",
+  "deployment_id",
+  "environment",
+  "image_digest",
+  "key_id",
+  "key_version",
+  "lifecycle_version",
+  "maxTtlMs",
+  "now",
+  "platform_approval_digest",
+  "platform_approval_id",
+  "product_pkg_sha256",
+  "purpose",
+  "qualification_report_digests",
+  "release_manifest_schema_version",
+  "release_manifest_sha256",
+  "signer_key_fingerprint",
+  "signing_version",
+  "source_commit",
+  "source_tree",
+  "protocol_version",
+  "sbom_sha256",
+]);
 const RESERVED_KEYS = Object.freeze(["state", ...RESERVATION_CORE_KEYS, ...OPTIONAL_RESERVATION_KEYS, "claim_token"]);
 const COMMITTED_KEYS = Object.freeze(["state", ...RESERVATION_CORE_KEYS, ...OPTIONAL_RESERVATION_KEYS, "promotion_evidence"]);
 
@@ -133,10 +161,11 @@ export function createPlatformPromotionIssuanceService(options = {}) {
   const {
     repository,
     signer,
+    publicKeyResolver,
     now = () => Date.now(),
     maxTtlMs = PROMOTION_EVIDENCE_V3_MAX_TTL_MS,
   } = options;
-  validateConfiguration(repository, signer, now, maxTtlMs);
+  validateConfiguration(repository, signer, publicKeyResolver, now, maxTtlMs);
 
   function currentNow() {
     let value;
@@ -195,12 +224,24 @@ export function createPlatformPromotionIssuanceService(options = {}) {
     }
 
     let envelope;
+    let verificationNow;
     try {
-      envelope = normalizeSignerOutput(signed, statement, reservation, currentNow(), maxTtlMs);
+      verificationNow = currentNow();
+      envelope = normalizeSignerOutput(signed, statement, reservation, verificationNow, maxTtlMs);
     } catch (error) {
       await markUncertainBestEffort(values, reservation, uncertaintyReason(error, "signer_output"));
       if (error instanceof PlatformPromotionIssuanceError) throw error;
       throw issuanceError(SIGNER_OUTPUT);
+    }
+
+    // The signer may self-check its provider response, but it is not the
+    // commit authority. Re-run the trusted v3 verifier with every field that
+    // came from the repository reservation immediately before commit.
+    try {
+      await verifyStoredEnvelope(envelope, reservation, verificationNow, maxTtlMs, false);
+    } catch {
+      await markUncertainBestEffort(values, reservation, "verification_failure");
+      throw issuanceError(VERIFIER);
     }
 
     let committedResult;
@@ -218,6 +259,12 @@ export function createPlatformPromotionIssuanceService(options = {}) {
     }
     if (committed.state !== "committed") return reconcileLostCommit(values, reservation, envelope);
     if (!sameEnvelope(committed.promotion_evidence, envelope)) return reconcileLostCommit(values, reservation, envelope);
+    try {
+      await verifyStoredEnvelope(committed.promotion_evidence, committed, currentNow(), maxTtlMs, false);
+    } catch {
+      await markUncertainBestEffort(values, reservation, "verification_failure");
+      throw issuanceError(COMMIT);
+    }
     return publicResult(committed, false);
   }
 
@@ -234,6 +281,12 @@ export function createPlatformPromotionIssuanceService(options = {}) {
       if (outcome.state === "committed") {
         if (!sameEnvelope(outcome.promotion_evidence, envelope)) {
           await markUncertainBestEffort(values, reservation, "commit_failure");
+          throw issuanceError(COMMIT);
+        }
+        try {
+          await verifyStoredEnvelope(outcome.promotion_evidence, outcome, currentNow(), maxTtlMs, true);
+        } catch {
+          await markUncertainBestEffort(values, reservation, "verification_failure");
           throw issuanceError(COMMIT);
         }
         return publicResult(outcome, true);
@@ -288,7 +341,7 @@ export function createPlatformPromotionIssuanceService(options = {}) {
     getCommittedPlatformPromotion,
   });
 
-  function materializeCommitted(values, outcome, replayed) {
+  async function materializeCommitted(values, outcome, replayed) {
     try {
       const envelope = normalizeSignerOutput(
         outcome.promotion_evidence,
@@ -298,17 +351,25 @@ export function createPlatformPromotionIssuanceService(options = {}) {
         maxTtlMs,
         true
       );
+      await verifyStoredEnvelope(envelope, outcome, currentNow(), maxTtlMs, true);
       return publicResult({ ...outcome, promotion_evidence: envelope }, replayed);
     } catch (error) {
       if (error instanceof PlatformPromotionIssuanceError) throw error;
       throw issuanceError(OUTPUT);
     }
   }
+
+  async function verifyStoredEnvelope(envelope, reservation, verificationNow, ttlMs, allowExpired) {
+    const context = toVerificationContext(reservation, verificationNow, ttlMs, allowExpired);
+    const verified = await verifyPromotionEvidenceV3(envelope, { ...context, publicKeyResolver });
+    if (!sameEnvelope(verified, envelope)) throw new Error("verification output mismatch");
+    return verified;
+  }
 }
 
 export const createAuthoritativePlatformPromotionIssuer = createPlatformPromotionIssuanceService;
 
-function validateConfiguration(repository, signer, now, maxTtlMs) {
+function validateConfiguration(repository, signer, publicKeyResolver, now, maxTtlMs) {
   if (!isObject(repository)
     || typeof repository.reservePlatformPromotion !== "function"
     || typeof repository.commitPlatformPromotion !== "function"
@@ -319,6 +380,7 @@ function validateConfiguration(repository, signer, now, maxTtlMs) {
   }
   if (!isObject(signer) || typeof signer.sign !== "function"
     || ["privateKey", "private_key", "secret", "private_key_pem"].some((key) => Object.hasOwn(signer, key))) throw issuanceError(CONFIG);
+  if (typeof publicKeyResolver !== "function") throw issuanceError(CONFIG);
   if (typeof now !== "function" || !Number.isSafeInteger(maxTtlMs)
     || maxTtlMs < 1 || maxTtlMs > PROMOTION_EVIDENCE_V3_MAX_TTL_MS) throw issuanceError(CONFIG);
 }
@@ -424,19 +486,10 @@ function buildStatement(values, reservation, nowMs, maxTtlMs, historical = false
 }
 
 function normalizeSignerOutput(value, expectedStatement, reservation, nowMs, maxTtlMs, historical = false) {
-  let candidate;
-  if (typeof value === "string") candidate = envelopeFromSignature(value, expectedStatement, reservation);
-  else if (Buffer.isBuffer(value) || value instanceof Uint8Array) candidate = envelopeFromSignature(Buffer.from(value).toString("base64url"), expectedStatement, reservation);
-  else if (isObject(value)) {
-    assertPlainDataTree(value);
-    const keys = Reflect.ownKeys(value);
-    if (keys.length === 1 && keys[0] === "signature") {
-      candidate = envelopeFromSignature(value.signature, expectedStatement, reservation);
-    } else {
-      assertExactKeys(value, ["version", "type", "statement", "statement_hash", "signature_algorithm", "signer_key_fingerprint", "signature"]);
-      candidate = value;
-    }
-  } else throw new Error("signer output");
+  if (!isObject(value)) throw new Error("signer output");
+  assertPlainDataTree(value);
+  assertExactKeys(value, ["version", "type", "statement", "statement_hash", "signature_algorithm", "signer_key_fingerprint", "signature"]);
+  const candidate = value;
   let envelope;
   try {
     envelope = normalizePromotionEvidenceV3(candidate, { now: nowMs, allowExpired: historical, allowFuture: historical, maxTtlMs });
@@ -453,18 +506,6 @@ function normalizeSignerOutput(value, expectedStatement, reservation, nowMs, max
 function normalizeCommittedEnvelope(value, values, reservation, maxTtlMs) {
   const expected = buildStatement(values, reservation, Date.parse(reservation.issued_at), maxTtlMs, true);
   return normalizeSignerOutput(value, expected, reservation, Date.parse(reservation.issued_at), maxTtlMs, true);
-}
-
-function envelopeFromSignature(signature, statement, reservation) {
-  return {
-    version: PROMOTION_EVIDENCE_V3_VERSION,
-    type: PROMOTION_EVIDENCE_V3_TYPE,
-    statement,
-    statement_hash: promotionEvidenceV3StatementHash(statement),
-    signature_algorithm: PROMOTION_EVIDENCE_V3_ALGORITHM,
-    signer_key_fingerprint: reservation.signer_key_fingerprint,
-    signature,
-  };
 }
 
 function sameEnvelope(left, right) {
@@ -488,7 +529,7 @@ function toRepositoryInput(values) {
 
 function toCommitInput(reservation, promotionEvidence) {
   return Object.freeze({
-    ...pickKnown(reservation, [...RESERVATION_CORE_KEYS, ...OPTIONAL_RESERVATION_KEYS]),
+    ...pickKnown(reservation, PUBLIC_INPUT_KEYS),
     claim_token: reservation.claim_token,
     promotion_evidence: promotionEvidence,
   });
@@ -496,10 +537,40 @@ function toCommitInput(reservation, promotionEvidence) {
 
 function toUncertainInput(reservation, reason) {
   return Object.freeze({
-    ...pickKnown(reservation, [...RESERVATION_CORE_KEYS, ...OPTIONAL_RESERVATION_KEYS]),
+    ...pickKnown(reservation, PUBLIC_INPUT_KEYS),
     claim_token: reservation.claim_token,
     reason,
   });
+}
+
+function toVerificationContext(reservation, nowMs, maxTtlMs, allowExpired = false) {
+  const context = {
+    allowExpired,
+    candidate_id: reservation.candidate_id,
+    deployment_id: reservation.deployment_id,
+    environment: reservation.environment,
+    image_digest: reservation.image_digest,
+    key_id: reservation.key_id,
+    key_version: reservation.key_version,
+    lifecycle_version: reservation.lifecycle_version,
+    maxTtlMs,
+    now: nowMs,
+    platform_approval_digest: reservation.platform_approval_digest,
+    platform_approval_id: reservation.platform_approval_id,
+    product_pkg_sha256: reservation.product_pkg_sha256,
+    purpose: PROMOTION_EVIDENCE_V3_PURPOSE,
+    qualification_report_digests: Object.freeze([...reservation.qualification_report_digests]),
+    release_manifest_schema_version: reservation.release_manifest_schema_version,
+    release_manifest_sha256: reservation.release_manifest_sha256,
+    signer_key_fingerprint: reservation.signer_key_fingerprint,
+    signing_version: PROMOTION_EVIDENCE_V3_SIGNING_VERSION,
+    source_commit: reservation.source_commit,
+    source_tree: reservation.source_tree,
+    protocol_version: PROMOTION_EVIDENCE_V3_PROTOCOL_VERSION,
+    sbom_sha256: reservation.sbom_sha256,
+  };
+  assertExactKeys(context, VERIFICATION_CONTEXT_KEYS);
+  return Object.freeze(context);
 }
 
 function mapRepositoryError(error, phase) {
@@ -535,6 +606,7 @@ function messageFor(code) {
     [REPOSITORY]: "platform promotion issuance storage is unavailable",
     [SIGNER]: "platform promotion signer is unavailable",
     [SIGNER_OUTPUT]: "platform promotion signer returned an invalid result",
+    [VERIFIER]: "platform promotion evidence failed independent verification",
     [STALE_LIFECYCLE]: "platform promotion signer lifecycle is stale",
     [APPROVAL]: "platform promotion approval is invalid or expired",
     [COMMIT]: "platform promotion issuance could not be committed",

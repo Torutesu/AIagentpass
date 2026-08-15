@@ -135,7 +135,13 @@ DO $$
 DECLARE
   relation_name text;
 BEGIN
-  FOREACH relation_name IN ARRAY ARRAY['schema_migrations', 'schema_migration_attempts'] LOOP
+  FOREACH relation_name IN ARRAY ARRAY[
+    'schema_migrations', 'schema_migration_attempts',
+    'release_candidates', 'platform_promotion_approvals',
+    'platform_promotion_deployments', 'platform_promotion_issuances',
+    'managed_signer_key_lifecycles', 'managed_signer_keys',
+    'managed_signer_key_lifecycle_operations', 'managed_signer_signing_idempotency'
+  ] LOOP
     IF to_regclass(format('public.%I', relation_name)) IS NOT NULL THEN
       EXECUTE format(
         'REVOKE INSERT, UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER ON TABLE public.%I FROM agentpass_app, agentpass_backup',
@@ -145,6 +151,12 @@ BEGIN
   END LOOP;
 END
 $$;
+
+-- Promotion issuance and signer authority are not generic application DML.
+-- The current repository path must run through a reviewed authority/procedure
+-- role before hosted deployment; these explicit revokes keep a compromised
+-- agentpass_app session from mutating the authority tables directly while
+-- that SECURITY DEFINER procedure path is completed.
 
 -- Future objects created by the migration identity preserve the same boundary.
 ALTER DEFAULT PRIVILEGES FOR ROLE agentpass_migrator IN SCHEMA public

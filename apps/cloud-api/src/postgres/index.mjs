@@ -95,3 +95,8 @@ export {
   canonicalManagedSignerRequestDigest,
   createPostgresManagedSignerKeyLifecycleRepository
 } from "./managed-signer-key-lifecycle-repository.mjs";
+export {
+  PLATFORM_PROMOTION_ISSUANCE_ERROR_CODES,
+  PlatformPromotionIssuanceRepositoryError,
+  createPostgresPlatformPromotionIssuanceRepository
+} from "./platform-promotion-issuance-repository.mjs";

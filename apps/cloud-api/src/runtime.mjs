@@ -31,8 +31,17 @@ import { AUDIT_ANCHOR_ALGORITHM, AUDIT_ANCHOR_PROTOCOL_VERSION, AUDIT_ANCHOR_PUR
 import { createAuditAnchorPublicKeyResolver } from "./audit-anchor-public-key-resolver.mjs";
 import { createAuditExportIssuanceService } from "./audit-export-issuance.mjs";
 import { verifyOfflineAuditExport } from "./audit-export-offline-verifier.mjs";
-import { createHostedPromotionEvidenceSigner } from "./promotion-evidence-signer.mjs";
-import { PROMOTION_EVIDENCE_ALGORITHM, PROMOTION_EVIDENCE_PROTOCOL_VERSION, PROMOTION_EVIDENCE_PURPOSE } from "./promotion-evidence-statement.mjs";
+import { createPromotionEvidenceV3Signer } from "./promotion-evidence-v3-signer.mjs";
+import { createPromotionEvidenceV3Verifier } from "./promotion-evidence-v3-verifier.mjs";
+import { createPromotionEvidenceV3PublicKeyResolver } from "./promotion-evidence-v3-public-key-resolver.mjs";
+import {
+  PROMOTION_EVIDENCE_V3_ALGORITHM,
+  PROMOTION_EVIDENCE_V3_MAX_TTL_MS,
+  PROMOTION_EVIDENCE_V3_PROTOCOL_VERSION,
+  PROMOTION_EVIDENCE_V3_PURPOSE,
+  PROMOTION_EVIDENCE_V3_SIGNING_VERSION
+} from "./promotion-evidence-v3-statement.mjs";
+import { createPlatformPromotionIssuanceService } from "./platform-promotion-issuance.mjs";
 import { PROTOCOL_VERSION, REFRESH_HINT_SIGNATURE_ALGORITHM, REFRESH_HINT_TYPE } from "../../../packages/protocol/src/index.mjs";
 
 const IDENTIFIER = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
@@ -63,6 +72,8 @@ export async function createCloudRuntime({ env = process.env, logger = console, 
   let auditExportIssuanceService;
   let auditExportVerifier;
   let promotionEvidenceSigner;
+  let platformPromotionIssuanceService;
+  let verifyPlatformPromotionEvidence;
   let ownedKmsProviders;
   let processBindingPolicies;
   if (profile.isHosted) {
@@ -90,7 +101,17 @@ export async function createCloudRuntime({ env = process.env, logger = console, 
   let server;
   try {
     if (profile.isHosted) {
-      postgresRuntime = await postgresFactory({ env, applicationVersion: "0.18.0", refreshNonceCodec, resolveProcessBindingPolicy: processBindingPolicies.resolve, ownerRecoveryPublisher: configuredOwnerRecoveryPublisher });
+      postgresRuntime = await postgresFactory({
+        env,
+        applicationVersion: "0.18.0",
+        refreshNonceCodec,
+        resolveProcessBindingPolicy: processBindingPolicies.resolve,
+        ownerRecoveryPublisher: configuredOwnerRecoveryPublisher,
+        platformPromotionVerifyEvidence: async (envelope, context) => {
+          if (typeof verifyPlatformPromotionEvidence !== "function") return false;
+          return verifyPlatformPromotionEvidence(envelope, context);
+        }
+      });
       if (!postgresRuntime?.capabilityAuthorityRepository
         || typeof postgresRuntime.capabilityAuthorityRepository.issueCapabilityMetadata !== "function"
         || typeof postgresRuntime.capabilityAuthorityRepository.listRevokedCapabilityIds !== "function") {
@@ -99,6 +120,7 @@ export async function createCloudRuntime({ env = process.env, logger = console, 
       if (!postgresRuntime?.controlPlaneStore) throw new Error("PostgreSQL control-plane store is unavailable");
       if (!postgresRuntime?.agentSessionIssuanceRepository || !postgresRuntime?.agentSessionAuthorityRepository) throw new Error("PostgreSQL Agent Session authority is unavailable");
       if (!postgresRuntime?.auditExportIssuanceRepository) throw new Error("PostgreSQL audit export authority is unavailable");
+      if (!postgresRuntime?.platformPromotionIssuanceRepository) throw new Error("PostgreSQL platform promotion authority is unavailable");
       if (!postgresRuntime?.sharedControlRepository || typeof postgresRuntime.sharedControlRepository.consumeDeviceRequestNonce !== "function" || typeof postgresRuntime.sharedControlRepository.acquireRateLimit !== "function" || typeof postgresRuntime.sharedControlRepository.acquireAnonymousRateLimit !== "function") throw new Error("PostgreSQL shared controls are unavailable");
       store = postgresRuntime.controlPlaneStore;
       if (typeof store.pollDeviceRefresh !== "function" || typeof store.markDeviceRefreshDelivered !== "function") throw new Error("PostgreSQL refresh polling is unavailable");
@@ -190,14 +212,14 @@ export async function createCloudRuntime({ env = process.env, logger = console, 
       const durablePromotionEvidence = await bindHostedManagedSignerProvider({
         postgresRuntime,
         provider: promotionEvidenceSignerProvider,
-        purpose: PROMOTION_EVIDENCE_PURPOSE,
+        purpose: PROMOTION_EVIDENCE_V3_PURPOSE,
         keyId: config.promotionEvidenceKeyId,
-        version: PROMOTION_EVIDENCE_PROTOCOL_VERSION,
-        algorithm: PROMOTION_EVIDENCE_ALGORITHM,
+        version: PROMOTION_EVIDENCE_V3_SIGNING_VERSION,
+        algorithm: PROMOTION_EVIDENCE_V3_ALGORITHM,
         publicKey: config.promotionEvidencePublicKey,
         publicKeyFingerprint: promotionEvidenceFingerprint
       });
-      promotionEvidenceSigner = createHostedPromotionEvidenceSigner({
+      promotionEvidenceSigner = createPromotionEvidenceV3Signer({
         provider: durablePromotionEvidence.provider,
         keyId: config.promotionEvidenceKeyId,
         keyVersion: durablePromotionEvidence.key_version,
@@ -205,6 +227,25 @@ export async function createCloudRuntime({ env = process.env, logger = console, 
         publicKey: config.promotionEvidencePublicKey,
         timeoutMs: config.promotionEvidenceTimeoutMs
       });
+      const promotionEvidenceLifecycleRepository = Object.freeze({
+        snapshot: () => durablePromotionEvidence.repository.snapshot()
+      });
+      const promotionEvidencePublicKeyResolver = createPromotionEvidenceV3PublicKeyResolver({
+        repository: promotionEvidenceLifecycleRepository
+      });
+      verifyPlatformPromotionEvidence = createDynamicPromotionEvidenceVerifier({
+        resolver: promotionEvidencePublicKeyResolver,
+        maxTtlMs: PROMOTION_EVIDENCE_V3_MAX_TTL_MS
+      });
+      const rawPlatformPromotionIssuanceService = createPlatformPromotionIssuanceService({
+        repository: postgresRuntime.platformPromotionIssuanceRepository,
+        signer: promotionEvidenceSigner,
+        publicKeyResolver: promotionEvidencePublicKeyResolver
+      });
+      platformPromotionIssuanceService = trackPlatformPromotionService(
+        rawPlatformPromotionIssuanceService,
+        postgresRuntime.trackInFlight
+      );
       const refreshFingerprint = crypto.createHash("sha256").update(refreshPublicKey.export({ type: "spki", format: "der" })).digest("hex");
       const durableRefreshHint = await bindHostedManagedSignerProvider({
         postgresRuntime,
@@ -406,7 +447,7 @@ export async function createCloudRuntime({ env = process.env, logger = console, 
     auditAnchorSigner,
     auditExportIssuanceService,
     auditExportVerifier,
-    promotionEvidenceSigner,
+    platformPromotionIssuanceService,
     async listen() {
       if (server.listening) return server.address();
       await new Promise((resolve, reject) => { server.once("error", reject); server.listen(config.port, config.host, () => { server.off("error", reject); resolve(); }); });
@@ -630,6 +671,67 @@ function runtimeTimeout(promise, timeoutMs) {
     promise,
     new Promise((_, reject) => { timer = setTimeout(() => reject(new Error("Cloud runtime shutdown timed out")), timeoutMs); })
   ]).finally(() => clearTimeout(timer));
+}
+
+const PLATFORM_PROMOTION_VERIFIER_CONTEXT_FIELDS = Object.freeze([
+  "deployment_id",
+  "environment",
+  "candidate_id",
+  "product_pkg_sha256",
+  "image_digest",
+  "sbom_sha256",
+  "platform_approval_id",
+  "platform_approval_digest",
+  "source_commit",
+  "source_tree",
+  "release_manifest_sha256",
+  "release_manifest_schema_version",
+  "qualification_report_digests",
+  "purpose",
+  "protocol_version",
+  "signing_version",
+  "key_id",
+  "key_version",
+  "lifecycle_version",
+  "signer_key_fingerprint"
+]);
+
+function createDynamicPromotionEvidenceVerifier({ resolver, maxTtlMs, now = () => Date.now() } = {}) {
+  if (typeof resolver !== "function" || !Number.isSafeInteger(maxTtlMs) || maxTtlMs < 1 || typeof now !== "function") {
+    throw new Error("Cloud promotion evidence verifier is unavailable");
+  }
+  return async function verifyPlatformPromotionEvidence(envelope, context = {}) {
+    try {
+      if (envelope === null || typeof envelope !== "object" || Array.isArray(envelope)
+        || context === null || typeof context !== "object" || Array.isArray(context)) return false;
+      const statement = envelope.statement;
+      if (statement === null || typeof statement !== "object" || Array.isArray(statement)) return false;
+      const verifierContext = {};
+      for (const field of PLATFORM_PROMOTION_VERIFIER_CONTEXT_FIELDS) {
+        if (!Object.hasOwn(context, field) || context[field] === undefined) return false;
+        verifierContext[field] = context[field];
+      }
+      const verifier = createPromotionEvidenceV3Verifier({
+        publicKeyResolver: resolver,
+        maxTtlMs,
+        now: now(),
+        ...verifierContext
+      });
+      await verifier.verify(envelope);
+      return true;
+    } catch {
+      return false;
+    }
+  };
+}
+
+function trackPlatformPromotionService(service, trackInFlight) {
+  if (typeof trackInFlight !== "function") return service;
+  return Object.freeze({
+    issuePlatformPromotion: (input) => trackInFlight(() => service.issuePlatformPromotion(input)),
+    replayPlatformPromotion: (input) => trackInFlight(() => service.replayPlatformPromotion(input)),
+    getCommittedPlatformPromotion: (input) => trackInFlight(() => service.getCommittedPlatformPromotion(input))
+  });
 }
 
 export function createHostedRateLimiter(repository, { secret } = {}) {
