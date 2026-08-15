@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  awaitConsoleSessionRotation,
   classifySessionBootstrap502,
   classifySessionBootstrap503,
   classifyStoredSessionState,
@@ -69,18 +70,62 @@ test("stored session diagnostics expose only fixed authoritative state codes", a
   assert.equal(await classifyStoredSessionState({ query: async () => { throw new Error("secret"); } }, sessionId), "unavailable");
 });
 
-test("live bootstrap waits for the Console-owned session rotation before registration", async () => {
-  const source = await import("node:fs/promises").then(({ readFile }) => readFile(new URL("./live-browser-fixture.mjs", import.meta.url), "utf8"));
-  const wait = source.indexOf("const applicationSession = page.waitForResponse");
-  const awaitResponse = source.indexOf("const [applicationSessionResponse] = await Promise.all");
-  const goto = source.indexOf("page.goto(target.toString()", awaitResponse);
-  const rotated = source.indexOf("const rotated = validateBootstrap");
-  const update = source.indexOf("sessionId: rotated.sessionId");
+test("live bootstrap adopts the Console-owned rotation before navigation completes", async () => {
+  const organizationId = "11111111-1111-4111-8111-111111111111";
+  const descriptor = Object.freeze({
+    role: "owner",
+    memberId: "22222222-2222-4222-8222-222222222222"
+  });
+  const expected = Object.freeze({
+    sessionId: "33333333-3333-4333-8333-333333333333",
+    csrfToken: "A".repeat(43)
+  });
+  const events = [];
+  let matchResponse;
+  let resolveResponse;
+  const responsePromise = new Promise((resolve) => { resolveResponse = resolve; });
+  const response = {
+    ok: () => true,
+    request: () => ({ method: () => "POST" }),
+    url: () => "https://console.example.test/api/auth/session/resume",
+    json: async () => ({
+      csrf_token: expected.csrfToken,
+      session: {
+        session_id: expected.sessionId,
+        organization_id: organizationId,
+        member_id: descriptor.memberId,
+        role: descriptor.role
+      }
+    })
+  };
+  const page = {
+    waitForResponse(predicate, options) {
+      events.push(["wait", options.timeout]);
+      matchResponse = predicate;
+      return responsePromise;
+    },
+    async goto(target, options) {
+      events.push(["goto", target, options.waitUntil]);
+      assert.equal(matchResponse({
+        ok: () => true,
+        request: () => ({ method: () => "GET" }),
+        url: () => "https://console.example.test/api/auth/session/resume"
+      }), false);
+      assert.equal(matchResponse(response), true);
+      resolveResponse(response);
+    }
+  };
 
-  assert.notEqual(wait, -1);
-  assert.match(source, /pathname === "\/api\/auth\/session\/resume" \|\| pathname === SESSION_PATH/);
-  assert.ok(wait < awaitResponse);
-  assert.ok(awaitResponse < goto);
-  assert.ok(awaitResponse < rotated);
-  assert.ok(rotated < update);
+  const rotated = await awaitConsoleSessionRotation(
+    page,
+    new URL("https://console.example.test/"),
+    descriptor,
+    organizationId
+  );
+
+  assert.deepEqual(events, [
+    ["wait", 15_000],
+    ["goto", "https://console.example.test/", "domcontentloaded"]
+  ]);
+  assert.deepEqual(rotated, expected);
 });

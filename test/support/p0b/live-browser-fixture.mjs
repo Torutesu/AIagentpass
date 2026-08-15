@@ -206,18 +206,8 @@ export async function startP0BLiveBrowserFixture({
         // its selector/CSRF pair. Wait for that authoritative success before a
         // fixture-owned WebAuthn ceremony; otherwise the registration request
         // can race the rotation between authentication and challenge insert.
-        const applicationSession = page.waitForResponse((candidate) => {
-          if (!candidate.ok() || candidate.request().method() !== "POST") return false;
-          const pathname = new URL(candidate.url()).pathname;
-          return pathname === "/api/auth/session/resume" || pathname === SESSION_PATH;
-        }, { timeout: 15_000 });
         stage = "target_session";
-        const [applicationSessionResponse] = await Promise.all([
-          applicationSession,
-          page.goto(target.toString(), { waitUntil: "domcontentloaded" }),
-        ]);
-        const applicationSessionBody = await applicationSessionResponse.json();
-        const rotated = validateBootstrap(applicationSessionBody, descriptor, safeSeed.organizationId);
+        const rotated = await awaitConsoleSessionRotation(page, target, descriptor, safeSeed.organizationId);
         pageState.set(page, { role: descriptor, sessionId: rotated.sessionId, csrfToken: rotated.csrfToken, registered: pageState.get(page)?.registered === true });
       } catch {
         throw new P0BLiveBrowserFixtureError(`session_bootstrap_${stage}_failed`, "P0-B live browser session bootstrap failed");
@@ -557,6 +547,20 @@ export async function seedP0BHumanBrowserDatabase({ pool, organizationId, refres
   } finally {
     client.release();
   }
+}
+
+export async function awaitConsoleSessionRotation(page, target, descriptor, organizationId) {
+  const applicationSession = page.waitForResponse((candidate) => {
+    if (!candidate.ok() || candidate.request().method() !== "POST") return false;
+    const pathname = new URL(candidate.url()).pathname;
+    return pathname === "/api/auth/session/resume" || pathname === SESSION_PATH;
+  }, { timeout: 15_000 });
+  const [applicationSessionResponse] = await Promise.all([
+    applicationSession,
+    page.goto(target.toString(), { waitUntil: "domcontentloaded" }),
+  ]);
+  const applicationSessionBody = await applicationSessionResponse.json();
+  return validateBootstrap(applicationSessionBody, descriptor, organizationId);
 }
 
 function publicSeed(seed) {
