@@ -105,6 +105,7 @@ test("recent authorization consumption is one atomic exact-binding update", asyn
   assert.deepEqual(await repo.consumeRecentAuth({session_id:ids.session,member_id:ids.member,organization_id:ids.org,operation:"device.enrollment.issue",challenge_id:ids.challenge,consumed_at:"2026-08-12T00:01:00.000Z"}),{authenticated_at:"2026-08-12T00:00:00.000Z"});
   assert.match(calls[0].text,/c\.session_id=s\.id/); assert.match(calls[0].text,/c\.member_id=s\.member_id/); assert.match(calls[0].text,/c\.organization_id=s\.organization_id/); assert.match(calls[0].text,/c\.ceremony='authentication'/); assert.match(calls[0].text,/c\.status='consumed'/);
   assert.match(calls[1].text,/s\.id=\$1/); assert.match(calls[1].text,/recent_auth_consumed_at IS NULL/); assert.match(calls[1].text,/INTERVAL '5 minutes'/); assert.deepEqual(calls[1].params.slice(0,5),[ids.session,ids.member,ids.org,"device.enrollment.issue",ids.challenge]);
+  assert.match(calls[1].text,/s\.idle_expires_at IS NULL OR s\.idle_expires_at>\$7/);
 });
 
 test("compares a resource context hash when binding and consuming recent authorization", async () => {
