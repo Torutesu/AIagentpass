@@ -18,6 +18,12 @@ test("Hosted onboarding exposes the complete first-user journey", async () => {
   assert.match(component, /最初のワークスペースを作成/);
   assert.match(component, /パスキーで管理者アカウントを保護/);
   assert.match(component, /準備ができました/);
+  assert.match(component, /data-onboarding-state/);
+  assert.match(component, /data-device-handoff="ready"/);
+  assert.match(component, /端末をAgentへ引き渡す/);
+  assert.match(component, /セットアップを再開してください/);
+  assert.match(component, /retryable/);
+  assert.match(component, /terminal/);
 });
 
 test("Hosted onboarding keeps ceremony authority out of React and browser storage", async () => {
@@ -28,4 +34,6 @@ test("Hosted onboarding keeps ceremony authority out of React and browser storag
   assert.match(source, /clientRef = useRef/);
   assert.match(source, /const controller = new AbortController/);
   assert.match(source, /return \(\) => \{[\s\S]*?controller\.abort\(\);[\s\S]*?\}/);
+  assert.match(source, /Reconcile once from the authoritative status/);
+  assert.match(source, /The boolean is ephemeral UI state/);
 });

@@ -3,6 +3,7 @@ import test from "node:test";
 
 import {
   createHostedBootstrapClient,
+  deriveHostedOnboardingState,
   HostedBootstrapClientError,
   HOSTED_BOOTSTRAP_CLIENT_PATHS,
 } from "../lib/hosted-bootstrap-client.mjs";
@@ -34,6 +35,24 @@ function sessionBody() {
 function organizationBody() {
   return { version: 1, organization: { organization_id: organizationId, name: "First Org", version: 1, created_at: timestamp, updated_at: timestamp }, onboarding: { state: "webauthn_required" } };
 }
+
+test("derives the browser onboarding state only from validated Hosted status", () => {
+  const states = [
+    ["oauth_started", "identity"],
+    ["identity_verified", "identity"],
+    ["organization_required", "organization"],
+    ["webauthn_required", "webauthn"],
+    ["ready", "device_handoff"],
+    ["completed", "device_handoff"],
+    ["no_membership", "recovery"],
+    ["expired", "terminal"],
+  ];
+  for (const [state, expected] of states) assert.equal(deriveHostedOnboardingState({ state }), expected);
+  assert.equal(deriveHostedOnboardingState(null), "loading");
+  assert.equal(deriveHostedOnboardingState({ state: "webauthn_required" }, { deviceHandoffReady: true }), "device_handoff");
+  // A verify response is the only reason the UI sets deviceHandoffReady; no
+  // credential, nonce, invitation, or session value is accepted by this API.
+});
 
 test("returns only the public camelCase status DTO while retaining CSRF in the closure", async () => {
   const calls = [];

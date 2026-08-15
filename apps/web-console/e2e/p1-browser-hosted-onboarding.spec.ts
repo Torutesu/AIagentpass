@@ -38,6 +38,7 @@ type HostedRouteState = {
   webauthnVerifyBodies: Array<Record<string, unknown>>;
   unexpectedRequests: string[];
   holdOrganizationResponse: boolean;
+  dropOrganizationResponse: boolean;
   releaseOrganizationResponse?: () => void;
 };
 
@@ -112,7 +113,7 @@ function requestJson(route: import("@playwright/test").Route): Record<string, un
   }
 }
 
-async function installHostedRoutes(page: Page, mode: HostedMode, options: { holdOrganizationResponse?: boolean } = {}): Promise<HostedRouteState> {
+async function installHostedRoutes(page: Page, mode: HostedMode, options: { holdOrganizationResponse?: boolean; dropOrganizationResponse?: boolean } = {}): Promise<HostedRouteState> {
   const state: HostedRouteState = {
     mode,
     statusCalls: 0,
@@ -125,6 +126,7 @@ async function installHostedRoutes(page: Page, mode: HostedMode, options: { hold
     webauthnVerifyBodies: [],
     unexpectedRequests: [],
     holdOrganizationResponse: options.holdOrganizationResponse === true,
+    dropOrganizationResponse: options.dropOrganizationResponse === true,
   };
 
   await page.route("**/api/auth/bootstrap/**", async (route) => {
@@ -163,6 +165,7 @@ async function installHostedRoutes(page: Page, mode: HostedMode, options: { hold
       if (state.holdOrganizationResponse && state.organizationCalls === 1) {
         await new Promise<void>((resolve) => { state.releaseOrganizationResponse = resolve; });
       }
+      if (state.dropOrganizationResponse && state.organizationCalls === 1) return route.abort("failed");
       return json(route, organizationBody(), 201);
     }
 
@@ -232,7 +235,7 @@ function assertNoSensitiveConsoleMessages(messages: string[], sensitiveValues: s
   }
 }
 
-async function openOnboarding(page: Page, mode: HostedMode, options: { holdOrganizationResponse?: boolean } = {}) {
+async function openOnboarding(page: Page, mode: HostedMode, options: { holdOrganizationResponse?: boolean; dropOrganizationResponse?: boolean } = {}) {
   const state = await installHostedRoutes(page, mode, options);
   const consoleMessages: string[] = [];
   page.on("console", (message) => consoleMessages.push(`${message.type()}: ${message.text()}`));
@@ -283,8 +286,34 @@ test("creates an organization with the exact JSON/header contract, registers a p
   const credential = state.webauthnVerifyBodies[0].credential as Record<string, unknown>;
   const response = credential.response as Record<string, unknown>;
   const sensitiveValues = [CSRF_TOKEN, SESSION_CSRF_TOKEN, CHALLENGE_ID, REGISTRATION_CHALLENGE, CREDENTIAL_ID, String(credential.id), String(response.clientDataJSON), String(response.attestationObject)];
+  await expect(page.locator('[data-onboarding-state="device_handoff"]')).toBeVisible();
+  await expect(page.locator('[data-device-handoff="ready"]')).toBeVisible();
+  await expect(page.getByText("端末をAgentへ引き渡す", { exact: true })).toBeVisible();
+  // The verify response is authoritative for this in-memory handoff screen.
+  // The current status route accepts only the bootstrap cookie, which is
+  // rotated away by verify; a post-verify refresh assertion therefore waits
+  // for a future session-aware onboarding status contract.
   await assertNoReusableAuthority(page, sensitiveValues);
   assertNoSensitiveConsoleMessages(consoleMessages, sensitiveValues);
+});
+
+test("reconciles a lost organization response from server status and resumes after refresh", async ({ page }) => {
+  const { state } = await openOnboarding(page, "organization", { dropOrganizationResponse: true });
+  await page.getByLabel("ワークスペース名").fill(ORGANIZATION_NAME);
+  await page.getByRole("button", { name: "ワークスペースを作成", exact: true }).click();
+  await expect(page.getByRole("heading", { name: "パスキーで管理者アカウントを保護" })).toBeVisible();
+  expect(state.organizationCalls).toBe(1);
+  expect(state.statusCalls).toBe(2);
+  expect(state.unexpectedRequests).toEqual([]);
+
+  // The mock deliberately drops the 201. The UI must use the next
+  // authoritative status response, and must not resend the mutation.
+  await page.reload();
+  await expect(page.getByRole("heading", { name: "パスキーで管理者アカウントを保護" })).toBeVisible();
+  await expect(page.locator('[data-onboarding-state="webauthn"]')).toBeVisible();
+  expect(state.organizationCalls).toBe(1);
+  expect(state.statusCalls).toBe(3);
+  await assertNoReusableAuthority(page, [CSRF_TOKEN, CHALLENGE_ID, REGISTRATION_CHALLENGE, CREDENTIAL_ID]);
 });
 
 test("prevents organization double submission while the first request is in flight", async ({ page }) => {

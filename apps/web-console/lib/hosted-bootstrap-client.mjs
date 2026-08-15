@@ -95,6 +95,46 @@ export const HOSTED_BOOTSTRAP_CLIENT_ERROR_CODES = Object.freeze({
 });
 
 /**
+ * The browser renders only states that can be derived from an already
+ * validated Hosted response. `device_handoff` is intentionally a UI state:
+ * the current Hosted contract has no separate device-handoff response yet.
+ *
+ * @typedef {"loading" | "identity" | "organization" | "webauthn" | "device_handoff" | "recovery" | "terminal"} HostedOnboardingState
+ */
+
+/**
+ * Derive the deterministic browser state from the validated public status.
+ * `deviceHandoffReady` is set only after the authoritative verify response;
+ * it contains no session, credential, nonce, or invitation data.
+ *
+ * @param {HostedBootstrapStatus | null} status
+ * @param {{ deviceHandoffReady?: boolean }} [options]
+ * @returns {HostedOnboardingState}
+ */
+export function deriveHostedOnboardingState(status, options = {}) {
+  if (options.deviceHandoffReady === true) return "device_handoff";
+  if (status === null) return "loading";
+  switch (status.state) {
+    case "oauth_started":
+    case "identity_verified":
+      return "identity";
+    case "organization_required":
+      return "organization";
+    case "webauthn_required":
+      return "webauthn";
+    case "ready":
+    case "completed":
+      return "device_handoff";
+    case "no_membership":
+      return "recovery";
+    case "expired":
+      return "terminal";
+    default:
+      return "terminal";
+  }
+}
+
+/**
  * UI-facing failures use a stable client code. For an HTTP rejection, the
  * allowlisted Cloud code is exposed separately as `serverCode` so React can
  * branch on `bootstrap_session_required` and friends without trusting an
