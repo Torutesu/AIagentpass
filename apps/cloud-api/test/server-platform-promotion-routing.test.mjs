@@ -101,7 +101,7 @@ test("fails closed for organization roles and malformed or private responses", a
   const malformed = await start(t, { service: { async issuePlatformPromotion() { return { ...publicPromotion(false), provider_diagnostics: { message: "secret" } }; }, async replayPlatformPromotion() { return null; } } });
   const malformedResponse = await fetch(`${malformed.base}/v1/platform/promotions`, { method: "POST", headers: headers(), body: JSON.stringify({ ...INPUT, unexpected: true }) });
   assert.equal(malformedResponse.status, 400);
-  assert.equal((await malformedResponse.json()).error.code, "platform_promotion_invalid_request");
+  assert.equal((await malformedResponse.json()).error.code, "err_platform_promotion_http_request");
   const privateResponse = await fetch(`${malformed.base}/v1/platform/promotions`, { method: "POST", headers: headers(), body: JSON.stringify(INPUT) });
   assert.equal(privateResponse.status, 503);
   assert.equal((await privateResponse.json()).error.code, "platform_promotion_unavailable");

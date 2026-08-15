@@ -665,7 +665,7 @@ jobs:
         env:
           AGENTPASS_TEST_DATABASE_URL: postgresql://postgres:agentpass-integration@127.0.0.1:5432/postgres
         run: >-
-          node --test
+          node --test --test-concurrency=1
           apps/cloud-api/test/postgres/organization-integration.test.mjs
           apps/cloud-api/test/postgres/capability-authority-repository.test.mjs
           apps/cloud-api/test/postgres/human-management-pagination-integration.test.mjs
@@ -873,6 +873,7 @@ jobs:
       - run: npm ci --prefix apps/web-console
       - run: npm run contracts:validate
       - run: npm run contracts:validate:platform
+      - run: npm run contracts:validate:hosted-identity-bootstrap
       - run: npm run test:w16
       - run: npm test
       - run: npm test --prefix apps/web-console

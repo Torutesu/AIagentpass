@@ -163,16 +163,20 @@ BEGIN
     END IF;
   END LOOP;
 
-  -- Future managed-signer ledgers are authority tables by default. A new
-  -- migration cannot silently inherit the broad application DML defaults
-  -- merely because this reviewed array has not yet been extended.
+  -- Future managed-signer and Platform ledgers are authority tables by
+  -- default. A new migration cannot silently inherit the broad application
+  -- DML defaults merely because this reviewed array has not yet been
+  -- extended.
   FOR relation_name IN
     SELECT c.relname
     FROM pg_catalog.pg_class AS c
     JOIN pg_catalog.pg_namespace AS n ON n.oid = c.relnamespace
     WHERE n.nspname = 'public'
       AND c.relkind IN ('r', 'p')
-      AND left(c.relname, length('managed_signer_')) = 'managed_signer_'
+      AND (
+        left(c.relname, length('managed_signer_')) = 'managed_signer_'
+        OR left(c.relname, length('platform_')) = 'platform_'
+      )
   LOOP
     EXECUTE format(
       'REVOKE INSERT, UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER ON TABLE public.%I FROM agentpass_app, agentpass_backup',

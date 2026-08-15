@@ -3,6 +3,7 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
+import { POSTGRES_SCHEMA_HEAD } from "../apps/cloud-api/src/postgres/schema-head.mjs";
 
 import {
   PLATFORM_AUTHORIZATION_QUALIFICATION_COMMAND,
@@ -16,7 +17,7 @@ import {
 
 const SOURCE_COMMIT = "a".repeat(40);
 
-test("creates the exact source, migration-55, PostgreSQL-17 authorization qualification contract", async () => {
+test("creates the exact source and current PostgreSQL authorization qualification contract", async () => {
   const evidence = await createPlatformAuthorizationQualificationEvidence({
     sourceCommit: SOURCE_COMMIT,
     postgresVersion: "17.6",
@@ -24,7 +25,7 @@ test("creates the exact source, migration-55, PostgreSQL-17 authorization qualif
     runAttempt: "1"
   });
   assert.equal(evidence.source_commit, SOURCE_COMMIT);
-  assert.equal(evidence.migration_version, 55);
+  assert.equal(evidence.migration_version, POSTGRES_SCHEMA_HEAD.version);
   assert.equal(evidence.command, PLATFORM_AUTHORIZATION_QUALIFICATION_COMMAND);
   assert.deepEqual(evidence.scenarios, PLATFORM_AUTHORIZATION_QUALIFICATION_SCENARIOS);
   assert.deepEqual(evidence.summary, { passed: 16, failed: 0, skipped: 0 });
@@ -46,7 +47,7 @@ test("writes one private canonical artifact and verifies source/catalog binding"
   assert.deepEqual(await verifyPlatformAuthorizationQualificationEvidence(output, { expectedSourceCommit: SOURCE_COMMIT }), {
     evidence_sha256: written.evidence_sha256,
     source_commit: SOURCE_COMMIT,
-    migration_version: 55,
+    migration_version: POSTGRES_SCHEMA_HEAD.version,
     scenarios: 16
   });
 });

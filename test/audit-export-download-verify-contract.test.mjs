@@ -88,8 +88,26 @@ test("audit export verify freezes exact public input, CSRF, recent WebAuthn, and
 test("catalog inventory includes the C2 download and verification contracts", () => {
   const catalog = readJson("contracts/catalog-v1.json");
   const counts = catalog.entries.reduce((result, entry) => ({ ...result, [entry.kind]: (result[entry.kind] ?? 0) + 1 }), {});
-  assert.equal(catalog.entries.length, 162);
-  assert.deepEqual(counts, { "json-schema": 46, "openapi-operation": 61, "postgres-migration": 55 });
+  const schemaCount = fs.readdirSync(path.join(root, "contracts", "schemas"))
+    .filter((name) => name.endsWith(".schema.json")).length;
+  const migrationCount = fs.readdirSync(path.join(root, "contracts", "postgres"))
+    .filter((name) => /^\d{4}_.+\.sql$/u.test(name)).length;
+  const operationMethods = new Set(["delete", "get", "head", "options", "patch", "post", "put", "trace"]);
+  const catalogOpenApiSources = [...new Set(catalog.entries
+    .filter((entry) => entry.kind === "openapi-operation")
+    .map((entry) => entry.source))];
+  const operationCount = catalogOpenApiSources
+    .map((source) => readJson(path.join("contracts", source)))
+    .reduce((total, document) => total + Object.values(document.paths ?? {}).reduce(
+      (pathTotal, pathItem) => pathTotal + Object.keys(pathItem).filter((key) => operationMethods.has(key)).length,
+      0
+    ), 0);
+  assert.deepEqual(counts, {
+    "json-schema": schemaCount,
+    "openapi-operation": operationCount,
+    "postgres-migration": migrationCount
+  });
+  assert.equal(catalog.entries.length, schemaCount + operationCount + migrationCount);
   for (const id of ["schema.audit-export-verification-result-v1", "api.human.downloadAuditExport", "api.human.verifyAuditExport"]) {
     assert.ok(catalog.entries.some((entry) => entry.id === id), `${id} catalog entry`);
   }

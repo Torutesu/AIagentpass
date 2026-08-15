@@ -8,6 +8,7 @@ import { pathToFileURL } from "node:url";
 
 import { canonicalJson } from "../../packages/protocol/src/index.mjs";
 import { loadSqlMigrations } from "../../apps/cloud-api/src/postgres/migration-runner.mjs";
+import { POSTGRES_SCHEMA_HEAD } from "../../apps/cloud-api/src/postgres/schema-head.mjs";
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu;
 const SHA256 = /^[0-9a-f]{64}$/u;
@@ -101,7 +102,10 @@ const AUTHORITY_TABLE_NAMES = Object.freeze(AUTHORITY_TABLES.map(([name]) => nam
 const TENANT_TABLE_NAMES = new Set(AUTHORITY_TABLES.filter(([, , kind]) => ["tenant", "audit", "outbox", "security"].includes(kind)).map(([name]) => name));
 
 export const AUTHORITY_MANIFEST_SCHEMA_VERSION = 2;
-export const REQUIRED_MIGRATION_VERSION = "55";
+// The authority snapshot must follow the same catalog/files head as runtime
+// readiness. Keep the string representation because the durable manifest
+// protocol stores migration versions as decimal strings.
+export const REQUIRED_MIGRATION_VERSION = String(POSTGRES_SCHEMA_HEAD.version);
 export const MANIFEST_KIND = "agentpass.authority-manifest";
 
 export const DIAGNOSTICS = Object.freeze({

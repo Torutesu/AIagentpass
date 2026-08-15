@@ -25,10 +25,14 @@ test("main CI validates the machine-readable contract inventory before product t
   const install = section.indexOf("- run: npm ci");
   const consoleInstall = section.indexOf("- run: npm ci --prefix apps/web-console");
   const contracts = section.indexOf("- run: npm run contracts:validate");
+  const platformContracts = section.indexOf("- run: npm run contracts:validate:platform");
+  const identityBootstrapContracts = section.indexOf("- run: npm run contracts:validate:hosted-identity-bootstrap");
   const w16 = section.indexOf("- run: npm run test:w16");
   const nodeTests = section.indexOf("- run: npm test");
-  assert.ok(install >= 0 && consoleInstall > install && contracts > consoleInstall && w16 > contracts && nodeTests > w16);
-  assert.equal(section.match(/npm run contracts:validate/g)?.length, 1);
+  assert.ok(install >= 0 && consoleInstall > install && contracts > consoleInstall && platformContracts > contracts && identityBootstrapContracts > platformContracts && w16 > identityBootstrapContracts && nodeTests > w16);
+  assert.equal(section.match(/^\s*- run: npm run contracts:validate$/gmu)?.length, 1);
+  assert.equal(section.match(/^\s*- run: npm run contracts:validate:platform$/gmu)?.length, 1);
+  assert.equal(section.match(/^\s*- run: npm run contracts:validate:hosted-identity-bootstrap$/gmu)?.length, 1);
   assert.equal(section.match(/npm run test:w16/g)?.length, 1);
 });
 

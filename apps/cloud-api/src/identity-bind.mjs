@@ -1,7 +1,7 @@
 import { fileURLToPath } from "node:url";
 import { resolve } from "node:path";
 import { Pool } from "pg";
-import { loadPostgresConfig } from "./postgres/runtime.mjs";
+import { loadPostgresAppConfig } from "./postgres/runtime.mjs";
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const PROVIDER = /^[a-z][a-z0-9._-]{0,63}$/;
@@ -94,7 +94,7 @@ function parseArguments(argv) {
 function loadDatabaseConfig(env) {
   if (!env || typeof env.AGENTPASS_DATABASE_URL !== "string" || env.AGENTPASS_DATABASE_URL.length === 0) throw new IdentityBindError("database_config_invalid");
   try {
-    return loadPostgresConfig(env);
+    return loadPostgresAppConfig(env);
   } catch (error) {
     throw new IdentityBindError("database_config_invalid", error);
   }

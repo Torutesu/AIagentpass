@@ -1,7 +1,7 @@
 # AgentPass execution plan
 
 Status: active
-Baseline commit: `fa8f87e`
+Baseline commit: `6b2f7f1`
 Branch: `codex/agent-platform`
 Updated: 2026-08-15
 
@@ -11,7 +11,8 @@ This document turns `IMPLEMENTATION_ROADMAP.md` into an ordered implementation b
 
 Completed at the baseline:
 
-- PostgreSQL migrations through 0055, including server-side Platform Session bootstrap.
+- PostgreSQL migrations through 0056, including server-side Platform Session
+  bootstrap and atomic identity/session epoch invalidation.
 - Frozen Platform v1 challenge/assertion/revoke contract and browser-safe public promotion intent.
 - Hosted composition of Platform Session bootstrap, WebAuthn ceremony, repository, HTTP boundary, and readiness.
 - Atomic PostgreSQL adapter that consumes a Platform authorization proof and reserves a promotion in one transaction.
@@ -28,12 +29,17 @@ Completed at the baseline:
 - Frozen hosted/evaluation/development route-authority matrix, synchronized
   Platform OpenAPI/schema/fixture/digest validation, downgrade guards, and a
   threat-to-test/external-evidence ledger.
+- Frozen Hosted GitHub identity/first-organization/WebAuthn bootstrap v1
+  contract with a dedicated validator and CI gate.
+- One generated PostgreSQL schema-head authority consumed by readiness,
+  authority manifests, privilege qualification, and evidence writers.
 
 Not completed at the baseline:
 
-- The PostgreSQL 17 qualification implementation is complete, but a successful
-  external CI artifact for the current immutable candidate has not yet been
-  retained as release evidence.
+- The previous PostgreSQL 16/17 CI run exposed excessive app-role DML on
+  `platform_*` tables. The role reconciliation is fixed locally and the
+  privilege checker now emits safe failed-check names, but a successful
+  external artifact for the new immutable candidate is not yet retained.
 - Console onboarding, managed infrastructure, physical-Mac qualification, notarized distribution, independent review, and production deployment remain open.
 
 The immediate release blocker is now real PostgreSQL race, rollback, tenant,
@@ -506,6 +512,11 @@ topology artifacts remain release gates rather than local-test claims.
 
 ### Slice S3 — identity and managed PostgreSQL in parallel
 
+Status: first foundation increment implemented locally on 2026-08-15. Migration
+0056, schema-head derivation, Hosted identity/bootstrap v1 contract, CI contract
+gate, and focused tests are green. Real PostgreSQL application/race tests for
+0056 and the 0057 Hosted bootstrap implementation remain next.
+
 Identity lane:
 
 1. Freeze the hosted identity provider and first-organization bootstrap flow.
@@ -582,3 +593,118 @@ has no primary UI and no reusable secret appears in browser storage or DOM.
 Final completion means S0–S6 and release Gates A–E pass on the same source
 commit, schema set, migration checksums, signer key metadata, and artifact
 digests. Passing local mocks alone never satisfies this definition.
+
+## 18. Detailed implementation sequence after the S3 foundation push
+
+This is the ordered backlog for the next implementation run. A pull request may
+contain multiple steps, but each gate must remain independently testable and
+revertible.
+
+### P1 — qualify and stabilize migration 0056
+
+1. Apply 0001–0056 on clean PostgreSQL 16 and 17 databases, then upgrade seeded
+   0024, 0025, 0052, 0053, 0054, and 0055 databases to head.
+2. Add real-DB tests for role downgrade/removal, membership deletion, Human and
+   Platform credential revoke, owner-recovery transitions, and organization
+   revocation. Assert epoch advancement, session/recent-auth/challenge revoke,
+   capability revoke, tenant isolation, and transaction rollback atomically.
+3. Test concurrent invalidations in the documented advisory-lock order and
+   prove no deadlock, lost increment, cross-tenant mutation, or caller timestamp
+   authority.
+4. Re-run reconciled app/signer/migrator/backup role checks. Retain PostgreSQL
+   version, source SHA, migration checksums, failed-check-free privilege report,
+   and sanitized race results as CI artifacts.
+
+Gate: PostgreSQL 16/17 qualification and the main CI job pass for one SHA; no
+0056 runtime route is enabled before this evidence exists.
+
+### P2 — implement migration 0057 and Hosted identity authority
+
+1. Add durable OAuth attempts containing only hashed state/code selectors,
+   PKCE binding metadata, exact redirect binding, expiry, consume state, and
+   bounded failure counters. Never persist or log the GitHub access token.
+2. Add bootstrap attempts, first-organization idempotency ledger, CSRF hash,
+   state/version, server-derived member/organization bindings, and a one-use
+   WebAuthn registration challenge binding.
+3. Implement the GitHub adapter: authorization redirect, callback state/PKCE
+   verification, server-side code exchange, server-side `/user` lookup, numeric
+   subject normalization, timeout/rate-limit handling, and stable redacted
+   errors. Keep the provider behind a narrow testable interface.
+4. Implement one PostgreSQL transaction for immutable upstream identity bind,
+   member creation/reuse, zero-membership proof, first organization plus owner
+   membership, and exact idempotent replay. Revoked membership history must
+   return `no_membership`, not create a new owner organization.
+5. Implement bootstrap status, WebAuthn options/verify, bootstrap-cookie rotation,
+   ordinary Human Session issuance only after verified WebAuthn, and terminal
+   attempt cleanup.
+6. Add HTTP/OpenAPI/schema/catalog fixtures and negative tests for caller role,
+   member/org injection, OAuth replay, wrong redirect/state/PKCE, duplicate
+   callback, cross-attempt WebAuthn, CSRF/origin, stale epoch, and concurrency.
+
+Gate: the six frozen routes match the v1 contract exactly; no ChatGPT ambient
+identity or legacy signed-console assertion is accepted as Hosted authority.
+
+### P3 — Organization, role, session, and WebAuthn completion
+
+1. Move owner/admin/auditor/viewer authorization decisions into exact
+   PostgreSQL-backed service operations with a deny-by-default matrix.
+2. Complete credential authenticate/rename/revoke, clone/sign-count handling,
+   last-usable-credential protection, recovery re-enrollment, session listing,
+   self/admin revoke, and operation-bound recent authentication.
+3. Add immutable, tenant-bound audit events for organization, membership,
+   invitation, credential, session, recovery, Platform assignment, and policy
+   changes. Every authority reduction invokes 0056 in the same transaction.
+4. Add two-connection race tests for last-owner, last-credential, invitation
+   acceptance, role downgrade, session revoke, and recovery activation.
+
+Gate: all caller-supplied authority identifiers are ignored or rejected, stale
+requests fail, and every high-risk mutation has correlated audit evidence.
+
+### P4 — production Console and browser onboarding
+
+1. Generate typed clients from frozen OpenAPI and introduce one BFF/session
+   boundary; remove sample/local production state.
+2. Build resumable pages for GitHub sign-in, organization creation, WebAuthn,
+   device enrollment, helper handoff, Agent Session scope/TTL, Claude Code and
+   Cursor setup, and signed-commit verification.
+3. Complete Dashboard, Devices, Agent Setup, Activity, and Security for loading,
+   empty, stale, revoked, unauthorized, retryable, terminal, and recovery states.
+4. Run deployed-like Playwright tests for all roles, keyboard/screen-reader use,
+   responsive layouts, CSRF/origin/cross-tenant denial, and browser storage/DOM/
+   URL/network-log secret scans.
+
+Gate: normal onboarding is browser-first; the native component is a thin helper,
+not a required desktop UI, and no reusable secret is exposed to the browser.
+
+### P5 — Device API, helper, and cloud signer
+
+1. Close durable enrollment/possession, signed bundle, monotonic ACK, reconnect,
+   wake, revoke propagation, and offline/restart state machines.
+2. Freeze peer-authenticated local protocol and implement Secure Enclave/TPM
+   non-exportable key generation/signing, lifecycle, preserve-by-default
+   uninstall, and separately confirmed purge.
+3. Bind each Agent Session to device, agent, process evidence, repository,
+   worktree, branch, operation, TTL, and signature count; revalidate immediately
+   before signing.
+4. Implement Claude Code and Cursor adapters without secrets in argv, env,
+   stdin, config, repository, or logs.
+5. Productionize all eight purpose-separated KMS/HSM signers with exact IAM,
+   lifecycle fencing, dual-read rotation, outage/throttle/uncertain-result
+   convergence, readiness, and safe receipts.
+
+Gate: each adapter performs two unattended verified commits; revoke blocks the
+third within the measured bound; cloud signer uncertainty never double-signs.
+
+### P6 — release evidence and production rollout
+
+1. Run the full journey against managed PostgreSQL, HTTPS Console/API, sandbox
+   KMS/HSM, real browsers, the shipped helper, and each claimed physical Mac.
+2. Complete dependency/SBOM, parser fuzzing, secret/log/trace review, IAM/TLS/
+   backup review, independent security review, and finding closure.
+3. Produce universal Developer ID signed/notarized packages and verify clean
+   install, upgrade, rollback, uninstall-preserve, reinstall, and purge.
+4. Deploy immutable artifacts through migration gate, canary, readiness, drain,
+   rollback, alerts, PITR restore drill, incident drill, and retained provenance.
+
+Gate: release Gates A–E pass on the exact same source SHA, schema checksums,
+signer metadata, package digests, and deployed artifact digests.

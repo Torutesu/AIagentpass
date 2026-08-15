@@ -7,6 +7,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { canonicalJson } from "../../packages/protocol/src/index.mjs";
+import { derivePostgresSchemaHead, POSTGRES_SCHEMA_HEAD } from "../../apps/cloud-api/src/postgres/schema-head.mjs";
 
 const MAX_BYTES = 16 * 1024;
 const NOFOLLOW = fs.constants.O_NOFOLLOW ?? 0;
@@ -107,9 +108,9 @@ export function normalizeProviderOperationQualificationEvidence(value, {
   if (!plainObject(value) || !sameArray(Object.keys(value).sort(), TOP_LEVEL_KEYS)) fail("invalid_evidence");
   if (value.version !== 1 || value.kind !== "agentpass-provider-operation-qualification"
     || value.workflow !== "CI/postgres-integration" || value.outcome !== "passed"
-    || !Number.isSafeInteger(value.migration_version) || value.migration_version < 42 || value.migration_version > 9_999
+    || !Number.isSafeInteger(value.migration_version) || value.migration_version < 1 || value.migration_version > 9_999
     || (expectedMigrationVersion !== undefined && value.migration_version !== expectedMigrationVersion)
-    || !Number.isSafeInteger(value.catalog_entries) || value.catalog_entries < 129 || value.catalog_entries > 10_000
+    || !Number.isSafeInteger(value.catalog_entries) || value.catalog_entries < 1 || value.catalog_entries > 10_000
     || (expectedCatalogEntries !== undefined && value.catalog_entries !== expectedCatalogEntries)
     || typeof value.source_commit !== "string" || !SOURCE_COMMIT.test(value.source_commit)
     || (expectedSourceCommit !== undefined && value.source_commit !== expectedSourceCommit)
@@ -210,16 +211,13 @@ function positiveInteger(value) {
 }
 
 function catalogMetadata(value) {
-  if (!plainObject(value) || !Array.isArray(value.entries) || value.entries.length < 129 || value.entries.length > 10_000) {
+  if (!plainObject(value) || !Array.isArray(value.entries) || value.entries.length < 1 || value.entries.length > 10_000) {
     fail("invalid_catalog");
   }
-  const migrations = value.entries.filter((entry) => plainObject(entry) && entry.kind === "postgres-migration");
-  if (migrations.length < 42 || migrations.some((entry) => !Number.isSafeInteger(entry.version) || entry.version < 1 || entry.version > 9_999)) {
-    fail("invalid_catalog");
-  }
-  const migrationVersion = Math.max(...migrations.map((entry) => entry.version));
-  if (migrationVersion < 42) fail("invalid_catalog");
-  return Object.freeze({ entries: value.entries.length, migrationVersion });
+  let head;
+  try { head = derivePostgresSchemaHead({ catalog: value, migrations: POSTGRES_SCHEMA_HEAD.migrations }); }
+  catch { fail("invalid_catalog"); }
+  return Object.freeze({ entries: value.entries.length, migrationVersion: head.version, schemaHead: head });
 }
 
 function sha256(bytes) { return crypto.createHash("sha256").update(bytes).digest("hex"); }

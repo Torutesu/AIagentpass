@@ -170,6 +170,7 @@ test('app is DML-only, migrator owns migration authority, and backup is read-onl
     'agentpass_managed_signer_lifecycle_operation_prune(text,timestamptz,integer)'
   ]) assert.equal(sql.includes(signature), true);
   assert.doesNotMatch(sql, /GRANT EXECUTE ON FUNCTION public\.agentpass_quarantine_expired_managed_signer_provider_operations/u);
+  assert.match(sql, /left\(c\.relname, length\('platform_'\)\) = 'platform_'/u);
   assert.match(sql, /GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO agentpass_app/);
   assert.match(sql, /GRANT USAGE, CREATE ON SCHEMA public TO agentpass_migrator/);
   assert.match(sql, /OWNER TO agentpass_migrator/);
@@ -195,7 +196,9 @@ test('checker reads the URL from the environment, enforces verify-full, and meas
   assert.match(checker, /agentpass_signer/);
   assert.match(checker, /managed_signer_provider_operations/);
   assert.match(checker, /migration_head_ok/u);
-  assert.match(checker, /count\(\*\) = 55 AND min\(version\) = 1 AND max\(version\) = 55/u);
+  assert.match(checker, /POSTGRES_SCHEMA_HEAD/u);
+  assert.match(checker, /const EXPECTED_MIGRATION_VERSION = POSTGRES_SCHEMA_HEAD\.version/u);
+  assert.match(checker, /count\(\*\) = \$\{EXPECTED_MIGRATION_VERSION\} AND min\(version\) = 1 AND max\(version\) = \$\{EXPECTED_MIGRATION_VERSION\}/u);
   assert.match(checker, /signer_function_allowlist/u);
   assert.match(checker, /app_function_allowlist/u);
   assert.match(checker, /to_regprocedure\('public\.' \|\| routine_signature\) AS routine_oid/u);
@@ -209,6 +212,8 @@ test('checker reads the URL from the environment, enforces verify-full, and meas
   }
   assert.match(checker, /a\.routine_oid = functions\.oid/u);
   assert.match(checker, /createHash\('sha256'\)/);
+  assert.match(checker, /failed_checks=/u);
+  assert.match(checker, /REPORT_CHECKS\.filter/u);
   assert.match(checker, /AGENTPASS_PRIVILEGE_EVIDENCE_OUTPUT/u);
   assert.match(checker, /writeFileSync\(evidenceOutput/u);
   assert.match(checker, /spawnSync\(\s*'psql'/);

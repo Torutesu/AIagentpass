@@ -47,6 +47,7 @@
     "test:postgres:platform-authorization": "node --test --test-concurrency=1 apps/cloud-api/test/postgres/platform-authorization.integration.test.mjs apps/cloud-api/test/postgres/platform-authorization-failure-qualification.integration.test.mjs apps/cloud-api/test/postgres/least-privilege-role.integration.test.mjs",
     "postgres:platform-authorization-evidence": "node scripts/postgres/platform-authorization-qualification-evidence.mjs",
     "contracts:validate:platform": "node scripts/validate-platform-contract-sync.mjs",
+    "contracts:validate:hosted-identity-bootstrap": "node scripts/validate-hosted-identity-bootstrap.mjs",
     "test:w16": "node scripts/owner-recovery/validate-w16-alerts.mjs \"$PWD/ops/observability/owner-recovery-alerts.v1.json\" && node --test scripts/owner-recovery/validate-w16-alerts.test.mjs scripts/owner-recovery/verify-w16-drill-evidence.test.mjs",
     "test:p0b:live": "node scripts/p0b/run-live-process.mjs",
     "release:validate": "node scripts/release/validate-version.mjs",

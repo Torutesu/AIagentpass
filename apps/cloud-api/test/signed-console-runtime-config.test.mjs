@@ -216,6 +216,17 @@ function fakePostgresRuntime() {
       async markPlatformPromotionUncertain() { return { state: "uncertain" }; },
       async getCommittedPlatformPromotion() { return null; }
     },
+    createPlatformAuthorizationRepository() {
+      return {
+        forAuthorization() {
+          return {
+            async reservePlatformPromotion() { return { state: "in_progress" }; },
+            async commitPlatformPromotion() { return { state: "committed" }; },
+            async markPlatformPromotionUncertain() { return { state: "uncertain" }; }
+          };
+        }
+      };
+    },
     platformOperatorAssignmentRepository: { async findActivePlatformOperatorAssignment() { return null; } },
     platformSessionBootstrapRepository: { async resolvePlatformSessionBootstrap() { return null; } },
     platformSessionRepository: {

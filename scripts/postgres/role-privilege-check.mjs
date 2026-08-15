@@ -2,11 +2,24 @@ import { createHash } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
 import { writeFileSync } from 'node:fs';
 import path from 'node:path';
+import { POSTGRES_SCHEMA_HEAD } from '../../apps/cloud-api/src/postgres/schema-head.mjs';
 
 const DATABASE_URL_ENV = 'AGENTPASS_DATABASE_URL';
 const EVIDENCE_OUTPUT_ENV = 'AGENTPASS_PRIVILEGE_EVIDENCE_OUTPUT';
 const SCHEMA = 'public';
+const EXPECTED_MIGRATION_VERSION = POSTGRES_SCHEMA_HEAD.version;
 const ROLES = ['agentpass_app', 'agentpass_signer', 'agentpass_migrator', 'agentpass_backup'];
+const REPORT_CHECKS = [
+  'role_attributes_ok',
+  'role_memberships_ok',
+  'schema_privileges_ok',
+  'database_privileges_ok',
+  'migration_head_ok',
+  'table_privileges_ok',
+  'sequence_privileges_ok',
+  'function_privileges_ok',
+  'default_privileges_ok',
+];
 
 function fail(message) {
   process.stderr.write(`${message}\n`);
@@ -171,7 +184,7 @@ database_privileges_ok AS (
 ),
 migration_head_ok AS (
   SELECT to_regclass('public.schema_migrations') IS NOT NULL
-    AND (SELECT count(*) = 55 AND min(version) = 1 AND max(version) = 55
+    AND (SELECT count(*) = ${EXPECTED_MIGRATION_VERSION} AND min(version) = 1 AND max(version) = ${EXPECTED_MIGRATION_VERSION}
          FROM public.schema_migrations) AS value
 ),
 table_privileges_ok AS (
@@ -325,7 +338,11 @@ SELECT json_build_object(
               .update(JSON.stringify(report))
               .digest('hex');
             if (report.ok !== true) {
-              fail(`database privilege contract failed: evidence=${evidence}`);
+              const failedChecks = [
+                ...(report.current_user === 'agentpass_migrator' ? [] : ['current_user']),
+                ...REPORT_CHECKS.filter((name) => report[name] !== true),
+              ];
+              fail(`database privilege contract failed: failed_checks=${failedChecks.join(',') || 'unknown'} evidence=${evidence}`);
             } else {
               const evidenceOutput = process.env[EVIDENCE_OUTPUT_ENV];
               if (evidenceOutput !== undefined) {

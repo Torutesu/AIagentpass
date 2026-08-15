@@ -40,6 +40,7 @@ import {
   createOperationalHealth,
   createOperationalMetrics
 } from "./operational-health.mjs";
+import { POSTGRES_SCHEMA_HEAD } from "./schema-head.mjs";
 
 export async function createPostgresRuntime({ env = process.env, PoolClass = Pool, MigrationPoolClass = PoolClass, SignerPoolClass = PoolClass, applicationVersion = "unknown", refreshNonceCodec, resolveProcessBindingPolicy, ownerRecoveryPublisher, platformPromotionVerifyEvidence, platformPromotionLifecycle = undefined, ownerRecoveryOutboxAutoStart = true, ownerRecoveryOutboxWorkerOptions = {}, sharedControlMaintenanceAutoStart = true, sharedControlMaintenanceWorkerOptions = {}, managedSignerProviderOperationMaintenanceAutoStart = true, managedSignerProviderOperationMaintenanceWorkerOptions = {} } = {}) {
   if (resolveProcessBindingPolicy !== undefined && typeof resolveProcessBindingPolicy !== "function") throw new TypeError("resolveProcessBindingPolicy must be a function");
@@ -154,7 +155,7 @@ export async function createPostgresRuntime({ env = process.env, PoolClass = Poo
   const operationalHealth = createOperationalHealth({
     pool,
     maxConnections: config.maxConnections,
-    expectedSchemaVersion: migrations.at(-1).version,
+    schemaHead: POSTGRES_SCHEMA_HEAD,
     migrationStatus: () => migrationRunner.status(),
     metrics: operationalMetrics,
     drainController,
@@ -442,18 +443,26 @@ function transactionBoundClient(tx) {
 }
 
 export function loadPostgresConfig(env = {}) {
-  const app = postgresRoleUrl(env.AGENTPASS_DATABASE_URL, "AGENTPASS_DATABASE_URL");
+  const appConfig = loadPostgresAppConfig(env);
+  const app = new URL(appConfig.connectionString);
   const migration = postgresRoleUrl(env.AGENTPASS_MIGRATION_DATABASE_URL, "AGENTPASS_MIGRATION_DATABASE_URL");
   const signer = postgresRoleUrl(env.AGENTPASS_SIGNER_DATABASE_URL, "AGENTPASS_SIGNER_DATABASE_URL");
   const appTarget = postgresTarget(app);
   if (postgresTarget(migration) !== appTarget || postgresTarget(signer) !== appTarget) throw new TypeError("PostgreSQL role databases must target the same authority database");
   if (new Set([app.username, migration.username, signer.username]).size !== 3) throw new TypeError("PostgreSQL app, migration, and signer roles must be distinct");
   return Object.freeze({
-    connectionString: app.toString(),
+    ...appConfig,
     migrationConnectionString: migration.toString(),
     signerConnectionString: signer.toString(),
+    signerMaxConnections: integer(env.AGENTPASS_SIGNER_DATABASE_MAX_CONNECTIONS ?? "4", 2, 50)
+  });
+}
+
+export function loadPostgresAppConfig(env = {}) {
+  const app = postgresRoleUrl(env.AGENTPASS_DATABASE_URL, "AGENTPASS_DATABASE_URL");
+  return Object.freeze({
+    connectionString: app.toString(),
     maxConnections: integer(env.AGENTPASS_DATABASE_MAX_CONNECTIONS ?? "10", 2, 100),
-    signerMaxConnections: integer(env.AGENTPASS_SIGNER_DATABASE_MAX_CONNECTIONS ?? "4", 2, 50),
     connectionTimeoutMs: integer(env.AGENTPASS_DATABASE_CONNECT_TIMEOUT_MS ?? "5000", 250, 30_000),
     idleTimeoutMs: integer(env.AGENTPASS_DATABASE_IDLE_TIMEOUT_MS ?? "30000", 1_000, 300_000),
     statementTimeoutMs: integer(env.AGENTPASS_DATABASE_STATEMENT_TIMEOUT_MS ?? "8000", 250, 60_000),

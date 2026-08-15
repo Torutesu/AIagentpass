@@ -1,5 +1,9 @@
+import { POSTGRES_SCHEMA_HEAD, POSTGRES_SCHEMA_HEAD_SOURCE_VERSION } from "./schema-head.mjs";
+
 export const OPERATIONAL_HEALTH_VERSION = 1;
-export const EXPECTED_POSTGRES_SCHEMA_VERSION = 41;
+// Backwards-compatible export for adapters; the value is derived from the
+// catalog/files source at module load and is never maintained independently.
+export const EXPECTED_POSTGRES_SCHEMA_VERSION = POSTGRES_SCHEMA_HEAD.version;
 
 // Recovery operations are deliberately a closed set.  These names are also
 // the admission-control names used by human-auth/rate-limit.mjs; keeping the
@@ -398,7 +402,8 @@ export function createDrainController({
 export function createOperationalHealth({
   pool,
   migrationStatus,
-  expectedSchemaVersion = EXPECTED_POSTGRES_SCHEMA_VERSION,
+  schemaHead = POSTGRES_SCHEMA_HEAD,
+  expectedSchemaVersion = schemaHead?.version,
   maxConnections,
   metrics = createOperationalMetrics(),
   drainController,
@@ -415,7 +420,11 @@ export function createOperationalHealth({
 } = {}) {
   if (!pool || typeof pool !== "object") throw invalidOperationalInput();
   if (typeof migrationStatus !== "function" || typeof probe !== "function") throw invalidOperationalInput();
-  if (!Number.isSafeInteger(expectedSchemaVersion) || expectedSchemaVersion < 1) throw invalidOperationalInput();
+  if (!schemaHead || typeof schemaHead !== "object" || Array.isArray(schemaHead)
+    || schemaHead.schema_version !== POSTGRES_SCHEMA_HEAD_SOURCE_VERSION
+    || !Number.isSafeInteger(schemaHead.version) || schemaHead.version < 1
+    || !Number.isSafeInteger(schemaHead.migration_count) || schemaHead.migration_count !== schemaHead.version
+    || !Number.isSafeInteger(expectedSchemaVersion) || expectedSchemaVersion !== schemaHead.version) throw invalidOperationalInput();
   if (!metrics || typeof metrics.snapshot !== "function") throw invalidOperationalInput();
   if (!drainController || typeof drainController.snapshot !== "function") throw invalidOperationalInput();
   if (outboxStatus !== undefined && typeof outboxStatus !== "function") throw invalidOperationalInput();

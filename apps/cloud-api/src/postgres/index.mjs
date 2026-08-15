@@ -14,6 +14,17 @@ export {
 } from "./migration-runner.mjs";
 
 export {
+  POSTGRES_SCHEMA_HEAD_SOURCE_VERSION,
+  PostgresSchemaHeadError,
+  POSTGRES_SCHEMA_HEAD,
+  defaultPostgresCatalogFile,
+  defaultPostgresMigrationDirectory,
+  derivePostgresSchemaHead,
+  readPostgresSchemaHead,
+  readPostgresSchemaHeadSync
+} from "./schema-head.mjs";
+
+export {
   PostgresRepositoryError,
   TenantScopeError,
   assertTenantId,

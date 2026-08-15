@@ -7,6 +7,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { canonicalJson } from "../../packages/protocol/src/index.mjs";
+import { derivePostgresSchemaHead, POSTGRES_SCHEMA_HEAD } from "../../apps/cloud-api/src/postgres/schema-head.mjs";
 
 const MAX_BYTES = 24 * 1024;
 const NOFOLLOW = fs.constants.O_NOFOLLOW ?? 0;
@@ -14,8 +15,6 @@ const SOURCE_COMMIT = /^[0-9a-f]{40}$/u;
 const POSTGRES_VERSION = /^17(?:\.[0-9]+){0,2}(?:[+._~A-Za-z0-9-]*)(?: \([A-Za-z0-9.+~:_ -]{1,128}\))?$/u;
 const RUN_ID = /^[1-9][0-9]{0,31}$/u;
 const DIGEST = /^[0-9a-f]{64}$/u;
-const EXPECTED_MIGRATION_VERSION = 55;
-
 export const PLATFORM_AUTHORIZATION_QUALIFICATION_COMMAND = [
   "node --test --test-concurrency=1",
   "apps/cloud-api/test/postgres/platform-authorization.integration.test.mjs",
@@ -95,8 +94,8 @@ export function normalizePlatformAuthorizationQualificationEvidence(value, expec
   if (!plainObject(value) || !sameArray(Object.keys(value).sort(), TOP_LEVEL_KEYS)
     || value.version !== 1 || value.kind !== "agentpass-platform-authorization-qualification"
     || value.workflow !== "CI/platform-authorization-postgres17" || value.outcome !== "passed"
-    || value.migration_version !== EXPECTED_MIGRATION_VERSION
-    || expectation.expectedMigrationVersion !== undefined && value.migration_version !== expectation.expectedMigrationVersion
+    || !Number.isSafeInteger(value.migration_version) || value.migration_version < 1
+    || value.migration_version !== (expectation.expectedMigrationVersion ?? POSTGRES_SCHEMA_HEAD.version)
     || !Number.isSafeInteger(value.catalog_entries) || value.catalog_entries < 165 || value.catalog_entries > 10_000
     || expectation.expectedCatalogEntries !== undefined && value.catalog_entries !== expectation.expectedCatalogEntries
     || typeof value.source_commit !== "string" || !SOURCE_COMMIT.test(value.source_commit)
@@ -191,11 +190,11 @@ function parseCatalog(bytes) {
   let value;
   try { value = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes)); }
   catch { fail("invalid_catalog"); }
-  if (!plainObject(value) || !Array.isArray(value.entries) || value.entries.length < 165) fail("invalid_catalog");
-  const migrations = value.entries.filter((entry) => plainObject(entry) && entry.kind === "postgres-migration");
-  const migrationVersion = Math.max(...migrations.map((entry) => entry.version));
-  if (migrations.length !== EXPECTED_MIGRATION_VERSION || migrationVersion !== EXPECTED_MIGRATION_VERSION) fail("invalid_catalog");
-  return Object.freeze({ entries: value.entries.length, migrationVersion });
+  if (!plainObject(value) || !Array.isArray(value.entries) || value.entries.length < 1) fail("invalid_catalog");
+  let head;
+  try { head = derivePostgresSchemaHead({ catalog: value, migrations: POSTGRES_SCHEMA_HEAD.migrations }); }
+  catch { fail("invalid_catalog"); }
+  return Object.freeze({ entries: value.entries.length, migrationVersion: head.version, schemaHead: head });
 }
 
 function expected(catalogState, catalogBytes, sourceCommit) {
