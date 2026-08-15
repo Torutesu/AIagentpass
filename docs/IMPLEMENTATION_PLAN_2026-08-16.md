@@ -2,7 +2,7 @@
 
 Status: active
 
-Planning baseline: `codex/agent-platform` at `4ee0a45`
+Planning baseline: `codex/agent-platform` at `6601c31`
 
 This document converts the v1 architecture into the remaining implementation
 and qualification gates. [`V1_EXECUTION_PLAN.md`](./V1_EXECUTION_PLAN.md)
@@ -36,44 +36,50 @@ signed/notarized artifact, staging drills, and independent security review.
 
 ### 1.1 Live execution checkpoint
 
-The latest completed diagnostic runs and the source at `4ee0a45` establish the
+The latest completed diagnostic runs and the source at `6601c31` establish the
 following current state:
 
 - PostgreSQL 16 authority qualification, PostgreSQL 17 authority
-  qualification, the full PostgreSQL integration lane, and the production-built
-  browser E2E lane are green;
+  qualification, and the full PostgreSQL integration lane were green in the
+  latest observed completed diagnostic run;
 - organization invitation acceptance now returns the frozen
   `{request_id, invitation, member}` contract, converges under concurrent
   PostgreSQL acceptance, and has response-loss browser coverage;
 - Human Session bootstrap is serialized in the live browser harness and retries
   only bounded transient `502` responses; authentication, authorization, and
   mutation failures are never retried;
-- P0-B has advanced through the earlier timestamp, rate-limit, bootstrap, and
-  signed-identity replay failures. The first remaining proven failure at
-  `e0af9f2` is `owner_reg_session_revoked_rotated`: concurrent Console/BFF
-  bootstrap paths rotate the Owner session while the first passkey ceremony is
-  still bound to it;
-- `4ee0a45` grants the application role only the missing
-  `agentpass_valid_webauthn_transports(text[])` CHECK-constraint function. The
-  allowlist, runtime role SQL, and privilege contract agree, and the focused
-  WebAuthn/role suite passes 45 tests;
-- registration dependency failures still need to preserve their storage/
-  availability classification through service and HTTP mapping; they must not
-  be flattened into a user-correctable `422` verification response;
-- the Human OpenAPI contract still needs exact registration request bodies and
-  the implemented `201` verification response;
+- one injected, single-flight Console session authority now owns bootstrap,
+  generation invalidation, rotation adoption, and conditional clearing for the
+  shell, organization client, security client, and both panels. A stale
+  bootstrap cannot overwrite or clear a newer session generation;
+- registration ceremony storage failures preserve their typed dependency
+  classification through service and HTTP mapping and return a stable,
+  secret-free `503` response rather than a user-correctable `422`;
+- the Human OpenAPI contract now freezes strict registration options/verify
+  bodies, exact success DTOs, the implemented `201`, CSRF shape, recent-auth
+  preconditions, and the complete error surface;
+- P0-B now waits for the Console-owned `/api/auth/session/resume` rotation after
+  navigation and adopts the returned session selector/CSRF before fixture-owned
+  WebAuthn registration. This closes the race that first appeared as
+  `owner_reg_session_revoked_rotated` and then as
+  `owner_registration_options_409`; protected qualification of this exact fix
+  remains pending;
+- the PostgreSQL application role includes only the required WebAuthn transport
+  validation function grant, and the role/constraint contract remains aligned;
 - invitation reissue is source-complete through PostgreSQL, Cloud HTTP,
   OpenAPI, and Console BFF at `ca19091`; the Console interaction and protected
   role/browser matrix remain open;
-- the root/native lane must reach terminal success on the same final source SHA
-  after the new P0-B run succeeds. A local test, partial run, replaced run, or
+- the last observed root lane lint defect is fixed. The prior browser lane also
+  exposed one CLI handoff failure; it must be reproduced on the current head
+  before any production code is changed. All six lanes must reach terminal
+  success on the same source SHA. A local test, partial run, replaced run, or
   cancelled diagnostic run is not N1 evidence.
 
 The next implementation batches are intentionally narrow and ordered:
 
 | Batch | Merge-sized work | Tests and evidence | Completion condition |
 | --- | --- | --- | --- |
-| Q1 | Replace the independent Console session caches with one injected, single-flight session authority shared by the shell, organization client, security client, and panels. Preserve one cookie/CSRF generation across a WebAuthn ceremony and invalidate it only on explicit auth failure or server rotation. Then repair the registration dependency error mapping and OpenAPI mismatch. | Concurrent bootstrap unit tests, session-rotation/revocation negatives, focused Human API tests, contract validation, live trusted-TLS PostgreSQL/Cloud/Console/Chromium run, artifact secret scan. | P0-B completes every Owner/Admin/Auditor/Viewer scenario and emits a verified source-bound report; registration dependency outages return stable `503`, and OpenAPI matches runtime bytes/statuses. |
+| Q1 | Source-complete at `6601c31`: shared Console session authority, typed registration dependency errors, exact registration OpenAPI, and P0-B rotation adoption. | Concurrent bootstrap unit tests, session-rotation/revocation negatives, focused Human API tests, contract validation, live trusted-TLS PostgreSQL/Cloud/Console/Chromium run, artifact secret scan. | P0-B completes every Owner/Admin/Auditor/Viewer scenario and emits a verified source-bound report for `6601c31` or its minimal diagnostic successor. |
 | Q2 | Rerun all six CI jobs without cancellation or replacement commits. Remove any newly exposed timing, lifecycle, native, or artifact-hygiene defect at its owning boundary. | Root/Console/native, browser, P0-B, PostgreSQL integration, PostgreSQL 16 and PostgreSQL 17 on one SHA. | One terminal all-green run is retained; N1 becomes `qualified`. |
 | H1 | Complete organization administration: invitation resend/revoke, role change/removal with `If-Match`, last-owner protection, authoritative response-loss reconciliation, and stable Japanese remediation. | Real PostgreSQL contention/replay/cross-tenant tests plus Owner/Admin/Auditor/Viewer Playwright matrix. | Every organization mutation converges to committed state without blind replay or fixture fallback. |
 | H2 | Complete passkey and Human Session lifecycle: add/rename/revoke, final-auth-path guard, current/other/all-other session revoke, epoch invalidation, explicit reauthentication. | Virtual WebAuthn, stale/replayed recent-auth, expiry, self-revoke, clone/sign-count, keyboard and secret-scan tests. | A non-engineer can recover from every expected conflict or expiry state without CLI/operator credentials. |
@@ -126,47 +132,42 @@ authority, and promotion remain serialized. Protocol/schema, migrations,
 signing domains, XPC selectors, entitlements, code identities, and evidence
 schemas each have one integration owner.
 
-### 1.2 Immediate merge queue
+### 3.1 Current phase order
 
 The next changes are intentionally small enough to diagnose and revert
 independently. Do not combine a CI-diagnostic repair with a new product surface.
 
-1. **Q1.1 shared Console session authority**
-   - extract a typed session authority with `get`, single-flight `bootstrap`,
-     `invalidate`, and server-rotation adoption;
-   - inject the same instance into `AgentPassConsole`, organization and security
-     clients, `OrganizationPanel`, and `SecurityPanel`;
-   - prove concurrent consumers perform one bootstrap and that a stale response
-     cannot overwrite a newer generation;
-   - rerun P0-B and retain the first source-bound successful report.
-2. **Q1.2 registration failure semantics and contract closure**
-   - preserve PostgreSQL ceremony/storage failure types through registration
-     service and map them to stable, secret-free `503` responses;
-   - add exact OpenAPI request bodies for options/verify and document the
-     implemented `201` credential-creation response;
-   - run generated-schema, HTTP negative, replay, and real-role credential
-     insertion tests.
-3. **Q2 one-SHA qualification**
+1. **Q1.3 protected P0-B qualification**
+   - run the exact `6601c31` source through trusted-TLS PostgreSQL, production
+     Cloud/Console builds, and Chromium;
+   - verify that bootstrap adopts the application-owned rotated session before
+     registration, all role scenarios complete, and retained artifacts are
+     secret-free and source-bound;
+   - if the run advances and fails, change only the boundary identified by its
+     fixed safe marker, add one focused regression, and rerun P0-B.
+2. **Q2 browser and one-SHA qualification**
+   - reproduce the prior CLI handoff browser failure on the current head; fix it
+     only if reproducible, without weakening secret scanners or response DTOs;
    - stop diagnostic commits and run all six jobs on one exact head: root test,
      browser E2E, P0-B, PostgreSQL integration, PostgreSQL 16, PostgreSQL 17;
    - accept the baseline only when every job is terminal green and every
      retained report identifies the same source SHA.
-4. **N2 Human/organization completion**
+3. **N2 Human/organization completion**
    - close invitation resend/revoke, role/removal CAS, last-owner protection,
      passkey lifecycle, session revocation, response-loss reconciliation, and
      non-engineer remediation copy;
    - qualify the real Owner/Admin/Auditor/Viewer browser matrix.
-5. **N3 + N5 parallel contract consumers**
+4. **N3 + N5 parallel contract consumers**
    - freeze and implement browser-led device onboarding and Device API/receipt/
      ACK convergence in one lane;
    - finish all eight managed-signer purposes and provider reconciliation in a
      separate lane; merge only after contract and authority reviews.
-6. **N4 agent/native closure**
+5. **N4 agent/native closure**
    - complete the sign-once XPC transaction and Claude Code lifecycle first;
      add Cursor only against the same frozen broker contract;
    - qualify process substitution, kill/restart, policy change, expiry,
      revocation, and ambiguous outcome handling on physical Macs.
-7. **N6 release and production**
+6. **N6 release and production**
    - build one Developer ID-signed/notarized/stapled PKG and distribute that
      exact digest by direct download, Homebrew bootstrap, and MDM;
    - deploy the immutable candidate to staging, run migration/restore/outage/
@@ -426,30 +427,33 @@ then N4; then final N6 qualification and promotion.
 
 ## 11. Immediate merge queue
 
-1. `test: qualify P0-B timestamp-boundary repair` — run the live
-   PostgreSQL/Cloud/Console/Chromium topology, require bootstrap success, and
-   preserve only source-bound secret-free diagnostics.
-2. `test: close one-SHA qualification` — finish PostgreSQL 16/17, PostgreSQL
+1. `test: qualify Console session-rotation repair` — run `6601c31` through the
+   live PostgreSQL/Cloud/Console/Chromium topology, require complete role and
+   WebAuthn success, and preserve only source-bound secret-free diagnostics.
+2. `fix: close CLI handoff browser regression if reproducible` — inspect the
+   current production-built browser result and repair the owning boundary only;
+   do not suppress the artifact scanner or render reusable handoff material.
+3. `test: close one-SHA qualification` — finish PostgreSQL 16/17, PostgreSQL
    integration, root/native, browser, and P0-B without replacement commits.
-3. `test: close protected console identity matrix` — organization switch,
+4. `test: close protected console identity matrix` — organization switch,
    invitation/role mutations, passkey/session lifecycle, expiry, self-logout,
    tenant substitution, and virtual-WebAuthn tests through real PostgreSQL.
-4. `feat: complete organization and identity console` — production UI states,
+5. `feat: complete organization and identity console` — production UI states,
    accessibility, Japanese errors, pagination/conflict recovery, and no fixture
    fallback.
-5. `test: qualify all hosted signer purposes` — purpose-by-purpose real-provider
+6. `test: qualify all hosted signer purposes` — purpose-by-purpose real-provider
    IAM/non-exportability, response-loss, rotation, and image/configuration scan.
-6. `feat: complete browser-led device onboarding` — complete loopback/PNA and
+7. `feat: complete browser-led device onboarding` — complete loopback/PNA and
    stdin recovery journeys, interruption matrix, authoritative receipt/ACK UI.
-7. `feat: close claude code native signing transaction` — durable sign-once,
+8. `feat: close claude code native signing transaction` — durable sign-once,
    invalidation races, installer/doctor, and two verified commits.
-8. `feat: add cursor adapter parity` — same closed adapter protocol and full
+9. `feat: add cursor adapter parity` — same closed adapter protocol and full
    negative matrix, with no new authority path.
-9. `build: publish immutable notarized candidate` — Developer ID signatures,
+10. `build: publish immutable notarized candidate` — Developer ID signatures,
    notarization/stapling, SBOM/provenance, direct download, and Homebrew.
-10. `test: qualify physical mac release candidate` — Apple silicon and Intel/T2
+11. `test: qualify physical mac release candidate` — Apple silicon and Intel/T2
    reports for the exact candidate digest.
-11. `ops: deploy staging and close production review` — restore/rollback/outage
+12. `ops: deploy staging and close production review` — restore/rollback/outage
     drills, independent review, signed promotion record, then explicit go/no-go.
 
 Each queue item is a reviewable commit or short ordered series. Every push runs
@@ -467,7 +471,7 @@ work that still needs protected infrastructure or physical hardware remains
 
 | Package | Current state | Next merge-sized deliverables | Required acceptance evidence | Unlocks |
 | --- | --- | --- | --- | --- |
-| N1 qualification closure | `source repair pushed; protected rerun open` | Verify `feba9f3` in P0-B; repair only the next proven boundary defect if exposed; rerun all six CI jobs on one head; retain clean browser/P0-B artifacts. | One terminal green run: root/Console/native, browser, P0-B, PostgreSQL integration, PostgreSQL 16, and PostgreSQL 17. | N2/N5 qualification claims |
+| N1 qualification closure | `Q1 source complete at 6601c31; protected rerun open` | Verify session-rotation adoption in P0-B; reproduce the prior CLI handoff failure; repair only a proven owning boundary; rerun all six CI jobs on one head; retain clean browser/P0-B artifacts. | One terminal green run: root/Console/native, browser, P0-B, PostgreSQL integration, PostgreSQL 16, and PostgreSQL 17. | N2/N5 qualification claims |
 | N2 organization and identity Console | `implemented, qualification open` | Finish real-process Owner/Admin/Auditor/Viewer journeys; cover invitation acceptance/resend, last-owner protection, current-session revoke, final-passkey guard, response loss, and accessibility. | Production-built Console and Cloud API against PostgreSQL; virtual WebAuthn; secret-free DOM/storage/network/artifact scan. | Non-engineer control plane |
 | N5 hosted signer | `drain closure implemented, protected evidence open` | Provision eight isolated AWS/GCP keys and identities; run exact-byte convergence, response-loss lookup, rotation, disablement, cross-purpose denial, multi-instance termination, and provider-specific cancellation tests. | Signed, source-bound AWS/GCP reports proving immutable versions, public fingerprints, non-exportability, least privilege, no fallback, bounded drain behavior, and operator-actionable uncertainty. | Hosted release candidate |
 | N3 device onboarding | `foundation implemented` | Freeze preflight/handoff DTO; implement browser-to-loopback transfer plus bounded stdin recovery; add interruption/resume state machine and verified receipt/ACK reconciliation. | Clean-machine physical Mac enrollment with restart/expiry/timeout/ambiguous-response matrix and zero secret-bearing artifacts. | Agent installation journey |
@@ -527,8 +531,8 @@ per-slice merge contract above.
 
 | ID | Deliverable | Depends on | Implementation boundary | Mandatory verification | Done when |
 | --- | --- | --- | --- | --- | --- |
-| Q1.1 | Live bootstrap qualification for `feba9f3` | none | CI harness only; no production fallback | trusted-TLS PostgreSQL, production Cloud/Console builds, Chromium, secret scan | bootstrap no longer returns BFF invalid-response and the retained report binds the exact SHA |
-| Q1.2 | First-next-failure repair, only if Q1.1 advances and fails | Q1.1 | the single owning boundary identified by a fixed marker | focused regression plus full P0-B rerun | no speculative retries, fixture bypass, or weakened decoder is introduced |
+| Q1.3 | Live session-rotation qualification for `6601c31` | none | CI harness only; no production fallback | trusted-TLS PostgreSQL, production Cloud/Console builds, Chromium, all roles, secret scan | fixture WebAuthn begins only after the Console rotation is adopted and the retained report binds the exact SHA |
+| Q1.4 | First-next-failure repair, only if Q1.3 advances and fails | Q1.3 | the single owning boundary identified by a fixed marker | focused regression plus full P0-B rerun | no speculative retries, fixture bypass, or weakened decoder is introduced |
 | Q2.1 | One-SHA six-lane qualification | Q1 | CI/workflow and evidence validators | root/native, browser, P0-B, PostgreSQL integration, PostgreSQL 16/17 | all jobs finish successfully on one unreplaced SHA |
 | H1.1 | Invitation reissue Console interaction | Q2, backend at `ca19091` | Console client/components/tests | Owner/Admin allow; Auditor/Viewer deny; recent-auth, stale version, response loss, a11y, token scan | raw token is shown exactly once and never reaches URL, storage, logs, traces, or blind replay |
 | H1.2 | Invitation revoke and acceptance reconciliation | H1.1 | Console/BFF/browser tests | expiry, accepted/revoked terminal states, concurrent acceptance, cross-tenant denial | authoritative refresh converges every ambiguous response |
@@ -554,6 +558,59 @@ Execution concurrency after Q2 is limited to three disjoint lanes: H1/H2,
 S1/S2, and D1/M1 preparation. Contract catalog changes, migrations, signing
 domains, XPC selectors, entitlements, and release identity remain serialized.
 No lane may declare another lane qualified from mocked or local-only evidence.
+
+### 12.4 Delivery sequence, parallel capacity, and effort bands
+
+The estimates below are engineering effort, not calendar promises. They exclude
+GitHub runner queue time, cloud-account approval, Apple notarization latency,
+physical hardware availability, and independent-review scheduling. A range is
+re-estimated whenever a protected test exposes a new authority-boundary defect.
+
+| Milestone | Included tickets | Parallel shape | Estimated engineering effort | Start condition | Exit condition |
+| --- | --- | --- | --- | --- | --- |
+| M0 trustworthy baseline | Q1.3, conditional Q1.4, Q2.1 | one integration owner; no feature merges | 1–4 engineer-days if no new boundary defect | current pushed head | all six CI lanes green on one SHA, retained evidence verified |
+| M1 complete human control plane | H1.1–H1.3 and H2.1–H2.3 | invitation/member and passkey/session slices may be implemented in parallel; shared Human DTO and migration changes serialize | 10–18 engineer-days | M0 qualified | full role/WebAuthn browser matrix, response-loss convergence, accessibility and secret scans pass |
+| M2 hosted authority + onboarding contract | S1.1–S1.3 in parallel with D1.1 preparation; D1 freezes after H2/S1 metadata | signer lane and device-contract lane; one contract integration owner | 12–22 engineer-days plus protected provider execution | M0 qualified; D1 freeze additionally requires H2 and S1 metadata | eight source paths reconcile exactly; onboarding contract is versioned and downgrade-closed |
+| M3 onboarding and native transaction | D2.1–D2.2 and M1.1 | loopback/Console and native persistence can proceed in parallel after D1 | 14–24 engineer-days | D1.1 frozen | interrupted enrollment converges through ACK; native sign-once never retries ambiguity |
+| M4 agent adapters and immutable Mac distribution | M1.2–M1.3, R1.1–R1.2 | Claude first, Cursor second; packaging follows broker freeze; hardware runs may execute in parallel | 15–25 engineer-days plus Apple/hardware execution | M3 qualified and signing identities available | two agents and two Mac hardware classes pass on the same notarized PKG digest |
+| M5 staging and production adjudication | O1.1–O1.2 | IaC, observability, and review preparation parallelize; migration, promotion, and go/no-go serialize | 12–20 engineer-days plus independent review | M0, protected S2, and R1 qualified | drills meet SLO/RPO/RTO, zero open critical/high findings, signed explicit go/no-go |
+
+With three implementation lanes, the intended steady state after M0 is:
+
+1. **Console/Human lane:** H1 and H2, owning browser journeys and remediation.
+2. **Signer/Cloud lane:** S1/S2, owning provider adapters, IAM evidence, and
+   reconciliation.
+3. **Device/native lane:** D1 preparation followed by D2 and M1, owning the
+   loopback protocol, durable setup state, XPC, and adapters.
+
+The integration owner alone merges catalog versions, migrations, public error
+codes, signing domains, XPC selectors, entitlements, and release identities.
+Each lane returns a reviewable commit with focused tests; integration runs the
+cross-lane contract suite before merge. If a lane needs a serialized boundary,
+it submits the smallest boundary-only change first and waits for that merge
+instead of carrying a private schema fork.
+
+### 12.5 Progress reporting and stop/go rules
+
+At every pushed checkpoint, record the source SHA, completed ticket IDs,
+focused test counts, complete-lane status, skipped/external evidence, and the
+first safe failure marker. Work stops at the owning boundary when any of these
+conditions occurs:
+
+- a migration or public contract would need an incompatible rewrite rather
+  than a forward version;
+- a test would need reusable secret material in logs, traces, URLs, storage,
+  argv, environment, or retained artifacts;
+- an ambiguous provider/native signing outcome would be automatically retried;
+- a UI would claim success without authoritative PostgreSQL state or a verified
+  signed ACK;
+- a protected or physical gate is unavailable and a mock would be the only
+  evidence.
+
+Work proceeds without product-owner interruption for ordinary implementation
+choices inside the frozen boundaries. Explicit approval is required for a new
+trust boundary, broader role authority, production credentials, destructive
+data migration, release signing, external deployment, or production promotion.
 
 ## 13. External requirements and final definition of done
 
