@@ -6,6 +6,7 @@ import {
   OrganizationClientError,
   createOrganizationClient,
   getOrganizationVisibility,
+  isAmbiguousOrganizationMutationError,
   resolveOrganizationSelection,
 } from "../app/organization-client.ts";
 
@@ -170,6 +171,34 @@ test("reissues an invitation with operation-bound WebAuthn, quoted version, fres
     assert.equal(call.init.headers.get("agentpass-recent-auth"), recentAuthId);
     assert.deepEqual(JSON.parse(call.init.body), { reissue_invitation_id: invitationId, expires_at: expiresAt });
   }
+  assert.equal(recentAuthCalls[0].organizationId, organizationId);
+  assert.equal(recentAuthCalls[0].csrfToken, csrf);
+});
+
+test("maps a stale reissue version to a conflict without replaying the mutation", async () => {
+  const calls = [];
+  const client = createOrganizationClient({
+    fetchImpl: async (url, init) => {
+      calls.push({ url: String(url), init });
+      if (url === "/api/auth/session") return sessionResponse();
+      return json({ error: { code: "version_conflict", message: "stale invitation version" } }, 409);
+    },
+    authorizeRecentAuthImpl: async () => ({ authorization_id: recentAuthId }),
+  });
+
+  await assert.rejects(
+    () => client.reissueInvitation({ organizationId, invitationId, expiresAt: "2026-08-21T00:00:00.000Z", expectedVersion: 1 }),
+    (error) => error instanceof OrganizationClientError && error.code === "conflict" && error.status === 409 && error.serverCode === "version_conflict",
+  );
+  assert.equal(calls.filter((call) => call.url.endsWith("/invitations")).length, 1);
+});
+
+test("classifies every uncertain mutation response for reconciliation, but not a known conflict", () => {
+  for (const status of [500, 502, 503, 504, 599]) assert.equal(isAmbiguousOrganizationMutationError(new OrganizationClientError("http_failed", "uncertain", status)), true);
+  assert.equal(isAmbiguousOrganizationMutationError(new OrganizationClientError("transport_failed", "network")), true);
+  assert.equal(isAmbiguousOrganizationMutationError(new OrganizationClientError("invalid_response", "malformed", 201)), true);
+  assert.equal(isAmbiguousOrganizationMutationError(new OrganizationClientError("conflict", "stale", 409, "version_conflict")), false);
+  assert.equal(isAmbiguousOrganizationMutationError(new OrganizationClientError("recent_auth_required", "step up", 428)), false);
 });
 
 test("rejects malformed data, maps conflicts, and does not persist invitation tokens", async () => {
@@ -193,6 +222,7 @@ test("rejects malformed data, maps conflicts, and does not persist invitation to
 
   const source = await readFile(new URL("../app/organization-client.ts", import.meta.url), "utf8");
   assert.doesNotMatch(source, /localStorage|sessionStorage|console\.(?:log|info|warn|error)/);
+  assert.doesNotMatch(source, /navigator\.clipboard|document\.cookie|location\.(?:href|assign|replace)/);
 });
 
 test("classifies expired and recent-auth failures for actionable organization UI states", async () => {

@@ -19,6 +19,8 @@ test("OrganizationPanel is standalone and covers the administration flow", async
   assert.match(source, /再発行を確定/);
   assert.match(source, /現在の招待トークンは無効/);
   assert.match(source, /応答を確認できない場合は自動再送せず/);
+  assert.match(source, /isAmbiguousOrganizationMutationError\(error\)/);
+  assert.match(source, /最新の状態を再確認/);
   assert.match(source, /optimistic/);
   assert.match(source, /setMembers\(previousMembers\)/);
   assert.match(source, /data-state=\{status\}/);
@@ -37,6 +39,18 @@ test("OrganizationPanel is standalone and covers the administration flow", async
   assert.match(source, /Member pagination cursor repeated/);
   assert.doesNotMatch(source, /AgentPassConsole/);
   assert.doesNotMatch(source, /localStorage|sessionStorage|console\.(?:log|info|warn|error)/);
+  assert.doesNotMatch(source, /navigator\.clipboard|document\.cookie|location\.(?:href|assign|replace)/);
+});
+
+test("invitation reissue is role-gated and the raw token has one display sink", async () => {
+  const source = await readFile(componentPath, "utf8");
+  assert.match(source, /canReissue=\{visibility\.canInvite\}/);
+  assert.match(source, /const reissuable = canReissue && \(status === "pending" \|\| status === "expired"\)/);
+  assert.match(source, /\{oneTimeToken !== null && <section[^>]*organization-one-time-secret/);
+  assert.equal((source.match(/className="organization-token"/g) ?? []).length, 1);
+  assert.equal((source.match(/\{oneTimeToken\}/g) ?? []).length, 1);
+  assert.doesNotMatch(source, /navigator\.clipboard|localStorage|sessionStorage|document\.cookie|console\.(?:log|info|warn|error)/);
+  assert.doesNotMatch(source, /new URL\([^)]*oneTimeToken|URLSearchParams\([^)]*oneTimeToken/);
 });
 
 test("organization styling keeps pending, expired, revoked, and keyboard-visible states in the existing visual system", async () => {
@@ -86,7 +100,7 @@ test("organization mutations reconcile authoritative state after response loss w
   assert.match(source, /const reconcileResources = useCallback/);
   assert.match(source, /loadAllMembers\(client, organizationId\)/);
   assert.match(source, /loadAllInvitations\(client, organizationId\)/);
-  assert.match(source, /isAmbiguousMutationError\(error\)/);
+  assert.match(source, /isAmbiguousOrganizationMutationError\(error\)/);
   assert.match(source, /code: "reconciliation_required"/);
   assert.match(source, /state\.code === "reconciliation_required"/);
   assert.match(source, /権威状態を再取得しました。操作は再送していません/);

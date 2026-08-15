@@ -95,6 +95,19 @@ export class OrganizationClientError extends Error {
   }
 }
 
+/**
+ * A mutation may have committed even when the browser cannot prove its
+ * outcome. Callers must reconcile authoritative state before offering any
+ * further action; they must not resend the mutation automatically.
+ */
+export function isAmbiguousOrganizationMutationError(error: unknown): boolean {
+  return error instanceof OrganizationClientError && (
+    error.code === "transport_failed"
+    || error.code === "invalid_response"
+    || error.code === "http_failed" && error.status !== undefined && error.status >= 500 && error.status <= 599
+  );
+}
+
 export type RequestOptions = Readonly<{
   signal?: AbortSignal;
 }>;

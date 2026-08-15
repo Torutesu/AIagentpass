@@ -4,6 +4,7 @@ import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } fro
 import {
   createOrganizationClient,
   getOrganizationVisibility,
+  isAmbiguousOrganizationMutationError,
   OrganizationClientError,
   type InvitationRole,
   type Organization,
@@ -313,7 +314,7 @@ export function OrganizationPanel({ client: suppliedClient, initialOrganizationI
       if (options.reconcile !== undefined) await options.reconcile();
       return true;
     } catch (error) {
-      const responseOutcomeIsAmbiguous = !operationCommitted && isAmbiguousMutationError(error);
+      const responseOutcomeIsAmbiguous = !operationCommitted && isAmbiguousOrganizationMutationError(error);
       if (options.reconcile !== undefined && (responseOutcomeIsAmbiguous || operationCommitted)) {
         let reconciliationError: unknown = operationCommitted ? error : undefined;
         try {
@@ -768,14 +769,6 @@ function resourceError(error: unknown): ResourceState {
   if (error instanceof OrganizationClientError && error.code === "unauthorized") return { status: "error", code: "unauthorized", error: "セッションの有効期限が切れています。セッションを更新してください。" };
   if (error instanceof OrganizationClientError && error.code === "validation_failed") return { status: "error", code: "validation_failed", error: "入力内容を確認してください。" };
   return { status: "error", error: "組織情報を取得できませんでした。接続を確認して、もう一度お試しください。" };
-}
-
-function isAmbiguousMutationError(error: unknown): boolean {
-  return error instanceof OrganizationClientError && (
-    error.code === "transport_failed"
-    || error.code === "invalid_response"
-    || error.code === "http_failed" && (error.status === 502 || error.status === 503 || error.status === 504)
-  );
 }
 
 function isLastOwnerProtectionError(error: unknown): error is OrganizationClientError {
