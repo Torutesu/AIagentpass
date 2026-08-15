@@ -134,6 +134,12 @@ signer_function_allowlist(routine_signature) AS (
 ),
 app_function_allowlist(routine_signature) AS (
   VALUES
+    ('agentpass_consume_device_request_nonce(uuid,uuid,bytea,integer)'),
+    ('agentpass_acquire_rate_limit(uuid,text,uuid,integer,numeric,integer,integer)'),
+    ('agentpass_acquire_anonymous_rate_limit(text,uuid,integer,numeric,integer,integer)'),
+    ('agentpass_prune_shared_control_expired(integer)'),
+    ('agentpass_prune_anonymous_rate_limits(integer)'),
+    ('agentpass_prune_human_identity_assertion_replays(integer)'),
     ('agentpass_platform_operator_assignment_find_active(uuid,uuid,uuid,text,text)'),
     ('agentpass_platform_session_challenge_create(uuid,uuid,bytea,bytea,bytea,bytea,bytea[],uuid,uuid,uuid,uuid,bigint,text,text,text,text,text,integer)'),
     ('agentpass_platform_session_challenge_find(uuid)'),

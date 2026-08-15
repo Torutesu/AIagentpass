@@ -34,6 +34,15 @@ const PLATFORM_APP_FUNCTIONS = Object.freeze([
   'agentpass_platform_session_bootstrap_context(bytea,uuid,text,text)',
 ]);
 
+const SHARED_CONTROL_APP_FUNCTIONS = Object.freeze([
+  'agentpass_consume_device_request_nonce(uuid,uuid,bytea,integer)',
+  'agentpass_acquire_rate_limit(uuid,text,uuid,integer,numeric,integer,integer)',
+  'agentpass_acquire_anonymous_rate_limit(text,uuid,integer,numeric,integer,integer)',
+  'agentpass_prune_shared_control_expired(integer)',
+  'agentpass_prune_anonymous_rate_limits(integer)',
+  'agentpass_prune_human_identity_assertion_replays(integer)',
+]);
+
 const LEGACY_PLATFORM_PROMOTION_MUTATIONS = Object.freeze([
   'agentpass_platform_promotion_issuance_reserve(uuid,text,text,text,text,bytea,integer,integer,text,bigint,bigint)',
   'agentpass_platform_promotion_issuance_replay(uuid,text,text,text,text)',
@@ -95,6 +104,9 @@ test('role SQL is idempotent, credential-free, and PUBLIC is revoked', async () 
     assert.match(sql, new RegExp(`'${escapedRegExp(signature)}'`, 'u'), `application function missing: ${signature}`);
     const functionName = signature.slice(0, signature.indexOf('('));
     assert.match(platformSql, new RegExp(`CREATE FUNCTION (?:public\\.)?${escapedRegExp(functionName)}\\(`, 'u'), `migration function missing: ${functionName}`);
+  }
+  for (const signature of SHARED_CONTROL_APP_FUNCTIONS) {
+    assert.match(sql, new RegExp(`'${escapedRegExp(signature)}'`, 'u'), `shared-control application function missing: ${signature}`);
   }
   for (const signature of LEGACY_PLATFORM_PROMOTION_MUTATIONS) {
     const occurrences = sql.split(`'${signature}'`).length - 1;

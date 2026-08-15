@@ -202,6 +202,28 @@ BEGIN
 END
 $$;
 
+-- Shared replay and abuse controls are online application responsibilities,
+-- but remain function-scoped so callers cannot gain EXECUTE on unrelated
+-- migration helpers. Maintenance is bounded inside each reviewed function.
+DO $$
+DECLARE
+  routine_signature text;
+BEGIN
+  FOREACH routine_signature IN ARRAY ARRAY[
+    'agentpass_consume_device_request_nonce(uuid,uuid,bytea,integer)',
+    'agentpass_acquire_rate_limit(uuid,text,uuid,integer,numeric,integer,integer)',
+    'agentpass_acquire_anonymous_rate_limit(text,uuid,integer,numeric,integer,integer)',
+    'agentpass_prune_shared_control_expired(integer)',
+    'agentpass_prune_anonymous_rate_limits(integer)',
+    'agentpass_prune_human_identity_assertion_replays(integer)'
+  ] LOOP
+    IF to_regprocedure('public.' || routine_signature) IS NOT NULL THEN
+      EXECUTE format('GRANT EXECUTE ON FUNCTION public.%s TO agentpass_app', routine_signature);
+    END IF;
+  END LOOP;
+END
+$$;
+
 -- Provider operations and deployment-wide maintenance are reachable only
 -- through the reviewed SECURITY DEFINER entry points. Helpers, triggers, the
 -- legacy quarantine function, and every unrelated routine remain denied.
