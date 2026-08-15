@@ -25,10 +25,17 @@ test("P0-B live browser role, WebAuthn, and recent-auth matrix", { skip: !enable
     const page = await open("owner");
     const card = deviceCard(page, "反映待ち Mac");
     const wake = card.getByRole("button", { name: "Wake requestを依頼" });
-    await wake.focus();
-    assert.equal(await wake.evaluate((element) => element === document.activeElement), true);
-    await page.keyboard.press("Enter");
-    assert.match(await requireWakeStatus(card), /依頼を受け付けました|既存の依頼へ統合し/u);
+    try {
+      await wake.focus();
+      assert.equal(await wake.evaluate((element) => element === document.activeElement), true);
+    } catch { assert.fail("P0B_SAFE_KEYBOARD_FOCUS_FAILED"); }
+    // Send Enter through the already-resolved control. This still exercises
+    // keyboard activation while preventing a late focus shift (for example a
+    // hydration or live-region update) from dispatching Enter to the page.
+    try { await wake.press("Enter"); }
+    catch { assert.fail("P0B_SAFE_KEYBOARD_PRESS_FAILED"); }
+    try { assert.match(await requireWakeStatus(card), /依頼を受け付けました|既存の依頼へ統合し/u); }
+    catch { assert.fail("P0B_SAFE_KEYBOARD_OUTCOME_FAILED"); }
   });
 
   await scenario(t, "shows accepted, coalesced, and no-pending outcomes from the real wake ledger", async ({ fixture, open }) => {
