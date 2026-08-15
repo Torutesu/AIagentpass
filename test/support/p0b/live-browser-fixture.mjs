@@ -135,20 +135,43 @@ export async function startP0BLiveBrowserFixture({
         await sessionReady;
         await route.fallback();
       });
-      const responsePromise = page.waitForResponse((response) => {
+      const isBootstrap = (resource) => {
         try {
-          const url = new URL(response.url());
-          return response.request().method() === "POST"
+          const url = new URL(resource.url());
+          const request = typeof resource.request === "function" ? resource.request() : resource;
+          return request.method() === "POST"
             && url.origin === new URL(harness.consoleUrl).origin
             && url.pathname === SESSION_PATH;
         } catch {
           return false;
         }
-      });
+      };
+      const requestPromise = page.waitForRequest(isBootstrap);
+      const responsePromise = page.waitForResponse(isBootstrap);
       let stage = "navigation";
       try {
         await page.goto(target.toString(), { waitUntil: "domcontentloaded" });
         stage = "response";
+        const applicationStartedBootstrap = await Promise.race([
+          requestPromise.then(() => true),
+          new Promise((resolve) => setTimeout(resolve, 1_000, false))
+        ]);
+        if (!applicationStartedBootstrap) {
+          // The live qualification must not depend on when the Console's first
+          // summary effect is scheduled. Start the same real BFF/Cloud
+          // bootstrap from this page only when no request has begun. The
+          // subsequent reload still proves cookie-bound resume and real UI.
+          await page.evaluate(async (path) => {
+            await fetch(path, {
+              method: "POST",
+              headers: { accept: "application/json", "content-type": "application/json" },
+              body: "{}",
+              cache: "no-store",
+              credentials: "same-origin",
+              redirect: "error"
+            });
+          }, SESSION_PATH);
+        }
         const response = await responsePromise;
         stage = "http";
         if (!response.ok()) throw new Error("session bootstrap was rejected");
