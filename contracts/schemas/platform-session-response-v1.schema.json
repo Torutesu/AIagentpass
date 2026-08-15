@@ -2,22 +2,16 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://agentpass.dev/contracts/schemas/platform-session-response-v1.schema.json",
   "title": "AgentPass public platform session metadata v1",
-  "description": "Public session metadata nested in the assertion response. The bearer is delivered only through the secure HttpOnly cookie; member, organization, credential, assertion, WebAuthn bytes, private key, and reusable token material are never returned.",
+  "description": "Exactly the public session metadata needed by the browser after assertion. The bearer is delivered only through the secure HttpOnly cookie; version tags, member, organization, principal, assignment, authority generation, request digest, credential, assertion, WebAuthn bytes, private key, and reusable token material are never returned.",
   "type": "object",
   "additionalProperties": false,
-  "minProperties": 13,
-  "maxProperties": 13,
-  "required": ["version", "type", "session_id", "principal_id", "assignment_id", "authority_generation", "operation", "capability", "request_digest_sha256", "authenticated_at", "issued_at", "expires_at", "status"],
+  "minProperties": 7,
+  "maxProperties": 7,
+  "required": ["session_id", "operation", "capability", "authenticated_at", "issued_at", "expires_at", "status"],
   "properties": {
-    "version": { "const": 1 },
-    "type": { "const": "agentpass.platform-session" },
     "session_id": { "$ref": "#/$defs/uuid" },
-    "principal_id": { "$ref": "#/$defs/uuid" },
-    "assignment_id": { "$ref": "#/$defs/uuid" },
-    "authority_generation": { "$ref": "#/$defs/positiveSafeInteger" },
     "operation": { "const": "platform.promotion.issue" },
     "capability": { "const": "platform.promotion.issue" },
-    "request_digest_sha256": { "$ref": "#/$defs/sha256" },
     "authenticated_at": { "$ref": "#/$defs/timestamp" },
     "issued_at": { "$ref": "#/$defs/timestamp" },
     "expires_at": { "$ref": "#/$defs/timestamp" },
@@ -25,8 +19,6 @@
   },
   "$defs": {
     "uuid": { "type": "string", "format": "uuid", "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$" },
-    "positiveSafeInteger": { "type": "integer", "minimum": 1, "maximum": 9007199254740991 },
-    "sha256": { "type": "string", "minLength": 64, "maxLength": 64, "pattern": "^[0-9a-f]{64}$" },
     "timestamp": { "type": "string", "format": "date-time", "minLength": 24, "maxLength": 24, "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$" }
   }
 }

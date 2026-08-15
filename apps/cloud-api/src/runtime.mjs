@@ -4,6 +4,7 @@ import path from "node:path";
 
 import { createCloudApi } from "./server.mjs";
 import { createPlatformSessionHttpApi } from "./platform-session-http-api.mjs";
+import { createPlatformSessionRateLimiter } from "./platform-session-rate-limit.mjs";
 import { createPlatformSessionWebAuthnService } from "./platform-session-webauthn.mjs";
 import { createCloudStore } from "./store.mjs";
 import { createPersistentReplayCache, verifyDeviceRequest } from "./auth.mjs";
@@ -182,6 +183,10 @@ export async function createCloudRuntime({ env = process.env, logger = console, 
           authenticatedBootstrap: bootstrapAuthenticator,
           trustedAuthorityResolver: resolveAuthorityContext,
           revokeService: postgresRuntime.platformSessionRepository,
+          rateLimiter: createPlatformSessionRateLimiter({
+            repository: postgresRuntime.sharedControlRepository,
+            bucketSecret: humanAuthSecret
+          }),
           origin: composedPlatformSessionConfig.origin
         });
       } else {

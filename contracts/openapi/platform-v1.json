@@ -55,6 +55,7 @@
           "401": { "$ref": "#/components/responses/Unauthorized" },
           "403": { "$ref": "#/components/responses/Forbidden" },
           "409": { "$ref": "#/components/responses/Conflict" },
+          "429": { "$ref": "#/components/responses/TooManyRequests" },
           "503": { "$ref": "#/components/responses/ServiceUnavailable" }
         }
       }
@@ -94,6 +95,7 @@
           "401": { "$ref": "#/components/responses/Unauthorized" },
           "403": { "$ref": "#/components/responses/Forbidden" },
           "409": { "$ref": "#/components/responses/Conflict" },
+          "429": { "$ref": "#/components/responses/TooManyRequests" },
           "503": { "$ref": "#/components/responses/ServiceUnavailable" }
         }
       }
@@ -121,6 +123,7 @@
           "400": { "$ref": "#/components/responses/BadRequest" },
           "401": { "$ref": "#/components/responses/Unauthorized" },
           "403": { "$ref": "#/components/responses/Forbidden" },
+          "429": { "$ref": "#/components/responses/TooManyRequests" },
           "503": { "$ref": "#/components/responses/ServiceUnavailable" }
         }
       }
@@ -221,6 +224,7 @@
       "ContentTypeJson": { "required": true, "schema": { "type": "string", "pattern": "^application/json(?:;\\s*charset=utf-8)?$" } },
       "NoSniff": { "required": true, "schema": { "type": "string", "const": "nosniff" } },
       "NoReferrer": { "required": true, "schema": { "type": "string", "const": "no-referrer" } },
+      "RetryAfter": { "required": true, "schema": { "type": "string", "pattern": "^[1-9][0-9]*$" } },
       "PlatformSessionSetCookie": {
         "required": true,
         "description": "The only bearer transport. Must be __Host-agentpass_platform_session, Path=/, HttpOnly, Secure, SameSite=Strict, with no Domain attribute.",
@@ -246,7 +250,7 @@
         "content": { "application/json": { "schema": { "$ref": "#/components/schemas/PlatformSessionChallenge" } } }
       },
       "PlatformSessionIssued": {
-        "description": "Public session metadata and CSRF token; bearer is only in the HttpOnly cookie.",
+        "description": "Exactly the public session metadata fields session_id, operation, capability, authenticated_at, issued_at, expires_at, and status, plus the CSRF token; the bearer is only in the HttpOnly cookie.",
         "headers": {
           "Set-Cookie": { "$ref": "#/components/headers/PlatformSessionSetCookie" },
           "Cache-Control": { "$ref": "#/components/headers/CacheControlNoStore" },
@@ -275,6 +279,7 @@
       "Unauthorized": { "description": "Authentication or session is required.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/PlatformSessionError" } } } },
       "Forbidden": { "description": "Origin or CSRF validation failed.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/PlatformSessionError" } } } },
       "Conflict": { "description": "Challenge is expired, busy, consumed, or the intent conflicts with its idempotency identity.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/PlatformSessionError" } } } },
+      "TooManyRequests": { "description": "The bounded Platform Session admission policy denied the request.", "headers": { "Retry-After": { "$ref": "#/components/headers/RetryAfter" }, "Cache-Control": { "$ref": "#/components/headers/CacheControlNoStore" } }, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/PlatformSessionError" } } } },
       "ServiceUnavailable": { "description": "The authority or persistence boundary is unavailable.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/PlatformSessionError" } } } }
     }
   }

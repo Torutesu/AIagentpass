@@ -61,6 +61,9 @@ Target: close P0/PS-03 through PS-05 without preserving the old hosted bypass.
 
 ### W0-00 Harden the existing Platform Session boundary
 
+Status: implemented and focused-validated on 2026-08-15. Managed PostgreSQL
+contention evidence remains part of W0-05.
+
 Change scope:
 
 - `apps/cloud-api/src/platform-session-http-api.mjs`

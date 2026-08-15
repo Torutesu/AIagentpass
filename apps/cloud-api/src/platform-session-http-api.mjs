@@ -1,3 +1,5 @@
+import crypto from "node:crypto";
+
 import {
   PLATFORM_SESSION_COOKIE_NAME,
   PLATFORM_SESSION_CSRF_HEADER,
@@ -13,6 +15,10 @@ import {
 } from "./platform-session-webauthn.mjs";
 import { hashOpaqueToken, parseSessionCookie } from "./human-session.mjs";
 import { platformPromotionAuthorizationRequestDigest } from "./platform-promotion-http-contract.mjs";
+import {
+  PLATFORM_SESSION_RATE_LIMIT_ERROR_CODES,
+  PlatformSessionRateLimitError
+} from "./platform-session-rate-limit.mjs";
 
 const ROOT_PATH = "/api/platform/v1/sessions";
 const DEFAULT_MAX_BODY_BYTES = 64 * 1024;
@@ -143,6 +149,7 @@ export function createPlatformSessionHttpApi({
   resolveAuthorityContext,
   trustedAuthorityResolver,
   revokeService,
+  rateLimiter,
   origin,
   maxBodyBytes = DEFAULT_MAX_BODY_BYTES,
   sessionMaxAgeSeconds = 900
@@ -155,6 +162,9 @@ export function createPlatformSessionHttpApi({
   const authority = trustedAuthorityResolver ?? resolveAuthorityContext;
   if (typeof bootstrap !== "function" || typeof authority !== "function") {
     throw new TypeError("authenticated bootstrap and trusted authority resolver are required");
+  }
+  if (!rateLimiter || typeof rateLimiter.acquire !== "function") {
+    throw new TypeError("Platform Session rate limiter is required");
   }
   assertOrigin(origin);
   assertBodyLimit(maxBodyBytes);
@@ -195,7 +205,12 @@ export function createPlatformSessionHttpApi({
   async function dispatchChallenge(request) {
     const body = await readJsonBody(request, maxBodyBytes);
     const intent = normalizePublicIntent(body, header(request.headers, "idempotency-key"));
-    const context = await resolveContext(request, "challenge", { intent });
+    const sessionMaterialHash = humanSessionMaterialHash(request.headers, "challenge");
+    await acquirePlatformSessionRateLimit(rateLimiter, request, {
+      phase: "challenge",
+      sessionMaterialHash
+    });
+    const context = await resolveContext(request, "challenge", { intent, session_material_hash: sessionMaterialHash });
     let issued;
     try {
       issued = await ceremony.begin(context);
@@ -211,6 +226,11 @@ export function createPlatformSessionHttpApi({
     assertExactKeys(body, ASSERTION_FIELDS);
     if (header(request.headers, "idempotency-key") !== undefined) throw invalidRequest();
     const assertion = normalizeAssertionBody(body);
+    await acquirePlatformSessionRateLimit(rateLimiter, request, {
+      phase: "assertion",
+      jtiHash: sha256Text(assertion.jti),
+      proofId: assertion.challenge_id
+    });
     const context = await resolveContext(request, "assertion", { challenge_id: assertion.challenge_id });
     let issued;
     try {
@@ -261,10 +281,16 @@ export function createPlatformSessionHttpApi({
     if (!isPlatformSessionToken(csrfToken)) {
       throw new PlatformSessionHttpError(PLATFORM_SESSION_HTTP_ERROR_CODES.CSRF_FAILED, { status: 403 });
     }
+    const sessionMaterialHash = hashPlatformSessionToken(token);
+    await acquirePlatformSessionRateLimit(rateLimiter, request, {
+      phase: "revoke",
+      sessionMaterialHash,
+      csrfTokenHash: sha256Text(csrfToken)
+    });
     let revoked;
     try {
       revoked = await revokeService.revokeSelf({
-        session_material_hash: hashPlatformSessionToken(token),
+        session_material_hash: sessionMaterialHash,
         csrf_token: csrfToken
       });
     } catch (error) {
@@ -277,7 +303,7 @@ export function createPlatformSessionHttpApi({
   }
 
   async function resolveContext(request, phase, extra = {}) {
-    const sessionMaterialHash = humanSessionMaterialHash(request.headers, phase);
+    const sessionMaterialHash = extra.session_material_hash ?? humanSessionMaterialHash(request.headers, phase);
     const resolverInput = Object.freeze({
       phase,
       ...(extra.challenge_id === undefined ? {} : { challenge_id: extra.challenge_id }),
@@ -385,10 +411,17 @@ function assertSecurityHeaders(request, routeKind) {
 function rejectAmbiguousPlatformCookie(headers, routeKind) {
   const cookie = headers.cookie;
   if (cookie === undefined || !hasPlatformCookie(cookie)) return;
+  // Challenge bootstrap belongs exclusively to the Human Session namespace,
+  // while assertion authority belongs to the durable challenge. Accepting an
+  // existing Platform Session cookie on either route would create an
+  // ambiguous authentication namespace even when the cookie is valid.
+  if (routeKind !== "revoke") {
+    throw new PlatformSessionHttpError(PLATFORM_SESSION_HTTP_ERROR_CODES.INVALID_REQUEST, { status: 400 });
+  }
   try {
     parsePlatformSessionCookie(cookie);
   } catch {
-    if (routeKind === "revoke" && countPlatformCookies(cookie) < 2) {
+    if (countPlatformCookies(cookie) < 2) {
       throw new PlatformSessionHttpError(PLATFORM_SESSION_HTTP_ERROR_CODES.SESSION_REQUIRED, { status: 401 });
     }
     throw new PlatformSessionHttpError(PLATFORM_SESSION_HTTP_ERROR_CODES.INVALID_REQUEST, { status: 400 });
@@ -614,16 +647,17 @@ function projectSession(value) {
     const status = value.status;
     if (operation !== PUBLIC_INTENT_OPERATION || capability !== operation
       || !["active", "expired", "revoked"].includes(status)) throw new Error("session scope is invalid");
+    // Validate the complete authoritative result before reducing it to the
+    // browser-safe representation. These values prove that the ceremony
+    // returned a fully bound session, but they are not public session state.
+    requiredUuid(value.principal_id);
+    requiredUuid(value.assignment_id);
+    requiredPositiveInteger(value.authority_generation ?? value.principal_authority_generation);
+    requiredDigestHex(value.request_digest_sha256);
     return Object.freeze({
-      version: 1,
-      type: "agentpass.platform-session",
       session_id: requiredUuid(value.session_id ?? value.id),
-      principal_id: requiredUuid(value.principal_id),
-      assignment_id: requiredUuid(value.assignment_id),
-      authority_generation: requiredPositiveInteger(value.authority_generation ?? value.principal_authority_generation),
       operation,
       capability,
-      request_digest_sha256: requiredDigestHex(value.request_digest_sha256),
       authenticated_at: requiredTimestamp(value.authenticated_at),
       issued_at: requiredTimestamp(value.issued_at ?? value.created_at),
       expires_at: requiredTimestamp(value.expires_at),
@@ -689,11 +723,47 @@ function mapRevokeError(error) {
 }
 
 function mapError(error) {
+  if (error instanceof PlatformSessionRateLimitError) {
+    return response(error.status, {
+      error: {
+        code: error.code,
+        message: error.code === PLATFORM_SESSION_RATE_LIMIT_ERROR_CODES.RATE_LIMITED
+          ? "Platform Session rate limit exceeded"
+          : "Platform Session rate limiter is temporarily unavailable"
+      }
+    }, error.headers);
+  }
   if (error instanceof PlatformSessionHttpError) {
     const headers = error.status === 405 ? { Allow: error.allow ?? "POST" } : undefined;
     return response(error.status, { error: { code: error.code, message: ERROR_MESSAGES[error.code] ?? ERROR_MESSAGES[PLATFORM_SESSION_HTTP_ERROR_CODES.INTERNAL_ERROR] } }, headers);
   }
   return response(500, { error: { code: PLATFORM_SESSION_HTTP_ERROR_CODES.INTERNAL_ERROR, message: ERROR_MESSAGES[PLATFORM_SESSION_HTTP_ERROR_CODES.INTERNAL_ERROR] } });
+}
+
+async function acquirePlatformSessionRateLimit(rateLimiter, request, dimensions) {
+  try {
+    const decision = await rateLimiter.acquire(Object.freeze({
+      ...dimensions,
+      transportIdentity: platformSessionTransportIdentity(request.input)
+    }));
+    if (!decision || decision.allowed !== true) {
+      throw new PlatformSessionRateLimitError(PLATFORM_SESSION_RATE_LIMIT_ERROR_CODES.CONTROL_UNAVAILABLE);
+    }
+    return decision;
+  } catch (error) {
+    if (error instanceof PlatformSessionRateLimitError) throw error;
+    throw new PlatformSessionRateLimitError(PLATFORM_SESSION_RATE_LIMIT_ERROR_CODES.CONTROL_UNAVAILABLE, { cause: error });
+  }
+}
+
+function platformSessionTransportIdentity(input) {
+  const value = input?.socket?.remoteAddress ?? input?.connection?.remoteAddress ?? input?.remoteAddress;
+  if (typeof value !== "string" || value.length === 0 || value.length > 256 || CONTROL_CHARACTERS.test(value)) return "unknown";
+  return value;
+}
+
+function sha256Text(value) {
+  return crypto.createHash("sha256").update(value, "utf8").digest("hex");
 }
 
 function response(status, body, extraHeaders = undefined) {

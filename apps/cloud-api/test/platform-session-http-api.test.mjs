@@ -14,6 +14,10 @@ import {
 } from "../src/platform-session-transport.mjs";
 import { HUMAN_SESSION_COOKIE_NAME, hashOpaqueToken } from "../src/human-session.mjs";
 import { platformPromotionAuthorizationRequestDigest } from "../src/platform-promotion-http-contract.mjs";
+import {
+  PLATFORM_SESSION_RATE_LIMIT_ERROR_CODES,
+  PlatformSessionRateLimitError
+} from "../src/platform-session-rate-limit.mjs";
 
 const ORIGIN = "https://console.agentpass.test";
 const IDS = Object.freeze({
@@ -142,6 +146,7 @@ function serviceFixture(overrides = {}) {
         return { revoked: true };
       }
     },
+    rateLimiter: { async acquire() { return { allowed: true }; } },
     origin: ORIGIN,
     ...overrides
   });
@@ -194,15 +199,9 @@ test("assertion endpoint keeps bearer in HttpOnly cookie and projects no interna
 
   assert.equal(result.status, 201);
   assert.deepEqual(result.body.session, {
-    version: 1,
-    type: "agentpass.platform-session",
     session_id: IDS.session,
-    principal_id: IDS.principal,
-    assignment_id: IDS.assignment,
-    authority_generation: AUTHORITY.authority_generation,
     operation: AUTHORITY.operation,
     capability: AUTHORITY.capability,
-    request_digest_sha256: AUTHORITY.request_digest_sha256,
     authenticated_at: "2026-08-15T00:00:00.000Z",
     issued_at: "2026-08-15T00:00:00.000Z",
     expires_at: "2026-08-15T00:15:00.000Z",
@@ -211,6 +210,10 @@ test("assertion endpoint keeps bearer in HttpOnly cookie and projects no interna
   assert.equal(result.body.session.credential_id, undefined);
   assert.equal(result.body.session.member_id, undefined);
   assert.equal(result.body.session.organization_id, undefined);
+  assert.equal(result.body.session.principal_id, undefined);
+  assert.equal(result.body.session.assignment_id, undefined);
+  assert.equal(result.body.session.authority_generation, undefined);
+  assert.equal(result.body.session.request_digest_sha256, undefined);
   assert.equal(result.body.csrf_token, CSRF);
   assert.equal(JSON.stringify(result.body).includes(BEARER), false);
   assert.match(result.headers["Set-Cookie"], new RegExp(`^${PLATFORM_SESSION_COOKIE_NAME}=${BEARER}; Path=/; HttpOnly; Secure; SameSite=Strict; Max-Age=900$`));
@@ -331,4 +334,72 @@ test("request body and content limits are bounded before the ceremony", async ()
   assert.equal(result.status, 413);
   assert.equal(calls.begin.length, 0);
   assert.equal(crypto.createHash("sha256").update(BEARER).digest("hex").length, 64);
+});
+
+test("dedicated rate limiting fails closed before ceremony or revoke authority", async () => {
+  const denied = serviceFixture({
+    rateLimiter: {
+      async acquire() {
+        throw new PlatformSessionRateLimitError(PLATFORM_SESSION_RATE_LIMIT_ERROR_CODES.RATE_LIMITED, { retryAfterSeconds: 7 });
+      }
+    }
+  });
+  const limited = await denied.api.handle(challengeRequest());
+  assert.equal(limited.status, 429);
+  assert.equal(limited.body.error.code, PLATFORM_SESSION_RATE_LIMIT_ERROR_CODES.RATE_LIMITED);
+  assert.equal(limited.headers["Retry-After"], "7");
+  assert.equal(denied.calls.bootstrap.length, 0);
+  assert.equal(denied.calls.begin.length, 0);
+
+  const unavailable = serviceFixture({
+    rateLimiter: { async acquire() { throw new Error("backend detail must not escape"); } }
+  });
+  const failed = await unavailable.api.handle(challengeRequest());
+  assert.equal(failed.status, 503);
+  assert.equal(failed.body.error.code, PLATFORM_SESSION_RATE_LIMIT_ERROR_CODES.CONTROL_UNAVAILABLE);
+  assert.equal(failed.headers["Retry-After"], "1");
+  assert.equal(JSON.stringify(failed.body).includes("backend detail"), false);
+  assert.equal(unavailable.calls.bootstrap.length, 0);
+});
+
+test("the Platform Session boundary cannot be constructed without admission control", () => {
+  assert.throws(
+    () => serviceFixture({ rateLimiter: undefined }),
+    /Platform Session rate limiter is required/u
+  );
+});
+
+test("rate limiter receives only hashed session, CSRF, and JTI dimensions", async () => {
+  const seen = [];
+  const { api } = serviceFixture({
+    rateLimiter: { async acquire(input) { seen.push(input); return { allowed: true }; } }
+  });
+  assert.equal((await api.handle(challengeRequest())).status, 201);
+  const assertionBody = {
+    version: 1,
+    type: "agentpass.platform-session-assertion",
+    challenge_id: IDS.challenge,
+    jti: IDS.jti,
+    credential_id: CREDENTIAL_ID,
+    client_data_json: "YQ",
+    authenticator_data: "Yg",
+    signature: "Yw"
+  };
+  assert.equal((await api.handle(jsonRequest(PLATFORM_SESSION_HTTP_PATHS.assertion, assertionBody))).status, 201);
+  assert.equal((await api.handle({
+    method: "POST",
+    url: PLATFORM_SESSION_HTTP_PATHS.revoke,
+    headers: { Origin: ORIGIN, Cookie: `${PLATFORM_SESSION_COOKIE_NAME}=${BEARER}`, [PLATFORM_SESSION_CSRF_HEADER]: CSRF },
+    body: ""
+  })).status, 200);
+
+  assert.deepEqual(seen.map(({ phase }) => phase), ["challenge", "assertion", "revoke"]);
+  assert.equal(seen[0].sessionMaterialHash, hashOpaqueToken(HUMAN_TOKEN));
+  assert.equal(seen[1].jtiHash, crypto.createHash("sha256").update(IDS.jti).digest("hex"));
+  assert.equal(seen[1].proofId, IDS.challenge);
+  assert.equal(seen[2].sessionMaterialHash, hashPlatformSessionToken(BEARER));
+  assert.equal(seen[2].csrfTokenHash, crypto.createHash("sha256").update(CSRF).digest("hex"));
+  assert.equal(JSON.stringify(seen).includes(BEARER), false);
+  assert.equal(JSON.stringify(seen).includes(CSRF), false);
+  assert.equal(JSON.stringify(seen).includes(IDS.jti), false);
 });
