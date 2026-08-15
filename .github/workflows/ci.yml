@@ -128,7 +128,6 @@ jobs:
           import fs from "node:fs";
           import path from "node:path";
           import { Client } from "pg";
-          import { POSTGRES_SCHEMA_HEAD } from "./apps/cloud-api/src/postgres/schema-head.mjs";
           import { createMigrationRunner } from "./apps/cloud-api/src/postgres/migration-runner.mjs";
           import { POSTGRES_SCHEMA_HEAD } from "./apps/cloud-api/src/postgres/schema-head.mjs";
 
@@ -194,6 +193,7 @@ jobs:
           import fs from "node:fs";
           import path from "node:path";
           import { Client } from "pg";
+          import { POSTGRES_SCHEMA_HEAD } from "./apps/cloud-api/src/postgres/schema-head.mjs";
 
           const roles = [
             ["agentpass_app", process.env.N1_APP_DATABASE_URL],
