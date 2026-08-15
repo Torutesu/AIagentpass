@@ -1,6 +1,9 @@
 import crypto from "node:crypto";
 
+import { normalizeHostedOrganizationName } from "../hosted-identity/organization-name.mjs";
+
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu;
+const UUID_V4 = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu;
 const DIGEST = /^[0-9a-f]{64}$/iu;
 const PKCE = /^[A-Za-z0-9_-]{43,128}$/u;
 const FAILURE_CODE = /^[a-z][a-z0-9_]{0,63}$/u;
@@ -25,6 +28,7 @@ export const HOSTED_IDENTITY_BOOTSTRAP_REPOSITORY_METHODS = Object.freeze([
   "failOAuthState",
   "issueCsrf",
   "commitOrganization",
+  "commitOrganizationV2",
   "createChallenge",
   "consumeChallenge",
   "completeChallenge",
@@ -41,6 +45,7 @@ export const HOSTED_IDENTITY_BOOTSTRAP_REPOSITORY_SQL = Object.freeze({
   failOAuthState: "SELECT public.agentpass_hosted_identity_oauth_state_fail($1::uuid,$2::text) AS result",
   issueCsrf: "SELECT public.agentpass_hosted_identity_bootstrap_csrf_issue($1::bytea,$2::bytea) AS result",
   commitOrganization: "SELECT * FROM public.agentpass_hosted_identity_bootstrap_organization_commit($1::bytea,$2::text,$3::bytea,$4::uuid,$5::uuid,$6::jsonb)",
+  commitOrganizationV2: "SELECT * FROM public.agentpass_hosted_identity_bootstrap_organization_commit_v2($1::bytea,$2::text,$3::bytea,$4::text,$5::uuid,$6::uuid,$7::uuid)",
   createChallenge: "SELECT * FROM public.agentpass_hosted_identity_bootstrap_challenge_create($1::bytea,$2::uuid,$3::bytea,$4::text,$5::text,$6::timestamptz)",
   consumeChallenge: "SELECT * FROM public.agentpass_hosted_identity_bootstrap_challenge_consume($1::bytea,$2::uuid,$3::bytea)",
   completeChallenge: "SELECT public.agentpass_hosted_identity_bootstrap_challenge_complete($1::bytea,$2::uuid,$3::bytea) AS result",
@@ -141,6 +146,20 @@ export function createPostgresHostedIdentityBootstrapRepository({ client } = {})
     return normalizeOrganizationResult(row);
   }
 
+  async function commitOrganizationV2(input = {}) {
+    const value = normalizeOrganizationCommitV2(input);
+    const row = await tableCall("commitOrganizationV2", [
+      sha256(value.bootstrap_cookie),
+      value.idempotency_key,
+      value.request_hash,
+      value.organization_name,
+      value.organization_id,
+      value.membership_id,
+      value.audit_event_id
+    ]);
+    return normalizeOrganizationResult(row);
+  }
+
   async function createChallenge(input = {}) {
     const value = normalizeChallengeCreate(input);
     const row = await tableCall("createChallenge", [sha256(value.bootstrap_cookie), value.challenge_id, sha256(value.challenge), value.rp_id, value.origin, value.expires_at]);
@@ -205,6 +224,7 @@ export function createPostgresHostedIdentityBootstrapRepository({ client } = {})
     failOAuthState,
     issueCsrf,
     commitOrganization,
+    commitOrganizationV2,
     createChallenge,
     consumeChallenge,
     completeChallenge,
@@ -297,6 +317,22 @@ function normalizeOrganizationCommit(value) {
     organization_id: uuid(value.organization_id, "organization_id"),
     membership_id: uuid(value.membership_id, "membership_id"),
     public_response: publicResponse(value.public_response)
+  });
+}
+
+function normalizeOrganizationCommitV2(value) {
+  exactObject(value, ["bootstrap_cookie", "idempotency_key", "request_hash", "organization_name", "organization_id", "membership_id", "audit_event_id"]);
+  let organizationName;
+  try { organizationName = normalizeHostedOrganizationName(value.organization_name, { requireCanonical: true }); }
+  catch { throw error("INPUT"); }
+  return Object.freeze({
+    bootstrap_cookie: selector(value.bootstrap_cookie, "bootstrap_cookie"),
+    idempotency_key: text(value.idempotency_key, 255, "idempotency_key", IDEMPOTENCY_KEY),
+    request_hash: digest(value.request_hash, "request_hash"),
+    organization_name: organizationName,
+    organization_id: uuidV4(value.organization_id, "organization_id"),
+    membership_id: uuidV4(value.membership_id, "membership_id"),
+    audit_event_id: uuidV4(value.audit_event_id, "audit_event_id")
   });
 }
 
@@ -451,6 +487,7 @@ function nonNegativeInteger(value, name, kind = "RESULT") {
   throw error(kind);
 }
 function uuid(value, name, kind = "INPUT") { if (typeof value !== "string" || !UUID.test(value)) throw error(kind); return value.toLowerCase(); }
+function uuidV4(value, name, kind = "INPUT") { if (typeof value !== "string" || !UUID_V4.test(value)) throw error(kind); return value.toLowerCase(); }
 function classifyDatabaseError(cause) {
   if (cause?.code === "40001") return error("RETRYABLE");
   if (cause?.code === "23505") return error("CONFLICT");

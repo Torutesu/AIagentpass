@@ -86,7 +86,7 @@ test("0057 binds bootstrap WebAuthn to the server-derived member/org and consume
   assert.match(bodyOf(sql, "agentpass_hosted_identity_bootstrap_challenge_complete"), /c\.status = 'consuming' AND a\.state = 'webauthn_required'/u);
 });
 
-test("0057 uses owner-based trigger guards, PUBLIC-only migration revokes, and exact app grants", async () => {
+test("0057 keeps owner-based guards while current roles expose only hardened bootstrap functions", async () => {
   const [sql, roles] = await Promise.all([readFile(migrationUrl, "utf8"), readFile(rolesUrl, "utf8")]);
   for (const name of [
     "agentpass_guard_hosted_identity_bootstrap_attempt",
@@ -106,10 +106,11 @@ test("0057 uses owner-based trigger guards, PUBLIC-only migration revokes, and e
     "agentpass_hosted_identity_bootstrap_start_v2(uuid,uuid,bytea,text,text,text,text,bytea,bytea,bytea,timestamptz)",
     "agentpass_hosted_identity_oauth_state_claim_v2(uuid,bytea,bytea,text)",
     "agentpass_hosted_identity_oauth_complete_v2(uuid,uuid,bytea,uuid,text,text,bytea)",
-    "agentpass_hosted_identity_bootstrap_organization_commit(bytea,text,bytea,uuid,uuid,jsonb)",
+    "agentpass_hosted_identity_bootstrap_organization_commit_v2(bytea,text,bytea,text,uuid,uuid,uuid)",
     "agentpass_hosted_identity_bootstrap_challenge_complete(bytea,uuid,bytea)"
   ]) assert.ok(roles.includes(`'${signature}'`), `${signature} app grant`);
   assert.equal(roles.includes("'agentpass_hosted_identity_bootstrap_start(uuid,uuid,bytea,text,text,text)'"), false);
   assert.equal(roles.includes("'agentpass_hosted_identity_oauth_state_consume(uuid,bytea,text)'"), false);
   assert.equal(roles.includes("'agentpass_hosted_identity_oauth_state_complete(uuid,bytea,uuid,text,bytea)'"), false);
+  assert.equal(roles.includes("'agentpass_hosted_identity_bootstrap_organization_commit(bytea,text,bytea,uuid,uuid,jsonb)'"), false);
 });

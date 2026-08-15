@@ -15,7 +15,8 @@
     "prerequisite_forward_migration": "0056_identity_epoch_invalidation",
     "planned_forward_migration": "0057_hosted_identity_bootstrap",
     "pkce_hardening_forward_migration": "0058_hosted_oauth_pkce_envelope",
-    "identity_completion_forward_migration": "0059_hosted_identity_atomic_completion"
+    "identity_completion_forward_migration": "0059_hosted_identity_atomic_completion",
+    "first_organization_forward_migration": "0060_hosted_first_organization_atomic"
   },
   "authority": {
     "identity_provider": "github",
@@ -28,7 +29,7 @@
       "the provider subject is bound to provider=github and an immutable upstream_identities row"
     ],
     "server_authority": "postgresql",
-    "organization_creation_authority": "server_transaction_createOrganizationWithOwner",
+    "organization_creation_authority": "agentpass_hosted_identity_bootstrap_organization_commit_v2",
     "web_authn_authority": "existing strict WebAuthn verifier and durable challenge coordinator, with bootstrap-session binding",
     "forbidden_identity_sources": [
       "ChatGPT-only ambient identity",

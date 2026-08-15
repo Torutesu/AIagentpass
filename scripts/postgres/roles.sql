@@ -265,7 +265,7 @@ BEGIN
     'agentpass_hosted_identity_oauth_complete_v2(uuid,uuid,bytea,uuid,text,text,bytea)',
     'agentpass_hosted_identity_oauth_state_fail(uuid,text)',
     'agentpass_hosted_identity_bootstrap_csrf_issue(bytea,bytea)',
-    'agentpass_hosted_identity_bootstrap_organization_commit(bytea,text,bytea,uuid,uuid,jsonb)',
+    'agentpass_hosted_identity_bootstrap_organization_commit_v2(bytea,text,bytea,text,uuid,uuid,uuid)',
     'agentpass_hosted_identity_bootstrap_challenge_create(bytea,uuid,bytea,text,text,timestamptz)',
     'agentpass_hosted_identity_bootstrap_challenge_consume(bytea,uuid,bytea)',
     'agentpass_hosted_identity_bootstrap_challenge_complete(bytea,uuid,bytea)',

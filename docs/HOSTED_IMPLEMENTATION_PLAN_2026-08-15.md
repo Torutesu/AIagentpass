@@ -1,7 +1,7 @@
 # Hosted v1 implementation plan
 
 Status: active  
-Baseline: `codex/agent-platform` at migration `0059`
+Baseline: `codex/agent-platform` at migration `0060`
 Updated: 2026-08-15
 
 This is the implementation plan for the Hosted identity, first-organization,
@@ -320,6 +320,16 @@ authority changes are forward-only; a pushed migration is never rewritten.
      `webauthn_required` in one transaction;
    - make same-key replay byte-equivalent and different-key contention return a
      stable conflict without creating a second organization.
+
+Implemented checkpoint (2026-08-15): migration `0060` adds a function-only
+first-organization boundary. It validates the normalized name and its SHA-256
+request binding, locks the exact bootstrap attempt and complete member history,
+creates the organization plus active owner membership, derives the public replay
+object, appends the initial admin audit-chain event, and advances the attempt to
+`webauthn_required` in one PostgreSQL transaction. The application role loses
+EXECUTE on the legacy caller-payload function and receives only the v2 entry
+point. Real PostgreSQL contention and response-loss qualification remains part
+of the same commit gate.
 5. `feat: commit bootstrap webauthn and human session atomically` (`0061`)
    - reuse the production verifier and pass only its strict verified result to
      a transaction procedure;

@@ -7,17 +7,16 @@ import { POSTGRES_SCHEMA_HEAD } from "../../src/postgres/schema-head.mjs";
 const root = new URL("../../../../", import.meta.url);
 const read = (path) => readFile(new URL(path, root), "utf8");
 
-test("0059 is the cataloged forward-only atomic identity completion head", async () => {
+test("0059 remains the cataloged forward-only atomic identity completion migration", async () => {
   const [sql, catalog] = await Promise.all([
     read("contracts/postgres/0059_hosted_identity_atomic_completion.sql"),
     read("contracts/catalog-v1.json").then(JSON.parse)
   ]);
-  assert.equal(POSTGRES_SCHEMA_HEAD.version, 59);
-  assert.equal(POSTGRES_SCHEMA_HEAD.name, "0059_hosted_identity_atomic_completion.sql");
+  assert.ok(POSTGRES_SCHEMA_HEAD.version >= 59);
   assert.match(sql, /^BEGIN;[\s\S]*COMMIT;\s*$/u);
   assert.doesNotMatch(sql, /DROP\s+(?:TABLE|COLUMN|INDEX)|TRUNCATE\s+TABLE/iu);
-  assert.equal(catalog.entries.at(-1).id, "migration.0059_hosted_identity_atomic_completion");
-  assert.equal(catalog.entries.at(-1).version, 59);
+  const entry = catalog.entries.find(({ id }) => id === "migration.0059_hosted_identity_atomic_completion");
+  assert.equal(entry?.version, 59);
 });
 
 test("0059 serializes immutable subject resolution and prevents orphan members", async () => {

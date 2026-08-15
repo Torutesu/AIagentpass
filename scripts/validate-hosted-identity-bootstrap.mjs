@@ -20,6 +20,7 @@ const REQUIRED_FILES = [
   "contracts/postgres/0057_hosted_identity_bootstrap.sql",
   "contracts/postgres/0058_hosted_oauth_pkce_envelope.sql",
   "contracts/postgres/0059_hosted_identity_atomic_completion.sql",
+  "contracts/postgres/0060_hosted_first_organization_atomic.sql",
   "contracts/schemas/human-session-v1.schema.json",
   "contracts/schemas/webauthn-ceremony-v1.schema.json",
   "apps/cloud-api/src/human-session.mjs",
@@ -49,7 +50,8 @@ export function validateHostedIdentityBootstrapContract(document, { root = DEFAU
     if (document.activation?.prerequisite_forward_migration !== "0056_identity_epoch_invalidation"
       || document.activation?.planned_forward_migration !== "0057_hosted_identity_bootstrap"
       || document.activation?.pkce_hardening_forward_migration !== "0058_hosted_oauth_pkce_envelope"
-      || document.activation?.identity_completion_forward_migration !== "0059_hosted_identity_atomic_completion") fail("migration ordering is not pinned after identity epoch invalidation");
+      || document.activation?.identity_completion_forward_migration !== "0059_hosted_identity_atomic_completion"
+      || document.activation?.first_organization_forward_migration !== "0060_hosted_first_organization_atomic") fail("migration ordering is not pinned after identity epoch invalidation");
 
     const authority = document.authority;
     if (!isObject(authority) || authority.identity_provider !== "github" || authority.server_authority !== "postgresql") fail("authority is not GitHub/PostgreSQL");
