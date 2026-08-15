@@ -4,6 +4,7 @@ import test from "node:test";
 import {
   classifySessionBootstrap502,
   classifySessionBootstrap503,
+  classifyStoredSessionState,
   P0BLiveBrowserFixtureError,
   startP0BLiveBrowserFixture
 } from "./live-browser-fixture.mjs";
@@ -49,4 +50,19 @@ test("bootstrap 503 classification exposes only fixed Cloud boundary classes", (
   assert.equal(classifySessionBootstrap503({ error: { code: "identity_unavailable", message: "ignored" } }), "identity_unavailable");
   assert.equal(classifySessionBootstrap503({ error: { code: "unknown" } }), "other");
   assert.equal(classifySessionBootstrap503(null), "other");
+});
+
+test("stored session diagnostics expose only fixed authoritative state codes", async () => {
+  const sessionId = "11111111-1111-4111-8111-111111111111";
+  for (const [row, expected] of [
+    [undefined, "missing"],
+    [{ revoked: true, absolute_expired: false, idle_expired: false }, "revoked"],
+    [{ revoked: false, absolute_expired: true, idle_expired: false }, "absolute_expired"],
+    [{ revoked: false, absolute_expired: false, idle_expired: true }, "idle_expired"],
+    [{ revoked: false, absolute_expired: false, idle_expired: false }, "active"]
+  ]) {
+    const pool = { query: async () => ({ rows: row === undefined ? [] : [row] }) };
+    assert.equal(await classifyStoredSessionState(pool, sessionId), expected);
+  }
+  assert.equal(await classifyStoredSessionState({ query: async () => { throw new Error("secret"); } }, sessionId), "unavailable");
 });

@@ -200,7 +200,7 @@ export async function startP0BLiveBrowserFixture({
         }
         stage = "contract";
         const session = validateBootstrap(response.body, descriptor, safeSeed.organizationId);
-        pageState.set(page, { role: descriptor, csrfToken: session.csrfToken, registered: pageState.get(page)?.registered === true });
+        pageState.set(page, { role: descriptor, sessionId: session.sessionId, csrfToken: session.csrfToken, registered: pageState.get(page)?.registered === true });
         stage = "target";
         await page.goto(target.toString(), { waitUntil: "domcontentloaded" });
       } catch {
@@ -300,7 +300,10 @@ export async function startP0BLiveBrowserFixture({
         }, { organizationId: safeSeed.organizationId, csrfToken: state.csrfToken });
         if (result?.registered !== true) throw new Error("registration not confirmed");
       } catch (error) {
-        const marker = String(error?.message ?? "").match(/registration_(?:options|verify)_[1-5][0-9]{2}(?:_[a-z][a-z0-9_]{0,95})?/u)?.[0];
+        let marker = String(error?.message ?? "").match(/registration_(?:options|verify)_[1-5][0-9]{2}(?:_[a-z][a-z0-9_]{0,95})?/u)?.[0];
+        if (marker === "registration_verify_401_webauthn_registration_http_session_required") {
+          marker = `${marker}_${await classifyStoredSessionState(databasePool, state.sessionId)}`;
+        }
         throw new P0BLiveBrowserFixtureError(marker ?? "webauthn_registration_failed", "P0-B WebAuthn registration failed");
       }
       state.registered = true;
@@ -572,7 +575,24 @@ function validateBootstrap(value, descriptor, organizationId) {
   if (!value || typeof value !== "object" || Array.isArray(value) || !value.session || typeof value.csrf_token !== "string" || !TOKEN.test(value.csrf_token)) throw new Error("session response is invalid");
   const session = value.session;
   if (session.role !== descriptor.role || session.member_id !== descriptor.memberId || session.organization_id !== organizationId || !UUID.test(session.session_id)) throw new Error("session binding is invalid");
-  return Object.freeze({ csrfToken: value.csrf_token });
+  return Object.freeze({ sessionId: session.session_id.toLowerCase(), csrfToken: value.csrf_token });
+}
+
+export async function classifyStoredSessionState(pool, sessionId) {
+  if (!pool || typeof pool.query !== "function" || !UUID.test(sessionId ?? "")) return "unavailable";
+  try {
+    const result = await pool.query(`SELECT revoked_at IS NOT NULL AS revoked,
+      expires_at <= clock_timestamp() AS absolute_expired,
+      idle_expires_at IS NOT NULL AND idle_expires_at <= clock_timestamp() AS idle_expired
+      FROM human_sessions WHERE id=$1 LIMIT 1`, [sessionId.toLowerCase()]);
+    const row = result.rows?.[0];
+    if (!row) return "missing";
+    if (row.revoked === true) return "revoked";
+    if (row.absolute_expired === true) return "absolute_expired";
+    if (row.idle_expired === true) return "idle_expired";
+    if (row.revoked === false && row.absolute_expired === false && row.idle_expired === false) return "active";
+  } catch {}
+  return "unavailable";
 }
 
 function consolePath(value, origin) {

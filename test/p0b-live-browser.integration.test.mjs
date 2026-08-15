@@ -254,6 +254,12 @@ function safeRegistrationMarker(code, prefix) {
     ["registration_options_503_webauthn_registration_http_session_unavailable", "OPTIONS_503_SESSION_UNAVAILABLE"],
     ["registration_options_503_webauthn_registration_http_unavailable", "OPTIONS_503_SERVICE_UNAVAILABLE"],
     ["registration_verify_401_webauthn_registration_http_session_required", "VERIFY_401_SESSION_REQUIRED"],
+    ["registration_verify_401_webauthn_registration_http_session_required_missing", "VERIFY_401_SESSION_MISSING"],
+    ["registration_verify_401_webauthn_registration_http_session_required_revoked", "VERIFY_401_SESSION_REVOKED"],
+    ["registration_verify_401_webauthn_registration_http_session_required_absolute_expired", "VERIFY_401_SESSION_ABSOLUTE_EXPIRED"],
+    ["registration_verify_401_webauthn_registration_http_session_required_idle_expired", "VERIFY_401_SESSION_IDLE_EXPIRED"],
+    ["registration_verify_401_webauthn_registration_http_session_required_active", "VERIFY_401_SESSION_ACTIVE"],
+    ["registration_verify_401_webauthn_registration_http_session_required_unavailable", "VERIFY_401_SESSION_UNAVAILABLE"],
     ["registration_verify_401_session_required", "VERIFY_401_COOKIE_MISSING"]
   ]).get(code);
   if (detailed !== undefined) return `${prefix}_REGISTRATION_${detailed}_FAILED`;
