@@ -195,8 +195,14 @@ test("0051 makes lifecycle and signing function-only for the signer role", {
     claim_token: providerReserved.claim_token,
   });
   assert.equal(providerCommitted.state, "committed");
-  assert.deepEqual(providerCommitted.signature, providerSignature);
-  assert.deepEqual((await providerRepository.reserveOperation(providerOperation)).signature, providerSignature);
+  const expectedProviderSignature = {
+    algorithm: "ed25519",
+    encoding: "base64url",
+    value: providerSignature.toString("base64url"),
+    public_key: { algorithm: "ed25519", encoding: "base64url", value: providerPublicKey.toString("base64url") },
+  };
+  assert.deepEqual(providerCommitted.signature, expectedProviderSignature);
+  assert.deepEqual((await providerRepository.reserveOperation(providerOperation)).signature, expectedProviderSignature);
 
   for (const table of [
     "managed_signer_key_lifecycles",

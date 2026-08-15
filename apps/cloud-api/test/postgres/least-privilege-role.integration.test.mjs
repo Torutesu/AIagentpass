@@ -284,11 +284,13 @@ test("qualifies least-privilege roles against real PostgreSQL migrations and smo
         [relationName],
       );
       assert.deepEqual(privileges.rows[0], {
-        can_select: true,
+        can_select: false,
         can_insert: false,
         can_update: false,
         can_delete: false,
       }, `unexpected app privileges for ${relation}`);
+
+      await expectPermissionDeniedInSavepoint(client, () => client.query(`SELECT * FROM public.${quoteIdentifier(relation)} LIMIT 0`));
 
       const table = quoteIdentifier(relation);
       const column = quoteIdentifier(authorityUpdateColumns.get(relation));

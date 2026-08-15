@@ -162,10 +162,10 @@ async function expireLease(pool, challengeId) {
   const client = await pool.connect();
   try {
     await client.query("BEGIN");
-    await client.query("SET LOCAL ROLE agentpass_migrator");
     // Explicit qualification-only fault injection. A normal application or
     // migrator update must continue to be rejected by the immutable guard.
     await client.query("SET LOCAL session_replication_role = replica");
+    await client.query("SET LOCAL ROLE agentpass_migrator");
     await client.query(`UPDATE public.hosted_identity_bootstrap_webauthn_challenges
       SET consume_started_at=clock_timestamp()-interval '60 seconds',
           claim_expires_at=clock_timestamp()-interval '1 second'
