@@ -137,8 +137,10 @@ export function assertPlatformSessionUpgrade(before, after) {
   for (const field of [
     "session_id", "principal_id", "member_id", "organization_id", "assignment_id", "credential_id",
     "operation", "capability", "principal_authority_generation", "assignment_version", "credential_version",
-    "idle_timeout_seconds", "created_at", "authenticated_at", "expires_at"
+    "idle_timeout_seconds", "created_at", "authenticated_at", "last_seen_at", "expires_at"
   ]) assert.equal(afterRow[field], beforeRow[field], `0054 must preserve platform session ${field}`);
+  assert.equal(beforeRow.created_at, beforeRow.authenticated_at, "N4 historical session creation and authentication must share one database timestamp");
+  assert.equal(beforeRow.authenticated_at, beforeRow.last_seen_at, "N4 historical session authentication and last-seen must share one database timestamp");
   assert.equal(beforeRow.status, "active");
   assert.equal(afterRow.status, "revoked");
   assert.equal(afterRow.version, beforeRow.version + 1);
@@ -441,16 +443,55 @@ async function seedN4PlatformRows(migrationPool, adminPool) {
       PLATFORM_CREDENTIAL_ID, PLATFORM_TARGET_PRINCIPAL_ID, LEGACY_TARGET_MEMBER_ID,
       PLATFORM_WEBAUTHN_ID, "N4 platform credential"
     ]);
-    await client.query(`SELECT agentpass_platform_session_issue(
-      $1::uuid, $2::bytea, $3::uuid, $4::uuid, $5::uuid, $6::uuid, $7::uuid,
-      $8::text, $9::text, 900, 300)`, [
-      PLATFORM_SESSION_ID, PLATFORM_SESSION_MATERIAL_HASH, PLATFORM_TARGET_PRINCIPAL_ID,
-      LEGACY_TARGET_MEMBER_ID, LEGACY_ORGANIZATION_ID, PLATFORM_ASSIGNMENT_ID,
-      PLATFORM_CREDENTIAL_ID, PLATFORM_OPERATION, PLATFORM_OPERATION
-    ]);
   } finally {
     client.release();
   }
+
+  // N4 qualifies the historical 0053 -> 0054 data transition.  Do not call
+  // the 0053 issue helper here: its original clock_timestamp() default is a
+  // known historical race that was fixed for live databases by migration
+  // 0069.  Seed the pre-0054 row as an administrator and explicitly bind all
+  // three creation/authentication observations to one database timestamp.
+  // This keeps the fixture deterministic while preserving the actual 0054
+  // upgrade assertions (immutable bindings, request-binding invalidation,
+  // and row preservation).
+  const seededSession = await adminPool.query(`
+    WITH db_now AS MATERIALIZED (
+      SELECT clock_timestamp() AS now_value
+    ), principal AS (
+      SELECT authority_generation
+      FROM platform_principals
+      WHERE principal_id = $3::uuid AND member_id = $4::uuid
+    ), assignment AS (
+      SELECT version
+      FROM platform_operator_assignments
+      WHERE assignment_id = $6::uuid
+    ), credential AS (
+      SELECT version
+      FROM platform_credentials
+      WHERE credential_id = $7::uuid
+    )
+    INSERT INTO platform_sessions (
+      session_id, session_material_hash, principal_id, member_id,
+      organization_id, assignment_id, credential_id, operation, capability,
+      principal_authority_generation, assignment_version, credential_version,
+      idle_timeout_seconds, status, version,
+      created_at, authenticated_at, last_seen_at, expires_at, idle_expires_at
+    )
+    SELECT
+      $1::uuid, $2::bytea, $3::uuid, $4::uuid,
+      $5::uuid, $6::uuid, $7::uuid, $8::text, $9::text,
+      principal.authority_generation, assignment.version, credential.version,
+      300, 'active', 1,
+      db_now.now_value, db_now.now_value, db_now.now_value,
+      db_now.now_value + interval '15 minutes',
+      db_now.now_value + interval '5 minutes'
+    FROM db_now, principal, assignment, credential`, [
+    PLATFORM_SESSION_ID, PLATFORM_SESSION_MATERIAL_HASH, PLATFORM_TARGET_PRINCIPAL_ID,
+    LEGACY_TARGET_MEMBER_ID, LEGACY_ORGANIZATION_ID, PLATFORM_ASSIGNMENT_ID,
+    PLATFORM_CREDENTIAL_ID, PLATFORM_OPERATION, PLATFORM_OPERATION
+  ]);
+  assert.equal(seededSession.rowCount, 1, "N4 historical platform session seed must insert exactly one row");
 }
 
 export async function snapshotN4LegacyRows(pool) {

@@ -64,6 +64,7 @@ function cleanSessions() {
     version: 1,
     created_at: "2099-01-01T00:00:00.000Z",
     authenticated_at: "2099-01-01T00:00:00.000Z",
+    last_seen_at: "2099-01-01T00:00:00.000Z",
     expires_at: "2099-01-01T00:15:00.000Z",
     revoked_at: null,
     revoke_reason: null
@@ -200,10 +201,12 @@ test("N4 qualification owns its seed set, authority evidence, and direct CI aggr
   assert.match(source, /agentpass_migrator/u);
   assert.match(source, /0053_platform_sessions\.sql/u);
   assert.match(source, /0054_platform_authorization\.sql/u);
-  assert.match(source, /platform_session_issue/u);
   assert.match(source, /platform_credential_provision/u);
   assert.match(source, /platform_principal_provision/u);
   assert.match(source, /platform_operator_assignment_request/u);
+  assert.match(source, /INSERT INTO platform_sessions/u);
+  assert.match(source, /WITH db_now AS MATERIALIZED/u);
+  assert.match(source, /created_at, authenticated_at, last_seen_at/u);
   assert.match(source, /platform_sessions/u);
   assert.match(source, /platform_credentials/u);
   assert.match(source, /platform_authorization/u);
