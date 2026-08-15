@@ -68,3 +68,19 @@ test("stored session diagnostics expose only fixed authoritative state codes", a
   }
   assert.equal(await classifyStoredSessionState({ query: async () => { throw new Error("secret"); } }, sessionId), "unavailable");
 });
+
+test("live bootstrap waits for the Console-owned session rotation before registration", async () => {
+  const source = await import("node:fs/promises").then(({ readFile }) => readFile(new URL("./live-browser-fixture.mjs", import.meta.url), "utf8"));
+  const wait = source.indexOf("const applicationSession = page.waitForResponse");
+  const awaitResponse = source.indexOf("const [applicationSessionResponse] = await Promise.all");
+  const goto = source.indexOf("page.goto(target.toString()", awaitResponse);
+  const rotated = source.indexOf("const rotated = validateBootstrap");
+  const update = source.indexOf("sessionId: rotated.sessionId");
+
+  assert.notEqual(wait, -1);
+  assert.match(source, /pathname === "\/api\/auth\/session\/resume" \|\| pathname === SESSION_PATH/);
+  assert.ok(wait < awaitResponse);
+  assert.ok(awaitResponse < goto);
+  assert.ok(awaitResponse < rotated);
+  assert.ok(rotated < update);
+});
