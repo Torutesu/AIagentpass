@@ -503,6 +503,14 @@ a:focus-visible {
   font-weight: 700;
 }
 
+.organization-panel .organization-last-owner-warning {
+  max-width: 48rem;
+  margin: 6px 0 0;
+  color: var(--amber);
+  font-size: 12px;
+  line-height: 1.55;
+}
+
 .organization-panel .organization-token {
   user-select: all;
 }

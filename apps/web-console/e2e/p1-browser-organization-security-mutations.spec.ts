@@ -394,6 +394,20 @@ for (const role of ["owner", "admin"] as const) {
     try {
       await openOrganizationPanel(page);
 
+      if (role === "owner") {
+        const currentRole = page.getByLabel("現在の利用者のロール");
+        await currentRole.selectOption("admin");
+        await page.getByRole("button", { name: "現在の利用者をAdminに変更", exact: true }).click();
+        await expect(page.getByRole("alert")).toContainText("最後のOwnerは降格・失効できません");
+        await expect(currentRole).toHaveValue("owner");
+        expect(state.mutations).toHaveLength(0);
+
+        await page.getByRole("button", { name: "現在の利用者のアクセスを失効", exact: true }).click();
+        await expect(page.getByRole("alert")).toContainText("先に別のメンバーをOwnerに変更");
+        await expect(page.getByRole("button", { name: "失効を確定", exact: true })).toHaveCount(0);
+        expect(state.mutations).toHaveLength(0);
+      }
+
       await page.getByLabel("組織名を変更").fill(RENAMED_ORGANIZATION);
       await page.getByRole("button", { name: "名前を変更", exact: true }).click();
       await expect(page.getByText(`${RENAMED_ORGANIZATION} · v2`, { exact: true })).toBeVisible();

@@ -92,3 +92,16 @@ test("organization mutations reconcile authoritative state after response loss w
   assert.match(source, /setPendingAction\("reconcile"\)/);
   assert.match(source, /disabled=\{pendingAction !== null\}/);
 });
+
+test("last-owner protection is visible, actionable, and reconciles server-side protection errors", async () => {
+  const source = await readFile(componentPath, "utf8");
+  assert.match(source, /activeOwnerCount/);
+  assert.match(source, /ownerSnapshotComplete/);
+  assert.match(source, /last_owner_protected/);
+  assert.match(source, /最後のOwnerは降格・失効できません/);
+  assert.match(source, /先に別のメンバーをOwnerに変更/);
+  assert.match(source, /isLastOwnerProtectionError/);
+  assert.match(source, /serverCode\?\.toLowerCase\(\)/);
+  assert.match(source, /aria-describedby=\{describedBy\}/);
+  assert.match(source, /data-state=\{state\.code \?\? "error"\}/);
+});

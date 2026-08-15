@@ -149,6 +149,12 @@ test("rejects malformed data, maps conflicts, and does not persist invitation to
   } });
   await assert.rejects(() => conflict.renameOrganization({ organizationId, name: "new", expectedVersion: 1, idempotencyKey: "conflict-1" }), (error) => error instanceof OrganizationClientError && error.code === "conflict" && error.status === 409 && error.serverCode === "version_conflict");
 
+  const lastOwner = createOrganizationClient({ fetchImpl: async (url) => {
+    if (url === "/api/auth/session") return sessionResponse();
+    return json({ error: { code: "ERR_LAST_OWNER", message: "the final active organization owner is protected" } }, 409);
+  } });
+  await assert.rejects(() => lastOwner.removeMember({ organizationId, memberId, expectedVersion: 3, recentAuth: recentAuthId, idempotencyKey: "last-owner-1" }), (error) => error instanceof OrganizationClientError && error.code === "conflict" && error.serverCode === "ERR_LAST_OWNER");
+
   const source = await readFile(new URL("../app/organization-client.ts", import.meta.url), "utf8");
   assert.doesNotMatch(source, /localStorage|sessionStorage|console\.(?:log|info|warn|error)/);
 });
