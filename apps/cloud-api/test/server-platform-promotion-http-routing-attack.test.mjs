@@ -120,10 +120,17 @@ test("the injected boundary owns only paths.issue and does not widen the route s
 
 test("malformed authorized Platform HTTP API injection fails closed at construction", () => {
   for (const value of [
+    null,
+    [],
     {},
     { handle() {}, paths: {} },
+    { handle() {}, paths: null },
+    { handle() {}, paths: [] },
     { handle() {}, paths: { issue: "" } },
     { handle() {}, paths: { issue: "/v1/platform/promotions" } },
+    { handle() {}, paths: { issue: `${ISSUE_PATH}/` } },
+    { handle() {}, paths: { issue: `${ISSUE_PATH}?alternate=1` } },
+    { handle() {}, paths: { issue: `https://evil.example${ISSUE_PATH}` } },
     { paths: { issue: ISSUE_PATH } }
   ]) {
     assert.throws(
