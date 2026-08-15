@@ -119,7 +119,7 @@ jobs:
         run: >-
           psql --no-psqlrc --quiet --set=ON_ERROR_STOP=1
           --command="ALTER ROLE agentpass_app PASSWORD 'n1-app-${{ matrix.postgres-version }}'; ALTER ROLE agentpass_signer PASSWORD 'n1-signer-${{ matrix.postgres-version }}'; ALTER ROLE agentpass_migrator PASSWORD 'n1-migrator-${{ matrix.postgres-version }}'; ALTER ROLE agentpass_backup PASSWORD 'n1-backup-${{ matrix.postgres-version }}';"
-      - name: Run fresh migrations through head 55
+      - name: Run fresh migrations through current head
         shell: bash
         run: |
           set -euo pipefail
@@ -129,6 +129,7 @@ jobs:
           import path from "node:path";
           import { Client } from "pg";
           import { createMigrationRunner } from "./apps/cloud-api/src/postgres/migration-runner.mjs";
+          import { POSTGRES_SCHEMA_HEAD } from "./apps/cloud-api/src/postgres/schema-head.mjs";
 
           const client = new Client({ connectionString: process.env.N1_DATABASE_URL });
           await client.connect();
@@ -140,10 +141,10 @@ jobs:
               client,
               applicationVersion: `ci-n1-postgres-${process.env.N1_POSTGRES_MAJOR}`,
             }).run();
-            assert.equal(result.currentVersion, 55);
+            assert.equal(result.currentVersion, POSTGRES_SCHEMA_HEAD.version);
             const history = await client.query("SELECT version::int AS version, checksum FROM public.schema_migrations ORDER BY version");
-            assert.equal(history.rowCount, 55);
-            assert.deepEqual(history.rows.map(({ version }) => Number(version)), Array.from({ length: 55 }, (_, index) => index + 1));
+            assert.equal(history.rowCount, POSTGRES_SCHEMA_HEAD.migration_count);
+            assert.deepEqual(history.rows.map(({ version }) => Number(version)), Array.from({ length: POSTGRES_SCHEMA_HEAD.migration_count }, (_, index) => index + 1));
             const attempts = await client.query("SELECT version FROM public.schema_migration_attempts WHERE status IN ('running', 'failed')");
             assert.equal(attempts.rowCount, 0);
             const server = await client.query(`SELECT current_setting('server_version') AS server_version,
@@ -158,7 +159,7 @@ jobs:
               `${JSON.stringify(value)}\n`,
               { mode: 0o600 },
             );
-            writeEvidence("migration-history.json", { head: 55, rows: history.rows });
+            writeEvidence("migration-history.json", { head: POSTGRES_SCHEMA_HEAD.version, rows: history.rows });
             writeEvidence("postgres-server.json", server.rows[0]);
           } finally {
             await client.end();
@@ -446,6 +447,7 @@ jobs:
           import crypto from "node:crypto";
           import fs from "node:fs";
           import path from "node:path";
+          import { POSTGRES_SCHEMA_HEAD } from "./apps/cloud-api/src/postgres/schema-head.mjs";
 
           const sha256 = (bytes) => crypto.createHash("sha256").update(bytes).digest("hex");
           const read = (file) => fs.readFileSync(file);
@@ -520,7 +522,7 @@ jobs:
           for (const name of migrationFiles) migrationDigest.update(name).update("\0").update(read(path.join("contracts/postgres", name))).update("\0");
           const migrationHistoryOutput = read(path.join(process.env.N1_EVIDENCE_DIR, "migration-history.json"));
           const migrationHistory = JSON.parse(migrationHistoryOutput.toString("utf8"));
-          if (migrationHistory.head !== 55 || migrationHistory.rows.length !== 55) throw new Error("fresh migration history evidence is incomplete");
+          if (migrationHistory.head !== POSTGRES_SCHEMA_HEAD.version || migrationHistory.rows.length !== POSTGRES_SCHEMA_HEAD.migration_count) throw new Error("fresh migration history evidence is incomplete");
           const serverOutput = read(path.join(process.env.N1_EVIDENCE_DIR, "postgres-server.json"));
           const server = JSON.parse(serverOutput.toString("utf8"));
           if (server.ssl !== true || Math.trunc(Number(server.server_version_num) / 10000) !== Number(process.env.N1_POSTGRES_MAJOR)) {
@@ -537,8 +539,8 @@ jobs:
             source_commit: sourceCommit,
             postgres_major: process.env.N1_POSTGRES_MAJOR,
             fresh_database: true,
-            migration_head: 55,
-            migration_history_count: 55,
+            migration_head: POSTGRES_SCHEMA_HEAD.version,
+            migration_history_count: POSTGRES_SCHEMA_HEAD.migration_count,
             migration_sources_sha256: migrationDigest.digest("hex"),
             migration_history_sha256: sha256(migrationHistoryOutput),
             postgres_server: {
@@ -574,7 +576,7 @@ jobs:
           fs.writeFileSync(artifactPath, canonical, { mode: 0o600 });
           if (fs.readFileSync(artifactPath, "utf8") !== canonical) throw new Error("N1 evidence was not written canonically");
           const reread = JSON.parse(fs.readFileSync(artifactPath, "utf8"));
-          if (reread.source_commit !== sourceCommit || reread.migration_head !== 55 || reread.unexpected_skips !== 0) throw new Error("N1 evidence source binding failed");
+          if (reread.source_commit !== sourceCommit || reread.migration_head !== POSTGRES_SCHEMA_HEAD.version || reread.unexpected_skips !== 0) throw new Error("N1 evidence source binding failed");
           console.log(`verified source-bound N1 evidence sha256=${sha256(Buffer.from(canonical, "utf8"))}`);
           NODE
       - name: Independently verify source-SHA-bound N1 evidence
@@ -587,13 +589,14 @@ jobs:
           jq -e \
             --arg source "$GITHUB_SHA" \
             --arg major "$N1_POSTGRES_MAJOR" \
+            --argjson migration_head "$(node --input-type=module -e 'import { POSTGRES_SCHEMA_HEAD } from "./apps/cloud-api/src/postgres/schema-head.mjs"; console.log(POSTGRES_SCHEMA_HEAD.version)')" \
             '(.schema_version == 1) and
              (.kind == "agentpass.postgres.n1.qualification") and
              (.source_commit == $source) and
              (.postgres_major == $major) and
              (.fresh_database == true) and
-             (.migration_head == 55) and
-             (.migration_history_count == 55) and
+             (.migration_head == $migration_head) and
+             (.migration_history_count == $migration_head) and
              (.migration_history_sha256 | test("^[0-9a-f]{64}$")) and
              (.postgres_server.server_version_num | tonumber / 10000 | floor == ($major | tonumber)) and
              (.postgres_server.tls_version | type == "string") and

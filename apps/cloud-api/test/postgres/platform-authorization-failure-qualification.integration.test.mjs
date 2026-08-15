@@ -1,3 +1,4 @@
+import { POSTGRES_SCHEMA_HEAD } from "../../src/postgres/schema-head.mjs";
 import assert from "node:assert/strict";
 import crypto from "node:crypto";
 import test from "node:test";
@@ -22,7 +23,7 @@ const ADMIN_DATABASE_URL = process.env.AGENTPASS_TEST_POSTGRES_ADMIN_URL ?? proc
 const { Pool } = ADMIN_DATABASE_URL ? await import("pg") : { Pool: undefined };
 const OPERATION = "platform.promotion.issue";
 const PURPOSE = PROMOTION_EVIDENCE_V3_PURPOSE;
-const MIGRATION_HEAD = 55;
+const MIGRATION_HEAD = POSTGRES_SCHEMA_HEAD.version;
 const QUALIFICATION_SIGNER_KEY_ID = "s1-shared-qualification-key";
 const QUALIFICATION_SIGNER_KEY_PAIR = crypto.generateKeyPairSync("ed25519");
 

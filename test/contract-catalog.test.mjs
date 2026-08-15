@@ -9,6 +9,7 @@ import { AGENT_SESSION_GRANT_SIGNATURE_DOMAIN } from "../apps/cloud-api/src/agen
 import { POSSESSION_RECEIPT_SIGNATURE_DOMAIN } from "../apps/cloud-api/src/possession-receipt-signer.mjs";
 import { QUALIFICATION_GRANT_BATCH_MANIFEST_SIGNATURE_DOMAIN } from "../apps/cloud-api/src/qualification-grant-batch-manifest.mjs";
 import { PROMOTION_EVIDENCE_V3_SIGNATURE_DOMAIN } from "../apps/cloud-api/src/promotion-evidence-v3-statement.mjs";
+import { POSTGRES_SCHEMA_HEAD } from "../apps/cloud-api/src/postgres/schema-head.mjs";
 import {
   BUNDLE_ACK_SIGNATURE_DOMAIN,
   REFRESH_HINT_SIGNATURE_DOMAIN
@@ -81,9 +82,10 @@ test("catalog freezes the complete current contract inventory", () => {
   assert.equal(catalog.catalog_id, "agentpass.contract-catalog");
   assert.equal(catalog.catalog_version, 1);
   assert.equal(catalog.status, "frozen");
-  assert.equal(catalog.entries.length, 165);
+  const expectedEntryCount = 49 + 61 + POSTGRES_SCHEMA_HEAD.migration_count;
+  assert.equal(catalog.entries.length, expectedEntryCount);
   const counts = catalog.entries.reduce((result, entry) => ({ ...result, [entry.kind]: (result[entry.kind] ?? 0) + 1 }), {});
-  assert.deepEqual(counts, { "json-schema": 49, "openapi-operation": 61, "postgres-migration": 55 });
+  assert.deepEqual(counts, { "json-schema": 49, "openapi-operation": 61, "postgres-migration": POSTGRES_SCHEMA_HEAD.migration_count });
   assert.equal(new Set(catalog.entries.map((entry) => entry.purpose)).size, catalog.entries.length);
   for (const entry of catalog.entries) {
     assert.ok(catalog.profiles[entry.profile], `${entry.id} profile`);
@@ -92,7 +94,7 @@ test("catalog freezes the complete current contract inventory", () => {
   }
   const result = runValidatorWithCatalog();
   assert.equal(result.status, 0, result.stderr);
-  assert.match(result.stdout, /validated frozen contract catalog: 165 entries/);
+  assert.match(result.stdout, new RegExp(`validated frozen contract catalog: ${expectedEntryCount} entries`, "u"));
 });
 
 test("catalog includes every promoted Phase 1 schema and fixture", () => {

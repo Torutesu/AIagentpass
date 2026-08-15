@@ -1,3 +1,4 @@
+import { POSTGRES_SCHEMA_HEAD } from "../../src/postgres/schema-head.mjs";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import crypto from "node:crypto";
@@ -91,7 +92,7 @@ test("0051 makes lifecycle and signing function-only for the signer role", {
   const migrationClient = await adminPool.connect();
   try {
     const migrated = await createMigrationRunner({ client: migrationClient, applicationVersion: "managed-signer-authority-qualification" }).run();
-    assert.equal(migrated.currentVersion, 55);
+    assert.equal(migrated.currentVersion, POSTGRES_SCHEMA_HEAD.version);
   } finally {
     migrationClient.release();
   }

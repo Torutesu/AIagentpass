@@ -391,7 +391,9 @@ SET search_path = pg_catalog, public
 AS $$
 BEGIN
   IF NEW.session_epoch IS DISTINCT FROM OLD.session_epoch THEN
-    IF (current_user <> 'agentpass_migrator'
+    IF (current_user <> pg_get_userbyid(
+          (SELECT relowner FROM pg_class WHERE oid = TG_RELID)
+        )
         AND COALESCE(current_setting('agentpass.recovery_epoch_bump', true), '') <> 'on')
        OR NEW.session_epoch <> OLD.session_epoch + 1 THEN
       RAISE EXCEPTION USING
@@ -416,7 +418,9 @@ SET search_path = pg_catalog, public
 AS $$
 BEGIN
   IF NEW.authority_epoch IS DISTINCT FROM OLD.authority_epoch THEN
-    IF current_user <> 'agentpass_migrator'
+    IF current_user <> pg_get_userbyid(
+         (SELECT relowner FROM pg_class WHERE oid = TG_RELID)
+       )
        OR NEW.authority_epoch <> OLD.authority_epoch + 1 THEN
       RAISE EXCEPTION USING
         ERRCODE = 'check_violation',
@@ -479,23 +483,17 @@ CREATE TRIGGER revocations_invalidate_organization_identity_epoch_update
   FOR EACH ROW
   EXECUTE FUNCTION public.agentpass_invalidate_organization_security_event();
 
--- Keep every entry point private to the migration owner.  Trigger execution
--- does not require granting the primitive to the application role.
-REVOKE ALL PRIVILEGES ON FUNCTION public.agentpass_invalidate_identity_epoch(uuid,uuid,text) FROM PUBLIC, agentpass_app, agentpass_signer, agentpass_backup;
-REVOKE ALL PRIVILEGES ON FUNCTION public.agentpass_invalidate_membership_after_change() FROM PUBLIC, agentpass_app, agentpass_signer, agentpass_backup;
-REVOKE ALL PRIVILEGES ON FUNCTION public.agentpass_invalidate_credential_after_revoke() FROM PUBLIC, agentpass_app, agentpass_signer, agentpass_backup;
-REVOKE ALL PRIVILEGES ON FUNCTION public.agentpass_invalidate_recovery_transition() FROM PUBLIC, agentpass_app, agentpass_signer, agentpass_backup;
-REVOKE ALL PRIVILEGES ON FUNCTION public.agentpass_invalidate_organization_security_event() FROM PUBLIC, agentpass_app, agentpass_signer, agentpass_backup;
-REVOKE ALL PRIVILEGES ON FUNCTION public.agentpass_guard_membership_session_epoch() FROM PUBLIC, agentpass_app, agentpass_signer, agentpass_backup;
-REVOKE ALL PRIVILEGES ON FUNCTION public.agentpass_guard_organization_authority_epoch() FROM PUBLIC, agentpass_app, agentpass_signer, agentpass_backup;
-REVOKE ALL PRIVILEGES ON FUNCTION public.agentpass_bump_organization_authority_epoch(uuid) FROM PUBLIC, agentpass_app, agentpass_signer, agentpass_backup;
-GRANT EXECUTE ON FUNCTION public.agentpass_invalidate_identity_epoch(uuid,uuid,text) TO agentpass_migrator;
-GRANT EXECUTE ON FUNCTION public.agentpass_invalidate_membership_after_change() TO agentpass_migrator;
-GRANT EXECUTE ON FUNCTION public.agentpass_invalidate_credential_after_revoke() TO agentpass_migrator;
-GRANT EXECUTE ON FUNCTION public.agentpass_invalidate_recovery_transition() TO agentpass_migrator;
-GRANT EXECUTE ON FUNCTION public.agentpass_invalidate_organization_security_event() TO agentpass_migrator;
-GRANT EXECUTE ON FUNCTION public.agentpass_guard_membership_session_epoch() TO agentpass_migrator;
-GRANT EXECUTE ON FUNCTION public.agentpass_guard_organization_authority_epoch() TO agentpass_migrator;
-GRANT EXECUTE ON FUNCTION public.agentpass_bump_organization_authority_epoch(uuid) TO agentpass_migrator;
+-- Keep every entry point private to its owner. Deployment-specific service
+-- roles are deliberately absent from migrations: roles.sql reconciles their
+-- exact grants after every migration, while generic PostgreSQL installations
+-- can apply this history without pre-creating Agentpass role names.
+REVOKE ALL PRIVILEGES ON FUNCTION public.agentpass_invalidate_identity_epoch(uuid,uuid,text) FROM PUBLIC;
+REVOKE ALL PRIVILEGES ON FUNCTION public.agentpass_invalidate_membership_after_change() FROM PUBLIC;
+REVOKE ALL PRIVILEGES ON FUNCTION public.agentpass_invalidate_credential_after_revoke() FROM PUBLIC;
+REVOKE ALL PRIVILEGES ON FUNCTION public.agentpass_invalidate_recovery_transition() FROM PUBLIC;
+REVOKE ALL PRIVILEGES ON FUNCTION public.agentpass_invalidate_organization_security_event() FROM PUBLIC;
+REVOKE ALL PRIVILEGES ON FUNCTION public.agentpass_guard_membership_session_epoch() FROM PUBLIC;
+REVOKE ALL PRIVILEGES ON FUNCTION public.agentpass_guard_organization_authority_epoch() FROM PUBLIC;
+REVOKE ALL PRIVILEGES ON FUNCTION public.agentpass_bump_organization_authority_epoch(uuid) FROM PUBLIC;
 
 COMMIT;

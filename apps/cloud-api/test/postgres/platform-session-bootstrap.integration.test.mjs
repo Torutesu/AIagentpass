@@ -1,3 +1,4 @@
+import { POSTGRES_SCHEMA_HEAD } from "../../src/postgres/schema-head.mjs";
 import assert from "node:assert/strict";
 import crypto from "node:crypto";
 import test from "node:test";
@@ -29,7 +30,7 @@ test("0055 real PostgreSQL resolves bootstrap authority only from the human sess
       client: migrationClient,
       applicationVersion: "platform-session-bootstrap-0055",
     }).run();
-    assert.equal(migrated.currentVersion, 55);
+    assert.equal(migrated.currentVersion, POSTGRES_SCHEMA_HEAD.version);
   } finally {
     migrationClient.release();
   }

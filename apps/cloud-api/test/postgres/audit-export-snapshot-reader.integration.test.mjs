@@ -1,3 +1,4 @@
+import { POSTGRES_SCHEMA_HEAD } from "../../src/postgres/schema-head.mjs";
 import assert from "node:assert/strict";
 import crypto from "node:crypto";
 import test from "node:test";
@@ -53,7 +54,7 @@ test("C2 PostgreSQL snapshot reader derives bounded roots and reservations from 
   const migrationClient = await poolA.connect();
   try {
     const migration = await createMigrationRunner({ client: migrationClient, applicationVersion: "audit-export-snapshot-reader-integration" }).run();
-    assert.equal(migration.currentVersion, 55);
+    assert.equal(migration.currentVersion, POSTGRES_SCHEMA_HEAD.version);
   } finally {
     migrationClient.release();
   }

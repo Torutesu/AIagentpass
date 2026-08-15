@@ -1,3 +1,4 @@
+import { POSTGRES_SCHEMA_HEAD } from "../../src/postgres/schema-head.mjs";
 import assert from "node:assert/strict";
 import crypto from "node:crypto";
 import test from "node:test";
@@ -34,7 +35,7 @@ test("0041 converges two PostgreSQL-backed adapter instances and recovers a star
   const migrationClient = await firstPool.connect();
   try {
     const migrated = await createMigrationRunner({ client: migrationClient, applicationVersion: "provider-operation-integration" }).run();
-    assert.equal(migrated.currentVersion, 55);
+    assert.equal(migrated.currentVersion, POSTGRES_SCHEMA_HEAD.version);
   } finally {
     migrationClient.release();
   }
@@ -123,7 +124,7 @@ test("0041 quarantines only expired started operations with bounded two-pool mai
   const migrationClient = await firstPool.connect();
   try {
     const migrated = await createMigrationRunner({ client: migrationClient, applicationVersion: "provider-operation-maintenance-integration" }).run();
-    assert.equal(migrated.currentVersion, 55);
+    assert.equal(migrated.currentVersion, POSTGRES_SCHEMA_HEAD.version);
   } finally {
     migrationClient.release();
   }
@@ -282,7 +283,7 @@ test("0042 runs bounded deployment-wide reconciliation and retention across two 
   const migrationClient = await firstPool.connect();
   try {
     const migrated = await createMigrationRunner({ client: migrationClient, applicationVersion: "provider-operation-race-matrix" }).run();
-    assert.equal(migrated.currentVersion, 55);
+    assert.equal(migrated.currentVersion, POSTGRES_SCHEMA_HEAD.version);
   } finally {
     migrationClient.release();
   }
@@ -513,7 +514,7 @@ test("0041 converges 100 identical requests across two PostgreSQL pools", {
   const migrationClient = await firstPool.connect();
   try {
     const migrated = await createMigrationRunner({ client: migrationClient, applicationVersion: "provider-operation-convergence-integration" }).run();
-    assert.equal(migrated.currentVersion, 55);
+    assert.equal(migrated.currentVersion, POSTGRES_SCHEMA_HEAD.version);
   } finally {
     migrationClient.release();
   }
@@ -584,7 +585,7 @@ test("0041 composes with lifecycle fencing across lost commits and emergency dis
   const migrationClient = await firstPool.connect();
   try {
     const migrated = await createMigrationRunner({ client: migrationClient, applicationVersion: "provider-operation-composed-integration" }).run();
-    assert.equal(migrated.currentVersion, 55);
+    assert.equal(migrated.currentVersion, POSTGRES_SCHEMA_HEAD.version);
   } finally {
     migrationClient.release();
   }

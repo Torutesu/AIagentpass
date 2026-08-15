@@ -1,3 +1,4 @@
+import { POSTGRES_SCHEMA_HEAD } from "../../src/postgres/schema-head.mjs";
 import assert from "node:assert/strict";
 import crypto from "node:crypto";
 import test from "node:test";
@@ -23,7 +24,7 @@ test("real PostgreSQL prunes bounded terminal recovery rows into an immutable se
   const migrationClient = await pool.connect();
   try {
     const result = await createMigrationRunner({ client: migrationClient, applicationVersion: "owner-recovery-retention-qualification" }).run();
-    assert.equal(result.currentVersion, 55);
+    assert.equal(result.currentVersion, POSTGRES_SCHEMA_HEAD.version);
   } finally {
     migrationClient.release();
   }

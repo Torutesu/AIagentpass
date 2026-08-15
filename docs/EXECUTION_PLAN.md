@@ -22,7 +22,7 @@ Completed at the baseline:
 - Hosted runtime composition of the authorized service, issue-only HTTP API, shared Platform limiter, dynamic signer/lifecycle readiness, and in-flight drain tracking.
 - Raw route dispatch before Human/Device authentication, with legacy hosted issue/replay composition removed and downgrade tests green.
 - Lost commit responses reconcile through the same authenticated atomic reservation function without a public replay/get surface or second signature.
-- Contract catalog, authority manifest, migration qualification, lint, and focused Platform Session tests at migration head 55.
+- Contract catalog, authority manifest, migration qualification, lint, and focused Platform Session tests at the generated current migration head.
 - Deterministic PostgreSQL 17 qualification lanes for Platform authorization
   concurrency, rollback/failure convergence, and the app/signer least-privilege
   boundary, plus source-bound CI evidence generation and retention.
@@ -471,7 +471,7 @@ only consume authorization and reserve through migration 0054. Promotion
 commit/uncertain finalization is routed through the signer pool and those are
 the only legacy promotion functions granted to the signer role.
 
-1. Build a deterministic fixture at migration head 55 with two organizations,
+1. Build a deterministic fixture at the generated current migration head with two organizations,
    active and stale assignments, two credentials, one revoked session, and
    least-privilege application/migration roles.
 2. Execute identical requests concurrently from separate pool connections;

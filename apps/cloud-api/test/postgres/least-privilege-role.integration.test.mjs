@@ -1,3 +1,4 @@
+import { POSTGRES_SCHEMA_HEAD } from "../../src/postgres/schema-head.mjs";
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import { spawnSync } from "node:child_process";
@@ -237,7 +238,7 @@ test("qualifies least-privilege roles against real PostgreSQL migrations and smo
       applicationVersion: "q2a-least-privilege-role-qualification",
     }).run();
     migrationApplied = true;
-    assert.equal(migration.currentVersion, 55);
+    assert.equal(migration.currentVersion, POSTGRES_SCHEMA_HEAD.version);
     await migrationClient.query(`CREATE TABLE public.${SMOKE_TABLE_NAME} (id uuid PRIMARY KEY, value text NOT NULL)`);
     smokeTableCreated = true;
     await migrationClient.query("CREATE SEQUENCE public.q2a_least_privilege_role_sequence");

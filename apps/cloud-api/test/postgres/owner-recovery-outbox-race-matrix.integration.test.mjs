@@ -1,3 +1,4 @@
+import { POSTGRES_SCHEMA_HEAD } from "../../src/postgres/schema-head.mjs";
 import assert from "node:assert/strict";
 import crypto from "node:crypto";
 import { writeFile } from "node:fs/promises";
@@ -46,7 +47,7 @@ test("W1.5 real-PostgreSQL two-worker owner-recovery outbox race matrix converge
       client: migrationClient,
       applicationVersion: "owner-recovery-outbox-race-matrix"
     }).run();
-    assert.equal(migration.currentVersion, 55);
+    assert.equal(migration.currentVersion, POSTGRES_SCHEMA_HEAD.version);
   } finally {
     migrationClient.release();
   }

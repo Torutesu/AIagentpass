@@ -8,6 +8,7 @@ const migrationUrl = new URL(
 );
 const catalogUrl = new URL("../../../../contracts/catalog-v1.json", import.meta.url);
 const authorityManifestUrl = new URL("../../../../scripts/postgres/authority-manifest.mjs", import.meta.url);
+const rolesUrl = new URL("../../../../scripts/postgres/roles.sql", import.meta.url);
 
 const readMigration = () => readFile(migrationUrl, "utf8");
 
@@ -134,8 +135,8 @@ test("0056 covers every reviewed mutation path through wrappers and triggers", a
   assert.match(sql, /agentpass_bump_organization_authority_epoch[\s\S]*agentpass_invalidate_identity_epoch/u);
 });
 
-test("0056 has exact function grants and denies direct service-role invocation", async () => {
-  const sql = await readMigration();
+test("0056 is deployment-role independent and roles.sql denies direct service-role invocation", async () => {
+  const [sql, roles] = await Promise.all([readMigration(), readFile(rolesUrl, "utf8")]);
   const functions = [
     "agentpass_invalidate_identity_epoch",
     "agentpass_invalidate_membership_after_change",
@@ -145,9 +146,22 @@ test("0056 has exact function grants and denies direct service-role invocation",
     "agentpass_guard_membership_session_epoch"
   ];
   for (const name of functions) {
-    assert.match(sql, new RegExp(`REVOKE ALL PRIVILEGES ON FUNCTION public\\.${name}\\([^;]* FROM PUBLIC, agentpass_app, agentpass_signer, agentpass_backup`, "u"), name);
-    assert.match(sql, new RegExp(`GRANT EXECUTE ON FUNCTION public\\.${name}\\([^;]* TO agentpass_migrator`, "u"), name);
+    assert.match(sql, new RegExp(`REVOKE ALL PRIVILEGES ON FUNCTION public\\.${name}\\([^;]* FROM PUBLIC`, "u"), name);
   }
-  assert.match(sql, /REVOKE ALL PRIVILEGES ON FUNCTION public\.agentpass_guard_organization_authority_epoch\(\) FROM PUBLIC, agentpass_app, agentpass_signer, agentpass_backup/u);
-  assert.doesNotMatch(sql, /GRANT EXECUTE ON FUNCTION public\.agentpass_invalidate_identity_epoch\([^;]* TO [^;]*(?:agentpass_app|agentpass_signer|agentpass_backup)/u);
+  assert.match(sql, /REVOKE ALL PRIVILEGES ON FUNCTION public\.agentpass_guard_organization_authority_epoch\(\) FROM PUBLIC/u);
+  assert.doesNotMatch(sql, /\bagentpass_(?:app|signer|backup|migrator)\b/u);
+  assert.match(roles, /REVOKE ALL PRIVILEGES ON ALL FUNCTIONS IN SCHEMA public FROM agentpass_app, agentpass_signer, agentpass_backup/u);
+  assert.match(roles, /GRANT EXECUTE ON FUNCTIONS TO agentpass_migrator/u);
+  assert.doesNotMatch(roles, /agentpass_invalidate_identity_epoch\([^)]*\)[^;]*TO agentpass_(?:app|signer|backup)/u);
+});
+
+test("0056 epoch guards authorize the relation owner rather than a fixed deployment role", async () => {
+  const sql = await readMigration();
+  const membershipGuard = bodyOf(sql, "agentpass_guard_membership_session_epoch");
+  const organizationGuard = bodyOf(sql, "agentpass_guard_organization_authority_epoch");
+  for (const guard of [membershipGuard, organizationGuard]) {
+    assert.match(guard, /pg_get_userbyid\([\s\S]*SELECT relowner FROM pg_class WHERE oid = TG_RELID/u);
+    assert.doesNotMatch(guard, /current_user\s*<>\s*'agentpass_migrator'/u);
+  }
+  assert.match(membershipGuard, /agentpass\.recovery_epoch_bump/u);
 });

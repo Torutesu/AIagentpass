@@ -1,3 +1,4 @@
+import { POSTGRES_SCHEMA_HEAD } from "../../src/postgres/schema-head.mjs";
 import assert from "node:assert/strict";
 import https from "node:https";
 import crypto from "node:crypto";
@@ -51,7 +52,7 @@ test("composed HTTPS provider, production publisher, worker, and PostgreSQL conv
       client: migrationClient,
       applicationVersion: "owner-recovery-https-provider-composed"
     }).run();
-    assert.equal(migration.currentVersion, 55);
+    assert.equal(migration.currentVersion, POSTGRES_SCHEMA_HEAD.version);
   } finally {
     migrationClient.release();
   }

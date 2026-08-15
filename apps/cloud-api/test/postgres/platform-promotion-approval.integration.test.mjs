@@ -1,3 +1,4 @@
+import { POSTGRES_SCHEMA_HEAD } from "../../src/postgres/schema-head.mjs";
 import assert from "node:assert/strict";
 import test from "node:test";
 import { Pool } from "pg";
@@ -47,7 +48,7 @@ test("0044 PostgreSQL digest is byte-identical to the canonical JavaScript appro
   t.after(async () => { client.release(); await pool.end(); });
 
   const migrated = await createMigrationRunner({ client, applicationVersion: "platform-approval-parity" }).run();
-  assert.equal(migrated.currentVersion, 55);
+  assert.equal(migrated.currentVersion, POSTGRES_SCHEMA_HEAD.version);
 
   const record = normalizePlatformPromotionApprovalRecord(RECORD, {
     now: Date.parse(RECORD.approved_at),

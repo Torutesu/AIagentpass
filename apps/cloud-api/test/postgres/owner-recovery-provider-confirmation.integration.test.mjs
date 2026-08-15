@@ -1,3 +1,4 @@
+import { POSTGRES_SCHEMA_HEAD } from "../../src/postgres/schema-head.mjs";
 import assert from "node:assert/strict";
 import crypto from "node:crypto";
 import test from "node:test";
@@ -30,7 +31,7 @@ test("0036 automatically confirms accepted uncertain delivery without retrying n
   const client = await poolA.connect();
   try {
     const migration = await createMigrationRunner({ client, applicationVersion: "owner-recovery-provider-confirmation" }).run();
-    assert.equal(migration.currentVersion, 55);
+    assert.equal(migration.currentVersion, POSTGRES_SCHEMA_HEAD.version);
   } finally { client.release(); }
   await ensureOwnerRecoveryProviderAcceptanceLedger(poolA);
 

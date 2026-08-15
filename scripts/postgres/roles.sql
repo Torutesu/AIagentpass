@@ -263,7 +263,17 @@ BEGIN
     'agentpass_platform_session_revoke(bytea,bytea,text)',
     'agentpass_platform_session_complete_and_issue(uuid,bytea,bytea,uuid,bytea,bytea,bytea,bytea,bytea,integer,integer)',
     'agentpass_consume_platform_authorization_and_reserve(bytea,bytea,uuid,bytea,bytea,uuid,text,text,text,text,bytea,integer,integer,text,bigint,bigint)',
-    'agentpass_platform_session_bootstrap_context(bytea,uuid,text,text)'
+    'agentpass_platform_session_bootstrap_context(bytea,uuid,text,text)',
+    'agentpass_hosted_identity_bootstrap_start(uuid,uuid,bytea,text,text,text)',
+    'agentpass_hosted_identity_oauth_state_consume(uuid,bytea,text)',
+    'agentpass_hosted_identity_oauth_state_complete(uuid,bytea,uuid,text,bytea)',
+    'agentpass_hosted_identity_oauth_state_fail(uuid,text)',
+    'agentpass_hosted_identity_bootstrap_csrf_issue(bytea,bytea)',
+    'agentpass_hosted_identity_bootstrap_organization_commit(bytea,text,bytea,uuid,uuid,jsonb)',
+    'agentpass_hosted_identity_bootstrap_challenge_create(bytea,uuid,bytea,text,text,timestamptz)',
+    'agentpass_hosted_identity_bootstrap_challenge_consume(bytea,uuid,bytea)',
+    'agentpass_hosted_identity_bootstrap_challenge_complete(bytea,uuid,bytea)',
+    'agentpass_hosted_identity_bootstrap_challenge_fail(bytea,uuid,bytea,text)'
   ] LOOP
     IF to_regprocedure('public.' || routine_signature) IS NOT NULL THEN
       EXECUTE format('GRANT EXECUTE ON FUNCTION public.%s TO agentpass_app', routine_signature);

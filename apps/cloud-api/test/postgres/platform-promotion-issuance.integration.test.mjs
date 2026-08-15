@@ -1,3 +1,4 @@
+import { POSTGRES_SCHEMA_HEAD } from "../../src/postgres/schema-head.mjs";
 import assert from "node:assert/strict";
 import crypto from "node:crypto";
 import { randomUUID } from "node:crypto";
@@ -25,7 +26,7 @@ test("0047 real PostgreSQL reserves, commits, and replays one exact promotion", 
   const migrationClient = await pool.connect();
   try {
     const migrated = await createMigrationRunner({ client: migrationClient, applicationVersion: "platform-promotion-issuance" }).run();
-    assert.equal(migrated.currentVersion, 55);
+    assert.equal(migrated.currentVersion, POSTGRES_SCHEMA_HEAD.version);
   } finally { migrationClient.release(); }
 
   const client = await pool.connect();

@@ -3,13 +3,14 @@ import fs from "node:fs";
 import path from "node:path";
 import test from "node:test";
 import { spawnSync } from "node:child_process";
+import { POSTGRES_SCHEMA_HEAD } from "../apps/cloud-api/src/postgres/schema-head.mjs";
 
 const root = path.resolve(import.meta.dirname, "..");
 
 test("machine-readable platform contracts pass the offline validator", () => {
   const result = spawnSync(process.execPath, [path.join(root, "scripts", "validate-contracts.mjs")], { cwd: root, encoding: "utf8" });
   assert.equal(result.status, 0, result.stderr);
-  assert.match(result.stdout, /validated 49 schemas, 2 OpenAPI documents, 21 fixtures, and 55 PostgreSQL migrations/);
+  assert.match(result.stdout, new RegExp(`validated 49 schemas, 2 OpenAPI documents, 21 fixtures, and ${POSTGRES_SCHEMA_HEAD.migration_count} PostgreSQL migrations`, "u"));
 });
 
 const humanOpenapi = () => JSON.parse(fs.readFileSync(path.join(root, "contracts", "openapi", "human-v1.json"), "utf8"));

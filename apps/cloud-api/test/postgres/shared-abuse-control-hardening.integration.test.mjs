@@ -1,3 +1,4 @@
+import { POSTGRES_SCHEMA_HEAD } from "../../src/postgres/schema-head.mjs";
 import assert from "node:assert/strict";
 import crypto from "node:crypto";
 import test from "node:test";
@@ -79,7 +80,7 @@ async function migrate(pool) {
   const client = await pool.connect();
   try {
     const result = await createMigrationRunner({ client, applicationVersion: "shared-abuse-control-hardening-integration" }).run();
-    assert.equal(result.currentVersion, 55);
+    assert.equal(result.currentVersion, POSTGRES_SCHEMA_HEAD.version);
   } finally {
     client.release();
   }
