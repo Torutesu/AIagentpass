@@ -2,13 +2,16 @@
 
 Status: active
 
-Baseline: `codex/agent-platform` after `d7a1dcd`
+Baseline: `codex/agent-platform` after `e950ea1`
 
-Updated: 2026-08-15
+Updated: 2026-08-16
 
 This is the authoritative forward plan for the first production release. The
 older milestone documents remain useful design history; when priorities differ,
 this document controls execution order.
+
+The current merge-sized implementation and qualification queue is maintained in
+[`IMPLEMENTATION_PLAN_2026-08-16.md`](./IMPLEMENTATION_PLAN_2026-08-16.md).
 
 ## 1. v1 outcome
 
@@ -53,6 +56,15 @@ The current integration slice closes five concrete gaps:
 5. import the exact public setup preflight in Console and carry an issued
    invitation over a short-lived, origin-pinned, nonce-bound IPv4 loopback
    channel without browser persistence.
+
+The source checkpoint now contains 181 catalog entries, 49 JSON Schemas, 62
+OpenAPI operations, and 70 forward-only PostgreSQL migrations. Platform
+challenge and session timestamps use database authority; platform authorization
+and provider-operation commits use purpose-correct digest binding; and the
+least-privilege execution probe reaches the reviewed function's input-validation
+boundary without granting direct table privileges. Organization workspace,
+passkey lifecycle, and Human session controls are present in Console. Their full
+protected browser/PostgreSQL qualification remains open.
 
 This checkpoint is not a production release. Real managed-key evidence,
 physical-Mac qualification, signed/notarized distribution, deployed staging,
