@@ -277,8 +277,10 @@
         "operationId": "createRegistrationOptions",
         "summary": "Create WebAuthn registration options",
         "security": [{ "humanSession": [] }],
-        "parameters": [{ "$ref": "#/components/parameters/CsrfToken" }, { "$ref": "#/components/parameters/IdempotencyKey" }],
-        "responses": { "200": { "$ref": "#/components/responses/Json" }, "400": { "$ref": "#/components/responses/BadRequest" }, "401": { "$ref": "#/components/responses/Unauthorized" } }
+        "parameters": [{ "$ref": "#/components/parameters/CsrfToken" }, { "$ref": "#/components/parameters/RecentAuthForCredentialRegistration" }],
+        "requestBody": { "$ref": "#/components/requestBodies/WebAuthnRegistrationOptions" },
+        "x-agentpass-runtime-path": "/api/auth/webauthn/registration/options",
+        "responses": { "200": { "$ref": "#/components/responses/WebAuthnRegistrationOptions" }, "400": { "$ref": "#/components/responses/BadRequest" }, "401": { "$ref": "#/components/responses/Unauthorized" }, "403": { "$ref": "#/components/responses/Forbidden" }, "409": { "$ref": "#/components/responses/VersionConflict" }, "428": { "$ref": "#/components/responses/PreconditionRequired" }, "429": { "$ref": "#/components/responses/TooManyRequests" }, "503": { "$ref": "#/components/responses/ServiceUnavailable" } }
       }
     },
     "/webauthn/registration/verify": {
@@ -286,8 +288,10 @@
         "operationId": "verifyRegistration",
         "summary": "Verify WebAuthn registration",
         "security": [{ "humanSession": [] }],
-        "parameters": [{ "$ref": "#/components/parameters/CsrfToken" }, { "$ref": "#/components/parameters/IdempotencyKey" }],
-        "responses": { "200": { "$ref": "#/components/responses/Json" }, "400": { "$ref": "#/components/responses/BadRequest" }, "401": { "$ref": "#/components/responses/Unauthorized" } }
+        "parameters": [{ "$ref": "#/components/parameters/CsrfToken" }, { "$ref": "#/components/parameters/RecentAuthForCredentialRegistration" }],
+        "requestBody": { "$ref": "#/components/requestBodies/WebAuthnRegistrationVerify" },
+        "x-agentpass-runtime-path": "/api/auth/webauthn/registration/verify",
+        "responses": { "201": { "$ref": "#/components/responses/WebAuthnRegistrationVerified" }, "400": { "$ref": "#/components/responses/BadRequest" }, "401": { "$ref": "#/components/responses/Unauthorized" }, "403": { "$ref": "#/components/responses/Forbidden" }, "409": { "$ref": "#/components/responses/VersionConflict" }, "422": { "$ref": "#/components/responses/ValidationError" }, "428": { "$ref": "#/components/responses/PreconditionRequired" }, "429": { "$ref": "#/components/responses/TooManyRequests" }, "503": { "$ref": "#/components/responses/ServiceUnavailable" } }
       }
     },
     "/webauthn/authentication/options": {
@@ -1178,11 +1182,11 @@
         "schema": { "type": "string", "format": "uuid" }
       },
       "CsrfToken": {
-        "name": "X-CSRF-Token",
+        "name": "AgentPass-CSRF",
         "in": "header",
         "required": true,
         "description": "Session-bound CSRF token. Same-origin/origin checks remain required; this header is not authentication.",
-        "schema": { "type": "string", "minLength": 32, "maxLength": 512 }
+        "schema": { "type": "string", "minLength": 43, "maxLength": 43, "pattern": "^[A-Za-z0-9_-]{43}$" }
       },
       "RecentAuth": {
         "name": "agentpass-recent-auth",
@@ -1196,6 +1200,13 @@
         "in": "header",
         "required": false,
         "description": "Required when the request body is ReissueInvitationRequest and prohibited for ordinary invitation creation.",
+        "schema": { "type": "string", "format": "uuid" }
+      },
+      "RecentAuthForCredentialRegistration": {
+        "name": "agentpass-recent-auth",
+        "in": "header",
+        "required": false,
+        "description": "Required only when the authenticated member already has an active credential; the one-use proof is bound to human.webauthn.credential.register.",
         "schema": { "type": "string", "format": "uuid" }
       },
       "IdempotencyKey": {
@@ -1270,6 +1281,16 @@
             "schema": { "$ref": "#/components/schemas/SessionBootstrapRequest" }
           }
         }
+      },
+      "WebAuthnRegistrationOptions": {
+        "required": true,
+        "description": "The organization must equal the organization bound to the authenticated Human Session. No member, role, RP, Origin, challenge, or credential field is accepted.",
+        "content": { "application/json": { "schema": { "$ref": "#/components/schemas/WebAuthnRegistrationOptionsRequest" } } }
+      },
+      "WebAuthnRegistrationVerify": {
+        "required": true,
+        "description": "Exact browser registration transport material bound to the authenticated Human Session and issued challenge. Raw ceremony material is never returned or durably stored.",
+        "content": { "application/json": { "schema": { "$ref": "#/components/schemas/WebAuthnRegistrationVerifyRequest" } } }
       },
       "CreateOrganization": {
         "required": true,
@@ -1479,6 +1500,16 @@
       "InvitationCreated": { "description": "Invitation and its one-time token. The token is returned only once.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/InvitationCreatedResponse" } } } },
       "InvitationResponse": { "description": "Invitation response without token material", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/InvitationResponse" } } } },
       "InvitationAccepted": { "description": "Invitation accepted and membership created", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/InvitationAcceptedResponse" } } } },
+      "WebAuthnRegistrationOptions": {
+        "description": "Short-lived WebAuthn registration options bound to the current Human Session. Challenge material is transport-only.",
+        "headers": { "Cache-Control": { "required": true, "schema": { "type": "string", "const": "no-store, max-age=0" } } },
+        "content": { "application/json": { "schema": { "$ref": "#/components/schemas/WebAuthnRegistrationOptionsResponse" } } }
+      },
+      "WebAuthnRegistrationVerified": {
+        "description": "The public credential was created. No attestation, public key, challenge, session authority, or provider diagnostics are returned.",
+        "headers": { "Cache-Control": { "required": true, "schema": { "type": "string", "const": "no-store, max-age=0" } } },
+        "content": { "application/json": { "schema": { "$ref": "#/components/schemas/WebAuthnRegistrationVerifiedResponse" } } }
+      },
       "DeviceList": { "description": "Minimal authoritative Console device state without keys, policy, nonce, signature, or metadata.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/DeviceListResponse" } } } },
       "DeviceRefreshRequestAccepted": { "description": "A wake request was accepted, coalesced with a pending wake, or found unnecessary because no refresh is pending. The response is a delivery hint only; it does not prove device delivery or application.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/DeviceRefreshRequestResponse" } } } },
       "AgentSessionGrantIssued": {
@@ -1556,7 +1587,9 @@
       "IdempotencyConflict": { "description": "Idempotency key is reused with a different request or an incompatible in-flight result", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorEnvelope" } } } },
       "InvitationConflict": { "description": "Invitation token or state cannot be accepted", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorEnvelope" } } } },
       "ValidationError": { "description": "Request fields fail the contract", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorEnvelope" } } } },
+      "PreconditionRequired": { "description": "A fresh operation-bound WebAuthn authorization is required", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorEnvelope" } } } },
       "TooManyRequests": { "description": "Rate limit exceeded", "headers": { "Retry-After": { "schema": { "type": "integer", "minimum": 1 } } }, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorEnvelope" } } } },
+      "ServiceUnavailable": { "description": "A required session, registration, verifier, recent-authorization, or credential-storage dependency is unavailable", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorEnvelope" } } } },
       "InternalError": { "description": "Stable internal failure response; sensitive details are not disclosed", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorEnvelope" } } } }
     },
     "schemas": {
@@ -1579,6 +1612,46 @@
       },
       "HumanSession": { "$ref": "../schemas/human-session-v1.schema.json" },
       "RequestId": { "type": "string", "format": "uuid", "description": "Stable request correlation identifier." },
+      "WebAuthnRegistrationOptionsRequest": {
+        "type": "object", "additionalProperties": false, "required": ["organization_id"],
+        "properties": { "organization_id": { "type": "string", "format": "uuid" } }
+      },
+      "WebAuthnRegistrationVerifyRequest": {
+        "type": "object", "additionalProperties": false, "required": ["organization_id", "challenge_id", "credential"],
+        "properties": {
+          "organization_id": { "type": "string", "format": "uuid" },
+          "challenge_id": { "type": "string", "format": "uuid" },
+          "credential": { "$ref": "#/components/schemas/WebAuthnBrowserRegistrationCredential" }
+        }
+      },
+      "WebAuthnBrowserRegistrationCredential": {
+        "type": "object", "additionalProperties": false, "required": ["id", "rawId", "response", "type", "clientExtensionResults"],
+        "description": "Exact browser serialization. id and rawId must be identical canonical base64url values.",
+        "x-agentpass-invariants": ["id equals rawId"],
+        "properties": {
+          "id": { "type": "string", "minLength": 22, "maxLength": 1366, "pattern": "^[A-Za-z0-9_-]+$" },
+          "rawId": { "type": "string", "minLength": 22, "maxLength": 1366, "pattern": "^[A-Za-z0-9_-]+$" },
+          "type": { "const": "public-key" },
+          "clientExtensionResults": { "type": "object", "additionalProperties": true, "maxProperties": 32 },
+          "authenticatorAttachment": { "type": "string", "enum": ["platform", "cross-platform"] },
+          "response": {
+            "type": "object", "additionalProperties": false, "required": ["clientDataJSON", "attestationObject"],
+            "properties": {
+              "clientDataJSON": { "type": "string", "minLength": 2, "maxLength": 21846, "pattern": "^[A-Za-z0-9_-]+$" },
+              "attestationObject": { "type": "string", "minLength": 2, "maxLength": 87382, "pattern": "^[A-Za-z0-9_-]+$" },
+              "transports": { "type": "array", "maxItems": 7, "uniqueItems": true, "items": { "type": "string", "enum": ["ble", "cable", "hybrid", "internal", "nfc", "smart-card", "usb"] } }
+            }
+          }
+        }
+      },
+      "WebAuthnRegistrationOptionsResponse": {
+        "type": "object", "additionalProperties": false, "required": ["challenge_id", "options"],
+        "properties": { "challenge_id": { "type": "string", "format": "uuid" }, "options": { "$ref": "#/components/schemas/RecoveryRegistrationOptions" } }
+      },
+      "WebAuthnRegistrationVerifiedResponse": {
+        "type": "object", "additionalProperties": false, "required": ["credential_id", "registered_at"],
+        "properties": { "credential_id": { "type": "string", "minLength": 22, "maxLength": 1366, "pattern": "^[A-Za-z0-9_-]+$" }, "registered_at": { "type": "string", "format": "date-time" } }
+      },
       "DeviceRefreshRequestBody": {
         "type": "object",
         "additionalProperties": false,
