@@ -21,13 +21,18 @@ const SESSION_KEYS = Object.freeze([
 ]);
 
 const FIND_INPUT_KEYS = Object.freeze(["capability", "operation", "organization_id", "session_material"]);
+const TOUCH_INPUT_KEYS = Object.freeze([...FIND_INPUT_KEYS, "csrf_token"]);
+const REVOKE_INPUT_KEYS = Object.freeze(["csrf_token", "session_material_hash"]);
+const SHA256_HEX = /^[0-9a-f]{64}$/u;
 
 // The PostgreSQL function is the authority boundary.  The raw bearer never
 // appears in these parameters: normalizeSessionMaterial returns only a digest.
 export const PLATFORM_SESSION_FIND_ACTIVE_SQL =
   "SELECT agentpass_platform_session_find_active($1::bytea,$2::uuid,$3::text,$4::text) AS session";
 export const PLATFORM_SESSION_TOUCH_SQL =
-  "SELECT agentpass_platform_session_touch($1::bytea,$2::uuid,$3::text,$4::text) AS session";
+  "SELECT agentpass_platform_session_touch($1::bytea,$2::bytea,$3::uuid,$4::text,$5::text) AS session";
+export const PLATFORM_SESSION_REVOKE_SELF_SQL =
+  "SELECT agentpass_platform_session_revoke($1::bytea,$2::bytea,$3::text) AS result";
 
 export const PLATFORM_SESSION_REPOSITORY_ERROR_CODES = Object.freeze({
   CONFIG: "ERR_PLATFORM_SESSION_REPOSITORY_CONFIG",
@@ -80,17 +85,30 @@ export function createPostgresPlatformSessionRepository({ client } = {}) {
 
   async function touchPlatformSession(...args) {
     if (args.length !== 1) throw repositoryError(PLATFORM_SESSION_REPOSITORY_ERROR_CODES.INPUT);
-    const values = normalizeLookupInputSafely(args[0]);
+    const values = normalizeTouchInputSafely(args[0]);
     return callFunction(
       PLATFORM_SESSION_TOUCH_SQL,
-      [values.session_material_hash, values.organization_id, values.operation, values.capability],
+      [values.session_material_hash, values.csrf_token_hash, values.organization_id, values.operation, values.capability],
       (result) => normalizeSessionLookupResult(result, values, false)
     );
   }
 
+  async function revokeSelf(...args) {
+    if (args.length !== 1) throw repositoryError(PLATFORM_SESSION_REPOSITORY_ERROR_CODES.INPUT);
+    const values = normalizeRevokeInputSafely(args[0]);
+    return callFunction(
+      PLATFORM_SESSION_REVOKE_SELF_SQL,
+      [values.session_material_hash, values.csrf_token_hash, "self_revoke"],
+      normalizeRevokeResult
+    );
+  }
+
   return Object.freeze({
+    bearerBound: true,
+    acceptsSessionMaterialHash: true,
     findActivePlatformSession,
-    touchPlatformSession
+    touchPlatformSession,
+    revokeSelf
   });
 
   async function callFunction(sql, params, normalizeResult) {
@@ -116,6 +134,44 @@ function normalizeLookupInputSafely(value) {
     if (error instanceof PlatformSessionRepositoryError) throw error;
     throw repositoryError(PLATFORM_SESSION_REPOSITORY_ERROR_CODES.INPUT);
   }
+}
+
+function normalizeTouchInputSafely(value) {
+  try {
+    if (!isPlainObject(value) || !exactKeys(value, TOUCH_INPUT_KEYS)) throw repositoryError(PLATFORM_SESSION_REPOSITORY_ERROR_CODES.INPUT);
+    const lookup = normalizeLookupInput(Object.fromEntries(FIND_INPUT_KEYS.map((key) => [key, value[key]])));
+    return Object.freeze({ ...lookup, csrf_token_hash: hashSessionMaterial(value.csrf_token) });
+  } catch (error) {
+    if (error instanceof PlatformSessionRepositoryError) throw error;
+    throw repositoryError(PLATFORM_SESSION_REPOSITORY_ERROR_CODES.INPUT);
+  }
+}
+
+function normalizeRevokeInputSafely(value) {
+  try {
+    if (!isPlainObject(value) || !exactKeys(value, REVOKE_INPUT_KEYS)
+      || typeof value.session_material_hash !== "string" || !SHA256_HEX.test(value.session_material_hash)) {
+      throw repositoryError(PLATFORM_SESSION_REPOSITORY_ERROR_CODES.INPUT);
+    }
+    return Object.freeze({
+      session_material_hash: Buffer.from(value.session_material_hash, "hex"),
+      csrf_token_hash: hashSessionMaterial(value.csrf_token)
+    });
+  } catch (error) {
+    if (error instanceof PlatformSessionRepositoryError) throw error;
+    throw repositoryError(PLATFORM_SESSION_REPOSITORY_ERROR_CODES.INPUT);
+  }
+}
+
+function normalizeRevokeResult(result) {
+  const row = singleRow(result, "result");
+  if (!isPlainObject(row.result) || !["revoked", "already-terminal", "absent"].includes(row.result.outcome)) {
+    throw repositoryError(PLATFORM_SESSION_REPOSITORY_ERROR_CODES.RESULT);
+  }
+  if (row.result.outcome === "absent") return Object.freeze({ revoked: false });
+  const session = normalizeSession(row.result.session);
+  if (session.status !== "revoked" && row.result.outcome === "revoked") throw repositoryError(PLATFORM_SESSION_REPOSITORY_ERROR_CODES.RESULT);
+  return Object.freeze({ revoked: true, session });
 }
 
 function normalizeLookupInput(value) {

@@ -5,6 +5,7 @@ import test from "node:test";
 import {
   createPostgresPlatformSessionRepository,
   PLATFORM_SESSION_FIND_ACTIVE_SQL,
+  PLATFORM_SESSION_REVOKE_SELF_SQL,
   PLATFORM_SESSION_REPOSITORY_ERROR_CODES as CODES,
   PLATFORM_SESSION_TOUCH_SQL,
   PlatformSessionRepositoryError
@@ -20,6 +21,8 @@ const CREDENTIAL_ID = "77777777-7777-4777-8777-777777777777";
 const OPERATION = "platform.promotion.issue";
 const MATERIAL = "A".repeat(43);
 const MATERIAL_DIGEST = crypto.createHash("sha256").update(MATERIAL).digest();
+const CSRF_TOKEN = "B".repeat(43);
+const CSRF_DIGEST = crypto.createHash("sha256").update(CSRF_TOKEN).digest();
 
 function session(overrides = {}) {
   return {
@@ -62,6 +65,10 @@ function lookupInput(overrides = {}) {
   };
 }
 
+function touchInput(overrides = {}) {
+  return { ...lookupInput(), csrf_token: CSRF_TOKEN, ...overrides };
+}
+
 class FakeClient {
   constructor({ result = response(), error = undefined } = {}) {
     this.result = result;
@@ -87,14 +94,28 @@ test("requires a client and exposes only the reviewed lifecycle methods", () => 
   assert.throws(() => createPostgresPlatformSessionRepository(), { code: CODES.CONFIG });
   const repository = createPostgresPlatformSessionRepository({ client: new FakeClient() });
   assert.deepEqual(Object.keys(repository), [
+    "bearerBound",
+    "acceptsSessionMaterialHash",
     "findActivePlatformSession",
-    "touchPlatformSession"
+    "touchPlatformSession",
+    "revokeSelf"
   ]);
   assert.equal(Object.isFrozen(repository), true);
   assert.equal("agentpass_platform_session_issue" in repository, false);
   assert.equal("agentpass_platform_credential_provision" in repository, false);
   assert.equal("agentpass_platform_credential_advance_sign_count" in repository, false);
-  assert.equal("revokePlatformSession" in repository, false);
+  assert.equal(repository.bearerBound, true);
+  assert.equal(repository.acceptsSessionMaterialHash, true);
+});
+
+test("self revoke binds bearer hash and CSRF hash without accepting raw bearer", async () => {
+  const client = new FakeClient({ result: { rowCount: 1, rows: [{ result: { outcome: "revoked", session: session({ status: "revoked", revoked_at: "2026-08-15T11:06:00.000Z", revoke_reason: "self_revoke", version: 3 }) } }] } });
+  const repository = createPostgresPlatformSessionRepository({ client });
+  const result = await repository.revokeSelf({ session_material_hash: MATERIAL_DIGEST.toString("hex"), csrf_token: CSRF_TOKEN });
+  assert.equal(result.revoked, true);
+  assert.equal(client.calls[0].text, PLATFORM_SESSION_REVOKE_SELF_SQL);
+  assert.deepEqual(client.calls[0].params, [MATERIAL_DIGEST, CSRF_DIGEST, "self_revoke"]);
+  assert.equal(client.calls[0].params.includes(MATERIAL), false);
 });
 
 test("findActive hashes raw material locally, uses one parameterized call, and returns bindings", async () => {
@@ -125,10 +146,10 @@ test("returns null for a denied canonical bearer lookup", async () => {
 test("touch uses its dedicated function and accepts an active or terminal lifecycle result", async () => {
   const client = new FakeClient();
   const repository = createPostgresPlatformSessionRepository({ client });
-  const result = await repository.touchPlatformSession(lookupInput());
+  const result = await repository.touchPlatformSession(touchInput());
   assert.deepEqual(result, session());
   assert.equal(client.calls[0].text, PLATFORM_SESSION_TOUCH_SQL);
-  assert.deepEqual(client.calls[0].params.slice(1), [ORGANIZATION_ID, OPERATION, OPERATION]);
+  assert.deepEqual(client.calls[0].params, [MATERIAL_DIGEST, CSRF_DIGEST, ORGANIZATION_ID, OPERATION, OPERATION]);
 
   const terminalClient = new FakeClient({ result: response(session({
     status: "expired",
@@ -136,7 +157,7 @@ test("touch uses its dedicated function and accepts an active or terminal lifecy
     idle_expires_at: "2026-08-15T12:00:00.000Z"
   })) });
   const terminalRepository = createPostgresPlatformSessionRepository({ client: terminalClient });
-  assert.equal((await terminalRepository.touchPlatformSession(lookupInput())).status, "expired");
+  assert.equal((await terminalRepository.touchPlatformSession(touchInput())).status, "expired");
 });
 
 test("rejects missing, extra, malformed, role-bearing, and secret-bearing inputs before querying", async () => {
@@ -183,7 +204,7 @@ test("rejects malformed and binding-conflicting session results", async () => {
   ];
   for (const result of cases) {
     const repository = createPostgresPlatformSessionRepository({ client: new FakeClient({ result }) });
-    await assert.rejects(repository.touchPlatformSession(lookupInput()), (error) => {
+    await assert.rejects(repository.touchPlatformSession(touchInput()), (error) => {
       assertOpaque(error, CODES.RESULT);
       return true;
     });
@@ -210,7 +231,7 @@ test("converts hostile result accessors into a stable result error", async () =>
   const repository = createPostgresPlatformSessionRepository({
     client: new FakeClient({ result: { rowCount: 1, rows: [row] } })
   });
-  await assert.rejects(repository.touchPlatformSession(lookupInput()), (error) => {
+  await assert.rejects(repository.touchPlatformSession(touchInput()), (error) => {
     assertOpaque(error, CODES.RESULT);
     return true;
   });

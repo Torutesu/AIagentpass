@@ -24,11 +24,12 @@ const ORIGIN = "https://console.agentpass.test";
 const RP_ID = "console.agentpass.test";
 const CAPABILITY = "platform.promotion.issue";
 const OPERATION = CAPABILITY;
+const REQUEST_DIGEST = "ab".repeat(32);
 const NOW = 1_800_000_000_000;
 
 function deterministicRandom() {
   const uuids = [IDS.challenge, IDS.session, IDS.jti];
-  const bytes = [Buffer.alloc(32, 1), Buffer.alloc(32, 2)];
+  const bytes = [Buffer.alloc(32, 1), Buffer.alloc(32, 2), Buffer.alloc(32, 3)];
   return {
     uuid: () => {
       const value = uuids.shift();
@@ -52,6 +53,8 @@ function context(overrides = {}) {
     authority_generation: 8,
     operation: OPERATION,
     capability: CAPABILITY,
+    request_digest_sha256: REQUEST_DIGEST,
+    allowed_credential_ids: [IDS.credential],
     rp_id: RP_ID,
     origin: ORIGIN,
     user_verification: "required",
@@ -152,9 +155,7 @@ function assertionFor(issued, overrides = {}) {
   ]).toString("base64url");
   return {
     challenge_id: issued.challenge_id,
-    challenge: issued.challenge,
     jti: issued.jti,
-    platform_session_id: issued.platform_session_id,
     credential_id: IDS.credential,
     client_data_json: clientData,
     authenticator_data: authenticatorData,
@@ -230,6 +231,9 @@ test("verify binds operation, capability, principal, assignment, generation, RP,
   assert.equal(result.session.session_id, IDS.session);
   assert.equal(typeof result.session_bearer, "string");
   assert.equal(result.session_bearer.length, 43);
+  assert.equal(typeof result.csrf_token, "string");
+  assert.equal(result.csrf_token.length, 43);
+  assert.notEqual(result.csrf_token, result.session_bearer);
   assert.equal(verifierInputs.length, 1);
   assert.deepEqual(verifierInputs[0].ceremony, {
     challenge_id: IDS.challenge,
@@ -242,6 +246,7 @@ test("verify binds operation, capability, principal, assignment, generation, RP,
     authority_generation: 8,
     operation: OPERATION,
     capability: CAPABILITY,
+    request_digest_sha256: REQUEST_DIGEST,
     jti: IDS.jti,
     context_hash: verifierInputs[0].ceremony.context_hash,
     rp_id: RP_ID,
@@ -259,6 +264,8 @@ test("verify binds operation, capability, principal, assignment, generation, RP,
   assert.ok(Buffer.isBuffer(issue.session_material_hash));
   assert.equal(issue.session_material_hash.length, 32);
   assert.equal(issue.session_material_hash.toString("hex"), crypto.createHash("sha256").update(result.session_bearer).digest("hex"));
+  assert.ok(Buffer.isBuffer(issue.csrf_token_hash));
+  assert.equal(issue.csrf_token_hash.toString("hex"), crypto.createHash("sha256").update(result.csrf_token).digest("hex"));
   assert.equal(issue.credential_id, IDS.platformCredential);
 });
 
@@ -267,7 +274,8 @@ test("challenge/JTI mismatch fails before one-use claim", async () => {
   const { service } = createService({ repository, verifyAssertion: async () => ({ verified: true, credential_id: IDS.credential, sign_count: 1 }) });
   const issued = await service.begin(beginInput());
 
-  await assert.rejects(() => service.verify(assertionFor(issued, { capability: "platform.other" })), errorCode(PLATFORM_SESSION_WEBAUTHN_ERROR_CODES.INVALID_CONTEXT));
+  const wrongClientData = Buffer.from(JSON.stringify({ type: "webauthn.get", challenge: Buffer.alloc(32, 9).toString("base64url"), origin: ORIGIN })).toString("base64url");
+  await assert.rejects(() => service.verify(assertionFor(issued, { client_data_json: wrongClientData })), errorCode(PLATFORM_SESSION_WEBAUTHN_ERROR_CODES.CHALLENGE_MISMATCH));
   await assert.rejects(() => service.verify(assertionFor(issued, { jti: IDS.assignment })), errorCode(PLATFORM_SESSION_WEBAUTHN_ERROR_CODES.JTI_MISMATCH));
   assert.equal(repository.challenges.get(IDS.challenge).status, "pending");
   assert.equal(repository.calls.filter(([name]) => name === "claimChallenge").length, 0);
@@ -282,7 +290,8 @@ test("every authority binding field is exact and cannot be substituted", async (
     ["organization_id", "99999999-9999-4999-8999-999999999999"],
     ["assignment_id", "99999999-9999-4999-8999-999999999999"],
     ["authority_generation", 9],
-    ["platform_session_id", "99999999-9999-4999-8999-999999999999"],
+    ["request_digest_sha256", "cd".repeat(32)],
+    ["allowed_credential_ids", [Buffer.alloc(32, 8).toString("base64url")]],
     ["rp_id", "other.agentpass.test", { rp_id: "other.agentpass.test", origin: "https://other.agentpass.test" }],
     ["origin", "https://other.agentpass.test", { rp_id: "other.agentpass.test", origin: "https://other.agentpass.test" }]
   ];

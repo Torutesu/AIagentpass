@@ -206,7 +206,7 @@ async function createFixture(t) {
       client: migrationClient,
       applicationVersion: "m2-a2q-agent-session-http"
     }).run();
-    assert.equal(migration.currentVersion, 53);
+    assert.equal(migration.currentVersion, 54);
   } finally {
     migrationClient.release();
   }

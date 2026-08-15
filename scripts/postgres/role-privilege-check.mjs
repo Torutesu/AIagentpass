@@ -97,14 +97,22 @@ signer_function_allowlist(routine_signature) AS (
 ),
 app_function_allowlist(routine_signature) AS (
   VALUES
-    ('agentpass_platform_promotion_issuance_reserve(uuid,text,text,text,text,bytea,integer,integer,text,bigint,bigint)'),
     ('agentpass_platform_promotion_issuance_replay(uuid,text,text,text,text)'),
     ('agentpass_platform_promotion_issuance_commit(uuid,text,text,text,text,bytea,bytea,bytea,bytea,bytea)'),
     ('agentpass_platform_promotion_issuance_uncertain(uuid,text,text,text,text,bytea,text)'),
     ('agentpass_platform_promotion_issuance_get(uuid,text,text,text,text,boolean)'),
     ('agentpass_platform_operator_assignment_find_active(uuid,uuid,uuid,text,text)'),
+    ('agentpass_platform_session_challenge_create(uuid,uuid,bytea,bytea,bytea,bytea,bytea[],uuid,uuid,uuid,uuid,bigint,text,text,text,text,text,integer)'),
+    ('agentpass_platform_session_challenge_find(uuid)'),
+    ('agentpass_platform_session_challenge_claim(uuid,bytea,bytea,bytea,bytea)'),
+    ('agentpass_platform_session_challenge_fail(uuid,bytea,bytea,bytea,bytea,text)'),
+    ('agentpass_platform_session_credential_find(uuid,bytea,bytea)'),
+    ('agentpass_platform_credential_advance_verified(uuid,bytea,uuid,bytea,bigint,bigint,bigint,boolean,boolean)'),
     ('agentpass_platform_session_find_active(bytea,uuid,text,text)'),
-    ('agentpass_platform_session_touch(bytea,uuid,text,text)')
+    ('agentpass_platform_session_touch(bytea,bytea,uuid,text,text)'),
+    ('agentpass_platform_session_revoke(bytea,bytea,text)'),
+    ('agentpass_platform_session_complete_and_issue(uuid,bytea,bytea,uuid,bytea,bytea,bytea,bytea,bytea,integer,integer)'),
+    ('agentpass_consume_platform_authorization_and_reserve(bytea,bytea,uuid,bytea,bytea,uuid,text,text,text,text,bytea,integer,integer,text,bigint,bigint)')
 ),
 signer_function_oids AS (
   SELECT routine_signature, to_regprocedure('public.' || routine_signature) AS routine_oid

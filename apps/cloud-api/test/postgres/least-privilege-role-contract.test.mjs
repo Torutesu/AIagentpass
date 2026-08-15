@@ -26,7 +26,11 @@ test('role SQL is idempotent, credential-free, and PUBLIC is revoked', async () 
   assert.match(sql, /GRANT EXECUTE ON FUNCTION public\.%s TO agentpass_app/);
   assert.match(sql, /agentpass_platform_operator_assignment_find_active\(uuid,uuid,uuid,text,text\)/u);
   assert.match(sql, /agentpass_platform_session_find_active\(bytea,uuid,text,text\)/u);
-  assert.match(sql, /agentpass_platform_session_touch\(bytea,uuid,text,text\)/u);
+  assert.match(sql, /agentpass_platform_session_touch\(bytea,bytea,uuid,text,text\)/u);
+  assert.match(sql, /agentpass_platform_session_revoke\(bytea,bytea,text\)/u);
+  assert.match(sql, /agentpass_platform_session_complete_and_issue\(uuid,bytea,bytea,uuid,bytea,bytea,bytea,bytea,bytea,integer,integer\)/u);
+  assert.match(sql, /agentpass_consume_platform_authorization_and_reserve\(bytea,bytea,uuid,bytea,bytea,uuid,text,text,text,text,bytea,integer,integer,text,bigint,bigint\)/u);
+  assert.doesNotMatch(sql, /'agentpass_platform_promotion_issuance_reserve\(/u);
   assert.match(sql, /ALTER DEFAULT PRIVILEGES FOR ROLE agentpass_migrator IN SCHEMA public/);
   assert.match(sql, /ON TABLES/);
   assert.match(sql, /ON SEQUENCES/);

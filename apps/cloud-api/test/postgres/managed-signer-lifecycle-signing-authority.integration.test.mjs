@@ -91,7 +91,7 @@ test("0051 makes lifecycle and signing function-only for the signer role", {
   const migrationClient = await adminPool.connect();
   try {
     const migrated = await createMigrationRunner({ client: migrationClient, applicationVersion: "managed-signer-authority-qualification" }).run();
-    assert.equal(migrated.currentVersion, 53);
+    assert.equal(migrated.currentVersion, 54);
   } finally {
     migrationClient.release();
   }

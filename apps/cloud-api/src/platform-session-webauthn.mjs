@@ -10,6 +10,7 @@ const MAX_RESPONSE_CACHE_MS = 300_000;
 const MAX_RESPONSE_CACHE_ENTRIES = 1_000;
 const CHALLENGE_BYTES = 32;
 const SESSION_BEARER_BYTES = 32;
+const SESSION_CSRF_BYTES = 32;
 const MAX_CLIENT_DATA_BYTES = 16 * 1024;
 const MAX_AUTHENTICATOR_DATA_BYTES = 4 * 1024;
 const MAX_SIGNATURE_BYTES = 1_024;
@@ -17,6 +18,7 @@ const MAX_CREDENTIAL_ID_BYTES = 1_024;
 const MAX_USER_HANDLE_BYTES = 64;
 const MAX_CLOCK_SKEW_MS = 30_000;
 const BASE64URL = /^[A-Za-z0-9_-]+$/u;
+const SHA256_HEX = /^[0-9a-f]{64}$/u;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu;
 const UUID_V4 = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu;
 const IDENTIFIER = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/u;
@@ -89,6 +91,8 @@ export class PlatformSessionWebAuthnError extends Error {
  * It must store only the hash fields in `create...`/`claim...`/`complete...`
  * calls. None of these methods may accept clientDataJSON, authenticatorData,
  * signature, a raw challenge, a raw JTI, or a raw session bearer.
+ * Session issuance receives only SHA-256 digests for the bearer and dedicated
+ * CSRF token, plus the already-bound canonical request digest.
  *
  * Required methods:
  * - createPlatformSessionChallenge(record)
@@ -187,6 +191,8 @@ export function createPlatformSessionWebAuthnService({
     }
     assertStoredChallenge(stored, record);
     return Object.freeze({
+      version: 1,
+      type: "agentpass.platform-session-challenge",
       challenge_id: challengeId,
       challenge,
       jti,
@@ -198,7 +204,12 @@ export function createPlatformSessionWebAuthnService({
       authority_generation: context.authority_generation,
       operation: context.operation,
       capability: context.capability,
+      request_digest_sha256: context.request_digest_sha256,
+      allowed_credential_ids: context.allowed_credential_ids,
       challenge_expires_at: new Date(expiresAt).toISOString(),
+      issued_at: new Date(issuedAt).toISOString(),
+      expires_at: new Date(expiresAt).toISOString(),
+      one_use: true,
       rp_id: context.rp_id,
       origin: context.origin,
       user_verification: context.user_verification
@@ -206,11 +217,11 @@ export function createPlatformSessionWebAuthnService({
   }
 
   async function verify(input = {}) {
-    const request = normalizeVerifyInput(input);
+    let request = normalizeVerifyInput(input);
     const requestFingerprint = assertionFingerprint(request);
     const cached = getCachedResponse(request.challenge_id);
     if (cached) {
-      if (cached.binding_fingerprint !== bindingFingerprint(request)) throw failure(PLATFORM_SESSION_WEBAUTHN_ERROR_CODES.BINDING_MISMATCH);
+      if (cached.authority_fingerprint !== authorityFingerprint(request)) throw failure(PLATFORM_SESSION_WEBAUTHN_ERROR_CODES.BINDING_MISMATCH);
       if (cached.assertion_fingerprint !== requestFingerprint) throw failure(PLATFORM_SESSION_WEBAUTHN_ERROR_CODES.CHALLENGE_REPLAYED);
       // Never replay bearer material from process memory. The durable session
       // is idempotent, but a lost transport response requires a new ceremony.
@@ -226,11 +237,16 @@ export function createPlatformSessionWebAuthnService({
     }
     const record = normalizeStoredChallenge(stored);
     checkChallengeState(record, currentTime);
+    const clientChallenge = extractClientChallenge(request.client_data_json, record.origin);
+    request = Object.freeze({ ...request, challenge: clientChallenge, platform_session_id: record.platform_session_id });
     if (!constantTimeBufferEqual(record.challenge_hash, sha256Bytes(request.challenge))) throw failure(PLATFORM_SESSION_WEBAUTHN_ERROR_CODES.CHALLENGE_MISMATCH);
     if (!constantTimeBufferEqual(record.jti_hash, sha256Bytes(request.jti))) throw failure(PLATFORM_SESSION_WEBAUTHN_ERROR_CODES.JTI_MISMATCH);
     const requestBinding = normalizeVerifyBinding(request);
     if (!sameBinding(record, requestBinding) || !constantTimeBufferEqual(record.binding_hash, bindingHash(requestBinding))) throw failure(PLATFORM_SESSION_WEBAUTHN_ERROR_CODES.BINDING_MISMATCH);
     validateAssertionEnvelope(request, record);
+    if (!record.allowed_credential_ids.includes(request.credential_id)) {
+      throw failure(PLATFORM_SESSION_WEBAUTHN_ERROR_CODES.CREDENTIAL_UNAVAILABLE);
+    }
 
     let claim;
     try {
@@ -264,6 +280,7 @@ export function createPlatformSessionWebAuthnService({
           organization_id: record.organization_id,
           assignment_id: record.assignment_id,
           authority_generation: record.authority_generation,
+          request_digest_sha256: record.request_digest_sha256,
           sign_count: verification.sign_count
         });
       } catch (error) {
@@ -274,13 +291,18 @@ export function createPlatformSessionWebAuthnService({
       const bearerBytes = randomBytes(SESSION_BEARER_BYTES);
       if (!(bearerBytes instanceof Uint8Array) || bearerBytes.byteLength !== SESSION_BEARER_BYTES) throw new TypeError("random session bearer bytes are invalid");
       const sessionBearer = Buffer.from(bearerBytes).toString("base64url");
+      const csrfBytes = randomBytes(SESSION_CSRF_BYTES);
+      if (!(csrfBytes instanceof Uint8Array) || csrfBytes.byteLength !== SESSION_CSRF_BYTES) throw new TypeError("random session CSRF bytes are invalid");
+      const csrfToken = Buffer.from(csrfBytes).toString("base64url");
       // Lookup repositories hash the exact base64url cookie value, so issue
       // must persist the digest of that same transport representation.
       const sessionMaterialHash = sha256Bytes(sessionBearer);
+      const csrfTokenHash = sha256Bytes(csrfToken);
       try {
         issued = await repository.issuePlatformSession({
           session_id: record.platform_session_id,
           session_material_hash: sessionMaterialHash,
+          csrf_token_hash: csrfTokenHash,
           principal_id: record.principal_id,
           member_id: record.member_id,
           organization_id: record.organization_id,
@@ -289,6 +311,7 @@ export function createPlatformSessionWebAuthnService({
           operation: record.operation,
           capability: record.capability,
           authority_generation: record.authority_generation,
+          request_digest_sha256: record.request_digest_sha256,
           challenge_id: record.challenge_id,
           jti_hash: record.jti_hash,
           ttl_seconds: sessionTtlSeconds,
@@ -302,6 +325,7 @@ export function createPlatformSessionWebAuthnService({
       response = Object.freeze({
         session: safeSession,
         session_bearer: sessionBearer,
+        csrf_token: csrfToken,
         challenge_id: record.challenge_id,
         authenticated_at: assertClock(now())
       });
@@ -338,7 +362,7 @@ export function createPlatformSessionWebAuthnService({
 
   function cacheResponse(record, request, assertionFingerprintValue) {
     responseCache.set(record.challenge_id, {
-      binding_fingerprint: bindingFingerprint(request),
+      authority_fingerprint: authorityFingerprint(request),
       assertion_fingerprint: assertionFingerprintValue,
       expires_at: Math.min(record.expires_at + MAX_RESPONSE_CACHE_MS, assertClock(now()) + responseCacheMs)
     });
@@ -427,6 +451,8 @@ function normalizeBeginContext(input) {
     authority_generation: requiredPositiveInteger(input.authority_generation ?? input.authorityGeneration, "authority_generation"),
     operation,
     capability,
+    request_digest_sha256: requiredDigestHex(input.request_digest_sha256 ?? input.requestDigestSha256, "request_digest_sha256"),
+    allowed_credential_ids: requiredCredentialIds(input.allowed_credential_ids ?? input.allowedCredentialIds),
     rp_id,
     origin,
     user_verification: requiredUserVerification(input.user_verification ?? input.userVerification ?? "required")
@@ -438,10 +464,8 @@ function normalizeVerifyInput(input) {
   const context = normalizeBeginContext(input);
   return Object.freeze({
     challenge_id: requiredUuidV4(input.challenge_id ?? input.challengeId, "challenge_id"),
-    challenge: requiredBase64Url(input.challenge, CHALLENGE_BYTES, "challenge"),
     jti: requiredUuidV4(input.jti, "jti"),
-    platform_session_id: requiredUuidV4(input.platform_session_id ?? input.platformSessionId, "platform_session_id"),
-    credential_id: requiredBase64Url(input.credential_id ?? input.credentialId, [1, MAX_CREDENTIAL_ID_BYTES], "credential_id"),
+    credential_id: requiredBase64Url(input.credential_id ?? input.credentialId, [16, MAX_CREDENTIAL_ID_BYTES], "credential_id"),
     client_data_json: requiredBase64Url(input.client_data_json ?? input.clientDataJSON, [1, MAX_CLIENT_DATA_BYTES], "client_data_json"),
     authenticator_data: requiredBase64Url(input.authenticator_data ?? input.authenticatorData, [37, MAX_AUTHENTICATOR_DATA_BYTES], "authenticator_data"),
     signature: requiredBase64Url(input.signature, [64, MAX_SIGNATURE_BYTES], "signature"),
@@ -460,6 +484,8 @@ function normalizeVerifyBinding(input) {
     authority_generation: input.authority_generation,
     operation: input.operation,
     capability: input.capability,
+    request_digest_sha256: input.request_digest_sha256,
+    allowed_credential_ids: input.allowed_credential_ids,
     rp_id: input.rp_id,
     origin: input.origin,
     user_verification: input.user_verification
@@ -481,6 +507,8 @@ function normalizeStoredChallenge(row) {
     authority_generation: requiredPositiveIntegerStorage(row.authority_generation, "authority_generation"),
     operation: storageOperation(row.operation),
     capability: storageOperation(row.capability),
+    request_digest_sha256: storageDigest(row.request_digest_sha256 ?? row.request_digest, "request_digest").toString("hex"),
+    allowed_credential_ids: requiredCredentialIdsStorage(row.allowed_credential_ids),
     rp_id: storageRpId(row.rp_id),
     origin: storageOrigin(row.origin),
     user_verification: row.user_verification,
@@ -558,6 +586,16 @@ function validateAssertionEnvelope(request, record) {
   if ((flags & 0x01) === 0 || (flags & 0x04) === 0) throw failure(PLATFORM_SESSION_WEBAUTHN_ERROR_CODES.INVALID_RESPONSE);
 }
 
+function extractClientChallenge(clientDataJson, expectedOrigin) {
+  const clientDataBytes = decodeBase64Url(clientDataJson, [1, MAX_CLIENT_DATA_BYTES], "client_data_json");
+  const clientDataText = Buffer.from(clientDataBytes).toString("utf8");
+  if (Buffer.from(clientDataText, "utf8").compare(Buffer.from(clientDataBytes)) !== 0) throw failure(PLATFORM_SESSION_WEBAUTHN_ERROR_CODES.INVALID_RESPONSE);
+  let clientData;
+  try { clientData = JSON.parse(clientDataText); } catch { throw failure(PLATFORM_SESSION_WEBAUTHN_ERROR_CODES.INVALID_RESPONSE); }
+  if (!isObject(clientData) || Object.keys(clientData).some((key) => !CLIENT_DATA_KEYS.has(key)) || clientData.type !== "webauthn.get" || clientData.origin !== expectedOrigin || clientData.crossOrigin !== undefined && clientData.crossOrigin !== false) throw failure(PLATFORM_SESSION_WEBAUTHN_ERROR_CODES.INVALID_RESPONSE);
+  return requiredBase64Url(clientData.challenge, CHALLENGE_BYTES, "challenge");
+}
+
 function buildVerifierInput(record, request, credential) {
   return Object.freeze({
     ceremony: Object.freeze({
@@ -571,6 +609,7 @@ function buildVerifierInput(record, request, credential) {
       authority_generation: record.authority_generation,
       operation: record.operation,
       capability: record.capability,
+      request_digest_sha256: record.request_digest_sha256,
       jti: request.jti,
       context_hash: record.binding_hash.toString("hex"),
       rp_id: record.rp_id,
@@ -637,7 +676,7 @@ async function failClaim(repository, claimedRecord, expected, originalError, now
 }
 
 function sameBinding(left, right) {
-  return left.platform_session_id === right.platform_session_id && left.principal_id === right.principal_id && left.member_id === right.member_id && left.organization_id === right.organization_id && left.assignment_id === right.assignment_id && left.authority_generation === right.authority_generation && left.operation === right.operation && left.capability === right.capability && left.rp_id === right.rp_id && left.origin === right.origin && left.user_verification === right.user_verification;
+  return left.platform_session_id === right.platform_session_id && left.principal_id === right.principal_id && left.member_id === right.member_id && left.organization_id === right.organization_id && left.assignment_id === right.assignment_id && left.authority_generation === right.authority_generation && left.operation === right.operation && left.capability === right.capability && left.request_digest_sha256 === right.request_digest_sha256 && sameStringArray(left.allowed_credential_ids, right.allowed_credential_ids) && left.rp_id === right.rp_id && left.origin === right.origin && left.user_verification === right.user_verification;
 }
 
 function bindingHash(binding) {
@@ -652,20 +691,34 @@ function bindingHash(binding) {
     authority_generation: binding.authority_generation,
     operation: binding.operation,
     capability: binding.capability,
+    request_digest_sha256: binding.request_digest_sha256,
+    allowed_credential_ids: binding.allowed_credential_ids,
     rp_id: binding.rp_id,
     origin: binding.origin,
     user_verification: binding.user_verification
   }));
 }
 
-function bindingFingerprint(request) {
-  return bindingHash(normalizeVerifyBinding(request)).toString("hex");
+function authorityFingerprint(request) {
+  return sha256Hex(JSON.stringify({
+    principal_id: request.principal_id,
+    member_id: request.member_id,
+    organization_id: request.organization_id,
+    assignment_id: request.assignment_id,
+    authority_generation: request.authority_generation,
+    operation: request.operation,
+    capability: request.capability,
+    request_digest_sha256: request.request_digest_sha256,
+    allowed_credential_ids: request.allowed_credential_ids,
+    rp_id: request.rp_id,
+    origin: request.origin,
+    user_verification: request.user_verification
+  }));
 }
 
 function assertionFingerprint(request) {
   return sha256Bytes(JSON.stringify({
     challenge_id: request.challenge_id,
-    challenge: sha256Hex(request.challenge),
     jti: request.jti,
     credential_id: request.credential_id,
     client_data_json: sha256Hex(request.client_data_json),
@@ -691,6 +744,10 @@ function requiredUuidStorage(value, field) { if (typeof value !== "string" || !U
 function requiredUuidV4Storage(value, field) { if (typeof value !== "string" || !UUID_V4.test(value)) throw failure(PLATFORM_SESSION_WEBAUTHN_ERROR_CODES.INVALID_REPOSITORY_RESULT, field); return value.toLowerCase(); }
 function requiredPositiveInteger(value, field) { if (!Number.isSafeInteger(value) || value < 1) throw failure(PLATFORM_SESSION_WEBAUTHN_ERROR_CODES.INVALID_CONTEXT, field); return value; }
 function requiredPositiveIntegerStorage(value, field) { if (!Number.isSafeInteger(value) || value < 1) throw failure(PLATFORM_SESSION_WEBAUTHN_ERROR_CODES.INVALID_REPOSITORY_RESULT, field); return value; }
+function requiredDigestHex(value, field) { if (typeof value !== "string" || !SHA256_HEX.test(value)) throw failure(PLATFORM_SESSION_WEBAUTHN_ERROR_CODES.INVALID_CONTEXT, field); return value; }
+function requiredCredentialIds(value) { if (!Array.isArray(value) || value.length < 1 || value.length > 16) throw failure(PLATFORM_SESSION_WEBAUTHN_ERROR_CODES.INVALID_CONTEXT, "allowed_credential_ids"); const ids = value.map((item) => requiredBase64Url(item, [16, MAX_CREDENTIAL_ID_BYTES], "allowed_credential_ids")); if (new Set(ids).size !== ids.length) throw failure(PLATFORM_SESSION_WEBAUTHN_ERROR_CODES.INVALID_CONTEXT, "allowed_credential_ids"); return Object.freeze([...ids].sort()); }
+function requiredCredentialIdsStorage(value) { try { return requiredCredentialIds(value); } catch { throw failure(PLATFORM_SESSION_WEBAUTHN_ERROR_CODES.INVALID_REPOSITORY_RESULT, "allowed_credential_ids"); } }
+function sameStringArray(left, right) { return Array.isArray(left) && Array.isArray(right) && left.length === right.length && left.every((value, index) => value === right[index]); }
 function requiredOperation(value) { if (typeof value !== "string" || !OPERATION.test(value) || /[\u0000-\u001f\u007f]/u.test(value)) throw failure(PLATFORM_SESSION_WEBAUTHN_ERROR_CODES.INVALID_CONTEXT, "operation_or_capability"); return value; }
 function storageOperation(value) { if (typeof value !== "string" || !OPERATION.test(value)) throw failure(PLATFORM_SESSION_WEBAUTHN_ERROR_CODES.INVALID_REPOSITORY_RESULT); return value; }
 function requiredUserVerification(value) { if (value !== "required") throw failure(PLATFORM_SESSION_WEBAUTHN_ERROR_CODES.INVALID_CONTEXT, "user_verification"); return value; }

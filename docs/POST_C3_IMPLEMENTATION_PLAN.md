@@ -64,11 +64,11 @@ The branch now contains:
   SHA-256 digests cross the database boundary;
 - exact signer-role grants for 23 entry functions, with no signer table or
   sequence privileges and no PUBLIC/helper execution;
-- 159 frozen contract-catalog entries: 45 schemas, 61 OpenAPI operations, and
-  53 migrations.
+- 160 frozen contract-catalog entries: 45 schemas, 61 OpenAPI operations, and
+  54 migrations.
 - a fail-closed PostgreSQL 16/17 CI matrix that uses authenticated
-  `sslmode=verify-full`, migrates a fresh database from 1→53, upgrades seeded
-  authority databases from 47→51, 48→51, and 51→52, applies the exact role policy,
+  `sslmode=verify-full`, migrates a fresh database from 1→54, upgrades seeded
+  authority databases from 47→51, 48→51, 51→52, 52→53, and 53→54, applies the exact role policy,
   rejects unexpected skips, and emits source-SHA-bound qualification evidence;
 - an N1 upgrade runner that proves contiguous migration history and checksums
   while byte-for-byte preserving seeded rows across all nine promotion and
