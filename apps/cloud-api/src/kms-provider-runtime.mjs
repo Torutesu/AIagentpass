@@ -148,6 +148,9 @@ export function parseKmsProviderRuntimeConfig(env = process.env) {
   const parsed = {};
   try {
     for (const definition of PURPOSE_DEFINITIONS) {
+      if (SIGNER_PURPOSE_REGISTRY[definition.registryName]?.hosted_status !== "managed_kms_integrated") {
+        fail(KMS_PROVIDER_RUNTIME_ERROR_CODES.CONFIG);
+      }
       parsed[definition.name] = definition.parse
         ? definition.parse(env)
         : parseGenericSignerConfig(env, definition);
@@ -365,7 +368,8 @@ function parseGenericSignerConfig(env, definition) {
   const fingerprint = crypto.createHash("sha256").update(publicKey.export({ type: "spki", format: "der" })).digest("hex");
   const registry = SIGNER_PURPOSE_REGISTRY[definition.registryName];
   if (!registry || registry.purpose !== definition.purpose || registry.protocol_version !== definition.version
-    || registry.signing_version < 1 || registry.managed_algorithm !== "ed25519") {
+    || registry.signing_version < 1 || registry.managed_algorithm !== "ed25519"
+    || registry.hosted_status !== "managed_kms_integrated") {
     fail(KMS_PROVIDER_RUNTIME_ERROR_CODES.CONFIG);
   }
   return Object.freeze({ keyId, publicKeyPem: canonicalPem, publicKeyFingerprint: fingerprint, timeoutMs });

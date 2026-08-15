@@ -43,10 +43,7 @@ test("freezes one closed registry with eight distinct purposes and domains", () 
   assert.ok(entries.every(({ version, registry_version, managed_algorithm, domain }) => version === SIGNER_PURPOSE_REGISTRY_VERSION && registry_version === SIGNER_PURPOSE_REGISTRY_VERSION && managed_algorithm === "ed25519" && domain.endsWith("\0")));
   assert.ok(Object.isFrozen(SIGNER_PURPOSE_REGISTRY));
   assert.ok(entries.every(Object.isFrozen));
-  assert.equal(SIGNER_PURPOSE_REGISTRY.capability.hosted_status, "migration_required");
-  assert.equal(SIGNER_PURPOSE_REGISTRY.refresh_hint.hosted_status, "managed_kms_integrated");
-  assert.equal(SIGNER_PURPOSE_REGISTRY.possession_receipt.hosted_status, "managed_kms_integrated");
-  assert.equal(SIGNER_PURPOSE_REGISTRY.agent_session_grant.hosted_status, "managed_kms_integrated");
+  assert.ok(entries.every(({ hosted_status }) => hosted_status === "managed_kms_integrated"));
   assert.equal(SIGNER_PURPOSE_REGISTRY.control_bundle.protocol_version, 2);
   assert.equal(SIGNER_PURPOSE_REGISTRY.control_bundle.signing_version, 2);
   assert.equal(SIGNER_PURPOSE_REGISTRY.qualification_manifest.protocol_version, 2);

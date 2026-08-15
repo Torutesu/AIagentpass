@@ -14,14 +14,14 @@ import { REFRESH_HINT_SIGNATURE_DOMAIN, REFRESH_HINT_TYPE } from "../../../packa
 
 export const SIGNER_PURPOSE_REGISTRY_VERSION = 1;
 const definitions = [
-  { name: "capability", purpose: "agentpass.capability", domain: "AgentPass-Capability-v1\0", allowedAlgorithms: ["ed25519"], protocolVersion: 1, signingVersion: 1, hostedStatus: "migration_required" },
-  { name: "control_bundle", purpose: "agentpass.control-bundle", domain: "AgentPass-Control-Bundle-v2\0", allowedAlgorithms: ["ed25519"], protocolVersion: 2, signingVersion: 2, hostedStatus: "migration_required" },
+  { name: "capability", purpose: "agentpass.capability", domain: "AgentPass-Capability-v1\0", allowedAlgorithms: ["ed25519"], protocolVersion: 1, signingVersion: 1, hostedStatus: "managed_kms_integrated" },
+  { name: "control_bundle", purpose: "agentpass.control-bundle", domain: "AgentPass-Control-Bundle-v2\0", allowedAlgorithms: ["ed25519"], protocolVersion: 2, signingVersion: 2, hostedStatus: "managed_kms_integrated" },
   { name: "refresh_hint", purpose: REFRESH_HINT_TYPE, domain: REFRESH_HINT_SIGNATURE_DOMAIN, allowedAlgorithms: ["ed25519"], protocolVersion: 1, signingVersion: 1, hostedStatus: "managed_kms_integrated" },
   { name: "possession_receipt", purpose: POSSESSION_RECEIPT_PURPOSE, domain: POSSESSION_RECEIPT_SIGNATURE_DOMAIN, allowedAlgorithms: POSSESSION_RECEIPT_SIGNATURE_ALGORITHMS, protocolVersion: 1, signingVersion: 1, hostedStatus: "managed_kms_integrated" },
   { name: "agent_session_grant", purpose: AGENT_SESSION_GRANT_TYPE, domain: AGENT_SESSION_GRANT_SIGNATURE_DOMAIN, allowedAlgorithms: ["ed25519"], protocolVersion: 1, signingVersion: 1, hostedStatus: "managed_kms_integrated" },
   { name: "qualification_manifest", purpose: QUALIFICATION_GRANT_BATCH_MANIFEST_PURPOSE, domain: QUALIFICATION_GRANT_BATCH_MANIFEST_SIGNATURE_DOMAIN, allowedAlgorithms: ["ed25519"], protocolVersion: 2, signingVersion: 2, hostedStatus: "managed_kms_integrated" },
-  { name: "audit_anchor", purpose: "agentpass.audit-anchor", domain: "AgentPass-Audit-Anchor-v1\0", allowedAlgorithms: ["ed25519"], protocolVersion: 1, signingVersion: 1, hostedStatus: "migration_required" },
-  { name: "promotion_evidence", purpose: PROMOTION_EVIDENCE_V3_PURPOSE, domain: PROMOTION_EVIDENCE_V3_SIGNATURE_DOMAIN, allowedAlgorithms: ["ed25519"], protocolVersion: PROMOTION_EVIDENCE_V3_PROTOCOL_VERSION, signingVersion: PROMOTION_EVIDENCE_V3_SIGNING_VERSION, hostedStatus: "migration_required" },
+  { name: "audit_anchor", purpose: "agentpass.audit-anchor", domain: "AgentPass-Audit-Anchor-v1\0", allowedAlgorithms: ["ed25519"], protocolVersion: 1, signingVersion: 1, hostedStatus: "managed_kms_integrated" },
+  { name: "promotion_evidence", purpose: PROMOTION_EVIDENCE_V3_PURPOSE, domain: PROMOTION_EVIDENCE_V3_SIGNATURE_DOMAIN, allowedAlgorithms: ["ed25519"], protocolVersion: PROMOTION_EVIDENCE_V3_PROTOCOL_VERSION, signingVersion: PROMOTION_EVIDENCE_V3_SIGNING_VERSION, hostedStatus: "managed_kms_integrated" },
 ];
 
 const HOSTED_STATUSES = new Set(["file_backed_hosted", "managed_kms_integrated", "migration_required", "primitive_only", "schema_only"]);
