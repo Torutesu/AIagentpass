@@ -504,7 +504,9 @@
         "parameters": [
           { "$ref": "#/components/parameters/OrganizationId" },
           { "$ref": "#/components/parameters/CsrfToken" },
-          { "$ref": "#/components/parameters/IdempotencyKey" }
+          { "$ref": "#/components/parameters/IdempotencyKey" },
+          { "$ref": "#/components/parameters/RecentAuthForInvitationReissue" },
+          { "$ref": "#/components/parameters/ExpectedVersionForInvitationReissue" }
         ],
         "requestBody": { "$ref": "#/components/requestBodies/CreateInvitation" },
         "description": "Invitation roles are deliberately limited to admin, auditor, and viewer. An invitation can never grant owner. The response contains the random one-time token exactly once; the server stores only its hash. The token is not email-bound. The same collection POST accepts ReissueInvitationRequest to rotate the digest and expiry for an existing pending or expired invitation under If-Match and recent operation-bound WebAuthn authentication.",
@@ -1189,6 +1191,13 @@
         "description": "One-use, operation- and request-bound WebAuthn authorization identifier.",
         "schema": { "type": "string", "format": "uuid" }
       },
+      "RecentAuthForInvitationReissue": {
+        "name": "agentpass-recent-auth",
+        "in": "header",
+        "required": false,
+        "description": "Required when the request body is ReissueInvitationRequest and prohibited for ordinary invitation creation.",
+        "schema": { "type": "string", "format": "uuid" }
+      },
       "IdempotencyKey": {
         "name": "Idempotency-Key",
         "in": "header",
@@ -1201,6 +1210,13 @@
         "in": "header",
         "required": true,
         "description": "Expected resource version for optimistic concurrency. Send the quoted decimal version, for example \"7\". A stale value returns version_conflict.",
+        "schema": { "type": "string", "pattern": "^\"[1-9][0-9]*\"$" }
+      },
+      "ExpectedVersionForInvitationReissue": {
+        "name": "If-Match",
+        "in": "header",
+        "required": false,
+        "description": "Required when the request body is ReissueInvitationRequest and forbidden for ordinary invitation creation. It carries the current invitation version as a quoted decimal.",
         "schema": { "type": "string", "pattern": "^\"[1-9][0-9]*\"$" }
       },
       "Cursor": {
@@ -1932,7 +1948,7 @@
       },
       "ReissueInvitationRequest": {
         "type": "object", "additionalProperties": false, "required": ["reissue_invitation_id", "expires_at"],
-        "description": "Rotates the one-time token for a pending invitation. The request must also carry If-Match with the current invitation version and a recent operation-bound WebAuthn proof. Expired, accepted, and revoked invitations are terminal.",
+        "description": "Rotates the one-time token for a pending or expired invitation. The request must also carry If-Match with the current invitation version and a recent operation-bound WebAuthn proof. Accepted and revoked invitations are terminal.",
         "properties": {
           "reissue_invitation_id": { "type": "string", "format": "uuid" },
           "expires_at": { "type": "string", "format": "date-time", "description": "New short-lived expiry; it must be later than the server evaluation time." }

@@ -51,6 +51,9 @@ export async function handleHumanAuthRequest(request, options = {}) {
     if (route.session === "bootstrap" && config.origin !== undefined && origin !== config.origin) fail(403, "origin_not_allowed", "The request origin is not allowed");
     const user = route.session === "bootstrap" ? await requireBootstrapUser(request, options, config) : undefined;
     const body = route.body === "none" ? await readNoBody(request) : await readBody(request, route);
+    if (route.body === "invitation-create" && isInvitationReissueBody(body)) {
+      route = { ...route, requireRecentAuth: true, requireIfMatch: true };
+    }
     const fetchImpl = options.fetchImpl ?? options.fetch ?? globalThis.fetch;
     if (typeof fetchImpl !== "function") fail(503, "cloud_api_unavailable", "Cloud API is unavailable");
 
@@ -205,7 +208,13 @@ function validateBody(value, shape) {
     return;
   }
   if (shape === "invitation-create") {
-    if (!isExactObject(value, ["role", "expires_at"]) || !["admin", "auditor", "viewer"].includes(value.role) || !isRfc3339(value.expires_at)) fail(400, "invalid_request", "The invitation request is invalid");
+    const create = isExactObject(value, ["role", "expires_at"])
+      && ["admin", "auditor", "viewer"].includes(value.role)
+      && isRfc3339(value.expires_at);
+    const reissue = isExactObject(value, ["reissue_invitation_id", "expires_at"])
+      && isUuid(value.reissue_invitation_id)
+      && isRfc3339(value.expires_at);
+    if (!create && !reissue) fail(400, "invalid_request", "The invitation request is invalid");
     return;
   }
   if (shape === "invitation-accept") {
@@ -217,6 +226,16 @@ function validateBody(value, shape) {
     return;
   }
   fail(500, "human_auth_bridge_failed", "Authentication is unavailable");
+}
+
+function isInvitationReissueBody(bytes) {
+  if (!(bytes instanceof Uint8Array)) return false;
+  try {
+    const value = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes));
+    return Boolean(value && typeof value === "object" && !Array.isArray(value) && Object.hasOwn(value, "reissue_invitation_id"));
+  } catch {
+    return false;
+  }
 }
 
 async function relayResponse(response, { allowSetCookie = false, clearCookieOnly = false, requireSetCookie = false, requireClearedSessionBody = false, bootstrap = false, normalizeSessionResponse = false } = {}) {

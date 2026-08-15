@@ -260,6 +260,41 @@ test("production bootstrap sends only the compact server identity header and exa
   assert.doesNotMatch(await response.text(), /agentpass-console-identity|siwc-subject-1|EdDSA/);
 });
 
+test("invitation reissue requires and forwards recent authorization and If-Match", async () => {
+  const calls = [];
+  const invitationId = "33333333-3333-4333-8333-333333333333";
+  const recentAuth = "44444444-4444-4444-8444-444444444444";
+  const path = `/api/auth/organizations/${organizationId}/invitations`;
+  const body = { reissue_invitation_id: invitationId, expires_at: "2026-08-13T00:00:00.000Z" };
+  const headers = {
+    cookie: sessionCookie,
+    "agentpass-csrf": csrf,
+    "agentpass-recent-auth": recentAuth,
+    "idempotency-key": "invitation-reissue-1",
+    "if-match": '"7"'
+  };
+  const api = bridge(async (url, init) => {
+    calls.push({ url: String(url), init });
+    return new Response(JSON.stringify({ invitation: { invitation_id: invitationId }, one_time_token: "T".repeat(43) }), { status: 201, headers: { "content-type": "application/json" } });
+  });
+
+  const response = await api.handle(request(path, { body, headers }));
+  assert.equal(response.status, 201);
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].url, `https://cloud.example.test${path}`);
+  assert.equal(calls[0].init.headers.get("agentpass-recent-auth"), recentAuth);
+  assert.equal(calls[0].init.headers.get("if-match"), '"7"');
+  assert.deepEqual(JSON.parse(new TextDecoder().decode(calls[0].init.body)), body);
+
+  const { "agentpass-recent-auth": _recent, ...withoutRecent } = headers;
+  const missingRecent = await api.handle(request(path, { body, headers: withoutRecent }));
+  assert.equal(missingRecent.status, 401);
+  const { "if-match": _version, ...withoutVersion } = headers;
+  const missingVersion = await api.handle(request(path, { body, headers: withoutVersion }));
+  assert.equal(missingVersion.status, 400);
+  assert.equal(calls.length, 1);
+});
+
 test("forwards only the session cookie and CSRF token to WebAuthn", async () => {
   const calls = [];
   const api = bridge(async (url, init) => {
