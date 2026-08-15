@@ -5,8 +5,61 @@ import assert from 'node:assert/strict';
 const root = new URL('../../../../', import.meta.url);
 const read = async (relativePath) => readFile(new URL(relativePath, root), 'utf8');
 
+const PLATFORM_AUTHORITY_RELATIONS = Object.freeze([
+  'platform_credentials',
+  'platform_sessions',
+  'platform_session_challenges',
+  'platform_authorization_proofs',
+  'platform_principals',
+  'platform_operator_assignments',
+  'platform_operator_assignment_approvals',
+  'platform_promotion_approvals',
+  'platform_promotion_deployments',
+  'platform_promotion_issuances',
+]);
+
+const PLATFORM_APP_FUNCTIONS = Object.freeze([
+  'agentpass_platform_promotion_issuance_get(uuid,text,text,text,text,boolean)',
+  'agentpass_platform_operator_assignment_find_active(uuid,uuid,uuid,text,text)',
+  'agentpass_platform_session_challenge_create(uuid,uuid,bytea,bytea,bytea,bytea,bytea[],uuid,uuid,uuid,uuid,bigint,text,text,text,text,text,integer)',
+  'agentpass_platform_session_challenge_find(uuid)',
+  'agentpass_platform_session_challenge_claim(uuid,bytea,bytea,bytea,bytea)',
+  'agentpass_platform_session_challenge_fail(uuid,bytea,bytea,bytea,bytea,text)',
+  'agentpass_platform_session_credential_find(uuid,bytea,bytea)',
+  'agentpass_platform_credential_advance_verified(uuid,bytea,uuid,bytea,bigint,bigint,bigint,boolean,boolean)',
+  'agentpass_platform_session_find_active(bytea,uuid,text,text)',
+  'agentpass_platform_session_touch(bytea,bytea,uuid,text,text)',
+  'agentpass_platform_session_revoke(bytea,bytea,text)',
+  'agentpass_platform_session_complete_and_issue(uuid,bytea,bytea,uuid,bytea,bytea,bytea,bytea,bytea,integer,integer)',
+  'agentpass_consume_platform_authorization_and_reserve(bytea,bytea,uuid,bytea,bytea,uuid,text,text,text,text,bytea,integer,integer,text,bigint,bigint)',
+  'agentpass_platform_session_bootstrap_context(bytea,uuid,text,text)',
+]);
+
+const LEGACY_PLATFORM_PROMOTION_MUTATIONS = Object.freeze([
+  'agentpass_platform_promotion_issuance_reserve(uuid,text,text,text,text,bytea,integer,integer,text,bigint,bigint)',
+  'agentpass_platform_promotion_issuance_replay(uuid,text,text,text,text)',
+  'agentpass_platform_promotion_issuance_commit(uuid,text,text,text,text,bytea,bytea,bytea,bytea,bytea)',
+  'agentpass_platform_promotion_issuance_uncertain(uuid,text,text,text,text,bytea,text)',
+]);
+
+const PLATFORM_MIGRATION_FILES = Object.freeze([
+  'contracts/postgres/0044_platform_promotion_approvals.sql',
+  'contracts/postgres/0047_platform_promotion_issuance.sql',
+  'contracts/postgres/0048_platform_promotion_authority_boundary.sql',
+  'contracts/postgres/0052_platform_operator_authority.sql',
+  'contracts/postgres/0053_platform_sessions.sql',
+  'contracts/postgres/0054_platform_authorization.sql',
+  'contracts/postgres/0055_platform_session_bootstrap.sql',
+]);
+
+function escapedRegExp(value) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
 test('role SQL is idempotent, credential-free, and PUBLIC is revoked', async () => {
   const sql = await read('scripts/postgres/roles.sql');
+  const migrations = await Promise.all(PLATFORM_MIGRATION_FILES.map(read));
+  const platformSql = migrations.join('\n');
 
   assert.match(sql, /CREATE ROLE %I LOGIN/);
   for (const role of ['agentpass_app', 'agentpass_signer', 'agentpass_migrator', 'agentpass_backup']) assert.match(sql, new RegExp(`\\b${role}\\b`));
@@ -21,6 +74,9 @@ test('role SQL is idempotent, credential-free, and PUBLIC is revoked', async () 
   assert.match(sql, /schema_migrations/);
   assert.match(sql, /schema_migration_attempts/);
   for (const relation of ['release_candidates', 'platform_promotion_approvals', 'platform_promotion_deployments', 'platform_promotion_issuances', 'platform_principals', 'platform_operator_assignments', 'platform_operator_assignment_approvals', 'managed_signer_key_lifecycles', 'managed_signer_keys']) assert.match(sql, new RegExp(`\\b${relation}\\b`));
+  for (const relation of PLATFORM_AUTHORITY_RELATIONS) {
+    assert.match(platformSql, new RegExp(`CREATE TABLE (?:public\\.)?${relation} \\(`, 'u'), `migration relation missing: ${relation}`);
+  }
   assert.match(sql, /Promotion issuance is reachable only through the reviewed SECURITY DEFINER/);
   assert.match(sql, /managed_signer_provider_operations/);
   assert.match(sql, /GRANT EXECUTE ON FUNCTION public\.%s TO agentpass_app/);
@@ -31,11 +87,54 @@ test('role SQL is idempotent, credential-free, and PUBLIC is revoked', async () 
   assert.match(sql, /agentpass_platform_session_complete_and_issue\(uuid,bytea,bytea,uuid,bytea,bytea,bytea,bytea,bytea,integer,integer\)/u);
   assert.match(sql, /agentpass_consume_platform_authorization_and_reserve\(bytea,bytea,uuid,bytea,bytea,uuid,text,text,text,text,bytea,integer,integer,text,bigint,bigint\)/u);
   assert.match(sql, /agentpass_platform_session_bootstrap_context\(bytea,uuid,text,text\)/u);
-  assert.doesNotMatch(sql, /'agentpass_platform_promotion_issuance_reserve\(/u);
+  for (const signature of PLATFORM_APP_FUNCTIONS) {
+    assert.match(sql, new RegExp(`'${escapedRegExp(signature)}'`, 'u'), `application function missing: ${signature}`);
+    const functionName = signature.slice(0, signature.indexOf('('));
+    assert.match(platformSql, new RegExp(`CREATE FUNCTION (?:public\\.)?${escapedRegExp(functionName)}\\(`, 'u'), `migration function missing: ${functionName}`);
+  }
+  for (const signature of LEGACY_PLATFORM_PROMOTION_MUTATIONS) {
+    assert.equal(sql.includes(`'${signature}'`), false, `legacy application grant present: ${signature}`);
+  }
   assert.match(sql, /ALTER DEFAULT PRIVILEGES FOR ROLE agentpass_migrator IN SCHEMA public/);
   assert.match(sql, /ON TABLES/);
   assert.match(sql, /ON SEQUENCES/);
   assert.match(sql, /ON FUNCTIONS/);
+});
+
+test('platform authority matrix is function-only for app and purpose-scoped for signer', async () => {
+  const [rolesSql, ...migrations] = await Promise.all([
+    read('scripts/postgres/roles.sql'),
+    ...PLATFORM_MIGRATION_FILES.map(read),
+  ]);
+  const platformSql = migrations.join('\n');
+  const authorization = await read('contracts/postgres/0054_platform_authorization.sql');
+
+  assert.match(rolesSql, /GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO agentpass_app/u);
+  assert.match(rolesSql, /REVOKE INSERT, UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER ON TABLE public\.%I FROM agentpass_app, agentpass_backup/u);
+  assert.match(rolesSql, /left\(c\.relname, length\('platform_'\)\) = 'platform_'/u);
+  assert.ok(
+    rolesSql.indexOf('GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO agentpass_app')
+      < rolesSql.indexOf("left(c.relname, length('platform_')) = 'platform_'")
+  );
+
+  assert.match(authorization, /CREATE FUNCTION public\.agentpass_consume_platform_authorization_and_reserve\([\s\S]*?SECURITY DEFINER[\s\S]*?SET search_path = pg_catalog, public/u);
+  assert.match(authorization, /REVOKE ALL PRIVILEGES ON FUNCTION public\.agentpass_platform_promotion_issuance_reserve\([^;]+\) FROM agentpass_app/u);
+  assert.doesNotMatch(authorization, /GRANT EXECUTE ON FUNCTION public\.agentpass_platform_promotion_issuance_reserve\([^;]+\) TO agentpass_app/u);
+
+  for (const signature of PLATFORM_APP_FUNCTIONS) {
+    assert.match(rolesSql, new RegExp(`'${escapedRegExp(signature)}'`, 'u'), `app allowlist missing: ${signature}`);
+  }
+  for (const signature of LEGACY_PLATFORM_PROMOTION_MUTATIONS) {
+    assert.equal(rolesSql.includes(`'${signature}'`), false, `legacy mutation allowlist present: ${signature}`);
+    const functionName = signature.slice(0, signature.indexOf('('));
+    assert.match(platformSql, new RegExp(`CREATE FUNCTION (?:public\\.)?${escapedRegExp(functionName)}\\(`, 'u'), `migration function missing: ${functionName}`);
+  }
+
+  assert.match(rolesSql, /GRANT ALL PRIVILEGES ON ALL TABLES IN SCHEMA public TO agentpass_migrator/u);
+  assert.match(rolesSql, /GRANT ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA public TO agentpass_migrator/u);
+  assert.match(rolesSql, /GRANT ALL PRIVILEGES ON ALL FUNCTIONS IN SCHEMA public TO agentpass_migrator/u);
+  assert.match(rolesSql, /GRANT EXECUTE ON FUNCTION public\.%s TO agentpass_signer/u);
+  assert.match(rolesSql, /left\(c\.relname, length\('managed_signer_'\)\) = 'managed_signer_'/u);
 });
 
 test('app is DML-only, migrator owns migration authority, and backup is read-only', async () => {
