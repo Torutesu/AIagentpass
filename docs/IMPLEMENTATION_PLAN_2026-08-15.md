@@ -563,9 +563,12 @@ against their stored SHA-256, rebound to the exact identity/range, root-folded,
 and returned with the historical-key-verified anchor. New admin events use the
 canonical v2 writer and are independently recomputed; legacy v1 remains
 explicitly linkage-only. C2's remaining product surface is the Human BFF/API
-and Console workflow. C3 has an approval authority but does not yet have the
-promotion issuance ledger, managed-signer transaction, or atomic deployment
-transition.
+and Console workflow. C3 now has a locally committed foundation in `4343b0f`:
+promotion-evidence v3 signing and historical verification, migration 0047,
+the deployment/promotion ledger repository, and a fail-closed issuance state
+machine. It is not yet runtime-enabled. Commit-bound cryptographic
+verification, historical lifecycle resolution, catalog/runtime composition,
+the platform-operator API, and fresh-PostgreSQL qualification remain open.
 
 The next implementation commits, in dependency order, are:
 
@@ -583,14 +586,18 @@ The next implementation commits, in dependency order, are:
    and returns a deeply frozen public result. Signer acceptance with an unknown
    commit outcome becomes a durable uncertain state; replay never re-signs or
    re-snapshots.
-4. `C3-promotion-ledger`: persist candidate identity, artifact/manifest/SBOM
+4. `C3-promotion-ledger` — foundation committed locally in `4343b0f`: persist candidate identity, artifact/manifest/SBOM
    digests, the exact qualification-report set, approval digest, signer
    lifecycle, opaque claim lease, provider operation, and deployment transition.
-   Concurrent promotions for one deployment/environment are serialized.
-5. `C3-runtime`: resolve an unexpired environment quorum, issue promotion
+   Concurrent promotions for one deployment/environment are serialized. The
+   migration still requires catalog/authority-manifest registration and a
+   fresh PostgreSQL privilege/race run before this item closes.
+5. `C3-runtime` — signer/service primitives committed locally in `4343b0f`:
+   resolve an unexpired environment quorum, issue promotion
    evidence v3 through the promotion-only managed signer, self-verify it, and
    commit evidence plus deployment state atomically. Rebuild-on-promotion and
-   v2 issuance are rejected.
+   v2 issuance are rejected. The Cloud runtime and commit-bound independent
+   verifier composition remain open.
 6. `C2/C3-apis-console`: expose bounded Human-BFF audit export operations and a
    separate platform-operator promotion surface. Add role/recent-WebAuthn/CSRF/
    `If-Match`/idempotency enforcement, redacted DTOs, and Console loading,
