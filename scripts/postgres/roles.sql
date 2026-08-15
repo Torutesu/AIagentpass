@@ -163,7 +163,7 @@ BEGIN
     END IF;
   END LOOP;
 
-  -- Future managed-signer and Platform ledgers are authority tables by
+  -- Future managed-signer, Platform, and Hosted identity ledgers are authority tables by
   -- default. A new migration cannot silently inherit the broad application
   -- DML defaults merely because this reviewed array has not yet been
   -- extended.
@@ -176,6 +176,7 @@ BEGIN
       AND (
         left(c.relname, length('managed_signer_')) = 'managed_signer_'
         OR left(c.relname, length('platform_')) = 'platform_'
+        OR left(c.relname, length('hosted_identity_')) = 'hosted_identity_'
       )
   LOOP
     EXECUTE format(
