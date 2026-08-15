@@ -502,13 +502,13 @@ test("production Console SecurityPanel executes passkey and session mutations wi
     await page.keyboard.press("Enter");
     await expect.poll(() => state.passkeyListReads).toBeGreaterThan(1);
     await expect(page.getByText("Mac Touch ID renamed", { exact: true })).toHaveCount(0);
-    await expect(page.getByText("パスキーを無効化しました。", { exact: true })).toBeVisible();
+    await expect(page.getByText("✓ パスキーを無効化しました。", { exact: true })).toBeVisible();
 
     await page.getByRole("button", { name: "他のセッションをすべて無効化", exact: true }).click();
     const confirmOther = page.getByRole("button", { name: "確認", exact: true });
     await confirmOther.focus();
     await page.keyboard.press("Enter");
-    await expect(page.getByText("他のセッションをすべて無効化しました。", { exact: true })).toBeVisible();
+    await expect(page.getByText("✓ 他のセッションをすべて無効化しました。", { exact: true })).toBeVisible();
     await expect(page.getByText("別のブラウザセッション", { exact: true })).toHaveCount(0);
 
     await page.getByRole("button", { name: "サインアウト", exact: true }).click();
