@@ -238,14 +238,22 @@ BEGIN
       MESSAGE = 'Hosted bootstrap WebAuthn challenge is not consuming';
   END IF;
 
-  SELECT m, o.authority_epoch INTO membership_row, organization_epoch
+  SELECT o.authority_epoch INTO organization_epoch
+  FROM public.organizations AS o
+  WHERE o.id = attempt_row.organization_id
+  FOR UPDATE;
+  IF NOT FOUND THEN
+    RAISE EXCEPTION USING ERRCODE = 'invalid_authorization_specification',
+      MESSAGE = 'Hosted bootstrap organization is absent';
+  END IF;
+
+  SELECT m.* INTO membership_row
   FROM public.memberships AS m
-  JOIN public.organizations AS o ON o.id = m.organization_id
   WHERE m.organization_id = attempt_row.organization_id
     AND m.id = attempt_row.membership_id
     AND m.member_id = attempt_row.member_id
     AND m.status = 'active'
-  FOR UPDATE OF m, o;
+  FOR UPDATE;
   IF NOT FOUND THEN
     RAISE EXCEPTION USING ERRCODE = 'invalid_authorization_specification',
       MESSAGE = 'Hosted bootstrap membership is not active';

@@ -89,6 +89,8 @@ test("0062 locks and rechecks the exact attempt, challenge, membership, and epoc
   assert.match(body, /m\.member_id\s*=\s*attempt_row\.member_id/u);
   assert.match(body, /m\.organization_id\s*=\s*attempt_row\.organization_id/u);
   assert.match(body, /m\.status\s*=\s*'active'/u);
+  assert.doesNotMatch(body, /SELECT\s+m\s*,\s*o\.authority_epoch\s+INTO\s+membership_row\s*,/iu,
+    "a %ROWTYPE target cannot share a PL/pgSQL INTO list with a scalar");
   assert.match(body, /o\.authority_epoch\s*=\s*session_row\.organization_authority_epoch|organization_authority_epoch\s*:=\s*organization_row\.authority_epoch|organization_epoch\b/u);
   assert.match(body, /m\.session_epoch\s*=\s*session_row\.membership_session_epoch|membership_row\.session_epoch/u);
   assert.match(body, /FOR (?:SHARE|UPDATE) OF organization|FOR UPDATE/u);

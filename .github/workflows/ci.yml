@@ -713,12 +713,47 @@ jobs:
           apps/cloud-api/test/postgres/agent-session-http-qualification.integration.test.mjs
           apps/cloud-api/test/postgres/agent-session-lifecycle-integration.test.mjs
           apps/cloud-api/test/postgres/managed-signer-key-lifecycle-repository.integration.test.mjs
-          apps/cloud-api/test/postgres/human-session-ceiling.integration.test.mjs
-          apps/cloud-api/test/postgres/human-session-epochs-integration.test.mjs
-          apps/cloud-api/test/postgres/hosted-identity-atomic-completion.integration.test.mjs
-          apps/cloud-api/test/postgres/hosted-first-organization-atomic.integration.test.mjs
-          apps/cloud-api/test/postgres/hosted-webauthn-claim-lease.integration.test.mjs
-          apps/cloud-api/test/postgres/hosted-bootstrap-status-csrf.integration.test.mjs
+      - name: Prepare Hosted account qualification evidence directory
+        run: |
+          install -d -m 0700 "$GITHUB_WORKSPACE/hosted-account-evidence"
+      - name: Qualify Hosted account authority, restart, and process-loss convergence on PostgreSQL 17
+        shell: bash
+        env:
+          AGENTPASS_TEST_DATABASE_URL: postgresql://postgres:agentpass-integration@127.0.0.1:5432/postgres
+          AGENTPASS_HOSTED_ACCOUNT_SOURCE_COMMIT: ${{ github.sha }}
+          AGENTPASS_HOSTED_ACCOUNT_RUN_ID: ${{ github.run_id }}
+          AGENTPASS_HOSTED_ACCOUNT_RUN_ATTEMPT: ${{ github.run_attempt }}
+          PGPASSWORD: agentpass-integration
+        run: |
+          set -euo pipefail
+          umask 077
+          tap="$GITHUB_WORKSPACE/hosted-account-evidence/hosted-account.tap"
+          evidence="$GITHUB_WORKSPACE/hosted-account-evidence/hosted-account.json"
+          status=0
+          node --test --test-concurrency=1 --test-reporter=tap \
+            apps/cloud-api/test/postgres/human-session-ceiling.integration.test.mjs \
+            apps/cloud-api/test/postgres/human-session-epochs-integration.test.mjs \
+            apps/cloud-api/test/postgres/hosted-identity-atomic-completion.integration.test.mjs \
+            apps/cloud-api/test/postgres/hosted-first-organization-atomic.integration.test.mjs \
+            apps/cloud-api/test/postgres/hosted-webauthn-claim-lease.integration.test.mjs \
+            apps/cloud-api/test/postgres/hosted-bootstrap-status-csrf.integration.test.mjs \
+            apps/cloud-api/test/postgres/hosted-webauthn-process-loss.integration.test.mjs \
+            >"$tap" 2>&1 || status=$?
+          cat "$tap"
+          (( status == 0 )) || exit "$status"
+          AGENTPASS_HOSTED_ACCOUNT_POSTGRES_VERSION="$(psql --host=127.0.0.1 --port=5432 --username=postgres --dbname=postgres --tuples-only --no-align --command='SHOW server_version')"
+          export AGENTPASS_HOSTED_ACCOUNT_POSTGRES_VERSION
+          node scripts/postgres/hosted-account-qualification-evidence.mjs write "$evidence" "$tap"
+          node scripts/postgres/hosted-account-qualification-evidence.mjs verify "$evidence" "$GITHUB_SHA"
+          rm "$tap"
+      - name: Retain verified source-bound Hosted account evidence
+        if: success()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: hosted-account-postgres17-${{ github.sha }}
+          path: hosted-account-evidence/hosted-account.json
+          if-no-files-found: error
+          retention-days: 30
       - name: Prepare Platform authorization qualification evidence and isolated role database
         env:
           PGPASSWORD: agentpass-integration
