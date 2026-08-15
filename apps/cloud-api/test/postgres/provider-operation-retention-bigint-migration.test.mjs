@@ -30,10 +30,10 @@ test("0066 supports the documented 30-to-365-day retention range without removin
   assert.match(roles, new RegExp(signature.replace(/[()]/gu, "\\$&"), "u"));
   assert.match(privilegeCheck, new RegExp(signature.replace(/[()]/gu, "\\$&"), "u"));
 
-  assert.equal(POSTGRES_SCHEMA_HEAD.version, 70);
-  assert.equal(POSTGRES_SCHEMA_HEAD.name, "0070_platform_provider_digest_binding.sql");
+  assert.equal(POSTGRES_SCHEMA_HEAD.version, 71);
+  assert.equal(POSTGRES_SCHEMA_HEAD.name, "0071_managed_signer_snapshot_timestamp.sql");
   const catalog = JSON.parse(catalogText);
-  assert.equal(catalog.entries.filter((entry) => entry.kind === "postgres-migration").length, 70);
+  assert.equal(catalog.entries.filter((entry) => entry.kind === "postgres-migration").length, 71);
   assert.equal(catalog.entries.find((entry) => entry.version === 66)?.id, "migration.0066_provider_operation_retention_bigint");
 });
 

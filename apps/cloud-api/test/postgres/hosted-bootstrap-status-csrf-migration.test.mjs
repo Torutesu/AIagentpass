@@ -111,8 +111,8 @@ test("0064 is cataloged, activated, and granted without app table reads", async 
       "apps/cloud-api/test/server-hosted-bootstrap-routing.test.mjs"
     ]
   });
-  assert.equal(catalog.entries.filter((item) => item.kind === "postgres-migration").length, 70);
-  assert.equal(catalog.entries.length, 181);
+  assert.equal(catalog.entries.filter((item) => item.kind === "postgres-migration").length, 71);
+  assert.equal(catalog.entries.length, 182);
   assert.equal(contract.activation.bootstrap_status_csrf_forward_migration, "0064_hosted_bootstrap_status_csrf");
   assert.match(contract.authority.bootstrap_status_csrf_authority, /status_v2/u);
   assert.match(contract.authority.bootstrap_status_csrf_authority, /csrf_verify_v2/u);
