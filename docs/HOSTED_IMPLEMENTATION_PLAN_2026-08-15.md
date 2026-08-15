@@ -1,7 +1,7 @@
 # Hosted v1 implementation plan
 
 Status: active  
-Baseline: `codex/agent-platform` at migration `0063`
+Baseline: `codex/agent-platform` at migration `0064`
 Updated: 2026-08-15
 
 This is the implementation plan for the Hosted identity, first-organization,
@@ -44,8 +44,14 @@ Implemented and pushed:
   with a database-owned 30-second lease, monotonic generation fencing, safe
   same-response restart, expired-lease takeover, claim-bound completion/failure
   entry points, and append-only claim lifecycle evidence;
-- the frozen catalog validates 173 entries, 49 schemas, 61 OpenAPI operations,
-  and all 63 forward-only migrations. Hosted bootstrap remains a separately
+- migration `0064` adds database-clock bootstrap status and exact CSRF
+  verification functions; a deterministic, purpose-separated CSRF projection
+  survives restart while PostgreSQL stores only its digest;
+- the six-route Hosted boundary is composed from PostgreSQL, GitHub OAuth,
+  strict WebAuthn, status/CSRF, and first-organization services, then dispatched
+  by the real Cloud server before Human Auth with its raw request preserved;
+- the frozen catalog validates 174 entries, 49 schemas, 61 OpenAPI operations,
+  and all 64 forward-only migrations. Hosted bootstrap remains a separately
   frozen six-route contract with its own validator.
 
 Not yet implemented as a production-composable path:
@@ -56,8 +62,8 @@ Not yet implemented as a production-composable path:
   credential plus Human Session completion;
 - real-PostgreSQL qualification of leased/recoverable WebAuthn verification
   claims under process death, lease expiry, takeover, and changed responses;
-- runtime routing, Console pages, deployed E2E, and production evidence.
-- a terminal green CI qualification at schema head `0063`; the previous run
+- Console pages, deployed E2E, and production evidence.
+- a terminal green CI qualification at schema head `0064`; the previous run
   proved fresh migration and role/login boundaries, and this repair set aligns
   legacy 0048 authority, shared-integration fixtures, and live-browser budgets.
 
@@ -391,7 +397,7 @@ of the same commit gate.
    - focused source tests are green; PostgreSQL 16/17 fresh/upgrade,
      two-instance contention, process-kill, and rollback qualification remain
      mandatory CI gates before production use.
-8. `feat: expose hosted bootstrap status and csrf authority` (`0064`)
+8. `feat: expose hosted bootstrap status and csrf authority` (`0064`) — implemented in source
    - add function-only status/CSRF procedures that derive state, membership,
      organization, WebAuthn requirement, expiry, and completion from the exact
      bootstrap selector under a database clock;
@@ -403,7 +409,7 @@ of the same commit gate.
      no SQLSTATE or selector leakage;
    - exit when restart, multiple API instances, stale cookie, wrong CSRF,
      response loss, and direct-table privilege tests converge on PostgreSQL.
-9. `feat: compose hosted bootstrap runtime routes`
+9. `feat: compose hosted bootstrap runtime routes` — implemented in source
    - construct the Hosted repository in PostgreSQL runtime, then compose GitHub
      OAuth, identity, status/CSRF, organization, WebAuthn, and HTTP services in
      dependency order with no local/evaluation fallback;
@@ -413,9 +419,12 @@ of the same commit gate.
    - adapt operation- and peer-scoped rate limiting to the HTTP boundary,
      enforce deadlines/readiness/drain, and dispatch all six exact routes before
      Human Auth without pre-consuming request bodies or writing twice;
-   - add request correlation and fixed-cardinality secret-free telemetry, then
-     prove cookie rotation, redirects, multiple `Set-Cookie`, strict path/query,
-     404 fallthrough, restart, and two-instance behavior at the real server.
+   - exact route dispatch, raw-body ownership, redirects, multiple `Set-Cookie`,
+     strict path/query handling, startup key separation, and PostgreSQL-backed
+     anonymous operation buckets are implemented and covered by focused tests;
+   - request correlation, dedicated Hosted metrics/readiness, real PostgreSQL
+     restart/two-instance qualification, and deployed reverse-proxy behavior
+     remain mandatory before this package is production-composable.
 10. `feat: build hosted console onboarding`
    - implement GitHub start/callback recovery, first-organization, passkey,
      completion, expired, no-membership, and authenticated landing screens;

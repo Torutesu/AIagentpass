@@ -35,6 +35,7 @@ import { createPostgresPlatformOperatorAssignmentRepository } from "./platform-o
 import { createPostgresPlatformSessionRepository } from "./platform-session-repository.mjs";
 import { createPostgresPlatformSessionWebAuthnRepository } from "./platform-session-webauthn-repository.mjs";
 import { createPostgresPlatformSessionBootstrapRepository } from "./platform-session-bootstrap-repository.mjs";
+import { createPostgresHostedIdentityBootstrapRepository } from "./hosted-identity-bootstrap-repository.mjs";
 import {
   createDrainController,
   createOperationalHealth,
@@ -318,6 +319,7 @@ export async function createPostgresRuntime({ env = process.env, PoolClass = Poo
   const platformSessionRepository = createPostgresPlatformSessionRepository({ client: pool });
   const platformSessionWebAuthnRepository = createPostgresPlatformSessionWebAuthnRepository({ client: pool });
   const platformSessionBootstrapRepository = createPostgresPlatformSessionBootstrapRepository({ client: pool });
+  const hostedIdentityBootstrapRepository = createPostgresHostedIdentityBootstrapRepository({ client: pool });
   const controlPlaneStore = createPostgresControlPlaneStore({
     client: pool,
     organizationRepository,
@@ -364,6 +366,7 @@ export async function createPostgresRuntime({ env = process.env, PoolClass = Poo
     platformSessionRepository,
     platformSessionWebAuthnRepository,
     platformSessionBootstrapRepository,
+    hostedIdentityBootstrapRepository,
     createManagedSignerKeyLifecycleRepository: (options = {}) => createPostgresManagedSignerKeyLifecycleRepository({ ...options, client: signerPool }),
     createProviderOperationRepository: (options = {}) => createPostgresProviderOperationRepository({ ...options, client: signerPool }),
     providerOperationMaintenanceRepository,

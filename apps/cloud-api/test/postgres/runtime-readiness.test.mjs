@@ -88,6 +88,8 @@ test("PostgreSQL runtime exposes exact-schema readiness, tracked work, and bound
   assert.equal(typeof runtime.qualificationGrantBatchRepository?.issueQualificationGrantBatch, "function");
   assert.equal(typeof runtime.qualificationGrantBatchRepository?.claimQualificationGrantBatch, "function");
   assert.equal(typeof runtime.platformOperatorAssignmentRepository?.findActivePlatformOperatorAssignment, "function");
+  assert.equal(typeof runtime.hostedIdentityBootstrapRepository?.getBootstrapStatus, "function");
+  assert.equal(typeof runtime.hostedIdentityBootstrapRepository?.verifyBootstrapCsrf, "function");
   assert.equal(typeof runtime.createManagedSignerKeyLifecycleRepository, "function");
   assert.equal(runtime.createManagedSignerKeyLifecycleRepository({ purpose: "agentpass.agent-session-grant" }).purpose, "agentpass.agent-session-grant");
   assert.equal(runtime.createProviderOperationRepository({ purpose: "agentpass.agent-session-grant", keyId: "agent-key-1", keyVersion: "1" }).purpose, "agentpass.agent-session-grant");

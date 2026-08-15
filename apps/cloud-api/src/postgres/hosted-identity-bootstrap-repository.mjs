@@ -29,6 +29,8 @@ export const HOSTED_IDENTITY_BOOTSTRAP_REPOSITORY_METHODS = Object.freeze([
   "completeOAuthStateV2",
   "failOAuthState",
   "issueCsrf",
+  "getBootstrapStatus",
+  "verifyBootstrapCsrf",
   "commitOrganization",
   "commitOrganizationV2",
   "createChallenge",
@@ -51,6 +53,8 @@ export const HOSTED_IDENTITY_BOOTSTRAP_REPOSITORY_SQL = Object.freeze({
   completeOAuthStateV2: "SELECT * FROM public.agentpass_hosted_identity_oauth_complete_v2($1::uuid,$2::uuid,$3::bytea,$4::uuid,$5::text,$6::text,$7::bytea)",
   failOAuthState: "SELECT public.agentpass_hosted_identity_oauth_state_fail($1::uuid,$2::text) AS result",
   issueCsrf: "SELECT public.agentpass_hosted_identity_bootstrap_csrf_issue($1::bytea,$2::bytea) AS result",
+  getBootstrapStatus: "SELECT * FROM public.agentpass_hosted_identity_bootstrap_status_v2($1::bytea,$2::bytea)",
+  verifyBootstrapCsrf: "SELECT public.agentpass_hosted_identity_bootstrap_csrf_verify_v2($1::bytea,$2::bytea) AS result",
   commitOrganization: "SELECT * FROM public.agentpass_hosted_identity_bootstrap_organization_commit($1::bytea,$2::text,$3::bytea,$4::uuid,$5::uuid,$6::jsonb)",
   commitOrganizationV2: "SELECT * FROM public.agentpass_hosted_identity_bootstrap_organization_commit_v2($1::bytea,$2::text,$3::bytea,$4::text,$5::uuid,$6::uuid,$7::uuid)",
   createChallenge: "SELECT * FROM public.agentpass_hosted_identity_bootstrap_challenge_create($1::bytea,$2::uuid,$3::bytea,$4::text,$5::text,$6::timestamptz)",
@@ -148,6 +152,19 @@ export function createPostgresHostedIdentityBootstrapRepository({ client } = {})
   async function issueCsrf(input = {}) {
     const value = normalizeCsrf(input);
     const result = await scalarCall("issueCsrf", [sha256(value.bootstrap_cookie), sha256(value.csrf_token)], "boolean");
+    if (typeof result !== "boolean") throw error("RESULT");
+    return result;
+  }
+
+  async function getBootstrapStatus(input = {}) {
+    const value = normalizeCsrf(input);
+    const row = await optionalTableCall("getBootstrapStatus", [sha256(value.bootstrap_cookie), sha256(value.csrf_token)]);
+    return row === null ? null : normalizeBootstrapStatusResult(row);
+  }
+
+  async function verifyBootstrapCsrf(input = {}) {
+    const value = normalizeCsrf(input);
+    const result = await scalarCall("verifyBootstrapCsrf", [sha256(value.bootstrap_cookie), sha256(value.csrf_token)], "boolean");
     if (typeof result !== "boolean") throw error("RESULT");
     return result;
   }
@@ -297,6 +314,8 @@ export function createPostgresHostedIdentityBootstrapRepository({ client } = {})
     completeOAuthStateV2,
     failOAuthState,
     issueCsrf,
+    getBootstrapStatus,
+    verifyBootstrapCsrf,
     commitOrganization,
     commitOrganizationV2,
     createChallenge,
@@ -552,6 +571,24 @@ function normalizeOrganizationResult(value) {
   if (typeof value.replayed !== "boolean") throw error("RESULT");
   if (value.replayed !== (value.response_status === 200)) throw error("RESULT");
   return Object.freeze({ response_status: value.response_status, response_json: publicResponse(value.response_json, "RESULT"), replayed: value.replayed });
+}
+
+function normalizeBootstrapStatusResult(value) {
+  exactObject(value, ["state", "organization_count", "webauthn_required", "can_create_first_organization", "expires_at"], "RESULT");
+  const states = new Set(["identity_verified", "organization_required", "webauthn_required", "ready", "no_membership", "completed", "expired"]);
+  if (!states.has(value.state)
+    || typeof value.webauthn_required !== "boolean"
+    || typeof value.can_create_first_organization !== "boolean") throw error("RESULT");
+  const organizationCount = nonNegativeInteger(value.organization_count, "organization_count", "RESULT");
+  if (value.can_create_first_organization !== (value.state === "organization_required" && organizationCount === 0)
+    || value.webauthn_required !== (value.state === "webauthn_required")) throw error("RESULT");
+  return Object.freeze({
+    state: value.state,
+    organization_count: organizationCount,
+    webauthn_required: value.webauthn_required,
+    can_create_first_organization: value.can_create_first_organization,
+    expires_at: timestamp(value.expires_at, "expires_at", "RESULT")
+  });
 }
 
 function normalizeChallengeResult(value) {

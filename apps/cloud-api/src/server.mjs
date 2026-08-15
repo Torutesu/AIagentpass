@@ -31,6 +31,7 @@ import {
   normalizePlatformPromotionResult,
   platformPromotionContextHash
 } from "./platform-promotion-http-contract.mjs";
+import { HOSTED_BOOTSTRAP_HTTP_PATHS } from "./hosted-bootstrap/http-api.mjs";
 
 const MAX_BODY_BYTES = 1024 * 1024;
 const HUMAN_AUTH_MAX_BODY_BYTES = 64 * 1024;
@@ -68,7 +69,7 @@ const V2_CANDIDATE_BINDING_KEYS = Object.freeze([
 const V2_COMPLETION_KEYS = new Set(["version", "proof_version", "enrollment_id", "organization_id", "device_id", "label", "platform", "device_key", "candidate_id", "device_key_fingerprint", "challenge"]);
 const V2_CHALLENGE_KEYS = new Set(["challenge_id", "nonce", "expires_at", "candidate_id", "device_key_fingerprint"]);
 const V2_PROOF_DOMAIN = "AgentPass-Enrollment-Proof-v2\0";
-export function createCloudApi({ store, tokenRecords = [], bundleSigner, capabilitySigner, refreshHintService, now = () => Date.now(), monotonicNow, replayCache = createReplayCache(), deviceReplayConsumer, agentSessionDeviceApi, qualificationGrantBatchDeviceApi, rateLimiter, admissionRateLimiter, verifyRecentWebAuthn, recentAuthService, humanAuthApi, humanSession, humanAuthOrigin, auditExportIssuanceService, auditExportVerifier, platformPromotionIssuanceService, platformOperatorAuthorizer, capabilityAuthorityRepository, capabilityRevocationSource, auditRepository, enrollmentCredentialSecret, possessionReceiptSigner, platformSessionHttpApi, platformPromotionHttpApi, trackInFlight, readiness, operationalMetrics, operationalProbeSecret } = {}) {
+export function createCloudApi({ store, tokenRecords = [], bundleSigner, capabilitySigner, refreshHintService, now = () => Date.now(), monotonicNow, replayCache = createReplayCache(), deviceReplayConsumer, agentSessionDeviceApi, qualificationGrantBatchDeviceApi, rateLimiter, admissionRateLimiter, verifyRecentWebAuthn, recentAuthService, humanAuthApi, humanSession, humanAuthOrigin, auditExportIssuanceService, auditExportVerifier, platformPromotionIssuanceService, platformOperatorAuthorizer, capabilityAuthorityRepository, capabilityRevocationSource, auditRepository, enrollmentCredentialSecret, possessionReceiptSigner, platformSessionHttpApi, platformPromotionHttpApi, hostedBootstrapHttpApi, trackInFlight, readiness, operationalMetrics, operationalProbeSecret } = {}) {
   if (!store) throw new TypeError("store is required");
   if (verifyRecentWebAuthn !== undefined && recentAuthService !== undefined) throw new TypeError("configure verifyRecentWebAuthn or recentAuthService, not both");
   if (humanAuthApi !== undefined && (!humanAuthApi || typeof humanAuthApi.handle !== "function")) throw new TypeError("humanAuthApi must expose handle()");
@@ -108,6 +109,7 @@ export function createCloudApi({ store, tokenRecords = [], bundleSigner, capabil
   if (possessionReceiptSigner !== undefined && (!possessionReceiptSigner || typeof possessionReceiptSigner.signPossessionReceipt !== "function")) throw new TypeError("possessionReceiptSigner must expose signPossessionReceipt()");
   if (platformSessionHttpApi !== undefined && (!platformSessionHttpApi || typeof platformSessionHttpApi.handle !== "function" || !platformSessionHttpApi.paths || typeof platformSessionHttpApi.paths.challenge !== "string" || typeof platformSessionHttpApi.paths.assertion !== "string" || typeof platformSessionHttpApi.paths.revoke !== "string")) throw new TypeError("platformSessionHttpApi must expose handle() and platform paths");
   if (platformPromotionHttpApi !== undefined && (!platformPromotionHttpApi || Array.isArray(platformPromotionHttpApi) || typeof platformPromotionHttpApi.handle !== "function" || !platformPromotionHttpApi.paths || Array.isArray(platformPromotionHttpApi.paths) || platformPromotionHttpApi.paths.issue !== PLATFORM_AUTHORIZED_PROMOTION_ISSUE_PATH)) throw new TypeError("platformPromotionHttpApi must expose handle() and paths.issue");
+  if (hostedBootstrapHttpApi !== undefined && (!hostedBootstrapHttpApi || Array.isArray(hostedBootstrapHttpApi) || typeof hostedBootstrapHttpApi.handle !== "function" || !hasExactHostedBootstrapHttpPaths(hostedBootstrapHttpApi.paths))) throw new TypeError("hostedBootstrapHttpApi must expose handle() and the exact Hosted bootstrap paths");
   if (trackInFlight !== undefined && typeof trackInFlight !== "function") throw new TypeError("trackInFlight must be a function");
   if (readiness !== undefined && typeof readiness !== "function") throw new TypeError("readiness must be a function");
   if (operationalMetrics !== undefined && (!operationalMetrics || typeof operationalMetrics.snapshot !== "function")) throw new TypeError("operationalMetrics must expose snapshot()");
@@ -168,6 +170,12 @@ export function createCloudApi({ store, tokenRecords = [], bundleSigner, capabil
         // IncomingMessage through so its boundary owns body/header/cookie
         // parsing and generic Cloud authentication cannot reinterpret it.
         return await platformSessionHttpApi.handle(request, response);
+      }
+      if (hostedBootstrapHttpApi && isHostedBootstrapHttpPath(request.url)) {
+        // Hosted bootstrap is an independent trust boundary. Preserve the
+        // original IncomingMessage, including its one-shot body stream, and
+        // let that boundary own the response contract exactly once.
+        return await hostedBootstrapHttpApi.handle(request, response);
       }
       if (platformPromotionHttpApi && isPlatformPromotionHttpIssuePath(request.url, platformPromotionHttpApi.paths.issue)) {
         // Authorized Platform Promotion is its own trust boundary. Keep this
@@ -271,7 +279,11 @@ export function createCloudApi({ store, tokenRecords = [], bundleSigner, capabil
       if (error?.code === "ERR_BUNDLE_HEAD_MISMATCH") recordOperationalMetric(operationalMetrics, "recordStaleAck");
       if (hasErrorCode(error, "55P03")) recordOperationalMetric(operationalMetrics, "recordLockTimeout");
       const mapped = mapError(error);
-      send(response, mapped.status, { error: { code: mapped.code, message: mapped.message }, request_id: requestId }, mapped.headers);
+      if (!response.headersSent && !response.writableEnded) {
+        send(response, mapped.status, { error: { code: mapped.code, message: mapped.message }, request_id: requestId }, mapped.headers);
+      } else if (!response.writableEnded && typeof response.destroy === "function") {
+        response.destroy();
+      }
     }
   }
 
@@ -2003,6 +2015,21 @@ function isPlatformSessionHttpPath(rawUrl, paths) {
   try { pathname = new URL(rawUrl, "http://agentpass.invalid").pathname; }
   catch { return false; }
   return pathname === paths.challenge || pathname === paths.assertion || pathname === paths.revoke;
+}
+
+function hasExactHostedBootstrapHttpPaths(paths) {
+  if (!paths || typeof paths !== "object" || Array.isArray(paths)) return false;
+  const expectedKeys = Object.keys(HOSTED_BOOTSTRAP_HTTP_PATHS);
+  const actualKeys = Object.keys(paths);
+  return actualKeys.length === expectedKeys.length
+    && expectedKeys.every((key) => paths[key] === HOSTED_BOOTSTRAP_HTTP_PATHS[key]);
+}
+
+function isHostedBootstrapHttpPath(rawUrl) {
+  let pathname;
+  try { pathname = new URL(rawUrl, "http://agentpass.invalid").pathname; }
+  catch { return false; }
+  return Object.values(HOSTED_BOOTSTRAP_HTTP_PATHS).includes(pathname);
 }
 
 function isPlatformPromotionHttpIssuePath(rawUrl, issuePath) {

@@ -106,8 +106,10 @@ test("0057 keeps owner-based guards while current roles expose only hardened boo
     "agentpass_hosted_identity_bootstrap_start_v2(uuid,uuid,bytea,text,text,text,text,bytea,bytea,bytea,timestamptz)",
     "agentpass_hosted_identity_oauth_state_claim_v2(uuid,bytea,bytea,text)",
     "agentpass_hosted_identity_oauth_complete_v2(uuid,uuid,bytea,uuid,text,text,bytea)",
+    "agentpass_hosted_identity_bootstrap_status_v2(bytea,bytea)",
+    "agentpass_hosted_identity_bootstrap_csrf_verify_v2(bytea,bytea)",
     "agentpass_hosted_identity_bootstrap_organization_commit_v2(bytea,text,bytea,text,uuid,uuid,uuid)",
-    "agentpass_hosted_identity_bootstrap_challenge_complete(bytea,uuid,bytea)"
+    "agentpass_hosted_identity_bootstrap_challenge_create(bytea,uuid,bytea,text,text,timestamptz)"
   ]) assert.ok(roles.includes(`'${signature}'`), `${signature} app grant`);
   assert.equal(roles.includes("'agentpass_hosted_identity_bootstrap_start(uuid,uuid,bytea,text,text,text)'"), false);
   assert.equal(roles.includes("'agentpass_hosted_identity_oauth_state_consume(uuid,bytea,text)'"), false);

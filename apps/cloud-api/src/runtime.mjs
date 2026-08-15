@@ -12,6 +12,10 @@ import { createPersistentReplayCache, verifyDeviceRequest } from "./auth.mjs";
 import { createRateLimiter } from "./rate-limit.mjs";
 import { createPostgresRuntime } from "./postgres/runtime.mjs";
 import { createHumanAuthRuntime } from "./human-auth/runtime.mjs";
+import { createSimpleWebAuthnRegistrationVerifier } from "./human-auth/webauthn/registration.mjs";
+import { createHostedBootstrapRuntime, loadHostedBootstrapRuntimeConfig } from "./hosted-bootstrap/runtime.mjs";
+import { createGithubOAuthConfig } from "./hosted-identity/github-oauth-config.mjs";
+import { HOSTED_BOOTSTRAP_HTTP_PATHS } from "./hosted-bootstrap/http-api.mjs";
 import { parseCloudRuntimeProfile } from "./runtime-profile.mjs";
 import { createRefreshHintService } from "./refresh-hint-service.mjs";
 import { createManagedRefreshHintSigner } from "./refresh-hint-signer.mjs";
@@ -110,6 +114,13 @@ export async function createCloudRuntime({ env = process.env, logger = console, 
   }
   const cursorSecret = config.humanAuth ? requireHumanCursorSecret(env.AGENTPASS_HUMAN_CURSOR_SECRET) : undefined;
   const humanAuthSecret = config.humanAuth ? exactRuntimeSecret(env.AGENTPASS_HUMAN_AUTH_SECRET, "AGENTPASS_HUMAN_AUTH_SECRET") : undefined;
+  if (profile.isHosted) {
+    const hostedBootstrapConfig = loadHostedBootstrapRuntimeConfig(env, { humanAuthSecret });
+    const githubOAuthConfig = createGithubOAuthConfig(env);
+    if (githubOAuthConfig.redirectUri !== `${hostedBootstrapConfig.origin}${HOSTED_BOOTSTRAP_HTTP_PATHS.githubCallback}`) {
+      throw new Error("Hosted GitHub redirect URI does not match the bootstrap callback");
+    }
+  }
   const consoleIdentityPublicKey = config.humanAuth
     ? readProtectedFile(config.humanAuth.identityAssertionPublicKeyPath, "console identity public key", 16 * 1024).toString("utf8")
     : undefined;
@@ -119,6 +130,7 @@ export async function createCloudRuntime({ env = process.env, logger = console, 
   let store;
   let postgresRuntime;
   let humanAuthRuntime;
+  let hostedBootstrapRuntime;
   let server;
   try {
     if (profile.isHosted) {
@@ -459,6 +471,16 @@ export async function createCloudRuntime({ env = process.env, logger = console, 
       });
     } else store = await createCloudStore({ dataDir: config.dataDir });
     const hostedRateLimiter = profile.isHosted ? createHostedRateLimiter(postgresRuntime.sharedControlRepository, { secret: humanAuthSecret }) : undefined;
+    if (profile.isHosted) {
+      hostedBootstrapRuntime = createHostedBootstrapRuntime({
+        env,
+        repository: postgresRuntime.hostedIdentityBootstrapRepository,
+        registrationVerifier: createSimpleWebAuthnRegistrationVerifier(),
+        rateLimitRepository: postgresRuntime.sharedControlRepository,
+        rateLimitSecret: humanAuthSecret,
+        humanAuthSecret
+      });
+    }
     let agentSessionDeviceApi;
     let qualificationGrantBatchDeviceApi;
     if (profile.isHosted) {
@@ -524,6 +546,7 @@ export async function createCloudRuntime({ env = process.env, logger = console, 
       ...(auditExportIssuanceService ? { auditExportIssuanceService, auditExportVerifier } : {}),
       ...(platformSessionHttpApi ? { platformSessionHttpApi } : {}),
       ...(platformPromotionHttpApi ? { platformPromotionHttpApi } : {}),
+      ...(hostedBootstrapRuntime ? { hostedBootstrapHttpApi: hostedBootstrapRuntime.api } : {}),
       ...(agentSessionDeviceApi ? { agentSessionDeviceApi } : {}),
       ...(qualificationGrantBatchDeviceApi ? { qualificationGrantBatchDeviceApi } : {}),
       ...(possessionReceiptSigner ? { possessionReceiptSigner } : {}),
@@ -539,6 +562,7 @@ export async function createCloudRuntime({ env = process.env, logger = console, 
     store,
     postgresRuntime,
     humanAuthRuntime,
+    hostedBootstrapRuntime,
     auditAnchorSigner,
     auditExportIssuanceService,
     auditExportVerifier,

@@ -19,7 +19,8 @@
     "first_organization_forward_migration": "0060_hosted_first_organization_atomic",
     "oauth_output_qualification_forward_migration": "0061_hosted_oauth_output_qualification",
     "webauthn_session_atomic_forward_migration": "0062_hosted_webauthn_session_atomic",
-    "webauthn_claim_lease_forward_migration": "0063_hosted_webauthn_claim_lease"
+    "webauthn_claim_lease_forward_migration": "0063_hosted_webauthn_claim_lease",
+    "bootstrap_status_csrf_forward_migration": "0064_hosted_bootstrap_status_csrf"
   },
   "authority": {
     "identity_provider": "github",
@@ -32,6 +33,7 @@
       "the provider subject is bound to provider=github and an immutable upstream_identities row"
     ],
     "server_authority": "postgresql",
+    "bootstrap_status_csrf_authority": "agentpass_hosted_identity_bootstrap_status_v2 validates the exact bootstrap cookie digest, persists or confirms the CSRF digest, and returns only state, organization_count, webauthn_required, can_create_first_organization, and expires_at; agentpass_hosted_identity_bootstrap_csrf_verify_v2 accepts only that exact digest on a nonexpired usable attempt",
     "organization_creation_authority": "agentpass_hosted_identity_bootstrap_organization_commit_v2",
     "web_authn_authority": "agentpass_hosted_identity_bootstrap_webauthn_claim_v2 grants a database-clock verification lease, then the existing strict WebAuthn verifier feeds agentpass_hosted_identity_bootstrap_webauthn_complete_v3, which claim-binds and atomically commits the credential, challenge, bootstrap attempt, Human Session, and digest-only response-loss receipt",
     "forbidden_identity_sources": [
@@ -101,6 +103,7 @@
       { "from": "webauthn_required", "to": "completed", "event": "initial_webauthn_registration_verified" },
       { "from": "webauthn_required", "to": "ready", "event": "existing_credential_verified_or_normal_session_issued" },
       { "from": "ready", "to": "completed", "event": "normal_human_session_issued" },
+      { "from": "no_membership", "to": "expired", "event": "bootstrap_session_expired" },
       { "from": "oauth_started", "to": "expired", "event": "state_or_attempt_expired" },
       { "from": "identity_verified", "to": "expired", "event": "bootstrap_session_expired" },
       { "from": "organization_required", "to": "expired", "event": "bootstrap_session_expired" },

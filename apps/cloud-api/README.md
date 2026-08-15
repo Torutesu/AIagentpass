@@ -94,6 +94,16 @@ export AGENTPASS_HUMAN_CURSOR_SECRET="$(openssl rand -base64 32 | tr '+/' '-_' |
 export AGENTPASS_HUMAN_AUTH_SECRET="$(openssl rand -base64 32 | tr '+/' '-_' | tr -d '=\n')"
 export AGENTPASS_CAPABILITY_NONCE_SECRET="$(openssl rand -base64 32 | tr '+/' '-_' | tr -d '=\n')"
 export AGENTPASS_OPERATIONAL_PROBE_SECRET="$(openssl rand -base64 32 | tr '+/' '-_' | tr -d '=\n')"
+# Hosted account bootstrap is also all-or-nothing. The redirect is fixed to
+# the exact six-route callback and onboarding remains on the Console origin.
+export AGENTPASS_GITHUB_CLIENT_ID='github-oauth-app-client-id'
+export AGENTPASS_GITHUB_CLIENT_SECRET='github-oauth-app-client-secret'
+export AGENTPASS_GITHUB_REDIRECT_URI='https://console.example.com/api/auth/bootstrap/github/callback'
+export AGENTPASS_HOSTED_CONSOLE_ONBOARDING_URL='https://console.example.com/onboarding'
+export AGENTPASS_HOSTED_PKCE_KEY_ID='hosted-pkce-v1'
+export AGENTPASS_HOSTED_PKCE_KEY="$(openssl rand -base64 32 | tr '+/' '-_' | tr -d '=\n')"
+export AGENTPASS_HOSTED_BOOTSTRAP_CSRF_KEY="$(openssl rand -base64 32 | tr '+/' '-_' | tr -d '=\n')"
+export AGENTPASS_HOSTED_WEBAUTHN_RESPONSE_KEY="$(openssl rand -base64 32 | tr '+/' '-_' | tr -d '=\n')"
 npm start
 ```
 
@@ -112,6 +122,13 @@ and reproducible PostgreSQL 16 qualification, use the
 `AGENTPASS_CLOUD_DATA_DIR` and `AGENTPASS_CLOUD_TOKEN_RECORDS_PATH` are required only with `AGENTPASS_CLOUD_PROFILE=evaluation`, where Human Auth is disabled. `AGENTPASS_CLOUD_PROFILE=hosted` rejects both variables, neither loads the file store nor accepts its bearer credentials, and fails startup on incomplete PostgreSQL, Human Auth, shared-control, or control-plane-store composition.
 
 `AGENTPASS_CONSOLE_ORIGIN` must be an exact HTTPS origin. The RP ID must equal its hostname or be a parent suffix. `AGENTPASS_IDENTITY_PROVIDER` defaults to `chatgpt`; every verified Console subject must have an `upstream_identities` row and an active organization membership before session issuance. The identity assertion public-key file must be a regular owner-only Ed25519 SPKI PEM file; missing or unsafe assertion configuration fails startup. The matching private key belongs only in the Console deployment secret manager. `AGENTPASS_HUMAN_CURSOR_SECRET` authenticates opaque organization/member/invitation cursors. `AGENTPASS_HUMAN_AUTH_SECRET` is a distinct 32-byte root used only for domain-separated HMAC identifiers in Human-auth shared rate limits and signed-identity replay records. Both values must be canonical unpadded base64url and identical across Cloud API replicas; neither is returned as configuration metadata. Rotate either through a coordinated deployment: cursor rotation invalidates pagination, while Human-auth rotation starts fresh limiter/replay namespaces and therefore requires a controlled overlap decision at the deployment layer. Partial Human Auth configuration fails startup.
+
+The Hosted bootstrap PKCE, CSRF, WebAuthn response-recovery, and Human Auth
+keys must be four different canonical 32-byte base64url values shared by every
+API replica. Startup rejects a missing, malformed, or aliased key and an OAuth
+redirect or onboarding URL outside the exact Console routes. PostgreSQL stores
+only SHA-256 selectors and the encrypted PKCE envelope; these raw roots stay in
+the deployment secret manager and never enter runtime metadata.
 
 The process binds loopback by default. Terminate with SIGINT/SIGTERM for graceful shutdown. Hosted device replay evidence, authenticated rate limits, idempotency, and authority survive restart in PostgreSQL. A dedicated shared-control maintenance worker starts independently of recovery delivery, prunes idempotency, nonce, tenant limiter, anonymous limiter, and signed-identity replay records under one bounded budget, and stops before the pool closes. Its counters are fixed and label-free. Evaluation uses the exclusive single-writer file store; never share its JSON data directory between processes.
 

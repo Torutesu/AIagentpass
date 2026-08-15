@@ -2,6 +2,7 @@ export * from "./github-oauth-adapter.mjs";
 export * from "./github-oauth-config.mjs";
 export * from "./github-oauth-normalization.mjs";
 export * from "./identity-bootstrap-service.mjs";
+export * from "./bootstrap-service.mjs";
 export * from "./organization-name.mjs";
 export * from "./organization-bootstrap-service.mjs";
 export * from "./pkce-verifier-codec.mjs";

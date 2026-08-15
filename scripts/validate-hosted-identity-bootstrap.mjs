@@ -24,6 +24,7 @@ const REQUIRED_FILES = [
   "contracts/postgres/0061_hosted_oauth_output_qualification.sql",
   "contracts/postgres/0062_hosted_webauthn_session_atomic.sql",
   "contracts/postgres/0063_hosted_webauthn_claim_lease.sql",
+  "contracts/postgres/0064_hosted_bootstrap_status_csrf.sql",
   "contracts/schemas/human-session-v1.schema.json",
   "contracts/schemas/webauthn-ceremony-v1.schema.json",
   "apps/cloud-api/src/human-session.mjs",
@@ -58,10 +59,14 @@ export function validateHostedIdentityBootstrapContract(document, { root = DEFAU
       || document.activation?.first_organization_forward_migration !== "0060_hosted_first_organization_atomic"
       || document.activation?.oauth_output_qualification_forward_migration !== "0061_hosted_oauth_output_qualification"
       || document.activation?.webauthn_session_atomic_forward_migration !== "0062_hosted_webauthn_session_atomic"
-      || document.activation?.webauthn_claim_lease_forward_migration !== "0063_hosted_webauthn_claim_lease") fail("migration ordering is not pinned after identity epoch invalidation");
+      || document.activation?.webauthn_claim_lease_forward_migration !== "0063_hosted_webauthn_claim_lease"
+      || document.activation?.bootstrap_status_csrf_forward_migration !== "0064_hosted_bootstrap_status_csrf") fail("migration ordering is not pinned after identity epoch invalidation");
 
     const authority = document.authority;
     if (!isObject(authority) || authority.identity_provider !== "github" || authority.server_authority !== "postgresql") fail("authority is not GitHub/PostgreSQL");
+    if (!/status_v2/i.test(authority.bootstrap_status_csrf_authority ?? "")
+      || !/csrf_verify_v2/i.test(authority.bootstrap_status_csrf_authority ?? "")
+      || !/only state, organization_count, webauthn_required, can_create_first_organization, and expires_at/i.test(authority.bootstrap_status_csrf_authority ?? "")) fail("status/CSRF database authority is not pinned");
     if (!isObject(authority) || authority.subject_verification?.some((item) => /browser-supplied access token|server calls github \/user/i.test(item)) !== true) fail("server-side GitHub subject verification is not encoded");
     for (const field of FORBIDDEN_FIELDS) includes(authority.forbidden_caller_authority_fields, field, "forbidden caller authority fields");
     if (!authority.forbidden_identity_sources?.some((item) => /ChatGPT-only ambient identity/i.test(item))) fail("ChatGPT-only ambient identity is not forbidden");

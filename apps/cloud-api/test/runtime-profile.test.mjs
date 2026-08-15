@@ -42,6 +42,14 @@ function hostedEnv(overrides = {}) {
     AGENTPASS_IDENTITY_ASSERTION_PUBLIC_KEY_PATH: "/srv/agentpass/hosted/console-public.pem",
     AGENTPASS_HUMAN_CURSOR_SECRET: SECRET,
     AGENTPASS_HUMAN_AUTH_SECRET: Buffer.alloc(32, 0x5b).toString("base64url"),
+    AGENTPASS_GITHUB_CLIENT_ID: "agentpass-profile-test",
+    AGENTPASS_GITHUB_CLIENT_SECRET: "github-profile-test-secret",
+    AGENTPASS_GITHUB_REDIRECT_URI: "https://console.example.test/api/auth/bootstrap/github/callback",
+    AGENTPASS_HOSTED_CONSOLE_ONBOARDING_URL: "https://console.example.test/onboarding",
+    AGENTPASS_HOSTED_PKCE_KEY_ID: "hosted-pkce-v1",
+    AGENTPASS_HOSTED_PKCE_KEY: Buffer.alloc(32, 0x5c).toString("base64url"),
+    AGENTPASS_HOSTED_BOOTSTRAP_CSRF_KEY: Buffer.alloc(32, 0x5d).toString("base64url"),
+    AGENTPASS_HOSTED_WEBAUTHN_RESPONSE_KEY: Buffer.alloc(32, 0x5e).toString("base64url"),
     AGENTPASS_CAPABILITY_NONCE_SECRET: Buffer.alloc(32, 0x33).toString("base64url"),
     AGENTPASS_CLOUD_REFRESH_PUBLIC_KEY: "hosted-refresh-public-key-pin",
     AGENTPASS_CLOUD_REFRESH_TIMEOUT_MS: "5000",
@@ -141,6 +149,14 @@ test("accepts hosted only with complete PostgreSQL and Human Auth prerequisites"
     "AGENTPASS_IDENTITY_ASSERTION_PUBLIC_KEY_PATH",
     "AGENTPASS_HUMAN_CURSOR_SECRET",
     "AGENTPASS_HUMAN_AUTH_SECRET",
+    "AGENTPASS_GITHUB_CLIENT_ID",
+    "AGENTPASS_GITHUB_CLIENT_SECRET",
+    "AGENTPASS_GITHUB_REDIRECT_URI",
+    "AGENTPASS_HOSTED_CONSOLE_ONBOARDING_URL",
+    "AGENTPASS_HOSTED_PKCE_KEY_ID",
+    "AGENTPASS_HOSTED_PKCE_KEY",
+    "AGENTPASS_HOSTED_BOOTSTRAP_CSRF_KEY",
+    "AGENTPASS_HOSTED_WEBAUTHN_RESPONSE_KEY",
     "AGENTPASS_CAPABILITY_NONCE_SECRET",
     "AGENTPASS_CLOUD_REFRESH_PUBLIC_KEY",
     "AGENTPASS_CLOUD_REFRESH_TIMEOUT_MS",
@@ -246,6 +262,22 @@ test("rejects hosted file-store compatibility inputs and evaluation auth inputs"
 });
 
 test("fails closed for partial, malformed, stale, unsafe, and unknown configuration", () => {
+  assertProfileError(
+    () => parseCloudRuntimeProfile(hostedEnv({ AGENTPASS_HOSTED_BOOTSTRAP_CSRF_KEY: undefined })),
+    CLOUD_RUNTIME_PROFILE_ERROR_CODES.HOSTED_AUTH_INCOMPLETE
+  );
+  assertProfileError(
+    () => parseCloudRuntimeProfile(hostedEnv({ AGENTPASS_GITHUB_REDIRECT_URI: "https://console.example.test/wrong" })),
+    CLOUD_RUNTIME_PROFILE_ERROR_CODES.HOSTED_AUTH_INCOMPLETE
+  );
+  assertProfileError(
+    () => parseCloudRuntimeProfile(hostedEnv({ AGENTPASS_HOSTED_BOOTSTRAP_CSRF_KEY: Buffer.alloc(32, 0x5c).toString("base64url") })),
+    CLOUD_RUNTIME_PROFILE_ERROR_CODES.HOSTED_AUTH_INCOMPLETE
+  );
+  assertProfileError(
+    () => parseCloudRuntimeProfile(evaluationEnv({ AGENTPASS_HOSTED_PKCE_KEY: SECRET })),
+    CLOUD_RUNTIME_PROFILE_ERROR_CODES.EVALUATION_AUTH_FORBIDDEN
+  );
   assertProfileError(
     () => parseCloudRuntimeProfile(hostedEnv({ AGENTPASS_DATABASE_URL: undefined })),
     CLOUD_RUNTIME_PROFILE_ERROR_CODES.HOSTED_AUTH_INCOMPLETE
