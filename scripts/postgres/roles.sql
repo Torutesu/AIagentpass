@@ -261,7 +261,8 @@ BEGIN
     'agentpass_platform_session_touch(bytea,bytea,uuid,text,text)',
     'agentpass_platform_session_revoke(bytea,bytea,text)',
     'agentpass_platform_session_complete_and_issue(uuid,bytea,bytea,uuid,bytea,bytea,bytea,bytea,bytea,integer,integer)',
-    'agentpass_consume_platform_authorization_and_reserve(bytea,bytea,uuid,bytea,bytea,uuid,text,text,text,text,bytea,integer,integer,text,bigint,bigint)'
+    'agentpass_consume_platform_authorization_and_reserve(bytea,bytea,uuid,bytea,bytea,uuid,text,text,text,text,bytea,integer,integer,text,bigint,bigint)',
+    'agentpass_platform_session_bootstrap_context(bytea,uuid,text,text)'
   ] LOOP
     IF to_regprocedure('public.' || routine_signature) IS NOT NULL THEN
       EXECUTE format('GRANT EXECUTE ON FUNCTION public.%s TO agentpass_app', routine_signature);

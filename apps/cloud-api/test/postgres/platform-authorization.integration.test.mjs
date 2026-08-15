@@ -22,7 +22,7 @@ test("0054 real PostgreSQL binds the ceremony, CSRF, request, proof, and atomic 
   const migrator = await pool.connect();
   try {
     const migrated = await createMigrationRunner({ client: migrator, applicationVersion: "platform-authorization-0054" }).run();
-    assert.equal(migrated.currentVersion, 54);
+    assert.equal(migrated.currentVersion, 55);
   } finally {
     migrator.release();
   }

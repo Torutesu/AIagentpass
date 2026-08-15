@@ -47,7 +47,7 @@ test("0044 PostgreSQL digest is byte-identical to the canonical JavaScript appro
   t.after(async () => { client.release(); await pool.end(); });
 
   const migrated = await createMigrationRunner({ client, applicationVersion: "platform-approval-parity" }).run();
-  assert.equal(migrated.currentVersion, 54);
+  assert.equal(migrated.currentVersion, 55);
 
   const record = normalizePlatformPromotionApprovalRecord(RECORD, {
     now: Date.parse(RECORD.approved_at),
