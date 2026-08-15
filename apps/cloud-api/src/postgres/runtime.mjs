@@ -292,7 +292,11 @@ export async function createPostgresRuntime({ env = process.env, PoolClass = Poo
     snapshotReader: auditExportSnapshotReader
   });
   const platformPromotionIssuanceRepository = createPostgresPlatformPromotionIssuanceRepository({
-    client: pool,
+    // Reservation authorization runs on the application pool through 0054,
+    // while post-signature commit/uncertain transitions use the purpose-scoped
+    // signer role. The application credential therefore cannot execute the
+    // legacy promotion mutation functions directly.
+    client: signerPool,
     verifyEvidence: platformPromotionVerifyEvidence,
     ...(normalizedPlatformPromotionLifecycle ?? {})
   });

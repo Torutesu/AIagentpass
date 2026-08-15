@@ -93,14 +93,12 @@ signer_function_allowlist(routine_signature) AS (
     ('agentpass_managed_signer_signing_reconcile(text,text,bytea,text,bigint,bytea,text,text)'),
     ('agentpass_managed_signer_signing_lookup(text,text)'),
     ('agentpass_managed_signer_signing_prune(text,timestamptz,integer)'),
-    ('agentpass_managed_signer_lifecycle_operation_prune(text,timestamptz,integer)')
+    ('agentpass_managed_signer_lifecycle_operation_prune(text,timestamptz,integer)'),
+    ('agentpass_platform_promotion_issuance_commit(uuid,text,text,text,text,bytea,bytea,bytea,bytea,bytea)'),
+    ('agentpass_platform_promotion_issuance_uncertain(uuid,text,text,text,text,bytea,text)')
 ),
 app_function_allowlist(routine_signature) AS (
   VALUES
-    ('agentpass_platform_promotion_issuance_replay(uuid,text,text,text,text)'),
-    ('agentpass_platform_promotion_issuance_commit(uuid,text,text,text,text,bytea,bytea,bytea,bytea,bytea)'),
-    ('agentpass_platform_promotion_issuance_uncertain(uuid,text,text,text,text,bytea,text)'),
-    ('agentpass_platform_promotion_issuance_get(uuid,text,text,text,text,boolean)'),
     ('agentpass_platform_operator_assignment_find_active(uuid,uuid,uuid,text,text)'),
     ('agentpass_platform_session_challenge_create(uuid,uuid,bytea,bytea,bytea,bytea,bytea[],uuid,uuid,uuid,uuid,bigint,text,text,text,text,text,integer)'),
     ('agentpass_platform_session_challenge_find(uuid)'),

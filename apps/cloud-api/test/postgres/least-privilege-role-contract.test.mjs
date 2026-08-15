@@ -19,7 +19,6 @@ const PLATFORM_AUTHORITY_RELATIONS = Object.freeze([
 ]);
 
 const PLATFORM_APP_FUNCTIONS = Object.freeze([
-  'agentpass_platform_promotion_issuance_get(uuid,text,text,text,text,boolean)',
   'agentpass_platform_operator_assignment_find_active(uuid,uuid,uuid,text,text)',
   'agentpass_platform_session_challenge_create(uuid,uuid,bytea,bytea,bytea,bytea,bytea[],uuid,uuid,uuid,uuid,bigint,text,text,text,text,text,integer)',
   'agentpass_platform_session_challenge_find(uuid)',
@@ -38,6 +37,11 @@ const PLATFORM_APP_FUNCTIONS = Object.freeze([
 const LEGACY_PLATFORM_PROMOTION_MUTATIONS = Object.freeze([
   'agentpass_platform_promotion_issuance_reserve(uuid,text,text,text,text,bytea,integer,integer,text,bigint,bigint)',
   'agentpass_platform_promotion_issuance_replay(uuid,text,text,text,text)',
+  'agentpass_platform_promotion_issuance_commit(uuid,text,text,text,text,bytea,bytea,bytea,bytea,bytea)',
+  'agentpass_platform_promotion_issuance_uncertain(uuid,text,text,text,text,bytea,text)',
+]);
+
+const PLATFORM_SIGNER_FINALIZE_FUNCTIONS = Object.freeze([
   'agentpass_platform_promotion_issuance_commit(uuid,text,text,text,text,bytea,bytea,bytea,bytea,bytea)',
   'agentpass_platform_promotion_issuance_uncertain(uuid,text,text,text,text,bytea,text)',
 ]);
@@ -77,7 +81,7 @@ test('role SQL is idempotent, credential-free, and PUBLIC is revoked', async () 
   for (const relation of PLATFORM_AUTHORITY_RELATIONS) {
     assert.match(platformSql, new RegExp(`CREATE TABLE (?:public\\.)?${relation} \\(`, 'u'), `migration relation missing: ${relation}`);
   }
-  assert.match(sql, /Promotion issuance is reachable only through the reviewed SECURITY DEFINER/);
+  assert.match(sql, /Platform mutation is issue-only for the application role/);
   assert.match(sql, /managed_signer_provider_operations/);
   assert.match(sql, /GRANT EXECUTE ON FUNCTION public\.%s TO agentpass_app/);
   assert.match(sql, /agentpass_platform_operator_assignment_find_active\(uuid,uuid,uuid,text,text\)/u);
@@ -93,7 +97,8 @@ test('role SQL is idempotent, credential-free, and PUBLIC is revoked', async () 
     assert.match(platformSql, new RegExp(`CREATE FUNCTION (?:public\\.)?${escapedRegExp(functionName)}\\(`, 'u'), `migration function missing: ${functionName}`);
   }
   for (const signature of LEGACY_PLATFORM_PROMOTION_MUTATIONS) {
-    assert.equal(sql.includes(`'${signature}'`), false, `legacy application grant present: ${signature}`);
+    const occurrences = sql.split(`'${signature}'`).length - 1;
+    assert.equal(occurrences, PLATFORM_SIGNER_FINALIZE_FUNCTIONS.includes(signature) ? 1 : 0, `unexpected promotion grant count: ${signature}`);
   }
   assert.match(sql, /ALTER DEFAULT PRIVILEGES FOR ROLE agentpass_migrator IN SCHEMA public/);
   assert.match(sql, /ON TABLES/);
@@ -125,7 +130,8 @@ test('platform authority matrix is function-only for app and purpose-scoped for 
     assert.match(rolesSql, new RegExp(`'${escapedRegExp(signature)}'`, 'u'), `app allowlist missing: ${signature}`);
   }
   for (const signature of LEGACY_PLATFORM_PROMOTION_MUTATIONS) {
-    assert.equal(rolesSql.includes(`'${signature}'`), false, `legacy mutation allowlist present: ${signature}`);
+    const occurrences = rolesSql.split(`'${signature}'`).length - 1;
+    assert.equal(occurrences, PLATFORM_SIGNER_FINALIZE_FUNCTIONS.includes(signature) ? 1 : 0, `unexpected promotion grant count: ${signature}`);
     const functionName = signature.slice(0, signature.indexOf('('));
     assert.match(platformSql, new RegExp(`CREATE FUNCTION (?:public\\.)?${escapedRegExp(functionName)}\\(`, 'u'), `migration function missing: ${functionName}`);
   }
@@ -135,6 +141,9 @@ test('platform authority matrix is function-only for app and purpose-scoped for 
   assert.match(rolesSql, /GRANT ALL PRIVILEGES ON ALL FUNCTIONS IN SCHEMA public TO agentpass_migrator/u);
   assert.match(rolesSql, /GRANT EXECUTE ON FUNCTION public\.%s TO agentpass_signer/u);
   assert.match(rolesSql, /left\(c\.relname, length\('managed_signer_'\)\) = 'managed_signer_'/u);
+  for (const signature of PLATFORM_SIGNER_FINALIZE_FUNCTIONS) {
+    assert.match(rolesSql, new RegExp(`'${escapedRegExp(signature)}'`, 'u'), `signer finalization allowlist missing: ${signature}`);
+  }
 });
 
 test('app is DML-only, migrator owns migration authority, and backup is read-only', async () => {
@@ -188,8 +197,16 @@ test('checker reads the URL from the environment, enforces verify-full, and meas
   assert.match(checker, /migration_head_ok/u);
   assert.match(checker, /count\(\*\) = 55 AND min\(version\) = 1 AND max\(version\) = 55/u);
   assert.match(checker, /signer_function_allowlist/u);
+  assert.match(checker, /app_function_allowlist/u);
   assert.match(checker, /to_regprocedure\('public\.' \|\| routine_signature\) AS routine_oid/u);
   assert.match(checker, /NOT EXISTS \(SELECT 1 FROM signer_function_oids WHERE routine_oid IS NULL\)/u);
+  for (const signature of PLATFORM_APP_FUNCTIONS) {
+    assert.match(checker, new RegExp(`\\('${escapedRegExp(signature)}'\\)`, 'u'), `checker app allowlist missing: ${signature}`);
+  }
+  for (const signature of LEGACY_PLATFORM_PROMOTION_MUTATIONS) {
+    const occurrences = checker.split(`('${signature}')`).length - 1;
+    assert.equal(occurrences, PLATFORM_SIGNER_FINALIZE_FUNCTIONS.includes(signature) ? 1 : 0, `checker promotion allowlist mismatch: ${signature}`);
+  }
   assert.match(checker, /a\.routine_oid = functions\.oid/u);
   assert.match(checker, /createHash\('sha256'\)/);
   assert.match(checker, /AGENTPASS_PRIVILEGE_EVIDENCE_OUTPUT/u);

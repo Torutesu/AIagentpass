@@ -36,10 +36,13 @@ const REQUEST = Object.freeze({
 const DATABASE_STATE = { applied: [] };
 
 class RuntimePool {
+  static instances = [];
+
   constructor() {
     this.applied = DATABASE_STATE.applied;
     this.calls = [];
     this.ended = false;
+    RuntimePool.instances.push(this);
   }
 
   async connect() {
@@ -87,6 +90,7 @@ function env() {
 }
 
 async function runtime(options = {}) {
+  RuntimePool.instances = [];
   return createPostgresRuntime({
     env: env(),
     PoolClass: RuntimePool,
@@ -96,6 +100,25 @@ async function runtime(options = {}) {
     ...options
   });
 }
+
+test("routes promotion finalization through the signer pool, never the application pool", async () => {
+  const value = await runtime();
+  const [applicationPool, _migrationPool, signerPool] = RuntimePool.instances;
+  await assert.rejects(value.platformPromotionIssuanceRepository.markPlatformPromotionUncertain({
+    ...REQUEST,
+    claim_token: Buffer.alloc(32, 0x77).toString("base64url"),
+    reason: "commit_failure"
+  }));
+  assert.equal(
+    signerPool.calls.some(({ text }) => typeof text === "string" && text.includes("agentpass_platform_promotion_issuance_uncertain")),
+    true
+  );
+  assert.equal(
+    applicationPool.calls.some(({ text }) => typeof text === "string" && text.includes("agentpass_platform_promotion_issuance_uncertain")),
+    false
+  );
+  await value.close();
+});
 
 test("does not expose atomic platform authorization without lifecycle binding", async () => {
   const value = await runtime();

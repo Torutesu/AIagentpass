@@ -238,18 +238,15 @@ BEGIN
 END
 $$;
 
--- Promotion issuance is reachable only through the reviewed SECURITY DEFINER
--- entry points. Helpers and every unrelated function remain non-executable by
--- the application role.
+-- Platform mutation is issue-only for the application role. Promotion replay,
+-- commit, uncertain, and legacy reserve remain unavailable even though their
+-- internal functions still support the purpose-scoped signer workflow.
+-- The reviewed 0054 function is the sole online proof-consuming mutation.
 DO $$
 DECLARE
   routine_signature text;
 BEGIN
   FOREACH routine_signature IN ARRAY ARRAY[
-    'agentpass_platform_promotion_issuance_replay(uuid,text,text,text,text)',
-    'agentpass_platform_promotion_issuance_commit(uuid,text,text,text,text,bytea,bytea,bytea,bytea,bytea)',
-    'agentpass_platform_promotion_issuance_uncertain(uuid,text,text,text,text,bytea,text)',
-    'agentpass_platform_promotion_issuance_get(uuid,text,text,text,text,boolean)',
     'agentpass_platform_operator_assignment_find_active(uuid,uuid,uuid,text,text)',
     'agentpass_platform_session_challenge_create(uuid,uuid,bytea,bytea,bytea,bytea,bytea[],uuid,uuid,uuid,uuid,bigint,text,text,text,text,text,integer)',
     'agentpass_platform_session_challenge_find(uuid)',
@@ -266,6 +263,24 @@ BEGIN
   ] LOOP
     IF to_regprocedure('public.' || routine_signature) IS NOT NULL THEN
       EXECUTE format('GRANT EXECUTE ON FUNCTION public.%s TO agentpass_app', routine_signature);
+    END IF;
+  END LOOP;
+END
+$$;
+
+-- After 0054 has atomically consumed the browser proof and reserved one
+-- issuance, only the signer identity may finalize that exact claim. It has no
+-- platform table privileges and receives neither reserve, replay, nor get.
+DO $$
+DECLARE
+  routine_signature text;
+BEGIN
+  FOREACH routine_signature IN ARRAY ARRAY[
+    'agentpass_platform_promotion_issuance_commit(uuid,text,text,text,text,bytea,bytea,bytea,bytea,bytea)',
+    'agentpass_platform_promotion_issuance_uncertain(uuid,text,text,text,text,bytea,text)'
+  ] LOOP
+    IF to_regprocedure('public.' || routine_signature) IS NOT NULL THEN
+      EXECUTE format('GRANT EXECUTE ON FUNCTION public.%s TO agentpass_signer', routine_signature);
     END IF;
   END LOOP;
 END

@@ -49,7 +49,6 @@ const PLATFORM_AUTHORITY_RELATIONS = Object.freeze([
   "platform_promotion_issuances",
 ]);
 const PLATFORM_APP_FUNCTIONS = Object.freeze([
-  "agentpass_platform_promotion_issuance_get(uuid,text,text,text,text,boolean)",
   "agentpass_platform_operator_assignment_find_active(uuid,uuid,uuid,text,text)",
   "agentpass_platform_session_challenge_create(uuid,uuid,bytea,bytea,bytea,bytea,bytea[],uuid,uuid,uuid,uuid,bigint,text,text,text,text,text,integer)",
   "agentpass_platform_session_challenge_find(uuid)",
@@ -81,6 +80,10 @@ const LEGACY_PLATFORM_PROMOTION_MUTATIONS = Object.freeze([
     signature: "agentpass_platform_promotion_issuance_uncertain(uuid,text,text,text,text,bytea,text)",
     call: "public.agentpass_platform_promotion_issuance_uncertain(NULL::uuid,NULL::text,NULL::text,NULL::text,NULL::text,NULL::bytea,NULL::text)",
   },
+]);
+const PLATFORM_SIGNER_FINALIZE_FUNCTIONS = Object.freeze([
+  "agentpass_platform_promotion_issuance_commit(uuid,text,text,text,text,bytea,bytea,bytea,bytea,bytea)",
+  "agentpass_platform_promotion_issuance_uncertain(uuid,text,text,text,text,bytea,text)",
 ]);
 const ATOMIC_PLATFORM_AUTHORIZATION_CALL = "public.agentpass_consume_platform_authorization_and_reserve(NULL::bytea,NULL::bytea,NULL::uuid,NULL::bytea,NULL::bytea,NULL::uuid,NULL::text,NULL::text,NULL::text,NULL::text,NULL::bytea,NULL::integer,NULL::integer,NULL::text,NULL::bigint,NULL::bigint)";
 const SQLSTATE_PERMISSION_DENIED = new Set(["42501", "0LP01"]);
@@ -181,7 +184,7 @@ function quoteIdentifier(identifier) {
   return `"${identifier}"`;
 }
 
-test("qualifies PostgreSQL 16 least-privilege roles against real migrations and smoke operations", {
+test("qualifies least-privilege roles against real PostgreSQL migrations and smoke operations", {
   skip: DATABASE_URL ? false : "set AGENTPASS_TEST_DATABASE_URL to run PostgreSQL role qualification",
   timeout: 120_000,
 }, async (t) => {
@@ -325,7 +328,7 @@ test("qualifies PostgreSQL 16 least-privilege roles against real migrations and 
     await expectPermissionDenied(() => client.query("SELECT agentpass_current_organization_id()"));
     await expectPermissionDenied(() => client.query("UPDATE schema_migrations SET checksum=checksum WHERE version=1"));
     await expectPermissionDenied(() => client.query("SET ROLE agentpass_migrator"));
-    for (const signature of SIGNER_FUNCTIONS) {
+    for (const signature of [...SIGNER_FUNCTIONS, ...PLATFORM_SIGNER_FINALIZE_FUNCTIONS]) {
       const privilege = await client.query(
         "SELECT has_function_privilege(current_user,$1,'EXECUTE') AS allowed",
         ["public." + signature]
@@ -353,7 +356,7 @@ test("qualifies PostgreSQL 16 least-privilege roles against real migrations and 
     await expectPermissionDenied(() => client.query("ALTER SEQUENCE public.q2a_least_privilege_role_sequence INCREMENT BY 2"));
     await expectPermissionDenied(() => client.query("UPDATE schema_migrations SET checksum=checksum WHERE version=1"));
     await expectPermissionDenied(() => client.query("SET ROLE agentpass_migrator"));
-    for (const signature of SIGNER_FUNCTIONS) {
+    for (const signature of [...SIGNER_FUNCTIONS, ...PLATFORM_SIGNER_FINALIZE_FUNCTIONS]) {
       const privilege = await client.query(
         "SELECT has_function_privilege(current_user,$1,'EXECUTE') AS allowed",
         ["public." + signature]
@@ -381,13 +384,17 @@ test("qualifies PostgreSQL 16 least-privilege roles against real migrations and 
       );
       assert.equal(privileges.rows[0].allowed, false, "signer ledger privilege leaked for " + table);
     }
-    for (const signature of SIGNER_FUNCTIONS) {
+    for (const signature of [...SIGNER_FUNCTIONS, ...PLATFORM_SIGNER_FINALIZE_FUNCTIONS]) {
       const privilege = await client.query("SELECT has_function_privilege(current_user,$1,'EXECUTE') AS allowed", [`public.${signature}`]);
       assert.equal(privilege.rows[0].allowed, true, `signer function privilege missing for ${signature}`);
     }
-    for (const signature of [...PLATFORM_APP_FUNCTIONS, ...LEGACY_PLATFORM_PROMOTION_MUTATIONS.map(({ signature }) => signature)]) {
+    for (const signature of PLATFORM_APP_FUNCTIONS) {
       const privilege = await client.query("SELECT has_function_privilege(current_user,$1,'EXECUTE') AS allowed", [`public.${signature}`]);
       assert.equal(privilege.rows[0].allowed, false, `platform function privilege leaked to signer for ${signature}`);
+    }
+    for (const { signature } of LEGACY_PLATFORM_PROMOTION_MUTATIONS) {
+      const privilege = await client.query("SELECT has_function_privilege(current_user,$1,'EXECUTE') AS allowed", [`public.${signature}`]);
+      assert.equal(privilege.rows[0].allowed, PLATFORM_SIGNER_FINALIZE_FUNCTIONS.includes(signature), `unexpected signer promotion privilege for ${signature}`);
     }
     await expectPermissionDenied(() => client.query("SELECT agentpass_quarantine_expired_managed_signer_provider_operations(1)"));
     await expectPermissionDenied(() => client.query("SELECT name FROM organizations LIMIT 1"));
