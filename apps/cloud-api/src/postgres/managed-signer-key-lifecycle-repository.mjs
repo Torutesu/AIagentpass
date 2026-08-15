@@ -237,9 +237,10 @@ export function createPostgresManagedSignerKeyLifecycleRepository({
         return publicSigningRecord(replay, config);
       }
       const claimDigest = Buffer.from(sha256(claimToken), "hex");
-      const started = await callAuthority(tx, AUTHORITY_SQL.start, signingBinding(values, config, [claimDigest]));
-      if (started.outcome === "uncertain") assertExactAuthorityFields(started, ["outcome"]);
-      else if (started.outcome !== "ok") throwSigningOutcome(started, values, config);
+      // The uncertainty authority itself records provider_started_at when a
+      // live claim is quarantined. Do not re-run signing_start here: lifecycle
+      // fencing may intentionally make start unavailable after provider
+      // acceptance, while the pending row still has to become uncertain.
       const envelope = await callAuthority(tx, AUTHORITY_SQL.uncertain, signingBinding(values, config, [claimDigest]));
       if (!["ok", "uncertain"].includes(envelope.outcome)) throwSigningOutcome(envelope, values, config);
       const row = recordFromEnvelope(envelope);

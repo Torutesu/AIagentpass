@@ -90,6 +90,7 @@ async function seed(pool, { state, expired = false, withOrganization = false }) 
     const now = (await client.query("SELECT clock_timestamp() AS now")).rows[0].now;
     const createdAt = new Date(now.getTime() - (expired ? 20 * 60_000 : 1_000));
     const expiresAt = new Date(createdAt.getTime() + 15 * 60_000);
+    const oauthExpiresAt = new Date(createdAt.getTime() + 10 * 60_000);
     await client.query("INSERT INTO public.members (id,github_subject,display_name) VALUES ($1,NULL,$2)", [value.memberId, "0064 status member"]);
     if (withOrganization) {
       await client.query("INSERT INTO public.organizations (id,name) VALUES ($1,$2)", [value.organizationId, `0064 ${value.organizationId}`]);
@@ -120,7 +121,7 @@ async function seed(pool, { state, expired = false, withOrganization = false }) 
       "https://console.example.test/api/auth/bootstrap/github/callback",
       "A".repeat(43),
       createdAt,
-      expiresAt
+      oauthExpiresAt
     ]);
     await client.query("COMMIT");
     return value;
