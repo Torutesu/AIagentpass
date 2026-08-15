@@ -69,6 +69,12 @@ Implemented and pushed:
 - the PostgreSQL CI lane now requires session-ceiling, atomic Session rotation,
   Hosted WebAuthn claim-lease, and Hosted status/CSRF contention suites at the
   current schema head;
+- fresh PostgreSQL 16 and 17 CI databases now migrate through schema head
+  `0064`; the remaining gate is a terminal green run of the complete authority
+  matrix, not migration applicability;
+- the Hosted account lane now includes a real child-process loss harness for
+  claim takeover, stale-generation fencing, committed-response loss, and
+  exact-once Session replay, plus a source-bound secret-free evidence generator;
 - the frozen catalog validates 175 entries, 49 schemas, 62 OpenAPI operations,
   and all 64 forward-only migrations. Hosted bootstrap remains a separately
   frozen six-route contract with its own validator.
@@ -77,8 +83,8 @@ Not yet qualified as a production-composable path:
 
 - a terminal green GitHub Actions run at schema head `0064`, including the four
   newly mandatory PostgreSQL concurrency suites;
-- real process-kill qualification between claim, verification, commit, and
-  response, beyond the existing two-pool/retry/lease PostgreSQL coverage;
+- a terminal real-PostgreSQL execution of the new process-loss lane and its
+  independently verified source-bound evidence artifact;
 - a deployed Console E2E against real Cloud API, PostgreSQL, GitHub OAuth test
   identity, and browser WebAuthn rather than route mocks;
 - the post-onboarding organization, device, policy, agent-session, activity,
@@ -190,10 +196,10 @@ creation converges to one organization and one owner membership.
 
 State: migrations `0062` and `0063`, PostgreSQL repository adapter,
 strict-verifier service, one-use response-recovery receipt, deterministic claim
-lease with generation fencing, append-only claim evidence, and focused tests
-are implemented in source. Real PostgreSQL 16/17,
-two-instance contention, and process-kill qualification remain before this
-package is production-composable.
+lease with generation fencing, append-only claim evidence, focused tests, and
+a child-process loss harness are implemented in source. Fresh PostgreSQL 16/17
+migration through `0064` is proven; a terminal green authority/process-loss CI
+run remains before this package is production-composable.
 
 Deliverables:
 
@@ -398,7 +404,7 @@ of the same commit gate.
      resolution for `RETURNS TABLE` names that also exist as physical columns;
    - retain function-only deployment authority and qualify the fix on fresh and
      upgraded PostgreSQL 16/17 databases.
-6. `feat: commit bootstrap webauthn and human session atomically` (`0062`) — implemented in source; PostgreSQL qualification pending
+6. `feat: commit bootstrap webauthn and human session atomically` (`0062`) — implemented in source; terminal PostgreSQL authority qualification pending
    - reuse the production verifier and pass only its strict verified result to
      a transaction procedure;
    - lock attempt/challenge/membership/epochs, insert the credential and Human
@@ -412,7 +418,7 @@ of the same commit gate.
    - derive response bearer values from an exact-response HMAC binding so the
      same committed session can be reconstructed once during the two-minute
      window without durably storing plaintext bearer material.
-7. `feat: fence hosted webauthn verification claims` (`0063`) — implemented
+7. `feat: fence hosted webauthn verification claims` (`0063`) — implemented with process-loss qualification source
    - bind external verification to a deterministic digest-only 30-second lease
      owned by the PostgreSQL clock, never to raw browser-visible authority;
    - return and require a monotonic claim generation on completion and failure,
@@ -421,9 +427,9 @@ of the same commit gate.
      rejecting changed responses and ambiguous claims;
    - append immutable claimed/takeover/completed/replayed/failed/expired events
      and remove application-role table reads in favor of reviewed functions;
-   - focused source tests are green; PostgreSQL 16/17 fresh/upgrade,
-     two-instance contention, process-kill, and rollback qualification remain
-     mandatory CI gates before production use.
+   - focused source tests are green, fresh PostgreSQL 16/17 migration reaches
+     `0064`, and the process-loss suite is wired into CI; terminal two-instance,
+     process-kill, rollback, and evidence verification remain mandatory gates.
 8. `feat: expose hosted bootstrap status and csrf authority` (`0064`) — implemented in source
    - add function-only status/CSRF procedures that derive state, membership,
      organization, WebAuthn requirement, expiry, and completion from the exact
@@ -526,12 +532,12 @@ they consume a frozen contract and do not modify the same authority boundary.
 
 ### N1 concrete commit sequence
 
-1. `test: qualify hosted postgres authority at schema head 0064`
+1. `test: qualify hosted postgres authority at schema head 0064` — implemented; terminal green run pending
    - require the four newly wired integration suites in CI;
    - make unexpected skip detection fail the job;
    - upload a source-bound summary containing only versions, scenario names,
      pass/fail counts, and invariant results.
-2. `test: add hosted process-loss qualification harness`
+2. `test: add hosted process-loss qualification harness` — implemented; real PostgreSQL CI evidence pending
    - fork workers at durable transition boundaries;
    - kill before provider call, after claim, before commit, after commit, and
      before response delivery;
