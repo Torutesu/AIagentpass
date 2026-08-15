@@ -120,19 +120,17 @@ REVOKE ALL PRIVILEGES ON ALL FUNCTIONS IN SCHEMA public FROM agentpass_app, agen
 GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO agentpass_app;
 GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO agentpass_app;
 
--- signer: temporary, purpose-limited ledger DML boundary. Runtime uses this
--- identity exclusively for managed-signer lifecycle/provider operations. A
--- subsequent forward migration replaces these direct grants with reviewed
--- SECURITY DEFINER entry points; no organization, policy, session, audit, or
--- promotion table is reachable through this role.
+-- signer: lifecycle/signing DML remains temporary while that family is moved
+-- behind its own forward migration. Provider-operation and maintenance access
+-- is function-only after migrations 0049-0050. No organization, policy,
+-- session, audit, promotion, or provider-operation table is directly reachable.
 DO $$
 DECLARE
   relation_name text;
 BEGIN
   FOREACH relation_name IN ARRAY ARRAY[
     'managed_signer_key_lifecycles', 'managed_signer_keys',
-    'managed_signer_key_lifecycle_operations', 'managed_signer_signing_idempotency',
-    'managed_signer_provider_operations'
+    'managed_signer_key_lifecycle_operations', 'managed_signer_signing_idempotency'
   ] LOOP
     IF to_regclass(format('public.%I', relation_name)) IS NOT NULL THEN
       EXECUTE format(
@@ -181,13 +179,31 @@ BEGIN
 END
 $$;
 
--- The deployment-wide signer maintenance worker uses this bounded function.
--- No other routine is executable by the signer identity.
+-- Provider operations and deployment-wide maintenance are reachable only
+-- through the reviewed SECURITY DEFINER entry points. Helpers, triggers, the
+-- legacy quarantine function, and every unrelated routine remain denied.
 DO $$
+DECLARE
+  routine_signature text;
 BEGIN
-  IF to_regprocedure('public.agentpass_quarantine_expired_managed_signer_provider_operations(integer)') IS NOT NULL THEN
-    GRANT EXECUTE ON FUNCTION public.agentpass_quarantine_expired_managed_signer_provider_operations(integer) TO agentpass_signer;
-  END IF;
+  FOREACH routine_signature IN ARRAY ARRAY[
+    'agentpass_managed_signer_provider_operation_reserve(text,text,text,integer,bytea,text,bigint,bytea,integer,integer)',
+    'agentpass_managed_signer_provider_operation_claim(text,text,text,integer,bytea,text,bigint,bytea,integer)',
+    'agentpass_managed_signer_provider_operation_start(text,text,text,integer,bytea,text,bigint,bytea)',
+    'agentpass_managed_signer_provider_operation_accept(text,text,text,integer,bytea,text,bigint,bytea,bytea,bytea,text,text,text,text,text)',
+    'agentpass_managed_signer_provider_operation_commit(text,text,text,integer,bytea,text,bigint,bytea)',
+    'agentpass_managed_signer_provider_operation_reconcile(text,text,text,integer,bytea,text,bigint)',
+    'agentpass_managed_signer_provider_operation_uncertain(text,text,text,integer,bytea,text,bigint,bytea,text)',
+    'agentpass_managed_signer_provider_operation_get(text,text,text,integer,bytea,text,bigint)',
+    'agentpass_managed_signer_provider_operation_health(text,text,bigint,text)',
+    'agentpass_managed_signer_provider_operation_prune(text,text,bigint,text,timestamptz,integer)',
+    'agentpass_maintain_managed_signer_provider_operations(integer)',
+    'agentpass_health_managed_signer_provider_operations()'
+  ] LOOP
+    IF to_regprocedure('public.' || routine_signature) IS NOT NULL THEN
+      EXECUTE format('GRANT EXECUTE ON FUNCTION public.%s TO agentpass_signer', routine_signature);
+    END IF;
+  END LOOP;
 END
 $$;
 

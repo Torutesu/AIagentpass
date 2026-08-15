@@ -55,65 +55,143 @@ class FakePg {
 
   async query(text, params = []) {
     this.calls.push({ text, params });
-    if (["BEGIN", "COMMIT", "ROLLBACK"].includes(text)) return { rows: [], rowCount: 0 };
-    if (text.startsWith("SELECT\n        count(*) FILTER")) {
-      const rows = [...this.rows.values()].filter((row) => row.purpose === params[0]
-        && row.key_id === params[1] && row.key_version === String(params[2]));
-      const aggregate = Object.fromEntries(["pending", "started", "accepted", "uncertain", "committed", "rejected", "failed"]
-        .map((state) => [state, String(rows.filter((row) => row.state === state).length)]));
-      return { rows: [{ ...aggregate, stale_claims: "0", oldest_nonterminal_at: null }], rowCount: 1 };
-    }
-    if (text.startsWith("WITH doomed AS")) {
-      const eligible = [...this.rows.entries()].filter(([, row]) => row.purpose === params[0]
-        && row.key_id === params[1] && row.key_version === String(params[2]) && row.state === "committed")
-        .slice(0, Number(params[4]));
-      for (const [entry] of eligible) this.rows.delete(entry);
-      return { rows: eligible.map(([, row]) => ({ operation_id: row.operation_id })), rowCount: eligible.length };
-    }
+    const functionName = text.match(/SELECT public\.agentpass_managed_signer_provider_operation_([a-z]+)\(/u)?.[1];
+    if (!functionName) throw new Error("unexpected non-function SQL");
     const key = `${params[0]}\0${params[1]}`;
-    if (text.startsWith("SELECT purpose,operation_id")) return this.result(this.rows.get(key));
-    if (text.startsWith("INSERT INTO managed_signer_provider_operations")) {
-      const [purpose, operationId, algorithm, bytesLength, requestDigest, keyId, keyVersion, claimDigest] = params;
-      const row = { purpose, operation_id: operationId, algorithm, bytes_length: bytesLength,
-        request_digest: Buffer.from(requestDigest).toString("hex"), key_id: keyId, key_version: String(keyVersion),
-        state: "pending", claim_token_digest: claimDigest, claim_expires_at: new Date(Date.now() + 30_000),
-        claim_active: true, provider_started_at: null, uncertain_reason: null, signature: null, public_key_der: null,
-        provider_receipt_provider: null, provider_receipt_id: null };
+    const operation = this.rows.get(key);
+    const identityMatches = (row) => row && row.algorithm === params[2] && row.bytes_length === Number(params[3])
+      && row.request_digest === Buffer.from(params[4]).toString("hex") && row.key_id === params[5]
+      && row.key_version === String(params[6]);
+    const claimMatches = (row, digest) => row?.claim_token_digest && Buffer.from(row.claim_token_digest).equals(Buffer.from(digest))
+      && row.claim_active === true;
+    const error = (errorCode) => this.envelope({ status: "error", error_code: errorCode });
+    const notFound = () => this.envelope({ status: "not_found" });
+    const ok = (row, claimAcquired = false) => this.envelope({ status: "ok", claim_acquired: claimAcquired, record: this.record(row) });
+
+    if (["reserve", "claim", "start", "accept", "commit", "reconcile", "uncertain", "get"].includes(functionName)
+      && !identityMatches({ algorithm: params[2], bytes_length: params[3], request_digest: Buffer.from(params[4]).toString("hex"), key_id: params[5], key_version: String(params[6]) })) {
+      // The real function validates this before touching the ledger.  The
+      // repository already rejects malformed values, so this branch models
+      // the stable database error for an impossible contract call.
+      return error("INPUT");
+    }
+
+    if (functionName === "reserve") {
+      const newRow = () => ({ purpose: params[0], operation_id: params[1], algorithm: params[2], bytes_length: Number(params[3]),
+        request_digest: Buffer.from(params[4]).toString("hex"), key_id: params[5], key_version: String(params[6]), state: "pending",
+        claim_token_digest: params[7], claim_expires_at: new Date(Date.now() + Number(params[8])), claim_active: true,
+        provider_started_at: null, uncertain_reason: null, signature: null, public_key_der: null,
+        provider_receipt_provider: null, provider_receipt_id: null });
+      if (!operation) {
+        const row = newRow();
+        let claimAcquired = true;
+        if (this.conflictOnInsert) {
+          this.conflictOnInsert = false;
+          row.claim_token_digest = Buffer.alloc(32, 0x7f);
+          claimAcquired = false;
+        }
+        this.rows.set(key, row);
+        return ok(row, claimAcquired);
+      }
+      if (!identityMatches(operation)) return error("CONFLICT");
       if (this.conflictOnInsert) {
         this.conflictOnInsert = false;
-        this.rows.set(key, row);
-        return { rows: [], rowCount: 0 };
+        operation.claim_token_digest = Buffer.alloc(32, 0x7f);
+        operation.claim_active = true;
       }
-      if (this.rows.has(key)) {
-        if (text.includes("ON CONFLICT (purpose,operation_id) DO NOTHING")) return { rows: [], rowCount: 0 };
-        throw new Error("duplicate");
+      if (operation.state === "pending" && operation.claim_active === false) {
+        operation.claim_token_digest = params[7]; operation.claim_active = true;
+        operation.claim_expires_at = new Date(Date.now() + Number(params[8]));
+        return ok(operation, true);
       }
-      this.rows.set(key, row);
-      return this.result(row);
+      return ok(operation, false);
     }
-    if (!text.startsWith("UPDATE managed_signer_provider_operations")) return { rows: [], rowCount: 0 };
-    const row = this.rows.get(key);
-    if (!row) return { rows: [], rowCount: 0 };
-    if (text.includes("SET state=$3")) {
-      row.state = params[2]; row.claim_token_digest = params[3]; row.claim_active = true;
-      row.claim_expires_at = new Date(Date.now() + Number(params[4]));
-    } else if (text.includes("SET state='started'")) {
-      row.state = "started"; row.provider_started_at ??= new Date();
-    } else if (text.includes("SET state='accepted'")) {
-      row.state = "accepted"; row.signature = params[2]; row.public_key_der = params[3];
-      row.uncertain_reason = null;
-      row.provider_receipt_provider = params[4]; row.provider_receipt_id = params[5];
-    } else if (text.includes("SET state='uncertain'")) {
-      row.state = "uncertain"; row.claim_token_digest = null; row.claim_expires_at = null;
-      row.uncertain_reason = params[2];
-      row.claim_active = false; row.provider_started_at ??= new Date();
-    } else if (text.includes("SET state='committed'")) {
-      row.state = "committed"; row.uncertain_reason = null; row.claim_token_digest = null; row.claim_expires_at = null; row.claim_active = false;
+    if (functionName === "claim") {
+      if (!operation) return notFound();
+      if (!identityMatches(operation)) return error("CONFLICT");
+      if (["committed", "rejected", "failed"].includes(operation.state) || claimMatches(operation, params[7])) return ok(operation, false);
+      operation.claim_token_digest = params[7]; operation.claim_active = true;
+      operation.claim_expires_at = new Date(Date.now() + Number(params[8]));
+      return ok(operation, true);
     }
-    return this.result(row);
+    if (functionName === "start") {
+      if (!operation) return error("CLAIM_LOST");
+      if (!identityMatches(operation)) return error("CONFLICT");
+      if (!["pending", "started"].includes(operation.state) || !claimMatches(operation, params[7])) return error("CLAIM_LOST");
+      operation.state = "started"; operation.provider_started_at ??= new Date();
+      return ok(operation);
+    }
+    if (functionName === "accept") {
+      if (!operation) return error("CLAIM_LOST");
+      if (!identityMatches(operation)) return error("CONFLICT");
+      if (!["started", "uncertain", "accepted"].includes(operation.state) || !claimMatches(operation, params[7])) return error("CLAIM_LOST");
+      if (operation.state === "accepted") {
+        if (!Buffer.from(operation.signature).equals(Buffer.from(params[8])) || !Buffer.from(operation.public_key_der).equals(Buffer.from(params[9]))
+          || operation.provider_receipt_provider !== params[10] || operation.provider_receipt_id !== params[11]) return error("CONFLICT");
+        return ok(operation);
+      }
+      operation.state = "accepted"; operation.signature = params[8]; operation.public_key_der = params[9];
+      operation.uncertain_reason = null; operation.provider_receipt_provider = params[10]; operation.provider_receipt_id = params[11];
+      return ok(operation);
+    }
+    if (functionName === "commit") {
+      if (!operation) return error("CLAIM_LOST");
+      if (!identityMatches(operation)) return error("CONFLICT");
+      if (operation.state === "committed") return ok(operation);
+      if (operation.state !== "accepted" || !claimMatches(operation, params[7])) return error("CLAIM_LOST");
+      operation.state = "committed"; operation.uncertain_reason = null; operation.claim_token_digest = null;
+      operation.claim_expires_at = null; operation.claim_active = false;
+      return ok(operation);
+    }
+    if (functionName === "reconcile") {
+      if (!operation) return notFound();
+      if (!identityMatches(operation)) return error("CONFLICT");
+      if (operation.state === "committed") return ok(operation);
+      if (!["accepted", "uncertain"].includes(operation.state) || !operation.signature || !operation.public_key_der
+        || !operation.provider_receipt_provider || !operation.provider_receipt_id) return error("STATE");
+      operation.state = "committed"; operation.uncertain_reason = null; operation.claim_token_digest = null;
+      operation.claim_expires_at = null; operation.claim_active = false;
+      return ok(operation);
+    }
+    if (functionName === "uncertain") {
+      if (!operation) return notFound();
+      if (!identityMatches(operation)) return error("CONFLICT");
+      if (["committed", "rejected", "failed"].includes(operation.state)) return ok(operation);
+      if (!["pending", "started", "accepted", "uncertain"].includes(operation.state) || !claimMatches(operation, params[7])) return error("CLAIM_LOST");
+      operation.state = "uncertain"; operation.uncertain_reason = params[8]; operation.claim_token_digest = null;
+      operation.claim_expires_at = null; operation.claim_active = false; operation.provider_started_at ??= new Date();
+      return ok(operation);
+    }
+    if (functionName === "get") {
+      if (!operation) return notFound();
+      if (!identityMatches(operation)) return error("CONFLICT");
+      return ok(operation);
+    }
+    if (functionName === "health") {
+      const rows = [...this.rows.values()].filter((row) => row.purpose === params[0] && row.key_id === params[1] && row.key_version === String(params[2]));
+      const states = Object.fromEntries(["pending", "started", "accepted", "uncertain", "committed", "rejected", "failed"]
+        .map((state) => [state, rows.filter((row) => row.state === state).length]));
+      return this.envelope({ status: "ok", health: { version: 1, purpose: params[0], algorithm: params[3], key_id: params[1], key_version: String(params[2]),
+        states, stale_claims: 0, oldest_nonterminal_at: null } });
+    }
+    if (functionName === "prune") {
+      const eligible = [...this.rows.entries()].filter(([, row]) => row.purpose === params[0]
+        && row.key_id === params[1] && row.key_version === String(params[2]) && row.state === "committed").slice(0, Number(params[5]));
+      for (const [entry] of eligible) this.rows.delete(entry);
+      return this.envelope({ status: "ok", pruned: eligible.length });
+    }
+    throw new Error(`unexpected function ${functionName}`);
   }
 
-  result(row) { return row ? { rows: [{ ...row }], rowCount: 1 } : { rows: [], rowCount: 0 }; }
+  envelope(result) { return { rows: [{ result }], rowCount: 1 }; }
+
+  record(row) {
+    return { algorithm: row.algorithm, bytes_length: row.bytes_length, key_id: row.key_id, key_version: row.key_version,
+      operation_id: row.operation_id, purpose: row.purpose, request_digest: row.request_digest, state: row.state,
+      uncertain_reason: row.uncertain_reason, signature_hex: row.signature ? Buffer.from(row.signature).toString("hex") : null,
+      public_key_der_hex: row.public_key_der ? Buffer.from(row.public_key_der).toString("hex") : null,
+      provider_receipt_provider: row.provider_receipt_provider, provider_receipt_id: row.provider_receipt_id };
+  }
 }
 
 function repository(client = new FakePg()) {
@@ -149,6 +227,27 @@ test("0041 adds closed uncertainty reasons and quarantines only bounded expired 
   assert.doesNotMatch(sql, /request_bytes|private_key|provider_credential/iu);
 });
 
+test("0049 exposes only purpose-specific signer functions and no repository table DML", async () => {
+  const source = await readFile(new URL("../../src/postgres/provider-operation-repository.mjs", import.meta.url), "utf8");
+  const sql = await readFile(new URL("../../../../contracts/postgres/0049_managed_signer_provider_operation_authority.sql", import.meta.url), "utf8");
+  const roles = await readFile(new URL("../../../../scripts/postgres/roles.sql", import.meta.url), "utf8");
+  const purposes = ["reserve", "claim", "start", "accept", "commit", "reconcile", "uncertain", "get", "health", "prune"];
+  assert.doesNotMatch(source, /managed_signer_provider_operations/u);
+  assert.doesNotMatch(source, /(?:INSERT|UPDATE|DELETE)\s+(?:INTO\s+)?[A-Za-z_]+/iu);
+  for (const purpose of purposes) {
+    assert.match(source, new RegExp(`\\["${purpose}",`, "u"));
+    assert.match(sql, new RegExp(`CREATE FUNCTION public\\.agentpass_managed_signer_provider_operation_${purpose}\\([\\s\\S]*?SECURITY DEFINER`, "u"));
+    assert.match(sql, new RegExp(`REVOKE ALL ON FUNCTION public\\.agentpass_managed_signer_provider_operation_${purpose}\\(`, "u"));
+    assert.match(roles, new RegExp(`agentpass_managed_signer_provider_operation_${purpose}\\(`, "u"));
+  }
+  assert.match(source, /agentpass_managed_signer_provider_operation_\$\{purpose\}/u);
+  assert.match(sql, /SET search_path = pg_catalog, public/gu);
+  assert.match(sql, /clock_timestamp\(\)/u);
+  assert.match(sql, /FOR UPDATE/u);
+  assert.match(sql, /SKIP LOCKED/u);
+  assert.doesNotMatch(sql, /GRANT EXECUTE ON FUNCTION public\.agentpass_managed_signer_provider_operation_(?:error|record|binding_valid|not_found)/u);
+});
+
 test("reserves, starts, accepts, and commits one closed provider operation", async () => {
   const { client, repo } = repository();
   const reserved = await repo.reserveOperation(operation());
@@ -178,9 +277,8 @@ test("first-reservation races converge through the unique operation binding", as
   const reserved = await repo.reserveOperation(operation());
   assert.equal(reserved.state, "pending");
   assert.equal(Object.hasOwn(reserved, "claim_token"), false, "the losing reserver must not receive the winner's claim");
-  const insert = client.calls.find(({ text }) => text.startsWith("INSERT INTO managed_signer_provider_operations"));
-  assert.match(insert?.text ?? "", /ON CONFLICT \(purpose,operation_id\) DO NOTHING/u);
-  assert.equal(client.calls.filter(({ text }) => text.startsWith("SELECT purpose,operation_id")).length, 2);
+  assert.equal(client.calls.length, 1);
+  assert.match(client.calls[0].text, /agentpass_managed_signer_provider_operation_reserve\(/u);
 });
 
 test("persists accepted output across uncertainty and reconciles without a new provider result", async () => {
@@ -241,10 +339,7 @@ test("reports fixed-cardinality aggregate health and prunes only correlated comm
     oldest_nonterminal_at: null,
   });
   assert.deepEqual(await repo.pruneOperations({ before: "2027-08-15T00:00:00.000Z", limit: 10 }), { pruned: 1 });
-  const pruneSql = client.calls.find(({ text }) => text.startsWith("WITH doomed AS"))?.text ?? "";
-  assert.match(pruneSql, /JOIN managed_signer_signing_idempotency/u);
-  assert.match(pruneSql, /provider\.state='committed' AND signing\.status='committed'/u);
-  assert.match(pruneSql, /FOR UPDATE OF provider SKIP LOCKED/u);
+  assert.match(client.calls.at(-1).text, /agentpass_managed_signer_provider_operation_prune\(/u);
   await assert.rejects(repo.pruneOperations({ before: "not-a-time", limit: 1 }), { code: CODES.INPUT });
   await assert.rejects(repo.pruneOperations({ before: "2027-08-15T00:00:00.000Z", limit: 1_001 }), { code: CODES.INPUT });
 });

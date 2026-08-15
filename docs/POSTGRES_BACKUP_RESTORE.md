@@ -120,13 +120,18 @@ manifestにはID、hash、sequence、状態が含まれるため一般公開し�
 verification. It may read tables and sequence state, but it cannot write,
 execute application functions, use sequence values, or perform schema DDL.
 Restore DDL and migration application must use the separately controlled
-`agentpass_migrator`/admin workflow; application traffic uses only
-`agentpass_app`, whose access is DML-only.
+`agentpass_migrator`/admin workflow. Ordinary application repositories use
+`agentpass_app`; managed-signer repositories use `agentpass_signer`.
+Provider-operation and maintenance access is restricted to the reviewed
+authority functions. Until migration `0051` lands, that role retains temporary
+direct DML on only the four lifecycle/signing ledger tables documented in
+`scripts/postgres/roles.sql`; it has no sequence privileges.
 
 Apply `scripts/postgres/roles.sql` idempotently before a cutover or restore
-rehearsal. It contains no credential. Keep the three role credentials outside
-the repository in the deployment secret manager and use
-`AGENTPASS_DATABASE_URL` with `sslmode=verify-full`; do not put a URL or
+rehearsal. It contains no credential. Keep the four role credentials outside
+the repository in the deployment secret manager. Runtime uses distinct
+`AGENTPASS_DATABASE_URL`, `AGENTPASS_MIGRATION_DATABASE_URL`, and
+`AGENTPASS_SIGNER_DATABASE_URL` values with `sslmode=verify-full`; do not put a URL or
 credential in a script, log, or ticket. After applying the role boundary, run
 the fixed checker and record only its opaque evidence digest:
 

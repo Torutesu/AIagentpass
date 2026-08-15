@@ -133,8 +133,7 @@ table_privileges_ok AS (
     ) FROM tables), true)
     AND COALESCE((SELECT bool_and(CASE WHEN relname IN (
       'managed_signer_key_lifecycles', 'managed_signer_keys',
-      'managed_signer_key_lifecycle_operations', 'managed_signer_signing_idempotency',
-      'managed_signer_provider_operations'
+      'managed_signer_key_lifecycle_operations', 'managed_signer_signing_idempotency'
     ) THEN
       has_table_privilege('agentpass_signer', oid, 'SELECT')
       AND has_table_privilege('agentpass_signer', oid, 'INSERT')
@@ -182,9 +181,35 @@ function_privileges_ok AS (
     AND NOT EXISTS (SELECT 1 FROM functions
       WHERE has_function_privilege('agentpass_backup', oid, 'EXECUTE')
          OR (has_function_privilege('agentpass_signer', oid, 'EXECUTE')
-           AND routine_signature <> 'agentpass_quarantine_expired_managed_signer_provider_operations(integer)')
+           AND routine_signature NOT IN (
+             'agentpass_managed_signer_provider_operation_reserve(text,text,text,integer,bytea,text,bigint,bytea,integer,integer)',
+             'agentpass_managed_signer_provider_operation_claim(text,text,text,integer,bytea,text,bigint,bytea,integer)',
+             'agentpass_managed_signer_provider_operation_start(text,text,text,integer,bytea,text,bigint,bytea)',
+             'agentpass_managed_signer_provider_operation_accept(text,text,text,integer,bytea,text,bigint,bytea,bytea,bytea,text,text,text,text,text)',
+             'agentpass_managed_signer_provider_operation_commit(text,text,text,integer,bytea,text,bigint,bytea)',
+             'agentpass_managed_signer_provider_operation_reconcile(text,text,text,integer,bytea,text,bigint)',
+             'agentpass_managed_signer_provider_operation_uncertain(text,text,text,integer,bytea,text,bigint,bytea,text)',
+             'agentpass_managed_signer_provider_operation_get(text,text,text,integer,bytea,text,bigint)',
+             'agentpass_managed_signer_provider_operation_health(text,text,bigint,text)',
+             'agentpass_managed_signer_provider_operation_prune(text,text,bigint,text,timestamptz,integer)',
+             'agentpass_maintain_managed_signer_provider_operations(integer)',
+             'agentpass_health_managed_signer_provider_operations()'
+           ))
          OR (NOT has_function_privilege('agentpass_signer', oid, 'EXECUTE')
-           AND routine_signature = 'agentpass_quarantine_expired_managed_signer_provider_operations(integer)')
+           AND routine_signature IN (
+             'agentpass_managed_signer_provider_operation_reserve(text,text,text,integer,bytea,text,bigint,bytea,integer,integer)',
+             'agentpass_managed_signer_provider_operation_claim(text,text,text,integer,bytea,text,bigint,bytea,integer)',
+             'agentpass_managed_signer_provider_operation_start(text,text,text,integer,bytea,text,bigint,bytea)',
+             'agentpass_managed_signer_provider_operation_accept(text,text,text,integer,bytea,text,bigint,bytea,bytea,bytea,text,text,text,text,text)',
+             'agentpass_managed_signer_provider_operation_commit(text,text,text,integer,bytea,text,bigint,bytea)',
+             'agentpass_managed_signer_provider_operation_reconcile(text,text,text,integer,bytea,text,bigint)',
+             'agentpass_managed_signer_provider_operation_uncertain(text,text,text,integer,bytea,text,bigint,bytea,text)',
+             'agentpass_managed_signer_provider_operation_get(text,text,text,integer,bytea,text,bigint)',
+             'agentpass_managed_signer_provider_operation_health(text,text,bigint,text)',
+             'agentpass_managed_signer_provider_operation_prune(text,text,bigint,text,timestamptz,integer)',
+             'agentpass_maintain_managed_signer_provider_operations(integer)',
+             'agentpass_health_managed_signer_provider_operations()'
+           ))
          OR (has_function_privilege('agentpass_app', oid, 'EXECUTE')
            AND routine_signature NOT IN (
              'agentpass_platform_promotion_issuance_reserve(uuid,text,text,text,text,bytea,integer,integer,text,bigint,bigint)',

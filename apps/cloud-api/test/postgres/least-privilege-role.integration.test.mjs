@@ -11,6 +11,20 @@ import { createMigrationRunner } from "../../src/postgres/migration-runner.mjs";
 
 const DATABASE_URL = process.env.AGENTPASS_TEST_DATABASE_URL ?? process.env.AGENTPASS_TEST_POSTGRES_URL;
 const ROLE_NAMES = Object.freeze({ app: "agentpass_app", signer: "agentpass_signer", migrator: "agentpass_migrator", backup: "agentpass_backup" });
+const SIGNER_FUNCTIONS = Object.freeze([
+  "agentpass_managed_signer_provider_operation_reserve(text,text,text,integer,bytea,text,bigint,bytea,integer,integer)",
+  "agentpass_managed_signer_provider_operation_claim(text,text,text,integer,bytea,text,bigint,bytea,integer)",
+  "agentpass_managed_signer_provider_operation_start(text,text,text,integer,bytea,text,bigint,bytea)",
+  "agentpass_managed_signer_provider_operation_accept(text,text,text,integer,bytea,text,bigint,bytea,bytea,bytea,text,text,text,text,text)",
+  "agentpass_managed_signer_provider_operation_commit(text,text,text,integer,bytea,text,bigint,bytea)",
+  "agentpass_managed_signer_provider_operation_reconcile(text,text,text,integer,bytea,text,bigint)",
+  "agentpass_managed_signer_provider_operation_uncertain(text,text,text,integer,bytea,text,bigint,bytea,text)",
+  "agentpass_managed_signer_provider_operation_get(text,text,text,integer,bytea,text,bigint)",
+  "agentpass_managed_signer_provider_operation_health(text,text,bigint,text)",
+  "agentpass_managed_signer_provider_operation_prune(text,text,bigint,text,timestamptz,integer)",
+  "agentpass_maintain_managed_signer_provider_operations(integer)",
+  "agentpass_health_managed_signer_provider_operations()"
+]);
 const SQLSTATE_PERMISSION_DENIED = new Set(["42501", "0LP01"]);
 const REPOSITORY_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../../..");
 const ROLES_SQL_PATH = path.join(REPOSITORY_ROOT, "scripts/postgres/roles.sql");
@@ -202,8 +216,7 @@ test("qualifies PostgreSQL 16 least-privilege roles against real migrations and 
   await withSessionAuthorization(pool, ROLE_NAMES.signer, async (client) => {
     for (const table of [
       "managed_signer_key_lifecycles", "managed_signer_keys",
-      "managed_signer_key_lifecycle_operations", "managed_signer_signing_idempotency",
-      "managed_signer_provider_operations"
+      "managed_signer_key_lifecycle_operations", "managed_signer_signing_idempotency"
     ]) {
       const privileges = await client.query(
         "SELECT has_table_privilege(current_user,$1,'SELECT,INSERT,UPDATE,DELETE') AS allowed",
@@ -211,7 +224,15 @@ test("qualifies PostgreSQL 16 least-privilege roles against real migrations and 
       );
       assert.equal(privileges.rows[0].allowed, true, `signer ledger privilege missing for ${table}`);
     }
-    await client.query("SELECT agentpass_quarantine_expired_managed_signer_provider_operations(1)");
+    const providerTable = await client.query(
+      "SELECT has_table_privilege(current_user,'public.managed_signer_provider_operations','SELECT,INSERT,UPDATE,DELETE') AS allowed"
+    );
+    assert.equal(providerTable.rows[0].allowed, false);
+    for (const signature of SIGNER_FUNCTIONS) {
+      const privilege = await client.query("SELECT has_function_privilege(current_user,$1,'EXECUTE') AS allowed", [`public.${signature}`]);
+      assert.equal(privilege.rows[0].allowed, true, `signer function privilege missing for ${signature}`);
+    }
+    await expectPermissionDenied(() => client.query("SELECT agentpass_quarantine_expired_managed_signer_provider_operations(1)"));
     await expectPermissionDenied(() => client.query("SELECT name FROM organizations LIMIT 1"));
     await expectPermissionDenied(() => client.query(`SELECT count(*) FROM ${SMOKE_TABLE_NAME}`));
     await expectPermissionDenied(() => client.query("SELECT nextval('public.q2a_least_privilege_role_sequence')"));

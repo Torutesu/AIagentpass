@@ -5,7 +5,7 @@ import { fileURLToPath } from "node:url";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
 
-import { createMigrationRunner, migrationChecksum } from "../../src/postgres/migration-runner.mjs";
+import { createMigrationRunner, loadSqlMigrations, migrationChecksum } from "../../src/postgres/migration-runner.mjs";
 
 const ADMIN_DATABASE_URL = process.env.AGENTPASS_TEST_POSTGRES_ADMIN_URL ?? process.env.P0B_POSTGRES_ADMIN_URL;
 
@@ -148,9 +148,11 @@ test("0048 qualifies fresh PostgreSQL authority functions and least-privilege ro
 
   await applyRoles(pool);
   await withSessionAuthorization(pool, ROLE_NAMES.migrator, async (client) => {
+    const migrations = (await loadSqlMigrations()).filter(({ version }) => version <= 48);
     const migrated = await createMigrationRunner({
       client,
-      applicationVersion: "q2a-platform-promotion-authority-qualification"
+      applicationVersion: "q2a-platform-promotion-authority-qualification",
+      migrations
     }).run();
     assert.equal(migrated.currentVersion, 48);
     assert.deepEqual(migrated.pending, []);

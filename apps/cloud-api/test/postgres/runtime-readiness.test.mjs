@@ -50,6 +50,8 @@ class FakePool {
     }
     if (text === "SELECT set_config('statement_timeout', $1, false)" || text === "SELECT set_config('lock_timeout', $1, false)") return { rows: [{ set_config: params[0] }] };
     if (text.includes("count(*) FILTER (WHERE status='pending')")) return { rowCount: 1, rows: [{ pending: "0", uncertain: "0", dead_letter: "0", oldest_pending_at: null, oldest_uncertain_at: null }] };
+    if (text.startsWith("SELECT public.agentpass_maintain_managed_signer_provider_operations")) return { rowCount: 1, rows: [{ result: { quarantined: 0, reconciled: 0, pruned: 0, total: 0 } }] };
+    if (text.startsWith("SELECT public.agentpass_health_managed_signer_provider_operations")) return { rowCount: 1, rows: [{ result: { version: 1, states: { pending: 0, started: 0, accepted: 0, uncertain: 0, committed: 0, rejected: 0, failed: 0 }, stale_started: 0, oldest_nonterminal_at: null } }] };
     if (text.startsWith("SELECT agentpass_quarantine_expired_managed_signer_provider_operations")) return { rowCount: 1, rows: [{ quarantined: 0 }] };
     if (text.startsWith("WITH candidates") && text.includes("UPDATE managed_signer_provider_operations")) return { rowCount: 1, rows: [{ reconciled: 0 }] };
     if (text.startsWith("WITH candidates") && text.includes("DELETE FROM managed_signer_signing_idempotency")) return { rowCount: 1, rows: [{ pruned: 0 }] };

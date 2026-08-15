@@ -36,7 +36,9 @@ test('app is DML-only, migrator owns migration authority, and backup is read-onl
   assert.match(sql, /GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO agentpass_app/);
   assert.match(sql, /'agentpass_signer'/);
   assert.match(sql, /GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE public\.%I TO agentpass_signer/);
-  assert.match(sql, /agentpass_quarantine_expired_managed_signer_provider_operations\(integer\).*TO agentpass_signer/su);
+  assert.match(sql, /agentpass_managed_signer_provider_operation_reserve\(text,text,text,integer,bytea,text,bigint,bytea,integer,integer\)/u);
+  assert.match(sql, /agentpass_maintain_managed_signer_provider_operations\(integer\)/u);
+  assert.doesNotMatch(sql, /GRANT EXECUTE ON FUNCTION public\.agentpass_quarantine_expired_managed_signer_provider_operations/u);
   assert.match(sql, /GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO agentpass_app/);
   assert.match(sql, /GRANT USAGE, CREATE ON SCHEMA public TO agentpass_migrator/);
   assert.match(sql, /OWNER TO agentpass_migrator/);
@@ -84,6 +86,7 @@ test('existing operational docs contain the role boundary', async () => {
   ]);
   for (const document of [cutover, backup]) {
     assert.match(document, /agentpass_app/);
+    assert.match(document, /agentpass_signer/);
     assert.match(document, /agentpass_migrator/);
     assert.match(document, /agentpass_backup/);
     assert.match(document, /verify-full/);

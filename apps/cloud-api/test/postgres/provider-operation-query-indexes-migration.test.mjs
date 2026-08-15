@@ -17,15 +17,15 @@ test("0042 is transactional, additive, and only adds deployment-wide provider-op
   assert.doesNotMatch(sql, /claim_expiry|started_claim_expiry/u, "0041 already owns the claim-expiry path");
 });
 
-test("0042 indexes match the current deployment-wide maintenance orderings", async () => {
-  const [migration, repository] = await Promise.all([
+test("0042 indexes match the current deployment-wide maintenance authority orderings", async () => {
+  const [migration, authority] = await Promise.all([
     readFile(migrationUrl, "utf8"),
-    readFile(new URL("../../src/postgres/provider-operation-maintenance-repository.mjs", import.meta.url), "utf8")
+    readFile(new URL("../../../../contracts/postgres/0050_managed_signer_provider_operation_maintenance_authority.sql", import.meta.url), "utf8")
   ]);
 
-  assert.match(repository, /WHERE state IN \('pending','started','accepted','uncertain'\)[\s\S]*ORDER BY created_at ASC[\s\S]*LIMIT 1/u);
-  assert.match(repository, /provider\.state IN \('accepted','uncertain'\)[\s\S]*ORDER BY provider\.updated_at ASC,provider\.purpose ASC,provider\.operation_id ASC[\s\S]*LIMIT \$1/u);
-  assert.match(repository, /provider\.state='committed'[\s\S]*ORDER BY provider\.expires_at ASC,signing\.expires_at ASC,provider\.purpose ASC,provider\.operation_id ASC[\s\S]*LIMIT \$1/u);
+  assert.match(authority, /state IN \('pending', 'started', 'accepted', 'uncertain'\)[\s\S]*ORDER BY created_at, purpose, operation_id[\s\S]*LIMIT 1/u);
+  assert.match(authority, /provider\.state IN \('accepted', 'uncertain'\)[\s\S]*ORDER BY provider\.updated_at, provider\.purpose, provider\.operation_id[\s\S]*LIMIT remaining/u);
+  assert.match(authority, /provider\.state = 'committed'[\s\S]*ORDER BY provider\.expires_at, signing\.expires_at, provider\.purpose, provider\.operation_id[\s\S]*LIMIT remaining/u);
   assert.match(migration, /nonterminal_created_at[\s\S]*reconciliation[\s\S]*committed_expiry/u);
 });
 

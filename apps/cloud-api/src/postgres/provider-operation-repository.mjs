@@ -1,7 +1,5 @@
 import crypto from "node:crypto";
 
-import { withTransaction } from "./repository.mjs";
-
 const PURPOSE = /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$/u;
 const KEY_ID = /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,255}$/u;
 const OPERATION_ID = /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,255}$/u;
@@ -11,6 +9,7 @@ const CLAIM = /^[A-Za-z0-9_-]{43}$/u;
 const PROVIDER = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$/u;
 const RECEIPT = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/u;
 const BASE64URL = /^[A-Za-z0-9_-]+$/u;
+const HEX = /^[0-9a-f]+$/u;
 const ALGORITHM = "ed25519";
 const DEFAULT_LEASE_MS = 30_000;
 const DEFAULT_RETENTION_MS = 30 * 24 * 60 * 60 * 1_000;
@@ -34,16 +33,19 @@ export const PROVIDER_OPERATION_UNCERTAIN_REASONS = Object.freeze([
 const UNCERTAIN_REASON_SET = new Set(PROVIDER_OPERATION_UNCERTAIN_REASONS);
 
 const OPERATION_FIELDS = Object.freeze([
-  "algorithm", "bytes_length", "key_id", "key_version", "operation_id", "purpose", "request_digest"
+  "algorithm", "bytes_length", "key_id", "key_version", "operation_id", "purpose", "request_digest",
 ]);
 
-const SELECT_OPERATION = `SELECT purpose,operation_id,algorithm,bytes_length,
-  encode(request_digest,'hex') AS request_digest,key_id,key_version::text AS key_version,state,
-  claim_token_digest,claim_expires_at,claim_expires_at > clock_timestamp() AS claim_active,
-  provider_started_at,uncertain_reason,signature,public_key_der,
-  provider_receipt_provider,provider_receipt_id
-  FROM managed_signer_provider_operations
-  WHERE purpose=$1 AND operation_id=$2`;
+// Closed SQL surface: no table name, column assignment, or caller input is
+// ever interpolated into a query.  Each durable operation has one exact
+// purpose-specific SECURITY DEFINER entry point in migration 0049.
+const FUNCTION_SQL = Object.freeze(Object.fromEntries([
+  ["reserve", 10], ["claim", 9], ["start", 8], ["accept", 15], ["commit", 8],
+  ["reconcile", 7], ["uncertain", 9], ["get", 7], ["health", 4], ["prune", 6],
+].map(([purpose, arity]) => [purpose,
+  `SELECT public.agentpass_managed_signer_provider_operation_${purpose}(${Array.from({ length: arity }, (_, index) => `$${index + 1}`).join(",")}) AS result`])));
+
+const FUNCTION_ERROR_CODES = new Set(["INPUT", "CONFLICT", "CLAIM_LOST", "STATE", "DATABASE"]);
 
 export const PROVIDER_OPERATION_REPOSITORY_ERROR_CODES = Object.freeze({
   CONFIG: "ERR_PROVIDER_OPERATION_REPOSITORY_CONFIG",
@@ -91,151 +93,60 @@ export function createPostgresProviderOperationRepository({
 
   async function reserveOperation(input) {
     const operation = normalizeOperation(input, binding);
-    return runDatabase(() => withTransaction(client, async (tx) => {
-      let row = await selectOperation(tx, operation, true);
-      if (row) {
-        assertIdentity(row, operation);
-        if (row.state === "pending" && claimExpired(row)) {
-          const token = makeToken(randomBytes);
-          row = await setClaim(tx, operation, token, "pending", claimLeaseMs);
-          return publicRecord(row, token);
-        }
-        return publicRecord(row);
-      }
-      const token = makeToken(randomBytes);
-      const result = await tx.query(`INSERT INTO managed_signer_provider_operations
-        (purpose,operation_id,algorithm,bytes_length,request_digest,key_id,key_version,state,
-         claim_token_digest,claim_expires_at,provider_started_at,uncertain_reason,signature,public_key_der,
-         provider_receipt_provider,provider_receipt_id,expires_at)
-        VALUES ($1,$2,$3,$4,$5,$6,$7,'pending',$8,clock_timestamp()+($9 * interval '1 millisecond'),
-          NULL,NULL,NULL,NULL,NULL,NULL,clock_timestamp()+($10 * interval '1 millisecond'))
-        ON CONFLICT (purpose,operation_id) DO NOTHING
-        RETURNING purpose,operation_id,algorithm,bytes_length,encode(request_digest,'hex') AS request_digest,
-          key_id,key_version::text AS key_version,state,claim_token_digest,claim_expires_at,
-          claim_expires_at > clock_timestamp() AS claim_active,
-          provider_started_at,uncertain_reason,signature,public_key_der,provider_receipt_provider,provider_receipt_id`, [
-        operation.purpose, operation.operation_id, operation.algorithm, operation.bytes_length,
-        Buffer.from(operation.request_digest, "hex"), operation.key_id, operation.key_version,
-        Buffer.from(sha256(token), "hex"), claimLeaseMs, retentionMs,
-      ]);
-      if (rowCount(result) === 1) return publicRecord(result.rows[0], token);
-      if (rowCount(result) !== 0) fail(PROVIDER_OPERATION_REPOSITORY_ERROR_CODES.DATABASE);
-
-      // SELECT-then-INSERT cannot by itself serialize two first reservations:
-      // both transactions may observe absence before either inserts.  The
-      // unique key and ON CONFLICT are the linearization point.  After the
-      // winning transaction commits, lock and validate its exact immutable
-      // binding rather than surfacing a transient database error.
-      row = await selectOperation(tx, operation, true);
-      if (!row) fail(PROVIDER_OPERATION_REPOSITORY_ERROR_CODES.DATABASE);
-      assertIdentity(row, operation);
-      if (row.state === "pending" && claimExpired(row)) {
-        const replacementToken = makeToken(randomBytes);
-        row = await setClaim(tx, operation, replacementToken, "pending", claimLeaseMs);
-        return publicRecord(row, replacementToken);
-      }
-      return publicRecord(row);
-    }));
+    const token = makeToken(randomBytes);
+    return operationCall("reserve", [
+      operation.purpose, operation.operation_id, operation.algorithm, operation.bytes_length,
+      Buffer.from(operation.request_digest, "hex"), operation.key_id, operation.key_version,
+      Buffer.from(sha256(token), "hex"), claimLeaseMs, retentionMs,
+    ], token, "claim_if_acquired", operation);
   }
 
   async function claimOperation(input) {
     const operation = normalizeOperation(input, binding);
-    return runDatabase(() => withTransaction(client, async (tx) => {
-      const row = await selectOperation(tx, operation, true);
-      if (!row) return null;
-      assertIdentity(row, operation);
-      if (["committed", "rejected", "failed"].includes(row.state)) return publicRecord(row);
-      if (row.claim_token_digest && !claimExpired(row)) return publicRecord(row);
-      const token = makeToken(randomBytes);
-      const claimed = await setClaim(tx, operation, token, row.state, claimLeaseMs);
-      return publicRecord(claimed, token);
-    }));
+    const token = makeToken(randomBytes);
+    return operationCall("claim", [
+      operation.purpose, operation.operation_id, operation.algorithm, operation.bytes_length,
+      Buffer.from(operation.request_digest, "hex"), operation.key_id, operation.key_version,
+      Buffer.from(sha256(token), "hex"), claimLeaseMs,
+    ], token, "claim_if_acquired", operation);
   }
 
   async function startOperation(input) {
     const { operation, claimToken } = normalizeClaimedOperation(input, binding);
-    return claimedUpdate(operation, claimToken, ["pending", "started"], `state='started',provider_started_at=COALESCE(provider_started_at,clock_timestamp())`);
+    return operationCall("start", operationParams(operation, Buffer.from(sha256(claimToken), "hex")), claimToken, "always", operation);
   }
 
   async function recordAccepted(input) {
     const { operation, claimToken } = normalizeClaimedOperation(input, binding, ["signature", "provider_receipt"]);
     const output = normalizeOutput(input.signature, input.provider_receipt, operation);
-    return runDatabase(() => withTransaction(client, async (tx) => {
-      const row = await selectOperation(tx, operation, true);
-      requireClaim(row, operation, claimToken, ["started", "uncertain", "accepted"]);
-      if (row.state === "accepted") {
-        assertStoredOutput(row, output);
-        return publicRecord(row, claimToken);
-      }
-      const result = await tx.query(`UPDATE managed_signer_provider_operations
-        SET state='accepted',uncertain_reason=NULL,signature=$3,public_key_der=$4,provider_receipt_provider=$5,provider_receipt_id=$6
-        WHERE purpose=$1 AND operation_id=$2
-        RETURNING purpose,operation_id,algorithm,bytes_length,encode(request_digest,'hex') AS request_digest,
-          key_id,key_version::text AS key_version,state,claim_token_digest,claim_expires_at,
-          claim_expires_at > clock_timestamp() AS claim_active,
-          provider_started_at,uncertain_reason,signature,public_key_der,provider_receipt_provider,provider_receipt_id`, [
-        operation.purpose, operation.operation_id, output.signature, output.publicKeyDer,
-        output.provider, output.receiptId,
-      ]);
-      if (rowCount(result) !== 1) fail(PROVIDER_OPERATION_REPOSITORY_ERROR_CODES.STATE);
-      return publicRecord(result.rows[0], claimToken);
-    }));
+    return operationCall("accept", [
+      ...operationParams(operation, Buffer.from(sha256(claimToken), "hex")),
+      output.signature, output.publicKeyDer, output.provider, output.receiptId,
+      input.provider_receipt.operation_id, input.provider_receipt.key_id, input.provider_receipt.key_version,
+    ], claimToken, "always", operation);
   }
 
   async function commitOperation(input) {
     const { operation, claimToken } = normalizeClaimedOperation(input, binding);
-    return runDatabase(() => withTransaction(client, async (tx) => {
-      const row = await selectOperation(tx, operation, true);
-      if (row?.state === "committed") { assertIdentity(row, operation); return publicRecord(row); }
-      requireClaim(row, operation, claimToken, ["accepted"]);
-      return commitRow(tx, operation);
-    }));
+    return operationCall("commit", operationParams(operation, Buffer.from(sha256(claimToken), "hex")), undefined, "never", operation);
   }
 
   async function reconcileOperation(input) {
     const operation = normalizeOperation(input, binding);
-    return runDatabase(() => withTransaction(client, async (tx) => {
-      const row = await selectOperation(tx, operation, true);
-      if (!row) return null;
-      assertIdentity(row, operation);
-      if (row.state === "committed") return publicRecord(row);
-      if (!["accepted", "uncertain"].includes(row.state) || !hasOutput(row)) {
-        fail(PROVIDER_OPERATION_REPOSITORY_ERROR_CODES.STATE);
-      }
-      return commitRow(tx, operation);
-    }));
+    return operationCall("reconcile", operationParams(operation), undefined, "never", operation);
   }
 
   async function markUncertain(input) {
     const { operation, claimToken } = normalizeClaimedOperation(input, binding, ["uncertain_reason"]);
     const uncertainReason = normalizeUncertainReason(input.uncertain_reason);
-    return runDatabase(() => withTransaction(client, async (tx) => {
-      const row = await selectOperation(tx, operation, true);
-      if (!row) return null;
-      assertIdentity(row, operation);
-      if (["committed", "rejected", "failed"].includes(row.state)) return publicRecord(row);
-      requireClaim(row, operation, claimToken, ["pending", "started", "accepted", "uncertain"]);
-      const result = await tx.query(`UPDATE managed_signer_provider_operations
-        SET state='uncertain',uncertain_reason=$3,claim_token_digest=NULL,claim_expires_at=NULL,
-          provider_started_at=COALESCE(provider_started_at,clock_timestamp())
-        WHERE purpose=$1 AND operation_id=$2
-        RETURNING purpose,operation_id,algorithm,bytes_length,encode(request_digest,'hex') AS request_digest,
-          key_id,key_version::text AS key_version,state,claim_token_digest,claim_expires_at,
-          claim_expires_at > clock_timestamp() AS claim_active,
-          provider_started_at,uncertain_reason,signature,public_key_der,provider_receipt_provider,provider_receipt_id`, [operation.purpose, operation.operation_id, uncertainReason]);
-      if (rowCount(result) !== 1) fail(PROVIDER_OPERATION_REPOSITORY_ERROR_CODES.STATE);
-      return publicRecord(result.rows[0]);
-    }));
+    return operationCall("uncertain", [
+      ...operationParams(operation, Buffer.from(sha256(claimToken), "hex")), uncertainReason,
+    ], undefined, "never", operation);
   }
 
   async function getOperation(input) {
     const operation = normalizeOperation(input, binding);
-    return runDatabase(async () => {
-      const row = await selectOperation(client, operation, false);
-      if (!row) return null;
-      assertIdentity(row, operation);
-      return publicRecord(row);
-    });
+    return operationCall("get", operationParams(operation), undefined, "never", operation);
   }
 
   async function waitForOperation(input) {
@@ -254,22 +165,12 @@ export function createPostgresProviderOperationRepository({
 
   async function health() {
     return runDatabase(async () => {
-      const result = await client.query(`SELECT
-        count(*) FILTER (WHERE state='pending') AS pending,
-        count(*) FILTER (WHERE state='started') AS started,
-        count(*) FILTER (WHERE state='accepted') AS accepted,
-        count(*) FILTER (WHERE state='uncertain') AS uncertain,
-        count(*) FILTER (WHERE state='committed') AS committed,
-        count(*) FILTER (WHERE state='rejected') AS rejected,
-        count(*) FILTER (WHERE state='failed') AS failed,
-        count(*) FILTER (WHERE state IN ('pending','started','accepted','uncertain')
-          AND claim_expires_at IS NOT NULL AND claim_expires_at<=clock_timestamp()) AS stale_claims,
-        min(created_at) FILTER (WHERE state IN ('pending','started','accepted','uncertain')) AS oldest_nonterminal_at
-        FROM managed_signer_provider_operations
-        WHERE purpose=$1 AND key_id=$2 AND key_version=$3`, [binding.purpose, binding.keyId, binding.keyVersion]);
-      if (rowCount(result) !== 1) fail(PROVIDER_OPERATION_REPOSITORY_ERROR_CODES.DATABASE);
-      const row = result.rows[0];
-      const states = Object.freeze(Object.fromEntries(PROVIDER_OPERATION_STATES_FOR_HEALTH.map((state) => [state, count(row[state])])));
+      const envelope = await callFunctionOn(client, "health", [binding.purpose, binding.keyId, binding.keyVersion, binding.algorithm]);
+      const payload = unwrap(envelope);
+      if (!plainObject(payload?.health)) fail(PROVIDER_OPERATION_REPOSITORY_ERROR_CODES.DATABASE);
+      const health = payload.health;
+      const states = Object.freeze(Object.fromEntries(PROVIDER_OPERATION_STATES_FOR_HEALTH.map((state) => [state, count(health.states?.[state])])))
+      ;
       return Object.freeze({
         version: 1,
         purpose: binding.purpose,
@@ -277,8 +178,8 @@ export function createPostgresProviderOperationRepository({
         key_id: binding.keyId,
         key_version: binding.keyVersion,
         states,
-        stale_claims: count(row.stale_claims),
-        oldest_nonterminal_at: timestampOrNull(row.oldest_nonterminal_at),
+        stale_claims: count(health.stale_claims),
+        oldest_nonterminal_at: timestampOrNull(health.oldest_nonterminal_at),
       });
     });
   }
@@ -289,41 +190,27 @@ export function createPostgresProviderOperationRepository({
     if (!Number.isSafeInteger(input.limit) || input.limit < 1 || input.limit > MAX_PRUNE) {
       fail(PROVIDER_OPERATION_REPOSITORY_ERROR_CODES.INPUT);
     }
-    return runDatabase(() => withTransaction(client, async (tx) => {
-      const result = await tx.query(`WITH doomed AS (
-          SELECT provider.purpose,provider.operation_id
-          FROM managed_signer_provider_operations provider
-          JOIN managed_signer_signing_idempotency signing
-            ON signing.purpose=provider.purpose AND signing.operation_id=provider.operation_id
-          WHERE provider.purpose=$1 AND provider.key_id=$2 AND provider.key_version=$3
-            AND provider.state='committed' AND signing.status='committed'
-            AND provider.expires_at<=$4::timestamptz AND provider.expires_at<=clock_timestamp()
-            AND signing.expires_at<=$4::timestamptz AND signing.expires_at<=clock_timestamp()
-          ORDER BY provider.expires_at ASC,provider.operation_id ASC
-          FOR UPDATE OF provider SKIP LOCKED
-          LIMIT $5
-        )
-        DELETE FROM managed_signer_provider_operations provider
-        USING doomed
-        WHERE provider.purpose=doomed.purpose AND provider.operation_id=doomed.operation_id
-        RETURNING provider.operation_id`, [binding.purpose, binding.keyId, binding.keyVersion, before, input.limit]);
-      return Object.freeze({ pruned: rowCount(result) });
-    }));
+    return runDatabase(async () => {
+      const envelope = await callFunctionOn(client, "prune", [binding.purpose, binding.keyId, binding.keyVersion, binding.algorithm, before, input.limit]);
+      const payload = unwrap(envelope);
+      if (!Number.isSafeInteger(payload?.pruned) || payload.pruned < 0 || payload.pruned > MAX_PRUNE) {
+        fail(PROVIDER_OPERATION_REPOSITORY_ERROR_CODES.DATABASE);
+      }
+      return Object.freeze({ pruned: payload.pruned });
+    });
   }
 
-  async function claimedUpdate(operation, claimToken, states, assignment) {
-    return runDatabase(() => withTransaction(client, async (tx) => {
-      const row = await selectOperation(tx, operation, true);
-      requireClaim(row, operation, claimToken, states);
-      const result = await tx.query(`UPDATE managed_signer_provider_operations SET ${assignment}
-        WHERE purpose=$1 AND operation_id=$2
-        RETURNING purpose,operation_id,algorithm,bytes_length,encode(request_digest,'hex') AS request_digest,
-          key_id,key_version::text AS key_version,state,claim_token_digest,claim_expires_at,
-          claim_expires_at > clock_timestamp() AS claim_active,
-          provider_started_at,uncertain_reason,signature,public_key_der,provider_receipt_provider,provider_receipt_id`, [operation.purpose, operation.operation_id]);
-      if (rowCount(result) !== 1) fail(PROVIDER_OPERATION_REPOSITORY_ERROR_CODES.STATE);
-      return publicRecord(result.rows[0], claimToken);
-    }));
+  async function operationCall(purposeName, params, claimToken, claimMode, operation) {
+    return runDatabase(async () => {
+      const envelope = await callFunctionOn(client, purposeName, params);
+      const payload = unwrap(envelope);
+      if (payload === null) return null;
+      if (!plainObject(payload?.record)) fail(PROVIDER_OPERATION_REPOSITORY_ERROR_CODES.DATABASE);
+      assertIdentity(payload.record, operation);
+      const token = claimMode === "always" || (claimMode === "claim_if_acquired" && payload.claim_acquired === true)
+        ? claimToken : undefined;
+      return publicRecord(payload.record, token);
+    });
   }
 
   return Object.freeze({ purpose, algorithm, key_id: keyId, key_version: String(keyVersion),
@@ -334,6 +221,21 @@ export function createPostgresProviderOperationRepository({
 const PROVIDER_OPERATION_STATES_FOR_HEALTH = Object.freeze([
   "pending", "started", "accepted", "uncertain", "committed", "rejected", "failed",
 ]);
+
+function operationParams(operation, claimDigest = undefined) {
+  const params = [
+    operation.purpose, operation.operation_id, operation.algorithm, operation.bytes_length,
+    Buffer.from(operation.request_digest, "hex"), operation.key_id, operation.key_version,
+  ];
+  if (claimDigest !== undefined) params.push(claimDigest);
+  return params;
+}
+
+async function callFunctionOn(client, purpose, params) {
+  const query = FUNCTION_SQL[purpose];
+  if (!query) fail(PROVIDER_OPERATION_REPOSITORY_ERROR_CODES.DATABASE);
+  return decodeQueryResult(await client.query(query, params));
+}
 
 function normalizeOperation(input, binding) {
   exactObject(input, OPERATION_FIELDS);
@@ -372,59 +274,20 @@ function normalizeOutput(signature, receipt, operation) {
   return Object.freeze({ signature: raw, publicKeyDer, provider: receipt.provider, receiptId: receipt.receipt_id });
 }
 
-async function selectOperation(client, operation, lock) {
-  const result = await client.query(`${SELECT_OPERATION}${lock ? " FOR UPDATE" : ""}`, [operation.purpose, operation.operation_id]);
-  return rowCount(result) === 0 ? null : result.rows[0];
-}
-
-async function setClaim(client, operation, token, state, leaseMs) {
-  const result = await client.query(`UPDATE managed_signer_provider_operations
-    SET state=$3,claim_token_digest=$4,claim_expires_at=clock_timestamp()+($5 * interval '1 millisecond')
-    WHERE purpose=$1 AND operation_id=$2
-    RETURNING purpose,operation_id,algorithm,bytes_length,encode(request_digest,'hex') AS request_digest,
-      key_id,key_version::text AS key_version,state,claim_token_digest,claim_expires_at,
-      claim_expires_at > clock_timestamp() AS claim_active,
-      provider_started_at,uncertain_reason,signature,public_key_der,provider_receipt_provider,provider_receipt_id`, [
-    operation.purpose, operation.operation_id, state, Buffer.from(sha256(token), "hex"), leaseMs,
-  ]);
-  if (rowCount(result) !== 1) fail(PROVIDER_OPERATION_REPOSITORY_ERROR_CODES.CLAIM_LOST);
-  return result.rows[0];
-}
-
-async function commitRow(client, operation) {
-  const result = await client.query(`UPDATE managed_signer_provider_operations
-    SET state='committed',uncertain_reason=NULL,claim_token_digest=NULL,claim_expires_at=NULL
-    WHERE purpose=$1 AND operation_id=$2
-    RETURNING purpose,operation_id,algorithm,bytes_length,encode(request_digest,'hex') AS request_digest,
-      key_id,key_version::text AS key_version,state,claim_token_digest,claim_expires_at,
-      claim_expires_at > clock_timestamp() AS claim_active,
-      provider_started_at,uncertain_reason,signature,public_key_der,provider_receipt_provider,provider_receipt_id`, [operation.purpose, operation.operation_id]);
-  if (rowCount(result) !== 1) fail(PROVIDER_OPERATION_REPOSITORY_ERROR_CODES.STATE);
-  return publicRecord(result.rows[0]);
-}
-
-function requireClaim(row, operation, claimToken, states) {
-  if (!row) fail(PROVIDER_OPERATION_REPOSITORY_ERROR_CODES.CLAIM_LOST);
-  assertIdentity(row, operation);
-  if (!states.includes(row.state) || !row.claim_token_digest || claimExpired(row)
-    || !safeEqual(Buffer.from(row.claim_token_digest), Buffer.from(sha256(claimToken), "hex"))) {
-    fail(PROVIDER_OPERATION_REPOSITORY_ERROR_CODES.CLAIM_LOST);
+function unwrap(envelope) {
+  if (!plainObject(envelope) || typeof envelope.status !== "string") fail(PROVIDER_OPERATION_REPOSITORY_ERROR_CODES.DATABASE);
+  if (envelope.status === "not_found") return null;
+  if (envelope.status === "error") {
+    const code = FUNCTION_ERROR_CODES.has(envelope.error_code) ? envelope.error_code : "DATABASE";
+    fail(PROVIDER_OPERATION_REPOSITORY_ERROR_CODES[code]);
   }
+  if (envelope.status !== "ok") fail(PROVIDER_OPERATION_REPOSITORY_ERROR_CODES.DATABASE);
+  return envelope;
 }
 
-function assertIdentity(row, operation) {
-  for (const field of OPERATION_FIELDS) {
-    const value = field === "key_version" ? String(row[field]) : field === "bytes_length" ? Number(row[field]) : row[field];
-    if (value !== operation[field]) fail(PROVIDER_OPERATION_REPOSITORY_ERROR_CODES.CONFLICT);
-  }
-}
-
-function assertStoredOutput(row, output) {
-  if (!safeEqual(Buffer.from(row.signature ?? []), output.signature)
-    || !safeEqual(Buffer.from(row.public_key_der ?? []), output.publicKeyDer)
-    || row.provider_receipt_provider !== output.provider || row.provider_receipt_id !== output.receiptId) {
-    fail(PROVIDER_OPERATION_REPOSITORY_ERROR_CODES.CONFLICT);
-  }
+function decodeQueryResult(result) {
+  if (rowCount(result) !== 1 || !plainObject(result.rows?.[0]?.result)) fail(PROVIDER_OPERATION_REPOSITORY_ERROR_CODES.DATABASE);
+  return result.rows[0].result;
 }
 
 function publicRecord(row, claimToken = undefined) {
@@ -440,21 +303,26 @@ function publicRecord(row, claimToken = undefined) {
   };
   if (claimToken !== undefined) record.claim_token = claimToken;
   if (row.state === "uncertain") record.uncertain_reason = normalizeStoredUncertainReason(row.uncertain_reason);
-  if (hasOutput(row)) {
-    record.signature = Object.freeze({ algorithm: ALGORITHM, encoding: "base64url", value: Buffer.from(row.signature).toString("base64url"),
-      public_key: Object.freeze({ algorithm: ALGORITHM, encoding: "base64url", value: Buffer.from(row.public_key_der).toString("base64url") }) });
+  if (row.signature_hex !== null && row.signature_hex !== undefined
+    && row.public_key_der_hex !== null && row.public_key_der_hex !== undefined
+    && row.provider_receipt_provider !== null && row.provider_receipt_provider !== undefined
+    && row.provider_receipt_id !== null && row.provider_receipt_id !== undefined) {
+    const signature = hexBuffer(row.signature_hex, 64);
+    const publicKeyDer = hexBuffer(row.public_key_der_hex, 44);
+    record.signature = Object.freeze({ algorithm: ALGORITHM, encoding: "base64url", value: signature.toString("base64url"),
+      public_key: Object.freeze({ algorithm: ALGORITHM, encoding: "base64url", value: publicKeyDer.toString("base64url") }) });
     record.provider_receipt = Object.freeze({ provider: row.provider_receipt_provider, receipt_id: row.provider_receipt_id,
       operation_id: row.operation_id, key_id: row.key_id, key_version: String(row.key_version) });
   }
   return Object.freeze(record);
 }
 
-function hasOutput(row) {
-  return row.signature != null && row.public_key_der != null
-    && row.provider_receipt_provider != null && row.provider_receipt_id != null;
+function assertIdentity(row, operation) {
+  for (const field of OPERATION_FIELDS) {
+    const value = field === "key_version" ? String(row[field]) : field === "bytes_length" ? Number(row[field]) : row[field];
+    if (value !== operation[field]) fail(PROVIDER_OPERATION_REPOSITORY_ERROR_CODES.CONFLICT);
+  }
 }
-
-function claimExpired(row) { return row.claim_active !== true; }
 
 function normalizeUncertainReason(value) {
   if (typeof value !== "string" || !UNCERTAIN_REASON_SET.has(value)) fail(PROVIDER_OPERATION_REPOSITORY_ERROR_CODES.INPUT);
@@ -491,7 +359,6 @@ function makeToken(randomBytes) {
 }
 
 function sha256(value) { return crypto.createHash("sha256").update(value).digest("hex"); }
-function safeEqual(left, right) { return left.length === right.length && crypto.timingSafeEqual(left, right); }
 function rowCount(result) { return Number.isSafeInteger(result?.rowCount) ? result.rowCount : Array.isArray(result?.rows) ? result.rows.length : 0; }
 function count(value) {
   const normalized = Number(value);
@@ -505,11 +372,20 @@ function timestamp(value) {
   return new Date(parsed).toISOString();
 }
 function timestampOrNull(value) {
-  if (value === null) return null;
+  if (value === null || value === undefined) return null;
   const parsed = value instanceof Date ? value.getTime() : Date.parse(String(value));
   if (!Number.isFinite(parsed)) fail(PROVIDER_OPERATION_REPOSITORY_ERROR_CODES.DATABASE);
   return new Date(parsed).toISOString();
 }
-function plainObject(value) { return value !== null && typeof value === "object" && !Array.isArray(value) && (Object.getPrototypeOf(value) === Object.prototype || Object.getPrototypeOf(value) === null); }
+function hexBuffer(value, expectedBytes) {
+  if (typeof value !== "string" || value.length !== expectedBytes * 2 || !HEX.test(value)) {
+    fail(PROVIDER_OPERATION_REPOSITORY_ERROR_CODES.DATABASE);
+  }
+  return Buffer.from(value, "hex");
+}
+function plainObject(value) {
+  return value !== null && typeof value === "object" && !Array.isArray(value)
+    && (Object.getPrototypeOf(value) === Object.prototype || Object.getPrototypeOf(value) === null);
+}
 function delay(ms) { return new Promise((resolve) => setTimeout(resolve, ms)); }
 function fail(code) { throw new ProviderOperationRepositoryError(code); }
