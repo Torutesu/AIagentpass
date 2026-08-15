@@ -108,6 +108,7 @@ private actor RunnerCoordinator: NativeDeviceSyncCoordinating {
     private var snapshotValue: NativeDeviceRefreshSnapshot
     private var outcomes: [Outcome]
     private var gate: RunnerGate?
+    private var completionGate: RunnerGate?
     private var activeCount = 0
     private var maximumActiveCount = 0
     private var callCount = 0
@@ -129,6 +130,7 @@ private actor RunnerCoordinator: NativeDeviceSyncCoordinating {
     }
 
     func setGate(_ gate: RunnerGate?) { self.gate = gate }
+    func setCompletionGate(_ gate: RunnerGate?) { self.completionGate = gate }
 
     func synchronize(waitMilliseconds: Int) async throws -> NativeDeviceSyncRunResult {
         callCount += 1
@@ -141,13 +143,14 @@ private actor RunnerCoordinator: NativeDeviceSyncCoordinating {
         if let currentGate { try await currentGate.wait() }
 
         let outcome = outcomes.isEmpty ? .noChange(snapshotValue.generation) : outcomes.removeFirst()
+        let result: NativeDeviceSyncRunResult
         switch outcome {
         case let .noChange(generation):
             snapshotValue = idleSnapshot(generation: generation, sequence: nil)
-            return .noChange(generation: generation)
+            result = .noChange(generation: generation)
         case let .applied(generation, sequence):
             snapshotValue = idleSnapshot(generation: generation, sequence: sequence)
-            return .applied(generation: generation, sequence: sequence)
+            result = .applied(generation: generation, sequence: sequence)
         case let .blocked(generation, sequence):
             snapshotValue = NativeDeviceRefreshSnapshot(
                 state: .idle,
@@ -159,12 +162,17 @@ private actor RunnerCoordinator: NativeDeviceSyncCoordinating {
                 sequenceWatermark: sequence,
                 revision: 0
             )
-            return .blocked(generation: generation, sequence: sequence, reason: .internalError)
+            result = .blocked(generation: generation, sequence: sequence, reason: .internalError)
         case .transportFailure:
             throw NativeDeviceSyncCoordinatorError.transportUnavailable
         case .unknownFailure:
             throw RunnerUnknownError.secretPathAndMessage
         }
+        if let completionGate {
+            self.completionGate = nil
+            try await completionGate.wait()
+        }
+        return result
     }
 
     func snapshot() async -> NativeDeviceRefreshSnapshot { snapshotValue }
@@ -244,7 +252,7 @@ private enum RunnerUnknownError: Error, Sendable {
     }
     let first = Task { await runner.requestRefresh() }
     let second = Task { await runner.requestRefresh() }
-    for _ in 0..<20 { await Task.yield() }
+    try await waitUntil { runner.pendingManualRequestCountForTesting() == 2 }
     activeGate.releaseOne()
     let firstStatus = await first.value
     let secondStatus = await second.value
@@ -273,7 +281,7 @@ private enum RunnerUnknownError: Error, Sendable {
     let first = Task { await runner.requestRefresh() }
     let second = Task { await runner.requestRefresh() }
     let third = Task { await runner.requestRefresh() }
-    for _ in 0..<20 { await Task.yield() }
+    try await waitUntil { runner.pendingManualRequestCountForTesting() == 3 }
     try await waitUntil { await coordinator.calls() == 2 }
     // The second cycle is deliberately allowed to finish only after all
     // callers have had an opportunity to join it.
@@ -282,6 +290,91 @@ private enum RunnerUnknownError: Error, Sendable {
     _ = await first.value
     _ = await second.value
     _ = await third.value
+    #expect(await coordinator.calls() == 2)
+    #expect(await coordinator.maximumActive() == 1)
+    await runner.stop()
+}
+
+@Test func runnerCoalescesManualRefreshesDuringCoordinatorCompletion() async throws {
+    let coordinator = RunnerCoordinator(outcomes: [.noChange(1)])
+    let completionGate = RunnerGate()
+    await coordinator.setCompletionGate(completionGate)
+    let runner = NativeDeviceSyncRunner(
+        coordinator: coordinator,
+        configuration: try NativeDeviceSyncRunnerConfiguration(intervalSeconds: 15, maximumBackoffSeconds: 60, jitterFraction: 0),
+        clock: RunnerClock(),
+        scheduler: RunnerScheduler(),
+        randomizer: RunnerRandom(0)
+    )
+
+    runner.start()
+    try await waitUntil {
+        let calls = await coordinator.calls()
+        let active = await coordinator.maximumActive()
+        return calls == 1 && active == 1
+    }
+    let first = Task { await runner.requestRefresh() }
+    let second = Task { await runner.requestRefresh() }
+    try await waitUntil { runner.pendingManualRequestCountForTesting() == 2 }
+    completionGate.releaseOne()
+
+    #expect((await first.value).reason == .noChange)
+    #expect((await second.value).reason == .noChange)
+    #expect(await coordinator.calls() == 1)
+    await runner.stop()
+}
+
+@Test func runnerSchedulesOneNewCycleForRefreshAfterCompletion() async throws {
+    let coordinator = RunnerCoordinator(outcomes: [.noChange(1), .noChange(2)])
+    let scheduler = RunnerScheduler()
+    let runner = NativeDeviceSyncRunner(
+        coordinator: coordinator,
+        configuration: try NativeDeviceSyncRunnerConfiguration(intervalSeconds: 15, maximumBackoffSeconds: 60, jitterFraction: 0),
+        clock: RunnerClock(),
+        scheduler: scheduler,
+        randomizer: RunnerRandom(0)
+    )
+
+    runner.start()
+    try await waitUntil {
+        await coordinator.calls() == 1 && scheduler.sleeps().count == 1 && !runner.status().inFlight
+    }
+    let secondGate = RunnerGate()
+    await coordinator.setGate(secondGate)
+    let waiter = Task { await runner.requestRefresh() }
+    try await waitUntil {
+        let calls = await coordinator.calls()
+        return runner.pendingManualRequestCountForTesting() == 1 && calls == 2
+    }
+    secondGate.releaseOne()
+
+    #expect((await waiter.value).reason == .noChange)
+    #expect(await coordinator.calls() == 2)
+    await runner.stop()
+}
+
+@Test func runnerCoalescesRefreshWithTimerWithoutLosingTheWake() async throws {
+    let coordinator = RunnerCoordinator(outcomes: [.noChange(1), .noChange(2)])
+    let scheduler = RunnerScheduler()
+    let secondGate = RunnerGate()
+    let runner = NativeDeviceSyncRunner(
+        coordinator: coordinator,
+        configuration: try NativeDeviceSyncRunnerConfiguration(intervalSeconds: 15, maximumBackoffSeconds: 60, jitterFraction: 0),
+        clock: RunnerClock(),
+        scheduler: scheduler,
+        randomizer: RunnerRandom(0)
+    )
+
+    runner.start()
+    try await waitUntil { await coordinator.calls() == 1 && scheduler.sleeps().count == 1 }
+    await coordinator.setGate(secondGate)
+    let waiter = Task { await runner.requestRefresh() }
+    try await waitUntil { runner.pendingManualRequestCountForTesting() == 1 }
+    scheduler.releaseNext()
+    try await waitUntil { await coordinator.calls() == 2 }
+    secondGate.releaseOne()
+
+    #expect((await waiter.value).reason == .noChange)
     #expect(await coordinator.calls() == 2)
     #expect(await coordinator.maximumActive() == 1)
     await runner.stop()
@@ -333,6 +426,37 @@ private enum RunnerUnknownError: Error, Sendable {
     #expect(waiterStatus.reason == .cancelled)
     #expect(!String(describing: status).contains("secret"))
     #expect(!String(describing: status).contains("path"))
+}
+
+@Test func runnerStopResolvesRefreshWaitersDuringAnActiveCycle() async throws {
+    let coordinator = RunnerCoordinator(outcomes: [.noChange(1)])
+    let activeGate = RunnerGate()
+    await coordinator.setGate(activeGate)
+    let runner = NativeDeviceSyncRunner(
+        coordinator: coordinator,
+        configuration: try NativeDeviceSyncRunnerConfiguration(intervalSeconds: 15, maximumBackoffSeconds: 60, jitterFraction: 0),
+        clock: RunnerClock(),
+        scheduler: RunnerScheduler(),
+        randomizer: RunnerRandom(0)
+    )
+
+    runner.start()
+    try await waitUntil {
+        let calls = await coordinator.calls()
+        let active = await coordinator.maximumActive()
+        return calls == 1 && active == 1
+    }
+    let first = Task { await runner.requestRefresh() }
+    let second = Task { await runner.requestRefresh() }
+    try await waitUntil { runner.pendingManualRequestCountForTesting() == 2 }
+
+    await runner.stop()
+    let firstStatus = await first.value
+    let secondStatus = await second.value
+    #expect(firstStatus.lifecycle == .stopped)
+    #expect(secondStatus.lifecycle == .stopped)
+    #expect(runner.status().lifecycle == .stopped)
+    #expect(await coordinator.maximumActive() == 1)
 }
 
 @Test func stoppedRunnerCannotRestartItsClosedWakeBoundary() async throws {

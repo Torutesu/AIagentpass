@@ -306,6 +306,15 @@ public final class NativeDeviceSyncRunner: @unchecked Sendable {
         return statusValue
     }
 
+    /// Test-only observability for synchronizing concurrent callers with the
+    /// coalescing boundary. This is deliberately an internal count rather
+    /// than a public status field: callers only need the resulting status,
+    /// while deterministic tests must know that their requests were admitted
+    /// before releasing an in-flight cycle.
+    internal func pendingManualRequestCountForTesting() -> Int {
+        withStateLock { manualWaiters.count }
+    }
+
     /// Idempotently starts the only runner loop. The first synchronization is
     /// started immediately so a durable fetching/staging/ack state is resumed
     /// on service launch without waiting for the configured interval.
@@ -336,7 +345,6 @@ public final class NativeDeviceSyncRunner: @unchecked Sendable {
     public func requestRefresh() async -> NativeDeviceSyncRunnerStatus {
         await withCheckedContinuation { (continuation: CheckedContinuation<NativeDeviceSyncRunnerStatus, Never>) in
             var immediate: NativeDeviceSyncRunnerStatus?
-            var signal = false
             withStateLock {
                 if statusValue.lifecycle == .stopping {
                     // A request racing with stop is a waiter, not an
@@ -349,14 +357,20 @@ public final class NativeDeviceSyncRunner: @unchecked Sendable {
                     manualWaiters.append(continuation)
                     if !cycleInFlight && !manualWakePending {
                         manualWakePending = true
-                        signal = true
+                        // Publish the wake while holding the same lock as the
+                        // cycle transition. If a timer wins concurrently, it
+                        // can consume this wake as part of that cycle; if the
+                        // manual request wins, the loop observes the wake and
+                        // starts exactly one manual cycle. Signaling after
+                        // releasing this lock leaves a race where the timer
+                        // consumes first and the delayed signal schedules an
+                        // unnecessary second cycle.
+                        wakeSignal.signal()
                     }
                 }
             }
             if let immediate {
                 continuation.resume(returning: immediate)
-            } else if signal {
-                wakeSignal.signal()
             }
         }
     }
