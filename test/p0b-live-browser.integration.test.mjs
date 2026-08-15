@@ -186,7 +186,11 @@ async function scenario(parent, name, callback) {
         }
         if (register) {
           try { await fixture.registerWebAuthn(page); }
-          catch { failSafeOpen(effectiveSafeOpenPrefix, "REGISTRATION"); }
+          catch (error) {
+            const registrationMarker = safeRegistrationMarker(error?.code, effectiveSafeOpenPrefix);
+            if (registrationMarker !== null) assert.fail(registrationMarker);
+            failSafeOpen(effectiveSafeOpenPrefix, "REGISTRATION");
+          }
         }
         try { await page.reload({ waitUntil: "domcontentloaded" }); }
         catch { failSafeOpen(effectiveSafeOpenPrefix, "RELOAD"); }
@@ -241,6 +245,12 @@ function safeRoleBootstrapMarker(code, prefix) {
     ["session_bootstrap_contract_failed", "CONTRACT"]
   ]).get(code);
   return suffix === undefined ? null : `${prefix}_BOOTSTRAP_${suffix}_FAILED`;
+}
+
+function safeRegistrationMarker(code, prefix) {
+  if (prefix !== "P0B_SAFE_OWNER_OPEN") return null;
+  const match = String(code ?? "").match(/^registration_(options|verify)_(400|401|403|409|413|422|428|500|503)(?:_[a-z][a-z0-9_]{0,95})?$/u);
+  return match === null ? null : `${prefix}_REGISTRATION_${match[1].toUpperCase()}_${match[2]}_FAILED`;
 }
 
 async function requireWakeStatus(card) {
