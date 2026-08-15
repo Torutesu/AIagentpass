@@ -2,7 +2,7 @@
 
 Status: active
 
-Planning baseline: `codex/agent-platform` after `e950ea1`
+Planning baseline: `codex/agent-platform` after `63a09d3`
 
 This document converts the v1 architecture into the remaining implementation
 and qualification gates. [`V1_EXECUTION_PLAN.md`](./V1_EXECUTION_PLAN.md)
@@ -11,7 +11,7 @@ the day-to-day merge order from the current source checkpoint.
 
 ## 1. Current source checkpoint
 
-The repository currently has 181 catalog entries, 49 JSON Schemas, 62 OpenAPI
+The repository currently has 182 catalog entries, 49 JSON Schemas, 62 OpenAPI
 operations, and 71 forward-only PostgreSQL migrations. The implemented source
 boundary includes:
 
@@ -23,14 +23,16 @@ boundary includes:
 - a strict Console BFF, organization workspace, passkey management, session
   management, device/control status, emergency actions, and recovery surfaces;
 - purpose-separated hosted signer configuration and provider adapters with
-  hosted file/private-key fallback rejection;
+  hosted file/private-key fallback rejection, exact eight-purpose readiness,
+  immutable version/fingerprint checks, and active-key enforcement;
 - resumable headless onboarding, v2 device enrollment, native broker/XPC,
   release-manifest verification, installer and hardware-qualification scaffolding.
 
-This is not production completion. The current branch still needs a terminal
-green cross-version CI run, complete browser journeys, protected real-provider
-evidence, physical Mac evidence, a signed/notarized artifact, staging drills,
-and independent security review.
+The PostgreSQL 16 and 17 authority lanes and the full PostgreSQL integration
+lane pass at this checkpoint. This is not production completion. The current
+branch still needs a terminal green cross-version CI run, complete browser
+journeys, protected real-provider evidence, physical Mac evidence, a
+signed/notarized artifact, staging drills, and independent security review.
 
 ## 2. Non-negotiable product boundaries
 
@@ -325,7 +327,69 @@ its focused tests plus contract validation, lint, root/Console/native suites,
 and `git diff --check`; boundary-specific PostgreSQL, browser, provider,
 packaging, or physical tests are added as required.
 
-## 12. External requirements and final definition of done
+## 12. Execution ledger and acceptance matrix
+
+This ledger is the operational source of truth for deciding what to implement
+next. A work package moves to `qualified` only when its source, negative tests,
+and required retained evidence all refer to the same commit. Source-complete
+work that still needs protected infrastructure or physical hardware remains
+`implemented`; it is not silently promoted.
+
+| Package | Current state | Next merge-sized deliverables | Required acceptance evidence | Unlocks |
+| --- | --- | --- | --- | --- |
+| N1 qualification closure | `in progress` | Repair the remaining Console browser journey; rerun all six CI jobs on one head; retain clean browser/P0-B artifacts. | One terminal green run: root/Console/native, browser, P0-B, PostgreSQL integration, PostgreSQL 16, and PostgreSQL 17. | N2/N5 qualification claims |
+| N2 organization and identity Console | `implemented, qualification open` | Finish real-process Owner/Admin/Auditor/Viewer journeys; cover invitation acceptance/resend, last-owner protection, current-session revoke, final-passkey guard, response loss, and accessibility. | Production-built Console and Cloud API against PostgreSQL; virtual WebAuthn; secret-free DOM/storage/network/artifact scan. | Non-engineer control plane |
+| N5 hosted signer | `readiness implemented, protected evidence open` | Add provider-operation drain/shutdown closure; provision eight isolated AWS/GCP keys and identities; run exact-byte convergence, response-loss lookup, rotation, disablement, and cross-purpose denial. | Signed, source-bound AWS/GCP reports proving immutable versions, public fingerprints, non-exportability, least privilege, no fallback, and operator-actionable uncertainty. | Hosted release candidate |
+| N3 device onboarding | `foundation implemented` | Freeze preflight/handoff DTO; implement browser-to-loopback transfer plus bounded stdin recovery; add interruption/resume state machine and verified receipt/ACK reconciliation. | Clean-machine physical Mac enrollment with restart/expiry/timeout/ambiguous-response matrix and zero secret-bearing artifacts. | Agent installation journey |
+| N4 native agents and distribution | `foundation implemented` | Close durable sign-once transaction; Claude Code lifecycle and two verified commits; Cursor parity; immutable PKG/Homebrew path; Developer ID signing and notarization. | Same artifact digest passes identity, entitlement, Gatekeeper, upgrade, uninstall-preserve, reinstall, rollback-refusal, and negative policy matrix on Apple silicon and Intel/T2. | Staging candidate |
+| N6 operations and production | `design/runbooks partial` | Finish reviewed IaC, immutable image promotion, migration/canary/drain, backup/PITR restore, SLOs/alerts, incident drills, and independent security assessment. | Exact candidate passes staging SLO/RPO/RTO, restore, outage, rotation/compromise, tenant-isolation, DAST/SAST/IaC/container review, and signed promotion adjudication. | Explicit production go/no-go |
+
+### 12.1 Next source sequence
+
+1. Close N1 on the current head. No broader protocol or migration work lands
+   while the terminal qualification run is red.
+2. Land N2 browser negatives in three independently reviewable slices:
+   organization/invitation, passkey/session, then accessibility and artifact
+   hygiene. Each slice must use authoritative refresh after response loss and
+   must never replay an unconfirmed destructive mutation.
+3. In parallel with N2, land N5 graceful drain and provider reconciliation
+   harnesses. The protected AWS/GCP executor is configuration-only; it cannot
+   add a local signer path or private key input.
+4. Freeze the N3 public handoff contract only after N2 session/recent-auth
+   behavior and N5 possession-receipt metadata are stable. Generate validators
+   from the catalog and reject every unknown field at each boundary.
+5. Implement N3 as explicit durable states: `prepared`, `invitation_issued`,
+   `delivered`, `enrollment_uncertain`, `receipt_verified`, `trust_installed`,
+   and `control_acknowledged`. Every restart must resume or terminate safely
+   from one of these states.
+6. Close N4 first for Claude Code, then reuse the frozen adapter contract for
+   Cursor. Both integrations must pass through the same signed broker and must
+   be unable to choose a key, alter policy, or retry an unknown signing outcome.
+7. Build, sign, notarize, and staple once. Direct download and Homebrew consume
+   the same immutable PKG; physical qualification and staging never rebuild it.
+8. Deploy that digest to staging, execute N6 drills and independent review,
+   then produce a signed promotion record. Production requires an explicit
+   human go/no-go after all evidence has been independently verified.
+
+### 12.2 Per-slice merge contract
+
+Every merge-sized slice must include all applicable items below:
+
+- source and generated contract changes, with forward-only migration/catalog
+  updates when the public or PostgreSQL boundary changes;
+- positive, denial, replay, stale-version, cross-tenant, malformed-input,
+  contention, timeout, response-loss, and process-loss tests for every changed
+  authority path;
+- threat-model and operator/runbook updates for newly introduced states,
+  failure classifications, recovery actions, and observability;
+- bounded, secret-free evidence containing source SHA, artifact/image digest,
+  migration head, provider/key version where applicable, command digests, and
+  verifier result;
+- focused tests before commit, then complete contract/lint/root/Console/native
+  qualification before push; protected or physical claims require their named
+  external executor and cannot be substituted by mocks or skips.
+
+## 13. External requirements and final definition of done
 
 The following cannot be manufactured by source changes: protected AWS/GCP KMS
 accounts and IAM evidence, Apple Developer ID Application/Installer and
