@@ -153,6 +153,8 @@ async function scenario(parent, name, callback) {
         }
         try { await fixture.bootstrap(page, role); }
         catch (error) {
+          const bootstrap503Marker = safeBootstrap503Marker(error?.code);
+          if (bootstrap503Marker !== null) assert.fail(bootstrap503Marker);
           if (safeOpenPrefix === "P0B_SAFE_ADMIN_OPEN") {
             if (error?.code === "session_bootstrap_navigation_failed") assert.fail("P0B_SAFE_ADMIN_OPEN_BOOTSTRAP_NAVIGATION_FAILED");
             if (error?.code === "session_bootstrap_response_failed") assert.fail("P0B_SAFE_ADMIN_OPEN_BOOTSTRAP_RESPONSE_FAILED");
@@ -169,12 +171,6 @@ async function scenario(parent, name, callback) {
             if (error?.code === "session_bootstrap_http_502_bff_invalid_response_failed") assert.fail("P0B_SAFE_ADMIN_OPEN_BOOTSTRAP_HTTP_502_BFF_INVALID_RESPONSE_FAILED");
             if (error?.code === "session_bootstrap_http_502_proxy_unavailable_failed") assert.fail("P0B_SAFE_ADMIN_OPEN_BOOTSTRAP_HTTP_502_PROXY_UNAVAILABLE_FAILED");
             if (error?.code === "session_bootstrap_http_502_cloud_exited_failed") assert.fail("P0B_SAFE_ADMIN_OPEN_BOOTSTRAP_HTTP_502_CLOUD_EXITED_FAILED");
-            if (error?.code === "session_bootstrap_http_503_session_unavailable_failed") assert.fail("P0B_SAFE_ADMIN_OPEN_BOOTSTRAP_HTTP_503_SESSION_UNAVAILABLE_FAILED");
-            if (error?.code === "session_bootstrap_http_503_human_auth_unavailable_failed") assert.fail("P0B_SAFE_ADMIN_OPEN_BOOTSTRAP_HTTP_503_HUMAN_AUTH_UNAVAILABLE_FAILED");
-            if (error?.code === "session_bootstrap_http_503_rate_limiter_unavailable_failed") assert.fail("P0B_SAFE_ADMIN_OPEN_BOOTSTRAP_HTTP_503_RATE_LIMITER_UNAVAILABLE_FAILED");
-            if (error?.code === "session_bootstrap_http_503_cloud_api_unavailable_failed") assert.fail("P0B_SAFE_ADMIN_OPEN_BOOTSTRAP_HTTP_503_CLOUD_API_UNAVAILABLE_FAILED");
-            if (error?.code === "session_bootstrap_http_503_identity_unavailable_failed") assert.fail("P0B_SAFE_ADMIN_OPEN_BOOTSTRAP_HTTP_503_IDENTITY_UNAVAILABLE_FAILED");
-            if (error?.code === "session_bootstrap_http_503_other_failed") assert.fail("P0B_SAFE_ADMIN_OPEN_BOOTSTRAP_HTTP_503_OTHER_FAILED");
             if (error?.code === "session_bootstrap_http_504_failed") assert.fail("P0B_SAFE_ADMIN_OPEN_BOOTSTRAP_HTTP_504_FAILED");
             if (error?.code === "session_bootstrap_http_4xx_failed") assert.fail("P0B_SAFE_ADMIN_OPEN_BOOTSTRAP_HTTP_4XX_FAILED");
             if (error?.code === "session_bootstrap_http_5xx_failed") assert.fail("P0B_SAFE_ADMIN_OPEN_BOOTSTRAP_HTTP_5XX_FAILED");
@@ -202,6 +198,18 @@ async function scenario(parent, name, callback) {
       await fixture?.close().catch(() => {});
     }
   });
+}
+
+function safeBootstrap503Marker(code) {
+  const suffix = new Map([
+    ["session_bootstrap_http_503_session_unavailable_failed", "SESSION_UNAVAILABLE"],
+    ["session_bootstrap_http_503_human_auth_unavailable_failed", "HUMAN_AUTH_UNAVAILABLE"],
+    ["session_bootstrap_http_503_rate_limiter_unavailable_failed", "RATE_LIMITER_UNAVAILABLE"],
+    ["session_bootstrap_http_503_cloud_api_unavailable_failed", "CLOUD_API_UNAVAILABLE"],
+    ["session_bootstrap_http_503_identity_unavailable_failed", "IDENTITY_UNAVAILABLE"],
+    ["session_bootstrap_http_503_other_failed", "OTHER"],
+  ]).get(code);
+  return suffix === undefined ? null : `P0B_SAFE_BOOTSTRAP_HTTP_503_${suffix}_FAILED`;
 }
 
 async function requireWakeStatus(card) {
