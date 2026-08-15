@@ -156,6 +156,10 @@ async function scenario(parent, name, callback) {
         catch (error) {
           const bootstrap503Marker = safeBootstrap503Marker(error?.code);
           if (bootstrap503Marker !== null) assert.fail(bootstrap503Marker);
+          if (effectiveSafeOpenPrefix === "P0B_SAFE_OWNER_OPEN") {
+            const ownerMarker = safeRoleBootstrapMarker(error?.code, effectiveSafeOpenPrefix);
+            if (ownerMarker !== null) assert.fail(ownerMarker);
+          }
           if (effectiveSafeOpenPrefix === "P0B_SAFE_ADMIN_OPEN") {
             if (error?.code === "session_bootstrap_navigation_failed") assert.fail("P0B_SAFE_ADMIN_OPEN_BOOTSTRAP_NAVIGATION_FAILED");
             if (error?.code === "session_bootstrap_response_failed") assert.fail("P0B_SAFE_ADMIN_OPEN_BOOTSTRAP_RESPONSE_FAILED");
@@ -211,6 +215,32 @@ function safeBootstrap503Marker(code) {
     ["session_bootstrap_http_503_other_failed", "OTHER"],
   ]).get(code);
   return suffix === undefined ? null : `P0B_SAFE_BOOTSTRAP_HTTP_503_${suffix}_FAILED`;
+}
+
+function safeRoleBootstrapMarker(code, prefix) {
+  const suffix = new Map([
+    ["session_bootstrap_navigation_failed", "NAVIGATION"],
+    ["session_bootstrap_response_failed", "RESPONSE"],
+    ["session_bootstrap_http_400_failed", "HTTP_400"],
+    ["session_bootstrap_http_401_failed", "HTTP_401"],
+    ["session_bootstrap_http_403_failed", "HTTP_403"],
+    ["session_bootstrap_http_404_failed", "HTTP_404"],
+    ["session_bootstrap_http_405_failed", "HTTP_405"],
+    ["session_bootstrap_http_409_failed", "HTTP_409"],
+    ["session_bootstrap_http_415_failed", "HTTP_415"],
+    ["session_bootstrap_http_422_failed", "HTTP_422"],
+    ["session_bootstrap_http_429_failed", "HTTP_429"],
+    ["session_bootstrap_http_500_failed", "HTTP_500"],
+    ["session_bootstrap_http_502_bff_invalid_response_failed", "HTTP_502_BFF_INVALID_RESPONSE"],
+    ["session_bootstrap_http_502_proxy_unavailable_failed", "HTTP_502_PROXY_UNAVAILABLE"],
+    ["session_bootstrap_http_502_cloud_exited_failed", "HTTP_502_CLOUD_EXITED"],
+    ["session_bootstrap_http_504_failed", "HTTP_504"],
+    ["session_bootstrap_http_4xx_failed", "HTTP_4XX"],
+    ["session_bootstrap_http_5xx_failed", "HTTP_5XX"],
+    ["session_bootstrap_http_other_failed", "HTTP_OTHER"],
+    ["session_bootstrap_contract_failed", "CONTRACT"]
+  ]).get(code);
+  return suffix === undefined ? null : `${prefix}_BOOTSTRAP_${suffix}_FAILED`;
 }
 
 async function requireWakeStatus(card) {
