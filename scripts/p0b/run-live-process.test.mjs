@@ -84,3 +84,12 @@ test("diagnostic reason is stable and code-only", () => {
     fixtureImage: "postgres:17-alpine"
   });
 });
+
+test("every static live-browser safe failure marker is allow-listed by the orchestrator", async () => {
+  const browserSource = await fs.readFile(new URL("../../test/p0b-live-browser.integration.test.mjs", import.meta.url), "utf8");
+  const runnerSource = await fs.readFile(new URL("./run-live-process.mjs", import.meta.url), "utf8");
+  const browserMarkers = new Set([...browserSource.matchAll(/["'](P0B_SAFE_[A-Z0-9_]+_FAILED)["']/gu)].map((match) => match[1]));
+  const runnerMarkers = new Set([...runnerSource.matchAll(/["'](P0B_SAFE_[A-Z0-9_]+_FAILED)["']/gu)].map((match) => match[1]));
+  assert.ok(browserMarkers.size > 0);
+  assert.deepEqual([...browserMarkers].filter((marker) => !runnerMarkers.has(marker)), []);
+});
