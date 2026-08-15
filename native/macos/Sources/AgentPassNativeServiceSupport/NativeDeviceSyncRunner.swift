@@ -188,23 +188,45 @@ public final class NativeDeviceSyncRunner: @unchecked Sendable {
         case stopped
     }
 
-    private final class WakeSignal: @unchecked Sendable {
+    /// Internal visibility exists only so tests can pause between waiter
+    /// reservation and continuation registration and prove cancellation-safe
+    /// shutdown. Production always uses the zero-hook initializer.
+    final class WakeSignal: @unchecked Sendable {
+        private enum WaiterState {
+            case reserved
+            case waiting(CheckedContinuation<Bool, Never>)
+            case cancelled
+        }
+
+        private enum RegistrationResult {
+            case waiting
+            case resume(Bool)
+        }
+
         private let lock = NSLock()
+        private let beforeWaiterRegistration: (@Sendable () async -> Void)?
         private var signaled = false
         private var closed = false
-        private var waiter: CheckedContinuation<Bool, Never>?
+        private var nextWaiterGeneration: UInt64 = 0
+        private var waiterOrder: [UInt64] = []
+        private var waiterStates: [UInt64: WaiterState] = [:]
+
+        init(beforeWaiterRegistration: (@Sendable () async -> Void)? = nil) {
+            self.beforeWaiterRegistration = beforeWaiterRegistration
+        }
 
         func signal() {
-            let continuation: CheckedContinuation<Bool, Never>?
+            var continuation: CheckedContinuation<Bool, Never>?
             lock.lock()
-            if closed {
-                continuation = nil
-            } else if let existing = waiter {
-                waiter = nil
-                continuation = existing
-            } else {
-                signaled = true
-                continuation = nil
+            if !closed {
+                while !waiterOrder.isEmpty, continuation == nil {
+                    let generation = waiterOrder.removeFirst()
+                    guard case let .waiting(waiter)? = waiterStates.removeValue(forKey: generation) else {
+                        continue
+                    }
+                    continuation = waiter
+                }
+                if continuation == nil { signaled = true }
             }
             lock.unlock()
             continuation?.resume(returning: true)
@@ -217,43 +239,91 @@ public final class NativeDeviceSyncRunner: @unchecked Sendable {
         }
 
         func close() {
-            let continuation: CheckedContinuation<Bool, Never>?
+            var continuations: [CheckedContinuation<Bool, Never>] = []
             lock.lock()
             closed = true
-            continuation = waiter
-            waiter = nil
+            signaled = false
+            let states = waiterStates
+            waiterStates.removeAll(keepingCapacity: true)
+            for (generation, state) in states {
+                switch state {
+                case .reserved, .cancelled:
+                    waiterStates[generation] = .cancelled
+                case let .waiting(continuation):
+                    continuations.append(continuation)
+                }
+            }
+            waiterOrder.removeAll(keepingCapacity: true)
             lock.unlock()
-            continuation?.resume(returning: false)
+            for continuation in continuations { continuation.resume(returning: false) }
         }
 
         func wait() async -> Bool {
-            await withTaskCancellationHandler(operation: {
-                await withCheckedContinuation { (continuation: CheckedContinuation<Bool, Never>) in
-                    var shouldResume = false
-                    var value = false
-                    lock.lock()
-                    if Task.isCancelled || closed {
-                        shouldResume = true
-                    } else if signaled {
-                        signaled = false
-                        shouldResume = true
-                        value = true
-                    } else {
-                        waiter = continuation
-                    }
-                    lock.unlock()
-                    if shouldResume { continuation.resume(returning: value) }
+            let generation = reserveWaiterGeneration()
+            return await withTaskCancellationHandler(operation: {
+                await beforeWaiterRegistration?()
+                return await withCheckedContinuation { (continuation: CheckedContinuation<Bool, Never>) in
+                    register(continuation, generation: generation)
                 }
             }, onCancel: {
-                self.cancelWaiter()
+                self.cancel(generation: generation)
             })
         }
 
-        private func cancelWaiter() {
+        private func reserveWaiterGeneration() -> UInt64 {
+            lock.lock()
+            let generation = nextWaiterGeneration
+            nextWaiterGeneration &+= 1
+            waiterStates[generation] = .reserved
+            lock.unlock()
+            return generation
+        }
+
+        private func register(_ continuation: CheckedContinuation<Bool, Never>, generation: UInt64) {
+            let result: RegistrationResult
+            lock.lock()
+            switch waiterStates[generation] {
+            case .cancelled:
+                waiterStates.removeValue(forKey: generation)
+                result = .resume(false)
+            case .reserved:
+                if Task.isCancelled || closed {
+                    waiterStates.removeValue(forKey: generation)
+                    result = .resume(false)
+                } else if signaled {
+                    signaled = false
+                    waiterStates.removeValue(forKey: generation)
+                    result = .resume(true)
+                } else {
+                    waiterStates[generation] = .waiting(continuation)
+                    waiterOrder.append(generation)
+                    result = .waiting
+                }
+            case .waiting, nil:
+                waiterStates.removeValue(forKey: generation)
+                result = .resume(false)
+            }
+            lock.unlock()
+
+            if case let .resume(value) = result {
+                continuation.resume(returning: value)
+            }
+        }
+
+        private func cancel(generation: UInt64) {
             let continuation: CheckedContinuation<Bool, Never>?
             lock.lock()
-            continuation = waiter
-            waiter = nil
+            switch waiterStates[generation] {
+            case .reserved:
+                waiterStates[generation] = .cancelled
+                continuation = nil
+            case let .waiting(waiter):
+                waiterStates.removeValue(forKey: generation)
+                waiterOrder.removeAll { $0 == generation }
+                continuation = waiter
+            case .cancelled, nil:
+                continuation = nil
+            }
             lock.unlock()
             continuation?.resume(returning: false)
         }
