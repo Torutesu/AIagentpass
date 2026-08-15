@@ -872,6 +872,7 @@ jobs:
       - run: npm ci
       - run: npm ci --prefix apps/web-console
       - run: npm run contracts:validate
+      - run: npm run contracts:validate:platform
       - run: npm run test:w16
       - run: npm test
       - run: npm test --prefix apps/web-console

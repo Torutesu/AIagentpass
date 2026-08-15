@@ -25,6 +25,9 @@ Completed at the baseline:
 - Deterministic PostgreSQL 17 qualification lanes for Platform authorization
   concurrency, rollback/failure convergence, and the app/signer least-privilege
   boundary, plus source-bound CI evidence generation and retention.
+- Frozen hosted/evaluation/development route-authority matrix, synchronized
+  Platform OpenAPI/schema/fixture/digest validation, downgrade guards, and a
+  threat-to-test/external-evidence ledger.
 
 Not completed at the baseline:
 
@@ -482,6 +485,12 @@ S1 exit: W0 closes only when the same candidate passes unit/contract/HTTP tests
 and the real PostgreSQL evidence above.
 
 ### Slice S2 — freeze contracts and the threat model
+
+Status: local implementation and focused validation complete on 2026-08-15.
+The frozen route/profile matrix, contract synchronization validator, hosted
+downgrade tests, and Platform threat evidence ledger are committed. External
+browser, physical-device, cloud-provider, supply-chain, and production
+topology artifacts remain release gates rather than local-test claims.
 
 1. Publish a route/profile matrix for hosted, evaluation, and development.
 2. Add CI assertions that the hosted legacy routes cannot reappear and that
