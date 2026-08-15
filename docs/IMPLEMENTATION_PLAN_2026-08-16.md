@@ -2,7 +2,7 @@
 
 Status: active
 
-Planning baseline: `codex/agent-platform` at `2a5700d`
+Planning baseline: `codex/agent-platform` at `feba9f3`
 
 This document converts the v1 architecture into the remaining implementation
 and qualification gates. [`V1_EXECUTION_PLAN.md`](./V1_EXECUTION_PLAN.md)
@@ -36,7 +36,8 @@ signed/notarized artifact, staging drills, and independent security review.
 
 ### 1.1 Live execution checkpoint
 
-The exact-head CI run `31906258471` establishes the following current state:
+The latest completed diagnostic runs and the source at `feba9f3` establish the
+following current state:
 
 - PostgreSQL 16 authority qualification, PostgreSQL 17 authority
   qualification, the full PostgreSQL integration lane, and the production-built
@@ -47,18 +48,24 @@ The exact-head CI run `31906258471` establishes the following current state:
 - Human Session bootstrap is serialized in the live browser harness and retries
   only bounded transient `502` responses; authentication, authorization, and
   mutation failures are never retried;
-- P0-B remains red at the Console-to-Cloud Human Session bootstrap boundary.
-  The current diagnostic safely distinguishes an exited Cloud child from a
-  running Cloud child without retaining child output or secrets;
+- P0-B identified the exact bootstrap failure as a Cloud-ready/BFF-contract
+  rejection. PostgreSQL `timestamptz` values were escaping the repository as
+  JavaScript `Date` objects and strict canonical JSON correctly rejected them;
+- `feba9f3` normalizes authority-bearing and management-session timestamps at
+  the PostgreSQL repository boundary and retains strict rejection of malformed
+  persisted timestamps. Focused runtime/repository/management tests pass;
+- invitation reissue is source-complete through PostgreSQL, Cloud HTTP,
+  OpenAPI, and Console BFF at `ca19091`; the Console interaction and protected
+  role/browser matrix remain open;
 - the root/native lane must reach terminal success on the same final source SHA
-  after P0-B is repaired. A partial or cancelled diagnostic run is not N1
-  evidence.
+  after the new P0-B run succeeds. A local test, partial run, replaced run, or
+  cancelled diagnostic run is not N1 evidence.
 
 The next implementation batches are intentionally narrow and ordered:
 
 | Batch | Merge-sized work | Tests and evidence | Completion condition |
 | --- | --- | --- | --- |
-| Q1 | Resolve P0-B bootstrap `502`: classify Cloud child state, then distinguish proxy transport failure from BFF response-contract rejection using fixed secret-free markers; repair the first proven defect. | Focused harness/unit tests, live trusted-TLS PostgreSQL/Cloud/Console/Chromium run, artifact secret scan. | P0-B completes every Owner/Admin/Auditor/Viewer scenario and emits a verified source-bound report. |
+| Q1 | Verify the repository timestamp-boundary repair in the live P0-B process topology; if it advances, repair only the next first proven defect using fixed secret-free markers. | Focused harness/unit tests, live trusted-TLS PostgreSQL/Cloud/Console/Chromium run, artifact secret scan. | P0-B completes every Owner/Admin/Auditor/Viewer scenario and emits a verified source-bound report. |
 | Q2 | Rerun all six CI jobs without cancellation or replacement commits. Remove any newly exposed timing, lifecycle, native, or artifact-hygiene defect at its owning boundary. | Root/Console/native, browser, P0-B, PostgreSQL integration, PostgreSQL 16 and PostgreSQL 17 on one SHA. | One terminal all-green run is retained; N1 becomes `qualified`. |
 | H1 | Complete organization administration: invitation resend/revoke, role change/removal with `If-Match`, last-owner protection, authoritative response-loss reconciliation, and stable Japanese remediation. | Real PostgreSQL contention/replay/cross-tenant tests plus Owner/Admin/Auditor/Viewer Playwright matrix. | Every organization mutation converges to committed state without blind replay or fixture fallback. |
 | H2 | Complete passkey and Human Session lifecycle: add/rename/revoke, final-auth-path guard, current/other/all-other session revoke, epoch invalidation, explicit reauthentication. | Virtual WebAuthn, stale/replayed recent-auth, expiry, self-revoke, clone/sign-count, keyboard and secret-scan tests. | A non-engineer can recover from every expected conflict or expiry state without CLI/operator credentials. |
@@ -359,27 +366,30 @@ then N4; then final N6 qualification and promotion.
 
 ## 11. Immediate merge queue
 
-1. `test: close postgres platform authority qualification` — finish the active
-   PostgreSQL 16/17 CI run and fix every newly exposed authority lane.
-2. `test: close protected console identity matrix` — organization switch,
+1. `test: qualify P0-B timestamp-boundary repair` — run the live
+   PostgreSQL/Cloud/Console/Chromium topology, require bootstrap success, and
+   preserve only source-bound secret-free diagnostics.
+2. `test: close one-SHA qualification` — finish PostgreSQL 16/17, PostgreSQL
+   integration, root/native, browser, and P0-B without replacement commits.
+3. `test: close protected console identity matrix` — organization switch,
    invitation/role mutations, passkey/session lifecycle, expiry, self-logout,
    tenant substitution, and virtual-WebAuthn tests through real PostgreSQL.
-3. `feat: complete organization and identity console` — production UI states,
+4. `feat: complete organization and identity console` — production UI states,
    accessibility, Japanese errors, pagination/conflict recovery, and no fixture
    fallback.
-4. `test: qualify all hosted signer purposes` — purpose-by-purpose real-provider
+5. `test: qualify all hosted signer purposes` — purpose-by-purpose real-provider
    IAM/non-exportability, response-loss, rotation, and image/configuration scan.
-5. `feat: complete browser-led device onboarding` — complete loopback/PNA and
+6. `feat: complete browser-led device onboarding` — complete loopback/PNA and
    stdin recovery journeys, interruption matrix, authoritative receipt/ACK UI.
-6. `feat: close claude code native signing transaction` — durable sign-once,
+7. `feat: close claude code native signing transaction` — durable sign-once,
    invalidation races, installer/doctor, and two verified commits.
-7. `feat: add cursor adapter parity` — same closed adapter protocol and full
+8. `feat: add cursor adapter parity` — same closed adapter protocol and full
    negative matrix, with no new authority path.
-8. `build: publish immutable notarized candidate` — Developer ID signatures,
+9. `build: publish immutable notarized candidate` — Developer ID signatures,
    notarization/stapling, SBOM/provenance, direct download, and Homebrew.
-9. `test: qualify physical mac release candidate` — Apple silicon and Intel/T2
+10. `test: qualify physical mac release candidate` — Apple silicon and Intel/T2
    reports for the exact candidate digest.
-10. `ops: deploy staging and close production review` — restore/rollback/outage
+11. `ops: deploy staging and close production review` — restore/rollback/outage
     drills, independent review, signed promotion record, then explicit go/no-go.
 
 Each queue item is a reviewable commit or short ordered series. Every push runs
@@ -397,7 +407,7 @@ work that still needs protected infrastructure or physical hardware remains
 
 | Package | Current state | Next merge-sized deliverables | Required acceptance evidence | Unlocks |
 | --- | --- | --- | --- | --- |
-| N1 qualification closure | `in progress` | Repair the remaining Console browser journey; rerun all six CI jobs on one head; retain clean browser/P0-B artifacts. | One terminal green run: root/Console/native, browser, P0-B, PostgreSQL integration, PostgreSQL 16, and PostgreSQL 17. | N2/N5 qualification claims |
+| N1 qualification closure | `source repair pushed; protected rerun open` | Verify `feba9f3` in P0-B; repair only the next proven boundary defect if exposed; rerun all six CI jobs on one head; retain clean browser/P0-B artifacts. | One terminal green run: root/Console/native, browser, P0-B, PostgreSQL integration, PostgreSQL 16, and PostgreSQL 17. | N2/N5 qualification claims |
 | N2 organization and identity Console | `implemented, qualification open` | Finish real-process Owner/Admin/Auditor/Viewer journeys; cover invitation acceptance/resend, last-owner protection, current-session revoke, final-passkey guard, response loss, and accessibility. | Production-built Console and Cloud API against PostgreSQL; virtual WebAuthn; secret-free DOM/storage/network/artifact scan. | Non-engineer control plane |
 | N5 hosted signer | `drain closure implemented, protected evidence open` | Provision eight isolated AWS/GCP keys and identities; run exact-byte convergence, response-loss lookup, rotation, disablement, cross-purpose denial, multi-instance termination, and provider-specific cancellation tests. | Signed, source-bound AWS/GCP reports proving immutable versions, public fingerprints, non-exportability, least privilege, no fallback, bounded drain behavior, and operator-actionable uncertainty. | Hosted release candidate |
 | N3 device onboarding | `foundation implemented` | Freeze preflight/handoff DTO; implement browser-to-loopback transfer plus bounded stdin recovery; add interruption/resume state machine and verified receipt/ACK reconciliation. | Clean-machine physical Mac enrollment with restart/expiry/timeout/ambiguous-response matrix and zero secret-bearing artifacts. | Agent installation journey |
@@ -448,6 +458,42 @@ Every merge-sized slice must include all applicable items below:
 - focused tests before commit, then complete contract/lint/root/Console/native
   qualification before push; protected or physical claims require their named
   external executor and cannot be substituted by mocks or skips.
+
+### 12.3 Ticket-level execution backlog
+
+The following backlog is ordered by dependency, not by apparent UI priority.
+Each ticket is small enough to review independently and must satisfy the
+per-slice merge contract above.
+
+| ID | Deliverable | Depends on | Implementation boundary | Mandatory verification | Done when |
+| --- | --- | --- | --- | --- | --- |
+| Q1.1 | Live bootstrap qualification for `feba9f3` | none | CI harness only; no production fallback | trusted-TLS PostgreSQL, production Cloud/Console builds, Chromium, secret scan | bootstrap no longer returns BFF invalid-response and the retained report binds the exact SHA |
+| Q1.2 | First-next-failure repair, only if Q1.1 advances and fails | Q1.1 | the single owning boundary identified by a fixed marker | focused regression plus full P0-B rerun | no speculative retries, fixture bypass, or weakened decoder is introduced |
+| Q2.1 | One-SHA six-lane qualification | Q1 | CI/workflow and evidence validators | root/native, browser, P0-B, PostgreSQL integration, PostgreSQL 16/17 | all jobs finish successfully on one unreplaced SHA |
+| H1.1 | Invitation reissue Console interaction | Q2, backend at `ca19091` | Console client/components/tests | Owner/Admin allow; Auditor/Viewer deny; recent-auth, stale version, response loss, a11y, token scan | raw token is shown exactly once and never reaches URL, storage, logs, traces, or blind replay |
+| H1.2 | Invitation revoke and acceptance reconciliation | H1.1 | Console/BFF/browser tests | expiry, accepted/revoked terminal states, concurrent acceptance, cross-tenant denial | authoritative refresh converges every ambiguous response |
+| H1.3 | Member role update/removal | H1.2 | contract, PostgreSQL, Cloud, BFF, Console | `If-Match`, idempotency, last-owner, self-change, contention, response loss | role authority changes atomically and session epochs invalidate stale authority |
+| H2.1 | Passkey lifecycle closure | Q2 | PostgreSQL/Cloud/BFF/Console | add/rename/revoke, clone counter, final-auth-path, replayed/expired recent-auth | no user can accidentally remove the final usable authentication/recovery path |
+| H2.2 | Human Session lifecycle closure | H2.1 | PostgreSQL/Cloud/BFF/Console | current/other/all-other revoke, idle/absolute expiry, self-revoke, cross-tenant | revoked authority is unusable immediately and UI clears tenant state predictably |
+| H2.3 | Console accessibility and remediation pass | H1, H2 | Console UI and Playwright | keyboard, focus, live regions, 200% zoom, reduced motion, Japanese/English stable errors | all expected failure states explain a safe recovery action without requiring CLI access |
+| S1.1 | Eight-purpose source-path inventory | Q2 | signer registry/readiness/tests | unique resource/version/fingerprint/domain, no local/file/private-key input | hosted readiness rejects every missing, shared, aliased, stale, or fallback configuration |
+| S1.2 | Exact-byte provider reconciliation | S1.1 | provider operation repositories/workers | two-instance contention, response loss, lookup absence, malformed response, process loss | each operation converges to one verified result or durable `uncertain` without re-signing |
+| S1.3 | Rotation, disablement, and drain | S1.2 | signer lifecycle/runtime | reserve/start/commit race matrix, active-to-retiring transition, emergency disable, bounded close | no provider call begins after authority reduction and accepted ambiguity is quarantined |
+| D1.1 | Freeze onboarding public contract | H2, S1 metadata | catalog/OpenAPI/Core/CLI/native DTOs | generated-validator sync, duplicate/unknown field, canonical vectors, downgrade denial | one versioned contract contains no caller-controlled authority field |
+| D2.1 | Loopback and stdin delivery | D1.1 | Console, CLI, native setup state | origin/nonce binding, PNA denial, listener timeout, argv/env/history/storage scans | invitation material exists only in bounded memory or explicit one-shot stdin recovery |
+| D2.2 | Durable onboarding resume machine | D2.1 | CLI/native/PostgreSQL/Console reconciliation | interruption at every durable state, expiry, ambiguous POST, duplicate enrollment | restart resumes safely through `control_acknowledged` without duplicate authority |
+| M1.1 | Native durable sign-once transaction | D1.1 | broker/XPC/native persistence | process/policy/repository substitution, kill/restart, expiry, unknown outcome | key use occurs once after final re-observation and ambiguous signing is never retried |
+| M1.2 | Claude Code lifecycle | M1.1, D2.2 | CLI/adapter/installer/doctor | install/setup/launch/status/close/revoke/uninstall; two unattended verified commits | adapter cannot select a key or widen policy and both commits verify independently |
+| M1.3 | Cursor parity | M1.2 | Cursor adapter only | same positive/negative matrix as Claude Code | no new broker selector, signing path, or authority surface is introduced |
+| R1.1 | Immutable signed PKG | M1 | release scripts/artifact manifests | hardened runtime, nested signatures, entitlements, SBOM, provenance, Gatekeeper | one digest is Developer ID signed, notarized, stapled, and independently verifiable |
+| R1.2 | Distribution and physical qualification | R1.1 | direct download/Homebrew/hardware runners | digest equality, install/upgrade/uninstall/reinstall/rollback; Apple silicon and Intel/T2 | both channels and both hardware reports identify the exact R1.1 digest |
+| O1.1 | Staging deployment and resilience drills | Q2, S2, R1 | IaC/deployment/runbooks | migration/canary/drain, restore, outage, compromise, tenant isolation, rollback | measured SLO/RPO/RTO and alert routing meet the reviewed targets |
+| O1.2 | Independent review and production record | O1.1 | review findings/promotion evidence | SAST/DAST/dependency/container/IaC, independent assessment, evidence verification | zero unresolved critical/high findings and explicit human go/no-go for the exact candidate |
+
+Execution concurrency after Q2 is limited to three disjoint lanes: H1/H2,
+S1/S2, and D1/M1 preparation. Contract catalog changes, migrations, signing
+domains, XPC selectors, entitlements, and release identity remain serialized.
+No lane may declare another lane qualified from mocked or local-only evidence.
 
 ## 13. External requirements and final definition of done
 
