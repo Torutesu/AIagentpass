@@ -117,7 +117,7 @@ test("expired sessions replace every operational surface with a reauthentication
   assert.match(source, /summaryEpoch\.current \+= 1/);
   assert.match(source, /capabilityEpoch\.current \+= 1/);
   assert.match(source, /adminAuditEpoch\.current \+= 1/);
-  assert.match(source, /<SecuritySurface onSessionEnded=\{expireSession\} \/>/);
+  assert.match(source, /<SecurityPanel onSessionEnded=\{expireSession\} \/>/);
 });
 
 test("global sign-out uses the same-origin DELETE contract and clears operational state", async () => {

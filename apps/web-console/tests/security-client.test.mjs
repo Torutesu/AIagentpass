@@ -84,6 +84,31 @@ test("reuses one bootstrap result for every read and mutation in a Security life
   assert.deepEqual(JSON.parse(calls[5].init.body), { expected_version: 4 });
 });
 
+test("registers a passkey through the session-bound WebAuthn client without returning ceremony material", async () => {
+  const calls = [];
+  const registrationInputs = [];
+  const client = createSecurityClient({
+    fetchImpl: async (url, init) => {
+      calls.push({ url: String(url), init });
+      if (url === "/api/auth/session") return sessionResponse();
+      throw new Error("the registration adapter owns the ceremony transport");
+    },
+    registerPasskeyImpl: async (input) => {
+      registrationInputs.push(input);
+      return { registered: true };
+    },
+  });
+
+  const result = await client.addPasskey();
+  assert.equal(result, undefined);
+  assert.deepEqual(calls.map((call) => call.url), ["/api/auth/session"]);
+  assert.equal(registrationInputs.length, 1);
+  assert.deepEqual(Object.keys(registrationInputs[0]).sort(), ["csrfToken", "fetchImpl", "organizationId", "signal"]);
+  assert.equal(registrationInputs[0].organizationId, organizationId);
+  assert.equal(registrationInputs[0].csrfToken, csrf);
+  assert.doesNotMatch(String(result), /credential|challenge|assertion|private|secret|token/i);
+});
+
 test("revokes all other sessions through the existing per-session contract", async () => {
   const calls = [];
   const client = createSecurityClient({ authenticateRecentAuthImpl: authorize, fetchImpl: async (url, init) => {

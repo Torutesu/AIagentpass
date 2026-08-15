@@ -2,7 +2,6 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { authenticateRecentAuth, registerPasskey, WebAuthnClientError } from "../webauthn-client";
-import { createSecurityClient, SecurityClientError, type SecurityClient, type SecurityPasskey, type SecuritySession, type SecuritySnapshot } from "../security-client";
 import { parseConsoleSummary, type ConsoleSummaryViewModel } from "../console-summary";
 import { EnrollmentPreflightError, parsePublicEnrollmentPreflight } from "../../lib/enrollment-preflight.mjs";
 import { fetchBrowserCliHandoffPreflight, parseBrowserCliHandoffLaunchFragment, postBrowserCliHandoff, publicEnrollmentPreflight as publicBrowserCliEnrollmentPreflight } from "../../lib/browser-cli-handoff.mjs";
@@ -11,6 +10,7 @@ import { createOrganizationClient, OrganizationClientError, resolveOrganizationS
 import { loadOrganizationSwitcherOrganizations } from "../organization-switcher";
 import { OwnerRecoveryPanel } from "./OwnerRecoveryPanel";
 import { AuditExportPanel } from "./AuditExportPanel";
+import { SecurityPanel } from "./SecurityPanel";
 
 export type ConsoleView =
   | "overview"
@@ -1096,104 +1096,6 @@ function ActivitySurface({ data }: { data: AgentPassInitialData }) {
   return <><SurfaceHeader eyebrow="ACTIVITY / 05" title="何が起きたか" copy="AgentPassが確認・許可・ブロックした操作を、時系列で記録しています。" /><div className="surface-content"><article className="surface-card"><span className="section-kicker">AUDIT LOG · TODAY</span><h2 className="surface-card-title">きょうの記録</h2><ActivityList activities={data.activities} /></article></div></>;
 }
 
-type SecurityLoadState = "loading" | "ready" | "error";
-
-function securityErrorMessage(error: unknown): string {
-  if (error instanceof DOMException && error.name === "AbortError") return "";
-  if (error instanceof SecurityClientError && (error.status === 401 || error.status === 403)) return "セッションの有効期限が切れています。ページを再読み込みして、もう一度お試しください。";
-  return "セキュリティ情報を取得できませんでした。接続と権限を確認して、もう一度お試しください。";
-}
-
-function securityDate(value: string): string {
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) return "日時不明";
-  return new Intl.DateTimeFormat("ja-JP", { dateStyle: "medium", timeStyle: "short", timeZone: "Asia/Tokyo" }).format(date);
-}
-
-function PasskeyRow({ passkey, actionKey, confirmKey, onRename, onRevoke, onCancelRevoke, onConfirmRevoke }: { passkey: SecurityPasskey; actionKey: string; confirmKey: string | null; onRename: () => void; onRevoke: () => void; onCancelRevoke: () => void; onConfirmRevoke: () => void }) {
-  const busy = actionKey === `passkey:${passkey.id}`;
-  const confirming = confirmKey === `passkey:${passkey.id}`;
-  return <li className="row-list-item"><div className="row-main"><span className="row-icon" aria-hidden="true">⌁</span><div><p className="row-title">{passkey.label}</p><p className="row-description">登録：{securityDate(passkey.createdAt)} · 最終使用：{passkey.lastUsedAt ? securityDate(passkey.lastUsedAt) : "まだ使用されていません"}</p></div></div><span>{confirming ? <><button className="text-button" type="button" disabled={busy} onClick={onConfirmRevoke}>取り消す</button><button className="text-button" type="button" disabled={busy} onClick={onCancelRevoke}>キャンセル</button></> : <><button className="text-button" type="button" disabled={busy} onClick={onRename}>名前を変更</button><button className="text-button" type="button" disabled={busy} onClick={onRevoke}>無効化</button></>}</span></li>;
-}
-
-function SessionRow({ session, actionKey, confirmKey, onRevoke, onCancelRevoke, onConfirmRevoke }: { session: SecuritySession; actionKey: string; confirmKey: string | null; onRevoke: () => void; onCancelRevoke: () => void; onConfirmRevoke: () => void }) {
-  const busy = actionKey === `session:${session.id}`;
-  const confirming = confirmKey === `session:${session.id}`;
-  return <li className="row-list-item"><div className="row-main"><span className="row-icon" aria-hidden="true">◌</span><div><p className="row-title">{session.label}{session.current ? "（この端末）" : ""}</p><p className="row-description">{session.platform} · 最終確認：{securityDate(session.lastSeenAt)} · 有効期限：{securityDate(session.expiresAt)}</p></div></div><span>{confirming ? <><button className="text-button" type="button" disabled={busy} onClick={onConfirmRevoke}>{session.current ? "サインアウト" : "取り消す"}</button><button className="text-button" type="button" disabled={busy} onClick={onCancelRevoke}>キャンセル</button></> : <>{session.current ? <StatusTag tone="green">現在のセッション</StatusTag> : null}<button className="text-button" type="button" disabled={busy} onClick={onRevoke}>{session.current ? "サインアウト" : "無効化"}</button></>}</span></li>;
-}
-
-function SecuritySurface({ onSessionEnded }: { onSessionEnded: () => void }) {
-  const securityClientRef = useRef<SecurityClient | null>(null);
-  if (securityClientRef.current === null) securityClientRef.current = createSecurityClient();
-  const securityClient = securityClientRef.current;
-  const [snapshot, setSnapshot] = useState<SecuritySnapshot | null>(null);
-  const [loadState, setLoadState] = useState<SecurityLoadState>("loading");
-  const [error, setError] = useState("");
-  const [actionKey, setActionKey] = useState("");
-  const [confirmKey, setConfirmKey] = useState<string | null>(null);
-  const [renameTarget, setRenameTarget] = useState<string | null>(null);
-  const [renameLabel, setRenameLabel] = useState("");
-  const [notice, setNotice] = useState("");
-  const [signedOut, setSignedOut] = useState(false);
-
-  const load = useCallback(async (signal?: AbortSignal) => {
-    setLoadState("loading");
-    setError("");
-    try {
-      setSnapshot(await securityClient.getSnapshot({ signal }));
-      setLoadState("ready");
-    } catch (caught) {
-      if (caught instanceof DOMException && caught.name === "AbortError") return;
-      if (caught instanceof SecurityClientError && (caught.status === 401 || caught.status === 403)) onSessionEnded();
-      setLoadState("error");
-      setError(securityErrorMessage(caught));
-    }
-  }, [securityClient, onSessionEnded]);
-
-  useEffect(() => {
-    const controller = new AbortController();
-    const timer = window.setTimeout(() => void load(controller.signal), 0);
-    return () => { window.clearTimeout(timer); controller.abort(); };
-  }, [load]);
-
-  const finishAction = async (key: string, action: () => Promise<void>, message: string, reload = true) => {
-    if (actionKey) return;
-    setActionKey(key);
-    setError("");
-    setNotice("");
-    try {
-      await action();
-      setConfirmKey(null);
-      setRenameTarget(null);
-      setRenameLabel("");
-      setNotice(message);
-      if (reload) await load();
-      else {
-        setSignedOut(true);
-        setSnapshot(null);
-        setLoadState("ready");
-      }
-    } catch (caught) {
-      if (caught instanceof SecurityClientError && (caught.status === 401 || caught.status === 403)) onSessionEnded();
-      setError(securityErrorMessage(caught));
-    } finally {
-      setActionKey("");
-    }
-  };
-
-  const startRename = (passkey: SecurityPasskey) => {
-    setConfirmKey(null);
-    setRenameTarget(passkey.id);
-    setRenameLabel(passkey.label);
-    setNotice("");
-  };
-
-  const passkeys = snapshot?.passkeys ?? [];
-  const sessions = snapshot?.sessions ?? [];
-  const otherSessions = sessions.filter((session) => !session.current);
-  return <><SurfaceHeader eyebrow="SECURITY / 06" title="アカウントを守る" copy="登録済みのパスキーと、AgentPassへ接続中のセッションを管理します。秘密鍵や認証器の内部データは、この画面には表示されません。" /><div className="surface-content">{signedOut ? <article className="surface-card"><span className="section-kicker">SIGNED OUT</span><h2 className="surface-card-title">このセッションを終了しました</h2><p className="surface-card-copy">現在のブラウザセッションを無効化し、セッション情報を画面から消去しました。続けるにはページを再読み込みしてください。</p></article> : <><article className="surface-card"><div className="stop-title-row"><div><span className="section-kicker">REGISTERED PASSKEYS</span><h2 className="surface-card-title">登録済みのパスキー</h2><p className="surface-card-copy">名前の変更や無効化ができます。無効化したパスキーは、以後の再認証に使えません。</p></div><button className="secondary-button" type="button" disabled={loadState === "loading"} onClick={() => void load()}>再読み込み</button></div>{loadState === "loading" ? <p className="section-note" role="status">読み込み中…</p> : loadState === "error" ? <div role="alert"><p className="section-note">{error}</p><button className="text-button" type="button" onClick={() => void load()}>もう一度試す</button></div> : passkeys.length ? <ul className="row-list">{passkeys.map((passkey) => <PasskeyRow key={passkey.id} passkey={passkey} actionKey={actionKey} confirmKey={confirmKey} onRename={() => startRename(passkey)} onRevoke={() => setConfirmKey(`passkey:${passkey.id}`)} onCancelRevoke={() => setConfirmKey(null)} onConfirmRevoke={() => void finishAction(`passkey:${passkey.id}`, () => securityClient.revokePasskey(passkey.id, passkey.version), "パスキーを無効化しました")} />)}</ul> : <EmptyState title="登録済みのパスキーはありません" copy="セットアップからTouch IDまたはパスキーを登録してください。" />}{renameTarget ? <form className="form-grid" onSubmit={(event) => { event.preventDefault(); const target = renameTarget; const passkey = passkeys.find((item) => item.id === target); if (!passkey) return; void finishAction(`passkey:${target}`, () => securityClient.renamePasskey(target, renameLabel, passkey.version), "パスキーの名前を変更しました"); }}><label>パスキーの表示名<input required maxLength={80} value={renameLabel} onChange={(event) => setRenameLabel(event.target.value)} autoComplete="off" /></label><div><button className="primary-button" type="submit" disabled={!renameLabel.trim() || Boolean(actionKey)}>保存</button><button className="text-button" type="button" disabled={Boolean(actionKey)} onClick={() => { setRenameTarget(null); setRenameLabel(""); }}>キャンセル</button></div></form> : null}</article><article className="surface-card"><div className="stop-title-row"><div><span className="section-kicker">ACTIVE SESSIONS</span><h2 className="surface-card-title">アクティブなセッション</h2></div><button className="secondary-button" type="button" disabled={loadState === "loading" || Boolean(actionKey) || otherSessions.length === 0} onClick={() => setConfirmKey("other-sessions")}>他のセッションをすべて無効化</button></div><p className="surface-card-copy">使っていないブラウザや端末のセッションは無効化してください。現在のセッションからサインアウトすることもできます。</p>{confirmKey === "other-sessions" ? <div className="stop-action-row"><span className="section-note">{otherSessions.length}件の他セッションを無効化します。</span><button className="text-button" type="button" disabled={Boolean(actionKey)} onClick={() => void finishAction("other-sessions", () => securityClient.revokeOtherSessions(sessions).then(() => undefined), "他のセッションをすべて無効化しました")}>確認</button><button className="text-button" type="button" disabled={Boolean(actionKey)} onClick={() => setConfirmKey(null)}>キャンセル</button></div> : null}{loadState === "loading" ? <p className="section-note" role="status">読み込み中…</p> : loadState === "error" ? <p className="section-note">セッション情報を取得できませんでした。</p> : sessions.length ? <ul className="row-list">{sessions.map((session) => <SessionRow key={session.id} session={session} actionKey={actionKey} confirmKey={confirmKey} onRevoke={() => setConfirmKey(`session:${session.id}`)} onCancelRevoke={() => setConfirmKey(null)} onConfirmRevoke={() => void finishAction(`session:${session.id}`, session.current ? () => securityClient.revokeCurrentSession(session.id, session.version) : () => securityClient.revokeSession(session.id, session.version), session.current ? "サインアウトしました" : "セッションを無効化しました", session.current ? false : true)} />)}</ul> : <EmptyState title="アクティブなセッションはありません" copy="再読み込みして、現在のログイン状態を確認してください。" />}</article>{notice ? <p className="section-note" role="status">✓ {notice}</p> : null}{error && loadState === "ready" ? <p className="section-note" role="alert">{error}</p> : null}</>}</div></>;
-}
-
 function EmergencySurface({ data, onOpenConfirm, stopped }: { data: AgentPassInitialData; onOpenConfirm: () => void; stopped: boolean }) {
   const activeCount = data.agents.filter((agent) => agent.state !== "停止").length;
   return <><SurfaceHeader eyebrow="EMERGENCY STOP / 06" title={<>いつでも、<br />止められます。</>} copy="Agentが予想外の動きをしたときは、すべての作業をただちに一時停止できます。" /><div className="surface-content"><article className="surface-card stop-card"><div className="stop-title-row"><div><span className="section-kicker">CONTROL ROOM</span><h2 className="surface-card-title">すべてのAgentを緊急停止</h2><p className="surface-card-copy">停止すると、有効なAgent登録に対する作業・セッション・キューを一時停止します。ファイルは削除されません。</p></div><span className="stop-mark" aria-hidden="true">■</span></div><div className="stop-action-row">{stopped ? <><StatusTag tone="red">停止済み</StatusTag><span className="section-note">すべてのAgentを停止しました。再開はセットアップから行えます。</span></> : <><span className="section-note">現在 {activeCount}件の有効なAgent登録があります</span><button type="button" className="danger-button" onClick={onOpenConfirm}>緊急停止を開始する</button></>}</div></article><article className="surface-card"><span className="section-kicker">WHEN TO USE</span><h2 className="surface-card-title">こんなときに使います</h2><ul className="row-list"><li className="row-list-item"><div className="row-main"><span className="row-icon" aria-hidden="true">!</span><div><p className="row-title">意図しないファイル変更が続いている</p><p className="row-description">作業を止めてから、アクティビティで操作を確認します。</p></div></div></li><li className="row-list-item"><div className="row-main"><span className="row-icon" aria-hidden="true">!</span><div><p className="row-title">不明なサービスへの接続が見つかった</p><p className="row-description">接続を止め、ポリシーと端末を確認します。</p></div></div></li></ul></article></div></>;
@@ -1626,7 +1528,7 @@ export function AgentPassConsole() {
           {sessionState === "active" && activeView === "policies" ? <PoliciesSurface data={data} operate={operate} canManage={canManage} /> : null}
           {sessionState === "active" && activeView === "activity" ? <ActivitySurface data={data} /> : null}
           {sessionState === "active" && activeView === "audit-exports" && auditSession ? <AuditExportPanel role={auditSession.role} organizationId={auditSession.organizationId} csrfToken={auditSession.csrfToken} /> : null}
-          {sessionState === "active" && activeView === "security" ? <SecuritySurface onSessionEnded={expireSession} /> : null}
+          {sessionState === "active" && activeView === "security" ? <SecurityPanel onSessionEnded={expireSession} /> : null}
           {sessionState === "active" && activeView === "organizations" ? <OrganizationPanel key={selectedOrganizationId ?? "session-organization"} initialOrganizationId={selectedOrganizationId ?? undefined} /> : null}
           {sessionState === "active" && activeView === "recovery" ? <OwnerRecoveryPanel /> : null}
           {sessionState === "active" && activeView === "emergency" && canEmergencyStop ? <EmergencySurface data={data} onOpenConfirm={() => setConfirmOpen(true)} stopped={stopped} /> : null}

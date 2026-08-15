@@ -32,12 +32,15 @@ type ClientOptions = Readonly<{
   fetchImpl?: FetchLike;
   signal?: AbortSignal;
   authenticateRecentAuthImpl?: (input: WebAuthnClientInput) => Promise<AuthorizationResult>;
+  registerPasskeyImpl?: (input: WebAuthnRegistrationInput) => Promise<RegistrationResult>;
 }>;
 type SecurityRequestOptions = Readonly<{ signal?: AbortSignal }>;
 
 export type SecurityClient = Readonly<{
   getSnapshot(options?: SecurityRequestOptions): Promise<SecuritySnapshot>;
   getSecuritySnapshot(options?: SecurityRequestOptions): Promise<SecuritySnapshot>;
+  addPasskey(options?: SecurityRequestOptions): Promise<void>;
+  registerPasskey(options?: SecurityRequestOptions): Promise<void>;
   renamePasskey(id: string, label: string, version: number, options?: SecurityRequestOptions): Promise<void>;
   revokePasskey(id: string, version: number, options?: SecurityRequestOptions): Promise<void>;
   revokeSession(id: string, version: number, options?: SecurityRequestOptions): Promise<void>;
@@ -71,6 +74,10 @@ export async function renamePasskey(id: string, label: string, version: number, 
   return createSecurityClient(options).renamePasskey(id, label, version, options);
 }
 
+export async function registerPasskey(options: ClientOptions = {}): Promise<void> {
+  return createSecurityClient(options).registerPasskey(options);
+}
+
 export async function revokePasskey(id: string, version: number, options: ClientOptions = {}): Promise<void> {
   return createSecurityClient(options).revokePasskey(id, version, options);
 }
@@ -90,6 +97,7 @@ export async function signOut(id: string, version: number, options: ClientOption
 export function createSecurityClient(options: ClientOptions = {}): SecurityClient {
   const fetchImpl = options.fetchImpl;
   const authenticateImpl = options.authenticateRecentAuthImpl ?? authenticateRecentAuth;
+  const registerImpl = options.registerPasskeyImpl ?? runPasskeyRegistration;
   let sessionContext: { csrfToken: string; organizationId: string } | undefined;
   let bootstrapPromise: Promise<{ csrfToken: string; organizationId: string }> | undefined;
   let closed = false;
@@ -127,6 +135,17 @@ export function createSecurityClient(options: ClientOptions = {}): SecurityClien
     expectCredentialMutation(response);
   };
 
+  const registerSecurityPasskey = async (requestOptions: SecurityRequestOptions): Promise<void> => {
+    const context = await ensureSession(requestOptions);
+    const result = await registerImpl({
+      organizationId: context.organizationId,
+      csrfToken: context.csrfToken,
+      signal: requestOptions.signal,
+      fetchImpl,
+    });
+    if (!result || result.registered !== true) throw new SecurityClientError("invalid_response", "パスキー登録の結果を確認できませんでした。");
+  };
+
   const revokeSessionRecord = async (id: string, version: number, requestOptions: SecurityRequestOptions, current: boolean): Promise<boolean> => {
     const context = await ensureSession(requestOptions);
     const recentAuth = current ? await authorize(context, "human.management.session.revoke", requestOptions) : undefined;
@@ -143,6 +162,8 @@ export function createSecurityClient(options: ClientOptions = {}): SecurityClien
   const client: SecurityClient = {
     getSnapshot,
     getSecuritySnapshot: getSnapshot,
+    addPasskey: async (requestOptions = {}) => registerSecurityPasskey(requestOptions),
+    registerPasskey: async (requestOptions = {}) => registerSecurityPasskey(requestOptions),
     renamePasskey: async (id, label, version, requestOptions = {}) => {
       assertCredentialId(id);
       assertLabel(label);
@@ -295,4 +316,4 @@ function isNullableInstant(value: unknown): value is string | null { return valu
 function hasControl(value: string): boolean { for (const character of value) { const code = character.codePointAt(0) ?? 0; if (code <= 0x1f || code === 0x7f) return true; } return false; }
 function isRecord(value: unknown): value is Record<string, unknown> { return Boolean(value) && typeof value === "object" && !Array.isArray(value) && Object.getPrototypeOf(value) === Object.prototype; }
 function hasExactKeys(value: Record<string, unknown>, expected: string[]): boolean { const actual = Object.keys(value).sort(); const keys = [...expected].sort(); return actual.length === keys.length && actual.every((key, index) => key === keys[index]); }
-import { authenticateRecentAuth, type AuthorizationResult, type WebAuthnClientInput } from "./webauthn-client.ts";
+import { authenticateRecentAuth, registerPasskey as runPasskeyRegistration, type AuthorizationResult, type RegistrationResult, type WebAuthnClientInput, type WebAuthnRegistrationInput } from "./webauthn-client.ts";
