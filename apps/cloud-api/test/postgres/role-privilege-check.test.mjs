@@ -9,6 +9,7 @@ test("authority relation ACL reconciliation clears stale app writes and restores
   const sql = await read("scripts/postgres/roles.sql");
   assert.match(sql, /REVOKE ALL PRIVILEGES ON TABLE public\.%I FROM agentpass_app, agentpass_backup/u);
   assert.match(sql, /GRANT SELECT ON TABLE public\.%I TO agentpass_app, agentpass_backup/u);
+  assert.match(sql, /c\.relkind IN \('r', 'p', 'v', 'm', 'f'\)/u);
   assert.match(sql, /hosted_identity_/u);
   assert.match(sql, /platform_/u);
   assert.match(sql, /managed_signer_/u);

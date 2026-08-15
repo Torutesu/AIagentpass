@@ -179,7 +179,7 @@ BEGIN
     FROM pg_catalog.pg_class AS c
     JOIN pg_catalog.pg_namespace AS n ON n.oid = c.relnamespace
     WHERE n.nspname = 'public'
-      AND c.relkind IN ('r', 'p')
+      AND c.relkind IN ('r', 'p', 'v', 'm', 'f')
       AND (
         left(c.relname, length('managed_signer_')) = 'managed_signer_'
         OR left(c.relname, length('platform_')) = 'platform_'
