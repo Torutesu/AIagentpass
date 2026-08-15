@@ -5,6 +5,7 @@ import test from "node:test";
 
 import { PLATFORM_SESSION_COOKIE_NAME, PLATFORM_SESSION_CSRF_HEADER } from "../src/platform-session-transport.mjs";
 import { PLATFORM_PROMOTION_ISSUANCE_ERROR_CODES, PlatformPromotionIssuanceError } from "../src/platform-promotion-issuance.mjs";
+import { PLATFORM_AUTHORIZATION_REPOSITORY_ERROR_CODES } from "../src/postgres/platform-authorization-repository.mjs";
 import { PLATFORM_SESSION_RATE_LIMIT_ERROR_CODES, PlatformSessionRateLimitError } from "../src/platform-session-rate-limit.mjs";
 
 // W0-02 contract tests for the future createPlatformPromotionHttpApi.
@@ -34,6 +35,7 @@ const CSRF_TOKEN = Buffer.alloc(32, 0x22).toString("base64url");
 const IDEMPOTENCY_KEY = "platform-intent-1";
 const CANDIDATE_ID = `release-pkg-sha256-v1-${"a".repeat(64)}`;
 const RAW_ERROR_SECRET = "raw-internal-secret-must-not-cross-http";
+const RAW_SQL_SECRET = "SQLSTATE=23505 constraint=secret_constraint detail=tenant-secret";
 
 const BODY = Object.freeze({
   operation: "platform.promotion.issue",
@@ -119,6 +121,15 @@ function assertSafeError(response, expectedStatus) {
   assert.equal(JSON.stringify(response.body).includes(PLATFORM_TOKEN), false);
   assert.equal(JSON.stringify(response.body).includes(CSRF_TOKEN), false);
   assert.equal(JSON.stringify(response.body).includes(IDS.jti), false);
+}
+
+function assertStableNoStoreHeaders(response) {
+  assert.equal(response.headers["Cache-Control"], "no-store, max-age=0");
+  assert.equal(response.headers.Pragma, "no-cache");
+  assert.equal(response.headers.Expires, "0");
+  assert.equal(response.headers["Content-Type"], "application/json; charset=utf-8");
+  assert.equal(response.headers["X-Content-Type-Options"], "nosniff");
+  assert.equal(response.headers["Referrer-Policy"], "no-referrer");
 }
 
 test("valid issue maps the exact browser envelope to the authorized service", async () => {
@@ -391,6 +402,34 @@ test("stable issuance states map to conflict, in-progress, and no-blind-retry un
     const response = await api.handle(request());
     assertSafeError(response, 409);
     assert.equal(response.body.error.code, expectedCode);
+  }
+});
+
+test("authorized repository outcomes map explicitly to safe retry statuses and codes", async () => {
+  const cases = [
+    [PLATFORM_AUTHORIZATION_REPOSITORY_ERROR_CODES.IDEMPOTENCY_CONFLICT, 409, "platform_promotion_http_idempotency_conflict"],
+    [PLATFORM_AUTHORIZATION_REPOSITORY_ERROR_CODES.AUTHORIZATION_REPLAYED, 409, "platform_promotion_http_idempotency_conflict"],
+    [PLATFORM_AUTHORIZATION_REPOSITORY_ERROR_CODES.AUTHORIZATION_STALE, 409, "platform_promotion_http_idempotency_conflict"],
+    [PLATFORM_AUTHORIZATION_REPOSITORY_ERROR_CODES.AUTHORIZATION_UNAVAILABLE, 503, "platform_promotion_http_unavailable"],
+    [PLATFORM_AUTHORIZATION_REPOSITORY_ERROR_CODES.DATABASE, 503, "platform_promotion_http_unavailable"]
+  ];
+
+  for (const [code, expectedStatus, expectedCode] of cases) {
+    const error = {
+      code,
+      message: `raw repository failure ${RAW_SQL_SECRET} ${RAW_ERROR_SECRET}`,
+      cause: new Error(`nested cause ${RAW_SQL_SECRET} ${RAW_ERROR_SECRET}`)
+    };
+    const { api, calls } = fixture({ serviceError: error });
+    const response = await api.handle(request());
+
+    assertSafeError(response, expectedStatus);
+    assert.equal(response.body.error.code, expectedCode);
+    assertStableNoStoreHeaders(response);
+    assert.equal(response.headers["Retry-After"], undefined);
+    assert.equal(JSON.stringify(response.body).includes(RAW_SQL_SECRET), false);
+    assert.equal(JSON.stringify(response.body).includes("constraint"), false);
+    assert.equal(calls.length, 1);
   }
 });
 

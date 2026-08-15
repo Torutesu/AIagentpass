@@ -6,6 +6,7 @@ import {
   normalizePlatformPromotionResult
 } from "./platform-promotion-http-contract.mjs";
 import { PLATFORM_PROMOTION_ISSUANCE_ERROR_CODES } from "./platform-promotion-issuance.mjs";
+import { PLATFORM_AUTHORIZATION_REPOSITORY_ERROR_CODES } from "./postgres/platform-authorization-repository.mjs";
 import {
   PLATFORM_SESSION_COOKIE_NAME,
   PLATFORM_SESSION_CSRF_HEADER,
@@ -300,6 +301,30 @@ async function readStream(stream, maxBytes) {
 
 function mapServiceError(error) {
   const code = String(error?.code ?? "");
+
+  // The authorized PostgreSQL seam deliberately exposes only stable error
+  // codes.  Collapse all durable authorization conflicts to the existing
+  // public conflict response: the caller must not learn whether a proof was
+  // replayed, a lifecycle row was stale, or an idempotency key differed.
+  if ([
+    PLATFORM_AUTHORIZATION_REPOSITORY_ERROR_CODES.IDEMPOTENCY_CONFLICT,
+    PLATFORM_AUTHORIZATION_REPOSITORY_ERROR_CODES.AUTHORIZATION_REPLAYED,
+    PLATFORM_AUTHORIZATION_REPOSITORY_ERROR_CODES.AUTHORIZATION_STALE
+  ].includes(code)) {
+    return httpError(PLATFORM_PROMOTION_HTTP_ERROR_CODES.IDEMPOTENCY_CONFLICT, 409);
+  }
+
+  // Database and authorization-control failures are intentionally
+  // indistinguishable at this boundary.  Only the stable public 503 contract
+  // is emitted; SQLSTATE, constraint names, messages, and causes stay inside
+  // the repository boundary.
+  if ([
+    PLATFORM_AUTHORIZATION_REPOSITORY_ERROR_CODES.AUTHORIZATION_UNAVAILABLE,
+    PLATFORM_AUTHORIZATION_REPOSITORY_ERROR_CODES.DATABASE
+  ].includes(code)) {
+    return httpError(PLATFORM_PROMOTION_HTTP_ERROR_CODES.UNAVAILABLE, 503);
+  }
+
   if ([PLATFORM_PROMOTION_ISSUANCE_ERROR_CODES.INPUT, PLATFORM_PROMOTION_ISSUANCE_ERROR_CODES.BINDING].includes(code)
     || /(?:_INPUT|_BINDING)$/u.test(code)) return httpError(PLATFORM_PROMOTION_HTTP_ERROR_CODES.INVALID_REQUEST, 400);
   if (code === PLATFORM_PROMOTION_ISSUANCE_ERROR_CODES.CONFLICT || /CONFLICT/u.test(code)) return httpError(PLATFORM_PROMOTION_HTTP_ERROR_CODES.IDEMPOTENCY_CONFLICT, 409);
