@@ -51,7 +51,7 @@ test("real PostgreSQL retention does not prune uncertain rows across management 
       client: migrationClient,
       applicationVersion: "owner-recovery-retention-confirmation-races"
     }).run();
-    assert.equal(migration.currentVersion, 50);
+    assert.equal(migration.currentVersion, 51);
   } finally {
     migrationClient.release();
   }

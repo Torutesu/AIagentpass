@@ -23,7 +23,18 @@ const SIGNER_FUNCTIONS = Object.freeze([
   "agentpass_managed_signer_provider_operation_health(text,text,bigint,text)",
   "agentpass_managed_signer_provider_operation_prune(text,text,bigint,text,timestamptz,integer)",
   "agentpass_maintain_managed_signer_provider_operations(integer)",
-  "agentpass_health_managed_signer_provider_operations()"
+  "agentpass_health_managed_signer_provider_operations()",
+  "agentpass_managed_signer_lifecycle_snapshot(text)",
+  "agentpass_managed_signer_lifecycle_initialize(text,text,jsonb,integer,bigint)",
+  "agentpass_managed_signer_lifecycle_apply(text,text,bytea,bigint,jsonb,bigint)",
+  "agentpass_managed_signer_signing_reserve(text,text,bytea,text,bigint,bytea,bigint,bigint)",
+  "agentpass_managed_signer_signing_start(text,text,bytea,text,bigint,bytea)",
+  "agentpass_managed_signer_signing_commit(text,text,bytea,text,bigint,bytea,bytea,text,text)",
+  "agentpass_managed_signer_signing_uncertain(text,text,bytea,text,bigint,bytea)",
+  "agentpass_managed_signer_signing_reconcile(text,text,bytea,text,bigint,bytea,text,text)",
+  "agentpass_managed_signer_signing_lookup(text,text)",
+  "agentpass_managed_signer_signing_prune(text,timestamptz,integer)",
+  "agentpass_managed_signer_lifecycle_operation_prune(text,timestamptz,integer)"
 ]);
 const SQLSTATE_PERMISSION_DENIED = new Set(["42501", "0LP01"]);
 const REPOSITORY_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../../..");
@@ -190,6 +201,13 @@ test("qualifies PostgreSQL 16 least-privilege roles against real migrations and 
     await expectPermissionDenied(() => client.query("SELECT agentpass_current_organization_id()"));
     await expectPermissionDenied(() => client.query("UPDATE schema_migrations SET checksum=checksum WHERE version=1"));
     await expectPermissionDenied(() => client.query("SET ROLE agentpass_migrator"));
+    for (const signature of SIGNER_FUNCTIONS) {
+      const privilege = await client.query(
+        "SELECT has_function_privilege(current_user,$1,'EXECUTE') AS allowed",
+        ["public." + signature]
+      );
+      assert.equal(privilege.rows[0].allowed, false, "app signer function privilege leaked for " + signature);
+    }
   });
 
   await withSessionAuthorization(pool, ROLE_NAMES.backup, async (client) => {
@@ -211,23 +229,27 @@ test("qualifies PostgreSQL 16 least-privilege roles against real migrations and 
     await expectPermissionDenied(() => client.query("ALTER SEQUENCE public.q2a_least_privilege_role_sequence INCREMENT BY 2"));
     await expectPermissionDenied(() => client.query("UPDATE schema_migrations SET checksum=checksum WHERE version=1"));
     await expectPermissionDenied(() => client.query("SET ROLE agentpass_migrator"));
+    for (const signature of SIGNER_FUNCTIONS) {
+      const privilege = await client.query(
+        "SELECT has_function_privilege(current_user,$1,'EXECUTE') AS allowed",
+        ["public." + signature]
+      );
+      assert.equal(privilege.rows[0].allowed, false, "backup signer function privilege leaked for " + signature);
+    }
   });
 
   await withSessionAuthorization(pool, ROLE_NAMES.signer, async (client) => {
     for (const table of [
       "managed_signer_key_lifecycles", "managed_signer_keys",
-      "managed_signer_key_lifecycle_operations", "managed_signer_signing_idempotency"
+      "managed_signer_key_lifecycle_operations", "managed_signer_signing_idempotency",
+      "managed_signer_provider_operations"
     ]) {
       const privileges = await client.query(
         "SELECT has_table_privilege(current_user,$1,'SELECT,INSERT,UPDATE,DELETE') AS allowed",
         [`public.${table}`]
       );
-      assert.equal(privileges.rows[0].allowed, true, `signer ledger privilege missing for ${table}`);
+      assert.equal(privileges.rows[0].allowed, false, "signer ledger privilege leaked for " + table);
     }
-    const providerTable = await client.query(
-      "SELECT has_table_privilege(current_user,'public.managed_signer_provider_operations','SELECT,INSERT,UPDATE,DELETE') AS allowed"
-    );
-    assert.equal(providerTable.rows[0].allowed, false);
     for (const signature of SIGNER_FUNCTIONS) {
       const privilege = await client.query("SELECT has_function_privilege(current_user,$1,'EXECUTE') AS allowed", [`public.${signature}`]);
       assert.equal(privilege.rows[0].allowed, true, `signer function privilege missing for ${signature}`);

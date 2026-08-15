@@ -189,14 +189,21 @@ Before hosted cutover, apply `scripts/postgres/roles.sql` from the approved
 database-admin workflow. It is idempotent and contains no password, token, or
 other credential. The migration set uses the `public` schema:
 
+Apply migrations first, then run `roles.sql`, then run the privilege checker,
+and only then start or mark ready any app/signer runtime. Running `roles.sql`
+before a migration is not sufficient: grants are intentionally conditional on
+the exact reviewed functions already existing. Readiness evidence must prove
+all 23 signer entry functions are executable and every other function plus all
+tables and sequences are denied to `agentpass_signer`.
+
 - `agentpass_app` has ordinary application DML and sequence consumption, but
   no direct mutation of migration, promotion, or managed-signer authority
   ledgers. It has no schema `CREATE`, database `CREATE`/`TEMP`, object ownership,
   or migration authority.
-- `agentpass_signer` has no provider-operation table or sequence privileges. It
-  can execute only the reviewed provider-operation and bounded-maintenance
-  functions introduced by migrations `0049` and `0050`. Until migration `0051`,
-  it retains temporary direct DML on the four lifecycle/signing ledger tables.
+- `agentpass_signer` has no table or sequence privileges. It can execute only
+  the 23 exact, reviewed provider-operation, maintenance, lifecycle, and
+  signing functions introduced by migrations `0049`-`0051`. The lifecycle
+  and signing state is never directly reachable by this role.
 - `agentpass_migrator` owns migration objects and has schema `CREATE`; it is
   not a superuser, createdb role, createrole role, replication role, or RLS
   bypass role.

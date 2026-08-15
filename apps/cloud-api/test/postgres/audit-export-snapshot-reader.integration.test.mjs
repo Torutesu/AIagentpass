@@ -53,7 +53,7 @@ test("C2 PostgreSQL snapshot reader derives bounded roots and reservations from 
   const migrationClient = await poolA.connect();
   try {
     const migration = await createMigrationRunner({ client: migrationClient, applicationVersion: "audit-export-snapshot-reader-integration" }).run();
-    assert.equal(migration.currentVersion, 50);
+    assert.equal(migration.currentVersion, 51);
   } finally {
     migrationClient.release();
   }

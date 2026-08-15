@@ -122,10 +122,9 @@ execute application functions, use sequence values, or perform schema DDL.
 Restore DDL and migration application must use the separately controlled
 `agentpass_migrator`/admin workflow. Ordinary application repositories use
 `agentpass_app`; managed-signer repositories use `agentpass_signer`.
-Provider-operation and maintenance access is restricted to the reviewed
-authority functions. Until migration `0051` lands, that role retains temporary
-direct DML on only the four lifecycle/signing ledger tables documented in
-`scripts/postgres/roles.sql`; it has no sequence privileges.
+Provider-operation, maintenance, lifecycle, and signing access is restricted
+to the 23 exact authority functions introduced by migrations `0049`-`0051`.
+The signer role has no table or sequence privileges.
 
 Apply `scripts/postgres/roles.sql` idempotently before a cutover or restore
 rehearsal. It contains no credential. Keep the four role credentials outside

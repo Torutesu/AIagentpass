@@ -35,9 +35,23 @@ test('app is DML-only, migrator owns migration authority, and backup is read-onl
 
   assert.match(sql, /GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO agentpass_app/);
   assert.match(sql, /'agentpass_signer'/);
-  assert.match(sql, /GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE public\.%I TO agentpass_signer/);
+  assert.doesNotMatch(sql, /GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE public\.%I TO agentpass_signer/);
+  assert.match(sql, /left\(c\.relname, length\('managed_signer_'\)\) = 'managed_signer_'/u);
   assert.match(sql, /agentpass_managed_signer_provider_operation_reserve\(text,text,text,integer,bytea,text,bigint,bytea,integer,integer\)/u);
   assert.match(sql, /agentpass_maintain_managed_signer_provider_operations\(integer\)/u);
+  for (const signature of [
+    'agentpass_managed_signer_lifecycle_snapshot(text)',
+    'agentpass_managed_signer_lifecycle_initialize(text,text,jsonb,integer,bigint)',
+    'agentpass_managed_signer_lifecycle_apply(text,text,bytea,bigint,jsonb,bigint)',
+    'agentpass_managed_signer_signing_reserve(text,text,bytea,text,bigint,bytea,bigint,bigint)',
+    'agentpass_managed_signer_signing_start(text,text,bytea,text,bigint,bytea)',
+    'agentpass_managed_signer_signing_commit(text,text,bytea,text,bigint,bytea,bytea,text,text)',
+    'agentpass_managed_signer_signing_uncertain(text,text,bytea,text,bigint,bytea)',
+    'agentpass_managed_signer_signing_reconcile(text,text,bytea,text,bigint,bytea,text,text)',
+    'agentpass_managed_signer_signing_lookup(text,text)',
+    'agentpass_managed_signer_signing_prune(text,timestamptz,integer)',
+    'agentpass_managed_signer_lifecycle_operation_prune(text,timestamptz,integer)'
+  ]) assert.equal(sql.includes(signature), true);
   assert.doesNotMatch(sql, /GRANT EXECUTE ON FUNCTION public\.agentpass_quarantine_expired_managed_signer_provider_operations/u);
   assert.match(sql, /GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO agentpass_app/);
   assert.match(sql, /GRANT USAGE, CREATE ON SCHEMA public TO agentpass_migrator/);

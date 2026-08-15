@@ -62,7 +62,7 @@ sequences AS (
   WHERE c.relkind = 'S'
 ),
 functions AS (
-  SELECT p.oid, p.proowner,
+  SELECT p.oid, p.proowner, p.proacl,
     p.proname || '(' || regexp_replace(pg_get_function_identity_arguments(p.oid), '\\s+', '', 'g') || ')' AS routine_signature
   FROM pg_proc AS p
   JOIN target_schema AS s ON s.oid = p.pronamespace
@@ -118,7 +118,8 @@ database_privileges_ok AS (
 table_privileges_ok AS (
   SELECT COALESCE((SELECT bool_and(
       has_table_privilege('agentpass_app', oid, 'SELECT')
-      AND CASE WHEN relname IN ('schema_migrations', 'schema_migration_attempts', 'release_candidates', 'platform_promotion_approvals', 'platform_promotion_deployments', 'platform_promotion_issuances', 'managed_signer_key_lifecycles', 'managed_signer_keys', 'managed_signer_key_lifecycle_operations', 'managed_signer_signing_idempotency', 'managed_signer_provider_operations') THEN
+      AND CASE WHEN relname IN ('schema_migrations', 'schema_migration_attempts', 'release_candidates', 'platform_promotion_approvals', 'platform_promotion_deployments', 'platform_promotion_issuances')
+          OR left(relname, length('managed_signer_')) = 'managed_signer_' THEN
         NOT has_table_privilege('agentpass_app', oid, 'INSERT')
         AND NOT has_table_privilege('agentpass_app', oid, 'UPDATE')
         AND NOT has_table_privilege('agentpass_app', oid, 'DELETE')
@@ -131,20 +132,11 @@ table_privileges_ok AS (
       AND NOT has_table_privilege('agentpass_app', oid, 'REFERENCES')
       AND NOT has_table_privilege('agentpass_app', oid, 'TRIGGER')
     ) FROM tables), true)
-    AND COALESCE((SELECT bool_and(CASE WHEN relname IN (
-      'managed_signer_key_lifecycles', 'managed_signer_keys',
-      'managed_signer_key_lifecycle_operations', 'managed_signer_signing_idempotency'
-    ) THEN
-      has_table_privilege('agentpass_signer', oid, 'SELECT')
-      AND has_table_privilege('agentpass_signer', oid, 'INSERT')
-      AND has_table_privilege('agentpass_signer', oid, 'UPDATE')
-      AND has_table_privilege('agentpass_signer', oid, 'DELETE')
-    ELSE
+    AND COALESCE((SELECT bool_and(
       NOT has_table_privilege('agentpass_signer', oid, 'SELECT')
       AND NOT has_table_privilege('agentpass_signer', oid, 'INSERT')
       AND NOT has_table_privilege('agentpass_signer', oid, 'UPDATE')
       AND NOT has_table_privilege('agentpass_signer', oid, 'DELETE')
-    END
       AND NOT has_table_privilege('agentpass_signer', oid, 'TRUNCATE')
       AND NOT has_table_privilege('agentpass_signer', oid, 'REFERENCES')
       AND NOT has_table_privilege('agentpass_signer', oid, 'TRIGGER')
@@ -179,6 +171,9 @@ sequence_privileges_ok AS (
 function_privileges_ok AS (
   SELECT COALESCE((SELECT bool_and(proowner = (SELECT oid FROM role_ids WHERE rolname = 'agentpass_migrator')) FROM functions), true)
     AND NOT EXISTS (SELECT 1 FROM functions
+      CROSS JOIN LATERAL aclexplode(COALESCE(proacl, acldefault('f', proowner))) AS acl
+      WHERE acl.grantee = 0 AND acl.privilege_type = 'EXECUTE')
+    AND NOT EXISTS (SELECT 1 FROM functions
       WHERE has_function_privilege('agentpass_backup', oid, 'EXECUTE')
          OR (has_function_privilege('agentpass_signer', oid, 'EXECUTE')
            AND routine_signature NOT IN (
@@ -193,7 +188,18 @@ function_privileges_ok AS (
              'agentpass_managed_signer_provider_operation_health(text,text,bigint,text)',
              'agentpass_managed_signer_provider_operation_prune(text,text,bigint,text,timestamptz,integer)',
              'agentpass_maintain_managed_signer_provider_operations(integer)',
-             'agentpass_health_managed_signer_provider_operations()'
+             'agentpass_health_managed_signer_provider_operations()',
+             'agentpass_managed_signer_lifecycle_snapshot(text)',
+             'agentpass_managed_signer_lifecycle_initialize(text,text,jsonb,integer,bigint)',
+             'agentpass_managed_signer_lifecycle_apply(text,text,bytea,bigint,jsonb,bigint)',
+             'agentpass_managed_signer_signing_reserve(text,text,bytea,text,bigint,bytea,bigint,bigint)',
+             'agentpass_managed_signer_signing_start(text,text,bytea,text,bigint,bytea)',
+             'agentpass_managed_signer_signing_commit(text,text,bytea,text,bigint,bytea,bytea,text,text)',
+             'agentpass_managed_signer_signing_uncertain(text,text,bytea,text,bigint,bytea)',
+             'agentpass_managed_signer_signing_reconcile(text,text,bytea,text,bigint,bytea,text,text)',
+             'agentpass_managed_signer_signing_lookup(text,text)',
+             'agentpass_managed_signer_signing_prune(text,timestamptz,integer)',
+             'agentpass_managed_signer_lifecycle_operation_prune(text,timestamptz,integer)'
            ))
          OR (NOT has_function_privilege('agentpass_signer', oid, 'EXECUTE')
            AND routine_signature IN (
@@ -208,7 +214,18 @@ function_privileges_ok AS (
              'agentpass_managed_signer_provider_operation_health(text,text,bigint,text)',
              'agentpass_managed_signer_provider_operation_prune(text,text,bigint,text,timestamptz,integer)',
              'agentpass_maintain_managed_signer_provider_operations(integer)',
-             'agentpass_health_managed_signer_provider_operations()'
+             'agentpass_health_managed_signer_provider_operations()',
+             'agentpass_managed_signer_lifecycle_snapshot(text)',
+             'agentpass_managed_signer_lifecycle_initialize(text,text,jsonb,integer,bigint)',
+             'agentpass_managed_signer_lifecycle_apply(text,text,bytea,bigint,jsonb,bigint)',
+             'agentpass_managed_signer_signing_reserve(text,text,bytea,text,bigint,bytea,bigint,bigint)',
+             'agentpass_managed_signer_signing_start(text,text,bytea,text,bigint,bytea)',
+             'agentpass_managed_signer_signing_commit(text,text,bytea,text,bigint,bytea,bytea,text,text)',
+             'agentpass_managed_signer_signing_uncertain(text,text,bytea,text,bigint,bytea)',
+             'agentpass_managed_signer_signing_reconcile(text,text,bytea,text,bigint,bytea,text,text)',
+             'agentpass_managed_signer_signing_lookup(text,text)',
+             'agentpass_managed_signer_signing_prune(text,timestamptz,integer)',
+             'agentpass_managed_signer_lifecycle_operation_prune(text,timestamptz,integer)'
            ))
          OR (has_function_privilege('agentpass_app', oid, 'EXECUTE')
            AND routine_signature NOT IN (

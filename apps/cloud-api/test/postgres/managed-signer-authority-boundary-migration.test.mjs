@@ -43,17 +43,18 @@ test("0049-0050 expose only fixed-search-path SECURITY DEFINER signer functions"
   }
 });
 
-test("0050 is the immutable migration head and both authority slices are catalogued", async () => {
+test("0051 is the immutable migration head and all signer authority slices are catalogued", async () => {
   const migrations = await loadSqlMigrations();
   const migration = migrations.at(-1);
-  assert.equal(migration?.version, 50);
-  assert.equal(migration?.name, "0050_managed_signer_provider_operation_maintenance_authority.sql");
+  assert.equal(migration?.version, 51);
+  assert.equal(migration?.name, "0051_managed_signer_lifecycle_signing_authority.sql");
   assert.match(migration?.checksum ?? "", /^[0-9a-f]{64}$/u);
 
   const catalog = JSON.parse(await readFile(new URL("../../../../contracts/catalog-v1.json", import.meta.url), "utf8"));
   for (const expected of [
     ["migration.0049_managed_signer_provider_operation_authority", "postgres/0049_managed_signer_provider_operation_authority.sql", 49],
-    ["migration.0050_managed_signer_provider_operation_maintenance_authority", "postgres/0050_managed_signer_provider_operation_maintenance_authority.sql", 50]
+    ["migration.0050_managed_signer_provider_operation_maintenance_authority", "postgres/0050_managed_signer_provider_operation_maintenance_authority.sql", 50],
+    ["migration.0051_managed_signer_lifecycle_signing_authority", "postgres/0051_managed_signer_lifecycle_signing_authority.sql", 51]
   ]) {
     const entry = catalog.entries.find((item) => item.id === expected[0]);
     assert.equal(entry?.source, expected[1]);

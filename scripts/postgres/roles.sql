@@ -120,27 +120,11 @@ REVOKE ALL PRIVILEGES ON ALL FUNCTIONS IN SCHEMA public FROM agentpass_app, agen
 GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO agentpass_app;
 GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO agentpass_app;
 
--- signer: lifecycle/signing DML remains temporary while that family is moved
--- behind its own forward migration. Provider-operation and maintenance access
--- is function-only after migrations 0049-0050. No organization, policy,
--- session, audit, promotion, or provider-operation table is directly reachable.
-DO $$
-DECLARE
-  relation_name text;
-BEGIN
-  FOREACH relation_name IN ARRAY ARRAY[
-    'managed_signer_key_lifecycles', 'managed_signer_keys',
-    'managed_signer_key_lifecycle_operations', 'managed_signer_signing_idempotency'
-  ] LOOP
-    IF to_regclass(format('public.%I', relation_name)) IS NOT NULL THEN
-      EXECUTE format(
-        'GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE public.%I TO agentpass_signer',
-        relation_name
-      );
-    END IF;
-  END LOOP;
-END
-$$;
+-- signer: all managed-signer state is function-only after migration 0051.
+-- The signer identity receives no table or sequence privileges. Every state
+-- transition is routed through the exact SECURITY DEFINER entry-point list
+-- below; no organization, policy, session, audit, promotion, or ledger table
+-- is directly reachable.
 
 -- backup: read-only table and sequence-state access. It cannot consume or
 -- mutate sequences and cannot execute functions.
@@ -176,6 +160,23 @@ BEGIN
       );
     END IF;
   END LOOP;
+
+  -- Future managed-signer ledgers are authority tables by default. A new
+  -- migration cannot silently inherit the broad application DML defaults
+  -- merely because this reviewed array has not yet been extended.
+  FOR relation_name IN
+    SELECT c.relname
+    FROM pg_catalog.pg_class AS c
+    JOIN pg_catalog.pg_namespace AS n ON n.oid = c.relnamespace
+    WHERE n.nspname = 'public'
+      AND c.relkind IN ('r', 'p')
+      AND left(c.relname, length('managed_signer_')) = 'managed_signer_'
+  LOOP
+    EXECUTE format(
+      'REVOKE INSERT, UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER ON TABLE public.%I FROM agentpass_app, agentpass_backup',
+      relation_name
+    );
+  END LOOP;
 END
 $$;
 
@@ -198,7 +199,18 @@ BEGIN
     'agentpass_managed_signer_provider_operation_health(text,text,bigint,text)',
     'agentpass_managed_signer_provider_operation_prune(text,text,bigint,text,timestamptz,integer)',
     'agentpass_maintain_managed_signer_provider_operations(integer)',
-    'agentpass_health_managed_signer_provider_operations()'
+    'agentpass_health_managed_signer_provider_operations()',
+    'agentpass_managed_signer_lifecycle_snapshot(text)',
+    'agentpass_managed_signer_lifecycle_initialize(text,text,jsonb,integer,bigint)',
+    'agentpass_managed_signer_lifecycle_apply(text,text,bytea,bigint,jsonb,bigint)',
+    'agentpass_managed_signer_signing_reserve(text,text,bytea,text,bigint,bytea,bigint,bigint)',
+    'agentpass_managed_signer_signing_start(text,text,bytea,text,bigint,bytea)',
+    'agentpass_managed_signer_signing_commit(text,text,bytea,text,bigint,bytea,bytea,text,text)',
+    'agentpass_managed_signer_signing_uncertain(text,text,bytea,text,bigint,bytea)',
+    'agentpass_managed_signer_signing_reconcile(text,text,bytea,text,bigint,bytea,text,text)',
+    'agentpass_managed_signer_signing_lookup(text,text)',
+    'agentpass_managed_signer_signing_prune(text,timestamptz,integer)',
+    'agentpass_managed_signer_lifecycle_operation_prune(text,timestamptz,integer)'
   ] LOOP
     IF to_regprocedure('public.' || routine_signature) IS NOT NULL THEN
       EXECUTE format('GRANT EXECUTE ON FUNCTION public.%s TO agentpass_signer', routine_signature);
