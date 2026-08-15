@@ -145,9 +145,10 @@ export async function startP0BLiveBrowserFixture({
           return false;
         }
       });
-      let stage = "transport";
+      let stage = "navigation";
       try {
         await page.goto(target.toString(), { waitUntil: "domcontentloaded" });
+        stage = "response";
         const response = await responsePromise;
         stage = "http";
         if (!response.ok()) throw new Error("session bootstrap was rejected");

@@ -148,7 +148,8 @@ async function scenario(parent, name, callback) {
         try { await fixture.bootstrap(page, role); }
         catch (error) {
           if (safeOpenPrefix === "P0B_SAFE_ADMIN_OPEN") {
-            if (error?.code === "session_bootstrap_transport_failed") assert.fail("P0B_SAFE_ADMIN_OPEN_BOOTSTRAP_TRANSPORT_FAILED");
+            if (error?.code === "session_bootstrap_navigation_failed") assert.fail("P0B_SAFE_ADMIN_OPEN_BOOTSTRAP_NAVIGATION_FAILED");
+            if (error?.code === "session_bootstrap_response_failed") assert.fail("P0B_SAFE_ADMIN_OPEN_BOOTSTRAP_RESPONSE_FAILED");
             if (error?.code === "session_bootstrap_http_failed") assert.fail("P0B_SAFE_ADMIN_OPEN_BOOTSTRAP_HTTP_FAILED");
             if (error?.code === "session_bootstrap_contract_failed") assert.fail("P0B_SAFE_ADMIN_OPEN_BOOTSTRAP_CONTRACT_FAILED");
           }
