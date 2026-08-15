@@ -258,20 +258,21 @@ function atomicParams(authorization, intent, overrides = {}) {
   ];
 }
 
-async function runWithAdvisoryBarrier(clients, barrierName, operation) {
-  const keys = clients.map((_, index) => `${barrierName}:ready:${index}`);
-  await Promise.all(clients.map((client, index) => client.query(
-    "SELECT pg_advisory_lock(hashtextextended($1, 0)) AS ready",
-    [keys[index]]
-  )));
-  try {
-    return await Promise.all(clients.map((client, index) => operation(client, index)));
-  } finally {
-    await Promise.allSettled(clients.map((client, index) => client.query(
-      "SELECT pg_advisory_unlock(hashtextextended($1, 0)) AS released",
-      [keys[index]]
-    )));
-  }
+async function runAtConnectionBarrier(clients, operation) {
+  let release;
+  let markReady;
+  const start = new Promise((resolve) => { release = resolve; });
+  const allReady = new Promise((resolve) => { markReady = resolve; });
+  let ready = 0;
+  const calls = clients.map(async (client, index) => {
+    ready += 1;
+    if (ready === clients.length) markReady();
+    await start;
+    return operation(client, index);
+  });
+  await allReady;
+  release();
+  return Promise.all(calls);
 }
 
 async function expectSqlState(operation, code, forbiddenValues = []) {
@@ -280,6 +281,30 @@ async function expectSqlState(operation, code, forbiddenValues = []) {
     for (const value of forbiddenValues) assert.equal(String(error?.message ?? "").includes(value), false);
     return true;
   });
+}
+
+async function expectDeniedAfterAuthorityMutation(client, authorization, intent, mutate, code) {
+  await client.query("BEGIN");
+  try {
+    await mutate(client);
+    await expectSqlState(
+      () => client.query(ATOMIC_SQL, atomicParams(authorization, intent)),
+      code,
+      [authorization.jtiHash.toString("hex"), authorization.sessionMaterialHash.toString("hex")]
+    );
+  } finally {
+    await client.query("ROLLBACK").catch(() => {});
+  }
+  const proof = await client.query(
+    "SELECT status FROM platform_authorization_proofs WHERE proof_id=$1",
+    [authorization.challengeId]
+  );
+  assert.equal(proof.rows[0]?.status, "available", "denial must not consume the authorization proof");
+  const promotion = await client.query(
+    "SELECT count(*)::integer AS count FROM platform_promotion_issuances WHERE promotion_id=$1",
+    [intent.promotionId]
+  );
+  assert.equal(promotion.rows[0].count, 0, "denial must not reserve a promotion");
 }
 
 test("0054 real PostgreSQL authorization concurrency and denial matrix", {
@@ -341,9 +366,8 @@ test("0054 real PostgreSQL authorization concurrency and denial matrix", {
         (await client.query("SELECT pg_backend_pid() AS pid")).rows[0].pid
       )));
       assert.notEqual(backendPids[0], backendPids[1], "concurrency calls must use distinct PostgreSQL connections");
-      const concurrentResults = await runWithAdvisoryBarrier(
+      const concurrentResults = await runAtConnectionBarrier(
         concurrentClients,
-        `${fixture.namespace}:identical-authorization`,
         (client) => client.query(ATOMIC_SQL, atomicParams(primary, firstIntent)).then((queryResult) => queryResult.rows[0].result)
       );
       assert.deepEqual(new Set(concurrentResults.map((entry) => entry.state)), new Set(["reserved"]));
@@ -412,6 +436,78 @@ test("0054 real PostgreSQL authorization concurrency and denial matrix", {
       "42501",
       [fixture.bytes("wrong-csrf").toString("hex"), primary.sessionMaterialHash.toString("hex")],
     );
+
+    const authorityDenials = [
+      {
+        label: "stale-generation",
+        code: "40001",
+        mutate: (client) => client.query(
+          "UPDATE platform_principals SET authority_generation=authority_generation+1, version=version+1 WHERE principal_id=$1",
+          [fixture.principalId]
+        ),
+      },
+      {
+        label: "revoked-assignment",
+        code: "40001",
+        mutate: (client) => client.query(
+          "UPDATE platform_operator_assignments SET status='revoked', revoked_at=clock_timestamp(), revoke_reason='s1-negative-matrix', version=version+1 WHERE assignment_id=$1",
+          [fixture.assignmentId]
+        ),
+      },
+      {
+        label: "revoked-credential",
+        code: "42501",
+        mutate: (client) => client.query(
+          "UPDATE platform_credentials SET status='revoked', revoked_at=clock_timestamp(), revoke_reason='s1-negative-matrix', version=version+1 WHERE credential_id=$1",
+          [fixture.id("platform-credential")]
+        ),
+      },
+      {
+        label: "revoked-webauthn",
+        code: "42501",
+        mutate: (client) => client.query(
+          "UPDATE webauthn_credentials SET revoked_at=clock_timestamp() WHERE id=$1",
+          [fixture.webauthnId]
+        ),
+      },
+      {
+        label: "revoked-session",
+        code: "40001",
+        mutate: (client, authorization) => client.query(
+          "UPDATE platform_sessions SET status='revoked', revoked_at=clock_timestamp(), revoke_reason='s1-negative-matrix', version=version+1 WHERE session_id=$1",
+          [authorization.sessionId]
+        ),
+      },
+      {
+        label: "expired-proof",
+        code: "40001",
+        mutate: async (client, authorization) => {
+          await client.query("SET LOCAL session_replication_role = replica");
+          await client.query(`UPDATE platform_authorization_proofs
+            SET issued_at=clock_timestamp()-interval '2 minutes', expires_at=clock_timestamp()-interval '1 minute'
+            WHERE proof_id=$1`, [authorization.challengeId]);
+          await client.query("SET LOCAL session_replication_role = origin");
+        },
+      },
+    ];
+    for (const denial of authorityDenials) {
+      const intent = {
+        promotionId: fixture.id(`promotion-${denial.label}`),
+        deploymentId: fixture.deploymentId,
+        environment: "staging",
+        candidateId: fixture.candidateId,
+        idempotencyKey: `idem-${fixture.short}-${denial.label}`,
+      };
+      const authorization = await prepareAuthorization(setupClient, fixture, denial.label, intent);
+      authorizations.push(authorization);
+      await expectDeniedAfterAuthorityMutation(
+        setupClient,
+        authorization,
+        intent,
+        (client) => denial.mutate(client, authorization),
+        denial.code
+      );
+    }
 
     const proof = await poolA.query(`SELECT status, consumed_promotion_id, consumed_idempotency_key
       FROM platform_authorization_proofs WHERE proof_id=$1`, [primary.challengeId]);

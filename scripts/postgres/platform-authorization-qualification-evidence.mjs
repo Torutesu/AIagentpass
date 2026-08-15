@@ -29,9 +29,15 @@ export const PLATFORM_AUTHORIZATION_QUALIFICATION_SCENARIOS = Object.freeze([
   "proof_and_jti_one_use_denial",
   "organization_binding_denial",
   "csrf_binding_denial",
+  "stale_principal_generation_denial",
+  "revoked_assignment_denial",
+  "revoked_platform_credential_denial",
+  "revoked_webauthn_credential_denial",
+  "revoked_session_and_expired_proof_denial",
   "pre_reservation_rollback_preserves_proof",
   "lost_commit_response_authenticated_reconciliation",
   "serialization_and_database_failure_closed",
+  "stale_signer_lifecycle_denied_before_signing",
   "application_role_platform_table_dml_denied",
   "legacy_mutation_execute_denied_atomic_function_allowed"
 ]);

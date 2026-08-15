@@ -27,7 +27,7 @@ test("creates the exact source, migration-55, PostgreSQL-17 authorization qualif
   assert.equal(evidence.migration_version, 55);
   assert.equal(evidence.command, PLATFORM_AUTHORIZATION_QUALIFICATION_COMMAND);
   assert.deepEqual(evidence.scenarios, PLATFORM_AUTHORIZATION_QUALIFICATION_SCENARIOS);
-  assert.deepEqual(evidence.summary, { passed: 10, failed: 0, skipped: 0 });
+  assert.deepEqual(evidence.summary, { passed: 16, failed: 0, skipped: 0 });
   assert.equal(Object.isFrozen(evidence), true);
 });
 
@@ -47,7 +47,7 @@ test("writes one private canonical artifact and verifies source/catalog binding"
     evidence_sha256: written.evidence_sha256,
     source_commit: SOURCE_COMMIT,
     migration_version: 55,
-    scenarios: 10
+    scenarios: 16
   });
 });
 

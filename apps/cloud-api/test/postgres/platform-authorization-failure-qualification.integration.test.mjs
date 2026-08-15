@@ -23,6 +23,8 @@ const { Pool } = ADMIN_DATABASE_URL ? await import("pg") : { Pool: undefined };
 const OPERATION = "platform.promotion.issue";
 const PURPOSE = PROMOTION_EVIDENCE_V3_PURPOSE;
 const MIGRATION_HEAD = 55;
+const QUALIFICATION_SIGNER_KEY_ID = "s1-shared-qualification-key";
+const QUALIFICATION_SIGNER_KEY_PAIR = crypto.generateKeyPairSync("ed25519");
 
 function sha256(value) {
   return crypto.createHash("sha256").update(value).digest();
@@ -121,8 +123,8 @@ async function seedFixture(pool, suffix = crypto.randomBytes(6).toString("hex"),
   const qualificationDigest = "1".repeat(64);
   const approvalDigest = "2".repeat(64);
   const approvalId = uuid();
-  const keyId = `s1-key-${suffix}`;
-  const keyPair = crypto.generateKeyPairSync("ed25519");
+  const keyId = withSigner ? QUALIFICATION_SIGNER_KEY_ID : `s1-key-${suffix}`;
+  const keyPair = withSigner ? QUALIFICATION_SIGNER_KEY_PAIR : crypto.generateKeyPairSync("ed25519");
   const keyPublicDer = keyPair.publicKey.export({ type: "spki", format: "der" });
   const request = Object.freeze({
     promotion_id: promotionId,
@@ -170,10 +172,11 @@ async function seedFixture(pool, suffix = crypto.randomBytes(6).toString("hex"),
     [candidateId, sourceCommit, packageDigest, manifestDigest]);
     if (withSigner) {
       await client.query(`INSERT INTO managed_signer_key_lifecycles (purpose,algorithm,version)
-        VALUES ($1,'ed25519',1)`, [PURPOSE]);
+        VALUES ($1,'ed25519',1) ON CONFLICT (purpose) DO NOTHING`, [PURPOSE]);
       await client.query(`INSERT INTO managed_signer_keys
         (purpose,key_id,key_version,algorithm,public_key_fingerprint,state,state_version,key_position)
-        VALUES ($1,$2,1,'ed25519',$3,'active',1,0)`, [PURPOSE, keyId, sha256(keyPublicDer)]);
+        VALUES ($1,$2,1,'ed25519',$3,'active',1,0)
+        ON CONFLICT (purpose,key_id) DO NOTHING`, [PURPOSE, keyId, sha256(keyPublicDer)]);
     }
     await client.query(`INSERT INTO platform_promotion_approvals
       (version,type,approval_id,deployment_id,environment,candidate_id,source_commit,source_tree,
@@ -473,6 +476,23 @@ test("S1 PostgreSQL failure convergence qualifies rollback, commit-loss reconcil
       assert.equal(error.cause, undefined);
       return true;
     });
+    assert.equal(await proofStatus(pool, fixture.challengeId), "available");
+    assert.equal(await countPromotion(pool, fixture.promotionId), 0);
+  });
+
+  await t.test("a stale signer lifecycle snapshot denies reservation before signing", async () => {
+    const fixture = await seedFixture(pool, undefined, { withSigner: true });
+    const signer = await createPromotionSigner(pool, fixture);
+    const repository = createAuthorizationRepository(pool, fixture, {
+      ...signer,
+      lifecycleVersion: signer.lifecycleVersion + 1
+    });
+    await assert.rejects(repository.forAuthorization(fixture.auth).reservePlatformPromotion(fixture.request), (error) => {
+      assert.equal(error.code, PLATFORM_AUTHORIZATION_REPOSITORY_ERROR_CODES.AUTHORIZATION_UNAVAILABLE);
+      assert.equal(error.cause, undefined);
+      return true;
+    });
+    assert.equal(signer.provider.calls, 0);
     assert.equal(await proofStatus(pool, fixture.challengeId), "available");
     assert.equal(await countPromotion(pool, fixture.promotionId), 0);
   });
