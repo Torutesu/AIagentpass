@@ -89,6 +89,7 @@ const LIVE_BROWSER_SAFE_FAILURE_MARKERS = Object.freeze([
   [null, "P0B_SAFE_OWNER_OPEN_REGISTRATION_OPTIONS_503_SERVICE_UNAVAILABLE_FAILED", "owner_reg_options_service_unavailable"],
   [null, "P0B_SAFE_OWNER_OPEN_REGISTRATION_VERIFY_400_FAILED", "owner_registration_verify_400"],
   [null, "P0B_SAFE_OWNER_OPEN_REGISTRATION_VERIFY_401_FAILED", "owner_registration_verify_401"],
+  [null, "P0B_SAFE_OWNER_OPEN_REGISTRATION_VERIFY_401_SESSION_REQUIRED_FAILED", "owner_reg_verify_session_required"],
   [null, "P0B_SAFE_OWNER_OPEN_REGISTRATION_VERIFY_403_FAILED", "owner_registration_verify_403"],
   [null, "P0B_SAFE_OWNER_OPEN_REGISTRATION_VERIFY_409_FAILED", "owner_registration_verify_409"],
   [null, "P0B_SAFE_OWNER_OPEN_REGISTRATION_VERIFY_413_FAILED", "owner_registration_verify_413"],
