@@ -150,9 +150,13 @@ async function scenario(parent, name, callback) {
           if (safeOpenPrefix === "P0B_SAFE_ADMIN_OPEN") {
             if (error?.code === "session_bootstrap_navigation_failed") assert.fail("P0B_SAFE_ADMIN_OPEN_BOOTSTRAP_NAVIGATION_FAILED");
             if (error?.code === "session_bootstrap_response_failed") assert.fail("P0B_SAFE_ADMIN_OPEN_BOOTSTRAP_RESPONSE_FAILED");
+            if (error?.code === "session_bootstrap_http_400_failed") assert.fail("P0B_SAFE_ADMIN_OPEN_BOOTSTRAP_HTTP_400_FAILED");
             if (error?.code === "session_bootstrap_http_401_failed") assert.fail("P0B_SAFE_ADMIN_OPEN_BOOTSTRAP_HTTP_401_FAILED");
+            if (error?.code === "session_bootstrap_http_403_failed") assert.fail("P0B_SAFE_ADMIN_OPEN_BOOTSTRAP_HTTP_403_FAILED");
             if (error?.code === "session_bootstrap_http_409_failed") assert.fail("P0B_SAFE_ADMIN_OPEN_BOOTSTRAP_HTTP_409_FAILED");
             if (error?.code === "session_bootstrap_http_429_failed") assert.fail("P0B_SAFE_ADMIN_OPEN_BOOTSTRAP_HTTP_429_FAILED");
+            if (error?.code === "session_bootstrap_http_500_failed") assert.fail("P0B_SAFE_ADMIN_OPEN_BOOTSTRAP_HTTP_500_FAILED");
+            if (error?.code === "session_bootstrap_http_502_failed") assert.fail("P0B_SAFE_ADMIN_OPEN_BOOTSTRAP_HTTP_502_FAILED");
             if (error?.code === "session_bootstrap_http_503_failed") assert.fail("P0B_SAFE_ADMIN_OPEN_BOOTSTRAP_HTTP_503_FAILED");
             if (error?.code === "session_bootstrap_http_other_failed") assert.fail("P0B_SAFE_ADMIN_OPEN_BOOTSTRAP_HTTP_OTHER_FAILED");
             if (error?.code === "session_bootstrap_contract_failed") assert.fail("P0B_SAFE_ADMIN_OPEN_BOOTSTRAP_CONTRACT_FAILED");
