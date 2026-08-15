@@ -1,7 +1,7 @@
 # AgentPass execution plan
 
 Status: active
-Baseline commit: `9d82663`
+Baseline commit: `e0c6c02`
 Branch: `codex/agent-platform`
 Updated: 2026-08-15
 
@@ -15,13 +15,17 @@ Completed at the baseline:
 - Frozen Platform v1 challenge/assertion/revoke contract and browser-safe public promotion intent.
 - Hosted composition of Platform Session bootstrap, WebAuthn ceremony, repository, HTTP boundary, and readiness.
 - Atomic PostgreSQL adapter that consumes a Platform authorization proof and reserves a promotion in one transaction.
+- Platform promotion issue-only HTTP boundary, strict request parser, rate limiter, frozen schemas/OpenAPI/fixtures, and adversarial tests.
+- PostgreSQL runtime exposure of the authorized promotion repository when lifecycle metadata is complete.
+- Stable SQLSTATE/constraint-based authorization failure classification without propagating PostgreSQL messages or causes.
+- Hosted route/composition attack tests that fail until the new boundary is wired and the legacy hosted routes are retired.
 - Contract catalog, authority manifest, migration qualification, lint, and focused Platform Session tests at migration head 55.
 
 Not completed at the baseline:
 
 - The hosted promotion issue HTTP route still uses the legacy Human Session, recent-auth, platform-operator authorizer, and non-atomic promotion repository.
 - The atomic authorized promotion service is not composed into the hosted server.
-- The browser contract does not yet freeze the proof transport used by promotion issue.
+- Lost-commit reconciliation still uses a fail-closed placeholder instead of authenticated re-entry through the same atomic reservation function.
 - A real PostgreSQL contention qualification for the complete HTTP-to-reservation flow has not been retained as release evidence.
 - Console onboarding, managed infrastructure, physical-Mac qualification, notarized distribution, independent review, and production deployment remain open.
 
@@ -139,6 +143,10 @@ Acceptance:
 
 ### W0-03 Compose the atomic service
 
+Status: in progress. PostgreSQL runtime repository exposure and fail-closed
+lifecycle validation landed in `e0c6c02`; service/HTTP/server/readiness composition
+remains open.
+
 Change scope:
 
 - `apps/cloud-api/src/postgres/index.mjs`
@@ -160,6 +168,10 @@ Acceptance:
 - The composed service calls only the 0054 atomic reservation function for online issue.
 
 ### W0-04 Remove the hosted legacy bypass
+
+Status: attack tests landed in `b745d99` and currently expose five expected
+failures. Production routing and hosted/evaluation profile separation remain
+open.
 
 Change scope:
 
@@ -356,16 +368,25 @@ After W0/W1, maintain these independent lanes:
 
 Each lane owns a disjoint file set within an implementation wave. Shared schemas and migration contracts are merged first; downstream lanes rebase on that frozen contract rather than editing it concurrently.
 
-## 14. Recommended next six pull requests
+## 14. Next pull requests
 
-1. **PR-1: Platform promotion v1 contract** — W0-01 only; schemas/OpenAPI/fixtures/catalog/digest vectors.
-2. **PR-2: Platform promotion HTTP boundary** — W0-02; framework-free boundary and negative tests.
-3. **PR-3: Hosted atomic composition** — W0-03; PostgreSQL repository/service/signer/readiness wiring.
-4. **PR-4: Legacy hosted route retirement** — W0-04; route cutover and downgrade/bypass tests.
-5. **PR-5: PostgreSQL race qualification** — W0-05; real DB concurrency, privilege, and failure tests.
-6. **PR-6: Contract/threat freeze** — W1; compatibility matrix, threat model, CI no-downgrade guard.
+Completed sequence:
 
-Before PR-1, land a small **PR-0: Platform Session transport hardening** for W0-00. PR-1 and implementation scaffolding for PR-2 may then be developed in parallel, but PR-2 must consume the merged PR-1 contract. PR-3 may begin against the existing atomic repository. PR-4 merges only after PR-2 and PR-3. PR-5 qualifies the merged result.
+1. **PR-0: Platform Session transport hardening** — `f52dbe1`.
+2. **PR-1: Platform promotion v1 contract and HTTP boundary** — `b13145d` and `fe9d251`.
+3. **PR-2: Cutover attack tests and PostgreSQL authorization runtime seam** — `b745d99`, `a8ece5a`, and `e0c6c02`.
+
+Next sequence:
+
+1. **PR-3: Hosted atomic composition and route cutover** — finish W0-03 and W0-04 in one atomic production boundary. It must turn the five attack-test failures green, keep evaluation-only legacy behavior explicit, and make hosted startup fail when any authorized dependency is absent.
+2. **PR-4: Commit-ambiguity reconciliation** — re-enter the same proof-consuming atomic function with the same authenticated scope after a lost commit response; prove one signature, one reservation, and no public replay/get surface.
+3. **PR-5: PostgreSQL race qualification** — W0-05 with real database contention, tenant-negative, privilege-negative, rollback, and lost-response cases retained as evidence.
+4. **PR-6: Contract/threat freeze** — W1 compatibility matrix, threat model, route inventory, and CI no-downgrade guard.
+5. **PR-7: Identity epoch and schema-head consistency** — begin W2-A/W2-B with session invalidation and one authoritative migration-head source.
+6. **PR-8: Console production-client cutover** — begin W3 only after PR-6 freezes the browser boundary.
+
+PR-3 is the immediate critical path. PR-4 may be developed in parallel against
+the repository seam, but both must merge before PR-5 records the W0 evidence.
 
 ## 15. External prerequisites
 
@@ -393,3 +414,140 @@ For every implementation wave, report:
 - next unblocked work item.
 
 Do not report the product as complete until all five release gates pass on one immutable candidate.
+
+## 17. Exact execution backlog from `e0c6c02`
+
+This section is the implementation handoff order. A later item may start in
+parallel only when its write set is disjoint and it does not assume an unfrozen
+contract from an earlier item.
+
+### Slice S0 — close the hosted promotion boundary
+
+| ID | Change | Primary files | Completion evidence |
+| --- | --- | --- | --- |
+| S0-01 | Replace the authorized service's internal lost-commit placeholder with scoped re-entry through `reservePlatformPromotion`; never expose replay/get publicly. | `apps/cloud-api/src/postgres/platform-authorization-repository.mjs` and focused test | Lost commit response returns the durable committed result, signs once, and repeats the exact authenticated atomic request. |
+| S0-02 | Map the new repository error taxonomy to stable HTTP statuses/codes. Keep conflict/replay/stale/authorization unavailable/database unavailable distinguishable only to the degree needed for safe retry. | `apps/cloud-api/src/platform-promotion-http-api.mjs` and adversarial test | No SQL text/cause/secret is serialized; status and retry behavior are deterministic. |
+| S0-03 | Construct the authorized service and promotion HTTP API from PostgreSQL repository, promotion signer/resolver, Platform Session limiter, and exact hosted origin. | `apps/cloud-api/src/runtime.mjs` and runtime tests | Every missing dependency fails startup/readiness; hosted overrides cannot substitute development authority. |
+| S0-04 | Add `platformPromotionHttpApi` validation and raw-path dispatch before generic Human/Device auth. | `apps/cloud-api/src/server.mjs` and routing attack test | New path reaches only the new handler; no injection returns 404; no fallthrough occurs. |
+| S0-05 | Stop composing the legacy promotion service/authorizer in hosted mode; preserve it only in an explicit evaluation profile. | `apps/cloud-api/src/runtime.mjs`, server/runtime tests, compatibility docs | Human Session cannot issue/replay in hosted mode; legacy routes are absent; evaluation behavior is opt-in and tested. |
+| S0-06 | Extend readiness and in-flight drain to the complete promotion boundary. | runtime/readiness modules and tests | `/ready` is false for missing DB/session/signer/limiter/route dependencies and becomes false during drain. |
+
+Merge gate for S0: all five tests in
+`server-platform-promotion-http-routing-attack.test.mjs` and
+`platform-promotion-hosted-composition-attack.test.mjs` turn green, existing
+Platform Session/promotion suites remain green, and hosted route inventory has
+exactly one promotion mutation path.
+
+### Slice S1 — real PostgreSQL authority qualification
+
+1. Build a deterministic fixture at migration head 55 with two organizations,
+   active and stale assignments, two credentials, one revoked session, and
+   least-privilege application/migration roles.
+2. Execute identical requests concurrently from separate pool connections;
+   assert one signature/provider operation and one durable promotion result.
+3. Exercise idempotency conflict, proof/JTI reuse, CSRF mismatch, tenant
+   substitution, credential/session/assignment revoke, stale generation,
+   expiry, and signer lifecycle change.
+4. Inject rollback before reservation, lost response after commit, database
+   disconnect, serialization failure, and signer uncertainty; prove each state
+   converges without a second signature.
+5. Run privilege-negative SQL showing the application role cannot mutate
+   session/proof/reservation tables or call legacy mutation functions directly.
+6. Save sanitized test output, PostgreSQL version, role, migration checksums,
+   source commit, and fixture digest under the release-evidence convention.
+
+S1 exit: W0 closes only when the same candidate passes unit/contract/HTTP tests
+and the real PostgreSQL evidence above.
+
+### Slice S2 — freeze contracts and the threat model
+
+1. Publish a route/profile matrix for hosted, evaluation, and development.
+2. Add CI assertions that the hosted legacy routes cannot reappear and that
+   OpenAPI, catalog, schemas, fixtures, digest vectors, and implementation paths
+   remain synchronized.
+3. Define additive versus breaking changes, explicit version negotiation,
+   cookie/header migration rules, and downgrade rejection.
+4. Update the threat model for browser compromise, malicious extensions,
+   stolen sessions, confused deputy, proof replay, tenant substitution, local
+   malware, signer uncertainty, database rollback, and supply-chain compromise.
+5. Convert every locally testable abuse case into a negative test and track
+   physical/cloud-only cases in the release evidence matrix.
+
+### Slice S3 — identity and managed PostgreSQL in parallel
+
+Identity lane:
+
+1. Freeze the hosted identity provider and first-organization bootstrap flow.
+2. Implement one epoch-invalidation primitive used by membership removal, role
+   downgrade, credential revoke, recovery transition, and organization security
+   events.
+3. Finish WebAuthn register/authenticate/rename/revoke/clone handling and
+   last-credential/recovery safeguards.
+4. Enforce owner/admin/auditor/viewer permissions in PostgreSQL-backed services;
+   keep platform operator as a separate authority namespace.
+5. Emit immutable tenant-bound audit events for every high-risk mutation.
+
+Database lane:
+
+1. Replace hard-coded schema-head expectations with one generated authoritative
+   value and test manifest/migration/readiness agreement.
+2. Qualify TLS verification, least-privilege roles, pool bounds,
+   statement/lock timeouts, transaction retry, and graceful drain.
+3. Add fresh-install, every-head upgrade, checksum drift, dirty migration,
+   concurrent migration, and privilege-negative tests.
+4. Review query plans/indexes for session, proof, idempotency, audit, activity,
+   device refresh, and ACK paths.
+5. Automate encrypted backup/PITR restore into isolation and compare authority,
+   tenant, and audit invariants with recorded RTO/RPO.
+
+### Slice S4 — browser Console and onboarding
+
+1. Inventory every screen and remove sample/local presentation state from the
+   production build.
+2. Introduce generated/typed API clients and one authenticated BFF/session
+   model with safe error projection.
+3. Implement the resumable onboarding state machine: identity → organization →
+   WebAuthn → device enrollment → helper handoff → Agent Session scope/TTL →
+   Claude Code/Cursor setup → signed-commit verification.
+4. Complete Dashboard, Devices, Agent Setup, Activity, and Security states for
+   loading, empty, stale, revoked, unauthorized, partial failure, and recovery.
+5. Add Playwright coverage for roles, CSRF/origin, cross-tenant denial, storage
+   inspection, keyboard/screen-reader behavior, and responsive layouts.
+
+S4 exit: a new user completes normal setup in the browser; the native component
+has no primary UI and no reusable secret appears in browser storage or DOM.
+
+### Slice S5 — device, helper, and agent adapters
+
+1. Close enrollment issue/complete, possession proof, signed ControlBundle,
+   monotonic sequence/epoch, durable ACK, refresh, reconnect, and revoke.
+2. Freeze the local helper protocol and peer/process authentication before
+   enabling Git signing.
+3. Implement Secure Enclave/TPM non-exportable key lifecycle, explicit unsupported
+   hardware denial, preserve-by-default uninstall, and separately confirmed purge.
+4. Bind grants to executable/process ancestry where reliable, repository,
+   worktree, branch, operation, signature count, TTL, organization, device, and
+   session; revalidate immediately before signing.
+5. Ship Claude Code and Cursor adapters over the same local protocol and prove
+   two unattended signed commits followed by revoke and a blocked third commit.
+
+### Slice S6 — signer, operations, release, and production
+
+1. Require purpose-separated managed KMS/HSM keys for all eight signing
+   purposes; reject file/development signers in hosted readiness.
+2. Implement exact key-version lifecycle, dual-read rotation, timeout/throttle/
+   duplicate/uncertain reconciliation, and provider-operation fencing.
+3. Add redacted structured logs, metrics, traces, alerts, SLOs, incident owners,
+   backup/recovery and signer/revoke runbooks.
+4. Run the complete production-like journey on managed PostgreSQL, HTTPS,
+   sandbox KMS/HSM, deployed Console/API, real browser, CLI/helper, and physical
+   supported Macs.
+5. Complete independent security review and close or explicitly accept every
+   critical/high finding with owner and expiry.
+6. Produce universal signed/notarized packages, verify install/upgrade/rollback/
+   uninstall/reinstall/purge on clean Macs, and deploy immutable artifacts using
+   migration gate, canary, readiness, drain, rollback, and retained evidence.
+
+Final completion means S0–S6 and release Gates A–E pass on the same source
+commit, schema set, migration checksums, signer key metadata, and artifact
+digests. Passing local mocks alone never satisfies this definition.
