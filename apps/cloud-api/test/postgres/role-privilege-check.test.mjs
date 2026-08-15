@@ -5,10 +5,11 @@ import test from "node:test";
 const root = new URL("../../../../", import.meta.url);
 const read = (relativePath) => readFile(new URL(relativePath, root), "utf8");
 
-test("authority relation ACL reconciliation clears stale app writes and restores contract reads", async () => {
+test("authority ACL reconciliation keeps Hosted runtime function-only and backup-readable", async () => {
   const sql = await read("scripts/postgres/roles.sql");
   assert.match(sql, /REVOKE ALL PRIVILEGES ON TABLE public\.%I FROM agentpass_app, agentpass_backup/u);
   assert.match(sql, /GRANT SELECT ON TABLE public\.%I TO agentpass_app, agentpass_backup/u);
+  assert.match(sql, /Hosted bootstrap is function-only[\s\S]*GRANT SELECT ON TABLE public\.%I TO agentpass_backup/u);
   assert.match(sql, /c\.relkind IN \('r', 'p', 'v', 'm', 'f'\)/u);
   assert.match(sql, /hosted_identity_/u);
   assert.match(sql, /platform_/u);
@@ -27,13 +28,14 @@ test("privilege checker exposes bounded, relation-only diagnostics without secre
   assert.doesNotMatch(checker, /table_privilege_diagnostics[\s\S]{0,512}(?:password|secret|token|credential|proacl)/iu);
 });
 
-test("authority diagnostics preserve the existing app SELECT contract", async () => {
+test("authority diagnostics enforce the Hosted app SELECT exception", async () => {
   const [roles, checker] = await Promise.all([
     read("scripts/postgres/roles.sql"),
     read("scripts/postgres/role-privilege-check.mjs"),
   ]);
   assert.match(roles, /GRANT SELECT ON TABLE public\.%I TO agentpass_app, agentpass_backup/u);
-  assert.match(checker, /has_table_privilege\('agentpass_app', t\.oid, 'SELECT'\)/u);
+  assert.match(roles, /Hosted bootstrap is function-only[\s\S]*GRANT SELECT ON TABLE public\.%I TO agentpass_backup/u);
+  assert.match(checker, /left\(t\.relname, length\('hosted_identity_'\)\) = 'hosted_identity_'[\s\S]*NOT has_table_privilege\('agentpass_app', t\.oid, 'SELECT'\)/u);
   assert.match(checker, /THEN 'authority'[\s\S]*AS expected_class/u);
   assert.match(checker, /app:insert/u);
   assert.match(checker, /app:update/u);

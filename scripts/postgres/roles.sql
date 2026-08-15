@@ -190,8 +190,11 @@ BEGIN
       'REVOKE ALL PRIVILEGES ON TABLE public.%I FROM agentpass_app, agentpass_backup',
       relation_name
     );
+    -- Hosted bootstrap is function-only for the online application identity.
+    -- The backup identity retains read-only access for complete restoration;
+    -- selectors and claim tokens are stored only as high-entropy digests.
     EXECUTE format(
-      'GRANT SELECT ON TABLE public.%I TO agentpass_app, agentpass_backup',
+      'GRANT SELECT ON TABLE public.%I TO agentpass_backup',
       relation_name
     );
   END LOOP;
@@ -267,10 +270,9 @@ BEGIN
     'agentpass_hosted_identity_bootstrap_csrf_issue(bytea,bytea)',
     'agentpass_hosted_identity_bootstrap_organization_commit_v2(bytea,text,bytea,text,uuid,uuid,uuid)',
     'agentpass_hosted_identity_bootstrap_challenge_create(bytea,uuid,bytea,text,text,timestamptz)',
-    'agentpass_hosted_identity_bootstrap_challenge_consume(bytea,uuid,bytea)',
-    'agentpass_hosted_identity_bootstrap_webauthn_replay_context(bytea,uuid,bytea)',
-    'agentpass_hosted_identity_bootstrap_webauthn_complete_v2(uuid,bytea,uuid,bytea,bytea,bytea,bytea,bigint,text[],text,boolean,boolean,bytea,bytea)',
-    'agentpass_hosted_identity_bootstrap_challenge_fail(bytea,uuid,bytea,text)'
+    'agentpass_hosted_identity_bootstrap_webauthn_claim_v2(bytea,uuid,bytea,bytea)',
+    'agentpass_hosted_identity_bootstrap_webauthn_complete_v3(uuid,bytea,uuid,bytea,bytea,bigint,bytea,bytea,bytea,bigint,text[],text,boolean,boolean,bytea,bytea)',
+    'agentpass_hosted_identity_bootstrap_webauthn_fail_v3(bytea,uuid,bytea,bytea,bigint,text)'
   ] LOOP
     IF to_regprocedure('public.' || routine_signature) IS NOT NULL THEN
       EXECUTE format('GRANT EXECUTE ON FUNCTION public.%s TO agentpass_app', routine_signature);

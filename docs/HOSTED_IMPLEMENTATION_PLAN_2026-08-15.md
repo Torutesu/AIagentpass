@@ -1,7 +1,7 @@
 # Hosted v1 implementation plan
 
 Status: active  
-Baseline: `codex/agent-platform` at migration `0062`
+Baseline: `codex/agent-platform` at migration `0063`
 Updated: 2026-08-15
 
 This is the implementation plan for the Hosted identity, first-organization,
@@ -40,8 +40,12 @@ Implemented and pushed:
   verified credential and ordinary Human Session with database-owned identity,
   epochs, session ID, limits, and timestamps. A digest-only, one-use receipt
   supports a two-minute response-loss retry without storing bearer values;
-- the frozen catalog validates 172 entries, 49 schemas, 61 OpenAPI operations,
-  and all 62 forward-only migrations. Hosted bootstrap remains a separately
+- migration `0063` adds deterministic, digest-only WebAuthn verification claims
+  with a database-owned 30-second lease, monotonic generation fencing, safe
+  same-response restart, expired-lease takeover, claim-bound completion/failure
+  entry points, and append-only claim lifecycle evidence;
+- the frozen catalog validates 173 entries, 49 schemas, 61 OpenAPI operations,
+  and all 63 forward-only migrations. Hosted bootstrap remains a separately
   frozen six-route contract with its own validator.
 
 Not yet implemented as a production-composable path:
@@ -50,10 +54,10 @@ Not yet implemented as a production-composable path:
 - real-PostgreSQL restart/race qualification of atomic identity completion;
 - real-PostgreSQL restart/race and rollback qualification of atomic WebAuthn
   credential plus Human Session completion;
-- a leased/recoverable WebAuthn verification claim so a process death after
-  claim but before completion cannot strand the ceremony until expiry;
+- real-PostgreSQL qualification of leased/recoverable WebAuthn verification
+  claims under process death, lease expiry, takeover, and changed responses;
 - runtime routing, Console pages, deployed E2E, and production evidence.
-- a terminal green CI qualification at schema head `0062`; the previous run
+- a terminal green CI qualification at schema head `0063`; the previous run
   proved fresh migration and role/login boundaries, and this repair set aligns
   legacy 0048 authority, shared-integration fixtures, and live-browser budgets.
 
@@ -159,10 +163,12 @@ creation converges to one organization and one owner membership.
 
 ### H3 — atomic bootstrap WebAuthn and Human Session issuance
 
-State: migration `0062`, PostgreSQL repository adapter, strict-verifier service,
-one-use response-recovery receipt, and focused tests are implemented in source.
-Real PostgreSQL 16/17, two-instance contention, process-kill, and claim-lease
-qualification remain before this package is production-composable.
+State: migrations `0062` and `0063`, PostgreSQL repository adapter,
+strict-verifier service, one-use response-recovery receipt, deterministic claim
+lease with generation fencing, append-only claim evidence, and focused tests
+are implemented in source. Real PostgreSQL 16/17,
+two-instance contention, and process-kill qualification remain before this
+package is production-composable.
 
 Deliverables:
 
@@ -373,13 +379,44 @@ of the same commit gate.
    - derive response bearer values from an exact-response HMAC binding so the
      same committed session can be reconstructed once during the two-minute
      window without durably storing plaintext bearer material.
-7. `feat: compose hosted bootstrap runtime routes`
-   - wire the six frozen routes to H1-H3 PostgreSQL services;
-   - enforce startup configuration, trusted proxy/origin rules, deadlines,
-     rate limits, readiness, graceful drain, fixed errors, and zero fallback;
-   - add request-scoped correlation IDs and fixed-cardinality, secret-free
-     metrics/audit events.
-8. `feat: build hosted console onboarding`
+7. `feat: fence hosted webauthn verification claims` (`0063`) — implemented
+   - bind external verification to a deterministic digest-only 30-second lease
+     owned by the PostgreSQL clock, never to raw browser-visible authority;
+   - return and require a monotonic claim generation on completion and failure,
+     so a worker from an expired generation cannot mutate a reclaimed ceremony;
+   - preserve same-response restart and one-use response-loss recovery while
+     rejecting changed responses and ambiguous claims;
+   - append immutable claimed/takeover/completed/replayed/failed/expired events
+     and remove application-role table reads in favor of reviewed functions;
+   - focused source tests are green; PostgreSQL 16/17 fresh/upgrade,
+     two-instance contention, process-kill, and rollback qualification remain
+     mandatory CI gates before production use.
+8. `feat: expose hosted bootstrap status and csrf authority` (`0064`)
+   - add function-only status/CSRF procedures that derive state, membership,
+     organization, WebAuthn requirement, expiry, and completion from the exact
+     bootstrap selector under a database clock;
+   - derive the browser CSRF value from a dedicated stable server key and exact
+     attempt binding, persist only its digest, use constant-time comparison at
+     the application boundary, and rotate/clear it on terminal transitions;
+   - compose a single bootstrap service exposing `status`, `verifyCsrf`, and
+     `createOrganization`, with stable 401/403/409/428/503 classifications and
+     no SQLSTATE or selector leakage;
+   - exit when restart, multiple API instances, stale cookie, wrong CSRF,
+     response loss, and direct-table privilege tests converge on PostgreSQL.
+9. `feat: compose hosted bootstrap runtime routes`
+   - construct the Hosted repository in PostgreSQL runtime, then compose GitHub
+     OAuth, identity, status/CSRF, organization, WebAuthn, and HTTP services in
+     dependency order with no local/evaluation fallback;
+   - require separate stable keys for OAuth envelopes, bootstrap CSRF, WebAuthn
+     response recovery, and ordinary Human Auth; fail startup on omission,
+     aliasing, malformed length, or unsupported hosted profile;
+   - adapt operation- and peer-scoped rate limiting to the HTTP boundary,
+     enforce deadlines/readiness/drain, and dispatch all six exact routes before
+     Human Auth without pre-consuming request bodies or writing twice;
+   - add request correlation and fixed-cardinality secret-free telemetry, then
+     prove cookie rotation, redirects, multiple `Set-Cookie`, strict path/query,
+     404 fallthrough, restart, and two-instance behavior at the real server.
+10. `feat: build hosted console onboarding`
    - implement GitHub start/callback recovery, first-organization, passkey,
      completion, expired, no-membership, and authenticated landing screens;
    - use HttpOnly/Secure/SameSite cookies and in-memory UI state only; add
@@ -387,18 +424,18 @@ of the same commit gate.
      coverage;
    - then add organization switcher and the role-gated member/session/device/
      agent/activity/revocation screens against existing Human APIs.
-9. `test: qualify hosted browser and restart security matrix`
+11. `test: qualify hosted browser and restart security matrix`
    - exercise two API instances plus PostgreSQL under restart, callback replay,
      response loss, concurrent tabs, stale cookies, Origin/CSRF substitution,
      WebAuthn replay, and network/provider failure;
    - scan URL, DOM, console, storage, traces, screenshots, metrics, and audit
      payloads for reusable selectors and credentials.
-10. `feat: complete device helper and managed signer production paths`
+12. `feat: complete device helper and managed signer production paths`
    - finish PostgreSQL Device API enrollment/control/ACK/revocation and the
      headless signed PKG + CLI + Git/Claude Code/Cursor adapters;
    - replace every hosted signing fallback with purpose-separated managed KMS
      keys and qualify idempotency, fencing, rotation, outage, and response loss.
-11. `release: qualify and promote one immutable agentpass candidate`
+13. `release: qualify and promote one immutable agentpass candidate`
     - freeze one source SHA and artifact manifest; run Claude Code/Cursor E2E,
       physical-Mac Secure Enclave/T2 tests, Developer ID signing, notarization,
       stapling, Gatekeeper, Homebrew/direct-download digest equality, staging,
@@ -407,8 +444,8 @@ of the same commit gate.
 
 ### Execution lanes and merge order
 
-- Critical path: schema-head qualification -> recoverable WebAuthn claim lease
-  -> `0062` PostgreSQL race/rollback qualification -> runtime composition ->
+- Critical path: schema-head qualification -> `0062`/`0063` PostgreSQL
+  race/rollback/lease qualification -> runtime composition ->
   Console onboarding -> Hosted E2E.
 - Parallel lane A after `0059` freezes DTOs: read-only Console states, typed BFF
   client, accessibility harness, localization, and browser secret scanner.

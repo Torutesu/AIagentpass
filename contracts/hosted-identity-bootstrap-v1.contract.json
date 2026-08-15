@@ -18,7 +18,8 @@
     "identity_completion_forward_migration": "0059_hosted_identity_atomic_completion",
     "first_organization_forward_migration": "0060_hosted_first_organization_atomic",
     "oauth_output_qualification_forward_migration": "0061_hosted_oauth_output_qualification",
-    "webauthn_session_atomic_forward_migration": "0062_hosted_webauthn_session_atomic"
+    "webauthn_session_atomic_forward_migration": "0062_hosted_webauthn_session_atomic",
+    "webauthn_claim_lease_forward_migration": "0063_hosted_webauthn_claim_lease"
   },
   "authority": {
     "identity_provider": "github",
@@ -32,7 +33,7 @@
     ],
     "server_authority": "postgresql",
     "organization_creation_authority": "agentpass_hosted_identity_bootstrap_organization_commit_v2",
-    "web_authn_authority": "existing strict WebAuthn verifier followed by agentpass_hosted_identity_bootstrap_webauthn_complete_v2, which atomically commits the credential, challenge, bootstrap attempt, Human Session, and digest-only response-loss receipt",
+    "web_authn_authority": "agentpass_hosted_identity_bootstrap_webauthn_claim_v2 grants a database-clock verification lease, then the existing strict WebAuthn verifier feeds agentpass_hosted_identity_bootstrap_webauthn_complete_v3, which claim-binds and atomically commits the credential, challenge, bootstrap attempt, Human Session, and digest-only response-loss receipt",
     "forbidden_identity_sources": [
       "ChatGPT-only ambient identity",
       "caller-supplied GitHub subject, email, member_id, organization_id, or role",
@@ -60,7 +61,7 @@
       "webauthn_challenges",
       "human_sessions"
     ],
-    "hosted_tables": ["hosted_identity_bootstrap_completions"],
+    "hosted_tables": ["hosted_identity_bootstrap_completions", "hosted_identity_bootstrap_webauthn_claim_events"],
     "existing_authority_methods": [
       "createOrganizationWithOwner",
       "getRegistrationUser",
@@ -287,9 +288,12 @@
       "scope": "bootstrap attempt plus one-use challenge",
       "same_verified_request": "return the committed public Human Session during a two-minute response-loss window",
       "different_request": "409 bootstrap_already_completed",
+      "verification_claim": "a deterministic exact-response claim token is stored only as SHA-256; PostgreSQL owns a 30-second lease, increments an unforgeable generation on takeover, and fences completion or failure by both digest and generation",
+      "claim_evidence": "claimed, takeover, completed, replayed, failed, and claimed-expiry events are append-only and retain no raw browser or bearer authority",
       "durable_material": "SHA-256 request and bearer digests only; no raw cookie, CSRF token, attestation, or public key response",
       "application_trust_boundary": "the Hosted WebAuthn service and strict attestation verifier are trusted to submit only verified credential metadata; PostgreSQL re-derives identity, membership, epochs, session identifiers, limits, and timestamps",
       "response_reconstruction": "session and CSRF bearer values are HMAC-SHA-256 derived from a stable 32-byte server key and the exact browser response binding, and the key must remain available for the full two-minute recovery window",
+      "legacy_upgrade_policy": "a response committed before claim leasing has no recoverable generation and is intentionally not adopted; the already-issued ordinary session remains valid, otherwise onboarding restarts",
       "post_window": "restart GitHub OAuth or use the issued ordinary session"
     }
   },

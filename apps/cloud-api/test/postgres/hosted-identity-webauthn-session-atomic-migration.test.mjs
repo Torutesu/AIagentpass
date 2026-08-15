@@ -106,7 +106,7 @@ test("0062 consumes the challenge once and completes the attempt atomically", as
   assert.doesNotMatch(body, /COMMIT;|ROLLBACK;/iu);
 });
 
-test("0062 replaces legacy direct challenge completion with one application entry point", async () => {
+test("0062 keeps its atomic function private after the 0063 claim-bound upgrade", async () => {
   const [sql, roles] = await Promise.all([readFile(migrationUrl, "utf8"), readFile(rolesUrl, "utf8")]);
   const signature = `${FUNCTION}(uuid,bytea,uuid,bytea,bytea,bytea,bytea,bigint,text[],text,boolean,boolean,bytea,bytea)`;
   const legacy = [
@@ -114,9 +114,6 @@ test("0062 replaces legacy direct challenge completion with one application entr
   ];
 
   assert.match(sql, new RegExp(`REVOKE ALL PRIVILEGES ON FUNCTION public\\.${FUNCTION}\\([^;]+\\) FROM PUBLIC`, "u"));
-  assert.ok(roles.includes(`'${signature}'`), "agentpass_app must receive only the atomic entry point");
-  assert.ok(roles.includes("'agentpass_hosted_identity_bootstrap_challenge_consume(bytea,uuid,bytea)'"));
-  assert.ok(roles.includes("'agentpass_hosted_identity_bootstrap_webauthn_replay_context(bytea,uuid,bytea)'"));
-  assert.ok(roles.includes("'agentpass_hosted_identity_bootstrap_challenge_fail(bytea,uuid,bytea,text)'"));
+  assert.equal(roles.includes(`'${signature}'`), false, "0062 entry point must be hidden behind the 0063 claim-bound wrapper");
   for (const oldSignature of legacy) assert.equal(roles.includes(`'${oldSignature}'`), false, oldSignature);
 });

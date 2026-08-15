@@ -105,19 +105,21 @@ export function createHostedWebAuthnBootstrapService({
     const credential = normalizeCredential(input.credential);
     const clientData = decodeClientData(credential.client_data_json, origin);
     const challenge = clientData.challenge;
-    const proof = { bootstrap_cookie: opaque(input.bootstrap_token), challenge_id: challengeId, challenge };
+    const responseBinding = completionBinding(input.bootstrap_token, challengeId, credential);
+    const claimToken = deriveToken(key, "claim", responseBinding);
+    const proof = {
+      bootstrap_cookie: opaque(input.bootstrap_token),
+      challenge_id: challengeId,
+      challenge,
+      claim_token: claimToken
+    };
 
     let binding;
-    let claimed = false;
     try {
-      binding = await repository.getWebAuthnReplayContext(proof);
-      if (binding === null) {
-        binding = await repository.consumeChallenge(proof);
-        claimed = true;
-      }
-    } catch { fail("REPLAYED"); }
-    if (binding === null) fail("INVALID");
-    assertBinding(binding, challengeId, rpId, origin);
+      binding = await repository.claimChallengeV2(proof);
+    } catch { fail("UNAVAILABLE"); }
+    if (binding === null) fail("REPLAYED");
+    assertBinding(binding, challengeId, rpId, origin, true);
 
     let verified;
     try {
@@ -137,20 +139,21 @@ export function createHostedWebAuthnBootstrapService({
         parsed: Object.freeze({ client_data: clientData })
       })), credential);
     } catch {
-      if (claimed) await failClaimBestEffort(proof);
+      await failClaimBestEffort({ ...proof, claim_generation: binding.claim_generation });
       fail("INVALID");
     }
 
-    const responseBinding = completionBinding(input.bootstrap_token, challengeId, credential);
     const sessionToken = deriveToken(key, "session", responseBinding);
     const csrfToken = deriveToken(key, "csrf", responseBinding);
     let completed;
     try {
-      completed = await repository.completeWebAuthnRegistrationV2({
+      completed = await repository.completeWebAuthnRegistrationV3({
         attempt_id: binding.attempt_id,
         bootstrap_cookie: input.bootstrap_token,
         challenge_id: challengeId,
         challenge,
+        claim_token: claimToken,
+        claim_generation: binding.claim_generation,
         credential: {
           id: verified.credential_id,
           public_key: verified.public_key,
@@ -174,14 +177,14 @@ export function createHostedWebAuthnBootstrapService({
   }
 
   async function failClaimBestEffort(proof) {
-    try { await repository.failChallenge({ ...proof, failure_code: "verification_failed" }); } catch { /* terminal public error remains fixed */ }
+    try { await repository.failChallengeV3({ ...proof, failure_code: "verification_failed" }); } catch { /* terminal public error remains fixed */ }
   }
 
   return Object.freeze({ options, verify, rpId, origin });
 }
 
 function assertRepository(value) {
-  for (const method of ["createChallenge", "consumeChallenge", "getWebAuthnReplayContext", "completeWebAuthnRegistrationV2", "failChallenge"]) {
+  for (const method of ["createChallenge", "claimChallengeV2", "completeWebAuthnRegistrationV3", "failChallengeV3"]) {
     if (!value || typeof value[method] !== "function") throw new TypeError(`repository.${method} is required`);
   }
 }
@@ -191,8 +194,8 @@ function assertRouteContext(value, rpId, origin, keys = ["bootstrap_token", "rp_
   opaque(value.bootstrap_token);
 }
 
-function assertBinding(value, challengeId, rpId, origin) {
-  if (!plain(value) || value.challenge_id !== undefined && value.challenge_id !== challengeId || !UUID_V4.test(value.attempt_id ?? challengeId) || !UUID_V4.test(value.member_id) || !UUID_V4.test(value.organization_id) || value.rp_id !== rpId || value.origin !== origin || value.user_verification !== undefined && value.user_verification !== "required") fail("UNAVAILABLE");
+function assertBinding(value, challengeId, rpId, origin, requireClaim = false) {
+  if (!plain(value) || value.challenge_id !== undefined && value.challenge_id !== challengeId || !UUID_V4.test(value.attempt_id ?? challengeId) || !UUID_V4.test(value.member_id) || !UUID_V4.test(value.organization_id) || value.rp_id !== rpId || value.origin !== origin || value.user_verification !== undefined && value.user_verification !== "required" || requireClaim && (!Number.isSafeInteger(value.claim_generation) || value.claim_generation < 1)) fail("UNAVAILABLE");
 }
 
 function normalizeGeneratedOptions(value, expected) {

@@ -153,9 +153,9 @@ app_function_allowlist(routine_signature) AS (
     ('agentpass_hosted_identity_bootstrap_csrf_issue(bytea,bytea)'),
     ('agentpass_hosted_identity_bootstrap_organization_commit_v2(bytea,text,bytea,text,uuid,uuid,uuid)'),
     ('agentpass_hosted_identity_bootstrap_challenge_create(bytea,uuid,bytea,text,text,timestamptz)'),
-    ('agentpass_hosted_identity_bootstrap_challenge_consume(bytea,uuid,bytea)'),
-    ('agentpass_hosted_identity_bootstrap_challenge_complete(bytea,uuid,bytea)'),
-    ('agentpass_hosted_identity_bootstrap_challenge_fail(bytea,uuid,bytea,text)')
+    ('agentpass_hosted_identity_bootstrap_webauthn_claim_v2(bytea,uuid,bytea,bytea)'),
+    ('agentpass_hosted_identity_bootstrap_webauthn_complete_v3(uuid,bytea,uuid,bytea,bytea,bigint,bytea,bytea,bytea,bigint,text[],text,boolean,boolean,bytea,bytea)'),
+    ('agentpass_hosted_identity_bootstrap_webauthn_fail_v3(bytea,uuid,bytea,bytea,bigint,text)')
 ),
 signer_function_oids AS (
   SELECT routine_signature, to_regprocedure('public.' || routine_signature) AS routine_oid
@@ -227,7 +227,9 @@ table_privilege_observations AS (
         OR left(t.relname, length('hosted_identity_')) = 'hosted_identity_' THEN 'authority'
       ELSE 'application' END AS expected_class,
     array_remove(ARRAY[
-      CASE WHEN has_table_privilege('agentpass_app', t.oid, 'SELECT') THEN NULL ELSE 'app:select' END,
+      CASE WHEN left(t.relname, length('hosted_identity_')) = 'hosted_identity_'
+        THEN CASE WHEN NOT has_table_privilege('agentpass_app', t.oid, 'SELECT') THEN NULL ELSE 'app:select' END
+        ELSE CASE WHEN has_table_privilege('agentpass_app', t.oid, 'SELECT') THEN NULL ELSE 'app:select_missing' END END,
       CASE WHEN (t.relname IN ('schema_migrations', 'schema_migration_attempts', 'release_candidates')
           OR left(t.relname, length('managed_signer_')) = 'managed_signer_'
           OR left(t.relname, length('platform_')) = 'platform_'

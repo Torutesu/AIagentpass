@@ -25,23 +25,20 @@ function clientData(challenge, overrides = {}) {
   return Buffer.from(JSON.stringify({ type: "webauthn.create", challenge, origin: ORIGIN, crossOrigin: false, ...overrides })).toString("base64url");
 }
 
-function fixture() {
-  const calls = { create: [], consume: [], replay: [], complete: [], fail: [], verify: [] };
+function fixture({ claimError = null } = {}) {
+  const calls = { create: [], claim: [], complete: [], fail: [], verify: [] };
   let completed = false;
   const repository = {
     async createChallenge(input) {
       calls.create.push(input);
       return { challenge_id: input.challenge_id, member_id: IDS.member, organization_id: IDS.organization, rp_id: RP_ID, origin: ORIGIN, expires_at: input.expires_at };
     },
-    async getWebAuthnReplayContext(input) {
-      calls.replay.push(input);
-      return completed ? { attempt_id: IDS.attempt, member_id: IDS.member, organization_id: IDS.organization, rp_id: RP_ID, origin: ORIGIN, user_verification: "required" } : null;
+    async claimChallengeV2(input) {
+      if (claimError) throw claimError;
+      calls.claim.push(input);
+      return { attempt_id: IDS.attempt, member_id: IDS.member, organization_id: IDS.organization, rp_id: RP_ID, origin: ORIGIN, user_verification: "required", claim_generation: 1, claim_expires_at: new Date(NOW + 30_000).toISOString() };
     },
-    async consumeChallenge(input) {
-      calls.consume.push(input);
-      return { attempt_id: IDS.attempt, member_id: IDS.member, organization_id: IDS.organization, rp_id: RP_ID, origin: ORIGIN, user_verification: "required" };
-    },
-    async completeWebAuthnRegistrationV2(input) {
+    async completeWebAuthnRegistrationV3(input) {
       calls.complete.push(input);
       completed = true;
       return {
@@ -51,7 +48,7 @@ function fixture() {
         session: { version: 1, session_id: IDS.session, member_id: IDS.member, organization_id: IDS.organization, role: "owner", created_at: new Date(NOW).toISOString(), expires_at: new Date(NOW + 8 * 60 * 60 * 1000).toISOString(), recent_auth_at: null }
       };
     },
-    async failChallenge(input) { calls.fail.push(input); return true; }
+    async failChallengeV3(input) { calls.fail.push(input); return true; }
   };
   const registrationVerifier = {
     async generateOptions(input) {
@@ -95,10 +92,13 @@ test("strict verification delegates one atomic credential and Human Session comm
   assert.match(result.session_token, /^[A-Za-z0-9_-]{43}$/u);
   assert.match(result.csrf_token, /^[A-Za-z0-9_-]{43}$/u);
   assert.equal(result.session.session_id, IDS.session);
-  assert.equal(calls.consume.length, 1);
+  assert.equal(calls.claim.length, 1);
+  assert.match(calls.claim[0].claim_token, /^[A-Za-z0-9_-]{43}$/u);
   assert.equal(calls.verify.length, 1);
   assert.equal(calls.complete.length, 1);
   assert.equal(calls.complete[0].attempt_id, IDS.attempt);
+  assert.equal(calls.complete[0].claim_token, calls.claim[0].claim_token);
+  assert.equal(calls.complete[0].claim_generation, 1);
   assert.equal(calls.complete[0].credential.id, CREDENTIAL_ID);
   assert.deepEqual(calls.complete[0].credential.public_key, PUBLIC_KEY);
   assert.equal(calls.complete[0].session.token, result.session_token);
@@ -115,14 +115,15 @@ test("an identical response-loss retry reconstructs the same bearer material", a
   assert.equal(replay.session_token, first.session_token);
   assert.equal(replay.csrf_token, first.csrf_token);
   assert.deepEqual(replay.session, first.session);
-  assert.equal(calls.consume.length, 1, "completed retry must use replay context instead of consuming again");
+  assert.equal(calls.claim.length, 2, "completed retry must reclaim the same deterministic response binding");
+  assert.equal(calls.claim[0].claim_token, calls.claim[1].claim_token);
   assert.equal(calls.complete.length, 2);
 });
 
 test("wrong origin and failed user verification burn a claimed challenge", async () => {
   const wrong = fixture();
   await assert.rejects(wrong.service.verify({ bootstrap_token: BOOTSTRAP, challenge_id: IDS.challenge, credential: { credential_id: CREDENTIAL_ID, client_data_json: clientData(Buffer.alloc(32, 0x55).toString("base64url"), { origin: "https://evil.example" }), attestation_object: Buffer.alloc(64).toString("base64url"), transports: [] }, rp_id: RP_ID, origin: ORIGIN, user_verification: "required" }), (error) => error.code === CODES.INVALID);
-  assert.equal(wrong.calls.consume.length, 0);
+  assert.equal(wrong.calls.claim.length, 0);
 
   const failed = fixture();
   const challenge = Buffer.alloc(32, 0x55).toString("base64url");
@@ -132,7 +133,18 @@ test("wrong origin and failed user verification burn a claimed challenge", async
   // credential id after the durable claim; strict normalization must burn it.
   const badCredential = { credential_id: Buffer.alloc(32, 0x77).toString("base64url"), client_data_json: clientData(challenge), attestation_object: Buffer.alloc(64).toString("base64url"), transports: [] };
   await assert.rejects(failed.service.verify({ bootstrap_token: BOOTSTRAP, challenge_id: IDS.challenge, credential: badCredential, rp_id: RP_ID, origin: ORIGIN, user_verification: "required" }), (error) => error.code === CODES.INVALID);
-  assert.equal(failed.calls.consume.length, 1);
+  assert.equal(failed.calls.claim.length, 1);
   assert.equal(failed.calls.fail.length, 1);
+  assert.equal(failed.calls.fail[0].claim_generation, 1);
   assert.equal(failed.calls.complete.length, 0);
+});
+
+test("storage failure during claim is unavailable rather than a false replay", async () => {
+  const unavailable = fixture({ claimError: new Error("database unavailable with secret details") });
+  const challenge = Buffer.alloc(32, 0x55).toString("base64url");
+  const credential = { credential_id: CREDENTIAL_ID, client_data_json: clientData(challenge), attestation_object: Buffer.alloc(64, 0x66).toString("base64url"), transports: ["internal"] };
+  await assert.rejects(
+    unavailable.service.verify({ bootstrap_token: BOOTSTRAP, challenge_id: IDS.challenge, credential, rp_id: RP_ID, origin: ORIGIN, user_verification: "required" }),
+    (error) => error.code === CODES.UNAVAILABLE && !/database|secret/iu.test(error.message)
+  );
 });

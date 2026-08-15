@@ -23,6 +23,7 @@ const REQUIRED_FILES = [
   "contracts/postgres/0060_hosted_first_organization_atomic.sql",
   "contracts/postgres/0061_hosted_oauth_output_qualification.sql",
   "contracts/postgres/0062_hosted_webauthn_session_atomic.sql",
+  "contracts/postgres/0063_hosted_webauthn_claim_lease.sql",
   "contracts/schemas/human-session-v1.schema.json",
   "contracts/schemas/webauthn-ceremony-v1.schema.json",
   "apps/cloud-api/src/human-session.mjs",
@@ -56,7 +57,8 @@ export function validateHostedIdentityBootstrapContract(document, { root = DEFAU
       || document.activation?.identity_completion_forward_migration !== "0059_hosted_identity_atomic_completion"
       || document.activation?.first_organization_forward_migration !== "0060_hosted_first_organization_atomic"
       || document.activation?.oauth_output_qualification_forward_migration !== "0061_hosted_oauth_output_qualification"
-      || document.activation?.webauthn_session_atomic_forward_migration !== "0062_hosted_webauthn_session_atomic") fail("migration ordering is not pinned after identity epoch invalidation");
+      || document.activation?.webauthn_session_atomic_forward_migration !== "0062_hosted_webauthn_session_atomic"
+      || document.activation?.webauthn_claim_lease_forward_migration !== "0063_hosted_webauthn_claim_lease") fail("migration ordering is not pinned after identity epoch invalidation");
 
     const authority = document.authority;
     if (!isObject(authority) || authority.identity_provider !== "github" || authority.server_authority !== "postgresql") fail("authority is not GitHub/PostgreSQL");
@@ -112,6 +114,11 @@ export function validateHostedIdentityBootstrapContract(document, { root = DEFAU
     const idempotency = document.idempotency?.organization_create;
     if (!isObject(idempotency) || idempotency.header !== "Idempotency-Key" || idempotency.format !== "8-255 ASCII characters matching [A-Za-z0-9._~-]") fail("organization idempotency contract is not pinned");
     if (!IDEMPOTENCY_KEY.test("bootstrap-2026")) fail("validator idempotency regex is invalid");
+    const webauthnCompletion = document.idempotency?.webauthn_completion;
+    if (!isObject(webauthnCompletion)
+      || !/generation/i.test(webauthnCompletion.verification_claim ?? "")
+      || !/append-only/i.test(webauthnCompletion.claim_evidence ?? "")
+      || !/before claim leasing/i.test(webauthnCompletion.legacy_upgrade_policy ?? "")) fail("WebAuthn claim fencing and upgrade policy are not pinned");
     for (const code of ["bootstrap_idempotency_conflict", "bootstrap_already_completed", "bootstrap_no_membership", "bootstrap_webauthn_required", "bootstrap_unavailable"]) {
       if (!document.errors?.some((error) => error.code === code)) fail(`missing stable error ${code}`);
     }
