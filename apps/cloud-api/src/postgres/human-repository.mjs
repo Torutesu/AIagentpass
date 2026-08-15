@@ -128,7 +128,7 @@ export function createPostgresHumanRepository({ client, onAuthorityReduction } =
   }
 
   async function findSessionByTokenHash(input) {
-    const result = await client.query(`SELECT s.*,encode(s.token_hash,'hex') AS token_hash_hex,encode(s.csrf_token_hash,'hex') AS csrf_token_hash_hex FROM human_sessions s JOIN memberships m ON m.organization_id=s.organization_id AND m.member_id=s.member_id AND m.id=s.membership_id JOIN organizations o ON o.id=s.organization_id WHERE s.token_hash=$1 AND m.status='active' AND m.role=s.role AND o.authority_epoch=s.organization_authority_epoch AND m.session_epoch=s.membership_session_epoch LIMIT 1`, [bytes32(input.token_hash ?? input.tokenHash)]);
+    const result = await client.query(`SELECT s.*,encode(s.token_hash,'hex') AS token_hash_hex,encode(s.csrf_token_hash,'hex') AS csrf_token_hash_hex FROM human_sessions s JOIN memberships m ON m.organization_id=s.organization_id AND m.member_id=s.member_id AND m.id=s.membership_id JOIN organizations o ON o.id=s.organization_id WHERE s.token_hash=$1 AND s.revoked_at IS NULL AND s.expires_at>clock_timestamp() AND (s.idle_expires_at IS NULL OR s.idle_expires_at>clock_timestamp()) AND m.status='active' AND m.role=s.role AND o.authority_epoch=s.organization_authority_epoch AND m.session_epoch=s.membership_session_epoch LIMIT 1`, [bytes32(input.token_hash ?? input.tokenHash)]);
     return sessionRow(result.rows?.[0]);
   }
 
@@ -263,7 +263,7 @@ export function createPostgresHumanRepository({ client, onAuthorityReduction } =
   }
 
   async function listCredentialsForSession(input) {
-    const result = await client.query(`SELECT c.id,c.transports FROM webauthn_credentials c JOIN human_sessions s ON s.member_id=c.member_id JOIN memberships m ON m.organization_id=s.organization_id AND m.member_id=s.member_id AND m.id=s.membership_id JOIN organizations o ON o.id=s.organization_id WHERE s.id=$1 AND s.organization_id=$2 AND s.revoked_at IS NULL AND s.expires_at>clock_timestamp() AND c.revoked_at IS NULL AND m.status='active' AND m.role=s.role AND o.authority_epoch=s.organization_authority_epoch AND m.session_epoch=s.membership_session_epoch ORDER BY c.created_at ASC,c.id ASC LIMIT 64`, [uuid(input.session_id), uuid(input.organization_id)]);
+    const result = await client.query(`SELECT c.id,c.transports FROM webauthn_credentials c JOIN human_sessions s ON s.member_id=c.member_id JOIN memberships m ON m.organization_id=s.organization_id AND m.member_id=s.member_id AND m.id=s.membership_id JOIN organizations o ON o.id=s.organization_id WHERE s.id=$1 AND s.organization_id=$2 AND s.revoked_at IS NULL AND s.expires_at>clock_timestamp() AND (s.idle_expires_at IS NULL OR s.idle_expires_at>clock_timestamp()) AND c.revoked_at IS NULL AND m.status='active' AND m.role=s.role AND o.authority_epoch=s.organization_authority_epoch AND m.session_epoch=s.membership_session_epoch ORDER BY c.created_at ASC,c.id ASC LIMIT 64`, [uuid(input.session_id), uuid(input.organization_id)]);
     return (result.rows ?? []).map((row) => ({ id: credentialId(row.id), type: "public-key", transports: credentialTransports(row.transports) }));
   }
 

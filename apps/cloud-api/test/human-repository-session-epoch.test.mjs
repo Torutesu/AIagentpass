@@ -69,6 +69,32 @@ test("all authority-bearing session and credential paths require exact current e
   }
 });
 
+test("token authentication and WebAuthn allow-list lookup require a currently usable session", async () => {
+  const calls = [];
+  const client = { async query(text, params) {
+    calls.push({ text, params });
+    return { rowCount: 0, rows: [] };
+  } };
+  const repository = createPostgresHumanRepository({ client });
+
+  assert.equal(await repository.findSessionByTokenHash({ token_hash: "a".repeat(64) }), null);
+  assert.deepEqual(await repository.listCredentialsForSession({ session_id: ids.session, organization_id: ids.organization }), []);
+
+  const sessionLookup = calls[0].text;
+  assert.match(sessionLookup, /s\.revoked_at IS NULL/);
+  assert.match(sessionLookup, /s\.expires_at>clock_timestamp\(\)/);
+  assert.match(sessionLookup, /s\.idle_expires_at IS NULL OR s\.idle_expires_at>clock_timestamp\(\)/);
+  assert.match(sessionLookup, /o\.authority_epoch=s\.organization_authority_epoch/);
+  assert.match(sessionLookup, /m\.session_epoch=s\.membership_session_epoch/);
+
+  const credentialLookup = calls[1].text;
+  assert.match(credentialLookup, /s\.revoked_at IS NULL/);
+  assert.match(credentialLookup, /s\.expires_at>clock_timestamp\(\)/);
+  assert.match(credentialLookup, /s\.idle_expires_at IS NULL OR s\.idle_expires_at>clock_timestamp\(\)/);
+  assert.match(credentialLookup, /o\.authority_epoch=s\.organization_authority_epoch/);
+  assert.match(credentialLookup, /m\.session_epoch=s\.membership_session_epoch/);
+});
+
 test("rotateSession atomically snapshots current epochs and revokes the exact old session", async () => {
   const client = new RotationClient();
   const repository = createPostgresHumanRepository({ client });
