@@ -319,9 +319,7 @@ async function seedN1AuthorityRows(pool) {
     RELEASE_MANIFEST_DIGEST,
     QUALIFICATION_DIGEST
   ]);
-  const approval = await pool.query("SELECT record_digest, expires_at FROM platform_promotion_approvals WHERE approval_id = $1", [APPROVAL_ID]);
-  assert.equal(approval.rows.length, 1);
-  await pool.query(`INSERT INTO platform_promotion_issuances
+  const issuance = await pool.query(`INSERT INTO platform_promotion_issuances
     (promotion_id, deployment_id, environment, candidate_id, idempotency_key, state,
      approval_id, approval_digest, source_commit, source_tree, product_pkg_sha256,
      image_digest, sbom_sha256, qualification_report_digests, release_manifest_schema_version,
@@ -329,29 +327,25 @@ async function seedN1AuthorityRows(pool) {
      protocol_version, signing_version, lifecycle_version, key_id, key_version,
      signer_key_fingerprint, provider_operation_id, request_digest, evidence_bytes,
      evidence_digest, deployment_generation)
-    VALUES ($1, $2, $3, $4, 'n1-seeded-issuance', 'committed', $5, $6, $7, $8, $9, $10, $11,
-      ARRAY[$12], 4, $13, $14, clock_timestamp(), clock_timestamp() + interval '15 minutes',
-      $15, 3, 3, 1, $16, 1, decode($17, 'hex'), 'n1-seeded-provider-operation', decode($18, 'hex'),
-      convert_to('n1 seeded evidence', 'UTF8'), sha256(convert_to('n1 seeded evidence', 'UTF8')), 1)`, [
+    SELECT $1, approval.deployment_id, approval.environment, approval.candidate_id,
+      'n1-seeded-issuance', 'committed', approval.approval_id, approval.record_digest,
+      approval.source_commit, approval.source_tree, approval.product_pkg_sha256,
+      approval.image_digest, approval.sbom_sha256, approval.qualification_report_digests,
+      approval.release_manifest_schema_version, approval.release_manifest_sha256,
+      approval.expires_at, clock_timestamp(), clock_timestamp() + interval '15 minutes',
+      $3, 3, 3, 1, $4, 1, decode($5, 'hex'), 'n1-seeded-provider-operation', decode($6, 'hex'),
+      convert_to('n1 seeded evidence', 'UTF8'), sha256(convert_to('n1 seeded evidence', 'UTF8')), 1
+    FROM platform_promotion_approvals AS approval
+    WHERE approval.approval_id = $2
+    RETURNING promotion_id`, [
     PROMOTION_ID,
-    DEPLOYMENT_ID,
-    ENVIRONMENT,
-    CANDIDATE_ID,
     APPROVAL_ID,
-    approval.rows[0].record_digest,
-    SOURCE_COMMIT,
-    SOURCE_TREE,
-    CANDIDATE_DIGEST,
-    IMAGE_DIGEST,
-    SBOM_DIGEST,
-    QUALIFICATION_DIGEST,
-    RELEASE_MANIFEST_DIGEST,
-    approval.rows[0].expires_at,
     AUTHORITY_PURPOSE,
     AUTHORITY_KEY_ID,
     AUTHORITY_FINGERPRINT_HEX,
     "27".repeat(32)
   ]);
+  assert.equal(issuance.rows.length, 1);
 }
 
 async function main() {

@@ -665,6 +665,31 @@ jobs:
           node-version: 22
           cache: npm
       - run: npm ci
+      - name: Migrate shared PostgreSQL integration database once
+        env:
+          AGENTPASS_TEST_DATABASE_URL: postgresql://postgres:agentpass-integration@127.0.0.1:5432/postgres
+        run: |
+          node --input-type=module <<'NODE'
+          import { Pool } from "pg";
+          import { createMigrationRunner } from "./apps/cloud-api/src/postgres/migration-runner.mjs";
+          const pool = new Pool({ connectionString: process.env.AGENTPASS_TEST_DATABASE_URL });
+          const client = await pool.connect();
+          try {
+            await createMigrationRunner({ client, applicationVersion: "postgres-integration-preflight" }).run();
+          } catch (error) {
+            const cause = error?.cause;
+            console.error(JSON.stringify({
+              code: error?.code ?? "ERR_UNKNOWN",
+              database_code: cause?.code ?? null,
+              constraint: cause?.constraint ?? null,
+              routine: cause?.routine ?? null
+            }));
+            process.exitCode = 1;
+          } finally {
+            client.release();
+            await pool.end();
+          }
+          NODE
       - name: Run real PostgreSQL authority and signed-session E2E
         env:
           AGENTPASS_TEST_DATABASE_URL: postgresql://postgres:agentpass-integration@127.0.0.1:5432/postgres
