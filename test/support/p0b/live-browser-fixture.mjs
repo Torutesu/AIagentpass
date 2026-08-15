@@ -175,7 +175,10 @@ export async function startP0BLiveBrowserFixture({
         const response = await responsePromise;
         stage = "http";
         if (!response.ok()) {
-          stage = [400, 401, 403, 409, 429, 500, 502, 503].includes(response.status) ? `http_${response.status}` : "http_other";
+          if ([400, 401, 403, 404, 405, 409, 415, 422, 429, 500, 502, 503, 504].includes(response.status)) stage = `http_${response.status}`;
+          else if (response.status >= 400 && response.status < 500) stage = "http_4xx";
+          else if (response.status >= 500 && response.status < 600) stage = "http_5xx";
+          else stage = "http_other";
           throw new Error("session bootstrap was rejected");
         }
         stage = "contract";
