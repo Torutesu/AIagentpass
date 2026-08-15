@@ -21,24 +21,36 @@ private final class HarnessResultBox<Value>: @unchecked Sendable {
 private final class HarnessContinuation: @unchecked Sendable {
     private let lock = NSLock()
     private var continuation: CheckedContinuation<Void, Never>?
+    private var timeoutWorkItem: DispatchWorkItem?
 
     init(_ continuation: CheckedContinuation<Void, Never>) {
         self.continuation = continuation
     }
 
     func resume() {
-        let pending = lock.withLock { () -> CheckedContinuation<Void, Never>? in
-            defer { continuation = nil }
-            return continuation
+        let pending: (CheckedContinuation<Void, Never>?, DispatchWorkItem?) = lock.withLock {
+            defer {
+                continuation = nil
+                timeoutWorkItem = nil
+            }
+            return (continuation, timeoutWorkItem)
         }
-        pending?.resume()
+        pending.1?.cancel()
+        pending.0?.resume()
+    }
+
+    func armTimeout(after interval: DispatchTimeInterval) {
+        let workItem = DispatchWorkItem { [weak self] in self?.resume() }
+        lock.withLock { timeoutWorkItem = workItem }
+        DispatchQueue.global(qos: .userInitiated).asyncAfter(
+            deadline: .now() + interval,
+            execute: workItem
+        )
     }
 }
 
 private func enforceHarnessReplyTimeout(_ reply: HarnessContinuation) {
-    DispatchQueue.global(qos: .userInitiated).asyncAfter(deadline: .now() + harnessReplyTimeout) {
-        reply.resume()
-    }
+    reply.armTimeout(after: harnessReplyTimeout)
 }
 
 private final class DummyAgentEndpoint: NSObject, AgentPassAgentXPCProtocol, @unchecked Sendable {
@@ -84,6 +96,8 @@ private final class AgentNegativeHarness: NSObject, NSXPCListenerDelegate {
     let endpoint: DummyAgentEndpoint
     private let listener = NSXPCListener.anonymous()
     private var connections: [NSXPCConnection] = []
+    private var acceptedConnections: [NSXPCConnection] = []
+    private var closed = false
 
     init(endpoint: DummyAgentEndpoint = DummyAgentEndpoint()) {
         self.endpoint = endpoint
@@ -101,10 +115,23 @@ private final class AgentNegativeHarness: NSObject, NSXPCListenerDelegate {
     func listener(_ listener: NSXPCListener, shouldAcceptNewConnection connection: NSXPCConnection) -> Bool {
         connection.exportedInterface = AgentPassAgentXPCInterface.make()
         connection.exportedObject = endpoint
+        acceptedConnections.append(connection)
         connection.resume()
         return true
     }
-    deinit { connections.forEach { $0.invalidate() }; listener.invalidate() }
+
+    func close() {
+        guard !closed else { return }
+        closed = true
+        listener.delegate = nil
+        connections.forEach { $0.invalidate() }
+        acceptedConnections.forEach { $0.invalidate() }
+        connections.removeAll()
+        acceptedConnections.removeAll()
+        listener.invalidate()
+    }
+
+    deinit { close() }
 }
 
 private func protocolSelectors(_ proto: Protocol) -> Set<String> {
@@ -116,6 +143,7 @@ private func protocolSelectors(_ proto: Protocol) -> Set<String> {
 
 @Test func agentAnonymousXPCInvokesOnlyTheExactAgentStatusSelector() async throws {
     let harness = AgentNegativeHarness()
+    defer { harness.close() }
     let connection = harness.connection(interface: AgentPassAgentXPCInterface.make())
     let request = try #require(AgentPassAgentSessionStatusRequest(sessionID: harnessSessionID))
     let result = HarnessResultBox<AgentPassAgentSessionStatusResponse>()
@@ -143,6 +171,7 @@ private func protocolSelectors(_ proto: Protocol) -> Set<String> {
     #expect(interface.classes(for: #selector(AgentPassAgentXPCProtocol.signGitCommit(_:withReply:)), argumentIndex: 0, ofReply: false).isEmpty == false)
 
     let harness = AgentNegativeHarness()
+    defer { harness.close() }
     let connection = harness.connection(interface: NSXPCInterface(with: AgentPassNativeServiceProtocol.self))
     let result = HarnessResultBox<NSError>()
     await withCheckedContinuation { continuation in
@@ -165,6 +194,7 @@ private func protocolSelectors(_ proto: Protocol) -> Set<String> {
 
 @Test func agentDeniedSignReturnsAStableFailClosedNSError() async throws {
     let harness = AgentNegativeHarness(endpoint: DummyAgentEndpoint(denySigning: true))
+    defer { harness.close() }
     let connection = harness.connection(interface: AgentPassAgentXPCInterface.make())
     let request = try #require(AgentPassAgentSignRequest(sessionID: harnessSessionID, requestID: harnessRequestID, capabilityID: harnessCapabilityID, commitPayload: Data("tree abc\n\nmessage\n".utf8), requestNonce: Data(repeating: 1, count: 32), createdAtMilliseconds: 4_000_000_000_000))
     let result = HarnessResultBox<NSError>()

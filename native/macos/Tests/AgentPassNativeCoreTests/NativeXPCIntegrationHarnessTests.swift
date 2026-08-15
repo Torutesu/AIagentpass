@@ -3,6 +3,7 @@ import Foundation
 import Testing
 
 private let xpcHarnessErrorDomain = "AgentPass.XPCIntegrationHarness"
+private let xpcHarnessReplyTimeout: DispatchTimeInterval = .seconds(15)
 
 private final class SendableXPCProxy: @unchecked Sendable {
     let value: AgentPassNativeServiceProtocol
@@ -24,6 +25,8 @@ private final class NativeXPCIntegrationHarness: NSObject, NSXPCListenerDelegate
     let service: NativeXPCHarnessService
     private let listener: NSXPCListener
     private(set) var connection: NSXPCConnection!
+    private var acceptedConnections: [NSXPCConnection] = []
+    private var closed = false
 
     init(service: NativeXPCHarnessService = NativeXPCHarnessService()) {
         self.service = service
@@ -44,14 +47,22 @@ private final class NativeXPCIntegrationHarness: NSObject, NSXPCListenerDelegate
     func listener(_ listener: NSXPCListener, shouldAcceptNewConnection newConnection: NSXPCConnection) -> Bool {
         newConnection.exportedInterface = NSXPCInterface(with: AgentPassNativeServiceProtocol.self)
         newConnection.exportedObject = service
+        acceptedConnections.append(newConnection)
         newConnection.resume()
         return true
     }
 
-    deinit {
+    func close() {
+        guard !closed else { return }
+        closed = true
+        listener.delegate = nil
         connection.invalidate()
+        acceptedConnections.forEach { $0.invalidate() }
+        acceptedConnections.removeAll()
         listener.invalidate()
     }
+
+    deinit { close() }
 }
 
 private final class NativeXPCHarnessService: NSObject, AgentPassNativeServiceProtocol, @unchecked Sendable {
@@ -196,26 +207,71 @@ private func unsupportedError() -> NSError {
 private func waitForDataCall(
     _ invoke: (@escaping (NSData?, NSError?) -> Void) -> Void
 ) async throws -> Data {
-    try await withCheckedThrowingContinuation { continuation in
+    try await waitForXPCReply { complete in
         invoke { data, callbackError in
             if let callbackError {
-                continuation.resume(throwing: callbackError)
+                complete(.failure(callbackError))
             } else if let data {
-                continuation.resume(returning: data as Data)
+                complete(.success(data as Data))
             } else {
-                continuation.resume(throwing: harnessError("XPC returned no data"))
+                complete(.failure(harnessError("XPC returned no data")))
             }
         }
     }
 }
 
+private final class XPCReplyGate<Value>: @unchecked Sendable {
+    private let lock = NSLock()
+    private var completion: ((Result<Value, Error>) -> Void)?
+    private var timeoutWorkItem: DispatchWorkItem?
+
+    init(completion: @escaping (Result<Value, Error>) -> Void) {
+        self.completion = completion
+    }
+
+    func armTimeout() {
+        let workItem = DispatchWorkItem { [weak self] in
+            self?.complete(.failure(harnessError("XPC reply timed out")))
+        }
+        lock.withLock { timeoutWorkItem = workItem }
+        DispatchQueue.global(qos: .userInitiated).asyncAfter(
+            deadline: .now() + xpcHarnessReplyTimeout,
+            execute: workItem
+        )
+    }
+
+    func complete(_ result: Result<Value, Error>) {
+        let pending: (((Result<Value, Error>) -> Void)?, DispatchWorkItem?) = lock.withLock {
+            defer {
+                completion = nil
+                timeoutWorkItem = nil
+            }
+            return (completion, timeoutWorkItem)
+        }
+        pending.1?.cancel()
+        pending.0?(result)
+    }
+}
+
+private func waitForXPCReply<Value: Sendable>(
+    _ invoke: (@escaping (Result<Value, Error>) -> Void) -> Void
+) async throws -> Value {
+    try await withCheckedThrowingContinuation { continuation in
+        let gate = XPCReplyGate<Value> { result in
+            continuation.resume(with: result)
+        }
+        gate.armTimeout()
+        invoke { result in gate.complete(result) }
+    }
+}
+
 private func waitForHealthCall(_ proxy: AgentPassNativeServiceProtocol) async throws -> [String: Any] {
-    let data: Data = try await withCheckedThrowingContinuation { continuation in
+    let data: Data = try await waitForDataCall { reply in
         proxy.health { health in
             do {
-                continuation.resume(returning: try JSONSerialization.data(withJSONObject: health, options: [.sortedKeys]))
+                reply(try JSONSerialization.data(withJSONObject: health, options: [.sortedKeys]) as NSData, nil)
             } catch {
-                continuation.resume(throwing: error)
+                reply(nil, error as NSError)
             }
         }
     }
@@ -225,21 +281,22 @@ private func waitForHealthCall(_ proxy: AgentPassNativeServiceProtocol) async th
     return object
 }
 
-private func waitForSignCall(_ proxy: AgentPassNativeServiceProtocol) async -> XPCSignResult {
-    await withCheckedContinuation { continuation in
+private func waitForSignCall(_ proxy: AgentPassNativeServiceProtocol) async throws -> XPCSignResult {
+    try await waitForXPCReply { complete in
         proxy.sign(request: Data("commit".utf8) as NSData) { signature, callbackError in
-            continuation.resume(returning: XPCSignResult(
+            complete(.success(XPCSignResult(
                 signature: signature as String?,
                 errorDomain: callbackError?.domain,
                 errorCode: callbackError?.code,
                 errorDescription: callbackError?.localizedDescription
-            ))
+            )))
         }
     }
 }
 
 @Test func nativeXPCHealthAndStatusRoundTrip() async throws {
     let harness = NativeXPCIntegrationHarness()
+    defer { harness.close() }
     let proxy = harness.proxy()
     let health = try await waitForHealthCall(proxy)
     #expect(health["ok"] as? Bool == true)
@@ -254,6 +311,7 @@ private func waitForSignCall(_ proxy: AgentPassNativeServiceProtocol) async -> X
 
 @Test func nativeXPCManualRefreshJoinsAndDeniesSigningDuringConvergence() async throws {
     let harness = NativeXPCIntegrationHarness()
+    defer { harness.close() }
     let proxy = harness.proxy()
     let concurrentProxy = SendableXPCProxy(proxy)
     harness.service.beginRefreshAwaitingConvergence()
@@ -268,7 +326,7 @@ private func waitForSignCall(_ proxy: AgentPassNativeServiceProtocol) async -> X
     #expect(health["control_operational"] as? Bool == false)
     #expect(harness.service.snapshot.starts == 1)
 
-    let signing = await waitForSignCall(proxy)
+    let signing = try await waitForSignCall(proxy)
     #expect(signing.signature == nil)
     #expect(signing.errorDomain == xpcHarnessErrorDomain)
     #expect(signing.errorCode == 1001)
