@@ -37,6 +37,7 @@ const PLATFORM_APP_FUNCTIONS = Object.freeze([
 const SHARED_CONTROL_APP_FUNCTIONS = Object.freeze([
   'agentpass_consume_device_request_nonce(uuid,uuid,bytea,integer)',
   'agentpass_consume_human_identity_assertion(bytea,timestamptz)',
+  'agentpass_valid_webauthn_transports(text[])',
   'agentpass_acquire_rate_limit(uuid,text,uuid,integer,numeric,integer,integer)',
   'agentpass_acquire_anonymous_rate_limit(text,uuid,integer,numeric,integer,integer)',
   'agentpass_prune_shared_control_expired(integer)',
