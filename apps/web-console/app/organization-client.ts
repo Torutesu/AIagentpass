@@ -127,6 +127,7 @@ export type OrganizationClient = Readonly<{
   removeMember(input: Readonly<{ organizationId: string; memberId: string; expectedVersion: number }> & MutationOptions): Promise<Readonly<{ requestId: string; member: OrganizationMember }>>;
   listInvitations(organizationId: string, options?: RequestOptions & Readonly<{ limit?: number; cursor?: string }>): Promise<InvitationPage>;
   createInvitation(input: Readonly<{ organizationId: string; role: InvitationRole; expiresAt: string }> & MutationOptions): Promise<Readonly<{ requestId: string; invitation: OrganizationInvitation; oneTimeToken: string }>>;
+  reissueInvitation(input: Readonly<{ organizationId: string; invitationId: string; expiresAt: string; expectedVersion: number }> & RequestOptions): Promise<Readonly<{ requestId: string; invitation: OrganizationInvitation; oneTimeToken: string }>>;
   revokeInvitation(input: Readonly<{ organizationId: string; invitationId: string; expectedVersion: number }> & MutationOptions): Promise<Readonly<{ requestId: string; invitation: OrganizationInvitation }>>;
   acceptInvitation(input: Readonly<{ oneTimeToken: string }> & MutationOptions): Promise<Readonly<{ requestId: string; invitation: OrganizationInvitation; member: OrganizationMember }>>;
 }>;
@@ -260,6 +261,25 @@ export function createOrganizationClient(options: OrganizationClientOptions = {}
     return parseInvitationCreated(payload, organizationId);
   };
 
+  const reissueInvitation = async (input: Readonly<{ organizationId: string; invitationId: string; expiresAt: string; expectedVersion: number }> & RequestOptions): Promise<Readonly<{ requestId: string; invitation: OrganizationInvitation; oneTimeToken: string }>> => {
+    const organizationId = requiredUuid(input?.organizationId, "organizationId");
+    const invitationId = requiredUuid(input?.invitationId, "invitationId");
+    const expiresAt = requiredDate(input?.expiresAt, "expiresAt");
+    const expectedVersion = requiredVersion(input?.expectedVersion);
+    const context = await getRequestContext(input);
+    const recentAuth = await resolveRecentAuth(context, organizationId, undefined, "human.organizations.invitation.reissue", input?.signal);
+    const payload = await requestOrganizationJson(
+      fetchImpl,
+      `${ORGANIZATIONS_PATH}/${organizationId}/invitations`,
+      "POST",
+      { reissue_invitation_id: invitationId, expires_at: expiresAt },
+      context,
+      input,
+      { idempotencyKey: makeIdempotencyKey(), expectedVersion, recentAuth },
+    );
+    return parseInvitationCreated(payload, organizationId);
+  };
+
   const revokeInvitation = async (input: Readonly<{ organizationId: string; invitationId: string; expectedVersion: number }> & MutationOptions): Promise<Readonly<{ requestId: string; invitation: OrganizationInvitation }>> => {
     const organizationId = requiredUuid(input?.organizationId, "organizationId");
     const invitationId = requiredUuid(input?.invitationId, "invitationId");
@@ -303,7 +323,7 @@ export function createOrganizationClient(options: OrganizationClientOptions = {}
     }
   }
 
-  return Object.freeze({ getSession, listOrganizations, createOrganization, renameOrganization, listMembers, updateMemberRole, removeMember, listInvitations, createInvitation, revokeInvitation, acceptInvitation });
+  return Object.freeze({ getSession, listOrganizations, createOrganization, renameOrganization, listMembers, updateMemberRole, removeMember, listInvitations, createInvitation, reissueInvitation, revokeInvitation, acceptInvitation });
 }
 
 export async function getOrganizations(options: OrganizationClientOptions & RequestOptions & Readonly<{ limit?: number; cursor?: string }> = {}): Promise<OrganizationPage> {

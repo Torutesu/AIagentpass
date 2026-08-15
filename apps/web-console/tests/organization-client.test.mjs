@@ -136,6 +136,42 @@ test("supports members, invitations, role/remove, revoke, and accept with operat
   }
 });
 
+test("reissues an invitation with operation-bound WebAuthn, quoted version, fresh idempotency, and one raw token", async () => {
+  const calls = [];
+  const recentAuthCalls = [];
+  const expiresAt = "2026-08-21T00:00:00.000Z";
+  const fetchImpl = async (url, init) => {
+    calls.push({ url: String(url), init });
+    if (url === "/api/auth/session") return sessionResponse();
+    assert.equal(url, `/api/auth/organizations/${organizationId}/invitations`);
+    assert.equal(init.method, "POST");
+    return json({ request_id: requestId, invitation: invitation("pending", 2), one_time_token: token }, 201);
+  };
+  const client = createOrganizationClient({
+    fetchImpl,
+    authorizeRecentAuthImpl: async (input) => {
+      recentAuthCalls.push(input);
+      return { authorization_id: recentAuthId };
+    },
+  });
+
+  const first = await client.reissueInvitation({ organizationId, invitationId, expiresAt, expectedVersion: 1 });
+  const second = await client.reissueInvitation({ organizationId, invitationId, expiresAt, expectedVersion: 2 });
+  assert.equal(first.oneTimeToken, token);
+  assert.equal(second.oneTimeToken, token);
+  assert.deepEqual(recentAuthCalls.map((input) => input.operation), ["human.organizations.invitation.reissue", "human.organizations.invitation.reissue"]);
+  const mutationCalls = calls.filter((call) => call.url !== "/api/auth/session");
+  assert.equal(mutationCalls.length, 2);
+  assert.notEqual(mutationCalls[0].init.headers.get("idempotency-key"), mutationCalls[1].init.headers.get("idempotency-key"));
+  for (const [index, call] of mutationCalls.entries()) {
+    assert.equal(call.init.headers.get("agentpass-csrf"), csrf);
+    assert.match(call.init.headers.get("idempotency-key"), /^[A-Za-z0-9._~-]{8,255}$/);
+    assert.equal(call.init.headers.get("if-match"), `"${index + 1}"`);
+    assert.equal(call.init.headers.get("agentpass-recent-auth"), recentAuthId);
+    assert.deepEqual(JSON.parse(call.init.body), { reissue_invitation_id: invitationId, expires_at: expiresAt });
+  }
+});
+
 test("rejects malformed data, maps conflicts, and does not persist invitation tokens", async () => {
   const malformed = createOrganizationClient({ fetchImpl: async (url) => {
     if (url === "/api/auth/session") return sessionResponse();

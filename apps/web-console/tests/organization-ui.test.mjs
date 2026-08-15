@@ -12,10 +12,13 @@ test("OrganizationPanel is standalone and covers the administration flow", async
   const source = await readFile(componentPath, "utf8");
   assert.match(source, /export function OrganizationPanel/);
   assert.match(source, /createOrganizationClient/);
-  for (const operation of ["listOrganizations", "createOrganization", "renameOrganization", "listMembers", "listInvitations", "createInvitation", "revokeInvitation", "acceptInvitation", "updateMemberRole", "removeMember"]) assert.match(source, new RegExp(`\\.${operation}\\(`));
+  for (const operation of ["listOrganizations", "createOrganization", "renameOrganization", "listMembers", "listInvitations", "createInvitation", "reissueInvitation", "revokeInvitation", "acceptInvitation", "updateMemberRole", "removeMember"]) assert.match(source, new RegExp(`\\.${operation}\\(`));
   for (const state of ["loading", "empty", "error", "conflict"]) assert.match(source, new RegExp(state));
   assert.match(source, /oneTimeToken/);
   assert.match(source, /一度だけ表示/);
+  assert.match(source, /再発行を確定/);
+  assert.match(source, /現在の招待トークンは無効/);
+  assert.match(source, /応答を確認できない場合は自動再送せず/);
   assert.match(source, /optimistic/);
   assert.match(source, /setMembers\(previousMembers\)/);
   assert.match(source, /data-state=\{status\}/);

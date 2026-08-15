@@ -20,6 +20,7 @@ const FUTURE = "2099-01-02T12:00:00.000Z";
 const ORGANIZATION_NAME = "Mutation E2E Organization";
 const RENAMED_ORGANIZATION = "Renamed Mutation Organization";
 const INVITATION_TOKEN = "i".repeat(64);
+const REISSUED_INVITATION_TOKEN = "r".repeat(64);
 const OTHER_SESSION_ID = "23333333-3333-4333-8333-333333333333";
 const INVITATION_ID = "85555555-5555-4555-8555-555555555555";
 const SECOND_CREDENTIAL_ID = "B".repeat(22);
@@ -30,6 +31,7 @@ const REQUEST_IDS = {
   remove: "6c999999-9999-4999-8999-999999999999",
   invitationCreate: "6d999999-9999-4999-8999-999999999999",
   invitationRevoke: "6e999999-9999-4999-8999-999999999999",
+  invitationReissue: "6f999999-9999-4999-8999-999999999999",
 };
 const UUID_V4 = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
@@ -53,6 +55,7 @@ type OrganizationRouteState = {
   recentAuthFailureOnce: boolean;
   mutations: MutationRequest[];
   recentAuthOperations: string[];
+  reissueResponseLossOnce?: boolean;
 };
 
 type SecurityRouteState = {
@@ -278,7 +281,21 @@ async function installOrganizationRoutes(page: Page, role: "owner" | "admin"): P
     }
     if (url.pathname === `/api/auth/organizations/${ORGANIZATION_ID}/invitations` && request.method() === "POST") {
       state.mutations.push(requestMutation(route));
-      state.invitationExpiresAt = String(parseRequestBody(route).expires_at);
+      const body = parseRequestBody(route);
+      state.invitationExpiresAt = String(body.expires_at);
+      if (body.reissue_invitation_id !== undefined) {
+        state.invitationVersion = 2;
+        if (state.reissueResponseLossOnce) {
+          state.reissueResponseLossOnce = false;
+          await route.abort("connectionreset");
+          return;
+        }
+        return json(route, {
+          request_id: REQUEST_IDS.invitationReissue,
+          invitation: invitationRecord(state),
+          one_time_token: REISSUED_INVITATION_TOKEN,
+        }, 201);
+      }
       return json(route, {
         request_id: REQUEST_IDS.invitationCreate,
         invitation: invitationRecord(state),
@@ -430,8 +447,17 @@ for (const role of ["owner", "admin"] as const) {
       await expect(page.getByText(INVITATION_TOKEN, { exact: true })).toBeVisible();
       expect(page.url()).not.toContain(INVITATION_TOKEN);
       expect(JSON.stringify(await browserStorageSnapshot(page))).not.toContain(INVITATION_TOKEN);
-      await page.getByRole("button", { name: "招待トークンを閉じる", exact: true }).click();
+      await page.getByRole("button", { name: "Viewer招待を再発行", exact: true }).click();
       await expect(page.getByText(INVITATION_TOKEN, { exact: true })).toHaveCount(0);
+      const reissueExpiryLocal = "2099-01-03T12:00";
+      const expectedReissueExpiry = await page.evaluate((value) => new Date(value).toISOString(), reissueExpiryLocal);
+      await page.getByLabel("再発行後の有効期限").fill(reissueExpiryLocal);
+      await page.getByRole("button", { name: "再発行を確定", exact: true }).click();
+      await expect(page.getByText(REISSUED_INVITATION_TOKEN, { exact: true })).toBeVisible();
+      expect(page.url()).not.toContain(REISSUED_INVITATION_TOKEN);
+      expect(JSON.stringify(await browserStorageSnapshot(page))).not.toContain(REISSUED_INVITATION_TOKEN);
+      await page.getByRole("button", { name: "招待トークンを閉じる", exact: true }).click();
+      await expect(page.getByText(REISSUED_INVITATION_TOKEN, { exact: true })).toHaveCount(0);
       await page.getByRole("button", { name: "Viewer招待を取り消す", exact: true }).click();
       await expect(page.getByText(/^取り消し済み · 有効期限/u)).toBeVisible();
 
@@ -454,10 +480,10 @@ for (const role of ["owner", "admin"] as const) {
       await expect(confirm).toBeVisible();
       await confirm.focus();
       await page.keyboard.press("Enter");
-      await expect.poll(() => state.mutations.length).toBe(6);
+      await expect.poll(() => state.mutations.length).toBe(7);
       await expect(page.getByText("このメンバーは失効しています", { exact: true })).toBeVisible();
 
-      const [rename, invitationCreate, invitationRevoke, roleConflict, roleRequest, remove] = state.mutations;
+      const [rename, invitationCreate, invitationReissue, invitationRevoke, roleConflict, roleRequest, remove] = state.mutations;
       assertOrganizationMutation(rename, {
         method: "PATCH",
         path: `/api/auth/organizations/${ORGANIZATION_ID}`,
@@ -469,11 +495,18 @@ for (const role of ["owner", "admin"] as const) {
         path: `/api/auth/organizations/${ORGANIZATION_ID}/invitations`,
         body: { role: "viewer", expires_at: expectedInvitationExpiry },
       });
+      assertOrganizationMutation(invitationReissue, {
+        method: "POST",
+        path: `/api/auth/organizations/${ORGANIZATION_ID}/invitations`,
+        body: { reissue_invitation_id: INVITATION_ID, expires_at: expectedReissueExpiry },
+        ifMatch: '"1"',
+        recentAuth: AUTHORIZATION_ID,
+      });
       assertOrganizationMutation(invitationRevoke, {
         method: "POST",
         path: `/api/auth/organizations/${ORGANIZATION_ID}/invitations/${INVITATION_ID}/revoke`,
         body: {},
-        ifMatch: '"1"',
+        ifMatch: '"2"',
       });
       assertOrganizationMutation(roleRequest, {
         method: "PATCH",
@@ -496,11 +529,12 @@ for (const role of ["owner", "admin"] as const) {
         ifMatch: '"2"',
         recentAuth: AUTHORIZATION_ID,
       });
-      expect(state.mutations).toHaveLength(6);
+      expect(state.mutations).toHaveLength(7);
+      expect(state.recentAuthOperations).toContain("human.organizations.invitation.reissue");
       expect(state.recentAuthOperations).toContain("human.organizations.member.role.update");
       expect(state.recentAuthOperations).toContain("human.organizations.member.remove");
       expect(consoleMessages.join("\n")).not.toContain(AUTHORIZATION_ID);
-      await assertNoReusableAuthority(page, [AUTHORIZATION_ID, CSRF_TOKEN, CREDENTIAL_ID, INVITATION_TOKEN]);
+      await assertNoReusableAuthority(page, [AUTHORIZATION_ID, CSRF_TOKEN, CREDENTIAL_ID, INVITATION_TOKEN, REISSUED_INVITATION_TOKEN]);
     } finally {
       await disposeVirtualAuthenticator(authenticator);
     }

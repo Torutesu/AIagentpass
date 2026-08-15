@@ -287,9 +287,11 @@ test("invitation reissue requires and forwards recent authorization and If-Match
   assert.deepEqual(JSON.parse(new TextDecoder().decode(calls[0].init.body)), body);
 
   const { "agentpass-recent-auth": _recent, ...withoutRecent } = headers;
+  assert.equal(_recent, recentAuth);
   const missingRecent = await api.handle(request(path, { body, headers: withoutRecent }));
   assert.equal(missingRecent.status, 401);
   const { "if-match": _version, ...withoutVersion } = headers;
+  assert.equal(_version, '"7"');
   const missingVersion = await api.handle(request(path, { body, headers: withoutVersion }));
   assert.equal(missingVersion.status, 400);
   assert.equal(calls.length, 1);

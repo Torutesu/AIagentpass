@@ -88,6 +88,8 @@ export function OrganizationPanel({ client: suppliedClient, initialOrganizationI
   const [inviteExpiresAt, setInviteExpiresAt] = useState("");
   const [acceptToken, setAcceptToken] = useState("");
   const [oneTimeToken, setOneTimeToken] = useState<string | null>(null);
+  const [reissueConfirmationId, setReissueConfirmationId] = useState<string | null>(null);
+  const [reissueExpiresAt, setReissueExpiresAt] = useState("");
   const [roleDrafts, setRoleDrafts] = useState<Readonly<Record<string, OrganizationRole>>>({});
   const [removalConfirmationId, setRemovalConfirmationId] = useState<string | null>(null);
   const [nowMs, setNowMs] = useState(0);
@@ -292,6 +294,9 @@ export function OrganizationPanel({ client: suppliedClient, initialOrganizationI
     setLoadingMore(null);
     setRoleDrafts({});
     setRemovalConfirmationId(null);
+    setOneTimeToken(null);
+    setReissueConfirmationId(null);
+    setReissueExpiresAt("");
     setMutationError(INITIAL_RESOURCE);
   };
 
@@ -399,6 +404,7 @@ export function OrganizationPanel({ client: suppliedClient, initialOrganizationI
   const createInvitation = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     if (!selectedOrganization || !visibility.canInvite) return;
+    setOneTimeToken(null);
     const expiresAt = parseDateTimeLocal(inviteExpiresAt);
     if (expiresAt === undefined) return setMutationError({ status: "error", error: "有効期限を入力してください。" });
     if (Date.parse(expiresAt) <= Date.now()) return setMutationError({ status: "error", code: "expired", error: "有効期限は現在より後に設定してください。" });
@@ -413,6 +419,58 @@ export function OrganizationPanel({ client: suppliedClient, initialOrganizationI
       setOneTimeToken(createdToken);
       setInviteExpiresAt("");
     }
+  };
+
+  const beginInvitationReissue = (invitation: OrganizationInvitation): void => {
+    if (!visibility.canInvite || !isInvitationReissuable(invitation, nowMs) || pendingAction !== null) return;
+    setMutationError(INITIAL_RESOURCE);
+    setRetryAction(null);
+    setOneTimeToken(null);
+    setReissueConfirmationId(invitation.id);
+    setReissueExpiresAt(minimumDateTimeLocal());
+  };
+
+  const cancelInvitationReissue = (): void => {
+    if (pendingAction !== null) return;
+    setReissueConfirmationId(null);
+    setReissueExpiresAt("");
+  };
+
+  const submitInvitationReissue = async (invitation: OrganizationInvitation, expiresAt: string): Promise<void> => {
+    let reissuedToken: string | undefined;
+    const committed = await runMutation(`invitation-reissue-${invitation.id}`, async () => {
+      const result = await client.reissueInvitation({
+        organizationId: invitation.organizationId,
+        invitationId: invitation.id,
+        expiresAt,
+        expectedVersion: invitation.version,
+      });
+      reissuedToken = result.oneTimeToken;
+      setInvitations((current) => current.map((item) => item.id === invitation.id ? result.invitation : item));
+    }, {
+      retry: () => submitInvitationReissue(invitation, expiresAt),
+      reconcile: () => reconcileResources(invitation.organizationId, { invitations: true }),
+    });
+    if (committed && reissuedToken !== undefined) {
+      setOneTimeToken(reissuedToken);
+      setReissueConfirmationId(null);
+      setReissueExpiresAt("");
+    }
+  };
+
+  const reissueInvitation = async (event: FormEvent<HTMLFormElement>, invitation: OrganizationInvitation): Promise<void> => {
+    event.preventDefault();
+    if (!selectedOrganization || !visibility.canInvite || !isInvitationReissuable(invitation, nowMs)) return;
+    const expiresAt = parseDateTimeLocal(reissueExpiresAt);
+    if (expiresAt === undefined) {
+      setMutationError({ status: "error", code: "validation_failed", error: "新しい有効期限を入力してください。" });
+      return;
+    }
+    if (nowMs > 0 && Date.parse(expiresAt) <= nowMs) {
+      setMutationError({ status: "error", code: "expired", error: "新しい有効期限は現在より後に設定してください。" });
+      return;
+    }
+    await submitInvitationReissue(invitation, expiresAt);
   };
 
   const changeMemberRole = (member: OrganizationMember, role: OrganizationRole): Promise<boolean> => {
@@ -467,6 +525,7 @@ export function OrganizationPanel({ client: suppliedClient, initialOrganizationI
 
   const revokeInvitation = (invitation: OrganizationInvitation): Promise<void> => {
     if (!visibility.canRevokeInvitations || invitation.status !== "pending" || isInvitationExpired(invitation, nowMs)) return Promise.resolve();
+    setOneTimeToken(null);
     const previousInvitations = invitations;
     return runMutation(`invitation-revoke-${invitation.id}`, async () => {
       const result = await client.revokeInvitation({ organizationId: invitation.organizationId, invitationId: invitation.id, expectedVersion: invitation.version });
@@ -484,6 +543,7 @@ export function OrganizationPanel({ client: suppliedClient, initialOrganizationI
     event.preventDefault();
     const token = acceptToken.trim();
     if (token === "") return setMutationError({ status: "error", error: "招待トークンを入力してください。" });
+    setOneTimeToken(null);
     await runMutation("accept-invitation", async () => {
       await client.acceptInvitation({ oneTimeToken: token });
       setAcceptToken("");
@@ -496,6 +556,8 @@ export function OrganizationPanel({ client: suppliedClient, initialOrganizationI
     setMutationError(INITIAL_RESOURCE);
     setRetryAction(null);
     setOneTimeToken(null);
+    setReissueConfirmationId(null);
+    setReissueExpiresAt("");
     setRefreshNonce((value) => value + 1);
   };
   const roleLabel = { owner: "Owner", admin: "Admin", auditor: "Auditor", viewer: "Viewer" }[effectiveRole];
@@ -553,7 +615,7 @@ export function OrganizationPanel({ client: suppliedClient, initialOrganizationI
           <section style={panelStyle.card} aria-labelledby="organization-invitations-title">
             <div style={panelStyle.row}><div><h2 id="organization-invitations-title" style={panelStyle.cardTitle}>招待</h2><p style={panelStyle.muted}>招待トークンは発行時のコンポーネントメモリにのみ保持します。</p></div><span style={panelStyle.muted}>{invitations.length}件</span></div>
             <ResourceStateView state={invitationState} empty="招待はありません。" error="招待情報を取得できませんでした。" onRetry={refresh} retryLabel="招待情報を再試行" />
-            {invitationState.status === "ready" && <ul style={panelStyle.list}>{invitations.map((invitation) => <InvitationRow key={invitation.id} invitation={invitation} canRevoke={visibility.canRevokeInvitations} expired={isInvitationExpired(invitation, nowMs)} pendingAction={pendingAction} actionKey={`invitation-revoke-${invitation.id}`} onRevoke={() => void revokeInvitation(invitation)} />)}</ul>}
+            {invitationState.status === "ready" && <ul style={panelStyle.list}>{invitations.map((invitation) => <InvitationRow key={invitation.id} invitation={invitation} canRevoke={visibility.canRevokeInvitations} canReissue={visibility.canInvite} expired={isInvitationExpired(invitation, nowMs)} pendingAction={pendingAction} actionKey={`invitation-revoke-${invitation.id}`} reissueActionKey={`invitation-reissue-${invitation.id}`} confirmReissue={reissueConfirmationId === invitation.id} reissueExpiresAt={reissueExpiresAt} setReissueExpiresAt={setReissueExpiresAt} onBeginReissue={() => beginInvitationReissue(invitation)} onCancelReissue={cancelInvitationReissue} onSubmitReissue={(event) => void reissueInvitation(event, invitation)} onRevoke={() => void revokeInvitation(invitation)} />)}</ul>}
             {invitationState.status === "ready" && invitationNextCursor !== null && <LoadMoreButton label="招待をさらに読み込む" pending={loadingMore === "invitations"} disabled={loadingMore !== null} onClick={() => void loadInvitations(selectedOrganization.id, undefined, invitationNextCursor)} />}
           </section>
           {visibility.canInvite && <InviteForm role={inviteRole} setRole={setInviteRole} expiresAt={inviteExpiresAt} setExpiresAt={setInviteExpiresAt} onSubmit={createInvitation} pending={pendingAction === "create-invitation"} />}
@@ -589,11 +651,27 @@ function MemberRow({ member, canManage, canAssignOwner, lastOwnerProtected, draf
   return <li className="organization-list-row" style={panelStyle.listRow} data-state={member.status === "revoked" ? "revoked" : pendingAction === actionKey ? "pending" : "active"} aria-busy={pendingAction === actionKey}><div style={panelStyle.row}><div><strong>{name}</strong><p id={detailsId} style={panelStyle.muted}>{roleLabel(member.role)} · {member.status === "active" ? "有効" : "失効"} · v{member.version}</p>{lastOwnerProtected ? <p id={lastOwnerWarningId} className="organization-last-owner-warning" role="note">この組織の最後のOwnerです。先に別のメンバーをOwnerに変更してから、降格または失効してください。</p> : null}</div>{canManage && member.status === "active" ? <div style={panelStyle.actionRow}><label style={panelStyle.label}><span className="sr-only">{name}のロール</span><select id={`member-role-${member.memberId}`} aria-label={`${name}のロール`} aria-describedby={describedBy} value={draft} onChange={(event) => setDraft(event.target.value as OrganizationRole)} style={panelStyle.select} disabled={busy}>{editableRoles.map((role) => <option key={role} value={role}>{roleLabel(role)}</option>)}</select></label><button type="button" style={panelStyle.secondaryButton} disabled={busy || draft === member.role} onClick={() => onRoleChange(draft)} aria-label={`${name}を${roleLabel(draft)}に変更`} aria-describedby={describedBy}>{pendingAction === actionKey ? "変更中…" : "変更"}</button>{confirmRemoval ? <div className="organization-confirmation" role="alert"><span>このメンバーを失効させますか？</span><button type="button" style={panelStyle.dangerButton} disabled={busy} onClick={onRemove}>失効を確定</button><button type="button" style={panelStyle.secondaryButton} disabled={busy} onClick={onCancelRemoval}>キャンセル</button></div> : <button type="button" style={panelStyle.dangerButton} disabled={busy} onClick={onConfirmRemoval} aria-label={`${name}のアクセスを失効`} aria-describedby={describedBy}>アクセスを失効</button>}</div> : member.status === "revoked" ? <span style={panelStyle.muted}>このメンバーは失効しています</span> : null}</div></li>;
 }
 
-function InvitationRow({ invitation, canRevoke, expired, pendingAction, actionKey, onRevoke }: { invitation: OrganizationInvitation; canRevoke: boolean; expired: boolean; pendingAction: string | null; actionKey: string; onRevoke: () => void }) {
+function InvitationRow({ invitation, canRevoke, canReissue, expired, pendingAction, actionKey, reissueActionKey, confirmReissue, reissueExpiresAt, setReissueExpiresAt, onBeginReissue, onCancelReissue, onSubmitReissue, onRevoke }: { invitation: OrganizationInvitation; canRevoke: boolean; canReissue: boolean; expired: boolean; pendingAction: string | null; actionKey: string; reissueActionKey: string; confirmReissue: boolean; reissueExpiresAt: string; setReissueExpiresAt: (value: string) => void; onBeginReissue: () => void; onCancelReissue: () => void; onSubmitReissue: (event: FormEvent<HTMLFormElement>) => void; onRevoke: () => void }) {
   const status = expired ? "expired" : invitation.status;
   const statusLabel = status === "pending" ? "有効" : status === "expired" ? "期限切れ" : status === "accepted" ? "受け入れ済み" : "取り消し済み";
   const busy = pendingAction !== null;
-  return <li className="organization-list-row" style={panelStyle.listRow} data-state={status} aria-busy={pendingAction === actionKey}><div style={panelStyle.row}><div><strong>{roleLabel(invitation.role)} 招待</strong><p style={panelStyle.muted}>{statusLabel} · 有効期限 {formatDate(invitation.expiresAt)} · v{invitation.version}</p></div>{canRevoke && status === "pending" && <button type="button" style={panelStyle.dangerButton} disabled={busy} onClick={onRevoke} aria-label={`${roleLabel(invitation.role)}招待を取り消す`}>{pendingAction === actionKey ? "取り消し中…" : "取り消す"}</button>}</div></li>;
+  const reissuable = canReissue && (status === "pending" || status === "expired");
+  const detailsId = `invitation-details-${invitation.id}`;
+  const reissueWarningId = `invitation-reissue-warning-${invitation.id}`;
+  return <li className="organization-list-row" style={panelStyle.listRow} data-state={status} aria-busy={pendingAction === actionKey || pendingAction === reissueActionKey}>
+    <div style={panelStyle.row}>
+      <div><strong>{roleLabel(invitation.role)} 招待</strong><p id={detailsId} style={panelStyle.muted}>{statusLabel} · 有効期限 {formatDate(invitation.expiresAt)} · v{invitation.version}</p></div>
+      <div style={panelStyle.actionRow}>
+        {canRevoke && status === "pending" && <button type="button" style={panelStyle.dangerButton} disabled={busy} onClick={onRevoke} aria-label={`${roleLabel(invitation.role)}招待を取り消す`} aria-describedby={detailsId}>{pendingAction === actionKey ? "取り消し中…" : "取り消す"}</button>}
+        {reissuable && !confirmReissue && <button type="button" style={panelStyle.secondaryButton} disabled={busy} onClick={onBeginReissue} aria-label={`${roleLabel(invitation.role)}招待を再発行`} aria-describedby={detailsId}>再発行</button>}
+      </div>
+    </div>
+    {reissuable && confirmReissue && <form onSubmit={onSubmitReissue} style={{ display: "grid", gap: 10 }} aria-busy={pendingAction === reissueActionKey} aria-describedby={`${detailsId} ${reissueWarningId}`}>
+      <p id={reissueWarningId} style={panelStyle.conflict} role="note">現在の招待トークンは無効になり、新しいトークンを一度だけ表示します。応答を確認できない場合は自動再送せず、最新状態を再取得します。</p>
+      <label style={panelStyle.label}><span>再発行後の有効期限</span><input type="datetime-local" value={reissueExpiresAt} onChange={(event) => setReissueExpiresAt(event.target.value)} min={minimumDateTimeLocal()} required style={panelStyle.input} disabled={busy} /></label>
+      <div style={panelStyle.actionRow}><button type="submit" style={panelStyle.button} disabled={busy}>{pendingAction === reissueActionKey ? "再発行中…" : "再発行を確定"}</button><button type="button" style={panelStyle.secondaryButton} disabled={busy} onClick={onCancelReissue}>キャンセル</button></div>
+    </form>}
+  </li>;
 }
 
 function ResourceStateView({ state, empty, error, onRetry, retryLabel }: { state: ResourceState; empty: string; error: string; onRetry?: () => void; retryLabel?: string }) {
@@ -713,6 +791,7 @@ function abortError(): OrganizationClientError {
 function pendingActionLabel(action: string): string {
   if (action === "rename-organization") return "組織名を変更しています…";
   if (action === "create-invitation") return "招待を発行しています…";
+  if (action.startsWith("invitation-reissue-")) return "招待を再発行しています…";
   if (action === "accept-invitation") return "招待を受け入れています…";
   if (action.startsWith("member-role-")) return "メンバーのロールを変更しています…";
   if (action.startsWith("member-remove-")) return "メンバーを失効しています…";
@@ -722,6 +801,11 @@ function pendingActionLabel(action: string): string {
 
 function isInvitationExpired(invitation: OrganizationInvitation, nowMs: number): boolean {
   return invitation.status === "expired" || nowMs > 0 && Date.parse(invitation.expiresAt) <= nowMs;
+}
+
+function isInvitationReissuable(invitation: OrganizationInvitation, nowMs: number): boolean {
+  const status = isInvitationExpired(invitation, nowMs) ? "expired" : invitation.status;
+  return status === "pending" || status === "expired";
 }
 
 function minimumDateTimeLocal(): string {
