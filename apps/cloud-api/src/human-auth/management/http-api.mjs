@@ -322,7 +322,15 @@ export function createHumanManagementHttpApi({
         reason: "human_management"
       });
       if (!record) throw repositoryNotFound();
-      const publicRecord = normalizeSession({ ...record, session_id: record.session_id ?? sessionId }, session);
+      // A revoke mutation is only authoritative when the repository returns
+      // the exact requested target in a revoked state.  Without this check a
+      // broken or stale adapter could return another active session; the
+      // self-revoke branch would then clear the current cookie while leaving
+      // the current authority usable.
+      const publicRecord = normalizeSession(record, session);
+      if (publicRecord.session_id !== sessionId || publicRecord.status !== "revoked" || publicRecord.revoked_at === null) {
+        throw new Error("session revocation result is not authoritative");
+      }
       const extraHeaders = session.session_id === sessionId
         ? { "Set-Cookie": serializeClearedSessionCookie() }
         : undefined;

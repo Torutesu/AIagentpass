@@ -338,6 +338,40 @@ test("revoking the current session clears only the current session cookie", asyn
   assert.equal(other.calls.recentAuth.length, 0);
 });
 
+test("fails closed when a session revoke response is not the exact revoked target", async () => {
+  const wrongTarget = fixture({
+    repositoryOverrides: {
+      revokeSession: session({
+        session_id: OTHER_SESSION_ID,
+        id: OTHER_SESSION_ID,
+        status: "revoked",
+        revoked_at: "2026-08-12T01:00:00.000Z",
+        version: 2
+      })
+    }
+  });
+  const wrongTargetResult = await wrongTarget.api.handle(request(HUMAN_MANAGEMENT_HTTP_PATHS.sessionRevoke(CURRENT_SESSION_ID), {
+    method: "POST",
+    body: { expected_version: 1 }
+  }));
+  assert.equal(wrongTargetResult.status, 503);
+  assert.equal(wrongTargetResult.body.error.code, HUMAN_MANAGEMENT_HTTP_ERROR_CODES.MANAGEMENT_UNAVAILABLE);
+  assert.equal(Object.hasOwn(wrongTargetResult.headers, "Set-Cookie"), false);
+
+  const stillActive = fixture({
+    repositoryOverrides: {
+      revokeSession: session({ status: "active", revoked_at: null })
+    }
+  });
+  const stillActiveResult = await stillActive.api.handle(request(HUMAN_MANAGEMENT_HTTP_PATHS.sessionRevoke(CURRENT_SESSION_ID), {
+    method: "POST",
+    body: { expected_version: 1 }
+  }));
+  assert.equal(stillActiveResult.status, 503);
+  assert.equal(stillActiveResult.body.error.code, HUMAN_MANAGEMENT_HTTP_ERROR_CODES.MANAGEMENT_UNAVAILABLE);
+  assert.equal(Object.hasOwn(stillActiveResult.headers, "Set-Cookie"), false);
+});
+
 test("requires exact single-use recent auth for credential and current-session revocation", async () => {
   for (const path of [
     HUMAN_MANAGEMENT_HTTP_PATHS.credentialRevoke(CREDENTIAL_ID),
