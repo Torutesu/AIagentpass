@@ -202,7 +202,9 @@ test("0048 qualifies fresh PostgreSQL authority functions and least-privilege ro
   });
 
   await withSessionAuthorization(pool, ROLE_NAMES.app, async (client) => {
-    for (const functionSignature of ENTRY_FUNCTIONS) await assertFunctionPrivilege(client, functionSignature, true);
+    // The current role contract intentionally retired every legacy 0048 entry
+    // point after the proof-consuming 0054 boundary became authoritative.
+    for (const functionSignature of ENTRY_FUNCTIONS) await assertFunctionPrivilege(client, functionSignature, false);
     for (const functionSignature of HELPER_FUNCTIONS) await assertFunctionPrivilege(client, functionSignature, false);
     for (const tableName of PROTECTED_TABLES) {
       const privilege = await client.query(
@@ -235,7 +237,11 @@ test("0048 qualifies fresh PostgreSQL authority functions and least-privilege ro
       "SELECT public.agentpass_platform_promotion_issuance_result(NULL::public.platform_promotion_issuances,false)"
     ));
     await expectPermissionDenied(() => client.query("SET ROLE agentpass_migrator"));
+  });
 
+  // Exercise the immutable 0048 implementation as its owning migration role;
+  // this is historical behavior qualification, not runtime authority.
+  await withSessionAuthorization(pool, ROLE_NAMES.migrator, async (client) => {
     const claimTokenDigest = Buffer.alloc(32, 0x2a);
     const identity = [fixture.promotionId, fixture.deploymentId, "staging", fixture.candidateId, "q2a-authority-request"];
     const reserved = await client.query(`SELECT public.agentpass_platform_promotion_issuance_reserve(

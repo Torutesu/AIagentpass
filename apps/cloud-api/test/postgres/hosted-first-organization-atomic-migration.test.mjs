@@ -7,17 +7,17 @@ import { POSTGRES_SCHEMA_HEAD } from "../../src/postgres/schema-head.mjs";
 const root = new URL("../../../../", import.meta.url);
 const read = (path) => readFile(new URL(path, root), "utf8");
 
-test("0060 is the cataloged forward-only first-organization authority head", async () => {
+test("0060 remains the cataloged forward-only first-organization authority migration", async () => {
   const [sql, catalog] = await Promise.all([
     read("contracts/postgres/0060_hosted_first_organization_atomic.sql"),
     read("contracts/catalog-v1.json").then(JSON.parse)
   ]);
-  assert.equal(POSTGRES_SCHEMA_HEAD.version, 60);
-  assert.equal(POSTGRES_SCHEMA_HEAD.name, "0060_hosted_first_organization_atomic.sql");
+  assert.ok(POSTGRES_SCHEMA_HEAD.version >= 60);
+  assert.equal(POSTGRES_SCHEMA_HEAD.migrations.find(({ version }) => version === 60)?.name, "0060_hosted_first_organization_atomic.sql");
   assert.match(sql, /^BEGIN;[\s\S]*COMMIT;\s*$/u);
   assert.doesNotMatch(sql, /DROP\s+(?:TABLE|COLUMN|INDEX)|TRUNCATE\s+TABLE/iu);
-  assert.equal(catalog.entries.at(-1).id, "migration.0060_hosted_first_organization_atomic");
-  assert.equal(catalog.entries.at(-1).version, 60);
+  const entry = catalog.entries.find(({ id }) => id === "migration.0060_hosted_first_organization_atomic");
+  assert.equal(entry?.version, 60);
 });
 
 test("0060 derives organization, membership, replay, and audit state in one function", async () => {

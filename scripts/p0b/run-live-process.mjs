@@ -26,7 +26,11 @@ const DEFAULT_FIXTURE_TIMEOUT_MS = 45_000;
 const MAX_ENV_FILE_BYTES = 16 * 1024;
 const DEFAULT_REPORT_OUTPUT = path.join(REPOSITORY_ROOT, ".agentpass", "qualification", "p0b.json");
 const BUILD_TIMEOUT_MS = 180_000;
-const BROWSER_TIMEOUT_MS = 600_000;
+// The live browser matrix intentionally provisions an isolated PostgreSQL,
+// Cloud, and Console stack per authority scenario. Keep the outer supervisor
+// above the complete matrix budget; each scenario retains its own tighter
+// deadline so a single stuck interaction still fails locally.
+const BROWSER_TIMEOUT_MS = 900_000;
 const PROCESS_TIMEOUT_MS = 180_000;
 const REQUIRED_ENV_KEYS = Object.freeze([
   "P0B_POSTGRES_ADMIN_URL",

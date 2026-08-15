@@ -465,7 +465,7 @@ function recordFromEnvelope(envelope) {
     if (signature.length !== SIGNATURE_BYTES || signature.toString("base64") !== value.signature) throw malformedAuthority();
     row.signature = signature;
   }
-  if (value.provider_receipt !== undefined) {
+  if (value.provider_receipt !== undefined && value.provider_receipt !== null) {
     if (!isPlainObject(value.provider_receipt)
         || Reflect.ownKeys(value.provider_receipt).sort().join(",") !== "provider,receipt_id") throw malformedAuthority();
     row.provider_receipt_provider = value.provider_receipt.provider;

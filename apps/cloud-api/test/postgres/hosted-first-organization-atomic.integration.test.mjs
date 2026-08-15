@@ -196,6 +196,7 @@ async function seedOrganizationRequired(pool, value, { existingMembershipStatus 
   const client = await pool.connect();
   try {
     await client.query("BEGIN");
+    await client.query("SET LOCAL ROLE agentpass_migrator");
     await client.query("SET CONSTRAINTS ALL DEFERRED");
     const nowResult = await client.query("SELECT clock_timestamp() AS now");
     const createdAt = new Date(nowResult.rows[0].now);

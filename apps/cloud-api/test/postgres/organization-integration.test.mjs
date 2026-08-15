@@ -136,7 +136,7 @@ test("Organization P1 is atomic and replay-safe across real PostgreSQL connectio
     recent_auth_organization_id,recent_auth_operation,recent_auth_consumed_at
     FROM human_sessions WHERE id=$1`, [roleSessionId]);
   assert.equal(roleSession.rowCount, 1);
-  assert.equal(new Date(roleSession.rows[0].revoked_at).toISOString(), NOW);
+  assert.ok(new Date(roleSession.rows[0].revoked_at).getTime() >= Date.parse(NOW), "role-change revocation must use authoritative database time");
   assert.equal(roleSession.rows[0].revoke_reason, "membership_role_changed");
   assert.equal(Number(roleSession.rows[0].version), 2);
   assert.equal(roleSession.rows[0].recent_auth_at, null);
@@ -167,7 +167,7 @@ test("Organization P1 is atomic and replay-safe across real PostgreSQL connectio
   const removedSession = await pool.query(`SELECT revoked_at,revoke_reason,version,recent_auth_at,recent_auth_challenge_id,
     recent_auth_organization_id,recent_auth_operation,recent_auth_consumed_at
     FROM human_sessions WHERE id=$1`, [removeSessionId]);
-  assert.equal(new Date(removedSession.rows[0].revoked_at).toISOString(), NOW);
+  assert.ok(new Date(removedSession.rows[0].revoked_at).getTime() >= Date.parse(NOW), "member-removal revocation must use authoritative database time");
   assert.equal(removedSession.rows[0].revoke_reason, "membership_removed");
   assert.equal(Number(removedSession.rows[0].version), 2);
   assert.equal(removedSession.rows[0].recent_auth_at, null);

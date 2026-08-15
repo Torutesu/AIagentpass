@@ -7,7 +7,7 @@ import { startP0BLiveBrowserFixture } from "./support/p0b/live-browser-fixture.m
 
 const enabled = process.env.P0B_LIVE_BROWSER === "1";
 
-test("P0-B live browser role, WebAuthn, and recent-auth matrix", { skip: !enabled, timeout: 480_000 }, async (t) => {
+test("P0-B live browser role, WebAuthn, and recent-auth matrix", { skip: !enabled, timeout: 840_000 }, async (t) => {
   await scenario(t, "renders all six real PostgreSQL device states and accepts keyboard wake", async ({ open }) => {
     const page = await open("owner");
     for (const label of ["同期済み", "反映待ち", "ブロック中", "古い状態", "オフライン", "失効済み"]) await page.getByLabel(`同期状態: ${label}`).waitFor();

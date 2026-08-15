@@ -251,7 +251,9 @@ class FakePgPool {
       ...(row.claim_expires_at ? { claim_expires_at: row.claim_expires_at } : {}),
       ...(row.provider_started_at ? { provider_started_at: row.provider_started_at } : {}),
       ...(row.signature ? { signature: Buffer.from(row.signature).toString("base64") } : {}),
-      ...(row.provider_receipt_provider ? { provider_receipt: { provider: row.provider_receipt_provider, receipt_id: row.provider_receipt_id } } : {})
+      provider_receipt: row.provider_receipt_provider
+        ? { provider: row.provider_receipt_provider, receipt_id: row.provider_receipt_id }
+        : null
     };
   }
 

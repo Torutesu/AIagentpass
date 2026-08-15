@@ -16,7 +16,8 @@
     "planned_forward_migration": "0057_hosted_identity_bootstrap",
     "pkce_hardening_forward_migration": "0058_hosted_oauth_pkce_envelope",
     "identity_completion_forward_migration": "0059_hosted_identity_atomic_completion",
-    "first_organization_forward_migration": "0060_hosted_first_organization_atomic"
+    "first_organization_forward_migration": "0060_hosted_first_organization_atomic",
+    "oauth_output_qualification_forward_migration": "0061_hosted_oauth_output_qualification"
   },
   "authority": {
     "identity_provider": "github",
