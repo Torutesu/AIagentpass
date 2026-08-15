@@ -189,6 +189,7 @@ function fakePostgresRuntime() {
     revokeCredential: noOp,
     listSafeSessions: async () => [],
     revokeManagedSession: noOp,
+    revokeOtherSessions: async () => [],
     findCredentialForSession: noOp,
     updateCredentialCounter: noOp
   };

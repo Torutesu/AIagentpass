@@ -272,6 +272,23 @@
         "responses": { "200": { "$ref": "#/components/responses/Json" }, "400": { "$ref": "#/components/responses/BadRequest" }, "401": { "$ref": "#/components/responses/Unauthorized" } }
       }
     },
+    "/auth/management/sessions/revoke-others": {
+      "post": {
+        "operationId": "revokeOtherHumanSessions",
+        "summary": "Revoke all other active human sessions",
+        "description": "Atomically revokes every other currently usable session for the authenticated member in the authenticated organization. The current session is never revoked. An empty result is a successful no-op.",
+        "security": [{ "humanSession": [], "recentWebAuthn": [] }],
+        "parameters": [{ "$ref": "#/components/parameters/CsrfToken" }, { "$ref": "#/components/parameters/RecentAuth" }],
+        "requestBody": { "$ref": "#/components/requestBodies/RevokeOtherSessions" },
+        "responses": {
+          "200": { "$ref": "#/components/responses/OtherSessionsRevoked" },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "503": { "$ref": "#/components/responses/ServiceUnavailable" }
+        }
+      }
+    },
     "/webauthn/registration/options": {
       "post": {
         "operationId": "createRegistrationOptions",
@@ -1315,6 +1332,11 @@
         "required": true,
         "content": { "application/json": { "schema": { "$ref": "#/components/schemas/AcceptInvitationRequest" } } }
       },
+      "RevokeOtherSessions": {
+        "required": true,
+        "description": "Exactly {}. Organization, member, current session, target sessions, and revocation time are resolved from the authenticated session and server-side transaction.",
+        "content": { "application/json": { "schema": { "$ref": "#/components/schemas/RevokeOtherSessionsRequest" } } }
+      },
       "CreateOwnerRecovery": {
         "required": true,
         "content": { "application/json": { "schema": { "$ref": "#/components/schemas/CreateOwnerRecoveryRequest" } } }
@@ -1448,6 +1470,11 @@
       "Json": {
         "description": "JSON response",
         "content": { "application/json": { "schema": { "type": "object", "additionalProperties": true } } }
+      },
+      "OtherSessionsRevoked": {
+        "description": "The exact committed set of other sessions revoked by this operation. The response is never cacheable and never contains session bearer or CSRF hashes.",
+        "headers": { "Cache-Control": { "required": true, "schema": { "type": "string", "const": "no-store, max-age=0" } } },
+        "content": { "application/json": { "schema": { "$ref": "#/components/schemas/RevokeOtherSessionsResponse" } } }
       },
       "DeviceEnrollmentIssued": {
         "description": "Legacy v1 enrollment response or the strict v2 invitation. v2 includes only public possession-receipt verification metadata; private keys and signing secrets are never returned.",
@@ -1612,6 +1639,43 @@
       },
       "HumanSession": { "$ref": "../schemas/human-session-v1.schema.json" },
       "RequestId": { "type": "string", "format": "uuid", "description": "Stable request correlation identifier." },
+      "RevokeOtherSessionsRequest": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [],
+        "minProperties": 0,
+        "maxProperties": 0,
+        "description": "Exactly {}. No organization_id, member_id, session_id, target list, reason, or timestamp is accepted from the caller."
+      },
+      "ManagedHumanSession": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["session_id", "version", "member_id", "organization_id", "role", "status", "is_current", "created_at", "expires_at", "last_seen_at", "recent_auth_at", "revoked_at"],
+        "properties": {
+          "session_id": { "type": "string", "format": "uuid" },
+          "version": { "type": "integer", "minimum": 1 },
+          "member_id": { "type": "string", "format": "uuid" },
+          "organization_id": { "type": "string", "format": "uuid" },
+          "role": { "$ref": "#/components/schemas/MemberRole" },
+          "status": { "const": "revoked" },
+          "is_current": { "type": "boolean", "const": false },
+          "created_at": { "type": "string", "format": "date-time" },
+          "expires_at": { "type": "string", "format": "date-time" },
+          "last_seen_at": { "type": ["string", "null"], "format": "date-time" },
+          "recent_auth_at": { "type": ["string", "null"], "format": "date-time" },
+          "revoked_at": { "type": "string", "format": "date-time" }
+        }
+      },
+      "RevokeOtherSessionsResponse": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["revoked_sessions", "revoked_count"],
+        "x-agentpass-invariants": ["revoked_count equals revoked_sessions.length", "every revoked_sessions item has status=revoked and is_current=false"],
+        "properties": {
+          "revoked_sessions": { "type": "array", "items": { "$ref": "#/components/schemas/ManagedHumanSession" } },
+          "revoked_count": { "type": "integer", "minimum": 0 }
+        }
+      },
       "WebAuthnRegistrationOptionsRequest": {
         "type": "object", "additionalProperties": false, "required": ["organization_id"],
         "properties": { "organization_id": { "type": "string", "format": "uuid" } }

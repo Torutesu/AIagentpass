@@ -72,8 +72,19 @@ function session(overrides = {}) {
   };
 }
 
+function revokedOtherSession(sessionId, overrides = {}) {
+  return session({
+    id: sessionId,
+    session_id: sessionId,
+    status: "revoked",
+    revoked_at: "2026-08-12T01:00:00.000Z",
+    version: 2,
+    ...overrides
+  });
+}
+
 function repository(overrides = {}) {
-  const calls = { listCredentials: [], renameCredential: [], revokeCredential: [], listSessions: [], revokeSession: [] };
+  const calls = { listCredentials: [], renameCredential: [], revokeCredential: [], listSessions: [], revokeSession: [], revokeOtherSessions: [] };
   const repo = {
     async listCredentials(input) {
       calls.listCredentials.push(input);
@@ -97,6 +108,11 @@ function repository(overrides = {}) {
       calls.revokeSession.push(input);
       if (overrides.revokeSession instanceof Error) throw overrides.revokeSession;
       return overrides.revokeSession ?? session({ session_id: input.target_session_id, id: input.target_session_id, status: "revoked", revoked_at: "2026-08-12T01:00:00.000Z", version: input.expected_version + 1 });
+    },
+    async revokeOtherSessions(input) {
+      calls.revokeOtherSessions.push(input);
+      if (overrides.revokeOtherSessions instanceof Error) throw overrides.revokeOtherSessions;
+      return Object.hasOwn(overrides, "revokeOtherSessions") ? overrides.revokeOtherSessions : [revokedOtherSession(OTHER_SESSION_ID)];
     }
   };
   return { repo, calls };
@@ -336,6 +352,123 @@ test("revoking the current session clears only the current session cookie", asyn
   assert.equal(Object.hasOwn(otherResult.headers, "Set-Cookie"), false);
   assert.equal(otherResult.body.session.is_current, false);
   assert.equal(other.calls.recentAuth.length, 0);
+});
+
+test("revokes zero or more other sessions with an exact envelope, current exclusion, and one repository call", async () => {
+  const empty = fixture({ repositoryOverrides: { revokeOtherSessions: [] } });
+  const emptyResult = await empty.api.handle(request(HUMAN_MANAGEMENT_HTTP_PATHS.revokeOtherSessions, { method: "POST", body: {} }));
+  assert.equal(emptyResult.status, 200);
+  assert.deepEqual(emptyResult.body, { revoked_sessions: [], revoked_count: 0 });
+  assert.equal(empty.calls.revokeOtherSessions.length, 1);
+  assert.deepEqual(empty.calls.revokeOtherSessions[0], {
+    session_id: CURRENT_SESSION_ID,
+    member_id: MEMBER_ID,
+    organization_id: ORGANIZATION_ID,
+    reason: "human_management"
+  });
+  assert.equal(empty.calls.recentAuth.length, 1);
+  assert.equal(empty.calls.recentAuth[0].operation, "human.management.sessions.revoke_others");
+
+  const other = fixture({ repositoryOverrides: {
+    revokeOtherSessions: [
+      revokedOtherSession(OTHER_SESSION_ID),
+      revokedOtherSession("66666666-6666-4666-8666-666666666666", { role: "admin" })
+    ]
+  } });
+  const result = await other.api.handle(request(HUMAN_MANAGEMENT_HTTP_PATHS.revokeOtherSessions, { method: "POST", body: {} }));
+  assert.equal(result.status, 200);
+  assert.deepEqual(result.body, {
+    revoked_sessions: [
+      {
+        session_id: OTHER_SESSION_ID,
+        version: 2,
+        member_id: MEMBER_ID,
+        organization_id: ORGANIZATION_ID,
+        role: "owner",
+        status: "revoked",
+        is_current: false,
+        created_at: CREATED,
+        expires_at: EXPIRES,
+        last_seen_at: CREATED,
+        recent_auth_at: null,
+        revoked_at: "2026-08-12T01:00:00.000Z"
+      },
+      {
+        session_id: "66666666-6666-4666-8666-666666666666",
+        version: 2,
+        member_id: MEMBER_ID,
+        organization_id: ORGANIZATION_ID,
+        role: "admin",
+        status: "revoked",
+        is_current: false,
+        created_at: CREATED,
+        expires_at: EXPIRES,
+        last_seen_at: CREATED,
+        recent_auth_at: null,
+        revoked_at: "2026-08-12T01:00:00.000Z"
+      }
+    ],
+    revoked_count: 2
+  });
+  assert.equal(result.body.revoked_sessions.some(({ session_id }) => session_id === CURRENT_SESSION_ID), false);
+  assert.equal(other.calls.revokeOtherSessions.length, 1);
+  assert.equal(Object.hasOwn(result.headers, "Set-Cookie"), false);
+});
+
+test("fails closed for a malformed other-session adapter result and never retries", async () => {
+  for (const malformed of [null, {}, [session()], [revokedOtherSession(OTHER_SESSION_ID, { revoked_at: null })], [revokedOtherSession(CURRENT_SESSION_ID)]]) {
+    const fixtureValue = fixture({ repositoryOverrides: { revokeOtherSessions: malformed } });
+    const result = await fixtureValue.api.handle(request(HUMAN_MANAGEMENT_HTTP_PATHS.revokeOtherSessions, { method: "POST", body: {} }));
+    assert.equal(result.status, 503);
+    assert.equal(result.body.error.code, HUMAN_MANAGEMENT_HTTP_ERROR_CODES.MANAGEMENT_UNAVAILABLE);
+    assert.equal(fixtureValue.calls.revokeOtherSessions.length, 1);
+  }
+});
+
+test("requires CSRF, operation-bound recent auth, exact empty body, and no mutation query", async () => {
+  const missingCsrf = fixture();
+  const csrfRequest = request(HUMAN_MANAGEMENT_HTTP_PATHS.revokeOtherSessions, { method: "POST", body: {} });
+  delete csrfRequest.headers["agentpass-csrf"];
+  const csrfResult = await missingCsrf.api.handle(csrfRequest);
+  assert.equal(csrfResult.status, 403);
+  assert.equal(csrfResult.body.error.code, HUMAN_MANAGEMENT_HTTP_ERROR_CODES.CSRF_FAILED);
+  assert.equal(missingCsrf.calls.revokeOtherSessions.length, 0);
+
+  const missingRecentAuth = fixture();
+  const recentRequest = request(HUMAN_MANAGEMENT_HTTP_PATHS.revokeOtherSessions, { method: "POST", body: {} });
+  delete recentRequest.headers["agentpass-recent-auth"];
+  const recentResult = await missingRecentAuth.api.handle(recentRequest);
+  assert.equal(recentResult.status, 401);
+  assert.equal(recentResult.body.error.code, HUMAN_MANAGEMENT_HTTP_ERROR_CODES.RECENT_AUTH_REQUIRED);
+  assert.equal(missingRecentAuth.calls.revokeOtherSessions.length, 0);
+
+  const wrongOperation = fixture({ recentAuthResult: (input) => ({
+    verified: true,
+    consumed: true,
+    challenge_id: RECENT_AUTHORIZATION_ID,
+    member_id: input.principal.member_id,
+    organization_id: input.organization_id,
+    operation: "human.management.session.revoke",
+    authenticated_at: NOW
+  }) });
+  const wrongResult = await wrongOperation.api.handle(request(HUMAN_MANAGEMENT_HTTP_PATHS.revokeOtherSessions, { method: "POST", body: {} }));
+  assert.equal(wrongResult.status, 401);
+  assert.equal(wrongResult.body.error.code, HUMAN_MANAGEMENT_HTTP_ERROR_CODES.RECENT_AUTH_FAILED);
+  assert.equal(wrongOperation.calls.revokeOtherSessions.length, 0);
+
+  for (const [body, suffix] of [[{ unexpected: true }, "body"], [[], "array"], [null, "null"]]) {
+    const malformed = fixture();
+    const result = await malformed.api.handle(request(HUMAN_MANAGEMENT_HTTP_PATHS.revokeOtherSessions, { method: "POST", body }));
+    assert.equal(result.status, 400, suffix);
+    assert.equal(result.body.error.code, HUMAN_MANAGEMENT_HTTP_ERROR_CODES.INVALID_REQUEST, suffix);
+    assert.equal(malformed.calls.revokeOtherSessions.length, 0);
+  }
+
+  const queried = fixture();
+  const queryResult = await queried.api.handle(request(`${HUMAN_MANAGEMENT_HTTP_PATHS.revokeOtherSessions}?unexpected=1`, { method: "POST", body: {} }));
+  assert.equal(queryResult.status, 400);
+  assert.equal(queryResult.body.error.code, HUMAN_MANAGEMENT_HTTP_ERROR_CODES.INVALID_REQUEST);
+  assert.equal(queried.calls.revokeOtherSessions.length, 0);
 });
 
 test("fails closed when a session revoke response is not the exact revoked target", async () => {

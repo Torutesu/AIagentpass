@@ -12,6 +12,7 @@ const REGISTRATION_OPTIONS_PATH = "/api/auth/webauthn/registration/options";
 const REGISTRATION_VERIFY_PATH = "/api/auth/webauthn/registration/verify";
 const MANAGEMENT_CREDENTIALS_PATH = "/api/auth/management/credentials";
 const MANAGEMENT_SESSIONS_PATH = "/api/auth/management/sessions";
+const MANAGEMENT_REVOKE_OTHER_SESSIONS_PATH = `${MANAGEMENT_SESSIONS_PATH}/revoke-others`;
 const ORGANIZATIONS_PATH = "/api/auth/organizations";
 const ACCEPT_INVITATION_PATH = "/api/auth/invitations/accept";
 const MANAGEMENT_CREDENTIAL_ID = Buffer.alloc(16).toString("base64url");
@@ -72,6 +73,10 @@ function managementApi({ calls, repositoryOverrides = {}, sessionId = CURRENT_SE
         recent_auth_at: null,
         revoked_at: "2026-08-12T01:00:00.000Z"
       };
+    },
+    async revokeOtherSessions(input) {
+      calls?.revokeOtherSessions.push(input);
+      return repositoryOverrides.revokeOtherSessions ?? [];
     }
   };
   return createHumanManagementHttpApi({
@@ -175,7 +180,7 @@ test("routes the exact paths without a bearer token and retains human-auth rate 
 });
 
 test("preserves management list queries and fails closed on mutation query strings", async (t) => {
-  const calls = { listCredentials: [], renameCredential: [], revokeCredential: [], listSessions: [], revokeSession: [] };
+  const calls = { listCredentials: [], renameCredential: [], revokeCredential: [], listSessions: [], revokeSession: [], revokeOtherSessions: [] };
   const base = await startServer(t, { humanAuthApi: managementApi({ calls }) });
 
   const listResponse = await fetch(`${base}${MANAGEMENT_CREDENTIALS_PATH}?limit=10&cursor=next_cursor`, { method: "GET", headers: managementHeaders() });
@@ -200,7 +205,8 @@ test("preserves management list queries and fails closed on mutation query strin
   for (const [method, path, body, callName] of [
     ["PATCH", `${MANAGEMENT_CREDENTIALS_PATH}/${MANAGEMENT_CREDENTIAL_ID}?unexpected=1`, { label: "renamed", expected_version: 1 }, "renameCredential"],
     ["POST", `${MANAGEMENT_CREDENTIALS_PATH}/${MANAGEMENT_CREDENTIAL_ID}/revoke?unexpected=1`, { expected_version: 1 }, "revokeCredential"],
-    ["POST", `${MANAGEMENT_SESSIONS_PATH}/${OTHER_SESSION_ID}/revoke?unexpected=1`, { expected_version: 1 }, "revokeSession"]
+    ["POST", `${MANAGEMENT_SESSIONS_PATH}/${OTHER_SESSION_ID}/revoke?unexpected=1`, { expected_version: 1 }, "revokeSession"],
+    ["POST", `${MANAGEMENT_REVOKE_OTHER_SESSIONS_PATH}?unexpected=1`, {}, "revokeOtherSessions"]
   ]) {
     const mutationResponse = await fetch(`${base}${path}`, { method, headers: managementHeaders(), body: JSON.stringify(body) });
     assert.equal(mutationResponse.status, 400, path);
@@ -216,7 +222,8 @@ test("does not delegate malformed management paths", async (t) => {
     `${MANAGEMENT_CREDENTIALS_PATH}/`,
     `${MANAGEMENT_CREDENTIALS_PATH}/${MANAGEMENT_CREDENTIAL_ID}/revoke/`,
     `${MANAGEMENT_SESSIONS_PATH}/not-a-uuid/revoke`,
-    `${MANAGEMENT_SESSIONS_PATH}/33333333-3333-4333-8333-333333333333/extra`
+    `${MANAGEMENT_SESSIONS_PATH}/33333333-3333-4333-8333-333333333333/extra`,
+    `${MANAGEMENT_REVOKE_OTHER_SESSIONS_PATH}/`
   ]) {
     const response = await fetch(`${base}${path}`, { method: "POST", headers: managementHeaders(), body: "{}" });
     assert.equal(response.status, 404, path);

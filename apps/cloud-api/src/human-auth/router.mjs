@@ -96,7 +96,7 @@ function isOrganizationListPath(url, input) {
 
 function isManagementPath(url) {
   if (url.hash) return false;
-  return /^\/api\/auth\/management\/(?:credentials(?:\/[A-Za-z0-9_-]+(?:\/revoke)?)?|sessions(?:\/[0-9a-fA-F-]{36}\/revoke)?)$/.test(url.pathname);
+  return /^\/api\/auth\/management\/(?:credentials(?:\/[A-Za-z0-9_-]+(?:\/revoke)?)?|sessions(?:\/[0-9a-fA-F-]{36}\/revoke|\/revoke-others)?)$/.test(url.pathname);
 }
 
 function requestUrl(input) {

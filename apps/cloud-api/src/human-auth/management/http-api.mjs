@@ -25,7 +25,8 @@ const METHODS = Object.freeze({
   renameCredential: "PATCH",
   revokeCredential: "POST",
   listSessions: "GET",
-  revokeSession: "POST"
+  revokeSession: "POST",
+  revokeOtherSessions: "POST"
 });
 
 export const HUMAN_MANAGEMENT_HTTP_PATHS = Object.freeze({
@@ -33,6 +34,7 @@ export const HUMAN_MANAGEMENT_HTTP_PATHS = Object.freeze({
   credential: (credentialId) => `${CREDENTIALS_PATH}/${encodeURIComponent(credentialId)}`,
   credentialRevoke: (credentialId) => `${CREDENTIALS_PATH}/${encodeURIComponent(credentialId)}/revoke`,
   sessions: SESSIONS_PATH,
+  revokeOtherSessions: `${SESSIONS_PATH}/revoke-others`,
   session: (sessionId) => `${SESSIONS_PATH}/${encodeURIComponent(sessionId)}`,
   sessionRevoke: (sessionId) => `${SESSIONS_PATH}/${encodeURIComponent(sessionId)}/revoke`
 });
@@ -42,12 +44,14 @@ export const HUMAN_MANAGEMENT_REPOSITORY_METHODS = Object.freeze([
   "renameCredential",
   "revokeCredential",
   "listSessions",
-  "revokeSession"
+  "revokeSession",
+  "revokeOtherSessions"
 ]);
 
 export const HUMAN_MANAGEMENT_RECENT_AUTH_OPERATIONS = Object.freeze({
   revokeCredential: "human.management.credential.revoke",
-  revokeCurrentSession: "human.management.session.revoke"
+  revokeCurrentSession: "human.management.session.revoke",
+  revokeOtherSessions: "human.management.sessions.revoke_others"
 });
 
 export const HUMAN_MANAGEMENT_HTTP_ERROR_CODES = Object.freeze({
@@ -143,6 +147,7 @@ export class HumanManagementHttpError extends Error {
  *   protect_last_active=true atomically while holding its member/org lock.
  * - listSessions(input) -> { items: SessionRecord[], next_cursor?: string|null }
  * - revokeSession(input) -> SessionRecord
+ * - revokeOtherSessions(input) -> SessionRecord[]
  *
  * All mutation methods must enforce the supplied expected_version atomically.
  */
@@ -193,6 +198,7 @@ export function createHumanManagementHttpApi({
       const body = await readJsonBody(request, maxBodyBytes);
       if (route.name === "renameCredential") return await renameCredential(session, route.id, body);
       if (route.name === "revokeCredential") return await revokeCredential(session, route.id, body, request);
+      if (route.name === "revokeOtherSessions") return await revokeOtherSessions(session, body, request);
       return await revokeSession(session, route.id, body, request);
     } catch (error) {
       return mapError(error);
@@ -340,6 +346,32 @@ export function createHumanManagementHttpApi({
     }
   }
 
+  async function revokeOtherSessions(session, body, request) {
+    parseBody(body, new Set());
+    await requireRecentAuth(session, request, HUMAN_MANAGEMENT_RECENT_AUTH_OPERATIONS.revokeOtherSessions);
+    try {
+      const records = await repository.revokeOtherSessions({
+        ...scope(session),
+        reason: "human_management"
+      });
+      if (!Array.isArray(records)) throw new Error("other-session revocation result is invalid");
+      const revokedSessions = records.map((record) => normalizeSession(record, session));
+      const ids = new Set();
+      for (const revoked of revokedSessions) {
+        if (revoked.is_current || revoked.status !== "revoked" || revoked.revoked_at === null || ids.has(revoked.session_id)) {
+          throw new Error("other-session revocation result is not authoritative");
+        }
+        ids.add(revoked.session_id);
+      }
+      return response(200, {
+        revoked_sessions: revokedSessions,
+        revoked_count: revokedSessions.length
+      });
+    } catch (error) {
+      throw mapRepositoryError(error, "session");
+    }
+  }
+
   return Object.freeze({
     handle,
     paths: HUMAN_MANAGEMENT_HTTP_PATHS,
@@ -444,6 +476,7 @@ function resolveRoute(rawUrl, basePath) {
   const path = url.pathname;
   if (path === `${prefix}${CREDENTIALS_PATH}`) return { name: "listCredentials", query: url.searchParams };
   if (path === `${prefix}${SESSIONS_PATH}`) return { name: "listSessions", query: url.searchParams };
+  if (path === `${prefix}${SESSIONS_PATH}/revoke-others`) return { name: "revokeOtherSessions", query: url.searchParams };
   const credentialPrefix = `${prefix}${CREDENTIALS_PATH}/`;
   if (path.startsWith(credentialPrefix)) {
     const id = path.slice(credentialPrefix.length);

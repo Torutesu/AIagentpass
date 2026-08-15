@@ -448,8 +448,25 @@ export function createPostgresHumanRepository({ client, onAuthorityReduction } =
     return inTransaction(async (transactionClient) => {
       await lockOrganization(transactionClient, organizationId);
       await lockSessionSet(transactionClient, memberId);
-      const result = await transactionClient.query(`UPDATE human_sessions target SET revoked_at=COALESCE(target.revoked_at,$4),revoke_reason=COALESCE(target.revoke_reason,$5) WHERE target.member_id=$2 AND target.organization_id=$3 AND target.id<>$1 AND target.revoked_at IS NULL AND EXISTS (SELECT 1 FROM human_sessions actor JOIN memberships m ON m.organization_id=actor.organization_id AND m.member_id=actor.member_id AND m.id=actor.membership_id JOIN organizations o ON o.id=actor.organization_id WHERE actor.id=$1 AND actor.member_id=$2 AND actor.organization_id=$3 AND actor.revoked_at IS NULL AND actor.expires_at>clock_timestamp() AND (actor.idle_expires_at IS NULL OR actor.idle_expires_at>clock_timestamp()) AND m.status='active' AND m.role=actor.role AND o.authority_epoch=actor.organization_authority_epoch AND m.session_epoch=actor.membership_session_epoch) AND EXISTS (SELECT 1 FROM memberships target_m JOIN organizations target_o ON target_o.id=target.organization_id WHERE target_m.id=target.membership_id AND target_m.organization_id=target.organization_id AND target_m.member_id=target.member_id AND target_m.status='active' AND target_m.role=target.role AND target_o.authority_epoch=target.organization_authority_epoch AND target_m.session_epoch=target.membership_session_epoch) RETURNING target.id AS session_id,target.member_id,target.organization_id,target.role,target.created_at,target.expires_at,target.last_seen_at,target.idle_expires_at,target.recent_auth_at,target.revoked_at,target.revoke_reason`, [sessionId, memberId, organizationId, revokedAt, reason]);
-      return (result.rows ?? []).map(safeSessionRow);
+      const result = await transactionClient.query(`UPDATE human_sessions target SET revoked_at=COALESCE(target.revoked_at,$4),revoke_reason=COALESCE(target.revoke_reason,$5),version=target.version+1 WHERE target.member_id=$2 AND target.organization_id=$3 AND target.id<>$1 AND target.revoked_at IS NULL AND target.expires_at>clock_timestamp() AND (target.idle_expires_at IS NULL OR target.idle_expires_at>clock_timestamp()) AND EXISTS (SELECT 1 FROM human_sessions actor JOIN memberships m ON m.organization_id=actor.organization_id AND m.member_id=actor.member_id AND m.id=actor.membership_id JOIN organizations o ON o.id=actor.organization_id WHERE actor.id=$1 AND actor.member_id=$2 AND actor.organization_id=$3 AND actor.revoked_at IS NULL AND actor.expires_at>clock_timestamp() AND (actor.idle_expires_at IS NULL OR actor.idle_expires_at>clock_timestamp()) AND m.status='active' AND m.role=actor.role AND o.authority_epoch=actor.organization_authority_epoch AND m.session_epoch=actor.membership_session_epoch) AND EXISTS (SELECT 1 FROM memberships target_m JOIN organizations target_o ON target_o.id=target.organization_id WHERE target_m.id=target.membership_id AND target_m.organization_id=target.organization_id AND target_m.member_id=target.member_id AND target_m.status='active' AND target_m.role=target.role AND target_o.authority_epoch=target.organization_authority_epoch AND target_m.session_epoch=target.membership_session_epoch) RETURNING target.id AS session_id,target.member_id,target.organization_id,target.role,target.version,target.created_at,target.expires_at,target.last_seen_at,target.idle_expires_at,target.recent_auth_at,target.revoked_at,target.revoke_reason`, [sessionId, memberId, organizationId, revokedAt, reason]);
+      if (!result || !Array.isArray(result.rows) || !Number.isSafeInteger(result.rowCount) || result.rowCount !== result.rows.length) throw new TypeError("other-session revocation result is invalid");
+      const records = result.rows.map(safeSessionRow);
+      const seen = new Set();
+      for (const record of records) {
+        if (record.session_id === sessionId || record.member_id !== memberId || record.organization_id !== organizationId || record.status !== "revoked" || record.revoked_at === null || seen.has(record.session_id)) throw new TypeError("other-session revocation result is not authoritative");
+        seen.add(record.session_id);
+      }
+      // Each requested authority reduction uses the same transaction-bound
+      // propagation hook. If any publication/audit step fails,
+      // withTransaction rolls back the entire batch, including all session
+      // rows already updated above. A zero-target no-op does not require a
+      // propagation dependency, but a non-empty administrative reduction does.
+      if (input?.authority_reduction === true) {
+        for (const record of records) {
+          await notifyAuthorityReduction(transactionClient, { organizationId, memberId, actorSessionId: sessionId, targetId: record.session_id, resource: "session", reason, occurredAt: revokedAt });
+        }
+      }
+      return records;
     });
   }
 

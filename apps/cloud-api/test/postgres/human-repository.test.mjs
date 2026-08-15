@@ -486,6 +486,46 @@ test("other-session revocation is transaction-bound and returns safe rows", asyn
   assert.equal(calls.at(-1).text, "COMMIT");
 });
 
+test("other-session revocation excludes the actor, supports an atomic empty no-op, and rolls back propagation failures", async () => {
+  const targetA = { session_id: "66666666-6666-4666-8666-666666666666", member_id: ids.member, organization_id: ids.org, role: "owner", version: 2, created_at: "2026-08-12T00:00:00.000Z", expires_at: "2026-08-13T00:00:00.000Z", last_seen_at: null, idle_expires_at: null, recent_auth_at: null, revoked_at: "2026-08-12T00:03:00.000Z", revoke_reason: "logout_all" };
+  const targetB = { ...targetA, session_id: "77777777-7777-4777-8777-777777777777" };
+  const calls = [];
+  const reductions = [];
+  let updateRows = [targetA, targetB];
+  const client = {
+    async query(text, params) {
+      calls.push({ text, params });
+      if (text.startsWith("UPDATE human_sessions target")) return { rows: updateRows, rowCount: updateRows.length };
+      return { rows: [], rowCount: 0 };
+    }
+  };
+  const repo = createPostgresHumanRepository({
+    client,
+    onAuthorityReduction: async (input) => {
+      reductions.push(input);
+      if (reductions.length === 2) throw new Error("audit publication failed");
+      return { generation: 9 };
+    }
+  });
+  await assert.rejects(() => repo.revokeOtherSessions({ session_id: ids.session, member_id: ids.member, organization_id: ids.org, revoked_at: "2026-08-12T00:03:00.000Z", reason: "logout_all", authority_reduction: true }), /audit publication failed/);
+  assert.equal(calls.some(({ text }) => text === "COMMIT"), false);
+  assert.equal(calls.at(-1).text, "ROLLBACK");
+  assert.deepEqual(reductions.map(({ tx, actor_session_id, target_id, resource }) => ({ tx, actor_session_id, target_id, resource })), [
+    { tx: client, actor_session_id: ids.session, target_id: targetA.session_id, resource: "session" },
+    { tx: client, actor_session_id: ids.session, target_id: targetB.session_id, resource: "session" }
+  ]);
+  const update = calls.find(({ text }) => text.startsWith("UPDATE human_sessions target"));
+  assert.match(update.text, /target\.id<>\$1/);
+  assert.match(update.text, /target\.expires_at>clock_timestamp\(\)/);
+  assert.match(update.text, /version=target\.version\+1/);
+
+  updateRows = [];
+  const emptyCalls = [];
+  const emptyRepo = createPostgresHumanRepository({ client: { async query(text, params) { emptyCalls.push({ text, params }); if (text.startsWith("UPDATE human_sessions target")) return { rows: [], rowCount: 0 }; return { rows: [], rowCount: 0 }; } } });
+  assert.deepEqual(await emptyRepo.revokeOtherSessions({ session_id: ids.session, member_id: ids.member, organization_id: ids.org, revoked_at: "2026-08-12T00:04:00.000Z", authority_reduction: true }), []);
+  assert.equal(emptyCalls.some(({ text }) => text === "COMMIT"), true);
+});
+
 test("serializes concurrent revocations so exactly one caller can revoke from two active credentials", async () => {
   const firstId = Buffer.alloc(16, 1);
   const secondId = Buffer.alloc(16, 2);

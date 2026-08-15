@@ -32,6 +32,7 @@ function postgres() {
     async revokeCredential() { return null; },
     async listSafeSessions() { return []; },
     async revokeManagedSession() { return null; },
+    async revokeOtherSessions() { return []; },
     async findCredentialForSession() { return null; },
     async updateCredentialCounter() { return false; },
   };
