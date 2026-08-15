@@ -200,6 +200,12 @@ test("hosted KMS config rejects shared resources, shared pins, private key mater
   assert.throws(() => parseKmsProviderRuntimeConfig(unversionedGcpResource), (error) => error.code === KMS_PROVIDER_RUNTIME_ERROR_CODES.CONFIG);
 });
 
+test("hosted refresh_hint config rejects private key material before public-key normalization", () => {
+  const env = allPurposeEnv();
+  env.AGENTPASS_CLOUD_REFRESH_PUBLIC_KEY = env.__keys.refresh.privateKey.export({ type: "pkcs8", format: "pem" }).toString();
+  assert.throws(() => parseKmsProviderRuntimeConfig(env), (error) => error.code === KMS_PROVIDER_RUNTIME_ERROR_CODES.CONFIG);
+});
+
 test("AWS composition constructs and purpose-binds all eight hosted KMS providers", async () => {
   const env = allPurposeEnv();
   const observed = [];

@@ -376,10 +376,14 @@ function parseRefreshHintSignerConfig(env) {
   const publicKeyPem = env.AGENTPASS_CLOUD_REFRESH_PUBLIC_KEY;
   const timeoutText = env.AGENTPASS_CLOUD_REFRESH_TIMEOUT_MS;
   if (!/^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$/u.test(keyId ?? "") || typeof publicKeyPem !== "string"
-    || publicKeyPem.length < 1 || publicKeyPem.length > 8 * 1024) fail(KMS_PROVIDER_RUNTIME_ERROR_CODES.CONFIG);
+    || publicKeyPem.length < 1 || publicKeyPem.length > 8 * 1024 || /PRIVATE\s+KEY/iu.test(publicKeyPem)) {
+    fail(KMS_PROVIDER_RUNTIME_ERROR_CODES.CONFIG);
+  }
   let publicKey;
   try { publicKey = crypto.createPublicKey(publicKeyPem); } catch { fail(KMS_PROVIDER_RUNTIME_ERROR_CODES.CONFIG); }
-  if (publicKey.asymmetricKeyType !== REFRESH_HINT_SIGNATURE_ALGORITHM) fail(KMS_PROVIDER_RUNTIME_ERROR_CODES.CONFIG);
+  if (publicKey.type !== "public" || publicKey.asymmetricKeyType !== REFRESH_HINT_SIGNATURE_ALGORITHM) {
+    fail(KMS_PROVIDER_RUNTIME_ERROR_CODES.CONFIG);
+  }
   const timeoutMs = timeoutText === undefined ? 5_000 : Number(timeoutText);
   if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 30_000 || String(timeoutMs) !== String(timeoutText ?? 5_000)) {
     fail(KMS_PROVIDER_RUNTIME_ERROR_CODES.CONFIG);
