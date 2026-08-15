@@ -252,7 +252,7 @@ test("uses an injected Console session authority without rotating the Human Sess
       get: async () => { gets += 1; return sharedSession; },
       clear: (session) => clears.push(session),
     },
-    fetchImpl: async (url, init) => {
+    fetchImpl: async (url) => {
       assert.notEqual(url, "/api/auth/session", "an injected client must not rotate the shared session");
       organizationCalls += 1;
       if (organizationCalls === 1) return json({ request_id: requestId, organizations: [organization()], next_cursor: null });
