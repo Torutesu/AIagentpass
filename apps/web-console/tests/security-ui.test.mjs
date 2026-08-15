@@ -61,3 +61,12 @@ test("last active passkey protection is based on a complete inventory and is acc
   assert.match(panel, /err_sole_active_credential/);
   assert.doesNotMatch(panel, /window\.location|location\.reload|setTimeout\([^)]*revoke/);
 });
+
+test("ambiguous and conflicting Security mutations reconcile without automatic replay", async () => {
+  const panel = await readFile(panelPath, "utf8");
+  assert.match(panel, /isAmbiguousSecurityMutationError\(caught\)/);
+  assert.match(panel, /const reconciled = await load\(\)/);
+  assert.match(panel, /最新の権威状態を再取得しました。操作は自動再送していません/);
+  assert.match(panel, /情報が更新されていたため、最新の権威状態を再取得しました/);
+  assert.doesNotMatch(panel, /setTimeout\([^)]*(?:revokePasskey|revokeSession|revokeOtherSessions)/);
+});

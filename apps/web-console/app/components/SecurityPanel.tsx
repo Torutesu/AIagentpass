@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import { SecurityClientError, createSecurityClient, type SecurityClient, type SecurityPasskey, type SecuritySession, type SecuritySnapshot } from "../security-client";
+import { SecurityClientError, createSecurityClient, isAmbiguousSecurityMutationError, type SecurityClient, type SecurityPasskey, type SecuritySession, type SecuritySnapshot } from "../security-client";
 import { WebAuthnClientError } from "../webauthn-client";
 
 type LoadState = "loading" | "ready" | "error";
@@ -27,18 +27,20 @@ export function SecurityPanel({ onSessionExpired, onSessionSignedOut, securityCl
   const [renameLabel, setRenameLabel] = useState("");
   const [signedOut, setSignedOut] = useState(false);
 
-  const load = useCallback(async (signal?: AbortSignal) => {
+  const load = useCallback(async (signal?: AbortSignal): Promise<boolean> => {
     setLoadState("loading");
     setError("");
     setNotice("");
     try {
       setSnapshot(await client.getSnapshot({ signal }));
       setLoadState("ready");
+      return true;
     } catch (caught) {
-      if (isAbortError(caught)) return;
+      if (isAbortError(caught)) return false;
       handleSessionFailure(caught, onSessionExpired);
       setLoadState("error");
       setError(securityPanelError(caught));
+      return false;
     }
   }, [client, onSessionExpired]);
 
@@ -61,12 +63,27 @@ export function SecurityPanel({ onSessionExpired, onSessionSignedOut, securityCl
       setConfirmKey(null);
       setRenameTarget(null);
       setRenameLabel("");
-      if (reload) await load();
+      if (reload && !(await load())) return;
       setNotice(successMessage);
     } catch (caught) {
       if (isAbortError(caught)) return;
       handleSessionFailure(caught, onSessionExpired);
-      setError(securityPanelError(caught));
+      const ambiguous = isAmbiguousSecurityMutationError(caught);
+      const conflict = caught instanceof SecurityClientError && caught.status === 409;
+      if (ambiguous || conflict) {
+        const reconciled = await load();
+        if (ambiguous) {
+          setError(reconciled
+            ? "操作結果を確認できなかったため、最新の権威状態を再取得しました。操作は自動再送していません。内容を確認してください。"
+            : "操作結果を確認できず、最新の権威状態も取得できませんでした。操作は自動再送していません。接続を確認して再読み込みしてください。");
+        } else {
+          setError(reconciled
+            ? "情報が更新されていたため、最新の権威状態を再取得しました。内容を確認してから操作してください。"
+            : securityPanelError(caught));
+        }
+      } else {
+        setError(securityPanelError(caught));
+      }
     } finally {
       setActionKey(null);
     }

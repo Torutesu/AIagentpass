@@ -72,6 +72,18 @@ export class SecurityClientError extends Error {
 }
 
 /**
+ * A mutation may have committed before its response is lost or rejected.
+ * Callers must refresh authoritative state and must not resend automatically.
+ */
+export function isAmbiguousSecurityMutationError(error: unknown): boolean {
+  return error instanceof SecurityClientError && (
+    error.code === "transport_failed"
+    || error.code === "invalid_response"
+    || error.code === "http_failed" && error.status !== undefined && error.status >= 500 && error.status <= 599
+  );
+}
+
+/**
  * The Cloud contract intentionally returns only safe management metadata.
  * Credential bytes, public keys, counters, IPs and user-agent strings are not
  * accepted by this client and are never placed in React state.

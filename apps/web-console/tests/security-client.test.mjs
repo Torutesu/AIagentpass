@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
-import { createSecurityClient, getSecuritySnapshot, renamePasskey, revokePasskey, SecurityClientError } from "../app/security-client.ts";
+import { createSecurityClient, getSecuritySnapshot, isAmbiguousSecurityMutationError, renamePasskey, revokePasskey, SecurityClientError } from "../app/security-client.ts";
 
 const csrf = "C".repeat(43);
 const credentialId = "A".repeat(22);
@@ -222,6 +222,16 @@ test("preserves only an allow-listed Cloud management error code without replayi
 
   await assert.rejects(() => client.revokePasskey(credentialId, 2), (error) => error instanceof SecurityClientError && error.status === 409 && error.serviceCode === "human_management_last_active_credential");
   assert.equal(revokeCalls, 1);
+});
+
+test("classifies uncertain Security mutation outcomes without treating known conflicts as ambiguous", () => {
+  for (const status of [500, 502, 503, 504, 599]) {
+    assert.equal(isAmbiguousSecurityMutationError(new SecurityClientError("http_failed", "uncertain", status)), true);
+  }
+  assert.equal(isAmbiguousSecurityMutationError(new SecurityClientError("transport_failed", "network")), true);
+  assert.equal(isAmbiguousSecurityMutationError(new SecurityClientError("invalid_response", "malformed", 200)), true);
+  assert.equal(isAmbiguousSecurityMutationError(new SecurityClientError("http_failed", "known conflict", 409, "human_management_version_conflict")), false);
+  assert.equal(isAmbiguousSecurityMutationError(new SecurityClientError("http_failed", "denied", 403)), false);
 });
 
 test("accepts the legacy last-credential error variants for UI classification", async () => {
