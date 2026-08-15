@@ -37,7 +37,12 @@ const PROCESS_TIMEOUT_MS = 180_000;
 // diagnostics, so assertions, URLs, credentials, SQL, and tenant data remain
 // unavailable to the orchestrator and CI log.
 const LIVE_BROWSER_SAFE_FAILURE_MARKERS = Object.freeze([
-  [1, "renders all six real PostgreSQL device states", "device_states"],
+  [null, "P0B_SAFE_STATE_MISSING_SYNCED", "device_state_synced"],
+  [null, "P0B_SAFE_STATE_MISSING_PENDING", "device_state_pending"],
+  [null, "P0B_SAFE_STATE_MISSING_BLOCKED", "device_state_blocked"],
+  [null, "P0B_SAFE_STATE_MISSING_STALE", "device_state_stale"],
+  [null, "P0B_SAFE_STATE_MISSING_OFFLINE", "device_state_offline"],
+  [null, "P0B_SAFE_STATE_MISSING_REVOKED", "device_state_revoked"],
   [2, "accepts keyboard wake from the real pending device", "keyboard_wake"],
   [3, "shows accepted, coalesced, and no-pending outcomes from the real wake ledger", "wake_ledger_outcomes"],
   [4, "admin completes real WebAuthn and wake mutation", "admin_webauthn_wake"],
@@ -50,7 +55,7 @@ const LIVE_BROWSER_SAFE_FAILURE_MARKERS = Object.freeze([
   [11, "owner cross_tenant authorization is rejected by the real Cloud boundary", "cross_tenant_denial"],
   [12, "owner completes distinct real WebAuthn device revoke", "owner_device_revoke"],
   [13, "admin completes distinct real WebAuthn device revoke", "admin_device_revoke"]
-].map(([index, name, code]) => Object.freeze({ marker: `not ok ${index} - ${name}`, code })));
+].map(([index, name, code]) => Object.freeze({ marker: index === null ? name : `not ok ${index} - ${name}`, code })));
 const REQUIRED_ENV_KEYS = Object.freeze([
   "P0B_POSTGRES_ADMIN_URL",
   "AGENTPASS_TEST_POSTGRES_ADMIN_URL",

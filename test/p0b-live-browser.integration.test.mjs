@@ -10,8 +10,15 @@ const enabled = process.env.P0B_LIVE_BROWSER === "1";
 test("P0-B live browser role, WebAuthn, and recent-auth matrix", { skip: !enabled, timeout: 840_000 }, async (t) => {
   await scenario(t, "renders all six real PostgreSQL device states", async ({ open }) => {
     const page = await open("owner");
-    await Promise.all(["同期済み", "反映待ち", "ブロック中", "古い状態", "オフライン", "失効済み"]
-      .map((label) => page.getByLabel(`同期状態: ${label}`).waitFor()));
+    await Promise.all([
+      ["同期済み", "P0B_SAFE_STATE_MISSING_SYNCED"],
+      ["反映待ち", "P0B_SAFE_STATE_MISSING_PENDING"],
+      ["ブロック中", "P0B_SAFE_STATE_MISSING_BLOCKED"],
+      ["古い状態", "P0B_SAFE_STATE_MISSING_STALE"],
+      ["オフライン", "P0B_SAFE_STATE_MISSING_OFFLINE"],
+      ["失効済み", "P0B_SAFE_STATE_MISSING_REVOKED"]
+    ].map(([label, safeCode]) => page.getByLabel(`同期状態: ${label}`).waitFor()
+      .catch(() => assert.fail(safeCode))));
   });
 
   await scenario(t, "accepts keyboard wake from the real pending device", async ({ open }) => {
