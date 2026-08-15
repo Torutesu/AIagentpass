@@ -56,7 +56,9 @@ test("stored session diagnostics expose only fixed authoritative state codes", a
   const sessionId = "11111111-1111-4111-8111-111111111111";
   for (const [row, expected] of [
     [undefined, "missing"],
-    [{ revoked: true, absolute_expired: false, idle_expired: false }, "revoked"],
+    [{ revoked: true, revoke_reason: "expired", absolute_expired: false, idle_expired: false }, "revoked_expired"],
+    [{ revoked: true, revoke_reason: "concurrent_session_limit", absolute_expired: false, idle_expired: false }, "revoked_concurrent_session_limit"],
+    [{ revoked: true, revoke_reason: "unexpected", absolute_expired: false, idle_expired: false }, "revoked_other"],
     [{ revoked: false, absolute_expired: true, idle_expired: false }, "absolute_expired"],
     [{ revoked: false, absolute_expired: false, idle_expired: true }, "idle_expired"],
     [{ revoked: false, absolute_expired: false, idle_expired: false }, "active"]

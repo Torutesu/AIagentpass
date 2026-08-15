@@ -581,13 +581,16 @@ function validateBootstrap(value, descriptor, organizationId) {
 export async function classifyStoredSessionState(pool, sessionId) {
   if (!pool || typeof pool.query !== "function" || !UUID.test(sessionId ?? "")) return "unavailable";
   try {
-    const result = await pool.query(`SELECT revoked_at IS NOT NULL AS revoked,
+    const result = await pool.query(`SELECT revoked_at IS NOT NULL AS revoked, revoke_reason,
       expires_at <= clock_timestamp() AS absolute_expired,
       idle_expires_at IS NOT NULL AND idle_expires_at <= clock_timestamp() AS idle_expired
       FROM human_sessions WHERE id=$1 LIMIT 1`, [sessionId.toLowerCase()]);
     const row = result.rows?.[0];
     if (!row) return "missing";
-    if (row.revoked === true) return "revoked";
+    if (row.revoked === true) {
+      if (["expired", "concurrent_session_limit", "session_rotation", "logout"].includes(row.revoke_reason)) return `revoked_${row.revoke_reason}`;
+      return "revoked_other";
+    }
     if (row.absolute_expired === true) return "absolute_expired";
     if (row.idle_expired === true) return "idle_expired";
     if (row.revoked === false && row.absolute_expired === false && row.idle_expired === false) return "active";
