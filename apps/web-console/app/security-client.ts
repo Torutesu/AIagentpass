@@ -219,8 +219,10 @@ export function createSecurityClient(options: ClientOptions = {}): SecurityClien
       if (!Array.isArray(sessions)) throw new SecurityClientError("invalid_response", "セッション情報を確認できませんでした。");
       const targets = sessions.filter((session) => !session.current);
       for (const session of targets) assertSessionTarget(session.id, session.version);
-      for (const session of targets) await revokeSessionRecord(session.id, session.version, requestOptions, false);
-      return targets.length;
+      const context = await ensureSession(requestOptions);
+      const recentAuth = await authorize(context, "human.management.sessions.revoke_others", requestOptions);
+      const response = await requestJson("/api/auth/security/sessions/revoke-others", "POST", context.csrfToken, {}, requestOptionsFor(requestOptions), recentAuth);
+      return expectOtherSessionsMutation(response, context.organizationId);
     },
   };
   return Object.freeze(client);
@@ -312,6 +314,20 @@ function expectCredentialMutation(value: unknown): void {
 function expectSessionMutation(value: unknown): SecuritySession {
   if (!isRecord(value) || !hasExactKeys(value, ["session"])) throw new SecurityClientError("invalid_response", "セキュリティ操作の応答を確認できませんでした。");
   return toPublicSession(parseSession(value.session));
+}
+
+function expectOtherSessionsMutation(value: unknown, organizationId: string): number {
+  if (!isRecord(value) || !hasExactKeys(value, ["revoked_sessions", "revoked_count"]) || !Array.isArray(value.revoked_sessions) || value.revoked_sessions.length > MAX_ITEMS || !Number.isSafeInteger(value.revoked_count) || Number(value.revoked_count) < 0 || value.revoked_count !== value.revoked_sessions.length) {
+    throw new SecurityClientError("invalid_response", "セッション一括無効化の応答を確認できませんでした。");
+  }
+  const records = value.revoked_sessions.map((session) => {
+    if (!isRecord(session) || session.organization_id !== organizationId || session.is_current !== false || session.status !== "revoked" || !isInstant(session.revoked_at)) {
+      throw new SecurityClientError("invalid_response", "セッション一括無効化の応答を確認できませんでした。");
+    }
+    return parseSession(session);
+  });
+  if (new Set(records.map((session) => session.id)).size !== records.length) throw new SecurityClientError("invalid_response", "セッション一括無効化の応答を確認できませんでした。");
+  return records.length;
 }
 
 function assertSessionTarget(id: string, version: number): void {

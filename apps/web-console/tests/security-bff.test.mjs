@@ -39,6 +39,12 @@ test("maps Security BFF paths to Cloud management paths and forwards session con
   await api.handle(request(`/api/auth/security/sessions/${sessionId}/revoke`, { method: "POST", body: { expected_version: 4 }, headers: { cookie, "agentpass-csrf": csrf } }));
   assert.equal(calls[2].url, `https://cloud.example.test/api/auth/management/sessions/${sessionId}/revoke`);
   assert.equal(calls[2].init.method, "POST");
+
+  await api.handle(request("/api/auth/security/sessions/revoke-others", { method: "POST", body: {}, headers: { cookie, "agentpass-csrf": csrf, "agentpass-recent-auth": authorizationId } }));
+  assert.equal(calls[3].url, "https://cloud.example.test/api/auth/management/sessions/revoke-others");
+  assert.equal(calls[3].init.method, "POST");
+  assert.equal(calls[3].init.headers.get("agentpass-recent-auth"), authorizationId);
+  assert.deepEqual(JSON.parse(new TextDecoder().decode(calls[3].init.body)), {});
 });
 
 test("fails closed before Cloud for missing session controls or malformed management input", async () => {
@@ -47,6 +53,8 @@ test("fails closed before Cloud for missing session controls or malformed manage
   assert.equal((await api.handle(request("/api/auth/security/sessions", { headers: { "agentpass-csrf": csrf } }))).status, 401);
   assert.equal((await api.handle(request(`/api/auth/security/passkeys/${credentialId}`, { method: "PATCH", body: { label: "x" }, headers: { cookie, "agentpass-csrf": csrf } }))).status, 400);
   assert.equal((await api.handle(request(`/api/auth/security/passkeys/${credentialId}/revoke`, { method: "POST", body: {}, headers: { cookie, "agentpass-csrf": csrf } }))).status, 400);
+  assert.equal((await api.handle(request("/api/auth/security/sessions/revoke-others", { method: "POST", body: {}, headers: { cookie, "agentpass-csrf": csrf } }))).status, 401);
+  assert.equal((await api.handle(request("/api/auth/security/sessions/revoke-others", { method: "POST", body: { session_ids: [sessionId] }, headers: { cookie, "agentpass-csrf": csrf, "agentpass-recent-auth": authorizationId } }))).status, 400);
   assert.equal(calls, 0);
 });
 
@@ -82,4 +90,17 @@ test("forwards recent auth only to protected Security mutations", async () => {
   const leaked = await api.handle(request("/api/auth/security/passkeys", { headers: { cookie, "agentpass-csrf": csrf, "agentpass-recent-auth": authorizationId } }));
   assert.equal(leaked.status, 400);
   assert.equal(calls.length, 1);
+});
+
+test("does not treat revoke-others as a per-session UUID route", async () => {
+  const calls = [];
+  const api = bridge(async (url, init) => {
+    calls.push({ url: String(url), init });
+    return new Response(JSON.stringify({ revoked_sessions: [], revoked_count: 0 }), { headers: { "content-type": "application/json" } });
+  });
+
+  const response = await api.handle(request("/api/auth/security/sessions/revoke-others", { method: "POST", body: {}, headers: { cookie, "agentpass-csrf": csrf, "agentpass-recent-auth": authorizationId } }));
+  assert.equal(response.status, 200);
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].url, "https://cloud.example.test/api/auth/management/sessions/revoke-others");
 });

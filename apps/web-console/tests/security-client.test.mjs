@@ -110,24 +110,53 @@ test("registers a passkey through the session-bound WebAuthn client without retu
   assert.doesNotMatch(String(result), /credential|challenge|assertion|private|secret|token/i);
 });
 
-test("revokes all other sessions through the existing per-session contract", async () => {
+test("revokes all other sessions through one atomic operation-bound request", async () => {
   const calls = [];
-  const client = createSecurityClient({ authenticateRecentAuthImpl: authorize, fetchImpl: async (url, init) => {
+  const authorizations = [];
+  const client = createSecurityClient({ authenticateRecentAuthImpl: async (input) => { authorizations.push(input); return { authorization_id: authorizationId }; }, fetchImpl: async (url, init) => {
     calls.push({ url: String(url), init });
     if (url === "/api/auth/session") return sessionResponse();
     if (url === "/api/auth/security/passkeys") return json({ credentials: [], next_cursor: null });
     if (url === "/api/auth/security/sessions") return json({ sessions: [session(), session("active", false), session("active", false, "55555555-5555-4555-8555-555555555555")], next_cursor: null });
-    if (url.includes("/security/sessions/") && init.method === "POST") return json({ session: session("revoked", false, String(url).split("/").at(-2)) });
+    if (url === "/api/auth/security/sessions/revoke-others" && init.method === "POST") return json({
+      revoked_sessions: [
+        { ...session("revoked", false), revoked_at: date },
+        { ...session("revoked", false, "55555555-5555-4555-8555-555555555555"), revoked_at: date },
+      ],
+      revoked_count: 2,
+    });
     throw new Error("unexpected path");
   }});
 
   const snapshot = await client.getSnapshot();
   assert.equal(await client.revokeOtherSessions(snapshot.sessions), 2);
   assert.equal(calls.filter((call) => call.url === "/api/auth/session").length, 1);
-  assert.deepEqual(calls.filter((call) => call.url.includes("/security/sessions/")).map((call) => call.url), [
-    `/api/auth/security/sessions/${otherSessionId}/revoke`,
-    "/api/auth/security/sessions/55555555-5555-4555-8555-555555555555/revoke",
-  ]);
+  const mutation = calls.find((call) => call.url === "/api/auth/security/sessions/revoke-others");
+  assert.ok(mutation);
+  assert.deepEqual(JSON.parse(mutation.init.body), {});
+  assert.equal(mutation.init.headers.get("agentpass-recent-auth"), authorizationId);
+  assert.deepEqual(authorizations.map(({ operation }) => operation), ["human.management.sessions.revoke_others"]);
+  assert.equal(calls.filter((call) => call.url.includes("/security/sessions/") && call.url !== "/api/auth/security/sessions/revoke-others").length, 0);
+});
+
+test("fails closed on malformed or current-session revoke-others results without replay", async () => {
+  const current = { id: sessionId, version: 3, label: "現在のブラウザ", platform: "Web Console", createdAt: date, lastSeenAt: date, expiresAt: "2026-08-12T18:00:00.000Z", current: true };
+  const other = { ...current, id: otherSessionId, label: "別のブラウザセッション", current: false };
+  for (const result of [
+    { revoked_sessions: [], revoked_count: 1 },
+    { revoked_sessions: [{ ...session("revoked", true), revoked_at: date }], revoked_count: 1 },
+    { revoked_sessions: [{ ...session("revoked", false), organization_id: "66666666-6666-4666-8666-666666666666", revoked_at: date }], revoked_count: 1 },
+    { revoked_sessions: [{ ...session("active", false), revoked_at: null }], revoked_count: 1 },
+  ]) {
+    let mutations = 0;
+    const client = createSecurityClient({ authenticateRecentAuthImpl: authorize, fetchImpl: async (url) => {
+      if (url === "/api/auth/session") return sessionResponse();
+      if (url === "/api/auth/security/sessions/revoke-others") { mutations += 1; return json(result); }
+      throw new Error("unexpected path");
+    }});
+    await assert.rejects(() => client.revokeOtherSessions([current, other]), (error) => error instanceof SecurityClientError && error.code === "invalid_response");
+    assert.equal(mutations, 1);
+  }
 });
 
 test("current-session revoke closes the lifecycle without bootstrapping a replacement", async () => {

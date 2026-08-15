@@ -17,6 +17,7 @@ const ROUTES = new Map([
   ["/api/auth/webauthn/registration/verify", Object.freeze({ cloudPath: "/api/auth/webauthn/registration/verify", session: "human", requireCookie: true, requireCsrf: true })],
   ["/api/auth/security/passkeys", Object.freeze({ cloudPath: "/api/auth/management/credentials", session: "human", methods: ["GET"], requireCookie: true, requireCsrf: true, body: "none" })],
   ["/api/auth/security/sessions", Object.freeze({ cloudPath: "/api/auth/management/sessions", session: "human", methods: ["GET"], requireCookie: true, requireCsrf: true, body: "none" })],
+  ["/api/auth/security/sessions/revoke-others", Object.freeze({ cloudPath: "/api/auth/management/sessions/revoke-others", session: "human", methods: ["POST"], requireCookie: true, requireCsrf: true, requireRecentAuth: true, body: "empty" })],
 ]);
 
 export class HumanAuthBridgeError extends Error {

@@ -396,10 +396,10 @@ async function installSecurityRoutes(page: Page, failStatus?: 401 | 403, options
       state.passkeyVersion = 2;
       return json(route, { credential: securityPasskey(state) });
     }
-    if (url.pathname === `/api/auth/security/sessions/${OTHER_SESSION_ID}/revoke` && request.method() === "POST") {
+    if (url.pathname === "/api/auth/security/sessions/revoke-others" && request.method() === "POST") {
       state.mutations.push(requestMutation(route));
       state.otherSessionStatus = "revoked";
-      return json(route, { session: securitySession(state, false) });
+      return json(route, { revoked_sessions: [securitySession(state, false)], revoked_count: 1 });
     }
     if (url.pathname === `/api/auth/security/sessions/${SESSION_ID}/revoke` && request.method() === "POST") {
       state.mutations.push(requestMutation(route));
@@ -590,8 +590,9 @@ test("production Console SecurityPanel executes passkey and session mutations wi
     });
     assertSecurityMutation(revokeOther, {
       method: "POST",
-      path: `/api/auth/security/sessions/${OTHER_SESSION_ID}/revoke`,
-      body: { expected_version: 1 },
+      path: "/api/auth/security/sessions/revoke-others",
+      body: {},
+      recentAuth: AUTHORIZATION_ID,
     });
     assertSecurityMutation(revokeCurrent, {
       method: "POST",
@@ -603,6 +604,8 @@ test("production Console SecurityPanel executes passkey and session mutations wi
     expect(state.recentAuthOperations).toEqual([
       "human.management.credential.revoke",
       "human.management.credential.revoke",
+      "human.management.sessions.revoke_others",
+      "human.management.sessions.revoke_others",
       "human.management.session.revoke",
       "human.management.session.revoke",
     ]);
