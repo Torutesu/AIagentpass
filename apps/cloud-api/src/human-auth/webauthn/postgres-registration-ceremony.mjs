@@ -177,6 +177,7 @@ export class PostgresWebAuthnRegistrationCeremonyError extends Error {
     void cause;
     this.name = "PostgresWebAuthnRegistrationCeremonyError";
     this.code = code;
+    this.kind = "storage_unavailable";
   }
 }
 
