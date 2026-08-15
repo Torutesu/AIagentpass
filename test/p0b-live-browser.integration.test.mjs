@@ -41,10 +41,16 @@ test("P0-B live browser role, WebAuthn, and recent-auth matrix", { skip: !enable
   await scenario(t, "shows accepted, coalesced, and no-pending outcomes from the real wake ledger", async ({ fixture, open }) => {
     await fixture.resetManualWakeEvidence();
     const page = await open("owner");
-    for (const [name, expected] of [["反映待ち Mac", /依頼を受け付けました/u], ["反映待ち Mac", /既存の依頼へ統合し/u], ["古い状態 Mac", /反映待ちの更新はなく/u]]) {
+    for (const [name, expected, safeCode] of [
+      ["反映待ち Mac", /依頼を受け付けました/u, "P0B_SAFE_WAKE_ACCEPTED_FAILED"],
+      ["反映待ち Mac", /既存の依頼へ統合し/u, "P0B_SAFE_WAKE_COALESCED_FAILED"],
+      ["古い状態 Mac", /反映待ちの更新はなく/u, "P0B_SAFE_WAKE_NO_PENDING_FAILED"]
+    ]) {
       const card = deviceCard(page, name);
-      await card.getByRole("button", { name: "Wake requestを依頼" }).click();
-      assert.match(await requireWakeStatus(card), expected);
+      try {
+        await card.getByRole("button", { name: "Wake requestを依頼" }).click();
+        assert.match(await requireWakeStatus(card), expected);
+      } catch { assert.fail(safeCode); }
     }
   });
 
