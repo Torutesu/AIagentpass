@@ -404,7 +404,7 @@ for (const role of ["owner", "admin"] as const) {
       await page.getByRole("button", { name: "招待トークンを閉じる", exact: true }).click();
       await expect(page.getByText(INVITATION_TOKEN, { exact: true })).toHaveCount(0);
       await page.getByRole("button", { name: "Viewer招待を取り消す", exact: true }).click();
-      await expect(page.getByText("取り消し済み", { exact: true })).toBeVisible();
+      await expect(page.getByText(/^取り消し済み · 有効期限/u)).toBeVisible();
 
       const roleSelect = page.getByLabel("共同管理者のロール");
       await roleSelect.selectOption("auditor");
@@ -507,7 +507,7 @@ test("production Console SecurityPanel executes passkey and session mutations wi
     const signOut = page.getByRole("button", { name: "サインアウトする", exact: true });
     await signOut.focus();
     await page.keyboard.press("Enter");
-    await expect(page.getByRole("heading", { name: "このセッションを終了しました" })).toBeVisible();
+    await expect(page.getByRole("heading", { name: "サインアウトしました" })).toBeVisible();
 
     const [rename, revokePasskeyRequest, revokeOther, revokeCurrent] = state.mutations;
     assertSecurityMutation(rename, {

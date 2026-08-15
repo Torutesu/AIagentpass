@@ -28,16 +28,16 @@ const CI_PATH = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../.
 
 function cleanAuthority() {
   return {
-    platform_principals: [{ principal_id: "principal" }, { principal_id: "approver" }],
+    platform_principals: [{ principal_id: "principal" }, { principal_id: "approver" }, { principal_id: "second-approver" }],
     platform_operator_assignments: [{ assignment_id: "assignment" }],
-    platform_operator_assignment_approvals: [{ approval_id: "approval" }]
+    platform_operator_assignment_approvals: [{ approval_id: "approval" }, { approval_id: "second-approval" }]
   };
 }
 
 function cleanLegacy() {
   return Object.fromEntries(N4_LEGACY_TABLE_SPECS.map(({ name }, index) => [
     name,
-    Array.from({ length: name === "members" ? 2 : 1 }, (_, row) => ({ id: `${name}-${index}-${row}` }))
+    Array.from({ length: name === "members" ? 3 : 1 }, (_, row) => ({ id: `${name}-${index}-${row}` }))
   ]));
 }
 
@@ -138,7 +138,7 @@ test("N4 history validator proves exact upgrade, legacy preservation, credential
   assert.equal(result.status, "clean");
   assert.deepEqual(result.appliedUpgradeVersions, [54]);
   assert.equal(result.history.length, 54);
-  assert.equal(result.seeded_legacy_row_count, 5);
+  assert.equal(result.seeded_legacy_row_count, 6);
   assert.equal(result.seeded_platform_credential_row_count, 1);
   assert.equal(result.seeded_platform_session_row_count, 1);
   assert.equal(result.platform_authority_preservation.exact, true);

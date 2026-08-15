@@ -46,12 +46,15 @@ export const N4_PLATFORM_AUTHORITY_TABLE_SPECS = Object.freeze([
 const LEGACY_ORGANIZATION_ID = "00000000-0000-4000-8000-000000000401";
 const LEGACY_TARGET_MEMBER_ID = "00000000-0000-4000-8000-000000000402";
 const LEGACY_APPROVER_MEMBER_ID = "00000000-0000-4000-8000-000000000403";
+const LEGACY_SECOND_APPROVER_MEMBER_ID = "00000000-0000-4000-8000-000000000406";
 const LEGACY_MEMBERSHIP_ID = "00000000-0000-4000-8000-000000000404";
 const LEGACY_SESSION_ID = "00000000-0000-4000-8000-000000000405";
 const PLATFORM_TARGET_PRINCIPAL_ID = "00000000-0000-4000-8000-000000000411";
 const PLATFORM_APPROVER_PRINCIPAL_ID = "00000000-0000-4000-8000-000000000412";
+const PLATFORM_SECOND_APPROVER_PRINCIPAL_ID = "00000000-0000-4000-8000-000000000417";
 const PLATFORM_ASSIGNMENT_ID = "00000000-0000-4000-8000-000000000413";
 const PLATFORM_APPROVAL_ID = "00000000-0000-4000-8000-000000000414";
+const PLATFORM_SECOND_APPROVAL_ID = "00000000-0000-4000-8000-000000000418";
 const PLATFORM_CREDENTIAL_ID = "00000000-0000-4000-8000-000000000415";
 const PLATFORM_SESSION_ID = "00000000-0000-4000-8000-000000000416";
 const PLATFORM_WEBAUTHN_ID = Buffer.alloc(32, 0x61);
@@ -108,15 +111,15 @@ export function assertReviewedN4MigrationSet(migrations) {
 
 export function assertLegacyRowsPreserved(before, after) {
   assert.deepEqual(after, before, "0054 must preserve seeded legacy organization, member, membership, and human session rows exactly");
-  assert.deepEqual(N4_LEGACY_TABLE_SPECS.map(({ name }) => before?.[name]?.length ?? 0), [1, 2, 1, 1], "N4 legacy fixture must contain the reviewed tenant/session rows");
+  assert.deepEqual(N4_LEGACY_TABLE_SPECS.map(({ name }) => before?.[name]?.length ?? 0), [1, 3, 1, 1], "N4 legacy fixture must contain the reviewed tenant/session rows");
   return true;
 }
 
 export function assertPlatformAuthorityRowsPreserved(before, after) {
   assert.deepEqual(after, before, "0054 must preserve seeded principal, assignment, and approval rows exactly");
-  assert.equal(before.platform_principals.length, 2);
+  assert.equal(before.platform_principals.length, 3);
   assert.equal(before.platform_operator_assignments.length, 1);
-  assert.equal(before.platform_operator_assignment_approvals.length, 1);
+  assert.equal(before.platform_operator_assignment_approvals.length, 2);
   return true;
 }
 
@@ -344,7 +347,7 @@ async function qualifyScenario({ database, migrationPool, migrations, scenario }
       from_version: N4_SOURCE_VERSION,
       to_version: N4_TARGET_VERSION,
       seeded_legacy_row_count: historyReport.seeded_legacy_row_count,
-      seeded_platform_authority_row_count: 4,
+      seeded_platform_authority_row_count: 6,
       seeded_platform_credential_row_count: historyReport.seeded_platform_credential_row_count,
       seeded_platform_session_row_count: historyReport.seeded_platform_session_row_count,
       legacy_preservation: historyReport.legacy_preservation,
@@ -383,7 +386,11 @@ async function seedN4LegacyRows(pool) {
   await pool.query(`INSERT INTO members
     (id, github_subject, display_name, created_at)
     VALUES ($1, 'n4-seeded-target-member', 'N4 seeded target member', $3::timestamptz),
-           ($2, 'n4-seeded-approver-member', 'N4 seeded approver member', $3::timestamptz)`, [LEGACY_TARGET_MEMBER_ID, LEGACY_APPROVER_MEMBER_ID, LEGACY_CREATED_AT]);
+           ($2, 'n4-seeded-approver-member', 'N4 seeded approver member', $3::timestamptz),
+           ($4, 'n4-seeded-second-approver-member', 'N4 seeded second approver member', $3::timestamptz)`, [
+    LEGACY_TARGET_MEMBER_ID, LEGACY_APPROVER_MEMBER_ID, LEGACY_CREATED_AT,
+    LEGACY_SECOND_APPROVER_MEMBER_ID
+  ]);
   await pool.query(`INSERT INTO memberships
     (organization_id, id, member_id, role, status, version, created_at, updated_at, session_epoch)
     VALUES ($1, $2, $3, 'admin', 'active', 4, $4::timestamptz, $5::timestamptz, 8)`, [LEGACY_ORGANIZATION_ID, LEGACY_MEMBERSHIP_ID, LEGACY_TARGET_MEMBER_ID, LEGACY_CREATED_AT, LEGACY_UPDATED_AT]);
@@ -410,6 +417,7 @@ async function seedN4PlatformRows(migrationPool, adminPool) {
   try {
     await client.query("SELECT agentpass_platform_principal_provision($1::uuid, $2::uuid)", [PLATFORM_TARGET_PRINCIPAL_ID, LEGACY_TARGET_MEMBER_ID]);
     await client.query("SELECT agentpass_platform_principal_provision($1::uuid, $2::uuid)", [PLATFORM_APPROVER_PRINCIPAL_ID, LEGACY_APPROVER_MEMBER_ID]);
+    await client.query("SELECT agentpass_platform_principal_provision($1::uuid, $2::uuid)", [PLATFORM_SECOND_APPROVER_PRINCIPAL_ID, LEGACY_SECOND_APPROVER_MEMBER_ID]);
     await client.query(`SELECT agentpass_platform_operator_assignment_request(
       $1::uuid, $2::uuid, $3::uuid, $4::uuid, $5::text, $6::text,
       decode($7, 'hex'), $8::timestamptz)`, [
@@ -422,6 +430,12 @@ async function seedN4PlatformRows(migrationPool, adminPool) {
       PLATFORM_APPROVAL_ID, PLATFORM_ASSIGNMENT_ID, PLATFORM_APPROVER_PRINCIPAL_ID,
       PLATFORM_REQUEST_DIGEST.toString("hex")
     ]);
+    await client.query(`SELECT agentpass_platform_operator_assignment_approve(
+      $1::uuid, $2::uuid, $3::uuid, decode($4, 'hex'))`, [
+      PLATFORM_SECOND_APPROVAL_ID, PLATFORM_ASSIGNMENT_ID, PLATFORM_SECOND_APPROVER_PRINCIPAL_ID,
+      PLATFORM_REQUEST_DIGEST.toString("hex")
+    ]);
+    await client.query("SELECT agentpass_platform_operator_assignment_activate($1::uuid)", [PLATFORM_ASSIGNMENT_ID]);
     await client.query(`SELECT agentpass_platform_credential_provision(
       $1::uuid, $2::uuid, $3::uuid, $4::bytea, $5::text)`, [
       PLATFORM_CREDENTIAL_ID, PLATFORM_TARGET_PRINCIPAL_ID, LEGACY_TARGET_MEMBER_ID,
@@ -442,7 +456,7 @@ async function seedN4PlatformRows(migrationPool, adminPool) {
 export async function snapshotN4LegacyRows(pool) {
   const snapshot = {
     organizations: (await pool.query(`SELECT id::text, name, version::int AS version, authority_epoch::int AS authority_epoch, created_at::text, updated_at::text FROM organizations WHERE id = $1 ORDER BY id`, [LEGACY_ORGANIZATION_ID])).rows,
-    members: (await pool.query(`SELECT id::text, github_subject, display_name, created_at::text FROM members WHERE id IN ($1, $2) ORDER BY id`, [LEGACY_TARGET_MEMBER_ID, LEGACY_APPROVER_MEMBER_ID])).rows,
+    members: (await pool.query(`SELECT id::text, github_subject, display_name, created_at::text FROM members WHERE id IN ($1, $2, $3) ORDER BY id`, [LEGACY_TARGET_MEMBER_ID, LEGACY_APPROVER_MEMBER_ID, LEGACY_SECOND_APPROVER_MEMBER_ID])).rows,
     memberships: (await pool.query(`SELECT organization_id::text, id::text, member_id::text, role, status, version::int AS version, session_epoch::int AS session_epoch, created_at::text, updated_at::text FROM memberships WHERE organization_id = $1 AND id = $2 ORDER BY organization_id,id`, [LEGACY_ORGANIZATION_ID, LEGACY_MEMBERSHIP_ID])).rows,
     human_sessions: (await pool.query(`SELECT id::text, member_id::text, encode(token_hash, 'hex') AS token_hash, created_at::text, expires_at::text, recent_auth_at::text, revoked_at::text, organization_id::text, membership_id::text, role, encode(csrf_token_hash, 'hex') AS csrf_token_hash, last_seen_at::text, idle_expires_at::text, revoke_reason, recent_auth_challenge_id::text, recent_auth_organization_id::text, recent_auth_operation, recent_auth_consumed_at::text, version::int AS version, organization_authority_epoch::int AS organization_authority_epoch, membership_session_epoch::int AS membership_session_epoch, encode(recent_auth_context_hash, 'hex') AS recent_auth_context_hash FROM human_sessions WHERE id = $1 ORDER BY id`, [LEGACY_SESSION_ID])).rows
   };

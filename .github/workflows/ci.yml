@@ -406,8 +406,8 @@ jobs:
           assert.equal(report.migration_role, "agentpass_migrator");
           assert.deepEqual(report.scenarios.map(({ from_version, to_version }) => [from_version, to_version]), [[53, 54]]);
           const scenario = report.scenarios[0];
-          assert.equal(scenario.seeded_legacy_row_count, 5);
-          assert.equal(scenario.seeded_platform_authority_row_count, 4);
+          assert.equal(scenario.seeded_legacy_row_count, 6);
+          assert.equal(scenario.seeded_platform_authority_row_count, 6);
           assert.equal(scenario.seeded_platform_credential_row_count, 1);
           assert.equal(scenario.seeded_platform_session_row_count, 1);
           assert.equal(scenario.legacy_preservation.exact, true);
