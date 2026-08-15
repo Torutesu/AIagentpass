@@ -262,7 +262,7 @@ BEGIN
     'agentpass_platform_session_bootstrap_context(bytea,uuid,text,text)',
     'agentpass_hosted_identity_bootstrap_start_v2(uuid,uuid,bytea,text,text,text,text,bytea,bytea,bytea,timestamptz)',
     'agentpass_hosted_identity_oauth_state_claim_v2(uuid,bytea,bytea,text)',
-    'agentpass_hosted_identity_oauth_state_complete(uuid,bytea,uuid,text,bytea)',
+    'agentpass_hosted_identity_oauth_complete_v2(uuid,uuid,bytea,uuid,text,text,bytea)',
     'agentpass_hosted_identity_oauth_state_fail(uuid,text)',
     'agentpass_hosted_identity_bootstrap_csrf_issue(bytea,bytea)',
     'agentpass_hosted_identity_bootstrap_organization_commit(bytea,text,bytea,uuid,uuid,jsonb)',

@@ -12,6 +12,8 @@ const CONTROL = /[\u0000-\u001f\u007f]/u;
 const MAX_SELECTOR_BYTES = 16 * 1024;
 const MAX_SUBJECT_BYTES = 512;
 const KEY_ID = /^[A-Za-z0-9._~-]{1,128}$/u;
+const GITHUB_SUBJECT = /^[1-9][0-9]{0,19}$/u;
+const OAUTH_COMPLETE_V2_STATES = Object.freeze(["identity_verified", "organization_required", "no_membership"]);
 
 export const HOSTED_IDENTITY_BOOTSTRAP_REPOSITORY_METHODS = Object.freeze([
   "start",
@@ -19,6 +21,7 @@ export const HOSTED_IDENTITY_BOOTSTRAP_REPOSITORY_METHODS = Object.freeze([
   "consumeOAuthState",
   "claimOAuthStateV2",
   "completeOAuthState",
+  "completeOAuthStateV2",
   "failOAuthState",
   "issueCsrf",
   "commitOrganization",
@@ -34,6 +37,7 @@ export const HOSTED_IDENTITY_BOOTSTRAP_REPOSITORY_SQL = Object.freeze({
   consumeOAuthState: "SELECT * FROM public.agentpass_hosted_identity_oauth_state_consume($1::uuid,$2::bytea,$3::text)",
   claimOAuthStateV2: "SELECT * FROM public.agentpass_hosted_identity_oauth_state_claim_v2($1::uuid,$2::bytea,$3::bytea,$4::text)",
   completeOAuthState: "SELECT public.agentpass_hosted_identity_oauth_state_complete($1::uuid,$2::bytea,$3::uuid,$4::text,$5::bytea) AS result",
+  completeOAuthStateV2: "SELECT * FROM public.agentpass_hosted_identity_oauth_complete_v2($1::uuid,$2::uuid,$3::bytea,$4::uuid,$5::text,$6::text,$7::bytea)",
   failOAuthState: "SELECT public.agentpass_hosted_identity_oauth_state_fail($1::uuid,$2::text) AS result",
   issueCsrf: "SELECT public.agentpass_hosted_identity_bootstrap_csrf_issue($1::bytea,$2::bytea) AS result",
   commitOrganization: "SELECT * FROM public.agentpass_hosted_identity_bootstrap_organization_commit($1::bytea,$2::text,$3::bytea,$4::uuid,$5::uuid,$6::jsonb)",
@@ -110,6 +114,12 @@ export function createPostgresHostedIdentityBootstrapRepository({ client } = {})
     const value = normalizeOAuthComplete(input);
     const result = await scalarCall("completeOAuthState", [value.oauth_state_id, sha256(value.bootstrap_cookie), value.member_id, value.subject, sha256(value.subject),], "uuid");
     return uuid(result, "attempt_id", "RESULT");
+  }
+
+  async function completeOAuthStateV2(input = {}) {
+    const value = normalizeOAuthCompleteV2(input);
+    const row = await optionalTableCall("completeOAuthStateV2", [value.oauth_state_id, value.attempt_id, sha256(value.bootstrap_cookie), value.candidate_member_id, value.provider, value.subject, sha256(value.subject)]);
+    return row === null ? null : normalizeOAuthCompleteV2Result(row, value.attempt_id);
   }
 
   async function failOAuthState(input = {}) {
@@ -191,6 +201,7 @@ export function createPostgresHostedIdentityBootstrapRepository({ client } = {})
     consumeOAuthState,
     claimOAuthStateV2,
     completeOAuthState,
+    completeOAuthStateV2,
     failOAuthState,
     issueCsrf,
     commitOrganization,
@@ -253,6 +264,21 @@ function normalizeOAuthComplete(value) {
     oauth_state_id: uuid(value.oauth_state_id, "oauth_state_id"),
     bootstrap_cookie: selector(value.bootstrap_cookie, "bootstrap_cookie"),
     member_id: uuid(value.member_id, "member_id"),
+    subject
+  });
+}
+
+function normalizeOAuthCompleteV2(value) {
+  exactObject(value, ["oauth_state_id", "attempt_id", "bootstrap_cookie", "candidate_member_id", "provider", "subject"]);
+  const provider = text(value.provider, 32, "provider");
+  const subject = text(value.subject, MAX_SUBJECT_BYTES, "subject");
+  if (provider !== "github" || !GITHUB_SUBJECT.test(subject) || Buffer.byteLength(subject, "utf8") > MAX_SUBJECT_BYTES) throw error("INPUT");
+  return Object.freeze({
+    oauth_state_id: uuid(value.oauth_state_id, "oauth_state_id"),
+    attempt_id: uuid(value.attempt_id, "attempt_id"),
+    bootstrap_cookie: selector(value.bootstrap_cookie, "bootstrap_cookie"),
+    candidate_member_id: uuid(value.candidate_member_id, "candidate_member_id"),
+    provider,
     subject
   });
 }
@@ -330,6 +356,20 @@ function normalizeOAuthClaimV2Result(value) {
   });
 }
 
+function normalizeOAuthCompleteV2Result(value, expectedAttemptId) {
+  exactObject(value, ["attempt_id", "state", "organization_count", "expires_at"], "RESULT");
+  const attemptId = uuid(value.attempt_id, "attempt_id", "RESULT");
+  if (attemptId !== expectedAttemptId || !OAUTH_COMPLETE_V2_STATES.includes(value.state)) throw error("RESULT");
+  const organizationCount = nonNegativeInteger(value.organization_count, "organization_count", "RESULT");
+  if (value.state === "identity_verified" ? organizationCount < 1 : organizationCount !== 0) throw error("RESULT");
+  return Object.freeze({
+    attempt_id: attemptId,
+    state: value.state,
+    organization_count: organizationCount,
+    expires_at: timestamp(value.expires_at, "expires_at", "RESULT")
+  });
+}
+
 function normalizeOrganizationResult(value) {
   exactObject(value, ["response_status", "response_json", "replayed"], "RESULT");
   if (value.response_status !== 200 && value.response_status !== 201) throw error("RESULT");
@@ -395,6 +435,21 @@ function timestamp(value, name, kind = "INPUT") {
   return new Date(value).toISOString();
 }
 function positiveInteger(value, name, kind = "RESULT") { if (!Number.isSafeInteger(Number(value)) || Number(value) < 1) throw error(kind); return Number(value); }
+function nonNegativeInteger(value, name, kind = "RESULT") {
+  if (typeof value === "number") {
+    if (!Number.isSafeInteger(value) || value < 0) throw error(kind);
+    return value;
+  }
+  if (typeof value === "bigint") {
+    if (value < 0n || value > BigInt(Number.MAX_SAFE_INTEGER)) throw error(kind);
+    return Number(value);
+  }
+  if (typeof value === "string" && /^(?:0|[1-9][0-9]*)$/u.test(value)) {
+    const number = Number(value);
+    if (Number.isSafeInteger(number)) return number;
+  }
+  throw error(kind);
+}
 function uuid(value, name, kind = "INPUT") { if (typeof value !== "string" || !UUID.test(value)) throw error(kind); return value.toLowerCase(); }
 function classifyDatabaseError(cause) {
   if (cause?.code === "40001") return error("RETRYABLE");

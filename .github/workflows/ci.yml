@@ -682,6 +682,7 @@ jobs:
           apps/cloud-api/test/postgres/agent-session-http-qualification.integration.test.mjs
           apps/cloud-api/test/postgres/agent-session-lifecycle-integration.test.mjs
           apps/cloud-api/test/postgres/managed-signer-key-lifecycle-repository.integration.test.mjs
+          apps/cloud-api/test/postgres/hosted-identity-atomic-completion.integration.test.mjs
       - name: Prepare Platform authorization qualification evidence and isolated role database
         env:
           PGPASSWORD: agentpass-integration

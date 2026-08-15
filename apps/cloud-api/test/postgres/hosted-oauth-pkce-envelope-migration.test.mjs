@@ -9,9 +9,8 @@ import { POSTGRES_SCHEMA_HEAD } from "../../src/postgres/schema-head.mjs";
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../../..");
 const sql = fs.readFileSync(path.join(root, "contracts/postgres/0058_hosted_oauth_pkce_envelope.sql"), "utf8");
 
-test("0058 is the forward-only encrypted PKCE envelope head", () => {
-  assert.equal(POSTGRES_SCHEMA_HEAD.version, 58);
-  assert.equal(POSTGRES_SCHEMA_HEAD.name, "0058_hosted_oauth_pkce_envelope.sql");
+test("0058 remains the forward-only encrypted PKCE envelope migration", () => {
+  assert.deepEqual(POSTGRES_SCHEMA_HEAD.migrations.find(({ version }) => version === 58)?.name, "0058_hosted_oauth_pkce_envelope.sql");
   assert.match(sql, /^BEGIN;/u);
   assert.match(sql, /COMMIT;\s*$/u);
   assert.match(sql, /CREATE TABLE public\.hosted_identity_oauth_pkce_envelopes/u);

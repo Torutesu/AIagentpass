@@ -1,7 +1,7 @@
 # Hosted v1 implementation plan
 
 Status: active  
-Baseline: `codex/agent-platform` at migration `0058`
+Baseline: `codex/agent-platform` at migration `0059`
 Updated: 2026-08-15
 
 This is the implementation plan for the Hosted identity, first-organization,
@@ -29,11 +29,14 @@ Implemented and pushed:
   strict envelope parsing, rotation-capable key resolution, and redacted errors;
 - durable OAuth state-store composition and an internal callback envelope that
   keeps `{provider, subject}` separate from server-generated attempt context.
+- migration `0059` atomic identity completion with subject serialization,
+  immutable mapping resolution, orphan-free member creation, database-owned
+  membership-history classification, and one-transaction OAuth consumption.
 
 Not yet implemented as a production-composable path:
 
 - real-PostgreSQL restart/race qualification of the new PKCE/state boundary;
-- one transaction that binds upstream identity and completes OAuth state;
+- real-PostgreSQL restart/race qualification of atomic identity completion;
 - one transaction that creates the first organization and owner membership;
 - one transaction that commits WebAuthn credential, completes challenge, and
   issues the ordinary Human Session;

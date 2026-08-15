@@ -100,6 +100,67 @@ test("0058 start and claim keep PKCE plaintext out of PostgreSQL parameters", as
   assert.match(SQL.claimOAuthStateV2, /oauth_state_claim_v2/u);
 });
 
+test("H2 completes OAuth through the exact V2 SQL boundary and normalizes the durable result", async () => {
+  const subject = "12345";
+  const { client, repository } = repo((text) => text === SQL.completeOAuthStateV2
+    ? { rows: [{ attempt_id: IDS.attempt, state: "organization_required", organization_count: "0", expires_at: new Date("2026-08-15T09:10:11+09:00") }], rowCount: 1 }
+    : { rows: [], rowCount: 0 });
+  const result = await repository.completeOAuthStateV2({
+    oauth_state_id: IDS.oauth,
+    attempt_id: IDS.attempt,
+    bootstrap_cookie: COOKIE,
+    candidate_member_id: IDS.member,
+    provider: "github",
+    subject
+  });
+
+  assert.deepEqual(result, {
+    attempt_id: IDS.attempt,
+    state: "organization_required",
+    organization_count: 0,
+    expires_at: "2026-08-15T00:10:11.000Z"
+  });
+  assert.equal(SQL.completeOAuthStateV2, "SELECT * FROM public.agentpass_hosted_identity_oauth_complete_v2($1::uuid,$2::uuid,$3::bytea,$4::uuid,$5::text,$6::text,$7::bytea)");
+  assert.deepEqual(client.calls, [{
+    text: SQL.completeOAuthStateV2,
+    params: [IDS.oauth, IDS.attempt, digest(COOKIE), IDS.member, "github", subject, digest(subject)]
+  }]);
+});
+
+test("H2 treats a missing completion row as null and rejects unsafe identity/result boundaries", async () => {
+  const empty = repo(() => ({ rows: [], rowCount: 0 }));
+  const input = { oauth_state_id: IDS.oauth, attempt_id: IDS.attempt, bootstrap_cookie: COOKIE, candidate_member_id: IDS.member, provider: "github", subject: "12345" };
+  assert.equal(await empty.repository.completeOAuthStateV2(input), null);
+
+  for (const invalid of [
+    { ...input, provider: "google" },
+    { ...input, subject: "0" },
+    { ...input, subject: "0001" },
+    { ...input, subject: "12x" },
+    { ...input, subject: "1".repeat(21) },
+    { ...input, extra: true }
+  ]) {
+    await assert.rejects(empty.repository.completeOAuthStateV2(invalid), (error) => error.code === CODES.INPUT);
+  }
+
+  for (const row of [
+    { attempt_id: IDS.member, state: "identity_verified", organization_count: 0, expires_at: LATER },
+    { attempt_id: IDS.attempt, state: "completed", organization_count: 0, expires_at: LATER },
+    { attempt_id: IDS.attempt, state: "no_membership", organization_count: -1, expires_at: LATER },
+    { attempt_id: IDS.attempt, state: "no_membership", organization_count: Number.MAX_SAFE_INTEGER + 1, expires_at: LATER },
+    { attempt_id: IDS.attempt, state: "no_membership", organization_count: null, expires_at: LATER },
+    { attempt_id: IDS.attempt, state: "no_membership", organization_count: "", expires_at: LATER },
+    { attempt_id: IDS.attempt, state: "identity_verified", organization_count: 0, expires_at: LATER },
+    { attempt_id: IDS.attempt, state: "organization_required", organization_count: 1, expires_at: LATER },
+    { attempt_id: IDS.attempt, state: "no_membership", organization_count: 1, expires_at: LATER },
+    { attempt_id: IDS.attempt, state: "no_membership", organization_count: 0, expires_at: "not-a-timestamp" },
+    { attempt_id: IDS.attempt, state: "no_membership", organization_count: 0, expires_at: LATER, extra: true }
+  ]) {
+    const invalidResult = repo((text) => text === SQL.completeOAuthStateV2 ? { rows: [row], rowCount: 1 } : { rows: [], rowCount: 0 });
+    await assert.rejects(invalidResult.repository.completeOAuthStateV2(input), (error) => error.code === CODES.RESULT);
+  }
+});
+
 test("covers OAuth failure, challenge failure, and empty transition results", async () => {
   const { client, repository } = repo((text) => text === SQL.consumeOAuthState || text === SQL.consumeChallenge ? { rows: [], rowCount: 0 } : { rows: [{ result: null }], rowCount: 1 });
   assert.equal(await repository.consumeOAuthState({ oauth_state_id: IDS.oauth, code: CODE, redirect_uri: REDIRECT }), null);
