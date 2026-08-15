@@ -511,7 +511,8 @@ test("production Console SecurityPanel executes passkey and session mutations wi
     await expect(page.getByText("✓ 他のセッションをすべて無効化しました。", { exact: true })).toBeVisible();
     await expect(page.getByText("別のブラウザセッション", { exact: true })).toHaveCount(0);
 
-    await page.getByRole("button", { name: "サインアウト", exact: true }).click();
+    const securityPanel = page.locator('section[aria-labelledby="security-panel-title"]');
+    await securityPanel.getByRole("button", { name: "サインアウト", exact: true }).click();
     const signOut = page.getByRole("button", { name: "サインアウトする", exact: true });
     await signOut.focus();
     await page.keyboard.press("Enter");
