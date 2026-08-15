@@ -137,7 +137,7 @@ export async function startP0BLiveBrowserFixture({
         await page.goto(new URL("/favicon.svg", harness.consoleUrl).toString(), { waitUntil: "domcontentloaded" });
         stage = "response";
         const response = await page.evaluate(async (sessionPath) => {
-          for (let attempt = 0; attempt < 3; attempt += 1) {
+          for (let attempt = 0; attempt < 8; attempt += 1) {
             const result = await fetch(sessionPath, {
               method: "POST",
               headers: { accept: "application/json", "content-type": "application/json" },
@@ -148,11 +148,11 @@ export async function startP0BLiveBrowserFixture({
             });
             let body = null;
             try { body = await result.json(); } catch {}
-            if (result.status !== 502 || attempt === 2) return { ok: result.ok, status: result.status, body };
+            if (result.status !== 502 || attempt === 7) return { ok: result.ok, status: result.status, body };
             // A 502 is emitted before Cloud can create a session. Retry only
             // this transport-unavailable response; authorization and contract
             // failures remain one-shot and fail closed.
-            await new Promise((resolve) => setTimeout(resolve, 250 * (attempt + 1)));
+            await new Promise((resolve) => setTimeout(resolve, Math.min(1_000, 250 * (attempt + 1))));
           }
           throw new Error("unreachable bootstrap retry state");
         }, SESSION_PATH);
