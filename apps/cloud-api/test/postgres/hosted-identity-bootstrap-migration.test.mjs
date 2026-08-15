@@ -101,11 +101,14 @@ test("0057 uses owner-based trigger guards, PUBLIC-only migration revokes, and e
   assert.doesNotMatch(sql, /GRANT\s/iu);
   assert.doesNotMatch(sql, /FROM PUBLIC,|TO agentpass_/u);
   assert.match(roles, /left\(c\.relname, length\('hosted_identity_'\)\) = 'hosted_identity_'/u);
-  assert.match(roles, /REVOKE INSERT, UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER ON TABLE public\.%I FROM agentpass_app, agentpass_backup/u);
+  assert.match(roles, /REVOKE ALL PRIVILEGES ON TABLE public\.%I FROM agentpass_app, agentpass_backup/u);
   for (const signature of [
-    "agentpass_hosted_identity_bootstrap_start(uuid,uuid,bytea,text,text,text)",
+    "agentpass_hosted_identity_bootstrap_start_v2(uuid,uuid,bytea,text,text,text,text,bytea,bytea,bytea,timestamptz)",
+    "agentpass_hosted_identity_oauth_state_claim_v2(uuid,bytea,bytea,text)",
     "agentpass_hosted_identity_oauth_state_complete(uuid,bytea,uuid,text,bytea)",
     "agentpass_hosted_identity_bootstrap_organization_commit(bytea,text,bytea,uuid,uuid,jsonb)",
     "agentpass_hosted_identity_bootstrap_challenge_complete(bytea,uuid,bytea)"
   ]) assert.ok(roles.includes(`'${signature}'`), `${signature} app grant`);
+  assert.equal(roles.includes("'agentpass_hosted_identity_bootstrap_start(uuid,uuid,bytea,text,text,text)'"), false);
+  assert.equal(roles.includes("'agentpass_hosted_identity_oauth_state_consume(uuid,bytea,text)'"), false);
 });

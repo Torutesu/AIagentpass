@@ -70,6 +70,36 @@ test("uses exact SQL signatures and hashes every raw selector before query", asy
   assert.match(SQL.completeOAuthState, /\$3::uuid,\$4::text,\$5::bytea/u);
 });
 
+test("0058 start and claim keep PKCE plaintext out of PostgreSQL parameters", async () => {
+  const envelope = { key_id: "pkce-key-v1", nonce: Buffer.alloc(12, 1), ciphertext: Buffer.alloc(43, 2), auth_tag: Buffer.alloc(16, 3), expires_at: LATER };
+  const pkceVerifier = "V".repeat(43);
+  const { client, repository } = repo((text) => {
+    if (text === SQL.startOAuthV2) return { rows: [startRow()], rowCount: 1 };
+    if (text === SQL.claimOAuthStateV2) return { rows: [{
+      attempt_id: IDS.attempt,
+      oauth_state_id: IDS.oauth,
+      pkce_challenge: "A".repeat(43),
+      client_id: "github-client",
+      redirect_uri: REDIRECT,
+      key_id: envelope.key_id,
+      nonce: envelope.nonce,
+      ciphertext: envelope.ciphertext,
+      auth_tag: envelope.auth_tag,
+      expires_at: new Date(LATER)
+    }], rowCount: 1 };
+    throw new Error("unexpected query");
+  });
+  await repository.startOAuthV2({ attempt_id: IDS.attempt, oauth_state_id: IDS.oauth, state: STATE, pkce_challenge: "A".repeat(43), client_id: "github-client", redirect_uri: REDIRECT, envelope });
+  const claimed = await repository.claimOAuthStateV2({ oauth_state_id: IDS.oauth, state: STATE, code: CODE, redirect_uri: REDIRECT });
+  assert.deepEqual(client.calls[0].params, [IDS.attempt, IDS.oauth, digest(STATE), "A".repeat(43), "github-client", REDIRECT, envelope.key_id, envelope.nonce, envelope.ciphertext, envelope.auth_tag, LATER]);
+  assert.deepEqual(client.calls[1].params, [IDS.oauth, digest(STATE), digest(CODE), REDIRECT]);
+  assert.equal(client.calls.flatMap(({ params }) => params).includes(pkceVerifier), false);
+  assert.deepEqual(claimed.envelope, { key_id: envelope.key_id, nonce: envelope.nonce, ciphertext: envelope.ciphertext, auth_tag: envelope.auth_tag });
+  assert.equal(claimed.expires_at, LATER);
+  assert.match(SQL.startOAuthV2, /bootstrap_start_v2/u);
+  assert.match(SQL.claimOAuthStateV2, /oauth_state_claim_v2/u);
+});
+
 test("covers OAuth failure, challenge failure, and empty transition results", async () => {
   const { client, repository } = repo((text) => text === SQL.consumeOAuthState || text === SQL.consumeChallenge ? { rows: [], rowCount: 0 } : { rows: [{ result: null }], rowCount: 1 });
   assert.equal(await repository.consumeOAuthState({ oauth_state_id: IDS.oauth, code: CODE, redirect_uri: REDIRECT }), null);

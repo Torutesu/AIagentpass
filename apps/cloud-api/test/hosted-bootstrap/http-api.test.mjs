@@ -18,6 +18,8 @@ const BOOTSTRAP_TOKEN = "b".repeat(43);
 const CSRF_TOKEN = "c".repeat(43);
 const SESSION_TOKEN = "s".repeat(43);
 const STATE = "t".repeat(43);
+const ATTEMPT_ID = "77777777-7777-4777-8777-777777777777";
+const OAUTH_STATE_ID = "88888888-8888-4888-8888-888888888888";
 const CHALLENGE_ID = "11111111-1111-4111-8111-111111111111";
 const SESSION = {
   version: 1,
@@ -36,7 +38,7 @@ function fixture(overrides = {}) {
   const calls = { githubStart: [], githubCallback: [], identity: [], status: [], csrf: [], organization: [], options: [], verify: [], rate: [] };
   const githubService = overrides.githubService ?? {
     async start(input) { calls.githubStart.push(input); return overrides.githubStart ?? { authorizationUrl: `${AUTH_ENDPOINT}?client_id=github-client-id&response_type=code&redirect_uri=${encodeURIComponent(CALLBACK_ENDPOINT)}&scope=read%3Auser&state=${STATE}&code_challenge=${"Q".repeat(43)}&code_challenge_method=S256`, state: STATE, stateCookie: STATE, expiresAt: NOW + 600_000 }; },
-    async callback(input) { calls.githubCallback.push(input); if (overrides.githubCallback instanceof Error) throw overrides.githubCallback; return overrides.githubCallback ?? { provider: "github", subject: "123456789" }; }
+    async callback(input) { calls.githubCallback.push(input); if (overrides.githubCallback instanceof Error) throw overrides.githubCallback; return overrides.githubCallback ?? { identity: { provider: "github", subject: "123456789" }, context: { attempt_id: ATTEMPT_ID, oauth_state_id: OAUTH_STATE_ID } }; }
   };
   const identityBootstrapService = overrides.identityBootstrapService ?? {
     async createBootstrapSession(input) { calls.identity.push(input); return overrides.identity ?? { bootstrapToken: BOOTSTRAP_TOKEN, expiresAt: NOW + 900_000 }; }
@@ -103,7 +105,7 @@ test("all six routes use exact paths and only server-derived service DTOs", asyn
   assert.equal(new URL(callback.headers.Location).search, "");
   assert.equal(new URL(callback.headers.Location).hash, "");
   assert.deepEqual(calls.githubCallback[0], { code: "oauth-code", state: STATE, stateCookie: STATE });
-  assert.deepEqual(calls.identity[0], { provider: "github", subject: "123456789" });
+  assert.deepEqual(calls.identity[0], { identity: { provider: "github", subject: "123456789" }, context: { attempt_id: ATTEMPT_ID, oauth_state_id: OAUTH_STATE_ID } });
 
   const status = await api.handle({ method: "GET", url: HOSTED_BOOTSTRAP_HTTP_PATHS.status, headers: { Origin: ORIGIN, Cookie: bootstrapCookie() } });
   assert.deepEqual(Object.keys(status.body).sort(), ["can_create_first_organization", "csrf_token", "expires_at", "organization_count", "state", "version", "webauthn_required"].sort());
@@ -135,8 +137,18 @@ test("composes with the sibling GitHub adapter without taking ownership of state
   const records = new Map();
   const githubService = createGithubOAuthIdentityAdapter({
     config: { provider: "github", clientId: "github-client-id", clientSecret: "secret-value", redirectUri: CALLBACK_ENDPOINT, authorizationEndpoint: AUTH_ENDPOINT, tokenEndpoint: "https://github.com/login/oauth/access_token", userEndpoint: "https://api.github.com/user", timeoutMs: 500, maxResponseBytes: 4096, scope: "read:user" },
-    stateStore: { async create(record) { records.set(record.stateHash, record); }, async consume(hash) { const record = records.get(hash); records.delete(hash); return record; } },
+    stateStore: {
+      async create(record) { records.set(record.oauthStateId, record); return { attemptId: record.attemptId, oauthStateId: record.oauthStateId, expiresAt: record.expiresAt }; },
+      async consume(input) {
+        const record = records.get(input.oauthStateId);
+        records.delete(input.oauthStateId);
+        if (!record || record.stateHash !== input.stateHash) return null;
+        return { attemptId: record.attemptId, oauthStateId: record.oauthStateId, pkceVerifier: record.pkceVerifier, pkceChallenge: record.pkceChallenge, redirectUri: record.redirectUri, expiresAt: record.expiresAt };
+      },
+      async fail() { return true; }
+    },
     randomBytes: (size) => Buffer.alloc(size, 9),
+    randomUUID: (() => { const values = [ATTEMPT_ID, OAUTH_STATE_ID]; return () => values.shift(); })(),
     fetchImpl: async (url) => {
       const body = url.endsWith("/access_token") ? { access_token: "provider-secret" } : { id: 123456789, email: "ignored@example.test", name: "ignored" };
       const bytes = Buffer.from(JSON.stringify(body));
@@ -153,7 +165,7 @@ test("composes with the sibling GitHub adapter without taking ownership of state
   assert.equal(callback.status, 303);
   assert.equal(JSON.stringify(callback.body).includes("provider-secret"), false);
   assert.equal(records.size, 0);
-  assert.deepEqual(calls.identity[0], { provider: "github", subject: "123456789" });
+  assert.deepEqual(calls.identity[0], { identity: { provider: "github", subject: "123456789" }, context: { attempt_id: ATTEMPT_ID, oauth_state_id: OAUTH_STATE_ID } });
 });
 
 test("requires exact Console Origin, forbids Authorization and caller authority headers, and fails closed on rate-limit outage", async () => {

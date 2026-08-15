@@ -11,10 +11,13 @@ const TIMESTAMP = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?(?:Z|[+-]\d
 const CONTROL = /[\u0000-\u001f\u007f]/u;
 const MAX_SELECTOR_BYTES = 16 * 1024;
 const MAX_SUBJECT_BYTES = 512;
+const KEY_ID = /^[A-Za-z0-9._~-]{1,128}$/u;
 
 export const HOSTED_IDENTITY_BOOTSTRAP_REPOSITORY_METHODS = Object.freeze([
   "start",
+  "startOAuthV2",
   "consumeOAuthState",
+  "claimOAuthStateV2",
   "completeOAuthState",
   "failOAuthState",
   "issueCsrf",
@@ -27,7 +30,9 @@ export const HOSTED_IDENTITY_BOOTSTRAP_REPOSITORY_METHODS = Object.freeze([
 
 export const HOSTED_IDENTITY_BOOTSTRAP_REPOSITORY_SQL = Object.freeze({
   start: "SELECT * FROM public.agentpass_hosted_identity_bootstrap_start($1::uuid,$2::uuid,$3::bytea,$4::text,$5::text,$6::text)",
+  startOAuthV2: "SELECT * FROM public.agentpass_hosted_identity_bootstrap_start_v2($1::uuid,$2::uuid,$3::bytea,$4::text,$5::text,$6::text,$7::text,$8::bytea,$9::bytea,$10::bytea,$11::timestamptz)",
   consumeOAuthState: "SELECT * FROM public.agentpass_hosted_identity_oauth_state_consume($1::uuid,$2::bytea,$3::text)",
+  claimOAuthStateV2: "SELECT * FROM public.agentpass_hosted_identity_oauth_state_claim_v2($1::uuid,$2::bytea,$3::bytea,$4::text)",
   completeOAuthState: "SELECT public.agentpass_hosted_identity_oauth_state_complete($1::uuid,$2::bytea,$3::uuid,$4::text,$5::bytea) AS result",
   failOAuthState: "SELECT public.agentpass_hosted_identity_oauth_state_fail($1::uuid,$2::text) AS result",
   issueCsrf: "SELECT public.agentpass_hosted_identity_bootstrap_csrf_issue($1::bytea,$2::bytea) AS result",
@@ -67,7 +72,7 @@ export class HostedIdentityBootstrapRepositoryError extends Error {
 }
 
 /**
- * Adapter for the 0057 Hosted identity/bootstrap authority.
+ * Adapter for the 0057/0058 Hosted identity/bootstrap authority.
  *
  * The SQL functions own all state transitions and all timestamps. This layer
  * only validates the closed boundary, hashes browser/provider selectors, and
@@ -87,6 +92,18 @@ export function createPostgresHostedIdentityBootstrapRepository({ client } = {})
     const value = normalizeOAuthConsume(input);
     const row = await optionalTableCall("consumeOAuthState", [value.oauth_state_id, sha256(value.code), value.redirect_uri]);
     return row === null ? null : normalizeOAuthConsumeResult(row);
+  }
+
+  async function startOAuthV2(input = {}) {
+    const value = normalizeStartV2(input);
+    const row = await tableCall("startOAuthV2", [value.attempt_id, value.oauth_state_id, sha256(value.state), value.pkce_challenge, value.client_id, value.redirect_uri, value.envelope.key_id, value.envelope.nonce, value.envelope.ciphertext, value.envelope.auth_tag, value.envelope.expires_at]);
+    return normalizeStartResult(row);
+  }
+
+  async function claimOAuthStateV2(input = {}) {
+    const value = normalizeOAuthClaimV2(input);
+    const row = await optionalTableCall("claimOAuthStateV2", [value.oauth_state_id, sha256(value.state), sha256(value.code), value.redirect_uri]);
+    return row === null ? null : normalizeOAuthClaimV2Result(row);
   }
 
   async function completeOAuthState(input = {}) {
@@ -170,7 +187,9 @@ export function createPostgresHostedIdentityBootstrapRepository({ client } = {})
 
   return Object.freeze({
     start,
+    startOAuthV2,
     consumeOAuthState,
+    claimOAuthStateV2,
     completeOAuthState,
     failOAuthState,
     issueCsrf,
@@ -198,6 +217,29 @@ function normalizeOAuthConsume(value) {
   exactObject(value, ["oauth_state_id", "code", "redirect_uri"]);
   return Object.freeze({
     oauth_state_id: uuid(value.oauth_state_id, "oauth_state_id"),
+    code: selector(value.code, "code"),
+    redirect_uri: httpsUri(value.redirect_uri, "redirect_uri")
+  });
+}
+
+function normalizeStartV2(value) {
+  exactObject(value, ["attempt_id", "oauth_state_id", "state", "pkce_challenge", "client_id", "redirect_uri", "envelope"]);
+  const base = normalizeStart({ attempt_id: value.attempt_id, oauth_state_id: value.oauth_state_id, state: value.state, pkce_challenge: value.pkce_challenge, client_id: value.client_id, redirect_uri: value.redirect_uri });
+  exactObject(value.envelope, ["key_id", "nonce", "ciphertext", "auth_tag", "expires_at"]);
+  return Object.freeze({ ...base, envelope: Object.freeze({
+    key_id: text(value.envelope.key_id, 128, "envelope.key_id", KEY_ID),
+    nonce: bytes(value.envelope.nonce, 12),
+    ciphertext: bytes(value.envelope.ciphertext, undefined, 43, 256),
+    auth_tag: bytes(value.envelope.auth_tag, 16),
+    expires_at: timestamp(value.envelope.expires_at, "envelope.expires_at")
+  }) });
+}
+
+function normalizeOAuthClaimV2(value) {
+  exactObject(value, ["oauth_state_id", "state", "code", "redirect_uri"]);
+  return Object.freeze({
+    oauth_state_id: uuid(value.oauth_state_id, "oauth_state_id"),
+    state: selector(value.state, "state"),
     code: selector(value.code, "code"),
     redirect_uri: httpsUri(value.redirect_uri, "redirect_uri")
   });
@@ -270,6 +312,24 @@ function normalizeOAuthConsumeResult(value) {
   return Object.freeze({ attempt_id: uuid(value.attempt_id, "attempt_id", "RESULT"), pkce_challenge: text(value.pkce_challenge, 128, "pkce_challenge", PKCE, "RESULT"), pkce_method: value.pkce_method, client_id: text(value.client_id, 256, "client_id", undefined, "RESULT"), redirect_uri: httpsUri(value.redirect_uri, "redirect_uri", "RESULT") });
 }
 
+function normalizeOAuthClaimV2Result(value) {
+  exactObject(value, ["attempt_id", "oauth_state_id", "pkce_challenge", "client_id", "redirect_uri", "key_id", "nonce", "ciphertext", "auth_tag", "expires_at"], "RESULT");
+  return Object.freeze({
+    attempt_id: uuid(value.attempt_id, "attempt_id", "RESULT"),
+    oauth_state_id: uuid(value.oauth_state_id, "oauth_state_id", "RESULT"),
+    pkce_challenge: text(value.pkce_challenge, 128, "pkce_challenge", PKCE, "RESULT"),
+    client_id: text(value.client_id, 256, "client_id", undefined, "RESULT"),
+    redirect_uri: httpsUri(value.redirect_uri, "redirect_uri", "RESULT"),
+    envelope: Object.freeze({
+      key_id: text(value.key_id, 128, "key_id", KEY_ID, "RESULT"),
+      nonce: bytes(value.nonce, 12, undefined, undefined, "RESULT"),
+      ciphertext: bytes(value.ciphertext, undefined, 43, 256, "RESULT"),
+      auth_tag: bytes(value.auth_tag, 16, undefined, undefined, "RESULT")
+    }),
+    expires_at: timestamp(value.expires_at, "expires_at", "RESULT")
+  });
+}
+
 function normalizeOrganizationResult(value) {
   exactObject(value, ["response_status", "response_json", "replayed"], "RESULT");
   if (value.response_status !== 200 && value.response_status !== 201) throw error("RESULT");
@@ -317,13 +377,23 @@ function digest(value, name) {
   if (typeof value === "string" && DIGEST.test(value)) return Buffer.from(value, "hex");
   throw error("INPUT");
 }
+function bytes(value, exact, min = exact, max = exact, kind = "INPUT") {
+  if (!(Buffer.isBuffer(value) || value instanceof Uint8Array)) throw error(kind);
+  const result = Buffer.from(value);
+  if (exact !== undefined ? result.length !== exact : result.length < min || result.length > max) throw error(kind);
+  return result;
+}
 function sha256(value) { return crypto.createHash("sha256").update(value, "utf8").digest(); }
 function text(value, max, name, pattern = undefined, kind = "INPUT") {
   if (typeof value !== "string" || value.length < 1 || value.length > max || CONTROL.test(value) || Buffer.byteLength(value, "utf8") > max * 4 || (pattern && !pattern.test(value))) throw error(kind);
   return value;
 }
 function httpsUri(value, name, kind = "INPUT") { return text(value, 2048, name, undefined, kind).startsWith("https://") && !value.includes("#") ? value : (() => { throw error(kind); })(); }
-function timestamp(value, name, kind = "INPUT") { if (typeof value !== "string" || !TIMESTAMP.test(value) || Number.isNaN(Date.parse(value))) throw error(kind); return new Date(value).toISOString(); }
+function timestamp(value, name, kind = "INPUT") {
+  if (value instanceof Date && !Number.isNaN(value.getTime())) return value.toISOString();
+  if (typeof value !== "string" || !TIMESTAMP.test(value) || Number.isNaN(Date.parse(value))) throw error(kind);
+  return new Date(value).toISOString();
+}
 function positiveInteger(value, name, kind = "RESULT") { if (!Number.isSafeInteger(Number(value)) || Number(value) < 1) throw error(kind); return Number(value); }
 function uuid(value, name, kind = "INPUT") { if (typeof value !== "string" || !UUID.test(value)) throw error(kind); return value.toLowerCase(); }
 function classifyDatabaseError(cause) {

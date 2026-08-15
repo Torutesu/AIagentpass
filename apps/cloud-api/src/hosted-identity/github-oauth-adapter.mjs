@@ -14,32 +14,51 @@ const PKCE_VERIFIER_BYTES = 32;
 const MAX_CODE_LENGTH = 2_048;
 const MAX_STATE_LENGTH = 512;
 const STATE_HASH_ALGORITHM = "sha256";
+const UUID_V4 = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu;
+const STATE = /^(?<oauthStateId>[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})\.(?<secret>[A-Za-z0-9_-]{43})$/iu;
 
 export function createGithubOAuthIdentityAdapter({
   config = createGithubOAuthConfig(),
   stateStore,
   fetchImpl = globalThis.fetch,
   randomBytes = crypto.randomBytes,
+  randomUUID = crypto.randomUUID,
   now = () => Date.now()
 } = {}) {
   assertConfig(config);
-  if (!stateStore || typeof stateStore.create !== "function" || typeof stateStore.consume !== "function") {
-    throw new TypeError("stateStore must provide create and consume");
+  if (!stateStore || typeof stateStore.create !== "function" || typeof stateStore.consume !== "function" || typeof stateStore.fail !== "function") {
+    throw new TypeError("stateStore must provide create, consume, and fail");
   }
   if (typeof fetchImpl !== "function") throw new TypeError("fetchImpl must be a function");
   if (typeof randomBytes !== "function") throw new TypeError("randomBytes must be a function");
+  if (typeof randomUUID !== "function") throw new TypeError("randomUUID must be a function");
   if (typeof now !== "function") throw new TypeError("now must be a function");
 
   async function start() {
-    const state = randomToken(STATE_BYTES, randomBytes);
+    const attemptId = exactUuid(randomUUID());
+    const oauthStateId = exactUuid(randomUUID());
+    const state = `${oauthStateId}.${randomToken(STATE_BYTES, randomBytes)}`;
     const pkceVerifier = randomToken(PKCE_VERIFIER_BYTES, randomBytes);
     const stateHash = hash(state);
+    const pkceChallenge = base64urlSha256(pkceVerifier);
     const expiresAt = exactNow(now()) + 10 * 60 * 1000;
+    let durable;
     try {
-      await stateStore.create(Object.freeze({ stateHash, pkceVerifier, redirectUri: config.redirectUri, expiresAt }));
+      durable = await stateStore.create(Object.freeze({
+        attemptId,
+        oauthStateId,
+        state,
+        stateHash,
+        pkceVerifier,
+        pkceChallenge,
+        clientId: config.clientId,
+        redirectUri: config.redirectUri,
+        expiresAt
+      }));
     } catch {
       throw providerError();
     }
+    const stored = normalizeCreatedState(durable, { attemptId, oauthStateId, expiresAt });
 
     const authorization = new URL(config.authorizationEndpoint);
     authorization.searchParams.set("client_id", config.clientId);
@@ -47,31 +66,56 @@ export function createGithubOAuthIdentityAdapter({
     authorization.searchParams.set("redirect_uri", config.redirectUri);
     authorization.searchParams.set("scope", config.scope);
     authorization.searchParams.set("state", state);
-    authorization.searchParams.set("code_challenge", base64urlSha256(pkceVerifier));
+    authorization.searchParams.set("code_challenge", pkceChallenge);
     authorization.searchParams.set("code_challenge_method", "S256");
 
     return Object.freeze({
       authorizationUrl: authorization.toString(),
       state,
       stateCookie: state,
-      expiresAt
+      expiresAt: stored.expiresAt
     });
   }
 
   async function callback(input) {
     const { code, state, stateCookie } = normalizeCallbackInput(input);
     if (!constantTimeEqual(state, stateCookie)) throw stateError();
+    const oauthStateId = parseState(state);
 
     let record;
-    try { record = await stateStore.consume(hash(state)); } catch { throw stateError(); }
-    if (!record || record.redirectUri !== config.redirectUri || !validVerifier(record.pkceVerifier)
-      || !Number.isSafeInteger(record.expiresAt) || record.expiresAt <= exactNow(now())) {
+    try {
+      record = await stateStore.consume(Object.freeze({
+        oauthStateId,
+        state,
+        stateHash: hash(state),
+        code,
+        redirectUri: config.redirectUri
+      }));
+    } catch { throw stateError(); }
+    const consumed = normalizeConsumedState(record, { oauthStateId, redirectUri: config.redirectUri, now: exactNow(now()) });
+    if (base64urlSha256(consumed.pkceVerifier) !== consumed.pkceChallenge) {
       throw stateError();
     }
 
-    const accessToken = await exchangeCode({ code, verifier: record.pkceVerifier });
-    const user = await lookupUser(accessToken);
-    return user;
+    let identity;
+    try {
+      const accessToken = await exchangeCode({ code, verifier: consumed.pkceVerifier });
+      identity = await lookupUser(accessToken);
+    } catch (error) {
+      try {
+        await stateStore.fail(Object.freeze({
+          oauthStateId: consumed.oauthStateId,
+          failureCode: error?.code === GITHUB_OAUTH_ERROR_CODES.SUBJECT_UNVERIFIED ? "subject_unverified" : "provider_unavailable"
+        }));
+      } catch {
+        throw providerError();
+      }
+      throw error;
+    }
+    return deepFreeze({
+      identity,
+      context: { attempt_id: consumed.attemptId, oauth_state_id: consumed.oauthStateId }
+    });
   }
 
   async function exchangeCode({ code, verifier }) {
@@ -168,6 +212,28 @@ function normalizeCallbackInput(input) {
   return { code, state, stateCookie };
 }
 
+function normalizeCreatedState(value, expected) {
+  if (!plainObject(value) || !exactKeys(value, ["attemptId", "oauthStateId", "expiresAt"])
+    || value.attemptId !== expected.attemptId || value.oauthStateId !== expected.oauthStateId
+    || !Number.isSafeInteger(value.expiresAt) || value.expiresAt <= 0 || value.expiresAt > expected.expiresAt) throw providerError();
+  return value;
+}
+
+function normalizeConsumedState(value, expected) {
+  if (!plainObject(value) || !exactKeys(value, ["attemptId", "oauthStateId", "pkceVerifier", "pkceChallenge", "redirectUri", "expiresAt"])
+    || !UUID_V4.test(value.attemptId) || value.oauthStateId !== expected.oauthStateId
+    || value.redirectUri !== expected.redirectUri || !validVerifier(value.pkceVerifier)
+    || !/^[A-Za-z0-9_-]{43}$/u.test(value.pkceChallenge)
+    || !Number.isSafeInteger(value.expiresAt) || value.expiresAt <= expected.now) throw stateError();
+  return value;
+}
+
+function parseState(value) {
+  const matched = STATE.exec(value);
+  if (!matched) throw stateError();
+  return matched.groups.oauthStateId.toLowerCase();
+}
+
 async function readBoundedBody(response, maxBytes) {
   const contentLength = response.headers?.get?.("content-length") ?? response.headers?.["content-length"];
   if (contentLength !== undefined && (!/^\d+$/u.test(String(contentLength)) || Number(contentLength) > maxBytes)) throw providerError();
@@ -236,13 +302,21 @@ function hash(value) { return crypto.createHash(STATE_HASH_ALGORITHM).update(val
 function base64urlSha256(value) { return crypto.createHash("sha256").update(value, "utf8").digest("base64url"); }
 function validVerifier(value) { return typeof value === "string" && /^[A-Za-z0-9_-]{43}$/u.test(value); }
 function boundedText(value, max) { return typeof value === "string" && value.length > 0 && value.length <= max && !/[\u0000-\u001f\u007f]/u.test(value); }
-function exactNow(value) { return Number.isSafeInteger(value) && value >= 0 ? value : 0; }
+function exactNow(value) { if (!Number.isSafeInteger(value) || value < 0) throw providerError(); return value; }
 
 function constantTimeEqual(left, right) {
   const a = Buffer.from(left, "utf8");
   const b = Buffer.from(right, "utf8");
   return a.length === b.length && crypto.timingSafeEqual(a, b);
 }
+
+function exactUuid(value) {
+  if (typeof value !== "string" || !UUID_V4.test(value)) throw providerError();
+  return value.toLowerCase();
+}
+function plainObject(value) { return value !== null && typeof value === "object" && !Array.isArray(value) && Object.getPrototypeOf(value) === Object.prototype; }
+function exactKeys(value, expected) { const actual = Object.keys(value).sort(); const wanted = [...expected].sort(); return actual.length === wanted.length && actual.every((key, index) => key === wanted[index]); }
+function deepFreeze(value) { if (value && typeof value === "object" && !Object.isFrozen(value)) { for (const child of Object.values(value)) deepFreeze(child); Object.freeze(value); } return value; }
 
 function stateError() { return new GithubOAuthError(GITHUB_OAUTH_ERROR_CODES.STATE_INVALID); }
 function providerError() { return new GithubOAuthError(GITHUB_OAUTH_ERROR_CODES.PROVIDER_UNAVAILABLE); }

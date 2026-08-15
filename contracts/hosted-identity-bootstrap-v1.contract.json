@@ -13,7 +13,8 @@
       "the focused contract validator and the real PostgreSQL qualification are green"
     ],
     "prerequisite_forward_migration": "0056_identity_epoch_invalidation",
-    "planned_forward_migration": "0057_hosted_identity_bootstrap"
+    "planned_forward_migration": "0057_hosted_identity_bootstrap",
+    "pkce_hardening_forward_migration": "0058_hosted_oauth_pkce_envelope"
   },
   "authority": {
     "identity_provider": "github",
@@ -305,7 +306,7 @@
     "read_policy": "During the compatibility window, resolve GitHub identities from upstream_identities and preserve the legacy members.github_subject mapping for existing rows; never silently reassign an immutable provider subject.",
     "write_policy": "New writes are canonical provider=github upstream_identities rows in the same transaction as member/organization ownership. The legacy column is compatibility data only and is never a caller input.",
     "schema_policy": "v1 is exact at every request boundary: unknown request fields are rejected, no field is repurposed, and no old ChatGPT/signed-console route is aliased to this flow.",
-    "forward_only_requirement": "After the identity invalidation boundary in 0056, add the bootstrap attempt, one-use OAuth state, bootstrap idempotency, and bootstrap challenge bindings through one transactional 0057 forward migration before Hosted activation; do not mutate historical migration files.",
+    "forward_only_requirement": "After the identity invalidation boundary in 0056, add the bootstrap attempt, one-use OAuth state, bootstrap idempotency, and bootstrap challenge bindings through forward migration 0057, then add exact state-hash claim and an AEAD-protected PKCE envelope through forward migration 0058 before Hosted activation; do not mutate historical migration files.",
     "rollback_policy": "Application rollback must leave the forward migration and immutable identity rows intact. A version that cannot understand this contract must fail closed and must not create an organization.",
     "versioning": "Security or authority changes require v2 and a new contract id; documentation-only clarifications may update the validator without changing v1 semantics."
   },

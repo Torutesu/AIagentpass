@@ -115,7 +115,8 @@ test('platform authority matrix is function-only for app and purpose-scoped for 
   const authorization = await read('contracts/postgres/0054_platform_authorization.sql');
 
   assert.match(rolesSql, /GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO agentpass_app/u);
-  assert.match(rolesSql, /REVOKE INSERT, UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER ON TABLE public\.%I FROM agentpass_app, agentpass_backup/u);
+  assert.match(rolesSql, /REVOKE ALL PRIVILEGES ON TABLE public\.%I FROM agentpass_app, agentpass_backup/u);
+  assert.match(rolesSql, /GRANT SELECT ON TABLE public\.%I TO agentpass_app, agentpass_backup/u);
   assert.match(rolesSql, /left\(c\.relname, length\('platform_'\)\) = 'platform_'/u);
   assert.ok(
     rolesSql.indexOf('GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO agentpass_app')

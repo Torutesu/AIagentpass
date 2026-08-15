@@ -18,6 +18,8 @@ const ENV = Object.freeze({
   AGENTPASS_GITHUB_TIMEOUT_MS: "500",
   AGENTPASS_GITHUB_MAX_RESPONSE_BYTES: "4096"
 });
+const ATTEMPT_ID = "11111111-1111-4111-8111-111111111111";
+const OAUTH_STATE_ID = "22222222-2222-4222-8222-222222222222";
 
 function config(overrides = {}) {
   return createGithubOAuthConfig({ ...ENV, ...overrides });
@@ -33,13 +35,26 @@ function response(body, { status = 200, contentType = "application/json" } = {})
 
 function stateFixture({ now = 1_800_000_000_000, fetchImpl, overrides = {} } = {}) {
   const stored = new Map();
+  const failures = [];
   const stateStore = {
-    async create(record) { stored.set(record.stateHash, record); },
-    async consume(stateHash) {
-      const record = stored.get(stateHash);
-      stored.delete(stateHash);
-      return record;
-    }
+    async create(record) {
+      stored.set(record.oauthStateId, record);
+      return { attemptId: record.attemptId, oauthStateId: record.oauthStateId, expiresAt: record.expiresAt };
+    },
+    async consume(input) {
+      const record = stored.get(input.oauthStateId);
+      stored.delete(input.oauthStateId);
+      if (!record || record.stateHash !== input.stateHash || record.redirectUri !== input.redirectUri) return null;
+      return {
+        attemptId: record.attemptId,
+        oauthStateId: record.oauthStateId,
+        pkceVerifier: record.pkceVerifier,
+        pkceChallenge: record.pkceChallenge,
+        redirectUri: record.redirectUri,
+        expiresAt: record.expiresAt
+      };
+    },
+    async fail(input) { failures.push(input); return true; }
   };
   const randomValues = [Buffer.alloc(32, 1), Buffer.alloc(32, 2)];
   const adapter = createGithubOAuthIdentityAdapter({
@@ -47,9 +62,10 @@ function stateFixture({ now = 1_800_000_000_000, fetchImpl, overrides = {} } = {
     stateStore,
     fetchImpl,
     randomBytes(size) { const value = randomValues.shift(); assert.equal(value?.length, size); return value; },
+    randomUUID: (() => { const values = [ATTEMPT_ID, OAUTH_STATE_ID]; return () => values.shift(); })(),
     now: () => now
   });
-  return { adapter, stored, stateStore, now };
+  return { adapter, stored, stateStore, failures, now };
 }
 
 test("config requires hosted profile and exact HTTPS endpoints with bounded defaults", () => {
@@ -81,7 +97,7 @@ test("adapter rejects a hand-built config that bypasses secure URL or limit vali
     { maxResponseBytes: 1_023 }
   ]) {
     assert.throws(
-      () => createGithubOAuthIdentityAdapter({ config: { ...valid, ...patch }, stateStore: { create() {}, consume() {} }, fetchImpl: async () => response({}) }),
+      () => createGithubOAuthIdentityAdapter({ config: { ...valid, ...patch }, stateStore: { create() {}, consume() {}, fail() {} }, fetchImpl: async () => response({}) }),
       (error) => error.code === GITHUB_OAUTH_ERROR_CODES.CONFIG_INVALID
     );
   }
@@ -99,11 +115,15 @@ test("start creates hashed state and S256 PKCE against the exact configured redi
   assert.equal(url.searchParams.get("redirect_uri"), ENV.AGENTPASS_GITHUB_REDIRECT_URI);
   assert.equal(url.searchParams.get("scope"), "read:user");
   assert.equal(url.searchParams.get("state"), started.state);
+  assert.equal(started.state.startsWith(`${OAUTH_STATE_ID}.`), true);
   assert.equal(url.searchParams.get("code_challenge_method"), "S256");
   assert.equal(url.searchParams.get("code_challenge"), crypto.createHash("sha256").update(stored.pkceVerifier).digest("base64url"));
   assert.equal(stored.stateHash, crypto.createHash("sha256").update(started.state).digest("hex"));
   assert.notEqual(stored.stateHash, started.state);
   assert.equal(stored.redirectUri, ENV.AGENTPASS_GITHUB_REDIRECT_URI);
+  assert.equal(stored.attemptId, ATTEMPT_ID);
+  assert.equal(stored.oauthStateId, OAUTH_STATE_ID);
+  assert.equal(stored.clientId, ENV.AGENTPASS_GITHUB_CLIENT_ID);
 });
 
 test("callback exchanges code server-side, calls /user, and returns only immutable numeric subject", async () => {
@@ -118,7 +138,12 @@ test("callback exchanges code server-side, calls /user, and returns only immutab
   const started = await fixture.adapter.start();
   const result = await fixture.adapter.callback({ code: "oauth-code", state: started.state, stateCookie: started.state });
 
-  assert.deepEqual(result, { provider: "github", subject: "123456789" });
+  assert.deepEqual(result, {
+    identity: { provider: "github", subject: "123456789" },
+    context: { attempt_id: ATTEMPT_ID, oauth_state_id: OAUTH_STATE_ID }
+  });
+  assert.equal(Object.isFrozen(result), true);
+  assert.equal(Object.isFrozen(result.identity), true);
   assert.equal(calls.length, 2);
   assert.equal(calls[0].init.method, "POST");
   assert.equal(calls[0].init.headers["Content-Type"], "application/x-www-form-urlencoded");
@@ -145,7 +170,7 @@ test("accepts the provider's JSON UTF-8 media type without treating parameters a
       : response({ id: 7 }, { contentType: "application/json; charset=utf-8" })
   });
   const started = await fixture.adapter.start();
-  assert.equal((await fixture.adapter.callback({ code: "code", state: started.state, stateCookie: started.state })).subject, "7");
+  assert.equal((await fixture.adapter.callback({ code: "code", state: started.state, stateCookie: started.state })).identity.subject, "7");
 });
 
 test("wrong state, wrong PKCE record, and replay fail with one stable redacted state error", async () => {
@@ -156,7 +181,7 @@ test("wrong state, wrong PKCE record, and replay fail with one stable redacted s
     (error) => error instanceof GithubOAuthError && error.code === GITHUB_OAUTH_ERROR_CODES.STATE_INVALID
   );
   const record = [...fixture.stored.values()][0];
-  fixture.stored.set(record.stateHash, Object.freeze({ ...record, pkceVerifier: "wrong" }));
+  fixture.stored.set(record.oauthStateId, Object.freeze({ ...record, pkceVerifier: "wrong" }));
   await assert.rejects(
     fixture.adapter.callback({ code: "code", state: started.state, stateCookie: started.state }),
     (error) => error.code === GITHUB_OAUTH_ERROR_CODES.STATE_INVALID
@@ -184,6 +209,7 @@ test("provider failures, malformed/oversized/duplicate JSON, invalid id, and wro
         fixture.adapter.callback({ code: "code", state: started.state, stateCookie: started.state }),
         (error) => error.code === expected && !String(error).includes("secret") && !String(error).includes("token")
       );
+      assert.deepEqual(fixture.failures, [{ oauthStateId: OAUTH_STATE_ID, failureCode: "provider_unavailable" }]);
     });
   }
 
@@ -195,6 +221,7 @@ test("provider failures, malformed/oversized/duplicate JSON, invalid id, and wro
     invalidIdFixture.adapter.callback({ code: "code", state: invalidIdStart.state, stateCookie: invalidIdStart.state }),
     (error) => error.code === GITHUB_OAUTH_ERROR_CODES.SUBJECT_UNVERIFIED
   );
+  assert.deepEqual(invalidIdFixture.failures, [{ oauthStateId: OAUTH_STATE_ID, failureCode: "subject_unverified" }]);
 });
 
 test("timeout aborts a hanging provider request", async () => {

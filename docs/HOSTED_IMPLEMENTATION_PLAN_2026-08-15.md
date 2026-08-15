@@ -23,10 +23,16 @@ Implemented and pushed:
 - function-only runtime authority for Hosted tables and least-privilege checks;
 - PostgreSQL adapter for all ten `0057` procedures, hashing every raw selector
   before SQL and using database-clock results.
+- migration `0058` and its v2 PostgreSQL adapter for exact state/code/redirect
+  claim, one-use encrypted PKCE envelopes, and function-only runtime access;
+- AES-256-GCM PKCE codec with version/key/attempt/state/redirect/expiry AAD,
+  strict envelope parsing, rotation-capable key resolution, and redacted errors;
+- durable OAuth state-store composition and an internal callback envelope that
+  keeps `{provider, subject}` separate from server-generated attempt context.
 
 Not yet implemented as a production-composable path:
 
-- restart-safe storage of the PKCE verifier and callback correlation;
+- real-PostgreSQL restart/race qualification of the new PKCE/state boundary;
 - one transaction that binds upstream identity and completes OAuth state;
 - one transaction that creates the first organization and owner membership;
 - one transaction that commits WebAuthn credential, completes challenge, and
@@ -74,6 +80,9 @@ and one immutable artifact set across all lanes.
 ## 4. Merge-sized implementation packages
 
 ### H1 — restart-safe OAuth coordinator
+
+State: implementation complete locally; real PostgreSQL 16/17 and two-instance
+qualification pending.
 
 Deliverables:
 

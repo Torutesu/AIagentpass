@@ -120,8 +120,9 @@ export class HostedBootstrapHttpError extends Error {
  * Framework-free Hosted bootstrap boundary.
  *
  * The five service arguments are deliberately narrow. The identity service
- * receives provider/subject only after the injected GitHub adapter verifies
- * them; no service receives caller-supplied member, organization, or role.
+ * receives a closed provider/subject identity plus server-generated OAuth
+ * attempt context after the injected GitHub adapter verifies them; no service
+ * receives caller-supplied member, organization, membership, or role.
  * `handle(request)` returns a small response object; `handle(request, res)`
  * also writes a Node ServerResponse-compatible response.
  */
@@ -209,10 +210,10 @@ export function createHostedBootstrapHttpApi({
       state: query.state,
       stateCookie
     }, HOSTED_BOOTSTRAP_HTTP_ERROR_CODES.PROVIDER_UNAVAILABLE);
-    const identity = normalizeGithubCallbackResult(result);
+    const verified = normalizeGithubCallbackResult(result);
     const bootstrapResult = await callService(identityBootstrapService.createBootstrapSession, identityBootstrapService, {
-      provider: identity.provider,
-      subject: identity.subject
+      identity: verified.identity,
+      context: verified.context
     }, HOSTED_BOOTSTRAP_HTTP_ERROR_CODES.UNAVAILABLE);
     const dto = normalizeBootstrapSessionResult(bootstrapResult, now);
     return response(303, null, {
@@ -532,8 +533,15 @@ function normalizeGithubStartResult(value, now) {
 }
 
 function normalizeGithubCallbackResult(value) {
-  if (!isObject(value) || JSON.stringify(Object.keys(value).sort()) !== JSON.stringify(["provider", "subject"].sort()) || value.provider !== "github" || typeof value.subject !== "string" || !/^\d{1,20}$/u.test(value.subject) || value.subject === "0") throw new HostedBootstrapHttpError(HOSTED_BOOTSTRAP_HTTP_ERROR_CODES.SUBJECT_UNVERIFIED);
-  return value;
+  if (!isObject(value) || JSON.stringify(Object.keys(value).sort()) !== JSON.stringify(["context", "identity"])
+    || !isObject(value.identity) || JSON.stringify(Object.keys(value.identity).sort()) !== JSON.stringify(["provider", "subject"])
+    || value.identity.provider !== "github" || typeof value.identity.subject !== "string" || !/^\d{1,20}$/u.test(value.identity.subject) || value.identity.subject === "0"
+    || !isObject(value.context) || JSON.stringify(Object.keys(value.context).sort()) !== JSON.stringify(["attempt_id", "oauth_state_id"])
+    || !UUID_V4.test(value.context.attempt_id) || !UUID_V4.test(value.context.oauth_state_id)) throw new HostedBootstrapHttpError(HOSTED_BOOTSTRAP_HTTP_ERROR_CODES.SUBJECT_UNVERIFIED);
+  return Object.freeze({
+    identity: Object.freeze({ provider: "github", subject: value.identity.subject }),
+    context: Object.freeze({ attempt_id: value.context.attempt_id.toLowerCase(), oauth_state_id: value.context.oauth_state_id.toLowerCase() })
+  });
 }
 
 function normalizeBootstrapSessionResult(value, now) {

@@ -8,6 +8,9 @@ const DATABASE_URL_ENV = 'AGENTPASS_DATABASE_URL';
 const EVIDENCE_OUTPUT_ENV = 'AGENTPASS_PRIVILEGE_EVIDENCE_OUTPUT';
 const SCHEMA = 'public';
 const EXPECTED_MIGRATION_VERSION = POSTGRES_SCHEMA_HEAD.version;
+const MAX_TABLE_DIAGNOSTICS = 32;
+const MAX_RELATION_DIAGNOSTIC_NAME = 128;
+const MAX_DIAGNOSTIC_OUTPUT = 4096;
 const ROLES = ['agentpass_app', 'agentpass_signer', 'agentpass_migrator', 'agentpass_backup'];
 const REPORT_CHECKS = [
   'role_attributes_ok',
@@ -24,6 +27,24 @@ const REPORT_CHECKS = [
 function fail(message) {
   process.stderr.write(`${message}\n`);
   process.exitCode = 2;
+}
+
+function boundedTableDiagnostics(value) {
+  if (!Array.isArray(value)) return '[]';
+  const diagnostics = value.slice(0, MAX_TABLE_DIAGNOSTICS).map((item) => ({
+    relation: typeof item?.relation === 'string'
+      ? item.relation.slice(0, MAX_RELATION_DIAGNOSTIC_NAME).replace(/[^A-Za-z0-9_]/gu, '?')
+      : 'unknown',
+    kind: typeof item?.kind === 'string' ? item.kind.slice(0, 1) : '?',
+    class: typeof item?.class === 'string' ? item.class.slice(0, 16) : 'unknown',
+    failures: Array.isArray(item?.failures)
+      ? item.failures.filter((failure) => typeof failure === 'string').slice(0, 16)
+      : [],
+  }));
+  const encoded = JSON.stringify(diagnostics);
+  return encoded.length <= MAX_DIAGNOSTIC_OUTPUT
+    ? encoded
+    : `${encoded.slice(0, MAX_DIAGNOSTIC_OUTPUT - 32)}...(truncated)`;
 }
 
 if (process.argv.length !== 2) {
@@ -125,8 +146,8 @@ app_function_allowlist(routine_signature) AS (
     ('agentpass_platform_session_complete_and_issue(uuid,bytea,bytea,uuid,bytea,bytea,bytea,bytea,bytea,integer,integer)'),
     ('agentpass_consume_platform_authorization_and_reserve(bytea,bytea,uuid,bytea,bytea,uuid,text,text,text,text,bytea,integer,integer,text,bigint,bigint)'),
     ('agentpass_platform_session_bootstrap_context(bytea,uuid,text,text)'),
-    ('agentpass_hosted_identity_bootstrap_start(uuid,uuid,bytea,text,text,text)'),
-    ('agentpass_hosted_identity_oauth_state_consume(uuid,bytea,text)'),
+    ('agentpass_hosted_identity_bootstrap_start_v2(uuid,uuid,bytea,text,text,text,text,bytea,bytea,bytea,timestamptz)'),
+    ('agentpass_hosted_identity_oauth_state_claim_v2(uuid,bytea,bytea,text)'),
     ('agentpass_hosted_identity_oauth_state_complete(uuid,bytea,uuid,text,bytea)'),
     ('agentpass_hosted_identity_oauth_state_fail(uuid,text)'),
     ('agentpass_hosted_identity_bootstrap_csrf_issue(bytea,bytea)'),
@@ -197,44 +218,60 @@ migration_head_ok AS (
     AND (SELECT count(*) = ${EXPECTED_MIGRATION_VERSION} AND min(version) = 1 AND max(version) = ${EXPECTED_MIGRATION_VERSION}
          FROM public.schema_migrations) AS value
 ),
+table_privilege_observations AS (
+  SELECT t.relname,
+    t.relkind,
+    CASE WHEN t.relname IN ('schema_migrations', 'schema_migration_attempts', 'release_candidates')
+        OR left(t.relname, length('managed_signer_')) = 'managed_signer_'
+        OR left(t.relname, length('platform_')) = 'platform_'
+        OR left(t.relname, length('hosted_identity_')) = 'hosted_identity_' THEN 'authority'
+      ELSE 'application' END AS expected_class,
+    array_remove(ARRAY[
+      CASE WHEN has_table_privilege('agentpass_app', t.oid, 'SELECT') THEN NULL ELSE 'app:select' END,
+      CASE WHEN (t.relname IN ('schema_migrations', 'schema_migration_attempts', 'release_candidates')
+          OR left(t.relname, length('managed_signer_')) = 'managed_signer_'
+          OR left(t.relname, length('platform_')) = 'platform_'
+          OR left(t.relname, length('hosted_identity_')) = 'hosted_identity_')
+          THEN CASE WHEN NOT has_table_privilege('agentpass_app', t.oid, 'INSERT') THEN NULL ELSE 'app:insert' END
+          ELSE CASE WHEN has_table_privilege('agentpass_app', t.oid, 'INSERT') THEN NULL ELSE 'app:insert_missing' END END,
+      CASE WHEN (t.relname IN ('schema_migrations', 'schema_migration_attempts', 'release_candidates')
+          OR left(t.relname, length('managed_signer_')) = 'managed_signer_'
+          OR left(t.relname, length('platform_')) = 'platform_'
+          OR left(t.relname, length('hosted_identity_')) = 'hosted_identity_')
+          THEN CASE WHEN NOT has_table_privilege('agentpass_app', t.oid, 'UPDATE') THEN NULL ELSE 'app:update' END
+          ELSE CASE WHEN has_table_privilege('agentpass_app', t.oid, 'UPDATE') THEN NULL ELSE 'app:update_missing' END END,
+      CASE WHEN (t.relname IN ('schema_migrations', 'schema_migration_attempts', 'release_candidates')
+          OR left(t.relname, length('managed_signer_')) = 'managed_signer_'
+          OR left(t.relname, length('platform_')) = 'platform_'
+          OR left(t.relname, length('hosted_identity_')) = 'hosted_identity_')
+          THEN CASE WHEN NOT has_table_privilege('agentpass_app', t.oid, 'DELETE') THEN NULL ELSE 'app:delete' END
+          ELSE CASE WHEN has_table_privilege('agentpass_app', t.oid, 'DELETE') THEN NULL ELSE 'app:delete_missing' END END,
+      CASE WHEN NOT has_table_privilege('agentpass_app', t.oid, 'TRUNCATE') THEN NULL ELSE 'app:truncate' END,
+      CASE WHEN NOT has_table_privilege('agentpass_app', t.oid, 'REFERENCES') THEN NULL ELSE 'app:references' END,
+      CASE WHEN NOT has_table_privilege('agentpass_app', t.oid, 'TRIGGER') THEN NULL ELSE 'app:trigger' END,
+      CASE WHEN NOT has_table_privilege('agentpass_signer', t.oid, 'SELECT') THEN NULL ELSE 'signer:select' END,
+      CASE WHEN NOT has_table_privilege('agentpass_signer', t.oid, 'INSERT') THEN NULL ELSE 'signer:insert' END,
+      CASE WHEN NOT has_table_privilege('agentpass_signer', t.oid, 'UPDATE') THEN NULL ELSE 'signer:update' END,
+      CASE WHEN NOT has_table_privilege('agentpass_signer', t.oid, 'DELETE') THEN NULL ELSE 'signer:delete' END,
+      CASE WHEN NOT has_table_privilege('agentpass_signer', t.oid, 'TRUNCATE') THEN NULL ELSE 'signer:truncate' END,
+      CASE WHEN NOT has_table_privilege('agentpass_signer', t.oid, 'REFERENCES') THEN NULL ELSE 'signer:references' END,
+      CASE WHEN NOT has_table_privilege('agentpass_signer', t.oid, 'TRIGGER') THEN NULL ELSE 'signer:trigger' END,
+      CASE WHEN has_table_privilege('agentpass_backup', t.oid, 'SELECT') THEN NULL ELSE 'backup:select' END,
+      CASE WHEN NOT has_table_privilege('agentpass_backup', t.oid, 'INSERT') THEN NULL ELSE 'backup:insert' END,
+      CASE WHEN NOT has_table_privilege('agentpass_backup', t.oid, 'UPDATE') THEN NULL ELSE 'backup:update' END,
+      CASE WHEN NOT has_table_privilege('agentpass_backup', t.oid, 'DELETE') THEN NULL ELSE 'backup:delete' END,
+      CASE WHEN NOT has_table_privilege('agentpass_backup', t.oid, 'TRUNCATE') THEN NULL ELSE 'backup:truncate' END,
+      CASE WHEN NOT has_table_privilege('agentpass_backup', t.oid, 'REFERENCES') THEN NULL ELSE 'backup:references' END,
+      CASE WHEN NOT has_table_privilege('agentpass_backup', t.oid, 'TRIGGER') THEN NULL ELSE 'backup:trigger' END,
+      CASE WHEN t.relowner = (SELECT oid FROM role_ids WHERE rolname = 'agentpass_migrator') THEN NULL ELSE 'owner:not_migrator' END
+    ]::text[], NULL::text) AS failures
+  FROM tables AS t
+),
 table_privileges_ok AS (
-  SELECT COALESCE((SELECT bool_and(
-      has_table_privilege('agentpass_app', oid, 'SELECT')
-      AND CASE WHEN relname IN ('schema_migrations', 'schema_migration_attempts', 'release_candidates')
-          OR left(relname, length('managed_signer_')) = 'managed_signer_'
-          OR left(relname, length('platform_')) = 'platform_'
-          OR left(relname, length('hosted_identity_')) = 'hosted_identity_' THEN
-        NOT has_table_privilege('agentpass_app', oid, 'INSERT')
-        AND NOT has_table_privilege('agentpass_app', oid, 'UPDATE')
-        AND NOT has_table_privilege('agentpass_app', oid, 'DELETE')
-      ELSE
-        has_table_privilege('agentpass_app', oid, 'INSERT')
-        AND has_table_privilege('agentpass_app', oid, 'UPDATE')
-        AND has_table_privilege('agentpass_app', oid, 'DELETE')
-      END
-      AND NOT has_table_privilege('agentpass_app', oid, 'TRUNCATE')
-      AND NOT has_table_privilege('agentpass_app', oid, 'REFERENCES')
-      AND NOT has_table_privilege('agentpass_app', oid, 'TRIGGER')
-    ) FROM tables), true)
-    AND COALESCE((SELECT bool_and(
-      NOT has_table_privilege('agentpass_signer', oid, 'SELECT')
-      AND NOT has_table_privilege('agentpass_signer', oid, 'INSERT')
-      AND NOT has_table_privilege('agentpass_signer', oid, 'UPDATE')
-      AND NOT has_table_privilege('agentpass_signer', oid, 'DELETE')
-      AND NOT has_table_privilege('agentpass_signer', oid, 'TRUNCATE')
-      AND NOT has_table_privilege('agentpass_signer', oid, 'REFERENCES')
-      AND NOT has_table_privilege('agentpass_signer', oid, 'TRIGGER')
-    ) FROM tables), true)
-    AND COALESCE((SELECT bool_and(relowner = (SELECT oid FROM role_ids WHERE rolname = 'agentpass_migrator')) FROM tables), true)
-    AND COALESCE((SELECT bool_and(has_table_privilege('agentpass_backup', oid, 'SELECT')
-      AND NOT has_table_privilege('agentpass_backup', oid, 'INSERT')
-      AND NOT has_table_privilege('agentpass_backup', oid, 'UPDATE')
-      AND NOT has_table_privilege('agentpass_backup', oid, 'DELETE')
-      AND NOT has_table_privilege('agentpass_backup', oid, 'TRUNCATE')
-      AND NOT has_table_privilege('agentpass_backup', oid, 'REFERENCES')
-      AND NOT has_table_privilege('agentpass_backup', oid, 'TRIGGER')) FROM tables), true)
-    AND NOT EXISTS (SELECT 1 FROM tables
-      WHERE relowner = (SELECT oid FROM role_ids WHERE rolname = 'agentpass_app')) AS value
+  SELECT NOT EXISTS (
+    SELECT 1 FROM table_privilege_observations
+    WHERE cardinality(failures) > 0
+  ) AS value
 ),
 sequence_privileges_ok AS (
   SELECT COALESCE((SELECT bool_and(
@@ -304,6 +341,17 @@ SELECT json_build_object(
   'database_privileges_ok', (SELECT value FROM database_privileges_ok),
   'migration_head_ok', (SELECT value FROM migration_head_ok),
   'table_privileges_ok', (SELECT value FROM table_privileges_ok),
+  'table_privilege_diagnostics', COALESCE((SELECT json_agg(json_build_object(
+      'relation', left(relname, ${MAX_RELATION_DIAGNOSTIC_NAME}),
+      'kind', relkind,
+      'class', expected_class,
+      'failures', failures
+    ) ORDER BY relname)
+    FROM (SELECT relname, relkind, expected_class, failures
+      FROM table_privilege_observations
+      WHERE cardinality(failures) > 0
+      ORDER BY relname
+      LIMIT ${MAX_TABLE_DIAGNOSTICS}) AS bounded_table_failures), '[]'::json),
   'sequence_privileges_ok', (SELECT value FROM sequence_privileges_ok),
   'function_privileges_ok', (SELECT value FROM function_privileges_ok),
   'default_privileges_ok', (SELECT value FROM default_privileges_ok),
@@ -353,7 +401,10 @@ SELECT json_build_object(
                 ...(report.current_user === 'agentpass_migrator' ? [] : ['current_user']),
                 ...REPORT_CHECKS.filter((name) => report[name] !== true),
               ];
-              fail(`database privilege contract failed: failed_checks=${failedChecks.join(',') || 'unknown'} evidence=${evidence}`);
+              const tableDiagnostics = report.table_privileges_ok === true
+                ? ''
+                : ` table_diagnostics=${boundedTableDiagnostics(report.table_privilege_diagnostics)}`;
+              fail(`database privilege contract failed: failed_checks=${failedChecks.join(',') || 'unknown'} evidence=${evidence}${tableDiagnostics}`);
             } else {
               const evidenceOutput = process.env[EVIDENCE_OUTPUT_ENV];
               if (evidenceOutput !== undefined) {

@@ -58,7 +58,7 @@ bootstrap cookie を失った場合は GitHub OAuth を最初からやり直し�
 
 ## Migration と互換性
 
-新規の canonical identity mapping は `upstream_identities(provider=github, subject)` です。`members.github_subject` は既存データの互換列として保持し、新しい caller input や再割当ての根拠にはしません。共有されている `0056_identity_epoch_invalidation` のidentity invalidation境界を前提に、過去の migration は変更せず、bootstrap attempt、one-use OAuth state、bootstrap idempotency、bootstrap WebAuthn binding を次の forward-only PostgreSQL migration（計画名 `0057_hosted_identity_bootstrap`）で追加してから Hosted を有効化します。
+新規の canonical identity mapping は `upstream_identities(provider=github, subject)` です。`members.github_subject` は既存データの互換列として保持し、新しい caller input や再割当ての根拠にはしません。共有されている `0056_identity_epoch_invalidation` のidentity invalidation境界を前提に、過去の migration は変更しません。`0057_hosted_identity_bootstrap` がbootstrap attempt、one-use OAuth state、bootstrap idempotency、bootstrap WebAuthn bindingを追加し、`0058_hosted_oauth_pkce_envelope` がstate hashのexact照合と、attempt/state/redirect/expiryへAEAD束縛された短命PKCE verifier暗号文を追加します。Hosted runtimeは0058のv2 start/claimだけを使用し、state hashを検証しない旧0057 start/consume関数のEXECUTE権限を持ちません。
 
 v1 の request は unknown field を拒否し、既存の legacy route をこの route に alias しません。authority や recovery の意味を変える場合は v2 と新しい contract id が必要です。
 

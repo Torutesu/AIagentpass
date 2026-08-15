@@ -157,7 +157,14 @@ BEGIN
   ] LOOP
     IF to_regclass(format('public.%I', relation_name)) IS NOT NULL THEN
       EXECUTE format(
-        'REVOKE INSERT, UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER ON TABLE public.%I FROM agentpass_app, agentpass_backup',
+        'REVOKE ALL PRIVILEGES ON TABLE public.%I FROM agentpass_app, agentpass_backup',
+        relation_name
+      );
+      -- Existing authority-table contracts intentionally retain read access for
+      -- the app and backup identities. Re-grant it after the full revoke so a
+      -- stale table ACL cannot leave any write privilege behind.
+      EXECUTE format(
+        'GRANT SELECT ON TABLE public.%I TO agentpass_app, agentpass_backup',
         relation_name
       );
     END IF;
@@ -180,27 +187,15 @@ BEGIN
       )
   LOOP
     EXECUTE format(
-      'REVOKE INSERT, UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER ON TABLE public.%I FROM agentpass_app, agentpass_backup',
+      'REVOKE ALL PRIVILEGES ON TABLE public.%I FROM agentpass_app, agentpass_backup',
+      relation_name
+    );
+    EXECUTE format(
+      'GRANT SELECT ON TABLE public.%I TO agentpass_app, agentpass_backup',
       relation_name
     );
   END LOOP;
 
-  -- Every platform_* relation is authority/control-plane state and is
-  -- function-only. This prefix rule also protects future platform-session and
-  -- proof ledgers before their reviewed entry points are allowlisted.
-  FOR relation_name IN
-    SELECT c.relname
-    FROM pg_catalog.pg_class AS c
-    JOIN pg_catalog.pg_namespace AS n ON n.oid = c.relnamespace
-    WHERE n.nspname = 'public'
-      AND c.relkind IN ('r', 'p')
-      AND left(c.relname, length('platform_')) = 'platform_'
-  LOOP
-    EXECUTE format(
-      'REVOKE INSERT, UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER ON TABLE public.%I FROM agentpass_app, agentpass_backup',
-      relation_name
-    );
-  END LOOP;
 END
 $$;
 
@@ -265,8 +260,8 @@ BEGIN
     'agentpass_platform_session_complete_and_issue(uuid,bytea,bytea,uuid,bytea,bytea,bytea,bytea,bytea,integer,integer)',
     'agentpass_consume_platform_authorization_and_reserve(bytea,bytea,uuid,bytea,bytea,uuid,text,text,text,text,bytea,integer,integer,text,bigint,bigint)',
     'agentpass_platform_session_bootstrap_context(bytea,uuid,text,text)',
-    'agentpass_hosted_identity_bootstrap_start(uuid,uuid,bytea,text,text,text)',
-    'agentpass_hosted_identity_oauth_state_consume(uuid,bytea,text)',
+    'agentpass_hosted_identity_bootstrap_start_v2(uuid,uuid,bytea,text,text,text,text,bytea,bytea,bytea,timestamptz)',
+    'agentpass_hosted_identity_oauth_state_claim_v2(uuid,bytea,bytea,text)',
     'agentpass_hosted_identity_oauth_state_complete(uuid,bytea,uuid,text,bytea)',
     'agentpass_hosted_identity_oauth_state_fail(uuid,text)',
     'agentpass_hosted_identity_bootstrap_csrf_issue(bytea,bytea)',
