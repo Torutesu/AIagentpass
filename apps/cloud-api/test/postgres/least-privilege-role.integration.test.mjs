@@ -308,8 +308,13 @@ test("qualifies least-privilege roles against real PostgreSQL migrations and smo
       );
       assert.equal(privilege.rows[0].allowed, true, `app reviewed function privilege missing for ${signature}`);
     }
-    const atomicResult = await client.query(`SELECT ${ATOMIC_PLATFORM_AUTHORIZATION_CALL} AS result`);
-    assert.equal(Array.isArray(atomicResult.rows), true, "app cannot execute the reviewed 0054 atomic function");
+    await assert.rejects(
+      () => client.query(`SELECT ${ATOMIC_PLATFORM_AUTHORIZATION_CALL} AS result`),
+      (error) => {
+        assert.equal(error?.code, "22023", "reviewed atomic function did not reach its input-validation boundary");
+        return true;
+      },
+    );
 
     for (const { signature, call } of LEGACY_PLATFORM_PROMOTION_MUTATIONS) {
       const privilege = await client.query(
