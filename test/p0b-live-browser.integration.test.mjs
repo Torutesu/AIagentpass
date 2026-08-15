@@ -146,7 +146,14 @@ async function scenario(parent, name, callback) {
           catch { failSafeOpen(safeOpenPrefix, "AUTHENTICATOR"); }
         }
         try { await fixture.bootstrap(page, role); }
-        catch { failSafeOpen(safeOpenPrefix, "BOOTSTRAP"); }
+        catch (error) {
+          if (safeOpenPrefix === "P0B_SAFE_ADMIN_OPEN") {
+            if (error?.code === "session_bootstrap_transport_failed") assert.fail("P0B_SAFE_ADMIN_OPEN_BOOTSTRAP_TRANSPORT_FAILED");
+            if (error?.code === "session_bootstrap_http_failed") assert.fail("P0B_SAFE_ADMIN_OPEN_BOOTSTRAP_HTTP_FAILED");
+            if (error?.code === "session_bootstrap_contract_failed") assert.fail("P0B_SAFE_ADMIN_OPEN_BOOTSTRAP_CONTRACT_FAILED");
+          }
+          failSafeOpen(safeOpenPrefix, "BOOTSTRAP");
+        }
         if (register) {
           try { await fixture.registerWebAuthn(page); }
           catch { failSafeOpen(safeOpenPrefix, "REGISTRATION"); }

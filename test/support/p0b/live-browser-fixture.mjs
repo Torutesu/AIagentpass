@@ -145,16 +145,20 @@ export async function startP0BLiveBrowserFixture({
           return false;
         }
       });
+      let stage = "transport";
       try {
         await page.goto(target.toString(), { waitUntil: "domcontentloaded" });
         const response = await responsePromise;
+        stage = "http";
+        if (!response.ok()) throw new Error("session bootstrap was rejected");
+        stage = "contract";
         const body = await response.json();
         const session = validateBootstrap(body, descriptor, safeSeed.organizationId);
         pageState.set(page, { role: descriptor, csrfToken: session.csrfToken, registered: pageState.get(page)?.registered === true });
         releaseSummary();
       } catch {
         releaseSummary();
-        throw new P0BLiveBrowserFixtureError("session_bootstrap_failed", "P0-B live browser session bootstrap failed");
+        throw new P0BLiveBrowserFixtureError(`session_bootstrap_${stage}_failed`, "P0-B live browser session bootstrap failed");
       }
       return descriptor;
     },
