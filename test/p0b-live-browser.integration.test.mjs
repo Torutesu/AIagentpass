@@ -55,9 +55,7 @@ test("P0-B live browser role, WebAuthn, and recent-auth matrix", { skip: !enable
   });
 
   await scenario(t, "admin completes real WebAuthn and wake mutation", async ({ open }) => {
-    let page;
-    try { page = await open("admin"); }
-    catch { assert.fail("P0B_SAFE_ADMIN_WAKE_OPEN_FAILED"); }
+    const page = await open("admin", { safeOpenPrefix: "P0B_SAFE_ADMIN_OPEN" });
     const card = deviceCard(page, "反映待ち Mac");
     try { await card.getByRole("button", { name: "Wake requestを依頼" }).click(); }
     catch { assert.fail("P0B_SAFE_ADMIN_WAKE_CLICK_FAILED"); }
@@ -135,16 +133,30 @@ async function scenario(parent, name, callback) {
       }
       browser = await chromium.launch({ headless: true, args: [`--ignore-certificate-errors-spki-list=${fixture.tlsSpkiPin}`] });
       const contexts = [];
-      const open = async (role, { register = true } = {}) => {
-        const context = await browser.newContext({ ignoreHTTPSErrors: false });
-        contexts.push(context);
-        const page = await context.newPage();
-        if (register) await fixture.installVirtualAuthenticator(page, role);
-        await fixture.bootstrap(page, role);
-        if (register) await fixture.registerWebAuthn(page);
-        await page.reload({ waitUntil: "domcontentloaded" });
-        await page.getByRole("heading", { name: /Agentの状態を、\s*確認できました。/u }).waitFor();
-        await deviceCard(page, "反映待ち Mac").getByRole("heading", { name: "反映待ち Mac" }).waitFor();
+      const open = async (role, { register = true, safeOpenPrefix = null } = {}) => {
+        let context;
+        let page;
+        try {
+          context = await browser.newContext({ ignoreHTTPSErrors: false });
+          contexts.push(context);
+          page = await context.newPage();
+        } catch { failSafeOpen(safeOpenPrefix, "CONTEXT"); }
+        if (register) {
+          try { await fixture.installVirtualAuthenticator(page, role); }
+          catch { failSafeOpen(safeOpenPrefix, "AUTHENTICATOR"); }
+        }
+        try { await fixture.bootstrap(page, role); }
+        catch { failSafeOpen(safeOpenPrefix, "BOOTSTRAP"); }
+        if (register) {
+          try { await fixture.registerWebAuthn(page); }
+          catch { failSafeOpen(safeOpenPrefix, "REGISTRATION"); }
+        }
+        try { await page.reload({ waitUntil: "domcontentloaded" }); }
+        catch { failSafeOpen(safeOpenPrefix, "RELOAD"); }
+        try {
+          await page.getByRole("heading", { name: /Agentの状態を、\s*確認できました。/u }).waitFor();
+          await deviceCard(page, "反映待ち Mac").getByRole("heading", { name: "反映待ち Mac" }).waitFor();
+        } catch { failSafeOpen(safeOpenPrefix, "READINESS"); }
         return page;
       };
       await callback({ fixture, browser, open });
@@ -171,4 +183,9 @@ function mutationCounter(page) {
     if (request.method() === "POST" && url.pathname === "/api/console" && url.searchParams.get("operation") === "device.refresh.request") calls += 1;
   });
   return Object.freeze({ count: () => calls });
+}
+
+function failSafeOpen(prefix, stage) {
+  if (typeof prefix === "string" && /^[A-Z0-9_]{1,64}$/u.test(prefix)) assert.fail(`${prefix}_${stage}_FAILED`);
+  throw new Error("P0-B browser open failed");
 }
