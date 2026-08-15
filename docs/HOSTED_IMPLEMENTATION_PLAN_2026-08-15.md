@@ -1,7 +1,7 @@
 # Hosted v1 implementation plan
 
 Status: active  
-Baseline: `codex/agent-platform` at migration `0067`
+Baseline: `codex/agent-platform` at migration `0068`
 Updated: 2026-08-15
 
 This is the implementation plan for the Hosted identity, first-organization,
@@ -54,6 +54,9 @@ Implemented and pushed:
   legacy integer overload for compatible callers;
 - migration `0067` removes PostgreSQL 16/17 PL/pgSQL output-column ambiguity
   from atomic Hosted OAuth completion with explicit column binding;
+- migration `0068` binds Platform challenge `issued_at` and `created_at` to
+  one database-clock instant, preserving the ordering invariant without
+  weakening the table constraint;
 - the six-route Hosted boundary is composed from PostgreSQL, GitHub OAuth,
   strict WebAuthn, status/CSRF, and first-organization services, then dispatched
   by the real Cloud server before Human Auth with its raw request preserved;
@@ -77,18 +80,18 @@ Implemented and pushed:
   Hosted WebAuthn claim-lease, and Hosted status/CSRF contention suites at the
   current schema head;
 - fresh PostgreSQL 16 and 17 CI databases now migrate through schema head
-  `0064`; the remaining gate is a terminal green run of the complete authority
+  `0068`; the remaining gate is a terminal green run of the complete authority
   matrix, not migration applicability;
 - the Hosted account lane now includes a real child-process loss harness for
   claim takeover, stale-generation fencing, committed-response loss, and
   exact-once Session replay, plus a source-bound secret-free evidence generator;
-- the frozen catalog validates 178 entries, 49 schemas, 62 OpenAPI operations,
-  and all 67 forward-only migrations. Hosted bootstrap remains a separately
+- the frozen catalog validates 179 entries, 49 schemas, 62 OpenAPI operations,
+  and all 68 forward-only migrations. Hosted bootstrap remains a separately
   frozen six-route contract with its own validator.
 
 Not yet qualified as a production-composable path:
 
-- a terminal green GitHub Actions run at schema head `0067`, including the four
+- a terminal green GitHub Actions run at schema head `0068`, including the four
   newly mandatory PostgreSQL concurrency suites;
 - a terminal real-PostgreSQL execution of the new process-loss lane and its
   independently verified source-bound evidence artifact;
@@ -495,7 +498,7 @@ of the same commit gate.
 
 ### Execution lanes and merge order
 
-- Critical path: terminal schema-head `0067` CI -> process-loss qualification ->
+- Critical path: terminal schema-head `0068` CI -> process-loss qualification ->
   composed/deployed Hosted E2E -> authenticated organization UX -> browser-led
   device enrollment.
 - Parallel lane A now: role-specific organization/accessibility/localization
@@ -529,7 +532,7 @@ they consume a frozen contract and do not modify the same authority boundary.
 
 | Wave | Scope | Parallel work | Required exit evidence |
 | --- | --- | --- | --- |
-| N1 | Close Hosted account qualification | Watch the pushed PostgreSQL 16/17 CI lanes; add deterministic process-kill harnesses for OAuth callback, WebAuthn claim/commit, and Session rotation; retain sanitized evidence by source SHA. | Fresh migration at `0067`, no unexpected skips, one winner under contention, safe retry after response loss, no usable partial Session, and green browser build/list/lint. |
+| N1 | Close Hosted account qualification | Watch the pushed PostgreSQL 16/17 CI lanes; add deterministic process-kill harnesses for OAuth callback, WebAuthn claim/commit, and Session rotation; retain sanitized evidence by source SHA. | Fresh migration at `0068`, no unexpected skips, one winner under contention, safe retry after response loss, no usable partial Session, and green browser build/list/lint. |
 | N2 | Complete authenticated organization UX | Wire organization select/switch, invitations, member role change/removal, credential/session management, logout, and emergency revoke through the existing strict BFF. | Owner/Admin/Auditor/Viewer matrix, last-owner protection, epoch invalidation, stale `If-Match`, recent-WebAuthn binding, CSRF/origin rejection, accessibility, and authority scan pass. |
 | N3 | Complete browser-led device onboarding | Connect invitation issuance to CLI loopback handoff, possession proof, enrollment completion, device list/detail, signed bundle status, monotonic ACK, wake, revoke, and repair. | One-time invitation cannot replay or cross tenants; no credential enters URL/storage/logs; restart and response-loss converge; revoked device cannot ACK or obtain new authority. |
 | N4 | Finish local helper and agent adapters | Make signed PKG + CLI the primary delivery; complete native broker/XPC setup journal and identical Claude Code/Cursor protocol adapters. | Clean physical Mac setup, two unattended verified commits per agent, sibling/repository/worktree substitution denied, budget/TTL enforced, daemon restart safe, next request blocked after revoke. |
@@ -539,7 +542,7 @@ they consume a frozen contract and do not modify the same authority boundary.
 
 ### N1 concrete commit sequence
 
-1. `test: qualify hosted postgres authority at schema head 0067` — implemented; terminal green run pending
+1. `test: qualify hosted postgres authority at schema head 0068` — implemented; terminal green run pending
    - require the four newly wired integration suites in CI;
    - make unexpected skip detection fail the job;
    - upload a source-bound summary containing only versions, scenario names,

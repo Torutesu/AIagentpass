@@ -172,12 +172,14 @@ async function expectPermissionDenied(callback) {
 
 async function expectPermissionDeniedInSavepoint(client, callback) {
   const savepoint = "q2a_least_privilege_probe";
+  await client.query("BEGIN");
   await client.query(`SAVEPOINT ${savepoint}`);
   try {
     await expectPermissionDenied(callback);
   } finally {
     await client.query(`ROLLBACK TO SAVEPOINT ${savepoint}`);
     await client.query(`RELEASE SAVEPOINT ${savepoint}`);
+    await client.query("COMMIT");
   }
 }
 

@@ -236,7 +236,7 @@ test("0051 makes lifecycle and signing function-only for the signer role", {
       algorithm: "ed25519",
       public_key_fingerprint: "c".repeat(64),
       state: "active",
-      state_version: 1,
+      state_version: 2,
     },
     verification_until: new Date(Date.now() + 60_000).toISOString(),
   });
