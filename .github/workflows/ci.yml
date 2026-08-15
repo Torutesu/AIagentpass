@@ -670,12 +670,18 @@ jobs:
           AGENTPASS_TEST_DATABASE_URL: postgresql://postgres:agentpass-integration@127.0.0.1:5432/postgres
         run: |
           node --input-type=module <<'NODE'
+          import { readFile } from "node:fs/promises";
           import { Pool } from "pg";
           import { createMigrationRunner } from "./apps/cloud-api/src/postgres/migration-runner.mjs";
           const pool = new Pool({ connectionString: process.env.AGENTPASS_TEST_DATABASE_URL });
           const client = await pool.connect();
           try {
+            const roles = (await readFile("./scripts/postgres/roles.sql", "utf8"))
+              .replace(/^\\set\s+ON_ERROR_STOP\s+on\s*$/mu, "")
+              .trim();
+            await client.query(roles);
             await createMigrationRunner({ client, applicationVersion: "postgres-integration-preflight" }).run();
+            await client.query(roles);
           } catch (error) {
             const cause = error?.cause;
             console.error(JSON.stringify({

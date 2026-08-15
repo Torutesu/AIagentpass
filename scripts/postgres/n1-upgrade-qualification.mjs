@@ -220,7 +220,7 @@ async function qualifyScenario({ database, migrationPool, migrations, scenario }
     from_version: scenario.startVersion,
     to_version: N1_TARGET_VERSION,
     seeded_authority_tables: N1_AUTHORITY_TABLE_SPECS.map(({ name }) => name),
-    seeded_authority_row_count: before.reduce((total, rows) => total + rows.length, 0),
+    seeded_authority_row_count: [...before.values()].reduce((total, rows) => total + rows.length, 0),
     history: historyReport
   });
 }

@@ -76,6 +76,11 @@ export function createVerifiedPostgresPoolOptions(value, { ca } = {}) {
 }
 
 async function prepareP0BDatabaseAuthorities(database) {
+  const rolesSql = (await fsp.readFile(path.join(REPOSITORY_ROOT, "scripts/postgres/roles.sql"), "utf8"))
+    .replace(/^\\set\s+ON_ERROR_STOP\s+on\s*$/mu, "")
+    .trim();
+  await database.pool.query(rolesSql);
+
   const migrationClient = await database.pool.connect();
   try {
     await createMigrationRunner({ client: migrationClient, applicationVersion: "p0b-authority-bootstrap" }).run();
@@ -83,9 +88,6 @@ async function prepareP0BDatabaseAuthorities(database) {
     migrationClient.release();
   }
 
-  const rolesSql = (await fsp.readFile(path.join(REPOSITORY_ROOT, "scripts/postgres/roles.sql"), "utf8"))
-    .replace(/^\\set\s+ON_ERROR_STOP\s+on\s*$/mu, "")
-    .trim();
   await database.pool.query(rolesSql);
 
   const credentials = Object.create(null);
