@@ -40,6 +40,24 @@ export function classifySessionBootstrap502(body, cloudProcessState, cloudReadin
     : "proxy_unavailable";
 }
 
+export function classifySessionBootstrap503(body) {
+  const code = body
+    && typeof body === "object"
+    && !Array.isArray(body)
+    && body.error
+    && typeof body.error === "object"
+    && !Array.isArray(body.error)
+    && typeof body.error.code === "string"
+    ? body.error.code
+    : "";
+  if (code === "human_session_unavailable") return "session_unavailable";
+  if (code === "human_auth_unavailable") return "human_auth_unavailable";
+  if (code === "rate_limiter_unavailable") return "rate_limiter_unavailable";
+  if (code === "cloud_api_unavailable") return "cloud_api_unavailable";
+  if (code === "identity_unavailable") return "identity_unavailable";
+  return "other";
+}
+
 /**
  * Start the existing P0-B process harness with a real human-auth tenant.
  *
@@ -173,7 +191,8 @@ export async function startP0BLiveBrowserFixture({
         stage = "http";
         if (!response.ok) {
           if (response.status === 502) stage = `http_502_${classifySessionBootstrap502(response.body, harness.cloudProcessState(), await harness.cloudReadinessState())}`;
-          else if ([400, 401, 403, 404, 405, 409, 415, 422, 429, 500, 503, 504].includes(response.status)) stage = `http_${response.status}`;
+          else if (response.status === 503) stage = `http_503_${classifySessionBootstrap503(response.body)}`;
+          else if ([400, 401, 403, 404, 405, 409, 415, 422, 429, 500, 504].includes(response.status)) stage = `http_${response.status}`;
           else if (response.status >= 400 && response.status < 500) stage = "http_4xx";
           else if (response.status >= 500 && response.status < 600) stage = "http_5xx";
           else stage = "http_other";

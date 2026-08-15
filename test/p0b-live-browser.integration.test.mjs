@@ -169,7 +169,12 @@ async function scenario(parent, name, callback) {
             if (error?.code === "session_bootstrap_http_502_bff_invalid_response_failed") assert.fail("P0B_SAFE_ADMIN_OPEN_BOOTSTRAP_HTTP_502_BFF_INVALID_RESPONSE_FAILED");
             if (error?.code === "session_bootstrap_http_502_proxy_unavailable_failed") assert.fail("P0B_SAFE_ADMIN_OPEN_BOOTSTRAP_HTTP_502_PROXY_UNAVAILABLE_FAILED");
             if (error?.code === "session_bootstrap_http_502_cloud_exited_failed") assert.fail("P0B_SAFE_ADMIN_OPEN_BOOTSTRAP_HTTP_502_CLOUD_EXITED_FAILED");
-            if (error?.code === "session_bootstrap_http_503_failed") assert.fail("P0B_SAFE_ADMIN_OPEN_BOOTSTRAP_HTTP_503_FAILED");
+            if (error?.code === "session_bootstrap_http_503_session_unavailable_failed") assert.fail("P0B_SAFE_ADMIN_OPEN_BOOTSTRAP_HTTP_503_SESSION_UNAVAILABLE_FAILED");
+            if (error?.code === "session_bootstrap_http_503_human_auth_unavailable_failed") assert.fail("P0B_SAFE_ADMIN_OPEN_BOOTSTRAP_HTTP_503_HUMAN_AUTH_UNAVAILABLE_FAILED");
+            if (error?.code === "session_bootstrap_http_503_rate_limiter_unavailable_failed") assert.fail("P0B_SAFE_ADMIN_OPEN_BOOTSTRAP_HTTP_503_RATE_LIMITER_UNAVAILABLE_FAILED");
+            if (error?.code === "session_bootstrap_http_503_cloud_api_unavailable_failed") assert.fail("P0B_SAFE_ADMIN_OPEN_BOOTSTRAP_HTTP_503_CLOUD_API_UNAVAILABLE_FAILED");
+            if (error?.code === "session_bootstrap_http_503_identity_unavailable_failed") assert.fail("P0B_SAFE_ADMIN_OPEN_BOOTSTRAP_HTTP_503_IDENTITY_UNAVAILABLE_FAILED");
+            if (error?.code === "session_bootstrap_http_503_other_failed") assert.fail("P0B_SAFE_ADMIN_OPEN_BOOTSTRAP_HTTP_503_OTHER_FAILED");
             if (error?.code === "session_bootstrap_http_504_failed") assert.fail("P0B_SAFE_ADMIN_OPEN_BOOTSTRAP_HTTP_504_FAILED");
             if (error?.code === "session_bootstrap_http_4xx_failed") assert.fail("P0B_SAFE_ADMIN_OPEN_BOOTSTRAP_HTTP_4XX_FAILED");
             if (error?.code === "session_bootstrap_http_5xx_failed") assert.fail("P0B_SAFE_ADMIN_OPEN_BOOTSTRAP_HTTP_5XX_FAILED");
