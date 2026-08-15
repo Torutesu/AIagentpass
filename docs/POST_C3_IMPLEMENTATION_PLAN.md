@@ -576,6 +576,42 @@ the complete N1 regression and privilege matrix.
 5. Add virtual-WebAuthn HTTP E2E for success, cancellation, timeout, cloned
    counter, CSRF, origin/RP mismatch, and response-loss recovery.
 
+Implementation checkpoint (2026-08-15): migration `0053`, the six public DTO
+schemas, strict platform-only WebAuthn ceremony service, distinct `__Host-`
+cookie/CSRF transport, hash-only active lookup/touch repository, and exact
+seeded 52→53 TLS/migrator qualification are implemented. The ceremony binds
+the closed operation/capability, principal, member, organization, assignment,
+authority generation, platform credential, RP ID, origin, and required user
+verification. Session issuance hashes the exact base64url cookie value; a lost
+response never replays bearer material from process memory. The runtime
+repository deliberately does not expose the migrator-only session-id revoke
+function because it cannot bind the target to the presented bearer.
+
+Remaining N3 execution order:
+
+1. Add durable one-use challenge storage and a ceremony repository whose
+   create/claim/fail/complete transitions are database-clock driven. Map the
+   public WebAuthn credential ID to a separate internal platform credential ID
+   and use compare-and-swap counter/backup metadata updates.
+2. Freeze `0054` with bearer-bound self-revocation and the atomic
+   `consume_platform_authorization_and_reserve` procedure. It must lock and
+   revalidate principal generation, assignment version/expiry, platform and
+   underlying WebAuthn credential state, session state, proof JTI, canonical
+   request digest, promotion idempotency key, candidate, environment, and
+   deployment before one commit.
+3. Implement the platform session HTTP/BFF routes only after the `0054`
+   procedure and DTO projection agree. Derive authority from the authenticated
+   bootstrap and database; reject Authorization headers, duplicate cookies,
+   cross-origin requests, the human CSRF namespace, unknown JSON, and any
+   caller-supplied principal or generation.
+4. Compose runtime dependencies behind readiness. Until the ceremony store,
+   bearer-bound revoke, and atomic consume/reserve are present, the platform
+   session and promotion mutation routes remain physically absent.
+5. Run PostgreSQL 16/17, two-instance race, virtual-WebAuthn browser, response
+   loss, restart, clone-counter, expiry, revocation, CSRF/origin/RP mismatch,
+   cross-tenant, and secret-scan qualification. Retain a source-SHA-bound report
+   for the exact 52→53→54 history and privilege matrix.
+
 Exit gate: no reusable assertion or claim reaches Console JavaScript, logs, API
 DTOs, or audit events; one proof authorizes exactly one bound mutation.
 

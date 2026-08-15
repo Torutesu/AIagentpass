@@ -290,6 +290,34 @@ jobs:
           assert.equal(scenario.history.historyRows, 52);
           assert.deepEqual(scenario.history.appliedUpgradeVersions, [52]);
           NODE
+      - name: Qualify seeded 52-to-53 upgrade
+        shell: bash
+        run: |
+          set -euo pipefail
+          AGENTPASS_N3_POSTGRES_ADMIN_URL="$N1_ADMIN_DATABASE_URL" \
+          AGENTPASS_N3_POSTGRES_MIGRATION_URL="$N1_MIGRATION_DATABASE_URL" \
+          AGENTPASS_TEST_POSTGRES_CA_FILE="$N1_PGSSLROOTCERT" \
+            node scripts/postgres/n3-upgrade-qualification.mjs > "$N1_EVIDENCE_DIR/qualification-n3-upgrade.json"
+          N3_UPGRADE_REPORT="$N1_EVIDENCE_DIR/qualification-n3-upgrade.json" node --input-type=module <<'NODE'
+          import assert from "node:assert/strict";
+          import fs from "node:fs";
+
+          const report = JSON.parse(fs.readFileSync(process.env.N3_UPGRADE_REPORT, "utf8"));
+          assert.equal(report.qualification, "postgres-upgrade");
+          assert.equal(report.report_schema_version, 1);
+          assert.equal(report.name, "N3");
+          assert.equal(report.source_version, 52);
+          assert.equal(report.target_version, 53);
+          assert.equal(report.migration_role, "agentpass_migrator");
+          assert.deepEqual(report.scenarios.map(({ from_version, to_version }) => [from_version, to_version]), [[52, 53]]);
+          const scenario = report.scenarios[0];
+          assert.equal(scenario.seeded_legacy_row_count, 5);
+          assert.equal(scenario.seeded_platform_authority_row_count, 4);
+          assert.equal(scenario.legacy_preservation.exact, true);
+          assert.equal(scenario.platform_authority_preservation.exact, true);
+          assert.equal(scenario.history.historyRows, 53);
+          assert.deepEqual(scenario.history.appliedUpgradeVersions, [53]);
+          NODE
       - name: Qualify PostgreSQL authority boundaries 0048 through 0053
         shell: bash
         run: |
@@ -390,6 +418,15 @@ jobs:
             || n2UpgradeReport.scenarios[0]?.legacy_preservation?.exact !== true) {
             throw new Error("N2 seeded upgrade qualification report is incomplete");
           }
+          const n3UpgradeOutput = read(path.join(process.env.N1_EVIDENCE_DIR, "qualification-n3-upgrade.json"));
+          const n3UpgradeReport = JSON.parse(n3UpgradeOutput.toString("utf8"));
+          if (n3UpgradeReport.target_version !== 53
+            || JSON.stringify(n3UpgradeReport.scenarios.map(({ from_version, to_version }) => [from_version, to_version])) !== JSON.stringify([[52, 53]])
+            || n3UpgradeReport.scenarios[0]?.seeded_legacy_row_count !== 5
+            || n3UpgradeReport.scenarios[0]?.seeded_platform_authority_row_count !== 4
+            || n3UpgradeReport.scenarios[0]?.platform_authority_preservation?.exact !== true) {
+            throw new Error("N3 seeded upgrade qualification report is incomplete");
+          }
           const migrationFiles = fs.readdirSync("contracts/postgres").filter((name) => /^\d{4}_[a-z0-9_]+\.sql$/u.test(name)).sort();
           const migrationDigest = crypto.createHash("sha256");
           for (const name of migrationFiles) migrationDigest.update(name).update("\0").update(read(path.join("contracts/postgres", name))).update("\0");
@@ -434,9 +471,10 @@ jobs:
             },
             seeded_upgrades: {
               ok: true,
-              paths: [[47, 51], [48, 51], [51, 52]],
+              paths: [[47, 51], [48, 51], [51, 52], [52, 53]],
               n1_report_sha256: sha256(upgradeOutput),
               n2_report_sha256: sha256(n2UpgradeOutput),
+              n3_report_sha256: sha256(n3UpgradeOutput),
             },
             qualifications,
             unexpected_skips: 0,
@@ -478,9 +516,10 @@ jobs:
              (.privilege_checker.ok == true) and
              (.privilege_checker.matrix_sha256 | test("^[0-9a-f]{64}$")) and
              (.seeded_upgrades.ok == true) and
-             (.seeded_upgrades.paths == [[47, 51], [48, 51], [51, 52]]) and
+             (.seeded_upgrades.paths == [[47, 51], [48, 51], [51, 52], [52, 53]]) and
              (.seeded_upgrades.n1_report_sha256 | test("^[0-9a-f]{64}$")) and
              (.seeded_upgrades.n2_report_sha256 | test("^[0-9a-f]{64}$")) and
+             (.seeded_upgrades.n3_report_sha256 | test("^[0-9a-f]{64}$")) and
              ((.qualifications | keys | sort) == ["0048", "0049", "0050", "0051", "0052", "0053"]) and
              (.unexpected_skips == 0)' "$artifact" >/dev/null
       - name: Retain source-SHA-bound N1 PostgreSQL evidence

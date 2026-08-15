@@ -78,6 +78,17 @@ test("N2 runs a seeded 51-to-52 upgrade with exact legacy-row preservation", () 
   assert.match(section, /qualification-n2-upgrade\.json/u);
 });
 
+test("N3 runs a seeded 52-to-53 upgrade preserving authority without implicit sessions", () => {
+  const section = job("postgres-authority-matrix");
+  assert.match(section, /scripts\/postgres\/n3-upgrade-qualification\.mjs/u);
+  assert.match(section, /AGENTPASS_N3_POSTGRES_ADMIN_URL="\$N1_ADMIN_DATABASE_URL"/u);
+  assert.match(section, /AGENTPASS_N3_POSTGRES_MIGRATION_URL="\$N1_MIGRATION_DATABASE_URL"/u);
+  assert.match(section, /seeded_platform_authority_row_count, 4/u);
+  assert.match(section, /platform_authority_preservation\.exact, true/u);
+  assert.match(section, /\[\[52, 53\]\]/u);
+  assert.match(section, /qualification-n3-upgrade\.json/u);
+});
+
 test("authority matrix executes the 0048-0053 qualification set and rejects unexpected skips", () => {
   const section = job("postgres-authority-matrix");
   for (const required of [
@@ -118,6 +129,8 @@ test("N1 evidence is source-SHA-bound and uploaded with a fail-closed artifact c
   assert.match(section, /seeded_upgrades:/u);
   assert.match(section, /n1_report_sha256: sha256\(upgradeOutput\)/u);
   assert.match(section, /n2_report_sha256: sha256\(n2UpgradeOutput\)/u);
+  assert.match(section, /n3_report_sha256: sha256\(n3UpgradeOutput\)/u);
+  assert.match(section, /\[\[47, 51\], \[48, 51\], \[51, 52\], \[52, 53\]\]/u);
   assert.match(section, /migration_history_sha256: sha256\(migrationHistoryOutput\)/u);
   assert.match(section, /postgres_server:/u);
   assert.match(section, /Independently verify source-SHA-bound N1 evidence/u);
