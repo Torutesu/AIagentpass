@@ -64,10 +64,10 @@ The branch now contains:
   SHA-256 digests cross the database boundary;
 - exact signer-role grants for 23 entry functions, with no signer table or
   sequence privileges and no PUBLIC/helper execution;
-- 152 frozen contract-catalog entries: 39 schemas, 61 OpenAPI operations, and
-  52 migrations.
+- 159 frozen contract-catalog entries: 45 schemas, 61 OpenAPI operations, and
+  53 migrations.
 - a fail-closed PostgreSQL 16/17 CI matrix that uses authenticated
-  `sslmode=verify-full`, migrates a fresh database from 1→52, upgrades seeded
+  `sslmode=verify-full`, migrates a fresh database from 1→53, upgrades seeded
   authority databases from 47→51, 48→51, and 51→52, applies the exact role policy,
   rejects unexpected skips, and emits source-SHA-bound qualification evidence;
 - an N1 upgrade runner that proves contiguous migration history and checksums
@@ -335,7 +335,7 @@ digest-exact, monitored, and reversible.
 
 | Wave | State | Serial authority work | Parallel work | Required evidence |
 | --- | --- | --- | --- | --- |
-| W0 | source complete, protected CI pending | three runtime DB identities; signer role; promotion DB qualification; operator repository seam | runtime/profile/docs tests | CI PostgreSQL 16/17 fresh 1→52 and seeded 47/48→51 plus 51→52, exact privilege negatives |
+| W0 | source complete, protected CI pending | three runtime DB identities; signer role; promotion DB qualification; operator repository seam | runtime/profile/docs tests | CI PostgreSQL 16/17 fresh 1→53 and seeded 47/48→51 plus 51→52, exact privilege negatives |
 | W1a | implemented, protected qualification pending | migrations `0049`-`0050` provider-operation and maintenance procedures | repository contract tests; role checker and runbook updates | no signer provider-operation table privilege; real PostgreSQL concurrency/replay/maintenance matrix |
 | W1b | source complete; protected qualification pending | migration `0051` lifecycle/signing procedures and repository conversion | lifecycle contract tests and privilege negatives | zero direct signer table DML; lifecycle/signing concurrency/replay/uncertain tests on real PostgreSQL |
 | W2 | source complete locally; protected qualification pending | migration `0052` platform principals, assignments, generations, and dual-control administration | repository adapters; privilege contract; threat tests | organization-role denial, dual approval, revocation, and 51→52 matrix on real PostgreSQL |
@@ -427,7 +427,7 @@ affected evidence and restarts that lane.
 2. `[implemented; procedures pending] feat: isolate postgres runtime database authorities`
 3. `[implemented; protected run pending] feat: isolate provider operation authority in database procedures`
 4. `[implemented locally; protected run pending] feat: replace lifecycle and signing ledger dml with database procedures`
-5. `[implemented locally; protected CI pending] test: qualify migrations 1-52 and signer/platform privilege boundaries`
+5. `[implemented locally; protected CI pending] test: qualify migrations 1-53 and signer/platform privilege boundaries`
 6. `[implemented locally; protected CI pending] feat: persist platform principals assignments and generations`
 7. `feat: add platform sessions and operation-bound webauthn`
 8. `feat: compose platform promotion runtime`
@@ -464,7 +464,7 @@ and retained GitHub evidence pending.
 
 Serial work:
 
-1. Maintain the PostgreSQL 16 and 17 matrix with fresh 1→52 plus historical
+1. Maintain the PostgreSQL 16 and 17 matrix with fresh 1→53 plus historical
    seeded 47→51 and 48→51 migration paths; N2 separately qualifies seeded
    51→52.
 2. Apply `roles.sql` as the administrative identity, reconnect as app, signer,
@@ -486,7 +486,7 @@ The fresh and upgrade migration runners authenticate as the real
 `agentpass_migrator` login, signer operations authenticate as the real
 `agentpass_signer` login, and app/backup negative probes use their real logins;
 `SET SESSION AUTHORIZATION` is supplemental coverage only. Evidence retains the
-   exact PostgreSQL server version, container image ID, all 52 migration checksums,
+   exact PostgreSQL server version, container image ID, all 53 migration checksums,
 the complete safe privilege matrix, actual-role login transcript, seeded-upgrade
 report, and TAP output. `SKIP`, `TODO`, bail-out, empty plans, and failed test
 processes all fail the gate.

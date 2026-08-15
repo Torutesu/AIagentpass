@@ -251,7 +251,9 @@ BEGIN
     'agentpass_platform_promotion_issuance_commit(uuid,text,text,text,text,bytea,bytea,bytea,bytea,bytea)',
     'agentpass_platform_promotion_issuance_uncertain(uuid,text,text,text,text,bytea,text)',
     'agentpass_platform_promotion_issuance_get(uuid,text,text,text,text,boolean)',
-    'agentpass_platform_operator_assignment_find_active(uuid,uuid,uuid,text,text)'
+    'agentpass_platform_operator_assignment_find_active(uuid,uuid,uuid,text,text)',
+    'agentpass_platform_session_find_active(bytea,uuid,text,text)',
+    'agentpass_platform_session_touch(bytea,uuid,text,text)'
   ] LOOP
     IF to_regprocedure('public.' || routine_signature) IS NOT NULL THEN
       EXECUTE format('GRANT EXECUTE ON FUNCTION public.%s TO agentpass_app', routine_signature);

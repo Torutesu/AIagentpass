@@ -42,6 +42,7 @@ import {
   PROMOTION_EVIDENCE_V3_SIGNING_VERSION
 } from "./promotion-evidence-v3-statement.mjs";
 import { createPlatformPromotionIssuanceService } from "./platform-promotion-issuance.mjs";
+import { createPlatformOperatorAuthorizer } from "./platform-operator-authorizer.mjs";
 import { PROTOCOL_VERSION, REFRESH_HINT_SIGNATURE_ALGORITHM, REFRESH_HINT_TYPE } from "../../../packages/protocol/src/index.mjs";
 
 const IDENTIFIER = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
@@ -49,6 +50,9 @@ const IDENTIFIER = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 export async function createCloudRuntime({ env = process.env, logger = console, postgresFactory = createPostgresRuntime, humanAuthFactory = createHumanAuthRuntime, kmsProviderFactory = createHostedKmsProviders, agentSessionSignerProvider, agentSessionSignerFactory = createHostedAgentSessionGrantSigner, qualificationManifestSignerProvider, qualificationManifestSignerFactory = createHostedQualificationManifestSigner, possessionReceiptSignerProvider, possessionReceiptSignerFactory = createHostedPossessionReceiptSigner, refreshHintSignerProvider, capabilitySignerProvider, controlBundleSignerProvider, auditAnchorSignerProvider, promotionEvidenceSignerProvider, platformOperatorAuthorizer, ownerRecoveryPublisher } = {}) {
   const profile = parseCloudRuntimeProfile(env);
   const config = loadRuntimeConfig(env);
+  if (profile.isHosted && platformOperatorAuthorizer !== undefined) {
+    throw new Error("Hosted platform operator authorization must be composed from PostgreSQL");
+  }
   const configuredOwnerRecoveryPublisher = profile.isHosted
     ? ownerRecoveryPublisher ?? createConfiguredOwnerRecoveryPublisher(config.ownerRecoveryNotification)
     : undefined;
@@ -73,6 +77,7 @@ export async function createCloudRuntime({ env = process.env, logger = console, 
   let auditExportVerifier;
   let promotionEvidenceSigner;
   let platformPromotionIssuanceService;
+  let effectivePlatformOperatorAuthorizer = platformOperatorAuthorizer;
   let verifyPlatformPromotionEvidence;
   let ownedKmsProviders;
   let processBindingPolicies;
@@ -118,6 +123,7 @@ export async function createCloudRuntime({ env = process.env, logger = console, 
         throw new Error("PostgreSQL capability authority is unavailable");
       }
       if (!postgresRuntime?.controlPlaneStore) throw new Error("PostgreSQL control-plane store is unavailable");
+      effectivePlatformOperatorAuthorizer = createHostedPlatformOperatorAuthorizer(postgresRuntime);
       if (!postgresRuntime?.agentSessionIssuanceRepository || !postgresRuntime?.agentSessionAuthorityRepository) throw new Error("PostgreSQL Agent Session authority is unavailable");
       if (!postgresRuntime?.auditExportIssuanceRepository) throw new Error("PostgreSQL audit export authority is unavailable");
       if (!postgresRuntime?.platformPromotionIssuanceRepository) throw new Error("PostgreSQL platform promotion authority is unavailable");
@@ -429,7 +435,9 @@ export async function createCloudRuntime({ env = process.env, logger = console, 
       ...(profile.isHosted ? { refreshHintService: createRefreshHintService({ source: store, nonceDeriver: refreshNonceCodec, signer: refreshHintSigner, notifier: postgresRuntime.refreshHintNotifier, metrics: postgresRuntime.operationalMetrics }) } : {}),
       ...(humanAuthRuntime ? { humanAuthApi: humanAuthRuntime.api, humanSession: humanAuthRuntime.humanSession, recentAuthService: humanAuthRuntime.recentAuthService, humanAuthOrigin: config.humanAuth.origin } : {}),
       ...(auditExportIssuanceService ? { auditExportIssuanceService, auditExportVerifier } : {}),
-      ...(platformPromotionIssuanceService && typeof platformOperatorAuthorizer === "function" ? { platformPromotionIssuanceService, platformOperatorAuthorizer } : {}),
+      ...(platformPromotionIssuanceService && typeof effectivePlatformOperatorAuthorizer === "function"
+        ? { platformPromotionIssuanceService, platformOperatorAuthorizer: effectivePlatformOperatorAuthorizer }
+        : {}),
       ...(agentSessionDeviceApi ? { agentSessionDeviceApi } : {}),
       ...(qualificationGrantBatchDeviceApi ? { qualificationGrantBatchDeviceApi } : {}),
       ...(possessionReceiptSigner ? { possessionReceiptSigner } : {}),
@@ -449,6 +457,7 @@ export async function createCloudRuntime({ env = process.env, logger = console, 
     auditExportIssuanceService,
     auditExportVerifier,
     platformPromotionIssuanceService,
+    platformOperatorAuthorizer: effectivePlatformOperatorAuthorizer,
     async listen() {
       if (server.listening) return server.address();
       await new Promise((resolve, reject) => { server.once("error", reject); server.listen(config.port, config.host, () => { server.off("error", reject); resolve(); }); });
@@ -480,6 +489,16 @@ export async function createCloudRuntime({ env = process.env, logger = console, 
       try { return await closePromise; }
       catch (error) { closePromise = undefined; throw error; }
     }
+  });
+}
+
+export function createHostedPlatformOperatorAuthorizer(postgresRuntime) {
+  if (!postgresRuntime?.platformOperatorAssignmentRepository
+    || typeof postgresRuntime.platformOperatorAssignmentRepository.findActivePlatformOperatorAssignment !== "function") {
+    throw new Error("PostgreSQL platform operator authority is unavailable");
+  }
+  return createPlatformOperatorAuthorizer({
+    repository: postgresRuntime.platformOperatorAssignmentRepository
   });
 }
 

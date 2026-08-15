@@ -102,7 +102,9 @@ app_function_allowlist(routine_signature) AS (
     ('agentpass_platform_promotion_issuance_commit(uuid,text,text,text,text,bytea,bytea,bytea,bytea,bytea)'),
     ('agentpass_platform_promotion_issuance_uncertain(uuid,text,text,text,text,bytea,text)'),
     ('agentpass_platform_promotion_issuance_get(uuid,text,text,text,text,boolean)'),
-    ('agentpass_platform_operator_assignment_find_active(uuid,uuid,uuid,text,text)')
+    ('agentpass_platform_operator_assignment_find_active(uuid,uuid,uuid,text,text)'),
+    ('agentpass_platform_session_find_active(bytea,uuid,text,text)'),
+    ('agentpass_platform_session_touch(bytea,uuid,text,text)')
 ),
 signer_function_oids AS (
   SELECT routine_signature, to_regprocedure('public.' || routine_signature) AS routine_oid
@@ -162,7 +164,7 @@ database_privileges_ok AS (
 ),
 migration_head_ok AS (
   SELECT to_regclass('public.schema_migrations') IS NOT NULL
-    AND (SELECT count(*) = 52 AND min(version) = 1 AND max(version) = 52
+    AND (SELECT count(*) = 53 AND min(version) = 1 AND max(version) = 53
          FROM public.schema_migrations) AS value
 ),
 table_privileges_ok AS (

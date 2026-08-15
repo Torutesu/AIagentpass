@@ -14,15 +14,15 @@ function job(name) {
   return workflow.slice(start, next === -1 ? workflow.length : start + 1 + next);
 }
 
-test("authority qualification runs an isolated PostgreSQL 16/17 matrix with a fresh head-52 database", () => {
+test("authority qualification runs an isolated PostgreSQL 16/17 matrix with a fresh head-53 database", () => {
   const section = job("postgres-authority-matrix");
   assert.match(section, /strategy:\n      fail-fast: false\n      matrix:\n        postgres-version: \["16", "17"\]/u);
   assert.match(section, /timeout-minutes: 30/u);
   assert.match(section, /docker run --detach --name "\$N1_CONTAINER_NAME"[\s\S]*?"postgres:\$\{POSTGRES_MAJOR\}"/u);
   assert.match(section, /assert\.equal\(preflight\.rows\[0\]\.schema_migrations, null, "N1 requires a fresh database"\)/u);
-  assert.match(section, /assert\.equal\(result\.currentVersion, 52\)/u);
-  assert.match(section, /assert\.equal\(history\.rowCount, 52\)/u);
-  assert.match(section, /Array\.from\(\{ length: 52 \}/u);
+  assert.match(section, /assert\.equal\(result\.currentVersion, 53\)/u);
+  assert.match(section, /assert\.equal\(history\.rowCount, 53\)/u);
+  assert.match(section, /Array\.from\(\{ length: 53 \}/u);
   assert.match(section, /FROM pg_stat_ssl WHERE pid = pg_backend_pid\(\)/u);
   assert.match(section, /assert\.equal\(server\.rows\[0\]\.ssl, true/u);
   assert.match(section, /migration-history\.json/u);
@@ -35,7 +35,7 @@ test("N1 bootstraps roles, migrates as the actual migrator login, then reconcile
   const section = job("postgres-authority-matrix");
   const bootstrap = section.indexOf("Bootstrap database roles before migrations");
   const authentication = section.indexOf("Provision ephemeral CI role authentication");
-  const migration = section.indexOf("Run fresh migrations through head 52");
+  const migration = section.indexOf("Run fresh migrations through head 53");
   const roles = section.indexOf("Reconcile database roles after migrations");
   const checker = section.indexOf("Run PostgreSQL privilege checker");
   const logins = section.indexOf("Verify actual service-role login boundaries");
@@ -78,7 +78,7 @@ test("N2 runs a seeded 51-to-52 upgrade with exact legacy-row preservation", () 
   assert.match(section, /qualification-n2-upgrade\.json/u);
 });
 
-test("authority matrix executes the 0048-0052 qualification set and rejects unexpected skips", () => {
+test("authority matrix executes the 0048-0053 qualification set and rejects unexpected skips", () => {
   const section = job("postgres-authority-matrix");
   for (const required of [
     "platform-promotion-authority-boundary-migration.test.mjs",
@@ -96,9 +96,12 @@ test("authority matrix executes the 0048-0052 qualification set and rejects unex
     "platform-operator-authority.integration.test.mjs",
     "platform-operator-assignment-repository.test.mjs",
     "platform-operator-authorizer.test.mjs",
+    "platform-session-authority-migration.test.mjs",
+    "platform-session-contract.test.mjs",
   ]) assert.match(section, new RegExp(required.replaceAll(".", "\\."), "u"));
   assert.match(section, /node --test --test-concurrency=1 --test-reporter=tap/u);
   assert.match(section, /AGENTPASS_TEST_POSTGRES_CA_FILE="\$N1_PGSSLROOTCERT"/u);
+  assert.match(section, /run_qualification 0053/u);
   assert.match(section, /# \(SKIP\|TODO\)/u);
   assert.match(section, /\^Bail out!/u);
   assert.match(section, /unexpected incomplete qualification/u);
@@ -109,7 +112,7 @@ test("authority matrix executes the 0048-0052 qualification set and rejects unex
 test("N1 evidence is source-SHA-bound and uploaded with a fail-closed artifact contract", () => {
   const section = job("postgres-authority-matrix");
   assert.match(section, /source_commit: sourceCommit/u);
-  assert.match(section, /migration_head: 52/u);
+  assert.match(section, /migration_head: 53/u);
   assert.match(section, /roles_applied_after_migrations: true/u);
   assert.match(section, /unexpected_skips: 0/u);
   assert.match(section, /seeded_upgrades:/u);

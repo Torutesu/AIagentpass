@@ -45,7 +45,7 @@ test("real PostgreSQL 0031 qualification protects resource-bound recovery manage
       client: migrationClient,
       applicationVersion: "owner-recovery-management-qualification"
     }).run();
-    assert.equal(migration.currentVersion, 52);
+    assert.equal(migration.currentVersion, 53);
   } finally {
     migrationClient.release();
   }

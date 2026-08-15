@@ -30,7 +30,7 @@ test("0051 fences signing leases across PostgreSQL pools and lifecycle races", {
   const migrationClient = await firstPool.connect();
   try {
     const migrated = await createMigrationRunner({ client: migrationClient, applicationVersion: "managed-signer-lifecycle-integration" }).run();
-    assert.equal(migrated.currentVersion, 52);
+    assert.equal(migrated.currentVersion, 53);
   } finally {
     migrationClient.release();
   }

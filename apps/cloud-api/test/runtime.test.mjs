@@ -6,7 +6,7 @@ import path from "node:path";
 import test from "node:test";
 
 import { createApiTokenRecord, generateApiToken } from "../src/auth.mjs";
-import { createCloudRuntime, createHostedRateLimiter, loadRuntimeConfig } from "../src/runtime.mjs";
+import { createCloudRuntime, createHostedPlatformOperatorAuthorizer, createHostedRateLimiter, loadRuntimeConfig } from "../src/runtime.mjs";
 import { createCloudStore } from "../src/store.mjs";
 import {
   PROMOTION_EVIDENCE_V3_ALGORITHM,
@@ -104,6 +104,40 @@ test("runtime rejects unsafe secrets, key algorithms, and configuration", async 
   await assert.rejects(createCloudRuntime({ env: withoutNotifications, agentSessionSignerProvider: signerProvider(value), qualificationManifestSignerProvider: qualificationSignerProvider(value) }), /requires complete PostgreSQL/);
 });
 
+test("hosted runtime rejects an externally injected platform operator authorizer", async (t) => {
+  const value = files();
+  t.after(() => fs.rmSync(value.root, { recursive: true, force: true }));
+  await assert.rejects(
+    createCloudRuntime({ env: hostedEnv(value), platformOperatorAuthorizer: async () => ({ allowed: true }) }),
+    /must be composed from PostgreSQL/
+  );
+});
+
+test("hosted platform operator authorization is composed only from its PostgreSQL repository", async () => {
+  assert.throws(() => createHostedPlatformOperatorAuthorizer({}), /authority is unavailable/);
+  const calls = [];
+  const authorizer = createHostedPlatformOperatorAuthorizer({
+    platformOperatorAssignmentRepository: {
+      async findActivePlatformOperatorAssignment(input) { calls.push(input); return null; }
+    }
+  });
+  const result = await authorizer({
+    principal: {
+      session_id: "11111111-1111-4111-8111-111111111111",
+      member_id: "22222222-2222-4222-8222-222222222222",
+      organization_id: "33333333-3333-4333-8333-333333333333",
+      role: "viewer",
+      version: 1,
+      created_at: "2025-01-01T00:00:00.000Z",
+      expires_at: "2099-01-01T00:00:00.000Z"
+    },
+    operation: "platform.promotion.issue",
+    capability: "platform.promotion.issue"
+  });
+  assert.equal(result.allowed, false);
+  assert.equal(calls.length, 1);
+});
+
 test("production human auth is composed from PostgreSQL and closed with the runtime", async (t) => {
   const value = files();
   t.after(() => fs.rmSync(value.root, { recursive: true, force: true }));
@@ -111,7 +145,7 @@ test("production human auth is composed from PostgreSQL and closed with the runt
   const calls = [];
   const controlPlaneStore = await createCloudStore({ dataDir: path.join(value.root, "hosted-test-store"), auditCursorSecret: Buffer.from(CURSOR_SECRET, "base64url") });
   const hostedControlPlaneStore = new Proxy(controlPlaneStore, { get(target, property, receiver) { if (property === "pollDeviceRefresh") return async () => null; if (property === "markDeviceRefreshDelivered") return async () => {}; return Reflect.get(target, property, receiver); } });
-  const postgresRuntime = { pool: {}, humanRepository: {}, controlPlaneStore: hostedControlPlaneStore, refreshHintNotifier: { async waitForRefresh() { return false; } }, sharedControlRepository: { async consumeDeviceRequestNonce() { return { accepted: true }; }, async acquireRateLimit() { return { allowed: true, limit: 120, remaining: 119, retryAfterMs: 0, retryAfterSeconds: 0, resetAt: Date.now() }; }, async acquireAnonymousRateLimit() { return { allowed: true, limit: 120, remaining: 119, retryAfterMs: 0, retryAfterSeconds: 0, resetAt: Date.now() }; } }, capabilityAuthorityRepository: { async issueCapabilityMetadata() {}, async listRevokedCapabilityIds() { return []; } }, agentSessionIssuanceRepository: { async issueAgentSessionGrant() {} }, agentSessionAuthorityRepository: { async consumeAgentSessionGrant() {} }, qualificationGrantBatchRepository: { async claimQualificationGrantBatch() {} }, auditExportIssuanceRepository: { async reserveAuditExport() {}, async commitAuditExport() {}, async replayAuditExport() {}, async markAuditExportUncertain() {}, async getAuditExportPayload() {}, async getCommittedAuditExport() {} }, platformPromotionIssuanceRepository: { async reservePlatformPromotion() { return { state: "in_progress" }; }, async commitPlatformPromotion() {}, async replayPlatformPromotion() {}, async markPlatformPromotionUncertain() {}, async getCommittedPlatformPromotion() {} }, createManagedSignerKeyLifecycleRepository: createManagedSignerRepositoryFactory(), createProviderOperationRepository: createProviderOperationRepositoryFactory(), async readiness() { return readyDatabaseReport(); }, async close() { calls.push("postgres-close"); await controlPlaneStore.close(); } };
+  const postgresRuntime = { pool: {}, humanRepository: {}, controlPlaneStore: hostedControlPlaneStore, refreshHintNotifier: { async waitForRefresh() { return false; } }, sharedControlRepository: { async consumeDeviceRequestNonce() { return { accepted: true }; }, async acquireRateLimit() { return { allowed: true, limit: 120, remaining: 119, retryAfterMs: 0, retryAfterSeconds: 0, resetAt: Date.now() }; }, async acquireAnonymousRateLimit() { return { allowed: true, limit: 120, remaining: 119, retryAfterMs: 0, retryAfterSeconds: 0, resetAt: Date.now() }; } }, capabilityAuthorityRepository: { async issueCapabilityMetadata() {}, async listRevokedCapabilityIds() { return []; } }, agentSessionIssuanceRepository: { async issueAgentSessionGrant() {} }, agentSessionAuthorityRepository: { async consumeAgentSessionGrant() {} }, qualificationGrantBatchRepository: { async claimQualificationGrantBatch() {} }, auditExportIssuanceRepository: { async reserveAuditExport() {}, async commitAuditExport() {}, async replayAuditExport() {}, async markAuditExportUncertain() {}, async getAuditExportPayload() {}, async getCommittedAuditExport() {} }, platformPromotionIssuanceRepository: { async reservePlatformPromotion() { return { state: "in_progress" }; }, async commitPlatformPromotion() {}, async replayPlatformPromotion() {}, async markPlatformPromotionUncertain() {}, async getCommittedPlatformPromotion() {} }, platformOperatorAssignmentRepository: { async findActivePlatformOperatorAssignment() { return null; } }, createManagedSignerKeyLifecycleRepository: createManagedSignerRepositoryFactory(), createProviderOperationRepository: createProviderOperationRepositoryFactory(), async readiness() { return readyDatabaseReport(); }, async close() { calls.push("postgres-close"); await controlPlaneStore.close(); } };
   let platformPromotionVerifier;
   const recentAuthService = { async authorize() { return { verified: false }; } };
   const humanSession = { async authenticateRequest() { return { session: {} }; } };
@@ -165,6 +199,7 @@ test("production human auth is composed from PostgreSQL and closed with the runt
   assert.equal(typeof runtime.platformPromotionIssuanceService.issuePlatformPromotion, "function");
   assert.equal(typeof runtime.platformPromotionIssuanceService.replayPlatformPromotion, "function");
   assert.equal(typeof runtime.platformPromotionIssuanceService.getCommittedPlatformPromotion, "function");
+  assert.equal(typeof runtime.platformOperatorAuthorizer, "function");
   assert.equal(Object.hasOwn(runtime, "promotionEvidenceSigner"), false);
   assert.equal(typeof platformPromotionVerifier, "function");
   const promotionEvidence = createPromotionEvidenceFixture(value);

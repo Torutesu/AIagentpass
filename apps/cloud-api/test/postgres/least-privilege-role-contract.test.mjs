@@ -25,6 +25,8 @@ test('role SQL is idempotent, credential-free, and PUBLIC is revoked', async () 
   assert.match(sql, /managed_signer_provider_operations/);
   assert.match(sql, /GRANT EXECUTE ON FUNCTION public\.%s TO agentpass_app/);
   assert.match(sql, /agentpass_platform_operator_assignment_find_active\(uuid,uuid,uuid,text,text\)/u);
+  assert.match(sql, /agentpass_platform_session_find_active\(bytea,uuid,text,text\)/u);
+  assert.match(sql, /agentpass_platform_session_touch\(bytea,uuid,text,text\)/u);
   assert.match(sql, /ALTER DEFAULT PRIVILEGES FOR ROLE agentpass_migrator IN SCHEMA public/);
   assert.match(sql, /ON TABLES/);
   assert.match(sql, /ON SEQUENCES/);
@@ -80,7 +82,7 @@ test('checker reads the URL from the environment, enforces verify-full, and meas
   assert.match(checker, /agentpass_signer/);
   assert.match(checker, /managed_signer_provider_operations/);
   assert.match(checker, /migration_head_ok/u);
-  assert.match(checker, /count\(\*\) = 52 AND min\(version\) = 1 AND max\(version\) = 52/u);
+  assert.match(checker, /count\(\*\) = 53 AND min\(version\) = 1 AND max\(version\) = 53/u);
   assert.match(checker, /signer_function_allowlist/u);
   assert.match(checker, /to_regprocedure\('public\.' \|\| routine_signature\) AS routine_oid/u);
   assert.match(checker, /NOT EXISTS \(SELECT 1 FROM signer_function_oids WHERE routine_oid IS NULL\)/u);
