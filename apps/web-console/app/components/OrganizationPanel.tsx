@@ -719,6 +719,11 @@ function CreateOrganizationForm({ name, setName, onSubmit, pending }: { name: st
   return <form onSubmit={onSubmit} style={panelStyle.actionRow} aria-busy={pending}><label style={{ ...panelStyle.label, flex: "1 1 320px" }}><span>組織名</span><input value={name} onChange={(event) => setName(event.target.value)} maxLength={128} required style={panelStyle.input} /></label><button type="submit" style={panelStyle.button} disabled={pending}>{pending ? "作成中…" : "組織を作成"}</button></form>;
 }
 
+function focusAfterPaint(ref: { readonly current: HTMLElement | null }): void {
+  if (typeof window === "undefined") return;
+  window.requestAnimationFrame(() => ref.current?.focus({ preventScroll: true }));
+}
+
 function InviteForm({ role, setRole, expiresAt, setExpiresAt, onSubmit, pending }: { role: InvitationRole; setRole: (value: InvitationRole) => void; expiresAt: string; setExpiresAt: (value: string) => void; onSubmit: (event: FormEvent<HTMLFormElement>) => void; pending: boolean }) {
   return <section style={panelStyle.card} aria-labelledby="create-invitation-title"><h2 id="create-invitation-title" style={panelStyle.cardTitle}>招待を作成</h2><p style={panelStyle.muted}>有効期限を過ぎた招待は自動的に受け入れできません。</p><form onSubmit={onSubmit} style={{ display: "grid", gap: 12 }} aria-busy={pending}><label style={panelStyle.label}><span>付与するロール</span><select value={role} onChange={(event) => setRole(event.target.value as InvitationRole)} style={panelStyle.select}>{INVITE_ROLES.map((value) => <option key={value} value={value}>{roleLabel(value)}</option>)}</select></label><label style={panelStyle.label}><span>有効期限</span><input type="datetime-local" value={expiresAt} onChange={(event) => setExpiresAt(event.target.value)} min={minimumDateTimeLocal()} required style={panelStyle.input} /></label><button type="submit" style={panelStyle.button} disabled={pending}>{pending ? "発行中…" : "招待を発行"}</button></form></section>;
 }
@@ -728,9 +733,33 @@ function MemberRow({ member, canManage, canAssignOwner, lastOwnerProtected, draf
   const name = member.displayName ?? "名前未設定";
   const detailsId = `member-details-${member.memberId}`;
   const lastOwnerWarningId = `member-last-owner-warning-${member.memberId}`;
+  const removalDialogTitleId = `member-removal-title-${member.memberId}`;
+  const removalDialogDescriptionId = `member-removal-description-${member.memberId}`;
+  const removalTriggerRef = useRef<HTMLButtonElement | null>(null);
+  const removalConfirmRef = useRef<HTMLButtonElement | null>(null);
+  const memberDetailsRef = useRef<HTMLParagraphElement | null>(null);
+  const wasConfirming = useRef(false);
   const busy = pendingAction !== null;
   const describedBy = lastOwnerProtected ? `${detailsId} ${lastOwnerWarningId}` : detailsId;
-  return <li className="organization-list-row" style={panelStyle.listRow} data-state={member.status === "revoked" ? "revoked" : pendingAction === actionKey ? "pending" : "active"} aria-busy={pendingAction === actionKey}><div style={panelStyle.row}><div><strong>{name}</strong><p id={detailsId} style={panelStyle.muted}>{roleLabel(member.role)} · {member.status === "active" ? "有効" : "失効"} · v{member.version}</p>{lastOwnerProtected ? <p id={lastOwnerWarningId} className="organization-last-owner-warning" role="note">この組織の最後のOwnerです。先に別のメンバーをOwnerに変更してから、降格または失効してください。</p> : null}</div>{canManage && member.status === "active" ? <div style={panelStyle.actionRow}><label style={panelStyle.label}><span className="sr-only">{name}のロール</span><select id={`member-role-${member.memberId}`} aria-label={`${name}のロール`} aria-describedby={describedBy} value={draft} onChange={(event) => setDraft(event.target.value as OrganizationRole)} style={panelStyle.select} disabled={busy}>{editableRoles.map((role) => <option key={role} value={role}>{roleLabel(role)}</option>)}</select></label><button type="button" style={panelStyle.secondaryButton} disabled={busy || draft === member.role} onClick={() => onRoleChange(draft)} aria-label={`${name}を${roleLabel(draft)}に変更`} aria-describedby={describedBy}>{pendingAction === actionKey ? "変更中…" : "変更"}</button>{confirmRemoval ? <div className="organization-confirmation" role="alert"><span>このメンバーを失効させますか？</span><button type="button" style={panelStyle.dangerButton} disabled={busy} onClick={onRemove}>失効を確定</button><button type="button" style={panelStyle.secondaryButton} disabled={busy} onClick={onCancelRemoval}>キャンセル</button></div> : <button type="button" style={panelStyle.dangerButton} disabled={busy} onClick={onConfirmRemoval} aria-label={`${name}のアクセスを失効`} aria-describedby={describedBy}>アクセスを失効</button>}</div> : member.status === "revoked" ? <span style={panelStyle.muted}>このメンバーは失効しています</span> : null}</div></li>;
+  useEffect(() => {
+    if (confirmRemoval && !wasConfirming.current) {
+      focusAfterPaint(removalConfirmRef);
+    } else if (!confirmRemoval && wasConfirming.current) {
+      focusAfterPaint(pendingAction === actionKey ? memberDetailsRef : removalTriggerRef);
+    }
+    wasConfirming.current = confirmRemoval;
+  }, [actionKey, confirmRemoval, pendingAction]);
+  useEffect(() => {
+    if (!confirmRemoval || busy || typeof window === "undefined") return;
+    const onEscape = (event: globalThis.KeyboardEvent): void => {
+      if (event.key !== "Escape") return;
+      event.preventDefault();
+      onCancelRemoval();
+    };
+    window.addEventListener("keydown", onEscape);
+    return () => window.removeEventListener("keydown", onEscape);
+  }, [busy, confirmRemoval, onCancelRemoval]);
+  return <li className="organization-list-row" style={panelStyle.listRow} data-state={member.status === "revoked" ? "revoked" : pendingAction === actionKey ? "pending" : "active"} aria-busy={pendingAction === actionKey}><div style={panelStyle.row}><div><strong>{name}</strong><p id={detailsId} ref={memberDetailsRef} tabIndex={-1} style={panelStyle.muted}>{roleLabel(member.role)} · {member.status === "active" ? "有効" : "失効"} · v{member.version}</p>{lastOwnerProtected ? <p id={lastOwnerWarningId} className="organization-last-owner-warning" role="note">この組織の最後のOwnerです。先に別のメンバーをOwnerに変更してから、降格または失効してください。</p> : null}</div>{canManage && member.status === "active" ? <div style={panelStyle.actionRow}><label style={panelStyle.label}><span className="sr-only">{name}のロール</span><select id={`member-role-${member.memberId}`} aria-label={`${name}のロール`} aria-describedby={describedBy} value={draft} onChange={(event) => setDraft(event.target.value as OrganizationRole)} style={panelStyle.select} disabled={busy}>{editableRoles.map((role) => <option key={role} value={role}>{roleLabel(role)}</option>)}</select></label><button type="button" style={panelStyle.secondaryButton} disabled={busy || draft === member.role} onClick={() => onRoleChange(draft)} aria-label={`${name}を${roleLabel(draft)}に変更`} aria-describedby={describedBy}>{pendingAction === actionKey ? "変更中…" : "変更"}</button>{confirmRemoval ? <div className="organization-confirmation" role="dialog" aria-labelledby={removalDialogTitleId} aria-describedby={removalDialogDescriptionId}><strong id={removalDialogTitleId}>メンバーのアクセスを失効</strong><span id={removalDialogDescriptionId}>このメンバーを失効させますか？この操作は管理画面から取り消せません。</span><button ref={removalConfirmRef} type="button" style={panelStyle.dangerButton} disabled={busy} onClick={onRemove} aria-keyshortcuts="Enter">失効を確定</button><button type="button" style={panelStyle.secondaryButton} disabled={busy} onClick={onCancelRemoval} aria-keyshortcuts="Escape">キャンセル</button></div> : <button ref={removalTriggerRef} type="button" style={panelStyle.dangerButton} disabled={busy} onClick={onConfirmRemoval} aria-label={`${name}のアクセスを失効`} aria-describedby={describedBy}>アクセスを失効</button>}</div> : member.status === "revoked" ? <span style={panelStyle.muted}>このメンバーは失効しています</span> : null}</div></li>;
 }
 
 function InvitationRow({ invitation, canRevoke, canReissue, expired, pendingAction, actionKey, reissueActionKey, confirmReissue, reissueExpiresAt, setReissueExpiresAt, onBeginReissue, onCancelReissue, onSubmitReissue, onRevoke }: { invitation: OrganizationInvitation; canRevoke: boolean; canReissue: boolean; expired: boolean; pendingAction: string | null; actionKey: string; reissueActionKey: string; confirmReissue: boolean; reissueExpiresAt: string; setReissueExpiresAt: (value: string) => void; onBeginReissue: () => void; onCancelReissue: () => void; onSubmitReissue: (event: FormEvent<HTMLFormElement>) => void; onRevoke: () => void }) {
@@ -741,17 +770,41 @@ function InvitationRow({ invitation, canRevoke, canReissue, expired, pendingActi
   const reissuable = canReissue && (status === "pending" || status === "expired");
   const detailsId = `invitation-details-${invitation.id}`;
   const reissueWarningId = `invitation-reissue-warning-${invitation.id}`;
+  const reissueDialogTitleId = `invitation-reissue-title-${invitation.id}`;
+  const reissueTriggerRef = useRef<HTMLButtonElement | null>(null);
+  const reissueInputRef = useRef<HTMLInputElement | null>(null);
+  const invitationDetailsRef = useRef<HTMLParagraphElement | null>(null);
+  const wasReissuing = useRef(false);
+  useEffect(() => {
+    if (confirmReissue && !wasReissuing.current) {
+      focusAfterPaint(reissueInputRef);
+    } else if (!confirmReissue && wasReissuing.current) {
+      focusAfterPaint(pendingAction === reissueActionKey ? invitationDetailsRef : reissueTriggerRef);
+    }
+    wasReissuing.current = confirmReissue;
+  }, [confirmReissue, pendingAction, reissueActionKey]);
+  useEffect(() => {
+    if (!confirmReissue || busy || typeof window === "undefined") return;
+    const onEscape = (event: globalThis.KeyboardEvent): void => {
+      if (event.key !== "Escape") return;
+      event.preventDefault();
+      onCancelReissue();
+    };
+    window.addEventListener("keydown", onEscape);
+    return () => window.removeEventListener("keydown", onEscape);
+  }, [busy, confirmReissue, onCancelReissue]);
   return <li className="organization-list-row" style={panelStyle.listRow} data-state={status} aria-busy={pendingAction === actionKey || pendingAction === reissueActionKey}>
     <div style={panelStyle.row}>
-      <div><strong>{roleLabel(invitation.role)} 招待</strong><p id={detailsId} style={panelStyle.muted}>{statusLabel} · 有効期限 {formatDate(invitation.expiresAt)} · v{invitation.version}</p>{statusGuidance !== undefined && <p style={panelStyle.muted} role="note">{statusGuidance}</p>}</div>
+      <div><strong>{roleLabel(invitation.role)} 招待</strong><p id={detailsId} ref={invitationDetailsRef} tabIndex={-1} style={panelStyle.muted}>{statusLabel} · 有効期限 {formatDate(invitation.expiresAt)} · v{invitation.version}</p>{statusGuidance !== undefined && <p style={panelStyle.muted} role="note">{statusGuidance}</p>}</div>
       <div style={panelStyle.actionRow}>
         {canRevoke && status === "pending" && <button type="button" style={panelStyle.dangerButton} disabled={busy} onClick={onRevoke} aria-label={`${roleLabel(invitation.role)}招待を取り消す`} aria-describedby={detailsId}>{pendingAction === actionKey ? "取り消し中…" : "取り消す"}</button>}
-        {reissuable && !confirmReissue && <button type="button" style={panelStyle.secondaryButton} disabled={busy} onClick={onBeginReissue} aria-label={`${roleLabel(invitation.role)}招待を再発行`} aria-describedby={detailsId}>再発行</button>}
+        {reissuable && !confirmReissue && <button ref={reissueTriggerRef} type="button" style={panelStyle.secondaryButton} disabled={busy} onClick={onBeginReissue} aria-label={`${roleLabel(invitation.role)}招待を再発行`} aria-describedby={detailsId}>再発行</button>}
       </div>
     </div>
-    {reissuable && confirmReissue && <form onSubmit={onSubmitReissue} style={{ display: "grid", gap: 10 }} aria-busy={pendingAction === reissueActionKey} aria-describedby={`${detailsId} ${reissueWarningId}`}>
-      <p id={reissueWarningId} style={panelStyle.conflict} role="note">現在の招待トークンは無効になり、新しいトークンを一度だけ表示します。応答を確認できない場合は自動再送せず、最新状態を再取得します。</p>
-      <label style={panelStyle.label}><span>再発行後の有効期限</span><input type="datetime-local" value={reissueExpiresAt} onChange={(event) => setReissueExpiresAt(event.target.value)} min={minimumDateTimeLocal()} required style={panelStyle.input} disabled={busy} /></label>
+    {reissuable && confirmReissue && <form role="dialog" aria-labelledby={reissueDialogTitleId} onSubmit={onSubmitReissue} style={{ display: "grid", gap: 10 }} aria-busy={pendingAction === reissueActionKey} aria-describedby={`${detailsId} ${reissueWarningId}`}>
+      <strong id={reissueDialogTitleId}>招待を再発行</strong>
+      <p id={reissueWarningId} style={panelStyle.conflict} role="note">現在の招待トークンは無効になり、新しいトークンを一度だけ表示します。応答を確認できない場合は自動再送せず、画面の「最新情報を読み込む」から状態を確認します。</p>
+      <label style={panelStyle.label}><span>再発行後の有効期限</span><input ref={reissueInputRef} type="datetime-local" value={reissueExpiresAt} onChange={(event) => setReissueExpiresAt(event.target.value)} min={minimumDateTimeLocal()} required style={panelStyle.input} disabled={busy} /></label>
       <div style={panelStyle.actionRow}><button type="submit" style={panelStyle.button} disabled={busy}>{pendingAction === reissueActionKey ? "再発行中…" : "再発行を確定"}</button><button type="button" style={panelStyle.secondaryButton} disabled={busy} onClick={onCancelReissue}>キャンセル</button></div>
     </form>}
   </li>;
@@ -760,7 +813,14 @@ function InvitationRow({ invitation, canRevoke, canReissue, expired, pendingActi
 function ResourceStateView({ state, empty, error, onRetry, retryLabel }: { state: ResourceState; empty: string; error: string; onRetry?: () => void; retryLabel?: string }) {
   if (state.status === "loading") return <p className="organization-status" style={panelStyle.state} data-state="loading" role="status" aria-live="polite">読み込み中です…</p>;
   if (state.status === "empty") return <p style={panelStyle.state} data-state="empty">{empty}</p>;
-  if (state.status === "error") return <div className="organization-status" style={state.code === "conflict" || state.code === "last_owner_protected" ? panelStyle.conflict : panelStyle.error} data-state={state.code ?? "error"} role="alert" aria-live="assertive"><span>{state.error ?? error}</span>{onRetry !== undefined && <button type="button" style={panelStyle.secondaryButton} onClick={onRetry}>{retryLabel ?? "再試行"}</button>}</div>;
+  if (state.status === "error") {
+    const messageId = `organization-resource-error-${state.code ?? "unknown"}`;
+    return <div className="organization-status" style={state.code === "conflict" || state.code === "last_owner_protected" ? panelStyle.conflict : panelStyle.error} data-state={state.code ?? "error"} role="alert" aria-live="assertive" aria-describedby={messageId}>
+      <span id={messageId}>{state.error ?? error}</span>
+      <span className="sr-only" lang="en">{safeEnglishRecoveryCopy(state.code)}</span>
+      {onRetry !== undefined && <button type="button" style={panelStyle.secondaryButton} onClick={onRetry}>{retryLabel ?? "再試行"}</button>}
+    </div>;
+  }
   return null;
 }
 
@@ -770,10 +830,27 @@ function LoadMoreButton({ label, pending, disabled, onClick }: { label: string; 
 
 function MutationNotice({ state, retryAction, onRefresh }: { state: ResourceState; retryAction: RetryAction | null; onRefresh: () => void }) {
   const refreshLabel = state.code === "unauthorized" ? "セッションを更新" : "最新情報を読み込む";
-  const canRefresh = state.code === "conflict" || state.code === "last_owner_protected" || state.code === "unauthorized" || state.code === "invitation_terminal" || state.code === "invitation_unavailable" || state.code === "expired";
   const canRetry = state.code === "recent_auth_required" || state.code === "aborted" || state.code === "reconciliation_required";
   const conflictStyle = state.code === "conflict" || state.code === "last_owner_protected" || state.code === "invitation_terminal";
-  return <div className="organization-status" style={conflictStyle ? panelStyle.conflict : panelStyle.error} data-state={state.code ?? "error"} role="alert" aria-live="assertive"><span>{state.error}</span>{retryAction !== null && canRetry ? <button type="button" style={panelStyle.secondaryButton} onClick={() => void retryAction.run()}>{retryAction.label}</button> : canRefresh ? <button type="button" style={panelStyle.secondaryButton} onClick={onRefresh}>{refreshLabel}</button> : null}</div>;
+  const recoveryAction = retryAction !== null && canRetry
+    ? { label: retryAction.label, run: () => void retryAction.run() }
+    : { label: refreshLabel, run: onRefresh };
+  const messageId = `organization-mutation-error-${state.code ?? "unknown"}`;
+  return <div className="organization-status" style={conflictStyle ? panelStyle.conflict : panelStyle.error} data-state={state.code ?? "error"} role="alert" aria-live="assertive" aria-describedby={messageId}>
+    <span id={messageId}>{state.error ?? "変更を完了できませんでした。"}</span>
+    <span className="sr-only" lang="en">{safeEnglishRecoveryCopy(state.code)}</span>
+    <button type="button" style={panelStyle.secondaryButton} onClick={recoveryAction.run}>{recoveryAction.label}</button>
+  </div>;
+}
+
+function safeEnglishRecoveryCopy(code: ResourceState["code"]): string {
+  if (code === "unauthorized") return "Your session may have expired. Use the button to refresh the session in this console.";
+  if (code === "recent_auth_required" || code === "aborted") return "Complete verification again from this screen, or use the recovery button to refresh the console.";
+  if (code === "conflict" || code === "last_owner_protected" || code === "reconciliation_required") return "The state changed elsewhere. Refresh the latest state in this console and do not retry an uncertain mutation.";
+  if (code === "invitation_terminal" || code === "invitation_unavailable" || code === "expired") return "Ask an organization administrator to issue a new invitation, then use it on this screen.";
+  if (code === "forbidden") return "Ask an organization administrator to make the change, or use the refresh action to confirm your access.";
+  if (code === "validation_failed") return "Check the fields on this screen and submit again after correcting the input.";
+  return "The request could not be completed. Use the refresh action in this console and try again only when the state is clear.";
 }
 
 function chooseOrganization(items: readonly Organization[], requested: string, sessionOrganizationId: string): string {
