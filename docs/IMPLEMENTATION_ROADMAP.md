@@ -4,6 +4,9 @@ Status: active implementation plan; not a production-readiness claim
 Baseline: `codex/agent-platform` after the Platform Session authorization wave
 Date: 2026-08-15
 
+The ordered, issue-level execution backlog for this roadmap is maintained in
+[`EXECUTION_PLAN.md`](./EXECUTION_PLAN.md).
+
 This document is the execution plan for turning AgentPass into a browser-first product for coding agents. It deliberately distinguishes code that exists in this repository from boundaries that still need integration, live qualification, operational controls, or independent review.
 
 ## 1. Product outcome and non-goals
