@@ -58,6 +58,7 @@ type SecurityRouteState = {
   passkeyLabel: string;
   passkeyVersion: number;
   passkeyStatus: "active" | "revoked";
+  passkeyListReads: number;
   otherSessionStatus: "active" | "revoked";
   currentSessionStatus: "active" | "revoked";
   mutations: MutationRequest[];
@@ -316,6 +317,7 @@ async function installSecurityRoutes(page: Page, failStatus?: 401 | 403): Promis
     passkeyLabel: "Mac Touch ID",
     passkeyVersion: 1,
     passkeyStatus: "active",
+    passkeyListReads: 0,
     otherSessionStatus: "active",
     currentSessionStatus: "active",
     mutations: [],
@@ -345,7 +347,10 @@ async function installSecurityRoutes(page: Page, failStatus?: 401 | 403): Promis
     }
     if (url.pathname === "/api/auth/security/passkeys" && request.method() === "GET") {
       if (state.failStatus !== undefined) return json(route, { error: { code: "security_unavailable", message: "Security unavailable" } }, state.failStatus);
-      return json(route, { credentials: [securityPasskey(state)], next_cursor: null });
+      state.passkeyListReads += 1;
+      // The production management endpoint is active-only. A revoked credential
+      // is accepted on the mutation response but must disappear from the next list.
+      return json(route, { credentials: state.passkeyStatus === "active" ? [securityPasskey(state)] : [], next_cursor: null });
     }
     if (url.pathname === "/api/auth/security/sessions" && request.method() === "GET") {
       if (state.failStatus !== undefined) return json(route, { error: { code: "security_unavailable", message: "Security unavailable" } }, state.failStatus);
@@ -425,6 +430,7 @@ for (const role of ["owner", "admin"] as const) {
       await expect(confirm).toBeVisible();
       await confirm.focus();
       await page.keyboard.press("Enter");
+      await expect.poll(() => state.mutations.length).toBe(6);
       await expect(page.getByText("このメンバーは失効しています", { exact: true })).toBeVisible();
 
       const [rename, invitationCreate, invitationRevoke, roleConflict, roleRequest, remove] = state.mutations;
@@ -494,6 +500,8 @@ test("production Console SecurityPanel executes passkey and session mutations wi
     const revokePasskey = page.getByRole("button", { name: "無効化する", exact: true });
     await revokePasskey.focus();
     await page.keyboard.press("Enter");
+    await expect.poll(() => state.passkeyListReads).toBeGreaterThan(1);
+    await expect(page.getByText("Mac Touch ID renamed", { exact: true })).toHaveCount(0);
     await expect(page.getByText("パスキーを無効化しました。", { exact: true })).toBeVisible();
 
     await page.getByRole("button", { name: "他のセッションをすべて無効化", exact: true }).click();
