@@ -196,6 +196,9 @@ test("production human auth is composed from PostgreSQL and closed with the runt
   let qualificationSignerHealthy = true;
   let possessionSignerHealthy = true;
   let refreshSignerHealthy = true;
+  let capabilitySignerHealthy = true;
+  let controlBundleSignerHealthy = true;
+  let auditAnchorSignerHealthy = true;
   let promotionSignerHealthy = true;
   const provider = signerProvider(value);
   const publicKeyMetadata = provider.publicKeyMetadata;
@@ -228,7 +231,25 @@ test("production human auth is composed from PostgreSQL and closed with the runt
     if (!promotionSignerHealthy) throw new Error("simulated promotion provider outage");
     return promotionPublicKeyMetadata(input);
   };
-  const runtime = await createCloudRuntime({ env, logger: { info() {} }, kmsProviderFactory: async () => { calls.push("kms"); return { agentSessionSignerProvider: provider, qualificationManifestSignerProvider: qualificationProvider, possessionReceiptSignerProvider: possessionProvider, refreshHintSignerProvider: refreshProvider, controlBundleSignerProvider: purposeProvider(value.controlBundleKeys, 2), capabilitySignerProvider: purposeProvider(value.capabilityKeys, 1), auditAnchorSignerProvider: purposeProvider(value.auditAnchorKeys, 1), promotionEvidenceSignerProvider: promotionProvider, async close() { calls.push("kms-close"); } }; }, ownerRecoveryPublisher, postgresFactory: async (input) => { platformPromotionVerifier = input.platformPromotionVerifyEvidence; calls.push(["postgres", input.applicationVersion, typeof input.refreshNonceCodec?.derive, typeof input.resolveProcessBindingPolicy, input.ownerRecoveryPublisher]); return postgresRuntime; }, humanAuthFactory: (input) => { calls.push(["human", input.origin, input.rpId, input.cursorSecret, input.securitySecret, input.signedConsoleIdentity, input.agentSessionSigner, input.qualificationManifestSigner]); return { api: { async handle() { return { status: 404, body: { error: { code: "not_found", message: "Resource not found" } }, headers: {} }; } }, humanSession, recentAuthService }; } });
+  const capabilityProvider = purposeProvider(value.capabilityKeys, 1);
+  const capabilityPublicKeyMetadata = capabilityProvider.publicKeyMetadata;
+  capabilityProvider.publicKeyMetadata = async (input) => {
+    if (!capabilitySignerHealthy) throw new Error("simulated capability provider outage");
+    return capabilityPublicKeyMetadata(input);
+  };
+  const controlBundleProvider = purposeProvider(value.controlBundleKeys, 2);
+  const controlBundlePublicKeyMetadata = controlBundleProvider.publicKeyMetadata;
+  controlBundleProvider.publicKeyMetadata = async (input) => {
+    if (!controlBundleSignerHealthy) throw new Error("simulated ControlBundle provider outage");
+    return controlBundlePublicKeyMetadata(input);
+  };
+  const auditAnchorProvider = purposeProvider(value.auditAnchorKeys, 1);
+  const auditAnchorPublicKeyMetadata = auditAnchorProvider.publicKeyMetadata;
+  auditAnchorProvider.publicKeyMetadata = async (input) => {
+    if (!auditAnchorSignerHealthy) throw new Error("simulated audit anchor provider outage");
+    return auditAnchorPublicKeyMetadata(input);
+  };
+  const runtime = await createCloudRuntime({ env, logger: { info() {} }, kmsProviderFactory: async () => { calls.push("kms"); return { agentSessionSignerProvider: provider, qualificationManifestSignerProvider: qualificationProvider, possessionReceiptSignerProvider: possessionProvider, refreshHintSignerProvider: refreshProvider, controlBundleSignerProvider: controlBundleProvider, capabilitySignerProvider: capabilityProvider, auditAnchorSignerProvider: auditAnchorProvider, promotionEvidenceSignerProvider: promotionProvider, async close() { calls.push("kms-close"); } }; }, ownerRecoveryPublisher, postgresFactory: async (input) => { platformPromotionVerifier = input.platformPromotionVerifyEvidence; calls.push(["postgres", input.applicationVersion, typeof input.refreshNonceCodec?.derive, typeof input.resolveProcessBindingPolicy, input.ownerRecoveryPublisher]); return postgresRuntime; }, humanAuthFactory: (input) => { calls.push(["human", input.origin, input.rpId, input.cursorSecret, input.securitySecret, input.signedConsoleIdentity, input.agentSessionSigner, input.qualificationManifestSigner]); return { api: { async handle() { return { status: 404, body: { error: { code: "not_found", message: "Resource not found" } }, headers: {} }; } }, humanSession, recentAuthService }; } });
   assert.equal(runtime.postgresRuntime, postgresRuntime);
   assert.equal(runtime.humanAuthRuntime.recentAuthService, recentAuthService);
   assert.equal(typeof runtime.hostedBootstrapRuntime?.api?.handle, "function");
@@ -302,13 +323,19 @@ test("production human auth is composed from PostgreSQL and closed with the runt
   assert.equal(directReady.statusCode, 200);
   const directReadyBody = JSON.parse(directReady.body);
   assert.deepEqual(directReadyBody.checks.platform_promotion, { enabled: true, ok: true, code: "ready" }, JSON.stringify(directReadyBody));
+  const hostedSignerCheckNames = ["agent_session_signer", "qualification_manifest_signer", "possession_receipt_signer", "refresh_hint_signer", "capability_signer", "control_bundle_signer", "audit_anchor_signer", "promotion_evidence_signer"];
+  assert.deepEqual(hostedSignerCheckNames.slice().sort(), Object.keys(directReadyBody.checks).filter((key) => key.endsWith("_signer")).sort());
+  assert.equal(new Set(hostedSignerCheckNames.map((name) => directReadyBody.checks[name].purpose)).size, 8);
+  assert.equal(hostedSignerCheckNames.every((name) => directReadyBody.checks[name].ok === true), true);
+  assert.doesNotMatch(JSON.stringify(directReadyBody), /BEGIN (?:PUBLIC|PRIVATE) KEY|PRIVATE KEY|tenant_id|request_bytes/iu);
   promotionSignerHealthy = false;
   const directDegraded = await dispatchServer(runtime.server, {
     url: "/health/ready",
     headers: { "agentpass-operational-token": env.AGENTPASS_OPERATIONAL_PROBE_SECRET }
   });
   assert.equal(directDegraded.statusCode, 503);
-  assert.equal(JSON.parse(directDegraded.body).code, "platform_promotion_unavailable");
+  assert.equal(JSON.parse(directDegraded.body).code, "promotion_evidence_signer_unavailable");
+  assert.equal(JSON.parse(directDegraded.body).checks.promotion_evidence_signer.ok, false);
   promotionSignerHealthy = true;
   const address = await runtime.listen();
   const probeHeaders = { "AgentPass-Operational-Token": env.AGENTPASS_OPERATIONAL_PROBE_SECRET };
@@ -322,7 +349,7 @@ test("production human auth is composed from PostgreSQL and closed with the runt
   assert.equal(degraded.status, 503);
   const degradedBody = await degraded.json();
   assert.equal(degradedBody.code, "agent_session_signer_unavailable");
-  assert.deepEqual(degradedBody.checks.agent_session_signer, { ok: false, purpose: "agent-session-grant", algorithm: "ed25519", key_id: null, public_key_fingerprint: null });
+  assert.deepEqual(degradedBody.checks.agent_session_signer, { ok: false, purpose: "agentpass.agent-session-grant", algorithm: "ed25519", key_id: null, public_key_fingerprint: null });
   signerHealthy = true;
   qualificationSignerHealthy = false;
   const qualificationDegraded = await fetch(`http://127.0.0.1:${address.port}/health/ready`, { headers: probeHeaders });
@@ -338,6 +365,26 @@ test("production human auth is composed from PostgreSQL and closed with the runt
   assert.equal(possessionDegradedBody.code, "possession_receipt_signer_unavailable");
   assert.deepEqual(possessionDegradedBody.checks.possession_receipt_signer, { ok: false, purpose: "device-enrollment-possession-receipt", algorithm: "ed25519", key_id: null, public_key_fingerprint: null });
   possessionSignerHealthy = true;
+  capabilitySignerHealthy = false;
+  const capabilityDegraded = await fetch(`http://127.0.0.1:${address.port}/health/ready`, { headers: probeHeaders });
+  assert.equal(capabilityDegraded.status, 503);
+  assert.equal((await capabilityDegraded.json()).code, "capability_signer_unavailable");
+  capabilitySignerHealthy = true;
+  controlBundleSignerHealthy = false;
+  const controlBundleDegraded = await fetch(`http://127.0.0.1:${address.port}/health/ready`, { headers: probeHeaders });
+  assert.equal(controlBundleDegraded.status, 503);
+  assert.equal((await controlBundleDegraded.json()).code, "control_bundle_signer_unavailable");
+  controlBundleSignerHealthy = true;
+  auditAnchorSignerHealthy = false;
+  const auditAnchorDegraded = await fetch(`http://127.0.0.1:${address.port}/health/ready`, { headers: probeHeaders });
+  assert.equal(auditAnchorDegraded.status, 503);
+  assert.equal((await auditAnchorDegraded.json()).code, "audit_anchor_signer_unavailable");
+  auditAnchorSignerHealthy = true;
+  promotionSignerHealthy = false;
+  const promotionDegraded = await fetch(`http://127.0.0.1:${address.port}/health/ready`, { headers: probeHeaders });
+  assert.equal(promotionDegraded.status, 503);
+  assert.equal((await promotionDegraded.json()).code, "promotion_evidence_signer_unavailable");
+  promotionSignerHealthy = true;
   refreshSignerHealthy = false;
   const refreshDegraded = await fetch(`http://127.0.0.1:${address.port}/health/ready`, { headers: probeHeaders });
   assert.equal(refreshDegraded.status, 503);

@@ -83,46 +83,37 @@ export function createHostedCapabilitySigner({
     throw new CapabilitySignerError(CAPABILITY_SIGNER_ERROR_CODES.CONFIG);
   }
 
-  let metadataPromise;
-
   async function loadMetadata() {
-    if (!metadataPromise) {
-      metadataPromise = (async () => {
-        let metadata;
-        try {
-          metadata = await withDeadline((signal) => provider.publicKeyMetadata({
-            key_id: config.keyId,
-            algorithm: CAPABILITY_SIGNER_ALGORITHM,
-            purpose: CAPABILITY_SIGNER_PURPOSE,
-            version: CAPABILITY_SIGNER_PROTOCOL_VERSION,
-            signal
-          }), config.timeoutMs);
-        } catch (error) {
-          metadataPromise = undefined;
-          if (error instanceof CapabilitySignerError) throw error;
-          throw new CapabilitySignerError(CAPABILITY_SIGNER_ERROR_CODES.PROVIDER);
-        }
-        try {
-          validateProviderMetadata(metadata, config);
-        } catch (error) {
-          metadataPromise = undefined;
-          if (error instanceof CapabilitySignerError) throw error;
-          throw new CapabilitySignerError(CAPABILITY_SIGNER_ERROR_CODES.METADATA);
-        }
-        return Object.freeze({
-          version: CAPABILITY_SIGNER_VERSION,
-          registry_version: CAPABILITY_SIGNER_REGISTRY_VERSION,
-          protocol_version: CAPABILITY_SIGNER_PROTOCOL_VERSION,
-          signing_version: CAPABILITY_SIGNER_SIGNING_VERSION,
-          purpose: CAPABILITY_SIGNER_PURPOSE,
-          key_id: config.keyId,
-          algorithm: CAPABILITY_SIGNER_ALGORITHM,
-          public_key: config.publicKeyPem,
-          public_key_fingerprint: config.publicKeyFingerprint
-        });
-      })();
+    let metadata;
+    try {
+      metadata = await withDeadline((signal) => provider.publicKeyMetadata({
+        key_id: config.keyId,
+        algorithm: CAPABILITY_SIGNER_ALGORITHM,
+        purpose: CAPABILITY_SIGNER_PURPOSE,
+        version: CAPABILITY_SIGNER_PROTOCOL_VERSION,
+        signal
+      }), config.timeoutMs);
+    } catch (error) {
+      if (error instanceof CapabilitySignerError) throw error;
+      throw new CapabilitySignerError(CAPABILITY_SIGNER_ERROR_CODES.PROVIDER);
     }
-    return metadataPromise;
+    try {
+      validateProviderMetadata(metadata, config);
+    } catch (error) {
+      if (error instanceof CapabilitySignerError) throw error;
+      throw new CapabilitySignerError(CAPABILITY_SIGNER_ERROR_CODES.METADATA);
+    }
+    return Object.freeze({
+      version: CAPABILITY_SIGNER_VERSION,
+      registry_version: CAPABILITY_SIGNER_REGISTRY_VERSION,
+      protocol_version: CAPABILITY_SIGNER_PROTOCOL_VERSION,
+      signing_version: CAPABILITY_SIGNER_SIGNING_VERSION,
+      purpose: CAPABILITY_SIGNER_PURPOSE,
+      key_id: config.keyId,
+      algorithm: CAPABILITY_SIGNER_ALGORITHM,
+      public_key: config.publicKeyPem,
+      public_key_fingerprint: config.publicKeyFingerprint
+    });
   }
 
   async function publicKeyMetadata() {
