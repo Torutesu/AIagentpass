@@ -528,7 +528,26 @@ export function createPostgresHumanRepository({ client, onAuthorityReduction } =
 }
 
 function validateSession(record) { uuid(record?.session_id); uuid(record?.member_id); uuid(record?.membership_id); uuid(record?.organization_id); if (!["owner", "admin", "auditor", "viewer"].includes(record.role)) throw new TypeError("session role is invalid"); bytes32(record.token_hash); bytes32(record.csrf_token_hash); }
-function sessionRow(row) { return row ? { ...row, session_id: row.session_id ?? row.id, token_hash: row.token_hash_hex ?? row.token_hash, csrf_token_hash: row.csrf_token_hash_hex ?? row.csrf_token_hash } : null; }
+function sessionRow(row) {
+  return row ? {
+    ...row,
+    session_id: row.session_id ?? row.id,
+    token_hash: row.token_hash_hex ?? row.token_hash,
+    csrf_token_hash: row.csrf_token_hash_hex ?? row.csrf_token_hash,
+    created_at: storedTimestamp(row.created_at, "created_at"),
+    expires_at: storedTimestamp(row.expires_at, "expires_at"),
+    last_seen_at: storedTimestamp(row.last_seen_at, "last_seen_at"),
+    idle_expires_at: nullableStoredTimestamp(row.idle_expires_at, "idle_expires_at"),
+    recent_auth_at: nullableStoredTimestamp(row.recent_auth_at, "recent_auth_at"),
+    revoked_at: nullableStoredTimestamp(row.revoked_at, "revoked_at")
+  } : null;
+}
+function storedTimestamp(value, name) {
+  if (value instanceof Date && Number.isFinite(value.getTime())) return value.toISOString();
+  if (typeof value === "string" && Number.isFinite(Date.parse(value))) return value;
+  throw new TypeError(`${name} is invalid`);
+}
+function nullableStoredTimestamp(value, name) { return value === null || value === undefined ? null : storedTimestamp(value, name); }
 function uuid(value) { if (typeof value !== "string" || !UUID.test(value)) throw new TypeError("UUID is invalid"); return value.toLowerCase(); }
 function bounded(value, max) { if (typeof value !== "string" || value.length < 1 || value.length > max || /[\u0000-\u001f\u007f]/.test(value)) throw new TypeError("bounded text is invalid"); return value; }
 function identityProvider(value) { if (typeof value !== "string" || !PROVIDER.test(value)) throw new TypeError("identity provider is invalid"); return value; }
@@ -552,7 +571,7 @@ function membershipRole(value) { if (!["owner", "admin", "auditor", "viewer"].in
 function positiveInteger(value) { if (typeof value === "string" && /^\d+$/.test(value)) value=Number(value); if (!Number.isSafeInteger(value)||value<1) throw new TypeError("membership version is invalid"); return value; }
 function credentialRow(row) { return { id: credentialId(row.id), member_id: uuid(String(row.member_id)), public_key: publicKeyBytes(row.public_key), sign_count: storedCounter(row.sign_count), transports: credentialTransports(row.transports), label: credentialLabel(row.label), backup_eligible: strictBoolean(row.backup_eligible, "backup_eligible"), backup_state: strictBoolean(row.backup_state, "backup_state"), created_at: row.created_at, last_used_at: row.last_used_at ?? null, revoked_at: row.revoked_at ?? null }; }
 function safeCredentialRow(row) { return { id: credentialId(row.id), member_id: uuid(String(row.member_id)), label: credentialLabel(row.label), transports: credentialTransports(row.transports), backup_eligible: strictBoolean(row.backup_eligible, "backup_eligible"), backup_state: strictBoolean(row.backup_state, "backup_state"), created_at: row.created_at, last_used_at: row.last_used_at ?? null, revoked_at: row.revoked_at ?? null, version: positiveInteger(row.version) }; }
-function safeSessionRow(row) { const sessionId = uuid(String(row.session_id ?? row.id)); const memberId = uuid(String(row.member_id)); const organizationId = uuid(String(row.organization_id)); return { session_id: sessionId, member_id: memberId, organization_id: organizationId, role: membershipRole(row.role), version: positiveInteger(row.version ?? 1), created_at: row.created_at, expires_at: row.expires_at, last_seen_at: row.last_seen_at ?? null, idle_expires_at: row.idle_expires_at ?? null, recent_auth_at: row.recent_auth_at ?? null, revoked_at: row.revoked_at ?? null, revoke_reason: row.revoke_reason ?? null, status: row.revoked_at ? "revoked" : "active" }; }
+function safeSessionRow(row) { const sessionId = uuid(String(row.session_id ?? row.id)); const memberId = uuid(String(row.member_id)); const organizationId = uuid(String(row.organization_id)); return { session_id: sessionId, member_id: memberId, organization_id: organizationId, role: membershipRole(row.role), version: positiveInteger(row.version ?? 1), created_at: storedTimestamp(row.created_at, "created_at"), expires_at: storedTimestamp(row.expires_at, "expires_at"), last_seen_at: nullableStoredTimestamp(row.last_seen_at, "last_seen_at"), idle_expires_at: nullableStoredTimestamp(row.idle_expires_at, "idle_expires_at"), recent_auth_at: nullableStoredTimestamp(row.recent_auth_at, "recent_auth_at"), revoked_at: nullableStoredTimestamp(row.revoked_at, "revoked_at"), revoke_reason: row.revoke_reason ?? null, status: row.revoked_at ? "revoked" : "active" }; }
 function credentialScope(input) { return { sessionId: uuid(input?.session_id ?? input?.sessionId), memberId: uuid(input?.member_id ?? input?.memberId), organizationId: uuid(input?.organization_id ?? input?.organizationId) }; }
 function keysetPagination(input, defaultLimit, resource) {
   const rawLimit = input?.limit;
