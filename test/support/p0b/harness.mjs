@@ -356,6 +356,10 @@ export async function startP0BHarness({ env = process.env, repoRoot = REPOSITORY
       cloudUrl: `https://localhost:${cloudTlsPort}/`, consoleUrl: `https://localhost:${consoleTlsPort}/`, caCert: certificates.caCert,
       tlsSpkiPin: await certificateSpkiPin(certificates.cert),
       databaseUrl: database.url, organizationId,
+      cloudProcessState() {
+        if (!cloudProcess) return "exited";
+        return cloudProcess.p0bSpawnError || cloudProcess.exitCode !== null || cloudProcess.signalCode !== null ? "exited" : "running";
+      },
       async close() { await closeP0BHarness({ cloudProcess, consoleProcess, cloudProxy, consoleProxy, database, temp }); }
     });
   } catch (error) {

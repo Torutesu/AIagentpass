@@ -158,7 +158,8 @@ export async function startP0BLiveBrowserFixture({
         }, SESSION_PATH);
         stage = "http";
         if (!response.ok) {
-          if ([400, 401, 403, 404, 405, 409, 415, 422, 429, 500, 502, 503, 504].includes(response.status)) stage = `http_${response.status}`;
+          if (response.status === 502) stage = `http_502_cloud_${harness.cloudProcessState()}`;
+          else if ([400, 401, 403, 404, 405, 409, 415, 422, 429, 500, 503, 504].includes(response.status)) stage = `http_${response.status}`;
           else if (response.status >= 400 && response.status < 500) stage = "http_4xx";
           else if (response.status >= 500 && response.status < 600) stage = "http_5xx";
           else stage = "http_other";
