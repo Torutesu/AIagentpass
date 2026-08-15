@@ -307,7 +307,9 @@ export function createOrganizationClient(options: OrganizationClientOptions = {}
     const expectedVersion = requiredVersion(input?.expectedVersion);
     const context = await getRequestContext(input);
     const payload = await requestOrganizationJson(fetchImpl, `${ORGANIZATIONS_PATH}/${organizationId}/invitations/${invitationId}/revoke`, "POST", undefined, context, input, { idempotencyKey: input.idempotencyKey, expectedVersion });
-    return parseInvitationEnvelope(payload, organizationId, invitationId);
+    const result = parseInvitationEnvelope(payload, organizationId, invitationId);
+    if (result.invitation.status !== "revoked") throw invalidResponse("Invitation revocation response is invalid");
+    return result;
   };
 
   const acceptInvitation = async (input: Readonly<{ oneTimeToken: string }> & MutationOptions): Promise<Readonly<{ requestId: string; invitation: OrganizationInvitation; member: OrganizationMember }>> => {
@@ -445,6 +447,7 @@ function parseInvitationAccepted(value: unknown): Readonly<{ requestId: string; 
   if (!isRecord(value) || !hasExactKeys(value, ["request_id", "invitation", "member"]) || typeof value.request_id !== "string" || !UUID.test(value.request_id) || !isRecord(value.invitation) || !isRecord(value.member)) throw invalidResponse("Invitation acceptance response is invalid");
   const invitation = parseInvitation(value.invitation);
   const member = parseMember(value.member, invitation.organizationId);
+  if (invitation.status !== "accepted" || invitation.acceptedAt === null || invitation.acceptedMemberId === null || invitation.acceptedMemberId !== member.memberId || member.status !== "active") throw invalidResponse("Invitation acceptance response is invalid");
   return Object.freeze({ requestId: value.request_id.toLowerCase(), invitation, member });
 }
 

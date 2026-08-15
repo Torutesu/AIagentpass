@@ -46,7 +46,8 @@ function member(role = "viewer", version = 3) {
 }
 
 function invitation(status = "pending", version = 1) {
-  return { invitation_id: invitationId, organization_id: organizationId, role: "viewer", status, version, created_at: date, expires_at: "2026-08-19T00:00:00.000Z", accepted_at: null, accepted_member_id: null };
+  const accepted = status === "accepted";
+  return { invitation_id: invitationId, organization_id: organizationId, role: "viewer", status, version, created_at: date, expires_at: "2026-08-19T00:00:00.000Z", accepted_at: accepted ? "2026-08-12T00:45:00.000Z" : null, accepted_member_id: accepted ? memberId : null };
 }
 
 function json(value, status = 200) {
@@ -191,6 +192,27 @@ test("maps a stale reissue version to a conflict without replaying the mutation"
     (error) => error instanceof OrganizationClientError && error.code === "conflict" && error.status === 409 && error.serverCode === "version_conflict",
   );
   assert.equal(calls.filter((call) => call.url.endsWith("/invitations")).length, 1);
+});
+
+test("rejects non-terminal invitation mutation responses as invalid without replay", async () => {
+  const revokeCalls = [];
+  const revokeClient = createOrganizationClient({
+    fetchImpl: async (url, init) => {
+      revokeCalls.push({ url: String(url), init });
+      if (url === "/api/auth/session") return sessionResponse();
+      return json({ request_id: requestId, invitation: invitation("pending", 1) });
+    },
+  });
+  await assert.rejects(() => revokeClient.revokeInvitation({ organizationId, invitationId, expectedVersion: 1 }), (error) => error instanceof OrganizationClientError && error.code === "invalid_response");
+  assert.equal(revokeCalls.filter((call) => call.url.endsWith(`/invitations/${invitationId}/revoke`)).length, 1);
+
+  const acceptClient = createOrganizationClient({
+    fetchImpl: async (url) => {
+      if (url === "/api/auth/session") return sessionResponse();
+      return json({ request_id: requestId, invitation: { ...invitation("accepted", 2), accepted_member_id: invitationId }, member: member("viewer", 1) }, 201);
+    },
+  });
+  await assert.rejects(() => acceptClient.acceptInvitation({ oneTimeToken: token }), (error) => error instanceof OrganizationClientError && error.code === "invalid_response");
 });
 
 test("classifies every uncertain mutation response for reconciliation, but not a known conflict", () => {

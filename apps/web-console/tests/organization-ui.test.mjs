@@ -29,6 +29,12 @@ test("OrganizationPanel is standalone and covers the administration flow", async
   assert.match(source, /role="alert" aria-live="assertive"/);
   assert.match(source, /失効を確定/);
   assert.match(source, /アクセスを失効/);
+  assert.match(source, /reconcileOnConflict: true/);
+  assert.match(source, /受け入れ済みです/);
+  assert.match(source, /取り消し済みです/);
+  assert.match(source, /期限切れです。管理者に招待の再発行/);
+  assert.match(source, /setAcceptToken\(""\)/);
+  assert.match(source, /invitationErrorState/);
   assert.match(source, /limit: 100/);
   assert.match(source, /nextCursor/);
   assert.match(source, /LoadMoreButton/);

@@ -23,9 +23,9 @@ export type OrganizationPanelProps = Readonly<{
 }>;
 
 type LoadStatus = "idle" | "loading" | "ready" | "empty" | "error";
-type ResourceState = Readonly<{ status: LoadStatus; error?: string; code?: OrganizationClientErrorCode | "last_owner_protected" | "reconciliation_required" }>;
+type ResourceState = Readonly<{ status: LoadStatus; error?: string; code?: OrganizationClientErrorCode | "last_owner_protected" | "reconciliation_required" | "invitation_terminal" | "invitation_unavailable" }>;
 type Rollback = () => void;
-type MutationOptions = Readonly<{ optimistic?: () => Rollback; reconcile?: () => Promise<void>; retry?: () => Promise<void>; retryLabel?: string }>;
+type MutationOptions = Readonly<{ optimistic?: () => Rollback; reconcile?: () => Promise<void>; reconcileOnConflict?: boolean; reconciliationMessage?: string; retry?: () => Promise<void>; retryLabel?: string }>;
 type RetryAction = Readonly<{ label: string; run: () => Promise<void> }>;
 
 const INITIAL_RESOURCE: ResourceState = Object.freeze({ status: "idle" });
@@ -232,6 +232,16 @@ export function OrganizationPanel({ client: suppliedClient, initialOrganizationI
     }
   }, [client, refreshOrganizationSnapshot]);
 
+  const reconcileAcceptedInvitation = useCallback(async (acceptedOrganizationId?: string): Promise<void> => {
+    const organizationId = acceptedOrganizationId ?? selectedOrganizationRef.current;
+    if (organizationId === "") {
+      await refreshOrganizationSnapshot();
+      return;
+    }
+    if (acceptedOrganizationId !== undefined) selectedOrganizationRef.current = acceptedOrganizationId;
+    await reconcileResources(organizationId, { members: true, invitations: true });
+  }, [reconcileResources, refreshOrganizationSnapshot]);
+
   useEffect(() => {
     const controller = new AbortController();
     const timer = setTimeout(() => void loadOrganizations(controller.signal), 0);
@@ -304,18 +314,19 @@ export function OrganizationPanel({ client: suppliedClient, initialOrganizationI
   const runMutation = async (action: string, operation: () => Promise<void>, options: MutationOptions = {}): Promise<boolean> => {
     if (pendingAction !== null) return false;
     setPendingAction(action);
-    setMutationError(INITIAL_RESOURCE);
-    setRetryAction(null);
-    const rollback = options.optimistic?.() ?? (() => undefined);
-    let operationCommitted = false;
-    try {
+      setMutationError(INITIAL_RESOURCE);
+      setRetryAction(null);
+      const rollback = options.optimistic?.() ?? (() => undefined);
+      let operationCommitted = false;
+      try {
       await operation();
       operationCommitted = true;
       if (options.reconcile !== undefined) await options.reconcile();
       return true;
     } catch (error) {
       const responseOutcomeIsAmbiguous = !operationCommitted && isAmbiguousOrganizationMutationError(error);
-      if (options.reconcile !== undefined && (responseOutcomeIsAmbiguous || operationCommitted)) {
+      const knownConcurrentOutcome = !operationCommitted && options.reconcileOnConflict === true && isOrganizationConflictError(error);
+      if (options.reconcile !== undefined && (responseOutcomeIsAmbiguous || knownConcurrentOutcome || operationCommitted)) {
         let reconciliationError: unknown = operationCommitted ? error : undefined;
         try {
           if (!operationCommitted) await options.reconcile();
@@ -323,7 +334,9 @@ export function OrganizationPanel({ client: suppliedClient, initialOrganizationI
           reconciliationError = caught;
         }
         const message = reconciliationError === undefined
-          ? "応答を確認できなかったため、権威状態を再取得しました。操作は再送していません。表示された状態を確認してください。"
+          ? options.reconciliationMessage ?? (knownConcurrentOutcome
+            ? "招待の状態が別の操作で変わったため、最新の権威状態を取得しました。操作は再送していません。表示された状態を確認してください。"
+            : "応答を確認できなかったため、権威状態を再取得しました。操作は再送していません。表示された状態を確認してください。")
           : "変更結果を確認できませんでした。再送せず、最新の状態をもう一度確認してください。";
         setMutationError({ status: "error", code: "reconciliation_required", error: message });
         setRetryAction({
@@ -536,6 +549,8 @@ export function OrganizationPanel({ client: suppliedClient, initialOrganizationI
         setInvitations((current) => current.map((item) => item.id === invitation.id ? { ...item, status: "revoked", version: item.version + 1 } : item));
         return () => setInvitations(previousInvitations);
       },
+      reconcileOnConflict: true,
+      reconciliationMessage: "招待の状態が別の操作で変わったため、最新の招待状態を取得しました。操作は再送していません。表示された状態を確認してください。",
       reconcile: () => reconcileResources(invitation.organizationId, { invitations: true }),
     });
   };
@@ -544,12 +559,16 @@ export function OrganizationPanel({ client: suppliedClient, initialOrganizationI
     event.preventDefault();
     const token = acceptToken.trim();
     if (token === "") return setMutationError({ status: "error", error: "招待トークンを入力してください。" });
+    setAcceptToken("");
     setOneTimeToken(null);
+    let acceptedOrganizationId: string | undefined;
     await runMutation("accept-invitation", async () => {
-      await client.acceptInvitation({ oneTimeToken: token });
-      setAcceptToken("");
+      const result = await client.acceptInvitation({ oneTimeToken: token });
+      acceptedOrganizationId = result.invitation.organizationId;
     }, {
-      reconcile: () => refreshOrganizationSnapshot().then(() => undefined),
+      reconcileOnConflict: true,
+      reconciliationMessage: "招待の状態を確認できなかったため、最新の所属状態を取得しました。操作は再送していません。表示された状態を確認してください。",
+      reconcile: () => reconcileAcceptedInvitation(acceptedOrganizationId),
     });
   };
 
@@ -655,13 +674,14 @@ function MemberRow({ member, canManage, canAssignOwner, lastOwnerProtected, draf
 function InvitationRow({ invitation, canRevoke, canReissue, expired, pendingAction, actionKey, reissueActionKey, confirmReissue, reissueExpiresAt, setReissueExpiresAt, onBeginReissue, onCancelReissue, onSubmitReissue, onRevoke }: { invitation: OrganizationInvitation; canRevoke: boolean; canReissue: boolean; expired: boolean; pendingAction: string | null; actionKey: string; reissueActionKey: string; confirmReissue: boolean; reissueExpiresAt: string; setReissueExpiresAt: (value: string) => void; onBeginReissue: () => void; onCancelReissue: () => void; onSubmitReissue: (event: FormEvent<HTMLFormElement>) => void; onRevoke: () => void }) {
   const status = expired ? "expired" : invitation.status;
   const statusLabel = status === "pending" ? "有効" : status === "expired" ? "期限切れ" : status === "accepted" ? "受け入れ済み" : "取り消し済み";
+  const statusGuidance = status === "expired" ? "期限切れです。管理者に招待の再発行を依頼してください。" : status === "accepted" ? "この招待はすでに受け入れ済みです。" : status === "revoked" ? "この招待は取り消し済みです。必要であれば新しい招待を依頼してください。" : undefined;
   const busy = pendingAction !== null;
   const reissuable = canReissue && (status === "pending" || status === "expired");
   const detailsId = `invitation-details-${invitation.id}`;
   const reissueWarningId = `invitation-reissue-warning-${invitation.id}`;
   return <li className="organization-list-row" style={panelStyle.listRow} data-state={status} aria-busy={pendingAction === actionKey || pendingAction === reissueActionKey}>
     <div style={panelStyle.row}>
-      <div><strong>{roleLabel(invitation.role)} 招待</strong><p id={detailsId} style={panelStyle.muted}>{statusLabel} · 有効期限 {formatDate(invitation.expiresAt)} · v{invitation.version}</p></div>
+      <div><strong>{roleLabel(invitation.role)} 招待</strong><p id={detailsId} style={panelStyle.muted}>{statusLabel} · 有効期限 {formatDate(invitation.expiresAt)} · v{invitation.version}</p>{statusGuidance !== undefined && <p style={panelStyle.muted} role="note">{statusGuidance}</p>}</div>
       <div style={panelStyle.actionRow}>
         {canRevoke && status === "pending" && <button type="button" style={panelStyle.dangerButton} disabled={busy} onClick={onRevoke} aria-label={`${roleLabel(invitation.role)}招待を取り消す`} aria-describedby={detailsId}>{pendingAction === actionKey ? "取り消し中…" : "取り消す"}</button>}
         {reissuable && !confirmReissue && <button type="button" style={panelStyle.secondaryButton} disabled={busy} onClick={onBeginReissue} aria-label={`${roleLabel(invitation.role)}招待を再発行`} aria-describedby={detailsId}>再発行</button>}
@@ -688,9 +708,10 @@ function LoadMoreButton({ label, pending, disabled, onClick }: { label: string; 
 
 function MutationNotice({ state, retryAction, onRefresh }: { state: ResourceState; retryAction: RetryAction | null; onRefresh: () => void }) {
   const refreshLabel = state.code === "unauthorized" ? "セッションを更新" : "最新情報を読み込む";
-  const canRefresh = state.code === "conflict" || state.code === "last_owner_protected" || state.code === "unauthorized";
+  const canRefresh = state.code === "conflict" || state.code === "last_owner_protected" || state.code === "unauthorized" || state.code === "invitation_terminal" || state.code === "invitation_unavailable" || state.code === "expired";
   const canRetry = state.code === "recent_auth_required" || state.code === "aborted" || state.code === "reconciliation_required";
-  return <div className="organization-status" style={state.code === "conflict" || state.code === "last_owner_protected" ? panelStyle.conflict : panelStyle.error} data-state={state.code ?? "error"} role="alert" aria-live="assertive"><span>{state.error}</span>{retryAction !== null && canRetry ? <button type="button" style={panelStyle.secondaryButton} onClick={() => void retryAction.run()}>{retryAction.label}</button> : canRefresh ? <button type="button" style={panelStyle.secondaryButton} onClick={onRefresh}>{refreshLabel}</button> : null}</div>;
+  const conflictStyle = state.code === "conflict" || state.code === "last_owner_protected" || state.code === "invitation_terminal";
+  return <div className="organization-status" style={conflictStyle ? panelStyle.conflict : panelStyle.error} data-state={state.code ?? "error"} role="alert" aria-live="assertive"><span>{state.error}</span>{retryAction !== null && canRetry ? <button type="button" style={panelStyle.secondaryButton} onClick={() => void retryAction.run()}>{retryAction.label}</button> : canRefresh ? <button type="button" style={panelStyle.secondaryButton} onClick={onRefresh}>{refreshLabel}</button> : null}</div>;
 }
 
 function chooseOrganization(items: readonly Organization[], requested: string, sessionOrganizationId: string): string {
@@ -761,6 +782,8 @@ async function findOrganizationMemberRole(client: OrganizationClient, organizati
 
 function resourceError(error: unknown): ResourceState {
   if (isLastOwnerProtectionError(error)) return { status: "error", code: "last_owner_protected", error: "最後のOwnerは降格・失効できません。先に別のメンバーをOwnerに変更してから、もう一度お試しください。" };
+  const invitationState = invitationErrorState(error);
+  if (invitationState !== undefined) return invitationState;
   if (error instanceof OrganizationClientError && error.code === "conflict") return { status: "error", code: "conflict", error: "他の管理者が先に変更しました。最新情報を読み込んでから、もう一度お試しください。" };
   if (error instanceof OrganizationClientError && error.code === "expired") return { status: "error", code: "expired", error: "この招待または操作の有効期限が切れています。最新情報を確認してください。" };
   if (error instanceof OrganizationClientError && error.code === "recent_auth_required") return { status: "error", code: "recent_auth_required", error: "安全な本人確認が必要です。もう一度実行してPasskey認証を完了してください。" };
@@ -769,6 +792,19 @@ function resourceError(error: unknown): ResourceState {
   if (error instanceof OrganizationClientError && error.code === "unauthorized") return { status: "error", code: "unauthorized", error: "セッションの有効期限が切れています。セッションを更新してください。" };
   if (error instanceof OrganizationClientError && error.code === "validation_failed") return { status: "error", code: "validation_failed", error: "入力内容を確認してください。" };
   return { status: "error", error: "組織情報を取得できませんでした。接続を確認して、もう一度お試しください。" };
+}
+
+function invitationErrorState(error: unknown): ResourceState | undefined {
+  if (!(error instanceof OrganizationClientError)) return undefined;
+  const code = error.serverCode?.toLowerCase().replace(/[.-]/g, "_") ?? "";
+  if (error.code === "expired" || code === "invitation_expired") return { status: "error", code: "expired", error: "この招待は期限切れです。管理者に最新の招待を再発行してもらってください。" };
+  if (["invitation_revoked", "invitation_already_accepted", "invitation_token_replayed"].includes(code)) return { status: "error", code: "invitation_terminal", error: code === "invitation_revoked" ? "この招待はすでに取り消されています。管理者に有効な招待を再発行してもらってください。" : code === "invitation_already_accepted" ? "この招待はすでに受け入れ済みです。現在の所属状態を確認してください。" : "この招待トークンはすでに使用されています。未使用の招待を依頼してください。" };
+  if (["invitation_invalid", "invitation_not_found", "resource_not_found", "not_found"].includes(code)) return { status: "error", code: "invitation_unavailable", error: "招待を確認できませんでした。入力を確認するか、管理者に新しい招待を依頼してください。" };
+  return undefined;
+}
+
+function isOrganizationConflictError(error: unknown): error is OrganizationClientError {
+  return error instanceof OrganizationClientError && error.code === "conflict";
 }
 
 function isLastOwnerProtectionError(error: unknown): error is OrganizationClientError {
