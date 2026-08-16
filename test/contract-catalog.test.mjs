@@ -82,10 +82,10 @@ test("catalog freezes the complete current contract inventory", () => {
   assert.equal(catalog.catalog_id, "agentpass.contract-catalog");
   assert.equal(catalog.catalog_version, 1);
   assert.equal(catalog.status, "frozen");
-  const expectedEntryCount = 49 + 62 + POSTGRES_SCHEMA_HEAD.migration_count;
+  const expectedEntryCount = 52 + 63 + POSTGRES_SCHEMA_HEAD.migration_count;
   assert.equal(catalog.entries.length, expectedEntryCount);
   const counts = catalog.entries.reduce((result, entry) => ({ ...result, [entry.kind]: (result[entry.kind] ?? 0) + 1 }), {});
-  assert.deepEqual(counts, { "json-schema": 49, "openapi-operation": 62, "postgres-migration": POSTGRES_SCHEMA_HEAD.migration_count });
+  assert.deepEqual(counts, { "json-schema": 52, "openapi-operation": 63, "postgres-migration": POSTGRES_SCHEMA_HEAD.migration_count });
   assert.equal(new Set(catalog.entries.map((entry) => entry.purpose)).size, catalog.entries.length);
   for (const entry of catalog.entries) {
     assert.ok(catalog.profiles[entry.profile], `${entry.id} profile`);

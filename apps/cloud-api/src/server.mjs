@@ -785,6 +785,15 @@ export function createCloudApi({ store, tokenRecords = [], bundleSigner, capabil
           const pendingDevice = typeof store.getDevice === "function" ? await store.getDevice({ organizationId: body.organization_id, deviceId: body.device_id }) : undefined;
           const deviceKeyEpoch = nextEnrollmentDeviceKeyEpoch(pendingDevice);
           const issuedAt = new Date(now()).toISOString();
+          const refreshHintTrust = await enrollmentRefreshHintTrustMetadata(refreshHintService, controlMetadata.public_key);
+          const controlTrust = {
+            format_epoch: 2,
+            issuer: controlBundleSigner.issuer,
+            key_id: controlMetadata.key_id,
+            public_key: controlMetadata.public_key,
+            bundle_path: `/v1/organizations/${body.organization_id}/bundles/${body.device_id}`,
+            refresh_hint: refreshHintTrust
+          };
           const possessionReceipt = await signAndValidatePossessionReceipt(possessionReceiptSigner, {
             version: 1,
             enrollment_id: body.enrollment_id,
@@ -797,6 +806,7 @@ export function createCloudApi({ store, tokenRecords = [], bundleSigner, capabil
             device_key_fingerprint: body.device_key_fingerprint,
             device_key_epoch: deviceKeyEpoch,
             challenge_nonce_digest: challengeNonceDigest,
+            control: controlTrust,
             issued_at: issuedAt
           });
           const device = await completeV2EnrollmentInStore(store, {
@@ -819,7 +829,6 @@ export function createCloudApi({ store, tokenRecords = [], bundleSigner, capabil
           if (typeof store.getDeviceEnrollmentPossessionReceipt !== "function" && typeof store.appendDevicePossessionReceipt === "function") {
             await store.appendDevicePossessionReceipt({ organizationId: body.organization_id, deviceId: body.device_id, receipt: possessionReceipt });
           }
-          const refreshHintTrust = await enrollmentRefreshHintTrustMetadata(refreshHintService, controlMetadata.public_key);
           const completedEpoch = positiveDeviceKeyEpoch(device);
           return {
             status: 201,
@@ -834,11 +843,7 @@ export function createCloudApi({ store, tokenRecords = [], bundleSigner, capabil
                 device_key_epoch: completedEpoch,
                 control: {
                   format_epoch: 2,
-                  issuer: controlBundleSigner.issuer,
-                  key_id: controlBundleSigner.key_id,
-                  public_key: controlMetadata.public_key,
-                  bundle_path: `/v1/organizations/${device.organization_id}/bundles/${device.device_id}`,
-                  refresh_hint: refreshHintTrust
+                  ...controlTrust
                 }
               }
             }
@@ -965,6 +970,7 @@ export function createCloudApi({ store, tokenRecords = [], bundleSigner, capabil
         const readReceipt = store.getDevicePossessionReceipt ?? store.getDeviceEnrollmentPossessionReceipt;
         if (typeof readReceipt !== "function") throw apiError("possession_receipt_unavailable", 503, "Possession receipt is unavailable");
         const receipt = await readReceipt.call(store, { organizationId, deviceId: match.deviceId });
+        validateAuthoritativeReceiptForDevice(receipt, { organizationId, deviceId: match.deviceId });
         return { body: { receipt } };
       }, true),
       route("GET", new RegExp(`^/v1/organizations/(?<organizationId>${UUID})/bundles/(?<deviceId>${UUID})$`), null, async ({ organizationId, principal, match }) => {
@@ -1730,6 +1736,25 @@ async function signAndValidatePossessionReceipt(signer, statement) {
       || !BASE64URL_SIGNATURE.test(receipt.signature) || Buffer.from(receipt.signature, "base64url").length !== 64 || Buffer.from(receipt.signature, "base64url").toString("base64url") !== receipt.signature) throw new Error("invalid receipt");
     return Object.freeze({ ...receipt, statement: normalizedStatement });
   } catch { throw apiError("possession_receipt_signing_unavailable", 503, "Possession receipt signing is unavailable"); }
+}
+
+function validateAuthoritativeReceiptForDevice(receipt, { organizationId, deviceId }) {
+  try {
+    const expectedKeys = ["version", "purpose", "key_id", "algorithm", "statement", "statement_hash", "signature"];
+    if (!receipt || typeof receipt !== "object" || Array.isArray(receipt) || Object.keys(receipt).sort().join(",") !== expectedKeys.slice().sort().join(",")
+      || receipt.version !== POSSESSION_RECEIPT_VERSION || receipt.purpose !== POSSESSION_RECEIPT_PURPOSE
+      || !POSSESSION_RECEIPT_SIGNATURE_ALGORITHMS.includes(receipt.algorithm)
+      || typeof receipt.key_id !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$/u.test(receipt.key_id)
+      || typeof receipt.statement_hash !== "string" || !SHA256_HEX.test(receipt.statement_hash)
+      || typeof receipt.signature !== "string" || !BASE64URL_SIGNATURE.test(receipt.signature)
+      || Buffer.from(receipt.signature, "base64url").toString("base64url") !== receipt.signature) throw new Error("invalid receipt envelope");
+    const statement = normalizePossessionReceiptStatement(receipt.statement);
+    if (canonicalJson(statement) !== canonicalJson(receipt.statement)
+      || sha256Text(canonicalJson(statement)) !== receipt.statement_hash
+      || statement.organization_id !== organizationId
+      || statement.device_id !== deviceId
+      || statement.control.bundle_path !== `/v1/organizations/${organizationId}/bundles/${deviceId}`) throw new Error("invalid receipt binding");
+  } catch { throw apiError("possession_receipt_unavailable", 503, "Possession receipt is unavailable"); }
 }
 
 function deriveEnrollmentV2Credential(secret, identity) {

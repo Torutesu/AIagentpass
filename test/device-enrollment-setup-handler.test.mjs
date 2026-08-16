@@ -30,12 +30,24 @@ function candidateBinding(key) {
   };
 }
 
-function possessionReceipt(key, receiptSigner, binding) {
+function possessionReceipt(key, receiptSigner, binding, control, refreshHint) {
   const { expires_at: _expiresAt, ...candidate } = binding;
   const statement = {
     ...candidate,
     device_key_epoch: 4,
     challenge_nonce_digest: crypto.createHash("sha256").update(nonce).digest("hex"),
+    control: {
+      format_epoch: 2,
+      issuer: "agentpass-cloud",
+      key_id: "control-v1",
+      public_key: control.publicKey.export({ type: "spki", format: "pem" }).toString(),
+      bundle_path: `/v1/organizations/${organizationId}/bundles/${deviceId}`,
+      refresh_hint: {
+        key_id: "refresh-hint-v1",
+        algorithm: "ed25519",
+        public_key: refreshHint.publicKey.export({ type: "spki", format: "pem" }).toString()
+      }
+    },
     issued_at: expiresAt
   };
   const statementBytes = Buffer.from(canonicalJson(statement), "utf8");
@@ -136,7 +148,7 @@ test("uses the v2 invitation, verifies the receipt, and persists only non-secret
   const control = crypto.generateKeyPairSync("ed25519");
   const refreshHint = crypto.generateKeyPairSync("ed25519");
   const credential = crypto.randomBytes(32).toString("base64url");
-  const receipt = possessionReceipt(device, receiptSigner, candidateBinding(device));
+  const receipt = possessionReceipt(device, receiptSigner, candidateBinding(device), control, refreshHint);
   const original = { version: 4, native_broker: { enabled: true, mach_service: "dev.agentpass.native-service", client: "/Applications/AgentPass.app/client" } };
   let saved;
   let provisioned;

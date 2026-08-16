@@ -25,6 +25,9 @@ const DIGEST = "a".repeat(64);
 const CANDIDATE = { candidate_id: "release-2026.08.13", source_commit: "b".repeat(40), artifact_sha256: "c".repeat(64), manifest_sha256: "d".repeat(64), team_id: "ABCDE12345", status: "active", created_at: NOW, retired_at: null };
 const DEVICE_FINGERPRINT = `SHA256:${"E".repeat(43)}`;
 const CHALLENGE_DIGEST = "f".repeat(64);
+const CONTROL_TEST_KEYS = crypto.generateKeyPairSync("ed25519");
+const REFRESH_TEST_KEYS = crypto.generateKeyPairSync("ed25519");
+const publicPem = (key) => key.export({ type: "spki", format: "pem" }).toString();
 const SCOPE = { operations: ["git.commit.sign"], repositories: ["/repo"], branches: { allow: ["main"], deny: [] }, remotes: { allow: ["origin"], deny: [] } };
 const PUBLIC_KEY = "-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==\n-----END PUBLIC KEY-----";
 
@@ -136,7 +139,7 @@ function agentRow(overrides = {}) { return { organization_id: ids.organization, 
 function policyRow(overrides = {}) { return { organization_id: ids.organization, id: ids.policy, sequence: 1, name: "default", scope_json: SCOPE, status: "active", created_by: ids.member, created_at: NOW, updated_at: NOW, version: 1, ...overrides }; }
 function enrollmentRow(overrides = {}) { return { id: ids.enrollment, organization_id: ids.organization, device_id: ids.device2, label: "New Mac", platform: "macos", created_at: NOW, expires_at: EXPIRES, consumed_at: null, completion_hash: null, ...overrides }; }
 function possessionReceiptStatement() {
-  return { version: 1, enrollment_id: ids.enrollment, organization_id: ids.organization, device_id: ids.device2, candidate_id: CANDIDATE.candidate_id, artifact_sha256: CANDIDATE.artifact_sha256, source_commit: CANDIDATE.source_commit, team_id: CANDIDATE.team_id, device_key_fingerprint: DEVICE_FINGERPRINT, device_key_epoch: 1, challenge_nonce_digest: CHALLENGE_DIGEST, issued_at: NOW };
+  return { version: 1, enrollment_id: ids.enrollment, organization_id: ids.organization, device_id: ids.device2, candidate_id: CANDIDATE.candidate_id, artifact_sha256: CANDIDATE.artifact_sha256, source_commit: CANDIDATE.source_commit, team_id: CANDIDATE.team_id, device_key_fingerprint: DEVICE_FINGERPRINT, device_key_epoch: 1, challenge_nonce_digest: CHALLENGE_DIGEST, control: { format_epoch: 2, issuer: "agentpass-cloud", key_id: "control-v1", public_key: publicPem(CONTROL_TEST_KEYS.publicKey), bundle_path: `/v1/organizations/${ids.organization}/bundles/${ids.device2}`, refresh_hint: { key_id: "refresh-v1", algorithm: "ed25519", public_key: publicPem(REFRESH_TEST_KEYS.publicKey) } }, issued_at: NOW };
 }
 function possessionReceipt() {
   const statement = possessionReceiptStatement();

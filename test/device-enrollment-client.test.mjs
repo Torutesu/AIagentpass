@@ -2,6 +2,8 @@ import assert from "node:assert/strict";
 import crypto from "node:crypto";
 import test from "node:test";
 
+import { canonicalJson } from "../lib/identity.mjs";
+
 import {
   DEVICE_ENROLLMENT_ERRORS,
   DeviceEnrollmentError,
@@ -22,6 +24,8 @@ const BASE_URL = "https://api.example.test/v1";
 const CREDENTIAL = "Abcdefghijklmnopqrstuvwxyz0123456789-_ABCDE";
 const CHALLENGE_NONCE = "A".repeat(43);
 const CHALLENGE_ID = ENROLLMENT;
+const CONTROL_TEST_KEYS = keys("ed25519");
+const REFRESH_TEST_KEYS = keys("ed25519");
 
 function keys(algorithm = "p256-sha256") {
   const pair = algorithm === "ed25519"
@@ -65,8 +69,6 @@ function jsonResponse(value, status = 201, headers = {}) {
 
 function enrolledResponse(pair, extra = {}) {
   const algorithm = pair.publicKey.asymmetricKeyType === "ed25519" ? "ed25519" : "p256-sha256";
-  const control = keys("ed25519");
-  const refreshHint = keys("ed25519");
   return {
     request_id: "request-123",
     enrollment: {
@@ -81,9 +83,9 @@ function enrolledResponse(pair, extra = {}) {
         format_epoch: 2,
         issuer: "cloud-control",
         key_id: "control-v2",
-        public_key: control.publicPem,
+        public_key: CONTROL_TEST_KEYS.publicPem,
         bundle_path: `/v1/organizations/${ORGANIZATION}/bundles/${DEVICE}`,
-        refresh_hint: { key_id: "refresh-hint-v1", algorithm: "ed25519", public_key: refreshHint.publicPem }
+        refresh_hint: { key_id: "refresh-hint-v1", algorithm: "ed25519", public_key: REFRESH_TEST_KEYS.publicPem }
       }
     },
     ...extra
@@ -112,10 +114,18 @@ function possessionReceipt(devicePair, receiptPair, overrides = {}) {
     ...candidateStatement,
     device_key_epoch: 3,
     challenge_nonce_digest: crypto.createHash("sha256").update(CHALLENGE_NONCE).digest("hex"),
+    control: {
+      format_epoch: 2,
+      issuer: "cloud-control",
+      key_id: "control-v2",
+      public_key: CONTROL_TEST_KEYS.publicPem,
+      bundle_path: `/v1/organizations/${ORGANIZATION}/bundles/${DEVICE}`,
+      refresh_hint: { key_id: "refresh-hint-v1", algorithm: "ed25519", public_key: REFRESH_TEST_KEYS.publicPem }
+    },
     issued_at: "2099-01-02T03:04:05.000Z",
     ...overrides
   };
-  const statementBytes = Buffer.from(JSON.stringify(Object.fromEntries(Object.entries(statement).sort(([a], [b]) => a.localeCompare(b)))), "utf8");
+  const statementBytes = Buffer.from(canonicalJson(statement), "utf8");
   const statementHash = crypto.createHash("sha256").update(statementBytes).digest("hex");
   const signed = Buffer.from(`AgentPass-Cloud-Possession-Receipt-v1\0${statementBytes.toString("utf8")}`);
   return {
@@ -491,7 +501,9 @@ test("reconciles an unusable 201 response without replaying the POST", async () 
       return new Response("not-json", { status: 201 });
     }
   });
-  await assert.rejects(() => client.enroll(), (error) => error.code === DEVICE_ENROLLMENT_ERRORS.RECOVERY_PROVEN);
+  const recovered = await client.enroll();
+  assert.equal(recovered.status, "enrolled");
+  assert.deepEqual(recovered.control, receipt.statement.control);
   assert.equal(posts, 1);
   assert.equal(gets, 2);
 });
@@ -525,16 +537,15 @@ test("does not retry a response-loss POST and recovers only through a bound rece
       throw new TypeError("connection closed after Cloud committed the request");
     }
   });
-  await assert.rejects(() => client.enroll(), (error) => {
-    assert.equal(error.code, DEVICE_ENROLLMENT_ERRORS.RECOVERY_PROVEN);
-    assert.equal(error.details.receipt_statement_hash, receipt.statement_hash);
-    assert.equal(JSON.stringify(error).includes(CREDENTIAL), false);
-    return true;
-  });
-  await assert.rejects(() => client.enroll(), (error) => error.code === DEVICE_ENROLLMENT_ERRORS.RECOVERY_PROVEN);
+  const recovered = await client.enroll();
+  assert.equal(recovered.status, "enrolled");
+  assert.equal(recovered.request_id, "receipt-request-2");
+  assert.equal(recovered.possession_receipt.statement_hash, receipt.statement_hash);
+  assert.equal(JSON.stringify(recovered).includes(CREDENTIAL), false);
+  assert.deepEqual(await client.enroll(), recovered);
   assert.equal(postCalls, 1);
   assert.equal(getCalls, 2);
-  assert.equal(client.status(), "failed");
+  assert.equal(client.status(), "enrolled");
 });
 
 test("a restarted v2 client checks the receipt before submitting a one-time credential", async () => {
@@ -557,7 +568,9 @@ test("a restarted v2 client checks the receipt before submitting a one-time cred
       return jsonResponse({ request_id: "receipt-request-restart", receipt }, 200);
     }
   });
-  await assert.rejects(() => client.enroll(), (error) => error.code === DEVICE_ENROLLMENT_ERRORS.RECOVERY_PROVEN);
+  const recovered = await client.enroll();
+  assert.equal(recovered.status, "enrolled");
+  assert.deepEqual(recovered.control, receipt.statement.control);
   assert.equal(posts, 0);
 });
 
@@ -615,6 +628,37 @@ test("rejects a receipt signed by the pinned key when its tenant or device bindi
   assert.equal(posts, 0);
 });
 
+test("fails closed when POST control trust or the pinned receipt signer drifts", async () => {
+  const cases = [
+    ["control key", (receipt) => ({ ...receipt, statement: { ...receipt.statement, control: { ...receipt.statement.control, key_id: "control-rotated" } } })],
+    ["refresh key", (receipt) => ({ ...receipt, statement: { ...receipt.statement, control: { ...receipt.statement.control, refresh_hint: { ...receipt.statement.control.refresh_hint, public_key: keys("ed25519").publicPem } } } })],
+    ["bundle path", (receipt) => ({ ...receipt, statement: { ...receipt.statement, control: { ...receipt.statement.control, bundle_path: `/v1/organizations/${ORGANIZATION}/bundles/44444444-4444-4444-8444-444444444444` } } })],
+    ["receipt signer rotation", (receipt) => ({ ...receipt, key_id: "receipt-rotated" })]
+  ];
+  for (const [label, mutate] of cases) {
+    const pair = keys();
+    const receiptPair = keys("ed25519");
+    const receipt = mutate(possessionReceipt(pair, receiptPair));
+    // Re-sign a statement mutation with the pinned receipt key so the test
+    // reaches the binding comparison rather than failing at the signature.
+    if (receipt.statement !== undefined && label !== "receipt signer rotation") {
+      const bytes = Buffer.from(`AgentPass-Cloud-Possession-Receipt-v1\0${canonicalJson(receipt.statement)}`);
+      receipt.statement_hash = crypto.createHash("sha256").update(canonicalJson(receipt.statement)).digest("hex");
+      receipt.signature = crypto.sign(null, bytes, receiptPair.privateKey).toString("base64url");
+    }
+    let posts = 0;
+    const client = createDeviceEnrollmentClient({
+      ...input(pair), proofVersion: 2, qualification: "p256-sha256", challengeId: CHALLENGE_ID, challengeNonce: CHALLENGE_NONCE,
+      candidateBinding: candidate(pair), possessionReceiptPublicKey: receiptPair.publicPem, possessionReceiptKeyId: "receipt-key-v1", signer: signWith(pair),
+      fetchImpl: async (_url, init) => init.method === "GET"
+        ? (posts === 0 ? new Response("", { status: 401 }) : jsonResponse({ request_id: `receipt-${label}`, receipt }, 200))
+        : (posts += 1, jsonResponse(enrolledResponse(pair)))
+    });
+    await assert.rejects(() => client.enroll(), (error) => error.code === DEVICE_ENROLLMENT_ERRORS.RECOVERY_UNPROVEN, label);
+    assert.equal(posts, 1, label);
+  }
+});
+
 test("verifies a purpose-separated possession receipt and rejects receipt substitution", () => {
   const pair = keys("ed25519");
   const statement = {
@@ -629,9 +673,17 @@ test("verifies a purpose-separated possession receipt and rejects receipt substi
     device_key_fingerprint: fingerprint(keys()),
     device_key_epoch: 3,
     challenge_nonce_digest: crypto.createHash("sha256").update(CHALLENGE_NONCE).digest("hex"),
+    control: {
+      format_epoch: 2,
+      issuer: "cloud-control",
+      key_id: "control-v2",
+      public_key: CONTROL_TEST_KEYS.publicPem,
+      bundle_path: `/v1/organizations/${ORGANIZATION}/bundles/${DEVICE}`,
+      refresh_hint: { key_id: "refresh-hint-v1", algorithm: "ed25519", public_key: REFRESH_TEST_KEYS.publicPem }
+    },
     issued_at: "2099-01-02T03:04:05.000Z"
   };
-  const statementBytes = Buffer.from(JSON.stringify(Object.fromEntries(Object.entries(statement).sort(([a], [b]) => a.localeCompare(b)))), "utf8");
+  const statementBytes = Buffer.from(canonicalJson(statement), "utf8");
   const receiptHash = crypto.createHash("sha256").update(statementBytes).digest("hex");
   const signed = Buffer.from(`AgentPass-Cloud-Possession-Receipt-v1\0${statementBytes.toString("utf8")}`);
   const receipt = { version: 1, purpose: "device-enrollment-possession-receipt", key_id: "receipt-key-v1", algorithm: "ed25519", statement, statement_hash: receiptHash, signature: crypto.sign(null, signed, pair.privateKey).toString("base64url") };

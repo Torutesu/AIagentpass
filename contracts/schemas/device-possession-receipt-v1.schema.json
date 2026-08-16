@@ -30,8 +30,8 @@
     "receiptStatement": {
       "type": "object",
       "additionalProperties": false,
-      "maxProperties": 12,
-      "required": ["version", "enrollment_id", "organization_id", "device_id", "candidate_id", "artifact_sha256", "source_commit", "team_id", "device_key_fingerprint", "device_key_epoch", "challenge_nonce_digest", "issued_at"],
+      "maxProperties": 13,
+      "required": ["version", "enrollment_id", "organization_id", "device_id", "candidate_id", "artifact_sha256", "source_commit", "team_id", "device_key_fingerprint", "device_key_epoch", "challenge_nonce_digest", "control", "issued_at"],
       "properties": {
         "version": { "const": 1 },
         "enrollment_id": { "$ref": "#/$defs/uuid" },
@@ -44,9 +44,35 @@
         "device_key_fingerprint": { "$ref": "#/$defs/deviceKeyFingerprint" },
         "device_key_epoch": { "type": "integer", "minimum": 1, "maximum": 9007199254740991 },
         "challenge_nonce_digest": { "$ref": "#/$defs/sha256Hex" },
+        "control": { "$ref": "#/$defs/controlTrust" },
         "issued_at": { "$ref": "#/$defs/canonicalTimestamp" }
       }
     },
+    "controlTrust": {
+      "type": "object",
+      "additionalProperties": false,
+      "maxProperties": 6,
+      "required": ["format_epoch", "issuer", "key_id", "public_key", "bundle_path", "refresh_hint"],
+      "properties": {
+        "format_epoch": { "const": 2 },
+        "issuer": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$" },
+        "key_id": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$" },
+        "public_key": { "$ref": "#/$defs/publicKeyPem" },
+        "bundle_path": { "type": "string", "pattern": "^/v1/organizations/[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}/bundles/[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$" },
+        "refresh_hint": {
+          "type": "object",
+          "additionalProperties": false,
+          "maxProperties": 3,
+          "required": ["key_id", "algorithm", "public_key"],
+          "properties": {
+            "key_id": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$" },
+            "algorithm": { "const": "ed25519" },
+            "public_key": { "$ref": "#/$defs/publicKeyPem" }
+          }
+        }
+      }
+    },
+    "publicKeyPem": { "type": "string", "minLength": 80, "maxLength": 8192, "pattern": "^-----BEGIN PUBLIC KEY-----[\\s\\S]+-----END PUBLIC KEY-----$" },
     "uuid": { "type": "string", "format": "uuid", "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$" },
     "candidateId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$" },
     "deviceKeyFingerprint": { "type": "string", "minLength": 50, "maxLength": 50, "pattern": "^SHA256:[A-Za-z0-9_-]{43}$" },
