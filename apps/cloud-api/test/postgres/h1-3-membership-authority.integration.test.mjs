@@ -402,7 +402,7 @@ async function assertReductionState(pool, fixture, expected) {
   assert.equal((retainedSession.revoked_at !== null), expected.retainedRevoked);
   assert.equal(Number(retainedSession.version), expected.retainedRevoked ? 2 : 1);
   const challenges = await pool.query("SELECT id,status,consumed_at FROM webauthn_challenges WHERE organization_id=$1 AND id IN ($2,$3,$4) ORDER BY id", [fixture.organizationId, fixture.targetChallengeId, fixture.targetSecondChallengeId, fixture.retainedChallengeId]);
-  assert.equal(challenges.rows.filter((row) => [fixture.targetChallengeId, fixture.targetSecondChallengeId].includes(row.id)).every((row) => row.status === expected.targetChallenge && row.consumed_at !== null), true);
+  assert.equal(challenges.rows.filter((row) => [fixture.targetChallengeId, fixture.targetSecondChallengeId].includes(row.id)).every((row) => row.status === expected.targetChallenge && (row.consumed_at !== null) === (expected.targetChallenge !== "pending")), true);
   assert.equal(challenges.rows.find((row) => row.id === fixture.retainedChallengeId).status, expected.retainedChallenge);
   const capabilities = await pool.query("SELECT id,revoked_at FROM capabilities WHERE organization_id=$1 AND id IN ($2,$3) ORDER BY id", [fixture.organizationId, fixture.targetCapabilityId, fixture.retainedCapabilityId]);
   assert.equal(capabilities.rows.find((row) => row.id === fixture.targetCapabilityId).revoked_at !== null, expected.targetCapabilityRevoked);
