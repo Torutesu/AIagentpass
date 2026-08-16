@@ -3,10 +3,14 @@ import test from "node:test";
 
 import { chromium } from "../apps/web-console/node_modules/@playwright/test/index.mjs";
 import { P0BSkip } from "./support/p0b/harness.mjs";
-import { startP0BLiveBrowserFixture } from "./support/p0b/live-browser-fixture.mjs";
+import { P0BLiveBrowserFixtureError, runP0BLifecycle, startP0BLiveBrowserFixture } from "./support/p0b/live-browser-fixture.mjs";
 
 const enabled = process.env.P0B_LIVE_BROWSER === "1";
 const scenarioFilter = process.env.P0B_LIVE_BROWSER_SCENARIO?.trim() ?? "";
+const BROWSER_STARTUP_TIMEOUT_MS = 15_000;
+const BROWSER_CLEANUP_TIMEOUT_MS = 15_000;
+const CONTEXT_CLEANUP_TIMEOUT_MS = 10_000;
+const WAKE_OUTCOME_TIMEOUT_MS = 15_000;
 let selectedScenarioCount = 0;
 
 test("P0-B live browser role, WebAuthn, and recent-auth matrix", { skip: !enabled, timeout: 840_000 }, async (t) => {
@@ -196,25 +200,64 @@ async function scenario(parent, name, callback) {
   // Chromium registration begins, so the scenario timeout must not race that
   // bounded startup deadline. UI assertions still retain Playwright's focused
   // per-action timeout and therefore fail promptly when a state is absent.
-  await parent.test(name, { timeout: 75_000 }, async () => {
+  await parent.test(name, { timeout: 120_000 }, async () => {
     let fixture;
     let browser;
+    let scenarioError;
+    let cleanupError;
+    let browserCleanupAttempted = false;
     try {
-      try { fixture = await startP0BLiveBrowserFixture({ waitTimeoutMs: 30_000 }); }
-      catch (error) {
-        if (error instanceof P0BSkip) assert.fail(`live browser qualification cannot skip: ${error.code}`);
-        throw error;
+      try {
+        fixture = await startP0BLiveBrowserFixture({
+          waitTimeoutMs: 30_000,
+          startupTimeoutMs: 90_000,
+          cleanupTimeoutMs: BROWSER_CLEANUP_TIMEOUT_MS
+        });
       }
-      browser = await chromium.launch({ headless: true, args: [`--ignore-certificate-errors-spki-list=${fixture.tlsSpkiPin}`] });
+      catch (error) {
+        if (error instanceof P0BSkip) assert.fail("P0B_SAFE_LIFECYCLE_EXTERNAL_DEPENDENCY_FAILED");
+        failLifecycle(error);
+      }
+      try {
+        browser = await runP0BLifecycle(
+          () => chromium.launch({ headless: true, args: [`--ignore-certificate-errors-spki-list=${fixture.tlsSpkiPin}`] }),
+          {
+            timeoutMs: BROWSER_STARTUP_TIMEOUT_MS,
+            timeoutCode: "browser_startup_timeout",
+            timeoutMessage: "P0-B live browser startup timed out",
+            onLateSuccess: (lateBrowser) => lateBrowser?.close?.()
+          }
+        );
+      } catch (error) {
+        throw error instanceof P0BLiveBrowserFixtureError
+          ? error
+          : new P0BLiveBrowserFixtureError("browser_startup_failed", "P0-B live browser startup failed");
+      }
       const contexts = [];
       const open = async (role, { register = true, safeOpenPrefix = null } = {}) => {
         const effectiveSafeOpenPrefix = safeOpenPrefix ?? (role === "owner" ? "P0B_SAFE_OWNER_OPEN" : null);
         let context;
         let page;
         try {
-          context = await browser.newContext({ ignoreHTTPSErrors: false });
+          context = await runP0BLifecycle(
+            () => browser.newContext({ ignoreHTTPSErrors: false }),
+            {
+              timeoutMs: BROWSER_STARTUP_TIMEOUT_MS,
+              timeoutCode: "context_startup_timeout",
+              timeoutMessage: "P0-B browser context startup timed out",
+              onLateSuccess: (lateContext) => lateContext?.close?.()
+            }
+          );
           contexts.push(context);
-          page = await context.newPage();
+          page = await runP0BLifecycle(
+            () => context.newPage(),
+            {
+              timeoutMs: BROWSER_STARTUP_TIMEOUT_MS,
+              timeoutCode: "page_startup_timeout",
+              timeoutMessage: "P0-B browser page startup timed out",
+              onLateSuccess: () => context.close()
+            }
+          );
         } catch { failSafeOpen(effectiveSafeOpenPrefix, "CONTEXT"); }
         if (register) {
           try { await fixture.installVirtualAuthenticator(page, role); }
@@ -268,13 +311,54 @@ async function scenario(parent, name, callback) {
         } catch { failSafeOpen(effectiveSafeOpenPrefix, "READINESS"); }
         return page;
       };
-      await callback({ fixture, browser, open });
-      await Promise.all(contexts.map((context) => context.close()));
+      try {
+        await callback({ fixture, browser, open });
+      } catch (error) {
+        scenarioError = error;
+      }
+      cleanupError = await closeBrowserResources(browser, contexts);
+      browserCleanupAttempted = true;
+    } catch (error) {
+      scenarioError ??= error;
     } finally {
-      await browser?.close().catch(() => {});
-      await fixture?.close().catch(() => {});
+      if (!browserCleanupAttempted) cleanupError = await closeBrowserResources(browser, []);
+      try { await fixture?.close(); }
+      catch (error) { cleanupError ??= error; }
     }
+    if (scenarioError) failLifecycle(scenarioError);
+    if (cleanupError) failLifecycle(cleanupError);
   });
+}
+
+async function closeBrowserResources(browser, contexts) {
+  let firstError;
+  for (const context of contexts) {
+    try {
+      await runP0BLifecycle(() => context.close(), {
+        timeoutMs: CONTEXT_CLEANUP_TIMEOUT_MS,
+        timeoutCode: "context_cleanup_timeout",
+        timeoutMessage: "P0-B browser context cleanup timed out"
+      });
+    } catch (error) {
+      firstError ??= error instanceof P0BLiveBrowserFixtureError
+        ? error
+        : new P0BLiveBrowserFixtureError("context_cleanup_failed", "P0-B browser context cleanup failed");
+    }
+  }
+  if (browser) {
+    try {
+      await runP0BLifecycle(() => browser.close(), {
+        timeoutMs: BROWSER_CLEANUP_TIMEOUT_MS,
+        timeoutCode: "browser_cleanup_timeout",
+        timeoutMessage: "P0-B live browser cleanup timed out"
+      });
+    } catch (error) {
+      firstError ??= error instanceof P0BLiveBrowserFixtureError
+        ? error
+        : new P0BLiveBrowserFixtureError("browser_cleanup_failed", "P0-B live browser cleanup failed");
+    }
+  }
+  return firstError;
 }
 
 function safeBootstrap503Marker(code) {
@@ -341,23 +425,51 @@ function safeRegistrationMarker(code, prefix) {
 }
 
 async function requireWakeStatus(card, failurePrefix) {
-  const outcome = await Promise.race([
-    card.getByRole("status").waitFor().then(() => "status").catch(() => null),
-    card.getByRole("alert").waitFor().then(() => "alert").catch(() => null),
-  ]);
-  if (outcome === "alert") {
+  const status = card.getByRole("status");
+  const alert = card.getByRole("alert");
+  const outcome = card.locator('[role="status"]:visible, [role="alert"]:visible').first();
+  try { await outcome.waitFor({ state: "visible", timeout: WAKE_OUTCOME_TIMEOUT_MS }); }
+  catch { return failWakeStatus(failurePrefix, "TIMEOUT"); }
+  let alertVisible = false;
+  try { alertVisible = await alert.isVisible(); } catch {}
+  const outcomeType = alertVisible ? "alert" : "status";
+  if (outcomeType === "alert") {
     if (failurePrefix !== undefined) throw new Error(`${failurePrefix}_ALERT_FAILED`);
     assert.fail("wake failed");
   }
-  if (outcome !== "status") {
-    if (failurePrefix !== undefined) throw new Error(`${failurePrefix}_TIMEOUT_FAILED`);
-    assert.fail("wake status unavailable");
-  }
+  if (outcomeType !== "status") return failWakeStatus(failurePrefix, "TIMEOUT");
   try { return await card.getByRole("status").innerText(); }
   catch {
     if (failurePrefix !== undefined) throw new Error(`${failurePrefix}_INVALID_FAILED`);
     throw new Error("wake status unavailable");
   }
+}
+
+function failWakeStatus(failurePrefix, suffix) {
+  if (failurePrefix !== undefined) throw new Error(`${failurePrefix}_${suffix}_FAILED`);
+  assert.fail("wake status unavailable");
+}
+
+function failLifecycle(error) {
+  const marker = lifecycleFailureMarker(error);
+  if (marker !== null) assert.fail(marker);
+  throw error;
+}
+
+export function lifecycleFailureMarker(error) {
+  if (!(error instanceof P0BLiveBrowserFixtureError)) return null;
+  return new Map([
+    ["startup_timeout", "P0B_SAFE_LIFECYCLE_FIXTURE_STARTUP_TIMEOUT_FAILED"],
+    ["fixture_start_failed", "P0B_SAFE_LIFECYCLE_FIXTURE_START_FAILED"],
+    ["database_prepare_failed", "P0B_SAFE_LIFECYCLE_DATABASE_PREPARE_FAILED"],
+    ["browser_startup_timeout", "P0B_SAFE_LIFECYCLE_BROWSER_STARTUP_TIMEOUT_FAILED"],
+    ["browser_startup_failed", "P0B_SAFE_LIFECYCLE_BROWSER_START_FAILED"],
+    ["cleanup_timeout", "P0B_SAFE_LIFECYCLE_FIXTURE_CLEANUP_TIMEOUT_FAILED"],
+    ["context_cleanup_timeout", "P0B_SAFE_LIFECYCLE_CONTEXT_CLEANUP_TIMEOUT_FAILED"],
+    ["context_cleanup_failed", "P0B_SAFE_LIFECYCLE_CONTEXT_CLEANUP_FAILED"],
+    ["browser_cleanup_timeout", "P0B_SAFE_LIFECYCLE_BROWSER_CLEANUP_TIMEOUT_FAILED"],
+    ["browser_cleanup_failed", "P0B_SAFE_LIFECYCLE_BROWSER_CLEANUP_FAILED"]
+  ]).get(error.code) ?? null;
 }
 
 export async function keyboardOutcomeFailureMarker(response, observation = {}) {

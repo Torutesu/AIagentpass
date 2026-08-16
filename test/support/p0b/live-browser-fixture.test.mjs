@@ -7,6 +7,7 @@ import {
   classifySessionBootstrap503,
   classifyStoredSessionState,
   P0BLiveBrowserFixtureError,
+  runP0BLifecycle,
   startP0BLiveBrowserFixture
 } from "./live-browser-fixture.mjs";
 import { P0BSkip } from "./harness.mjs";
@@ -33,6 +34,36 @@ test("fixture errors have stable, secret-free public shape", () => {
     message: "P0-B live browser fixture startup failed"
   });
   assert.equal(Object.hasOwn(error, "cause"), false);
+});
+
+test("bounded lifecycle timeout disposes a late startup result", async () => {
+  let resolveStartup;
+  let lateCleanupCount = 0;
+  const startup = new Promise((resolve) => { resolveStartup = resolve; });
+  await assert.rejects(
+    runP0BLifecycle(() => startup, {
+      timeoutMs: 5,
+      timeoutCode: "startup_timeout",
+      onLateSuccess: async (value) => {
+        assert.equal(value, "late-harness");
+        lateCleanupCount += 1;
+      }
+    }),
+    (error) => error instanceof P0BLiveBrowserFixtureError
+      && error.code === "startup_timeout"
+      && error.message === "P0-B live browser lifecycle timed out"
+  );
+  resolveStartup("late-harness");
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(lateCleanupCount, 1);
+});
+
+test("bounded lifecycle clears its timer after success", async () => {
+  const result = await runP0BLifecycle(async () => "ready", {
+    timeoutMs: 50,
+    timeoutCode: "startup_timeout"
+  });
+  assert.equal(result, "ready");
 });
 
 test("bootstrap 502 classification exposes only fixed failure classes", () => {

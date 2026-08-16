@@ -222,6 +222,17 @@ const LIVE_BROWSER_SAFE_FAILURE_MARKERS = Object.freeze([
   [null, "P0B_SAFE_ADMIN_WAKE_UI_ALERT_FAILED", "admin_wake_ui_alert"],
   [null, "P0B_SAFE_ADMIN_WAKE_UI_TIMEOUT_FAILED", "admin_wake_ui_timeout"],
   [null, "P0B_SAFE_ADMIN_WAKE_UI_COPY_MISMATCH_FAILED", "admin_wake_ui_copy_mismatch"],
+  [null, "P0B_SAFE_LIFECYCLE_FIXTURE_STARTUP_TIMEOUT_FAILED", "lifecycle_fixture_startup_timeout"],
+  [null, "P0B_SAFE_LIFECYCLE_FIXTURE_START_FAILED", "lifecycle_fixture_start"],
+  [null, "P0B_SAFE_LIFECYCLE_DATABASE_PREPARE_FAILED", "lifecycle_database_prepare"],
+  [null, "P0B_SAFE_LIFECYCLE_EXTERNAL_DEPENDENCY_FAILED", "lifecycle_external_dependency"],
+  [null, "P0B_SAFE_LIFECYCLE_BROWSER_STARTUP_TIMEOUT_FAILED", "lifecycle_browser_startup_timeout"],
+  [null, "P0B_SAFE_LIFECYCLE_BROWSER_START_FAILED", "lifecycle_browser_start"],
+  [null, "P0B_SAFE_LIFECYCLE_FIXTURE_CLEANUP_TIMEOUT_FAILED", "lifecycle_fixture_cleanup_timeout"],
+  [null, "P0B_SAFE_LIFECYCLE_CONTEXT_CLEANUP_TIMEOUT_FAILED", "lifecycle_context_cleanup_timeout"],
+  [null, "P0B_SAFE_LIFECYCLE_CONTEXT_CLEANUP_FAILED", "lifecycle_context_cleanup"],
+  [null, "P0B_SAFE_LIFECYCLE_BROWSER_CLEANUP_TIMEOUT_FAILED", "lifecycle_browser_cleanup_timeout"],
+  [null, "P0B_SAFE_LIFECYCLE_BROWSER_CLEANUP_FAILED", "lifecycle_browser_cleanup"],
   [null, "P0B_SAFE_AUDITOR_OPEN_CONTEXT_FAILED", "auditor_open_context"],
   [null, "P0B_SAFE_AUDITOR_OPEN_AUTHENTICATOR_FAILED", "auditor_open_authenticator"],
   [null, "P0B_SAFE_AUDITOR_OPEN_BOOTSTRAP_FAILED", "auditor_open_bootstrap"],
@@ -428,6 +439,7 @@ export async function main(argv = process.argv.slice(2)) {
   let failure;
   let interrupted = false;
   let activeChild;
+  let terminateActiveChild;
   let publicManifest;
   let fixtureEnvironment;
   let postgresEvidence;
@@ -436,7 +448,7 @@ export async function main(argv = process.argv.slice(2)) {
   const commands = [];
   const onSignal = (signal) => {
     interrupted = true;
-    if (activeChild && !activeChild.killed) activeChild.kill("SIGTERM");
+    if (activeChild && !activeChild.killed) terminateActiveChild?.();
     // Keep the handler installed until the finally block so the fixture is
     // stopped before the process returns control to the shell.
     void signal;
@@ -488,10 +500,11 @@ export async function main(argv = process.argv.slice(2)) {
         cwd: CONSOLE_ROOT,
         env: qualificationBaseEnvironment(process.env),
         timeoutMs: BUILD_TIMEOUT_MS,
-        onChild: (child) => { activeChild = child; }
+        onChild: (child, terminate) => { activeChild = child; terminateActiveChild = terminate; }
       });
       commands.push(commandEvidence("console-build", ["npm", "run", "build"], "apps/web-console", result));
       activeChild = undefined;
+      terminateActiveChild = undefined;
       if (result.status !== "passed") {
         failure = { stage: "console-build", error: new OrchestrationError(result.reason) };
       }
@@ -515,10 +528,12 @@ export async function main(argv = process.argv.slice(2)) {
           env: { ...buildTestEnvironment(process.env, fixtureEnvironment), P0B_LIVE_BROWSER: "1" },
           timeoutMs: BROWSER_TIMEOUT_MS,
           safeFailureMarkers: LIVE_BROWSER_SAFE_FAILURE_MARKERS,
-          onChild: (child) => { activeChild = child; }
+          terminateOnSafeFailure: true,
+          onChild: (child, terminate) => { activeChild = child; terminateActiveChild = terminate; }
         });
         commands.push(commandEvidence("browser-e2e", ["node", ...childArgs], "repository", result));
         activeChild = undefined;
+        terminateActiveChild = undefined;
         if (result.status !== "passed") {
           const diagnostic = result.internal.safe_failure_code;
           failure = { stage: "live-browser", error: new OrchestrationError(diagnostic === null ? result.reason : `child_exit_nonzero_${diagnostic}`) };
@@ -538,10 +553,11 @@ export async function main(argv = process.argv.slice(2)) {
           cwd: REPOSITORY_ROOT,
           env: buildTestEnvironment(process.env, fixtureEnvironment),
           timeoutMs: PROCESS_TIMEOUT_MS,
-          onChild: (child) => { activeChild = child; }
+          onChild: (child, terminate) => { activeChild = child; terminateActiveChild = terminate; }
         });
         commands.push(commandEvidence("process-e2e", ["node", ...childArgs], "repository", result));
         activeChild = undefined;
+        terminateActiveChild = undefined;
         if (result.status !== "passed") {
           failure = { stage: "live-test", error: new OrchestrationError(result.reason) };
         } else if (interrupted) {

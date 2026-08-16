@@ -14,6 +14,7 @@ const MAX_SAFE_FAILURE_MARKER_BYTES = 512;
 const SAFE_FAILURE_CODE = /^[a-z][a-z0-9_]{0,63}$/u;
 const TERMINATION_GRACE_MS = 250;
 const DEFAULT_TIMEOUT_MS = 120_000;
+const SUPPORTS_PROCESS_GROUPS = process.platform !== "win32";
 const SAFE_REASON = Object.freeze({
   spawn: "child_spawn_failed",
   timeout: "child_timeout",
@@ -53,6 +54,9 @@ function normalizeOptions(options) {
     throw new TypeError("cwd is invalid");
   }
   if (options.onChild !== undefined && typeof options.onChild !== "function") throw new TypeError("onChild must be a function");
+  if (options.terminateOnSafeFailure !== undefined && typeof options.terminateOnSafeFailure !== "boolean") {
+    throw new TypeError("terminateOnSafeFailure must be a boolean");
+  }
   const safeFailureMarkers = normalizeSafeFailureMarkers(options.safeFailureMarkers);
   const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
   if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1) throw new TypeError("timeoutMs must be a positive integer");
@@ -61,6 +65,7 @@ function normalizeOptions(options) {
     env: normalizeEnvironment(options.env),
     onChild: options.onChild,
     safeFailureMarkers,
+    terminateOnSafeFailure: options.terminateOnSafeFailure === true,
     timeoutMs
   };
 }
@@ -143,7 +148,7 @@ function durationMilliseconds(startedAt) {
  */
 export function runQualificationCommand(command, args, options) {
   assertCommand(command, args);
-  const { cwd, env, onChild, safeFailureMarkers, timeoutMs } = normalizeOptions(options);
+  const { cwd, env, onChild, safeFailureMarkers, terminateOnSafeFailure, timeoutMs } = normalizeOptions(options);
   const startedAt = process.hrtime.bigint();
   const stdoutHash = createHash("sha256");
   const stderrHash = createHash("sha256");
@@ -162,6 +167,7 @@ export function runQualificationCommand(command, args, options) {
   let timeoutHandle;
   let killHandle;
   let child;
+  let requestTermination = () => {};
 
   const observeMarker = (chunk, stream) => {
     if (skipMarker) return;
@@ -193,6 +199,7 @@ export function runQualificationCommand(command, args, options) {
         safeFailureCode = entry.code;
         safeFailureStdoutTail = Buffer.alloc(0);
         safeFailureStderrTail = Buffer.alloc(0);
+        if (terminateOnSafeFailure) setImmediate(() => requestTermination());
         return;
       }
     }
@@ -239,17 +246,41 @@ export function runQualificationCommand(command, args, options) {
 
     const requestKill = (signal) => {
       try {
-        child?.kill(signal);
+        // A qualification command can start browsers and service processes
+        // which inherit its stdout/stderr pipes. Killing only the direct child
+        // leaves those descendants alive and prevents the ChildProcess
+        // `close` event from ever firing. A detached POSIX child is the leader
+        // of a private process group, so a negative pid terminates the complete
+        // command tree without risking an unrelated process.
+        if (SUPPORTS_PROCESS_GROUPS && Number.isSafeInteger(child?.pid) && child.pid > 0) {
+          process.kill(-child.pid, signal);
+        } else {
+          child?.kill(signal);
+        }
       } catch {
         // The close/error event remains authoritative. Never expose a kill
         // exception or a command-specific diagnostic to the report.
       }
     };
 
+    requestTermination = () => {
+      if (settled) return;
+      requestKill("SIGTERM");
+      if (killHandle !== undefined) clearTimeout(killHandle);
+      killHandle = setTimeout(() => {
+        if (!settled) requestKill("SIGKILL");
+      }, TERMINATION_GRACE_MS);
+      killHandle.unref?.();
+    };
+
     try {
       child = spawn(command, args, {
         cwd,
         env,
+        // On POSIX this creates the private process group used by requestKill.
+        // Windows has no equivalent negative-pid group signalling, so retain
+        // the normal ChildProcess fallback there.
+        detached: SUPPORTS_PROCESS_GROUPS,
         shell: false,
         stdio: ["ignore", "pipe", "pipe"]
       });
@@ -282,24 +313,19 @@ export function runQualificationCommand(command, args, options) {
     timeoutHandle = setTimeout(() => {
       if (settled) return;
       timedOut = true;
-      requestKill("SIGTERM");
-      killHandle = setTimeout(() => {
-        if (!settled) requestKill("SIGKILL");
-      }, TERMINATION_GRACE_MS);
-      killHandle.unref?.();
+      requestTermination();
     }, timeoutMs);
     timeoutHandle.unref?.();
 
     if (onChild) {
       try {
-        onChild(child);
+        // The second argument is an intentionally narrow tree-termination
+        // capability for supervisors handling their own SIGINT/SIGTERM. It
+        // keeps the process-group implementation private to this runner.
+        onChild(child, requestTermination);
       } catch {
         callbackFailed = true;
-        requestKill("SIGTERM");
-        killHandle = setTimeout(() => {
-          if (!settled) requestKill("SIGKILL");
-        }, TERMINATION_GRACE_MS);
-        killHandle.unref?.();
+        requestTermination();
       }
     }
   });

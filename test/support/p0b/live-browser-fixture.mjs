@@ -11,6 +11,8 @@ const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-
 const TOKEN = /^[A-Za-z0-9_-]{43}$/u;
 const OPERATION = /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$/u;
 const SESSION_PATH = "/api/auth/session";
+const DEFAULT_STARTUP_TIMEOUT_MS = 90_000;
+const DEFAULT_CLEANUP_TIMEOUT_MS = 15_000;
 const USER_EMAILS = Object.freeze({
   owner: "p0b-owner@example.test",
   admin: "p0b-admin@example.test",
@@ -24,6 +26,52 @@ export class P0BLiveBrowserFixtureError extends Error {
     this.name = "P0BLiveBrowserFixtureError";
     this.code = code;
   }
+}
+
+/**
+ * Bound a lifecycle operation without abandoning a late result. When startup
+ * wins the deadline after allocating a harness, onLateSuccess gets the late
+ * value so the caller can close it and avoid orphaning its handles.
+ */
+export function runP0BLifecycle(operation, {
+  timeoutMs,
+  timeoutCode,
+  timeoutMessage = "P0-B live browser lifecycle timed out",
+  onLateSuccess,
+  onTimeout
+} = {}) {
+  if (typeof operation !== "function") throw new TypeError("P0-B lifecycle operation must be a function");
+  if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1) throw new TypeError("P0-B lifecycle timeout is invalid");
+  if (typeof timeoutCode !== "string" || !/^[a-z][a-z0-9_]*$/u.test(timeoutCode)) throw new TypeError("P0-B lifecycle timeout code is invalid");
+  if (onLateSuccess !== undefined && typeof onLateSuccess !== "function") throw new TypeError("P0-B lifecycle late cleanup must be a function");
+  if (onTimeout !== undefined && typeof onTimeout !== "function") throw new TypeError("P0-B lifecycle timeout cleanup must be a function");
+
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const timer = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      if (onTimeout) Promise.resolve().then(onTimeout).catch(() => {});
+      reject(new P0BLiveBrowserFixtureError(timeoutCode, timeoutMessage));
+    }, timeoutMs);
+
+    Promise.resolve()
+      .then(operation)
+      .then((value) => {
+        if (settled) {
+          if (onLateSuccess) Promise.resolve().then(() => onLateSuccess(value)).catch(() => {});
+          return;
+        }
+        settled = true;
+        clearTimeout(timer);
+        resolve(value);
+      }, (error) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        reject(error);
+      });
+  });
 }
 
 export function classifySessionBootstrap502(body, cloudProcessState, cloudReadinessState) {
@@ -71,40 +119,49 @@ export async function startP0BLiveBrowserFixture({
   repoRoot = p0bRepositoryRoot(),
   consoleBuild = true,
   waitTimeoutMs = 20_000,
+  startupTimeoutMs = DEFAULT_STARTUP_TIMEOUT_MS,
+  cleanupTimeoutMs = DEFAULT_CLEANUP_TIMEOUT_MS,
   prepareDatabase
 } = {}) {
   if (prepareDatabase !== undefined && typeof prepareDatabase !== "function") {
     throw new TypeError("P0-B database preparation must be a function");
   }
+  if (!Number.isSafeInteger(startupTimeoutMs) || startupTimeoutMs < 1) throw new TypeError("P0-B startup timeout is invalid");
+  if (!Number.isSafeInteger(cleanupTimeoutMs) || cleanupTimeoutMs < 1) throw new TypeError("P0-B cleanup timeout is invalid");
 
   let seed;
   let databasePool;
   let harness;
   try {
-    harness = await startP0BHarness({
-      env,
-      repoRoot,
-      consoleBuild,
-      waitTimeoutMs,
-      prepareDatabase: async (context) => {
-        databasePool = context.pool;
-        seed = await seedP0BHumanBrowserDatabase(context);
-        if (prepareDatabase) {
-          try {
-            const safeContext = {
-              pool: context.pool,
-              organizationId: context.organizationId,
-              seed: publicSeed(seed)
-            };
-            await prepareDatabase(Object.freeze({
-              ...safeContext
-            }));
-          } catch {
-            throw new P0BLiveBrowserFixtureError("database_prepare_failed", "P0-B live browser database preparation failed");
+    harness = await runP0BLifecycle(() => startP0BHarness({
+        env,
+        repoRoot,
+        consoleBuild,
+        waitTimeoutMs,
+        prepareDatabase: async (context) => {
+          databasePool = context.pool;
+          seed = await seedP0BHumanBrowserDatabase(context);
+          if (prepareDatabase) {
+            try {
+              const safeContext = {
+                pool: context.pool,
+                organizationId: context.organizationId,
+                seed: publicSeed(seed)
+              };
+              await prepareDatabase(Object.freeze({
+                ...safeContext
+              }));
+            } catch {
+              throw new P0BLiveBrowserFixtureError("database_prepare_failed", "P0-B live browser database preparation failed");
+            }
           }
         }
-      }
-    });
+      }), {
+        timeoutMs: startupTimeoutMs,
+        timeoutCode: "startup_timeout",
+        timeoutMessage: "P0-B live browser fixture startup timed out",
+        onLateSuccess: (lateHarness) => lateHarness?.close?.()
+      });
   } catch (error) {
     if (error instanceof P0BSkip) throw error;
     if (error instanceof P0BLiveBrowserFixtureError) throw error;
@@ -112,12 +169,16 @@ export async function startP0BLiveBrowserFixture({
   }
 
   if (!seed) {
-    await harness.close().catch(() => {});
+    await runP0BLifecycle(() => harness.close(), {
+      timeoutMs: cleanupTimeoutMs,
+      timeoutCode: "cleanup_timeout",
+      timeoutMessage: "P0-B live browser fixture cleanup timed out"
+    }).catch(() => {});
     throw new P0BLiveBrowserFixtureError("database_prepare_failed", "P0-B live browser database was not prepared");
   }
 
   const pageState = new WeakMap();
-  let closed = false;
+  let closePromise;
   const safeSeed = publicSeed(seed);
 
   const fixture = {
@@ -466,9 +527,14 @@ export async function startP0BLiveBrowserFixture({
     },
 
     async close() {
-      if (closed) return;
-      closed = true;
-      await harness.close();
+      if (!closePromise) {
+        closePromise = runP0BLifecycle(() => harness.close(), {
+          timeoutMs: cleanupTimeoutMs,
+          timeoutCode: "cleanup_timeout",
+          timeoutMessage: "P0-B live browser fixture cleanup timed out"
+        });
+      }
+      return closePromise;
     }
   };
 

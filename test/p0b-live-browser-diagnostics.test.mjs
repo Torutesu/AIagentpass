@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { adminWakeFailureMarker, keyboardOutcomeFailureMarker, keyboardRecentAuthFailureMarker, wakeAcceptedFailureMarker } from "./p0b-live-browser.integration.test.mjs";
+import { adminWakeFailureMarker, keyboardOutcomeFailureMarker, keyboardRecentAuthFailureMarker, lifecycleFailureMarker, wakeAcceptedFailureMarker } from "./p0b-live-browser.integration.test.mjs";
+import { P0BLiveBrowserFixtureError } from "./support/p0b/live-browser-fixture.mjs";
 
 function response(status, payload, parse = true) {
   return {
@@ -31,6 +32,25 @@ const verifiedRecentAuth = {
   verifyObserved: true,
   verifyStatus: 200,
 };
+
+test("P0-B lifecycle diagnostics expose only reviewed timeout classes", () => {
+  for (const [code, marker] of [
+    ["startup_timeout", "P0B_SAFE_LIFECYCLE_FIXTURE_STARTUP_TIMEOUT_FAILED"],
+    ["fixture_start_failed", "P0B_SAFE_LIFECYCLE_FIXTURE_START_FAILED"],
+    ["database_prepare_failed", "P0B_SAFE_LIFECYCLE_DATABASE_PREPARE_FAILED"],
+    ["browser_startup_timeout", "P0B_SAFE_LIFECYCLE_BROWSER_STARTUP_TIMEOUT_FAILED"],
+    ["browser_startup_failed", "P0B_SAFE_LIFECYCLE_BROWSER_START_FAILED"],
+    ["cleanup_timeout", "P0B_SAFE_LIFECYCLE_FIXTURE_CLEANUP_TIMEOUT_FAILED"],
+    ["context_cleanup_timeout", "P0B_SAFE_LIFECYCLE_CONTEXT_CLEANUP_TIMEOUT_FAILED"],
+    ["context_cleanup_failed", "P0B_SAFE_LIFECYCLE_CONTEXT_CLEANUP_FAILED"],
+    ["browser_cleanup_timeout", "P0B_SAFE_LIFECYCLE_BROWSER_CLEANUP_TIMEOUT_FAILED"],
+    ["browser_cleanup_failed", "P0B_SAFE_LIFECYCLE_BROWSER_CLEANUP_FAILED"]
+  ]) {
+    assert.equal(lifecycleFailureMarker(new P0BLiveBrowserFixtureError(code, "unsafe diagnostic")), marker);
+  }
+  assert.equal(lifecycleFailureMarker(new P0BLiveBrowserFixtureError("unknown", "unsafe")), null);
+  assert.equal(lifecycleFailureMarker(new Error("unsafe")), null);
+});
 
 test("P0-B keyboard diagnostics classify the reviewed HTTP statuses without payload output", async () => {
   for (const [status, marker] of [

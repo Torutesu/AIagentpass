@@ -104,6 +104,27 @@ test("reports only an allow-listed failure code without retaining matching child
   assert.equal(Object.keys(result).includes("safeFailureCode"), false);
 });
 
+test("can terminate a command tree as soon as a reviewed safe failure is observed", async () => {
+  const marker = "P0B_SAFE_REVIEWED_FAILURE";
+  const startedAt = Date.now();
+  const result = await runQualificationCommand(node, script([
+    `process.stdout.write(${JSON.stringify(`${marker}\n`)});`,
+    "process.on('SIGTERM', () => {});",
+    "setInterval(() => {}, 1000);"
+  ].join("")), {
+    cwd,
+    env,
+    timeoutMs: 5_000,
+    terminateOnSafeFailure: true,
+    safeFailureMarkers: [{ marker, code: "reviewed_failure" }]
+  });
+
+  assert.equal(result.status, "failed");
+  assert.equal(result.internal.safe_failure_code, "reviewed_failure");
+  assert.equal(result.internal.timed_out, false);
+  assert.equal(Date.now() - startedAt < 2_000, true);
+});
+
 test("supports the bounded live-browser failure marker registry", async () => {
   const safeFailureMarkers = Array.from({ length: 256 }, (_, index) => ({
     marker: `P0B_SAFE_STAGE_${index}_FAILED`,
@@ -133,6 +154,22 @@ test("terminates a timed-out child with SIGTERM and then SIGKILL if needed", asy
   assert.equal(result.reason, "child_timeout");
   assert.equal(result.internal.timed_out, true);
   assert.equal(result.duration_ms >= 40, true);
+});
+
+test("terminates a timed-out command tree whose descendant retains stdio", { skip: process.platform === "win32" }, async () => {
+  const source = [
+    "const { spawn } = require('node:child_process');",
+    "spawn(process.execPath, ['-e', 'process.on(\\\"SIGTERM\\\", () => {}); setInterval(() => {}, 1000)'], { stdio: ['ignore', 'inherit', 'inherit'] });",
+    "process.on('SIGTERM', () => {});",
+    "setInterval(() => {}, 1000);"
+  ].join("");
+  const startedAt = Date.now();
+  const result = await runQualificationCommand(node, script(source), { cwd, env, timeoutMs: 40 });
+
+  assert.equal(result.status, "failed");
+  assert.equal(result.reason, "child_timeout");
+  assert.equal(result.internal.timed_out, true);
+  assert.equal(Date.now() - startedAt < 2_000, true);
 });
 
 test("reports an externally signalled child without settling twice", async () => {

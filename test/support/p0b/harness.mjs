@@ -20,6 +20,12 @@ const SECRET_ENV_PREFIX = "AGENTPASS_";
 const MAX_CAPTURED_OUTPUT = 8 * 1024;
 const MAX_DIAGNOSTIC_OUTPUT = 2 * 1024;
 const MAX_CA_BYTES = 256 * 1024;
+const P0B_PROCESS_TERM_TIMEOUT_MS = 1_000;
+const P0B_PROCESS_FORCE_TIMEOUT_MS = 1_000;
+const P0B_PROXY_CLOSE_TIMEOUT_MS = 1_500;
+const P0B_POOL_CLOSE_TIMEOUT_MS = 2_000;
+const P0B_DATABASE_QUERY_TIMEOUT_MS = 2_000;
+const P0B_TEMP_CLEANUP_TIMEOUT_MS = 2_000;
 const TRUSTED_HTTPS_LOOPBACK_HOSTS = new Set(["localhost", "127.0.0.1", "[::1]"]);
 const POSTGRES_CA_ENV_NAMES = ["P0B_POSTGRES_CA_FILE", "AGENTPASS_TEST_POSTGRES_CA_FILE"];
 const P0B_CLOUD_PROCESS = path.join(REPOSITORY_ROOT, "test/support/p0b/cloud-runtime-process.mjs");
@@ -29,6 +35,8 @@ const P0B_DATABASE_ROLES = Object.freeze({
   signer: "agentpass_signer",
   maintenance: "agentpass_maintenance"
 });
+const PROCESS_STOP_PROMISES = new WeakMap();
+const RESOURCE_CLOSE_PROMISES = new WeakMap();
 
 export class P0BSkip extends Error {
   constructor(code, diagnostic) {
@@ -207,29 +215,39 @@ export async function createDisposablePostgres({ adminUrl, databaseName = random
     await pool.query(`CREATE DATABASE ${quoteIdentifier(databaseName)}`);
     created = true;
   } catch (error) {
-    await pool.end().catch(() => {});
+    await endPool(pool);
     if (["ECONNREFUSED", "ENOTFOUND", "ETIMEDOUT", "EAI_AGAIN"].includes(error?.code)) throw new P0BSkip("postgres_unavailable", "PostgreSQL is unavailable; P0-B lane skipped");
     throw new Error("P0-B disposable PostgreSQL database could not be created");
   }
-  try { await pool.end(); } catch (error) {
+  if (!await endPool(pool)) {
     if (created) await dropDisposableDatabase(baseOptions, databaseName);
-    throw new Error(`P0-B PostgreSQL admin pool could not close (${redactP0BDiagnostic(error?.message ?? "unknown")})`);
+    throw new Error("P0-B PostgreSQL admin pool could not close (cleanup timeout)");
   }
   const database = new URL(admin.toString());
   database.pathname = `/${databaseName}`;
   const databaseOptions = createVerifiedPostgresPoolOptions(database, { ca: ca?.pem });
   const databasePool = new Pool({ ...databaseOptions, max: 8, connectionTimeoutMillis: 3_000, idleTimeoutMillis: 3_000 });
-  let removed = false;
+  let closePromise;
   return Object.freeze({
     url: database.toString(),
     caCertificate: ca?.pem,
     async close() {
-      if (removed) return;
-      removed = true;
-      await databasePool.end().catch(() => {});
-      const cleanupPool = new Pool({ ...baseOptions, max: 1, connectionTimeoutMillis: 3_000, idleTimeoutMillis: 3_000 });
-      try { await cleanupPool.query(`DROP DATABASE ${quoteIdentifier(databaseName)} WITH (FORCE)`); }
-      finally { await cleanupPool.end().catch(() => {}); }
+      if (!closePromise) {
+        closePromise = (async () => {
+          await endPool(databasePool);
+          const cleanupPool = new Pool({ ...baseOptions, max: 1, connectionTimeoutMillis: 3_000, idleTimeoutMillis: 3_000 });
+          try {
+            await boundedCleanup(
+              () => cleanupPool.query(`DROP DATABASE ${quoteIdentifier(databaseName)} WITH (FORCE)`),
+              P0B_DATABASE_QUERY_TIMEOUT_MS,
+              () => forceDestroyPool(cleanupPool)
+            );
+          } finally {
+            await endPool(cleanupPool);
+          }
+        })();
+      }
+      await closePromise;
     },
     pool: databasePool
   });
@@ -406,12 +424,13 @@ export function p0bHostedBootstrapEnvironment(consoleTlsPort) {
 }
 
 export async function closeP0BHarness({ cloudProcess, consoleProcess, cloudProxy, consoleProxy, database, temp } = {}) {
-  await consoleProxy?.close?.().catch(() => {});
-  await cloudProxy?.close?.().catch(() => {});
-  await stopProcess(consoleProcess);
-  await stopProcess(cloudProcess);
-  await database?.close?.().catch(() => {});
-  if (temp) await fsp.rm(temp, { recursive: true, force: true }).catch(() => {});
+  await Promise.all([
+    closeResource(consoleProxy, P0B_PROXY_CLOSE_TIMEOUT_MS),
+    closeResource(cloudProxy, P0B_PROXY_CLOSE_TIMEOUT_MS)
+  ]);
+  await Promise.all([stopProcess(consoleProcess), stopProcess(cloudProcess)]);
+  await closeResource(database, P0B_POOL_CLOSE_TIMEOUT_MS + P0B_DATABASE_QUERY_TIMEOUT_MS + P0B_POOL_CLOSE_TIMEOUT_MS);
+  if (temp) await boundedCleanup(() => fsp.rm(temp, { recursive: true, force: true }), P0B_TEMP_CLEANUP_TIMEOUT_MS);
 }
 
 export function randomDatabaseName() { return `agentpass_p0b_${process.pid}_${crypto.randomBytes(6).toString("hex")}`.slice(0, 63); }
@@ -439,8 +458,15 @@ async function createTrustedCaBundle(directory, files, certificates = []) {
 
 async function dropDisposableDatabase(baseOptions, databaseName) {
   const cleanupPool = new Pool({ ...baseOptions, max: 1, connectionTimeoutMillis: 3_000, idleTimeoutMillis: 3_000 });
-  try { await cleanupPool.query(`DROP DATABASE ${quoteIdentifier(databaseName)} WITH (FORCE)`); }
-  finally { await cleanupPool.end().catch(() => {}); }
+  try {
+    await boundedCleanup(
+      () => cleanupPool.query(`DROP DATABASE ${quoteIdentifier(databaseName)} WITH (FORCE)`),
+      P0B_DATABASE_QUERY_TIMEOUT_MS,
+      () => forceDestroyPool(cleanupPool)
+    );
+  } finally {
+    await endPool(cleanupPool);
+  }
 }
 
 async function createRuntimeFiles(directory) {
@@ -534,15 +560,108 @@ function processDiagnostic(child) {
   return `${state}${safeOutput}`;
 }
 
-async function stopProcess(child) {
-  if (!child || child.exitCode !== null || child.signalCode !== null) return;
-  const pid = child.pid;
-  try { process.kill(process.platform === "win32" ? pid : -pid, "SIGTERM"); } catch { try { child.kill("SIGTERM"); } catch {} }
-  await new Promise((resolve) => {
-    if (child.exitCode !== null || child.signalCode !== null) { resolve(); return; }
-    const timer = setTimeout(() => { try { process.kill(process.platform === "win32" ? pid : -pid, "SIGKILL"); } catch { try { child.kill("SIGKILL"); } catch {} } resolve(); }, 3_000);
-    child.once("exit", () => { clearTimeout(timer); resolve(); });
+async function boundedCleanup(task, timeoutMs, onAbort) {
+  const timedOut = Symbol("cleanup_timeout");
+  let timer;
+  const operation = Promise.resolve().then(task).then(() => true, () => false);
+  const timeout = new Promise((resolve) => {
+    timer = setTimeout(() => resolve(timedOut), timeoutMs);
   });
+  const result = await Promise.race([operation, timeout]);
+  clearTimeout(timer);
+  if (result === timedOut || result === false) {
+    try { onAbort?.(); } catch {}
+    return false;
+  }
+  return true;
+}
+
+async function closeResource(resource, timeoutMs) {
+  if (!resource || (typeof resource !== "object" && typeof resource !== "function") || typeof resource.close !== "function") return;
+  let closePromise = RESOURCE_CLOSE_PROMISES.get(resource);
+  if (!closePromise) {
+    closePromise = boundedCleanup(() => resource.close(), timeoutMs);
+    RESOURCE_CLOSE_PROMISES.set(resource, closePromise);
+  }
+  await closePromise;
+}
+
+async function endPool(pool) {
+  if (!pool || typeof pool.end !== "function") return true;
+  return boundedCleanup(() => pool.end(), P0B_POOL_CLOSE_TIMEOUT_MS, () => forceDestroyPool(pool));
+}
+
+function forceDestroyPool(pool) {
+  const clients = new Set([
+    ...(Array.isArray(pool?._clients) ? pool._clients : []),
+    ...(Array.isArray(pool?._idle) ? pool._idle.map((item) => item?.client).filter(Boolean) : [])
+  ]);
+  for (const item of pool?._idle ?? []) {
+    try { clearTimeout(item?.timeoutId); } catch {}
+  }
+  for (const client of clients) {
+    try { client.connection?.stream?.destroy(); } catch {}
+  }
+}
+
+function processExited(child) {
+  return Boolean(child?.p0bSpawnError) || child?.exitCode != null || child?.signalCode != null;
+}
+
+function sendProcessSignal(child, signal) {
+  const pid = child?.pid;
+  if (Number.isSafeInteger(pid) && pid > 0) {
+    if (process.platform !== "win32") {
+      try { process.kill(-pid, signal); } catch {}
+    }
+    try { process.kill(pid, signal); } catch {}
+  }
+  try { child?.kill?.(signal); } catch {}
+}
+
+function waitForProcessExit(child, timeoutMs) {
+  if (processExited(child)) return Promise.resolve(true);
+  return new Promise((resolve) => {
+    let settled = false;
+    let timer;
+    const finish = (exited) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      child.removeListener?.("exit", onExit);
+      child.removeListener?.("error", onError);
+      resolve(exited);
+    };
+    const onExit = () => finish(true);
+    const onError = () => finish(processExited(child));
+    child.once?.("exit", onExit);
+    child.once?.("error", onError);
+    if (processExited(child)) {
+      finish(true);
+      return;
+    }
+    timer = setTimeout(() => finish(processExited(child)), timeoutMs);
+  });
+}
+
+async function stopProcess(child) {
+  if (!child || typeof child !== "object") return;
+  let stopPromise = PROCESS_STOP_PROMISES.get(child);
+  if (!stopPromise) {
+    stopPromise = (async () => {
+      if (processExited(child)) return;
+      sendProcessSignal(child, "SIGTERM");
+      if (await waitForProcessExit(child, P0B_PROCESS_TERM_TIMEOUT_MS)) return;
+      sendProcessSignal(child, "SIGKILL");
+      if (!await waitForProcessExit(child, P0B_PROCESS_FORCE_TIMEOUT_MS)) {
+        try { child.stdout?.destroy(); } catch {}
+        try { child.stderr?.destroy(); } catch {}
+        try { child.unref?.(); } catch {}
+      }
+    })();
+    PROCESS_STOP_PROMISES.set(child, stopPromise);
+  }
+  await stopPromise;
 }
 
 async function createTlsProxy({ cert, key, targetPort, port }) {
@@ -565,12 +684,33 @@ async function createTlsProxy({ cert, key, targetPort, port }) {
   server.keepAliveTimeout = 1_000;
   server.on("connection", (socket) => { sockets.add(socket); socket.once("close", () => sockets.delete(socket)); });
   await new Promise((resolve, reject) => { server.once("error", reject); server.listen(port, LOOPBACK, resolve); });
+  let closePromise;
+  const forceClose = () => {
+    try { server.closeIdleConnections?.(); } catch {}
+    try { server.closeAllConnections?.(); } catch {}
+    for (const upstream of upstreams) {
+      try { upstream.destroy(); } catch {}
+    }
+    for (const socket of sockets) {
+      try { socket.destroy(); } catch {}
+    }
+  };
   return Object.freeze({
     port,
     async close() {
-      for (const upstream of upstreams) upstream.destroy();
-      for (const socket of sockets) socket.destroy();
-      await new Promise((resolve) => server.close(() => resolve()));
+      if (!closePromise) {
+        closePromise = (async () => {
+          let closeOperation;
+          try {
+            closeOperation = new Promise((resolve) => server.close(() => resolve()));
+          } catch {
+            closeOperation = Promise.resolve();
+          }
+          forceClose();
+          await boundedCleanup(closeOperation, P0B_PROXY_CLOSE_TIMEOUT_MS, forceClose);
+        })();
+      }
+      await closePromise;
     }
   });
 }
