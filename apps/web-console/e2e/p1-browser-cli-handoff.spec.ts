@@ -177,7 +177,7 @@ test("posts the exact bound envelope and marks delivery only after the exact ACK
   await page.getByRole("button", { name: "Touch ID/パスキー確認して発行", exact: true }).click();
   await expect(page.locator('[data-live-handoff-state="delivered"]')).toBeVisible();
   expect(state.postBodies).toHaveLength(1);
-  expect(state.postBodies[0]).toEqual({ version: 1, correlation_id: CORRELATION_ID, nonce: NONCE, invitation: enrollment() });
+  expect(state.postBodies[0]).toEqual({ version: 1, type: "agentpass.browser-onboarding.invitation", correlation_id: CORRELATION_ID, nonce: NONCE, invitation: enrollment() });
   const rendered = (await page.locator("body").textContent()) ?? "";
   expect(rendered).not.toContain(NONCE);
   expect(rendered).not.toContain(ENROLLMENT_SECRET);

@@ -13,6 +13,7 @@ import {
   normalizeConsoleBaseUrl,
   openConsoleWithSystem
 } from "../lib/setup-browser-connect.mjs";
+import { ONBOARDING_INVITATION_DELIVERY_TYPE } from "../lib/onboarding-contract.mjs";
 
 const CONSOLE = "https://console.example";
 const DEV_CONSOLE = "http://localhost:3001";
@@ -151,7 +152,7 @@ test("opens Console and returns exactly one invitation from memory", async () =>
       const response = await request(handoffUrl, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ version: 1, correlation_id: challenge.correlation_id, nonce: challenge.nonce, invitation: value })
+        body: JSON.stringify({ version: 1, type: ONBOARDING_INVITATION_DELIVERY_TYPE, correlation_id: challenge.correlation_id, nonce: challenge.nonce, invitation: value })
       });
       assert.equal(response.status, 200);
     }

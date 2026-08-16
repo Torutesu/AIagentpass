@@ -92,7 +92,7 @@ test("GETs preflight with no-store and validates the response before exposing pu
 test("POSTs exactly the bound envelope and accepts only the exact ACK", async () => {
   let request;
   const envelope = buildBrowserCliHandoffEnvelope({ correlation_id: correlationId, nonce, invitation });
-  assert.deepEqual(Object.keys(envelope), ["version", "correlation_id", "nonce", "invitation"]);
+  assert.deepEqual(Object.keys(envelope), ["version", "type", "correlation_id", "nonce", "invitation"]);
   await postBrowserCliHandoff({
     handoff,
     correlation_id: correlationId,
@@ -107,7 +107,7 @@ test("POSTs exactly the bound envelope and accepts only the exact ACK", async ()
   assert.equal(request.init.method, "POST");
   assert.equal(request.init.cache, "no-store");
   assert.equal(request.init.credentials, "omit");
-  assert.deepEqual(JSON.parse(request.init.body), { version: 1, correlation_id: correlationId, nonce, invitation });
+  assert.deepEqual(JSON.parse(request.init.body), { version: 1, type: "agentpass.browser-onboarding.invitation", correlation_id: correlationId, nonce, invitation });
   await assert.rejects(postBrowserCliHandoff({ handoff, correlation_id: correlationId, nonce, invitation, fetchImpl: async () => response({ version: 1, ok: true, consumed: false }) }), (error) => error.code === BROWSER_CLI_HANDOFF_ERRORS.INVALID_ACK);
   await assert.rejects(postBrowserCliHandoff({ handoff, correlation_id: correlationId, nonce, invitation, fetchImpl: async () => response({ version: 1, ok: true, consumed: true, credential: "must-not-be-accepted" }) }), (error) => error.code === BROWSER_CLI_HANDOFF_ERRORS.INVALID_ACK);
   assert.throws(() => buildBrowserCliHandoffEnvelope({ correlation_id: correlationId, nonce, invitation, extra: "reject" }), BrowserCliHandoffClientError);

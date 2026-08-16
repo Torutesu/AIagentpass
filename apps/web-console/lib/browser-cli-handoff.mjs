@@ -1,4 +1,5 @@
 const HANDOFF_VERSION = 1;
+const HANDOFF_TYPE = "agentpass.browser-onboarding.invitation";
 const PREFLIGHT_VERSION = 1;
 const SAFE_TOKEN = /^[A-Za-z0-9_-]{43}$/u;
 const SAFE_CANDIDATE_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/u;
@@ -129,7 +130,7 @@ export function buildBrowserCliHandoffEnvelope(input = {}) {
     || !plainObject(invitation)) {
     throw new BrowserCliHandoffClientError(BROWSER_CLI_HANDOFF_ERRORS.DELIVERY_FAILED, "The local setup handoff could not be prepared");
   }
-  return Object.freeze({ version: HANDOFF_VERSION, correlation_id, nonce, invitation });
+  return Object.freeze({ version: HANDOFF_VERSION, type: HANDOFF_TYPE, correlation_id, nonce, invitation });
 }
 
 export async function postBrowserCliHandoff({ handoff, correlation_id, nonce, invitation, fetchImpl = globalThis.fetch, signal } = {}) {
