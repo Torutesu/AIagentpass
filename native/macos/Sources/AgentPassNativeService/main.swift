@@ -3827,7 +3827,7 @@ private final class AgentConnectionEndpoint: NSObject, AgentPassAgentXPCProtocol
                     let phase = try runtime.signingTransactions.lookup(request: transactionRequest)?.phase
                     if phase == .signedVerified {
                         do { _ = try runtime.signingTransactions.markUncertain(requestID: transactionRequest.requestID) }
-                        catch { replyBox.call(nil, NativeSigningTransactionError.invalidState as NSError); return }
+                        catch { replyBox.call(nil, Self.denial(for: NativeSigningTransactionError.invalidState).nsError); return }
                     }
                     if phase == .providerStarted {
                         do { _ = try runtime.signingTransactions.markUncertain(requestID: transactionRequest.requestID) } catch {}
@@ -3839,10 +3839,10 @@ private final class AgentConnectionEndpoint: NSObject, AgentPassAgentXPCProtocol
                         do { _ = try runtime.signingTransactions.markUncertain(requestID: transactionRequest.requestID) } catch {}
                         do { try coordinator.releaseSigningBeforeKey(reservation) } catch {}
                     }
-                    replyBox.call(nil, error as NSError)
+                    replyBox.call(nil, Self.denial(for: error).nsError)
                 }
             } catch {
-                replyBox.call(nil, error as NSError)
+                replyBox.call(nil, Self.denial(for: error).nsError)
             }
         }
     }
@@ -3879,6 +3879,23 @@ private final class AgentConnectionEndpoint: NSObject, AgentPassAgentXPCProtocol
     }
 
     private static func denial(for error: Error) -> NativeAgentSessionDenialReason {
+        if let error = error as? NativeSigningTransactionError {
+            switch error {
+            case .invalidPath, .invalidRequest: return .malformedRequest
+            case .invalidAuthority, .authorityConflict: return .controlDenied
+            case .requestConflict: return .replayDetected
+            case .capacityExceeded: return .budgetExceeded
+            case .uncertain, .phaseConflict: return .signingOutcomeUnknown
+            case .invalidState: return .internalFailure
+            }
+        }
+        if let error = error as? NativeAgentGitCommitSignerError {
+            switch error {
+            case .invalidPayload: return .malformedRequest
+            case .invalidSigner: return .keyUnavailable
+            case .signingFailed, .invalidSignature: return .internalFailure
+            }
+        }
         guard let error = error as? NativeAgentSessionCoordinatorError else {
             return .internalFailure
         }

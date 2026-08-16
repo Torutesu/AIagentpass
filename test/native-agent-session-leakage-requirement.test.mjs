@@ -248,7 +248,7 @@ test("audit evidence is an exact secret-free allowlist and is hashed before the 
   assert.doesNotMatch(appendAudit, /localizedDescription|error\.userInfo|String\(describing:|proof|grant|private[_-]?key|credential/u);
 });
 
-test("signGitCommit remains deliberately unavailable and cannot reach a signer", () => {
+test("signGitCommit uses a durable sign-once transaction and returns only bounded denials", () => {
   const endpoint = between(
     service,
     "private final class AgentConnectionEndpoint",
@@ -256,10 +256,17 @@ test("signGitCommit remains deliberately unavailable and cannot reach a signer",
   );
   const signMethod = between(endpoint, "func signGitCommit", "func closeAgentSession");
   const signBody = signMethod.slice(signMethod.indexOf("{") + 1);
-  assert.match(signMethod, /reply\(nil, unavailableAfterAuthorization\(\)\)/u);
-  assert.doesNotMatch(signBody, /AgentPassAgentSignResponse|signGitCommitPayload|runtime\.[A-Za-z]*sign|privateKey|keySelector/u);
+  assert.match(signMethod, /runtime\.signingTransactions\.lookup\(request: transactionRequest\)/u);
+  assert.match(signMethod, /runtime\.signingTransactions\.markProviderStarted/u);
+  assert.match(signMethod, /runtime\.gitCommitSigner\.signGitCommitPayload/u);
+  assert.match(signMethod, /runtime\.gitCommitSigner\.verifyGitCommitSignature/u);
+  assert.match(signMethod, /runtime\.signingTransactions\.recordVerified/u);
+  assert.match(signMethod, /runtime\.signingTransactions\.complete/u);
+  assert.match(signMethod, /Self\.denial\(for: error\)\.nsError/u);
+  assert.doesNotMatch(signBody, /error as NSError|localizedDescription|error\.userInfo|privateKey|keySelector/u);
   assert.match(protocol, /func signGitCommit\([\s\S]*AgentPassAgentSignResponse\?/u);
-  assert.match(service, /signing implementation will be allowed[\s\S]*unavailableAfterAuthorization/u);
+  assert.match(signMethod, /case \.providerStarted:[\s\S]*NativeSigningTransactionError\.uncertain/u);
+  assert.match(signMethod, /case \.uncertain:[\s\S]*NativeSigningTransactionError\.uncertain/u);
 });
 
 test("restart recovery persists only Grant and authority digests", () => {
