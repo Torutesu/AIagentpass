@@ -1,4 +1,4 @@
-import AgentPassNativeCore
+@testable import AgentPassNativeCore
 import Darwin
 import Foundation
 import Testing
@@ -180,6 +180,65 @@ private final class ExecutableProbeFixture: @unchecked Sendable {
         lock.lock()
         defer { lock.unlock() }
         return probedPaths
+    }
+}
+
+private final class ExecutableTrustFixture: @unchecked Sendable {
+    private let lock = NSLock()
+    private let executablePaths: Set<String>
+    private let writablePaths: Set<String>
+    private var overrides: [String: NativeAgentHostExecutableMetadata]
+
+    init(
+        executablePaths: Set<String>,
+        writablePaths: Set<String> = [],
+        overrides: [String: NativeAgentHostExecutableMetadata] = [:]
+    ) {
+        self.executablePaths = executablePaths
+        self.writablePaths = writablePaths
+        self.overrides = overrides
+    }
+
+    func setOverride(_ metadata: NativeAgentHostExecutableMetadata, for path: String) {
+        lock.lock()
+        overrides[path] = metadata
+        lock.unlock()
+    }
+
+    func hooks() -> NativeAgentHostExecutableTrustHooks {
+        NativeAgentHostExecutableTrustHooks(
+            lstat: { [self] path in
+                lock.lock()
+                defer { lock.unlock() }
+                if let metadata = overrides[path] {
+                    return metadata
+                }
+                if executablePaths.contains(path) {
+                    return NativeAgentHostExecutableMetadata(
+                        device: 1,
+                        inode: 100,
+                        ownerUID: 0,
+                        mode: UInt32(S_IFREG) | UInt32(0o755)
+                    )
+                }
+                return NativeAgentHostExecutableMetadata(
+                    device: 1,
+                    inode: 10,
+                    ownerUID: 0,
+                    mode: UInt32(S_IFDIR) | UInt32(0o755)
+                )
+            },
+            isExecutable: { [self] path in
+                lock.lock()
+                defer { lock.unlock() }
+                return executablePaths.contains(path)
+            },
+            isWritable: { [self] path in
+                lock.lock()
+                defer { lock.unlock() }
+                return writablePaths.contains(path)
+            }
+        )
     }
 }
 
@@ -754,5 +813,164 @@ func waitOutcomeIsReducedToBoundedExitClassification(_ outcome: NativeAgentHostW
         let snapshot = fixture.snapshot()
         #expect(snapshot.signals.map { $0.1 } == [.terminate])
         #expect(snapshot.waitCallCount == 1)
+    }
+}
+
+@Test func cursorExecutableTrustAcceptsOnlyRootOwnedRegularNonWritableExecutables() throws {
+    let candidate = NativeAgentHostExecutableTrust.cursorExecutableCandidates[0]
+    let fixture = ExecutableTrustFixture(executablePaths: [candidate])
+
+    let selection = try NativeAgentHostExecutableTrust.resolveCursorExecutable(
+        candidates: [candidate],
+        hooks: fixture.hooks()
+    )
+
+    #expect(selection.path == candidate)
+    #expect(selection.device == 1)
+    #expect(selection.inode == 100)
+}
+
+@Test func cursorExecutableTrustRejectsUserOwnedAndGroupWritableCandidates() throws {
+    let userOwned = NativeAgentHostExecutableTrust.cursorExecutableCandidates[0]
+    let writableParent = NativeAgentHostExecutableTrust.cursorExecutableCandidates[1]
+    let writableParentPath = "/Applications/Cursor.app/Contents/Resources/app"
+    let fixture = ExecutableTrustFixture(
+        executablePaths: [userOwned, writableParent],
+        overrides: [
+            userOwned: NativeAgentHostExecutableMetadata(
+                device: 1,
+                inode: 101,
+                ownerUID: 501,
+                mode: UInt32(S_IFREG) | UInt32(0o755)
+            ),
+            writableParentPath: NativeAgentHostExecutableMetadata(
+                device: 1,
+                inode: 102,
+                ownerUID: 0,
+                mode: UInt32(S_IFDIR) | UInt32(0o775)
+            )
+        ]
+    )
+
+    #expect(throws: NativeAgentHostExecutableTrustError.noTrustedCandidate) {
+        try NativeAgentHostExecutableTrust.resolveCursorExecutable(
+            candidates: [userOwned, writableParent],
+            hooks: fixture.hooks()
+        )
+    }
+}
+
+@Test func cursorExecutableTrustRejectsACLWriteAccessEvenWhenModeIsSafe() throws {
+    let executable = NativeAgentHostExecutableTrust.cursorExecutableCandidates[0]
+    let parent = "/Applications/Cursor.app/Contents/Resources/app"
+
+    let writableExecutable = ExecutableTrustFixture(
+        executablePaths: [executable],
+        writablePaths: [executable]
+    )
+    #expect(throws: NativeAgentHostExecutableTrustError.noTrustedCandidate) {
+        try NativeAgentHostExecutableTrust.resolveCursorExecutable(
+            candidates: [executable],
+            hooks: writableExecutable.hooks()
+        )
+    }
+
+    let writableParent = ExecutableTrustFixture(
+        executablePaths: [executable],
+        writablePaths: [parent]
+    )
+    #expect(throws: NativeAgentHostExecutableTrustError.noTrustedCandidate) {
+        try NativeAgentHostExecutableTrust.resolveCursorExecutable(
+            candidates: [executable],
+            hooks: writableParent.hooks()
+        )
+    }
+}
+
+@Test func cursorExecutableTrustRejectsSymlinkFinalObjectsAndParents() throws {
+    let symlinkCandidate = NativeAgentHostExecutableTrust.cursorExecutableCandidates[0]
+    let symlinkParentCandidate = NativeAgentHostExecutableTrust.cursorExecutableCandidates[1]
+    let symlinkParent = "/Applications/Cursor.app/Contents/Resources/app"
+    let fixture = ExecutableTrustFixture(
+        executablePaths: [symlinkCandidate, symlinkParentCandidate],
+        overrides: [
+            symlinkCandidate: NativeAgentHostExecutableMetadata(
+                device: 1,
+                inode: 103,
+                ownerUID: 0,
+                mode: UInt32(S_IFLNK) | UInt32(0o777)
+            ),
+            symlinkParent: NativeAgentHostExecutableMetadata(
+                device: 1,
+                inode: 104,
+                ownerUID: 0,
+                mode: UInt32(S_IFLNK) | UInt32(0o777)
+            )
+        ]
+    )
+
+    #expect(throws: NativeAgentHostExecutableTrustError.noTrustedCandidate) {
+        try NativeAgentHostExecutableTrust.resolveCursorExecutable(
+            candidates: [symlinkCandidate, symlinkParentCandidate],
+            hooks: fixture.hooks()
+        )
+    }
+}
+
+@Test func cursorExecutableTrustFallsBackOnlyToTheNextReviewedCandidate() throws {
+    let rejected = NativeAgentHostExecutableTrust.cursorExecutableCandidates[0]
+    let accepted = NativeAgentHostExecutableTrust.cursorExecutableCandidates[1]
+    let fixture = ExecutableTrustFixture(
+        executablePaths: [rejected, accepted],
+        overrides: [
+            rejected: NativeAgentHostExecutableMetadata(
+                device: 1,
+                inode: 105,
+                ownerUID: 501,
+                mode: UInt32(S_IFREG) | UInt32(0o755)
+            )
+        ]
+    )
+
+    let selection = try NativeAgentHostExecutableTrust.resolveCursorExecutable(
+        candidates: [rejected, accepted],
+        hooks: fixture.hooks()
+    )
+    #expect(selection.path == accepted)
+}
+
+@Test func cursorExecutableTrustRevalidationDetectsInodeReplacement() throws {
+    let candidate = NativeAgentHostExecutableTrust.cursorExecutableCandidates[2]
+    let fixture = ExecutableTrustFixture(executablePaths: [candidate])
+    let selection = try NativeAgentHostExecutableTrust.resolveCursorExecutable(
+        candidates: [candidate],
+        hooks: fixture.hooks()
+    )
+
+    fixture.setOverride(
+        NativeAgentHostExecutableMetadata(
+            device: 1,
+            inode: 106,
+            ownerUID: 0,
+            mode: UInt32(S_IFREG) | UInt32(0o755)
+        ),
+        for: candidate
+    )
+
+    #expect(throws: NativeAgentHostExecutableTrustError.identityChanged) {
+        try NativeAgentHostExecutableTrust.revalidate(selection, hooks: fixture.hooks())
+    }
+}
+
+@Test func cursorExecutableTrustRejectsUnknownAndUserHomeSelectors() throws {
+    let unknown = "/tmp/attacker/cursor-agent"
+    let userHome = "/Users/tester/.local/bin/cursor-agent"
+    let fixture = ExecutableTrustFixture(executablePaths: [unknown, userHome])
+
+    #expect(throws: NativeAgentHostExecutableTrustError.noTrustedCandidate) {
+        try NativeAgentHostExecutableTrust.resolveCursorExecutable(
+            candidates: [unknown, userHome],
+            hooks: fixture.hooks()
+        )
     }
 }
