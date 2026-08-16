@@ -4,6 +4,8 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 
+import { POSTGRES_SCHEMA_HEAD } from "../apps/cloud-api/src/postgres/schema-head.mjs";
+
 import {
   HOSTED_ACCOUNT_TEST_FILES,
   HOSTED_ACCOUNT_QUALIFICATION_SCENARIOS,
@@ -38,8 +40,8 @@ test("creates source- and TAP-bound Hosted account qualification evidence", asyn
     runAttempt: "2",
     tapFile: f.tapFile
   });
-  assert.equal(evidence.migration_version, 71);
-  assert.equal(evidence.catalog_entries, 182);
+  assert.equal(evidence.migration_version, POSTGRES_SCHEMA_HEAD.version);
+  assert.equal(evidence.catalog_entries, POSTGRES_SCHEMA_HEAD.catalog_entries);
   assert.deepEqual(evidence.test_files, HOSTED_ACCOUNT_TEST_FILES);
   assert.deepEqual(evidence.scenarios, HOSTED_ACCOUNT_QUALIFICATION_SCENARIOS);
   assert.deepEqual(evidence.summary, { tests: 12, passed: 12, failed: 0, skipped: 0, todo: 0 });

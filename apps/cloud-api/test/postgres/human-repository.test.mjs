@@ -128,7 +128,7 @@ test("credential lookup and counter update are session and organization scoped",
   assert.equal(await repo.findCredentialForSession({session_id:ids.session,organization_id:ids.org,credential_id:credential}),null);
   assert.equal(await repo.updateCredentialCounter({session_id:ids.session,organization_id:ids.org,credential_id:credential,sign_count:2,expected_sign_count:1}),false);
   assert.match(calls[0].text,/m\.status='active'/); assert.match(calls[1].text,/c\.sign_count=\$5/);
-  assert.match(calls[1].text,/SET sign_count=\$4,backup_eligible=COALESCE\(\$6,c\.backup_eligible\),backup_state=COALESCE\(\$7,c\.backup_state\),last_used_at=clock_timestamp\(\)/);
+  assert.match(calls[1].text,/SET sign_count=\$4,sign_count_state=CASE WHEN \$4=0 THEN 'zero-counter' ELSE 'monotonic' END,backup_eligible=COALESCE\(\$6,c\.backup_eligible\),backup_state=COALESCE\(\$7,c\.backup_state\),last_used_at=clock_timestamp\(\)/);
   assert.deepEqual(calls[1].params.slice(5), [null, null, null, null]);
   assert.doesNotMatch(calls[1].text,/\bversion\s*=/);
 });
@@ -284,7 +284,7 @@ test("credential registration atomically locks, consumes step-up for existing cr
   let activeCount = "0";
   const client = { async query(text, params) {
     calls.push({ text, params });
-    if (text.startsWith("SELECT COUNT(*)")) return { rows: [{ active_count: activeCount }], rowCount: 1 };
+    if (text.startsWith("SELECT COUNT(*)")) return { rows: [{ active_count: activeCount, total_count: activeCount }], rowCount: 1 };
     if (text.startsWith("UPDATE human_sessions")) return { rows: [{ id: ids.session }], rowCount: 1 };
     if (text.startsWith("INSERT INTO webauthn_credentials")) return { rows: [{ id: Buffer.from(credentialId, "base64url") }], rowCount: 1 };
     return { rows: [], rowCount: 0 };

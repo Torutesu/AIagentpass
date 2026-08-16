@@ -192,6 +192,18 @@ test("device-authenticated receipt endpoint returns a strict signed receipt", ()
         device_key_fingerprint: `SHA256:${"D".repeat(43)}`,
         device_key_epoch: 1,
         challenge_nonce_digest: "e".repeat(64),
+        control: {
+          format_epoch: 2,
+          issuer: "agentpass-cloud",
+          key_id: "control-v2",
+          public_key: `-----BEGIN PUBLIC KEY-----\n${"A".repeat(80)}\n-----END PUBLIC KEY-----`,
+          bundle_path: "/v1/organizations/33333333-3333-4333-8333-333333333333/bundles/22222222-2222-4222-8222-222222222222",
+          refresh_hint: {
+            key_id: "control-refresh-v1",
+            algorithm: "ed25519",
+            public_key: `-----BEGIN PUBLIC KEY-----\n${"B".repeat(80)}\n-----END PUBLIC KEY-----`
+          }
+        },
         issued_at: "2026-08-13T10:00:00.000Z"
       },
       statement_hash: "a".repeat(64),

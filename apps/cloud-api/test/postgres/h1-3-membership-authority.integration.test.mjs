@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { generateKeyPairSync, randomUUID } from "node:crypto";
+import { createHash, generateKeyPairSync, randomUUID } from "node:crypto";
 import test from "node:test";
 import { Pool } from "pg";
 
@@ -365,9 +365,11 @@ async function seedContentionTarget(pool, fixture) {
 }
 
 async function insertSessionAndChallenge(pool, { sessionId, challengeId, memberId, membershipId, role, byte, operation, organizationId }) {
+  const tokenHash = createHash("sha256").update(`h1-3-token:${sessionId}`).digest();
+  const csrfTokenHash = createHash("sha256").update(`h1-3-csrf:${sessionId}`).digest();
   await pool.query(`INSERT INTO human_sessions
     (id,member_id,organization_id,membership_id,role,token_hash,csrf_token_hash,created_at,expires_at,last_seen_at,idle_expires_at)
-    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$8,$9)`, [sessionId, memberId, organizationId, membershipId, role, Buffer.alloc(32, byte), Buffer.alloc(32, byte + 1), CREATED_AT, EXPIRES_AT]);
+    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$8,$9)`, [sessionId, memberId, organizationId, membershipId, role, tokenHash, csrfTokenHash, CREATED_AT, EXPIRES_AT]);
   await pool.query(`INSERT INTO webauthn_challenges
     (id,session_id,member_id,organization_id,ceremony,operation,challenge_hash,created_at,expires_at,rp_id,origin,user_verification,status)
     VALUES ($1,$2,$3,$4,'authentication',$5,$6,$7,$8,'console.agentpass.test','https://console.agentpass.test','required','pending')`, [challengeId, sessionId, memberId, organizationId, operation, Buffer.alloc(32, byte + 2), CREATED_AT, EXPIRES_AT]);

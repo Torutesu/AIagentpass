@@ -2,6 +2,8 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
 
+import { POSTGRES_SCHEMA_HEAD } from "../../src/postgres/schema-head.mjs";
+
 const migrationUrl = new URL("../../../../contracts/postgres/0064_hosted_bootstrap_status_csrf.sql", import.meta.url);
 const rolesUrl = new URL("../../../../scripts/postgres/roles.sql", import.meta.url);
 const roleCheckerUrl = new URL("../../../../scripts/postgres/role-privilege-check.mjs", import.meta.url);
@@ -111,8 +113,8 @@ test("0064 is cataloged, activated, and granted without app table reads", async 
       "apps/cloud-api/test/server-hosted-bootstrap-routing.test.mjs"
     ]
   });
-  assert.equal(catalog.entries.filter((item) => item.kind === "postgres-migration").length, 71);
-  assert.equal(catalog.entries.length, 182);
+  assert.equal(catalog.entries.filter((item) => item.kind === "postgres-migration").length, POSTGRES_SCHEMA_HEAD.migration_count);
+  assert.equal(catalog.entries.length, POSTGRES_SCHEMA_HEAD.catalog_entries);
   assert.equal(contract.activation.bootstrap_status_csrf_forward_migration, "0064_hosted_bootstrap_status_csrf");
   assert.match(contract.authority.bootstrap_status_csrf_authority, /status_v2/u);
   assert.match(contract.authority.bootstrap_status_csrf_authority, /csrf_verify_v2/u);
