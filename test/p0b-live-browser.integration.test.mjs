@@ -163,7 +163,9 @@ test("P0-B live browser role, WebAuthn, and recent-auth matrix", { skip: !enable
         const observation = {
           routeIntercepted: false,
           routeSetupFailed: false,
-          routeActionFailed: false,
+          routeFetchFailed: false,
+          verifyResponseStatus: null,
+          routeFulfillFailed: false,
           invalidationFailed: false,
           clickFailed: false,
           responseStatus: null,
@@ -184,19 +186,20 @@ test("P0-B live browser role, WebAuthn, and recent-auth matrix", { skip: !enable
             try {
               response = await route.fetch();
             } catch {
-              observation.routeActionFailed = true;
+              observation.routeFetchFailed = true;
               await route.abort().catch(() => {});
               return;
             }
+            observation.verifyResponseStatus = response.status();
             if (!response.ok()) {
-              observation.routeActionFailed = true;
-              await route.fulfill({ response }).catch(() => {});
+              try { await route.fulfill({ response }); }
+              catch { observation.routeFulfillFailed = true; }
               return;
             }
             try { await fixture.invalidateRecentAuth(page, failure); }
             catch { observation.invalidationFailed = true; }
             try { await route.fulfill({ response }); }
-            catch { observation.routeActionFailed = true; }
+            catch { observation.routeFulfillFailed = true; }
           });
         } catch {
           observation.routeSetupFailed = true;
@@ -255,7 +258,9 @@ test("stale authorization diagnostics emit only fixed safe markers", () => {
   const valid = {
     routeIntercepted: true,
     routeSetupFailed: false,
-    routeActionFailed: false,
+    routeFetchFailed: false,
+    verifyResponseStatus: 200,
+    routeFulfillFailed: false,
     invalidationFailed: false,
     clickFailed: false,
     responseStatus: 401,
@@ -264,7 +269,12 @@ test("stale authorization diagnostics emit only fixed safe markers", () => {
   assert.equal(staleAuthorizationFailureMarker(valid), null);
   assert.equal(staleAuthorizationFailureMarker({ ...valid, clickFailed: true }), STALE_AUTH_DIAGNOSTIC_MARKERS.clickFailed);
   assert.equal(staleAuthorizationFailureMarker({ ...valid, routeSetupFailed: true }), STALE_AUTH_DIAGNOSTIC_MARKERS.routeSetupFailed);
-  assert.equal(staleAuthorizationFailureMarker({ ...valid, routeActionFailed: true }), STALE_AUTH_DIAGNOSTIC_MARKERS.routeActionFailed);
+  assert.equal(staleAuthorizationFailureMarker({ ...valid, routeFetchFailed: true }), STALE_AUTH_DIAGNOSTIC_MARKERS.routeFetchFailed);
+  assert.equal(staleAuthorizationFailureMarker({ ...valid, verifyResponseStatus: 401 }), STALE_AUTH_DIAGNOSTIC_MARKERS.verifyHttp401);
+  assert.equal(staleAuthorizationFailureMarker({ ...valid, verifyResponseStatus: 403 }), STALE_AUTH_DIAGNOSTIC_MARKERS.verifyHttp4xx);
+  assert.equal(staleAuthorizationFailureMarker({ ...valid, verifyResponseStatus: 503 }), STALE_AUTH_DIAGNOSTIC_MARKERS.verifyHttp5xx);
+  assert.equal(staleAuthorizationFailureMarker({ ...valid, verifyResponseStatus: 0 }), STALE_AUTH_DIAGNOSTIC_MARKERS.verifyHttpOther);
+  assert.equal(staleAuthorizationFailureMarker({ ...valid, routeFulfillFailed: true }), STALE_AUTH_DIAGNOSTIC_MARKERS.routeFulfillFailed);
   assert.equal(staleAuthorizationFailureMarker({ ...valid, routeIntercepted: false }), STALE_AUTH_DIAGNOSTIC_MARKERS.routeNotIntercepted);
   assert.equal(staleAuthorizationFailureMarker({ ...valid, invalidationFailed: true }), STALE_AUTH_DIAGNOSTIC_MARKERS.invalidationFailed);
   assert.equal(staleAuthorizationFailureMarker({ ...valid, responseStatus: null }), STALE_AUTH_DIAGNOSTIC_MARKERS.responseMissing);
@@ -277,7 +287,12 @@ test("stale authorization diagnostics emit only fixed safe markers", () => {
   assert.deepEqual(Object.values(STALE_AUTH_DIAGNOSTIC_MARKERS), [
     "P0B_SAFE_STALE_AUTH_CLICK_FAILED",
     "P0B_SAFE_STALE_AUTH_ROUTE_SETUP_FAILED",
-    "P0B_SAFE_STALE_AUTH_ROUTE_ACTION_FAILED",
+    "P0B_SAFE_STALE_AUTH_VERIFY_FETCH_FAILED",
+    "P0B_SAFE_STALE_AUTH_VERIFY_HTTP_401_FAILED",
+    "P0B_SAFE_STALE_AUTH_VERIFY_HTTP_4XX_FAILED",
+    "P0B_SAFE_STALE_AUTH_VERIFY_HTTP_5XX_FAILED",
+    "P0B_SAFE_STALE_AUTH_VERIFY_HTTP_OTHER_FAILED",
+    "P0B_SAFE_STALE_AUTH_VERIFY_FULFILL_FAILED",
     "P0B_SAFE_STALE_AUTH_ROUTE_NOT_INTERCEPTED_FAILED",
     "P0B_SAFE_STALE_AUTH_INVALIDATION_FAILED",
     "P0B_SAFE_STALE_AUTH_RESPONSE_MISSING_FAILED",
@@ -557,7 +572,12 @@ function failLifecycle(error) {
 export const STALE_AUTH_DIAGNOSTIC_MARKERS = Object.freeze({
   clickFailed: "P0B_SAFE_STALE_AUTH_CLICK_FAILED",
   routeSetupFailed: "P0B_SAFE_STALE_AUTH_ROUTE_SETUP_FAILED",
-  routeActionFailed: "P0B_SAFE_STALE_AUTH_ROUTE_ACTION_FAILED",
+  routeFetchFailed: "P0B_SAFE_STALE_AUTH_VERIFY_FETCH_FAILED",
+  verifyHttp401: "P0B_SAFE_STALE_AUTH_VERIFY_HTTP_401_FAILED",
+  verifyHttp4xx: "P0B_SAFE_STALE_AUTH_VERIFY_HTTP_4XX_FAILED",
+  verifyHttp5xx: "P0B_SAFE_STALE_AUTH_VERIFY_HTTP_5XX_FAILED",
+  verifyHttpOther: "P0B_SAFE_STALE_AUTH_VERIFY_HTTP_OTHER_FAILED",
+  routeFulfillFailed: "P0B_SAFE_STALE_AUTH_VERIFY_FULFILL_FAILED",
   routeNotIntercepted: "P0B_SAFE_STALE_AUTH_ROUTE_NOT_INTERCEPTED_FAILED",
   invalidationFailed: "P0B_SAFE_STALE_AUTH_INVALIDATION_FAILED",
   responseMissing: "P0B_SAFE_STALE_AUTH_RESPONSE_MISSING_FAILED",
@@ -573,8 +593,16 @@ export function staleAuthorizationFailureMarker(observation = {}) {
   if (observation.clickFailed === true) return STALE_AUTH_DIAGNOSTIC_MARKERS.clickFailed;
   if (observation.routeSetupFailed === true) return STALE_AUTH_DIAGNOSTIC_MARKERS.routeSetupFailed;
   if (observation.routeIntercepted !== true) return STALE_AUTH_DIAGNOSTIC_MARKERS.routeNotIntercepted;
-  if (observation.routeActionFailed === true) return STALE_AUTH_DIAGNOSTIC_MARKERS.routeActionFailed;
+  if (observation.routeFetchFailed === true) return STALE_AUTH_DIAGNOSTIC_MARKERS.routeFetchFailed;
+  const verifyStatus = observation.verifyResponseStatus;
+  if (verifyStatus !== 200) {
+    if (verifyStatus === 401) return STALE_AUTH_DIAGNOSTIC_MARKERS.verifyHttp401;
+    if (Number.isInteger(verifyStatus) && verifyStatus >= 400 && verifyStatus < 500) return STALE_AUTH_DIAGNOSTIC_MARKERS.verifyHttp4xx;
+    if (Number.isInteger(verifyStatus) && verifyStatus >= 500 && verifyStatus < 600) return STALE_AUTH_DIAGNOSTIC_MARKERS.verifyHttp5xx;
+    return STALE_AUTH_DIAGNOSTIC_MARKERS.verifyHttpOther;
+  }
   if (observation.invalidationFailed === true) return STALE_AUTH_DIAGNOSTIC_MARKERS.invalidationFailed;
+  if (observation.routeFulfillFailed === true) return STALE_AUTH_DIAGNOSTIC_MARKERS.routeFulfillFailed;
   const status = observation.responseStatus;
   if (!Number.isInteger(status)) return STALE_AUTH_DIAGNOSTIC_MARKERS.responseMissing;
   if (status === 401) {
