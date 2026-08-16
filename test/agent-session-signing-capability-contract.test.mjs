@@ -24,6 +24,7 @@ addFormats(ajv);
 for (const schema of Object.values(schemas)) ajv.addSchema(schema);
 
 const ids = Object.freeze({
+  organization: "11111111-1111-4111-8111-111111111111",
   device: "22222222-2222-4222-8222-222222222222",
   agent: "33333333-3333-4333-8333-333333333333",
   session: "44444444-4444-4444-8444-444444444444",
@@ -63,6 +64,7 @@ function capabilityStatement() {
     version: 1,
     type: "agentpass.agent-signing-capability",
     capability_id: ids.capability,
+    organization_id: ids.organization,
     session_id: ids.session,
     device_id: ids.device,
     agent_id: ids.agent,
@@ -73,6 +75,7 @@ function capabilityStatement() {
     key_id: "git-commit-signing-v1",
     algorithm: "ed25519",
     max_signatures: 1,
+    issued_at: timestamps.issued,
     not_before: timestamps.issued,
     expires_at: timestamps.expires,
     sequence: 13,
@@ -191,8 +194,8 @@ test("F1a schemas are strict, bounded, and expose exact public key sets", () => 
   const envelope = schemas["agent-signing-capability-v1.schema.json"];
   assert.deepEqual(Object.keys(envelope.properties), ["version", "type", "statement", "statement_hash", "signature"]);
   assert.deepEqual(Object.keys(envelope.$defs.statement.properties), [
-    "version", "type", "capability_id", "session_id", "device_id", "agent_id", "one_use", "operation", "scope",
-    "key_purpose", "key_id", "algorithm", "max_signatures", "not_before", "expires_at", "sequence", "control_sequence",
+    "version", "type", "capability_id", "organization_id", "session_id", "device_id", "agent_id", "one_use", "operation", "scope",
+    "key_purpose", "key_id", "algorithm", "max_signatures", "issued_at", "not_before", "expires_at", "sequence", "control_sequence",
     "authority_generation", "issuer"
   ]);
 
@@ -231,7 +234,7 @@ test("F1a request body contains no caller authority and OpenAPI binds only path 
   assert.equal(operation["x-agentpass-runtime-path"], `/v1${route}`);
   assert.deepEqual(operation["x-agentpass-request-binding"]["caller-authority-fields"], []);
   assert.deepEqual(operation["x-agentpass-authority"]["derived-fields"], [
-    "operation", "scope", "key_purpose", "key_id", "algorithm", "max_signatures", "one_use", "issued_at", "not_before", "expires_at",
+    "organization_id", "operation", "scope", "key_purpose", "key_id", "algorithm", "max_signatures", "one_use", "issued_at", "not_before", "expires_at",
     "sequence", "remaining_session_signatures", "control_sequence", "authority_generation"
   ]);
   assert.equal(operation["x-agentpass-authority"]["one-use"], true);
@@ -269,6 +272,8 @@ test("F1a rejects unknown, duplicate, noncanonical, downgrade, and caller-author
     (value) => { value.statement.key_purpose = "other"; },
     (value) => { value.statement.algorithm = "rsa-sha256"; },
     (value) => { value.statement.max_signatures = 2; },
+    (value) => { delete value.statement.organization_id; },
+    (value) => { delete value.statement.issued_at; },
     (value) => { value.statement.authority_generation = 0; }
   ]) {
     const mutated = structuredClone(capability());
@@ -279,6 +284,10 @@ test("F1a rejects unknown, duplicate, noncanonical, downgrade, and caller-author
   expired.statement.expires_at = expired.statement.not_before;
   assertValid("agent-signing-capability-v1.schema.json", expired);
   assert.notEqual(Date.parse(expired.statement.expires_at) > Date.parse(expired.statement.not_before), true, "schema leaves temporal ordering to the runtime invariant");
+
+  const overBudgetResponse = response();
+  overBudgetResponse.metadata.remaining_session_signatures = 2;
+  assertInvalid("agent-session-signing-capability-response-v1.schema.json", overBudgetResponse);
 
   const encoded = canonicalJson(request);
   assert.deepEqual(parseCanonicalJson(encoded), request);
@@ -298,10 +307,11 @@ test("F1a binds safe metadata to the signed capability and freezes the signing d
   const value = response();
   assert.equal(value.metadata.operation, value.capability.statement.operation);
   assert.equal(value.metadata.key_purpose, value.capability.statement.key_purpose);
-  assert.equal(value.metadata.issued_at, value.capability.statement.not_before);
+  assert.equal(value.metadata.issued_at, value.capability.statement.issued_at);
   assert.equal(value.metadata.expires_at, value.capability.statement.expires_at);
   assert.equal(value.metadata.sequence, value.capability.statement.sequence);
   assert.ok(value.metadata.remaining_session_signatures >= 0);
+  assert.ok(value.metadata.remaining_session_signatures <= 1);
   assert.equal(crypto.createHash("sha256").update(canonicalJson(value.capability.statement)).digest("hex"), value.capability.statement_hash);
   assert.doesNotMatch(JSON.stringify(value), /(?:private[_-]?key|secret|bearer|access[_-]?token|provider[_-]?diagnostic|credential)/iu);
 
@@ -337,6 +347,7 @@ test("F1a catalog freezes ownership, server derivation, and contract-only implem
   }
   const profile = catalog.profiles["cloud-agent-signing-capability"];
   assert.deepEqual(profile.signature, { signed: true, algorithm: "ed25519", domain: "AgentPass-Agent-Signing-Capability-v1\u0000" });
+  assert.deepEqual(profile.tenant_binding, { required: true, source: "document", paths: ["statement.organization_id"] });
   assert.deepEqual(catalog.profiles["cloud-tenant-device-agent-session"].idempotency, {
     required: true,
     key_paths: ["path.organization_id", "path.device_id", "path.session_id", "body.request_id"],

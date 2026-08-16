@@ -40,6 +40,7 @@ test("P0-B live browser role, WebAuthn, and recent-auth matrix", { skip: !enable
       verifyObserved: false,
       verifyFailed: false,
       verifyStatus: null,
+      verifyResponse: null,
       sessionObserved: false,
       sessionFailed: false,
       sessionStatus: null,
@@ -62,7 +63,10 @@ test("P0-B live browser role, WebAuthn, and recent-auth matrix", { skip: !enable
     page.on("response", (response) => {
       const phase = keyboardRecentAuthPhase(response.request());
       if (phase === "options") recentAuthObservation.optionsStatus = response.status();
-      if (phase === "verify") recentAuthObservation.verifyStatus = response.status();
+      if (phase === "verify") {
+        recentAuthObservation.verifyStatus = response.status();
+        recentAuthObservation.verifyResponse = response;
+      }
       if (isKeyboardSessionRequest(response.request())) recentAuthObservation.sessionStatus = response.status();
     });
     const refreshResponsePromise = page.waitForResponse((response) => {
@@ -375,7 +379,7 @@ export async function keyboardOutcomeFailureMarker(response, observation = {}) {
   return "P0B_SAFE_KEYBOARD_OUTCOME_2XX_UI_PARSE_FAILED";
 }
 
-export function keyboardRecentAuthFailureMarker(observation) {
+export async function keyboardRecentAuthFailureMarker(observation) {
   if (!observation || observation.optionsObserved !== true) {
     if (observation?.webAuthnSupported === false) return "P0B_SAFE_KEYBOARD_AUTH_WEBAUTHN_UNAVAILABLE_FAILED";
     if (observation?.sessionFailed === true) return "P0B_SAFE_KEYBOARD_AUTH_SESSION_TRANSPORT_FAILED";
@@ -390,9 +394,27 @@ export function keyboardRecentAuthFailureMarker(observation) {
   if (optionsFailure !== null) return optionsFailure;
   if (observation.verifyObserved !== true) return "P0B_SAFE_KEYBOARD_AUTH_VERIFY_NO_REQUEST_FAILED";
   if (observation.verifyFailed === true) return "P0B_SAFE_KEYBOARD_AUTH_VERIFY_TRANSPORT_FAILED";
+  if (observation.verifyStatus === 401) {
+    const code = await safeRecentAuthErrorCode(observation.verifyResponse);
+    const detail = new Map([
+      ["human_auth_credential_not_allowed", "CREDENTIAL_NOT_ALLOWED"],
+      ["human_auth_webauthn_verification_failed", "WEBAUTHN_VERIFICATION_FAILED"],
+      ["human_auth_session_required", "SESSION_REQUIRED"],
+    ]).get(code);
+    if (detail !== undefined) return `P0B_SAFE_KEYBOARD_AUTH_VERIFY_HTTP_401_${detail}_FAILED`;
+  }
   const verifyFailure = keyboardPhaseStatusMarker("VERIFY", observation.verifyStatus);
   if (verifyFailure !== null) return verifyFailure;
   return "P0B_SAFE_KEYBOARD_AUTH_VERIFIED_NO_REFRESH_FAILED";
+}
+
+async function safeRecentAuthErrorCode(response) {
+  if (!response || typeof response.json !== "function") return null;
+  try {
+    const body = await response.json();
+    const code = body?.error?.code;
+    return typeof code === "string" ? code : null;
+  } catch { return null; }
 }
 
 function keyboardPhaseStatusMarker(phase, status) {

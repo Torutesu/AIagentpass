@@ -24,7 +24,7 @@
         "issued_at": { "$ref": "#/$defs/canonicalTimestamp" },
         "expires_at": { "$ref": "#/$defs/canonicalTimestamp" },
         "sequence": { "$ref": "#/$defs/positiveSafeInteger" },
-        "remaining_session_signatures": { "type": "integer", "minimum": 0, "maximum": 64 },
+        "remaining_session_signatures": { "type": "integer", "minimum": 0, "maximum": 1 },
         "replayed": { "type": "boolean" }
       }
     },

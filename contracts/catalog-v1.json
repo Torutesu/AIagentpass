@@ -34,7 +34,7 @@
     },
     "cloud-agent-signing-capability": {
       "authority_owner": "cloud",
-      "tenant_binding": { "required": true, "source": "runtime", "paths": ["runtime.organization_id"] },
+      "tenant_binding": { "required": true, "source": "document", "paths": ["statement.organization_id"] },
       "actor_binding": { "required": true, "paths": ["statement.device_id", "statement.agent_id", "statement.session_id"] },
       "signature": { "signed": true, "algorithm": "ed25519", "domain": "AgentPass-Agent-Signing-Capability-v1\u0000" },
       "idempotency": { "required": true, "key_paths": ["statement.capability_id", "statement.sequence"], "scope": "session", "replay": "reject-replay" },

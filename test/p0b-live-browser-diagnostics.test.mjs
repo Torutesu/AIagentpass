@@ -54,22 +54,25 @@ test("P0-B keyboard diagnostics separate transport, 2xx contract, and UI parsing
   assert.equal(await keyboardOutcomeFailureMarker(response(202, validPayload)), "P0B_SAFE_KEYBOARD_OUTCOME_2XX_UI_PARSE_FAILED");
 });
 
-test("P0-B keyboard diagnostics localize pre-refresh recent-auth failures without response bodies", () => {
-  assert.equal(keyboardRecentAuthFailureMarker(), "P0B_SAFE_KEYBOARD_AUTH_OPTIONS_NO_REQUEST_FAILED");
-  assert.equal(keyboardRecentAuthFailureMarker({ webAuthnSupported: false }), "P0B_SAFE_KEYBOARD_AUTH_WEBAUTHN_UNAVAILABLE_FAILED");
-  assert.equal(keyboardRecentAuthFailureMarker({ webAuthnSupported: true, sessionObserved: true, sessionFailed: true }), "P0B_SAFE_KEYBOARD_AUTH_SESSION_TRANSPORT_FAILED");
-  assert.equal(keyboardRecentAuthFailureMarker({ webAuthnSupported: true, sessionObserved: true, sessionStatus: 401 }), "P0B_SAFE_KEYBOARD_AUTH_SESSION_HTTP_4XX_FAILED");
-  assert.equal(keyboardRecentAuthFailureMarker({ webAuthnSupported: true, sessionObserved: true, sessionStatus: 503 }), "P0B_SAFE_KEYBOARD_AUTH_SESSION_HTTP_5XX_FAILED");
-  assert.equal(keyboardRecentAuthFailureMarker({ webAuthnSupported: true, sessionObserved: true, sessionStatus: 200 }), "P0B_SAFE_KEYBOARD_AUTH_SESSION_SUCCEEDED_NO_OPTIONS_FAILED");
-  assert.equal(keyboardRecentAuthFailureMarker({ optionsObserved: true, optionsFailed: true }), "P0B_SAFE_KEYBOARD_AUTH_OPTIONS_TRANSPORT_FAILED");
-  assert.equal(keyboardRecentAuthFailureMarker({ optionsObserved: true, optionsStatus: 403 }), "P0B_SAFE_KEYBOARD_AUTH_OPTIONS_HTTP_4XX_FAILED");
-  assert.equal(keyboardRecentAuthFailureMarker({ optionsObserved: true, optionsStatus: 503 }), "P0B_SAFE_KEYBOARD_AUTH_OPTIONS_HTTP_5XX_FAILED");
-  assert.equal(keyboardRecentAuthFailureMarker({ optionsObserved: true, optionsStatus: 200 }), "P0B_SAFE_KEYBOARD_AUTH_VERIFY_NO_REQUEST_FAILED");
-  assert.equal(keyboardRecentAuthFailureMarker({ optionsObserved: true, optionsStatus: 200, verifyObserved: true, verifyFailed: true }), "P0B_SAFE_KEYBOARD_AUTH_VERIFY_TRANSPORT_FAILED");
+test("P0-B keyboard diagnostics localize pre-refresh recent-auth failures without unsafe response bodies", async () => {
+  assert.equal(await keyboardRecentAuthFailureMarker(), "P0B_SAFE_KEYBOARD_AUTH_OPTIONS_NO_REQUEST_FAILED");
+  assert.equal(await keyboardRecentAuthFailureMarker({ webAuthnSupported: false }), "P0B_SAFE_KEYBOARD_AUTH_WEBAUTHN_UNAVAILABLE_FAILED");
+  assert.equal(await keyboardRecentAuthFailureMarker({ webAuthnSupported: true, sessionObserved: true, sessionFailed: true }), "P0B_SAFE_KEYBOARD_AUTH_SESSION_TRANSPORT_FAILED");
+  assert.equal(await keyboardRecentAuthFailureMarker({ webAuthnSupported: true, sessionObserved: true, sessionStatus: 401 }), "P0B_SAFE_KEYBOARD_AUTH_SESSION_HTTP_4XX_FAILED");
+  assert.equal(await keyboardRecentAuthFailureMarker({ webAuthnSupported: true, sessionObserved: true, sessionStatus: 503 }), "P0B_SAFE_KEYBOARD_AUTH_SESSION_HTTP_5XX_FAILED");
+  assert.equal(await keyboardRecentAuthFailureMarker({ webAuthnSupported: true, sessionObserved: true, sessionStatus: 200 }), "P0B_SAFE_KEYBOARD_AUTH_SESSION_SUCCEEDED_NO_OPTIONS_FAILED");
+  assert.equal(await keyboardRecentAuthFailureMarker({ optionsObserved: true, optionsFailed: true }), "P0B_SAFE_KEYBOARD_AUTH_OPTIONS_TRANSPORT_FAILED");
+  assert.equal(await keyboardRecentAuthFailureMarker({ optionsObserved: true, optionsStatus: 403 }), "P0B_SAFE_KEYBOARD_AUTH_OPTIONS_HTTP_4XX_FAILED");
+  assert.equal(await keyboardRecentAuthFailureMarker({ optionsObserved: true, optionsStatus: 503 }), "P0B_SAFE_KEYBOARD_AUTH_OPTIONS_HTTP_5XX_FAILED");
+  assert.equal(await keyboardRecentAuthFailureMarker({ optionsObserved: true, optionsStatus: 200 }), "P0B_SAFE_KEYBOARD_AUTH_VERIFY_NO_REQUEST_FAILED");
+  assert.equal(await keyboardRecentAuthFailureMarker({ optionsObserved: true, optionsStatus: 200, verifyObserved: true, verifyFailed: true }), "P0B_SAFE_KEYBOARD_AUTH_VERIFY_TRANSPORT_FAILED");
   for (const status of [400, 401, 403, 409, 422, 428, 429]) {
-    assert.equal(keyboardRecentAuthFailureMarker({ optionsObserved: true, optionsStatus: 200, verifyObserved: true, verifyStatus: status }), `P0B_SAFE_KEYBOARD_AUTH_VERIFY_HTTP_${status}_FAILED`);
+    assert.equal(await keyboardRecentAuthFailureMarker({ optionsObserved: true, optionsStatus: 200, verifyObserved: true, verifyStatus: status }), `P0B_SAFE_KEYBOARD_AUTH_VERIFY_HTTP_${status}_FAILED`);
   }
-  assert.equal(keyboardRecentAuthFailureMarker({ optionsObserved: true, optionsStatus: 200, verifyObserved: true, verifyStatus: 418 }), "P0B_SAFE_KEYBOARD_AUTH_VERIFY_HTTP_4XX_FAILED");
-  assert.equal(keyboardRecentAuthFailureMarker({ optionsObserved: true, optionsStatus: 200, verifyObserved: true, verifyStatus: 502 }), "P0B_SAFE_KEYBOARD_AUTH_VERIFY_HTTP_5XX_FAILED");
-  assert.equal(keyboardRecentAuthFailureMarker({ optionsObserved: true, optionsStatus: 200, verifyObserved: true, verifyStatus: 200 }), "P0B_SAFE_KEYBOARD_AUTH_VERIFIED_NO_REFRESH_FAILED");
+  for (const [code, suffix] of [["human_auth_credential_not_allowed", "CREDENTIAL_NOT_ALLOWED"], ["human_auth_webauthn_verification_failed", "WEBAUTHN_VERIFICATION_FAILED"], ["human_auth_session_required", "SESSION_REQUIRED"]]) {
+    assert.equal(await keyboardRecentAuthFailureMarker({ optionsObserved: true, optionsStatus: 200, verifyObserved: true, verifyStatus: 401, verifyResponse: response(401, { error: { code, unsafe: "ignored" } }) }), `P0B_SAFE_KEYBOARD_AUTH_VERIFY_HTTP_401_${suffix}_FAILED`);
+  }
+  assert.equal(await keyboardRecentAuthFailureMarker({ optionsObserved: true, optionsStatus: 200, verifyObserved: true, verifyStatus: 418 }), "P0B_SAFE_KEYBOARD_AUTH_VERIFY_HTTP_4XX_FAILED");
+  assert.equal(await keyboardRecentAuthFailureMarker({ optionsObserved: true, optionsStatus: 200, verifyObserved: true, verifyStatus: 502 }), "P0B_SAFE_KEYBOARD_AUTH_VERIFY_HTTP_5XX_FAILED");
+  assert.equal(await keyboardRecentAuthFailureMarker({ optionsObserved: true, optionsStatus: 200, verifyObserved: true, verifyStatus: 200 }), "P0B_SAFE_KEYBOARD_AUTH_VERIFIED_NO_REFRESH_FAILED");
 });
