@@ -4,7 +4,7 @@ import { useCallback, useEffect, useMemo, useRef, useState, type RefObject } fro
 import { authenticateRecentAuth, registerPasskey, WebAuthnClientError } from "../webauthn-client";
 import { parseConsoleSummary, type ConsoleSummaryViewModel } from "../console-summary";
 import { EnrollmentPreflightError, parsePublicEnrollmentPreflight } from "../../lib/enrollment-preflight.mjs";
-import { fetchBrowserCliHandoffPreflight, parseBrowserCliHandoffLaunchFragment, postBrowserCliHandoff, publicEnrollmentPreflight as publicBrowserCliEnrollmentPreflight } from "../../lib/browser-cli-handoff.mjs";
+import { BROWSER_CLI_HANDOFF_EVENTS, createBrowserCliHandoffDelivery, fetchBrowserCliHandoffPreflight, parseBrowserCliHandoffLaunchFragment, publicEnrollmentPreflight as publicBrowserCliEnrollmentPreflight, transitionBrowserCliHandoffState } from "../../lib/browser-cli-handoff.mjs";
 import { OrganizationPanel } from "./OrganizationPanel";
 import { createOrganizationClient, OrganizationClientError, resolveOrganizationSelection, type Organization, type OrganizationClient } from "../organization-client";
 import { loadOrganizationSwitcherOrganizations } from "../organization-switcher";
@@ -276,7 +276,8 @@ type PublicEnrollmentPreflight = Readonly<{
   device_key_fingerprint: string;
 }>;
 
-type LiveHandoffStatus = "none" | "loading" | "ready" | "delivered" | "failed";
+type LiveHandoffStatus = "none" | "loading" | "connected" | "delivered" | "failed";
+type LiveHandoffEvent = "launch" | "launch_failed" | "preflight_succeeded" | "preflight_failed" | "delivery_succeeded" | "delivery_failed";
 type LiveHandoffPreflight = Readonly<{
   version: 1;
   correlation_id: string;
@@ -285,13 +286,23 @@ type LiveHandoffPreflight = Readonly<{
   candidate_id: string;
   device_key_fingerprint: string;
 }>;
+type LiveHandoffDescriptor = Readonly<{
+  url: string;
+  preflight_url: string;
+  correlation_id: string;
+}>;
 type LiveHandoffSession = Readonly<{
   url: string;
   preflight_url: string;
   correlation_id: string;
   preflight: LiveHandoffPreflight;
+  delivery: Readonly<{
+    deliver: (invitation: Record<string, unknown>) => Promise<true>;
+  }>;
 }>;
 type LiveHandoffRef = { current: LiveHandoffSession | null };
+type LiveHandoffDelivery = LiveHandoffSession["delivery"];
+const createLiveHandoffDelivery = createBrowserCliHandoffDelivery as unknown as (options: { handoff: LiveHandoffDescriptor; preflight: LiveHandoffPreflight }) => LiveHandoffDelivery;
 
 function parseV2EnrollmentInvitation(payload: unknown, organizationId: string, expectedPreflight: PublicEnrollmentPreflight): Record<string, unknown> {
   if (!isPlainRecord(payload) || !isPlainRecord(payload.enrollment)) throw new EnrollmentFlowError("enrollment", "登録情報の形式を検証できませんでした。もう一度発行してください。");
@@ -909,7 +920,7 @@ function installGuidance(status: LiveHandoffStatus): InstallGuidance {
   switch (status) {
     case "loading":
       return { state: "checking", tone: "amber", label: "確認中", title: "Macヘルパーの接続を確認しています", copy: "Macで起動したセットアップ接続から、公開情報だけを読み込んでいます。" };
-    case "ready":
+    case "connected":
       return { state: "connected", tone: "green", label: "接続済み", title: "Macヘルパーが接続されています", copy: "公開preflightを読み込みました。端末名を入力して、Touch ID / パスキーで発行を承認してください。" };
     case "delivered":
       return { state: "delivered", tone: "green", label: "受け渡し済み", title: "セットアップ情報をMacへ渡しました", copy: "Mac側のセットアップ完了を待っています。招待情報をコピーしたり、もう一度発行したりする必要はありません。" };
@@ -951,7 +962,7 @@ function InstallStatusCard({ status }: { status: LiveHandoffStatus }) {
   );
 }
 
-function SetupSurface({ data, goTo, operate, online, canManage, refresh, liveHandoffRef, livePreflight, liveHandoffStatus, onLiveHandoffStatus }: { data: AgentPassInitialData; goTo: (view: ConsoleView) => void; operate: (operation: string, body: Record<string, unknown>, success: string) => Promise<void>; online: boolean; canManage: boolean; refresh: () => Promise<void>; liveHandoffRef: LiveHandoffRef; livePreflight: PublicEnrollmentPreflight | null; liveHandoffStatus: LiveHandoffStatus; onLiveHandoffStatus: (status: LiveHandoffStatus) => void }) {
+function SetupSurface({ data, goTo, operate, online, canManage, refresh, liveHandoffRef, livePreflight, liveHandoffStatus, onLiveHandoffEvent }: { data: AgentPassInitialData; goTo: (view: ConsoleView) => void; operate: (operation: string, body: Record<string, unknown>, success: string) => Promise<void>; online: boolean; canManage: boolean; refresh: () => Promise<void>; liveHandoffRef: LiveHandoffRef; livePreflight: PublicEnrollmentPreflight | null; liveHandoffStatus: LiveHandoffStatus; onLiveHandoffEvent: (event: LiveHandoffEvent) => void }) {
   const [deviceLabel, setDeviceLabel] = useState("");
   const [preflightText, setPreflightText] = useState("");
   const [preflight, setPreflight] = useState<PublicEnrollmentPreflight | null>(null);
@@ -1040,22 +1051,17 @@ function SetupSurface({ data, goTo, operate, online, canManage, refresh, liveHan
           && liveHandoff.preflight.device_key_fingerprint === activePreflight.device_key_fingerprint;
         liveHandoffRef.current = null;
         if (!sameBinding) {
-          onLiveHandoffStatus("failed");
+          onLiveHandoffEvent(BROWSER_CLI_HANDOFF_EVENTS.DELIVERY_FAILED);
           setEnrollmentVisible(true);
         } else {
           try {
-            await postBrowserCliHandoff({
-              handoff: liveHandoff,
-              correlation_id: liveHandoff.correlation_id,
-              nonce: liveHandoff.preflight.nonce,
-              invitation,
-            });
+            await liveHandoff.delivery.deliver(invitation);
             clearEnrollmentStore(enrollmentStoreId);
             setEnrollmentVisible(false);
-            onLiveHandoffStatus("delivered");
+            onLiveHandoffEvent(BROWSER_CLI_HANDOFF_EVENTS.DELIVERY_SUCCEEDED);
           } catch {
             setEnrollmentVisible(true);
-            onLiveHandoffStatus("failed");
+            onLiveHandoffEvent(BROWSER_CLI_HANDOFF_EVENTS.DELIVERY_FAILED);
           }
         }
       } else {
@@ -1112,7 +1118,7 @@ function SetupSurface({ data, goTo, operate, online, canManage, refresh, liveHan
       <div className="surface-content">
         {liveHandoffStatus !== "none" ? <div className={`handoff-notice handoff-${liveHandoffStatus}`} role={liveHandoffStatus === "failed" ? "alert" : "status"} data-live-handoff-state={liveHandoffStatus}>
           {liveHandoffStatus === "loading" ? "Macのセットアップ接続を確認しています。" : null}
-          {liveHandoffStatus === "ready" ? "公開preflightを読み込みました。招待を発行すると、Macへ自動で渡します。" : null}
+          {liveHandoffStatus === "connected" ? "公開preflightを読み込みました。招待を発行すると、Macへ自動で渡します。" : null}
           {liveHandoffStatus === "delivered" ? "招待をMacへ安全に渡しました。Mac側のセットアップ完了を待っています。" : null}
           {liveHandoffStatus === "failed" ? "自動受け渡しに失敗しました。発行済みの招待を下のJSONから標準入力へ渡してください。" : null}
         </div> : null}
@@ -1234,6 +1240,17 @@ export function AgentPassConsole() {
   const liveHandoffMountedRef = useRef(false);
   const [liveHandoffStatus, setLiveHandoffStatus] = useState<LiveHandoffStatus>("none");
   const [livePreflight, setLivePreflight] = useState<PublicEnrollmentPreflight | null>(null);
+
+  const advanceLiveHandoff = useCallback((event: LiveHandoffEvent) => {
+    if (!liveHandoffMountedRef.current) return;
+    setLiveHandoffStatus((current) => {
+      try {
+        return transitionBrowserCliHandoffState(current, event) as LiveHandoffStatus;
+      } catch {
+        return "failed";
+      }
+    });
+  }, []);
 
   useDeterministicDialogFocus(mobileOpen, sidebarRef, mobileTriggerRef);
   useDeterministicDialogFocus(workspaceOpen, workspaceMenuRef, workspaceTriggerRef);
@@ -1378,15 +1395,15 @@ export function AgentPassConsole() {
     liveHandoffReadRef.current = true;
     const launchFragment = window.location.hash;
     if (launchFragment === "") return;
-    const failLiveHandoff = () => window.setTimeout(() => {
-      if (liveHandoffMountedRef.current) setLiveHandoffStatus("failed");
+    const failLiveHandoff = (event: "launch_failed" | "preflight_failed") => window.setTimeout(() => {
+      advanceLiveHandoff(event);
     }, 0);
     try {
       const pageUrl = new URL(window.location.href);
       pageUrl.hash = "";
       window.history.replaceState(window.history.state, "", `${pageUrl.pathname}${pageUrl.search}`);
     } catch {
-      failLiveHandoff();
+      failLiveHandoff(BROWSER_CLI_HANDOFF_EVENTS.LAUNCH_FAILED);
       return;
     }
     let handoff: ReturnType<typeof parseBrowserCliHandoffLaunchFragment>;
@@ -1394,21 +1411,25 @@ export function AgentPassConsole() {
       handoff = parseBrowserCliHandoffLaunchFragment(launchFragment);
       if (!handoff) return;
     } catch {
-      failLiveHandoff();
+      failLiveHandoff(BROWSER_CLI_HANDOFF_EVENTS.LAUNCH_FAILED);
       return;
     }
     queueMicrotask(() => {
-      if (liveHandoffMountedRef.current) setLiveHandoffStatus("loading");
+      advanceLiveHandoff(BROWSER_CLI_HANDOFF_EVENTS.LAUNCH);
     });
     void fetchBrowserCliHandoffPreflight({ handoff }).then((preflight) => {
       if (!liveHandoffMountedRef.current) return;
-      liveHandoffRef.current = { ...handoff, preflight };
+      liveHandoffRef.current = {
+        ...handoff,
+        preflight,
+        delivery: createLiveHandoffDelivery({ handoff, preflight }),
+      };
       setLivePreflight(publicBrowserCliEnrollmentPreflight(preflight));
-      setLiveHandoffStatus("ready");
+      advanceLiveHandoff(BROWSER_CLI_HANDOFF_EVENTS.PREFLIGHT_SUCCEEDED);
     }).catch(() => {
-      failLiveHandoff();
+      failLiveHandoff(BROWSER_CLI_HANDOFF_EVENTS.PREFLIGHT_FAILED);
     });
-  }, []);
+  }, [advanceLiveHandoff]);
 
   useEffect(() => {
     const activeDialog = confirmOpen ? modalRef.current : helpOpen ? helpModalRef.current : workspaceOpen ? workspaceMenuRef.current : mobileOpen ? sidebarRef.current : null;
@@ -1649,7 +1670,7 @@ export function AgentPassConsole() {
         <main id="main-content" tabIndex={-1} aria-labelledby="console-page-heading" className={`content${activeView === "organizations" || activeView === "recovery" ? " organization-content" : ""}`}>
           {sessionState !== "active" ? <SessionEndedSurface reason={sessionState} /> : null}
           {sessionState === "active" && activeView === "overview" ? <Overview data={data} goTo={goTo} onRequestRefresh={requestDeviceRefresh} summaryState={summaryState} canManage={canManage} /> : null}
-          {sessionState === "active" && (activeView === "setup" || liveSetupActive) ? <SetupSurface data={data} goTo={goTo} operate={operate} online={summaryState === "ready"} canManage={canManage} refresh={() => refreshSummary()} liveHandoffRef={liveHandoffRef} livePreflight={livePreflight} liveHandoffStatus={liveHandoffStatus} onLiveHandoffStatus={setLiveHandoffStatus} /> : null}
+          {sessionState === "active" && (activeView === "setup" || liveSetupActive) ? <SetupSurface data={data} goTo={goTo} operate={operate} online={summaryState === "ready"} canManage={canManage} refresh={() => refreshSummary()} liveHandoffRef={liveHandoffRef} livePreflight={livePreflight} liveHandoffStatus={liveHandoffStatus} onLiveHandoffEvent={advanceLiveHandoff} /> : null}
           {sessionState === "active" && activeView === "agents" ? <AgentsSurface data={data} operate={operate} canManage={canManage} /> : null}
           {sessionState === "active" && activeView === "policies" ? <PoliciesSurface data={data} operate={operate} canManage={canManage} /> : null}
           {sessionState === "active" && activeView === "activity" ? <ActivitySurface data={data} /> : null}

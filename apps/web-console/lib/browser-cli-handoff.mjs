@@ -14,6 +14,38 @@ export const BROWSER_CLI_HANDOFF_ERRORS = Object.freeze({
   PREFLIGHT_UNAVAILABLE: "ERR_BROWSER_CLI_HANDOFF_PREFLIGHT_UNAVAILABLE",
   INVALID_ACK: "ERR_BROWSER_CLI_HANDOFF_ACK",
   DELIVERY_FAILED: "ERR_BROWSER_CLI_HANDOFF_DELIVERY",
+  INVALID_STATE: "ERR_BROWSER_CLI_HANDOFF_STATE",
+  DELIVERY_ALREADY_ATTEMPTED: "ERR_BROWSER_CLI_HANDOFF_ALREADY_ATTEMPTED",
+});
+
+/**
+ * The browser only renders outcomes that were proven at the loopback
+ * boundary. There is no retry edge: a handoff is consumed by the first POST
+ * attempt, whether the caller receives a valid ACK or an error.
+ */
+export const BROWSER_CLI_HANDOFF_STATES = Object.freeze({
+  NONE: "none",
+  LOADING: "loading",
+  CONNECTED: "connected",
+  DELIVERED: "delivered",
+  FAILED: "failed",
+});
+
+export const BROWSER_CLI_HANDOFF_EVENTS = Object.freeze({
+  LAUNCH: "launch",
+  LAUNCH_FAILED: "launch_failed",
+  PREFLIGHT_SUCCEEDED: "preflight_succeeded",
+  PREFLIGHT_FAILED: "preflight_failed",
+  DELIVERY_SUCCEEDED: "delivery_succeeded",
+  DELIVERY_FAILED: "delivery_failed",
+});
+
+const HANDOFF_TRANSITIONS = Object.freeze({
+  none: Object.freeze({ launch: "loading", launch_failed: "failed" }),
+  loading: Object.freeze({ preflight_succeeded: "connected", preflight_failed: "failed" }),
+  connected: Object.freeze({ delivery_succeeded: "delivered", delivery_failed: "failed" }),
+  delivered: Object.freeze({}),
+  failed: Object.freeze({}),
 });
 
 export class BrowserCliHandoffClientError extends Error {
@@ -22,6 +54,18 @@ export class BrowserCliHandoffClientError extends Error {
     this.name = "BrowserCliHandoffClientError";
     this.code = code;
   }
+}
+
+/**
+ * Apply one result from the bounded handoff protocol. Invalid edges are
+ * rejected rather than silently turning a UI-only state into authority.
+ */
+export function transitionBrowserCliHandoffState(state, event) {
+  const next = HANDOFF_TRANSITIONS[state]?.[event];
+  if (next === undefined) {
+    throw new BrowserCliHandoffClientError(BROWSER_CLI_HANDOFF_ERRORS.INVALID_STATE, "The local setup handoff state transition is invalid");
+  }
+  return next;
 }
 
 /**
@@ -133,6 +177,7 @@ export function buildBrowserCliHandoffEnvelope(input = {}) {
   return Object.freeze({ version: HANDOFF_VERSION, type: HANDOFF_TYPE, correlation_id, nonce, invitation });
 }
 
+/** @returns {Promise<true>} */
 export async function postBrowserCliHandoff({ handoff, correlation_id, nonce, invitation, fetchImpl = globalThis.fetch, signal } = {}) {
   if (!plainObject(handoff) || typeof handoff.url !== "string") {
     throw new BrowserCliHandoffClientError(BROWSER_CLI_HANDOFF_ERRORS.DELIVERY_FAILED, "The local setup handoff could not be delivered");
@@ -167,6 +212,40 @@ export async function postBrowserCliHandoff({ handoff, correlation_id, nonce, in
     throw new BrowserCliHandoffClientError(BROWSER_CLI_HANDOFF_ERRORS.INVALID_ACK, "The local setup handoff acknowledgement is invalid");
   }
   return true;
+}
+
+/**
+ * Create an ephemeral, one-consume delivery controller after a validated
+ * preflight. The controller never exposes the nonce or invitation and refuses
+ * every second send, including after a response-loss/invalid-ACK outcome.
+ *
+ * @param {{ handoff?: { url?: string, correlation_id?: string }, preflight?: { correlation_id?: string, nonce?: string }, fetchImpl?: typeof globalThis.fetch }} options
+ * @returns {{ deliver: (invitation: Record<string, unknown>, options?: { signal?: AbortSignal }) => Promise<true> }}
+ */
+export function createBrowserCliHandoffDelivery(options = {}) {
+  const { handoff, preflight, fetchImpl = globalThis.fetch } = options;
+  if (!plainObject(handoff) || typeof handoff.url !== "string" || typeof handoff.correlation_id !== "string"
+    || !plainObject(preflight) || preflight.correlation_id !== handoff.correlation_id
+    || typeof preflight.nonce !== "string" || !SAFE_TOKEN.test(preflight.nonce)) {
+    throw new BrowserCliHandoffClientError(BROWSER_CLI_HANDOFF_ERRORS.DELIVERY_FAILED, "The local setup handoff could not be prepared");
+  }
+  let attempted = false;
+  return Object.freeze({
+    async deliver(invitation, { signal } = {}) {
+      if (attempted) {
+        throw new BrowserCliHandoffClientError(BROWSER_CLI_HANDOFF_ERRORS.DELIVERY_ALREADY_ATTEMPTED, "The local setup handoff has already been consumed");
+      }
+      attempted = true;
+      return postBrowserCliHandoff({
+        handoff,
+        correlation_id: handoff.correlation_id,
+        nonce: preflight.nonce,
+        invitation,
+        fetchImpl,
+        signal,
+      });
+    },
+  });
 }
 
 function exactKeys(value, expected) {

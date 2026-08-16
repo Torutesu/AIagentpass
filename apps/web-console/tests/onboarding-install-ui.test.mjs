@@ -28,3 +28,16 @@ test("install guidance is accessible and never introduces browser persistence", 
   assert.doesNotMatch(installBody, /localStorage|sessionStorage|indexedDB|window\.location\.(?:search|hash)/);
   assert.doesNotMatch(installBody, /private[_ ]key|credential|authorization_id|nonce|challenge/iu);
 });
+
+test("install states are advanced by the handoff contract and the loopback is one-consume", async () => {
+  const source = await readFile(componentPath, "utf8");
+
+  assert.match(source, /transitionBrowserCliHandoffState\(current, event\)/);
+  assert.match(source, /createLiveHandoffDelivery\(\{ handoff, preflight \}\)/);
+  assert.match(source, /createLiveHandoffDelivery = createBrowserCliHandoffDelivery as unknown as/);
+  assert.match(source, /liveHandoff\.delivery\.deliver\(invitation\)/);
+  assert.match(source, /BROWSER_CLI_HANDOFF_EVENTS\.PREFLIGHT_SUCCEEDED/);
+  assert.match(source, /BROWSER_CLI_HANDOFF_EVENTS\.DELIVERY_SUCCEEDED/);
+  assert.doesNotMatch(source, /setLiveHandoffStatus\("(?:connected|delivered|failed)"\)/);
+  assert.doesNotMatch(source, /postBrowserCliHandoff\(/);
+});

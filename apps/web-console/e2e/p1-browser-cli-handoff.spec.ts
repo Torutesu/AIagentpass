@@ -145,6 +145,7 @@ async function openLiveSetup(page: Page, mode: HandoffMode): Promise<HandoffStat
   await expect(page).toHaveURL(/\/$/u);
   await expect.poll(() => state.preflightCalls).toBe(1);
   await expect(page.locator('[data-install-state="connected"]')).toBeVisible();
+  await expect(page.locator('[data-live-handoff-state="connected"]')).toBeVisible();
   await expect(page.getByText("公開preflightを確認しました")).toBeVisible();
   return state;
 }
@@ -191,11 +192,12 @@ test("posts the exact bound envelope and marks delivery only after the exact ACK
 });
 
 test("keeps the one-time manual fallback when the ACK is not exact", async ({ page }) => {
-  await openLiveSetup(page, HandoffMode.invalidAck);
+  const state = await openLiveSetup(page, HandoffMode.invalidAck);
   await page.getByLabel("端末名").fill("Fallback handoff Mac");
   await page.getByRole("button", { name: "Touch ID/パスキー確認して発行", exact: true }).click();
   await expect(page.locator('[data-live-handoff-state="failed"]')).toContainText("標準入力");
   await expect(page.locator(".secret-output")).toContainText(ENROLLMENT_SECRET);
+  expect(state.postBodies).toHaveLength(1);
   expect((await browserStorageSnapshot(page)).local).toEqual({});
   expect((await browserStorageSnapshot(page)).session).toEqual({});
 });
