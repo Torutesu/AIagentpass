@@ -10,7 +10,9 @@ private final class PrivateGitBridgeClientTestIO: @unchecked Sendable {
     var inputOffset = 0
     var output = Data()
     var closeCallCount = 0
+    var shutdownCallCount = 0
     var writeError: Int32?
+    var shutdownError: Int32?
     var readError: Int32?
     var blockReads = false
     let readEntered = DispatchSemaphore(value: 0)
@@ -56,6 +58,16 @@ private final class PrivateGitBridgeClientTestIO: @unchecked Sendable {
         closeCallCount += 1
         return 0
     }
+
+    func shutdownWrite(_ descriptor: Int32) -> Int32 {
+        _ = descriptor
+        shutdownCallCount += 1
+        if let shutdownError {
+            errno = shutdownError
+            return -1
+        }
+        return 0
+    }
 }
 
 private func makePrivateGitBridgeClient(
@@ -67,7 +79,8 @@ private func makePrivateGitBridgeClient(
         ownership: .owned,
         read: io.read,
         write: io.write,
-        close: io.close)
+        close: io.close,
+        shutdownWrite: io.shutdownWrite)
     return NativeAgentPrivateGitBridgeClient(transport: transport)
 }
 
@@ -80,6 +93,20 @@ private func makePrivateGitBridgeClient(
 
     #expect(try client.sign(commitPayload: payload) == signature)
     #expect(io.output == (try NativeAgentGitBridgeFrame.encodeCommitPayload(payload)))
+    #expect(io.shutdownCallCount == 1)
+    #expect(io.closeCallCount == 1)
+}
+
+@Test func privateGitBridgeClientRequiresRequestHalfCloseBeforeReading() throws {
+    let io = PrivateGitBridgeClientTestIO()
+    io.shutdownError = Int32(ENOTSOCK)
+    let client = try makePrivateGitBridgeClient(io: io)
+
+    #expect(throws: NativeAgentPrivateGitBridgeClientError.transport(.shutdownFailed(Int32(ENOTSOCK)))) {
+        _ = try client.sign(commitPayload: Data("payload".utf8))
+    }
+    #expect(io.shutdownCallCount == 1)
+    #expect(io.inputOffset == 0)
     #expect(io.closeCallCount == 1)
 }
 

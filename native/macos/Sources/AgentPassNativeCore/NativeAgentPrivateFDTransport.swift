@@ -11,6 +11,7 @@ public enum NativeAgentPrivateFDTransportError: Error, Equatable, Sendable {
     case alreadyClosed
     case readFailed(Int32)
     case writeFailed(Int32)
+    case shutdownFailed(Int32)
     case closeFailed(Int32)
     case truncated
     case extraBytes
@@ -27,12 +28,14 @@ public final class NativeAgentPrivateFDTransport {
     public typealias ReadClosure = @Sendable (Int32, UnsafeMutableRawPointer, Int) -> Int
     public typealias WriteClosure = @Sendable (Int32, UnsafeRawPointer, Int) -> Int
     public typealias CloseClosure = @Sendable (Int32) -> Int32
+    public typealias ShutdownWriteClosure = @Sendable (Int32) -> Int32
 
     private let descriptor: Int32
     private let ownership: NativeAgentPrivateFDTransportOwnership
     private let readClosure: ReadClosure
     private let writeClosure: WriteClosure
     private let closeClosure: CloseClosure
+    private let shutdownWriteClosure: ShutdownWriteClosure
     private let stateLock = NSLock()
     private var closed = false
 
@@ -51,7 +54,26 @@ public final class NativeAgentPrivateFDTransport {
             },
             close: { descriptor in
                 Darwin.close(descriptor)
+            },
+            shutdownWrite: { descriptor in
+                Darwin.shutdown(descriptor, SHUT_WR)
             })
+    }
+
+    public convenience init(
+        fd: Int32,
+        ownership: NativeAgentPrivateFDTransportOwnership,
+        read: @escaping ReadClosure,
+        write: @escaping WriteClosure,
+        close: @escaping CloseClosure
+    ) throws {
+        try self.init(
+            fd: fd,
+            ownership: ownership,
+            read: read,
+            write: write,
+            close: close,
+            shutdownWrite: { _ in 0 })
     }
 
     public init(
@@ -59,7 +81,8 @@ public final class NativeAgentPrivateFDTransport {
         ownership: NativeAgentPrivateFDTransportOwnership,
         read: @escaping ReadClosure,
         write: @escaping WriteClosure,
-        close: @escaping CloseClosure
+        close: @escaping CloseClosure,
+        shutdownWrite: @escaping ShutdownWriteClosure
     ) throws {
         guard fd >= 0 else {
             throw NativeAgentPrivateFDTransportError.invalidFileDescriptor
@@ -69,6 +92,7 @@ public final class NativeAgentPrivateFDTransport {
         self.readClosure = read
         self.writeClosure = write
         self.closeClosure = close
+        self.shutdownWriteClosure = shutdownWrite
     }
 
     /// Writes exactly one bounded commit-payload frame, retrying interrupted
@@ -77,6 +101,73 @@ public final class NativeAgentPrivateFDTransport {
         let frame: Data
         do {
             frame = try NativeAgentGitBridgeFrame.encodeCommitPayload(payload)
+        } catch let error as NativeAgentGitBridgeFrameError {
+            throw NativeAgentPrivateFDTransportError.invalidFrame(error)
+        }
+
+        try withOpenDescriptor {
+            try writeExactly(frame)
+        }
+    }
+
+    /// Permanently half-closes the request direction. The Host requires the
+    /// resulting EOF before it signs, eliminating a trailing-frame race while
+    /// leaving the response direction available on the full-duplex socket.
+    public func finishRequestWriting() throws {
+        try withOpenDescriptor {
+            guard shutdownWriteClosure(descriptor) == 0 else {
+                throw NativeAgentPrivateFDTransportError.shutdownFailed(Self.currentErrno())
+            }
+        }
+    }
+
+    /// Reads exactly one bounded commit-payload frame and requires EOF after
+    /// it. The peer half-closes its request direction before waiting for the
+    /// response, so a second or late frame fails closed before signing.
+    public func readCommitPayload() throws -> Data {
+        try withOpenDescriptor {
+            var frame = Data(count: NativeAgentGitBridgeFrame.headerBytes)
+            try readExactly(&frame)
+
+            let bytes = [UInt8](frame)
+            let length = (UInt32(bytes[0]) << 24)
+                | (UInt32(bytes[1]) << 16)
+                | (UInt32(bytes[2]) << 8)
+                | UInt32(bytes[3])
+            guard length > 0 else {
+                throw NativeAgentPrivateFDTransportError.invalidFrame(.invalidLength)
+            }
+            guard length <= UInt32(NativeAgentGitBridgeFrame.maximumCommitPayloadBytes) else {
+                throw NativeAgentPrivateFDTransportError.invalidFrame(.payloadTooLarge)
+            }
+
+            var payload = Data(count: Int(length))
+            try readExactly(&payload)
+            frame.append(payload)
+
+            var extraByte: UInt8 = 0
+            let extraCount = try withUnsafeMutableBytes(of: &extraByte) { rawBuffer in
+                try readOnce(into: rawBuffer.baseAddress!, count: 1)
+            }
+            guard extraCount == 0 else {
+                throw NativeAgentPrivateFDTransportError.extraBytes
+            }
+
+            do {
+                return try NativeAgentGitBridgeFrame.decodeCommitPayload(frame)
+            } catch let error as NativeAgentGitBridgeFrameError {
+                throw NativeAgentPrivateFDTransportError.invalidFrame(error)
+            }
+        }
+    }
+
+    /// Writes exactly one bounded signature frame, retrying interrupted
+    /// writes and short system calls. No second response frame can be
+    /// emitted through this transport operation.
+    public func writeSignature(_ signature: Data) throws {
+        let frame: Data
+        do {
+            frame = try NativeAgentGitBridgeFrame.encodeSignature(signature)
         } catch let error as NativeAgentGitBridgeFrameError {
             throw NativeAgentPrivateFDTransportError.invalidFrame(error)
         }
@@ -240,4 +331,5 @@ public final class NativeAgentPrivateFDTransport {
         let error = Int32(errno)
         return error == 0 ? Int32(EIO) : error
     }
+
 }

@@ -40,6 +40,7 @@ public final class NativeAgentPrivateGitBridgeClient: @unchecked Sendable {
         var result: Result<Data, NativeAgentPrivateGitBridgeClientError>
         do {
             try transport.writeCommitPayload(commitPayload)
+            try transport.finishRequestWriting()
             result = .success(try transport.readSignature())
         } catch let error as NativeAgentPrivateFDTransportError {
             result = .failure(.transport(error))
