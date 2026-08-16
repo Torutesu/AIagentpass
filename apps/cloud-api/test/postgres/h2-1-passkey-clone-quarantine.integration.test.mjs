@@ -492,12 +492,15 @@ async function insertSession(pool, organizationId, member) {
 }
 
 async function insertChallenge(pool, organizationId, challengeId, member, { status, contextHash, consumedAt = null }) {
+  const createdAt = consumedAt === null
+    ? new Date(Date.now() - 10_000)
+    : new Date(new Date(consumedAt).getTime() - 10_000);
   await pool.query(`INSERT INTO webauthn_challenges
     (id,session_id,member_id,organization_id,ceremony,operation,challenge_hash,created_at,expires_at,rp_id,origin,user_verification,status,consumed_at,context_hash)
     VALUES ($1,$2,$3,$4,'authentication','human.webauthn.credential.rename',$5,$6,$7,'agentpass.local','https://agentpass.local','required',$8,$9,$10)`, [
     challengeId, member.sessionId, member.memberId,
     organizationId,
-    crypto.randomBytes(32), new Date(Date.now() - 10_000), EXPIRES_AT, status, consumedAt, Buffer.from(contextHash, "hex")
+    crypto.randomBytes(32), createdAt, EXPIRES_AT, status, consumedAt, Buffer.from(contextHash, "hex")
   ]);
 }
 

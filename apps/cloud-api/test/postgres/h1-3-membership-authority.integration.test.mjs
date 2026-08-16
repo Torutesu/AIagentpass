@@ -319,7 +319,7 @@ async function seedFixture(pool) {
     ids.retainedMembershipId, ids.retainedId,
     ids.otherOrganizationId, randomUUID(), ids.otherOwnerId,
     randomUUID(), ids.otherTargetId,
-    ids.crossTenantMembershipId, ids.targetId
+    ids.crossTenantMembershipId
   ]);
 
   const publicKey = generateKeyPairSync("ed25519").publicKey.export({ type: "spki", format: "pem" }).toString().trimEnd();

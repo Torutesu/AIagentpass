@@ -437,6 +437,7 @@ function createMemoryPostgresState() {
     async revokeCredential() { return null; },
     async listSafeSessions() { return []; },
     async revokeManagedSession() { return null; },
+    async revokeOtherSessions() { return []; },
   };
   const organizationRepository = {
     async listOrganizationsForMember() { return []; },

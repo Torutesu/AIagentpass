@@ -998,6 +998,6 @@ function delegateProviderRepository(repository, overrides = {}) {
 
 function delegateLifecycleRepository(repository, overrides = {}) {
   return Object.freeze(Object.fromEntries([
-    "snapshot", "reserveSignature", "startSignature", "commitSignature", "markSignatureUncertain", "reconcileSignature",
+    "snapshot", "reserveSignature", "startSignature", "fenceSignature", "commitSignature", "markSignatureUncertain", "reconcileSignature",
   ].map((method) => [method, overrides[method] ?? ((...args) => repository[method](...args))])));
 }
