@@ -103,11 +103,15 @@ test("P0-B admin wake diagnostics distinguish WebAuthn options and verify phases
     [{ optionsObserved: true, optionsStatus: 200 }, "P0B_SAFE_ADMIN_WAKE_AUTH_VERIFY_TRANSPORT_FAILED"],
     [{ optionsObserved: true, optionsStatus: 200, verifyObserved: true, verifyFailed: true }, "P0B_SAFE_ADMIN_WAKE_AUTH_VERIFY_TRANSPORT_FAILED"],
     [{ optionsObserved: true, optionsStatus: 200, verifyObserved: true, verifyStatus: null }, "P0B_SAFE_ADMIN_WAKE_AUTH_VERIFY_TRANSPORT_FAILED"],
-    [{ optionsObserved: true, optionsStatus: 200, verifyObserved: true, verifyStatus: 403 }, "P0B_SAFE_ADMIN_WAKE_AUTH_VERIFY_HTTP_4XX_FAILED"],
+    [{ optionsObserved: true, optionsStatus: 200, verifyObserved: true, verifyStatus: 403 }, "P0B_SAFE_ADMIN_WAKE_AUTH_VERIFY_HTTP_403_FAILED"],
     [{ optionsObserved: true, optionsStatus: 200, verifyObserved: true, verifyStatus: 503 }, "P0B_SAFE_ADMIN_WAKE_AUTH_VERIFY_HTTP_5XX_FAILED"],
     [{ optionsObserved: true, optionsStatus: 200, verifyObserved: true, verifyStatus: 302 }, "P0B_SAFE_ADMIN_WAKE_AUTH_VERIFY_HTTP_OTHER_FAILED"],
   ]) {
     assert.equal(await adminWakeFailureMarker(null, { recentAuthObservation: observation }), marker);
+  }
+  for (const [code, suffix] of [["human_auth_credential_not_allowed", "CREDENTIAL_NOT_ALLOWED"], ["human_auth_webauthn_verification_failed", "WEBAUTHN_VERIFICATION_FAILED"], ["human_auth_session_required", "SESSION_REQUIRED"]]) {
+    const verifyResponse = response(401, { error: { code, unsafe: "ignored" } });
+    assert.equal(await adminWakeFailureMarker(null, { recentAuthObservation: { optionsObserved: true, optionsStatus: 200, verifyObserved: true, verifyStatus: 401, verifyResponse } }), `P0B_SAFE_ADMIN_WAKE_AUTH_VERIFY_HTTP_401_${suffix}_FAILED`);
   }
 });
 

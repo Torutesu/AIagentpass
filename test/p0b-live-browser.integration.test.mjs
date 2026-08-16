@@ -452,9 +452,9 @@ export async function wakeAcceptedFailureMarker(response, observation = {}) {
 
 export async function adminWakeFailureMarker(response, observation = {}, uiFailure = null) {
   const recentAuth = observation?.recentAuthObservation ?? {};
-  const optionsFailure = adminRecentAuthPhaseFailureMarker("OPTIONS", recentAuth);
+  const optionsFailure = await adminRecentAuthPhaseFailureMarker("OPTIONS", recentAuth);
   if (optionsFailure !== null) return optionsFailure;
-  const verifyFailure = adminRecentAuthPhaseFailureMarker("VERIFY", recentAuth);
+  const verifyFailure = await adminRecentAuthPhaseFailureMarker("VERIFY", recentAuth);
   if (verifyFailure !== null) return verifyFailure;
 
   if (response === null || response === undefined) {
@@ -474,7 +474,7 @@ export async function adminWakeFailureMarker(response, observation = {}, uiFailu
   return "P0B_SAFE_ADMIN_WAKE_UI_COPY_MISMATCH_FAILED";
 }
 
-function adminRecentAuthPhaseFailureMarker(phase, observation) {
+async function adminRecentAuthPhaseFailureMarker(phase, observation) {
   const prefix = `P0B_SAFE_ADMIN_WAKE_AUTH_${phase}`;
   const key = phase.toLowerCase();
   const observed = observation?.[`${key}Observed`] === true;
@@ -487,6 +487,18 @@ function adminRecentAuthPhaseFailureMarker(phase, observation) {
   if (!observed) return null;
   if (failed || !Number.isInteger(status)) return `${prefix}_TRANSPORT_FAILED`;
   if (status >= 200 && status < 300) return null;
+  if (phase === "VERIFY" && status === 401) {
+    const code = await safeRecentAuthErrorCode(observation.verifyResponse);
+    const detail = new Map([
+      ["human_auth_credential_not_allowed", "CREDENTIAL_NOT_ALLOWED"],
+      ["human_auth_webauthn_verification_failed", "WEBAUTHN_VERIFICATION_FAILED"],
+      ["human_auth_session_required", "SESSION_REQUIRED"],
+    ]).get(code);
+    if (detail !== undefined) return `${prefix}_HTTP_401_${detail}_FAILED`;
+  }
+  if (phase === "VERIFY" && [400, 401, 403, 409, 422, 428, 429].includes(status)) {
+    return `${prefix}_HTTP_${status}_FAILED`;
+  }
   if (status >= 400 && status < 500) return `${prefix}_HTTP_4XX_FAILED`;
   if (status >= 500 && status < 600) return `${prefix}_HTTP_5XX_FAILED`;
   return `${prefix}_HTTP_OTHER_FAILED`;
