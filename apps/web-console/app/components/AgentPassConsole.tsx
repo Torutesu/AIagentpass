@@ -1178,6 +1178,12 @@ export function AgentPassConsole() {
   useDeterministicDialogFocus(helpOpen, helpModalRef, helpTriggerRef);
   useDeterministicDialogFocus(confirmOpen, modalRef, confirmTriggerRef);
 
+  useEffect(() => {
+    if (!workspaceOpen || organizationSwitcherState === "loading") return;
+    const timer = window.setTimeout(() => focusFirstElement(workspaceMenuRef.current), 0);
+    return () => window.clearTimeout(timer);
+  }, [organizationSwitcherState, workspaceOpen]);
+
   const endSession = useCallback((nextState: "expired" | "signed-out") => {
     summaryEpoch.current += 1;
     capabilityEpoch.current += 1;
@@ -1343,14 +1349,15 @@ export function AgentPassConsole() {
   }, []);
 
   useEffect(() => {
-    const activeDialog = confirmOpen ? modalRef.current : helpOpen ? helpModalRef.current : workspaceOpen ? workspaceMenuRef.current : null;
+    const activeDialog = confirmOpen ? modalRef.current : helpOpen ? helpModalRef.current : workspaceOpen ? workspaceMenuRef.current : mobileOpen ? sidebarRef.current : null;
     if (!activeDialog) return;
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.key === "Escape") {
         event.preventDefault();
         if (confirmOpen) setConfirmOpen(false);
         else if (helpOpen) setHelpOpen(false);
-        else setWorkspaceOpen(false);
+        else if (workspaceOpen) setWorkspaceOpen(false);
+        else setMobileOpen(false);
         return;
       }
       if (event.key === "Tab") {
@@ -1386,7 +1393,7 @@ export function AgentPassConsole() {
     };
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [confirmOpen, helpOpen, workspaceOpen]);
+  }, [confirmOpen, helpOpen, mobileOpen, workspaceOpen]);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -1547,13 +1554,13 @@ export function AgentPassConsole() {
   return (
     <div className="console-shell">
       <a className="skip-link" href="#main-content">メインコンテンツへ移動</a>
-      <aside className={`sidebar${mobileOpen ? " mobile-open" : ""}`} ref={sidebarRef} aria-label="AgentPass Consoleサイドバー">
+      <aside className={`sidebar${mobileOpen ? " mobile-open" : ""}`} ref={sidebarRef} role={mobileOpen ? "dialog" : undefined} aria-modal={mobileOpen ? "true" : undefined} aria-label="AgentPass Consoleサイドバー">
         <a className="brand" href="#top" onClick={(event) => { event.preventDefault(); goTo("overview"); }}>
           <span className="brand-mark" aria-hidden="true">A</span>
           <span><span className="brand-name">AgentPass</span><span className="brand-note">CONSOLE</span></span>
         </a>
         <button className="workspace-switcher" ref={workspaceTriggerRef} type="button" aria-label={`${workspaceName}ワークスペースを選択`} aria-expanded={workspaceOpen} aria-controls="workspace-menu" data-dialog-initial-focus onClick={toggleOrganizationSwitcher}><span><span className="workspace-label">WORKSPACE</span><span className="workspace-name">{workspaceName}</span></span><span className="chevron" aria-hidden="true">⌄</span></button>
-        {workspaceOpen ? <div className="workspace-menu" ref={workspaceMenuRef} id="workspace-menu" role="dialog" aria-modal="false" aria-labelledby="workspace-dialog-title" aria-busy={organizationSwitcherState === "loading"} tabIndex={-1}>
+        {workspaceOpen ? <div className="workspace-menu" ref={workspaceMenuRef} id="workspace-menu" role="dialog" aria-modal="true" aria-labelledby="workspace-dialog-title" aria-busy={organizationSwitcherState === "loading"} tabIndex={-1}>
           <strong id="workspace-dialog-title">組織を選択</strong>
           <span>アクセス可能な組織だけを表示しています</span>
           {organizationSwitcherState === "loading" ? <small role="status">組織を確認中です…</small> : null}
