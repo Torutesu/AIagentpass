@@ -2,14 +2,27 @@
 
 Status: active
 
-Source baseline: `codex/agent-platform` at committed `09eb561` (the last
-clean contract/CI diagnostic slice inspected for this plan)
+Source baseline: `codex/agent-platform` at committed and pushed `044696e`
+(`feat(cloud): add signing capability issuance core`)
 
-Execution checkpoint: the merge slice containing this plan also carries the
-F1d/F1e native contract candidates (`AgentHostXPCProtocol.swift`, the private
-Git session state machine, and `AgentSigningCapability.swift` plus
-tests/vectors). They are implemented and locally verified, but are not a
-qualified baseline until the resulting commit passes the exact-SHA CI gate.
+Execution checkpoint: F1d/F1e native contracts are committed in `458a46b` and
+F2a's canonical JavaScript codec plus pure issuance coordinator are committed
+in `044696e`. The immediately preceding exact SHA `2a20a1f` has green `test`,
+`browser-e2e`, PostgreSQL integration, and PostgreSQL 16/17 authority jobs;
+its long-running P0-B live-process job remains the final observed gate at this
+checkpoint. `044696e` requires its own complete exact-SHA CI result before it
+becomes a qualified baseline.
+
+Current package ledger:
+
+| Package | State | Evidence required to advance |
+| --- | --- | --- |
+| F0 exact-SHA CI | in progress | all six protected jobs green on the same latest SHA |
+| F1 contract/security freeze | source-complete | exact-SHA CI plus review of native/JS canonical vectors |
+| F2a issuance core | source-complete | exact-SHA CI and integration with the reviewed PostgreSQL repository |
+| F2b PostgreSQL reservation | design/review | migration 0074, repository, role matrix, PG16/17 contention/replay tests |
+| F2c Device route | implementation in progress | raw-body Device authentication and adversarial HTTP tests |
+| F3-F10 | queued | the dependency and exit gates below; no completion claim may skip them |
 
 This is the authoritative day-to-day plan after the native launch, child
 supervision, and private Git transport primitives landed. Product and release
@@ -510,6 +523,22 @@ Files, migration, and API:
   sequence, and capability hash; add checks for one-use and max two session
   signatures. Register it in `contracts/catalog-v1.json` and update schema
   head/privilege fixtures.
+- Persist the exact committed public Capability envelope behind function-only
+  privileges while it is live so an identical `request_id` can replay the
+  byte-identical response after an HTTP/transaction response loss without a
+  second provider invocation. The envelope is a short-lived bearer and must
+  never be logged or exposed to backup/operator diagnostics. Scrub the stored
+  envelope when it becomes consumed, revoked, or expired while retaining its
+  statement/signature digests and audit identity. Digest-only persistence is
+  insufficient for this requirement, because a signature cannot be
+  reconstructed safely after the provider result is committed.
+- Make the reservation transaction the sole owner of `agent_sessions.status`,
+  `active_request_id`, `last_request_id`, `used_signatures`, and
+  `reserved_signatures`. It must lock the session, allocate the next Agent
+  sequence, reserve one unit, and return a server-clock window atomically.
+  Commit moves the same request from `signing_intent` to `signed`; a proven
+  no-sign result releases the reservation; an ambiguous result consumes the
+  safety budget and closes the session as `outcome_unknown`.
 - Consume `capability_id + statement_hash` atomically through the existing
   durable sign-once transaction. A verified envelope is not consumed merely
   because its Ed25519 signature is valid; duplicate use must return the exact
@@ -785,50 +814,58 @@ Tests and gate:
 
 ## 4-B. Next three merge-sized slices
 
-These are the immediate queue after the current `09eb561` baseline. They are
-intentionally small enough to review independently and ordered so that the
-first Cloud implementation cannot outrun the native contract.
+These are the immediate queue after the current `044696e` baseline. They are
+intentionally small enough to review independently. F2b and F2c remain
+separate commits even when developed in parallel, so the database authority
+can be reviewed without HTTP/controller noise.
 
-### Slice 1 — accept or reject the pending F1 native contract candidates
+### Slice 1 — qualify the baseline and close F2b persistence
 
-Scope: only the uncommitted F1d/F1e files and their tests/vectors. Review the
-Host XPC DTOs, private Git lifecycle state machine, and
-`AgentSigningCapability.swift` as one contract set; do not add runtime wiring.
+Scope: exact-SHA CI plus migration 0074, its repository, catalog registration,
+least-privilege functions, and PostgreSQL tests. Do not wire the HTTP route or
+native runtime in this slice.
 
 Required checks:
 
-- Confirm Host prepare has no caller-supplied agent/adapter/session authority;
-  sign requests carry only payload and sequence; timestamps/PID versions reject
-  zero and out-of-range values; stale reserved authority keys are rejected.
-- Confirm capability verification performs real pinned-key Ed25519 verification
-  over the exact domain plus canonical statement, not shape-only parsing, and
-  binds organization/device/agent/session, issuer/purpose/key ID, time, TTL,
-  sequence, and one-use budget.
-- Run focused Swift tests, JS vectors, and native-source typecheck; then run
-  all six CI jobs on one SHA. Record any local listener restriction as an
-  environment note only.
+- Do not promote `044696e` until all six protected jobs are green on that exact
+  SHA. A green earlier SHA is diagnostic evidence, not qualification.
+- Review migration 0074 against the existing `agent_sessions` lifecycle;
+  session counters and request states stay authoritative there and are changed
+  only through SECURITY DEFINER functions with explicit app-role grants.
+- Persist a replayable live envelope only until consume/revoke/expiry, then
+  scrub it while retaining immutable digests and lifecycle audit evidence.
+- Prove atomic first/second issuance, deterministic third denial, identical-ID
+  replay, conflict detection, stale generation rejection, and ambiguous
+  provider closure on PostgreSQL 16 and 17.
+- Register migration 0074 in the catalog and pass schema checksum, fresh
+  migration, seeded upgrade, RLS, backup visibility, and role-privilege checks.
 
-Exit artifact: one reviewable F1 contract commit (or a documented rejection
-with a follow-up fix), no API/database/source-runtime changes, and updated
-threat-matrix evidence.
+Exit artifact: a reviewable F2b commit whose repository satisfies the exact
+contract consumed by F2a, plus one latest-SHA green CI run.
 
-### Slice 2 — implement F2 issuance behind the frozen Device API
+### Slice 2 — complete F2 behind the frozen Device API
 
-Scope: the signing-capability route, service, repository, migration, and
-contract tests only. Do not launch Claude Code or change the private Git
-transport in this slice.
+Scope: integrate the committed F2a service and reviewed F2b repository through
+the signing-capability route and production server composition. Do not launch
+Claude Code or change the private Git transport in this slice.
 
 Required implementation order:
 
-1. Add the next migration after 0073 and its catalog/schema-head/role checks.
-2. Add the PostgreSQL reservation transaction with unique retry identity,
-   session sequence, budget, generations, and `outcome_unknown` state.
-3. Add the issuance service and route using the existing Device verifier and
-   signer-purpose/provider-operation seams. Parse the body only after raw-byte
-   authentication; accept only `request_id`.
-4. Add unit, adversarial HTTP, PostgreSQL 16/17 integration, concurrency, and
-   provider uncertainty tests. Update OpenAPI only if implementation exposes a
-   mismatch; do not widen the already-frozen request.
+1. Bind the F2a issuance coordinator to the F2b repository and the existing
+   purpose-separated managed signer. Production composition must not use the
+   generic test signer adapter.
+2. Add the route using the existing raw-body Device verifier. Authenticate the
+   exact bytes and path identity before JSON parsing; accept only `request_id`.
+3. Map repository/provider states to the frozen public error taxonomy without
+   exposing tenant existence, provider diagnostics, claim tokens, envelopes,
+   or key metadata in logs.
+4. Add adversarial unit/HTTP tests for malformed/duplicate JSON, extra keys,
+   signature/path mismatch, cross-tenant/device/session requests, exhausted or
+   revoked sessions, exact retry, conflicting reuse, response loss, timeout,
+   disconnect, and provider uncertainty.
+5. Run root contracts/lint/tests, Web Console tests, bounded native tests, and
+   PostgreSQL 16/17 integration on the same pushed SHA. Update OpenAPI only if
+   implementation exposes a mismatch; do not widen the frozen request.
 
 Exit artifact: a Device-authenticated active Lease can issue/replay exactly
 one server-scoped capability, while unauthorized, stale, exhausted, or
