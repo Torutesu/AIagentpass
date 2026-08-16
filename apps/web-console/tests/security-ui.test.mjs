@@ -84,6 +84,13 @@ test("committed Security mutations retain their outcome when reconciliation is u
   assert.match(panel, /if \(isSessionError\(caught\) && onSessionExpired !== undefined\) return;/);
 });
 
+test("automatic inventory refreshes preserve mutation outcomes while explicit reloads clear them", async () => {
+  const panel = await readFile(panelPath, "utf8");
+  assert.match(panel, /clearMessages = false/);
+  assert.match(panel, /onClick=\{\(\) => void load\(undefined, true\)\}>再読み込み/);
+  assert.match(panel, /onRetry=\{\(\) => void load\(undefined, true\)\}/);
+});
+
 test("stale Security inventory loads cannot overwrite a committed mutation outcome", async () => {
   const panel = await readFile(panelPath, "utf8");
   assert.match(panel, /const loadEpochRef = useRef\(0\);/);
