@@ -3,9 +3,11 @@ import test from "node:test";
 
 import {
   awaitConsoleSessionRotation,
+  awaitConsoleSessionReload,
   classifySessionBootstrap502,
   classifySessionBootstrap503,
   classifyStoredSessionState,
+  findExactActiveRecentAuthSession,
   P0BLiveBrowserFixtureError,
   runP0BLifecycle,
   startP0BLiveBrowserFixture
@@ -101,6 +103,27 @@ test("stored session diagnostics expose only fixed authoritative state codes", a
   assert.equal(await classifyStoredSessionState({ query: async () => { throw new Error("secret"); } }, sessionId), "unavailable");
 });
 
+test("recent-auth invalidation targets the page-bound session without latest-row guessing", async () => {
+  const binding = {
+    sessionId: "11111111-1111-4111-8111-111111111111",
+    memberId: "22222222-2222-4222-8222-222222222222",
+    organizationId: "33333333-3333-4333-8333-333333333333"
+  };
+  let observed;
+  const pool = {
+    async query(text, params) {
+      observed = { text, params };
+      return { rows: [{ id: binding.sessionId }] };
+    }
+  };
+
+  assert.equal(await findExactActiveRecentAuthSession(pool, binding), binding.sessionId);
+  assert.match(observed.text, /WHERE id=\$1 AND member_id=\$2 AND organization_id=\$3 AND revoked_at IS NULL/u);
+  assert.doesNotMatch(observed.text, /ORDER BY|LIMIT/u);
+  assert.deepEqual(observed.params, [binding.sessionId, binding.memberId, binding.organizationId]);
+  assert.equal(await findExactActiveRecentAuthSession({ query: async () => ({ rows: [] }) }, binding), null);
+});
+
 test("live bootstrap adopts the Console-owned rotation before navigation completes", async () => {
   const organizationId = "11111111-1111-4111-8111-111111111111";
   const descriptor = Object.freeze({
@@ -157,6 +180,66 @@ test("live bootstrap adopts the Console-owned rotation before navigation complet
   assert.deepEqual(events, [
     ["wait", 15_000],
     ["goto", "https://console.example.test/", "domcontentloaded"]
+  ]);
+  assert.deepEqual(rotated, expected);
+});
+
+test("live reload adopts only the exact successful Console resume rotation", async () => {
+  const organizationId = "11111111-1111-4111-8111-111111111111";
+  const descriptor = Object.freeze({
+    role: "admin",
+    memberId: "22222222-2222-4222-8222-222222222222"
+  });
+  const expected = Object.freeze({
+    sessionId: "33333333-3333-4333-8333-333333333333",
+    csrfToken: "B".repeat(43)
+  });
+  const events = [];
+  let matchResponse;
+  let resolveResponse;
+  const responsePromise = new Promise((resolve) => { resolveResponse = resolve; });
+  const response = {
+    ok: () => true,
+    request: () => ({ method: () => "POST" }),
+    url: () => "https://console.example.test/api/auth/session/resume",
+    json: async () => ({
+      csrf_token: expected.csrfToken,
+      session: {
+        session_id: expected.sessionId,
+        organization_id: organizationId,
+        member_id: descriptor.memberId,
+        role: descriptor.role
+      }
+    })
+  };
+  const page = {
+    waitForResponse(predicate, options) {
+      events.push(["wait", options.timeout]);
+      matchResponse = predicate;
+      return responsePromise;
+    },
+    async reload(options) {
+      events.push(["reload", options.waitUntil]);
+      assert.equal(matchResponse({
+        ok: () => true,
+        request: () => ({ method: () => "POST" }),
+        url: () => "https://console.example.test/api/auth/session"
+      }), false);
+      assert.equal(matchResponse({
+        ok: () => false,
+        request: () => ({ method: () => "POST" }),
+        url: () => "https://console.example.test/api/auth/session/resume"
+      }), false);
+      assert.equal(matchResponse(response), true);
+      resolveResponse(response);
+    }
+  };
+
+  const rotated = await awaitConsoleSessionReload(page, descriptor, organizationId);
+
+  assert.deepEqual(events, [
+    ["wait", 15_000],
+    ["reload", "domcontentloaded"]
   ]);
   assert.deepEqual(rotated, expected);
 });

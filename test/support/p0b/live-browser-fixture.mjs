@@ -385,6 +385,21 @@ export async function startP0BLiveBrowserFixture({
       return fixture.registerWebAuthn(page);
     },
 
+    /** Reload the Console and adopt the exact session rotation it performs. */
+    async reloadAndAdoptSession(page) {
+      assertPage(page);
+      const state = pageState.get(page);
+      if (!state) throw new P0BLiveBrowserFixtureError("session_required", "P0-B page has not completed session bootstrap");
+      let rotated;
+      try {
+        rotated = await awaitConsoleSessionReload(page, state.role, safeSeed.organizationId);
+      } catch {
+        throw new P0BLiveBrowserFixtureError("session_reload_failed", "P0-B Console session reload failed");
+      }
+      pageState.set(page, { ...state, sessionId: rotated.sessionId, csrfToken: rotated.csrfToken });
+      return Object.freeze({ reloaded: true });
+    },
+
     /**
      * Run a real operation-bound recent-auth ceremony. The authorization is
      * supplied only to the callback, so it cannot appear in fixture metadata.
@@ -474,20 +489,27 @@ export async function startP0BLiveBrowserFixture({
       return fixture.withRecentAuth(page, operation, action);
     },
 
-    async invalidateRecentAuth(role, failure) {
-      const descriptor = roleDescriptor(safeSeed, role);
+    async invalidateRecentAuth(page, failure) {
+      assertPage(page);
+      const state = pageState.get(page);
+      if (!state) throw new P0BLiveBrowserFixtureError("session_required", "P0-B page has not completed session bootstrap");
+      const descriptor = state.role;
       if (!new Set(["stale", "replayed", "cross_operation", "cross_tenant"]).has(failure)) throw new TypeError("recent-auth failure is invalid");
-      const session = await databasePool.query(`SELECT id FROM human_sessions
-        WHERE member_id=$1 AND organization_id=$2 AND revoked_at IS NULL
-        ORDER BY created_at DESC,id DESC LIMIT 1`, [descriptor.memberId, safeSeed.organizationId]);
-      const sessionId = session.rows?.[0]?.id;
+      const sessionId = await findExactActiveRecentAuthSession(databasePool, {
+        sessionId: state.sessionId,
+        memberId: descriptor.memberId,
+        organizationId: safeSeed.organizationId
+      });
       if (!sessionId) throw new P0BLiveBrowserFixtureError("session_required", "P0-B browser session is unavailable");
       if (failure === "stale") {
-        await databasePool.query("UPDATE human_sessions SET recent_auth_at=clock_timestamp()-interval '10 minutes' WHERE id=$1", [sessionId]);
+        const result = await databasePool.query("UPDATE human_sessions SET recent_auth_at=clock_timestamp()-interval '10 minutes' WHERE id=$1", [sessionId]);
+        if (result.rowCount !== 1) throw new P0BLiveBrowserFixtureError("recent_auth_invalidation_failed", "P0-B recent authorization invalidation failed");
       } else if (failure === "replayed") {
-        await databasePool.query("UPDATE human_sessions SET recent_auth_consumed_at=clock_timestamp() WHERE id=$1", [sessionId]);
+        const result = await databasePool.query("UPDATE human_sessions SET recent_auth_consumed_at=clock_timestamp() WHERE id=$1", [sessionId]);
+        if (result.rowCount !== 1) throw new P0BLiveBrowserFixtureError("recent_auth_invalidation_failed", "P0-B recent authorization invalidation failed");
       } else if (failure === "cross_operation") {
-        await databasePool.query("UPDATE human_sessions SET recent_auth_operation='device.revoke' WHERE id=$1", [sessionId]);
+        const result = await databasePool.query("UPDATE human_sessions SET recent_auth_operation='device.revoke' WHERE id=$1", [sessionId]);
+        if (result.rowCount !== 1) throw new P0BLiveBrowserFixtureError("recent_auth_invalidation_failed", "P0-B recent authorization invalidation failed");
       } else {
         const client = await databasePool.connect();
         try {
@@ -629,6 +651,18 @@ export async function awaitConsoleSessionRotation(page, target, descriptor, orga
   return validateBootstrap(applicationSessionBody, descriptor, organizationId);
 }
 
+export async function awaitConsoleSessionReload(page, descriptor, organizationId) {
+  const applicationSession = page.waitForResponse((candidate) => {
+    if (!candidate.ok() || candidate.request().method() !== "POST") return false;
+    return new URL(candidate.url()).pathname === "/api/auth/session/resume";
+  }, { timeout: 15_000 });
+  const [applicationSessionResponse] = await Promise.all([
+    applicationSession,
+    page.reload({ waitUntil: "domcontentloaded" }),
+  ]);
+  return validateBootstrap(await applicationSessionResponse.json(), descriptor, organizationId);
+}
+
 function publicSeed(seed) {
   return Object.freeze({
     organizationId: seed.organizationId,
@@ -682,6 +716,18 @@ export async function classifyStoredSessionState(pool, sessionId) {
     if (row.revoked === false && row.absolute_expired === false && row.idle_expired === false) return "active";
   } catch {}
   return "unavailable";
+}
+
+export async function findExactActiveRecentAuthSession(pool, { sessionId, memberId, organizationId } = {}) {
+  if (!pool || typeof pool.query !== "function") throw new TypeError("P0-B database pool is invalid");
+  if (![sessionId, memberId, organizationId].every((value) => UUID.test(value ?? ""))) throw new TypeError("P0-B recent-auth session binding is invalid");
+  const result = await pool.query(
+    `SELECT id FROM human_sessions
+     WHERE id=$1 AND member_id=$2 AND organization_id=$3 AND revoked_at IS NULL`,
+    [sessionId.toLowerCase(), memberId.toLowerCase(), organizationId.toLowerCase()]
+  );
+  const id = result.rows?.[0]?.id;
+  return typeof id === "string" && UUID.test(id) ? id.toLowerCase() : null;
 }
 
 function consolePath(value, origin) {

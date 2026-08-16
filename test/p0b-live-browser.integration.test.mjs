@@ -157,17 +157,62 @@ test("P0-B live browser role, WebAuthn, and recent-auth matrix", { skip: !enable
   for (const failure of ["stale", "replayed", "cross_operation", "cross_tenant"]) {
     await scenario(t, `owner ${failure} authorization is rejected by the real Cloud boundary`, async ({ fixture, open }) => {
       const page = await open("owner");
+      const pattern = "**/api/console?operation=device.refresh.request";
+      if (failure === "stale") {
+        const card = deviceCard(page, "反映待ち Mac");
+        const observation = {
+          routeIntercepted: false,
+          invalidationFailed: false,
+          clickFailed: false,
+          responseStatus: null,
+          alertObserved: false,
+        };
+        const refreshResponsePromise = page.waitForResponse(
+          (response) => isKeyboardRefreshRequest(response.request()),
+          { timeout: 15_000 }
+        ).catch(() => null);
+        const alertPromise = card.getByRole("alert").waitFor({ state: "visible", timeout: WAKE_OUTCOME_TIMEOUT_MS })
+          .then(() => true)
+          .catch(() => false);
+        try {
+          await page.route(pattern, async (route) => {
+            if (route.request().method() !== "POST") return route.continue();
+            observation.routeIntercepted = true;
+            try {
+              await fixture.invalidateRecentAuth(page, failure);
+            } catch {
+              observation.invalidationFailed = true;
+            }
+            await route.continue();
+          });
+        } catch {
+          // Keep the observation bounded and let the classifier emit the
+          // fixed route-not-intercepted marker after the click attempt.
+        }
+        try {
+          await card.getByRole("button", { name: "Wake requestを依頼" }).click();
+        } catch {
+          observation.clickFailed = true;
+        }
+        const [refreshResponse, alertObserved] = await Promise.all([refreshResponsePromise, alertPromise]);
+        observation.responseStatus = refreshResponse?.status() ?? null;
+        observation.alertObserved = alertObserved;
+        await page.unroute(pattern).catch(() => {});
+        const marker = staleAuthorizationFailureMarker(observation);
+        if (marker !== null) assert.fail(marker);
+        return;
+      }
+
       let intercepted = false;
       let responseStatus;
       page.on("response", (response) => {
         const url = new URL(response.url());
         if (response.request().method() === "POST" && url.pathname === "/api/console" && url.searchParams.get("operation") === "device.refresh.request") responseStatus = response.status();
       });
-      const pattern = "**/api/console?operation=device.refresh.request";
       await page.route(pattern, async (route) => {
         if (route.request().method() !== "POST") return route.continue();
         intercepted = true;
-        await fixture.invalidateRecentAuth("owner", failure);
+        await fixture.invalidateRecentAuth(page, failure);
         await route.continue();
       });
       const card = deviceCard(page, "反映待ち Mac");
@@ -190,6 +235,39 @@ test("P0-B live browser role, WebAuthn, and recent-auth matrix", { skip: !enable
   }
 
   if (scenarioFilter !== "" && selectedScenarioCount === 0) assert.fail("P0B_SAFE_SCENARIO_NOT_FOUND");
+});
+
+test("stale authorization diagnostics emit only fixed safe markers", () => {
+  const valid = {
+    routeIntercepted: true,
+    invalidationFailed: false,
+    clickFailed: false,
+    responseStatus: 401,
+    alertObserved: true,
+  };
+  assert.equal(staleAuthorizationFailureMarker(valid), null);
+  assert.equal(staleAuthorizationFailureMarker({ ...valid, clickFailed: true }), STALE_AUTH_DIAGNOSTIC_MARKERS.clickFailed);
+  assert.equal(staleAuthorizationFailureMarker({ ...valid, routeIntercepted: false }), STALE_AUTH_DIAGNOSTIC_MARKERS.routeNotIntercepted);
+  assert.equal(staleAuthorizationFailureMarker({ ...valid, invalidationFailed: true }), STALE_AUTH_DIAGNOSTIC_MARKERS.invalidationFailed);
+  assert.equal(staleAuthorizationFailureMarker({ ...valid, responseStatus: null }), STALE_AUTH_DIAGNOSTIC_MARKERS.responseMissing);
+  assert.equal(staleAuthorizationFailureMarker({ ...valid, responseStatus: 204 }), STALE_AUTH_DIAGNOSTIC_MARKERS.http2xx);
+  assert.equal(staleAuthorizationFailureMarker({ ...valid, responseStatus: 302 }), STALE_AUTH_DIAGNOSTIC_MARKERS.http3xx);
+  assert.equal(staleAuthorizationFailureMarker({ ...valid, responseStatus: 403 }), STALE_AUTH_DIAGNOSTIC_MARKERS.http4xx);
+  assert.equal(staleAuthorizationFailureMarker({ ...valid, responseStatus: 503 }), STALE_AUTH_DIAGNOSTIC_MARKERS.http5xx);
+  assert.equal(staleAuthorizationFailureMarker({ ...valid, responseStatus: 0 }), STALE_AUTH_DIAGNOSTIC_MARKERS.httpOther);
+  assert.equal(staleAuthorizationFailureMarker({ ...valid, alertObserved: false }), STALE_AUTH_DIAGNOSTIC_MARKERS.alertMissing);
+  assert.deepEqual(Object.values(STALE_AUTH_DIAGNOSTIC_MARKERS), [
+    "P0B_SAFE_STALE_AUTH_CLICK_FAILED",
+    "P0B_SAFE_STALE_AUTH_ROUTE_NOT_INTERCEPTED_FAILED",
+    "P0B_SAFE_STALE_AUTH_INVALIDATION_FAILED",
+    "P0B_SAFE_STALE_AUTH_RESPONSE_MISSING_FAILED",
+    "P0B_SAFE_STALE_AUTH_RESPONSE_HTTP_2XX_FAILED",
+    "P0B_SAFE_STALE_AUTH_RESPONSE_HTTP_3XX_FAILED",
+    "P0B_SAFE_STALE_AUTH_RESPONSE_HTTP_4XX_FAILED",
+    "P0B_SAFE_STALE_AUTH_RESPONSE_HTTP_5XX_FAILED",
+    "P0B_SAFE_STALE_AUTH_RESPONSE_HTTP_OTHER_FAILED",
+    "P0B_SAFE_STALE_AUTH_ALERT_MISSING_FAILED",
+  ]);
 });
 
 async function scenario(parent, name, callback) {
@@ -303,7 +381,7 @@ async function scenario(parent, name, callback) {
             failSafeOpen(effectiveSafeOpenPrefix, "REGISTRATION");
           }
         }
-        try { await page.reload({ waitUntil: "domcontentloaded" }); }
+        try { await fixture.reloadAndAdoptSession(page); }
         catch { failSafeOpen(effectiveSafeOpenPrefix, "RELOAD"); }
         try {
           await page.getByRole("heading", { name: /Agentの状態を、\s*確認できました。/u }).waitFor();
@@ -454,6 +532,35 @@ function failLifecycle(error) {
   const marker = lifecycleFailureMarker(error);
   if (marker !== null) assert.fail(marker);
   throw error;
+}
+
+export const STALE_AUTH_DIAGNOSTIC_MARKERS = Object.freeze({
+  clickFailed: "P0B_SAFE_STALE_AUTH_CLICK_FAILED",
+  routeNotIntercepted: "P0B_SAFE_STALE_AUTH_ROUTE_NOT_INTERCEPTED_FAILED",
+  invalidationFailed: "P0B_SAFE_STALE_AUTH_INVALIDATION_FAILED",
+  responseMissing: "P0B_SAFE_STALE_AUTH_RESPONSE_MISSING_FAILED",
+  http2xx: "P0B_SAFE_STALE_AUTH_RESPONSE_HTTP_2XX_FAILED",
+  http3xx: "P0B_SAFE_STALE_AUTH_RESPONSE_HTTP_3XX_FAILED",
+  http4xx: "P0B_SAFE_STALE_AUTH_RESPONSE_HTTP_4XX_FAILED",
+  http5xx: "P0B_SAFE_STALE_AUTH_RESPONSE_HTTP_5XX_FAILED",
+  httpOther: "P0B_SAFE_STALE_AUTH_RESPONSE_HTTP_OTHER_FAILED",
+  alertMissing: "P0B_SAFE_STALE_AUTH_ALERT_MISSING_FAILED",
+});
+
+export function staleAuthorizationFailureMarker(observation = {}) {
+  if (observation.clickFailed === true) return STALE_AUTH_DIAGNOSTIC_MARKERS.clickFailed;
+  if (observation.routeIntercepted !== true) return STALE_AUTH_DIAGNOSTIC_MARKERS.routeNotIntercepted;
+  if (observation.invalidationFailed === true) return STALE_AUTH_DIAGNOSTIC_MARKERS.invalidationFailed;
+  const status = observation.responseStatus;
+  if (!Number.isInteger(status)) return STALE_AUTH_DIAGNOSTIC_MARKERS.responseMissing;
+  if (status === 401) {
+    return observation.alertObserved === true ? null : STALE_AUTH_DIAGNOSTIC_MARKERS.alertMissing;
+  }
+  if (status >= 200 && status < 300) return STALE_AUTH_DIAGNOSTIC_MARKERS.http2xx;
+  if (status >= 300 && status < 400) return STALE_AUTH_DIAGNOSTIC_MARKERS.http3xx;
+  if (status >= 400 && status < 500) return STALE_AUTH_DIAGNOSTIC_MARKERS.http4xx;
+  if (status >= 500 && status < 600) return STALE_AUTH_DIAGNOSTIC_MARKERS.http5xx;
+  return STALE_AUTH_DIAGNOSTIC_MARKERS.httpOther;
 }
 
 export function lifecycleFailureMarker(error) {

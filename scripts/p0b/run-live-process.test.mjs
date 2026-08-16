@@ -103,3 +103,22 @@ test("every static live-browser safe failure marker is allow-listed by the orche
   assert.ok(browserMarkers.size > 0);
   assert.deepEqual([...browserMarkers].filter((marker) => !runnerMarkers.has(marker)), []);
 });
+
+test("stale authorization diagnostics use a bounded fixed marker registry", async () => {
+  const runnerSource = await fs.readFile(new URL("./run-live-process.mjs", import.meta.url), "utf8");
+  const expected = [
+    ["P0B_SAFE_STALE_AUTH_CLICK_FAILED", "stale_auth_click"],
+    ["P0B_SAFE_STALE_AUTH_ROUTE_NOT_INTERCEPTED_FAILED", "stale_auth_route_not_intercepted"],
+    ["P0B_SAFE_STALE_AUTH_INVALIDATION_FAILED", "stale_auth_invalidation"],
+    ["P0B_SAFE_STALE_AUTH_RESPONSE_MISSING_FAILED", "stale_auth_response_missing"],
+    ["P0B_SAFE_STALE_AUTH_RESPONSE_HTTP_2XX_FAILED", "stale_auth_response_http_2xx"],
+    ["P0B_SAFE_STALE_AUTH_RESPONSE_HTTP_3XX_FAILED", "stale_auth_response_http_3xx"],
+    ["P0B_SAFE_STALE_AUTH_RESPONSE_HTTP_4XX_FAILED", "stale_auth_response_http_4xx"],
+    ["P0B_SAFE_STALE_AUTH_RESPONSE_HTTP_5XX_FAILED", "stale_auth_response_http_5xx"],
+    ["P0B_SAFE_STALE_AUTH_RESPONSE_HTTP_OTHER_FAILED", "stale_auth_response_http_other"],
+    ["P0B_SAFE_STALE_AUTH_ALERT_MISSING_FAILED", "stale_auth_alert_missing"],
+  ];
+  for (const [marker, code] of expected) {
+    assert.equal(runnerSource.includes(`[null, "${marker}", "${code}"]`), true, marker);
+  }
+});
