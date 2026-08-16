@@ -31,18 +31,27 @@ test("P0-B live browser role, WebAuthn, and recent-auth matrix", { skip: !enable
       await wake.focus();
       assert.equal(await wake.evaluate((element) => element === document.activeElement), true);
     } catch { assert.fail("P0B_SAFE_KEYBOARD_FOCUS_FAILED"); }
+    let refreshRequestObserved = false;
+    let refreshRequestFailed = false;
+    page.on("request", (request) => {
+      if (isKeyboardRefreshRequest(request)) refreshRequestObserved = true;
+    });
+    page.on("requestfailed", (request) => {
+      if (isKeyboardRefreshRequest(request)) refreshRequestFailed = true;
+    });
+    const refreshResponsePromise = page.waitForResponse((response) => {
+      return isKeyboardRefreshRequest(response.request());
+    }, { timeout: 15_000 }).catch(() => null);
     // Send Enter through the already-resolved control. This still exercises
     // keyboard activation while preventing a late focus shift (for example a
     // hydration or live-region update) from dispatching Enter to the page.
     try { await wake.press("Enter"); }
     catch { assert.fail("P0B_SAFE_KEYBOARD_PRESS_FAILED"); }
+    const refreshResponse = await refreshResponsePromise;
     try {
       assert.match(await requireWakeStatus(card, "P0B_SAFE_KEYBOARD_OUTCOME"), /依頼を受け付けました|既存の依頼へ統合し/u);
     } catch (error) {
-      const marker = error instanceof Error && /^P0B_SAFE_KEYBOARD_OUTCOME_(?:ALERT|TIMEOUT|INVALID)_FAILED$/u.test(error.message)
-        ? error.message
-        : "P0B_SAFE_KEYBOARD_OUTCOME_FAILED";
-      assert.fail(marker);
+      assert.fail(await keyboardOutcomeFailureMarker(refreshResponse, { refreshRequestObserved, refreshRequestFailed }));
     }
   });
 
@@ -302,6 +311,63 @@ async function requireWakeStatus(card, failurePrefix) {
     if (failurePrefix !== undefined) throw new Error(`${failurePrefix}_INVALID_FAILED`);
     throw new Error("wake status unavailable");
   }
+}
+
+export async function keyboardOutcomeFailureMarker(response, observation = {}) {
+  if (response === null) {
+    if (observation.refreshRequestFailed === true) return "P0B_SAFE_KEYBOARD_OUTCOME_TRANSPORT_FAILED";
+    if (observation.refreshRequestObserved === true) return "P0B_SAFE_KEYBOARD_OUTCOME_RESPONSE_TIMEOUT_FAILED";
+    return "P0B_SAFE_KEYBOARD_OUTCOME_NO_REQUEST_FAILED";
+  }
+  const status = response.status();
+  const statusMarker = new Map([
+    [400, "P0B_SAFE_KEYBOARD_OUTCOME_HTTP_400_FAILED"],
+    [401, "P0B_SAFE_KEYBOARD_OUTCOME_HTTP_401_FAILED"],
+    [403, "P0B_SAFE_KEYBOARD_OUTCOME_HTTP_403_FAILED"],
+    [409, "P0B_SAFE_KEYBOARD_OUTCOME_HTTP_409_FAILED"],
+    [422, "P0B_SAFE_KEYBOARD_OUTCOME_HTTP_422_FAILED"],
+    [429, "P0B_SAFE_KEYBOARD_OUTCOME_HTTP_429_FAILED"],
+    [500, "P0B_SAFE_KEYBOARD_OUTCOME_HTTP_500_FAILED"],
+    [502, "P0B_SAFE_KEYBOARD_OUTCOME_HTTP_502_FAILED"],
+    [503, "P0B_SAFE_KEYBOARD_OUTCOME_HTTP_503_FAILED"],
+    [504, "P0B_SAFE_KEYBOARD_OUTCOME_HTTP_504_FAILED"],
+  ]).get(status);
+  if (statusMarker !== undefined) return statusMarker;
+  if (status < 200 || status >= 300) {
+    return status >= 400 && status < 500
+      ? "P0B_SAFE_KEYBOARD_OUTCOME_HTTP_4XX_FAILED"
+      : status >= 500 && status < 600
+        ? "P0B_SAFE_KEYBOARD_OUTCOME_HTTP_5XX_FAILED"
+        : "P0B_SAFE_KEYBOARD_OUTCOME_HTTP_OTHER_FAILED";
+  }
+  let payload;
+  try { payload = await response.json(); }
+  catch { return "P0B_SAFE_KEYBOARD_OUTCOME_2XX_RESPONSE_CONTRACT_FAILED"; }
+  if (!isKeyboardRefreshResponseContract(payload)) return "P0B_SAFE_KEYBOARD_OUTCOME_2XX_RESPONSE_CONTRACT_FAILED";
+  return "P0B_SAFE_KEYBOARD_OUTCOME_2XX_UI_PARSE_FAILED";
+}
+
+function isKeyboardRefreshResponseContract(value) {
+  const opaqueID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/u;
+  const utcInstant = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{3})?Z$/u;
+  if (!value || typeof value !== "object" || Array.isArray(value) || Object.keys(value).sort().join(",") !== "refresh_request,request_id") return false;
+  if (typeof value.request_id !== "string" || !opaqueID.test(value.request_id)) return false;
+  const refresh = value.refresh_request;
+  if (!refresh || typeof refresh !== "object" || Array.isArray(refresh)
+    || Object.keys(refresh).sort().join(",") !== "desired_generation,device_id,request_id,requested_at,status,version") return false;
+  return refresh.version === 1
+    && typeof refresh.request_id === "string" && opaqueID.test(refresh.request_id)
+    && typeof refresh.device_id === "string" && opaqueID.test(refresh.device_id)
+    && (refresh.desired_generation === null || Number.isSafeInteger(refresh.desired_generation) && refresh.desired_generation >= 1)
+    && ["accepted", "coalesced", "no_pending_refresh"].includes(refresh.status)
+    && typeof refresh.requested_at === "string" && utcInstant.test(refresh.requested_at) && Number.isFinite(Date.parse(refresh.requested_at));
+}
+
+function isKeyboardRefreshRequest(request) {
+  const url = new URL(request.url());
+  return request.method() === "POST"
+    && url.pathname === "/api/console"
+    && url.searchParams.get("operation") === "device.refresh.request";
 }
 
 function deviceCard(page, name) { return page.getByRole("article").filter({ has: page.getByRole("heading", { name }) }); }
