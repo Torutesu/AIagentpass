@@ -39,6 +39,7 @@ export function createPostgresHumanRepository({ client, onAuthorityReduction } =
     createCredentialWithRecentAuth,
     insertCredentialForSession: insertCredential,
     updateCredentialCounter,
+    quarantineCredentialClone,
     updateCredentialLabel,
     revokeCredential,
     listSafeSessions,
@@ -272,7 +273,7 @@ export function createPostgresHumanRepository({ client, onAuthorityReduction } =
   }
 
   async function findCredentialForSession(input) {
-    const result = await client.query(`SELECT c.id,c.public_key,c.sign_count,c.transports,c.backup_eligible,c.backup_state,c.revoked_at FROM webauthn_credentials c JOIN human_sessions s ON s.member_id=c.member_id JOIN memberships m ON m.organization_id=s.organization_id AND m.member_id=s.member_id AND m.id=s.membership_id JOIN organizations o ON o.id=s.organization_id WHERE s.id=$1 AND s.organization_id=$2 AND c.id=$3 AND s.revoked_at IS NULL AND s.expires_at>clock_timestamp() AND (s.idle_expires_at IS NULL OR s.idle_expires_at>clock_timestamp()) AND c.revoked_at IS NULL AND m.status='active' AND m.role=s.role AND o.authority_epoch=s.organization_authority_epoch AND m.session_epoch=s.membership_session_epoch LIMIT 1`, [uuid(input.session_id), uuid(input.organization_id), base64Bytes(input.credential_id, 16, 1024)]);
+    const result = await client.query(`SELECT c.id,c.public_key,c.sign_count,c.transports,c.backup_eligible,c.backup_state,c.revoked_at FROM webauthn_credentials c JOIN human_sessions s ON s.member_id=c.member_id JOIN memberships m ON m.organization_id=s.organization_id AND m.member_id=s.member_id AND m.id=s.membership_id JOIN organizations o ON o.id=s.organization_id WHERE s.id=$1 AND s.organization_id=$2 AND c.id=$3 AND s.revoked_at IS NULL AND s.expires_at>clock_timestamp() AND (s.idle_expires_at IS NULL OR s.idle_expires_at>clock_timestamp()) AND c.revoked_at IS NULL AND c.clone_detected_at IS NULL AND c.sign_count_state<>'clone-detected' AND m.status='active' AND m.role=s.role AND o.authority_epoch=s.organization_authority_epoch AND m.session_epoch=s.membership_session_epoch LIMIT 1`, [uuid(input.session_id), uuid(input.organization_id), base64Bytes(input.credential_id, 16, 1024)]);
     const row = result.rows?.[0];
     return row ? { ...row, id: Buffer.from(row.id).toString("base64url"), sign_count: storedCounter(row.sign_count), backup_eligible: strictBoolean(row.backup_eligible, "backup_eligible"), backup_state: strictBoolean(row.backup_state, "backup_state") } : null;
   }
@@ -287,7 +288,7 @@ export function createPostgresHumanRepository({ client, onAuthorityReduction } =
       : "";
     if (paging.after) params.push(paging.after.createdAt, paging.after.id);
     params.push(paging.limit + 1);
-    const result = await client.query(`SELECT c.id,c.member_id,c.label,c.transports,c.backup_eligible,c.backup_state,c.created_at,c.last_used_at,c.revoked_at,c.version FROM webauthn_credentials c JOIN human_sessions s ON s.member_id=c.member_id JOIN memberships m ON m.organization_id=s.organization_id AND m.member_id=s.member_id AND m.id=s.membership_id JOIN organizations o ON o.id=s.organization_id WHERE s.id=$1 AND s.member_id=$2 AND s.organization_id=$3 AND s.revoked_at IS NULL AND s.expires_at>clock_timestamp() AND (s.idle_expires_at IS NULL OR s.idle_expires_at>clock_timestamp()) AND m.status='active' AND m.role=s.role AND o.authority_epoch=s.organization_authority_epoch AND m.session_epoch=s.membership_session_epoch${after} ORDER BY date_trunc('milliseconds',c.created_at) ASC,c.id ASC LIMIT $${params.length}`, params);
+    const result = await client.query(`SELECT c.id,c.member_id,c.label,c.transports,c.backup_eligible,c.backup_state,c.created_at,c.last_used_at,c.revoked_at,c.clone_detected_at,c.version FROM webauthn_credentials c JOIN human_sessions s ON s.member_id=c.member_id JOIN memberships m ON m.organization_id=s.organization_id AND m.member_id=s.member_id AND m.id=s.membership_id JOIN organizations o ON o.id=s.organization_id WHERE s.id=$1 AND s.member_id=$2 AND s.organization_id=$3 AND s.revoked_at IS NULL AND s.expires_at>clock_timestamp() AND (s.idle_expires_at IS NULL OR s.idle_expires_at>clock_timestamp()) AND m.status='active' AND m.role=s.role AND o.authority_epoch=s.organization_authority_epoch AND m.session_epoch=s.membership_session_epoch${after} ORDER BY date_trunc('milliseconds',c.created_at) ASC,c.id ASC LIMIT $${params.length}`, params);
     return (result.rows ?? []).map(safeCredentialRow);
   }
 
@@ -353,9 +354,11 @@ export function createPostgresHumanRepository({ client, onAuthorityReduction } =
 
     return inTransaction(async (transactionClient) => {
       await lockCredentialSet(transactionClient, memberId);
-      const active = await transactionClient.query("SELECT COUNT(*) AS active_count FROM webauthn_credentials WHERE member_id=$1 AND revoked_at IS NULL", [memberId]);
+      const active = await transactionClient.query("SELECT COUNT(*) FILTER (WHERE revoked_at IS NULL AND clone_detected_at IS NULL) AS active_count,COUNT(*) AS total_count FROM webauthn_credentials WHERE member_id=$1", [memberId]);
       const activeCount = parseDatabaseCount(active.rows?.[0]?.active_count, "active credential count");
-      if (activeCount > 0) {
+      const totalCount = parseDatabaseCount(active.rows?.[0]?.total_count, "credential count");
+      if (activeCount > totalCount) throw new TypeError("credential counts are invalid");
+      if (totalCount > 0) {
         let authorizationId;
         let operation;
         let proofSessionId;
@@ -390,8 +393,34 @@ export function createPostgresHumanRepository({ client, onAuthorityReduction } =
     const expectedBackupEligible = hasBackupState ? strictBoolean(input?.expected_backup_eligible, "expected_backup_eligible") : null;
     const expectedBackupState = hasBackupState ? strictBoolean(input?.expected_backup_state, "expected_backup_state") : null;
     if (hasBackupState && ((backupState && !backupEligible) || (expectedBackupState && !expectedBackupEligible))) throw new TypeError("backup_state requires backup_eligible");
-    const result = await client.query(`UPDATE webauthn_credentials c SET sign_count=$4,backup_eligible=COALESCE($6,c.backup_eligible),backup_state=COALESCE($7,c.backup_state),last_used_at=clock_timestamp() FROM human_sessions s JOIN memberships m ON m.organization_id=s.organization_id AND m.member_id=s.member_id AND m.id=s.membership_id JOIN organizations o ON o.id=s.organization_id WHERE s.id=$1 AND s.organization_id=$2 AND c.id=$3 AND c.member_id=s.member_id AND c.sign_count=$5 AND ($8::boolean IS NULL OR c.backup_eligible=$8) AND ($9::boolean IS NULL OR c.backup_state=$9) AND c.revoked_at IS NULL AND s.revoked_at IS NULL AND s.expires_at>clock_timestamp() AND (s.idle_expires_at IS NULL OR s.idle_expires_at>clock_timestamp()) AND m.status='active' AND m.role=s.role AND o.authority_epoch=s.organization_authority_epoch AND m.session_epoch=s.membership_session_epoch RETURNING c.id`, [uuid(input.session_id), uuid(input.organization_id), base64Bytes(input.credential_id, 16, 1024), counter(input.sign_count), counter(input.expected_sign_count), backupEligible, backupState, expectedBackupEligible, expectedBackupState]);
+    const nextCount = counter(input.sign_count);
+    const result = await client.query(`UPDATE webauthn_credentials c SET sign_count=$4,sign_count_state=CASE WHEN $4=0 THEN 'zero-counter' ELSE 'monotonic' END,backup_eligible=COALESCE($6,c.backup_eligible),backup_state=COALESCE($7,c.backup_state),last_used_at=clock_timestamp() FROM human_sessions s JOIN memberships m ON m.organization_id=s.organization_id AND m.member_id=s.member_id AND m.id=s.membership_id JOIN organizations o ON o.id=s.organization_id WHERE s.id=$1 AND s.organization_id=$2 AND c.id=$3 AND c.member_id=s.member_id AND c.sign_count=$5 AND ($8::boolean IS NULL OR c.backup_eligible=$8) AND ($9::boolean IS NULL OR c.backup_state=$9) AND c.revoked_at IS NULL AND c.clone_detected_at IS NULL AND c.sign_count_state<>'clone-detected' AND s.revoked_at IS NULL AND s.expires_at>clock_timestamp() AND (s.idle_expires_at IS NULL OR s.idle_expires_at>clock_timestamp()) AND m.status='active' AND m.role=s.role AND o.authority_epoch=s.organization_authority_epoch AND m.session_epoch=s.membership_session_epoch RETURNING c.id`, [uuid(input.session_id), uuid(input.organization_id), base64Bytes(input.credential_id, 16, 1024), nextCount, counter(input.expected_sign_count), backupEligible, backupState, expectedBackupEligible, expectedBackupState]);
     return result.rowCount === 1;
+  }
+
+  async function quarantineCredentialClone(input) {
+    const sessionId = uuid(input?.session_id ?? input?.sessionId);
+    const organizationId = uuid(input?.organization_id ?? input?.organizationId);
+    const credentialValue = input?.credential_id ?? input?.credentialId;
+    const expectedCount = counter(input?.expected_sign_count ?? input?.expectedSignCount);
+    const observedCount = counter(input?.observed_sign_count ?? input?.observedSignCount);
+    if ((expectedCount === 0 && observedCount === 0) || observedCount > expectedCount) throw new TypeError("clone counter evidence is invalid");
+    return inTransaction(async (transactionClient) => {
+      await lockOrganization(transactionClient, organizationId);
+      const session = await transactionClient.query(`SELECT s.member_id FROM human_sessions s JOIN memberships m ON m.organization_id=s.organization_id AND m.member_id=s.member_id AND m.id=s.membership_id JOIN organizations o ON o.id=s.organization_id WHERE s.id=$1 AND s.organization_id=$2 AND s.revoked_at IS NULL AND s.expires_at>clock_timestamp() AND (s.idle_expires_at IS NULL OR s.idle_expires_at>clock_timestamp()) AND m.status='active' AND m.role=s.role AND o.authority_epoch=s.organization_authority_epoch AND m.session_epoch=s.membership_session_epoch`, [sessionId, organizationId]);
+      const memberId = session.rows?.[0]?.member_id === undefined ? null : uuid(String(session.rows[0].member_id));
+      if (memberId === null) return false;
+      await lockCredentialSet(transactionClient, memberId);
+      const result = await transactionClient.query(`UPDATE webauthn_credentials
+        SET sign_count_state='clone-detected',clone_detected_at=clock_timestamp(),version=version+1
+        WHERE id=$1 AND member_id=$2 AND revoked_at IS NULL AND clone_detected_at IS NULL
+          AND sign_count_state<>'clone-detected' AND sign_count>0 AND sign_count>=$3
+        RETURNING id,clone_detected_at`, [base64Bytes(credentialValue, 16, 1024), memberId, expectedCount]);
+      if (result.rowCount !== 1) return false;
+      const detectedAt = storedTimestamp(result.rows[0].clone_detected_at, "clone_detected_at");
+      await notifyAuthorityReduction(transactionClient, { organizationId, memberId, actorSessionId: sessionId, targetId: credentialId(result.rows[0].id), resource: "credential", reason: "webauthn_clone_detected", occurredAt: detectedAt });
+      return true;
+    });
   }
 
   async function updateCredentialLabel(input) {
@@ -659,7 +688,7 @@ function upstreamMembershipRow(row) { return { provider: identityProvider(row.pr
 function membershipRole(value) { if (!["owner", "admin", "auditor", "viewer"].includes(value)) throw new TypeError("membership role is invalid"); return value; }
 function positiveInteger(value) { if (typeof value === "string" && /^\d+$/.test(value)) value=Number(value); if (!Number.isSafeInteger(value)||value<1) throw new TypeError("membership version is invalid"); return value; }
 function credentialRow(row) { return { id: credentialId(row.id), member_id: uuid(String(row.member_id)), public_key: publicKeyBytes(row.public_key), sign_count: storedCounter(row.sign_count), transports: credentialTransports(row.transports), label: credentialLabel(row.label), backup_eligible: strictBoolean(row.backup_eligible, "backup_eligible"), backup_state: strictBoolean(row.backup_state, "backup_state"), created_at: row.created_at, last_used_at: row.last_used_at ?? null, revoked_at: row.revoked_at ?? null }; }
-function safeCredentialRow(row) { return { id: credentialId(row.id), member_id: uuid(String(row.member_id)), label: credentialLabel(row.label), transports: credentialTransports(row.transports), backup_eligible: strictBoolean(row.backup_eligible, "backup_eligible"), backup_state: strictBoolean(row.backup_state, "backup_state"), created_at: row.created_at, last_used_at: row.last_used_at ?? null, revoked_at: row.revoked_at ?? null, version: positiveInteger(row.version) }; }
+function safeCredentialRow(row) { return { id: credentialId(row.id), member_id: uuid(String(row.member_id)), label: credentialLabel(row.label), transports: credentialTransports(row.transports), backup_eligible: strictBoolean(row.backup_eligible, "backup_eligible"), backup_state: strictBoolean(row.backup_state, "backup_state"), created_at: row.created_at, last_used_at: row.last_used_at ?? null, revoked_at: row.revoked_at ?? row.clone_detected_at ?? null, version: positiveInteger(row.version) }; }
 function safeSessionRow(row) { const sessionId = uuid(String(row.session_id ?? row.id)); const memberId = uuid(String(row.member_id)); const organizationId = uuid(String(row.organization_id)); return { session_id: sessionId, member_id: memberId, organization_id: organizationId, role: membershipRole(row.role), version: positiveInteger(row.version ?? 1), created_at: storedTimestamp(row.created_at, "created_at"), expires_at: storedTimestamp(row.expires_at, "expires_at"), last_seen_at: nullableStoredTimestamp(row.last_seen_at, "last_seen_at"), idle_expires_at: nullableStoredTimestamp(row.idle_expires_at, "idle_expires_at"), recent_auth_at: nullableStoredTimestamp(row.recent_auth_at, "recent_auth_at"), revoked_at: nullableStoredTimestamp(row.revoked_at, "revoked_at"), revoke_reason: row.revoke_reason ?? null, status: row.revoked_at ? "revoked" : "active" }; }
 function credentialScope(input) { return { sessionId: uuid(input?.session_id ?? input?.sessionId), memberId: uuid(input?.member_id ?? input?.memberId), organizationId: uuid(input?.organization_id ?? input?.organizationId) }; }
 function keysetPagination(input, defaultLimit, resource) {

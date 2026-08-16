@@ -64,15 +64,38 @@ test("allows zero counters only as the explicitly ambiguous zero/zero case", asy
 test("fails closed on non-zero counter rollback or equality, including an alternate verifier that bypasses the provider check", async () => {
   for (const newCounter of [5, 6, 0]) {
     let updates = 0;
+    const quarantines = [];
     const verifier = createSimpleWebAuthnAssertionVerifier({
       credentialRepository: {
         async findCredentialForSession() { return { public_key: Buffer.alloc(64, 1), sign_count: 6 }; },
-        async updateCredentialCounter() { updates += 1; return true; }
+        async updateCredentialCounter() { updates += 1; return true; },
+        async quarantineCredentialClone(input) { quarantines.push(input); return true; }
       },
       verify: async () => ({ verified: true, authenticationInfo: authenticationInfo({ newCounter }) })
     });
     await assert.rejects(() => verifier({ ceremony, assertion }), /verification failed/);
     assert.equal(updates, 0);
+    assert.deepEqual(quarantines, [{
+      credential_id: assertion.credential_id,
+      session_id: ceremony.session_id,
+      organization_id: ceremony.organization_id,
+      expected_sign_count: 6,
+      observed_sign_count: newCounter
+    }]);
+  }
+});
+
+test("fails closed when durable clone quarantine cannot commit", async () => {
+  for (const quarantine of [async () => false, async () => { throw new Error("database detail"); }]) {
+    const verifier = createSimpleWebAuthnAssertionVerifier({
+      credentialRepository: {
+        async findCredentialForSession() { return { public_key: Buffer.alloc(64, 1), sign_count: 6 }; },
+        async updateCredentialCounter() { throw new Error("must not update"); },
+        quarantineCredentialClone: quarantine
+      },
+      verify: async () => ({ verified: true, authenticationInfo: authenticationInfo({ newCounter: 6 }) })
+    });
+    await assert.rejects(() => verifier({ ceremony, assertion }), (error) => error.message === "WebAuthn assertion verification failed" && !error.message.includes("database detail"));
   }
 });
 
