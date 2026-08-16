@@ -30,7 +30,7 @@ const BUILD_TIMEOUT_MS = 180_000;
 // Cloud, and Console stack per authority scenario. Keep the outer supervisor
 // above the complete matrix budget; each scenario retains its own tighter
 // deadline so a single stuck interaction still fails locally.
-const BROWSER_TIMEOUT_MS = 1_260_000;
+const BROWSER_TIMEOUT_MS = 1_920_000;
 const PROCESS_TIMEOUT_MS = 180_000;
 // Only these static TAP fragments may cross the child-output boundary. The
 // command runner retains the fixed code, never the matched line or adjacent

@@ -16,9 +16,10 @@ let selectedScenarioCount = 0;
 
 // Thirteen authority scenarios each own a fresh TLS PostgreSQL/Cloud/Console
 // stack. A complete successful matrix is longer than the earlier failure-
-// masked 14-minute ceiling on hosted runners; per-scenario 120-second bounds
-// remain the owning hang detector.
-test("P0-B live browser role, WebAuthn, and recent-auth matrix", { skip: !enabled, timeout: 1_200_000 }, async (t) => {
+// masked 14-minute ceiling on hosted runners. The first complete traversal
+// reached its thirteenth isolated stack after 20 minutes; per-scenario
+// 120-second bounds remain the owning hang detector.
+test("P0-B live browser role, WebAuthn, and recent-auth matrix", { skip: !enabled, timeout: 1_800_000 }, async (t) => {
   await scenario(t, "renders all six real PostgreSQL device states", async ({ open }) => {
     const page = await open("owner");
     await Promise.all([
