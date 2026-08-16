@@ -2,7 +2,9 @@
 
 Status: active
 
-Planning baseline: `codex/agent-platform` through `1a9c027`
+Planning baseline: superseded for day-to-day execution by
+[`FORWARD_IMPLEMENTATION_PLAN_2026-08-16.md`](./FORWARD_IMPLEMENTATION_PLAN_2026-08-16.md)
+at `89e61fb`. This document retains the earlier detailed package history.
 
 This document converts the v1 architecture into the remaining implementation
 and qualification gates. [`V1_EXECUTION_PLAN.md`](./V1_EXECUTION_PLAN.md)
