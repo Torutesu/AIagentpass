@@ -94,10 +94,17 @@ test("P0-B live browser role, WebAuthn, and recent-auth matrix", { skip: !enable
       ["古い状態 Mac", /反映待ちの更新はなく/u, "P0B_SAFE_WAKE_NO_PENDING_FAILED"]
     ]) {
       const card = deviceCard(page, name);
+      const diagnosis = safeCode === "P0B_SAFE_WAKE_ACCEPTED_FAILED" ? observeWakeAttempt(page) : null;
       try {
         await card.getByRole("button", { name: "Wake requestを依頼" }).click();
         assert.match(await requireWakeStatus(card), expected);
-      } catch { assert.fail(safeCode); }
+      } catch {
+        if (diagnosis !== null) {
+          const refreshResponse = await diagnosis.refreshResponsePromise;
+          assert.fail(await wakeAcceptedFailureMarker(refreshResponse, diagnosis.observation));
+        }
+        assert.fail(safeCode);
+      }
     }
   });
 
@@ -377,6 +384,60 @@ export async function keyboardOutcomeFailureMarker(response, observation = {}) {
   catch { return "P0B_SAFE_KEYBOARD_OUTCOME_2XX_RESPONSE_CONTRACT_FAILED"; }
   if (!isKeyboardRefreshResponseContract(payload)) return "P0B_SAFE_KEYBOARD_OUTCOME_2XX_RESPONSE_CONTRACT_FAILED";
   return "P0B_SAFE_KEYBOARD_OUTCOME_2XX_UI_PARSE_FAILED";
+}
+
+function observeWakeAttempt(page) {
+  const observation = {
+    refreshRequestObserved: false,
+    refreshRequestFailed: false,
+    recentAuthObservation: {
+      optionsObserved: false, optionsFailed: false, optionsStatus: null,
+      verifyObserved: false, verifyFailed: false, verifyStatus: null, verifyResponse: null,
+      sessionObserved: false, sessionFailed: false, sessionStatus: null,
+      webAuthnSupported: true,
+    },
+  };
+  page.on("request", (request) => {
+    if (isKeyboardRefreshRequest(request)) observation.refreshRequestObserved = true;
+    const phase = keyboardRecentAuthPhase(request);
+    if (phase === "options") observation.recentAuthObservation.optionsObserved = true;
+    if (phase === "verify") observation.recentAuthObservation.verifyObserved = true;
+    if (isKeyboardSessionRequest(request)) observation.recentAuthObservation.sessionObserved = true;
+  });
+  page.on("requestfailed", (request) => {
+    if (isKeyboardRefreshRequest(request)) observation.refreshRequestFailed = true;
+    const phase = keyboardRecentAuthPhase(request);
+    if (phase === "options") observation.recentAuthObservation.optionsFailed = true;
+    if (phase === "verify") observation.recentAuthObservation.verifyFailed = true;
+    if (isKeyboardSessionRequest(request)) observation.recentAuthObservation.sessionFailed = true;
+  });
+  page.on("response", (response) => {
+    const phase = keyboardRecentAuthPhase(response.request());
+    if (phase === "options") observation.recentAuthObservation.optionsStatus = response.status();
+    if (phase === "verify") {
+      observation.recentAuthObservation.verifyStatus = response.status();
+      observation.recentAuthObservation.verifyResponse = response;
+    }
+    if (isKeyboardSessionRequest(response.request())) observation.recentAuthObservation.sessionStatus = response.status();
+  });
+  return {
+    observation,
+    refreshResponsePromise: page.waitForResponse((response) => isKeyboardRefreshRequest(response.request()), { timeout: 15_000 }).catch(() => null),
+  };
+}
+
+export async function wakeAcceptedFailureMarker(response, observation = {}) {
+  if (response === null || response.status() < 200 || response.status() >= 300) {
+    return keyboardOutcomeFailureMarker(response, observation);
+  }
+  let payload;
+  try { payload = await response.json(); }
+  catch { return "P0B_SAFE_KEYBOARD_OUTCOME_2XX_RESPONSE_CONTRACT_FAILED"; }
+  if (!isKeyboardRefreshResponseContract(payload)) return "P0B_SAFE_KEYBOARD_OUTCOME_2XX_RESPONSE_CONTRACT_FAILED";
+  if (payload.refresh_request.status === "coalesced") return "P0B_SAFE_WAKE_ACCEPTED_GOT_COALESCED_FAILED";
+  if (payload.refresh_request.status === "no_pending_refresh") return "P0B_SAFE_WAKE_ACCEPTED_GOT_NO_PENDING_FAILED";
+  if (payload.refresh_request.status !== "accepted") return "P0B_SAFE_WAKE_ACCEPTED_STATUS_MISMATCH_FAILED";
+  return "P0B_SAFE_WAKE_ACCEPTED_UI_STATUS_FAILED";
 }
 
 export async function keyboardRecentAuthFailureMarker(observation) {

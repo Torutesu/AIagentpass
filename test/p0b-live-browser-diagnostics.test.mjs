@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { keyboardOutcomeFailureMarker, keyboardRecentAuthFailureMarker } from "./p0b-live-browser.integration.test.mjs";
+import { keyboardOutcomeFailureMarker, keyboardRecentAuthFailureMarker, wakeAcceptedFailureMarker } from "./p0b-live-browser.integration.test.mjs";
 
 function response(status, payload, parse = true) {
   return {
@@ -75,4 +75,13 @@ test("P0-B keyboard diagnostics localize pre-refresh recent-auth failures withou
   assert.equal(await keyboardRecentAuthFailureMarker({ optionsObserved: true, optionsStatus: 200, verifyObserved: true, verifyStatus: 418 }), "P0B_SAFE_KEYBOARD_AUTH_VERIFY_HTTP_4XX_FAILED");
   assert.equal(await keyboardRecentAuthFailureMarker({ optionsObserved: true, optionsStatus: 200, verifyObserved: true, verifyStatus: 502 }), "P0B_SAFE_KEYBOARD_AUTH_VERIFY_HTTP_5XX_FAILED");
   assert.equal(await keyboardRecentAuthFailureMarker({ optionsObserved: true, optionsStatus: 200, verifyObserved: true, verifyStatus: 200 }), "P0B_SAFE_KEYBOARD_AUTH_VERIFIED_NO_REFRESH_FAILED");
+});
+
+test("accepted wake diagnostics distinguish authority failures, ledger outcomes, and UI parsing", async () => {
+  assert.equal(await wakeAcceptedFailureMarker(null, { recentAuthObservation: { optionsObserved: true, optionsStatus: 200 } }), "P0B_SAFE_KEYBOARD_AUTH_VERIFY_NO_REQUEST_FAILED");
+  assert.equal(await wakeAcceptedFailureMarker(response(503, { secret: "ignored" })), "P0B_SAFE_KEYBOARD_OUTCOME_HTTP_503_FAILED");
+  assert.equal(await wakeAcceptedFailureMarker(response(202, null, false)), "P0B_SAFE_KEYBOARD_OUTCOME_2XX_RESPONSE_CONTRACT_FAILED");
+  assert.equal(await wakeAcceptedFailureMarker(response(202, { ...validPayload, refresh_request: { ...validPayload.refresh_request, status: "coalesced" } })), "P0B_SAFE_WAKE_ACCEPTED_GOT_COALESCED_FAILED");
+  assert.equal(await wakeAcceptedFailureMarker(response(202, { ...validPayload, refresh_request: { ...validPayload.refresh_request, status: "no_pending_refresh" } })), "P0B_SAFE_WAKE_ACCEPTED_GOT_NO_PENDING_FAILED");
+  assert.equal(await wakeAcceptedFailureMarker(response(202, validPayload)), "P0B_SAFE_WAKE_ACCEPTED_UI_STATUS_FAILED");
 });
