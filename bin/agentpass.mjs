@@ -23,10 +23,9 @@ import { createNativeSetupHandlers } from "../lib/native-setup-handlers.mjs";
 import { createDeviceEnrollmentSetupHandler } from "../lib/device-enrollment-setup-handler.mjs";
 import { connectSetupInBrowser, normalizeConsoleBaseUrl } from "../lib/setup-browser-connect.mjs";
 import { parseSetupContinueOptions } from "../lib/setup-continue-options.mjs";
-import { parseControlBundleJson } from "../lib/control-bundle-v2.mjs";
 import { executeProductionUninstall, planProductionUninstall } from "../lib/platform-uninstall.mjs";
 import { runUserStatePurge } from "../lib/platform-user-purge.mjs";
-import { parseEnrollmentInvitation, publicSetupFailure, publicSetupResult, readHeadlessOnboarding, validateHeadlessEnrollmentBaseUrl } from "../lib/headless-onboarding.mjs";
+import { publicSetupFailure, publicSetupResult, readHeadlessOnboarding, validateHeadlessEnrollmentBaseUrl } from "../lib/headless-onboarding.mjs";
 import { prepareSetupPreflight, publicSetupPreflightFailure, serializeSetupPreflightHandoff } from "../lib/setup-preflight.mjs";
 import { readInstalledReleaseReceipt, verifyInstalledReleaseReceipt } from "../lib/installed-release-receipt.mjs";
 import { createSetupOrchestrator } from "../lib/setup-orchestrator.mjs";
@@ -34,6 +33,7 @@ import { TEST_COMMIT_VERIFICATION_MARKER, createCompleteSetupHandler, createEdit
 import { SETUP_STATES, SetupJournalError, createSetupJournal, loadSetupJournal } from "../lib/setup-journal.mjs";
 import { generateRecoveryIdentity, recoveryPolicyToAnchorPolicy, signAnchorRecoveryAuthorization, signRecoveryRequest, verifyAnchorRecoveryApprovals, verifyRecoveryThreshold } from "../lib/recovery.mjs";
 import { applyControlBundle, controlKeyFingerprint, fetchControlBundle, generateControlKeyPair, loadControlBundle, signControlBundle } from "../lib/remote-control.mjs";
+import { readSetupEnrollmentInvitationStdin } from "../lib/setup-stdin-delivery.mjs";
 
 const [, , command, ...args] = process.argv;
 
@@ -196,20 +196,6 @@ function installProduction() {
   }
 }
 
-function readEnrollmentInvitationStdin() {
-  const chunks = []; let total = 0;
-  while (true) {
-    const chunk = Buffer.alloc(4096);
-    const count = fs.readSync(0, chunk, 0, chunk.length, null);
-    if (count === 0) break;
-    total += count;
-    if (total > 16 * 1024) throw new Error("Enrollment invitation exceeds 16 KiB");
-    chunks.push(chunk.subarray(0, count));
-  }
-  const parsed = parseControlBundleJson(Buffer.concat(chunks), { maxBytes: 16 * 1024, maxDepth: 8 });
-  return parseEnrollmentInvitation(parsed);
-}
-
 async function continueNativeSetup() {
   const flags = parseSetupContinueOptions(args.slice(1));
   const journal = loadSetupJournal();
@@ -235,7 +221,7 @@ async function continueNativeSetup() {
   if (config.native_broker?.client !== application.client || config.native_broker?.manager !== application.manager || config.native_broker?.mach_service !== "dev.agentpass.native-service") throw new Error("Native bridge configuration does not match the verified AgentPass application");
   const enrollmentRunner = enrollmentMode ? createNativeDeviceEnrollmentRunner({ servicePath: application.service }) : undefined;
   let enrollmentInvitation;
-  if (flags.enrollmentStdin) enrollmentInvitation = readEnrollmentInvitationStdin();
+  if (flags.enrollmentStdin) enrollmentInvitation = await readSetupEnrollmentInvitationStdin({ enrollmentUrl: enrollmentBaseUrl });
   if (flags.browser) {
     const receipt = readInstalledReleaseReceipt();
     const preflight = await prepareSetupPreflight({
