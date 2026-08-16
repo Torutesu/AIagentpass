@@ -16,10 +16,10 @@ public enum NativeAgentPrivateGitBridgeServerError: Error, Equatable, Sendable {
 /// A Host-side one-shot private Git bridge server.
 ///
 /// The transport is the sole authority for bytes: it reads one bounded commit
-/// payload frame (rejecting already-available trailing input), then the
-/// injected signer is called exactly once, then one bounded signature frame is
-/// written. The server owns one lifecycle reservation, so concurrent and
-/// repeated calls fail before any I/O.
+/// payload frame and requires request-direction EOF, then the injected signer
+/// is called exactly once, then one bounded signature frame is written. The
+/// server owns one lifecycle reservation, so concurrent and repeated calls
+/// fail before any I/O.
 ///
 /// This API deliberately exposes no selector beyond the commit payload. In
 /// particular, callers cannot choose a session, capability, key, algorithm,
@@ -43,8 +43,9 @@ public final class NativeAgentPrivateGitBridgeServer: @unchecked Sendable {
     /// Serves exactly one request and then closes the transport on every path.
     ///
     /// The signer is invoked only after the complete request frame has been
-    /// validated. A failed signer or response write is terminal; this method
-    /// never retries either operation.
+    /// validated and EOF proves that no late second frame can follow. A failed
+    /// signer or response write is terminal; this method never retries either
+    /// operation.
     public func serve() throws {
         try reserveOneShot()
 
