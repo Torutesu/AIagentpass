@@ -18,6 +18,7 @@ import {
   platformPromotionAuthorizationRequestDigest
 } from "../platform-promotion-http-contract.mjs";
 import { createPlatformPromotionIssuanceService } from "../platform-promotion-issuance.mjs";
+import { isPromotionEvidenceV3Signer } from "../promotion-evidence-v3-signer.mjs";
 import { isPlatformSessionToken } from "../platform-session-transport.mjs";
 import {
   createPostgresPlatformPromotionIssuanceRepository,
@@ -227,7 +228,7 @@ export function createPlatformAuthorizedPromotionService({
   maxTtlMs = PROMOTION_EVIDENCE_V3_MAX_TTL_MS
 } = {}) {
   if (!repository || typeof repository.forAuthorization !== "function"
-    || !signer || typeof signer.sign !== "function"
+    || !isPromotionEvidenceV3Signer(signer)
     || typeof publicKeyResolver !== "function") {
     throw new PlatformAuthorizationRepositoryError(PLATFORM_AUTHORIZATION_REPOSITORY_ERROR_CODES.CONFIG);
   }

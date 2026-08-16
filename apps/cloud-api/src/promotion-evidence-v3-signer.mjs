@@ -37,6 +37,11 @@ const PROVIDER_KEYS = Object.freeze([
 ]);
 const METADATA_KEYS = Object.freeze(["algorithm", "key_id", "public_key"]);
 const SIGNAL_KEYS = Object.freeze(["signal"]);
+const SIGNER_KEYS = Object.freeze([
+  "algorithm", "key_id", "key_version", "lifecycle_version", "protocol_version",
+  "public_key_fingerprint", "publicKeyMetadata", "purpose", "sign",
+  "signPromotionEvidence", "signPromotionEvidenceV3", "signing_version", "version",
+]);
 const PRIVATE_NAME = /(?:private|secret|password|credential|token|diagnostic|debug|trace|pem)/iu;
 
 /**
@@ -203,6 +208,46 @@ export const createPromotionEvidenceV3Signer = createHostedPromotionEvidenceV3Si
 export const createHostedPromotionEvidenceSignerV3 = createHostedPromotionEvidenceV3Signer;
 export const createHostedPromotionEvidenceSigner = createHostedPromotionEvidenceV3Signer;
 export const createPromotionEvidenceSigner = createHostedPromotionEvidenceV3Signer;
+
+/**
+ * Check the narrow signer object that may cross the hosted Platform
+ * promotion composition boundary.  A generic `sign(bytes)` object is not
+ * sufficient here: the runtime must prove that the operation is bound to the
+ * v3 promotion purpose before it can publish readiness or construct the
+ * authorization service.
+ *
+ * This intentionally checks only public, non-secret metadata.  The provider
+ * and any credential/private-key material must remain inside the signer
+ * closure and are rejected if exposed on the object.
+ */
+export function isPromotionEvidenceV3Signer(value, { keyId, keyVersion, lifecycleVersion } = {}) {
+  const keys = plainObject(value) ? Reflect.ownKeys(value) : [];
+  if (!plainObject(value)
+    || keys.length !== SIGNER_KEYS.length
+    || keys.some((key) => typeof key !== "string" || !SIGNER_KEYS.includes(key))
+    || typeof value.sign !== "function"
+    || typeof value.signPromotionEvidence !== "function"
+    || typeof value.signPromotionEvidenceV3 !== "function"
+    || typeof value.publicKeyMetadata !== "function"
+    || value.purpose !== PROMOTION_EVIDENCE_V3_PURPOSE
+    || value.algorithm !== PROMOTION_EVIDENCE_V3_ALGORITHM
+    || value.version !== PROMOTION_EVIDENCE_V3_SIGNING_VERSION
+    || value.protocol_version !== PROMOTION_EVIDENCE_V3_PROTOCOL_VERSION
+    || value.signing_version !== PROMOTION_EVIDENCE_V3_SIGNING_VERSION
+    || (keyId !== undefined && value.key_id !== keyId)
+    || (keyVersion !== undefined && value.key_version !== keyVersion)
+    || (lifecycleVersion !== undefined && value.lifecycle_version !== lifecycleVersion)
+    || !KEY_ID.test(value.key_id ?? "")
+    || !Number.isSafeInteger(value.key_version) || value.key_version < 1
+    || !Number.isSafeInteger(value.lifecycle_version) || value.lifecycle_version < 1
+    || typeof value.public_key_fingerprint !== "string"
+    || !/^SHA256:[A-Za-z0-9_-]{43}$/u.test(value.public_key_fingerprint)) return false;
+  return !keys.some((key) => {
+    if (typeof key !== "string" || PRIVATE_NAME.test(key)) return true;
+    const descriptor = Object.getOwnPropertyDescriptor(value, key);
+    return !descriptor || descriptor.enumerable !== true || !("value" in descriptor);
+  });
+}
 
 function validateConfiguration({ provider, keyId, keyVersion, lifecycleVersion, publicKey, publicKeyFingerprint, timeoutMs, maxTtlMs, now }) {
   exactRecord(provider, PROVIDER_KEYS, PROMOTION_EVIDENCE_V3_SIGNER_ERROR_CODES.CONFIG, true);

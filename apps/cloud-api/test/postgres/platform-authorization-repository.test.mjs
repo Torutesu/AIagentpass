@@ -15,8 +15,10 @@ import { platformPromotionAuthorizationRequestDigest } from "../../src/platform-
 import {
   PROMOTION_EVIDENCE_V3_ALGORITHM,
   PROMOTION_EVIDENCE_V3_MAX_TTL_MS,
+  PROMOTION_EVIDENCE_V3_PROTOCOL_VERSION,
   PROMOTION_EVIDENCE_V3_PURPOSE,
   PROMOTION_EVIDENCE_V3_SIGNATURE_DOMAIN,
+  PROMOTION_EVIDENCE_V3_SIGNING_VERSION,
   PROMOTION_EVIDENCE_V3_TYPE,
   PROMOTION_EVIDENCE_V3_VERSION,
   normalizePromotionEvidenceV3Statement,
@@ -383,6 +385,21 @@ test("service composition binds authorization before invoking the existing issua
     async markPlatformPromotionUncertain() { return { state: "uncertain" }; },
     async getCommittedPlatformPromotion() { return { state: "absent" }; }
   };
+  const strictSigner = {
+    purpose: PROMOTION_EVIDENCE_V3_PURPOSE,
+    algorithm: PROMOTION_EVIDENCE_V3_ALGORITHM,
+    version: PROMOTION_EVIDENCE_V3_SIGNING_VERSION,
+    protocol_version: PROMOTION_EVIDENCE_V3_PROTOCOL_VERSION,
+    signing_version: PROMOTION_EVIDENCE_V3_SIGNING_VERSION,
+    key_id: "promotion-evidence-2026-08",
+    key_version: 7,
+    lifecycle_version: 3,
+    public_key_fingerprint: `SHA256:${"A".repeat(43)}`,
+    async sign() { throw new Error("signer must not run"); },
+    async signPromotionEvidence() { throw new Error("signer must not run"); },
+    async signPromotionEvidenceV3() { throw new Error("signer must not run"); },
+    async publicKeyMetadata() { return {}; }
+  };
   const service = createPlatformAuthorizedPromotionService({
     repository: { forAuthorization(input) {
       assert.deepEqual(Object.keys(input).sort(), ["csrf_token", "jti", "organization_id", "proof_id", "session_material_hash"]);
@@ -393,7 +410,7 @@ test("service composition binds authorization before invoking the existing issua
       assert.equal(input.jti, IDS.jti);
       return scoped;
     } },
-    signer: { async sign() { throw new Error("signer must not run"); } },
+    signer: strictSigner,
     publicKeyResolver: async () => undefined,
     now: () => Date.parse(NOW)
   });
@@ -406,6 +423,33 @@ test("service composition binds authorization before invoking the existing issua
     (error) => error instanceof PlatformAuthorizationRepositoryError
       && error.code === PLATFORM_AUTHORIZATION_REPOSITORY_ERROR_CODES.INPUT
   );
+});
+
+test("hosted authorization composition rejects a generic or cross-purpose signer", () => {
+  for (const signer of [
+    { async sign() {}, async publicKeyMetadata() {} },
+    {
+      purpose: "generic.sign",
+      algorithm: PROMOTION_EVIDENCE_V3_ALGORITHM,
+      version: PROMOTION_EVIDENCE_V3_SIGNING_VERSION,
+      protocol_version: PROMOTION_EVIDENCE_V3_PROTOCOL_VERSION,
+      signing_version: PROMOTION_EVIDENCE_V3_SIGNING_VERSION,
+      key_id: "promotion-evidence-2026-08",
+      key_version: 7,
+      lifecycle_version: 3,
+      public_key_fingerprint: "a".repeat(64),
+      async sign() {},
+      async signPromotionEvidence() {},
+      async signPromotionEvidenceV3() {},
+      async publicKeyMetadata() {}
+    }
+  ]) {
+    assert.throws(() => createPlatformAuthorizedPromotionService({
+      repository: { forAuthorization() {} },
+      signer,
+      publicKeyResolver: async () => undefined
+    }), (error) => error.code === PLATFORM_AUTHORIZATION_REPOSITORY_ERROR_CODES.CONFIG);
+  }
 });
 
 test("reconciles a lost commit through the same authenticated atomic reserve scope", async () => {
@@ -448,6 +492,15 @@ test("reconciles a lost commit through the same authenticated atomic reserve sco
       }
     },
     signer: {
+      purpose: PROMOTION_EVIDENCE_V3_PURPOSE,
+      algorithm: PROMOTION_EVIDENCE_V3_ALGORITHM,
+      version: PROMOTION_EVIDENCE_V3_SIGNING_VERSION,
+      protocol_version: PROMOTION_EVIDENCE_V3_PROTOCOL_VERSION,
+      signing_version: PROMOTION_EVIDENCE_V3_SIGNING_VERSION,
+      key_id: "promotion-evidence-2026-08",
+      key_version: 7,
+      lifecycle_version: 3,
+      public_key_fingerprint: signerKeyFingerprint,
       async sign(statement) {
         signCalls += 1;
         return {
@@ -466,6 +519,28 @@ test("reconciles a lost commit through the same authenticated atomic reserve sco
             }),
             signingKeys.privateKey
           ).toString("base64url")
+        };
+      },
+      async signPromotionEvidenceV3(statement) {
+        return this.sign(statement);
+      },
+      async signPromotionEvidence(statement) {
+        return this.sign(statement);
+      },
+      async publicKeyMetadata() {
+        return {
+          version: PROMOTION_EVIDENCE_V3_VERSION,
+          type: PROMOTION_EVIDENCE_V3_TYPE,
+          purpose: PROMOTION_EVIDENCE_V3_PURPOSE,
+          domain: PROMOTION_EVIDENCE_V3_SIGNATURE_DOMAIN,
+          protocol_version: PROMOTION_EVIDENCE_V3_PROTOCOL_VERSION,
+          signing_version: PROMOTION_EVIDENCE_V3_SIGNING_VERSION,
+          algorithm: PROMOTION_EVIDENCE_V3_ALGORITHM,
+          key_id: this.key_id,
+          key_version: this.key_version,
+          lifecycle_version: this.lifecycle_version,
+          public_key: publicKey,
+          public_key_fingerprint: signerKeyFingerprint
         };
       }
     },

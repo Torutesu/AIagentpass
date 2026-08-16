@@ -49,8 +49,13 @@ import {
   PROMOTION_EVIDENCE_V3_MAX_TTL_MS,
   PROMOTION_EVIDENCE_V3_PROTOCOL_VERSION,
   PROMOTION_EVIDENCE_V3_PURPOSE,
-  PROMOTION_EVIDENCE_V3_SIGNING_VERSION
+  PROMOTION_EVIDENCE_V3_SIGNING_VERSION,
+  PROMOTION_EVIDENCE_V3_SIGNATURE_DOMAIN,
+  PROMOTION_EVIDENCE_V3_TYPE,
+  PROMOTION_EVIDENCE_V3_VERSION,
+  promotionEvidenceV3PublicKeyFingerprint
 } from "./promotion-evidence-v3-statement.mjs";
+import { isPromotionEvidenceV3Signer } from "./promotion-evidence-v3-signer.mjs";
 import { createPlatformAuthorizedPromotionService } from "./postgres/platform-authorization-repository.mjs";
 import { createPlatformOperatorAuthorizer } from "./platform-operator-authorizer.mjs";
 import { PROTOCOL_VERSION, REFRESH_HINT_SIGNATURE_ALGORITHM, REFRESH_HINT_TYPE } from "../../../packages/protocol/src/index.mjs";
@@ -1152,7 +1157,7 @@ function platformSessionAuthorityContext(source, config, intent = undefined) {
 export function createPlatformPromotionCompositionReadiness({ httpApi, repository, signer, lifecycleRepository, keyId, keyVersion, lifecycleVersion } = {}) {
   if (!httpApi || typeof httpApi.handle !== "function" || typeof httpApi.paths?.issue !== "string"
     || !repository || typeof repository.forAuthorization !== "function"
-    || !signer || typeof signer.publicKeyMetadata !== "function"
+    || !isPromotionEvidenceV3Signer(signer, { keyId, keyVersion, lifecycleVersion })
     || !lifecycleRepository || typeof lifecycleRepository.snapshot !== "function"
     || typeof keyId !== "string" || !Number.isSafeInteger(keyVersion) || keyVersion < 1
     || !Number.isSafeInteger(lifecycleVersion) || lifecycleVersion < 1) {
@@ -1167,8 +1172,8 @@ export function createPlatformPromotionCompositionReadiness({ httpApi, repositor
       const active = Array.isArray(lifecycle?.keys)
         ? lifecycle.keys.filter((key) => key?.state === "active")
         : [];
-      if (!metadata || metadata.key_id !== keyId || metadata.key_version !== keyVersion
-        || metadata.lifecycle_version !== lifecycleVersion || lifecycle?.version !== lifecycleVersion
+      if (!isExactPromotionEvidenceV3Metadata(metadata, { keyId, keyVersion, lifecycleVersion, signer })
+        || lifecycle?.version !== lifecycleVersion
         || active.length !== 1 || active[0].key_id !== keyId || active[0].key_version !== keyVersion) {
         throw new Error("Platform promotion lifecycle binding is stale");
       }
@@ -1177,6 +1182,43 @@ export function createPlatformPromotionCompositionReadiness({ httpApi, repositor
       return Object.freeze({ enabled: true, ok: false, code: "platform_promotion_unavailable" });
     }
   };
+}
+
+function isExactPromotionEvidenceV3Metadata(value, { keyId, keyVersion, lifecycleVersion, signer }) {
+  const expectedKeys = [
+    "version", "type", "purpose", "domain", "protocol_version", "signing_version",
+    "algorithm", "key_id", "key_version", "lifecycle_version", "public_key", "public_key_fingerprint"
+  ];
+  const keys = value && typeof value === "object" && !Array.isArray(value) ? Reflect.ownKeys(value) : [];
+  if (!value || typeof value !== "object" || Array.isArray(value)
+    || keys.length !== expectedKeys.length
+    || keys.some((key) => {
+      if (typeof key !== "string" || !expectedKeys.includes(key)) return true;
+      const descriptor = Object.getOwnPropertyDescriptor(value, key);
+      return !descriptor || descriptor.enumerable !== true || !("value" in descriptor);
+    })
+    || value.version !== PROMOTION_EVIDENCE_V3_VERSION
+    || value.type !== PROMOTION_EVIDENCE_V3_TYPE
+    || value.purpose !== PROMOTION_EVIDENCE_V3_PURPOSE
+    || value.domain !== PROMOTION_EVIDENCE_V3_SIGNATURE_DOMAIN
+    || value.protocol_version !== PROMOTION_EVIDENCE_V3_PROTOCOL_VERSION
+    || value.signing_version !== PROMOTION_EVIDENCE_V3_SIGNING_VERSION
+    || value.algorithm !== PROMOTION_EVIDENCE_V3_ALGORITHM
+    || value.key_id !== keyId || value.key_version !== keyVersion
+    || value.lifecycle_version !== lifecycleVersion
+    || typeof value.public_key !== "string"
+    || typeof value.public_key_fingerprint !== "string"
+    || !/^SHA256:[A-Za-z0-9_-]{43}$/u.test(value.public_key_fingerprint)) return false;
+  let key;
+  try {
+    key = crypto.createPublicKey(value.public_key);
+    if (key.type !== "public" || key.asymmetricKeyType !== "ed25519"
+      || key.export({ type: "spki", format: "pem" }).toString() !== value.public_key) return false;
+  } catch {
+    return false;
+  }
+  return signer.public_key_fingerprint === promotionEvidenceV3PublicKeyFingerprint(key)
+    && promotionEvidenceV3PublicKeyFingerprint(key) === value.public_key_fingerprint;
 }
 
 function createHostedReadiness(databaseReadiness, signers, platformSessionReadiness = undefined, platformPromotionReadiness = undefined) {
