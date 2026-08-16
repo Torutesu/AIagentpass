@@ -33,6 +33,9 @@ import {
   normalizeOperationRequest,
   normalizeRefreshHint,
   normalizeScope,
+  parseOnboardingInvitationDeliveryJson,
+  parseOnboardingPreflightJson,
+  parseOnboardingTrustInstallationAcknowledgementJson,
   parseContractJson,
   parseBundleAcknowledgementJson,
   parseRefreshHintJson,
@@ -121,7 +124,7 @@ test("publishes a closed, immutable, private-material-free contract manifest", (
   assert.equal(CONTRACT_MANIFEST_VERSION, PROTOCOL_VERSION);
   assert.equal(PUBLIC_CONTRACT_MANIFEST, CONTRACT_MANIFEST);
   assert.equal(getPublicContractManifest(), PUBLIC_CONTRACT_MANIFEST);
-  assert.deepEqual(CONTRACT_KINDS, ["agent_descriptor_v1", "operation_request_v1", "operation_decision_v1", "audit_event_v1", "refresh_hint_v1", "bundle_ack_v1"]);
+  assert.deepEqual(CONTRACT_KINDS, ["agent_descriptor_v1", "operation_request_v1", "operation_decision_v1", "audit_event_v1", "refresh_hint_v1", "bundle_ack_v1", "onboarding_preflight_v1", "onboarding_invitation_delivery_v1", "onboarding_trust_installation_ack_v1", "onboarding_control_ack_v1"]);
   assert.equal(PUBLIC_CONTRACT_MANIFEST.version, CONTRACT_MANIFEST_VERSION);
   assert.deepEqual(
     PUBLIC_CONTRACT_MANIFEST.contracts.map(({ kind, version, purpose, parser_version }) => ({ kind, version, purpose, parser_version })),
@@ -131,7 +134,11 @@ test("publishes a closed, immutable, private-material-free contract manifest", (
       { kind: "operation_decision_v1", version: 1, purpose: "operation-decision", parser_version: 1 },
       { kind: "audit_event_v1", version: 1, purpose: "audit-event", parser_version: 1 },
       { kind: "refresh_hint_v1", version: 1, purpose: "refresh-hint", parser_version: 1 },
-      { kind: "bundle_ack_v1", version: 1, purpose: "bundle-ack", parser_version: 1 }
+      { kind: "bundle_ack_v1", version: 1, purpose: "bundle-ack", parser_version: 1 },
+      { kind: "onboarding_preflight_v1", version: 1, purpose: "onboarding-preflight", parser_version: 1 },
+      { kind: "onboarding_invitation_delivery_v1", version: 1, purpose: "onboarding-invitation-delivery", parser_version: 1 },
+      { kind: "onboarding_trust_installation_ack_v1", version: 1, purpose: "onboarding-trust-installation-ack", parser_version: 1 },
+      { kind: "onboarding_control_ack_v1", version: 1, purpose: "onboarding-control-ack", parser_version: 1 }
     ]
   );
   assert.equal(new Set(PUBLIC_CONTRACT_MANIFEST.contracts.map(({ purpose }) => purpose)).size, PUBLIC_CONTRACT_MANIFEST.contracts.length);
@@ -166,7 +173,11 @@ test("rejects unknown contract kinds and dispatches every parser at its manifest
     },
     audit_event_v1: audit(),
     refresh_hint_v1: refreshHint(),
-    bundle_ack_v1: bundleAcknowledgement()
+    bundle_ack_v1: bundleAcknowledgement(),
+    onboarding_preflight_v1: JSON.parse(fs.readFileSync(new URL("../../../contracts/fixtures/device-onboarding-preflight.valid.json", import.meta.url))),
+    onboarding_invitation_delivery_v1: JSON.parse(fs.readFileSync(new URL("../../../contracts/fixtures/device-onboarding-invitation-delivery.valid.json", import.meta.url))),
+    onboarding_trust_installation_ack_v1: JSON.parse(fs.readFileSync(new URL("../../../contracts/fixtures/device-trust-installation-ack.valid.json", import.meta.url))),
+    onboarding_control_ack_v1: bundleAcknowledgement()
   };
 
   for (const contract of PUBLIC_CONTRACT_MANIFEST.contracts) {

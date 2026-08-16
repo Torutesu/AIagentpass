@@ -9,6 +9,16 @@
         "operationId": "completeDeviceEnrollment",
         "summary": "Complete a one-time device enrollment",
         "description": "Consumes the one-time enrollment credential and proof-of-possession, then returns the active device identity epoch and the two purpose-separated public trust roots required by the native client. The enrollment response never contains private key material or an enrollment credential. The response is no-store and includes a request_id envelope field.",
+        "x-agentpass-browser-onboarding": {
+          "preflight_schema": "../schemas/device-onboarding-preflight-v1.schema.json",
+          "invitation_delivery_schema": "../schemas/device-onboarding-invitation-delivery-v1.schema.json",
+          "possession_receipt_schema": "../schemas/device-possession-receipt-v1.schema.json",
+          "trust_installation_ack_schema": "../schemas/device-trust-installation-ack-v1.schema.json",
+          "control_ack_schema": "../schemas/bundle-ack-v1.schema.json",
+          "authority_fields": "server-derived only; caller cannot select organization, device, authority generation, or trust roots",
+          "secret_transport": "credential is one-shot in-memory delivery only and is forbidden in argv, environment, URL, and durable storage",
+          "downgrade": "reject browser-led proof versions other than 2"
+        },
         "security": [{ "enrollmentCredential": [], "enrollmentProof": [] }],
         "parameters": [{ "$ref": "#/components/parameters/EnrollmentId" }],
         "requestBody": {
@@ -274,9 +284,13 @@
     "schemas": {
       "ScopeV1": { "$ref": "../schemas/scope-v1.schema.json" },
       "BundleAckV1": { "$ref": "../schemas/bundle-ack-v1.schema.json" },
+      "OnboardingControlAckV1": { "$ref": "../schemas/bundle-ack-v1.schema.json" },
       "RefreshHintV1": { "$ref": "../schemas/refresh-hint-v1.schema.json" },
       "DeviceEnrollmentCompletionV2": { "$ref": "../schemas/device-enrollment-completion-v2.schema.json" },
       "DevicePossessionReceiptV1": { "$ref": "../schemas/device-possession-receipt-v1.schema.json" },
+      "DeviceOnboardingPreflightV1": { "$ref": "../schemas/device-onboarding-preflight-v1.schema.json" },
+      "DeviceOnboardingInvitationDeliveryV1": { "$ref": "../schemas/device-onboarding-invitation-delivery-v1.schema.json" },
+      "DeviceTrustInstallationAcknowledgementV1": { "$ref": "../schemas/device-trust-installation-ack-v1.schema.json" },
       "AgentSessionGrantV1": { "$ref": "../schemas/agent-session-grant-v1.schema.json" },
       "AgentSessionLeaseV1": { "$ref": "../schemas/agent-session-lease-v1.schema.json" },
       "QualificationGrantBatchClaimRequest": { "$ref": "../schemas/qualification-grant-batch-claim-v1.schema.json" },

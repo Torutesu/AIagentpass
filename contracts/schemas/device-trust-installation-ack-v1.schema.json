@@ -1,0 +1,32 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agentpass.dev/contracts/device-trust-installation-ack-v1.schema.json",
+  "title": "Device trust installation acknowledgement v1",
+  "description": "Secret-free native evidence that the exact enrolled device installed the server-supplied ControlBundle trust. It carries hashes and observed identifiers only; it cannot select authority, policy, capabilities, roles, or signer material.",
+  "$comment": "Secret-free; safe for bounded setup evidence after native validation.",
+  "type": "object",
+  "additionalProperties": false,
+  "maxProperties": 12,
+  "required": ["version", "type", "organization_id", "device_id", "enrollment_id", "device_key_epoch", "control_format_epoch", "control_sequence", "control_statement_hash", "trust_fingerprint", "installed_at", "result"],
+  "properties": {
+    "version": { "const": 1 },
+    "type": { "const": "agentpass.browser-onboarding.trust-installation-ack" },
+    "organization_id": { "$ref": "#/$defs/uuid" },
+    "device_id": { "$ref": "#/$defs/uuid" },
+    "enrollment_id": { "$ref": "#/$defs/uuid" },
+    "device_key_epoch": { "$ref": "#/$defs/positiveInteger" },
+    "control_format_epoch": { "const": 2 },
+    "control_sequence": { "$ref": "#/$defs/positiveInteger" },
+    "control_statement_hash": { "$ref": "#/$defs/sha256" },
+    "trust_fingerprint": { "$ref": "#/$defs/fingerprint" },
+    "installed_at": { "$ref": "#/$defs/canonicalTimestamp" },
+    "result": { "enum": ["installed", "already_installed"] }
+  },
+  "$defs": {
+    "uuid": { "type": "string", "format": "uuid", "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$" },
+    "positiveInteger": { "type": "integer", "minimum": 1, "maximum": 9007199254740991 },
+    "sha256": { "type": "string", "minLength": 64, "maxLength": 64, "pattern": "^[0-9a-f]{64}$" },
+    "fingerprint": { "type": "string", "minLength": 50, "maxLength": 50, "pattern": "^SHA256:[A-Za-z0-9_-]{43}$" },
+    "canonicalTimestamp": { "type": "string", "format": "date-time", "minLength": 24, "maxLength": 24, "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$" }
+  }
+}

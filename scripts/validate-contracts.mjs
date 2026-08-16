@@ -48,6 +48,9 @@ const BASELINE_SCHEMA_FIXTURES = Object.freeze({
   "bundle-ack-v1.schema.json": "bundle-ack.valid.json",
   "device-audit-list-v1.schema.json": "device-audit-list.valid.json",
   "device-enrollment-v1.schema.json": "device-enrollment.valid.json",
+  "device-onboarding-invitation-delivery-v1.schema.json": "device-onboarding-invitation-delivery.valid.json",
+  "device-onboarding-preflight-v1.schema.json": "device-onboarding-preflight.valid.json",
+  "device-trust-installation-ack-v1.schema.json": "device-trust-installation-ack.valid.json",
   "device-possession-receipt-verification-v1.schema.json": "device-possession-receipt-verification.valid.json",
   "doctor-report-v1.schema.json": "doctor-report.valid.json",
   "refresh-hint-v1.schema.json": "refresh-hint.valid.json"

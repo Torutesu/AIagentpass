@@ -784,6 +784,16 @@
           "candidate_binding": "candidate_id is resolved against the server-side release candidate registry; artifact_sha256, source_commit, team_id, and manifest_sha256 are never accepted as caller input",
           "device_key_binding": "device_key_fingerprint is bound to the one-time challenge and must match the public key used at completion",
           "forbidden_request_fields": ["artifact_sha256", "source_commit", "team_id", "manifest_sha256", "release_manifest", "private_key", "credential"]
+        },
+        "x-agentpass-browser-onboarding": {
+          "preflight_schema": "../schemas/device-onboarding-preflight-v1.schema.json",
+          "invitation_delivery_schema": "../schemas/device-onboarding-invitation-delivery-v1.schema.json",
+          "possession_receipt_schema": "../schemas/device-possession-receipt-v1.schema.json",
+          "trust_installation_ack_schema": "../schemas/device-trust-installation-ack-v1.schema.json",
+          "control_ack_schema": "../schemas/bundle-ack-v1.schema.json",
+          "authority_fields": "server-derived only; caller cannot select organization, device, candidate provenance, authority generation, or trust roots",
+          "secret_transport": "credential is one-shot in-memory delivery only and is forbidden in argv, environment, URL, and durable storage",
+          "downgrade": "reject browser-led proof versions other than 2"
         }
       }
     },
@@ -1644,6 +1654,9 @@
       "InternalError": { "description": "Stable internal failure response; sensitive details are not disclosed", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorEnvelope" } } } }
     },
     "schemas": {
+      "DeviceOnboardingPreflightV1": { "$ref": "../schemas/device-onboarding-preflight-v1.schema.json" },
+      "DeviceOnboardingInvitationDeliveryV1": { "$ref": "../schemas/device-onboarding-invitation-delivery-v1.schema.json" },
+      "DeviceTrustInstallationAcknowledgementV1": { "$ref": "../schemas/device-trust-installation-ack-v1.schema.json" },
       "SessionBootstrapRequest": {
         "type": "object",
         "additionalProperties": false,
