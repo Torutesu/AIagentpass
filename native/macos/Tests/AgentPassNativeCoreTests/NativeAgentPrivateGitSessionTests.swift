@@ -28,6 +28,31 @@ private let sessionSignature = Data("-----BEGIN SSH SIGNATURE-----\nfixed\n-----
         NativeAgentPrivateGitSessionFrameCodec.encode(response)) == response)
 }
 
+@Test func privateGitSessionCodecRoundTripsCanonicalTerminalClose() throws {
+    let close = try NativeAgentPrivateGitSessionFrameCodec.encode(.close)
+
+    #expect(close == Data([
+        0, 0, 0, 16,
+        0x41, 0x50, 0x47, 0x53,
+        NativeAgentPrivateGitSessionFrameCodec.currentVersion, 3,
+        0, 0,
+        0, 0, 0, 0,
+        0, 0, 0, 0,
+    ]))
+    #expect(try NativeAgentPrivateGitSessionFrameCodec.decode(close) == .close)
+}
+
+@Test func privateGitSessionLifecycleErrorsHaveStableF1Codes() {
+    #expect(NativeAgentPrivateGitSessionLifecycleError.allCases.map(\.rawValue) == [
+        "outcome_unknown",
+        "revoked",
+        "expired",
+        "policy_drift",
+        "process_drift",
+        "transport_quarantined",
+    ])
+}
+
 @Test func privateGitSessionCodecRejectsEmptyAndBoundViolations() throws {
     #expect(throws: NativeAgentPrivateGitSessionCodecError.emptyPayload) {
         try NativeAgentPrivateGitSessionFrameCodec.encode(.request(sequence: 1, commitPayload: Data()))
@@ -142,6 +167,54 @@ private let sessionSignature = Data("-----BEGIN SSH SIGNATURE-----\nfixed\n-----
     oversizedResponseContent[19] = UInt8(oversizedResponseLength & 0xff)
     #expect(throws: NativeAgentPrivateGitSessionCodecError.signatureTooLarge) {
         try NativeAgentPrivateGitSessionFrameCodec.decode(oversizedResponseContent)
+    }
+}
+
+@Test func privateGitSessionCodecRejectsCrossProtocolDowngradeAndMalformedCloseFrames() throws {
+    let oldOneShotFrame = try NativeAgentGitBridgeFrame.encodeCommitPayload(sessionPayload)
+    #expect(throws: NativeAgentPrivateGitSessionCodecError.invalidMagic) {
+        try NativeAgentPrivateGitSessionFrameCodec.decode(oldOneShotFrame)
+    }
+
+    let valid = try NativeAgentPrivateGitSessionFrameCodec.encode(
+        .request(sequence: 1, commitPayload: sessionPayload))
+    var downgraded = valid
+    downgraded[8] = 0
+    #expect(throws: NativeAgentPrivateGitSessionCodecError.unsupportedVersion) {
+        try NativeAgentPrivateGitSessionFrameCodec.decode(downgraded)
+    }
+
+    var unknownKind = valid
+    unknownKind[9] = 9
+    #expect(throws: NativeAgentPrivateGitSessionCodecError.invalidMessageKind) {
+        try NativeAgentPrivateGitSessionFrameCodec.decode(unknownKind)
+    }
+
+    let close = try NativeAgentPrivateGitSessionFrameCodec.encode(.close)
+    var closeWithSequence = close
+    closeWithSequence[15] = 1
+    #expect(throws: NativeAgentPrivateGitSessionCodecError.invalidClose) {
+        try NativeAgentPrivateGitSessionFrameCodec.decode(closeWithSequence)
+    }
+
+    var closeWithPayloadLength = close
+    closeWithPayloadLength[19] = 1
+    #expect(throws: NativeAgentPrivateGitSessionCodecError.invalidClose) {
+        try NativeAgentPrivateGitSessionFrameCodec.decode(closeWithPayloadLength)
+    }
+
+    #expect(throws: NativeAgentPrivateGitSessionCodecError.lengthMismatch) {
+        try NativeAgentPrivateGitSessionFrameCodec.decode(close + Data([0]))
+    }
+
+    var oversized = Data(repeating: 0, count: NativeAgentPrivateGitSessionFrameCodec.framePrefixBytes + NativeAgentPrivateGitSessionFrameCodec.bodyHeaderBytes)
+    let oversizedBody = UInt32(NativeAgentPrivateGitSessionFrameCodec.maximumBodyBytes + 1)
+    oversized[0] = UInt8((oversizedBody >> 24) & 0xff)
+    oversized[1] = UInt8((oversizedBody >> 16) & 0xff)
+    oversized[2] = UInt8((oversizedBody >> 8) & 0xff)
+    oversized[3] = UInt8(oversizedBody & 0xff)
+    #expect(throws: NativeAgentPrivateGitSessionCodecError.frameTooLarge) {
+        try NativeAgentPrivateGitSessionFrameCodec.decode(oversized)
     }
 }
 
@@ -283,6 +356,139 @@ private let sessionSignature = Data("-----BEGIN SSH SIGNATURE-----\nfixed\n-----
     #expect(throws: NativeAgentPrivateGitSessionStateMachineError.terminal) {
         _ = try machine.beginRequest(commitPayload: sessionPayload)
     }
+}
+
+@Test func privateGitSessionStateMachineClosesInOrderAfterBudgetCompletion() throws {
+    let machine = NativeAgentPrivateGitSessionStateMachine()
+    _ = try machine.beginRequest(commitPayload: sessionPayload)
+    _ = try machine.acceptResponse(responseFrame(sequence: 1))
+    _ = try machine.beginRequest(commitPayload: sessionPayload)
+    _ = try machine.acceptResponse(responseFrame(sequence: 2))
+
+    let close = try machine.close()
+    #expect(try NativeAgentPrivateGitSessionFrameCodec.decode(close) == .close)
+    #expect(machine.state == .closing)
+    try machine.acceptEOF()
+    #expect(machine.state == .closed)
+    #expect(throws: NativeAgentPrivateGitSessionStateMachineError.alreadyClosed) {
+        _ = try machine.close()
+    }
+}
+
+@Test func privateGitSessionStateMachineRejectsDuplicateCloseAndPostCloseTraffic() throws {
+    let machine = NativeAgentPrivateGitSessionStateMachine()
+    _ = try machine.close()
+
+    #expect(machine.state == .closing)
+    #expect(throws: NativeAgentPrivateGitSessionStateMachineError.alreadyClosed) {
+        _ = try machine.close()
+    }
+    try machine.acceptEOF()
+    #expect(machine.state == .closed)
+    #expect(throws: NativeAgentPrivateGitSessionStateMachineError.alreadyClosed) {
+        _ = try machine.beginRequest(commitPayload: sessionPayload)
+    }
+    #expect(throws: NativeAgentPrivateGitSessionStateMachineError.alreadyClosed) {
+        _ = try machine.acceptResponse(responseFrame(sequence: 1))
+    }
+    #expect(machine.state == .closed)
+}
+
+@Test func privateGitSessionStateMachineQuarantinesCloseWhileOutstanding() throws {
+    let localClose = NativeAgentPrivateGitSessionStateMachine()
+    _ = try localClose.beginRequest(commitPayload: sessionPayload)
+    do {
+        _ = try localClose.close()
+        Issue.record("close while outstanding unexpectedly succeeded")
+    } catch let error as NativeAgentPrivateGitSessionStateMachineError {
+        #expect(error == .closeWhileOutstanding)
+        #expect(error.lifecycleError == .outcomeUnknown)
+    } catch {
+        Issue.record("unexpected error: \(error)")
+    }
+    #expect(localClose.state == .quarantined(.closeWhileOutstanding))
+
+    let peerClose = NativeAgentPrivateGitSessionStateMachine()
+    _ = try peerClose.beginRequest(commitPayload: sessionPayload)
+    let closeFrame = try NativeAgentPrivateGitSessionFrameCodec.encode(.close)
+    #expect(throws: NativeAgentPrivateGitSessionStateMachineError.closeWhileOutstanding) {
+        try peerClose.acceptClose(closeFrame)
+    }
+    #expect(peerClose.state == .quarantined(.closeWhileOutstanding))
+}
+
+@Test func privateGitSessionStateMachineAcceptsPeerCloseOnlyAtAStableBoundary() throws {
+    let ready = NativeAgentPrivateGitSessionStateMachine()
+    let close = try NativeAgentPrivateGitSessionFrameCodec.encode(.close)
+    try ready.acceptClose(close)
+    #expect(ready.state == .closing)
+    try ready.acceptEOF()
+    #expect(ready.state == .closed)
+
+    let completed = NativeAgentPrivateGitSessionStateMachine()
+    _ = try completed.beginRequest(commitPayload: sessionPayload)
+    _ = try completed.acceptResponse(responseFrame(sequence: 1))
+    _ = try completed.beginRequest(commitPayload: sessionPayload)
+    _ = try completed.acceptResponse(responseFrame(sequence: 2))
+    try completed.acceptClose(close)
+    #expect(completed.state == .closing)
+    try completed.acceptEOF()
+    #expect(completed.state == .closed)
+}
+
+@Test func privateGitSessionStateMachineRejectsEOFWithoutCommittedClose() throws {
+    let ready = NativeAgentPrivateGitSessionStateMachine()
+    #expect(throws: NativeAgentPrivateGitSessionStateMachineError.unexpectedEOF) {
+        try ready.acceptEOF()
+    }
+    #expect(ready.state == .quarantined(.unexpectedEOF))
+
+    let outstanding = NativeAgentPrivateGitSessionStateMachine()
+    _ = try outstanding.beginRequest(commitPayload: sessionPayload)
+    do {
+        try outstanding.acceptEOF()
+        Issue.record("EOF with an outstanding response unexpectedly succeeded")
+    } catch let error as NativeAgentPrivateGitSessionStateMachineError {
+        #expect(error == .outcomeUnknown)
+        #expect(error.lifecycleError == .outcomeUnknown)
+    } catch {
+        Issue.record("unexpected error: \(error)")
+    }
+    #expect(outstanding.state == .quarantined(.outcomeUnknown))
+}
+
+@Test func privateGitSessionStateMachineQuarantinesTrafficBeforeEOFCommitsClose() throws {
+    let machine = NativeAgentPrivateGitSessionStateMachine()
+    let close = try machine.close()
+    #expect(machine.state == .closing)
+
+    #expect(throws: NativeAgentPrivateGitSessionStateMachineError.trafficAfterClose) {
+        _ = try machine.beginRequest(commitPayload: sessionPayload)
+    }
+    #expect(machine.state == .quarantined(.trafficAfterClose))
+
+    let duplicate = NativeAgentPrivateGitSessionStateMachine()
+    try duplicate.acceptClose(close)
+    #expect(throws: NativeAgentPrivateGitSessionStateMachineError.duplicateClose) {
+        try duplicate.acceptClose(close)
+    }
+    #expect(duplicate.state == .quarantined(.duplicateClose))
+}
+
+@Test func privateGitSessionStateMachineQuarantinesWrongCloseDirectionAndMalformedClose() throws {
+    let wrongDirection = NativeAgentPrivateGitSessionStateMachine()
+    let request = try NativeAgentPrivateGitSessionFrameCodec.encode(
+        .request(sequence: 1, commitPayload: sessionPayload))
+    #expect(throws: NativeAgentPrivateGitSessionStateMachineError.wrongMessage) {
+        try wrongDirection.acceptClose(request)
+    }
+    #expect(wrongDirection.state == .quarantined(.wrongMessage))
+
+    let malformed = NativeAgentPrivateGitSessionStateMachine()
+    #expect(throws: NativeAgentPrivateGitSessionStateMachineError.malformed) {
+        try malformed.acceptClose(Data([0, 0, 0]))
+    }
+    #expect(malformed.state == .quarantined(.malformed))
 }
 
 private func responseFrame(sequence: UInt32) throws -> Data {

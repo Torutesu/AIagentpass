@@ -13,14 +13,13 @@ public enum AgentPassHostXPCContract {
     public static let maximumNonceBytes = 64
     public static let maximumCommitPayloadBytes = 1 * 1024 * 1024
     public static let maximumSignatureBytes = 4 * 1024
-    public static let minimumSignatureBudget = 1
-    public static let maximumSignatureBudget = 1_024
+    public static let fixedSignatureBudget = 2
     public static let maximumChildPID = Int(Int32.max)
-    /// PID versions are represented as a bounded millisecond process-start
+    /// PID versions are represented as a bounded microsecond process-start
     /// identity. The upper bound is the same 2100 boundary used by native
     /// timestamp DTOs, so negative, zero, and arbitrary-width values fail
     /// before they can become an observation hint.
-    public static let maximumChildPIDVersion: Int64 = 4_102_444_800_000
+    public static let maximumChildPIDVersion: Int64 = 4_102_444_800_000_000
 
     public enum SessionStatus: String, CaseIterable, Sendable {
         case prepared
@@ -95,7 +94,7 @@ public enum AgentPassHostXPCContract {
     }
 
     public static func isTimestamp(_ value: Int64) -> Bool {
-        (0...4_102_444_800_000).contains(value)
+        (1...4_102_444_800_000).contains(value)
     }
 
     fileprivate static func containsForbiddenAuthorityKey(_ coder: NSCoder) -> Bool {
@@ -114,7 +113,7 @@ public enum AgentPassHostXPCContract {
         "key", "key_id", "algorithm", "signer", "signer_arguments",
         "operation", "repository", "repository_path", "worktree_path",
         "branch", "remote", "session_token", "token", "ttl_seconds",
-        "scope", "authority", "lease",
+        "scope", "authority", "lease", "agent_id", "adapter_kind",
     ]
 
     private static let requestOnlyForbiddenKeys = [
@@ -130,24 +129,17 @@ public final class AgentPassHostPrepareRequest: NSObject, NSSecureCoding {
     public static var supportsSecureCoding: Bool { true }
 
     public let protocolVersion: Int
-    public let agentID: String
-    public let adapterKind: String
     public let launchNonce: Data
 
     public init?(
         protocolVersion: Int = AgentPassHostXPCContract.protocolVersion,
-        agentID: String,
-        adapterKind: AgentPassAgentAdapterKind,
         launchNonce: Data
     ) {
         guard protocolVersion == AgentPassHostXPCContract.protocolVersion,
-              let agentID = AgentPassHostXPCContract.canonicalUUID(agentID),
               (AgentPassHostXPCContract.minimumNonceBytes...AgentPassHostXPCContract.maximumNonceBytes).contains(launchNonce.count) else {
             return nil
         }
         self.protocolVersion = protocolVersion
-        self.agentID = agentID
-        self.adapterKind = adapterKind.rawValue
         self.launchNonce = launchNonce
         super.init()
     }
@@ -156,26 +148,19 @@ public final class AgentPassHostPrepareRequest: NSObject, NSSecureCoding {
         guard !AgentPassHostXPCContract.containsForbiddenRequestAuthorityKey(coder),
               coder.containsValue(forKey: Keys.protocolVersion),
               let protocolVersion = coder.decodeObject(of: NSNumber.self, forKey: Keys.protocolVersion)?.intValue,
-              let agentID = coder.decodeObject(of: NSString.self, forKey: Keys.agentID) as String?,
-              let adapterKind = coder.decodeObject(of: NSString.self, forKey: Keys.adapterKind) as String?,
-              let adapter = AgentPassAgentAdapterKind(rawValue: adapterKind),
               let launchNonce = coder.decodeObject(of: NSData.self, forKey: Keys.launchNonce) as Data? else {
             return nil
         }
-        self.init(protocolVersion: protocolVersion, agentID: agentID, adapterKind: adapter, launchNonce: launchNonce)
+        self.init(protocolVersion: protocolVersion, launchNonce: launchNonce)
     }
 
     public func encode(with coder: NSCoder) {
         coder.encode(NSNumber(value: protocolVersion), forKey: Keys.protocolVersion)
-        coder.encode(agentID as NSString, forKey: Keys.agentID)
-        coder.encode(adapterKind as NSString, forKey: Keys.adapterKind)
         coder.encode(launchNonce as NSData, forKey: Keys.launchNonce)
     }
 
     private enum Keys {
         static let protocolVersion = "protocol_version"
-        static let agentID = "agent_id"
-        static let adapterKind = "adapter_kind"
         static let launchNonce = "launch_nonce"
     }
 }
@@ -202,7 +187,7 @@ public final class AgentPassHostPrepareResponse: NSObject, NSSecureCoding {
               let sessionID = AgentPassHostXPCContract.canonicalUUID(sessionID),
               status == .prepared,
               AgentPassHostXPCContract.isTimestamp(expiresAtMilliseconds),
-              (AgentPassHostXPCContract.minimumSignatureBudget...AgentPassHostXPCContract.maximumSignatureBudget).contains(maxSignatures) else {
+              maxSignatures == AgentPassHostXPCContract.fixedSignatureBudget else {
             return nil
         }
         self.protocolVersion = protocolVersion
@@ -345,7 +330,7 @@ public final class AgentPassHostAttachChildResponse: NSObject, NSSecureCoding {
         guard protocolVersion == AgentPassHostXPCContract.protocolVersion,
               let sessionID = AgentPassHostXPCContract.canonicalUUID(sessionID),
               AgentPassHostXPCContract.isTimestamp(attachedAtMilliseconds),
-              (AgentPassHostXPCContract.minimumSignatureBudget...AgentPassHostXPCContract.maximumSignatureBudget).contains(maxSignatures) else {
+              maxSignatures == AgentPassHostXPCContract.fixedSignatureBudget else {
             return nil
         }
         self.protocolVersion = protocolVersion
@@ -391,44 +376,55 @@ public final class AgentPassHostAttachChildResponse: NSObject, NSSecureCoding {
 @objc(AgentPassHostSignRequest)
 public final class AgentPassHostSignRequest: NSObject, NSSecureCoding {
     public static var supportsSecureCoding: Bool { true }
+    public let requestSequence: UInt32
     public let commitPayload: Data
 
-    public init?(commitPayload: Data) {
-        guard !commitPayload.isEmpty,
+    public init?(requestSequence: UInt32, commitPayload: Data) {
+        guard (1...UInt32(AgentPassHostXPCContract.fixedSignatureBudget)).contains(requestSequence),
+              !commitPayload.isEmpty,
               commitPayload.count <= AgentPassHostXPCContract.maximumCommitPayloadBytes else {
             return nil
         }
+        self.requestSequence = requestSequence
         self.commitPayload = commitPayload
         super.init()
     }
 
     public required convenience init?(coder: NSCoder) {
         guard !AgentPassHostXPCContract.containsForbiddenRequestAuthorityKey(coder),
+              let requestSequence = coder.decodeObject(of: NSNumber.self, forKey: Keys.requestSequence)?.uint32Value,
               let commitPayload = coder.decodeObject(of: NSData.self, forKey: Keys.commitPayload) as Data? else {
             return nil
         }
-        self.init(commitPayload: commitPayload)
+        self.init(requestSequence: requestSequence, commitPayload: commitPayload)
     }
 
     public func encode(with coder: NSCoder) {
+        coder.encode(NSNumber(value: requestSequence), forKey: Keys.requestSequence)
         coder.encode(commitPayload as NSData, forKey: Keys.commitPayload)
     }
 
-    private enum Keys { static let commitPayload = "commit_payload" }
+    private enum Keys {
+        static let requestSequence = "request_sequence"
+        static let commitPayload = "commit_payload"
+    }
 }
 
 @objc(AgentPassHostSignResponse)
 public final class AgentPassHostSignResponse: NSObject, NSSecureCoding {
     public static var supportsSecureCoding: Bool { true }
+    public let responseSequence: UInt32
     public let signature: Data
     public let remainingSignatures: Int
 
-    public init?(signature: Data, remainingSignatures: Int) {
-        guard !signature.isEmpty,
+    public init?(responseSequence: UInt32, signature: Data, remainingSignatures: Int) {
+        guard (1...UInt32(AgentPassHostXPCContract.fixedSignatureBudget)).contains(responseSequence),
+              !signature.isEmpty,
               signature.count <= AgentPassHostXPCContract.maximumSignatureBytes,
-              (0...AgentPassHostXPCContract.maximumSignatureBudget).contains(remainingSignatures) else {
+              remainingSignatures == AgentPassHostXPCContract.fixedSignatureBudget - Int(responseSequence) else {
             return nil
         }
+        self.responseSequence = responseSequence
         self.signature = signature
         self.remainingSignatures = remainingSignatures
         super.init()
@@ -436,19 +432,22 @@ public final class AgentPassHostSignResponse: NSObject, NSSecureCoding {
 
     public required convenience init?(coder: NSCoder) {
         guard !AgentPassHostXPCContract.containsForbiddenAuthorityKey(coder),
+              let responseSequence = coder.decodeObject(of: NSNumber.self, forKey: Keys.responseSequence)?.uint32Value,
               let signature = coder.decodeObject(of: NSData.self, forKey: Keys.signature) as Data?,
               let remainingSignatures = coder.decodeObject(of: NSNumber.self, forKey: Keys.remainingSignatures)?.intValue else {
             return nil
         }
-        self.init(signature: signature, remainingSignatures: remainingSignatures)
+        self.init(responseSequence: responseSequence, signature: signature, remainingSignatures: remainingSignatures)
     }
 
     public func encode(with coder: NSCoder) {
+        coder.encode(NSNumber(value: responseSequence), forKey: Keys.responseSequence)
         coder.encode(signature as NSData, forKey: Keys.signature)
         coder.encode(NSNumber(value: remainingSignatures), forKey: Keys.remainingSignatures)
     }
 
     private enum Keys {
+        static let responseSequence = "response_sequence"
         static let signature = "signature"
         static let remainingSignatures = "remaining_signatures"
     }
@@ -504,7 +503,7 @@ public final class AgentPassHostStatusResponse: NSObject, NSSecureCoding {
     ) {
         guard let sessionID = AgentPassHostXPCContract.canonicalUUID(sessionID),
               AgentPassHostXPCContract.isTimestamp(expiresAtMilliseconds),
-              (AgentPassHostXPCContract.minimumSignatureBudget...AgentPassHostXPCContract.maximumSignatureBudget).contains(maxSignatures),
+              maxSignatures == AgentPassHostXPCContract.fixedSignatureBudget,
               (0...maxSignatures).contains(usedSignatures),
               ((status == .prepared || status == .expired || status == .revoked || status == .closed) && !childAttached)
                 || ((status == .attached || status == .active) && childAttached) else {

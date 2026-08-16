@@ -3,7 +3,6 @@ import Foundation
 import ObjectiveC.runtime
 import Testing
 
-private let hostAgentID = "11111111-1111-4111-8111-111111111111"
 private let hostSessionID = "22222222-2222-4222-8222-222222222222"
 private let hostDigest = Data(repeating: 0x11, count: AgentPassHostXPCContract.digestBytes)
 private let hostDigest2 = Data(repeating: 0x22, count: AgentPassHostXPCContract.digestBytes)
@@ -127,11 +126,7 @@ private final class HostForbiddenKeyCoder: NSCoder {
 }
 
 @Test func hostDTOsRoundTripWithSecureCodingAndServiceAssignedSessionOnly() throws {
-    let prepare = try #require(AgentPassHostPrepareRequest(
-        agentID: hostAgentID,
-        adapterKind: .claudeCode,
-        launchNonce: hostNonce
-    ))
+    let prepare = try #require(AgentPassHostPrepareRequest(launchNonce: hostNonce))
     let prepareResponse = try #require(AgentPassHostPrepareResponse(
         sessionID: hostSessionID,
         status: .prepared,
@@ -140,7 +135,7 @@ private final class HostForbiddenKeyCoder: NSCoder {
     ))
     let attach = try #require(AgentPassHostAttachChildRequest(
         childPID: 42,
-        childPIDVersion: 1_735_000_000_000,
+        childPIDVersion: 1_735_000_000_000_000,
         executableIdentityDigest: hostDigest,
         ancestryBindingDigest: hostDigest2,
         worktreeBindingDigest: hostDigest3
@@ -150,8 +145,8 @@ private final class HostForbiddenKeyCoder: NSCoder {
         attachedAtMilliseconds: 4_000_000_000_000,
         maxSignatures: 2
     ))
-    let sign = try #require(AgentPassHostSignRequest(commitPayload: Data("tree deadbeef\n".utf8)))
-    let signResponse = try #require(AgentPassHostSignResponse(signature: Data(repeating: 0x55, count: 64), remainingSignatures: 1))
+    let sign = try #require(AgentPassHostSignRequest(requestSequence: 1, commitPayload: Data("tree deadbeef\n".utf8)))
+    let signResponse = try #require(AgentPassHostSignResponse(responseSequence: 1, signature: Data(repeating: 0x55, count: 64), remainingSignatures: 1))
     let statusRequest = try #require(AgentPassHostStatusRequest())
     let statusResponse = try #require(AgentPassHostStatusResponse(
         sessionID: hostSessionID,
@@ -164,19 +159,19 @@ private final class HostForbiddenKeyCoder: NSCoder {
     let closeRequest = try #require(AgentPassHostCloseRequest(reason: .completed))
     let closeResponse = try #require(AgentPassHostCloseResponse(sessionID: hostSessionID, closedAtMilliseconds: 4_000_000_000_000))
 
-    #expect((try unarchive(AgentPassHostPrepareRequest.self, from: archive(prepare))).agentID == hostAgentID)
+    #expect((try unarchive(AgentPassHostPrepareRequest.self, from: archive(prepare))).launchNonce == hostNonce)
     #expect((try unarchive(AgentPassHostPrepareResponse.self, from: archive(prepareResponse))).sessionID == hostSessionID)
-    #expect((try unarchive(AgentPassHostAttachChildRequest.self, from: archive(attach))).childPIDVersion == 1_735_000_000_000)
+    #expect((try unarchive(AgentPassHostAttachChildRequest.self, from: archive(attach))).childPIDVersion == 1_735_000_000_000_000)
     #expect((try unarchive(AgentPassHostAttachChildResponse.self, from: archive(attachResponse))).status == "attached")
-    #expect((try unarchive(AgentPassHostSignRequest.self, from: archive(sign))).commitPayload == Data("tree deadbeef\n".utf8))
-    #expect((try unarchive(AgentPassHostSignResponse.self, from: archive(signResponse))).signature.count == 64)
+    #expect((try unarchive(AgentPassHostSignRequest.self, from: archive(sign))).requestSequence == 1)
+    #expect((try unarchive(AgentPassHostSignResponse.self, from: archive(signResponse))).responseSequence == 1)
     #expect((try unarchive(AgentPassHostStatusRequest.self, from: archive(statusRequest))).protocolVersion == 1)
     #expect((try unarchive(AgentPassHostStatusResponse.self, from: archive(statusResponse))).childAttached)
     #expect((try unarchive(AgentPassHostCloseRequest.self, from: archive(closeRequest))).reason == "completed")
     #expect((try unarchive(AgentPassHostCloseResponse.self, from: archive(closeResponse))).status == "closed")
 
     let signLabels = Set(Mirror(reflecting: sign).children.compactMap(\.label))
-    #expect(signLabels == ["commitPayload"])
+    #expect(signLabels == ["requestSequence", "commitPayload"])
     for forbidden in ["capability", "privateKey", "algorithm", "operation", "repositoryPath", "sessionID", "token"] {
         #expect(signLabels.contains(forbidden) == false)
     }
@@ -186,7 +181,7 @@ private final class HostForbiddenKeyCoder: NSCoder {
     func attach(
         protocolVersion: Int = AgentPassHostXPCContract.protocolVersion,
         pid: Int = 42,
-        pidVersion: Int64 = 1_735_000_000_000,
+        pidVersion: Int64 = 1_735_000_000_000_000,
         executable: Data = hostDigest,
         ancestry: Data = hostDigest2,
         worktree: Data = hostDigest3
@@ -215,19 +210,37 @@ private final class HostForbiddenKeyCoder: NSCoder {
 }
 
 @Test func hostPrepareAndResponsesRejectMalformedVersionAndBounds() {
-    #expect(AgentPassHostPrepareRequest(protocolVersion: 0, agentID: hostAgentID, adapterKind: .claudeCode, launchNonce: hostNonce) == nil)
-    #expect(AgentPassHostPrepareRequest(agentID: "not-a-uuid", adapterKind: .claudeCode, launchNonce: hostNonce) == nil)
-    #expect(AgentPassHostPrepareRequest(agentID: hostAgentID, adapterKind: .claudeCode, launchNonce: Data(repeating: 0, count: 15)) == nil)
-    #expect(AgentPassHostPrepareRequest(agentID: hostAgentID, adapterKind: .claudeCode, launchNonce: Data(repeating: 0, count: 65)) == nil)
+    #expect(AgentPassHostPrepareRequest(protocolVersion: 0, launchNonce: hostNonce) == nil)
+    #expect(AgentPassHostPrepareRequest(launchNonce: Data(repeating: 0, count: 15)) == nil)
+    #expect(AgentPassHostPrepareRequest(launchNonce: Data(repeating: 0, count: 65)) == nil)
     #expect(AgentPassHostPrepareResponse(protocolVersion: 2, sessionID: hostSessionID, status: .prepared, expiresAtMilliseconds: 1, maxSignatures: 1) == nil)
     #expect(AgentPassHostPrepareResponse(sessionID: hostSessionID, status: .active, expiresAtMilliseconds: 1, maxSignatures: 1) == nil)
+    #expect(AgentPassHostPrepareResponse(sessionID: hostSessionID, status: .prepared, expiresAtMilliseconds: 0, maxSignatures: 2) == nil)
     #expect(AgentPassHostPrepareResponse(sessionID: hostSessionID, status: .prepared, expiresAtMilliseconds: -1, maxSignatures: 1) == nil)
     #expect(AgentPassHostPrepareResponse(sessionID: hostSessionID, status: .prepared, expiresAtMilliseconds: 1, maxSignatures: 0) == nil)
     #expect(AgentPassHostStatusRequest(protocolVersion: 2) == nil)
 }
 
-@Test func signIsPayloadOnlyButOrderingStillRejectsSignBeforeAttach() throws {
-    let request = try #require(AgentPassHostSignRequest(commitPayload: Data(repeating: 0x01, count: 1)))
+@Test func hostAttachAcceptsMicrosecondPIDVersionAndRejectsMillisecondRangeOverflow() throws {
+    #expect(AgentPassHostAttachChildRequest(
+        childPID: 42,
+        childPIDVersion: 1_735_000_000_000_000,
+        executableIdentityDigest: hostDigest,
+        ancestryBindingDigest: hostDigest2,
+        worktreeBindingDigest: hostDigest3
+    ) != nil)
+    #expect(AgentPassHostAttachChildRequest(
+        childPID: 42,
+        childPIDVersion: AgentPassHostXPCContract.maximumChildPIDVersion + 1,
+        executableIdentityDigest: hostDigest,
+        ancestryBindingDigest: hostDigest2,
+        worktreeBindingDigest: hostDigest3
+    ) == nil)
+}
+
+@Test func signCarriesOnlySequenceAndPayloadAndOrderingRejectsSignBeforeAttach() throws {
+    let request = try #require(AgentPassHostSignRequest(requestSequence: 1, commitPayload: Data(repeating: 0x01, count: 1)))
+    #expect(request.requestSequence == 1)
     #expect(request.commitPayload.count == 1)
     #expect(AgentPassHostXPCContract.isAllowed(.signPayload, in: .prepared) == false)
     #expect(AgentPassHostXPCContract.isAllowed(.status, in: .prepared) == false)
@@ -235,21 +248,25 @@ private final class HostForbiddenKeyCoder: NSCoder {
         try AgentPassHostXPCContract.requireAllowed(.signPayload, in: .prepared)
     }
     try AgentPassHostXPCContract.requireAllowed(.signPayload, in: .attached)
-    #expect(AgentPassHostSignRequest(commitPayload: Data()) == nil)
-    #expect(AgentPassHostSignRequest(commitPayload: Data(repeating: 0x01, count: AgentPassHostXPCContract.maximumCommitPayloadBytes + 1)) == nil)
+    #expect(AgentPassHostSignRequest(requestSequence: 0, commitPayload: Data([1])) == nil)
+    #expect(AgentPassHostSignRequest(requestSequence: 3, commitPayload: Data([1])) == nil)
+    #expect(AgentPassHostSignRequest(requestSequence: 1, commitPayload: Data()) == nil)
+    #expect(AgentPassHostSignRequest(requestSequence: 1, commitPayload: Data(repeating: 0x01, count: AgentPassHostXPCContract.maximumCommitPayloadBytes + 1)) == nil)
+    #expect(AgentPassHostSignResponse(responseSequence: 1, signature: Data([1]), remainingSignatures: 0) == nil)
+    #expect(AgentPassHostSignResponse(responseSequence: 2, signature: Data([1]), remainingSignatures: 0) != nil)
 }
 
 @Test func everyHostRequestShapeExcludesAuthorityKeyMaterialAndPaths() throws {
     let requests: [NSObject] = [
-        try #require(AgentPassHostPrepareRequest(agentID: hostAgentID, adapterKind: .claudeCode, launchNonce: hostNonce)),
+        try #require(AgentPassHostPrepareRequest(launchNonce: hostNonce)),
         try #require(AgentPassHostAttachChildRequest(
             childPID: 42,
-            childPIDVersion: 1_735_000_000_000,
+            childPIDVersion: 1_735_000_000_000_000,
             executableIdentityDigest: hostDigest,
             ancestryBindingDigest: hostDigest2,
             worktreeBindingDigest: hostDigest3
         )),
-        try #require(AgentPassHostSignRequest(commitPayload: Data([0x01]))),
+        try #require(AgentPassHostSignRequest(requestSequence: 1, commitPayload: Data([0x01]))),
         try #require(AgentPassHostStatusRequest()),
         try #require(AgentPassHostCloseRequest(reason: .completed)),
     ]
@@ -275,7 +292,7 @@ private final class HostForbiddenKeyCoder: NSCoder {
 }
 
 @Test func hostRequestsRejectUnexpectedAuthorityKeysIncludingCallerSessionID() {
-    for key in ["capability", "private_key", "algorithm", "operation", "repository_path", "session_id"] {
+    for key in ["capability", "private_key", "algorithm", "operation", "repository_path", "session_id", "agent_id", "adapter_kind"] {
         #expect(AgentPassHostSignRequest(coder: HostForbiddenKeyCoder(forbiddenKey: key)) == nil)
     }
 }

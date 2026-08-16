@@ -8,6 +8,24 @@ import Foundation
 public enum NativeAgentPrivateGitSessionMessage: Equatable, Sendable {
     case request(sequence: UInt32, commitPayload: Data)
     case response(sequence: UInt32, signature: Data)
+    /// A terminal, zero-payload frame. Close is deliberately not sequenced:
+    /// the state machine admits it only at a legal lifecycle boundary.
+    case close
+}
+
+/// Stable lifecycle classes shared by the private-session contract.
+///
+/// These are intentionally not fields on a request or response. Authority
+/// and process observations come from trusted lifecycle boundaries, while a
+/// peer can only cause the transport-quarantined class through protocol
+/// violations.
+public enum NativeAgentPrivateGitSessionLifecycleError: String, CaseIterable, Codable, Error, Equatable, Sendable {
+    case outcomeUnknown = "outcome_unknown"
+    case revoked
+    case expired
+    case policyDrift = "policy_drift"
+    case processDrift = "process_drift"
+    case transportQuarantined = "transport_quarantined"
 }
 
 /// Stable, secret-free failures for the private Git session wire codec.
@@ -24,6 +42,7 @@ public enum NativeAgentPrivateGitSessionCodecError: Error, Equatable, Sendable {
     case emptyPayload
     case payloadTooLarge
     case signatureTooLarge
+    case invalidClose
 }
 
 /// Canonical version-one codec for the private Git multi-request session.
@@ -33,7 +52,7 @@ public enum NativeAgentPrivateGitSessionCodecError: Error, Equatable, Sendable {
 ///     body_length:u32
 ///     magic:[4] = "APGS"
 ///     version:u8 = 1
-///     kind:u8 = 1(request) | 2(response)
+///     kind:u8 = 1(request) | 2(response) | 3(close)
 ///     flags:u16 = 0
 ///     sequence:u32
 ///     content_length:u32
@@ -58,6 +77,7 @@ public enum NativeAgentPrivateGitSessionFrameCodec {
     private static let magic: [UInt8] = [0x41, 0x50, 0x47, 0x53] // APGS
     private static let requestKind: UInt8 = 1
     private static let responseKind: UInt8 = 2
+    private static let closeKind: UInt8 = 3
 
     public static func encode(_ message: NativeAgentPrivateGitSessionMessage) throws -> Data {
         let kind: UInt8
@@ -76,10 +96,21 @@ public enum NativeAgentPrivateGitSessionFrameCodec {
             sequence = responseSequence
             content = signature
             maximumContentBytes = maximumSignatureBytes
+        case .close:
+            kind = closeKind
+            sequence = 0
+            content = Data()
+            maximumContentBytes = 0
         }
 
-        guard sequence > 0 else { throw NativeAgentPrivateGitSessionCodecError.invalidSequence }
-        guard !content.isEmpty else { throw NativeAgentPrivateGitSessionCodecError.emptyPayload }
+        if kind == closeKind {
+            guard sequence == 0, content.isEmpty else {
+                throw NativeAgentPrivateGitSessionCodecError.invalidClose
+            }
+        } else {
+            guard sequence > 0 else { throw NativeAgentPrivateGitSessionCodecError.invalidSequence }
+            guard !content.isEmpty else { throw NativeAgentPrivateGitSessionCodecError.emptyPayload }
+        }
         guard content.count <= maximumContentBytes else {
             throw message.isRequest
                 ? NativeAgentPrivateGitSessionCodecError.payloadTooLarge
@@ -131,7 +162,7 @@ public enum NativeAgentPrivateGitSessionFrameCodec {
         }
 
         let kind = frame[bodyOffset + 5]
-        guard kind == requestKind || kind == responseKind else {
+        guard kind == requestKind || kind == responseKind || kind == closeKind else {
             throw NativeAgentPrivateGitSessionCodecError.invalidMessageKind
         }
 
@@ -139,9 +170,16 @@ public enum NativeAgentPrivateGitSessionFrameCodec {
         guard flags == 0 else { throw NativeAgentPrivateGitSessionCodecError.nonZeroFlags }
 
         let sequence = readUInt32(frame, offset: bodyOffset + 8)
-        guard sequence > 0 else { throw NativeAgentPrivateGitSessionCodecError.invalidSequence }
 
         let contentLength = readUInt32(frame, offset: bodyOffset + 12)
+        if kind == closeKind {
+            guard sequence == 0, contentLength == 0, bodyLength == UInt32(bodyHeaderBytes) else {
+                throw NativeAgentPrivateGitSessionCodecError.invalidClose
+            }
+            return .close
+        }
+
+        guard sequence > 0 else { throw NativeAgentPrivateGitSessionCodecError.invalidSequence }
         let maximumContentBytes = kind == requestKind
             ? maximumCommitPayloadBytes
             : maximumSignatureBytes
