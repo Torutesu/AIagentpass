@@ -12,6 +12,10 @@ private final class HostSupervisorFixture: @unchecked Sendable {
     var spawnError = false
     var waitError = false
     var waitOutcome: NativeAgentHostWaitOutcome = .exitedSuccessfully
+    var installPrivateBridgeActions = true
+    var rejectPrivateBridgeActions = false
+    var privateBridgeDuplicateCalls: [(Int32, Int32)] = []
+    var privateBridgeCloseCalls: [Int32] = []
 
     func hooks(process: NativeAgentHostProcessHandle = .init(processIdentifier: 700, processGroupIdentifier: 700))
         -> NativeAgentHostChildSupervisorHooks
@@ -19,11 +23,29 @@ private final class HostSupervisorFixture: @unchecked Sendable {
         NativeAgentHostChildSupervisorHooks(
             spawn: { [self] spec in
                 lock.lock()
-                defer { lock.unlock() }
                 if spawnError {
+                    lock.unlock()
                     throw TestFixtureError.failed
                 }
+                let installBridge = installPrivateBridgeActions
+                let rejectBridge = rejectPrivateBridgeActions
                 spawnSpec = spec
+                lock.unlock()
+                if installBridge {
+                    try spec.installPrivateGitBridgeFileActions(
+                        addDuplicate: { [self] source, target in
+                            lock.lock()
+                            privateBridgeDuplicateCalls.append((source, target))
+                            lock.unlock()
+                        },
+                        addClose: { [self] source in
+                            lock.lock()
+                            privateBridgeCloseCalls.append(source)
+                            lock.unlock()
+                            if rejectBridge { throw TestFixtureError.failed }
+                        }
+                    )
+                }
                 return process
             },
             signal: { [self] process, signal in
@@ -64,6 +86,12 @@ private final class HostSupervisorFixture: @unchecked Sendable {
         lock.lock()
         defer { lock.unlock() }
         return terminatedProcesses.count
+    }
+
+    func privateBridgeActions() -> (duplicates: [(Int32, Int32)], closes: [Int32]) {
+        lock.lock()
+        defer { lock.unlock() }
+        return (privateBridgeDuplicateCalls, privateBridgeCloseCalls)
     }
 }
 
@@ -333,6 +361,7 @@ private func makeHookedProjectDirectory(
 
         let spec = fixture.snapshot().spec
         #expect(spec?.useOwnedProcessGroup == true)
+        #expect(spec?.hasPrivateGitBridgeHandoff == true)
         #expect(spec?.arguments.isEmpty == true)
         #expect(spec?.executablePath.hasPrefix("/") == true)
         #expect(spec?.executablePath == "/opt/homebrew/bin/claude"
@@ -342,6 +371,47 @@ private func makeHookedProjectDirectory(
         #expect(throws: NativeAgentHostChildSupervisorError.unsupportedAdapter) {
             _ = try supervisor.start(cursorRequest)
         }
+    }
+}
+
+@Test func claudeChildReceivesOnlyTheReviewedPrivateBridgeAtFD3() throws {
+    try withTemporaryProjectDirectory { project in
+        let fixture = HostSupervisorFixture()
+        fixture.installPrivateBridgeActions = true
+        let supervisor = NativeAgentHostChildSupervisor(hooks: fixture.hooks())
+
+        let session = try supervisor.start(try makeRequest(projectDirectory: project))
+        let spec = try #require(fixture.snapshot().spec)
+        let actions = fixture.privateBridgeActions()
+
+        #expect(spec.hasPrivateGitBridgeHandoff == true)
+        #expect(actions.duplicates.count == 1)
+        #expect(actions.duplicates[0].1 == NativeAgentPrivateGitBridgeSocketPair.reviewedChildFileDescriptor)
+        #expect(actions.closes == [actions.duplicates[0].0])
+        #expect(actions.duplicates[0].0 != NativeAgentPrivateGitBridgeSocketPair.reviewedChildFileDescriptor)
+
+        let hostEndpoint = session.privateGitBridgeHostEndpoint
+        _ = try session.wait()
+        // The child lifecycle owns transport cleanup. Closing the borrowed
+        // view again must be harmless and cannot resurrect the endpoint.
+        try hostEndpoint.close()
+    }
+}
+
+@Test func privateBridgeFileActionFailureStopsSpawnBeforeAChildIsReturned() throws {
+    try withTemporaryProjectDirectory { project in
+        let fixture = HostSupervisorFixture()
+        fixture.installPrivateBridgeActions = true
+        fixture.rejectPrivateBridgeActions = true
+        let supervisor = NativeAgentHostChildSupervisor(hooks: fixture.hooks())
+
+        #expect(throws: NativeAgentHostChildSupervisorError.launchFailed) {
+            _ = try supervisor.start(try makeRequest(projectDirectory: project))
+        }
+        #expect(fixture.snapshot().waitCallCount == 0)
+        let actions = fixture.privateBridgeActions()
+        #expect(actions.duplicates.count == 1)
+        #expect(actions.closes == [actions.duplicates[0].0])
     }
 }
 
