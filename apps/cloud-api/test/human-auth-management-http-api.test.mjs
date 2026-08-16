@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import test from "node:test";
 
 import {
@@ -141,7 +142,8 @@ function fixture({ repositoryOverrides = {}, sessionOverrides = {}, authError = 
         member_id: input.principal.member_id,
         organization_id: input.organization_id,
         operation: input.operation,
-        authenticated_at: NOW
+        authenticated_at: NOW,
+        ...(input.context_hash === undefined ? {} : { context_hash: input.context_hash })
       };
     }
   };
@@ -163,6 +165,11 @@ function request(path, { method = "GET", body = undefined, headers = {} } = {}) 
     },
     ...(body === undefined ? {} : { body })
   };
+}
+
+function credentialContext(expectedVersion) {
+  const canonical = `{"credential_id":${JSON.stringify(CREDENTIAL_ID)},"expected_version":${expectedVersion},"operation":${JSON.stringify("human.management.credential.revoke")},"version":1}`;
+  return createHash("sha256").update(canonical, "utf8").digest("hex");
 }
 
 function assertNoStore(result) {
@@ -277,7 +284,8 @@ test("renames a credential with an atomic expected version and rejects caller-su
   const { api, calls } = fixture();
   const result = await api.handle(request(HUMAN_MANAGEMENT_HTTP_PATHS.credential(CREDENTIAL_ID), {
     method: "PATCH",
-    body: { label: "Work Mac", expected_version: 7 }
+    body: { label: "Work Mac" },
+    headers: { "if-match": '"7"', "idempotency-key": "rename-key-01" }
   }));
   assert.equal(result.status, 200);
   assert.deepEqual(calls.renameCredential[0], {
@@ -286,14 +294,16 @@ test("renames a credential with an atomic expected version and rejects caller-su
     organization_id: ORGANIZATION_ID,
     credential_id: CREDENTIAL_ID,
     label: "Work Mac",
-    expected_version: 7
+    expected_version: 7,
+    idempotency_key: "rename-key-01"
   });
   assert.equal(result.body.credential.label, "Work Mac");
   assert.equal(result.body.credential.version, 8);
 
   const rejected = await api.handle(request(HUMAN_MANAGEMENT_HTTP_PATHS.credential(CREDENTIAL_ID), {
     method: "PATCH",
-    body: { label: "Work Mac", expected_version: 7, member_id: "attacker" }
+    body: { label: "Work Mac", member_id: "attacker" },
+    headers: { "if-match": '"7"', "idempotency-key": "rename-key-02" }
   }));
   assert.equal(rejected.status, 400);
   assert.equal(calls.renameCredential.length, 1);
@@ -307,9 +317,11 @@ test("accepts a Fetch Request body without changing the management contract", as
       Origin: ORIGIN,
       Cookie: COOKIE,
       "agentpass-csrf": CSRF,
-      "Content-Type": "application/json"
+      "Content-Type": "application/json",
+      "Idempotency-Key": "fetch-key-01",
+      "If-Match": '"1"'
     },
-    body: JSON.stringify({ label: "Fetch Mac", expected_version: 1 })
+    body: JSON.stringify({ label: "Fetch Mac" })
   });
   const result = await api.handle(fetchRequest);
   assert.equal(result.status, 200);
@@ -320,7 +332,7 @@ test("maps optimistic conflicts and sole-active-credential protection to stable 
   const conflict = new Error("actual version=99 and database password");
   conflict.code = "version_conflict";
   const conflictFixture = fixture({ repositoryOverrides: { renameCredential: conflict } });
-  const conflictResult = await conflictFixture.api.handle(request(HUMAN_MANAGEMENT_HTTP_PATHS.credential(CREDENTIAL_ID), { method: "PATCH", body: { label: "x", expected_version: 1 } }));
+  const conflictResult = await conflictFixture.api.handle(request(HUMAN_MANAGEMENT_HTTP_PATHS.credential(CREDENTIAL_ID), { method: "PATCH", body: { label: "x" }, headers: { "if-match": '"1"', "idempotency-key": "conflict-key-01" } }));
   assert.equal(conflictResult.status, 409);
   assert.equal(conflictResult.body.error.code, HUMAN_MANAGEMENT_HTTP_ERROR_CODES.VERSION_CONFLICT);
   assert.equal(JSON.stringify(conflictResult.body).includes("database password"), false);
@@ -328,7 +340,7 @@ test("maps optimistic conflicts and sole-active-credential protection to stable 
   const sole = new Error("sole credential");
   sole.code = "sole_active_credential";
   const soleFixture = fixture({ repositoryOverrides: { revokeCredential: sole } });
-  const soleResult = await soleFixture.api.handle(request(HUMAN_MANAGEMENT_HTTP_PATHS.credentialRevoke(CREDENTIAL_ID), { method: "POST", body: { expected_version: 1 } }));
+  const soleResult = await soleFixture.api.handle(request(HUMAN_MANAGEMENT_HTTP_PATHS.credentialRevoke(CREDENTIAL_ID), { method: "POST", body: {}, headers: { "if-match": '"1"', "idempotency-key": "sole-key-01", "agentpass-recent-auth-context": credentialContext(1) } }));
   assert.equal(soleResult.status, 409);
   assert.equal(soleResult.body.error.code, HUMAN_MANAGEMENT_HTTP_ERROR_CODES.LAST_ACTIVE_CREDENTIAL);
   assert.equal(soleFixture.calls.revokeCredential[0].protect_last_active, true);
@@ -522,7 +534,9 @@ test("requires exact single-use recent auth for credential and current-session r
     HUMAN_MANAGEMENT_HTTP_PATHS.sessionRevoke(CURRENT_SESSION_ID)
   ]) {
     const missing = fixture();
-    const missingRequest = request(path, { method: "POST", body: { expected_version: 1 } });
+    const credentialPath = path === HUMAN_MANAGEMENT_HTTP_PATHS.credentialRevoke(CREDENTIAL_ID);
+    const mutationHeaders = credentialPath ? { "if-match": '"1"', "idempotency-key": "recent-key-01", "agentpass-recent-auth-context": credentialContext(1) } : {};
+    const missingRequest = request(path, { method: "POST", body: credentialPath ? {} : { expected_version: 1 }, headers: mutationHeaders });
     delete missingRequest.headers["agentpass-recent-auth"];
     const missingResult = await missing.api.handle(missingRequest);
     assert.equal(missingResult.status, 401);
@@ -538,7 +552,7 @@ test("requires exact single-use recent auth for credential and current-session r
       operation: "wrong.operation",
       authenticated_at: NOW
     }) });
-    const wrongResult = await wrong.api.handle(request(path, { method: "POST", body: { expected_version: 1 } }));
+    const wrongResult = await wrong.api.handle(request(path, { method: "POST", body: credentialPath ? {} : { expected_version: 1 }, headers: mutationHeaders }));
     assert.equal(wrongResult.status, 401);
     assert.equal(wrongResult.body.error.code, HUMAN_MANAGEMENT_HTTP_ERROR_CODES.RECENT_AUTH_FAILED);
     assert.equal(wrong.calls.revokeCredential.length + wrong.calls.revokeSession.length, 0);
@@ -553,7 +567,8 @@ test("requires exact single-use recent auth for credential and current-session r
       member_id: input.principal.member_id,
       organization_id: input.organization_id,
       operation: input.operation,
-      authenticated_at: NOW
+      authenticated_at: NOW,
+      ...(input.context_hash === undefined ? {} : { context_hash: input.context_hash })
     };
     consumed = true;
     return {
@@ -563,12 +578,14 @@ test("requires exact single-use recent auth for credential and current-session r
       member_id: input.principal.member_id,
       organization_id: input.organization_id,
       operation: input.operation,
-      authenticated_at: NOW
+      authenticated_at: NOW,
+      ...(input.context_hash === undefined ? {} : { context_hash: input.context_hash })
     };
   } });
-  const first = await replay.api.handle(request(HUMAN_MANAGEMENT_HTTP_PATHS.credentialRevoke(CREDENTIAL_ID), { method: "POST", body: { expected_version: 1 } }));
+  const replayHeaders = { "if-match": '"1"', "idempotency-key": "replay-key-01", "agentpass-recent-auth-context": credentialContext(1) };
+  const first = await replay.api.handle(request(HUMAN_MANAGEMENT_HTTP_PATHS.credentialRevoke(CREDENTIAL_ID), { method: "POST", body: {}, headers: replayHeaders }));
   assert.equal(first.status, 200);
-  const second = await replay.api.handle(request(HUMAN_MANAGEMENT_HTTP_PATHS.credentialRevoke(CREDENTIAL_ID), { method: "POST", body: { expected_version: 1 } }));
+  const second = await replay.api.handle(request(HUMAN_MANAGEMENT_HTTP_PATHS.credentialRevoke(CREDENTIAL_ID), { method: "POST", body: {}, headers: replayHeaders }));
   assert.equal(second.status, 401);
   assert.equal(second.body.error.code, HUMAN_MANAGEMENT_HTTP_ERROR_CODES.RECENT_AUTH_FAILED);
   assert.equal(replay.calls.revokeCredential.length, 1);

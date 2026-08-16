@@ -43,6 +43,7 @@ type ClientOptions = Readonly<{
   sessionProvider?: SecuritySessionProvider;
 }>;
 type SecurityRequestOptions = Readonly<{ signal?: AbortSignal }>;
+type MutationControls = Readonly<{ idempotencyKey?: string; expectedVersion?: number; recentAuth?: string; recentAuthContext?: string }>;
 
 export type SecurityClient = Readonly<{
   getSnapshot(options?: SecurityRequestOptions): Promise<SecuritySnapshot>;
@@ -153,11 +154,13 @@ export function createSecurityClient(options: ClientOptions = {}): SecurityClien
     return Object.freeze({ passkeys: Object.freeze(credentialPage.items), passkeysComplete: credentialPage.complete, sessions: Object.freeze(parseSessionPage(sessions)) });
   };
 
-  const mutatePasskey = async (path: string, method: "POST" | "PATCH", body: Record<string, unknown>, requestOptions: SecurityRequestOptions, recentAuthOperation?: string): Promise<void> => {
+  const mutatePasskey = async (id: string, method: "POST" | "PATCH", body: Record<string, unknown>, version: number, requestOptions: SecurityRequestOptions, recentAuthOperation?: string, label?: string): Promise<void> => {
     const context = await ensureSession(requestOptions);
-    const recentAuth = recentAuthOperation === undefined ? undefined : await authorize(context, recentAuthOperation, requestOptions);
-    const response = await requestJson(path, method, context.csrfToken, body, requestOptionsFor(requestOptions), recentAuth);
-    expectCredentialMutation(response);
+    const idempotencyKey = makeIdempotencyKey();
+    const recentAuthContext = recentAuthOperation === undefined ? undefined : await credentialContextHash(recentAuthOperation, id, version);
+    const recentAuth = recentAuthOperation === undefined ? undefined : await authorize(context, recentAuthOperation, requestOptions, recentAuthContext);
+    const response = await requestJson(`/api/auth/security/passkeys/${encodeURIComponent(id)}${method === "POST" ? "/revoke" : ""}`, method, context.csrfToken, body, requestOptionsFor(requestOptions), { idempotencyKey, expectedVersion: version, recentAuth, recentAuthContext });
+    expectCredentialMutation(response, { id, version, status: method === "POST" ? "revoked" : "active", label });
   };
 
   const registerSecurityPasskey = async (requestOptions: SecurityRequestOptions): Promise<void> => {
@@ -174,7 +177,7 @@ export function createSecurityClient(options: ClientOptions = {}): SecurityClien
   const revokeSessionRecord = async (id: string, version: number, requestOptions: SecurityRequestOptions, current: boolean): Promise<boolean> => {
     const context = await ensureSession(requestOptions);
     const recentAuth = current ? await authorize(context, "human.management.session.revoke", requestOptions) : undefined;
-    const response = await requestJson(`/api/auth/security/sessions/${encodeURIComponent(id)}/revoke`, "POST", context.csrfToken, { expected_version: version }, requestOptionsFor(requestOptions), recentAuth);
+    const response = await requestJson(`/api/auth/security/sessions/${encodeURIComponent(id)}/revoke`, "POST", context.csrfToken, { expected_version: version }, requestOptionsFor(requestOptions), { recentAuth });
     const revoked = expectSessionMutation(response);
     if (revoked.current) {
       if (sessionProvider !== undefined) sessionProvider.clear(context);
@@ -196,12 +199,12 @@ export function createSecurityClient(options: ClientOptions = {}): SecurityClien
       assertCredentialId(id);
       assertLabel(label);
       assertVersion(version);
-      await mutatePasskey(`/api/auth/security/passkeys/${encodeURIComponent(id)}`, "PATCH", { label, expected_version: version }, requestOptions);
+      await mutatePasskey(id, "PATCH", { label }, version, requestOptions, undefined, label);
     },
     revokePasskey: async (id, version, requestOptions = {}) => {
       assertCredentialId(id);
       assertVersion(version);
-      await mutatePasskey(`/api/auth/security/passkeys/${encodeURIComponent(id)}/revoke`, "POST", { expected_version: version }, requestOptions, "human.management.credential.revoke");
+      await mutatePasskey(id, "POST", {}, version, requestOptions, "human.management.credential.revoke");
     },
     revokeSession: async (id, version, requestOptions = {}) => {
       assertSessionTarget(id, version);
@@ -221,7 +224,7 @@ export function createSecurityClient(options: ClientOptions = {}): SecurityClien
       for (const session of targets) assertSessionTarget(session.id, session.version);
       const context = await ensureSession(requestOptions);
       const recentAuth = await authorize(context, "human.management.sessions.revoke_others", requestOptions);
-      const response = await requestJson("/api/auth/security/sessions/revoke-others", "POST", context.csrfToken, {}, requestOptionsFor(requestOptions), recentAuth);
+      const response = await requestJson("/api/auth/security/sessions/revoke-others", "POST", context.csrfToken, {}, requestOptionsFor(requestOptions), { recentAuth });
       return expectOtherSessionsMutation(response, context.organizationId);
     },
   };
@@ -231,8 +234,8 @@ export function createSecurityClient(options: ClientOptions = {}): SecurityClien
     return { fetchImpl, signal: requestOptions.signal };
   }
 
-  async function authorize(context: SecuritySessionContext, operation: string, requestOptions: SecurityRequestOptions): Promise<string> {
-    const result = await authenticateImpl({ operation, organizationId: context.organizationId, csrfToken: context.csrfToken, signal: requestOptions.signal, fetchImpl });
+  async function authorize(context: SecuritySessionContext, operation: string, requestOptions: SecurityRequestOptions, contextHash?: string): Promise<string> {
+    const result = await authenticateImpl({ operation, organizationId: context.organizationId, csrfToken: context.csrfToken, signal: requestOptions.signal, fetchImpl, ...(contextHash === undefined ? {} : { contextHash }) });
     if (!isUuid(result?.authorization_id)) throw new SecurityClientError("invalid_response", "再認証の結果を確認できませんでした。");
     return result.authorization_id.toLowerCase();
   }
@@ -246,13 +249,16 @@ async function bootstrapSession(options: ClientOptions): Promise<SecuritySession
   return { csrfToken: response.csrf_token, organizationId: response.session.organization_id.toLowerCase() };
 }
 
-async function requestJson(path: string, method: "GET" | "POST" | "PATCH", csrfToken: string | undefined, body: Record<string, unknown> | undefined, options: ClientOptions, recentAuth?: string): Promise<unknown> {
+async function requestJson(path: string, method: "GET" | "POST" | "PATCH", csrfToken: string | undefined, body: Record<string, unknown> | undefined, options: ClientOptions, controls: MutationControls = {}): Promise<unknown> {
   const fetchImpl = options.fetchImpl ?? globalThis.fetch;
   if (typeof fetchImpl !== "function") throw new SecurityClientError("transport_failed", "セキュリティ情報を取得できませんでした。");
   const headers = new Headers({ accept: "application/json" });
   if (body !== undefined) headers.set("content-type", "application/json");
   if (csrfToken !== undefined) headers.set("agentpass-csrf", csrfToken);
-  if (recentAuth !== undefined) headers.set("agentpass-recent-auth", recentAuth);
+  if (controls.recentAuth !== undefined) headers.set("agentpass-recent-auth", controls.recentAuth);
+  if (controls.recentAuthContext !== undefined) headers.set("agentpass-recent-auth-context", controls.recentAuthContext);
+  if (controls.idempotencyKey !== undefined) headers.set("idempotency-key", controls.idempotencyKey);
+  if (controls.expectedVersion !== undefined) headers.set("if-match", `"${controls.expectedVersion}"`);
   let response: Response;
   try {
     response = await fetchImpl(path, {
@@ -306,9 +312,10 @@ function parseSession(value: unknown): SecuritySession & { status: "active" | "r
   return { id: value.session_id, version: value.version, label: value.is_current ? "現在のブラウザ" : "別のブラウザセッション", platform: "Web Console", createdAt: value.created_at, lastSeenAt: value.last_seen_at ?? value.created_at, expiresAt: value.expires_at, current: value.is_current, status: value.status as "active" | "revoked" | "expired" };
 }
 
-function expectCredentialMutation(value: unknown): void {
+function expectCredentialMutation(value: unknown, expected: Readonly<{ id: string; version: number; status: "active" | "revoked"; label?: string }>): void {
   if (!isRecord(value) || !hasExactKeys(value, ["credential"])) throw new SecurityClientError("invalid_response", "セキュリティ操作の応答を確認できませんでした。");
-  parsePasskey(value.credential);
+  const credential = parsePasskey(value.credential);
+  if (credential.id !== expected.id || credential.version !== expected.version + 1 || credential.status !== expected.status || expected.label !== undefined && credential.label !== expected.label) throw new SecurityClientError("invalid_response", "セキュリティ操作の応答を確認できませんでした。");
 }
 
 function expectSessionMutation(value: unknown): SecuritySession {
@@ -335,6 +342,20 @@ function assertSessionTarget(id: string, version: number): void {
   assertVersion(version);
 }
 
+function makeIdempotencyKey(): string {
+  const value = globalThis.crypto?.randomUUID?.();
+  if (typeof value === "string") return value;
+  throw new SecurityClientError("transport_failed", "安全な操作IDを生成できませんでした。");
+}
+
+async function credentialContextHash(operation: string, credentialId: string, expectedVersion: number): Promise<string> {
+  const subtle = globalThis.crypto?.subtle;
+  if (!subtle) throw new SecurityClientError("transport_failed", "再認証コンテキストを生成できませんでした。");
+  const canonical = `{"credential_id":${JSON.stringify(credentialId)},"expected_version":${expectedVersion},"operation":${JSON.stringify(operation)},"version":1}`;
+  const digest = await subtle.digest("SHA-256", new TextEncoder().encode(canonical));
+  return [...new Uint8Array(digest)].map((item) => item.toString(16).padStart(2, "0")).join("");
+}
+
 function closedSessionError(): SecurityClientError {
   return new SecurityClientError("http_failed", "セッションの有効期限が切れています。", 401);
 }
@@ -351,7 +372,7 @@ function assertCredentialId(value: string): asserts value is string { if (!isCre
 function assertLabel(value: string): asserts value is string { if (!isLabel(value)) throw new SecurityClientError("invalid_response", "表示名を確認できませんでした。"); }
 function assertVersion(value: number): asserts value is number { if (!isVersion(value)) throw new SecurityClientError("invalid_response", "更新番号を確認できませんでした。"); }
 function isId(value: unknown): value is string { return typeof value === "string" && ID.test(value); }
-function isCredentialId(value: unknown): value is string { return typeof value === "string" && /^[A-Za-z0-9_-]{16,1024}$/.test(value) && !value.includes("="); }
+function isCredentialId(value: unknown): value is string { return typeof value === "string" && /^[A-Za-z0-9_-]{22,1366}$/.test(value) && !value.includes("="); }
 function isUuid(value: unknown): value is string { return typeof value === "string" && /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value); }
 function isLabel(value: unknown): value is string { return typeof value === "string" && value.length >= 1 && value.length <= 80 && value.trim() === value && !hasControl(value); }
 function isVersion(value: unknown): value is number { return typeof value === "number" && Number.isSafeInteger(value) && value > 0; }

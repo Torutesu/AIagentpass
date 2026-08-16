@@ -1,3 +1,5 @@
+import { createHash } from "node:crypto";
+
 import { withTransaction } from "./repository.mjs";
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
@@ -7,6 +9,8 @@ const SUBJECT = /^[^\u0000-\u001f\u007f]{1,512}$/u;
 const CREDENTIAL_TRANSPORTS = new Set(["ble", "cable", "hybrid", "internal", "nfc", "smart-card", "usb"]);
 const DEFAULT_MANAGEMENT_PAGE_SIZE = 25;
 const MAX_MANAGEMENT_PAGE_SIZE = 100;
+const IDEMPOTENCY_KEY = /^[A-Za-z0-9._~-]{8,255}$/u;
+const IDEMPOTENCY_TTL = "24 hours";
 
 export function createPostgresHumanRepository({ client, onAuthorityReduction } = {}) {
   if (!client || typeof client.query !== "function") throw new TypeError("database client is invalid");
@@ -394,13 +398,32 @@ export function createPostgresHumanRepository({ client, onAuthorityReduction } =
     const scope = credentialScope(input);
     const label = credentialLabel(input?.label);
     const expectedVersion = positiveInteger(input?.expected_version ?? input?.expectedVersion);
+    const idempotencyKey = optionalIdempotencyKey(input?.idempotency_key ?? input?.idempotencyKey);
+    const requestHash = idempotencyKey === undefined ? undefined : humanCredentialMutationRequestHash("credential.rename", {
+      organization_id: scope.organizationId,
+      member_id: scope.memberId,
+      session_id: scope.sessionId,
+      credential_id: input?.credential_id ?? input?.credentialId,
+      label,
+      expected_version: expectedVersion
+    });
     try {
       return await inTransaction(async (transactionClient) => {
         await lockOrganization(transactionClient, scope.organizationId);
         await lockCredentialSet(transactionClient, scope.memberId);
+        const idempotency = idempotencyKey === undefined ? undefined : await acquireHumanCredentialIdempotency(transactionClient, {
+          organizationId: scope.organizationId,
+          principalId: scope.sessionId,
+          idempotencyKey,
+          requestHash
+        });
+        if (idempotency?.replayed) return idempotency.response;
         const result = await transactionClient.query(`UPDATE webauthn_credentials c SET label=$4,version=c.version+1 FROM human_sessions s JOIN memberships m ON m.organization_id=s.organization_id AND m.member_id=s.member_id AND m.id=s.membership_id JOIN organizations o ON o.id=s.organization_id WHERE s.id=$1 AND s.member_id=$2 AND s.organization_id=$3 AND s.revoked_at IS NULL AND s.expires_at>clock_timestamp() AND (s.idle_expires_at IS NULL OR s.idle_expires_at>clock_timestamp()) AND m.status='active' AND m.role=s.role AND o.authority_epoch=s.organization_authority_epoch AND m.session_epoch=s.membership_session_epoch AND c.id=$5 AND c.member_id=s.member_id AND c.revoked_at IS NULL AND c.version=$6 RETURNING c.id,c.member_id,c.label,c.transports,c.backup_eligible,c.backup_state,c.created_at,c.last_used_at,c.revoked_at,c.version`, [scope.sessionId, scope.memberId, scope.organizationId, label, base64Bytes(input?.credential_id ?? input?.credentialId, 16, 1024), expectedVersion]);
         if (result.rowCount === 0 && await credentialExistsInScope(transactionClient, scope, input?.credential_id ?? input?.credentialId)) throw versionConflict();
-        return result.rows?.[0] ? safeCredentialRow(result.rows[0]) : null;
+        const record = result.rows?.[0] ? safeCredentialRow(result.rows[0]) : null;
+        if (record && idempotencyKey !== undefined) await completeHumanCredentialIdempotency(transactionClient, { organizationId: scope.organizationId, principalId: scope.sessionId, idempotencyKey, requestHash, response: record, responseStatus: 200 });
+        if (!record && idempotencyKey !== undefined) await abandonHumanCredentialIdempotency(transactionClient, { organizationId: scope.organizationId, principalId: scope.sessionId, idempotencyKey, requestHash });
+        return record;
       });
     } catch (error) {
       throw normalizeLastCredentialError(error);
@@ -411,14 +434,29 @@ export function createPostgresHumanRepository({ client, onAuthorityReduction } =
     const scope = credentialScope(input);
     const expectedVersion = positiveInteger(input?.expected_version ?? input?.expectedVersion);
     const credentialId = base64Bytes(input?.credential_id ?? input?.credentialId, 16, 1024);
+    const idempotencyKey = optionalIdempotencyKey(input?.idempotency_key ?? input?.idempotencyKey);
     const revokedAt = input?.revoked_at ?? input?.revokedAt;
     if (typeof revokedAt !== "string" || !Number.isFinite(Date.parse(revokedAt))) throw new TypeError("revoked_at is invalid");
     const reasonValue = input?.revoke_reason ?? input?.revokeReason ?? input?.reason;
     const reason = reasonValue === undefined ? undefined : bounded(reasonValue, 128);
+    const requestHash = idempotencyKey === undefined ? undefined : humanCredentialMutationRequestHash("credential.revoke", {
+      organization_id: scope.organizationId,
+      member_id: scope.memberId,
+      session_id: scope.sessionId,
+      credential_id: input?.credential_id ?? input?.credentialId,
+      expected_version: expectedVersion
+    });
     try {
       return await inTransaction(async (transactionClient) => {
         await lockOrganization(transactionClient, scope.organizationId);
         await lockCredentialSet(transactionClient, scope.memberId);
+        const idempotency = idempotencyKey === undefined ? undefined : await acquireHumanCredentialIdempotency(transactionClient, {
+          organizationId: scope.organizationId,
+          principalId: scope.sessionId,
+          idempotencyKey,
+          requestHash
+        });
+        if (idempotency?.replayed) return idempotency.response;
         const candidate = await transactionClient.query(`SELECT c.id FROM webauthn_credentials c JOIN human_sessions s ON s.member_id=c.member_id JOIN memberships m ON m.organization_id=s.organization_id AND m.member_id=s.member_id AND m.id=s.membership_id JOIN organizations o ON o.id=s.organization_id WHERE s.id=$1 AND s.member_id=$2 AND s.organization_id=$3 AND s.revoked_at IS NULL AND s.expires_at>clock_timestamp() AND (s.idle_expires_at IS NULL OR s.idle_expires_at>clock_timestamp()) AND m.status='active' AND m.role=s.role AND o.authority_epoch=s.organization_authority_epoch AND m.session_epoch=s.membership_session_epoch AND c.id=$4 AND c.member_id=s.member_id AND c.revoked_at IS NULL AND c.version=$5 LIMIT 1`, [scope.sessionId, scope.memberId, scope.organizationId, credentialId, expectedVersion]);
         if (candidate.rowCount !== 1) {
           if (await credentialExistsInScope(transactionClient, scope, input?.credential_id ?? input?.credentialId)) throw versionConflict();
@@ -431,6 +469,8 @@ export function createPostgresHumanRepository({ client, onAuthorityReduction } =
         const result = await transactionClient.query(`UPDATE webauthn_credentials c SET revoked_at=$7,revoke_reason=COALESCE($6,c.revoke_reason),version=c.version+1 FROM human_sessions s JOIN memberships m ON m.organization_id=s.organization_id AND m.member_id=s.member_id AND m.id=s.membership_id JOIN organizations o ON o.id=s.organization_id WHERE s.id=$1 AND s.member_id=$2 AND s.organization_id=$3 AND s.revoked_at IS NULL AND s.expires_at>clock_timestamp() AND (s.idle_expires_at IS NULL OR s.idle_expires_at>clock_timestamp()) AND m.status='active' AND m.role=s.role AND o.authority_epoch=s.organization_authority_epoch AND m.session_epoch=s.membership_session_epoch AND c.id=$4 AND c.member_id=s.member_id AND c.revoked_at IS NULL AND c.version=$5 RETURNING c.id,c.member_id,c.label,c.transports,c.backup_eligible,c.backup_state,c.created_at,c.last_used_at,c.revoked_at,c.version`, [scope.sessionId, scope.memberId, scope.organizationId, credentialId, expectedVersion, reason ?? null, revokedAt]);
         const record = result.rows?.[0] ? safeCredentialRow(result.rows[0]) : null;
         if (record && input?.authority_reduction === true) await notifyAuthorityReduction(transactionClient, { ...scope, memberId: scope.memberId, actorSessionId: input?.actor_session_id ?? input?.actorSessionId ?? scope.sessionId, targetId: record.id, resource: "credential", reason, occurredAt: revokedAt });
+        if (record && idempotencyKey !== undefined) await completeHumanCredentialIdempotency(transactionClient, { organizationId: scope.organizationId, principalId: scope.sessionId, idempotencyKey, requestHash, response: record, responseStatus: 200 });
+        if (!record && idempotencyKey !== undefined) await abandonHumanCredentialIdempotency(transactionClient, { organizationId: scope.organizationId, principalId: scope.sessionId, idempotencyKey, requestHash });
         return record;
       });
     } catch (error) {
@@ -542,6 +582,38 @@ export function createPostgresHumanRepository({ client, onAuthorityReduction } =
     const result = await transactionClient.query(`SELECT 1 FROM webauthn_credentials c JOIN human_sessions s ON s.member_id=c.member_id JOIN memberships m ON m.organization_id=s.organization_id AND m.member_id=s.member_id AND m.id=s.membership_id JOIN organizations o ON o.id=s.organization_id WHERE s.id=$1 AND s.member_id=$2 AND s.organization_id=$3 AND s.revoked_at IS NULL AND s.expires_at>clock_timestamp() AND m.status='active' AND m.role=s.role AND o.authority_epoch=s.organization_authority_epoch AND m.session_epoch=s.membership_session_epoch AND c.id=$4 AND c.revoked_at IS NULL LIMIT 1`, [scope.sessionId, scope.memberId, scope.organizationId, base64Bytes(credentialValue, 16, 1024)]);
     return result.rowCount === 1;
   }
+
+  async function acquireHumanCredentialIdempotency(tx, { organizationId, principalId, idempotencyKey, requestHash }) {
+    await tx.query(`DELETE FROM idempotency_records
+      WHERE organization_id=$1 AND principal_id=$2 AND idempotency_key=$3
+        AND expires_at<=clock_timestamp()`, [organizationId, principalId, idempotencyKey]);
+    const inserted = await tx.query(`INSERT INTO idempotency_records
+      (organization_id,principal_id,idempotency_key,request_hash,response_status,response_json,expires_at)
+      VALUES ($1,$2,$3,$4,102,'{}'::jsonb,clock_timestamp()+$5::interval)
+      ON CONFLICT (organization_id,principal_id,idempotency_key) DO NOTHING`, [organizationId, principalId, idempotencyKey, requestHash, IDEMPOTENCY_TTL]);
+    const record = await tx.query(`SELECT request_hash,response_status,response_json
+      FROM idempotency_records
+      WHERE organization_id=$1 AND principal_id=$2 AND idempotency_key=$3
+      FOR UPDATE`, [organizationId, principalId, idempotencyKey]);
+    if ((record.rowCount ?? record.rows?.length ?? 0) !== 1) throw idempotencyUnavailable();
+    const row = record.rows[0];
+    if (String(row.request_hash).toLowerCase() !== requestHash) throw idempotencyConflict();
+    if ((inserted.rowCount ?? inserted.rows?.length ?? 0) !== 1) return { replayed: true, response: replayCredentialResponse(row.response_json) };
+    return { replayed: false };
+  }
+
+  async function completeHumanCredentialIdempotency(tx, { organizationId, principalId, idempotencyKey, requestHash, response, responseStatus }) {
+    const result = await tx.query(`UPDATE idempotency_records
+      SET response_status=$4,response_json=$5::jsonb
+      WHERE organization_id=$1 AND principal_id=$2 AND idempotency_key=$3 AND request_hash=$6`, [organizationId, principalId, idempotencyKey, responseStatus, JSON.stringify(response), requestHash]);
+    if ((result.rowCount ?? result.rows?.length ?? 0) !== 1) throw idempotencyUnavailable();
+  }
+
+  async function abandonHumanCredentialIdempotency(tx, { organizationId, principalId, idempotencyKey, requestHash }) {
+    const result = await tx.query(`DELETE FROM idempotency_records
+      WHERE organization_id=$1 AND principal_id=$2 AND idempotency_key=$3 AND request_hash=$4`, [organizationId, principalId, idempotencyKey, requestHash]);
+    if ((result.rowCount ?? result.rows?.length ?? 0) !== 1) throw idempotencyUnavailable();
+  }
 }
 
 function validateSession(record) { uuid(record?.session_id); uuid(record?.member_id); uuid(record?.membership_id); uuid(record?.organization_id); if (!["owner", "admin", "auditor", "viewer"].includes(record.role)) throw new TypeError("session role is invalid"); bytes32(record.token_hash); bytes32(record.csrf_token_hash); }
@@ -621,4 +693,27 @@ function normalizeLastCredentialError(error) { return error?.code === "23514" &&
 function upstreamIdentityConflict() { const error = new Error("upstream identity mapping conflict"); error.code = "ERR_UPSTREAM_IDENTITY_CONFLICT"; return error; }
 function credentialExists() { const error = new Error("credential already exists"); error.code = "credential_exists"; return error; }
 function recentAuthRequired() { const error = new Error("recent authentication is required"); error.code = "recent_auth_required"; return error; }
+function optionalIdempotencyKey(value) {
+  if (value === undefined) return undefined;
+  if (typeof value !== "string" || !IDEMPOTENCY_KEY.test(value)) throw new TypeError("idempotency_key is invalid");
+  return value;
+}
+function humanCredentialMutationRequestHash(operation, identity) {
+  return createHash("sha256").update(stableCanonicalize({ version: 1, operation, identity }), "utf8").digest("hex");
+}
+function stableCanonicalize(value) {
+  if (value === null || typeof value === "string" || typeof value === "boolean") return JSON.stringify(value);
+  if (Number.isSafeInteger(value) || typeof value === "number" && Number.isFinite(value)) return JSON.stringify(value);
+  if (Array.isArray(value)) return `[${value.map(stableCanonicalize).join(",")}]`;
+  if (!value || typeof value !== "object") throw new TypeError("canonical identity contains an invalid value");
+  const keys = Object.keys(value).sort();
+  return `{${keys.map((key) => `${JSON.stringify(key)}:${stableCanonicalize(value[key])}`).join(",")}}`;
+}
+function replayCredentialResponse(value) {
+  const response = typeof value === "string" ? JSON.parse(value) : value;
+  if (!response || typeof response !== "object" || Array.isArray(response)) throw idempotencyUnavailable();
+  return response;
+}
+function idempotencyConflict() { const error = new Error("idempotency key was already used for a different request"); error.code = "ERR_IDEMPOTENCY_CONFLICT"; return error; }
+function idempotencyUnavailable() { const error = new Error("idempotency response could not be acquired"); error.code = "ERR_IDEMPOTENCY"; return error; }
 function parseDatabaseCount(value, label) { const count = typeof value === "string" && /^\d+$/.test(value) ? Number(value) : value; if (!Number.isSafeInteger(count) || count < 0) throw new TypeError(`${label} is invalid`); return count; }

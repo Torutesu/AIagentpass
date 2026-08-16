@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { SecurityClientError, createSecurityClient, isAmbiguousSecurityMutationError, type SecurityClient, type SecurityPasskey, type SecuritySession, type SecuritySnapshot } from "../security-client";
-import { WebAuthnClientError } from "../webauthn-client";
+import { isAmbiguousWebAuthnMutationError, WebAuthnClientError } from "../webauthn-client";
 
 type LoadState = "loading" | "ready" | "error";
 type SecurityPanelProps = Readonly<{
@@ -68,7 +68,7 @@ export function SecurityPanel({ onSessionExpired, onSessionSignedOut, securityCl
     } catch (caught) {
       if (isAbortError(caught)) return;
       handleSessionFailure(caught, onSessionExpired);
-      const ambiguous = isAmbiguousSecurityMutationError(caught);
+      const ambiguous = isAmbiguousSecurityMutationError(caught) || isAmbiguousWebAuthnMutationError(caught);
       const conflict = caught instanceof SecurityClientError && caught.status === 409;
       if (ambiguous || conflict) {
         const reconciled = await load();

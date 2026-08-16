@@ -6,6 +6,7 @@ const DEFAULT_TIMEOUT_MS = 8_000;
 const ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 const OPAQUE_TOKEN = /^[A-Za-z0-9_-]{43}$/;
 const SESSION_COOKIE_NAME = "__Host-agentpass_session";
+const RECENT_AUTH_CONTEXT_HEADER = "agentpass-recent-auth-context";
 const SESSION_KEYS = Object.freeze(["version", "session_id", "member_id", "organization_id", "role", "created_at", "expires_at", "recent_auth_at"]);
 const SESSION_ROLES = new Set(["owner", "admin", "auditor", "viewer"]);
 const ROUTES = new Map([
@@ -99,6 +100,10 @@ export async function handleHumanAuthRequest(request, options = {}) {
       if (!(route.requireRecentAuth || route.allowRecentAuth) || !isUuid(recentAuth)) fail(400, "invalid_recent_auth", "Recent WebAuthn authentication is invalid");
       headers.set("agentpass-recent-auth", recentAuth.toLowerCase());
     }
+    const recentAuthContext = request.headers.get(RECENT_AUTH_CONTEXT_HEADER);
+    if (route.requireRecentAuthContext && (recentAuthContext === null || !isContextHash(recentAuthContext))) fail(401, "recent_auth_failed", "Recent WebAuthn context is invalid");
+    if (!route.requireRecentAuthContext && recentAuthContext !== null) fail(400, "invalid_recent_auth_context", "Recent WebAuthn context is not allowed");
+    if (recentAuthContext !== null) headers.set(RECENT_AUTH_CONTEXT_HEADER, recentAuthContext.toLowerCase());
     const idempotencyKey = request.headers.get("idempotency-key");
     if (route.requireIdempotency && !isIdempotencyKey(idempotencyKey)) fail(400, "idempotency_required", "A valid Idempotency-Key is required");
     if (!route.requireIdempotency && idempotencyKey !== null) fail(400, "invalid_idempotency", "The Idempotency-Key is not allowed");
@@ -129,7 +134,7 @@ export async function handleHumanAuthRequest(request, options = {}) {
     } finally {
       clearTimeout(timeout);
     }
-    return await relayResponse(upstream, { allowSetCookie: route.session === "bootstrap" || route.allowSetCookie === true, clearCookieOnly: route.clearCookieOnly === true, requireSetCookie: route.requireSetCookie === true, requireClearedSessionBody: route.requireClearedSessionBody === true, bootstrap: route.session === "bootstrap", normalizeSessionResponse: route.normalizeSessionResponse === true });
+    return await relayResponse(upstream, { allowSetCookie: route.session === "bootstrap" || route.allowSetCookie === true, clearCookieOnly: route.clearCookieOnly === true, requireSetCookie: route.requireSetCookie === true, requireClearedSessionBody: route.requireClearedSessionBody === true, bootstrap: route.session === "bootstrap", normalizeSessionResponse: route.normalizeSessionResponse === true, passkeyMutation: route.passkeyMutation });
   } catch (error) {
     const mapped = error instanceof HumanAuthBridgeError
       ? error
@@ -186,8 +191,8 @@ function validateBody(value, shape) {
     if (!isExactObject(value, [])) fail(400, "invalid_request", "The security request is invalid");
     return;
   }
-  if (shape === "rename") {
-    if (!isExactObject(value, ["label", "expected_version"]) || !isSafeLabel(value.label) || !isVersion(value.expected_version)) {
+  if (shape === "rename-passkey") {
+    if (!isExactObject(value, ["label"]) || !isSafeLabel(value.label)) {
       fail(400, "invalid_request", "The security request is invalid");
     }
     return;
@@ -239,7 +244,7 @@ function isInvitationReissueBody(bytes) {
   }
 }
 
-async function relayResponse(response, { allowSetCookie = false, clearCookieOnly = false, requireSetCookie = false, requireClearedSessionBody = false, bootstrap = false, normalizeSessionResponse = false } = {}) {
+async function relayResponse(response, { allowSetCookie = false, clearCookieOnly = false, requireSetCookie = false, requireClearedSessionBody = false, bootstrap = false, normalizeSessionResponse = false, passkeyMutation = undefined } = {}) {
   if (!response || typeof response.status !== "number" || response.status < 200 || response.status > 599 || (response.status >= 300 && response.status < 400)) fail(502, "cloud_api_invalid_response", "Cloud API response was invalid");
   const type = response.headers?.get("content-type") ?? "";
   if (!/^application\/json(?:\s*;|\s*$)/i.test(type)) fail(502, "cloud_api_invalid_response", "Cloud API response was invalid");
@@ -250,6 +255,7 @@ async function relayResponse(response, { allowSetCookie = false, clearCookieOnly
   let value;
   try { value = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes)); } catch { fail(502, "cloud_api_invalid_response", "Cloud API response was invalid"); }
   if (bootstrap || normalizeSessionResponse) value = normalizeBootstrapResponse(value, response.status >= 200 && response.status < 300);
+  if (passkeyMutation !== undefined && response.status >= 200 && response.status < 300) validatePasskeyMutationResponse(value, passkeyMutation);
   if (requireClearedSessionBody && (response.status < 200 || response.status >= 300 || !isExactObject(value, ["session"]) || value.session !== null)) fail(502, "cloud_api_invalid_response", "Cloud API response was invalid");
   const headers = new Headers({ "content-type": "application/json; charset=utf-8", "cache-control": "no-store, max-age=0", pragma: "no-cache", expires: "0", "x-content-type-options": "nosniff", "referrer-policy": "no-referrer" });
   const setCookie = response.headers.get("set-cookie");
@@ -264,6 +270,17 @@ async function relayResponse(response, { allowSetCookie = false, clearCookieOnly
   }
   return new Response(JSON.stringify(value), { status: response.status, headers });
 }
+
+function validatePasskeyMutationResponse(value, mutation) {
+  if (!isExactObject(value, ["credential"]) || !isExactObject(value.credential, ["credential_id", "version", "label", "transports", "backup_eligible", "backup_state", "status", "created_at", "last_used_at", "revoked_at"])) fail(502, "cloud_api_invalid_response", "Cloud API response was invalid");
+  const credential = value.credential;
+  if (credential.credential_id !== mutation.id || !isCredentialId(credential.credential_id) || !isVersion(credential.version) || !isSafeManagementLabel(credential.label) || !Array.isArray(credential.transports) || credential.transports.length > 7 || new Set(credential.transports).size !== credential.transports.length || credential.transports.some((item) => !["ble", "cable", "hybrid", "internal", "nfc", "smart-card", "usb"].includes(item)) || typeof credential.backup_eligible !== "boolean" || typeof credential.backup_state !== "boolean" || (credential.backup_state && !credential.backup_eligible) || credential.status !== (mutation.kind === "revoke" ? "revoked" : "active") || !isRfc3339(credential.created_at) || !isNullableRfc3339(credential.last_used_at) || !isNullableRfc3339(credential.revoked_at) || mutation.kind === "revoke" && credential.revoked_at === null || mutation.kind === "rename" && credential.revoked_at !== null) {
+    fail(502, "cloud_api_invalid_response", "Cloud API response was invalid");
+  }
+}
+
+function isSafeManagementLabel(value) { return typeof value === "string" && value.length >= 1 && value.length <= 128 && value.trim() === value && !hasControl(value); }
+function isNullableRfc3339(value) { return value === null || isRfc3339(value); }
 
 function normalizeBootstrapResponse(value, success) {
   if (!success) {
@@ -371,8 +388,8 @@ function resolveRoute(pathname) {
   let id;
   try { id = decodeURIComponent(match[2]); } catch { return undefined; }
   if (id !== match[2]) return undefined;
-  if (match[1] === "passkeys" && isCredentialId(id) && !match[3]) return { cloudPath: `/api/auth/management/credentials/${id}`, methods: ["PATCH"], requireCookie: true, requireCsrf: true, body: "rename", allowIfMatch: true };
-  if (match[1] === "passkeys" && isCredentialId(id) && match[3]) return { cloudPath: `/api/auth/management/credentials/${id}/revoke`, methods: ["POST"], requireCookie: true, requireCsrf: true, requireRecentAuth: true, body: "version", allowIfMatch: true };
+  if (match[1] === "passkeys" && isCredentialId(id) && !match[3]) return { cloudPath: `/api/auth/management/credentials/${id}`, methods: ["PATCH"], requireCookie: true, requireCsrf: true, requireIdempotency: true, requireIfMatch: true, body: "rename-passkey", passkeyMutation: { kind: "rename", id } };
+  if (match[1] === "passkeys" && isCredentialId(id) && match[3]) return { cloudPath: `/api/auth/management/credentials/${id}/revoke`, methods: ["POST"], requireCookie: true, requireCsrf: true, requireIdempotency: true, requireIfMatch: true, requireRecentAuth: true, requireRecentAuthContext: true, body: "empty", passkeyMutation: { kind: "revoke", id } };
   if (match[1] === "sessions" && isUuid(id) && match[3]) return { cloudPath: `/api/auth/management/sessions/${id.toLowerCase()}/revoke`, methods: ["POST"], requireCookie: true, requireCsrf: true, allowRecentAuth: true, body: "version", allowIfMatch: true, allowSetCookie: true, clearCookieOnly: true };
   return undefined;
 }
@@ -429,4 +446,5 @@ function isRfc3339(value) { return typeof value === "string" && /^\d{4}-\d{2}-\d
 function isOpaqueInvitationToken(value) { return typeof value === "string" && /^[A-Za-z0-9_-]{43,512}$/.test(value); }
 function isIdempotencyKey(value) { return typeof value === "string" && /^[A-Za-z0-9._~-]{8,255}$/.test(value); }
 function isIfMatch(value) { return typeof value === "string" && /^"[1-9][0-9]*"$/.test(value); }
+function isContextHash(value) { return typeof value === "string" && /^[0-9a-f]{64}$/i.test(value); }
 function fail(status, code, message) { throw new HumanAuthBridgeError(status, code, message); }

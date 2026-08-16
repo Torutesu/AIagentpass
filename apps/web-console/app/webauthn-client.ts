@@ -106,6 +106,16 @@ export class WebAuthnClientError extends Error {
   }
 }
 
+/** Registration may have committed before its response was lost. The caller
+ * must reconcile the authoritative passkey list and never replay blindly. */
+export function isAmbiguousWebAuthnMutationError(error: unknown): boolean {
+  return error instanceof WebAuthnClientError && (
+    error.code === "transport_failed"
+    || error.code === "invalid_response"
+    || error.code === "http_failed" && error.status !== undefined && error.status >= 500 && error.status <= 599
+  );
+}
+
 /**
  * Run one operation-bound recent-authentication ceremony.
  *

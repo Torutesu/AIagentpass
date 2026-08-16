@@ -241,8 +241,9 @@
         "operationId": "renameWebAuthnCredential",
         "summary": "Rename a WebAuthn credential",
         "security": [{ "humanSession": [] }],
-        "parameters": [{ "$ref": "#/components/parameters/CredentialId" }, { "$ref": "#/components/parameters/CsrfToken" }, { "$ref": "#/components/parameters/IdempotencyKey" }],
-        "responses": { "200": { "$ref": "#/components/responses/Json" }, "401": { "$ref": "#/components/responses/Unauthorized" } }
+        "parameters": [{ "$ref": "#/components/parameters/CredentialId" }, { "$ref": "#/components/parameters/CsrfToken" }, { "$ref": "#/components/parameters/IdempotencyKey" }, { "$ref": "#/components/parameters/ExpectedVersion" }],
+        "requestBody": { "$ref": "#/components/requestBodies/RenameWebAuthnCredential" },
+        "responses": { "200": { "$ref": "#/components/responses/WebAuthnCredentialMutation" }, "400": { "$ref": "#/components/responses/BadRequest" }, "401": { "$ref": "#/components/responses/Unauthorized" }, "409": { "$ref": "#/components/responses/VersionConflict" }, "502": { "$ref": "#/components/responses/ServiceUnavailable" } }
       }
     },
     "/auth/management/credentials/{credential_id}/revoke": {
@@ -250,8 +251,9 @@
         "operationId": "revokeWebAuthnCredential",
         "summary": "Revoke a WebAuthn credential",
         "security": [{ "humanSession": [], "recentWebAuthn": [] }],
-        "parameters": [{ "$ref": "#/components/parameters/CredentialId" }, { "$ref": "#/components/parameters/CsrfToken" }, { "$ref": "#/components/parameters/IdempotencyKey" }],
-        "responses": { "200": { "$ref": "#/components/responses/Json" }, "401": { "$ref": "#/components/responses/Unauthorized" } }
+        "parameters": [{ "$ref": "#/components/parameters/CredentialId" }, { "$ref": "#/components/parameters/CsrfToken" }, { "$ref": "#/components/parameters/IdempotencyKey" }, { "$ref": "#/components/parameters/ExpectedVersion" }, { "$ref": "#/components/parameters/RecentAuthContext" }],
+        "requestBody": { "$ref": "#/components/requestBodies/RevokeWebAuthnCredential" },
+        "responses": { "200": { "$ref": "#/components/responses/WebAuthnCredentialMutation" }, "400": { "$ref": "#/components/responses/BadRequest" }, "401": { "$ref": "#/components/responses/Unauthorized" }, "409": { "$ref": "#/components/responses/VersionConflict" }, "502": { "$ref": "#/components/responses/ServiceUnavailable" } }
       }
     },
     "/auth/management/sessions": {
@@ -1154,7 +1156,7 @@
         "in": "path",
         "required": true,
         "description": "WebAuthn credential identifier.",
-        "schema": { "type": "string", "minLength": 16, "maxLength": 1024 }
+        "schema": { "type": "string", "minLength": 22, "maxLength": 1366, "pattern": "^[A-Za-z0-9_-]+$" }
       },
       "SessionId": {
         "name": "session_id",
@@ -1211,6 +1213,13 @@
         "required": true,
         "description": "One-use, operation- and request-bound WebAuthn authorization identifier.",
         "schema": { "type": "string", "format": "uuid" }
+      },
+      "RecentAuthContext": {
+        "name": "agentpass-recent-auth-context",
+        "in": "header",
+        "required": true,
+        "description": "SHA-256 of canonical JSON {version:1,operation,credential_id,expected_version}; binds the one-use proof to this exact credential mutation.",
+        "schema": { "type": "string", "minLength": 64, "maxLength": 64, "pattern": "^[0-9a-f]{64}$" }
       },
       "RecentAuthForInvitationReissue": {
         "name": "agentpass-recent-auth",
@@ -1308,6 +1317,16 @@
         "required": true,
         "description": "Exact browser registration transport material bound to the authenticated Human Session and issued challenge. Raw ceremony material is never returned or durably stored.",
         "content": { "application/json": { "schema": { "$ref": "#/components/schemas/WebAuthnRegistrationVerifyRequest" } } }
+      },
+      "RenameWebAuthnCredential": {
+        "required": true,
+        "description": "Exactly the mutable display label. Credential identity and expected version are transport-bound.",
+        "content": { "application/json": { "schema": { "$ref": "#/components/schemas/RenameWebAuthnCredentialRequest" } } }
+      },
+      "RevokeWebAuthnCredential": {
+        "required": true,
+        "description": "Exactly {}. Credential identity, expected version, idempotency, and recent-auth context are transport-bound.",
+        "content": { "application/json": { "schema": { "$ref": "#/components/schemas/RevokeWebAuthnCredentialRequest" } } }
       },
       "CreateOrganization": {
         "required": true,
@@ -1537,6 +1556,11 @@
         "headers": { "Cache-Control": { "required": true, "schema": { "type": "string", "const": "no-store, max-age=0" } } },
         "content": { "application/json": { "schema": { "$ref": "#/components/schemas/WebAuthnRegistrationVerifiedResponse" } } }
       },
+      "WebAuthnCredentialMutation": {
+        "description": "Authoritative, secret-free credential metadata after an atomic rename or revoke.",
+        "headers": { "Cache-Control": { "required": true, "schema": { "type": "string", "const": "no-store, max-age=0" } } },
+        "content": { "application/json": { "schema": { "$ref": "#/components/schemas/WebAuthnCredentialMutationResponse" } } }
+      },
       "DeviceList": { "description": "Minimal authoritative Console device state without keys, policy, nonce, signature, or metadata.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/DeviceListResponse" } } } },
       "DeviceRefreshRequestAccepted": { "description": "A wake request was accepted, coalesced with a pending wake, or found unnecessary because no refresh is pending. The response is a delivery hint only; it does not prove device delivery or application.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/DeviceRefreshRequestResponse" } } } },
       "AgentSessionGrantIssued": {
@@ -1680,6 +1704,43 @@
       "WebAuthnRegistrationOptionsRequest": {
         "type": "object", "additionalProperties": false, "required": ["organization_id"],
         "properties": { "organization_id": { "type": "string", "format": "uuid" } }
+      },
+      "RenameWebAuthnCredentialRequest": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["label"],
+        "properties": { "label": { "type": "string", "minLength": 1, "maxLength": 128 } }
+      },
+      "RevokeWebAuthnCredentialRequest": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [],
+        "minProperties": 0,
+        "maxProperties": 0
+      },
+      "WebAuthnCredentialMutationResponse": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["credential"],
+        "properties": {
+          "credential": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["credential_id", "version", "label", "transports", "backup_eligible", "backup_state", "status", "created_at", "last_used_at", "revoked_at"],
+            "properties": {
+              "credential_id": { "type": "string", "minLength": 22, "maxLength": 1366, "pattern": "^[A-Za-z0-9_-]+$" },
+              "version": { "type": "integer", "minimum": 1 },
+              "label": { "type": "string", "minLength": 1, "maxLength": 128 },
+              "transports": { "type": "array", "maxItems": 7, "uniqueItems": true, "items": { "type": "string", "enum": ["ble", "cable", "hybrid", "internal", "nfc", "smart-card", "usb"] } },
+              "backup_eligible": { "type": "boolean" },
+              "backup_state": { "type": "boolean" },
+              "status": { "type": "string", "enum": ["active", "revoked"] },
+              "created_at": { "type": "string", "format": "date-time" },
+              "last_used_at": { "type": ["string", "null"], "format": "date-time" },
+              "revoked_at": { "type": ["string", "null"], "format": "date-time" }
+            }
+          }
+        }
       },
       "WebAuthnRegistrationVerifyRequest": {
         "type": "object", "additionalProperties": false, "required": ["organization_id", "challenge_id", "credential"],

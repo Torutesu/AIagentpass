@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import test from "node:test";
 import { createHumanAuthBridge } from "../lib/human-auth-api.mjs";
 
@@ -14,12 +15,14 @@ function request(path, { method = "GET", body, headers = {} } = {}) {
 }
 
 function bridge(fetchImpl) { return createHumanAuthBridge({ env, fetchImpl, getSiwcUser: async () => ({ userId: "operator-1" }) }); }
+function credentialMutation(status = "active", version = 3, label = "仕事用") { return { credential: { credential_id: credentialId, version, label, transports: ["internal"], backup_eligible: false, backup_state: false, status, created_at: "2026-08-12T00:00:00.000Z", last_used_at: null, revoked_at: status === "revoked" ? "2026-08-12T01:00:00.000Z" : null } }; }
+function contextHash(version) { return createHash("sha256").update(`{"credential_id":${JSON.stringify(credentialId)},"expected_version":${version},"operation":"human.management.credential.revoke","version":1}`, "utf8").digest("hex"); }
 
 test("maps Security BFF paths to Cloud management paths and forwards session controls", async () => {
   const calls = [];
   const api = bridge(async (url, init) => {
     calls.push({ url: String(url), init });
-    return new Response(JSON.stringify({ credentials: [], next_cursor: null }), { headers: { "content-type": "application/json" } });
+    return new Response(JSON.stringify(String(url).includes(`/credentials/${credentialId}`) ? credentialMutation() : { credentials: [], next_cursor: null }), { headers: { "content-type": "application/json" } });
   });
   const response = await api.handle(request("/api/auth/security/passkeys", { headers: { cookie, "agentpass-csrf": csrf } }));
   assert.equal(response.status, 200);
@@ -30,11 +33,12 @@ test("maps Security BFF paths to Cloud management paths and forwards session con
   assert.equal(calls[0].init.headers.get("cookie"), cookie);
   assert.equal(calls[0].init.headers.get("agentpass-csrf"), csrf);
 
-  await api.handle(request(`/api/auth/security/passkeys/${credentialId}`, { method: "PATCH", body: { label: "仕事用", expected_version: 2 }, headers: { cookie, "agentpass-csrf": csrf, "if-match": '"2"' } }));
+  await api.handle(request(`/api/auth/security/passkeys/${credentialId}`, { method: "PATCH", body: { label: "仕事用" }, headers: { cookie, "agentpass-csrf": csrf, "if-match": '"2"', "idempotency-key": "rename-bff-01" } }));
   assert.equal(calls[1].url, `https://cloud.example.test/api/auth/management/credentials/${credentialId}`);
   assert.equal(calls[1].init.method, "PATCH");
   assert.equal(calls[1].init.headers.get("if-match"), '"2"');
-  assert.deepEqual(JSON.parse(new TextDecoder().decode(calls[1].init.body)), { label: "仕事用", expected_version: 2 });
+  assert.deepEqual(JSON.parse(new TextDecoder().decode(calls[1].init.body)), { label: "仕事用" });
+  assert.equal(calls[1].init.headers.get("idempotency-key"), "rename-bff-01");
 
   await api.handle(request(`/api/auth/security/sessions/${sessionId}/revoke`, { method: "POST", body: { expected_version: 4 }, headers: { cookie, "agentpass-csrf": csrf } }));
   assert.equal(calls[2].url, `https://cloud.example.test/api/auth/management/sessions/${sessionId}/revoke`);
@@ -52,7 +56,7 @@ test("fails closed before Cloud for missing session controls or malformed manage
   const api = bridge(async () => { calls += 1; return new Response("{}", { headers: { "content-type": "application/json" } }); });
   assert.equal((await api.handle(request("/api/auth/security/sessions", { headers: { "agentpass-csrf": csrf } }))).status, 401);
   assert.equal((await api.handle(request(`/api/auth/security/passkeys/${credentialId}`, { method: "PATCH", body: { label: "x" }, headers: { cookie, "agentpass-csrf": csrf } }))).status, 400);
-  assert.equal((await api.handle(request(`/api/auth/security/passkeys/${credentialId}/revoke`, { method: "POST", body: {}, headers: { cookie, "agentpass-csrf": csrf } }))).status, 400);
+  assert.equal((await api.handle(request(`/api/auth/security/passkeys/${credentialId}/revoke`, { method: "POST", body: {}, headers: { cookie, "agentpass-csrf": csrf } }))).status, 401);
   assert.equal((await api.handle(request("/api/auth/security/sessions/revoke-others", { method: "POST", body: {}, headers: { cookie, "agentpass-csrf": csrf } }))).status, 401);
   assert.equal((await api.handle(request("/api/auth/security/sessions/revoke-others", { method: "POST", body: { session_ids: [sessionId] }, headers: { cookie, "agentpass-csrf": csrf, "agentpass-recent-auth": authorizationId } }))).status, 400);
   assert.equal(calls, 0);
@@ -76,14 +80,14 @@ test("forwards recent auth only to protected Security mutations", async () => {
   const calls = [];
   const api = bridge(async (url, init) => {
     calls.push({ url: String(url), init });
-    return new Response(JSON.stringify({ credential: {} }), { headers: { "content-type": "application/json" } });
+    return new Response(JSON.stringify(credentialMutation("revoked", 2)), { headers: { "content-type": "application/json" } });
   });
   const path = `/api/auth/security/passkeys/${credentialId}/revoke`;
-  const missing = await api.handle(request(path, { method: "POST", body: { expected_version: 1 }, headers: { cookie, "agentpass-csrf": csrf } }));
+  const missing = await api.handle(request(path, { method: "POST", body: {}, headers: { cookie, "agentpass-csrf": csrf, "idempotency-key": "revoke-bff-02", "if-match": '"1"' } }));
   assert.equal(missing.status, 401);
   assert.equal(calls.length, 0);
 
-  const response = await api.handle(request(path, { method: "POST", body: { expected_version: 1 }, headers: { cookie, "agentpass-csrf": csrf, "agentpass-recent-auth": authorizationId } }));
+  const response = await api.handle(request(path, { method: "POST", body: {}, headers: { cookie, "agentpass-csrf": csrf, "idempotency-key": "revoke-bff-01", "if-match": '"1"', "agentpass-recent-auth": authorizationId, "agentpass-recent-auth-context": contextHash(1) } }));
   assert.equal(response.status, 200);
   assert.equal(calls[0].init.headers.get("agentpass-recent-auth"), authorizationId);
 

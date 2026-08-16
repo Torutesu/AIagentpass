@@ -58,8 +58,8 @@ test("reuses one bootstrap result for every read and mutation in a Security life
     if (url === "/api/auth/session") return sessionResponse();
     if (url === "/api/auth/security/passkeys") return json({ credentials: [credential()], next_cursor: null });
     if (url === "/api/auth/security/sessions") return json({ sessions: [session()], next_cursor: null });
-    if (url.includes("/passkeys/") && init.method === "PATCH") return json({ credential: credential() });
-    if (url.includes("/passkeys/") && init.method === "POST") return json({ credential: { ...credential("revoked"), revoked_at: date } });
+    if (url.includes("/passkeys/") && init.method === "PATCH") return json({ credential: { ...credential(), version: 3, label: "仕事用Touch ID" } });
+    if (url.includes("/passkeys/") && init.method === "POST") return json({ credential: { ...credential("revoked"), version: 4, revoked_at: date } });
     if (url.includes("/sessions/") && init.method === "POST") return json({ session: session("revoked", false) });
     throw new Error("unexpected path");
   };
@@ -78,10 +78,15 @@ test("reuses one bootstrap result for every read and mutation in a Security life
     [`/api/auth/security/passkeys/${credentialId}/revoke`, "POST"],
     [`/api/auth/security/sessions/${otherSessionId}/revoke`, "POST"],
   ]);
-  assert.deepEqual(JSON.parse(calls[3].init.body), { label: "仕事用Touch ID", expected_version: 2 });
-  assert.deepEqual(JSON.parse(calls[4].init.body), { expected_version: 3 });
+  assert.deepEqual(JSON.parse(calls[3].init.body), { label: "仕事用Touch ID" });
+  assert.equal(calls[3].init.headers.get("if-match"), '"2"');
+  assert.match(calls[3].init.headers.get("idempotency-key"), /^[A-Za-z0-9._~-]{8,255}$/);
+  assert.deepEqual(JSON.parse(calls[4].init.body), {});
+  assert.equal(calls[4].init.headers.get("if-match"), '"3"');
+  assert.match(calls[4].init.headers.get("idempotency-key"), /^[A-Za-z0-9._~-]{8,255}$/);
   assert.equal(calls[4].init.headers.get("agentpass-recent-auth"), authorizationId);
-  assert.deepEqual(authorizations.map(({ operation, organizationId, csrfToken }) => ({ operation, organizationId, csrfToken })), [{ operation: "human.management.credential.revoke", organizationId, csrfToken: csrf }]);
+  assert.match(calls[4].init.headers.get("agentpass-recent-auth-context"), /^[0-9a-f]{64}$/);
+  assert.deepEqual(authorizations.map(({ operation, organizationId, csrfToken, contextHash }) => ({ operation, organizationId, csrfToken, contextHash })), [{ operation: "human.management.credential.revoke", organizationId, csrfToken: csrf, contextHash: calls[4].init.headers.get("agentpass-recent-auth-context") }]);
   assert.deepEqual(JSON.parse(calls[5].init.body), { expected_version: 4 });
 });
 
