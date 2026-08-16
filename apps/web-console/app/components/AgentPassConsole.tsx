@@ -934,7 +934,6 @@ function installGuidance(status: LiveHandoffStatus): InstallGuidance {
 
 function InstallStatusCard({ status }: { status: LiveHandoffStatus }) {
   const guidance = installGuidance(status);
-  const isFailure = guidance.state === "failed";
   return (
     <article className="surface-card" data-install-state={guidance.state}>
       <div className="stop-title-row">
@@ -945,7 +944,7 @@ function InstallStatusCard({ status }: { status: LiveHandoffStatus }) {
         </div>
         <StatusTag tone={guidance.tone}>{guidance.label}</StatusTag>
       </div>
-      <div className="device-wake-action" role={isFailure ? "alert" : "status"} aria-live={isFailure ? "assertive" : "polite"}>
+      <div className="device-wake-action" role="status" aria-live="polite">
         <p className="row-title">{guidance.title}</p>
         <p className="device-state-description">{guidance.copy}</p>
       </div>

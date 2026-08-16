@@ -23,8 +23,8 @@ test("install guidance is accessible and never introduces browser persistence", 
   const source = await readFile(componentPath, "utf8");
   const installBody = source.slice(source.indexOf("type InstallGuidanceState"), source.indexOf("function SetupSurface"));
 
-  assert.match(installBody, /role=\{isFailure \? "alert" : "status"\}/);
-  assert.match(installBody, /aria-live=\{isFailure \? "assertive" : "polite"\}/);
+  assert.match(installBody, /role="status" aria-live="polite"/);
+  assert.doesNotMatch(installBody, /role=\{isFailure \? "alert" : "status"\}/);
   assert.doesNotMatch(installBody, /localStorage|sessionStorage|indexedDB|window\.location\.(?:search|hash)/);
   assert.doesNotMatch(installBody, /private[_ ]key|credential|authorization_id|nonce|challenge/iu);
 });
