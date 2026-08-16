@@ -548,7 +548,7 @@ export async function startP0BLiveBrowserFixture({
       assertPage(page);
       if (!pageState.has(page)) throw new P0BLiveBrowserFixtureError("session_required", "P0-B page has not completed session bootstrap");
       if (!new Set(["stale", "replayed", "cross_operation", "cross_tenant"]).has(failure)) throw new TypeError("recent-auth failure is invalid");
-      if (typeof page.exposeFunction !== "function") throw new TypeError("Playwright Page binding is required");
+      if (typeof page.exposeFunction !== "function" || typeof page.addInitScript !== "function") throw new TypeError("Playwright Page binding is required");
       const bindingName = "__agentpassP0BInvalidateRecentAuth";
       let intercepted = false;
       let invalidationFailed = false;
@@ -563,7 +563,11 @@ export async function startP0BLiveBrowserFixture({
           return false;
         }
       });
-      await page.evaluate(installRecentAuthFailureFetchGate, bindingName);
+      // Install before the next document's application bundle executes. The
+      // production bundle may capture the global fetch reference during module
+      // initialization, so replacing it only after hydration is too late.
+      await page.addInitScript(installRecentAuthFailureFetchGate, bindingName);
+      await fixture.reloadAndAdoptSession(page);
       return Object.freeze({
         intercepted: () => intercepted,
         invalidationFailed: () => invalidationFailed
