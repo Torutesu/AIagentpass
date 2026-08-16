@@ -66,6 +66,8 @@ test("all authority-bearing session and credential paths require exact current e
 
   const authorityQueries = calls.filter(({ text }) => /human_sessions/.test(text));
   assert.ok(authorityQueries.length >= 10);
+  assert.match(calls[1].text, /s\.expires_at>clock_timestamp\(\)/);
+  assert.match(calls[1].text, /s\.idle_expires_at IS NULL OR s\.idle_expires_at>clock_timestamp\(\)/);
   for (const { text } of authorityQueries) {
     assert.match(text, /authority_epoch/);
     assert.match(text, /session_epoch/);

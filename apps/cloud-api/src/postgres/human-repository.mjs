@@ -138,7 +138,7 @@ export function createPostgresHumanRepository({ client, onAuthorityReduction } =
   }
 
   async function updateSessionActivity(input) {
-    const result = await client.query(`UPDATE human_sessions s SET last_seen_at=$2,idle_expires_at=$3 FROM memberships m JOIN organizations o ON o.id=m.organization_id WHERE s.id=$1 AND s.organization_id=m.organization_id AND s.member_id=m.member_id AND s.membership_id=m.id AND s.revoked_at IS NULL AND o.authority_epoch=s.organization_authority_epoch AND m.session_epoch=s.membership_session_epoch RETURNING s.*,encode(s.token_hash,'hex') AS token_hash_hex,encode(s.csrf_token_hash,'hex') AS csrf_token_hash_hex`, [uuid(input.session_id ?? input.sessionId), input.last_seen_at ?? input.lastSeenAt, input.idle_expires_at ?? input.idleExpiresAt]);
+    const result = await client.query(`UPDATE human_sessions s SET last_seen_at=$2,idle_expires_at=$3 FROM memberships m JOIN organizations o ON o.id=m.organization_id WHERE s.id=$1 AND s.organization_id=m.organization_id AND s.member_id=m.member_id AND s.membership_id=m.id AND s.revoked_at IS NULL AND s.expires_at>clock_timestamp() AND (s.idle_expires_at IS NULL OR s.idle_expires_at>clock_timestamp()) AND o.authority_epoch=s.organization_authority_epoch AND m.session_epoch=s.membership_session_epoch RETURNING s.*,encode(s.token_hash,'hex') AS token_hash_hex,encode(s.csrf_token_hash,'hex') AS csrf_token_hash_hex`, [uuid(input.session_id ?? input.sessionId), input.last_seen_at ?? input.lastSeenAt, input.idle_expires_at ?? input.idleExpiresAt]);
     return sessionRow(result.rows?.[0]);
   }
 
