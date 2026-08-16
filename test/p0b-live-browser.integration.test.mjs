@@ -6,6 +6,8 @@ import { P0BSkip } from "./support/p0b/harness.mjs";
 import { startP0BLiveBrowserFixture } from "./support/p0b/live-browser-fixture.mjs";
 
 const enabled = process.env.P0B_LIVE_BROWSER === "1";
+const scenarioFilter = process.env.P0B_LIVE_BROWSER_SCENARIO?.trim() ?? "";
+let selectedScenarioCount = 0;
 
 test("P0-B live browser role, WebAuthn, and recent-auth matrix", { skip: !enabled, timeout: 840_000 }, async (t) => {
   await scenario(t, "renders all six real PostgreSQL device states", async ({ open }) => {
@@ -34,8 +36,14 @@ test("P0-B live browser role, WebAuthn, and recent-auth matrix", { skip: !enable
     // hydration or live-region update) from dispatching Enter to the page.
     try { await wake.press("Enter"); }
     catch { assert.fail("P0B_SAFE_KEYBOARD_PRESS_FAILED"); }
-    try { assert.match(await requireWakeStatus(card), /依頼を受け付けました|既存の依頼へ統合し/u); }
-    catch { assert.fail("P0B_SAFE_KEYBOARD_OUTCOME_FAILED"); }
+    try {
+      assert.match(await requireWakeStatus(card, "P0B_SAFE_KEYBOARD_OUTCOME"), /依頼を受け付けました|既存の依頼へ統合し/u);
+    } catch (error) {
+      const marker = error instanceof Error && /^P0B_SAFE_KEYBOARD_OUTCOME_(?:ALERT|TIMEOUT|INVALID)_FAILED$/u.test(error.message)
+        ? error.message
+        : "P0B_SAFE_KEYBOARD_OUTCOME_FAILED";
+      assert.fail(marker);
+    }
   });
 
   await scenario(t, "shows accepted, coalesced, and no-pending outcomes from the real wake ledger", async ({ fixture, open }) => {
@@ -120,9 +128,13 @@ test("P0-B live browser role, WebAuthn, and recent-auth matrix", { skip: !enable
       await page.getByText(`${deviceName}を停止しました`).waitFor();
     });
   }
+
+  if (scenarioFilter !== "" && selectedScenarioCount === 0) assert.fail("P0B_SAFE_SCENARIO_NOT_FOUND");
 });
 
 async function scenario(parent, name, callback) {
+  if (scenarioFilter !== "" && !name.includes(scenarioFilter)) return;
+  selectedScenarioCount += 1;
   // Each scenario intentionally starts a fresh PostgreSQL/Cloud/Console stack.
   // Hosted CI can spend most of the fixture's 30-second readiness budget before
   // Chromium registration begins, so the scenario timeout must not race that
@@ -272,10 +284,24 @@ function safeRegistrationMarker(code, prefix) {
   return match === null ? null : `${prefix}_REGISTRATION_${match[1].toUpperCase()}_${match[2]}_FAILED`;
 }
 
-async function requireWakeStatus(card) {
-  const outcome = await Promise.race([card.getByRole("status").waitFor().then(() => "status"), card.getByRole("alert").waitFor().then(() => "alert")]);
-  if (outcome === "alert") assert.fail(`wake failed: ${await card.getByRole("alert").innerText()}`);
-  return card.getByRole("status").innerText();
+async function requireWakeStatus(card, failurePrefix) {
+  const outcome = await Promise.race([
+    card.getByRole("status").waitFor().then(() => "status").catch(() => null),
+    card.getByRole("alert").waitFor().then(() => "alert").catch(() => null),
+  ]);
+  if (outcome === "alert") {
+    if (failurePrefix !== undefined) throw new Error(`${failurePrefix}_ALERT_FAILED`);
+    assert.fail("wake failed");
+  }
+  if (outcome !== "status") {
+    if (failurePrefix !== undefined) throw new Error(`${failurePrefix}_TIMEOUT_FAILED`);
+    assert.fail("wake status unavailable");
+  }
+  try { return await card.getByRole("status").innerText(); }
+  catch {
+    if (failurePrefix !== undefined) throw new Error(`${failurePrefix}_INVALID_FAILED`);
+    throw new Error("wake status unavailable");
+  }
 }
 
 function deviceCard(page, name) { return page.getByRole("article").filter({ has: page.getByRole("heading", { name }) }); }

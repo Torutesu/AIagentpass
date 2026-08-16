@@ -40,6 +40,10 @@ export function SecurityPanel({ onSessionExpired, onSessionSignedOut, securityCl
     } catch (caught) {
       if (isAbortError(caught)) return false;
       handleSessionFailure(caught, onSessionExpired);
+      // The parent removes this panel immediately after an authoritative
+      // session failure. Do not enqueue child state updates after that
+      // transition; they can race the fail-closed surface.
+      if (isSessionError(caught) && onSessionExpired !== undefined) return false;
       setLoadState("error");
       setError(securityPanelError(caught));
       return false;
@@ -65,11 +69,16 @@ export function SecurityPanel({ onSessionExpired, onSessionSignedOut, securityCl
       setConfirmKey(null);
       setRenameTarget(null);
       setRenameLabel("");
-      if (reload && !(await load(undefined, false))) return;
+      // The mutation response is authoritative and has already passed the
+      // client's strict contract checks. Reconciliation is best effort: a
+      // successful mutation must not lose its user-visible outcome merely
+      // because the follow-up inventory read is slow or unavailable.
       setNotice(successMessage);
+      if (reload) await load(undefined, false);
     } catch (caught) {
       if (isAbortError(caught)) return;
       handleSessionFailure(caught, onSessionExpired);
+      if (isSessionError(caught) && onSessionExpired !== undefined) return;
       const ambiguous = isAmbiguousSecurityMutationError(caught) || isAmbiguousWebAuthnMutationError(caught);
       const conflict = caught instanceof SecurityClientError && caught.status === 409;
       const lastActiveCredential = isLastActiveCredentialError(caught);

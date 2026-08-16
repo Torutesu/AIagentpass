@@ -70,3 +70,15 @@ test("ambiguous and conflicting Security mutations reconcile without automatic r
   assert.match(panel, /情報が更新されていたため、最新の権威状態を再取得しました/);
   assert.doesNotMatch(panel, /setTimeout\([^)]*(?:revokePasskey|revokeSession|revokeOtherSessions)/);
 });
+
+test("committed Security mutations retain their outcome when reconciliation is unavailable", async () => {
+  const panel = await readFile(panelPath, "utf8");
+  const mutationCommit = panel.indexOf("await action();");
+  const successNotice = panel.indexOf("setNotice(successMessage);", mutationCommit);
+  const reconciliation = panel.indexOf("if (reload) await load(undefined, false);", successNotice);
+  assert.ok(mutationCommit >= 0);
+  assert.ok(successNotice > mutationCommit);
+  assert.ok(reconciliation > successNotice);
+  assert.match(panel, /if \(isSessionError\(caught\) && onSessionExpired !== undefined\) return false;/);
+  assert.match(panel, /if \(isSessionError\(caught\) && onSessionExpired !== undefined\) return;/);
+});
