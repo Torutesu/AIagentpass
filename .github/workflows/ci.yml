@@ -704,6 +704,7 @@ jobs:
           node --test --test-concurrency=1
           apps/cloud-api/test/postgres/organization-integration.test.mjs
           apps/cloud-api/test/postgres/h1-3-membership-authority.integration.test.mjs
+          apps/cloud-api/test/postgres/h2-1-passkey-clone-quarantine.integration.test.mjs
           apps/cloud-api/test/postgres/capability-authority-repository.test.mjs
           apps/cloud-api/test/postgres/human-management-pagination-integration.test.mjs
           apps/cloud-api/test/postgres/signed-console-replay-integration.test.mjs
@@ -851,6 +852,7 @@ jobs:
         run: >-
           node --test --test-concurrency=1
           apps/cloud-api/test/postgres/h1-3-membership-authority.integration.test.mjs
+          apps/cloud-api/test/postgres/h2-1-passkey-clone-quarantine.integration.test.mjs
           apps/cloud-api/test/postgres/owner-recovery-provider-acceptance.integration.test.mjs
           apps/cloud-api/test/postgres/owner-recovery-provider-confirmation.integration.test.mjs
           apps/cloud-api/test/postgres/owner-recovery-outbox-race-matrix.integration.test.mjs
