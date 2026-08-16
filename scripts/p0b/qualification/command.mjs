@@ -6,7 +6,10 @@ const MARKER_TAIL_BYTES = SKIP_MARKER.byteLength - 1;
 // The live browser authority matrix has one fixed, non-sensitive marker per
 // bounded failure stage. Keep enough room for the complete matrix while still
 // rejecting an unbounded caller-controlled registry.
-const MAX_SAFE_FAILURE_MARKERS = 128;
+// The protected browser matrix currently has more than 128 fixed stage
+// markers. Keep a finite ceiling above that reviewed registry so adding a
+// marker cannot make qualification fail before the child process starts.
+const MAX_SAFE_FAILURE_MARKERS = 192;
 const MAX_SAFE_FAILURE_MARKER_BYTES = 512;
 const SAFE_FAILURE_CODE = /^[a-z][a-z0-9_]{0,63}$/u;
 const TERMINATION_GRACE_MS = 250;

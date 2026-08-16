@@ -105,7 +105,7 @@ test("reports only an allow-listed failure code without retaining matching child
 });
 
 test("supports the bounded live-browser failure marker registry", async () => {
-  const safeFailureMarkers = Array.from({ length: 64 }, (_, index) => ({
+  const safeFailureMarkers = Array.from({ length: 192 }, (_, index) => ({
     marker: `P0B_SAFE_STAGE_${index}_FAILED`,
     code: `stage_${index}`
   }));
@@ -116,7 +116,7 @@ test("supports the bounded live-browser failure marker registry", async () => {
     cwd,
     env,
     timeoutMs: 2_000,
-    safeFailureMarkers: Array.from({ length: 129 }, (_, index) => ({ marker: `m${index}`, code: `m_${index}` }))
+    safeFailureMarkers: Array.from({ length: 193 }, (_, index) => ({ marker: `m${index}`, code: `m_${index}` }))
   }), TypeError);
 });
 
