@@ -23,6 +23,7 @@ import { createPostgresAgentSessionLifecycleRepository } from "./agent-session-l
 import { createPostgresAgentSessionIssuanceRepository } from "./agent-session-issuance-repository.mjs";
 import {
   createPostgresAgentSessionSigningCapabilityReservationRepository,
+  createPostgresAgentSessionSigningCapabilityMaintenanceRepository,
   createPostgresAgentSessionSigningCapabilitySessionBinder
 } from "./agent-session-signing-capability-reservation-repository.mjs";
 import { createQualificationGrantBatchRepository } from "./qualification-grant-batch-repository.mjs";
@@ -47,7 +48,7 @@ import {
 } from "./operational-health.mjs";
 import { POSTGRES_SCHEMA_HEAD } from "./schema-head.mjs";
 
-export async function createPostgresRuntime({ env = process.env, PoolClass = Pool, MigrationPoolClass = PoolClass, SignerPoolClass = PoolClass, applicationVersion = "unknown", refreshNonceCodec, resolveProcessBindingPolicy, ownerRecoveryPublisher, platformPromotionVerifyEvidence, platformPromotionLifecycle = undefined, ownerRecoveryOutboxAutoStart = true, ownerRecoveryOutboxWorkerOptions = {}, sharedControlMaintenanceAutoStart = true, sharedControlMaintenanceWorkerOptions = {}, managedSignerProviderOperationMaintenanceAutoStart = true, managedSignerProviderOperationMaintenanceWorkerOptions = {} } = {}) {
+export async function createPostgresRuntime({ env = process.env, PoolClass = Pool, MigrationPoolClass = PoolClass, SignerPoolClass = PoolClass, MaintenancePoolClass = PoolClass, applicationVersion = "unknown", refreshNonceCodec, resolveProcessBindingPolicy, ownerRecoveryPublisher, platformPromotionVerifyEvidence, platformPromotionLifecycle = undefined, ownerRecoveryOutboxAutoStart = true, ownerRecoveryOutboxWorkerOptions = {}, sharedControlMaintenanceAutoStart = true, sharedControlMaintenanceWorkerOptions = {}, managedSignerProviderOperationMaintenanceAutoStart = true, managedSignerProviderOperationMaintenanceWorkerOptions = {} } = {}) {
   if (resolveProcessBindingPolicy !== undefined && typeof resolveProcessBindingPolicy !== "function") throw new TypeError("resolveProcessBindingPolicy must be a function");
   if (typeof ownerRecoveryOutboxAutoStart !== "boolean" || !ownerRecoveryOutboxWorkerOptions || typeof ownerRecoveryOutboxWorkerOptions !== "object" || Array.isArray(ownerRecoveryOutboxWorkerOptions)) throw new TypeError("owner recovery outbox runtime configuration is invalid");
   if (typeof sharedControlMaintenanceAutoStart !== "boolean" || !sharedControlMaintenanceWorkerOptions || typeof sharedControlMaintenanceWorkerOptions !== "object" || Array.isArray(sharedControlMaintenanceWorkerOptions)) throw new TypeError("shared-control maintenance runtime configuration is invalid");
@@ -71,6 +72,9 @@ export async function createPostgresRuntime({ env = process.env, PoolClass = Poo
   const pool = new PoolClass(poolOptions(config.connectionString, config.maxConnections));
   const migrationPool = new MigrationPoolClass(poolOptions(config.migrationConnectionString, 2));
   const signerPool = new SignerPoolClass(poolOptions(config.signerConnectionString, config.signerMaxConnections));
+  // Expiry recovery is auxiliary and deployment-wide. It gets its own login
+  // identity and pool; there is intentionally no fallback to `pool`.
+  const maintenancePool = new MaintenancePoolClass(poolOptions(config.maintenanceConnectionString, config.maintenanceMaxConnections));
   let migrationRunner;
   let migrations;
   let client;
@@ -78,6 +82,7 @@ export async function createPostgresRuntime({ env = process.env, PoolClass = Poo
   let poolEndPromise;
   let migrationPoolEndPromise;
   let signerPoolEndPromise;
+  let maintenancePoolEndPromise;
   let ownerRecoveryOutboxWorker;
   let ownerRecoveryOutboxRepository;
   let sharedControlMaintenanceWorker;
@@ -107,6 +112,11 @@ export async function createPostgresRuntime({ env = process.env, PoolClass = Poo
     return signerPoolEndPromise;
   }
 
+  function endMaintenancePoolOnce() {
+    if (maintenancePoolEndPromise === undefined) maintenancePoolEndPromise = Promise.resolve().then(() => maintenancePool.end());
+    return maintenancePoolEndPromise;
+  }
+
   async function cleanupConstructionFailure() {
     // Cleanup is deliberately best effort: the construction error is the
     // stable public failure and must never be replaced by a close error.
@@ -123,6 +133,7 @@ export async function createPostgresRuntime({ env = process.env, PoolClass = Poo
     try { releaseMigrationClient(true); } catch { /* preserve the original construction error */ }
     try { await endMigrationPoolOnce(); } catch { /* preserve the original construction error */ }
     try { await endSignerPoolOnce(); } catch { /* preserve the original construction error */ }
+    try { await endMaintenancePoolOnce(); } catch { /* preserve the original construction error */ }
     try { await endPoolOnce(); } catch { /* preserve the original construction error */ }
   }
 
@@ -147,6 +158,7 @@ export async function createPostgresRuntime({ env = process.env, PoolClass = Poo
   const drainController = createDrainController();
   const operationalMetrics = createOperationalMetrics();
   const providerOperationMaintenanceRepository = createPostgresProviderOperationMaintenanceRepository({ client: signerPool });
+  const agentSessionSigningCapabilityMaintenanceRepository = createPostgresAgentSessionSigningCapabilityMaintenanceRepository({ client: maintenancePool });
   providerOperationMaintenanceWorker = createManagedSignerProviderOperationMaintenanceWorker({
     firstCycleDelayMs: 5_000,
     intervalMs: 30_000,
@@ -188,6 +200,7 @@ export async function createPostgresRuntime({ env = process.env, PoolClass = Poo
     closePoolPromise = (async () => {
       await refreshHintNotifier.close();
       await endSignerPoolOnce();
+      await endMaintenancePoolOnce();
       await endPoolOnce();
       closed = true;
     })();
@@ -361,6 +374,8 @@ export async function createPostgresRuntime({ env = process.env, PoolClass = Poo
     agentSessionSigningCapabilitySessionBinder,
     createAgentSessionSigningCapabilityReservationRepository: (context) =>
       createPostgresAgentSessionSigningCapabilityReservationRepository({ client: pool, context }),
+    agentSessionSigningCapabilityMaintenanceRepository,
+    maintenancePool,
     ...(agentSessionIssuanceRepository ? { agentSessionIssuanceRepository } : {}),
     qualificationGrantBatchRepository,
     auditExportIssuanceRepository,
@@ -462,14 +477,20 @@ export function loadPostgresConfig(env = {}) {
   const app = new URL(appConfig.connectionString);
   const migration = postgresRoleUrl(env.AGENTPASS_MIGRATION_DATABASE_URL, "AGENTPASS_MIGRATION_DATABASE_URL");
   const signer = postgresRoleUrl(env.AGENTPASS_SIGNER_DATABASE_URL, "AGENTPASS_SIGNER_DATABASE_URL");
+  const maintenance = postgresRoleUrl(env.AGENTPASS_MAINTENANCE_DATABASE_URL, "AGENTPASS_MAINTENANCE_DATABASE_URL");
   const appTarget = postgresTarget(app);
-  if (postgresTarget(migration) !== appTarget || postgresTarget(signer) !== appTarget) throw new TypeError("PostgreSQL role databases must target the same authority database");
-  if (new Set([app.username, migration.username, signer.username]).size !== 3) throw new TypeError("PostgreSQL app, migration, and signer roles must be distinct");
+  if (postgresTarget(migration) !== appTarget || postgresTarget(signer) !== appTarget
+    || postgresTarget(maintenance) !== appTarget) throw new TypeError("PostgreSQL role databases must target the same authority database");
+  const usernames = [app.username, migration.username, signer.username, maintenance.username];
+  if (new Set(usernames).size !== usernames.length) throw new TypeError("PostgreSQL app, migration, signer, and maintenance roles must be distinct");
+  if (maintenance.username !== "agentpass_maintenance") throw new TypeError("AGENTPASS_MAINTENANCE_DATABASE_URL must use agentpass_maintenance");
   return Object.freeze({
     ...appConfig,
     migrationConnectionString: migration.toString(),
     signerConnectionString: signer.toString(),
-    signerMaxConnections: integer(env.AGENTPASS_SIGNER_DATABASE_MAX_CONNECTIONS ?? "4", 2, 50)
+    signerMaxConnections: integer(env.AGENTPASS_SIGNER_DATABASE_MAX_CONNECTIONS ?? "4", 2, 50),
+    maintenanceConnectionString: maintenance.toString(),
+    maintenanceMaxConnections: integer(env.AGENTPASS_MAINTENANCE_DATABASE_MAX_CONNECTIONS ?? "2", 1, 10)
   });
 }
 

@@ -12,6 +12,7 @@ const SECRET = Buffer.alloc(32, 0x5a).toString("base64url");
 const DATABASE_URL = "postgresql://agent:database-password@db.example.test/agentpass?sslmode=verify-full";
 const MIGRATION_DATABASE_URL = "postgresql://migrator:database-password@db.example.test/agentpass?sslmode=verify-full";
 const SIGNER_DATABASE_URL = "postgresql://signer:database-password@db.example.test/agentpass?sslmode=verify-full";
+const MAINTENANCE_DATABASE_URL = "postgresql://agentpass_maintenance:database-password@db.example.test/agentpass?sslmode=verify-full";
 
 function evaluationEnv(overrides = {}) {
   return {
@@ -28,8 +29,10 @@ function hostedEnv(overrides = {}) {
     AGENTPASS_DATABASE_URL: DATABASE_URL,
     AGENTPASS_MIGRATION_DATABASE_URL: MIGRATION_DATABASE_URL,
     AGENTPASS_SIGNER_DATABASE_URL: SIGNER_DATABASE_URL,
+    AGENTPASS_MAINTENANCE_DATABASE_URL: MAINTENANCE_DATABASE_URL,
     AGENTPASS_DATABASE_MAX_CONNECTIONS: "10",
     AGENTPASS_SIGNER_DATABASE_MAX_CONNECTIONS: "4",
+    AGENTPASS_MAINTENANCE_DATABASE_MAX_CONNECTIONS: "2",
     AGENTPASS_DATABASE_CONNECT_TIMEOUT_MS: "5000",
     AGENTPASS_DATABASE_IDLE_TIMEOUT_MS: "30000",
     AGENTPASS_DATABASE_STATEMENT_TIMEOUT_MS: "8000",
@@ -141,6 +144,7 @@ test("accepts hosted only with complete PostgreSQL and Human Auth prerequisites"
     "AGENTPASS_DATABASE_URL",
     "AGENTPASS_MIGRATION_DATABASE_URL",
     "AGENTPASS_SIGNER_DATABASE_URL",
+    "AGENTPASS_MAINTENANCE_DATABASE_URL",
     "AGENTPASS_CONSOLE_ORIGIN",
     "AGENTPASS_WEBAUTHN_RP_ID",
     "AGENTPASS_IDENTITY_ASSERTION_ISSUER",
@@ -187,7 +191,7 @@ test("accepts hosted only with complete PostgreSQL and Human Auth prerequisites"
   ]) {
     const env = hostedEnv();
     delete env[name];
-    const expected = ["AGENTPASS_MIGRATION_DATABASE_URL", "AGENTPASS_SIGNER_DATABASE_URL"].includes(name)
+    const expected = ["AGENTPASS_MIGRATION_DATABASE_URL", "AGENTPASS_SIGNER_DATABASE_URL", "AGENTPASS_MAINTENANCE_DATABASE_URL"].includes(name)
       ? CLOUD_RUNTIME_PROFILE_ERROR_CODES.DATABASE_INVALID
       : CLOUD_RUNTIME_PROFILE_ERROR_CODES.HOSTED_AUTH_INCOMPLETE;
     assertProfileError(() => parseCloudRuntimeProfile(env), expected);

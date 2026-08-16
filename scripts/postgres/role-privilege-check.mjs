@@ -11,7 +11,7 @@ const EXPECTED_MIGRATION_VERSION = POSTGRES_SCHEMA_HEAD.version;
 const MAX_TABLE_DIAGNOSTICS = 32;
 const MAX_RELATION_DIAGNOSTIC_NAME = 128;
 const MAX_DIAGNOSTIC_OUTPUT = 4096;
-const ROLES = ['agentpass_app', 'agentpass_signer', 'agentpass_migrator', 'agentpass_backup'];
+const ROLES = ['agentpass_app', 'agentpass_signer', 'agentpass_migrator', 'agentpass_backup', 'agentpass_maintenance'];
 const REPORT_CHECKS = [
   'role_attributes_ok',
   'role_memberships_ok',
@@ -178,7 +178,6 @@ app_function_allowlist(routine_signature) AS (
     ('agentpass_agent_signing_capability_commit(uuid,uuid,uuid,uuid,bytea,bytea)'),
     ('agentpass_agent_signing_capability_replay(uuid,uuid,uuid,uuid,bytea)'),
     ('agentpass_agent_signing_capability_uncertain(uuid,uuid,uuid,uuid,bytea,bytea,text)'),
-    ('agentpass_agent_signing_capability_recover_expired(uuid,integer)'),
     ('agentpass_capability_authority_issue(uuid,uuid,uuid,uuid,bigint,text,timestamptz,uuid,bigint)'),
     ('agentpass_capability_authority_revoke_member(uuid,uuid,timestamptz)'),
     ('agentpass_capability_authority_list_revoked(uuid,timestamptz,integer)'),
@@ -215,12 +214,16 @@ signing_capability_function_allowlist(routine_signature) AS (
     ('agentpass_agent_signing_capability_commit(uuid,uuid,uuid,uuid,bytea,bytea)'),
     ('agentpass_agent_signing_capability_replay(uuid,uuid,uuid,uuid,bytea)'),
     ('agentpass_agent_signing_capability_uncertain(uuid,uuid,uuid,uuid,bytea,bytea,text)'),
-    ('agentpass_agent_signing_capability_recover_expired(uuid,integer)'),
+    ('agentpass_agent_signing_capability_recover_expired(integer)'),
     ('agentpass_capability_authority_issue(uuid,uuid,uuid,uuid,bigint,text,timestamptz,uuid,bigint)'),
     ('agentpass_capability_authority_revoke_member(uuid,uuid,timestamptz)'),
     ('agentpass_capability_authority_list_revoked(uuid,timestamptz,integer)'),
     ('agentpass_capability_reservation_issue(uuid,uuid,uuid,uuid,bigint,text,timestamptz,uuid,text,text,jsonb,timestamptz,bytea)'),
     ('agentpass_capability_reservation_list(uuid,integer)')
+),
+maintenance_function_allowlist(routine_signature) AS (
+  VALUES
+    ('agentpass_agent_signing_capability_recover_expired(integer)')
 ),
 signing_authority_table_allowlist(relname) AS (
   VALUES
@@ -239,6 +242,7 @@ signing_authority_policy_contract(relname, policy_name, policy_command, using_ex
     ('agent_session_signing_capability_reservations', 'agent_session_signing_capability_reservations_tenant_insert', 'a', NULL, 'organization_id=agentpass_current_organization_id()', NULL),
     ('agent_session_signing_capability_reservations', 'agent_session_signing_capability_reservations_tenant_update', 'w', 'organization_id=agentpass_current_organization_id()', 'organization_id=agentpass_current_organization_id()', NULL),
     ('agent_session_signing_capability_reservations', 'agent_session_signing_capability_reservations_backup_select', 'r', 'true', NULL, 'agentpass_backup'),
+    ('agent_session_signing_capability_reservations', 'agent_session_signing_capability_reservations_migrator_authority', '*', 'true', 'true', 'agentpass_migrator'),
     ('agent_capability_sequence_heads', 'agent_capability_sequence_heads_tenant_select', 'r', 'organization_id=agentpass_current_organization_id()', NULL, NULL),
     ('agent_capability_sequence_heads', 'agent_capability_sequence_heads_tenant_insert', 'a', NULL, 'organization_id=agentpass_current_organization_id()', NULL),
     ('agent_capability_sequence_heads', 'agent_capability_sequence_heads_tenant_update', 'w', 'organization_id=agentpass_current_organization_id()', 'organization_id=agentpass_current_organization_id()', NULL),
@@ -252,6 +256,10 @@ signer_function_oids AS (
 app_function_oids AS (
   SELECT routine_signature, to_regprocedure('public.' || routine_signature) AS routine_oid
   FROM app_function_allowlist
+),
+maintenance_function_oids AS (
+  SELECT routine_signature, to_regprocedure('public.' || routine_signature) AS routine_oid
+  FROM maintenance_function_allowlist
 ),
 signing_capability_function_observations AS (
   SELECT a.routine_signature,
@@ -406,7 +414,9 @@ schema_privileges_ok AS (
     AND has_schema_privilege('agentpass_migrator', '${SCHEMA}', 'USAGE')
     AND has_schema_privilege('agentpass_migrator', '${SCHEMA}', 'CREATE')
     AND has_schema_privilege('agentpass_backup', '${SCHEMA}', 'USAGE')
-    AND NOT has_schema_privilege('agentpass_backup', '${SCHEMA}', 'CREATE') AS value
+    AND NOT has_schema_privilege('agentpass_backup', '${SCHEMA}', 'CREATE')
+    AND has_schema_privilege('agentpass_maintenance', '${SCHEMA}', 'USAGE')
+    AND NOT has_schema_privilege('agentpass_maintenance', '${SCHEMA}', 'CREATE') AS value
 ),
 database_privileges_ok AS (
   SELECT has_database_privilege('agentpass_app', current_database(), 'CONNECT')
@@ -418,7 +428,10 @@ database_privileges_ok AS (
     AND has_database_privilege('agentpass_migrator', current_database(), 'CONNECT')
     AND has_database_privilege('agentpass_backup', current_database(), 'CONNECT')
     AND NOT has_database_privilege('agentpass_backup', current_database(), 'CREATE')
-    AND NOT has_database_privilege('agentpass_backup', current_database(), 'TEMP') AS value
+    AND NOT has_database_privilege('agentpass_backup', current_database(), 'TEMP')
+    AND has_database_privilege('agentpass_maintenance', current_database(), 'CONNECT')
+    AND NOT has_database_privilege('agentpass_maintenance', current_database(), 'CREATE')
+    AND NOT has_database_privilege('agentpass_maintenance', current_database(), 'TEMP') AS value
 ),
 migration_head_ok AS (
   SELECT to_regclass('public.schema_migrations') IS NOT NULL
@@ -479,6 +492,13 @@ table_privilege_observations AS (
       CASE WHEN NOT has_table_privilege('agentpass_backup', t.oid, 'TRUNCATE') THEN NULL ELSE 'backup:truncate' END,
       CASE WHEN NOT has_table_privilege('agentpass_backup', t.oid, 'REFERENCES') THEN NULL ELSE 'backup:references' END,
       CASE WHEN NOT has_table_privilege('agentpass_backup', t.oid, 'TRIGGER') THEN NULL ELSE 'backup:trigger' END,
+      CASE WHEN has_table_privilege('agentpass_maintenance', t.oid, 'SELECT') THEN 'maintenance:select' END,
+      CASE WHEN has_table_privilege('agentpass_maintenance', t.oid, 'INSERT') THEN 'maintenance:insert' END,
+      CASE WHEN has_table_privilege('agentpass_maintenance', t.oid, 'UPDATE') THEN 'maintenance:update' END,
+      CASE WHEN has_table_privilege('agentpass_maintenance', t.oid, 'DELETE') THEN 'maintenance:delete' END,
+      CASE WHEN has_table_privilege('agentpass_maintenance', t.oid, 'TRUNCATE') THEN 'maintenance:truncate' END,
+      CASE WHEN has_table_privilege('agentpass_maintenance', t.oid, 'REFERENCES') THEN 'maintenance:references' END,
+      CASE WHEN has_table_privilege('agentpass_maintenance', t.oid, 'TRIGGER') THEN 'maintenance:trigger' END,
       CASE WHEN t.relowner = (SELECT oid FROM role_ids WHERE rolname = 'agentpass_migrator') THEN NULL ELSE 'owner:not_migrator' END
     ]::text[], NULL::text) AS failures
   FROM tables AS t
@@ -503,12 +523,18 @@ sequence_privileges_ok AS (
       NOT has_sequence_privilege('agentpass_signer', oid, 'USAGE')
       AND NOT has_sequence_privilege('agentpass_signer', oid, 'SELECT')
       AND NOT has_sequence_privilege('agentpass_signer', oid, 'UPDATE')
+    ) FROM sequences), true)
+    AND COALESCE((SELECT bool_and(
+      NOT has_sequence_privilege('agentpass_maintenance', oid, 'USAGE')
+      AND NOT has_sequence_privilege('agentpass_maintenance', oid, 'SELECT')
+      AND NOT has_sequence_privilege('agentpass_maintenance', oid, 'UPDATE')
     ) FROM sequences), true) AS value
 ),
 function_privileges_ok AS (
   SELECT COALESCE((SELECT bool_and(proowner = (SELECT oid FROM role_ids WHERE rolname = 'agentpass_migrator')) FROM functions), true)
     AND NOT EXISTS (SELECT 1 FROM signer_function_oids WHERE routine_oid IS NULL)
     AND NOT EXISTS (SELECT 1 FROM app_function_oids WHERE routine_oid IS NULL)
+    AND NOT EXISTS (SELECT 1 FROM maintenance_function_oids WHERE routine_oid IS NULL)
     AND NOT EXISTS (SELECT 1 FROM functions
       CROSS JOIN LATERAL aclexplode(COALESCE(proacl, acldefault('f', proowner))) AS acl
       WHERE acl.grantee = 0 AND acl.privilege_type = 'EXECUTE')
@@ -521,7 +547,11 @@ function_privileges_ok AS (
          OR (has_function_privilege('agentpass_app', oid, 'EXECUTE')
            AND NOT EXISTS (SELECT 1 FROM app_function_oids AS a WHERE a.routine_oid = functions.oid))
          OR (NOT has_function_privilege('agentpass_app', oid, 'EXECUTE')
-           AND EXISTS (SELECT 1 FROM app_function_oids AS a WHERE a.routine_oid = functions.oid))) AS value
+           AND EXISTS (SELECT 1 FROM app_function_oids AS a WHERE a.routine_oid = functions.oid))
+         OR (has_function_privilege('agentpass_maintenance', oid, 'EXECUTE')
+           AND NOT EXISTS (SELECT 1 FROM maintenance_function_oids AS a WHERE a.routine_oid = functions.oid))
+         OR (NOT has_function_privilege('agentpass_maintenance', oid, 'EXECUTE')
+           AND EXISTS (SELECT 1 FROM maintenance_function_oids AS a WHERE a.routine_oid = functions.oid))) AS value
 ),
 default_privileges_ok AS (
   SELECT
@@ -532,9 +562,9 @@ default_privileges_ok AS (
     AND (SELECT count(*) = 1 FROM default_acl
       WHERE object_type = 'S' AND grantee = 'agentpass_backup' AND privilege_type = 'SELECT')
     AND NOT EXISTS (SELECT 1 FROM default_acl
-      WHERE object_type = 'f' AND grantee IN ('agentpass_app', 'agentpass_signer', 'agentpass_backup'))
+      WHERE object_type = 'f' AND grantee IN ('agentpass_app', 'agentpass_signer', 'agentpass_backup', 'agentpass_maintenance'))
     AND NOT EXISTS (SELECT 1 FROM default_acl
-      WHERE grantee = 'agentpass_signer') AS value
+      WHERE grantee IN ('agentpass_signer', 'agentpass_maintenance')) AS value
 ),
 checks AS (
   SELECT current_user = 'agentpass_migrator'

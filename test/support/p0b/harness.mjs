@@ -26,7 +26,8 @@ const P0B_CLOUD_PROCESS = path.join(REPOSITORY_ROOT, "test/support/p0b/cloud-run
 const P0B_DATABASE_ROLES = Object.freeze({
   app: "agentpass_app",
   migration: "agentpass_migrator",
-  signer: "agentpass_signer"
+  signer: "agentpass_signer",
+  maintenance: "agentpass_maintenance"
 });
 
 export class P0BSkip extends Error {
@@ -264,6 +265,8 @@ export async function startP0BHarness({ env = process.env, repoRoot = REPOSITORY
       AGENTPASS_DATABASE_URL: databaseAuthorities.app,
       AGENTPASS_MIGRATION_DATABASE_URL: databaseAuthorities.migration,
       AGENTPASS_SIGNER_DATABASE_URL: databaseAuthorities.signer,
+      AGENTPASS_MAINTENANCE_DATABASE_URL: databaseAuthorities.maintenance,
+      AGENTPASS_MAINTENANCE_DATABASE_MAX_CONNECTIONS: "2",
       AGENTPASS_CLOUD_PROFILE: "hosted",
       AGENTPASS_CLOUD_HOST: LOOPBACK,
       AGENTPASS_CLOUD_PORT: cloudPort,

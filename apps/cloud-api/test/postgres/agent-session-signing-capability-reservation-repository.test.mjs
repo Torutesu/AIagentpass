@@ -10,8 +10,10 @@ import {
 import {
   AGENT_SESSION_SIGNING_CAPABILITY_RESERVATION_ERROR_CODES as CODES,
   AGENT_SESSION_SIGNING_CAPABILITY_BIND_SQL,
+  AGENT_SESSION_SIGNING_CAPABILITY_MAINTENANCE_SQL,
   AGENT_SESSION_SIGNING_CAPABILITY_RESERVATION_SQL,
   createPostgresAgentSessionSigningCapabilitySessionBinder,
+  createPostgresAgentSessionSigningCapabilityMaintenanceRepository,
   createPostgresAgentSessionSigningCapabilityReservationRepository,
   AgentSessionSigningCapabilityReservationRepositoryError
 } from "../../src/postgres/agent-session-signing-capability-reservation-repository.mjs";
@@ -190,6 +192,30 @@ test("rejects authority-bearing or malformed inputs before SQL", async () => {
   await assert.rejects(repo.replayCapability({ request_id: IDS.request_id, organization_id: IDS.organization_id }), { code: CODES.INPUT });
   await assert.rejects(repo.markCapabilityUncertain({ request_id: IDS.request_id, claim_token: "not-a-token", reason: "signer_failure" }), { code: CODES.INPUT });
   assert.equal(client.calls.length, 0);
+});
+
+test("maintenance repository is isolated from the normal Agent capability repository", async () => {
+  const calls = [];
+  const client = {
+    async query(text, params = []) {
+      calls.push({ text, params });
+      if (["BEGIN", "COMMIT", "ROLLBACK"].includes(text)) return result([]);
+      assert.equal(text, AGENT_SESSION_SIGNING_CAPABILITY_MAINTENANCE_SQL.recoverExpired);
+      return result([{ result: { status: "ok", expired: 2, uncertain: 1 } }]);
+    }
+  };
+  const maintenance = createPostgresAgentSessionSigningCapabilityMaintenanceRepository({ client });
+  const value = await maintenance.recoverExpiredReservations({ limit: 8 });
+  assert.deepEqual(value, { expired: 2, uncertain: 1 });
+  assert.deepEqual(calls.find(({ text }) => text === AGENT_SESSION_SIGNING_CAPABILITY_MAINTENANCE_SQL.recoverExpired).params, [8]);
+  assert.equal("reserveCapability" in maintenance, false);
+  assert.equal("expireReservations" in repository(new FakePg()), false);
+});
+
+test("maintenance repository fails closed for missing or invalid configuration", async () => {
+  assert.throws(() => createPostgresAgentSessionSigningCapabilityMaintenanceRepository(), { code: CODES.CONFIG });
+  const maintenance = createPostgresAgentSessionSigningCapabilityMaintenanceRepository({ client: new FakePg() });
+  await assert.rejects(maintenance.recoverExpiredReservations({ limit: 257 }), { code: CODES.INPUT });
 });
 
 test("Session binder installs tenant context and returns only the locked server audience", async () => {

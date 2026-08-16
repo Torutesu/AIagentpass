@@ -11,6 +11,7 @@ import { createPostgresRuntime } from "../../src/postgres/runtime.mjs";
 const DATABASE_URL = "postgresql://agentpass_app:secret@db.example.test/agentpass?sslmode=verify-full";
 const MIGRATION_DATABASE_URL = "postgresql://agentpass_migrator:secret@db.example.test/agentpass?sslmode=verify-full";
 const SIGNER_DATABASE_URL = "postgresql://agentpass_signer:secret@db.example.test/agentpass?sslmode=verify-full";
+const MAINTENANCE_DATABASE_URL = "postgresql://agentpass_maintenance:secret@db.example.test/agentpass?sslmode=verify-full";
 const HUMAN_CURSOR_SECRET = Buffer.alloc(32, 0x31).toString("base64url");
 const CAPABILITY_NONCE_SECRET = Buffer.alloc(32, 0x32).toString("base64url");
 const PLATFORM_LIFECYCLE = Object.freeze({
@@ -84,6 +85,7 @@ function env() {
     AGENTPASS_DATABASE_URL: DATABASE_URL,
     AGENTPASS_MIGRATION_DATABASE_URL: MIGRATION_DATABASE_URL,
     AGENTPASS_SIGNER_DATABASE_URL: SIGNER_DATABASE_URL,
+    AGENTPASS_MAINTENANCE_DATABASE_URL: MAINTENANCE_DATABASE_URL,
     AGENTPASS_HUMAN_CURSOR_SECRET: HUMAN_CURSOR_SECRET,
     AGENTPASS_CAPABILITY_NONCE_SECRET: CAPABILITY_NONCE_SECRET
   };

@@ -102,8 +102,10 @@ const DATABASE_ENV = Object.freeze([
   "AGENTPASS_DATABASE_URL",
   "AGENTPASS_MIGRATION_DATABASE_URL",
   "AGENTPASS_SIGNER_DATABASE_URL",
+  "AGENTPASS_MAINTENANCE_DATABASE_URL",
   "AGENTPASS_DATABASE_MAX_CONNECTIONS",
   "AGENTPASS_SIGNER_DATABASE_MAX_CONNECTIONS",
+  "AGENTPASS_MAINTENANCE_DATABASE_MAX_CONNECTIONS",
   "AGENTPASS_DATABASE_CONNECT_TIMEOUT_MS",
   "AGENTPASS_DATABASE_IDLE_TIMEOUT_MS",
   "AGENTPASS_DATABASE_STATEMENT_TIMEOUT_MS",
@@ -424,15 +426,17 @@ function parseFileStore(env) {
 function parseDatabase(env) {
   const present = DATABASE_ENV.some((name) => configured(env, name));
   if (!present) return { present: false };
-  const urls = [env.AGENTPASS_DATABASE_URL, env.AGENTPASS_MIGRATION_DATABASE_URL, env.AGENTPASS_SIGNER_DATABASE_URL].map(parseDatabaseRoleUrl);
+  const urls = [env.AGENTPASS_DATABASE_URL, env.AGENTPASS_MIGRATION_DATABASE_URL, env.AGENTPASS_SIGNER_DATABASE_URL, env.AGENTPASS_MAINTENANCE_DATABASE_URL].map(parseDatabaseRoleUrl);
   const target = databaseTarget(urls[0]);
   if (urls.some((url) => databaseTarget(url) !== target) || new Set(urls.map((url) => url.username)).size !== urls.length) fail(CLOUD_RUNTIME_PROFILE_ERROR_CODES.DATABASE_INVALID);
-  if (!boundedInteger(env.AGENTPASS_DATABASE_MAX_CONNECTIONS, 2, 100)
-    || !boundedInteger(env.AGENTPASS_SIGNER_DATABASE_MAX_CONNECTIONS, 2, 50)
-    || !boundedInteger(env.AGENTPASS_DATABASE_CONNECT_TIMEOUT_MS, 250, 30_000)
-    || !boundedInteger(env.AGENTPASS_DATABASE_IDLE_TIMEOUT_MS, 1_000, 300_000)
-    || !boundedInteger(env.AGENTPASS_DATABASE_STATEMENT_TIMEOUT_MS, 250, 60_000)
-    || !boundedInteger(env.AGENTPASS_DATABASE_LOCK_TIMEOUT_MS, 100, 30_000)) {
+  if (urls.at(-1).username !== "agentpass_maintenance") fail(CLOUD_RUNTIME_PROFILE_ERROR_CODES.DATABASE_INVALID);
+  const databaseLimitsValid = boundedInteger(env.AGENTPASS_DATABASE_MAX_CONNECTIONS, 2, 100)
+    && boundedInteger(env.AGENTPASS_SIGNER_DATABASE_MAX_CONNECTIONS, 2, 50)
+    && boundedInteger(env.AGENTPASS_DATABASE_CONNECT_TIMEOUT_MS, 250, 30_000)
+    && boundedInteger(env.AGENTPASS_DATABASE_IDLE_TIMEOUT_MS, 1_000, 300_000)
+    && boundedInteger(env.AGENTPASS_DATABASE_STATEMENT_TIMEOUT_MS, 250, 60_000)
+    && boundedInteger(env.AGENTPASS_DATABASE_LOCK_TIMEOUT_MS, 100, 30_000);
+  if (!databaseLimitsValid || !boundedInteger(env.AGENTPASS_MAINTENANCE_DATABASE_MAX_CONNECTIONS, 1, 10)) {
     fail(CLOUD_RUNTIME_PROFILE_ERROR_CODES.DATABASE_INVALID);
   }
   return { present: true };

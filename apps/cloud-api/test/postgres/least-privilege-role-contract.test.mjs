@@ -77,10 +77,10 @@ test('role SQL is idempotent, credential-free, and PUBLIC is revoked', async () 
   const platformSql = migrations.join('\n');
 
   assert.match(sql, /CREATE ROLE %I LOGIN/);
-  for (const role of ['agentpass_app', 'agentpass_signer', 'agentpass_migrator', 'agentpass_backup']) assert.match(sql, new RegExp(`\\b${role}\\b`));
+  for (const role of ['agentpass_app', 'agentpass_signer', 'agentpass_migrator', 'agentpass_backup', 'agentpass_maintenance']) assert.match(sql, new RegExp(`\\b${role}\\b`));
   assert.doesNotMatch(sql, /PASSWORD\s+['"]/i);
   assert.doesNotMatch(sql, /postgres(?:ql)?:\/\/[^\s]*:[^\s@]+@/i);
-  assert.match(sql, /REVOKE agentpass_migrator FROM agentpass_app, agentpass_signer, agentpass_backup/);
+  assert.match(sql, /REVOKE agentpass_migrator FROM agentpass_app, agentpass_signer, agentpass_backup, agentpass_maintenance/);
   assert.match(sql, /REVOKE ALL PRIVILEGES ON DATABASE/);
   assert.match(sql, /REVOKE ALL PRIVILEGES ON SCHEMA public FROM PUBLIC/);
   assert.match(sql, /REVOKE ALL PRIVILEGES ON ALL TABLES IN SCHEMA public FROM PUBLIC/);
@@ -95,6 +95,9 @@ test('role SQL is idempotent, credential-free, and PUBLIC is revoked', async () 
   assert.match(sql, /Platform mutation is issue-only for the application role/);
   assert.match(sql, /managed_signer_provider_operations/);
   assert.match(sql, /GRANT EXECUTE ON FUNCTION public\.%s TO agentpass_app/);
+  assert.match(sql, /agentpass_agent_signing_capability_recover_expired\(integer\)/u);
+  assert.match(sql, /GRANT EXECUTE ON FUNCTION public\.%s TO agentpass_maintenance/u);
+  assert.doesNotMatch(sql, /agentpass_agent_signing_capability_recover_expired\(uuid,integer\)/u);
   assert.match(sql, /agentpass_platform_operator_assignment_find_active\(uuid,uuid,uuid,text,text\)/u);
   assert.match(sql, /agentpass_platform_session_find_active\(bytea,uuid,text,text\)/u);
   assert.match(sql, /agentpass_platform_session_touch\(bytea,bytea,uuid,text,text\)/u);
@@ -190,7 +193,7 @@ test('app is DML-only, migrator owns migration authority, and backup is read-onl
   assert.match(sql, /OWNER TO agentpass_migrator/);
   assert.match(sql, /GRANT SELECT ON ALL TABLES IN SCHEMA public TO agentpass_backup/);
   assert.match(sql, /GRANT SELECT ON ALL SEQUENCES IN SCHEMA public TO agentpass_backup/);
-  assert.match(sql, /REVOKE ALL PRIVILEGES ON ALL FUNCTIONS IN SCHEMA public FROM agentpass_app, agentpass_signer, agentpass_backup/);
+  assert.match(sql, /REVOKE ALL PRIVILEGES ON ALL FUNCTIONS IN SCHEMA public FROM agentpass_app, agentpass_signer, agentpass_backup, agentpass_maintenance/);
   assert.doesNotMatch(sql, /GRANT .* ON SCHEMA public TO agentpass_app[^\n]*CREATE/i);
   assert.doesNotMatch(sql, /GRANT .* ON SCHEMA public TO agentpass_signer[^\n]*CREATE/i);
   assert.doesNotMatch(sql, /ALTER DEFAULT PRIVILEGES[\s\S]{0,160}GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO agentpass_app/u);

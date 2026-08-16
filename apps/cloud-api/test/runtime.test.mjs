@@ -478,6 +478,8 @@ function hostedEnv(value) {
     AGENTPASS_DATABASE_URL: "postgresql://agentpass_app:secret@db.example.test/agentpass?sslmode=verify-full",
     AGENTPASS_MIGRATION_DATABASE_URL: "postgresql://agentpass_migrator:secret@db.example.test/agentpass?sslmode=verify-full",
     AGENTPASS_SIGNER_DATABASE_URL: "postgresql://agentpass_signer:secret@db.example.test/agentpass?sslmode=verify-full",
+    AGENTPASS_MAINTENANCE_DATABASE_URL: "postgresql://agentpass_maintenance:secret@db.example.test/agentpass?sslmode=verify-full",
+    AGENTPASS_MAINTENANCE_DATABASE_MAX_CONNECTIONS: "2",
     AGENTPASS_CONSOLE_ORIGIN: "https://console.example.test",
     AGENTPASS_WEBAUTHN_RP_ID: "example.test",
     AGENTPASS_HUMAN_CURSOR_SECRET: CURSOR_SECRET,

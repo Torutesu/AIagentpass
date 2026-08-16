@@ -71,9 +71,12 @@ export const AGENT_SESSION_SIGNING_CAPABILITY_RESERVATION_SQL = Object.freeze({
   ) AS result`,
   uncertain: `SELECT public.agentpass_agent_signing_capability_uncertain(
     $1::uuid,$2::uuid,$3::uuid,$4::uuid,$5::bytea,$6::bytea,$7::text
-  ) AS result`,
-  expire: `SELECT public.agentpass_agent_signing_capability_recover_expired(
-    $1::uuid,$2::integer
+  ) AS result`
+});
+
+export const AGENT_SESSION_SIGNING_CAPABILITY_MAINTENANCE_SQL = Object.freeze({
+  recoverExpired: `SELECT public.agentpass_agent_signing_capability_recover_expired(
+    $1::integer
   ) AS result`
 });
 
@@ -81,8 +84,11 @@ export const AGENT_SESSION_SIGNING_CAPABILITY_RESERVATION_FUNCTIONS = Object.fre
   reserve: "public.agentpass_agent_signing_capability_reserve",
   commit: "public.agentpass_agent_signing_capability_commit",
   replay: "public.agentpass_agent_signing_capability_replay",
-  uncertain: "public.agentpass_agent_signing_capability_uncertain",
-  expire: "public.agentpass_agent_signing_capability_recover_expired"
+  uncertain: "public.agentpass_agent_signing_capability_uncertain"
+});
+
+export const AGENT_SESSION_SIGNING_CAPABILITY_MAINTENANCE_FUNCTIONS = Object.freeze({
+  recoverExpired: "public.agentpass_agent_signing_capability_recover_expired"
 });
 
 export const AGENT_SESSION_SIGNING_CAPABILITY_BIND_SQL = `SELECT
@@ -167,7 +173,7 @@ export function createPostgresAgentSessionSigningCapabilityReservationRepository
   if (!client || typeof client.query !== "function" || typeof randomBytes !== "function" || typeof randomUUID !== "function"
     || !Number.isSafeInteger(maxTtlMs) || maxTtlMs < 1_000 || maxTtlMs > MAX_TTL_MS
     || !sql || typeof sql.reserve !== "string" || typeof sql.commit !== "string"
-    || typeof sql.replay !== "string" || typeof sql.uncertain !== "string" || typeof sql.expire !== "string") {
+    || typeof sql.replay !== "string" || typeof sql.uncertain !== "string") {
     throw repoError("CONFIG");
   }
 
@@ -231,12 +237,26 @@ export function createPostgresAgentSessionSigningCapabilityReservationRepository
     }
   }
 
-  async function expireReservations({ limit = 64 } = {}) {
+  return Object.freeze({ reserveCapability, commitCapability, replayCapability, markCapabilityUncertain });
+}
+
+/**
+ * Create the deployment-wide expiry repository on the dedicated maintenance
+ * connection. This adapter deliberately has no tenant context and exposes no
+ * reserve/commit/replay methods. The SQL function applies its bounded batch
+ * across all tenants under the migration-owned SECURITY DEFINER boundary.
+ */
+export function createPostgresAgentSessionSigningCapabilityMaintenanceRepository({
+  client,
+  sql = AGENT_SESSION_SIGNING_CAPABILITY_MAINTENANCE_SQL
+} = {}) {
+  if (!client || typeof client.query !== "function"
+    || !sql || typeof sql.recoverExpired !== "string") throw repoError("CONFIG");
+
+  async function recoverExpiredReservations({ limit = 64 } = {}) {
     if (!Number.isSafeInteger(limit) || limit < 1 || limit > 256) throw repoError("INPUT");
     try {
-      const raw = await withTenantTransaction(client, boundContext.organization_id, async (tx) => callFunction(tx, sql.expire, [
-        boundContext.organization_id, limit
-      ]));
+      const raw = await withTransaction(client, async (tx) => callFunction(tx, sql.recoverExpired, [limit]));
       if (!raw || typeof raw !== "object" || Array.isArray(raw) || raw.status !== "ok"
         || !Number.isSafeInteger(raw.expired) || raw.expired < 0 || raw.expired > limit
         || !Number.isSafeInteger(raw.uncertain) || raw.uncertain < 0
@@ -247,7 +267,7 @@ export function createPostgresAgentSessionSigningCapabilityReservationRepository
     }
   }
 
-  return Object.freeze({ reserveCapability, commitCapability, replayCapability, markCapabilityUncertain, expireReservations });
+  return Object.freeze({ recoverExpiredReservations });
 }
 
 export const createAgentSessionSigningCapabilityReservationRepository = createPostgresAgentSessionSigningCapabilityReservationRepository;

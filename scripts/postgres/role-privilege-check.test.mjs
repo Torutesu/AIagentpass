@@ -20,7 +20,7 @@ test('signing capability role qualification is an explicit catalog contract', as
     'agentpass_agent_signing_capability_commit(uuid,uuid,uuid,uuid,bytea,bytea)',
     'agentpass_agent_signing_capability_replay(uuid,uuid,uuid,uuid,bytea)',
     'agentpass_agent_signing_capability_uncertain(uuid,uuid,uuid,uuid,bytea,bytea,text)',
-    'agentpass_agent_signing_capability_recover_expired(uuid,integer)',
+    'agentpass_agent_signing_capability_recover_expired(integer)',
     'agentpass_capability_authority_issue(uuid,uuid,uuid,uuid,bigint,text,timestamptz,uuid,bigint)',
     'agentpass_capability_authority_revoke_member(uuid,uuid,timestamptz)',
     'agentpass_capability_authority_list_revoked(uuid,timestamptz,integer)',
@@ -70,6 +70,9 @@ test('signing capability role qualification is an explicit catalog contract', as
   assert.match(checker, /signing_capability_boundary_ok/u);
   assert.match(checker, /signing_capability_table_diagnostics/u);
   assert.match(checker, /signing_capability_function_diagnostics/u);
+  assert.match(checker, /agentpass_maintenance/u);
+  assert.match(checker, /maintenance_function_allowlist/u);
+  assert.match(checker, /maintenance_function_oids/u);
   assert.match(checker, /policy_mismatches/u);
   assert.match(checker, /actual_with_check/u);
 });

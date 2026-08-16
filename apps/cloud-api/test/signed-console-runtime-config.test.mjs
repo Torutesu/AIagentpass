@@ -120,6 +120,8 @@ function createFixture({ identityPublicKey, controlBundlePublicKey } = {}) {
       AGENTPASS_DATABASE_URL: DATABASE_URL,
       AGENTPASS_MIGRATION_DATABASE_URL: "postgresql://migrator:secret@db.example.test/agentpass?sslmode=verify-full",
       AGENTPASS_SIGNER_DATABASE_URL: "postgresql://signer:secret@db.example.test/agentpass?sslmode=verify-full",
+      AGENTPASS_MAINTENANCE_DATABASE_URL: "postgresql://agentpass_maintenance:secret@db.example.test/agentpass?sslmode=verify-full",
+      AGENTPASS_MAINTENANCE_DATABASE_MAX_CONNECTIONS: "2",
       AGENTPASS_CONSOLE_ORIGIN: "https://console.example.test",
       AGENTPASS_WEBAUTHN_RP_ID: "example.test",
       AGENTPASS_HUMAN_CURSOR_SECRET: CURSOR_SECRET,

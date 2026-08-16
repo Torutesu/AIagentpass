@@ -94,6 +94,7 @@ jobs:
           printf 'N1_ADMIN_DATABASE_URL=postgresql://postgres:%s@127.0.0.1:5432/postgres?sslmode=verify-full\n' "$N1_POSTGRES_PASSWORD" >> "$GITHUB_ENV"
           printf 'N1_APP_DATABASE_URL=postgresql://agentpass_app:n1-app-%s@127.0.0.1:5432/postgres?sslmode=verify-full\n' "$POSTGRES_MAJOR" >> "$GITHUB_ENV"
           printf 'N1_SIGNER_DATABASE_URL=postgresql://agentpass_signer:n1-signer-%s@127.0.0.1:5432/postgres?sslmode=verify-full\n' "$POSTGRES_MAJOR" >> "$GITHUB_ENV"
+          printf 'N1_MAINTENANCE_DATABASE_URL=postgresql://agentpass_maintenance:n1-maintenance-%s@127.0.0.1:5432/postgres?sslmode=verify-full\n' "$POSTGRES_MAJOR" >> "$GITHUB_ENV"
           printf 'N1_MIGRATION_DATABASE_URL=postgresql://agentpass_migrator:n1-migrator-%s@127.0.0.1:5432/postgres?sslmode=verify-full\n' "$POSTGRES_MAJOR" >> "$GITHUB_ENV"
           printf 'N1_BACKUP_DATABASE_URL=postgresql://agentpass_backup:n1-backup-%s@127.0.0.1:5432/postgres?sslmode=verify-full\n' "$POSTGRES_MAJOR" >> "$GITHUB_ENV"
           printf 'N1_PRIVILEGE_DATABASE_URL=postgresql://agentpass_migrator:n1-migrator-%s@127.0.0.1:5432/postgres?sslmode=verify-full\n' "$POSTGRES_MAJOR" >> "$GITHUB_ENV"
@@ -124,7 +125,7 @@ jobs:
           PGSSLROOTCERT: ${{ runner.temp }}/agentpass-n1-tls-${{ matrix.postgres-version }}-${{ github.run_id }}-${{ github.run_attempt }}/server.crt
         run: >-
           psql --no-psqlrc --quiet --set=ON_ERROR_STOP=1
-          --command="ALTER ROLE agentpass_app PASSWORD 'n1-app-${{ matrix.postgres-version }}'; ALTER ROLE agentpass_signer PASSWORD 'n1-signer-${{ matrix.postgres-version }}'; ALTER ROLE agentpass_migrator PASSWORD 'n1-migrator-${{ matrix.postgres-version }}'; ALTER ROLE agentpass_backup PASSWORD 'n1-backup-${{ matrix.postgres-version }}';"
+          --command="ALTER ROLE agentpass_app PASSWORD 'n1-app-${{ matrix.postgres-version }}'; ALTER ROLE agentpass_signer PASSWORD 'n1-signer-${{ matrix.postgres-version }}'; ALTER ROLE agentpass_migrator PASSWORD 'n1-migrator-${{ matrix.postgres-version }}'; ALTER ROLE agentpass_backup PASSWORD 'n1-backup-${{ matrix.postgres-version }}'; ALTER ROLE agentpass_maintenance PASSWORD 'n1-maintenance-${{ matrix.postgres-version }}';"
       - name: Run fresh migrations through current head
         shell: bash
         run: |
@@ -206,6 +207,7 @@ jobs:
             ["agentpass_signer", process.env.N1_SIGNER_DATABASE_URL],
             ["agentpass_migrator", process.env.N1_MIGRATION_DATABASE_URL],
             ["agentpass_backup", process.env.N1_BACKUP_DATABASE_URL],
+            ["agentpass_maintenance", process.env.N1_MAINTENANCE_DATABASE_URL],
           ];
           const report = { ok: true, roles: [] };
           for (const [expected, connectionString] of roles) {
@@ -228,13 +230,20 @@ jobs:
                   current_user,'public.agentpass_managed_signer_lifecycle_snapshot(text)','EXECUTE') AS allowed`);
                 assert.equal(allowed.rows[0].allowed, true);
               }
+              if (expected === "agentpass_maintenance") {
+                const allowed = await client.query(`SELECT has_function_privilege(
+                  current_user,'public.agentpass_agent_signing_capability_recover_expired(integer)','EXECUTE') AS allowed`);
+                assert.equal(allowed.rows[0].allowed, true);
+              }
               const denied = expected === "agentpass_app"
                 ? "CREATE SCHEMA agentpass_n1_app_denied"
                 : expected === "agentpass_signer"
                   ? "SELECT count(*) FROM public.organizations"
                   : expected === "agentpass_backup"
                     ? "UPDATE public.organizations SET name=name"
-                    : "SET ROLE postgres";
+                    : expected === "agentpass_maintenance"
+                      ? "SELECT count(*) FROM public.organizations"
+                      : "SET ROLE postgres";
               await assert.rejects(client.query(denied), (error) => ["42501", "0LP01"].includes(error?.code));
             } finally {
               await client.end();
@@ -539,7 +548,7 @@ jobs:
           const roleLoginOutput = read(path.join(process.env.N1_EVIDENCE_DIR, "role-login-boundaries.json"));
           const roleLogins = JSON.parse(roleLoginOutput.toString("utf8"));
           if (roleLogins.ok !== true || JSON.stringify(roleLogins.roles) !== JSON.stringify([
-            "agentpass_app", "agentpass_signer", "agentpass_migrator", "agentpass_backup",
+            "agentpass_app", "agentpass_signer", "agentpass_migrator", "agentpass_backup", "agentpass_maintenance",
           ])) throw new Error("actual database role login evidence is invalid");
           const report = {
             schema_version: 1,

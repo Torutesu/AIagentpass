@@ -1014,7 +1014,7 @@ END;
 $$;
 
 CREATE FUNCTION public.agentpass_agent_signing_capability_recover_expired(
-  p_organization_id uuid, p_batch_size integer
+  p_batch_size integer
 ) RETURNS jsonb LANGUAGE plpgsql VOLATILE PARALLEL UNSAFE SECURITY DEFINER
 SET search_path = pg_catalog, public AS $$
 DECLARE
@@ -1024,13 +1024,11 @@ DECLARE
   uncertain_count integer := 0;
   expired_count integer := 0;
 BEGIN
-  IF p_organization_id IS NULL
-     OR public.agentpass_current_organization_id() IS DISTINCT FROM p_organization_id
-     OR p_batch_size IS NULL OR p_batch_size NOT BETWEEN 1 AND 256
+  IF p_batch_size IS NULL OR p_batch_size NOT BETWEEN 1 AND 256
   THEN RETURN jsonb_build_object('status', 'invalid'); END IF;
   FOR reservation_row IN
     SELECT * FROM public.agent_session_signing_capability_reservations AS reservation
-    WHERE reservation.organization_id = p_organization_id AND (
+    WHERE (
       (reservation.state = 'reserved' AND reservation.claim_expires_at <= now_value)
        OR (reservation.state = 'completed' AND reservation.expires_at <= now_value))
     ORDER BY least(reservation.claim_expires_at, reservation.expires_at),
@@ -1074,6 +1072,13 @@ ALTER TABLE public.agent_capability_sequence_heads ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.agent_capability_sequence_heads FORCE ROW LEVEL SECURITY;
 ALTER TABLE public.capabilities ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.capabilities FORCE ROW LEVEL SECURITY;
+-- Expiry recovery is deployment-wide maintenance, not a tenant-scoped API.
+-- The migration-owned SECURITY DEFINER function needs an explicit policy to
+-- traverse all sessions while the online roles remain unable to read or write
+-- these tables directly.
+CREATE POLICY agent_sessions_signing_capability_migrator_authority
+  ON public.agent_sessions FOR ALL TO agentpass_migrator
+  USING (true) WITH CHECK (true);
 CREATE POLICY agent_session_signing_capability_reservations_tenant_select
   ON public.agent_session_signing_capability_reservations FOR SELECT
   USING (organization_id = public.agentpass_current_organization_id());
@@ -1087,6 +1092,9 @@ CREATE POLICY agent_session_signing_capability_reservations_tenant_update
 CREATE POLICY agent_session_signing_capability_reservations_backup_select
   ON public.agent_session_signing_capability_reservations FOR SELECT TO agentpass_backup
   USING (true);
+CREATE POLICY agent_session_signing_capability_reservations_migrator_authority
+  ON public.agent_session_signing_capability_reservations FOR ALL TO agentpass_migrator
+  USING (true) WITH CHECK (true);
 CREATE POLICY agent_capability_sequence_heads_tenant_select
   ON public.agent_capability_sequence_heads FOR SELECT
   USING (organization_id = public.agentpass_current_organization_id());
@@ -1174,8 +1182,8 @@ REVOKE ALL ON FUNCTION public.agentpass_agent_signing_capability_replay(
 REVOKE ALL ON FUNCTION public.agentpass_agent_signing_capability_uncertain(
   uuid, uuid, uuid, uuid, bytea, bytea, text
 ) FROM PUBLIC, agentpass_app, agentpass_signer, agentpass_backup;
-REVOKE ALL ON FUNCTION public.agentpass_agent_signing_capability_recover_expired(uuid, integer)
-  FROM PUBLIC, agentpass_app, agentpass_signer, agentpass_backup;
+REVOKE ALL ON FUNCTION public.agentpass_agent_signing_capability_recover_expired(integer)
+  FROM PUBLIC, agentpass_app, agentpass_signer, agentpass_backup, agentpass_maintenance;
 
 GRANT EXECUTE ON FUNCTION public.agentpass_agent_signing_capability_reserve(
   uuid, uuid, uuid, uuid, bytea, uuid, uuid, bytea, text, text, boolean, integer, bigint
@@ -1189,8 +1197,8 @@ GRANT EXECUTE ON FUNCTION public.agentpass_agent_signing_capability_replay(
 GRANT EXECUTE ON FUNCTION public.agentpass_agent_signing_capability_uncertain(
   uuid, uuid, uuid, uuid, bytea, bytea, text
 ) TO agentpass_app;
-GRANT EXECUTE ON FUNCTION public.agentpass_agent_signing_capability_recover_expired(uuid, integer)
-  TO agentpass_app;
+GRANT EXECUTE ON FUNCTION public.agentpass_agent_signing_capability_recover_expired(integer)
+  TO agentpass_maintenance;
 GRANT EXECUTE ON FUNCTION public.agentpass_capability_authority_issue(
   uuid, uuid, uuid, uuid, bigint, text, timestamptz, uuid, bigint
 ) TO agentpass_app;

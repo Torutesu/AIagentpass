@@ -14,7 +14,8 @@ BEGIN
     'agentpass_app',
     'agentpass_signer',
     'agentpass_migrator',
-    'agentpass_backup'
+    'agentpass_backup',
+    'agentpass_maintenance'
   ] LOOP
     IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = role_name) THEN
       EXECUTE format('CREATE ROLE %I LOGIN', role_name);
@@ -33,13 +34,16 @@ ALTER ROLE agentpass_migrator
   LOGIN NOINHERIT NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS;
 ALTER ROLE agentpass_backup
   LOGIN NOINHERIT NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS;
+ALTER ROLE agentpass_maintenance
+  LOGIN NOINHERIT NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS;
 
 -- Prevent an existing role membership from becoming a privilege-escalation
 -- path through SET ROLE, even though these roles are NOINHERIT.
-REVOKE agentpass_app FROM agentpass_signer, agentpass_migrator, agentpass_backup;
-REVOKE agentpass_signer FROM agentpass_app, agentpass_migrator, agentpass_backup;
-REVOKE agentpass_migrator FROM agentpass_app, agentpass_signer, agentpass_backup;
-REVOKE agentpass_backup FROM agentpass_app, agentpass_signer, agentpass_migrator;
+REVOKE agentpass_app FROM agentpass_signer, agentpass_migrator, agentpass_backup, agentpass_maintenance;
+REVOKE agentpass_signer FROM agentpass_app, agentpass_migrator, agentpass_backup, agentpass_maintenance;
+REVOKE agentpass_migrator FROM agentpass_app, agentpass_signer, agentpass_backup, agentpass_maintenance;
+REVOKE agentpass_backup FROM agentpass_app, agentpass_signer, agentpass_migrator, agentpass_maintenance;
+REVOKE agentpass_maintenance FROM agentpass_app, agentpass_signer, agentpass_migrator, agentpass_backup;
 
 -- Revoke database-wide PUBLIC access, then grant connection only to the
 -- identities that are explicitly part of this contract.
@@ -49,7 +53,7 @@ DECLARE
 BEGIN
   EXECUTE format('REVOKE ALL PRIVILEGES ON DATABASE %I FROM PUBLIC', database_name);
   EXECUTE format(
-    'GRANT CONNECT ON DATABASE %I TO agentpass_app, agentpass_signer, agentpass_migrator, agentpass_backup',
+    'GRANT CONNECT ON DATABASE %I TO agentpass_app, agentpass_signer, agentpass_migrator, agentpass_backup, agentpass_maintenance',
     database_name
   );
 END
@@ -58,8 +62,8 @@ $$;
 -- The existing migration set uses public. The migration role receives schema
 -- CREATE; app and backup receive USAGE only.
 REVOKE ALL PRIVILEGES ON SCHEMA public FROM PUBLIC;
-REVOKE ALL PRIVILEGES ON SCHEMA public FROM agentpass_app, agentpass_signer, agentpass_backup;
-GRANT USAGE ON SCHEMA public TO agentpass_app, agentpass_signer, agentpass_backup;
+REVOKE ALL PRIVILEGES ON SCHEMA public FROM agentpass_app, agentpass_signer, agentpass_backup, agentpass_maintenance;
+GRANT USAGE ON SCHEMA public TO agentpass_app, agentpass_signer, agentpass_backup, agentpass_maintenance;
 GRANT USAGE, CREATE ON SCHEMA public TO agentpass_migrator;
 
 -- Make the migration identity the owner of existing migration objects. This
@@ -110,11 +114,11 @@ $$;
 
 -- Clear grants on objects already present before applying the exact contract.
 REVOKE ALL PRIVILEGES ON ALL TABLES IN SCHEMA public FROM PUBLIC;
-REVOKE ALL PRIVILEGES ON ALL TABLES IN SCHEMA public FROM agentpass_app, agentpass_signer, agentpass_backup;
+REVOKE ALL PRIVILEGES ON ALL TABLES IN SCHEMA public FROM agentpass_app, agentpass_signer, agentpass_backup, agentpass_maintenance;
 REVOKE ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA public FROM PUBLIC;
-REVOKE ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA public FROM agentpass_app, agentpass_signer, agentpass_backup;
+REVOKE ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA public FROM agentpass_app, agentpass_signer, agentpass_backup, agentpass_maintenance;
 REVOKE ALL PRIVILEGES ON ALL FUNCTIONS IN SCHEMA public FROM PUBLIC;
-REVOKE ALL PRIVILEGES ON ALL FUNCTIONS IN SCHEMA public FROM agentpass_app, agentpass_signer, agentpass_backup;
+REVOKE ALL PRIVILEGES ON ALL FUNCTIONS IN SCHEMA public FROM agentpass_app, agentpass_signer, agentpass_backup, agentpass_maintenance;
 
 -- app: DML on ordinary application tables only. Authority tables are excluded
 -- before any grant is made, so a stale ACL or newly added authority relation
@@ -184,7 +188,7 @@ BEGIN
   ] LOOP
     IF to_regclass(format('public.%I', relation_name)) IS NOT NULL THEN
       EXECUTE format(
-        'REVOKE ALL PRIVILEGES ON TABLE public.%I FROM agentpass_app, agentpass_backup',
+        'REVOKE ALL PRIVILEGES ON TABLE public.%I FROM agentpass_app, agentpass_backup, agentpass_maintenance',
         relation_name
       );
       -- Existing authority-table contracts intentionally retain read access for
@@ -215,7 +219,7 @@ BEGIN
       )
   LOOP
     EXECUTE format(
-      'REVOKE ALL PRIVILEGES ON TABLE public.%I FROM agentpass_app, agentpass_backup',
+      'REVOKE ALL PRIVILEGES ON TABLE public.%I FROM agentpass_app, agentpass_backup, agentpass_maintenance',
       relation_name
     );
     -- Hosted bootstrap is function-only for the online application identity.
@@ -250,7 +254,6 @@ BEGIN
     'agentpass_agent_signing_capability_commit(uuid,uuid,uuid,uuid,bytea,bytea)',
     'agentpass_agent_signing_capability_replay(uuid,uuid,uuid,uuid,bytea)',
     'agentpass_agent_signing_capability_uncertain(uuid,uuid,uuid,uuid,bytea,bytea,text)',
-    'agentpass_agent_signing_capability_recover_expired(uuid,integer)',
     'agentpass_capability_authority_issue(uuid,uuid,uuid,uuid,bigint,text,timestamptz,uuid,bigint)',
     'agentpass_capability_authority_revoke_member(uuid,uuid,timestamptz)',
     'agentpass_capability_authority_list_revoked(uuid,timestamptz,integer)',
@@ -259,6 +262,23 @@ BEGIN
   ] LOOP
     IF to_regprocedure('public.' || routine_signature) IS NOT NULL THEN
       EXECUTE format('GRANT EXECUTE ON FUNCTION public.%s TO agentpass_app', routine_signature);
+    END IF;
+  END LOOP;
+END
+$$;
+
+-- Expiry recovery is the only function exposed to the dedicated maintenance
+-- identity. It is intentionally not part of the application or signer
+-- contracts, and the maintenance connection is never reused for migrations.
+DO $$
+DECLARE
+  routine_signature text;
+BEGIN
+  FOREACH routine_signature IN ARRAY ARRAY[
+    'agentpass_agent_signing_capability_recover_expired(integer)'
+  ] LOOP
+    IF to_regprocedure('public.' || routine_signature) IS NOT NULL THEN
+      EXECUTE format('GRANT EXECUTE ON FUNCTION public.%s TO agentpass_maintenance', routine_signature);
     END IF;
   END LOOP;
 END
@@ -365,17 +385,17 @@ $$;
 
 -- Future objects created by the migration identity preserve the same boundary.
 ALTER DEFAULT PRIVILEGES FOR ROLE agentpass_migrator IN SCHEMA public
-  REVOKE ALL PRIVILEGES ON TABLES FROM PUBLIC, agentpass_app, agentpass_signer, agentpass_backup;
+  REVOKE ALL PRIVILEGES ON TABLES FROM PUBLIC, agentpass_app, agentpass_signer, agentpass_backup, agentpass_maintenance;
 ALTER DEFAULT PRIVILEGES FOR ROLE agentpass_migrator IN SCHEMA public
   GRANT SELECT ON TABLES TO agentpass_backup;
 
 ALTER DEFAULT PRIVILEGES FOR ROLE agentpass_migrator IN SCHEMA public
-  REVOKE ALL PRIVILEGES ON SEQUENCES FROM PUBLIC, agentpass_app, agentpass_signer, agentpass_backup;
+  REVOKE ALL PRIVILEGES ON SEQUENCES FROM PUBLIC, agentpass_app, agentpass_signer, agentpass_backup, agentpass_maintenance;
 ALTER DEFAULT PRIVILEGES FOR ROLE agentpass_migrator IN SCHEMA public
   GRANT SELECT ON SEQUENCES TO agentpass_backup;
 
 ALTER DEFAULT PRIVILEGES FOR ROLE agentpass_migrator IN SCHEMA public
-  REVOKE ALL PRIVILEGES ON FUNCTIONS FROM PUBLIC, agentpass_app, agentpass_signer, agentpass_backup;
+  REVOKE ALL PRIVILEGES ON FUNCTIONS FROM PUBLIC, agentpass_app, agentpass_signer, agentpass_backup, agentpass_maintenance;
 ALTER DEFAULT PRIVILEGES FOR ROLE agentpass_migrator IN SCHEMA public
   GRANT EXECUTE ON FUNCTIONS TO agentpass_migrator;
 

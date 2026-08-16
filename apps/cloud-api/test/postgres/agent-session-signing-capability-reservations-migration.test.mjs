@@ -148,6 +148,8 @@ test("0074 exposes only function-owned app authority with tenant RLS", async () 
   assert.match(sql, /REVOKE ALL ON TABLE public\.agent_session_signing_capability_reservations[\s\S]*FROM PUBLIC, agentpass_app, agentpass_signer, agentpass_backup/u);
   assert.match(sql, /GRANT SELECT ON TABLE public\.agent_session_signing_capability_reservations TO agentpass_backup/u);
   assert.match(sql, /CREATE POLICY agent_capability_sequence_heads_migrator_authority[\s\S]*TO agentpass_migrator[\s\S]*USING \(true\) WITH CHECK \(true\)/u);
+  assert.match(sql, /CREATE POLICY agent_session_signing_capability_reservations_migrator_authority[\s\S]*TO agentpass_migrator[\s\S]*USING \(true\) WITH CHECK \(true\)/u);
+  assert.match(sql, /CREATE POLICY agent_sessions_signing_capability_migrator_authority[\s\S]*ON public\.agent_sessions[\s\S]*TO agentpass_migrator/u);
   for (const name of ["reserve", "commit", "replay", "uncertain"]) {
     assert.match(sql, new RegExp(`CREATE FUNCTION public\\.agentpass_agent_signing_capability_${name}\\(`, "u"));
     assert.match(sql, new RegExp(`GRANT EXECUTE ON FUNCTION public\\.agentpass_agent_signing_capability_${name}\\([\\s\\S]*?TO agentpass_app`, "u"));
@@ -281,10 +283,11 @@ test("0074 has bounded expiry recovery for abandoned reservations", async () => 
   assert.match(recovery, /used_signatures\s*=\s*used_signatures\s*\+\s*1/u);
   assert.match(recovery, /response_json\s*=\s*NULL/u);
   assert.match(recovery, /LIMIT\s+p_batch_size/u);
-  assert.match(
-    sql,
-    /GRANT EXECUTE ON FUNCTION public\.agentpass_agent_signing_capability_recover_expired\([\s\S]*?TO agentpass_app/u,
-  );
+  assert.match(sql, /CREATE FUNCTION public\.agentpass_agent_signing_capability_recover_expired\(\s*p_batch_size integer/u);
+  assert.match(sql, /GRANT EXECUTE ON FUNCTION public\.agentpass_agent_signing_capability_recover_expired\(integer\)[\s\S]*?TO agentpass_maintenance/u);
+  assert.doesNotMatch(sql, /GRANT EXECUTE ON FUNCTION public\.agentpass_agent_signing_capability_recover_expired\(integer\)\s+TO agentpass_app;/u);
+  assert.doesNotMatch(recovery, /p_organization_id|agentpass_current_organization_id/u);
+  assert.match(recovery, /FROM public\.agent_session_signing_capability_reservations AS reservation[\s\S]*WHERE \(/u);
 });
 
 test("0074 never derives the tenant GUC directly from a caller argument", async () => {
@@ -300,6 +303,7 @@ test("0074 never derives the tenant GUC directly from a caller argument", async 
     if (setConfig) assert.doesNotMatch(setConfig[1], /p_organization_id/u, `${name} must not trust caller organization_id`);
     assert.match(body, /public\.agentpass_current_organization_id\(\)\s+IS DISTINCT FROM\s+p_organization_id/u);
   }
+  assert.doesNotMatch(functionBody(sql, "agentpass_agent_signing_capability_recover_expired"), /p_organization_id|agentpass_current_organization_id/u);
   assert.doesNotMatch(sql, /set_config\(\s*'agentpass\.organization_id'\s*,\s*p_organization_id::text/u);
 });
 
