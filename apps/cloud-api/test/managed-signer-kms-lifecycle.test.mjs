@@ -46,6 +46,16 @@ function fixture() {
     AGENTPASS_CLOUD_PROMOTION_EVIDENCE_KEY_ID: "promotion-evidence-2026-08",
     AGENTPASS_CLOUD_PROMOTION_EVIDENCE_PUBLIC_KEY: promotionEvidence.publicKey.export({ type: "spki", format: "pem" }).toString(),
     AGENTPASS_KMS_PROVIDER: "aws",
+    AGENTPASS_KMS_SIGNER_KEY_VERSIONS_JSON: JSON.stringify({
+      "agentpass.agent-session-grant": 1,
+      "agentpass.qualification-grant-batch-manifest": 1,
+      "device-enrollment-possession-receipt": 1,
+      "agentpass.refresh-hint": 1,
+      "agentpass.capability": 1,
+      "agentpass.control-bundle": 1,
+      "agentpass.audit-anchor": 1,
+      "agentpass.promotion-evidence": 1
+    }),
     AGENTPASS_KMS_AGENT_SESSION_KEY_RESOURCE: RESOURCE,
     AGENTPASS_KMS_QUALIFICATION_MANIFEST_KEY_RESOURCE: MANIFEST_RESOURCE,
     AGENTPASS_KMS_POSSESSION_RECEIPT_KEY_RESOURCE: POSSESSION_RESOURCE,

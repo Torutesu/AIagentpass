@@ -52,6 +52,16 @@ function baseEnv({ provider = "aws", agentResource = awsAgentResource, manifestR
     AGENTPASS_CLOUD_POSSESSION_RECEIPT_TIMEOUT_MS: "5000",
     AGENTPASS_CLOUD_REFRESH_KEY_ID: "refresh-hint-2026-08",
     AGENTPASS_CLOUD_REFRESH_PUBLIC_KEY: refresh.publicKey.export({ type: "spki", format: "pem" }).toString(),
+    AGENTPASS_KMS_SIGNER_KEY_VERSIONS_JSON: JSON.stringify({
+      "agentpass.agent-session-grant": 1,
+      "agentpass.qualification-grant-batch-manifest": 1,
+      "device-enrollment-possession-receipt": 1,
+      "agentpass.refresh-hint": 1,
+      "agentpass.capability": 1,
+      "agentpass.control-bundle": 1,
+      "agentpass.audit-anchor": 1,
+      "agentpass.promotion-evidence": 1
+    }),
     AGENTPASS_KMS_PROVIDER: provider,
     AGENTPASS_KMS_AGENT_SESSION_KEY_RESOURCE: agentResource,
     AGENTPASS_KMS_QUALIFICATION_MANIFEST_KEY_RESOURCE: manifestResource,
@@ -111,6 +121,7 @@ test("hosted KMS config is exactly eight-purpose, explicit, and keeps logical ID
   assert.equal(config.agentSessionResource, awsAgentResource);
   assert.equal(config.possessionReceipt.keyId, "possession-receipt-2026-08");
   assert.equal(config.possessionReceiptResource, awsPossessionResource);
+  assert.equal(config.agentSession.keyVersion, 1);
   assert.equal(config.capabilityResource, EXTENDED_FIXTURE_DEFINITIONS[0].resource);
   assert.equal(config.promotionEvidenceResource, EXTENDED_FIXTURE_DEFINITIONS[3].resource);
   assert.notEqual(config.agentSession.keyId, config.agentSessionResource);
@@ -137,6 +148,47 @@ test("hosted KMS config is exactly eight-purpose, explicit, and keeps logical ID
     const invalid = { ...env, ...value };
     assert.throws(() => parseKmsProviderRuntimeConfig(invalid), (error) => error.code === KMS_PROVIDER_RUNTIME_ERROR_CODES.CONFIG);
   }
+});
+
+test("hosted KMS config binds immutable key versions separately from protocol versions", () => {
+  const env = allPurposeEnv();
+  const versions = JSON.parse(env.AGENTPASS_KMS_SIGNER_KEY_VERSIONS_JSON);
+  for (const purpose of Object.keys(versions)) versions[purpose] = 7;
+  env.AGENTPASS_KMS_SIGNER_KEY_VERSIONS_JSON = JSON.stringify(versions);
+  const config = parseKmsProviderRuntimeConfig(env);
+  assert.equal(config.agentSession.keyVersion, 7);
+  assert.equal(config.purposes.find(({ name }) => name === "agentSession").version, 1);
+  assert.equal(config.controlBundle.keyVersion, 7);
+  assert.equal(config.purposes.find(({ name }) => name === "controlBundle").version, 2);
+
+  const missing = { ...env };
+  delete missing.AGENTPASS_KMS_SIGNER_KEY_VERSIONS_JSON;
+  assert.throws(() => parseKmsProviderRuntimeConfig(missing), { code: KMS_PROVIDER_RUNTIME_ERROR_CODES.CONFIG });
+
+  const extra = { ...env, AGENTPASS_KMS_SIGNER_KEY_VERSIONS_JSON: JSON.stringify({ ...versions, "agentpass.unknown": 7 }) };
+  assert.throws(() => parseKmsProviderRuntimeConfig(extra), { code: KMS_PROVIDER_RUNTIME_ERROR_CODES.CONFIG });
+});
+
+test("GCP cryptoKeyVersion must equal the immutable signer key version", () => {
+  const env = baseEnv({ provider: "gcp", agentResource: gcpAgentResource, manifestResource: gcpManifestResource });
+  const versions = JSON.parse(env.AGENTPASS_KMS_SIGNER_KEY_VERSIONS_JSON);
+  versions["agentpass.agent-session-grant"] = 7;
+  env.AGENTPASS_KMS_SIGNER_KEY_VERSIONS_JSON = JSON.stringify(versions);
+  assert.throws(() => parseKmsProviderRuntimeConfig(env), { code: KMS_PROVIDER_RUNTIME_ERROR_CODES.CONFIG });
+
+  for (const key of [
+    "AGENTPASS_KMS_AGENT_SESSION_KEY_RESOURCE",
+    "AGENTPASS_KMS_QUALIFICATION_MANIFEST_KEY_RESOURCE",
+    "AGENTPASS_KMS_POSSESSION_RECEIPT_KEY_RESOURCE",
+    "AGENTPASS_KMS_REFRESH_HINT_KEY_RESOURCE",
+    "AGENTPASS_KMS_CAPABILITY_KEY_RESOURCE",
+    "AGENTPASS_KMS_CONTROL_BUNDLE_KEY_RESOURCE",
+    "AGENTPASS_KMS_AUDIT_ANCHOR_KEY_RESOURCE",
+    "AGENTPASS_KMS_PROMOTION_EVIDENCE_KEY_RESOURCE"
+  ]) env[key] = env[key].replace(/cryptoKeyVersions\/1$/u, "cryptoKeyVersions/7");
+  for (const purpose of Object.keys(versions)) versions[purpose] = 7;
+  env.AGENTPASS_KMS_SIGNER_KEY_VERSIONS_JSON = JSON.stringify(versions);
+  assert.equal(parseKmsProviderRuntimeConfig(env).agentSession.keyVersion, 7);
 });
 
 test("hosted KMS config binds every signer-purpose-registry purpose with unique pinned public keys", () => {
@@ -274,6 +326,9 @@ test("AWS composition constructs and purpose-binds all eight hosted KMS provider
 
 test("AWS composition instantiates official-shaped clients and signs all purpose-separated providers with mapped remote resources", async () => {
   const env = baseEnv();
+  const versions = JSON.parse(env.AGENTPASS_KMS_SIGNER_KEY_VERSIONS_JSON);
+  for (const purpose of Object.keys(versions)) versions[purpose] = 7;
+  env.AGENTPASS_KMS_SIGNER_KEY_VERSIONS_JSON = JSON.stringify(versions);
   const observed = [];
   let destroyed = 0;
   class GetPublicKeyCommand { constructor(input) { this.input = input; this.kind = "get"; } }
@@ -305,6 +360,7 @@ test("AWS composition instantiates official-shaped clients and signs all purpose
   const providers = await createHostedKmsProviders({ env, sdkLoader: async () => ({ KMSClient, GetPublicKeyCommand, SignCommand }) });
   assert.equal(providers.agentSessionSignerProvider.key_id, "agent-session-2026-08");
   assert.equal(providers.agentSessionSignerProvider.provider_id, "agentpass-aws-kms-ledger-v1");
+  assert.equal(providers.agentSessionSignerProvider.key_lifecycle_state().keys[0].key_version, 7);
   assert.equal(providers.qualificationManifestSignerProvider.key_id, "qualification-manifest-2026-08");
   const data = Buffer.from("aws runtime composition");
   const signature = await providers.agentSessionSignerProvider.sign({
