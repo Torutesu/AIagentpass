@@ -543,7 +543,7 @@ export async function startP0BLiveBrowserFixture({
       }
     },
 
-    /** Pause the real Console mutation until its bound authorization is invalidated. */
+    /** Install before the Console's next navigation and gate its real mutation. */
     async installRecentAuthFailureGate(page, failure) {
       assertPage(page);
       if (!pageState.has(page)) throw new P0BLiveBrowserFixtureError("session_required", "P0-B page has not completed session bootstrap");
@@ -563,11 +563,11 @@ export async function startP0BLiveBrowserFixture({
           return false;
         }
       });
-      // Install before the next document's application bundle executes. The
-      // production bundle may capture the global fetch reference during module
-      // initialization, so replacing it only after hydration is too late.
+      // The caller installs this before its normal post-registration reload.
+      // The production bundle may capture the global fetch reference during
+      // module initialization, so replacing it only after hydration is too
+      // late. Do not introduce an additional session-rotating navigation here.
       await page.addInitScript(installRecentAuthFailureFetchGate, bindingName);
-      await fixture.reloadAndAdoptSession(page);
       return Object.freeze({
         intercepted: () => intercepted,
         invalidationFailed: () => invalidationFailed

@@ -156,7 +156,6 @@ test("P0-B live browser role, WebAuthn, and recent-auth matrix", { skip: !enable
 
   for (const failure of ["stale", "replayed", "cross_operation", "cross_tenant"]) {
     await scenario(t, `owner ${failure} authorization is rejected by the real Cloud boundary`, async ({ fixture, open }) => {
-      const page = await open("owner");
       if (failure === "stale") {
         const observation = {
           gateInvoked: false,
@@ -167,14 +166,17 @@ test("P0-B live browser role, WebAuthn, and recent-auth matrix", { skip: !enable
           alertObserved: false,
         };
         let gate;
-        try { gate = await fixture.installRecentAuthFailureGate(page, failure); }
-        catch { observation.gateSetupFailed = true; }
+        const page = await open("owner", {
+          beforeFinalReload: async (candidate) => {
+            try { gate = await fixture.installRecentAuthFailureGate(candidate, failure); }
+            catch { observation.gateSetupFailed = true; }
+          }
+        });
         if (observation.gateSetupFailed) assert.fail(staleAuthorizationFailureMarker(observation));
 
-        // Installing the gate intentionally reloads the Console so the fetch
-        // wrapper exists before the application bundle captures `fetch`.
-        // Resolve actionability and start all document-bound waits only after
-        // that navigation has completed.
+        // The normal post-registration reload installed the gate before the
+        // application bundle captured `fetch`; all locators and waits belong
+        // to that final document.
         const card = deviceCard(page, "反映待ち Mac");
         const wakeButton = card.getByRole("button", { name: "Wake requestを依頼" });
         try { await wakeButton.waitFor({ state: "visible", timeout: WAKE_OUTCOME_TIMEOUT_MS }); }
@@ -202,12 +204,17 @@ test("P0-B live browser role, WebAuthn, and recent-auth matrix", { skip: !enable
         return;
       }
 
+      let gate;
+      const page = await open("owner", {
+        beforeFinalReload: async (candidate) => {
+          gate = await fixture.installRecentAuthFailureGate(candidate, failure);
+        }
+      });
       let responseStatus;
       page.on("response", (response) => {
         const url = new URL(response.url());
         if (response.request().method() === "POST" && url.pathname === "/api/console" && url.searchParams.get("operation") === "device.refresh.request") responseStatus = response.status();
       });
-      const gate = await fixture.installRecentAuthFailureGate(page, failure);
       const card = deviceCard(page, "反映待ち Mac");
       await card.getByRole("button", { name: "Wake requestを依頼" }).click();
       await card.getByRole("alert").waitFor();
@@ -308,7 +315,7 @@ async function scenario(parent, name, callback) {
           : new P0BLiveBrowserFixtureError("browser_startup_failed", "P0-B live browser startup failed");
       }
       const contexts = [];
-      const open = async (role, { register = true, safeOpenPrefix = null } = {}) => {
+      const open = async (role, { register = true, safeOpenPrefix = null, beforeFinalReload = null } = {}) => {
         const effectiveSafeOpenPrefix = safeOpenPrefix ?? (role === "owner" ? "P0B_SAFE_OWNER_OPEN" : null);
         let context;
         let page;
@@ -377,6 +384,7 @@ async function scenario(parent, name, callback) {
             failSafeOpen(effectiveSafeOpenPrefix, "REGISTRATION");
           }
         }
+        if (beforeFinalReload !== null) await beforeFinalReload(page);
         try { await fixture.reloadAndAdoptSession(page); }
         catch { failSafeOpen(effectiveSafeOpenPrefix, "RELOAD"); }
         try {
