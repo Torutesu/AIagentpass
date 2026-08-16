@@ -2,7 +2,7 @@ name: CI
 
 on:
   push:
-    branches: [main, codex/agent-platform]
+    branches: [main, codex/agent-platform, codex/p0b-admin-diagnostic]
   pull_request:
 
 permissions:
