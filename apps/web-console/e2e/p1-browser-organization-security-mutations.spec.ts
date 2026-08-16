@@ -393,7 +393,7 @@ async function installSecurityRoutes(page: Page, failStatus?: 401 | 403, options
       state.mutations.push(requestMutation(route));
       if (state.revokePasskeyErrorCode !== undefined) return json(route, { error: { code: state.revokePasskeyErrorCode, message: "The last active credential cannot be revoked" } }, 409);
       state.passkeyStatus = "revoked";
-      state.passkeyVersion = 2;
+      state.passkeyVersion += 1;
       return json(route, { credential: securityPasskey(state) });
     }
     if (url.pathname === "/api/auth/security/sessions/revoke-others" && request.method() === "POST") {
