@@ -70,7 +70,10 @@ public enum SSHSIG {
             return false
         }
         let encoded = String(signature.dropFirst(prefix.utf8.count).dropLast(suffix.utf8.count))
-        guard let envelope = Data(base64Encoded: encoded) else { return false }
+        // OpenSSH armor is line-wrapped. Strip only the required line breaks;
+        // keep Base64 decoding strict so other unexpected characters fail.
+        let base64 = encoded.replacingOccurrences(of: "\n", with: "")
+        guard !base64.contains("\r"), let envelope = Data(base64Encoded: base64) else { return false }
         var cursor = SSHWireCursor(data: envelope)
         guard try cursor.readBytes(count: 6) == Data("SSHSIG".utf8),
               try cursor.readUInt32() == 1 else { return false }

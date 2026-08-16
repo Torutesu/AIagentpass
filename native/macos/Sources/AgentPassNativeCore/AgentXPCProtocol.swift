@@ -369,7 +369,7 @@ public final class AgentPassAgentSessionStatusResponse: NSObject, NSSecureCoding
 /// namespace, key selector, signer argument, session token, or private key field:
 /// this DTO can express only the first supported operation.
 @objc(AgentPassAgentSignRequest)
-public final class AgentPassAgentSignRequest: NSObject, NSSecureCoding {
+public final class AgentPassAgentSignRequest: NSObject, NSSecureCoding, @unchecked Sendable {
     public static var supportsSecureCoding: Bool { true }
 
     public static let minimumNonceBytes = 16

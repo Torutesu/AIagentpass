@@ -3,7 +3,7 @@ import Foundation
 import Testing
 @testable import AgentPassNativeCore
 
-private final class AgentCountingP256Signer: P256MessageSigner, @unchecked Sendable {
+final class AgentCountingP256Signer: P256MessageSigner, @unchecked Sendable {
     private let key = P256.Signing.PrivateKey()
     private let lock = NSLock()
     private(set) var messages: [Data] = []
