@@ -590,7 +590,7 @@ per-slice merge contract above.
 | S1.3 | Rotation, disablement, and drain — source at `da955e2`; PostgreSQL evidence wired at `f2e7957` | S1.2 | signer lifecycle/runtime | reserve/start/commit race matrix, active-to-retiring transition, emergency disable, bounded close | no new provider admission occurs after authority reduction wins and accepted ambiguity is quarantined |
 | D1.1 | Freeze onboarding public contract — implemented through `d63919a` and endpoint binding fix `c4ef41c` | H2, S1 metadata | catalog/OpenAPI/Core/CLI/native DTOs | generated-validator sync, duplicate/unknown field, canonical vectors, downgrade denial | one versioned contract contains no caller-controlled authority field |
 | D2.1 | Loopback and stdin delivery — source complete at `5f6b35b` | D1.1 | Console, CLI, native setup state | origin/nonce binding, PNA denial, listener timeout, argv/env/history/storage scans | protected HTTP/browser execution confirms invitation material exists only in bounded memory or explicit one-shot stdin recovery |
-| D2.2 | Durable onboarding resume machine — store and signed recovery source complete at `06325e0`/`7ed5474`; runtime wiring open | D2.1 | CLI/native/PostgreSQL/Console reconciliation | interruption at every durable state, expiry, ambiguous POST, duplicate enrollment | the production setup handler advances the durable store through `control_acknowledged`, and restart resumes without duplicate POST or authority |
+| D2.2 | Durable onboarding resume machine — runtime source complete; one-SHA qualification open | D2.1 | CLI/native/PostgreSQL/Console reconciliation | interruption at every durable state, expiry, ambiguous POST, duplicate enrollment | the production setup handler advances the durable store through `control_acknowledged`, and restart resumes without duplicate POST or authority |
 | M1.1 | Native durable sign-once transaction — source complete at `2b76abf`, verification fix `54bee51` | D1.1 | broker/XPC/native persistence | process/policy/repository substitution, kill/restart, expiry, unknown outcome | physical/broker qualification proves key use occurs once after final re-observation and ambiguous signing is never retried |
 | M1.2 | Claude Code lifecycle | M1.1, D2.2 | CLI/adapter/installer/doctor | install/setup/launch/status/close/revoke/uninstall; two unattended verified commits | adapter cannot select a key or widen policy and both commits verify independently |
 | M1.3 | Cursor parity | M1.2 | Cursor adapter only | same positive/negative matrix as Claude Code | no new broker selector, signing path, or authority surface is introduced |
@@ -671,6 +671,34 @@ receipt/signing domains, XPC selectors and DTO encodings, entitlement sets,
 Developer ID identities, and production promotion authority. A single owner
 serializes those boundaries; UI, adapter, native internal tests, and provider
 qualification may otherwise proceed in parallel with disjoint files.
+
+### 12.3.3 Post-D2.2 implementation plan
+
+D2.2 now has production-handler and CLI wiring, a fixed durable resume path,
+GET-only signed receipt recovery, immutable public recovery bindings, and
+interruption/response-loss tests. This is source completion, not production
+qualification. Work proceeds in the following dependency order.
+
+| Phase | Work packages | Concrete output | Verification | Promotion gate |
+| --- | --- | --- | --- | --- |
+| P1 Baseline repair | Q2.1 | Run root, browser E2E, P0-B, PostgreSQL integration, PostgreSQL 16/17, and native lanes on this exact SHA. Classify failures as source defects, runner restrictions, or missing protected infrastructure. Repair only the owning boundary and rerun all lanes without changing the candidate between evidence sets. | exact SHA and migration head; complete job logs; no skipped protected boundary counted as a pass; secret scan over artifacts | one SHA is green in every non-external lane and every external gate has an explicit owner/input |
+| P2 Claude Code lifecycle | M1.2a install/setup, M1.2b session/signing, M1.2c revoke/recovery/uninstall | One supported command installs the host and broker, enrolls the device, configures Git SSH signing, opens a bounded Agent Session, signs through the fixed native transaction, reports status, revokes authority, and removes configuration. The adapter exposes no key, algorithm, namespace, entitlement, or arbitrary signing operation selector. | clean-user install; two independent unattended commits; `git verify-commit`; process/worktree/repository/branch/remote substitution; expiry/restart/revoke/unknown-outcome; argv/env/log/state secret scans | Claude Code completes two policy-bounded commits unattended; revocation and ambiguous key use fail closed and never invoke the key twice |
+| P3 Onboarding UX and Cursor parity | M1.3, H2.3/D2 UX | Add Cursor through the same broker protocol. Console and CLI expose safe states for pending approval, invitation expiry, response-loss recovery, native approval, restart/resume, completion, and remediation. Identifiers are minimized and secrets never enter URLs, browser storage, telemetry, clipboard defaults, or retained artifacts. | Claude/Cursor parity; keyboard-only and screen-reader names; focus restoration; live regions; 200% zoom; reduced motion; Japanese/English error actions; full browser/setup E2E | a non-engineer can install, resume, diagnose, revoke, and uninstall without learning internal protocol details; Cursor adds no authority surface |
+| P4 Hosted signer productionization | S1.4/S2.1 | Replace development signing providers with eight purpose-separated KMS/HSM identities. Persist provider operation intent/result/uncertainty in PostgreSQL, pin provider/key versions, enforce IAM purpose separation, and block readiness on fallback, alias drift, stale rotation, or missing reconciliation workers. | AWS/GCP IAM allow/deny matrix; two-instance contention; timeout/response-loss/provider outage/throttle; rotation/drain/emergency disable; wrong-purpose/version denial; private-byte absence | every purpose converges to one verified signature or durable uncertainty and production cannot start with local/file-backed keys |
+| P5 Immutable macOS distribution | R1.1/R1.2 | Freeze bundle IDs, Team ID, designated requirements, entitlements, XPC selectors, and provisioning profiles. Build one universal hardened-runtime PKG, Developer ID sign nested code, notarize, staple, emit SBOM/provenance, and publish direct-download plus Homebrew metadata pinned to one digest. | `codesign`, `spctl`, `pkgutil`, stapler/notary evidence; fresh install, upgrade, rollback, uninstall/reinstall; Apple silicon Secure Enclave and Intel/T2; channel digest equality | both channels install the same independently verifiable notarized digest and both hardware reports bind that digest and source SHA |
+| P6 Production closure | O1.1/O1.2 | Deploy immutable Console/API images, PostgreSQL migrations, queues/workers, KMS configuration, dashboards, alerts, backup/PITR, tenant allow-list, emergency stop, and incident runbooks to staging. Run independent security review and produce a signed promotion record. | migration/canary/drain/rollback; restore and measured RPO/RTO; KMS/database/network outage; tenant isolation; revoke latency; SAST/DAST/dependency/container/IaC/SBOM; retained audit evidence | zero unresolved critical/high findings, SLO/RPO/RTO targets met, rollback rehearsed, and a human approves the exact source/artifact/provider-version set |
+
+Parallel work is limited to three disjoint lanes after P1: agent UX/adapters,
+hosted signer/infrastructure, and release/hardware preparation. Schema/catalog
+versions, PostgreSQL migrations, signing domains, XPC protocol, entitlements,
+Developer ID identities, and promotion records remain serialized. P2 may start
+while protected P1 jobs run, but it cannot be called qualified until P1 is green.
+
+The next three merge units are therefore: (1) repair and retain the current
+one-SHA CI baseline, (2) implement the complete Claude Code install-to-revoke
+lifecycle without expanding the signing protocol, and (3) add the operator UX
+and Cursor parity matrix. KMS provisioning and Apple notarization preparation
+may run in parallel once their external credentials and accounts are available.
 
 ### 12.4 Delivery sequence, parallel capacity, and effort bands
 
