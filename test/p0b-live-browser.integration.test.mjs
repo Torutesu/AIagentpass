@@ -157,7 +157,7 @@ test("P0-B live browser role, WebAuthn, and recent-auth matrix", { skip: !enable
   for (const failure of ["stale", "replayed", "cross_operation", "cross_tenant"]) {
     await scenario(t, `owner ${failure} authorization is rejected by the real Cloud boundary`, async ({ fixture, open }) => {
       const page = await open("owner");
-      const pattern = "**/api/console?operation=device.refresh.request";
+      const refreshRoute = (url) => isConsoleDeviceRefreshUrl(url);
       if (failure === "stale") {
         const card = deviceCard(page, "反映待ち Mac");
         const observation = {
@@ -175,7 +175,7 @@ test("P0-B live browser role, WebAuthn, and recent-auth matrix", { skip: !enable
           .then(() => true)
           .catch(() => false);
         try {
-          await page.route(pattern, async (route) => {
+          await page.route(refreshRoute, async (route) => {
             if (route.request().method() !== "POST") return route.continue();
             observation.routeIntercepted = true;
             try {
@@ -197,7 +197,7 @@ test("P0-B live browser role, WebAuthn, and recent-auth matrix", { skip: !enable
         const [refreshResponse, alertObserved] = await Promise.all([refreshResponsePromise, alertPromise]);
         observation.responseStatus = refreshResponse?.status() ?? null;
         observation.alertObserved = alertObserved;
-        await page.unroute(pattern).catch(() => {});
+        await page.unroute(refreshRoute).catch(() => {});
         const marker = staleAuthorizationFailureMarker(observation);
         if (marker !== null) assert.fail(marker);
         return;
@@ -209,7 +209,7 @@ test("P0-B live browser role, WebAuthn, and recent-auth matrix", { skip: !enable
         const url = new URL(response.url());
         if (response.request().method() === "POST" && url.pathname === "/api/console" && url.searchParams.get("operation") === "device.refresh.request") responseStatus = response.status();
       });
-      await page.route(pattern, async (route) => {
+      await page.route(refreshRoute, async (route) => {
         if (route.request().method() !== "POST") return route.continue();
         intercepted = true;
         await fixture.invalidateRecentAuth(page, failure);
@@ -218,7 +218,7 @@ test("P0-B live browser role, WebAuthn, and recent-auth matrix", { skip: !enable
       const card = deviceCard(page, "反映待ち Mac");
       await card.getByRole("button", { name: "Wake requestを依頼" }).click();
       await card.getByRole("alert").waitFor();
-      await page.unroute(pattern);
+      await page.unroute(refreshRoute);
       assert.equal(intercepted, true);
       assert.equal(responseStatus, 401);
     });
@@ -268,6 +268,12 @@ test("stale authorization diagnostics emit only fixed safe markers", () => {
     "P0B_SAFE_STALE_AUTH_RESPONSE_HTTP_OTHER_FAILED",
     "P0B_SAFE_STALE_AUTH_ALERT_MISSING_FAILED",
   ]);
+});
+
+test("recent-auth failure injection matches the exact Console operation URL", () => {
+  assert.equal(isConsoleDeviceRefreshUrl(new URL("https://console.example.test/api/console?operation=device.refresh.request")), true);
+  assert.equal(isConsoleDeviceRefreshUrl(new URL("https://console.example.test/api/console?operation=device.revoke")), false);
+  assert.equal(isConsoleDeviceRefreshUrl(new URL("https://console.example.test/api/auth/webauthn/verify?operation=device.refresh.request")), false);
 });
 
 async function scenario(parent, name, callback) {
@@ -546,6 +552,12 @@ export const STALE_AUTH_DIAGNOSTIC_MARKERS = Object.freeze({
   httpOther: "P0B_SAFE_STALE_AUTH_RESPONSE_HTTP_OTHER_FAILED",
   alertMissing: "P0B_SAFE_STALE_AUTH_ALERT_MISSING_FAILED",
 });
+
+export function isConsoleDeviceRefreshUrl(url) {
+  return url instanceof URL
+    && url.pathname === "/api/console"
+    && url.searchParams.get("operation") === "device.refresh.request";
+}
 
 export function staleAuthorizationFailureMarker(observation = {}) {
   if (observation.clickFailed === true) return STALE_AUTH_DIAGNOSTIC_MARKERS.clickFailed;
