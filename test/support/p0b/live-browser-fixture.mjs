@@ -543,6 +543,33 @@ export async function startP0BLiveBrowserFixture({
       }
     },
 
+    /** Pause the real Console mutation until its bound authorization is invalidated. */
+    async installRecentAuthFailureGate(page, failure) {
+      assertPage(page);
+      if (!pageState.has(page)) throw new P0BLiveBrowserFixtureError("session_required", "P0-B page has not completed session bootstrap");
+      if (!new Set(["stale", "replayed", "cross_operation", "cross_tenant"]).has(failure)) throw new TypeError("recent-auth failure is invalid");
+      if (typeof page.exposeFunction !== "function") throw new TypeError("Playwright Page binding is required");
+      const bindingName = "__agentpassP0BInvalidateRecentAuth";
+      let intercepted = false;
+      let invalidationFailed = false;
+      await page.exposeFunction(bindingName, async () => {
+        if (intercepted) return invalidationFailed === false;
+        intercepted = true;
+        try {
+          await fixture.invalidateRecentAuth(page, failure);
+          return true;
+        } catch {
+          invalidationFailed = true;
+          return false;
+        }
+      });
+      await page.evaluate(installRecentAuthFailureFetchGate, bindingName);
+      return Object.freeze({
+        intercepted: () => intercepted,
+        invalidationFailed: () => invalidationFailed
+      });
+    },
+
     async resetManualWakeEvidence() {
       await databasePool.query("DELETE FROM device_manual_wake_requests WHERE organization_id=$1", [safeSeed.organizationId]);
       await databasePool.query("DELETE FROM device_manual_wake_events WHERE organization_id=$1", [safeSeed.organizationId]);
@@ -661,6 +688,23 @@ export async function awaitConsoleSessionReload(page, descriptor, organizationId
     page.reload({ waitUntil: "domcontentloaded" }),
   ]);
   return validateBootstrap(await applicationSessionResponse.json(), descriptor, organizationId);
+}
+
+export function installRecentAuthFailureFetchGate(name, scope = globalThis) {
+  const originalFetch = scope.fetch.bind(scope);
+  const RequestConstructor = scope.Request;
+  const URLConstructor = scope.URL;
+  scope.fetch = async (input, init) => {
+    const isRequest = typeof RequestConstructor === "function" && input instanceof RequestConstructor;
+    let url;
+    try { url = new URLConstructor(isRequest ? input.url : String(input), scope.location.origin); }
+    catch { return originalFetch(input, init); }
+    const method = String(init?.method ?? (isRequest ? input.method : "GET")).toUpperCase();
+    if (method === "POST" && url.pathname === "/api/console" && url.searchParams.get("operation") === "device.refresh.request") {
+      if (await scope[name]() !== true) throw new Error("recent-auth failure gate failed");
+    }
+    return originalFetch(input, init);
+  };
 }
 
 function publicSeed(seed) {

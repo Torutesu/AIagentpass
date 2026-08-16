@@ -11,7 +11,6 @@ const BROWSER_STARTUP_TIMEOUT_MS = 15_000;
 const BROWSER_CLEANUP_TIMEOUT_MS = 15_000;
 const CONTEXT_CLEANUP_TIMEOUT_MS = 10_000;
 const WAKE_OUTCOME_TIMEOUT_MS = 15_000;
-export const DEVICE_REFRESH_ROUTE = /\/api\/console\?operation=device\.refresh\.request(?:&|$)/u;
 let selectedScenarioCount = 0;
 
 test("P0-B live browser role, WebAuthn, and recent-auth matrix", { skip: !enabled, timeout: 840_000 }, async (t) => {
@@ -158,12 +157,11 @@ test("P0-B live browser role, WebAuthn, and recent-auth matrix", { skip: !enable
   for (const failure of ["stale", "replayed", "cross_operation", "cross_tenant"]) {
     await scenario(t, `owner ${failure} authorization is rejected by the real Cloud boundary`, async ({ fixture, open }) => {
       const page = await open("owner");
-      const refreshRoute = DEVICE_REFRESH_ROUTE;
       if (failure === "stale") {
         const card = deviceCard(page, "反映待ち Mac");
         const observation = {
-          routeIntercepted: false,
-          routeSetupFailed: false,
+          gateInvoked: false,
+          gateSetupFailed: false,
           invalidationFailed: false,
           clickFailed: false,
           responseStatus: null,
@@ -176,48 +174,35 @@ test("P0-B live browser role, WebAuthn, and recent-auth matrix", { skip: !enable
         const alertPromise = card.getByRole("alert").waitFor({ state: "visible", timeout: WAKE_OUTCOME_TIMEOUT_MS })
           .then(() => true)
           .catch(() => false);
-        try {
-          await page.route(refreshRoute, async (route) => {
-            if (route.request().method() !== "POST") return route.continue();
-            observation.routeIntercepted = true;
-            try { await fixture.invalidateRecentAuth(page, failure); }
-            catch { observation.invalidationFailed = true; }
-            await route.continue();
-          });
-        } catch {
-          observation.routeSetupFailed = true;
-        }
+        let gate;
+        try { gate = await fixture.installRecentAuthFailureGate(page, failure); }
+        catch { observation.gateSetupFailed = true; }
         try {
           await card.getByRole("button", { name: "Wake requestを依頼" }).click();
         } catch {
           observation.clickFailed = true;
         }
         const [refreshResponse, alertObserved] = await Promise.all([refreshResponsePromise, alertPromise]);
+        observation.gateInvoked = gate?.intercepted() === true;
+        observation.invalidationFailed = gate?.invalidationFailed() === true;
         observation.responseStatus = refreshResponse?.status() ?? null;
         observation.alertObserved = alertObserved;
-        await page.unroute(refreshRoute).catch(() => {});
         const marker = staleAuthorizationFailureMarker(observation);
         if (marker !== null) assert.fail(marker);
         return;
       }
 
-      let intercepted = false;
       let responseStatus;
       page.on("response", (response) => {
         const url = new URL(response.url());
         if (response.request().method() === "POST" && url.pathname === "/api/console" && url.searchParams.get("operation") === "device.refresh.request") responseStatus = response.status();
       });
-      await page.route(refreshRoute, async (route) => {
-        if (route.request().method() !== "POST") return route.continue();
-        intercepted = true;
-        await fixture.invalidateRecentAuth(page, failure);
-        await route.continue();
-      });
+      const gate = await fixture.installRecentAuthFailureGate(page, failure);
       const card = deviceCard(page, "反映待ち Mac");
       await card.getByRole("button", { name: "Wake requestを依頼" }).click();
       await card.getByRole("alert").waitFor();
-      await page.unroute(refreshRoute);
-      assert.equal(intercepted, true);
+      assert.equal(gate.intercepted(), true);
+      assert.equal(gate.invalidationFailed(), false);
       assert.equal(responseStatus, 401);
     });
   }
@@ -237,8 +222,8 @@ test("P0-B live browser role, WebAuthn, and recent-auth matrix", { skip: !enable
 
 test("stale authorization diagnostics emit only fixed safe markers", () => {
   const valid = {
-    routeIntercepted: true,
-    routeSetupFailed: false,
+    gateInvoked: true,
+    gateSetupFailed: false,
     invalidationFailed: false,
     clickFailed: false,
     responseStatus: 401,
@@ -246,8 +231,8 @@ test("stale authorization diagnostics emit only fixed safe markers", () => {
   };
   assert.equal(staleAuthorizationFailureMarker(valid), null);
   assert.equal(staleAuthorizationFailureMarker({ ...valid, clickFailed: true }), STALE_AUTH_DIAGNOSTIC_MARKERS.clickFailed);
-  assert.equal(staleAuthorizationFailureMarker({ ...valid, routeSetupFailed: true }), STALE_AUTH_DIAGNOSTIC_MARKERS.routeSetupFailed);
-  assert.equal(staleAuthorizationFailureMarker({ ...valid, routeIntercepted: false }), STALE_AUTH_DIAGNOSTIC_MARKERS.routeNotIntercepted);
+  assert.equal(staleAuthorizationFailureMarker({ ...valid, gateSetupFailed: true }), STALE_AUTH_DIAGNOSTIC_MARKERS.gateSetupFailed);
+  assert.equal(staleAuthorizationFailureMarker({ ...valid, gateInvoked: false }), STALE_AUTH_DIAGNOSTIC_MARKERS.gateNotInvoked);
   assert.equal(staleAuthorizationFailureMarker({ ...valid, invalidationFailed: true }), STALE_AUTH_DIAGNOSTIC_MARKERS.invalidationFailed);
   assert.equal(staleAuthorizationFailureMarker({ ...valid, responseStatus: null }), STALE_AUTH_DIAGNOSTIC_MARKERS.responseMissing);
   assert.equal(staleAuthorizationFailureMarker({ ...valid, responseStatus: 204 }), STALE_AUTH_DIAGNOSTIC_MARKERS.http2xx);
@@ -258,8 +243,8 @@ test("stale authorization diagnostics emit only fixed safe markers", () => {
   assert.equal(staleAuthorizationFailureMarker({ ...valid, alertObserved: false }), STALE_AUTH_DIAGNOSTIC_MARKERS.alertMissing);
   assert.deepEqual(Object.values(STALE_AUTH_DIAGNOSTIC_MARKERS), [
     "P0B_SAFE_STALE_AUTH_CLICK_FAILED",
-    "P0B_SAFE_STALE_AUTH_ROUTE_SETUP_FAILED",
-    "P0B_SAFE_STALE_AUTH_ROUTE_NOT_INTERCEPTED_FAILED",
+    "P0B_SAFE_STALE_AUTH_GATE_SETUP_FAILED",
+    "P0B_SAFE_STALE_AUTH_GATE_NOT_INVOKED_FAILED",
     "P0B_SAFE_STALE_AUTH_INVALIDATION_FAILED",
     "P0B_SAFE_STALE_AUTH_RESPONSE_MISSING_FAILED",
     "P0B_SAFE_STALE_AUTH_RESPONSE_HTTP_2XX_FAILED",
@@ -269,12 +254,6 @@ test("stale authorization diagnostics emit only fixed safe markers", () => {
     "P0B_SAFE_STALE_AUTH_RESPONSE_HTTP_OTHER_FAILED",
     "P0B_SAFE_STALE_AUTH_ALERT_MISSING_FAILED",
   ]);
-});
-
-test("recent-auth failure injection matches the exact refresh mutation URL", () => {
-  assert.equal(DEVICE_REFRESH_ROUTE.test("https://console.example.test/api/console?operation=device.refresh.request"), true);
-  assert.equal(DEVICE_REFRESH_ROUTE.test("https://console.example.test/api/console?operation=device.refresh.request&trace=1"), true);
-  assert.equal(DEVICE_REFRESH_ROUTE.test("https://console.example.test/api/console?operation=device.revoke"), false);
 });
 
 async function scenario(parent, name, callback) {
@@ -543,8 +522,8 @@ function failLifecycle(error) {
 
 export const STALE_AUTH_DIAGNOSTIC_MARKERS = Object.freeze({
   clickFailed: "P0B_SAFE_STALE_AUTH_CLICK_FAILED",
-  routeSetupFailed: "P0B_SAFE_STALE_AUTH_ROUTE_SETUP_FAILED",
-  routeNotIntercepted: "P0B_SAFE_STALE_AUTH_ROUTE_NOT_INTERCEPTED_FAILED",
+  gateSetupFailed: "P0B_SAFE_STALE_AUTH_GATE_SETUP_FAILED",
+  gateNotInvoked: "P0B_SAFE_STALE_AUTH_GATE_NOT_INVOKED_FAILED",
   invalidationFailed: "P0B_SAFE_STALE_AUTH_INVALIDATION_FAILED",
   responseMissing: "P0B_SAFE_STALE_AUTH_RESPONSE_MISSING_FAILED",
   http2xx: "P0B_SAFE_STALE_AUTH_RESPONSE_HTTP_2XX_FAILED",
@@ -557,8 +536,8 @@ export const STALE_AUTH_DIAGNOSTIC_MARKERS = Object.freeze({
 
 export function staleAuthorizationFailureMarker(observation = {}) {
   if (observation.clickFailed === true) return STALE_AUTH_DIAGNOSTIC_MARKERS.clickFailed;
-  if (observation.routeSetupFailed === true) return STALE_AUTH_DIAGNOSTIC_MARKERS.routeSetupFailed;
-  if (observation.routeIntercepted !== true) return STALE_AUTH_DIAGNOSTIC_MARKERS.routeNotIntercepted;
+  if (observation.gateSetupFailed === true) return STALE_AUTH_DIAGNOSTIC_MARKERS.gateSetupFailed;
+  if (observation.gateInvoked !== true) return STALE_AUTH_DIAGNOSTIC_MARKERS.gateNotInvoked;
   if (observation.invalidationFailed === true) return STALE_AUTH_DIAGNOSTIC_MARKERS.invalidationFailed;
   const status = observation.responseStatus;
   if (!Number.isInteger(status)) return STALE_AUTH_DIAGNOSTIC_MARKERS.responseMissing;
