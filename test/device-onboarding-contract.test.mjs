@@ -55,6 +55,10 @@ test("fails closed on unknown fields, duplicate keys, and downgrade attempts", (
   const delivery = fixture("device-onboarding-invitation-delivery.valid.json");
   assert.throws(() => normalizeOnboardingInvitationDelivery({ ...delivery, type: "caller-selected-authority" }), /invalid_value/u);
   assert.throws(() => parseOnboardingInvitationDeliveryJson(JSON.stringify({ ...delivery, version: 0 })), /invalid_version/u);
+  assert.throws(() => normalizeOnboardingInvitationDelivery({
+    ...delivery,
+    invitation: { ...delivery.invitation, endpoint: "/v1/enrollments/00000000-0000-4000-8000-000000000000" }
+  }), /inconsistent_value/u);
   const duplicateInvitation = JSON.stringify(delivery).replace('"invitation":{', '"invitation":{"version":2,"version":1,');
   assert.throws(() => parseOnboardingInvitationDeliveryJson(duplicateInvitation), /duplicate_field/u);
 

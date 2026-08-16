@@ -201,6 +201,20 @@ test("rejects legacy invitations and unsafe enrollment bases before mutation", a
   const { version: _missingVersion, ...missingVersion } = canonical;
   assert.throws(() => createDeviceEnrollmentSetupHandler({ ...common, invitation: missingVersion }), (error) => error.code === "INVALID_ENROLLMENT_INVITATION");
   assert.throws(() => createDeviceEnrollmentSetupHandler({ ...common, invitation: { ...canonical, version: 1 } }), (error) => error.code === "INVALID_ENROLLMENT_INVITATION");
+  assert.throws(() => createDeviceEnrollmentSetupHandler({
+    ...common,
+    invitation: { ...canonical, endpoint: "/v1/enrollments/00000000-0000-4000-8000-000000000000" }
+  }), (error) => error.code === "INVALID_ENROLLMENT_INVITATION");
+  const expiredAt = "2020-01-02T03:04:05.000Z";
+  assert.throws(() => createDeviceEnrollmentSetupHandler({
+    ...common,
+    invitation: {
+      ...canonical,
+      expires_at: expiredAt,
+      candidate_binding: { ...canonical.candidate_binding, expires_at: expiredAt },
+      challenge: { ...canonical.challenge, expires_at: expiredAt }
+    }
+  }), (error) => error.code === "INVALID_ENROLLMENT_INVITATION");
   const credentialed = createDeviceEnrollmentSetupHandler({ ...common, baseUrl: "https://user:pass@api.example.test/v1" });
   await assert.rejects(() => credentialed(context()), (error) => error.code === "INVALID_ENROLLMENT_INVITATION" || error.code === "ERR_DEVICE_ENROLLMENT_URL");
   const wrongPath = createDeviceEnrollmentSetupHandler({ ...common, baseUrl: "https://api.example.test/api" });
