@@ -125,6 +125,47 @@ test("can terminate a command tree as soon as a reviewed safe failure is observe
   assert.equal(Date.now() - startedAt < 2_000, true);
 });
 
+test("upgrades a provisional TAP failure to a terminal fixed diagnostic before cleanup", async () => {
+  const coarse = "not ok 8 - owner stale authorization is rejected by the real Cloud boundary";
+  const detailed = "P0B_SAFE_STALE_AUTH_INVALIDATION_FAILED";
+  const startedAt = Date.now();
+  const result = await runQualificationCommand(node, script([
+    `process.stdout.write(${JSON.stringify(`${coarse}\n`)});`,
+    `setTimeout(() => process.stdout.write(${JSON.stringify(`${detailed}\n`)}), 10);`,
+    "process.on('SIGTERM', () => {});",
+    "setInterval(() => {}, 1000);"
+  ].join("")), {
+    cwd,
+    env,
+    timeoutMs: 5_000,
+    terminateOnSafeFailure: true,
+    safeFailureMarkers: [
+      { marker: detailed, code: "stale_auth_invalidation" },
+      { marker: coarse, code: "stale_authorization_denial", terminate: false }
+    ]
+  });
+
+  assert.equal(result.status, "failed");
+  assert.equal(result.internal.safe_failure_code, "stale_auth_invalidation");
+  assert.equal(result.internal.timed_out, false);
+  assert.equal(Date.now() - startedAt < 2_000, true);
+});
+
+test("retains a provisional safe diagnostic when no detailed marker follows", async () => {
+  const marker = "not ok 12 - owner completes distinct real WebAuthn device revoke";
+  const result = await runQualificationCommand(node, script(`process.stdout.write(${JSON.stringify(`${marker}\n`)}); process.exit(1);`), {
+    cwd,
+    env,
+    timeoutMs: 2_000,
+    terminateOnSafeFailure: true,
+    safeFailureMarkers: [{ marker, code: "owner_device_revoke", terminate: false }]
+  });
+
+  assert.equal(result.status, "failed");
+  assert.equal(result.internal.safe_failure_code, "owner_device_revoke");
+  assert.equal(result.internal.timed_out, false);
+});
+
 test("supports the bounded live-browser failure marker registry", async () => {
   const safeFailureMarkers = Array.from({ length: 256 }, (_, index) => ({
     marker: `P0B_SAFE_STAGE_${index}_FAILED`,

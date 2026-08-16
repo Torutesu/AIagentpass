@@ -252,14 +252,18 @@ const LIVE_BROWSER_SAFE_FAILURE_MARKERS = Object.freeze([
   [null, "P0B_SAFE_AUDITOR_WAKE_CONTROL_FAILED", "auditor_wake_control"],
   [null, "P0B_SAFE_VIEWER_OPEN_FAILED", "viewer_open"],
   [null, "P0B_SAFE_VIEWER_WAKE_CONTROL_FAILED", "viewer_wake_control"],
-  [7, "owner without an available authenticator fails before wake mutation", "missing_authenticator_denial"],
-  [8, "owner stale authorization is rejected by the real Cloud boundary", "stale_authorization_denial"],
-  [9, "owner replayed authorization is rejected by the real Cloud boundary", "replayed_authorization_denial"],
-  [10, "owner cross_operation authorization is rejected by the real Cloud boundary", "cross_operation_denial"],
-  [11, "owner cross_tenant authorization is rejected by the real Cloud boundary", "cross_tenant_denial"],
-  [12, "owner completes distinct real WebAuthn device revoke", "owner_device_revoke"],
-  [13, "admin completes distinct real WebAuthn device revoke", "admin_device_revoke"]
-].map(([index, name, code]) => Object.freeze({ marker: index === null ? name : `not ok ${index} - ${name}`, code })));
+  [7, "owner without an available authenticator fails before wake mutation", "missing_authenticator_denial", false],
+  [8, "owner stale authorization is rejected by the real Cloud boundary", "stale_authorization_denial", false],
+  [9, "owner replayed authorization is rejected by the real Cloud boundary", "replayed_authorization_denial", false],
+  [10, "owner cross_operation authorization is rejected by the real Cloud boundary", "cross_operation_denial", false],
+  [11, "owner cross_tenant authorization is rejected by the real Cloud boundary", "cross_tenant_denial", false],
+  [12, "owner completes distinct real WebAuthn device revoke", "owner_device_revoke", false],
+  [13, "admin completes distinct real WebAuthn device revoke", "admin_device_revoke", false]
+].map(([index, name, code, terminate = true]) => Object.freeze({
+  marker: index === null ? name : `not ok ${index} - ${name}`,
+  code,
+  terminate
+})));
 const REQUIRED_ENV_KEYS = Object.freeze([
   "P0B_POSTGRES_ADMIN_URL",
   "AGENTPASS_TEST_POSTGRES_ADMIN_URL",

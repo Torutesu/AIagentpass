@@ -75,14 +75,16 @@ function normalizeSafeFailureMarkers(value) {
   if (!Array.isArray(value) || value.length > MAX_SAFE_FAILURE_MARKERS) throw new TypeError("safeFailureMarkers must be a bounded array");
   const codes = new Set();
   return Object.freeze(value.map((entry) => {
+    const keys = Object.keys(entry ?? {}).sort().join(",");
     if (entry === null || typeof entry !== "object" || Array.isArray(entry)
-      || Object.keys(entry).sort().join(",") !== "code,marker"
+      || (keys !== "code,marker" && keys !== "code,marker,terminate")
       || typeof entry.marker !== "string" || entry.marker.length === 0 || entry.marker.includes("\u0000")
       || Buffer.byteLength(entry.marker) > MAX_SAFE_FAILURE_MARKER_BYTES
       || typeof entry.code !== "string" || !SAFE_FAILURE_CODE.test(entry.code)
+      || (entry.terminate !== undefined && typeof entry.terminate !== "boolean")
       || codes.has(entry.code)) throw new TypeError("safe failure marker is invalid");
     codes.add(entry.code);
-    return Object.freeze({ code: entry.code, marker: Buffer.from(entry.marker, "utf8") });
+    return Object.freeze({ code: entry.code, marker: Buffer.from(entry.marker, "utf8"), terminate: entry.terminate !== false });
   }));
 }
 
@@ -158,6 +160,7 @@ export function runQualificationCommand(command, args, options) {
   let stderrMarkerTail = Buffer.alloc(0);
   let skipMarker = false;
   let safeFailureCode = null;
+  let safeFailureTerminal = false;
   let safeFailureStdoutTail = Buffer.alloc(0);
   let safeFailureStderrTail = Buffer.alloc(0);
   let spawnError = false;
@@ -190,17 +193,21 @@ export function runQualificationCommand(command, args, options) {
   };
 
   const observeSafeFailureMarker = (chunk, stream) => {
-    if (safeFailureCode !== null || safeFailureMarkers.length === 0) return;
+    if (safeFailureTerminal || safeFailureMarkers.length === 0) return;
     const bytes = asBytes(chunk);
     const previous = stream === "stdout" ? safeFailureStdoutTail : safeFailureStderrTail;
     const candidate = previous.byteLength === 0 ? bytes : Buffer.concat([previous, bytes]);
     for (const entry of safeFailureMarkers) {
       if (includesMarker(candidate, entry.marker)) {
         safeFailureCode = entry.code;
-        safeFailureStdoutTail = Buffer.alloc(0);
-        safeFailureStderrTail = Buffer.alloc(0);
-        if (terminateOnSafeFailure) setImmediate(() => requestTermination());
-        return;
+        if (entry.terminate) {
+          safeFailureTerminal = true;
+          safeFailureStdoutTail = Buffer.alloc(0);
+          safeFailureStderrTail = Buffer.alloc(0);
+          if (terminateOnSafeFailure) setImmediate(() => requestTermination());
+          return;
+        }
+        break;
       }
     }
     const longest = Math.max(...safeFailureMarkers.map((entry) => entry.marker.byteLength));
