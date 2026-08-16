@@ -8,7 +8,6 @@ import {
   classifySessionBootstrap503,
   classifyStoredSessionState,
   findExactActiveRecentAuthSession,
-  installRecentAuthFailureFetchGate,
   P0BLiveBrowserFixtureError,
   runP0BLifecycle,
   startP0BLiveBrowserFixture
@@ -123,32 +122,6 @@ test("recent-auth invalidation targets the page-bound session without latest-row
   assert.doesNotMatch(observed.text, /ORDER BY|LIMIT/u);
   assert.deepEqual(observed.params, [binding.sessionId, binding.memberId, binding.organizationId]);
   assert.equal(await findExactActiveRecentAuthSession({ query: async () => ({ rows: [] }) }, binding), null);
-});
-
-test("recent-auth fetch gate pauses only the exact refresh mutation", async () => {
-  const events = [];
-  const scope = {
-    URL,
-    Request,
-    location: { origin: "https://console.example.test" },
-    async fetch(input) {
-      events.push(["fetch", String(input)]);
-      return "response";
-    },
-    async __gate() {
-      events.push(["gate"]);
-      return true;
-    }
-  };
-  installRecentAuthFailureFetchGate("__gate", scope);
-
-  assert.equal(await scope.fetch("/api/console?operation=device.refresh.request", { method: "POST" }), "response");
-  assert.equal(await scope.fetch("/api/console?operation=device.revoke", { method: "POST" }), "response");
-  assert.deepEqual(events, [
-    ["gate"],
-    ["fetch", "/api/console?operation=device.refresh.request"],
-    ["fetch", "/api/console?operation=device.revoke"]
-  ]);
 });
 
 test("live bootstrap adopts the Console-owned rotation before navigation completes", async () => {

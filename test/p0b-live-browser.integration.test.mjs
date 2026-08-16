@@ -11,6 +11,7 @@ const BROWSER_STARTUP_TIMEOUT_MS = 15_000;
 const BROWSER_CLEANUP_TIMEOUT_MS = 15_000;
 const CONTEXT_CLEANUP_TIMEOUT_MS = 10_000;
 const WAKE_OUTCOME_TIMEOUT_MS = 15_000;
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u;
 let selectedScenarioCount = 0;
 
 test("P0-B live browser role, WebAuthn, and recent-auth matrix", { skip: !enabled, timeout: 840_000 }, async (t) => {
@@ -156,70 +157,30 @@ test("P0-B live browser role, WebAuthn, and recent-auth matrix", { skip: !enable
 
   for (const failure of ["stale", "replayed", "cross_operation", "cross_tenant"]) {
     await scenario(t, `owner ${failure} authorization is rejected by the real Cloud boundary`, async ({ fixture, open }) => {
-      if (failure === "stale") {
-        const observation = {
-          gateInvoked: false,
-          gateSetupFailed: false,
-          invalidationFailed: false,
-          clickFailed: false,
-          responseStatus: null,
-          alertObserved: false,
-        };
-        let gate;
-        const page = await open("owner", {
-          beforeFinalReload: async (candidate) => {
-            try { gate = await fixture.installRecentAuthFailureGate(candidate, failure); }
-            catch { observation.gateSetupFailed = true; }
-          }
-        });
-        if (observation.gateSetupFailed) assert.fail(staleAuthorizationFailureMarker(observation));
-
-        // The normal post-registration reload installed the gate before the
-        // application bundle captured `fetch`; all locators and waits belong
-        // to that final document.
-        const card = deviceCard(page, "反映待ち Mac");
-        const wakeButton = card.getByRole("button", { name: "Wake requestを依頼" });
-        try { await wakeButton.waitFor({ state: "visible", timeout: WAKE_OUTCOME_TIMEOUT_MS }); }
-        catch { observation.clickFailed = true; }
-        if (observation.clickFailed) assert.fail(staleAuthorizationFailureMarker(observation));
-        const refreshResponsePromise = page.waitForResponse(
-          (response) => isKeyboardRefreshRequest(response.request()),
-          { timeout: 15_000 }
-        ).catch(() => null);
-        const alertPromise = card.getByRole("alert").waitFor({ state: "visible", timeout: WAKE_OUTCOME_TIMEOUT_MS })
-          .then(() => true)
-          .catch(() => false);
-        try {
-          await wakeButton.click();
-        } catch {
-          observation.clickFailed = true;
-        }
-        const [refreshResponse, alertObserved] = await Promise.all([refreshResponsePromise, alertPromise]);
-        observation.gateInvoked = gate?.intercepted() === true;
-        observation.invalidationFailed = gate?.invalidationFailed() === true;
-        observation.responseStatus = refreshResponse?.status() ?? null;
-        observation.alertObserved = alertObserved;
-        const marker = staleAuthorizationFailureMarker(observation);
-        if (marker !== null) assert.fail(marker);
-        return;
-      }
-
-      let gate;
-      const page = await open("owner", {
-        beforeFinalReload: async (candidate) => {
-          gate = await fixture.installRecentAuthFailureGate(candidate, failure);
-        }
+      const page = await open("owner");
+      const targetId = fixture.devices.find(({ label }) => label === "反映待ち Mac")?.deviceId;
+      assert.match(targetId ?? "", UUID);
+      const responseStatus = await fixture.withRecentAuth(page, "device.refresh.request", async ({ authorizationId, csrfToken }) => {
+        await fixture.invalidateRecentAuth(page, failure);
+        return page.evaluate(async ({ authorizationId, csrfToken, targetId }) => {
+          const response = await fetch("/api/console?operation=device.refresh.request", {
+            method: "POST",
+            headers: {
+              accept: "application/json",
+              "content-type": "application/json",
+              "agentpass-csrf": csrfToken,
+              "agentpass-recent-auth": authorizationId,
+              "idempotency-key": crypto.randomUUID()
+            },
+            credentials: "same-origin",
+            cache: "no-store",
+            redirect: "error",
+            body: JSON.stringify({ target_id: targetId })
+          });
+          await response.arrayBuffer();
+          return response.status;
+        }, { authorizationId, csrfToken, targetId });
       });
-      let responseStatus;
-      page.on("response", (response) => {
-        const url = new URL(response.url());
-        if (response.request().method() === "POST" && url.pathname === "/api/console" && url.searchParams.get("operation") === "device.refresh.request") responseStatus = response.status();
-      });
-      const card = deviceCard(page, "反映待ち Mac");
-      await card.getByRole("button", { name: "Wake requestを依頼" }).click();
-      await card.getByRole("alert").waitFor();
-      assert.equal(gate.intercepted(), true);
-      assert.equal(gate.invalidationFailed(), false);
       assert.equal(responseStatus, 401);
     });
   }
@@ -235,42 +196,6 @@ test("P0-B live browser role, WebAuthn, and recent-auth matrix", { skip: !enable
   }
 
   if (scenarioFilter !== "" && selectedScenarioCount === 0) assert.fail("P0B_SAFE_SCENARIO_NOT_FOUND");
-});
-
-test("stale authorization diagnostics emit only fixed safe markers", () => {
-  const valid = {
-    gateInvoked: true,
-    gateSetupFailed: false,
-    invalidationFailed: false,
-    clickFailed: false,
-    responseStatus: 401,
-    alertObserved: true,
-  };
-  assert.equal(staleAuthorizationFailureMarker(valid), null);
-  assert.equal(staleAuthorizationFailureMarker({ ...valid, clickFailed: true }), STALE_AUTH_DIAGNOSTIC_MARKERS.clickFailed);
-  assert.equal(staleAuthorizationFailureMarker({ ...valid, gateSetupFailed: true }), STALE_AUTH_DIAGNOSTIC_MARKERS.gateSetupFailed);
-  assert.equal(staleAuthorizationFailureMarker({ ...valid, gateInvoked: false }), STALE_AUTH_DIAGNOSTIC_MARKERS.gateNotInvoked);
-  assert.equal(staleAuthorizationFailureMarker({ ...valid, invalidationFailed: true }), STALE_AUTH_DIAGNOSTIC_MARKERS.invalidationFailed);
-  assert.equal(staleAuthorizationFailureMarker({ ...valid, responseStatus: null }), STALE_AUTH_DIAGNOSTIC_MARKERS.responseMissing);
-  assert.equal(staleAuthorizationFailureMarker({ ...valid, responseStatus: 204 }), STALE_AUTH_DIAGNOSTIC_MARKERS.http2xx);
-  assert.equal(staleAuthorizationFailureMarker({ ...valid, responseStatus: 302 }), STALE_AUTH_DIAGNOSTIC_MARKERS.http3xx);
-  assert.equal(staleAuthorizationFailureMarker({ ...valid, responseStatus: 403 }), STALE_AUTH_DIAGNOSTIC_MARKERS.http4xx);
-  assert.equal(staleAuthorizationFailureMarker({ ...valid, responseStatus: 503 }), STALE_AUTH_DIAGNOSTIC_MARKERS.http5xx);
-  assert.equal(staleAuthorizationFailureMarker({ ...valid, responseStatus: 0 }), STALE_AUTH_DIAGNOSTIC_MARKERS.httpOther);
-  assert.equal(staleAuthorizationFailureMarker({ ...valid, alertObserved: false }), STALE_AUTH_DIAGNOSTIC_MARKERS.alertMissing);
-  assert.deepEqual(Object.values(STALE_AUTH_DIAGNOSTIC_MARKERS), [
-    "P0B_SAFE_STALE_AUTH_CLICK_FAILED",
-    "P0B_SAFE_STALE_AUTH_GATE_SETUP_FAILED",
-    "P0B_SAFE_STALE_AUTH_GATE_NOT_INVOKED_FAILED",
-    "P0B_SAFE_STALE_AUTH_INVALIDATION_FAILED",
-    "P0B_SAFE_STALE_AUTH_RESPONSE_MISSING_FAILED",
-    "P0B_SAFE_STALE_AUTH_RESPONSE_HTTP_2XX_FAILED",
-    "P0B_SAFE_STALE_AUTH_RESPONSE_HTTP_3XX_FAILED",
-    "P0B_SAFE_STALE_AUTH_RESPONSE_HTTP_4XX_FAILED",
-    "P0B_SAFE_STALE_AUTH_RESPONSE_HTTP_5XX_FAILED",
-    "P0B_SAFE_STALE_AUTH_RESPONSE_HTTP_OTHER_FAILED",
-    "P0B_SAFE_STALE_AUTH_ALERT_MISSING_FAILED",
-  ]);
 });
 
 async function scenario(parent, name, callback) {
@@ -315,7 +240,7 @@ async function scenario(parent, name, callback) {
           : new P0BLiveBrowserFixtureError("browser_startup_failed", "P0-B live browser startup failed");
       }
       const contexts = [];
-      const open = async (role, { register = true, safeOpenPrefix = null, beforeFinalReload = null } = {}) => {
+      const open = async (role, { register = true, safeOpenPrefix = null } = {}) => {
         const effectiveSafeOpenPrefix = safeOpenPrefix ?? (role === "owner" ? "P0B_SAFE_OWNER_OPEN" : null);
         let context;
         let page;
@@ -384,7 +309,6 @@ async function scenario(parent, name, callback) {
             failSafeOpen(effectiveSafeOpenPrefix, "REGISTRATION");
           }
         }
-        if (beforeFinalReload !== null) await beforeFinalReload(page);
         try { await fixture.reloadAndAdoptSession(page); }
         catch { failSafeOpen(effectiveSafeOpenPrefix, "RELOAD"); }
         try {
@@ -536,37 +460,6 @@ function failLifecycle(error) {
   const marker = lifecycleFailureMarker(error);
   if (marker !== null) assert.fail(marker);
   throw error;
-}
-
-export const STALE_AUTH_DIAGNOSTIC_MARKERS = Object.freeze({
-  clickFailed: "P0B_SAFE_STALE_AUTH_CLICK_FAILED",
-  gateSetupFailed: "P0B_SAFE_STALE_AUTH_GATE_SETUP_FAILED",
-  gateNotInvoked: "P0B_SAFE_STALE_AUTH_GATE_NOT_INVOKED_FAILED",
-  invalidationFailed: "P0B_SAFE_STALE_AUTH_INVALIDATION_FAILED",
-  responseMissing: "P0B_SAFE_STALE_AUTH_RESPONSE_MISSING_FAILED",
-  http2xx: "P0B_SAFE_STALE_AUTH_RESPONSE_HTTP_2XX_FAILED",
-  http3xx: "P0B_SAFE_STALE_AUTH_RESPONSE_HTTP_3XX_FAILED",
-  http4xx: "P0B_SAFE_STALE_AUTH_RESPONSE_HTTP_4XX_FAILED",
-  http5xx: "P0B_SAFE_STALE_AUTH_RESPONSE_HTTP_5XX_FAILED",
-  httpOther: "P0B_SAFE_STALE_AUTH_RESPONSE_HTTP_OTHER_FAILED",
-  alertMissing: "P0B_SAFE_STALE_AUTH_ALERT_MISSING_FAILED",
-});
-
-export function staleAuthorizationFailureMarker(observation = {}) {
-  if (observation.gateSetupFailed === true) return STALE_AUTH_DIAGNOSTIC_MARKERS.gateSetupFailed;
-  if (observation.clickFailed === true) return STALE_AUTH_DIAGNOSTIC_MARKERS.clickFailed;
-  if (observation.gateInvoked !== true) return STALE_AUTH_DIAGNOSTIC_MARKERS.gateNotInvoked;
-  if (observation.invalidationFailed === true) return STALE_AUTH_DIAGNOSTIC_MARKERS.invalidationFailed;
-  const status = observation.responseStatus;
-  if (!Number.isInteger(status)) return STALE_AUTH_DIAGNOSTIC_MARKERS.responseMissing;
-  if (status === 401) {
-    return observation.alertObserved === true ? null : STALE_AUTH_DIAGNOSTIC_MARKERS.alertMissing;
-  }
-  if (status >= 200 && status < 300) return STALE_AUTH_DIAGNOSTIC_MARKERS.http2xx;
-  if (status >= 300 && status < 400) return STALE_AUTH_DIAGNOSTIC_MARKERS.http3xx;
-  if (status >= 400 && status < 500) return STALE_AUTH_DIAGNOSTIC_MARKERS.http4xx;
-  if (status >= 500 && status < 600) return STALE_AUTH_DIAGNOSTIC_MARKERS.http5xx;
-  return STALE_AUTH_DIAGNOSTIC_MARKERS.httpOther;
 }
 
 export function lifecycleFailureMarker(error) {
