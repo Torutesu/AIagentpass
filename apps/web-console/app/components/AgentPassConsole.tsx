@@ -576,8 +576,14 @@ async function responseEndsConsoleSession(response: Response): Promise<boolean> 
   return ["authentication_required", "human_session_invalid", "session_expired", "session_revoked", "session_not_found", "invalid_session_cookie"].includes(code);
 }
 
-async function fetchConsole(path: string, init: RequestInit = {}): Promise<Response> {
-  const session = await consoleSessionContext.get(init.signal ?? undefined);
+async function fetchConsole(path: string, init: RequestInit = {}, sessionOverride?: ConsoleSession): Promise<Response> {
+  // A recent-authenticated mutation must use the exact session snapshot that
+  // was supplied to the WebAuthn ceremony. Re-reading the authority after
+  // that ceremony creates a race with session invalidation/rotation: the
+  // proof can belong to one session while the CSRF-bound mutation belongs to
+  // another. Callers that do not own a ceremony continue to use the shared
+  // authority as before.
+  const session = sessionOverride ?? await consoleSessionContext.get(init.signal ?? undefined);
   const method = String(init.method ?? "GET").toUpperCase();
   const headers = new Headers(init.headers);
   headers.set("accept", "application/json");
@@ -1521,14 +1527,15 @@ export function AgentPassConsole() {
 
   const requestDeviceRefresh = async (deviceId: string): Promise<DeviceRefreshRequestStatus> => {
     if (sessionRole !== "owner" && sessionRole !== "admin") throw new Error("role denied");
-    const { organizationId, csrfToken } = await consoleSessionContext.get();
+    const session = await consoleSessionContext.get();
+    const { organizationId, csrfToken } = session;
     if (!supportsWebAuthn()) throw new Error("WebAuthn unavailable");
     const { authorization_id } = await authenticateRecentAuth({ operation: DEVICE_REFRESH_REQUEST_RECENT_AUTH_OPERATION, organizationId, csrfToken });
     const response = await fetchConsole("/api/console?operation=device.refresh.request", {
       method: "POST",
       headers: { "content-type": "application/json", "idempotency-key": crypto.randomUUID(), "agentpass-recent-auth": authorization_id },
       body: JSON.stringify({ target_id: deviceId }),
-    });
+    }, session);
     let payload: unknown;
     try {
       payload = await response.json();
