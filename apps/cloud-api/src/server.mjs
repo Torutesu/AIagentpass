@@ -1092,7 +1092,7 @@ function isExactHumanAuthPath(url, method = undefined) {
   if (HUMAN_QUALIFICATION_GRANT_BATCH_PATH.test(url.pathname)) return true;
   if (!url.search && (url.pathname === HUMAN_AUTH_SESSION_PATH || url.pathname === HUMAN_AUTH_SESSION_RESUME_PATH || url.pathname === HUMAN_AUTH_OPTIONS_PATH || url.pathname === HUMAN_AUTH_VERIFY_PATH || url.pathname === HUMAN_AUTH_REGISTRATION_OPTIONS_PATH || url.pathname === HUMAN_AUTH_REGISTRATION_VERIFY_PATH)) return true;
   if (isExactHumanOrganizationPath(url, method)) return true;
-  return /^\/api\/auth\/management\/(?:credentials(?:\/[A-Za-z0-9_-]+(?:\/revoke)?)?|sessions(?:\/[0-9a-fA-F-]{36}\/revoke)?)$/.test(url.pathname);
+  return /^\/api\/auth\/management\/(?:credentials(?:\/[A-Za-z0-9_-]+(?:\/revoke)?)?|sessions(?:\/revoke-others|\/[0-9a-fA-F-]{36}\/revoke)?)$/.test(url.pathname);
 }
 
 function isExactHumanOrganizationPath(url, method) {

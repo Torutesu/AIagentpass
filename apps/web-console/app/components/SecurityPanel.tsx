@@ -70,12 +70,15 @@ export function SecurityPanel({ onSessionExpired, onSessionSignedOut, securityCl
       handleSessionFailure(caught, onSessionExpired);
       const ambiguous = isAmbiguousSecurityMutationError(caught) || isAmbiguousWebAuthnMutationError(caught);
       const conflict = caught instanceof SecurityClientError && caught.status === 409;
+      const lastActiveCredential = isLastActiveCredentialError(caught);
       if (ambiguous || conflict) {
         const reconciled = await load();
         if (ambiguous) {
           setError(reconciled
             ? "操作結果を確認できなかったため、最新の権威状態を再取得しました。操作は自動再送していません。内容を確認してください。"
             : "操作結果を確認できず、最新の権威状態も取得できませんでした。操作は自動再送していません。接続を確認して再読み込みしてください。");
+        } else if (lastActiveCredential) {
+          setError(securityPanelError(caught));
         } else {
           setError(reconciled
             ? "情報が更新されていたため、最新の権威状態を再取得しました。内容を確認してから操作してください。"

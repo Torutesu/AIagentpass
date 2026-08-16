@@ -348,7 +348,7 @@ export function OrganizationPanel({ client: suppliedClient, initialOrganizationI
             : "応答を確認できなかったため、権威状態を再取得しました。操作は再送していません。表示された状態を確認してください。")
           : "変更結果を確認できませんでした。再送せず、最新の状態をもう一度確認してください。";
         const lastOwnerConflict = isLastOwnerProtectionError(error);
-        setMutationError({ status: "error", code: lastOwnerConflict ? "last_owner_protected" : "reconciliation_required", error: lastOwnerConflict ? LAST_OWNER_REMEDIATION : message });
+        setMutationError({ status: "error", code: lastOwnerConflict ? "last_owner_protected" : knownConcurrentOutcome && reconciliationError === undefined ? "conflict" : "reconciliation_required", error: lastOwnerConflict ? LAST_OWNER_REMEDIATION : message });
         setRetryAction({
           label: "最新の状態を再確認",
           run: async () => {
@@ -543,7 +543,7 @@ export function OrganizationPanel({ client: suppliedClient, initialOrganizationI
       reconcileOnConflict: true,
       reconciliationMessage: isCurrentSessionMember
         ? "現在の権限変更を確認できないため、共有セッションを無効化しました。再送せず、最新の組織一覧を確認してください。"
-        : "メンバーの変更結果を確認できなかったため、最新の権威状態を取得しました。操作は再送していません。表示された状態を確認してください。",
+        : "他の管理者が先に変更しました。最新の権威状態を取得し、操作は再送していません。表示された状態を確認してください。",
       reconcile: reconcileMemberMutation,
     });
   };
