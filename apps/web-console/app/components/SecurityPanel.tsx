@@ -26,24 +26,35 @@ export function SecurityPanel({ onSessionExpired, onSessionSignedOut, securityCl
   const [renameTarget, setRenameTarget] = useState<string | null>(null);
   const [renameLabel, setRenameLabel] = useState("");
   const [signedOut, setSignedOut] = useState(false);
+  const loadEpochRef = useRef(0);
 
   const load = useCallback(async (signal?: AbortSignal, clearMessages = true): Promise<boolean> => {
+    const loadEpoch = ++loadEpochRef.current;
     setLoadState("loading");
     if (clearMessages) {
       setError("");
       setNotice("");
     }
     try {
-      setSnapshot(await client.getSnapshot({ signal }));
+      const nextSnapshot = await client.getSnapshot({ signal });
+      // A mutation owns the visible outcome once it has committed. An older
+      // inventory request must not overwrite that outcome or put the panel
+      // back into an intermediate state after the mutation starts.
+      if (loadEpoch !== loadEpochRef.current) return false;
+      setSnapshot(nextSnapshot);
       setLoadState("ready");
       return true;
     } catch (caught) {
       if (isAbortError(caught)) return false;
-      handleSessionFailure(caught, onSessionExpired);
+      // A stale read may no longer own the rendered snapshot, but an
+      // authoritative session failure still belongs to the parent Console.
+      const sessionError = isSessionError(caught);
+      if (sessionError) handleSessionFailure(caught, onSessionExpired);
+      if (loadEpoch !== loadEpochRef.current) return false;
       // The parent removes this panel immediately after an authoritative
       // session failure. Do not enqueue child state updates after that
       // transition; they can race the fail-closed surface.
-      if (isSessionError(caught) && onSessionExpired !== undefined) return false;
+      if (sessionError && onSessionExpired !== undefined) return false;
       setLoadState("error");
       setError(securityPanelError(caught));
       return false;
@@ -61,6 +72,9 @@ export function SecurityPanel({ onSessionExpired, onSessionSignedOut, securityCl
 
   const runAction = async (key: string, action: () => Promise<void>, successMessage: string, reload = true) => {
     if (actionKey !== null) return;
+    // Invalidate any inventory request that was started before this action.
+    // Its eventual result is no longer authoritative for the post-mutation UI.
+    loadEpochRef.current += 1;
     setActionKey(key);
     setError("");
     setNotice("");

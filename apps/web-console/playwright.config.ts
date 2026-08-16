@@ -24,6 +24,10 @@ export default defineConfig({
   forbidOnly: Boolean(process.env.CI),
   retries: process.env.CI ? 1 : 0,
   reporter: process.env.CI ? "line" : "list",
+  // Playwright's failure context is a Markdown file that the repository-wide
+  // artifact gate cannot parse. Screenshots, video, and traces are disabled
+  // below, so retaining test output would add no supported diagnostic value.
+  preserveOutput: "never",
   outputDir: "./e2e/test-results",
   use: {
     baseURL: `http://localhost:${e2ePort}`,

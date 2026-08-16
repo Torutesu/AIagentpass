@@ -206,11 +206,11 @@ async function openOrganizationPanel(page: Page): Promise<void> {
   await expect(page.getByRole("heading", { name: "組織を安全に管理する" })).toBeVisible();
 }
 
-async function openSecurityPanel(page: Page): Promise<void> {
+async function openSecurityPanel(page: Page, options: { expectPanel?: boolean } = {}): Promise<void> {
   await page.goto("/");
   await expect(page.getByRole("heading", { name: /Agentの状態を、\s*確認できました。/u })).toBeVisible();
   await page.getByRole("button", { name: "セキュリティ", exact: true }).click();
-  await expect(page.getByRole("heading", { name: "アカウントを守る" })).toBeVisible();
+  if (options.expectPanel !== false) await expect(page.getByRole("heading", { name: "アカウントを守る" })).toBeVisible();
 }
 
 async function installOrganizationRoutes(page: Page, role: "owner" | "admin"): Promise<OrganizationRouteState> {
@@ -669,7 +669,7 @@ for (const status of [401, 403] as const) {
     const consoleMessages: string[] = [];
     page.on("console", (message) => consoleMessages.push(message.text()));
     const state = await installSecurityRoutes(page, status);
-    await openSecurityPanel(page);
+    await openSecurityPanel(page, { expectPanel: false });
     await expect(page.getByText("セッションの有効期限が切れました", { exact: true })).toBeVisible();
     await expect(page.getByRole("button", { name: "名前を変更", exact: true })).toHaveCount(0);
     await expect(page.getByRole("button", { name: "サインアウト", exact: true })).toHaveCount(0);

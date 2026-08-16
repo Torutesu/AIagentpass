@@ -4,6 +4,7 @@ import test from "node:test";
 
 const componentPath = new URL("../app/components/AgentPassConsole.tsx", import.meta.url);
 const panelPath = new URL("../app/components/SecurityPanel.tsx", import.meta.url);
+const playwrightConfigPath = new URL("../playwright.config.ts", import.meta.url);
 
 test("Console exposes a Japanese Security surface with bounded loading, empty, error, rename, and revoke states", async () => {
   const source = await readFile(componentPath, "utf8");
@@ -79,6 +80,27 @@ test("committed Security mutations retain their outcome when reconciliation is u
   assert.ok(mutationCommit >= 0);
   assert.ok(successNotice > mutationCommit);
   assert.ok(reconciliation > successNotice);
-  assert.match(panel, /if \(isSessionError\(caught\) && onSessionExpired !== undefined\) return false;/);
+  assert.match(panel, /if \(sessionError && onSessionExpired !== undefined\) return false;/);
   assert.match(panel, /if \(isSessionError\(caught\) && onSessionExpired !== undefined\) return;/);
+});
+
+test("stale Security inventory loads cannot overwrite a committed mutation outcome", async () => {
+  const panel = await readFile(panelPath, "utf8");
+  assert.match(panel, /const loadEpochRef = useRef\(0\);/);
+  assert.match(panel, /const loadEpoch = \+\+loadEpochRef\.current;/);
+  assert.match(panel, /if \(loadEpoch !== loadEpochRef\.current\) return false;/);
+  assert.match(panel, /loadEpochRef\.current \+= 1;/);
+  const staleLoadCatch = panel.indexOf("const sessionError = isSessionError(caught);");
+  const staleLoadGuard = panel.indexOf("if (loadEpoch !== loadEpochRef.current) return false;", staleLoadCatch);
+  assert.ok(staleLoadCatch >= 0);
+  assert.ok(staleLoadGuard > staleLoadCatch);
+  assert.ok(panel.indexOf("if (sessionError) handleSessionFailure(caught, onSessionExpired);", staleLoadCatch) < staleLoadGuard);
+});
+
+test("browser failure output is not retained outside the supported artifact contract", async () => {
+  const config = await readFile(playwrightConfigPath, "utf8");
+  assert.match(config, /preserveOutput:\s*"never"/);
+  assert.match(config, /trace:\s*"off"/);
+  assert.match(config, /video:\s*"off"/);
+  assert.match(config, /screenshot:\s*"off"/);
 });
