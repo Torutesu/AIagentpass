@@ -700,15 +700,28 @@ lifecycle without expanding the signing protocol, and (3) add the operator UX
 and Cursor parity matrix. KMS provisioning and Apple notarization preparation
 may run in parallel once their external credentials and accounts are available.
 
-### 12.3.4 Exact forward queue from `1a9c027`
+### 12.3.4 Exact forward queue from `a6752ec`
 
 The current head freezes the public `agentpass launch` argument contract,
-implements the bounded private-FD Git bridge transport and one-shot native
-client, and requires a canonical Cloud-signed capability to be verified and
-atomically consumed before native key use. The durable signing transaction is
-bound to the capability-body digest, so an identifier-preserving capability
-substitution cannot replay a completed request. These are source-complete
-boundaries; they do not yet constitute a working Claude Code lifecycle.
+requires a canonical Cloud-signed capability to be verified and atomically
+consumed before native key use, implements the canonical one-use Host handoff,
+adds a fixed-adapter child-supervision primitive, and implements both sides of
+the one-shot private-FD Git bridge. The helper half-closes its request direction
+and the Host requires EOF before signing, so a late second frame cannot race the
+one-signature boundary. The durable signing transaction is bound to the
+capability-body digest, so an identifier-preserving capability substitution
+cannot replay a completed request. These are source-complete primitives; the
+Host coordinator has not yet wired them into a working Claude Code lifecycle.
+
+Current checkpoint:
+
+| Unit | State at `a6752ec` | Immediate next merge boundary |
+| --- | --- | --- |
+| A0 | PostgreSQL 16/17, PostgreSQL integration, root/Console/native lanes passed on the preceding candidate; Browser E2E and P0-B fixes are being requalified on the new exact SHA. | Retain one terminal Actions run for `a6752ec` or its forward-fix successor; repair only the owning lane. |
+| A1 | Canonical bounded FD3 handoff is implemented with duplicate/unknown/noncanonical rejection and transient-buffer zeroing. | Connect the decoder to a one-use Host coordinator and prove expiry/replay/boot/process substitution at the integration boundary. |
+| A2 | Fixed Claude Code adapter, canonical project directory, strict environment allowlist, owned process group, TERM/INT forwarding, reap, and bounded exit classes are implemented as an isolated primitive. | Bind spawn/monitor/close to the same qualified XPC connection; close every private FD and session on child or authority loss. |
+| A3 | Helper client and Host server are implemented with one-use reservation, bounded frames, request half-close/EOF, signer-at-most-once, close-on-all-paths, and no authority selector. | Create the private socketpair in the Host, pass only the helper endpoint, wire the server signer to `signGitCommit`, and prove a real `git commit -S`. |
+| A4-A8 | Not complete. Existing lower-level Cloud, Console, PostgreSQL, signer, release, and evidence components remain inputs, not proof of the end-to-end product. | Execute in dependency order below; no phase inherits a green claim from a lower-level unit test alone. |
 
 The remaining path is split into merge-sized units below. Each unit must land
 with its own negative tests and may not broaden the five-selector Agent XPC
