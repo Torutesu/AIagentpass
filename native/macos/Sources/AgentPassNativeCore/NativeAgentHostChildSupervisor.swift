@@ -665,13 +665,23 @@ public final class NativeAgentHostChildSession: @unchecked Sendable {
 /// Starts and supervises one fixed-adapter Host child.
 public final class NativeAgentHostChildSupervisor: @unchecked Sendable {
     private let hooks: NativeAgentHostChildSupervisorHooks
+    private let executableProbe: @Sendable (String) -> Bool
 
-    public init(hooks: NativeAgentHostChildSupervisorHooks = .system) {
+    public init(
+        hooks: NativeAgentHostChildSupervisorHooks = .system,
+        executableProbe: @escaping @Sendable (String) -> Bool = { path in
+            FileManager.default.isExecutableFile(atPath: path)
+        }
+    ) {
         self.hooks = hooks
+        self.executableProbe = executableProbe
     }
 
     public func start(_ request: NativeAgentHostChildLaunchRequest) throws -> NativeAgentHostChildSession {
-        let adapter = try NativeAgentHostFixedAdapter.command(for: request.adapter)
+        let adapter = try NativeAgentHostFixedAdapter.command(
+            for: request.adapter,
+            executableProbe: executableProbe
+        )
         let environment = try NativeAgentHostStrictEnvironment.make(
             from: request.trustedEnvironment,
             projectDirectory: request.projectDirectory.path
@@ -769,7 +779,24 @@ private struct NativeAgentHostFixedAdapter {
     let executablePath: String
     let arguments: [String]
 
-    static func command(for kind: NativeAgentHostAdapterKind) throws -> Self {
+    /// The Cursor desktop application exposes its CLI through the bundled
+    /// `code`/`cursor` launcher. Current Cursor Agent installations also use
+    /// the explicit `cursor-agent` name when an administrator places the CLI
+    /// in a system bin directory. These are the complete reviewed candidates;
+    /// user-home installs (including `~/.local/bin`) and PATH lookup are
+    /// intentionally excluded because they are mutable by the agent user.
+    private static let cursorExecutableCandidates = [
+        "/Applications/Cursor.app/Contents/Resources/app/bin/code",
+        "/Applications/Cursor.app/Contents/Resources/app/bin/cursor",
+        "/opt/cursor-agent",
+        "/opt/homebrew/bin/cursor-agent",
+        "/usr/local/bin/cursor-agent"
+    ]
+
+    static func command(
+        for kind: NativeAgentHostAdapterKind,
+        executableProbe: @Sendable (String) -> Bool
+    ) throws -> Self {
         switch kind {
         case .claudeCode:
             // These are fixed, reviewed installation locations. The caller
@@ -785,7 +812,13 @@ private struct NativeAgentHostFixedAdapter {
             let executable = candidates.first(where: { FileManager.default.isExecutableFile(atPath: $0) }) ?? preferred
             return Self(executablePath: executable, arguments: [])
         case .cursor:
-            throw NativeAgentHostChildSupervisorError.unsupportedAdapter
+            guard let executable = cursorExecutableCandidates.first(where: executableProbe) else {
+                // Do not fall back to an arbitrary path, PATH lookup, or a
+                // caller-provided command. The bounded error contains no
+                // path, errno, or process detail that could disclose state.
+                throw NativeAgentHostChildSupervisorError.launchFailed
+            }
+            return Self(executablePath: executable, arguments: [])
         }
     }
 }

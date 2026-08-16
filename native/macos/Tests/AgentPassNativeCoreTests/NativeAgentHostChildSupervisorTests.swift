@@ -159,6 +159,30 @@ private final class ProjectDirectoryHookFixture: @unchecked Sendable {
     }
 }
 
+private final class ExecutableProbeFixture: @unchecked Sendable {
+    private let lock = NSLock()
+    private let executablePaths: Set<String>
+    private var probedPaths: [String] = []
+
+    init(executablePaths: Set<String>) {
+        self.executablePaths = executablePaths
+    }
+
+    func probe(_ path: String) -> Bool {
+        lock.lock()
+        probedPaths.append(path)
+        let result = executablePaths.contains(path)
+        lock.unlock()
+        return result
+    }
+
+    func paths() -> [String] {
+        lock.lock()
+        defer { lock.unlock() }
+        return probedPaths
+    }
+}
+
 private enum TestFixtureError: Error {
     case failed
 }
@@ -352,10 +376,13 @@ private func makeHookedProjectDirectory(
     }
 }
 
-@Test func fixedAdapterHasNoExecutableSelectorAndCursorIsNotYetLaunchable() throws {
+@Test func fixedAdapterHasNoExecutableSelectorAndCursorFailsClosedWithoutAReviewedCLI() throws {
     try withTemporaryProjectDirectory { project in
         let fixture = HostSupervisorFixture()
-        let supervisor = NativeAgentHostChildSupervisor(hooks: fixture.hooks())
+        let supervisor = NativeAgentHostChildSupervisor(
+            hooks: fixture.hooks(),
+            executableProbe: { _ in false }
+        )
         let request = try makeRequest(projectDirectory: project)
         _ = try supervisor.start(request)
 
@@ -368,9 +395,139 @@ private func makeHookedProjectDirectory(
             || spec?.executablePath == "/usr/local/bin/claude")
 
         let cursorRequest = try makeRequest(adapter: .cursor, projectDirectory: project)
-        #expect(throws: NativeAgentHostChildSupervisorError.unsupportedAdapter) {
+        #expect(throws: NativeAgentHostChildSupervisorError.launchFailed) {
             _ = try supervisor.start(cursorRequest)
         }
+    }
+}
+
+@Test func cursorAdapterUsesOnlyTheReviewedFixedCandidateSet() throws {
+    let expectedCandidates = [
+        "/Applications/Cursor.app/Contents/Resources/app/bin/code",
+        "/Applications/Cursor.app/Contents/Resources/app/bin/cursor",
+        "/opt/cursor-agent",
+        "/opt/homebrew/bin/cursor-agent",
+        "/usr/local/bin/cursor-agent"
+    ]
+    try withTemporaryProjectDirectory { project in
+        let fixture = HostSupervisorFixture()
+        let probe = ExecutableProbeFixture(executablePaths: [expectedCandidates[1]])
+        let supervisor = NativeAgentHostChildSupervisor(
+            hooks: fixture.hooks(),
+            executableProbe: { [probe] path in probe.probe(path) }
+        )
+
+        _ = try supervisor.start(try makeRequest(adapter: .cursor, projectDirectory: project))
+
+        let spec = try #require(fixture.snapshot().spec)
+        #expect(spec.executablePath == expectedCandidates[1])
+        #expect(spec.arguments.isEmpty)
+        #expect(probe.paths() == Array(expectedCandidates.prefix(2)))
+    }
+}
+
+@Test func cursorAdapterWithNoCandidateDoesNotCreateAChildOrExposeUnknownPath() throws {
+    let expectedCandidates = [
+        "/Applications/Cursor.app/Contents/Resources/app/bin/code",
+        "/Applications/Cursor.app/Contents/Resources/app/bin/cursor",
+        "/opt/cursor-agent",
+        "/opt/homebrew/bin/cursor-agent",
+        "/usr/local/bin/cursor-agent"
+    ]
+    try withTemporaryProjectDirectory { project in
+        let fixture = HostSupervisorFixture()
+        let probe = ExecutableProbeFixture(executablePaths: ["/tmp/attacker/cursor-agent"])
+        let supervisor = NativeAgentHostChildSupervisor(
+            hooks: fixture.hooks(),
+            executableProbe: { [probe] path in probe.probe(path) }
+        )
+
+        #expect(throws: NativeAgentHostChildSupervisorError.launchFailed) {
+            _ = try supervisor.start(try makeRequest(adapter: .cursor, projectDirectory: project))
+        }
+        #expect(probe.paths() == expectedCandidates)
+        #expect(fixture.snapshot().spec == nil)
+        #expect(fixture.snapshot().waitCallCount == 0)
+        #expect(fixture.privateBridgeActions().duplicates.isEmpty)
+    }
+}
+
+@Test func cursorAdapterReusesPrivateBridgeCwdAndOwnedProcessGroupConstraints() throws {
+    let cursorBundleCLI = "/Applications/Cursor.app/Contents/Resources/app/bin/code"
+    try withTemporaryProjectDirectory { project in
+        let fixture = HostSupervisorFixture()
+        let supervisor = NativeAgentHostChildSupervisor(
+            hooks: fixture.hooks(),
+            executableProbe: { path in path == cursorBundleCLI }
+        )
+
+        let session = try supervisor.start(
+            try makeRequest(adapter: .cursor, projectDirectory: project)
+        )
+        let spec = try #require(fixture.snapshot().spec)
+        let actions = fixture.privateBridgeActions()
+
+        #expect(spec.executablePath == cursorBundleCLI)
+        #expect(spec.arguments.isEmpty)
+        #expect(spec.workingDirectory == project.path)
+        #expect(spec.workingDirectoryFD >= 4)
+        #expect(spec.useOwnedProcessGroup)
+        #expect(spec.hasPrivateGitBridgeHandoff)
+        #expect(actions.duplicates.count == 1)
+        #expect(actions.duplicates[0].1 == NativeAgentPrivateGitBridgeSocketPair.reviewedChildFileDescriptor)
+        #expect(actions.closes == [actions.duplicates[0].0])
+        #expect(!spec.executablePath.hasSuffix("/sh"))
+        #expect(!spec.arguments.contains("-c"))
+
+        _ = try session.wait()
+    }
+}
+
+@Test func cursorAdapterRejectsPathArgvShellAndGitOverrides() throws {
+    let cursorBundleCLI = "/Applications/Cursor.app/Contents/Resources/app/bin/code"
+    try withTemporaryProjectDirectory { project in
+        let fixture = HostSupervisorFixture()
+        let supervisor = NativeAgentHostChildSupervisor(
+            hooks: fixture.hooks(),
+            executableProbe: { path in path == cursorBundleCLI }
+        )
+        let request = try makeRequest(
+            adapter: .cursor,
+            projectDirectory: project,
+            environment: [
+                "PATH": "/tmp/attacker-bin",
+                "CURSOR_CLI": "/tmp/attacker-cursor",
+                "CURSOR_AGENT": "/tmp/attacker-agent",
+                "SHELL": "/tmp/attacker-shell",
+                "BASH_ENV": "/tmp/attacker-env",
+                "GIT_CONFIG_COUNT": "99",
+                "GIT_CONFIG_KEY_0": "core.sshCommand",
+                "GIT_CONFIG_VALUE_0": "/tmp/attacker-ssh",
+                "GIT_CONFIG_KEY_1": "user.signingkey",
+                "GIT_CONFIG_VALUE_1": "/tmp/attacker-key"
+            ]
+        )
+
+        _ = try supervisor.start(request)
+        let spec = try #require(fixture.snapshot().spec)
+        let environment = spec.environment
+
+        #expect(spec.executablePath == cursorBundleCLI)
+        #expect(spec.arguments.isEmpty)
+        #expect(environment["PATH"] == "/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin:/usr/local/bin")
+        #expect(environment["CURSOR_CLI"] == nil)
+        #expect(environment["CURSOR_AGENT"] == nil)
+        #expect(environment["SHELL"] == nil)
+        #expect(environment["BASH_ENV"] == nil)
+        #expect(environment["GIT_CONFIG_COUNT"] == "4")
+        #expect(environment["GIT_CONFIG_KEY_0"] == "gpg.format")
+        #expect(environment["GIT_CONFIG_VALUE_0"] == "ssh")
+        #expect(environment["GIT_CONFIG_KEY_1"] == "gpg.ssh.program")
+        #expect(environment["GIT_CONFIG_VALUE_1"] == NativeAgentHostGitConfiguration.helperExecutablePath)
+        #expect(environment["GIT_CONFIG_KEY_2"] == "user.signingkey")
+        #expect(environment["GIT_CONFIG_VALUE_2"] == NativeAgentHostGitConfiguration.signerReference)
+        #expect(environment["GIT_CONFIG_KEY_3"] == "commit.gpgsign")
+        #expect(environment["GIT_CONFIG_VALUE_3"] == "true")
     }
 }
 
