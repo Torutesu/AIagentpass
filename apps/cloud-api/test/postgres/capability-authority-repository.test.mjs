@@ -269,19 +269,20 @@ test("real PostgreSQL capability authority behavior is exercised when AGENTPASS_
       organization: randomUUID(), member: randomUUID(), membership: randomUUID(),
       device: randomUUID(), agent: randomUUID(), capability: randomUUID()
     };
+    const realExpires = new Date(Date.now() + 15 * 60_000).toISOString();
     await pool.query("INSERT INTO organizations (id,name) VALUES ($1,'Capability authority test')", [real.organization]);
     await pool.query("INSERT INTO members (id,github_subject) VALUES ($1,$2)", [real.member, `capability-${real.member}`]);
     await pool.query("INSERT INTO memberships (organization_id,id,member_id,role,status) VALUES ($1,$2,$3,'admin','active')", [real.organization, real.membership, real.member]);
     await pool.query("INSERT INTO devices (organization_id,id,label,key_algorithm,status,public_key_pem) VALUES ($1,$2,'Test device','ed25519','active',$3)", [real.organization, real.device, TEST_PUBLIC_KEY]);
     await pool.query("INSERT INTO agents (organization_id,id,device_id,kind,name,public_key_pem,status) VALUES ($1,$2,$3,'cli','Test agent',$4,'active')", [real.organization, real.agent, real.device, TEST_PUBLIC_KEY]);
     await assert.rejects(
-      pool.query("INSERT INTO capabilities (organization_id,id,agent_id,device_id,sequence,statement_hash,expires_at) VALUES ($1,$2,$3,$4,1,$5,$6)", [real.organization, real.capability, real.agent, real.device, HASH, EXPIRES]),
+      pool.query("INSERT INTO capabilities (organization_id,id,agent_id,device_id,sequence,statement_hash,expires_at) VALUES ($1,$2,$3,$4,1,$5,$6)", [real.organization, real.capability, real.agent, real.device, HASH, realExpires]),
       (error) => error.code === "23514" && error.constraint === "capabilities_active_issuer_authority_complete"
     );
     const repository = createCapabilityAuthorityRepository({ client: pool, now: () => NOW, onAuthorityReduction: async () => ({ generation: 2 }) });
     const issued = await repository.issueCapabilityMetadata({
       organization_id: real.organization, capability_id: real.capability, agent_id: real.agent,
-      device_id: real.device, sequence: 1, statement_hash: HASH, expires_at: EXPIRES,
+      device_id: real.device, sequence: 1, statement_hash: HASH, expires_at: realExpires,
       issued_by_member_id: real.member
     });
     assert.equal(issued.issued_by_member_id, real.member);

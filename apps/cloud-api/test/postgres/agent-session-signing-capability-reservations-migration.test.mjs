@@ -118,7 +118,12 @@ test("0074 supports exact committed replay without retaining clear claim tokens"
 
 test("0074 derives fixed authority and rejects substituted Capability statements", async () => {
   const sql = await migration();
+  const reserve = functionBody(sql, "agentpass_agent_signing_capability_reserve");
   const commit = functionBody(sql, "agentpass_agent_signing_capability_commit");
+  for (const body of [reserve, commit]) {
+    assert.match(body, /convert_to\('AgentPass-Agent-Signing-Capability-v1', 'UTF8'\)\s*\|\|\s*decode\('00', 'hex'\)\s*\|\|\s*convert_to\(statement_text, 'UTF8'\)/u);
+    assert.doesNotMatch(body, /chr\(0\)/u, "PostgreSQL text cannot contain a NUL byte");
+  }
   assert.match(sql, /p_operation IS DISTINCT FROM 'git\.commit\.sign'/u);
   assert.match(sql, /p_key_purpose IS DISTINCT FROM 'git\.commit\.sign'/u);
   assert.match(sql, /p_one_use IS DISTINCT FROM true/u);

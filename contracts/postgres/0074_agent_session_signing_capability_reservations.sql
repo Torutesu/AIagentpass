@@ -694,8 +694,8 @@ BEGIN
   binding_row.expires_at := expiry_value;
   statement_text := public.agentpass_agent_signing_capability_statement_canonical_json(binding_row);
   IF statement_text IS NULL THEN RETURN jsonb_build_object('state', 'conflict'); END IF;
-  signing_bytes := convert_to(
-    'AgentPass-Agent-Signing-Capability-v1' || chr(0) || statement_text, 'UTF8');
+  signing_bytes := convert_to('AgentPass-Agent-Signing-Capability-v1', 'UTF8')
+    || decode('00', 'hex') || convert_to(statement_text, 'UTF8');
   statement_digest := sha256(convert_to(statement_text, 'UTF8'));
   signing_digest := sha256(signing_bytes);
   provider_request_json := '{"algorithm":"ed25519","bytes":' ||
@@ -854,8 +854,8 @@ BEGIN
   statement_text := public.agentpass_agent_signing_capability_statement_canonical_json(reservation_row);
   IF statement_text IS NULL THEN RETURN jsonb_build_object('state', 'conflict'); END IF;
   expected_statement_hash := sha256(convert_to(statement_text, 'UTF8'));
-  signing_bytes := convert_to(
-    'AgentPass-Agent-Signing-Capability-v1' || chr(0) || statement_text, 'UTF8');
+  signing_bytes := convert_to('AgentPass-Agent-Signing-Capability-v1', 'UTF8')
+    || decode('00', 'hex') || convert_to(statement_text, 'UTF8');
   expected_signing_digest := sha256(signing_bytes);
   provider_request_json := '{"algorithm":"ed25519","bytes":' ||
     to_json(replace(encode(signing_bytes, 'base64'), chr(10), ''))::text ||

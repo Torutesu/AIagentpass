@@ -221,18 +221,18 @@ signing_authority_table_allowlist(relname) AS (
 ),
 signing_authority_policy_contract(relname, policy_name, policy_command, using_expression, with_check_expression, policy_role) AS (
   VALUES
-    ('capabilities', 'capabilities_tenant_select', 'r', 'organization_id=public.agentpass_current_organization_id()', NULL, NULL),
-    ('capabilities', 'capabilities_tenant_insert', 'a', NULL, 'organization_id=public.agentpass_current_organization_id()', NULL),
-    ('capabilities', 'capabilities_tenant_update', 'w', 'organization_id=public.agentpass_current_organization_id()', 'organization_id=public.agentpass_current_organization_id()', NULL),
+    ('capabilities', 'capabilities_tenant_select', 'r', 'organization_id=agentpass_current_organization_id()', NULL, NULL),
+    ('capabilities', 'capabilities_tenant_insert', 'a', NULL, 'organization_id=agentpass_current_organization_id()', NULL),
+    ('capabilities', 'capabilities_tenant_update', 'w', 'organization_id=agentpass_current_organization_id()', 'organization_id=agentpass_current_organization_id()', NULL),
     ('capabilities', 'capabilities_migrator_authority', '*', 'true', 'true', 'agentpass_migrator'),
     ('capabilities', 'capabilities_backup_select', 'r', 'true', NULL, 'agentpass_backup'),
-    ('agent_session_signing_capability_reservations', 'agent_session_signing_capability_reservations_tenant_select', 'r', 'organization_id=public.agentpass_current_organization_id()', NULL, NULL),
-    ('agent_session_signing_capability_reservations', 'agent_session_signing_capability_reservations_tenant_insert', 'a', NULL, 'organization_id=public.agentpass_current_organization_id()', NULL),
-    ('agent_session_signing_capability_reservations', 'agent_session_signing_capability_reservations_tenant_update', 'w', 'organization_id=public.agentpass_current_organization_id()', 'organization_id=public.agentpass_current_organization_id()', NULL),
+    ('agent_session_signing_capability_reservations', 'agent_session_signing_capability_reservations_tenant_select', 'r', 'organization_id=agentpass_current_organization_id()', NULL, NULL),
+    ('agent_session_signing_capability_reservations', 'agent_session_signing_capability_reservations_tenant_insert', 'a', NULL, 'organization_id=agentpass_current_organization_id()', NULL),
+    ('agent_session_signing_capability_reservations', 'agent_session_signing_capability_reservations_tenant_update', 'w', 'organization_id=agentpass_current_organization_id()', 'organization_id=agentpass_current_organization_id()', NULL),
     ('agent_session_signing_capability_reservations', 'agent_session_signing_capability_reservations_backup_select', 'r', 'true', NULL, 'agentpass_backup'),
-    ('agent_capability_sequence_heads', 'agent_capability_sequence_heads_tenant_select', 'r', 'organization_id=public.agentpass_current_organization_id()', NULL, NULL),
-    ('agent_capability_sequence_heads', 'agent_capability_sequence_heads_tenant_insert', 'a', NULL, 'organization_id=public.agentpass_current_organization_id()', NULL),
-    ('agent_capability_sequence_heads', 'agent_capability_sequence_heads_tenant_update', 'w', 'organization_id=public.agentpass_current_organization_id()', 'organization_id=public.agentpass_current_organization_id()', NULL),
+    ('agent_capability_sequence_heads', 'agent_capability_sequence_heads_tenant_select', 'r', 'organization_id=agentpass_current_organization_id()', NULL, NULL),
+    ('agent_capability_sequence_heads', 'agent_capability_sequence_heads_tenant_insert', 'a', NULL, 'organization_id=agentpass_current_organization_id()', NULL),
+    ('agent_capability_sequence_heads', 'agent_capability_sequence_heads_tenant_update', 'w', 'organization_id=agentpass_current_organization_id()', 'organization_id=agentpass_current_organization_id()', NULL),
     ('agent_capability_sequence_heads', 'agent_capability_sequence_heads_migrator_authority', '*', 'true', 'true', 'agentpass_migrator'),
     ('agent_capability_sequence_heads', 'agent_capability_sequence_heads_backup_select', 'r', 'true', NULL, 'agentpass_backup')
 ),
@@ -294,11 +294,13 @@ signing_authority_table_observations AS (
                 SELECT oid FROM role_ids WHERE rolname = expected.policy_role
               )])
               OR regexp_replace(
-                  regexp_replace(pg_get_expr(p.polqual, p.polrelid), '[[:space:]]+', '', 'g'),
+                  replace(regexp_replace(pg_get_expr(p.polqual, p.polrelid), '[[:space:]]+', '', 'g'),
+                    'public.agentpass_current_organization_id()', 'agentpass_current_organization_id()'),
                   '^\\((.*)\\)$', '\\1'
                 ) IS DISTINCT FROM expected.using_expression
               OR regexp_replace(
-                  regexp_replace(pg_get_expr(p.polwithcheck, p.polrelid), '[[:space:]]+', '', 'g'),
+                  replace(regexp_replace(pg_get_expr(p.polwithcheck, p.polrelid), '[[:space:]]+', '', 'g'),
+                    'public.agentpass_current_organization_id()', 'agentpass_current_organization_id()'),
                   '^\\((.*)\\)$', '\\1'
                 ) IS DISTINCT FROM expected.with_check_expression
             )

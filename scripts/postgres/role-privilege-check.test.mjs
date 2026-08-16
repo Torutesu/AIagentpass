@@ -37,6 +37,7 @@ test('signing capability role qualification is an explicit catalog contract', as
   assert.match(checker, /pg_get_expr\(p\.polwithcheck, p\.polrelid\)/u);
   assert.doesNotMatch(checker, /btrim\(regexp_replace\(pg_get_expr/u);
   assert.match(checker, /'\^\\\\\(\(\.\*\)\\\\\)\$'/u);
+  assert.match(checker, /'public\.agentpass_current_organization_id\(\)', 'agentpass_current_organization_id\(\)'/u);
   assert.match(checker, /p\.polroles IS DISTINCT FROM ARRAY\[0::oid\]/u);
   assert.match(checker, /p\.polpermissive IS DISTINCT FROM true/u);
   assert.match(checker, /SET search_path = pg_catalog;/u);
@@ -53,7 +54,7 @@ test('signing capability role qualification is an explicit catalog contract', as
     assert.match(checker, new RegExp(`'${policy}'`, 'u'));
   }
 
-  assert.match(checker, /organization_id=public\.agentpass_current_organization_id\(\)/gu);
+  assert.match(checker, /organization_id=agentpass_current_organization_id\(\)/gu);
   assert.match(checker, /p\.prosecdef IS DISTINCT FROM true/u);
   assert.match(checker, /p\.proconfig\[1\] IS DISTINCT FROM 'search_path=pg_catalog, public'/u);
   assert.match(checker, /p\.proowner IS DISTINCT FROM \(SELECT oid FROM role_ids WHERE rolname = 'agentpass_migrator'\)/u);
