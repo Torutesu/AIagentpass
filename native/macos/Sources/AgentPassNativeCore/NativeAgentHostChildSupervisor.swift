@@ -1,6 +1,8 @@
 import Darwin
 import Foundation
 
+private let nativeAgentHostMinimumPrivateDescriptor: Int32 = 4
+
 /// Fixed adapters that the signed Host is permitted to supervise.
 ///
 /// This enum is intentionally closed. A launch request has no executable or
@@ -16,17 +18,195 @@ public enum NativeAgentHostProjectDirectoryError: Error, Equatable, Sendable {
     case missing
     case notDirectory
     case invalidPath
+    case ownerMismatch
+    case identityChanged
+    case descriptorOpenFailed
+    case descriptorStatFailed
+    case descriptorCloseFailed
+    case invalidDescriptor
+}
+
+/// The identity observed through an opened directory descriptor.
+///
+/// `path` is never used as the authority for a child working directory. The
+/// descriptor identity is captured once, then checked again when a launch
+/// opens the binding. This makes a path substitution fail closed instead of
+/// silently selecting a new inode.
+public struct NativeAgentHostProjectDirectoryIdentity: Equatable, Hashable, Sendable {
+    public let device: UInt64
+    public let inode: UInt64
+    public let ownerUserID: UInt32
+    public let mode: UInt32
+
+    public init(device: UInt64, inode: UInt64, ownerUserID: UInt32, mode: UInt32) {
+        self.device = device
+        self.inode = inode
+        self.ownerUserID = ownerUserID
+        self.mode = mode
+    }
+
+    fileprivate var isDirectory: Bool {
+        mode & UInt32(S_IFMT) == UInt32(S_IFDIR)
+    }
+}
+
+/// Deterministic hooks for opening, inspecting, and closing a project binding.
+///
+/// Production uses the `system` implementation below. The hook boundary keeps
+/// the security-critical state machine testable without racing real filesystem
+/// paths or depending on a particular process' open-file table.
+public struct NativeAgentHostProjectDirectoryHooks: @unchecked Sendable {
+    public typealias OpenClosure = @Sendable (String) throws -> Int32
+    public typealias InspectClosure = @Sendable (Int32) throws -> NativeAgentHostProjectDirectoryIdentity
+    public typealias CloseClosure = @Sendable (Int32) -> Int32
+    public typealias EffectiveUserIDClosure = @Sendable () -> UInt32
+
+    public let open: OpenClosure
+    public let inspect: InspectClosure
+    public let close: CloseClosure
+    public let effectiveUserID: EffectiveUserIDClosure
+
+    public init(
+        open: @escaping OpenClosure,
+        inspect: @escaping InspectClosure,
+        close: @escaping CloseClosure,
+        effectiveUserID: @escaping EffectiveUserIDClosure
+    ) {
+        self.open = open
+        self.inspect = inspect
+        self.close = close
+        self.effectiveUserID = effectiveUserID
+    }
+
+    public static let system = Self(
+        open: { path in try NativeAgentHostProjectDirectorySystem.open(path) },
+        inspect: { descriptor in try NativeAgentHostProjectDirectorySystem.inspect(descriptor) },
+        close: { descriptor in Darwin.close(descriptor) },
+        effectiveUserID: { geteuid() }
+    )
 }
 
 /// A canonical, existing project directory bound by the trusted Host caller.
 ///
-/// The value is validated before it can enter a launch request. Symlinks and
-/// path normalization are rejected instead of being silently followed so a
-/// later working-directory lookup cannot change the project binding.
-public struct NativeAgentHostProjectDirectory: Equatable, Hashable, Sendable {
+/// Construction performs a no-follow descriptor walk and owner/type check.
+/// A later launch repeats the walk and requires the same `(st_dev, st_ino)`;
+/// the returned descriptor is the only working-directory authority passed to
+/// `posix_spawn`. The path is retained for display/environment compatibility,
+/// never for the child `chdir` operation.
+public struct NativeAgentHostProjectDirectory: Equatable, Hashable, @unchecked Sendable {
     public let path: String
 
-    public init(path: String, fileManager: FileManager = .default) throws {
+    private let identity: NativeAgentHostProjectDirectoryIdentity
+    private let expectedUserID: UInt32
+    private let hooks: NativeAgentHostProjectDirectoryHooks
+
+    public init(path: String, fileManager _: FileManager = .default) throws {
+        try self.init(path: path, hooks: .system)
+    }
+
+    public init(path: String, hooks: NativeAgentHostProjectDirectoryHooks) throws {
+        try Self.validatePath(path)
+        let expectedUserID = hooks.effectiveUserID()
+        let identity = try Self.captureIdentity(
+            path: path,
+            hooks: hooks,
+            expectedUserID: expectedUserID
+        )
+        self.path = path
+        self.identity = identity
+        self.expectedUserID = expectedUserID
+        self.hooks = hooks
+    }
+
+    public static func == (lhs: Self, rhs: Self) -> Bool {
+        lhs.path == rhs.path
+            && lhs.identity == rhs.identity
+            && lhs.expectedUserID == rhs.expectedUserID
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(path)
+        hasher.combine(identity)
+        hasher.combine(expectedUserID)
+    }
+
+    fileprivate func openForSpawn() throws -> NativeAgentHostProjectDirectoryBinding {
+        let descriptor = try Self.openDescriptor(path: path, hooks: hooks)
+        let binding = NativeAgentHostProjectDirectoryBinding(
+            descriptor: descriptor,
+            close: hooks.close
+        )
+
+        do {
+            let observed = try hooks.inspect(descriptor)
+            guard observed.isDirectory else {
+                try binding.close()
+                throw NativeAgentHostProjectDirectoryError.notDirectory
+            }
+            guard hooks.effectiveUserID() == expectedUserID,
+                  observed.ownerUserID == expectedUserID else {
+                try binding.close()
+                throw NativeAgentHostProjectDirectoryError.ownerMismatch
+            }
+            guard observed == identity else {
+                try binding.close()
+                throw NativeAgentHostProjectDirectoryError.identityChanged
+            }
+            return binding
+        } catch {
+            try? binding.close()
+            throw error
+        }
+    }
+
+    private static func captureIdentity(
+        path: String,
+        hooks: NativeAgentHostProjectDirectoryHooks,
+        expectedUserID: UInt32
+    ) throws -> NativeAgentHostProjectDirectoryIdentity {
+        let descriptor = try openDescriptor(path: path, hooks: hooks)
+        let binding = NativeAgentHostProjectDirectoryBinding(
+            descriptor: descriptor,
+            close: hooks.close
+        )
+        do {
+            let observed = try hooks.inspect(descriptor)
+            guard observed.isDirectory else {
+                try binding.close()
+                throw NativeAgentHostProjectDirectoryError.notDirectory
+            }
+            guard observed.ownerUserID == expectedUserID else {
+                try binding.close()
+                throw NativeAgentHostProjectDirectoryError.ownerMismatch
+            }
+            try binding.close()
+            return observed
+        } catch {
+            try? binding.close()
+            throw error
+        }
+    }
+
+    private static func openDescriptor(
+        path: String,
+        hooks: NativeAgentHostProjectDirectoryHooks
+    ) throws -> Int32 {
+        let descriptor: Int32
+        do {
+            descriptor = try hooks.open(path)
+        } catch let error as NativeAgentHostProjectDirectoryError {
+            throw error
+        } catch {
+            throw NativeAgentHostProjectDirectoryError.descriptorOpenFailed
+        }
+        guard descriptor >= nativeAgentHostMinimumPrivateDescriptor else {
+            _ = hooks.close(descriptor)
+            throw NativeAgentHostProjectDirectoryError.invalidDescriptor
+        }
+        return descriptor
+    }
+
+    private static func validatePath(_ path: String) throws {
         guard !path.isEmpty,
               path.utf8.count <= 4_096,
               !path.contains("\0"),
@@ -36,22 +216,147 @@ public struct NativeAgentHostProjectDirectory: Equatable, Hashable, Sendable {
             throw NativeAgentHostProjectDirectoryError.notAbsolute
         }
 
-        let url = URL(fileURLWithPath: path, isDirectory: true)
-        let standardized = url.standardizedFileURL.path
-        let resolved = url.resolvingSymlinksInPath().standardizedFileURL.path
-        guard standardized == path, resolved == path else {
+        let components = path.split(separator: "/", omittingEmptySubsequences: false)
+        guard components.first?.isEmpty == true,
+              components.dropFirst().allSatisfy({ !$0.isEmpty && $0 != "." && $0 != ".." }) else {
             throw NativeAgentHostProjectDirectoryError.notCanonical
         }
 
-        var isDirectory: ObjCBool = false
-        guard fileManager.fileExists(atPath: path, isDirectory: &isDirectory) else {
-            throw NativeAgentHostProjectDirectoryError.missing
+        // Do not use Foundation's path normalization as the security check:
+        // macOS intentionally treats `/private/var` and `/var` as aliases.
+        // The production descriptor walk below rejects every symlink with
+        // O_NOFOLLOW, including parent components, while this lexical check
+        // rejects dot components and empty path components before opening it.
+    }
+}
+
+fileprivate final class NativeAgentHostProjectDirectoryBinding: @unchecked Sendable {
+    let descriptor: Int32
+    private let closeClosure: NativeAgentHostProjectDirectoryHooks.CloseClosure
+    private let lock = NSLock()
+    private var closed = false
+
+    init(descriptor: Int32, close: @escaping NativeAgentHostProjectDirectoryHooks.CloseClosure) {
+        self.descriptor = descriptor
+        self.closeClosure = close
+    }
+
+    func close() throws {
+        lock.lock()
+        guard !closed else {
+            lock.unlock()
+            return
         }
-        guard isDirectory.boolValue else {
-            throw NativeAgentHostProjectDirectoryError.notDirectory
+        closed = true
+        let result = closeClosure(descriptor)
+        lock.unlock()
+        guard result == 0 else {
+            throw NativeAgentHostProjectDirectoryError.descriptorCloseFailed
+        }
+    }
+
+    deinit {
+        lock.lock()
+        guard !closed else {
+            lock.unlock()
+            return
+        }
+        closed = true
+        _ = closeClosure(descriptor)
+        lock.unlock()
+    }
+}
+
+private enum NativeAgentHostProjectDirectorySystem {
+    static func open(_ path: String) throws -> Int32 {
+        let components = path.split(separator: "/", omittingEmptySubsequences: false)
+        guard components.first?.isEmpty == true else {
+            throw NativeAgentHostProjectDirectoryError.notAbsolute
         }
 
-        self.path = path
+        var current = Darwin.open("/", O_RDONLY | O_DIRECTORY | O_CLOEXEC)
+        guard current >= 0 else {
+            throw NativeAgentHostProjectDirectoryError.descriptorOpenFailed
+        }
+        var ownsCurrent = true
+        defer {
+            if ownsCurrent {
+                _ = Darwin.close(current)
+            }
+        }
+
+        for component in components.dropFirst() {
+            guard !component.isEmpty, component != ".", component != ".." else {
+                throw NativeAgentHostProjectDirectoryError.notCanonical
+            }
+            let next = component.withCString {
+                openat(current, $0, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
+            }
+            guard next >= 0 else {
+                let errorNumber = errno
+                if errorNumber == ENOTDIR,
+                   component.withCString({ name in Self.isSymlink(parent: current, name: name) }) {
+                    throw NativeAgentHostProjectDirectoryError.notCanonical
+                }
+                throw Self.mapOpenError(errorNumber)
+            }
+            let previous = current
+            current = next
+            guard Darwin.close(previous) == 0 else {
+                _ = Darwin.close(current)
+                ownsCurrent = false
+                throw NativeAgentHostProjectDirectoryError.descriptorCloseFailed
+            }
+        }
+
+        // Never let the directory binding occupy stdin/stdout/stderr. A
+        // fixed lower bound also makes the explicit child close action
+        // incapable of colliding with a standard stream.
+        let privateDescriptor = fcntl(current, F_DUPFD_CLOEXEC, nativeAgentHostMinimumPrivateDescriptor)
+        guard privateDescriptor >= nativeAgentHostMinimumPrivateDescriptor else {
+            throw NativeAgentHostProjectDirectoryError.descriptorOpenFailed
+        }
+        guard Darwin.close(current) == 0 else {
+            _ = Darwin.close(privateDescriptor)
+            ownsCurrent = false
+            throw NativeAgentHostProjectDirectoryError.descriptorCloseFailed
+        }
+        ownsCurrent = false
+        return privateDescriptor
+    }
+
+    static func inspect(_ descriptor: Int32) throws -> NativeAgentHostProjectDirectoryIdentity {
+        var metadata = stat()
+        guard fstat(descriptor, &metadata) == 0 else {
+            throw NativeAgentHostProjectDirectoryError.descriptorStatFailed
+        }
+        return NativeAgentHostProjectDirectoryIdentity(
+            device: UInt64(metadata.st_dev),
+            inode: UInt64(metadata.st_ino),
+            ownerUserID: UInt32(metadata.st_uid),
+            mode: UInt32(metadata.st_mode)
+        )
+    }
+
+    private static func isSymlink(parent: Int32, name: UnsafePointer<CChar>) -> Bool {
+        var metadata = stat()
+        guard fstatat(parent, name, &metadata, AT_SYMLINK_NOFOLLOW) == 0 else {
+            return false
+        }
+        return UInt32(metadata.st_mode) & UInt32(S_IFMT) == UInt32(S_IFLNK)
+    }
+
+    private static func mapOpenError(_ errorNumber: Int32) -> NativeAgentHostProjectDirectoryError {
+        switch errorNumber {
+        case ENOENT:
+            return .missing
+        case ELOOP:
+            return .notCanonical
+        case ENOTDIR:
+            return .notDirectory
+        default:
+            return .descriptorOpenFailed
+        }
     }
 }
 
@@ -130,6 +435,7 @@ public enum NativeAgentHostExitClassification: String, Codable, Equatable, Senda
 public enum NativeAgentHostChildSupervisorError: Error, Equatable, Sendable {
     case unsupportedAdapter
     case launchFailed
+    case projectDirectoryCloseFailed
     case processGroupNotOwned
     case signalFailed
     case waitFailed
@@ -156,18 +462,24 @@ public struct NativeAgentHostSpawnSpec: Equatable, Sendable {
     public let arguments: [String]
     public let environment: [String: String]
     public let workingDirectory: String
+    /// Ephemeral, parent-owned descriptor for the validated project inode.
+    /// The system spawn hook consumes it synchronously and closes it in the
+    /// parent on every return path; it is never an argv or environment value.
+    public let workingDirectoryFD: Int32
     public let useOwnedProcessGroup: Bool
 
     fileprivate init(
         executablePath: String,
         arguments: [String],
         environment: [String: String],
-        workingDirectory: String
+        workingDirectory: String,
+        workingDirectoryFD: Int32
     ) {
         self.executablePath = executablePath
         self.arguments = arguments
         self.environment = environment
         self.workingDirectory = workingDirectory
+        self.workingDirectoryFD = workingDirectoryFD
         self.useOwnedProcessGroup = true
     }
 }
@@ -175,21 +487,28 @@ public struct NativeAgentHostSpawnSpec: Equatable, Sendable {
 public struct NativeAgentHostChildSupervisorHooks: @unchecked Sendable {
     public let spawn: @Sendable (NativeAgentHostSpawnSpec) throws -> NativeAgentHostProcessHandle
     public let signal: @Sendable (NativeAgentHostProcessHandle, NativeAgentHostForwardedSignal) throws -> Void
+    /// Terminates the claimed child PID directly. This is used only when the
+    /// process-group ownership invariant fails, because signaling an unknown
+    /// negative PGID could affect an unrelated process group.
+    public let terminateProcess: @Sendable (NativeAgentHostProcessHandle) throws -> Void
     public let wait: @Sendable (NativeAgentHostProcessHandle) throws -> NativeAgentHostWaitOutcome
 
     public init(
         spawn: @escaping @Sendable (NativeAgentHostSpawnSpec) throws -> NativeAgentHostProcessHandle,
         signal: @escaping @Sendable (NativeAgentHostProcessHandle, NativeAgentHostForwardedSignal) throws -> Void,
+        terminateProcess: @escaping @Sendable (NativeAgentHostProcessHandle) throws -> Void,
         wait: @escaping @Sendable (NativeAgentHostProcessHandle) throws -> NativeAgentHostWaitOutcome
     ) {
         self.spawn = spawn
         self.signal = signal
+        self.terminateProcess = terminateProcess
         self.wait = wait
     }
 
     public static let system = Self(
         spawn: NativeAgentHostSystemHooks.spawn,
         signal: NativeAgentHostSystemHooks.signal,
+        terminateProcess: NativeAgentHostSystemHooks.terminateProcess,
         wait: NativeAgentHostSystemHooks.wait
     )
 }
@@ -298,25 +617,50 @@ public final class NativeAgentHostChildSupervisor: @unchecked Sendable {
             from: request.trustedEnvironment,
             projectDirectory: request.projectDirectory.path
         )
+        let projectBinding = try request.projectDirectory.openForSpawn()
         let spec = NativeAgentHostSpawnSpec(
             executablePath: adapter.executablePath,
             arguments: adapter.arguments,
             environment: environment,
-            workingDirectory: request.projectDirectory.path
+            workingDirectory: request.projectDirectory.path,
+            workingDirectoryFD: projectBinding.descriptor
         )
 
-        let process: NativeAgentHostProcessHandle
         do {
-            process = try hooks.spawn(spec)
+            let process = try hooks.spawn(spec)
+            guard process.processIdentifier > 0,
+                  process.processGroupIdentifier > 0,
+                  process.processGroupIdentifier == process.processIdentifier else {
+                // The group identity is not trusted, so do not signal a
+                // negative PID. The system spawn hook establishes this
+                // invariant; an injected violation is terminated through the
+                // claimed child PID and then reaped to avoid an orphan.
+                if process.processIdentifier > 0 {
+                    try? hooks.terminateProcess(process)
+                    _ = try? hooks.wait(process)
+                }
+                try? projectBinding.close()
+                throw NativeAgentHostChildSupervisorError.processGroupNotOwned
+            }
+
+            do {
+                try projectBinding.close()
+            } catch {
+                // The child is already running, but the parent could not
+                // prove descriptor cleanup. Terminate/reap it before the
+                // caller sees the bounded failure.
+                try? hooks.signal(process, .terminate)
+                _ = try? hooks.wait(process)
+                throw NativeAgentHostChildSupervisorError.projectDirectoryCloseFailed
+            }
+            return NativeAgentHostChildSession(process: process, hooks: hooks)
+        } catch let error as NativeAgentHostChildSupervisorError {
+            try? projectBinding.close()
+            throw error
         } catch {
+            try? projectBinding.close()
             throw NativeAgentHostChildSupervisorError.launchFailed
         }
-        guard process.processIdentifier > 0,
-              process.processGroupIdentifier > 0,
-              process.processGroupIdentifier == process.processIdentifier else {
-            throw NativeAgentHostChildSupervisorError.processGroupNotOwned
-        }
-        return NativeAgentHostChildSession(process: process, hooks: hooks)
     }
 }
 
@@ -381,7 +725,11 @@ private enum NativeAgentHostSystemHooks {
         }
         defer { posix_spawn_file_actions_destroy(&fileActions) }
 
-        guard posix_spawn_file_actions_addchdir_np(&fileActions, spec.workingDirectory) == 0 else {
+        guard spec.workingDirectoryFD >= nativeAgentHostMinimumPrivateDescriptor,
+              Self.addDirectoryChangeAction(&fileActions, descriptor: spec.workingDirectoryFD) == 0,
+              // O_CLOEXEC is set at open time; this explicit action makes the
+              // no-leak contract visible and robust across spawn/exec changes.
+              posix_spawn_file_actions_addclose(&fileActions, spec.workingDirectoryFD) == 0 else {
             throw NativeAgentHostChildSupervisorError.launchFailed
         }
 
@@ -432,6 +780,16 @@ private enum NativeAgentHostSystemHooks {
         )
     }
 
+    private static func addDirectoryChangeAction(
+        _ actions: inout posix_spawn_file_actions_t?,
+        descriptor: Int32
+    ) -> Int32 {
+        if #available(macOS 26.0, *) {
+            return posix_spawn_file_actions_addfchdir(&actions, descriptor)
+        }
+        return posix_spawn_file_actions_addfchdir_np(&actions, descriptor)
+    }
+
     static func signal(
         _ process: NativeAgentHostProcessHandle,
         _ signal: NativeAgentHostForwardedSignal
@@ -439,6 +797,13 @@ private enum NativeAgentHostSystemHooks {
         // Negative PID targets the process group owned by this child. The
         // equality invariant is checked before a session is returned.
         guard kill(-process.processGroupIdentifier, signal.rawValue) == 0 else {
+            throw NativeAgentHostChildSupervisorError.signalFailed
+        }
+    }
+
+    static func terminateProcess(_ process: NativeAgentHostProcessHandle) throws {
+        guard process.processIdentifier > 0,
+              kill(process.processIdentifier, SIGTERM) == 0 else {
             throw NativeAgentHostChildSupervisorError.signalFailed
         }
     }

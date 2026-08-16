@@ -1,4 +1,5 @@
 import AgentPassNativeCore
+import Darwin
 import Foundation
 import Testing
 
@@ -6,6 +7,7 @@ private final class HostSupervisorFixture: @unchecked Sendable {
     private let lock = NSLock()
     var spawnSpec: NativeAgentHostSpawnSpec?
     var signals: [(NativeAgentHostProcessHandle, NativeAgentHostForwardedSignal)] = []
+    var terminatedProcesses: [NativeAgentHostProcessHandle] = []
     var waitCallCount = 0
     var spawnError = false
     var waitError = false
@@ -27,6 +29,11 @@ private final class HostSupervisorFixture: @unchecked Sendable {
             signal: { [self] process, signal in
                 lock.lock()
                 signals.append((process, signal))
+                lock.unlock()
+            },
+            terminateProcess: { [self] process in
+                lock.lock()
+                terminatedProcesses.append(process)
                 lock.unlock()
             },
             wait: { [self] _ in
@@ -52,10 +59,88 @@ private final class HostSupervisorFixture: @unchecked Sendable {
         defer { lock.unlock() }
         return (spawnSpec, signals, waitCallCount)
     }
+
+    func terminationCallCount() -> Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return terminatedProcesses.count
+    }
+}
+
+private final class ProjectDirectoryHookFixture: @unchecked Sendable {
+    private let lock = NSLock()
+    var openDescriptors: [Int32] = []
+    var closedDescriptors: [Int32] = []
+    var inspectedIdentities: [NativeAgentHostProjectDirectoryIdentity] = []
+    var identityForOpen: [Int32: NativeAgentHostProjectDirectoryIdentity] = [:]
+    var nextDescriptor: Int32 = 40
+    var openError = false
+    var inspectError = false
+    var closeCallCount = 0
+    var closeErrorOnCall: Int?
+
+    let owner: UInt32 = 501
+    let directoryIdentity = NativeAgentHostProjectDirectoryIdentity(
+        device: 10,
+        inode: 20,
+        ownerUserID: 501,
+        mode: UInt32(S_IFDIR) | 0o700
+    )
+    let substitutedIdentity = NativeAgentHostProjectDirectoryIdentity(
+        device: 10,
+        inode: 21,
+        ownerUserID: 501,
+        mode: UInt32(S_IFDIR) | 0o700
+    )
+
+    func hooks() -> NativeAgentHostProjectDirectoryHooks {
+        NativeAgentHostProjectDirectoryHooks(
+            open: { [self] _ in
+                lock.lock()
+                defer { lock.unlock() }
+                if openError { throw TestFixtureError.failed }
+                let descriptor = nextDescriptor
+                nextDescriptor += 1
+                openDescriptors.append(descriptor)
+                return descriptor
+            },
+            inspect: { [self] descriptor in
+                lock.lock()
+                defer { lock.unlock() }
+                if inspectError { throw TestFixtureError.failed }
+                let identity = identityForOpen[descriptor] ?? directoryIdentity
+                inspectedIdentities.append(identity)
+                return identity
+            },
+            close: { [self] descriptor in
+                lock.lock()
+                closeCallCount += 1
+                closedDescriptors.append(descriptor)
+                let shouldFail = closeErrorOnCall == closeCallCount
+                lock.unlock()
+                return shouldFail ? -1 : 0
+            },
+            effectiveUserID: { [self] in owner }
+        )
+    }
+
+    func closed() -> [Int32] {
+        lock.lock()
+        defer { lock.unlock() }
+        return closedDescriptors
+    }
 }
 
 private enum TestFixtureError: Error {
     case failed
+}
+
+private func canonicalFilesystemPath(_ path: String) -> String {
+    var buffer = [CChar](repeating: 0, count: Int(PATH_MAX))
+    guard path.withCString({ realpath($0, &buffer) != nil }) else {
+        return path
+    }
+    return String(cString: buffer)
 }
 
 private func withTemporaryProjectDirectory<T>(
@@ -70,7 +155,7 @@ private func withTemporaryProjectDirectory<T>(
         attributes: [.posixPermissions: 0o700]
     )
     defer { try? FileManager.default.removeItem(atPath: path) }
-    return try body(try NativeAgentHostProjectDirectory(path: path))
+    return try body(try NativeAgentHostProjectDirectory(path: canonicalFilesystemPath(path)))
 }
 
 private func makeRequest(
@@ -91,23 +176,34 @@ private func makeRequest(
     )
 }
 
+private func makeHookedProjectDirectory(
+    fixture: ProjectDirectoryHookFixture
+) throws -> NativeAgentHostProjectDirectory {
+    try NativeAgentHostProjectDirectory(
+        path: "/Users/tester/project",
+        hooks: fixture.hooks()
+    )
+}
+
 @Test func projectDirectoryRequiresCanonicalAbsoluteExistingDirectory() throws {
     let base = FileManager.default.temporaryDirectory
         .appendingPathComponent("agentpass-host-path-\(UUID().uuidString)", isDirectory: true)
     let child = base.appendingPathComponent("project", isDirectory: true)
     try FileManager.default.createDirectory(at: child, withIntermediateDirectories: true)
     defer { try? FileManager.default.removeItem(at: base) }
+    let canonicalBase = canonicalFilesystemPath(base.path)
+    let canonicalChild = canonicalFilesystemPath(child.path)
 
     #expect(throws: NativeAgentHostProjectDirectoryError.notAbsolute) {
         _ = try NativeAgentHostProjectDirectory(path: "relative/project")
     }
     #expect(throws: NativeAgentHostProjectDirectoryError.notCanonical) {
-        _ = try NativeAgentHostProjectDirectory(path: child.path + "/../project")
+        _ = try NativeAgentHostProjectDirectory(path: canonicalChild + "/../project")
     }
     #expect(throws: NativeAgentHostProjectDirectoryError.missing) {
-        _ = try NativeAgentHostProjectDirectory(path: base.appendingPathComponent("missing").path)
+        _ = try NativeAgentHostProjectDirectory(path: canonicalBase + "/missing")
     }
-    try #expect(NativeAgentHostProjectDirectory(path: child.path).path == child.path)
+    try #expect(NativeAgentHostProjectDirectory(path: canonicalChild).path == canonicalChild)
 }
 
 @Test func projectDirectoryRejectsSymlinkBindingAndRegularFile() throws {
@@ -120,12 +216,111 @@ private func makeRequest(
     try FileManager.default.createSymbolicLink(at: link, withDestinationURL: target)
     try Data("not a directory".utf8).write(to: file)
     defer { try? FileManager.default.removeItem(at: base) }
+    let canonicalBase = canonicalFilesystemPath(base.path)
+    let canonicalLink = canonicalBase + "/link"
+    let canonicalFile = canonicalBase + "/file"
 
     #expect(throws: NativeAgentHostProjectDirectoryError.notCanonical) {
-        _ = try NativeAgentHostProjectDirectory(path: link.path)
+        _ = try NativeAgentHostProjectDirectory(path: canonicalLink)
     }
     #expect(throws: NativeAgentHostProjectDirectoryError.notDirectory) {
-        _ = try NativeAgentHostProjectDirectory(path: file.path)
+        _ = try NativeAgentHostProjectDirectory(path: canonicalFile)
+    }
+}
+
+@Test func projectDirectoryBindsSpawnToValidatedIdentityAfterPathSubstitution() throws {
+    let directory = ProjectDirectoryHookFixture()
+    let project = try makeHookedProjectDirectory(fixture: directory)
+    let fixture = HostSupervisorFixture()
+    let supervisor = NativeAgentHostChildSupervisor(hooks: fixture.hooks())
+
+    // The path may be replaced after construction. The second open still
+    // returns the captured inode identity, so the spawn hook receives the
+    // opened descriptor rather than a path that could be re-resolved.
+    let session = try supervisor.start(try makeRequest(projectDirectory: project))
+    _ = try session.wait()
+
+    let spec = try #require(fixture.snapshot().spec)
+    #expect(spec.workingDirectory == project.path)
+    #expect(spec.workingDirectoryFD >= 4)
+    #expect(directory.closed().count == 2)
+    #expect(directory.closed().allSatisfy { $0 >= 4 })
+}
+
+@Test func projectDirectoryRejectsIdentitySubstitutionAndClosesReopenedDescriptor() throws {
+    let directory = ProjectDirectoryHookFixture()
+    let project = try makeHookedProjectDirectory(fixture: directory)
+    let reopenedDescriptor = directory.nextDescriptor
+    directory.identityForOpen[reopenedDescriptor] = directory.substitutedIdentity
+
+    let fixture = HostSupervisorFixture()
+    let supervisor = NativeAgentHostChildSupervisor(hooks: fixture.hooks())
+    #expect(throws: NativeAgentHostProjectDirectoryError.identityChanged) {
+        _ = try supervisor.start(try makeRequest(projectDirectory: project))
+    }
+    #expect(directory.closed().count == 2)
+}
+
+@Test func projectDirectoryRequiresTheEffectiveUserAsOwner() throws {
+    let directory = ProjectDirectoryHookFixture()
+    directory.identityForOpen[40] = NativeAgentHostProjectDirectoryIdentity(
+        device: 10,
+        inode: 20,
+        ownerUserID: 502,
+        mode: UInt32(S_IFDIR) | 0o700
+    )
+    #expect(throws: NativeAgentHostProjectDirectoryError.ownerMismatch) {
+        _ = try makeHookedProjectDirectory(fixture: directory)
+    }
+    #expect(directory.closed() == [40])
+}
+
+@Test func projectDirectoryClosesOpenedDescriptorWhenSpawnFails() throws {
+    let directory = ProjectDirectoryHookFixture()
+    let project = try makeHookedProjectDirectory(fixture: directory)
+    let fixture = HostSupervisorFixture()
+    fixture.spawnError = true
+    let supervisor = NativeAgentHostChildSupervisor(hooks: fixture.hooks())
+
+    #expect(throws: NativeAgentHostChildSupervisorError.launchFailed) {
+        _ = try supervisor.start(try makeRequest(projectDirectory: project))
+    }
+    #expect(directory.closed().count == 2)
+}
+
+@Test func projectDirectoryClosesDescriptorWhenInspectionFails() throws {
+    let directory = ProjectDirectoryHookFixture()
+    directory.inspectError = true
+    #expect(throws: TestFixtureError.failed) {
+        _ = try makeHookedProjectDirectory(fixture: directory)
+    }
+    #expect(directory.closed().count == 1)
+}
+
+@Test func projectDirectoryCloseFailureIsBoundedAndChildIsReaped() throws {
+    let directory = ProjectDirectoryHookFixture()
+    let project = try makeHookedProjectDirectory(fixture: directory)
+    directory.closeErrorOnCall = 2
+    let fixture = HostSupervisorFixture()
+    let supervisor = NativeAgentHostChildSupervisor(hooks: fixture.hooks())
+
+    #expect(throws: NativeAgentHostChildSupervisorError.projectDirectoryCloseFailed) {
+        _ = try supervisor.start(try makeRequest(projectDirectory: project))
+    }
+    let snapshot = fixture.snapshot()
+    #expect(directory.closed().count == 2)
+    #expect(snapshot.signals.map { $0.1 } == [.terminate])
+    #expect(snapshot.waitCallCount == 1)
+}
+
+@Test func projectDirectoryRejectsDescriptorCollisionAndClosesIt() throws {
+    for collision in [Int32(0), Int32(3)] {
+        let directory = ProjectDirectoryHookFixture()
+        directory.nextDescriptor = collision
+        #expect(throws: NativeAgentHostProjectDirectoryError.invalidDescriptor) {
+            _ = try makeHookedProjectDirectory(fixture: directory)
+        }
+        #expect(directory.closed() == [collision])
     }
 }
 
@@ -270,8 +465,24 @@ func waitOutcomeIsReducedToBoundedExitClassification(_ outcome: NativeAgentHostW
         #expect(throws: NativeAgentHostChildSupervisorError.processGroupNotOwned) {
             _ = try supervisor.start(try makeRequest(projectDirectory: project))
         }
+        #expect(fixture.snapshot().waitCallCount == 1)
+        #expect(fixture.snapshot().signals.isEmpty)
+        #expect(fixture.terminationCallCount() == 1)
+    }
+}
+
+@Test func invalidChildPIDIsRejectedWithoutSignalingOrWaitingForAnUnrelatedProcess() throws {
+    try withTemporaryProjectDirectory { project in
+        let fixture = HostSupervisorFixture()
+        let supervisor = NativeAgentHostChildSupervisor(
+            hooks: fixture.hooks(process: .init(processIdentifier: -1, processGroupIdentifier: -1))
+        )
+        #expect(throws: NativeAgentHostChildSupervisorError.processGroupNotOwned) {
+            _ = try supervisor.start(try makeRequest(projectDirectory: project))
+        }
         #expect(fixture.snapshot().waitCallCount == 0)
         #expect(fixture.snapshot().signals.isEmpty)
+        #expect(fixture.terminationCallCount() == 0)
     }
 }
 
