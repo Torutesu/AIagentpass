@@ -665,8 +665,8 @@ public final class NativeAgentHostChildSession: @unchecked Sendable {
 /// Starts and supervises one fixed-adapter Host child.
 public final class NativeAgentHostChildSupervisor: @unchecked Sendable {
     private let hooks: NativeAgentHostChildSupervisorHooks
-    private let cursorExecutableResolver: @Sendable () throws -> NativeAgentHostExecutableSelection
-    private let cursorExecutableRevalidator: @Sendable (NativeAgentHostExecutableSelection) throws -> Void
+    private let cursorExecutableResolver: @Sendable () throws -> NativeCursorAgentRuntimeSelection
+    private let cursorExecutableRevalidator: @Sendable (NativeCursorAgentRuntimeSelection) throws -> Void
 
     public init(hooks: NativeAgentHostChildSupervisorHooks = .system) {
         self.hooks = hooks
@@ -686,10 +686,42 @@ public final class NativeAgentHostChildSupervisor: @unchecked Sendable {
     ) {
         self.hooks = hooks
         self.cursorExecutableResolver = {
-            guard let path = NativeAgentHostExecutableTrust.cursorExecutableCandidates.first(where: executableProbe) else {
+            guard NativeCursorAgentRuntimeSpec.requiredPaths.allSatisfy(executableProbe) else {
                 throw NativeAgentHostExecutableTrustError.noTrustedCandidate
             }
-            return NativeAgentHostExecutableSelection(path: path, device: 0, inode: 0)
+            let manifest = try NativeCursorAgentRuntimeManifest(entries: [
+                try NativeCursorAgentRuntimeManifestEntry(
+                    relativePath: NativeCursorAgentRuntimeSpec.nodeRelativePath,
+                    sha256: String(repeating: "a", count: 64),
+                    size: 1,
+                    isExecutable: true
+                ),
+                try NativeCursorAgentRuntimeManifestEntry(
+                    relativePath: NativeCursorAgentRuntimeSpec.indexRelativePath,
+                    sha256: String(repeating: "b", count: 64),
+                    size: 2,
+                    isExecutable: false
+                )
+            ])
+            return NativeCursorAgentRuntimeSelection(
+                nodePath: NativeCursorAgentRuntimeSpec.nodePath,
+                indexPath: NativeCursorAgentRuntimeSpec.indexPath,
+                fileIdentities: [
+                    NativeCursorAgentRuntimeFileIdentity(
+                        relativePath: NativeCursorAgentRuntimeSpec.nodeRelativePath,
+                        device: 0,
+                        inode: 0,
+                        size: 1
+                    ),
+                    NativeCursorAgentRuntimeFileIdentity(
+                        relativePath: NativeCursorAgentRuntimeSpec.indexRelativePath,
+                        device: 0,
+                        inode: 0,
+                        size: 2
+                    )
+                ],
+                manifest: manifest
+            )
         }
         // The probe is deliberately a test-only synthetic selector; its
         // result is not used by the production initializer or revalidation.
@@ -703,7 +735,8 @@ public final class NativeAgentHostChildSupervisor: @unchecked Sendable {
         )
         let environment = try NativeAgentHostStrictEnvironment.make(
             from: request.trustedEnvironment,
-            projectDirectory: request.projectDirectory.path
+            projectDirectory: request.projectDirectory.path,
+            fixedEnvironment: adapter.fixedEnvironment
         )
         let privateGitBridge: NativeAgentPrivateGitBridgeSocketPair
         do {
@@ -803,11 +836,12 @@ public final class NativeAgentHostChildSupervisor: @unchecked Sendable {
 private struct NativeAgentHostFixedAdapter {
     let executablePath: String
     let arguments: [String]
-    let executableSelection: NativeAgentHostExecutableSelection?
+    let fixedEnvironment: [String: String]
+    let executableSelection: NativeCursorAgentRuntimeSelection?
 
     static func command(
         for kind: NativeAgentHostAdapterKind,
-        cursorExecutableResolver: @escaping @Sendable () throws -> NativeAgentHostExecutableSelection
+        cursorExecutableResolver: @escaping @Sendable () throws -> NativeCursorAgentRuntimeSelection
     ) throws -> Self {
         switch kind {
         case .claudeCode:
@@ -822,13 +856,14 @@ private struct NativeAgentHostFixedAdapter {
             #endif
             let candidates = [preferred, "/usr/local/bin/claude", "/opt/homebrew/bin/claude"]
             let executable = candidates.first(where: { FileManager.default.isExecutableFile(atPath: $0) }) ?? preferred
-            return Self(executablePath: executable, arguments: [], executableSelection: nil)
+            return Self(executablePath: executable, arguments: [], fixedEnvironment: [:], executableSelection: nil)
         case .cursor:
             do {
                 let selection = try cursorExecutableResolver()
                 return Self(
-                    executablePath: selection.path,
-                    arguments: [],
+                    executablePath: selection.nodePath,
+                    arguments: NativeCursorAgentRuntimeSpec.fixedArguments,
+                    fixedEnvironment: NativeCursorAgentRuntimeSpec.fixedEnvironment,
                     executableSelection: selection
                 )
             } catch {
@@ -847,7 +882,11 @@ private enum NativeAgentHostStrictEnvironment {
     ]
     private static let fixedPath = "/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin:/usr/local/bin"
 
-    static func make(from input: [String: String], projectDirectory: String) throws -> [String: String] {
+    static func make(
+        from input: [String: String],
+        projectDirectory: String,
+        fixedEnvironment: [String: String] = [:]
+    ) throws -> [String: String] {
         guard input.count <= NativeAgentHostChildLaunchRequest.maximumEnvironmentEntries else {
             throw NativeAgentHostChildLaunchRequestError.invalidEnvironment
         }
@@ -869,6 +908,7 @@ private enum NativeAgentHostStrictEnvironment {
         // after the caller allowlist so a launch request cannot replace the
         // helper path, signing reference, or protocol through GIT_CONFIG_*.
         output.merge(NativeAgentHostGitConfiguration.environment) { _, fixed in fixed }
+        output.merge(fixedEnvironment) { _, fixed in fixed }
         return output
     }
 }

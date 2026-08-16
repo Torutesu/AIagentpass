@@ -187,16 +187,67 @@ private final class ExecutableTrustFixture: @unchecked Sendable {
     private let lock = NSLock()
     private let executablePaths: Set<String>
     private let writablePaths: Set<String>
+    private let aclPaths: Set<String>
     private var overrides: [String: NativeAgentHostExecutableMetadata]
+    private let runtimeFiles: [NativeCursorAgentRuntimeObservedFile]
+    private let runtimeManifest: NativeCursorAgentRuntimeManifest
+    private let digestOverrides: [String: String]
+    private var codeSignaturePaths: [String] = []
+    private var digestPaths: [String] = []
+    var rejectCodeSignature = false
+    var rejectDigest = false
 
     init(
         executablePaths: Set<String>,
         writablePaths: Set<String> = [],
-        overrides: [String: NativeAgentHostExecutableMetadata] = [:]
+        aclPaths: Set<String> = [],
+        overrides: [String: NativeAgentHostExecutableMetadata] = [:],
+        runtimeFiles: [NativeCursorAgentRuntimeObservedFile]? = nil,
+        runtimeManifest: NativeCursorAgentRuntimeManifest? = nil,
+        digestOverrides: [String: String] = [:]
     ) {
         self.executablePaths = executablePaths
         self.writablePaths = writablePaths
+        self.aclPaths = aclPaths
         self.overrides = overrides
+        self.digestOverrides = digestOverrides
+        let defaultEntries = [
+            try! NativeCursorAgentRuntimeManifestEntry(
+                relativePath: NativeCursorAgentRuntimeSpec.nodeRelativePath,
+                sha256: String(repeating: "a", count: 64),
+                size: 1,
+                isExecutable: true
+            ),
+            try! NativeCursorAgentRuntimeManifestEntry(
+                relativePath: NativeCursorAgentRuntimeSpec.indexRelativePath,
+                sha256: String(repeating: "b", count: 64),
+                size: 2,
+                isExecutable: false
+            )
+        ]
+        self.runtimeManifest = runtimeManifest ?? (try! NativeCursorAgentRuntimeManifest(entries: defaultEntries))
+        self.runtimeFiles = runtimeFiles ?? [
+            NativeCursorAgentRuntimeObservedFile(
+                relativePath: NativeCursorAgentRuntimeSpec.nodeRelativePath,
+                metadata: NativeAgentHostExecutableMetadata(
+                    device: 1,
+                    inode: 100,
+                    ownerUID: 0,
+                    mode: UInt32(S_IFREG) | UInt32(0o755),
+                    size: 1
+                )
+            ),
+            NativeCursorAgentRuntimeObservedFile(
+                relativePath: NativeCursorAgentRuntimeSpec.indexRelativePath,
+                metadata: NativeAgentHostExecutableMetadata(
+                    device: 1,
+                    inode: 101,
+                    ownerUID: 0,
+                    mode: UInt32(S_IFREG) | UInt32(0o644),
+                    size: 2
+                )
+            )
+        ]
     }
 
     func setOverride(_ metadata: NativeAgentHostExecutableMetadata, for path: String) {
@@ -213,13 +264,10 @@ private final class ExecutableTrustFixture: @unchecked Sendable {
                 if let metadata = overrides[path] {
                     return metadata
                 }
-                if executablePaths.contains(path) {
-                    return NativeAgentHostExecutableMetadata(
-                        device: 1,
-                        inode: 100,
-                        ownerUID: 0,
-                        mode: UInt32(S_IFREG) | UInt32(0o755)
-                    )
+                if let file = runtimeFiles.first(where: {
+                    NativeCursorAgentRuntimeSpec.runtimeRoot + "/" + $0.relativePath == path
+                }) {
+                    return file.metadata
                 }
                 return NativeAgentHostExecutableMetadata(
                     device: 1,
@@ -237,8 +285,57 @@ private final class ExecutableTrustFixture: @unchecked Sendable {
                 lock.lock()
                 defer { lock.unlock() }
                 return writablePaths.contains(path)
+            },
+            hasExtendedACL: { [self] path in
+                lock.lock()
+                defer { lock.unlock() }
+                return aclPaths.contains(path)
+            },
+            isReadable: { [self] path in
+                lock.lock()
+                defer { lock.unlock() }
+                return runtimeFiles.contains {
+                    NativeCursorAgentRuntimeSpec.runtimeRoot + "/" + $0.relativePath == path
+                }
+            },
+            enumerateRuntimeFiles: { [self] in
+                lock.lock()
+                defer { lock.unlock() }
+                return runtimeFiles
+            },
+            digest: { [self] path in
+                lock.lock()
+                digestPaths.append(path)
+                let rejected = rejectDigest
+                lock.unlock()
+                if rejected { throw TestFixtureError.failed }
+                return digestOverrides[path] ?? runtimeManifest.entries.first {
+                    NativeCursorAgentRuntimeSpec.runtimeRoot + "/" + $0.relativePath == path
+                }?.sha256 ?? String(repeating: "0", count: 64)
+            },
+            loadRuntimeManifest: { [self] in
+                runtimeManifest
+            },
+            verifyCodeIdentity: { [self] path, _ in
+                lock.lock()
+                codeSignaturePaths.append(path)
+                let rejected = rejectCodeSignature
+                lock.unlock()
+                if rejected { throw TestFixtureError.failed }
             }
         )
+    }
+
+    func verifiedCodeSignaturePaths() -> [String] {
+        lock.lock()
+        defer { lock.unlock() }
+        return codeSignaturePaths
+    }
+
+    func verifiedDigestPaths() -> [String] {
+        lock.lock()
+        defer { lock.unlock() }
+        return digestPaths
     }
 }
 
@@ -460,17 +557,11 @@ private func makeHookedProjectDirectory(
     }
 }
 
-@Test func cursorAdapterUsesOnlyTheReviewedFixedCandidateSet() throws {
-    let expectedCandidates = [
-        "/Applications/Cursor.app/Contents/Resources/app/bin/code",
-        "/Applications/Cursor.app/Contents/Resources/app/bin/cursor",
-        "/opt/cursor-agent",
-        "/opt/homebrew/bin/cursor-agent",
-        "/usr/local/bin/cursor-agent"
-    ]
+@Test func cursorAdapterUsesOnlyTheManagedRuntimeNodeAndIndex() throws {
+    let expectedPaths = NativeCursorAgentRuntimeSpec.requiredPaths
     try withTemporaryProjectDirectory { project in
         let fixture = HostSupervisorFixture()
-        let probe = ExecutableProbeFixture(executablePaths: [expectedCandidates[1]])
+        let probe = ExecutableProbeFixture(executablePaths: Set(expectedPaths))
         let supervisor = NativeAgentHostChildSupervisor(
             hooks: fixture.hooks(),
             executableProbe: { [probe] path in probe.probe(path) }
@@ -479,20 +570,20 @@ private func makeHookedProjectDirectory(
         _ = try supervisor.start(try makeRequest(adapter: .cursor, projectDirectory: project))
 
         let spec = try #require(fixture.snapshot().spec)
-        #expect(spec.executablePath == expectedCandidates[1])
-        #expect(spec.arguments.isEmpty)
-        #expect(probe.paths() == Array(expectedCandidates.prefix(2)))
+        #expect(spec.executablePath == NativeCursorAgentRuntimeSpec.nodePath)
+        #expect(spec.arguments == NativeCursorAgentRuntimeSpec.fixedArguments)
+        #expect(spec.environment[NativeCursorAgentRuntimeSpec.invokedAsEnvironmentKey]
+            == NativeCursorAgentRuntimeSpec.invokedAsEnvironmentValue)
+        #expect(probe.paths() == expectedPaths)
+        #expect(!spec.executablePath.contains("/Applications/Cursor.app/"))
+        #expect(!spec.executablePath.contains("/.local/"))
     }
 }
 
 @Test func cursorAdapterWithNoCandidateDoesNotCreateAChildOrExposeUnknownPath() throws {
-    let expectedCandidates = [
-        "/Applications/Cursor.app/Contents/Resources/app/bin/code",
-        "/Applications/Cursor.app/Contents/Resources/app/bin/cursor",
-        "/opt/cursor-agent",
-        "/opt/homebrew/bin/cursor-agent",
-        "/usr/local/bin/cursor-agent"
-    ]
+    // The fail-closed probe short-circuits at the first missing required
+    // artifact; it must never continue to or expose an unmanaged path.
+    let expectedPaths = [NativeCursorAgentRuntimeSpec.nodePath]
     try withTemporaryProjectDirectory { project in
         let fixture = HostSupervisorFixture()
         let probe = ExecutableProbeFixture(executablePaths: ["/tmp/attacker/cursor-agent"])
@@ -504,7 +595,7 @@ private func makeHookedProjectDirectory(
         #expect(throws: NativeAgentHostChildSupervisorError.launchFailed) {
             _ = try supervisor.start(try makeRequest(adapter: .cursor, projectDirectory: project))
         }
-        #expect(probe.paths() == expectedCandidates)
+        #expect(probe.paths() == expectedPaths)
         #expect(fixture.snapshot().spec == nil)
         #expect(fixture.snapshot().waitCallCount == 0)
         #expect(fixture.privateBridgeActions().duplicates.isEmpty)
@@ -512,12 +603,12 @@ private func makeHookedProjectDirectory(
 }
 
 @Test func cursorAdapterReusesPrivateBridgeCwdAndOwnedProcessGroupConstraints() throws {
-    let cursorBundleCLI = "/Applications/Cursor.app/Contents/Resources/app/bin/code"
+    let runtimePaths = Set(NativeCursorAgentRuntimeSpec.requiredPaths)
     try withTemporaryProjectDirectory { project in
         let fixture = HostSupervisorFixture()
         let supervisor = NativeAgentHostChildSupervisor(
             hooks: fixture.hooks(),
-            executableProbe: { path in path == cursorBundleCLI }
+            executableProbe: { path in runtimePaths.contains(path) }
         )
 
         let session = try supervisor.start(
@@ -526,8 +617,8 @@ private func makeHookedProjectDirectory(
         let spec = try #require(fixture.snapshot().spec)
         let actions = fixture.privateBridgeActions()
 
-        #expect(spec.executablePath == cursorBundleCLI)
-        #expect(spec.arguments.isEmpty)
+        #expect(spec.executablePath == NativeCursorAgentRuntimeSpec.nodePath)
+        #expect(spec.arguments == NativeCursorAgentRuntimeSpec.fixedArguments)
         #expect(spec.workingDirectory == project.path)
         #expect(spec.workingDirectoryFD >= 4)
         #expect(spec.useOwnedProcessGroup)
@@ -537,18 +628,20 @@ private func makeHookedProjectDirectory(
         #expect(actions.closes == [actions.duplicates[0].0])
         #expect(!spec.executablePath.hasSuffix("/sh"))
         #expect(!spec.arguments.contains("-c"))
+        #expect(spec.environment[NativeCursorAgentRuntimeSpec.invokedAsEnvironmentKey]
+            == NativeCursorAgentRuntimeSpec.invokedAsEnvironmentValue)
 
         _ = try session.wait()
     }
 }
 
 @Test func cursorAdapterRejectsPathArgvShellAndGitOverrides() throws {
-    let cursorBundleCLI = "/Applications/Cursor.app/Contents/Resources/app/bin/code"
+    let runtimePaths = Set(NativeCursorAgentRuntimeSpec.requiredPaths)
     try withTemporaryProjectDirectory { project in
         let fixture = HostSupervisorFixture()
         let supervisor = NativeAgentHostChildSupervisor(
             hooks: fixture.hooks(),
-            executableProbe: { path in path == cursorBundleCLI }
+            executableProbe: { path in runtimePaths.contains(path) }
         )
         let request = try makeRequest(
             adapter: .cursor,
@@ -571,11 +664,13 @@ private func makeHookedProjectDirectory(
         let spec = try #require(fixture.snapshot().spec)
         let environment = spec.environment
 
-        #expect(spec.executablePath == cursorBundleCLI)
-        #expect(spec.arguments.isEmpty)
+        #expect(spec.executablePath == NativeCursorAgentRuntimeSpec.nodePath)
+        #expect(spec.arguments == NativeCursorAgentRuntimeSpec.fixedArguments)
         #expect(environment["PATH"] == "/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin:/usr/local/bin")
         #expect(environment["CURSOR_CLI"] == nil)
         #expect(environment["CURSOR_AGENT"] == nil)
+        #expect(environment[NativeCursorAgentRuntimeSpec.invokedAsEnvironmentKey]
+            == NativeCursorAgentRuntimeSpec.invokedAsEnvironmentValue)
         #expect(environment["SHELL"] == nil)
         #expect(environment["BASH_ENV"] == nil)
         #expect(environment["GIT_CONFIG_COUNT"] == "4")
@@ -816,134 +911,321 @@ func waitOutcomeIsReducedToBoundedExitClassification(_ outcome: NativeAgentHostW
     }
 }
 
-@Test func cursorExecutableTrustAcceptsOnlyRootOwnedRegularNonWritableExecutables() throws {
-    let candidate = NativeAgentHostExecutableTrust.cursorExecutableCandidates[0]
-    let fixture = ExecutableTrustFixture(executablePaths: [candidate])
+private func trustManifestEntry(
+    _ relativePath: String,
+    digest: String,
+    size: UInt64,
+    executable: Bool = false
+) throws -> NativeCursorAgentRuntimeManifestEntry {
+    try NativeCursorAgentRuntimeManifestEntry(
+        relativePath: relativePath,
+        sha256: digest,
+        size: size,
+        isExecutable: executable
+    )
+}
+
+private func trustObservedFile(
+    _ relativePath: String,
+    inode: UInt64,
+    size: UInt64,
+    mode: UInt32 = UInt32(S_IFREG) | UInt32(0o644)
+) -> NativeCursorAgentRuntimeObservedFile {
+    NativeCursorAgentRuntimeObservedFile(
+        relativePath: relativePath,
+        metadata: NativeAgentHostExecutableMetadata(
+            device: 1,
+            inode: inode,
+            ownerUID: 0,
+            mode: mode,
+            size: size
+        )
+    )
+}
+
+private func makeMultiFileRuntimeFixture(
+    digestOverrides: [String: String] = [:],
+    runtimeFiles: [NativeCursorAgentRuntimeObservedFile]? = nil,
+    runtimeManifest: NativeCursorAgentRuntimeManifest? = nil
+) throws -> ExecutableTrustFixture {
+    let nodePath = NativeCursorAgentRuntimeSpec.nodePath
+    let entries = [
+        try trustManifestEntry(
+            NativeCursorAgentRuntimeSpec.nodeRelativePath,
+            digest: String(repeating: "a", count: 64),
+            size: 1,
+            executable: true
+        ),
+        try trustManifestEntry(
+            NativeCursorAgentRuntimeSpec.indexRelativePath,
+            digest: String(repeating: "b", count: 64),
+            size: 2
+        ),
+        try trustManifestEntry(
+            "chunks/one.index.js",
+            digest: String(repeating: "c", count: 64),
+            size: 3
+        ),
+        try trustManifestEntry(
+            "native/addon.node",
+            digest: String(repeating: "d", count: 64),
+            size: 4
+        )
+    ]
+    let files = [
+        trustObservedFile(
+            NativeCursorAgentRuntimeSpec.nodeRelativePath,
+            inode: 100,
+            size: 1,
+            mode: UInt32(S_IFREG) | UInt32(0o755)
+        ),
+        trustObservedFile(NativeCursorAgentRuntimeSpec.indexRelativePath, inode: 101, size: 2),
+        trustObservedFile("chunks", inode: 110, size: 0, mode: UInt32(S_IFDIR) | UInt32(0o755)),
+        trustObservedFile("chunks/one.index.js", inode: 102, size: 3),
+        trustObservedFile("native", inode: 111, size: 0, mode: UInt32(S_IFDIR) | UInt32(0o755)),
+        trustObservedFile("native/addon.node", inode: 103, size: 4)
+    ]
+    let resolvedManifest: NativeCursorAgentRuntimeManifest
+    if let runtimeManifest {
+        resolvedManifest = runtimeManifest
+    } else {
+        resolvedManifest = try NativeCursorAgentRuntimeManifest(entries: entries)
+    }
+    return ExecutableTrustFixture(
+        executablePaths: [nodePath],
+        runtimeFiles: runtimeFiles ?? files,
+        runtimeManifest: resolvedManifest,
+        digestOverrides: digestOverrides
+    )
+}
+
+@Test func cursorRuntimeTrustRequiresBothRootOwnedArtifactsAndManifestDigests() throws {
+    let paths = NativeCursorAgentRuntimeSpec.requiredPaths
+    let fixture = ExecutableTrustFixture(executablePaths: Set(paths))
 
     let selection = try NativeAgentHostExecutableTrust.resolveCursorExecutable(
-        candidates: [candidate],
+        candidates: paths,
         hooks: fixture.hooks()
     )
 
-    #expect(selection.path == candidate)
-    #expect(selection.device == 1)
-    #expect(selection.inode == 100)
+    #expect(selection.nodePath == NativeCursorAgentRuntimeSpec.nodePath)
+    #expect(selection.indexPath == NativeCursorAgentRuntimeSpec.indexPath)
+    #expect(fixture.verifiedDigestPaths() == paths.sorted())
 }
 
-@Test func cursorExecutableTrustRejectsUserOwnedAndGroupWritableCandidates() throws {
-    let userOwned = NativeAgentHostExecutableTrust.cursorExecutableCandidates[0]
-    let writableParent = NativeAgentHostExecutableTrust.cursorExecutableCandidates[1]
-    let writableParentPath = "/Applications/Cursor.app/Contents/Resources/app"
+@Test func cursorRuntimeTrustAcceptsAValidMultiFileRuntimeAndDigestsEveryFile() throws {
+    let fixture = try makeMultiFileRuntimeFixture()
+    let selection = try NativeAgentHostExecutableTrust.resolveCursorExecutable(
+        candidates: NativeCursorAgentRuntimeSpec.requiredPaths,
+        hooks: fixture.hooks()
+    )
+
+    #expect(selection.fileIdentities.count == 4)
+    #expect(fixture.verifiedDigestPaths() == [
+        NativeCursorAgentRuntimeSpec.runtimeRoot + "/chunks/one.index.js",
+        NativeCursorAgentRuntimeSpec.runtimeRoot + "/index.js",
+        NativeCursorAgentRuntimeSpec.runtimeRoot + "/native/addon.node",
+        NativeCursorAgentRuntimeSpec.runtimeRoot + "/node"
+    ])
+}
+
+@Test func cursorRuntimeTrustRejectsAnExtraUnknownDirectory() throws {
+    let base = try makeMultiFileRuntimeFixture()
+    let runtimeFiles = [
+        trustObservedFile("node", inode: 100, size: 1, mode: UInt32(S_IFREG) | UInt32(0o755)),
+        trustObservedFile("index.js", inode: 101, size: 2),
+        trustObservedFile("chunks", inode: 110, size: 0, mode: UInt32(S_IFDIR) | UInt32(0o755)),
+        trustObservedFile("chunks/one.index.js", inode: 102, size: 3),
+        trustObservedFile("native", inode: 111, size: 0, mode: UInt32(S_IFDIR) | UInt32(0o755)),
+        trustObservedFile("native/addon.node", inode: 103, size: 4),
+        trustObservedFile("unexpected", inode: 112, size: 0, mode: UInt32(S_IFDIR) | UInt32(0o755))
+    ]
     let fixture = ExecutableTrustFixture(
-        executablePaths: [userOwned, writableParent],
-        overrides: [
-            userOwned: NativeAgentHostExecutableMetadata(
-                device: 1,
-                inode: 101,
-                ownerUID: 501,
-                mode: UInt32(S_IFREG) | UInt32(0o755)
-            ),
-            writableParentPath: NativeAgentHostExecutableMetadata(
-                device: 1,
-                inode: 102,
-                ownerUID: 0,
-                mode: UInt32(S_IFDIR) | UInt32(0o775)
-            )
-        ]
+        executablePaths: [NativeCursorAgentRuntimeSpec.nodePath],
+        runtimeFiles: runtimeFiles,
+        runtimeManifest: try base.hooks().loadRuntimeManifest()
     )
 
     #expect(throws: NativeAgentHostExecutableTrustError.noTrustedCandidate) {
         try NativeAgentHostExecutableTrust.resolveCursorExecutable(
-            candidates: [userOwned, writableParent],
+            candidates: NativeCursorAgentRuntimeSpec.requiredPaths,
             hooks: fixture.hooks()
         )
     }
 }
 
-@Test func cursorExecutableTrustRejectsACLWriteAccessEvenWhenModeIsSafe() throws {
-    let executable = NativeAgentHostExecutableTrust.cursorExecutableCandidates[0]
-    let parent = "/Applications/Cursor.app/Contents/Resources/app"
-
-    let writableExecutable = ExecutableTrustFixture(
-        executablePaths: [executable],
-        writablePaths: [executable]
+@Test func cursorRuntimeTrustRejectsAnExtraUnknownRuntimeFile() throws {
+    let extra = trustObservedFile("unexpected.js", inode: 104, size: 5)
+    let fixture = ExecutableTrustFixture(
+        executablePaths: [NativeCursorAgentRuntimeSpec.nodePath],
+        runtimeFiles: [
+            trustObservedFile(
+                NativeCursorAgentRuntimeSpec.nodeRelativePath,
+                inode: 100,
+                size: 1,
+                mode: UInt32(S_IFREG) | UInt32(0o755)
+            ),
+            trustObservedFile(NativeCursorAgentRuntimeSpec.indexRelativePath, inode: 101, size: 2),
+            extra
+        ]
     )
+
     #expect(throws: NativeAgentHostExecutableTrustError.noTrustedCandidate) {
         try NativeAgentHostExecutableTrust.resolveCursorExecutable(
-            candidates: [executable],
-            hooks: writableExecutable.hooks()
+            candidates: NativeCursorAgentRuntimeSpec.requiredPaths,
+            hooks: fixture.hooks()
         )
     }
+}
 
-    let writableParent = ExecutableTrustFixture(
-        executablePaths: [executable],
+@Test func cursorRuntimeTrustRejectsAMissingManifestFile() throws {
+    let manifest = try NativeCursorAgentRuntimeManifest(entries: [
+        try trustManifestEntry("node", digest: String(repeating: "a", count: 64), size: 1, executable: true),
+        try trustManifestEntry("index.js", digest: String(repeating: "b", count: 64), size: 2),
+        try trustManifestEntry("chunks/missing.index.js", digest: String(repeating: "c", count: 64), size: 3)
+    ])
+    let fixture = ExecutableTrustFixture(
+        executablePaths: [NativeCursorAgentRuntimeSpec.nodePath],
+        runtimeManifest: manifest
+    )
+
+    #expect(throws: NativeAgentHostExecutableTrustError.noTrustedCandidate) {
+        try NativeAgentHostExecutableTrust.resolveCursorExecutable(
+            candidates: NativeCursorAgentRuntimeSpec.requiredPaths,
+            hooks: fixture.hooks()
+        )
+    }
+}
+
+@Test func cursorRuntimeTrustRejectsSiblingDigestTampering() throws {
+    let siblingPath = NativeCursorAgentRuntimeSpec.runtimeRoot + "/chunks/one.index.js"
+    let fixture = try makeMultiFileRuntimeFixture(
+        digestOverrides: [siblingPath: String(repeating: "f", count: 64)]
+    )
+
+    #expect(throws: NativeAgentHostExecutableTrustError.noTrustedCandidate) {
+        try NativeAgentHostExecutableTrust.resolveCursorExecutable(
+            candidates: NativeCursorAgentRuntimeSpec.requiredPaths,
+            hooks: fixture.hooks()
+        )
+    }
+}
+
+@Test func cursorRuntimeTrustRejectsSymlinkRuntimeMembers() throws {
+    let manifest = try NativeCursorAgentRuntimeManifest(entries: [
+        try trustManifestEntry("node", digest: String(repeating: "a", count: 64), size: 1, executable: true),
+        try trustManifestEntry("index.js", digest: String(repeating: "b", count: 64), size: 2),
+        try trustManifestEntry("chunks/link.js", digest: String(repeating: "c", count: 64), size: 3)
+    ])
+    let fixture = ExecutableTrustFixture(
+        executablePaths: [NativeCursorAgentRuntimeSpec.nodePath],
+        runtimeFiles: [
+            trustObservedFile(
+                "node",
+                inode: 100,
+                size: 1,
+                mode: UInt32(S_IFREG) | UInt32(0o755)
+            ),
+            trustObservedFile("index.js", inode: 101, size: 2),
+            trustObservedFile("chunks/link.js", inode: 102, size: 3, mode: UInt32(S_IFLNK) | 0o777)
+        ],
+        runtimeManifest: manifest
+    )
+
+    #expect(throws: NativeAgentHostExecutableTrustError.noTrustedCandidate) {
+        try NativeAgentHostExecutableTrust.resolveCursorExecutable(
+            candidates: NativeCursorAgentRuntimeSpec.requiredPaths,
+            hooks: fixture.hooks()
+        )
+    }
+}
+
+@Test func cursorRuntimeTrustRejectsMissingManifestAndDigestMismatch() throws {
+    let paths = NativeCursorAgentRuntimeSpec.requiredPaths
+    let fixture = ExecutableTrustFixture(executablePaths: Set(paths))
+    fixture.rejectDigest = true
+
+    #expect(throws: NativeAgentHostExecutableTrustError.noTrustedCandidate) {
+        try NativeAgentHostExecutableTrust.resolveCursorExecutable(
+            candidates: paths,
+            hooks: fixture.hooks()
+        )
+    }
+}
+
+@Test func cursorRuntimeTrustPreservesACLAndSymlinkHardening() throws {
+    let paths = NativeCursorAgentRuntimeSpec.requiredPaths
+    let node = paths[0]
+    let parent = NativeCursorAgentRuntimeSpec.runtimeRoot
+    let writable = ExecutableTrustFixture(
+        executablePaths: Set(paths),
         writablePaths: [parent]
     )
     #expect(throws: NativeAgentHostExecutableTrustError.noTrustedCandidate) {
         try NativeAgentHostExecutableTrust.resolveCursorExecutable(
-            candidates: [executable],
-            hooks: writableParent.hooks()
+            candidates: paths,
+            hooks: writable.hooks()
         )
     }
-}
 
-@Test func cursorExecutableTrustRejectsSymlinkFinalObjectsAndParents() throws {
-    let symlinkCandidate = NativeAgentHostExecutableTrust.cursorExecutableCandidates[0]
-    let symlinkParentCandidate = NativeAgentHostExecutableTrust.cursorExecutableCandidates[1]
-    let symlinkParent = "/Applications/Cursor.app/Contents/Resources/app"
-    let fixture = ExecutableTrustFixture(
-        executablePaths: [symlinkCandidate, symlinkParentCandidate],
+    let aclGranted = ExecutableTrustFixture(
+        executablePaths: Set(paths),
+        aclPaths: [node]
+    )
+    #expect(throws: NativeAgentHostExecutableTrustError.noTrustedCandidate) {
+        try NativeAgentHostExecutableTrust.resolveCursorExecutable(
+            candidates: paths,
+            hooks: aclGranted.hooks()
+        )
+    }
+
+    let symlink = ExecutableTrustFixture(
+        executablePaths: Set(paths),
         overrides: [
-            symlinkCandidate: NativeAgentHostExecutableMetadata(
+            node: NativeAgentHostExecutableMetadata(
                 device: 1,
                 inode: 103,
-                ownerUID: 0,
-                mode: UInt32(S_IFLNK) | UInt32(0o777)
-            ),
-            symlinkParent: NativeAgentHostExecutableMetadata(
-                device: 1,
-                inode: 104,
                 ownerUID: 0,
                 mode: UInt32(S_IFLNK) | UInt32(0o777)
             )
         ]
     )
-
     #expect(throws: NativeAgentHostExecutableTrustError.noTrustedCandidate) {
         try NativeAgentHostExecutableTrust.resolveCursorExecutable(
-            candidates: [symlinkCandidate, symlinkParentCandidate],
+            candidates: paths,
+            hooks: symlink.hooks()
+        )
+    }
+}
+
+@Test func cursorRuntimeTrustRejectsHardLinkedRuntimeMembers() throws {
+    let paths = NativeCursorAgentRuntimeSpec.requiredPaths
+    let fixture = ExecutableTrustFixture(
+        executablePaths: Set(paths),
+        overrides: [
+            paths[1]: NativeAgentHostExecutableMetadata(
+                device: 1,
+                inode: 101,
+                ownerUID: 0,
+                mode: UInt32(S_IFREG) | UInt32(0o644),
+                size: 2,
+                linkCount: 2
+            )
+        ]
+    )
+    #expect(throws: NativeAgentHostExecutableTrustError.noTrustedCandidate) {
+        try NativeAgentHostExecutableTrust.resolveCursorExecutable(
+            candidates: paths,
             hooks: fixture.hooks()
         )
     }
 }
 
-@Test func cursorExecutableTrustFallsBackOnlyToTheNextReviewedCandidate() throws {
-    let rejected = NativeAgentHostExecutableTrust.cursorExecutableCandidates[0]
-    let accepted = NativeAgentHostExecutableTrust.cursorExecutableCandidates[1]
-    let fixture = ExecutableTrustFixture(
-        executablePaths: [rejected, accepted],
-        overrides: [
-            rejected: NativeAgentHostExecutableMetadata(
-                device: 1,
-                inode: 105,
-                ownerUID: 501,
-                mode: UInt32(S_IFREG) | UInt32(0o755)
-            )
-        ]
-    )
-
+@Test func cursorRuntimeTrustRevalidationDetectsEitherArtifactReplacement() throws {
+    let paths = NativeCursorAgentRuntimeSpec.requiredPaths
+    let fixture = ExecutableTrustFixture(executablePaths: Set(paths))
     let selection = try NativeAgentHostExecutableTrust.resolveCursorExecutable(
-        candidates: [rejected, accepted],
-        hooks: fixture.hooks()
-    )
-    #expect(selection.path == accepted)
-}
-
-@Test func cursorExecutableTrustRevalidationDetectsInodeReplacement() throws {
-    let candidate = NativeAgentHostExecutableTrust.cursorExecutableCandidates[2]
-    let fixture = ExecutableTrustFixture(executablePaths: [candidate])
-    let selection = try NativeAgentHostExecutableTrust.resolveCursorExecutable(
-        candidates: [candidate],
+        candidates: paths,
         hooks: fixture.hooks()
     )
 
@@ -952,9 +1234,10 @@ func waitOutcomeIsReducedToBoundedExitClassification(_ outcome: NativeAgentHostW
             device: 1,
             inode: 106,
             ownerUID: 0,
-            mode: UInt32(S_IFREG) | UInt32(0o755)
+            mode: UInt32(S_IFREG) | UInt32(0o644),
+            size: 2
         ),
-        for: candidate
+        for: paths[1]
     )
 
     #expect(throws: NativeAgentHostExecutableTrustError.identityChanged) {
@@ -962,14 +1245,19 @@ func waitOutcomeIsReducedToBoundedExitClassification(_ outcome: NativeAgentHostW
     }
 }
 
-@Test func cursorExecutableTrustRejectsUnknownAndUserHomeSelectors() throws {
-    let unknown = "/tmp/attacker/cursor-agent"
-    let userHome = "/Users/tester/.local/bin/cursor-agent"
-    let fixture = ExecutableTrustFixture(executablePaths: [unknown, userHome])
-
+@Test func cursorRuntimeTrustRejectsUnmanagedPathsAndOldLaunchers() throws {
+    let fixture = ExecutableTrustFixture(
+        executablePaths: [
+            "/Applications/Cursor.app/Contents/Resources/app/bin/code",
+            "/Applications/Cursor.app/Contents/Resources/app/bin/cursor",
+            "/opt/cursor-agent",
+            "/opt/homebrew/bin/cursor-agent",
+            "/usr/local/bin/cursor-agent"
+        ]
+    )
     #expect(throws: NativeAgentHostExecutableTrustError.noTrustedCandidate) {
         try NativeAgentHostExecutableTrust.resolveCursorExecutable(
-            candidates: [unknown, userHome],
+            candidates: ["/Applications/Cursor.app/Contents/Resources/app/bin/code"],
             hooks: fixture.hooks()
         )
     }
