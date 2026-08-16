@@ -366,7 +366,8 @@ jobs:
             apps/cloud-api/test/postgres/managed-signer-lifecycle-signing-authority-migration.test.mjs \
             apps/cloud-api/test/postgres/least-privilege-role.integration.test.mjs \
             apps/cloud-api/test/postgres/managed-signer-key-lifecycle-repository.integration.test.mjs \
-            apps/cloud-api/test/postgres/managed-signer-lifecycle-signing-authority.integration.test.mjs
+            apps/cloud-api/test/postgres/managed-signer-lifecycle-signing-authority.integration.test.mjs \
+            apps/cloud-api/test/postgres/managed-signer-s13-multi-instance.integration.test.mjs
           run_qualification 0052 \
             apps/cloud-api/test/postgres/platform-operator-authority-migration.test.mjs \
             apps/cloud-api/test/postgres/platform-operator-authority.integration.test.mjs \
