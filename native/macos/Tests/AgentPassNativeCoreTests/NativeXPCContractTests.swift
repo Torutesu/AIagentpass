@@ -3,11 +3,12 @@ import Foundation
 import Testing
 
 @Test func nativeXPCContractHasFrozenFingerprintAndClosedInventory() {
-    #expect(AgentPassNativeXPCContract.fingerprint == "SHA256:e674b7eb5fa9b80313a57571f9a14ab28e2295c356bbb57592c8f61b3bb6165e")
+    #expect(AgentPassNativeXPCContract.fingerprint == "SHA256:c8d084ff39e3dd22fa5a8f922d925ad00976b0422d99e2b937b418f1f8369965")
     #expect(AgentPassNativeXPCContract.fingerprint == AgentPassNativeXPCContract.derivedFingerprint)
     #expect(AgentPassNativeXPCContract.managementProtocol.methods.count == 41)
     #expect(AgentPassNativeXPCContract.agentProtocol.methods.count == 5)
-    #expect(AgentPassNativeXPCContract.dtoInventories.count == 10)
+    #expect(AgentPassNativeXPCContract.hostProtocol.methods.count == 5)
+    #expect(AgentPassNativeXPCContract.dtoInventories.count == 20)
 }
 
 @Test func nativeXPCContractRuntimeSurfaceMatchesInventory() throws {

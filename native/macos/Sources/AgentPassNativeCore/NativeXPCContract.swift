@@ -2,8 +2,8 @@ import CryptoKit
 import Foundation
 import ObjectiveC.runtime
 
-/// The frozen, machine-readable contract shared by the native management and
-/// Agent XPC surfaces.
+/// The frozen, machine-readable contract shared by the native management,
+/// Agent, and supervised Host XPC surfaces.
 ///
 /// The protocol declarations remain the source of ObjC interoperability. This
 /// inventory is intentionally separate from those declarations so a protocol
@@ -12,12 +12,13 @@ import ObjectiveC.runtime
 /// `verifyRuntimeSurface()` before accepting connections.
 public enum AgentPassNativeXPCContract {
     public static let contractIdentifier = "dev.agentpass.native-xpc"
-    public static let contractVersion = 1
+    public static let contractVersion = 2
     public static let fingerprintAlgorithm = "SHA-256"
 
     public enum Purpose: String, Codable, Equatable, Hashable, Sendable {
         case management
         case agent
+        case host
     }
 
     public enum DTORole: String, Codable, Equatable, Hashable, Sendable {
@@ -108,7 +109,7 @@ public enum AgentPassNativeXPCContract {
     // This is deliberately a literal. Any intentional contract change must
     // update the version and this value together, making the change visible to
     // binaries and CI rather than deriving a new identity silently.
-    public static let frozenFingerprint = "SHA256:e674b7eb5fa9b80313a57571f9a14ab28e2295c356bbb57592c8f61b3bb6165e"
+    public static let frozenFingerprint = "SHA256:c8d084ff39e3dd22fa5a8f922d925ad00976b0422d99e2b937b418f1f8369965"
 
     public static let managementProtocol = ProtocolInventory(
         name: "AgentPassNativeServiceProtocol",
@@ -170,7 +171,19 @@ public enum AgentPassNativeXPCContract {
             method("closeAgentSession:withReply:", .agent, ["AgentPassAgentCloseSessionRequest"], ["AgentPassAgentCloseSessionResponse", "NSError"], "v32@0:8@16@?24"),
         ])
 
-    public static let protocolInventories = [managementProtocol, agentProtocol]
+    public static let hostProtocol = ProtocolInventory(
+        name: "AgentPassHostXPCProtocol",
+        version: 1,
+        purpose: .host,
+        methods: [
+            method("prepareHostSession:withReply:", .host, ["AgentPassHostPrepareRequest"], ["AgentPassHostPrepareResponse", "NSError"], "v32@0:8@16@?24"),
+            method("attachHostChild:withReply:", .host, ["AgentPassHostAttachChildRequest"], ["AgentPassHostAttachChildResponse", "NSError"], "v32@0:8@16@?24"),
+            method("signHostPayload:withReply:", .host, ["AgentPassHostSignRequest"], ["AgentPassHostSignResponse", "NSError"], "v32@0:8@16@?24"),
+            method("hostSessionStatus:withReply:", .host, ["AgentPassHostStatusRequest"], ["AgentPassHostStatusResponse", "NSError"], "v32@0:8@16@?24"),
+            method("closeHostSession:withReply:", .host, ["AgentPassHostCloseRequest"], ["AgentPassHostCloseResponse", "NSError"], "v32@0:8@16@?24"),
+        ])
+
+    public static let protocolInventories = [managementProtocol, agentProtocol, hostProtocol]
 
     public static let dtoInventories: [DTOInventory] = [
         dto("AgentPassAgentBootstrapRequest", .request, "bootstrapAgent:withReply:"),
@@ -183,6 +196,16 @@ public enum AgentPassNativeXPCContract {
         dto("AgentPassAgentSignResponse", .response, "signGitCommit:withReply:"),
         dto("AgentPassAgentCloseSessionRequest", .request, "closeAgentSession:withReply:"),
         dto("AgentPassAgentCloseSessionResponse", .response, "closeAgentSession:withReply:"),
+        hostDTO("AgentPassHostPrepareRequest", .request, "prepareHostSession:withReply:"),
+        hostDTO("AgentPassHostPrepareResponse", .response, "prepareHostSession:withReply:"),
+        hostDTO("AgentPassHostAttachChildRequest", .request, "attachHostChild:withReply:"),
+        hostDTO("AgentPassHostAttachChildResponse", .response, "attachHostChild:withReply:"),
+        hostDTO("AgentPassHostSignRequest", .request, "signHostPayload:withReply:"),
+        hostDTO("AgentPassHostSignResponse", .response, "signHostPayload:withReply:"),
+        hostDTO("AgentPassHostStatusRequest", .request, "hostSessionStatus:withReply:"),
+        hostDTO("AgentPassHostStatusResponse", .response, "hostSessionStatus:withReply:"),
+        hostDTO("AgentPassHostCloseRequest", .request, "closeHostSession:withReply:"),
+        hostDTO("AgentPassHostCloseResponse", .response, "closeHostSession:withReply:"),
     ]
 
     /// The canonical, line-oriented representation used as the fingerprint
@@ -314,8 +337,10 @@ public enum AgentPassNativeXPCContract {
         try validateClosedInventory()
         try verifyProtocolRuntime(AgentPassNativeServiceProtocol.self, inventory: managementProtocol)
         try verifyProtocolRuntime(AgentPassAgentXPCProtocol.self, inventory: agentProtocol)
+        try verifyProtocolRuntime(AgentPassHostXPCProtocol.self, inventory: hostProtocol)
         try verifyRuntimeDTOs()
         try verifyAgentInterface()
+        try verifyHostInterface()
     }
 
     private static func verifyProtocolRuntime(_ runtimeProtocol: Protocol, inventory: ProtocolInventory) throws {
@@ -382,6 +407,25 @@ public enum AgentPassNativeXPCContract {
         }
     }
 
+    private static func verifyHostInterface() throws {
+        let interface = AgentPassHostXPCInterface.make()
+        for method in hostProtocol.methods {
+            let requestDTOs = dtoInventories.filter { $0.selector == method.selector && $0.role == .request }
+            let responseDTOs = dtoInventories.filter { $0.selector == method.selector && $0.role == .response }
+            let selector = NSSelectorFromString(method.selector)
+            let actualRequests = classNames(interface.classes(for: selector, argumentIndex: 0, ofReply: false))
+            let actualResponses = classNames(interface.classes(for: selector, argumentIndex: 0, ofReply: true))
+            let expectedRequests = requestDTOs.map(\.objcName).sorted()
+            let expectedResponses = responseDTOs.map(\.objcName).sorted()
+            guard expectedRequests.allSatisfy({ actualRequests.contains($0) }), actualRequests.count == expectedRequests.count else {
+                throw ValidationError.interfaceDTORegistrationDrift(selector: method.selector, expected: expectedRequests, actual: actualRequests.sorted())
+            }
+            guard expectedResponses.allSatisfy({ actualResponses.contains($0) }), actualResponses.count == expectedResponses.count else {
+                throw ValidationError.interfaceDTORegistrationDrift(selector: method.selector, expected: expectedResponses, actual: actualResponses.sorted())
+            }
+        }
+    }
+
     private static func validateDTOReference(
         type: String,
         selector: String,
@@ -391,7 +435,7 @@ public enum AgentPassNativeXPCContract {
         referencedDTOs: inout Set<String>
     ) throws {
         guard let dto = dtos.first(where: { $0.name == type }) else {
-            if type.hasPrefix("AgentPassAgent") {
+            if type.hasPrefix("AgentPassAgent") || type.hasPrefix("AgentPassHost") {
                 throw ValidationError.missingDTO(name: type, selector: selector)
             }
             return
@@ -417,6 +461,16 @@ public enum AgentPassNativeXPCContract {
         case "AgentPassAgentSignResponse": return NSStringFromClass(AgentPassAgentSignResponse.self)
         case "AgentPassAgentCloseSessionRequest": return NSStringFromClass(AgentPassAgentCloseSessionRequest.self)
         case "AgentPassAgentCloseSessionResponse": return NSStringFromClass(AgentPassAgentCloseSessionResponse.self)
+        case "AgentPassHostPrepareRequest": return NSStringFromClass(AgentPassHostPrepareRequest.self)
+        case "AgentPassHostPrepareResponse": return NSStringFromClass(AgentPassHostPrepareResponse.self)
+        case "AgentPassHostAttachChildRequest": return NSStringFromClass(AgentPassHostAttachChildRequest.self)
+        case "AgentPassHostAttachChildResponse": return NSStringFromClass(AgentPassHostAttachChildResponse.self)
+        case "AgentPassHostSignRequest": return NSStringFromClass(AgentPassHostSignRequest.self)
+        case "AgentPassHostSignResponse": return NSStringFromClass(AgentPassHostSignResponse.self)
+        case "AgentPassHostStatusRequest": return NSStringFromClass(AgentPassHostStatusRequest.self)
+        case "AgentPassHostStatusResponse": return NSStringFromClass(AgentPassHostStatusResponse.self)
+        case "AgentPassHostCloseRequest": return NSStringFromClass(AgentPassHostCloseRequest.self)
+        case "AgentPassHostCloseResponse": return NSStringFromClass(AgentPassHostCloseResponse.self)
         default: return nil
         }
     }
@@ -449,6 +503,17 @@ public enum AgentPassNativeXPCContract {
             name: name,
             objcName: name,
             purpose: .agent,
+            role: role,
+            selector: selector,
+            secureCoding: true
+        )
+    }
+
+    private static func hostDTO(_ name: String, _ role: DTORole, _ selector: String) -> DTOInventory {
+        DTOInventory(
+            name: name,
+            objcName: name,
+            purpose: .host,
             role: role,
             selector: selector,
             secureCoding: true
