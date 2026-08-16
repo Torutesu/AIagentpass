@@ -162,6 +162,7 @@ test("P0-B live browser role, WebAuthn, and recent-auth matrix", { skip: !enable
         const card = deviceCard(page, "反映待ち Mac");
         const observation = {
           routeIntercepted: false,
+          routeSetupFailed: false,
           invalidationFailed: false,
           clickFailed: false,
           responseStatus: null,
@@ -186,8 +187,7 @@ test("P0-B live browser role, WebAuthn, and recent-auth matrix", { skip: !enable
             await route.continue();
           });
         } catch {
-          // Keep the observation bounded and let the classifier emit the
-          // fixed route-not-intercepted marker after the click attempt.
+          observation.routeSetupFailed = true;
         }
         try {
           await card.getByRole("button", { name: "Wake requestを依頼" }).click();
@@ -240,6 +240,7 @@ test("P0-B live browser role, WebAuthn, and recent-auth matrix", { skip: !enable
 test("stale authorization diagnostics emit only fixed safe markers", () => {
   const valid = {
     routeIntercepted: true,
+    routeSetupFailed: false,
     invalidationFailed: false,
     clickFailed: false,
     responseStatus: 401,
@@ -247,6 +248,7 @@ test("stale authorization diagnostics emit only fixed safe markers", () => {
   };
   assert.equal(staleAuthorizationFailureMarker(valid), null);
   assert.equal(staleAuthorizationFailureMarker({ ...valid, clickFailed: true }), STALE_AUTH_DIAGNOSTIC_MARKERS.clickFailed);
+  assert.equal(staleAuthorizationFailureMarker({ ...valid, routeSetupFailed: true }), STALE_AUTH_DIAGNOSTIC_MARKERS.routeSetupFailed);
   assert.equal(staleAuthorizationFailureMarker({ ...valid, routeIntercepted: false }), STALE_AUTH_DIAGNOSTIC_MARKERS.routeNotIntercepted);
   assert.equal(staleAuthorizationFailureMarker({ ...valid, invalidationFailed: true }), STALE_AUTH_DIAGNOSTIC_MARKERS.invalidationFailed);
   assert.equal(staleAuthorizationFailureMarker({ ...valid, responseStatus: null }), STALE_AUTH_DIAGNOSTIC_MARKERS.responseMissing);
@@ -258,6 +260,7 @@ test("stale authorization diagnostics emit only fixed safe markers", () => {
   assert.equal(staleAuthorizationFailureMarker({ ...valid, alertObserved: false }), STALE_AUTH_DIAGNOSTIC_MARKERS.alertMissing);
   assert.deepEqual(Object.values(STALE_AUTH_DIAGNOSTIC_MARKERS), [
     "P0B_SAFE_STALE_AUTH_CLICK_FAILED",
+    "P0B_SAFE_STALE_AUTH_ROUTE_SETUP_FAILED",
     "P0B_SAFE_STALE_AUTH_ROUTE_NOT_INTERCEPTED_FAILED",
     "P0B_SAFE_STALE_AUTH_INVALIDATION_FAILED",
     "P0B_SAFE_STALE_AUTH_RESPONSE_MISSING_FAILED",
@@ -272,6 +275,7 @@ test("stale authorization diagnostics emit only fixed safe markers", () => {
 
 test("recent-auth failure injection matches the exact Console operation URL", () => {
   assert.equal(isConsoleDeviceRefreshUrl(new URL("https://console.example.test/api/console?operation=device.refresh.request")), true);
+  assert.equal(isConsoleDeviceRefreshUrl({ toString: () => "https://console.example.test/api/console?operation=device.refresh.request" }), true);
   assert.equal(isConsoleDeviceRefreshUrl(new URL("https://console.example.test/api/console?operation=device.revoke")), false);
   assert.equal(isConsoleDeviceRefreshUrl(new URL("https://console.example.test/api/auth/webauthn/verify?operation=device.refresh.request")), false);
 });
@@ -542,6 +546,7 @@ function failLifecycle(error) {
 
 export const STALE_AUTH_DIAGNOSTIC_MARKERS = Object.freeze({
   clickFailed: "P0B_SAFE_STALE_AUTH_CLICK_FAILED",
+  routeSetupFailed: "P0B_SAFE_STALE_AUTH_ROUTE_SETUP_FAILED",
   routeNotIntercepted: "P0B_SAFE_STALE_AUTH_ROUTE_NOT_INTERCEPTED_FAILED",
   invalidationFailed: "P0B_SAFE_STALE_AUTH_INVALIDATION_FAILED",
   responseMissing: "P0B_SAFE_STALE_AUTH_RESPONSE_MISSING_FAILED",
@@ -554,13 +559,16 @@ export const STALE_AUTH_DIAGNOSTIC_MARKERS = Object.freeze({
 });
 
 export function isConsoleDeviceRefreshUrl(url) {
-  return url instanceof URL
-    && url.pathname === "/api/console"
-    && url.searchParams.get("operation") === "device.refresh.request";
+  let parsed;
+  try { parsed = new URL(String(url)); }
+  catch { return false; }
+  return parsed.pathname === "/api/console"
+    && parsed.searchParams.get("operation") === "device.refresh.request";
 }
 
 export function staleAuthorizationFailureMarker(observation = {}) {
   if (observation.clickFailed === true) return STALE_AUTH_DIAGNOSTIC_MARKERS.clickFailed;
+  if (observation.routeSetupFailed === true) return STALE_AUTH_DIAGNOSTIC_MARKERS.routeSetupFailed;
   if (observation.routeIntercepted !== true) return STALE_AUTH_DIAGNOSTIC_MARKERS.routeNotIntercepted;
   if (observation.invalidationFailed === true) return STALE_AUTH_DIAGNOSTIC_MARKERS.invalidationFailed;
   const status = observation.responseStatus;
