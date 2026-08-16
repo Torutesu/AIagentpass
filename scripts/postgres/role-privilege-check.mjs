@@ -305,12 +305,12 @@ signing_authority_table_observations AS (
               OR regexp_replace(
                   replace(regexp_replace(pg_get_expr(p.polqual, p.polrelid), '[[:space:]]+', '', 'g'),
                     'public.agentpass_current_organization_id()', 'agentpass_current_organization_id()'),
-                  '^\\((.*)\\)$', '\\1'
+                  '(^[(]|[)]$)', '', 'g'
                 ) IS DISTINCT FROM expected.using_expression
               OR regexp_replace(
                   replace(regexp_replace(pg_get_expr(p.polwithcheck, p.polrelid), '[[:space:]]+', '', 'g'),
                     'public.agentpass_current_organization_id()', 'agentpass_current_organization_id()'),
-                  '^\\((.*)\\)$', '\\1'
+                  '(^[(]|[)]$)', '', 'g'
                 ) IS DISTINCT FROM expected.with_check_expression
             )
         ) THEN 'policy:missing_or_mismatch' END,
@@ -345,12 +345,12 @@ signing_authority_table_observations AS (
           OR regexp_replace(
               replace(regexp_replace(pg_get_expr(policy.polqual, policy.polrelid), '[[:space:]]+', '', 'g'),
                 'public.agentpass_current_organization_id()', 'agentpass_current_organization_id()'),
-              '^\\((.*)\\)$', '\\1'
+              '(^[(]|[)]$)', '', 'g'
             ) IS DISTINCT FROM expected_policy.using_expression
           OR regexp_replace(
               replace(regexp_replace(pg_get_expr(policy.polwithcheck, policy.polrelid), '[[:space:]]+', '', 'g'),
                 'public.agentpass_current_organization_id()', 'agentpass_current_organization_id()'),
-              '^\\((.*)\\)$', '\\1'
+              '(^[(]|[)]$)', '', 'g'
             ) IS DISTINCT FROM expected_policy.with_check_expression
         )
     ), '[]'::json) AS policy_mismatches
