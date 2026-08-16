@@ -157,6 +157,12 @@ async function openSetup(page: Page): Promise<void> {
   await expect(page.getByRole("heading", { name: "パスキーを登録" })).toBeVisible();
 }
 
+function passkeyRegistrationCard(page: Page) {
+  return page.locator("article").filter({
+    has: page.getByRole("heading", { name: "パスキーを登録", exact: true }),
+  });
+}
+
 async function importPreflight(page: Page): Promise<void> {
   await page.getByLabel("公開preflight JSON").fill(JSON.stringify({
     version: 1,
@@ -181,7 +187,7 @@ test("registers a passkey through the production browser API and keeps credentia
   const state = await installSecurityRoutes(page, "initial_registration");
   await openSetup(page);
   await page.getByRole("button", { name: "Touch ID / パスキーを登録", exact: true }).click();
-  await expect(page.getByRole("status")).toContainText("パスキーを登録しました");
+  await expect(passkeyRegistrationCard(page).getByRole("status")).toContainText("パスキーを登録しました");
 
   expect(state.registrationOptionsCalls).toBe(1);
   expect(state.registrationOptionRecentAuth).toEqual([undefined]);
@@ -199,7 +205,7 @@ test("requires operation-bound step-up before registering another passkey", asyn
   const state = await installSecurityRoutes(page, "step_up_registration");
   await openSetup(page);
   await page.getByRole("button", { name: "Touch ID / パスキーを登録", exact: true }).click();
-  await expect(page.getByRole("status")).toContainText("パスキーを登録しました");
+  await expect(passkeyRegistrationCard(page).getByRole("status")).toContainText("パスキーを登録しました");
 
   expect(state.registrationOptionsCalls).toBe(2);
   expect(state.registrationOptionRecentAuth).toEqual([undefined, AUTHORIZATION_ID]);
