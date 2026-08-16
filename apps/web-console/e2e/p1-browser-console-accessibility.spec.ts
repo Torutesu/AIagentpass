@@ -108,6 +108,7 @@ async function openOrganizations(page: Page): Promise<void> {
 }
 
 test("help dialog is keyboard operable and restores focus to its trigger", async ({ page }) => {
+  await installRoutes(page);
   await openConsole(page);
   const trigger = page.getByRole("button", { name: "ヘルプを開く", exact: true });
   await trigger.click();
@@ -126,6 +127,7 @@ test("help dialog is keyboard operable and restores focus to its trigger", async
 });
 
 test("workspace chooser is an accessible dialog and Escape restores focus", async ({ page }) => {
+  await installRoutes(page);
   await openConsole(page);
   const trigger = page.getByRole("button", { name: /ワークスペースを選択$/u });
   await trigger.click();
@@ -142,6 +144,7 @@ test("workspace chooser is an accessible dialog and Escape restores focus", asyn
 
 test("mobile navigation closes with Escape and restores focus", async ({ page }) => {
   await page.setViewportSize({ width: 640, height: 900 });
+  await installRoutes(page);
   await openConsole(page);
   const trigger = page.getByRole("button", { name: "メニューを開く", exact: true });
   await trigger.click();
@@ -180,6 +183,7 @@ test("organization failure is announced without leaking server text and offers n
 
 test("Console reflows at a 200 percent effective zoom without horizontal overflow", async ({ page }) => {
   await page.setViewportSize({ width: 640, height: 900 });
+  await installRoutes(page);
   await openConsole(page);
   await page.evaluate(() => {
     document.documentElement.style.zoom = "2";
@@ -196,6 +200,7 @@ test("Console reflows at a 200 percent effective zoom without horizontal overflo
 
 test("reduced motion disables shell scrolling and transition motion", async ({ page }) => {
   await page.emulateMedia({ reducedMotion: "reduce" });
+  await installRoutes(page);
   await openConsole(page);
 
   const styles = await page.evaluate(() => {
