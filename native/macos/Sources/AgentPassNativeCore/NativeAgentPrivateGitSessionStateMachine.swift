@@ -133,7 +133,10 @@ public final class NativeAgentPrivateGitSessionStateMachine: @unchecked Sendable
             }
             return signature
 
-        case .completed, .quarantined:
+        case .completed:
+            quarantine(.excess)
+            throw Self.error(for: .excess)
+        case .quarantined:
             throw NativeAgentPrivateGitSessionStateMachineError.terminal
         }
     }

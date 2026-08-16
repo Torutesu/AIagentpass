@@ -398,6 +398,9 @@ export function keyboardRecentAuthFailureMarker(observation) {
 function keyboardPhaseStatusMarker(phase, status) {
   if (!Number.isInteger(status)) return `P0B_SAFE_KEYBOARD_AUTH_${phase}_RESPONSE_MISSING_FAILED`;
   if (status >= 200 && status < 300) return null;
+  if (phase === "VERIFY" && [400, 401, 403, 409, 422, 428, 429].includes(status)) {
+    return `P0B_SAFE_KEYBOARD_AUTH_VERIFY_HTTP_${status}_FAILED`;
+  }
   if (status >= 400 && status < 500) return `P0B_SAFE_KEYBOARD_AUTH_${phase}_HTTP_4XX_FAILED`;
   if (status >= 500 && status < 600) return `P0B_SAFE_KEYBOARD_AUTH_${phase}_HTTP_5XX_FAILED`;
   return `P0B_SAFE_KEYBOARD_AUTH_${phase}_HTTP_OTHER_FAILED`;

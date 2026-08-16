@@ -277,11 +277,11 @@ private let sessionSignature = Data("-----BEGIN SSH SIGNATURE-----\nfixed\n-----
 
     #expect(machine.state == .completed)
     #expect(throws: NativeAgentPrivateGitSessionStateMachineError.excess) {
-        _ = try machine.beginRequest(commitPayload: sessionPayload)
+        _ = try machine.acceptResponse(responseFrame(sequence: 2))
     }
     #expect(machine.state == .quarantined(.excess))
     #expect(throws: NativeAgentPrivateGitSessionStateMachineError.terminal) {
-        _ = try machine.acceptResponse(responseFrame(sequence: 2))
+        _ = try machine.beginRequest(commitPayload: sessionPayload)
     }
 }
 
