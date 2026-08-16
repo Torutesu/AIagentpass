@@ -33,29 +33,32 @@ class FakeClient {
   async query(text, params = []) {
     this.calls.push({ text, params });
     if (text === "BEGIN" || text === "COMMIT" || text === "ROLLBACK") return { rows: [], rowCount: 0 };
-    if (text.startsWith("SELECT pg_advisory_xact_lock")) return { rows: [{ locked: true }], rowCount: 1 };
-    if (text.startsWith("SELECT member_id,role,version")) return this.membership ? { rows: [this.membership], rowCount: 1 } : { rows: [], rowCount: 0 };
-    if (text.startsWith("INSERT INTO capabilities")) {
-      if (this.existingCapability) return { rows: [], rowCount: 0 };
+    if (text.startsWith("SELECT set_config")) return { rows: [{ organization_id: params[0] }], rowCount: 1 };
+    if (text.startsWith("SELECT public.agentpass_capability_authority_issue")) {
+      if (!this.membership || !["owner", "admin"].includes(this.membership.role)) return { rows: [{ result: { state: "member_not_active" } }], rowCount: 1 };
+      if (params[8] !== null && params[8] !== this.membership.version) return { rows: [{ result: { state: "membership_version_conflict" } }], rowCount: 1 };
       const row = {
         organization_id: params[0], capability_id: params[1], agent_id: params[2], device_id: params[3],
         sequence: params[4], statement_hash: params[5], expires_at: params[6], revoked_at: null,
-        issued_by_member_id: params[7], issued_membership_version: params[8]
+        issued_by_member_id: params[7], issued_membership_version: this.membership.version
       };
-      return { rows: [row], rowCount: 1 };
+      if (this.existingCapability) {
+        const matches = Object.entries(row).every(([key, value]) => this.existingCapability[key] === value);
+        return { rows: [{ result: matches ? { state: "replayed", capability: this.existingCapability } : { state: "conflict" } }], rowCount: 1 };
+      }
+      return { rows: [{ result: { state: "issued", capability: row } }], rowCount: 1 };
     }
-    if (text.startsWith("SELECT organization_id,id AS capability_id")) return this.existingCapability ? { rows: [this.existingCapability], rowCount: 1 } : { rows: [], rowCount: 0 };
-    if (text.startsWith("UPDATE capabilities")) {
+    if (text.startsWith("SELECT public.agentpass_capability_authority_revoke_member")) {
       const rows = this.capabilities.filter((row) => row.organization_id === params[0] && row.issued_by_member_id === params[1] && row.revoked_at === null).map((row) => ({ ...row, revoked_at: params[2] }));
-      return { rows, rowCount: rows.length };
+      return { rows: [{ result: { state: "revoked", capabilities: rows.sort((left, right) => left.capability_id.localeCompare(right.capability_id)) } }], rowCount: 1 };
     }
-    if (text.startsWith("SELECT id AS capability_id")) {
+    if (text.startsWith("SELECT public.agentpass_capability_authority_list_revoked")) {
       const rows = this.capabilities
         .filter((row) => row.organization_id === params[0] && row.revoked_at !== null && Date.parse(row.expires_at) > Date.parse(params[1]))
         .sort((left, right) => left.capability_id.localeCompare(right.capability_id))
         .slice(0, params[2])
-        .map((row) => ({ capability_id: row.capability_id }));
-      return { rows, rowCount: rows.length };
+        .map((row) => row.capability_id);
+      return { rows: [{ result: { state: "listed", capability_ids: rows } }], rowCount: 1 };
     }
     throw new Error(`unexpected query: ${text}`);
   }
@@ -109,9 +112,7 @@ test("lists only unexpired durable revocations for ControlBundle generation and 
   ] });
   const repository = createCapabilityAuthorityRepository({ client, now: () => NOW });
   assert.deepEqual(await repository.listRevokedCapabilityIds({ organization_id: ids.organization }), [ids.capability, ids.capability2]);
-  const query = client.calls.at(-1);
-  assert.match(query.text, /revoked_at IS NOT NULL AND expires_at>\$2::timestamptz/);
-  assert.match(query.text, /ORDER BY id ASC\s+LIMIT \$3/);
+  const query = client.calls.find(({ text }) => text.startsWith("SELECT public.agentpass_capability_authority_list_revoked"));
   assert.deepEqual(query.params, [ids.organization, NOW, 257]);
 
   const overflow = new FakeClient({ capabilities: Array.from({ length: 257 }, (_, index) => ({
@@ -139,11 +140,9 @@ test("issues metadata from the locked active membership version and never trusts
     issued_by_member_id: ids.member,
     issued_membership_version: 7
   });
-  assert.deepEqual(client.calls.slice(0, 4).map(({ text }) => text), ["BEGIN", "SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", "SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", "SELECT member_id,role,version\n        FROM memberships\n        WHERE organization_id=$1 AND member_id=$2 AND status='active'\n        FOR SHARE"]);
-  assert.deepEqual(client.calls[1].params, [`agentpass:organization:${ids.organization}`]);
-  assert.deepEqual(client.calls[2].params, [`agentpass:capability-authority:${ids.organization}:${ids.member}`]);
-  const insert = client.calls.find(({ text }) => text.startsWith("INSERT INTO capabilities"));
-  assert.deepEqual(insert.params, [ids.organization, ids.capability, ids.agent, ids.device, 3, HASH, EXPIRES, ids.member, 7]);
+  assert.deepEqual(client.calls.slice(0, 3).map(({ text }) => text), ["BEGIN", "SELECT set_config('agentpass.organization_id',$1,true) AS organization_id", "SELECT public.agentpass_capability_authority_issue(\n        $1,$2,$3,$4,$5,$6,$7::timestamptz,$8,$9\n      ) AS result"]);
+  const issue = client.calls[2];
+  assert.deepEqual(issue.params, [ids.organization, ids.capability, ids.agent, ids.device, 3, HASH, EXPIRES, ids.member, null]);
 
   const stale = new FakeClient({ membership: { member_id: ids.member, role: "admin", version: 8 } });
   await assert.rejects(createCapabilityAuthorityRepository({ client: stale, now: () => NOW }).issueCapabilityMetadata(issueInput({ issued_membership_version: 7 })), (error) => error instanceof CapabilityAuthorityRepositoryError && error.code === "ERR_MEMBERSHIP_VERSION");
@@ -181,8 +180,7 @@ test("revokeActiveCapabilitiesForMember atomically updates only unrevoked capabi
   assert.equal(result.revoked_count, 1);
   assert.deepEqual(result.capability_ids, [ids.capability]);
   assert.equal(result.capabilities[0].revoked_at, NOW);
-  const update = client.calls.find(({ text }) => text.startsWith("UPDATE capabilities"));
-  assert.match(update.text, /organization_id=\$1 AND issued_by_member_id=\$2 AND revoked_at IS NULL/);
+  const update = client.calls.find(({ text }) => text.startsWith("SELECT public.agentpass_capability_authority_revoke_member"));
   assert.deepEqual(update.params, [ids.organization, ids.member, NOW]);
   assert.equal(client.calls.at(-1).text, "COMMIT");
 });
@@ -223,7 +221,7 @@ test("revoke failure rolls back and does not leak database error details into th
   const client = new FakeClient();
   const originalQuery = client.query.bind(client);
   client.query = async (text, params) => {
-    if (text.startsWith("UPDATE capabilities")) throw new Error("statement contains secret internal detail");
+    if (text.startsWith("SELECT public.agentpass_capability_authority_revoke_member")) throw new Error("statement contains secret internal detail");
     return originalQuery(text, params);
   };
   await assert.rejects(

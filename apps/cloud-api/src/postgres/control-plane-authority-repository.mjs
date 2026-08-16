@@ -87,6 +87,7 @@ export function createControlPlaneAuthorityRepository({ client, cursorCodec, cur
   async function createRevocation(input = {}) {
     const values = normalizeRevocationInput(input, now);
     return databaseOperation(() => transaction(client, async (tx) => {
+      await establishTenantContext(tx, values.organizationId);
       await lockOrganization(tx, values.organizationId);
       await assertActiveMember(tx, values.organizationId, values.createdBy);
       await assertRevocationTarget(tx, values);
@@ -209,6 +210,7 @@ export function createControlPlaneAuthorityRepository({ client, cursorCodec, cur
     const statementHashFactory = input.statement_hash_factory ?? input.statementHashFactory;
     if (typeof statementHashFactory !== "function") throw new ControlPlaneAuthorityRepositoryError("ERR_INPUT", "bundle statement hash factory is required");
     return databaseOperation(() => transaction(client, async (tx) => {
+      await establishTenantContext(tx, values.organizationId);
       await lockOrganization(tx, values.organizationId);
       await lockOrganizationRow(tx, values.organizationId);
       await assertDevice(tx, values.organizationId, values.deviceId);
@@ -232,12 +234,14 @@ export function createControlPlaneAuthorityRepository({ client, cursorCodec, cur
       // Capability revocations are durable authority state too.  Read them
       // inside this transaction so the returned snapshot never omits a
       // capability that was already revoked at the snapshot boundary.
-      const capabilityResult = await tx.query(`SELECT id AS capability_id
-        FROM capabilities
-        WHERE organization_id=$1 AND revoked_at IS NOT NULL AND expires_at>$2::timestamptz
-        ORDER BY id ASC
-        LIMIT $3`, [values.organizationId, values.issuedAt, MAX_CONTROL_BUNDLE_REVOCATIONS + 1]);
-      const durableCapabilityRevocations = (capabilityResult.rows ?? []).map((row) => uuid(row.capability_id ?? row.id, "capability_id"));
+      const capabilityResult = await tx.query(`SELECT public.agentpass_capability_authority_list_revoked(
+        $1,$2::timestamptz,$3
+      ) AS result`, [values.organizationId, values.issuedAt, MAX_CONTROL_BUNDLE_REVOCATIONS + 1]);
+      const capabilityRecord = capabilityResult.rows?.[0]?.result;
+      if (rowCount(capabilityResult) !== 1 || capabilityRecord?.state !== "listed" || !Array.isArray(capabilityRecord.capability_ids)) {
+        throw new ControlPlaneAuthorityRepositoryError("ERR_DB_RESULT", "capability revocation snapshot is unavailable");
+      }
+      const durableCapabilityRevocations = capabilityRecord.capability_ids.map((id) => uuid(id, "capability_id"));
       if (durableCapabilityRevocations.length > MAX_CONTROL_BUNDLE_REVOCATIONS) {
         throw new ControlPlaneAuthorityRepositoryError("ERR_REVOCATION_CAPACITY", "active capability revocations exceed the ControlBundle limit");
       }

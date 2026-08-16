@@ -2,7 +2,6 @@ import { assertTenantId, PostgresRepositoryError, withTransaction } from "./repo
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const SHA256 = /^[0-9a-f]{64}$/;
-const LOCK_PREFIX = "agentpass:capability-authority:";
 const MAX_CONTROL_BUNDLE_REVOCATIONS = 256;
 
 export class CapabilityAuthorityRepositoryError extends PostgresRepositoryError {
@@ -29,30 +28,10 @@ export function createCapabilityAuthorityRepository({ client, now = () => new Da
   async function issueCapabilityMetadata(input = {}) {
     const values = normalizeIssueInput(input, now);
     return operation(async () => transaction(async (tx) => {
-      await lockOrganization(tx, values.organizationId);
-      await lockAuthority(tx, values.organizationId, values.issuedByMemberId);
-      const membership = await tx.query(`SELECT member_id,role,version
-        FROM memberships
-        WHERE organization_id=$1 AND member_id=$2 AND status='active'
-        FOR SHARE`, [values.organizationId, values.issuedByMemberId]);
-      if (rowCount(membership) !== 1 || !["owner", "admin"].includes(membership.rows[0].role)) {
-        throw new CapabilityAuthorityRepositoryError("ERR_MEMBER_NOT_ACTIVE", "capability issuer is not an active organization administrator");
-      }
-
-      const membershipVersion = positiveInteger(membership.rows[0].version, "membership version");
-      if (values.expectedMembershipVersion !== undefined && values.expectedMembershipVersion !== membershipVersion) {
-        throw new CapabilityAuthorityRepositoryError("ERR_MEMBERSHIP_VERSION", "capability issuer membership version is stale", {
-          expected: values.expectedMembershipVersion,
-          actual: membershipVersion
-        });
-      }
-
-      let result = await tx.query(`INSERT INTO capabilities
-        (organization_id,id,agent_id,device_id,sequence,statement_hash,expires_at,issued_by_member_id,issued_membership_version)
-        VALUES ($1,$2,$3,$4,$5,$6,$7::timestamptz,$8,$9)
-        ON CONFLICT (organization_id,id) DO NOTHING
-        RETURNING organization_id,id AS capability_id,agent_id,device_id,sequence,statement_hash,
-          expires_at,revoked_at,issued_by_member_id,issued_membership_version`, [
+      await installTenantContext(tx, values.organizationId);
+      const result = await tx.query(`SELECT public.agentpass_capability_authority_issue(
+        $1,$2,$3,$4,$5,$6,$7::timestamptz,$8,$9
+      ) AS result`, [
         values.organizationId,
         values.capabilityId,
         values.agentId,
@@ -61,37 +40,31 @@ export function createCapabilityAuthorityRepository({ client, now = () => new Da
         values.statementHash,
         values.expiresAt,
         values.issuedByMemberId,
-        membershipVersion
+        values.expectedMembershipVersion ?? null
       ]);
-      let replayed = false;
-      if (rowCount(result) !== 1) {
-        result = await tx.query(`SELECT organization_id,id AS capability_id,agent_id,device_id,sequence,statement_hash,
-          expires_at,revoked_at,issued_by_member_id,issued_membership_version
-          FROM capabilities WHERE organization_id=$1 AND id=$2 FOR UPDATE`, [values.organizationId, values.capabilityId]);
-        if (rowCount(result) !== 1 || !sameCapabilityAuthority(result.rows[0], values, membershipVersion)) {
-          throw new CapabilityAuthorityRepositoryError("ERR_CAPABILITY_CONFLICT", "capability identity conflicts with another request");
-        }
-        replayed = true;
-      }
-      return Object.freeze({ ...publicCapabilityRow(result.rows[0]), ...(replayed ? { replayed: true } : {}) });
+      const record = functionResult(result);
+      if (record.state === "member_not_active") throw new CapabilityAuthorityRepositoryError("ERR_MEMBER_NOT_ACTIVE", "capability issuer is not an active organization administrator");
+      if (record.state === "membership_version_conflict") throw new CapabilityAuthorityRepositoryError("ERR_MEMBERSHIP_VERSION", "capability issuer membership version is stale");
+      if (record.state === "conflict") throw new CapabilityAuthorityRepositoryError("ERR_CAPABILITY_CONFLICT", "capability identity conflicts with another request");
+      if (!["issued", "replayed"].includes(record.state) || !record.capability) throw new CapabilityAuthorityRepositoryError("ERR_DB_RESULT", "capability authority returned an invalid issue result");
+      return Object.freeze({ ...publicCapabilityRow(record.capability), ...(record.state === "replayed" ? { replayed: true } : {}) });
     }));
   }
 
   async function revokeActiveCapabilitiesForMember(input = {}) {
     const values = normalizeRevokeInput(input, now);
     return operation(async () => transaction(async (tx) => {
-      await lockOrganization(tx, values.organizationId);
-      await lockAuthority(tx, values.organizationId, values.memberId);
-      const result = await tx.query(`UPDATE capabilities
-        SET revoked_at=$3::timestamptz
-        WHERE organization_id=$1 AND issued_by_member_id=$2 AND revoked_at IS NULL
-        RETURNING organization_id,id AS capability_id,agent_id,device_id,sequence,statement_hash,
-          expires_at,revoked_at,issued_by_member_id,issued_membership_version`, [
+      await installTenantContext(tx, values.organizationId);
+      const result = await tx.query(`SELECT public.agentpass_capability_authority_revoke_member(
+        $1,$2,$3::timestamptz
+      ) AS result`, [
         values.organizationId,
         values.memberId,
         values.revokedAt
       ]);
-      const capabilities = (result.rows ?? []).map(publicCapabilityRow);
+      const record = functionResult(result);
+      if (record.state !== "revoked" || !Array.isArray(record.capabilities)) throw new CapabilityAuthorityRepositoryError("ERR_DB_RESULT", "capability authority returned an invalid revoke result");
+      const capabilities = record.capabilities.map(publicCapabilityRow);
       if (capabilities.length > 0) {
         if (!onAuthorityReduction) {
           throw new CapabilityAuthorityRepositoryError("ERR_AUTHORITY_REDUCTION_UNAVAILABLE", "authority reduction propagation is unavailable");
@@ -128,18 +101,18 @@ export function createCapabilityAuthorityRepository({ client, now = () => new Da
   async function listRevokedCapabilityIds(input = {}) {
     const organizationId = tenant(input.organization_id ?? input.organizationId);
     const evaluatedAt = timestamp(input.evaluated_at ?? input.evaluatedAt ?? now(), "evaluated_at");
-    return operation(async () => {
-      const result = await client.query(`SELECT id AS capability_id
-        FROM capabilities
-        WHERE organization_id=$1 AND revoked_at IS NOT NULL AND expires_at>$2::timestamptz
-        ORDER BY id ASC
-        LIMIT $3`, [organizationId, evaluatedAt, MAX_CONTROL_BUNDLE_REVOCATIONS + 1]);
-      const rows = result.rows ?? [];
-      if (rows.length > MAX_CONTROL_BUNDLE_REVOCATIONS) {
+    return operation(async () => transaction(async (tx) => {
+      await installTenantContext(tx, organizationId);
+      const result = await tx.query(`SELECT public.agentpass_capability_authority_list_revoked(
+        $1,$2::timestamptz,$3
+      ) AS result`, [organizationId, evaluatedAt, MAX_CONTROL_BUNDLE_REVOCATIONS + 1]);
+      const record = functionResult(result);
+      if (record.state !== "listed" || !Array.isArray(record.capability_ids)) throw new CapabilityAuthorityRepositoryError("ERR_DB_RESULT", "capability authority returned an invalid revocation list");
+      if (record.capability_ids.length > MAX_CONTROL_BUNDLE_REVOCATIONS) {
         throw new CapabilityAuthorityRepositoryError("ERR_REVOCATION_CAPACITY", "active capability revocations exceed the ControlBundle limit");
       }
-      return Object.freeze(rows.map((row) => uuid(row.capability_id ?? row.id, "capability_id")));
-    });
+      return Object.freeze(record.capability_ids.map((id) => uuid(id, "capability_id")));
+    }));
   }
 
   async function operation(callback) {
@@ -191,12 +164,11 @@ function normalizeRevokeInput(input, now) {
   return { organizationId, memberId, actorMemberId, revokedAt };
 }
 
-async function lockAuthority(tx, organizationId, memberId) {
-  await tx.query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", [`${LOCK_PREFIX}${organizationId}:${memberId}`]);
-}
-
-async function lockOrganization(tx, organizationId) {
-  await tx.query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", [`agentpass:organization:${organizationId}`]);
+async function installTenantContext(tx, organizationId) {
+  const result = await tx.query("SELECT set_config('agentpass.organization_id',$1,true) AS organization_id", [organizationId]);
+  if (rowCount(result) !== 1 || result.rows?.[0]?.organization_id !== organizationId) {
+    throw new CapabilityAuthorityRepositoryError("ERR_TENANT_SCOPE", "capability tenant context could not be installed");
+  }
 }
 
 function publicCapabilityRow(row) {
@@ -215,16 +187,13 @@ function publicCapabilityRow(row) {
   });
 }
 
-function sameCapabilityAuthority(row, values, membershipVersion) {
-  return row.organization_id === values.organizationId
-    && (row.capability_id ?? row.id) === values.capabilityId
-    && row.agent_id === values.agentId
-    && row.device_id === values.deviceId
-    && Number(row.sequence) === values.sequence
-    && row.statement_hash === values.statementHash
-    && timestamp(row.expires_at, "expires_at") === values.expiresAt
-    && row.issued_by_member_id === values.issuedByMemberId
-    && Number(row.issued_membership_version) === membershipVersion;
+function functionResult(result) {
+  if (rowCount(result) !== 1) throw new CapabilityAuthorityRepositoryError("ERR_DB_RESULT", "capability authority returned an invalid function result");
+  const value = result.rows?.[0]?.result;
+  if (!value || typeof value !== "object" || Array.isArray(value) || typeof value.state !== "string") {
+    throw new CapabilityAuthorityRepositoryError("ERR_DB_RESULT", "capability authority returned an invalid function result");
+  }
+  return value;
 }
 
 function tenant(value) {

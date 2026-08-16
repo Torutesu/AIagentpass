@@ -23,6 +23,8 @@ import { createRefreshNonceCodec } from "./postgres/refresh-nonce-codec.mjs";
 import { createHostedAgentSessionGrantSigner, parseAgentSessionSignerConfig } from "./agent-session-signer-config.mjs";
 import { createProcessBindingPolicyRegistry } from "./process-binding-policy-registry.mjs";
 import { createAgentSessionDeviceApi } from "./agent-session-device-api.mjs";
+import { createAgentSessionSigningCapabilityApi } from "./agent-session-signing-capability-api.mjs";
+import { createAgentSessionSigningCapabilityIssuanceService } from "./human-auth/agent-sessions/signing-capability-issuance-service.mjs";
 import { createQualificationGrantBatchDeviceApi } from "./qualification-grant-batch-device-api.mjs";
 import { createHostedQualificationManifestSigner, parseQualificationManifestSignerConfig } from "./qualification-manifest-signer-config.mjs";
 import { createOwnerRecoveryNotificationPublisher } from "./postgres/owner-recovery-notification-publisher.mjs";
@@ -54,8 +56,125 @@ import { createPlatformOperatorAuthorizer } from "./platform-operator-authorizer
 import { PROTOCOL_VERSION, REFRESH_HINT_SIGNATURE_ALGORITHM, REFRESH_HINT_TYPE } from "../../../packages/protocol/src/index.mjs";
 
 const IDENTIFIER = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu;
+const AGENT_SESSION_SIGNING_CAPABILITY_PURPOSE = "git.commit.sign";
 
-export async function createCloudRuntime({ env = process.env, logger = console, postgresFactory = createPostgresRuntime, humanAuthFactory = createHumanAuthRuntime, kmsProviderFactory = createHostedKmsProviders, agentSessionSignerProvider, agentSessionSignerFactory = createHostedAgentSessionGrantSigner, qualificationManifestSignerProvider, qualificationManifestSignerFactory = createHostedQualificationManifestSigner, possessionReceiptSignerProvider, possessionReceiptSignerFactory = createHostedPossessionReceiptSigner, refreshHintSignerProvider, capabilitySignerProvider, controlBundleSignerProvider, auditAnchorSignerProvider, promotionEvidenceSignerProvider, platformOperatorAuthorizer, ownerRecoveryPublisher, platformSession, platformSessionBootstrapAuthenticator, platformSessionAuthorityResolver, platformSessionWebAuthnVerify, platformSessionOrigin, platformSessionRpId } = {}) {
+/**
+ * Compose the F2 signing-capability API at the production boundary.
+ *
+ * The signer is deliberately an injected, purpose-specific object. This
+ * seam does not discover a KMS provider, read signer configuration, or fall
+ * back to the generic capability signer. The caller must provide the
+ * PostgreSQL session binder and a factory for tenant/session-bound
+ * reservation repositories as well.
+ */
+export function createAgentSessionSigningCapabilityRuntimeComposition({
+  deviceRequestVerifier,
+  sessionBinder,
+  reservationRepositoryFactory,
+  signer,
+  signerKeyId = undefined,
+  grantVerifier,
+  repository,
+  rateLimiter = undefined,
+  now = () => Date.now(),
+  requestIdFactory = undefined,
+  maxBodyBytes = undefined
+} = {}) {
+  if (typeof deviceRequestVerifier !== "function") throw new TypeError("signing capability deviceRequestVerifier is required");
+  if (!sessionBinder || (typeof sessionBinder !== "function" && typeof sessionBinder.bindAgentSession !== "function")) {
+    throw new TypeError("signing capability sessionBinder is required");
+  }
+  if (typeof reservationRepositoryFactory !== "function") throw new TypeError("signing capability reservationRepositoryFactory is required");
+  if (!signer || typeof signer !== "object" || Array.isArray(signer)
+    || (typeof signer.signAgentSigningCapability !== "function" && typeof signer.sign !== "function")
+    || signer.purpose !== AGENT_SESSION_SIGNING_CAPABILITY_PURPOSE) {
+    throw new TypeError("purpose-separated signing capability signer is required");
+  }
+  const resolvedSignerKeyId = signerKeyId ?? signer.key_id ?? signer.keyId;
+  if (typeof resolvedSignerKeyId !== "string" || !IDENTIFIER.test(resolvedSignerKeyId)) {
+    throw new TypeError("signing capability signer key id is required");
+  }
+  if (typeof grantVerifier !== "function") throw new TypeError("Agent Session grant verifier is required");
+  if (!repository || typeof repository.consumeAgentSessionGrant !== "function") {
+    throw new TypeError("Agent Session repository is required");
+  }
+  if (typeof now !== "function") throw new TypeError("signing capability now must be a function");
+
+  const signingCapabilityApi = createAgentSessionSigningCapabilityApi({
+    deviceRequestVerifier,
+    sessionBinder,
+    issuanceServiceFactory: async ({ organization_id, device_id, session_id, binding } = {}) => {
+      const context = normalizeAgentSessionSigningCapabilityBinding({
+        organization_id,
+        device_id,
+        session_id,
+        binding
+      });
+      const reservationRepository = await reservationRepositoryFactory(context);
+      if (!reservationRepository || typeof reservationRepository.reserveCapability !== "function"
+        || typeof reservationRepository.commitCapability !== "function"
+        || typeof reservationRepository.replayCapability !== "function"
+        || typeof reservationRepository.markCapabilityUncertain !== "function") {
+        throw new TypeError("signing capability reservation repository is unavailable");
+      }
+      return createAgentSessionSigningCapabilityIssuanceService({
+        repository: reservationRepository,
+        signer,
+        signerKeyId: resolvedSignerKeyId,
+        now
+      });
+    },
+    rateLimiter,
+    now,
+    ...(requestIdFactory === undefined ? {} : { requestIdFactory }),
+    ...(maxBodyBytes === undefined ? {} : { maxBodyBytes })
+  });
+
+  // The Device boundary authenticates raw bytes once, then delegates the
+  // already-authenticated request to this exact method. Passing the method,
+  // rather than the standalone API's handle(), prevents a second Device
+  // authentication attempt and keeps the trusted binding explicit.
+  const agentSessionDeviceApi = createAgentSessionDeviceApi({
+    deviceRequestVerifier,
+    grantVerifier,
+    repository,
+    rateLimiter,
+    signingCapabilityHandler: signingCapabilityApi.handleAuthenticated,
+    now,
+    ...(requestIdFactory === undefined ? {} : { requestIdFactory }),
+    ...(maxBodyBytes === undefined ? {} : { maxBodyBytes })
+  });
+
+  return Object.freeze({
+    agentSessionDeviceApi,
+    agentSessionSigningCapabilityApi: signingCapabilityApi,
+    signingCapabilityApi
+  });
+}
+
+function normalizeAgentSessionSigningCapabilityBinding({ organization_id, device_id, session_id, binding } = {}) {
+  const bindingValue = binding && typeof binding === "object" && !Array.isArray(binding) ? binding : {};
+  const organizationId = bindingValue.organization_id ?? bindingValue.organizationId ?? organization_id;
+  const deviceId = bindingValue.device_id ?? bindingValue.deviceId ?? device_id;
+  const sessionId = bindingValue.session_id ?? bindingValue.sessionId ?? session_id;
+  const grantId = bindingValue.grant_id ?? bindingValue.grantId;
+  const agentId = bindingValue.agent_id ?? bindingValue.agentId;
+  if (!UUID.test(String(organizationId ?? "")) || !UUID.test(String(deviceId ?? ""))
+    || !UUID.test(String(sessionId ?? "")) || !UUID.test(String(grantId ?? "")) || !UUID.test(String(agentId ?? ""))
+    || organizationId !== organization_id || deviceId !== device_id || sessionId !== session_id) {
+    throw new TypeError("signing capability session binding is unavailable");
+  }
+  return Object.freeze({
+    organizationId: organizationId.toLowerCase(),
+    sessionId: sessionId.toLowerCase(),
+    grantId: grantId.toLowerCase(),
+    deviceId: deviceId.toLowerCase(),
+    agentId: agentId.toLowerCase()
+  });
+}
+
+export async function createCloudRuntime({ env = process.env, logger = console, postgresFactory = createPostgresRuntime, humanAuthFactory = createHumanAuthRuntime, kmsProviderFactory = createHostedKmsProviders, agentSessionSignerProvider, agentSessionSignerFactory = createHostedAgentSessionGrantSigner, agentSessionSigningCapabilitySigner, qualificationManifestSignerProvider, qualificationManifestSignerFactory = createHostedQualificationManifestSigner, possessionReceiptSignerProvider, possessionReceiptSignerFactory = createHostedPossessionReceiptSigner, refreshHintSignerProvider, capabilitySignerProvider, controlBundleSignerProvider, auditAnchorSignerProvider, promotionEvidenceSignerProvider, platformOperatorAuthorizer, ownerRecoveryPublisher, platformSession, platformSessionBootstrapAuthenticator, platformSessionAuthorityResolver, platformSessionWebAuthnVerify, platformSessionOrigin, platformSessionRpId } = {}) {
   const profile = parseCloudRuntimeProfile(env);
   const config = loadRuntimeConfig(env);
   if (profile.isHosted && platformOperatorAuthorizer !== undefined) {
@@ -132,6 +251,7 @@ export async function createCloudRuntime({ env = process.env, logger = console, 
   let humanAuthRuntime;
   let hostedBootstrapRuntime;
   let server;
+  let agentSessionSigningCapabilityApi;
   try {
     if (profile.isHosted) {
       postgresRuntime = await postgresFactory({
@@ -507,15 +627,37 @@ export async function createCloudRuntime({ env = process.env, logger = console, 
         if (consumed?.accepted !== true) { const replay = new Error("device request replay denied"); replay.code = "ERR_REPLAY_DETECTED"; throw replay; }
         return principal;
       };
-      agentSessionDeviceApi = createAgentSessionDeviceApi({
-        deviceRequestVerifier,
-        grantVerifier: async (grant, context) => {
-          await agentSessionSigner.verificationKeyMetadata(grant?.statement?.key_id, { at: context.now });
-          return agentSessionSigner.verifyAgentSessionGrant(grant, { at: context.now });
-        },
-        repository: postgresRuntime.agentSessionAuthorityRepository,
-        rateLimiter: hostedRateLimiter
-      });
+      const agentSessionGrantVerifier = async (grant, context) => {
+        await agentSessionSigner.verificationKeyMetadata(grant?.statement?.key_id, { at: context.now });
+        return agentSessionSigner.verifyAgentSessionGrant(grant, { at: context.now });
+      };
+      if (agentSessionSigningCapabilitySigner !== undefined) {
+        if (!postgresRuntime.agentSessionSigningCapabilitySessionBinder
+          || typeof postgresRuntime.createAgentSessionSigningCapabilityReservationRepository !== "function") {
+          throw new Error("Agent Session signing capability composition is incomplete");
+        }
+        const composed = createAgentSessionSigningCapabilityRuntimeComposition({
+          deviceRequestVerifier,
+          sessionBinder: postgresRuntime.agentSessionSigningCapabilitySessionBinder,
+          reservationRepositoryFactory: postgresRuntime.createAgentSessionSigningCapabilityReservationRepository,
+          signer: agentSessionSigningCapabilitySigner,
+          grantVerifier: agentSessionGrantVerifier,
+          repository: postgresRuntime.agentSessionAuthorityRepository,
+          rateLimiter: hostedRateLimiter
+        });
+        agentSessionDeviceApi = composed.agentSessionDeviceApi;
+        agentSessionSigningCapabilityApi = composed.agentSessionSigningCapabilityApi;
+      } else {
+        // Until the dedicated signer is injected by the deployment owner, the
+        // route remains present but unavailable. It is never silently wired
+        // to the generic capability signer or a local fallback.
+        agentSessionDeviceApi = createAgentSessionDeviceApi({
+          deviceRequestVerifier,
+          grantVerifier: agentSessionGrantVerifier,
+          repository: postgresRuntime.agentSessionAuthorityRepository,
+          rateLimiter: hostedRateLimiter
+        });
+      }
       if (!postgresRuntime.qualificationGrantBatchRepository
         || typeof postgresRuntime.qualificationGrantBatchRepository.claimQualificationGrantBatch !== "function") {
         throw new Error("PostgreSQL qualification Grant batch authority is unavailable");
@@ -565,6 +707,7 @@ export async function createCloudRuntime({ env = process.env, logger = console, 
       ...(platformPromotionHttpApi ? { platformPromotionHttpApi } : {}),
       ...(hostedBootstrapRuntime ? { hostedBootstrapHttpApi: hostedBootstrapRuntime.api } : {}),
       ...(agentSessionDeviceApi ? { agentSessionDeviceApi } : {}),
+      ...(agentSessionSigningCapabilityApi ? { agentSessionSigningCapabilityApi } : {}),
       ...(qualificationGrantBatchDeviceApi ? { qualificationGrantBatchDeviceApi } : {}),
       ...(possessionReceiptSigner ? { possessionReceiptSigner } : {}),
       ...(postgresRuntime?.capabilityAuthorityRepository ? { capabilityAuthorityRepository: postgresRuntime.capabilityAuthorityRepository } : {}),
@@ -583,6 +726,7 @@ export async function createCloudRuntime({ env = process.env, logger = console, 
     auditAnchorSigner,
     auditExportIssuanceService,
     auditExportVerifier,
+    agentSessionSigningCapabilityApi,
     platformOperatorAuthorizer: effectivePlatformOperatorAuthorizer,
     platformPromotionHttpApi,
     platformPromotionReadiness,

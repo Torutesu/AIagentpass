@@ -116,8 +116,35 @@ REVOKE ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA public FROM agentpass_app, agen
 REVOKE ALL PRIVILEGES ON ALL FUNCTIONS IN SCHEMA public FROM PUBLIC;
 REVOKE ALL PRIVILEGES ON ALL FUNCTIONS IN SCHEMA public FROM agentpass_app, agentpass_signer, agentpass_backup;
 
--- app: DML only, plus sequence consumption required by inserts.
-GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO agentpass_app;
+-- app: DML on ordinary application tables only. Authority tables are excluded
+-- before any grant is made, so a stale ACL or newly added authority relation
+-- cannot create a transient direct-write path.
+DO $$
+DECLARE
+  relation_name text;
+BEGIN
+  FOR relation_name IN
+    SELECT c.relname
+    FROM pg_catalog.pg_class AS c
+    JOIN pg_catalog.pg_namespace AS n ON n.oid = c.relnamespace
+    WHERE n.nspname = 'public'
+      AND c.relkind IN ('r', 'p', 'v', 'm', 'f')
+      AND c.relname NOT IN (
+        'schema_migrations', 'schema_migration_attempts', 'release_candidates',
+        'capabilities', 'agent_session_signing_capability_reservations',
+        'agent_capability_sequence_heads'
+      )
+      AND left(c.relname, length('managed_signer_')) <> 'managed_signer_'
+      AND left(c.relname, length('platform_')) <> 'platform_'
+      AND left(c.relname, length('hosted_identity_')) <> 'hosted_identity_'
+  LOOP
+    EXECUTE format(
+      'GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE public.%I TO agentpass_app',
+      relation_name
+    );
+  END LOOP;
+END
+$$;
 GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO agentpass_app;
 
 -- signer: all managed-signer state is function-only after migration 0051.
@@ -184,6 +211,7 @@ BEGIN
         left(c.relname, length('managed_signer_')) = 'managed_signer_'
         OR left(c.relname, length('platform_')) = 'platform_'
         OR left(c.relname, length('hosted_identity_')) = 'hosted_identity_'
+        OR c.relname IN ('capabilities', 'agent_session_signing_capability_reservations', 'agent_capability_sequence_heads')
       )
   LOOP
     EXECUTE format(
@@ -217,7 +245,17 @@ BEGIN
     'agentpass_acquire_anonymous_rate_limit(text,uuid,integer,numeric,integer,integer)',
     'agentpass_prune_shared_control_expired(integer)',
     'agentpass_prune_anonymous_rate_limits(integer)',
-    'agentpass_prune_human_identity_assertion_replays(integer)'
+    'agentpass_prune_human_identity_assertion_replays(integer)',
+    'agentpass_agent_signing_capability_reserve(uuid,uuid,uuid,uuid,bytea,uuid,uuid,bytea,text,text,boolean,integer,bigint)',
+    'agentpass_agent_signing_capability_commit(uuid,uuid,uuid,uuid,bytea,bytea)',
+    'agentpass_agent_signing_capability_replay(uuid,uuid,uuid,uuid,bytea)',
+    'agentpass_agent_signing_capability_uncertain(uuid,uuid,uuid,uuid,bytea,bytea,text)',
+    'agentpass_agent_signing_capability_recover_expired(uuid,integer)',
+    'agentpass_capability_authority_issue(uuid,uuid,uuid,uuid,bigint,text,timestamptz,uuid,bigint)',
+    'agentpass_capability_authority_revoke_member(uuid,uuid,timestamptz)',
+    'agentpass_capability_authority_list_revoked(uuid,timestamptz,integer)',
+    'agentpass_capability_reservation_issue(uuid,uuid,uuid,uuid,bigint,text,timestamptz,uuid,text,text,jsonb,timestamptz,bytea)',
+    'agentpass_capability_reservation_list(uuid,integer)'
   ] LOOP
     IF to_regprocedure('public.' || routine_signature) IS NOT NULL THEN
       EXECUTE format('GRANT EXECUTE ON FUNCTION public.%s TO agentpass_app', routine_signature);

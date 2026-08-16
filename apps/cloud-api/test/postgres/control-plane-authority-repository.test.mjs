@@ -64,7 +64,15 @@ class FakeClient {
       if (text.includes("target_type=$2")) return result();
       return result([revocationRow()]);
     }
-    if (text.startsWith("SELECT id AS capability_id")) return result();
+    if (text.startsWith("SELECT public.agentpass_capability_authority_issue(")) {
+      return result([{ result: { state: "issued", capability: { organization_id: params[0], capability_id: params[1], agent_id: params[2], device_id: params[3], sequence: params[4], statement_hash: params[5], expires_at: params[6], revoked_at: null, issued_by_member_id: params[7], issued_membership_version: 1 } } }]);
+    }
+    if (text.startsWith("SELECT public.agentpass_capability_authority_list_revoked(")) {
+      return result([{ result: { state: "listed", capability_ids: [] } }]);
+    }
+    if (text.startsWith("SELECT public.agentpass_capability_authority_revoke_member(")) {
+      return result([{ result: { state: "revoked", capabilities: [], capability_ids: [], revoked_count: 0 } }]);
+    }
     if (text.startsWith("SELECT COALESCE(MAX(sequence)")) return result([{ sequence: 1 }]);
     if (text.startsWith("INSERT INTO revocations")) return result([revocationRow()]);
     if (text.startsWith("SELECT organization_id,device_id,format_epoch,sequence,statement_hash") && text.includes("bundle_heads")) {
@@ -217,6 +225,10 @@ test("bundle authority snapshot and head assignment share the revocation organiz
   assert.deepEqual(first.snapshot.policy_scope.operations, ["git.commit.sign"]);
   assert.deepEqual(first.snapshot.revoked_devices, [ids.device]);
   assert.equal(first.snapshot.global_revoked, false);
+  const capabilityList = client.calls.find(({ text }) => text.startsWith("SELECT public.agentpass_capability_authority_list_revoked("));
+  assert.ok(capabilityList);
+  assert.deepEqual(capabilityList.params, [ids.organization, NOW, 257]);
+  assert.equal(client.calls.some(({ text }) => text.startsWith("SELECT id AS capability_id")), false);
   assert.match(first.snapshot.state_fingerprint, /^[0-9a-f]{64}$/u);
   assert.equal(first.head.sequence, 1);
   assert.equal(first.head.state_fingerprint, HASH);

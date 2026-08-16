@@ -721,6 +721,7 @@ jobs:
           apps/cloud-api/test/postgres/agent-session-human-http-qualification.integration.test.mjs
           apps/cloud-api/test/postgres/agent-session-http-qualification.integration.test.mjs
           apps/cloud-api/test/postgres/agent-session-lifecycle-integration.test.mjs
+          apps/cloud-api/test/postgres/agent-session-signing-capability-reservation.integration.test.mjs
           apps/cloud-api/test/postgres/managed-signer-key-lifecycle-repository.integration.test.mjs
       - name: Prepare Hosted account qualification evidence directory
         run: |

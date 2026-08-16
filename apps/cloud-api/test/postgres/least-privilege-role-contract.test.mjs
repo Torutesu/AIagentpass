@@ -128,14 +128,12 @@ test('platform authority matrix is function-only for app and purpose-scoped for 
   const platformSql = migrations.join('\n');
   const authorization = await read('contracts/postgres/0054_platform_authorization.sql');
 
-  assert.match(rolesSql, /GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO agentpass_app/u);
+  assert.match(rolesSql, /GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE public\.%I TO agentpass_app/u);
+  assert.match(rolesSql, /c\.relname NOT IN \([\s\S]*'capabilities'[\s\S]*'agent_session_signing_capability_reservations'/u);
   assert.match(rolesSql, /REVOKE ALL PRIVILEGES ON TABLE public\.%I FROM agentpass_app, agentpass_backup/u);
   assert.match(rolesSql, /GRANT SELECT ON TABLE public\.%I TO agentpass_app, agentpass_backup/u);
   assert.match(rolesSql, /left\(c\.relname, length\('platform_'\)\) = 'platform_'/u);
-  assert.ok(
-    rolesSql.indexOf('GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO agentpass_app')
-      < rolesSql.indexOf("left(c.relname, length('platform_')) = 'platform_'")
-  );
+  assert.ok(rolesSql.indexOf("c.relname NOT IN (") < rolesSql.indexOf('GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE public.%I TO agentpass_app'));
 
   assert.match(authorization, /CREATE FUNCTION public\.agentpass_consume_platform_authorization_and_reserve\([\s\S]*?SECURITY DEFINER[\s\S]*?SET search_path = pg_catalog, public/u);
   assert.match(authorization, /REVOKE ALL PRIVILEGES ON FUNCTION public\.agentpass_platform_promotion_issuance_reserve\([^;]+\) FROM agentpass_app/u);
@@ -164,7 +162,8 @@ test('platform authority matrix is function-only for app and purpose-scoped for 
 test('app is DML-only, migrator owns migration authority, and backup is read-only', async () => {
   const sql = await read('scripts/postgres/roles.sql');
 
-  assert.match(sql, /GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO agentpass_app/);
+  assert.match(sql, /GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE public\.%I TO agentpass_app/);
+  assert.doesNotMatch(sql, /GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO agentpass_app/);
   assert.match(sql, /'agentpass_signer'/);
   assert.doesNotMatch(sql, /GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE public\.%I TO agentpass_signer/);
   assert.match(sql, /left\(c\.relname, length\('managed_signer_'\)\) = 'managed_signer_'/u);

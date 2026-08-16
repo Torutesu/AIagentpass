@@ -21,6 +21,10 @@ import { createAgentSessionAuthorityRepository } from "./agent-session-authority
 import { createPostgresAgentSessionConsumptionRepository } from "./agent-session-consumption-repository.mjs";
 import { createPostgresAgentSessionLifecycleRepository } from "./agent-session-lifecycle-repository.mjs";
 import { createPostgresAgentSessionIssuanceRepository } from "./agent-session-issuance-repository.mjs";
+import {
+  createPostgresAgentSessionSigningCapabilityReservationRepository,
+  createPostgresAgentSessionSigningCapabilitySessionBinder
+} from "./agent-session-signing-capability-reservation-repository.mjs";
 import { createQualificationGrantBatchRepository } from "./qualification-grant-batch-repository.mjs";
 import { createAuthorityReductionAuditAppender } from "./authority-reduction-audit.mjs";
 import { createPostgresManagedSignerKeyLifecycleRepository } from "./managed-signer-key-lifecycle-repository.mjs";
@@ -255,6 +259,7 @@ export async function createPostgresRuntime({ env = process.env, PoolClass = Poo
     metrics: operationalMetrics
   });
   const agentSessionLifecycleRepository = createPostgresAgentSessionLifecycleRepository({ client: pool, metrics: operationalMetrics });
+  const agentSessionSigningCapabilitySessionBinder = createPostgresAgentSessionSigningCapabilitySessionBinder({ client: pool });
   const agentSessionIssuanceRepository = resolveProcessBindingPolicy === undefined ? undefined : createPostgresAgentSessionIssuanceRepository({
     client: pool,
     authorityRepository: agentSessionAuthorityRepository,
@@ -353,6 +358,9 @@ export async function createPostgresRuntime({ env = process.env, PoolClass = Poo
     agentSessionAuthorityRepository: agentSessionConsumptionRepository,
     agentSessionConsumptionRepository,
     agentSessionLifecycleRepository,
+    agentSessionSigningCapabilitySessionBinder,
+    createAgentSessionSigningCapabilityReservationRepository: (context) =>
+      createPostgresAgentSessionSigningCapabilityReservationRepository({ client: pool, context }),
     ...(agentSessionIssuanceRepository ? { agentSessionIssuanceRepository } : {}),
     qualificationGrantBatchRepository,
     auditExportIssuanceRepository,

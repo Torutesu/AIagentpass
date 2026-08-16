@@ -499,9 +499,17 @@ export function createPostgresOrganizationRepository({ client, now = () => new D
         recent_auth_organization_id=NULL,recent_auth_operation=NULL,
         recent_auth_context_hash=NULL,recent_auth_consumed_at=NULL
       WHERE organization_id=$1 AND member_id=$2 AND revoked_at IS NULL`, [organizationId, memberId, revokedAt, reason]);
-    await tx.query(`UPDATE capabilities
-      SET revoked_at=$3
-      WHERE organization_id=$1 AND issued_by_member_id=$2 AND revoked_at IS NULL`, [organizationId, memberId, revokedAt]);
+    const tenant = await tx.query("SELECT set_config('agentpass.organization_id',$1,true) AS organization_id", [organizationId]);
+    if ((tenant.rowCount ?? tenant.rows?.length ?? 0) !== 1 || tenant.rows?.[0]?.organization_id !== organizationId) {
+      throw new OrganizationRepositoryError("ERR_DATABASE", "capability tenant context is unavailable");
+    }
+    const revoked = await tx.query(
+      "SELECT public.agentpass_capability_authority_revoke_member($1,$2,$3::timestamptz) AS result",
+      [organizationId, memberId, revokedAt]
+    );
+    if ((revoked.rowCount ?? revoked.rows?.length ?? 0) !== 1 || revoked.rows?.[0]?.result?.state !== "revoked") {
+      throw new OrganizationRepositoryError("ERR_DATABASE", "capability revocation is unavailable");
+    }
   }
 
   async function notifyAuthorityReduction(tx, { organizationId, actorId, memberId, eventType, occurredAt }) {

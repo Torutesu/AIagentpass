@@ -56,6 +56,10 @@ class QueueClient {
     if (text.startsWith("DELETE FROM idempotency_records") && text.includes("expires_at<=")) return response([], 0);
     if (text.startsWith("DELETE FROM idempotency_records")) return response([], 1);
     if (text.startsWith("UPDATE idempotency_records")) return response([], 1);
+    if (text.startsWith("SELECT set_config('agentpass.organization_id'")) return response([{ organization_id: params[0] }]);
+    if (text.startsWith("SELECT public.agentpass_capability_authority_revoke_member(")) {
+      return response([{ result: { state: "revoked", capabilities: [], capability_ids: [], revoked_count: 0 } }]);
+    }
     if (text.startsWith("SELECT s.id AS session_id")) {
       return this.sessionAuthority === undefined ? response([], 0) : response(this.sessionAuthority === null ? [] : [this.sessionAuthority]);
     }
@@ -228,8 +232,10 @@ test("rename and role mutations use optimistic versions and return null out of s
   const roleChallengeConsume = roleClient.calls.find((call) => call.text.startsWith("UPDATE webauthn_challenges"));
   assert.match(roleChallengeConsume.text, /status='consumed'/);
   assert.deepEqual(roleChallengeConsume.params, [ids.organization, ids.viewer, NOW]);
-  const roleCapabilityRevoke = roleClient.calls.find((call) => call.text.startsWith("UPDATE capabilities"));
-  assert.match(roleCapabilityRevoke.text, /issued_by_member_id=\$2/);
+  const roleCapabilityTenant = roleClient.calls.find((call) => call.text.startsWith("SELECT set_config('agentpass.organization_id'"));
+  assert.deepEqual(roleCapabilityTenant.params, [ids.organization]);
+  const roleCapabilityRevoke = roleClient.calls.find((call) => call.text.startsWith("SELECT public.agentpass_capability_authority_revoke_member("));
+  assert.ok(roleCapabilityRevoke);
   assert.deepEqual(roleCapabilityRevoke.params, [ids.organization, ids.viewer, NOW]);
 });
 
@@ -378,7 +384,12 @@ test("removeMember is role-gated, versioned, tenant-scoped, session-revoking, an
   assert.match(sessionRevoke.text, /recent_auth_consumed_at=NULL/);
   assert.deepEqual(sessionRevoke.params, [ids.organization, ids.viewer, NOW, "membership_removed"]);
   assert.equal(client.calls.some((call) => call.text.startsWith("UPDATE webauthn_challenges") && call.text.includes("status='consumed'")), true);
-  assert.equal(client.calls.some((call) => call.text.startsWith("UPDATE capabilities") && call.text.includes("issued_by_member_id=$2")), true);
+  const capabilityTenant = client.calls.find((call) => call.text.startsWith("SELECT set_config('agentpass.organization_id'"));
+  assert.deepEqual(capabilityTenant.params, [ids.organization]);
+  const capabilityRevoke = client.calls.find((call) => call.text.startsWith("SELECT public.agentpass_capability_authority_revoke_member("));
+  assert.ok(capabilityRevoke);
+  assert.deepEqual(capabilityRevoke.params, [ids.organization, ids.viewer, NOW]);
+  assert.equal(client.calls.some((call) => call.text.startsWith("UPDATE capabilities")), false);
   assert.equal(client.calls.filter((call) => call.text.startsWith("INSERT INTO admin_audit_events")).length, 1);
   assert.equal(reductions.length, 1);
   assert.equal(reductions[0].tx, client);

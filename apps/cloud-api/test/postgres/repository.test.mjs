@@ -117,6 +117,7 @@ test("rejects unapproved identifiers and missing tenant scope", async () => {
   assert.throws(() => createTenantRepository({ client, organizationId: "org-1" }), TenantScopeError);
   const repository = createTenantRepository({ client, organizationId });
   await assert.rejects(repository.select({ table: "devices; DROP TABLE members", columns: ["id"] }), (error) => error.code === "ERR_TABLE");
+  await assert.rejects(repository.select({ table: "capabilities", columns: ["id"] }), (error) => error.code === "ERR_TABLE");
   await assert.rejects(repository.select({ table: "devices", where: "status = $2", params: ["active"] }), (error) => error.code === "ERR_QUERY");
 });
 
