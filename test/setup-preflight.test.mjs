@@ -28,9 +28,10 @@ function p256() {
 
 function binding(overrides = {}) {
   return {
-    version: 1,
+    version: 2,
     kind: "agentpass.installed-release-receipt",
     candidate_id: "release-2026-08-15-01",
+    release_version: "0.18.0",
     manifest_sha256: "a".repeat(64),
     artifact_sha256: "b".repeat(64),
     source_commit: "c".repeat(40),

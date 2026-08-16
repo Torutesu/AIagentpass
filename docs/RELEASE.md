@@ -91,6 +91,24 @@ state. A fresh install creates only the root-owned mode-`0700` state directory;
 it does not invent configuration or lifecycle records. An unsafe existing tree
 causes installation to fail closed instead of being repaired or replaced.
 
+### Install freshness and rollback policy
+
+The signed manifest version is copied into the root-owned installed-release
+receipt as `release_version` (receipt schema version 2). Before invoking
+`/usr/sbin/installer`, the CLI reads that receipt and applies this policy:
+
+- a missing receipt permits the first install;
+- a strictly newer release permits an upgrade;
+- an exact same-version artifact and manifest permit an idempotent repair;
+- an older release is rejected, even when its signature, notarization, and
+  checksums are valid;
+- a different artifact or manifest with the same version is rejected.
+
+There is no implicit rollback switch. A rollback requires a separately designed,
+audited authorization flow; operators must not bypass this check by invoking the
+system installer directly. An unreadable, unsafe, or pre-versioned receipt also
+fails closed, because the installed release version cannot be proven.
+
 For a production macOS artifact, run the macOS verifier with an independently
 distributed release-key fingerprint and Apple Team ID:
 

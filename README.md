@@ -85,6 +85,12 @@ audit-anchor signature, and historical public-key checks. If creation returns
 an uncertain response, keep the generated export ID and use **再認証して取得**;
 do not create another export merely because the response was lost.
 
+Production installs also enforce release freshness before invoking the macOS
+installer: a newer signed release may upgrade, an exact same release may be
+repaired, and older or same-version/different-artifact packages are rejected.
+Rollback is not an implicit installer option and requires a separately audited
+authorization flow.
+
 `enrollment.json` may be the exact canonical response returned by `POST /v1/organizations/{organization_id}/device-enrollments`, or its nested `enrollment` object. Setup accepts only the complete v2 document: it binds the protocol version, tenant, enrollment/device IDs, release candidate, Secure Enclave P-256 key fingerprint, challenge, expiry, endpoint, and public possession-receipt verification key. Do not paste its one-time credential into argv, an environment variable, URL, repository, or shell history. Enrollment issuance requires an Owner/Admin session plus operation-bound recent WebAuthn authorization.
 
 Native bootstrap requires the root-owned `/Library/Application Support/AgentPass/native-service.json` and policy from the release configuration. Device enrollment atomically provisions the pinned ControlBundle v2 trust into that root-owned configuration, restarts the service, and requires an authenticated first refresh before its journal state advances. The final editor check is read-only and setup completes only after `git verify-commit` accepts the current full commit hash. A hosted Control Plane and physical-Mac release qualification remain separate work.
