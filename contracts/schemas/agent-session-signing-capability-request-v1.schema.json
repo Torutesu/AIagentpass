@@ -1,0 +1,19 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agentpass.dev/contracts/agent-session-signing-capability-request-v1.schema.json",
+  "title": "AgentPass Agent Session signing-capability issuance request v1",
+  "description": "The device-authenticated public request identity for issuing one server-scoped, one-use Git signing capability. Organization, device, and session are transport path bindings; all authority fields are server-derived.",
+  "type": "object",
+  "additionalProperties": false,
+  "minProperties": 1,
+  "maxProperties": 1,
+  "required": ["request_id"],
+  "properties": {
+    "request_id": {
+      "type": "string",
+      "format": "uuid",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
+      "description": "Public caller-generated request identity used for bounded idempotent replay correlation. It is not authority."
+    }
+  }
+}
