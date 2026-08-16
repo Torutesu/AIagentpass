@@ -109,6 +109,7 @@ test("stale authorization diagnostics use a bounded fixed marker registry", asyn
   const expected = [
     ["P0B_SAFE_STALE_AUTH_CLICK_FAILED", "stale_auth_click"],
     ["P0B_SAFE_STALE_AUTH_ROUTE_SETUP_FAILED", "stale_auth_route_setup"],
+    ["P0B_SAFE_STALE_AUTH_ROUTE_ACTION_FAILED", "stale_auth_route_action"],
     ["P0B_SAFE_STALE_AUTH_ROUTE_NOT_INTERCEPTED_FAILED", "stale_auth_route_not_intercepted"],
     ["P0B_SAFE_STALE_AUTH_INVALIDATION_FAILED", "stale_auth_invalidation"],
     ["P0B_SAFE_STALE_AUTH_RESPONSE_MISSING_FAILED", "stale_auth_response_missing"],

@@ -157,12 +157,13 @@ test("P0-B live browser role, WebAuthn, and recent-auth matrix", { skip: !enable
   for (const failure of ["stale", "replayed", "cross_operation", "cross_tenant"]) {
     await scenario(t, `owner ${failure} authorization is rejected by the real Cloud boundary`, async ({ fixture, open }) => {
       const page = await open("owner");
-      const refreshRoute = (url) => isConsoleDeviceRefreshUrl(url);
+      const verifyRoute = "**/api/auth/webauthn/verify";
       if (failure === "stale") {
         const card = deviceCard(page, "反映待ち Mac");
         const observation = {
           routeIntercepted: false,
           routeSetupFailed: false,
+          routeActionFailed: false,
           invalidationFailed: false,
           clickFailed: false,
           responseStatus: null,
@@ -176,15 +177,26 @@ test("P0-B live browser role, WebAuthn, and recent-auth matrix", { skip: !enable
           .then(() => true)
           .catch(() => false);
         try {
-          await page.route(refreshRoute, async (route) => {
+          await page.route(verifyRoute, async (route) => {
             if (route.request().method() !== "POST") return route.continue();
             observation.routeIntercepted = true;
+            let response;
             try {
-              await fixture.invalidateRecentAuth(page, failure);
+              response = await route.fetch();
             } catch {
-              observation.invalidationFailed = true;
+              observation.routeActionFailed = true;
+              await route.abort().catch(() => {});
+              return;
             }
-            await route.continue();
+            if (!response.ok()) {
+              observation.routeActionFailed = true;
+              await route.fulfill({ response }).catch(() => {});
+              return;
+            }
+            try { await fixture.invalidateRecentAuth(page, failure); }
+            catch { observation.invalidationFailed = true; }
+            try { await route.fulfill({ response }); }
+            catch { observation.routeActionFailed = true; }
           });
         } catch {
           observation.routeSetupFailed = true;
@@ -197,7 +209,7 @@ test("P0-B live browser role, WebAuthn, and recent-auth matrix", { skip: !enable
         const [refreshResponse, alertObserved] = await Promise.all([refreshResponsePromise, alertPromise]);
         observation.responseStatus = refreshResponse?.status() ?? null;
         observation.alertObserved = alertObserved;
-        await page.unroute(refreshRoute).catch(() => {});
+        await page.unroute(verifyRoute).catch(() => {});
         const marker = staleAuthorizationFailureMarker(observation);
         if (marker !== null) assert.fail(marker);
         return;
@@ -209,16 +221,18 @@ test("P0-B live browser role, WebAuthn, and recent-auth matrix", { skip: !enable
         const url = new URL(response.url());
         if (response.request().method() === "POST" && url.pathname === "/api/console" && url.searchParams.get("operation") === "device.refresh.request") responseStatus = response.status();
       });
-      await page.route(refreshRoute, async (route) => {
+      await page.route(verifyRoute, async (route) => {
         if (route.request().method() !== "POST") return route.continue();
         intercepted = true;
+        const response = await route.fetch();
+        if (!response.ok()) return route.fulfill({ response });
         await fixture.invalidateRecentAuth(page, failure);
-        await route.continue();
+        await route.fulfill({ response });
       });
       const card = deviceCard(page, "反映待ち Mac");
       await card.getByRole("button", { name: "Wake requestを依頼" }).click();
       await card.getByRole("alert").waitFor();
-      await page.unroute(refreshRoute);
+      await page.unroute(verifyRoute);
       assert.equal(intercepted, true);
       assert.equal(responseStatus, 401);
     });
@@ -241,6 +255,7 @@ test("stale authorization diagnostics emit only fixed safe markers", () => {
   const valid = {
     routeIntercepted: true,
     routeSetupFailed: false,
+    routeActionFailed: false,
     invalidationFailed: false,
     clickFailed: false,
     responseStatus: 401,
@@ -249,6 +264,7 @@ test("stale authorization diagnostics emit only fixed safe markers", () => {
   assert.equal(staleAuthorizationFailureMarker(valid), null);
   assert.equal(staleAuthorizationFailureMarker({ ...valid, clickFailed: true }), STALE_AUTH_DIAGNOSTIC_MARKERS.clickFailed);
   assert.equal(staleAuthorizationFailureMarker({ ...valid, routeSetupFailed: true }), STALE_AUTH_DIAGNOSTIC_MARKERS.routeSetupFailed);
+  assert.equal(staleAuthorizationFailureMarker({ ...valid, routeActionFailed: true }), STALE_AUTH_DIAGNOSTIC_MARKERS.routeActionFailed);
   assert.equal(staleAuthorizationFailureMarker({ ...valid, routeIntercepted: false }), STALE_AUTH_DIAGNOSTIC_MARKERS.routeNotIntercepted);
   assert.equal(staleAuthorizationFailureMarker({ ...valid, invalidationFailed: true }), STALE_AUTH_DIAGNOSTIC_MARKERS.invalidationFailed);
   assert.equal(staleAuthorizationFailureMarker({ ...valid, responseStatus: null }), STALE_AUTH_DIAGNOSTIC_MARKERS.responseMissing);
@@ -261,6 +277,7 @@ test("stale authorization diagnostics emit only fixed safe markers", () => {
   assert.deepEqual(Object.values(STALE_AUTH_DIAGNOSTIC_MARKERS), [
     "P0B_SAFE_STALE_AUTH_CLICK_FAILED",
     "P0B_SAFE_STALE_AUTH_ROUTE_SETUP_FAILED",
+    "P0B_SAFE_STALE_AUTH_ROUTE_ACTION_FAILED",
     "P0B_SAFE_STALE_AUTH_ROUTE_NOT_INTERCEPTED_FAILED",
     "P0B_SAFE_STALE_AUTH_INVALIDATION_FAILED",
     "P0B_SAFE_STALE_AUTH_RESPONSE_MISSING_FAILED",
@@ -271,13 +288,6 @@ test("stale authorization diagnostics emit only fixed safe markers", () => {
     "P0B_SAFE_STALE_AUTH_RESPONSE_HTTP_OTHER_FAILED",
     "P0B_SAFE_STALE_AUTH_ALERT_MISSING_FAILED",
   ]);
-});
-
-test("recent-auth failure injection matches the exact Console operation URL", () => {
-  assert.equal(isConsoleDeviceRefreshUrl(new URL("https://console.example.test/api/console?operation=device.refresh.request")), true);
-  assert.equal(isConsoleDeviceRefreshUrl({ toString: () => "https://console.example.test/api/console?operation=device.refresh.request" }), true);
-  assert.equal(isConsoleDeviceRefreshUrl(new URL("https://console.example.test/api/console?operation=device.revoke")), false);
-  assert.equal(isConsoleDeviceRefreshUrl(new URL("https://console.example.test/api/auth/webauthn/verify?operation=device.refresh.request")), false);
 });
 
 async function scenario(parent, name, callback) {
@@ -547,6 +557,7 @@ function failLifecycle(error) {
 export const STALE_AUTH_DIAGNOSTIC_MARKERS = Object.freeze({
   clickFailed: "P0B_SAFE_STALE_AUTH_CLICK_FAILED",
   routeSetupFailed: "P0B_SAFE_STALE_AUTH_ROUTE_SETUP_FAILED",
+  routeActionFailed: "P0B_SAFE_STALE_AUTH_ROUTE_ACTION_FAILED",
   routeNotIntercepted: "P0B_SAFE_STALE_AUTH_ROUTE_NOT_INTERCEPTED_FAILED",
   invalidationFailed: "P0B_SAFE_STALE_AUTH_INVALIDATION_FAILED",
   responseMissing: "P0B_SAFE_STALE_AUTH_RESPONSE_MISSING_FAILED",
@@ -558,18 +569,11 @@ export const STALE_AUTH_DIAGNOSTIC_MARKERS = Object.freeze({
   alertMissing: "P0B_SAFE_STALE_AUTH_ALERT_MISSING_FAILED",
 });
 
-export function isConsoleDeviceRefreshUrl(url) {
-  let parsed;
-  try { parsed = new URL(String(url)); }
-  catch { return false; }
-  return parsed.pathname === "/api/console"
-    && parsed.searchParams.get("operation") === "device.refresh.request";
-}
-
 export function staleAuthorizationFailureMarker(observation = {}) {
   if (observation.clickFailed === true) return STALE_AUTH_DIAGNOSTIC_MARKERS.clickFailed;
   if (observation.routeSetupFailed === true) return STALE_AUTH_DIAGNOSTIC_MARKERS.routeSetupFailed;
   if (observation.routeIntercepted !== true) return STALE_AUTH_DIAGNOSTIC_MARKERS.routeNotIntercepted;
+  if (observation.routeActionFailed === true) return STALE_AUTH_DIAGNOSTIC_MARKERS.routeActionFailed;
   if (observation.invalidationFailed === true) return STALE_AUTH_DIAGNOSTIC_MARKERS.invalidationFailed;
   const status = observation.responseStatus;
   if (!Number.isInteger(status)) return STALE_AUTH_DIAGNOSTIC_MARKERS.responseMissing;
