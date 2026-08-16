@@ -7,8 +7,6 @@ enum AgentHostContract {
     static let machServiceName = "dev.agentpass.agent-session"
     static let probeSessionID = "00000000-0000-4000-8000-000000000000"
     static let activationDocumentFD: Int32 = 3
-    static let maximumActivationDocumentBytes = 16 * 1024
-    static let maximumProofBytes = AgentPassAgentSessionRequest.maximumProofBytes
     static let nonceBytes = 32
     static let xpcTimeout: DispatchTimeInterval = .seconds(5)
     static let statusPollInterval: DispatchTimeInterval = .seconds(1)
@@ -52,154 +50,30 @@ private final class ProbeResultBox: @unchecked Sendable {
     }
 }
 
-/// The only document accepted by `qualification-activate`.
-///
-/// The proof is deliberately a String rather than a decoded JSON object. Its
-/// UTF-8 bytes are handed to the XPC DTO unchanged; this host never verifies,
-/// normalizes, logs, or re-encodes authority-bearing proof material.
-struct AgentHostActivationDocument: Equatable, Sendable {
-    let schemaVersion: Int
-    let agentID: String
-    let agentKind: String
-    let requestedTTLSeconds: Int
-    let proof: String
-
-    static let expectedSchemaVersion = 1
-    static let expectedKeys: Set<String> = [
-        "schema_version", "agent_id", "agent_kind", "requested_ttl_seconds", "proof"
-    ]
-
-    enum DecodeError: Error, Equatable {
-        case malformed
-        case fields
-        case oversized
-
-        var stableCode: String {
-            switch self {
-            case .malformed: return "malformed"
-            case .fields: return "invalid_fields"
-            case .oversized: return "oversized"
-            }
+private func readLaunchAuthorityHandoff(
+    from descriptor: Int32 = AgentHostContract.activationDocumentFD
+) throws -> NativeAgentLaunchAuthorityHandoff {
+    var data = Data()
+    var buffer = [UInt8](repeating: 0, count: 4 * 1024)
+    defer {
+        data.resetBytes(in: data.startIndex..<data.endIndex)
+        _ = buffer.withUnsafeMutableBytes { $0.initializeMemory(as: UInt8.self, repeating: 0) }
+    }
+    while true {
+        let count = buffer.withUnsafeMutableBytes { bytes in
+            Darwin.read(descriptor, bytes.baseAddress, bytes.count)
+        }
+        if count == 0 { break }
+        if count < 0 {
+            if errno == EINTR { continue }
+            throw NativeAgentLaunchAuthorityHandoffError.malformed
+        }
+        data.append(buffer, count: count)
+        if data.count > NativeAgentLaunchAuthorityHandoff.maximumDocumentBytes {
+            throw NativeAgentLaunchAuthorityHandoffError.oversized
         }
     }
-
-    private struct CodableDocument: Decodable {
-        let schemaVersion: Int
-        let agentID: String
-        let agentKind: String
-        let requestedTTLSeconds: Int
-        let proof: String
-
-        enum CodingKeys: String, CodingKey, CaseIterable {
-            case schemaVersion = "schema_version"
-            case agentID = "agent_id"
-            case agentKind = "agent_kind"
-            case requestedTTLSeconds = "requested_ttl_seconds"
-            case proof
-        }
-
-        init(from decoder: Decoder) throws {
-            let container = try decoder.container(keyedBy: CodingKeys.self)
-            guard Set(container.allKeys.map(\.stringValue)) == AgentHostActivationDocument.expectedKeys else {
-                throw DecodeError.fields
-            }
-            schemaVersion = try container.decode(Int.self, forKey: .schemaVersion)
-            agentID = try container.decode(String.self, forKey: .agentID)
-            agentKind = try container.decode(String.self, forKey: .agentKind)
-            requestedTTLSeconds = try container.decode(Int.self, forKey: .requestedTTLSeconds)
-            proof = try container.decode(String.self, forKey: .proof)
-        }
-    }
-
-    init(schemaVersion: Int, agentID: String, agentKind: String, requestedTTLSeconds: Int, proof: String) throws {
-        guard schemaVersion == Self.expectedSchemaVersion,
-              UUID(uuidString: agentID) != nil,
-              agentKind == AgentPassAgentAdapterKind.claudeCode.rawValue || agentKind == AgentPassAgentAdapterKind.cursor.rawValue,
-              (AgentPassAgentBootstrapRequest.minimumSessionTTLSeconds...AgentPassAgentBootstrapRequest.maximumSessionTTLSeconds).contains(requestedTTLSeconds),
-              !proof.isEmpty,
-              Data(proof.utf8).count >= AgentPassAgentSessionRequest.minimumProofBytes,
-              Data(proof.utf8).count <= AgentHostContract.maximumProofBytes,
-              proof.utf8.first == 123,
-              proof.utf8.last == 125,
-              (try? JSONSerialization.jsonObject(with: Data(proof.utf8), options: [.fragmentsAllowed])) is [String: Any] else {
-            throw DecodeError.fields
-        }
-        self.schemaVersion = schemaVersion
-        self.agentID = agentID
-        self.agentKind = agentKind
-        self.requestedTTLSeconds = requestedTTLSeconds
-        self.proof = proof
-    }
-
-    static func decode(_ data: Data) throws -> AgentHostActivationDocument {
-        guard !data.isEmpty, data.count <= AgentHostContract.maximumActivationDocumentBytes else {
-            throw DecodeError.oversized
-        }
-        let decoder = JSONDecoder()
-        decoder.keyDecodingStrategy = .useDefaultKeys
-        let decoded: CodableDocument
-        do {
-            decoded = try decoder.decode(CodableDocument.self, from: data)
-        } catch let error as DecodeError {
-            throw error
-        } catch {
-            throw DecodeError.malformed
-        }
-        let canonicalObject: [String: Any] = [
-            "schema_version": decoded.schemaVersion,
-            "agent_id": decoded.agentID,
-            "agent_kind": decoded.agentKind,
-            "requested_ttl_seconds": decoded.requestedTTLSeconds,
-            "proof": decoded.proof
-        ]
-        guard let canonicalData = try? JSONSerialization.data(
-            withJSONObject: canonicalObject,
-            options: [.sortedKeys, .withoutEscapingSlashes]
-        ), canonicalData == data else {
-            throw DecodeError.malformed
-        }
-        let proofData = Data(decoded.proof.utf8)
-        guard let proofObject = try? NativeStrictJSON.object(
-            from: proofData,
-            maxBytes: AgentHostContract.maximumProofBytes,
-            maxDepth: 32
-        ), let canonicalProof = try? NativeStrictJSON.data(proofObject), canonicalProof == proofData else {
-            throw DecodeError.fields
-        }
-        do {
-            return try AgentHostActivationDocument(
-                schemaVersion: decoded.schemaVersion,
-                agentID: decoded.agentID,
-                agentKind: decoded.agentKind,
-                requestedTTLSeconds: decoded.requestedTTLSeconds,
-                proof: decoded.proof
-            )
-        } catch let error as DecodeError {
-            throw error
-        } catch {
-            throw DecodeError.fields
-        }
-    }
-
-    static func read(from descriptor: Int32 = AgentHostContract.activationDocumentFD) throws -> AgentHostActivationDocument {
-        var data = Data()
-        var buffer = [UInt8](repeating: 0, count: 4 * 1024)
-        while true {
-            let count = buffer.withUnsafeMutableBytes { bytes in
-                Darwin.read(descriptor, bytes.baseAddress, bytes.count)
-            }
-            if count == 0 { break }
-            if count < 0 {
-                if errno == EINTR { continue }
-                throw DecodeError.malformed
-            }
-            data.append(buffer, count: count)
-            if data.count > AgentHostContract.maximumActivationDocumentBytes {
-                throw DecodeError.oversized
-            }
-        }
-        return try decode(data)
-    }
+    return try NativeAgentLaunchAuthorityHandoff.decode(data)
 }
 
 private func emitProbe(_ output: ProbeOutput, status: Int32) -> Never {
@@ -345,10 +219,10 @@ private func closeSession(
 }
 
 private func runQualificationActivation() -> Never {
-    let document: AgentHostActivationDocument
+    let document: NativeAgentLaunchAuthorityHandoff
     do {
-        document = try AgentHostActivationDocument.read()
-    } catch let error as AgentHostActivationDocument.DecodeError {
+        document = try readLaunchAuthorityHandoff()
+    } catch let error as NativeAgentLaunchAuthorityHandoffError {
         emitActivation(
             ActivationOutput(ok: false, operation: "qualification-activate", status: "rejected", error: "activation_document_\(error.stableCode)"),
             status: 2
@@ -363,7 +237,7 @@ private func runQualificationActivation() -> Never {
     guard let nonce = randomNonce(),
           let bootstrapRequest = AgentPassAgentBootstrapRequest(
             agentID: document.agentID,
-            adapterKind: document.agentKind,
+            adapterKind: document.agentKind.rawValue,
             requestedTTLSeconds: document.requestedTTLSeconds,
             bootstrapNonce: nonce
           ) else {
@@ -409,7 +283,7 @@ private func runQualificationActivation() -> Never {
     guard !signalController.isStopRequested,
           let sessionRequest = AgentPassAgentSessionRequest(
             bootstrapID: bootstrap.bootstrapID,
-            proof: Data(document.proof.utf8)
+            proof: document.proof
           ) else {
         finishActivation(
             ActivationOutput(ok: false, operation: "qualification-activate", status: "interrupted", error: "activation_interrupted"),

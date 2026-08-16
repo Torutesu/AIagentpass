@@ -14,11 +14,11 @@ private func agentHostSource() throws -> String {
     let source = try agentHostSource()
 
     #expect(source.contains("static let activationDocumentFD: Int32 = 3"))
-    #expect(source.contains("static let maximumActivationDocumentBytes = 16 * 1024"))
-    #expect(source.contains("static let maximumProofBytes = AgentPassAgentSessionRequest.maximumProofBytes"))
-    #expect(source.contains("\"schema_version\", \"agent_id\", \"agent_kind\", \"requested_ttl_seconds\", \"proof\""))
-    #expect(source.contains("agentKind == AgentPassAgentAdapterKind.claudeCode.rawValue || agentKind == AgentPassAgentAdapterKind.cursor.rawValue"))
-    #expect(source.contains("Data(document.proof.utf8)"))
+    #expect(source.contains("NativeAgentLaunchAuthorityHandoff.maximumDocumentBytes"))
+    #expect(source.contains("NativeAgentLaunchAuthorityHandoff.decode(data)"))
+    #expect(source.contains("data.resetBytes"))
+    #expect(source.contains("buffer.withUnsafeMutableBytes"))
+    #expect(source.contains("proof: document.proof"))
     #expect(source.contains("AgentPassAgentSessionRequest("))
     #expect(source.contains("arguments == [\"qualification-activate\"]"))
 }
