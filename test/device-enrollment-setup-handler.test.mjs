@@ -1,9 +1,13 @@
 import assert from "node:assert/strict";
 import crypto from "node:crypto";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import test from "node:test";
 
 import { createDeviceEnrollmentSetupHandler } from "../lib/device-enrollment-setup-handler.mjs";
 import { canonicalJson } from "../lib/identity.mjs";
+import { DeviceOnboardingResumeStore } from "../lib/device-onboarding-resume.mjs";
 
 const enrollmentId = "11111111-1111-4111-8111-111111111111";
 const organizationId = "22222222-2222-4222-8222-222222222222";
@@ -142,6 +146,55 @@ function context() {
   return { current_state: "service_keys_activated", target_state: "device_enrolled", operation_id: "setup:test:enroll_device", action: { id: "enroll_device" } };
 }
 
+function resumeStore() {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "agentpass-setup-resume-"));
+  return { directory, store: new DeviceOnboardingResumeStore(path.join(directory, "resume.json")) };
+}
+
+function verifiedResult(device, control, refreshHint, receipt, requestDigest) {
+  return {
+    status: "enrolled",
+    enrollment_id: enrollmentId,
+    organization_id: organizationId,
+    device_id: deviceId,
+    label: "Build Mac",
+    platform: "macos",
+    device_key: { algorithm: "p256-sha256", spki_pem: device.publicKey.export({ type: "spki", format: "pem" }).toString() },
+    key_fingerprint: fingerprint(device),
+    request_hash: requestDigest,
+    request_id: "request-1",
+    device_key_epoch: 4,
+    control,
+    possession_receipt: receipt,
+    evidence: {
+      organization_id: organizationId,
+      device_id: deviceId,
+      enrollment_id: enrollmentId,
+      device_key_epoch: 4,
+      key_fingerprint: fingerprint(device),
+      proof_version: 2,
+      candidate_id: "release-2026-08-13-01",
+      challenge_nonce_digest: crypto.createHash("sha256").update(nonce).digest("hex"),
+      receipt_key_id: receipt.key_id,
+      receipt_statement_hash: receipt.statement_hash
+    },
+    refresh_hint: refreshHint
+  };
+}
+
+function publicSetupOptions({ device, receiptSigner, credential, resume, fetchImpl, invitationValue, provisionControl, restartService, loadConfig, saveConfig, recoverEnrollment, baseUrl = "https://api.example.test/v1" } = {}) {
+  return {
+    ...commonOptions({ device, receiptSigner, credential, fetchImpl, baseUrl }),
+    invitation: invitationValue ?? invitation(device, credential, receiptSigner),
+    resumeStore: resume?.store,
+    provisionControl: provisionControl ?? (async () => ({ changed: true, old_fingerprint: null, new_fingerprint: `SHA256:${"A".repeat(43)}` })),
+    restartService: restartService ?? (async () => ({ status: "enabled", control_refreshed: true })),
+    loadConfig: loadConfig ?? (() => ({})),
+    saveConfig: saveConfig ?? (() => {}),
+    recoverEnrollment
+  };
+}
+
 test("uses the v2 invitation, verifies the receipt, and persists only non-secret control trust", async () => {
   const device = crypto.generateKeyPairSync("ec", { namedCurve: "prime256v1" });
   const receiptSigner = crypto.generateKeyPairSync("ed25519");
@@ -244,4 +297,150 @@ test("fails before mutation when dispatched outside the enrollment state", async
   });
   await assert.rejects(() => handler({ current_state: "device_enrolled", target_state: "editor_connected", action: { id: "connect_editor" } }), /wrong setup state/);
   assert.equal(saved, false);
+});
+
+test("durably records every pre-POST boundary and completes the resumed state machine", async () => {
+  const device = crypto.generateKeyPairSync("ec", { namedCurve: "prime256v1" });
+  const receiptSigner = crypto.generateKeyPairSync("ed25519");
+  const control = crypto.generateKeyPairSync("ed25519");
+  const refreshHint = crypto.generateKeyPairSync("ed25519");
+  const credential = crypto.randomBytes(32).toString("base64url");
+  const receipt = possessionReceipt(device, receiptSigner, candidateBinding(device), control, refreshHint);
+  const resume = resumeStore();
+  let postCount = 0;
+  let stateAtPost;
+  let receiptReads = 0;
+  const base = commonOptions({
+    device,
+    receiptSigner,
+    credential,
+    fetchImpl: async (_url, init) => {
+      if (init.method === "GET") {
+        receiptReads += 1;
+        return receiptReads === 1
+          ? new Response("", { status: 401 })
+          : new Response(canonicalJson({ request_id: "receipt-1", receipt }), { status: 200, headers: { "content-type": "application/json" } });
+      }
+      postCount += 1;
+      stateAtPost = resume.store.read().state;
+      assert.equal(JSON.parse(Buffer.from(init.body).toString("utf8")).proof_version, 2);
+      return new Response(canonicalJson(completedResponse(control, refreshHint)), { status: 201, headers: { "content-type": "application/json" } });
+    }
+  });
+  const handler = createDeviceEnrollmentSetupHandler({ ...base, resumeStore: resume.store });
+  await handler(context());
+
+  assert.equal(postCount, 1);
+  assert.equal(stateAtPost, "enrollment_uncertain");
+  assert.equal(resume.store.read().state, "control_acknowledged");
+  const journal = JSON.parse(fs.readFileSync(`${resume.store.filePath}.journal`, "utf8"));
+  assert.deepEqual(journal.entries.map((entry) => entry.state), ["prepared", "invitation_issued", "delivered", "enrollment_uncertain", "receipt_verified", "trust_installed", "control_acknowledged"]);
+  const durable = JSON.stringify(resume.store.read());
+  assert.equal(resume.store.read().recovery_descriptor.request_digest.length, 64);
+  assert.equal(resume.store.read().recovery_descriptor.challenge_digest, crypto.createHash("sha256").update(nonce).digest("hex"));
+  assert.equal(resume.store.read().recovery_descriptor.api_base_url, "https://api.example.test/v1");
+  assert.equal(durable.includes(credential), false);
+  assert.doesNotMatch(durable, /(?:nonce|signature|private.?key|credential)/iu);
+});
+
+test("response loss is interruptible and a fresh run recovers GET-only without POST or secret reuse", async () => {
+  const device = crypto.generateKeyPairSync("ec", { namedCurve: "prime256v1" });
+  const receiptSigner = crypto.generateKeyPairSync("ed25519");
+  const control = crypto.generateKeyPairSync("ed25519");
+  const refreshHint = crypto.generateKeyPairSync("ed25519");
+  const credential = crypto.randomBytes(32).toString("base64url");
+  const receipt = possessionReceipt(device, receiptSigner, candidateBinding(device), control, refreshHint);
+  const resume = resumeStore();
+  let postCount = 0;
+  let firstFetches = 0;
+  const base = commonOptions({
+    device,
+    receiptSigner,
+    credential,
+    fetchImpl: async (_url, init) => {
+      firstFetches += 1;
+      if (init.method === "POST") {
+        postCount += 1;
+        return new Response("{malformed", { status: 201, headers: { "content-type": "application/json" } });
+      }
+      return new Response("", { status: 401 });
+    }
+  });
+  await assert.rejects(() => createDeviceEnrollmentSetupHandler({ ...base, resumeStore: resume.store })(context()), (error) => error.code === "ERR_DEVICE_ENROLLMENT_RECOVERY_UNPROVEN");
+  assert.equal(postCount, 1);
+  assert.equal(resume.store.read().state, "enrollment_uncertain");
+  assert.equal(firstFetches, 3);
+
+  const requestDigest = resume.store.read().recovery_descriptor.request_digest;
+  const recovered = verifiedResult(device, {
+    format_epoch: 2,
+    issuer: "agentpass-cloud",
+    key_id: "control-v1",
+    public_key: control.publicKey.export({ type: "spki", format: "pem" }).toString(),
+    bundle_path: `/v1/organizations/${organizationId}/bundles/${deviceId}`,
+    refresh_hint: {
+      key_id: "refresh-hint-v1",
+      algorithm: "ed25519",
+      public_key: refreshHint.publicKey.export({ type: "spki", format: "pem" }).toString()
+    }
+  }, refreshHint, receipt, requestDigest);
+  let recoveryCalls = 0;
+  let saved;
+  const runner = base.runner;
+  const resumed = createDeviceEnrollmentSetupHandler({
+    runner,
+    resumeStore: resume.store,
+    recoverEnrollment: async (input) => {
+      recoveryCalls += 1;
+      for (const forbidden of ["credential", "nonce", "signature", "privateKey", "private_key", "challengeNonce", "challenge_nonce"]) assert.equal(Object.hasOwn(input, forbidden), false, `recovery input leaked ${forbidden}`);
+      assert.equal(input.recovery_descriptor.request_digest, requestDigest);
+      assert.equal(Object.hasOwn(input.recovery_descriptor, "nonce"), false);
+      assert.equal(Object.hasOwn(input.recovery_descriptor, "signature"), false);
+      return recovered;
+    },
+    provisionControl: async () => ({ changed: true, old_fingerprint: null, new_fingerprint: `SHA256:${"B".repeat(43)}` }),
+    restartService: async () => ({ status: "enabled", control_refreshed: true }),
+    loadConfig: () => ({}),
+    saveConfig: (value) => { saved = value; }
+  });
+  const result = await resumed(context());
+  assert.equal(recoveryCalls, 1);
+  assert.equal(postCount, 1);
+  assert.equal(resume.store.read().state, "control_acknowledged");
+  assert.equal(saved.control_v2.url, `https://api.example.test/v1/organizations/${organizationId}/bundles/${deviceId}`);
+  const serializedResult = JSON.stringify(result);
+  assert.equal(serializedResult.includes(credential), false);
+  assert.equal(serializedResult.includes(nonce), false);
+  assert.doesNotMatch(serializedResult, /(?:"signature"|private.?key|"credential")/iu);
+});
+
+test("fails closed when a durable descriptor is incomplete or bound to another device", async () => {
+  const device = crypto.generateKeyPairSync("ec", { namedCurve: "prime256v1" });
+  const otherDevice = crypto.generateKeyPairSync("ec", { namedCurve: "prime256v1" });
+  const receiptSigner = crypto.generateKeyPairSync("ed25519");
+  const binding = candidateBinding(device);
+  const descriptor = {
+    enrollment_id: enrollmentId,
+    label: "Build Mac",
+    platform: "macos",
+    api_base_url: "https://api.example.test/v1",
+    candidate_binding: binding,
+    challenge_digest: crypto.createHash("sha256").update(nonce).digest("hex"),
+    request_digest: "c".repeat(64),
+    verification_key_id: "receipt-key-v1",
+    verification_algorithm: "ed25519",
+    verification_public_key: receiptSigner.publicKey.export({ type: "spki", format: "pem" }).toString()
+  };
+  const methods = {
+    read: () => ({ state: "enrollment_uncertain", release_id: binding.candidate_id, organization_id: organizationId, device_id: deviceId, recovery_descriptor: { ...descriptor, request_digest: undefined } }),
+    create_prepared: () => { throw new Error("unexpected mutation"); },
+    issue_invitation: () => { throw new Error("unexpected mutation"); },
+    record_delivery: () => { throw new Error("unexpected mutation"); },
+    mark_enrollment_uncertain: () => { throw new Error("unexpected mutation"); },
+    reconcile_enrollment: () => { throw new Error("unexpected mutation"); },
+    install_trust: () => { throw new Error("unexpected mutation"); },
+    acknowledge_control: () => { throw new Error("unexpected mutation"); }
+  };
+  const common = commonOptions({ device: otherDevice, receiptSigner, credential: crypto.randomBytes(32).toString("base64url"), fetchImpl: async () => { throw new Error("unexpected network"); } });
+  await assert.rejects(() => createDeviceEnrollmentSetupHandler({ ...common, invitation: undefined, resumeStore: methods })(context()), (error) => error.code === "RESUME_BINDING_MISMATCH");
 });

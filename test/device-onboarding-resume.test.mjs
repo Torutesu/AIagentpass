@@ -17,6 +17,33 @@ const TIMES = [
   "2026-08-16T00:00:03.000Z", "2026-08-16T00:00:04.000Z", "2026-08-16T00:00:05.000Z", "2026-08-16T00:00:06.000Z"
 ];
 const HASHES = Object.fromEntries(["invitation", "delivery", "attempt", "receipt", "authority", "trust", "ack"].map((key, index) => [key, `${index + 1}`.repeat(64)]));
+const verificationKey = crypto.generateKeyPairSync("ed25519").publicKey.export({ type: "spki", format: "pem" }).toString();
+
+function recoveryDescriptor() {
+  return {
+    enrollment_id: "11111111-1111-4111-8111-111111111111",
+    label: "Build Mac",
+    platform: "macos",
+    api_base_url: "https://api.example.test/v1",
+    candidate_binding: {
+      version: 1,
+      enrollment_id: "11111111-1111-4111-8111-111111111111",
+      organization_id: "22222222-2222-4222-8222-222222222222",
+      device_id: "33333333-3333-4333-8333-333333333333",
+      candidate_id: "release-1",
+      artifact_sha256: "a".repeat(64),
+      source_commit: "b".repeat(40),
+      team_id: "TEAMID1234",
+      device_key_fingerprint: `SHA256:${"A".repeat(43)}`,
+      expires_at: "2099-01-02T03:04:05.000Z"
+    },
+    challenge_digest: "c".repeat(64),
+    request_digest: "d".repeat(64),
+    verification_key_id: "receipt-key-v1",
+    verification_algorithm: "ed25519",
+    verification_public_key: verificationKey
+  };
+}
 
 function tempStore(options = {}) {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "agentpass-resume-"));
@@ -65,6 +92,41 @@ test("persists no secret material and denies caller-selected authority", () => {
   assert.doesNotMatch(recordText, /BEGIN [A-Z ]*PRIVATE KEY/iu);
   assert.throws(() => store.create_prepared({ release_id: "r", organization_id: "o", device_id: "d", authority: "caller", created_at: TIMES[0] }), { code: "INVALID_SCHEMA" });
   assert.ok(!Object.keys(store.read()).some((key) => /authority(?!_)/iu.test(key)));
+});
+
+test("persists an immutable public recovery descriptor without invitation secrets", () => {
+  const { store, file } = tempStore();
+  const descriptor = recoveryDescriptor();
+  const prepared = store.create_prepared({
+    release_id: "release-1",
+    organization_id: descriptor.candidate_binding.organization_id,
+    device_id: descriptor.candidate_binding.device_id,
+    resume_id: "resume-1",
+    created_at: TIMES[0],
+    recovery_descriptor: descriptor
+  });
+  assert.deepEqual(prepared.recovery_descriptor, descriptor);
+  store.issue_invitation({ invitation_id: descriptor.enrollment_id, invitation_hash: HASHES.invitation, issued_at: TIMES[1] });
+  assert.deepEqual(store.read().recovery_descriptor, descriptor);
+  const durable = fs.readFileSync(file, "utf8");
+  assert.doesNotMatch(durable, /credential|challenge_nonce|receipt_signature|BEGIN [A-Z ]*PRIVATE KEY/iu);
+  assert.match(durable, /verification_public_key/u);
+});
+
+test("recovery descriptor rejects identity drift, unsafe endpoints, private keys, and raw challenge fields", () => {
+  const make = (descriptor) => tempStore().store.create_prepared({
+    release_id: "release-1",
+    organization_id: "22222222-2222-4222-8222-222222222222",
+    device_id: "33333333-3333-4333-8333-333333333333",
+    created_at: TIMES[0],
+    recovery_descriptor: descriptor
+  });
+  const descriptor = recoveryDescriptor();
+  assert.throws(() => make({ ...descriptor, api_base_url: "http://api.example.test/v1" }), { code: "BINDING_FAILURE" });
+  assert.throws(() => make({ ...descriptor, candidate_binding: { ...descriptor.candidate_binding, device_id: "44444444-4444-4444-8444-444444444444" } }), { code: "BINDING_FAILURE" });
+  const privateKey = crypto.generateKeyPairSync("ed25519").privateKey.export({ type: "pkcs8", format: "pem" }).toString();
+  assert.throws(() => make({ ...descriptor, verification_public_key: privateKey }), { code: "SECRET_FIELD" });
+  assert.throws(() => make({ ...descriptor, challenge_nonce: "raw" }), { code: "INVALID_SCHEMA" });
 });
 
 test("response loss remains uncertain and only lookup can converge it", async () => {

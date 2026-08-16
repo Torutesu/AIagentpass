@@ -14,6 +14,7 @@ import {
   canonicalEnrollmentProofV2,
   createDeviceEnrollmentClient,
   deviceEnrollmentEvidence,
+  recoverDeviceEnrollment,
   verifyDeviceEnrollmentReceipt
 } from "../lib/device-enrollment-client.mjs";
 
@@ -138,6 +139,38 @@ function possessionReceipt(devicePair, receiptPair, overrides = {}) {
     signature: receiptPair.publicKey.asymmetricKeyType === "ed25519"
       ? crypto.sign(null, signed, receiptPair.privateKey).toString("base64url")
       : crypto.sign("sha256", signed, { key: receiptPair.privateKey, dsaEncoding: "ieee-p1363" }).toString("base64url")
+  };
+}
+
+function recoveryInput(pair, receiptPair, overrides = {}) {
+  const receipt = possessionReceipt(pair, receiptPair);
+  return {
+    baseUrl: BASE_URL,
+    enrollmentId: ENROLLMENT,
+    organizationId: ORGANIZATION,
+    deviceId: DEVICE,
+    label: "build-mac-01",
+    deviceKey: { algorithm: "p256-sha256", spkiPem: pair.publicPem },
+    keyFingerprint: fingerprint(pair),
+    candidateBinding: candidate(pair),
+    requestDigest: "c".repeat(64),
+    challengeNonceDigest: crypto.createHash("sha256").update(CHALLENGE_NONCE).digest("hex"),
+    possessionReceiptPublicKey: receiptPair.publicPem,
+    possessionReceiptKeyId: receipt.key_id,
+    signer: signWith(pair),
+    ...overrides
+  };
+}
+
+function resignReceipt(receipt, receiptPair, statement = receipt.statement, extra = {}) {
+  const statementBytes = Buffer.from(canonicalJson(statement), "utf8");
+  const signed = Buffer.from(`AgentPass-Cloud-Possession-Receipt-v1\0${statementBytes.toString("utf8")}`);
+  return {
+    ...receipt,
+    statement,
+    statement_hash: crypto.createHash("sha256").update(statementBytes).digest("hex"),
+    signature: crypto.sign(null, signed, receiptPair.privateKey).toString("base64url"),
+    ...extra
   };
 }
 
@@ -572,6 +605,161 @@ test("a restarted v2 client checks the receipt before submitting a one-time cred
   assert.equal(recovered.status, "enrolled");
   assert.deepEqual(recovered.control, receipt.statement.control);
   assert.equal(posts, 0);
+});
+
+test("public recovery restores the normal enrollment result through exactly one signed GET", async () => {
+  const pair = keys();
+  const receiptPair = keys("ed25519");
+  const receipt = possessionReceipt(pair, receiptPair);
+  const methods = [];
+  const calls = [];
+  const result = await recoverDeviceEnrollment(recoveryInput(pair, receiptPair, {
+    control: receipt.statement.control,
+    signer: ({ bytes, body, credential, enrollment_credential: enrollmentCredential, challenge_nonce: challengeNonce }) => {
+      assert.equal(body.length, 0);
+      assert.equal(credential, undefined);
+      assert.equal(enrollmentCredential, undefined);
+      assert.equal(challengeNonce, undefined);
+      return signWith(pair)({ bytes });
+    },
+    fetchImpl: async (url, init) => {
+      methods.push(init.method);
+      calls.push({ url, init });
+      assert.equal(init.method, "GET");
+      assert.equal(init.body, undefined);
+      assert.equal(init.redirect, "error");
+      assert.equal(init.headers["AgentPass-Enrollment-Credential"], undefined);
+      assert.equal(init.headers["AgentPass-Enrollment-Nonce"], undefined);
+      assert.equal(init.headers["AgentPass-Enrollment-Candidate-Binding"], undefined);
+      assert.equal(url, `https://api.example.test/v1/organizations/${ORGANIZATION}/devices/${DEVICE}/enrollment-receipt`);
+      return jsonResponse({ request_id: "receipt-recovery-1", receipt }, 200);
+    }
+  }));
+  assert.deepEqual(methods, ["GET"]);
+  assert.equal(calls.length, 1);
+  assert.equal(result.status, "enrolled");
+  assert.equal(result.label, "build-mac-01");
+  assert.equal(result.platform, "macos");
+  assert.equal(result.enrollment_id, ENROLLMENT);
+  assert.equal(result.organization_id, ORGANIZATION);
+  assert.equal(result.device_id, DEVICE);
+  assert.equal(result.key_fingerprint, fingerprint(pair));
+  assert.equal(result.request_hash, "c".repeat(64));
+  assert.deepEqual(result.control, receipt.statement.control);
+  assert.equal(result.server.status, "active");
+  assert.equal(result.server.device_key_epoch, receipt.statement.device_key_epoch);
+  assert.equal(result.evidence.challenge_nonce_digest, receipt.statement.challenge_nonce_digest);
+  assert.equal(result.possession_receipt.statement_hash, receipt.statement_hash);
+  assert.equal(JSON.stringify(result).includes(CREDENTIAL), false);
+});
+
+test("recovery accepts the persisted public descriptor names and succeeds after invitation expiry", async () => {
+  const pair = keys();
+  const receiptPair = keys("ed25519");
+  const receipt = possessionReceipt(pair, receiptPair);
+  const original = recoveryInput(pair, receiptPair);
+  const {
+    baseUrl: _baseUrl,
+    candidateBinding: _candidateBinding,
+    challengeNonceDigest: _challengeNonceDigest,
+    possessionReceiptPublicKey: _receiptPublicKey,
+    possessionReceiptKeyId: _receiptKeyId,
+    requestDigest: _requestDigest,
+    ...descriptor
+  } = original;
+  const result = await recoverDeviceEnrollment({
+    ...descriptor,
+    api_base_url: original.baseUrl,
+    candidate_binding: { ...original.candidateBinding, expires_at: "2020-01-01T00:00:00.000Z" },
+    challenge_digest: original.challengeNonceDigest,
+    request_digest: original.requestDigest,
+    verification_algorithm: "ed25519",
+    verification_key_id: original.possessionReceiptKeyId,
+    verification_public_key: original.possessionReceiptPublicKey,
+    fetchImpl: async (_url, init) => {
+      assert.equal(init.method, "GET");
+      return jsonResponse({ request_id: "receipt-after-expiry", receipt }, 200);
+    }
+  });
+  assert.equal(result.status, "enrolled");
+  assert.equal(result.request_hash, original.requestDigest);
+  assert.equal(result.possession_receipt.statement.issued_at, "2099-01-02T03:04:05.000Z");
+});
+
+test("recovery fails closed for absent receipts and never reaches a POST path", async () => {
+  const pair = keys();
+  const receiptPair = keys("ed25519");
+  for (const status of [401, 404, 200]) {
+    let posts = 0;
+    let gets = 0;
+    await assert.rejects(() => recoverDeviceEnrollment(recoveryInput(pair, receiptPair, {
+      fetchImpl: async (_url, init) => {
+        if (init.method === "POST") posts += 1;
+        if (init.method === "GET") gets += 1;
+        assert.equal(init.method, "GET");
+        return status === 200 ? jsonResponse({ request_id: "receipt-empty" }, 200) : new Response("", { status });
+      }
+    })), (error) => error.code === DEVICE_ENROLLMENT_ERRORS.RECOVERY_UNPROVEN);
+    assert.equal(posts, 0, `HTTP ${status} must not reach POST`);
+    assert.equal(gets, 1);
+  }
+});
+
+test("recovery binds the signed challenge digest, candidate, device key, control, path, and receipt signer", async () => {
+  const pair = keys();
+  const receiptPair = keys("ed25519");
+  const valid = possessionReceipt(pair, receiptPair);
+  const expectedControl = valid.statement.control;
+  const digest = valid.statement.challenge_nonce_digest;
+  const denied = async (receipt, overrides = {}) => {
+    let posts = 0;
+    await assert.rejects(() => recoverDeviceEnrollment(recoveryInput(pair, receiptPair, {
+      control: expectedControl,
+      fetchImpl: async (_url, init) => {
+        if (init.method === "POST") posts += 1;
+        assert.equal(init.method, "GET");
+        return jsonResponse({ request_id: "receipt-recovery-negative", receipt }, 200);
+      },
+      ...overrides
+    })), (error) => error.code === DEVICE_ENROLLMENT_ERRORS.RECOVERY_UNPROVEN);
+    assert.equal(posts, 0);
+  };
+
+  await denied(valid, { challengeNonceDigest: "f".repeat(64) });
+  await denied(resignReceipt(valid, receiptPair, { ...valid.statement, candidate_id: "candidate-substituted" }));
+  await denied(resignReceipt(valid, receiptPair, { ...valid.statement, device_key_fingerprint: fingerprint(keys()) }));
+  await denied(resignReceipt(valid, receiptPair, { ...valid.statement, organization_id: DEVICE }));
+  await denied(resignReceipt(valid, receiptPair, { ...valid.statement, control: { ...valid.statement.control, bundle_path: `/v1/organizations/${ORGANIZATION}/bundles/44444444-4444-4444-8444-444444444444` } }));
+  await denied(resignReceipt(valid, receiptPair, { ...valid.statement, control: { ...valid.statement.control, key_id: "control-substituted" } }));
+  await denied({ ...valid, key_id: "receipt-rotated" });
+  await denied({ ...valid, unknown: true });
+  assert.equal(digest, valid.statement.challenge_nonce_digest);
+});
+
+test("recovery rejects credentials, challenge nonces, private keys, and unpinned public descriptors", async () => {
+  const pair = keys();
+  const receiptPair = keys("ed25519");
+  const valid = recoveryInput(pair, receiptPair, { fetchImpl: async () => { throw new Error("must not fetch"); } });
+  for (const extra of [
+    { credential: CREDENTIAL },
+    { enrollmentCredential: CREDENTIAL },
+    { challengeNonce: CHALLENGE_NONCE },
+    { challengeId: CHALLENGE_ID },
+    { privateKey: pair.privateKey },
+    { unknownDescriptor: true }
+  ]) {
+    await assert.rejects(() => recoverDeviceEnrollment({ ...valid, ...extra }), (error) => error.code === DEVICE_ENROLLMENT_ERRORS.INVALID_CONFIG);
+  }
+  for (const baseUrl of ["http://api.example.test/v1", "https://user:pass@api.example.test/v1", "https://api.example.test/v1?token=secret", "https://api.example.test/api", "https://api.example.test/v1#fragment"]) {
+    await assert.rejects(() => recoverDeviceEnrollment({ ...valid, baseUrl }), (error) => error.code === DEVICE_ENROLLMENT_ERRORS.INVALID_URL);
+  }
+  const { requestDigest: _requestDigest, ...withoutDigest } = valid;
+  await assert.rejects(() => recoverDeviceEnrollment(withoutDigest), (error) => error.code === DEVICE_ENROLLMENT_ERRORS.INVALID_CONFIG);
+  await assert.rejects(() => recoverDeviceEnrollment({ ...valid, requestDigest: "A".repeat(64) }), (error) => error.code === DEVICE_ENROLLMENT_ERRORS.INVALID_CONFIG);
+  await assert.rejects(() => recoverDeviceEnrollment({ ...valid, label: "\u0000bad" }), (error) => error.code === DEVICE_ENROLLMENT_ERRORS.INVALID_REQUEST);
+  await assert.rejects(() => recoverDeviceEnrollment({ ...valid, keyFingerprint: fingerprint(keys()) }), (error) => error.code === DEVICE_ENROLLMENT_ERRORS.INVALID_CONFIG);
+  await assert.rejects(() => recoverDeviceEnrollment({ ...valid, deviceKey: { algorithm: "p256-sha256", spkiPem: pair.privateKey.export({ type: "pkcs8", format: "pem" }).toString() } }), (error) => error.code === DEVICE_ENROLLMENT_ERRORS.INVALID_KEY);
+  await assert.rejects(() => recoverDeviceEnrollment({ ...valid, challengeNonceDigest: "A".repeat(64) }), (error) => error.code === DEVICE_ENROLLMENT_ERRORS.INVALID_REQUEST);
 });
 
 test("stops honestly when the receipt endpoint cannot prove response-loss recovery", async () => {

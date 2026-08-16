@@ -21,6 +21,7 @@ import { createNativeBootstrapRunner } from "../lib/native-bootstrap-runner.mjs"
 import { createNativeDeviceEnrollmentRunner } from "../lib/native-device-enrollment-runner.mjs";
 import { createNativeSetupHandlers } from "../lib/native-setup-handlers.mjs";
 import { createDeviceEnrollmentSetupHandler } from "../lib/device-enrollment-setup-handler.mjs";
+import { createDeviceOnboardingResumeStore } from "../lib/device-onboarding-resume.mjs";
 import { connectSetupInBrowser, normalizeConsoleBaseUrl } from "../lib/setup-browser-connect.mjs";
 import { parseSetupContinueOptions } from "../lib/setup-continue-options.mjs";
 import { executeProductionUninstall, planProductionUninstall } from "../lib/platform-uninstall.mjs";
@@ -207,13 +208,24 @@ async function continueNativeSetup() {
   if (process.getuid?.() === 0) throw new Error("Run setup as the interactive user, not root");
   const config = loadConfig();
   const state = journal.status().state;
-  const enrollmentMode = flags.browser || flags.enrollmentStdin;
-  if ((state === "service_keys_activated") !== enrollmentMode) {
-    throw new Error(state === "service_keys_activated"
-      ? "At service_keys_activated, use the browser-assisted command or the explicit stdin recovery path"
-      : "Browser and stdin enrollment options are accepted only at service_keys_activated");
+  const enrollmentRequested = flags.browser || flags.enrollmentStdin;
+  let enrollmentResumeStore;
+  let enrollmentResumeRecord;
+  if (state === "service_keys_activated") {
+    enrollmentResumeStore = createDeviceOnboardingResumeStore(path.join(defaultConfigDir, "device-onboarding-resume.json"));
+    try { enrollmentResumeRecord = enrollmentResumeStore.read(); }
+    catch (error) { if (error?.code !== "NOT_INITIALIZED") throw error; }
+    if (enrollmentResumeRecord?.state === "failed") throw Object.assign(new Error("The durable device enrollment record is terminal and requires operator reconciliation"), { code: "DEVICE_ENROLLMENT_RESUME_FAILED" });
+    if (!enrollmentRequested && !enrollmentResumeRecord?.recovery_descriptor) {
+      throw new Error("At service_keys_activated, use the browser-assisted command or the explicit stdin recovery path");
+    }
+  } else if (enrollmentRequested) {
+    throw new Error("Browser and stdin enrollment options are accepted only at service_keys_activated");
   }
-  const enrollmentBaseUrl = flags.enrollmentUrl === undefined ? undefined : validateHeadlessEnrollmentBaseUrl(flags.enrollmentUrl);
+  const enrollmentMode = state === "service_keys_activated" && (enrollmentRequested || Boolean(enrollmentResumeRecord?.recovery_descriptor));
+  const enrollmentBaseUrl = flags.enrollmentUrl === undefined
+    ? enrollmentResumeRecord?.recovery_descriptor?.api_base_url
+    : validateHeadlessEnrollmentBaseUrl(flags.enrollmentUrl);
   const consoleBaseUrl = flags.consoleUrl === undefined ? undefined : normalizeConsoleBaseUrl(flags.consoleUrl);
   const teamId = config.native_broker?.team_id;
   if (typeof teamId !== "string") throw new Error("Native bridge configuration has no pinned Apple Team ID; rerun agentpass setup --team-id TEAMID");
@@ -287,7 +299,7 @@ async function continueNativeSetup() {
   if (journal.status().state === "device_enrolled") handlers.connect_editor = createEditorConnectedHandler({ onboarding });
   if (journal.status().state === "editor_connected") handlers.verify_test_commit = createTestCommitVerifiedHandler({ verifierResult: verifyCurrentCommit() });
   if (journal.status().state === "test_commit_verified") handlers.complete_setup = createCompleteSetupHandler({ priorVerificationProof: verifyCurrentCommit() });
-  if (enrollmentInvitation) {
+  if (enrollmentInvitation || enrollmentResumeRecord?.recovery_descriptor) {
     nativeHandlers();
     handlers.enroll_device = createDeviceEnrollmentSetupHandler({
       runner: enrollmentRunner,
@@ -305,6 +317,7 @@ async function continueNativeSetup() {
       },
       invitation: enrollmentInvitation,
       baseUrl: enrollmentBaseUrl,
+      resumeStore: enrollmentResumeStore,
       loadConfig,
       saveConfig
     });
