@@ -2,13 +2,81 @@
 
 Status: active
 
-Source baseline: `codex/agent-platform` at `89e61fb`
+Source baseline: `codex/agent-platform` at committed `09eb561` (the last
+clean contract/CI diagnostic slice inspected for this plan)
+
+Execution checkpoint: the merge slice containing this plan also carries the
+F1d/F1e native contract candidates (`AgentHostXPCProtocol.swift`, the private
+Git session state machine, and `AgentSigningCapability.swift` plus
+tests/vectors). They are implemented and locally verified, but are not a
+qualified baseline until the resulting commit passes the exact-SHA CI gate.
 
 This is the authoritative day-to-day plan after the native launch, child
 supervision, and private Git transport primitives landed. Product and release
 requirements remain defined by [`V1_EXECUTION_PLAN.md`](./V1_EXECUTION_PLAN.md).
 Older checkpoint queues are historical context when they conflict with this
 document.
+
+## 0. Repository reality and execution rules
+
+The repository is a mature security-boundary codebase, not an empty product
+scaffold. The plan below must extend existing seams rather than introduce a
+second authority model.
+
+Current facts to preserve:
+
+- `contracts/openapi/device-v1.json` already declares
+  `POST /v1/organizations/{organization_id}/devices/{device_id}/agent-sessions/{session_id}/signing-capabilities`
+  as `frozen-f1a`. Its body is only `{request_id}`; all authority fields are
+  server-derived. The route is not yet wired into the production handler in
+  `apps/cloud-api/src/agent-session-device-api.mjs`.
+- `contracts/schemas/agent-signing-capability-v1.schema.json` and
+  `contracts/schemas/agent-session-signing-capability-response-v1.schema.json`
+  require tenant-bound, canonical, one-use signing material. The committed
+  `09eb561` slice specifically binds `organization_id` and `issued_at` and
+  caps `remaining_session_signatures` at one.
+- Existing Cloud seams include the Grant/Lease lifecycle, capability
+  reservation repository, signer-purpose registry, managed-signer provider
+  operation adjudication, Device authentication, Human WebAuthn, and
+  PostgreSQL migration/checksum enforcement. Reuse these seams; do not create
+  a parallel session table, token format, or local signer fallback.
+- The current PostgreSQL migration head is `0073_possession_receipt_control_trust.sql`.
+  The next migration must be the next contiguous number and must update the
+  catalog, schema-head tests, least-privilege checks, and integration fixtures
+  in the same merge unit.
+- Native has separate products for the service, manager/client, agent Host,
+  onboarding, and helper tools in `native/macos/Package.swift`. The Host is a
+  supervisor boundary; it is not the Agent and must not receive capability or
+  key authority.
+- `Formula/agentpass.rb` intentionally installs an evaluation JavaScript
+  broker and marks the production XPC boundary unavailable. The signed
+  native bundle produced by `native/macos/scripts/build-app.sh` is the
+  production boundary. Keep this distinction visible in every user-facing
+  status and release artifact.
+- CI is split into `test`, `browser-e2e`, `p0b-live-process`,
+  `postgres-integration`, and `postgres-authority-matrix`; PostgreSQL 16 and
+  17 qualification is part of the integration matrix. A local macOS sandbox
+  failure to bind a listener is not a substitute for CI evidence.
+
+Execution rules:
+
+1. Each slice below is one reviewable merge unit with one contract owner,
+   bounded file scope, and a named exit gate. Do not mix a schema redesign,
+   native transport rewrite, and release packaging in one PR.
+2. Contract changes land before producer/consumer changes. The canonical
+   schema, OpenAPI, catalog, Swift DTO, JavaScript validator, and vectors are
+   one versioned set; generated or derived changes are checked in when the
+   repository convention requires them.
+3. Every database change is forward-only, contiguous, checksum-registered,
+   transactionally applied, and tested on PostgreSQL 16 and 17. Application
+   rollback is the rollback mechanism; authority history is never rewritten.
+4. A provider response lost after an external sign is `outcome_unknown`.
+   Retries are prohibited until durable reconciliation proves that no key use
+   occurred or proves the exact completed result.
+5. “Implemented” means source tests pass. “Qualified” additionally requires
+   the protected CI, physical macOS, managed-provider, or staging evidence
+   named by the relevant gate. These words must not be interchanged in status
+   reports.
 
 ## 1. Outcome and current boundary
 
@@ -362,6 +430,432 @@ Deliverables:
 Exit gate: no critical/high finding remains, SLO/RPO/RTO targets are met,
 rollback is rehearsed, and production promotion names the exact source,
 database migration head, images, PKG, and provider key versions.
+
+## 4-A. Executable package ledger
+
+This ledger turns F1-F10 into bounded work packages. File names are intended
+targets; when a package discovers that an existing seam already owns the
+responsibility, extend that seam and record the substitution in the PR rather
+than creating a duplicate implementation.
+
+### F1 — contract and security freeze
+
+Package: `F1d-lifecycle-errors`, `F1e-capability-codec`, and
+`F1f-threat-matrix`.
+
+Dependencies: the committed F1a JSON Schema/OpenAPI/catalog changes in
+`09eb561`; no Cloud, database, or external provider dependency.
+
+Files and API surface:
+
+- `native/macos/Sources/AgentPassNativeCore/AgentHostXPCProtocol.swift`
+  defines prepare, attach, payload-only sign, status, and close with fixed
+  two-signature semantics and no caller-selected authority fields.
+- `native/macos/Sources/AgentPassNativeCore/NativeAgentPrivateGitSessionMessage.swift`
+  and `NativeAgentPrivateGitSessionStateMachine.swift` define the versioned
+  request/response/close frame, one outstanding request, EOF, and quarantine
+  semantics. The existing one-shot bridge files remain unchanged primitives.
+- `native/macos/Sources/AgentPassNativeCore/AgentSigningCapability.swift`
+  must separate decode/shape validation from Ed25519 verification. Verification
+  pins issuer, key purpose, key ID, domain, organization, device, agent,
+  session, time window, TTL, and sequence; it must verify the exact bytes
+  `domain || canonical(statement)` and the statement hash.
+- `contracts/schemas/*signing-capability*`, `contracts/openapi/device-v1.json`,
+  `contracts/catalog-v1.json`, `test/fixtures/`, and the Swift/JS vector tests
+  are updated together. No new authority-bearing field may be added to an
+  untrusted request.
+
+Tests and gate:
+
+- `AgentHostXPCProtocolTests`, `NativeAgentPrivateGitSessionTests`, and
+  `AgentSigningCapabilityTests` cover zero timestamps, PID reuse/version
+  bounds, duplicate/unknown fields, noncanonical JSON, wrong domain/key,
+  tenant/session mismatch, expired/not-yet-valid statements, signature
+  mutation, sequence replay/skip, close/EOF, and outcome-unknown paths.
+- `test/agent-signing-capability-vector.test.mjs` must agree byte-for-byte
+  with Swift vectors. Run focused Swift tests with the repository's disabled
+  sandbox/module-cache setup, then run all CI jobs on one SHA.
+- Exit only when a reviewer can show that no untrusted input selects operation,
+  scope, key, algorithm, budget, session, or adapter identity.
+
+### F2 — Device API issuance and PostgreSQL reservation
+
+Package: `F2a-issuance-service`, `F2b-postgres-reservation`, and
+`F2c-device-route`.
+
+Dependencies: F1 vectors; existing Device request authentication; active
+Agent Session/Lease and authority-generation repositories; capability signer
+and managed-signer provider-operation infrastructure.
+
+Files, migration, and API:
+
+- Extend `apps/cloud-api/src/agent-session-device-api.mjs` with the already
+  declared signing-capability route. Add a dedicated
+  `apps/cloud-api/src/agent-session-signing-capability-api.mjs` only if the
+  existing handler cannot keep Grant and Capability parsing isolated.
+- Add `apps/cloud-api/src/human-auth/agent-sessions/signing-capability-issuance-service.mjs`
+  to derive `git.commit.sign`, scope, key purpose, `issued_at`, `not_before`,
+  `expires_at`, sequence, `control_sequence`, `authority_generation`, and
+  budget from the locked server records. The request may contribute only
+  `request_id`.
+- Extend or add the narrow repository in
+  `apps/cloud-api/src/postgres/capability-reservation-repository.mjs` and
+  `capability-authority-repository.mjs`; reuse `capability-signer.mjs` and
+  `agent-session-signer-config.mjs` for the purpose-separated Cloud key.
+- Add the next contiguous migration after `0073` (planned name:
+  `0074_agent_session_signing_capability_reservations.sql`) for the exact
+  request identity, canonical statement hash, capability hash, tenant/device/
+  session bindings, sequence, reservation state, budget, generation fields,
+  and safe timestamps. Add unique constraints for tenant+request, session+
+  sequence, and capability hash; add checks for one-use and max two session
+  signatures. Register it in `contracts/catalog-v1.json` and update schema
+  head/privilege fixtures.
+- Consume `capability_id + statement_hash` atomically through the existing
+  durable sign-once transaction. A verified envelope is not consumed merely
+  because its Ed25519 signature is valid; duplicate use must return the exact
+  prior result or terminal `outcome_unknown`, never invoke the key again.
+- Keep external provider intent/result/uncertainty in the existing provider
+  operation tables when Cloud signing is remote. Do not store raw capability,
+  nonce secret, private key, or provider response diagnostics in logs.
+
+Tests and gate:
+
+- Unit/API tests cover exact raw-body Device authentication, path/auth binding,
+  missing or extra body keys, cross-tenant/device/session, stale control or
+  authority generation, expired/revoked Lease, sequence contention, exhausted
+  budget, same-request retry, conflicting request reuse, response loss, and
+  managed-signer timeout/uncertainty.
+- PostgreSQL tests cover two concurrent issuers, rollback after signer failure,
+  migration upgrade from the current head on PostgreSQL 16 and 17, role
+  privileges, and schema checksum/catalog consistency.
+- Exit only when one active Lease can issue exactly the next server-scoped
+  capability and an ambiguous provider outcome cannot reserve or use a second
+  signature.
+
+### F3 — Host XPC and independent child observation
+
+Package: `F3a-host-runtime`, `F3b-child-observer`, and `F3c-close-paths`.
+
+Dependencies: F1 Host contract; existing
+`NativeAgentHostLifecycleCoordinator`, `NativeAgentHostChildSupervisor`,
+`NativeDarwinProcessObservationSource`, `NativeAgentWorktreeBinding`, and
+the signed launch-authority handoff.
+
+Files and API surface:
+
+- Implement the frozen Host interface in
+  `native/macos/Sources/AgentPassNativeAgentHost/main.swift` and
+  `native/macos/Sources/AgentPassNativeService/main.swift`, with shared DTOs
+  only in `AgentPassNativeCore`.
+- Make prepare assign session identity, attach accept only observation hints,
+  and sign accept payload plus request sequence. The Service independently
+  checks PID version, ancestry, executable/code identity, Team ID/designated
+  requirement, cwd/worktree, repository/.git identity, branch, and remote.
+- Bind the XPC connection to one lifecycle object; terminate on child exit,
+  XPC interruption, authority loss, observation drift, or close. The Host may
+  report a PID but never becomes the signing subject.
+- Construct Capability verification context only from current, verified
+  Control/Device state. Bind key ID to an enrolled public-key fingerprint,
+  reject generation rollback, and keep connection-owned expected sequence and
+  used-signature state so DTO range validation cannot substitute for runtime
+  ordering.
+
+Tests and gate:
+
+- Extend `NativeAgentHostChildSupervisorTests`,
+  `NativeAgentHostLifecycleCoordinatorTests`,
+  `NativeDarwinProcessObservationSourceTests`, and XPC negative harnesses for
+  untrusted Host, PID reuse, ancestry escape, binary replacement, signature
+  drift, worktree/repository/branch/remote drift, sleep/wake, restart, attach
+  races, early sign, post-close sign, and cleanup failure.
+- Exit only with an evidence record showing the child identity was observed by
+  the Service immediately before reservation and key use.
+
+### F4 — multi-request private Git transport
+
+Package: `F4a-frame-runtime`, `F4b-fd3-handoff`, and `F4c-concurrency-tests`.
+
+Dependencies: F1 frame/state machine and F3 Host lifecycle; existing
+`NativeAgentPrivateFDTransport`, private bridge socket pair/client/server, and
+launch authority handoff.
+
+Files and API surface:
+
+- Add the session transport adapter alongside
+  `NativeAgentPrivateGitBridgeClient.swift` and
+  `NativeAgentPrivateGitBridgeServer.swift`; prefer unnamed Darwin
+  `SOCK_SEQPACKET` only after platform qualification, otherwise retain a
+  length-preserving bounded transport with an explicit decoder.
+- Install the child-only endpoint at fixed FD3. Consume and close the launch
+  FD3 before spawn, clear all unrelated descriptors, and transfer ownership
+  deterministically around `posix_spawn`.
+- Keep one outstanding request, sequence 1 then 2, no third request, bounded
+  payload/signature sizes, and a terminal close that quarantines malformed or
+  ambiguous traffic.
+
+Tests and gate:
+
+- Extend the bridge and FD transport tests for two sequential commits, third
+  request denial, concurrent helper/interleaving, partial or oversized frames,
+  trailing bytes, replay/skip/wrong response sequence, EOF, signer failure,
+  process termination, spawn failure, FD collision/leak, and no TCP/filesystem
+  fallback.
+- Exit only when two helper invocations share one approved session without
+  authority interleaving and the endpoint cannot be reused after close.
+
+### F5 — CLI, Host, Git helper, and sign-once integration
+
+Package: `F5a-real-launch`, `F5b-git-helper`, and `F5c-signing-composition`.
+
+Dependencies: F2 Device issuance, F3 Host runtime, F4 transport, existing
+`NativeAgentGrantLeaseHTTPConsumer`, `NativeSigningTransaction`, `SSHSIG`,
+`lib/agent-launch-contract.mjs`, and `lib/git-signing.mjs`.
+
+Files and API surface:
+
+- Replace the validated-but-unavailable path in the root CLI/launch contract
+  with the fixed signed Host launch; keep all authority in the Service.
+- Make `agentpass-git-sign` (native or fixed-path helper as selected by the
+  distribution) accept only Git's bounded payload, read only FD3, request one
+  signature, write SSHSIG, and exit. Missing or inherited-wrong FD3 fails
+  closed.
+- Configure Claude Code through the existing adapter path and add Cursor as a
+  second adapter descriptor only; do not add an adapter-specific key or XPC
+  selector. `git commit -S` and `git verify-commit` are the black-box contract.
+
+Tests and gate:
+
+- Run real repository vectors for SSHSIG, `git commit -S`, two commits after
+  one approval, third-commit denial, wrong branch/remote/worktree, helper
+  without Host/FD3, executable/adapter substitution, child/sibling denial,
+  and response-loss after key use.
+- Scan argv, environment, Git config, shell history, logs, crash output,
+  repository state, and durable state for capability, key, token, and socket
+  path leakage. Exit only when the Agent and Git helper see payload/result, not
+  authority.
+
+### F6 — lifecycle, revocation, and recovery closure
+
+Package: `F6a-state-composition`, `F6b-reconciliation`, and
+`F6c-user-remediation`.
+
+Dependencies: F2-F5; `NativeAgentSessionCoordinator`,
+`NativeAgentSessionRegistry`, `NativeAgentSigningIntentStore`, existing
+Cloud lifecycle repositories, audit transaction, and recovery code.
+
+Files and API surface:
+
+- Compose `launch`, `status`, `close`, `revoke`, `doctor`, and uninstall in
+  the existing CLI/native lifecycle seams. Add no second session state store.
+- Persist only public transaction identity, state, hashes, and recovery
+  evidence. Reconcile `pending`, `completed`, `outcome_unknown`, revoked,
+  expired, process-drift, and transport-quarantined states after restart.
+- Make revocation authoritative in PostgreSQL/Control state, propagate via
+  existing Device refresh, and require a final authoritative read before
+  native key use.
+
+Tests and gate:
+
+- Kill/restart before and after every transition; cover network loss, clock
+  rollback/advance, stale generations, revoke races, exact replay, provider
+  uncertainty, emergency stop, cleanup failure, and Japanese/English stable
+  remediation.
+- Exit only when every interruption converges safely and the same provider
+  operation can never be invoked twice because of response loss.
+
+### F7 — clean-machine Claude Code qualification
+
+Package: `F7a-installer-doctor`, `F7b-two-commit-run`, and `F7c-leak-audit`.
+
+Dependencies: F1-F6; a clean supported macOS machine, real Git, Claude Code,
+Developer ID artifact, and managed or qualification Cloud endpoint.
+
+Files and API surface:
+
+- Extend the existing root CLI setup/doctor/uninstall modules and the native
+  onboarding status model. Do not require a full Mac GUI; browser approval and
+  CLI diagnostics are the supported workflow.
+- Capture secret-free qualification evidence bound to source SHA, PKG digest,
+  contract hashes, migration head, and provider key version.
+
+Tests and gate:
+
+- On a clean user account, install, enroll, approve once, create two unattended
+  signed commits, verify both signatures/audit links, deny the third, revoke,
+  and prove immediate denial. Repeat after restart and with install/upgrade/
+  uninstall/reinstall-preserve.
+- Exit only with process/argv/env/config/log/crash/repository/durable-state
+  scans clean and the evidence independently reproducible.
+
+### F8 — Web Console onboarding and Cursor parity
+
+Package: `F8a-console-flow`, `F8b-policy/activity`, and `F8c-cursor-adapter`.
+
+Dependencies: F2/F6 public states and current Web Console BFF, Human WebAuthn,
+organization/role/session APIs, and accessibility test conventions.
+
+Files and API surface:
+
+- Extend `apps/web-console/app/components/AgentPassConsole.tsx`,
+  `HostedOnboarding.tsx`, `SecurityPanel.tsx`, the existing console API/BFF
+  routes, and `apps/web-console/app/globals.css` with install, enrollment,
+  approval preview, active session, activity, expiry, revoke, emergency stop,
+  resume, and remediation states.
+- Add only public metadata to Console APIs: display name, state, expiry,
+  last activity, bounded reason, and audit references. Never return a raw
+  capability, device credential, private key, or bearer session to browser
+  storage.
+- Cursor consumes the same CLI/Host adapter contract as Claude Code. No new
+  authority object or native selector is allowed.
+
+Tests and gate:
+
+- Extend Console unit and Playwright tests for Owner/Admin/Auditor/Viewer,
+  operation-bound WebAuthn, response loss/stale state, keyboard/screen reader,
+  focus restoration, 200% reflow, reduced motion, Japanese/English, and
+  browser-storage/artifact scans. Run Claude/Cursor parity vectors.
+- Exit only when a non-engineer can install, approve, understand activity,
+  revoke, recover, and uninstall without seeing internal authority IDs.
+
+### F9 — managed signer and signed distribution
+
+Package: `F9a-provider`, `F9b-package`, and `F9c-channel-equality`.
+
+Dependencies: F2 provider-operation state, F7 qualification workflow, Apple
+Developer ID credentials, notarization service, supported Apple silicon and
+Intel/T2 hardware, and Homebrew release review.
+
+Files and API surface:
+
+- Extend existing AWS/GCP KMS provider/runtime/key-lifecycle modules and
+  `contracts/postgres/0037_managed_signer_lifecycle.sql`-era repositories;
+  assign immutable purpose/key-version/fingerprint/workload-identity records
+  and a disable/drain/reconcile worker. Hosted mode must reject local/file
+  private-key fallback.
+- Keep `native/macos/scripts/build-app.sh` as the reproducible assembly path;
+  add a release manifest, SBOM/provenance, notarization/stapling checks, and
+  digest publication around the existing signed bundle. Do not make a full
+  Mac GUI a prerequisite for production.
+- Keep Homebrew as the easy evaluation/CLI channel (`Formula/agentpass.rb`)
+  and distribute production enforcement as one signed/notarized PKG. The
+  formula must point users to the PKG for the XPC identity boundary; it must
+  never silently claim production protection.
+
+Tests and gate:
+
+- Provider tests cover IAM allow/deny, non-exportability, purpose/version/
+  fingerprint binding, outage/throttle/timeout/response loss, rotation,
+  drain, disable, and no fallback.
+- Release tests run `codesign`, `spctl`, `pkgutil`, notarization/stapler,
+  install/upgrade/uninstall/reinstall/rollback, and arm64/x86_64 checks. The
+  direct-download manifest, PKG, and any production installer must have the
+  same digest; Homebrew source mode is explicitly a different evaluation
+  status.
+- Exit only when the production package is signed/notarized and physical
+  qualification proves the same identity boundary on both hardware classes.
+
+### F10 — staging, independent review, and production promotion
+
+Package: `F10a-staging`, `F10b-review`, and `F10c-promotion`.
+
+Dependencies: all previous exits; protected Cloud/Console accounts; immutable
+container registry; PostgreSQL backup/PITR; KMS; observability; incident
+owners; independent security reviewer; release approvers.
+
+Files and API/runbook surface:
+
+- Add immutable deployment manifests, migration allow-list, worker/drain
+  configuration, dashboards/alerts, SLO definitions, and staging evidence
+  under the existing `ops/` and release/runbook conventions.
+- Use `docs/POSTGRES_CUTOVER_RUNBOOK.md`,
+  `docs/POSTGRES_BACKUP_RESTORE.md`, provider rotation runbooks, and release
+  manifests as the operator contract. Every promotion record names source
+  SHA, schema head/checksums, image digest, PKG digest, and provider versions.
+
+Tests and gate:
+
+- Rehearse migration canary/drain, restore with measured RPO/RTO, database/KMS/
+  network outage, tenant-isolation attack, revoke latency, signer compromise/
+  rotation, queue/dead-letter recovery, and rollback.
+- Run SAST, DAST, dependency/container/IaC scans, SBOM/provenance verification,
+  full E2E, and independent security review. No critical/high unresolved
+  finding, unmet SLO/RPO/RTO, or unreviewed exception may pass promotion.
+- Production is a human-approved canary followed by measured expansion; it is
+  never an automatic consequence of a green build.
+
+## 4-B. Next three merge-sized slices
+
+These are the immediate queue after the current `09eb561` baseline. They are
+intentionally small enough to review independently and ordered so that the
+first Cloud implementation cannot outrun the native contract.
+
+### Slice 1 — accept or reject the pending F1 native contract candidates
+
+Scope: only the uncommitted F1d/F1e files and their tests/vectors. Review the
+Host XPC DTOs, private Git lifecycle state machine, and
+`AgentSigningCapability.swift` as one contract set; do not add runtime wiring.
+
+Required checks:
+
+- Confirm Host prepare has no caller-supplied agent/adapter/session authority;
+  sign requests carry only payload and sequence; timestamps/PID versions reject
+  zero and out-of-range values; stale reserved authority keys are rejected.
+- Confirm capability verification performs real pinned-key Ed25519 verification
+  over the exact domain plus canonical statement, not shape-only parsing, and
+  binds organization/device/agent/session, issuer/purpose/key ID, time, TTL,
+  sequence, and one-use budget.
+- Run focused Swift tests, JS vectors, and native-source typecheck; then run
+  all six CI jobs on one SHA. Record any local listener restriction as an
+  environment note only.
+
+Exit artifact: one reviewable F1 contract commit (or a documented rejection
+with a follow-up fix), no API/database/source-runtime changes, and updated
+threat-matrix evidence.
+
+### Slice 2 — implement F2 issuance behind the frozen Device API
+
+Scope: the signing-capability route, service, repository, migration, and
+contract tests only. Do not launch Claude Code or change the private Git
+transport in this slice.
+
+Required implementation order:
+
+1. Add the next migration after 0073 and its catalog/schema-head/role checks.
+2. Add the PostgreSQL reservation transaction with unique retry identity,
+   session sequence, budget, generations, and `outcome_unknown` state.
+3. Add the issuance service and route using the existing Device verifier and
+   signer-purpose/provider-operation seams. Parse the body only after raw-byte
+   authentication; accept only `request_id`.
+4. Add unit, adversarial HTTP, PostgreSQL 16/17 integration, concurrency, and
+   provider uncertainty tests. Update OpenAPI only if implementation exposes a
+   mismatch; do not widen the already-frozen request.
+
+Exit artifact: a Device-authenticated active Lease can issue/replay exactly
+one server-scoped capability, while unauthorized, stale, exhausted, or
+ambiguous cases are stable denials. F3 cannot begin integration until this
+slice is green in protected CI.
+
+### Slice 3 — connect one native sign boundary without Git automation
+
+Scope: F3 plus the F4 transport adapter, using a deterministic test signer or
+test Device endpoint only at unit-test seams. Do not claim a real unattended
+commit yet and do not alter Console/UI or distribution.
+
+Required implementation order:
+
+1. Connect Host prepare/attach/status/close to the Service lifecycle and
+   independent child observer.
+2. Connect the two-request session state machine to FD3 with bounded framing,
+   ownership transfer, and quarantine/EOF behavior.
+3. Inject a signed-capability verifier and fake signing transaction in tests;
+   prove that Host/child/process drift prevents reservation and that response
+   loss becomes `outcome_unknown`.
+4. Run Swift unit/integration/XPC negative harnesses, FD leak scans, and
+   sanitizer or stress coverage where available.
+
+Exit artifact: a supervised child can perform two in-memory sign exchanges
+through the Service boundary with no authority in the Host/child DTOs. The
+next slice (F5) is the first one allowed to touch real `git commit -S`.
 
 ## 5. Parallel execution and ownership
 
