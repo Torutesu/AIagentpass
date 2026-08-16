@@ -27,10 +27,12 @@ export function SecurityPanel({ onSessionExpired, onSessionSignedOut, securityCl
   const [renameLabel, setRenameLabel] = useState("");
   const [signedOut, setSignedOut] = useState(false);
 
-  const load = useCallback(async (signal?: AbortSignal): Promise<boolean> => {
+  const load = useCallback(async (signal?: AbortSignal, clearMessages = true): Promise<boolean> => {
     setLoadState("loading");
-    setError("");
-    setNotice("");
+    if (clearMessages) {
+      setError("");
+      setNotice("");
+    }
     try {
       setSnapshot(await client.getSnapshot({ signal }));
       setLoadState("ready");
@@ -63,7 +65,7 @@ export function SecurityPanel({ onSessionExpired, onSessionSignedOut, securityCl
       setConfirmKey(null);
       setRenameTarget(null);
       setRenameLabel("");
-      if (reload && !(await load())) return;
+      if (reload && !(await load(undefined, false))) return;
       setNotice(successMessage);
     } catch (caught) {
       if (isAbortError(caught)) return;

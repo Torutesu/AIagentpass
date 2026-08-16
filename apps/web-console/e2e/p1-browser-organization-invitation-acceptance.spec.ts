@@ -200,7 +200,7 @@ test("reconciles a lost invitation acceptance response without sending a second 
   await openOrganizationPanel(page);
   await submitAcceptance(page);
   await assertAcceptedOrganizationVisible(page);
-  await expect(page.getByRole("alert")).toContainText("応答を確認できなかったため、権威状態を再取得しました");
+  await expect(page.getByRole("alert")).toContainText("招待の状態を確認できなかったため、最新の所属状態を取得しました");
   await expect(page.getByRole("button", { name: "最新の状態を再確認", exact: true })).toBeVisible();
 
   expect(state.acceptanceRequests).toHaveLength(1);
