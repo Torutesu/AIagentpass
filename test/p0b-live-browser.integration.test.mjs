@@ -11,6 +11,7 @@ const BROWSER_STARTUP_TIMEOUT_MS = 15_000;
 const BROWSER_CLEANUP_TIMEOUT_MS = 15_000;
 const CONTEXT_CLEANUP_TIMEOUT_MS = 10_000;
 const WAKE_OUTCOME_TIMEOUT_MS = 15_000;
+export const DEVICE_REFRESH_ROUTE = /\/api\/console\?operation=device\.refresh\.request(?:&|$)/u;
 let selectedScenarioCount = 0;
 
 test("P0-B live browser role, WebAuthn, and recent-auth matrix", { skip: !enabled, timeout: 840_000 }, async (t) => {
@@ -157,15 +158,12 @@ test("P0-B live browser role, WebAuthn, and recent-auth matrix", { skip: !enable
   for (const failure of ["stale", "replayed", "cross_operation", "cross_tenant"]) {
     await scenario(t, `owner ${failure} authorization is rejected by the real Cloud boundary`, async ({ fixture, open }) => {
       const page = await open("owner");
-      const verifyRoute = "**/api/auth/webauthn/verify";
+      const refreshRoute = DEVICE_REFRESH_ROUTE;
       if (failure === "stale") {
         const card = deviceCard(page, "反映待ち Mac");
         const observation = {
           routeIntercepted: false,
           routeSetupFailed: false,
-          routeFetchFailed: false,
-          verifyResponseStatus: null,
-          routeFulfillFailed: false,
           invalidationFailed: false,
           clickFailed: false,
           responseStatus: null,
@@ -179,27 +177,12 @@ test("P0-B live browser role, WebAuthn, and recent-auth matrix", { skip: !enable
           .then(() => true)
           .catch(() => false);
         try {
-          await page.route(verifyRoute, async (route) => {
+          await page.route(refreshRoute, async (route) => {
             if (route.request().method() !== "POST") return route.continue();
             observation.routeIntercepted = true;
-            let response;
-            try {
-              response = await route.fetch();
-            } catch {
-              observation.routeFetchFailed = true;
-              await route.abort().catch(() => {});
-              return;
-            }
-            observation.verifyResponseStatus = response.status();
-            if (!response.ok()) {
-              try { await route.fulfill({ response }); }
-              catch { observation.routeFulfillFailed = true; }
-              return;
-            }
             try { await fixture.invalidateRecentAuth(page, failure); }
             catch { observation.invalidationFailed = true; }
-            try { await route.fulfill({ response }); }
-            catch { observation.routeFulfillFailed = true; }
+            await route.continue();
           });
         } catch {
           observation.routeSetupFailed = true;
@@ -212,7 +195,7 @@ test("P0-B live browser role, WebAuthn, and recent-auth matrix", { skip: !enable
         const [refreshResponse, alertObserved] = await Promise.all([refreshResponsePromise, alertPromise]);
         observation.responseStatus = refreshResponse?.status() ?? null;
         observation.alertObserved = alertObserved;
-        await page.unroute(verifyRoute).catch(() => {});
+        await page.unroute(refreshRoute).catch(() => {});
         const marker = staleAuthorizationFailureMarker(observation);
         if (marker !== null) assert.fail(marker);
         return;
@@ -224,18 +207,16 @@ test("P0-B live browser role, WebAuthn, and recent-auth matrix", { skip: !enable
         const url = new URL(response.url());
         if (response.request().method() === "POST" && url.pathname === "/api/console" && url.searchParams.get("operation") === "device.refresh.request") responseStatus = response.status();
       });
-      await page.route(verifyRoute, async (route) => {
+      await page.route(refreshRoute, async (route) => {
         if (route.request().method() !== "POST") return route.continue();
         intercepted = true;
-        const response = await route.fetch();
-        if (!response.ok()) return route.fulfill({ response });
         await fixture.invalidateRecentAuth(page, failure);
-        await route.fulfill({ response });
+        await route.continue();
       });
       const card = deviceCard(page, "反映待ち Mac");
       await card.getByRole("button", { name: "Wake requestを依頼" }).click();
       await card.getByRole("alert").waitFor();
-      await page.unroute(verifyRoute);
+      await page.unroute(refreshRoute);
       assert.equal(intercepted, true);
       assert.equal(responseStatus, 401);
     });
@@ -258,9 +239,6 @@ test("stale authorization diagnostics emit only fixed safe markers", () => {
   const valid = {
     routeIntercepted: true,
     routeSetupFailed: false,
-    routeFetchFailed: false,
-    verifyResponseStatus: 200,
-    routeFulfillFailed: false,
     invalidationFailed: false,
     clickFailed: false,
     responseStatus: 401,
@@ -269,12 +247,6 @@ test("stale authorization diagnostics emit only fixed safe markers", () => {
   assert.equal(staleAuthorizationFailureMarker(valid), null);
   assert.equal(staleAuthorizationFailureMarker({ ...valid, clickFailed: true }), STALE_AUTH_DIAGNOSTIC_MARKERS.clickFailed);
   assert.equal(staleAuthorizationFailureMarker({ ...valid, routeSetupFailed: true }), STALE_AUTH_DIAGNOSTIC_MARKERS.routeSetupFailed);
-  assert.equal(staleAuthorizationFailureMarker({ ...valid, routeFetchFailed: true }), STALE_AUTH_DIAGNOSTIC_MARKERS.routeFetchFailed);
-  assert.equal(staleAuthorizationFailureMarker({ ...valid, verifyResponseStatus: 401 }), STALE_AUTH_DIAGNOSTIC_MARKERS.verifyHttp401);
-  assert.equal(staleAuthorizationFailureMarker({ ...valid, verifyResponseStatus: 403 }), STALE_AUTH_DIAGNOSTIC_MARKERS.verifyHttp4xx);
-  assert.equal(staleAuthorizationFailureMarker({ ...valid, verifyResponseStatus: 503 }), STALE_AUTH_DIAGNOSTIC_MARKERS.verifyHttp5xx);
-  assert.equal(staleAuthorizationFailureMarker({ ...valid, verifyResponseStatus: 0 }), STALE_AUTH_DIAGNOSTIC_MARKERS.verifyHttpOther);
-  assert.equal(staleAuthorizationFailureMarker({ ...valid, routeFulfillFailed: true }), STALE_AUTH_DIAGNOSTIC_MARKERS.routeFulfillFailed);
   assert.equal(staleAuthorizationFailureMarker({ ...valid, routeIntercepted: false }), STALE_AUTH_DIAGNOSTIC_MARKERS.routeNotIntercepted);
   assert.equal(staleAuthorizationFailureMarker({ ...valid, invalidationFailed: true }), STALE_AUTH_DIAGNOSTIC_MARKERS.invalidationFailed);
   assert.equal(staleAuthorizationFailureMarker({ ...valid, responseStatus: null }), STALE_AUTH_DIAGNOSTIC_MARKERS.responseMissing);
@@ -287,12 +259,6 @@ test("stale authorization diagnostics emit only fixed safe markers", () => {
   assert.deepEqual(Object.values(STALE_AUTH_DIAGNOSTIC_MARKERS), [
     "P0B_SAFE_STALE_AUTH_CLICK_FAILED",
     "P0B_SAFE_STALE_AUTH_ROUTE_SETUP_FAILED",
-    "P0B_SAFE_STALE_AUTH_VERIFY_FETCH_FAILED",
-    "P0B_SAFE_STALE_AUTH_VERIFY_HTTP_401_FAILED",
-    "P0B_SAFE_STALE_AUTH_VERIFY_HTTP_4XX_FAILED",
-    "P0B_SAFE_STALE_AUTH_VERIFY_HTTP_5XX_FAILED",
-    "P0B_SAFE_STALE_AUTH_VERIFY_HTTP_OTHER_FAILED",
-    "P0B_SAFE_STALE_AUTH_VERIFY_FULFILL_FAILED",
     "P0B_SAFE_STALE_AUTH_ROUTE_NOT_INTERCEPTED_FAILED",
     "P0B_SAFE_STALE_AUTH_INVALIDATION_FAILED",
     "P0B_SAFE_STALE_AUTH_RESPONSE_MISSING_FAILED",
@@ -303,6 +269,12 @@ test("stale authorization diagnostics emit only fixed safe markers", () => {
     "P0B_SAFE_STALE_AUTH_RESPONSE_HTTP_OTHER_FAILED",
     "P0B_SAFE_STALE_AUTH_ALERT_MISSING_FAILED",
   ]);
+});
+
+test("recent-auth failure injection matches the exact refresh mutation URL", () => {
+  assert.equal(DEVICE_REFRESH_ROUTE.test("https://console.example.test/api/console?operation=device.refresh.request"), true);
+  assert.equal(DEVICE_REFRESH_ROUTE.test("https://console.example.test/api/console?operation=device.refresh.request&trace=1"), true);
+  assert.equal(DEVICE_REFRESH_ROUTE.test("https://console.example.test/api/console?operation=device.revoke"), false);
 });
 
 async function scenario(parent, name, callback) {
@@ -572,12 +544,6 @@ function failLifecycle(error) {
 export const STALE_AUTH_DIAGNOSTIC_MARKERS = Object.freeze({
   clickFailed: "P0B_SAFE_STALE_AUTH_CLICK_FAILED",
   routeSetupFailed: "P0B_SAFE_STALE_AUTH_ROUTE_SETUP_FAILED",
-  routeFetchFailed: "P0B_SAFE_STALE_AUTH_VERIFY_FETCH_FAILED",
-  verifyHttp401: "P0B_SAFE_STALE_AUTH_VERIFY_HTTP_401_FAILED",
-  verifyHttp4xx: "P0B_SAFE_STALE_AUTH_VERIFY_HTTP_4XX_FAILED",
-  verifyHttp5xx: "P0B_SAFE_STALE_AUTH_VERIFY_HTTP_5XX_FAILED",
-  verifyHttpOther: "P0B_SAFE_STALE_AUTH_VERIFY_HTTP_OTHER_FAILED",
-  routeFulfillFailed: "P0B_SAFE_STALE_AUTH_VERIFY_FULFILL_FAILED",
   routeNotIntercepted: "P0B_SAFE_STALE_AUTH_ROUTE_NOT_INTERCEPTED_FAILED",
   invalidationFailed: "P0B_SAFE_STALE_AUTH_INVALIDATION_FAILED",
   responseMissing: "P0B_SAFE_STALE_AUTH_RESPONSE_MISSING_FAILED",
@@ -593,16 +559,7 @@ export function staleAuthorizationFailureMarker(observation = {}) {
   if (observation.clickFailed === true) return STALE_AUTH_DIAGNOSTIC_MARKERS.clickFailed;
   if (observation.routeSetupFailed === true) return STALE_AUTH_DIAGNOSTIC_MARKERS.routeSetupFailed;
   if (observation.routeIntercepted !== true) return STALE_AUTH_DIAGNOSTIC_MARKERS.routeNotIntercepted;
-  if (observation.routeFetchFailed === true) return STALE_AUTH_DIAGNOSTIC_MARKERS.routeFetchFailed;
-  const verifyStatus = observation.verifyResponseStatus;
-  if (verifyStatus !== 200) {
-    if (verifyStatus === 401) return STALE_AUTH_DIAGNOSTIC_MARKERS.verifyHttp401;
-    if (Number.isInteger(verifyStatus) && verifyStatus >= 400 && verifyStatus < 500) return STALE_AUTH_DIAGNOSTIC_MARKERS.verifyHttp4xx;
-    if (Number.isInteger(verifyStatus) && verifyStatus >= 500 && verifyStatus < 600) return STALE_AUTH_DIAGNOSTIC_MARKERS.verifyHttp5xx;
-    return STALE_AUTH_DIAGNOSTIC_MARKERS.verifyHttpOther;
-  }
   if (observation.invalidationFailed === true) return STALE_AUTH_DIAGNOSTIC_MARKERS.invalidationFailed;
-  if (observation.routeFulfillFailed === true) return STALE_AUTH_DIAGNOSTIC_MARKERS.routeFulfillFailed;
   const status = observation.responseStatus;
   if (!Number.isInteger(status)) return STALE_AUTH_DIAGNOSTIC_MARKERS.responseMissing;
   if (status === 401) {
