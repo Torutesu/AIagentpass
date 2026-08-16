@@ -4805,9 +4805,11 @@ do {
     case .enabled(let authority):
         guard let deviceSigner = controlV2DeviceSigner,
               let controlV2Manager,
-              let capabilityVerifier,
               let activeSigning else {
             throw AgentPassNativeError.invalidConfiguration("Agent runtime device and signing lifecycle authority is unavailable")
+        }
+        guard let capabilityVerifier else {
+            throw AgentPassNativeError.invalidConfiguration("Agent runtime capability authority is unavailable")
         }
         let authorityState = try AgentRuntimeAuthorityState(
             control: controlV2Manager,
