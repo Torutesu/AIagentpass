@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { adminWakeFailureMarker, keyboardOutcomeFailureMarker, keyboardRecentAuthFailureMarker, lifecycleFailureMarker, wakeAcceptedFailureMarker } from "./p0b-live-browser.integration.test.mjs";
+import { adminWakeFailureMarker, keyboardOutcomeFailureMarker, keyboardRecentAuthFailureMarker, lifecycleFailureMarker, staleAuthorizationFailureMarker, wakeAcceptedFailureMarker } from "./p0b-live-browser.integration.test.mjs";
 import { P0BLiveBrowserFixtureError } from "./support/p0b/live-browser-fixture.mjs";
 
 function response(status, payload, parse = true) {
@@ -50,6 +50,17 @@ test("P0-B lifecycle diagnostics expose only reviewed timeout classes", () => {
   }
   assert.equal(lifecycleFailureMarker(new P0BLiveBrowserFixtureError("unknown", "unsafe")), null);
   assert.equal(lifecycleFailureMarker(new Error("unsafe")), null);
+});
+
+test("P0-B stale-authorization diagnostics expose only a fixed phase or status class", () => {
+  assert.equal(staleAuthorizationFailureMarker({ phase: "response", status: 401 }), null);
+  assert.equal(staleAuthorizationFailureMarker({ phase: "invalidation_failed", status: null }), "P0B_SAFE_STALE_AUTH_INVALIDATION_FAILED");
+  assert.equal(staleAuthorizationFailureMarker({ phase: "fetch_failed", status: null }), "P0B_SAFE_STALE_AUTH_FETCH_FAILED");
+  assert.equal(staleAuthorizationFailureMarker({ phase: "response", status: 204 }), "P0B_SAFE_STALE_AUTH_HTTP_2XX_FAILED");
+  assert.equal(staleAuthorizationFailureMarker({ phase: "response", status: 403 }), "P0B_SAFE_STALE_AUTH_HTTP_4XX_FAILED");
+  assert.equal(staleAuthorizationFailureMarker({ phase: "response", status: 503 }), "P0B_SAFE_STALE_AUTH_HTTP_5XX_FAILED");
+  assert.equal(staleAuthorizationFailureMarker({ phase: "response", status: 302 }), "P0B_SAFE_STALE_AUTH_HTTP_OTHER_FAILED");
+  assert.equal(staleAuthorizationFailureMarker({ phase: "unexpected", status: 401 }), "P0B_SAFE_STALE_AUTH_RESPONSE_FAILED");
 });
 
 test("P0-B keyboard diagnostics classify the reviewed HTTP statuses without payload output", async () => {

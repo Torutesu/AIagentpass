@@ -135,12 +135,13 @@ test("live bootstrap adopts the Console-owned rotation before navigation complet
     csrfToken: "A".repeat(43)
   });
   const events = [];
+  let currentHeaders = {};
   let matchResponse;
   let resolveResponse;
   const responsePromise = new Promise((resolve) => { resolveResponse = resolve; });
   const response = {
     ok: () => true,
-    request: () => ({ method: () => "POST" }),
+    request: () => ({ method: () => "POST", headers: () => currentHeaders }),
     url: () => "https://console.example.test/api/auth/session/resume",
     json: async () => ({
       csrf_token: expected.csrfToken,
@@ -153,6 +154,10 @@ test("live bootstrap adopts the Console-owned rotation before navigation complet
     })
   };
   const page = {
+    async setExtraHTTPHeaders(headers) {
+      currentHeaders = headers;
+      events.push(["headers", Object.hasOwn(headers, "agentpass-p0b-session-correlation")]);
+    },
     waitForResponse(predicate, options) {
       events.push(["wait", options.timeout]);
       matchResponse = predicate;
@@ -162,7 +167,12 @@ test("live bootstrap adopts the Console-owned rotation before navigation complet
       events.push(["goto", target, options.waitUntil]);
       assert.equal(matchResponse({
         ok: () => true,
-        request: () => ({ method: () => "GET" }),
+        request: () => ({ method: () => "GET", headers: () => currentHeaders }),
+        url: () => "https://console.example.test/api/auth/session/resume"
+      }), false);
+      assert.equal(matchResponse({
+        ok: () => true,
+        request: () => ({ method: () => "POST", headers: () => ({}) }),
         url: () => "https://console.example.test/api/auth/session/resume"
       }), false);
       assert.equal(matchResponse(response), true);
@@ -178,8 +188,10 @@ test("live bootstrap adopts the Console-owned rotation before navigation complet
   );
 
   assert.deepEqual(events, [
+    ["headers", true],
     ["wait", 15_000],
-    ["goto", "https://console.example.test/", "domcontentloaded"]
+    ["goto", "https://console.example.test/", "domcontentloaded"],
+    ["headers", false]
   ]);
   assert.deepEqual(rotated, expected);
 });
@@ -195,12 +207,13 @@ test("live reload adopts only the exact successful Console resume rotation", asy
     csrfToken: "B".repeat(43)
   });
   const events = [];
+  let currentHeaders = {};
   let matchResponse;
   let resolveResponse;
   const responsePromise = new Promise((resolve) => { resolveResponse = resolve; });
   const response = {
     ok: () => true,
-    request: () => ({ method: () => "POST" }),
+    request: () => ({ method: () => "POST", headers: () => currentHeaders }),
     url: () => "https://console.example.test/api/auth/session/resume",
     json: async () => ({
       csrf_token: expected.csrfToken,
@@ -213,6 +226,10 @@ test("live reload adopts only the exact successful Console resume rotation", asy
     })
   };
   const page = {
+    async setExtraHTTPHeaders(headers) {
+      currentHeaders = headers;
+      events.push(["headers", Object.hasOwn(headers, "agentpass-p0b-session-correlation")]);
+    },
     waitForResponse(predicate, options) {
       events.push(["wait", options.timeout]);
       matchResponse = predicate;
@@ -222,12 +239,17 @@ test("live reload adopts only the exact successful Console resume rotation", asy
       events.push(["reload", options.waitUntil]);
       assert.equal(matchResponse({
         ok: () => true,
-        request: () => ({ method: () => "POST" }),
+        request: () => ({ method: () => "POST", headers: () => currentHeaders }),
         url: () => "https://console.example.test/api/auth/session"
       }), false);
       assert.equal(matchResponse({
         ok: () => false,
-        request: () => ({ method: () => "POST" }),
+        request: () => ({ method: () => "POST", headers: () => currentHeaders }),
+        url: () => "https://console.example.test/api/auth/session/resume"
+      }), false);
+      assert.equal(matchResponse({
+        ok: () => true,
+        request: () => ({ method: () => "POST", headers: () => ({}) }),
         url: () => "https://console.example.test/api/auth/session/resume"
       }), false);
       assert.equal(matchResponse(response), true);
@@ -238,8 +260,10 @@ test("live reload adopts only the exact successful Console resume rotation", asy
   const rotated = await awaitConsoleSessionReload(page, descriptor, organizationId);
 
   assert.deepEqual(events, [
+    ["headers", true],
     ["wait", 15_000],
-    ["reload", "domcontentloaded"]
+    ["reload", "domcontentloaded"],
+    ["headers", false]
   ]);
   assert.deepEqual(rotated, expected);
 });

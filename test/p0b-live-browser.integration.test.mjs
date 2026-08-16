@@ -162,29 +162,33 @@ test("P0-B live browser role, WebAuthn, and recent-auth matrix", { skip: !enable
 
   for (const failure of ["stale", "replayed", "cross_operation", "cross_tenant"]) {
     await scenario(t, `owner ${failure} authorization is rejected by the real Cloud boundary`, async ({ fixture, open }) => {
-      const page = await open("owner");
+      const page = await open("owner", { safeOpenPrefix: "P0B_SAFE_OWNER_OPEN" });
       const targetId = fixture.devices.find(({ label }) => label === "反映待ち Mac")?.deviceId;
+      if (failure === "stale" && !UUID.test(targetId ?? "")) assert.fail("P0B_SAFE_STALE_AUTH_TARGET_FAILED");
       assert.match(targetId ?? "", UUID);
+      if (failure === "stale") {
+        let outcome;
+        try {
+          outcome = await fixture.withRecentAuth(page, "device.refresh.request", async ({ authorizationId, csrfToken }) => {
+            try { await fixture.invalidateRecentAuth(page, failure); }
+            catch { return Object.freeze({ phase: "invalidation_failed", status: null }); }
+            try {
+              const status = await requestRefreshStatus(page, { authorizationId, csrfToken, targetId });
+              return Object.freeze({ phase: "response", status });
+            } catch {
+              return Object.freeze({ phase: "fetch_failed", status: null });
+            }
+          });
+        } catch {
+          assert.fail("P0B_SAFE_STALE_AUTH_CEREMONY_FAILED");
+        }
+        const marker = staleAuthorizationFailureMarker(outcome);
+        if (marker !== null) assert.fail(marker);
+        return;
+      }
       const responseStatus = await fixture.withRecentAuth(page, "device.refresh.request", async ({ authorizationId, csrfToken }) => {
         await fixture.invalidateRecentAuth(page, failure);
-        return page.evaluate(async ({ authorizationId, csrfToken, targetId }) => {
-          const response = await fetch("/api/console?operation=device.refresh.request", {
-            method: "POST",
-            headers: {
-              accept: "application/json",
-              "content-type": "application/json",
-              "agentpass-csrf": csrfToken,
-              "agentpass-recent-auth": authorizationId,
-              "idempotency-key": crypto.randomUUID()
-            },
-            credentials: "same-origin",
-            cache: "no-store",
-            redirect: "error",
-            body: JSON.stringify({ target_id: targetId })
-          });
-          await response.arrayBuffer();
-          return response.status;
-        }, { authorizationId, csrfToken, targetId });
+        return requestRefreshStatus(page, { authorizationId, csrfToken, targetId });
       });
       assert.equal(responseStatus, 401);
     });
@@ -202,6 +206,38 @@ test("P0-B live browser role, WebAuthn, and recent-auth matrix", { skip: !enable
 
   if (scenarioFilter !== "" && selectedScenarioCount === 0) assert.fail("P0B_SAFE_SCENARIO_NOT_FOUND");
 });
+
+async function requestRefreshStatus(page, { authorizationId, csrfToken, targetId }) {
+  return page.evaluate(async ({ authorizationId, csrfToken, targetId }) => {
+    const response = await fetch("/api/console?operation=device.refresh.request", {
+      method: "POST",
+      headers: {
+        accept: "application/json",
+        "content-type": "application/json",
+        "agentpass-csrf": csrfToken,
+        "agentpass-recent-auth": authorizationId,
+        "idempotency-key": crypto.randomUUID()
+      },
+      credentials: "same-origin",
+      cache: "no-store",
+      redirect: "error",
+      body: JSON.stringify({ target_id: targetId })
+    });
+    await response.arrayBuffer();
+    return response.status;
+  }, { authorizationId, csrfToken, targetId });
+}
+
+export function staleAuthorizationFailureMarker(outcome) {
+  if (outcome?.phase === "invalidation_failed") return "P0B_SAFE_STALE_AUTH_INVALIDATION_FAILED";
+  if (outcome?.phase === "fetch_failed") return "P0B_SAFE_STALE_AUTH_FETCH_FAILED";
+  if (outcome?.phase !== "response" || !Number.isInteger(outcome.status)) return "P0B_SAFE_STALE_AUTH_RESPONSE_FAILED";
+  if (outcome.status === 401) return null;
+  if (outcome.status >= 200 && outcome.status < 300) return "P0B_SAFE_STALE_AUTH_HTTP_2XX_FAILED";
+  if (outcome.status >= 400 && outcome.status < 500) return "P0B_SAFE_STALE_AUTH_HTTP_4XX_FAILED";
+  if (outcome.status >= 500 && outcome.status < 600) return "P0B_SAFE_STALE_AUTH_HTTP_5XX_FAILED";
+  return "P0B_SAFE_STALE_AUTH_HTTP_OTHER_FAILED";
+}
 
 async function scenario(parent, name, callback) {
   if (scenarioFilter !== "" && !name.includes(scenarioFilter)) return;

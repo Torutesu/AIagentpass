@@ -11,6 +11,7 @@ const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-
 const TOKEN = /^[A-Za-z0-9_-]{43}$/u;
 const OPERATION = /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$/u;
 const SESSION_PATH = "/api/auth/session";
+const SESSION_CORRELATION_HEADER = "agentpass-p0b-session-correlation";
 const DEFAULT_STARTUP_TIMEOUT_MS = 90_000;
 const DEFAULT_CLEANUP_TIMEOUT_MS = 15_000;
 const USER_EMAILS = Object.freeze({
@@ -638,29 +639,35 @@ export async function seedP0BHumanBrowserDatabase({ pool, organizationId, refres
 }
 
 export async function awaitConsoleSessionRotation(page, target, descriptor, organizationId) {
-  const applicationSession = page.waitForResponse((candidate) => {
-    if (!candidate.ok() || candidate.request().method() !== "POST") return false;
-    const pathname = new URL(candidate.url()).pathname;
-    return pathname === "/api/auth/session/resume" || pathname === SESSION_PATH;
-  }, { timeout: 15_000 });
-  const [applicationSessionResponse] = await Promise.all([
-    applicationSession,
-    page.goto(target.toString(), { waitUntil: "domcontentloaded" }),
-  ]);
-  const applicationSessionBody = await applicationSessionResponse.json();
-  return validateBootstrap(applicationSessionBody, descriptor, organizationId);
+  return awaitCorrelatedConsoleSession(page, descriptor, organizationId, {
+    paths: new Set(["/api/auth/session/resume", SESSION_PATH]),
+    navigate: () => page.goto(target.toString(), { waitUntil: "domcontentloaded" })
+  });
 }
 
 export async function awaitConsoleSessionReload(page, descriptor, organizationId) {
-  const applicationSession = page.waitForResponse((candidate) => {
-    if (!candidate.ok() || candidate.request().method() !== "POST") return false;
-    return new URL(candidate.url()).pathname === "/api/auth/session/resume";
-  }, { timeout: 15_000 });
-  const [applicationSessionResponse] = await Promise.all([
-    applicationSession,
-    page.reload({ waitUntil: "domcontentloaded" }),
-  ]);
-  return validateBootstrap(await applicationSessionResponse.json(), descriptor, organizationId);
+  return awaitCorrelatedConsoleSession(page, descriptor, organizationId, {
+    paths: new Set(["/api/auth/session/resume"]),
+    navigate: () => page.reload({ waitUntil: "domcontentloaded" })
+  });
+}
+
+async function awaitCorrelatedConsoleSession(page, descriptor, organizationId, { paths, navigate }) {
+  const correlation = crypto.randomUUID();
+  const identity = identityHeaders(descriptor);
+  await page.setExtraHTTPHeaders({ ...identity, [SESSION_CORRELATION_HEADER]: correlation });
+  try {
+    const applicationSession = page.waitForResponse((candidate) => {
+      if (!candidate.ok() || candidate.request().method() !== "POST") return false;
+      const requestHeaders = candidate.request().headers();
+      if (requestHeaders[SESSION_CORRELATION_HEADER] !== correlation) return false;
+      return paths.has(new URL(candidate.url()).pathname);
+    }, { timeout: 15_000 });
+    const [applicationSessionResponse] = await Promise.all([applicationSession, navigate()]);
+    return validateBootstrap(await applicationSessionResponse.json(), descriptor, organizationId);
+  } finally {
+    await page.setExtraHTTPHeaders(identity);
+  }
 }
 
 function publicSeed(seed) {
