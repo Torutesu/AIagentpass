@@ -372,7 +372,7 @@ async function insertSessionAndChallenge(pool, { sessionId, challengeId, memberI
     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$8,$9)`, [sessionId, memberId, organizationId, membershipId, role, tokenHash, csrfTokenHash, CREATED_AT, EXPIRES_AT]);
   await pool.query(`INSERT INTO webauthn_challenges
     (id,session_id,member_id,organization_id,ceremony,operation,challenge_hash,created_at,expires_at,rp_id,origin,user_verification,status)
-    VALUES ($1,$2,$3,$4,'authentication',$5,$6,$7,$8,'console.agentpass.test','https://console.agentpass.test','required','pending')`, [challengeId, sessionId, memberId, organizationId, operation, Buffer.alloc(32, byte + 2), CREATED_AT, EXPIRES_AT]);
+    VALUES ($1,$2,$3,$4,'authentication',$5,$6,$7,$8,'console.agentpass.test','https://console.agentpass.test','required','pending')`, [challengeId, sessionId, memberId, organizationId, operation, createHash("sha256").update(`h1-3-challenge:${challengeId}`).digest(), CREATED_AT, EXPIRES_AT]);
   await pool.query(`UPDATE human_sessions SET recent_auth_at=$2,recent_auth_challenge_id=$3,
     recent_auth_organization_id=$4,recent_auth_operation=$5 WHERE id=$1`, [sessionId, CREATED_AT, challengeId, organizationId, operation]);
 }

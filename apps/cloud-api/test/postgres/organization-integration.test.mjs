@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { generateKeyPairSync, randomUUID } from "node:crypto";
+import { createHash, generateKeyPairSync, randomUUID } from "node:crypto";
 import test from "node:test";
 import { Pool } from "pg";
 
@@ -142,7 +142,7 @@ test("Organization P1 is atomic and replay-safe across real PostgreSQL connectio
       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,1)`, [sessionId, memberId, organizationId, membershipId, role, Buffer.alloc(32, byte), Buffer.alloc(32, byte + 1), NOW, EXPIRES]);
     await pool.query(`INSERT INTO webauthn_challenges
       (id,session_id,member_id,organization_id,ceremony,operation,challenge_hash,created_at,expires_at,rp_id,origin,user_verification,status)
-      VALUES ($1,$2,$3,$4,'authentication',$5,$6,$7,$8,'app.ai-agentpass.com','https://app.ai-agentpass.com','required','pending')`, [challengeId, sessionId, memberId, organizationId, operation, Buffer.alloc(32, byte + 2), NOW, EXPIRES]);
+      VALUES ($1,$2,$3,$4,'authentication',$5,$6,$7,$8,'app.ai-agentpass.com','https://app.ai-agentpass.com','required','pending')`, [challengeId, sessionId, memberId, organizationId, operation, createHash("sha256").update(`organization-integration-challenge:${challengeId}`).digest(), NOW, EXPIRES]);
     await pool.query(`UPDATE human_sessions SET recent_auth_at=$2,recent_auth_challenge_id=$3,
       recent_auth_organization_id=$4,recent_auth_operation=$5,recent_auth_consumed_at=NULL
       WHERE id=$1`, [sessionId, NOW, challengeId, organizationId, operation]);
