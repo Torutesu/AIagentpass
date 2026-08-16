@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { keyboardOutcomeFailureMarker } from "./p0b-live-browser.integration.test.mjs";
+import { keyboardOutcomeFailureMarker, keyboardRecentAuthFailureMarker } from "./p0b-live-browser.integration.test.mjs";
 
 function response(status, payload, parse = true) {
   return {
@@ -52,4 +52,16 @@ test("P0-B keyboard diagnostics separate transport, 2xx contract, and UI parsing
   assert.equal(await keyboardOutcomeFailureMarker(response(202, null, false)), "P0B_SAFE_KEYBOARD_OUTCOME_2XX_RESPONSE_CONTRACT_FAILED");
   assert.equal(await keyboardOutcomeFailureMarker(response(202, { refresh_request: {} })), "P0B_SAFE_KEYBOARD_OUTCOME_2XX_RESPONSE_CONTRACT_FAILED");
   assert.equal(await keyboardOutcomeFailureMarker(response(202, validPayload)), "P0B_SAFE_KEYBOARD_OUTCOME_2XX_UI_PARSE_FAILED");
+});
+
+test("P0-B keyboard diagnostics localize pre-refresh recent-auth failures without response bodies", () => {
+  assert.equal(keyboardRecentAuthFailureMarker(), "P0B_SAFE_KEYBOARD_AUTH_OPTIONS_NO_REQUEST_FAILED");
+  assert.equal(keyboardRecentAuthFailureMarker({ optionsObserved: true, optionsFailed: true }), "P0B_SAFE_KEYBOARD_AUTH_OPTIONS_TRANSPORT_FAILED");
+  assert.equal(keyboardRecentAuthFailureMarker({ optionsObserved: true, optionsStatus: 403 }), "P0B_SAFE_KEYBOARD_AUTH_OPTIONS_HTTP_4XX_FAILED");
+  assert.equal(keyboardRecentAuthFailureMarker({ optionsObserved: true, optionsStatus: 503 }), "P0B_SAFE_KEYBOARD_AUTH_OPTIONS_HTTP_5XX_FAILED");
+  assert.equal(keyboardRecentAuthFailureMarker({ optionsObserved: true, optionsStatus: 200 }), "P0B_SAFE_KEYBOARD_AUTH_VERIFY_NO_REQUEST_FAILED");
+  assert.equal(keyboardRecentAuthFailureMarker({ optionsObserved: true, optionsStatus: 200, verifyObserved: true, verifyFailed: true }), "P0B_SAFE_KEYBOARD_AUTH_VERIFY_TRANSPORT_FAILED");
+  assert.equal(keyboardRecentAuthFailureMarker({ optionsObserved: true, optionsStatus: 200, verifyObserved: true, verifyStatus: 401 }), "P0B_SAFE_KEYBOARD_AUTH_VERIFY_HTTP_4XX_FAILED");
+  assert.equal(keyboardRecentAuthFailureMarker({ optionsObserved: true, optionsStatus: 200, verifyObserved: true, verifyStatus: 502 }), "P0B_SAFE_KEYBOARD_AUTH_VERIFY_HTTP_5XX_FAILED");
+  assert.equal(keyboardRecentAuthFailureMarker({ optionsObserved: true, optionsStatus: 200, verifyObserved: true, verifyStatus: 200 }), "P0B_SAFE_KEYBOARD_AUTH_VERIFIED_NO_REFRESH_FAILED");
 });

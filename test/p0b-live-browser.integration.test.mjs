@@ -33,11 +33,30 @@ test("P0-B live browser role, WebAuthn, and recent-auth matrix", { skip: !enable
     } catch { assert.fail("P0B_SAFE_KEYBOARD_FOCUS_FAILED"); }
     let refreshRequestObserved = false;
     let refreshRequestFailed = false;
+    const recentAuthObservation = {
+      optionsObserved: false,
+      optionsFailed: false,
+      optionsStatus: null,
+      verifyObserved: false,
+      verifyFailed: false,
+      verifyStatus: null,
+    };
     page.on("request", (request) => {
       if (isKeyboardRefreshRequest(request)) refreshRequestObserved = true;
+      const phase = keyboardRecentAuthPhase(request);
+      if (phase === "options") recentAuthObservation.optionsObserved = true;
+      if (phase === "verify") recentAuthObservation.verifyObserved = true;
     });
     page.on("requestfailed", (request) => {
       if (isKeyboardRefreshRequest(request)) refreshRequestFailed = true;
+      const phase = keyboardRecentAuthPhase(request);
+      if (phase === "options") recentAuthObservation.optionsFailed = true;
+      if (phase === "verify") recentAuthObservation.verifyFailed = true;
+    });
+    page.on("response", (response) => {
+      const phase = keyboardRecentAuthPhase(response.request());
+      if (phase === "options") recentAuthObservation.optionsStatus = response.status();
+      if (phase === "verify") recentAuthObservation.verifyStatus = response.status();
     });
     const refreshResponsePromise = page.waitForResponse((response) => {
       return isKeyboardRefreshRequest(response.request());
@@ -51,7 +70,7 @@ test("P0-B live browser role, WebAuthn, and recent-auth matrix", { skip: !enable
     try {
       assert.match(await requireWakeStatus(card, "P0B_SAFE_KEYBOARD_OUTCOME"), /依頼を受け付けました|既存の依頼へ統合し/u);
     } catch (error) {
-      assert.fail(await keyboardOutcomeFailureMarker(refreshResponse, { refreshRequestObserved, refreshRequestFailed }));
+      assert.fail(await keyboardOutcomeFailureMarker(refreshResponse, { refreshRequestObserved, refreshRequestFailed, recentAuthObservation }));
     }
   });
 
@@ -317,7 +336,9 @@ export async function keyboardOutcomeFailureMarker(response, observation = {}) {
   if (response === null) {
     if (observation.refreshRequestFailed === true) return "P0B_SAFE_KEYBOARD_OUTCOME_TRANSPORT_FAILED";
     if (observation.refreshRequestObserved === true) return "P0B_SAFE_KEYBOARD_OUTCOME_RESPONSE_TIMEOUT_FAILED";
-    return "P0B_SAFE_KEYBOARD_OUTCOME_NO_REQUEST_FAILED";
+    return Object.hasOwn(observation, "recentAuthObservation")
+      ? keyboardRecentAuthFailureMarker(observation.recentAuthObservation)
+      : "P0B_SAFE_KEYBOARD_OUTCOME_NO_REQUEST_FAILED";
   }
   const status = response.status();
   const statusMarker = new Map([
@@ -347,6 +368,26 @@ export async function keyboardOutcomeFailureMarker(response, observation = {}) {
   return "P0B_SAFE_KEYBOARD_OUTCOME_2XX_UI_PARSE_FAILED";
 }
 
+export function keyboardRecentAuthFailureMarker(observation) {
+  if (!observation || observation.optionsObserved !== true) return "P0B_SAFE_KEYBOARD_AUTH_OPTIONS_NO_REQUEST_FAILED";
+  if (observation.optionsFailed === true) return "P0B_SAFE_KEYBOARD_AUTH_OPTIONS_TRANSPORT_FAILED";
+  const optionsFailure = keyboardPhaseStatusMarker("OPTIONS", observation.optionsStatus);
+  if (optionsFailure !== null) return optionsFailure;
+  if (observation.verifyObserved !== true) return "P0B_SAFE_KEYBOARD_AUTH_VERIFY_NO_REQUEST_FAILED";
+  if (observation.verifyFailed === true) return "P0B_SAFE_KEYBOARD_AUTH_VERIFY_TRANSPORT_FAILED";
+  const verifyFailure = keyboardPhaseStatusMarker("VERIFY", observation.verifyStatus);
+  if (verifyFailure !== null) return verifyFailure;
+  return "P0B_SAFE_KEYBOARD_AUTH_VERIFIED_NO_REFRESH_FAILED";
+}
+
+function keyboardPhaseStatusMarker(phase, status) {
+  if (!Number.isInteger(status)) return `P0B_SAFE_KEYBOARD_AUTH_${phase}_RESPONSE_MISSING_FAILED`;
+  if (status >= 200 && status < 300) return null;
+  if (status >= 400 && status < 500) return `P0B_SAFE_KEYBOARD_AUTH_${phase}_HTTP_4XX_FAILED`;
+  if (status >= 500 && status < 600) return `P0B_SAFE_KEYBOARD_AUTH_${phase}_HTTP_5XX_FAILED`;
+  return `P0B_SAFE_KEYBOARD_AUTH_${phase}_HTTP_OTHER_FAILED`;
+}
+
 function isKeyboardRefreshResponseContract(value) {
   const opaqueID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/u;
   const utcInstant = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{3})?Z$/u;
@@ -368,6 +409,14 @@ function isKeyboardRefreshRequest(request) {
   return request.method() === "POST"
     && url.pathname === "/api/console"
     && url.searchParams.get("operation") === "device.refresh.request";
+}
+
+function keyboardRecentAuthPhase(request) {
+  if (request.method() !== "POST") return null;
+  const pathname = new URL(request.url()).pathname;
+  if (pathname === "/api/auth/webauthn/options") return "options";
+  if (pathname === "/api/auth/webauthn/verify") return "verify";
+  return null;
 }
 
 function deviceCard(page, name) { return page.getByRole("article").filter({ has: page.getByRole("heading", { name }) }); }
