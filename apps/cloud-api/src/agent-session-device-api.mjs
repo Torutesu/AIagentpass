@@ -459,7 +459,6 @@ function assertGrantVerification(value, grant) {
   if (!value || typeof value !== "object" || Array.isArray(value) || value.verified === false) {
     throw new AgentSessionDeviceHttpError(AGENT_SESSION_DEVICE_HTTP_ERROR_CODES.GRANT_NOT_AUTHORIZED, { status: 403 });
   }
-  if (value.verified === true && value.grant === undefined && value.verified_grant === undefined) return;
   const verifiedGrant = value.grant ?? value.verified_grant ?? (value.statement && value.signature ? value : undefined);
   if (!verifiedGrant || !isObject(verifiedGrant)) throw new AgentSessionDeviceHttpError(AGENT_SESSION_DEVICE_HTTP_ERROR_CODES.GRANT_NOT_AUTHORIZED, { status: 403 });
   try {

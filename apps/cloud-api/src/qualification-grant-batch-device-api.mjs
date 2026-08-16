@@ -412,11 +412,9 @@ function mapGrantVerificationError(error) {
 }
 
 function assertGrantVerification(value, grant, batch, step, clock) {
-  if (value === true) return;
   if (!value || typeof value !== "object" || Array.isArray(value) || value.verified === false) {
     throw new QualificationGrantBatchDeviceHttpError(QUALIFICATION_GRANT_BATCH_DEVICE_HTTP_ERROR_CODES.GRANT_NOT_AUTHORIZED, { status: 403 });
   }
-  if (value.verified === true && value.grant === undefined && value.verified_grant === undefined) return;
   const verifiedGrant = value.grant ?? value.verified_grant ?? (value.statement && value.signature ? value : undefined);
   if (!verifiedGrant || !isObject(verifiedGrant)) {
     throw new QualificationGrantBatchDeviceHttpError(QUALIFICATION_GRANT_BATCH_DEVICE_HTTP_ERROR_CODES.GRANT_NOT_AUTHORIZED, { status: 403 });

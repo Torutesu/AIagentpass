@@ -220,7 +220,7 @@ function assertError(result, status, code) {
 }
 
 test("authenticates exact raw request before interpreting canonical JSON and returns a closed no-store batch", async () => {
-  const f = await fixture({ grantVerifier: async () => true });
+  const f = await fixture({ grantVerifier: async (grant) => grant });
   const bytes = body();
   const headers = { "AgentPass-Device": "signed", "AgentPass-Nonce": "nonce" };
   const result = await f.api.handle(request({ bodyBytes: bytes, headers }));
@@ -266,6 +266,18 @@ test("authenticates exact raw request before interpreting canonical JSON and ret
   assert.equal(result.body.batch.steps.every((step) => step.grant.statement.device_id === IDS.device), true);
   assert.equal(result.body.batch.steps.every((step) => step.grant.statement.agent_id === IDS.agent), true);
   assert.equal(result.body.batch.steps.every((step) => step.grant.statement.expires_at === result.body.batch.expires_at), true);
+});
+
+test("rejects unbound or substituted Grant verifier success results", async () => {
+  for (const [index, grantVerifier] of [
+    async () => true,
+    async () => ({ verified: true }),
+    async (grant) => ({ verified: true, grant: { ...grant, statement: { ...grant.statement, grant_id: IDS.otherDevice } } })
+  ].entries()) {
+    const f = await fixture({ grantVerifier });
+    const result = await f.api.handle(request({ bodyBytes: body(), headers: { "x-device-auth": `signed-${index}` } }));
+    assertError(result, 403, QUALIFICATION_GRANT_BATCH_DEVICE_HTTP_ERROR_CODES.GRANT_NOT_AUTHORIZED);
+  }
 });
 
 test("rejects noncanonical, duplicate, unknown, and malformed public request fields after device auth", async () => {
