@@ -53,6 +53,7 @@ const HUMAN_AUDIT_EXPORT_VERIFY_PATH = new RegExp(`^/v1/organizations/(?<organiz
 const UUID = "([0-9a-fA-F-]{36})";
 const UUID_VALUE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu;
 const AGENT_SESSION_DEVICE_CONSUME_PATH = /^\/v1\/organizations\/(?<organizationId>[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})\/devices\/(?<deviceId>[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})\/agent-session-grants\/(?<grantId>[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})\/consume$/u;
+const AGENT_SESSION_DEVICE_SIGNING_CAPABILITY_PATH = /^\/v1\/organizations\/(?<organizationId>[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})\/devices\/(?<deviceId>[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})\/agent-sessions\/(?<sessionId>[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})\/signing-capabilities$/u;
 const QUALIFICATION_GRANT_BATCH_DEVICE_CLAIM_PATH = /^\/v1\/organizations\/(?<organizationId>[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})\/devices\/(?<deviceId>[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})\/qualification-grant-batches\/(?<batchId>[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})\/claim$/u;
 const RFC3339_UTC = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?Z$/u;
 const RFC3339_MILLISECONDS_UTC = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/u;
@@ -184,7 +185,9 @@ export function createCloudApi({ store, tokenRecords = [], bundleSigner, capabil
         // injected boundary, not Cloud authentication, owns the wire format.
         return await platformPromotionHttpApi.handle(request, response);
       }
-      const agentSessionRoute = request.method === "POST" ? AGENT_SESSION_DEVICE_CONSUME_PATH.exec(request.url) : null;
+      const agentSessionRoute = request.method === "POST"
+        ? AGENT_SESSION_DEVICE_CONSUME_PATH.exec(request.url) ?? AGENT_SESSION_DEVICE_SIGNING_CAPABILITY_PATH.exec(request.url)
+        : null;
       if (agentSessionDeviceApi && agentSessionRoute) {
         const admissionDecision = await acquireRateLimit(admission, {
           tenantId: agentSessionRoute.groups.organizationId,

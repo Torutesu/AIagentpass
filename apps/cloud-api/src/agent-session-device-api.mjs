@@ -5,6 +5,7 @@ import { validateScope } from "../../../packages/capability/src/index.mjs";
 import { canonicalJson } from "../../../packages/protocol/src/index.mjs";
 
 const DEVICE_ROUTE = "/v1/organizations/{organization_id}/devices/{device_id}/agent-session-grants/{grant_id}/consume";
+const SIGNING_CAPABILITY_ROUTE = "/v1/organizations/{organization_id}/devices/{device_id}/agent-sessions/{session_id}/signing-capabilities";
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u;
 const SHA256 = /^[0-9a-f]{64}$/u;
 const BASE64URL_SIGNATURE = /^[A-Za-z0-9_-]{86}$/u;
@@ -39,7 +40,10 @@ const LEASE_KEYS = new Set([
   "not_before", "expires_at", "control_sequence", "authority_generation"
 ]);
 
-export const AGENT_SESSION_DEVICE_HTTP_PATHS = Object.freeze({ consume: DEVICE_ROUTE });
+export const AGENT_SESSION_DEVICE_HTTP_PATHS = Object.freeze({
+  consume: DEVICE_ROUTE,
+  issueSigningCapability: SIGNING_CAPABILITY_ROUTE
+});
 
 export const AGENT_SESSION_DEVICE_HTTP_ERROR_CODES = Object.freeze({
   INVALID_REQUEST: "invalid_request",
@@ -96,6 +100,9 @@ export function createAgentSessionDeviceApi({
   verifyDeviceRequest,
   grantVerifier,
   repository,
+  signingCapabilityApi = undefined,
+  agentSessionSigningCapabilityApi = undefined,
+  signingCapabilityHandler = undefined,
   rateLimiter = undefined,
   now = () => Date.now(),
   requestIdFactory = () => crypto.randomUUID(),
@@ -103,6 +110,9 @@ export function createAgentSessionDeviceApi({
 } = {}) {
   const deviceVerifier = resolveVerifier(deviceRequestVerifier ?? deviceRequestAuthenticator ?? verifyDeviceRequest, "deviceRequestVerifier");
   const signedGrantVerifier = resolveVerifier(grantVerifier, "grantVerifier");
+  const signingCapabilityDelegate = resolveSigningCapabilityDelegate(
+    signingCapabilityHandler ?? signingCapabilityApi ?? agentSessionSigningCapabilityApi
+  );
   if (!repository || typeof repository.consumeAgentSessionGrant !== "function") {
     throw new TypeError("repository must expose consumeAgentSessionGrant()");
   }
@@ -132,17 +142,24 @@ export function createAgentSessionDeviceApi({
       try {
         // This is deliberately the first operation involving the body. A
         // verifier may hash/sign these exact bytes and the exact raw path.
+        const authenticationOptions = {
+          organization_id: route.organizationId,
+          organizationId: route.organizationId,
+          now: clock,
+          includeAuthenticationMetadata: true,
+          ...(route.kind === "signing-capability" ? {
+            device_id: route.deviceId,
+            deviceId: route.deviceId,
+            session_id: route.sessionId,
+            sessionId: route.sessionId
+          } : {})
+        };
         authenticated = await deviceVerifier({
           method: request.method,
           path: request.path,
           body: Buffer.from(request.body),
           headers: request.headers
-        }, {
-          organization_id: route.organizationId,
-          organizationId: route.organizationId,
-          now: clock,
-          includeAuthenticationMetadata: true
-        });
+        }, authenticationOptions);
       } catch (error) {
         throw mapDeviceAuthenticationError(error);
       }
@@ -150,13 +167,18 @@ export function createAgentSessionDeviceApi({
       if (rateLimiter) {
         let decision;
         try {
-          decision = await rateLimiter.acquire({ tenantId: route.organizationId, principalType: "device", principalId: route.deviceId });
+          decision = await rateLimiter.acquire(rateLimitInput(route));
         } catch (error) {
           if (isRateLimitCode(error?.code) || error?.status === 429) throw mapRepositoryError(error);
           throw new AgentSessionDeviceHttpError(AGENT_SESSION_DEVICE_HTTP_ERROR_CODES.UNAVAILABLE, { cause: error });
         }
         if (!validRateLimitDecision(decision)) throw new AgentSessionDeviceHttpError(AGENT_SESSION_DEVICE_HTTP_ERROR_CODES.UNAVAILABLE);
         if (!decision.allowed) throw new AgentSessionDeviceHttpError(AGENT_SESSION_DEVICE_HTTP_ERROR_CODES.RATE_LIMITED, { status: 429, retryAfterSeconds: decision.retryAfterSeconds });
+      }
+
+      if (route.kind === "signing-capability") {
+        if (!signingCapabilityDelegate) throw unavailable();
+        return await dispatchSigningCapability(signingCapabilityDelegate, request, route, authenticated, clock);
       }
 
       const body = parseBody(request.body, maxBodyBytes);
@@ -234,7 +256,8 @@ export function createAgentSessionDeviceApi({
   return Object.freeze({
     handle,
     paths: AGENT_SESSION_DEVICE_HTTP_PATHS,
-    route: DEVICE_ROUTE
+    route: DEVICE_ROUTE,
+    routes: AGENT_SESSION_DEVICE_HTTP_PATHS
   });
 }
 
@@ -244,6 +267,61 @@ function resolveVerifier(value, label) {
   if (value && typeof value.verifyGrant === "function") return value.verifyGrant.bind(value);
   if (value && typeof value.authenticate === "function") return value.authenticate.bind(value);
   throw new TypeError(`${label} must be a function or expose verify()/authenticate()`);
+}
+
+function resolveSigningCapabilityDelegate(value) {
+  if (value === undefined) return undefined;
+  if (typeof value === "function") return value;
+  if (value && typeof value.handleAuthenticated === "function") return value.handleAuthenticated.bind(value);
+  throw new TypeError("signingCapabilityApi must expose handleAuthenticated()");
+}
+
+function rateLimitInput(route) {
+  return route.kind === "signing-capability"
+    ? { tenantId: route.organizationId, principalType: "device", principalId: route.deviceId, sessionId: route.sessionId }
+    : { tenantId: route.organizationId, principalType: "device", principalId: route.deviceId };
+}
+
+async function dispatchSigningCapability(delegate, request, route, authenticated, clock) {
+  const delegatedRequest = Object.freeze({
+    method: request.method,
+    url: request.path,
+    path: request.path,
+    originalUrl: request.path,
+    headers: request.headers,
+    body: Buffer.from(request.body)
+  });
+  const context = Object.freeze({
+    organization_id: route.organizationId,
+    device_id: route.deviceId,
+    session_id: route.sessionId,
+    now: clock,
+    authenticated_device: publicDeviceIdentity(authenticated)
+  });
+  let delegated;
+  try {
+    delegated = await delegate(delegatedRequest, context);
+  } catch (error) {
+    throw unavailableWithCause(error);
+  }
+  if (!isResponseLike(delegated)) throw unavailable();
+  return delegated;
+}
+
+function isResponseLike(value) {
+  return isObject(value) && Number.isSafeInteger(value.status) && value.status >= 100 && value.status <= 599
+    && isObject(value.headers) && isObject(value.body);
+}
+
+function publicDeviceIdentity(value) {
+  const principal = value?.principal ?? value?.device ?? value;
+  const organizationId = principal?.organization_id ?? principal?.organizationId;
+  const deviceId = principal?.device_id ?? principal?.deviceId;
+  return Object.freeze({
+    organization_id: organizationId,
+    device_id: deviceId,
+    ...(principal?.session_id ?? principal?.sessionId ? { session_id: principal.session_id ?? principal.sessionId } : {})
+  });
 }
 
 function validRateLimitDecision(value) {
@@ -297,8 +375,15 @@ function toBytes(value) {
 }
 
 function resolveRoute(path) {
+  const signingCapabilityMatch = /^\/v1\/organizations\/([0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})\/devices\/([0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})\/agent-sessions\/([0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})\/signing-capabilities$/u.exec(path);
+  if (signingCapabilityMatch) return Object.freeze({
+    kind: "signing-capability",
+    organizationId: signingCapabilityMatch[1],
+    deviceId: signingCapabilityMatch[2],
+    sessionId: signingCapabilityMatch[3]
+  });
   const match = /^\/v1\/organizations\/([0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})\/devices\/([0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})\/agent-session-grants\/([0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})\/consume$/u.exec(path);
-  return match ? Object.freeze({ organizationId: match[1], deviceId: match[2], grantId: match[3] }) : undefined;
+  return match ? Object.freeze({ kind: "grant-consume", organizationId: match[1], deviceId: match[2], grantId: match[3] }) : undefined;
 }
 
 function parseBody(bytes, maxBodyBytes) {
@@ -355,7 +440,14 @@ function assertAuthenticatedDevice(value, route) {
   const deviceId = principal?.device_id ?? principal?.deviceId;
   const organizationId = principal?.organization_id ?? principal?.organizationId;
   if (typeof deviceId !== "string") throw new AgentSessionDeviceHttpError(AGENT_SESSION_DEVICE_HTTP_ERROR_CODES.DEVICE_AUTH_FAILED, { status: 401 });
+  if (route.kind === "signing-capability" && typeof organizationId !== "string") {
+    throw new AgentSessionDeviceHttpError(AGENT_SESSION_DEVICE_HTTP_ERROR_CODES.DEVICE_AUTH_FAILED, { status: 401 });
+  }
   if (deviceId !== route.deviceId || (organizationId !== undefined && organizationId !== route.organizationId)) {
+    throw new AgentSessionDeviceHttpError(AGENT_SESSION_DEVICE_HTTP_ERROR_CODES.AUDIENCE_MISMATCH, { status: 403 });
+  }
+  const sessionId = principal?.session_id ?? principal?.sessionId;
+  if (route.kind === "signing-capability" && sessionId !== undefined && sessionId !== route.sessionId) {
     throw new AgentSessionDeviceHttpError(AGENT_SESSION_DEVICE_HTTP_ERROR_CODES.AUDIENCE_MISMATCH, { status: 403 });
   }
 }
