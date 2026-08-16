@@ -61,6 +61,11 @@ function createSharedFixture({ lookupState = "committed", lookupSignature = unde
         calls.push("start");
         return cloneRow(row);
       },
+      async fenceSignature(input) {
+        const row = shared.get(input.operation_id);
+        if (!row || row.status !== "pending" || row.claim_token !== input.claim_token) throw Object.assign(new Error("claim lost"), { code: REPOSITORY_CODES.SIGNING_CLAIM_LOST });
+        return cloneRow(row);
+      },
       async commitSignature(input) {
         const row = shared.get(input.operation_id);
         if (!row || row.status !== "pending" || row.claim_token !== input.claim_token) throw Object.assign(new Error("claim lost"), { code: REPOSITORY_CODES.SIGNING_CLAIM_LOST });

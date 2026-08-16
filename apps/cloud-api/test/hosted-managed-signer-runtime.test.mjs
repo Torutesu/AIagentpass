@@ -26,6 +26,7 @@ function fixture({ existing, metadataKeyId = "agent-key-1" } = {}) {
     async initialize(input) { calls.push("initialize"); snapshot = input.snapshot; return snapshot; },
     async reserveSignature() { throw new Error("not used"); },
     async startSignature() { throw new Error("not used"); },
+    async fenceSignature() { throw new Error("not used"); },
     async commitSignature() { throw new Error("not used"); },
     async markSignatureUncertain() { throw new Error("not used"); },
     async reconcileSignature() { throw new Error("not used"); }
@@ -100,6 +101,7 @@ test("redacts provider and database failures", async () => {
 test("requires an explicit provider-start boundary before accepting a durable repository", async () => {
   const value = fixture();
   delete value.repository.startSignature;
+  delete value.repository.fenceSignature;
   await assert.rejects(bindHostedManagedSignerProvider({
     postgresRuntime: value.postgresRuntime,
     provider: value.provider,

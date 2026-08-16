@@ -24,6 +24,7 @@ function makeFixture({ reserveState = undefined, sign = undefined, metadata = un
     sign: [],
     reserve: [],
     start: [],
+    fence: [],
     commit: [],
     uncertain: []
   };
@@ -63,6 +64,11 @@ function makeFixture({ reserveState = undefined, sign = undefined, metadata = un
     async startSignature(input) {
       calls.start.push(input);
       if (repository.startSignature) return repository.startSignature(input, calls);
+      return { state: "pending", provider_started_at: "2026-08-15T00:00:00.000Z" };
+    },
+    async fenceSignature(input) {
+      calls.fence.push(input);
+      if (repository.fenceSignature) return repository.fenceSignature(input, calls);
       return { state: "pending", provider_started_at: "2026-08-15T00:00:00.000Z" };
     },
     async commitSignature(input) {
@@ -187,6 +193,11 @@ function makeContractFixture({ signOnce, lookup, initialState = undefined } = {}
       async startSignature(input) {
         if (state.status !== "pending" || input.claim_token !== "contract-claim-token") throw Object.assign(new Error("claim lost"), { code: REPOSITORY_CODES.SIGNING_CLAIM_LOST });
         calls.push("start");
+        return { state: "pending", provider_started_at: "2026-08-15T00:00:00.000Z" };
+      },
+      async fenceSignature(input) {
+        if (state.status !== "pending" || input.claim_token !== "contract-claim-token") throw Object.assign(new Error("claim lost"), { code: REPOSITORY_CODES.SIGNING_CLAIM_LOST });
+        calls.push("fence");
         return { state: "pending", provider_started_at: "2026-08-15T00:00:00.000Z" };
       },
       async commitSignature(input) {
@@ -327,6 +338,24 @@ test("fences after durable start so an accepted operation cannot start a provide
   assert.equal(fixture.calls.start.length, 1);
   assert.equal(fixture.calls.sign.length, 0);
   assert.equal(fixture.calls.uncertain.length, 1);
+});
+
+test("rechecks durable lifecycle authority after start and quarantines a cross-instance reduction", async () => {
+  const fixture = makeFixture({
+    repository: {
+      async fenceSignature() {
+        throw Object.assign(new Error("lifecycle authority reduced"), { code: REPOSITORY_CODES.SIGNING_CLAIM_LOST });
+      }
+    }
+  });
+
+  await rejectsWithCode(() => fixture.signer.sign(request()), CODES.COMMIT);
+  assert.equal(fixture.calls.start.length, 1);
+  assert.equal(fixture.calls.fence.length, 1);
+  assert.equal(fixture.calls.sign.length, 0, "the provider must not be called after the durable fence is lost");
+  assert.equal(fixture.calls.uncertain.length, 1);
+  await rejectsWithCode(() => fixture.signer.sign(request()), CODES.UNCERTAIN);
+  assert.equal(fixture.calls.sign.length, 0, "a quarantined operation must never be re-signed");
 });
 
 test("rejects payload substitution and unknown fields before durable or provider calls", async () => {

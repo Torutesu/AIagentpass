@@ -198,6 +198,16 @@ export function createPostgresManagedSignerKeyLifecycleRepository({
     });
   }
 
+  /**
+   * Re-check the lifecycle/claim fence immediately before crossing the
+   * external provider boundary. This reuses the same transactional authority:
+   * it is idempotent for an already-started claim, but loses the claim if a
+   * different instance reduced signing authority in the meantime.
+   */
+  async function fenceSignature(input = {}) {
+    return startSignature(input);
+  }
+
   async function commitSignature(input = {}) {
     const values = normalizeSigningInput(input, { requireBinding: true, requireSignature: true }, config);
     const claimToken = values.claimToken ?? localClaimTokens.get(values.operationId);
@@ -357,6 +367,8 @@ export function createPostgresManagedSignerKeyLifecycleRepository({
     reserveSignature,
     beginSigning: reserveSignature,
     startSignature,
+    fenceSignature,
+    admitSignature: fenceSignature,
     markSignatureProviderStarted: startSignature,
     commitSignature,
     commitSigning: commitSignature,

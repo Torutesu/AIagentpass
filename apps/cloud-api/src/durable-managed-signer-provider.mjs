@@ -206,6 +206,27 @@ async function signReserved(request, binding, provider, adapter, protocolVersion
   // A drain may begin while startSignature is awaiting PostgreSQL.  Never let
   // that accepted lease cross into a new provider call; quarantine it instead.
   await fenceBeforeProviderBoundary(operationGate, repository, durableInput);
+  // A different instance may rotate or emergency-disable the lifecycle after
+  // the first start transaction has returned. Re-enter the same durable
+  // authority immediately before the provider boundary. The named method is
+  // mandatory so a local-only or stale repository cannot weaken this fence.
+  let admitted;
+  try {
+    admitted = await repository.fenceSignature(durableInput);
+    if (!admitted || !["pending", "committed"].includes(admitted.state)
+      || (admitted.state === "pending" && typeof admitted.provider_started_at !== "string")) {
+      throw durableError(DURABLE_MANAGED_SIGNER_ERROR_CODES.COMMIT);
+    }
+  } catch (error) {
+    await markUncertainBestEffort(repository, durableInput);
+    if (error instanceof DurableManagedSignerError) throw error;
+    throw mapCommitError(error);
+  }
+  if (admitted.state === "committed") {
+    const verificationKey = await loadVerificationKey(request.signal);
+    if (adapter && !admitted.provider_receipt) throw durableError(DURABLE_MANAGED_SIGNER_ERROR_CODES.COMMIT);
+    return verifySignature(admitted.signature, request.bytes, verificationKey);
+  }
   let signature;
   let providerReceipt;
   try {
@@ -540,6 +561,7 @@ function validateConfiguration({ provider, managedSignerAdapter, repository, pur
     || (managedSignerAdapter === undefined && typeof provider.sign !== "function")
     || (managedSignerAdapter !== undefined && (typeof managedSignerAdapter.signOnce !== "function" || typeof managedSignerAdapter.lookup !== "function"))
     || !repository || typeof repository.reserveSignature !== "function" || typeof repository.startSignature !== "function"
+    || typeof repository.fenceSignature !== "function"
     || typeof repository.commitSignature !== "function"
     || typeof repository.markSignatureUncertain !== "function" || typeof repository.snapshot !== "function"
     || (managedSignerAdapter !== undefined && typeof repository.reconcileSignature !== "function")

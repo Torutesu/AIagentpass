@@ -355,6 +355,7 @@ test("0051 uses exactly the fixed public-schema function allowlist", async () =>
   const firstDigest = canonicalManagedSignerRequestDigest({ purpose: PURPOSE, key_id: "agent-key-1", bytes: Buffer.from("allowlist-1") });
   const first = await repo.reserveSignature({ operation_id: "sign-allowlist-1", request_digest: firstDigest, key_id: "agent-key-1", key_version: 1 });
   await repo.startSignature({ operation_id: "sign-allowlist-1", request_digest: firstDigest, key_id: "agent-key-1", key_version: 1, claim_token: first.claim_token });
+  await repo.fenceSignature({ operation_id: "sign-allowlist-1", request_digest: firstDigest, key_id: "agent-key-1", key_version: 1, claim_token: first.claim_token });
   await repo.commitSignature({ operation_id: "sign-allowlist-1", request_digest: firstDigest, key_id: "agent-key-1", key_version: 1, claim_token: first.claim_token, signature: SIGNATURE });
 
   const secondDigest = canonicalManagedSignerRequestDigest({ purpose: PURPOSE, key_id: "agent-key-2", bytes: Buffer.from("allowlist-2") });

@@ -204,7 +204,7 @@ function validateInput(value) {
 }
 
 function validateRepository(value) {
-  for (const method of ["snapshot", "initialize", "reserveSignature", "startSignature", "commitSignature", "markSignatureUncertain", "reconcileSignature"]) {
+  for (const method of ["snapshot", "initialize", "reserveSignature", "startSignature", "fenceSignature", "commitSignature", "markSignatureUncertain", "reconcileSignature"]) {
     if (typeof value?.[method] !== "function") fail(HOSTED_MANAGED_SIGNER_RUNTIME_ERROR_CODES.DATABASE);
   }
 }
