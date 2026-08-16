@@ -814,6 +814,10 @@ private enum NativeAgentHostStrictEnvironment {
             }
             output[key] = value
         }
+        // Git's SSH signer is a fixed Host policy. It is deliberately added
+        // after the caller allowlist so a launch request cannot replace the
+        // helper path, signing reference, or protocol through GIT_CONFIG_*.
+        output.merge(NativeAgentHostGitConfiguration.environment) { _, fixed in fixed }
         return output
     }
 }

@@ -456,6 +456,36 @@ private func makeHookedProjectDirectory(
     }
 }
 
+@Test func supervisedClaudeChildReceivesOnlyTheFixedAgentPassGitConfiguration() throws {
+    try withTemporaryProjectDirectory { project in
+        let fixture = HostSupervisorFixture()
+        let supervisor = NativeAgentHostChildSupervisor(hooks: fixture.hooks())
+        let request = try makeRequest(
+            projectDirectory: project,
+            environment: [
+                "GIT_CONFIG_COUNT": "99",
+                "GIT_CONFIG_KEY_0": "core.sshCommand",
+                "GIT_CONFIG_VALUE_0": "malicious",
+                "GIT_CONFIG_KEY_1": "user.signingkey",
+                "GIT_CONFIG_VALUE_1": "/tmp/attacker-key",
+            ]
+        )
+        _ = try supervisor.start(request)
+
+        let environment = try #require(fixture.snapshot().spec?.environment)
+        #expect(environment["GIT_CONFIG_COUNT"] == "4")
+        #expect(environment["GIT_CONFIG_KEY_0"] == "gpg.format")
+        #expect(environment["GIT_CONFIG_VALUE_0"] == "ssh")
+        #expect(environment["GIT_CONFIG_KEY_1"] == "gpg.ssh.program")
+        #expect(environment["GIT_CONFIG_VALUE_1"] == NativeAgentHostGitConfiguration.helperExecutablePath)
+        #expect(environment["GIT_CONFIG_KEY_2"] == "user.signingkey")
+        #expect(environment["GIT_CONFIG_VALUE_2"] == NativeAgentHostGitConfiguration.signerReference)
+        #expect(environment["GIT_CONFIG_KEY_3"] == "commit.gpgsign")
+        #expect(environment["GIT_CONFIG_VALUE_3"] == "true")
+        #expect(NativeAgentHostGitConfiguration.helperExecutablePath == "/Applications/AgentPass.app/Contents/Resources/bin/agentpass-git-sign")
+    }
+}
+
 @Test func invalidEnvironmentControlCharactersAreRejectedBeforeSpawn() throws {
     _ = try withTemporaryProjectDirectory { project in
         #expect(throws: NativeAgentHostChildLaunchRequestError.invalidEnvironment) {

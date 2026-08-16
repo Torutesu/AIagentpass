@@ -15,6 +15,10 @@ QUALIFICATION_CLIENT_PROFILE="${AGENTPASS_QUALIFICATION_CLIENT_PROVISIONING_PROF
 ADHOC=0
 FORCE=0
 ARCHITECTURES=("$(uname -m)")
+SWIFT_BUILD_OPTIONS=()
+if [[ "${AGENTPASS_DISABLE_SWIFTPM_SANDBOX:-0}" == "1" ]]; then
+  SWIFT_BUILD_OPTIONS+=(--disable-sandbox)
+fi
 
 usage() {
   echo "Usage: build-app.sh [--output-dir DIR] [--identity IDENTITY --team-id TEAMID --app-identifier-prefix PREFIX --service-profile FILE --client-profile FILE --agent-profile FILE --qualification-client-profile FILE] [--universal] [--adhoc] [--force]" >&2
@@ -101,6 +105,7 @@ TEMP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/agentpass-build.XXXXXX")"
 trap 'rm -rf -- "$TEMP_DIR"' EXIT
 APP="$TEMP_DIR/AgentPass.app"
 MACOS_DIR="$APP/Contents/MacOS"
+RESOURCE_BIN_DIR="$APP/Contents/Resources/bin"
 DAEMON_DIR="$APP/Contents/Library/LaunchDaemons"
 HELPER_DIR="$APP/Contents/Library/HelperTools"
 SERVICE_APP="$HELPER_DIR/AgentPassNativeService.app"
@@ -109,17 +114,18 @@ AGENT_HOST_APP="$HELPER_DIR/AgentPassNativeAgentHost.app"
 QUALIFICATION_CLIENT="$HELPER_DIR/agentpass-qualification-grant-client"
 QUALIFICATION_CLIENT_APP="$HELPER_DIR/agentpass-qualification-grant-client.app"
 QUALIFICATION_CLIENT_BINARY="$QUALIFICATION_CLIENT_APP/Contents/MacOS/agentpass-qualification-grant-client"
+GIT_SIGNING_HELPER="$RESOURCE_BIN_DIR/agentpass-git-sign"
 ENTITLEMENT_DIR="$TEMP_DIR/entitlements"
-mkdir -p "$MACOS_DIR" "$DAEMON_DIR" "$SERVICE_APP/Contents/MacOS" "$CLIENT_APP/Contents/MacOS" "$AGENT_HOST_APP/Contents/MacOS" "$QUALIFICATION_CLIENT_APP/Contents/MacOS" "$ENTITLEMENT_DIR"
+mkdir -p "$MACOS_DIR" "$RESOURCE_BIN_DIR" "$DAEMON_DIR" "$SERVICE_APP/Contents/MacOS" "$CLIENT_APP/Contents/MacOS" "$AGENT_HOST_APP/Contents/MacOS" "$QUALIFICATION_CLIENT_APP/Contents/MacOS" "$ENTITLEMENT_DIR"
 
 for architecture in "${ARCHITECTURES[@]}"; do
-  MACOSX_DEPLOYMENT_TARGET=14.0 swift build -c release --package-path "$PACKAGE_DIR" --arch "$architecture" >&2
+  MACOSX_DEPLOYMENT_TARGET=14.0 swift build "${SWIFT_BUILD_OPTIONS[@]}" -c release --package-path "$PACKAGE_DIR" --arch "$architecture" >&2
 done
 
 install_product() {
   local product="$1" destination="$2" slices=() architecture bin_dir
   for architecture in "${ARCHITECTURES[@]}"; do
-    bin_dir="$(swift build -c release --package-path "$PACKAGE_DIR" --arch "$architecture" --show-bin-path)"
+    bin_dir="$(swift build "${SWIFT_BUILD_OPTIONS[@]}" -c release --package-path "$PACKAGE_DIR" --arch "$architecture" --show-bin-path)"
     slices+=("$bin_dir/$product")
   done
   if [[ "${#slices[@]}" -eq 1 ]]; then
@@ -135,6 +141,7 @@ install_product agentpass-native-manager "$MACOS_DIR/agentpass-native-manager"
 install_product agentpass-native-service "$SERVICE_APP/Contents/MacOS/agentpass-native-service"
 install_product agentpass-native-client "$CLIENT_APP/Contents/MacOS/agentpass-native-client"
 install_product agentpass-native-agent-host "$AGENT_HOST_APP/Contents/MacOS/agentpass-native-agent-host"
+install_product agentpass-git-sign "$GIT_SIGNING_HELPER"
 install_product agentpass-atomic-rename "$HELPER_DIR/agentpass-atomic-rename"
 install_product agentpass-qualification-grant-client "$QUALIFICATION_CLIENT_BINARY"
 install -m 0755 "$SCRIPT_DIR/qualification-grant-client-launcher.sh" "$QUALIFICATION_CLIENT"
@@ -199,8 +206,10 @@ sign_item "$QUALIFICATION_CLIENT_BINARY" "dev.agentpass.qualification-grant-clie
 sign_item "$QUALIFICATION_CLIENT_APP" "dev.agentpass.qualification-grant-client" "$ENTITLEMENT_DIR/qualification-client.plist"
 if [[ "$ADHOC" -eq 1 ]]; then
   /usr/bin/codesign --force --sign - --identifier "dev.agentpass.atomic-rename" "$HELPER_DIR/agentpass-atomic-rename"
+  /usr/bin/codesign --force --sign - --identifier "dev.agentpass.git-sign" "$GIT_SIGNING_HELPER"
 else
   /usr/bin/codesign --force --sign "$SIGNING_IDENTITY" --identifier "dev.agentpass.atomic-rename" --options runtime --timestamp "$HELPER_DIR/agentpass-atomic-rename"
+  /usr/bin/codesign --force --sign "$SIGNING_IDENTITY" --identifier "dev.agentpass.git-sign" --options runtime --timestamp "$GIT_SIGNING_HELPER"
 fi
 sign_item "$MACOS_DIR/agentpass-native-manager" "dev.agentpass.native-manager" "$ENTITLEMENT_DIR/manager.plist"
 sign_item "$MACOS_DIR/agentpass-onboarding" "dev.agentpass" "$ENTITLEMENT_DIR/manager.plist"
@@ -239,11 +248,13 @@ verify_agent_entitlement() {
 /usr/bin/codesign --verify --strict --verbose=2 "$AGENT_HOST_APP"
 /usr/bin/codesign --verify --strict --verbose=2 "$QUALIFICATION_CLIENT_APP"
 /usr/bin/codesign --verify --strict --verbose=2 "$HELPER_DIR/agentpass-atomic-rename"
+/usr/bin/codesign --verify --strict --verbose=2 "$GIT_SIGNING_HELPER"
 /usr/bin/codesign --verify --strict --verbose=2 "$APP"
 verify_identifier "$SERVICE_APP" "dev.agentpass.native-service"
 verify_identifier "$CLIENT_APP" "dev.agentpass.native-client"
 verify_identifier "$AGENT_HOST_APP" "dev.agentpass.agent-host"
 verify_identifier "$HELPER_DIR/agentpass-atomic-rename" "dev.agentpass.atomic-rename"
+verify_identifier "$GIT_SIGNING_HELPER" "dev.agentpass.git-sign"
 verify_identifier "$MACOS_DIR/agentpass-native-manager" "dev.agentpass.native-manager"
 verify_identifier "$MACOS_DIR/agentpass-onboarding" "dev.agentpass"
 verify_identifier "$APP" "dev.agentpass"
@@ -278,7 +289,7 @@ verify_qualification_client_entitlements "$QUALIFICATION_CLIENT_APP"
 [[ "$(/usr/libexec/PlistBuddy -c 'Print :MachServices:dev.agentpass.n3e-qualification' "$DAEMON_DIR/dev.agentpass.native-service.plist")" == "true" ]] || { echo "Missing reserved qualification Mach service" >&2; exit 1; }
 
 if [[ "$ADHOC" -eq 0 ]]; then
-  for item in "$SERVICE_APP" "$CLIENT_APP" "$AGENT_HOST_APP" "$QUALIFICATION_CLIENT_APP" "$HELPER_DIR/agentpass-atomic-rename" "$MACOS_DIR/agentpass-native-manager" "$MACOS_DIR/agentpass-onboarding" "$APP"; do
+  for item in "$SERVICE_APP" "$CLIENT_APP" "$AGENT_HOST_APP" "$QUALIFICATION_CLIENT_APP" "$HELPER_DIR/agentpass-atomic-rename" "$GIT_SIGNING_HELPER" "$MACOS_DIR/agentpass-native-manager" "$MACOS_DIR/agentpass-onboarding" "$APP"; do
     actual_team="$(/usr/bin/codesign -dv --verbose=4 "$item" 2>&1 | /usr/bin/awk -F= '/^TeamIdentifier=/{print $2; exit}')"
     [[ "$actual_team" == "$TEAM_ID" ]] || { echo "Unexpected TeamIdentifier on $item" >&2; exit 1; }
   done

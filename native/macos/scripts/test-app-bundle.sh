@@ -14,15 +14,21 @@ QUALIFICATION_CLIENT="$APP_PATH/Contents/Library/HelperTools/agentpass-qualifica
 QUALIFICATION_CLIENT_APP="$APP_PATH/Contents/Library/HelperTools/agentpass-qualification-grant-client.app"
 QUALIFICATION_CLIENT_BINARY="$QUALIFICATION_CLIENT_APP/Contents/MacOS/agentpass-qualification-grant-client"
 ATOMIC_RENAME="$APP_PATH/Contents/Library/HelperTools/agentpass-atomic-rename"
+GIT_SIGNING_HELPER="$APP_PATH/Contents/Resources/bin/agentpass-git-sign"
 ONBOARDING="$APP_PATH/Contents/MacOS/agentpass-onboarding"
 [[ -d "$SERVICE_APP" && -d "$CLIENT_APP" && -d "$AGENT_HOST_APP" ]] || { echo "Nested helper app layout is missing" >&2; exit 1; }
 [[ ! -e "$APP_PATH/Contents/MacOS/agentpass-native-service" && ! -e "$APP_PATH/Contents/MacOS/agentpass-native-client" ]] || { echo "Helpers were duplicated outside their bundles" >&2; exit 1; }
 [[ -x "$ATOMIC_RENAME" && ! -L "$ATOMIC_RENAME" ]] || { echo "Atomic rename helper is missing or unsafe" >&2; exit 1; }
+[[ -x "$GIT_SIGNING_HELPER" && ! -L "$GIT_SIGNING_HELPER" ]] || { echo "Git signing helper is missing or unsafe" >&2; exit 1; }
+[[ "$(/usr/bin/find "$APP_PATH" -name agentpass-git-sign -print | /usr/bin/wc -l | /usr/bin/tr -d '[:space:]')" == "1" ]] || { echo "Git signing helper must appear exactly once in the app bundle" >&2; exit 1; }
+[[ ! -e "$APP_PATH/Contents/MacOS/agentpass-git-sign" && ! -e "$APP_PATH/Contents/Library/HelperTools/agentpass-git-sign" ]] || { echo "Git signing helper was duplicated outside the frozen resource path" >&2; exit 1; }
 [[ -x "$QUALIFICATION_CLIENT" && ! -L "$QUALIFICATION_CLIENT" ]] || { echo "Qualification grant client is missing or unsafe" >&2; exit 1; }
 [[ -d "$QUALIFICATION_CLIENT_APP" && -x "$QUALIFICATION_CLIENT_BINARY" && ! -L "$QUALIFICATION_CLIENT_APP" && ! -L "$QUALIFICATION_CLIENT_BINARY" ]] || { echo "Qualification grant client helper bundle is missing or unsafe" >&2; exit 1; }
 grep -q '/opt/agentpass/p0c/qualification-client/agentpass-qualification-grant-client.app/Contents/MacOS/agentpass-qualification-grant-client' "$QUALIFICATION_CLIENT" || { echo "Qualification grant client launcher does not resolve to its signed helper app" >&2; exit 1; }
 [[ -x "$ONBOARDING" && ! -L "$ONBOARDING" ]] || { echo "Onboarding UI executable is missing or unsafe" >&2; exit 1; }
 /usr/bin/codesign --verify --deep --strict "$QUALIFICATION_CLIENT_APP"
+/usr/bin/codesign --verify --strict "$GIT_SIGNING_HELPER"
+[[ "$(/usr/bin/codesign -dv --verbose=4 "$GIT_SIGNING_HELPER" 2>&1 | /usr/bin/awk -F= '/^Identifier=/{print $2; exit}')" == "dev.agentpass.git-sign" ]] || { echo "Git signing helper identifier mismatch" >&2; exit 1; }
 [[ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$APP_PATH/Contents/Info.plist")" == "agentpass-onboarding" ]] || { echo "Unexpected outer app executable" >&2; exit 1; }
 [[ "$(/usr/libexec/PlistBuddy -c 'Print :LSUIElement' "$APP_PATH/Contents/Info.plist")" == "false" ]] || { echo "Onboarding app is unexpectedly hidden" >&2; exit 1; }
 AGENTPASS_ATOMIC_RENAME_HELPER="$ATOMIC_RENAME" "$SCRIPT_DIR/test-atomic-rename.sh"
