@@ -387,9 +387,17 @@ async function callUncertain(client, context, request_id, claim_token_hash) {
 
 async function call(client, functionName, values) {
   const casts = values.map((_, index) => `$${index + 1}`).join(",");
-  const result = await client.query(`SELECT public.${functionName}(${casts}) AS result`, values);
-  assert.equal(result.rowCount, 1, `${functionName} must return one jsonb result`);
-  return result.rows[0].result;
+  await client.query("BEGIN");
+  try {
+    await client.query("SELECT set_config('agentpass.organization_id',$1,true)", [values[0]]);
+    const result = await client.query(`SELECT public.${functionName}(${casts}) AS result`, values);
+    assert.equal(result.rowCount, 1, `${functionName} must return one jsonb result`);
+    await client.query("COMMIT");
+    return result.rows[0].result;
+  } catch (error) {
+    await client.query("ROLLBACK");
+    throw error;
+  }
 }
 
 async function assertFunctionPrivileges(client) {

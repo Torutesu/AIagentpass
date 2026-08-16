@@ -35,6 +35,8 @@ test('signing capability role qualification is an explicit catalog contract', as
   assert.match(checker, /pg_policy/u);
   assert.match(checker, /pg_get_expr\(p\.polqual, p\.polrelid\)/u);
   assert.match(checker, /pg_get_expr\(p\.polwithcheck, p\.polrelid\)/u);
+  assert.doesNotMatch(checker, /btrim\(regexp_replace\(pg_get_expr/u);
+  assert.match(checker, /'\^\\\\\(\(\.\*\)\\\\\)\$'/u);
   assert.match(checker, /p\.polroles IS DISTINCT FROM ARRAY\[0::oid\]/u);
   assert.match(checker, /p\.polpermissive IS DISTINCT FROM true/u);
   assert.match(checker, /SET search_path = pg_catalog;/u);

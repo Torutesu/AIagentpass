@@ -276,7 +276,7 @@ test("real PostgreSQL capability authority behavior is exercised when AGENTPASS_
     await pool.query("INSERT INTO agents (organization_id,id,device_id,kind,name,public_key_pem,status) VALUES ($1,$2,$3,'cli','Test agent',$4,'active')", [real.organization, real.agent, real.device, TEST_PUBLIC_KEY]);
     await assert.rejects(
       pool.query("INSERT INTO capabilities (organization_id,id,agent_id,device_id,sequence,statement_hash,expires_at) VALUES ($1,$2,$3,$4,1,$5,$6)", [real.organization, real.capability, real.agent, real.device, HASH, EXPIRES]),
-      (error) => error.code === "23514" && error.constraint === "capabilities_active_membership_authority_complete"
+      (error) => error.code === "23514" && error.constraint === "capabilities_active_issuer_authority_complete"
     );
     const repository = createCapabilityAuthorityRepository({ client: pool, now: () => NOW, onAuthorityReduction: async () => ({ generation: 2 }) });
     const issued = await repository.issueCapabilityMetadata({

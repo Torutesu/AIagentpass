@@ -293,10 +293,14 @@ signing_authority_table_observations AS (
               OR (expected.policy_role IS NOT NULL AND p.polroles IS DISTINCT FROM ARRAY[(
                 SELECT oid FROM role_ids WHERE rolname = expected.policy_role
               )])
-              OR btrim(regexp_replace(pg_get_expr(p.polqual, p.polrelid), '[[:space:]]+', '', 'g'), '()')
-                IS DISTINCT FROM expected.using_expression
-              OR btrim(regexp_replace(pg_get_expr(p.polwithcheck, p.polrelid), '[[:space:]]+', '', 'g'), '()')
-                IS DISTINCT FROM expected.with_check_expression
+              OR regexp_replace(
+                  regexp_replace(pg_get_expr(p.polqual, p.polrelid), '[[:space:]]+', '', 'g'),
+                  '^\\((.*)\\)$', '\\1'
+                ) IS DISTINCT FROM expected.using_expression
+              OR regexp_replace(
+                  regexp_replace(pg_get_expr(p.polwithcheck, p.polrelid), '[[:space:]]+', '', 'g'),
+                  '^\\((.*)\\)$', '\\1'
+                ) IS DISTINCT FROM expected.with_check_expression
             )
         ) THEN 'policy:missing_or_mismatch' END,
       CASE WHEN has_table_privilege('agentpass_app', t.oid, 'SELECT') THEN 'app:select' END,
