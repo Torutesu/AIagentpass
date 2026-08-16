@@ -235,6 +235,7 @@ test("F1a request body contains no caller authority and OpenAPI binds only path 
     "sequence", "remaining_session_signatures", "control_sequence", "authority_generation"
   ]);
   assert.equal(operation["x-agentpass-authority"]["one-use"], true);
+  assert.equal(operation["x-agentpass-authority"]["signature-domain"], "AgentPass-Agent-Signing-Capability-v1\u0000");
   assert.equal(operation["x-agentpass-transport"]["cache-control"], "no-store");
   assert.deepEqual(openapi.components.schemas.AgentSessionSigningCapabilityRequest, { $ref: "../schemas/agent-session-signing-capability-request-v1.schema.json" });
   assert.deepEqual(openapi.components.schemas.AgentSigningCapabilityV1, { $ref: "../schemas/agent-signing-capability-v1.schema.json" });
