@@ -453,7 +453,9 @@ function assertAuthenticatedDevice(value, route) {
 }
 
 function assertGrantVerification(value, grant) {
-  if (value === true) return;
+  // A boolean success result does not prove that the verifier checked this
+  // exact signed envelope. Require a structured verification result so a
+  // miswired verifier cannot fail open into lease issuance.
   if (!value || typeof value !== "object" || Array.isArray(value) || value.verified === false) {
     throw new AgentSessionDeviceHttpError(AGENT_SESSION_DEVICE_HTTP_ERROR_CODES.GRANT_NOT_AUTHORIZED, { status: 403 });
   }
