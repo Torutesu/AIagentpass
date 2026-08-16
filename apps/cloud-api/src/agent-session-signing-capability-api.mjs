@@ -410,7 +410,9 @@ function publicDeviceIdentity(value) {
 }
 
 function assertSessionBinding(value, route) {
-  if (value === true) return;
+  // A boolean success result cannot prove which tenant/device/session was
+  // authorized. Accepting it would turn a miswired binder into a fail-open
+  // path from Device authentication directly to capability issuance.
   if (!value || typeof value !== "object" || Array.isArray(value) || value.authorized === false || value.active === false || value.verified === false) throw new AgentSessionSigningCapabilityHttpError(AGENT_SESSION_SIGNING_CAPABILITY_HTTP_ERROR_CODES.SESSION_NOT_AUTHORIZED, { status: 403 });
   if (value.authorized !== true && value.verified !== true && value.active !== true) throw new AgentSessionSigningCapabilityHttpError(AGENT_SESSION_SIGNING_CAPABILITY_HTTP_ERROR_CODES.SESSION_NOT_AUTHORIZED, { status: 403 });
   for (const [key, expected] of [["organization_id", route.organizationId], ["device_id", route.deviceId], ["session_id", route.sessionId]]) {

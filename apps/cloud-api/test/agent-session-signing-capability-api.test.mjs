@@ -207,6 +207,13 @@ test("accepts a trusted Device boundary without repeating authentication or rate
   assert.equal(f.calls.issue.length, 1);
 });
 
+test("rejects a boolean session-binder result instead of failing open", async () => {
+  const f = fixture({ binder: async () => true });
+  const result = await f.api.handle(requestFor(f, { nonce: "capability-device-nonce-boolean-binding-0001" }));
+  assertError(result, 403, AGENT_SESSION_SIGNING_CAPABILITY_HTTP_ERROR_CODES.SESSION_NOT_AUTHORIZED);
+  assert.deepEqual(f.calls.issue, []);
+});
+
 test("creates a Session-bound issuance service only after Device authentication and binding", async () => {
   const factoryCalls = [];
   let calls;
