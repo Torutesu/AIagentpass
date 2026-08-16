@@ -26,6 +26,8 @@ private final class AgentCountingP256Signer: P256MessageSigner, @unchecked Senda
     let signedMessage = try #require(primitive.messages.first)
     #expect(signedMessage.starts(with: Data("SSHSIG".utf8)))
     #expect(signedMessage.range(of: Data("git".utf8)) != nil)
+    #expect(try signer.verifyGitCommitSignature(payload: payload, signature: output))
+    #expect(!(try signer.verifyGitCommitSignature(payload: Data("different".utf8), signature: output)))
 }
 
 @Test func fixedGitSignerRejectsEmptyAndOversizedPayloadBeforeKeyUse() throws {

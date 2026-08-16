@@ -587,6 +587,117 @@ public final class NativeAgentSessionCoordinator: @unchecked Sendable {
     }
   }
 
+  /// Reserves one fixed Git-sign request after a fresh process, worktree,
+  /// control, generation, and key binding observation. The returned
+  /// reservation is the only authority accepted by the signing transitions.
+  public func reserveSigningRequest(
+    _ request: AgentPassAgentSignRequest
+  ) throws -> (NativeAgentSessionReservation, NativeAgentSessionBinding) {
+    operationLock.lock()
+    defer { operationLock.unlock() }
+    try revalidateConnection()
+    try ensureLive()
+    guard let expected = stateLock.withLock({ sessionBindings[request.sessionID.lowercased()] }) else {
+      throw NativeAgentSessionCoordinatorError.sessionDenied
+    }
+    try revalidate(binding: expected)
+    do {
+      let reservation = try registry.reserve(
+        sessionID: request.sessionID.lowercased(),
+        requestID: request.requestID.lowercased(),
+        capabilityID: request.capabilityID.lowercased(),
+        nonce: request.requestNonce,
+        payloadDigest: Data(SHA256.hash(data: request.commitPayload)),
+        connectionTokenIdentity: connectionTokenIdentity,
+        binding: expected,
+        wallClock: sampleWall(),
+        monotonicClock: sampleMonotonic())
+      return (reservation, expected)
+    } catch {
+      throw NativeAgentSessionCoordinatorError.sessionDenied
+    }
+  }
+
+  /// Performs the final binding observation and crosses the registry's
+  /// durable-intent boundary. No provider may be called before this returns.
+  public func beginSigningIntent(
+    _ reservation: NativeAgentSessionReservation
+  ) throws -> NativeAgentSessionBinding {
+    operationLock.lock()
+    defer { operationLock.unlock() }
+    try revalidateConnection()
+    try ensureLive()
+    guard let expected = stateLock.withLock({ sessionBindings[reservation.sessionID] }) else {
+      throw NativeAgentSessionCoordinatorError.sessionDenied
+    }
+    try revalidate(binding: expected)
+    do {
+      try registry.beginSigningIntent(reservation)
+      return expected
+    } catch {
+      throw NativeAgentSessionCoordinatorError.sessionDenied
+    }
+  }
+
+  public func recoverSigningReservation(
+    _ request: AgentPassAgentSignRequest,
+    budgetSequence: Int
+  ) throws -> (NativeAgentSessionReservation, NativeAgentSessionBinding) {
+    operationLock.lock()
+    defer { operationLock.unlock() }
+    try revalidateConnection()
+    try ensureLive()
+    guard let expected = stateLock.withLock({ sessionBindings[request.sessionID.lowercased()] }) else {
+      throw NativeAgentSessionCoordinatorError.sessionDenied
+    }
+    try revalidate(binding: expected)
+    do {
+      let reservation = try registry.recoverSigningReservation(
+        sessionID: request.sessionID.lowercased(),
+        requestID: request.requestID.lowercased(),
+        capabilityID: request.capabilityID.lowercased(),
+        payloadDigest: Data(SHA256.hash(data: request.commitPayload)),
+        budgetSequence: budgetSequence,
+        connectionTokenIdentity: connectionTokenIdentity,
+        binding: expected,
+        wallClock: sampleWall(),
+        monotonicClock: sampleMonotonic())
+      return (reservation, expected)
+    } catch {
+      throw NativeAgentSessionCoordinatorError.sessionDenied
+    }
+  }
+
+  public func recordSigning(_ reservation: NativeAgentSessionReservation) throws {
+    operationLock.lock()
+    defer { operationLock.unlock() }
+    try registry.recordSigned(reservation)
+  }
+
+  public func completeSigning(_ reservation: NativeAgentSessionReservation) throws -> NativeAgentSessionRegistryStatus {
+    operationLock.lock()
+    defer { operationLock.unlock() }
+    return try registry.complete(reservation)
+  }
+
+  public func finalizeSigning(_ reservation: NativeAgentSessionReservation) throws -> NativeAgentSessionRegistryStatus {
+    operationLock.lock()
+    defer { operationLock.unlock() }
+    return try registry.finalizeSigning(reservation)
+  }
+
+  public func releaseSigningBeforeKey(_ reservation: NativeAgentSessionReservation) throws {
+    operationLock.lock()
+    defer { operationLock.unlock() }
+    try registry.releaseBeforeKey(reservation)
+  }
+
+  public func markSigningOutcomeUnknown(_ reservation: NativeAgentSessionReservation) throws {
+    operationLock.lock()
+    defer { operationLock.unlock() }
+    try registry.markOutcomeUnknown(reservation)
+  }
+
   public func close(
     sessionID: String,
     reason: AgentPassAgentSessionCloseReason

@@ -146,6 +146,19 @@ public struct NativeAgentWorktreeBinding: Equatable, Sendable {
   public let remotes: [NativeAgentGitRemote]
   public let digest: Data
 
+  public var headKind: String {
+    switch head {
+    case .branch: return "branch"
+    case .detached: return "detached"
+    }
+  }
+
+  public var headValue: String {
+    switch head {
+    case .branch(let value), .detached(let value): return value
+    }
+  }
+
   public init(
     layout: NativeAgentGitDirectoryLayout,
     repositoryPath: String,

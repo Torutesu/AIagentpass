@@ -972,16 +972,19 @@ private final class ServiceEndpoint: NSObject, AgentPassNativeServiceProtocol, N
         do {
             if let prior = try signingTransactions.lookup(requestData: request as Data) {
                 switch prior.phase {
-                case .complete:
+                case .completed:
                     reply(prior.signature! as NSString, nil)
-                case .signed:
+                case .signedVerified:
                     try appendAudit(NativeAuditEvent(operation: "git.commit.sign", decision: "allow", requestID: prior.requestID, reason: "allowed_recovered", agentID: prior.agentID, repository: prior.repository, branch: prior.branch, remote: prior.remote, payloadSHA256: prior.payloadHash))
                     let completed = try signingTransactions.complete(requestID: prior.requestID)
                     reply(completed.signature! as NSString, nil)
                 case .intent:
                     _ = try signingTransactions.markOutcomeUnknown(requestID: prior.requestID)
                     throw AgentPassNativeError.unauthorizedClient("signing_outcome_unknown")
-                case .outcomeUnknown:
+                case .uncertain:
+                    throw AgentPassNativeError.unauthorizedClient("signing_outcome_unknown")
+                case .admitted, .providerStarted:
+                    _ = try signingTransactions.markOutcomeUnknown(requestID: prior.requestID)
                     throw AgentPassNativeError.unauthorizedClient("signing_outcome_unknown")
                 }
                 return
@@ -1009,6 +1012,7 @@ private final class ServiceEndpoint: NSObject, AgentPassNativeServiceProtocol, N
             // an unresolved outcome rather than silent key use.
             try appendAudit(NativeAuditEvent(operation: "git.commit.sign", decision: "allow", requestID: authorized.requestID, reason: "authorized_intent", agentID: authorized.agentID, repository: authorized.repository, branch: authorized.branch, remote: authorized.remote, payloadSHA256: payloadHash))
             try authorizer.revalidate(authorized)
+            _ = try signingTransactions.markProviderStarted(requestID: authorized.requestID)
             let signature = try SSHSIG.sign(payload: authorized.payload, signer: keyStore)
             _ = try signingTransactions.recordSigned(requestID: authorized.requestID, signature: signature)
             try appendAudit(NativeAuditEvent(operation: "git.commit.sign", decision: "allow", requestID: authorized.requestID, reason: "allowed", agentID: authorized.agentID, repository: authorized.repository, branch: authorized.branch, remote: authorized.remote, payloadSHA256: payloadHash))
@@ -1018,7 +1022,7 @@ private final class ServiceEndpoint: NSObject, AgentPassNativeServiceProtocol, N
             // Once a signature is durably recorded, never append a contradictory
             // terminal error and never touch the key again. The exact retry path
             // above only repairs the missing final audit record.
-            if let transaction = try? signingTransactions.lookup(requestData: request as Data), transaction.phase == .signed {
+            if let transaction = try? signingTransactions.lookup(requestData: request as Data), transaction.phase == .signedVerified {
                 controlManager?.invalidate()
                 controlV2Manager?.invalidate()
                 reply(nil, signingError as NSError)
@@ -1027,7 +1031,7 @@ private final class ServiceEndpoint: NSObject, AgentPassNativeServiceProtocol, N
             // An intent without a durably recorded signature is deliberately
             // treated as ambiguous. This sacrifices availability after a crash
             // boundary rather than risking duplicate hardware-key use.
-            if let transaction = try? signingTransactions.lookup(requestData: request as Data), transaction.phase == .intent {
+            if let transaction = try? signingTransactions.lookup(requestData: request as Data), transaction.phase == .intent || transaction.phase == .providerStarted {
                 _ = try? signingTransactions.markOutcomeUnknown(requestID: authorized.requestID)
             }
             do { try appendAudit(NativeAuditEvent(operation: "git.commit.sign", decision: "error", requestID: authorized.requestID, reason: signingError.localizedDescription, agentID: authorized.agentID, repository: authorized.repository, branch: authorized.branch, remote: authorized.remote)) }
@@ -3151,6 +3155,27 @@ private struct AgentConnectionSessionBindingObserver: NativeAgentSessionBindingO
         )
     }
 
+    func observeSigningAuthority(
+        request: NativeSigningTransactionRequest,
+        agentID: String,
+        keyLifecycleIdentity: String
+    ) throws -> NativeSigningTransactionAuthority {
+        let binding = try observeSessionBinding(agentID: agentID)
+        let worktree = try worktreeObserver.observe(
+            pid: connectionGuard.context.pid,
+            expectedUserID: connectionGuard.context.effectiveUserID
+        ).binding
+        guard binding.worktreeBindingDigest == worktree.digest else {
+            throw NativeAgentSessionCoordinatorError.bindingDenied
+        }
+        return try NativeSigningTransactionAuthority(
+            request: request,
+            binding: binding,
+            worktree: worktree,
+            keyLifecycleIdentity: keyLifecycleIdentity
+        )
+    }
+
     private static func digest(_ value: String) -> Data? {
         guard value.count == 64 else { return nil }
         var bytes = [UInt8]()
@@ -3390,6 +3415,7 @@ private final class AgentRuntimeDependencies: @unchecked Sendable {
     let consumeRecoveryStore: NativeAgentSessionConsumeRecoveryStore
     let activationRecoveryStore: NativeAgentSessionConsumeRecoveryV4Store
     let signingIntentStore: NativeAgentSigningIntentStore
+    let signingTransactions: NativeSigningTransactionStore
     let gitCommitSigner: NativeAgentGitCommitSigner
     let authorityState: AgentRuntimeAuthorityState
     let qualificationFaultConsumer: any NativeAgentSessionQualificationFaultConsuming
@@ -3413,6 +3439,9 @@ private final class AgentRuntimeDependencies: @unchecked Sendable {
         )
         signingIntentStore = try NativeAgentSigningIntentStore(
             path: authority.signingIntentDirectory + "/signing-intents.v1.json"
+        )
+        signingTransactions = try NativeSigningTransactionStore(
+            path: authority.signingIntentDirectory + "/signing-transactions.v2.json"
         )
         consumeRecoveryStore = try NativeAgentSessionConsumeRecoveryStore(
             path: authority.signingIntentDirectory + "/session-consume-recovery.v1.json"
@@ -3468,6 +3497,7 @@ private final class AgentConnectionEndpoint: NSObject, AgentPassAgentXPCProtocol
     private let clocks = NativeAgentSystemClocks()
     private let worker = DispatchQueue(label: "dev.agentpass.agent-session.connection")
     private let coordinator: NativeAgentSessionCoordinator?
+    private let signingBindingObserver: AgentConnectionSessionBindingObserver?
 
     init(
         connectionGuard: NativeAgentConnectionGuard,
@@ -3490,6 +3520,7 @@ private final class AgentConnectionEndpoint: NSObject, AgentPassAgentXPCProtocol
                 authority: runtime.authorityState,
                 deviceID: runtime.authority.deviceID
             )
+            signingBindingObserver = bindingObserver
             coordinator = try? NativeAgentSessionCoordinator(
                 connectionTokenIdentity: connectionGuard.context.tokenIdentity,
                 connectionRevalidator: {
@@ -3512,6 +3543,7 @@ private final class AgentConnectionEndpoint: NSObject, AgentPassAgentXPCProtocol
                 authority: runtime.authority
             )
         } else {
+            signingBindingObserver = nil
             coordinator = nil
         }
     }
@@ -3656,9 +3688,163 @@ private final class AgentConnectionEndpoint: NSObject, AgentPassAgentXPCProtocol
     }
 
     func signGitCommit(_ request: AgentPassAgentSignRequest, withReply reply: @escaping (AgentPassAgentSignResponse?, NSError?) -> Void) {
-        // Re-observation is deliberately the last operation before the N3/N4
-        // signing implementation will be allowed to reserve and touch a key.
-        reply(nil, unavailableAfterAuthorization())
+        let replyBox = AgentXPCReplyBox(reply)
+        worker.async { [weak self] in
+            guard let self,
+                  let runtime = self.runtime,
+                  let coordinator = self.coordinator,
+                  let bindingObserver = self.signingBindingObserver else {
+                replyBox.call(nil, NativeAgentSessionDenialReason.unavailable.nsError)
+                return
+            }
+            do {
+                try self.authorizeConnection()
+                let transactionRequest = try NativeSigningTransactionRequest(request)
+                if let prior = try runtime.signingTransactions.lookup(request: transactionRequest) {
+                    do {
+                        switch prior.phase {
+                        case .completed:
+                            guard let priorAuthority = prior.authority,
+                                  let remaining = prior.remainingSignatures else { throw NativeSigningTransactionError.invalidState }
+                            _ = try coordinator.status(sessionID: request.sessionID)
+                            let observed = try bindingObserver.observeSigningAuthority(
+                                request: transactionRequest,
+                                agentID: priorAuthority.agentID,
+                                keyLifecycleIdentity: runtime.gitCommitSigner.keyLifecycleIdentity)
+                            guard observed == priorAuthority,
+                                  prior.remainingSignatures != nil,
+                                  let signature = prior.signature?.data(using: .utf8),
+                                  try runtime.gitCommitSigner.verifyGitCommitSignature(
+                                      payload: request.commitPayload,
+                                      signature: signature) == true else {
+                                throw NativeAgentSessionCoordinatorError.bindingDenied
+                            }
+                            guard let response = AgentPassAgentSignResponse(
+                                    requestID: request.requestID,
+                                    signature: signature,
+                                    remainingSignatures: remaining) else {
+                                throw NativeSigningTransactionError.invalidState
+                            }
+                            replyBox.call(response, nil)
+                        case .signedVerified:
+                            guard let priorAuthority = prior.authority else { throw NativeSigningTransactionError.invalidState }
+                            _ = try coordinator.status(sessionID: request.sessionID)
+                            let observed = try bindingObserver.observeSigningAuthority(
+                                request: transactionRequest,
+                                agentID: priorAuthority.agentID,
+                                keyLifecycleIdentity: runtime.gitCommitSigner.keyLifecycleIdentity)
+                            guard observed == priorAuthority else { throw NativeAgentSessionCoordinatorError.bindingDenied }
+                            guard let priorSignature = prior.signature?.data(using: .utf8),
+                                  try runtime.gitCommitSigner.verifyGitCommitSignature(
+                                      payload: request.commitPayload,
+                                      signature: priorSignature) == true else {
+                                throw NativeSigningTransactionError.invalidState
+                            }
+                            let (reservation, _) = try coordinator.recoverSigningReservation(
+                                request,
+                                budgetSequence: prior.budgetSequence)
+                            let finalized = try coordinator.finalizeSigning(reservation)
+                            let completed = try runtime.signingTransactions.complete(
+                                requestID: transactionRequest.requestID,
+                                remainingSignatures: finalized.remainingSignatures)
+                            guard let signature = completed.signature?.data(using: .utf8),
+                                  let response = AgentPassAgentSignResponse(
+                                    requestID: request.requestID,
+                                    signature: signature,
+                                    remainingSignatures: finalized.remainingSignatures) else {
+                                throw NativeSigningTransactionError.invalidState
+                            }
+                            replyBox.call(response, nil)
+                        case .providerStarted:
+                            throw NativeSigningTransactionError.uncertain
+                        case .uncertain:
+                            throw NativeSigningTransactionError.uncertain
+                        case .admitted, .intent:
+                            throw NativeSigningTransactionError.phaseConflict
+                        }
+                    } catch {
+                        if prior.phase == .signedVerified {
+                            do { _ = try runtime.signingTransactions.markUncertain(requestID: transactionRequest.requestID) }
+                            catch { throw NativeSigningTransactionError.invalidState }
+                        }
+                        throw error
+                    }
+                    return
+                }
+
+                let (reservation, reservedBinding) = try coordinator.reserveSigningRequest(request)
+                do {
+                    let authority = try bindingObserver.observeSigningAuthority(
+                        request: transactionRequest,
+                        agentID: reservedBinding.agentID,
+                        keyLifecycleIdentity: runtime.gitCommitSigner.keyLifecycleIdentity)
+                    guard authority.sessionID == request.sessionID.lowercased() else {
+                        throw NativeAgentSessionCoordinatorError.bindingDenied
+                    }
+                    _ = try runtime.signingTransactions.admit(
+                        request: transactionRequest,
+                        authority: authority,
+                        budgetSequence: reservation.budgetSequence)
+
+                    let finalBinding = try coordinator.beginSigningIntent(reservation)
+                    let finalAuthority = try bindingObserver.observeSigningAuthority(
+                        request: transactionRequest,
+                        agentID: finalBinding.agentID,
+                        keyLifecycleIdentity: runtime.gitCommitSigner.keyLifecycleIdentity)
+                    guard finalBinding == reservedBinding, finalAuthority == authority else {
+                        throw NativeAgentSessionCoordinatorError.bindingDenied
+                    }
+                    _ = try runtime.signingTransactions.markIntent(
+                        requestID: transactionRequest.requestID,
+                        authority: finalAuthority)
+
+                    // This fsynced marker is the last durable action before
+                    // the fixed Secure Enclave-backed provider is invoked.
+                    _ = try runtime.signingTransactions.markProviderStarted(
+                        requestID: transactionRequest.requestID)
+                    let signature = try runtime.gitCommitSigner.signGitCommitPayload(request.commitPayload)
+                    guard try runtime.gitCommitSigner.verifyGitCommitSignature(
+                        payload: request.commitPayload,
+                        signature: signature) else {
+                        throw NativeAgentGitCommitSignerError.invalidSignature
+                    }
+                    _ = try runtime.signingTransactions.recordVerified(
+                        requestID: transactionRequest.requestID,
+                        signature: String(decoding: signature, as: UTF8.self))
+                    let status = try coordinator.finalizeSigning(reservation)
+                    let completed = try runtime.signingTransactions.complete(
+                        requestID: transactionRequest.requestID,
+                        remainingSignatures: status.remainingSignatures)
+                    guard let responseSignature = completed.signature?.data(using: .utf8),
+                          let response = AgentPassAgentSignResponse(
+                            requestID: request.requestID,
+                            signature: responseSignature,
+                            remainingSignatures: completed.remainingSignatures ?? 0) else {
+                        throw NativeSigningTransactionError.invalidState
+                    }
+                    replyBox.call(response, nil)
+                } catch {
+                    let phase = try runtime.signingTransactions.lookup(request: transactionRequest)?.phase
+                    if phase == .signedVerified {
+                        do { _ = try runtime.signingTransactions.markUncertain(requestID: transactionRequest.requestID) }
+                        catch { replyBox.call(nil, NativeSigningTransactionError.invalidState as NSError); return }
+                    }
+                    if phase == .providerStarted {
+                        do { _ = try runtime.signingTransactions.markUncertain(requestID: transactionRequest.requestID) } catch {}
+                        do { try coordinator.markSigningOutcomeUnknown(reservation) } catch {}
+                    } else if phase == .intent {
+                        do { _ = try runtime.signingTransactions.markUncertain(requestID: transactionRequest.requestID) } catch {}
+                        do { try coordinator.markSigningOutcomeUnknown(reservation) } catch {}
+                    } else if phase == .admitted || phase == nil {
+                        do { _ = try runtime.signingTransactions.markUncertain(requestID: transactionRequest.requestID) } catch {}
+                        do { try coordinator.releaseSigningBeforeKey(reservation) } catch {}
+                    }
+                    replyBox.call(nil, error as NSError)
+                }
+            } catch {
+                replyBox.call(nil, error as NSError)
+            }
+        }
     }
 
     func closeAgentSession(_ request: AgentPassAgentCloseSessionRequest, withReply reply: @escaping (AgentPassAgentCloseSessionResponse?, NSError?) -> Void) {

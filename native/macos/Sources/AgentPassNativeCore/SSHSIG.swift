@@ -54,6 +54,53 @@ public enum SSHSIG {
         return armor(envelope)
     }
 
+    public static func verify(
+        payload: Data,
+        signature: String,
+        namespace: String = "git",
+        publicKeyX963: Data
+    ) throws -> Bool {
+        guard !namespace.isEmpty, !namespace.utf8.contains(0),
+              publicKeyX963.count == 65, publicKeyX963.first == 0x04 else {
+            throw AgentPassNativeError.invalidSignature("SSHSIG verification input is invalid")
+        }
+        let prefix = "-----BEGIN SSH SIGNATURE-----\n"
+        let suffix = "\n-----END SSH SIGNATURE-----\n"
+        guard signature.hasPrefix(prefix), signature.hasSuffix(suffix) else {
+            return false
+        }
+        let encoded = String(signature.dropFirst(prefix.utf8.count).dropLast(suffix.utf8.count))
+        guard let envelope = Data(base64Encoded: encoded) else { return false }
+        var cursor = SSHWireCursor(data: envelope)
+        guard try cursor.readBytes(count: 6) == Data("SSHSIG".utf8),
+              try cursor.readUInt32() == 1 else { return false }
+
+        var publicKeyCursor = SSHWireCursor(data: try cursor.readString())
+        guard try publicKeyCursor.readString() == Data(algorithm.utf8),
+              try publicKeyCursor.readString() == Data(curve.utf8),
+              try publicKeyCursor.readString() == publicKeyX963,
+              publicKeyCursor.isAtEnd else { return false }
+        guard try cursor.readString() == Data(namespace.utf8),
+              try cursor.readString().isEmpty,
+              try cursor.readString() == Data(hashAlgorithm.utf8) else { return false }
+
+        var signatureCursor = SSHWireCursor(data: try cursor.readString())
+        guard try signatureCursor.readString() == Data(algorithm.utf8) else { return false }
+        var ecdsaCursor = SSHWireCursor(data: try signatureCursor.readString())
+        let r = try normalizedMPInt(ecdsaCursor.readString())
+        let s = try normalizedMPInt(ecdsaCursor.readString())
+        guard ecdsaCursor.isAtEnd, signatureCursor.isAtEnd, cursor.isAtEnd else { return false }
+        let raw = r + s
+        let publicKey = try P256.Signing.PublicKey(x963Representation: publicKeyX963)
+        let ecdsaSignature = try P256.Signing.ECDSASignature(rawRepresentation: raw)
+        var signedData = Data("SSHSIG".utf8)
+        signedData.appendSSHString(namespace)
+        signedData.appendSSHString(Data())
+        signedData.appendSSHString(hashAlgorithm)
+        signedData.appendSSHString(Data(SHA256.hash(data: payload)))
+        return publicKey.isValidSignature(ecdsaSignature, for: signedData)
+    }
+
     public static func authorizedKey(publicKeyX963: Data) throws -> String {
         guard publicKeyX963.count == 65, publicKeyX963.first == 0x04 else {
             throw AgentPassNativeError.invalidKey("P-256 public key must use uncompressed X9.63 encoding")
@@ -114,6 +161,28 @@ private struct SSHWireCursor {
         defer { offset += length }
         return data.subdata(in: offset..<(offset + length))
     }
+
+    mutating func readUInt32() throws -> UInt32 {
+        guard offset + 4 <= data.count else { throw AgentPassNativeError.invalidSignature("SSHSIG integer is truncated") }
+        let value = data[offset..<(offset + 4)].reduce(UInt32(0)) { ($0 << 8) | UInt32($1) }
+        offset += 4
+        return value
+    }
+
+    mutating func readBytes(count: Int) throws -> Data {
+        guard count >= 0, offset + count <= data.count else { throw AgentPassNativeError.invalidSignature("SSHSIG bytes are truncated") }
+        defer { offset += count }
+        return data.subdata(in: offset..<(offset + count))
+    }
+}
+
+private func normalizedMPInt(_ value: Data) throws -> Data {
+    var bytes = Array(value)
+    while bytes.count > 32, bytes.first == 0 { bytes.removeFirst() }
+    guard !bytes.isEmpty, bytes.count <= 32 else {
+        throw AgentPassNativeError.invalidSignature("SSHSIG ECDSA integer is invalid")
+    }
+    return Data(repeating: 0, count: 32 - bytes.count) + Data(bytes)
 }
 
 extension Data {

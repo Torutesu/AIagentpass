@@ -394,6 +394,34 @@ public final class NativeAgentSessionRegistry: @unchecked Sendable {
         try mutateReservation(reservation, required: .requestReserved, next: .signingIntent)
     }
 
+    public func recoverSigningReservation(
+        sessionID: String,
+        requestID: String,
+        capabilityID: String,
+        payloadDigest: Data,
+        budgetSequence: Int,
+        connectionTokenIdentity: String,
+        binding: NativeAgentSessionBinding,
+        wallClock: NativeAgentWallClockValue,
+        monotonicClock: NativeAgentMonotonicClockValue
+    ) throws -> NativeAgentSessionReservation {
+        try lock.withLock {
+            var entry = try checkedEntry(sessionID: sessionID, connectionTokenIdentity: connectionTokenIdentity, binding: binding)
+            guard entry.state == .signingIntent || entry.state == .signed,
+                  let reservation = entry.reservation,
+                  reservation.sessionID == sessionID,
+                  reservation.requestID == requestID.lowercased(),
+                  reservation.capabilityID == capabilityID.lowercased(),
+                  reservation.payloadDigest == payloadDigest,
+                  reservation.budgetSequence == budgetSequence else {
+                throw NativeAgentSessionRegistryError.reservationMismatch
+            }
+            do { _ = try entry.deadline.revalidate(wallClock: wallClock, monotonicClock: monotonicClock) }
+            catch { throw NativeAgentSessionRegistryError.deadlineMismatch }
+            return reservation
+        }
+    }
+
     public func recordSigned(_ reservation: NativeAgentSessionReservation) throws {
         try mutateReservation(reservation, required: .signingIntent, next: .signed)
     }
@@ -401,6 +429,24 @@ public final class NativeAgentSessionRegistry: @unchecked Sendable {
     public func complete(_ reservation: NativeAgentSessionReservation) throws -> NativeAgentSessionRegistryStatus {
         try lock.withLock {
             var entry = try reservationEntry(reservation, required: .signed)
+            let next: NativeAgentSessionState = entry.usedSignatures == entry.lease.maxSignatures ? .closed : .active
+            try Self.transition(&entry, to: next)
+            entry.reservation = nil
+            entries[reservation.sessionID] = entry
+            return Self.status(entry)
+        }
+    }
+
+    public func finalizeSigning(_ reservation: NativeAgentSessionReservation) throws -> NativeAgentSessionRegistryStatus {
+        try lock.withLock {
+            guard var entry = entries[reservation.sessionID],
+                  (entry.state == .signingIntent || entry.state == .signed),
+                  entry.reservation == reservation else {
+                throw NativeAgentSessionRegistryError.reservationMismatch
+            }
+            if entry.state == .signingIntent {
+                try Self.transition(&entry, to: .signed)
+            }
             let next: NativeAgentSessionState = entry.usedSignatures == entry.lease.maxSignatures ? .closed : .active
             try Self.transition(&entry, to: next)
             entry.reservation = nil
